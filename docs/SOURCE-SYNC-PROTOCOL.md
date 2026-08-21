@@ -120,10 +120,12 @@ The connector implementation was checked against these source snapshots on
   `GET /api/user/topup` remains AdminAuth bearer authentication and returns
   `success/data/{page,page_size,total,items}` ordered by `id DESC`.
 
-The production read-only observation supplied for this milestone found Sub2API
-runtime `0.1.178` with the required payment columns and New API rc25 with the
-same top-up limitation. That observation did not authorize source writes and no
-source row or credential was copied into this repository.
+The first production read-only observation for this milestone found Sub2API
+runtime `0.1.178`; the launch recheck found its OTA-updated runtime `0.1.179`
+at the exact audited commit above, with the required payment columns unchanged.
+New API remains rc25 with the same top-up limitation. Neither observation
+authorized source writes and no source row or credential was copied into this
+repository.
 
 ## 2. Production source priority
 

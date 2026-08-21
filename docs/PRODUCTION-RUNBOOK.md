@@ -34,8 +34,9 @@ after replacing it with a host-local untracked file.
 
 Recheck immediately before launch; these observations are from 2026-08-20/21:
 
-- FiberState Sub2API container: `sub2api-mig`, runtime `0.1.178`, commit
-  `e0c48a19ed794a565e3858662520afe0a1f9f0ba`;
+- FiberState Sub2API container: `sub2api-mig`, runtime `0.1.179`, commit
+  `75f88be5f75c27771836b586f7de1503afa0e3bc` (rechecked 2026-08-21
+  16:18 Asia/Shanghai; the container image label remains stale);
 - Sub2API Compose directory: `/root/sub2api-mig`; PostgreSQL container:
   `sub2api-mig-postgres`;
 - New API container: `new-api`, image `v1.0.0-rc.25`, commit
@@ -252,6 +253,10 @@ normal UID and require every mounted private secret to be readable but not
 group/world readable. Source agents perform the equivalent fail-closed checks
 during `check-db`/startup because their scratch image has no shell. Never assume
 a successful `docker compose config` proves secret readability or mode.
+The PostgreSQL-client `permissions` job also runs explicitly as UID/GID 10001;
+with all capabilities dropped, leaving it at the image's default root user
+would make the host-owned `0400` owner DSN unreadable rather than more
+privileged.
 
 ## 5. Central Keycloak reference deployment
 

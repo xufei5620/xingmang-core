@@ -218,6 +218,13 @@ try {
             throw "$service does not use the isolated tools image target"
         }
     }
+    $permissionsService = $renderedProductionTools.services.permissions
+    if ([string]$permissionsService.user -ne '10001:10001' -or
+        @($permissionsService.secrets | ForEach-Object { $_.source }) -notcontains 'invoice_owner_database_url' -or
+        @($permissionsService.cap_drop) -notcontains 'ALL' -or
+        @($permissionsService.security_opt) -notcontains 'no-new-privileges:true') {
+        throw 'permissions service cannot read its 0400 owner DSN as the isolated tools UID'
+    }
     $oidcPreflight = $renderedProductionTools.services.'oidc-preflight'
     $oidcPreflightNetworks = @($oidcPreflight.networks.PSObject.Properties.Name)
     if ($oidcPreflight.PSObject.Properties.Name -contains 'secrets' -or

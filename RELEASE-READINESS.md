@@ -34,7 +34,7 @@ this release candidate.
   OIDC smoke passed, and the independent artifact verifier passed at generation
   time. Later backend/deployment changes now make this bundle deliberately
   stale; a fresh full gate is required after PostgreSQL verification is green;
-- read-only `fiberstate` preflight: live Sub2API 0.1.178 and New API rc.25
+- read-only `fiberstate` preflight: live Sub2API 0.1.179 and New API rc.25
   match the frozen contracts; planned ports and five Docker networks are free,
   NTP/disk/Cloudflare real-IP policy are acceptable.
 

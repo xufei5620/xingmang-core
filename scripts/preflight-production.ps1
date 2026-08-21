@@ -13,7 +13,7 @@ param(
     [string]$KeycloakEdgeSubnet = '172.30.254.0/29',
     [string]$KeycloakEdgeGateway = '172.30.254.1',
     [string]$KeycloakProxyTrustedCIDR = '172.30.254.1/32',
-    [string]$ExpectedSub2Version = '0.1.178',
+    [string]$ExpectedSub2Version = '0.1.179',
     [string]$ExpectedNewAPIImageVersion = 'v1.0.0-rc.25'
 )
 

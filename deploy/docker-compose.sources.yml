@@ -85,7 +85,7 @@ services:
       SOURCE_TYPE: sub2api
       SOURCE_STATE_STREAM: identities
       SOURCE_SCHEMA_VERSION: "2.0"
-      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:-0.1.178}
+      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:-0.1.179}
       SOURCE_DB_DSN_FILE: /run/secrets/sub2api_identities_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_RECONCILE_FILE: /state/reconcile.json

@@ -109,5 +109,9 @@ if [[ "${CHECK_CONTAINER_READABILITY:-false}" == "true" ]]; then
   "${compose[@]}" --profile tools run --rm --no-deps --entrypoint /bin/sh migrate -ec '
     test -r /run/secrets/invoice_owner_database_url
     test "$(stat -c %a /run/secrets/invoice_owner_database_url)" = 400'
+  "${compose[@]}" --profile tools run --rm --no-deps --entrypoint /bin/sh permissions -ec '
+    test "$(id -u)" = 10001
+    test -r /run/secrets/invoice_owner_database_url
+    test "$(stat -c %a /run/secrets/invoice_owner_database_url)" = 400'
   printf 'API/tools in-container secret readability preflight passed\n'
 fi
