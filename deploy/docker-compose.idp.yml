@@ -74,6 +74,9 @@ networks:
   keycloak_db:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: ${KEYCLOAK_DB_SUBNET:?set a non-conflicting Keycloak database subnet}
   keycloak_edge:
     driver: bridge
     ipam:

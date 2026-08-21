@@ -1,6 +1,11 @@
 param(
     [string]$HostAlias = 'fiberstate',
     [int[]]$RequiredLoopbackPorts = @(58088, 58090, 58180, 58181),
+    [string]$InvoiceEdgeSubnet = '172.30.239.0/28',
+    [string]$InvoiceDBSubnet = '172.30.240.0/28',
+    [string]$InvoiceAppSubnet = '172.30.241.0/28',
+    [string]$ClamAVEgressSubnet = '172.30.242.0/28',
+    [string]$OIDCPreflightEgressSubnet = '172.30.243.0/28',
     [string]$ProxySubnet = '172.30.250.0/28',
     [string]$ProxyGatewayIP = '172.30.250.1',
     [string]$TrustedProxyCIDR = '172.30.250.1/32',
@@ -10,6 +15,7 @@ param(
     [string]$IngestProxyCIDR = '172.30.251.14/32',
     [string]$Sub2ProjectionSubnet = '172.30.252.0/28',
     [string]$NewAPIProjectionSubnet = '172.30.253.0/28',
+    [string]$KeycloakDBSubnet = '172.30.244.0/28',
     [string]$KeycloakEdgeSubnet = '172.30.254.0/29',
     [string]$KeycloakEdgeGateway = '172.30.254.1',
     [string]$KeycloakProxyTrustedCIDR = '172.30.254.1/32',
@@ -40,9 +46,15 @@ function Get-IPv4Value([string]$Address) {
 
 $ingestBounds = Get-IPv4CIDRBounds $IngestSubnet
 $proxyBounds = Get-IPv4CIDRBounds $ProxySubnet
+$invoiceEdgeBounds = Get-IPv4CIDRBounds $InvoiceEdgeSubnet
+$invoiceDBBounds = Get-IPv4CIDRBounds $InvoiceDBSubnet
+$invoiceAppBounds = Get-IPv4CIDRBounds $InvoiceAppSubnet
+$clamavEgressBounds = Get-IPv4CIDRBounds $ClamAVEgressSubnet
+$oidcPreflightEgressBounds = Get-IPv4CIDRBounds $OIDCPreflightEgressSubnet
 $dynamicBounds = Get-IPv4CIDRBounds $IngestDynamicRange
 $sub2ProjectionBounds = Get-IPv4CIDRBounds $Sub2ProjectionSubnet
 $newAPIProjectionBounds = Get-IPv4CIDRBounds $NewAPIProjectionSubnet
+$keycloakDBBounds = Get-IPv4CIDRBounds $KeycloakDBSubnet
 $keycloakEdgeBounds = Get-IPv4CIDRBounds $KeycloakEdgeSubnet
 $proxyValue = Get-IPv4Value $IngestProxyIP
 $invoiceProxyGatewayValue = Get-IPv4Value $ProxyGatewayIP
@@ -72,11 +84,17 @@ if ($KeycloakProxyTrustedCIDR -ne "$KeycloakEdgeGateway/32") {
     throw 'Keycloak proxy trust must be the exact Keycloak edge gateway /32'
 }
 $plannedNetworks = @(
-    [pscustomobject]@{ Label = 'proxy'; CIDR = $ProxySubnet; Bounds = $proxyBounds; ExistingName = 'invoice-system-prod_invoice_proxy' },
-    [pscustomobject]@{ Label = 'ingest'; CIDR = $IngestSubnet; Bounds = $ingestBounds; ExistingName = 'invoice-system-ingest' },
-    [pscustomobject]@{ Label = 'sub2 projection'; CIDR = $Sub2ProjectionSubnet; Bounds = $sub2ProjectionBounds; ExistingName = 'invoice-sub2api-projection' },
-    [pscustomobject]@{ Label = 'New API projection'; CIDR = $NewAPIProjectionSubnet; Bounds = $newAPIProjectionBounds; ExistingName = 'invoice-newapi-projection' },
-    [pscustomobject]@{ Label = 'Keycloak edge'; CIDR = $KeycloakEdgeSubnet; Bounds = $keycloakEdgeBounds; ExistingName = 'invoice-keycloak-prod_keycloak_edge' }
+    [pscustomobject]@{ Label = 'invoice edge'; CIDR = $InvoiceEdgeSubnet; Bounds = $invoiceEdgeBounds; ExistingName = 'invoice-system-prod_invoice_edge'; Internal = $false },
+    [pscustomobject]@{ Label = 'invoice database'; CIDR = $InvoiceDBSubnet; Bounds = $invoiceDBBounds; ExistingName = 'invoice-system-prod_invoice_db'; Internal = $true },
+    [pscustomobject]@{ Label = 'invoice application'; CIDR = $InvoiceAppSubnet; Bounds = $invoiceAppBounds; ExistingName = 'invoice-system-prod_invoice_app'; Internal = $true },
+    [pscustomobject]@{ Label = 'ClamAV egress'; CIDR = $ClamAVEgressSubnet; Bounds = $clamavEgressBounds; ExistingName = 'invoice-system-prod_clamav_egress'; Internal = $false },
+    [pscustomobject]@{ Label = 'OIDC preflight egress'; CIDR = $OIDCPreflightEgressSubnet; Bounds = $oidcPreflightEgressBounds; ExistingName = 'invoice-system-prod_oidc_preflight_egress'; Internal = $false },
+    [pscustomobject]@{ Label = 'Keycloak database'; CIDR = $KeycloakDBSubnet; Bounds = $keycloakDBBounds; ExistingName = 'invoice-keycloak-prod_keycloak_db'; Internal = $true },
+    [pscustomobject]@{ Label = 'proxy'; CIDR = $ProxySubnet; Bounds = $proxyBounds; ExistingName = 'invoice-system-prod_invoice_proxy'; Internal = $false },
+    [pscustomobject]@{ Label = 'ingest'; CIDR = $IngestSubnet; Bounds = $ingestBounds; ExistingName = 'invoice-system-ingest'; Internal = $true },
+    [pscustomobject]@{ Label = 'sub2 projection'; CIDR = $Sub2ProjectionSubnet; Bounds = $sub2ProjectionBounds; ExistingName = 'invoice-sub2api-projection'; Internal = $true },
+    [pscustomobject]@{ Label = 'New API projection'; CIDR = $NewAPIProjectionSubnet; Bounds = $newAPIProjectionBounds; ExistingName = 'invoice-newapi-projection'; Internal = $true },
+    [pscustomobject]@{ Label = 'Keycloak edge'; CIDR = $KeycloakEdgeSubnet; Bounds = $keycloakEdgeBounds; ExistingName = 'invoice-keycloak-prod_keycloak_edge'; Internal = $false }
 )
 for ($left = 0; $left -lt $plannedNetworks.Count; $left++) {
     for ($right = $left + 1; $right -lt $plannedNetworks.Count; $right++) {
@@ -167,10 +185,9 @@ foreach ($line in $networks) {
         foreach ($planned in $plannedNetworks) {
             $overlaps = $existing.Start -le $planned.Bounds.End -and $planned.Bounds.Start -le $existing.End
             if (-not $overlaps) { continue }
-            $requiresInternal = $planned.Label -notin @('proxy', 'Keycloak edge')
             $approvedExisting = $name -eq $planned.ExistingName -and
                 $existingCIDR -eq $planned.CIDR -and
-                (-not $requiresInternal -or $isInternal)
+                $isInternal -eq $planned.Internal
             if (-not $approvedExisting) {
                 throw "planned $($planned.Label) subnet overlaps Docker network $name ($existingCIDR)"
             }
@@ -180,6 +197,6 @@ foreach ($line in $networks) {
 
 Write-Host "Read-only production preflight passed for $HostAlias"
 Write-Host "Running Sub2API: $sub2Version"
-Write-Host 'Existing Docker network subnets (all five planned ranges were checked for overlap):'
+Write-Host 'Existing Docker network subnets (all planned ranges were checked for overlap and exact internal mode):'
 $networks | ForEach-Object { Write-Host "  $_" }
 Write-Host 'No production state was changed.'

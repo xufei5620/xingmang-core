@@ -102,8 +102,14 @@ $productionEnv = @{
     ADMIN_SETTINGS_BOOTSTRAP_FILE = (Join-Path $projectRoot 'deploy\admin-settings.bootstrap.example.json')
     SOURCE_TRUST_CONFIG_FILE = (Join-Path $projectRoot 'deploy\source-trust.example.json')
     SOURCE_INSTANCES_CONFIG_FILE = (Join-Path $projectRoot 'deploy\source-instances.example.json')
+    INVOICE_EDGE_SUBNET = '172.30.239.0/28'
+    INVOICE_DB_SUBNET = '172.30.240.0/28'
+    INVOICE_APP_SUBNET = '172.30.241.0/28'
+    CLAMAV_EGRESS_SUBNET = '172.30.242.0/28'
+    OIDC_PREFLIGHT_EGRESS_SUBNET = '172.30.243.0/28'
     KEYCLOAK_HTTP_PORT = '58180'
     KEYCLOAK_ADMIN_HTTP_PORT = '58181'
+    KEYCLOAK_DB_SUBNET = '172.30.244.0/28'
     KEYCLOAK_EDGE_SUBNET = '172.30.254.0/29'
     KEYCLOAK_EDGE_GATEWAY = '172.30.254.1'
     KC_PROXY_TRUSTED_ADDRESSES = '172.30.254.1/32'
@@ -156,6 +162,18 @@ try {
         $renderedProduction.services.api.environment.OIDC_LOGOUT_TOKEN_MAX_AGE -ne $productionEnv.OIDC_LOGOUT_TOKEN_MAX_AGE -or
         $renderedProduction.services.api.environment.OIDC_MAX_HTTP_RESPONSE_BYTES -ne $productionEnv.OIDC_MAX_HTTP_RESPONSE_BYTES) {
         throw 'invoice API trusted proxy/default gateway does not equal the exact configured bridge gateway /32'
+    }
+    foreach ($network in @(
+        @{ Name = 'invoice_edge'; Env = 'INVOICE_EDGE_SUBNET'; Internal = $false },
+        @{ Name = 'invoice_db'; Env = 'INVOICE_DB_SUBNET'; Internal = $true },
+        @{ Name = 'invoice_app'; Env = 'INVOICE_APP_SUBNET'; Internal = $true },
+        @{ Name = 'clamav_egress'; Env = 'CLAMAV_EGRESS_SUBNET'; Internal = $false }
+    )) {
+        $renderedNetwork = $renderedProduction.networks.($network.Name)
+        $ipam = @($renderedNetwork.ipam.config)[0]
+        if ($ipam.subnet -ne $productionEnv[$network.Env] -or [bool]$renderedNetwork.internal -ne $network.Internal) {
+            throw "$($network.Name) does not use its exact reviewed subnet/internal mode"
+        }
     }
     if ($renderedProduction.services.api.build.target -ne 'api') {
         throw 'production API service does not use the minimal api image target'
@@ -227,10 +245,14 @@ try {
     }
     $oidcPreflight = $renderedProductionTools.services.'oidc-preflight'
     $oidcPreflightNetworks = @($oidcPreflight.networks.PSObject.Properties.Name)
+    $oidcPreflightNetwork = $renderedProductionTools.networks.oidc_preflight_egress
+    $oidcPreflightIPAM = @($oidcPreflightNetwork.ipam.config)[0]
     if ($oidcPreflight.PSObject.Properties.Name -contains 'secrets' -or
         $oidcPreflight.PSObject.Properties.Name -contains 'volumes' -or
         $oidcPreflight.PSObject.Properties.Name -contains 'ports' -or
         $oidcPreflightNetworks.Count -ne 1 -or $oidcPreflightNetworks[0] -ne 'oidc_preflight_egress' -or
+        $oidcPreflightIPAM.subnet -ne $productionEnv.OIDC_PREFLIGHT_EGRESS_SUBNET -or
+        [bool]$oidcPreflightNetwork.internal -ne $false -or
         @($oidcPreflight.entrypoint) -notcontains '/usr/local/bin/invoice-oidc-preflight' -or
         $oidcPreflight.read_only -ne $true -or
         @($oidcPreflight.cap_drop) -notcontains 'ALL' -or
@@ -305,8 +327,11 @@ try {
         throw 'Keycloak public/admin listeners are not split across loopback-only host ports'
     }
     $keycloakEdgeIPAM = @($idpBaseObject.networks.keycloak_edge.ipam.config)[0]
+    $keycloakDBIPAM = @($idpBaseObject.networks.keycloak_db.ipam.config)[0]
     if ($keycloakEdgeIPAM.subnet -ne $productionEnv.KEYCLOAK_EDGE_SUBNET -or
         $keycloakEdgeIPAM.gateway -ne $productionEnv.KEYCLOAK_EDGE_GATEWAY -or
+        $keycloakDBIPAM.subnet -ne $productionEnv.KEYCLOAK_DB_SUBNET -or
+        $idpBaseObject.networks.keycloak_db.internal -ne $true -or
         [int]$idpBaseObject.services.keycloak.networks.keycloak_edge.gw_priority -ne 1 -or
         $productionEnv.KC_PROXY_TRUSTED_ADDRESSES -ne "$($keycloakEdgeIPAM.gateway)/32") {
         throw 'Keycloak proxy trust/default gateway does not equal the exact configured edge gateway /32'

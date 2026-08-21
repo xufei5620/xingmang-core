@@ -278,19 +278,24 @@ plus `/32`; Compose passes the same gateway into the startup validator, so a
 mismatch, list or subnet is rejected before Keycloak starts. The `keycloak_edge`
 attachment has the only positive `gw_priority`, which pins the published-port
 peer/default gateway to that trusted `/32` for this multi-network container.
+Every other Invoice/Keycloak bridge also has an explicit small CIDR. Docker's
+automatic `/16` allocation is forbidden because it can silently cover the
+proxy, ingestion and upstream projection ranges before those networks exist.
 The reference values are:
 
 ```text
 KEYCLOAK_HTTP_PORT=58180
 KEYCLOAK_ADMIN_HTTP_PORT=58181
+KEYCLOAK_DB_SUBNET=172.30.244.0/28
 KEYCLOAK_EDGE_SUBNET=172.30.254.0/29
 KEYCLOAK_EDGE_GATEWAY=172.30.254.1
 KC_PROXY_TRUSTED_ADDRESSES=172.30.254.1/32
 ```
 
 Run `scripts/preflight-production.ps1` before creation. It checks both loopback
-ports, this fifth planned Docker range, and equality between the gateway and
-trusted `/32`. After creation, compare the actual gateway without changing it:
+ports, all explicitly planned Docker ranges/internal modes, and equality
+between the gateway and trusted `/32`. After creation, compare the actual
+gateway without changing it:
 
 ```bash
 docker network inspect invoice-keycloak-prod_keycloak_edge \
@@ -479,8 +484,10 @@ addresses as exceptions.
 
 ## 6. Invoice database, migrations and initial settings
 
-**Production change approval.** Verify that `INVOICE_PROXY_SUBNET` and
-`INVOICE_INGEST_SUBNET` do not overlap any existing Docker network.
+**Production change approval.** Verify every explicit network in
+`deploy/.env.production` (`INVOICE_EDGE/DB/APP`, ClamAV/OIDC egress,
+proxy/ingest, both projection networks, and Keycloak DB/edge) against every
+existing Docker network. Never let Compose auto-allocate one of these bridges.
 Set `INVOICE_PROXY_GATEWAY_IP` to one usable address inside the proxy subnet
 and set `TRUSTED_PROXY_CIDRS` to exactly that address plus `/32`. Compose pins
 the bridge gateway to the same value and assigns `invoice_proxy` the only

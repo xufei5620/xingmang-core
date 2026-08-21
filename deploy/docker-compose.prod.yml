@@ -377,16 +377,31 @@ networks:
           gateway: ${INVOICE_PROXY_GATEWAY_IP:?set the exact invoice proxy bridge gateway}
   invoice_edge:
     driver: bridge
+    ipam:
+      config:
+        - subnet: ${INVOICE_EDGE_SUBNET:?set a non-conflicting public edge subnet}
   invoice_app:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: ${INVOICE_APP_SUBNET:?set a non-conflicting internal application subnet}
   clamav_egress:
     driver: bridge
+    ipam:
+      config:
+        - subnet: ${CLAMAV_EGRESS_SUBNET:?set a non-conflicting ClamAV egress subnet}
   oidc_preflight_egress:
     driver: bridge
+    ipam:
+      config:
+        - subnet: ${OIDC_PREFLIGHT_EGRESS_SUBNET:?set a non-conflicting OIDC preflight egress subnet}
   invoice_db:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: ${INVOICE_DB_SUBNET:?set a non-conflicting internal database subnet}
   invoice_ingest:
     name: ${INVOICE_INGEST_NETWORK:-invoice-system-ingest}
     driver: bridge
