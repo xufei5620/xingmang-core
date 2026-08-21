@@ -1,0 +1,459 @@
+name: invoice-source-agents-prod
+
+x-source-common: &source-common
+  image: invoice-source-agent:${SOURCE_AGENT_IMAGE_TAG:-0.3.0}
+  build:
+    context: ../agents
+    dockerfile: Dockerfile.production
+    args:
+      SOURCE_AGENT_VERSION: ${SOURCE_AGENT_IMAGE_TAG:-0.3.0}
+  restart: unless-stopped
+  read_only: true
+  user: "65532:65532"
+  environment: &source-environment
+    SOURCE_MODE: db_projection
+    SOURCE_DB_DIALECT: postgres
+    INGESTION_ORIGIN: https://invoice-ingest.internal:8443
+    INGESTION_ALLOWED_HOSTS: invoice-ingest.internal
+    INGESTION_ALLOWED_PORTS: "8443"
+    INGESTION_ALLOWED_CIDRS: ${INVOICE_INGEST_PROXY_CIDR:?set exact ingest-proxy /32}
+    INGESTION_ALLOWED_METHODS: POST
+    INGESTION_HTTP_TIMEOUT: 20s
+    SOURCE_MTLS_CA_FILE: /run/secrets/source_agent_ca
+    SOURCE_MTLS_SERVER_NAME: invoice-ingest.internal
+    SOURCE_MTLS_RELOAD_ON_HANDSHAKE: "true"
+    SOURCE_SCAN_LIMIT: "100"
+    SOURCE_POLL_INTERVAL: 1m
+    SOURCE_RECONCILE_INTERVAL: 6h
+    SOURCE_RECONCILE_MISS_THRESHOLD: "3"
+    NEWAPI_FULL_SCAN_INTERVAL: 1h
+    SOURCE_MAX_BACKOFF: 1m
+    SOURCE_MAX_PAGES_PER_CYCLE: "1000"
+    SOURCE_MAX_CONSECUTIVE_FAILURES: "10"
+    SOURCE_LOCAL_HEALTH_MAX_AGE: 5m
+    SOURCE_TRUSTED_OIDC_ISSUER: ${OIDC_ISSUER_URL:?set central OIDC issuer}
+  secrets:
+    - source_agent_ca
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  healthcheck:
+    test: ["CMD", "/source-agent-prod", "healthcheck"]
+    interval: 30s
+    timeout: 20s
+    retries: 3
+    start_period: 2m
+  networks: [invoice_ingest]
+
+services:
+  sub2api-payments:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
+      SOURCE_TYPE: sub2api
+      SOURCE_STATE_STREAM: payments
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      SOURCE_DB_DSN_FILE: /run/secrets/sub2api_payments_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/sub2api_payments_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/sub2api_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/sub2api_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/sub2api_payments_signing_key
+      SOURCE_SIGNING_KEY_ID: ${SUB2API_PAYMENTS_SIGNING_KEY_ID:-2026-08-payments}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/sub2api_cutover_key
+    secrets:
+      - source_agent_ca
+      - sub2api_payments_reader_database_url
+      - sub2api_payments_spool_key
+      - sub2api_agent_cert
+      - sub2api_agent_key
+      - sub2api_payments_signing_key
+      - sub2api_cutover_key
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/sub2api-payments:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/sub2api:/cutover:ro
+    networks: [invoice_ingest, sub2api_projection]
+
+  sub2api-identities:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
+      SOURCE_TYPE: sub2api
+      SOURCE_STATE_STREAM: identities
+      SOURCE_SCHEMA_VERSION: "2.0"
+      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:-0.1.178}
+      SOURCE_DB_DSN_FILE: /run/secrets/sub2api_identities_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_RECONCILE_FILE: /state/reconcile.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/sub2api_identities_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/sub2api_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/sub2api_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/sub2api_identities_signing_key
+      SOURCE_SIGNING_KEY_ID: ${SUB2API_IDENTITIES_SIGNING_KEY_ID:-2026-08-identities}
+      SOURCE_TRUSTED_OIDC_PROVIDER_KEY: ${SUB2API_OIDC_PROVIDER_KEY:?set exact Sub2API central OIDC provider key}
+    secrets:
+      - source_agent_ca
+      - sub2api_identities_reader_database_url
+      - sub2api_identities_spool_key
+      - sub2api_agent_cert
+      - sub2api_agent_key
+      - sub2api_identities_signing_key
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/sub2api-identities:/state
+    networks: [invoice_ingest, sub2api_projection]
+
+  sub2api-usage:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
+      SOURCE_TYPE: sub2api
+      SOURCE_STATE_STREAM: usage
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      SOURCE_DB_DSN_FILE: /run/secrets/sub2api_usage_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/sub2api_usage_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/sub2api_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/sub2api_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/sub2api_usage_signing_key
+      SOURCE_SIGNING_KEY_ID: ${SUB2API_USAGE_SIGNING_KEY_ID:-2026-08-usage}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/sub2api_cutover_key
+    secrets: [source_agent_ca,sub2api_usage_reader_database_url,sub2api_usage_spool_key,sub2api_agent_cert,sub2api_agent_key,sub2api_usage_signing_key,sub2api_cutover_key]
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/sub2api-usage:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/sub2api:/cutover:ro
+    networks: [invoice_ingest, sub2api_projection]
+
+  sub2api-credits:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
+      SOURCE_TYPE: sub2api
+      SOURCE_STATE_STREAM: credits
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      SOURCE_DB_DSN_FILE: /run/secrets/sub2api_credits_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/sub2api_credits_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/sub2api_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/sub2api_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/sub2api_credits_signing_key
+      SOURCE_SIGNING_KEY_ID: ${SUB2API_CREDITS_SIGNING_KEY_ID:-2026-08-credits}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/sub2api_cutover_key
+    secrets: [source_agent_ca,sub2api_credits_reader_database_url,sub2api_credits_spool_key,sub2api_agent_cert,sub2api_agent_key,sub2api_credits_signing_key,sub2api_cutover_key]
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/sub2api-credits:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/sub2api:/cutover:ro
+    networks: [invoice_ingest, sub2api_projection]
+
+  sub2api-balances:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
+      SOURCE_TYPE: sub2api
+      SOURCE_STATE_STREAM: balances
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      SOURCE_DB_DSN_FILE: /run/secrets/sub2api_balances_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/sub2api_balances_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/sub2api_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/sub2api_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/sub2api_balances_signing_key
+      SOURCE_SIGNING_KEY_ID: ${SUB2API_BALANCES_SIGNING_KEY_ID:-2026-08-balances}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/sub2api_cutover_key
+      SOURCE_BALANCE_BASELINE_FILE: /cutover/baseline.enc
+      SOURCE_BALANCE_SNAPSHOT_FILE: /state/balance-current.enc
+      SOURCE_BALANCE_SNAPSHOT_KEY_FILE: /run/secrets/sub2api_balance_snapshot_key
+    secrets: [source_agent_ca,sub2api_balances_reader_database_url,sub2api_balances_spool_key,sub2api_agent_cert,sub2api_agent_key,sub2api_balances_signing_key,sub2api_cutover_key,sub2api_balance_snapshot_key]
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/sub2api-balances:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/sub2api:/cutover:ro
+    networks: [invoice_ingest, sub2api_projection]
+
+  newapi-payments:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
+      SOURCE_TYPE: newapi
+      SOURCE_STATE_STREAM: payments
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      SOURCE_DB_DSN_FILE: /run/secrets/newapi_payments_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/newapi_payments_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/newapi_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/newapi_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/newapi_payments_signing_key
+      SOURCE_SIGNING_KEY_ID: ${NEWAPI_PAYMENTS_SIGNING_KEY_ID:-2026-08-payments}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/newapi_cutover_key
+    secrets:
+      - source_agent_ca
+      - newapi_payments_reader_database_url
+      - newapi_payments_spool_key
+      - newapi_agent_cert
+      - newapi_agent_key
+      - newapi_payments_signing_key
+      - newapi_cutover_key
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/newapi-payments:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/newapi:/cutover:ro
+    networks: [invoice_ingest, newapi_projection]
+
+  newapi-identities:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
+      SOURCE_TYPE: newapi
+      SOURCE_STATE_STREAM: identities
+      SOURCE_SCHEMA_VERSION: "2.0"
+      SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      SOURCE_DB_DSN_FILE: /run/secrets/newapi_identities_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_RECONCILE_FILE: /state/reconcile.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/newapi_identities_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/newapi_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/newapi_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/newapi_identities_signing_key
+      SOURCE_SIGNING_KEY_ID: ${NEWAPI_IDENTITIES_SIGNING_KEY_ID:-2026-08-identities}
+      SOURCE_TRUSTED_OIDC_PROVIDER_KEY: ${NEWAPI_OAUTH_PROVIDER_SLUG:-solov-sso}
+    secrets:
+      - source_agent_ca
+      - newapi_identities_reader_database_url
+      - newapi_identities_spool_key
+      - newapi_agent_cert
+      - newapi_agent_key
+      - newapi_identities_signing_key
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/newapi-identities:/state
+    networks: [invoice_ingest, newapi_projection]
+
+  newapi-usage:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
+      SOURCE_TYPE: newapi
+      SOURCE_STATE_STREAM: usage
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      SOURCE_DB_DSN_FILE: /run/secrets/newapi_usage_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/newapi_usage_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/newapi_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/newapi_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/newapi_usage_signing_key
+      SOURCE_SIGNING_KEY_ID: ${NEWAPI_USAGE_SIGNING_KEY_ID:-2026-08-usage}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/newapi_cutover_key
+    secrets: [source_agent_ca,newapi_usage_reader_database_url,newapi_usage_spool_key,newapi_agent_cert,newapi_agent_key,newapi_usage_signing_key,newapi_cutover_key]
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/newapi-usage:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/newapi:/cutover:ro
+    networks: [invoice_ingest, newapi_projection]
+
+  newapi-credits:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
+      SOURCE_TYPE: newapi
+      SOURCE_STATE_STREAM: credits
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      SOURCE_DB_DSN_FILE: /run/secrets/newapi_credits_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/newapi_credits_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/newapi_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/newapi_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/newapi_credits_signing_key
+      SOURCE_SIGNING_KEY_ID: ${NEWAPI_CREDITS_SIGNING_KEY_ID:-2026-08-credits}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/newapi_cutover_key
+    secrets: [source_agent_ca,newapi_credits_reader_database_url,newapi_credits_spool_key,newapi_agent_cert,newapi_agent_key,newapi_credits_signing_key,newapi_cutover_key]
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/newapi-credits:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/newapi:/cutover:ro
+    networks: [invoice_ingest, newapi_projection]
+
+  newapi-balances:
+    <<: *source-common
+    environment:
+      <<: *source-environment
+      SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
+      SOURCE_TYPE: newapi
+      SOURCE_STATE_STREAM: balances
+      SOURCE_SCHEMA_VERSION: "3.0"
+      SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      SOURCE_DB_DSN_FILE: /run/secrets/newapi_balances_reader_database_url
+      SOURCE_STATE_FILE: /state/state.json
+      SOURCE_SPOOL_FILE: /state/pending.enc
+      SOURCE_SPOOL_KEY_FILE: /run/secrets/newapi_balances_spool_key
+      SOURCE_MTLS_CERT_FILE: /run/secrets/newapi_agent_cert
+      SOURCE_MTLS_KEY_FILE: /run/secrets/newapi_agent_key
+      SOURCE_SIGNING_KEY_FILE: /run/secrets/newapi_balances_signing_key
+      SOURCE_SIGNING_KEY_ID: ${NEWAPI_BALANCES_SIGNING_KEY_ID:-2026-08-balances}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/newapi_cutover_key
+      SOURCE_BALANCE_BASELINE_FILE: /cutover/baseline.enc
+      SOURCE_BALANCE_SNAPSHOT_FILE: /state/balance-current.enc
+      SOURCE_BALANCE_SNAPSHOT_KEY_FILE: /run/secrets/newapi_balance_snapshot_key
+    secrets: [source_agent_ca,newapi_balances_reader_database_url,newapi_balances_spool_key,newapi_agent_cert,newapi_agent_key,newapi_balances_signing_key,newapi_cutover_key,newapi_balance_snapshot_key]
+    volumes:
+      - ${SOURCE_STATE_ROOT:?set SOURCE_STATE_ROOT}/newapi-balances:/state
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/newapi:/cutover:ro
+    networks: [invoice_ingest, newapi_projection]
+
+  sub2api-cutover-init:
+    <<: *source-common
+    profiles: [cutover]
+    restart: "no"
+    command: ["cutover-init"]
+    healthcheck: {disable: true}
+    environment:
+      SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
+      SOURCE_TYPE: sub2api
+      SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      SOURCE_DB_DSN_FILE: /run/secrets/sub2api_balances_reader_database_url
+      SOURCE_SIGNING_KEY_ID: ${SUB2API_BALANCES_SIGNING_KEY_ID:-2026-08-balances}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/sub2api_cutover_key
+      SOURCE_BALANCE_BASELINE_FILE: /cutover/baseline.enc
+      SOURCE_BALANCE_SNAPSHOT_KEY_FILE: /run/secrets/sub2api_balance_snapshot_key
+    secrets: [sub2api_balances_reader_database_url,sub2api_cutover_key,sub2api_balance_snapshot_key]
+    volumes:
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/sub2api:/cutover
+    networks: [sub2api_projection]
+
+  newapi-cutover-init:
+    <<: *source-common
+    profiles: [cutover]
+    restart: "no"
+    command: ["cutover-init"]
+    healthcheck: {disable: true}
+    environment:
+      SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
+      SOURCE_TYPE: newapi
+      SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      SOURCE_DB_DSN_FILE: /run/secrets/newapi_balances_reader_database_url
+      SOURCE_SIGNING_KEY_ID: ${NEWAPI_BALANCES_SIGNING_KEY_ID:-2026-08-balances}
+      SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
+      SOURCE_CUTOVER_KEY_FILE: /run/secrets/newapi_cutover_key
+      SOURCE_BALANCE_BASELINE_FILE: /cutover/baseline.enc
+      SOURCE_BALANCE_SNAPSHOT_KEY_FILE: /run/secrets/newapi_balance_snapshot_key
+    secrets: [newapi_balances_reader_database_url,newapi_cutover_key,newapi_balance_snapshot_key]
+    volumes:
+      - ${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT}/newapi:/cutover
+    networks: [newapi_projection]
+
+networks:
+  invoice_ingest:
+    external: true
+    name: ${INVOICE_INGEST_NETWORK:-invoice-system-ingest}
+  sub2api_projection:
+    external: true
+    name: ${SUB2API_PROJECTION_NETWORK:-invoice-sub2api-projection}
+  newapi_projection:
+    external: true
+    name: ${NEWAPI_PROJECTION_NETWORK:-invoice-newapi-projection}
+
+secrets:
+  source_agent_ca:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/source_agent_ca.pem
+  sub2api_payments_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_payments_reader_database_url
+  sub2api_identities_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_identities_reader_database_url
+  sub2api_usage_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_usage_reader_database_url
+  sub2api_credits_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_credits_reader_database_url
+  sub2api_balances_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_balances_reader_database_url
+  newapi_payments_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_payments_reader_database_url
+  newapi_identities_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_identities_reader_database_url
+  newapi_usage_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_usage_reader_database_url
+  newapi_credits_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_credits_reader_database_url
+  newapi_balances_reader_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_balances_reader_database_url
+  sub2api_agent_cert:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api-agent_cert.pem
+  sub2api_agent_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api-agent_key.pem
+  newapi_agent_cert:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi-agent_cert.pem
+  newapi_agent_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi-agent_key.pem
+  sub2api_payments_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_payments_spool_key
+  sub2api_identities_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_identities_spool_key
+  sub2api_usage_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_usage_spool_key
+  sub2api_credits_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_credits_spool_key
+  sub2api_balances_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_balances_spool_key
+  newapi_payments_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_payments_spool_key
+  newapi_identities_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_identities_spool_key
+  newapi_usage_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_usage_spool_key
+  newapi_credits_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_credits_spool_key
+  newapi_balances_spool_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_balances_spool_key
+  sub2api_payments_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_payments_signing_key.pem
+  sub2api_identities_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_identities_signing_key.pem
+  sub2api_usage_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_usage_signing_key.pem
+  sub2api_credits_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_credits_signing_key.pem
+  sub2api_balances_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_balances_signing_key.pem
+  newapi_payments_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_payments_signing_key.pem
+  newapi_identities_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_identities_signing_key.pem
+  newapi_usage_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_usage_signing_key.pem
+  newapi_credits_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_credits_signing_key.pem
+  newapi_balances_signing_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_balances_signing_key.pem
+  sub2api_cutover_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_cutover_key
+  newapi_cutover_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_cutover_key
+  sub2api_balance_snapshot_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/sub2api_balance_snapshot_key
+  newapi_balance_snapshot_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/newapi_balance_snapshot_key

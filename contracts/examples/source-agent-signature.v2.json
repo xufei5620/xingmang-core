@@ -1,0 +1,15 @@
+{
+  "batch_file": "source-agent-batch.v2.newapi.json",
+  "method": "POST",
+  "path": "/internal/v1/source-batches",
+  "source_id": "10000000-0000-4000-8000-000000000002",
+  "stream_id": "payments",
+  "batch_id": "018f4ec7-08d0-7b72-a2d4-1df742eec6d0",
+  "sequence": 1,
+  "sent_at": "2026-08-21T00:00:03Z",
+  "body_sha256": "4a3c7d2d8030ff1450f48c6494d1d594281fbbc2844d1fe0ba76c5c1e95a77c4",
+  "key_id": "test-key-1",
+  "public_key_raw_base64": "m+j/uNRVSZjmwV5kX7yBW3xeFk/BcR9HfK4qSvWSbLE=",
+  "signature_base64": "b3+TNI9r2iQplVZ5AWiuaK9OqDB+2ttX5FBcPt4V4Z5I6H50AI1BxOfe0ismMRxX6Lz1REbT/qaSy85DB3ldBA==",
+  "canonical_input": "POST\n/internal/v1/source-batches\n10000000-0000-4000-8000-000000000002\npayments\n018f4ec7-08d0-7b72-a2d4-1df742eec6d0\n1\n2026-08-21T00:00:03Z\n4a3c7d2d8030ff1450f48c6494d1d594281fbbc2844d1fe0ba76c5c1e95a77c4"
+}

@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://invoice.solov.cc/contracts/source-agent-batch.v1.schema.json",
+  "title": "Invoice Source Agent Batch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_instance_id",
+    "source_type",
+    "source_runtime_version",
+    "agent_version",
+    "batch_id",
+    "sequence",
+    "previous_batch_hash",
+    "captured_at",
+    "mode",
+    "records"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "source_instance_id": { "$ref": "#/$defs/sourceId" },
+    "source_type": { "enum": ["sub2api", "newapi", "desktop"] },
+    "source_runtime_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "agent_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "batch_id": { "type": "string", "format": "uuid" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "previous_batch_hash": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sha256" }
+      ]
+    },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "mode": { "enum": ["mock", "db_projection", "admin_api"] },
+    "records": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/paymentOrderRecord" },
+          { "$ref": "#/$defs/identityRecord" },
+          { "$ref": "#/$defs/usageDailyRecord" },
+          { "$ref": "#/$defs/tombstoneRecord" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sourceId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$"
+    },
+    "externalId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,8})?$"
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "recordBase": {
+      "type": "object",
+      "required": ["event_id", "operation", "observed_at", "payload_sha256"],
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "operation": { "enum": ["upsert", "tombstone"] },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "payload_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "paymentOrderRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/recordBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+          "properties": {
+            "event_id": { "type": "string", "format": "uuid" },
+            "operation": { "const": "upsert" },
+            "observed_at": { "type": "string", "format": "date-time" },
+            "payload_sha256": { "$ref": "#/$defs/sha256" },
+            "entity_type": { "const": "payment_order" },
+            "payload": { "$ref": "#/$defs/paymentOrderPayload" }
+          }
+        }
+      ]
+    },
+    "paymentOrderPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_order_id",
+        "external_user_id",
+        "status",
+        "order_type",
+        "amount",
+        "pay_amount",
+        "currency",
+        "refund_amount",
+		"gateway_refund_amount",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "external_order_id": { "$ref": "#/$defs/externalId" },
+        "external_user_id": { "$ref": "#/$defs/externalId" },
+        "status": {
+          "enum": [
+            "PENDING",
+            "PAID",
+            "RECHARGING",
+            "COMPLETED",
+            "EXPIRED",
+            "CANCELLED",
+            "FAILED",
+            "REFUND_REQUESTED",
+            "REFUNDING",
+            "REFUND_PENDING",
+            "PARTIALLY_REFUNDED",
+            "REFUNDED",
+            "REFUND_FAILED"
+          ]
+        },
+        "order_type": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "amount": { "$ref": "#/$defs/decimal" },
+        "pay_amount": { "$ref": "#/$defs/decimal" },
+        "currency": { "$ref": "#/$defs/currency" },
+        "refund_amount": { "$ref": "#/$defs/decimal" },
+		"gateway_refund_amount": { "$ref": "#/$defs/decimal" },
+        "completed_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "refund_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "payment_type": { "type": "string", "maxLength": 32 },
+        "provider_key": { "type": "string", "maxLength": 32 },
+        "external_trade_ref_hmac": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "identityRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/recordBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+          "properties": {
+            "event_id": { "type": "string", "format": "uuid" },
+            "operation": { "const": "upsert" },
+            "observed_at": { "type": "string", "format": "date-time" },
+            "payload_sha256": { "$ref": "#/$defs/sha256" },
+            "entity_type": { "const": "identity_binding" },
+            "payload": { "$ref": "#/$defs/identityPayload" }
+          }
+        }
+      ]
+    },
+    "identityPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_user_id",
+        "provider_type",
+        "provider_key",
+        "provider_subject",
+        "verified_at",
+        "user_status",
+        "updated_at"
+      ],
+      "properties": {
+        "external_user_id": { "$ref": "#/$defs/externalId" },
+        "provider_type": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "provider_key": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "provider_subject": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "issuer": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "verified_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "user_status": { "enum": ["active", "inactive", "deleted", "suspended"] },
+        "deleted_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "usageDailyRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/recordBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+          "properties": {
+            "event_id": { "type": "string", "format": "uuid" },
+            "operation": { "const": "upsert" },
+            "observed_at": { "type": "string", "format": "date-time" },
+            "payload_sha256": { "$ref": "#/$defs/sha256" },
+            "entity_type": { "const": "usage_daily" },
+            "payload": { "$ref": "#/$defs/usageDailyPayload" }
+          }
+        }
+      ]
+    },
+    "usageDailyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_user_id",
+        "usage_date",
+        "total_requests",
+        "total_tokens",
+        "total_cost",
+        "total_actual_cost",
+        "cost_currency"
+      ],
+      "properties": {
+        "external_user_id": { "$ref": "#/$defs/externalId" },
+        "usage_date": { "type": "string", "format": "date" },
+        "total_requests": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 },
+        "total_cost": { "$ref": "#/$defs/decimal" },
+        "total_actual_cost": { "$ref": "#/$defs/decimal" },
+        "cost_currency": { "$ref": "#/$defs/currency" }
+      }
+    },
+    "tombstoneRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/recordBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+          "properties": {
+            "event_id": { "type": "string", "format": "uuid" },
+            "operation": { "const": "tombstone" },
+            "observed_at": { "type": "string", "format": "date-time" },
+            "payload_sha256": { "$ref": "#/$defs/sha256" },
+            "entity_type": { "enum": ["payment_order", "identity_binding"] },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["external_id", "reason", "confirmed_at"],
+              "properties": {
+                "external_id": { "$ref": "#/$defs/externalId" },
+                "reason": { "enum": ["source_deleted", "source_disabled", "reconciliation_missing"] },
+                "confirmed_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

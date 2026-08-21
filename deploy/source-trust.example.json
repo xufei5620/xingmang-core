@@ -1,0 +1,64 @@
+{
+  "sources": [
+    {
+      "source_id": "10000000-0000-4000-8000-000000000001",
+      "source_type": "sub2api",
+      "streams": {
+        "payments": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {
+            "2026-08-payments": "REPLACE_WITH_SUB2API_PAYMENTS_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"
+          }
+        },
+        "identities": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {
+            "2026-08-identities": "REPLACE_WITH_SUB2API_IDENTITIES_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"
+          }
+        },
+        "usage": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {"2026-08-usage": "REPLACE_WITH_SUB2API_USAGE_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"}
+        },
+        "credits": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {"2026-08-credits": "REPLACE_WITH_SUB2API_CREDITS_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"}
+        },
+        "balances": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {"2026-08-balances": "REPLACE_WITH_SUB2API_BALANCES_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"}
+        }
+      }
+    },
+    {
+      "source_id": "10000000-0000-4000-8000-000000000002",
+      "source_type": "newapi",
+      "streams": {
+        "payments": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {
+            "2026-08-payments": "REPLACE_WITH_NEWAPI_PAYMENTS_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"
+          }
+        },
+        "identities": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {
+            "2026-08-identities": "REPLACE_WITH_NEWAPI_IDENTITIES_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"
+          }
+        },
+        "usage": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {"2026-08-usage": "REPLACE_WITH_NEWAPI_USAGE_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"}
+        },
+        "credits": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {"2026-08-credits": "REPLACE_WITH_NEWAPI_CREDITS_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"}
+        },
+        "balances": {
+          "certificate_serials": ["REPLACE_WITH_UPPERCASE_CERT_SERIAL"],
+          "signing_keys": {"2026-08-balances": "REPLACE_WITH_NEWAPI_BALANCES_RAW_ED25519_PUBLIC_KEY_STANDARD_BASE64"}
+        }
+      }
+    }
+  ]
+}

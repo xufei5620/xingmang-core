@@ -1,0 +1,129 @@
+name: invoice-system-dev
+
+services:
+  api:
+    build:
+      context: ../backend
+    restart: unless-stopped
+    environment:
+      AUTH_MODE: mock
+      HTTP_ADDR: :8088
+      ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST:-127.0.0.1/32,::1/128}
+      ADMIN_BOOTSTRAP_IP_ALLOWLIST: ${ADMIN_BOOTSTRAP_IP_ALLOWLIST:-127.0.0.1/32,::1/128}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      DOCUMENT_ROOT: /data/documents
+    ports:
+      - "127.0.0.1:${INVOICE_API_PORT:-58088}:8088"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    volumes:
+      - invoice_document_data:/data/documents
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    networks: [invoice_internal]
+
+  web:
+    build:
+      context: ../web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${INVOICE_WEB_PORT:-58090}:8080"
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m,noexec,nosuid,nodev
+      - /var/run:size=4m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    networks: [invoice_internal]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-invoice_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-invoice_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invoice_dev_only}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - invoice_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [invoice_internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-56379}:6379"
+    volumes:
+      - invoice_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [invoice_internal]
+
+  mailpit:
+    image: axllent/mailpit:v1.20
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-58025}:1025"
+      - "127.0.0.1:${MAILPIT_UI_PORT:-58080}:8025"
+    environment:
+      MP_MAX_MESSAGES: "500"
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    networks: [invoice_internal]
+
+  mock-source:
+    image: wiremock/wiremock:3.9.1
+    restart: unless-stopped
+    command: ["--global-response-templating", "--disable-gzip", "--verbose"]
+    ports:
+      - "127.0.0.1:${MOCK_SOURCE_PORT:-58081}:8080"
+    volumes:
+      - ../contracts/examples:/home/wiremock/__files:ro
+      - ./wiremock/mappings:/home/wiremock/mappings:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/__admin/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [invoice_internal]
+
+  clamav:
+    image: clamav/clamav:1.4
+    profiles: ["security"]
+    restart: unless-stopped
+    volumes:
+      - clamav_database:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 3 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 2m
+    networks: [invoice_internal]
+
+networks:
+  invoice_internal:
+    driver: bridge
+    # Development services are bound to 127.0.0.1 but need host access from
+    # local Go/Node tooling. Production uses separate internal/edge networks.
+    internal: false
+
+volumes:
+  invoice_postgres_data:
+  invoice_redis_data:
+  clamav_database:
+  invoice_document_data:

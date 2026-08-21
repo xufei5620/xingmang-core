@@ -1,0 +1,425 @@
+name: invoice-system-prod
+
+x-api-common: &api-common
+  image: invoice-system-api:${INVOICE_IMAGE_TAG:-0.1.0}
+  build:
+    context: ../backend
+    target: api
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+
+x-tools-common: &tools-common
+  <<: *api-common
+  image: invoice-system-tools:${INVOICE_IMAGE_TAG:-0.1.0}
+  build:
+    context: ../backend
+    target: tools
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: invoice
+      POSTGRES_USER: invoice_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/invoice_owner_db_password
+    secrets:
+      - invoice_owner_db_password
+      - invoice_app_db_password
+    volumes:
+      # PostgreSQL 18+ stores data in a major-version subdirectory. Mount the
+      # parent so pg_upgrade can cross the directory boundary safely.
+      - invoice_postgres_data:/var/lib/postgresql
+      - ./postgres/010-invoice-roles.sh:/docker-entrypoint-initdb.d/010-invoice-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invoice_owner -d invoice"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [invoice_db]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+
+  migrate:
+    <<: *tools-common
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: ["/usr/local/bin/invoice-migrate"]
+    environment:
+      APP_ENV: production
+      DATABASE_URL_FILE: /run/secrets/invoice_owner_database_url
+      MIGRATIONS_DIR: /app/migrations
+    secrets:
+      - invoice_owner_database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [invoice_db]
+
+  permissions:
+    image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: ["/bin/sh", "/config/apply-permissions.sh"]
+    secrets:
+      - invoice_owner_database_url
+    volumes:
+      - ./postgres/apply-permissions.sh:/config/apply-permissions.sh:ro
+      - ./postgres/harden-runtime-role.sql:/config/harden-runtime-role.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [invoice_db]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+  bootstrap-settings:
+    <<: *tools-common
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint:
+      - /usr/local/bin/invoice-bootstrap-settings
+      - --database-url-file
+      - /run/secrets/invoice_owner_database_url
+      - --settings-file
+      - /config/admin-settings.bootstrap.json
+    secrets:
+      - invoice_owner_database_url
+    volumes:
+      - ${ADMIN_SETTINGS_BOOTSTRAP_FILE:?set ADMIN_SETTINGS_BOOTSTRAP_FILE}:/config/admin-settings.bootstrap.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [invoice_db]
+
+  bootstrap-sources:
+    <<: *tools-common
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint:
+      - /usr/local/bin/invoice-bootstrap-sources
+      - --database-url-file
+      - /run/secrets/invoice_owner_database_url
+      - --config-file
+      - /config/source-instances.json
+    secrets:
+      - invoice_owner_database_url
+    volumes:
+      - ${SOURCE_INSTANCES_CONFIG_FILE:?set SOURCE_INSTANCES_CONFIG_FILE}:/config/source-instances.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [invoice_db]
+
+  document-gc:
+    <<: *tools-common
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: [/usr/local/bin/invoice-document-gc]
+    secrets:
+      - invoice_owner_database_url
+    volumes:
+      - invoice_document_data:/data/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [invoice_db]
+
+  oidc-logout-retention:
+    <<: *tools-common
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: [/usr/local/bin/invoice-oidc-logout-retention]
+    secrets:
+      - invoice_owner_database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [invoice_db]
+
+  oidc-preflight:
+    <<: *tools-common
+    profiles: ["tools"]
+    restart: "no"
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 32
+    entrypoint: [/usr/local/bin/invoice-oidc-preflight]
+    environment:
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?set OIDC_ISSUER_URL}
+      OIDC_ALLOWED_ENDPOINT_HOSTS: ${OIDC_ALLOWED_ENDPOINT_HOSTS:?set exact IdP endpoint hosts}
+      OIDC_ALLOWED_PRIVATE_ENDPOINT_IPS: ${OIDC_ALLOWED_PRIVATE_ENDPOINT_IPS:-}
+      OIDC_ALLOWED_SIGNING_ALGS: ${OIDC_ALLOWED_SIGNING_ALGS:-RS256}
+      OIDC_TOKEN_AUTH_METHOD: client_secret_basic
+      OIDC_MAX_HTTP_RESPONSE_BYTES: ${OIDC_MAX_HTTP_RESPONSE_BYTES:-1048576}
+      OIDC_PREFLIGHT_TIMEOUT: ${OIDC_PREFLIGHT_TIMEOUT:-30s}
+    # Discovery/JWKS only: deliberately mount no client secret or application
+    # database credential. This one-shot tool needs outbound HTTPS only.
+    networks: [oidc_preflight_egress]
+
+  pdf-scanner:
+    image: invoice-system-pdf-scanner:${INVOICE_IMAGE_TAG:-0.1.0}
+    build:
+      context: ../backend
+      target: scanner
+    restart: unless-stopped
+    read_only: true
+    network_mode: none
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 32
+    environment:
+      HOME: /nonexistent
+      TMPDIR: /scan-tmp
+    secrets:
+      - invoice_pdf_scanner_capability
+    volumes:
+      - invoice_pdf_scanner_socket:/scanner
+    tmpfs:
+      - /scan-tmp:size=64m,noexec,nosuid,nodev,mode=0700,uid=10002,gid=10000
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/invoice-pdf-scanner
+        - -healthcheck
+        - -socket
+        - /scanner/qpdf.sock
+        - -token-file
+        - /run/secrets/invoice_pdf_scanner_capability
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 10s
+
+  api:
+    <<: *api-common
+    mem_limit: 768m
+    pids_limit: 128
+    environment:
+      APP_ENV: production
+      AUTH_MODE: oidc
+      SOURCE_MODE: agent
+      HTTP_ADDR: :8088
+      PUBLIC_ORIGIN: https://invoice.solov.cc
+      DATABASE_URL_FILE: /run/secrets/invoice_app_database_url
+      FIELD_KEYRING_FILE: /run/secrets/invoice_field_keyring
+      SESSION_BINDING_KEY_FILE: /run/secrets/invoice_session_binding_key
+      ADMIN_BREAK_GLASS_CIDRS_FILE: /run/secrets/invoice_admin_break_glass_cidrs
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?set the exact Docker host proxy CIDR}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?set OIDC_ISSUER_URL}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-invoice-web}
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/invoice_oidc_client_secret
+      OIDC_PROVIDER_LABEL: ${OIDC_PROVIDER_LABEL:-SoloV 统一登录}
+      OIDC_ADMIN_ROLE: ${OIDC_ADMIN_ROLE:-invoice-admin}
+      OIDC_ROLE_CLAIM: ${OIDC_ROLE_CLAIM:-roles}
+      OIDC_REQUIRED_ADMIN_ACR: ${OIDC_REQUIRED_ADMIN_ACR:?set OIDC_REQUIRED_ADMIN_ACR}
+      OIDC_REQUIRED_ADMIN_AMR: ${OIDC_REQUIRED_ADMIN_AMR:-otp}
+      OIDC_ALLOWED_SIGNING_ALGS: ${OIDC_ALLOWED_SIGNING_ALGS:-RS256}
+      OIDC_ALLOWED_ENDPOINT_HOSTS: ${OIDC_ALLOWED_ENDPOINT_HOSTS:?set exact IdP endpoint hosts}
+      OIDC_ALLOWED_PRIVATE_ENDPOINT_IPS: ${OIDC_ALLOWED_PRIVATE_ENDPOINT_IPS:-}
+      OIDC_SCOPES: openid,profile,email
+      OIDC_TOKEN_AUTH_METHOD: client_secret_basic
+      OIDC_LOGOUT_TOKEN_MAX_AGE: ${OIDC_LOGOUT_TOKEN_MAX_AGE:-10m}
+      OIDC_MAX_HTTP_RESPONSE_BYTES: ${OIDC_MAX_HTTP_RESPONSE_BYTES:-1048576}
+      DOCUMENT_ROOT: /data/documents
+      DOCUMENT_QUARANTINE_ROOT: /quarantine
+      TMPDIR: /quarantine
+      CLAMAV_ADDRESS: clamav:3310
+      CLAMAV_DATABASE_ROOT: /clamav-db
+      CLAMAV_MAX_SIGNATURE_AGE: ${CLAMAV_MAX_SIGNATURE_AGE:-48h}
+      PDF_SCANNER_SOCKET: /scanner/qpdf.sock
+      PDF_SCANNER_CAPABILITY_FILE: /run/secrets/invoice_pdf_scanner_capability
+      SOURCE_TRUST_FILE: /config/source-trust.json
+      SOURCE_PAYMENTS_MAX_STALENESS: ${SOURCE_PAYMENTS_MAX_STALENESS:-5m}
+      SOURCE_IDENTITIES_MAX_STALENESS: ${SOURCE_IDENTITIES_MAX_STALENESS:-15m}
+      INGEST_PROXY_CIDRS: ${INVOICE_INGEST_PROXY_CIDR:?set the exact ingest-proxy /32}
+      MIGRATIONS_DIR: /app/migrations
+    secrets:
+      - invoice_app_database_url
+      - invoice_field_keyring
+      - invoice_session_binding_key
+      - invoice_admin_break_glass_cidrs
+      - invoice_oidc_client_secret
+      - invoice_pdf_scanner_capability
+    group_add:
+      - "10000"
+    ports:
+      - "127.0.0.1:${INVOICE_API_PORT:-58088}:8088"
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid,nodev
+      - /quarantine:size=128m,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001
+    volumes:
+      - invoice_document_data:/data/documents
+      - clamav_database:/clamav-db:ro
+      - invoice_pdf_scanner_socket:/scanner:ro
+      - ${SOURCE_TRUST_CONFIG_FILE:?set SOURCE_TRUST_CONFIG_FILE}:/config/source-trust.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+      pdf-scanner:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8088/readyz"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+    networks:
+      # The host Nginx reaches the published API port through this bridge.
+      # Pin it as the default-gateway endpoint so RemoteAddr is always the
+      # exact /32 configured in TRUSTED_PROXY_CIDRS, even if Compose changes
+      # multi-network attachment order.
+      invoice_proxy:
+        gw_priority: 1
+      invoice_db: {}
+      invoice_app: {}
+      invoice_ingest: {}
+
+  web:
+    image: invoice-system-web:${INVOICE_IMAGE_TAG:-0.1.0}
+    build:
+      context: ../web
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "127.0.0.1:${INVOICE_WEB_PORT:-58090}:8080"
+    tmpfs:
+      - /var/cache/nginx:size=16m,noexec,nosuid,nodev
+      - /var/run:size=4m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    networks: [invoice_edge]
+
+  clamav:
+    # Official amd64 1.4.5 image, frozen after release scanning. The upstream
+    # non-base tag can otherwise move when its bundled signatures are refreshed.
+    image: clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: 2.0
+    pids_limit: 256
+    volumes:
+      - clamav_database:/var/lib/clamav
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          clamdscan --ping 3 &&
+          test -s /var/lib/clamav/freshclam.dat &&
+          (test -s /var/lib/clamav/main.cvd || test -s /var/lib/clamav/main.cld) &&
+          (test -s /var/lib/clamav/daily.cvd || test -s /var/lib/clamav/daily.cld) &&
+          find /var/lib/clamav/freshclam.dat -mmin -2880 -print -quit | grep -q . &&
+          find /var/lib/clamav/daily.cvd /var/lib/clamav/daily.cld -mmin -2880 -print -quit 2>/dev/null | grep -q .
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 3m
+    networks:
+      invoice_app: {}
+      # FreshClam needs a deterministic public default route while clamd stays
+      # reachable from the API only through the internal application network.
+      clamav_egress:
+        gw_priority: 1
+    security_opt:
+      - no-new-privileges:true
+
+  ingest-proxy:
+    image: nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
+    restart: unless-stopped
+    read_only: true
+    volumes:
+      - ./nginx/ingest-mtls.conf:/etc/nginx/nginx.conf:ro
+    secrets:
+      - ingest_server_cert
+      - ingest_server_key
+      - source_agent_ca
+    tmpfs:
+      - /var/cache/nginx:size=16m,noexec,nosuid,nodev
+      - /var/run:size=4m,noexec,nosuid,nodev
+    depends_on:
+      api:
+        # The API intentionally remains unready until all four source streams
+        # send heartbeats through this proxy. Waiting for API health here would
+        # create a cold-start deadlock.
+        condition: service_started
+    networks:
+      invoice_ingest:
+        ipv4_address: ${INVOICE_INGEST_PROXY_IP:?set the dedicated ingest-proxy IP}
+        aliases: [invoice-ingest.internal]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+
+networks:
+  invoice_proxy:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${INVOICE_PROXY_SUBNET:?set a non-conflicting proxy subnet}
+          gateway: ${INVOICE_PROXY_GATEWAY_IP:?set the exact invoice proxy bridge gateway}
+  invoice_edge:
+    driver: bridge
+  invoice_app:
+    driver: bridge
+    internal: true
+  clamav_egress:
+    driver: bridge
+  oidc_preflight_egress:
+    driver: bridge
+  invoice_db:
+    driver: bridge
+    internal: true
+  invoice_ingest:
+    name: ${INVOICE_INGEST_NETWORK:-invoice-system-ingest}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${INVOICE_INGEST_SUBNET:?set a non-conflicting ingestion subnet}
+          ip_range: ${INVOICE_INGEST_DYNAMIC_RANGE:?set a dynamic range that excludes the proxy IP}
+
+volumes:
+  invoice_postgres_data:
+  invoice_document_data:
+  clamav_database:
+  invoice_pdf_scanner_socket:
+
+secrets:
+  invoice_owner_db_password:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_owner_db_password
+  invoice_app_db_password:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_app_db_password
+  invoice_owner_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_owner_database_url
+  invoice_app_database_url:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_app_database_url
+  invoice_field_keyring:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_field_keyring.json
+  invoice_session_binding_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_session_binding_key
+  invoice_admin_break_glass_cidrs:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_admin_break_glass_cidrs
+  invoice_oidc_client_secret:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_oidc_client_secret
+  invoice_pdf_scanner_capability:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/invoice_pdf_scanner_capability
+  ingest_server_cert:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/ingest_server_cert.pem
+  ingest_server_key:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/ingest_server_key.pem
+  source_agent_ca:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/source_agent_ca.pem

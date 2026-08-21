@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://invoice.solov.cc/contracts/source-agent-batch.v2.schema.json",
+  "title": "Invoice Source Agent Batch v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_instance_id",
+    "stream_id",
+    "source_type",
+    "source_runtime_version",
+    "agent_version",
+    "batch_id",
+    "sequence",
+    "previous_batch_hash",
+    "captured_at",
+    "mode",
+    "projection_status",
+    "records"
+  ],
+  "properties": {
+    "schema_version": { "const": "2.0" },
+    "source_instance_id": { "$ref": "#/$defs/sourceId" },
+    "stream_id": { "$ref": "#/$defs/streamId" },
+    "source_type": { "enum": ["sub2api", "newapi"] },
+    "source_runtime_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "agent_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "batch_id": { "$ref": "#/$defs/uuid" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "previous_batch_hash": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sha256" }
+      ]
+    },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "mode": { "const": "db_projection" },
+    "projection_status": { "enum": ["healthy", "blocked"] },
+    "records": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "oneOf": [
+          { "$ref": "source-agent-batch.v1.schema.json#/$defs/paymentOrderRecord" },
+          { "$ref": "#/$defs/paymentCandidateRecord" },
+          { "$ref": "#/$defs/paymentAdjustmentRecord" },
+          { "$ref": "#/$defs/identityRecord" },
+          { "$ref": "source-agent-batch.v1.schema.json#/$defs/usageDailyRecord" },
+          { "$ref": "source-agent-batch.v1.schema.json#/$defs/tombstoneRecord" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "sourceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "streamId": {
+      "type": "string",
+      "enum": ["payments", "identities"]
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "externalId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,8})?$"
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "paymentCandidateRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "operation",
+        "observed_at",
+        "payload_sha256",
+        "entity_type",
+        "payload"
+      ],
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "payload_sha256": { "$ref": "#/$defs/sha256" },
+        "entity_type": { "const": "payment_candidate" },
+        "payload": { "$ref": "#/$defs/paymentCandidatePayload" }
+      }
+    },
+    "paymentCandidatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_order_id",
+        "external_user_id",
+        "source_status",
+        "order_type",
+        "quoted_amount",
+        "observed_pay_amount",
+        "verification_state",
+        "verification_reason",
+        "created_at",
+        "observed_at"
+      ],
+      "properties": {
+        "external_order_id": { "$ref": "#/$defs/externalId" },
+        "external_user_id": { "$ref": "#/$defs/externalId" },
+        "source_status": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "order_type": { "const": "topup" },
+        "quoted_amount": { "$ref": "#/$defs/decimal" },
+        "observed_pay_amount": { "$ref": "#/$defs/decimal" },
+        "currency": { "$ref": "#/$defs/currency" },
+        "verification_state": { "const": "pending_manual" },
+        "verification_reason": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "completed_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "created_at": { "type": "string", "format": "date-time" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "payment_type": { "type": "string", "maxLength": 50 },
+        "provider_key": { "type": "string", "maxLength": 50 }
+      }
+    },
+    "paymentAdjustmentRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "operation",
+        "observed_at",
+        "payload_sha256",
+        "entity_type",
+        "payload"
+      ],
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "payload_sha256": { "$ref": "#/$defs/sha256" },
+        "entity_type": { "const": "payment_adjustment" },
+        "payload": { "$ref": "#/$defs/paymentAdjustmentPayload" }
+      }
+    },
+    "paymentAdjustmentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_order_id",
+        "external_user_id",
+        "adjustment_type",
+        "amount",
+        "currency",
+        "source_status",
+        "source_updated_at",
+        "basis"
+      ],
+      "properties": {
+        "external_order_id": { "$ref": "#/$defs/externalId" },
+        "external_user_id": { "$ref": "#/$defs/externalId" },
+		"adjustment_type": { "const": "refund" },
+        "amount": {
+          "allOf": [
+            { "$ref": "#/$defs/decimal" },
+            { "not": { "const": "0" } }
+          ]
+        },
+        "currency": { "$ref": "#/$defs/currency" },
+        "effective_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "source_status": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "source_updated_at": { "type": "string", "format": "date-time" },
+		"basis": { "const": "absolute_cumulative_gateway_refund" }
+      }
+    },
+    "identityRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "operation",
+        "observed_at",
+        "payload_sha256",
+        "entity_type",
+        "payload"
+      ],
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "payload_sha256": { "$ref": "#/$defs/sha256" },
+        "entity_type": { "const": "identity_binding" },
+        "payload": { "$ref": "#/$defs/identityPayload" }
+      }
+    },
+    "identityPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_user_id",
+        "provider_type",
+        "provider_key",
+        "provider_subject",
+        "verified_at",
+        "user_status",
+        "deleted_at",
+        "updated_at"
+      ],
+      "properties": {
+        "external_user_id": { "$ref": "#/$defs/externalId" },
+        "provider_type": { "const": "oidc" },
+        "provider_key": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "provider_subject": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "issuer": { "type": "string", "format": "uri", "pattern": "^https://", "maxLength": 2048 },
+        "verified_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "user_status": { "enum": ["unknown", "active", "inactive", "deleted", "suspended"] },
+        "deleted_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "format": "date-time" }
+          ]
+        },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

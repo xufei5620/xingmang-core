@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "source_instance_id": "sub2api-mock",
+  "source_type": "sub2api",
+  "source_runtime_version": "mock-0.1.179",
+  "agent_version": "0.1.0-dev",
+  "batch_id": "018f4ec7-08d0-7b72-a2d4-1df742eec6c8",
+  "sequence": 1,
+  "previous_batch_hash": null,
+  "captured_at": "2026-08-20T12:00:00Z",
+  "mode": "mock",
+  "records": [
+    {
+      "event_id": "018f4ec7-27a4-7fd2-9f0d-f564046c71d1",
+      "operation": "upsert",
+      "observed_at": "2026-08-20T12:00:00Z",
+	  "payload_sha256": "ebe3e13cbbcf39f5623b671dd3088d75d84ee59076b7abaa64f9f1806f6bbd35",
+      "entity_type": "payment_order",
+      "payload": {
+        "external_order_id": "50001",
+        "external_user_id": "1001",
+        "status": "COMPLETED",
+        "order_type": "balance",
+        "amount": "300.00",
+        "pay_amount": "300.00",
+        "currency": "CNY",
+        "refund_amount": "0.00",
+		"gateway_refund_amount": "0",
+        "completed_at": "2026-08-18T08:30:00Z",
+        "refund_at": null,
+        "created_at": "2026-08-18T08:25:00Z",
+        "updated_at": "2026-08-18T08:30:00Z",
+        "payment_type": "mock",
+        "provider_key": "mock"
+      }
+    },
+    {
+      "event_id": "018f4ec7-2f0d-7b47-a1d4-d7edaaad01bc",
+      "operation": "upsert",
+      "observed_at": "2026-08-20T12:00:00Z",
+      "payload_sha256": "582746d04ba8d1a89c97d30e409cf70d1f3c088fe14d1c43366426188f7684f9",
+      "entity_type": "identity_binding",
+      "payload": {
+        "external_user_id": "1001",
+        "provider_type": "oidc",
+        "provider_key": "https://auth.mock.invalid/realms/invoice",
+        "provider_subject": "mock-user-1001",
+        "issuer": "https://auth.mock.invalid/realms/invoice",
+        "verified_at": "2026-08-17T09:00:00Z",
+        "user_status": "active",
+        "deleted_at": null,
+        "updated_at": "2026-08-17T09:00:00Z"
+      }
+    },
+    {
+      "event_id": "018f4ec7-3e17-73f6-8f82-edbd9233cc8d",
+      "operation": "upsert",
+      "observed_at": "2026-08-20T12:00:00Z",
+      "payload_sha256": "345e6bd4f9af576e387def5205c4ff377fab1240e99fd17fc127d3471caad828",
+      "entity_type": "usage_daily",
+      "payload": {
+        "external_user_id": "1001",
+        "usage_date": "2026-08-19",
+        "total_requests": 24,
+        "total_tokens": 18240,
+        "total_cost": "3.42",
+        "total_actual_cost": "2.17",
+        "cost_currency": "USD"
+      }
+    }
+  ]
+}

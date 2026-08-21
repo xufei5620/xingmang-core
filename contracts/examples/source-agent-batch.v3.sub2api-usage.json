@@ -1,0 +1,42 @@
+{
+  "schema_version": "3.0",
+  "source_instance_id": "10000000-0000-4000-8000-000000000001",
+  "stream_id": "usage",
+  "source_type": "sub2api",
+  "source_runtime_version": "0.1.179",
+  "agent_version": "0.3.0",
+  "batch_id": "30000000-0000-4000-8000-000000000001",
+  "sequence": 1,
+  "previous_batch_hash": null,
+  "captured_at": "2026-08-21T00:03:00Z",
+  "mode": "db_projection",
+  "projection_status": "healthy",
+  "stream_watermark_at": "2026-08-21T00:01:00Z",
+  "source_cursor": "usage_published:1",
+  "scan_ceiling_at": "2026-08-21T00:02:00Z",
+  "scan_ceiling_cursor": "usage_ceiling:2",
+  "scan_cycle_id": "40000000-0000-4000-8000-000000000001",
+  "scan_complete": false,
+  "records": [
+    {
+      "event_id": "a9eeea97-0d98-874e-8dc5-f211fe4e1da2",
+      "operation": "upsert",
+      "observed_at": "2026-08-21T00:03:00Z",
+      "payload_sha256": "aad078d8fcc00734c1d6a1958d33ee61363ccba4660f95e8c20650217d736c00",
+      "entity_type": "usage_event",
+      "payload": {
+        "external_user_id": "7",
+        "external_usage_id": "usage_logs:21",
+        "occurred_at": "2026-08-21T00:00:30Z",
+        "service_units": "125000",
+        "unit_code": "SUB2_BALANCE_1E8",
+        "billing_scope": "wallet",
+        "source_cursor": "usage_logs:21",
+        "causal_domain": "usage_logs",
+        "causal_order": "21",
+        "cutover_manifest_hash": "e83c5ba06912f46f1058fd9703db7b6849f9bed9125f61509842f34919fa5ae2",
+        "configuration_hash": "b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910"
+      }
+    }
+  ]
+}
