@@ -746,7 +746,7 @@ func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config ru
 	}
 	var superuser, createDB, createRole, replication, bypassRLS, canLogin, inherit, canConnect, canTemporary bool
 	var connectionLimit int
-	var createSchema, usePublicSchema, unexpectedSchemaUsage, memberOfRole bool
+	var createSchema, usePublicSchema, unexpectedSchemaUsage, roleMembership bool
 	if err = database.QueryRowContext(ctx, `
 		SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,
 		       r.rolcanlogin,r.rolinherit,r.rolconnlimit,
@@ -767,17 +767,17 @@ func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config ru
 		           AND has_schema_privilege(current_user,n.oid,'USAGE')
 		       ),
 		       EXISTS (
-		         SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid
+		         SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid
 		       )
 		FROM pg_roles r WHERE r.rolname=current_user`).Scan(
 		&superuser, &createDB, &createRole, &replication, &bypassRLS,
 		&canLogin, &inherit, &connectionLimit, &canConnect, &canTemporary,
-		&createSchema, &usePublicSchema, &unexpectedSchemaUsage, &memberOfRole); err != nil {
+		&createSchema, &usePublicSchema, &unexpectedSchemaUsage, &roleMembership); err != nil {
 		return errors.New("inspect source role attributes failed")
 	}
 	if superuser || createDB || createRole || replication || bypassRLS || !canLogin || inherit || !canConnect ||
 		connectionLimit != 2 || canTemporary || createSchema || !usePublicSchema ||
-		unexpectedSchemaUsage || memberOfRole {
+		unexpectedSchemaUsage || roleMembership {
 		return errors.New("source database role is over-privileged")
 	}
 	tables := map[string]struct{}{}

@@ -72,7 +72,9 @@ func TestEconomicProjectionContractsAgainstPostgres(t *testing.T) {
 			t.Fatalf("prepare Sub2 fixture: %v\n%s", err, statement)
 		}
 	}
-	if _, err = admin.ExecContext(ctx, readContractFile(t, "sub2api-economic-projection-grants.postgresql.sql")); err != nil {
+	sub2Contract := readContractFile(t, "sub2api-economic-projection-grants.postgresql.sql")
+	assertEconomicContractRejectsMembership(t, ctx, admin, sub2Contract, "invoice_sub2api_usage_reader")
+	if _, err = admin.ExecContext(ctx, sub2Contract); err != nil {
 		t.Fatalf("apply Sub2 V3 contract: %v", err)
 	}
 	var units string
@@ -266,11 +268,44 @@ func manifestHashForTest(t *testing.T, value sourceagent.CutoverManifest) string
 	return hex.EncodeToString(sum[:])
 }
 
+func assertEconomicContractRejectsMembership(t *testing.T, ctx context.Context, admin *sql.DB, contract, readerName string) {
+	t.Helper()
+	probeName := "invoice_economic_membership_probe"
+	probe := pgx.Identifier{probeName}.Sanitize()
+	reader := pgx.Identifier{readerName}.Sanitize()
+	if _, err := admin.ExecContext(ctx, `CREATE ROLE `+probe+` NOLOGIN`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, `GRANT `+probe+` TO `+reader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, contract); err == nil {
+		t.Fatal("economic contract accepted reader membership in another role")
+	}
+	_, _ = admin.ExecContext(ctx, `ROLLBACK`)
+	if _, err := admin.ExecContext(ctx, `REVOKE `+probe+` FROM `+reader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, `GRANT `+reader+` TO `+probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, contract); err == nil {
+		t.Fatal("economic contract accepted reader granted to another role")
+	}
+	_, _ = admin.ExecContext(ctx, `ROLLBACK`)
+	if _, err := admin.ExecContext(ctx, `REVOKE `+reader+` FROM `+probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, `DROP ROLE `+probe); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func cleanupEconomicContract(t *testing.T, admin *sql.DB) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	roles := []string{"invoice_sub2api_payments_v3_reader", "invoice_sub2api_usage_reader", "invoice_sub2api_credits_reader", "invoice_sub2api_balances_reader", "invoice_newapi_payments_v3_reader", "invoice_newapi_usage_reader", "invoice_newapi_credits_reader", "invoice_newapi_balances_reader"}
+	roles := []string{"invoice_economic_membership_probe", "invoice_sub2api_payments_v3_reader", "invoice_sub2api_usage_reader", "invoice_sub2api_credits_reader", "invoice_sub2api_balances_reader", "invoice_newapi_payments_v3_reader", "invoice_newapi_usage_reader", "invoice_newapi_credits_reader", "invoice_newapi_balances_reader"}
 	for _, role := range roles {
 		quoted := pgx.Identifier{role}.Sanitize()
 		_, _ = admin.ExecContext(ctx, `DROP OWNED BY `+quoted)

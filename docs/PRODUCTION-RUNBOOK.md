@@ -102,6 +102,12 @@ mode does not silently skip the IdP: its manifest records
 `external_pending_canary` and remains blocked. Explicit `none` is likewise an
 application-image-only blocked result.
 
+The exact manifest-bound Keycloak image also runs the disposable
+`provision-solov-realm.sh` integration: realm policy, LoA1/LoA2 executions,
+roles/ACR/AMR mappers, four clients, no offline scope, fixed output, existing
+realm refusal and the single root-owned invoice client-secret publication must
+all pass. A result from a different local Keycloak tag or image ID is rejected.
+
 The output includes raw HIGH/CRITICAL Trivy JSON, CycloneDX 1.7 SBOMs, build
 logs, exact tool/database evidence, `release-manifest.json`, and a complete
 `SHA256SUMS`. Recheck an artifact directory and its current local image tags
@@ -318,6 +324,25 @@ docker compose --env-file deploy/.env.production \
   -f deploy/docker-compose.idp.yml \
   -f deploy/docker-compose.idp.bootstrap.yml up -d keycloak
 ```
+
+After the loopback listener is healthy, provision the immutable initial realm
+contract exactly once. The password is read with `password@FILE`; bearer tokens
+and response bodies live only under root-owned `/dev/shm`. Stdout is one fixed
+JSON line, and the only published client secret is `invoice-web` at UID/GID
+10001 mode `0400`:
+
+```bash
+KEYCLOAK_BOOTSTRAP_PASSWORD_FILE=/root/invoice-system/secrets/keycloak_bootstrap_admin_password \
+INVOICE_OIDC_CLIENT_SECRET_FILE=/root/invoice-system/secrets/invoice_oidc_client_secret \
+  bash deploy/keycloak/provision-solov-realm.sh
+```
+
+Expected output is exactly
+`{"status":"ok","realm":"solov","clients":4,"desktop_enabled":false}`.
+Re-running or finding an existing output secret is an error; inspect a partial
+realm rather than deleting or merging it automatically. Sub2API and New API
+client secrets remain inside the restricted Keycloak administration flow and
+are never printed by this provisioner.
 
 Before using the bootstrap account, create DNS/TLS for both hostnames and
 install the split edge policy. Render
@@ -557,10 +582,15 @@ its subnet, internal flag and members match; do not silently accept a different
 object.
 
 Review, then execute the V2 identity and V3 economic templates as the upstream
-database owner. Production has ten DSN secret files:
+database owner. Production has ten active LOGIN roles/DSN secret files: one
+identity plus four V3 economic streams per source. The two legacy V2 payment
+compatibility holders (`invoice_sub2api_payments_reader` and
+`invoice_newapi_payments_reader`) must exist as `NOLOGIN`, connection-limit-0
+roles with no password; the templates enforce that state and no container uses
+them.
 
 - `contracts/sub2api-source-projection-grants.postgresql.sql`;
-- `contracts/newapi-source-projection-grants.postgresql.sql`.
+- `contracts/newapi-source-projection-grants.postgresql.sql`;
 - `contracts/sub2api-economic-projection-grants.postgresql.sql`;
 - `contracts/newapi-economic-projection-grants.postgresql.sql`.
 
@@ -822,7 +852,10 @@ Use one finance admin, one Sub2API user and one New API user.
 1. Login, logout and login again; confirm cookie flags and CSRF rejection.
    Logout must first revoke the local opaque session, then navigate the top
    window through Keycloak's discovered end-session endpoint and return only
-   to `https://invoice.solov.cc/`. Terminate a canary session in Keycloak and
+   to `https://invoice.solov.cc/`. Because the service deliberately does not
+   persist an ID token, Keycloak may show one explicit logout-confirmation
+   page; zero-click IdP logout is not a V1 requirement. Terminate a canary
+   session in Keycloak and
    prove the signed back-channel callback immediately invalidates its invoice
    session; replay the same logout token and confirm one immutable replay row
    and one audit event only.
@@ -1074,6 +1107,15 @@ database backup. After traffic is accepted:
   database containers from their invoice projection networks and remove those
   empty networks; never disconnect either database from its original upstream
   network;
+- before disconnecting, run the matching reviewed rollback contract as the
+  source database owner:
+  `contracts/sub2api-projection-rollback.postgresql.sql` or
+  `contracts/newapi-projection-rollback.postgresql.sql`. Each transaction first
+  forces all six source-specific roles to NOLOGIN, refuses any active reader
+  session, drops only named auxiliary views with `RESTRICT` (never `CASCADE`),
+  drops their owned grants/roles, and restores the recorded deployment-before
+  `PUBLIC TEMPORARY` baseline. A missing role/view or dependency aborts the
+  whole rollback instead of accepting a partial source boundary;
 - OIDC configuration rollback re-enables prior login methods but must not
   delete IdP bindings or silently merge accounts.
 

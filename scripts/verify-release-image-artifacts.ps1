@@ -40,7 +40,9 @@ if ([string]$manifest.tools.scriptSha256 -cne (Get-FileSha256Lower -Path (Join-P
     [string]$manifest.tools.librarySha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')) -or
     [string]$manifest.tools.verifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')) -or
     [string]$manifest.tools.sourceVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify.ps1')) -or
-    [string]$manifest.tools.keycloakRuntimeVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1'))) {
+    [string]$manifest.tools.keycloakRuntimeVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')) -or
+    [string]$manifest.tools.keycloakProvisioningVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')) -or
+    [string]$manifest.tools.keycloakProvisionerSha256 -cne (Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh'))) {
     throw 'release gate/verifier source changed after artifact generation'
 }
 if ((@($manifest.policy.trivySeverities) -join ',') -cne 'HIGH,CRITICAL' -or
@@ -148,10 +150,21 @@ switch ($idpMode) {
                 throw 'Keycloak runtime OIDC smoke proof is missing or stale'
             }
         }
+        $realmProvisioningPassed = $null -ne $keycloak[0].realmProvisioning -and [string]$keycloak[0].realmProvisioning.status -ceq 'passed'
+        if ($realmProvisioningPassed) {
+            $provisioningPath = Resolve-ReleaseArtifactPath -ReleaseDirectory $releaseRoot -RelativePath ([string]$keycloak[0].realmProvisioning.path)
+            if ([string]$keycloak[0].realmProvisioning.imageId -cne [string]$keycloak[0].imageId -or
+                (Get-FileSha256Lower -Path $provisioningPath) -cne [string]$keycloak[0].realmProvisioning.sha256 -or
+                [string]$keycloak[0].realmProvisioning.scriptSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')) -or
+                [string]$keycloak[0].realmProvisioning.provisionerSha256 -cne (Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')) -or
+                (Get-Content -Raw -LiteralPath $provisioningPath) -notmatch '(?m)^Disposable Keycloak 26\.7\.2 realm provisioning, output allowlist and one-secret publication passed\.\s*$') {
+                throw 'Keycloak realm provisioning proof is missing or stale'
+            }
+        }
         if ([int]$keycloak[0].vulnerabilities.total -eq 0) {
             if ([string]$keycloak[0].policyStatus -ceq 'failed') {
                 if ([string]$manifest.idp.status -cne 'image_rejected') { throw 'failed Keycloak runtime smoke was not fail-closed' }
-            } elseif ([string]$keycloak[0].policyStatus -cne 'approved' -or -not $runtimeSmokePassed -or
+            } elseif ([string]$keycloak[0].policyStatus -cne 'approved' -or -not $runtimeSmokePassed -or -not $realmProvisioningPassed -or
                 [string]$manifest.idp.status -cne 'image_approved_pending_canary' -or
                 [string]$manifest.idp.productionCanary -cne 'pending') {
                 throw 'zero-finding Keycloak image did not remain pending the production canary'
@@ -163,7 +176,7 @@ switch ($idpMode) {
             Assert-KeycloakVendorRejectedCveScope -ImageReference ([string]$keycloak[0].reference) -ImageId ([string]$keycloak[0].imageId) -BaseReference ([string]$keycloak[0].baseReference) -Summary $keycloakSummary -ExpectedBaseReference $expectedKeycloakBase | Out-Null
             if ([string]$keycloak[0].policyStatus -ceq 'failed') {
                 if ([string]$manifest.idp.status -cne 'image_rejected') { throw 'failed Keycloak runtime smoke was not fail-closed' }
-            } elseif ([string]$keycloak[0].policyStatus -cne 'approved-by-exact-vendor-rejection' -or -not $runtimeSmokePassed -or
+            } elseif ([string]$keycloak[0].policyStatus -cne 'approved-by-exact-vendor-rejection' -or -not $runtimeSmokePassed -or -not $realmProvisioningPassed -or
                 [string]$keycloak[0].exception.derivedImageId -cne [string]$keycloak[0].imageId -or
                 [string]$keycloak[0].exception.vulnerabilityId -cne 'CVE-2026-22020' -or
                 [string]$keycloak[0].exception.package -cne 'java-21-openjdk-headless' -or

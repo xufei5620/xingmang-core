@@ -2,22 +2,20 @@
 
 This runbook deploys the outbound-only PostgreSQL projection agent without
 changing Sub2API or New API source code, containers, application tables or
-application files. The templates create only auxiliary security-barrier views
-and least-privilege LOGIN roles. Applying those reviewed
-views/grants is a separate DBA action; the agent
-itself never runs either template.
+application files. The templates create only auxiliary security-barrier views,
+ten least-privilege active LOGIN roles, and two credential-free NOLOGIN legacy
+payment holders. Applying those reviewed views/grants is a separate DBA action;
+the agent itself never runs either template.
 
 ## 1. One container per stream
 
 | Source | Stream | Connector | Required schedule | Extra configuration |
 | --- | --- | --- | --- | --- |
-| Sub2API | `payments` V2 compatibility | `Sub2APIDBConnector` | legacy only | do not use for consumption eligibility |
 | Sub2API | `identities` | `Sub2APIIdentityDBConnector` | incremental + reconciliation | central OIDC provider key + canonical issuer |
 | Sub2API | `payments` V3 | `PaymentV3DBConnector` | updated-at scan + complete reconciliation | exact CNY/config/unit evidence |
 | Sub2API | `usage` V3 | `EconomicDBConnector` | ID scan + full rescan | wallet billing only, scale 1e8 |
 | Sub2API | `credits` V3 | `EconomicDBConnector` | full scan every cycle | bonus/rebate domains; payment codes excluded |
 | Sub2API | `balances` V3 | `BalanceDBConnector` | atomic snapshot pages | encrypted cutover/baseline required |
-| New API | `payments` V2 compatibility | `NewAPIDBConnector` | legacy only | do not use for consumption eligibility |
 | New API | `identities` | `NewAPIIdentityDBConnector` | incremental + forced full scan <= 24h | central OIDC provider slug + canonical issuer |
 | New API | `payments` V3 | `PaymentV3DBConnector` | full post-cutover scan every cycle | all candidates manual; failed/pending excluded |
 | New API | `usage` V3 | `EconomicDBConnector` | ID scan + full rescan | consume logging must remain enabled |

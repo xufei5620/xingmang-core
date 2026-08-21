@@ -40,7 +40,7 @@ services:
       KC_PROXY_HEADERS: xforwarded
       KC_PROXY_TRUSTED_ADDRESSES: ${KC_PROXY_TRUSTED_ADDRESSES:?set the exact Keycloak Docker gateway IPv4 /32}
       KEYCLOAK_EDGE_GATEWAY: ${KEYCLOAK_EDGE_GATEWAY:?set the Keycloak edge gateway}
-      JAVA_OPTS_KC_HEAP: -XX:MaxHeapFreeRatio=30 -XX:MaxRAMPercentage=65
+      JAVA_OPTS_KC_HEAP: -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30 -XX:MaxRAMPercentage=65
     secrets:
       - keycloak_app_db_password
     ports:

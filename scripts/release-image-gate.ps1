@@ -486,6 +486,7 @@ try {
                 exception = $exception
                 runtimeProof = $runtimeProof
                 runtimeSmoke = $null
+                realmProvisioning = $null
             })
         }
 
@@ -520,6 +521,38 @@ try {
                         script = 'scripts/verify-keycloak-runtime.ps1'
                         scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
                         imageId = [string]$keycloakRuntimeRecord.imageId
+                    }
+                }
+                if ([string]$keycloakRuntimeRecord.runtimeSmoke.status -ceq 'passed') {
+                    $provisioningPath = Join-Path $releaseRoot 'proof\keycloak-realm-provisioning.txt'
+                    $provisioningErrorPath = Join-Path $releaseRoot 'logs\keycloak-realm-provisioning.log'
+                    Write-Host '==> Running isolated Keycloak realm/client/LoA2 provisioning contract'
+                    $provisioningText = (& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1') -KeycloakImage ([string]$keycloakRuntimeRecord.reference) -ExpectedKeycloakImageID ([string]$keycloakRuntimeRecord.imageId) 2> $provisioningErrorPath | Out-String)
+                    $provisioningExit = $LASTEXITCODE
+                    Write-Utf8NoBom -Path $provisioningPath -Text $provisioningText
+                    if ($provisioningExit -eq 0 -and $provisioningText -match '(?m)^Disposable Keycloak 26\.7\.2 realm provisioning, output allowlist and one-secret publication passed\.\s*$') {
+                        $keycloakRuntimeRecord['realmProvisioning'] = [ordered]@{
+                            status = 'passed'
+                            path = 'proof/keycloak-realm-provisioning.txt'
+                            sha256 = Get-FileSha256Lower -Path $provisioningPath
+                            script = 'scripts/verify-keycloak-provisioning.ps1'
+                            scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
+                            provisionerSha256 = Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')
+                            imageId = [string]$keycloakRuntimeRecord.imageId
+                            assertions = @('realm-policy', 'default-user-role', 'loa1-loa2', 'roles-acr-amr-mappers', 'four-clients', 'no-offline-scope', 'disabled-desktop', 'single-secret-0400', 'fixed-output', 'existing-realm-refusal', 'log-redaction')
+                        }
+                    } else {
+                        $keycloakRuntimeRecord['policyStatus'] = 'failed'
+                        $keycloakRuntimeRecord['policyReason'] = 'keycloak_realm_provisioning_contract_failed'
+                        $keycloakRuntimeRecord['realmProvisioning'] = [ordered]@{
+                            status = 'failed'
+                            path = 'proof/keycloak-realm-provisioning.txt'
+                            sha256 = Get-FileSha256Lower -Path $provisioningPath
+                            script = 'scripts/verify-keycloak-provisioning.ps1'
+                            scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
+                            provisionerSha256 = Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')
+                            imageId = [string]$keycloakRuntimeRecord.imageId
+                        }
                     }
                 }
             }
@@ -583,6 +616,8 @@ try {
                 verifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
                 sourceVerifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify.ps1')
                 keycloakRuntimeVerifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
+                keycloakProvisioningVerifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
+                keycloakProvisionerSha256 = Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')
                 trivyReference = $trivyImage
                 trivyImageId = $trivyToolID
                 trivyAcquisition = $trivyAcquisition.Status
@@ -629,6 +664,8 @@ binary proof. It cannot be reused for another image, binary or finding target.
 The Keycloak exception, when present, retains the Trivy finding and is bound to
 the exact 26.7.2 base digest, current derived image ID, one CVE/package/version
 tuple and proof that the admin CLI and unused MSSQL driver are absent.
+The same immutable Keycloak image must also pass the disposable realm/client,
+LoA2, mapper, output-redaction and one-secret-publication contract.
 "@
         Write-Utf8NoBom -Path (Join-Path $releaseRoot 'README.md') -Text ($readme + "`n")
 

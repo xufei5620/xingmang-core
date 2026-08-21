@@ -62,7 +62,9 @@ func TestNewAPIV3FullRescanCapturesOldIDTransitionsAndSafetyHorizon(t *testing.T
 			t.Fatalf("prepare New API fixture: %v\n%s", err, statement)
 		}
 	}
-	if _, err = admin.ExecContext(ctx, readContractFile(t, "newapi-economic-projection-grants.postgresql.sql")); err != nil {
+	newAPIContract := readContractFile(t, "newapi-economic-projection-grants.postgresql.sql")
+	assertEconomicContractRejectsMembership(t, ctx, admin, newAPIContract, "invoice_newapi_usage_reader")
+	if _, err = admin.ExecContext(ctx, newAPIContract); err != nil {
 		t.Fatalf("apply New API V3 contract: %v", err)
 	}
 	var hash string

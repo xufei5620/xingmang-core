@@ -169,6 +169,13 @@ BEGIN
     IF has_database_privilege(role_name,current_database(),'TEMP') THEN
       RAISE EXCEPTION '% retains TEMP through PUBLIC; revoke TEMPORARY on this database from PUBLIC first',role_name;
     END IF;
+    IF EXISTS (
+      SELECT 1 FROM pg_auth_members m
+      WHERE m.member=(SELECT oid FROM pg_roles WHERE rolname=role_name)
+         OR m.roleid=(SELECT oid FROM pg_roles WHERE rolname=role_name)
+    ) THEN
+      RAISE EXCEPTION '% has a role membership in either direction',role_name;
+    END IF;
   END LOOP;
 END $contract$;
 

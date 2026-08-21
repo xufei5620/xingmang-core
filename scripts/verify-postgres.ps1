@@ -1,5 +1,7 @@
 param(
-    [string]$PostgresImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+    [string]$PostgresImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2',
+    [string]$Postgres15Image = 'postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b',
+    [string]$Postgres15FallbackImageID = 'sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -138,4 +140,73 @@ try {
     }
 }
 
-Write-Host "PostgreSQL migration and integration verification passed in isolated container $containerName."
+$source15Container = "invoice-source-pg15-$suffix"
+$source15Started = $false
+try {
+    $source15RunImage = $Postgres15Image
+    docker image inspect $Postgres15Image *> $null
+    if ($LASTEXITCODE -ne 0) {
+        docker image inspect $Postgres15FallbackImageID *> $null
+        if ($LASTEXITCODE -eq 0) {
+            $source15RunImage = $Postgres15FallbackImageID
+        } else {
+            docker pull $Postgres15Image *> $null
+            if ($LASTEXITCODE -ne 0) { throw 'exact PostgreSQL 15 source-contract image is unavailable' }
+        }
+    }
+    docker run --detach --rm `
+        --name $source15Container `
+        --env 'POSTGRES_DB=source_contract_test' `
+        --env 'POSTGRES_USER=source_contract_test' `
+        --env 'POSTGRES_PASSWORD=source_contract_test_only' `
+        --publish '127.0.0.1::5432' `
+        --tmpfs '/var/lib/postgresql:rw,nosuid,nodev,size=512m' `
+        $source15RunImage | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'failed to start exact PostgreSQL 15 source-contract container' }
+    $source15Started = $true
+
+    $deadline = (Get-Date).AddSeconds(60)
+    do {
+        docker exec $source15Container pg_isready -U source_contract_test -d source_contract_test *> $null
+        if ($LASTEXITCODE -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if ($LASTEXITCODE -ne 0) { throw 'isolated PostgreSQL 15 did not become ready' }
+
+    $binding = (docker port $source15Container '5432/tcp').Trim()
+    if ($LASTEXITCODE -ne 0 -or $binding -notmatch ':(\d+)$') {
+        throw "unable to resolve isolated PostgreSQL 15 port: $binding"
+    }
+    $hostPort = [int]$Matches[1]
+    $hostDeadline = (Get-Date).AddSeconds(30)
+    $hostReady = $false
+    do {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $connect = $client.ConnectAsync('127.0.0.1', $hostPort)
+            $hostReady = $connect.Wait(500) -and $client.Connected
+        } catch {
+            $hostReady = $false
+        } finally {
+            $client.Dispose()
+        }
+        if (-not $hostReady) { Start-Sleep -Milliseconds 250 }
+    } while (-not $hostReady -and (Get-Date) -lt $hostDeadline)
+    if (-not $hostReady) { throw 'isolated PostgreSQL 15 host port did not become reachable' }
+
+    Push-Location (Join-Path $projectRoot 'agents')
+    try {
+        $env:SOURCE_AGENT_TEST_DATABASE_URL = "postgres://source_contract_test:source_contract_test_only@127.0.0.1:${hostPort}/source_contract_test?sslmode=disable"
+        go test -race ./cmd/source-agent-prod -count=1
+        if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15 source projection/apply/rollback contracts failed' }
+    } finally {
+        Remove-Item Env:SOURCE_AGENT_TEST_DATABASE_URL -ErrorAction SilentlyContinue
+        Pop-Location
+    }
+} finally {
+    if ($source15Started) {
+        docker rm --force $source15Container *> $null
+    }
+}
+
+Write-Host "PostgreSQL migration/integration and PG15/PG18 source-contract verification passed in isolated containers."

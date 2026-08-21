@@ -1,20 +1,20 @@
 -- REVIEW-ONLY TEMPLATE. Do not run automatically or from a source agent.
--- Create two independent LOGIN roles first. Replace the role names below only
--- after an operator has reviewed the resulting SQL. Neither role may be a
--- member of an upstream application/owner role. Passwords belong only in the
--- matching source-agent secret files.
+-- Create the identity role as LOGIN and the legacy V2 payment role as
+-- NOLOGIN. The V3 payment agent uses invoice_sub2api_payments_v3_reader;
+-- there is deliberately no credential for this compatibility holder. Replace
+-- role names only after review. Neither role may belong to an upstream role.
 
 BEGIN;
 
 ALTER ROLE invoice_sub2api_payments_reader
-  NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-ALTER ROLE invoice_sub2api_payments_reader CONNECTION LIMIT 2;
+  NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE invoice_sub2api_payments_reader CONNECTION LIMIT 0;
 ALTER ROLE invoice_sub2api_payments_reader SET default_transaction_read_only = on;
 ALTER ROLE invoice_sub2api_payments_reader SET statement_timeout = '15s';
 ALTER ROLE invoice_sub2api_payments_reader SET lock_timeout = '5s';
 ALTER ROLE invoice_sub2api_payments_reader SET idle_in_transaction_session_timeout = '15s';
 DO $contract$ BEGIN
-  EXECUTE format('GRANT CONNECT ON DATABASE %I TO invoice_sub2api_payments_reader', current_database());
+  EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM invoice_sub2api_payments_reader', current_database());
 END $contract$;
 
 REVOKE CREATE ON SCHEMA public FROM invoice_sub2api_payments_reader;
@@ -139,10 +139,14 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM pg_auth_members m
-    JOIN pg_roles r ON r.oid=m.member
-    WHERE r.rolname IN (
-      'invoice_sub2api_payments_reader',
-      'invoice_sub2api_identities_reader'
+    WHERE m.member IN (
+      SELECT oid FROM pg_roles WHERE rolname IN (
+        'invoice_sub2api_payments_reader','invoice_sub2api_identities_reader'
+      )
+    ) OR m.roleid IN (
+      SELECT oid FROM pg_roles WHERE rolname IN (
+        'invoice_sub2api_payments_reader','invoice_sub2api_identities_reader'
+      )
     )
   ) THEN
     RAISE EXCEPTION 'invoice Sub2API projection roles must not inherit or assume another role';

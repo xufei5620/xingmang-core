@@ -97,6 +97,13 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
     throw 'bash is required to validate production shell scripts'
 }
 
+$sub2SourceContract = Get-Content -Raw (Join-Path $projectRoot 'contracts\sub2api-source-projection-grants.postgresql.sql')
+$newAPISourceContract = Get-Content -Raw (Join-Path $projectRoot 'contracts\newapi-source-projection-grants.postgresql.sql')
+if ($sub2SourceContract -notmatch 'ALTER ROLE invoice_sub2api_payments_reader\s+NOLOGIN[\s\S]*?CONNECTION LIMIT 0;[\s\S]*?REVOKE CONNECT' -or
+    $newAPISourceContract -notmatch 'ALTER ROLE invoice_newapi_payments_reader\s+NOLOGIN[\s\S]*?CONNECTION LIMIT 0;[\s\S]*?REVOKE CONNECT') {
+    throw 'unused V2 payment compatibility roles must remain credential-free NOLOGIN holders'
+}
+
 $productionEnv = @{
     SECRETS_DIR = (Join-Path $projectRoot 'deploy')
     ADMIN_SETTINGS_BOOTSTRAP_FILE = (Join-Path $projectRoot 'deploy\admin-settings.bootstrap.example.json')
@@ -315,7 +322,8 @@ try {
         $keycloakEnvironment.KC_HOSTNAME_ADMIN -ne 'https://auth-admin.solov.cc' -or
         $keycloakEnvironment.KC_PROXY_HEADERS -ne 'xforwarded' -or
         $keycloakEnvironment.KC_PROXY_TRUSTED_ADDRESSES -ne $productionEnv.KC_PROXY_TRUSTED_ADDRESSES -or
-        $keycloakEnvironment.KEYCLOAK_EDGE_GATEWAY -ne $productionEnv.KEYCLOAK_EDGE_GATEWAY) {
+        $keycloakEnvironment.KEYCLOAK_EDGE_GATEWAY -ne $productionEnv.KEYCLOAK_EDGE_GATEWAY -or
+        $keycloakEnvironment.JAVA_OPTS_KC_HEAP -ne '-XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30 -XX:MaxRAMPercentage=65') {
         throw 'Keycloak hostname or exact proxy trust policy drifted'
     }
     $keycloakPublishedPorts = @(

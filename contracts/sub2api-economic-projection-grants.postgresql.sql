@@ -1,5 +1,5 @@
 -- REVIEW-ONLY V3 ECONOMIC PROJECTION. This changes no Sub2API source code and
--- grants no write path. Run only after creating the three named LOGIN roles.
+-- grants no write path. Run only after creating the four named LOGIN roles.
 -- The cutover-init command reads these views inside one REPEATABLE READ READ
 -- ONLY transaction; normal agents never receive raw-table privileges.
 
@@ -188,6 +188,13 @@ BEGIN
     EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM %I',current_database(),role_name);
     IF has_database_privilege(role_name,current_database(),'TEMP') THEN
       RAISE EXCEPTION '% retains TEMP through PUBLIC; revoke TEMPORARY on this database from PUBLIC first',role_name;
+    END IF;
+    IF EXISTS (
+      SELECT 1 FROM pg_auth_members m
+      WHERE m.member=(SELECT oid FROM pg_roles WHERE rolname=role_name)
+         OR m.roleid=(SELECT oid FROM pg_roles WHERE rolname=role_name)
+    ) THEN
+      RAISE EXCEPTION '% has a role membership in either direction',role_name;
     END IF;
   END LOOP;
 END $contract$;

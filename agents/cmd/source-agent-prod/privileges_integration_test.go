@@ -155,6 +155,25 @@ func TestVerifyProjectionPrivilegesAllFourPostgresStreams(t *testing.T) {
 	if _, err = admin.ExecContext(ctx, `REVOKE TEMPORARY ON DATABASE `+database+` FROM `+readerRole); err != nil {
 		t.Fatal(err)
 	}
+	otherRole := pgx.Identifier{fixtures[1].role}.Sanitize()
+	if _, err = admin.ExecContext(ctx, `GRANT `+otherRole+` TO `+readerRole); err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyProjectionPrivileges(ctx, reader, fixtures[0].config); err == nil {
+		t.Fatal("source reader membership in another role was accepted")
+	}
+	if _, err = admin.ExecContext(ctx, `REVOKE `+otherRole+` FROM `+readerRole); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = admin.ExecContext(ctx, `GRANT `+readerRole+` TO `+otherRole); err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyProjectionPrivileges(ctx, reader, fixtures[0].config); err == nil {
+		t.Fatal("source reader granted to another role was accepted")
+	}
+	if _, err = admin.ExecContext(ctx, `REVOKE `+readerRole+` FROM `+otherRole); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = admin.ExecContext(ctx, `ALTER ROLE `+readerRole+` CONNECTION LIMIT 3`); err != nil {
 		t.Fatal(err)
 	}

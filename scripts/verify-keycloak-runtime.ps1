@@ -57,6 +57,7 @@ test ! -e /opt/keycloak/bin/client
         --env KC_HOSTNAME_STRICT=true `
         --env KC_HTTP_ENABLED=true `
         --env KC_HEALTH_ENABLED=true `
+        --env 'JAVA_OPTS_KC_HEAP=-XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30 -XX:MaxRAMPercentage=65' `
         $Image start --optimized | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'failed to start hardened Keycloak image' }
     $keycloakCreated = $true
