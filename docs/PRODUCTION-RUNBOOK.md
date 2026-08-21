@@ -822,7 +822,9 @@ Install these files in the BT Nginx locations shown in their templates:
 - `invoice-common-headers.conf` as
   `/www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf` and
   `invoice-security-headers.conf` as
-  `/www/server/panel/vhost/nginx/invoice-security-headers.conf`;
+  `/www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf` (the BT
+  vhost-root `*.conf` glob is the `http {}` context and must not load this
+  server-only snippet globally);
 - `invoice.solov.cc.conf.template` as the enabled vhost.
 
 Issue TLS, run `/www/server/nginx/sbin/nginx -t`, then reload. The vhost:

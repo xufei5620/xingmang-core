@@ -23,7 +23,10 @@ try {
     $key = '/test/pki/ingest_server_key.pem'
     $ca = '/test/pki/source_agent_ca.pem'
     $invoice = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\nginx\invoice.solov.cc.conf.template')
-    $invoice = $invoice.Replace('/www/server/panel/vhost/nginx/invoice-security-headers.conf', $security).
+    if ($invoice -match '/www/server/panel/vhost/nginx/invoice-security-headers\.conf') {
+        throw 'invoice security snippet would be loaded globally by the BT vhost glob'
+    }
+    $invoice = $invoice.Replace('/www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf', $security).
         Replace('/www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf', $common).
         Replace('/www/server/panel/vhost/cert/invoice.solov.cc/fullchain.pem', $cert).
         Replace('/www/server/panel/vhost/cert/invoice.solov.cc/privkey.pem', $key).

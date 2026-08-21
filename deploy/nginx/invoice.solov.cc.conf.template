@@ -23,7 +23,7 @@ server {
     ssl_session_cache shared:INVOICE_TLS:10m;
     ssl_session_timeout 1d;
 
-    include /www/server/panel/vhost/nginx/invoice-security-headers.conf;
+    include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
 
     access_log /www/wwwlogs/invoice.solov.cc.log;
     error_log  /www/wwwlogs/invoice.solov.cc.error.log warn;
@@ -33,14 +33,14 @@ server {
     # session. New API uses the same clean embedded entry shape.
     location = /embed/sub2api {
         access_log off;
-        include /www/server/panel/vhost/nginx/invoice-security-headers.conf;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
         add_header Cache-Control "no-store" always;
         return 303 https://invoice.solov.cc/?ui_mode=embedded&source=sub2api;
     }
 
     location = /embed/newapi {
         access_log off;
-        include /www/server/panel/vhost/nginx/invoice-security-headers.conf;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
         add_header Cache-Control "no-store" always;
         return 303 https://invoice.solov.cc/?ui_mode=embedded&source=newapi;
     }
@@ -126,7 +126,7 @@ server {
     # Administrator pages are top-level only. Authentication, MFA, RBAC and
     # source-IP policy are still enforced by the API.
     location = /admin {
-        include /www/server/panel/vhost/nginx/invoice-security-headers.conf;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
         add_header Content-Security-Policy "frame-ancestors 'none'" always;
         proxy_pass http://127.0.0.1:58090;
         include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
@@ -135,7 +135,7 @@ server {
     }
 
     location ^~ /admin/ {
-        include /www/server/panel/vhost/nginx/invoice-security-headers.conf;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
         add_header Content-Security-Policy "frame-ancestors 'none'" always;
         proxy_pass http://127.0.0.1:58090;
         include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
