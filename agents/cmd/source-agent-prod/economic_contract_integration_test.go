@@ -60,7 +60,11 @@ func TestEconomicProjectionContractsAgainstPostgres(t *testing.T) {
 		`INSERT INTO public.settings VALUES('BALANCE_RECHARGE_MULTIPLIER','1.00',now()-interval '1 day'),('RECHARGE_FEE_RATE','0.00',now()-interval '1 day')`,
 		`INSERT INTO public.users VALUES(1,10.00000000,NULL,'hidden@example.com','secret'),(2,-2.50000000,NULL,'negative@example.com','secret')`,
 		`INSERT INTO public.usage_logs VALUES(1,1,0,0.000000005,now()-interval '10 minutes','secret content','192.0.2.1')`,
-		`INSERT INTO public.redeem_codes VALUES(1,'CASHCODE','balance',10,'used',1,now()-interval '10 minutes'),(99992744,'BONUSCODE','balance',3,'used',1,now()-interval '9 minutes')`,
+		`INSERT INTO public.redeem_codes VALUES
+			(1,'CASHCODE','balance',10,'used',1,now()-interval '10 minutes'),
+			(2,'ADMINNEG','admin_balance',-4,'used',1,now()-interval '10 minutes'),
+			(3,'CONCURRENCYNEG','admin_concurrency',-2,'used',1,now()-interval '10 minutes'),
+			(99992744,'BONUSCODE','balance',3,'used',1,now()-interval '9 minutes')`,
 		`INSERT INTO public.payment_orders VALUES(1,1,'COMPLETED','balance',10,10,0,now()-interval '8 minutes',NULL,now()-interval '9 minutes',now()-interval '8 minutes','epay','easypay','{}','CASHCODE')`,
 	}
 	for _, statement := range statements {
@@ -88,6 +92,16 @@ func TestEconomicProjectionContractsAgainstPostgres(t *testing.T) {
 	var gaps int64
 	if err = admin.QueryRowContext(ctx, `SELECT contract_ok,gap_count FROM public.invoice_sub2api_credits_projection_health_v3`).Scan(&healthy, &gaps); err != nil || !healthy || gaps == 0 {
 		t.Fatalf("legitimate sequence gap blocked contract healthy=%t gaps=%d err=%v", healthy, gaps, err)
+	}
+	if _, err = admin.ExecContext(ctx, `INSERT INTO public.redeem_codes VALUES(4,'INVALIDBALANCE','balance',-1,'used',1,now()-interval '8 minutes')`); err != nil {
+		t.Fatal(err)
+	}
+	var blockedReason string
+	if err = admin.QueryRowContext(ctx, `SELECT contract_ok,blocked_reason FROM public.invoice_sub2api_credits_projection_health_v3`).Scan(&healthy, &blockedReason); err != nil || healthy || blockedReason != "credit_contract_invalid" {
+		t.Fatalf("negative projected balance credit did not fail closed healthy=%t reason=%q err=%v", healthy, blockedReason, err)
+	}
+	if _, err = admin.ExecContext(ctx, `DELETE FROM public.redeem_codes WHERE id=4`); err != nil {
+		t.Fatal(err)
 	}
 	var utcHash, tokyoHash string
 	if _, err = admin.ExecContext(ctx, `SET TIME ZONE 'UTC'`); err != nil {

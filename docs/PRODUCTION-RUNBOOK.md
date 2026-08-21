@@ -606,6 +606,11 @@ The agent never receives an invoice PostgreSQL credential.
   unit/config/currency proof;
 - Sub2API usage/credits/balances: wallet events, non-cash sources and atomic
   encrypted balance snapshots;
+- negative `admin_balance`/`admin_concurrency` redeem records are not positive
+  credit facts and therefore do not poison the credits contract. A
+  non-positive used `balance` credit still fails closed; unexplained
+  administrator deductions remain visible to the signed balance checkpoint
+  and freeze eligibility instead of creating invoiceable cash;
 - Sub2API identities: only the configured central OIDC provider/issuer;
 - New API payments: every row remains `pending_manual`; every publishable cycle
   is a full post-cutover scan because there is no `updated_at`;

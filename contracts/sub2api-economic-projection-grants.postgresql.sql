@@ -83,7 +83,11 @@ WITH p AS (
          count(*) FILTER (WHERE action NOT IN ('accrue','transfer') OR amount<=0)::bigint invalid FROM public.user_affiliate_ledger
 ), r AS (
   SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
-         count(*) FILTER (WHERE value<0)::bigint invalid FROM public.redeem_codes
+         count(*) FILTER (
+           WHERE type='balance' AND status='used' AND used_by IS NOT NULL
+             AND used_at IS NOT NULL AND value<=0
+         )::bigint invalid
+  FROM public.redeem_codes
 ), combined AS (
   SELECT p.n+a.n+r.n AS total_rows,p.gaps+a.gaps+r.gaps AS gap_count,p.invalid+a.invalid+r.invalid AS invalid_rows FROM p,a,r
 )
