@@ -242,8 +242,8 @@ try {
         $trivyAcquisition = Ensure-PinnedImage -Reference $trivyImage -LogPath (Join-Path $releaseRoot 'logs\trivy-tool-pull.log') -Description 'Refreshing exact Trivy 0.74.0 tool digest'
         $trivyToolID = Get-RequiredImageId -Reference $trivyImage
         if ($trivyAcquisition.ImageId -cne $trivyToolID) { throw 'Trivy tool ID changed after acquisition' }
-        Invoke-DockerLogged -Arguments (Get-TrivyArguments -Command @('image', '--download-db-only', '--no-progress')) -LogPath (Join-Path $releaseRoot 'logs\trivy-db-update.log') -Description 'Updating Trivy vulnerability database'
-        Invoke-DockerLogged -Arguments (Get-TrivyArguments -Command @('image', '--download-java-db-only', '--no-progress')) -LogPath (Join-Path $releaseRoot 'logs\trivy-java-db-update.log') -Description 'Updating Trivy Java database'
+        Invoke-DockerLogged -Arguments (Get-TrivyArguments -Command @('image', '--timeout', '15m', '--download-db-only', '--no-progress')) -LogPath (Join-Path $releaseRoot 'logs\trivy-db-update.log') -Description 'Updating Trivy vulnerability database'
+        Invoke-DockerLogged -Arguments (Get-TrivyArguments -Command @('image', '--timeout', '15m', '--download-java-db-only', '--no-progress')) -LogPath (Join-Path $releaseRoot 'logs\trivy-java-db-update.log') -Description 'Updating Trivy Java database'
         $trivyVersionPath = Join-Path $releaseRoot 'proof\trivy-version.txt'
         Invoke-DockerTextCapture -Arguments (Get-TrivyArguments -Command @('--version')) -OutputPath $trivyVersionPath -ErrorLogPath (Join-Path $releaseRoot 'logs\trivy-version.log') -Description 'Recording Trivy and database versions'
         $trivyVersionText = Get-Content -Raw -LiteralPath $trivyVersionPath
@@ -309,12 +309,12 @@ try {
             $reportLog = Join-Path $releaseRoot "logs\$($definition.ArtifactName).trivy.log"
             $sbomLog = Join-Path $releaseRoot "logs\$($definition.ArtifactName).sbom.log"
 
-            $scanCommand = @('image', '--skip-db-update', '--skip-java-db-update', '--no-progress', '--scanners', 'vuln', '--severity', 'HIGH,CRITICAL', '--format', 'json', $definition.Reference)
+            $scanCommand = @('image', '--timeout', '15m', '--skip-db-update', '--skip-java-db-update', '--no-progress', '--scanners', 'vuln', '--severity', 'HIGH,CRITICAL', '--format', 'json', $definition.Reference)
             Invoke-DockerTextCapture -Arguments (Get-TrivyArguments -Command $scanCommand) -OutputPath $reportPath -ErrorLogPath $reportLog -Description "Scanning $($definition.Reference) (serial HIGH/CRITICAL policy)"
             $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
             $summary = Assert-TrivyReportBinding -Report $report -ExpectedImageId $metadata.Id
 
-            $sbomCommand = @('image', '--skip-db-update', '--skip-java-db-update', '--no-progress', '--scanners', 'vuln', '--format', 'cyclonedx', $definition.Reference)
+            $sbomCommand = @('image', '--timeout', '15m', '--skip-db-update', '--skip-java-db-update', '--no-progress', '--scanners', 'vuln', '--format', 'cyclonedx', $definition.Reference)
             Invoke-DockerTextCapture -Arguments (Get-TrivyArguments -Command $sbomCommand) -OutputPath $sbomPath -ErrorLogPath $sbomLog -Description "Generating CycloneDX SBOM for $($definition.Reference)"
             $bom = Get-Content -Raw -LiteralPath $sbomPath | ConvertFrom-Json
             Assert-CycloneDxBinding -Bom $bom -ExpectedImageId $metadata.Id | Out-Null

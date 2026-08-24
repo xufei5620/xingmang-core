@@ -1,4 +1,9 @@
 $ErrorActionPreference = 'Stop'
+
+$gateSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'release-image-gate.ps1')
+if ([regex]::Matches($gateSource, "'--timeout', '15m'").Count -lt 4) {
+    throw 'release image gate does not apply the reviewed 15-minute Trivy timeout to database updates, scans and SBOM generation'
+}
 Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
