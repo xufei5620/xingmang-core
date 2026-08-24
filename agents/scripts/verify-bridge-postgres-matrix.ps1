@@ -12,7 +12,8 @@ $password = 'bridge_matrix_ephemeral'
 function Invoke-BridgeMatrixCase {
     param([Parameter(Mandatory)][string]$Image, [Parameter(Mandatory)][string]$Label)
 
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
+    $maxAttempts = 10
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         $name = 'invoice-bridge-matrix-' + $Label + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
         $attemptError = $null
         $cleanupExitCode = -1
@@ -25,7 +26,7 @@ function Invoke-BridgeMatrixCase {
 
             $ready = $false
             for ($readyAttempt = 0; $readyAttempt -lt 60; $readyAttempt++) {
-                docker exec $name pg_isready --username postgres --dbname bridge_test *> $null
+                docker exec $name pg_isready --username postgres --dbname bridge_test 2>&1 | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     $ready = $true
                     break
@@ -40,9 +41,25 @@ function Invoke-BridgeMatrixCase {
             if ($LASTEXITCODE -ne 0 -or $portLine -notmatch ':(\d+)\s*$') {
                 throw "Could not resolve PostgreSQL $Label host port"
             }
+            $hostPort = [int]$Matches[1]
+            $hostDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            $hostReady = $false
+            do {
+                $client = [Net.Sockets.TcpClient]::new()
+                try {
+                    $pendingConnect = $client.ConnectAsync('127.0.0.1', $hostPort)
+                    $hostReady = $pendingConnect.Wait(500) -and $client.Connected
+                } catch {
+                    $hostReady = $false
+                } finally {
+                    $client.Dispose()
+                }
+                if (-not $hostReady) { Start-Sleep -Milliseconds 250 }
+            } while (-not $hostReady -and [DateTime]::UtcNow -lt $hostDeadline)
+            if (-not $hostReady) { throw "PostgreSQL $Label host port did not become reachable" }
             $prior = $env:SOURCE_AGENT_TEST_DATABASE_URL
             try {
-                $env:SOURCE_AGENT_TEST_DATABASE_URL = "postgres://postgres:$password@127.0.0.1:$($Matches[1])/bridge_test?sslmode=disable"
+                $env:SOURCE_AGENT_TEST_DATABASE_URL = "postgres://postgres:$password@127.0.0.1:${hostPort}/bridge_test?sslmode=disable"
                 Push-Location $agentRoot
                 try {
                     $testOutput = @(& go test ./cmd/source-agent-prod -run 'Test(BridgeV4|Sub2APIBridge|NewAPIBridge)' -count=1 2>&1)
@@ -53,7 +70,7 @@ function Invoke-BridgeMatrixCase {
                     } else {
                         $testText = $testOutput | Out-String
                         $isTransientHostPortFailure = Test-BridgeMatrixTransientHostPortFailure -Text $testText
-                        if (-not $isTransientHostPortFailure -or $attempt -eq 3) {
+                        if (-not $isTransientHostPortFailure -or $attempt -eq $maxAttempts) {
                             throw "Bridge V4 integration failed on PostgreSQL $Label"
                         }
                         $retry = $true
@@ -72,7 +89,7 @@ function Invoke-BridgeMatrixCase {
             $attemptError = $_
         }
         finally {
-            docker rm --force $name *> $null
+            docker rm --force $name 2>&1 | Out-Null
             $cleanupExitCode = $LASTEXITCODE
         }
         Complete-BridgeMatrixAttempt -ContainerName $name -CleanupExitCode $cleanupExitCode -AttemptError $attemptError
