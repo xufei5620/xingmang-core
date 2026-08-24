@@ -131,7 +131,8 @@ func TestSub2APIBridgePreservesFinancialAndCutoverSemantics(t *testing.T) {
 	snapshotStore := sourceagent.EncryptedStateFile{Path: filepath.Join(directory, "baseline.enc"), Purpose: "balance_baseline", Keys: sourceagent.FileSpoolKeyProvider{Path: writeBridgeTestKey(t, directory, "snapshot.key")}}
 	captured, err := sourceagent.CaptureCutover(ctx, cutoverReader, sourceagent.CutoverCaptureConfig{
 		SourceID: "10000000-0000-4000-8000-000000000001", SourceType: sourceagent.SourceSub2API,
-		SourceRuntime: "0.1.179", SigningKeyID: "key-1", Manifest: manifestStore, Snapshot: snapshotStore,
+		SourceRuntime: "0.1.179", SigningKeyID: "key-1",
+		EligibilityStartAt: time.Now().UTC().Add(time.Hour), Manifest: manifestStore, Snapshot: snapshotStore,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +143,8 @@ func TestSub2APIBridgePreservesFinancialAndCutoverSemantics(t *testing.T) {
 	}
 	if _, err = sourceagent.CaptureCutover(ctx, cutoverReader, sourceagent.CutoverCaptureConfig{
 		SourceID: captured.SourceID, SourceType: captured.SourceType, SourceRuntime: captured.SourceRuntime,
-		SigningKeyID: "key-1", Manifest: manifestStore, Snapshot: snapshotStore,
+		SigningKeyID: "key-1", EligibilityStartAt: time.Now().UTC().Add(time.Hour),
+		Manifest: manifestStore, Snapshot: snapshotStore,
 	}); err == nil {
 		t.Fatal("cutover state was overwritten")
 	}

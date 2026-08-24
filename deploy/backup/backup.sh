@@ -12,6 +12,11 @@ umask 077
   echo 'set BACKUP_QUIESCE_CONFIRMED=YES after scheduling the write-freeze window' >&2
   exit 2
 }
+backup_schema_mode=${BACKUP_SCHEMA_MODE:-post-0011}
+[[ "$backup_schema_mode" == 'pre-0011' || "$backup_schema_mode" == 'post-0011' ]] || {
+  echo 'BACKUP_SCHEMA_MODE must be pre-0011 or post-0011' >&2
+  exit 2
+}
 
 for command in age docker sha256sum flock tar find ssh-keygen stat; do command -v "$command" >/dev/null; done
 test -s "$AGE_RECIPIENT_FILE"
@@ -100,12 +105,22 @@ backup_signer_identity=invoice-backup
 document_volume=${INVOICE_DOCUMENT_VOLUME:-invoice-system-prod_invoice_document_data}
 resume_required=false
 backup_published=false
+resume_source_services=()
+resume_prod_services=()
 
 resume_services() {
-  "${source_compose[@]}" up -d "${source_services[@]}"
-  "${prod_compose[@]}" up -d api ingest-proxy
-  "${source_compose[@]}" up -d --wait --wait-timeout 180 "${source_services[@]}"
-  "${prod_compose[@]}" up -d --wait --wait-timeout 180 api ingest-proxy
+  if (( ${#resume_source_services[@]} > 0 )); then
+    "${source_compose[@]}" up -d "${resume_source_services[@]}"
+  fi
+  if (( ${#resume_prod_services[@]} > 0 )); then
+    "${prod_compose[@]}" up -d "${resume_prod_services[@]}"
+  fi
+  if (( ${#resume_source_services[@]} > 0 )); then
+    "${source_compose[@]}" up -d --wait --wait-timeout 180 "${resume_source_services[@]}"
+  fi
+  if (( ${#resume_prod_services[@]} > 0 )); then
+    "${prod_compose[@]}" up -d --wait --wait-timeout 180 "${resume_prod_services[@]}"
+  fi
 }
 
 cleanup() {
@@ -150,6 +165,12 @@ done
 # Freeze every writer before taking any component snapshot. The whole source
 # directory is archived, including pending spool, inventory, reconciliation and
 # lock metadata introduced by future compatible agent versions.
+for service in "${source_services[@]}"; do
+  [[ -n "$("${source_compose[@]}" ps --status running -q "$service")" ]] && resume_source_services+=("$service")
+done
+for service in api ingest-proxy; do
+  [[ -n "$("${prod_compose[@]}" ps --status running -q "$service")" ]] && resume_prod_services+=("$service")
+done
 resume_required=true
 "${prod_compose[@]}" stop -t 30 ingest-proxy api
 "${source_compose[@]}" stop -t 30 "${source_services[@]}"
@@ -192,14 +213,37 @@ mv -- "$source_state_tmp" "$source_state_final"
 "${prod_compose[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice \
   -c "COPY (SELECT si.id,si.source_type,si.runtime_version,sis.stream_id,sis.sequence,COALESCE(sis.last_batch_hash,'') FROM source_instances si LEFT JOIN source_ingest_state sis ON sis.source_instance_id=si.id ORDER BY si.id,sis.stream_id) TO STDOUT WITH CSV HEADER" \
   >"$work_dir/source-receiver-state.csv"
+printf '%s\n' "$backup_schema_mode" >"$work_dir/backup-schema-mode.txt"
+if [[ "$backup_schema_mode" == 'post-0011' ]]; then
+  "${prod_compose[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice \
+    -c "COPY (SELECT singleton_id,to_char(eligibility_start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS eligibility_start_utc,display_timezone,require_payment_at_or_after,require_usage_at_or_after,policy_version FROM invoice_eligibility_policy ORDER BY singleton_id) TO STDOUT WITH CSV HEADER" \
+    >"$work_dir/invoice-eligibility-policy.csv"
+  eligibility_policy=$("${prod_compose[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+    -c "SELECT to_char(eligibility_start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),display_timezone,require_payment_at_or_after,require_usage_at_or_after,policy_version FROM invoice_eligibility_policy WHERE singleton_id=1")
+  [[ "$eligibility_policy" == '2026-08-31T16:00:00Z|Asia/Shanghai|t|t|1' ]] || {
+    echo 'immutable invoice eligibility policy mismatch; backup publication refused' >&2
+    exit 1
+  }
+else
+  pre_policy_state=$("${prod_compose[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+    -c "SELECT to_regclass('invoice_eligibility_policy') IS NULL,(SELECT count(*) FROM schema_migrations WHERE name='0011_invoice_eligibility_policy.sql')")
+  [[ "$pre_policy_state" == 't|0' ]] || {
+    echo 'pre-0011 backup mode does not match the invoice database schema' >&2
+    exit 1
+  }
+  printf 'schema_mode\npre-0011\n' >"$work_dir/invoice-eligibility-policy.csv"
+fi
 
 cat >"$work_dir/backup-info.txt" <<INFO
 snapshot_utc=$timestamp
+schema_mode=$backup_schema_mode
 write_freeze=api,ingest-proxy,${source_services[*]}
 document_volume=$document_volume
 source_state_directories=${source_directories[*]}
 invoice_image_tag=${INVOICE_IMAGE_TAG:-unknown}
 source_agent_image_tag=${INVOICE_IMAGE_TAG:-unknown}
+eligibility_start_at=$([[ "$backup_schema_mode" == post-0011 ]] && printf '%s' '2026-09-01T00:00:00+08:00' || printf '%s' 'not-applied')
+eligibility_policy_version=$([[ "$backup_schema_mode" == post-0011 ]] && printf '%s' '1' || printf '%s' 'not-applied')
 INFO
 cp -- "$source_compose_file" "$work_dir/docker-compose.sources.yml"
 for metadata_file in "${SOURCE_INSTANCES_CONFIG_FILE:-}" "${SOURCE_TRUST_CONFIG_FILE:-}" "${RELEASE_METADATA_FILE:-}"; do

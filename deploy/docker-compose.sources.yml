@@ -27,6 +27,7 @@ x-source-common: &source-common
     SOURCE_MAX_PAGES_PER_CYCLE: "1000"
     SOURCE_MAX_CONSECUTIVE_FAILURES: "10"
     SOURCE_LOCAL_HEALTH_MAX_AGE: 5m
+    ELIGIBILITY_START_AT: ${ELIGIBILITY_START_AT:?set immutable invoice eligibility start}
     SOURCE_TRUSTED_OIDC_ISSUER: ${OIDC_ISSUER_URL:?set central OIDC issuer}
   secrets:
     - source_agent_ca
@@ -328,6 +329,7 @@ services:
     command: ["cutover-init"]
     healthcheck: {disable: true}
     environment:
+      ELIGIBILITY_START_AT: ${ELIGIBILITY_START_AT:?set immutable invoice eligibility start}
       SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
       SOURCE_TYPE: sub2api
       SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
@@ -349,6 +351,7 @@ services:
     command: ["cutover-init"]
     healthcheck: {disable: true}
     environment:
+      ELIGIBILITY_START_AT: ${ELIGIBILITY_START_AT:?set immutable invoice eligibility start}
       SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
       SOURCE_TYPE: newapi
       SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}

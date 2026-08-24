@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc11 candidate
+# Release readiness: 0.1.0-rc18 eligibility-policy candidate
 
-Status as of 2026-08-24:
+Status as of 2026-08-25:
 
-- application code and local release candidate: **GO**;
-- isolated staging deployment: **GO after the fresh RC11 image gate**;
+- application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
+- isolated staging deployment: **GO after the fresh RC18 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -34,22 +34,24 @@ this release candidate.
   OIDC smoke passed, and the independent artifact verifier passed at generation
   time. Later backend/deployment changes now make this bundle deliberately
   stale; a fresh full gate is required after PostgreSQL verification is green;
-- read-only `fiberstate` preflight: live Sub2API 0.1.179 and New API rc.25
-  match the frozen contracts; both applications are healthy, DNS/TLS/Nginx and
-  Keycloak discovery are healthy, and the invoice database contains no user,
-  funding-lot, ingest-batch or invoice-request rows. The old New API partial
-  role state and Sub2API legacy views remain production cleanup inputs, not an
-  approved runtime boundary.
+- recorded 2026-08-24 `fiberstate` evidence: live Sub2API 0.1.179 and New API
+  rc.25 matched the frozen contracts; both applications, DNS/TLS/Nginx and
+  Keycloak discovery were healthy; Bridge V4 and exact grants were installed,
+  legacy views/roles were removed, signed backups restored successfully, and
+  the invoice financial ledger was empty. This evidence must be rechecked in
+  the maintenance window; it is not presented as live 2026-08-25 state.
 
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC11 image/SBOM/vulnerability
+- generate and independently verify a fresh RC18 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
-- verify new source/invoice/IdP backups with isolated restores, preserve the
-  existing reader SCRAM envelope, reconcile the legacy view boundary, install
-  Bridge V4, prove `pg_depend=0`, and recapture both cutovers while each
-  upstream application is stopped and the database quiescence gate passes;
-- deploy all Invoice images under the same RC11 tag and pass real production
+- create a fresh pre-0011 signed rollback package with isolated restore,
+  re-prove the already installed Bridge V4/role boundary and `pg_depend=0`, and
+  capture each cutover exactly once while
+  its upstream application is stopped and the database quiescence gate passes;
+  if a create-only pair already exists, verify and reuse that exact pair rather
+  than overwriting or "recapturing" it;
+- deploy all Invoice images under the same RC18 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -64,7 +66,7 @@ this release candidate.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC11 commit and signed release tag; no GitHub
+- create and locally verify the RC18 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement
@@ -76,9 +78,12 @@ this release candidate.
 - New API observed top-ups never become invoiceable automatically. Two
   distinct finance reviewers must verify external payment evidence, and a
   third operator issues the invoice;
-- a successful post-cutover subscription purchase is treated as delivered
-  service and becomes invoiceable for its verified real payment amount; wallet
-  top-ups still require actual cash-backed consumption;
+- both payment completion and authoritative wallet usage occurrence must be at
+  or after `2026-09-01 00:00:00 Asia/Shanghai`. Historical cash is retained as
+  a noninvoiceable pool and consumed first;
+- subscription payments remain auditable but noninvoiceable in V1 because the
+  current source contracts cannot prove an unambiguous
+  purchase-to-subscription-instance-to-actual-usage relationship;
 - ordinary invoices only, minimum CNY 200.00, item `技术服务`, hidden issuing
   entity, and email notification with authenticated download rather than a PDF
   attachment; administrators enter the actual tax-platform issue time.
@@ -88,5 +93,7 @@ this release candidate.
 Do not publish traffic merely because the local gate is green. Follow
 `docs/PRODUCTION-RUNBOOK.md` in order and record each approval, immutable image
 digest, backup proof and canary result. Delete the upstream custom menus and
-revoke the integration credentials to roll back; no upstream source rollback
-is involved.
+revoke the integration credentials to take the feature offline; no upstream
+source rollback is involved. After one-way migration 0011, however, an
+application rollback also requires the matching signed pre-0011 invoice DB and
+source-state restore. Switching only back to RC17 is not a valid rollback.

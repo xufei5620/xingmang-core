@@ -1,6 +1,7 @@
 {
   "issuer_name": "请替换为实际开票主体全称",
   "minimum_request_minor": 20000,
+  "eligibility_start_at": "2026-09-01T00:00:00+08:00",
   "smtp_host": "smtp.qq.com",
   "smtp_port": 587,
   "smtp_from": "replace-with-dedicated-account@qq.com",

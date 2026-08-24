@@ -129,6 +129,7 @@ if ($sub2SourceContract -notmatch 'ALTER ROLE invoice_sub2api_payments_reader\s+
 
 $productionEnv = @{
     INVOICE_IMAGE_TAG = 'verification-build'
+    ELIGIBILITY_START_AT = '2026-09-01T00:00:00+08:00'
     SECRETS_DIR = (Join-Path $projectRoot 'deploy')
     ADMIN_SETTINGS_BOOTSTRAP_FILE = (Join-Path $projectRoot 'deploy\admin-settings.bootstrap.example.json')
     SOURCE_TRUST_CONFIG_FILE = (Join-Path $projectRoot 'deploy\source-trust.example.json')
@@ -176,9 +177,9 @@ try {
         $previousProductionEnv[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
         [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
     }
-    docker compose -f (Join-Path $projectRoot 'deploy\docker-compose.prod.yml') config --quiet
+    docker compose --profile tools -f (Join-Path $projectRoot 'deploy\docker-compose.prod.yml') config --quiet
     if ($LASTEXITCODE -ne 0) { throw 'production docker compose validation failed' }
-    $renderedProduction = docker compose -f (Join-Path $projectRoot 'deploy\docker-compose.prod.yml') config --format json | ConvertFrom-Json
+    $renderedProduction = docker compose --profile tools -f (Join-Path $projectRoot 'deploy\docker-compose.prod.yml') config --format json | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'cannot inspect rendered production compose' }
     $proxyNetwork = $renderedProduction.services.'ingest-proxy'.networks.invoice_ingest
     if ($renderedProduction.services.api.environment.INGEST_PROXY_CIDRS -ne $productionEnv.INVOICE_INGEST_PROXY_CIDR -or
@@ -195,6 +196,11 @@ try {
         $renderedProduction.services.api.environment.OIDC_LOGOUT_TOKEN_MAX_AGE -ne $productionEnv.OIDC_LOGOUT_TOKEN_MAX_AGE -or
         $renderedProduction.services.api.environment.OIDC_MAX_HTTP_RESPONSE_BYTES -ne $productionEnv.OIDC_MAX_HTTP_RESPONSE_BYTES) {
         throw 'invoice API trusted proxy/default gateway does not equal the exact configured bridge gateway /32'
+    }
+    if ($renderedProduction.services.api.environment.ELIGIBILITY_START_AT -cne $productionEnv.ELIGIBILITY_START_AT -or
+        $renderedProduction.services.migrate.environment.ELIGIBILITY_START_AT -cne $productionEnv.ELIGIBILITY_START_AT -or
+        $productionEnv.ELIGIBILITY_START_AT -cne '2026-09-01T00:00:00+08:00') {
+        throw 'invoice API/migration immutable eligibility start is missing or differs from 2026-09-01T00:00:00+08:00'
     }
     foreach ($network in @(
         @{ Name = 'invoice_edge'; Env = 'INVOICE_EDGE_SUBNET'; Internal = $false },
@@ -417,6 +423,9 @@ try {
         if ($renderedSources.services.$service.environment.INGESTION_ALLOWED_CIDRS -ne $productionEnv.INVOICE_INGEST_PROXY_CIDR) {
             throw "$service does not pin ingestion DNS to the proxy /32"
         }
+        if ($renderedSources.services.$service.environment.ELIGIBILITY_START_AT -cne '2026-09-01T00:00:00+08:00') {
+            throw "$service does not pin the immutable invoice eligibility start"
+        }
         if ($null -eq $renderedSources.services.$service.healthcheck) { throw "$service is missing its local healthcheck" }
         if ($service -in $identityServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '2.0' -or $renderedSources.services.$service.environment.SOURCE_RECONCILE_FILE -ne '/state/reconcile.json')) { throw "$service is missing V2 durable reconciliation" }
         if ($service -in $economicServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '3.0' -or $null -ne $renderedSources.services.$service.environment.SOURCE_RECONCILE_FILE -or $renderedSources.services.$service.environment.SOURCE_CUTOVER_MANIFEST_FILE -ne '/cutover/manifest.enc')) { throw "$service V3 cutover/state contract drifted" }
@@ -429,6 +438,9 @@ try {
             -not (Test-OrdinalStringEqual -Actual $cutoverService.pull_policy -Expected 'never') -or
             $cutoverService.PSObject.Properties.Name -contains 'build') {
             throw "$service escaped the common prebuilt-only release image tag"
+        }
+        if ($cutoverService.environment.ELIGIBILITY_START_AT -cne '2026-09-01T00:00:00+08:00') {
+            throw "$service cutover can run without the immutable eligibility boundary"
         }
     }
     $trustExample = Get-Content -Raw (Join-Path $projectRoot 'deploy\source-trust.example.json') | ConvertFrom-Json

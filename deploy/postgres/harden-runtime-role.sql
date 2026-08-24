@@ -17,6 +17,9 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO invoice_app;
 REVOKE ALL ON TABLE schema_migrations FROM invoice_app;
 GRANT SELECT ON TABLE schema_migrations TO invoice_app;
 
+REVOKE ALL ON TABLE invoice_eligibility_policy FROM invoice_app;
+GRANT SELECT ON TABLE invoice_eligibility_policy TO invoice_app;
+
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE audit_events FROM invoice_app;
 GRANT SELECT, INSERT ON TABLE audit_events TO invoice_app;
 
@@ -57,6 +60,9 @@ GRANT SELECT, INSERT ON TABLE
   balance_reconciliation_checkpoints,
   balance_checkpoint_evaluations
 TO invoice_app;
+
+REVOKE UPDATE, TRUNCATE ON TABLE consumption_allocations FROM invoice_app;
+GRANT SELECT, INSERT, DELETE ON TABLE consumption_allocations TO invoice_app;
 
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE source_economic_scan_cycle_events FROM invoice_app;
 GRANT SELECT, INSERT ON TABLE source_economic_scan_cycle_events TO invoice_app;

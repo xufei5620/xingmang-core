@@ -78,11 +78,14 @@ func TestVerifyDocumentsAgainstRestoredPostgres(t *testing.T) {
 		INSERT INTO invoice_requests(
 			id,request_no,invoice_user_id,source_instance_id,profile_id,profile_snapshot_ciphertext,
 			issuer_setting_revision,issue_snapshot_ciphertext,currency,issuer_code,service_item,
-			amount_minor,status,idempotency_key,version,submitted_at,updated_at)
+			amount_minor,status,idempotency_key,eligibility_policy_start_at,
+			eligibility_policy_version,version,submitted_at,updated_at)
 		VALUES(
 			'40000000-0000-4000-8000-000000000001','BACKUP-1','20000000-0000-4000-8000-000000000001',
 			'10000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000001','snapshot',
-			1,'immutable-issue-snapshot','CNY','default','技术服务',20000,'issued','backup-idempotency',2,$1,$1);
+			1,'immutable-issue-snapshot','CNY','default','技术服务',20000,'issued','backup-idempotency',
+			(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),
+			(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),2,$1,$1);
 		INSERT INTO invoice_documents(
 			id,invoice_request_id,invoice_number,object_key,object_version,sha256,size_bytes,
 			mime_type,scan_status,uploaded_by,issued_at,created_at)

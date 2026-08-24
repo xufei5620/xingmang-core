@@ -132,6 +132,12 @@ setting.
    The command is read-only to the source DB. It must create `manifest.enc` and
    `baseline.enc`; a second run must fail. Immediately run `check-cutover` (the
    same profile with command override) and archive their hashes offline.
+   Both commands require `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`,
+   reject either cutover/database clock at or after that instant, and require
+   the exact source contract (`sub2api-economic-v3` or
+   `newapi-economic-rc25-v3`). Run these checks before applying invoice
+   migration 0011, then bind the verified hashes into the signed rollback
+   package; never discover an invalid pair only after the one-way migration.
    Later balance snapshots must retain this encrypted baseline: it is the only
    authority for signed `baseline_member` (`true` for original users, `false`
    for post-cutover users). Loss/corruption is fail-closed, never recaptured.

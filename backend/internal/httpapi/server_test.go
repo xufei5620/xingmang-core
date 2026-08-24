@@ -262,11 +262,15 @@ func TestTypedAdminSettingsGetDoesNotExposeSecretOrBreakGlassCIDRs(t *testing.T)
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var response struct {
-		Revision         int64  `json:"revision"`
-		IssuerName       string `json:"issuer_name"`
-		IssuerConfigured bool   `json:"issuer_configured"`
-		ServiceItem      string `json:"service_item"`
-		SMTP             struct {
+		Revision            int64  `json:"revision"`
+		IssuerName          string `json:"issuer_name"`
+		IssuerConfigured    bool   `json:"issuer_configured"`
+		ServiceItem         string `json:"service_item"`
+		EligibilityStartAt  string `json:"eligibility_start_at"`
+		EligibilityVersion  int64  `json:"eligibility_policy_version"`
+		EligibilityTimezone string `json:"eligibility_timezone"`
+		EligibilityRule     string `json:"eligibility_rule"`
+		SMTP                struct {
 			FromAddress          string `json:"from_address"`
 			CredentialConfigured bool   `json:"credential_configured"`
 			AuthorizationCode    string `json:"authorization_code"`
@@ -280,7 +284,11 @@ func TestTypedAdminSettingsGetDoesNotExposeSecretOrBreakGlassCIDRs(t *testing.T)
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Revision != 1 || response.IssuerConfigured || response.ServiceItem != adminsettings.FixedServiceItem || response.SMTP.FromAddress != "invoice@qq.com" || response.SMTP.AuthorizationCode != "" || response.AdminAccess.CurrentIP != "203.0.113.8" || response.AdminAccess.BootstrapAccess {
+	if response.Revision != 1 || response.IssuerConfigured || response.ServiceItem != adminsettings.FixedServiceItem ||
+		response.EligibilityStartAt != "2026-08-31T16:00:00Z" || response.EligibilityTimezone != "Asia/Shanghai" ||
+		response.EligibilityVersion != 1 || response.EligibilityRule != "payment_and_usage_at_or_after" ||
+		response.SMTP.FromAddress != "invoice@qq.com" ||
+		response.SMTP.AuthorizationCode != "" || response.AdminAccess.CurrentIP != "203.0.113.8" || response.AdminAccess.BootstrapAccess {
 		t.Fatalf("unexpected response: %+v", response)
 	}
 	if strings.Contains(recorder.Body.String(), "127.0.0.1") || strings.Contains(recorder.Body.String(), "authorization_code") {
@@ -309,11 +317,18 @@ func TestTypedInvoiceSettingsCASUpdatesLedgerMinimum(t *testing.T) {
 	var policy struct {
 		MinimumRequestMinor int64  `json:"minimum_request_minor"`
 		ServiceItem         string `json:"service_item"`
+		EligibilityStartAt  string `json:"eligibility_start_at"`
+		EligibilityVersion  int64  `json:"eligibility_policy_version"`
+		EligibilityTimezone string `json:"eligibility_timezone"`
+		EligibilityRule     string `json:"eligibility_rule"`
 	}
 	if err := json.Unmarshal(policyRecorder.Body.Bytes(), &policy); err != nil {
 		t.Fatal(err)
 	}
-	if policy.MinimumRequestMinor != 30_000 || policy.ServiceItem != domain.FixedServiceItem || strings.Contains(policyRecorder.Body.String(), "issuer") {
+	if policy.MinimumRequestMinor != 30_000 || policy.ServiceItem != domain.FixedServiceItem ||
+		policy.EligibilityStartAt != "2026-08-31T16:00:00Z" || policy.EligibilityTimezone != "Asia/Shanghai" ||
+		policy.EligibilityVersion != 1 || policy.EligibilityRule != "payment_and_usage_at_or_after" ||
+		strings.Contains(policyRecorder.Body.String(), "issuer") {
 		t.Fatalf("unexpected public invoice policy: %s", policyRecorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
@@ -399,6 +414,12 @@ func TestSettingsSurfaceHasNoLegacyUnifiedRouteAndRejectsTrailingJSON(t *testing
 	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPut, "/api/v1/admin/settings/invoice", "203.0.113.8", body))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("trailing JSON status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	body = `{"revision":1,"issuer_name":"A","minimum_request_minor":20000,"eligibility_start_at":"2026-09-01T00:00:00+08:00"}`
+	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPut, "/api/v1/admin/settings/invoice", "203.0.113.8", body))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("mutable eligibility policy field status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

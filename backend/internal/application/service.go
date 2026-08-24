@@ -607,11 +607,13 @@ func (s *Service) BeginManualIssue(ctx context.Context, adminID, requestID strin
 }
 
 type IssueSnapshot struct {
-	IssuerName       string    `json:"issuer_name"`
-	IssuerCode       string    `json:"issuer_code"`
-	ServiceItem      string    `json:"service_item"`
-	SettingsRevision int64     `json:"settings_revision"`
-	ConfirmedAt      time.Time `json:"confirmed_at"`
+	IssuerName               string    `json:"issuer_name"`
+	IssuerCode               string    `json:"issuer_code"`
+	ServiceItem              string    `json:"service_item"`
+	SettingsRevision         int64     `json:"settings_revision"`
+	EligibilityStartAt       time.Time `json:"eligibility_start_at"`
+	EligibilityPolicyVersion int64     `json:"eligibility_policy_version"`
+	ConfirmedAt              time.Time `json:"confirmed_at"`
 }
 
 func (s *Service) ConfirmManualIssue(ctx context.Context, adminID, requestID string, expectedVersion int64) (domain.InvoiceRequest, error) {
@@ -623,9 +625,13 @@ func (s *Service) ConfirmManualIssue(ctx context.Context, adminID, requestID str
 	if issuerName == "" || issuerName == "待配置开票主体" || settings.Revision <= 0 || settings.ServiceItem != domain.FixedServiceItem {
 		return domain.InvoiceRequest{}, ErrIssuerNotConfigured
 	}
+	if settings.EligibilityStartAt.IsZero() || settings.EligibilityPolicyVersion <= 0 {
+		return domain.InvoiceRequest{}, domain.ErrInvalidState
+	}
 	snapshot := IssueSnapshot{
 		IssuerName: issuerName, IssuerCode: "default", ServiceItem: domain.FixedServiceItem,
-		SettingsRevision: settings.Revision, ConfirmedAt: s.now(),
+		SettingsRevision: settings.Revision, EligibilityStartAt: settings.EligibilityStartAt,
+		EligibilityPolicyVersion: settings.EligibilityPolicyVersion, ConfirmedAt: s.now(),
 	}
 	body, err := json.Marshal(snapshot)
 	if err != nil {
@@ -663,7 +669,14 @@ func (s *Service) GetIssueSnapshot(ctx context.Context, adminID, requestID strin
 	if err = json.Unmarshal(body, &snapshot); err != nil {
 		return IssueSnapshot{}, err
 	}
-	if snapshot.SettingsRevision != record.IssuerSettingRevision || snapshot.ServiceItem != domain.FixedServiceItem {
+	settings, err := s.settings.Get(ctx)
+	if err != nil {
+		return IssueSnapshot{}, fmt.Errorf("load eligibility policy settings: %w", err)
+	}
+	if snapshot.SettingsRevision != record.IssuerSettingRevision || snapshot.ServiceItem != domain.FixedServiceItem ||
+		!snapshot.EligibilityStartAt.UTC().Equal(settings.EligibilityStartAt.UTC()) ||
+		snapshot.EligibilityPolicyVersion <= 0 ||
+		snapshot.EligibilityPolicyVersion != settings.EligibilityPolicyVersion {
 		return IssueSnapshot{}, domain.ErrConflict
 	}
 	_ = adminID // authorization is enforced by the calling admin edge.

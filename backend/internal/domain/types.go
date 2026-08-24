@@ -96,6 +96,12 @@ type FundingLot struct {
 }
 
 func (l FundingLot) AvailableMinor() int64 {
+	if l.EligibilityKind == EligibilitySubscriptionCash {
+		// Current signed source contracts expose wallet usage only. Subscription
+		// payments remain auditable but cannot become invoiceable without an
+		// authoritative purchase-to-usage linkage.
+		return 0
+	}
 	cap := l.ConsumedCashMinor
 	// Empty eligibility kind exists only in the in-memory/bootstrap fixture
 	// service retained for unit tests. Persistent production rows always carry

@@ -35,6 +35,10 @@ func waitIntegrationPool(t *testing.T, pool *pgxpool.Pool) {
 }
 
 func integrationStore(t *testing.T) (*Store, context.Context) {
+	return integrationStoreWithPolicyStart(t, time.Now().UTC().Add(-24*time.Hour).Truncate(time.Second))
+}
+
+func integrationStoreWithPolicyStart(t *testing.T, fixturePolicyStart time.Time) (*Store, context.Context) {
 	t.Helper()
 	url := os.Getenv("INVOICE_TEST_DATABASE_URL")
 	if url == "" {
@@ -52,6 +56,23 @@ func integrationStore(t *testing.T) (*Store, context.Context) {
 	}
 	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
+	}
+	fixturePolicyStart = fixturePolicyStart.UTC().Truncate(time.Second)
+	// Tests use an isolated disposable schema and a movable boundary to exercise
+	// T-1/T/T+1 cases. Production policy updates are permanently rejected.
+	if _, err = pool.Exec(ctx, `ALTER TABLE invoice_eligibility_policy
+		DISABLE TRIGGER invoice_eligibility_policy_guard`); err != nil {
+		t.Fatalf("disable immutable policy guard in isolated fixture: %v", err)
+	}
+	if _, err = pool.Exec(ctx, `
+		UPDATE invoice_eligibility_policy
+		SET eligibility_start_at=$1,policy_version=policy_version+1,updated_by='integration-test'
+		WHERE singleton_id=1`, fixturePolicyStart); err != nil {
+		t.Fatalf("set pre-ingestion eligibility policy: %v", err)
+	}
+	if _, err = pool.Exec(ctx, `ALTER TABLE invoice_eligibility_policy
+		ENABLE TRIGGER invoice_eligibility_policy_guard`); err != nil {
+		t.Fatalf("re-enable immutable policy guard in isolated fixture: %v", err)
 	}
 	seedSQL := `INSERT INTO source_instances(id,source_type,name) VALUES('10000000-0000-4000-8000-000000000001','sub2api','test'); INSERT INTO invoice_users(id,oidc_issuer,oidc_subject) VALUES('20000000-0000-4000-8000-000000000001','test','user'); INSERT INTO external_accounts(id,invoice_user_id,source_instance_id,external_user_id,binding_method,binding_status) VALUES('30000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','u1','test','verified')`
 	if _, err = pool.Exec(ctx, seedSQL); err != nil {
@@ -112,6 +133,19 @@ func TestSubmitTransactionIdempotencyAndConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var requestPolicyStart, currentPolicyStart time.Time
+	var requestPolicyVersion, currentPolicyVersion int64
+	if err = store.pool.QueryRow(ctx, `
+		SELECT ir.eligibility_policy_start_at,ir.eligibility_policy_version,
+			p.eligibility_start_at,p.policy_version
+		FROM invoice_requests ir CROSS JOIN invoice_eligibility_policy p
+		WHERE ir.id=$1`, a.ID).Scan(&requestPolicyStart, &requestPolicyVersion,
+		&currentPolicyStart, &currentPolicyVersion); err != nil {
+		t.Fatal(err)
+	}
+	if !requestPolicyStart.Equal(currentPolicyStart) || requestPolicyVersion != currentPolicyVersion {
+		t.Fatal("invoice request did not snapshot the immutable eligibility policy")
+	}
 	b, err := store.Submit(ctx, first)
 	if err != nil || a.ID != b.ID {
 		t.Fatalf("idempotency: ids %s %s err=%v", a.ID, b.ID, err)
@@ -148,6 +182,118 @@ func TestSubmitTransactionIdempotencyAndConcurrency(t *testing.T) {
 	}
 	if reserved != 100_000 {
 		t.Fatalf("reserved=%d", reserved)
+	}
+}
+
+func observeFixtureFundingCompletion(store *Store, ctx context.Context, lot domain.FundingLot,
+	completedAt, observedAt time.Time, revision string, sequence int64) (ObservationResult, error) {
+	lot.CompletedAt = completedAt
+	lot.ObservedAt = observedAt
+	lot.UpdatedAt = observedAt
+	lot.SourceRevision = revision
+	return store.ObserveFundingLot(ctx, SourceObservation{
+		Lot: lot, ExternalUserID: "u1", EventKind: "payment",
+		ExternalEventID: "completion-observation-" + revision[:8], SchemaVersion: "test",
+		SourceUpdatedAt: observedAt, SourceSequence: sequence,
+	}, AuditActor{Type: "source_connector", ID: lot.SourceInstanceID})
+}
+
+func TestFundingCompletionDriftPreservesOriginalAndInvalidatesPending(t *testing.T) {
+	store, ctx := integrationStore(t)
+	lot, err := store.GetFundingLot(ctx, "50000000-0000-4000-8000-000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalCompleted := lot.CompletedAt
+	observed := lot.ObservedAt.Add(time.Minute)
+	zeroRescan := lot
+	if _, err = observeFixtureFundingCompletion(store, ctx, zeroRescan, time.Time{}, observed,
+		strings.Repeat("a", 64), 1); err != nil {
+		t.Fatalf("zero completion rescan changed a settled payment: %v", err)
+	}
+	lot, err = store.GetFundingLot(ctx, lot.ID)
+	if err != nil || !lot.CompletedAt.Equal(originalCompleted) || lot.EligibilityStatus != "active" {
+		t.Fatalf("zero rescan lot=%+v err=%v", lot, err)
+	}
+	request, err := store.Submit(ctx, SubmitInput{
+		PrincipalID: "20000000-0000-4000-8000-000000000001", ProfileID: "40000000-0000-4000-8000-000000000001",
+		SourceInstanceID: lot.SourceInstanceID, ProfileSnapshotCiphertext: []byte("encrypted-snapshot"),
+		IdempotencyKey: "completion-drift-pending",
+		Allocations:    []AllocationInput{{FundingLotID: lot.ID, AmountMinor: 20_000}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policyStart time.Time
+	if err = store.pool.QueryRow(ctx, `SELECT eligibility_start_at FROM invoice_eligibility_policy
+		WHERE singleton_id=1`).Scan(&policyStart); err != nil {
+		t.Fatal(err)
+	}
+	_, err = observeFixtureFundingCompletion(store, ctx, lot, policyStart.Add(-time.Microsecond),
+		observed.Add(time.Minute), strings.Repeat("b", 64), 2)
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("cross-boundary completion drift error=%v", err)
+	}
+	lot, err = store.GetFundingLot(ctx, lot.ID)
+	if err != nil || !lot.CompletedAt.Equal(originalCompleted) || lot.EligibilityStatus != "frozen" || lot.AvailableMinor() != 0 {
+		t.Fatalf("drifted lot remained usable: lot=%+v err=%v", lot, err)
+	}
+	record, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false)
+	if err != nil || record.Request.Status != domain.StatusRejected {
+		t.Fatalf("pending request was not invalidated: request=%+v err=%v", record.Request, err)
+	}
+	var evidenceEvents int
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM source_events
+		WHERE source_instance_id=$1 AND external_event_id LIKE 'completion-observation-%'`,
+		lot.SourceInstanceID).Scan(&evidenceEvents); err != nil {
+		t.Fatal(err)
+	}
+	if evidenceEvents != 2 {
+		t.Fatalf("completion observations retained=%d want 2", evidenceEvents)
+	}
+}
+
+func TestFundingCompletionSameSideDriftMarksIssuedAttention(t *testing.T) {
+	store, ctx := integrationStore(t)
+	lot, err := store.GetFundingLot(ctx, "50000000-0000-4000-8000-000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := store.Submit(ctx, SubmitInput{
+		PrincipalID: "20000000-0000-4000-8000-000000000001", ProfileID: "40000000-0000-4000-8000-000000000001",
+		SourceInstanceID: lot.SourceInstanceID, ProfileSnapshotCiphertext: []byte("encrypted-snapshot"),
+		IdempotencyKey: "completion-drift-issued",
+		Allocations:    []AllocationInput{{FundingLotID: lot.ID, AmountMinor: 20_000}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminID := "90000000-0000-4000-8000-000000000001"
+	reviewed, err := store.ReviewRequest(ctx, adminID, request.ID, "approve", "", request.Version,
+		AuditActor{Type: "admin", ID: adminID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := store.ConfirmManualIssue(ctx, ConfirmIssueInput{
+		AdminID: adminID, RequestID: request.ID, ExpectedVersion: reviewed.Request.Version,
+		IssuerSettingRevision: 1, IssueSnapshotCiphertext: []byte("encrypted-issuer"),
+		Actor: AuditActor{Type: "admin", ID: adminID},
+	})
+	if err != nil || issued.Request.Status != domain.StatusIssuedAwaitingDocument {
+		t.Fatalf("issue result=%+v err=%v", issued.Request, err)
+	}
+	_, err = observeFixtureFundingCompletion(store, ctx, lot, lot.CompletedAt.Add(time.Minute),
+		lot.ObservedAt.Add(time.Minute), strings.Repeat("c", 64), 1)
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("same-side completion drift error=%v", err)
+	}
+	record, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false)
+	if err != nil || record.Request.Status != domain.StatusRefundAttention {
+		t.Fatalf("issued request did not enter attention: request=%+v err=%v", record.Request, err)
+	}
+	page, err := store.ListRefundCasesPage(ctx, RefundCasePageQuery{Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].RequestID != request.ID {
+		t.Fatalf("completion drift attention cases=%+v err=%v", page.Items, err)
 	}
 }
 
@@ -454,6 +600,44 @@ func TestNewAPIPaymentVerificationRequiresEvidenceAndAuditsOnlyHash(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err = store.pool.Exec(ctx, `
+		UPDATE invoice_requests SET eligibility_policy_version=eligibility_policy_version+1
+		WHERE id=$1`, request.ID); err == nil {
+		t.Fatal("database allowed immutable request policy snapshot mutation")
+	}
+	// Exercise the independent issue-time defense by simulating physical
+	// corruption in this disposable schema after proving normal SQL is blocked.
+	if _, err = store.pool.Exec(ctx, `ALTER TABLE invoice_requests
+		DISABLE TRIGGER invoice_requests_immutable_fields`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `UPDATE invoice_requests
+		SET eligibility_policy_version=eligibility_policy_version+1 WHERE id=$1`, request.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `ALTER TABLE invoice_requests
+		ENABLE TRIGGER invoice_requests_immutable_fields`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ConfirmManualIssue(ctx, ConfirmIssueInput{
+		AdminID: issuerAdmin, RequestID: request.ID, ExpectedVersion: begun.Request.Version,
+		IssuerSettingRevision: 1, IssueSnapshotCiphertext: []byte("encrypted-issuer"),
+		Actor: AuditActor{Type: "admin", ID: issuerAdmin},
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("policy snapshot drift was issuable: %v", err)
+	}
+	if _, err = store.pool.Exec(ctx, `ALTER TABLE invoice_requests
+		DISABLE TRIGGER invoice_requests_immutable_fields`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `UPDATE invoice_requests
+		SET eligibility_policy_version=eligibility_policy_version-1 WHERE id=$1`, request.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `ALTER TABLE invoice_requests
+		ENABLE TRIGGER invoice_requests_immutable_fields`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = store.ConfirmManualIssue(ctx, ConfirmIssueInput{
 		AdminID: issuerAdmin, RequestID: request.ID, ExpectedVersion: begun.Request.Version,
 		IssuerSettingRevision: 1, IssueSnapshotCiphertext: []byte("encrypted-issuer"),
@@ -686,12 +870,15 @@ func TestListHardCapsAndAdminKeysetPagination(t *testing.T) {
 		INSERT INTO invoice_requests(
 			id,request_no,invoice_user_id,source_instance_id,profile_id,
 			profile_snapshot_ciphertext,currency,issuer_code,service_item,
-			amount_minor,status,idempotency_key,version,submitted_at,updated_at)
+			amount_minor,status,idempotency_key,version,eligibility_policy_start_at,
+			eligibility_policy_version,submitted_at,updated_at)
 		SELECT md5('page-request-'||gs::text)::uuid,'PAGE-'||gs,
 			'20000000-0000-4000-8000-000000000001',
 			'10000000-0000-4000-8000-000000000001',
 			'40000000-0000-4000-8000-000000000001',decode('01','hex'),
 			'CNY','default','技术服务',20000,'pending_review','page-idem-'||gs,1,
+			(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),
+			(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),
 			now()-(gs||' milliseconds')::interval,now()-(gs||' milliseconds')::interval
 		FROM generate_series(1,205) gs;
 

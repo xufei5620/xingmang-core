@@ -355,6 +355,7 @@ SOURCE_MTLS_SERVER_NAME=invoice.example.invalid
 SOURCE_MTLS_RELOAD_ON_HANDSHAKE=true
 SOURCE_SIGNING_KEY_FILE=/run/secrets/source_signing_key
 SOURCE_SIGNING_KEY_ID=source-signing-2026-01
+ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00
 SOURCE_CUTOVER_MANIFEST_FILE=/cutover/manifest.enc
 SOURCE_CUTOVER_KEY_FILE=/run/secrets/sub2api_cutover_key
 # balances stream only:
@@ -590,6 +591,10 @@ At startup, production must reject:
 - disabled TLS verification;
 - `ADMIN_BOOTSTRAP_IP_ALLOWLIST` as a production authorization source;
 - an empty or world-open administrator IP allowlist;
+- a missing/invalid `ELIGIBILITY_START_AT`, any value other than
+  `2026-09-01T00:00:00+08:00` (the same instant as
+  `2026-08-31T16:00:00Z`), or any mismatch between that deployment value and
+  the immutable database policy row;
 - public document storage, stale ClamAV signatures, disabled malware scanning,
   an unavailable/wrong-version isolated qpdf scanner, unsafe/missing scanner
   capability, or a non-tmpfs quarantine;
@@ -606,6 +611,7 @@ settings endpoint is prohibited.
 | Delivery | sender display name, verified sender address, notification toggle | readable; test action available | DB metadata; sender changes require verification |
 | Write-only secret | QQ authorization code or Google App Password | empty input keeps current value; never echo | field-keyring ciphertext in dedicated secret row; MFA/IP rotate action |
 | Security policy | dynamic administrator CIDRs | dedicated security page; new list retains current IP | MFA, optimistic revision, atomic single-replica refresh |
+| Immutable financial policy | eligibility start, policy version, payment-and-usage rule | read-only in user/admin UI | fixed by migration; UPDATE/DELETE/TRUNCATE rejected; a change requires a new audited migration and ledger review |
 | Deployment locked | break-glass CIDRs, trusted proxies, field keys, cookie security, mTLS files, production mode | status only or completely hidden | operator-managed file/environment; no settings API write path |
 | Issuer snapshot | administrator-only issuing entity name and fixed invoice item | update current settings | settings revision plus immutable encrypted snapshot when issuance is confirmed |
 
@@ -626,9 +632,20 @@ PUT  /api/v1/admin/settings/admin-access
 POST /api/v1/admin/settings/smtp/test
 ```
 
-The user policy response contains only `minimum_request_minor` and the fixed
-`service_item`. It never contains issuer names, issuer revision identifiers,
-SMTP metadata, CIDRs or deployment configuration.
+The user policy response contains `minimum_request_minor`, the fixed
+`service_item`, `eligibility_start_at`, `eligibility_policy_version`,
+`eligibility_timezone=Asia/Shanghai`, and
+`eligibility_rule=payment_and_usage_at_or_after`. These are read-only public
+business rules, not a settings write surface. It never contains issuer names,
+issuer revision identifiers, SMTP metadata, CIDRs or secrets.
+
+V1 eligibility is inclusive at the exact boundary: both the real payment
+completion time and the authoritative wallet usage occurrence time must be
+greater than or equal to `2026-09-01 00:00:00 Asia/Shanghai`. Pre-policy cash
+remains in a noninvoiceable pool and is consumed before post-policy cash.
+Subscription purchases remain auditable but noninvoiceable because the current
+signed source contract cannot prove an unambiguous subscription-purchase to
+actual-usage link.
 
 ## 10. Issuing entity and historical snapshots
 

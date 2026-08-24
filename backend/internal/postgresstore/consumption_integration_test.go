@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +107,8 @@ func markV3CycleProcessed(t *testing.T, store *Store, ctx context.Context, sourc
 }
 
 func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testing.T) {
-	store, ctx := integrationStore(t)
+	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
+	store, ctx := integrationStoreWithPolicyStart(t, fixtureNow.Add(-115*time.Minute))
 	sourceID := "10000000-0000-4000-8000-000000000010"
 	userID := "20000000-0000-4000-8000-000000000010"
 	accountID := "30000000-0000-4000-8000-000000000010"
@@ -135,7 +137,7 @@ func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testin
 		t.Fatal(err)
 	}
 
-	cutover := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	cutover := fixtureNow.Add(-2 * time.Hour)
 	chain := newV3TestChain()
 	manifestEvent := SourceBatchEvent{EventID: "82000000-0000-4000-8000-000000000001",
 		EntityType: "cutover_manifest", Operation: "upsert", PayloadHash: strings.Repeat("1", 64),
@@ -378,6 +380,211 @@ func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testin
 	}
 }
 
+func TestEligibilityPolicyKeepsPreStartFundingNonInvoiceableAndIncludesExactBoundary(t *testing.T) {
+	start := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
+	store, ctx := integrationStoreWithPolicyStart(t, start)
+	sourceID := "11000000-0000-4000-8000-000000000011"
+	userID := "21000000-0000-4000-8000-000000000011"
+	accountID := "31000000-0000-4000-8000-000000000011"
+	preLotID := "51000000-0000-4000-8000-000000000011"
+	postLotID := "51000000-0000-4000-8000-000000000012"
+	preUsageID := "61000000-0000-4000-8000-000000000011"
+	postUsageID := "61000000-0000-4000-8000-000000000012"
+	manifestHash := strings.Repeat("a", 64)
+	configHash := strings.Repeat("b", 64)
+	revision := strings.Repeat("c", 64)
+	cutover := start.Add(-time.Hour)
+	through := start.Add(10 * time.Minute)
+	_, err := store.pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','policy-boundary','policy-test')`, sourceID)
+	if err == nil {
+		_, err = store.pool.Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+			VALUES($1,'test','policy-user')`, userID)
+	}
+	if err == nil {
+		_, err = store.pool.Exec(ctx, `INSERT INTO external_accounts(
+				id,invoice_user_id,source_instance_id,external_user_id,binding_method,binding_status)
+			VALUES($1,$2,$3,'policy-user','test','verified')`, accountID, userID, sourceID)
+	}
+	if err == nil {
+		_, err = store.pool.Exec(ctx, `INSERT INTO source_cutover_manifests(
+			source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+			projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+			credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+			baseline_row_count,signing_key_id)
+		VALUES($1,$2,$3,$3,'policy-test','sub2api-economic-v3',$4,'SUB2_BALANCE_1E8',
+			'p','u','c','b',$2,$2,1,'policy-key')`,
+			sourceID, manifestHash, cutover, configHash)
+	}
+	if err == nil {
+		_, err = store.pool.Exec(ctx, `INSERT INTO source_account_eligibility_state(
+			external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
+			cutover_manifest_hash,finalized_through,finalization_delay_seconds)
+		VALUES($1,$2,$3,'SUB2_BALANCE_1E8',0,$4,$5,900)`,
+			accountID, sourceID, cutover, manifestHash, cutover)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.pool.Exec(ctx, `INSERT INTO funding_lots(
+			id,invoice_user_id,external_account_id,source_instance_id,external_order_id,currency,
+			original_minor,current_cap_minor,verified_cash_minor,consumed_cash_minor,
+			eligibility_kind,eligibility_cutover_at,verification_state,source_status,
+			source_revision_hash,completed_at,observed_at)
+		VALUES
+			($1,$2,$3,$4,'pre-policy','CNY',10000,10000,0,0,'LEGACY_NON_INVOICEABLE',NULL,
+			 'verified','COMPLETED',$6,$7,$9),
+			($8,$2,$3,$4,'at-policy','CNY',10000,10000,10000,0,'WALLET_CASH',$5,
+			 'verified','COMPLETED',$6,$5,$9)`,
+		preLotID, userID, accountID, sourceID, start, revision,
+		start.Add(-10*time.Minute), postLotID, through)
+	if err == nil {
+		_, err = store.pool.Exec(ctx, `INSERT INTO funding_lot_consumption_state(funding_lot_id,cash_service_units)
+			VALUES($1,100)`, postLotID)
+	}
+	if err == nil {
+		_, err = store.pool.Exec(ctx, `INSERT INTO source_usage_events(
+			id,source_instance_id,external_account_id,external_event_id,external_usage_id,
+			event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
+			billing_scope,invoice_eligible,source_sequence,source_cursor,stream_watermark_at,
+			source_revision_hash,observed_at)
+		VALUES
+			($1,$2,$3,'pre-usage','pre-usage',$4,50,'SUB2_BALANCE_1E8',$5,$6,
+			 'wallet',FALSE,1,'pre-usage',$7,$8,$7),
+			($9,$2,$3,'post-usage','post-usage',$10,120,'SUB2_BALANCE_1E8',$5,$6,
+			 'wallet',TRUE,2,'post-usage',$7,$8,$7)`,
+			preUsageID, sourceID, accountID, start.Add(-5*time.Minute), manifestHash,
+			configHash, through, revision, postUsageID, start.Add(time.Minute))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	classificationTx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := getEligibilityAccountTx(ctx, classificationTx, accountID, true)
+	if err == nil {
+		err = applyPrePolicyWalletFundingTx(ctx, classificationTx, preLotID, accountID, account,
+			SourceObservation{
+				Lot: domain.FundingLot{SourceInstanceID: sourceID, SourceRevision: revision,
+					CompletedAt: start.Add(-10 * time.Minute), ObservedAt: through},
+				ExternalEventID: "pre-policy-payment", WalletUnitCode: "SUB2_BALANCE_1E8",
+				CutoverManifestHash: manifestHash, ConfigurationHash: configHash,
+				SourceSequence: 1, SourceCursor: "pre-policy-payment", StreamWatermarkAt: through,
+			}, big.NewInt(100), nil, AuditActor{Type: "source_connector", ID: sourceID})
+	}
+	if err != nil {
+		_ = classificationTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err = classificationTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	if err = reprojectEligibilityTx(ctx, tx, accountID, through,
+		AuditActor{Type: "system", ID: "policy-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	postLot, err := store.GetFundingLot(ctx, postLotID)
+	if err != nil || postLot.ConsumedCashMinor != 7_000 || postLot.AvailableMinor() != 7_000 {
+		t.Fatalf("post-policy cash projection=%+v err=%v", postLot, err)
+	}
+	var preCashAllocations, postCashAllocations int
+	if err = store.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE usage_event_id=$1 AND funding_lot_id IS NOT NULL),
+			count(*) FILTER (WHERE usage_event_id=$2 AND funding_lot_id IS NOT NULL)
+		FROM consumption_allocations WHERE usage_event_id IN ($1,$2)`, preUsageID, postUsageID).
+		Scan(&preCashAllocations, &postCashAllocations); err != nil {
+		t.Fatal(err)
+	}
+	if preCashAllocations != 0 || postCashAllocations != 1 {
+		t.Fatalf("cash allocation crossed policy boundary: pre=%d post=%d", preCashAllocations, postCashAllocations)
+	}
+	if _, err = store.pool.Exec(ctx, `INSERT INTO consumption_allocations(
+		id,usage_event_id,funding_lot_id,allocation_order,service_units,cash_minor_delta,projection_version)
+		VALUES('71000000-0000-4000-8000-000000000011',$1,$2,1,1,100,99)`, preUsageID, postLotID); err == nil {
+		t.Fatal("pre-policy usage was accepted as cash consumption evidence")
+	}
+	otherUserID := "21000000-0000-4000-8000-000000000012"
+	otherAccountID := "31000000-0000-4000-8000-000000000012"
+	otherUsageID := "61000000-0000-4000-8000-000000000013"
+	if _, err = store.pool.Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+		VALUES($1,'test','other-policy-user')`, otherUserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+		VALUES($1,$2,$3,'other-policy-user',$4,'test','verified')`, otherAccountID, otherUserID,
+		sourceID, "h1:"+strings.Repeat("e", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `INSERT INTO source_account_eligibility_state(
+		external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
+		cutover_manifest_hash,finalized_through,finalization_delay_seconds)
+		VALUES($1,$2,$3,'SUB2_BALANCE_1E8',0,$4,$3,900)`,
+		otherAccountID, sourceID, cutover, manifestHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `INSERT INTO source_usage_events(
+		id,source_instance_id,external_account_id,external_event_id,external_usage_id,
+		event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
+		billing_scope,invoice_eligible,source_sequence,source_cursor,stream_watermark_at,
+		source_revision_hash,observed_at)
+		VALUES($1,$2,$3,'other-usage','other-usage',$4,1,'SUB2_BALANCE_1E8',$5,$6,
+		'wallet',TRUE,1,'other-usage',$7,$8,$7)`, otherUsageID, sourceID, otherAccountID,
+		start.Add(time.Minute), manifestHash, configHash, through, revision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.pool.Exec(ctx, `INSERT INTO consumption_allocations(
+		id,usage_event_id,funding_lot_id,allocation_order,service_units,cash_minor_delta,projection_version)
+		VALUES('71000000-0000-4000-8000-000000000012',$1,$2,1,1,100,99)`, otherUsageID, postLotID); err == nil {
+		t.Fatal("cross-account usage was accepted as cash consumption evidence")
+	}
+	tamperTx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tamperTx.Exec(ctx, `UPDATE funding_lot_consumption_state SET
+		consumed_service_units=71,cumulative_cash_numerator=710000,
+		rounded_consumed_cash_minor=7100,rounding_remainder_numerator=0
+		WHERE funding_lot_id=$1`, postLotID); err == nil {
+		_, err = tamperTx.Exec(ctx, `UPDATE funding_lots SET consumed_cash_minor=7100 WHERE id=$1`, postLotID)
+	}
+	if err != nil {
+		_ = tamperTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err = tamperTx.Commit(ctx); err == nil {
+		t.Fatal("wallet consumed cash was inflated without matching usage allocations")
+	}
+	exactUsageID := "61000000-0000-4000-8000-000000000014"
+	if _, err = store.pool.Exec(ctx, `INSERT INTO source_usage_events(
+		id,source_instance_id,external_account_id,external_event_id,external_usage_id,
+		event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
+		billing_scope,invoice_eligible,source_sequence,source_cursor,stream_watermark_at,
+		source_revision_hash,observed_at)
+		VALUES($1,$2,$3,'exact-policy-usage','exact-policy-usage',$4,1,'SUB2_BALANCE_1E8',$5,$6,
+		'wallet',TRUE,3,'exact-policy-usage',$7,$8,$7)`, exactUsageID, sourceID, accountID,
+		start, manifestHash, configHash, through, revision); err != nil {
+		t.Fatalf("usage exactly at eligibility boundary was rejected: %v", err)
+	}
+	if _, err = store.pool.Exec(ctx, `
+		UPDATE invoice_eligibility_policy
+		SET eligibility_start_at=eligibility_start_at-interval '1 second',
+			policy_version=policy_version+1,updated_by='forbidden-test'
+		WHERE singleton_id=1`); err == nil {
+		t.Fatal("financial ingestion did not make eligibility policy immutable")
+	}
+}
+
 func TestSubmitRejectsLegacyNonCashAndRefundFrozenLotsAtSQLBoundary(t *testing.T) {
 	store, ctx := integrationStore(t)
 	if _, err := store.pool.Exec(ctx, `UPDATE source_account_eligibility_state
@@ -400,10 +607,10 @@ func TestSubmitRejectsLegacyNonCashAndRefundFrozenLotsAtSQLBoundary(t *testing.T
 			id,invoice_user_id,external_account_id,source_instance_id,external_order_id,currency,
 			original_minor,current_cap_minor,verified_cash_minor,consumed_cash_minor,
 			eligibility_kind,eligibility_cutover_at,refund_frozen,verification_state,
-			source_status,source_revision_hash,observed_at)
+			source_status,source_revision_hash,completed_at,observed_at)
 		VALUES($1,'20000000-0000-4000-8000-000000000001','30000000-0000-4000-8000-000000000001',
 			'10000000-0000-4000-8000-000000000001',$2,'CNY',50000,50000,$3,$4,$5,$6,$7,
-			'verified','COMPLETED','attack-fixture',now())`
+			'verified','COMPLETED','attack-fixture',now(),now())`
 	fixtures := []struct {
 		id, order, kind    string
 		verified, consumed int64
@@ -726,10 +933,10 @@ func TestUnknownPositiveCheckpointIsConservativelyPlacedBeforeIntervalUsage(t *t
 		INSERT INTO source_usage_events(
 			id,source_instance_id,external_account_id,external_event_id,external_usage_id,
 			event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
-			billing_scope,source_sequence,source_cursor,stream_watermark_at,
+			billing_scope,invoice_eligible,source_sequence,source_cursor,stream_watermark_at,
 			source_revision_hash,observed_at)
 		VALUES('89000000-0000-4000-8000-000000000003',$1,$2,'89000000-0000-4000-8000-000000000003',
-			'fixture-usage-50',$3,50,$4,$5,$6,'wallet',1,'fixture-usage',$7,$8,$7)`,
+			'fixture-usage-50',$3,50,$4,$5,$6,'wallet',TRUE,1,'fixture-usage',$7,$8,$7)`,
 		sourceID, accountID, usageAt, unitCode, manifestHash, configHash, finalized,
 		strings.Repeat("2", 64)); err != nil {
 		t.Fatal(err)
@@ -762,7 +969,7 @@ func TestUnknownPositiveCheckpointIsConservativelyPlacedBeforeIntervalUsage(t *t
 	}
 }
 
-func TestSubscriptionCashIsImmediateAfterVerificationAndRefundPermanentlyFreezes(t *testing.T) {
+func TestSubscriptionCashRequiresActualUsageEvidenceAndRefundPermanentlyFreezes(t *testing.T) {
 	store, ctx := integrationStore(t)
 	profileID := "40000000-0000-4000-8000-000000000001"
 	userID := "20000000-0000-4000-8000-000000000001"
@@ -802,15 +1009,15 @@ func TestSubscriptionCashIsImmediateAfterVerificationAndRefundPermanentlyFreezes
 			CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceCursor: "subscription-sub2",
 			BatchID: cycle.batchID, ScanCycleID: cycle.cycleID, StreamWatermarkAt: completed,
 		}, AuditActor{Type: "source_connector", ID: sourceID})
-		if err != nil || observed.Lot.ConsumedCashMinor != 50_000 || observed.Lot.AvailableMinor() != 50_000 {
-			t.Fatalf("verified subscription not immediately eligible: lot=%+v err=%v", observed.Lot, err)
+		if err != nil || observed.Lot.ConsumedCashMinor != 0 || observed.Lot.AvailableMinor() != 0 {
+			t.Fatalf("subscription payment minted eligibility without usage: lot=%+v err=%v", observed.Lot, err)
 		}
-		request, err := store.Submit(ctx, SubmitInput{PrincipalID: userID, ProfileID: profileID,
+		_, err = store.Submit(ctx, SubmitInput{PrincipalID: userID, ProfileID: profileID,
 			SourceInstanceID: sourceID, IdempotencyKey: "subscription-sub2-submit",
 			ProfileSnapshotCiphertext: []byte("encrypted"),
 			Allocations:               []AllocationInput{{FundingLotID: observed.Lot.ID, AmountMinor: 20_000}}})
-		if err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, domain.ErrUnverifiedPayment) {
+			t.Fatalf("subscription without usage was selectable: %v", err)
 		}
 		markV3CycleProcessed(t, store, ctx, sourceID, "payments", cycle)
 		refunded := observed.Lot
@@ -824,7 +1031,7 @@ func TestSubscriptionCashIsImmediateAfterVerificationAndRefundPermanentlyFreezes
 			ExternalEventID: "subscription-sub2-refund", SchemaVersion: "test",
 		}, AuditActor{Type: "source_connector", ID: sourceID})
 		if err != nil || !refundResult.Lot.RefundFrozen || refundResult.Lot.AvailableMinor() != 0 ||
-			len(refundResult.InvalidatedRequestIDs) != 1 || refundResult.InvalidatedRequestIDs[0] != request.ID {
+			len(refundResult.InvalidatedRequestIDs) != 0 {
 			t.Fatalf("subscription refund did not permanently freeze lot: result=%+v err=%v", refundResult, err)
 		}
 	})
@@ -853,11 +1060,19 @@ func TestSubscriptionCashIsImmediateAfterVerificationAndRefundPermanentlyFreezes
 		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err = tx.Exec(ctx, `ALTER TABLE funding_lots
+			DISABLE TRIGGER funding_lots_invoice_policy_guard`); err != nil {
+			t.Fatal(err)
+		}
 		if _, err = tx.Exec(ctx, `DELETE FROM funding_lot_consumption_state WHERE funding_lot_id=$1`, candidate.ID); err != nil {
 			t.Fatal(err)
 		}
 		if _, err = tx.Exec(ctx, `UPDATE funding_lots SET eligibility_kind='SUBSCRIPTION_CASH'
 			WHERE id=$1`, candidate.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = tx.Exec(ctx, `ALTER TABLE funding_lots
+			ENABLE TRIGGER funding_lots_invoice_policy_guard`); err != nil {
 			t.Fatal(err)
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -876,19 +1091,23 @@ func TestSubscriptionCashIsImmediateAfterVerificationAndRefundPermanentlyFreezes
 			t.Fatalf("first reviewer minted subscription cash: lot=%+v err=%v", firstReview, err)
 		}
 		approved, err := review("90000000-0000-4000-8000-000000000092")
-		if err != nil || approved.Verification != domain.VerificationVerified || approved.ConsumedCashMinor != 30_000 {
-			t.Fatalf("second reviewer did not activate subscription: lot=%+v err=%v", approved, err)
+		if err != nil || approved.Verification != domain.VerificationVerified || approved.ConsumedCashMinor != 0 ||
+			approved.AvailableMinor() != 0 {
+			t.Fatalf("second reviewer minted eligibility without usage: lot=%+v err=%v", approved, err)
 		}
 		if _, err = store.Submit(ctx, SubmitInput{PrincipalID: userID, ProfileID: profileID,
 			SourceInstanceID: sourceID, IdempotencyKey: "subscription-newapi-submit",
 			ProfileSnapshotCiphertext: []byte("encrypted"),
-			Allocations:               []AllocationInput{{FundingLotID: candidate.ID, AmountMinor: 20_000}}}); err != nil {
-			t.Fatal(err)
+			Allocations:               []AllocationInput{{FundingLotID: candidate.ID, AmountMinor: 20_000}}}); !errors.Is(err, domain.ErrUnverifiedPayment) {
+			t.Fatalf("reviewed subscription without usage was selectable: %v", err)
+		}
+		if _, err = store.pool.Exec(ctx, `UPDATE funding_lots SET consumed_cash_minor=1 WHERE id=$1`, candidate.ID); err == nil {
+			t.Fatal("database allowed subscription consumption without authoritative usage evidence")
 		}
 	})
 }
 
-func TestPostCutoverNewAccountBootstrapsWalletConservativelyButKeepsSubscriptionException(t *testing.T) {
+func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWithoutUsage(t *testing.T) {
 	store, ctx := integrationStore(t)
 	sourceID := "10000000-0000-4000-8000-000000000001"
 	userID := "20000000-0000-4000-8000-000000000077"
@@ -973,7 +1192,7 @@ func TestPostCutoverNewAccountBootstrapsWalletConservativelyButKeepsSubscription
 	markV3CycleProcessed(t, store, ctx, sourceID, "balances", baselineCycle)
 	var bootstrapKind string
 	if err := store.pool.QueryRow(ctx, `SELECT bootstrap_kind FROM source_account_eligibility_state
-		WHERE external_account_id=$1`, accountID).Scan(&bootstrapKind); err != nil || bootstrapKind != "POST_CUTOVER_CONSERVATIVE" {
+		WHERE external_account_id=$1`, accountID).Scan(&bootstrapKind); err != nil || bootstrapKind != "POST_CUTOVER_REPLAY" {
 		t.Fatalf("new account bootstrap kind=%q err=%v", bootstrapKind, err)
 	}
 
@@ -1001,8 +1220,8 @@ func TestPostCutoverNewAccountBootstrapsWalletConservativelyButKeepsSubscription
 		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceCursor: "new-subscription:77",
 		BatchID: preCycle.batchID, ScanCycleID: preCycle.cycleID, StreamWatermarkAt: accountCutover.Add(time.Minute),
 	}, AuditActor{Type: "source_connector", ID: sourceID})
-	if err != nil || subscription.Lot.ConsumedCashMinor != 30_000 {
-		t.Fatalf("post-global subscription was lost at wallet bootstrap: lot=%+v err=%v", subscription.Lot, err)
+	if err != nil || subscription.Lot.ConsumedCashMinor != 0 || subscription.Lot.AvailableMinor() != 0 {
+		t.Fatalf("post-global subscription minted eligibility without usage: lot=%+v err=%v", subscription.Lot, err)
 	}
 	preWallet, err := store.ObserveFundingLot(ctx, SourceObservation{
 		Lot: domain.FundingLot{PrincipalID: userID, SourceInstanceID: sourceID, SourceType: domain.SourceSub2API,
@@ -1015,8 +1234,9 @@ func TestPostCutoverNewAccountBootstrapsWalletConservativelyButKeepsSubscription
 		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceCursor: "new-pre-wallet:77",
 		BatchID: preCycle.batchID, ScanCycleID: preCycle.cycleID, StreamWatermarkAt: accountCutover.Add(time.Minute),
 	}, AuditActor{Type: "source_connector", ID: sourceID})
-	if err != nil || preWallet.Lot.EligibilityKind != domain.EligibilityLegacyNonInvoiceable || preWallet.Lot.AvailableMinor() != 0 {
-		t.Fatalf("pre-bootstrap wallet payment became eligible: lot=%+v err=%v", preWallet.Lot, err)
+	if err != nil || preWallet.Lot.EligibilityKind != domain.EligibilityWalletCash ||
+		preWallet.Lot.ConsumedCashMinor != 0 || preWallet.Lot.AvailableMinor() != 0 {
+		t.Fatalf("post-policy pre-binding wallet payment was not retained for replay: lot=%+v err=%v", preWallet.Lot, err)
 	}
 	preGlobalSubscription, err := store.ObserveFundingLot(ctx, SourceObservation{
 		Lot: domain.FundingLot{PrincipalID: userID, SourceInstanceID: sourceID, SourceType: domain.SourceSub2API,
@@ -1037,8 +1257,8 @@ func TestPostCutoverNewAccountBootstrapsWalletConservativelyButKeepsSubscription
 	if _, err = store.Submit(ctx, SubmitInput{PrincipalID: userID, ProfileID: profileID,
 		SourceInstanceID: sourceID, IdempotencyKey: "new-account-subscription",
 		ProfileSnapshotCiphertext: []byte("encrypted"),
-		Allocations:               []AllocationInput{{FundingLotID: subscription.Lot.ID, AmountMinor: 20_000}}}); err != nil {
-		t.Fatal(err)
+		Allocations:               []AllocationInput{{FundingLotID: subscription.Lot.ID, AmountMinor: 20_000}}}); !errors.Is(err, domain.ErrUnverifiedPayment) {
+		t.Fatalf("subscription without usage was selectable after bootstrap: %v", err)
 	}
 
 	finalCeiling := accountCutover.Add(30 * time.Minute)
@@ -1090,5 +1310,9 @@ func TestPostCutoverNewAccountBootstrapsWalletConservativelyButKeepsSubscription
 	postPaymentLot, err := store.GetFundingLot(ctx, postPayment.Lot.ID)
 	if err != nil || postPaymentLot.ConsumedCashMinor != 50_000 {
 		t.Fatalf("post-bootstrap wallet usage did not become eligible: lot=%+v err=%v", postPaymentLot, err)
+	}
+	preWalletLot, err := store.GetFundingLot(ctx, preWallet.Lot.ID)
+	if err != nil || preWalletLot.ConsumedCashMinor != 50_000 {
+		t.Fatalf("pre-binding post-policy payment was not consumed first: lot=%+v err=%v", preWalletLot, err)
 	}
 }

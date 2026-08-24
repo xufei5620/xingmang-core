@@ -5,7 +5,9 @@ import type {
   EligibilityFreezeFilters,
   EligibilityFreezeReason,
   FundingOrder,
+  InvoicePolicy,
   InvoiceProfile,
+  InvoiceSystemSettings,
   InvoiceDeliveryState,
   InvoiceRequest,
   InvoiceStatus,
@@ -147,7 +149,7 @@ type BackendRefundCase = {
   resolved_at?: string;
 };
 
-type BackendFundingLot = {
+export type BackendFundingLot = {
   id: string;
   source: "sub2api" | "newapi";
   source_instance_id: string;
@@ -170,7 +172,10 @@ type BackendFundingLot = {
     | "SOURCE_REFUND"
     | "LEDGER_SYNCING"
     | "LEDGER_FROZEN"
-    | "SOURCE_NOT_READY";
+    | "SOURCE_NOT_READY"
+    | "BEFORE_ELIGIBILITY_START"
+    | "NO_POST_START_CONSUMPTION"
+    | "SUBSCRIPTION_USAGE_UNSUPPORTED";
   verification: "pending" | "verified" | "frozen";
   refund_frozen: boolean;
 };
@@ -231,12 +236,16 @@ type BackendInvoiceRequest = {
   payment_verification?: "not_required" | "pending" | "passed" | "failed";
 };
 
-type BackendSystemSettings = {
+export type BackendSystemSettings = {
   revision: number;
   issuer_configured: boolean;
   issuer_name: string;
   service_item: "技术服务";
   minimum_request_minor: number;
+  eligibility_start_at: string;
+  eligibility_policy_version: number;
+  eligibility_timezone: "Asia/Shanghai";
+  eligibility_rule: "payment_and_usage_at_or_after";
   smtp: {
     from_address: string;
     from_name: string;
@@ -251,13 +260,18 @@ type BackendSystemSettings = {
   };
 };
 
-type BackendInvoicePolicy = {
+export type BackendInvoicePolicy = {
   minimum_request_minor: number;
   service_item: "技术服务";
+  eligibility_start_at: string;
+  eligibility_policy_version: number;
+  eligibility_timezone: "Asia/Shanghai";
+  eligibility_rule: "payment_and_usage_at_or_after";
 };
 
 const baseUrl = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 const requestTimeoutMs = 15_000;
+export const requiredEligibilityStartAt = "2026-08-31T16:00:00Z";
 let sessionCSRFToken = "";
 const documentUploadCheckpoints = new Map<string, number>();
 
@@ -736,7 +750,7 @@ function availableMinor(lot: BackendFundingLot) {
   return lot.available_minor;
 }
 
-function mapLot(lot: BackendFundingLot): FundingOrder {
+export function mapLot(lot: BackendFundingLot): FundingOrder {
   if (
     ![
       "active",
@@ -753,6 +767,9 @@ function mapLot(lot: BackendFundingLot): FundingOrder {
         "LEDGER_SYNCING",
         "LEDGER_FROZEN",
         "SOURCE_NOT_READY",
+        "BEFORE_ELIGIBILITY_START",
+        "NO_POST_START_CONSUMPTION",
+        "SUBSCRIPTION_USAGE_UNSUPPORTED",
       ].includes(lot.reason_code)) ||
     (lot.eligibility_status === "source_unavailable" &&
       lot.reason_code !== "SOURCE_NOT_READY")
@@ -782,9 +799,76 @@ function mapLot(lot: BackendFundingLot): FundingOrder {
     refundFrozen: lot.refund_frozen,
     paymentMethod: "支付凭证已核验",
     description:
-      lot.eligibility_kind === "subscription"
+      lot.reason_code === "BEFORE_ELIGIBILITY_START"
+        ? "开票生效日前充值（不可开票）"
+        : lot.reason_code === "SUBSCRIPTION_USAGE_UNSUPPORTED"
+        ? "订阅消费暂缺可核验关联证据（不可开票）"
+        : lot.reason_code === "NO_POST_START_CONSUMPTION"
+        ? "尚无开票生效日后的真实消费（暂不可开票）"
+        : lot.eligibility_kind === "subscription"
         ? "订阅套餐支付"
         : "钱包充值（按已消费现金开票）",
+  };
+}
+
+export function mapInvoicePolicy(policy: BackendInvoicePolicy): InvoicePolicy {
+  if (
+    policy.eligibility_start_at !== requiredEligibilityStartAt ||
+    !Number.isSafeInteger(policy.eligibility_policy_version) ||
+    policy.eligibility_policy_version !== 1 ||
+    policy.eligibility_timezone !== "Asia/Shanghai" ||
+    policy.eligibility_rule !== "payment_and_usage_at_or_after"
+  ) {
+    throw new InvoiceApiError("开票生效时间策略无效，已停止提交。", {
+      code: "INVALID_ELIGIBILITY_POLICY",
+    });
+  }
+  return {
+    minimumRequestMinor: policy.minimum_request_minor,
+    serviceItem: policy.service_item,
+    eligibilityStartAt: policy.eligibility_start_at,
+    eligibilityPolicyVersion: policy.eligibility_policy_version,
+    eligibilityTimezone: policy.eligibility_timezone,
+    eligibilityRule: policy.eligibility_rule,
+  };
+}
+
+export function mapAdminSettings(
+  settings: BackendSystemSettings,
+): InvoiceSystemSettings {
+  if (
+    settings.eligibility_start_at !== requiredEligibilityStartAt ||
+    !Number.isSafeInteger(settings.eligibility_policy_version) ||
+    settings.eligibility_policy_version !== 1 ||
+    settings.eligibility_timezone !== "Asia/Shanghai" ||
+    settings.eligibility_rule !== "payment_and_usage_at_or_after"
+  ) {
+    throw new InvoiceApiError("系统开票生效策略无效。", {
+      code: "INVALID_ELIGIBILITY_POLICY",
+    });
+  }
+  return {
+    revision: settings.revision,
+    issuerConfigured: settings.issuer_configured,
+    issuerName: settings.issuer_name,
+    serviceItem: settings.service_item,
+    minimumRequestMinor: settings.minimum_request_minor,
+    eligibilityStartAt: settings.eligibility_start_at,
+    eligibilityPolicyVersion: settings.eligibility_policy_version,
+    eligibilityTimezone: settings.eligibility_timezone,
+    eligibilityRule: settings.eligibility_rule,
+    smtp: {
+      fromAddress: settings.smtp.from_address,
+      fromName: settings.smtp.from_name,
+      host: settings.smtp.host,
+      port: settings.smtp.port,
+      startTLS: settings.smtp.starttls,
+      credentialConfigured: settings.smtp.credential_configured,
+    },
+    adminAccess: {
+      cidrs: settings.admin_access.cidrs,
+      currentIP: settings.admin_access.current_ip,
+    },
   };
 }
 
@@ -1407,10 +1491,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
     const policy = await requestJSON<BackendInvoicePolicy>(
       "/api/v1/user/invoice-policy",
     );
-    return {
-      minimumRequestMinor: policy.minimum_request_minor,
-      serviceItem: policy.service_item,
-    };
+    return mapInvoicePolicy(policy);
   },
 
   async getProfiles() {
@@ -1935,25 +2016,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       "/api/v1/admin/settings",
       { role: "admin" },
     );
-    return {
-      revision: settings.revision,
-      issuerConfigured: settings.issuer_configured,
-      issuerName: settings.issuer_name,
-      serviceItem: settings.service_item,
-      minimumRequestMinor: settings.minimum_request_minor,
-      smtp: {
-        fromAddress: settings.smtp.from_address,
-        fromName: settings.smtp.from_name,
-        host: settings.smtp.host,
-        port: settings.smtp.port,
-        startTLS: settings.smtp.starttls,
-        credentialConfigured: settings.smtp.credential_configured,
-      },
-      adminAccess: {
-        cidrs: settings.admin_access.cidrs,
-        currentIP: settings.admin_access.current_ip,
-      },
-    };
+    return mapAdminSettings(settings);
   },
 
   async saveInvoiceRules(input) {

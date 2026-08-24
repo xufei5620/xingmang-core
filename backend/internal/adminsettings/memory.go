@@ -16,6 +16,12 @@ type MemoryRepository struct {
 }
 
 func NewMemoryRepository(initial Settings) *MemoryRepository {
+	if initial.EligibilityStartAt.IsZero() {
+		initial.EligibilityStartAt = RequiredEligibilityStartAt
+	}
+	if initial.EligibilityPolicyVersion == 0 {
+		initial.EligibilityPolicyVersion = 1
+	}
 	return &MemoryRepository{settings: initial, configured: initial.Revision > 0}
 }
 func (r *MemoryRepository) Get(context.Context) (Settings, error) {
@@ -45,7 +51,11 @@ func (r *MemoryRepository) Update(_ context.Context, in UpdateInput, expected in
 		revision = r.settings.Revision + 1
 		created = r.settings.CreatedAt
 	}
-	r.settings = Settings{IssuerName: in.IssuerName, ServiceItem: FixedServiceItem, MinimumRequestMinor: in.MinimumRequestMinor, SMTPHost: in.SMTPHost, SMTPPort: in.SMTPPort, SMTPFrom: in.SMTPFrom, SMTPFromName: in.SMTPFromName, SMTPStartTLS: in.SMTPStartTLS, SMTPSecretConfigured: len(r.secret.Ciphertext) > 0, AdminCIDRs: append([]string(nil), in.AdminCIDRs...), Revision: revision, UpdatedBy: actor.ID, CreatedAt: created, UpdatedAt: now}
+	policyVersion := r.settings.EligibilityPolicyVersion
+	if policyVersion == 0 {
+		policyVersion = 1
+	}
+	r.settings = Settings{IssuerName: in.IssuerName, ServiceItem: FixedServiceItem, MinimumRequestMinor: in.MinimumRequestMinor, EligibilityStartAt: in.EligibilityStartAt, EligibilityPolicyVersion: policyVersion, SMTPHost: in.SMTPHost, SMTPPort: in.SMTPPort, SMTPFrom: in.SMTPFrom, SMTPFromName: in.SMTPFromName, SMTPStartTLS: in.SMTPStartTLS, SMTPSecretConfigured: len(r.secret.Ciphertext) > 0, AdminCIDRs: append([]string(nil), in.AdminCIDRs...), Revision: revision, UpdatedBy: actor.ID, CreatedAt: created, UpdatedAt: now}
 	r.configured = true
 	return r.settings, nil
 }

@@ -38,7 +38,10 @@ export interface FundingOrder {
     | "SOURCE_REFUND"
     | "LEDGER_SYNCING"
     | "LEDGER_FROZEN"
-    | "SOURCE_NOT_READY";
+    | "SOURCE_NOT_READY"
+    | "BEFORE_ELIGIBILITY_START"
+    | "NO_POST_START_CONSUMPTION"
+    | "SUBSCRIPTION_USAGE_UNSUPPORTED";
   verification: VerificationState;
   refundFrozen: boolean;
   paymentMethod: string;
@@ -282,6 +285,10 @@ export interface DashboardSummary {
 export interface InvoicePolicy {
   minimumRequestMinor: number;
   serviceItem: "技术服务";
+  eligibilityStartAt: string;
+  eligibilityPolicyVersion: number;
+  eligibilityTimezone: "Asia/Shanghai";
+  eligibilityRule: "payment_and_usage_at_or_after";
 }
 
 export interface SourceStreamHealth {
@@ -332,6 +339,10 @@ export interface InvoiceSystemSettings {
   issuerName: string;
   serviceItem: "技术服务";
   minimumRequestMinor: number;
+  eligibilityStartAt: string;
+  eligibilityPolicyVersion: number;
+  eligibilityTimezone: "Asia/Shanghai";
+  eligibilityRule: "payment_and_usage_at_or_after";
   smtp: {
     fromAddress: string;
     fromName: string;

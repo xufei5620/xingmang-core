@@ -104,7 +104,7 @@ func buildMockRuntime(authMode string) (appRuntime, error) {
 	if err != nil {
 		return appRuntime{}, err
 	}
-	settingsRepo := adminsettings.NewMemoryRepository(adminsettings.Settings{IssuerName: "待配置开票主体", ServiceItem: adminsettings.FixedServiceItem, MinimumRequestMinor: adminsettings.MinimumMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "not-configured@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	settingsRepo := adminsettings.NewMemoryRepository(adminsettings.Settings{IssuerName: "待配置开票主体", ServiceItem: adminsettings.FixedServiceItem, MinimumRequestMinor: adminsettings.MinimumMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "not-configured@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
 	keyring := securefields.Keyring{CurrentKeyID: "dev-only", EncryptionKeys: map[string][]byte{"dev-only": bytes.Repeat([]byte{0x42}, 32)}, IndexKey: bytes.Repeat([]byte{0x24}, 32)}
 	settingsService := adminsettings.NewService(settingsRepo, adminsettings.SecureFieldsBox{Keyring: keyring, AAD: "invoice/admin-settings/smtp-authorization-code"})
 	var store document.Store
@@ -159,6 +159,12 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	}
 	if strings.TrimSpace(settings.IssuerName) == "" || settings.IssuerName == "待配置开票主体" {
 		return appRuntime{}, application.ErrIssuerNotConfigured
+	}
+	if err = validateEligibilityPolicyStart(os.Getenv("ELIGIBILITY_START_AT"), settings.EligibilityStartAt); err != nil {
+		return appRuntime{}, err
+	}
+	if err = verifyEligibilitySourceManifests(ctx, store); err != nil {
+		return appRuntime{}, err
 	}
 	paymentsMaxAge, err := boundedDurationEnv("SOURCE_PAYMENTS_MAX_STALENESS", "5m", 30*time.Second, 24*time.Hour)
 	if err != nil {
@@ -354,9 +360,53 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	return appRuntime{API: api, AuthMode: "oidc", SourceMode: "agent", Workers: workers, close: store.Close}, nil
 }
 
+func validateEligibilityPolicyStart(configured string, databaseValue time.Time) error {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return errors.New("ELIGIBILITY_START_AT is required in production")
+	}
+	parsed, err := time.Parse(time.RFC3339, configured)
+	if err != nil {
+		return fmt.Errorf("ELIGIBILITY_START_AT must be RFC3339: %w", err)
+	}
+	if !parsed.UTC().Equal(adminsettings.RequiredEligibilityStartAt) {
+		return errors.New("ELIGIBILITY_START_AT does not match the immutable release policy")
+	}
+	if databaseValue.IsZero() || !databaseValue.UTC().Equal(parsed.UTC()) {
+		return errors.New("deployment eligibility start does not match immutable database policy")
+	}
+	return nil
+}
+
+func verifyEligibilitySourceManifests(ctx context.Context, store *postgresstore.Store) error {
+	var invalid int
+	err := store.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM source_cutover_manifests scm
+		JOIN source_instances si ON si.id=scm.source_instance_id
+		CROSS JOIN invoice_eligibility_policy policy
+		WHERE policy.singleton_id=1 AND (
+			scm.cutover_at>=policy.eligibility_start_at
+			OR scm.database_clock>=policy.eligibility_start_at
+			OR (si.source_type='sub2api' AND scm.projection_contract<>'sub2api-economic-v3')
+			OR (si.source_type='newapi' AND scm.projection_contract<>'newapi-economic-rc25-v3')
+			OR scm.projection_contract='fixture-v3'
+			OR scm.signing_key_id='fixture'
+			OR scm.source_runtime_version='fixture-runtime'
+		)`).Scan(&invalid)
+	if err != nil {
+		return fmt.Errorf("verify source manifests against invoice eligibility policy: %w", err)
+	}
+	if invalid != 0 {
+		return errors.New("source manifest cutover/contract violates immutable invoice eligibility policy")
+	}
+	return nil
+}
+
 func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.Store) error {
 	var canInsertAudit, canUpdateAudit, canDeleteAudit, canUpdateLogoutEvent, canDeleteLogoutEvent, canCreateSchema, canReadMigrations, canTemporary bool
 	var canUpdateSourceEvent, canUpdateSourceBatch, canUpdatePaymentReview, canUpdateUsageFact, canUpdateCreditFact, canUpdateBalanceFact bool
+	var canUpdateConsumptionAllocation bool
+	var canReadEligibilityPolicy, canWriteEligibilityPolicy bool
 	var superuser, createDB, createRole, replication, bypassRLS, inherit, memberOfRole bool
 	var connectionLimit int
 	err := store.Pool().QueryRow(ctx, `
@@ -371,6 +421,9 @@ func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.S
 		       has_table_privilege(current_user,'source_usage_events','UPDATE'),
 		       has_table_privilege(current_user,'source_credit_events','UPDATE'),
 		       has_table_privilege(current_user,'balance_reconciliation_checkpoints','UPDATE'),
+		       has_table_privilege(current_user,'consumption_allocations','UPDATE'),
+		       has_table_privilege(current_user,'invoice_eligibility_policy','SELECT'),
+		       has_table_privilege(current_user,'invoice_eligibility_policy','UPDATE'),
 		       has_schema_privilege(current_user,'public','CREATE'),
 		       has_table_privilege(current_user,'schema_migrations','SELECT'),
 		       has_database_privilege(current_user,current_database(),'TEMP'),
@@ -380,14 +433,17 @@ func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.S
 		FROM pg_roles r WHERE r.rolname=current_user`).Scan(
 		&canInsertAudit, &canUpdateAudit, &canDeleteAudit, &canUpdateLogoutEvent, &canDeleteLogoutEvent,
 		&canUpdateSourceEvent, &canUpdateSourceBatch, &canUpdatePaymentReview, &canUpdateUsageFact,
-		&canUpdateCreditFact, &canUpdateBalanceFact, &canCreateSchema,
+		&canUpdateCreditFact, &canUpdateBalanceFact, &canUpdateConsumptionAllocation,
+		&canReadEligibilityPolicy, &canWriteEligibilityPolicy, &canCreateSchema,
 		&canReadMigrations, &canTemporary, &superuser, &createDB, &createRole,
 		&replication, &bypassRLS, &inherit, &connectionLimit, &memberOfRole)
 	if err != nil {
 		return fmt.Errorf("inspect runtime database privileges: %w", err)
 	}
 	if !canInsertAudit || canUpdateAudit || canDeleteAudit || canUpdateLogoutEvent || canDeleteLogoutEvent ||
-		canUpdateSourceEvent || canUpdateSourceBatch || canUpdatePaymentReview || canUpdateUsageFact || canUpdateCreditFact || canUpdateBalanceFact ||
+		canUpdateSourceEvent || canUpdateSourceBatch || canUpdatePaymentReview || canUpdateUsageFact ||
+		canUpdateCreditFact || canUpdateBalanceFact || canUpdateConsumptionAllocation ||
+		!canReadEligibilityPolicy || canWriteEligibilityPolicy ||
 		canCreateSchema || !canReadMigrations || canTemporary ||
 		superuser || createDB || createRole || replication || bypassRLS || inherit || connectionLimit != 20 || memberOfRole {
 		return errors.New("runtime database role is over-privileged or missing required append/read grants")

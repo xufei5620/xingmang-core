@@ -334,8 +334,8 @@ func (s *Store) ListEligibilitySummaries(ctx context.Context, principalID string
 				AND fl.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH') AND fl.verification_state='verified'
 		) l ON true
 		LEFT JOIN LATERAL (
-			SELECT sum(service_units) FILTER (WHERE credit_kind='LEGACY_NON_INVOICEABLE') legacy,
-				sum(service_units) FILTER (WHERE credit_kind<>'LEGACY_NON_INVOICEABLE') noncash
+			SELECT sum(service_units) FILTER (WHERE credit_kind IN ('LEGACY_NON_INVOICEABLE','PRE_POLICY_NON_INVOICEABLE')) legacy,
+				sum(service_units) FILTER (WHERE credit_kind NOT IN ('LEGACY_NON_INVOICEABLE','PRE_POLICY_NON_INVOICEABLE')) noncash
 			FROM source_credit_events ce WHERE ce.external_account_id=ea.id
 		) c ON true
 		WHERE ea.invoice_user_id=$1 ORDER BY si.source_type,si.name,si.id`, principalID)

@@ -22,7 +22,7 @@ func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
 }
 
 func (r *PostgresRepository) Get(ctx context.Context) (Settings, error) {
-	return scanSettings(r.pool.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1`))
+	return scanSettings(r.pool.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1`))
 }
 
 func (r *PostgresRepository) Update(ctx context.Context, in UpdateInput, expected int64, actor Actor) (Settings, error) {
@@ -37,12 +37,12 @@ func (r *PostgresRepository) Update(ctx context.Context, in UpdateInput, expecte
 		}
 	}
 	var before Settings
-	before, err = scanSettings(tx.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1 FOR UPDATE`))
+	before, err = scanSettings(tx.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1 FOR UPDATE`))
 	if errors.Is(err, ErrNotConfigured) {
 		if expected != 0 {
 			return Settings{}, ErrRevisionConflict
 		}
-		before, err = scanSettings(tx.QueryRow(ctx, `INSERT INTO admin_settings(singleton_id,issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,admin_cidrs,revision,updated_by) VALUES(1,$1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10) RETURNING issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,FALSE,admin_cidrs,revision,updated_by,created_at,updated_at`, in.IssuerName, FixedServiceItem, in.MinimumRequestMinor, in.SMTPHost, in.SMTPPort, in.SMTPFrom, in.SMTPFromName, in.SMTPStartTLS, in.AdminCIDRs, actor.ID))
+		before, err = scanSettings(tx.QueryRow(ctx, `INSERT INTO admin_settings(singleton_id,issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,admin_cidrs,revision,updated_by) VALUES(1,$1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10) RETURNING issuer_name,service_item,minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,FALSE,admin_cidrs,revision,updated_by,created_at,updated_at`, in.IssuerName, FixedServiceItem, in.MinimumRequestMinor, in.SMTPHost, in.SMTPPort, in.SMTPFrom, in.SMTPFromName, in.SMTPStartTLS, in.AdminCIDRs, actor.ID))
 		if isUniqueViolation(err) {
 			return Settings{}, ErrRevisionConflict
 		}
@@ -63,7 +63,7 @@ func (r *PostgresRepository) Update(ctx context.Context, in UpdateInput, expecte
 	if before.Revision != expected {
 		return Settings{}, ErrRevisionConflict
 	}
-	after, err := scanSettings(tx.QueryRow(ctx, `UPDATE admin_settings SET issuer_name=$1,service_item=$2,minimum_request_minor=$3,smtp_host=$4,smtp_port=$5,smtp_from=$6,smtp_from_name=$7,smtp_starttls=$8,admin_cidrs=$9,revision=revision+1,updated_by=$10,updated_at=now() WHERE singleton_id=1 AND revision=$11 RETURNING issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets WHERE setting_id=1),admin_cidrs,revision,updated_by,created_at,updated_at`, in.IssuerName, FixedServiceItem, in.MinimumRequestMinor, in.SMTPHost, in.SMTPPort, in.SMTPFrom, in.SMTPFromName, in.SMTPStartTLS, in.AdminCIDRs, actor.ID, expected))
+	after, err := scanSettings(tx.QueryRow(ctx, `UPDATE admin_settings SET issuer_name=$1,service_item=$2,minimum_request_minor=$3,smtp_host=$4,smtp_port=$5,smtp_from=$6,smtp_from_name=$7,smtp_starttls=$8,admin_cidrs=$9,revision=revision+1,updated_by=$10,updated_at=now() WHERE singleton_id=1 AND revision=$11 RETURNING issuer_name,service_item,minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets WHERE setting_id=1),admin_cidrs,revision,updated_by,created_at,updated_at`, in.IssuerName, FixedServiceItem, in.MinimumRequestMinor, in.SMTPHost, in.SMTPPort, in.SMTPFrom, in.SMTPFromName, in.SMTPStartTLS, in.AdminCIDRs, actor.ID, expected))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Settings{}, ErrRevisionConflict
 	}
@@ -91,7 +91,7 @@ func (r *PostgresRepository) UpdateSMTP(ctx context.Context, in UpdateInput, cha
 		return Settings{}, err
 	}
 	defer tx.Rollback(context.Background())
-	before, err := scanSettings(tx.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1 FOR UPDATE`))
+	before, err := scanSettings(tx.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1 FOR UPDATE`))
 	if err != nil {
 		return Settings{}, err
 	}
@@ -109,7 +109,7 @@ func (r *PostgresRepository) UpdateSMTP(ctx context.Context, in UpdateInput, cha
 			return Settings{}, err
 		}
 	}
-	after, err := scanSettings(tx.QueryRow(ctx, `UPDATE admin_settings SET smtp_host=$1,smtp_port=$2,smtp_from=$3,smtp_from_name=$4,smtp_starttls=$5,revision=revision+1,updated_by=$6,updated_at=now() WHERE singleton_id=1 AND revision=$7 RETURNING issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets WHERE setting_id=1),admin_cidrs,revision,updated_by,created_at,updated_at`, in.SMTPHost, in.SMTPPort, in.SMTPFrom, in.SMTPFromName, in.SMTPStartTLS, actor.ID, expected))
+	after, err := scanSettings(tx.QueryRow(ctx, `UPDATE admin_settings SET smtp_host=$1,smtp_port=$2,smtp_from=$3,smtp_from_name=$4,smtp_starttls=$5,revision=revision+1,updated_by=$6,updated_at=now() WHERE singleton_id=1 AND revision=$7 RETURNING issuer_name,service_item,minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets WHERE setting_id=1),admin_cidrs,revision,updated_by,created_at,updated_at`, in.SMTPHost, in.SMTPPort, in.SMTPFrom, in.SMTPFromName, in.SMTPStartTLS, actor.ID, expected))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Settings{}, ErrRevisionConflict
 	}
@@ -142,7 +142,7 @@ func (r *PostgresRepository) changeSecret(ctx context.Context, e SecretEnvelope,
 		return Settings{}, err
 	}
 	defer tx.Rollback(context.Background())
-	before, err := scanSettings(tx.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1 FOR UPDATE`))
+	before, err := scanSettings(tx.QueryRow(ctx, `SELECT s.issuer_name,s.service_item,s.minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),s.smtp_host,s.smtp_port,s.smtp_from,s.smtp_from_name,s.smtp_starttls,EXISTS(SELECT 1 FROM admin_setting_secrets x WHERE x.setting_id=s.singleton_id),s.admin_cidrs,s.revision,s.updated_by,s.created_at,s.updated_at FROM admin_settings s WHERE singleton_id=1 FOR UPDATE`))
 	if err != nil {
 		return Settings{}, err
 	}
@@ -157,7 +157,7 @@ func (r *PostgresRepository) changeSecret(ctx context.Context, e SecretEnvelope,
 	if err != nil {
 		return Settings{}, err
 	}
-	after, err := scanSettings(tx.QueryRow(ctx, `UPDATE admin_settings SET revision=revision+1,updated_by=$1,updated_at=now() WHERE singleton_id=1 AND revision=$2 RETURNING issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,$3::boolean,admin_cidrs,revision,updated_by,created_at,updated_at`, actor.ID, expected, set))
+	after, err := scanSettings(tx.QueryRow(ctx, `UPDATE admin_settings SET revision=revision+1,updated_by=$1,updated_at=now() WHERE singleton_id=1 AND revision=$2 RETURNING issuer_name,service_item,minimum_request_minor,(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1),smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,$3::boolean,admin_cidrs,revision,updated_by,created_at,updated_at`, actor.ID, expected, set))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Settings{}, ErrRevisionConflict
 	}
@@ -191,7 +191,7 @@ type rowScanner interface{ Scan(...any) error }
 func scanSettings(row rowScanner) (Settings, error) {
 	var s Settings
 	var cidrs []*net.IPNet
-	err := row.Scan(&s.IssuerName, &s.ServiceItem, &s.MinimumRequestMinor, &s.SMTPHost, &s.SMTPPort, &s.SMTPFrom, &s.SMTPFromName, &s.SMTPStartTLS, &s.SMTPSecretConfigured, &cidrs, &s.Revision, &s.UpdatedBy, &s.CreatedAt, &s.UpdatedAt)
+	err := row.Scan(&s.IssuerName, &s.ServiceItem, &s.MinimumRequestMinor, &s.EligibilityStartAt, &s.EligibilityPolicyVersion, &s.SMTPHost, &s.SMTPPort, &s.SMTPFrom, &s.SMTPFromName, &s.SMTPStartTLS, &s.SMTPSecretConfigured, &cidrs, &s.Revision, &s.UpdatedBy, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, ErrNotConfigured
 	}

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLoadBreakGlassCIDRsPrefersDeploymentFile(t *testing.T) {
@@ -73,5 +74,35 @@ func TestBoundedOIDCResponseSizeEnvironment(t *testing.T) {
 		if _, err := boundedInt64Env("OIDC_MAX_HTTP_RESPONSE_BYTES", 1<<20, 64<<10, 4<<20); err == nil {
 			t.Fatalf("unsafe response limit accepted: %q", value)
 		}
+	}
+}
+
+func TestValidateEligibilityPolicyStartFailsClosedAtExactBoundary(t *testing.T) {
+	want := time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
+	for _, configured := range []string{
+		"2026-09-01T00:00:00+08:00",
+		"2026-08-31T16:00:00Z",
+	} {
+		if err := validateEligibilityPolicyStart(configured, want); err != nil {
+			t.Fatalf("equivalent boundary %q rejected: %v", configured, err)
+		}
+	}
+	for name, fixture := range map[string]struct {
+		configured string
+		database   time.Time
+	}{
+		"missing":    {database: want},
+		"invalid":    {configured: "2026-09-01", database: want},
+		"env before": {configured: "2026-08-31T15:59:59.999999Z", database: want},
+		"env after":  {configured: "2026-08-31T16:00:00.000001Z", database: want},
+		"db before":  {configured: "2026-09-01T00:00:00+08:00", database: want.Add(-time.Microsecond)},
+		"db after":   {configured: "2026-09-01T00:00:00+08:00", database: want.Add(time.Microsecond)},
+		"db missing": {configured: "2026-09-01T00:00:00+08:00"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateEligibilityPolicyStart(fixture.configured, fixture.database); err == nil {
+				t.Fatal("invalid eligibility policy boundary was accepted")
+			}
+		})
 	}
 }

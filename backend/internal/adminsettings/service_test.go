@@ -26,7 +26,7 @@ func (m *memoryRepo) Update(_ context.Context, in UpdateInput, expected int64, a
 	if m.settings.Revision != expected {
 		return Settings{}, ErrRevisionConflict
 	}
-	m.settings = Settings{IssuerName: in.IssuerName, ServiceItem: FixedServiceItem, MinimumRequestMinor: in.MinimumRequestMinor, SMTPHost: in.SMTPHost, SMTPPort: in.SMTPPort, SMTPFrom: in.SMTPFrom, SMTPFromName: in.SMTPFromName, SMTPStartTLS: in.SMTPStartTLS, AdminCIDRs: in.AdminCIDRs, Revision: expected + 1, UpdatedBy: a.ID}
+	m.settings = Settings{IssuerName: in.IssuerName, ServiceItem: FixedServiceItem, MinimumRequestMinor: in.MinimumRequestMinor, EligibilityStartAt: in.EligibilityStartAt, EligibilityPolicyVersion: 1, SMTPHost: in.SMTPHost, SMTPPort: in.SMTPPort, SMTPFrom: in.SMTPFrom, SMTPFromName: in.SMTPFromName, SMTPStartTLS: in.SMTPStartTLS, AdminCIDRs: in.AdminCIDRs, Revision: expected + 1, UpdatedBy: a.ID}
 	return m.settings, nil
 }
 func (m *memoryRepo) UpdateSMTP(_ context.Context, in UpdateInput, change SMTPSecretChange, e SecretEnvelope, expected int64, a Actor) (Settings, error) {
@@ -96,7 +96,7 @@ func (failingSealBox) Open(context.Context, SecretEnvelope) ([]byte, error) {
 	return nil, errors.New("not used")
 }
 func validInput() UpdateInput {
-	return UpdateInput{IssuerName: "开票主体", MinimumRequestMinor: 20_000, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "invoice@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: []string{"203.0.113.8/32"}}
+	return UpdateInput{IssuerName: "开票主体", MinimumRequestMinor: 20_000, EligibilityStartAt: RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "invoice@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: []string{"203.0.113.8/32"}}
 }
 func TestServiceValidationAndSecretNonDisclosure(t *testing.T) {
 	repo := &memoryRepo{}
@@ -127,6 +127,24 @@ func TestServiceValidationAndSecretNonDisclosure(t *testing.T) {
 	plain, err := service.SMTPSecretForDelivery(context.Background())
 	if err != nil || plain != "authorization-code" {
 		t.Fatalf("plain=%q err=%v", plain, err)
+	}
+}
+
+func TestEligibilityStartUsesExactShanghaiBoundaryAndCannotBeChangedBySettings(t *testing.T) {
+	parsed, err := time.Parse(time.RFC3339, EligibilityStartAtRFC3339)
+	if err != nil || !parsed.UTC().Equal(RequiredEligibilityStartAt) ||
+		parsed.UTC().Format(time.RFC3339) != "2026-08-31T16:00:00Z" {
+		t.Fatalf("eligibility boundary parsed=%s err=%v", parsed, err)
+	}
+	for _, changed := range []time.Time{
+		RequiredEligibilityStartAt.Add(-time.Microsecond),
+		RequiredEligibilityStartAt.Add(time.Microsecond),
+	} {
+		input := validInput()
+		input.EligibilityStartAt = changed
+		if _, err = normalize(input); !errors.Is(err, ErrInvalidSettings) {
+			t.Fatalf("changed eligibility boundary %s accepted: %v", changed, err)
+		}
 	}
 }
 
@@ -218,7 +236,7 @@ func TestSMTPPortAndDisplayNameLimits(t *testing.T) {
 
 func TestUpdateSMTPIsOneRevisionAndEncryptionFailureChangesNothing(t *testing.T) {
 	now := time.Now().UTC()
-	initial := Settings{IssuerName: "开票主体", ServiceItem: FixedServiceItem, MinimumRequestMinor: MinimumMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "old@qq.com", SMTPFromName: "旧名称", SMTPStartTLS: true, AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	initial := Settings{IssuerName: "开票主体", ServiceItem: FixedServiceItem, MinimumRequestMinor: MinimumMinor, EligibilityStartAt: RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "old@qq.com", SMTPFromName: "旧名称", SMTPStartTLS: true, AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	repo := NewMemoryRepository(initial)
 	input := validInput()
 	input.SMTPFrom = "new@qq.com"

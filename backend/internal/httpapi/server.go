@@ -401,13 +401,17 @@ func (s *Server) settingsResponse(settings adminsettings.Settings, r *http.Reque
 	issuerName := strings.TrimSpace(settings.IssuerName)
 	issuerConfigured := issuerName != "" && issuerName != "待配置开票主体"
 	return map[string]any{
-		"revision":              settings.Revision,
-		"issuer_name":           issuerName,
-		"issuer_configured":     issuerConfigured,
-		"service_item":          adminsettings.FixedServiceItem,
-		"minimum_request_minor": settings.MinimumRequestMinor,
-		"smtp":                  map[string]any{"host": settings.SMTPHost, "port": settings.SMTPPort, "from_address": settings.SMTPFrom, "from_name": settings.SMTPFromName, "starttls": settings.SMTPStartTLS, "credential_configured": settings.SMTPSecretConfigured},
-		"admin_access":          map[string]any{"cidrs": settings.AdminCIDRs, "current_ip": s.requestClientIP(r).String(), "bootstrap_access": s.requestUsesBootstrap(r)},
+		"revision":                   settings.Revision,
+		"issuer_name":                issuerName,
+		"issuer_configured":          issuerConfigured,
+		"service_item":               adminsettings.FixedServiceItem,
+		"minimum_request_minor":      settings.MinimumRequestMinor,
+		"eligibility_start_at":       settings.EligibilityStartAt.UTC().Format(time.RFC3339),
+		"eligibility_policy_version": settings.EligibilityPolicyVersion,
+		"eligibility_timezone":       adminsettings.EligibilityDisplayTimeZone,
+		"eligibility_rule":           "payment_and_usage_at_or_after",
+		"smtp":                       map[string]any{"host": settings.SMTPHost, "port": settings.SMTPPort, "from_address": settings.SMTPFrom, "from_name": settings.SMTPFromName, "starttls": settings.SMTPStartTLS, "credential_configured": settings.SMTPSecretConfigured},
+		"admin_access":               map[string]any{"cidrs": settings.AdminCIDRs, "current_ip": s.requestClientIP(r).String(), "bootstrap_access": s.requestUsesBootstrap(r)},
 	}
 }
 
@@ -429,7 +433,7 @@ func (s *Server) currentSettings(w http.ResponseWriter, r *http.Request, revisio
 }
 
 func updateInputFromSettings(settings adminsettings.Settings) adminsettings.UpdateInput {
-	return adminsettings.UpdateInput{IssuerName: settings.IssuerName, MinimumRequestMinor: settings.MinimumRequestMinor, SMTPHost: settings.SMTPHost, SMTPPort: settings.SMTPPort, SMTPFrom: settings.SMTPFrom, SMTPFromName: settings.SMTPFromName, SMTPStartTLS: settings.SMTPStartTLS, AdminCIDRs: append([]string(nil), settings.AdminCIDRs...)}
+	return adminsettings.UpdateInput{IssuerName: settings.IssuerName, MinimumRequestMinor: settings.MinimumRequestMinor, EligibilityStartAt: settings.EligibilityStartAt, SMTPHost: settings.SMTPHost, SMTPPort: settings.SMTPPort, SMTPFrom: settings.SMTPFrom, SMTPFromName: settings.SMTPFromName, SMTPStartTLS: settings.SMTPStartTLS, AdminCIDRs: append([]string(nil), settings.AdminCIDRs...)}
 }
 
 func (s *Server) updateInvoiceSettings(w http.ResponseWriter, r *http.Request) {
@@ -625,10 +629,23 @@ func (s *Server) listLots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": userFundingLotDTOs(items)})
 }
 
-func (s *Server) getInvoicePolicy(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getInvoicePolicy(w http.ResponseWriter, r *http.Request) {
+	if s.adminSettings == nil {
+		writeError(w, http.StatusServiceUnavailable, "POLICY_UNAVAILABLE", "invoice eligibility policy is unavailable")
+		return
+	}
+	settings, err := s.adminSettings.Get(r.Context())
+	if err != nil {
+		handleSettingsError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"minimum_request_minor": s.ledger.MinimumRequestMinor(),
-		"service_item":          domain.FixedServiceItem,
+		"minimum_request_minor":      s.ledger.MinimumRequestMinor(),
+		"service_item":               domain.FixedServiceItem,
+		"eligibility_start_at":       settings.EligibilityStartAt.UTC().Format(time.RFC3339),
+		"eligibility_policy_version": settings.EligibilityPolicyVersion,
+		"eligibility_timezone":       adminsettings.EligibilityDisplayTimeZone,
+		"eligibility_rule":           "payment_and_usage_at_or_after",
 	})
 }
 

@@ -149,9 +149,7 @@ func nullableBytes(value []byte) any {
 // refunds, request invalidation and audit records commit atomically.
 func (s *Store) UpsertFundingLot(ctx context.Context, lot domain.FundingLot) error {
 	cutoverBasis := valueOrNow(lot.CompletedAt).UTC().Truncate(time.Microsecond)
-	if !lot.CompletedAt.IsZero() {
-		lot.CompletedAt = cutoverBasis
-	}
+	lot.CompletedAt = cutoverBasis
 	// PostgreSQL stores timestamptz at microsecond precision. Keep a full
 	// millisecond between the fixture cutover and payment completion so a
 	// round-trip can never collapse the strict completed_at > cutover boundary.
@@ -253,7 +251,7 @@ func (s *Store) UpsertFundingLot(ctx context.Context, lot domain.FundingLot) err
 	if lot.CurrentCapMinor == 0 {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO funding_lot_consumption_state(funding_lot_id,cash_service_units)
-			VALUES($1,0) ON CONFLICT(funding_lot_id) DO NOTHING`, lot.ID)
+			VALUES($1,1) ON CONFLICT(funding_lot_id) DO NOTHING`, lot.ID)
 	} else {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO funding_lot_consumption_state(
@@ -342,6 +340,14 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 		return domain.InvoiceRequest{}, fmt.Errorf("begin submit: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	var eligibilityPolicyStart time.Time
+	var eligibilityPolicyVersion int64
+	if err = tx.QueryRow(ctx, `
+		SELECT eligibility_start_at,policy_version
+		FROM invoice_eligibility_policy WHERE singleton_id=1`).Scan(
+		&eligibilityPolicyStart, &eligibilityPolicyVersion); err != nil {
+		return domain.InvoiceRequest{}, fmt.Errorf("load invoice eligibility policy: %w", err)
+	}
 	if err = assertSourceFreshTx(ctx, tx, in.SourceInstanceID, in.Freshness); err != nil {
 		return domain.InvoiceRequest{}, err
 	}
@@ -371,6 +377,7 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 		SELECT fl.id, fl.invoice_user_id, fl.source_instance_id, si.source_type, fl.external_order_id,
 			fl.currency, fl.current_cap_minor, fl.consumed_cash_minor, fl.reserved_minor, fl.issued_minor,
 			fl.verification_state, fl.source_revision_hash,fl.eligibility_kind,fl.refund_frozen,
+			COALESCE(fl.completed_at,'epoch'::timestamptz),COALESCE(fl.eligibility_cutover_at,'epoch'::timestamptz),
 			COALESCE(eas.eligibility_status,'missing'),
 			EXISTS(SELECT 1 FROM eligibility_projection_jobs epj WHERE epj.external_account_id=fl.external_account_id)
 		FROM funding_lots fl JOIN source_instances si ON si.id=fl.source_instance_id
@@ -385,13 +392,15 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 		cap, consumed, reserved, issued                                       int64
 		refundFrozen                                                          bool
 		projectionPending                                                     bool
+		completedAt, eligibilityCutoverAt                                     time.Time
 	}
 	locked := map[string]lockedLot{}
 	for rows.Next() {
 		var l lockedLot
 		if err = rows.Scan(&l.id, &l.user, &l.source, &l.sourceType, &l.order, &l.currency,
 			&l.cap, &l.consumed, &l.reserved, &l.issued, &l.verification, &l.revision,
-			&l.eligibilityKind, &l.refundFrozen, &l.eligibilityStatus, &l.projectionPending); err != nil {
+			&l.eligibilityKind, &l.refundFrozen, &l.completedAt, &l.eligibilityCutoverAt,
+			&l.eligibilityStatus, &l.projectionPending); err != nil {
 			rows.Close()
 			return domain.InvoiceRequest{}, err
 		}
@@ -421,9 +430,9 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 		if l.verification != string(domain.VerificationVerified) {
 			return domain.InvoiceRequest{}, domain.ErrUnverifiedPayment
 		}
-		if (l.eligibilityKind != string(domain.EligibilityWalletCash) &&
-			l.eligibilityKind != string(domain.EligibilitySubscriptionCash)) ||
-			l.refundFrozen || l.eligibilityStatus != "active" || l.projectionPending {
+		if l.eligibilityKind != string(domain.EligibilityWalletCash) ||
+			l.refundFrozen || l.eligibilityStatus != "active" || l.projectionPending ||
+			l.completedAt.Before(eligibilityPolicyStart) || l.eligibilityCutoverAt.Before(eligibilityPolicyStart) {
 			return domain.InvoiceRequest{}, domain.ErrUnverifiedPayment
 		}
 		if l.consumed-l.reserved-l.issued < a.AmountMinor {
@@ -444,7 +453,7 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 	if issuerCode == "" {
 		issuerCode = "default"
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO invoice_requests (id,request_no,invoice_user_id,source_instance_id,profile_id,profile_snapshot_ciphertext,currency,issuer_code,service_item,amount_minor,status,idempotency_key,version,submitted_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,'CNY',$7,$8,$9,$10,$11,1,$12,$12)`, requestID, requestNo, in.PrincipalID, in.SourceInstanceID, in.ProfileID, in.ProfileSnapshotCiphertext, issuerCode, domain.FixedServiceItem, total, domain.StatusPendingReview, in.IdempotencyKey, now)
+	_, err = tx.Exec(ctx, `INSERT INTO invoice_requests (id,request_no,invoice_user_id,source_instance_id,profile_id,profile_snapshot_ciphertext,currency,issuer_code,service_item,amount_minor,status,idempotency_key,version,eligibility_policy_start_at,eligibility_policy_version,submitted_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,'CNY',$7,$8,$9,$10,$11,1,$12,$13,$14,$14)`, requestID, requestNo, in.PrincipalID, in.SourceInstanceID, in.ProfileID, in.ProfileSnapshotCiphertext, issuerCode, domain.FixedServiceItem, total, domain.StatusPendingReview, in.IdempotencyKey, eligibilityPolicyStart, eligibilityPolicyVersion, now)
 	if err != nil {
 		return domain.InvoiceRequest{}, fmt.Errorf("insert invoice request: %w", err)
 	}
@@ -452,8 +461,10 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 		l := locked[a.FundingLotID]
 		command, updateErr := tx.Exec(ctx, `
 			UPDATE funding_lots SET reserved_minor=reserved_minor+$1,updated_at=$2
-			WHERE id=$3 AND eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
+			WHERE id=$3 AND eligibility_kind='WALLET_CASH'
 				AND verification_state='verified' AND refund_frozen=FALSE
+				AND completed_at >= (SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1)
+				AND eligibility_cutover_at >= (SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1)
 				AND consumed_cash_minor-reserved_minor-issued_minor >= $1
 				AND EXISTS (
 					SELECT 1 FROM source_account_eligibility_state eas

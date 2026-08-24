@@ -185,10 +185,13 @@ func (s *Store) ObserveFundingLot(ctx context.Context, in SourceObservation, act
 	}
 	before := existing
 	nextSourceTime, nextSourceSequence := sourceVersionTime, in.SourceSequence
+	trackedEligibilityKind := existing.EligibilityKind == domain.EligibilityWalletCash ||
+		existing.EligibilityKind == domain.EligibilitySubscriptionCash ||
+		existing.EligibilityKind == domain.EligibilityNonCash
 	refundObservation := manualNewAPICap ||
 		(in.EventKind == "refund" || in.EventKind == "tombstone") &&
-			(existing.EligibilityKind == domain.EligibilityWalletCash || existing.EligibilityKind == domain.EligibilitySubscriptionCash) ||
-		(existing.EligibilityKind == domain.EligibilityWalletCash || existing.EligibilityKind == domain.EligibilitySubscriptionCash) &&
+			trackedEligibilityKind ||
+		trackedEligibilityKind &&
 			existing.VerifiedCashMinor > 0 && lot.CurrentCapMinor < existing.VerifiedCashMinor
 	if refundObservation {
 		nextSourceTime, nextSourceSequence = currentSourceTime, currentSourceSequence
@@ -224,6 +227,41 @@ func (s *Store) ObserveFundingLot(ctx context.Context, in SourceObservation, act
 		lot.ID = existing.ID
 		lot.ReservedMinor = existing.ReservedMinor
 		lot.IssuedMinor = existing.IssuedMinor
+		if lot.CompletedAt.IsZero() {
+			lot.CompletedAt = existing.CompletedAt
+		} else if !existing.CompletedAt.IsZero() &&
+			!lot.CompletedAt.UTC().Truncate(time.Microsecond).Equal(existing.CompletedAt.UTC()) {
+			// completed_at is the financial policy boundary fact. Once observed it
+			// cannot move, even to another timestamp on the same side of the
+			// boundary. Preserve the original projection, retain the new source
+			// event as evidence, and fail the entire account closed.
+			lot.CompletedAt = existing.CompletedAt
+			if existing.IssuedMinor > 0 {
+				attention := &projectedLot{ID: existing.ID, OldMinor: existing.CurrentCapMinor,
+					RoundedMinor: existing.CurrentCapMinor, IssuedMinor: existing.IssuedMinor,
+					ReservedMinor: existing.ReservedMinor}
+				if err = markLotIssuedAttentionTx(ctx, tx, attention, actor); err != nil {
+					return ObservationResult{}, err
+				}
+			}
+			if err = freezeEligibilityTx(ctx, tx, externalAccountID, existing.ID, "EVENT_PAYLOAD_DRIFT",
+				"funding_lot.completed_at", existing.ID, lot.SourceRevision, actor); err != nil {
+				return ObservationResult{}, err
+			}
+			if err = writeAudit(ctx, tx, actor, "funding_lot.completed_at_drift_rejected", "funding_lot", existing.ID,
+				map[string]any{"completed_at": existing.CompletedAt},
+				map[string]any{"rejected_completed_at": in.Lot.CompletedAt}); err != nil {
+				return ObservationResult{}, err
+			}
+			frozen, getErr := getFundingLotTx(ctx, tx, "", "", existing.ID, "FOR UPDATE")
+			if getErr != nil {
+				return ObservationResult{}, getErr
+			}
+			if err = tx.Commit(ctx); err != nil {
+				return ObservationResult{}, err
+			}
+			return ObservationResult{Lot: frozen}, domain.ErrConflict
+		}
 		if manualNewAPICap {
 			if existing.SourceType != domain.SourceNewAPI || *in.NewAPIManualCeilingMinor >= existing.CurrentCapMinor {
 				return ObservationResult{}, domain.ErrInvalidState
@@ -323,8 +361,14 @@ func (s *Store) ObserveFundingLot(ctx context.Context, in SourceObservation, act
 			WHERE id=$1`, lot.ID); err != nil {
 			return ObservationResult{}, err
 		}
-		if err = freezeRefundedLotTx(ctx, tx, externalAccountID, lot.ID, existing.ConsumedCashMinor,
-			lot.SourceRevision, actor); err != nil {
+		if existing.EligibilityKind == domain.EligibilityNonCash {
+			err = freezeEligibilityTx(ctx, tx, externalAccountID, lot.ID, "SOURCE_REFUND",
+				"funding_lot", lot.ID, lot.SourceRevision, actor)
+		} else {
+			err = freezeRefundedLotTx(ctx, tx, externalAccountID, lot.ID, existing.ConsumedCashMinor,
+				lot.SourceRevision, actor)
+		}
+		if err != nil {
 			return ObservationResult{}, err
 		}
 	}
@@ -925,21 +969,6 @@ func (s *Store) ReviewNewAPIPaymentCandidate(ctx context.Context, in ReviewPayme
 		if err == nil && eligibilityKind == string(domain.EligibilityWalletCash) && !completed.After(finalized) {
 			if err = reprojectEligibilityTx(ctx, tx, accountID, finalized, actor); err != nil {
 				return domain.FundingLot{}, err
-			}
-			lot, err = getFundingLotTx(ctx, tx, "", "", lot.ID, "FOR UPDATE")
-			if err != nil {
-				return domain.FundingLot{}, err
-			}
-		} else if err == nil && eligibilityKind == string(domain.EligibilitySubscriptionCash) {
-			subscriptionCommand, subscriptionErr := tx.Exec(ctx, `
-				UPDATE funding_lots SET consumed_cash_minor=verified_cash_minor,
-					eligibility_revision=eligibility_revision+1,updated_at=now()
-				WHERE id=$1 AND refund_frozen=FALSE AND verification_state='verified'`, lot.ID)
-			if subscriptionErr != nil {
-				return domain.FundingLot{}, subscriptionErr
-			}
-			if subscriptionCommand.RowsAffected() != 1 {
-				return domain.FundingLot{}, domain.ErrInvalidState
 			}
 			lot, err = getFundingLotTx(ctx, tx, "", "", lot.ID, "FOR UPDATE")
 			if err != nil {

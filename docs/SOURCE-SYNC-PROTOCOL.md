@@ -22,6 +22,10 @@ must be `true`. Reconciliation never infers this flag from current user state:
 the balances agent authenticates/decrypts the immutable original baseline and
 checks the external user ID against that set. A user created after cutover is
 therefore `false`; a missing, corrupt or mismatched baseline stops the stream.
+For a signed `false` member, the invoice ledger starts that account at zero on
+the global cutover and replays every signed post-cutover economic fact. The
+first later balance is a reconciliation checkpoint, not a new legacy baseline;
+this preserves post-policy payment and usage that arrived before OIDC binding.
 
 The signed `cutover_manifest` hash is SHA-256 over its strict canonical payload
 with `manifest_hash` blank. It covers the projection contract, configuration

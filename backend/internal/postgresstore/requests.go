@@ -285,6 +285,19 @@ func releaseReservations(ctx context.Context, tx pgx.Tx, requestID string) error
 }
 
 func issueReservations(ctx context.Context, tx pgx.Tx, requestID string) error {
+	var requestPolicyStart, currentPolicyStart time.Time
+	var requestPolicyVersion, currentPolicyVersion int64
+	if err := tx.QueryRow(ctx, `
+		SELECT ir.eligibility_policy_start_at,ir.eligibility_policy_version,
+			policy.eligibility_start_at,policy.policy_version
+		FROM invoice_requests ir CROSS JOIN invoice_eligibility_policy policy
+		WHERE ir.id=$1 FOR SHARE OF ir`, requestID).Scan(
+		&requestPolicyStart, &requestPolicyVersion, &currentPolicyStart, &currentPolicyVersion); err != nil {
+		return err
+	}
+	if !requestPolicyStart.Equal(currentPolicyStart) || requestPolicyVersion != currentPolicyVersion {
+		return domain.ErrConflict
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT funding_lot_id,amount_minor FROM invoice_allocations
 		WHERE invoice_request_id=$1 AND allocation_state='reserved'
@@ -318,8 +331,10 @@ func issueReservations(ctx context.Context, tx pgx.Tx, requestID string) error {
 			UPDATE funding_lots SET reserved_minor=reserved_minor-$1,
 				issued_minor=issued_minor+$1,updated_at=now()
 			WHERE id=$2 AND reserved_minor >= $1
-				AND eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
+				AND eligibility_kind='WALLET_CASH'
 				AND verification_state='verified' AND refund_frozen=FALSE
+				AND completed_at >= (SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1)
+				AND eligibility_cutover_at >= (SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1)
 				AND reserved_minor+issued_minor <= consumed_cash_minor
 				AND EXISTS (
 					SELECT 1 FROM source_account_eligibility_state eas

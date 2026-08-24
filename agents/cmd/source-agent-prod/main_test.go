@@ -44,6 +44,7 @@ func validEnvironment(t *testing.T, sourceType, stream string) map[string]string
 		"SOURCE_MTLS_RELOAD_ON_HANDSHAKE":  "true",
 		"SOURCE_SIGNING_KEY_FILE":          abs("signing.key"),
 		"SOURCE_SIGNING_KEY_ID":            "key-1",
+		"ELIGIBILITY_START_AT":             "2026-09-01T00:00:00+08:00",
 		"SOURCE_TRUSTED_OIDC_PROVIDER_KEY": "solov-sso",
 		"SOURCE_TRUSTED_OIDC_ISSUER":       "https://id.example.invalid/realms/central",
 	}
@@ -124,6 +125,20 @@ func TestLoadRunConfigAcceptsV3EconomicStreamsWithIsolatedState(t *testing.T) {
 		}
 		if config.ProtocolVersion != sourceagent.SchemaVersionV3 || config.StreamID != stream {
 			t.Fatalf("unexpected V3 config: %#v", config)
+		}
+	}
+}
+
+func TestLoadEligibilityStartRequiresExactBusinessBoundary(t *testing.T) {
+	for _, value := range []string{"2026-09-01T00:00:00+08:00", "2026-08-31T16:00:00Z"} {
+		got, err := loadEligibilityStart(func(string) string { return value })
+		if err != nil || !got.Equal(requiredEligibilityStartAt) {
+			t.Fatalf("boundary %q got=%s err=%v", value, got, err)
+		}
+	}
+	for _, value := range []string{"", "2026-09-01", "2026-08-31T15:59:59.999999Z", "2026-08-31T16:00:00.000001Z"} {
+		if _, err := loadEligibilityStart(func(string) string { return value }); err == nil {
+			t.Fatalf("invalid boundary %q accepted", value)
 		}
 	}
 }

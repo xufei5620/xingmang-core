@@ -201,6 +201,7 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	all := migrationMapFS(t)
 	delete(all, "0009_consumption_eligibility_ledger.sql")
 	delete(all, "0010_eligibility_freeze_operations.sql")
+	delete(all, "0011_invoice_eligibility_policy.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +221,7 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	}
 	withNine := migrationMapFS(t)
 	delete(withNine, "0010_eligibility_freeze_operations.sql")
+	delete(withNine, "0011_invoice_eligibility_policy.sql")
 	if err = UpFS(ctx, pool, withNine); err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +247,155 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	}
 	if issuedStatus != "issued" || issuedKind != "LEGACY_NON_INVOICEABLE" || verified != issued || consumed != issued || issued != 20000 {
 		t.Fatalf("issued legacy migration status=%s kind=%s verified=%d consumed=%d issued=%d", issuedStatus, issuedKind, verified, consumed, issued)
+	}
+}
+
+func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
+	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	schema := fmt.Sprintf("migrate_eligibility_policy_%d", time.Now().UnixNano())
+	identifier := pgx.Identifier{schema}.Sanitize()
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+identifier); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+identifier+" CASCADE") })
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	throughTen := migrationMapFS(t)
+	delete(throughTen, "0011_invoice_eligibility_policy.sql")
+	if err = UpFS(ctx, pool, throughTen); err != nil {
+		t.Fatal(err)
+	}
+	const sourceID = "10000000-0000-4000-8000-000000000011"
+	if _, err = pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','policy-migration','policy-test')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO source_cutover_manifests(
+		source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+		baseline_row_count,signing_key_id)
+		VALUES($1,repeat('a',64),now(),now(),'policy-test','sub2api-economic-v3',repeat('b',64),
+		'SUB2_BALANCE_1E8','p','u','c','b',repeat('c',64),repeat('c',64),1,'policy-key')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+
+	all := migrationMapFS(t)
+	err = UpFS(ctx, pool, all)
+	if err == nil || !strings.Contains(err.Error(), "empty pre-launch financial ledger") {
+		t.Fatalf("populated-ledger migration error=%v", err)
+	}
+	var policyRelation *string
+	if err = pool.QueryRow(ctx, `SELECT to_regclass('invoice_eligibility_policy')::text`).Scan(&policyRelation); err != nil {
+		t.Fatal(err)
+	}
+	if policyRelation != nil {
+		t.Fatal("failed eligibility policy migration left committed DDL")
+	}
+	var recorded int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations
+		WHERE name='0011_invoice_eligibility_policy.sql'`).Scan(&recorded); err != nil || recorded != 0 {
+		t.Fatalf("failed eligibility policy migration record count=%d err=%v", recorded, err)
+	}
+
+	// Reset only this disposable migration fixture after proving the populated
+	// ledger fails closed. Production source facts are permanently immutable.
+	if _, err = pool.Exec(ctx, `ALTER TABLE source_cutover_manifests
+		DISABLE TRIGGER source_cutover_manifests_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `DELETE FROM source_cutover_manifests`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `ALTER TABLE source_cutover_manifests
+		ENABLE TRIGGER source_cutover_manifests_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if err = UpFS(ctx, pool, all); err != nil {
+		t.Fatal(err)
+	}
+	var start time.Time
+	var version int64
+	var paymentRequired, usageRequired bool
+	if err = pool.QueryRow(ctx, `SELECT eligibility_start_at,policy_version,
+		require_payment_at_or_after,require_usage_at_or_after
+		FROM invoice_eligibility_policy WHERE singleton_id=1`).Scan(
+		&start, &version, &paymentRequired, &usageRequired); err != nil {
+		t.Fatal(err)
+	}
+	wantStart := time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
+	if !start.UTC().Equal(wantStart) || version != 1 || !paymentRequired || !usageRequired {
+		t.Fatalf("policy start=%s version=%d payment=%t usage=%t", start, version, paymentRequired, usageRequired)
+	}
+	for name, statement := range map[string]string{
+		"update":   `UPDATE invoice_eligibility_policy SET updated_by='forbidden' WHERE singleton_id=1`,
+		"delete":   `DELETE FROM invoice_eligibility_policy WHERE singleton_id=1`,
+		"truncate": `TRUNCATE invoice_eligibility_policy`,
+	} {
+		if _, immutableErr := pool.Exec(ctx, statement); immutableErr == nil ||
+			!strings.Contains(immutableErr.Error(), "immutable") {
+			t.Fatalf("policy %s error=%v", name, immutableErr)
+		}
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+		VALUES('20000000-0000-4000-8000-000000000011','test','policy-request-user')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO invoice_profiles(
+		id,invoice_user_id,profile_type,title_ciphertext,email_ciphertext,email_verified)
+		VALUES('40000000-0000-4000-8000-000000000011',
+		'20000000-0000-4000-8000-000000000011','personal',decode(repeat('11',16),'hex'),
+		decode(repeat('22',16),'hex'),TRUE)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO invoice_requests(
+		id,request_no,invoice_user_id,source_instance_id,profile_id,profile_snapshot_ciphertext,
+		currency,amount_minor,status,idempotency_key,eligibility_policy_start_at,eligibility_policy_version)
+		VALUES('60000000-0000-4000-8000-000000000011','POLICY-MISMATCH',
+		'20000000-0000-4000-8000-000000000011',$1,
+		'40000000-0000-4000-8000-000000000011',decode(repeat('33',16),'hex'),
+		'CNY',20000,'pending_review','policy-mismatch',$2,1)`, sourceID, wantStart.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "policy snapshot") {
+		t.Fatalf("mismatched request policy snapshot error=%v", err)
+	}
+
+	postPolicyManifestInsert := `INSERT INTO source_cutover_manifests(
+		source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+		baseline_row_count,signing_key_id)
+		VALUES($1,repeat('a',64),$2,$2,'policy-test','sub2api-economic-v3',repeat('b',64),
+		'SUB2_BALANCE_1E8','p','u','c','b',repeat('c',64),repeat('c',64),1,'policy-key')`
+	for _, invalidCutover := range []time.Time{wantStart, wantStart.Add(time.Microsecond)} {
+		if _, boundaryErr := pool.Exec(ctx, postPolicyManifestInsert, sourceID, invalidCutover); boundaryErr == nil ||
+			!strings.Contains(boundaryErr.Error(), "strictly before") {
+			t.Fatalf("cutover %s boundary error=%v", invalidCutover, boundaryErr)
+		}
+	}
+	if _, err = pool.Exec(ctx, postPolicyManifestInsert, sourceID, wantStart.Add(-time.Microsecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE invoice_eligibility_policy
+		SET policy_version=policy_version+1,updated_by='forbidden-after-ingestion'
+		WHERE singleton_id=1`); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("post-ingestion policy update error=%v", err)
 	}
 }
 

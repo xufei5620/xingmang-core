@@ -239,3 +239,38 @@ func TestEncryptedCutoverStateIsAuthenticatedAndCreateOnly(t *testing.T) {
 		t.Fatal("cutover state is not an encrypted envelope")
 	}
 }
+
+func TestCutoverMustBeStrictlyBeforeEligibilityBoundary(t *testing.T) {
+	start := time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
+	manifest := CutoverManifest{
+		SourceType: SourceSub2API, ProjectionContract: "sub2api-economic-v3",
+		CutoverAt:     start.Add(-time.Microsecond).Format(time.RFC3339Nano),
+		DatabaseClock: start.Add(-time.Microsecond).Format(time.RFC3339Nano),
+	}
+	if err := ValidateCutoverEligibility(manifest, start); err != nil {
+		t.Fatalf("T-1us cutover rejected: %v", err)
+	}
+	for name, value := range map[string]time.Time{
+		"exact": start,
+		"after": start.Add(time.Microsecond),
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := manifest
+			candidate.CutoverAt = value.Format(time.RFC3339Nano)
+			candidate.DatabaseClock = value.Format(time.RFC3339Nano)
+			if err := ValidateCutoverEligibility(candidate, start); err == nil {
+				t.Fatal("cutover at or after eligibility start was accepted")
+			}
+		})
+	}
+	candidate := manifest
+	candidate.DatabaseClock = start.Format(time.RFC3339Nano)
+	if err := ValidateCutoverEligibility(candidate, start); err == nil {
+		t.Fatal("database clock at eligibility start was accepted")
+	}
+	candidate = manifest
+	candidate.ProjectionContract = "wrong-contract"
+	if err := ValidateCutoverEligibility(candidate, start); err == nil {
+		t.Fatal("wrong source projection contract was accepted")
+	}
+}

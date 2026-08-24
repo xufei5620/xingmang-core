@@ -47,6 +47,7 @@ services:
     entrypoint: ["/usr/local/bin/invoice-migrate"]
     environment:
       APP_ENV: production
+      ELIGIBILITY_START_AT: ${ELIGIBILITY_START_AT:?set immutable invoice eligibility start}
       DATABASE_URL_FILE: /run/secrets/invoice_owner_database_url
       MIGRATIONS_DIR: /app/migrations
     secrets:
@@ -207,6 +208,7 @@ services:
       SOURCE_MODE: agent
       HTTP_ADDR: :8088
       PUBLIC_ORIGIN: https://invoice.solov.cc
+      ELIGIBILITY_START_AT: ${ELIGIBILITY_START_AT:?set the immutable invoice eligibility start}
       DATABASE_URL_FILE: /run/secrets/invoice_app_database_url
       FIELD_KEYRING_FILE: /run/secrets/invoice_field_keyring
       SESSION_BINDING_KEY_FILE: /run/secrets/invoice_session_binding_key

@@ -22,6 +22,7 @@ const maxBootstrapFileBytes int64 = 64 << 10
 type bootstrapSettings struct {
 	IssuerName          string   `json:"issuer_name"`
 	MinimumRequestMinor int64    `json:"minimum_request_minor"`
+	EligibilityStartAt  string   `json:"eligibility_start_at"`
 	SMTPHost            string   `json:"smtp_host"`
 	SMTPPort            int      `json:"smtp_port"`
 	SMTPFrom            string   `json:"smtp_from"`
@@ -55,10 +56,15 @@ func run(ctx context.Context, databaseURLFile, settingsFile, actorID string) err
 		return err
 	}
 	defer store.Close()
+	eligibilityStartAt, err := time.Parse(time.RFC3339, strings.TrimSpace(settings.EligibilityStartAt))
+	if err != nil {
+		return fmt.Errorf("eligibility_start_at: %w", err)
+	}
 	service := adminsettings.NewService(adminsettings.NewPostgresRepository(store.Pool()), nil)
 	updated, err := service.Update(ctx, adminsettings.UpdateInput{
 		IssuerName: settings.IssuerName, MinimumRequestMinor: settings.MinimumRequestMinor,
-		SMTPHost: settings.SMTPHost, SMTPPort: settings.SMTPPort,
+		EligibilityStartAt: eligibilityStartAt.UTC(),
+		SMTPHost:           settings.SMTPHost, SMTPPort: settings.SMTPPort,
 		SMTPFrom: settings.SMTPFrom, SMTPFromName: settings.SMTPFromName,
 		SMTPStartTLS: settings.SMTPStartTLS, AdminCIDRs: settings.AdminCIDRs,
 	}, 0, adminsettings.Actor{

@@ -28,6 +28,8 @@ type eligibilityAccount struct {
 	PrincipalID       string
 	CutoverAt         time.Time
 	GlobalCutoverAt   time.Time
+	PolicyStartAt     time.Time
+	PolicyVersion     int64
 	UnitCode          string
 	ManifestHash      string
 	ConfigurationHash string
@@ -39,17 +41,18 @@ type eligibilityAccount struct {
 }
 
 type eligibilityFact struct {
-	Kind         string
-	ID           string
-	At           time.Time
-	Units        *big.Int
-	LotID        string
-	CreditID     string
-	UsageID      string
-	PaidMinor    int64
-	CausalDomain string
-	CausalOrder  *big.Int
-	Revision     string
+	Kind            string
+	ID              string
+	At              time.Time
+	Units           *big.Int
+	LotID           string
+	CreditID        string
+	UsageID         string
+	PaidMinor       int64
+	InvoiceEligible bool
+	CausalDomain    string
+	CausalOrder     *big.Int
+	Revision        string
 }
 
 type projectedLot struct {
@@ -178,6 +181,15 @@ func (s *Store) RegisterCutoverManifest(ctx context.Context, manifest CutoverMan
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,41))`, manifest.SourceInstanceID); err != nil {
 		return err
 	}
+	var policyStart time.Time
+	if err = tx.QueryRow(ctx, `SELECT eligibility_start_at FROM invoice_eligibility_policy
+		WHERE singleton_id=1`).Scan(&policyStart); err != nil {
+		return err
+	}
+	if !manifest.CutoverAt.UTC().Before(policyStart.UTC()) ||
+		!manifest.DatabaseClock.UTC().Before(policyStart.UTC()) {
+		return domain.ErrConflict
+	}
 	trustedSigningKey, err := verifyFactBatchContextTx(ctx, tx, manifest.SourceInstanceID, "balances",
 		manifest.ExternalEventID, manifest.BatchID, manifest.ScanCycleID, manifest.SourceRevision,
 		manifest.StreamWatermarkAt)
@@ -215,7 +227,12 @@ func (s *Store) RegisterCutoverManifest(ctx context.Context, manifest CutoverMan
 		}
 		return err
 	}
-	if configuredRuntime != manifest.SourceRuntimeVersion || manifest.UnitCode != expectedUnitForSource(sourceType) {
+	expectedContract := "sub2api-economic-v3"
+	if sourceType == domain.SourceNewAPI {
+		expectedContract = "newapi-economic-rc25-v3"
+	}
+	if configuredRuntime != manifest.SourceRuntimeVersion || manifest.UnitCode != expectedUnitForSource(sourceType) ||
+		manifest.ProjectionContract != expectedContract {
 		return domain.ErrConflict
 	}
 	_, err = tx.Exec(ctx, `
@@ -666,13 +683,16 @@ func getEligibilityAccountTx(ctx context.Context, tx pgx.Tx, accountID string, l
 	var delaySeconds int
 	err := tx.QueryRow(ctx, `
 		SELECT eas.external_account_id,eas.source_instance_id,ea.invoice_user_id,eas.cutover_at,scm.cutover_at,
+			policy.eligibility_start_at,policy.policy_version,
 			eas.unit_code,eas.cutover_manifest_hash,scm.configuration_hash,eas.bootstrap_kind,eas.finalized_through,
 			eas.finalization_delay_seconds,eas.eligibility_status,eas.projection_version
 		FROM source_account_eligibility_state eas
 		JOIN external_accounts ea ON ea.id=eas.external_account_id
 		JOIN source_cutover_manifests scm ON scm.source_instance_id=eas.source_instance_id
+		CROSS JOIN invoice_eligibility_policy policy
 		WHERE eas.external_account_id=$1`+clause, accountID).Scan(
 		&account.ExternalAccountID, &account.SourceInstanceID, &account.PrincipalID, &account.CutoverAt, &account.GlobalCutoverAt,
+		&account.PolicyStartAt, &account.PolicyVersion,
 		&account.UnitCode, &account.ManifestHash, &account.ConfigurationHash, &account.BootstrapKind, &account.FinalizedThrough,
 		&delaySeconds, &account.Status, &account.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -950,8 +970,8 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
 				cutover_manifest_hash,bootstrap_kind,finalized_through,finalization_delay_seconds,
 				catchup_key_hmac,eligibility_status)
-			VALUES($1,$2,$3,$4,$5::numeric,$6,'POST_CUTOVER_CONSERVATIVE',$3,$7,NULLIF($8,''),$9)`,
-			accountID, in.SourceInstanceID, in.AsOf.UTC(), in.UnitCode, balance.String(),
+			VALUES($1,$2,$3,$4,0,$5,'POST_CUTOVER_REPLAY',$3,$6,NULLIF($7,''),$8)`,
+			accountID, in.SourceInstanceID, manifest.CutoverAt.UTC(), in.UnitCode,
 			in.CutoverManifestHash, int(defaultEligibilityFinalizationDelay/time.Second),
 			in.CatchupKeyHMAC, eligibilityStatus)
 		if err != nil {
@@ -966,7 +986,7 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
 				source_cursor,stream_watermark_at,source_revision_hash,observed_at)
 			VALUES($1,$2,$3,$4,$5,'reconciliation',FALSE,$6,$7,$8,$9::numeric,$10,$11,$12,$13,
-				'cutover_baseline',$14,$15,$16,$17,$18)`, checkpointID, in.SourceInstanceID,
+				'pending_finalization',$14,$15,$16,$17,$18)`, checkpointID, in.SourceInstanceID,
 			accountID, in.ExternalEventID, in.CheckpointID, in.SourceSnapshotID,
 			snapshotRows.Int64(), in.AsOf.UTC(), balance.String(),
 			in.BalanceNegative, in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash,
@@ -975,18 +995,13 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 		if err != nil {
 			return err
 		}
-		legacyID := randomUUID()
-		_, err = tx.Exec(ctx, `
-			INSERT INTO source_credit_events(
-				id,source_instance_id,external_account_id,external_event_id,external_credit_id,
-				event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
-				credit_kind,source_sequence,source_cursor,stream_watermark_at,
-				source_revision_hash,observed_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,'LEGACY_NON_INVOICEABLE',
-				0,$11,$6,$12,$13)`, legacyID, in.SourceInstanceID, accountID,
-			"post-cutover-legacy:"+in.ExternalEventID, "post-cutover-legacy:"+in.CheckpointID,
-			in.AsOf.UTC(), balance.String(), in.UnitCode, in.CutoverManifestHash,
-			in.ConfigurationHash, in.SourceCursor, in.SourceRevision, in.ObservedAt.UTC())
+		_, err = tx.Exec(ctx, `INSERT INTO eligibility_projection_jobs(
+			external_account_id,requested_through,status,next_attempt_at)
+			VALUES($1,$2,'queued',now())
+			ON CONFLICT(external_account_id) DO UPDATE SET
+				requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
+				status='queued',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now(),updated_at=now()`,
+			accountID, in.AsOf.UTC())
 		if err != nil {
 			return err
 		}
@@ -996,9 +1011,9 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				return err
 			}
 		}
-		if err = writeAudit(ctx, tx, actor, "eligibility.post_cutover_account_bootstrapped",
-			"external_account", accountID, nil, map[string]any{"cutover_at": in.AsOf,
-				"baseline_noninvoiceable_units": balance.String(), "status": eligibilityStatus}); err != nil {
+		if err = writeAudit(ctx, tx, actor, "eligibility.post_cutover_account_replay_bootstrapped",
+			"external_account", accountID, nil, map[string]any{"cutover_at": manifest.CutoverAt,
+				"reconcile_at": in.AsOf, "opening_units": "0", "status": eligibilityStatus}); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -1168,8 +1183,7 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 		}
 		return err
 	}
-	preBootstrapHistorical := !in.EventTime.After(account.CutoverAt) && account.BootstrapKind == "POST_CUTOVER_CONSERVATIVE"
-	if !in.EventTime.After(account.CutoverAt) && !preBootstrapHistorical {
+	if !in.EventTime.After(account.CutoverAt) {
 		if err = freezeEligibilityTx(ctx, tx, accountID, "", "SOURCE_GAP", in.Kind, in.ExternalObjectID, in.SourceRevision, actor); err != nil {
 			return err
 		}
@@ -1208,16 +1222,17 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 	id := randomUUID()
 	causalOrder := nullableBigInt(in.CausalOrder)
 	if in.Kind == "usage" {
+		invoiceEligible := !in.EventTime.Before(account.PolicyStartAt)
 		_, err = tx.Exec(ctx, `
 			INSERT INTO source_usage_events(
 				id,source_instance_id,external_account_id,external_event_id,external_usage_id,
 				event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
-				billing_scope,causal_domain,causal_order,source_sequence,source_cursor,
+				billing_scope,invoice_eligible,causal_domain,causal_order,source_sequence,source_cursor,
 				stream_watermark_at,source_revision_hash,observed_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,NULLIF($12,''),$13::numeric,
-				$14,$15,$16,$17,$18)`, id, in.SourceInstanceID, accountID, in.ExternalEventID,
+			VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,NULLIF($13,''),$14::numeric,
+				$15,$16,$17,$18,$19)`, id, in.SourceInstanceID, accountID, in.ExternalEventID,
 			in.ExternalObjectID, in.EventTime.UTC(), in.Units.String(), in.UnitCode,
-			in.CutoverManifestHash, in.ConfigurationHash, in.DetailKind, in.CausalDomain,
+			in.CutoverManifestHash, in.ConfigurationHash, in.DetailKind, invoiceEligible, in.CausalDomain,
 			causalOrder, in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt.UTC(),
 			in.SourceRevision, in.ObservedAt.UTC())
 	} else {
@@ -1237,7 +1252,7 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 	if err != nil {
 		return err
 	}
-	late := !preBootstrapHistorical && !in.EventTime.After(account.FinalizedThrough)
+	late := !in.EventTime.After(account.FinalizedThrough)
 	if late {
 		if err = reprojectEligibilityTx(ctx, tx, accountID, account.FinalizedThrough, actor); err != nil {
 			return err
@@ -1248,7 +1263,7 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 	}
 	if err = writeAudit(ctx, tx, actor, "eligibility."+in.Kind+".observed", in.Kind, id,
 		nil, map[string]any{"event_time": in.EventTime, "late": late,
-			"pre_bootstrap_historical": preBootstrapHistorical, "source_revision": in.SourceRevision}); err != nil {
+			"source_revision": in.SourceRevision}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1311,8 +1326,9 @@ func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligib
 		JOIN funding_lot_consumption_state flcs ON flcs.funding_lot_id=fl.id
 		WHERE fl.external_account_id=$1 AND fl.eligibility_kind='WALLET_CASH'
 			AND fl.completed_at>$3 AND fl.completed_at<=$2
+			AND fl.completed_at>=$4
 			AND fl.verification_state='verified' AND fl.refund_frozen=FALSE
-		ORDER BY fl.completed_at,fl.id FOR UPDATE OF fl,flcs`, account.ExternalAccountID, through, account.CutoverAt)
+		ORDER BY fl.completed_at,fl.id FOR UPDATE OF fl,flcs`, account.ExternalAccountID, through, account.CutoverAt, account.PolicyStartAt)
 	if err != nil {
 		return projection, err
 	}
@@ -1355,7 +1371,7 @@ func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligib
 	rows.Close()
 
 	rows, err = tx.Query(ctx, `
-		SELECT id,event_time,service_units::text,COALESCE(causal_domain,''),
+		SELECT id,event_time,service_units::text,invoice_eligible,COALESCE(causal_domain,''),
 			COALESCE(causal_order::text,''),source_revision_hash
 		FROM source_usage_events
 		WHERE external_account_id=$1 AND event_time>$3 AND event_time<=$2
@@ -1366,7 +1382,8 @@ func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligib
 	for rows.Next() {
 		var id, unitsText, causalDomain, causalOrder, revision string
 		var at time.Time
-		if err = rows.Scan(&id, &at, &unitsText, &causalDomain, &causalOrder, &revision); err != nil {
+		var invoiceEligible bool
+		if err = rows.Scan(&id, &at, &unitsText, &invoiceEligible, &causalDomain, &causalOrder, &revision); err != nil {
 			rows.Close()
 			return projection, err
 		}
@@ -1381,7 +1398,8 @@ func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligib
 			return projection, parseErr
 		}
 		facts = append(facts, eligibilityFact{Kind: "usage", ID: id, UsageID: id,
-			At: at, Units: units, CausalDomain: domainValue, CausalOrder: order, Revision: revision})
+			At: at, Units: units, InvoiceEligible: invoiceEligible,
+			CausalDomain: domainValue, CausalOrder: order, Revision: revision})
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
@@ -1450,6 +1468,12 @@ func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligib
 				})
 				nonCash[i].remaining.Sub(nonCash[i].remaining, amount)
 				remaining.Sub(remaining, amount)
+			}
+			if !fact.InvoiceEligible {
+				if remaining.Sign() > 0 && projection.ShortfallUsage == "" {
+					projection.ShortfallUsage = fact.UsageID
+				}
+				continue
 			}
 			for i := range cash {
 				if remaining.Sign() == 0 {
@@ -2022,11 +2046,11 @@ func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID,
 		}
 		return err
 	}
-	eligibilityCutover := account.CutoverAt
+	sourceCutover := account.CutoverAt
 	if in.EligibilityKind == domain.EligibilitySubscriptionCash {
-		eligibilityCutover = account.GlobalCutoverAt
+		sourceCutover = account.GlobalCutoverAt
 	}
-	if in.Lot.CompletedAt.IsZero() || !in.Lot.CompletedAt.After(eligibilityCutover) {
+	if in.Lot.CompletedAt.IsZero() || !in.Lot.CompletedAt.After(sourceCutover) {
 		return nil
 	}
 	cashUnits, err := parseUnsignedUnits(in.CashServiceUnits, "wallet cash service units", in.EligibilityKind == domain.EligibilitySubscriptionCash)
@@ -2038,6 +2062,16 @@ func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID,
 		return err
 	}
 	in.CausalDomain = parsedDomain
+	if in.Lot.CompletedAt.Before(account.PolicyStartAt) {
+		if in.EligibilityKind == domain.EligibilityWalletCash {
+			return applyPrePolicyWalletFundingTx(ctx, tx, lotID, accountID, account, in, cashUnits, parsedOrder, actor)
+		}
+		return nil
+	}
+	eligibilityCutover := sourceCutover
+	if eligibilityCutover.Before(account.PolicyStartAt) {
+		eligibilityCutover = account.PolicyStartAt
+	}
 	var causalOrder any
 	if parsedOrder != nil {
 		causalOrder = parsedOrder.String()
@@ -2093,10 +2127,6 @@ func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID,
 		}
 	}
 	consumed := oldConsumed
-	if in.EligibilityKind == domain.EligibilitySubscriptionCash &&
-		verification == domain.VerificationVerified && !refundFrozen {
-		consumed = verifiedCash
-	}
 	if refundFrozen {
 		consumed = oldConsumed
 	}
@@ -2128,10 +2158,7 @@ func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID,
 	if refundFrozen {
 		return nil
 	}
-	conservativeSubscriptionCatchup := account.BootstrapKind == "POST_CUTOVER_CONSERVATIVE" &&
-		in.EligibilityKind == domain.EligibilitySubscriptionCash &&
-		in.Lot.CompletedAt.After(account.GlobalCutoverAt) && !in.Lot.CompletedAt.After(account.CutoverAt)
-	if !in.Lot.CompletedAt.After(account.FinalizedThrough) && oldVerified == 0 && !conservativeSubscriptionCatchup {
+	if !in.Lot.CompletedAt.After(account.FinalizedThrough) && oldVerified == 0 {
 		// The payment fact itself was present before finalization only when this
 		// is a later independent evidence approval. A first-seen payment after a
 		// published boundary violates completeness and freezes instead.
@@ -2141,16 +2168,6 @@ func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID,
 		}
 	}
 	return nil
-}
-
-func finalizeSubscriptionsTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time) error {
-	_, err := tx.Exec(ctx, `
-		UPDATE funding_lots fl SET consumed_cash_minor=fl.verified_cash_minor,
-			eligibility_revision=eligibility_revision+1,updated_at=now()
-		WHERE fl.external_account_id=$1 AND fl.eligibility_kind='SUBSCRIPTION_CASH'
-			AND fl.completed_at<=$2 AND fl.verification_state='verified' AND fl.refund_frozen=FALSE
-			AND fl.consumed_cash_minor<fl.verified_cash_minor`, accountID, through)
-	return err
 }
 
 func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, lease string, actor AuditActor) error {
@@ -2180,9 +2197,6 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 	if requested.Before(account.FinalizedThrough) {
 		requested = account.FinalizedThrough
 	}
-	if err = finalizeSubscriptionsTx(ctx, tx, accountID, requested); err != nil {
-		return err
-	}
 	if err = reprojectEligibilityTx(ctx, tx, accountID, requested, actor); err != nil {
 		return err
 	}
@@ -2208,6 +2222,99 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		return domain.ErrConflict
 	}
 	return tx.Commit(ctx)
+}
+
+func applyPrePolicyWalletFundingTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	lotID, accountID string,
+	account eligibilityAccount,
+	in SourceObservation,
+	cashUnits *big.Int,
+	causalOrder *big.Int,
+	actor AuditActor,
+) error {
+	var existingKind domain.EligibilityKind
+	var verification domain.VerificationState
+	var currentCap, reserved, issued int64
+	if err := tx.QueryRow(ctx, `
+		SELECT eligibility_kind,verification_state,current_cap_minor,reserved_minor,issued_minor
+		FROM funding_lots WHERE id=$1 FOR UPDATE`, lotID).Scan(
+		&existingKind, &verification, &currentCap, &reserved, &issued); err != nil {
+		return err
+	}
+	if (existingKind != domain.EligibilityLegacyNonInvoiceable && existingKind != domain.EligibilityNonCash) ||
+		reserved != 0 || issued != 0 {
+		return freezeEligibilityTx(ctx, tx, accountID, lotID, "EVENT_PAYLOAD_DRIFT", "funding_lot", lotID,
+			in.Lot.SourceRevision, actor)
+	}
+	verifiedHistoricalCash := int64(0)
+	if verification == domain.VerificationVerified {
+		verifiedHistoricalCash = currentCap
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE funding_lots SET eligibility_kind='NON_CASH',eligibility_cutover_at=$1,
+			verified_cash_minor=$2,consumed_cash_minor=0,
+			eligibility_revision=eligibility_revision+1,updated_at=now()
+		WHERE id=$3 AND eligibility_kind IN ('LEGACY_NON_INVOICEABLE','NON_CASH')
+			AND reserved_minor=0 AND issued_minor=0`, account.PolicyStartAt, verifiedHistoricalCash, lotID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return domain.ErrConflict
+	}
+	causalOrderText := ""
+	if causalOrder != nil {
+		causalOrderText = causalOrder.String()
+	}
+	var existingUnits, existingUnitCode, existingManifest, existingConfiguration string
+	var existingAt time.Time
+	var existingDomain, existingOrder string
+	err = tx.QueryRow(ctx, `
+		SELECT service_units::text,event_time,unit_code,cutover_manifest_hash,
+			configuration_hash,COALESCE(causal_domain,''),COALESCE(causal_order::text,'')
+		FROM source_credit_events
+		WHERE funding_lot_id=$1 AND credit_kind='PRE_POLICY_NON_INVOICEABLE'
+		FOR UPDATE`, lotID).Scan(&existingUnits, &existingAt, &existingUnitCode,
+		&existingManifest, &existingConfiguration, &existingDomain, &existingOrder)
+	if err == nil {
+		if existingUnits != cashUnits.String() || !existingAt.Equal(in.Lot.CompletedAt.UTC()) ||
+			existingUnitCode != in.WalletUnitCode || existingManifest != in.CutoverManifestHash ||
+			existingConfiguration != in.ConfigurationHash || existingDomain != in.CausalDomain ||
+			existingOrder != causalOrderText {
+			return freezeEligibilityTx(ctx, tx, accountID, lotID, "EVENT_PAYLOAD_DRIFT", "funding_lot", lotID,
+				in.Lot.SourceRevision, actor)
+		}
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	derivedID := randomUUID()
+	derivedExternalID := "pre-policy:" + lotID
+	_, err = tx.Exec(ctx, `
+		INSERT INTO source_credit_events(
+			id,source_instance_id,external_account_id,external_event_id,external_credit_id,
+			funding_lot_id,event_time,service_units,unit_code,cutover_manifest_hash,
+			configuration_hash,credit_kind,causal_domain,causal_order,source_sequence,
+			source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+		VALUES($1,$2,$3,$4,$4,$5,$6,$7::numeric,$8,$9,$10,
+			'PRE_POLICY_NON_INVOICEABLE',NULLIF($11,''),$12::numeric,$13,$14,$15,$16,$17)`,
+		derivedID, in.Lot.SourceInstanceID, accountID, derivedExternalID, lotID,
+		in.Lot.CompletedAt.UTC(), cashUnits.String(), in.WalletUnitCode,
+		in.CutoverManifestHash, in.ConfigurationHash, in.CausalDomain,
+		nullableBigInt(causalOrder), in.SourceSequence, in.SourceCursor,
+		in.StreamWatermarkAt.UTC(), in.Lot.SourceRevision, in.Lot.ObservedAt.UTC())
+	if err != nil {
+		return err
+	}
+	if !in.Lot.CompletedAt.After(account.FinalizedThrough) {
+		return freezeEligibilityTx(ctx, tx, accountID, lotID, "LATE_FINALIZED_EVENT", "funding_lot", lotID,
+			in.Lot.SourceRevision, actor)
+	}
+	return writeAudit(ctx, tx, actor, "eligibility.pre_policy_funding_classified", "funding_lot", lotID,
+		nil, map[string]any{"eligibility_start_at": account.PolicyStartAt, "credit_event_id": derivedID})
 }
 
 func evaluatePendingCheckpointsTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, actor AuditActor) error {

@@ -65,7 +65,7 @@ func TestBaselineMemberReconciliationWaitsWithoutConsumingRetryBudget(t *testing
 		baseline_row_count,signing_key_id)
 		VALUES($1,$2,$3,$3,'wait-v3','sub2api-economic-v3',$4,'SUB2_BALANCE_1E8',
 		'p0','u0','c0','b0',$5,$5,1,'wait-key')`, sourceID, manifestHash,
-		now.Add(-time.Hour), configHash, snapshotHash); err != nil {
+		now.Add(-25*time.Hour), configHash, snapshotHash); err != nil {
 		t.Fatal(err)
 	}
 	member := true
@@ -196,9 +196,27 @@ func integrationApplication(t *testing.T) (*Service, *postgresstore.Store, *muta
 	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
 	}
+	testPolicyStart := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+	// This disposable schema moves the boundary only to keep integration facts
+	// near the test clock. Production policy updates are permanently rejected.
+	if _, err = pool.Exec(ctx, `ALTER TABLE invoice_eligibility_policy
+		DISABLE TRIGGER invoice_eligibility_policy_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE invoice_eligibility_policy
+		SET eligibility_start_at=$1,policy_version=policy_version+1,
+			updated_by='application-integration-test' WHERE singleton_id=1`,
+		testPolicyStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `ALTER TABLE invoice_eligibility_policy
+		ENABLE TRIGGER invoice_eligibility_policy_guard`); err != nil {
+		t.Fatal(err)
+	}
 	settings := &mutableSettings{value: adminsettings.Settings{
 		IssuerName: "测试开票主体", ServiceItem: domain.FixedServiceItem,
-		MinimumRequestMinor: domain.MinimumRequestMinor, Revision: 7,
+		MinimumRequestMinor: domain.MinimumRequestMinor, EligibilityStartAt: testPolicyStart,
+		EligibilityPolicyVersion: 2, Revision: 7,
 	}}
 	store := postgresstore.New(pool)
 	service, err := NewService(store, testKeys(), settings, Options{
@@ -306,12 +324,18 @@ func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {
 		t.Fatalf("status=%s", request.Status)
 	}
 	immutable, err := service.GetIssueSnapshot(ctx, adminID, request.ID)
-	if err != nil || immutable.IssuerName != "测试开票主体" || immutable.SettingsRevision != 7 {
+	currentSettings, settingsErr := settings.Get(ctx)
+	if err != nil || settingsErr != nil || immutable.IssuerName != "测试开票主体" ||
+		immutable.SettingsRevision != 7 ||
+		!immutable.EligibilityStartAt.Equal(currentSettings.EligibilityStartAt) ||
+		immutable.EligibilityPolicyVersion != currentSettings.EligibilityPolicyVersion {
 		t.Fatalf("issue snapshot=%+v err=%v", immutable, err)
 	}
 	settings.set(adminsettings.Settings{
 		IssuerName: "新开票主体", ServiceItem: domain.FixedServiceItem,
-		MinimumRequestMinor: domain.MinimumRequestMinor, Revision: 8,
+		MinimumRequestMinor:      domain.MinimumRequestMinor,
+		EligibilityStartAt:       currentSettings.EligibilityStartAt,
+		EligibilityPolicyVersion: currentSettings.EligibilityPolicyVersion, Revision: 8,
 	})
 	stillImmutable, err := service.GetIssueSnapshot(ctx, adminID, request.ID)
 	if err != nil || stillImmutable != immutable {

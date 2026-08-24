@@ -26,6 +26,7 @@ import (
 )
 
 var buildVersion = "0.3.0"
+var requiredEligibilityStartAt = time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
 
 var productionSourceIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
 
@@ -57,6 +58,7 @@ type runConfig struct {
 	MTLSServerName         string
 	SigningKeyFile         string
 	SigningKeyID           string
+	EligibilityStartAt     time.Time
 	ScanLimit              int
 	PollInterval           time.Duration
 	ReconcileInterval      time.Duration
@@ -117,6 +119,18 @@ func main() {
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage: source-agent-prod init-state|init-reconcile|cutover-init|check-cutover|check-db|check-state|healthcheck|run|version")
 	os.Exit(2)
+}
+
+func loadEligibilityStart(getenv func(string) string) (time.Time, error) {
+	if getenv == nil {
+		return time.Time{}, errors.New("environment reader is required")
+	}
+	raw := strings.TrimSpace(getenv("ELIGIBILITY_START_AT"))
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if raw == "" || err != nil || !parsed.UTC().Equal(requiredEligibilityStartAt) {
+		return time.Time{}, errors.New("ELIGIBILITY_START_AT must equal 2026-09-01T00:00:00+08:00")
+	}
+	return requiredEligibilityStartAt, nil
 }
 
 func checkDatabaseFromEnvironment() error {
@@ -187,7 +201,8 @@ func cutoverInitFromEnvironment() error {
 	defer database.Close()
 	manifest, err := sourceagent.CaptureCutover(ctx, database, sourceagent.CutoverCaptureConfig{
 		SourceID: config.SourceID, SourceType: config.SourceType, SourceRuntime: config.SourceRuntime,
-		SigningKeyID: config.SigningKeyID, Manifest: manifestStore, Snapshot: snapshotStore})
+		SigningKeyID: config.SigningKeyID, EligibilityStartAt: config.EligibilityStartAt,
+		Manifest: manifestStore, Snapshot: snapshotStore})
 	if err != nil {
 		return err
 	}
@@ -207,6 +222,9 @@ func checkCutoverFromEnvironment() error {
 	if manifest.SigningKeyID != config.SigningKeyID {
 		return errors.New("cutover signing key id mismatch")
 	}
+	if err = sourceagent.ValidateCutoverEligibility(manifest, config.EligibilityStartAt); err != nil {
+		return err
+	}
 	log.Printf("cutover valid source=%q at=%q manifest_hash=%q baseline_snapshot=%q rows=%d", config.SourceID, manifest.CutoverAt, manifest.ManifestHash, snapshot.SnapshotID, len(snapshot.Rows))
 	return nil
 }
@@ -216,6 +234,11 @@ func loadCutoverCommandConfig(getenv func(string) string) (runConfig, sourceagen
 		ProtocolVersion: sourceagent.SchemaVersionV3, StreamID: sourceagent.StreamBalances, DatabaseDSNFile: strings.TrimSpace(getenv("SOURCE_DB_DSN_FILE")),
 		CutoverManifestFile: strings.TrimSpace(getenv("SOURCE_CUTOVER_MANIFEST_FILE")), CutoverKeyFile: strings.TrimSpace(getenv("SOURCE_CUTOVER_KEY_FILE")),
 		BalanceBaselineFile: strings.TrimSpace(getenv("SOURCE_BALANCE_BASELINE_FILE")), BalanceSnapshotKeyFile: strings.TrimSpace(getenv("SOURCE_BALANCE_SNAPSHOT_KEY_FILE")), SigningKeyID: strings.TrimSpace(getenv("SOURCE_SIGNING_KEY_ID"))}
+	eligibilityStart, err := loadEligibilityStart(getenv)
+	if err != nil {
+		return runConfig{}, sourceagent.EncryptedStateFile{}, sourceagent.EncryptedStateFile{}, err
+	}
+	config.EligibilityStartAt = eligibilityStart
 	if !productionSourceIDPattern.MatchString(config.SourceID) || (config.SourceType != sourceagent.SourceSub2API && config.SourceType != sourceagent.SourceNewAPI) || config.SourceRuntime == "" || sourceagent.ValidateSigningKeyID(config.SigningKeyID) != nil {
 		return runConfig{}, sourceagent.EncryptedStateFile{}, sourceagent.EncryptedStateFile{}, errors.New("cutover requires source UUID/type/runtime and signing key id")
 	}
@@ -310,6 +333,13 @@ func checkStateFromEnvironment() error {
 		manifest, loadErr := sourceagent.LoadCutoverManifest(context.Background(), manifestStore, sourceID, sourceType, strings.TrimSpace(os.Getenv("SOURCE_RUNTIME_VERSION")))
 		if loadErr != nil {
 			return fmt.Errorf("check cutover manifest: %w", loadErr)
+		}
+		eligibilityStart, policyErr := loadEligibilityStart(os.Getenv)
+		if policyErr != nil {
+			return policyErr
+		}
+		if loadErr = sourceagent.ValidateCutoverEligibility(manifest, eligibilityStart); loadErr != nil {
+			return loadErr
 		}
 		if streamID == sourceagent.StreamBalances && manifest.SigningKeyID != strings.TrimSpace(os.Getenv("SOURCE_SIGNING_KEY_ID")) {
 			return errors.New("cutover manifest signing key id mismatch")
@@ -511,6 +541,12 @@ func loadRunConfig(getenv func(string) string) (runConfig, error) {
 	var err error
 	if config.ProtocolVersion == "" {
 		config.ProtocolVersion = sourceagent.SchemaVersionV2
+	}
+	if config.ProtocolVersion == sourceagent.SchemaVersionV3 {
+		config.EligibilityStartAt, err = loadEligibilityStart(getenv)
+		if err != nil {
+			return runConfig{}, err
+		}
 	}
 	if config.IngestionPorts, err = parsePorts(getenv("INGESTION_ALLOWED_PORTS")); err != nil {
 		return runConfig{}, err
@@ -1077,6 +1113,9 @@ func buildDBConnector(config runConfig, database *sql.DB) (sourceagent.Connector
 		manifest, err := sourceagent.LoadCutoverManifest(context.Background(), manifestStore, config.SourceID, config.SourceType, config.SourceRuntime)
 		if err != nil {
 			return nil, fmt.Errorf("load encrypted cutover manifest: %w", err)
+		}
+		if err = sourceagent.ValidateCutoverEligibility(manifest, config.EligibilityStartAt); err != nil {
+			return nil, err
 		}
 		if config.StreamID == sourceagent.StreamBalances && manifest.SigningKeyID != config.SigningKeyID {
 			return nil, errors.New("cutover manifest signing key id differs from this stream")

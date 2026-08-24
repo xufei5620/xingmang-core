@@ -19,6 +19,14 @@ umask 077
 : "${SUB2API_BALANCES_SIGNING_KEY_ID:?set the cutover manifest signing key id}"
 : "${NEWAPI_BALANCES_SIGNING_KEY_ID:?set the cutover manifest signing key id}"
 
+eligibility_start_at='2026-09-01T00:00:00+08:00'
+eligibility_start_utc='2026-08-31T16:00:00Z'
+restore_schema_mode=${RESTORE_SCHEMA_MODE:-post-0011}
+[[ "$restore_schema_mode" == 'pre-0011' || "$restore_schema_mode" == 'post-0011' ]] || {
+  echo 'RESTORE_SCHEMA_MODE must be pre-0011 or post-0011' >&2
+  exit 2
+}
+
 for command in age docker sha256sum tar find cmp grep ssh-keygen stat; do command -v "$command" >/dev/null; done
 for file in "$DATABASE_BACKUP" "$DOCUMENT_BACKUP" "$SOURCE_STATE_BACKUP" "$METADATA_BACKUP" "$BACKUP_MANIFEST" "$BACKUP_SIGNATURE" "$BACKUP_ALLOWED_SIGNERS_FILE" "$AGE_IDENTITY_FILE" "$FIELD_KEYRING_FILE"; do
   test -f "$file" && test ! -L "$file" && test -s "$file"
@@ -117,6 +125,11 @@ else
   : "${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag or INVOICE_TOOLS_IMAGE}"
   invoice_tools_image="invoice-system-tools:$INVOICE_IMAGE_TAG"
 fi
+database_verify_image=$invoice_tools_image
+if [[ "$restore_schema_mode" == 'pre-0011' ]]; then
+  : "${PRE_0011_TOOLS_IMAGE:?set the exact RC17 tools image for pre-0011 migration verification}"
+  database_verify_image=$PRE_0011_TOOLS_IMAGE
+fi
 validate_tar() {
   local archive="$1"
   local max_total="$2"
@@ -145,6 +158,12 @@ fi
   cd "$temporary/metadata"
   sha256sum -c metadata-files.sha256
 )
+test -f "$temporary/metadata/backup-schema-mode.txt"
+metadata_schema_mode=$(<"$temporary/metadata/backup-schema-mode.txt")
+[[ "$metadata_schema_mode" == "$restore_schema_mode" ]] || {
+  echo 'requested restore schema mode does not match signed backup metadata' >&2
+  exit 1
+}
 
 source_directories=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
 source_agent_image=${SOURCE_AGENT_IMAGE:-invoice-source-agent:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag or SOURCE_AGENT_IMAGE}}
@@ -193,6 +212,7 @@ for directory in "${source_directories[@]}"; do
     find "$cutover_dir" -type d -exec chmod 0700 {} +
     find "$cutover_dir" -type f -exec chmod 0600 {} +
     docker_args+=(--env SOURCE_SCHEMA_VERSION=3.0 --env "SOURCE_RUNTIME_VERSION=$runtime_version"
+      --env "ELIGIBILITY_START_AT=$eligibility_start_at"
       --env "SOURCE_SIGNING_KEY_ID=$balances_signing_key_id"
       --env SOURCE_CUTOVER_MANIFEST_FILE=/cutover/manifest.enc
       --env SOURCE_CUTOVER_KEY_FILE=/run/secrets/cutover-key
@@ -246,6 +266,29 @@ docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d invoice \
 cmp "$temporary/metadata/schema-migrations.csv" "$temporary/restored-schema-migrations.csv"
 cmp "$temporary/metadata/invoice-documents.csv" "$temporary/restored-invoice-documents.csv"
 cmp "$temporary/metadata/source-receiver-state.csv" "$temporary/restored-source-receiver-state.csv"
+if [[ "$restore_schema_mode" == 'post-0011' ]]; then
+  docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d invoice \
+    -c "COPY (SELECT singleton_id,to_char(eligibility_start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS eligibility_start_utc,display_timezone,require_payment_at_or_after,require_usage_at_or_after,policy_version FROM invoice_eligibility_policy ORDER BY singleton_id) TO STDOUT WITH CSV HEADER" \
+    >"$temporary/restored-invoice-eligibility-policy.csv"
+  cmp "$temporary/metadata/invoice-eligibility-policy.csv" "$temporary/restored-invoice-eligibility-policy.csv"
+  restored_policy=$(docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d invoice -At -F '|' -c \
+    "SELECT to_char(eligibility_start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),display_timezone,require_payment_at_or_after,require_usage_at_or_after,policy_version FROM invoice_eligibility_policy WHERE singleton_id=1")
+  [[ "$restored_policy" == "$eligibility_start_utc|Asia/Shanghai|t|t|1" ]] || {
+    echo 'restored immutable invoice eligibility policy mismatch' >&2
+    exit 1
+  }
+else
+  [[ "$(<"$temporary/metadata/invoice-eligibility-policy.csv")" == $'schema_mode\npre-0011' ]] || {
+    echo 'signed pre-0011 eligibility policy marker is invalid' >&2
+    exit 1
+  }
+  restored_pre_policy=$(docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d invoice -At -F '|' -c \
+    "SELECT to_regclass('invoice_eligibility_policy') IS NULL,(SELECT count(*) FROM schema_migrations WHERE name='0011_invoice_eligibility_policy.sql')")
+  [[ "$restored_pre_policy" == 't|0' ]] || {
+    echo 'restored database is not the signed pre-0011 schema' >&2
+    exit 1
+  }
+fi
 
 install -m 0400 "$FIELD_KEYRING_FILE" "$temporary/field-keyring.json"
 printf '%s\n' 'postgres://postgres:restore-drill-only@postgres:5432/invoice?sslmode=disable' >"$temporary/database-url"
@@ -256,7 +299,7 @@ docker run --rm --read-only --network "$network" --user 10001:10001 \
   --mount "type=bind,src=$temporary/documents,dst=/restore/documents,readonly" \
   --mount "type=bind,src=$temporary/field-keyring.json,dst=/run/secrets/field-keyring.json,readonly" \
   --mount "type=bind,src=$temporary/database-url,dst=/run/secrets/database-url,readonly" \
-  --entrypoint /usr/local/bin/invoice-backup-verify "$invoice_tools_image" \
+  --entrypoint /usr/local/bin/invoice-backup-verify "$database_verify_image" \
   --database-url-file /run/secrets/database-url \
   --document-root /restore/documents \
   --field-keyring-file /run/secrets/field-keyring.json \

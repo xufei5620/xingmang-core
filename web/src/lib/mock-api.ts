@@ -248,6 +248,10 @@ let systemSettings: InvoiceSystemSettings = {
   issuerName: "上海星河智能科技有限公司",
   serviceItem: "技术服务",
   minimumRequestMinor: 20_000,
+  eligibilityStartAt: "2026-08-31T16:00:00Z",
+  eligibilityPolicyVersion: 1,
+  eligibilityTimezone: "Asia/Shanghai",
+  eligibilityRule: "payment_and_usage_at_or_after",
   smtp: {
     fromAddress: "invoice@solov.cc",
     fromName: "SoloV 开票中心",
@@ -490,6 +494,10 @@ export const mockInvoiceApi: InvoiceApiClient = {
     return {
       minimumRequestMinor: systemSettings.minimumRequestMinor,
       serviceItem: systemSettings.serviceItem,
+      eligibilityStartAt: systemSettings.eligibilityStartAt,
+      eligibilityPolicyVersion: systemSettings.eligibilityPolicyVersion,
+      eligibilityTimezone: systemSettings.eligibilityTimezone,
+      eligibilityRule: systemSettings.eligibilityRule,
     } as const;
   },
 

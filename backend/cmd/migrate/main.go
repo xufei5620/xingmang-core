@@ -17,6 +17,10 @@ import (
 )
 
 func main() {
+	if err := validateMigrationEligibilityPolicy(); err != nil {
+		slog.Error("validate immutable invoice eligibility policy", "error", err)
+		os.Exit(1)
+	}
 	databaseURL, err := migrationDatabaseURL()
 	if err != nil {
 		slog.Error("load database credential", "error", err)
@@ -47,6 +51,19 @@ func main() {
 		}
 		slog.Info("database migrations applied")
 	}
+}
+
+func validateMigrationEligibilityPolicy() error {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
+		return nil
+	}
+	raw := strings.TrimSpace(os.Getenv("ELIGIBILITY_START_AT"))
+	parsed, err := time.Parse(time.RFC3339, raw)
+	required := time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
+	if raw == "" || err != nil || !parsed.UTC().Equal(required) {
+		return errors.New("ELIGIBILITY_START_AT must equal 2026-09-01T00:00:00+08:00 before production migration")
+	}
+	return nil
 }
 
 func migrationDatabaseURL() (string, error) {

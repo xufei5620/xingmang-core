@@ -239,12 +239,44 @@ func (s EncryptedStateFile) validate() error {
 func (s EncryptedStateFile) aad() []byte { return []byte("invoice-source-state-v1\x00" + s.Purpose) }
 
 type CutoverCaptureConfig struct {
-	SourceID      string
-	SourceType    string
-	SourceRuntime string
-	SigningKeyID  string
-	Manifest      EncryptedStateFile
-	Snapshot      EncryptedStateFile
+	SourceID           string
+	SourceType         string
+	SourceRuntime      string
+	SigningKeyID       string
+	EligibilityStartAt time.Time
+	Manifest           EncryptedStateFile
+	Snapshot           EncryptedStateFile
+}
+
+// ValidateCutoverEligibility keeps the global technical baseline strictly
+// before the inclusive business eligibility boundary. A baseline at or after
+// the boundary would conservatively swallow otherwise eligible facts.
+func ValidateCutoverEligibility(manifest CutoverManifest, eligibilityStartAt time.Time) error {
+	if eligibilityStartAt.IsZero() {
+		return errors.New("invoice eligibility start is required for cutover")
+	}
+	cutoverAt, err := time.Parse(time.RFC3339Nano, manifest.CutoverAt)
+	if err != nil {
+		return errors.New("cutover manifest time is invalid")
+	}
+	databaseClock, err := time.Parse(time.RFC3339Nano, manifest.DatabaseClock)
+	if err != nil {
+		return errors.New("cutover database clock is invalid")
+	}
+	start := eligibilityStartAt.UTC()
+	expectedContract := "sub2api-economic-v3"
+	if manifest.SourceType == SourceNewAPI {
+		expectedContract = "newapi-economic-rc25-v3"
+	} else if manifest.SourceType != SourceSub2API {
+		return errors.New("cutover manifest source type is invalid")
+	}
+	if manifest.ProjectionContract != expectedContract {
+		return errors.New("cutover projection contract does not match source type")
+	}
+	if !cutoverAt.UTC().Before(start) || !databaseClock.UTC().Before(start) {
+		return errors.New("source cutover must be strictly before invoice eligibility start")
+	}
+	return nil
 }
 
 // CaptureCutover performs the mandatory atomic baseline read. No upstream
@@ -253,7 +285,8 @@ type CutoverCaptureConfig struct {
 func CaptureCutover(ctx context.Context, db *sql.DB, config CutoverCaptureConfig) (CutoverManifest, error) {
 	if db == nil || !uuidPattern.MatchString(config.SourceID) ||
 		(config.SourceType != SourceSub2API && config.SourceType != SourceNewAPI) ||
-		strings.TrimSpace(config.SourceRuntime) == "" || len(config.SourceRuntime) > 64 || ValidateSigningKeyID(config.SigningKeyID) != nil {
+		strings.TrimSpace(config.SourceRuntime) == "" || len(config.SourceRuntime) > 64 ||
+		config.EligibilityStartAt.IsZero() || ValidateSigningKeyID(config.SigningKeyID) != nil {
 		return CutoverManifest{}, errors.New("cutover capture configuration is invalid")
 	}
 	for _, store := range []EncryptedStateFile{config.Manifest, config.Snapshot} {
@@ -276,6 +309,9 @@ func CaptureCutover(ctx context.Context, db *sql.DB, config CutoverCaptureConfig
 	if err = tx.QueryRowContext(ctx, `SELECT transaction_timestamp()`).Scan(&cutover); err != nil {
 		return CutoverManifest{}, errors.New("capture source database cutover clock failed")
 	}
+	if !cutover.UTC().Before(config.EligibilityStartAt.UTC()) {
+		return CutoverManifest{}, errors.New("source cutover reached invoice eligibility start")
+	}
 	contractRelation, err := bridgeJSONRecordRelation(config.SourceType, StreamBalances, "contract",
 		"projection_contract text,contract_ok boolean,configuration_hash text,payments_event_at timestamptz,payments_cursor text,usage_event_at timestamptz,usage_cursor text,credits_event_at timestamptz,credits_cursor text")
 	if err != nil {
@@ -293,7 +329,11 @@ func CaptureCutover(ctx context.Context, db *sql.DB, config CutoverCaptureConfig
 	if err = tx.QueryRowContext(ctx, query, request).Scan(&contract, &contractOK, &configurationHash, &paymentAt, &paymentCursor, &usageAt, &usageCursor, &creditAt, &creditCursor); err != nil {
 		return CutoverManifest{}, fmt.Errorf("capture cutover contract: %w", err)
 	}
-	if !contractOK || !hexHashPattern.MatchString(configurationHash) {
+	expectedContract := "sub2api-economic-v3"
+	if config.SourceType == SourceNewAPI {
+		expectedContract = "newapi-economic-rc25-v3"
+	}
+	if !contractOK || contract != expectedContract || !hexHashPattern.MatchString(configurationHash) {
 		return CutoverManifest{}, errors.New("source projection contract is not healthy at cutover")
 	}
 	balanceRelation, err := bridgeJSONRecordRelation(config.SourceType, StreamBalances, "rows", "user_id bigint,balance_service_units text,balance_negative boolean")

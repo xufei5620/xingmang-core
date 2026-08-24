@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"invoice-system/backend/internal/adminsettings"
 	"invoice-system/backend/internal/domain"
 )
 
@@ -95,7 +96,11 @@ func userFundingLotDTOs(lots []domain.FundingLot) []userFundingLot {
 		case domain.EligibilitySubscriptionCash:
 			kind = "subscription"
 		case domain.EligibilityNonCash:
-			kind = "noncash"
+			if !lot.CompletedAt.IsZero() && lot.CompletedAt.Before(adminsettings.RequiredEligibilityStartAt) {
+				kind = "legacy"
+			} else {
+				kind = "noncash"
+			}
 		}
 		label := "SoloV API"
 		if lot.SourceType == domain.SourceNewAPI {
@@ -108,6 +113,14 @@ func userFundingLotDTOs(lots []domain.FundingLot) []userFundingLot {
 		reasonCode := ""
 		if lot.RefundFrozen {
 			reasonCode = "SOURCE_REFUND"
+		} else if kind == "legacy" && !lot.CompletedAt.IsZero() && lot.CompletedAt.Before(adminsettings.RequiredEligibilityStartAt) {
+			reasonCode = "BEFORE_ELIGIBILITY_START"
+		} else if lot.EligibilityKind == domain.EligibilitySubscriptionCash {
+			reasonCode = "SUBSCRIPTION_USAGE_UNSUPPORTED"
+		} else if (lot.EligibilityKind == domain.EligibilityWalletCash ||
+			lot.EligibilityKind == domain.EligibilitySubscriptionCash) &&
+			lot.Verification == domain.VerificationVerified && lot.ConsumedCashMinor == 0 {
+			reasonCode = "NO_POST_START_CONSUMPTION"
 		} else if lot.EligibilityStatus == "syncing" {
 			reasonCode = "LEDGER_SYNCING"
 		} else if lot.EligibilityStatus == "source_unavailable" {

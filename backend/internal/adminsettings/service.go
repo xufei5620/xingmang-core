@@ -117,7 +117,9 @@ func normalize(in UpdateInput) (UpdateInput, error) {
 	in.SMTPHost = strings.ToLower(strings.TrimSpace(in.SMTPHost))
 	in.SMTPFrom = strings.TrimSpace(in.SMTPFrom)
 	in.SMTPFromName = strings.TrimSpace(in.SMTPFromName)
-	if in.IssuerName == "" || utf8.RuneCountInString(in.IssuerName) > 200 || in.MinimumRequestMinor < MinimumMinor || in.SMTPPort != 587 || in.SMTPFromName == "" || utf8.RuneCountInString(in.SMTPFromName) > 128 || !in.SMTPStartTLS {
+	if in.IssuerName == "" || utf8.RuneCountInString(in.IssuerName) > 200 || in.MinimumRequestMinor < MinimumMinor ||
+		in.EligibilityStartAt.IsZero() || !in.EligibilityStartAt.UTC().Equal(RequiredEligibilityStartAt) ||
+		in.SMTPPort != 587 || in.SMTPFromName == "" || utf8.RuneCountInString(in.SMTPFromName) > 128 || !in.SMTPStartTLS {
 		return UpdateInput{}, ErrInvalidSettings
 	}
 	if in.SMTPHost != "smtp.qq.com" && in.SMTPHost != "smtp.exmail.qq.com" && in.SMTPHost != "smtp.gmail.com" {

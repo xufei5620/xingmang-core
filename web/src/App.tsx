@@ -66,6 +66,7 @@ import { InvoiceApiError } from "./lib/api-contract";
 import {
   canUserCancelInvoice,
   currentLocalDateTimeValue,
+  eligibilityStartLabel,
   invoicePDFSizeAllowed,
   normalizeIssuedAt,
   replaceDirectRequestAfterMutation,
@@ -1178,6 +1179,12 @@ function OrdersPage() {
             <ShieldCheck size={16} />
             <span>
               可开金额由服务端资金账本计算；待审占用和已开金额均不能再次使用，浏览器不会自行推算额度。
+              {policy && (
+                <>
+                  {" "}只有在 {eligibilityStartLabel(policy.eligibilityStartAt)}（北京时间）
+                  及之后完成的真实充值，并由该时点及之后的实际消费核销，才能开票。
+                </>
+              )}
             </span>
           </div>
         </section>
@@ -3955,6 +3962,17 @@ function SystemSettingsPage() {
                     />
                   </div>
                   <small>可提高，但不能低于 ¥200.00</small>
+                </label>
+                <label className="form-field">
+                  <span>开票资格生效时间</span>
+                  <input
+                    value={`${eligibilityStartLabel(settings.eligibilityStartAt)}（北京时间）`}
+                    readOnly
+                    disabled
+                  />
+                  <small>
+                    财务政策 v{settings.eligibilityPolicyVersion}：充值完成时间和消费时间都必须不早于该时点；上线后不可回拨。
+                  </small>
                 </label>
               </div>
               <div className="settings-actions">

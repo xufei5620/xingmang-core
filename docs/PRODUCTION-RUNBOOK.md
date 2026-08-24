@@ -533,7 +533,86 @@ the bridge gateway to the same value and assigns `invoice_proxy` the only
 positive `gw_priority`; static verification compares all three, and the API
 rejects subnets, multiple trusted proxies and every non-host prefix.
 
-Run in this exact order:
+Put the immutable release value exactly once in the root-owned
+`deploy/.env.production` (do not merely assign a non-exported shell variable),
+keep that file mode `0600`, then prove Compose reads the same value:
+
+```bash
+# deploy/.env.production contains this exact line:
+# ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00
+test "$(stat -c '%a' deploy/.env.production)" = 600
+test "$(grep -Fxc 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00' deploy/.env.production)" -eq 1
+docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+  config --environment | grep -Fx 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00'
+```
+
+Migration `0011_invoice_eligibility_policy.sql` is a deliberate one-way
+application/DB switch. The old image does not know migration 0011 and will
+refuse startup; an already-running old API also cannot write the new required
+snapshot columns. Before applying it:
+
+1. verify signed tag `v0.1.0-rc17-signed` peels to commit
+   `b17dbe4ba2d1a2c4926d0156abf80c9207a74a54` and retain the RC17 release
+   manifest's exact rollback image IDs; verify the exact RC18 candidate images,
+   then resolve the existing-pair/first-install path below without starting
+   invoice ingestion;
+2. stop the old `api`, `ingest-proxy`, and all source-agent containers and prove
+   there are no invoice writer sessions;
+3. while they remain stopped, run
+   the reviewed RC18 `deploy/backup/backup.sh` with
+   `BACKUP_SCHEMA_MODE=pre-0011`; it records initial service state and must not
+   start a service that was stopped. Restore it with the RC18 drill and
+   `RESTORE_SCHEMA_MODE=pre-0011` plus the exact RC17
+   `PRE_0011_TOOLS_IMAGE`, which proves migration 0011/policy table are absent
+   while the RC18 source agent validates all cutover/state contracts. Do not
+   use the older RC17 backup script here because it resumes every service
+   unconditionally;
+4. verify `funding_lots`, `source_usage_events`, `source_credit_events`,
+   `consumption_allocations`, `invoice_requests`, and
+   `source_cutover_manifests` are all empty (the migration independently locks
+   and rechecks them);
+5. stage the new Web image first, then run migration, permissions, settings and
+   the new API as one maintenance-window change.
+
+The pre-0011 rollback package requires all ten source-state directories and two
+create-only cutover pairs, so resolve one of these paths during item 1:
+
+- Existing pair: do not recapture it. With the exact RC18 source-agent image,
+  run offline `check-cutover` and all V3 `check-state` commands using
+  `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`; require the exact source
+  contract, both clocks strictly before the boundary, and record the encrypted
+  file hashes in the pre-0011 backup ticket.
+- First installation with no pair: before applying 0011, stop one upstream
+  application, pass the explicit-container quiescence gate, and use the exact
+  RC18 source-agent image to capture that source once and immediately run
+  `check-cutover`; restart it, repeat for the other source, then initialize the
+  ten empty durable state directories without starting ingestion. Now create
+  and restore-test the full backup in explicit RC18 pre-0011 mode while the
+  services remain stopped. These same
+  encrypted pairs are registered after migration; they are never captured
+  again.
+
+The schema-mode controls are explicit and signed into metadata; all other
+backup/restore variables are the ones in section 11:
+
+```bash
+BACKUP_SCHEMA_MODE=pre-0011 BACKUP_QUIESCE_CONFIRMED=YES \
+  bash deploy/backup/backup.sh
+
+RESTORE_SCHEMA_MODE=pre-0011 \
+PRE_0011_TOOLS_IMAGE='<exact RC17 tools image from its release manifest>' \
+INVOICE_TOOLS_IMAGE='<exact RC18 tools image>' \
+SOURCE_AGENT_IMAGE='<exact RC18 source-agent image>' \
+  bash deploy/backup/restore-drill.sh
+```
+
+Do not call switching only the application tag a rollback. After 0011, rollback
+means stopping all new writers and restoring the matching signed pre-0011
+database backup, source state and RC17 images together. If any post-0011
+financial fact exists, prefer a reviewed forward fix; a database restore would
+discard that fact and requires explicit financial approval.
+
+Run in this exact order while the old API/ingest remain stopped:
 
 ```bash
 docker compose --env-file deploy/.env.production \
@@ -550,6 +629,13 @@ docker compose --env-file deploy/.env.production \
 
 docker compose --env-file deploy/.env.production \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never bootstrap-sources
+
+docker compose --env-file deploy/.env.production \
+  -f deploy/docker-compose.prod.yml exec -T postgres psql -X -v ON_ERROR_STOP=1 \
+  -U invoice_owner -d invoice -At -F '|' -c \
+  "SELECT to_char(eligibility_start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),display_timezone,require_payment_at_or_after,require_usage_at_or_after,policy_version FROM invoice_eligibility_policy WHERE singleton_id=1"
+# Required exact output:
+# 2026-08-31T16:00:00Z|Asia/Shanghai|t|t|1
 ```
 
 ClamAV has no published port. It joins the internal API network plus a dedicated
@@ -570,7 +656,9 @@ rejected before encrypted promotion.
 The bootstrap command refuses to overwrite an existing setting row. All later
 changes use OIDC/MFA/admin-IP-protected typed APIs. The application runtime role
 can append but cannot update/delete audit records and cannot mutate migration
-checksums.
+checksums. It can only read the eligibility policy; the policy row rejects
+UPDATE, DELETE and TRUNCATE even for normal owner commands. Any policy change
+requires a new audited migration.
 
 ## 7. Source-instance provisioning and read-only agents
 
@@ -800,33 +888,15 @@ for service in "${all_sources[@]}"; do
     -f deploy/docker-compose.sources.yml run --rm --pull never "$service" check-db
 done
 
-# Cut over one source at a time. Stop its upstream application container first
-# (not only its source agents) and keep it stopped. With only PostgreSQL up, run
-# the matching explicit-container quiescence gate and require zero other client
-# backends/prepared transactions. SQL cannot prove Docker remains stopped.
-bash scripts/invoke-upstream-projection-maintenance.sh \
-  --source sub2api --mode cutover-quiescence-preflight \
-  --container <verified-sub2api-postgres-container> \
-  --database <verified-sub2api-database> --user <cluster-superuser-and-db-owner> \
-  --ack-upstream-app-stopped
-
-# Immediately capture and verify Sub2API while its app is still stopped.
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
-  --profile cutover run --rm --pull never sub2api-cutover-init
+# The create-only pairs were already captured/verified before migration 0011.
+# Never run cutover-init here. Re-check the exact same encrypted files, source
+# contracts and strict pre-policy clocks before registering trust.
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm --pull never sub2api-cutover-init check-cutover
-
-# Only now restart Sub2API. Then stop New API and repeat the same invariant.
-bash scripts/invoke-upstream-projection-maintenance.sh \
-  --source newapi --mode cutover-quiescence-preflight \
-  --container <verified-newapi-postgres-container> \
-  --database <verified-newapi-database> --user <cluster-superuser-and-db-owner> \
-  --ack-upstream-app-stopped
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
-  --profile cutover run --rm --pull never newapi-cutover-init
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm --pull never newapi-cutover-init check-cutover
-# Verify manifest.enc and baseline.enc hashes before restarting New API.
+# Verify persisted contracts are exactly sub2api-economic-v3 and
+# newapi-economic-rc25-v3; fixture-v3 is forbidden in production.
 
 # Initialize every independent cursor/sequence. Only V2 identities have a
 # deletion-reconciliation state file.
@@ -1040,10 +1110,15 @@ before any checksum or `age` decryption. The drill's streaming archive parser
 allows only bounded directories/regular files and rejects duplicate/traversal
 paths, links, devices, FIFO/socket entries, PAX/xattr metadata and resource
 overruns before extraction. It then restores PostgreSQL, compares migration,
-receiver-state and document indexes byte-for-byte, validates all ten source
-state envelopes, and runs `invoice-backup-verify` to authenticate/decrypt a
-bounded sample of document objects and compare plaintext size/SHA-256 to the
-restored database. A backup is invalid until this passes.
+receiver-state, document indexes and `invoice-eligibility-policy.csv`
+byte-for-byte. The policy comparison covers UTC start, display timezone, both
+payment/usage booleans and version, and independently requires the fixed
+`2026-08-31T16:00:00Z|Asia/Shanghai|t|t|1` value. It validates all ten source
+state envelopes; each of the eight V3 economic states must load the exact
+source contract and a cutover/database clock strictly before the same policy.
+Finally `invoice-backup-verify` authenticates/decrypts a bounded document
+sample and compares plaintext size/SHA-256 to the restored database. A backup
+is invalid until all checks pass.
 
 ```bash
 DATABASE_BACKUP=/root/invoice-system/backups/invoice-TS.postgres.dump.age \
@@ -1142,8 +1217,12 @@ state while its cursor/pending spool is from a different snapshot.
 
 ## 12. Rollback
 
-Before first public traffic, rollback is simply the previous image digest and
-database backup. After traffic is accepted:
+Before first public traffic, an image-only rollback is allowed only when the
+previous image explicitly declares the current migration set compatible.
+Migration 0011 is not compatible with RC17. Its rollback requires the exact
+signed pre-0011 package: RC17 checkout/images, invoice database, documents, all
+ten source-state directories, both create-only cutover pairs and their matching
+keys. After traffic is accepted:
 
 - never point DNS at an older writable database;
 - stop user/source ingress before restoring a database;
