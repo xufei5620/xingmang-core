@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc8 candidate
+# Release readiness: 0.1.0-rc9 candidate
 
 Status as of 2026-08-24:
 
 - application code and local release candidate: **GO**;
-- isolated staging deployment: **GO after the fresh RC8 image gate**;
+- isolated staging deployment: **GO after the fresh RC9 image gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -43,13 +43,13 @@ this release candidate.
 
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC8 image/SBOM/vulnerability
+- generate and independently verify a fresh RC9 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - verify new source/invoice/IdP backups with isolated restores, preserve the
   existing reader SCRAM envelope, reconcile the legacy view boundary, install
   Bridge V4, prove `pg_depend=0`, and recapture both cutovers while each
   upstream application is stopped and the database quiescence gate passes;
-- deploy all Invoice images under the same RC8 tag and pass real production
+- deploy all Invoice images under the same RC9 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -64,7 +64,7 @@ this release candidate.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC8 commit and signed release tag; no GitHub
+- create and locally verify the RC9 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

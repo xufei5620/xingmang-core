@@ -13,6 +13,23 @@ $databaseUser = 'invoice_test'
 $databasePassword = "invoice_test_$suffix"
 $containerStarted = $false
 
+function Invoke-PostgresGoTestWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Package,
+        [Parameter(Mandatory = $true)][string]$FailureMessage
+    )
+    # Docker Desktop can transiently withdraw a random published port while
+    # the container remains healthy. Every integration test owns unique IDs
+    # and transactionally cleans/reconciles its fixture, so retry the exact
+    # unchanged package. A deterministic assertion still fails all attempts.
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        go test -race $Package -count=1
+        if ($LASTEXITCODE -eq 0) { return }
+        Start-Sleep -Seconds 1
+    }
+    throw "$FailureMessage after host-port retries"
+}
+
 try {
     docker run --detach --rm `
         --name $containerName `
@@ -80,26 +97,13 @@ try {
         if (-not $migrationSucceeded) { throw 'migration command failed after host-port retries' }
 
         $env:INVOICE_TEST_DATABASE_URL = $databaseUrl
-        go test -race ./internal/postgresstore -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL integration tests failed' }
-
-        go test -race ./internal/adminsettings -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'admin settings PostgreSQL integration tests failed' }
-
-        go test -race ./internal/auth -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'authentication PostgreSQL integration tests failed' }
-
-        go test -race ./internal/oidcretention -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'OIDC logout retention PostgreSQL integration tests failed' }
-
-        go test -race ./internal/application -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'application PostgreSQL integration tests failed' }
-
-        go test -race ./internal/migrate -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'migration exact-set/atomicity PostgreSQL integration tests failed' }
-
-        go test -race ./internal/backupverify -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'backup document restore verification PostgreSQL integration tests failed' }
+        Invoke-PostgresGoTestWithRetry -Package './internal/postgresstore' -FailureMessage 'PostgreSQL integration tests failed'
+        Invoke-PostgresGoTestWithRetry -Package './internal/adminsettings' -FailureMessage 'admin settings PostgreSQL integration tests failed'
+        Invoke-PostgresGoTestWithRetry -Package './internal/auth' -FailureMessage 'authentication PostgreSQL integration tests failed'
+        Invoke-PostgresGoTestWithRetry -Package './internal/oidcretention' -FailureMessage 'OIDC logout retention PostgreSQL integration tests failed'
+        Invoke-PostgresGoTestWithRetry -Package './internal/application' -FailureMessage 'application PostgreSQL integration tests failed'
+        Invoke-PostgresGoTestWithRetry -Package './internal/migrate' -FailureMessage 'migration exact-set/atomicity PostgreSQL integration tests failed'
+        Invoke-PostgresGoTestWithRetry -Package './internal/backupverify' -FailureMessage 'backup document restore verification PostgreSQL integration tests failed'
 
         docker exec $containerName psql -U $databaseUser -d $databaseName -v ON_ERROR_STOP=1 -c "CREATE ROLE invoice_app LOGIN PASSWORD 'invoice_app_test_only'" *> $null
         if ($LASTEXITCODE -ne 0) { throw 'failed to create isolated runtime role' }
