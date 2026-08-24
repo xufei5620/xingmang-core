@@ -71,7 +71,7 @@ if ($parseErrors.Count -ne 0) {
 
 $docker = Get-Command docker -CommandType Application -ErrorAction Stop |
     Select-Object -First 1
-$container = "invoice-projection-maintenance-test-$PID"
+$script:maintenanceContainerName = "invoice-projection-maintenance-test-$PID"
 $containerStarted = $false
 
 function Invoke-TestPsql {
@@ -85,7 +85,10 @@ function Invoke-TestPsql {
         [switch]$TuplesOnly
     )
 
-    $arguments = @('exec', $script:container, 'psql', '-X', '-v', 'ON_ERROR_STOP=1', '-U', $User, '-d', $Database)
+    if ([string]::IsNullOrWhiteSpace($script:maintenanceContainerName)) {
+        throw 'maintenance fixture container name is unavailable'
+    }
+    $arguments = @('exec', $script:maintenanceContainerName, 'psql', '-X', '-v', 'ON_ERROR_STOP=1', '-U', $User, '-d', $Database)
     if ($TuplesOnly) {
         $arguments += @('-A', '-t')
     }
@@ -259,7 +262,7 @@ function Install-BridgeFixture {
 }
 
 try {
-    & $docker.Source run --name $container --detach --rm `
+    & $docker.Source run --name $script:maintenanceContainerName --detach --rm `
         --env POSTGRES_PASSWORD=test-only `
         --env POSTGRES_HOST_AUTH_METHOD=trust `
         $PostgresImage -c max_prepared_transactions=10 > $null
@@ -270,7 +273,7 @@ try {
 
     $ready = $false
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        & $docker.Source exec $container pg_isready -U postgres > $null 2>&1
+        & $docker.Source exec $script:maintenanceContainerName pg_isready -U postgres 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             $ready = $true
             break
@@ -281,16 +284,16 @@ try {
         throw 'Disposable PostgreSQL did not become ready.'
     }
 
-    & $docker.Source exec $container mkdir -p /contracts
+    & $docker.Source exec $script:maintenanceContainerName mkdir -p /contracts
     if ($LASTEXITCODE -ne 0) { throw 'Unable to create disposable contract directory.' }
-    & $docker.Source cp $reconcileContract "${container}:/contracts/projection-reconcile.postgresql.sql"
+    & $docker.Source cp $reconcileContract "$($script:maintenanceContainerName):/contracts/projection-reconcile.postgresql.sql"
     if ($LASTEXITCODE -ne 0) { throw 'Unable to copy reconcile contract.' }
-    & $docker.Source cp $preflightContract "${container}:/contracts/upstream-upgrade-preflight.postgresql.sql"
+    & $docker.Source cp $preflightContract "$($script:maintenanceContainerName):/contracts/upstream-upgrade-preflight.postgresql.sql"
     if ($LASTEXITCODE -ne 0) { throw 'Unable to copy preflight contract.' }
-    & $docker.Source cp $quiescenceContract "${container}:/contracts/source-cutover-quiescence-preflight.postgresql.sql"
+    & $docker.Source cp $quiescenceContract "$($script:maintenanceContainerName):/contracts/source-cutover-quiescence-preflight.postgresql.sql"
     if ($LASTEXITCODE -ne 0) { throw 'Unable to copy cutover quiescence contract.' }
     foreach ($contract in $bridgeContracts) {
-        & $docker.Source cp $contract "${container}:/contracts/$([IO.Path]::GetFileName($contract))"
+        & $docker.Source cp $contract "$($script:maintenanceContainerName):/contracts/$([IO.Path]::GetFileName($contract))"
         if ($LASTEXITCODE -ne 0) { throw "Unable to copy bridge contract $contract" }
     }
 
@@ -313,7 +316,7 @@ try {
         -Variables @('invoice_source=newapi') > $null
 
     # The contract detects but never terminates a connected source role.
-    & $docker.Source exec --detach $container psql -X -U invoice_newapi_usage_reader `
+    & $docker.Source exec --detach $script:maintenanceContainerName psql -X -U invoice_newapi_usage_reader `
         -d $newapi.Database -c 'SELECT pg_sleep(3)' > $null
     if ($LASTEXITCODE -ne 0) { throw 'Unable to start disposable active-session fixture.' }
     $sessionObserved = $false
@@ -695,6 +698,6 @@ GRANT EXECUTE ON FUNCTION public.invoice_unrelated_helper() TO invoice_newapi_id
     Write-Host 'Projection maintenance static, executor, quiescence, prepared-xact, session, rollback, dry-run, partial/full-state, idempotence, detached and adversarial bridge-v4 tests passed.'
 } finally {
     if ($containerStarted) {
-        & $docker.Source rm --force $container > $null 2>&1
+        & $docker.Source rm --force $script:maintenanceContainerName 2>&1 | Out-Null
     }
 }
