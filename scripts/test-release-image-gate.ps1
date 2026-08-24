@@ -69,6 +69,37 @@ if ($productionComposeText -match '(?m)^\s+build:\s*$') {
     throw 'production Compose retains a local build directive outside the release gate'
 }
 
+$bridgeMatrixVerifier = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
+if ($bridgeMatrixVerifier -notmatch 'for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\)' -or
+    $bridgeMatrixVerifier -notmatch 'Test-BridgeMatrixTransientHostPortFailure' -or
+    $bridgeMatrixVerifier -notmatch 'retrying the unchanged test suite in a fresh container' -or
+    $bridgeMatrixVerifier -notmatch 'Complete-BridgeMatrixAttempt') {
+    throw 'Bridge PostgreSQL matrix retry can hide deterministic failures or is no longer tightly bounded'
+}
+$bridgeRetryPolicy = Join-Path $projectRoot 'agents\scripts\bridge-matrix-retry-policy.ps1'
+. $bridgeRetryPolicy
+$transientFixture = 'bridge_integration_test.go:233: failed to connect to user=postgres database=bridge_test: 127.0.0.1:54321: dial tcp 127.0.0.1:54321: connectex: connection refused'
+$mixedDeterministicFixture = "assertion mismatch`nserver closed the connection unexpectedly"
+$authenticationFixture = 'bridge_integration_test.go:233: failed to connect to user=postgres database=bridge_test: 127.0.0.1:54321: FATAL: password authentication failed'
+$databaseFixture = 'bridge_integration_test.go:233: failed to connect to user=postgres database=missing: 127.0.0.1:54321: FATAL: database does not exist'
+$mixedLoopbackFixture = "bridge_integration_test.go:120: assertion mismatch: got 1 want 0`nbridge_integration_test.go:233: failed to connect: dial tcp 127.0.0.1:54321: connectex: connection refused"
+if (-not (Test-BridgeMatrixTransientHostPortFailure -Text $transientFixture) -or
+    (Test-BridgeMatrixTransientHostPortFailure -Text $mixedDeterministicFixture) -or
+    (Test-BridgeMatrixTransientHostPortFailure -Text $authenticationFixture) -or
+    (Test-BridgeMatrixTransientHostPortFailure -Text $databaseFixture) -or
+    (Test-BridgeMatrixTransientHostPortFailure -Text $mixedLoopbackFixture) -or
+    (Test-BridgeMatrixTransientHostPortFailure -Text 'server closed the connection unexpectedly')) {
+    throw 'Bridge PostgreSQL matrix transient classifier escaped the explicit loopback host-port scope'
+}
+$cleanupRejected = $false
+try { Complete-BridgeMatrixAttempt -ContainerName fixture -CleanupExitCode 1 -AttemptError $null } catch { $cleanupRejected = $_.Exception.Message -match 'cleanup.*failed' }
+if (-not $cleanupRejected) { throw 'Bridge PostgreSQL matrix cleanup failure was not fail-closed' }
+$combinedRejected = $false
+try { Complete-BridgeMatrixAttempt -ContainerName fixture -CleanupExitCode 1 -AttemptError ([Exception]::new('deterministic assertion')) } catch {
+    $combinedRejected = $_.Exception.Message -match 'deterministic assertion' -and $_.Exception.Message -match 'cleanup.*failed'
+}
+if (-not $combinedRejected) { throw 'Bridge PostgreSQL matrix cleanup failure hid the original attempt error' }
+
 $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\release-image-gate'
 $imageID = 'sha256:' + ('a' * 64)
 $trivyTimestamp = ConvertFrom-TrivyDatabaseTimestamp -Timestamp '2026-08-20 19:46:52.822388238 +0000 UTC'
