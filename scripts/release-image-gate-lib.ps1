@@ -277,6 +277,14 @@ function Get-CommonReleaseImageTag {
     return [string]$releaseTags[0]
 }
 
+function Test-OrdinalStringEqual {
+    param(
+        [AllowNull()]$Actual,
+        [AllowNull()]$Expected
+    )
+    return [string]::Equals([string]$Actual, [string]$Expected, [StringComparison]::Ordinal)
+}
+
 function Get-FileSha256Lower {
     param([Parameter(Mandatory)][string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()

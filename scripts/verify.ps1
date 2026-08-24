@@ -6,6 +6,14 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 
+function Test-OrdinalStringEqual {
+    param(
+        [AllowNull()]$Actual,
+        [AllowNull()]$Expected
+    )
+    return [string]::Equals([string]$Actual, [string]$Expected, [StringComparison]::Ordinal)
+}
+
 & (Join-Path $PSScriptRoot 'check-no-secrets.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'secret-material gate failed' }
 
@@ -227,8 +235,8 @@ try {
     }
     foreach ($serviceName in $expectedReleaseImages.Keys) {
         $releaseService = $renderedProduction.services.$serviceName
-        if ([string]$releaseService.image -cne $expectedReleaseImages[$serviceName] -or
-            [string]$releaseService.pull_policy -cne 'never' -or
+        if (-not (Test-OrdinalStringEqual -Actual $releaseService.image -Expected $expectedReleaseImages[$serviceName]) -or
+            -not (Test-OrdinalStringEqual -Actual $releaseService.pull_policy -Expected 'never') -or
             $releaseService.PSObject.Properties.Name -contains 'build') {
             throw "production service $serviceName escaped the exact prebuilt-only INVOICE_IMAGE_TAG"
         }
@@ -278,8 +286,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'cannot inspect rendered production tools compose' }
     foreach ($service in @('migrate', 'bootstrap-settings', 'bootstrap-sources', 'document-gc', 'oidc-logout-retention', 'oidc-preflight')) {
         $toolService = $renderedProductionTools.services.$service
-        if ([string]$toolService.image -cne 'invoice-system-tools:verification-build' -or
-            [string]$toolService.pull_policy -cne 'never' -or
+        if (-not (Test-OrdinalStringEqual -Actual $toolService.image -Expected 'invoice-system-tools:verification-build') -or
+            -not (Test-OrdinalStringEqual -Actual $toolService.pull_policy -Expected 'never') -or
             $toolService.PSObject.Properties.Name -contains 'build') {
             throw "$service does not use the isolated prebuilt-only tools image with the exact reviewed release tag"
         }
@@ -351,8 +359,8 @@ try {
     $keycloakDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\keycloak\Dockerfile')
     if (-not $keycloakDockerfile.Contains("ARG KEYCLOAK_BASE_IMAGE=$expectedKeycloakBase") -or
         [regex]::Matches($keycloakDockerfile, '(?m)^FROM \$\{KEYCLOAK_BASE_IMAGE\}(?: AS builder)?$').Count -ne 2 -or
-        $idpBaseObject.services.keycloak.image -ne 'invoice-keycloak:verification-build' -or
-        $idpBaseObject.services.keycloak.pull_policy -ne 'never' -or
+        -not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build') -or
+        -not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.pull_policy -Expected 'never') -or
         $idpBaseObject.services.keycloak.PSObject.Properties.Name -contains 'build' -or
         [regex]::Matches($keycloakDockerfile, '(?m)^(?:RUN|\s*&&) rm -rf /opt/keycloak/bin/client \\$').Count -ne 2 -or
         [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& rm -f /opt/keycloak/lib/lib/main/com\.microsoft\.sqlserver\.mssql-jdbc-\*\.jar \\$').Count -ne 2 -or
@@ -401,8 +409,8 @@ try {
     $identityServices = @('sub2api-identities','newapi-identities')
     foreach ($service in ($economicServices + $identityServices)) {
         $sourceService = $renderedSources.services.$service
-        if ([string]$sourceService.image -cne 'invoice-source-agent:verification-build' -or
-            [string]$sourceService.pull_policy -cne 'never' -or
+        if (-not (Test-OrdinalStringEqual -Actual $sourceService.image -Expected 'invoice-source-agent:verification-build') -or
+            -not (Test-OrdinalStringEqual -Actual $sourceService.pull_policy -Expected 'never') -or
             $sourceService.PSObject.Properties.Name -contains 'build') {
             throw "$service escaped the common prebuilt-only release image tag"
         }
@@ -417,8 +425,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'cannot inspect rendered source-agent cutover compose' }
     foreach ($service in @('sub2api-cutover-init', 'newapi-cutover-init')) {
         $cutoverService = $renderedSourceCutover.services.$service
-        if ([string]$cutoverService.image -cne 'invoice-source-agent:verification-build' -or
-            [string]$cutoverService.pull_policy -cne 'never' -or
+        if (-not (Test-OrdinalStringEqual -Actual $cutoverService.image -Expected 'invoice-source-agent:verification-build') -or
+            -not (Test-OrdinalStringEqual -Actual $cutoverService.pull_policy -Expected 'never') -or
             $cutoverService.PSObject.Properties.Name -contains 'build') {
             throw "$service escaped the common prebuilt-only release image tag"
         }

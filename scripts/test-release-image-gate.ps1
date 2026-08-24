@@ -11,11 +11,20 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 
 $idpCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
 $artifactVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
+$sourceVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
 if (-not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}') -or
     $idpCompose.Contains('    image: invoice-keycloak:26.7.2') -or
     -not $artifactVerifier.Contains('Get-CommonReleaseImageTag -ImageRecords $records -IdPMode $idpMode') -or
-    -not $artifactVerifier.Contains('production Keycloak Compose does not use the manifest-bound release image tag')) {
+    -not $artifactVerifier.Contains('production Keycloak Compose does not use the manifest-bound release image tag') -or
+    -not $sourceVerifier.Contains("Test-OrdinalStringEqual -Actual `$idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build'") -or
+    -not $sourceVerifier.Contains("Test-OrdinalStringEqual -Actual `$idpBaseObject.services.keycloak.pull_policy -Expected 'never'")) {
     throw 'Keycloak production Compose can escape the common manifest-bound release image tag'
+}
+
+if (-not (Test-OrdinalStringEqual -Actual 'invoice-keycloak:verification-build' -Expected 'invoice-keycloak:verification-build') -or
+    (Test-OrdinalStringEqual -Actual 'invoice-keycloak:Verification-build' -Expected 'invoice-keycloak:verification-build') -or
+    (Test-OrdinalStringEqual -Actual 'Never' -Expected 'never')) {
+    throw 'production image or pull-policy comparison is not ordinal and case-sensitive'
 }
 
 $matchingTagRecords = @(
