@@ -1195,6 +1195,20 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 		WHERE external_account_id=$1`, accountID).Scan(&bootstrapKind); err != nil || bootstrapKind != "POST_CUTOVER_REPLAY" {
 		t.Fatalf("new account bootstrap kind=%q err=%v", bootstrapKind, err)
 	}
+	var prematureJobs int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_projection_jobs
+		WHERE external_account_id=$1`, accountID).Scan(&prematureJobs); err != nil || prematureJobs != 0 {
+		t.Fatalf("balance-first replay queued before four-stream finalization: jobs=%d err=%v", prematureJobs, err)
+	}
+	if _, err := store.ProcessEligibilityProjectionJobs(ctx, 10, accountCutover.Add(time.Minute),
+		AuditActor{Type: "system", ID: "balance-first-worker"}); err != nil {
+		t.Fatal(err)
+	}
+	var prematureFreezes int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes
+		WHERE external_account_id=$1 AND status='open'`, accountID).Scan(&prematureFreezes); err != nil || prematureFreezes != 0 {
+		t.Fatalf("balance-first replay froze before facts arrived: freezes=%d err=%v", prematureFreezes, err)
+	}
 
 	preSubscriptionEvent := SourceBatchEvent{EventID: "8c000000-0000-4000-8000-000000000002",
 		EntityType: "subscription_purchase", Operation: "upsert", PayloadHash: strings.Repeat("3", 64),

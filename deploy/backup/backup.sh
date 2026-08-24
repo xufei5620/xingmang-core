@@ -18,7 +18,7 @@ backup_schema_mode=${BACKUP_SCHEMA_MODE:-post-0011}
   exit 2
 }
 
-for command in age docker sha256sum flock tar find ssh-keygen stat; do command -v "$command" >/dev/null; done
+for command in age docker sha256sum flock tar find ssh-keygen stat cmp; do command -v "$command" >/dev/null; done
 test -s "$AGE_RECIPIENT_FILE"
 test -d "$SOURCE_STATE_ROOT"
 test -d "$SOURCE_CUTOVER_ROOT"
@@ -76,6 +76,12 @@ source_compose=(docker compose "${compose_env[@]}" -f "$source_compose_file")
 source_services=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
 source_directories=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
 source_archive_entries=("${source_directories[@]}" cutover)
+
+capture_migration_state() {
+  local output=$1
+  "${prod_compose[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+    -c "SELECT name,checksum FROM schema_migrations ORDER BY name" >"$output"
+}
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 prefix="$BACKUP_DIR/invoice-$timestamp"
@@ -182,6 +188,17 @@ for directory in "${source_directories[@]}"; do
   fi
 done
 
+schema_mode_state=$("${prod_compose[@]}" exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT to_regclass('invoice_eligibility_policy') IS NULL,(SELECT count(*) FROM schema_migrations WHERE name='0011_invoice_eligibility_policy.sql')")
+if [[ "$backup_schema_mode" == 'pre-0011' ]]; then
+  [[ "$schema_mode_state" == 't|0' ]] || { echo 'pre-0011 backup mode does not match the invoice database schema' >&2; exit 1; }
+else
+  [[ "$schema_mode_state" == 'f|1' ]] || { echo 'post-0011 backup mode does not match the invoice database schema' >&2; exit 1; }
+fi
+migration_state_before="$work_dir/.schema-migrations-before"
+migration_state_after="$work_dir/.schema-migrations-after"
+capture_migration_state "$migration_state_before"
+
 "${prod_compose[@]}" exec -T postgres \
   pg_dump -U invoice_owner -d invoice --format=custom --no-owner --no-acl \
   | age -R "$AGE_RECIPIENT_FILE" -o "$database_tmp"
@@ -233,6 +250,12 @@ else
   }
   printf 'schema_mode\npre-0011\n' >"$work_dir/invoice-eligibility-policy.csv"
 fi
+capture_migration_state "$migration_state_after"
+cmp "$migration_state_before" "$migration_state_after" || {
+  echo 'invoice migration state changed during the backup snapshot; publication refused' >&2
+  exit 1
+}
+rm -f -- "$migration_state_before" "$migration_state_after"
 
 cat >"$work_dir/backup-info.txt" <<INFO
 snapshot_utc=$timestamp

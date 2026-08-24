@@ -377,7 +377,8 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				GREATEST(eas.cutover_at,$2::timestamptz-
 					make_interval(secs=>eas.finalization_delay_seconds)) AS requested_through
 			FROM source_account_eligibility_state eas
-			WHERE eas.source_instance_id=$1
+			WHERE eas.source_instance_id=$1 AND eas.catchup_key_hmac IS NULL
+				AND eas.eligibility_status<>'syncing'
 		), changed AS (
 			SELECT t.* FROM targets t WHERE t.requested_through>t.finalized_through AND (
 				EXISTS (SELECT 1 FROM source_usage_events e WHERE e.external_account_id=t.external_account_id
@@ -410,7 +411,8 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				GREATEST(eas.cutover_at,$2::timestamptz-
 					make_interval(secs=>eas.finalization_delay_seconds)) AS requested_through
 			FROM source_account_eligibility_state eas
-			WHERE eas.source_instance_id=$1
+			WHERE eas.source_instance_id=$1 AND eas.catchup_key_hmac IS NULL
+				AND eas.eligibility_status<>'syncing'
 		)
 		UPDATE source_account_eligibility_state eas
 		SET finalized_through=t.requested_through,projection_version=eas.projection_version+1,updated_at=now()
@@ -992,16 +994,6 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			in.BalanceNegative, in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash,
 			in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt.UTC(), in.SourceRevision,
 			in.ObservedAt.UTC())
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO eligibility_projection_jobs(
-			external_account_id,requested_through,status,next_attempt_at)
-			VALUES($1,$2,'queued',now())
-			ON CONFLICT(external_account_id) DO UPDATE SET
-				requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
-				status='queued',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now(),updated_at=now()`,
-			accountID, in.AsOf.UTC())
 		if err != nil {
 			return err
 		}
