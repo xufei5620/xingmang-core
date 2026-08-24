@@ -84,7 +84,7 @@ rm -f "$password_request"
 trap - EXIT HUP INT TERM
 '@
     do {
-        & docker exec --env "BOOTSTRAP_USER=$bootstrapUser" $tools sh -ec $request *> $null
+        & docker exec --env "BOOTSTRAP_USER=$bootstrapUser" $tools sh -ec $request 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { return }
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -181,7 +181,7 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
         --env POSTGRES_HOST_AUTH_METHOD=trust $postgresImage | Out-Null
     $databaseCreated = $true
     Wait-Until -Seconds 60 -Failure 'disposable Keycloak PostgreSQL did not become ready' -Condition {
-        & docker exec $database pg_isready -U keycloak_app -d keycloak *> $null
+        & docker exec $database pg_isready -U keycloak_app -d keycloak 2>&1 | Out-Null
         return $LASTEXITCODE -eq 0
     }
 
@@ -203,7 +203,7 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
         $provisionToolsImage sh -c 'mkdir -p /run/test-secrets && chmod 0700 /run/test-secrets /out && printf "%s\n" Fixture+Bootstrap/Password=2026_Only >/run/test-secrets/bootstrap_password && chmod 0400 /run/test-secrets/bootstrap_password && touch /run/tools-ready && exec sleep 600' | Out-Null
     $toolsCreated = $true
     Wait-Until -Seconds 120 -Failure 'disposable provisioning tools did not become ready' -Condition {
-        & docker exec $tools test -f /run/tools-ready *> $null
+        & docker exec $tools test -f /run/tools-ready 2>&1 | Out-Null
         return $LASTEXITCODE -eq 0
     }
     $discoveryProbe = @'
@@ -212,7 +212,7 @@ curl --fail --silent --show-error \
   | jq -e '.token_endpoint | type == "string" and length > 0'
 '@
     Wait-Until -Seconds 180 -Failure 'disposable Keycloak 26.7.2 did not become ready' -Condition {
-        & docker exec $tools sh -ec $discoveryProbe *> $null
+        & docker exec $tools sh -ec $discoveryProbe 2>&1 | Out-Null
         return $LASTEXITCODE -eq 0
     }
     $provisionOutput = & docker exec `
@@ -377,10 +377,10 @@ curl --fail --silent --show-error \
 
     Write-Host 'Disposable Keycloak 26.7.2 realm provisioning, output allowlist and one-secret publication passed.'
 } finally {
-    if ($toolsCreated) { & docker rm --force $tools *> $null }
-    if ($keycloakCreated) { & docker rm --force $keycloak *> $null }
-    if ($databaseCreated) { & docker rm --force $database *> $null }
-    if ($networkCreated) { & docker network rm $network *> $null }
-    if ($volumeCreated) { & docker volume rm --force $secretVolume *> $null }
-    if ($provisionToolsImageCreated) { & docker image rm --force $provisionToolsImage *> $null }
+    if ($toolsCreated) { & docker rm --force $tools 2>&1 | Out-Null }
+    if ($keycloakCreated) { & docker rm --force $keycloak 2>&1 | Out-Null }
+    if ($databaseCreated) { & docker rm --force $database 2>&1 | Out-Null }
+    if ($networkCreated) { & docker network rm $network 2>&1 | Out-Null }
+    if ($volumeCreated) { & docker volume rm --force $secretVolume 2>&1 | Out-Null }
+    if ($provisionToolsImageCreated) { & docker image rm --force $provisionToolsImage 2>&1 | Out-Null }
 }
