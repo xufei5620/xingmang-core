@@ -37,6 +37,28 @@ $keycloakRecords[-1].reference = 'invoice-keycloak:different'
 $rejected = $false
 try { Get-CommonReleaseImageTag -ImageRecords $keycloakRecords -IdPMode keycloak | Out-Null } catch { $rejected = $true }
 if (-not $rejected) { throw 'mismatched Keycloak release image tag was accepted' }
+$keycloakRecords[-1].reference = 'invoice-keycloak:Fixture'
+$rejected = $false
+try { Get-CommonReleaseImageTag -ImageRecords $keycloakRecords -IdPMode keycloak | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'case-mismatched Keycloak release image tag was accepted' }
+
+$productionRunbookLines = Get-Content -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
+foreach ($line in $productionRunbookLines) {
+    if ($line -match '\bup -d\b' -and $line -notmatch '--no-build') {
+        throw "production Compose command can rebuild outside the release gate: $line"
+    }
+    if ($line -match '\brun --rm\b' -and $line -notmatch '^docker run\b' -and $line -notmatch '--pull never') {
+        throw "production Compose one-shot command can pull outside the release gate: $line"
+    }
+}
+$productionComposeText = @(
+    Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.prod.yml')
+    Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.sources.yml')
+    Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
+) -join "`n"
+if ($productionComposeText -match '(?m)^\s+build:\s*$') {
+    throw 'production Compose retains a local build directive outside the release gate'
+}
 
 $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\release-image-gate'
 $imageID = 'sha256:' + ('a' * 64)

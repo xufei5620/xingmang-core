@@ -269,7 +269,9 @@ function Get-CommonReleaseImageTag {
         }
         $releaseTags += $Matches.tag
     }
-    if (@($releaseTags | Sort-Object -Unique).Count -ne 1) {
+    $uniqueReleaseTags = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($releaseTag in $releaseTags) { $null = $uniqueReleaseTags.Add([string]$releaseTag) }
+    if ($uniqueReleaseTags.Count -ne 1) {
         throw 'all locally built release images do not share one exact release image tag'
     }
     return [string]$releaseTags[0]

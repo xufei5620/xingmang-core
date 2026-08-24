@@ -200,9 +200,6 @@ try {
             throw "$($network.Name) does not use its exact reviewed subnet/internal mode"
         }
     }
-    if ($renderedProduction.services.api.build.target -ne 'api') {
-        throw 'production API service does not use the minimal api image target'
-    }
     if ($renderedProduction.services.clamav.image -ne 'clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8' -or
         [int]$renderedProduction.services.clamav.networks.clamav_egress.gw_priority -ne 1 -or
         $renderedProduction.networks.invoice_app.internal -ne $true -or
@@ -229,8 +226,11 @@ try {
         'pdf-scanner' = 'invoice-system-pdf-scanner:verification-build'
     }
     foreach ($serviceName in $expectedReleaseImages.Keys) {
-        if ([string]$renderedProduction.services.$serviceName.image -cne $expectedReleaseImages[$serviceName]) {
-            throw "production service $serviceName escaped the single exact INVOICE_IMAGE_TAG"
+        $releaseService = $renderedProduction.services.$serviceName
+        if ([string]$releaseService.image -cne $expectedReleaseImages[$serviceName] -or
+            [string]$releaseService.pull_policy -cne 'never' -or
+            $releaseService.PSObject.Properties.Name -contains 'build') {
+            throw "production service $serviceName escaped the exact prebuilt-only INVOICE_IMAGE_TAG"
         }
     }
     $pdfScanner = $renderedProduction.services.'pdf-scanner'
@@ -238,8 +238,7 @@ try {
     $scannerVolumes = @($pdfScanner.volumes)
     $apiScannerVolume = @($renderedProduction.services.api.volumes | Where-Object { $_.target -eq '/scanner' })
     $apiSecrets = @($renderedProduction.services.api.secrets | ForEach-Object { $_.source })
-    if ($pdfScanner.build.target -ne 'scanner' -or
-        $pdfScanner.image -notlike 'invoice-system-pdf-scanner:*' -or
+    if ($pdfScanner.image -notlike 'invoice-system-pdf-scanner:*' -or
         $pdfScanner.network_mode -ne 'none' -or
         $pdfScanner.read_only -ne $true -or
         @($pdfScanner.cap_drop) -notcontains 'ALL' -or
@@ -278,9 +277,11 @@ try {
     $renderedProductionTools = docker compose --profile tools -f (Join-Path $projectRoot 'deploy\docker-compose.prod.yml') config --format json | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'cannot inspect rendered production tools compose' }
     foreach ($service in @('migrate', 'bootstrap-settings', 'bootstrap-sources', 'document-gc', 'oidc-logout-retention', 'oidc-preflight')) {
-        if ($renderedProductionTools.services.$service.build.target -ne 'tools' -or
-            [string]$renderedProductionTools.services.$service.image -cne 'invoice-system-tools:verification-build') {
-            throw "$service does not use the isolated tools target with the exact reviewed release tag"
+        $toolService = $renderedProductionTools.services.$service
+        if ([string]$toolService.image -cne 'invoice-system-tools:verification-build' -or
+            [string]$toolService.pull_policy -cne 'never' -or
+            $toolService.PSObject.Properties.Name -contains 'build') {
+            throw "$service does not use the isolated prebuilt-only tools image with the exact reviewed release tag"
         }
     }
     $permissionsService = $renderedProductionTools.services.permissions
@@ -350,8 +351,9 @@ try {
     $keycloakDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\keycloak\Dockerfile')
     if (-not $keycloakDockerfile.Contains("ARG KEYCLOAK_BASE_IMAGE=$expectedKeycloakBase") -or
         [regex]::Matches($keycloakDockerfile, '(?m)^FROM \$\{KEYCLOAK_BASE_IMAGE\}(?: AS builder)?$').Count -ne 2 -or
-        $idpBaseObject.services.keycloak.build.args.KEYCLOAK_BASE_IMAGE -ne $expectedKeycloakBase -or
         $idpBaseObject.services.keycloak.image -ne 'invoice-keycloak:verification-build' -or
+        $idpBaseObject.services.keycloak.pull_policy -ne 'never' -or
+        $idpBaseObject.services.keycloak.PSObject.Properties.Name -contains 'build' -or
         [regex]::Matches($keycloakDockerfile, '(?m)^(?:RUN|\s*&&) rm -rf /opt/keycloak/bin/client \\$').Count -ne 2 -or
         [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& rm -f /opt/keycloak/lib/lib/main/com\.microsoft\.sqlserver\.mssql-jdbc-\*\.jar \\$').Count -ne 2 -or
         [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& test ! -e /opt/keycloak/bin/client \\$').Count -ne 2) {
@@ -398,9 +400,11 @@ try {
     $economicServices = @('sub2api-payments','sub2api-usage','sub2api-credits','sub2api-balances','newapi-payments','newapi-usage','newapi-credits','newapi-balances')
     $identityServices = @('sub2api-identities','newapi-identities')
     foreach ($service in ($economicServices + $identityServices)) {
-        if ([string]$renderedSources.services.$service.image -cne 'invoice-source-agent:verification-build' -or
-            [string]$renderedSources.services.$service.build.args.SOURCE_AGENT_VERSION -cne $productionEnv.SOURCE_AGENT_VERSION) {
-            throw "$service escaped the common release tag or exact source-agent binary version"
+        $sourceService = $renderedSources.services.$service
+        if ([string]$sourceService.image -cne 'invoice-source-agent:verification-build' -or
+            [string]$sourceService.pull_policy -cne 'never' -or
+            $sourceService.PSObject.Properties.Name -contains 'build') {
+            throw "$service escaped the common prebuilt-only release image tag"
         }
         if ($renderedSources.services.$service.environment.INGESTION_ALLOWED_CIDRS -ne $productionEnv.INVOICE_INGEST_PROXY_CIDR) {
             throw "$service does not pin ingestion DNS to the proxy /32"
@@ -412,9 +416,11 @@ try {
     $renderedSourceCutover = docker compose --profile cutover -f (Join-Path $projectRoot 'deploy\docker-compose.sources.yml') config --format json | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'cannot inspect rendered source-agent cutover compose' }
     foreach ($service in @('sub2api-cutover-init', 'newapi-cutover-init')) {
-        if ([string]$renderedSourceCutover.services.$service.image -cne 'invoice-source-agent:verification-build' -or
-            [string]$renderedSourceCutover.services.$service.build.args.SOURCE_AGENT_VERSION -cne $productionEnv.SOURCE_AGENT_VERSION) {
-            throw "$service escaped the common release tag or exact source-agent binary version"
+        $cutoverService = $renderedSourceCutover.services.$service
+        if ([string]$cutoverService.image -cne 'invoice-source-agent:verification-build' -or
+            [string]$cutoverService.pull_policy -cne 'never' -or
+            $cutoverService.PSObject.Properties.Name -contains 'build') {
+            throw "$service escaped the common prebuilt-only release image tag"
         }
     }
     $trustExample = Get-Content -Raw (Join-Path $projectRoot 'deploy\source-trust.example.json') | ConvertFrom-Json

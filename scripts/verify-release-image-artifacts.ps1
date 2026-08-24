@@ -83,6 +83,26 @@ if ($idpMode -ceq 'keycloak' -and
     -not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}')) {
     throw 'production Keycloak Compose does not use the manifest-bound release image tag'
 }
+if ($idpMode -ceq 'keycloak') {
+    $previousImageTag = $env:INVOICE_IMAGE_TAG
+    try {
+        $env:INVOICE_IMAGE_TAG = $releaseImageTag
+        $renderedIDPText = docker compose `
+            --env-file (Join-Path $projectRoot 'deploy\.env.production.example') `
+            -f (Join-Path $projectRoot 'deploy\docker-compose.idp.yml') config --format json | Out-String
+        if ($LASTEXITCODE -ne 0) { throw 'cannot render production Keycloak Compose for release binding verification' }
+        $renderedIDP = $renderedIDPText | ConvertFrom-Json
+    } finally {
+        if ($null -eq $previousImageTag) {
+            Remove-Item Env:INVOICE_IMAGE_TAG -ErrorAction SilentlyContinue
+        } else {
+            $env:INVOICE_IMAGE_TAG = $previousImageTag
+        }
+    }
+    if ([string]$renderedIDP.services.keycloak.image -cne "invoice-keycloak:$releaseImageTag") {
+        throw 'rendered production Keycloak image does not match the manifest-bound release tag'
+    }
+}
 
 foreach ($record in $records) {
     Assert-GeneratedArtifactBinding -ReleaseDirectory $releaseRoot -ImageRecord $record | Out-Null

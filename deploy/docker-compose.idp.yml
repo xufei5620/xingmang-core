@@ -24,10 +24,7 @@ services:
 
   keycloak:
     image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
-    build:
-      context: ./keycloak
-      args:
-        KEYCLOAK_BASE_IMAGE: ${KEYCLOAK_BASE_IMAGE:-quay.io/keycloak/keycloak:26.7.2@sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec}
+    pull_policy: never
     restart: unless-stopped
     environment:
       KC_DB_URL: jdbc:postgresql://keycloak-postgres:5432/keycloak

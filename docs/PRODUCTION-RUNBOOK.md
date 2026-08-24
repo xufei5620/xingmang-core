@@ -167,8 +167,10 @@ the newly verified release manifest. Production Compose has no image-tag
 fallback: API, tools, PDF scanner, web, source-agent and the locally built
 Keycloak image must resolve from that one value. `SOURCE_AGENT_VERSION` remains
 the independent binary/protocol version recorded inside the agent; it is not an
-image tag. Use `--no-build` for production Compose starts so a missing reviewed
-image fails closed instead of being rebuilt outside the release gate.
+image tag. The production Compose files contain no `build:` directives and set
+`pull_policy: never` for every locally built image. Use `--no-build` for `up`
+and `--pull never` for one-shot `run` commands as second guards; a missing
+reviewed image must fail closed.
 After any code or deployment change, the prior RC evidence is historical and a
 new image gate must be generated before containers are recreated. Never mix an
 older API container with a newer web/scanner container under one release.
@@ -263,7 +265,7 @@ openssl rand -hex 32 >/root/invoice-system/secrets/invoice_pdf_scanner_capabilit
 chown root:10000 /root/invoice-system/secrets/invoice_pdf_scanner_capability
 chmod 0440 /root/invoice-system/secrets/invoice_pdf_scanner_capability
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
-  up -d --force-recreate pdf-scanner api
+  up -d --no-build --force-recreate pdf-scanner api
 ```
 
 Run a container-level readability preflight. For the API image, enter with its
@@ -492,7 +494,7 @@ invoice API, run the provider contract gate:
 ```bash
 docker compose --env-file deploy/.env.production \
   -f deploy/docker-compose.prod.yml --profile tools \
-  run --rm --no-deps oidc-preflight
+  run --rm --pull never --no-deps oidc-preflight
 ```
 
 The command performs discovery and JWKS reads only. It intentionally receives
@@ -535,19 +537,19 @@ Run in this exact order:
 
 ```bash
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.prod.yml up -d postgres clamav pdf-scanner
+  -f deploy/docker-compose.prod.yml up -d --no-build postgres clamav pdf-scanner
 
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.prod.yml --profile tools run --rm migrate
+  -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never migrate
 
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.prod.yml --profile tools run --rm permissions
+  -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never permissions
 
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.prod.yml --profile tools run --rm bootstrap-settings
+  -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never bootstrap-settings
 
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.prod.yml --profile tools run --rm bootstrap-sources
+  -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never bootstrap-sources
 ```
 
 ClamAV has no published port. It joins the internal API network plus a dedicated
@@ -789,13 +791,13 @@ ten signed heartbeats, so a health dependency would deadlock cold start.
 
 ```bash
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.prod.yml up -d api web ingest-proxy
+  -f deploy/docker-compose.prod.yml up -d --no-build api web ingest-proxy
 
 # First installation only: prove all ten DB roles.
 all_sources=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
 for service in "${all_sources[@]}"; do
   docker compose --env-file deploy/.env.production \
-    -f deploy/docker-compose.sources.yml run --rm "$service" check-db
+    -f deploy/docker-compose.sources.yml run --rm --pull never "$service" check-db
 done
 
 # Cut over one source at a time. Stop its upstream application container first
@@ -810,9 +812,9 @@ bash scripts/invoke-upstream-projection-maintenance.sh \
 
 # Immediately capture and verify Sub2API while its app is still stopped.
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
-  --profile cutover run --rm sub2api-cutover-init
+  --profile cutover run --rm --pull never sub2api-cutover-init
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
-  --profile cutover run --rm sub2api-cutover-init check-cutover
+  --profile cutover run --rm --pull never sub2api-cutover-init check-cutover
 
 # Only now restart Sub2API. Then stop New API and repeat the same invariant.
 bash scripts/invoke-upstream-projection-maintenance.sh \
@@ -821,36 +823,36 @@ bash scripts/invoke-upstream-projection-maintenance.sh \
   --database <verified-newapi-database> --user <cluster-superuser-and-db-owner> \
   --ack-upstream-app-stopped
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
-  --profile cutover run --rm newapi-cutover-init
+  --profile cutover run --rm --pull never newapi-cutover-init
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
-  --profile cutover run --rm newapi-cutover-init check-cutover
+  --profile cutover run --rm --pull never newapi-cutover-init check-cutover
 # Verify manifest.enc and baseline.enc hashes before restarting New API.
 
 # Initialize every independent cursor/sequence. Only V2 identities have a
 # deletion-reconciliation state file.
 for service in "${all_sources[@]}"; do
   docker compose --env-file deploy/.env.production \
-    -f deploy/docker-compose.sources.yml run --rm "$service" init-state
+    -f deploy/docker-compose.sources.yml run --rm --pull never "$service" init-state
 done
 for service in sub2api-identities newapi-identities; do
   docker compose --env-file deploy/.env.production \
-    -f deploy/docker-compose.sources.yml run --rm "$service" init-reconcile
+    -f deploy/docker-compose.sources.yml run --rm --pull never "$service" init-reconcile
 done
 
 # Register trust first, then let manifest-only balances sequence 1 commit.
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.sources.yml up -d --wait --wait-timeout 300 \
+  -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-balances newapi-balances
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.sources.yml up -d --wait --wait-timeout 300 \
+  -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-payments sub2api-usage sub2api-credits newapi-payments newapi-usage newapi-credits
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.sources.yml up -d --wait --wait-timeout 300 \
+  -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-identities newapi-identities
 
 # Now wait for the source heartbeats, event drain, ClamAV/scanner and API health.
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.prod.yml up -d --wait --wait-timeout 300 \
+  -f deploy/docker-compose.prod.yml up -d --no-build --wait --wait-timeout 300 \
   api web ingest-proxy
 
 docker compose --env-file deploy/.env.production \
@@ -992,11 +994,11 @@ docker compose --env-file deploy/.env.production -f deploy/docker-compose.source
   sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances \
   newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
-  --profile tools run --rm document-gc \
+  --profile tools run --rm --pull never document-gc \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --document-root /data/documents --minimum-age 24h
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
-  --profile tools run --rm document-gc \
+  --profile tools run --rm --pull never document-gc \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --document-root /data/documents --minimum-age 24h --execute \
   --maintenance-confirmed --reason 'scheduled pre-backup orphan cleanup'
@@ -1094,24 +1096,24 @@ they spool safely while the API is down:
 
 ```bash
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
-  --profile tools run --rm oidc-logout-retention \
+  --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500
 
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml stop api ingest-proxy
 
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
-  --profile tools run --rm oidc-logout-retention \
+  --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500
 
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
-  --profile tools run --rm oidc-logout-retention \
+  --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500 --execute --maintenance-confirmed \
   --reason 'quarterly OIDC logout replay retention after verified backup'
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml up -d api ingest-proxy
+docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml up -d --no-build api ingest-proxy
 ```
 
 Record the emitted `request_id`, starting eligible count, deleted count, batch

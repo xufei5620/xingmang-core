@@ -2,9 +2,7 @@ name: invoice-system-prod
 
 x-api-common: &api-common
   image: invoice-system-api:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
-  build:
-    context: ../backend
-    target: api
+  pull_policy: never
   restart: unless-stopped
   read_only: true
   security_opt:
@@ -14,9 +12,6 @@ x-api-common: &api-common
 x-tools-common: &tools-common
   <<: *api-common
   image: invoice-system-tools:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
-  build:
-    context: ../backend
-    target: tools
 
 services:
   postgres:
@@ -169,9 +164,7 @@ services:
 
   pdf-scanner:
     image: invoice-system-pdf-scanner:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
-    build:
-      context: ../backend
-      target: scanner
+    pull_policy: never
     restart: unless-stopped
     read_only: true
     network_mode: none
@@ -292,8 +285,7 @@ services:
 
   web:
     image: invoice-system-web:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
-    build:
-      context: ../web
+    pull_policy: never
     restart: unless-stopped
     read_only: true
     ports:
