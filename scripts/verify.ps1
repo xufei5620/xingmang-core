@@ -12,6 +12,19 @@ if ($LASTEXITCODE -ne 0) { throw 'secret-material gate failed' }
 & (Join-Path $PSScriptRoot 'test-release-image-gate.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'release image gate static fixtures failed' }
 
+if (-not (Get-Command bash -ErrorAction SilentlyContinue)) {
+    throw 'bash is required to run the ClamAV deployment healthcheck tests'
+}
+Push-Location $projectRoot
+try {
+    bash scripts/test-clamav-healthcheck.sh
+    if ($LASTEXITCODE -ne 0) { throw 'ClamAV deployment healthcheck tests failed' }
+    bash scripts/test-preserve-source-reader-roles.sh
+    if ($LASTEXITCODE -ne 0) { throw 'source reader role-verifier envelope tests failed' }
+} finally {
+    Pop-Location
+}
+
 Push-Location (Join-Path $projectRoot 'backend')
 try {
     go test -race ./...
@@ -24,6 +37,8 @@ try {
 
 Push-Location (Join-Path $projectRoot 'web')
 try {
+    npm test
+    if ($LASTEXITCODE -ne 0) { throw 'frontend automated tests failed' }
     npm run typecheck
     if ($LASTEXITCODE -ne 0) { throw 'frontend typecheck failed' }
     npm run build
@@ -67,7 +82,7 @@ if ($LASTEXITCODE -ne 0) { throw 'docker compose validation failed' }
 if (Get-Command bash -ErrorAction SilentlyContinue) {
     Push-Location $projectRoot
     try {
-        $shellScripts = @(rg --files deploy | Where-Object { $_ -like '*.sh' })
+        $shellScripts = @(rg --files deploy scripts | Where-Object { $_ -like '*.sh' })
         $scriptsForBash = @($shellScripts | ForEach-Object { $_.Replace('\', '/') })
         bash -n @scriptsForBash
         if ($LASTEXITCODE -ne 0) { throw 'production shell syntax validation failed' }
@@ -105,6 +120,7 @@ if ($sub2SourceContract -notmatch 'ALTER ROLE invoice_sub2api_payments_reader\s+
 }
 
 $productionEnv = @{
+    INVOICE_IMAGE_TAG = 'verification-build'
     SECRETS_DIR = (Join-Path $projectRoot 'deploy')
     ADMIN_SETTINGS_BOOTSTRAP_FILE = (Join-Path $projectRoot 'deploy\admin-settings.bootstrap.example.json')
     SOURCE_TRUST_CONFIG_FILE = (Join-Path $projectRoot 'deploy\source-trust.example.json')
@@ -134,13 +150,15 @@ $productionEnv = @{
     OIDC_LOGOUT_TOKEN_MAX_AGE = '10m'
     OIDC_MAX_HTTP_RESPONSE_BYTES = '1048576'
     OIDC_PREFLIGHT_TIMEOUT = '30s'
+    CLAMAV_MAX_SIGNATURE_AGE = '48h'
+    SOURCE_AGENT_VERSION = '0.3.0'
     SOURCE_STATE_ROOT = (Join-Path $projectRoot 'deploy')
     SOURCE_CUTOVER_ROOT = (Join-Path $projectRoot 'deploy\cutover')
     SUB2API_SOURCE_ID = '10000000-0000-4000-8000-000000000001'
     NEWAPI_SOURCE_ID = '10000000-0000-4000-8000-000000000002'
     SUB2API_RUNTIME_VERSION = '0.1.179'
     NEWAPI_RUNTIME_VERSION = 'v1.0.0-rc.25'
-    SUB2API_OIDC_PROVIDER_KEY = 'solov-sso'
+    SUB2API_OIDC_PROVIDER_KEY = 'https://auth.solov.cc/realms/solov'
     SUB2API_PROJECTION_NETWORK = 'invoice-sub2api-projection'
     NEWAPI_PROJECTION_NETWORK = 'invoice-newapi-projection'
 }
@@ -193,6 +211,28 @@ try {
         [int]$renderedProduction.services.clamav.pids_limit -ne 256) {
         throw 'ClamAV digest, resources, default egress route or internal application boundary drifted'
     }
+    $clamAVHealthTest = @($renderedProduction.services.clamav.healthcheck.test)
+    $clamAVHealthScriptMount = @($renderedProduction.services.clamav.volumes | Where-Object { $_.target -eq '/usr/local/bin/invoice-clamav-healthcheck' })
+    if (($clamAVHealthTest -join '|') -cne 'CMD|/bin/sh|/usr/local/bin/invoice-clamav-healthcheck' -or
+        $renderedProduction.services.clamav.environment.CLAMAV_DATABASE_ROOT -cne '/var/lib/clamav' -or
+        $renderedProduction.services.clamav.environment.CLAMAV_MAX_SIGNATURE_AGE -cne $productionEnv.CLAMAV_MAX_SIGNATURE_AGE -or
+        $clamAVHealthScriptMount.Count -ne 1 -or
+        $clamAVHealthScriptMount[0].read_only -ne $true -or
+        $renderedProduction.services.api.depends_on.clamav.condition -cne 'service_healthy' -or
+        $renderedProduction.services.api.depends_on.postgres.condition -cne 'service_healthy' -or
+        $renderedProduction.services.api.depends_on.'pdf-scanner'.condition -cne 'service_healthy') {
+        throw 'API startup is not gated by the reviewed ClamAV/database/scanner health contract'
+    }
+    $expectedReleaseImages = @{
+        api = 'invoice-system-api:verification-build'
+        web = 'invoice-system-web:verification-build'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:verification-build'
+    }
+    foreach ($serviceName in $expectedReleaseImages.Keys) {
+        if ([string]$renderedProduction.services.$serviceName.image -cne $expectedReleaseImages[$serviceName]) {
+            throw "production service $serviceName escaped the single exact INVOICE_IMAGE_TAG"
+        }
+    }
     $pdfScanner = $renderedProduction.services.'pdf-scanner'
     $scannerSecrets = @($pdfScanner.secrets | ForEach-Object { $_.source })
     $scannerVolumes = @($pdfScanner.volumes)
@@ -239,8 +279,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'cannot inspect rendered production tools compose' }
     foreach ($service in @('migrate', 'bootstrap-settings', 'bootstrap-sources', 'document-gc', 'oidc-logout-retention', 'oidc-preflight')) {
         if ($renderedProductionTools.services.$service.build.target -ne 'tools' -or
-            $renderedProductionTools.services.$service.image -notlike 'invoice-system-tools:*') {
-            throw "$service does not use the isolated tools image target"
+            [string]$renderedProductionTools.services.$service.image -cne 'invoice-system-tools:verification-build') {
+            throw "$service does not use the isolated tools target with the exact reviewed release tag"
         }
     }
     $permissionsService = $renderedProductionTools.services.permissions
@@ -358,12 +398,24 @@ try {
     $economicServices = @('sub2api-payments','sub2api-usage','sub2api-credits','sub2api-balances','newapi-payments','newapi-usage','newapi-credits','newapi-balances')
     $identityServices = @('sub2api-identities','newapi-identities')
     foreach ($service in ($economicServices + $identityServices)) {
+        if ([string]$renderedSources.services.$service.image -cne 'invoice-source-agent:verification-build' -or
+            [string]$renderedSources.services.$service.build.args.SOURCE_AGENT_VERSION -cne $productionEnv.SOURCE_AGENT_VERSION) {
+            throw "$service escaped the common release tag or exact source-agent binary version"
+        }
         if ($renderedSources.services.$service.environment.INGESTION_ALLOWED_CIDRS -ne $productionEnv.INVOICE_INGEST_PROXY_CIDR) {
             throw "$service does not pin ingestion DNS to the proxy /32"
         }
         if ($null -eq $renderedSources.services.$service.healthcheck) { throw "$service is missing its local healthcheck" }
         if ($service -in $identityServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '2.0' -or $renderedSources.services.$service.environment.SOURCE_RECONCILE_FILE -ne '/state/reconcile.json')) { throw "$service is missing V2 durable reconciliation" }
         if ($service -in $economicServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '3.0' -or $null -ne $renderedSources.services.$service.environment.SOURCE_RECONCILE_FILE -or $renderedSources.services.$service.environment.SOURCE_CUTOVER_MANIFEST_FILE -ne '/cutover/manifest.enc')) { throw "$service V3 cutover/state contract drifted" }
+    }
+    $renderedSourceCutover = docker compose --profile cutover -f (Join-Path $projectRoot 'deploy\docker-compose.sources.yml') config --format json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'cannot inspect rendered source-agent cutover compose' }
+    foreach ($service in @('sub2api-cutover-init', 'newapi-cutover-init')) {
+        if ([string]$renderedSourceCutover.services.$service.image -cne 'invoice-source-agent:verification-build' -or
+            [string]$renderedSourceCutover.services.$service.build.args.SOURCE_AGENT_VERSION -cne $productionEnv.SOURCE_AGENT_VERSION) {
+            throw "$service escaped the common release tag or exact source-agent binary version"
+        }
     }
     $trustExample = Get-Content -Raw (Join-Path $projectRoot 'deploy\source-trust.example.json') | ConvertFrom-Json
     $serviceTrust = @{
@@ -432,6 +484,13 @@ if ($v3Schema.additionalProperties -ne $false -or (@($v3Schema.properties.stream
 if ($v3Example.schema_version -ne '3.0' -or $v3Example.stream_id -ne 'usage' -or $v3Example.scan_complete -ne $false -or $v3Example.records[0].entity_type -ne 'usage_event') { throw 'v3 fixed example drifted' }
 
 if (-not $SkipPostgres) {
+    & (Join-Path $PSScriptRoot 'test-upstream-projection-maintenance.ps1') `
+        -PostgresImage 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+    if ($LASTEXITCODE -ne 0) { throw 'upstream projection maintenance adversarial tests failed' }
+
+    & (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15/18 source Bridge V4 matrix failed' }
+
     & (Join-Path $PSScriptRoot 'verify-postgres.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'isolated PostgreSQL verification failed' }
 }

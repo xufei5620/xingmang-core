@@ -103,11 +103,9 @@ func (c *Sub2APIIdentityDBConnector) Scan(ctx context.Context, req ScanRequest) 
 	return page, nil
 }
 
-// NewAPIIdentityDBConnector reads only two security-barrier views. The provider
-// view exposes four non-secret OIDC endpoints plus contract_ok; the binding
-// view exposes identities only when that contract is structurally valid. It
-// never receives raw-table access, users, client credentials, scopes, mappings,
-// or access policy.
+// NewAPIIdentityDBConnector calls a row-filtered bridge. The LOGIN caller has
+// no raw OAuth-table privileges and therefore cannot enumerate other providers
+// or bindings even if its process is compromised.
 type NewAPIIdentityDBConnector struct {
 	DB                  *sql.DB
 	Dialect             SQLDialect
@@ -197,13 +195,20 @@ func (c *NewAPIIdentityDBConnector) Scan(ctx context.Context, req ScanRequest) (
 }
 
 func (c *NewAPIIdentityDBConnector) verifyNewAPIProviderContract(ctx context.Context, slug, issuer string) error {
+	relation, err := bridgeJSONRecordRelation(SourceNewAPI, StreamIdentities, "provider_contract",
+		"slug text,enabled boolean,well_known text,authorization_endpoint text,token_endpoint text,user_info_endpoint text,contract_ok boolean")
+	if err != nil {
+		return err
+	}
+	request, err := marshalBridgeRequest(map[string]any{"slug": slug})
+	if err != nil {
+		return err
+	}
 	var actualSlug, wellKnown, authorizationEndpoint, tokenEndpoint, userInfoEndpoint string
 	var enabled, contractOK bool
-	err := c.DB.QueryRowContext(ctx, `
+	err = c.DB.QueryRowContext(ctx, `
 		SELECT slug,enabled,well_known,authorization_endpoint,token_endpoint,
-			user_info_endpoint,contract_ok
-		FROM public.invoice_newapi_oidc_provider_contract_v1
-		WHERE slug=$1`, slug).Scan(&actualSlug, &enabled, &wellKnown,
+			user_info_endpoint,contract_ok FROM `+relation, request).Scan(&actualSlug, &enabled, &wellKnown,
 		&authorizationEndpoint, &tokenEndpoint, &userInfoEndpoint, &contractOK)
 	if err != nil {
 		return fmt.Errorf("newapi identity connector: read provider trust contract: %w", err)
@@ -218,11 +223,16 @@ func (c *NewAPIIdentityDBConnector) verifyNewAPIProviderContract(ctx context.Con
 func sub2APIIdentityQuery(dialect SQLDialect, providerKey, issuer string, updatedAt time.Time, id int64, limit int) (string, []any, error) {
 	switch dialect {
 	case DialectPostgres:
-		return `SELECT id, user_id, provider_type, provider_key, provider_subject,
-verified_at, issuer, created_at, updated_at FROM public.invoice_sub2api_oidc_binding_projection_v1
-WHERE provider_type = $1 AND provider_key = $2 AND issuer = $3
-AND (updated_at, id) > ($4, $5)
-ORDER BY updated_at ASC, id ASC LIMIT $6`, []any{"oidc", providerKey, issuer, updatedAt, id, limit}, nil
+		relation, err := bridgeJSONRecordRelation(SourceSub2API, StreamIdentities, "page",
+			"id bigint,user_id bigint,provider_type text,provider_key text,provider_subject text,verified_at timestamptz,issuer text,created_at timestamptz,updated_at timestamptz")
+		if err != nil {
+			return "", nil, err
+		}
+		request, err := marshalBridgeRequest(map[string]any{"provider_key": providerKey, "issuer": issuer, "updated_at": updatedAt.UTC().Format(time.RFC3339Nano), "id": id, "limit": limit})
+		if err != nil {
+			return "", nil, err
+		}
+		return `SELECT id,user_id,provider_type,provider_key,provider_subject,verified_at,issuer,created_at,updated_at FROM ` + relation + ` ORDER BY updated_at ASC,id ASC`, []any{request}, nil
 	case DialectMySQL, DialectSQLite:
 		return `SELECT id, user_id, provider_type, provider_key, provider_subject,
 verified_at, issuer, created_at, updated_at FROM auth_identities
@@ -239,9 +249,16 @@ func newAPIIdentityQuery(dialect SQLDialect, slug string, id int64, limit int) (
 		return "", nil, fmt.Errorf("unsupported SQL dialect %q", dialect)
 	}
 	if dialect == DialectPostgres {
-		return `SELECT id,user_id,provider_id,provider_user_id,created_at,provider_slug
-FROM public.invoice_newapi_oidc_binding_projection_v1
-WHERE provider_slug=$1 AND id>$2 ORDER BY id ASC LIMIT $3`, []any{slug, id, limit}, nil
+		relation, err := bridgeJSONRecordRelation(SourceNewAPI, StreamIdentities, "page",
+			"id bigint,user_id bigint,provider_id bigint,provider_user_id text,created_at timestamptz,provider_slug text")
+		if err != nil {
+			return "", nil, err
+		}
+		request, err := marshalBridgeRequest(map[string]any{"slug": slug, "id": id, "limit": limit})
+		if err != nil {
+			return "", nil, err
+		}
+		return `SELECT id,user_id,provider_id,provider_user_id,created_at,provider_slug FROM ` + relation + ` ORDER BY id ASC`, []any{request}, nil
 	}
 	return `SELECT b.id,b.user_id,b.provider_id,b.provider_user_id,b.created_at,p.slug
 FROM user_oauth_bindings b JOIN custom_oauth_providers p ON p.id=b.provider_id

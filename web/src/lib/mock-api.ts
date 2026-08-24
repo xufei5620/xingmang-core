@@ -143,6 +143,7 @@ let orders: FundingOrder[] = [
 let profiles: InvoiceProfile[] = [
   {
     id: "profile_company",
+    revision: 1,
     type: "enterprise",
     title: "上海星河智能科技有限公司",
     taxId: "91310115MA1K4X8P2C",
@@ -155,6 +156,7 @@ let profiles: InvoiceProfile[] = [
   },
   {
     id: "profile_personal",
+    revision: 1,
     type: "personal",
     title: "陈远",
     taxId: "",
@@ -498,9 +500,19 @@ export const mockInvoiceApi: InvoiceApiClient = {
 
   async saveProfile(profile: Omit<InvoiceProfile, "id"> & { id?: string }) {
     await delay();
+    const existing = profile.id
+      ? profiles.find((item) => item.id === profile.id)
+      : undefined;
+    if (existing && existing.revision !== profile.revision) {
+      throw new InvoiceApiError("资料已被更新，请刷新后重试。", {
+        code: "VERSION_CONFLICT",
+        status: 409,
+      });
+    }
     const saved: InvoiceProfile = {
       ...profile,
       id: profile.id ?? `profile_${Date.now()}`,
+      revision: existing ? existing.revision + 1 : 1,
     };
     if (saved.isDefault)
       profiles = profiles.map((item) => ({ ...item, isDefault: false }));
@@ -660,6 +672,45 @@ export const mockInvoiceApi: InvoiceApiClient = {
     };
     requests = [request, ...requests];
     return structuredClone(request);
+  },
+
+  async cancelInvoice(target: InvoiceRequest) {
+    await delay(280);
+    const current = requests.find((request) => request.id === target.id);
+    if (!current) throw new Error("开票申请不存在");
+    if (
+      current.workflowStatus !== "pending_review" &&
+      current.workflowStatus !== "needs_changes" &&
+      current.status !== "submitted"
+    ) {
+      throw new Error("当前申请状态不能取消");
+    }
+    orders = orders.map((order) => {
+      const allocation = current.allocations.find(
+        (item) => item.orderId === order.id,
+      );
+      if (!allocation) return order;
+      return {
+        ...order,
+        reservedMinor: Math.max(
+          0,
+          order.reservedMinor - allocation.allocatedMinor,
+        ),
+        availableMinor: order.availableMinor + allocation.allocatedMinor,
+      };
+    });
+    const cancelled: InvoiceRequest = {
+      ...current,
+      status: "returned",
+      workflowStatus: "user_cancelled",
+      reviewNote: "用户已取消；对应金额已经释放，可重新选择后申请。",
+      version: (current.version ?? 1) + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    requests = requests.map((request) =>
+      request.id === current.id ? cancelled : request,
+    );
+    return structuredClone(cancelled);
   },
 
   async getPaymentCandidates(cursor) {
@@ -860,6 +911,9 @@ export const mockInvoiceApi: InvoiceApiClient = {
         ? {
             ...request,
             status: payload.action === "approve" ? "reviewing" : "returned",
+            workflowStatus:
+              payload.action === "approve" ? "approved" : "needs_changes",
+            version: (request.version ?? 1) + 1,
             reviewer: "财务管理员",
             reviewNote: payload.note,
             updatedAt: new Date().toISOString(),
@@ -872,6 +926,7 @@ export const mockInvoiceApi: InvoiceApiClient = {
     target: InvoiceRequest,
     file: File,
     invoiceNumber: string,
+    _issuedAt: string,
   ) {
     await delay(650);
     requests = requests.map((request) =>
@@ -879,6 +934,7 @@ export const mockInvoiceApi: InvoiceApiClient = {
         ? {
             ...request,
             status: "issued",
+            workflowStatus: "issued",
             pdfName: file.name,
             invoiceNumber,
             mailStatus: "queued",
@@ -916,6 +972,10 @@ export const mockInvoiceApi: InvoiceApiClient = {
     anchor.download = request.pdfName ?? `${request.requestNo}.pdf`;
     anchor.click();
     URL.revokeObjectURL(url);
+  },
+
+  async downloadAdminInvoiceDocument(request: InvoiceRequest) {
+    return this.downloadInvoiceDocument(request);
   },
 
   async getAdminSettings() {

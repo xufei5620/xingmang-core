@@ -1,12 +1,12 @@
 name: invoice-source-agents-prod
 
 x-source-common: &source-common
-  image: invoice-source-agent:${SOURCE_AGENT_IMAGE_TAG:-0.3.0}
+  image: invoice-source-agent:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
   build:
     context: ../agents
     dockerfile: Dockerfile.production
     args:
-      SOURCE_AGENT_VERSION: ${SOURCE_AGENT_IMAGE_TAG:-0.3.0}
+      SOURCE_AGENT_VERSION: ${SOURCE_AGENT_VERSION:?set the exact source-agent binary version}
   restart: unless-stopped
   read_only: true
   user: "65532:65532"

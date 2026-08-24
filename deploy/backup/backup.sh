@@ -199,7 +199,7 @@ write_freeze=api,ingest-proxy,${source_services[*]}
 document_volume=$document_volume
 source_state_directories=${source_directories[*]}
 invoice_image_tag=${INVOICE_IMAGE_TAG:-unknown}
-source_agent_image_tag=${SOURCE_AGENT_IMAGE_TAG:-unknown}
+source_agent_image_tag=${INVOICE_IMAGE_TAG:-unknown}
 INFO
 cp -- "$source_compose_file" "$work_dir/docker-compose.sources.yml"
 for metadata_file in "${SOURCE_INSTANCES_CONFIG_FILE:-}" "${SOURCE_TRUST_CONFIG_FILE:-}" "${RELEASE_METADATA_FILE:-}"; do

@@ -105,6 +105,7 @@ export interface InvoiceApiClient {
   getSourceHealth(): Promise<SourceHealthReport>;
   getSummary(admin?: boolean): Promise<DashboardSummary>;
   submitInvoice(payload: SubmitInvoicePayload): Promise<InvoiceRequest>;
+  cancelInvoice(request: InvoiceRequest): Promise<InvoiceRequest>;
   getPaymentCandidates(cursor?: string): Promise<PaymentCandidatePage>;
 	verifyPayment(
 		candidateId: string,
@@ -133,6 +134,7 @@ export interface InvoiceApiClient {
     request: InvoiceRequest,
     file: File,
     invoiceNumber: string,
+    issuedAt: string,
   ): Promise<void>;
   resendMail(request: InvoiceRequest): Promise<void>;
   getDeliveryState(
@@ -140,6 +142,7 @@ export interface InvoiceApiClient {
     admin?: boolean,
   ): Promise<InvoiceDeliveryState>;
   downloadInvoiceDocument(request: InvoiceRequest): Promise<void>;
+  downloadAdminInvoiceDocument(request: InvoiceRequest): Promise<void>;
   getAdminSettings(): Promise<InvoiceSystemSettings>;
   saveInvoiceRules(input: InvoiceRuleSettingsInput): Promise<void>;
   saveSMTPSettings(input: SMTPSettingsInput): Promise<void>;

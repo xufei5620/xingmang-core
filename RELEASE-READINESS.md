@@ -1,10 +1,9 @@
-# Release readiness: 0.1.0-rc1
+# Release readiness: 0.1.0-rc8 candidate
 
-Status as of 2026-08-21:
+Status as of 2026-08-24:
 
 - application code and local release candidate: **GO**;
-- isolated staging deployment after real configuration is supplied: **GO with
-  external prerequisites**;
+- isolated staging deployment: **GO after the fresh RC8 image gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -14,8 +13,9 @@ this release candidate.
 
 ## Verified locally
 
-- full race/vet/frontend/Nginx/Compose/PostgreSQL/migration/concurrency/backup
-  and upstream-integrity gate: `scripts/verify.ps1`;
+- full race/vet/frontend/Nginx/Compose/PostgreSQL/migration/concurrency/backup,
+  Bridge V4 adversarial maintenance, PG15/PG18 matrix and upstream-integrity
+  gate: `scripts/verify.ps1`;
 - Go `govulncheck v1.7.0`: no called vulnerabilities in backend or source
   agent modules;
 - real qpdf 12.3.2 image build gate: safe static PDF accepted; structurally
@@ -35,28 +35,27 @@ this release candidate.
   time. Later backend/deployment changes now make this bundle deliberately
   stale; a fresh full gate is required after PostgreSQL verification is green;
 - read-only `fiberstate` preflight: live Sub2API 0.1.179 and New API rc.25
-  match the frozen contracts; planned ports and five Docker networks are free,
-  NTP/disk/Cloudflare real-IP policy are acceptable.
+  match the frozen contracts; both applications are healthy, DNS/TLS/Nginx and
+  Keycloak discovery are healthy, and the invoice database contains no user,
+  funding-lot, ingest-batch or invoice-request rows. The old New API partial
+  role state and Sub2API legacy views remain production cleanup inputs, not an
+  approved runtime boundary.
 
 ## Production prerequisites not yet performed
 
-- obtain explicit authorization for DNS, Nginx, database grants/views,
-  containers and upstream OIDC/menu configuration;
-- deploy the approved exact Keycloak 26.7.2 derived image and pass the real
-  production OIDC discovery, ID-token, administrator MFA `acr`/`amr`,
+- generate and independently verify a fresh RC8 image/SBOM/vulnerability
+  manifest bound to the committed source and one exact image tag;
+- verify new source/invoice/IdP backups with isolated restores, preserve the
+  existing reader SCRAM envelope, reconcile the legacy view boundary, install
+  Bridge V4, prove `pg_depend=0`, and recapture both cutovers while each
+  upstream application is stopped and the database quiescence gate passes;
+- deploy all Invoice images under the same RC8 tag and pass real production
+  OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
-- create DNS/TLS for `invoice.solov.cc` and the selected IdP host(s);
 - supply exact administrator and independent break-glass `/32` or `/128`
-  routes, actual hidden issuer settings and at least three finance operators;
-- choose QQ/enterprise QQ or Gmail SMTP and provide its app password through a
-  host secret (never Git or browser storage);
-- generate all field/session/OIDC/database/source-agent/mTLS/signing/spool,
-  cutover and balance-snapshot,
-  age backup and offline backup-signing keys according to the runbook;
-- install and prove the ten column/row-restricted upstream projection roles;
-- capture each source cutover once in a database-clocked `REPEATABLE READ READ
-  ONLY` transaction, authenticate both encrypted manifests/baselines, and
-  retain them in every source-state backup;
+  routes and provision at least three distinct finance operators;
+- enter the QQ SMTP authorization code through the protected administrator UI
+  and pass a real delivery/retry canary; never place it in Git or chat;
 - bind existing Sub2API/New API accounts to the same OIDC identity. Never
   merge by email alone;
 - run the real encrypted backup/restore drill and the full canary: login,
@@ -65,9 +64,8 @@ this release candidate.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create the initial Git commit and signed release tag. The repository has no
-  configured author identity, so no identity was invented and no commit was
-  made.
+- create and locally verify the RC8 commit and signed release tag; no GitHub
+  push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement
 
@@ -78,9 +76,12 @@ this release candidate.
 - New API observed top-ups never become invoiceable automatically. Two
   distinct finance reviewers must verify external payment evidence, and a
   third operator issues the invoice;
+- a successful post-cutover subscription purchase is treated as delivered
+  service and becomes invoiceable for its verified real payment amount; wallet
+  top-ups still require actual cash-backed consumption;
 - ordinary invoices only, minimum CNY 200.00, item `技术服务`, hidden issuing
   entity, and email notification with authenticated download rather than a PDF
-  attachment.
+  attachment; administrators enter the actual tax-platform issue time.
 
 ## Release decision
 

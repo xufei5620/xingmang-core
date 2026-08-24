@@ -6,25 +6,26 @@ import (
 	"time"
 )
 
-func TestSub2APIPaymentQueryRequiresPerOrderCurrencyView(t *testing.T) {
+func TestSub2APIPaymentQueryUsesDependencyFreeBridge(t *testing.T) {
 	t.Parallel()
 	query, _, err := sub2APIKeysetQuery(DialectPostgres, time.Unix(0, 0).UTC(), 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(query, "FROM public.invoice_sub2api_payment_projection_v1") ||
+	if !strings.Contains(query, "invoice_bridge.sub2api_payments_v4('legacy_page'") ||
 		!strings.Contains(query, "CAST(refund_amount AS TEXT), currency") ||
-		strings.Contains(query, "FROM payment_orders") {
-		t.Fatalf("query bypassed reviewed per-order currency view: %s", query)
+		strings.Contains(query, "payment_orders") || strings.Contains(query, "provider_snapshot") {
+		t.Fatalf("query bypassed reviewed bridge boundary: %s", query)
 	}
 }
 
-func TestSub2APIPaymentHealthQueryIsAggregateOnly(t *testing.T) {
+func TestSub2APIPaymentHealthBridgeIsAggregateOnly(t *testing.T) {
 	t.Parallel()
-	if strings.Contains(sub2APIProjectionHealthQuery, " id") || strings.Contains(sub2APIProjectionHealthQuery, "provider_snapshot") ||
-		!strings.Contains(sub2APIProjectionHealthQuery, "unsupported_known_non_cny_rows") ||
-		!strings.Contains(sub2APIProjectionHealthQuery, "blocked_unknown_currency_rows") {
-		t.Fatalf("health query exposed row identity/snapshot or missed blocked aggregate: %s", sub2APIProjectionHealthQuery)
+	relation, err := bridgeJSONRecordRelation(SourceSub2API, StreamPayments, "legacy_health",
+		"total_rows bigint,exposed_cny_rows bigint,unsupported_known_non_cny_rows bigint,blocked_unknown_currency_rows bigint")
+	if err != nil || strings.Contains(relation, "provider_snapshot") || strings.Contains(relation, "payment_orders") ||
+		!strings.Contains(relation, "unsupported_known_non_cny_rows") || !strings.Contains(relation, "blocked_unknown_currency_rows") {
+		t.Fatalf("health bridge exposed raw source data or missed aggregate: %s err=%v", relation, err)
 	}
 }
 

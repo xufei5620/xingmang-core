@@ -217,6 +217,7 @@ export interface ResolveRefundCaseInput {
 
 export interface InvoiceProfile {
   id: string;
+  revision: number;
   type: InvoiceProfileType;
   title: string;
   taxId: string;

@@ -468,3 +468,21 @@ func (s *Service) GetDocumentForRequest(_ context.Context, principalID, requestI
 	}
 	return domain.InvoiceDocument{}, domain.ErrNotFound
 }
+
+func (s *Service) GetDocumentForRequestAsAdmin(_ context.Context, requestID string) (domain.InvoiceDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	request, ok := s.requests[requestID]
+	if !ok {
+		return domain.InvoiceDocument{}, domain.ErrNotFound
+	}
+	if request.Status != domain.StatusIssued && request.Status != domain.StatusRefundAttention {
+		return domain.InvoiceDocument{}, domain.ErrInvalidState
+	}
+	for _, document := range s.documents {
+		if document.RequestID == requestID {
+			return document, nil
+		}
+	}
+	return domain.InvoiceDocument{}, domain.ErrNotFound
+}

@@ -111,7 +111,12 @@ trap cleanup EXIT
 age --decrypt -i "$AGE_IDENTITY_FILE" -o "$temporary/documents.tar" "$DOCUMENT_BACKUP"
 age --decrypt -i "$AGE_IDENTITY_FILE" -o "$temporary/source-state.tar" "$SOURCE_STATE_BACKUP"
 age --decrypt -i "$AGE_IDENTITY_FILE" -o "$temporary/metadata.tar" "$METADATA_BACKUP"
-invoice_tools_image=${INVOICE_TOOLS_IMAGE:-invoice-system-tools:${INVOICE_IMAGE_TAG:-0.1.0}}
+if [[ -n "${INVOICE_TOOLS_IMAGE:-}" ]]; then
+  invoice_tools_image=$INVOICE_TOOLS_IMAGE
+else
+  : "${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag or INVOICE_TOOLS_IMAGE}"
+  invoice_tools_image="invoice-system-tools:$INVOICE_IMAGE_TAG"
+fi
 validate_tar() {
   local archive="$1"
   local max_total="$2"
@@ -142,7 +147,7 @@ fi
 )
 
 source_directories=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
-source_agent_image=${SOURCE_AGENT_IMAGE:-invoice-source-agent:${SOURCE_AGENT_IMAGE_TAG:-0.3.0}}
+source_agent_image=${SOURCE_AGENT_IMAGE:-invoice-source-agent:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag or SOURCE_AGENT_IMAGE}}
 for directory in "${source_directories[@]}"; do
   state_dir="$temporary/source-state/$directory"
   test -d "$state_dir"

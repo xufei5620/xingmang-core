@@ -29,6 +29,7 @@ type InvoiceService interface {
 	ConfirmManualIssue(context.Context, string, string, int64) (domain.InvoiceRequest, error)
 	AttachDocument(context.Context, string, domain.InvoiceDocument, int64) (domain.InvoiceRequest, domain.InvoiceDocument, domain.EmailOutbox, error)
 	GetDocumentForRequest(context.Context, string, string) (domain.InvoiceDocument, error)
+	GetDocumentForRequestAsAdmin(context.Context, string) (domain.InvoiceDocument, error)
 	GetRequest(context.Context, string, string, bool) (domain.InvoiceRequest, error)
 	ListRequests(context.Context, string, bool) ([]domain.InvoiceRequest, error)
 	VerifyNewAPIPaymentWithEvidence(context.Context, string, string, int64, string, string) (domain.FundingLot, error)

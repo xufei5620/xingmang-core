@@ -63,6 +63,14 @@ import {
 import { dateTime, maskTaxId, money } from "./lib/format";
 import { apiCapabilities, apiMode, invoiceApi } from "./lib/api";
 import { InvoiceApiError } from "./lib/api-contract";
+import {
+  canUserCancelInvoice,
+  currentLocalDateTimeValue,
+  invoicePDFSizeAllowed,
+  normalizeIssuedAt,
+  replaceDirectRequestAfterMutation,
+  userCancellationLabel,
+} from "./lib/workflow";
 import { AuthProvider, useAuth } from "./AuthProvider";
 import type {
   InvoiceSystemSettings,
@@ -1217,7 +1225,7 @@ function OrdersPage() {
                     <small>
                       {profile.type === "enterprise"
                         ? maskTaxId(profile.taxId)
-                        : "个人电子发票"}
+                        : "个人电子普票"}
                     </small>
                   </div>
                   {profile.isDefault && <Badge tone="blue">默认</Badge>}
@@ -1302,7 +1310,7 @@ function ProfilesPage() {
                 <span>
                   {profile.type === "enterprise"
                     ? maskTaxId(profile.taxId)
-                    : "个人电子发票"}
+                    : "个人电子普票"}
                 </span>
               </div>
               {profile.isDefault && (
@@ -1377,6 +1385,7 @@ function ProfileDialog({
   onSaved: () => Promise<void>;
 }) {
   const toast = useContext(ToastContext);
+  const { user } = useAuth();
   const [type, setType] = useState<InvoiceProfileType>(
     initial?.type ?? "enterprise",
   );
@@ -1384,7 +1393,7 @@ function ProfileDialog({
   const [form, setForm] = useState({
     title: initial?.title ?? "",
     taxId: initial?.taxId ?? "",
-    email: initial?.email ?? "",
+    email: initial?.email ?? (user?.emailVerified ? user.email : ""),
     phone: initial?.phone ?? "",
     address: initial?.address ?? "",
     bankName: initial?.bankName ?? "",
@@ -1409,6 +1418,7 @@ function ProfileDialog({
         taxId: form.taxId.trim(),
         email: form.email.trim(),
         id: initial?.id,
+        revision: initial?.revision ?? 0,
         type,
       });
       await onSaved();
@@ -1457,7 +1467,7 @@ function ProfileDialog({
               <UserRound size={18} />
               <span>
                 <strong>个人抬头</strong>
-                <small>用于个人电子发票</small>
+                <small>用于个人电子普票</small>
               </span>
             </button>
           </div>
@@ -1485,6 +1495,7 @@ function ProfileDialog({
               value={form.email}
               onChange={(value) => update("email", value)}
               placeholder="invoice@example.com"
+              hint="V1 仅支持统一身份账号已经验证的邮箱；备用邮箱验证将在后续版本提供。"
             />
             <Field
               label="联系电话"
@@ -1499,7 +1510,7 @@ function ProfileDialog({
                   label="注册地址"
                   value={form.address}
                   onChange={(value) => update("address", value)}
-                  placeholder="专票或业务需要时填写"
+                  placeholder="电子普票业务需要时填写（选填）"
                 />
                 <Field
                   label="开户银行"
@@ -1555,6 +1566,7 @@ function Field({
   wide,
   disabled,
   maxLength,
+  hint,
 }: {
   label: string;
   value: string;
@@ -1565,6 +1577,7 @@ function Field({
   wide?: boolean;
   disabled?: boolean;
   maxLength?: number;
+  hint?: string;
 }) {
   return (
     <label className={`form-field ${wide ? "field-wide" : ""}`}>
@@ -1581,6 +1594,7 @@ function Field({
         disabled={disabled}
         maxLength={maxLength}
       />
+      {hint && <small>{hint}</small>}
     </label>
   );
 }
@@ -1592,6 +1606,7 @@ function RecordsPage() {
     requestsNextCursor,
     loadingMoreRequests,
     loadMoreRequests,
+    refresh,
   } = useData();
   const toast = useContext(ToastContext);
   const location = useLocation();
@@ -1599,6 +1614,9 @@ function RecordsPage() {
   const [directRequest, setDirectRequest] = useState<InvoiceRequest | null>(null);
   const [directLoading, setDirectLoading] = useState(false);
   const [directError, setDirectError] = useState<string | null>(null);
+  const [cancellingRequestID, setCancellingRequestID] = useState<string | null>(
+    null,
+  );
   const requestedID = new URLSearchParams(location.search).get("request_id")?.trim();
 
   useEffect(() => {
@@ -1645,6 +1663,30 @@ function RecordsPage() {
         error instanceof Error ? error.message : "发票文件暂时无法下载。",
         "error",
       );
+    }
+  };
+  const cancel = async (request: InvoiceRequest) => {
+    if (!request.version) {
+      toast("申请版本缺失，请刷新后重试。", "error");
+      return;
+    }
+    const message =
+      request.workflowStatus === "needs_changes"
+        ? "取消后会释放本申请占用的金额，你可以修改资料后重新申请。确定继续吗？"
+        : "取消后会释放本申请占用的金额。确定取消吗？";
+    if (!window.confirm(message)) return;
+    setCancellingRequestID(request.id);
+    try {
+      const cancelled = await invoiceApi.cancelInvoice(request);
+      setDirectRequest((current) =>
+        replaceDirectRequestAfterMutation(current, cancelled),
+      );
+      await refresh();
+      toast("申请已取消，占用金额已释放，可以重新申请。");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "取消申请失败。", "error");
+    } finally {
+      setCancellingRequestID(null);
     }
   };
   return (
@@ -1757,6 +1799,17 @@ function RecordsPage() {
                           {apiCapabilities.documentDownload
                             ? "下载 PDF"
                             : "PDF 接口待接入"}
+                        </button>
+                      ) : canUserCancelInvoice(request) ? (
+                        <button
+                          className="button button-small button-secondary"
+                          disabled={cancellingRequestID === request.id}
+                          onClick={() => void cancel(request)}
+                        >
+                          {cancellingRequestID === request.id && (
+                            <Loader2 className="spin" size={14} />
+                          )}
+                          {userCancellationLabel(request)}
                         </button>
                       ) : (
                         <button className="icon-button">
@@ -2045,6 +2098,7 @@ function AdminDrawer({
   const [working, setWorking] = useState(false);
   const [note, setNote] = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [issuedAt, setIssuedAt] = useState(currentLocalDateTimeValue);
   const [file, setFile] = useState<File | null>(null);
   const [delivery, setDelivery] = useState<Awaited<
     ReturnType<typeof invoiceApi.getDeliveryState>
@@ -2082,6 +2136,9 @@ function AdminDrawer({
       active = false;
     };
   }, [requestId, request?.status, request?.updatedAt, request?.workflowStatus]);
+  useEffect(() => {
+    setIssuedAt(currentLocalDateTimeValue());
+  }, [requestId]);
   if (!request) return null;
   const effectiveWorkflow =
     request.workflowStatus ??
@@ -2144,8 +2201,25 @@ function AdminDrawer({
       toast("仅允许上传 PDF 发票文件。", "error");
       return;
     }
+    if (!invoicePDFSizeAllowed(file.size)) {
+      toast("PDF 文件必须大于 0 且不能超过 20 MiB。", "error");
+      return;
+    }
+    let normalizedIssuedAt: string;
+    try {
+      normalizedIssuedAt = normalizeIssuedAt(issuedAt);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "实际开票时间无效。", "error");
+      return;
+    }
     void run(
-      () => invoiceApi.adminUploadInvoice(request, file, invoiceNumber),
+      () =>
+        invoiceApi.adminUploadInvoice(
+          request,
+          file,
+          invoiceNumber,
+          normalizedIssuedAt,
+        ),
       "电子发票已归档，邮件已进入发送队列。",
     );
   };
@@ -2309,6 +2383,14 @@ function AdminDrawer({
                       required
                       maxLength={128}
                     />
+                    <Field
+                      label="实际开票时间"
+                      type="datetime-local"
+                      value={issuedAt}
+                      onChange={setIssuedAt}
+                      required
+                      hint="请填写税务平台实际开具时间；系统会按当前时区转换并保存。"
+                    />
                     <label className={`file-drop ${file ? "has-file" : ""}`}>
                       <input
                         type="file"
@@ -2322,7 +2404,7 @@ function AdminDrawer({
                       <span>
                         {file
                           ? `${(file.size / 1024).toFixed(1)} KB`
-                          : "单个文件不超过 10 MB"}
+                          : "单个文件不超过 20 MiB"}
                       </span>
                     </label>
                     <button
@@ -2376,7 +2458,7 @@ function AdminDrawer({
                 }
                 onClick={() =>
                   void run(
-                    () => invoiceApi.downloadInvoiceDocument(request),
+                    () => invoiceApi.downloadAdminInvoiceDocument(request),
                     "发票文件已开始下载。",
                   )
                 }

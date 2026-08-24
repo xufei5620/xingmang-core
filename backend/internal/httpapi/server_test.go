@@ -492,4 +492,64 @@ func TestPDFUploadAndDownloadRequireStateAndOwnership(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("cross-user download status=%d", recorder.Code)
 	}
+	adminDownload := httptest.NewRequest(http.MethodGet, "/api/v1/admin/invoice-requests/"+request.ID+"/document", nil)
+	adminDownload.RemoteAddr = "127.0.0.1:4412"
+	adminDownload.Header.Set("X-Mock-User-ID", "admin-2")
+	adminDownload.Header.Set("X-Mock-Role", "admin")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, adminDownload)
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "application/pdf" || recorder.Header().Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("admin download status=%d headers=%v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+}
+
+func TestUserCancelReleasesPendingAndReturnedReservations(t *testing.T) {
+	server, service := testServer(t)
+	profile, err := service.SaveProfile(context.Background(), domain.InvoiceProfile{
+		PrincipalID: "u1", Type: domain.ProfilePersonal, Title: "张三",
+		Email: "z@example.com", EmailVerified: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, returned := range []bool{false, true} {
+		name := "pending"
+		if returned {
+			name = "needs_changes"
+		}
+		t.Run(name, func(t *testing.T) {
+			request, submitErr := service.Submit(context.Background(), ledger.SubmitInput{
+				PrincipalID: "u1", ProfileID: profile.ID, SourceInstanceID: "sub2-main",
+				IdempotencyKey: "cancel-" + name,
+				Allocations:    []ledger.AllocationInput{{FundingLotID: "u1-lot", AmountMinor: 20_000}},
+			})
+			if submitErr != nil {
+				t.Fatal(submitErr)
+			}
+			if returned {
+				request, submitErr = service.Review(context.Background(), "admin-1", request.ID, "return", "请修改抬头", request.Version)
+				if submitErr != nil {
+					t.Fatal(submitErr)
+				}
+			}
+			body, _ := json.Marshal(map[string]any{"version": request.Version})
+			cancel := httptest.NewRequest(http.MethodPost, "/api/v1/user/invoice-requests/"+request.ID+"/cancel", bytes.NewReader(body))
+			cancel.Header.Set("Content-Type", "application/json")
+			cancel.Header.Set("X-Mock-User-ID", "u1")
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, cancel)
+			if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"user_cancelled"`) {
+				t.Fatalf("cancel status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			lots, listErr := service.ListFundingLots(context.Background(), "u1")
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			for _, lot := range lots {
+				if lot.ID == "u1-lot" && lot.ReservedMinor != 0 {
+					t.Fatalf("reservation remained after cancellation: %+v", lot)
+				}
+			}
+		})
+	}
 }

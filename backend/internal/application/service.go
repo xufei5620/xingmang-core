@@ -707,6 +707,10 @@ func (s *Service) GetDocumentForRequest(ctx context.Context, principalID, reques
 	return s.store.GetDocumentForRequest(ctx, principalID, requestID)
 }
 
+func (s *Service) GetDocumentForRequestAsAdmin(ctx context.Context, requestID string) (domain.InvoiceDocument, error) {
+	return s.store.GetDocumentForRequestAsAdmin(ctx, requestID)
+}
+
 type InvoiceDeliveryStatus struct {
 	DocumentID    string    `json:"document_id"`
 	InvoiceNumber string    `json:"invoice_number"`

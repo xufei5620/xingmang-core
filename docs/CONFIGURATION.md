@@ -415,16 +415,16 @@ paths, query strings, fragments and disabled TLS verification are rejected.
 New API uses `SOURCE_TYPE=newapi` and no projection currency. Its top-ups are
 always `pending_manual` candidates; its `identities` stream additionally
 requires exact slug `solov-sso` and the HTTPS issuer. The identities reader has
-only the reviewed provider-contract/binding views; every scan requires
+only `invoice_bridge.newapi_identities_v4(text,jsonb)` EXECUTE; every scan requires
 `contract_ok=true` and validates well-known, authorization, token and user-info
 endpoints against that issuer.
-Sub2API payments always read the fixed, reviewed
-`invoice_sub2api_payment_projection_v1` view. The view extracts each order's
+Sub2API payments always call the fixed, reviewed
+`invoice_bridge.sub2api_payments_v4(text,jsonb)` function. It extracts each order's
 currency from `provider_snapshot.currency` without exposing the JSON object;
 only v0.1.179's audited fixed-CNY providers (`easypay`, `alipay`, `wxpay`) may
 derive CNY when snapshot currency is absent. Configurable/unknown unresolved
-rows are excluded and counted in
-`invoice_sub2api_payment_projection_health_v1`; valid non-CNY is separately
+rows are excluded and counted by its aggregate-only `legacy_health` operation;
+valid non-CNY is separately
 counted as unsupported and does not block reconciliation, while unknown or
 contradictory evidence does. Fixed deployment currency and direct
 `payment_orders` reads are intentionally unsupported.
@@ -467,8 +467,10 @@ echoing or logging either key.
 The production entrypoint is `cmd/source-agent-prod`; `cmd/source-agent` remains
 an offline v1 mock verifier. Build the minimal non-root image with:
 
-```text
-docker build -f agents/Dockerfile.production -t invoice-source-agent:0.3.0 agents
+```bash
+docker build -f agents/Dockerfile.production \
+  --build-arg SOURCE_AGENT_VERSION=0.3.0 \
+  -t "invoice-source-agent:$INVOICE_IMAGE_TAG" agents
 ```
 
 The Dockerfile exposes `GO_IMAGE` and `ALPINE_IMAGE` build arguments. Release
@@ -478,9 +480,9 @@ not a production pin.
 
 Initialize each stream's dedicated volume once, then run it normally:
 
-```text
-docker run --rm ... invoice-source-agent:0.3.0 init-state
-docker run --rm ... invoice-source-agent:0.3.0 run
+```bash
+docker run --rm ... "invoice-source-agent:$INVOICE_IMAGE_TAG" init-state
+docker run --rm ... "invoice-source-agent:$INVOICE_IMAGE_TAG" run
 ```
 
 Initialization refuses overwrite; normal startup only loads the existing
@@ -559,8 +561,13 @@ PDF_SCANNER_CAPABILITY_FILE=/run/secrets/invoice_pdf_scanner_capability
 ```
 
 Production startup and every individual upload fail if clamd is unavailable,
-the read-only signature volume lacks `main.*`, `daily.*` or `freshclam.dat`, or
-the daily/FreshClam state is stale. The ClamAV container has a dedicated
+the read-only signature volume lacks `main.*` or `daily.*`, or the actual
+`daily.*` database file is older than `CLAMAV_MAX_SIGNATURE_AGE`. The
+deployment healthcheck deliberately ignores `freshclam.dat`: it is updater and
+rate-limit state whose mtime may remain unchanged after a successful no-op
+check, so it cannot prove signature freshness. Production accepts only a
+positive integer duration with one `h`, `m` or `s` suffix (for example `48h`).
+The ClamAV container has a dedicated
 egress-only network for FreshClam and no published port. After ClamAV, the
 pinned qpdf 12.3.2 parser runs in the separate `scanner` image over an
 authenticated Unix socket. The scanner container has `network_mode: none`, no

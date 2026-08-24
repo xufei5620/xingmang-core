@@ -181,7 +181,10 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.ResolveEligibilityFreeze(ctx, changed); !errors.Is(err, domain.ErrVersionConflict) {
 		t.Fatalf("changed duplicate err=%v", err)
 	}
-	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC(), AuditActor{Type: "system", ID: "ops-worker", Reason: "test"})
+	// The PostgreSQL container clock can lead the Windows host by a few
+	// milliseconds. Advance the worker clock so a just-queued job is
+	// deterministically due instead of making this integration test flaky.
+	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute), AuditActor{Type: "system", ID: "ops-worker", Reason: "test"})
 	if err != nil || processed != 1 {
 		t.Fatalf("process reprojection=%d err=%v", processed, err)
 	}

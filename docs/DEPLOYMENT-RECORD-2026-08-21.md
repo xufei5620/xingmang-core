@@ -1,5 +1,10 @@
 # FiberState deployment record — 2026-08-21
 
+> Historical record only. This snapshot predates Source Bridge V4 and documents
+> the retired projection-view experiment. Do not use its roles/views or commands
+> as current installation guidance; follow `SOURCE-BRIDGE-V4.md` and the current
+> maintenance runbook.
+
 Target host alias: `fiberstate` (`fxg-0321`, amd64). This record intentionally
 contains no credential, user row, order row, email address or invoice field.
 

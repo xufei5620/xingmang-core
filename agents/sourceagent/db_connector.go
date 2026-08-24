@@ -13,19 +13,15 @@ import (
 type SQLDialect string
 
 const (
-	DialectPostgres              SQLDialect = "postgres"
-	DialectMySQL                 SQLDialect = "mysql"
-	DialectSQLite                SQLDialect = "sqlite"
-	defaultScanLimit                        = 100
-	maxScanLimit                            = 500
-	sub2APIProjectionHealthQuery            = `SELECT total_rows,exposed_cny_rows,unsupported_known_non_cny_rows,blocked_unknown_currency_rows
-FROM public.invoice_sub2api_payment_projection_health_v1`
+	DialectPostgres  SQLDialect = "postgres"
+	DialectMySQL     SQLDialect = "mysql"
+	DialectSQLite    SQLDialect = "sqlite"
+	defaultScanLimit            = 100
+	maxScanLimit                = 500
 )
 
-// Sub2APIDBConnector is the preferred production connector. It reads the fixed
-// reviewed view that exposes a per-order provider-snapshot currency scalar and
-// never joins or reads users. Direct payment_orders access and a configured
-// fixed currency are intentionally unsupported.
+// Sub2APIDBConnector reads the reviewed bridge boundary. The LOGIN caller has
+// EXECUTE only and cannot read payment_orders or provider_snapshot directly.
 type Sub2APIDBConnector struct {
 	DB      *sql.DB
 	Dialect SQLDialect
@@ -121,8 +117,17 @@ func (c *Sub2APIDBConnector) paymentProjectionHealth(ctx context.Context) ([]str
 	if c.Dialect != DialectPostgres {
 		return nil, false, nil
 	}
+	relation, err := bridgeJSONRecordRelation(SourceSub2API, StreamPayments, "legacy_health",
+		"total_rows bigint,exposed_cny_rows bigint,unsupported_known_non_cny_rows bigint,blocked_unknown_currency_rows bigint")
+	if err != nil {
+		return nil, false, err
+	}
+	request, err := marshalBridgeRequest(nil)
+	if err != nil {
+		return nil, false, err
+	}
 	var total, exposedCNY, unsupportedNonCNY, blockedUnknown int64
-	err := c.DB.QueryRowContext(ctx, sub2APIProjectionHealthQuery).
+	err = c.DB.QueryRowContext(ctx, `SELECT total_rows,exposed_cny_rows,unsupported_known_non_cny_rows,blocked_unknown_currency_rows FROM `+relation, request).
 		Scan(&total, &exposedCNY, &unsupportedNonCNY, &blockedUnknown)
 	if err != nil {
 		return nil, false, fmt.Errorf("sub2api db connector: read payment projection health: %w", err)
@@ -270,9 +275,16 @@ completed_at, refund_at, created_at, updated_at, payment_type, provider_key`,
 	)
 	switch dialect {
 	case DialectPostgres:
-		return `SELECT ` + columns + ` FROM public.invoice_sub2api_payment_projection_v1
-WHERE (updated_at, id) > ($1, $2)
-ORDER BY updated_at ASC, id ASC LIMIT $3`, []any{updatedAt, id, limit}, nil
+		relation, relationErr := bridgeJSONRecordRelation(SourceSub2API, StreamPayments, "legacy_page",
+			"id bigint,user_id bigint,status text,order_type text,amount text,pay_amount text,refund_amount text,currency text,completed_at timestamptz,refund_at timestamptz,created_at timestamptz,updated_at timestamptz,payment_type text,provider_key text")
+		if relationErr != nil {
+			return "", nil, relationErr
+		}
+		request, requestErr := marshalBridgeRequest(map[string]any{"updated_at": updatedAt.UTC().Format(time.RFC3339Nano), "id": id, "limit": limit})
+		if requestErr != nil {
+			return "", nil, requestErr
+		}
+		return `SELECT ` + columns + ` FROM ` + relation + ` ORDER BY updated_at ASC,id ASC`, []any{request}, nil
 	case DialectMySQL, DialectSQLite:
 		// Sub2API's production schema is PostgreSQL. These branches exist for
 		// contract tests/private mirrors and avoid row-value comparison drift.
@@ -285,6 +297,18 @@ ORDER BY updated_at ASC, id ASC LIMIT ?`, []any{updatedAt, updatedAt, id, limit}
 }
 
 func newAPIKeysetQuery(dialect SQLDialect, id int64, limit int) (string, []any, error) {
+	if dialect == DialectPostgres {
+		relation, err := bridgeJSONRecordRelation(SourceNewAPI, StreamPayments, "legacy_page",
+			"id bigint,user_id bigint,amount bigint,money text,payment_method text,payment_provider text,create_time bigint,complete_time bigint,status text")
+		if err != nil {
+			return "", nil, err
+		}
+		request, err := marshalBridgeRequest(map[string]any{"id": id, "limit": limit})
+		if err != nil {
+			return "", nil, err
+		}
+		return `SELECT id,user_id,amount,money,payment_method,payment_provider,create_time,complete_time,status FROM ` + relation + ` ORDER BY id ASC`, []any{request}, nil
+	}
 	decimalCast, err := decimalCastFor(dialect)
 	if err != nil {
 		return "", nil, err

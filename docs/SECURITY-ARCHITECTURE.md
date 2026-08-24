@@ -105,24 +105,25 @@ no route to the upstream web/API container or the public internet.
 
 ## 4. Credential containment
 
-### Preferred projection mode
+### Source Bridge V4 mode
 
-The source agent receives only column-level `SELECT` on reviewed base tables or
-versioned projection views. Sub2API payments must use the reviewed view because
-the base table has no currency column; the view extracts only
+The LOGIN source agent receives no base-table privilege. It has only
+`invoice_bridge` USAGE and EXECUTE on its exact fixed dynamic SECURITY DEFINER
+function. A NOLOGIN/NOINHERIT owner receives exact reviewed source-column
+SELECT. Function bodies use bound JSONB values, `search_path=pg_catalog` and
+zero persistent relation `pg_depend`. Sub2API payments use the payments bridge
+because the base table has no currency column; the function extracts only
 `provider_snapshot.currency`, with a narrowly audited fixed-CNY fallback only
 for EasyPay/Alipay/WeChat Pay. Unresolved rows are excluded and reported only as
 aggregate counts. Valid non-CNY rows are an unsupported-but-known bucket and do
 not block reconciliation; only missing, contradictory or invalid currency
-evidence pauses missing/tombstone processing. Its
-database role must be `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`,
+evidence pauses missing/tombstone processing. Each caller
+must be `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`,
 `NOREPLICATION`, `NOBYPASSRLS`, read-only by default, limited to two
 connections, and constrained by short statement and idle-transaction timeouts.
-When a versioned projection view is unavailable, the role has direct access
-only to the reviewed columns on the named upstream tables. The production
-launcher inventories all effective non-system-schema column grants and refuses
-startup if even one required column is missing or any extra column, mutation,
-sequence, schema-create, privileged role attribute, or inherited role appears.
+There is no direct-column fallback. The production gate verifies exact function
+body hashes, owner effective columns, no caller raw access/ownership/schema
+CREATE, RLS disabled and zero upstream dependencies; any mismatch fails closed.
 Payments and identities readers are separate; their DSNs are never shared.
 
 ### Admin API fallback
@@ -165,11 +166,11 @@ the connector has no operation that can turn them into verified entitlement.
 The source DTO lacks currency, refund/chargeback evidence, `updated_at`, and a
 way to distinguish provider settlement from administrator completion.
 
-Central identity projection never reads `users` or email. Sub2API reads only a
-security-barrier binding view pinned to the exact central issuer; its role has
-no access to raw `auth_identities`, so email/social provider subjects never
-cross the database boundary. New API reads security-barrier provider/binding
-views pinned to `solov-sso`. All four
+Central identity projection never reads `users` or email. Sub2API calls only a
+row-filtered identities bridge pinned to the exact central issuer; its LOGIN
+role has no access to raw `auth_identities`, so email/social provider subjects
+never cross the database boundary. New API calls its identities bridge pinned
+to `solov-sso`. All four
 non-secret endpoints (well-known, authorization, token and user-info) must match
 the configured exact HTTPS issuer. Raw OAuth tables, client credentials,
 scopes, field mappings and access policies are outside the grant. Only the configured exact HTTPS central issuer

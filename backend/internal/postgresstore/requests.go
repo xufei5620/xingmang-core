@@ -752,3 +752,22 @@ func (s *Store) GetDocumentForRequest(ctx context.Context, principalID, requestI
 	}
 	return doc, nil
 }
+
+func (s *Store) GetDocumentForRequestAsAdmin(ctx context.Context, requestID string) (domain.InvoiceDocument, error) {
+	var doc domain.InvoiceDocument
+	err := s.pool.QueryRow(ctx, `
+		SELECT d.id,d.invoice_request_id,d.invoice_number,d.object_key,d.object_version,
+			d.sha256,d.size_bytes,d.mime_type,d.scan_status,d.uploaded_by,d.issued_at,d.created_at
+		FROM invoice_documents d JOIN invoice_requests ir ON ir.id=d.invoice_request_id
+		WHERE d.invoice_request_id=$1 AND ir.status IN ('issued','refund_attention')`, requestID).Scan(
+		&doc.ID, &doc.RequestID, &doc.InvoiceNumber, &doc.ObjectKey, &doc.ObjectVersion,
+		&doc.SHA256, &doc.SizeBytes, &doc.MIME, &doc.ScanStatus, &doc.UploadedBy,
+		&doc.IssuedAt, &doc.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.InvoiceDocument{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.InvoiceDocument{}, err
+	}
+	return doc, nil
+}

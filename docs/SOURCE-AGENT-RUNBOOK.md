@@ -2,10 +2,12 @@
 
 This runbook deploys the outbound-only PostgreSQL projection agent without
 changing Sub2API or New API source code, containers, application tables or
-application files. The templates create only auxiliary security-barrier views,
-ten least-privilege active LOGIN roles, and two credential-free NOLOGIN legacy
-payment holders. Applying those reviewed views/grants is a separate DBA action;
-the agent itself never runs either template.
+application files. Bridge V4 creates five fixed dynamic SECURITY DEFINER
+functions per source, ten least-privilege active LOGIN roles, two
+credential-free NOLOGIN compatibility holders and two NOLOGIN function owners.
+LOGIN callers receive only exact function EXECUTE. Applying those reviewed
+contracts is a separate cluster-superuser/DB-owner action; the agent never runs
+an install or rollback contract.
 
 ## 1. One container per stream
 
@@ -50,40 +52,48 @@ keys only by source, or accepts a missing `X-Stream-ID`.
 
 ## 3. Source database prerequisites
 
-Have the source DBA independently review and apply exactly one template. Each
-V2 templates provision identity/legacy readers; V3 templates provision four
-economic readers per source. Ten containers use ten independent credentials:
+Bridge V4 replaces all source-dependent views. For each source, pre-create six
+reader roles, then have the cluster superuser that owns the current database
+apply both contracts through the reviewed maintenance wrapper:
 
 - `contracts/sub2api-source-projection-grants.postgresql.sql`
 - `contracts/newapi-source-projection-grants.postgresql.sql`
 - `contracts/sub2api-economic-projection-grants.postgresql.sql`
 - `contracts/newapi-economic-projection-grants.postgresql.sql`
 
+On the production migration, preserve the existing six source reader roles
+before legacy reconcile by using `scripts/preserve-source-reader-roles.sh
+--mode export` with a new root-only mode-0600 file. After reconcile removes the
+legacy roles, restore that file, install both Bridge contracts and run all five
+`check-db` commands. The file contains SCRAM verifiers: never display it, and
+encrypt/archive or securely delete it immediately after the five checks pass.
+
 Put each complete approved PostgreSQL connection string in its matching 0600
 regular, non-symlink `SOURCE_DB_DSN_FILE`. Never reuse a payments DSN for an
 identities stream or the reverse. The production process rejects ambient `PG*`
 configuration, sets `default_transaction_read_only=on`, and proves
 `SHOW transaction_read_only = on` before reading. It also forces a 15-second
-statement timeout, UTC, `public,pg_catalog` search path and at most two
-connections. Before scanning, it inventories effective privileges and refuses
-startup unless they match the exact source/stream column contract with no role
-membership, schema-create, mutation or sequence privileges.
+statement timeout, UTC and at most two connections. LOGIN callers receive only
+`invoice_bridge` schema USAGE and their exact function EXECUTE; all raw source
+columns belong to the NOLOGIN bridge owner. Before scanning, `check-db`
+inventories effective privileges and refuses raw SELECT, role membership,
+schema-create, mutation, sequence, unexpected function execution or a
+dependency-bearing/unsafe function.
 
 For New API, `top_ups.id` is the `source_order_id` display reference. Do not
 grant/read `trade_no`, and do not put `top_ups.id` into a provider-trade-number
 field.
 
-For New API identities, prove the reader can select only the reviewed
-`invoice_newapi_oidc_provider_contract_v1` and
-`invoice_newapi_oidc_binding_projection_v1` columns. It must fail on both raw
+For New API identities, the caller executes only
+`invoice_bridge.newapi_identities_v4(text,jsonb)`. It must fail on both raw
 OAuth tables and all client secret/policy/mapping columns. The production slug
 is exactly `solov-sso`; all well-known, authorization, token and user-info
 endpoints must validate against the same configured HTTPS issuer.
 
-For Sub2API payments, prove the role can read
-`invoice_sub2api_payment_projection_v1` and the four aggregate columns of
-`invoice_sub2api_payment_projection_health_v1`, but cannot read
-`payment_orders` or `provider_snapshot`. At launch,
+For Sub2API payments, the caller executes only
+`invoice_bridge.sub2api_payments_v4(text,jsonb)` and cannot read
+`payment_orders` or `provider_snapshot`. Its `legacy_health` operation exposes
+only four aggregate values. At launch,
 `blocked_unknown_currency_rows` must be zero. Known non-CNY rows are counted and
 excluded from the CNY-only ledger without blocking reconciliation. In
 operation, any blocked-unknown row raises an alert and blocks missing/tombstone
@@ -94,15 +104,23 @@ setting.
 
 ### V3 cutover order (mandatory)
 
-1. Stop all four economic streams for the source; the V2 identity stream may
-   remain read-only. Verify the approved runtime and view SQL checksum.
-2. Apply the matching economic projection/grant template as source DB owner.
-   Run `check-db` separately with the payments, usage, credits and balances
-   DSNs. Extra grants are a hard failure.
+1. Disable invoice submission and stop all five source streams for the source.
+   Verify the approved runtime and exact Bridge V4 contract hashes.
+2. Verify backup/restore evidence. As cluster superuser and current database
+   owner, use maintenance wrapper modes `install-source` then
+   `install-economic`; bare psql is forbidden. Run the `bridge-v4` upgrade gate
+   and `check-db` separately with all five DSNs. Extra grants, RLS, unexpected
+   ownership/function body or schema CREATE are hard failures.
 3. Create 0700 `$SOURCE_STATE_ROOT/{source}-{stream}` directories and
    `$SOURCE_CUTOVER_ROOT/{source}`. Generate distinct spool/signing keys per
    stream, one source cutover AES key and one balance-snapshot AES key.
-4. Run the Compose `cutover` profile exactly once:
+4. Stop the matching New API/Sub2API application container while keeping its
+   PostgreSQL container running. Keep it stopped, acknowledge that operator
+   action, and run maintenance mode `cutover-quiescence-preflight`. It must see
+   zero other client backends and zero prepared transactions. The SQL gate
+   cannot prove the container stays stopped.
+5. Without restarting the upstream application, run the Compose `cutover`
+   profile exactly once:
 
    ```text
    docker compose -f deploy/docker-compose.sources.yml --profile cutover \
@@ -117,12 +135,13 @@ setting.
    Later balance snapshots must retain this encrypted baseline: it is the only
    authority for signed `baseline_member` (`true` for original users, `false`
    for post-cutover users). Loss/corruption is fail-closed, never recaptured.
-5. Register all five stream certificate/key tuples and source runtime in the
+   Only after both encrypted files verify may the upstream application restart.
+6. Register all five stream certificate/key tuples and source runtime in the
    receiver. The balances key ID must equal the key declared by the manifest;
    other streams keep their independent keys.
-6. Run `init-state` for all ten streams. Run `init-reconcile` only for the two
+7. Run `init-state` for all ten streams. Run `init-reconcile` only for the two
    V2 identity streams; V3 must reject that command.
-7. Start balances first. Its first acknowledged batch must contain only the
+8. Start balances first. Its first acknowledged batch must contain only the
    cutover manifest with `scan_complete=false`; let the baseline and its empty
    final page finish. Start payments, credits and usage, then identity. Keep
    public invoice submission disabled until all four economic watermarks and
@@ -183,12 +202,15 @@ govulncheck ./...
 docker build -f agents/Dockerfile.production \
   --build-arg GO_IMAGE=golang:1.25.13-alpine@sha256:<approved> \
   --build-arg ALPINE_IMAGE=alpine:3.23@sha256:<approved> \
-  -t invoice-source-agent:0.3.0 agents
+  --build-arg SOURCE_AGENT_VERSION=0.3.0 \
+  -t "invoice-source-agent:$INVOICE_IMAGE_TAG" agents
 ```
 
 Record and deploy the resulting image digest, not only its tag. The final image
 is scratch-based, runs UID/GID 65532 and contains only CA certificates and
-`source-agent-prod`; it contains no shell or key generator.
+`source-agent-prod`; it contains no shell or key generator. The shared
+`INVOICE_IMAGE_TAG` comes from the verified release manifest; the independent
+`SOURCE_AGENT_VERSION` build argument is the binary/protocol version.
 
 ## 6. Initialize and start
 

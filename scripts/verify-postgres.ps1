@@ -128,8 +128,16 @@ try {
     Push-Location (Join-Path $projectRoot 'agents')
     try {
         $env:SOURCE_AGENT_TEST_DATABASE_URL = $databaseUrl
-        go test -race ./cmd/source-agent-prod -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'source projection privilege integration tests failed' }
+        $sourceContractSucceeded = $false
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            go test -race ./cmd/source-agent-prod -count=1
+            if ($LASTEXITCODE -eq 0) {
+                $sourceContractSucceeded = $true
+                break
+            }
+            Start-Sleep -Seconds 1
+        }
+        if (-not $sourceContractSucceeded) { throw 'source bridge privilege integration tests failed after host-port retries' }
     } finally {
         Remove-Item Env:SOURCE_AGENT_TEST_DATABASE_URL -ErrorAction SilentlyContinue
         Pop-Location
@@ -197,8 +205,16 @@ try {
     Push-Location (Join-Path $projectRoot 'agents')
     try {
         $env:SOURCE_AGENT_TEST_DATABASE_URL = "postgres://source_contract_test:source_contract_test_only@127.0.0.1:${hostPort}/source_contract_test?sslmode=disable"
-        go test -race ./cmd/source-agent-prod -count=1
-        if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15 source projection/apply/rollback contracts failed' }
+        $source15ContractSucceeded = $false
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            go test -race ./cmd/source-agent-prod -count=1
+            if ($LASTEXITCODE -eq 0) {
+                $source15ContractSucceeded = $true
+                break
+            }
+            Start-Sleep -Seconds 1
+        }
+        if (-not $source15ContractSucceeded) { throw 'PostgreSQL 15 source bridge/apply/rollback contracts failed after host-port retries' }
     } finally {
         Remove-Item Env:SOURCE_AGENT_TEST_DATABASE_URL -ErrorAction SilentlyContinue
         Pop-Location

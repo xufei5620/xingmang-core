@@ -186,6 +186,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /api/v1/admin/invoice-requests/{id}/confirm-manual-issue", s.require("admin", http.HandlerFunc(s.confirmManualIssue)))
 	s.mux.Handle("POST /api/v1/admin/invoice-requests/{id}/documents/upload", s.require("admin", http.HandlerFunc(s.uploadDocument)))
 	s.mux.Handle("GET /api/v1/user/invoice-requests/{id}/document", s.require("user", http.HandlerFunc(s.downloadDocument)))
+	s.mux.Handle("GET /api/v1/admin/invoice-requests/{id}/document", s.require("admin", http.HandlerFunc(s.downloadAdminDocument)))
 	s.mux.Handle("GET /api/v1/admin/settings", s.require("admin", http.HandlerFunc(s.getAdminSettings)))
 	s.mux.Handle("PUT /api/v1/admin/settings/invoice", s.require("admin", http.HandlerFunc(s.updateInvoiceSettings)))
 	s.mux.Handle("PUT /api/v1/admin/settings/smtp", s.require("admin", http.HandlerFunc(s.updateSMTPSettings)))
@@ -928,11 +929,25 @@ func (s *Server) uploadDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) downloadDocument(w http.ResponseWriter, r *http.Request) {
+	s.downloadDocumentForRole(w, r, false)
+}
+
+func (s *Server) downloadAdminDocument(w http.ResponseWriter, r *http.Request) {
+	s.downloadDocumentForRole(w, r, true)
+}
+
+func (s *Server) downloadDocumentForRole(w http.ResponseWriter, r *http.Request, admin bool) {
 	if s.documentStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "DOCUMENT_STORE_DISABLED", "document storage is not configured")
 		return
 	}
-	doc, err := s.ledger.GetDocumentForRequest(r.Context(), principal(r).UserID, r.PathValue("id"))
+	var doc domain.InvoiceDocument
+	var err error
+	if admin {
+		doc, err = s.ledger.GetDocumentForRequestAsAdmin(r.Context(), r.PathValue("id"))
+	} else {
+		doc, err = s.ledger.GetDocumentForRequest(r.Context(), principal(r).UserID, r.PathValue("id"))
+	}
 	if err != nil {
 		handleDomainError(w, err)
 		return
@@ -946,6 +961,10 @@ func (s *Server) downloadDocument(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `attachment; filename="invoice.pdf"`)
 	w.Header().Set("Cache-Control", "private, no-store")
+	// The administrator route passes through the generic API proxy location.
+	// Explicitly disable upstream response buffering so decrypted PDF bytes can
+	// never spill into the host proxy cache/temp path.
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Content-Length", strconv.FormatInt(doc.SizeBytes, 10))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, file)

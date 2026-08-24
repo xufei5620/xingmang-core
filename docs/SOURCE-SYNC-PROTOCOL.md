@@ -77,7 +77,7 @@ each publishable cycle, so a pre-cutover ID completed/redeemed after cutover is
 captured. Every scan rechecks the current configuration hash; drift blocks
 without advancing the watermark.
 
-Security-barrier views expose only numeric IDs, event times, service units,
+Bridge V4 SECURITY DEFINER functions expose only numeric IDs, event times, service units,
 non-secret method/provider identifiers and health/configuration hashes. They do
 not expose email, password, log content, model/token/IP/request metadata, raw
 trade references, redeem keys, provider payloads or secret settings. Equal
@@ -129,12 +129,12 @@ repository.
 
 ## 2. Production source priority
 
-### 2.1 Preferred: column-level read-only database projection
+### 2.1 Preferred: dependency-free Source Bridge V4
 
-`Sub2APIDBConnector` selects only the independently reviewed view:
+`Sub2APIDBConnector` has EXECUTE only on the independently reviewed function:
 
 ```text
-invoice_sub2api_payment_projection_v1:
+invoice_bridge.sub2api_payments_v4(text,jsonb):
 id, user_id, status, order_type, amount, pay_amount, refund_amount,
 currency, completed_at, refund_at, created_at, updated_at, payment_type, provider_key
 ```
@@ -143,11 +143,11 @@ Sub2API v0.1.179 has no `payment_orders.currency` column. The actual per-order
 gateway currency is `provider_snapshot.currency`. Its source
 `paymentProviderConfigCurrency` permits configured currency only for Stripe and
 Airwallex; EasyPay, Alipay and WeChat Pay are fixed to default CNY. The reviewed
-security-barrier view therefore prefers a valid matching v2 snapshot currency,
+payments bridge therefore prefers a valid matching v2 snapshot currency,
 and derives CNY only for those three exact fixed-provider keys when their v2
 snapshot omitted/invalidated currency. Stripe, Airwallex, provider mismatch and
-unknown-provider rows without valid currency are excluded. The payment view
-exposes CNY only. A companion view returns aggregate total, exposed-CNY,
+unknown-provider rows without valid currency are excluded. The page operation
+exposes CNY only. `legacy_health` returns aggregate total, exposed-CNY,
 known-non-CNY and blocked-unknown counts. There is no fixed-currency
 environment variable, and the reader never receives direct `provider_snapshot`
 access.
@@ -155,13 +155,14 @@ access.
 Known non-CNY rows are intentionally unsupported by V1 and excluded without
 blocking reconciliation; if an order previously exposed as CNY becomes
 explicitly non-CNY, normal repeated-miss tombstoning withdraws its entitlement.
-If the aggregate view reports blocked-unknown currency rows, CNY rows continue
+If aggregate health reports blocked-unknown currency rows, CNY rows continue
 to synchronize but that reconciliation cycle is marked blocked: it does not
 increment missing counters or emit tombstones. This prevents an excluded row
 from being misclassified as deleted. Only IDs previously exposed by the
-payments view participate in later repeated-miss tombstone inventory.
+payments bridge participate in later repeated-miss tombstone inventory.
 
-`NewAPIDBConnector` selects only:
+`NewAPIDBConnector` executes only
+`invoice_bridge.newapi_payments_v4(text,jsonb)`, whose returned page contains:
 
 ```text
 top_ups:
@@ -179,13 +180,15 @@ Review-only PostgreSQL grant templates are provided separately:
 - [`sub2api-source-projection-grants.postgresql.sql`](../contracts/sub2api-source-projection-grants.postgresql.sql)
 - [`newapi-source-projection-grants.postgresql.sql`](../contracts/newapi-source-projection-grants.postgresql.sql)
 
-They are not migrations and the agent never executes them. A database owner
-must separately approve and apply the relevant template. The dedicated login
+They are not migrations and the agent never executes them. The cluster
+superuser that owns the current database must apply both source and economic
+contracts through the reviewed `ON_ERROR_STOP` maintenance wrapper. The dedicated login
 must be transaction-read-only, have a short statement timeout and no source-app
 role membership, and must not be mounted into invoice web/API. The production
-launcher also compares all effective non-system-schema SELECT columns with the
-exact stream contract and rejects extra grants, mutation/sequence privileges,
-schema CREATE, elevated role attributes or any inherited role.
+launcher requires zero effective raw SELECT and rejects extra function grants,
+mutation/sequence privileges, schema CREATE, elevated role attributes or any
+inherited role. The database gate separately proves exact bridge-owner columns,
+function body hashes, RLS disabled and zero persistent relation dependencies.
 
 Each login must also have effective CONNECT, exactly `CONNECTION LIMIT 2`, no
 effective TEMPORARY privilege and `NOINHERIT`. The launcher proves these facts
@@ -202,9 +205,9 @@ each process columns it does not need and is rejected by the exact-grant gate.
 Only the explicitly configured central OIDC provider can produce an
 `identity_binding`. Email is never a join key or automatic binding proof.
 
-Sub2API reads these columns from the security-barrier
-`invoice_sub2api_oidc_binding_projection_v1` view using `(updated_at,id)` keyset
-pagination. The view, not merely Go filtering, pins `provider_type='oidc'`, the
+Sub2API reads these fields only from
+`invoice_bridge.sub2api_identities_v4(text,jsonb)` using `(updated_at,id)` keyset
+pagination. The function, not merely Go filtering, pins `provider_type='oidc'`, the
 exact provider key/HTTPS issuer and non-null verification time; the reader has
 no raw `auth_identities` privilege:
 
@@ -213,18 +216,18 @@ id, user_id, provider_type, provider_key, provider_subject,
 verified_at, issuer, created_at, updated_at
 ```
 
-New API reads only two security-barrier views:
+New API reads only `invoice_bridge.newapi_identities_v4(text,jsonb)` operations:
 
 ```text
-invoice_newapi_oidc_binding_projection_v1:
+page:
 id, user_id, provider_id, provider_user_id, created_at, provider_slug
 
-invoice_newapi_oidc_provider_contract_v1 (trust check only):
-id, slug, enabled, well_known, authorization_endpoint, token_endpoint,
+provider_contract (trust check only):
+slug, enabled, well_known, authorization_endpoint, token_endpoint,
 user_info_endpoint, contract_ok
 ```
 
-The reviewed view is pinned to slug `solov-sso`; the connector requires all four
+The reviewed function is pinned to slug `solov-sso`; the connector requires all four
 non-secret endpoints to be present, HTTPS, query/userinfo/fragment-free, on the
 configured exact issuer and under its path. The binding view joins by provider
 ID only when `contract_ok=true`. The role has no raw-table grant and never
@@ -534,10 +537,11 @@ exits cleanly.
 
 Code and local tests cannot prove the following deployment facts:
 
-- the approved source DB roles have exactly the reviewed SELECT columns and no
-  inherited mutation privilege;
-- the reviewed Sub2API views are owned by the approved DBA, expose only the
-  listed payment columns and aggregate health counts, and the fixed-CNY
+- the approved LOGIN source roles have only exact bridge-function EXECUTE, the
+  NOLOGIN owner has exact reviewed columns, and neither has inherited mutation,
+  ownership or schema-CREATE privilege;
+- the reviewed Bridge V4 function hashes/ACLs match, have zero upstream
+  `pg_depend`, every read source table has RLS disabled, and the fixed-CNY
   provider allowlist still matches the audited upstream source;
 - central IdP provider key/slug and issuer values are the approved production
   values;

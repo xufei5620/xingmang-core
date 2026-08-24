@@ -75,6 +75,25 @@ foreach ($name in $requiredNames) {
     if ($name -notin $names) { throw "release manifest is missing required image $name" }
 }
 
+$releaseRepositories = [ordered]@{
+    api = 'invoice-system-api'
+    'pdf-scanner' = 'invoice-system-pdf-scanner'
+    tools = 'invoice-system-tools'
+    web = 'invoice-system-web'
+    'source-agent' = 'invoice-source-agent'
+}
+$releaseTags = @()
+foreach ($entry in $releaseRepositories.GetEnumerator()) {
+    $record = @($records | Where-Object name -eq $entry.Key)
+    if ($record.Count -ne 1 -or [string]$record[0].reference -notmatch "^$([regex]::Escape($entry.Value)):(?<tag>[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})$") {
+        throw "release manifest has an invalid local image reference for $($entry.Key)"
+    }
+    $releaseTags += $Matches.tag
+}
+if (@($releaseTags | Sort-Object -Unique).Count -ne 1) {
+    throw 'API, tools, PDF scanner, web and source-agent do not share one exact release image tag'
+}
+
 foreach ($record in $records) {
     Assert-GeneratedArtifactBinding -ReleaseDirectory $releaseRoot -ImageRecord $record | Out-Null
     $currentID = Get-RequiredImageId -Reference ([string]$record.reference)

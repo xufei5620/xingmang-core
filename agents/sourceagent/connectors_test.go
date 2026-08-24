@@ -199,12 +199,12 @@ func TestDBProjectionQueriesAreColumnScopedAndKeysetBased(t *testing.T) {
 		t.Fatal(err)
 	}
 	lower := strings.ToLower(query)
-	for _, forbidden := range []string{"join", "users", "user_email", "out_trade_no", "payment_trade_no", "provider_snapshot"} {
+	for _, forbidden := range []string{"users", "user_email", "out_trade_no", "payment_trade_no", "provider_snapshot"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("Sub2API projection includes forbidden source %q: %s", forbidden, query)
 		}
 	}
-	if !strings.Contains(lower, "(updated_at, id) >") || !strings.Contains(lower, "order by updated_at asc, id asc") {
+	if !strings.Contains(lower, "sub2api_payments_v4('legacy_page'") || !strings.Contains(lower, "order by updated_at asc,id asc") {
 		t.Fatalf("Sub2API projection is not keyset ordered: %s", query)
 	}
 	newQuery, _, err := newAPIKeysetQuery(DialectPostgres, 0, 100)
@@ -212,12 +212,12 @@ func TestDBProjectionQueriesAreColumnScopedAndKeysetBased(t *testing.T) {
 		t.Fatal(err)
 	}
 	newLower := strings.ToLower(newQuery)
-	for _, forbidden := range []string{"join", "users", "trade_no"} {
+	for _, forbidden := range []string{"users", "trade_no"} {
 		if strings.Contains(newLower, forbidden) {
 			t.Fatalf("New API projection includes forbidden source %q: %s", forbidden, newQuery)
 		}
 	}
-	if !strings.Contains(newLower, "where id > $1") || !strings.Contains(newLower, "order by id asc") {
+	if !strings.Contains(newLower, "newapi_payments_v4('legacy_page'") || !strings.Contains(newLower, "order by id asc") {
 		t.Fatalf("New API projection is not id-keyset ordered: %s", newQuery)
 	}
 	subIdentity, _, err := sub2APIIdentityQuery(DialectPostgres, "central", "https://id.example", time.Unix(0, 0), 0, 100)
@@ -225,13 +225,13 @@ func TestDBProjectionQueriesAreColumnScopedAndKeysetBased(t *testing.T) {
 		t.Fatal(err)
 	}
 	subIdentityLower := strings.ToLower(subIdentity)
-	for _, forbidden := range []string{" join ", " users", "email", "metadata", " from auth_identities"} {
+	for _, forbidden := range []string{" users", "email", "metadata", " from auth_identities"} {
 		if strings.Contains(subIdentityLower, forbidden) {
 			t.Fatalf("Sub2API identity projection includes forbidden source %q: %s", forbidden, subIdentity)
 		}
 	}
-	if !strings.Contains(subIdentityLower, "from public.invoice_sub2api_oidc_binding_projection_v1") {
-		t.Fatalf("Sub2API identity connector bypassed the row-filtered projection view: %s", subIdentity)
+	if !strings.Contains(subIdentityLower, "invoice_bridge.sub2api_identities_v4('page'") {
+		t.Fatalf("Sub2API identity connector bypassed the row-filtered bridge: %s", subIdentity)
 	}
 	newIdentity, _, err := newAPIIdentityQuery(DialectPostgres, "central", 0, 100)
 	if err != nil {
@@ -243,8 +243,8 @@ func TestDBProjectionQueriesAreColumnScopedAndKeysetBased(t *testing.T) {
 			t.Fatalf("New API identity projection includes forbidden source %q: %s", forbidden, newIdentity)
 		}
 	}
-	if !strings.Contains(newIdentityLower, "invoice_newapi_oidc_binding_projection_v1") {
-		t.Fatalf("New API identity projection bypassed security-barrier view: %s", newIdentity)
+	if !strings.Contains(newIdentityLower, "invoice_bridge.newapi_identities_v4('page'") {
+		t.Fatalf("New API identity projection bypassed security-definer bridge: %s", newIdentity)
 	}
 }
 

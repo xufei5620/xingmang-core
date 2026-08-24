@@ -340,6 +340,10 @@ func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {
 	if err != nil || retryDoc.ID != savedDoc.ID || retryOutbox.ID != queued.ID {
 		t.Fatalf("attach retry doc=%s outbox=%s err=%v", retryDoc.ID, retryOutbox.ID, err)
 	}
+	adminDoc, err := service.GetDocumentForRequestAsAdmin(ctx, request.ID)
+	if err != nil || adminDoc.ID != savedDoc.ID {
+		t.Fatalf("admin document lookup doc=%s err=%v", adminDoc.ID, err)
+	}
 	messages, err := service.Claim(ctx, 10, now.Add(time.Minute))
 	if err != nil || len(messages) != 1 {
 		t.Fatalf("claimed=%d err=%v", len(messages), err)

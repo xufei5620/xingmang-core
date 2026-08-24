@@ -162,6 +162,15 @@ pins both stages to multi-arch digest
 an override of `KEYCLOAK_BASE_IMAGE` is a release change and requires the same
 scan/review/recording gates.
 
+Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` to the exact tag named by
+the newly verified release manifest. Production Compose has no image-tag
+fallback: API, tools, PDF scanner, web and source-agent must resolve from that
+one value. `SOURCE_AGENT_VERSION` remains the independent binary/protocol
+version recorded inside the agent; it is not an image tag.
+After any code or deployment change, the prior RC evidence is historical and a
+new image gate must be generated before containers are recreated. Never mix an
+older API container with a newer web/scanner container under one release.
+
 ## 4. Host directories and secrets
 
 **Production change approval.** Create a new directory; do not reuse an
@@ -180,11 +189,12 @@ DSN files. Use URL-safe/hex passwords so a DSN is not ambiguously encoded.
 Generate the application field keyring without printing key material:
 
 ```bash
-docker build --target api -t invoice-system-api:0.1.0 /root/invoice-system/app/backend
-docker build --target tools -t invoice-system-tools:0.1.0 /root/invoice-system/app/backend
+export INVOICE_IMAGE_TAG='<exact tag from the verified release manifest>'
+docker build --target api -t "invoice-system-api:$INVOICE_IMAGE_TAG" /root/invoice-system/app/backend
+docker build --target tools -t "invoice-system-tools:$INVOICE_IMAGE_TAG" /root/invoice-system/app/backend
 docker run --rm --user "$(id -u):$(id -g)" \
   -v /root/invoice-system/secrets:/secrets \
-  --entrypoint /usr/local/bin/invoice-keygen invoice-system-tools:0.1.0 \
+  --entrypoint /usr/local/bin/invoice-keygen "invoice-system-tools:$INVOICE_IMAGE_TAG" \
   --out /secrets/invoice_field_keyring.json --key-id 2026-08
 ```
 
@@ -197,7 +207,7 @@ Generate the private source-agent PKI in a temporary 0700 directory:
 ```bash
 docker run --rm --user "$(id -u):$(id -g)" \
   -v /root/invoice-system/secrets:/secrets \
-  --entrypoint /usr/local/bin/invoice-mtlsgen invoice-system-tools:0.1.0 \
+  --entrypoint /usr/local/bin/invoice-mtlsgen "invoice-system-tools:$INVOICE_IMAGE_TAG" \
   --out-dir /secrets/source-pki --server-name invoice-ingest.internal \
   --clients sub2api-agent,newapi-agent
 ```
@@ -540,9 +550,12 @@ docker compose --env-file deploy/.env.production \
 
 ClamAV has no published port. It joins the internal API network plus a dedicated
 egress-only bridge so FreshClam can update the persistent signature volume. The
-API mounts that volume read-only and rejects every upload when `daily.*` or the
-last FreshClam update check is older than `CLAMAV_MAX_SIGNATURE_AGE` (default
-48h), even if clamd still answers PING. The upload chain then streams the file
+API mounts that volume read-only and rejects startup/uploads when `main.*` or
+`daily.*` is missing, or the actual `daily.*` database file is older than
+`CLAMAV_MAX_SIGNATURE_AGE` (default `48h`), even if clamd still answers PING.
+The healthcheck does not use `freshclam.dat` mtime: that updater/rate-limit
+state may legitimately remain unchanged after a successful no-op check. Use a
+positive integer with one `h`, `m` or `s` suffix. The upload chain then streams the file
 over an authenticated Unix socket to the pinned qpdf 12.3.2 structural scanner.
 The scanner has `network_mode: none`, no API/DB/document mounts or application
 secrets, and fixed 256 MiB/0.5 CPU/32 PID/two-scan limits; its only credential
@@ -581,8 +594,15 @@ agents. If a named network already exists, inspect it and reuse it only when
 its subnet, internal flag and members match; do not silently accept a different
 object.
 
-Review, then execute the V2 identity and V3 economic templates as the upstream
-database owner. Production has ten active LOGIN roles/DSN secret files: one
+Bridge V4 replaces every source projection view. Before legacy cleanup, export
+each source's exact six reader definitions/SCRAM verifiers with the root-only
+`scripts/preserve-source-reader-roles.sh --mode export`. Never display that
+mode-0600 file. After cleanup, restore it, then run maintenance wrapper modes
+`install-source` and `install-economic` as the cluster superuser that owns the
+current source database. Bare psql is forbidden because the wrapper supplies
+`-X --no-password -v ON_ERROR_STOP=1`.
+
+Production has ten active LOGIN roles/DSN secret files: one
 identity plus four V3 economic streams per source. The two legacy V2 payment
 compatibility holders (`invoice_sub2api_payments_reader` and
 `invoice_newapi_payments_reader`) must exist as `NOLOGIN`, connection-limit-0
@@ -595,22 +615,28 @@ them.
 - `contracts/newapi-economic-projection-grants.postgresql.sql`.
 
 The read roles must have `default_transaction_read_only=on`, a short statement
-timeout, no role inheritance from the application owner and no write/schema
-privilege. Validate using attempted `INSERT`, `UPDATE`, `DELETE`, `CREATE` and
-access to password/session/client-secret columns; every attempt must fail. The
-agent repeats this as a fail-closed startup inventory: its effective SELECT
-columns must equal the reviewed template exactly, with no role membership or
-sequence privilege.
+timeout, no role inheritance and no raw SELECT/write/schema privilege. Each
+LOGIN role receives only `invoice_bridge` USAGE and its exact V4 function
+EXECUTE. The NOLOGIN owner alone holds exact source-column SELECT grants. Run
+the `bridge-v4` upgrade preflight and all five `check-db` commands per source;
+then immediately encrypt/archive or securely delete the plaintext preserved-role
+file. The gate rejects function-body drift, RLS, unexpected ownership, raw
+caller ACL, schema CREATE and nonzero upstream relation dependencies.
 
-The Sub2API payments template creates
-`invoice_sub2api_payment_projection_v1`; its companion health view exposes only
-four aggregate counts. Neither patches Sub2API source or tables. Before
-starting the agent, prove no row is blocked:
+The Sub2API payments reader calls only
+`invoice_bridge.sub2api_payments_v4(text,jsonb)`; its `legacy_health` operation
+exposes four aggregate counts. It never patches Sub2API source/tables and the
+caller cannot read `payment_orders` or `provider_snapshot`. Before starting the
+agent, call the aggregate operation through the reviewed reader and prove no
+row is blocked:
 
 ```sql
 SELECT total_rows,exposed_cny_rows,unsupported_known_non_cny_rows,
        blocked_unknown_currency_rows
-FROM public.invoice_sub2api_payment_projection_health_v1;
+FROM invoice_bridge.sub2api_payments_v4('legacy_health','{}'::jsonb) bridge(payload)
+CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(
+  total_rows bigint,exposed_cny_rows bigint,
+  unsupported_known_non_cny_rows bigint,blocked_unknown_currency_rows bigint);
 ```
 
 Any non-zero `blocked_unknown_currency_rows` blocks launch pending explicit
@@ -626,9 +652,8 @@ PostgreSQL TEMP is granted through PUBLIC by default;
 the templates fail until the source database owner has removed that effective
 privilege for these isolated readers.
 
-The New API template likewise creates only
-`invoice_newapi_oidc_provider_contract_v1` and
-`invoice_newapi_oidc_binding_projection_v1`. Before starting identities sync,
+The New API identities reader executes only
+`invoice_bridge.newapi_identities_v4(text,jsonb)`. Before starting identities sync,
 verify exactly one `solov-sso` provider row has `contract_ok=true`; the reader
 must fail on both raw OAuth tables and client-secret/policy/mapping fields. The
 agent independently validates all four endpoints against the configured exact
@@ -653,7 +678,7 @@ The agent never receives an invoice PostgreSQL credential.
   is a full post-cutover scan because there is no `updated_at`;
 - New API usage/credits/balances: consume logs, mutable-code full rescans and
   atomic balance snapshots; logging/configuration drift blocks watermarks;
-- New API identities: only the two reviewed security-barrier views. The provider
+- New API identities: only the reviewed identities bridge function. The provider
   contract must prove well-known, authorization, token and user-info endpoints
   belong to the exact central issuer and slug `solov-sso`; the reader cannot
   select either raw OAuth table or any client secret.
@@ -771,15 +796,33 @@ for service in "${all_sources[@]}"; do
     -f deploy/docker-compose.sources.yml run --rm "$service" check-db
 done
 
-# Capture each source exactly once in one RR/RO transaction. A rerun must fail.
+# Cut over one source at a time. Stop its upstream application container first
+# (not only its source agents) and keep it stopped. With only PostgreSQL up, run
+# the matching explicit-container quiescence gate and require zero other client
+# backends/prepared transactions. SQL cannot prove Docker remains stopped.
+bash scripts/invoke-upstream-projection-maintenance.sh \
+  --source sub2api --mode cutover-quiescence-preflight \
+  --container <verified-sub2api-postgres-container> \
+  --database <verified-sub2api-database> --user <cluster-superuser-and-db-owner> \
+  --ack-upstream-app-stopped
+
+# Immediately capture and verify Sub2API while its app is still stopped.
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm sub2api-cutover-init
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
+  --profile cutover run --rm sub2api-cutover-init check-cutover
+
+# Only now restart Sub2API. Then stop New API and repeat the same invariant.
+bash scripts/invoke-upstream-projection-maintenance.sh \
+  --source newapi --mode cutover-quiescence-preflight \
+  --container <verified-newapi-postgres-container> \
+  --database <verified-newapi-database> --user <cluster-superuser-and-db-owner> \
+  --ack-upstream-app-stopped
+docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm newapi-cutover-init
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
-  --profile cutover run --rm sub2api-cutover-init check-cutover
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm newapi-cutover-init check-cutover
+# Verify manifest.enc and baseline.enc hashes before restarting New API.
 
 # Initialize every independent cursor/sequence. Only V2 identities have a
 # deletion-reconciliation state file.
@@ -1014,8 +1057,8 @@ SUB2API_SOURCE_ID="$SUB2API_SOURCE_ID" NEWAPI_SOURCE_ID="$NEWAPI_SOURCE_ID" \
 SUB2API_RUNTIME_VERSION=0.1.179 NEWAPI_RUNTIME_VERSION=v1.0.0-rc.25 \
 SUB2API_BALANCES_SIGNING_KEY_ID=2026-08-balances \
 NEWAPI_BALANCES_SIGNING_KEY_ID=2026-08-balances \
-INVOICE_TOOLS_IMAGE=invoice-system-tools:0.1.0 \
-SOURCE_AGENT_IMAGE=invoice-source-agent:0.3.0 \
+INVOICE_TOOLS_IMAGE="invoice-system-tools:$INVOICE_IMAGE_TAG" \
+SOURCE_AGENT_IMAGE="invoice-source-agent:$INVOICE_IMAGE_TAG" \
   bash deploy/backup/restore-drill.sh
 ```
 
@@ -1109,15 +1152,14 @@ database backup. After traffic is accepted:
   database containers from their invoice projection networks and remove those
   empty networks; never disconnect either database from its original upstream
   network;
-- before disconnecting, run the matching reviewed rollback contract as the
-  source database owner:
-  `contracts/sub2api-projection-rollback.postgresql.sql` or
-  `contracts/newapi-projection-rollback.postgresql.sql`. Each transaction first
-  forces all six source-specific roles to NOLOGIN, refuses any active reader
-  session, drops only named auxiliary views with `RESTRICT` (never `CASCADE`),
-  drops their owned grants/roles, and restores the recorded deployment-before
-  `PUBLIC TEMPORARY` baseline. A missing role/view or dependency aborts the
-  whole rollback instead of accepting a partial source boundary;
+- before disconnecting, use maintenance wrapper mode `rollback-bridge` with
+  stop/backup acknowledgements as the cluster superuser/current DB owner. It
+  refuses active readers or inventory/ACL drift, drops only the exact five V4
+  functions/schema with `RESTRICT`, explicitly revokes reviewed grants, then
+  directly drops seven roles. Unknown ACL/type/ownership makes `DROP ROLE` fail
+  and rolls back everything; `DROP OWNED` is forbidden. It restores the
+  deployment-before `PUBLIC TEMPORARY` baseline. Use legacy reconcile only when
+  Bridge V4 was never installed;
 - OIDC configuration rollback re-enables prior login methods but must not
   delete IdP bindings or silently merge accounts.
 

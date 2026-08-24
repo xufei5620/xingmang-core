@@ -1,232 +1,374 @@
--- REVIEW-ONLY V3 ECONOMIC PROJECTION. This changes no Sub2API source code and
--- grants no write path. Run only after creating the four named LOGIN roles.
--- The cutover-init command reads these views inside one REPEATABLE READ READ
--- ONLY transaction; normal agents never receive raw-table privileges.
+-- REVIEW-ONLY SUB2API ECONOMIC BRIDGE V4.
+-- Requires sub2api-source-projection-grants.postgresql.sql and the four named
+-- LOGIN reader roles. It creates functions only, never source-dependent views.
+-- Execute only through the reviewed maintenance wrapper, which supplies psql
+-- -X and ON_ERROR_STOP=1. Never pipe this SQL to bare psql.
 
 BEGIN;
+SET LOCAL lock_timeout='5s';
+SET LOCAL statement_timeout='15s';
+SET LOCAL idle_in_transaction_session_timeout='15s';
 
-CREATE OR REPLACE VIEW public.invoice_sub2api_wallet_config_contract_v3
-WITH (security_barrier = true) AS
-SELECT
-  max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
-  max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
-  max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
-  max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
-  (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
-   AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
-   AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
-FROM public.settings
-WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE');
+DO $executor$
+DECLARE executor_oid oid; database_owner oid; executor_superuser boolean;
+BEGIN
+  SELECT oid,rolsuper INTO executor_oid,executor_superuser FROM pg_roles WHERE rolname=current_user;
+  SELECT datdba INTO database_owner FROM pg_database WHERE datname=current_database();
+  IF executor_oid IS NULL OR NOT executor_superuser OR executor_oid<>database_owner THEN
+    RAISE EXCEPTION 'Sub2API economic bridge install requires the cluster superuser that owns the current database';
+  END IF;
+END $executor$;
 
-CREATE OR REPLACE VIEW public.invoice_sub2api_usage_projection_v3
-WITH (security_barrier = true) AS
-SELECT ul.id AS source_id,
-       ul.user_id,
-       ul.created_at AS event_time,
-       ((round(ul.actual_cost,8) * 100000000)::numeric(78,0))::text AS service_units,
-       'usage_logs'::text AS causal_domain,
-       ('usage_logs:' || ul.id::text)::text AS source_cursor
-FROM public.usage_logs ul
-WHERE ul.billing_type=0
-  AND round(ul.actual_cost,8)>0;
-
-CREATE OR REPLACE VIEW public.invoice_sub2api_usage_projection_health_v3
-WITH (security_barrier = true) AS
-WITH stats AS (
-  SELECT count(*)::bigint AS total_rows,
-         COALESCE(max(id)-min(id)+1-count(*),0)::bigint AS gap_count,
-         count(*) FILTER (WHERE billing_type NOT IN (0,1) OR actual_cost<0)::bigint AS invalid_rows
-  FROM public.usage_logs
-)
-SELECT (stats.invalid_rows=0 AND w.contract_ok) AS contract_ok,
-       CASE WHEN NOT w.contract_ok THEN 'wallet_configuration_invalid'
-            WHEN invalid_rows>0 THEN 'usage_contract_invalid'
-            ELSE '' END::text AS blocked_reason,
-       total_rows,gap_count,
-       encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>') || '|' || COALESCE((extract(epoch from multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>') || '|' ||
-       COALESCE(fee_rate_value,'<missing>') || '|' || COALESCE((extract(epoch from fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>') ||
-       '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
-FROM stats,public.invoice_sub2api_wallet_config_contract_v3 w;
-
-CREATE OR REPLACE VIEW public.invoice_sub2api_credits_projection_v3
-WITH (security_barrier = true) AS
-SELECT pcu.id AS source_id,pcu.user_id,pcu.used_at AS event_time,
-       ((pcu.bonus_amount * 100000000)::numeric(78,0))::text AS service_units,
-       'bonus'::text AS credit_kind,'promo_code_usages'::text AS causal_domain,
-       ('promo_code_usages:' || pcu.id::text)::text AS source_cursor
-FROM public.promo_code_usages pcu
-WHERE pcu.bonus_amount>0
-UNION ALL
-SELECT ual.id,ual.user_id,ual.created_at,
-       ((ual.amount * 100000000)::numeric(78,0))::text,
-       'rebate'::text,'user_affiliate_ledger'::text,
-       ('user_affiliate_ledger:' || ual.id::text)::text
-FROM public.user_affiliate_ledger ual
-WHERE ual.action='transfer' AND ual.amount>0
-UNION ALL
-SELECT rc.id,rc.used_by,rc.used_at,
-       ((rc.value * 100000000)::numeric(78,0))::text,
-       'bonus'::text,'redeem_codes'::text,
-       ('redeem_codes:' || rc.id::text)::text
-FROM public.redeem_codes rc
-WHERE rc.type='balance' AND rc.used_by IS NOT NULL AND rc.used_at IS NOT NULL
-  AND rc.status='used' AND rc.value>0
-  AND NOT EXISTS (SELECT 1 FROM public.payment_orders po WHERE po.recharge_code=rc.code);
-
-CREATE OR REPLACE VIEW public.invoice_sub2api_credits_projection_health_v3
-WITH (security_barrier = true) AS
-WITH p AS (
-  SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
-         count(*) FILTER (WHERE bonus_amount<=0)::bigint invalid FROM public.promo_code_usages
-), a AS (
-  SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
-         count(*) FILTER (WHERE action NOT IN ('accrue','transfer') OR amount<=0)::bigint invalid FROM public.user_affiliate_ledger
-), r AS (
-  SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
-         count(*) FILTER (
-           WHERE type='balance' AND status='used' AND used_by IS NOT NULL
-             AND used_at IS NOT NULL AND value<=0
-         )::bigint invalid
-  FROM public.redeem_codes
-), combined AS (
-  SELECT p.n+a.n+r.n AS total_rows,p.gaps+a.gaps+r.gaps AS gap_count,p.invalid+a.invalid+r.invalid AS invalid_rows FROM p,a,r
-)
-SELECT (combined.invalid_rows=0 AND w.contract_ok) AS contract_ok,
-       CASE WHEN NOT w.contract_ok THEN 'wallet_configuration_invalid'
-            WHEN invalid_rows>0 THEN 'credit_contract_invalid'
-            ELSE '' END::text AS blocked_reason,total_rows,gap_count
-       ,encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>') || '|' || COALESCE((extract(epoch from multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>') || '|' ||
-       COALESCE(fee_rate_value,'<missing>') || '|' || COALESCE((extract(epoch from fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>') ||
-       '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
-FROM combined,public.invoice_sub2api_wallet_config_contract_v3 w;
-
-CREATE OR REPLACE VIEW public.invoice_sub2api_balance_projection_v3
-WITH (security_barrier = true) AS
-SELECT u.id AS user_id,
-       ((GREATEST(u.balance,0) * 100000000)::numeric(78,0))::text AS balance_service_units,
-       (u.balance<0) AS balance_negative
-FROM public.users u
-WHERE u.deleted_at IS NULL;
-
-CREATE OR REPLACE VIEW public.invoice_sub2api_cutover_contract_v3
-WITH (security_barrier = true) AS
-WITH payment_high AS (
-  SELECT COALESCE(p.updated_at,transaction_timestamp()) AS at,COALESCE(p.id,0)::bigint AS id
-  FROM (SELECT 1) seed LEFT JOIN LATERAL (
-    SELECT updated_at,id FROM public.payment_orders ORDER BY updated_at DESC,id DESC LIMIT 1
-  ) p ON true
-), usage_high AS (
-  SELECT COALESCE(u.created_at,transaction_timestamp()) AS at,COALESCE(u.id,0)::bigint AS id
-  FROM (SELECT 1) seed LEFT JOIN LATERAL (
-    SELECT created_at,id FROM public.usage_logs ORDER BY created_at DESC,id DESC LIMIT 1
-  ) u ON true
-), credit_high AS (
-  SELECT COALESCE(max(event_time),transaction_timestamp()) AS at,
-         concat('promo_code_usages:',COALESCE((SELECT max(id) FROM public.promo_code_usages),0),
-                ';user_affiliate_ledger:',COALESCE((SELECT max(id) FROM public.user_affiliate_ledger),0),
-                ';redeem_codes:',COALESCE((SELECT max(id) FROM public.redeem_codes),0)) AS cursor
-  FROM public.invoice_sub2api_credits_projection_v3
-), cfg AS (
-  SELECT contract_ok,
-         encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>') || '|' || COALESCE((extract(epoch from multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>') || '|' ||
-         COALESCE(fee_rate_value,'<missing>') || '|' || COALESCE((extract(epoch from fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>') ||
-         '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
-  FROM public.invoice_sub2api_wallet_config_contract_v3
-)
-SELECT 'sub2api-economic-v3'::text AS projection_contract,
-       contract_ok,configuration_hash,
-       payment_high.at AS payments_event_at,('payment_orders:' || payment_high.id)::text AS payments_cursor,
-       usage_high.at AS usage_event_at,('usage_logs:' || usage_high.id)::text AS usage_cursor,
-       credit_high.at AS credits_event_at,credit_high.cursor::text AS credits_cursor
-FROM payment_high,usage_high,credit_high,cfg;
-
-CREATE OR REPLACE VIEW public.invoice_sub2api_payments_projection_v3
-WITH (security_barrier = true) AS
-SELECT p.id AS source_id,p.user_id,p.updated_at AS event_time,
-       'payment_orders'::text AS causal_domain,('payment_orders:'||p.id::text)::text AS source_cursor,
-       CASE WHEN p.order_type='subscription' THEN 'subscription_purchase' ELSE 'payment_order' END::text AS entity_kind,
-       p.status,p.order_type,p.amount::text,p.pay_amount::text,p.currency,
-       p.refund_amount::text,
-       round(p.pay_amount*p.refund_amount/NULLIF(p.amount,0),2)::text AS gateway_refund_amount,
-       p.completed_at,p.refund_at,p.created_at,p.updated_at,p.payment_type,p.provider_key,
-       CASE WHEN p.order_type='balance' AND cfg.contract_ok AND cfg.multiplier_updated_at<=p.completed_at
-            THEN ((p.amount*100000000)::numeric(78,0))::text END AS wallet_cash_service_units,
-       CASE WHEN p.order_type='subscription' AND p.pay_amount>0 AND p.pay_amount*100=trunc(p.pay_amount*100)
-            THEN (p.pay_amount*100)::numeric(78,0)::text END AS paid_minor,
-       CASE WHEN p.order_type='subscription' AND p.status='COMPLETED' AND p.refund_amount=0 THEN 'verified'
-            WHEN p.order_type='subscription' THEN 'frozen' END::text AS verification_state,
-       (p.refund_amount>0) AS refunded
-FROM public.invoice_sub2api_payment_projection_v1 p
-CROSS JOIN public.invoice_sub2api_wallet_config_contract_v3 cfg;
-
-CREATE OR REPLACE VIEW public.invoice_sub2api_payments_projection_health_v3
-WITH (security_barrier = true) AS
-SELECT (cfg.contract_ok AND h.blocked_unknown_currency_rows=0) AS contract_ok,
-       CASE WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
-            WHEN h.blocked_unknown_currency_rows>0 THEN 'payment_currency_evidence_missing'
-            ELSE '' END::text AS blocked_reason,
-       encode(sha256(convert_to(COALESCE(cfg.multiplier_value,'<missing>') || '|' || COALESCE((extract(epoch from cfg.multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>') || '|' ||
-       COALESCE(cfg.fee_rate_value,'<missing>') || '|' || COALESCE((extract(epoch from cfg.fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>') ||
-       '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
-FROM public.invoice_sub2api_wallet_config_contract_v3 cfg
-CROSS JOIN public.invoice_sub2api_payment_projection_health_v1 h;
+DO $contract$
+DECLARE owner_oid oid; bridge_namespace oid;
+BEGIN
+  SELECT oid INTO owner_oid FROM pg_roles
+    WHERE rolname='invoice_sub2api_bridge_owner' AND NOT rolcanlogin AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit
+      AND NOT rolreplication AND NOT rolbypassrls AND rolconnlimit=0;
+  SELECT oid INTO bridge_namespace FROM pg_namespace WHERE nspname='invoice_bridge';
+  IF owner_oid IS NULL OR bridge_namespace IS NULL
+     OR to_regprocedure('invoice_bridge.sub2api_payments_v4(text,jsonb)') IS NULL
+     OR to_regprocedure('invoice_bridge.sub2api_identities_v4(text,jsonb)') IS NULL THEN
+    RAISE EXCEPTION 'verified Sub2API source bridge is required';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_auth_members WHERE member=owner_oid OR roleid=owner_oid)
+     OR EXISTS (SELECT 1 FROM pg_class WHERE relnamespace=bridge_namespace)
+     OR EXISTS (
+       SELECT 1 FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang
+       WHERE p.pronamespace=bridge_namespace AND (
+         p.proname NOT IN ('sub2api_payments_v4','sub2api_usage_v4','sub2api_credits_v4','sub2api_balances_v4','sub2api_identities_v4')
+         OR oidvectortypes(p.proargtypes)<>'text, jsonb' OR p.prorettype<>'jsonb'::regtype
+         OR NOT p.proretset OR NOT p.prosecdef OR l.lanname<>'plpgsql' OR p.proowner<>owner_oid
+         OR NOT COALESCE('search_path=pg_catalog'=ANY(p.proconfig),false)
+         OR NOT COALESCE('row_security=on'=ANY(p.proconfig),false)
+       )
+     ) THEN RAISE EXCEPTION 'Sub2API source bridge preflight failed'; END IF;
+END
+$contract$;
 
 DO $contract$
 DECLARE role_name text;
 BEGIN
-  FOREACH role_name IN ARRAY ARRAY['invoice_sub2api_payments_v3_reader','invoice_sub2api_usage_reader','invoice_sub2api_credits_reader','invoice_sub2api_balances_reader'] LOOP
-    EXECUTE format('ALTER ROLE %I NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 2',role_name);
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='invoice_sub2api_bridge_owner') THEN
+    RAISE EXCEPTION 'apply Sub2API source bridge before economic bridge';
+  END IF;
+  FOREACH role_name IN ARRAY ARRAY[
+    'invoice_sub2api_payments_v3_reader','invoice_sub2api_usage_reader',
+    'invoice_sub2api_credits_reader','invoice_sub2api_balances_reader'
+  ] LOOP
+    EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 2',role_name);
     EXECUTE format('ALTER ROLE %I SET default_transaction_read_only=on',role_name);
     EXECUTE format('ALTER ROLE %I SET statement_timeout=''15s''',role_name);
     EXECUTE format('ALTER ROLE %I SET lock_timeout=''5s''',role_name);
     EXECUTE format('ALTER ROLE %I SET idle_in_transaction_session_timeout=''15s''',role_name);
     EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I',current_database(),role_name);
     EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I',role_name);
-    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I',role_name);
     EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I',role_name);
     EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I',role_name);
     EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM %I',current_database(),role_name);
-    IF has_database_privilege(role_name,current_database(),'TEMP') THEN
-      RAISE EXCEPTION '% retains TEMP through PUBLIC; revoke TEMPORARY on this database from PUBLIC first',role_name;
-    END IF;
+    EXECUTE format('GRANT USAGE ON SCHEMA invoice_bridge TO %I',role_name);
+    IF has_database_privilege(role_name,current_database(),'TEMP') THEN RAISE EXCEPTION '% retains TEMP',role_name; END IF;
     IF EXISTS (
       SELECT 1 FROM pg_auth_members m
       WHERE m.member=(SELECT oid FROM pg_roles WHERE rolname=role_name)
          OR m.roleid=(SELECT oid FROM pg_roles WHERE rolname=role_name)
-    ) THEN
-      RAISE EXCEPTION '% has a role membership in either direction',role_name;
-    END IF;
+    ) THEN RAISE EXCEPTION '% has a role membership in either direction',role_name; END IF;
   END LOOP;
-END $contract$;
+END
+$contract$;
 
-REVOKE ALL ON public.invoice_sub2api_usage_projection_v3,public.invoice_sub2api_usage_projection_health_v3,
-  public.invoice_sub2api_credits_projection_v3,public.invoice_sub2api_credits_projection_health_v3,
-  public.invoice_sub2api_balance_projection_v3,public.invoice_sub2api_wallet_config_contract_v3,
-  public.invoice_sub2api_cutover_contract_v3,public.invoice_sub2api_payments_projection_v3,
-  public.invoice_sub2api_payments_projection_health_v3 FROM PUBLIC;
+DO $relations$
+DECLARE owner_oid oid; expected text[] := ARRAY[
+  'payment_orders','settings','auth_identities','usage_logs',
+  'promo_code_usages','user_affiliate_ledger','redeem_codes','users'];
+relation_count integer; unsafe_count integer;
+BEGIN
+  SELECT oid INTO owner_oid FROM pg_roles WHERE rolname='invoice_sub2api_bridge_owner';
+  SELECT count(*),count(*) FILTER (
+    WHERE c.relrowsecurity OR c.relforcerowsecurity OR c.relowner=owner_oid
+  ) INTO relation_count,unsafe_count
+  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relname=ANY(expected);
+  IF relation_count<>array_length(expected,1) OR unsafe_count<>0 THEN
+    RAISE EXCEPTION 'Sub2API economic bridge relations are missing, role-owned or protected by unreviewed RLS';
+  END IF;
+END $relations$;
 
-GRANT SELECT(source_id,user_id,event_time,causal_domain,source_cursor,entity_kind,status,order_type,
-  amount,pay_amount,currency,refund_amount,gateway_refund_amount,completed_at,refund_at,created_at,
-  updated_at,payment_type,provider_key,wallet_cash_service_units,paid_minor,verification_state,refunded)
-  ON public.invoice_sub2api_payments_projection_v3 TO invoice_sub2api_payments_v3_reader;
-GRANT SELECT(contract_ok,blocked_reason,configuration_hash)
-  ON public.invoice_sub2api_payments_projection_health_v3 TO invoice_sub2api_payments_v3_reader;
+GRANT SELECT(id,user_id,billing_type,actual_cost,created_at)
+  ON public.usage_logs TO invoice_sub2api_bridge_owner;
+GRANT SELECT(id,user_id,bonus_amount,used_at)
+  ON public.promo_code_usages TO invoice_sub2api_bridge_owner;
+GRANT SELECT(id,user_id,action,amount,created_at)
+  ON public.user_affiliate_ledger TO invoice_sub2api_bridge_owner;
+GRANT SELECT(id,code,type,value,status,used_by,used_at)
+  ON public.redeem_codes TO invoice_sub2api_bridge_owner;
+GRANT SELECT(recharge_code)
+  ON public.payment_orders TO invoice_sub2api_bridge_owner;
+GRANT SELECT(id,balance,deleted_at)
+  ON public.users TO invoice_sub2api_bridge_owner;
 
-GRANT SELECT(source_id,user_id,event_time,service_units,causal_domain,source_cursor)
-  ON public.invoice_sub2api_usage_projection_v3 TO invoice_sub2api_usage_reader;
-GRANT SELECT(contract_ok,blocked_reason,total_rows,gap_count,configuration_hash)
-  ON public.invoice_sub2api_usage_projection_health_v3 TO invoice_sub2api_usage_reader;
-GRANT SELECT(source_id,user_id,event_time,service_units,credit_kind,causal_domain,source_cursor)
-  ON public.invoice_sub2api_credits_projection_v3 TO invoice_sub2api_credits_reader;
-GRANT SELECT(contract_ok,blocked_reason,total_rows,gap_count,configuration_hash)
-  ON public.invoice_sub2api_credits_projection_health_v3 TO invoice_sub2api_credits_reader;
-GRANT SELECT(user_id,balance_service_units,balance_negative)
-  ON public.invoice_sub2api_balance_projection_v3 TO invoice_sub2api_balances_reader;
-GRANT SELECT(projection_contract,contract_ok,configuration_hash,payments_event_at,payments_cursor,usage_event_at,usage_cursor,credits_event_at,credits_cursor)
-  ON public.invoice_sub2api_cutover_contract_v3 TO invoice_sub2api_balances_reader;
+CREATE OR REPLACE FUNCTION invoice_bridge.sub2api_usage_v4(operation text,request jsonb)
+RETURNS SETOF jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog SET row_security=on
+AS $bridge$
+DECLARE requested_limit integer;
+BEGIN
+  IF request IS NULL OR jsonb_typeof(request)<>'object' THEN RAISE EXCEPTION 'invalid bridge request'; END IF;
+  IF operation='health' THEN
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        WITH cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
+            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
+            max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
+            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
+             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
+             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+          FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), stats AS (
+          SELECT count(*)::bigint AS total_rows,COALESCE(max(id)-min(id)+1-count(*),0)::bigint AS gap_count,
+            count(*) FILTER (WHERE billing_type NOT IN (0,1) OR actual_cost<0)::bigint AS invalid_rows
+          FROM public.usage_logs
+        )
+        SELECT (stats.invalid_rows=0 AND cfg.contract_ok) AS contract_ok,
+          CASE WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
+               WHEN invalid_rows>0 THEN 'usage_contract_invalid' ELSE '' END::text AS blocked_reason,
+          total_rows,gap_count,
+          encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>')||'|'||
+            COALESCE((extract(epoch FROM multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||'|'||
+            COALESCE(fee_rate_value,'<missing>')||'|'||
+            COALESCE((extract(epoch FROM fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||
+            '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
+        FROM stats,cfg
+      ) result
+    $query$;
+    RETURN;
+  ELSIF operation='ceiling' THEN
+    IF request->>'domain'<>'usage_logs' THEN RAISE EXCEPTION 'invalid usage domain'; END IF;
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        SELECT COALESCE(CASE WHEN min(id) FILTER (WHERE created_at>$1::timestamptz) IS NOT NULL
+          THEN min(id) FILTER (WHERE created_at>$1::timestamptz)-1 ELSE max(id) END,$2::bigint)::bigint AS source_id
+        FROM public.usage_logs
+        WHERE billing_type=0 AND round(actual_cost,8)>0 AND id>$2::bigint
+      ) result
+    $query$ USING request->>'horizon',request->>'position';
+    RETURN;
+  ELSIF operation='page' THEN
+    requested_limit := (request->>'limit')::integer;
+    IF requested_limit<1 OR requested_limit>500 THEN RAISE EXCEPTION 'invalid bridge limit'; END IF;
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        SELECT id AS source_id,user_id,created_at AS event_time,
+          ((round(actual_cost,8)*100000000)::numeric(78,0))::text AS service_units,
+          NULL::text AS credit_kind,'usage_logs'::text AS causal_domain,
+          ('usage_logs:'||id::text)::text AS source_cursor
+        FROM public.usage_logs
+        WHERE billing_type=0 AND round(actual_cost,8)>0
+          AND id>$1::bigint AND id<=$2::bigint
+          AND created_at>=$3::timestamptz AND created_at<=$4::timestamptz
+        ORDER BY id LIMIT $5
+      ) result
+    $query$ USING request->>'usage_logs_position',request->>'usage_logs_ceiling',
+      request->>'cutover',request->>'horizon',requested_limit;
+    RETURN;
+  END IF;
+  RAISE EXCEPTION 'unsupported Sub2API usage bridge operation';
+END
+$bridge$;
+
+CREATE OR REPLACE FUNCTION invoice_bridge.sub2api_credits_v4(operation text,request jsonb)
+RETURNS SETOF jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog SET row_security=on
+AS $bridge$
+DECLARE requested_limit integer; requested_domain text;
+BEGIN
+  IF request IS NULL OR jsonb_typeof(request)<>'object' THEN RAISE EXCEPTION 'invalid bridge request'; END IF;
+  IF operation='health' THEN
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        WITH cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
+            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
+            max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
+            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
+             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
+             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+          FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), p AS (
+          SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
+            count(*) FILTER (WHERE bonus_amount<=0)::bigint invalid FROM public.promo_code_usages
+        ), a AS (
+          SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
+            count(*) FILTER (WHERE action NOT IN ('accrue','transfer') OR amount<=0)::bigint invalid FROM public.user_affiliate_ledger
+        ), r AS (
+          SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
+            count(*) FILTER (WHERE type='balance' AND status='used' AND used_by IS NOT NULL AND used_at IS NOT NULL AND value<=0)::bigint invalid
+          FROM public.redeem_codes
+        ), stats AS (
+          SELECT p.n+a.n+r.n AS total_rows,p.gaps+a.gaps+r.gaps AS gap_count,p.invalid+a.invalid+r.invalid AS invalid_rows FROM p,a,r
+        )
+        SELECT (stats.invalid_rows=0 AND cfg.contract_ok) AS contract_ok,
+          CASE WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
+               WHEN invalid_rows>0 THEN 'credit_contract_invalid' ELSE '' END::text AS blocked_reason,
+          total_rows,gap_count,
+          encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>')||'|'||
+            COALESCE((extract(epoch FROM multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||'|'||
+            COALESCE(fee_rate_value,'<missing>')||'|'||
+            COALESCE((extract(epoch FROM fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||
+            '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
+        FROM stats,cfg
+      ) result
+    $query$;
+    RETURN;
+  ELSIF operation='ceiling' THEN
+    requested_domain := request->>'domain';
+    IF requested_domain NOT IN ('promo_code_usages','user_affiliate_ledger','redeem_codes') THEN RAISE EXCEPTION 'invalid credit domain'; END IF;
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        WITH projected AS (
+          SELECT id AS source_id,used_at AS event_time,'promo_code_usages'::text AS causal_domain
+          FROM public.promo_code_usages WHERE bonus_amount>0
+          UNION ALL
+          SELECT id,created_at,'user_affiliate_ledger'::text FROM public.user_affiliate_ledger WHERE action='transfer' AND amount>0
+          UNION ALL
+          SELECT rc.id,rc.used_at,'redeem_codes'::text FROM public.redeem_codes rc
+          WHERE rc.type='balance' AND rc.used_by IS NOT NULL AND rc.used_at IS NOT NULL AND rc.status='used' AND rc.value>0
+            AND NOT EXISTS (SELECT 1 FROM public.payment_orders po WHERE po.recharge_code=rc.code)
+        )
+        SELECT COALESCE(max(source_id) FILTER (WHERE event_time>=$1::timestamptz AND event_time<=$2::timestamptz),$3::bigint)::bigint AS source_id
+        FROM projected WHERE causal_domain=$4 AND source_id>$3::bigint
+      ) result
+    $query$ USING request->>'cutover',request->>'horizon',request->>'position',requested_domain;
+    RETURN;
+  ELSIF operation='page' THEN
+    requested_limit := (request->>'limit')::integer;
+    IF requested_limit<1 OR requested_limit>500 THEN RAISE EXCEPTION 'invalid bridge limit'; END IF;
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        WITH projected AS (
+          SELECT id AS source_id,user_id,used_at AS event_time,
+            ((bonus_amount*100000000)::numeric(78,0))::text AS service_units,
+            'bonus'::text AS credit_kind,'promo_code_usages'::text AS causal_domain,
+            ('promo_code_usages:'||id::text)::text AS source_cursor
+          FROM public.promo_code_usages WHERE bonus_amount>0
+          UNION ALL
+          SELECT id,user_id,created_at,((amount*100000000)::numeric(78,0))::text,
+            'rebate'::text,'user_affiliate_ledger'::text,('user_affiliate_ledger:'||id::text)::text
+          FROM public.user_affiliate_ledger WHERE action='transfer' AND amount>0
+          UNION ALL
+          SELECT rc.id,rc.used_by,rc.used_at,((rc.value*100000000)::numeric(78,0))::text,
+            'bonus'::text,'redeem_codes'::text,('redeem_codes:'||rc.id::text)::text
+          FROM public.redeem_codes rc
+          WHERE rc.type='balance' AND rc.used_by IS NOT NULL AND rc.used_at IS NOT NULL AND rc.status='used' AND rc.value>0
+            AND NOT EXISTS (SELECT 1 FROM public.payment_orders po WHERE po.recharge_code=rc.code)
+        )
+        SELECT * FROM projected
+        WHERE event_time>=$1::timestamptz AND event_time<=$2::timestamptz AND (
+          (causal_domain='promo_code_usages' AND source_id>$3::bigint AND source_id<=$4::bigint) OR
+          (causal_domain='user_affiliate_ledger' AND source_id>$5::bigint AND source_id<=$6::bigint) OR
+          (causal_domain='redeem_codes' AND source_id>$7::bigint AND source_id<=$8::bigint))
+        ORDER BY causal_domain,source_id LIMIT $9
+      ) result
+    $query$ USING request->>'cutover',request->>'horizon',
+      request->>'promo_code_usages_position',request->>'promo_code_usages_ceiling',
+      request->>'user_affiliate_ledger_position',request->>'user_affiliate_ledger_ceiling',
+      request->>'redeem_codes_position',request->>'redeem_codes_ceiling',requested_limit;
+    RETURN;
+  END IF;
+  RAISE EXCEPTION 'unsupported Sub2API credits bridge operation';
+END
+$bridge$;
+
+CREATE OR REPLACE FUNCTION invoice_bridge.sub2api_balances_v4(operation text,request jsonb)
+RETURNS SETOF jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog SET row_security=on
+AS $bridge$
+BEGIN
+  IF request IS NULL OR jsonb_typeof(request)<>'object' THEN RAISE EXCEPTION 'invalid bridge request'; END IF;
+  IF operation='rows' THEN
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        SELECT id AS user_id,((GREATEST(balance,0)*100000000)::numeric(78,0))::text AS balance_service_units,
+          (balance<0) AS balance_negative FROM public.users WHERE deleted_at IS NULL ORDER BY id
+      ) result
+    $query$;
+    RETURN;
+  ELSIF operation='contract' THEN
+    RETURN QUERY EXECUTE $query$
+      SELECT to_jsonb(result) FROM (
+        WITH cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
+            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
+            max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
+            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
+             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
+             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+          FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), payment_high AS (
+          SELECT COALESCE(updated_at,transaction_timestamp()) AS at,COALESCE(id,0)::bigint AS id
+          FROM (SELECT updated_at,id FROM public.payment_orders ORDER BY updated_at DESC,id DESC LIMIT 1) p
+          RIGHT JOIN (SELECT 1) seed ON true
+        ), usage_high AS (
+          SELECT COALESCE(created_at,transaction_timestamp()) AS at,COALESCE(id,0)::bigint AS id
+          FROM (SELECT created_at,id FROM public.usage_logs ORDER BY created_at DESC,id DESC LIMIT 1) u
+          RIGHT JOIN (SELECT 1) seed ON true
+        ), credits AS (
+          SELECT id,used_at AS event_time,'promo_code_usages'::text AS domain FROM public.promo_code_usages WHERE bonus_amount>0
+          UNION ALL SELECT id,created_at,'user_affiliate_ledger'::text FROM public.user_affiliate_ledger WHERE action='transfer' AND amount>0
+          UNION ALL SELECT rc.id,rc.used_at,'redeem_codes'::text FROM public.redeem_codes rc
+            WHERE rc.type='balance' AND rc.used_by IS NOT NULL AND rc.used_at IS NOT NULL AND rc.status='used' AND rc.value>0
+              AND NOT EXISTS (SELECT 1 FROM public.payment_orders po WHERE po.recharge_code=rc.code)
+        ), credit_high AS (
+          SELECT COALESCE(max(event_time),transaction_timestamp()) AS at,
+            concat('promo_code_usages:',COALESCE((SELECT max(id) FROM public.promo_code_usages),0),
+              ';user_affiliate_ledger:',COALESCE((SELECT max(id) FROM public.user_affiliate_ledger),0),
+              ';redeem_codes:',COALESCE((SELECT max(id) FROM public.redeem_codes),0)) AS cursor FROM credits
+        )
+        SELECT 'sub2api-economic-v3'::text AS projection_contract,cfg.contract_ok,
+          encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>')||'|'||
+            COALESCE((extract(epoch FROM multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||'|'||
+            COALESCE(fee_rate_value,'<missing>')||'|'||
+            COALESCE((extract(epoch FROM fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||
+            '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash,
+          payment_high.at AS payments_event_at,('payment_orders:'||payment_high.id)::text AS payments_cursor,
+          usage_high.at AS usage_event_at,('usage_logs:'||usage_high.id)::text AS usage_cursor,
+          credit_high.at AS credits_event_at,credit_high.cursor::text AS credits_cursor
+        FROM cfg,payment_high,usage_high,credit_high
+      ) result
+    $query$;
+    RETURN;
+  END IF;
+  RAISE EXCEPTION 'unsupported Sub2API balances bridge operation';
+END
+$bridge$;
+
+ALTER FUNCTION invoice_bridge.sub2api_usage_v4(text,jsonb) OWNER TO invoice_sub2api_bridge_owner;
+ALTER FUNCTION invoice_bridge.sub2api_credits_v4(text,jsonb) OWNER TO invoice_sub2api_bridge_owner;
+ALTER FUNCTION invoice_bridge.sub2api_balances_v4(text,jsonb) OWNER TO invoice_sub2api_bridge_owner;
+DO $contract$
+DECLARE role_name text; function_name text;
+BEGIN
+  FOREACH function_name IN ARRAY ARRAY['sub2api_payments_v4','sub2api_usage_v4','sub2api_credits_v4','sub2api_balances_v4','sub2api_identities_v4'] LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION invoice_bridge.%I(text,jsonb) FROM PUBLIC',function_name);
+    FOREACH role_name IN ARRAY ARRAY['invoice_sub2api_payments_reader','invoice_sub2api_identities_reader','invoice_sub2api_payments_v3_reader','invoice_sub2api_usage_reader','invoice_sub2api_credits_reader','invoice_sub2api_balances_reader'] LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION invoice_bridge.%I(text,jsonb) FROM %I',function_name,role_name);
+    END LOOP;
+  END LOOP;
+  GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_payments_v4(text,jsonb) TO invoice_sub2api_payments_reader,invoice_sub2api_payments_v3_reader;
+  GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_identities_v4(text,jsonb) TO invoice_sub2api_identities_reader;
+  GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_usage_v4(text,jsonb) TO invoice_sub2api_usage_reader;
+  GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_credits_v4(text,jsonb) TO invoice_sub2api_credits_reader;
+  GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_balances_v4(text,jsonb) TO invoice_sub2api_balances_reader;
+END
+$contract$;
+REVOKE ALL ON FUNCTION invoice_bridge.sub2api_usage_v4(text,jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION invoice_bridge.sub2api_credits_v4(text,jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION invoice_bridge.sub2api_balances_v4(text,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_payments_v4(text,jsonb) TO invoice_sub2api_payments_v3_reader;
+GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_usage_v4(text,jsonb) TO invoice_sub2api_usage_reader;
+GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_credits_v4(text,jsonb) TO invoice_sub2api_credits_reader;
+GRANT EXECUTE ON FUNCTION invoice_bridge.sub2api_balances_v4(text,jsonb) TO invoice_sub2api_balances_reader;
 
 COMMIT;
-
--- Deliberately absent: users.email/password/notes, usage request/model/token/IP
--- content, redeem codes, affiliate source-user/order details, settings secrets,
--- raw provider snapshots/trade references, and every mutation/sequence grant.

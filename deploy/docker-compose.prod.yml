@@ -1,7 +1,7 @@
 name: invoice-system-prod
 
 x-api-common: &api-common
-  image: invoice-system-api:${INVOICE_IMAGE_TAG:-0.1.0}
+  image: invoice-system-api:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
   build:
     context: ../backend
     target: api
@@ -13,7 +13,7 @@ x-api-common: &api-common
 
 x-tools-common: &tools-common
   <<: *api-common
-  image: invoice-system-tools:${INVOICE_IMAGE_TAG:-0.1.0}
+  image: invoice-system-tools:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
   build:
     context: ../backend
     target: tools
@@ -168,7 +168,7 @@ services:
     networks: [oidc_preflight_egress]
 
   pdf-scanner:
-    image: invoice-system-pdf-scanner:${INVOICE_IMAGE_TAG:-0.1.0}
+    image: invoice-system-pdf-scanner:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
     build:
       context: ../backend
       target: scanner
@@ -291,7 +291,7 @@ services:
       invoice_ingest: {}
 
   web:
-    image: invoice-system-web:${INVOICE_IMAGE_TAG:-0.1.0}
+    image: invoice-system-web:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
     build:
       context: ../web
     restart: unless-stopped
@@ -315,18 +315,14 @@ services:
     mem_limit: 4g
     cpus: 2.0
     pids_limit: 256
+    environment:
+      CLAMAV_DATABASE_ROOT: /var/lib/clamav
+      CLAMAV_MAX_SIGNATURE_AGE: ${CLAMAV_MAX_SIGNATURE_AGE:-48h}
     volumes:
       - clamav_database:/var/lib/clamav
+      - ./clamav-healthcheck.sh:/usr/local/bin/invoice-clamav-healthcheck:ro
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          clamdscan --ping 3 &&
-          test -s /var/lib/clamav/freshclam.dat &&
-          (test -s /var/lib/clamav/main.cvd || test -s /var/lib/clamav/main.cld) &&
-          (test -s /var/lib/clamav/daily.cvd || test -s /var/lib/clamav/daily.cld) &&
-          find /var/lib/clamav/freshclam.dat -mmin -2880 -print -quit | grep -q . &&
-          find /var/lib/clamav/daily.cvd /var/lib/clamav/daily.cld -mmin -2880 -print -quit 2>/dev/null | grep -q .
+      test: ["CMD", "/bin/sh", "/usr/local/bin/invoice-clamav-healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 20

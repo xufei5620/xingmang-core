@@ -156,7 +156,6 @@ func (c *PaymentV3DBConnector) prepare(ctx context.Context, req ScanRequest, del
 	if horizon.Before(mustParseTime(c.Manifest.CutoverAt)) {
 		horizon = mustParseTime(c.Manifest.CutoverAt)
 	}
-	view := paymentProjectionView(c.Source)
 	if c.Source == SourceSub2API {
 		if req.Mode == ScanFull || req.Mode == ScanReconcile {
 			cursor.UpdatedAt = c.Manifest.CutoverAt
@@ -165,7 +164,15 @@ func (c *PaymentV3DBConnector) prepare(ctx context.Context, req ScanRequest, del
 		}
 		var at time.Time
 		var id int64
-		err := c.DB.QueryRowContext(ctx, fmt.Sprintf(`SELECT event_time,source_id FROM %s WHERE event_time<=$1 ORDER BY event_time DESC,source_id DESC LIMIT 1`, view), horizon).Scan(&at, &id)
+		relation, relationErr := bridgeJSONRecordRelation(c.Source, StreamPayments, "ceiling", "event_time timestamptz,source_id bigint")
+		if relationErr != nil {
+			return ScanCursor{}, relationErr
+		}
+		request, requestErr := marshalBridgeRequest(map[string]any{"horizon": horizon.UTC().Format(time.RFC3339Nano)})
+		if requestErr != nil {
+			return ScanCursor{}, requestErr
+		}
+		err := c.DB.QueryRowContext(ctx, `SELECT event_time,source_id FROM `+relation, request).Scan(&at, &id)
 		if errors.Is(err, sql.ErrNoRows) {
 			at = horizon
 			id = 0
@@ -188,8 +195,15 @@ func (c *PaymentV3DBConnector) prepare(ctx context.Context, req ScanRequest, del
 		for _, domain := range domains {
 			position := positions[domain]
 			var ceiling int64
-			query := fmt.Sprintf(`SELECT COALESCE(CASE WHEN min(source_id) FILTER (WHERE event_time>$1) IS NOT NULL THEN min(source_id) FILTER (WHERE event_time>$1)-1 ELSE max(source_id) END,$2)::bigint FROM %s WHERE causal_domain=$3 AND source_id>$2`, view)
-			if err = c.DB.QueryRowContext(ctx, query, horizon, position, domain).Scan(&ceiling); err != nil {
+			relation, relationErr := bridgeJSONRecordRelation(c.Source, StreamPayments, "ceiling", "source_id bigint")
+			if relationErr != nil {
+				return ScanCursor{}, relationErr
+			}
+			request, requestErr := marshalBridgeRequest(map[string]any{"horizon": horizon.UTC().Format(time.RFC3339Nano), "position": position, "domain": domain})
+			if requestErr != nil {
+				return ScanCursor{}, requestErr
+			}
+			if err = c.DB.QueryRowContext(ctx, `SELECT source_id FROM `+relation, request).Scan(&ceiling); err != nil {
 				return ScanCursor{}, err
 			}
 			if ceiling < position {
@@ -207,13 +221,24 @@ func (c *PaymentV3DBConnector) prepare(ctx context.Context, req ScanRequest, del
 
 func (c *PaymentV3DBConnector) queryRows(ctx context.Context, cursor ScanCursor, limit int) (*sql.Rows, error) {
 	columns := `source_id,user_id,event_time,causal_domain,source_cursor,entity_kind,status,order_type,amount,pay_amount,currency,refund_amount,gateway_refund_amount,completed_at,refund_at,created_at,updated_at,payment_type,provider_key,wallet_cash_service_units,paid_minor,verification_state,refunded`
-	view := paymentProjectionView(c.Source)
+	record := `source_id bigint,user_id bigint,event_time timestamptz,causal_domain text,source_cursor text,entity_kind text,status text,order_type text,amount text,pay_amount text,currency text,refund_amount text,gateway_refund_amount text,completed_at timestamptz,refund_at timestamptz,created_at timestamptz,updated_at timestamptz,payment_type text,provider_key text,wallet_cash_service_units text,paid_minor text,verification_state text,refunded boolean`
+	relation, err := bridgeJSONRecordRelation(c.Source, StreamPayments, "page", record)
+	if err != nil {
+		return nil, err
+	}
 	if c.Source == SourceSub2API {
 		ceilingAt := mustParseTime(cursor.CeilingAt)
 		parts := strings.Split(cursor.CeilingCursor, ":")
 		ceilingID, _ := strconv.ParseInt(parts[len(parts)-1], 10, 64)
 		position := mustParseTime(cursor.UpdatedAt)
-		return c.DB.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE completed_at>=$1 AND (event_time,source_id)>($2,$3) AND (event_time,source_id)<=($4,$5) ORDER BY event_time,source_id LIMIT $6`, columns, view), c.Manifest.CutoverAt, position, cursor.ID, ceilingAt, ceilingID, limit)
+		request, requestErr := marshalBridgeRequest(map[string]any{
+			"cutover": c.Manifest.CutoverAt, "position_at": position.UTC().Format(time.RFC3339Nano), "position_id": cursor.ID,
+			"ceiling_at": ceilingAt.UTC().Format(time.RFC3339Nano), "ceiling_id": ceilingID, "limit": limit,
+		})
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		return c.DB.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s ORDER BY event_time,source_id`, columns, relation), request)
 	}
 	domains := []string{"subscription_orders", "top_ups"}
 	positions, err := parseDomainCursor(cursor.PositionCursor, domains)
@@ -224,13 +249,28 @@ func (c *PaymentV3DBConnector) queryRows(ctx context.Context, cursor ScanCursor,
 	if err != nil {
 		return nil, err
 	}
-	return c.DB.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE completed_at>=$1 AND event_time<=$2 AND ((causal_domain='subscription_orders' AND source_id>$3 AND source_id<=$4) OR (causal_domain='top_ups' AND source_id>$5 AND source_id<=$6)) ORDER BY causal_domain,source_id LIMIT $7`, columns, view), c.Manifest.CutoverAt, mustParseTime(cursor.CeilingAt), positions["subscription_orders"], ceilings["subscription_orders"], positions["top_ups"], ceilings["top_ups"], limit)
+	request, requestErr := marshalBridgeRequest(map[string]any{
+		"cutover": c.Manifest.CutoverAt, "horizon": cursor.CeilingAt, "subscription_position": positions["subscription_orders"],
+		"subscription_ceiling": ceilings["subscription_orders"], "topup_position": positions["top_ups"], "topup_ceiling": ceilings["top_ups"], "limit": limit,
+	})
+	if requestErr != nil {
+		return nil, requestErr
+	}
+	return c.DB.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s ORDER BY causal_domain,source_id`, columns, relation), request)
 }
 
 func (c *PaymentV3DBConnector) health(ctx context.Context) (bool, string, error) {
+	relation, err := bridgeJSONRecordRelation(c.Source, StreamPayments, "health", "contract_ok boolean,blocked_reason text,configuration_hash text")
+	if err != nil {
+		return false, "", err
+	}
+	request, err := marshalBridgeRequest(nil)
+	if err != nil {
+		return false, "", err
+	}
 	var ok bool
 	var reason, hash string
-	if err := c.DB.QueryRowContext(ctx, fmt.Sprintf(`SELECT contract_ok,blocked_reason,configuration_hash FROM %s`, paymentHealthView(c.Source))).Scan(&ok, &reason, &hash); err != nil {
+	if err := c.DB.QueryRowContext(ctx, `SELECT contract_ok,blocked_reason,configuration_hash FROM `+relation, request).Scan(&ok, &reason, &hash); err != nil {
 		return false, "", err
 	}
 	if hash != c.Manifest.ConfigurationHash {
@@ -301,11 +341,4 @@ func (c *PaymentV3DBConnector) project(row paymentV3Row, observed time.Time) ([]
 		out = append(out, Projection{EntityType: EntityPaymentAdjustment, ExternalID: orderID + ":refund", ObservedAt: observed.Format(time.RFC3339Nano), Operation: "upsert", Payload: PaymentAdjustmentPayload{ExternalOrderID: orderID, ExternalUserID: userID, AdjustmentType: AdjustmentRefund, Amount: row.GatewayRefundAmount, Currency: row.Currency, EffectiveAt: nullableTimeString(row.RefundAt), SourceStatus: row.Status, SourceUpdatedAt: payload.UpdatedAt, Basis: "absolute_cumulative_gateway_refund", FactMetadata: meta}})
 	}
 	return out, nil
-}
-
-func paymentProjectionView(source string) string {
-	return fmt.Sprintf("public.invoice_%s_payments_projection_v3", source)
-}
-func paymentHealthView(source string) string {
-	return fmt.Sprintf("public.invoice_%s_payments_projection_health_v3", source)
 }

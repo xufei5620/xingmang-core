@@ -73,7 +73,6 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 			ScanCycleID: cursor.ScanCycleID, ScanComplete: false}, nil
 	}
 	limit := boundedScanLimit(req.Limit)
-	view := economicProjectionView(c.Source, c.Stream)
 	domains := economicDomains(c.Source, c.Stream)
 	positions, err := parseDomainCursor(cursor.PositionCursor, domains)
 	if err != nil {
@@ -83,24 +82,20 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 	if err != nil {
 		return ScanPage{}, err
 	}
-	creditColumn := "NULL::text"
-	if c.Stream == StreamCredits {
-		creditColumn = "credit_kind"
+	requestValues := map[string]any{"cutover": c.Manifest.CutoverAt, "horizon": cursor.CeilingAt, "limit": limit}
+	for _, domain := range domains {
+		requestValues[domain+"_position"] = positions[domain]
+		requestValues[domain+"_ceiling"] = ceilings[domain]
 	}
-	clauses := make([]string, 0, len(domains))
-	args := make([]any, 0, len(domains)*3+1)
-	for index, domain := range domains {
-		base := index * 3
-		clauses = append(clauses, fmt.Sprintf("(causal_domain=$%d AND source_id>$%d AND source_id<=$%d)", base+1, base+2, base+3))
-		args = append(args, domain, positions[domain], ceilings[domain])
+	request, err := marshalBridgeRequest(requestValues)
+	if err != nil {
+		return ScanPage{}, err
 	}
-	args = append(args, c.Manifest.CutoverAt, mustParseTime(cursor.CeilingAt))
-	cutoverIndex := len(args) - 1
-	horizonIndex := len(args)
-	args = append(args, limit)
-	query := fmt.Sprintf(`SELECT source_id,user_id,event_time,service_units,%s,causal_domain,source_cursor
-FROM %s WHERE (%s) AND event_time>=$%d AND event_time<=$%d ORDER BY causal_domain,source_id LIMIT $%d`, creditColumn, view, strings.Join(clauses, " OR "), cutoverIndex, horizonIndex, len(args))
-	rows, err := c.DB.QueryContext(ctx, query, args...)
+	relation, err := bridgeJSONRecordRelation(c.Source, c.Stream, "page", "source_id bigint,user_id bigint,event_time timestamptz,service_units text,credit_kind text,causal_domain text,source_cursor text")
+	if err != nil {
+		return ScanPage{}, err
+	}
+	rows, err := c.DB.QueryContext(ctx, `SELECT source_id,user_id,event_time,service_units,credit_kind,causal_domain,source_cursor FROM `+relation+` ORDER BY causal_domain,source_id`, request)
 	if err != nil {
 		return ScanPage{}, fmt.Errorf("read %s economic projection: %w", c.Stream, err)
 	}
@@ -209,7 +204,6 @@ func (c *EconomicDBConnector) prepareCursor(ctx context.Context, req ScanRequest
 	if err := c.DB.QueryRowContext(ctx, `SELECT transaction_timestamp() - $1::interval`, delay.String()).Scan(&horizon); err != nil {
 		return ScanCursor{}, errors.New("capture source event horizon failed")
 	}
-	view := economicProjectionView(c.Source, c.Stream)
 	positions, err := parseDomainCursor(cursor.PositionCursor, domains)
 	if err != nil {
 		return ScanCursor{}, err
@@ -218,17 +212,17 @@ func (c *EconomicDBConnector) prepareCursor(ctx context.Context, req ScanRequest
 	for _, domain := range domains {
 		position := positions[domain]
 		var ceiling int64
-		query := fmt.Sprintf(`SELECT COALESCE(max(source_id) FILTER (WHERE event_time>=$1 AND event_time<=$2),$3)::bigint FROM %s WHERE causal_domain=$4 AND source_id>$3`, view)
-		if c.Stream == StreamUsage {
-			query = fmt.Sprintf(`SELECT COALESCE(CASE WHEN min(source_id) FILTER (WHERE event_time>$1) IS NOT NULL THEN min(source_id) FILTER (WHERE event_time>$1)-1 ELSE max(source_id) END,$2)::bigint FROM %s WHERE causal_domain=$3 AND source_id>$2`, view)
+		request, requestErr := marshalBridgeRequest(map[string]any{"cutover": c.Manifest.CutoverAt, "horizon": horizon.UTC().Format(time.RFC3339Nano), "position": position, "domain": domain})
+		if requestErr != nil {
+			return ScanCursor{}, requestErr
 		}
-		if c.Stream == StreamCredits {
-			err = c.DB.QueryRowContext(ctx, query, c.Manifest.CutoverAt, horizon, position, domain).Scan(&ceiling)
-			if ceiling < cutoverPositions[domain] {
-				ceiling = cutoverPositions[domain]
-			}
-		} else {
-			err = c.DB.QueryRowContext(ctx, query, horizon, position, domain).Scan(&ceiling)
+		relation, relationErr := bridgeJSONRecordRelation(c.Source, c.Stream, "ceiling", "source_id bigint")
+		if relationErr != nil {
+			return ScanCursor{}, relationErr
+		}
+		err = c.DB.QueryRowContext(ctx, `SELECT source_id FROM `+relation, request).Scan(&ceiling)
+		if c.Stream == StreamCredits && ceiling < cutoverPositions[domain] {
+			ceiling = cutoverPositions[domain]
 		}
 		if err != nil {
 			return ScanCursor{}, fmt.Errorf("capture %s domain ceiling: %w", c.Stream, err)
@@ -249,12 +243,19 @@ func (c *EconomicDBConnector) prepareCursor(ctx context.Context, req ScanRequest
 }
 
 func (c *EconomicDBConnector) projectionHealth(ctx context.Context) (bool, string, error) {
-	view := economicHealthView(c.Source, c.Stream)
+	relation, err := bridgeJSONRecordRelation(c.Source, c.Stream, "health", "contract_ok boolean,blocked_reason text,total_rows bigint,gap_count bigint,configuration_hash text")
+	if err != nil {
+		return false, "", err
+	}
+	request, err := marshalBridgeRequest(nil)
+	if err != nil {
+		return false, "", err
+	}
 	var ok bool
 	var reason string
 	var configurationHash string
 	var total, gaps int64
-	if err := c.DB.QueryRowContext(ctx, fmt.Sprintf(`SELECT contract_ok,blocked_reason,total_rows,gap_count,configuration_hash FROM %s`, view)).Scan(&ok, &reason, &total, &gaps, &configurationHash); err != nil {
+	if err := c.DB.QueryRowContext(ctx, `SELECT contract_ok,blocked_reason,total_rows,gap_count,configuration_hash FROM `+relation, request).Scan(&ok, &reason, &total, &gaps, &configurationHash); err != nil {
 		return false, "", fmt.Errorf("read %s projection health: %w", c.Stream, err)
 	}
 	if total < 0 || gaps < 0 || (ok && reason != "") || (!ok && strings.TrimSpace(reason) == "") {
@@ -264,14 +265,6 @@ func (c *EconomicDBConnector) projectionHealth(ctx context.Context) (bool, strin
 		return false, "configuration_drift", nil
 	}
 	return ok, reason, nil
-}
-
-func economicProjectionView(source, stream string) string {
-	return fmt.Sprintf("public.invoice_%s_%s_projection_v3", source, stream)
-}
-
-func economicHealthView(source, stream string) string {
-	return fmt.Sprintf("public.invoice_%s_%s_projection_health_v3", source, stream)
 }
 
 func economicDomains(source, stream string) []string {
@@ -350,10 +343,17 @@ func (c *BalanceDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPag
 	if err := validateScanRequest(req); err != nil {
 		return ScanPage{}, err
 	}
-	contractView, _ := cutoverViewNames(c.Source)
+	contractRelation, relationErr := bridgeJSONRecordRelation(c.Source, StreamBalances, "contract", "contract_ok boolean,configuration_hash text")
+	if relationErr != nil {
+		return ScanPage{}, relationErr
+	}
+	request, requestErr := marshalBridgeRequest(nil)
+	if requestErr != nil {
+		return ScanPage{}, requestErr
+	}
 	var currentHash string
 	var contractOK bool
-	if err := c.DB.QueryRowContext(ctx, fmt.Sprintf(`SELECT contract_ok,configuration_hash FROM %s`, contractView)).Scan(&contractOK, &currentHash); err != nil || !contractOK || currentHash != c.Manifest.ConfigurationHash {
+	if err := c.DB.QueryRowContext(ctx, `SELECT contract_ok,configuration_hash FROM `+contractRelation, request).Scan(&contractOK, &currentHash); err != nil || !contractOK || currentHash != c.Manifest.ConfigurationHash {
 		return ScanPage{}, errors.New("balance projection configuration drifted or is unhealthy")
 	}
 	cursor := req.Cursor
@@ -495,13 +495,24 @@ func (c *BalanceDBConnector) captureReconciliation(ctx context.Context) (Balance
 	if err = tx.QueryRowContext(ctx, `SELECT transaction_timestamp()`).Scan(&asOf); err != nil {
 		return BalanceSnapshot{}, err
 	}
-	contractView, view := cutoverViewNames(c.Source)
+	contractRelation, err := bridgeJSONRecordRelation(c.Source, StreamBalances, "contract", "contract_ok boolean,configuration_hash text")
+	if err != nil {
+		return BalanceSnapshot{}, err
+	}
+	request, err := marshalBridgeRequest(nil)
+	if err != nil {
+		return BalanceSnapshot{}, err
+	}
 	var contractOK bool
 	var configurationHash string
-	if err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT contract_ok,configuration_hash FROM %s`, contractView)).Scan(&contractOK, &configurationHash); err != nil || !contractOK || configurationHash != c.Manifest.ConfigurationHash {
+	if err = tx.QueryRowContext(ctx, `SELECT contract_ok,configuration_hash FROM `+contractRelation, request).Scan(&contractOK, &configurationHash); err != nil || !contractOK || configurationHash != c.Manifest.ConfigurationHash {
 		return BalanceSnapshot{}, errors.New("balance snapshot configuration drifted or is unhealthy")
 	}
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT user_id,balance_service_units,balance_negative FROM %s ORDER BY user_id`, view))
+	balanceRelation, err := bridgeJSONRecordRelation(c.Source, StreamBalances, "rows", "user_id bigint,balance_service_units text,balance_negative boolean")
+	if err != nil {
+		return BalanceSnapshot{}, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT user_id,balance_service_units,balance_negative FROM `+balanceRelation+` ORDER BY user_id`, request)
 	if err != nil {
 		return BalanceSnapshot{}, err
 	}

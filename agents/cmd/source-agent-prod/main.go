@@ -131,7 +131,7 @@ func checkDatabaseFromEnvironment() error {
 		return err
 	}
 	defer database.Close()
-	log.Printf("validated exact read-only projection source=%q stream=%q", config.SourceID, config.StreamID)
+	log.Printf("validated dependency-free read-only bridge source=%q stream=%q", config.SourceID, config.StreamID)
 	return nil
 }
 
@@ -695,7 +695,7 @@ func openReadOnlyPostgres(ctx context.Context, config runConfig) (*sql.DB, error
 	defer cancel()
 	if err := database.PingContext(connectContext); err != nil {
 		database.Close()
-		return nil, errors.New("connect to source projection database failed")
+		return nil, errors.New("connect to source bridge database failed")
 	}
 	var readOnly string
 	if err := database.QueryRowContext(connectContext, "SHOW transaction_read_only").Scan(&readOnly); err != nil || readOnly != "on" {
@@ -711,8 +711,9 @@ func openReadOnlyPostgres(ctx context.Context, config runConfig) (*sql.DB, error
 
 func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config runConfig) error {
 	expected := expectedProjectionColumns(config)
-	if len(expected) == 0 {
-		return errors.New("no projection privilege contract for source stream")
+	expectedRoutine := expectedBridgeRoutine(config)
+	if expectedRoutine == "" {
+		return errors.New("no source bridge privilege contract for source stream")
 	}
 	rows, err := database.QueryContext(ctx, `
 		SELECT table_schema,table_name,column_name
@@ -736,8 +737,8 @@ func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config ru
 	if err = rows.Err(); err != nil {
 		return errors.New("iterate source projection privileges failed")
 	}
-	if len(actual) != len(expected) {
-		return errors.New("source database SELECT grants differ from the exact projection contract")
+	if len(actual) != 0 || len(expected) != 0 {
+		return errors.New("source database caller must not have raw column SELECT grants")
 	}
 	for field := range expected {
 		if _, ok := actual[field]; !ok {
@@ -746,7 +747,7 @@ func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config ru
 	}
 	var superuser, createDB, createRole, replication, bypassRLS, canLogin, inherit, canConnect, canTemporary bool
 	var connectionLimit int
-	var createSchema, usePublicSchema, unexpectedSchemaUsage, roleMembership bool
+	var createSchema, useBridgeSchema, unexpectedSchemaUsage, roleMembership bool
 	if err = database.QueryRowContext(ctx, `
 		SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,
 		       r.rolcanlogin,r.rolinherit,r.rolconnlimit,
@@ -758,10 +759,10 @@ func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config ru
 		           AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
 		           AND has_schema_privilege(current_user,n.oid,'CREATE')
 		       ),
-		       has_schema_privilege(current_user,'public','USAGE'),
+		       has_schema_privilege(current_user,'invoice_bridge','USAGE'),
 		       EXISTS (
 		         SELECT 1 FROM pg_namespace n
-		         WHERE n.nspname <> 'public'
+		         WHERE n.nspname NOT IN ('public','invoice_bridge')
 		           AND n.nspname <> 'information_schema'
 		           AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
 		           AND has_schema_privilege(current_user,n.oid,'USAGE')
@@ -772,13 +773,134 @@ func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config ru
 		FROM pg_roles r WHERE r.rolname=current_user`).Scan(
 		&superuser, &createDB, &createRole, &replication, &bypassRLS,
 		&canLogin, &inherit, &connectionLimit, &canConnect, &canTemporary,
-		&createSchema, &usePublicSchema, &unexpectedSchemaUsage, &roleMembership); err != nil {
+		&createSchema, &useBridgeSchema, &unexpectedSchemaUsage, &roleMembership); err != nil {
 		return errors.New("inspect source role attributes failed")
 	}
 	if superuser || createDB || createRole || replication || bypassRLS || !canLogin || inherit || !canConnect ||
-		connectionLimit != 2 || canTemporary || createSchema || !usePublicSchema ||
+		connectionLimit != 2 || canTemporary || createSchema || !useBridgeSchema ||
 		unexpectedSchemaUsage || roleMembership {
 		return errors.New("source database role is over-privileged")
+	}
+	expectedRoutineHash := expectedBridgeRoutineHash(config)
+	if expectedRoutineHash == "" {
+		return errors.New("source bridge routine hash contract is missing")
+	}
+	var routineOID uint32
+	var ownerConnectionLimit int
+	var routineHash, ownerName string
+	var securityDefiner, ownerCanLogin, ownerSuper, ownerCreateDB, ownerCreateRole, ownerReplication, ownerBypassRLS, ownerInherit bool
+	var safeRoutineShape, ownerMembership, relationDependency, callerCanExecute bool
+	if err = database.QueryRowContext(ctx, `
+		SELECT p.oid,owner.rolname,p.prosecdef,owner.rolcanlogin,owner.rolsuper,owner.rolcreatedb,
+		       owner.rolcreaterole,owner.rolreplication,owner.rolbypassrls,
+		       owner.rolinherit,owner.rolconnlimit,
+		       p.prokind='f' AND p.pronargs=2
+		         AND oidvectortypes(p.proargtypes)='text, jsonb'
+		         AND p.proretset AND p.prorettype='jsonb'::regtype
+		         AND language_row.lanname='plpgsql' AND p.provolatile='v'
+		         AND (
+		           SELECT COALESCE(array_agg(setting ORDER BY setting),ARRAY[]::text[])
+		           FROM unnest(COALESCE(p.proconfig,ARRAY[]::text[])) configured(setting)
+		         )=ARRAY['row_security=on','search_path=pg_catalog']::text[],
+		       encode(sha256(convert_to(p.prosrc,'UTF8')),'hex'),
+		       EXISTS (
+		         SELECT 1 FROM pg_auth_members m
+		         WHERE m.member=owner.oid OR m.roleid=owner.oid
+		       ),
+		       EXISTS (
+		         SELECT 1 FROM pg_depend d
+		         WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid
+		           AND d.refclassid='pg_class'::regclass
+		       ),
+		       has_function_privilege(current_user,p.oid,'EXECUTE')
+		FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner
+		JOIN pg_language language_row ON language_row.oid=p.prolang
+		WHERE p.oid=to_regprocedure($1)`, expectedRoutine).Scan(
+		&routineOID, &ownerName, &securityDefiner, &ownerCanLogin, &ownerSuper, &ownerCreateDB,
+		&ownerCreateRole, &ownerReplication, &ownerBypassRLS, &ownerInherit, &ownerConnectionLimit,
+		&safeRoutineShape, &routineHash, &ownerMembership, &relationDependency, &callerCanExecute); err != nil {
+		return errors.New("inspect source bridge routine failed")
+	}
+	ownerRole := "invoice_" + config.SourceType + "_bridge_owner"
+	if routineOID == 0 || ownerName != ownerRole || !securityDefiner || ownerCanLogin || ownerSuper || ownerCreateDB || ownerCreateRole ||
+		ownerReplication || ownerBypassRLS || ownerInherit || ownerConnectionLimit != 0 || ownerMembership ||
+		!safeRoutineShape || routineHash != expectedRoutineHash || relationDependency || !callerCanExecute {
+		return errors.New("source bridge routine security contract failed")
+	}
+	relations := expectedBridgeRelations(config.SourceType)
+	if len(relations) == 0 {
+		return errors.New("source bridge relation contract is missing")
+	}
+	var relationCount, unsafeRelations int
+	if err = database.QueryRowContext(ctx, `
+		SELECT count(*),count(*) FILTER (
+		  WHERE c.relrowsecurity OR c.relforcerowsecurity
+		     OR c.relowner=(SELECT oid FROM pg_roles WHERE rolname=$2)
+		)
+		FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+		WHERE n.nspname='public' AND c.relkind IN ('r','p')
+		  AND c.relname=ANY($1::text[])`, relations, ownerRole).Scan(&relationCount, &unsafeRelations); err != nil {
+		return errors.New("inspect source bridge relation safety failed")
+	}
+	if relationCount != len(relations) || unsafeRelations != 0 {
+		return errors.New("source bridge relation inventory or row-security contract failed")
+	}
+	bridgeRoles := expectedBridgeRoles(config.SourceType)
+	bridgeFunctions := expectedBridgeFunctions(config.SourceType)
+	routineCallers := expectedBridgeRoutineCallers(config)
+	if len(bridgeRoles) != 7 || len(bridgeFunctions) != 5 || len(routineCallers) == 0 {
+		return errors.New("source bridge global ACL contract is missing")
+	}
+	var globalBoundarySafe bool
+	if err = database.QueryRowContext(ctx, `
+		SELECT
+		  n.nspowner=d.datdba
+		  AND NOT EXISTS (SELECT 1 FROM pg_class relation WHERE relation.relnamespace=n.oid)
+		  AND COALESCE((
+		    SELECT array_agg(function_row.proname ORDER BY function_row.proname)
+		    FROM pg_proc function_row WHERE function_row.pronamespace=n.oid
+		  ),ARRAY[]::name[])=$3::name[]
+		  AND NOT EXISTS (
+		    SELECT 1 FROM aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner))) privilege
+		    LEFT JOIN pg_roles grantee ON grantee.oid=privilege.grantee
+		    WHERE privilege.grantee<>n.nspowner AND (
+		      privilege.grantee=0 OR grantee.rolname IS NULL OR
+		      grantee.rolname<>ALL($2::text[]) OR privilege.privilege_type<>'USAGE'
+		    )
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM unnest($2::text[]) expected(role_name)
+		    WHERE NOT has_schema_privilege(expected.role_name,n.oid,'USAGE')
+		       OR has_schema_privilege(expected.role_name,n.oid,'CREATE')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM pg_proc function_row
+		    CROSS JOIN LATERAL aclexplode(COALESCE(function_row.proacl,acldefault('f',function_row.proowner))) privilege
+		    LEFT JOIN pg_roles grantee ON grantee.oid=privilege.grantee
+		    WHERE function_row.oid=$1 AND privilege.grantee<>function_row.proowner AND (
+		      privilege.grantee=0 OR grantee.rolname IS NULL OR
+		      grantee.rolname<>ALL($4::text[]) OR privilege.privilege_type<>'EXECUTE'
+		    )
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM unnest($4::text[]) expected(role_name)
+		    WHERE NOT has_function_privilege(expected.role_name,$1,'EXECUTE')
+		  )
+		FROM pg_namespace n JOIN pg_database d ON d.datname=current_database()
+		WHERE n.nspname='invoice_bridge'`, routineOID, bridgeRoles, bridgeFunctions, routineCallers).Scan(&globalBoundarySafe); err != nil {
+		return errors.New("inspect source bridge global ACL failed")
+	}
+	if !globalBoundarySafe {
+		return errors.New("source bridge schema, owner or function ACL contract failed")
+	}
+	var unexpectedBridgeExecute bool
+	if err = database.QueryRowContext(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+		  WHERE n.nspname='invoice_bridge' AND p.oid<>$1
+		    AND has_function_privilege(current_user,p.oid,'EXECUTE')
+		)`, routineOID).Scan(&unexpectedBridgeExecute); err != nil || unexpectedBridgeExecute {
+		return errors.New("source database caller can execute an unexpected bridge routine")
 	}
 	tables := map[string]struct{}{}
 	for field := range expected {
@@ -847,47 +969,106 @@ func verifyProjectionPrivileges(ctx context.Context, database *sql.DB, config ru
 }
 
 func expectedProjectionColumns(config runConfig) map[string]struct{} {
-	fields := []string{}
-	switch {
-	case config.ProtocolVersion == sourceagent.SchemaVersionV3 && config.SourceType == sourceagent.SourceSub2API && config.StreamID == sourceagent.StreamPayments:
-		fields = projectionFields("invoice_sub2api_payments_projection_v3", []string{"source_id", "user_id", "event_time", "causal_domain", "source_cursor", "entity_kind", "status", "order_type", "amount", "pay_amount", "currency", "refund_amount", "gateway_refund_amount", "completed_at", "refund_at", "created_at", "updated_at", "payment_type", "provider_key", "wallet_cash_service_units", "paid_minor", "verification_state", "refunded"})
-		fields = append(fields, projectionFields("invoice_sub2api_payments_projection_health_v3", []string{"contract_ok", "blocked_reason", "configuration_hash"})...)
-	case config.ProtocolVersion == sourceagent.SchemaVersionV3 && config.SourceType == sourceagent.SourceNewAPI && config.StreamID == sourceagent.StreamPayments:
-		fields = projectionFields("invoice_newapi_payments_projection_v3", []string{"source_id", "user_id", "event_time", "causal_domain", "source_cursor", "entity_kind", "status", "order_type", "amount", "pay_amount", "currency", "refund_amount", "gateway_refund_amount", "completed_at", "refund_at", "created_at", "updated_at", "payment_type", "provider_key", "wallet_cash_service_units", "paid_minor", "verification_state", "refunded"})
-		fields = append(fields, projectionFields("invoice_newapi_payments_projection_health_v3", []string{"contract_ok", "blocked_reason", "configuration_hash"})...)
-	case config.ProtocolVersion == sourceagent.SchemaVersionV3 && (config.StreamID == sourceagent.StreamUsage || config.StreamID == sourceagent.StreamCredits):
-		base := "invoice_" + config.SourceType + "_" + config.StreamID + "_projection_v3"
-		columns := []string{"source_id", "user_id", "event_time", "service_units", "causal_domain", "source_cursor"}
-		if config.StreamID == sourceagent.StreamCredits {
-			columns = append(columns, "credit_kind")
-		}
-		fields = projectionFields(base, columns)
-		fields = append(fields, projectionFields("invoice_"+config.SourceType+"_"+config.StreamID+"_projection_health_v3", []string{"contract_ok", "blocked_reason", "total_rows", "gap_count", "configuration_hash"})...)
-	case config.ProtocolVersion == sourceagent.SchemaVersionV3 && config.StreamID == sourceagent.StreamBalances:
-		fields = projectionFields("invoice_"+config.SourceType+"_balance_projection_v3", []string{"user_id", "balance_service_units", "balance_negative"})
-		fields = append(fields, projectionFields("invoice_"+config.SourceType+"_cutover_contract_v3", []string{"projection_contract", "contract_ok", "configuration_hash", "payments_event_at", "payments_cursor", "usage_event_at", "usage_cursor", "credits_event_at", "credits_cursor"})...)
-	case config.SourceType == sourceagent.SourceSub2API && config.StreamID == "payments":
-		fields = []string{"public.invoice_sub2api_payment_projection_v1.id", "public.invoice_sub2api_payment_projection_v1.user_id", "public.invoice_sub2api_payment_projection_v1.status", "public.invoice_sub2api_payment_projection_v1.order_type", "public.invoice_sub2api_payment_projection_v1.amount", "public.invoice_sub2api_payment_projection_v1.pay_amount", "public.invoice_sub2api_payment_projection_v1.refund_amount", "public.invoice_sub2api_payment_projection_v1.currency", "public.invoice_sub2api_payment_projection_v1.completed_at", "public.invoice_sub2api_payment_projection_v1.refund_at", "public.invoice_sub2api_payment_projection_v1.created_at", "public.invoice_sub2api_payment_projection_v1.updated_at", "public.invoice_sub2api_payment_projection_v1.payment_type", "public.invoice_sub2api_payment_projection_v1.provider_key", "public.invoice_sub2api_payment_projection_health_v1.total_rows", "public.invoice_sub2api_payment_projection_health_v1.exposed_cny_rows", "public.invoice_sub2api_payment_projection_health_v1.unsupported_known_non_cny_rows", "public.invoice_sub2api_payment_projection_health_v1.blocked_unknown_currency_rows"}
-	case config.SourceType == sourceagent.SourceSub2API && config.StreamID == "identities":
-		fields = []string{"public.invoice_sub2api_oidc_binding_projection_v1.id", "public.invoice_sub2api_oidc_binding_projection_v1.user_id", "public.invoice_sub2api_oidc_binding_projection_v1.provider_type", "public.invoice_sub2api_oidc_binding_projection_v1.provider_key", "public.invoice_sub2api_oidc_binding_projection_v1.provider_subject", "public.invoice_sub2api_oidc_binding_projection_v1.verified_at", "public.invoice_sub2api_oidc_binding_projection_v1.issuer", "public.invoice_sub2api_oidc_binding_projection_v1.created_at", "public.invoice_sub2api_oidc_binding_projection_v1.updated_at"}
-	case config.SourceType == sourceagent.SourceNewAPI && config.StreamID == "payments":
-		fields = []string{"public.top_ups.id", "public.top_ups.user_id", "public.top_ups.amount", "public.top_ups.money", "public.top_ups.payment_method", "public.top_ups.payment_provider", "public.top_ups.create_time", "public.top_ups.complete_time", "public.top_ups.status"}
-	case config.SourceType == sourceagent.SourceNewAPI && config.StreamID == "identities":
-		fields = []string{"public.invoice_newapi_oidc_provider_contract_v1.id", "public.invoice_newapi_oidc_provider_contract_v1.slug", "public.invoice_newapi_oidc_provider_contract_v1.enabled", "public.invoice_newapi_oidc_provider_contract_v1.well_known", "public.invoice_newapi_oidc_provider_contract_v1.authorization_endpoint", "public.invoice_newapi_oidc_provider_contract_v1.token_endpoint", "public.invoice_newapi_oidc_provider_contract_v1.user_info_endpoint", "public.invoice_newapi_oidc_provider_contract_v1.contract_ok", "public.invoice_newapi_oidc_binding_projection_v1.id", "public.invoice_newapi_oidc_binding_projection_v1.user_id", "public.invoice_newapi_oidc_binding_projection_v1.provider_id", "public.invoice_newapi_oidc_binding_projection_v1.provider_user_id", "public.invoice_newapi_oidc_binding_projection_v1.created_at", "public.invoice_newapi_oidc_binding_projection_v1.provider_slug"}
-	}
-	result := make(map[string]struct{}, len(fields))
-	for _, field := range fields {
-		result[field] = struct{}{}
-	}
-	return result
+	return map[string]struct{}{}
 }
 
-func projectionFields(table string, columns []string) []string {
-	result := make([]string, 0, len(columns))
-	for _, column := range columns {
-		result = append(result, "public."+table+"."+column)
+func expectedBridgeRoutine(config runConfig) string {
+	if config.SourceType != sourceagent.SourceSub2API && config.SourceType != sourceagent.SourceNewAPI {
+		return ""
 	}
-	return result
+	suffix := ""
+	switch config.StreamID {
+	case sourceagent.StreamPayments:
+		suffix = "payments_v4"
+	case sourceagent.StreamUsage:
+		suffix = "usage_v4"
+	case sourceagent.StreamCredits:
+		suffix = "credits_v4"
+	case sourceagent.StreamBalances:
+		suffix = "balances_v4"
+	case sourceagent.StreamIdentities:
+		suffix = "identities_v4"
+	default:
+		return ""
+	}
+	return "invoice_bridge." + config.SourceType + "_" + suffix + "(text,jsonb)"
+}
+
+func expectedBridgeRelations(source string) []string {
+	switch source {
+	case sourceagent.SourceSub2API:
+		return []string{
+			"payment_orders", "settings", "auth_identities", "usage_logs",
+			"promo_code_usages", "user_affiliate_ledger", "redeem_codes", "users",
+		}
+	case sourceagent.SourceNewAPI:
+		return []string{
+			"top_ups", "subscription_orders", "options", "custom_oauth_providers",
+			"user_oauth_bindings", "logs", "checkins", "redemptions", "users",
+		}
+	default:
+		return nil
+	}
+}
+
+func expectedBridgeRoutineHash(config runConfig) string {
+	hashes := map[string]map[string]string{
+		sourceagent.SourceNewAPI: {
+			sourceagent.StreamPayments:   "5332f8ad2865322474c2a30dd7b75449b03ac21456ef0d8eaf9f288340329992",
+			sourceagent.StreamUsage:      "7f805eee577b9d6ae70bc5cad35bdd121a276030036922b7beaeb2ea26aca95a",
+			sourceagent.StreamCredits:    "0a561cbef74936b10a25eff0b814beae67b86d99d1380b6e95e0284aa057e972",
+			sourceagent.StreamBalances:   "fde0788da503cbb2267cdd9a14b0559ec8643f10ac6ce8ea0a9a02e174d2ad8f",
+			sourceagent.StreamIdentities: "dd92d2fe4b37a8b22509d19507ebae1143dde9952a185a0a180336cc3ef4a7a1",
+		},
+		sourceagent.SourceSub2API: {
+			sourceagent.StreamPayments:   "93356b6df68addef132c13da5110b4388bcd82e7ac6d1da97afa049115ea502d",
+			sourceagent.StreamUsage:      "0e1f30730616eb0c8f778038b3e371f84fdf26d2e7f16437dc8dd5705ca26af6",
+			sourceagent.StreamCredits:    "1a82daeda746fc6b392fc00cf01dccc37fcc8a453ec937f60bb363af85fd15b3",
+			sourceagent.StreamBalances:   "944f96996ed3fef2d99d7eba839b83c0e418b38e739785ff2753421beb6e71ab",
+			sourceagent.StreamIdentities: "ddf489610999697e9e6054730a5ec12eb78a42dd1e0e40dbb54dec9b469be6fa",
+		},
+	}
+	return hashes[config.SourceType][config.StreamID]
+}
+
+func expectedBridgeRoles(source string) []string {
+	if source != sourceagent.SourceSub2API && source != sourceagent.SourceNewAPI {
+		return nil
+	}
+	prefix := "invoice_" + source + "_"
+	return []string{
+		prefix + "balances_reader", prefix + "bridge_owner", prefix + "credits_reader",
+		prefix + "identities_reader", prefix + "payments_reader", prefix + "payments_v3_reader",
+		prefix + "usage_reader",
+	}
+}
+
+func expectedBridgeFunctions(source string) []string {
+	if source != sourceagent.SourceSub2API && source != sourceagent.SourceNewAPI {
+		return nil
+	}
+	return []string{
+		source + "_balances_v4", source + "_credits_v4", source + "_identities_v4",
+		source + "_payments_v4", source + "_usage_v4",
+	}
+}
+
+func expectedBridgeRoutineCallers(config runConfig) []string {
+	prefix := "invoice_" + config.SourceType + "_"
+	switch config.StreamID {
+	case sourceagent.StreamPayments:
+		return []string{prefix + "payments_reader", prefix + "payments_v3_reader"}
+	case sourceagent.StreamIdentities:
+		return []string{prefix + "identities_reader"}
+	case sourceagent.StreamUsage:
+		return []string{prefix + "usage_reader"}
+	case sourceagent.StreamCredits:
+		return []string{prefix + "credits_reader"}
+	case sourceagent.StreamBalances:
+		return []string{prefix + "balances_reader"}
+	default:
+		return nil
+	}
 }
 
 func buildDBConnector(config runConfig, database *sql.DB) (sourceagent.Connector, error) {

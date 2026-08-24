@@ -175,7 +175,7 @@ type BackendFundingLot = {
   refund_frozen: boolean;
 };
 
-type BackendProfile = {
+export type BackendProfile = {
   id: string;
   principal_id: string;
   type: "personal" | "enterprise";
@@ -788,9 +788,15 @@ function mapLot(lot: BackendFundingLot): FundingOrder {
   };
 }
 
-function mapProfile(profile: BackendProfile): InvoiceProfile {
+export function mapProfile(profile: BackendProfile): InvoiceProfile {
+  if (!Number.isSafeInteger(profile.revision) || profile.revision <= 0) {
+    throw new InvoiceApiError("开票资料版本无效，已停止编辑。", {
+      code: "INVALID_PROFILE_REVISION",
+    });
+  }
   return {
     id: profile.id,
+    revision: profile.revision,
     type: profile.type,
     title: profile.title,
     taxId: profile.tax_id ?? "",
@@ -801,6 +807,29 @@ function mapProfile(profile: BackendProfile): InvoiceProfile {
     bankAccount: profile.bank_account,
     isDefault: profile.is_default,
   };
+}
+
+export function profileMutationBody(
+  profile: Omit<InvoiceProfile, "id"> & { id?: string },
+) {
+  return {
+    id: profile.id,
+    revision: profile.revision,
+    type: profile.type,
+    title: profile.title,
+    tax_id: profile.taxId,
+    email: profile.email,
+    address: profile.address,
+    phone: profile.phone,
+    bank_name: profile.bankName,
+    bank_account: profile.bankAccount,
+    is_default: profile.isDefault,
+  };
+}
+
+export function invoiceDocumentPath(requestId: string, admin = false) {
+  const role = admin ? "admin" : "user";
+  return `/api/v1/${role}/invoice-requests/${encodeURIComponent(requestId)}/document`;
 }
 
 function mapStatus(status: BackendInvoiceRequest["status"]): InvoiceStatus {
@@ -819,6 +848,7 @@ function mapStatus(status: BackendInvoiceRequest["status"]): InvoiceStatus {
 function profileSnapshot(request: BackendInvoiceRequest): InvoiceProfile {
   return {
     id: `snapshot:${request.id}`,
+    revision: request.profile.revision,
     type: request.profile.type,
     title: request.profile.title,
     taxId: request.profile.tax_id ?? "",
@@ -1393,18 +1423,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
   async saveProfile(profile) {
     const saved = await requestJSON<BackendProfile>("/api/v1/user/profiles", {
       method: "POST",
-      body: {
-        id: profile.id,
-        type: profile.type,
-        title: profile.title,
-        tax_id: profile.taxId,
-        email: profile.email,
-        address: profile.address,
-        phone: profile.phone,
-        bank_name: profile.bankName,
-        bank_account: profile.bankAccount,
-        is_default: profile.isDefault,
-      },
+      body: profileMutationBody(profile),
     });
     return mapProfile(saved);
   },
@@ -1485,6 +1504,26 @@ export const httpInvoiceApi: InvoiceApiClient = {
       },
     );
     return mapRequest(created, new Map(lots.map((lot) => [lot.id, lot])));
+  },
+
+  async cancelInvoice(request) {
+    if (!request.version) {
+      throw new InvoiceApiError("缺少申请版本，请刷新后重试。", {
+        code: "VERSION_MISSING",
+      });
+    }
+    const lots = await getBackendLots();
+    const cancelled = await requestJSON<BackendInvoiceRequest>(
+      `/api/v1/user/invoice-requests/${encodeURIComponent(request.id)}/cancel`,
+      {
+        method: "POST",
+        body: { version: request.version },
+      },
+    );
+    return mapRequest(
+      cancelled,
+      new Map(lots.map((lot) => [lot.id, lot])),
+    );
   },
 
   async getPaymentCandidates(cursor) {
@@ -1764,7 +1803,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
     );
   },
 
-  async adminUploadInvoice(request, file, invoiceNumber) {
+  async adminUploadInvoice(request, file, invoiceNumber, issuedAt) {
     if (!request.version) {
       throw new InvoiceApiError("缺少申请版本，请刷新后重试。", {
         code: "VERSION_MISSING",
@@ -1789,7 +1828,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
     const form = new FormData();
     form.set("version", String(uploadVersion));
     form.set("invoice_number", invoiceNumber);
-    form.set("issued_at", new Date().toISOString());
+    form.set("issued_at", issuedAt);
     form.set("file", file, file.name);
     await requestMultipart(
       `/api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/documents/upload`,
@@ -1865,8 +1904,22 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async downloadInvoiceDocument(request) {
     const response = await requestBinary(
-      `/api/v1/user/invoice-requests/${encodeURIComponent(request.id)}/document`,
+      invoiceDocumentPath(request.id),
       "user",
+    );
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = request.pdfName ?? `${request.requestNo}.pdf`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  },
+
+  async downloadAdminInvoiceDocument(request) {
+    const response = await requestBinary(
+      invoiceDocumentPath(request.id, true),
+      "admin",
     );
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);

@@ -202,7 +202,7 @@ func TestReadSecretFileRequiresPrivateRegularFile(t *testing.T) {
 	}
 }
 
-func TestExpectedProjectionColumnsNeverIncludeSensitiveFields(t *testing.T) {
+func TestExpectedBridgeAccessNeverGrantsCallerRawColumns(t *testing.T) {
 	for _, config := range []runConfig{
 		{SourceType: sourceagent.SourceSub2API, StreamID: "payments"},
 		{SourceType: sourceagent.SourceSub2API, StreamID: "identities"},
@@ -218,25 +218,12 @@ func TestExpectedProjectionColumnsNeverIncludeSensitiveFields(t *testing.T) {
 		{SourceType: sourceagent.SourceNewAPI, StreamID: sourceagent.StreamBalances, ProtocolVersion: sourceagent.SchemaVersionV3},
 	} {
 		fields := expectedProjectionColumns(config)
-		if len(fields) == 0 {
-			t.Fatalf("%s/%s has no projection contract", config.SourceType, config.StreamID)
+		if len(fields) != 0 {
+			t.Fatalf("%s/%s caller has raw column grants: %#v", config.SourceType, config.StreamID, fields)
 		}
-		for field := range fields {
-			for _, forbidden := range []string{
-				"password", "secret", "email", "trade_no", "provider_snapshot", "metadata",
-			} {
-				if strings.Contains(field, forbidden) {
-					t.Fatalf("%s/%s projection exposes forbidden field %q", config.SourceType, config.StreamID, field)
-				}
-			}
-			if strings.Contains(field, "token") && field != "public.invoice_newapi_oidc_provider_contract_v1.token_endpoint" {
-				t.Fatalf("%s/%s projection exposes forbidden token field %q", config.SourceType, config.StreamID, field)
-			}
-			for _, forbidden := range []string{"public.custom_oauth_providers", "client_id", "client_secret", "scopes", "access_policy", "mapping"} {
-				if strings.Contains(field, forbidden) {
-					t.Fatalf("%s/%s projection exposes raw provider field %q", config.SourceType, config.StreamID, field)
-				}
-			}
+		routine := expectedBridgeRoutine(config)
+		if !strings.HasPrefix(routine, "invoice_bridge."+config.SourceType+"_") || !strings.HasSuffix(routine, "_v4(text,jsonb)") {
+			t.Fatalf("%s/%s has invalid bridge routine %q", config.SourceType, config.StreamID, routine)
 		}
 	}
 }

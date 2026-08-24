@@ -276,19 +276,31 @@ func CaptureCutover(ctx context.Context, db *sql.DB, config CutoverCaptureConfig
 	if err = tx.QueryRowContext(ctx, `SELECT transaction_timestamp()`).Scan(&cutover); err != nil {
 		return CutoverManifest{}, errors.New("capture source database cutover clock failed")
 	}
-	contractView, balanceView := cutoverViewNames(config.SourceType)
+	contractRelation, err := bridgeJSONRecordRelation(config.SourceType, StreamBalances, "contract",
+		"projection_contract text,contract_ok boolean,configuration_hash text,payments_event_at timestamptz,payments_cursor text,usage_event_at timestamptz,usage_cursor text,credits_event_at timestamptz,credits_cursor text")
+	if err != nil {
+		return CutoverManifest{}, err
+	}
+	request, err := marshalBridgeRequest(nil)
+	if err != nil {
+		return CutoverManifest{}, err
+	}
 	var contract, configurationHash string
 	var contractOK bool
 	var paymentAt, usageAt, creditAt time.Time
 	var paymentCursor, usageCursor, creditCursor string
-	query := fmt.Sprintf(`SELECT projection_contract,contract_ok,configuration_hash,payments_event_at,payments_cursor,usage_event_at,usage_cursor,credits_event_at,credits_cursor FROM %s`, contractView)
-	if err = tx.QueryRowContext(ctx, query).Scan(&contract, &contractOK, &configurationHash, &paymentAt, &paymentCursor, &usageAt, &usageCursor, &creditAt, &creditCursor); err != nil {
+	query := `SELECT projection_contract,contract_ok,configuration_hash,payments_event_at,payments_cursor,usage_event_at,usage_cursor,credits_event_at,credits_cursor FROM ` + contractRelation
+	if err = tx.QueryRowContext(ctx, query, request).Scan(&contract, &contractOK, &configurationHash, &paymentAt, &paymentCursor, &usageAt, &usageCursor, &creditAt, &creditCursor); err != nil {
 		return CutoverManifest{}, fmt.Errorf("capture cutover contract: %w", err)
 	}
 	if !contractOK || !hexHashPattern.MatchString(configurationHash) {
 		return CutoverManifest{}, errors.New("source projection contract is not healthy at cutover")
 	}
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT user_id,balance_service_units,balance_negative FROM %s ORDER BY user_id`, balanceView))
+	balanceRelation, err := bridgeJSONRecordRelation(config.SourceType, StreamBalances, "rows", "user_id bigint,balance_service_units text,balance_negative boolean")
+	if err != nil {
+		return CutoverManifest{}, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT user_id,balance_service_units,balance_negative FROM `+balanceRelation+` ORDER BY user_id`, request)
 	if err != nil {
 		return CutoverManifest{}, fmt.Errorf("capture cutover balances: %w", err)
 	}
@@ -471,13 +483,6 @@ func balanceSnapshotID(value BalanceSnapshot) (string, error) {
 		return "", err
 	}
 	return SHA256Hex(raw), nil
-}
-
-func cutoverViewNames(sourceType string) (string, string) {
-	if sourceType == SourceSub2API {
-		return "public.invoice_sub2api_cutover_contract_v3", "public.invoice_sub2api_balance_projection_v3"
-	}
-	return "public.invoice_newapi_cutover_contract_v3", "public.invoice_newapi_balance_projection_v3"
 }
 
 func unitCodeForSource(sourceType string) string {
