@@ -247,6 +247,22 @@ until docker exec "$container" pg_isready -U postgres -d invoice >/dev/null 2>&1
   sleep 1
 done
 
+# The official image briefly runs a bootstrap postmaster, stops it, then starts
+# the final server. A single pg_isready can hit that transient instance and
+# race pg_restore into the restart window. Require the entrypoint's init-complete
+# marker plus three consecutive final-server readiness checks.
+until docker logs "$container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; do
+  (( SECONDS < deadline )) || { echo 'restore PostgreSQL initialization did not complete' >&2; exit 1; }
+  sleep 1
+done
+for _ in 1 2 3; do
+  docker exec "$container" pg_isready -U postgres -d invoice >/dev/null 2>&1 || {
+    echo 'restore PostgreSQL final server did not remain ready' >&2
+    exit 1
+  }
+  sleep 1
+done
+
 age --decrypt -i "$AGE_IDENTITY_FILE" "$DATABASE_BACKUP" \
   | docker exec -i "$container" pg_restore -U postgres -d invoice --no-owner --no-acl --exit-on-error
 
