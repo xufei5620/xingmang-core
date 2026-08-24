@@ -9,6 +9,35 @@ Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
 
+$idpCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
+$artifactVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
+if (-not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}') -or
+    $idpCompose.Contains('    image: invoice-keycloak:26.7.2') -or
+    -not $artifactVerifier.Contains('Get-CommonReleaseImageTag -ImageRecords $records -IdPMode $idpMode') -or
+    -not $artifactVerifier.Contains('production Keycloak Compose does not use the manifest-bound release image tag')) {
+    throw 'Keycloak production Compose can escape the common manifest-bound release image tag'
+}
+
+$matchingTagRecords = @(
+    [pscustomobject]@{ name = 'api'; reference = 'invoice-system-api:fixture' }
+    [pscustomobject]@{ name = 'pdf-scanner'; reference = 'invoice-system-pdf-scanner:fixture' }
+    [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:fixture' }
+    [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:fixture' }
+    [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:fixture' }
+)
+if ((Get-CommonReleaseImageTag -ImageRecords $matchingTagRecords -IdPMode external-managed) -cne 'fixture' -or
+    (Get-CommonReleaseImageTag -ImageRecords $matchingTagRecords -IdPMode none) -cne 'fixture') {
+    throw 'non-Keycloak IdP modes no longer accept the five common application release images'
+}
+$keycloakRecords = @($matchingTagRecords) + [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:fixture' }
+if ((Get-CommonReleaseImageTag -ImageRecords $keycloakRecords -IdPMode keycloak) -cne 'fixture') {
+    throw 'matching Keycloak release image tag was rejected'
+}
+$keycloakRecords[-1].reference = 'invoice-keycloak:different'
+$rejected = $false
+try { Get-CommonReleaseImageTag -ImageRecords $keycloakRecords -IdPMode keycloak | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'mismatched Keycloak release image tag was accepted' }
+
 $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\release-image-gate'
 $imageID = 'sha256:' + ('a' * 64)
 $trivyTimestamp = ConvertFrom-TrivyDatabaseTimestamp -Timestamp '2026-08-20 19:46:52.822388238 +0000 UTC'

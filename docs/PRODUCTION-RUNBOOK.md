@@ -164,9 +164,11 @@ scan/review/recording gates.
 
 Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` to the exact tag named by
 the newly verified release manifest. Production Compose has no image-tag
-fallback: API, tools, PDF scanner, web and source-agent must resolve from that
-one value. `SOURCE_AGENT_VERSION` remains the independent binary/protocol
-version recorded inside the agent; it is not an image tag.
+fallback: API, tools, PDF scanner, web, source-agent and the locally built
+Keycloak image must resolve from that one value. `SOURCE_AGENT_VERSION` remains
+the independent binary/protocol version recorded inside the agent; it is not an
+image tag. Use `--no-build` for production Compose starts so a missing reviewed
+image fails closed instead of being rebuilt outside the release gate.
 After any code or deployment change, the prior RC evidence is historical and a
 new image gate must be generated before containers are recreated. Never mix an
 older API container with a newer web/scanner container under one release.
@@ -329,10 +331,10 @@ only, start it with `deploy/docker-compose.idp.bootstrap.yml`:
 
 ```bash
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.idp.yml up -d keycloak-postgres
+  -f deploy/docker-compose.idp.yml up -d --no-build keycloak-postgres
 docker compose --env-file deploy/.env.production \
   -f deploy/docker-compose.idp.yml \
-  -f deploy/docker-compose.idp.bootstrap.yml up -d keycloak
+  -f deploy/docker-compose.idp.bootstrap.yml up -d --no-build keycloak
 ```
 
 After the loopback listener is healthy, provision the immutable initial realm
@@ -409,7 +411,7 @@ docker compose --env-file deploy/.env.production \
 rm -f -- /root/invoice-system/secrets/keycloak_bootstrap_admin_password
 unset KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME
 docker compose --env-file deploy/.env.production \
-  -f deploy/docker-compose.idp.yml up -d --force-recreate keycloak
+  -f deploy/docker-compose.idp.yml up -d --no-build --force-recreate keycloak
 ```
 
 Inspect the recreated container and prove neither

@@ -23,7 +23,7 @@ services:
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
 
   keycloak:
-    image: invoice-keycloak:26.7.2
+    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
     build:
       context: ./keycloak
       args:

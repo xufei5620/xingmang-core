@@ -351,7 +351,7 @@ try {
     if (-not $keycloakDockerfile.Contains("ARG KEYCLOAK_BASE_IMAGE=$expectedKeycloakBase") -or
         [regex]::Matches($keycloakDockerfile, '(?m)^FROM \$\{KEYCLOAK_BASE_IMAGE\}(?: AS builder)?$').Count -ne 2 -or
         $idpBaseObject.services.keycloak.build.args.KEYCLOAK_BASE_IMAGE -ne $expectedKeycloakBase -or
-        $idpBaseObject.services.keycloak.image -ne 'invoice-keycloak:26.7.2' -or
+        $idpBaseObject.services.keycloak.image -ne 'invoice-keycloak:verification-build' -or
         [regex]::Matches($keycloakDockerfile, '(?m)^(?:RUN|\s*&&) rm -rf /opt/keycloak/bin/client \\$').Count -ne 2 -or
         [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& rm -f /opt/keycloak/lib/lib/main/com\.microsoft\.sqlserver\.mssql-jdbc-\*\.jar \\$').Count -ne 2 -or
         [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& test ! -e /opt/keycloak/bin/client \\$').Count -ne 2) {

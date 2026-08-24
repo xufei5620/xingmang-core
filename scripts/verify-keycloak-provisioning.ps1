@@ -1,5 +1,6 @@
 param(
-    [string]$KeycloakImage = 'invoice-keycloak:26.7.2',
+    [Parameter(Mandatory)]
+    [string]$KeycloakImage,
     [Parameter(Mandatory)]
     [ValidatePattern('^sha256:[0-9a-f]{64}$')]
     [string]$ExpectedKeycloakImageID

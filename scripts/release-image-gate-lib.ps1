@@ -245,6 +245,36 @@ function Get-IdpGateDecision {
     }
 }
 
+function Get-CommonReleaseImageTag {
+    param(
+        [Parameter(Mandatory)][object[]]$ImageRecords,
+        [Parameter(Mandatory)][ValidateSet('keycloak', 'external-managed', 'none')][string]$IdPMode
+    )
+
+    $releaseRepositories = [ordered]@{
+        api = 'invoice-system-api'
+        'pdf-scanner' = 'invoice-system-pdf-scanner'
+        tools = 'invoice-system-tools'
+        web = 'invoice-system-web'
+        'source-agent' = 'invoice-source-agent'
+    }
+    if ($IdPMode -ceq 'keycloak') { $releaseRepositories.keycloak = 'invoice-keycloak' }
+
+    $releaseTags = @()
+    foreach ($entry in $releaseRepositories.GetEnumerator()) {
+        $record = @($ImageRecords | Where-Object { [string]$_.name -ceq [string]$entry.Key })
+        if ($record.Count -ne 1 -or
+            [string]$record[0].reference -notmatch "^$([regex]::Escape($entry.Value)):(?<tag>[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})$") {
+            throw "release manifest has an invalid local image reference for $($entry.Key)"
+        }
+        $releaseTags += $Matches.tag
+    }
+    if (@($releaseTags | Sort-Object -Unique).Count -ne 1) {
+        throw 'all locally built release images do not share one exact release image tag'
+    }
+    return [string]$releaseTags[0]
+}
+
 function Get-FileSha256Lower {
     param([Parameter(Mandatory)][string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()

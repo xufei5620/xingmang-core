@@ -1,5 +1,6 @@
 param(
-    [string]$Image = 'invoice-keycloak:26.7.2',
+    [Parameter(Mandatory)]
+    [string]$Image,
     [string]$PostgresImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2',
     [string]$ProbeImage = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
 )

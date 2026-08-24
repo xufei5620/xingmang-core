@@ -67,7 +67,9 @@ foreach ($name in $currentFingerprints.Keys) {
     }
 }
 
+$idpMode = [string]$manifest.idp.mode
 $requiredNames = @('api', 'pdf-scanner', 'tools', 'web', 'source-agent', 'postgres-runtime', 'clamav-runtime', 'ingest-proxy')
+if ($idpMode -ceq 'keycloak') { $requiredNames += 'keycloak' }
 $records = @($manifest.images)
 $names = @($records | ForEach-Object { [string]$_.name })
 if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw 'release manifest has duplicate image names' }
@@ -75,23 +77,11 @@ foreach ($name in $requiredNames) {
     if ($name -notin $names) { throw "release manifest is missing required image $name" }
 }
 
-$releaseRepositories = [ordered]@{
-    api = 'invoice-system-api'
-    'pdf-scanner' = 'invoice-system-pdf-scanner'
-    tools = 'invoice-system-tools'
-    web = 'invoice-system-web'
-    'source-agent' = 'invoice-source-agent'
-}
-$releaseTags = @()
-foreach ($entry in $releaseRepositories.GetEnumerator()) {
-    $record = @($records | Where-Object name -eq $entry.Key)
-    if ($record.Count -ne 1 -or [string]$record[0].reference -notmatch "^$([regex]::Escape($entry.Value)):(?<tag>[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})$") {
-        throw "release manifest has an invalid local image reference for $($entry.Key)"
-    }
-    $releaseTags += $Matches.tag
-}
-if (@($releaseTags | Sort-Object -Unique).Count -ne 1) {
-    throw 'API, tools, PDF scanner, web and source-agent do not share one exact release image tag'
+$releaseImageTag = Get-CommonReleaseImageTag -ImageRecords $records -IdPMode $idpMode
+$idpCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
+if ($idpMode -ceq 'keycloak' -and
+    -not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}')) {
+    throw 'production Keycloak Compose does not use the manifest-bound release image tag'
 }
 
 foreach ($record in $records) {
@@ -142,7 +132,6 @@ if ([int]$postgres[0].vulnerabilities.total -gt 0) {
     throw 'zero-finding PostgreSQL image was not approved normally'
 }
 
-$idpMode = [string]$manifest.idp.mode
 $keycloak = @($records | Where-Object name -eq 'keycloak')
 switch ($idpMode) {
     'keycloak' {
