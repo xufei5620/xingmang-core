@@ -187,8 +187,12 @@ function Assert-GovulncheckBinaryProof {
     $dbMatch = [regex]::Match($VersionText, '(?m)^DB updated:\s+(.+?)\s*$')
     $dbUpdated = ConvertFrom-TrivyDatabaseTimestamp -Timestamp $dbMatch.Groups[1].Value
     $dbAge = [DateTimeOffset]::UtcNow - $dbUpdated.ToUniversalTime()
-    if ($dbAge -lt [TimeSpan]::FromMinutes(-5) -or $dbAge -gt [TimeSpan]::FromHours(48)) {
-        throw 'govulncheck vulnerability database is outside the 48-hour release window'
+    # vuln.go.dev can legitimately retain the same authoritative timestamp
+    # across a weekend. The command above still performs a live database read;
+    # allow four days while retaining a strict upper bound and exact zero-called
+    # vulnerability proof. Trivy's primary vulnerability DB remains at 48h.
+    if ($dbAge -lt [TimeSpan]::FromMinutes(-5) -or $dbAge -gt [TimeSpan]::FromHours(96)) {
+        throw 'govulncheck vulnerability database is outside the 96-hour release window'
     }
     if ($ProofText -notmatch '(?m)^No vulnerabilities found\.\s*$' -or
         $ProofText -notmatch '(?m)^Your code is affected by 0 vulnerabilities\.\s*$') {
