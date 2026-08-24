@@ -229,6 +229,155 @@ BEGIN
       unsafe_count;
   END IF;
 
+  -- ACL dependencies are allowed only on the current database, public schema,
+  -- the exact legacy views that this transaction drops, and one observed New
+  -- API partial-state compatibility grant. Any ACL on another raw relation,
+  -- routine, default ACL or database remains an unknown dependency and fails
+  -- before apply changes role attributes.
+  SELECT count(*) INTO unsafe_count
+  FROM pg_shdepend dependency
+  JOIN pg_roles role_row
+    ON dependency.refclassid = 'pg_authid'::regclass
+   AND dependency.refobjid = role_row.oid
+  WHERE role_row.rolname = ANY(expected_roles)
+    AND dependency.deptype = 'a'
+    AND NOT (
+      (
+        dependency.classid = 'pg_database'::regclass
+        AND dependency.objid = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND dependency.objsubid = 0
+      ) OR (
+        dependency.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND dependency.classid = 'pg_namespace'::regclass
+        AND dependency.objid = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+        AND dependency.objsubid = 0
+      ) OR (
+        dependency.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND dependency.classid = 'pg_class'::regclass
+        AND EXISTS (
+          SELECT 1
+          FROM pg_class relation
+          JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+          WHERE relation.oid = dependency.objid
+            AND namespace.nspname = 'public'
+            AND relation.relkind = 'v'
+            AND relation.relname = ANY(expected_views)
+        )
+      ) OR (
+        source_name = 'newapi'
+        AND role_row.rolname = 'invoice_newapi_payments_reader'
+        AND dependency.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND dependency.classid = 'pg_class'::regclass
+        AND dependency.objid = to_regclass('public.top_ups')
+        AND dependency.objsubid IN (
+          SELECT attribute.attnum
+          FROM pg_attribute attribute
+          WHERE attribute.attrelid = to_regclass('public.top_ups')
+            AND attribute.attname = ANY(ARRAY[
+              'id','user_id','amount','money','payment_method','payment_provider',
+              'create_time','complete_time','status'
+            ])
+            AND NOT attribute.attisdropped
+        )
+      )
+    );
+  IF unsafe_count <> 0 THEN
+    RAISE EXCEPTION '% unexpected legacy invoice ACL dependency/dependencies require manual review',
+      unsafe_count;
+  END IF;
+
+  SELECT count(*) INTO unsafe_count
+  FROM pg_database database_row
+  CROSS JOIN LATERAL aclexplode(
+    COALESCE(database_row.datacl, acldefault('d', database_row.datdba))
+  ) privilege
+  JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+  WHERE database_row.datname = current_database()
+    AND grantee.rolname = ANY(expected_roles)
+    AND NOT (
+      privilege.privilege_type = 'CONNECT'
+      AND NOT privilege.is_grantable
+    );
+  IF unsafe_count <> 0 THEN
+    RAISE EXCEPTION '% unsafe direct database privilege(s) require manual review', unsafe_count;
+  END IF;
+
+  SELECT count(*) INTO unsafe_count
+  FROM pg_namespace namespace
+  CROSS JOIN LATERAL aclexplode(
+    COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+  ) privilege
+  JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+  WHERE namespace.nspname = 'public'
+    AND grantee.rolname = ANY(expected_roles)
+    AND NOT (
+      privilege.privilege_type = 'USAGE'
+      AND NOT privilege.is_grantable
+    );
+  IF unsafe_count <> 0 THEN
+    RAISE EXCEPTION '% unsafe direct public-schema privilege(s) require manual review', unsafe_count;
+  END IF;
+
+  SELECT count(*) INTO unsafe_count
+  FROM pg_class relation
+  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+  CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+  JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+  WHERE namespace.nspname = 'public'
+    AND relation.relkind = 'v'
+    AND relation.relname = ANY(expected_views)
+    AND grantee.rolname = ANY(expected_roles)
+    AND NOT (
+      privilege.privilege_type = 'SELECT'
+      AND NOT privilege.is_grantable
+    );
+  IF unsafe_count <> 0 THEN
+    RAISE EXCEPTION '% unsafe direct legacy-view privilege(s) require manual review', unsafe_count;
+  END IF;
+
+  SELECT count(*) INTO unsafe_count
+  FROM pg_attribute attribute
+  JOIN pg_class relation ON relation.oid = attribute.attrelid
+  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+  CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+  JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+  WHERE namespace.nspname = 'public'
+    AND relation.relkind = 'v'
+    AND relation.relname = ANY(expected_views)
+    AND grantee.rolname = ANY(expected_roles)
+    AND NOT (
+      privilege.privilege_type = 'SELECT'
+      AND NOT privilege.is_grantable
+    );
+  IF unsafe_count <> 0 THEN
+    RAISE EXCEPTION '% unsafe direct legacy-view column privilege(s) require manual review',
+      unsafe_count;
+  END IF;
+
+  IF source_name = 'newapi' THEN
+    SELECT count(*) INTO unsafe_count
+    FROM pg_attribute attribute
+    JOIN pg_class relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+    JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+    WHERE namespace.nspname = 'public'
+      AND relation.relname = 'top_ups'
+      AND grantee.rolname = 'invoice_newapi_payments_reader'
+      AND NOT (
+        attribute.attname = ANY(ARRAY[
+          'id','user_id','amount','money','payment_method','payment_provider',
+          'create_time','complete_time','status'
+        ])
+        AND privilege.privilege_type = 'SELECT'
+        AND NOT privilege.is_grantable
+      );
+    IF unsafe_count <> 0 THEN
+      RAISE EXCEPTION '% unsafe New API compatibility column privilege(s) require manual review',
+        unsafe_count;
+    END IF;
+  END IF;
+
   SELECT count(*) INTO unsafe_count
   FROM pg_stat_activity activity
   WHERE activity.datname = current_database()
@@ -344,6 +493,7 @@ DECLARE
   expected_roles text[];
   view_name text;
   role_name text;
+  compatibility_columns text;
   unsafe_count bigint;
 BEGIN
   IF NOT pg_try_advisory_xact_lock(
@@ -428,6 +578,34 @@ BEGIN
       EXECUTE format('DROP VIEW %I.%I RESTRICT', 'public', view_name);
     END IF;
   END LOOP;
+
+  IF source_name = 'newapi'
+     AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'invoice_newapi_payments_reader') THEN
+    SELECT string_agg(format('%I', allowed.attname), ',' ORDER BY allowed.attnum)
+      INTO compatibility_columns
+    FROM (
+      SELECT DISTINCT attribute.attname, attribute.attnum
+      FROM pg_attribute attribute
+      CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+      JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+      WHERE attribute.attrelid = to_regclass('public.top_ups')
+        AND attribute.attname = ANY(ARRAY[
+          'id','user_id','amount','money','payment_method','payment_provider',
+          'create_time','complete_time','status'
+        ])
+        AND NOT attribute.attisdropped
+        AND grantee.rolname = 'invoice_newapi_payments_reader'
+        AND privilege.privilege_type = 'SELECT'
+        AND NOT privilege.is_grantable
+    ) allowed;
+    IF compatibility_columns IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE SELECT (%s) ON TABLE public.top_ups FROM %I RESTRICT',
+        compatibility_columns,
+        'invoice_newapi_payments_reader'
+      );
+    END IF;
+  END IF;
 
   FOREACH role_name IN ARRAY expected_roles LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN

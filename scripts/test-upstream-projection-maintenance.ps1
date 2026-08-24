@@ -356,6 +356,98 @@ try {
         -File /contracts/source-cutover-quiescence-preflight.postgresql.sql `
         -Variables @('invoice_source=newapi') > $null
 
+    # Exact database/schema/view ACL semantics are audited with aclexplode;
+    # pg_shdepend alone cannot distinguish CONNECT from CREATE or SELECT from
+    # UPDATE/grant-option on the same object.
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        "GRANT CREATE ON DATABASE $($newapi.Database) TO invoice_newapi_usage_reader"
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=1') -ExpectFailure > $null
+    $databaseCreatePreserved = Invoke-TestPsql -Database $newapi.Database -TuplesOnly -Sql (
+        "SELECT has_database_privilege('invoice_newapi_usage_reader',current_database(),'CREATE')"
+    )
+    if ($databaseCreatePreserved -ne 't') { throw 'Database CREATE ACL was not fail-closed.' }
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        "REVOKE CREATE ON DATABASE $($newapi.Database) FROM invoice_newapi_usage_reader"
+    ) > $null
+
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        "GRANT TEMPORARY ON DATABASE $($newapi.Database) TO invoice_newapi_usage_reader"
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=0') -ExpectFailure > $null
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        "REVOKE TEMPORARY ON DATABASE $($newapi.Database) FROM invoice_newapi_usage_reader"
+    ) > $null
+
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        "GRANT CONNECT ON DATABASE $($newapi.Database) TO invoice_newapi_usage_reader WITH GRANT OPTION"
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=0') -ExpectFailure > $null
+    $databaseGrantOption = Invoke-TestPsql -Database $newapi.Database -TuplesOnly -Sql (
+        "SELECT count(*) FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a " +
+        "JOIN pg_roles r ON r.oid=a.grantee WHERE d.datname=current_database() " +
+        "AND r.rolname='invoice_newapi_usage_reader' AND a.privilege_type='CONNECT' AND a.is_grantable"
+    )
+    if ($databaseGrantOption -ne '1') { throw 'Database CONNECT grant option fixture was not preserved.' }
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        "REVOKE GRANT OPTION FOR CONNECT ON DATABASE $($newapi.Database) FROM invoice_newapi_usage_reader"
+    ) > $null
+
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'GRANT CREATE ON SCHEMA public TO invoice_newapi_usage_reader'
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=1') -ExpectFailure > $null
+    $schemaCreatePreserved = Invoke-TestPsql -Database $newapi.Database -TuplesOnly -Sql (
+        "SELECT has_schema_privilege('invoice_newapi_usage_reader','public','CREATE')"
+    )
+    if ($schemaCreatePreserved -ne 't') { throw 'Schema CREATE ACL was not fail-closed.' }
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'REVOKE CREATE ON SCHEMA public FROM invoice_newapi_usage_reader'
+    ) > $null
+
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'GRANT USAGE ON SCHEMA public TO invoice_newapi_usage_reader WITH GRANT OPTION'
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=0') -ExpectFailure > $null
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'REVOKE GRANT OPTION FOR USAGE ON SCHEMA public FROM invoice_newapi_usage_reader'
+    ) > $null
+
+    $legacyView = $sub2api.Views[0]
+    Invoke-TestPsql -Database $sub2api.Database -Sql (
+        "GRANT UPDATE ON public.$legacyView TO invoice_sub2api_usage_reader"
+    ) > $null
+    Invoke-TestPsql -Database $sub2api.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=sub2api', 'reconcile_apply=1') -ExpectFailure > $null
+    $viewUpdatePreserved = Invoke-TestPsql -Database $sub2api.Database -TuplesOnly -Sql (
+        "SELECT has_table_privilege('invoice_sub2api_usage_reader','public.$legacyView','UPDATE')"
+    )
+    if ($viewUpdatePreserved -ne 't') { throw 'Legacy view UPDATE ACL was not fail-closed.' }
+    Invoke-TestPsql -Database $sub2api.Database -Sql (
+        "REVOKE UPDATE ON public.$legacyView FROM invoice_sub2api_usage_reader"
+    ) > $null
+
+    Invoke-TestPsql -Database $sub2api.Database -Sql (
+        "GRANT SELECT ON public.$legacyView TO invoice_sub2api_usage_reader WITH GRANT OPTION"
+    ) > $null
+    Invoke-TestPsql -Database $sub2api.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=sub2api', 'reconcile_apply=0') -ExpectFailure > $null
+    Invoke-TestPsql -Database $sub2api.Database -Sql (
+        "REVOKE GRANT OPTION FOR SELECT ON public.$legacyView FROM invoice_sub2api_usage_reader"
+    ) > $null
+
     # A raw upstream-table grant is not silently revoked. DROP ROLE refuses it,
     # and the enclosing transaction restores every earlier role/privilege step.
     Invoke-TestPsql -Database $newapi.Database -Sql (
@@ -376,6 +468,68 @@ try {
     }
     Invoke-TestPsql -Database $newapi.Database -Sql (
         'REVOKE SELECT ON public.top_ups FROM invoice_newapi_payments_reader'
+    ) > $null
+
+    Invoke-TestPsql -Database postgres -Sql 'CREATE ROLE upstream_sentinel_role NOLOGIN' > $null
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'GRANT SELECT(trade_no) ON public.top_ups TO upstream_sentinel_role'
+    ) > $null
+    Invoke-TestPsql -Database $sub2api.Database -Sql (
+        'GRANT SELECT(secret_value) ON public.auth_identities TO upstream_sentinel_role'
+    ) > $null
+
+    # An additional raw column on the compatibility reader is not part of the
+    # reviewed partial state. Audit must fail before changing the six roles,
+    # and both the unknown ACL and an unrelated upstream ACL must survive.
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'GRANT SELECT(trade_no) ON public.top_ups TO invoice_newapi_payments_reader'
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=1') `
+        -ExpectFailure > $null
+    $extraColumnState = Invoke-TestPsql -Database $newapi.Database -TuplesOnly -Sql (
+        "SELECT (SELECT count(*) FROM pg_roles WHERE rolname LIKE 'invoice!_newapi!_%' ESCAPE '!') || '|' || " +
+        "has_column_privilege('invoice_newapi_payments_reader','public.top_ups','trade_no','SELECT') || '|' || " +
+        "has_column_privilege('upstream_sentinel_role','public.top_ups','trade_no','SELECT')"
+    )
+    if ($extraColumnState -ne '6|true|true') {
+        throw "Unexpected compatibility ACL was not fail-closed: $extraColumnState"
+    }
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'REVOKE SELECT(trade_no) ON public.top_ups FROM invoice_newapi_payments_reader'
+    ) > $null
+
+    # The same allowed column on the wrong reader and WITH GRANT OPTION are
+    # independently outside the exact production allowlist.
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'GRANT SELECT(id) ON public.top_ups TO invoice_newapi_identities_reader'
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=0') `
+        -ExpectFailure > $null
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'REVOKE SELECT(id) ON public.top_ups FROM invoice_newapi_identities_reader'
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'GRANT SELECT(id) ON public.top_ups TO invoice_newapi_payments_reader WITH GRANT OPTION'
+    ) > $null
+    Invoke-TestPsql -Database $newapi.Database `
+        -File /contracts/projection-reconcile.postgresql.sql `
+        -Variables @('invoice_source=newapi', 'reconcile_apply=0') `
+        -ExpectFailure > $null
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'REVOKE SELECT(id) ON public.top_ups FROM invoice_newapi_payments_reader'
+    ) > $null
+
+    # Reproduce the exact production partial state left by the reviewed legacy
+    # compatibility contract: zero views, six roles and only these nine
+    # non-grantable SELECT column ACLs on top_ups. Reconciliation may revoke
+    # this exact known residue, while the full-table grant above remains fatal.
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'GRANT SELECT(id,user_id,amount,money,payment_method,payment_provider,' +
+        'create_time,complete_time,status) ON public.top_ups TO invoice_newapi_payments_reader'
     ) > $null
 
     foreach ($fixture in @($newapi, $sub2api)) {
@@ -412,6 +566,21 @@ try {
             throw "$source cleanup postcondition mismatch: $postState"
         }
 
+        $sentinelState = if ($source -eq 'newapi') {
+            Invoke-TestPsql -Database $fixture.Database -TuplesOnly -Sql (
+                "SELECT has_column_privilege('upstream_sentinel_role','public.top_ups','trade_no','SELECT') || '|' || " +
+                "pg_get_userbyid(relowner) FROM pg_class WHERE oid='public.top_ups'::regclass"
+            )
+        } else {
+            Invoke-TestPsql -Database $fixture.Database -TuplesOnly -Sql (
+                "SELECT has_column_privilege('upstream_sentinel_role','public.auth_identities','secret_value','SELECT') || '|' || " +
+                "pg_get_userbyid(relowner) FROM pg_class WHERE oid='public.auth_identities'::regclass"
+            )
+        }
+        if ($sentinelState -ne 'true|postgres') {
+            throw "$source cleanup changed an unrelated upstream ACL or table owner: $sentinelState"
+        }
+
         # Idempotence: the same apply must remain a successful no-op.
         Invoke-TestPsql -Database $fixture.Database `
             -File /contracts/projection-reconcile.postgresql.sql `
@@ -421,6 +590,14 @@ try {
             -File /contracts/upstream-upgrade-preflight.postgresql.sql `
             -Variables @("invoice_source=$source", 'boundary_state=detached') > $null
     }
+
+    Invoke-TestPsql -Database $newapi.Database -Sql (
+        'REVOKE SELECT(trade_no) ON public.top_ups FROM upstream_sentinel_role'
+    ) > $null
+    Invoke-TestPsql -Database $sub2api.Database -Sql (
+        'REVOKE SELECT(secret_value) ON public.auth_identities FROM upstream_sentinel_role'
+    ) > $null
+    Invoke-TestPsql -Database postgres -Sql 'DROP ROLE upstream_sentinel_role' > $null
 
     # Unknown invoice-prefixed roles are never silently removed.
     Invoke-TestPsql -Database $newapi.Database -Sql 'CREATE ROLE invoice_newapi_unreviewed NOLOGIN' > $null
