@@ -202,9 +202,12 @@ bash ./scripts/invoke-upstream-projection-maintenance.sh \
 ```
 
 Repeat for Sub2API, then require the `bridge-v4` upgrade gate and all five
-source-specific `check-db` commands. Immediately after all five pass, move the
-preservation file into the approved encrypted secret archive or securely remove
-it. Do not leave a plaintext SCRAM-verifier SQL file on the host.
+source-specific `check-db-static` commands. These checks deliberately do not
+require the not-yet-created cutover manifest. Immediately after all five pass,
+move the preservation file into the approved encrypted secret archive or
+securely remove it. Do not leave a plaintext SCRAM-verifier SQL file on the
+host. After the new create-only pair is captured and verified, run full
+`check-db` for all five streams before any source agent starts.
 
 ## 4. Detached upgrade preflight
 

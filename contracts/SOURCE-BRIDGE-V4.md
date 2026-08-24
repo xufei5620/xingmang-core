@@ -57,9 +57,14 @@ For one source database:
    bridge-to-relation dependencies. The gate also proves exact function body
    hashes, owner column ACL, caller isolation, no unexpected ownership/schema
    CREATE and RLS disabled on every reviewed source relation.
-8. Run `source-agent-prod check-db` independently for all five streams before
-   starting an agent. Immediately encrypt/archive or securely delete the
-   plaintext role-preservation file after all five checks pass.
+8. Run `source-agent-prod check-db-static` independently for all five streams.
+   This pre-cutover command proves connection hardening, exact ACLs, function
+   body hashes and the source-relation boundary without requiring a cutover
+   manifest that does not exist yet. Immediately encrypt/archive or securely
+   delete the plaintext role-preservation file after all five static checks
+   pass. After the create-only cutover pair exists, all five streams must also
+   pass the full `check-db`, which binds the live financial semantics and
+   configuration hash to that encrypted manifest, before an agent starts.
 
 Both install contracts are idempotent. In particular, applying
 `source -> economic -> source` restores the complete bridge-owner ACL; it must
@@ -104,6 +109,12 @@ Run `agents/scripts/verify-bridge-postgres-matrix.ps1`. The integration suite
 proves financial semantics, exact caller access, encrypted cutover capture,
 configuration drift blocking, install idempotency, `pg_depend=0`, compatible
 `ALTER TYPE`, incompatible drop fail-closed behavior, and complete rollback.
+The v4 economic contracts additionally prove that Sub2API timestamp-only setting
+rewrites and New API all-one group additions retain one normalized semantic
+fingerprint, while a real fee/ratio change and malformed configuration still
+fail closed. Sub2API wallet cash units are also bound to each order's immutable
+fee rate and exact CNY round-up equation, so a settings timestamp is not a
+financial-semantic boundary.
 
 These SQL files are review-only. No source agent, application startup, or
 automatic migration may install or remove the boundary.

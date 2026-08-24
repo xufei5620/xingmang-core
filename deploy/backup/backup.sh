@@ -113,39 +113,164 @@ resume_required=false
 backup_published=false
 resume_source_services=()
 resume_prod_services=()
+resume_source_wait_services=()
+resume_prod_wait_services=()
+resume_source_running_only_services=()
+resume_prod_running_only_services=()
+service_health_before_file="$work_dir/service-health-before.tsv"
+printf 'compose\tservice\thealth_state\n' >"$service_health_before_file"
+
+record_running_service() {
+  local compose_scope=$1
+  local service=$2
+  local container_output
+  local -a container_ids=()
+  if [[ "$compose_scope" == 'source' ]]; then
+    if ! container_output=$("${source_compose[@]}" ps --status running -q "$service"); then
+      echo "cannot inspect pre-backup source service state: $service" >&2
+      return 1
+    fi
+  elif [[ "$compose_scope" == 'prod' ]]; then
+    if ! container_output=$("${prod_compose[@]}" ps --status running -q "$service"); then
+      echo "cannot inspect pre-backup production service state: $service" >&2
+      return 1
+    fi
+  else
+    echo "unknown Compose scope while recording service state: $compose_scope" >&2
+    return 1
+  fi
+  if [[ -z "$container_output" ]]; then
+    printf '%s\t%s\tnot-running\n' "$compose_scope" "$service" >>"$service_health_before_file"
+    return 0
+  fi
+  mapfile -t container_ids <<<"$container_output"
+  (( ${#container_ids[@]} > 0 )) || return 0
+  (( ${#container_ids[@]} == 1 )) || {
+    echo "expected exactly one running container for $compose_scope service $service" >&2
+    return 1
+  }
+
+  local health_state
+  if ! health_state=$(docker inspect --format '{{if .Config.Healthcheck}}{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}{{else}}none{{end}}' "${container_ids[0]}"); then
+    echo "cannot inspect pre-backup health state for $compose_scope service $service" >&2
+    return 1
+  fi
+  case "$health_state" in
+    healthy|none|starting|unhealthy) ;;
+    *)
+      echo "unsupported pre-backup health state for $compose_scope service $service: $health_state" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\t%s\t%s\n' "$compose_scope" "$service" "$health_state" >>"$service_health_before_file"
+
+  if [[ "$compose_scope" == 'source' ]]; then
+    resume_source_services+=("$service")
+    if [[ "$health_state" == 'healthy' ]]; then
+      resume_source_wait_services+=("$service")
+    else
+      resume_source_running_only_services+=("$service")
+    fi
+  else
+    resume_prod_services+=("$service")
+    if [[ "$health_state" == 'healthy' ]]; then
+      resume_prod_wait_services+=("$service")
+    else
+      resume_prod_running_only_services+=("$service")
+    fi
+  fi
+}
+
+verify_services_running() {
+  local compose_scope=$1
+  shift
+  (( $# > 0 )) || return 0
+  local deadline=$((SECONDS+60))
+  local service
+  local all_running
+  local container_output
+  local -a container_ids=()
+  while :; do
+    all_running=true
+    for service in "$@"; do
+      container_ids=()
+      if [[ "$compose_scope" == 'source' ]]; then
+        if ! container_output=$("${source_compose[@]}" ps --status running -q "$service"); then
+          echo "cannot inspect restored source service state: $service" >&2
+          return 1
+        fi
+      elif [[ "$compose_scope" == 'prod' ]]; then
+        if ! container_output=$("${prod_compose[@]}" ps --status running -q "$service"); then
+          echo "cannot inspect restored production service state: $service" >&2
+          return 1
+        fi
+      else
+        echo "unknown Compose scope while checking restored service: $compose_scope" >&2
+        return 1
+      fi
+      if [[ -n "$container_output" ]]; then
+        mapfile -t container_ids <<<"$container_output"
+      fi
+      if (( ${#container_ids[@]} != 1 )); then
+        all_running=false
+      fi
+    done
+    $all_running && return 0
+    if (( SECONDS >= deadline )); then
+      echo "one or more previously running $compose_scope services did not return to running state: $*" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
 
 resume_services() {
   if (( ${#resume_source_services[@]} > 0 )); then
-    "${source_compose[@]}" up -d "${resume_source_services[@]}"
+    "${source_compose[@]}" up -d --no-deps "${resume_source_services[@]}" || return 1
   fi
   if (( ${#resume_prod_services[@]} > 0 )); then
-    "${prod_compose[@]}" up -d "${resume_prod_services[@]}"
+    "${prod_compose[@]}" up -d --no-deps "${resume_prod_services[@]}" || return 1
   fi
-  if (( ${#resume_source_services[@]} > 0 )); then
-    "${source_compose[@]}" up -d --wait --wait-timeout 180 "${resume_source_services[@]}"
+  if (( ${#resume_source_wait_services[@]} > 0 )); then
+    "${source_compose[@]}" up -d --no-deps --wait --wait-timeout 180 "${resume_source_wait_services[@]}" || return 1
   fi
-  if (( ${#resume_prod_services[@]} > 0 )); then
-    "${prod_compose[@]}" up -d --wait --wait-timeout 180 "${resume_prod_services[@]}"
+  if (( ${#resume_prod_wait_services[@]} > 0 )); then
+    "${prod_compose[@]}" up -d --no-deps --wait --wait-timeout 180 "${resume_prod_wait_services[@]}" || return 1
   fi
+  verify_services_running source "${resume_source_running_only_services[@]}" || return 1
+  verify_services_running prod "${resume_prod_running_only_services[@]}" || return 1
+  return 0
 }
 
 cleanup() {
   status=$?
   trap - EXIT
-  rm -f -- "$database_tmp" "$documents_tmp" "$source_state_tmp" "$metadata_tmp" "$keycloak_tmp" "$manifest_tmp" "$signature_tmp"
+  # Cleanup is a recovery boundary. Never let errexit or a failed removal skip
+  # the attempt to return every previously running service to its prior state.
+  set +e
+  if $resume_required; then
+    resume_services
+    resume_status=$?
+    resume_required=false
+    if (( resume_status != 0 )); then
+      echo 'CRITICAL: backup failed and one or more quiesced services did not restart' >&2
+      status=1
+    fi
+  fi
+
+  cleanup_failed=false
+  rm -f -- "$database_tmp" "$documents_tmp" "$source_state_tmp" "$metadata_tmp" "$keycloak_tmp" "$manifest_tmp" "$signature_tmp" || cleanup_failed=true
   if ! $backup_published; then
     # This timestamp prefix is unique and was checked absent before the
     # freeze. Never leave unsigned ciphertext components that look like a
     # restorable set after signing or pre-publication failure.
     rm -f -- "$database_final" "$documents_final" "$source_state_final" \
-      "$metadata_final" "$keycloak_final" "$manifest_final" "$signature_final"
+      "$metadata_final" "$keycloak_final" "$manifest_final" "$signature_final" || cleanup_failed=true
   fi
-  rm -rf -- "$work_dir"
-  if $resume_required; then
-    if ! resume_services; then
-      echo 'CRITICAL: backup failed and one or more quiesced services did not restart' >&2
-      status=1
-    fi
+  rm -rf -- "$work_dir" || cleanup_failed=true
+  if $cleanup_failed; then
+    echo 'CRITICAL: backup cleanup left temporary or unpublished files behind' >&2
+    status=1
   fi
   exit "$status"
 }
@@ -172,10 +297,10 @@ done
 # directory is archived, including pending spool, inventory, reconciliation and
 # lock metadata introduced by future compatible agent versions.
 for service in "${source_services[@]}"; do
-  [[ -n "$("${source_compose[@]}" ps --status running -q "$service")" ]] && resume_source_services+=("$service")
+  record_running_service source "$service"
 done
 for service in api ingest-proxy; do
-  [[ -n "$("${prod_compose[@]}" ps --status running -q "$service")" ]] && resume_prod_services+=("$service")
+  record_running_service prod "$service"
 done
 resume_required=true
 "${prod_compose[@]}" stop -t 30 ingest-proxy api

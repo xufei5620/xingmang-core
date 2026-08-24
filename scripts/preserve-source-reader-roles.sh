@@ -222,4 +222,4 @@ printf '%s' "$restore_sql" | docker exec --interactive "$container_name" psql -X
   --set=ON_ERROR_STOP=1 --username "$database_user" --dbname "$database_name" \
   --file=-
 unset restore_sql verifier restored_verifiers
-printf 'Restored %s reader roles. Apply Bridge V4 and run all five check-db canaries now.\n' "$source_name"
+printf 'Restored %s reader roles. Apply Bridge V4 and run all five pre-cutover check-db-static canaries now; run full check-db only after the new manifest exists.\n' "$source_name"

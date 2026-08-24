@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -128,6 +129,59 @@ func TestBridgeV4ContractsAreDependencyFreeAndMigrationCompatible(t *testing.T) 
 
 			assertUpstreamAlterAndRuntimeDrift(t, ctx, admin, configuration, source)
 		})
+	}
+}
+
+func TestBridgeV4StaticDatabaseCheckDoesNotRequireCutoverManifest(t *testing.T) {
+	adminURL := os.Getenv("SOURCE_AGENT_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("SOURCE_AGENT_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	configuration, err := pgx.ParseConfig(adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := stdlib.OpenDB(*configuration)
+	defer admin.Close()
+	if err = pingIntegrationDatabase(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	cleanupBridgeFixture(t, ctx, admin)
+	defer cleanupBridgeFixture(t, ctx, admin)
+	setupBridgeFixture(t, ctx, admin, sourceagent.SourceSub2API)
+	applyBridgeContracts(t, ctx, admin, sourceagent.SourceSub2API)
+
+	readerURL, err := url.Parse(adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerURL.User = url.UserPassword("invoice_sub2api_usage_reader", bridgeTestPassword)
+	temporary := t.TempDir()
+	dsnPath := filepath.Join(temporary, "usage-reader.dsn")
+	if err = os.WriteFile(dsnPath, []byte(readerURL.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(dsnPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	values := validEnvironment(t, sourceagent.SourceSub2API, sourceagent.StreamUsage)
+	values["SOURCE_SCHEMA_VERSION"] = sourceagent.SchemaVersionV3
+	values["SOURCE_DB_DSN_FILE"] = dsnPath
+	values["SOURCE_CUTOVER_MANIFEST_FILE"] = filepath.Join(temporary, "not-created-manifest.enc")
+	values["SOURCE_CUTOVER_KEY_FILE"] = filepath.Join(temporary, "not-created-cutover.key")
+	for name, value := range values {
+		t.Setenv(name, value)
+	}
+	for _, name := range []string{"PGPASSWORD", "PGSERVICE", "PGSERVICEFILE", "PGPASSFILE", "DATABASE_URL", "SOURCE_DB_DSN"} {
+		t.Setenv(name, "")
+	}
+	if err = checkDatabaseFromEnvironment(false); err != nil {
+		t.Fatalf("static database check required a cutover manifest: %v", err)
+	}
+	if err = checkDatabaseFromEnvironment(true); err == nil || !strings.Contains(err.Error(), "load encrypted cutover manifest") {
+		t.Fatalf("full database check did not require the V4 cutover manifest: %v", err)
 	}
 }
 
@@ -310,14 +364,14 @@ func sub2BridgeFixtureStatements() []string {
 		`CREATE TABLE public.promo_code_usages(id bigint primary key,user_id bigint,bonus_amount numeric(20,8),used_at timestamptz)`,
 		`CREATE TABLE public.user_affiliate_ledger(id bigint primary key,user_id bigint,action text,amount numeric(20,8),created_at timestamptz)`,
 		`CREATE TABLE public.redeem_codes(id bigint primary key,code text,type text,value numeric(20,8),status text,used_by bigint,used_at timestamptz)`,
-		`CREATE TABLE public.payment_orders(id bigint primary key,user_id bigint,status text,order_type text,amount numeric(20,8),pay_amount numeric(20,8),refund_amount numeric(20,8),completed_at timestamptz,refund_at timestamptz,created_at timestamptz,updated_at timestamptz,payment_type text,provider_key text,provider_snapshot jsonb,recharge_code text)`,
+		`CREATE TABLE public.payment_orders(id bigint primary key,user_id bigint,status text,order_type text,amount numeric(20,8),pay_amount numeric(20,8),fee_rate numeric(10,4),refund_amount numeric(20,8),completed_at timestamptz,refund_at timestamptz,created_at timestamptz,updated_at timestamptz,payment_type text,provider_key text,provider_snapshot jsonb,recharge_code text)`,
 		`CREATE TABLE public.auth_identities(id bigint primary key,user_id bigint,provider_type text,provider_key text,provider_subject text,verified_at timestamptz,issuer text,created_at timestamptz,updated_at timestamptz,secret_value text)`,
 		`INSERT INTO public.settings VALUES('BALANCE_RECHARGE_MULTIPLIER','1.00',now()-interval '1 day'),('RECHARGE_FEE_RATE','0.00',now()-interval '1 day')`,
 		`INSERT INTO public.users VALUES(1,10,NULL,'hidden@example.com','secret'),(2,-2.5,NULL,'negative@example.com','secret')`,
 		`INSERT INTO public.usage_logs VALUES(1,1,0,0.000000005,now()-interval '10 minutes','secret','192.0.2.1')`,
 		`INSERT INTO public.promo_code_usages VALUES(1,1,2,now()-interval '9 minutes')`,
 		`INSERT INTO public.redeem_codes VALUES(1,'CASH','balance',10,'used',1,now()-interval '10 minutes'),(99992744,'BONUS','balance',3,'used',1,now()-interval '9 minutes')`,
-		`INSERT INTO public.payment_orders VALUES(1,1,'COMPLETED','balance',10,10,0,now()-interval '8 minutes',NULL,now()-interval '9 minutes',now()-interval '8 minutes','epay','easypay','{"schema_version":"2","provider_key":"easypay","currency":"CNY"}','CASH')`,
+		`INSERT INTO public.payment_orders VALUES(1,1,'COMPLETED','balance',10,10,0,0,now()-interval '8 minutes',NULL,now()-interval '9 minutes',now()-interval '8 minutes','epay','easypay','{"schema_version":"2","provider_key":"easypay","currency":"CNY"}','CASH')`,
 		`INSERT INTO public.auth_identities VALUES(1,1,'oidc','https://auth.solov.cc/realms/solov','subject-1',now(),'https://auth.solov.cc/realms/solov',now()-interval '1 day',now(),'hidden')`,
 	}
 }

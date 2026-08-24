@@ -19,10 +19,10 @@
   "scan_complete": false,
   "records": [
     {
-      "event_id": "a9eeea97-0d98-874e-8dc5-f211fe4e1da2",
+      "event_id": "f4606a2c-a204-8cd2-9db6-25306220db85",
       "operation": "upsert",
       "observed_at": "2026-08-21T00:03:00Z",
-      "payload_sha256": "aad078d8fcc00734c1d6a1958d33ee61363ccba4660f95e8c20650217d736c00",
+      "payload_sha256": "ce56a1ae82d05613a94e2de8ee2c048c0b336e5c6c901281ce9e5fb5abc4c100",
       "entity_type": "usage_event",
       "payload": {
         "external_user_id": "7",
@@ -34,8 +34,8 @@
         "source_cursor": "usage_logs:21",
         "causal_domain": "usage_logs",
         "causal_order": "21",
-        "cutover_manifest_hash": "e83c5ba06912f46f1058fd9703db7b6849f9bed9125f61509842f34919fa5ae2",
-        "configuration_hash": "b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910"
+        "cutover_manifest_hash": "44fbe682863296eb30d2ba90b749b8ceddf61677a8d18d401bb0d8876bfe6adb",
+        "configuration_hash": "23ea1ac7ae3bb0607ab8d836fc3ac2dc8b2756662a95bc21e139f8c48c138557"
       }
     }
   ]

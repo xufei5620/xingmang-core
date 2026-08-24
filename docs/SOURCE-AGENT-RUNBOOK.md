@@ -65,8 +65,10 @@ On the production migration, preserve the existing six source reader roles
 before legacy reconcile by using `scripts/preserve-source-reader-roles.sh
 --mode export` with a new root-only mode-0600 file. After reconcile removes the
 legacy roles, restore that file, install both Bridge contracts and run all five
-`check-db` commands. The file contains SCRAM verifiers: never display it, and
-encrypt/archive or securely delete it immediately after the five checks pass.
+`check-db-static` commands. The file contains SCRAM verifiers: never display
+it, and encrypt/archive or securely delete it immediately after the five
+static checks pass. Once the new create-only cutover pair exists, run the full
+`check-db` for all five streams before starting them.
 
 Put each complete approved PostgreSQL connection string in its matching 0600
 regular, non-symlink `SOURCE_DB_DSN_FILE`. Never reuse a payments DSN for an
@@ -75,10 +77,12 @@ configuration, sets `default_transaction_read_only=on`, and proves
 `SHOW transaction_read_only = on` before reading. It also forces a 15-second
 statement timeout, UTC and at most two connections. LOGIN callers receive only
 `invoice_bridge` schema USAGE and their exact function EXECUTE; all raw source
-columns belong to the NOLOGIN bridge owner. Before scanning, `check-db`
+columns belong to the NOLOGIN bridge owner. Pre-cutover `check-db-static`
 inventories effective privileges and refuses raw SELECT, role membership,
 schema-create, mutation, sequence, unexpected function execution or a
-dependency-bearing/unsafe function.
+dependency-bearing/unsafe function. Full `check-db` repeats that boundary and,
+for V3 economic streams, requires the encrypted manifest plus live semantic
+contract/hash equality.
 
 For New API, `top_ups.id` is the `source_order_id` display reference. Do not
 grant/read `trade_no`, and do not put `top_ups.id` into a provider-trade-number
@@ -109,11 +113,13 @@ setting.
 2. Verify backup/restore evidence. As cluster superuser and current database
    owner, use maintenance wrapper modes `install-source` then
    `install-economic`; bare psql is forbidden. Run the `bridge-v4` upgrade gate
-   and `check-db` separately with all five DSNs. Extra grants, RLS, unexpected
-   ownership/function body or schema CREATE are hard failures.
+   after installation. Extra grants, RLS, unexpected ownership/function body
+   or schema CREATE are hard failures.
 3. Create 0700 `$SOURCE_STATE_ROOT/{source}-{stream}` directories and
    `$SOURCE_CUTOVER_ROOT/{source}`. Generate distinct spool/signing keys per
-   stream, one source cutover AES key and one balance-snapshot AES key.
+   stream, one source cutover AES key and one balance-snapshot AES key. Run
+   `check-db-static` separately with all five DSNs; it must pass before the
+   manifest exists and must not be substituted with the full `check-db`.
 4. Stop the matching New API/Sub2API application container while keeping its
    PostgreSQL container running. Keep it stopped, acknowledge that operator
    action, and run maintenance mode `cutover-quiescence-preflight`. It must see
@@ -134,14 +140,16 @@ setting.
    same profile with command override) and archive their hashes offline.
    Both commands require `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`,
    reject either cutover/database clock at or after that instant, and require
-   the exact source contract (`sub2api-economic-v3` or
-   `newapi-economic-rc25-v3`). Run these checks before applying invoice
+   the exact source contract (`sub2api-economic-v4` or
+   `newapi-economic-rc25-v4`). Run these checks before applying invoice
    migration 0011, then bind the verified hashes into the signed rollback
    package; never discover an invalid pair only after the one-way migration.
    Later balance snapshots must retain this encrypted baseline: it is the only
    authority for signed `baseline_member` (`true` for original users, `false`
    for post-cutover users). Loss/corruption is fail-closed, never recaptured.
-   Only after both encrypted files verify may the upstream application restart.
+   After the pair verifies, run the full `check-db` for all five source streams;
+   every V3 stream must bind the live contract/hash to the new manifest. Only
+   after all five full checks pass may the upstream application restart.
 6. Register all five stream certificate/key tuples and source runtime in the
    receiver. The balances key ID must equal the key declared by the manifest;
    other streams keep their independent keys.
@@ -225,14 +233,25 @@ Create each state directory as UID/GID 65532 mode 0700. Run exactly once with
 the final state mount:
 
 ```text
+# Before the first cutover manifest exists:
+source-agent-prod check-db-static
+# After the create-only manifest/baseline pair passes check-cutover:
 source-agent-prod check-db
 source-agent-prod init-state
 # V2 identities only:
 source-agent-prod init-reconcile
 ```
 
-`check-db` opens the configured source DSN and exits only after the effective
-database grants match the exact source/stream projection contract. Init
+`check-db-static` opens the configured source DSN and exits only after the
+effective database grants, role attributes, relation boundary and function
+body SHA match the exact source/stream projection contract. Full `check-db`
+repeats those static checks. For every V3 economic stream it also decrypts the
+create-only manifest, validates the policy boundary, invokes that reader's
+live `health` operation (or balances `contract`) and requires a healthy
+contract plus exact configuration-hash equality; balances also compares the
+projection-contract name. Therefore the static command is the only valid
+pre-cutover check, while a static-only success can no longer defer semantic
+drift detection until `run`. Init
 commands refuse overwrite. `SOURCE_RECONCILE_FILE` and threshold 3 are required
 only by V2 identities; V3 uses complete rescans and stable invoice-side facts.
 Then run normally:

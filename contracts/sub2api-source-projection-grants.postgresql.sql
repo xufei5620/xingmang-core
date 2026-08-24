@@ -119,11 +119,11 @@ ALTER ROLE invoice_sub2api_payments_reader SET lock_timeout='5s';
 ALTER ROLE invoice_sub2api_payments_reader SET idle_in_transaction_session_timeout='15s';
 
 GRANT USAGE ON SCHEMA public TO invoice_sub2api_bridge_owner;
-GRANT SELECT(id,user_id,status,order_type,amount,pay_amount,refund_amount,
+GRANT SELECT(id,user_id,status,order_type,amount,pay_amount,fee_rate,refund_amount,
   completed_at,refund_at,created_at,updated_at,payment_type,provider_key,
   provider_snapshot)
   ON public.payment_orders TO invoice_sub2api_bridge_owner;
-GRANT SELECT(key,value,updated_at)
+GRANT SELECT(key,value)
   ON public.settings TO invoice_sub2api_bridge_owner;
 GRANT SELECT(id,user_id,provider_type,provider_key,provider_subject,verified_at,
   issuer,created_at,updated_at)
@@ -213,15 +213,26 @@ BEGIN
   ELSIF operation='health' THEN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
-        WITH cfg AS (
-          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
-            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
-            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
-            max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
-            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
-             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
-             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+        WITH raw_cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_raw,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_raw,
+            count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_count,
+            count(*) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_count
           FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), cfg AS (
+          SELECT CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(multiplier_raw)::numeric)::text END AS multiplier_value,
+            CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(fee_rate_raw)::numeric)::text END AS fee_rate_value,
+            (multiplier_count=1 AND fee_rate_count=1
+             AND COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(fee_rate_raw)::numeric BETWEEN 0 AND 100
+                    AND scale(trim_scale(btrim(fee_rate_raw)::numeric))<=2 ELSE FALSE END
+             AND CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(multiplier_raw)::numeric=1 ELSE FALSE END) AS contract_ok
+          FROM raw_cfg
         ), health AS (
           SELECT count(*) FILTER (WHERE classification='blocked_unknown')::bigint AS blocked
           FROM (
@@ -241,11 +252,8 @@ BEGIN
         SELECT (cfg.contract_ok AND health.blocked=0) AS contract_ok,
           CASE WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
                WHEN health.blocked>0 THEN 'payment_currency_evidence_missing' ELSE '' END::text AS blocked_reason,
-          encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||'|'||
-            COALESCE(fee_rate_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||
-            '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
+          encode(sha256(convert_to(COALESCE(multiplier_value,'<invalid>')||'|'||
+            COALESCE(fee_rate_value,'<invalid>')||'|SUB2_BALANCE_1E8|v4','UTF8')),'hex') AS configuration_hash
         FROM cfg,health
       ) result
     $query$;
@@ -277,16 +285,25 @@ BEGIN
   ELSIF operation='page' THEN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
-        WITH cfg AS (
-          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
-            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
-            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
-             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
-             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+        WITH raw_cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_raw,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_raw,
+            count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_count,
+            count(*) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_count
           FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), cfg AS (
+          SELECT (multiplier_count=1 AND fee_rate_count=1
+             AND COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(fee_rate_raw)::numeric BETWEEN 0 AND 100
+                    AND scale(trim_scale(btrim(fee_rate_raw)::numeric))<=2 ELSE FALSE END
+             AND CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(multiplier_raw)::numeric=1 ELSE FALSE END) AS contract_ok
+          FROM raw_cfg
         ), classified AS (
           SELECT po.id,po.user_id,po.status,po.order_type,po.amount,po.pay_amount,
-            po.refund_amount,po.completed_at,po.refund_at,po.created_at,po.updated_at,
+            po.fee_rate,po.refund_amount,po.completed_at,po.refund_at,po.created_at,po.updated_at,
             po.payment_type,po.provider_key,
             CASE
               WHEN jsonb_typeof(po.provider_snapshot)='object'
@@ -307,7 +324,11 @@ BEGIN
           p.status,p.order_type,p.amount::text,p.pay_amount::text,p.currency,
           p.refund_amount::text,round(p.pay_amount*p.refund_amount/NULLIF(p.amount,0),2)::text AS gateway_refund_amount,
           p.completed_at,p.refund_at,p.created_at,p.updated_at,p.payment_type,p.provider_key,
-          CASE WHEN p.order_type='balance' AND cfg.contract_ok AND cfg.multiplier_updated_at<=p.completed_at
+          CASE WHEN p.order_type='balance' AND cfg.contract_ok
+            AND p.amount>0 AND p.pay_amount>0
+            AND p.fee_rate BETWEEN 0 AND 100
+            AND scale(trim_scale(p.fee_rate))<=2
+            AND p.pay_amount=p.amount+ceil(p.amount*p.fee_rate)/100
             THEN ((p.amount*100000000)::numeric(78,0))::text END AS wallet_cash_service_units,
           CASE WHEN p.order_type='subscription' AND p.pay_amount>0 AND p.pay_amount*100=trunc(p.pay_amount*100)
             THEN (p.pay_amount*100)::numeric(78,0)::text END AS paid_minor,

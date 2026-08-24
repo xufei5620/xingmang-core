@@ -68,17 +68,31 @@ Units are explicit canonical non-negative integer strings:
 - Sub2API uses `SUB2_BALANCE_1E8`. Wallet usage is PostgreSQL
   `round(actual_cost,8)*1e8`, matching `users.balance numeric(20,8)`. Negative
   balances are sent as zero plus `balance_negative=true`, freezing that account.
+  Contract `sub2api-economic-v4` hashes normalized numeric multiplier and fee
+  values, not mutable settings timestamps. Missing, duplicate or non-numeric
+  settings, a multiplier other than one, or a fee outside `0..100` with at most
+  two decimal places remain unhealthy; a real valid fee change
+  changes the hash.
 - New API uses native integer `NEWAPI_QUOTA`. rc.25 wallet derivation is healthy
   only with `QuotaPerUnit=500000`, `Price=1`, and every `TopupGroupRatio=1`.
+  Contract `newapi-economic-rc25-v4` normalizes equivalent numeric text and
+  represents every valid all-one ratio object with one semantic constant, so
+  group names, JSON ordering and whitespace do not create false drift.
   Unknown providers remain `pending_manual` without wallet units.
 
-Sub2API cash wallet units additionally require the reviewed
-`BALANCE_RECHARGE_MULTIPLIER=1` setting to predate order completion. Payment
-fulfilment redeem codes are excluded from bonus credits. New API candidates
+Sub2API cash wallet units additionally require a positive per-order `amount`
+and `pay_amount`, an order `fee_rate` in `0..100` with at most two decimal
+places, and the exact CNY invariant
+`pay_amount = amount + ceil(amount * fee_rate) / 100`. This reproduces
+Sub2API's two-decimal fee `RoundUp` while remaining invariant under harmless
+settings timestamp rewrites; an order credited under a non-unit multiplier
+does not satisfy the formula. Payment fulfilment redeem codes are excluded from
+bonus credits. New API candidates
 require `status=success` and `complete_time`; failures/pending rows are not
 projected. Mutable New API payments and redeem-code domains are fully rescanned
 each publishable cycle, so a pre-cutover ID completed/redeemed after cutover is
-captured. Every scan rechecks the current configuration hash; drift blocks
+captured. Every scan and every V3 `check-db` rechecks the live contract and
+current configuration hash against the create-only cutover manifest; drift blocks
 without advancing the watermark.
 
 Bridge V4 SECURITY DEFINER functions expose only numeric IDs, event times, service units,
@@ -500,6 +514,9 @@ commands are:
 ```text
 source-agent-prod init-state
 source-agent-prod init-reconcile
+source-agent-prod cutover-init
+source-agent-prod check-cutover
+source-agent-prod check-db-static
 source-agent-prod check-db
 source-agent-prod check-state
 source-agent-prod healthcheck
@@ -508,7 +525,11 @@ source-agent-prod version
 ```
 
 The init commands create but never overwrite source+stream cursor or reconcile
-state. `check-state` is offline/read-only, rejects stale locks, validates all
+state. `check-db-static` is the pre-cutover connection/ACL/function-SHA and
+source-boundary check; it does not read a manifest. Full `check-db` repeats that
+gate and requires every V3 economic stream to match the live semantic contract
+and configuration hash recorded by the encrypted create-only manifest.
+`check-state` is offline/read-only, rejects stale locks, validates all
 reconcile files and decrypts a pending spool with the real mounted key.
 `healthcheck` adds a bounded local heartbeat-age check. `run`
 requires an existing state file, a source PostgreSQL DSN secret file, a

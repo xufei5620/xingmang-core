@@ -152,7 +152,7 @@ func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testin
 	snapshotHash := testHash(cutoverCycle.cycleID)
 	if err := store.RegisterCutoverManifest(ctx, CutoverManifest{
 		SourceInstanceID: sourceID, ManifestHash: manifestHash, SourceRuntimeVersion: "v3-test",
-		ProjectionContract: "sub2api-economic-v3", ConfigurationHash: configHash,
+		ProjectionContract: "sub2api-economic-v4", ConfigurationHash: configHash,
 		UnitCode: "SUB2_BALANCE_1E8", PaymentsCeiling: "p0", UsageCeiling: "u0",
 		CreditsCeiling: "c0", BalancesCeiling: "b0", BaselineSnapshotID: snapshotHash,
 		BaselineSnapshotHash: snapshotHash, BaselineRowCount: 1, SigningKeyID: "ignored-payload-key",
@@ -412,7 +412,7 @@ func TestEligibilityPolicyKeepsPreStartFundingNonInvoiceableAndIncludesExactBoun
 			projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
 			credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
 			baseline_row_count,signing_key_id)
-		VALUES($1,$2,$3,$3,'policy-test','sub2api-economic-v3',$4,'SUB2_BALANCE_1E8',
+		VALUES($1,$2,$3,$3,'policy-test','sub2api-economic-v4',$4,'SUB2_BALANCE_1E8',
 			'p','u','c','b',$2,$2,1,'policy-key')`,
 			sourceID, manifestHash, cutover, configHash)
 	}

@@ -20,10 +20,23 @@ import (
 )
 
 const (
-	cutoverSchemaVersion   = 1
-	cutoverMaxBytes        = 8 << 20
-	balanceSnapshotMaxRows = 2_000_000
+	cutoverSchemaVersion           = 1
+	cutoverMaxBytes                = 8 << 20
+	balanceSnapshotMaxRows         = 2_000_000
+	ProjectionContractSub2APIV4    = "sub2api-economic-v4"
+	ProjectionContractNewAPIRC25V4 = "newapi-economic-rc25-v4"
 )
+
+func expectedEconomicProjectionContract(sourceType string) (string, error) {
+	switch sourceType {
+	case SourceSub2API:
+		return ProjectionContractSub2APIV4, nil
+	case SourceNewAPI:
+		return ProjectionContractNewAPIRC25V4, nil
+	default:
+		return "", errors.New("cutover manifest source type is invalid")
+	}
+}
 
 // SourceHighWater is captured for audit in the same source-database snapshot
 // as the legacy balance baseline. It is not itself a post-cutover watermark.
@@ -264,11 +277,9 @@ func ValidateCutoverEligibility(manifest CutoverManifest, eligibilityStartAt tim
 		return errors.New("cutover database clock is invalid")
 	}
 	start := eligibilityStartAt.UTC()
-	expectedContract := "sub2api-economic-v3"
-	if manifest.SourceType == SourceNewAPI {
-		expectedContract = "newapi-economic-rc25-v3"
-	} else if manifest.SourceType != SourceSub2API {
-		return errors.New("cutover manifest source type is invalid")
+	expectedContract, err := expectedEconomicProjectionContract(manifest.SourceType)
+	if err != nil {
+		return err
 	}
 	if manifest.ProjectionContract != expectedContract {
 		return errors.New("cutover projection contract does not match source type")
@@ -329,9 +340,9 @@ func CaptureCutover(ctx context.Context, db *sql.DB, config CutoverCaptureConfig
 	if err = tx.QueryRowContext(ctx, query, request).Scan(&contract, &contractOK, &configurationHash, &paymentAt, &paymentCursor, &usageAt, &usageCursor, &creditAt, &creditCursor); err != nil {
 		return CutoverManifest{}, fmt.Errorf("capture cutover contract: %w", err)
 	}
-	expectedContract := "sub2api-economic-v3"
-	if config.SourceType == SourceNewAPI {
-		expectedContract = "newapi-economic-rc25-v3"
+	expectedContract, err := expectedEconomicProjectionContract(config.SourceType)
+	if err != nil {
+		return CutoverManifest{}, err
 	}
 	if !contractOK || contract != expectedContract || !hexHashPattern.MatchString(configurationHash) {
 		return CutoverManifest{}, errors.New("source projection contract is not healthy at cutover")

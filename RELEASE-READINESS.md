@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc24 eligibility-policy candidate
+# Release readiness: 0.1.0-rc25 semantic-projection candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC24 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC25 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -41,17 +41,35 @@ this release candidate.
   the invoice financial ledger was empty. This evidence must be rechecked in
   the maintenance window; it is not presented as live 2026-08-25 state.
 
+The RC24 maintenance attempt applied migration 0011 and restored the public
+API, Web, ClamAV and OIDC redirect chain, which removed the Nginx 502. Its
+balances-first canary then failed closed before accepting any batch: both live
+sources had semantically harmless configuration rewrites after the original
+cutover, but the v3 fingerprint included a Sub2API settings timestamp and raw
+New API group-ratio JSON. Both balances agents were stopped with sequence zero,
+and the signed post-0011 recovery point was independently restored. RC25
+replaces that representation-sensitive fingerprint with the reviewed v4
+financial-semantics contract; it does not waive configuration validation.
+
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC24 image/SBOM/vulnerability
+- generate and independently verify a fresh RC25 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
-- create a fresh pre-0011 signed rollback package with isolated restore,
-  re-prove the already installed Bridge V4/role boundary and `pg_depend=0`, and
-  capture each cutover exactly once while
-  its upstream application is stopped and the database quiescence gate passes;
-  if a create-only pair already exists, verify and reuse that exact pair rather
-  than overwriting or "recapturing" it;
-- deploy all Invoice images under the same RC24 tag and pass real production
+- retain the verified pre-0011 rollback package and the independently restored
+  post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
+  generation and cutover pairs without deleting or overwriting them;
+- install the reviewed v4 semantic-fingerprint functions only inside the
+  dedicated `invoice_bridge` schema, re-prove exact roles/ACLs and
+  `pg_depend=0`, pass all ten pre-cutover `check-db-static` commands, then
+  create a new empty versioned state generation. Stop only
+  one upstream application at a time, pass the database quiescence gate and
+  capture each new create-only cutover before the eligibility boundary; after
+  each pair exists, its five full `check-db` commands must bind the live hash
+  to that pair before the application restarts;
+- after both new pairs and all ten fresh sequence-zero states validate, apply
+  migration 0012. It must refuse any accepted manifest, batch, advanced source
+  sequence, watermark, eligibility state or financial-ledger row;
+- deploy all Invoice images under the same RC25 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -66,7 +84,7 @@ this release candidate.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC24 commit and signed release tag; no GitHub
+- create and locally verify the RC25 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement
@@ -94,6 +112,7 @@ Do not publish traffic merely because the local gate is green. Follow
 `docs/PRODUCTION-RUNBOOK.md` in order and record each approval, immutable image
 digest, backup proof and canary result. Delete the upstream custom menus and
 revoke the integration credentials to take the feature offline; no upstream
-source rollback is involved. After one-way migration 0011, however, an
-application rollback also requires the matching signed pre-0011 invoice DB and
-source-state restore. Switching only back to RC17 is not a valid rollback.
+source rollback is involved. After one-way migrations 0011 and 0012, however,
+an application rollback must preserve one matching set of invoice DB, ten
+source states, both cutover pairs, keys and compatible images. Switching only
+back to RC17 or restoring one component independently is not a valid rollback.

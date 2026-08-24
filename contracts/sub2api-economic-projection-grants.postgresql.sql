@@ -117,15 +117,26 @@ BEGIN
   IF operation='health' THEN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
-        WITH cfg AS (
-          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
-            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
-            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
-            max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
-            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
-             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
-             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+        WITH raw_cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_raw,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_raw,
+            count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_count,
+            count(*) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_count
           FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), cfg AS (
+          SELECT CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(multiplier_raw)::numeric)::text END AS multiplier_value,
+            CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(fee_rate_raw)::numeric)::text END AS fee_rate_value,
+            (multiplier_count=1 AND fee_rate_count=1
+             AND COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(fee_rate_raw)::numeric BETWEEN 0 AND 100
+                    AND scale(trim_scale(btrim(fee_rate_raw)::numeric))<=2 ELSE FALSE END
+             AND CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(multiplier_raw)::numeric=1 ELSE FALSE END) AS contract_ok
+          FROM raw_cfg
         ), stats AS (
           SELECT count(*)::bigint AS total_rows,COALESCE(max(id)-min(id)+1-count(*),0)::bigint AS gap_count,
             count(*) FILTER (WHERE billing_type NOT IN (0,1) OR actual_cost<0)::bigint AS invalid_rows
@@ -135,11 +146,8 @@ BEGIN
           CASE WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
                WHEN invalid_rows>0 THEN 'usage_contract_invalid' ELSE '' END::text AS blocked_reason,
           total_rows,gap_count,
-          encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||'|'||
-            COALESCE(fee_rate_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||
-            '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
+          encode(sha256(convert_to(COALESCE(multiplier_value,'<invalid>')||'|'||
+            COALESCE(fee_rate_value,'<invalid>')||'|SUB2_BALANCE_1E8|v4','UTF8')),'hex') AS configuration_hash
         FROM stats,cfg
       ) result
     $query$;
@@ -187,15 +195,26 @@ BEGIN
   IF operation='health' THEN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
-        WITH cfg AS (
-          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
-            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
-            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
-            max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
-            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
-             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
-             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+        WITH raw_cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_raw,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_raw,
+            count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_count,
+            count(*) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_count
           FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), cfg AS (
+          SELECT CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(multiplier_raw)::numeric)::text END AS multiplier_value,
+            CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(fee_rate_raw)::numeric)::text END AS fee_rate_value,
+            (multiplier_count=1 AND fee_rate_count=1
+             AND COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(fee_rate_raw)::numeric BETWEEN 0 AND 100
+                    AND scale(trim_scale(btrim(fee_rate_raw)::numeric))<=2 ELSE FALSE END
+             AND CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(multiplier_raw)::numeric=1 ELSE FALSE END) AS contract_ok
+          FROM raw_cfg
         ), p AS (
           SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
             count(*) FILTER (WHERE bonus_amount<=0)::bigint invalid FROM public.promo_code_usages
@@ -213,11 +232,8 @@ BEGIN
           CASE WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
                WHEN invalid_rows>0 THEN 'credit_contract_invalid' ELSE '' END::text AS blocked_reason,
           total_rows,gap_count,
-          encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||'|'||
-            COALESCE(fee_rate_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||
-            '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash
+          encode(sha256(convert_to(COALESCE(multiplier_value,'<invalid>')||'|'||
+            COALESCE(fee_rate_value,'<invalid>')||'|SUB2_BALANCE_1E8|v4','UTF8')),'hex') AS configuration_hash
         FROM stats,cfg
       ) result
     $query$;
@@ -297,15 +313,26 @@ BEGIN
   ELSIF operation='contract' THEN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
-        WITH cfg AS (
-          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_value,
-            max(updated_at) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_updated_at,
-            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_value,
-            max(updated_at) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_updated_at,
-            (count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')=1
-             AND max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') IN ('1','1.0','1.00','1.00000000')
-             AND count(*) FILTER (WHERE key='RECHARGE_FEE_RATE')=1) AS contract_ok
+        WITH raw_cfg AS (
+          SELECT max(value) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER')::text AS multiplier_raw,
+            max(value) FILTER (WHERE key='RECHARGE_FEE_RATE')::text AS fee_rate_raw,
+            count(*) FILTER (WHERE key='BALANCE_RECHARGE_MULTIPLIER') AS multiplier_count,
+            count(*) FILTER (WHERE key='RECHARGE_FEE_RATE') AS fee_rate_count
           FROM public.settings WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')
+        ), cfg AS (
+          SELECT CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(multiplier_raw)::numeric)::text END AS multiplier_value,
+            CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                 THEN trim_scale(btrim(fee_rate_raw)::numeric)::text END AS fee_rate_value,
+            (multiplier_count=1 AND fee_rate_count=1
+             AND COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+             AND CASE WHEN COALESCE(btrim(fee_rate_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(fee_rate_raw)::numeric BETWEEN 0 AND 100
+                    AND scale(trim_scale(btrim(fee_rate_raw)::numeric))<=2 ELSE FALSE END
+             AND CASE WHEN COALESCE(btrim(multiplier_raw)~'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',FALSE)
+                  THEN btrim(multiplier_raw)::numeric=1 ELSE FALSE END) AS contract_ok
+          FROM raw_cfg
         ), payment_high AS (
           SELECT COALESCE(updated_at,transaction_timestamp()) AS at,COALESCE(id,0)::bigint AS id
           FROM (SELECT updated_at,id FROM public.payment_orders ORDER BY updated_at DESC,id DESC LIMIT 1) p
@@ -326,12 +353,9 @@ BEGIN
               ';user_affiliate_ledger:',COALESCE((SELECT max(id) FROM public.user_affiliate_ledger),0),
               ';redeem_codes:',COALESCE((SELECT max(id) FROM public.redeem_codes),0)) AS cursor FROM credits
         )
-        SELECT 'sub2api-economic-v3'::text AS projection_contract,cfg.contract_ok,
-          encode(sha256(convert_to(COALESCE(multiplier_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM multiplier_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||'|'||
-            COALESCE(fee_rate_value,'<missing>')||'|'||
-            COALESCE((extract(epoch FROM fee_rate_updated_at)*1000000)::numeric(30,0)::text,'<missing>')||
-            '|SUB2_BALANCE_1E8|v3','UTF8')),'hex') AS configuration_hash,
+        SELECT 'sub2api-economic-v4'::text AS projection_contract,cfg.contract_ok,
+          encode(sha256(convert_to(COALESCE(multiplier_value,'<invalid>')||'|'||
+            COALESCE(fee_rate_value,'<invalid>')||'|SUB2_BALANCE_1E8|v4','UTF8')),'hex') AS configuration_hash,
           payment_high.at AS payments_event_at,('payment_orders:'||payment_high.id)::text AS payments_cursor,
           usage_high.at AS usage_event_at,('usage_logs:'||usage_high.id)::text AS usage_cursor,
           credit_high.at AS credits_event_at,credit_high.cursor::text AS credits_cursor

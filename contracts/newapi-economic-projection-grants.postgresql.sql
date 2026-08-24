@@ -110,14 +110,17 @@ BEGIN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
         WITH cfg AS (
-          SELECT COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000')::text AS quota_per_unit,
-            COALESCE((SELECT value FROM public.options WHERE key='Price'),'1')::text AS price,
-            COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::text AS topup_group_ratio,
+          SELECT trim_scale(btrim(COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000'))::numeric)::text AS quota_per_unit,
+            trim_scale(btrim(COALESCE((SELECT value FROM public.options WHERE key='Price'),'1'))::numeric)::text AS price,
+            'ALL_GROUP_RATIOS_ONE'::text AS topup_group_ratio_semantics,
             ((SELECT count(*) FROM public.options WHERE key='QuotaPerUnit')<=1
-             AND COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000')='500000'
+             AND btrim(COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000'))::numeric=500000
              AND (SELECT count(*) FROM public.options WHERE key='Price')<=1
-             AND COALESCE((SELECT value FROM public.options WHERE key='Price'),'1')='1'
-             AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb) WHERE value::numeric<>1)) AS contract_ok
+             AND btrim(COALESCE((SELECT value FROM public.options WHERE key='Price'),'1'))::numeric=1
+             AND (SELECT count(*) FROM public.options WHERE key='TopupGroupRatio')<=1
+             AND jsonb_typeof(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb)='object'
+             AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb)
+               WHERE value IS NULL OR btrim(value)::numeric<>1)) AS contract_ok
         ), stats AS (
           SELECT count(*)::bigint AS total_rows,COALESCE(max(id)-min(id)+1-count(*),0)::bigint AS gap_count,
             count(*) FILTER (WHERE type=2 AND quota<0)::bigint AS invalid_rows FROM public.logs
@@ -131,7 +134,7 @@ BEGIN
                WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
                WHEN stats.invalid_rows>0 THEN 'consume_log_contract_invalid' ELSE '' END::text AS blocked_reason,
           stats.total_rows,stats.gap_count,
-          encode(sha256(convert_to(quota_per_unit||'|'||price||'|'||topup_group_ratio||'|NEWAPI_QUOTA|rc.25|v3','UTF8')),'hex') AS configuration_hash
+          encode(sha256(convert_to(quota_per_unit||'|'||price||'|'||topup_group_ratio_semantics||'|NEWAPI_QUOTA|rc.25|v4','UTF8')),'hex') AS configuration_hash
         FROM cfg,stats,logging
       ) result
     $query$;
@@ -176,14 +179,17 @@ BEGIN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
         WITH cfg AS (
-          SELECT COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000')::text AS quota_per_unit,
-            COALESCE((SELECT value FROM public.options WHERE key='Price'),'1')::text AS price,
-            COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::text AS topup_group_ratio,
+          SELECT trim_scale(btrim(COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000'))::numeric)::text AS quota_per_unit,
+            trim_scale(btrim(COALESCE((SELECT value FROM public.options WHERE key='Price'),'1'))::numeric)::text AS price,
+            'ALL_GROUP_RATIOS_ONE'::text AS topup_group_ratio_semantics,
             ((SELECT count(*) FROM public.options WHERE key='QuotaPerUnit')<=1
-             AND COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000')='500000'
+             AND btrim(COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000'))::numeric=500000
              AND (SELECT count(*) FROM public.options WHERE key='Price')<=1
-             AND COALESCE((SELECT value FROM public.options WHERE key='Price'),'1')='1'
-             AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb) WHERE value::numeric<>1)) AS contract_ok
+             AND btrim(COALESCE((SELECT value FROM public.options WHERE key='Price'),'1'))::numeric=1
+             AND (SELECT count(*) FROM public.options WHERE key='TopupGroupRatio')<=1
+             AND jsonb_typeof(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb)='object'
+             AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb)
+               WHERE value IS NULL OR btrim(value)::numeric<>1)) AS contract_ok
         ), c AS (
           SELECT count(*)::bigint n,COALESCE(max(id)-min(id)+1-count(*),0)::bigint gaps,
             count(*) FILTER (WHERE quota_awarded<=0)::bigint invalid FROM public.checkins
@@ -197,7 +203,7 @@ BEGIN
           CASE WHEN NOT cfg.contract_ok THEN 'wallet_configuration_invalid'
                WHEN stats.invalid_rows>0 THEN 'credit_contract_invalid' ELSE '' END::text AS blocked_reason,
           stats.total_rows,stats.gap_count,
-          encode(sha256(convert_to(quota_per_unit||'|'||price||'|'||topup_group_ratio||'|NEWAPI_QUOTA|rc.25|v3','UTF8')),'hex') AS configuration_hash
+          encode(sha256(convert_to(quota_per_unit||'|'||price||'|'||topup_group_ratio_semantics||'|NEWAPI_QUOTA|rc.25|v4','UTF8')),'hex') AS configuration_hash
         FROM cfg,stats
       ) result
     $query$;
@@ -265,14 +271,17 @@ BEGIN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
         WITH cfg AS (
-          SELECT COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000')::text AS quota_per_unit,
-            COALESCE((SELECT value FROM public.options WHERE key='Price'),'1')::text AS price,
-            COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::text AS topup_group_ratio,
+          SELECT trim_scale(btrim(COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000'))::numeric)::text AS quota_per_unit,
+            trim_scale(btrim(COALESCE((SELECT value FROM public.options WHERE key='Price'),'1'))::numeric)::text AS price,
+            'ALL_GROUP_RATIOS_ONE'::text AS topup_group_ratio_semantics,
             ((SELECT count(*) FROM public.options WHERE key='QuotaPerUnit')<=1
-             AND COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000')='500000'
+             AND btrim(COALESCE((SELECT value FROM public.options WHERE key='QuotaPerUnit'),'500000'))::numeric=500000
              AND (SELECT count(*) FROM public.options WHERE key='Price')<=1
-             AND COALESCE((SELECT value FROM public.options WHERE key='Price'),'1')='1'
-             AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb) WHERE value::numeric<>1)
+             AND btrim(COALESCE((SELECT value FROM public.options WHERE key='Price'),'1'))::numeric=1
+             AND (SELECT count(*) FROM public.options WHERE key='TopupGroupRatio')<=1
+             AND jsonb_typeof(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb)='object'
+             AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(COALESCE((SELECT value FROM public.options WHERE key='TopupGroupRatio'),'{}')::jsonb)
+               WHERE value IS NULL OR btrim(value)::numeric<>1)
              AND (SELECT count(*) FROM public.options WHERE key='LogConsumeEnabled')<=1
              AND COALESCE((SELECT value FROM public.options WHERE key='LogConsumeEnabled'),'true')='true') AS contract_ok
         ), payment_high AS (
@@ -289,8 +298,8 @@ BEGIN
             to_timestamp(GREATEST(COALESCE((SELECT max(created_at) FROM public.checkins),0),
               COALESCE((SELECT max(redeemed_time) FROM public.redemptions),0))) AS at
         )
-        SELECT 'newapi-economic-rc25-v3'::text AS projection_contract,cfg.contract_ok,
-          encode(sha256(convert_to(quota_per_unit||'|'||price||'|'||topup_group_ratio||'|NEWAPI_QUOTA|rc.25|v3','UTF8')),'hex') AS configuration_hash,
+        SELECT 'newapi-economic-rc25-v4'::text AS projection_contract,cfg.contract_ok,
+          encode(sha256(convert_to(quota_per_unit||'|'||price||'|'||topup_group_ratio_semantics||'|NEWAPI_QUOTA|rc.25|v4','UTF8')),'hex') AS configuration_hash,
           COALESCE(payment_high.at,transaction_timestamp()) AS payments_event_at,payment_high.cursor::text AS payments_cursor,
           usage_high.at AS usage_event_at,usage_high.cursor::text AS usage_cursor,
           COALESCE(credit_high.at,transaction_timestamp()) AS credits_event_at,credit_high.cursor::text AS credits_cursor

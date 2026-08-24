@@ -387,8 +387,8 @@ func verifyEligibilitySourceManifests(ctx context.Context, store *postgresstore.
 		WHERE policy.singleton_id=1 AND (
 			scm.cutover_at>=policy.eligibility_start_at
 			OR scm.database_clock>=policy.eligibility_start_at
-			OR (si.source_type='sub2api' AND scm.projection_contract<>'sub2api-economic-v3')
-			OR (si.source_type='newapi' AND scm.projection_contract<>'newapi-economic-rc25-v3')
+			OR (si.source_type='sub2api' AND scm.projection_contract<>'sub2api-economic-v4')
+			OR (si.source_type='newapi' AND scm.projection_contract<>'newapi-economic-rc25-v4')
 			OR scm.projection_contract='fixture-v3'
 			OR scm.signing_key_id='fixture'
 			OR scm.source_runtime_version='fixture-runtime'

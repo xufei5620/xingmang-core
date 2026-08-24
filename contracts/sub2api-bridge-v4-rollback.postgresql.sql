@@ -76,10 +76,10 @@ BEGIN
   IF EXISTS (
     WITH declared(table_name,column_name) AS (VALUES
       ('payment_orders','id'),('payment_orders','user_id'),('payment_orders','status'),('payment_orders','order_type'),
-      ('payment_orders','amount'),('payment_orders','pay_amount'),('payment_orders','refund_amount'),
+      ('payment_orders','amount'),('payment_orders','pay_amount'),('payment_orders','fee_rate'),('payment_orders','refund_amount'),
       ('payment_orders','completed_at'),('payment_orders','refund_at'),('payment_orders','created_at'),('payment_orders','updated_at'),
       ('payment_orders','payment_type'),('payment_orders','provider_key'),('payment_orders','provider_snapshot'),('payment_orders','recharge_code'),
-      ('settings','key'),('settings','value'),('settings','updated_at'),
+      ('settings','key'),('settings','value'),
       ('auth_identities','id'),('auth_identities','user_id'),('auth_identities','provider_type'),('auth_identities','provider_key'),
       ('auth_identities','provider_subject'),('auth_identities','verified_at'),('auth_identities','issuer'),
       ('auth_identities','created_at'),('auth_identities','updated_at'),

@@ -328,6 +328,67 @@ type BalanceDBConnector struct {
 	Now      func() time.Time
 }
 
+type economicContractQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func checkLiveEconomicContract(ctx context.Context, queryer economicContractQueryer, source, stream string, manifest CutoverManifest) error {
+	if queryer == nil || manifest.SourceType != source || !hexHashPattern.MatchString(manifest.ConfigurationHash) {
+		return errors.New("live economic contract configuration is invalid")
+	}
+	expectedContract, err := expectedEconomicProjectionContract(source)
+	if err != nil || manifest.ProjectionContract != expectedContract {
+		return errors.New("cutover projection contract does not match source type")
+	}
+	operation := "health"
+	recordDefinition := "contract_ok boolean,configuration_hash text"
+	if stream == StreamBalances {
+		operation = "contract"
+		recordDefinition = "projection_contract text,contract_ok boolean,configuration_hash text"
+	} else if stream != StreamPayments && stream != StreamUsage && stream != StreamCredits {
+		return errors.New("live economic contract stream is invalid")
+	}
+	relation, err := bridgeJSONRecordRelation(source, stream, operation, recordDefinition)
+	if err != nil {
+		return err
+	}
+	request, err := marshalBridgeRequest(nil)
+	if err != nil {
+		return err
+	}
+	var liveContract, liveHash string
+	var contractOK bool
+	query := `SELECT contract_ok,configuration_hash FROM ` + relation
+	destinations := []any{&contractOK, &liveHash}
+	if stream == StreamBalances {
+		query = `SELECT projection_contract,contract_ok,configuration_hash FROM ` + relation
+		destinations = []any{&liveContract, &contractOK, &liveHash}
+	}
+	if err = queryer.QueryRowContext(ctx, query, request).Scan(destinations...); err != nil {
+		return fmt.Errorf("read live economic projection contract: %w", err)
+	}
+	if !contractOK {
+		return errors.New("live economic projection contract is unhealthy")
+	}
+	if stream == StreamBalances && liveContract != manifest.ProjectionContract {
+		return errors.New("live economic projection contract drifted")
+	}
+	if liveHash != manifest.ConfigurationHash {
+		return errors.New("live economic configuration hash drifted")
+	}
+	return nil
+}
+
+// CheckLiveEconomicContract is the read-only V3 startup canary. It binds the
+// currently callable bridge semantics to the encrypted, create-only cutover
+// manifest before a production process is allowed to start its runner.
+func CheckLiveEconomicContract(ctx context.Context, database *sql.DB, source, stream string, manifest CutoverManifest) error {
+	if database == nil {
+		return errors.New("live economic contract database is required")
+	}
+	return checkLiveEconomicContract(ctx, database, source, stream, manifest)
+}
+
 func (c *BalanceDBConnector) SourceType() string {
 	if c == nil {
 		return ""
@@ -343,17 +404,7 @@ func (c *BalanceDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPag
 	if err := validateScanRequest(req); err != nil {
 		return ScanPage{}, err
 	}
-	contractRelation, relationErr := bridgeJSONRecordRelation(c.Source, StreamBalances, "contract", "contract_ok boolean,configuration_hash text")
-	if relationErr != nil {
-		return ScanPage{}, relationErr
-	}
-	request, requestErr := marshalBridgeRequest(nil)
-	if requestErr != nil {
-		return ScanPage{}, requestErr
-	}
-	var currentHash string
-	var contractOK bool
-	if err := c.DB.QueryRowContext(ctx, `SELECT contract_ok,configuration_hash FROM `+contractRelation, request).Scan(&contractOK, &currentHash); err != nil || !contractOK || currentHash != c.Manifest.ConfigurationHash {
+	if err := checkLiveEconomicContract(ctx, c.DB, c.Source, StreamBalances, c.Manifest); err != nil {
 		return ScanPage{}, errors.New("balance projection configuration drifted or is unhealthy")
 	}
 	cursor := req.Cursor
@@ -495,20 +546,14 @@ func (c *BalanceDBConnector) captureReconciliation(ctx context.Context) (Balance
 	if err = tx.QueryRowContext(ctx, `SELECT transaction_timestamp()`).Scan(&asOf); err != nil {
 		return BalanceSnapshot{}, err
 	}
-	contractRelation, err := bridgeJSONRecordRelation(c.Source, StreamBalances, "contract", "contract_ok boolean,configuration_hash text")
+	if err = checkLiveEconomicContract(ctx, tx, c.Source, StreamBalances, c.Manifest); err != nil {
+		return BalanceSnapshot{}, errors.New("balance snapshot configuration drifted or is unhealthy")
+	}
+	balanceRelation, err := bridgeJSONRecordRelation(c.Source, StreamBalances, "rows", "user_id bigint,balance_service_units text,balance_negative boolean")
 	if err != nil {
 		return BalanceSnapshot{}, err
 	}
 	request, err := marshalBridgeRequest(nil)
-	if err != nil {
-		return BalanceSnapshot{}, err
-	}
-	var contractOK bool
-	var configurationHash string
-	if err = tx.QueryRowContext(ctx, `SELECT contract_ok,configuration_hash FROM `+contractRelation, request).Scan(&contractOK, &configurationHash); err != nil || !contractOK || configurationHash != c.Manifest.ConfigurationHash {
-		return BalanceSnapshot{}, errors.New("balance snapshot configuration drifted or is unhealthy")
-	}
-	balanceRelation, err := bridgeJSONRecordRelation(c.Source, StreamBalances, "rows", "user_id bigint,balance_service_units text,balance_negative boolean")
 	if err != nil {
 		return BalanceSnapshot{}, err
 	}

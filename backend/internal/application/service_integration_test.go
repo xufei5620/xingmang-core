@@ -63,7 +63,7 @@ func TestBaselineMemberReconciliationWaitsWithoutConsumingRetryBudget(t *testing
 		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
 		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
 		baseline_row_count,signing_key_id)
-		VALUES($1,$2,$3,$3,'wait-v3','sub2api-economic-v3',$4,'SUB2_BALANCE_1E8',
+		VALUES($1,$2,$3,$3,'wait-v3','sub2api-economic-v4',$4,'SUB2_BALANCE_1E8',
 		'p0','u0','c0','b0',$5,$5,1,'wait-key')`, sourceID, manifestHash,
 		now.Add(-25*time.Hour), configHash, snapshotHash); err != nil {
 		t.Fatal(err)

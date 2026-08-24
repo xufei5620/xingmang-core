@@ -96,11 +96,76 @@ func TestSub2APIBridgePreservesFinancialAndCutoverSemantics(t *testing.T) {
 		t.Fatalf("configuration hash changed by timezone utc=%q tokyo=%q err=%v", utcHash, tokyoHash, err)
 	}
 	_, _ = admin.ExecContext(ctx, `SET TIME ZONE 'UTC'`)
+	if _, err = admin.ExecContext(ctx, `UPDATE public.settings SET
+		value=CASE key WHEN 'BALANCE_RECHARGE_MULTIPLIER' THEN '1.000000' ELSE '0.0000' END,
+		updated_at=now()+interval '1 hour'
+		WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')`); err != nil {
+		t.Fatal(err)
+	}
+	var rewrittenHash string
+	if err = readSub2HealthHash(ctx, admin).Scan(&rewrittenHash); err != nil || rewrittenHash != utcHash {
+		t.Fatalf("equivalent Sub2 setting rewrite changed semantic hash before=%q after=%q err=%v", utcHash, rewrittenHash, err)
+	}
+	var timestampCrossed bool
+	var rewrittenUnits sql.NullString
+	if err = admin.QueryRowContext(ctx, `SELECT
+		(SELECT max(updated_at) FROM public.settings WHERE key='BALANCE_RECHARGE_MULTIPLIER')>
+		(SELECT completed_at FROM public.payment_orders WHERE id=1),wallet_cash_service_units
+		FROM invoice_bridge.sub2api_payments_v4('page',
+		'{"cutover":"2000-01-01T00:00:00Z","position_at":"2000-01-01T00:00:00Z","position_id":0,"ceiling_at":"2100-01-01T00:00:00Z","ceiling_id":1,"limit":10}'::jsonb) bridge(payload)
+		CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(source_id bigint,wallet_cash_service_units text)
+		WHERE source_id=1`).Scan(&timestampCrossed, &rewrittenUnits); err != nil || !timestampCrossed ||
+		!rewrittenUnits.Valid || rewrittenUnits.String != "1000000000" {
+		t.Fatalf("same-value timestamp rewrite changed per-order wallet proof crossed=%t units=%#v err=%v", timestampCrossed, rewrittenUnits, err)
+	}
+	if _, err = admin.ExecContext(ctx, `UPDATE public.settings SET value='0.01' WHERE key='RECHARGE_FEE_RATE'`); err != nil {
+		t.Fatal(err)
+	}
+	var changedFeeHash string
+	if err = readSub2HealthHash(ctx, admin).Scan(&changedFeeHash); err != nil || changedFeeHash == utcHash {
+		t.Fatalf("real Sub2 fee change did not change semantic hash before=%q after=%q err=%v", utcHash, changedFeeHash, err)
+	}
+	for _, invalidFee := range []string{"-0.01", "101", "1.234"} {
+		if _, err = admin.ExecContext(ctx, `UPDATE public.settings SET value=$1 WHERE key='RECHARGE_FEE_RATE'`, invalidFee); err != nil {
+			t.Fatal(err)
+		}
+		if err = admin.QueryRowContext(ctx, `SELECT contract_ok
+			FROM invoice_bridge.sub2api_usage_v4('health','{}'::jsonb) bridge(payload)
+			CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(contract_ok boolean)`).Scan(&healthy); err != nil || healthy {
+			t.Fatalf("out-of-contract Sub2 fee %q did not fail closed healthy=%t err=%v", invalidFee, healthy, err)
+		}
+	}
+	if _, err = admin.ExecContext(ctx, `UPDATE public.settings SET value='invalid' WHERE key='RECHARGE_FEE_RATE'`); err != nil {
+		t.Fatal(err)
+	}
+	if err = admin.QueryRowContext(ctx, `SELECT contract_ok
+		FROM invoice_bridge.sub2api_usage_v4('health','{}'::jsonb) bridge(payload)
+		CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(contract_ok boolean)`).Scan(&healthy); err != nil || healthy {
+		t.Fatalf("invalid Sub2 fee did not fail closed healthy=%t err=%v", healthy, err)
+	}
+	if _, err = admin.ExecContext(ctx, `UPDATE public.settings SET value=CASE key
+		WHEN 'BALANCE_RECHARGE_MULTIPLIER' THEN '1.00' ELSE '0.00' END
+		WHERE key IN ('BALANCE_RECHARGE_MULTIPLIER','RECHARGE_FEE_RATE')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = admin.ExecContext(ctx, `UPDATE public.settings SET value='2.0'
+		WHERE key='BALANCE_RECHARGE_MULTIPLIER'`); err != nil {
+		t.Fatal(err)
+	}
+	if err = admin.QueryRowContext(ctx, `SELECT contract_ok
+		FROM invoice_bridge.sub2api_usage_v4('health','{}'::jsonb) bridge(payload)
+		CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(contract_ok boolean)`).Scan(&healthy); err != nil || healthy {
+		t.Fatalf("non-unit Sub2 multiplier did not fail closed healthy=%t err=%v", healthy, err)
+	}
+	if _, err = admin.ExecContext(ctx, `UPDATE public.settings SET value='1.00'
+		WHERE key='BALANCE_RECHARGE_MULTIPLIER'`); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err = admin.ExecContext(ctx, `INSERT INTO public.payment_orders VALUES
-		(2,1,'COMPLETED','balance',10,10,0,now(),NULL,now(),now(),'stripe','stripe','{"schema_version":"2","provider_key":"stripe","currency":"USD"}',NULL),
-		(3,1,'COMPLETED','balance',10,10,0,now(),NULL,now(),now(),'unknown','unknown','{}',NULL),
-		(4,1,'COMPLETED','balance',10,10,0,now(),NULL,now(),now(),'epay','easypay','{"schema_version":"2","provider_key":"easypay","currency":"invalid"}',NULL)`); err != nil {
+		(2,1,'COMPLETED','balance',10,10,0,0,now(),NULL,now(),now(),'stripe','stripe','{"schema_version":"2","provider_key":"stripe","currency":"USD"}',NULL),
+		(3,1,'COMPLETED','balance',10,10,0,0,now(),NULL,now(),now(),'unknown','unknown','{}',NULL),
+		(4,1,'COMPLETED','balance',10,10,0,0,now(),NULL,now(),now(),'epay','easypay','{"schema_version":"2","provider_key":"easypay","currency":"invalid"}',NULL)`); err != nil {
 		t.Fatal(err)
 	}
 	var unsupported, blocked int64
@@ -123,6 +188,27 @@ func TestSub2APIBridgePreservesFinancialAndCutoverSemantics(t *testing.T) {
 		t.Fatalf("fixed-CNY invalid-currency row ceiling/page classification drifted count=%d err=%v", fallbackPageCount, err)
 	}
 	_, _ = admin.ExecContext(ctx, `DELETE FROM public.payment_orders WHERE id IN (2,3)`)
+	if _, err = admin.ExecContext(ctx, `INSERT INTO public.payment_orders VALUES
+		(5,1,'COMPLETED','balance',10,10.34,3.33,0,now(),NULL,now(),now(),'epay','easypay','{"schema_version":"2","provider_key":"easypay","currency":"CNY"}',NULL),
+		(6,1,'COMPLETED','balance',20,10.34,3.33,0,now(),NULL,now(),now(),'epay','easypay','{"schema_version":"2","provider_key":"easypay","currency":"CNY"}',NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, expectation := range []struct {
+		id    int
+		valid bool
+		units string
+	}{{id: 5, valid: true, units: "1000000000"}, {id: 6, valid: false}} {
+		var walletUnits sql.NullString
+		if err = admin.QueryRowContext(ctx, `SELECT wallet_cash_service_units
+			FROM invoice_bridge.sub2api_payments_v4('page',
+			'{"cutover":"2000-01-01T00:00:00Z","position_at":"2000-01-01T00:00:00Z","position_id":0,"ceiling_at":"2100-01-01T00:00:00Z","ceiling_id":6,"limit":10}'::jsonb) bridge(payload)
+			CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(source_id bigint,wallet_cash_service_units text)
+			WHERE source_id=$1`, expectation.id).Scan(&walletUnits); err != nil || walletUnits.Valid != expectation.valid ||
+			(expectation.valid && walletUnits.String != expectation.units) {
+			t.Fatalf("per-order CNY fee proof id=%d units=%#v err=%v", expectation.id, walletUnits, err)
+		}
+	}
+	_, _ = admin.ExecContext(ctx, `DELETE FROM public.payment_orders WHERE id IN (5,6)`)
 
 	cutoverReader := openBridgeReader(t, configuration, sourceagent.SourceSub2API, sourceagent.StreamBalances)
 	defer cutoverReader.Close()
@@ -140,6 +226,14 @@ func TestSub2APIBridgePreservesFinancialAndCutoverSemantics(t *testing.T) {
 	_, baseline, err := sourceagent.LoadAndCheckCutover(ctx, manifestStore, snapshotStore, captured.SourceID, captured.SourceType, captured.SourceRuntime)
 	if err != nil || len(baseline.Rows) != 2 || !baseline.Rows[1].BalanceNegative {
 		t.Fatalf("encrypted cutover baseline=%#v err=%v", baseline.Rows, err)
+	}
+	for _, stream := range []string{sourceagent.StreamPayments, sourceagent.StreamUsage, sourceagent.StreamCredits, sourceagent.StreamBalances} {
+		reader := openBridgeReader(t, configuration, sourceagent.SourceSub2API, stream)
+		checkErr := sourceagent.CheckLiveEconomicContract(ctx, reader, sourceagent.SourceSub2API, stream, captured)
+		_ = reader.Close()
+		if checkErr != nil {
+			t.Fatalf("live V3 check-db contract rejected stream=%s captured configuration: %v", stream, checkErr)
+		}
 	}
 	if _, err = sourceagent.CaptureCutover(ctx, cutoverReader, sourceagent.CutoverCaptureConfig{
 		SourceID: captured.SourceID, SourceType: captured.SourceType, SourceRuntime: captured.SourceRuntime,
@@ -174,11 +268,23 @@ func TestNewAPIBridgePreservesTransitionSafetyAndConfigurationDrift(t *testing.T
 		CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(configuration_hash text)`).Scan(&hash); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = admin.ExecContext(ctx, `UPDATE public.options SET value=CASE key
+		WHEN 'QuotaPerUnit' THEN '500000.000' WHEN 'Price' THEN '1.0000'
+		ELSE '{ "vip": 1.0, "default": 1, "new-group": 1.000 }' END
+		WHERE key IN ('QuotaPerUnit','Price','TopupGroupRatio')`); err != nil {
+		t.Fatal(err)
+	}
+	var equivalentHash string
+	if err = admin.QueryRowContext(ctx, `SELECT configuration_hash
+		FROM invoice_bridge.newapi_payments_v4('health','{}'::jsonb) bridge(payload)
+		CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(configuration_hash text)`).Scan(&equivalentHash); err != nil || equivalentHash != hash {
+		t.Fatalf("equivalent New API numeric/group configuration changed semantic hash before=%q after=%q err=%v", hash, equivalentHash, err)
+	}
 	cutover := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
 	manifest := sourceagent.CutoverManifest{SchemaVersion: 1,
 		SourceID: "10000000-0000-4000-8000-000000000002", SourceType: sourceagent.SourceNewAPI,
 		SourceRuntime: "v1.0.0-rc.25", CutoverAt: cutover.Format(time.RFC3339Nano), DatabaseClock: cutover.Format(time.RFC3339Nano),
-		ProjectionContract: "newapi-economic-rc25-v3", ConfigurationHash: hash, UnitCode: "NEWAPI_QUOTA",
+		ProjectionContract: "newapi-economic-rc25-v4", ConfigurationHash: hash, UnitCode: "NEWAPI_QUOTA",
 		SigningKeyID: "key-1", BaselineSnapshotID: strings.Repeat("b", 64), BaselineRowCount: "2",
 		HighWaters: map[string]sourceagent.SourceHighWater{
 			sourceagent.StreamPayments: {EventTime: cutover.Format(time.RFC3339Nano), Cursor: "subscription_orders:1;top_ups:4"},
@@ -187,6 +293,14 @@ func TestNewAPIBridgePreservesTransitionSafetyAndConfigurationDrift(t *testing.T
 			sourceagent.StreamBalances: {EventTime: cutover.Format(time.RFC3339Nano), Cursor: "balance_snapshot:0"},
 		}}
 	manifest.ManifestHash = bridgeManifestHash(t, manifest)
+	for _, stream := range []string{sourceagent.StreamPayments, sourceagent.StreamUsage, sourceagent.StreamCredits, sourceagent.StreamBalances} {
+		reader := openBridgeReader(t, configuration, sourceagent.SourceNewAPI, stream)
+		checkErr := sourceagent.CheckLiveEconomicContract(ctx, reader, sourceagent.SourceNewAPI, stream, manifest)
+		_ = reader.Close()
+		if checkErr != nil {
+			t.Fatalf("live V3 check-db contract rejected stream=%s equivalent configuration: %v", stream, checkErr)
+		}
+	}
 
 	if _, err = admin.ExecContext(ctx, `UPDATE public.redemptions SET status=3,used_user_id=1,redeemed_time=extract(epoch from now()-interval '5 minutes')::bigint WHERE id=5`); err != nil {
 		t.Fatal(err)
@@ -243,9 +357,23 @@ func TestNewAPIBridgePreservesTransitionSafetyAndConfigurationDrift(t *testing.T
 	if _, err = admin.ExecContext(ctx, `UPDATE public.options SET value='{"default":1.5}' WHERE key='TopupGroupRatio'`); err != nil {
 		t.Fatal(err)
 	}
+	if liveErr := sourceagent.CheckLiveEconomicContract(ctx, admin, sourceagent.SourceNewAPI, sourceagent.StreamPayments, manifest); liveErr == nil {
+		t.Fatal("live V3 check-db contract accepted real ratio drift")
+	}
 	drift, err := credits.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanFull, Limit: 10})
 	if err != nil || !drift.ReconcileBlocked || drift.NextCursor.WatermarkAt != manifest.CutoverAt {
 		t.Fatalf("configuration drift advanced watermark page=%#v err=%v", drift, err)
+	}
+	_, _ = admin.ExecContext(ctx, `UPDATE public.options SET value='{"default":1}' WHERE key='TopupGroupRatio'`)
+	_, invalidJSONErr := admin.ExecContext(ctx, `UPDATE public.options SET value='not-json' WHERE key='TopupGroupRatio'`)
+	if invalidJSONErr != nil {
+		t.Fatal(invalidJSONErr)
+	}
+	var invalidHealthy bool
+	if queryErr := admin.QueryRowContext(ctx, `SELECT contract_ok
+		FROM invoice_bridge.newapi_payments_v4('health','{}'::jsonb) bridge(payload)
+		CROSS JOIN LATERAL jsonb_to_record(bridge.payload) projected(contract_ok boolean)`).Scan(&invalidHealthy); queryErr == nil {
+		t.Fatal("invalid New API group-ratio JSON did not fail closed")
 	}
 	_, _ = admin.ExecContext(ctx, `UPDATE public.options SET value='{"default":1}' WHERE key='TopupGroupRatio'`)
 	_, _ = admin.ExecContext(ctx, `UPDATE public.options SET value='false' WHERE key='LogConsumeEnabled'`)

@@ -227,9 +227,9 @@ func (s *Store) RegisterCutoverManifest(ctx context.Context, manifest CutoverMan
 		}
 		return err
 	}
-	expectedContract := "sub2api-economic-v3"
+	expectedContract := "sub2api-economic-v4"
 	if sourceType == domain.SourceNewAPI {
-		expectedContract = "newapi-economic-rc25-v3"
+		expectedContract = "newapi-economic-rc25-v4"
 	}
 	if configuredRuntime != manifest.SourceRuntimeVersion || manifest.UnitCode != expectedUnitForSource(sourceType) ||
 		manifest.ProjectionContract != expectedContract {

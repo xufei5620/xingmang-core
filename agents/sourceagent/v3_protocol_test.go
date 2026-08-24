@@ -55,6 +55,21 @@ func TestV3PublishedExamplePassesReceiverValidator(t *testing.T) {
 	if _, err = NewValidator("10000000-0000-4000-8000-000000000001", StreamUsage).ValidateAndCommit(raw, SHA256Hex(raw)); err != nil {
 		t.Fatal(err)
 	}
+	var batch Batch
+	if err = json.Unmarshal(raw, &batch); err != nil || len(batch.Records) != 1 {
+		t.Fatalf("decode published V4-semantic example: records=%d err=%v", len(batch.Records), err)
+	}
+	record := batch.Records[0]
+	if record.EventID != "f4606a2c-a204-8cd2-9db6-25306220db85" ||
+		record.PayloadSHA256 != "ce56a1ae82d05613a94e2de8ee2c048c0b336e5c6c901281ce9e5fb5abc4c100" {
+		t.Fatalf("published V4-semantic fact vector drifted event=%s payload=%s", record.EventID, record.PayloadSHA256)
+	}
+	var payload UsageEventPayload
+	if err = json.Unmarshal(record.Payload, &payload); err != nil ||
+		payload.CutoverManifestHash != "44fbe682863296eb30d2ba90b749b8ceddf61677a8d18d401bb0d8876bfe6adb" ||
+		payload.ConfigurationHash != "23ea1ac7ae3bb0607ab8d836fc3ac2dc8b2756662a95bc21e139f8c48c138557" {
+		t.Fatalf("published V4-semantic manifest/config vector drifted payload=%#v err=%v", payload, err)
+	}
 }
 
 func testV3Manifest(t *testing.T) CutoverManifest {
@@ -62,7 +77,7 @@ func testV3Manifest(t *testing.T) CutoverManifest {
 	at := "2026-08-20T00:00:00Z"
 	value := CutoverManifest{SchemaVersion: cutoverSchemaVersion, SourceID: "10000000-0000-4000-8000-000000000001",
 		SourceType: SourceSub2API, SourceRuntime: "0.1.179", CutoverAt: at, DatabaseClock: at,
-		ProjectionContract: "sub2api-economic-v3", ConfigurationHash: SHA256Hex([]byte("config")),
+		ProjectionContract: "sub2api-economic-v4", ConfigurationHash: SHA256Hex([]byte("config")),
 		UnitCode: "SUB2_BALANCE_1E8", SigningKeyID: "key-1", BaselineSnapshotID: SHA256Hex([]byte("snapshot")), BaselineRowCount: "0",
 		HighWaters: map[string]SourceHighWater{
 			StreamPayments: {EventTime: at, Cursor: "payment_orders:10"},
@@ -121,7 +136,7 @@ func TestV3FactIdentityDoesNotDriftAcrossScanCycles(t *testing.T) {
 	if first.Batch.Records[0].EventID != second.Batch.Records[0].EventID || first.Batch.Records[0].PayloadSHA256 != second.Batch.Records[0].PayloadSHA256 {
 		t.Fatal("transport watermark or scan cycle changed immutable economic fact identity")
 	}
-	if first.Batch.Records[0].EventID != "a9eeea97-0d98-874e-8dc5-f211fe4e1da2" || first.Batch.Records[0].PayloadSHA256 != "aad078d8fcc00734c1d6a1958d33ee61363ccba4660f95e8c20650217d736c00" {
+	if first.Batch.Records[0].EventID != "5ddccd4c-543e-827c-af52-0adf86ae7e69" || first.Batch.Records[0].PayloadSHA256 != "571fbe694fee8c9c1714dc0baf2a61238e8b6014dafd4ca4d0a90d4edcdde025" {
 		t.Fatalf("V3 cross-language fact vector event=%s payload=%s", first.Batch.Records[0].EventID, first.Batch.Records[0].PayloadSHA256)
 	}
 }
@@ -145,7 +160,7 @@ func TestV3EntityStreamMatrixAndTombstoneFailClosed(t *testing.T) {
 
 func TestV3ManifestCanonicalHashAndVerifiedKeyBinding(t *testing.T) {
 	manifest := testV3Manifest(t)
-	if manifest.ManifestHash != "e83c5ba06912f46f1058fd9703db7b6849f9bed9125f61509842f34919fa5ae2" {
+	if manifest.ManifestHash != "1b9e2996f75d17a9e240e17282b2609d9b7e6dc306e097ea861f1f91452e7130" {
 		t.Fatalf("V3 canonical manifest vector=%s", manifest.ManifestHash)
 	}
 	projection := Projection{EntityType: EntityCutoverManifest, ExternalID: manifest.ManifestHash, ObservedAt: "2026-08-21T00:03:00Z", Operation: "upsert", Payload: manifest.Payload()}
@@ -243,7 +258,7 @@ func TestEncryptedCutoverStateIsAuthenticatedAndCreateOnly(t *testing.T) {
 func TestCutoverMustBeStrictlyBeforeEligibilityBoundary(t *testing.T) {
 	start := time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
 	manifest := CutoverManifest{
-		SourceType: SourceSub2API, ProjectionContract: "sub2api-economic-v3",
+		SourceType: SourceSub2API, ProjectionContract: "sub2api-economic-v4",
 		CutoverAt:     start.Add(-time.Microsecond).Format(time.RFC3339Nano),
 		DatabaseClock: start.Add(-time.Microsecond).Format(time.RFC3339Nano),
 	}

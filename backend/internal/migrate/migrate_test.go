@@ -202,6 +202,7 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	delete(all, "0009_consumption_eligibility_ledger.sql")
 	delete(all, "0010_eligibility_freeze_operations.sql")
 	delete(all, "0011_invoice_eligibility_policy.sql")
+	delete(all, "0012_economic_projection_contract_v4.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +223,7 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	withNine := migrationMapFS(t)
 	delete(withNine, "0010_eligibility_freeze_operations.sql")
 	delete(withNine, "0011_invoice_eligibility_policy.sql")
+	delete(withNine, "0012_economic_projection_contract_v4.sql")
 	if err = UpFS(ctx, pool, withNine); err != nil {
 		t.Fatal(err)
 	}
@@ -280,6 +282,7 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 
 	throughTen := migrationMapFS(t)
 	delete(throughTen, "0011_invoice_eligibility_policy.sql")
+	delete(throughTen, "0012_economic_projection_contract_v4.sql")
 	if err = UpFS(ctx, pool, throughTen); err != nil {
 		t.Fatal(err)
 	}
@@ -327,6 +330,57 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 	}
 	if _, err = pool.Exec(ctx, `ALTER TABLE source_cutover_manifests
 		ENABLE TRIGGER source_cutover_manifests_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	throughEleven := migrationMapFS(t)
+	delete(throughEleven, "0012_economic_projection_contract_v4.sql")
+	if err = UpFS(ctx, pool, throughEleven); err != nil {
+		t.Fatal(err)
+	}
+	prePolicy := time.Date(2026, time.August, 31, 15, 59, 59, 999999000, time.UTC)
+	if _, err = pool.Exec(ctx, `INSERT INTO source_cutover_manifests(
+		source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+		baseline_row_count,signing_key_id)
+		VALUES($1,repeat('a',64),$2,$2,'policy-test','sub2api-economic-v3',repeat('b',64),
+		'SUB2_BALANCE_1E8','p','u','c','b',repeat('c',64),repeat('c',64),1,'policy-key')`, sourceID, prePolicy); err != nil {
+		t.Fatal(err)
+	}
+	if contractErr := UpFS(ctx, pool, all); contractErr == nil ||
+		!strings.Contains(contractErr.Error(), "economic projection v4 migration requires an empty pre-launch financial ledger") {
+		t.Fatalf("populated v4 contract migration error=%v", contractErr)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations
+		WHERE name='0012_economic_projection_contract_v4.sql'`).Scan(&recorded); err != nil || recorded != 0 {
+		t.Fatalf("failed v4 migration record count=%d err=%v", recorded, err)
+	}
+	if _, err = pool.Exec(ctx, `ALTER TABLE source_cutover_manifests
+		DISABLE TRIGGER source_cutover_manifests_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `DELETE FROM source_cutover_manifests`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `ALTER TABLE source_cutover_manifests
+		ENABLE TRIGGER source_cutover_manifests_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO source_ingest_state(
+		source_instance_id,stream_id,sequence,last_batch_hash)
+		VALUES($1,'payments',1,repeat('d',64))`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if stateErr := UpFS(ctx, pool, all); stateErr == nil ||
+		!strings.Contains(stateErr.Error(), "economic projection v4 migration requires an empty pre-launch financial ledger") {
+		t.Fatalf("advanced source-state v4 migration error=%v", stateErr)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations
+		WHERE name='0012_economic_projection_contract_v4.sql'`).Scan(&recorded); err != nil || recorded != 0 {
+		t.Fatalf("advanced-state v4 migration record count=%d err=%v", recorded, err)
+	}
+	if _, err = pool.Exec(ctx, `UPDATE source_ingest_state
+		SET sequence=0,last_batch_hash=NULL WHERE source_instance_id=$1`, sourceID); err != nil {
 		t.Fatal(err)
 	}
 	if err = UpFS(ctx, pool, all); err != nil {
@@ -381,7 +435,7 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
 		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
 		baseline_row_count,signing_key_id)
-		VALUES($1,repeat('a',64),$2,$2,'policy-test','sub2api-economic-v3',repeat('b',64),
+		VALUES($1,repeat('a',64),$2,$2,'policy-test','sub2api-economic-v4',repeat('b',64),
 		'SUB2_BALANCE_1E8','p','u','c','b',repeat('c',64),repeat('c',64),1,'policy-key')`
 	for _, invalidCutover := range []time.Time{wantStart, wantStart.Add(time.Microsecond)} {
 		if _, boundaryErr := pool.Exec(ctx, postPolicyManifestInsert, sourceID, invalidCutover); boundaryErr == nil ||

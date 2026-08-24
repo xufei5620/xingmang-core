@@ -71,10 +71,10 @@ BEGIN
       'newapi_identities_v4'
     ];
     expected_function_hashes := ARRAY[
-      '5332f8ad2865322474c2a30dd7b75449b03ac21456ef0d8eaf9f288340329992',
-      '7f805eee577b9d6ae70bc5cad35bdd121a276030036922b7beaeb2ea26aca95a',
-      '0a561cbef74936b10a25eff0b814beae67b86d99d1380b6e95e0284aa057e972',
-      'fde0788da503cbb2267cdd9a14b0559ec8643f10ac6ce8ea0a9a02e174d2ad8f',
+      'd908e1ef57383ad10ccf0c4d2e266577e51a5e37a1684866ad5dd4f347c10dcf',
+      'ca68cbf1a9ce5eaacde3c52b2778f535bf3510b24c095150ed2bf7bd7fd8843a',
+      '307183eda0f2e6900ea9c7dd49194e499e9abfbbb07d308b1558769e257bd8ff',
+      '63ab9a5c45cb06267c59a6b8e105149679249fce94b7f73abefd85e6f856d484',
       'dd92d2fe4b37a8b22509d19507ebae1143dde9952a185a0a180336cc3ef4a7a1'
     ];
     expected_owner_columns := ARRAY[
@@ -140,18 +140,18 @@ BEGIN
       'sub2api_identities_v4'
     ];
     expected_function_hashes := ARRAY[
-      '93356b6df68addef132c13da5110b4388bcd82e7ac6d1da97afa049115ea502d',
-      '0e1f30730616eb0c8f778038b3e371f84fdf26d2e7f16437dc8dd5705ca26af6',
-      '1a82daeda746fc6b392fc00cf01dccc37fcc8a453ec937f60bb363af85fd15b3',
-      '944f96996ed3fef2d99d7eba839b83c0e418b38e739785ff2753421beb6e71ab',
+      '3ce533217c9535cec7ca711ccb2c011540f4976c414d4543bf3bb13f991c3df1',
+      '9291f757e1e0c5b0daa0c6858020e6f61f1cfd63f66cfbe4677b7c6dff3b1530',
+      '5683a8b5eec1b50f33740b63d6a361c003686fa6d90eafc92306882a337ab087',
+      '00697ce59c06a5a5715dfd4ac58df15e83f76418d8cc4f20ec904cf59d0b36d5',
       'ddf489610999697e9e6054730a5ec12eb78a42dd1e0e40dbb54dec9b469be6fa'
     ];
     expected_owner_columns := ARRAY[
       'payment_orders.id','payment_orders.user_id','payment_orders.status','payment_orders.order_type',
-      'payment_orders.amount','payment_orders.pay_amount','payment_orders.refund_amount',
+      'payment_orders.amount','payment_orders.pay_amount','payment_orders.fee_rate','payment_orders.refund_amount',
       'payment_orders.completed_at','payment_orders.refund_at','payment_orders.created_at','payment_orders.updated_at',
       'payment_orders.payment_type','payment_orders.provider_key','payment_orders.provider_snapshot','payment_orders.recharge_code',
-      'settings.key','settings.value','settings.updated_at',
+      'settings.key','settings.value',
       'auth_identities.id','auth_identities.user_id','auth_identities.provider_type','auth_identities.provider_key',
       'auth_identities.provider_subject','auth_identities.verified_at','auth_identities.issuer',
       'auth_identities.created_at','auth_identities.updated_at',

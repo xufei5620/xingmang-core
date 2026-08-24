@@ -271,7 +271,8 @@ docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.y
 Run a container-level readability preflight. For the API image, enter with its
 normal UID and require every mounted private secret to be readable but not
 group/world readable. Source agents perform the equivalent fail-closed checks
-during `check-db`/startup because their scratch image has no shell. Never assume
+during `check-db-static`, full `check-db`, and startup because their scratch
+image has no shell. Never assume
 a successful `docker compose config` proves secret readability or mode.
 The PostgreSQL-client `permissions` job also runs explicitly as UID/GID 10001;
 with all capabilities dropped, leaving it at the image's default root user
@@ -546,27 +547,32 @@ docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.y
   config --environment | grep -Fx 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00'
 ```
 
-Migration `0011_invoice_eligibility_policy.sql` is a deliberate one-way
-application/DB switch. The old image does not know migration 0011 and will
+Migrations `0011_invoice_eligibility_policy.sql` and
+`0012_economic_projection_contract_v4.sql` are a deliberate one-way
+application/DB switch. Migration 0012 changes the production manifest allowlist
+to normalized v4 financial-semantics contracts and refuses any accepted
+manifest, batch or financial-ledger row. The old image does not know these
+migrations and will
 refuse startup; an already-running old API also cannot write the new required
 snapshot columns. Before applying it:
 
 1. verify signed tag `v0.1.0-rc17-signed` peels to commit
    `b17dbe4ba2d1a2c4926d0156abf80c9207a74a54` and retain the RC17 release
-   manifest's exact rollback image IDs; verify the exact RC24 candidate images,
+   manifest's exact rollback image IDs; verify the exact RC25 candidate images,
    then resolve the existing-pair/first-install path below without starting
    invoice ingestion;
 2. stop the old `api`, `ingest-proxy`, and all source-agent containers and prove
    there are no invoice writer sessions;
 3. while they remain stopped, run
-   the reviewed RC24 `deploy/backup/backup.sh` with
+   the reviewed RC25 `deploy/backup/backup.sh` with
    `BACKUP_SCHEMA_MODE=pre-0011`; it records initial service state and must not
-   start a service that was stopped. Restore it with the RC24 drill and
+   start a service that was stopped. Restore it with the RC25 drill and
    `RESTORE_SCHEMA_MODE=pre-0011` plus the exact RC17
    `PRE_0011_TOOLS_IMAGE`, which proves migration 0011/policy table are absent
-   while the RC24 source agent validates all cutover/state contracts. Do not
-   use the older RC17 backup script here because it resumes every service
-   unconditionally;
+   while the source-agent image bound to the archived state generation validates
+   its cutover/state contracts. An old V3 pair requires the exact RC24 source
+   agent; the RC25 V4 agent must not be used to reinterpret it. Do not use the
+   older RC17 backup script here because it resumes every service unconditionally;
 4. verify `funding_lots`, `source_usage_events`, `source_credit_events`,
    `consumption_allocations`, `invoice_requests`, and
    `source_cutover_manifests` are all empty (the migration independently locks
@@ -577,20 +583,59 @@ snapshot columns. Before applying it:
 The pre-0011 rollback package requires all ten source-state directories and two
 create-only cutover pairs, so resolve one of these paths during item 1:
 
-- Existing pair: do not recapture it. With the exact RC24 source-agent image,
-  run offline `check-cutover` and all V3 `check-state` commands using
+- Existing V3 pair: do not recapture or reinterpret it. With the exact RC24
+  source-agent image bound to that state generation, run offline
+  `check-cutover` and all V3 `check-state` commands using
   `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`; require the exact source
-  contract, both clocks strictly before the boundary, and record the encrypted
-  file hashes in the pre-0011 backup ticket.
+  V3 contract, both clocks strictly before the boundary, and record the
+  encrypted file hashes in the pre-0011 backup ticket. This proves the rollback
+  generation only; it is not authorization to start the RC25 receiver.
 - First installation with no pair: before applying 0011, stop one upstream
   application, pass the explicit-container quiescence gate, and use the exact
-  RC24 source-agent image to capture that source once and immediately run
+  RC25 source-agent image to capture that source once and immediately run
   `check-cutover`; restart it, repeat for the other source, then initialize the
   ten empty durable state directories without starting ingestion. Now create
-  and restore-test the full backup in explicit RC24 pre-0011 mode while the
+  and restore-test the full backup in explicit RC25 pre-0011 mode while the
   services remain stopped. These same
   encrypted pairs are registered after migration; they are never captured
   again.
+
+### One-time unactivated v4 candidate replacement
+
+This is the only exception to reusing an existing pair, and it is not an
+in-place recapture. It applies only to the prelaunch RC24 state in which
+migration 0011 is present but the receiver has accepted no manifest or batch,
+all ten receiver and local sequences are zero, every pending spool is absent,
+all eligibility/watermark/financial tables are empty, and the current time is
+strictly before the immutable eligibility boundary. Migration 0012 independently
+locks and rechecks these conditions.
+
+1. Keep the verified pre-0011 package. Create, sign and restore-test a separate
+   post-0011 recovery point containing the unused RC24 state generation and
+   both old pairs. Its source-state check must use the exact RC24 source-agent
+   image recorded for that recovery generation, never RC25.
+2. Stop all source agents. Install the RC25 v4 semantic-fingerprint functions
+   through the reviewed wrapper and re-prove exact function hashes, roles,
+   ACLs and `pg_depend=0`. Run all ten `check-db-static` commands; full
+   `check-db` cannot pass against the old V3 pair and is forbidden at this step.
+3. Move the whole unused RC24 generation—ten state directories and its
+   `cutover` directory—to a read-only retired location and record ciphertext
+   hashes. Do not delete, overwrite or mount it. Point `SOURCE_STATE_ROOT` and
+   `SOURCE_CUTOVER_ROOT` at a new empty versioned generation.
+4. Stop New API alone, prove database quiescence and capture/check its new
+   create-only pair; run its five full `check-db` commands, then restart and
+   prove health. Repeat for Sub2API. Never stop both public upstream
+   applications at once. After both pairs exist, all ten full checks must have
+   passed against the new V4 generation.
+5. Initialize ten new state files and the two identity reconciliation files,
+   then repeat the sequence-zero/no-pending and cutover checks.
+6. Only after both pairs pass, apply migration 0012 and permissions while API,
+   ingest and agents remain stopped. Start balances first. The first accepted
+   batch permanently closes this replacement path.
+
+Do not roll the invoice database back merely to replace an unused file trust
+root. Never edit an old manifest, restore source-setting timestamps, reuse a
+partially written directory or apply this procedure after any ACK.
 
 The schema-mode controls are explicit and signed into metadata; all other
 backup/restore variables are the ones in section 11:
@@ -601,8 +646,8 @@ BACKUP_SCHEMA_MODE=pre-0011 BACKUP_QUIESCE_CONFIRMED=YES \
 
 RESTORE_SCHEMA_MODE=pre-0011 \
 PRE_0011_TOOLS_IMAGE='<exact RC17 tools image from its release manifest>' \
-INVOICE_TOOLS_IMAGE='<exact RC24 tools image>' \
-SOURCE_AGENT_IMAGE='<exact RC24 source-agent image>' \
+INVOICE_TOOLS_IMAGE='<exact RC25 tools image>' \
+SOURCE_AGENT_IMAGE='<exact RC24 source-agent image bound to this old V3 backup>' \
   bash deploy/backup/restore-drill.sh
 ```
 
@@ -710,7 +755,9 @@ The read roles must have `default_transaction_read_only=on`, a short statement
 timeout, no role inheritance and no raw SELECT/write/schema privilege. Each
 LOGIN role receives only `invoice_bridge` USAGE and its exact V4 function
 EXECUTE. The NOLOGIN owner alone holds exact source-column SELECT grants. Run
-the `bridge-v4` upgrade preflight and all five `check-db` commands per source;
+the `bridge-v4` upgrade preflight and all five `check-db-static` commands per
+source before cutover; after the create-only pair exists, run all five full
+`check-db` commands;
 then immediately encrypt/archive or securely delete the plaintext preserved-role
 file. The gate rejects function-body drift, RLS, unexpected ownership, raw
 caller ACL, schema CREATE and nonzero upstream relation dependencies.
@@ -881,7 +928,7 @@ ten signed heartbeats, so a health dependency would deadlock cold start.
 docker compose --env-file deploy/.env.production \
   -f deploy/docker-compose.prod.yml up -d --no-build api web ingest-proxy
 
-# First installation only: prove all ten DB roles.
+# Before any fresh V4 generation starts: prove all ten static and live checks.
 all_sources=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
 for service in "${all_sources[@]}"; do
   docker compose --env-file deploy/.env.production \
@@ -895,8 +942,8 @@ docker compose --env-file deploy/.env.production -f deploy/docker-compose.source
   --profile cutover run --rm --pull never sub2api-cutover-init check-cutover
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm --pull never newapi-cutover-init check-cutover
-# Verify persisted contracts are exactly sub2api-economic-v3 and
-# newapi-economic-rc25-v3; fixture-v3 is forbidden in production.
+# Verify persisted contracts are exactly sub2api-economic-v4 and
+# newapi-economic-rc25-v4; fixture-v3 is forbidden in production.
 
 # Initialize every independent cursor/sequence. Only V2 identities have a
 # deletion-reconciliation state file.
