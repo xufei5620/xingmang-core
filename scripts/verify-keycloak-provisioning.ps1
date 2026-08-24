@@ -51,52 +51,82 @@ function Wait-Until {
     throw $Failure
 }
 
-function Get-AdminToken {
-    param([int]$Port)
+function Initialize-AdminToken {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $request = @'
+set -eu
+tmp=/run/test-secrets/admin_token.tmp
+header_tmp=/run/test-secrets/admin_auth_header.tmp
+password_request=/run/test-secrets/admin_password_request.tmp
+trap 'rm -f "$tmp" "$header_tmp" "$password_request"' EXIT HUP INT TERM
+tr -d '\r\n' </run/test-secrets/bootstrap_password >"$password_request"
+chmod 0400 "$password_request"
+curl --fail --silent --show-error --request POST \
+  --max-filesize 1048576 --max-time 10 --proto '=http' \
+  --data-urlencode grant_type=password \
+  --data-urlencode client_id=admin-cli \
+  --data-urlencode "username=$BOOTSTRAP_USER" \
+  --data-urlencode "password@$password_request" \
+  http://keycloak:8080/realms/master/protocol/openid-connect/token \
+  | jq -er .access_token >"$tmp"
+test -s "$tmp"
+test "$(wc -l <"$tmp")" -eq 1
+token=$(cat "$tmp")
+test "${#token}" -ge 64
+test "${#token}" -le 262144
+printf '%s' "$token" | grep -Eq '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+printf 'Authorization: Bearer %s\n' "$token" >"$header_tmp"
+unset token
+chmod 0400 "$header_tmp"
+mv -f "$header_tmp" /run/test-secrets/admin_auth_header
+rm -f "$tmp"
+rm -f "$password_request"
+trap - EXIT HUP INT TERM
+'@
     do {
-        try {
-            $response = Invoke-RestMethod -Method Post -TimeoutSec 3 -Uri "http://127.0.0.1:$Port/realms/master/protocol/openid-connect/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
-                grant_type = 'password'
-                client_id = 'admin-cli'
-                username = $bootstrapUser
-                password = $bootstrapPassword
-            }
-            if (-not [string]::IsNullOrWhiteSpace($response.access_token)) {
-                return [string]$response.access_token
-            }
-        } catch {
-            # Docker Desktop may briefly withdraw a random published port.
-        }
+        & docker exec --env "BOOTSTRAP_USER=$bootstrapUser" $tools sh -ec $request *> $null
+        if ($LASTEXITCODE -eq 0) { return }
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'disposable Keycloak did not issue an admin token'
 }
 
 function Invoke-AdminGet {
-    param(
-        [int]$Port,
-        [string]$Token,
-        [string]$Path
-    )
+    param([string]$Path)
+    if ($Path -notmatch '^solov(?:[/?][A-Za-z0-9._~%?&=:+-]+)*$' -or
+        $Path.Contains('..') -or $Path -match '(?i)%2f|%5c') {
+        throw 'unsafe disposable Keycloak Admin REST path'
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $request = @'
+set -eu
+curl --header @/run/test-secrets/admin_auth_header \
+  --fail --silent --show-error --max-filesize 1048576 --max-time 10 --proto '=http' \
+  "http://keycloak:8080/admin/realms/${ADMIN_PATH}"
+'@
     do {
-        try {
-            return Invoke-RestMethod -Method Get -TimeoutSec 3 -Uri "http://127.0.0.1:$Port/admin/realms/$Path" -Headers @{ Authorization = "Bearer $Token" }
-        } catch {
-            Start-Sleep -Milliseconds 500
+        $output = @(& docker exec --env "ADMIN_PATH=$Path" $tools sh -ec $request 2>$null)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            try {
+                $jsonText = ($output | Out-String).Trim()
+                if (-not ($jsonText.StartsWith('{', [StringComparison]::Ordinal) -or
+                    $jsonText.StartsWith('[', [StringComparison]::Ordinal))) {
+                    throw 'Admin GET JSON root is not an object or array'
+                }
+                return $jsonText | ConvertFrom-Json
+            } catch {
+                throw "Admin GET returned invalid JSON for $Path"
+            }
         }
+        Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "Admin GET failed for $Path"
 }
 
 function Invoke-AdminGetArray {
-    param(
-        [int]$Port,
-        [string]$Token,
-        [string]$Path
-    )
-    $value = Invoke-AdminGet -Port $Port -Token $Token -Path $Path
+    param([string]$Path)
+    $value = Invoke-AdminGet -Path $Path
     foreach ($item in @($value)) { Write-Output $item }
 }
 
@@ -155,12 +185,8 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
         return $LASTEXITCODE -eq 0
     }
 
-    $portReservation = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-    $portReservation.Start()
-    $hostPort = ([Net.IPEndPoint]$portReservation.LocalEndpoint).Port
-    $portReservation.Stop()
     Invoke-Docker run --detach --name $keycloak --network $network --network-alias keycloak `
-        --publish "127.0.0.1:${hostPort}:8080" --entrypoint /opt/keycloak/bin/kc.sh `
+        --entrypoint /opt/keycloak/bin/kc.sh `
         --env 'KC_DB=postgres' `
         --env 'KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak' `
         --env 'KC_DB_USERNAME=keycloak_app' --env 'KC_DB_PASSWORD=fixture-db-password' `
@@ -170,14 +196,6 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
         --env "KC_BOOTSTRAP_ADMIN_PASSWORD=$bootstrapPassword" `
         $KeycloakImage start --optimized | Out-Null
     $keycloakCreated = $true
-    Wait-Until -Seconds 180 -Failure 'disposable Keycloak 26.7.2 did not become ready' -Condition {
-        try {
-            $discovery = Invoke-RestMethod -Method Get -TimeoutSec 2 -Uri "http://127.0.0.1:$hostPort/realms/master/.well-known/openid-configuration"
-            return (-not [string]::IsNullOrWhiteSpace($discovery.token_endpoint))
-        } catch {
-            return $false
-        }
-    }
 
     # The image above exists only for this disposable test and is removed in
     # finally. The production host provisioner remains a plain host script.
@@ -186,6 +204,15 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
     $toolsCreated = $true
     Wait-Until -Seconds 120 -Failure 'disposable provisioning tools did not become ready' -Condition {
         & docker exec $tools test -f /run/tools-ready *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    $discoveryProbe = @'
+curl --fail --silent --show-error \
+  http://keycloak:8080/realms/master/.well-known/openid-configuration \
+  | jq -e '.token_endpoint | type == "string" and length > 0'
+'@
+    Wait-Until -Seconds 180 -Failure 'disposable Keycloak 26.7.2 did not become ready' -Condition {
+        & docker exec $tools sh -ec $discoveryProbe *> $null
         return $LASTEXITCODE -eq 0
     }
     $provisionOutput = & docker exec `
@@ -210,8 +237,8 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
         throw "published invoice-web fixture secret permissions/size are unsafe: $secretStat"
     }
 
-    $token = Get-AdminToken -Port $hostPort
-    $realm = Invoke-AdminGet -Port $hostPort -Token $token -Path 'solov'
+    Initialize-AdminToken
+    $realm = Invoke-AdminGet -Path 'solov'
     if ($realm.realm -ne 'solov' -or -not $realm.enabled -or $realm.browserFlow -ne 'solov-browser-step-up' -or
         $realm.registrationAllowed -ne $false -or $realm.verifyEmail -ne $false -or
         $realm.attributes.'acr.loa.map' -ne '{"urn:solov:loa:2":2}' -or
@@ -221,10 +248,10 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
 
     $clients = @{}
     foreach ($clientId in @('invoice-web', 'sub2api', 'newapi', 'invoice-desktop')) {
-        $matches = @(Invoke-AdminGetArray -Port $hostPort -Token $token -Path "solov/clients?clientId=$clientId&search=true&first=0&max=2")
+        $matches = @(Invoke-AdminGetArray -Path "solov/clients?clientId=$clientId&search=true&first=0&max=2")
         $matches = @($matches | Where-Object { $_.clientId -eq $clientId })
         if ($matches.Count -ne 1) { throw "client lookup is not unique after provisioning: $clientId" }
-        $clients[$clientId] = Invoke-AdminGet -Port $hostPort -Token $token -Path "solov/clients/$($matches[0].id)"
+        $clients[$clientId] = Invoke-AdminGet -Path "solov/clients/$($matches[0].id)"
     }
     if (@($clients['invoice-web'].redirectUris).Count -ne 1 -or $clients['invoice-web'].redirectUris[0] -ne 'https://invoice.solov.cc/api/v1/auth/callback' -or
         $clients['invoice-web'].attributes.'backchannel.logout.session.required' -ne 'true' -or
@@ -237,24 +264,24 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
 
     foreach ($clientId in $clients.Keys) {
         $clientUuid = $clients[$clientId].id
-        $defaults = @(Invoke-AdminGetArray -Port $hostPort -Token $token -Path "solov/clients/$clientUuid/default-client-scopes")
+        $defaults = @(Invoke-AdminGetArray -Path "solov/clients/$clientUuid/default-client-scopes")
         $defaultNames = @($defaults | ForEach-Object { $_.name } | Sort-Object)
         if (($defaultNames -join ',') -ne 'email,profile,solov-token-contract') {
             throw "client has an unexpected default/offline scope set: $clientId"
         }
-        $optional = @(Invoke-AdminGetArray -Port $hostPort -Token $token -Path "solov/clients/$clientUuid/optional-client-scopes")
+        $optional = @(Invoke-AdminGetArray -Path "solov/clients/$clientUuid/optional-client-scopes")
         $optionalNames = @($optional | ForEach-Object { $_.name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($optionalNames.Count -ne 0) { throw "client retains optional/offline scopes: $clientId" }
-        $scopeRoles = @(Invoke-AdminGetArray -Port $hostPort -Token $token -Path "solov/clients/$clientUuid/scope-mappings/realm")
+        $scopeRoles = @(Invoke-AdminGetArray -Path "solov/clients/$clientUuid/scope-mappings/realm")
         $roleNames = @($scopeRoles | ForEach-Object { $_.name } | Sort-Object)
         $expectedRoles = if ($clientId -eq 'invoice-web') { 'invoice-admin,invoice-user' } else { 'invoice-user' }
         if (($roleNames -join ',') -ne $expectedRoles) { throw "client role scope is not least privilege: $clientId" }
     }
 
-    $scopes = @(Invoke-AdminGetArray -Port $hostPort -Token $token -Path 'solov/client-scopes')
+    $scopes = @(Invoke-AdminGetArray -Path 'solov/client-scopes')
     $contractScopes = @($scopes | Where-Object { $_.name -eq 'solov-token-contract' })
     if ($contractScopes.Count -ne 1) { throw 'token contract scope lookup is not unique' }
-    $mappers = @(Invoke-AdminGetArray -Port $hostPort -Token $token -Path "solov/client-scopes/$($contractScopes[0].id)/protocol-mappers/models")
+    $mappers = @(Invoke-AdminGetArray -Path "solov/client-scopes/$($contractScopes[0].id)/protocol-mappers/models")
     $mapperIds = @($mappers | ForEach-Object { $_.protocolMapper } | Sort-Object)
     if (($mapperIds -join ',') -ne 'oidc-acr-mapper,oidc-amr-mapper,oidc-usermodel-realm-role-mapper') {
         throw 'ACR/AMR/roles protocol mapper set is incomplete'
@@ -265,7 +292,7 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
     }
 
     foreach ($flowAlias in @('solov-browser-step-up', 'solov-auth', 'solov-loa1', 'solov-loa2')) {
-        $flowExecutions = @(Invoke-AdminGetArray -Port $hostPort -Token $token -Path "solov/authentication/flows/$flowAlias/executions")
+        $flowExecutions = @(Invoke-AdminGetArray -Path "solov/authentication/flows/$flowAlias/executions")
         switch ($flowAlias) {
             'solov-browser-step-up' {
                 $direct = @($flowExecutions | Where-Object { $_.level -eq 0 })
@@ -283,7 +310,7 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
             }
         }
         foreach ($execution in @($flowExecutions | Where-Object { -not [string]::IsNullOrWhiteSpace($_.authenticationConfig) })) {
-            $config = Invoke-AdminGet -Port $hostPort -Token $token -Path "solov/authentication/config/$($execution.authenticationConfig)"
+            $config = Invoke-AdminGet -Path "solov/authentication/config/$($execution.authenticationConfig)"
             if ($config.alias -notin @('solov-loa1-condition', 'solov-password-amr', 'solov-loa2-condition', 'solov-otp-amr')) {
                 throw 'unexpected authentication execution configuration alias'
             }
@@ -304,7 +331,7 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
         }
     }
 
-    $invoiceSecret = Invoke-AdminGet -Port $hostPort -Token $token -Path "solov/clients/$($clients['invoice-web'].id)/client-secret"
+    $invoiceSecret = Invoke-AdminGet -Path "solov/clients/$($clients['invoice-web'].id)/client-secret"
     if ([string]::IsNullOrWhiteSpace($invoiceSecret.value)) { throw 'invoice-web client secret is unavailable after provisioning' }
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try {

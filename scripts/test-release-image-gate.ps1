@@ -12,6 +12,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $idpCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
 $artifactVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
 $sourceVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
+$keycloakProvisioningVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
 if (-not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}') -or
     $idpCompose.Contains('    image: invoice-keycloak:26.7.2') -or
     -not $artifactVerifier.Contains('Get-CommonReleaseImageTag -ImageRecords $records -IdPMode $idpMode') -or
@@ -19,6 +20,32 @@ if (-not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?
     -not $sourceVerifier.Contains("Test-OrdinalStringEqual -Actual `$idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build'") -or
     -not $sourceVerifier.Contains("Test-OrdinalStringEqual -Actual `$idpBaseObject.services.keycloak.pull_policy -Expected 'never'")) {
     throw 'Keycloak production Compose can escape the common manifest-bound release image tag'
+}
+if ($keycloakProvisioningVerifier -notmatch 'tr -d ''\\r\\n''' -or
+    $keycloakProvisioningVerifier -notmatch 'test "\$\(wc -l <"\$tmp"\)" -eq 1' -or
+    $keycloakProvisioningVerifier -notmatch '/run/test-secrets/admin_auth_header' -or
+    $keycloakProvisioningVerifier -notmatch 'curl --header @/run/test-secrets/admin_auth_header' -or
+    $keycloakProvisioningVerifier -notmatch 'http://keycloak:8080/admin/realms/' -or
+    $keycloakProvisioningVerifier -notmatch 'http://keycloak:8080/realms/master/\.well-known/openid-configuration' -or
+    $keycloakProvisioningVerifier -notmatch 'rm -f "\$password_request"' -or
+    $keycloakProvisioningVerifier -notmatch '\^\[A-Za-z0-9_-\]\+\\\.\[A-Za-z0-9_-\]\+\\\.\[A-Za-z0-9_-\]\+\$' -or
+    $keycloakProvisioningVerifier -notmatch 'test "\$\{#token\}" -ge 64' -or
+    $keycloakProvisioningVerifier -notmatch 'test "\$\{#token\}" -le 262144' -or
+    $keycloakProvisioningVerifier -notmatch '\$Path\.Contains\(''\.\.''' -or
+    $keycloakProvisioningVerifier -notmatch '\(\?i\)%2f\|%5c' -or
+    $keycloakProvisioningVerifier -notmatch 'Admin GET JSON root is not an object or array' -or
+    $keycloakProvisioningVerifier -match 'http://127\.0\.0\.1:\$Port/admin/realms/' -or
+    $keycloakProvisioningVerifier -match '--publish') {
+    throw 'Keycloak provisioning verification can expose credentials or depend on Docker host-port NAT for Admin REST'
+}
+
+$validFixtureJWT = ('a' * 32) + '.' + ('b' * 32) + '.' + ('c' * 32)
+$multilineFixtureJWT = $validFixtureJWT + "`n" + 'header = "X-Probe: injected"'
+$fixtureJWTPattern = '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+if ($validFixtureJWT -cnotmatch $fixtureJWTPattern -or
+    @($validFixtureJWT -split "`n").Count -ne 1 -or
+    @($multilineFixtureJWT -split "`n").Count -eq 1) {
+    throw 'Keycloak fixture JWT single-line validation contract is incomplete'
 }
 
 if (-not (Test-OrdinalStringEqual -Actual 'invoice-keycloak:verification-build' -Expected 'invoice-keycloak:verification-build') -or
