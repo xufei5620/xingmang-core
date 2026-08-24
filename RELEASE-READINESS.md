@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc21 eligibility-policy candidate
+# Release readiness: 0.1.0-rc22 eligibility-policy candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC21 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC22 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -43,7 +43,7 @@ this release candidate.
 
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC21 image/SBOM/vulnerability
+- generate and independently verify a fresh RC22 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - create a fresh pre-0011 signed rollback package with isolated restore,
   re-prove the already installed Bridge V4/role boundary and `pg_depend=0`, and
@@ -51,7 +51,7 @@ this release candidate.
   its upstream application is stopped and the database quiescence gate passes;
   if a create-only pair already exists, verify and reuse that exact pair rather
   than overwriting or "recapturing" it;
-- deploy all Invoice images under the same RC21 tag and pass real production
+- deploy all Invoice images under the same RC22 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -66,7 +66,7 @@ this release candidate.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC21 commit and signed release tag; no GitHub
+- create and locally verify the RC22 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

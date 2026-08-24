@@ -12,7 +12,7 @@ $password = 'bridge_matrix_ephemeral'
 function Invoke-BridgeMatrixCase {
     param([Parameter(Mandatory)][string]$Image, [Parameter(Mandatory)][string]$Label)
 
-    $maxAttempts = 10
+    $maxAttempts = 5
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         $name = 'invoice-bridge-matrix-' + $Label + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
         $attemptError = $null

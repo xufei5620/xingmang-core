@@ -97,7 +97,8 @@ if ($productionComposeText -match '(?m)^\s+build:\s*$') {
 }
 
 $bridgeMatrixVerifier = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
-if ($bridgeMatrixVerifier -notmatch 'for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\)' -or
+if ($bridgeMatrixVerifier -notmatch '\$maxAttempts = 5' -or
+    $bridgeMatrixVerifier -notmatch 'for \(\$attempt = 1; \$attempt -le \$maxAttempts; \$attempt\+\+\)' -or
     $bridgeMatrixVerifier -notmatch 'Test-BridgeMatrixTransientHostPortFailure' -or
     $bridgeMatrixVerifier -notmatch 'retrying the unchanged test suite in a fresh container' -or
     $bridgeMatrixVerifier -notmatch 'Complete-BridgeMatrixAttempt') {
