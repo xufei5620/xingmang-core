@@ -22,12 +22,25 @@ umask 077
 eligibility_start_at='2026-09-01T00:00:00+08:00'
 eligibility_start_utc='2026-08-31T16:00:00Z'
 restore_schema_mode=${RESTORE_SCHEMA_MODE:-post-0011}
+restore_postgres_tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE-16g}
 [[ "$restore_schema_mode" == 'pre-0011' || "$restore_schema_mode" == 'post-0011' ]] || {
   echo 'RESTORE_SCHEMA_MODE must be pre-0011 or post-0011' >&2
   exit 2
 }
 
-for command in age docker sha256sum tar find cmp grep ssh-keygen stat; do command -v "$command" >/dev/null; done
+for command in age awk docker sha256sum tar find cmp grep ssh-keygen stat; do command -v "$command" >/dev/null; done
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+capacity_validator="$script_dir/validate-restore-postgres-capacity.sh"
+test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator"
+cleanup_state_helper="$script_dir/docker-cleanup-state.sh"
+test -f "$cleanup_state_helper" && test ! -L "$cleanup_state_helper" && test -s "$cleanup_state_helper"
+# shellcheck source=deploy/backup/docker-cleanup-state.sh
+source "$cleanup_state_helper"
+host_available_bytes=$(awk '/^MemAvailable:/ { printf "%.0f\n",$2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo)
+docker_total_bytes=$(docker info --format '{{.MemTotal}}')
+restore_postgres_tmpfs_bytes=$(bash "$capacity_validator" "$restore_postgres_tmpfs_size" \
+  "$host_available_bytes" "$docker_total_bytes")
+[[ "$restore_postgres_tmpfs_bytes" =~ ^[1-9][0-9]*$ ]]
 for file in "$DATABASE_BACKUP" "$DOCUMENT_BACKUP" "$SOURCE_STATE_BACKUP" "$METADATA_BACKUP" "$BACKUP_MANIFEST" "$BACKUP_SIGNATURE" "$BACKUP_ALLOWED_SIGNERS_FILE" "$AGE_IDENTITY_FILE" "$FIELD_KEYRING_FILE"; do
   test -f "$file" && test ! -L "$file" && test -s "$file"
 done
@@ -110,9 +123,22 @@ temporary=$(mktemp -d)
 started=false
 network_created=false
 cleanup() {
-  if $started; then docker rm --force "$container" >/dev/null 2>&1 || true; fi
-  if $network_created; then docker network rm "$network" >/dev/null 2>&1 || true; fi
-  rm -rf -- "$temporary"
+  local original_status=$?
+  local cleanup_failed=false
+  set +e
+  if $started; then
+    remove_docker_resource_strict container "$container" || cleanup_failed=true
+  fi
+  if $network_created; then
+    remove_docker_resource_strict network "$network" || cleanup_failed=true
+  fi
+  rm -rf -- "$temporary" || cleanup_failed=true
+  [[ -e "$temporary" ]] && cleanup_failed=true
+  if $cleanup_failed; then
+    echo 'CRITICAL: restore drill cleanup left a container, network, or temporary plaintext behind' >&2
+    exit 1
+  fi
+  exit "$original_status"
 }
 trap cleanup EXIT
 
@@ -232,14 +258,19 @@ for directory in "${source_directories[@]}"; do
   "${docker_args[@]}"
 done
 
-docker network create "$network" >/dev/null
+if docker network inspect "$network" >/dev/null 2>&1 ||
+   docker container inspect "$container" >/dev/null 2>&1; then
+  echo 'restore drill Docker resource name collision' >&2
+  exit 1
+fi
 network_created=true
-docker run --detach --name "$container" --network "$network" --network-alias postgres \
+docker network create "$network" >/dev/null
+started=true
+docker run --detach --rm --name "$container" --network "$network" --network-alias postgres \
   --env POSTGRES_PASSWORD=restore-drill-only \
   --env POSTGRES_DB=invoice \
-  --tmpfs /var/lib/postgresql:rw,nosuid,nodev,size=1g \
+  --tmpfs "/var/lib/postgresql:rw,nosuid,nodev,size=$restore_postgres_tmpfs_size" \
   postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2 >/dev/null
-started=true
 
 deadline=$((SECONDS+60))
 until docker exec "$container" pg_isready -U postgres -d invoice >/dev/null 2>&1; do

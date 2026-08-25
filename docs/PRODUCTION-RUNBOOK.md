@@ -1019,6 +1019,7 @@ BACKUP_SCHEMA_MODE=pre-0011 BACKUP_QUIESCE_CONFIRMED=YES \
   bash deploy/backup/backup.sh
 
 RESTORE_SCHEMA_MODE=pre-0011 \
+RESTORE_POSTGRES_TMPFS_SIZE=16g \
 PRE_0011_TOOLS_IMAGE='<exact RC17 tools image from its release manifest>' \
 INVOICE_TOOLS_IMAGE='<exact RC32 tools image>' \
 SOURCE_AGENT_IMAGE='<exact RC24 source-agent image bound to this old V3 backup>' \
@@ -1564,6 +1565,22 @@ Finally `invoice-backup-verify` authenticates/decrypts a bounded document
 sample and compares plaintext size/SHA-256 to the restored database. A backup
 is invalid until all checks pass.
 
+The isolated restore PostgreSQL uses a non-persistent tmpfs with a 16 GiB
+default, sized for the current approximately 4.3 GiB restored database plus
+indexes and restore-time headroom. `RESTORE_POSTGRES_TMPFS_SIZE` accepts only a
+lowercase integer `8g` through `32g`; do not reduce it to fit a constrained
+host. Before creating a Docker network or container, the drill requires both
+Linux `MemAvailable` and the Docker daemon memory total to be at least the
+chosen tmpfs ceiling plus a fixed 4 GiB reserve. An unreadable memory value or
+insufficient capacity fails closed. The detached PostgreSQL container uses
+`--rm`, and the exit trap force-removes its exact container and network names,
+so success, restore failure, or capacity failure leaves no restore database,
+container, network, or volume behind. An inspect error counts as “absent” only
+while an independent `docker info` still proves the daemon is reachable;
+otherwise cleanup itself fails critically instead of hiding unknown state. Run the drill on a host with more
+available memory rather than substituting persistent storage without a
+separately reviewed encrypted-at-rest design.
+
 ```bash
 DATABASE_BACKUP=/root/invoice-system/backups/invoice-TS.postgres.dump.age \
 DOCUMENT_BACKUP=/root/invoice-system/backups/invoice-TS.documents.tar.age \
@@ -1580,6 +1597,7 @@ SUB2API_SOURCE_ID="$SUB2API_SOURCE_ID" NEWAPI_SOURCE_ID="$NEWAPI_SOURCE_ID" \
 SUB2API_RUNTIME_VERSION=0.1.179 NEWAPI_RUNTIME_VERSION=v1.0.0-rc.25 \
 SUB2API_BALANCES_SIGNING_KEY_ID=2026-08-balances \
 NEWAPI_BALANCES_SIGNING_KEY_ID=2026-08-balances \
+RESTORE_POSTGRES_TMPFS_SIZE=16g \
 INVOICE_TOOLS_IMAGE="invoice-system-tools:$INVOICE_IMAGE_TAG" \
 SOURCE_AGENT_IMAGE="invoice-source-agent:$INVOICE_IMAGE_TAG" \
   bash deploy/backup/restore-drill.sh

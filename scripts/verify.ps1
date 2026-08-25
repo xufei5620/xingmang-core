@@ -77,6 +77,9 @@ if ($LASTEXITCODE -ne 0) { throw 'edge Nginx configuration verification failed' 
 & (Join-Path $PSScriptRoot 'verify-backup-signature.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'backup signature verification failed' }
 
+& (Join-Path $PSScriptRoot 'verify-restore-capacity.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'restore PostgreSQL capacity verification failed' }
+
 & (Join-Path $PSScriptRoot 'verify-keycloak-permanent-master-admin.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'permanent Keycloak master administrator invitation verification failed' }
 
