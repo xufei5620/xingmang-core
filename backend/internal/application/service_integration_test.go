@@ -196,6 +196,13 @@ func integrationApplication(t *testing.T) (*Service, *postgresstore.Store, *muta
 	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = pool.Exec(ctx, `INSERT INTO admin_settings(
+		singleton_id,issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,
+		smtp_from,smtp_from_name,smtp_starttls,admin_cidrs,revision,updated_by)
+		VALUES(1,'测试开票主体','技术服务',20000,'smtp.qq.com',587,'invoice@qq.com',
+		'发票中心',TRUE,ARRAY['127.0.0.1/32']::inet[],7,'application-integration-test')`); err != nil {
+		t.Fatal(err)
+	}
 	testPolicyStart := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
 	// This disposable schema moves the boundary only to keep integration facts
 	// near the test clock. Production policy updates are permanently rejected.

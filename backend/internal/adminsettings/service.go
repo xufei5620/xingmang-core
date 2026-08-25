@@ -19,8 +19,37 @@ func NewService(repo Repository, box SecretBox) *Service { return &Service{repo:
 
 func (s *Service) Get(ctx context.Context) (Settings, error) { return s.repo.Get(ctx) }
 
+// Bootstrap creates the singleton configuration with either a real issuer or
+// the one reserved issuer placeholder. The repository's revision-zero CAS
+// makes this create-only; an existing configuration can only be changed
+// through authenticated Update.
+func (s *Service) Bootstrap(ctx context.Context, in UpdateInput, actor Actor) (Settings, error) {
+	normalized, err := normalizeBootstrap(in)
+	if err != nil {
+		return Settings{}, err
+	}
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.Update(ctx, normalized, 0, actor)
+}
+
 func (s *Service) Update(ctx context.Context, in UpdateInput, expectedRevision int64, actor Actor) (Settings, error) {
 	normalized, err := normalize(in)
+	if err != nil {
+		return Settings{}, err
+	}
+	if expectedRevision < 0 || strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: revision, actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.Update(ctx, normalized, expectedRevision, actor)
+}
+
+// UpdateInvoice changes invoice policy fields and therefore requires a real
+// issuer. Metadata-only SMTP and admin-access updates use Update/UpdateSMTP so
+// they can preserve an existing legacy placeholder until this step is done.
+func (s *Service) UpdateInvoice(ctx context.Context, in UpdateInput, expectedRevision int64, actor Actor) (Settings, error) {
+	normalized, err := normalizeInvoice(in)
 	if err != nil {
 		return Settings{}, err
 	}
@@ -113,6 +142,32 @@ func errorsInvalidEnvelope() error {
 }
 
 func normalize(in UpdateInput) (UpdateInput, error) {
+	return normalizeInput(in)
+}
+
+func normalizeBootstrap(in UpdateInput) (UpdateInput, error) {
+	normalized, err := normalizeInput(in)
+	if err != nil {
+		return UpdateInput{}, err
+	}
+	if !IsIssuerConfigured(normalized.IssuerName) && normalized.IssuerName != UnconfiguredIssuerName {
+		return UpdateInput{}, ErrInvalidSettings
+	}
+	return normalized, nil
+}
+
+func normalizeInvoice(in UpdateInput) (UpdateInput, error) {
+	normalized, err := normalizeInput(in)
+	if err != nil {
+		return UpdateInput{}, err
+	}
+	if !IsIssuerConfigured(normalized.IssuerName) {
+		return UpdateInput{}, ErrInvalidSettings
+	}
+	return normalized, nil
+}
+
+func normalizeInput(in UpdateInput) (UpdateInput, error) {
 	in.IssuerName = strings.TrimSpace(in.IssuerName)
 	in.SMTPHost = strings.ToLower(strings.TrimSpace(in.SMTPHost))
 	in.SMTPFrom = strings.TrimSpace(in.SMTPFrom)

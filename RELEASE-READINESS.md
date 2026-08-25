@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc31 source-watermark candidate
+# Release readiness: 0.1.0-rc32 issuer-configuration lifecycle candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC31 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC32 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -101,9 +101,21 @@ watermark budget smaller than the safety delay, receiver clock-skew allowance
 and two poll intervals. A real PostgreSQL idle-cycle test proves the horizon
 advances while the row cursor does not.
 
+RC32 closes the production issuer-configuration lifecycle. The API may start
+with the one reserved `待配置开票主体` bootstrap value so an authenticated,
+IP-restricted administrator can replace it. The settings API reports every
+trimmed empty value or reserved `待配置...`/`请替换...` prefix as unconfigured;
+invoice-settings updates reject those values, and manual issue confirmation fails closed before
+capturing an immutable issuer snapshot. The create-only bootstrap command has
+an explicit path that accepts either the exact reserved value or a real issuer
+while retaining all amount, date, SMTP and administrator-CIDR validation.
+`/healthz` and the protected administrator routes remain available during this
+setup state, but `/readyz` deliberately returns 503 until a real issuer is
+saved; orchestration must not route user invoice traffic before readiness.
+
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC31 image/SBOM/vulnerability
+- generate and independently verify a fresh RC32 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -119,7 +131,7 @@ advances while the row cursor does not.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC31 tag and pass real production
+- deploy all Invoice images under the same RC32 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -134,7 +146,7 @@ advances while the row cursor does not.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC31 commit and signed release tag; no GitHub
+- create and locally verify the RC32 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

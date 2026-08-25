@@ -130,6 +130,43 @@ func TestServiceValidationAndSecretNonDisclosure(t *testing.T) {
 	}
 }
 
+func TestBootstrapAcceptsReservedOrRealIssuerAndIsCreateOnly(t *testing.T) {
+	repo := &memoryRepo{}
+	service := NewService(repo, testBox{})
+	input := validInput()
+	input.IssuerName = " " + UnconfiguredIssuerName + " "
+	settings, err := service.Bootstrap(context.Background(), input, Actor{ID: "deployment", RequestID: "bootstrap-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.IssuerName != UnconfiguredIssuerName || settings.Revision != 1 {
+		t.Fatalf("bootstrap settings=%+v", settings)
+	}
+	if _, err = service.Bootstrap(context.Background(), input, Actor{ID: "deployment", RequestID: "bootstrap-2"}); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("bootstrap overwrite error=%v", err)
+	}
+	for _, issuer := range []string{UnconfiguredIssuerName, "示例科技有限公司"} {
+		candidate := validInput()
+		candidate.IssuerName = issuer
+		if _, normalizeErr := normalizeBootstrap(candidate); normalizeErr != nil {
+			t.Errorf("bootstrap issuer %q rejected: %v", issuer, normalizeErr)
+		}
+	}
+	for _, issuer := range []string{"", "待配置实际开票主体（上线前必须修改）", "请替换为实际开票主体全称"} {
+		candidate := validInput()
+		candidate.IssuerName = issuer
+		if _, normalizeErr := normalizeBootstrap(candidate); !errors.Is(normalizeErr, ErrInvalidSettings) {
+			t.Errorf("bootstrap issuer %q accepted: %v", issuer, normalizeErr)
+		}
+	}
+	unsafe := validInput()
+	unsafe.IssuerName = UnconfiguredIssuerName
+	unsafe.AdminCIDRs = []string{"0.0.0.0/0"}
+	if _, err = normalizeBootstrap(unsafe); !errors.Is(err, ErrInvalidSettings) {
+		t.Fatalf("bootstrap bypassed common security validation: %v", err)
+	}
+}
+
 func TestEligibilityStartUsesExactShanghaiBoundaryAndCannotBeChangedBySettings(t *testing.T) {
 	parsed, err := time.Parse(time.RFC3339, EligibilityStartAtRFC3339)
 	if err != nil || !parsed.UTC().Equal(RequiredEligibilityStartAt) ||
@@ -231,6 +268,29 @@ func TestSMTPPortAndDisplayNameLimits(t *testing.T) {
 	longIssuer.IssuerName = strings.Repeat("企", 201)
 	if _, err := service.Update(context.Background(), longIssuer, 0, Actor{ID: "admin", RequestID: "issuer"}); !errors.Is(err, ErrInvalidSettings) {
 		t.Fatalf("issuer got %v", err)
+	}
+}
+
+func TestUpdateInvoiceRejectsReservedOrEmptyIssuerNames(t *testing.T) {
+	service := NewService(&memoryRepo{}, testBox{})
+	for _, issuer := range []string{"", "  ", "待配置开票主体", " 待配置实际开票主体（上线前必须修改） ", "请替换为实际开票主体全称"} {
+		input := validInput()
+		input.IssuerName = issuer
+		if _, err := service.UpdateInvoice(context.Background(), input, 0, Actor{ID: "admin", RequestID: "issuer"}); !errors.Is(err, ErrInvalidSettings) {
+			t.Errorf("reserved issuer %q accepted: %v", issuer, err)
+		}
+	}
+}
+
+func TestMetadataUpdatesMayPreserveLegacyPlaceholder(t *testing.T) {
+	for _, issuer := range []string{UnconfiguredIssuerName, "待配置实际开票主体（上线前必须修改）", "请替换为实际开票主体全称"} {
+		repo := &memoryRepo{settings: Settings{IssuerName: issuer, Revision: 1}}
+		service := NewService(repo, testBox{})
+		input := validInput()
+		input.IssuerName = issuer
+		if _, err := service.UpdateSMTP(context.Background(), input, SMTPSecretUnchanged, "", 1, Actor{ID: "admin", RequestID: "metadata"}); err != nil {
+			t.Errorf("legacy issuer %q blocked metadata update: %v", issuer, err)
+		}
 	}
 }
 

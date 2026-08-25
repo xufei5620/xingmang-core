@@ -61,13 +61,13 @@ func run(ctx context.Context, databaseURLFile, settingsFile, actorID string) err
 		return fmt.Errorf("eligibility_start_at: %w", err)
 	}
 	service := adminsettings.NewService(adminsettings.NewPostgresRepository(store.Pool()), nil)
-	updated, err := service.Update(ctx, adminsettings.UpdateInput{
+	updated, err := service.Bootstrap(ctx, adminsettings.UpdateInput{
 		IssuerName: settings.IssuerName, MinimumRequestMinor: settings.MinimumRequestMinor,
 		EligibilityStartAt: eligibilityStartAt.UTC(),
 		SMTPHost:           settings.SMTPHost, SMTPPort: settings.SMTPPort,
 		SMTPFrom: settings.SMTPFrom, SMTPFromName: settings.SMTPFromName,
 		SMTPStartTLS: settings.SMTPStartTLS, AdminCIDRs: settings.AdminCIDRs,
-	}, 0, adminsettings.Actor{
+	}, adminsettings.Actor{
 		ID: strings.TrimSpace(actorID), RequestID: fmt.Sprintf("bootstrap-%d", time.Now().UTC().UnixNano()),
 		Reason: "initial production settings bootstrap",
 	})

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"invoice-system/backend/internal/adminsettings"
 )
 
 func TestLoadBreakGlassCIDRsPrefersDeploymentFile(t *testing.T) {
@@ -116,6 +118,26 @@ func TestValidateEligibilityPolicyStartFailsClosedAtExactBoundary(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			if err := validateEligibilityPolicyStart(fixture.configured, fixture.database); err == nil {
 				t.Fatal("invalid eligibility policy boundary was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateIssuerReadinessRejectsBootstrapAndLegacyPlaceholders(t *testing.T) {
+	for name, fixture := range map[string]struct {
+		issuer string
+		ready  bool
+	}{
+		"empty":                  {issuer: "", ready: false},
+		"canonical placeholder":  {issuer: "待配置开票主体", ready: false},
+		"production placeholder": {issuer: " 待配置实际开票主体（上线前必须修改） ", ready: false},
+		"legacy placeholder":     {issuer: "请替换为实际开票主体全称", ready: false},
+		"real issuer":            {issuer: "示例科技有限公司", ready: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := validateIssuerReadiness(adminsettings.Settings{IssuerName: fixture.issuer})
+			if (err == nil) != fixture.ready {
+				t.Fatalf("issuer=%q ready=%t err=%v", fixture.issuer, fixture.ready, err)
 			}
 		})
 	}

@@ -104,7 +104,7 @@ func buildMockRuntime(authMode string) (appRuntime, error) {
 	if err != nil {
 		return appRuntime{}, err
 	}
-	settingsRepo := adminsettings.NewMemoryRepository(adminsettings.Settings{IssuerName: "待配置开票主体", ServiceItem: adminsettings.FixedServiceItem, MinimumRequestMinor: adminsettings.MinimumMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "not-configured@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	settingsRepo := adminsettings.NewMemoryRepository(adminsettings.Settings{IssuerName: adminsettings.UnconfiguredIssuerName, ServiceItem: adminsettings.FixedServiceItem, MinimumRequestMinor: adminsettings.MinimumMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "not-configured@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
 	keyring := securefields.Keyring{CurrentKeyID: "dev-only", EncryptionKeys: map[string][]byte{"dev-only": bytes.Repeat([]byte{0x42}, 32)}, IndexKey: bytes.Repeat([]byte{0x24}, 32)}
 	settingsService := adminsettings.NewService(settingsRepo, adminsettings.SecureFieldsBox{Keyring: keyring, AAD: "invoice/admin-settings/smtp-authorization-code"})
 	var store document.Store
@@ -157,9 +157,9 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, fmt.Errorf("production admin settings must be bootstrapped: %w", err)
 	}
-	if strings.TrimSpace(settings.IssuerName) == "" || settings.IssuerName == "待配置开票主体" {
-		return appRuntime{}, application.ErrIssuerNotConfigured
-	}
+	// An unconfigured issuer must not prevent the API from starting: the
+	// protected admin UI is the only supported path for replacing the bootstrap
+	// placeholder. Saving settings and confirming an issue remain fail closed.
 	if err = validateEligibilityPolicyStart(os.Getenv("ELIGIBILITY_START_AT"), settings.EligibilityStartAt); err != nil {
 		return appRuntime{}, err
 	}
@@ -316,8 +316,12 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			if pingErr := store.Pool().Ping(readyCtx); pingErr != nil {
 				return pingErr
 			}
-			if _, settingsErr := settingsService.Get(readyCtx); settingsErr != nil {
+			currentSettings, settingsErr := settingsService.Get(readyCtx)
+			if settingsErr != nil {
 				return settingsErr
+			}
+			if issuerErr := validateIssuerReadiness(currentSettings); issuerErr != nil {
+				return issuerErr
 			}
 			if clamErr := clamAVScanner.Ping(readyCtx); clamErr != nil {
 				return clamErr
@@ -375,6 +379,13 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	}
 	closeOnError = false
 	return appRuntime{API: api, AuthMode: "oidc", SourceMode: "agent", Workers: workers, close: store.Close}, nil
+}
+
+func validateIssuerReadiness(settings adminsettings.Settings) error {
+	if !adminsettings.IsIssuerConfigured(settings.IssuerName) {
+		return application.ErrIssuerNotConfigured
+	}
+	return nil
 }
 
 func validateEligibilityPolicyStart(configured string, databaseValue time.Time) error {

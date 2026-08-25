@@ -399,7 +399,7 @@ func (s *Server) getAdminSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) settingsResponse(settings adminsettings.Settings, r *http.Request) map[string]any {
 	issuerName := strings.TrimSpace(settings.IssuerName)
-	issuerConfigured := issuerName != "" && issuerName != "待配置开票主体"
+	issuerConfigured := adminsettings.IsIssuerConfigured(issuerName)
 	return map[string]any{
 		"revision":                   settings.Revision,
 		"issuer_name":                issuerName,
@@ -456,7 +456,7 @@ func (s *Server) updateInvoiceSettings(w http.ResponseWriter, r *http.Request) {
 	input := updateInputFromSettings(current)
 	input.IssuerName = body.IssuerName
 	input.MinimumRequestMinor = body.MinimumRequestMinor
-	updated, err := s.adminSettings.Update(r.Context(), input, body.Revision, s.settingsActor(r))
+	updated, err := s.adminSettings.UpdateInvoice(r.Context(), input, body.Revision, s.settingsActor(r))
 	if err != nil {
 		handleSettingsError(w, err)
 		return

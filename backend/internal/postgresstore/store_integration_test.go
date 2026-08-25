@@ -74,7 +74,7 @@ func integrationStoreWithPolicyStart(t *testing.T, fixturePolicyStart time.Time)
 		ENABLE TRIGGER invoice_eligibility_policy_guard`); err != nil {
 		t.Fatalf("re-enable immutable policy guard in isolated fixture: %v", err)
 	}
-	seedSQL := `INSERT INTO source_instances(id,source_type,name) VALUES('10000000-0000-4000-8000-000000000001','sub2api','test'); INSERT INTO invoice_users(id,oidc_issuer,oidc_subject) VALUES('20000000-0000-4000-8000-000000000001','test','user'); INSERT INTO external_accounts(id,invoice_user_id,source_instance_id,external_user_id,binding_method,binding_status) VALUES('30000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','u1','test','verified')`
+	seedSQL := `INSERT INTO admin_settings(singleton_id,issuer_name,service_item,minimum_request_minor,smtp_host,smtp_port,smtp_from,smtp_from_name,smtp_starttls,admin_cidrs,revision,updated_by) VALUES(1,'测试开票主体','技术服务',20000,'smtp.qq.com',587,'invoice@qq.com','发票中心',TRUE,ARRAY['127.0.0.1/32']::inet[],1,'integration-test'); INSERT INTO source_instances(id,source_type,name) VALUES('10000000-0000-4000-8000-000000000001','sub2api','test'); INSERT INTO invoice_users(id,oidc_issuer,oidc_subject) VALUES('20000000-0000-4000-8000-000000000001','test','user'); INSERT INTO external_accounts(id,invoice_user_id,source_instance_id,external_user_id,binding_method,binding_status) VALUES('30000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','u1','test','verified')`
 	if _, err = pool.Exec(ctx, seedSQL); err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +406,72 @@ func TestWorkflowCASMovesReservationToIssuedExactlyOnce(t *testing.T) {
 	}
 	if _, err = store.pool.Exec(ctx, `UPDATE invoice_requests SET issue_snapshot_ciphertext='changed'::bytea WHERE id=$1`, request.ID); err == nil {
 		t.Fatal("database allowed immutable issue snapshot to change")
+	}
+}
+
+func TestConfirmManualIssueRejectsIssuerRevisionDriftAtomically(t *testing.T) {
+	store, ctx := integrationStore(t)
+	request, err := store.Submit(ctx, SubmitInput{
+		PrincipalID:               "20000000-0000-4000-8000-000000000001",
+		ProfileID:                 "40000000-0000-4000-8000-000000000001",
+		SourceInstanceID:          "10000000-0000-4000-8000-000000000001",
+		ProfileSnapshotCiphertext: []byte("encrypted-snapshot"),
+		IdempotencyKey:            "issuer-revision-drift",
+		Allocations:               []AllocationInput{{FundingLotID: "50000000-0000-4000-8000-000000000001", AmountMinor: 20_000}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminID := "90000000-0000-4000-8000-000000000001"
+	reviewed, err := store.ReviewRequest(ctx, adminID, request.ID, "approve", "", request.Version,
+		AuditActor{Type: "admin", ID: adminID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reservedBefore, issuedBefore, auditBefore int64
+	var allocationBefore string
+	if err = store.pool.QueryRow(ctx, `SELECT reserved_minor,issued_minor FROM funding_lots WHERE id=$1`, "50000000-0000-4000-8000-000000000001").Scan(&reservedBefore, &issuedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT allocation_state FROM invoice_allocations WHERE invoice_request_id=$1`, request.ID).Scan(&allocationBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE object_type='invoice_request' AND object_id=$1`, request.ID).Scan(&auditBefore); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the settings update winning after the application captured the
+	// revision-1 snapshot but before the issue transaction starts.
+	if _, err = store.pool.Exec(ctx, `UPDATE admin_settings SET issuer_name='新测试开票主体',revision=2,updated_by='concurrent-admin',updated_at=now() WHERE singleton_id=1 AND revision=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ConfirmManualIssue(ctx, ConfirmIssueInput{
+		AdminID: adminID, RequestID: request.ID, ExpectedVersion: reviewed.Request.Version,
+		IssuerSettingRevision: 1, IssueSnapshotCiphertext: bytes.Repeat([]byte{0x42}, 32),
+		Actor: AuditActor{Type: "admin", ID: adminID},
+	}); !errors.Is(err, domain.ErrVersionConflict) {
+		t.Fatalf("issuer revision drift error=%v", err)
+	}
+	after, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reservedAfter, issuedAfter, auditAfter int64
+	var allocationAfter string
+	if err = store.pool.QueryRow(ctx, `SELECT reserved_minor,issued_minor FROM funding_lots WHERE id=$1`, "50000000-0000-4000-8000-000000000001").Scan(&reservedAfter, &issuedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT allocation_state FROM invoice_allocations WHERE invoice_request_id=$1`, request.ID).Scan(&allocationAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE object_type='invoice_request' AND object_id=$1`, request.ID).Scan(&auditAfter); err != nil {
+		t.Fatal(err)
+	}
+	if after.Request.Status != reviewed.Request.Status || after.Request.Version != reviewed.Request.Version ||
+		after.IssuerSettingRevision != 0 || len(after.IssueSnapshotCiphertext) != 0 ||
+		reservedAfter != reservedBefore || issuedAfter != issuedBefore || allocationAfter != allocationBefore || auditAfter != auditBefore {
+		t.Fatalf("revision mismatch changed state: request=%+v issuer_revision=%d snapshot=%d reserved=%d/%d issued=%d/%d allocation=%s/%s audits=%d/%d",
+			after.Request, after.IssuerSettingRevision, len(after.IssueSnapshotCiphertext), reservedBefore, reservedAfter,
+			issuedBefore, issuedAfter, allocationBefore, allocationAfter, auditBefore, auditAfter)
 	}
 }
 

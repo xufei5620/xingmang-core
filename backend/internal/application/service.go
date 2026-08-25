@@ -634,7 +634,7 @@ func (s *Service) ConfirmManualIssue(ctx context.Context, adminID, requestID str
 		return domain.InvoiceRequest{}, fmt.Errorf("load issuer settings: %w", err)
 	}
 	issuerName := strings.TrimSpace(settings.IssuerName)
-	if issuerName == "" || issuerName == "待配置开票主体" || settings.Revision <= 0 || settings.ServiceItem != domain.FixedServiceItem {
+	if !adminsettings.IsIssuerConfigured(issuerName) || settings.Revision <= 0 || settings.ServiceItem != domain.FixedServiceItem {
 		return domain.InvoiceRequest{}, ErrIssuerNotConfigured
 	}
 	if settings.EligibilityStartAt.IsZero() || settings.EligibilityPolicyVersion <= 0 {
@@ -685,14 +685,24 @@ func (s *Service) GetIssueSnapshot(ctx context.Context, adminID, requestID strin
 	if err != nil {
 		return IssueSnapshot{}, fmt.Errorf("load eligibility policy settings: %w", err)
 	}
-	if snapshot.SettingsRevision != record.IssuerSettingRevision || snapshot.ServiceItem != domain.FixedServiceItem ||
-		!snapshot.EligibilityStartAt.UTC().Equal(settings.EligibilityStartAt.UTC()) ||
-		snapshot.EligibilityPolicyVersion <= 0 ||
-		snapshot.EligibilityPolicyVersion != settings.EligibilityPolicyVersion {
-		return IssueSnapshot{}, domain.ErrConflict
+	if err = validateIssueSnapshot(snapshot, record.IssuerSettingRevision, settings); err != nil {
+		return IssueSnapshot{}, err
 	}
 	_ = adminID // authorization is enforced by the calling admin edge.
 	return snapshot, nil
+}
+
+func validateIssueSnapshot(snapshot IssueSnapshot, storedRevision int64, settings adminsettings.Settings) error {
+	if !adminsettings.IsIssuerConfigured(snapshot.IssuerName) {
+		return ErrIssuerNotConfigured
+	}
+	if snapshot.SettingsRevision != storedRevision || snapshot.ServiceItem != domain.FixedServiceItem ||
+		!snapshot.EligibilityStartAt.UTC().Equal(settings.EligibilityStartAt.UTC()) ||
+		snapshot.EligibilityPolicyVersion <= 0 ||
+		snapshot.EligibilityPolicyVersion != settings.EligibilityPolicyVersion {
+		return domain.ErrConflict
+	}
+	return nil
 }
 
 func (s *Service) AttachDocument(ctx context.Context, adminID string, document domain.InvoiceDocument, expectedVersion int64) (domain.InvoiceRequest, domain.InvoiceDocument, domain.EmailOutbox, error) {

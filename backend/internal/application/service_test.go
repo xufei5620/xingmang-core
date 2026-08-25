@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"invoice-system/backend/internal/adminsettings"
 	"invoice-system/backend/internal/domain"
@@ -64,6 +65,32 @@ func TestNewServiceFailsClosedOnUnsafeConfiguration(t *testing.T) {
 	}
 	if _, err := NewService(store, testKeys(), settings, Options{DownloadBaseURL: "https://invoice.example", MinimumRequestMinor: domain.MinimumRequestMinor - 1}); !errors.Is(err, domain.ErrMinimumAmount) {
 		t.Fatalf("minimum error=%v", err)
+	}
+}
+
+func TestConfirmManualIssueFailsClosedForEveryIssuerPlaceholderVariant(t *testing.T) {
+	for _, issuer := range []string{"", "待配置开票主体", " 待配置实际开票主体（上线前必须修改） ", "请替换为实际开票主体全称"} {
+		service := &Service{settings: &fixedSettings{value: adminsettings.Settings{
+			IssuerName: issuer, ServiceItem: domain.FixedServiceItem, Revision: 1,
+		}}}
+		if _, err := service.ConfirmManualIssue(context.Background(), "admin", "request", 1); !errors.Is(err, ErrIssuerNotConfigured) {
+			t.Errorf("issuer %q confirmation error=%v", issuer, err)
+		}
+	}
+}
+
+func TestValidateIssueSnapshotRejectsHistoricalPlaceholderIssuer(t *testing.T) {
+	policyStart := time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
+	settings := adminsettings.Settings{EligibilityStartAt: policyStart, EligibilityPolicyVersion: 1}
+	for _, issuer := range []string{"待配置开票主体", "待配置实际开票主体（上线前必须修改）", "请替换为实际开票主体全称"} {
+		snapshot := IssueSnapshot{IssuerName: issuer, ServiceItem: domain.FixedServiceItem, SettingsRevision: 1, EligibilityStartAt: policyStart, EligibilityPolicyVersion: 1}
+		if err := validateIssueSnapshot(snapshot, 1, settings); !errors.Is(err, ErrIssuerNotConfigured) {
+			t.Errorf("historical issuer %q validation error=%v", issuer, err)
+		}
+	}
+	valid := IssueSnapshot{IssuerName: "示例科技有限公司", ServiceItem: domain.FixedServiceItem, SettingsRevision: 1, EligibilityStartAt: policyStart, EligibilityPolicyVersion: 1}
+	if err := validateIssueSnapshot(valid, 1, settings); err != nil {
+		t.Fatalf("real historical issuer rejected: %v", err)
 	}
 }
 

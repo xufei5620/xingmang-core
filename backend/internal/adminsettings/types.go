@@ -3,6 +3,7 @@ package adminsettings
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -11,9 +12,29 @@ const (
 	MinimumMinor               = int64(20_000)
 	EligibilityStartAtRFC3339  = "2026-09-01T00:00:00+08:00"
 	EligibilityDisplayTimeZone = "Asia/Shanghai"
+	// UnconfiguredIssuerName is the only issuer placeholder accepted by the
+	// create-only bootstrap path.
+	UnconfiguredIssuerName = "待配置开票主体"
 )
 
 var RequiredEligibilityStartAt = time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
+
+var unconfiguredIssuerPrefixes = [...]string{"待配置", "请替换"}
+
+// IsIssuerConfigured is the single authority for deciding whether an issuer
+// name can be persisted or captured in an immutable issue snapshot.
+func IsIssuerConfigured(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return false
+	}
+	for _, prefix := range unconfiguredIssuerPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return false
+		}
+	}
+	return true
+}
 
 var (
 	ErrNotConfigured    = errors.New("admin settings are not configured")

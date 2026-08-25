@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -28,11 +29,15 @@ func (httpSettingsBox) Open(_ context.Context, envelope adminsettings.SecretEnve
 }
 
 func settingsServer(t *testing.T, adminCIDRs, breakGlassCIDRs []string) (*Server, *ledger.Service) {
+	return settingsServerWithIssuer(t, "待配置开票主体", adminCIDRs, breakGlassCIDRs)
+}
+
+func settingsServerWithIssuer(t *testing.T, issuerName string, adminCIDRs, breakGlassCIDRs []string) (*Server, *ledger.Service) {
 	t.Helper()
 	service := ledger.NewService()
 	now := time.Now().UTC()
 	repo := adminsettings.NewMemoryRepository(adminsettings.Settings{
-		IssuerName: "待配置开票主体", ServiceItem: adminsettings.FixedServiceItem,
+		IssuerName: issuerName, ServiceItem: adminsettings.FixedServiceItem,
 		MinimumRequestMinor: adminsettings.MinimumMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587,
 		SMTPFrom: "invoice@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true,
 		AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: now, UpdatedAt: now,
@@ -254,6 +259,37 @@ func TestSecurityHeadersAreAlwaysPresent(t *testing.T) {
 	}
 }
 
+func TestNotReadyStillServesHealthAndProtectedAdminConfiguration(t *testing.T) {
+	service := ledger.NewService()
+	now := time.Now().UTC()
+	repo := adminsettings.NewMemoryRepository(adminsettings.Settings{
+		IssuerName: adminsettings.UnconfiguredIssuerName, ServiceItem: adminsettings.FixedServiceItem,
+		MinimumRequestMinor: adminsettings.MinimumMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587,
+		SMTPFrom: "invoice@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true,
+		AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, CreatedAt: now, UpdatedAt: now,
+	})
+	server, err := NewWithConfig(service, Config{
+		AuthMode: "mock", AdminIPAllowlist: []string{"203.0.113.8/32"},
+		AdminSettings: adminsettings.NewService(repo, httpSettingsBox{}),
+		Readiness:     func(context.Context) error { return errors.New("issuer not configured") },
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]int{"/healthz": http.StatusOK, "/readyz": http.StatusServiceUnavailable} {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != want {
+			t.Errorf("%s status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodGet, "/api/v1/admin/settings", "203.0.113.8", ""))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"issuer_configured":false`) {
+		t.Fatalf("admin setup route status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestTypedAdminSettingsGetDoesNotExposeSecretOrBreakGlassCIDRs(t *testing.T) {
 	server, _ := settingsServer(t, []string{"203.0.113.8/32"}, []string{"127.0.0.1/32"})
 	recorder := httptest.NewRecorder()
@@ -293,6 +329,56 @@ func TestTypedAdminSettingsGetDoesNotExposeSecretOrBreakGlassCIDRs(t *testing.T)
 	}
 	if strings.Contains(recorder.Body.String(), "127.0.0.1") || strings.Contains(recorder.Body.String(), "authorization_code") {
 		t.Fatalf("sensitive field leaked: %s", recorder.Body.String())
+	}
+}
+
+func TestTypedAdminSettingsIssuerConfiguredUsesSharedPlaceholderRule(t *testing.T) {
+	for name, fixture := range map[string]struct {
+		issuer     string
+		configured bool
+	}{
+		"exact placeholder":      {issuer: "待配置开票主体", configured: false},
+		"production placeholder": {issuer: "待配置实际开票主体（上线前必须修改）", configured: false},
+		"legacy placeholder":     {issuer: "请替换为实际开票主体全称", configured: false},
+		"real issuer":            {issuer: "示例科技有限公司", configured: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server, _ := settingsServerWithIssuer(t, fixture.issuer, []string{"203.0.113.8/32"}, nil)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, adminRequest(http.MethodGet, "/api/v1/admin/settings", "203.0.113.8", ""))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var response struct {
+				IssuerConfigured bool `json:"issuer_configured"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.IssuerConfigured != fixture.configured {
+				t.Fatalf("issuer_configured=%t want %t", response.IssuerConfigured, fixture.configured)
+			}
+		})
+	}
+}
+
+func TestTypedInvoiceSettingsRejectsReservedIssuerPlaceholder(t *testing.T) {
+	server, service := settingsServer(t, []string{"203.0.113.8/32"}, nil)
+	for _, issuer := range []string{"", "待配置开票主体", "待配置实际开票主体（上线前必须修改）", "请替换为实际开票主体全称"} {
+		body, err := json.Marshal(map[string]any{
+			"revision": 1, "issuer_name": issuer, "minimum_request_minor": 20_000,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPut, "/api/v1/admin/settings/invoice", "203.0.113.8", string(body)))
+		if recorder.Code != http.StatusUnprocessableEntity {
+			t.Errorf("issuer=%q status=%d body=%s", issuer, recorder.Code, recorder.Body.String())
+		}
+	}
+	if service.MinimumRequestMinor() != adminsettings.MinimumMinor {
+		t.Fatalf("failed updates changed ledger minimum to %d", service.MinimumRequestMinor())
 	}
 }
 
@@ -366,6 +452,31 @@ func TestTypedSMTPSettingsSecretIsWriteOnlyAndTestMailFailsClosed(t *testing.T) 
 	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", "203.0.113.8", testBody))
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("test email status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLegacyIssuerPlaceholderDoesNotBlockSMTPOrAdminAccessSetup(t *testing.T) {
+	server, _ := settingsServerWithIssuer(t, "请替换为实际开票主体全称", []string{"203.0.113.8/32"}, nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPut, "/api/v1/admin/settings/smtp", "203.0.113.8", `{"revision":1,"host":"smtp.qq.com","port":587,"from_address":"billing@qq.com","from_name":"发票中心","starttls":true,"authorization_code":"qq-secret-code"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("legacy SMTP update status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPut, "/api/v1/admin/settings/admin-access", "203.0.113.8", `{"revision":2,"cidrs":["203.0.113.8","198.51.100.9"]}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("legacy admin access update status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		IssuerName       string `json:"issuer_name"`
+		IssuerConfigured bool   `json:"issuer_configured"`
+		Revision         int64  `json:"revision"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.IssuerName != "请替换为实际开票主体全称" || response.IssuerConfigured || response.Revision != 3 {
+		t.Fatalf("legacy placeholder lifecycle response=%+v", response)
 	}
 }
 

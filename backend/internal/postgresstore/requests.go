@@ -560,6 +560,19 @@ func (s *Store) ConfirmManualIssue(ctx context.Context, in ConfirmIssueInput) (R
 	if err = assertSourceFreshTx(ctx, tx, sourceInstanceID, in.Freshness); err != nil {
 		return RequestRecord{}, err
 	}
+	// Linearize the application-layer issuer snapshot against settings updates.
+	// FOR SHARE blocks an UPDATE of the singleton until this issue transaction
+	// commits; a settings change that won the race is detected by revision.
+	var issuerSettingRevision int64
+	if err = tx.QueryRow(ctx, `
+		SELECT revision FROM admin_settings WHERE singleton_id=1 FOR SHARE`).Scan(&issuerSettingRevision); errors.Is(err, pgx.ErrNoRows) {
+		return RequestRecord{}, domain.ErrVersionConflict
+	} else if err != nil {
+		return RequestRecord{}, err
+	}
+	if issuerSettingRevision != in.IssuerSettingRevision {
+		return RequestRecord{}, domain.ErrVersionConflict
+	}
 	rec, err := getRequestRecordTx(ctx, tx, in.RequestID, true)
 	if err != nil {
 		return RequestRecord{}, err
