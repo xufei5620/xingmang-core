@@ -586,6 +586,7 @@ func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
 		DownloadURL: s.publicOrigin + "/", CreatedAt: now,
 	})
 	if err != nil {
+		s.logger.Warn("SMTP test failed", "request_id", messageID, "failure_stage", mailer.SMTPFailureStage(err))
 		if s.operations != nil {
 			_ = s.operations.RecordAdminAudit(r.Context(), adminID, "smtp_test", "smtp", messageID, "failure")
 		}

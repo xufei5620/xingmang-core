@@ -28,6 +28,36 @@ type SMTPConfig struct {
 
 type SMTPSender struct{ config SMTPConfig }
 
+type smtpFailure struct {
+	stage string
+	err   error
+}
+
+func (e *smtpFailure) Error() string { return e.err.Error() }
+func (e *smtpFailure) Unwrap() error { return e.err }
+
+func smtpFailureAt(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &smtpFailure{stage: stage, err: err}
+}
+
+// SMTPFailureStage returns only a fixed diagnostic category. Callers must not
+// log the wrapped provider error because it may contain remote response text.
+func SMTPFailureStage(err error) string {
+	var failure *smtpFailure
+	if !errors.As(err, &failure) {
+		return "other"
+	}
+	switch failure.stage {
+	case "message", "recipient", "config", "dial", "client", "starttls", "auth", "mail", "rcpt", "data", "quit":
+		return failure.stage
+	default:
+		return "other"
+	}
+}
+
 func NewSMTPSender(config SMTPConfig) (*SMTPSender, error) {
 	config.Host = strings.TrimSpace(config.Host)
 	config.Username = strings.TrimSpace(config.Username)
@@ -48,16 +78,16 @@ func NewSMTPSender(config SMTPConfig) (*SMTPSender, error) {
 
 func (s *SMTPSender) SendInvoiceReady(ctx context.Context, message Message) (string, error) {
 	if err := message.Validate(); err != nil {
-		return "", err
+		return "", smtpFailureAt("message", err)
 	}
 	recipient, err := mail.ParseAddress(message.Recipient)
 	if err != nil {
-		return "", err
+		return "", smtpFailureAt("recipient", err)
 	}
 	dialer := net.Dialer{Timeout: s.config.Timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(s.config.Host, strconv.Itoa(s.config.Port)))
 	if err != nil {
-		return "", fmt.Errorf("dial SMTP: %w", err)
+		return "", smtpFailureAt("dial", fmt.Errorf("dial SMTP: %w", err))
 	}
 	defer conn.Close()
 	deadline := time.Now().Add(s.config.Timeout)
@@ -67,35 +97,35 @@ func (s *SMTPSender) SendInvoiceReady(ctx context.Context, message Message) (str
 	_ = conn.SetDeadline(deadline)
 	client, err := smtp.NewClient(conn, s.config.Host)
 	if err != nil {
-		return "", fmt.Errorf("open SMTP client: %w", err)
+		return "", smtpFailureAt("client", fmt.Errorf("open SMTP client: %w", err))
 	}
 	defer client.Close()
 	if s.config.RequireSTARTTLS {
 		ok, _ := client.Extension("STARTTLS")
 		if !ok {
-			return "", errors.New("SMTP server does not offer STARTTLS")
+			return "", smtpFailureAt("starttls", errors.New("SMTP server does not offer STARTTLS"))
 		}
 		if err = client.StartTLS(&tls.Config{ServerName: s.config.Host, MinVersion: tls.VersionTLS12}); err != nil {
-			return "", fmt.Errorf("SMTP STARTTLS: %w", err)
+			return "", smtpFailureAt("starttls", fmt.Errorf("SMTP STARTTLS: %w", err))
 		}
 	}
 	if s.config.Username != "" {
 		if s.config.Password == "" {
-			return "", errors.New("SMTP authorization code is empty")
+			return "", smtpFailureAt("auth", errors.New("SMTP authorization code is empty"))
 		}
 		if err = client.Auth(smtp.PlainAuth("", s.config.Username, s.config.Password, s.config.Host)); err != nil {
-			return "", fmt.Errorf("SMTP authentication: %w", err)
+			return "", smtpFailureAt("auth", fmt.Errorf("SMTP authentication: %w", err))
 		}
 	}
 	if err = client.Mail(s.config.FromAddress); err != nil {
-		return "", err
+		return "", smtpFailureAt("mail", err)
 	}
 	if err = client.Rcpt(recipient.Address); err != nil {
-		return "", err
+		return "", smtpFailureAt("rcpt", err)
 	}
 	data, err := client.Data()
 	if err != nil {
-		return "", err
+		return "", smtpFailureAt("data", err)
 	}
 	buffer := bufio.NewWriter(data)
 	subjectText := "您的电子普票已开具"
@@ -109,7 +139,7 @@ func (s *SMTPSender) SendInvoiceReady(ctx context.Context, message Message) (str
 	headers := []string{"From: " + fromName + " <" + s.config.FromAddress + ">", "To: <" + recipient.Address + ">", "Subject: " + subject, "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: 8bit", "Date: " + time.Now().Format(time.RFC1123Z)}
 	for _, header := range headers {
 		if _, err = buffer.WriteString(header + "\r\n"); err != nil {
-			return "", err
+			return "", smtpFailureAt("data", err)
 		}
 	}
 	if _, err = buffer.WriteString("\r\n" + body); err == nil {
@@ -117,13 +147,13 @@ func (s *SMTPSender) SendInvoiceReady(ctx context.Context, message Message) (str
 	}
 	closeErr := data.Close()
 	if err != nil {
-		return "", err
+		return "", smtpFailureAt("data", err)
 	}
 	if closeErr != nil {
-		return "", closeErr
+		return "", smtpFailureAt("data", closeErr)
 	}
 	if err = client.Quit(); err != nil {
-		return "", err
+		return "", smtpFailureAt("quit", err)
 	}
 	return "smtp:" + message.ID, nil
 }

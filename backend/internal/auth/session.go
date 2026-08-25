@@ -473,15 +473,45 @@ func (m *MemorySessionStore) revokeWhere(now time.Time, reason string, matches f
 func (m *MemorySessionStore) DeleteExpired(_ context.Context, before time.Time) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Match the PostgreSQL self-FK semantics: an active rotation leaf retains
+	// every predecessor until the complete chain is cleanup-eligible.
+	retained := make(map[string]struct{}, len(m.byToken))
+	for _, session := range m.byToken {
+		if !sessionCleanupEligible(session, before) {
+			retained[session.ID] = struct{}{}
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for id := range retained {
+			hash, ok := m.byID[id]
+			if !ok {
+				continue
+			}
+			parentID := m.byToken[hash].RotatedFrom
+			if parentID == "" {
+				continue
+			}
+			if _, ok = retained[parentID]; !ok {
+				retained[parentID] = struct{}{}
+				changed = true
+			}
+		}
+	}
 	var count int64
 	for hash, session := range m.byToken {
-		if session.AbsoluteExpiresAt.Before(before) || session.RevokedAt != nil && session.RevokedAt.Before(before) {
+		_, keep := retained[session.ID]
+		if sessionCleanupEligible(session, before) && !keep {
 			delete(m.byToken, hash)
 			delete(m.byID, session.ID)
 			count++
 		}
 	}
 	return count, nil
+}
+
+func sessionCleanupEligible(session Session, before time.Time) bool {
+	return session.AbsoluteExpiresAt.Before(before) || session.RevokedAt != nil && session.RevokedAt.Before(before)
 }
 
 func bindingMatches(session Session, binding ClientBinding) bool {

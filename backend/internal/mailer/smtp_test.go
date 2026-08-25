@@ -1,6 +1,9 @@
 package mailer
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestNewSMTPSenderRejectsUnsafeConfiguration(t *testing.T) {
 	for _, config := range []SMTPConfig{{Host: "", Port: 587, FromAddress: "invoice@example.com"}, {Host: "smtp.example.com\r\nX: y", Port: 587, FromAddress: "invoice@example.com"}, {Host: "smtp.example.com", Port: 587, FromAddress: "bad\r\nBcc:x@example.com"}} {
@@ -17,5 +20,17 @@ func TestQQSMTPConfigurationUsesAuthorizationCodeField(t *testing.T) {
 	}
 	if sender.config.Password != "authorization-code" || !sender.config.RequireSTARTTLS {
 		t.Fatal("SMTP configuration changed")
+	}
+}
+
+func TestSMTPFailureStageIsAllowlistedAndPreservesErrorIdentity(t *testing.T) {
+	providerErr := errors.New("provider-response-sensitive-marker")
+	err := smtpFailureAt("auth", providerErr)
+	if SMTPFailureStage(err) != "auth" || !errors.Is(err, providerErr) {
+		t.Fatalf("stage=%q error=%v", SMTPFailureStage(err), err)
+	}
+	if SMTPFailureStage(errors.New("unclassified-sensitive-marker")) != "other" ||
+		SMTPFailureStage(smtpFailureAt("unapproved-stage", providerErr)) != "other" {
+		t.Fatal("SMTP failure classifier returned a non-allowlisted stage")
 	}
 }

@@ -123,6 +123,55 @@ func TestSessionRotationRejectsIdentitySwapAndWrongFlowSession(t *testing.T) {
 	}
 }
 
+func TestSessionCleanupPreservesRotatedAncestorUntilFamilyIsStale(t *testing.T) {
+	store := NewMemorySessionStore()
+	manager, err := NewSessionManager(store, SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, &MemorySecurityAuditSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	manager.now = func() time.Time { return now }
+	principal := Principal{Issuer: "https://identity.example", Subject: "subject-1"}
+	issued, err := manager.Issue(context.Background(), IssueSessionInput{UserID: "user-1", Principal: principal, RequestID: "req-cleanup-issue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return now.Add(time.Minute) }
+	firstRotation, err := manager.Rotate(context.Background(), RotateSessionInput{
+		Token: issued.Token, ExpectedSessionID: issued.Session.ID,
+		Principal: principal, RequestID: "req-cleanup-rotate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return now.Add(2 * time.Minute) }
+	activeLeaf, err := manager.Rotate(context.Background(), RotateSessionInput{
+		Token: firstRotation.Token, ExpectedSessionID: firstRotation.Session.ID,
+		Principal: principal, RequestID: "req-cleanup-rotate-again",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.DeleteExpired(context.Background(), now.Add(3*time.Minute))
+	if err != nil || deleted != 0 {
+		t.Fatalf("cleanup with active descendant deleted=%d err=%v", deleted, err)
+	}
+	if _, err = manager.Authenticate(context.Background(), activeLeaf.Token, ClientBinding{}); err != nil {
+		t.Fatalf("active rotated session was not preserved: %v", err)
+	}
+	manager.now = func() time.Time { return now.Add(4 * time.Minute) }
+	if err = manager.RevokeToken(context.Background(), activeLeaf.Token, "test cleanup", "req-cleanup-revoke"); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err = store.DeleteExpired(context.Background(), now.Add(5*time.Minute))
+	if err != nil || deleted != 3 {
+		t.Fatalf("stale rotation family deleted=%d err=%v", deleted, err)
+	}
+	if len(store.byToken) != 0 || len(store.byID) != 0 {
+		t.Fatal("stale rotation family remains in memory store")
+	}
+}
+
 func TestAdminPolicyRequiresExactRoleACRAMRAndFreshMFA(t *testing.T) {
 	now := time.Now().UTC()
 	policy := AdminPolicy{Role: "invoice-admin", RequiredACR: "urn:invoice:mfa", RequiredAMR: []string{"pwd", "otp"}, StepUpMaxAge: 10 * time.Minute}

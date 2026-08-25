@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"invoice-system/backend/internal/document"
 	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/ledger"
+	"invoice-system/backend/internal/mailer"
 )
 
 type httpSettingsBox struct{}
@@ -453,6 +455,37 @@ func TestTypedSMTPSettingsSecretIsWriteOnlyAndTestMailFailsClosed(t *testing.T) 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("test email status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+}
+
+func TestSMTPTestFailureLogsOnlySafeStage(t *testing.T) {
+	const sensitiveMarker = "provider-response-sensitive-marker"
+	var logs bytes.Buffer
+	server := &Server{
+		logger:         slog.New(slog.NewTextHandler(&logs, nil)),
+		smtpTestSender: failingSMTPTestSender{err: errors.New(sensitiveMarker)},
+		productionAuth: &ProductionAuth{LoadUser: func(context.Context, string) (SessionUser, error) {
+			return SessionUser{Email: "private-admin@example.com", EmailVerified: true}, nil
+		}},
+		publicOrigin: "https://invoice.example",
+		lastSMTPTest: make(map[string]time.Time),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", nil)
+	request = request.WithContext(context.WithValue(request.Context(), identityKey, identity{UserID: "admin-user"}))
+	recorder := httptest.NewRecorder()
+	server.testEmail(recorder, request)
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "SMTP_TEST_FAILED") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	logText := logs.String()
+	if !strings.Contains(logText, "failure_stage=other") || strings.Contains(logText, sensitiveMarker) || strings.Contains(logText, "private-admin@example.com") {
+		t.Fatalf("unsafe SMTP failure log: %s", logText)
+	}
+}
+
+type failingSMTPTestSender struct{ err error }
+
+func (s failingSMTPTestSender) SendInvoiceReady(context.Context, mailer.Message) (string, error) {
+	return "", s.err
 }
 
 func TestLegacyIssuerPlaceholderDoesNotBlockSMTPOrAdminAccessSetup(t *testing.T) {

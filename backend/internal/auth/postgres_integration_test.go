@@ -69,7 +69,8 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	}
 
 	audit := NewPostgresSecurityAuditSink(pool)
-	manager, err := NewSessionManager(NewPostgresSessionStore(pool), SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, audit)
+	sessionStore := NewPostgresSessionStore(pool)
+	manager, err := NewSessionManager(sessionStore, SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, audit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +114,22 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	if _, err = manager.Authenticate(ctx, rotated.Token, ClientBinding{}); err != nil {
 		t.Fatal(err)
 	}
+	manager.now = func() time.Time { return now.Add(2 * time.Minute) }
+	secondRotationMFA := now.Add(2 * time.Minute)
+	activeLeaf, err := manager.Rotate(ctx, RotateSessionInput{
+		Token: rotated.Token, ExpectedSessionID: rotated.Session.ID,
+		Principal: principal, MFAAt: &secondRotationMFA, RequestID: "req-rotate-again",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := sessionStore.DeleteExpired(ctx, now.Add(3*time.Minute))
+	if err != nil || deleted != 0 {
+		t.Fatalf("cleanup with active PostgreSQL descendant deleted=%d err=%v", deleted, err)
+	}
+	if _, err = manager.Authenticate(ctx, activeLeaf.Token, ClientBinding{}); err != nil {
+		t.Fatal(err)
+	}
 	backchannel, err := NewBackchannelLogoutService(NewPostgresBackchannelLogoutRepository(pool))
 	if err != nil {
 		t.Fatal(err)
@@ -138,12 +155,20 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 		firstCall.result.RevokedSessions != 1 || secondCall.result.RevokedSessions != 1 || firstCall.result.Replay == secondCall.result.Replay {
 		t.Fatalf("concurrent logout calls=%+v %+v", firstCall, secondCall)
 	}
-	if _, err = manager.Authenticate(ctx, rotated.Token, ClientBinding{}); !errors.Is(err, ErrSessionInvalid) {
+	if _, err = manager.Authenticate(ctx, activeLeaf.Token, ClientBinding{}); !errors.Is(err, ErrSessionInvalid) {
 		t.Fatal("back-channel sid logout did not revoke the active session")
 	}
 	replay, err := backchannel.Process(ctx, logoutEvent, BackchannelLogoutActor{RequestID: "req-backchannel-replay"})
 	if err != nil || !replay.Replay || replay.EventID != firstCall.result.EventID || replay.RevokedSessions != firstCall.result.RevokedSessions {
 		t.Fatalf("logout replay=%+v err=%v", replay, err)
+	}
+	deleted, err = sessionStore.DeleteExpired(ctx, now.Add(4*time.Minute))
+	if err != nil || deleted != 3 {
+		t.Fatalf("stale PostgreSQL rotation family deleted=%d err=%v", deleted, err)
+	}
+	var remainingFamilySessions int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE family_id=$1`, activeLeaf.Session.FamilyID).Scan(&remainingFamilySessions); err != nil || remainingFamilySessions != 0 {
+		t.Fatalf("remaining PostgreSQL rotation family sessions=%d err=%v", remainingFamilySessions, err)
 	}
 	principal.ProviderSID = "provider-session-2"
 	second, err := manager.Issue(ctx, IssueSessionInput{UserID: identity.UserID, Principal: principal, MFAAt: &mfaAt, RequestID: "req-session-2"})
@@ -193,11 +218,11 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE action IN ('auth.identity.create','auth.session.issue','auth.session.rotate','auth.backchannel_logout.process','external_account.binding_proof.verify')`).Scan(&audits); err != nil {
 		t.Fatal(err)
 	}
-	if audits != 7 {
-		t.Fatalf("security audit rows=%d want 7", audits)
+	if audits != 8 {
+		t.Fatalf("security audit rows=%d want 8", audits)
 	}
 	var plaintextTokens int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE token_hash=$1 OR csrf_hash=$2`, issued.Token, issued.CSRFToken).Scan(&plaintextTokens); err != nil || plaintextTokens != 0 {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE token_hash=$1 OR csrf_hash=$2`, second.Token, second.CSRFToken).Scan(&plaintextTokens); err != nil || plaintextTokens != 0 {
 		t.Fatalf("raw secrets reached session table: count=%d err=%v", plaintextTokens, err)
 	}
 }

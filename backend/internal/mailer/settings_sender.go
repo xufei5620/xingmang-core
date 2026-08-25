@@ -48,7 +48,7 @@ func (s SettingsSender) SendInvoiceReady(ctx context.Context, message Message) (
 	}
 	sender, err := NewSMTPSender(config)
 	if err != nil {
-		return "", err
+		return "", smtpFailureAt("config", err)
 	}
 	return sender.SendInvoiceReady(ctx, message)
 }

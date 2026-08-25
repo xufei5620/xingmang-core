@@ -234,7 +234,22 @@ func (s *PostgresSessionStore) DeleteExpired(ctx context.Context, before time.Ti
 	if s == nil || s.pool == nil {
 		return 0, errors.New("nil PostgreSQL session store")
 	}
-	result, err := s.pool.Exec(ctx, `DELETE FROM auth_sessions WHERE absolute_expires_at<$1 OR revoked_at<$1`, before)
+	// A rotated child references its predecessor. Preserve every ancestor of a
+	// session that is not yet eligible, then prune only fully stale chains.
+	result, err := s.pool.Exec(ctx, `
+		WITH RECURSIVE retained(id,rotated_from) AS (
+			SELECT id,rotated_from
+			FROM auth_sessions
+			WHERE absolute_expires_at >= $1
+			  AND (revoked_at IS NULL OR revoked_at >= $1)
+			UNION
+			SELECT parent.id,parent.rotated_from
+			FROM auth_sessions parent
+			JOIN retained child ON child.rotated_from=parent.id
+		)
+		DELETE FROM auth_sessions session
+		WHERE (session.absolute_expires_at<$1 OR session.revoked_at<$1)
+		  AND NOT EXISTS (SELECT 1 FROM retained WHERE retained.id=session.id)`, before)
 	return result.RowsAffected(), err
 }
 
