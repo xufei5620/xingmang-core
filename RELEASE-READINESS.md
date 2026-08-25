@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc27 immutable-projection candidate
+# Release readiness: 0.1.0-rc28 pending-first candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC27 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC28 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -68,9 +68,17 @@ retains serialization on advisory/source, mutable cycle, watermark, account
 and funding-lot rows. A static regression gate rejects reintroduction of the
 exact forbidden lock forms.
 
+RC27 then processed both retained manifests and published both baseline scan
+cycles without weakening permissions. During the next Sub2API balance cycle,
+restart recovery exposed an ordering bug: `Connector.Scan` captured and replaced
+the current encrypted balance snapshot before `Publisher` replayed an existing
+pending batch, leaving the acknowledged target cursor bound to the older
+snapshot. RC28 resumes/finalizes any pending batch before the first connector
+read. Restart tests now make the connector fail if it is called before replay.
+
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC27 image/SBOM/vulnerability
+- generate and independently verify a fresh RC28 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -86,7 +94,7 @@ exact forbidden lock forms.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC27 tag and pass real production
+- deploy all Invoice images under the same RC28 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -101,7 +109,7 @@ exact forbidden lock forms.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC27 commit and signed release tag; no GitHub
+- create and locally verify the RC28 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

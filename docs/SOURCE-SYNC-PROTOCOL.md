@@ -307,7 +307,10 @@ refreshed). Sequence state advances only after the ACK matches source, stream,
 batch, sequence and record count; the target cursor then advances, and only
 afterward is the pending spool deleted. Crash recovery also recognizes the
 locally ACK-proven sequence and completes its stored cursor without skipping to
-a newly observed cursor.
+a newly observed cursor. On every restart the coordinator must inspect and
+replay that spool before calling `Connector.Scan`; otherwise a stateful balance
+connector could replace its durable snapshot before the pending target cursor
+is committed.
 
 Event IDs remain deterministic from source ID, entity, external ID, operation
 and canonical payload hash. Adding `stream_id` does not change established

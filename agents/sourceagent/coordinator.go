@@ -65,6 +65,25 @@ func (c *SyncCoordinator) SyncPage(ctx context.Context, mode ScanMode) (ScanPage
 	if err != nil {
 		return ScanPage{}, IngestAck{}, err
 	}
+	if c.Publisher.Pending != nil {
+		receipt, exists, resumeErr := c.Publisher.ResumePendingPage(ctx, cursor)
+		if resumeErr != nil {
+			return ScanPage{}, IngestAck{}, resumeErr
+		}
+		if exists {
+			committed, commitErr := c.Cursors.CompareAndSwap(ctx, c.SourceID, cursor, receipt.CursorAfter)
+			if commitErr != nil {
+				return ScanPage{}, IngestAck{}, commitErr
+			}
+			if !committed {
+				return ScanPage{}, IngestAck{}, errors.New("source cursor changed concurrently")
+			}
+			if finalizeErr := c.Publisher.FinalizePage(ctx, receipt); finalizeErr != nil {
+				return ScanPage{}, IngestAck{}, finalizeErr
+			}
+			return resumedScanPage(receipt.CursorAfter), receipt.Ack, nil
+		}
+	}
 	page, err := c.Connector.Scan(ctx, ScanRequest{Mode: mode, Cursor: cursor, Limit: c.Limit})
 	if err != nil {
 		return ScanPage{}, IngestAck{}, err
@@ -99,4 +118,24 @@ func (c *SyncCoordinator) SyncPage(ctx context.Context, mode ScanMode) (ScanPage
 	}
 	page.NextCursor = targetCursor
 	return page, ack, nil
+}
+
+func resumedScanPage(cursor ScanCursor) ScanPage {
+	page := ScanPage{
+		NextCursor:        cursor,
+		HasMore:           !cursor.Completed && !cursor.ProjectionBlocked,
+		ReconcileBlocked:  cursor.ProjectionBlocked,
+		StreamWatermarkAt: cursor.WatermarkAt,
+		SourceCursor:      cursor.WatermarkCursor,
+		ScanCeilingAt:     cursor.CeilingAt,
+		ScanCeilingCursor: cursor.CeilingCursor,
+		ScanCycleID:       cursor.ScanCycleID,
+		ScanComplete:      cursor.Completed && !cursor.ProjectionBlocked,
+		ScanSnapshotID:    cursor.SnapshotID,
+	}
+	if cursor.HasSnapshotMetadata {
+		count := cursor.SnapshotRowCount
+		page.ScanSnapshotRowCount = &count
+	}
+	return page
 }

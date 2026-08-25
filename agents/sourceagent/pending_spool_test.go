@@ -17,6 +17,13 @@ func (c fixedConnector) Scan(context.Context, ScanRequest) (ScanPage, error) {
 	return c.page, nil
 }
 
+type failOnScanConnector struct{}
+
+func (failOnScanConnector) SourceType() string { return SourceNewAPI }
+func (failOnScanConnector) Scan(context.Context, ScanRequest) (ScanPage, error) {
+	return ScanPage{}, errors.New("connector scan ran before pending replay")
+}
+
 func TestEncryptedPendingSpoolRoundTripAndTamperFailsClosed(t *testing.T) {
 	directory := t.TempDir()
 	keyPath := filepath.Join(directory, "spool.key")
@@ -139,7 +146,7 @@ func TestAckLossRetriesExactPendingBatch(t *testing.T) {
 			}, nil
 		}),
 	}
-	secondCoordinator := &SyncCoordinator{SourceID: "10000000-0000-4000-8000-000000000002", Connector: connector, Cursors: cursors, Publisher: secondPublisher, Limit: 100}
+	secondCoordinator := &SyncCoordinator{SourceID: "10000000-0000-4000-8000-000000000002", Connector: failOnScanConnector{}, Cursors: cursors, Publisher: secondPublisher, Limit: 100}
 	if _, _, err := secondCoordinator.SyncPage(ctx, ScanFull); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +213,7 @@ func TestProcessRestartReplaysExactEncryptedFilePendingBatch(t *testing.T) {
 	// New state/spool objects simulate a new process with no shared memory.
 	secondState := &FileStateStore{Path: statePath, SourceID: sourceID, StreamID: "payments"}
 	second := &SyncCoordinator{
-		SourceID: sourceID, Connector: fixedConnector{page: page},
+		SourceID: sourceID, Connector: failOnScanConnector{},
 		Cursors: FileCursorStore{State: secondState},
 		Publisher: &Publisher{
 			Builder: builder, Store: FileSequenceStore{State: secondState}, Pending: newSpool(),

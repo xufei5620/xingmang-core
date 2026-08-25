@@ -389,6 +389,49 @@ type PublishReceipt struct {
 	bodyHash     string
 }
 
+// ResumePendingPage replays a durable batch before the connector performs any
+// new source read. This ordering is essential for connectors such as balances
+// that atomically replace a durable snapshot while beginning a new scan: a
+// restart must not overwrite that snapshot before the pending cursor is
+// committed.
+func (p *Publisher) ResumePendingPage(ctx context.Context, cursor ScanCursor) (PublishReceipt, bool, error) {
+	if p == nil || p.Store == nil || p.Client == nil || p.Pending == nil {
+		return PublishReceipt{}, false, errors.New("durable page publisher is not configured")
+	}
+	if err := validateStoredFileCursor(cursor); err != nil {
+		return PublishReceipt{}, false, err
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		state, err := p.Store.Load(ctx)
+		if err != nil {
+			return PublishReceipt{}, false, err
+		}
+		pending, exists, err := p.Pending.Load(ctx)
+		if err != nil {
+			return PublishReceipt{}, false, err
+		}
+		if !exists {
+			return PublishReceipt{}, false, nil
+		}
+		if pending.CursorBefore != cursor {
+			if cursorMatchesCommitted(pending.CursorAfter, cursor) && state.Sequence == pending.Batch.Batch.Sequence && state.LastBatchHash == pending.Batch.BodyHash {
+				if err := p.Pending.Clear(ctx, pending.Batch.BodyHash); err != nil {
+					pending.Destroy()
+					return PublishReceipt{}, false, err
+				}
+				pending.Destroy()
+				continue
+			}
+			pending.Destroy()
+			return PublishReceipt{}, false, errors.New("pending batch does not match the loaded source cursor")
+		}
+		receipt, err := p.resumePending(ctx, state, pending)
+		pending.Destroy()
+		return receipt, true, err
+	}
+	return PublishReceipt{}, false, errors.New("pending batch changed concurrently")
+}
+
 // PublishPage persists a complete encrypted pending batch before network I/O.
 // It intentionally leaves the spool in place after a validated ACK; the
 // coordinator clears it only after committing the matching source cursor.
