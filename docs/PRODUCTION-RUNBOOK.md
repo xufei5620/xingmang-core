@@ -268,8 +268,13 @@ export RECORD_ROOT=/root/invoice-system/deployment-records
 deploy/postgres/apply-source-readiness-index-concurrently.sh
 ```
 
-The operator uses a verified root-owned `0700` directory under `/run/lock` and
-rejects symlink, non-regular and owner/mode drift for its lock path. It refuses
+The operator accepts a root-owned `/run/lock` parent when it is either not
+world-writable (for example `0755`/`0775`) or has the sticky bit set (the
+standard `1777` layout). A world-writable parent without sticky protection,
+including `0777`, fails before any database mutation. Under that parent the
+operator uses a verified root-owned `0700` dedicated directory and root-owned
+`0600` lock file, and rejects symlink, non-regular and owner/mode drift for its
+lock path. It refuses
 to run after migration 0013 is registered and never drops or repairs a
 same-name index. After `CREATE INDEX CONCURRENTLY`, it runs `ANALYZE`, exact
 catalog assertions, a read-only plan and bounded `EXPLAIN ANALYZE BUFFERS`.

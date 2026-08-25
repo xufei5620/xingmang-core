@@ -22,6 +22,10 @@ foreach ($required in @(
     'EXPECTED_OPERATOR_SHA256',
     'EXPECTED_VERIFIER_SHA256',
     "readonly LOCK_PARENT='/run/lock'",
+    'lock_parent_mode_is_safe',
+    '(8#$mode & 8#002) == 0',
+    '(8#$mode & 8#1000) != 0',
+    '/run/lock must not be world-writable unless the sticky bit is set',
     'solov-invoice-source-readiness-index',
     'dedicated lock directory must be root:root mode 0700',
     'lock file must be a regular non-symlink file',
@@ -59,6 +63,36 @@ foreach ($required in @(
     if (-not $operator.Contains($required, [StringComparison]::Ordinal)) {
         throw "operator contract is missing: $required"
     }
+}
+
+if ($operator.Contains("die '/run/lock must not be world-writable'", [StringComparison]::Ordinal)) {
+    throw 'operator still rejects the standard sticky /run/lock mode'
+}
+$modeFunction = [regex]::Match($operator, '(?ms)^lock_parent_mode_is_safe\(\) \{.*?^\}').Value
+if ([string]::IsNullOrWhiteSpace($modeFunction)) {
+    throw 'cannot extract lock parent mode predicate for dynamic tests'
+}
+$modeFixtureName = '.tmp-lock-parent-mode-' + [Guid]::NewGuid().ToString('N') + '.sh'
+$modeFixturePath = Join-Path $projectRoot $modeFixtureName
+try {
+    [IO.File]::WriteAllText($modeFixturePath,
+        $modeFunction + "`nlock_parent_mode_is_safe `"`$1`"`n",
+        [Text.UTF8Encoding]::new($false))
+    Push-Location $projectRoot
+    try {
+        foreach ($mode in @('755','775','1777')) {
+            & bash $modeFixtureName $mode 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "safe root-owned lock parent mode was rejected: $mode" }
+        }
+        foreach ($mode in @('0777','0002')) {
+            & bash $modeFixtureName $mode 2>$null
+            if ($LASTEXITCODE -eq 0) { throw "unsafe non-sticky world-writable lock parent mode was accepted: $mode" }
+        }
+    } finally {
+        Pop-Location
+    }
+} finally {
+    Remove-Item -LiteralPath $modeFixturePath -Force -ErrorAction SilentlyContinue
 }
 
 foreach ($required in @(
@@ -110,13 +144,18 @@ if ($operator.Contains('exec 9>"$LOCK_FILE"', [StringComparison]::Ordinal) -or
     throw 'operator lock descriptor can follow an unverified pre-existing path'
 }
 $lockDirectoryCheckOffset = $operator.IndexOf('dedicated lock directory must be root:root mode 0700', [StringComparison]::Ordinal)
+$lockParentModeOffset = $operator.IndexOf('lock_parent_mode_is_safe "$lock_parent_mode"', [StringComparison]::Ordinal)
+$lockDirectoryCreateOffset = $operator.IndexOf('mkdir -m 0700 -- "$LOCK_DIRECTORY"', [StringComparison]::Ordinal)
 $lockFileCheckOffset = $operator.IndexOf('lock file must be a regular non-symlink file', [StringComparison]::Ordinal)
 $lockOpenOffset = $operator.IndexOf('exec 9<>"$LOCK_FILE"', [StringComparison]::Ordinal)
 $lockDescriptorCheckOffset = $operator.IndexOf('opened lock descriptor does not match the reviewed lock path', [StringComparison]::Ordinal)
 $flockOffset = $operator.IndexOf("flock -n 9 || die 'another source readiness index operation is running'", [StringComparison]::Ordinal)
 $lockPostCheckOffset = $operator.IndexOf("die 'lock path inode changed after flock'", [StringComparison]::Ordinal)
-if ($lockDirectoryCheckOffset -lt 0 -or $lockFileCheckOffset -lt 0 -or $lockOpenOffset -lt 0 -or
+if ($lockParentModeOffset -lt 0 -or $lockDirectoryCreateOffset -lt 0 -or
+    $lockDirectoryCheckOffset -lt 0 -or $lockFileCheckOffset -lt 0 -or $lockOpenOffset -lt 0 -or
     $lockDescriptorCheckOffset -lt 0 -or $flockOffset -lt 0 -or $lockPostCheckOffset -lt 0 -or
+    $lockParentModeOffset -ge $lockDirectoryCreateOffset -or
+    $lockDirectoryCreateOffset -ge $lockDirectoryCheckOffset -or
     $lockDirectoryCheckOffset -ge $lockFileCheckOffset -or $lockFileCheckOffset -ge $lockOpenOffset -or
     $lockOpenOffset -ge $lockDescriptorCheckOffset -or $lockDescriptorCheckOffset -ge $flockOffset -or
     $flockOffset -ge $lockPostCheckOffset) {

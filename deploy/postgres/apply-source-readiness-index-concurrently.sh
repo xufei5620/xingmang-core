@@ -61,6 +61,12 @@ check_root_directory() {
   [[ "$(stat -c '%u:%g:%a' "$path")" == '0:0:700' ]] || die "$label must be root:root mode 0700"
 }
 
+lock_parent_mode_is_safe() {
+  local mode=$1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 8#002) == 0 || (8#$mode & 8#1000) != 0 ))
+}
+
 check_root_config_file "$PRODUCTION_ENV_FILE" 'production environment file'
 check_root_directory "$RECORD_ROOT" 'deployment record root'
 readonly PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
@@ -74,7 +80,8 @@ readonly LOCK_FILE="$LOCK_DIRECTORY/operator.lock"
 [[ -d "$LOCK_PARENT" && ! -L "$LOCK_PARENT" ]] || die '/run/lock must be a regular non-symlink directory'
 [[ "$(stat -c '%u:%g' "$LOCK_PARENT")" == '0:0' ]] || die '/run/lock must be root-owned'
 lock_parent_mode=$(stat -c '%a' "$LOCK_PARENT")
-(( (8#$lock_parent_mode & 8#002) == 0 )) || die '/run/lock must not be world-writable'
+lock_parent_mode_is_safe "$lock_parent_mode" ||
+  die '/run/lock must not be world-writable unless the sticky bit is set'
 if [[ ! -e "$LOCK_DIRECTORY" && ! -L "$LOCK_DIRECTORY" ]]; then
   mkdir -m 0700 -- "$LOCK_DIRECTORY" || die 'cannot create the dedicated lock directory'
 fi
