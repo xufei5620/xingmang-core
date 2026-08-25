@@ -18,6 +18,7 @@ import (
 	"invoice-system/backend/internal/application"
 	"invoice-system/backend/internal/auth"
 	"invoice-system/backend/internal/document"
+	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/httpapi"
 	"invoice-system/backend/internal/ledger"
 	"invoice-system/backend/internal/mailer"
@@ -336,8 +337,8 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			if healthErr != nil {
 				return healthErr
 			}
-			if health.Dead > 0 || !health.OldestPending.IsZero() && time.Since(health.OldestPending) > 15*time.Minute {
-				return errors.New("source ingestion processing is unhealthy")
+			if ingestErr := validateSourceIngestRuntimeReadiness(health, time.Now().UTC()); ingestErr != nil {
+				return ingestErr
 			}
 			eligibilityHealth, healthErr := store.EligibilityProjectionHealth(readyCtx)
 			if healthErr != nil {
@@ -348,11 +349,11 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 				return errors.New("invoice eligibility projection is unhealthy")
 			}
 			report, healthErr := appService.SourceHealth(readyCtx)
-			if healthErr != nil || !report.Ready {
-				if healthErr != nil {
-					return healthErr
-				}
-				return errors.New("required source streams are stale, unprocessed, or version-mismatched")
+			if healthErr != nil {
+				return healthErr
+			}
+			if readinessErr := validateSourceRuntimeReadiness(report); readinessErr != nil {
+				return readinessErr
 			}
 			return nil
 		},
@@ -384,6 +385,95 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 func validateIssuerReadiness(settings adminsettings.Settings) error {
 	if !adminsettings.IsIssuerConfigured(settings.IssuerName) {
 		return application.ErrIssuerNotConfigured
+	}
+	return nil
+}
+
+func validateSourceRuntimeReadiness(report postgresstore.SourceHealthReport) error {
+	requiredStreams := map[string]struct{}{"payments": {}, "identities": {}, "usage": {}, "credits": {}, "balances": {}}
+	type sourceState struct {
+		sourceType domain.SourceType
+		streams    map[string]struct{}
+	}
+	sources := make(map[string]sourceState)
+	enabledTypes := make(map[domain.SourceType]bool)
+	strictReady := true
+	for _, item := range report.Items {
+		if !item.SourceEnabled {
+			continue
+		}
+		if item.SourceType != domain.SourceSub2API && item.SourceType != domain.SourceNewAPI {
+			return errors.New("required source streams contain an unsupported source type")
+		}
+		if strings.TrimSpace(item.SourceInstanceID) == "" {
+			return errors.New("required source stream identity is missing")
+		}
+		if _, ok := requiredStreams[item.StreamID]; !ok {
+			return errors.New("required source streams contain an unsupported stream")
+		}
+		state, ok := sources[item.SourceInstanceID]
+		if !ok {
+			state = sourceState{sourceType: item.SourceType, streams: make(map[string]struct{}, len(requiredStreams))}
+		} else if state.sourceType != item.SourceType {
+			return errors.New("required source identity changed type")
+		}
+		if _, duplicate := state.streams[item.StreamID]; duplicate {
+			return errors.New("required source stream is duplicated")
+		}
+		state.streams[item.StreamID] = struct{}{}
+		sources[item.SourceInstanceID] = state
+		enabledTypes[item.SourceType] = true
+		if !item.Ready {
+			strictReady = false
+		}
+		switch {
+		case item.Ready:
+			if len(item.Reasons) != 0 || item.PendingEvents != 0 || item.DeadEvents != 0 {
+				return errors.New("ready source stream has inconsistent health evidence")
+			}
+		case item.DeadEvents != 0:
+			return errors.New("required source stream contains dead events")
+		case item.PendingEvents <= 0 || len(item.Reasons) != 1 || item.Reasons[0] != "EVENTS_PENDING":
+			return errors.New("required source streams are stale, blocked, dead, or version-mismatched")
+		}
+		// The preceding SourceIngestHealth check already bounds the oldest
+		// pending event to 15 minutes. This exact pending-only state must not
+		// remove an otherwise healthy API from service; irreversible invoice
+		// operations still use the stricter per-stream freshness policy.
+	}
+	if !enabledTypes[domain.SourceSub2API] || !enabledTypes[domain.SourceNewAPI] {
+		strictReady = false
+		if report.Ready != strictReady {
+			return errors.New("source health report readiness is inconsistent")
+		}
+		return errors.New("both Sub2API and New API sources must be enabled")
+	}
+	for _, state := range sources {
+		if len(state.streams) != len(requiredStreams) {
+			return errors.New("required source stream set is incomplete")
+		}
+	}
+	if report.Ready != strictReady {
+		return errors.New("source health report readiness is inconsistent")
+	}
+	return nil
+}
+
+func validateSourceIngestRuntimeReadiness(health postgresstore.SourceIngestHealth, now time.Time) error {
+	if now.IsZero() {
+		return errors.New("source ingestion readiness clock is unavailable")
+	}
+	if health.Dead > 0 {
+		return errors.New("source ingestion contains dead events")
+	}
+	if health.Pending == 0 {
+		if !health.OldestPending.IsZero() {
+			return errors.New("source ingestion pending evidence is inconsistent")
+		}
+		return nil
+	}
+	if health.OldestPending.IsZero() || health.OldestPending.After(now.Add(5*time.Minute)) || now.Sub(health.OldestPending) > 15*time.Minute {
+		return errors.New("source ingestion processing is unhealthy")
 	}
 	return nil
 }

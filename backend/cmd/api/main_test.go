@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"invoice-system/backend/internal/adminsettings"
+	"invoice-system/backend/internal/domain"
+	"invoice-system/backend/internal/postgresstore"
 )
 
 func TestLoadBreakGlassCIDRsPrefersDeploymentFile(t *testing.T) {
@@ -138,6 +140,131 @@ func TestValidateIssuerReadinessRejectsBootstrapAndLegacyPlaceholders(t *testing
 			err := validateIssuerReadiness(adminsettings.Settings{IssuerName: fixture.issuer})
 			if (err == nil) != fixture.ready {
 				t.Fatalf("issuer=%q ready=%t err=%v", fixture.issuer, fixture.ready, err)
+			}
+		})
+	}
+}
+
+func TestSourceRuntimeReadinessAllowsOnlyBoundedPendingWork(t *testing.T) {
+	report := postgresstore.SourceHealthReport{Ready: false}
+	for _, source := range []struct {
+		id         string
+		sourceType domain.SourceType
+	}{{"sub2", domain.SourceSub2API}, {"new", domain.SourceNewAPI}} {
+		for _, stream := range []string{"payments", "identities", "usage", "credits", "balances"} {
+			report.Items = append(report.Items, postgresstore.SourceStreamHealth{
+				SourceInstanceID: source.id, SourceType: source.sourceType, SourceEnabled: true,
+				StreamID: stream, PendingEvents: 1, Ready: false, Reasons: []string{"EVENTS_PENDING"},
+			})
+		}
+	}
+	if err := validateSourceRuntimeReadiness(report); err != nil {
+		t.Fatalf("bounded processing window removed API readiness: %v", err)
+	}
+
+	stale := report
+	stale.Items = append([]postgresstore.SourceStreamHealth(nil), report.Items...)
+	stale.Items[0].Reasons = []string{"EVENTS_PENDING", "STREAM_STALE"}
+	if err := validateSourceRuntimeReadiness(stale); err == nil {
+		t.Fatal("stale source stream was accepted as runtime-ready")
+	}
+
+	incomplete := report
+	incomplete.Items = append([]postgresstore.SourceStreamHealth(nil), report.Items[:len(report.Items)-1]...)
+	if err := validateSourceRuntimeReadiness(incomplete); err == nil {
+		t.Fatal("incomplete source stream set was accepted as runtime-ready")
+	}
+}
+
+func TestSourceRuntimeReadinessRejectsInconsistentHealthEvidence(t *testing.T) {
+	healthy := postgresstore.SourceHealthReport{Ready: true}
+	for _, source := range []struct {
+		id         string
+		sourceType domain.SourceType
+	}{{"sub2", domain.SourceSub2API}, {"new", domain.SourceNewAPI}} {
+		for _, stream := range []string{"payments", "identities", "usage", "credits", "balances"} {
+			healthy.Items = append(healthy.Items, postgresstore.SourceStreamHealth{
+				SourceInstanceID: source.id, SourceType: source.sourceType, SourceEnabled: true,
+				StreamID: stream, Ready: true,
+			})
+		}
+	}
+	if err := validateSourceRuntimeReadiness(healthy); err != nil {
+		t.Fatalf("healthy source report rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*postgresstore.SourceHealthReport){
+		"false without reason": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].Ready = false
+			report.Ready = false
+		},
+		"pending without reason": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].Ready = false
+			report.Items[0].PendingEvents = 1
+			report.Ready = false
+		},
+		"ready with pending reason": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].PendingEvents = 1
+			report.Items[0].Reasons = []string{"EVENTS_PENDING"}
+		},
+		"dead without reason": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].DeadEvents = 1
+		},
+		"report ready mismatch": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].Ready = false
+			report.Items[0].PendingEvents = 1
+			report.Items[0].Reasons = []string{"EVENTS_PENDING"}
+		},
+		"duplicate stream": func(report *postgresstore.SourceHealthReport) {
+			report.Items = append(report.Items, report.Items[0])
+		},
+		"blank source id": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].SourceInstanceID = ""
+		},
+		"empty report": func(report *postgresstore.SourceHealthReport) {
+			report.Ready = false
+			report.Items = nil
+		},
+		"missing source type": func(report *postgresstore.SourceHealthReport) {
+			report.Items = report.Items[:5]
+		},
+		"unsupported stream": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].StreamID = "unknown"
+		},
+		"unsupported source type": func(report *postgresstore.SourceHealthReport) {
+			report.Items[0].SourceType = domain.SourceType("unknown")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := healthy
+			report.Items = append([]postgresstore.SourceStreamHealth(nil), healthy.Items...)
+			mutate(&report)
+			if err := validateSourceRuntimeReadiness(report); err == nil {
+				t.Fatal("inconsistent source health was accepted")
+			}
+		})
+	}
+}
+
+func TestSourceIngestRuntimeReadinessBoundsPendingAge(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for name, fixture := range map[string]struct {
+		health postgresstore.SourceIngestHealth
+		ready  bool
+	}{
+		"empty":         {health: postgresstore.SourceIngestHealth{}, ready: true},
+		"fresh pending": {health: postgresstore.SourceIngestHealth{Pending: 3, OldestPending: now.Add(-14*time.Minute - 59*time.Second)}, ready: true},
+		"exact limit":   {health: postgresstore.SourceIngestHealth{Pending: 1, OldestPending: now.Add(-15 * time.Minute)}, ready: true},
+		"too old":       {health: postgresstore.SourceIngestHealth{Pending: 1, OldestPending: now.Add(-15*time.Minute - time.Nanosecond)}},
+		"dead":          {health: postgresstore.SourceIngestHealth{Dead: 1}},
+		"missing age":   {health: postgresstore.SourceIngestHealth{Pending: 1}},
+		"future age":    {health: postgresstore.SourceIngestHealth{Pending: 1, OldestPending: now.Add(6 * time.Minute)}},
+		"phantom age":   {health: postgresstore.SourceIngestHealth{OldestPending: now.Add(-time.Minute)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := validateSourceIngestRuntimeReadiness(fixture.health, now)
+			if (err == nil) != fixture.ready {
+				t.Fatalf("ready=%t err=%v", fixture.ready, err)
 			}
 		})
 	}
