@@ -298,15 +298,20 @@ readonly ACTIVE_EVENT_COUNT="$(psql_readonly -At -c "SELECT count(*) FILTER (WHE
 [[ "$ACTIVE_EVENT_COUNT" == 0 ]] || die "active/dead source events remain during freeze: $ACTIVE_EVENT_COUNT"
 readonly TARGET_COUNT_BEFORE="$(psql_readonly -At -c "$TARGET_COUNT_SQL")"
 readonly PARKED_TOTAL_BEFORE="$(psql_readonly -At -c "SELECT count(*) FROM public.source_ingest_events WHERE processing_status='parked_identity'")"
+# Frozen RC45 prestate: 1,879,297 approved balance-history targets plus
+# 25,044 non-target parked payment/usage/credit events.  Removing the exact
+# 1,873,803 purge set must therefore leave 30,538 parked rows.
+readonly EXPECTED_PARKED_PRESTATE=1904341
+readonly EXPECTED_PARKED_POSTSTATE=30538
 CLEANUP_STATE=unknown
 case "$TARGET_COUNT_BEFORE" in
   1879297)
-    [[ "$PARKED_TOTAL_BEFORE" == 1903871 ]] || die "prestate parked total mismatch: $PARKED_TOTAL_BEFORE"
+    [[ "$PARKED_TOTAL_BEFORE" == "$EXPECTED_PARKED_PRESTATE" ]] || die "prestate parked total mismatch: $PARKED_TOTAL_BEFORE"
     CLEANUP_STATE=prestate
     printf '%s\n' prestate >"$RECORD_DIR/cleanup-state-before.txt"
     ;;
   5494)
-    [[ "$PARKED_TOTAL_BEFORE" == 30068 ]] || die "poststate parked total mismatch: $PARKED_TOTAL_BEFORE"
+    [[ "$PARKED_TOTAL_BEFORE" == "$EXPECTED_PARKED_POSTSTATE" ]] || die "poststate parked total mismatch: $PARKED_TOTAL_BEFORE"
     CLEANUP_STATE=poststate
     readonly POST_GROUP_STATE="$(psql_readonly -At -F '|' -c "SELECT count(*),min(group_rows),max(group_rows) FROM (SELECT count(*) group_rows $TARGET_JOIN_SQL GROUP BY event.source_instance_id,event.dependency_key_hmac) grouped")"
     [[ "$POST_GROUP_STATE" == '2747|2|2' ]] || die "poststate group tuple mismatch: $POST_GROUP_STATE"
@@ -429,7 +434,7 @@ psql_readonly -At -F '|' -c "SELECT processing_status,count(*) FROM public.sourc
 readonly FINAL_FREEZE_STATE="$(psql_readonly -At -c "SELECT count(*) FILTER (WHERE processing_status IN ('queued','processing','failed','dead')) FROM public.source_ingest_events")|$(psql_readonly -At -c "$TARGET_COUNT_SQL")"
 [[ "$FINAL_FREEZE_STATE" == '0|5494' ]] || die "post-cleanup source event/target tuple mismatch: $FINAL_FREEZE_STATE"
 readonly PARKED_TOTAL_AFTER="$(psql_readonly -At -c "SELECT count(*) FROM public.source_ingest_events WHERE processing_status='parked_identity'")"
-[[ "$PARKED_TOTAL_AFTER" == 30068 ]] || die "post-cleanup parked total mismatch: $PARKED_TOTAL_AFTER"
+[[ "$PARKED_TOTAL_AFTER" == "$EXPECTED_PARKED_POSTSTATE" ]] || die "post-cleanup parked total mismatch: $PARKED_TOTAL_AFTER"
 
 # Only the two target tables may differ, and by exactly D rows each.
 before_events=$(grep '^source_ingest_events|' "$RECORD_DIR/counts-before.tsv" | cut -d'|' -f2)
