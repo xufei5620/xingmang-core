@@ -4477,6 +4477,9 @@ function SourceHealthPage() {
                       {item.streamId !== "identities" && (
                         <small>
                           账本水位 {item.economicWatermarkAt ? dateTime(item.economicWatermarkAt) : "尚未发布"}
+                          {item.economicWatermarkMaximumAgeSeconds
+                            ? ` · 最大 ${item.economicWatermarkMaximumAgeSeconds}s`
+                            : ""}
                         </small>
                       )}
                     </td>

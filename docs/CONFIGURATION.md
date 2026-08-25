@@ -335,6 +335,7 @@ SOURCE_STATE_STREAM=payments
 SOURCE_SPOOL_FILE=/var/lib/invoice-source-agent/sub2api-payments.pending.enc
 SOURCE_SPOOL_KEY_FILE=/run/secrets/source_spool_key
 SOURCE_POLL_INTERVAL=1m
+SOURCE_ECONOMIC_SAFETY_DELAY=5m
 SOURCE_RECONCILE_INTERVAL=6h
 NEWAPI_FULL_SCAN_INTERVAL=1h
 SOURCE_MAX_BACKOFF=1m
@@ -431,9 +432,17 @@ contradictory evidence does. Fixed deployment currency and direct
 `payment_orders` reads are intentionally unsupported.
 
 The invoice API independently requires fresh accepted `payments`, `usage`,
-`credits`, `balances`, and `identities` batches. Production defaults are
-`SOURCE_PAYMENTS_MAX_STALENESS=5m` and
-`SOURCE_IDENTITIES_MAX_STALENESS=15m` (30 seconds to 24 hours allowed).
+`credits`, `balances`, and `identities` batches. Production uses independent
+freshness budgets: `SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS=5m` for the latest
+accepted non-identity batch, `SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS=15m` for
+the proven economic scan horizon, and `SOURCE_IDENTITIES_MAX_STALENESS=15m` for
+identity heartbeats. The source horizon uses
+`SOURCE_ECONOMIC_SAFETY_DELAY=5m` and `SOURCE_POLL_INTERVAL=1m`. The API refuses
+an economic watermark budget smaller than the safety delay, the receiver's
+five-minute maximum clock skew, and two poll intervals (12 minutes under the
+reviewed defaults), so a nominally healthy quiet stream cannot be configured
+to fail readiness by construction. All durations remain bounded between their
+documented launcher limits.
 `projection_status=blocked`, an unapproved runtime version, queued/dead source
 events or a missed heartbeat fails readiness, user submission and final manual
 issue confirmation. Recoverable OIDC/account dependency waits remain visible

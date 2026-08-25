@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	SourceBatchPath = "/internal/v1/source-batches"
-	maxBatchBytes   = 4 << 20
+	SourceBatchPath    = "/internal/v1/source-batches"
+	DefaultMaximumSkew = 5 * time.Minute
+	maxBatchBytes      = 4 << 20
 )
 
 type Acceptor interface {
@@ -135,7 +136,7 @@ func (receiver *Receiver) ServeHTTP(writer http.ResponseWriter, request *http.Re
 	}
 	maximumSkew := receiver.MaximumSkew
 	if maximumSkew <= 0 {
-		maximumSkew = 5 * time.Minute
+		maximumSkew = DefaultMaximumSkew
 	}
 	for _, record := range batch.Records {
 		observedAt, parseErr := time.Parse(time.RFC3339Nano, record.ObservedAt)
@@ -234,7 +235,7 @@ func (receiver *Receiver) verifyEnvelope(request *http.Request, body []byte) (ve
 	}
 	skew := receiver.MaximumSkew
 	if skew <= 0 {
-		skew = 5 * time.Minute
+		skew = DefaultMaximumSkew
 	}
 	delta := now.Sub(sentAt.UTC())
 	if delta < -skew || delta > skew {

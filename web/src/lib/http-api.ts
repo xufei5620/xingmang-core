@@ -109,6 +109,7 @@ type BackendSourceHealth = {
     last_nonempty_batch_at?: string;
     economic_watermark_at?: string;
     maximum_age_seconds: number;
+    economic_watermark_maximum_age_seconds?: number;
     pending_events: number;
     dead_events: number;
     waiting_dependencies: number;
@@ -1252,6 +1253,7 @@ function mapSourceHealth(
     const counters = [
       item.sequence,
       item.maximum_age_seconds,
+      item.economic_watermark_maximum_age_seconds ?? 0,
       item.pending_events,
       item.dead_events,
       item.waiting_dependencies,
@@ -1285,6 +1287,10 @@ function mapSourceHealth(
       ) ||
       !counters.every((counter) => Number.isSafeInteger(counter) && counter >= 0) ||
       item.maximum_age_seconds <= 0 ||
+      (item.stream_id === "identities"
+        ? item.economic_watermark_maximum_age_seconds !== undefined
+        : !Number.isSafeInteger(item.economic_watermark_maximum_age_seconds) ||
+          (item.economic_watermark_maximum_age_seconds ?? 0) <= 0) ||
       !Array.isArray(item.reasons) ||
       item.reasons.length > 10 ||
       !item.reasons.every(
@@ -1320,6 +1326,8 @@ function mapSourceHealth(
         ? undefined
         : item.economic_watermark_at,
       maximumAgeSeconds: item.maximum_age_seconds,
+      economicWatermarkMaximumAgeSeconds:
+        item.economic_watermark_maximum_age_seconds,
       pendingEvents: item.pending_events,
       deadEvents: item.dead_events,
       waitingDependencies: item.waiting_dependencies,

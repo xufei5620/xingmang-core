@@ -238,20 +238,57 @@ func TestSub2APIBridgePreservesFinancialAndCutoverSemantics(t *testing.T) {
 	if _, err = admin.ExecContext(ctx, `DELETE FROM public.payment_orders WHERE id=4`); err != nil {
 		t.Fatal(err)
 	}
-	payments := &sourceagent.PaymentV3DBConnector{DB: admin, Source: sourceagent.SourceSub2API, Manifest: captured, SafetyDelay: time.Minute}
-	firstEmpty, err := payments.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanFull, Limit: 10})
+	var lastVisiblePaymentAt time.Time
+	if err = admin.QueryRowContext(ctx, `SELECT updated_at FROM public.payment_orders WHERE id=1`).Scan(&lastVisiblePaymentAt); err != nil {
+		t.Fatal(err)
+	}
+	idleManifest := captured
+	idleCutover := lastVisiblePaymentAt.Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	idleManifest.CutoverAt = idleCutover
+	idleManifest.DatabaseClock = idleCutover
+	idleManifest.HighWaters = make(map[string]sourceagent.SourceHighWater, len(captured.HighWaters))
+	for stream, highWater := range captured.HighWaters {
+		highWater.EventTime = idleCutover
+		idleManifest.HighWaters[stream] = highWater
+	}
+	idleManifest.ManifestHash = bridgeManifestHash(t, idleManifest)
+	idleCursor := sourceagent.ScanCursor{
+		Revision: 1, Version: 2, CutoverAt: idleCutover,
+		WatermarkAt: lastVisiblePaymentAt.UTC().Format(time.RFC3339Nano), WatermarkCursor: "payment_orders:1",
+		CeilingAt: lastVisiblePaymentAt.UTC().Format(time.RFC3339Nano), CeilingCursor: "payment_orders:1",
+		PositionCursor: "payment_orders:1", UpdatedAt: lastVisiblePaymentAt.UTC().Format(time.RFC3339Nano), ID: 1, Completed: true,
+	}
+	payments := &sourceagent.PaymentV3DBConnector{DB: admin, Source: sourceagent.SourceSub2API, Manifest: idleManifest, SafetyDelay: time.Minute}
+	var firstHorizonLower time.Time
+	if err = admin.QueryRowContext(ctx, `SELECT transaction_timestamp()-interval '1 minute'`).Scan(&firstHorizonLower); err != nil {
+		t.Fatal(err)
+	}
+	firstEmpty, err := payments.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanIncremental, Cursor: idleCursor, Limit: 10})
 	if err != nil || !firstEmpty.ScanComplete || len(firstEmpty.Projections) != 0 {
 		t.Fatalf("first Sub2API empty payment cycle page=%#v err=%v", firstEmpty, err)
 	}
+	var firstHorizonUpper time.Time
+	if err = admin.QueryRowContext(ctx, `SELECT transaction_timestamp()-interval '1 minute'`).Scan(&firstHorizonUpper); err != nil {
+		t.Fatal(err)
+	}
+	firstCeiling, err := time.Parse(time.RFC3339Nano, firstEmpty.ScanCeilingAt)
+	if err != nil || firstCeiling.Before(firstHorizonLower) || firstCeiling.After(firstHorizonUpper) ||
+		!firstCeiling.After(lastVisiblePaymentAt) || firstEmpty.ScanCeilingCursor != "payment_orders:1" ||
+		firstEmpty.StreamWatermarkAt != firstEmpty.ScanCeilingAt {
+		t.Fatalf("first idle cycle did not publish its source transaction horizon lower=%s ceiling=%s upper=%s watermark=%s err=%v",
+			firstHorizonLower, firstEmpty.ScanCeilingAt, firstHorizonUpper, firstEmpty.StreamWatermarkAt, err)
+	}
 	committed := firstEmpty.NextCursor
 	committed.Revision++ // Simulate the coordinator's successful cursor CAS.
-	secondEmpty, err := payments.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanFull, Cursor: committed, Limit: 10})
+	time.Sleep(10 * time.Millisecond)
+	secondEmpty, err := payments.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanIncremental, Cursor: committed, Limit: 10})
 	if err != nil || !secondEmpty.ScanComplete || len(secondEmpty.Projections) != 0 {
 		t.Fatalf("second Sub2API empty payment cycle page=%#v err=%v", secondEmpty, err)
 	}
-	if firstEmpty.ScanCeilingAt != secondEmpty.ScanCeilingAt || firstEmpty.ScanCeilingCursor != secondEmpty.ScanCeilingCursor {
-		t.Fatalf("empty-cycle fixture did not retain one ceiling first=%s/%s second=%s/%s",
-			firstEmpty.ScanCeilingAt, firstEmpty.ScanCeilingCursor, secondEmpty.ScanCeilingAt, secondEmpty.ScanCeilingCursor)
+	secondCeiling, err := time.Parse(time.RFC3339Nano, secondEmpty.ScanCeilingAt)
+	if err != nil || !secondCeiling.After(firstCeiling) || firstEmpty.ScanCeilingCursor != secondEmpty.ScanCeilingCursor || secondEmpty.StreamWatermarkAt != secondEmpty.ScanCeilingAt {
+		t.Fatalf("idle cycle did not advance the proven horizon while retaining its row ceiling first=%s/%s second=%s/%s err=%v",
+			firstEmpty.ScanCeilingAt, firstEmpty.ScanCeilingCursor, secondEmpty.ScanCeilingAt, secondEmpty.ScanCeilingCursor, err)
 	}
 	if firstEmpty.ScanCycleID == secondEmpty.ScanCycleID {
 		t.Fatal("successive committed Sub2API empty cycles reused the same scan cycle ID")

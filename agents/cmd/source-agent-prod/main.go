@@ -63,6 +63,7 @@ type runConfig struct {
 	EligibilityStartAt     time.Time
 	ScanLimit              int
 	PollInterval           time.Duration
+	EconomicSafetyDelay    time.Duration
 	ReconcileInterval      time.Duration
 	FullScanInterval       time.Duration
 	MaxBackoff             time.Duration
@@ -831,6 +832,12 @@ func loadRunConfig(getenv func(string) string) (runConfig, error) {
 	if config.PollInterval, err = envDuration(getenv, "SOURCE_POLL_INTERVAL", time.Minute); err != nil {
 		return runConfig{}, err
 	}
+	if config.EconomicSafetyDelay, err = envDuration(getenv, "SOURCE_ECONOMIC_SAFETY_DELAY", 5*time.Minute); err != nil {
+		return runConfig{}, err
+	}
+	if config.EconomicSafetyDelay < time.Minute || config.EconomicSafetyDelay > 24*time.Hour {
+		return runConfig{}, errors.New("SOURCE_ECONOMIC_SAFETY_DELAY must be between 1 minute and 24 hours")
+	}
 	if config.ReconcileInterval, err = envDuration(getenv, "SOURCE_RECONCILE_INTERVAL", 6*time.Hour); err != nil {
 		return runConfig{}, err
 	}
@@ -1387,9 +1394,9 @@ func buildDBConnector(config runConfig, database *sql.DB) (sourceagent.Connector
 		}
 		switch config.StreamID {
 		case sourceagent.StreamPayments:
-			return &sourceagent.PaymentV3DBConnector{DB: database, Source: config.SourceType, Manifest: manifest}, nil
+			return &sourceagent.PaymentV3DBConnector{DB: database, Source: config.SourceType, Manifest: manifest, SafetyDelay: config.EconomicSafetyDelay}, nil
 		case sourceagent.StreamUsage, sourceagent.StreamCredits:
-			return &sourceagent.EconomicDBConnector{DB: database, Source: config.SourceType, Stream: config.StreamID, Manifest: manifest}, nil
+			return &sourceagent.EconomicDBConnector{DB: database, Source: config.SourceType, Stream: config.StreamID, Manifest: manifest, SafetyDelay: config.EconomicSafetyDelay}, nil
 		case sourceagent.StreamBalances:
 			return &sourceagent.BalanceDBConnector{DB: database, Source: config.SourceType, SourceID: config.SourceID, Manifest: manifest,
 				Baseline: sourceagent.EncryptedStateFile{Path: config.BalanceBaselineFile, Purpose: "balance_baseline", Keys: sourceagent.FileSpoolKeyProvider{Path: config.BalanceSnapshotKeyFile}},

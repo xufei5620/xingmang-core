@@ -166,8 +166,23 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err = verifyEligibilitySourceManifests(ctx, store); err != nil {
 		return appRuntime{}, err
 	}
-	paymentsMaxAge, err := boundedDurationEnv("SOURCE_PAYMENTS_MAX_STALENESS", "5m", 30*time.Second, 24*time.Hour)
+	economicHeartbeatMaxAge, err := boundedDurationEnv("SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS", "5m", 30*time.Second, 24*time.Hour)
 	if err != nil {
+		return appRuntime{}, err
+	}
+	economicWatermarkMaxAge, err := boundedDurationEnv("SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS", "15m", 30*time.Second, 24*time.Hour)
+	if err != nil {
+		return appRuntime{}, err
+	}
+	economicSafetyDelay, err := boundedDurationEnv("SOURCE_ECONOMIC_SAFETY_DELAY", "5m", time.Minute, 24*time.Hour)
+	if err != nil {
+		return appRuntime{}, err
+	}
+	sourcePollInterval, err := boundedDurationEnv("SOURCE_POLL_INTERVAL", "1m", 5*time.Second, time.Hour)
+	if err != nil {
+		return appRuntime{}, err
+	}
+	if err = validateSourceFreshnessBudget(economicWatermarkMaxAge, economicSafetyDelay, sourcePollInterval); err != nil {
 		return appRuntime{}, err
 	}
 	identitiesMaxAge, err := boundedDurationEnv("SOURCE_IDENTITIES_MAX_STALENESS", "15m", 30*time.Second, 24*time.Hour)
@@ -184,8 +199,10 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	}
 	appService, err := application.NewService(store, keyring, settingsService, application.Options{
 		MinimumRequestMinor: settings.MinimumRequestMinor, DownloadBaseURL: publicOrigin,
-		EmailTemplateVersion: "invoice-ready-v1",
-		SourcePaymentsMaxAge: paymentsMaxAge, SourceIdentitiesMaxAge: identitiesMaxAge,
+		EmailTemplateVersion:          "invoice-ready-v1",
+		SourceEconomicHeartbeatMaxAge: economicHeartbeatMaxAge,
+		SourceEconomicWatermarkMaxAge: economicWatermarkMaxAge,
+		SourceIdentitiesMaxAge:        identitiesMaxAge,
 	})
 	if err != nil {
 		return appRuntime{}, err
@@ -477,6 +494,13 @@ func boundedDurationEnv(name, fallback string, minimum, maximum time.Duration) (
 		return 0, fmt.Errorf("%s must be a duration between %s and %s", name, minimum, maximum)
 	}
 	return value, nil
+}
+
+func validateSourceFreshnessBudget(economicWatermarkMaxAge, economicSafetyDelay, pollInterval time.Duration) error {
+	if economicWatermarkMaxAge < economicSafetyDelay+sourceingest.DefaultMaximumSkew+2*pollInterval {
+		return errors.New("SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS must cover SOURCE_ECONOMIC_SAFETY_DELAY, receiver clock skew and two SOURCE_POLL_INTERVAL windows")
+	}
+	return nil
 }
 
 func boundedInt64Env(name string, fallback, minimum, maximum int64) (int64, error) {

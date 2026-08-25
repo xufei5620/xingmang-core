@@ -160,6 +160,10 @@ $productionEnv = @{
     OIDC_MAX_HTTP_RESPONSE_BYTES = '1048576'
     OIDC_PREFLIGHT_TIMEOUT = '30s'
     CLAMAV_MAX_SIGNATURE_AGE = '48h'
+    SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS = '5m'
+    SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS = '15m'
+    SOURCE_ECONOMIC_SAFETY_DELAY = '5m'
+    SOURCE_POLL_INTERVAL = '1m'
     SOURCE_AGENT_VERSION = '0.3.0'
     SOURCE_STATE_ROOT = (Join-Path $projectRoot 'deploy')
     SOURCE_CUTOVER_ROOT = (Join-Path $projectRoot 'deploy\cutover')
@@ -201,6 +205,16 @@ try {
         $renderedProduction.services.migrate.environment.ELIGIBILITY_START_AT -cne $productionEnv.ELIGIBILITY_START_AT -or
         $productionEnv.ELIGIBILITY_START_AT -cne '2026-09-01T00:00:00+08:00') {
         throw 'invoice API/migration immutable eligibility start is missing or differs from 2026-09-01T00:00:00+08:00'
+    }
+    if ($renderedProduction.services.api.environment.SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS -cne $productionEnv.SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS -or
+        $renderedProduction.services.api.environment.SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS -cne $productionEnv.SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS -or
+        $renderedProduction.services.api.environment.SOURCE_ECONOMIC_SAFETY_DELAY -cne $productionEnv.SOURCE_ECONOMIC_SAFETY_DELAY -or
+        $renderedProduction.services.api.environment.SOURCE_POLL_INTERVAL -cne $productionEnv.SOURCE_POLL_INTERVAL -or
+        $productionEnv.SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS -cne '5m' -or
+        $productionEnv.SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS -cne '15m' -or
+        $productionEnv.SOURCE_ECONOMIC_SAFETY_DELAY -cne '5m' -or
+        $productionEnv.SOURCE_POLL_INTERVAL -cne '1m') {
+        throw 'invoice API heartbeat/watermark budget drifted from the reviewed 5m/15m/5m/1m contract'
     }
     foreach ($network in @(
         @{ Name = 'invoice_edge'; Env = 'INVOICE_EDGE_SUBNET'; Internal = $false },
@@ -425,6 +439,10 @@ try {
         }
         if ($renderedSources.services.$service.environment.ELIGIBILITY_START_AT -cne '2026-09-01T00:00:00+08:00') {
             throw "$service does not pin the immutable invoice eligibility start"
+        }
+        if ($renderedSources.services.$service.environment.SOURCE_ECONOMIC_SAFETY_DELAY -cne $productionEnv.SOURCE_ECONOMIC_SAFETY_DELAY -or
+            $renderedSources.services.$service.environment.SOURCE_POLL_INTERVAL -cne $productionEnv.SOURCE_POLL_INTERVAL) {
+            throw "$service source horizon/poll contract differs from the API freshness budget"
         }
         if ($null -eq $renderedSources.services.$service.healthcheck) { throw "$service is missing its local healthcheck" }
         if ($service -in $identityServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '2.0' -or $renderedSources.services.$service.environment.SOURCE_RECONCILE_FILE -ne '/state/reconcile.json')) { throw "$service is missing V2 durable reconciliation" }

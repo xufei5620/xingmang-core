@@ -59,7 +59,7 @@ func seedEligibilityOpsFixture(t *testing.T, store *Store, ctx context.Context) 
 	f.manifestHash = manifestHash
 	f.configHash = configHash
 	f.unitCode = unitCode
-	f.policy = SourceFreshnessPolicy{PaymentsMaxAge: time.Hour, IdentitiesMaxAge: time.Hour, Now: now}
+	f.policy = SourceFreshnessPolicy{EconomicHeartbeatMaxAge: time.Hour, EconomicWatermarkMaxAge: time.Hour, IdentitiesMaxAge: time.Hour, Now: now}
 	return f
 }
 

@@ -61,38 +61,40 @@ type SourceIngestHealth struct {
 }
 
 // SourceFreshnessPolicy protects irreversible operations from using an old
-// projection. Both streams are mandatory: payments carry economic state and
-// identities carry the authority to use it.
+// projection. Accepted-batch heartbeats and proven economic watermarks have
+// independent budgets; identities carry the authority to use economic state.
 type SourceFreshnessPolicy struct {
-	PaymentsMaxAge   time.Duration
-	IdentitiesMaxAge time.Duration
-	Now              time.Time
+	EconomicHeartbeatMaxAge time.Duration
+	EconomicWatermarkMaxAge time.Duration
+	IdentitiesMaxAge        time.Duration
+	Now                     time.Time
 }
 
 func (p SourceFreshnessPolicy) enabled() bool {
-	return p.PaymentsMaxAge > 0 && p.IdentitiesMaxAge > 0 && !p.Now.IsZero()
+	return p.EconomicHeartbeatMaxAge > 0 && p.EconomicWatermarkMaxAge > 0 && p.IdentitiesMaxAge > 0 && !p.Now.IsZero()
 }
 
 type SourceStreamHealth struct {
-	SourceInstanceID       string            `json:"source_instance_id"`
-	SourceType             domain.SourceType `json:"source_type"`
-	SourceName             string            `json:"source_name"`
-	SourceEnabled          bool              `json:"source_enabled"`
-	StreamID               string            `json:"stream_id"`
-	Sequence               int64             `json:"sequence"`
-	ApprovedRuntimeVersion string            `json:"approved_runtime_version"`
-	ObservedRuntimeVersion string            `json:"observed_runtime_version"`
-	ObservedAgentVersion   string            `json:"observed_agent_version"`
-	ProjectionStatus       string            `json:"projection_status"`
-	LastAcceptedAt         time.Time         `json:"last_accepted_at"`
-	LastNonemptyBatchAt    time.Time         `json:"last_nonempty_batch_at"`
-	EconomicWatermarkAt    time.Time         `json:"economic_watermark_at,omitempty"`
-	MaximumAgeSeconds      int64             `json:"maximum_age_seconds"`
-	PendingEvents          int64             `json:"pending_events"`
-	DeadEvents             int64             `json:"dead_events"`
-	WaitingDependencies    int64             `json:"waiting_dependencies"`
-	Ready                  bool              `json:"ready"`
-	Reasons                []string          `json:"reasons"`
+	SourceInstanceID                   string            `json:"source_instance_id"`
+	SourceType                         domain.SourceType `json:"source_type"`
+	SourceName                         string            `json:"source_name"`
+	SourceEnabled                      bool              `json:"source_enabled"`
+	StreamID                           string            `json:"stream_id"`
+	Sequence                           int64             `json:"sequence"`
+	ApprovedRuntimeVersion             string            `json:"approved_runtime_version"`
+	ObservedRuntimeVersion             string            `json:"observed_runtime_version"`
+	ObservedAgentVersion               string            `json:"observed_agent_version"`
+	ProjectionStatus                   string            `json:"projection_status"`
+	LastAcceptedAt                     time.Time         `json:"last_accepted_at"`
+	LastNonemptyBatchAt                time.Time         `json:"last_nonempty_batch_at"`
+	EconomicWatermarkAt                time.Time         `json:"economic_watermark_at,omitempty"`
+	MaximumAgeSeconds                  int64             `json:"maximum_age_seconds"`
+	EconomicWatermarkMaximumAgeSeconds int64             `json:"economic_watermark_maximum_age_seconds,omitempty"`
+	PendingEvents                      int64             `json:"pending_events"`
+	DeadEvents                         int64             `json:"dead_events"`
+	WaitingDependencies                int64             `json:"waiting_dependencies"`
+	Ready                              bool              `json:"ready"`
+	Reasons                            []string          `json:"reasons"`
 }
 
 type SourceHealthReport struct {
@@ -593,22 +595,26 @@ func (s *Store) SourceIngestHealth(ctx context.Context) (SourceIngestHealth, err
 	return out, err
 }
 
-func maximumAgeForStream(policy SourceFreshnessPolicy, streamID string) time.Duration {
+func maximumHeartbeatAgeForStream(policy SourceFreshnessPolicy, streamID string) time.Duration {
 	if streamID == "identities" {
 		return policy.IdentitiesMaxAge
 	}
-	return policy.PaymentsMaxAge
+	return policy.EconomicHeartbeatMaxAge
 }
 
 func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshnessPolicy) {
-	item.MaximumAgeSeconds = int64(maximumAgeForStream(policy, item.StreamID) / time.Second)
+	item.MaximumAgeSeconds = int64(maximumHeartbeatAgeForStream(policy, item.StreamID) / time.Second)
+	item.EconomicWatermarkMaximumAgeSeconds = 0
+	if item.StreamID != "identities" {
+		item.EconomicWatermarkMaximumAgeSeconds = int64(policy.EconomicWatermarkMaxAge / time.Second)
+	}
 	item.Reasons = make([]string, 0, 5)
 	if !item.SourceEnabled {
 		item.Reasons = append(item.Reasons, "SOURCE_DISABLED")
 	}
 	if item.LastAcceptedAt.IsZero() {
 		item.Reasons = append(item.Reasons, "STREAM_NEVER_ACCEPTED")
-	} else if policy.Now.Sub(item.LastAcceptedAt) > maximumAgeForStream(policy, item.StreamID) || item.LastAcceptedAt.After(policy.Now.Add(5*time.Minute)) {
+	} else if policy.Now.Sub(item.LastAcceptedAt) > maximumHeartbeatAgeForStream(policy, item.StreamID) || item.LastAcceptedAt.After(policy.Now.Add(5*time.Minute)) {
 		item.Reasons = append(item.Reasons, "STREAM_STALE")
 	}
 	if strings.TrimSpace(item.ApprovedRuntimeVersion) == "" || item.ObservedRuntimeVersion != item.ApprovedRuntimeVersion {
@@ -620,7 +626,7 @@ func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshness
 	if item.StreamID != "identities" && item.EconomicWatermarkAt.IsZero() {
 		item.Reasons = append(item.Reasons, "ECONOMIC_WATERMARK_NEVER_PUBLISHED")
 	} else if item.StreamID != "identities" &&
-		(policy.Now.Sub(item.EconomicWatermarkAt) > maximumAgeForStream(policy, item.StreamID) ||
+		(policy.Now.Sub(item.EconomicWatermarkAt) > policy.EconomicWatermarkMaxAge ||
 			item.EconomicWatermarkAt.After(policy.Now.Add(5*time.Minute))) {
 		item.Reasons = append(item.Reasons, "ECONOMIC_WATERMARK_STALE")
 	}

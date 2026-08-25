@@ -306,6 +306,7 @@ export interface SourceStreamHealth {
   lastNonemptyBatchAt?: string;
   economicWatermarkAt?: string;
   maximumAgeSeconds: number;
+  economicWatermarkMaximumAgeSeconds?: number;
   pendingEvents: number;
   deadEvents: number;
   waitingDependencies: number;

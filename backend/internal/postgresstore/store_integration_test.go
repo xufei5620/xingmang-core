@@ -1081,7 +1081,7 @@ func TestSourceFreshnessFailsClosedForSubmitAndFinalIssue(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	policy := SourceFreshnessPolicy{PaymentsMaxAge: 5 * time.Minute, IdentitiesMaxAge: 15 * time.Minute, Now: now}
+	policy := SourceFreshnessPolicy{EconomicHeartbeatMaxAge: 5 * time.Minute, EconomicWatermarkMaxAge: 15 * time.Minute, IdentitiesMaxAge: 15 * time.Minute, Now: now}
 	input := SubmitInput{PrincipalID: "20000000-0000-4000-8000-000000000001",
 		ProfileID: "40000000-0000-4000-8000-000000000001", SourceInstanceID: sourceID,
 		ProfileSnapshotCiphertext: []byte("encrypted-snapshot"), IdempotencyKey: "freshness-submit",

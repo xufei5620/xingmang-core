@@ -592,7 +592,9 @@ export const mockInvoiceApi: InvoiceApiClient = {
           economicWatermarkAt:
             stream === "identities" ? undefined : new Date().toISOString(),
           maximumAgeSeconds:
-            stream === "identities" ? 900 : stream === "balances" ? 600 : 300,
+            stream === "identities" ? 900 : 300,
+          economicWatermarkMaximumAgeSeconds:
+            stream === "identities" ? undefined : 900,
           pendingEvents: 0,
           deadEvents: 0,
           waitingDependencies: 0,

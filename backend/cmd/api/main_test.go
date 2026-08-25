@@ -77,6 +77,20 @@ func TestBoundedOIDCResponseSizeEnvironment(t *testing.T) {
 	}
 }
 
+func TestSourceFreshnessBudgetMustCoverSafetyDelayAndPoll(t *testing.T) {
+	if err := validateSourceFreshnessBudget(15*time.Minute, 5*time.Minute, time.Minute); err != nil {
+		t.Fatalf("reviewed production freshness budget was rejected: %v", err)
+	}
+	for _, maximumAge := range []time.Duration{5 * time.Minute, 11 * time.Minute, 12*time.Minute - time.Nanosecond} {
+		if err := validateSourceFreshnessBudget(maximumAge, 5*time.Minute, time.Minute); err == nil {
+			t.Fatalf("impossible freshness budget %s was accepted", maximumAge)
+		}
+	}
+	if err := validateSourceFreshnessBudget(12*time.Minute, 5*time.Minute, time.Minute); err != nil {
+		t.Fatalf("minimum safety/skew/two-poll freshness headroom was rejected: %v", err)
+	}
+}
+
 func TestValidateEligibilityPolicyStartFailsClosedAtExactBoundary(t *testing.T) {
 	want := time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
 	for _, configured := range []string{

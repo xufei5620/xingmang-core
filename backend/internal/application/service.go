@@ -38,22 +38,24 @@ type Options struct {
 	PublicBaseURL       string
 	// DownloadBaseURL is kept as a temporary configuration alias. Both values
 	// represent the public UI origin; generated mail never links to a bearer API.
-	DownloadBaseURL        string
-	EmailTemplateVersion   string
-	SourcePaymentsMaxAge   time.Duration
-	SourceIdentitiesMaxAge time.Duration
+	DownloadBaseURL               string
+	EmailTemplateVersion          string
+	SourceEconomicHeartbeatMaxAge time.Duration
+	SourceEconomicWatermarkMaxAge time.Duration
+	SourceIdentitiesMaxAge        time.Duration
 }
 
 type Service struct {
-	store                  *postgresstore.Store
-	keys                   securefields.Keyring
-	settings               SettingsProvider
-	minimumRequestMinor    atomic.Int64
-	publicBaseURL          *url.URL
-	emailTemplateVersion   string
-	sourcePaymentsMaxAge   time.Duration
-	sourceIdentitiesMaxAge time.Duration
-	now                    func() time.Time
+	store                         *postgresstore.Store
+	keys                          securefields.Keyring
+	settings                      SettingsProvider
+	minimumRequestMinor           atomic.Int64
+	publicBaseURL                 *url.URL
+	emailTemplateVersion          string
+	sourceEconomicHeartbeatMaxAge time.Duration
+	sourceEconomicWatermarkMaxAge time.Duration
+	sourceIdentitiesMaxAge        time.Duration
+	now                           func() time.Time
 }
 
 func NewService(store *postgresstore.Store, keys securefields.Keyring, settings SettingsProvider, options Options) (*Service, error) {
@@ -86,17 +88,26 @@ func NewService(store *postgresstore.Store, keys securefields.Keyring, settings 
 	if template == "" {
 		template = "invoice-ready-v1"
 	}
-	paymentsMaxAge := options.SourcePaymentsMaxAge
+	economicHeartbeatMaxAge := options.SourceEconomicHeartbeatMaxAge
+	economicWatermarkMaxAge := options.SourceEconomicWatermarkMaxAge
 	identitiesMaxAge := options.SourceIdentitiesMaxAge
-	if (paymentsMaxAge == 0) != (identitiesMaxAge == 0) ||
-		paymentsMaxAge != 0 && (paymentsMaxAge < 30*time.Second || paymentsMaxAge > 24*time.Hour ||
+	configuredFreshnessValues := 0
+	for _, value := range []time.Duration{economicHeartbeatMaxAge, economicWatermarkMaxAge, identitiesMaxAge} {
+		if value != 0 {
+			configuredFreshnessValues++
+		}
+	}
+	if configuredFreshnessValues != 0 && configuredFreshnessValues != 3 ||
+		economicHeartbeatMaxAge != 0 && (economicHeartbeatMaxAge < 30*time.Second || economicHeartbeatMaxAge > 24*time.Hour ||
+			economicWatermarkMaxAge < 30*time.Second || economicWatermarkMaxAge > 24*time.Hour ||
 			identitiesMaxAge < 30*time.Second || identitiesMaxAge > 24*time.Hour) {
 		return nil, errors.New("source freshness thresholds must be between 30 seconds and 24 hours")
 	}
 	service := &Service{
 		store: store, keys: keys, settings: settings, publicBaseURL: base,
-		emailTemplateVersion: template, sourcePaymentsMaxAge: paymentsMaxAge,
-		sourceIdentitiesMaxAge: identitiesMaxAge, now: func() time.Time { return time.Now().UTC() },
+		emailTemplateVersion: template, sourceEconomicHeartbeatMaxAge: economicHeartbeatMaxAge,
+		sourceEconomicWatermarkMaxAge: economicWatermarkMaxAge,
+		sourceIdentitiesMaxAge:        identitiesMaxAge, now: func() time.Time { return time.Now().UTC() },
 	}
 	service.minimumRequestMinor.Store(minimum)
 	return service, nil
@@ -104,8 +115,9 @@ func NewService(store *postgresstore.Store, keys securefields.Keyring, settings 
 
 func (s *Service) sourceFreshnessPolicy() postgresstore.SourceFreshnessPolicy {
 	return postgresstore.SourceFreshnessPolicy{
-		PaymentsMaxAge: s.sourcePaymentsMaxAge, IdentitiesMaxAge: s.sourceIdentitiesMaxAge,
-		Now: s.now().UTC(),
+		EconomicHeartbeatMaxAge: s.sourceEconomicHeartbeatMaxAge,
+		EconomicWatermarkMaxAge: s.sourceEconomicWatermarkMaxAge,
+		IdentitiesMaxAge:        s.sourceIdentitiesMaxAge, Now: s.now().UTC(),
 	}
 }
 
@@ -490,10 +502,10 @@ func (s *Service) ListFundingLots(ctx context.Context, principalID string) ([]do
 		return nil, err
 	}
 	// Mock/unit services intentionally omit source freshness. Production
-	// startup always supplies both bounded ages and takes the fail-closed path
+	// startup always supplies all three bounded ages and takes the fail-closed path
 	// below; keeping the test-only configuration absent avoids fabricating five
 	// healthy signed streams in non-source workflow tests.
-	if s.sourcePaymentsMaxAge <= 0 || s.sourceIdentitiesMaxAge <= 0 {
+	if s.sourceEconomicHeartbeatMaxAge <= 0 || s.sourceEconomicWatermarkMaxAge <= 0 || s.sourceIdentitiesMaxAge <= 0 {
 		return lots, nil
 	}
 	report, err := s.store.SourceHealth(ctx, s.sourceFreshnessPolicy())

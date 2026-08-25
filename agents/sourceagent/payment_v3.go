@@ -174,12 +174,17 @@ func (c *PaymentV3DBConnector) prepare(ctx context.Context, req ScanRequest, del
 		}
 		err := c.DB.QueryRowContext(ctx, `SELECT event_time,source_id FROM `+relation, request).Scan(&at, &id)
 		if errors.Is(err, sql.ErrNoRows) {
-			at = horizon
 			id = 0
 		} else if err != nil {
 			return ScanCursor{}, err
+		} else if id <= 0 || at.After(horizon) {
+			return ScanCursor{}, errors.New("Sub2API payment ceiling is outside the captured horizon")
 		}
-		cursor.CeilingAt = at.UTC().Format(time.RFC3339Nano)
+		// The row cursor freezes the last payment visible at the source-side
+		// transaction horizon. The time component must remain that horizon,
+		// including during an idle period: using the last row's event time would
+		// make a healthy quiet stream permanently stale in receiver readiness.
+		cursor.CeilingAt = horizon.UTC().Format(time.RFC3339Nano)
 		cursor.CeilingCursor = "payment_orders:" + strconv.FormatInt(id, 10)
 	} else {
 		domains := []string{"subscription_orders", "top_ups"}

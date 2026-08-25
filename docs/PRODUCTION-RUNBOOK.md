@@ -558,20 +558,20 @@ snapshot columns. Before applying it:
 
 1. verify signed tag `v0.1.0-rc17-signed` peels to commit
    `b17dbe4ba2d1a2c4926d0156abf80c9207a74a54` and retain the RC17 release
-   manifest's exact rollback image IDs; verify the exact RC30 candidate images,
+   manifest's exact rollback image IDs; verify the exact RC31 candidate images,
    then resolve the existing-pair/first-install path below without starting
    invoice ingestion;
 2. stop the old `api`, `ingest-proxy`, and all source-agent containers and prove
    there are no invoice writer sessions;
 3. while they remain stopped, run
-   the reviewed RC30 `deploy/backup/backup.sh` with
+   the reviewed RC31 `deploy/backup/backup.sh` with
    `BACKUP_SCHEMA_MODE=pre-0011`; it records initial service state and must not
-   start a service that was stopped. Restore it with the RC30 drill and
+   start a service that was stopped. Restore it with the RC31 drill and
    `RESTORE_SCHEMA_MODE=pre-0011` plus the exact RC17
    `PRE_0011_TOOLS_IMAGE`, which proves migration 0011/policy table are absent
    while the source-agent image bound to the archived state generation validates
    its cutover/state contracts. An old V3 pair requires the exact RC24 source
-   agent; the RC30 V4 agent must not be used to reinterpret it. Do not use the
+   agent; the RC31 V4 agent must not be used to reinterpret it. Do not use the
    older RC17 backup script here because it resumes every service unconditionally;
 4. verify `funding_lots`, `source_usage_events`, `source_credit_events`,
    `consumption_allocations`, `invoice_requests`, and
@@ -589,13 +589,13 @@ create-only cutover pairs, so resolve one of these paths during item 1:
   `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`; require the exact source
   V3 contract, both clocks strictly before the boundary, and record the
   encrypted file hashes in the pre-0011 backup ticket. This proves the rollback
-  generation only; it is not authorization to start the RC30 receiver.
+  generation only; it is not authorization to start the RC31 receiver.
 - First installation with no pair: before applying 0011, stop one upstream
   application, pass the explicit-container quiescence gate, and use the exact
-  RC30 source-agent image to capture that source once and immediately run
+  RC31 source-agent image to capture that source once and immediately run
   `check-cutover`; restart it, repeat for the other source, then initialize the
   ten empty durable state directories without starting ingestion. Now create
-  and restore-test the full backup in explicit RC30 pre-0011 mode while the
+  and restore-test the full backup in explicit RC31 pre-0011 mode while the
   services remain stopped. These same
   encrypted pairs are registered after migration; they are never captured
   again.
@@ -613,8 +613,8 @@ locks and rechecks these conditions.
 1. Keep the verified pre-0011 package. Create, sign and restore-test a separate
    post-0011 recovery point containing the unused RC24 state generation and
    both old pairs. Its source-state check must use the exact RC24 source-agent
-   image recorded for that recovery generation, never RC30.
-2. Stop all source agents. Install the RC30 v4 semantic-fingerprint functions
+   image recorded for that recovery generation, never RC31.
+2. Stop all source agents. Install the RC31 v4 semantic-fingerprint functions
    through the reviewed wrapper and re-prove exact function hashes, roles,
    ACLs and `pg_depend=0`. Run all ten `check-db-static` commands; full
    `check-db` cannot pass against the old V3 pair and is forbidden at this step.
@@ -655,7 +655,7 @@ BACKUP_SCHEMA_MODE=pre-0011 BACKUP_QUIESCE_CONFIRMED=YES \
 
 RESTORE_SCHEMA_MODE=pre-0011 \
 PRE_0011_TOOLS_IMAGE='<exact RC17 tools image from its release manifest>' \
-INVOICE_TOOLS_IMAGE='<exact RC30 tools image>' \
+INVOICE_TOOLS_IMAGE='<exact RC31 tools image>' \
 SOURCE_AGENT_IMAGE='<exact RC24 source-agent image bound to this old V3 backup>' \
   bash deploy/backup/restore-drill.sh
 ```
@@ -932,6 +932,17 @@ Start the API process and internal mTLS ingress after migrations, permissions,
 settings, ten agent state directories and both encrypted cutover pairs are ready. The ingest proxy waits
 for the API process, not its readiness: readiness itself requires the first
 ten signed heartbeats, so a health dependency would deadlock cold start.
+
+Keep the API and every source-agent service on the same reviewed timing
+contract: `SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS=5m`,
+`SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS=15m`,
+`SOURCE_ECONOMIC_SAFETY_DELAY=5m`, and `SOURCE_POLL_INTERVAL=1m`. The API fails
+startup if the economic watermark threshold is less than the safety delay plus
+the receiver's five-minute maximum clock skew plus two poll intervals. A missed
+non-identity heartbeat still fails after five minutes independently of the
+watermark budget. After startup, an idle Sub2API payment stream must continue
+publishing a watermark near source time minus five minutes; a watermark pinned
+to the timestamp of the last payment is an RC31 rollback condition.
 
 ```bash
 docker compose --env-file deploy/.env.production \

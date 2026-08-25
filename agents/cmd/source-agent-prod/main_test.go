@@ -123,8 +123,22 @@ func TestLoadRunConfigAcceptsV3EconomicStreamsWithIsolatedState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stream %s: %v", stream, err)
 		}
-		if config.ProtocolVersion != sourceagent.SchemaVersionV3 || config.StreamID != stream {
+		if config.ProtocolVersion != sourceagent.SchemaVersionV3 || config.StreamID != stream || config.EconomicSafetyDelay != 5*time.Minute {
 			t.Fatalf("unexpected V3 config: %#v", config)
+		}
+	}
+}
+
+func TestLoadRunConfigBoundsEconomicSafetyDelay(t *testing.T) {
+	for _, value := range []string{"59s", "24h0m1s", "not-a-duration"} {
+		values := validEnvironment(t, sourceagent.SourceSub2API, sourceagent.StreamPayments)
+		directory := filepath.Dir(values["SOURCE_STATE_FILE"])
+		values["SOURCE_SCHEMA_VERSION"] = sourceagent.SchemaVersionV3
+		values["SOURCE_CUTOVER_MANIFEST_FILE"] = filepath.Join(directory, "cutover.enc")
+		values["SOURCE_CUTOVER_KEY_FILE"] = filepath.Join(directory, "cutover.key")
+		values["SOURCE_ECONOMIC_SAFETY_DELAY"] = value
+		if _, err := loadRunConfig(mapEnvironment(values)); err == nil {
+			t.Fatalf("unsafe economic safety delay %q was accepted", value)
 		}
 	}
 }

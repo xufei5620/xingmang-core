@@ -42,6 +42,14 @@ prior pages and events commit; an empty final page advances an actually empty
 stream. The payload excludes changing scan/watermark values, so full rescans
 produce the same payload hash and event ID.
 
+Economic cycles capture their source-side horizon as
+`transaction_timestamp()-SOURCE_ECONOMIC_SAFETY_DELAY`. Sub2API payments keep
+the ID of the final classified row visible at that horizon as the row ceiling,
+but publish the horizon itself as `scan_ceiling_at`/watermark. Page reads remain
+bounded by the exact `(horizon,row_id)` tuple. Consequently, a quiet payment
+stream proves it was checked through the current delayed horizon instead of
+re-publishing the timestamp of its last historical order.
+
 The scan-cycle identity also binds the committed starting cursor revision. An
 ACK retry at the same revision therefore keeps the same cycle ID, while the
 next empty cycle receives a new ID even when its source ceiling is unchanged;
