@@ -477,6 +477,18 @@ For `invoice-web`, also configure:
   `https://invoice.solov.cc/api/v1/auth/backchannel-logout`;
 - Backchannel Logout Session Required = ON and Front Channel Logout = OFF.
 
+For an already-provisioned realm that predates the `basic` requirement, use
+`deploy/keycloak/attach-invoice-basic-scope.sh` only from a verified signed
+release tag. Pass the exact tag commit, tag name and SHA-256 of that tag's blob;
+the operator refuses a working-tree or transfer mismatch. It first publishes a
+signed encrypted full-database backup and completes a no-network restore drill,
+then changes only the `invoice-web` default-scope association through the Admin
+REST API. Its success record deliberately leaves the real administrator
+step-up canary and bootstrap-administrator retirement as pending gates. Do not
+mark the identity rollout complete until the rotated invoice session contains
+the required ACR, both `pwd` and `otp` AMR values, and a fresh `auth_time`, and
+the temporary Keycloak bootstrap account has been retired as described above.
+
 The invoice API derives RP-initiated logout only from the discovery
 `end_session_endpoint`. Startup fails unless discovery advertises back-channel
 logout. Logout tokens are accepted only as a bounded form POST and must pass
