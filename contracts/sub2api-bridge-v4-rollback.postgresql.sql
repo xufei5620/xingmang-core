@@ -81,7 +81,7 @@ BEGIN
       ('payment_orders','payment_type'),('payment_orders','provider_key'),('payment_orders','provider_snapshot'),('payment_orders','recharge_code'),
       ('settings','key'),('settings','value'),
       ('auth_identities','id'),('auth_identities','user_id'),('auth_identities','provider_type'),('auth_identities','provider_key'),
-      ('auth_identities','provider_subject'),('auth_identities','verified_at'),('auth_identities','issuer'),
+      ('auth_identities','provider_subject'),('auth_identities','verified_at'),('auth_identities','issuer'),('auth_identities','metadata'),
       ('auth_identities','created_at'),('auth_identities','updated_at'),
       ('usage_logs','id'),('usage_logs','user_id'),('usage_logs','billing_type'),('usage_logs','actual_cost'),('usage_logs','created_at'),
       ('promo_code_usages','id'),('promo_code_usages','user_id'),('promo_code_usages','bonus_amount'),('promo_code_usages','used_at'),

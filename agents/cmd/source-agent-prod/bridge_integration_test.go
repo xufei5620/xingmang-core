@@ -365,14 +365,30 @@ func sub2BridgeFixtureStatements() []string {
 		`CREATE TABLE public.user_affiliate_ledger(id bigint primary key,user_id bigint,action text,amount numeric(20,8),created_at timestamptz)`,
 		`CREATE TABLE public.redeem_codes(id bigint primary key,code text,type text,value numeric(20,8),status text,used_by bigint,used_at timestamptz)`,
 		`CREATE TABLE public.payment_orders(id bigint primary key,user_id bigint,status text,order_type text,amount numeric(20,8),pay_amount numeric(20,8),fee_rate numeric(10,4),refund_amount numeric(20,8),completed_at timestamptz,refund_at timestamptz,created_at timestamptz,updated_at timestamptz,payment_type text,provider_key text,provider_snapshot jsonb,recharge_code text)`,
-		`CREATE TABLE public.auth_identities(id bigint primary key,user_id bigint,provider_type text,provider_key text,provider_subject text,verified_at timestamptz,issuer text,created_at timestamptz,updated_at timestamptz,secret_value text)`,
+		`CREATE TABLE public.auth_identities(id bigint primary key,user_id bigint,provider_type text,provider_key text,provider_subject text,verified_at timestamptz,issuer text,metadata jsonb,created_at timestamptz,updated_at timestamptz,secret_value text)`,
 		`INSERT INTO public.settings VALUES('BALANCE_RECHARGE_MULTIPLIER','1.00',now()-interval '1 day'),('RECHARGE_FEE_RATE','0.00',now()-interval '1 day')`,
 		`INSERT INTO public.users VALUES(1,10,NULL,'hidden@example.com','secret'),(2,-2.5,NULL,'negative@example.com','secret')`,
 		`INSERT INTO public.usage_logs VALUES(1,1,0,0.000000005,now()-interval '10 minutes','secret','192.0.2.1')`,
 		`INSERT INTO public.promo_code_usages VALUES(1,1,2,now()-interval '9 minutes')`,
 		`INSERT INTO public.redeem_codes VALUES(1,'CASH','balance',10,'used',1,now()-interval '10 minutes'),(99992744,'BONUS','balance',3,'used',1,now()-interval '9 minutes')`,
 		`INSERT INTO public.payment_orders VALUES(1,1,'COMPLETED','balance',10,10,0,0,now()-interval '8 minutes',NULL,now()-interval '9 minutes',now()-interval '8 minutes','epay','easypay','{"schema_version":"2","provider_key":"easypay","currency":"CNY"}','CASH')`,
-		`INSERT INTO public.auth_identities VALUES(1,1,'oidc','https://auth.solov.cc/realms/solov','subject-1',now(),'https://auth.solov.cc/realms/solov',now()-interval '1 day',now(),'hidden')`,
+		`INSERT INTO public.auth_identities(id,user_id,provider_type,provider_key,provider_subject,verified_at,issuer,metadata,created_at,updated_at,secret_value) VALUES
+			(1,1,'oidc','https://auth.solov.cc/realms/solov','subject-verified','2026-08-15T10:00:00Z','https://auth.solov.cc/realms/solov','{"email_verified":false}','2026-08-14T10:00:00Z','2026-08-20T10:00:01Z','hidden'),
+			(2,1,'oidc','https://auth.solov.cc/realms/solov','subject-bound',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":true}','2026-08-16T12:34:56Z','2026-08-20T10:00:02Z','hidden'),
+			(3,1,'oidc','https://auth.solov.cc/realms/solov','subject-unverified',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":false}','2026-08-16T12:34:56Z','2026-08-20T10:00:03Z','hidden'),
+			(4,1,'oidc','https://auth.solov.cc/realms/solov','subject-missing-claim',NULL,'https://auth.solov.cc/realms/solov','{}','2026-08-16T12:34:56Z','2026-08-20T10:00:04Z','hidden'),
+			(5,1,'oidc','https://auth.solov.cc/realms/solov','subject-wrong-issuer',NULL,'https://invalid.example/realms/solov','{"email_verified":true}','2026-08-16T12:34:56Z','2026-08-20T10:00:05Z','hidden'),
+			(6,1,'oidc','https://auth.solov.cc/realms/solov','',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":true}','2026-08-16T12:34:56Z','2026-08-20T10:00:06Z','hidden'),
+			(7,1,'oidc','https://auth.solov.cc/realms/solov','subject-string-claim',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":"true"}','2026-08-16T12:34:56Z','2026-08-20T10:00:07Z','hidden'),
+			(8,1,'oidc','https://auth.solov.cc/realms/solov','   ',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":true}','2026-08-16T12:34:56Z','2026-08-20T10:00:08Z','hidden'),
+			(9,1,'github','https://auth.solov.cc/realms/solov','subject-wrong-type',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":true}','2026-08-16T12:34:56Z','2026-08-20T10:00:09Z','hidden'),
+			(10,1,'oidc','https://invalid.example/realms/solov','subject-wrong-key',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":true}','2026-08-16T12:34:56Z','2026-08-20T10:00:10Z','hidden'),
+			(11,1,'oidc','https://auth.solov.cc/realms/solov','subject-sql-null',NULL,'https://auth.solov.cc/realms/solov',NULL,'2026-08-16T12:34:56Z','2026-08-20T10:00:11Z','hidden'),
+			(12,1,'oidc','https://auth.solov.cc/realms/solov','subject-json-null',NULL,'https://auth.solov.cc/realms/solov','null','2026-08-16T12:34:56Z','2026-08-20T10:00:12Z','hidden'),
+			(13,1,'oidc','https://auth.solov.cc/realms/solov','subject-number-claim',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":1}','2026-08-16T12:34:56Z','2026-08-20T10:00:13Z','hidden'),
+			(14,1,'oidc','https://auth.solov.cc/realms/solov','subject-nested-claim',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":{"value":true}}','2026-08-16T12:34:56Z','2026-08-20T10:00:14Z','hidden'),
+			(15,1,'oidc','https://auth.solov.cc/realms/solov','subject-missing-created',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":true}',NULL,'2026-08-20T10:00:15Z','hidden'),
+			(16,1,'oidc','https://auth.solov.cc/realms/solov',E'\t\n',NULL,'https://auth.solov.cc/realms/solov','{"email_verified":true}','2026-08-16T12:34:56Z','2026-08-20T10:00:16Z','hidden')`,
 	}
 }
 
@@ -490,6 +506,7 @@ func assertBridgeSemantics(t *testing.T, ctx context.Context, admin *sql.DB, _ *
 		if err != nil || units != "1" {
 			t.Fatalf("Sub2 usage units=%q err=%v", units, err)
 		}
+		assertSub2OIDCIdentityBridgeSemantics(t, ctx, admin)
 		return
 	}
 	for _, query := range []string{
@@ -513,6 +530,50 @@ func assertBridgeSemantics(t *testing.T, ctx context.Context, admin *sql.DB, _ *
 		`{"cutover":"2000-01-01T00:00:00Z","horizon":"2100-01-01T00:00:00Z","limit":10,"subscription_position":0,"subscription_ceiling":1,"topup_position":0,"topup_ceiling":1}`).Scan(&units)
 	if err != nil || units != "50000000" {
 		t.Fatalf("New API payment units=%q err=%v", units, err)
+	}
+}
+
+func assertSub2OIDCIdentityBridgeSemantics(t *testing.T, ctx context.Context, admin *sql.DB) {
+	t.Helper()
+	rows, err := admin.QueryContext(ctx, `
+		SELECT projected.id,projected.verified_at,
+			(SELECT string_agg(key,',' ORDER BY key) FROM jsonb_object_keys(bridge.payload) AS key)
+		FROM invoice_bridge.sub2api_identities_v4('page',$1::jsonb) AS bridge(payload)
+		CROSS JOIN LATERAL jsonb_to_record(bridge.payload) AS projected(id bigint,verified_at timestamptz)
+		ORDER BY projected.id`,
+		`{"provider_key":"https://auth.solov.cc/realms/solov","issuer":"https://auth.solov.cc/realms/solov","updated_at":"2000-01-01T00:00:00Z","id":0,"limit":50}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type projectedIdentity struct {
+		id         int64
+		verifiedAt time.Time
+		keys       string
+	}
+	got := make([]projectedIdentity, 0, 2)
+	for rows.Next() {
+		var item projectedIdentity
+		if err = rows.Scan(&item.id, &item.verifiedAt, &item.keys); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, item)
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].id != 1 || got[1].id != 2 {
+		t.Fatalf("Sub2 identity bridge exported IDs=%v, want only verified identity 1 and email-verified OIDC binding 2", got)
+	}
+	wantVerified := []time.Time{
+		time.Date(2026, time.August, 15, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, time.August, 16, 12, 34, 56, 0, time.UTC),
+	}
+	const wantKeys = "created_at,id,issuer,provider_key,provider_subject,provider_type,updated_at,user_id,verified_at"
+	for index, item := range got {
+		if !item.verifiedAt.Equal(wantVerified[index]) || item.keys != wantKeys {
+			t.Fatalf("Sub2 identity bridge proof time or output allowlist mismatch: got=%+v want_time=%s want_keys=%s", item, wantVerified[index], wantKeys)
+		}
 	}
 }
 

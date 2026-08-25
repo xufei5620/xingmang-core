@@ -1333,7 +1333,7 @@ func expectedBridgeRoutineHash(config runConfig) string {
 			sourceagent.StreamUsage:      "9291f757e1e0c5b0daa0c6858020e6f61f1cfd63f66cfbe4677b7c6dff3b1530",
 			sourceagent.StreamCredits:    "5683a8b5eec1b50f33740b63d6a361c003686fa6d90eafc92306882a337ab087",
 			sourceagent.StreamBalances:   "00697ce59c06a5a5715dfd4ac58df15e83f76418d8cc4f20ec904cf59d0b36d5",
-			sourceagent.StreamIdentities: "ddf489610999697e9e6054730a5ec12eb78a42dd1e0e40dbb54dec9b469be6fa",
+			sourceagent.StreamIdentities: "443fc8aa1ed8232c742bfe2964a2869e279886694dddeda0a9d532ecad8f1f90",
 		},
 	}
 	return hashes[config.SourceType][config.StreamID]

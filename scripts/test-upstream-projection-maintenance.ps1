@@ -170,7 +170,7 @@ function New-SourceFixture {
             user_affiliate_ledger = 'id bigint PRIMARY KEY,user_id bigint,action text,amount numeric(20,8),created_at timestamptz'
             redeem_codes = 'id bigint PRIMARY KEY,code text,type text,value numeric(20,8),status text,used_by bigint,used_at timestamptz'
             payment_orders = 'id bigint PRIMARY KEY,user_id bigint,status text,order_type text,amount numeric(20,8),pay_amount numeric(20,8),fee_rate numeric(10,4),refund_amount numeric(20,8),completed_at timestamptz,refund_at timestamptz,created_at timestamptz,updated_at timestamptz,payment_type text,provider_key text,provider_snapshot jsonb,recharge_code text'
-            auth_identities = 'id bigint PRIMARY KEY,user_id bigint,provider_type text,provider_key text,provider_subject text,verified_at timestamptz,issuer text,created_at timestamptz,updated_at timestamptz,secret_value text'
+            auth_identities = 'id bigint PRIMARY KEY,user_id bigint,provider_type text,provider_key text,provider_subject text,verified_at timestamptz,issuer text,metadata jsonb NOT NULL DEFAULT ''{}''::jsonb,created_at timestamptz,updated_at timestamptz,secret_value text'
         }
         $tables = @($tableDefinitions.Keys)
         $sentinelTable = 'payment_orders'

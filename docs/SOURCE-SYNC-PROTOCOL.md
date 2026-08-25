@@ -285,8 +285,15 @@ Only the explicitly configured central OIDC provider can produce an
 Sub2API reads these fields only from
 `invoice_bridge.sub2api_identities_v4(text,jsonb)` using `(updated_at,id)` keyset
 pagination. The function, not merely Go filtering, pins `provider_type='oidc'`, the
-exact provider key/HTTPS issuer and non-null verification time; the reader has
-no raw `auth_identities` privilege:
+exact provider key/HTTPS issuer and a non-empty provider subject. It accepts either
+the dedicated `verified_at` timestamp or the exact JSON boolean
+`metadata.email_verified=true` written by Sub2API's verified-email OIDC flow.
+For the latter case, the projected verification time is the immutable identity
+`created_at` (the local binding-persistence time, not the IdP's original email
+verification time). String values such as `"true"`, false/missing/non-object
+metadata and a missing creation time fail closed. Among invoice bridge roles,
+only the NOLOGIN bridge owner gains `SELECT(metadata)`; the LOGIN reader receives
+EXECUTE only, and the function never returns metadata, email or other claims:
 
 ```text
 id, user_id, provider_type, provider_key, provider_subject,

@@ -126,7 +126,7 @@ GRANT SELECT(id,user_id,status,order_type,amount,pay_amount,fee_rate,refund_amou
 GRANT SELECT(key,value)
   ON public.settings TO invoice_sub2api_bridge_owner;
 GRANT SELECT(id,user_id,provider_type,provider_key,provider_subject,verified_at,
-  issuer,created_at,updated_at)
+  issuer,metadata,created_at,updated_at)
   ON public.auth_identities TO invoice_sub2api_bridge_owner;
 -- Repeat the complete five-stream owner ACL in this source contract. This is
 -- required for idempotency because the REVOKE ALL above also removes grants
@@ -363,13 +363,22 @@ BEGIN
   IF requested_limit<1 OR requested_limit>500 THEN RAISE EXCEPTION 'invalid bridge limit'; END IF;
   RETURN QUERY EXECUTE $query$
     SELECT to_jsonb(result) FROM (
-      SELECT id,user_id,provider_type,provider_key,provider_subject,verified_at,
+      SELECT id,user_id,provider_type,provider_key,provider_subject,
+        COALESCE(verified_at,created_at) AS verified_at,
         issuer,created_at,updated_at
       FROM public.auth_identities
       WHERE provider_type='oidc'
         AND provider_key='https://auth.solov.cc/realms/solov'
         AND issuer='https://auth.solov.cc/realms/solov'
-        AND verified_at IS NOT NULL
+        AND provider_subject~'[^[:space:]]'
+        AND (
+          verified_at IS NOT NULL
+          OR (
+            created_at IS NOT NULL
+            AND jsonb_typeof(metadata)='object'
+            AND metadata->'email_verified'='true'::jsonb
+          )
+        )
         AND (updated_at,id)>($1::timestamptz,$2::bigint)
       ORDER BY updated_at,id LIMIT $3
     ) result
