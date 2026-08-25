@@ -518,8 +518,21 @@ cat >"$scope_payload" <<'JSON'
 JSON
 admin_request POST "/admin/realms/$REALM_NAME/client-scopes" "$scope_payload" 201
 contract_scope_id="$(lookup_scope_id "$CONTRACT_SCOPE")"
+basic_scope_id="$(lookup_scope_id basic)"
 profile_scope_id="$(lookup_scope_id profile)"
 email_scope_id="$(lookup_scope_id email)"
+admin_request GET "/admin/realms/$REALM_NAME/client-scopes/$basic_scope_id/protocol-mappers/models"
+assert_json "$HTTP_BODY"
+jq -e '
+  [.[] | select(
+    .name == "auth_time" and
+    .protocolMapper == "oidc-usersessionmodel-note-mapper" and
+    .config["user.session.note"] == "AUTH_TIME" and
+    .config["claim.name"] == "auth_time" and
+    .config["jsonType.label"] == "long" and
+    .config["id.token.claim"] == "true"
+  )] | length == 1
+' "$HTTP_BODY" >/dev/null 2>&1 || die 'built-in basic scope does not provide the required ID-token auth_time contract'
 admin_request GET "/admin/realms/$REALM_NAME/client-scopes/$contract_scope_id/protocol-mappers/models"
 assert_json "$HTTP_BODY"
 jq -e '
@@ -537,7 +550,7 @@ cat >"$invoice_client_payload" <<'JSON'
   "directAccessGrantsEnabled":false,"serviceAccountsEnabled":false,"authorizationServicesEnabled":false,"consentRequired":false,
   "frontchannelLogout":false,"fullScopeAllowed":false,
   "redirectUris":["https://invoice.solov.cc/api/v1/auth/callback"],"webOrigins":[],
-  "defaultClientScopes":["profile","email","solov-token-contract"],"optionalClientScopes":[],
+  "defaultClientScopes":["basic","profile","email","solov-token-contract"],"optionalClientScopes":[],
   "attributes":{
     "pkce.code.challenge.method":"S256",
     "post.logout.redirect.uris":"https://invoice.solov.cc/",
@@ -602,13 +615,20 @@ desktop_client_id="$(lookup_client_id invoice-desktop)"
 
 reconcile_client_scopes() {
   local client_uuid="$1"
+  local include_basic="$2"
   local scope_id scope_name
+  [[ "$include_basic" == true || "$include_basic" == false ]] || die 'invalid basic client-scope requirement'
   admin_request GET "/admin/realms/$REALM_NAME/clients/$client_uuid/default-client-scopes"
   assert_json "$HTTP_BODY"
   while IFS=$'\t' read -r scope_id scope_name; do
     [[ -z "$scope_id" ]] && continue
     case "$scope_name" in
       profile|email|"$CONTRACT_SCOPE") ;;
+      basic)
+        [[ "$include_basic" == true ]] && continue
+        assert_uuid "$scope_id" 'default client scope ID'
+        admin_request DELETE "/admin/realms/$REALM_NAME/clients/$client_uuid/default-client-scopes/$scope_id" '' 204
+        ;;
       *)
         assert_uuid "$scope_id" 'default client scope ID'
         admin_request DELETE "/admin/realms/$REALM_NAME/clients/$client_uuid/default-client-scopes/$scope_id" '' 204
@@ -622,6 +642,9 @@ reconcile_client_scopes() {
       admin_request PUT "/admin/realms/$REALM_NAME/clients/$client_uuid/default-client-scopes/$required_scope_id" '' 204
     fi
   done
+  if [[ "$include_basic" == true ]] && ! jq -e --arg id "$basic_scope_id" 'any(.[]; .id == $id)' "$HTTP_BODY" >/dev/null 2>&1; then
+    admin_request PUT "/admin/realms/$REALM_NAME/clients/$client_uuid/default-client-scopes/$basic_scope_id" '' 204
+  fi
 
   admin_request GET "/admin/realms/$REALM_NAME/clients/$client_uuid/optional-client-scopes"
   assert_json "$HTTP_BODY"
@@ -632,15 +655,16 @@ reconcile_client_scopes() {
   done < <(jq -r '.[].id' "$HTTP_BODY")
 
   admin_request GET "/admin/realms/$REALM_NAME/clients/$client_uuid/default-client-scopes"
-  jq -e --arg contract "$CONTRACT_SCOPE" \
-    '([.[].name] | sort) == (["email","profile",$contract] | sort)' "$HTTP_BODY" >/dev/null 2>&1 ||
+  jq -e --arg contract "$CONTRACT_SCOPE" --argjson include_basic "$include_basic" \
+    '([.[].name] | sort) == ((["email","profile",$contract] + (if $include_basic then ["basic"] else [] end)) | sort)' "$HTTP_BODY" >/dev/null 2>&1 ||
     die 'exact default client-scope set did not persist'
   admin_request GET "/admin/realms/$REALM_NAME/clients/$client_uuid/optional-client-scopes"
   jq -e 'length == 0' "$HTTP_BODY" >/dev/null 2>&1 || die 'optional/offline client scopes remain attached'
 }
 
-for client_uuid in "$invoice_client_id" "$sub2api_client_id" "$newapi_client_id" "$desktop_client_id"; do
-  reconcile_client_scopes "$client_uuid"
+reconcile_client_scopes "$invoice_client_id" true
+for client_uuid in "$sub2api_client_id" "$newapi_client_id" "$desktop_client_id"; do
+  reconcile_client_scopes "$client_uuid" false
 done
 
 invoice_user_only_payload="$(payload_file invoice-user-only-scope)"

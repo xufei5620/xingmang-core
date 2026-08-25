@@ -266,7 +266,12 @@ curl --fail --silent --show-error \
         $clientUuid = $clients[$clientId].id
         $defaults = @(Invoke-AdminGetArray -Path "solov/clients/$clientUuid/default-client-scopes")
         $defaultNames = @($defaults | ForEach-Object { $_.name } | Sort-Object)
-        if (($defaultNames -join ',') -ne 'email,profile,solov-token-contract') {
+        $expectedDefaultNames = if ($clientId -eq 'invoice-web') {
+            'basic,email,profile,solov-token-contract'
+        } else {
+            'email,profile,solov-token-contract'
+        }
+        if (($defaultNames -join ',') -ne $expectedDefaultNames) {
             throw "client has an unexpected default/offline scope set: $clientId"
         }
         $optional = @(Invoke-AdminGetArray -Path "solov/clients/$clientUuid/optional-client-scopes")
@@ -279,6 +284,17 @@ curl --fail --silent --show-error \
     }
 
     $scopes = @(Invoke-AdminGetArray -Path 'solov/client-scopes')
+    $basicScopes = @($scopes | Where-Object { $_.name -eq 'basic' })
+    if ($basicScopes.Count -ne 1) { throw 'built-in basic scope lookup is not unique' }
+    $basicMappers = @(Invoke-AdminGetArray -Path "solov/client-scopes/$($basicScopes[0].id)/protocol-mappers/models")
+    $authTimeMappers = @($basicMappers | Where-Object { $_.name -eq 'auth_time' -and $_.protocolMapper -eq 'oidc-usersessionmodel-note-mapper' })
+    if ($authTimeMappers.Count -ne 1 -or
+        $authTimeMappers[0].config.'user.session.note' -ne 'AUTH_TIME' -or
+        $authTimeMappers[0].config.'claim.name' -ne 'auth_time' -or
+        $authTimeMappers[0].config.'jsonType.label' -ne 'long' -or
+        $authTimeMappers[0].config.'id.token.claim' -ne 'true') {
+        throw 'built-in basic scope does not provide the required ID-token auth_time contract'
+    }
     $contractScopes = @($scopes | Where-Object { $_.name -eq 'solov-token-contract' })
     if ($contractScopes.Count -ne 1) { throw 'token contract scope lookup is not unique' }
     $mappers = @(Invoke-AdminGetArray -Path "solov/client-scopes/$($contractScopes[0].id)/protocol-mappers/models")

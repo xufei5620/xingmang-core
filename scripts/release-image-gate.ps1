@@ -539,7 +539,7 @@ try {
                             scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
                             provisionerSha256 = Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')
                             imageId = [string]$keycloakRuntimeRecord.imageId
-                            assertions = @('realm-policy', 'default-user-role', 'loa1-loa2', 'roles-acr-amr-mappers', 'four-clients', 'no-offline-scope', 'disabled-desktop', 'single-secret-0400', 'fixed-output', 'existing-realm-refusal', 'log-redaction')
+                            assertions = @('realm-policy', 'default-user-role', 'loa1-loa2', 'roles-acr-amr-mappers', 'invoice-auth-time-scope', 'four-clients', 'no-offline-scope', 'disabled-desktop', 'single-secret-0400', 'fixed-output', 'existing-realm-refusal', 'log-redaction')
                         }
                     } else {
                         $keycloakRuntimeRecord['policyStatus'] = 'failed'

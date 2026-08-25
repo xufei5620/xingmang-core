@@ -467,6 +467,11 @@ Create distinct clients and secrets:
 
 For `invoice-web`, also configure:
 
+- attach Keycloak's built-in `basic` scope as a default client scope and verify
+  its `auth_time` mapper writes the `AUTH_TIME` user-session note into the ID
+  token; Keycloak 25 and later no longer emit this claim automatically without
+  that mapper, and administrator step-up intentionally fails closed when the
+  claim is absent or stale;
 - valid post-logout redirect: exactly `https://invoice.solov.cc/`;
 - back-channel logout URL: exactly
   `https://invoice.solov.cc/api/v1/auth/backchannel-logout`;
