@@ -181,6 +181,9 @@ func (s *Store) RegisterCutoverManifest(ctx context.Context, manifest CutoverMan
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,41))`, manifest.SourceInstanceID); err != nil {
 		return err
 	}
+	// The source-scoped advisory lock serializes create/idempotence checks.
+	// source_cutover_manifests is append-only, so a row lock would add no
+	// protection and would incorrectly require UPDATE on the hardened runtime.
 	var policyStart time.Time
 	if err = tx.QueryRow(ctx, `SELECT eligibility_start_at FROM invoice_eligibility_policy
 		WHERE singleton_id=1`).Scan(&policyStart); err != nil {
@@ -205,7 +208,7 @@ func (s *Store) RegisterCutoverManifest(ctx context.Context, manifest CutoverMan
 			payments_ceiling,usage_ceiling,credits_ceiling,balances_ceiling,
 			baseline_snapshot_id,baseline_snapshot_hash,baseline_row_count,
 			signing_key_id,cutover_at,database_clock
-		FROM source_cutover_manifests WHERE source_instance_id=$1 FOR UPDATE`, manifest.SourceInstanceID).Scan(
+		FROM source_cutover_manifests WHERE source_instance_id=$1`, manifest.SourceInstanceID).Scan(
 		&existing.SourceInstanceID, &existing.ManifestHash, &existing.SourceRuntimeVersion, &existing.ProjectionContract, &existing.ConfigurationHash,
 		&existing.UnitCode, &existing.PaymentsCeiling, &existing.UsageCeiling, &existing.CreditsCeiling,
 		&existing.BalancesCeiling, &existing.BaselineSnapshotID, &existing.BaselineSnapshotHash,
@@ -301,7 +304,7 @@ func (s *Store) AdvanceSourceEconomicWatermark(ctx context.Context, sourceID, ma
 		return err
 	}
 	var trustedManifest, trustedConfig string
-	if err = tx.QueryRow(ctx, `SELECT manifest_hash,configuration_hash FROM source_cutover_manifests WHERE source_instance_id=$1 FOR SHARE`, sourceID).Scan(&trustedManifest, &trustedConfig); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT manifest_hash,configuration_hash FROM source_cutover_manifests WHERE source_instance_id=$1`, sourceID).Scan(&trustedManifest, &trustedConfig); err != nil {
 		return err
 	}
 	if trustedManifest != manifestHash || trustedConfig != configurationHash {
@@ -502,7 +505,7 @@ func tryPublishEconomicScanCyclesTx(ctx context.Context, tx pgx.Tx, sourceID, st
 		var baselineRows int64
 		err = tx.QueryRow(ctx, `
 			SELECT configuration_hash,baseline_row_count FROM source_cutover_manifests
-			WHERE source_instance_id=$1 FOR SHARE`, sourceID).Scan(&configHash, &baselineRows)
+			WHERE source_instance_id=$1`, sourceID).Scan(&configHash, &baselineRows)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
@@ -826,7 +829,7 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			payments_ceiling,usage_ceiling,credits_ceiling,balances_ceiling,
 			baseline_snapshot_id,baseline_snapshot_hash,baseline_row_count,
 			signing_key_id,cutover_at,database_clock
-		FROM source_cutover_manifests WHERE source_instance_id=$1 FOR SHARE`, in.SourceInstanceID).Scan(
+		FROM source_cutover_manifests WHERE source_instance_id=$1`, in.SourceInstanceID).Scan(
 		&manifest.SourceInstanceID, &manifest.ManifestHash, &manifest.SourceRuntimeVersion, &manifest.ProjectionContract, &manifest.ConfigurationHash,
 		&manifest.UnitCode, &manifest.PaymentsCeiling, &manifest.UsageCeiling, &manifest.CreditsCeiling,
 		&manifest.BalancesCeiling, &manifest.BaselineSnapshotID, &manifest.BaselineSnapshotHash,
@@ -2271,8 +2274,7 @@ func applyPrePolicyWalletFundingTx(
 		SELECT service_units::text,event_time,unit_code,cutover_manifest_hash,
 			configuration_hash,COALESCE(causal_domain,''),COALESCE(causal_order::text,'')
 		FROM source_credit_events
-		WHERE funding_lot_id=$1 AND credit_kind='PRE_POLICY_NON_INVOICEABLE'
-		FOR UPDATE`, lotID).Scan(&existingUnits, &existingAt, &existingUnitCode,
+		WHERE funding_lot_id=$1 AND credit_kind='PRE_POLICY_NON_INVOICEABLE'`, lotID).Scan(&existingUnits, &existingAt, &existingUnitCode,
 		&existingManifest, &existingConfiguration, &existingDomain, &existingOrder)
 	if err == nil {
 		if existingUnits != cashUnits.String() || !existingAt.Equal(in.Lot.CompletedAt.UTC()) ||
@@ -2324,7 +2326,7 @@ func evaluatePendingCheckpointsTx(ctx context.Context, tx pgx.Tx, accountID stri
 		FROM balance_reconciliation_checkpoints b
 		WHERE b.external_account_id=$1 AND b.checkpoint_kind='reconciliation' AND b.as_of<=$2
 			AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations e WHERE e.checkpoint_id=b.id)
-		ORDER BY b.as_of,b.id FOR SHARE OF b`, accountID, through)
+		ORDER BY b.as_of,b.id`, accountID, through)
 	if err != nil {
 		return err
 	}

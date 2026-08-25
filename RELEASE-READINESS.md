@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc26 runtime-lock candidate
+# Release readiness: 0.1.0-rc27 immutable-projection candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC26 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC27 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -60,9 +60,17 @@ equivalent least-privilege integration test proves that the immutable batch
 remains readable but not mutable. The accepted batches, local sequence hashes
 and dependency-wait records were retained for forward recovery.
 
+The RC26 retry reached the next historical instance of the same design error:
+existing-manifest and idempotence reads still requested row locks on append-only
+projection tables. RC27 audits the runtime lock set, removes row locks from
+immutable manifests, batches, derived credits and balance checkpoints, and
+retains serialization on advisory/source, mutable cycle, watermark, account
+and funding-lot rows. A static regression gate rejects reintroduction of the
+exact forbidden lock forms.
+
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC26 image/SBOM/vulnerability
+- generate and independently verify a fresh RC27 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -78,7 +86,7 @@ and dependency-wait records were retained for forward recovery.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC26 tag and pass real production
+- deploy all Invoice images under the same RC27 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -93,7 +101,7 @@ and dependency-wait records were retained for forward recovery.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC26 commit and signed release tag; no GitHub
+- create and locally verify the RC27 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

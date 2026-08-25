@@ -6,6 +6,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$consumptionStoreSource = Get-Content -Raw (Join-Path $projectRoot 'backend\internal\postgresstore\consumption.go')
+$normalizedConsumptionStore = [regex]::Replace($consumptionStoreSource, '\s+', ' ')
+$forbiddenImmutableRowLocks = @(
+    'FROM source_cutover_manifests WHERE source_instance_id=$1 FOR UPDATE',
+    'FROM source_cutover_manifests WHERE source_instance_id=$1 FOR SHARE',
+    "FROM source_credit_events WHERE funding_lot_id=`$1 AND credit_kind='PRE_POLICY_NON_INVOICEABLE' FOR UPDATE",
+    'ORDER BY b.as_of,b.id FOR SHARE OF b',
+    "AND b.schema_version='3.0' FOR SHARE OF b"
+)
+foreach ($forbiddenLock in $forbiddenImmutableRowLocks) {
+    if ($normalizedConsumptionStore.Contains($forbiddenLock, [StringComparison]::Ordinal)) {
+        throw "runtime store attempts a row lock on an immutable projection table: $forbiddenLock"
+    }
+}
 $suffix = ([Guid]::NewGuid().ToString('N')).Substring(0, 12)
 $containerName = "invoice-system-pgtest-$suffix"
 $databaseName = 'invoice_test'
