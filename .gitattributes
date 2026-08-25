@@ -1,1 +1,1 @@
-deploy/keycloak/attach-invoice-basic-scope.sh text eol=lf
+*.sh text eol=lf
