@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc28 pending-first candidate
+# Release readiness: 0.1.0-rc29 ingestion-capacity candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC28 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC29 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -76,9 +76,15 @@ pending batch, leaving the acknowledged target cursor bound to the older
 snapshot. RC28 resumes/finalizes any pending batch before the first connector
 read. Restart tests now make the connector fail if it is called before replay.
 
+The RC28 ten-agent startup then proved the configured ingestion dynamic pool
+was undersized: the old `/29` pool could not hold the API plus ten source
+agents. RC29 uses a `/27` internal subnet, a `/28` dynamic pool with at least 11
+container addresses, and reserves `.30` outside that pool for the exact trusted
+ingest proxy `/32`. Production preflight now rejects smaller pools.
+
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC28 image/SBOM/vulnerability
+- generate and independently verify a fresh RC29 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -94,7 +100,7 @@ read. Restart tests now make the connector fail if it is called before replay.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC28 tag and pass real production
+- deploy all Invoice images under the same RC29 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -109,7 +115,7 @@ read. Restart tests now make the connector fail if it is called before replay.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC28 commit and signed release tag; no GitHub
+- create and locally verify the RC29 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

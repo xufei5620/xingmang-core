@@ -9,10 +9,10 @@ param(
     [string]$ProxySubnet = '172.30.250.0/28',
     [string]$ProxyGatewayIP = '172.30.250.1',
     [string]$TrustedProxyCIDR = '172.30.250.1/32',
-    [string]$IngestSubnet = '172.30.251.0/28',
-    [string]$IngestDynamicRange = '172.30.251.0/29',
-    [string]$IngestProxyIP = '172.30.251.14',
-    [string]$IngestProxyCIDR = '172.30.251.14/32',
+    [string]$IngestSubnet = '172.30.251.0/27',
+    [string]$IngestDynamicRange = '172.30.251.0/28',
+    [string]$IngestProxyIP = '172.30.251.30',
+    [string]$IngestProxyCIDR = '172.30.251.30/32',
     [string]$Sub2ProjectionSubnet = '172.30.252.0/28',
     [string]$NewAPIProjectionSubnet = '172.30.253.0/28',
     [string]$KeycloakDBSubnet = '172.30.244.0/28',
@@ -61,6 +61,14 @@ $invoiceProxyGatewayValue = Get-IPv4Value $ProxyGatewayIP
 $keycloakGatewayValue = Get-IPv4Value $KeycloakEdgeGateway
 if ($dynamicBounds.Start -lt $ingestBounds.Start -or $dynamicBounds.End -gt $ingestBounds.End) {
     throw 'ingestion dynamic range is outside the ingestion subnet'
+}
+$dynamicCapacity = [int64]([Math]::Max(0, [double]($dynamicBounds.End - $dynamicBounds.Start - 1)))
+$ingestGatewayValue = $ingestBounds.Start + 1
+if ($ingestGatewayValue -ge $dynamicBounds.Start -and $ingestGatewayValue -le $dynamicBounds.End) {
+    $dynamicCapacity--
+}
+if ($dynamicCapacity -lt 11) {
+    throw "ingestion dynamic range has $dynamicCapacity usable container addresses; API plus ten source agents require at least 11"
 }
 if ($proxyValue -le $ingestBounds.Start -or $proxyValue -ge $ingestBounds.End) {
     throw 'ingest proxy IP is not a usable address inside the ingestion subnet'
