@@ -334,6 +334,28 @@ type BalanceDBConnector struct {
 	Now      func() time.Time
 }
 
+const balanceReconciliationStateSchemaVersion = 1
+
+// balanceReconciliationState is the durable sender-side bridge between an
+// acknowledged balance cycle and the next one. CapturedSnapshot is the full
+// source state used for the following comparison. EmissionSnapshot contains
+// only new or semantically changed accounts and is the exact signed snapshot
+// whose row count the receiver verifies. BaseSnapshotID makes a prepared cycle
+// recoverable if the process stops after replacing Current but before writing
+// the pending batch spool.
+type balanceReconciliationState struct {
+	SchemaVersion    int             `json:"schema_version"`
+	StateKind        string          `json:"state_kind"`
+	BaseSnapshotID   string          `json:"base_snapshot_id"`
+	CapturedSnapshot BalanceSnapshot `json:"captured_snapshot"`
+	EmissionSnapshot BalanceSnapshot `json:"emission_snapshot"`
+}
+
+type preparedBalanceCycle struct {
+	Snapshot      BalanceSnapshot
+	CeilingCursor string
+}
+
 type economicContractQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
@@ -415,6 +437,7 @@ func (c *BalanceDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPag
 	}
 	cursor := req.Cursor
 	var snapshot BalanceSnapshot
+	var ceilingCursor string
 	if cursor.Version == 0 {
 		if err := c.Baseline.Load(ctx, &snapshot); err != nil {
 			return ScanPage{}, err
@@ -425,6 +448,7 @@ func (c *BalanceDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPag
 		cursor = ScanCursor{Revision: req.Cursor.Revision, Version: 2, CutoverAt: c.Manifest.CutoverAt,
 			WatermarkAt: c.Manifest.CutoverAt, WatermarkCursor: c.Manifest.HighWaters[StreamBalances].Cursor,
 			CeilingAt: snapshot.AsOf, CeilingCursor: "balance_snapshot:" + lastBalanceUserID(snapshot.Rows), SnapshotID: snapshot.SnapshotID, SnapshotRowCount: int64(len(snapshot.Rows)), HasSnapshotMetadata: true}
+		ceilingCursor = cursor.CeilingCursor
 		cursor.PositionCursor = "balance_snapshot:0"
 		cursor.ScanCycleID = deterministicUUID(strings.Join([]string{c.SourceID, StreamBalances, snapshot.AsOf, snapshot.SnapshotID}, "\x00"))
 	} else {
@@ -432,14 +456,12 @@ func (c *BalanceDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPag
 			return ScanPage{}, errors.New("balance cursor conflicts with cutover")
 		}
 		if cursor.Completed {
-			var err error
-			snapshot, err = c.captureReconciliation(ctx)
+			cycle, err := c.prepareReconciliationCycle(ctx, cursor, c.captureReconciliation)
 			if err != nil {
 				return ScanPage{}, err
 			}
-			if err = c.Current.Replace(ctx, snapshot); err != nil {
-				return ScanPage{}, err
-			}
+			snapshot = cycle.Snapshot
+			ceilingCursor = cycle.CeilingCursor
 			cursor.Page = 0
 			cursor.ID = 0
 			cursor.Completed = false
@@ -447,16 +469,18 @@ func (c *BalanceDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPag
 			cursor.SnapshotRowCount = int64(len(snapshot.Rows))
 			cursor.HasSnapshotMetadata = true
 			cursor.CeilingAt = snapshot.AsOf
-			cursor.CeilingCursor = "balance_snapshot:" + lastBalanceUserID(snapshot.Rows)
+			cursor.CeilingCursor = ceilingCursor
 			cursor.PositionCursor = "balance_snapshot:0"
 			cursor.ScanCycleID = deterministicUUID(strings.Join([]string{c.SourceID, StreamBalances, snapshot.AsOf, snapshot.SnapshotID}, "\x00"))
 		} else {
-			store := c.Current
-			if cursor.SnapshotID == c.Manifest.BaselineSnapshotID {
-				store = c.Baseline
-			}
-			if err := store.Load(ctx, &snapshot); err != nil {
+			cycle, err := c.loadBalanceCycle(ctx, cursor.SnapshotID)
+			if err != nil {
 				return ScanPage{}, err
+			}
+			snapshot = cycle.Snapshot
+			ceilingCursor = cycle.CeilingCursor
+			if cursor.CeilingCursor != ceilingCursor {
+				return ScanPage{}, errors.New("durable balance cycle ceiling differs from cursor")
 			}
 		}
 	}
@@ -505,24 +529,212 @@ func (c *BalanceDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPag
 			Operation: "upsert", Payload: c.Manifest.Payload()})
 	}
 	for _, row := range snapshot.Rows[start:end] {
-		order := row.ExternalUserID
-		cursorValue := "balance_snapshot:" + row.ExternalUserID
-		payload := BalanceCheckpointPayload{ExternalUserID: row.ExternalUserID,
-			CheckpointID: snapshot.SnapshotID + ":" + row.ExternalUserID, CheckpointKind: snapshot.CheckpointKind,
-			AsOf: snapshot.AsOf, BalanceServiceUnits: row.ServiceUnits, UnitCode: snapshot.UnitCode,
-			SourceSnapshotID: snapshot.SnapshotID, SnapshotRowCount: strconv.Itoa(len(snapshot.Rows)),
-			BalanceNegative: row.BalanceNegative, BaselineMember: row.BaselineMember,
-			FactMetadata: FactMetadata{SourceCursor: cursorValue,
-				CausalDomain: "balance_snapshot", CausalOrder: &order,
-				CutoverManifestHash: c.Manifest.ManifestHash, ConfigurationHash: c.Manifest.ConfigurationHash}}
-		projections = append(projections, Projection{EntityType: EntityBalanceCheckpoint,
-			ExternalID: payload.CheckpointID, ObservedAt: now().UTC().Format(time.RFC3339Nano), Operation: "upsert", Payload: payload})
+		projections = append(projections, balanceCheckpointProjection(c.Manifest, snapshot, row, now().UTC()))
 	}
 	return ScanPage{Projections: projections, NextCursor: next, HasMore: hasMore,
 		StreamWatermarkAt: next.WatermarkAt, SourceCursor: next.WatermarkCursor,
 		ScanCeilingAt: next.CeilingAt, ScanCeilingCursor: next.CeilingCursor,
 		ScanCycleID: next.ScanCycleID, ScanComplete: next.Completed,
 		ScanSnapshotID: next.SnapshotID, ScanSnapshotRowCount: snapshotRowCountPtr(next.SnapshotRowCount)}, nil
+}
+
+func balanceCheckpointProjection(manifest CutoverManifest, snapshot BalanceSnapshot, row BalanceSnapshotRow, observedAt time.Time) Projection {
+	order := row.ExternalUserID
+	cursorValue := "balance_snapshot:" + row.ExternalUserID
+	payload := BalanceCheckpointPayload{ExternalUserID: row.ExternalUserID,
+		CheckpointID: snapshot.SnapshotID + ":" + row.ExternalUserID, CheckpointKind: snapshot.CheckpointKind,
+		AsOf: snapshot.AsOf, BalanceServiceUnits: row.ServiceUnits, UnitCode: snapshot.UnitCode,
+		SourceSnapshotID: snapshot.SnapshotID, SnapshotRowCount: strconv.Itoa(len(snapshot.Rows)),
+		BalanceNegative: row.BalanceNegative, BaselineMember: row.BaselineMember,
+		FactMetadata: FactMetadata{SourceCursor: cursorValue,
+			CausalDomain: "balance_snapshot", CausalOrder: &order,
+			CutoverManifestHash: manifest.ManifestHash, ConfigurationHash: manifest.ConfigurationHash}}
+	return Projection{EntityType: EntityBalanceCheckpoint, ExternalID: payload.CheckpointID,
+		ObservedAt: observedAt.UTC().Format(time.RFC3339Nano), Operation: "upsert", Payload: payload}
+}
+
+func (c *BalanceDBConnector) loadBalanceCycle(ctx context.Context, snapshotID string) (preparedBalanceCycle, error) {
+	if snapshotID == c.Manifest.BaselineSnapshotID {
+		var baseline BalanceSnapshot
+		if err := c.Baseline.Load(ctx, &baseline); err != nil {
+			return preparedBalanceCycle{}, err
+		}
+		if err := validateBalanceSnapshot(baseline); err != nil || baseline.SnapshotID != snapshotID {
+			return preparedBalanceCycle{}, errors.New("baseline balance cycle is invalid")
+		}
+		return preparedBalanceCycle{Snapshot: baseline, CeilingCursor: "balance_snapshot:" + lastBalanceUserID(baseline.Rows)}, nil
+	}
+	state, legacy, exists, err := loadCurrentBalanceReconciliationState(ctx, c.Current)
+	if err != nil {
+		return preparedBalanceCycle{}, err
+	}
+	if !exists {
+		return preparedBalanceCycle{}, errors.New("durable current balance cycle is missing")
+	}
+	if legacy != nil {
+		if legacy.SnapshotID != snapshotID {
+			return preparedBalanceCycle{}, errors.New("legacy durable balance cycle differs from cursor")
+		}
+		return preparedBalanceCycle{Snapshot: *legacy, CeilingCursor: "balance_snapshot:" + lastBalanceUserID(legacy.Rows)}, nil
+	}
+	if state.EmissionSnapshot.SnapshotID != snapshotID {
+		return preparedBalanceCycle{}, errors.New("durable balance emission differs from cursor")
+	}
+	return preparedBalanceCycle{Snapshot: state.EmissionSnapshot,
+		CeilingCursor: "balance_snapshot:" + lastBalanceUserID(state.CapturedSnapshot.Rows)}, nil
+}
+
+func (c *BalanceDBConnector) prepareReconciliationCycle(ctx context.Context, cursor ScanCursor, capture func(context.Context) (BalanceSnapshot, error)) (preparedBalanceCycle, error) {
+	if !cursor.Completed || !hexHashPattern.MatchString(cursor.SnapshotID) || capture == nil {
+		return preparedBalanceCycle{}, errors.New("balance reconciliation cycle preparation is invalid")
+	}
+	state, legacy, exists, err := loadCurrentBalanceReconciliationState(ctx, c.Current)
+	if err != nil {
+		return preparedBalanceCycle{}, err
+	}
+	var previous BalanceSnapshot
+	if exists && state != nil {
+		switch cursor.SnapshotID {
+		case state.BaseSnapshotID:
+			// Current was durably prepared but the pending batch was not yet
+			// written. Reuse it byte-for-byte instead of observing a newer state.
+			return preparedBalanceCycle{Snapshot: state.EmissionSnapshot,
+				CeilingCursor: "balance_snapshot:" + lastBalanceUserID(state.CapturedSnapshot.Rows)}, nil
+		case state.EmissionSnapshot.SnapshotID:
+			previous = state.CapturedSnapshot
+		default:
+			return preparedBalanceCycle{}, errors.New("durable balance reconciliation state conflicts with cursor")
+		}
+	} else if exists && legacy != nil {
+		if cursor.SnapshotID != legacy.SnapshotID {
+			return preparedBalanceCycle{}, errors.New("legacy durable balance snapshot conflicts with cursor")
+		}
+		previous = *legacy
+	} else {
+		if cursor.SnapshotID != c.Manifest.BaselineSnapshotID {
+			return preparedBalanceCycle{}, errors.New("current balance state is missing after baseline")
+		}
+		if err = c.Baseline.Load(ctx, &previous); err != nil {
+			return preparedBalanceCycle{}, err
+		}
+		if err = validateBalanceSnapshot(previous); err != nil || previous.SnapshotID != c.Manifest.BaselineSnapshotID {
+			return preparedBalanceCycle{}, errors.New("immutable balance baseline is invalid")
+		}
+	}
+
+	captured, err := capture(ctx)
+	if err != nil {
+		return preparedBalanceCycle{}, err
+	}
+	prepared, err := buildBalanceReconciliationState(cursor.SnapshotID, previous, captured)
+	if err != nil {
+		return preparedBalanceCycle{}, err
+	}
+	if err = c.Current.Replace(ctx, prepared); err != nil {
+		return preparedBalanceCycle{}, err
+	}
+	return preparedBalanceCycle{Snapshot: prepared.EmissionSnapshot,
+		CeilingCursor: "balance_snapshot:" + lastBalanceUserID(prepared.CapturedSnapshot.Rows)}, nil
+}
+
+func loadCurrentBalanceReconciliationState(ctx context.Context, store EncryptedStateFile) (*balanceReconciliationState, *BalanceSnapshot, bool, error) {
+	exists, err := store.Exists()
+	if err != nil || !exists {
+		return nil, nil, exists, err
+	}
+	var state balanceReconciliationState
+	if stateErr := store.Load(ctx, &state); stateErr == nil {
+		if err = validateBalanceReconciliationState(state); err != nil {
+			return nil, nil, true, err
+		}
+		return &state, nil, true, nil
+	}
+	var legacy BalanceSnapshot
+	if legacyErr := store.Load(ctx, &legacy); legacyErr != nil {
+		return nil, nil, true, errors.New("decode durable current balance state failed")
+	}
+	if err = validateBalanceSnapshot(legacy); err != nil || legacy.CheckpointKind != "reconciliation" {
+		return nil, nil, true, errors.New("legacy durable current balance snapshot is invalid")
+	}
+	return nil, &legacy, true, nil
+}
+
+func buildBalanceReconciliationState(baseSnapshotID string, previous, captured BalanceSnapshot) (balanceReconciliationState, error) {
+	if !hexHashPattern.MatchString(baseSnapshotID) || validateBalanceSnapshot(previous) != nil || validateBalanceSnapshot(captured) != nil ||
+		captured.CheckpointKind != "reconciliation" || previous.SourceID != captured.SourceID || previous.SourceType != captured.SourceType ||
+		previous.CutoverAt != captured.CutoverAt || previous.UnitCode != captured.UnitCode {
+		return balanceReconciliationState{}, errors.New("balance reconciliation snapshots are incompatible")
+	}
+	changed, err := changedBalanceRows(previous.Rows, captured.Rows)
+	if err != nil {
+		return balanceReconciliationState{}, err
+	}
+	emission := BalanceSnapshot{SchemaVersion: cutoverSchemaVersion, SourceID: captured.SourceID,
+		SourceType: captured.SourceType, PreviousSnapshotID: baseSnapshotID, CheckpointKind: "reconciliation",
+		AsOf: captured.AsOf, CutoverAt: captured.CutoverAt, UnitCode: captured.UnitCode, Rows: changed}
+	emission.SnapshotID, err = balanceSnapshotID(emission)
+	if err != nil {
+		return balanceReconciliationState{}, err
+	}
+	state := balanceReconciliationState{SchemaVersion: balanceReconciliationStateSchemaVersion,
+		StateKind: "balance_delta_v1", BaseSnapshotID: baseSnapshotID,
+		CapturedSnapshot: captured, EmissionSnapshot: emission}
+	if err = validateBalanceReconciliationState(state); err != nil {
+		return balanceReconciliationState{}, err
+	}
+	return state, nil
+}
+
+func changedBalanceRows(previous, captured []BalanceSnapshotRow) ([]BalanceSnapshotRow, error) {
+	changed := make([]BalanceSnapshotRow, 0)
+	priorIndex := 0
+	for _, row := range captured {
+		for priorIndex < len(previous) && compareDecimalIDs(previous[priorIndex].ExternalUserID, row.ExternalUserID) < 0 {
+			return nil, errors.New("balance projection removed an account; delta publication is unsafe")
+		}
+		if priorIndex >= len(previous) || compareDecimalIDs(previous[priorIndex].ExternalUserID, row.ExternalUserID) > 0 {
+			if row.BaselineMember {
+				return nil, errors.New("post-cutover balance account claimed baseline membership")
+			}
+			changed = append(changed, row)
+			continue
+		}
+		prior := previous[priorIndex]
+		priorIndex++
+		if prior.BaselineMember != row.BaselineMember {
+			return nil, errors.New("immutable balance baseline membership changed")
+		}
+		if prior.ServiceUnits != row.ServiceUnits || prior.BalanceNegative != row.BalanceNegative {
+			changed = append(changed, row)
+		}
+	}
+	if priorIndex != len(previous) {
+		return nil, errors.New("balance projection removed an account; delta publication is unsafe")
+	}
+	return changed, nil
+}
+
+func validateBalanceReconciliationState(state balanceReconciliationState) error {
+	if state.SchemaVersion != balanceReconciliationStateSchemaVersion || state.StateKind != "balance_delta_v1" ||
+		!hexHashPattern.MatchString(state.BaseSnapshotID) || validateBalanceSnapshot(state.CapturedSnapshot) != nil ||
+		validateBalanceSnapshot(state.EmissionSnapshot) != nil || state.CapturedSnapshot.CheckpointKind != "reconciliation" ||
+		state.EmissionSnapshot.CheckpointKind != "reconciliation" || state.EmissionSnapshot.PreviousSnapshotID != state.BaseSnapshotID ||
+		state.CapturedSnapshot.SourceID != state.EmissionSnapshot.SourceID || state.CapturedSnapshot.SourceType != state.EmissionSnapshot.SourceType ||
+		state.CapturedSnapshot.AsOf != state.EmissionSnapshot.AsOf || state.CapturedSnapshot.CutoverAt != state.EmissionSnapshot.CutoverAt ||
+		state.CapturedSnapshot.UnitCode != state.EmissionSnapshot.UnitCode {
+		return errors.New("durable balance reconciliation state is invalid")
+	}
+	capturedIndex := 0
+	for _, row := range state.EmissionSnapshot.Rows {
+		for capturedIndex < len(state.CapturedSnapshot.Rows) && compareDecimalIDs(state.CapturedSnapshot.Rows[capturedIndex].ExternalUserID, row.ExternalUserID) < 0 {
+			capturedIndex++
+		}
+		if capturedIndex >= len(state.CapturedSnapshot.Rows) || state.CapturedSnapshot.Rows[capturedIndex] != row {
+			return errors.New("balance emission snapshot is not an exact captured subset")
+		}
+		capturedIndex++
+	}
+	return nil
 }
 
 func snapshotRowCountPtr(value int64) *int64 { return &value }

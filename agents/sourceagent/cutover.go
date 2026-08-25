@@ -70,15 +70,16 @@ type BalanceSnapshotRow struct {
 }
 
 type BalanceSnapshot struct {
-	SchemaVersion  int                  `json:"schema_version"`
-	SourceID       string               `json:"source_id"`
-	SourceType     string               `json:"source_type"`
-	SnapshotID     string               `json:"snapshot_id"`
-	CheckpointKind string               `json:"checkpoint_kind"`
-	AsOf           string               `json:"as_of"`
-	CutoverAt      string               `json:"cutover_at"`
-	UnitCode       string               `json:"unit_code"`
-	Rows           []BalanceSnapshotRow `json:"rows"`
+	SchemaVersion      int                  `json:"schema_version"`
+	SourceID           string               `json:"source_id"`
+	SourceType         string               `json:"source_type"`
+	SnapshotID         string               `json:"snapshot_id"`
+	PreviousSnapshotID string               `json:"previous_snapshot_id,omitempty"`
+	CheckpointKind     string               `json:"checkpoint_kind"`
+	AsOf               string               `json:"as_of"`
+	CutoverAt          string               `json:"cutover_at"`
+	UnitCode           string               `json:"unit_code"`
+	Rows               []BalanceSnapshotRow `json:"rows"`
 }
 
 type EncryptedStateFile struct {
@@ -502,6 +503,12 @@ func validateBalanceSnapshot(value BalanceSnapshot) error {
 		(value.SourceType != SourceSub2API && value.SourceType != SourceNewAPI) || !hexHashPattern.MatchString(value.SnapshotID) ||
 		(value.CheckpointKind != "cutover" && value.CheckpointKind != "reconciliation") || value.UnitCode != unitCodeForSource(value.SourceType) || len(value.Rows) > balanceSnapshotMaxRows {
 		return errors.New("balance snapshot metadata is invalid")
+	}
+	if value.PreviousSnapshotID != "" && !hexHashPattern.MatchString(value.PreviousSnapshotID) {
+		return errors.New("balance snapshot predecessor is invalid")
+	}
+	if value.CheckpointKind == "cutover" && value.PreviousSnapshotID != "" {
+		return errors.New("cutover balance snapshot cannot have a predecessor")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, value.AsOf); err != nil {
 		return errors.New("balance snapshot as_of is invalid")

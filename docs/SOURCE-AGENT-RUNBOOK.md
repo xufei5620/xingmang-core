@@ -17,12 +17,12 @@ an install or rollback contract.
 | Sub2API | `payments` V3 | `PaymentV3DBConnector` | updated-at scan + complete reconciliation | exact CNY/config/unit evidence |
 | Sub2API | `usage` V3 | `EconomicDBConnector` | ID scan + full rescan | wallet billing only, scale 1e8 |
 | Sub2API | `credits` V3 | `EconomicDBConnector` | full scan every cycle | bonus/rebate domains; payment codes excluded |
-| Sub2API | `balances` V3 | `BalanceDBConnector` | atomic snapshot pages | encrypted cutover/baseline required |
+| Sub2API | `balances` V3 | `BalanceDBConnector` | atomic full capture, change-snapshot pages | encrypted cutover/baseline required |
 | New API | `identities` | `NewAPIIdentityDBConnector` | incremental + forced full scan <= 24h | central OIDC provider slug + canonical issuer |
 | New API | `payments` V3 | `PaymentV3DBConnector` | full post-cutover scan every cycle | all candidates manual; failed/pending excluded |
 | New API | `usage` V3 | `EconomicDBConnector` | ID scan + full rescan | consume logging must remain enabled |
 | New API | `credits` V3 | `EconomicDBConnector` | full scan every cycle | check-in/redemption domains |
-| New API | `balances` V3 | `BalanceDBConnector` | atomic snapshot pages | encrypted cutover/baseline required |
+| New API | `balances` V3 | `BalanceDBConnector` | atomic full capture, change-snapshot pages | encrypted cutover/baseline required |
 
 Each row is an independent non-root container with a distinct writable 0700
 state directory, state file, encrypted spool, 32-byte spool key, mTLS client
@@ -282,8 +282,15 @@ For each stream, prove in order:
    issuing the resulting invoice;
 7. an empty/static source still emits a signed `projection_status=healthy`
    heartbeat and advances sequence only after the exact ACK;
-8. the configured reconciliation/full-scan deadline is alerted if missed;
-9. `/source-agent-prod healthcheck` remains healthy and the invoice admin
+8. for each balances stream, a second identical full capture has zero records
+   but `scan_complete=true`, while a new account, a real balance change and an
+   `A -> B -> A` transition each produce exactly one new checkpoint; kill once
+   before `pending.enc` creation and once after it, then prove both restarts
+   retain the exact prepared event IDs and body;
+9. a missing previously captured balance account fails closed and cannot
+   publish a false complete watermark;
+10. the configured reconciliation/full-scan deadline is alerted if missed;
+11. `/source-agent-prod healthcheck` remains healthy and the invoice admin
    `/api/v1/admin/source-health` shows both identity streams and all eight economic streams fresh, processed,
    version-matched and projection-healthy.
 
@@ -306,6 +313,18 @@ but alerts must not rely on restart alone.
   state/spool. Run the v2 signature vector before restart.
 - If a spool is present, restore the matching spool key and let the agent finish
   exact replay. Do not delete it while receiver commit status is unknown.
+- For the first balance-delta sender upgrade, preserve the legacy
+  `balance-current.enc` and cursor as one generation. Startup replays any
+  existing `pending.enc` before entering `BalanceDBConnector`. A completed
+  legacy cursor whose snapshot ID exactly matches the legacy current file is
+  migrated only while preparing the next cycle. A mismatch fails closed and
+  requires receiver/cursor evidence; never delete or recapture around it.
+- Balance crash boundaries are explicit: before `balance-current.enc` replace,
+  the old acknowledged base remains authoritative; after replace but before
+  `pending.enc`, the new encrypted state carries the old cursor snapshot ID and
+  is reused without another source read; after pending creation, normal exact
+  pending replay/ACK/CAS cleanup applies. Back up the cursor, current file,
+  pending spool and both matching AES keys together.
 - A 409 requires receiver/source+stream reconciliation by an operator; blind
   retries or state-file edits are prohibited.
 - Key rotation: register the new source+stream public key first, rotate the

@@ -337,11 +337,11 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			if pdfScannerErr := pdfScanner.Ping(readyCtx); pdfScannerErr != nil {
 				return pdfScannerErr
 			}
-			health, healthErr := appService.SourceIngestHealth(readyCtx)
+			sourceHealth, healthErr := appService.SourceReadinessHealth(readyCtx)
 			if healthErr != nil {
 				return healthErr
 			}
-			if ingestErr := validateSourceIngestRuntimeReadiness(health, time.Now().UTC()); ingestErr != nil {
+			if ingestErr := validateSourceIngestRuntimeReadiness(sourceHealth.Ingest, time.Now().UTC()); ingestErr != nil {
 				return ingestErr
 			}
 			eligibilityHealth, healthErr := store.EligibilityProjectionHealth(readyCtx)
@@ -352,11 +352,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 				!eligibilityHealth.OldestPending.IsZero() && time.Since(eligibilityHealth.OldestPending) > 15*time.Minute {
 				return errors.New("invoice eligibility projection is unhealthy")
 			}
-			report, healthErr := appService.SourceHealth(readyCtx)
-			if healthErr != nil {
-				return healthErr
-			}
-			if readinessErr := validateSourceRuntimeReadiness(report); readinessErr != nil {
+			if readinessErr := validateSourceRuntimeReadiness(sourceHealth.Report); readinessErr != nil {
 				return readinessErr
 			}
 			return nil

@@ -102,6 +102,14 @@ type SourceHealthReport struct {
 	Items []SourceStreamHealth `json:"items"`
 }
 
+// SourceReadinessHealth is the bounded subset of source health needed by the
+// HTTP readiness probe. Waiting dependency counts are deliberately absent:
+// management surfaces use SourceHealth when they need those exact counts.
+type SourceReadinessHealth struct {
+	Ingest SourceIngestHealth
+	Report SourceHealthReport
+}
+
 type SourceBatchInput struct {
 	SchemaVersion        string
 	SourceInstanceID     string
@@ -637,6 +645,94 @@ func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshness
 		item.Reasons = append(item.Reasons, "EVENTS_DEAD")
 	}
 	item.Ready = len(item.Reasons) == 0
+}
+
+const sourceReadinessHealthQuery = `
+	WITH active_event_health AS MATERIALIZED (
+		SELECT source_instance_id,stream_id,
+			count(*) FILTER (WHERE processing_status IN ('queued','failed','processing')) AS pending_events,
+			count(*) FILTER (WHERE processing_status='dead') AS dead_events,
+			COALESCE(min(created_at) FILTER (WHERE processing_status IN ('queued','failed','processing')),'epoch'::timestamptz) AS oldest_pending
+		FROM source_ingest_events
+		WHERE processing_status IN ('queued','failed','processing','dead')
+		GROUP BY source_instance_id,stream_id
+	), ingest_health AS (
+		SELECT COALESCE(sum(pending_events),0)::bigint AS pending_events,
+			COALESCE(sum(dead_events),0)::bigint AS dead_events,
+			COALESCE(min(oldest_pending) FILTER (WHERE pending_events>0),'epoch'::timestamptz) AS oldest_pending
+		FROM active_event_health
+	)
+	SELECT si.id,si.source_type,si.name,si.enabled,required.stream_id,
+		COALESCE(sis.sequence,0),si.runtime_version,
+		COALESCE(sis.source_runtime_version,''),COALESCE(sis.source_agent_version,''),COALESCE(sis.projection_status,'unknown'),
+		COALESCE(sis.last_accepted_at,'epoch'::timestamptz),
+		COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
+		COALESCE(sew.watermark_at,'epoch'::timestamptz),
+		COALESCE(aeh.pending_events,0),COALESCE(aeh.dead_events,0),
+		ingest.pending_events,ingest.dead_events,ingest.oldest_pending
+	FROM source_instances si
+	CROSS JOIN (VALUES ('payments'::text),('identities'::text),('usage'::text),('credits'::text),('balances'::text)) required(stream_id)
+	LEFT JOIN source_ingest_state sis ON sis.source_instance_id=si.id AND sis.stream_id=required.stream_id
+	LEFT JOIN source_economic_stream_watermarks sew ON sew.source_instance_id=si.id AND sew.stream_kind=required.stream_id
+	LEFT JOIN active_event_health aeh ON aeh.source_instance_id=si.id AND aeh.stream_id=required.stream_id
+	CROSS JOIN ingest_health ingest
+	ORDER BY si.source_type,si.id,required.stream_id`
+
+// SourceReadinessHealth returns the same freshness/version/projection evidence
+// used by SourceHealth plus only active pending/dead event state. Its query can
+// be satisfied entirely from source_ingest_events_readiness_active_idx, so a
+// large waiting/parked backlog cannot make /readyz scan the event table.
+func (s *Store) SourceReadinessHealth(ctx context.Context, policy SourceFreshnessPolicy) (SourceReadinessHealth, error) {
+	if !policy.enabled() {
+		return SourceReadinessHealth{}, errors.New("source freshness policy is not configured")
+	}
+	rows, err := s.pool.Query(ctx, sourceReadinessHealthQuery)
+	if err != nil {
+		return SourceReadinessHealth{}, fmt.Errorf("query source readiness health: %w", err)
+	}
+	defer rows.Close()
+	health := SourceReadinessHealth{Report: SourceHealthReport{Ready: true, Items: make([]SourceStreamHealth, 0, 10)}}
+	enabledTypes := map[domain.SourceType]bool{}
+	for rows.Next() {
+		var item SourceStreamHealth
+		var ingest SourceIngestHealth
+		if err = rows.Scan(&item.SourceInstanceID, &item.SourceType, &item.SourceName,
+			&item.SourceEnabled, &item.StreamID, &item.Sequence,
+			&item.ApprovedRuntimeVersion, &item.ObservedRuntimeVersion,
+			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
+			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents,
+			&ingest.Pending, &ingest.Dead, &ingest.OldestPending); err != nil {
+			return SourceReadinessHealth{}, err
+		}
+		if item.LastAcceptedAt.Equal(time.Unix(0, 0).UTC()) {
+			item.LastAcceptedAt = time.Time{}
+		}
+		if item.LastNonemptyBatchAt.Equal(time.Unix(0, 0).UTC()) {
+			item.LastNonemptyBatchAt = time.Time{}
+		}
+		if item.EconomicWatermarkAt.Equal(time.Unix(0, 0).UTC()) {
+			item.EconomicWatermarkAt = time.Time{}
+		}
+		if ingest.OldestPending.Equal(time.Unix(0, 0).UTC()) {
+			ingest.OldestPending = time.Time{}
+		}
+		health.Ingest = ingest
+		evaluateSourceStreamHealth(&item, policy)
+		if item.SourceEnabled {
+			enabledTypes[item.SourceType] = true
+			if !item.Ready {
+				health.Report.Ready = false
+			}
+		}
+		health.Report.Items = append(health.Report.Items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return SourceReadinessHealth{}, err
+	}
+	if !enabledTypes[domain.SourceSub2API] || !enabledTypes[domain.SourceNewAPI] {
+		health.Report.Ready = false
+	}
+	return health, nil
 }
 
 // SourceHealth returns one row for both mandatory streams of every configured

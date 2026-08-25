@@ -91,7 +91,10 @@ func TestVerifyFSRejectsUnknownDatabaseMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	migrations := os.DirFS("../../migrations")
+	// This fixture runs in a private schema. Migration 0013 deliberately binds
+	// its production catalog assertion to public and has a dedicated public-
+	// schema integration test below.
+	migrations := migrationMapBeforeReadinessIndex(t)
 	if err = UpFS(ctx, pool, migrations); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +111,7 @@ func TestVerifyFSRejectsUnknownDatabaseMigration(t *testing.T) {
 	if err = VerifyFS(ctx, pool, migrations); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatalf("unknown database migration error=%v", err)
 	}
-	unknownGate := migrationMapFS(t)
+	unknownGate := migrationMapBeforeReadinessIndex(t)
 	unknownGate["9998_should_not_run.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE migration_unknown_gate_probe(id integer);\n")}
 	if err = UpFS(ctx, pool, unknownGate); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatalf("UpFS unknown database migration error=%v", err)
@@ -123,7 +126,7 @@ func TestVerifyFSRejectsUnknownDatabaseMigration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `DELETE FROM schema_migrations WHERE name='9999_unknown.sql'`); err != nil {
 		t.Fatal(err)
 	}
-	broken := migrationMapFS(t)
+	broken := migrationMapBeforeReadinessIndex(t)
 	broken["9998_atomic_failure.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE migration_atomic_probe(id integer);\nSELECT definitely_missing_column FROM migration_atomic_probe;\n")}
 	if err = UpFS(ctx, pool, broken); err == nil || !strings.Contains(err.Error(), "9998_atomic_failure.sql") {
 		t.Fatalf("broken migration error=%v", err)
@@ -198,7 +201,7 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	all := migrationMapFS(t)
+	all := migrationMapBeforeReadinessIndex(t)
 	delete(all, "0009_consumption_eligibility_ledger.sql")
 	delete(all, "0010_eligibility_freeze_operations.sql")
 	delete(all, "0011_invoice_eligibility_policy.sql")
@@ -220,7 +223,7 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 			t.Fatal(err)
 		}
 	}
-	withNine := migrationMapFS(t)
+	withNine := migrationMapBeforeReadinessIndex(t)
 	delete(withNine, "0010_eligibility_freeze_operations.sql")
 	delete(withNine, "0011_invoice_eligibility_policy.sql")
 	delete(withNine, "0012_economic_projection_contract_v4.sql")
@@ -280,7 +283,7 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	throughTen := migrationMapFS(t)
+	throughTen := migrationMapBeforeReadinessIndex(t)
 	delete(throughTen, "0011_invoice_eligibility_policy.sql")
 	delete(throughTen, "0012_economic_projection_contract_v4.sql")
 	if err = UpFS(ctx, pool, throughTen); err != nil {
@@ -301,7 +304,7 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	all := migrationMapFS(t)
+	all := migrationMapBeforeReadinessIndex(t)
 	err = UpFS(ctx, pool, all)
 	if err == nil || !strings.Contains(err.Error(), "empty pre-launch financial ledger") {
 		t.Fatalf("populated-ledger migration error=%v", err)
@@ -332,7 +335,7 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 		ENABLE TRIGGER source_cutover_manifests_immutable`); err != nil {
 		t.Fatal(err)
 	}
-	throughEleven := migrationMapFS(t)
+	throughEleven := migrationMapBeforeReadinessIndex(t)
 	delete(throughEleven, "0012_economic_projection_contract_v4.sql")
 	if err = UpFS(ctx, pool, throughEleven); err != nil {
 		t.Fatal(err)
@@ -453,6 +456,219 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 	}
 }
 
+func TestSourceReadinessActiveIndexMigrationCatalogContract(t *testing.T) {
+	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = pool.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	beforeReadiness := migrationMapBeforeReadinessIndex(t)
+	all := migrationMapFS(t)
+	resetBeforeReadiness := func(st *testing.T) {
+		st.Helper()
+		if _, resetErr := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); resetErr != nil {
+			st.Fatal(resetErr)
+		}
+		if resetErr := UpFS(ctx, pool, beforeReadiness); resetErr != nil {
+			st.Fatal(resetErr)
+		}
+	}
+	assertRecorded := func(st *testing.T, want int) {
+		st.Helper()
+		var recorded int
+		recordErr := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations
+			WHERE name='0013_source_readiness_active_index.sql'`).Scan(&recorded)
+		if recordErr != nil || recorded != want {
+			st.Fatalf("readiness migration record count=%d want=%d err=%v", recorded, want, recordErr)
+		}
+	}
+	assertExact := func(st *testing.T) {
+		st.Helper()
+		var exact bool
+		exactErr := pool.QueryRow(ctx, sourceReadinessIndexCatalogContractSQL).Scan(&exact)
+		if exactErr != nil || !exact {
+			st.Fatalf("readiness index catalog exact=%t err=%v", exact, exactErr)
+		}
+	}
+	assertMissing := func(st *testing.T) {
+		st.Helper()
+		var missing bool
+		missingErr := pool.QueryRow(ctx, `SELECT pg_catalog.to_regclass(
+			'public.source_ingest_events_readiness_active_idx') IS NULL`).Scan(&missing)
+		if missingErr != nil || !missing {
+			st.Fatalf("readiness index missing=%t err=%v", missing, missingErr)
+		}
+		assertRecorded(st, 0)
+	}
+	applyMustRequireConcurrent := func(st *testing.T) {
+		st.Helper()
+		applyErr := UpFS(ctx, pool, all)
+		if applyErr == nil || !strings.Contains(applyErr.Error(),
+			"must be prebuilt externally with CREATE INDEX CONCURRENTLY before migration") {
+			st.Fatalf("populated missing-index migration error=%v", applyErr)
+		}
+		assertMissing(st)
+	}
+
+	t.Run("exact prebuilt avoids table lock", func(t *testing.T) {
+		resetBeforeReadiness(t)
+		if _, err = pool.Exec(ctx, `
+			CREATE INDEX source_ingest_events_readiness_active_idx
+			ON public.source_ingest_events(source_instance_id,stream_id,processing_status,created_at)
+			WHERE processing_status IN ('queued','failed','processing','dead')`); err != nil {
+			t.Fatal(err)
+		}
+		locker, acquireErr := pool.Acquire(ctx)
+		if acquireErr != nil {
+			t.Fatal(acquireErr)
+		}
+		defer locker.Release()
+		lockTx, beginErr := locker.Begin(ctx)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		defer func() { _ = lockTx.Rollback(context.Background()) }()
+		if _, lockErr := lockTx.Exec(ctx, `LOCK TABLE public.source_ingest_events IN ROW EXCLUSIVE MODE`); lockErr != nil {
+			t.Fatal(lockErr)
+		}
+		shortCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		started := time.Now()
+		applyErr := UpFS(shortCtx, pool, all)
+		elapsed := time.Since(started)
+		cancel()
+		if applyErr != nil {
+			t.Fatalf("exact prebuilt index blocked behind ROW EXCLUSIVE for %s: %v", elapsed, applyErr)
+		}
+		if elapsed >= 2*time.Second {
+			t.Fatalf("exact prebuilt migration exceeded short lock deadline: %s", elapsed)
+		}
+		assertRecorded(t, 1)
+		assertExact(t)
+	})
+
+	t.Run("wrong same-name relation fails closed", func(t *testing.T) {
+		resetBeforeReadiness(t)
+		if _, err = pool.Exec(ctx, `
+			CREATE INDEX source_ingest_events_readiness_active_idx
+			ON public.source_ingest_events(source_instance_id,stream_id,processing_status,created_at)
+			WHERE processing_status='dead'`); err != nil {
+			t.Fatal(err)
+		}
+		applyErr := UpFS(ctx, pool, all)
+		if applyErr == nil || !strings.Contains(applyErr.Error(), "source readiness active index catalog contract mismatch") {
+			t.Fatalf("wrong same-name readiness index migration error=%v", applyErr)
+		}
+		assertRecorded(t, 0)
+	})
+
+	t.Run("missing on nonempty or physically used table fails closed", func(t *testing.T) {
+		resetBeforeReadiness(t)
+		if _, err = pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name)
+			VALUES('10000000-0000-4000-8000-000000000013','sub2api','readiness-migration')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, `INSERT INTO source_ingest_state(source_instance_id,stream_id)
+			VALUES('10000000-0000-4000-8000-000000000013','identities')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, `INSERT INTO source_ingest_batches(
+			source_instance_id,stream_id,batch_id,sequence,body_hash,signing_key_id,record_count)
+			VALUES('10000000-0000-4000-8000-000000000013','identities',
+			'13000000-0000-4000-8000-000000000001',1,repeat('a',64),'migration-test',1)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, `INSERT INTO source_ingest_events(
+			source_instance_id,stream_id,event_id,first_batch_id,entity_type,operation,
+			payload_hash,payload_ciphertext,observed_at)
+			VALUES('10000000-0000-4000-8000-000000000013','identities',
+			'13000000-0000-4000-8000-000000000002','13000000-0000-4000-8000-000000000001',
+			'identity_binding','upsert',repeat('b',64),decode(repeat('11',16),'hex'),now())`); err != nil {
+			t.Fatal(err)
+		}
+		applyMustRequireConcurrent(t)
+		if _, err = pool.Exec(ctx, `DELETE FROM source_ingest_events`); err != nil {
+			t.Fatal(err)
+		}
+		var rows, physicalBytes int64
+		if err = pool.QueryRow(ctx, `SELECT count(*),pg_catalog.pg_relation_size(
+			'public.source_ingest_events'::pg_catalog.regclass) FROM source_ingest_events`).Scan(&rows, &physicalBytes); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 0 || physicalBytes <= 0 {
+			t.Fatalf("deleted event fixture rows=%d physical_bytes=%d", rows, physicalBytes)
+		}
+		applyMustRequireConcurrent(t)
+	})
+
+	t.Run("missing on logically and physically empty install creates exact index", func(t *testing.T) {
+		resetBeforeReadiness(t)
+		var rows, physicalBytes int64
+		if err = pool.QueryRow(ctx, `SELECT count(*),pg_catalog.pg_relation_size(
+			'public.source_ingest_events'::pg_catalog.regclass) FROM source_ingest_events`).Scan(&rows, &physicalBytes); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 0 || physicalBytes != 0 {
+			t.Fatalf("new-install event table rows=%d physical_bytes=%d", rows, physicalBytes)
+		}
+		if err = UpFS(ctx, pool, all); err != nil {
+			t.Fatalf("empty-install readiness index creation failed: %v", err)
+		}
+		assertRecorded(t, 1)
+		assertExact(t)
+	})
+
+	var serverVersion int
+	if err = pool.QueryRow(ctx, `SELECT current_setting('server_version_num')::integer`).Scan(&serverVersion); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("source readiness index catalog contract passed on PostgreSQL server_version_num=%d", serverVersion)
+}
+
+const sourceReadinessIndexCatalogContractSQL = `
+	SELECT EXISTS (
+		SELECT 1
+		FROM pg_catalog.pg_index AS i
+		JOIN pg_catalog.pg_class AS idx ON idx.oid=i.indexrelid
+		JOIN pg_catalog.pg_namespace AS idx_ns ON idx_ns.oid=idx.relnamespace
+		JOIN pg_catalog.pg_am AS am ON am.oid=idx.relam
+		JOIN pg_catalog.pg_class AS tbl ON tbl.oid=i.indrelid
+		JOIN pg_catalog.pg_namespace AS tbl_ns ON tbl_ns.oid=tbl.relnamespace
+		WHERE idx.relname='source_ingest_events_readiness_active_idx'
+		  AND idx_ns.nspname='public'
+		  AND idx.relkind='i'
+		  AND am.amname='btree'
+		  AND tbl.relname='source_ingest_events'
+		  AND tbl_ns.nspname='public'
+		  AND tbl.relkind='r'
+		  AND i.indrelid='public.source_ingest_events'::pg_catalog.regclass
+		  AND i.indnatts=4
+		  AND i.indnkeyatts=4
+		  AND i.indexprs IS NULL
+		  AND pg_catalog.pg_get_indexdef(idx.oid,1,true)='source_instance_id'
+		  AND pg_catalog.pg_get_indexdef(idx.oid,2,true)='stream_id'
+		  AND pg_catalog.pg_get_indexdef(idx.oid,3,true)='processing_status'
+		  AND pg_catalog.pg_get_indexdef(idx.oid,4,true)='created_at'
+		  AND i.indpred IS NOT NULL
+		  AND pg_catalog.regexp_replace(
+				pg_catalog.pg_get_expr(i.indpred,i.indrelid,false),
+				'\s+','','g'
+			  )='(processing_status=ANY(ARRAY[''queued''::text,''failed''::text,''processing''::text,''dead''::text]))'
+		  AND NOT i.indisunique
+		  AND NOT i.indisprimary
+		  AND NOT i.indisexclusion
+		  AND i.indisvalid
+		  AND i.indisready
+		  AND i.indislive
+	)`
+
 func migrationMapFS(t *testing.T) fstest.MapFS {
 	t.Helper()
 	entries, err := os.ReadDir("../../migrations")
@@ -470,5 +686,13 @@ func migrationMapFS(t *testing.T) fstest.MapFS {
 		}
 		files[entry.Name()] = &fstest.MapFile{Data: body}
 	}
+	return files
+}
+
+func migrationMapBeforeReadinessIndex(t *testing.T) fstest.MapFS {
+	t.Helper()
+	files := migrationMapFS(t)
+	delete(files, "0013_source_readiness_active_index.sql")
+	delete(files, "0014_balance_carry_forward_proof.sql")
 	return files
 }

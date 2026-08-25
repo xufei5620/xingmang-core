@@ -109,6 +109,10 @@ func (s *Service) SourceHealth(ctx context.Context) (postgresstore.SourceHealthR
 	return s.store.SourceHealth(ctx, s.sourceFreshnessPolicy())
 }
 
+func (s *Service) SourceReadinessHealth(ctx context.Context) (postgresstore.SourceReadinessHealth, error) {
+	return s.store.SourceReadinessHealth(ctx, s.sourceFreshnessPolicy())
+}
+
 func (s *Service) ProcessSourceEvent(ctx context.Context, claim postgresstore.SourceEventClaim) error {
 	plaintext, err := s.keys.Decrypt(claim.PayloadCiphertext,
 		ingestEventAAD(claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.PayloadHash))

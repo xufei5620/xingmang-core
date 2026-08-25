@@ -175,6 +175,251 @@ After any code or deployment change, the prior RC evidence is historical and a
 new image gate must be generated before containers are recreated. Never mix an
 older API container with a newer web/scanner container under one release.
 
+### 3.1 RC39 populated readiness-index roll-forward
+
+This is a **production change approval** procedure for the existing populated
+`public.source_ingest_events` table. It does not authorize any change to
+Sub2API or upstream New API, and it does not authorize restarting a deliberately
+stopped source agent.
+
+#### Stage 0: backlog freeze, recoverability and capacity hard gate
+
+Stage 0 must pass before the immutable roll-forward order begins. Missing,
+stale or unsigned evidence is NO-GO.
+
+- Prove `sub2api-balances` and `newapi-balances` remain stopped with two
+  timestamped `docker compose ... ps --status running -q` snapshots at least
+  five minutes apart, the second immediately before the operator. Both outputs
+  must be empty. Record `ps -a` state as well, and compare receiver counts and
+  maximum `created_at` for `stream_id='balances'`; they must not advance between
+  snapshots. Do not start either balance container during backup restoration or
+  this roll-forward.
+- Freeze account linking for the whole window: keep the public menu/edge closed,
+  do not run an account-binding canary, and do not invoke any dependency batch
+  wakeup. Record `external_accounts`, `external_account_binding_proofs`, and
+  `source_ingest_events` status/dependency counts before backup and immediately
+  before the operator. Any new external account, verified binding proof, or
+  bulk transition out of `parked_identity` is NO-GO. This freeze remains until
+  the separate parked-backlog cutover is approved.
+- Create a fresh encrypted and Ed25519-signed full backup with the existing
+  `deploy/backup/backup.sh` package using `BACKUP_SCHEMA_MODE=post-0011` and
+  `BACKUP_LOCAL_KEYCLOAK=true`. It must contain the invoice PostgreSQL dump,
+  documents, all ten source-state directories plus both cutover pairs,
+  source/config metadata, and the local Keycloak dump. Independently verify the
+  signed manifest and complete `deploy/backup/restore-drill.sh` into an isolated
+  stack. The restore proof and off-host copy/ACK must be no older than two hours
+  when the operator begins. This is the pre-RC39 database backup: its exact
+  `schema_migrations` set must end at 0012, both
+  `0013_source_readiness_active_index.sql` and
+  `0014_balance_carry_forward_proof.sql` must be absent, and both new
+  carry-forward tables must be absent in the restored copy. The production
+  migration set must still match that backup evidence when the operator begins.
+  A component omission, signature failure or partial restore is NO-GO.
+- Persist a capacity TSV before approval containing
+  `pg_database_size(current_database())`, `pg_table_size`,
+  `pg_indexes_size` and `pg_total_relation_size` for
+  `public.source_ingest_events`, the same sizes for any existing target index,
+  total bytes from `pg_ls_waldir()`, `pg_stat_archiver`,
+  `pg_replication_slots`, and `pg_stat_replication`. Also record byte and inode
+  availability from `df` for the PostgreSQL volume mount, Docker data root,
+  `RECORD_ROOT`, and `/tmp`; record the exact host and PostgreSQL timestamps.
+- Capacity GO requires PostgreSQL-volume free bytes to be at least the greater
+  of 20 GiB or `2 * pg_total_relation_size(source_ingest_events) +
+  2 * pg_wal_bytes`; `/tmp` and `RECORD_ROOT` must each have at least 5 GiB free,
+  and every recorded filesystem must have at least 10 percent free inodes. If
+  archiving, slots or replicas are disabled, record that fact explicitly. If
+  enabled, there may be no unresolved archiver failure, inactive slot, replay
+  lag over 60 seconds, or retained/replay WAL lag over 512 MiB. Any unknown,
+  NULL where evidence is expected, threshold failure, or capacity change before
+  operator start is NO-GO.
+
+The order is immutable: concurrent index operator, persistent evidence
+signature and independent signature verification, exact migration 0013 and
+0014 registration, owner-applied runtime-role hardening and privilege proof,
+then roll forward to the new invoice API image. Do not combine or reorder these
+stages. In populated production the migration's exact-index fast-path `DO`
+block must find the already-valid index and return after catalog reads. Its
+ordinary `CREATE INDEX` branch is restricted to a logically and physically
+empty installation. A missing, wrong, invalid, not-ready or not-live index on
+the populated table must fail before `schema_migrations` is updated.
+
+Install the following files from the signed RC39 source tree beside the
+reviewed production Compose file and set both shell files to `root:root` mode
+`0700`:
+
+- `deploy/postgres/apply-source-readiness-index-concurrently.sh`;
+- `deploy/postgres/verify-source-readiness-index.sh`.
+
+The release manifest must bind both hashes and the hash of
+`scripts/verify-source-readiness-index-operator.ps1`. Set every mandatory value
+below before invoking the operator. `EXPECTED_API_IMAGE_ID` is the exact image
+ID of the currently running old invoice API, captured and approved before the
+window; a tag is not acceptable. Script hashes must come from the signed RC39
+manifest, not from an unreviewed server copy.
+
+```bash
+export SOURCE_READINESS_INDEX_CONFIRMED=YES
+export PRODUCTION_ENV_FILE=/root/invoice-system/app/releases/<exact-current-release>/.env.production
+export EXPECTED_API_IMAGE_ID='sha256:<approved-running-old-invoice-api-image-id>'
+export EXPECTED_OPERATOR_SHA256='<signed-rc39-operator-sha256>'
+export EXPECTED_VERIFIER_SHA256='<signed-rc39-verifier-sha256>'
+export RECORD_ROOT=/root/invoice-system/deployment-records
+
+deploy/postgres/apply-source-readiness-index-concurrently.sh
+```
+
+The operator uses a verified root-owned `0700` directory under `/run/lock` and
+rejects symlink, non-regular and owner/mode drift for its lock path. It refuses
+to run after migration 0013 is registered and never drops or repairs a
+same-name index. After `CREATE INDEX CONCURRENTLY`, it runs `ANALYZE`, exact
+catalog assertions, a read-only plan and bounded `EXPLAIN ANALYZE BUFFERS`.
+PostgreSQL `Execution Time` must be at most 2000 ms and neither plan may contain
+a sequential scan of `source_ingest_events`. The old API container
+ID/image/start time must remain unchanged and `/healthz` must pass before and
+after; `schema_migrations` must remain byte-for-byte unchanged.
+
+Copy the exact manifest path printed by the operator into
+`EVIDENCE_MANIFEST`; never select it using `ls -t`, a wildcard or an unreviewed
+timestamp. Sign it with the approved namespace-bound evidence key and
+independently verify the signature before changing `INVOICE_IMAGE_TAG` or
+running the migrator:
+
+```bash
+export EVIDENCE_MANIFEST=/root/invoice-system/deployment-records/<exact-record>/RC39-SOURCE-READINESS-INDEX.sha256
+export BACKUP_SIGNING_KEY_FILE=/root/invoice-system/incoming/rc22/backup-signing-key
+export BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/incoming/rc22/backup-allowed-signers
+
+ssh-keygen -Y sign -q -f "$BACKUP_SIGNING_KEY_FILE" \
+  -n solov-invoice-backup-v1 "$EVIDENCE_MANIFEST"
+ssh-keygen -Y verify -f "$BACKUP_ALLOWED_SIGNERS_FILE" -I invoice-backup \
+  -n solov-invoice-backup-v1 -s "$EVIDENCE_MANIFEST.sig" <"$EVIDENCE_MANIFEST"
+```
+
+Retain the manifest, signature, catalog dump, plans, actual execution
+milliseconds, script/config hashes and old API identity together. Missing
+evidence is NO-GO. After the signature passes, update only the invoice release
+tag in the reviewed production environment to the exact RC39 tag and run the
+RC39 tools image. The exact-index fast path must succeed. The database migration
+set must then exactly equal every `*.sql` file in the signed RC39 migration
+directory, including exactly one checksum-bound row for each of 0013 and 0014:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml --profile tools \
+  run --rm --pull never migrate
+
+export RC39_POST_MIGRATION_EVIDENCE_DIR="$RECORD_ROOT/<exact-rc39-post-migration-record>"
+install -d -m 0700 "$RC39_POST_MIGRATION_EVIDENCE_DIR"
+(
+  cd backend/migrations
+  for migration in *.sql; do
+    printf '%s|%s\n' "$migration" "$(sha256sum "$migration" | cut -d' ' -f1)"
+  done | LC_ALL=C sort
+) >"$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-expected.tsv"
+
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT name,checksum FROM public.schema_migrations ORDER BY name" \
+  >"$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
+
+cmp -s "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-expected.tsv" \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
+grep -Fx "0013_source_readiness_active_index.sql|$(sha256sum backend/migrations/0013_source_readiness_active_index.sql | cut -d' ' -f1)" \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
+grep -Fx "0014_balance_carry_forward_proof.sql|$(sha256sum backend/migrations/0014_balance_carry_forward_proof.sql | cut -d' ' -f1)" \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
+```
+
+Before API startup, use `invoice_owner` to replay the signed RC39 runtime-role
+policy. Then prove that `invoice_app` has exactly `SELECT, INSERT` on the two new
+tables—no effective `UPDATE`, `DELETE` or `TRUNCATE` and no other direct table
+grant. Also prove `schema_migrations` remains exact after the permission
+transaction and that `invoice_app` retains SELECT-only access to it:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice \
+  <deploy/postgres/harden-runtime-role.sql
+
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT table_name,
+             has_table_privilege('invoice_app',format('public.%I',table_name),'SELECT'),
+             has_table_privilege('invoice_app',format('public.%I',table_name),'INSERT'),
+             has_table_privilege('invoice_app',format('public.%I',table_name),'UPDATE'),
+             has_table_privilege('invoice_app',format('public.%I',table_name),'DELETE'),
+             has_table_privilege('invoice_app',format('public.%I',table_name),'TRUNCATE'),
+             has_table_privilege('invoice_app',format('public.%I',table_name),'REFERENCES'),
+             has_table_privilege('invoice_app',format('public.%I',table_name),'TRIGGER')
+      FROM (VALUES ('balance_carry_forward_evaluations'),('balance_carry_forward_proofs')) AS checked(table_name)
+      ORDER BY table_name" \
+  >"$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-effective-privileges.tsv"
+
+grep -Fx 'balance_carry_forward_evaluations|t|t|f|f|f|f|f' \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-effective-privileges.tsv"
+grep -Fx 'balance_carry_forward_proofs|t|t|f|f|f|f|f' \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-effective-privileges.tsv"
+test "$(wc -l <"$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-effective-privileges.tsv")" -eq 2
+
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT table_name,string_agg(privilege_type,',' ORDER BY privilege_type)
+      FROM information_schema.role_table_grants
+      WHERE grantee='invoice_app' AND table_schema='public'
+        AND table_name IN ('balance_carry_forward_proofs','balance_carry_forward_evaluations')
+      GROUP BY table_name ORDER BY table_name" \
+  >"$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-direct-grants.tsv"
+
+grep -Fx 'balance_carry_forward_evaluations|INSERT,SELECT' \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-direct-grants.tsv"
+grep -Fx 'balance_carry_forward_proofs|INSERT,SELECT' \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-direct-grants.tsv"
+test "$(wc -l <"$RC39_POST_MIGRATION_EVIDENCE_DIR/carry-forward-direct-grants.tsv")" -eq 2
+
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT has_table_privilege('invoice_app','public.schema_migrations','SELECT'),
+             has_table_privilege('invoice_app','public.schema_migrations','INSERT'),
+             has_table_privilege('invoice_app','public.schema_migrations','UPDATE'),
+             has_table_privilege('invoice_app','public.schema_migrations','DELETE'),
+             has_table_privilege('invoice_app','public.schema_migrations','TRUNCATE'),
+             has_table_privilege('invoice_app','public.schema_migrations','REFERENCES'),
+             has_table_privilege('invoice_app','public.schema_migrations','TRIGGER')" \
+  | grep -Fx 't|f|f|f|f|f|f'
+
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT name,checksum FROM public.schema_migrations ORDER BY name" \
+  >"$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-after-permissions.tsv"
+cmp -s "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-expected.tsv" \
+  "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-after-permissions.tsv"
+```
+
+Require exactly two lines in each carry-forward privilege evidence file, hash
+and sign the complete post-migration evidence directory, and independently
+verify it. Any extra grant or migration, missing 0013/0014 checksum, permission
+failure, or migration-set drift is NO-GO. Only then roll forward the invoice
+API. This command does not refer to, restart or modify the upstream New API
+service:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml up -d --no-build --no-deps api
+```
+
+Verify the new container has the exact signed RC39 image ID and both
+`/healthz` and the indexed `/readyz` path behave as expected. Once migration
+0013 or 0014 is registered, the prior invoice API image is operationally forbidden:
+never restart, recreate or roll back to it against the upgraded writable
+database. If RC39 cannot become healthy, keep ingress closed and forward-fix,
+or restore the complete matched pre-RC39 backup into an isolated stack.
+
 ## 4. Host directories and secrets
 
 **Production change approval.** Create a new directory; do not reuse an
@@ -1428,6 +1673,10 @@ keys. After traffic is accepted:
 - preserve current database/documents/audit as incident evidence;
 - application images may be rolled back only if their declared migration
   compatibility includes the current schema;
+- after migration 0013 or 0014 is registered, never roll back to the pre-RC39 invoice
+  API image: its readiness path scans the parked-event backlog. Keep ingress
+  closed and forward-fix, or restore the complete matched pre-RC39 snapshot in
+  an isolated stack;
 - otherwise restore the matched database + document backup together into a new
   isolated stack, validate, then switch the vhost;
 - after all ten source agents are stopped, disconnect the two upstream

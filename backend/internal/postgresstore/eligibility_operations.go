@@ -250,14 +250,28 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 	}
 	var evaluation string
 	err = tx.QueryRow(ctx, `
-		SELECT COALESCE(e.evaluation_status,'') FROM (
-			SELECT b.id FROM balance_reconciliation_checkpoints b
-			JOIN source_account_eligibility_state eas ON eas.external_account_id=b.external_account_id
-			WHERE b.external_account_id=$1 AND b.checkpoint_kind='reconciliation' AND b.as_of<=eas.finalized_through
-			ORDER BY b.as_of DESC,b.id DESC LIMIT 1
+		SELECT COALESCE(latest.evaluation_status,'') FROM (
+			SELECT checkpoint.as_of,checkpoint.source_sequence,checkpoint.id,
+				(SELECT evaluation.evaluation_status FROM balance_checkpoint_evaluations evaluation
+				 WHERE evaluation.checkpoint_id=checkpoint.id
+				 ORDER BY evaluation.projection_version DESC LIMIT 1) AS evaluation_status
+			FROM balance_reconciliation_checkpoints checkpoint
+			JOIN source_account_eligibility_state state
+			  ON state.external_account_id=checkpoint.external_account_id
+			WHERE checkpoint.external_account_id=$1
+			  AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of<=state.finalized_through
+			UNION ALL
+			SELECT proof.as_of,proof.source_sequence,proof.id,
+				(SELECT evaluation.evaluation_status FROM balance_carry_forward_evaluations evaluation
+				 WHERE evaluation.proof_id=proof.id
+				 ORDER BY evaluation.projection_version DESC LIMIT 1)
+			FROM balance_carry_forward_proofs proof
+			JOIN source_account_eligibility_state state
+			  ON state.external_account_id=proof.external_account_id
+			WHERE proof.external_account_id=$1 AND proof.as_of<=state.finalized_through
 		) latest
-		LEFT JOIN LATERAL (SELECT evaluation_status FROM balance_checkpoint_evaluations e
-			WHERE e.checkpoint_id=latest.id ORDER BY e.projection_version DESC LIMIT 1) e ON true`, accountID).Scan(&evaluation)
+		ORDER BY latest.as_of DESC,latest.source_sequence DESC,latest.id DESC LIMIT 1`, accountID).Scan(&evaluation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EligibilityFreeze{}, domain.ErrInvalidState
 	}

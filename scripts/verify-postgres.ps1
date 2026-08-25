@@ -130,8 +130,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'runtime role cannot append audit events' }
         docker exec -e PGPASSWORD=invoice_app_test_only $containerName psql -U invoice_app -d $databaseName -v ON_ERROR_STOP=1 -c "INSERT INTO oidc_backchannel_logout_events(id,issuer_hash,jti_hash,sid_hash,token_issued_at,token_expires_at,received_at,revoked_session_count,request_id) VALUES('00000000-0000-4000-8000-000000000098',repeat('a',64),repeat('b',64),repeat('c',64),now()-interval '1 minute',now()+interval '1 minute',now(),0,'permission-test')" *> $null
         if ($LASTEXITCODE -ne 0) { throw 'runtime role cannot append OIDC logout replay records' }
-        $privileges = (docker exec -e PGPASSWORD=invoice_app_test_only $containerName psql -U invoice_app -d $databaseName -At -F '|' -c "SELECT has_table_privilege(current_user,'audit_events','INSERT'),has_table_privilege(current_user,'audit_events','UPDATE'),has_table_privilege(current_user,'audit_events','DELETE'),has_table_privilege(current_user,'oidc_backchannel_logout_events','UPDATE'),has_table_privilege(current_user,'oidc_backchannel_logout_events','DELETE'),has_table_privilege(current_user,'source_events','UPDATE'),has_table_privilege(current_user,'source_ingest_batches','UPDATE'),has_table_privilege(current_user,'payment_candidate_reviews','UPDATE'),has_table_privilege(current_user,'source_usage_events','UPDATE'),has_table_privilege(current_user,'source_credit_events','UPDATE'),has_table_privilege(current_user,'balance_reconciliation_checkpoints','UPDATE'),has_table_privilege(current_user,'consumption_allocations','UPDATE'),has_table_privilege(current_user,'invoice_eligibility_policy','SELECT'),has_table_privilege(current_user,'invoice_eligibility_policy','UPDATE'),has_schema_privilege(current_user,'public','CREATE'),has_table_privilege(current_user,'schema_migrations','SELECT'),has_database_privilege(current_user,current_database(),'TEMP'),r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,r.rolinherit,r.rolconnlimit,EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) FROM pg_roles r WHERE r.rolname=current_user").Trim()
-        if ($LASTEXITCODE -ne 0 -or $privileges -ne 't|f|f|f|f|f|f|f|f|f|f|f|t|f|f|t|f|f|f|f|f|f|f|20|f') { throw "unexpected runtime role privileges: $privileges" }
+        $privileges = (docker exec -e PGPASSWORD=invoice_app_test_only $containerName psql -U invoice_app -d $databaseName -At -F '|' -c "SELECT has_table_privilege(current_user,'audit_events','INSERT'),has_table_privilege(current_user,'audit_events','UPDATE'),has_table_privilege(current_user,'audit_events','DELETE'),has_table_privilege(current_user,'oidc_backchannel_logout_events','UPDATE'),has_table_privilege(current_user,'oidc_backchannel_logout_events','DELETE'),has_table_privilege(current_user,'source_events','UPDATE'),has_table_privilege(current_user,'source_ingest_batches','UPDATE'),has_table_privilege(current_user,'payment_candidate_reviews','UPDATE'),has_table_privilege(current_user,'source_usage_events','UPDATE'),has_table_privilege(current_user,'source_credit_events','UPDATE'),has_table_privilege(current_user,'balance_reconciliation_checkpoints','UPDATE'),has_table_privilege(current_user,'balance_carry_forward_proofs','UPDATE'),has_table_privilege(current_user,'balance_carry_forward_evaluations','UPDATE'),has_table_privilege(current_user,'consumption_allocations','UPDATE'),has_table_privilege(current_user,'invoice_eligibility_policy','SELECT'),has_table_privilege(current_user,'invoice_eligibility_policy','UPDATE'),has_schema_privilege(current_user,'public','CREATE'),has_table_privilege(current_user,'schema_migrations','SELECT'),has_database_privilege(current_user,current_database(),'TEMP'),r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,r.rolinherit,r.rolconnlimit,EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) FROM pg_roles r WHERE r.rolname=current_user").Trim()
+        if ($LASTEXITCODE -ne 0 -or $privileges -ne 't|f|f|f|f|f|f|f|f|f|f|f|f|f|t|f|f|t|f|f|f|f|f|f|f|20|f') { throw "unexpected runtime role privileges: $privileges" }
         docker exec -e PGPASSWORD=invoice_app_test_only $containerName psql -U invoice_app -d $databaseName -v ON_ERROR_STOP=1 -c "SELECT eligibility_start_at,policy_version FROM invoice_eligibility_policy WHERE singleton_id=1" *> $null
         if ($LASTEXITCODE -ne 0) { throw 'runtime role cannot read immutable invoice eligibility policy' }
         docker exec $containerName psql -U $databaseUser -d $databaseName -v ON_ERROR_STOP=1 -c "INSERT INTO source_instances(id,source_type,name,runtime_version) VALUES('f1000000-0000-4000-8000-000000000001','sub2api','runtime-policy-negative','fixture-runtime'),('f1000000-0000-4000-8000-000000000002','sub2api','runtime-policy-positive','runtime-test') ON CONFLICT(id) DO NOTHING" *> $null
@@ -241,6 +241,29 @@ try {
         if (-not $hostReady) { Start-Sleep -Milliseconds 250 }
     } while (-not $hostReady -and (Get-Date) -lt $hostDeadline)
     if (-not $hostReady) { throw 'isolated PostgreSQL 15 host port did not become reachable' }
+
+	# Migration 0013 intentionally uses PostgreSQL catalogs as a fail-closed
+	# structural contract. Exercise the exact same migration on the oldest
+	# supported PostgreSQL family as well as the PostgreSQL 18 invoice test above.
+	Push-Location (Join-Path $projectRoot 'backend')
+	try {
+		$env:INVOICE_TEST_DATABASE_URL = "postgres://source_contract_test:source_contract_test_only@127.0.0.1:${hostPort}/source_contract_test?sslmode=disable"
+		$readinessIndexContractSucceeded = $false
+		for ($attempt = 1; $attempt -le 10; $attempt++) {
+			go test -race ./internal/migrate -run '^TestSourceReadinessActiveIndexMigrationCatalogContract$' -count=1
+			if ($LASTEXITCODE -eq 0) {
+				$readinessIndexContractSucceeded = $true
+				break
+			}
+			Start-Sleep -Seconds 1
+		}
+		if (-not $readinessIndexContractSucceeded) { throw 'PostgreSQL 15 source readiness index catalog contract failed after host-port retries' }
+	} finally {
+		Remove-Item Env:INVOICE_TEST_DATABASE_URL -ErrorAction SilentlyContinue
+		Pop-Location
+	}
+	docker exec $source15Container psql -U source_contract_test -d source_contract_test -v ON_ERROR_STOP=1 -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public" *> $null
+	if ($LASTEXITCODE -ne 0) { throw 'failed to reset PostgreSQL 15 after readiness index catalog contract' }
 
     Push-Location (Join-Path $projectRoot 'agents')
     try {

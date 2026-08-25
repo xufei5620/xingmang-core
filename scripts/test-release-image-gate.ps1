@@ -12,6 +12,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $idpCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
 $artifactVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
 $sourceVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
+$readinessIndexGate = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-source-readiness-index-operator.ps1')
 $keycloakProvisioningVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
 if (-not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}') -or
     $idpCompose.Contains('    image: invoice-keycloak:26.7.2') -or
@@ -20,6 +21,16 @@ if (-not $idpCompose.Contains('    image: invoice-keycloak:${INVOICE_IMAGE_TAG:?
     -not $sourceVerifier.Contains("Test-OrdinalStringEqual -Actual `$idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build'") -or
     -not $sourceVerifier.Contains("Test-OrdinalStringEqual -Actual `$idpBaseObject.services.keycloak.pull_policy -Expected 'never'")) {
     throw 'Keycloak production Compose can escape the common manifest-bound release image tag'
+}
+if (-not $sourceVerifier.Contains("& (Join-Path `$PSScriptRoot 'verify-source-readiness-index-operator.ps1')", [StringComparison]::Ordinal) -or
+    -not $gateSource.Contains('readinessIndexOperatorGateSha256 = Get-FileSha256Lower', [StringComparison]::Ordinal) -or
+    -not $gateSource.Contains('readinessIndexOperatorSha256 = Get-FileSha256Lower', [StringComparison]::Ordinal) -or
+    -not $gateSource.Contains('readinessIndexVerifierSha256 = Get-FileSha256Lower', [StringComparison]::Ordinal) -or
+    -not $artifactVerifier.Contains('manifest.tools.readinessIndexOperatorGateSha256', [StringComparison]::Ordinal) -or
+    -not $artifactVerifier.Contains('manifest.tools.readinessIndexOperatorSha256', [StringComparison]::Ordinal) -or
+    -not $artifactVerifier.Contains('manifest.tools.readinessIndexVerifierSha256', [StringComparison]::Ordinal) -or
+    -not $readinessIndexGate.Contains('readiness query execution exceeded the 2000ms hard limit', [StringComparison]::Ordinal)) {
+    throw 'RC39 readiness-index operator/verifier escaped the source or release artifact gates'
 }
 if ($keycloakProvisioningVerifier -notmatch 'tr -d ''\\r\\n''' -or
     $keycloakProvisioningVerifier -notmatch 'test "\$\(wc -l <"\$tmp"\)" -eq 1' -or

@@ -40,6 +40,9 @@ if ([string]$manifest.tools.scriptSha256 -cne (Get-FileSha256Lower -Path (Join-P
     [string]$manifest.tools.librarySha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')) -or
     [string]$manifest.tools.verifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')) -or
     [string]$manifest.tools.sourceVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify.ps1')) -or
+    [string]$manifest.tools.readinessIndexOperatorGateSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-source-readiness-index-operator.ps1')) -or
+    [string]$manifest.tools.readinessIndexOperatorSha256 -cne (Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\postgres\apply-source-readiness-index-concurrently.sh')) -or
+    [string]$manifest.tools.readinessIndexVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\postgres\verify-source-readiness-index.sh')) -or
     [string]$manifest.tools.keycloakRuntimeVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')) -or
     [string]$manifest.tools.keycloakProvisioningVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')) -or
     [string]$manifest.tools.keycloakProvisionerSha256 -cne (Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh'))) {

@@ -193,7 +193,7 @@ func integrationApplication(t *testing.T) (*Service, *postgresstore.Store, *muta
 	}
 	waitForTestPool(t, pool)
 	t.Cleanup(pool.Close)
-	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
+	if err = migrate.Up(ctx, pool, privateSchemaMigrationsDir(t, schema)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO admin_settings(
@@ -234,6 +234,40 @@ func integrationApplication(t *testing.T) (*Service, *postgresstore.Store, *muta
 		t.Fatal(err)
 	}
 	return service, store, settings, ctx
+}
+
+func privateSchemaMigrationsDir(t *testing.T, schema string) string {
+	t.Helper()
+	// 0013 is deliberately bound to the production public schema. This private
+	// application fixture does not exercise that separately tested contract.
+	source := filepath.Join("..", "..", "migrations")
+	target := t.TempDir()
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") ||
+			entry.Name() == "0013_source_readiness_active_index.sql" {
+			continue
+		}
+		body, readErr := os.ReadFile(filepath.Join(source, entry.Name()))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if entry.Name() == "0014_balance_carry_forward_proof.sql" {
+			// Production 0014 is deliberately public-bound. Rebind only this
+			// disposable private-schema copy while preserving its fixed search_path.
+			rebound := strings.ReplaceAll(string(body), "public.", "")
+			rebound = strings.ReplaceAll(rebound, "SET search_path=pg_catalog,public",
+				"SET search_path=pg_catalog,"+pgx.Identifier{schema}.Sanitize())
+			body = []byte(rebound)
+		}
+		if writeErr := os.WriteFile(filepath.Join(target, entry.Name()), body, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	return target
 }
 
 func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {

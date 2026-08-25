@@ -40,7 +40,8 @@ watermark/cursor and `scan_complete`. Intermediate pages do not publish the
 ceiling. Only the final page may advance the source-wide watermark after all
 prior pages and events commit; an empty final page advances an actually empty
 stream. The payload excludes changing scan/watermark values, so full rescans
-produce the same payload hash and event ID.
+produce the same payload hash and event ID. Balances use the change-snapshot
+rule below instead of replaying every account at each source observation time.
 
 Economic cycles capture their source-side horizon as
 `transaction_timestamp()-SOURCE_ECONOMIC_SAFETY_DELAY`. Sub2API payments keep
@@ -61,6 +62,51 @@ the same values from the encrypted durable snapshot; an empty snapshot still
 sends explicit numeric zero. Other streams omit both fields. The receiver can
 therefore refuse publication until the exact snapshot event count is present,
 instead of trusting a short final page.
+
+The balances connector still captures the **entire** source balance projection
+inside one repeatable-read, read-only transaction on every cycle. After the
+cutover baseline, however, the signed event snapshot contains only accounts
+that are new or whose service units/negative flag actually changed since the
+last acknowledged full capture. `scan_snapshot_row_count` is the exact number
+of records in this signed change snapshot, not the total number of source
+accounts. The sender includes the preceding acknowledged event snapshot ID in
+the emission-snapshot hash preimage, so `A -> B -> A` produces distinct
+occurrence identities even if the database clock has equal precision. That
+predecessor is sender-side encrypted state; it is not an extra checkpoint
+payload field and the receiver does not independently validate the predecessor
+chain. The receiver verifies the signed `scan_snapshot_id`, delta count and
+ordinary signed batch sequence. A static full capture therefore publishes a
+complete, healthy, signed zero-record cycle and advances the balances watermark
+without creating another `balance_checkpoint` event.
+
+The encrypted mutable balance file stores both the latest full capture and its
+prepared change snapshot. It accepts the prior legacy full-snapshot format and
+migrates it only when beginning the next cycle. If the process stops after
+preparing that file but before creating `pending.enc`, the unchanged committed
+cursor selects the exact prepared snapshot on restart; the source is not read
+again. Once the exact ACK commits the cursor, that full capture becomes the
+comparison base for the following cycle. A previously present account missing
+from a later full capture fails closed because V3 balances have no deletion
+tombstone. This delta rule is balances-only: payments, usage and credits retain
+their immutable fact rules and are never coalesced.
+
+On the receiver, omission from a published balance delta means unchanged only
+for an already bound account whose catch-up is complete. If new payment,
+credit, or usage facts exist after its last checked boundary, their receiver
+visibility must be covered by a published balances cycle. Funding visibility
+is proven through the exact source event, payload revision, scan-cycle mapping,
+and published payments cycle; an unmapped eligible funding lot fails closed.
+When that balances cycle has no real checkpoint for the account, the receiver
+persists a separate immutable carry-forward proof rather than fabricating a
+source checkpoint. The proof binds the cycle snapshot/count, final sequence and
+batch body hash, and the latest real signed actual ordered by
+`(as_of,source_sequence,id)`. Real checkpoints and carry proofs are mutually
+exclusive for one account/cycle and are evaluated together in
+`(as_of,source_sequence,real-before-carry,id)` order. This lets a positive
+classification from one evidence item participate in the next conservation
+check. Parked checkpoints for unrelated identities in the same published cycle
+do not block a bound account; that account's advisory lock and completed
+catch-up state provide the isolation boundary.
 
 | Stream | Allowed entities |
 |---|---|
@@ -324,6 +370,12 @@ a newly observed cursor. On every restart the coordinator must inspect and
 replay that spool before calling `Connector.Scan`; otherwise a stateful balance
 connector could replace its durable snapshot before the pending target cursor
 is committed.
+
+The balances durable change state also closes the smaller pre-spool crash
+window: replacing `balance-current.enc` records the committed base snapshot ID
+alongside the newly captured full state and exact change snapshot. A restart
+whose cursor still names that base reuses the prepared change snapshot rather
+than treating it as acknowledged or capturing past it.
 
 Event IDs remain deterministic from source ID, entity, external ID, operation
 and canonical payload hash. Adding `stream_id` does not change established

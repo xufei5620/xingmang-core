@@ -18,8 +18,10 @@ import (
 const defaultEligibilityFinalizationDelay = 15 * time.Minute
 
 var (
-	serviceUnitsPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,77})$`)
-	unitCodePattern     = regexp.MustCompile(`^[A-Z0-9_:-]{1,32}$`)
+	serviceUnitsPattern                = regexp.MustCompile(`^(0|[1-9][0-9]{0,77})$`)
+	unitCodePattern                    = regexp.MustCompile(`^[A-Z0-9_:-]{1,32}$`)
+	errBalanceCarryForwardProofPending = errors.New("signed balance carry-forward proof is not published yet")
+	errBalanceCarryForwardProofInvalid = errors.New("signed balance carry-forward proof contract is invalid")
 )
 
 type eligibilityAccount struct {
@@ -822,6 +824,22 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 	}
 	if cycleSnapshotID != in.SourceSnapshotID || cycleSnapshotRows != snapshotRows.Int64() {
 		return domain.ErrConflict
+	}
+	var carryProofKey string
+	err = tx.QueryRow(ctx, `SELECT proof_key FROM balance_carry_forward_proofs
+		WHERE external_account_id=$1 AND scan_cycle_id=$2::uuid`, accountID, in.ScanCycleID).Scan(&carryProofKey)
+	if err == nil {
+		if freezeErr := freezeEligibilityTx(ctx, tx, accountID, "", "EVENT_PAYLOAD_DRIFT",
+			"balance_carry_forward_proof", carryProofKey, in.SourceRevision, actor); freezeErr != nil {
+			return freezeErr
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return commitErr
+		}
+		return domain.ErrConflict
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
 	}
 	var manifest CutoverManifest
 	err = tx.QueryRow(ctx, `
@@ -2001,6 +2019,17 @@ func (s *Store) ProcessEligibilityProjectionJobs(ctx context.Context, limit int,
 	var firstProcessingError error
 	for _, accountID := range ids {
 		if processErr := s.processEligibilityProjectionJob(ctx, accountID, lease, actor); processErr != nil {
+			if errors.Is(processErr, errBalanceCarryForwardProofPending) {
+				_, markErr := s.pool.Exec(ctx, `
+					UPDATE eligibility_projection_jobs SET status='queued',lease_token=NULL,lease_expires_at=NULL,
+						last_error_code='BALANCE_PROOF_PENDING',
+						next_attempt_at=$3::timestamptz+interval '30 seconds',updated_at=$3::timestamptz
+					WHERE external_account_id=$1 AND lease_token=$2`, accountID, lease, now.UTC())
+				if markErr != nil {
+					return processed, markErr
+				}
+				continue
+			}
 			if firstProcessingError == nil {
 				firstProcessingError = fmt.Errorf("eligibility projection job failed: %w", processErr)
 			}
@@ -2196,10 +2225,13 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 	if requested.Before(account.FinalizedThrough) {
 		requested = account.FinalizedThrough
 	}
+	if err = ensureBalanceCarryForwardProofTx(ctx, tx, account, requested, actor); err != nil {
+		return err
+	}
 	if err = reprojectEligibilityTx(ctx, tx, accountID, requested, actor); err != nil {
 		return err
 	}
-	if err = evaluatePendingCheckpointsTx(ctx, tx, accountID, requested, actor); err != nil {
+	if err = evaluatePendingBalanceEvidenceTx(ctx, tx, accountID, requested, actor); err != nil {
 		return err
 	}
 	// A positive checkpoint may have inserted a conservative non-cash fact at
@@ -2221,6 +2253,220 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		return domain.ErrConflict
 	}
 	return tx.Commit(ctx)
+}
+
+func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, requested time.Time, actor AuditActor) error {
+	// The caller holds the account advisory lock and a row lock on the bound,
+	// non-syncing account. A published delta cycle may still contain parked
+	// checkpoints for unrelated identities; those must not block this account's
+	// unchanged proof. A later checkpoint for this account is rejected by the
+	// mutually exclusive proof/checkpoint contract.
+	if account.Status == "syncing" {
+		return errBalanceCarryForwardProofPending
+	}
+	var unmappedFunding bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM funding_lots lot
+			WHERE lot.external_account_id=$1
+			  AND lot.completed_at>$2 AND lot.completed_at<=$3
+			  AND lot.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
+			  AND NOT EXISTS (
+				SELECT 1 FROM source_events event
+				JOIN source_economic_scan_cycle_events mapped
+				  ON mapped.source_instance_id=lot.source_instance_id
+				 AND mapped.stream_id='payments'
+				 AND mapped.event_id::text=event.external_event_id
+				 AND mapped.payload_hash=lot.source_revision_hash
+				JOIN source_economic_scan_cycles cycle
+				  ON cycle.source_instance_id=mapped.source_instance_id
+				 AND cycle.stream_id=mapped.stream_id
+				 AND cycle.scan_cycle_id=mapped.scan_cycle_id
+				WHERE event.id=lot.source_event_id AND cycle.cycle_status='published'
+			  )
+		)`, account.ExternalAccountID, account.FinalizedThrough, requested).Scan(&unmappedFunding); err != nil {
+		return err
+	}
+	if unmappedFunding {
+		return errBalanceCarryForwardProofInvalid
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT visibility_at FROM (
+			SELECT stream_watermark_at AS visibility_at
+			FROM source_usage_events
+			WHERE external_account_id=$1 AND event_time>$2 AND event_time<=$3
+			UNION ALL
+			SELECT stream_watermark_at
+			FROM source_credit_events
+			WHERE external_account_id=$1 AND event_time>$2 AND event_time<=$3
+			UNION ALL
+			SELECT cycle.scan_ceiling_at
+			FROM funding_lots lot
+			JOIN source_events event ON event.id=lot.source_event_id
+			JOIN source_economic_scan_cycle_events mapped
+			  ON mapped.source_instance_id=lot.source_instance_id
+			 AND mapped.stream_id='payments'
+			 AND mapped.event_id::text=event.external_event_id
+			 AND mapped.payload_hash=lot.source_revision_hash
+			JOIN source_economic_scan_cycles cycle
+			  ON cycle.source_instance_id=mapped.source_instance_id
+			 AND cycle.stream_id=mapped.stream_id
+			 AND cycle.scan_cycle_id=mapped.scan_cycle_id
+			WHERE lot.external_account_id=$1
+			  AND lot.completed_at>$2 AND lot.completed_at<=$3
+			  AND lot.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
+			  AND cycle.cycle_status='published'
+		) facts ORDER BY visibility_at`, account.ExternalAccountID, account.FinalizedThrough, requested)
+	if err != nil {
+		return err
+	}
+	visibilities := make([]time.Time, 0)
+	for rows.Next() {
+		var visibility time.Time
+		if err = rows.Scan(&visibility); err != nil {
+			rows.Close()
+			return err
+		}
+		visibilities = append(visibilities, visibility.UTC())
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	type proof struct {
+		cycleID, batchID, snapshotID, cursor, revision string
+		priorID, balance                               string
+		asOf, watermark, observed                      time.Time
+		snapshotRows, sequence                         int64
+		negative, baselineMember, hasRealCheckpoint    bool
+	}
+	coveredVisibility := account.FinalizedThrough.UTC()
+	for _, visibility := range visibilities {
+		if !visibility.After(coveredVisibility) {
+			continue
+		}
+		// A real signed account checkpoint keeps its established semantics: its
+		// own as_of must be finalizable, while the enclosing published cycle must
+		// be at or after the fact's receiver visibility. Delta carry proofs are
+		// stricter below because they derive as_of from the cycle ceiling itself.
+		var realCycleCoverage time.Time
+		realErr := tx.QueryRow(ctx, `
+			SELECT cycle.scan_ceiling_at
+			FROM balance_reconciliation_checkpoints checkpoint
+			JOIN source_economic_scan_cycle_events mapped
+			  ON mapped.source_instance_id=checkpoint.source_instance_id
+			 AND mapped.stream_id='balances'
+			 AND mapped.event_id::text=checkpoint.external_event_id
+			 AND mapped.payload_hash=checkpoint.source_revision_hash
+			JOIN source_economic_scan_cycles cycle
+			  ON cycle.source_instance_id=mapped.source_instance_id
+			 AND cycle.stream_id=mapped.stream_id
+			 AND cycle.scan_cycle_id=mapped.scan_cycle_id
+			WHERE checkpoint.external_account_id=$1
+			  AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of>$2 AND checkpoint.as_of<=$3
+			  AND cycle.cycle_status='published' AND cycle.scan_ceiling_at>=$4
+			ORDER BY cycle.scan_ceiling_at,cycle.first_sequence LIMIT 1`,
+			account.ExternalAccountID, account.FinalizedThrough, requested.UTC(), visibility).Scan(&realCycleCoverage)
+		if realErr == nil {
+			coveredVisibility = realCycleCoverage.UTC()
+			continue
+		}
+		if !errors.Is(realErr, pgx.ErrNoRows) {
+			return realErr
+		}
+		var item proof
+		err = tx.QueryRow(ctx, `
+			SELECT cycle.scan_cycle_id::text,batch.batch_id::text,cycle.scan_snapshot_id,
+				cycle.scan_snapshot_row_count,cycle.scan_ceiling_at,cycle.stream_watermark_at,
+				cycle.source_cursor,cycle.final_sequence,batch.body_hash,batch.source_captured_at,
+				prior.id::text,prior.balance_service_units::text,prior.balance_negative,prior.baseline_member,
+				EXISTS (
+					SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
+					JOIN source_economic_scan_cycle_events mapped
+					  ON mapped.source_instance_id=checkpoint.source_instance_id
+					 AND mapped.stream_id='balances'
+					 AND mapped.event_id::text=checkpoint.external_event_id
+					 AND mapped.payload_hash=checkpoint.source_revision_hash
+					WHERE checkpoint.external_account_id=$1
+					  AND mapped.scan_cycle_id=cycle.scan_cycle_id
+				) AS has_real_checkpoint
+			FROM source_economic_scan_cycles cycle
+			JOIN source_ingest_batches batch
+			  ON batch.source_instance_id=cycle.source_instance_id
+			 AND batch.stream_id=cycle.stream_id
+			 AND batch.scan_cycle_id=cycle.scan_cycle_id
+			 AND batch.sequence=cycle.final_sequence
+			JOIN LATERAL (
+				SELECT checkpoint.id,checkpoint.balance_service_units,
+					checkpoint.balance_negative,checkpoint.baseline_member
+				FROM balance_reconciliation_checkpoints checkpoint
+				WHERE checkpoint.external_account_id=$1
+				  AND (checkpoint.as_of<cycle.scan_ceiling_at
+				       OR (checkpoint.as_of=cycle.scan_ceiling_at
+				           AND checkpoint.source_sequence<cycle.final_sequence))
+				ORDER BY checkpoint.as_of DESC,checkpoint.source_sequence DESC,checkpoint.id DESC LIMIT 1
+			) prior ON true
+			WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
+			  AND cycle.cycle_status='published'
+			  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
+			ORDER BY cycle.scan_ceiling_at,cycle.first_sequence LIMIT 1`,
+			account.ExternalAccountID, account.SourceInstanceID, visibility, requested.UTC()).Scan(
+			&item.cycleID, &item.batchID, &item.snapshotID, &item.snapshotRows,
+			&item.asOf, &item.watermark, &item.cursor, &item.sequence, &item.revision,
+			&item.observed, &item.priorID, &item.balance, &item.negative, &item.baselineMember,
+			&item.hasRealCheckpoint)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errBalanceCarryForwardProofPending
+		}
+		if err != nil {
+			return err
+		}
+		coveredVisibility = item.asOf.UTC()
+		if item.hasRealCheckpoint {
+			continue
+		}
+		proofKey := "carry-forward:" + item.cycleID + ":" + strings.ToLower(account.ExternalAccountID)
+		proofID := randomUUID()
+		command, insertErr := tx.Exec(ctx, `
+			INSERT INTO balance_carry_forward_proofs(
+				id,source_instance_id,external_account_id,proof_key,prior_checkpoint_id,
+				scan_cycle_id,final_batch_id,as_of,balance_service_units,balance_negative,
+				baseline_member,source_snapshot_id,snapshot_row_count,source_sequence,
+				source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::numeric,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+			ON CONFLICT(external_account_id,scan_cycle_id) DO NOTHING`, proofID,
+			account.SourceInstanceID, account.ExternalAccountID, proofKey, item.priorID,
+			item.cycleID, item.batchID, item.asOf.UTC(), item.balance, item.negative,
+			item.baselineMember, item.snapshotID, item.snapshotRows, item.sequence,
+			item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
+		if insertErr != nil {
+			return insertErr
+		}
+		if command.RowsAffected() == 0 {
+			var existingKey, existingPrior, existingRevision string
+			if err = tx.QueryRow(ctx, `SELECT proof_key,prior_checkpoint_id::text,source_revision_hash
+				FROM balance_carry_forward_proofs
+				WHERE external_account_id=$1 AND scan_cycle_id=$2::uuid`,
+				account.ExternalAccountID, item.cycleID).Scan(&existingKey, &existingPrior, &existingRevision); err != nil {
+				return err
+			}
+			if existingKey != proofKey || existingPrior != item.priorID || existingRevision != item.revision {
+				return domain.ErrConflict
+			}
+			continue
+		}
+		if err = writeAudit(ctx, tx, actor, "eligibility.balance_carry_forward.derived",
+			"balance_carry_forward_proof", proofID, nil, map[string]any{
+				"proof_key": proofKey, "scan_cycle_id": item.cycleID,
+				"prior_checkpoint_id": item.priorID, "source_revision": item.revision,
+			}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func applyPrePolicyWalletFundingTx(
@@ -2315,33 +2561,55 @@ func applyPrePolicyWalletFundingTx(
 		nil, map[string]any{"eligibility_start_at": account.PolicyStartAt, "credit_event_id": derivedID})
 }
 
-func evaluatePendingCheckpointsTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, actor AuditActor) error {
+func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, actor AuditActor) error {
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT b.id,b.checkpoint_id,b.external_event_id,b.as_of,b.balance_service_units::text,b.balance_negative,
-			b.source_sequence,b.source_cursor,b.stream_watermark_at,b.source_revision_hash,b.observed_at
-		FROM balance_reconciliation_checkpoints b
-		WHERE b.external_account_id=$1 AND b.checkpoint_kind='reconciliation' AND b.as_of<=$2
-			AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations e WHERE e.checkpoint_id=b.id)
-		ORDER BY b.as_of,b.id`, accountID, through)
+		SELECT evidence_kind,id,evidence_key,external_event_id,as_of,balance_service_units,
+			balance_negative,source_sequence,source_cursor,stream_watermark_at,
+			source_revision_hash,observed_at
+		FROM (
+			SELECT 'real'::text AS evidence_kind,checkpoint.id,
+				checkpoint.checkpoint_id AS evidence_key,checkpoint.external_event_id,
+				checkpoint.as_of,checkpoint.balance_service_units::text AS balance_service_units,
+				checkpoint.balance_negative,checkpoint.source_sequence,checkpoint.source_cursor,
+				checkpoint.stream_watermark_at,checkpoint.source_revision_hash,checkpoint.observed_at
+			FROM balance_reconciliation_checkpoints checkpoint
+			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of<=$2
+			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
+				WHERE evaluation.checkpoint_id=checkpoint.id)
+			UNION ALL
+			SELECT 'carry'::text,proof.id,proof.proof_key,proof.proof_key,
+				proof.as_of,proof.balance_service_units::text,proof.balance_negative,
+				proof.source_sequence,proof.source_cursor,proof.stream_watermark_at,
+				proof.source_revision_hash,proof.observed_at
+			FROM balance_carry_forward_proofs proof
+			WHERE proof.external_account_id=$1 AND proof.as_of<=$2
+			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
+				WHERE evaluation.proof_id=proof.id)
+		) pending
+		ORDER BY as_of,source_sequence,
+			CASE evidence_kind WHEN 'real' THEN 0 ELSE 1 END,id`, accountID, through)
 	if err != nil {
 		return err
 	}
-	type checkpoint struct {
-		id, checkpointID, externalEventID, balanceText, cursor, revision string
-		asOf, watermark, observed                                        time.Time
-		sequence                                                         int64
-		balanceNegative                                                  bool
+	type proof struct {
+		kind, id, key, externalEventID string
+		balanceText, cursor, revision  string
+		asOf, watermark, observed      time.Time
+		sequence                       int64
+		balanceNegative                bool
 	}
-	items := make([]checkpoint, 0)
+	items := make([]proof, 0)
 	for rows.Next() {
-		var item checkpoint
-		if err = rows.Scan(&item.id, &item.checkpointID, &item.externalEventID, &item.asOf,
-			&item.balanceText, &item.balanceNegative, &item.sequence, &item.cursor, &item.watermark, &item.revision,
-			&item.observed); err != nil {
+		var item proof
+		if err = rows.Scan(&item.kind, &item.id, &item.key, &item.externalEventID,
+			&item.asOf, &item.balanceText,
+			&item.balanceNegative, &item.sequence, &item.cursor, &item.watermark,
+			&item.revision, &item.observed); err != nil {
 			rows.Close()
 			return err
 		}
@@ -2353,7 +2621,7 @@ func evaluatePendingCheckpointsTx(ctx context.Context, tx pgx.Tx, accountID stri
 	}
 	rows.Close()
 	for _, item := range items {
-		balance, parseErr := parseUnsignedUnits(item.balanceText, "checkpoint balance", true)
+		balance, parseErr := parseUnsignedUnits(item.balanceText, "carry-forward balance", true)
 		if parseErr != nil {
 			return parseErr
 		}
@@ -2363,10 +2631,14 @@ func evaluatePendingCheckpointsTx(ctx context.Context, tx pgx.Tx, accountID stri
 		}
 		difference := new(big.Int).Sub(new(big.Int).Set(balance), projection.ExpectedBalance)
 		status := "matched"
+		objectType := "balance_checkpoint"
+		if item.kind == "carry" {
+			objectType = "balance_carry_forward_proof"
+		}
 		if item.balanceNegative {
 			status = "negative_frozen"
 			if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-				"balance_checkpoint", item.checkpointID, item.revision, actor); err != nil {
+				objectType, item.key, item.revision, actor); err != nil {
 				return err
 			}
 		} else {
@@ -2374,60 +2646,82 @@ func evaluatePendingCheckpointsTx(ctx context.Context, tx pgx.Tx, accountID stri
 			case -1:
 				status = "negative_frozen"
 				if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-					"balance_checkpoint", item.checkpointID, item.revision, actor); err != nil {
+					objectType, item.key, item.revision, actor); err != nil {
 					return err
 				}
 			case 1:
 				var intervalStart time.Time
 				err = tx.QueryRow(ctx, `
-				SELECT max(q.as_of) FROM (
-					SELECT b.as_of FROM balance_reconciliation_checkpoints b
-					WHERE b.external_account_id=$1 AND b.checkpoint_kind='cutover' AND b.as_of<$2
-					UNION ALL
-					SELECT b.as_of FROM balance_reconciliation_checkpoints b
-					JOIN balance_checkpoint_evaluations e ON e.checkpoint_id=b.id
-					WHERE b.external_account_id=$1 AND b.as_of<$2
-						AND e.evaluation_status IN ('matched','positive_classified_non_cash')
-				) q`, accountID, item.asOf).Scan(&intervalStart)
+					SELECT max(q.as_of) FROM (
+						SELECT checkpoint.as_of FROM balance_reconciliation_checkpoints checkpoint
+						WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='cutover'
+						  AND (checkpoint.as_of<$2 OR (checkpoint.as_of=$2 AND checkpoint.source_sequence<$3))
+						UNION ALL
+						SELECT checkpoint.as_of FROM balance_reconciliation_checkpoints checkpoint
+						JOIN balance_checkpoint_evaluations evaluation ON evaluation.checkpoint_id=checkpoint.id
+						WHERE checkpoint.external_account_id=$1
+						  AND (checkpoint.as_of<$2 OR (checkpoint.as_of=$2 AND checkpoint.source_sequence<$3))
+						  AND evaluation.evaluation_status IN ('matched','positive_classified_non_cash')
+						UNION ALL
+						SELECT proof.as_of FROM balance_carry_forward_proofs proof
+						JOIN balance_carry_forward_evaluations evaluation ON evaluation.proof_id=proof.id
+						WHERE proof.external_account_id=$1
+						  AND (proof.as_of<$2 OR (proof.as_of=$2 AND proof.source_sequence<$3))
+						  AND evaluation.evaluation_status IN ('matched','positive_classified_non_cash')
+					) q`, accountID, item.asOf, item.sequence).Scan(&intervalStart)
 				if err != nil || intervalStart.IsZero() {
 					status = "source_gap_frozen"
 					if err = freezeEligibilityTx(ctx, tx, accountID, "", "SOURCE_GAP",
-						"balance_checkpoint", item.checkpointID, item.revision, actor); err != nil {
+						objectType, item.key, item.revision, actor); err != nil {
 						return err
 					}
 				} else {
 					status = "positive_classified_non_cash"
 					_, err = tx.Exec(ctx, `
-					INSERT INTO source_credit_events(
-						id,source_instance_id,external_account_id,external_event_id,external_credit_id,
-						event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
-						credit_kind,source_sequence,source_cursor,stream_watermark_at,
-						source_revision_hash,observed_at)
-					VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,
-						'UNKNOWN_POSITIVE',$11,$12,$13,$14,$15)
-					ON CONFLICT(source_instance_id,external_event_id) DO NOTHING`, randomUUID(),
+						INSERT INTO source_credit_events(
+							id,source_instance_id,external_account_id,external_event_id,external_credit_id,
+							event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
+							credit_kind,source_sequence,source_cursor,stream_watermark_at,
+							source_revision_hash,observed_at)
+						VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,
+							'UNKNOWN_POSITIVE',$11,$12,$13,$14,$15)
+						ON CONFLICT(source_instance_id,external_event_id) DO NOTHING`, randomUUID(),
 						account.SourceInstanceID, accountID, "unknown-positive:"+item.externalEventID,
-						"unknown-positive:"+item.checkpointID, intervalStart.UTC(), difference.String(),
-						account.UnitCode, account.ManifestHash, account.ConfigurationHash, item.sequence,
-						item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
+						"unknown-positive:"+item.id, intervalStart.UTC(), difference.String(),
+						account.UnitCode, account.ManifestHash, account.ConfigurationHash,
+						item.sequence, item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
 					if err != nil {
 						return err
 					}
 				}
 			}
 		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO balance_checkpoint_evaluations(
-				id,checkpoint_id,projection_version,expected_service_units,
-				difference_service_units,evaluation_status)
-			VALUES($1,$2,$3,$4::numeric,$5::numeric,$6)`, randomUUID(), item.id,
-			account.Version+1, projection.ExpectedBalance.String(), difference.String(), status)
+		if item.kind == "carry" {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO balance_carry_forward_evaluations(
+					id,proof_id,projection_version,expected_service_units,
+					difference_service_units,evaluation_status)
+				VALUES($1,$2,$3,$4::numeric,$5::numeric,$6)`, randomUUID(), item.id,
+				account.Version+1, projection.ExpectedBalance.String(), difference.String(), status)
+		} else {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO balance_checkpoint_evaluations(
+					id,checkpoint_id,projection_version,expected_service_units,
+					difference_service_units,evaluation_status)
+				VALUES($1,$2,$3,$4::numeric,$5::numeric,$6)`, randomUUID(), item.id,
+				account.Version+1, projection.ExpectedBalance.String(), difference.String(), status)
+		}
 		if err != nil {
 			return err
 		}
-		if err = writeAudit(ctx, tx, actor, "eligibility.balance_checkpoint.evaluated",
-			"balance_checkpoint", item.id, nil, map[string]any{"status": status,
-				"checkpoint_id": item.checkpointID}); err != nil {
+		action := "eligibility.balance_checkpoint.evaluated"
+		if item.kind == "carry" {
+			action = "eligibility.balance_carry_forward.evaluated"
+		}
+		if err = writeAudit(ctx, tx, actor, action,
+			objectType, item.id, nil, map[string]any{
+				"status": status, "evidence_key": item.key,
+			}); err != nil {
 			return err
 		}
 	}

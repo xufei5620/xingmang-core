@@ -48,7 +48,9 @@ REVOKE UPDATE, DELETE, TRUNCATE ON TABLE
   source_usage_events,
   source_credit_events,
   balance_reconciliation_checkpoints,
-  balance_checkpoint_evaluations
+  balance_checkpoint_evaluations,
+  balance_carry_forward_proofs,
+  balance_carry_forward_evaluations
 FROM invoice_app;
 GRANT SELECT, INSERT ON TABLE
   source_cutover_manifests,
@@ -58,7 +60,9 @@ GRANT SELECT, INSERT ON TABLE
   source_usage_events,
   source_credit_events,
   balance_reconciliation_checkpoints,
-  balance_checkpoint_evaluations
+  balance_checkpoint_evaluations,
+  balance_carry_forward_proofs,
+  balance_carry_forward_evaluations
 TO invoice_app;
 
 REVOKE UPDATE, TRUNCATE ON TABLE consumption_allocations FROM invoice_app;

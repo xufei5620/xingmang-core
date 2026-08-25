@@ -329,7 +329,24 @@ func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testin
 	}
 	markV3CycleProcessed(t, store, ctx, sourceID, "usage", usageCycle)
 
-	chain.commit(t, store, ctx, sourceID, "balances", "83000000-0000-4000-8000-000000000005", finalCeiling, nil)
+	matchingBalanceEvent := SourceBatchEvent{EventID: "82000000-0000-4000-8000-000000000009",
+		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: strings.Repeat("9", 64),
+		PayloadCiphertext: bytes.Repeat([]byte{9}, 32), ObservedAt: finalCeiling}
+	matchingBalanceCycle := chain.commit(t, store, ctx, sourceID, "balances",
+		"83000000-0000-4000-8000-000000000005", finalCeiling, []SourceBatchEvent{matchingBalanceEvent})
+	if err = store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
+		SourceInstanceID: sourceID, ExternalUserID: "10", ExternalEventID: matchingBalanceEvent.EventID,
+		CheckpointID: strings.Repeat("9", 64) + ":10", CheckpointKind: "reconciliation",
+		BalanceServiceUnits: "140", UnitCode: "SUB2_BALANCE_1E8",
+		SourceSnapshotID: testHash(matchingBalanceCycle.cycleID), SnapshotRowCount: "1", BaselineMember: true,
+		AsOf: cutover.Add(70 * time.Minute), ObservedAt: finalCeiling, StreamWatermarkAt: finalCeiling,
+		SourceCursor: "balance-matched:10", SourceRevision: matchingBalanceEvent.PayloadHash,
+		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 2,
+		BatchID: matchingBalanceCycle.batchID, ScanCycleID: matchingBalanceCycle.cycleID,
+	}, AuditActor{Type: "source_connector", ID: sourceID}); err != nil {
+		t.Fatal(err)
+	}
+	markV3CycleProcessed(t, store, ctx, sourceID, "balances", matchingBalanceCycle)
 	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute),
 		AuditActor{Type: "system", ID: "test-worker"})
 	if err != nil || processed != 1 {
@@ -1386,7 +1403,24 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 	}
 	markV3CycleProcessed(t, store, ctx, sourceID, "usage", usageCycle)
 	chain.commit(t, store, ctx, sourceID, "credits", "8d000000-0000-4000-8000-000000000005", finalCeiling, nil)
-	chain.commit(t, store, ctx, sourceID, "balances", "8d000000-0000-4000-8000-000000000006", finalCeiling, nil)
+	matchingBalanceEvent := SourceBatchEvent{EventID: "8c000000-0000-4000-8000-000000000007",
+		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: strings.Repeat("8", 64),
+		PayloadCiphertext: bytes.Repeat([]byte{8}, 32), ObservedAt: finalCeiling}
+	matchingBalanceCycle := chain.commit(t, store, ctx, sourceID, "balances",
+		"8d000000-0000-4000-8000-000000000006", finalCeiling, []SourceBatchEvent{matchingBalanceEvent})
+	if err = store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
+		SourceInstanceID: sourceID, ExternalUserID: "77", ExternalEventID: matchingBalanceEvent.EventID,
+		CheckpointID: strings.Repeat("8", 64) + ":77", CheckpointKind: "reconciliation",
+		BalanceServiceUnits: "50", UnitCode: unitCode,
+		SourceSnapshotID: testHash(matchingBalanceCycle.cycleID), SnapshotRowCount: "1", BaselineMember: false,
+		AsOf: accountCutover.Add(15 * time.Minute), ObservedAt: finalCeiling, StreamWatermarkAt: finalCeiling,
+		SourceCursor: "new-account-matched:77", SourceRevision: matchingBalanceEvent.PayloadHash,
+		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 3,
+		BatchID: matchingBalanceCycle.batchID, ScanCycleID: matchingBalanceCycle.cycleID,
+	}, AuditActor{Type: "source_connector", ID: sourceID}); err != nil {
+		t.Fatal(err)
+	}
+	markV3CycleProcessed(t, store, ctx, sourceID, "balances", matchingBalanceCycle)
 	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute),
 		AuditActor{Type: "system", ID: "test-worker"})
 	if err != nil || processed == 0 {
