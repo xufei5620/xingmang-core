@@ -42,6 +42,11 @@ prior pages and events commit; an empty final page advances an actually empty
 stream. The payload excludes changing scan/watermark values, so full rescans
 produce the same payload hash and event ID.
 
+The scan-cycle identity also binds the committed starting cursor revision. An
+ACK retry at the same revision therefore keeps the same cycle ID, while the
+next empty cycle receives a new ID even when its source ceiling is unchanged;
+it cannot append a new sequence to an already finalized cycle.
+
 Balances batches additionally carry signed top-level `scan_snapshot_id` and
 integer `scan_snapshot_row_count` (0..2,000,000). Every page in that cycle uses
 the same values from the encrypted durable snapshot; an empty snapshot still
@@ -522,6 +527,7 @@ source-agent-prod check-cutover
 source-agent-prod check-db-static
 source-agent-prod check-db
 source-agent-prod check-state
+source-agent-prod inspect-pending
 source-agent-prod healthcheck
 source-agent-prod run
 source-agent-prod version
@@ -534,6 +540,15 @@ gate and requires every V3 economic stream to match the live semantic contract
 and configuration hash recorded by the encrypted create-only manifest.
 `check-state` is offline/read-only, rejects stale locks, validates all
 reconcile files and decrypts a pending spool with the real mounted key.
+`inspect-pending` uses the same production configuration, state envelope and
+authenticated encrypted-spool reader, but emits exactly one versioned JSON
+object containing only source/stream, batch/hash/count/scan metadata, hashed
+cursor positions, durable sequence state and a reachable crash-window
+classification. It never emits records, payloads, source cursors, DSNs, key
+material or tokens, never opens the source database or ingestion transport, and
+never creates a lock or writes state. It fails closed unless the state directory
+is lock-free and the pending batch, cursor transition and hash/sequence chain
+are mutually consistent.
 `healthcheck` adds a bounded local heartbeat-age check. `run`
 requires an existing state file, a source PostgreSQL DSN secret file, a
 base64-encoded 32-byte spool-key file, Ed25519 PKCS8 signing key, mTLS files and

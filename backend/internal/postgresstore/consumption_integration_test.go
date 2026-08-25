@@ -106,6 +106,77 @@ func markV3CycleProcessed(t *testing.T, store *Store, ctx context.Context, sourc
 	}
 }
 
+func TestV3ReceiverRejectsFinalizedCycleAppendAndAcceptsNewCycleAtSameCeiling(t *testing.T) {
+	store, ctx := integrationStore(t)
+	const sourceID = "10000000-0000-4000-8000-000000000099"
+	const oldCycleID = "82000000-0000-4000-8000-000000000001"
+	const newCycleID = "82000000-0000-4000-8000-000000000002"
+	ceiling := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := store.pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','v3-cycle-revision-test','v3-test')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProvisionSourceStream(ctx, sourceID, "payments", AuditActor{Type: "system", ID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `INSERT INTO source_cutover_manifests(
+		source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+		baseline_row_count,signing_key_id)
+		VALUES($1,$2,$3,$3,'v3-test','sub2api-economic-v4',$4,'SUB2_BALANCE_1E8',
+			'payment_orders:10','usage_logs:0','credits:0','balance_snapshot:0',$2,$2,0,'test-key')`,
+		sourceID, testHash("v3-cycle-revision-manifest"), ceiling.Add(-48*time.Hour), testHash("v3-cycle-revision-config")); err != nil {
+		t.Fatal(err)
+	}
+	firstHash := testHash("finalized-cycle-first")
+	first := SourceBatchInput{
+		SchemaVersion: "3.0", SourceInstanceID: sourceID, StreamID: "payments",
+		BatchID: "83000000-0000-4000-8000-000000000001", Sequence: 1, BodyHash: firstHash,
+		SigningKeyID: "test-key", SourceRuntimeVersion: "v3-test", SourceAgentVersion: "rc29",
+		SourceCapturedAt: ceiling, ProjectionStatus: "healthy", StreamWatermarkAt: ceiling,
+		SourceCursor: "payment_orders:10", ScanCeilingAt: ceiling, ScanCeilingCursor: "payment_orders:10",
+		ScanCycleID: oldCycleID, ScanComplete: true,
+		Actor: AuditActor{Type: "source_connector", ID: sourceID, Reason: "v3 finalized cycle regression"},
+	}
+	if _, err := store.CommitSourceBatch(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	var oldStatus string
+	if err := store.pool.QueryRow(ctx, `SELECT cycle_status FROM source_economic_scan_cycles
+		WHERE source_instance_id=$1 AND stream_id='payments' AND scan_cycle_id=$2::uuid`, sourceID, oldCycleID).Scan(&oldStatus); err != nil || oldStatus != "published" {
+		t.Fatalf("first empty cycle status=%q err=%v", oldStatus, err)
+	}
+	legacyRetry := first
+	legacyRetry.BatchID = "83000000-0000-4000-8000-000000000002"
+	legacyRetry.Sequence = 2
+	legacyRetry.PreviousBatchHash = firstHash
+	legacyRetry.BodyHash = testHash("finalized-cycle-legacy-retry")
+	legacyRetry.SourceAgentVersion = "rc30"
+	if _, err := store.CommitSourceBatch(ctx, legacyRetry); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("append to finalized legacy cycle error=%v", err)
+	}
+	var sequence int64
+	if err := store.pool.QueryRow(ctx, `SELECT sequence FROM source_ingest_state
+		WHERE source_instance_id=$1 AND stream_id='payments'`, sourceID).Scan(&sequence); err != nil || sequence != 1 {
+		t.Fatalf("rejected legacy append advanced sequence=%d err=%v", sequence, err)
+	}
+	fresh := legacyRetry
+	fresh.BatchID = "83000000-0000-4000-8000-000000000003"
+	fresh.BodyHash = testHash("finalized-cycle-revision-salted")
+	fresh.ScanCycleID = newCycleID
+	if _, err := store.CommitSourceBatch(ctx, fresh); err != nil {
+		t.Fatalf("new cycle at unchanged ceiling was rejected: %v", err)
+	}
+	var newStatus string
+	if err := store.pool.QueryRow(ctx, `SELECT s.sequence,c.cycle_status
+		FROM source_ingest_state s JOIN source_economic_scan_cycles c
+		  ON c.source_instance_id=s.source_instance_id AND c.stream_id=s.stream_id
+		WHERE s.source_instance_id=$1 AND s.stream_id='payments' AND c.scan_cycle_id=$2::uuid`, sourceID, newCycleID).Scan(&sequence, &newStatus); err != nil || sequence != 2 || newStatus != "published" {
+		t.Fatalf("new cycle sequence=%d status=%q err=%v", sequence, newStatus, err)
+	}
+}
+
 func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testing.T) {
 	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
 	store, ctx := integrationStoreWithPolicyStart(t, fixtureNow.Add(-115*time.Minute))

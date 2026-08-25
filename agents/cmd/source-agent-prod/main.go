@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -109,6 +111,10 @@ func main() {
 		if err := checkStateFromEnvironment(); err != nil {
 			log.Fatal(err)
 		}
+	case "inspect-pending":
+		if err := inspectPendingFromEnvironment(os.Getenv, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
 	case "healthcheck":
 		if err := healthcheckFromEnvironment(); err != nil {
 			log.Fatal(err)
@@ -121,7 +127,7 @@ func main() {
 }
 
 func fatalUsage() {
-	fmt.Fprintln(os.Stderr, "usage: source-agent-prod init-state|init-reconcile|cutover-init|check-cutover|check-db-static|check-db|check-state|healthcheck|run|version")
+	fmt.Fprintln(os.Stderr, "usage: source-agent-prod init-state|init-reconcile|cutover-init|check-cutover|check-db-static|check-db|check-state|inspect-pending|healthcheck|run|version")
 	os.Exit(2)
 }
 
@@ -274,6 +280,241 @@ func loadCutoverCommandConfig(getenv func(string) string) (runConfig, sourceagen
 	manifest := sourceagent.EncryptedStateFile{Path: config.CutoverManifestFile, Purpose: "cutover_manifest", Keys: sourceagent.FileSpoolKeyProvider{Path: config.CutoverKeyFile}}
 	snapshot := sourceagent.EncryptedStateFile{Path: config.BalanceBaselineFile, Purpose: "balance_baseline", Keys: sourceagent.FileSpoolKeyProvider{Path: config.BalanceSnapshotKeyFile}}
 	return config, manifest, snapshot, nil
+}
+
+const pendingInspectionSchemaVersion = 1
+
+type pendingInspectionCursor struct {
+	Revision uint64 `json:"revision"`
+	SHA256   string `json:"sha256"`
+}
+
+type pendingInspectionBatch struct {
+	SchemaVersion     string  `json:"schema_version"`
+	BatchID           string  `json:"batch_id"`
+	Sequence          uint64  `json:"sequence"`
+	PreviousBatchHash *string `json:"previous_batch_hash"`
+	BodyHash          string  `json:"body_hash"`
+	RecordCount       int     `json:"record_count"`
+	ScanCycleID       string  `json:"scan_cycle_id"`
+	ScanComplete      bool    `json:"scan_complete"`
+}
+
+type pendingInspectionDurableState struct {
+	CursorRevision  uint64 `json:"cursor_revision"`
+	CursorSHA256    string `json:"cursor_sha256"`
+	PublishRevision uint64 `json:"publish_revision"`
+	Sequence        uint64 `json:"sequence"`
+	LastBatchHash   string `json:"last_batch_hash"`
+}
+
+type pendingInspectionConsistency struct {
+	Lifecycle               string `json:"lifecycle"`
+	SourceStream            bool   `json:"source_stream"`
+	SchemaRuntime           bool   `json:"schema_runtime"`
+	BodyHash                bool   `json:"body_hash"`
+	HashChain               bool   `json:"hash_chain"`
+	Sequence                bool   `json:"sequence"`
+	PublishRevision         bool   `json:"publish_revision"`
+	Cursor                  bool   `json:"cursor"`
+	CursorRevision          bool   `json:"cursor_revision"`
+	BatchCursorScanMetadata bool   `json:"batch_cursor_scan_metadata"`
+}
+
+type pendingInspectionReport struct {
+	InspectionSchemaVersion int                           `json:"inspection_schema_version"`
+	Source                  string                        `json:"source"`
+	SourceType              string                        `json:"source_type"`
+	Stream                  string                        `json:"stream"`
+	Pending                 bool                          `json:"pending"`
+	CursorHashAlgorithm     string                        `json:"cursor_hash_algorithm"`
+	Batch                   *pendingInspectionBatch       `json:"batch,omitempty"`
+	CursorBefore            *pendingInspectionCursor      `json:"cursor_before,omitempty"`
+	CursorAfter             *pendingInspectionCursor      `json:"cursor_after,omitempty"`
+	DurableState            pendingInspectionDurableState `json:"durable_state"`
+	Consistency             *pendingInspectionConsistency `json:"consistency,omitempty"`
+}
+
+// inspectPendingFromEnvironment emits only a versioned, non-sensitive JSON
+// projection. It deliberately uses the production configuration loader and the
+// authenticated encrypted-spool reader, but never opens the source database,
+// initializes an outbound transport, acquires a state lock or writes a file.
+func inspectPendingFromEnvironment(getenv func(string) string, output io.Writer) error {
+	if output == nil {
+		return errors.New("inspect-pending output is required")
+	}
+	config, err := loadRunConfig(getenv)
+	if err != nil {
+		return err
+	}
+	stateDirectory := filepath.Dir(config.StateFile)
+	if filepath.Dir(config.SpoolFile) != stateDirectory {
+		return errors.New("inspect-pending requires state and pending spool in one dedicated stream directory")
+	}
+	locks, err := filepath.Glob(filepath.Join(stateDirectory, "*.lock"))
+	if err != nil || len(locks) != 0 {
+		return errors.New("inspect-pending requires a stopped agent and a lock-free state directory")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	spoolKeys := sourceagent.FileSpoolKeyProvider{Path: config.SpoolKeyFile}
+	keySnapshot, err := spoolKeys.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("validate pending spool key: %w", err)
+	}
+	keySnapshot.Destroy()
+
+	stateStore := &sourceagent.FileStateStore{Path: config.StateFile, SourceID: config.SourceID, StreamID: config.StreamID}
+	durableCursor, durableSequence, err := stateStore.CheckReadOnly()
+	if err != nil {
+		return fmt.Errorf("inspect durable cursor/sequence: %w", err)
+	}
+	if durableSequence.Revision != durableSequence.Sequence {
+		return errors.New("durable publish revision and sequence are inconsistent")
+	}
+	durableCursorMetadata, err := pendingCursorMetadata(durableCursor)
+	if err != nil {
+		return err
+	}
+	report := pendingInspectionReport{
+		InspectionSchemaVersion: pendingInspectionSchemaVersion,
+		Source:                  config.SourceID, SourceType: config.SourceType, Stream: config.StreamID,
+		CursorHashAlgorithm: "sha256-go-json-scan-cursor-v1",
+		DurableState: pendingInspectionDurableState{
+			CursorRevision: durableCursorMetadata.Revision, CursorSHA256: durableCursorMetadata.SHA256,
+			PublishRevision: durableSequence.Revision, Sequence: durableSequence.Sequence,
+			LastBatchHash: durableSequence.LastBatchHash,
+		},
+	}
+
+	pendingStore := &sourceagent.EncryptedFilePendingStore{
+		Path: config.SpoolFile, SourceID: config.SourceID, StreamID: config.StreamID, Keys: spoolKeys,
+	}
+	pending, exists, err := pendingStore.CheckReadOnly(ctx)
+	if err != nil {
+		return fmt.Errorf("authenticate and validate encrypted pending spool: %w", err)
+	}
+	if !exists {
+		return writePendingInspection(output, report)
+	}
+	defer pending.Destroy()
+
+	batch := pending.Batch.Batch
+	if batch.SourceInstanceID != config.SourceID || batch.StreamID != config.StreamID ||
+		batch.SourceType != config.SourceType || batch.SourceRuntimeVersion != config.SourceRuntime ||
+		batch.SchemaVersion != config.ProtocolVersion || batch.Mode != "db_projection" {
+		return errors.New("pending spool metadata does not match the production stream configuration")
+	}
+	if !pendingBatchCursorMetadataConsistent(batch, pending.CursorAfter) {
+		return errors.New("pending batch scan metadata does not match its target cursor")
+	}
+	lifecycle, err := pendingLifecycle(durableCursor, durableSequence, pending)
+	if err != nil {
+		return err
+	}
+	beforeMetadata, err := pendingCursorMetadata(pending.CursorBefore)
+	if err != nil {
+		return err
+	}
+	afterMetadata, err := pendingCursorMetadata(pending.CursorAfter)
+	if err != nil {
+		return err
+	}
+	var previousBatchHash *string
+	if batch.PreviousBatchHash != nil {
+		value := *batch.PreviousBatchHash
+		previousBatchHash = &value
+	}
+	report.Pending = true
+	report.Batch = &pendingInspectionBatch{
+		SchemaVersion: batch.SchemaVersion, BatchID: batch.BatchID, Sequence: batch.Sequence,
+		PreviousBatchHash: previousBatchHash, BodyHash: pending.Batch.BodyHash,
+		RecordCount: len(batch.Records), ScanCycleID: batch.ScanCycleID, ScanComplete: batch.ScanComplete,
+	}
+	report.CursorBefore = &beforeMetadata
+	report.CursorAfter = &afterMetadata
+	report.Consistency = &pendingInspectionConsistency{
+		Lifecycle: lifecycle, SourceStream: true, SchemaRuntime: true, BodyHash: true,
+		HashChain: true, Sequence: true, PublishRevision: true, Cursor: true,
+		CursorRevision: true, BatchCursorScanMetadata: true,
+	}
+	return writePendingInspection(output, report)
+}
+
+func pendingCursorMetadata(cursor sourceagent.ScanCursor) (pendingInspectionCursor, error) {
+	revision := cursor.Revision
+	cursor.Revision = 0
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		return pendingInspectionCursor{}, errors.New("encode cursor fingerprint failed")
+	}
+	result := pendingInspectionCursor{Revision: revision, SHA256: sourceagent.SHA256Hex(raw)}
+	for index := range raw {
+		raw[index] = 0
+	}
+	return result, nil
+}
+
+func pendingLifecycle(cursor sourceagent.ScanCursor, sequence sourceagent.SequenceState, pending sourceagent.PendingBatch) (string, error) {
+	if sequence.Revision != sequence.Sequence {
+		return "", errors.New("durable publish revision and sequence are inconsistent")
+	}
+	previousHash := ""
+	if pending.Batch.Batch.PreviousBatchHash != nil {
+		previousHash = *pending.Batch.Batch.PreviousBatchHash
+	}
+	queuedSequence := pending.Batch.Batch.Sequence > 0 && sequence.Sequence == pending.Batch.Batch.Sequence-1 && sequence.LastBatchHash == previousHash
+	committedSequence := sequence.Sequence == pending.Batch.Batch.Sequence && sequence.LastBatchHash == pending.Batch.BodyHash
+	cursorBefore := cursor == pending.CursorBefore
+	cursorAfter := pendingCommittedCursorMatches(pending.CursorAfter, cursor)
+	switch {
+	case queuedSequence && cursorBefore:
+		return "sequence_uncommitted", nil
+	case committedSequence && cursorBefore:
+		return "sequence_committed_cursor_pending", nil
+	case committedSequence && cursorAfter:
+		return "cursor_committed_pending_clear", nil
+	default:
+		return "", errors.New("pending spool is inconsistent with durable cursor, sequence or hash chain")
+	}
+}
+
+func pendingCommittedCursorMatches(pendingAfter, current sourceagent.ScanCursor) bool {
+	if current.Revision == 0 || current.Revision-1 != pendingAfter.Revision {
+		return false
+	}
+	current.Revision = pendingAfter.Revision
+	return current == pendingAfter
+}
+
+func pendingBatchCursorMetadataConsistent(batch sourceagent.Batch, cursor sourceagent.ScanCursor) bool {
+	if batch.SchemaVersion == sourceagent.SchemaVersionV3 {
+		snapshotMatches := (!cursor.HasSnapshotMetadata && batch.ScanSnapshotRowCount == nil && batch.ScanSnapshotID == "") ||
+			(cursor.HasSnapshotMetadata && batch.ScanSnapshotRowCount != nil && *batch.ScanSnapshotRowCount == cursor.SnapshotRowCount && batch.ScanSnapshotID == cursor.SnapshotID)
+		return batch.StreamWatermarkAt == cursor.WatermarkAt && batch.SourceCursor == cursor.WatermarkCursor &&
+			batch.ScanCeilingAt == cursor.CeilingAt && batch.ScanCeilingCursor == cursor.CeilingCursor &&
+			batch.ScanCycleID == cursor.ScanCycleID && batch.ScanComplete == (cursor.Completed && !cursor.ProjectionBlocked) && snapshotMatches
+	}
+	return batch.StreamWatermarkAt == "" && batch.SourceCursor == "" && batch.ScanCeilingAt == "" &&
+		batch.ScanCeilingCursor == "" && batch.ScanCycleID == "" && !batch.ScanComplete &&
+		batch.ScanSnapshotID == "" && batch.ScanSnapshotRowCount == nil
+}
+
+func writePendingInspection(output io.Writer, report pendingInspectionReport) error {
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return errors.New("encode pending inspection failed")
+	}
+	raw = append(raw, '\n')
+	written, writeErr := output.Write(raw)
+	for index := range raw {
+		raw[index] = 0
+	}
+	if writeErr != nil || written != len(raw) {
+		return errors.New("write pending inspection failed")
+	}
+	return nil
 }
 
 func checkStateFromEnvironment() error {

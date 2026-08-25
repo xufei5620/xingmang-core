@@ -70,6 +70,16 @@ try {
         $invoice -notmatch '/document\$[\s\S]*proxy_buffering off') {
         throw 'PDF edge routes do not explicitly disable disk-capable buffering'
     }
+    $readinessMatch = [regex]::Match(
+        $invoice,
+        '(?s)location = /readyz\s*\{(?<body>.*?)\r?\n\s*\}'
+    )
+    $readinessBody = $readinessMatch.Groups['body'].Value
+    if (-not $readinessMatch.Success -or
+        $readinessBody -notmatch 'proxy_pass http://127\.0\.0\.1:58088;' -or
+        $readinessBody -notmatch 'access_log off;') {
+        throw 'public readiness route is missing, not exact, or can be masked by the SPA fallback'
+    }
     $backchannelMatch = [regex]::Match(
         $invoice,
         '(?s)location = /api/v1/auth/backchannel-logout\s*\{(?<body>.*?)\r?\n\s*\}'

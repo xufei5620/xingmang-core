@@ -237,7 +237,7 @@ func (c *EconomicDBConnector) prepareCursor(ctx context.Context, req ScanRequest
 	}
 	cursor.CeilingAt = horizon.UTC().Format(time.RFC3339Nano)
 	cursor.CeilingCursor = canonicalDomainCursor(domains, ceilingPositions)
-	cursor.ScanCycleID = deterministicUUID(strings.Join([]string{c.Manifest.SourceID, c.Stream, cursor.CeilingAt, cursor.CeilingCursor}, "\x00"))
+	cursor.ScanCycleID = deterministicEconomicScanCycleID(c.Manifest.SourceID, c.Stream, cursor.CeilingAt, cursor.CeilingCursor, cursor.Revision)
 	cursor.Completed = false
 	return cursor, nil
 }
@@ -311,6 +311,12 @@ func canonicalDomainCursor(domains []string, values map[string]int64) string {
 		parts = append(parts, domain+":"+strconv.FormatInt(values[domain], 10))
 	}
 	return strings.Join(parts, ";")
+}
+
+func deterministicEconomicScanCycleID(sourceID, stream, ceilingAt, ceilingCursor string, committedRevision uint64) string {
+	return deterministicUUID(strings.Join([]string{
+		sourceID, stream, ceilingAt, ceilingCursor, strconv.FormatUint(committedRevision, 10),
+	}, "\x00"))
 }
 
 func mustParseTime(value string) time.Time {

@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc29 ingestion-capacity candidate
+# Release readiness: 0.1.0-rc30 scan-cycle candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC29 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC30 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -82,9 +82,17 @@ agents. RC29 uses a `/27` internal subnet, a `/28` dynamic pool with at least 11
 container addresses, and reserves `.30` outside that pool for the exact trusted
 ingest proxy `/32`. Production preflight now rejects smaller pools.
 
+After RC29 admitted the API plus all ten senders, a Sub2API payment stream with
+no new rows reused the preceding published `scan_cycle_id`, because the ID was
+derived only from an unchanged ceiling. RC30 also binds the committed cursor
+revision: an ACK retry at the same revision remains byte-stable, while the next
+empty cycle receives a distinct ID and cannot append to a finalized cycle.
+The public Nginx template now also proxies the exact `/readyz` path to the API;
+the SPA fallback can no longer turn a failed dependency check into an HTML 200.
+
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC29 image/SBOM/vulnerability
+- generate and independently verify a fresh RC30 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -100,7 +108,7 @@ ingest proxy `/32`. Production preflight now rejects smaller pools.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC29 tag and pass real production
+- deploy all Invoice images under the same RC30 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -115,7 +123,7 @@ ingest proxy `/32`. Production preflight now rejects smaller pools.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC29 commit and signed release tag; no GitHub
+- create and locally verify the RC30 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

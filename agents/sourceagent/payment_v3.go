@@ -214,7 +214,7 @@ func (c *PaymentV3DBConnector) prepare(ctx context.Context, req ScanRequest, del
 		cursor.CeilingAt = horizon.UTC().Format(time.RFC3339Nano)
 		cursor.CeilingCursor = canonicalDomainCursor(domains, ceil)
 	}
-	cursor.ScanCycleID = deterministicUUID(strings.Join([]string{c.Manifest.SourceID, StreamPayments, cursor.CeilingAt, cursor.CeilingCursor}, "\x00"))
+	cursor.ScanCycleID = deterministicEconomicScanCycleID(c.Manifest.SourceID, StreamPayments, cursor.CeilingAt, cursor.CeilingCursor, cursor.Revision)
 	cursor.Completed = false
 	return cursor, nil
 }

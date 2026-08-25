@@ -119,6 +119,17 @@ server {
         proxy_request_buffering on;
     }
 
+    # Readiness is deliberately distinct from liveness.  Keep this exact route
+    # ahead of the SPA fallback so an unhealthy source stream cannot be masked
+    # by a successful index.html response.
+    location = /readyz {
+        access_log off;
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
     location = /metrics {
         return 404;
     }

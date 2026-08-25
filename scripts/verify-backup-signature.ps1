@@ -35,6 +35,9 @@ $resumeHealthContract = @(
     'verify_services_running source "${resume_source_running_only_services[@]}" || return 1',
     'verify_services_running prod "${resume_prod_running_only_services[@]}" || return 1',
     'set +e',
+    'resume_status=$?',
+    'if (( resume_status != 0 )); then',
+    'CRITICAL: backup failed and one or more quiesced services did not restart',
     'cleanup_failed=false',
     '|| cleanup_failed=true'
 )
@@ -78,6 +81,15 @@ $cleanupFunctionStart = $backupScript.IndexOf("cleanup() {", [StringComparison]:
 $resumeFunction = $backupScript.Substring($resumeFunctionStart, $cleanupFunctionStart - $resumeFunctionStart)
 if (($resumeFunction.Split('|| return 1', [StringSplitOptions]::None).Count - 1) -lt 6) {
     throw 'backup resume can still hide an early Compose or state-verification failure'
+}
+$resumeComposeUpLines = @($resumeFunction -split "`r?`n" | Where-Object {
+    $_.Contains('compose[@]}" up -d', [StringComparison]::Ordinal)
+})
+if ($resumeComposeUpLines.Count -ne 4 -or
+    @($resumeComposeUpLines | Where-Object {
+        -not $_.Contains('--no-deps', [StringComparison]::Ordinal)
+    }).Count -ne 0) {
+    throw 'backup resume contains a Compose up path that may start an originally stopped dependency'
 }
 
 $sshKeygen = Get-Command ssh-keygen -ErrorAction Stop

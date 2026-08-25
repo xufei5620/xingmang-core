@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -157,6 +158,63 @@ func TestAckLossRetriesExactPendingBatch(t *testing.T) {
 	}
 	if _, exists, _ := pending.Load(ctx); exists {
 		t.Fatal("pending spool was not cleared after ACK and cursor commit")
+	}
+}
+
+func TestRevisionSaltDoesNotRewriteLegacyPendingBatch(t *testing.T) {
+	ctx := context.Background()
+	const sourceID = "10000000-0000-4000-8000-000000000001"
+	const ceilingAt = "2026-08-25T00:00:00Z"
+	const ceilingCursor = "payment_orders:10"
+	legacyCycleID := deterministicUUID(strings.Join([]string{sourceID, StreamPayments, ceilingAt, ceilingCursor}, "\x00"))
+	cursorAfter := ScanCursor{
+		Version: 2, CutoverAt: "2026-08-24T00:00:00Z",
+		WatermarkAt: ceilingAt, WatermarkCursor: ceilingCursor,
+		CeilingAt: ceilingAt, CeilingCursor: ceilingCursor, PositionCursor: ceilingCursor,
+		ScanCycleID: legacyCycleID, Completed: true,
+	}
+	sequence := &MemorySequenceStore{}
+	cursors := NewMemoryCursorStore()
+	pending := &MemoryPendingBatchStore{}
+	builder := BatchBuilder{
+		SchemaVersion: SchemaVersionV3, SourceInstanceID: sourceID, StreamID: StreamPayments,
+		SourceType: SourceSub2API, SourceRuntimeVersion: "0.1.179", AgentVersion: "rc29", Mode: "db_projection",
+	}
+	var legacyPending ValidatedBatch
+	first := &SyncCoordinator{
+		SourceID: sourceID, Connector: fixedConnector{page: ScanPage{NextCursor: cursorAfter}}, Cursors: cursors,
+		Publisher: &Publisher{Builder: builder, Store: sequence, Pending: pending,
+			Client: ingestFunc(func(_ context.Context, batch ValidatedBatch) (IngestAck, error) {
+				legacyPending = cloneValidatedBatchForTest(batch)
+				return IngestAck{}, errors.New("receiver rejected finalized legacy cycle")
+			})},
+	}
+	if _, _, err := first.SyncPage(ctx, ScanFull); err == nil {
+		t.Fatal("legacy pending fixture unexpectedly succeeded")
+	}
+	if legacyPending.Batch.ScanCycleID != legacyCycleID {
+		t.Fatal("legacy pending fixture did not carry the legacy cycle ID")
+	}
+
+	builder.AgentVersion = "rc30"
+	second := &SyncCoordinator{
+		SourceID: sourceID, Connector: failOnScanConnector{}, Cursors: cursors,
+		Publisher: &Publisher{Builder: builder, Store: sequence, Pending: pending,
+			Client: ingestFunc(func(_ context.Context, replayed ValidatedBatch) (IngestAck, error) {
+				if replayed.Batch.ScanCycleID != legacyCycleID || replayed.BodyHash != legacyPending.BodyHash || !bytes.Equal(replayed.RawBody, legacyPending.RawBody) {
+					t.Fatal("RC30 rebuilt or revision-salted an already durable legacy pending batch")
+				}
+				return IngestAck{Accepted: true, SourceInstanceID: sourceID, StreamID: StreamPayments,
+					BatchID: replayed.Batch.BatchID, Sequence: replayed.Batch.Sequence,
+					AcceptedRecords: len(replayed.Batch.Records), Duplicate: true}, nil
+			})},
+	}
+	page, _, err := second.SyncPage(ctx, ScanFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.ScanCycleID != legacyCycleID {
+		t.Fatal("pending-first recovery did not commit the exact legacy cursor")
 	}
 }
 

@@ -235,6 +235,27 @@ func TestSub2APIBridgePreservesFinancialAndCutoverSemantics(t *testing.T) {
 			t.Fatalf("live V3 check-db contract rejected stream=%s captured configuration: %v", stream, checkErr)
 		}
 	}
+	if _, err = admin.ExecContext(ctx, `DELETE FROM public.payment_orders WHERE id=4`); err != nil {
+		t.Fatal(err)
+	}
+	payments := &sourceagent.PaymentV3DBConnector{DB: admin, Source: sourceagent.SourceSub2API, Manifest: captured, SafetyDelay: time.Minute}
+	firstEmpty, err := payments.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanFull, Limit: 10})
+	if err != nil || !firstEmpty.ScanComplete || len(firstEmpty.Projections) != 0 {
+		t.Fatalf("first Sub2API empty payment cycle page=%#v err=%v", firstEmpty, err)
+	}
+	committed := firstEmpty.NextCursor
+	committed.Revision++ // Simulate the coordinator's successful cursor CAS.
+	secondEmpty, err := payments.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanFull, Cursor: committed, Limit: 10})
+	if err != nil || !secondEmpty.ScanComplete || len(secondEmpty.Projections) != 0 {
+		t.Fatalf("second Sub2API empty payment cycle page=%#v err=%v", secondEmpty, err)
+	}
+	if firstEmpty.ScanCeilingAt != secondEmpty.ScanCeilingAt || firstEmpty.ScanCeilingCursor != secondEmpty.ScanCeilingCursor {
+		t.Fatalf("empty-cycle fixture did not retain one ceiling first=%s/%s second=%s/%s",
+			firstEmpty.ScanCeilingAt, firstEmpty.ScanCeilingCursor, secondEmpty.ScanCeilingAt, secondEmpty.ScanCeilingCursor)
+	}
+	if firstEmpty.ScanCycleID == secondEmpty.ScanCycleID {
+		t.Fatal("successive committed Sub2API empty cycles reused the same scan cycle ID")
+	}
 	if _, err = sourceagent.CaptureCutover(ctx, cutoverReader, sourceagent.CutoverCaptureConfig{
 		SourceID: captured.SourceID, SourceType: captured.SourceType, SourceRuntime: captured.SourceRuntime,
 		SigningKeyID: "key-1", EligibilityStartAt: time.Now().UTC().Add(time.Hour),
@@ -321,6 +342,7 @@ func TestNewAPIBridgePreservesTransitionSafetyAndConfigurationDrift(t *testing.T
 	payments := &sourceagent.PaymentV3DBConnector{DB: admin, Source: sourceagent.SourceNewAPI, Manifest: manifest, SafetyDelay: time.Minute}
 	foundOld, foundFailed, foundUnknownPending := false, false, false
 	cursor := sourceagent.ScanCursor{}
+	cycleID := ""
 	for pages := 0; pages < 10; pages++ {
 		page, scanErr := payments.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanFull, Cursor: cursor, Limit: 2})
 		if scanErr != nil {
@@ -336,7 +358,13 @@ func TestNewAPIBridgePreservesTransitionSafetyAndConfigurationDrift(t *testing.T
 				foundUnknownPending = payload.WalletCashServiceUnits == nil && payload.VerificationState == sourceagent.VerificationPendingManual
 			}
 		}
+		if cycleID == "" {
+			cycleID = page.ScanCycleID
+		} else if page.ScanCycleID != cycleID {
+			t.Fatalf("New API multi-page payment cycle changed ID old=%q new=%q", cycleID, page.ScanCycleID)
+		}
 		cursor = page.NextCursor
+		cursor.Revision++ // Simulate the coordinator CAS between pages.
 		if !page.HasMore {
 			break
 		}

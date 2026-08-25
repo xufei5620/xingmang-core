@@ -312,6 +312,82 @@ but alerts must not rely on restart alone.
   sender private file/key ID, retain the previous receiver key through the retry
   window, then revoke it. Rotate a spool key only when no spool exists.
 
+### 8.1 Controlled pending inspection before an incident migration
+
+`inspect-pending` is evidence collection, not permission to reset or migrate a
+stream. Before this incident-only procedure, the operator must have an approved
+maintenance ticket, the exact currently bound source-agent image digest, a
+recovery copy of the entire stream directory plus its matching spool key, and a
+separate receiver-side sequence/commit check. Never modify Sub2API/New API or
+their databases for this inspection.
+
+The affected stream container must be stopped first. Prove that Compose reports
+no running container and that the dedicated state directory contains no lock.
+Do not stop an upstream application or another source stream merely to inspect
+one spool. Use `--no-deps`; never use `up`, and do not combine stderr with the
+JSON evidence file.
+
+```bash
+set -euo pipefail
+umask 077
+: "${TICKET_ID:?set the approved incident ticket id}"
+: "${SOURCE_STATE_ROOT:?export the exact reviewed source state root}"
+: "${SOURCE_SERVICE:?set the one approved affected Compose service}"
+source_service="$SOURCE_SERVICE"
+case "$source_service" in
+  sub2api-payments|sub2api-identities|sub2api-usage|sub2api-credits|sub2api-balances|\
+  newapi-payments|newapi-identities|newapi-usage|newapi-credits|newapi-balances) ;;
+  *) echo 'SOURCE_SERVICE is not an exact production source-agent service' >&2; exit 1 ;;
+esac
+state_dir="$SOURCE_STATE_ROOT/$source_service"
+evidence_dir="/root/invoice-system/incident-evidence/$TICKET_ID"
+compose=(docker compose --env-file deploy/.env.production \
+  -f deploy/docker-compose.sources.yml)
+
+install -d -m 0700 "$evidence_dir"
+"${compose[@]}" stop -t 30 "$source_service"
+test -z "$("${compose[@]}" ps --status running -q "$source_service")"
+test -z "$(find "$state_dir" -maxdepth 1 -type f -name '*.lock' -print -quit)"
+test -s "$state_dir/state.json"
+test -s "$state_dir/pending.enc"
+evidence_files=("$state_dir/state.json" "$state_dir/pending.enc")
+for optional_state in reconcile.json balance-current.enc; do
+  test ! -e "$state_dir/$optional_state" || evidence_files+=("$state_dir/$optional_state")
+done
+sha256sum "${evidence_files[@]}" >"$evidence_dir/files-before.sha256"
+
+"${compose[@]}" run --rm --no-deps --pull never -T "$source_service" inspect-pending \
+  >"$evidence_dir/pending.json.part"
+jq -e '
+  .inspection_schema_version == 1 and .pending == true and
+  (.batch.body_hash | test("^[0-9a-f]{64}$")) and
+  (.cursor_before.sha256 | test("^[0-9a-f]{64}$")) and
+  (.cursor_after.sha256 | test("^[0-9a-f]{64}$")) and
+  .consistency.source_stream == true and
+  .consistency.schema_runtime == true and
+  .consistency.body_hash == true and
+  .consistency.hash_chain == true and
+  .consistency.sequence == true and
+  .consistency.publish_revision == true and
+  .consistency.cursor == true and
+  .consistency.cursor_revision == true and
+  .consistency.batch_cursor_scan_metadata == true
+' "$evidence_dir/pending.json.part" >/dev/null
+mv "$evidence_dir/pending.json.part" "$evidence_dir/pending.json"
+(cd / && sha256sum -c "$evidence_dir/files-before.sha256")
+test -z "$(find "$state_dir" -maxdepth 1 -type f -name '*.lock' -print -quit)"
+```
+
+The JSON deliberately contains only identifiers, counts, SHA-256 values and
+consistency results. It contains no event records, raw cursor values, DSN,
+certificate/key bytes or tokens. Preserve it as mode 0600 incident evidence.
+If it reports `pending=true`, preserve state, `pending.enc`, balance snapshot
+(when applicable), spool key and receiver evidence as one generation. Do not
+delete the spool, initialize a replacement state, rotate its key or claim
+sequence zero. Any inspection error or ciphertext hash drift keeps the migration
+blocked. The one-time unused-candidate replacement procedure remains forbidden
+when any pending spool exists.
+
 ## 9. Reconciliation, dependency waits and version approval
 
 - Only a completed `full`/`reconcile` scan increments a missing-row counter.

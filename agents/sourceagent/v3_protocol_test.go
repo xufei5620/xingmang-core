@@ -101,6 +101,25 @@ func testV3Cursor(stream string, cycleSalt string) ScanCursor {
 		PositionCursor: stream + "_position:1", ScanCycleID: deterministicUUID(stream + "\x00" + cycleSalt)}
 }
 
+func TestEconomicScanCycleIDBindsCommittedCursorRevision(t *testing.T) {
+	const sourceID = "10000000-0000-4000-8000-000000000001"
+	const ceilingAt = "2026-08-25T00:00:00Z"
+	const ceilingCursor = "payment_orders:10"
+	legacy := deterministicUUID(strings.Join([]string{sourceID, StreamPayments, ceilingAt, ceilingCursor}, "\x00"))
+	first := deterministicEconomicScanCycleID(sourceID, StreamPayments, ceilingAt, ceilingCursor, 7)
+	retry := deterministicEconomicScanCycleID(sourceID, StreamPayments, ceilingAt, ceilingCursor, 7)
+	nextEmptyCycle := deterministicEconomicScanCycleID(sourceID, StreamPayments, ceilingAt, ceilingCursor, 8)
+	if first == legacy {
+		t.Fatal("revision-bound scan cycle ID reused the legacy four-field identity")
+	}
+	if first != retry {
+		t.Fatal("same committed cursor revision changed retry scan cycle ID")
+	}
+	if first == nextEmptyCycle {
+		t.Fatal("next empty cycle reused an already-published scan cycle ID")
+	}
+}
+
 func TestV3FactIdentityDoesNotDriftAcrossScanCycles(t *testing.T) {
 	manifest := testV3Manifest(t)
 	order := "21"
