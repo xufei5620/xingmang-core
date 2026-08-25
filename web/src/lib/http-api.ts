@@ -254,6 +254,7 @@ export type BackendSystemSettings = {
     port: number;
     starttls: boolean;
     credential_configured: boolean;
+    test_recipient_masked: string;
   };
   admin_access: {
     cidrs: string[];
@@ -848,6 +849,15 @@ export function mapAdminSettings(
       code: "INVALID_ELIGIBILITY_POLICY",
     });
   }
+  if (
+    typeof settings.smtp.test_recipient_masked !== "string" ||
+    !settings.smtp.test_recipient_masked.includes("***@") ||
+    /[\r\n\0]/.test(settings.smtp.test_recipient_masked)
+  ) {
+    throw new InvoiceApiError("SMTP 测试收件地址配置无效。", {
+      code: "INVALID_SMTP_TEST_RECIPIENT",
+    });
+  }
   return {
     revision: settings.revision,
     issuerConfigured: settings.issuer_configured,
@@ -865,6 +875,7 @@ export function mapAdminSettings(
       port: settings.smtp.port,
       startTLS: settings.smtp.starttls,
       credentialConfigured: settings.smtp.credential_configured,
+      testRecipientMasked: settings.smtp.test_recipient_masked,
     },
     adminAccess: {
       cidrs: settings.admin_access.cidrs,
@@ -2066,7 +2077,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       });
     } catch (error) {
       if (error instanceof InvoiceApiError && error.status === 503) {
-        throw new InvoiceApiError("需接通已验证管理员邮箱后启用测试邮件。", {
+        throw new InvoiceApiError("需配置 SMTP 凭据和独立测试收件邮箱后启用测试邮件。", {
           code: error.code,
           status: 503,
           retryable: true,

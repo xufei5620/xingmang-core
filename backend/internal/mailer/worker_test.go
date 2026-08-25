@@ -75,3 +75,22 @@ func TestMessageRejectsBearerOrUnexpectedLinkParameters(t *testing.T) {
 		t.Fatal("invoice email link accepted a bearer token parameter")
 	}
 }
+
+func TestSMTPTestMessageAcceptsOnlyExactApplicationRoot(t *testing.T) {
+	valid := Message{ID: "smtp-test-1", Kind: MessageSMTPTest, Recipient: "test@example.com", RequestNo: "SMTP-TEST-1", DownloadURL: "https://invoice.example/"}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid SMTP test message rejected: %v", err)
+	}
+	for _, link := range []string{
+		"https://invoice.example/records?request_id=fake",
+		"https://invoice.example/?recipient=attacker",
+		"https://invoice.example/?",
+		"https://user@invoice.example/",
+	} {
+		invalid := valid
+		invalid.DownloadURL = link
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("unsafe SMTP test link accepted: %s", link)
+		}
+	}
+}

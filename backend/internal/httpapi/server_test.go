@@ -428,6 +428,7 @@ func TestTypedInvoiceSettingsCASUpdatesLedgerMinimum(t *testing.T) {
 
 func TestTypedSMTPSettingsSecretIsWriteOnlyAndTestMailFailsClosed(t *testing.T) {
 	server, _ := settingsServer(t, []string{"203.0.113.8/32"}, nil)
+	server.smtpTestRecipient = "test-recipient@example.com"
 	body := `{"revision":1,"host":"smtp.qq.com","port":587,"from_address":"billing@qq.com","from_name":"发票中心","starttls":true,"authorization_code":"qq-secret-code"}`
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPut, "/api/v1/admin/settings/smtp", "203.0.113.8", body))
@@ -439,6 +440,9 @@ func TestTypedSMTPSettingsSecretIsWriteOnlyAndTestMailFailsClosed(t *testing.T) 
 	}
 	if !strings.Contains(recorder.Body.String(), `"credential_configured":true`) || !strings.Contains(recorder.Body.String(), `"from_address":"billing@qq.com"`) {
 		t.Fatalf("secret flag missing: %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"test_recipient_masked":"tes***@example.com"`) || strings.Contains(recorder.Body.String(), "test-recipient@example.com") {
+		t.Fatalf("test recipient was not safely masked: %s", recorder.Body.String())
 	}
 	var response struct {
 		Revision int64 `json:"revision"`
@@ -457,19 +461,31 @@ func TestTypedSMTPSettingsSecretIsWriteOnlyAndTestMailFailsClosed(t *testing.T) 
 	}
 }
 
+func TestSMTPSettingsRejectSenderEqualToFixedTestRecipient(t *testing.T) {
+	server, _ := settingsServer(t, []string{"203.0.113.8/32"}, nil)
+	server.smtpTestRecipient = "test-recipient@example.com"
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, adminRequest(http.MethodPut, "/api/v1/admin/settings/smtp", "203.0.113.8", `{"revision":1,"host":"smtp.qq.com","port":587,"from_address":"test-recipient@example.com","from_name":"发票中心","starttls":true,"authorization_code":"qq-secret-code"}`))
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "SMTP_TEST_RECIPIENT_CONFLICT") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestSMTPTestFailureLogsOnlySafeStage(t *testing.T) {
 	const sensitiveMarker = "provider-response-sensitive-marker"
 	var logs bytes.Buffer
 	server := &Server{
-		logger:         slog.New(slog.NewTextHandler(&logs, nil)),
-		smtpTestSender: failingSMTPTestSender{err: errors.New(sensitiveMarker)},
+		logger:            slog.New(slog.NewTextHandler(&logs, nil)),
+		smtpTestSender:    failingSMTPTestSender{err: errors.New(sensitiveMarker)},
+		smtpTestRecipient: "test-recipient@example.com",
+		adminSettings:     smtpTestSettings("sender@example.com"),
 		productionAuth: &ProductionAuth{LoadUser: func(context.Context, string) (SessionUser, error) {
 			return SessionUser{Email: "private-admin@example.com", EmailVerified: true}, nil
 		}},
 		publicOrigin: "https://invoice.example",
 		lastSMTPTest: make(map[string]time.Time),
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", strings.NewReader(`{}`))
 	request = request.WithContext(context.WithValue(request.Context(), identityKey, identity{UserID: "admin-user"}))
 	recorder := httptest.NewRecorder()
 	server.testEmail(recorder, request)
@@ -477,15 +493,113 @@ func TestSMTPTestFailureLogsOnlySafeStage(t *testing.T) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	logText := logs.String()
-	if !strings.Contains(logText, "failure_stage=other") || strings.Contains(logText, sensitiveMarker) || strings.Contains(logText, "private-admin@example.com") {
+	if !strings.Contains(logText, "failure_stage=other") || strings.Contains(logText, sensitiveMarker) || strings.Contains(logText, "private-admin@example.com") || strings.Contains(logText, "test-recipient@example.com") {
 		t.Fatalf("unsafe SMTP failure log: %s", logText)
 	}
+}
+
+func TestSMTPTestUsesFixedIndependentRecipientAndRejectsOverride(t *testing.T) {
+	newServer := func(sender mailer.Sender) *Server {
+		return &Server{
+			logger:            slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+			smtpTestSender:    sender,
+			smtpTestRecipient: "test-recipient@example.com",
+			adminSettings:     smtpTestSettings("sender@example.com"),
+			productionAuth: &ProductionAuth{LoadUser: func(context.Context, string) (SessionUser, error) {
+				return SessionUser{Email: "admin@example.com", EmailVerified: true}, nil
+			}},
+			publicOrigin: "https://invoice.example",
+			lastSMTPTest: make(map[string]time.Time),
+			operations:   smtpAuditOperations{},
+		}
+	}
+
+	capture := &capturingSMTPTestSender{}
+	server := newServer(capture)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", strings.NewReader(`{}`))
+	request = request.WithContext(context.WithValue(request.Context(), identityKey, identity{UserID: "admin-user"}))
+	recorder := httptest.NewRecorder()
+	server.testEmail(recorder, request)
+	if recorder.Code != http.StatusOK || capture.calls != 1 || capture.message.Recipient != "test-recipient@example.com" || capture.message.Kind != mailer.MessageSMTPTest {
+		t.Fatalf("status=%d calls=%d message=%+v", recorder.Code, capture.calls, capture.message)
+	}
+
+	for _, invalidBody := range []string{`{"recipient":"attacker@example.com"}`, `null`, `[]`, `"text"`} {
+		capture = &capturingSMTPTestSender{}
+		server = newServer(capture)
+		request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", strings.NewReader(invalidBody))
+		request = request.WithContext(context.WithValue(request.Context(), identityKey, identity{UserID: "admin-user"}))
+		recorder = httptest.NewRecorder()
+		server.testEmail(recorder, request)
+		if recorder.Code != http.StatusBadRequest || capture.calls != 0 {
+			t.Fatalf("body=%s status=%d calls=%d response=%s", invalidBody, recorder.Code, capture.calls, recorder.Body.String())
+		}
+	}
+}
+
+func TestSMTPTestRecipientValidationMaskingAndSenderConflict(t *testing.T) {
+	for _, value := range []string{"Display <test-recipient@example.com>", "test-recipient@example.com\r\nBcc:x@example.com", "not-an-email", "测试@example.com"} {
+		if _, err := normalizeSMTPTestRecipient(value); err == nil {
+			t.Fatalf("unsafe SMTP test recipient accepted: %q", value)
+		}
+	}
+	if value, err := normalizeSMTPTestRecipient("test-recipient@example.com"); err != nil || value != "test-recipient@example.com" {
+		t.Fatalf("recipient=%q err=%v", value, err)
+	}
+	if masked := maskSMTPTestRecipient("test-recipient@example.com"); masked != "tes***@example.com" {
+		t.Fatalf("masked recipient=%q", masked)
+	}
+
+	server := &Server{
+		smtpTestSender:    &capturingSMTPTestSender{},
+		smtpTestRecipient: "test-recipient@example.com",
+		adminSettings:     smtpTestSettings("test-recipient@example.com"),
+		productionAuth: &ProductionAuth{LoadUser: func(context.Context, string) (SessionUser, error) {
+			return SessionUser{Email: "admin@example.com", EmailVerified: true}, nil
+		}},
+		publicOrigin: "https://invoice.example", lastSMTPTest: make(map[string]time.Time), logger: slog.Default(),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", strings.NewReader(`{}`))
+	request = request.WithContext(context.WithValue(request.Context(), identityKey, identity{UserID: "admin-user"}))
+	recorder := httptest.NewRecorder()
+	server.testEmail(recorder, request)
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "SMTP_TEST_RECIPIENT_CONFLICT") {
+		t.Fatalf("conflict status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func smtpTestSettings(from string) *adminsettings.Service {
+	now := time.Now().UTC()
+	repo := adminsettings.NewMemoryRepository(adminsettings.Settings{
+		IssuerName: "示例科技有限公司", ServiceItem: adminsettings.FixedServiceItem,
+		MinimumRequestMinor: adminsettings.MinimumMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt,
+		SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: from, SMTPFromName: "发票中心", SMTPStartTLS: true,
+		AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, UpdatedBy: "test", CreatedAt: now, UpdatedAt: now,
+	})
+	return adminsettings.NewService(repo, httpSettingsBox{})
 }
 
 type failingSMTPTestSender struct{ err error }
 
 func (s failingSMTPTestSender) SendInvoiceReady(context.Context, mailer.Message) (string, error) {
 	return "", s.err
+}
+
+type capturingSMTPTestSender struct {
+	calls   int
+	message mailer.Message
+}
+
+type smtpAuditOperations struct{ OperationsService }
+
+func (smtpAuditOperations) RecordAdminAudit(context.Context, string, string, string, string, string) error {
+	return nil
+}
+
+func (s *capturingSMTPTestSender) SendInvoiceReady(_ context.Context, message mailer.Message) (string, error) {
+	s.calls++
+	s.message = message
+	return "smtp:test", nil
 }
 
 func TestLegacyIssuerPlaceholderDoesNotBlockSMTPOrAdminAccessSetup(t *testing.T) {

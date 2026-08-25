@@ -213,18 +213,28 @@ SPF, DKIM and DMARC must be configured before public delivery. Email is a
 notification only: do not attach invoices or place a permanent bearer download
 URL in the message. Delivery uses an idempotent outbox and a verified recipient.
 
-The administrator `Send test email` action is rate-limited, MFA step-up
-protected and restricted to the currently authenticated administrator's
-verified email. It cannot accept an arbitrary
+The administrator `Send test email` action is rate-limited and MFA step-up
+protected. Production must set `SMTP_TEST_RECIPIENT` to a dedicated, controlled
+mailbox that differs from the configured sender (for example,
+`invoice-test@example.com`). The actual deployment value belongs only in the
+root-managed production environment. The API returns only a masked form to the administrator
+UI and the request body must be exactly `{}`. It cannot accept an arbitrary
 recipient, attachment or template body, so the service cannot become an SMTP
 relay. Audit stores only the bounded operation outcome; raw SMTP dialogue,
 recipient address and authorization material are never persisted in audit.
+The administrator identity must still carry a verified email as an additional
+account-integrity gate, even though that address is not used as the recipient.
 
 Local mock mode may use Mailpit. Production has no `SMTP_PASSWORD` or
 `SMTP_PASSWORD_FILE` precedence: introducing a second secret source would make
 rotation ambiguous and is deliberately rejected by the deployment contract.
 Rotate or clear the credential only through the typed MFA/IP-protected settings
 command, then run the restricted test action.
+
+Keep three mailbox roles separate where practical: the administrator identity,
+the dedicated SMTP sender and the fixed independent test recipient. Sharing the
+administrator and sender mailbox is supported for V1 but increases the impact
+of a mailbox compromise and should be removed in a later hardening phase.
 
 ## 4. Administrator source-IP policy
 

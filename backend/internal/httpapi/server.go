@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/mail"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,7 @@ type Server struct {
 	sourceMode         string
 	readiness          func(context.Context) error
 	smtpTestSender     mailer.Sender
+	smtpTestRecipient  string
 	publicOrigin       string
 	smtpTestMu         sync.Mutex
 	lastSMTPTest       map[string]time.Time
@@ -63,16 +65,17 @@ type Config struct {
 	AdminIPAllowlist []string
 	// BreakGlassCIDRs are deployment-only recovery networks. They are never
 	// returned by the settings API and cannot be changed by an API request.
-	BreakGlassCIDRs []string
-	TrustedProxies  []string
-	DocumentStore   document.Store
-	AdminSettings   *adminsettings.Service
-	ProductionAuth  *ProductionAuth
-	SourceMode      string
-	Readiness       func(context.Context) error
-	SMTPTestSender  mailer.Sender
-	PublicOrigin    string
-	SourceIngest    http.Handler
+	BreakGlassCIDRs   []string
+	TrustedProxies    []string
+	DocumentStore     document.Store
+	AdminSettings     *adminsettings.Service
+	ProductionAuth    *ProductionAuth
+	SourceMode        string
+	Readiness         func(context.Context) error
+	SMTPTestSender    mailer.Sender
+	SMTPTestRecipient string
+	PublicOrigin      string
+	SourceIngest      http.Handler
 }
 
 func New(service InvoiceService, authMode string, logger *slog.Logger) *Server {
@@ -105,6 +108,13 @@ func NewWithConfig(service InvoiceService, cfg Config, logger *slog.Logger) (*Se
 	if err != nil {
 		return nil, fmt.Errorf("trusted proxies: %w", err)
 	}
+	smtpTestRecipient, err := normalizeSMTPTestRecipient(cfg.SMTPTestRecipient)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.SMTPTestSender != nil && cfg.ProductionAuth != nil && smtpTestRecipient == "" {
+		return nil, errors.New("production SMTP test recipient is required")
+	}
 	switch cfg.AuthMode {
 	case "mock":
 		if cfg.ProductionAuth != nil {
@@ -128,7 +138,7 @@ func NewWithConfig(service InvoiceService, cfg Config, logger *slog.Logger) (*Se
 	if sourceMode == "agent" && cfg.SourceIngest == nil {
 		return nil, errors.New("source ingestion handler is required in agent mode")
 	}
-	s := &Server{ledger: service, authMode: cfg.AuthMode, logger: logger, mux: http.NewServeMux(), adminNetworks: adminNetworks, breakGlassNetworks: breakGlassNetworks, trustedProxies: trustedProxies, documentStore: cfg.DocumentStore, adminSettings: cfg.AdminSettings, productionAuth: cfg.ProductionAuth, operations: operations, sourceMode: sourceMode, readiness: cfg.Readiness, smtpTestSender: cfg.SMTPTestSender, publicOrigin: strings.TrimRight(cfg.PublicOrigin, "/"), lastSMTPTest: make(map[string]time.Time), sourceIngest: cfg.SourceIngest}
+	s := &Server{ledger: service, authMode: cfg.AuthMode, logger: logger, mux: http.NewServeMux(), adminNetworks: adminNetworks, breakGlassNetworks: breakGlassNetworks, trustedProxies: trustedProxies, documentStore: cfg.DocumentStore, adminSettings: cfg.AdminSettings, productionAuth: cfg.ProductionAuth, operations: operations, sourceMode: sourceMode, readiness: cfg.Readiness, smtpTestSender: cfg.SMTPTestSender, smtpTestRecipient: smtpTestRecipient, publicOrigin: strings.TrimRight(cfg.PublicOrigin, "/"), lastSMTPTest: make(map[string]time.Time), sourceIngest: cfg.SourceIngest}
 	s.routes()
 	return s, nil
 }
@@ -410,7 +420,7 @@ func (s *Server) settingsResponse(settings adminsettings.Settings, r *http.Reque
 		"eligibility_policy_version": settings.EligibilityPolicyVersion,
 		"eligibility_timezone":       adminsettings.EligibilityDisplayTimeZone,
 		"eligibility_rule":           "payment_and_usage_at_or_after",
-		"smtp":                       map[string]any{"host": settings.SMTPHost, "port": settings.SMTPPort, "from_address": settings.SMTPFrom, "from_name": settings.SMTPFromName, "starttls": settings.SMTPStartTLS, "credential_configured": settings.SMTPSecretConfigured},
+		"smtp":                       map[string]any{"host": settings.SMTPHost, "port": settings.SMTPPort, "from_address": settings.SMTPFrom, "from_name": settings.SMTPFromName, "starttls": settings.SMTPStartTLS, "credential_configured": settings.SMTPSecretConfigured, "test_recipient_masked": maskSMTPTestRecipient(s.smtpTestRecipient)},
 		"admin_access":               map[string]any{"cidrs": settings.AdminCIDRs, "current_ip": s.requestClientIP(r).String(), "bootstrap_access": s.requestUsesBootstrap(r)},
 	}
 }
@@ -494,6 +504,10 @@ func (s *Server) updateSMTPSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "INVALID_SMTP_SECRET_ACTION", "authorization_code cannot be empty")
 		return
 	}
+	if s.smtpTestRecipient != "" && strings.EqualFold(strings.TrimSpace(body.FromAddress), s.smtpTestRecipient) {
+		writeError(w, http.StatusUnprocessableEntity, "SMTP_TEST_RECIPIENT_CONFLICT", "SMTP sender and fixed test recipient must be different")
+		return
+	}
 	current, ok := s.currentSettings(w, r, body.Revision)
 	if !ok {
 		return
@@ -556,14 +570,31 @@ func (s *Server) updateAdminAccessSettings(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
-	if s.smtpTestSender == nil || s.productionAuth == nil || s.publicOrigin == "" {
+	if s.smtpTestSender == nil || s.productionAuth == nil || s.adminSettings == nil || s.publicOrigin == "" || s.smtpTestRecipient == "" {
 		writeError(w, http.StatusServiceUnavailable, "TEST_EMAIL_NOT_CONNECTED", "test email delivery requires production authentication and SMTP")
+		return
+	}
+	var body *struct{}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be an empty JSON object")
 		return
 	}
 	adminID := principal(r).UserID
 	user, err := s.productionAuth.LoadUser(r.Context(), adminID)
 	if err != nil || !user.EmailVerified || strings.TrimSpace(user.Email) == "" {
 		writeError(w, http.StatusUnprocessableEntity, "ADMIN_EMAIL_NOT_VERIFIED", "current administrator email must be verified")
+		return
+	}
+	settings, err := s.adminSettings.Get(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "TEST_EMAIL_NOT_CONNECTED", "test email delivery requires production authentication and SMTP")
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(settings.SMTPFrom), s.smtpTestRecipient) {
+		writeError(w, http.StatusUnprocessableEntity, "SMTP_TEST_RECIPIENT_CONFLICT", "SMTP sender and fixed test recipient must be different")
 		return
 	}
 	now := time.Now().UTC()
@@ -581,7 +612,7 @@ func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
 	s.smtpTestMu.Unlock()
 	messageID := requestID(r)
 	_, err = s.smtpTestSender.SendInvoiceReady(r.Context(), mailer.Message{
-		ID: messageID, Kind: mailer.MessageSMTPTest, Recipient: user.Email,
+		ID: messageID, Kind: mailer.MessageSMTPTest, Recipient: s.smtpTestRecipient,
 		RequestNo:   "SMTP-TEST-" + strings.ToUpper(messageID[:min(len(messageID), 12)]),
 		DownloadURL: s.publicOrigin + "/", CreatedAt: now,
 	})
@@ -599,6 +630,31 @@ func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Info("SMTP test email delivered", "admin_id", adminID, "request_id", messageID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func normalizeSMTPTestRecipient(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := mail.ParseAddress(value)
+	if err != nil || len(value) > 320 || parsed.Name != "" || parsed.Address != value || strings.ContainsAny(value, "\r\n\x00") || strings.IndexFunc(value, func(character rune) bool { return character < 33 || character > 126 }) >= 0 {
+		return "", errors.New("SMTP test recipient must be one exact email address")
+	}
+	return value, nil
+}
+
+func maskSMTPTestRecipient(value string) string {
+	separator := strings.LastIndexByte(value, '@')
+	if separator <= 0 || separator == len(value)-1 {
+		return ""
+	}
+	local := value[:separator]
+	visible := 3
+	if len(local) < visible {
+		visible = 1
+	}
+	return local[:visible] + "***@" + value[separator+1:]
 }
 
 func handleSettingsError(w http.ResponseWriter, err error) {

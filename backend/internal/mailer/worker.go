@@ -42,7 +42,16 @@ func (m Message) Validate() error {
 		return errors.New("request number contains invalid characters")
 	}
 	parsed, err := url.Parse(m.DownloadURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || parsed.Path != "/records" {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return errors.New("invoice link must be the absolute HTTPS records UI route")
+	}
+	if m.Kind == MessageSMTPTest {
+		if parsed.Path != "/" || parsed.RawQuery != "" || parsed.ForceQuery {
+			return errors.New("SMTP test link must be the exact HTTPS application root")
+		}
+		return nil
+	}
+	if parsed.Path != "/records" {
 		return errors.New("invoice link must be the absolute HTTPS records UI route")
 	}
 	query := parsed.Query()

@@ -146,6 +146,7 @@ $productionEnv = @{
     KEYCLOAK_EDGE_GATEWAY = '172.30.254.1'
     KC_PROXY_TRUSTED_ADDRESSES = '172.30.254.1/32'
     TRUSTED_PROXY_CIDRS = '172.30.250.1/32'
+    SMTP_TEST_RECIPIENT = 'invoice-test-recipient@example.invalid'
     INVOICE_PROXY_SUBNET = '172.30.250.0/28'
     INVOICE_PROXY_GATEWAY_IP = '172.30.250.1'
     INVOICE_INGEST_SUBNET = '172.30.251.0/27'
@@ -198,7 +199,8 @@ try {
         [int]$renderedProduction.services.api.networks.invoice_proxy.gw_priority -ne 1 -or
         $renderedProduction.services.api.environment.TRUSTED_PROXY_CIDRS -ne "$($invoiceProxyIPAM.gateway)/32" -or
         $renderedProduction.services.api.environment.OIDC_LOGOUT_TOKEN_MAX_AGE -ne $productionEnv.OIDC_LOGOUT_TOKEN_MAX_AGE -or
-        $renderedProduction.services.api.environment.OIDC_MAX_HTTP_RESPONSE_BYTES -ne $productionEnv.OIDC_MAX_HTTP_RESPONSE_BYTES) {
+        $renderedProduction.services.api.environment.OIDC_MAX_HTTP_RESPONSE_BYTES -ne $productionEnv.OIDC_MAX_HTTP_RESPONSE_BYTES -or
+        $renderedProduction.services.api.environment.SMTP_TEST_RECIPIENT -ne $productionEnv.SMTP_TEST_RECIPIENT) {
         throw 'invoice API trusted proxy/default gateway does not equal the exact configured bridge gateway /32'
     }
     if ($renderedProduction.services.api.environment.ELIGIBILITY_START_AT -cne $productionEnv.ELIGIBILITY_START_AT -or

@@ -343,8 +343,9 @@ template ID, message ID and delivery status.
 SMTP authorization material is write-only. It is accepted only through a
 step-up protected rotate command, AES-GCM encrypted with the field keyring in a
 dedicated secret row, and never returned or included in audit bodies. Test email
-is restricted to the current administrator's verified address and cannot carry
-an attachment or arbitrary content.
+is sent only to the deployment-fixed independent recipient, which must differ
+from the sender. The API exposes only its masked form and rejects any request
+body that attempts to supply a recipient, attachment or arbitrary content.
 
 The production mailer supports only STARTTLS with hostname/certificate
 validation and an exact host allowlist: `smtp.qq.com`, `smtp.exmail.qq.com`, or

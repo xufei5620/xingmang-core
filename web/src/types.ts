@@ -351,6 +351,7 @@ export interface InvoiceSystemSettings {
     port: number;
     startTLS: boolean;
     credentialConfigured: boolean;
+    testRecipientMasked: string;
   };
   adminAccess: {
     cidrs: string[];

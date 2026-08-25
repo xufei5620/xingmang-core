@@ -158,6 +158,10 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, fmt.Errorf("production admin settings must be bootstrapped: %w", err)
 	}
+	smtpTestRecipient := strings.TrimSpace(os.Getenv("SMTP_TEST_RECIPIENT"))
+	if smtpTestRecipient != "" && strings.EqualFold(smtpTestRecipient, strings.TrimSpace(settings.SMTPFrom)) {
+		return appRuntime{}, errors.New("SMTP_TEST_RECIPIENT must differ from the configured SMTP sender")
+	}
 	// An unconfigured issuer must not prevent the API from starting: the
 	// protected admin UI is the only supported path for replacing the bootstrap
 	// placeholder. Saving settings and confirming an issue remain fail closed.
@@ -311,7 +315,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		AuthMode: "oidc", SourceMode: "agent", AdminIPAllowlist: settings.AdminCIDRs,
 		BreakGlassCIDRs: breakGlass, TrustedProxies: trustedProxies,
 		DocumentStore: documentStore, AdminSettings: settingsService, ProductionAuth: productionAuth,
-		SMTPTestSender: mailer.SettingsSender{Source: settingsService}, PublicOrigin: publicOrigin,
+		SMTPTestSender: mailer.SettingsSender{Source: settingsService}, SMTPTestRecipient: smtpTestRecipient, PublicOrigin: publicOrigin,
 		SourceIngest: receiver,
 		Readiness: func(readyCtx context.Context) error {
 			if pingErr := store.Pool().Ping(readyCtx); pingErr != nil {

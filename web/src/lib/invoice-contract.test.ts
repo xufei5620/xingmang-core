@@ -158,6 +158,7 @@ describe("immutable invoice eligibility policy contract", () => {
         port: 587,
         starttls: true,
         credential_configured: true,
+        test_recipient_masked: "tes***@example.com",
       },
       admin_access: { cidrs: ["203.0.113.8/32"], current_ip: "203.0.113.8" },
     };
@@ -165,6 +166,7 @@ describe("immutable invoice eligibility policy contract", () => {
       revision: 3,
       eligibilityStartAt: requiredEligibilityStartAt,
       eligibilityPolicyVersion: 1,
+      smtp: { testRecipientMasked: "tes***@example.com" },
     });
     expect(() =>
       mapAdminSettings({ ...settings, eligibility_policy_version: 0 }),

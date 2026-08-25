@@ -208,6 +208,7 @@ services:
       SOURCE_MODE: agent
       HTTP_ADDR: :8088
       PUBLIC_ORIGIN: https://invoice.solov.cc
+      SMTP_TEST_RECIPIENT: ${SMTP_TEST_RECIPIENT:?set a dedicated test recipient different from the SMTP sender}
       ELIGIBILITY_START_AT: ${ELIGIBILITY_START_AT:?set the immutable invoice eligibility start}
       DATABASE_URL_FILE: /run/secrets/invoice_app_database_url
       FIELD_KEYRING_FILE: /run/secrets/invoice_field_keyring

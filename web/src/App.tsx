@@ -61,6 +61,7 @@ import {
 } from "react-router-dom";
 
 import { dateTime, maskTaxId, money } from "./lib/format";
+import { shouldShowAdminReturn } from "./lib/portal-navigation";
 import { apiCapabilities, apiMode, invoiceApi } from "./lib/api";
 import { InvoiceApiError } from "./lib/api-contract";
 import {
@@ -352,7 +353,7 @@ function PortalLayout({
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { loadError, refresh } = useData();
-  const { user, logout } = useAuth();
+  const { user, logout, stepUpRequired } = useAuth();
   const toast = useContext(ToastContext);
   const location = useLocation();
   const nav = admin ? adminNav : userNav;
@@ -420,6 +421,18 @@ function PortalLayout({
               </NavLink>
             );
           })}
+          {shouldShowAdminReturn(admin, user?.role, stepUpRequired) && (
+            <NavLink
+              to="/admin"
+              target={embedded ? "_top" : undefined}
+              className={({ isActive }) =>
+                isActive ? "nav-item nav-item-active" : "nav-item"
+              }
+            >
+              <ShieldCheck size={18} />
+              <span>返回管理端</span>
+            </NavLink>
+          )}
         </nav>
 
         <div className="sidebar-spacer" />
@@ -4107,7 +4120,8 @@ function SystemSettingsPage() {
                 <div className="verified-recipient-note">
                   <AtSign size={17} />
                   <span>
-                    测试邮件只发送至当前已验证管理员邮箱，不接受自定义收件人。
+                    测试邮件固定发送至独立收件邮箱
+                    {settings.smtp.testRecipientMasked}，不接受自定义收件人。
                   </span>
                 </div>
                 <button
@@ -4120,7 +4134,7 @@ function SystemSettingsPage() {
                     void run(
                       "smtp-test",
                       () => invoiceApi.sendSMTPTest(),
-                      "测试邮件已发送至已验证管理员邮箱。",
+                      `测试邮件已发送至 ${settings.smtp.testRecipientMasked}。`,
                     )
                   }
                 >

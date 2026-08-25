@@ -259,6 +259,7 @@ let systemSettings: InvoiceSystemSettings = {
     port: 587,
     startTLS: true,
     credentialConfigured: false,
+    testRecipientMasked: "tes***@example.com",
   },
   adminAccess: {
     cidrs: ["127.0.0.1/32", "::1/128"],
@@ -1036,6 +1037,7 @@ export const mockInvoiceApi: InvoiceApiClient = {
       credentialConfigured:
         Boolean(input.authorizationCode) ||
         systemSettings.smtp.credentialConfigured,
+      testRecipientMasked: systemSettings.smtp.testRecipientMasked,
     };
     systemSettings.revision += 1;
   },
