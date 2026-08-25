@@ -30,7 +30,11 @@ foreach ($required in @(
     "SELECT source_instance_id::text||'|'||event_id::text",
     'FROM cleanup_keep ORDER BY source_instance_id,event_id',
     'FROM cleanup_purge ORDER BY source_instance_id,event_id',
-    'BEGIN ISOLATION LEVEL SERIALIZABLE',
+    'BEGIN READ WRITE',
+    'ON COMMIT PRESERVE ROWS',
+    'BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE',
+    'BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY',
+    'INSERT INTO cleanup_target',
     'SET LOCAL synchronous_commit=on',
     "SET LOCAL transaction_timeout='2h'",
     'source_economic_scan_cycle_events_event_fk_idx',
@@ -44,6 +48,26 @@ foreach ($required in @(
     if (-not $sql.Contains($required, [StringComparison]::Ordinal)) {
         throw "cleanup SQL contract missing: $required"
     }
+}
+if ($sql -match 'CREATE\s+TEMP(?:ORARY)?\s+TABLE[\s\S]*?\s+AS\s+(?:SELECT|WITH)' -or
+    $sql.Contains('ON COMMIT DROP', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'cleanup SQL recreates temporary objects inside the read-only plan transaction'
+}
+$bootstrapStart = $sql.IndexOf('BEGIN READ WRITE;', [StringComparison]::Ordinal)
+$planTransaction = $sql.IndexOf('BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;', [StringComparison]::Ordinal)
+$firstDelete = $sql.IndexOf('DELETE FROM public.source_economic_scan_cycle_events', [StringComparison]::Ordinal)
+$planRollback = $sql.IndexOf("ROLLBACK;`n\quit", [StringComparison]::Ordinal)
+if ($bootstrapStart -lt 0 -or $planTransaction -le $bootstrapStart -or
+    $firstDelete -le $planTransaction -or $planRollback -le $planTransaction -or
+    $planRollback -ge $firstDelete) {
+    throw 'cleanup plan transaction or rollback/delete ordering is unsafe'
+}
+$bootstrapBlock = $sql.Substring($bootstrapStart, $planTransaction - $bootstrapStart)
+if ([regex]::Matches($bootstrapBlock, 'CREATE\s+TEMP\s+TABLE', 'IgnoreCase').Count -ne 9 -or
+    [regex]::Matches($bootstrapBlock, 'ON\s+COMMIT\s+PRESERVE\s+ROWS', 'IgnoreCase').Count -ne 9 -or
+    $sql.IndexOf('CREATE TEMP TABLE', $planTransaction, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    $sql.IndexOf('ALTER TABLE', $planTransaction, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    throw 'cleanup temporary-table bootstrap escaped the explicit read-write preamble'
 }
 $mappingDelete = $sql.IndexOf('DELETE FROM public.source_economic_scan_cycle_events', [StringComparison]::Ordinal)
 $eventDelete = $sql.IndexOf('DELETE FROM public.source_ingest_events', [StringComparison]::Ordinal)

@@ -27,7 +27,85 @@
   \quit 2
 \endif
 
-BEGIN ISOLATION LEVEL SERIALIZABLE;
+-- PostgreSQL read-only transactions reject every CREATE/ALTER command, even
+-- for temporary objects.  Define the session-local work tables in a short,
+-- explicit read-write transaction, then run the entire plan path under a
+-- SERIALIZABLE READ ONLY transaction.  The apply path uses the same tables but
+-- explicitly opts into READ WRITE below.
+BEGIN READ WRITE;
+CREATE TEMP TABLE cleanup_target(
+  source_instance_id uuid NOT NULL,
+  stream_id text NOT NULL,
+  event_id uuid NOT NULL,
+  dependency_key_hmac text NOT NULL,
+  scan_cycle_id uuid NOT NULL,
+  batch_id uuid NOT NULL,
+  scan_ceiling_at timestamptz NOT NULL,
+  scan_snapshot_id char(64),
+  baseline_snapshot_hash char(64) NOT NULL,
+  cutover_at timestamptz NOT NULL,
+  sequence bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY(source_instance_id,stream_id,event_id),
+  UNIQUE(source_instance_id,stream_id,scan_cycle_id,event_id)
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_ranked(
+  source_instance_id uuid NOT NULL,
+  stream_id text NOT NULL,
+  event_id uuid NOT NULL,
+  dependency_key_hmac text NOT NULL,
+  scan_cycle_id uuid NOT NULL,
+  batch_id uuid NOT NULL,
+  scan_ceiling_at timestamptz NOT NULL,
+  scan_snapshot_id char(64),
+  baseline_snapshot_hash char(64) NOT NULL,
+  cutover_at timestamptz NOT NULL,
+  batch_sequence bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  first_rank bigint NOT NULL,
+  last_rank bigint NOT NULL
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_keep(
+  source_instance_id uuid NOT NULL,
+  stream_id text NOT NULL,
+  event_id uuid NOT NULL,
+  PRIMARY KEY(source_instance_id,stream_id,event_id)
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_purge(
+  source_instance_id uuid NOT NULL,
+  stream_id text NOT NULL,
+  event_id uuid NOT NULL,
+  scan_cycle_id uuid NOT NULL,
+  PRIMARY KEY(source_instance_id,stream_id,event_id),
+  UNIQUE(source_instance_id,stream_id,scan_cycle_id,event_id)
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_guard_before(
+  object_name text PRIMARY KEY,
+  row_count bigint NOT NULL
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_status_before(
+  processing_status text NOT NULL,
+  row_count bigint NOT NULL
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_baseline_metrics(
+  non_target_events bigint NOT NULL,
+  non_target_mappings bigint NOT NULL
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_delete_counts(
+  kind text PRIMARY KEY,
+  row_count bigint NOT NULL
+) ON COMMIT PRESERVE ROWS;
+CREATE TEMP TABLE cleanup_guard_after(
+  object_name text PRIMARY KEY,
+  row_count bigint NOT NULL
+) ON COMMIT PRESERVE ROWS;
+COMMIT;
+
+\if :apply_cleanup
+BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE;
+\else
+BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;
+\endif
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='2h';
 SET LOCAL idle_in_transaction_session_timeout='10min';
@@ -114,7 +192,7 @@ BEGIN
 END;
 $$;
 
-CREATE TEMP TABLE cleanup_target ON COMMIT DROP AS
+INSERT INTO cleanup_target
 SELECT event.source_instance_id,event.stream_id,event.event_id,event.dependency_key_hmac,
        mapped.scan_cycle_id,mapped.batch_id,cycle.scan_ceiling_at,
        cycle.scan_snapshot_id,manifest.baseline_snapshot_hash,manifest.cutover_at,
@@ -143,11 +221,7 @@ WHERE event.stream_id='balances'
   AND batch.schema_version='3.0'
   AND cycle.scan_ceiling_at<'2026-09-01T00:00:00+08:00'::timestamptz;
 
-ALTER TABLE cleanup_target
-  ADD PRIMARY KEY(source_instance_id,stream_id,event_id),
-  ADD UNIQUE(source_instance_id,stream_id,scan_cycle_id,event_id);
-
-CREATE TEMP TABLE cleanup_ranked ON COMMIT DROP AS
+INSERT INTO cleanup_ranked
 SELECT target.*,
        row_number() OVER (
          PARTITION BY source_instance_id,dependency_key_hmac
@@ -164,21 +238,17 @@ FROM (
   FROM cleanup_target
 ) target;
 
-CREATE TEMP TABLE cleanup_keep ON COMMIT DROP AS
+INSERT INTO cleanup_keep
 SELECT source_instance_id,stream_id,event_id
 FROM cleanup_ranked WHERE first_rank=1 OR last_rank=1;
-ALTER TABLE cleanup_keep ADD PRIMARY KEY(source_instance_id,stream_id,event_id);
 
-CREATE TEMP TABLE cleanup_purge ON COMMIT DROP AS
+INSERT INTO cleanup_purge
 SELECT target.source_instance_id,target.stream_id,target.event_id,target.scan_cycle_id
 FROM cleanup_target target
 LEFT JOIN cleanup_keep keep
   ON keep.source_instance_id=target.source_instance_id
  AND keep.stream_id=target.stream_id AND keep.event_id=target.event_id
 WHERE keep.event_id IS NULL;
-ALTER TABLE cleanup_purge
-  ADD PRIMARY KEY(source_instance_id,stream_id,event_id),
-  ADD UNIQUE(source_instance_id,stream_id,scan_cycle_id,event_id);
 
 DO $$
 DECLARE
@@ -237,10 +307,6 @@ BEGIN
 END;
 $$;
 
-CREATE TEMP TABLE cleanup_guard_before(
-  object_name text PRIMARY KEY,
-  row_count bigint NOT NULL
-) ON COMMIT DROP;
 INSERT INTO cleanup_guard_before VALUES
   ('source_ingest_state',(SELECT count(*) FROM public.source_ingest_state)),
   ('source_ingest_batches',(SELECT count(*) FROM public.source_ingest_batches)),
@@ -265,7 +331,7 @@ INSERT INTO cleanup_guard_before VALUES
   ('audit_events',(SELECT count(*) FROM public.audit_events)),
   ('schema_migrations',(SELECT count(*) FROM public.schema_migrations));
 
-CREATE TEMP TABLE cleanup_status_before ON COMMIT DROP AS
+INSERT INTO cleanup_status_before
 SELECT processing_status,count(*) AS row_count
 FROM public.source_ingest_events event
 WHERE NOT EXISTS (
@@ -275,7 +341,7 @@ WHERE NOT EXISTS (
 )
 GROUP BY processing_status;
 
-CREATE TEMP TABLE cleanup_baseline_metrics ON COMMIT DROP AS
+INSERT INTO cleanup_baseline_metrics
 SELECT
   (SELECT count(*) FROM public.source_ingest_events)-1879297::bigint AS non_target_events,
   (SELECT count(*) FROM public.source_economic_scan_cycle_events)-1879297::bigint AS non_target_mappings;
@@ -343,7 +409,6 @@ ROLLBACK;
 \quit
 \endif
 
-CREATE TEMP TABLE cleanup_delete_counts(kind text PRIMARY KEY,row_count bigint NOT NULL) ON COMMIT DROP;
 WITH deleted AS (
   DELETE FROM public.source_economic_scan_cycle_events mapped
   USING cleanup_purge purge
@@ -376,7 +441,6 @@ BEGIN
 END;
 $$;
 
-CREATE TEMP TABLE cleanup_guard_after(LIKE cleanup_guard_before INCLUDING ALL) ON COMMIT DROP;
 INSERT INTO cleanup_guard_after VALUES
   ('source_ingest_state',(SELECT count(*) FROM public.source_ingest_state)),
   ('source_ingest_batches',(SELECT count(*) FROM public.source_ingest_batches)),

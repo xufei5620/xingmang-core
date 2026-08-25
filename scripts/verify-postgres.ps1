@@ -110,6 +110,33 @@ try {
         }
         if (-not $migrationSucceeded) { throw 'migration command failed after host-port retries' }
 
+        # Exercise the production cleanup plan under PostgreSQL's real
+        # read-only enforcement.  An empty fixture must advance past the
+        # session-temp bootstrap and fail only at the deliberately production-
+        # exact tuple gate.  This catches CREATE/ALTER/CTAS regressions that a
+        # string-only verifier cannot detect.
+        $cleanupSQL = Get-Content -Raw (Join-Path $projectRoot 'deploy\postgres\balance-history-cleanup.sql')
+        $cleanupProbeOutput = $cleanupSQL | docker exec -i `
+            --env 'PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=2min -c lock_timeout=5s' `
+            $containerName psql -X -q -v ON_ERROR_STOP=1 -U $databaseUser -d $databaseName `
+            -v apply_cleanup=false `
+            -v keep_rows_path=/tmp/solov-cleanup-probe-keep.rows `
+            -v purge_rows_path=/tmp/solov-cleanup-probe-purge.rows -f - 2>&1
+        $cleanupProbeExit = $LASTEXITCODE
+        $cleanupProbeText = @($cleanupProbeOutput) -join "`n"
+        if ($cleanupProbeExit -eq 0 -or
+            -not $cleanupProbeText.Contains('balance history cleanup tuple mismatch', [StringComparison]::Ordinal) -or
+            $cleanupProbeText.Contains('cannot execute CREATE TABLE', [StringComparison]::OrdinalIgnoreCase) -or
+            $cleanupProbeText.Contains('cannot execute ALTER TABLE', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "balance cleanup read-only transaction probe failed at the wrong gate: $cleanupProbeText"
+        }
+        $persistentCleanupRelations = docker exec $containerName psql -X -q -At -v ON_ERROR_STOP=1 `
+            -U $databaseUser -d $databaseName `
+            -c "SELECT count(*) FROM pg_catalog.pg_class WHERE relname LIKE 'cleanup\_%' ESCAPE '\';"
+        if ($LASTEXITCODE -ne 0 -or [int64]$persistentCleanupRelations -ne 0) {
+            throw 'balance cleanup read-only transaction probe left a persistent relation'
+        }
+
         $env:INVOICE_TEST_DATABASE_URL = $databaseUrl
         Invoke-PostgresGoTestWithRetry -Package './internal/postgresstore' -FailureMessage 'PostgreSQL integration tests failed'
         Invoke-PostgresGoTestWithRetry -Package './internal/adminsettings' -FailureMessage 'admin settings PostgreSQL integration tests failed'
