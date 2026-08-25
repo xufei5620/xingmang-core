@@ -400,12 +400,115 @@ the admin hostname and `https://auth.solov.cc/realms/master/` must return 403.
 Public discovery under `https://auth.solov.cc/realms/solov/` must still work.
 Do not expose Keycloak port `9000`.
 
-The optimized image uses a 2 GiB memory limit. Immediately create a different,
-named permanent administrator, enroll and test TOTP/LoA2, and confirm it can
-administer the realm in a fresh browser. Then delete (preferred) or disable the
-temporary bootstrap account. Stop Keycloak, delete the bootstrap password file,
-remove its username from the host environment, and restart with the base file
-only:
+The optimized image uses a 2 GiB memory limit. Create the permanent master
+administrator with the create-only operator; do not type or pass a target email
+or SMTP value to it:
+
+```bash
+AGE_RECIPIENT_FILE=/root/invoice-system/config/backup-recipients.txt \
+AGE_IDENTITY_FILE=/root/invoice-system/offline-mount/backup-age-identity \
+BACKUP_SIGNING_KEY_FILE=/root/invoice-system/offline-mount/backup-signing-key \
+BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
+KEYCLOAK_BOOTSTRAP_PASSWORD_FILE=/root/invoice-system/secrets/keycloak_bootstrap_admin_password \
+  bash deploy/keycloak/run-permanent-master-admin-maintenance.sh
+```
+
+The fixed `/root/invoice-system/keycloak-backups` directory must already be
+`root:root 0700` on a non-ephemeral filesystem. The age identity and
+Ed25519 signing key are temporarily mounted offline material and must not live
+under the backup directory. RC38 installation must create root-only
+`SOURCE_COMMIT`, `SOURCE_TAG`, `KEYCLOAK_IMAGE`, `SMTP_TRANSPORT` and an exact
+six-entry `RELEASE-TREE.sha256`, then sign it with the release key under the
+dedicated release-tree namespace. The production operator re-verifies this
+attestation using the independent root-only release-tree trust file. This is a
+signed installed-tree attestation; the deployment wrapper must separately
+verify the Git tag signature and peeled tag commit before generating it.
+
+Before the mail window, rebuild/recreate the exact RC38 Keycloak container and
+prove its immutable image ID plus the explicit default TLS hostname verifier
+and disabled Kubernetes truststore environment. Run the negative wrong-hostname
+SMTP canary when available; do not use this operator to send from an older
+container or an unverified truststore-provider state.
+
+The maintenance wrapper encrypts and signs the original administrator
+allowlist, atomically installs a loopback-only allowlist, tests/reloads Nginx
+and proves a public non-loopback request is denied. Its exit trap atomically
+restores the byte-identical original file and reloads Nginx on both success and
+failure. It never widens the approved list. The operator also takes a fixed
+global lock and independently verifies the active loopback-only file.
+
+Because the approved in-app browser egress cannot be reproduced from SSH, the
+wrapper pauses on three explicit sentinels. From that same browser, verify the
+admin route is reachable and reply `confirm-preflight-auth-admin-reachable`;
+after the freeze verify both admin/master routes return 403 and reply
+`confirm-frozen-auth-admin-master-403`; after restoration verify they are no
+longer 403 and reply `confirm-restored-auth-admin-master-non403`. Timeout, EOF
+or any other reply restores the exact original allowlist and exits failed.
+
+The operator then performs these fail-closed gates in order:
+
+1. create a complete encrypted Keycloak PostgreSQL dump, restore it into the
+   exact pinned PostgreSQL image with `--network none`, verify the restored
+   `master`, `solov` and source SMTP records, and sign the backup manifest;
+2. `sync -f` every encrypted backup/proof/manifest/signature and both containing
+   directories. It prints `backup_ready` and blocks without an Admin token.
+   Download the four-file encrypted set to an off-host persistent location,
+   run `scripts/create-keycloak-offsite-ack.ps1` to verify the backup signature
+   and component hashes, upload its independently signed `OFFSITE-ACK` pair,
+   then send the exact stdin word `continue`. Timeout, EOF, bad hash or bad
+   off-site signature exits before mutation;
+3. obtain a short-lived Admin REST token using the bootstrap secret through
+   `password@FILE`; token, target identity and SMTP responses exist only in a
+   root-owned `0700` directory under `/dev/shm`, with files mode `0600`;
+4. require exactly one enabled, email-verified `solov` user holding the
+   `invoice-admin` realm role. Its verified address is the only invitation
+   target. No environment/argument target override exists;
+5. require `master` to have no pre-existing SMTP map and accept only the
+   signed-host SMTP contract: authenticated implicit TLS on port 465, SSL true,
+   STARTTLS false, basic authentication and an exact field allowlist;
+6. fresh-GET and canonicalize the complete `master` representation before each
+   PUT, inject the source SMTP map into that fresh full representation, and
+   verify after PUT that only SMTP changed, with exact database comparison. It
+   then creates a differently named master user, grants only the
+   `realm-management/admin` client role, and dispatches one 15-minute
+   execute-actions message for `VERIFY_EMAIL`, `UPDATE_PASSWORD` and
+   `CONFIGURE_TOTP`;
+7. restore from a fresh current representation by clearing only SMTP, full-PUT
+   that current object, then fresh-GET/canonical-compare and verify empty SMTP
+   directly in PostgreSQL. It never replays a stale old realm snapshot. Any
+   concurrent drift is preserved where safe and converts the run to fail-closed.
+
+Operator-generated plaintext proof contains no email, domain, user identifier,
+SMTP field, token or secret. The encrypted database backup necessarily contains
+the full identity/configuration database, and the new master user necessarily
+persists the invitation email. Keycloak admin events may also record the user
+operation. Do not claim that Keycloak itself contains no PII.
+
+The execute-actions link uses Keycloak's frontend realm path. The public auth
+vhost deliberately applies the administrator/break-glass allowlist to every
+`/realms/master/` request, even when Keycloak generates the frontend hostname.
+The recipient must therefore open the invitation while using an approved
+administrator or VPN/bastion egress. Do not weaken the allowlist to make the
+link easier to open. A realm-level frontend URL override is rejected by the
+operator because it could redirect the invitation outside this reviewed path
+policy.
+
+After the wrapper restores the allowlist, independently confirm the approved
+administrator source can reach the admin route. Only then show the 15-minute
+invitation to the recipient. The wrapper deliberately reports this probe as
+required rather than claiming remote reachability it cannot observe locally.
+
+The operator is create-only. A matching existing permanent user is identified
+and refused; any mismatch is also refused for manual inspection. It never
+repairs, re-invites, merges or adds privileges to an existing account.
+
+After the invitation is consumed, enroll and test TOTP, confirm in a fresh
+browser that the permanent account can administer the required realms, and
+record the browser canary separately without identity data. The invitation
+result alone is not permission to retire bootstrap. Then delete (preferred) or
+disable the temporary bootstrap account. Stop Keycloak, delete the bootstrap
+password file, remove its username from the host environment, and restart with
+the base file only:
 
 ```bash
 docker compose --env-file deploy/.env.production \

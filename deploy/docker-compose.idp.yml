@@ -33,6 +33,8 @@ services:
       KC_HOSTNAME_ADMIN: https://auth-admin.solov.cc
       KC_HOSTNAME_STRICT: "true"
       KC_HOSTNAME_DEBUG: "false"
+      KC_TLS_HOSTNAME_VERIFIER: DEFAULT
+      KC_TRUSTSTORE_KUBERNETES_ENABLED: "false"
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
       KC_PROXY_TRUSTED_ADDRESSES: ${KC_PROXY_TRUSTED_ADDRESSES:?set the exact Keycloak Docker gateway IPv4 /32}

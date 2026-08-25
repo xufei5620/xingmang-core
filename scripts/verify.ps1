@@ -74,6 +74,9 @@ if ($LASTEXITCODE -ne 0) { throw 'edge Nginx configuration verification failed' 
 & (Join-Path $PSScriptRoot 'verify-backup-signature.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'backup signature verification failed' }
 
+& (Join-Path $PSScriptRoot 'verify-keycloak-permanent-master-admin.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'permanent Keycloak master administrator invitation verification failed' }
+
 Push-Location (Join-Path $projectRoot 'agents')
 try {
     go test -race ./...
@@ -393,6 +396,8 @@ try {
     if ($keycloakEnvironment.KC_HOSTNAME -ne 'https://auth.solov.cc' -or
         $keycloakEnvironment.KC_HOSTNAME_ADMIN -ne 'https://auth-admin.solov.cc' -or
         $keycloakEnvironment.KC_PROXY_HEADERS -ne 'xforwarded' -or
+        $keycloakEnvironment.KC_TLS_HOSTNAME_VERIFIER -ne 'DEFAULT' -or
+        $keycloakEnvironment.KC_TRUSTSTORE_KUBERNETES_ENABLED -ne 'false' -or
         $keycloakEnvironment.KC_PROXY_TRUSTED_ADDRESSES -ne $productionEnv.KC_PROXY_TRUSTED_ADDRESSES -or
         $keycloakEnvironment.KEYCLOAK_EDGE_GATEWAY -ne $productionEnv.KEYCLOAK_EDGE_GATEWAY -or
         $keycloakEnvironment.JAVA_OPTS_KC_HEAP -ne '-XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30 -XX:MaxRAMPercentage=65') {
