@@ -727,6 +727,10 @@ func verifyFactBatchContextTx(ctx context.Context, tx pgx.Tx, sourceID, streamID
 	}
 	var storedHash, signingKeyID, cycleStatus string
 	var storedWatermark time.Time
+	// Lock only the mutable scan-cycle row. source_ingest_batches and the
+	// cycle-event binding are append-only; locking b would require UPDATE on an
+	// intentionally immutable batch table and break the least-privilege runtime
+	// role without adding any consistency guarantee.
 	err := tx.QueryRow(ctx, `
 		SELECT m.payload_hash,b.signing_key_id,b.scan_ceiling_at,c.cycle_status
 		FROM source_economic_scan_cycle_events m
@@ -736,7 +740,7 @@ func verifyFactBatchContextTx(ctx context.Context, tx pgx.Tx, sourceID, streamID
 			AND c.stream_id=m.stream_id AND c.scan_cycle_id=m.scan_cycle_id
 		WHERE m.source_instance_id=$1 AND m.stream_id=$2 AND m.event_id=$3::uuid
 			AND m.batch_id=$4::uuid AND m.scan_cycle_id=$5::uuid
-			AND b.schema_version='3.0' FOR SHARE OF b,c`, sourceID, streamID, eventID,
+			AND b.schema_version='3.0' FOR SHARE OF c`, sourceID, streamID, eventID,
 		batchID, scanCycleID).Scan(&storedHash, &signingKeyID, &storedWatermark, &cycleStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", domain.ErrForbidden

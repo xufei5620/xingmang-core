@@ -1,9 +1,9 @@
-# Release readiness: 0.1.0-rc25 semantic-projection candidate
+# Release readiness: 0.1.0-rc26 runtime-lock candidate
 
 Status as of 2026-08-25:
 
 - application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC25 image/SBOM gate**;
+- isolated staging deployment: **GO after the fresh RC26 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
@@ -51,9 +51,18 @@ and the signed post-0011 recovery point was independently restored. RC25
 replaces that representation-sensitive fingerprint with the reviewed v4
 financial-semantics contract; it does not waive configuration validation.
 
+The first RC25 balances canary then accepted all signed batches but failed
+closed before projection: the runtime attempted `FOR SHARE` on both the mutable
+scan-cycle row and the intentionally immutable batch row. PostgreSQL correctly
+requires UPDATE privilege for a locked row, while `invoice_app` correctly has
+no UPDATE on batches. RC26 locks only the mutable scan-cycle row; a production-
+equivalent least-privilege integration test proves that the immutable batch
+remains readable but not mutable. The accepted batches, local sequence hashes
+and dependency-wait records were retained for forward recovery.
+
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC25 image/SBOM/vulnerability
+- generate and independently verify a fresh RC26 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -69,7 +78,7 @@ financial-semantics contract; it does not waive configuration validation.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC25 tag and pass real production
+- deploy all Invoice images under the same RC26 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -84,7 +93,7 @@ financial-semantics contract; it does not waive configuration validation.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC25 commit and signed release tag; no GitHub
+- create and locally verify the RC26 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement
