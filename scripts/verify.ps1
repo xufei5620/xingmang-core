@@ -20,6 +20,9 @@ if ($LASTEXITCODE -ne 0) { throw 'secret-material gate failed' }
 & (Join-Path $PSScriptRoot 'verify-source-readiness-index-operator.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'RC39 concurrent readiness-index operator/verifier gate failed' }
 
+& (Join-Path $PSScriptRoot 'verify-balance-history-cleanup-operator.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'balance history cleanup operator/rehearsal gate failed' }
+
 & (Join-Path $PSScriptRoot 'test-release-image-gate.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'release image gate static fixtures failed' }
 

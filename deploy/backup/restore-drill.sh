@@ -23,10 +23,27 @@ eligibility_start_at='2026-09-01T00:00:00+08:00'
 eligibility_start_utc='2026-08-31T16:00:00Z'
 restore_schema_mode=${RESTORE_SCHEMA_MODE:-post-0011}
 restore_postgres_tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE-16g}
+restore_balance_history_rehearsal=${RESTORE_BALANCE_HISTORY_CLEANUP_REHEARSAL-NO}
 [[ "$restore_schema_mode" == 'pre-0011' || "$restore_schema_mode" == 'post-0011' ]] || {
   echo 'RESTORE_SCHEMA_MODE must be pre-0011 or post-0011' >&2
   exit 2
 }
+[[ "$restore_balance_history_rehearsal" == NO || "$restore_balance_history_rehearsal" == YES ]] || {
+  echo 'RESTORE_BALANCE_HISTORY_CLEANUP_REHEARSAL must be YES or NO' >&2
+  exit 2
+}
+if [[ "$restore_balance_history_rehearsal" == YES && "$restore_postgres_tmpfs_size" != 16g ]]; then
+  echo 'balance history cleanup rehearsal requires RESTORE_POSTGRES_TMPFS_SIZE=16g' >&2
+  exit 2
+fi
+if [[ "$restore_balance_history_rehearsal" == YES ]]; then
+  : "${BALANCE_HISTORY_REHEARSAL_RECORD_ROOT:?set fixed root-only rehearsal evidence root}"
+  [[ -d "$BALANCE_HISTORY_REHEARSAL_RECORD_ROOT" && ! -L "$BALANCE_HISTORY_REHEARSAL_RECORD_ROOT" &&
+     "$(stat -c '%u:%g:%a' "$BALANCE_HISTORY_REHEARSAL_RECORD_ROOT")" == 0:0:700 ]] || {
+    echo 'BALANCE_HISTORY_REHEARSAL_RECORD_ROOT must be root:root mode 0700' >&2
+    exit 2
+  }
+fi
 
 for command in age awk docker sha256sum tar find cmp grep ssh-keygen stat; do command -v "$command" >/dev/null; done
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -36,6 +53,18 @@ cleanup_state_helper="$script_dir/docker-cleanup-state.sh"
 test -f "$cleanup_state_helper" && test ! -L "$cleanup_state_helper" && test -s "$cleanup_state_helper"
 # shellcheck source=deploy/backup/docker-cleanup-state.sh
 source "$cleanup_state_helper"
+balance_history_rehearsal="$script_dir/../postgres/rehearse-balance-history-cleanup.sh"
+test -f "$balance_history_rehearsal" && test ! -L "$balance_history_rehearsal" && test -s "$balance_history_rehearsal"
+if [[ "$restore_balance_history_rehearsal" == YES ]]; then
+  [[ "$(stat -c '%u:%g:%a' "$balance_history_rehearsal")" == 0:0:700 ]] || {
+    echo 'installed balance history rehearsal must be root:root mode 0700' >&2
+    exit 2
+  }
+  [[ "$(stat -c '%u:%g:%a' "$script_dir/../postgres/balance-history-cleanup.sql")" == 0:0:600 ]] || {
+    echo 'installed balance history cleanup SQL must be root:root mode 0600' >&2
+    exit 2
+  }
+fi
 host_available_bytes=$(awk '/^MemAvailable:/ { printf "%.0f\n",$2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo)
 docker_total_bytes=$(docker info --format '{{.MemTotal}}')
 restore_postgres_tmpfs_bytes=$(bash "$capacity_validator" "$restore_postgres_tmpfs_size" \
@@ -361,6 +390,12 @@ if [[ -n "${KEYCLOAK_BACKUP:-}" ]]; then
   keycloak_tables=$(docker exec "$container" psql -U postgres -d keycloak_restore -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")
   test "$keycloak_tables" -gt 20
+fi
+
+if [[ "$restore_balance_history_rehearsal" == YES ]]; then
+  rehearsal_evidence="$BALANCE_HISTORY_REHEARSAL_RECORD_ROOT/rehearsal-$suffix"
+  mkdir -m 0700 -- "$rehearsal_evidence"
+  "$balance_history_rehearsal" "$container" "$rehearsal_evidence"
 fi
 
 printf 'restore drill passed: public_tables=%s; source_states=4; database/document/source metadata matched; encrypted document samples verified\n' "$table_count"

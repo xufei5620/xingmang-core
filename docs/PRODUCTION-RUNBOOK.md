@@ -425,6 +425,75 @@ never restart, recreate or roll back to it against the upgraded writable
 database. If RC39 cannot become healthy, keep ingress closed and forward-fix,
 or restore the complete matched pre-RC39 backup into an isolated stack.
 
+### 3.2 Balance-history cleanup maintenance exception
+
+This is a separately signed, one-time exception; it is not a business
+migration and must never be generalized. The approved target contains only
+pre-policy `balances/balance_checkpoint/upsert/parked_identity` rows with
+`dependency_kind=source_external_account`, a non-null dependency key, an exact
+published V3 cycle/batch mapping and `scan_ceiling_at` strictly before
+`2026-09-01T00:00:00+08:00`. The user has explicitly rejected this historical
+balance data. Invoice eligibility recognizes only recharge and consumption
+facts occurring together at or after that boundary. At approval time all
+external accounts, binding proofs, eligibility state, real/carry balance
+evidence and projection jobs are empty. Therefore the signed exception keeps
+the first technical anchor and latest pre-policy actual anchor for each
+`(source_instance_id,dependency_key_hmac)` group and permanently removes only
+the middle history. It must retain exactly `T=1879297`, `G=2747`, `K=5494`,
+`D=1873803`, with exact group-size bounds `min=79` and `max=771`; any count,
+bound or digest drift is NO-GO.
+The first-anchor tuple is exact: 2738 rows match both the manifest baseline
+snapshot and manifest cutover time, while 9 are the earliest post-cutover,
+pre-policy technical anchors with a non-baseline snapshot. Baseline-snapshot
+matches at a different time must remain zero.
+The last-rank tuple is independently exact: all 2747 rows are non-baseline
+snapshots strictly after the manifest cutover and are the maximum
+`(scan_ceiling_at,batch.sequence,event.created_at,event_id)` tuple in their
+group while still strictly before the policy cutoff; unexpected last rows must
+remain zero.
+
+First install and hash the tracked SQL and three root-only scripts:
+
+- `deploy/postgres/balance-history-cleanup.sql`;
+- `deploy/postgres/plan-balance-history-cleanup.sh`;
+- `deploy/postgres/rehearse-balance-history-cleanup.sh`;
+- `deploy/postgres/apply-balance-history-cleanup.sh`.
+
+Stop every production service except PostgreSQL and stop all ten source-agent
+services. Keep that write freeze through backup, restore rehearsal, off-site
+ACK, production cleanup and post-cleanup evidence signing. Create a fresh
+post-0014 encrypted/signed full backup. Its restore drill must run with the
+fixed rehearsal path, not an arbitrary hook:
+
+```bash
+RESTORE_POSTGRES_TMPFS_SIZE=16g \
+RESTORE_BALANCE_HISTORY_CLEANUP_REHEARSAL=YES \
+BALANCE_HISTORY_REHEARSAL_RECORD_ROOT=/root/invoice-system/deployment-records \
+EXPECTED_BALANCE_HISTORY_SQL_SHA256='<signed SQL sha256>' \
+EXPECTED_BALANCE_HISTORY_REHEARSAL_SHA256='<signed rehearsal sha256>' \
+EXPECTED_BALANCE_HISTORY_KEEP_SHA256='<planned keep sha256>' \
+EXPECTED_BALANCE_HISTORY_PURGE_SHA256='<planned purge sha256>' \
+  bash deploy/backup/restore-drill.sh
+```
+
+The rehearsal must reproduce T/G/K/D and both canonical SHA-256 sets, record
+WAL bytes and duration, finish VACUUM, bind the backup manifest/signature and
+produce `BALANCE-HISTORY-REHEARSAL.sha256`. Obtain the two expected digests only
+from the fixed read-only `plan-balance-history-cleanup.sh`, which runs the same
+tracked SQL with `apply_cleanup=false`; do not copy or edit the target query.
+Sign and independently verify the plan, rehearsal and off-site ACK evidence.
+
+Only after the supporting FK lookup index is exact valid/ready/live and every
+capacity, replication, zero-business-state, schema, backup and evidence gate
+passes may the signed operator run. It deletes mapping rows before event rows
+in one SERIALIZABLE, synchronous transaction, records WAL/time, then vacuums
+both affected tables. Keep and purge digests contain only
+`source_instance_id|event_id`; HMACs, payload hashes and ciphertext must never
+enter the evidence bundle. An exact poststate is reconciliation-only and still
+requires all catalog, VACUUM and evidence gates. Never execute this procedure
+against 9/1-or-later rows, another stream/entity/status, or a database with any
+non-zero identity/eligibility/carry/job state.
+
 ## 4. Host directories and secrets
 
 **Production change approval.** Create a new directory; do not reuse an
