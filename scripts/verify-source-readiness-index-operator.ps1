@@ -50,6 +50,7 @@ foreach ($required in @(
     "INDEX_ACTION='create-concurrently'",
     "INDEX_ACTION='already-exact'",
     'operator will not drop or repair it automatically',
+    "statement_timeout='20min'",
     'ANALYZE public.source_ingest_events',
     'schema-migrations-before.tsv',
     'schema-migrations-after.tsv',
@@ -63,6 +64,10 @@ foreach ($required in @(
     if (-not $operator.Contains($required, [StringComparison]::Ordinal)) {
         throw "operator contract is missing: $required"
     }
+}
+
+if ($operator.Contains("statement_timeout='20m'", [StringComparison]::Ordinal)) {
+    throw 'operator uses PostgreSQL-invalid minute abbreviation 20m instead of 20min'
 }
 
 if ($operator.Contains("die '/run/lock must not be world-writable'", [StringComparison]::Ordinal)) {

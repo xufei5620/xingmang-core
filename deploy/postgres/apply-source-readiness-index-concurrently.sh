@@ -352,7 +352,7 @@ readonly ANALYZE_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly ANALYZE_START_SECONDS=$SECONDS
 timeout 1800s "${COMPOSE[@]}" exec -T postgres \
   psql -X -q -v ON_ERROR_STOP=1 -U "$DATABASE_USER" -d "$DATABASE_NAME" \
-  -c "SET statement_timeout='20m'; SET lock_timeout='5s'; ANALYZE public.source_ingest_events" \
+  -c "SET statement_timeout='20min'; SET lock_timeout='5s'; ANALYZE public.source_ingest_events" \
   >"$RECORD_DIR/analyze.stdout" 2>"$RECORD_DIR/analyze.stderr"
 readonly ANALYZE_FINISH_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly ANALYZE_DURATION_SECONDS=$((SECONDS-ANALYZE_START_SECONDS))
