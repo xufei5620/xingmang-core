@@ -55,6 +55,10 @@ SELECT * FROM core.connection
 WHERE service_id = $1
 ORDER BY created_at;
 
+-- name: GetConnection :one
+SELECT * FROM core.connection
+WHERE id = $1;
+
 -- name: SetConnectionStatus :one
 UPDATE core.connection
 SET status     = $2,

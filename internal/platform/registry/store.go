@@ -289,6 +289,15 @@ func (s *Store) ListConnectionsByService(ctx context.Context, serviceID uuid.UUI
 }
 
 // SetConnectionStatus 改变连接状态（含 Kill Switch 拉闸）。
+// GetConnection 按 ID 读取 Connection。
+func (s *Store) GetConnection(ctx context.Context, id uuid.UUID) (Connection, error) {
+	row, err := s.q.GetConnection(ctx, id)
+	if err != nil {
+		return Connection{}, wrapNotFound(err, "get connection")
+	}
+	return connectionFromRow(row), nil
+}
+
 func (s *Store) SetConnectionStatus(ctx context.Context, id uuid.UUID, status ConnectionStatus) (Connection, error) {
 	if _, err := ParseConnectionStatus(string(status)); err != nil {
 		return Connection{}, err
