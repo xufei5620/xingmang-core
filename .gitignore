@@ -14,6 +14,7 @@ deploy/secrets/
 **/node_modules/
 **/coverage/
 .playwright-cli/
+.worktrees/
 /release/
 *.tsbuildinfo
 web/vite.config.js
