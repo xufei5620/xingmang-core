@@ -16,10 +16,14 @@ set -uo pipefail
 : "${HEAD_SHA:?缺少 HEAD_SHA}"
 labels="${PR_LABELS:-}"
 
+# 改动这些路径需要 governance-change 标签。
+# check-governance.sh 的 v6 会断言它依赖的每个脚本都在这里——
+# 新增治理脚本却忘了加保护时，治理检查会直接失败而不是静静地失效（XM-R007）。
 protected_globs=(
   '.github/workflows/'
   '.github/CODEOWNERS'
   'scripts/check-governance.sh'
+  'scripts/check-versions.py'
   'scripts/guard-governance-files.sh'
   'tests/security/'
 )

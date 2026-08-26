@@ -76,6 +76,10 @@ def scan_workspace_yaml(path: str, bad: list[str]) -> None:
     scan("catalog", cfg.get("catalog"), bad)
     scan("catalogs", cfg.get("catalogs"), bad)
     scan("overrides", cfg.get("overrides"), bad)
+    # pnpm 11 的 packageExtensions 既可写在 package.json 的 pnpm 字段里，
+    # 也可写在 workspace 文件里。只扫前者的话，后者就是一条写 latest 的暗道
+    # （XM-R007）。
+    scan("packageExtensions", cfg.get("packageExtensions"), bad)
 
 
 def main(argv: list[str]) -> int:

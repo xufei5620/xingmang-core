@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # 治理红线检查（CI job: governance）。随任务增量收紧：
-#   v1(XM-0002) 宪法与入口文件；v2(XM-0003) VERSIONS.lock；v3(XM-0004) ADR。
+#   v1(XM-0002) 宪法与入口文件；v2(XM-0003) VERSIONS.lock；v3(XM-0004) ADR；
+#   v4(XM-0005) workspace/包与 Actions SHA 钉版；v5(XM-0009/XM-R006) 迁移不可变；
+#   v6(XM-R007) 治理脚本自身必须在守卫名单内。
+#
+# 环境变量：
+#   GOVERNANCE_BASE_REF   迁移不可变检查的基线（默认 origin/main）
+#   GOVERNANCE_REQUIRE_BASE=1  基线取不到时失败而不是跳过（CI 的 PR 事件必须置 1）
 set -uo pipefail
 fail=0
 err() { echo "GOVERNANCE FAIL: $*" >&2; fail=1; }
@@ -82,14 +88,54 @@ for f in gitleaks.toml .gitleaks.toml .gitleaksignore; do
 done
 
 
-# --- v5(XM-0009): 迁移不可变性（规格 §5.7 forward-only）---
-if [ -d db/migrations ] && git rev-parse --verify origin/main >/dev/null 2>&1; then
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    if git cat-file -e "origin/main:$f" 2>/dev/null; then
-      git diff --quiet "origin/main" -- "$f"         || err "迁移文件 $f 已发布却被修改（规格 §5.7 forward-only：请新增迁移）"
-    fi
-  done < <(git ls-files 'db/migrations/*.sql')
+# --- v5(XM-0009/XM-R006): 迁移不可变性（规格 §5.7 forward-only）---
+#
+# XM-R006：原实现以「origin/main 存在」为前提，不存在就整段跳过 exit 0。
+# CI 的 checkout 默认 fetch-depth:1，PR 上根本没有 origin/main——这段检查
+# 在唯一会拦住人的路径上从未执行过。三处修正：
+#   1. 基线由 GOVERNANCE_BASE_REF 显式传入，CI 负责保证它可解析；
+#   2. GOVERNANCE_REQUIRE_BASE=1 时基线缺失即失败（fail closed），
+#      本地运行仍只是警告，不影响开发；
+#   3. 用 merge-base 而不是基线 tip 比对，并遍历**基线上的**迁移文件——
+#      前者避免把别人合入的迁移算到本 PR 头上，后者让「删除已发布迁移」
+#      也能被发现（遍历当前树永远看不见被删掉的文件）。
+if [ -d db/migrations ]; then
+  base_ref="${GOVERNANCE_BASE_REF:-origin/main}"
+  if base_sha="$(git rev-parse --verify "$base_ref^{commit}" 2>/dev/null)"; then
+    merge_base="$(git merge-base HEAD "$base_sha" 2>/dev/null || echo "$base_sha")"
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      # 比对**工作树**而不是 HEAD：CI 里两者等价，本地还能拦住未提交的改动。
+      # 写成 `git diff A HEAD -- f` 会漏掉工作树里的篡改（实测踩过）。
+      if [ ! -f "$f" ]; then
+        err "迁移文件 $f 已发布却被删除（规格 §5.7 forward-only：请新增迁移）"
+        continue
+      fi
+      git diff --quiet "$merge_base" -- "$f" \
+        || err "迁移文件 $f 已发布却被修改（规格 §5.7 forward-only：请新增迁移）"
+    done < <(git ls-tree -r --name-only "$merge_base" -- db/migrations | grep '\.sql$' || true)
+  elif [ "${GOVERNANCE_REQUIRE_BASE:-0}" = "1" ]; then
+    err "迁移不可变检查无法取得基线 $base_ref——CI 必须以完整历史检出（fetch-depth: 0）"
+  else
+    echo "提示：本地无法解析基线 $base_ref，跳过迁移不可变检查（CI 会强制执行）" >&2
+  fi
 fi
+
+# --- v6(XM-R007): 治理脚本自身必须在守卫名单内 ---
+#
+# XM-R007：#27 把版本扫描抽到 scripts/check-versions.py，守卫名单却没跟着加，
+# 于是「改扫描器」不需要 governance-change 标签——治理用一个被掏空的扫描器
+# 检查自己。手工同步两份名单迟早再漂一次，所以这里让本脚本**声明**它依赖
+# 哪些文件，并断言守卫确实保护它们：新增扫描器忘了加保护，治理直接失败。
+governance_deps=(
+  scripts/check-governance.sh
+  scripts/check-versions.py
+  scripts/guard-governance-files.sh
+)
+for dep in "${governance_deps[@]}"; do
+  [ -f "$dep" ] || err "治理依赖 $dep 缺失"
+  grep -qF "'$dep'" scripts/guard-governance-files.sh \
+    || err "$dep 未被 guard-governance-files.sh 保护：改它不需要 governance-change 标签，门禁可被掏空"
+done
 
 exit $fail

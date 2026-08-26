@@ -17,8 +17,22 @@ jobs:
   governance:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 是迁移不可变检查（v5）的前提。默认的浅检出里没有
+      # origin/main，那段检查会整段跳过并 exit 0——在唯一会拦住人的路径上
+      # 从未真正执行过（XM-R006）。
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - name: 治理红线检查
+        env:
+          # PR 上比对 base 分支；push 到 main 时比对推送前的 main。
+          # 后者为空（首次推送）时脚本会走「基线缺失」分支。
+          GOVERNANCE_BASE_REF: >-
+            ${{ github.event_name == 'pull_request'
+                && format('origin/{0}', github.base_ref)
+                || github.event.before }}
+          # PR 上基线必须存在：取不到就是 CI 配错了，不能当作通过。
+          GOVERNANCE_REQUIRE_BASE: ${{ github.event_name == 'pull_request' && '1' || '0' }}
         run: bash scripts/check-governance.sh
       - name: 安全测试（脚本路径穿越等）
         run: |

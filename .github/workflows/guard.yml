@@ -12,8 +12,18 @@ on:
   # labeled/unlabeled 必须包含：governance-change 标签是放行开关，
   # 而默认触发类型（opened/synchronize/reopened）不含打标签事件，
   # 会导致「打了标签但检查仍是旧的失败结果」（XM-R003 端到端验证发现）。
+  #
+  # branches 必须限定 main（XM-R004）：pull_request_target 跑的是 **PR base
+  # 分支上的** workflow 文件，不是永远 main。不限定的话，攻击者可以从 main 拉一个
+  # pwn-base、在上面把本文件改成空操作、开 pwn-head → pwn-base 的 PR，
+  # 于是在 pull_request_target 这个特权上下文里跑他自己的 workflow。
+  #
+  # edited 必须包含（XM-R004）：改 PR 的 base 分支只触发 edited，不触发
+  # synchronize。缺了它，攻击者可以先在自控 base 上拿到一个绿的 guard，
+  # 再把 base 改到 main —— main 上的守卫不会重跑，那个绿勾就一路留到合并。
   pull_request_target:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
 
 permissions:
   contents: read
