@@ -1,0 +1,51 @@
+/** 平台 API 客户端配置。
+ *
+ *  身份三件套集中在这里，不散落到各个请求点：换鉴权方式时只改这一处。
+ *  TODO(XM-0008): 换成 OIDC —— principalId/principalType/scopes 由 Keycloak
+ *  下发的 Access Token 取代，devPrincipalHeaders() 换成 Authorization: Bearer。 */
+export interface PlatformApiConfig {
+  /** 基地址。空串表示同源（开发时由 Vite 代理转发到 127.0.0.1:8080）。 */
+  baseUrl: string;
+  principalId: string;
+  principalType: PrincipalType;
+  scopes: string[];
+  /** 显式查询环境；undefined 表示不传 environment 参数。 */
+  environment?: string;
+}
+
+/** 后端 `principal.ParseType` 接受的两种主体类型（宪法 6 条：人机身份分域）。 */
+export type PrincipalType = "HUMAN" | "MACHINE";
+
+/** 看板只读，需要这两个 scope（对应后端路由上的 RequireScope）。 */
+export const DEFAULT_SCOPES = ["registry.read", "ops.read"];
+
+function parseScopes(raw: string | undefined): string[] {
+  if (!raw) return DEFAULT_SCOPES;
+  const parsed = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return parsed.length > 0 ? parsed : DEFAULT_SCOPES;
+}
+
+function parsePrincipalType(raw: string | undefined): PrincipalType {
+  return raw === "MACHINE" ? "MACHINE" : "HUMAN";
+}
+
+/** 从构建期环境变量组装配置。
+ *
+ *  environment 默认**不传**：后端 resolveEnvironment 的规则是「不传用调用者
+ *  自己的环境，传了必须一致」，而前端并不知道服务端把自己配成了哪个环境。
+ *  猜一个值只会换来 403，不传反而总是对的（跨环境读取本来就不允许）。 */
+export function configFromEnv(env: ImportMetaEnv): PlatformApiConfig {
+  return {
+    baseUrl: env.VITE_XM_API_BASE_URL ?? "",
+    principalId: env.VITE_XM_PRINCIPAL_ID ?? "dev-operator",
+    principalType: parsePrincipalType(env.VITE_XM_PRINCIPAL_TYPE),
+    scopes: parseScopes(env.VITE_XM_SCOPES),
+    environment: env.VITE_XM_ENVIRONMENT,
+  };
+}
+
+/** 应用默认配置。测试里请自己造 PlatformApiConfig，不要依赖它。 */
+export const appApiConfig: PlatformApiConfig = configFromEnv(import.meta.env);

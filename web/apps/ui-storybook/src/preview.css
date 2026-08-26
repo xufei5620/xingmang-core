@@ -2,4 +2,9 @@
 @import "@xingmang/design-tokens/tokens.css";
 @import "@xingmang/design-tokens/tailwind.css";
 
+/* 同 admin-web/src/index.css：Tailwind 4 扫不到 workspace 里的 UI 包，
+   不显式登记的话 Storybook 里的组件同样是裸的。 */
+@source "../../../packages/ui-primitives/src";
+@source "../../../packages/ui-admin/src";
+
 body { background: var(--xm-color-canvas); color: var(--xm-color-fg); font-family: var(--xm-font-sans); }

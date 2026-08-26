@@ -1,3 +1,11 @@
 @import "tailwindcss";
 @import "@xingmang/design-tokens/tokens.css";
 @import "@xingmang/design-tokens/tailwind.css";
+
+/* Tailwind 4 的自动内容探测只扫本包目录，扫不到 workspace 里的 UI 包——
+   于是 Button 的 bg-accent、Badge 的 bg-danger/10 这些只出现在
+   ui-primitives / ui-admin 源码里的类根本不会被生成，组件在真实页面上是
+   没有样式的（构建不报错，所以一直没被发现）。这里显式登记源目录。
+   用相对路径而不是包名：workspace 依赖是符号链接，Tailwind 不跟。 */
+@source "../../../packages/ui-primitives/src";
+@source "../../../packages/ui-admin/src";
