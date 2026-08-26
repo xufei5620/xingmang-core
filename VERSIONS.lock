@@ -13,7 +13,7 @@ pgx              = v5.10.0
 golang-migrate   = v4.19.1
 uuid             = v1.6.0
 sqlc             = v1.31.1
-river            = 由 go.mod 锁定（XM-0013 引入时记录于此）
+river            = 0.45.0
 
 [frontend]
 react         = 19.2.8
