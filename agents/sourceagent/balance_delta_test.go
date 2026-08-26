@@ -58,6 +58,20 @@ func testBalanceState(t *testing.T, schema int, kind string, retired []string) b
 		EmissionSnapshot: emission, RetiredZeroAccountIDs: retired}
 }
 
+func buildStateWithCapturedRow(t *testing.T, retired []string, row BalanceSnapshotRow) (balanceReconciliationState, error) {
+	t.Helper()
+	previous := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:00:00Z", "", nil)
+	captured := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", []BalanceSnapshotRow{row})
+	return buildBalanceReconciliationStateWithRetired(previous.SnapshotID, previous, captured, retired)
+}
+
+func buildStateWithMissingPriorRow(t *testing.T, retired []string, row BalanceSnapshotRow) (balanceReconciliationState, error) {
+	t.Helper()
+	previous := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:00:00Z", "", []BalanceSnapshotRow{row})
+	captured := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", nil)
+	return buildBalanceReconciliationStateWithRetired(previous.SnapshotID, previous, captured, retired)
+}
+
 func requireReplaceBalanceState(t *testing.T, store EncryptedStateFile, state balanceReconciliationState) {
 	t.Helper()
 	if err := store.Replace(context.Background(), state); err != nil {
@@ -255,5 +269,50 @@ func TestBalanceDeltaRejectsInvalidRetiredSets(t *testing.T) {
 	state = testBalanceState(t, 2, "balance_delta_v2", oversized)
 	if err := validateBalanceReconciliationState(state); err == nil {
 		t.Fatal("oversized retired set was accepted")
+	}
+}
+
+func TestBalanceDeltaRetiresMultipleZeroAccountsInNumericOrder(t *testing.T) {
+	previous := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:00:00Z", "", []BalanceSnapshotRow{
+		{ExternalUserID: "2", ServiceUnits: "0"},
+		{ExternalUserID: "9", ServiceUnits: "0"},
+		{ExternalUserID: "10", ServiceUnits: "0"},
+		{ExternalUserID: "11", ServiceUnits: "50"},
+	})
+	capturedRows := []BalanceSnapshotRow{
+		{ExternalUserID: "3", ServiceUnits: "0"},
+		{ExternalUserID: "11", ServiceUnits: "50"},
+	}
+	captured := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", capturedRows)
+	state, err := buildBalanceReconciliationStateWithRetired(previous.SnapshotID, previous, captured, []string{"1"})
+	if err != nil || !reflect.DeepEqual(state.RetiredZeroAccountIDs, []string{"1", "2", "9", "10"}) {
+		t.Fatalf("retirement union failed: state=%#v err=%v", state, err)
+	}
+	if want := []BalanceSnapshotRow{capturedRows[0]}; !reflect.DeepEqual(state.EmissionSnapshot.Rows, want) {
+		t.Fatalf("retirements emitted synthetic rows or ordinary new account was omitted: got=%#v want=%#v", state.EmissionSnapshot.Rows, want)
+	}
+}
+
+func TestBalanceDeltaRetiredAccountReappearanceAlwaysFails(t *testing.T) {
+	for _, row := range []BalanceSnapshotRow{
+		{ExternalUserID: "9", ServiceUnits: "0"},
+		{ExternalUserID: "9", ServiceUnits: "1"},
+		{ExternalUserID: "9", ServiceUnits: "0", BalanceNegative: true},
+		{ExternalUserID: "9", ServiceUnits: "0", BaselineMember: true},
+	} {
+		if _, err := buildStateWithCapturedRow(t, []string{"9"}, row); err == nil {
+			t.Fatalf("retired ID reappeared without failure: %#v", row)
+		}
+	}
+}
+
+func TestBalanceDeltaNonZeroRemovalLeavesRetiredSetUnchanged(t *testing.T) {
+	for _, row := range []BalanceSnapshotRow{
+		{ExternalUserID: "9", ServiceUnits: "1"},
+		{ExternalUserID: "9", ServiceUnits: "0", BalanceNegative: true},
+	} {
+		if _, err := buildStateWithMissingPriorRow(t, []string{"2"}, row); err == nil {
+			t.Fatalf("unsafe removal was accepted: %#v", row)
+		}
 	}
 }

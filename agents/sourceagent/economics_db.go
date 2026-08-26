@@ -680,12 +680,27 @@ func loadCurrentBalanceReconciliationState(ctx context.Context, store EncryptedS
 }
 
 func buildBalanceReconciliationState(baseSnapshotID string, previous, captured BalanceSnapshot) (balanceReconciliationState, error) {
+	return buildBalanceReconciliationStateWithRetired(baseSnapshotID, previous, captured, nil)
+}
+
+func buildBalanceReconciliationStateWithRetired(
+	baseSnapshotID string,
+	previous, captured BalanceSnapshot,
+	retired []string,
+) (balanceReconciliationState, error) {
 	if !hexHashPattern.MatchString(baseSnapshotID) || validateBalanceSnapshot(previous) != nil || validateBalanceSnapshot(captured) != nil ||
 		captured.CheckpointKind != "reconciliation" || previous.SourceID != captured.SourceID || previous.SourceType != captured.SourceType ||
 		previous.CutoverAt != captured.CutoverAt || previous.UnitCode != captured.UnitCode {
 		return balanceReconciliationState{}, errors.New("balance reconciliation snapshots are incompatible")
 	}
-	changed, err := changedBalanceRows(previous.Rows, captured.Rows)
+	if err := validateRetiredBalanceAccountIDs(retired, captured.Rows); err != nil {
+		return balanceReconciliationState{}, err
+	}
+	changed, newlyRetired, err := changedBalanceRowsAndRetirements(previous.Rows, captured.Rows)
+	if err != nil {
+		return balanceReconciliationState{}, err
+	}
+	retirementUnion, err := mergeRetiredBalanceAccountIDs(retired, newlyRetired)
 	if err != nil {
 		return balanceReconciliationState{}, err
 	}
@@ -698,23 +713,29 @@ func buildBalanceReconciliationState(baseSnapshotID string, previous, captured B
 	}
 	state := balanceReconciliationState{SchemaVersion: balanceReconciliationStateSchemaVersion,
 		StateKind: "balance_delta_v2", BaseSnapshotID: baseSnapshotID,
-		CapturedSnapshot: captured, EmissionSnapshot: emission}
+		CapturedSnapshot: captured, EmissionSnapshot: emission, RetiredZeroAccountIDs: retirementUnion}
 	if err = validateBalanceReconciliationState(state); err != nil {
 		return balanceReconciliationState{}, err
 	}
 	return state, nil
 }
 
-func changedBalanceRows(previous, captured []BalanceSnapshotRow) ([]BalanceSnapshotRow, error) {
+func changedBalanceRowsAndRetirements(previous, captured []BalanceSnapshotRow) ([]BalanceSnapshotRow, []string, error) {
 	changed := make([]BalanceSnapshotRow, 0)
+	newlyRetired := make([]string, 0)
 	priorIndex := 0
 	for _, row := range captured {
 		for priorIndex < len(previous) && compareDecimalIDs(previous[priorIndex].ExternalUserID, row.ExternalUserID) < 0 {
-			return nil, errors.New("balance projection removed an account; delta publication is unsafe")
+			prior := previous[priorIndex]
+			if prior.ServiceUnits != "0" || prior.BalanceNegative {
+				return nil, nil, errors.New("balance projection removed an account; delta publication is unsafe")
+			}
+			newlyRetired = append(newlyRetired, prior.ExternalUserID)
+			priorIndex++
 		}
 		if priorIndex >= len(previous) || compareDecimalIDs(previous[priorIndex].ExternalUserID, row.ExternalUserID) > 0 {
 			if row.BaselineMember {
-				return nil, errors.New("post-cutover balance account claimed baseline membership")
+				return nil, nil, errors.New("post-cutover balance account claimed baseline membership")
 			}
 			changed = append(changed, row)
 			continue
@@ -722,16 +743,45 @@ func changedBalanceRows(previous, captured []BalanceSnapshotRow) ([]BalanceSnaps
 		prior := previous[priorIndex]
 		priorIndex++
 		if prior.BaselineMember != row.BaselineMember {
-			return nil, errors.New("immutable balance baseline membership changed")
+			return nil, nil, errors.New("immutable balance baseline membership changed")
 		}
 		if prior.ServiceUnits != row.ServiceUnits || prior.BalanceNegative != row.BalanceNegative {
 			changed = append(changed, row)
 		}
 	}
-	if priorIndex != len(previous) {
-		return nil, errors.New("balance projection removed an account; delta publication is unsafe")
+	for priorIndex < len(previous) {
+		prior := previous[priorIndex]
+		if prior.ServiceUnits != "0" || prior.BalanceNegative {
+			return nil, nil, errors.New("balance projection removed an account; delta publication is unsafe")
+		}
+		newlyRetired = append(newlyRetired, prior.ExternalUserID)
+		priorIndex++
 	}
-	return changed, nil
+	return changed, newlyRetired, nil
+}
+
+func mergeRetiredBalanceAccountIDs(previous, newlyRetired []string) ([]string, error) {
+	if len(previous) > maxRetiredBalanceAccounts || len(newlyRetired) > maxRetiredBalanceAccounts-len(previous) {
+		return nil, errors.New("retired zero-balance account set exceeds the safety limit")
+	}
+	merged := make([]string, 0, len(previous)+len(newlyRetired))
+	previousIndex := 0
+	newIndex := 0
+	for previousIndex < len(previous) && newIndex < len(newlyRetired) {
+		switch compareDecimalIDs(previous[previousIndex], newlyRetired[newIndex]) {
+		case -1:
+			merged = append(merged, previous[previousIndex])
+			previousIndex++
+		case 0:
+			return nil, errors.New("retired zero-balance account IDs are duplicated")
+		default:
+			merged = append(merged, newlyRetired[newIndex])
+			newIndex++
+		}
+	}
+	merged = append(merged, previous[previousIndex:]...)
+	merged = append(merged, newlyRetired[newIndex:]...)
+	return merged, nil
 }
 
 func validateBalanceReconciliationState(state balanceReconciliationState) error {
