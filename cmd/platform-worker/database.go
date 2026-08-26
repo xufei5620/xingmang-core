@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/pgdsn"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
@@ -22,25 +22,21 @@ func databaseURLFromEnv(ctx context.Context, getenv func(string) string, logger 
 	if raw == "" {
 		return "", fmt.Errorf("DATABASE_URL is required")
 	}
-	parsed, err := url.Parse(raw)
-	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") || parsed.Host == "" {
-		return "", fmt.Errorf("DATABASE_URL is not a valid postgres URL")
-	}
-
 	environment := strings.TrimSpace(getenv("ENVIRONMENT"))
 	refText := strings.TrimSpace(getenv("DATABASE_PASSWORD_REF"))
-	hasInlinePassword := false
-	if parsed.User != nil {
-		_, hasInlinePassword = parsed.User.Password()
-	}
-	if hasInlinePassword && (environment != "development" || refText != "") {
-		return "", fmt.Errorf("remove inline database password before using DATABASE_PASSWORD_REF; inline passwords are development-only")
+
+	// 密码何时必须走 CredentialRef：非开发环境，或者已经显式配了 ref。
+	// 开发环境且没配 ref 时允许内联密码（见 README 的本地调试流程）。
+	requireManagedPassword := environment != "development" || refText != ""
+
+	// 校验交给 pgdsn：它不自己解析 URL 判断「有没有内联密码」，而是问 pgx
+	// 实际会用什么配置。?password= / ?host= 这类 query 参数会覆盖 DSN 的
+	// 表面声明，自己解析一定漏（见 internal/platform/pgdsn 的包注释）。
+	if err := pgdsn.Validate(raw, requireManagedPassword); err != nil {
+		return "", err
 	}
 	if refText == "" {
 		return raw, nil
-	}
-	if parsed.User == nil {
-		return "", fmt.Errorf("DATABASE_URL must include a user when DATABASE_PASSWORD_REF is set")
 	}
 
 	ref, err := secrets.ParseCredentialRef(refText)
@@ -65,6 +61,5 @@ func databaseURLFromEnv(ctx context.Context, getenv func(string) string, logger 
 	if err != nil {
 		return "", fmt.Errorf("resolve database password: %w", err)
 	}
-	parsed.User = url.UserPassword(parsed.User.Username(), value.Reveal())
-	return parsed.String(), nil
+	return pgdsn.WithPassword(raw, value.Reveal())
 }

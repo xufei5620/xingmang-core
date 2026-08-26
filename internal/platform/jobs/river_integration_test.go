@@ -3,14 +3,14 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/pgdsn"
 )
 
 func selectIntegrationDSN() (string, bool, error) {
@@ -33,20 +33,16 @@ func selectIntegrationDSN() (string, bool, error) {
 	return dsn, true, nil
 }
 
+// validateIntegrationDSN 确保集成测试只打本机库。
+//
+// 判定依据必须是 **pgx 实际会连哪里**，不是 DSN 字符串看起来像什么：
+// postgres://u@127.0.0.1/db?host=prod.example.com 看着是 loopback，
+// pgx 连的却是 prod.example.com（见 internal/platform/pgdsn 包注释）。
 func validateIntegrationDSN(dsn string) error {
-	parsed, err := url.Parse(dsn)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
-		return fmt.Errorf("DATABASE_URL must be a valid local postgres URL")
+	if err := pgdsn.Validate(dsn, false); err != nil {
+		return err
 	}
-	host := parsed.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("integration refuses non-loopback DATABASE_URL host %q", host)
-	}
-	return nil
+	return pgdsn.RequireLoopback(dsn)
 }
 
 func TestRiverWorkerPostgresIntegration(t *testing.T) {

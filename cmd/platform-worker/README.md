@@ -51,3 +51,13 @@ Provide a password-free URL plus an explicit `DATABASE_PASSWORD_REF`; the
 existing audited `SecretProvider` path then resolves the internally mapped
 `DATABASE_PASSWORD` value. Inline passwords are accepted only with the explicit
 `ENVIRONMENT=development` local exception above.
+
+`DATABASE_URL` query parameters are checked against an **allowlist**
+(`internal/platform/pgdsn`). pgx reads the query string as connection settings
+*after* it fills in host and userinfo, so `?password=` and `?host=` silently
+override what the URL appears to say — a check that parses the URL itself and
+then hands the same string to pgx is no check at all. Only `sslmode`,
+`sslcert`, `sslkey`, `sslrootcert`, `connect_timeout`, `application_name`,
+`target_session_attrs` and the `pool_*` settings are accepted; anything else is
+rejected in every environment. The loopback guard on the integration test asks
+pgx which hosts it will actually dial rather than reading the URL.
