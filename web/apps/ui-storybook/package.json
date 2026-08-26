@@ -1,0 +1,28 @@
+{
+  "name": "ui-storybook",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "storybook dev -p 6006",
+    "build": "storybook build",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'ui-storybook: 无单测（构建即验证）'"
+  },
+  "dependencies": {
+    "@xingmang/design-tokens": "workspace:*",
+    "@xingmang/ui-primitives": "workspace:*",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@storybook/react-vite": "10.5.10",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "storybook": "10.5.10",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.2.2"
+  }
+}

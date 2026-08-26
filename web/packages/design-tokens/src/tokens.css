@@ -1,0 +1,60 @@
+/* 星芒设计令牌。业务代码禁止硬编码颜色/圆角/阴影（规格 §7.7），只用这些变量
+   或由 tailwind.css 映射出的工具类。 */
+:root {
+  /* 基础色板 */
+  --xm-palette-gray-50: #f8fafc;  --xm-palette-gray-100: #f1f5f9;
+  --xm-palette-gray-200: #e2e8f0; --xm-palette-gray-300: #cbd5e1;
+  --xm-palette-gray-500: #64748b; --xm-palette-gray-700: #334155;
+  --xm-palette-gray-800: #1e293b; --xm-palette-gray-900: #0f172a;
+  --xm-palette-blue-500: #3b82f6; --xm-palette-blue-600: #2563eb;
+  --xm-palette-blue-700: #1d4ed8;
+  --xm-palette-red-500: #ef4444;  --xm-palette-red-600: #dc2626;
+  --xm-palette-green-600: #16a34a;--xm-palette-amber-500: #f59e0b;
+
+  /* 语义色（明亮主题） */
+  --xm-color-canvas: var(--xm-palette-gray-100);      /* 页面底 */
+  --xm-color-surface: #ffffff;                        /* 卡片/面板 */
+  --xm-color-surface-muted: var(--xm-palette-gray-50);
+  --xm-color-fg: var(--xm-palette-gray-900);
+  --xm-color-fg-muted: var(--xm-palette-gray-500);
+  --xm-color-edge: var(--xm-palette-gray-200);        /* 边框 */
+  --xm-color-accent: var(--xm-palette-blue-600);
+  --xm-color-accent-strong: var(--xm-palette-blue-700);
+  --xm-color-accent-fg: #ffffff;
+  --xm-color-danger: var(--xm-palette-red-600);
+  --xm-color-danger-fg: #ffffff;
+  --xm-color-success: var(--xm-palette-green-600);
+  --xm-color-warning: var(--xm-palette-amber-500);
+
+  /* 字体 */
+  --xm-font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --xm-font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+  /* 间距（4px 基） */
+  --xm-space-1: 0.25rem; --xm-space-2: 0.5rem; --xm-space-3: 0.75rem;
+  --xm-space-4: 1rem;    --xm-space-6: 1.5rem; --xm-space-8: 2rem;
+
+  /* 圆角 */
+  --xm-radius-sm: 0.25rem; --xm-radius-md: 0.5rem; --xm-radius-lg: 0.75rem;
+
+  /* 阴影 */
+  --xm-shadow-sm: 0 1px 2px 0 rgb(15 23 42 / 0.06);
+  --xm-shadow-md: 0 4px 12px -2px rgb(15 23 42 / 0.10);
+
+  /* 密度（管理后台默认紧凑） */
+  --xm-control-h-sm: 1.75rem; --xm-control-h-md: 2.25rem; --xm-control-h-lg: 2.75rem;
+}
+
+/* 暗色主题：切换 html[data-theme="dark"] */
+[data-theme="dark"] {
+  --xm-color-canvas: var(--xm-palette-gray-900);
+  --xm-color-surface: var(--xm-palette-gray-800);
+  --xm-color-surface-muted: #16202e;
+  --xm-color-fg: var(--xm-palette-gray-100);
+  --xm-color-fg-muted: #94a3b8;
+  --xm-color-edge: var(--xm-palette-gray-700);
+  --xm-color-accent: var(--xm-palette-blue-500);
+  --xm-color-accent-strong: var(--xm-palette-blue-600);
+  --xm-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --xm-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5);
+}

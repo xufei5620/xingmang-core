@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@import "@xingmang/design-tokens/tokens.css";
+@import "@xingmang/design-tokens/tailwind.css";
+
+body { background: var(--xm-color-canvas); color: var(--xm-color-fg); font-family: var(--xm-font-sans); }
