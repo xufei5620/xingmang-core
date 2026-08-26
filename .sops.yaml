@@ -1,0 +1,6 @@
+# SOPS + age 配置（ADR-014）。
+# 占位公钥：生成真实密钥对后替换 age recipient；私钥离线保存，
+# 与数据库密文备份不同位置（ADR-014 备份铁律），绝不入仓库。
+creation_rules:
+  - path_regex: deploy/secrets/.*\.enc\.yaml$
+    age: age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqql90d0v

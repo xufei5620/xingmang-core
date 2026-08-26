@@ -14,7 +14,8 @@ storybook-static/
 .env.*
 *.age
 !*.example
-secrets/
+/secrets/
+var/
 *.pem
 *.key
 # --- 系统/编辑器 ---
