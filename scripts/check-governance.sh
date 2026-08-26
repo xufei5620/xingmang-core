@@ -45,27 +45,18 @@ for d in web/apps/admin-web web/apps/ui-storybook web/packages/design-tokens web
   [ -d "$d" ] || err "缺少工作区包 $d（frontend 门禁会空跑）"
 done
 
-# #13: package.json 精确版本（依赖段禁止范围表达式；engines 允许下限声明）
+# #13 + XM-R004(#24): 前端版本入口一律精确版本。
+# 扫描面不止依赖段——overrides/resolutions/pnpm.overrides/packageExtensions
+# 与 workspace catalog 同样能引入范围与 latest（详见 scripts/check-versions.py）。
+version_files="$(git ls-files '*package.json' | grep -v node_modules)"
+[ -f pnpm-workspace.yaml ] && version_files="$version_files
+pnpm-workspace.yaml"
 while IFS= read -r f; do
-  python3 - "$f" <<'PY' || err "$f 依赖含范围表达式（宪法：精确版本）"
-import json, re, sys
-p = sys.argv[1]
-with open(p, encoding="utf-8") as fh:
-    pkg = json.load(fh)
-bad = []
-for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
-    for name, spec in (pkg.get(section) or {}).items():
-        if not isinstance(spec, str):
-            continue
-        if spec.startswith("workspace:") or spec.startswith("catalog:") or spec.startswith("link:"):
-            continue
-        if not re.fullmatch(r"\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?", spec):
-            bad.append(f"{section}.{name}={spec}")
-if bad:
-    print("  " + "; ".join(bad), file=sys.stderr)
-    sys.exit(1)
-PY
-done < <(git ls-files '*package.json' | grep -v node_modules)
+  [ -n "$f" ] || continue
+  python3 scripts/check-versions.py "$f" || err "$f 含非精确版本（宪法：禁止范围表达式与 latest）"
+done <<EOF
+$version_files
+EOF
 
 # #13: CI 中的 Actions 必须钉 commit SHA（40 位十六进制），禁止浮动 tag
 if [ -d .github/workflows ]; then
