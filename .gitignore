@@ -1,0 +1,28 @@
+# --- Go ---
+/bin/
+*.exe
+*.test
+*.out
+# --- Node ---
+node_modules/
+dist/
+storybook-static/
+.vite/
+*.tsbuildinfo
+# --- 环境与凭据（宪法 7 条：仓库禁明文凭据）---
+.env
+.env.*
+*.age
+!*.example
+secrets/
+*.pem
+*.key
+# --- 系统/编辑器 ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+# --- 测试产物 ---
+coverage/
+playwright-report/
+test-results/
