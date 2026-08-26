@@ -33,8 +33,9 @@ type serviceItem struct {
 
 // ListServicesHandler 列出某环境下的 Service。
 //
-// 未显式指定 environment 时用调用者 Principal 的环境——**不默认生产**
-// （规格 §20.5：生产权限不继承）。
+// 环境范围由 resolveEnvironment 决定：不传用调用者自己的，传了必须一致——
+// **不默认生产，也不允许跨环境读取**（规格 §20.5：生产权限不继承）。
+// 权限（registry.ScopeRead）由路由上的 RequireScope 判定，不在此处重复。
 func ListServicesHandler(store ServiceLister) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := principal.FromContext(r.Context())
@@ -42,14 +43,9 @@ func ListServicesHandler(store ServiceLister) http.HandlerFunc {
 			WriteError(w, r, action.NewError(action.CodePermissionDenied, "缺少身份", nil))
 			return
 		}
-		envParam := r.URL.Query().Get("environment")
-		if envParam == "" {
-			envParam = p.Environment
-		}
-		env, err := registry.ParseEnvironment(envParam)
+		env, err := resolveEnvironment(r, p)
 		if err != nil {
-			WriteError(w, r, action.NewError(action.CodeInvalidParams,
-				"environment 必须是 development / staging / production 之一", err))
+			WriteError(w, r, err)
 			return
 		}
 

@@ -8,6 +8,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
 
 // defaultRequestTimeout 是单请求的默认期限。
@@ -53,8 +55,12 @@ func NewRouter(d Deps) http.Handler {
 		api.Use(RequirePrincipal(d.Resolver))
 		api.Get("/actions", ListActionsHandler(d.ActionRegistry))
 		api.Post("/actions/{actionID}/versions/{version}/execute", ExecuteActionHandler(d.Kernel))
-		api.Get("/services", ListServicesHandler(d.Services))
-		api.Get("/metrics", ListMetricsHandler(d.Metrics))
+		// 读也要权限（规格 §2.4）。声明在路由上，让路由表成为
+		// 「哪个端点要什么权限」的单一清单
+		api.With(RequireScope(registry.ScopeRead)).
+			Get("/services", ListServicesHandler(d.Services))
+		api.With(RequireScope(ops.ScopeRead)).
+			Get("/metrics", ListMetricsHandler(d.Metrics))
 	})
 	return r
 }

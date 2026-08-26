@@ -166,3 +166,10 @@ func (o Observation) Validate() error {
 	}
 	return nil
 }
+
+// ScopeRead 是读取运营指标所需的权限。
+//
+// 与 registry.ScopeRead 分开授予而不是共用一个「读」权限：指标里将来会有
+// 收入、余额这类业务数据（XM-0017 接入 Sub2API 之后），比「有哪些服务」
+// 敏感一个量级，不该被同一个 scope 一并放行。
+const ScopeRead = "ops.read"
