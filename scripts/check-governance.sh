@@ -90,4 +90,15 @@ for f in gitleaks.toml .gitleaks.toml .gitleaksignore; do
   [ -e "$f" ] && err "$f 未经登记：gitleaks allowlist 可使 secret-scan 空心化，需人工评审后在本脚本放行"
 done
 
+
+# --- v5(XM-0009): 迁移不可变性（规格 §5.7 forward-only）---
+if [ -d db/migrations ] && git rev-parse --verify origin/main >/dev/null 2>&1; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if git cat-file -e "origin/main:$f" 2>/dev/null; then
+      git diff --quiet "origin/main" -- "$f"         || err "迁移文件 $f 已发布却被修改（规格 §5.7 forward-only：请新增迁移）"
+    fi
+  done < <(git ls-files 'db/migrations/*.sql')
+fi
+
 exit $fail
