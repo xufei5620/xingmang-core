@@ -19,6 +19,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
 
@@ -58,6 +59,7 @@ func main() {
 		os.Exit(1)
 	}
 	kernel := action.NewKernel(actionRegistry, action.NewPgRunStore(pool, logger))
+	opsStore := ops.NewStore(pool)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:         logger,
@@ -68,6 +70,7 @@ func main() {
 		Kernel:         kernel,
 		ActionRegistry: actionRegistry,
 		Services:       registryStore,
+		Metrics:        opsStore,
 		RequestTimeout: cfg.RequestTimeout,
 	})
 

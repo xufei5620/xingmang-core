@@ -27,6 +27,12 @@ func executePath(actionID, version string) string {
 }
 
 func testRouter(t *testing.T, exec ActionExecutor, services ServiceLister) http.Handler {
+	return testRouterWithMetrics(t, exec, services, nil)
+}
+
+func testRouterWithMetrics(
+	t *testing.T, exec ActionExecutor, services ServiceLister, metrics MetricLister,
+) http.Handler {
 	t.Helper()
 	res, err := NewDevHeaderResolver("development")
 	if err != nil {
@@ -41,5 +47,6 @@ func testRouter(t *testing.T, exec ActionExecutor, services ServiceLister) http.
 		Kernel:         exec,
 		ActionRegistry: action.NewRegistry(),
 		Services:       services,
+		Metrics:        metrics,
 	})
 }

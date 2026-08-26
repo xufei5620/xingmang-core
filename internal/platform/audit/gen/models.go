@@ -120,3 +120,20 @@ type CoreService struct {
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
 }
+
+type OpsMetricObservation struct {
+	ID                        uuid.UUID
+	MetricKey                 string
+	Source                    string
+	Environment               string
+	ObservedAt                pgtype.Timestamptz
+	SyncedAt                  pgtype.Timestamptz
+	Watermark                 string
+	Status                    string
+	IsPartial                 bool
+	LastSuccess               pgtype.Timestamptz
+	LastErrorCode             string
+	StalenessThresholdSeconds int32
+	ValueJson                 []byte
+	UpdatedAt                 pgtype.Timestamptz
+}

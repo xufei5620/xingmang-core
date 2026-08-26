@@ -23,6 +23,7 @@ type Deps struct {
 	Kernel         ActionExecutor
 	ActionRegistry *action.Registry
 	Services       ServiceLister
+	Metrics        MetricLister
 	RequestTimeout time.Duration
 }
 
@@ -53,6 +54,7 @@ func NewRouter(d Deps) http.Handler {
 		api.Get("/actions", ListActionsHandler(d.ActionRegistry))
 		api.Post("/actions/{actionID}/versions/{version}/execute", ExecuteActionHandler(d.Kernel))
 		api.Get("/services", ListServicesHandler(d.Services))
+		api.Get("/metrics", ListMetricsHandler(d.Metrics))
 	})
 	return r
 }
