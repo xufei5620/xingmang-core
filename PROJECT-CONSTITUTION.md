@@ -46,7 +46,7 @@
 
 ## 三、分支与协作（规格 §17.4 / §17.6）
 
-- 分支命名：`ai/<tool>/XM-<编号>-<slug>`（tool ∈ claude/codex/gemini/grok）。
+- 分支命名：`ai/<tool>/XM-<编号>-<slug>`（tool ∈ claude/codex/gemini/grok/cursor）。
 - Main 禁止直接提交；PR 必须 CI 通过；人类拥有最终合并权。
 - 一个任务一个主责 AI；两个 AI 不修改同一分支；高风险目录走 CODEOWNERS。
 - 同时进行的开发任务不超过 2~3 个（WIP 上限）。

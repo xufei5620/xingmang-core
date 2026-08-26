@@ -48,3 +48,21 @@
 
 看 GitHub Issue 标签 `task`，读其中 Task Spec YAML 的 allowed_paths /
 out_of_scope / acceptance_criteria / required_tests，超出范围先停。
+
+## Cursor 专属规则
+
+- 主战场：前端包与应用（web/packages/*、web/apps/*）；后端任务不派给 Cursor。
+- 自有化 shadcn/ui + Radix Primitives 允许引入（精确版本；禁止 AntD/MUI）。
+- 禁止硬编码设计令牌；一律用 @xingmang/design-tokens 与既有工具类。
+- 分支：`ai/cursor/XM-xxxx-<slug>`；vitest 保持 globals:true 配置不变。
+
+## 自动轮询协议（所有 AI 通用）
+
+每轮固定动作：
+
+1. `git fetch origin`
+2. `bash scripts/ai-inbox.sh <你的名字：claude|codex|gemini|grok|cursor>`
+3. 有指派给你的新 Issue、待你冷审的 PR、或你 PR 上的新反馈 → 立即处理；
+4. 无新工作 → 等待 10 分钟再查；连续 6 轮空转后改为每 30 分钟一查；
+5. 永不因空转自行找活干：任务只来自 Issue 指派与评审请求；
+6. 处理结果必须回写 GitHub（Issue 评论 / PR review / 新 PR），不留在会话里。
