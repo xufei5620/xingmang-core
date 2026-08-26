@@ -64,7 +64,14 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "worker_start_error")
 		os.Exit(1)
 	}
-	logger.InfoContext(ctx, "worker_started", "event", "worker_started", "module", "platform.worker", "environment", config.Environment, "principal_id", "worker:platform")
+	// 启动时就把采集配置摊开：运维必须能一眼看出这个进程写进看板的数字
+	// 是 Fake 产的还是真实上游来的，而不是等发现数字不对再回来翻配置。
+	logger.InfoContext(ctx, "worker_started", "event", "worker_started", "module", "platform.worker",
+		"environment", config.Environment, "principal_id", "worker:platform",
+		"sub2api_sync_enabled", config.Sub2APISyncEnabled,
+		"sub2api_mode", string(config.Sub2APIMode),
+		"sub2api_source", config.Sub2APIInstanceID,
+		"sub2api_sync_interval", config.Sub2APISyncInterval.String())
 
 	<-ctx.Done()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
