@@ -27,3 +27,6 @@ Thumbs.db
 coverage/
 playwright-report/
 test-results/
+
+# Claude Code 会话产物(代理 worktree 等),永不入库
+/.claude/
