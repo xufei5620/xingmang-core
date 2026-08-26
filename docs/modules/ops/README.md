@@ -45,3 +45,26 @@
 
 每个 `(metric_key, environment)` 只保留**最新一条**。看板要回答的是「现在是什么」；
 历史时序另有归档任务，不由本模块承担。
+
+## 这些观测是谁写的
+
+`internal/platform/jobs` 的 Sub2API 周期同步任务（XM-0022）：默认每 300 秒
+读一次 `connectors/sub2api` 的只读契约，经 `sub2api.ToObservations` 转成
+Observation 后逐条 `Store.Upsert`。运行手册见 `cmd/platform-worker/README.md`。
+
+三条调用方必须知道的纪律：
+
+**失败也要写。** 上游读取失败时任务仍为每个指标写一条
+`status=failed` + `last_error_code=<connector.ErrorKind>` 的观测。不写的话，
+库里那条记录会**停在上一次成功的样子**——`observed_at` 不再前进，看板只能
+等它超过阈值才降级成「延迟」，而真正的原因（认证过期？限流？）一个字都没留下。
+
+**`Upsert` 是整行覆盖。** `ON CONFLICT DO UPDATE` 里 `observed_at`、
+`last_success` 都取 `EXCLUDED.*`，本模块**不会**替调用方保留旧值。写失败
+观测的调用方必须自己先 `Get` 回旧行再把这两个字段带上，否则「半小时前成功过」
+会被抹成「从未采集」。这条留给调用方而不是藏进 SQL：「保留旧值」在补数据、
+改口径、换来源这些场景下并不总是对的，仓储层替所有人默默做决定会更难排查。
+
+**Fake 数据不伪装成真实来源。** XM-0017 之前同步任务跑在 fake 模式，
+`source` 默认是 `sub2api-staging`——`source` 是前端必须显示的字段，
+它同时承担「这批数字从哪来」的告知义务。

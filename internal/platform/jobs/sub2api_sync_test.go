@@ -1,0 +1,578 @@
+package jobs
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
+
+	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
+	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+)
+
+// fixedNow 是所有单元测试共用的固定时钟：新鲜度全是时间的函数，
+// 用真实时钟测它等于把测试建在流沙上。
+var fixedNow = time.Date(2026, 8, 27, 3, 4, 5, 0, time.UTC)
+
+// errNoRows 模拟「这个 (metric_key, environment) 还没有行」。
+var errNoRows = errors.New("no rows in result set")
+
+// memoryStore 是 ObservationStore 的内存实现。
+//
+// 它照样跑 Observation.Validate()——真实的 ops.Store 会跑，数据库还有同一条
+// 一致性 CHECK。不跑的话，本测试就证明不了「失败观测真的写得进去」。
+type memoryStore struct {
+	rows      map[string]ops.Observation
+	writes    []ops.Observation
+	upsertErr error
+}
+
+func newMemoryStore() *memoryStore {
+	return &memoryStore{rows: map[string]ops.Observation{}}
+}
+
+func (s *memoryStore) key(metricKey, environment string) string {
+	return metricKey + "\x00" + environment
+}
+
+func (s *memoryStore) Get(_ context.Context, metricKey, environment string) (ops.Observation, error) {
+	row, ok := s.rows[s.key(metricKey, environment)]
+	if !ok {
+		return ops.Observation{}, fmt.Errorf("get %s: %w", metricKey, errNoRows)
+	}
+	return row, nil
+}
+
+func (s *memoryStore) Upsert(_ context.Context, o ops.Observation) (ops.Observation, error) {
+	if s.upsertErr != nil {
+		return ops.Observation{}, s.upsertErr
+	}
+	if err := o.Validate(); err != nil {
+		return ops.Observation{}, err
+	}
+	s.rows[s.key(o.MetricKey, o.Environment)] = o
+	s.writes = append(s.writes, o)
+	return o, nil
+}
+
+func (s *memoryStore) byKey(t *testing.T, metricKey string) ops.Observation {
+	t.Helper()
+	row, ok := s.rows[s.key(metricKey, "staging")]
+	if !ok {
+		t.Fatalf("指标 %s 没有落库", metricKey)
+	}
+	return row
+}
+
+func (s *memoryStore) keys() []string {
+	out := make([]string, 0, len(s.rows))
+	for _, row := range s.rows {
+		out = append(out, row.MetricKey)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// contractMetricKeys 是契约当前产出的全部指标键。
+var contractMetricKeys = []string{
+	sub2api.MetricChannelBalance,
+	sub2api.MetricCostDaily,
+	sub2api.MetricRevenueDaily,
+	sub2api.MetricUsersBalance,
+	sub2api.MetricUsersTotal,
+}
+
+func fakeFactory(opts sub2api.FakeOptions) Sub2APIClientFactory {
+	if opts.Now == nil {
+		opts.Now = func() time.Time { return fixedNow }
+	}
+	return func(context.Context) (sub2api.ReadClient, error) {
+		return sub2api.NewFake(opts), nil
+	}
+}
+
+func newTestSyncWorker(store ObservationStore, factory Sub2APIClientFactory, out *bytes.Buffer) *Sub2APISyncWorker {
+	logger := slog.New(slog.NewJSONHandler(out, nil))
+	return NewSub2APISyncWorker(Sub2APISyncOptions{
+		Logger:      logger,
+		Environment: "staging",
+		InstanceID:  DefaultSub2APIInstanceID,
+		Mode:        Sub2APIModeFake,
+		Store:       store,
+		NewClient:   factory,
+		Now:         func() time.Time { return fixedNow },
+	})
+}
+
+func syncJob() *river.Job[Sub2APISyncArgs] {
+	return &river.Job[Sub2APISyncArgs]{
+		JobRow: &rivertype.JobRow{
+			ID:          101,
+			Kind:        Sub2APISyncJobKind,
+			Queue:       QueueMaintenance,
+			Attempt:     1,
+			MaxAttempts: sub2apiSyncMaxAttempts,
+		},
+	}
+}
+
+func TestSub2APISyncArgsDeclareRetryQueueAndUniqueness(t *testing.T) {
+	args := Sub2APISyncArgs{}
+	if got := args.Kind(); got != Sub2APISyncJobKind {
+		t.Fatalf("Kind() = %q, want %q", got, Sub2APISyncJobKind)
+	}
+
+	opts := args.InsertOpts()
+	if opts.Queue != QueueMaintenance {
+		t.Fatalf("queue = %q, want %q", opts.Queue, QueueMaintenance)
+	}
+	if opts.MaxAttempts < 2 {
+		t.Fatalf("MaxAttempts = %d, want retryable value", opts.MaxAttempts)
+	}
+	if !opts.UniqueOpts.ByArgs || !opts.UniqueOpts.ByQueue || opts.UniqueOpts.ByPeriod <= 0 {
+		t.Fatalf("同一个周期只该采一次: %+v", opts.UniqueOpts)
+	}
+}
+
+// TestSub2APISyncSuccessWritesEveryMetric 是验收门禁 (a)。
+func TestSub2APISyncSuccessWritesEveryMetric(t *testing.T) {
+	store := newMemoryStore()
+	var logs bytes.Buffer
+	worker := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
+
+	if err := worker.Work(context.Background(), syncJob()); err != nil {
+		t.Fatalf("Work = %v, want nil", err)
+	}
+
+	got := store.keys()
+	if len(got) != len(contractMetricKeys) {
+		t.Fatalf("落库指标 = %v, want %v", got, contractMetricKeys)
+	}
+	for i, want := range contractMetricKeys {
+		if got[i] != want {
+			t.Fatalf("落库指标 = %v, want %v", got, contractMetricKeys)
+		}
+	}
+
+	wantWatermark := fmt.Sprintf("wm-%d", fixedNow.Unix())
+	for _, key := range contractMetricKeys {
+		row := store.byKey(t, key)
+		if row.Status != ops.SyncOK {
+			t.Fatalf("%s status = %q, want ok", key, row.Status)
+		}
+		if row.LastErrorCode != "" {
+			t.Fatalf("%s 成功却带错误码 %q", key, row.LastErrorCode)
+		}
+		if row.Source != DefaultSub2APIInstanceID {
+			t.Fatalf("%s source = %q, want %q", key, row.Source, DefaultSub2APIInstanceID)
+		}
+		if row.Environment != "staging" {
+			t.Fatalf("%s environment = %q", key, row.Environment)
+		}
+		if row.Watermark != wantWatermark {
+			t.Fatalf("%s watermark = %q, want %q", key, row.Watermark, wantWatermark)
+		}
+		if row.ObservedAt == nil || !row.ObservedAt.Equal(fixedNow) {
+			t.Fatalf("%s observed_at = %v, want %v", key, row.ObservedAt, fixedNow)
+		}
+		if row.LastSuccess == nil || !row.LastSuccess.Equal(fixedNow) {
+			t.Fatalf("%s last_success = %v, want %v", key, row.LastSuccess, fixedNow)
+		}
+		if !row.SyncedAt.Equal(fixedNow) {
+			t.Fatalf("%s synced_at = %v, want %v", key, row.SyncedAt, fixedNow)
+		}
+		// 新鲜度是派生的：固定时钟下这批观测必须判为 fresh，
+		// 否则「看板有持续更新的新鲜度数据」这句话就没兑现。
+		if state := row.Freshness(fixedNow).State; state != ops.StateFresh {
+			t.Fatalf("%s freshness = %q, want fresh", key, state)
+		}
+	}
+
+	// 业务日必须是当天 UTC，不能跟着进程本地时区漂。
+	revenue := store.byKey(t, sub2api.MetricRevenueDaily)
+	if day, _ := revenue.Value["day"].(string); day != "2026-08-27" {
+		t.Fatalf("business day = %q, want 2026-08-27", day)
+	}
+
+	for _, want := range []string{`"event":"job_completed"`, `"success":true`, `"metrics_failed":0`, `"sub2api_mode":"fake"`} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("日志缺少 %s: %s", want, logs.String())
+		}
+	}
+}
+
+// TestSub2APISyncFailureStillWrites 是验收门禁 (b)：读失败也要写，
+// 而且要带正确的错误分类。数据静静停更是规格 §9.1 明令禁止的失败模式。
+func TestSub2APISyncFailureStillWrites(t *testing.T) {
+	for _, kind := range []connector.ErrorKind{
+		connector.KindUnavailable,
+		connector.KindAuth,
+		connector.KindRateLimited,
+		connector.KindBadResponse,
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			store := newMemoryStore()
+			var logs bytes.Buffer
+			worker := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{FailWith: kind}), &logs)
+
+			if err := worker.Work(context.Background(), syncJob()); err != nil {
+				t.Fatalf("Work = %v, want nil（失败已诚实落库，不该再让 River 重试）", err)
+			}
+			if len(store.keys()) != len(contractMetricKeys) {
+				t.Fatalf("失败路径落库指标 = %v, want 全部 %v", store.keys(), contractMetricKeys)
+			}
+			for _, key := range contractMetricKeys {
+				row := store.byKey(t, key)
+				if row.Status != ops.SyncFailed {
+					t.Fatalf("%s status = %q, want failed", key, row.Status)
+				}
+				if row.LastErrorCode != string(kind) {
+					t.Fatalf("%s last_error_code = %q, want %q", key, row.LastErrorCode, kind)
+				}
+				if !row.SyncedAt.Equal(fixedNow) {
+					t.Fatalf("%s synced_at = %v, want %v（同步尝试过，这是任务还活着的证据）", key, row.SyncedAt, fixedNow)
+				}
+				// 从未成功过：observed_at 留空 → 未初始化，而不是拿 now 冒充一次采集。
+				if row.ObservedAt != nil {
+					t.Fatalf("%s observed_at = %v, want nil", key, row.ObservedAt)
+				}
+				if state := row.Freshness(fixedNow).State; state != ops.StateUninitialized {
+					t.Fatalf("%s freshness = %q, want uninitialized", key, state)
+				}
+			}
+			for _, want := range []string{`"event":"job_completed"`, `"success":false`, `"metrics_failed":5`, `"error_code":"` + string(kind) + `"`} {
+				if !strings.Contains(logs.String(), want) {
+					t.Fatalf("日志缺少 %s: %s", want, logs.String())
+				}
+			}
+		})
+	}
+}
+
+// TestSub2APISyncRealModeRecordsNotImplemented 是验收门禁 (c)：
+// real 模式当前必然失败，但必须失败得**看得见**，而不是崩溃或静默。
+func TestSub2APISyncRealModeRecordsNotImplemented(t *testing.T) {
+	store := newMemoryStore()
+	var logs bytes.Buffer
+	// 走真正的生产工厂，不是测试替身——接缝本身就是被测对象。
+	factory := NewSub2APIClientFactory(Sub2APIModeReal, "")
+	worker := NewSub2APISyncWorker(Sub2APISyncOptions{
+		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
+		Environment: "staging",
+		Mode:        Sub2APIModeReal,
+		Store:       store,
+		NewClient:   factory,
+		Now:         func() time.Time { return fixedNow },
+	})
+
+	if err := worker.Work(context.Background(), syncJob()); err != nil {
+		t.Fatalf("Work = %v, want nil（未实现是事实，不是任务失败）", err)
+	}
+	if len(store.keys()) != len(contractMetricKeys) {
+		t.Fatalf("real 模式落库指标 = %v, want 全部 %v", store.keys(), contractMetricKeys)
+	}
+	for _, key := range contractMetricKeys {
+		row := store.byKey(t, key)
+		if row.Status != ops.SyncFailed {
+			t.Fatalf("%s status = %q, want failed", key, row.Status)
+		}
+		if row.LastErrorCode != string(connector.KindNotSupported) {
+			t.Fatalf("%s last_error_code = %q, want %q", key, row.LastErrorCode, connector.KindNotSupported)
+		}
+	}
+	if strings.Contains(logs.String(), "XM-0017") {
+		// 错误分类进库与日志，供应商/内部原始文本不进（ADR-004）。
+		t.Fatalf("结构化日志不该带原始错误文本: %s", logs.String())
+	}
+}
+
+func TestSub2APIClientFactoryRealErrorIsClassified(t *testing.T) {
+	_, err := NewSub2APIClientFactory(Sub2APIModeReal, "")(context.Background())
+	if err == nil {
+		t.Fatal("real 模式当前必须返回错误")
+	}
+	if got := connector.KindOf(err); got != connector.KindNotSupported {
+		t.Fatalf("KindOf = %q, want %q", got, connector.KindNotSupported)
+	}
+	if !errors.Is(err, ErrSub2APIRealClientUnavailable) {
+		t.Fatalf("根因应可被 errors.Is 认出: %v", err)
+	}
+
+	client, err := NewSub2APIClientFactory(Sub2APIModeFake, "")(context.Background())
+	if err != nil || client == nil {
+		t.Fatalf("fake 模式应构造成功: client=%v err=%v", client, err)
+	}
+
+	if _, err := NewSub2APIClientFactory(Sub2APIMode("wat"), "")(context.Background()); connector.KindOf(err) != connector.KindInternal {
+		t.Fatalf("未知模式应归为 internal, got %v", err)
+	}
+}
+
+// TestSub2APISyncFailurePreservesLastSuccess 锁住失败路径最容易丢的语义：
+// ops.Store.Upsert 是整行覆盖，不先读旧行就写，会把「半小时前成功过」
+// 抹成「从未采集」。
+func TestSub2APISyncFailurePreservesLastSuccess(t *testing.T) {
+	store := newMemoryStore()
+	var logs bytes.Buffer
+
+	ok := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
+	if err := ok.Work(context.Background(), syncJob()); err != nil {
+		t.Fatal(err)
+	}
+	before := store.byKey(t, sub2api.MetricUsersTotal)
+
+	later := fixedNow.Add(10 * time.Minute)
+	failing := NewSub2APISyncWorker(Sub2APISyncOptions{
+		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
+		Environment: "staging",
+		InstanceID:  DefaultSub2APIInstanceID,
+		Mode:        Sub2APIModeFake,
+		Store:       store,
+		NewClient:   fakeFactory(sub2api.FakeOptions{FailWith: connector.KindUnavailable}),
+		Now:         func() time.Time { return later },
+	})
+	if err := failing.Work(context.Background(), syncJob()); err != nil {
+		t.Fatal(err)
+	}
+
+	after := store.byKey(t, sub2api.MetricUsersTotal)
+	if after.Status != ops.SyncFailed || after.LastErrorCode != string(connector.KindUnavailable) {
+		t.Fatalf("失败态未写入: %+v", after)
+	}
+	if after.ObservedAt == nil || !after.ObservedAt.Equal(*before.ObservedAt) {
+		t.Fatalf("observed_at = %v, want 保留 %v", after.ObservedAt, before.ObservedAt)
+	}
+	if after.LastSuccess == nil || !after.LastSuccess.Equal(*before.LastSuccess) {
+		t.Fatalf("last_success = %v, want 保留 %v", after.LastSuccess, before.LastSuccess)
+	}
+	if after.Watermark != before.Watermark {
+		t.Fatalf("watermark = %q, want 保留 %q", after.Watermark, before.Watermark)
+	}
+	if fmt.Sprint(after.Value["total_users"]) != fmt.Sprint(before.Value["total_users"]) {
+		t.Fatalf("上次已知值应保留: %v vs %v", after.Value, before.Value)
+	}
+	if !after.SyncedAt.Equal(later) {
+		t.Fatalf("synced_at = %v, want %v（尝试过就要记）", after.SyncedAt, later)
+	}
+	// 状态优先级：失败盖过延迟，但 staleness 仍按旧的 observed_at 增长。
+	freshness := after.Freshness(later)
+	if freshness.State != ops.StateFailed {
+		t.Fatalf("freshness = %q, want failed", freshness.State)
+	}
+	if freshness.StalenessSeconds == nil || *freshness.StalenessSeconds != 600 {
+		t.Fatalf("staleness = %v, want 600", freshness.StalenessSeconds)
+	}
+}
+
+// partialFailClient 让指定的读取方法失败，其余仍走 Fake。
+type partialFailClient struct {
+	sub2api.ReadClient
+	statsErr    error
+	ordersErr   error
+	balancesErr error
+}
+
+func (c partialFailClient) UserStats(ctx context.Context) (sub2api.UserStats, error) {
+	if c.statsErr != nil {
+		return sub2api.UserStats{}, c.statsErr
+	}
+	return c.ReadClient.UserStats(ctx)
+}
+
+func (c partialFailClient) DailyOrders(ctx context.Context, day string) (sub2api.OrderSummary, error) {
+	if c.ordersErr != nil {
+		return sub2api.OrderSummary{}, c.ordersErr
+	}
+	return c.ReadClient.DailyOrders(ctx, day)
+}
+
+func (c partialFailClient) ChannelBalances(ctx context.Context) ([]sub2api.ChannelBalance, error) {
+	if c.balancesErr != nil {
+		return nil, c.balancesErr
+	}
+	return c.ReadClient.ChannelBalances(ctx)
+}
+
+// TestSub2APISyncPartialFailureKeepsGoodMetrics：渠道余额挂了不该把已经
+// 读到的当日收入一起抹成失败——那会让看板丢掉本来拿得到的真话。
+func TestSub2APISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
+	store := newMemoryStore()
+	var logs bytes.Buffer
+	factory := func(context.Context) (sub2api.ReadClient, error) {
+		return partialFailClient{
+			ReadClient:  sub2api.NewFake(sub2api.FakeOptions{Now: func() time.Time { return fixedNow }}),
+			balancesErr: connector.NewError(connector.KindRateLimited, "sub2api.channels.balance_read", nil),
+		}, nil
+	}
+	worker := newTestSyncWorker(store, factory, &logs)
+	if err := worker.Work(context.Background(), syncJob()); err != nil {
+		t.Fatal(err)
+	}
+
+	channels := store.byKey(t, sub2api.MetricChannelBalance)
+	if channels.Status != ops.SyncFailed || channels.LastErrorCode != string(connector.KindRateLimited) {
+		t.Fatalf("渠道余额应记为失败: %+v", channels)
+	}
+	for _, key := range []string{
+		sub2api.MetricUsersTotal, sub2api.MetricUsersBalance,
+		sub2api.MetricRevenueDaily, sub2api.MetricCostDaily,
+	} {
+		row := store.byKey(t, key)
+		if row.Status != ops.SyncOK {
+			t.Fatalf("%s status = %q, want ok（这一组读成功了）", key, row.Status)
+		}
+	}
+	if !strings.Contains(logs.String(), `"metrics_failed":1`) {
+		t.Fatalf("日志应报告 1 条失败: %s", logs.String())
+	}
+}
+
+// TestSub2APISyncMetricMappingIsExhaustive 让「契约新增指标却漏登记映射」
+// 在 CI 就暴露，而不是等某个新指标在看板上永远显示成功。
+func TestSub2APISyncMetricMappingIsExhaustive(t *testing.T) {
+	produced := sub2api.ToObservations(fixedNow, "src", "staging",
+		sub2api.UserStats{}, sub2api.OrderSummary{}, nil)
+	if len(produced) != len(contractMetricKeys) {
+		t.Fatalf("ToObservations 产出 %d 条指标，映射表登记了 %d 条——请同步更新 forMetric",
+			len(produced), len(contractMetricKeys))
+	}
+
+	statsErr := errors.New("stats")
+	ordersErr := errors.New("orders")
+	balancesErr := errors.New("balances")
+	want := map[string]error{
+		sub2api.MetricUsersTotal:     statsErr,
+		sub2api.MetricUsersBalance:   statsErr,
+		sub2api.MetricRevenueDaily:   ordersErr,
+		sub2api.MetricCostDaily:      ordersErr,
+		sub2api.MetricChannelBalance: balancesErr,
+	}
+	errs := sub2apiReadErrors{stats: statsErr, orders: ordersErr, balances: balancesErr}
+	for _, observation := range produced {
+		expected, ok := want[observation.MetricKey]
+		if !ok {
+			t.Fatalf("指标 %s 未登记在映射表里", observation.MetricKey)
+		}
+		if got := errs.forMetric(observation.MetricKey); !errors.Is(got, expected) {
+			t.Fatalf("%s 映射到 %v, want %v", observation.MetricKey, got, expected)
+		}
+	}
+
+	// 未登记的键 fail closed：任一读取失败就把它也判为失败。
+	if got := errs.forMetric("sub2api.brand.new"); got == nil {
+		t.Fatal("未登记的指标键必须 fail closed")
+	}
+	if got := (sub2apiReadErrors{}).forMetric("sub2api.brand.new"); got != nil {
+		t.Fatalf("三组都成功时不该凭空造出错误: %v", got)
+	}
+}
+
+// TestSub2APISyncUpsertFailureIsRetryable：写库失败才是真正要重试的失败
+// ——话根本没说出口。
+func TestSub2APISyncUpsertFailureIsRetryable(t *testing.T) {
+	store := newMemoryStore()
+	store.upsertErr = errors.New("connection refused")
+	var logs bytes.Buffer
+	worker := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
+
+	err := worker.Work(context.Background(), syncJob())
+	if err == nil {
+		t.Fatal("写库失败必须返回 error 让 River 重试")
+	}
+	if !strings.Contains(logs.String(), `"error_code":"observation_upsert_failed"`) {
+		t.Fatalf("日志缺少写库失败的错误码: %s", logs.String())
+	}
+}
+
+func TestSub2APISyncHonorsCancellation(t *testing.T) {
+	store := newMemoryStore()
+	var logs bytes.Buffer
+	worker := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := worker.Work(ctx, syncJob()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Work = %v, want context.Canceled", err)
+	}
+	// 关机不是同步故障：一次正常重启不该在看板上留下 failed。
+	if len(store.writes) != 0 {
+		t.Fatalf("取消时不该写观测: %+v", store.writes)
+	}
+}
+
+func TestSub2APISyncWorkerRejectsMissingCollaborators(t *testing.T) {
+	noStore := NewSub2APISyncWorker(Sub2APISyncOptions{NewClient: fakeFactory(sub2api.FakeOptions{})})
+	if err := noStore.Work(context.Background(), syncJob()); err == nil {
+		t.Fatal("没有仓储时必须报错，而不是假装同步成功")
+	}
+	noClient := NewSub2APISyncWorker(Sub2APISyncOptions{Store: newMemoryStore()})
+	if err := noClient.Work(context.Background(), syncJob()); err == nil {
+		t.Fatal("没有客户端工厂时必须报错")
+	}
+}
+
+func TestParseSub2APIMode(t *testing.T) {
+	for input, want := range map[string]Sub2APIMode{
+		"":      Sub2APIModeFake, // 真实账号未就绪，默认必须是 fake
+		" fake": Sub2APIModeFake,
+		"real":  Sub2APIModeReal,
+	} {
+		got, err := ParseSub2APIMode(input)
+		if err != nil || got != want {
+			t.Fatalf("ParseSub2APIMode(%q) = %q, %v; want %q", input, got, err, want)
+		}
+	}
+	if _, err := ParseSub2APIMode("production"); err == nil {
+		t.Fatal("未知模式必须 fail closed")
+	}
+}
+
+func TestSub2APISyncConfigValidation(t *testing.T) {
+	base := DefaultConfig()
+	base.Environment = "staging"
+	if !base.Sub2APISyncEnabled || base.Sub2APIMode != Sub2APIModeFake {
+		t.Fatalf("默认应开启同步且走 fake: %+v", base)
+	}
+	if base.Sub2APISyncInterval != DefaultSub2APISyncInterval {
+		t.Fatalf("默认周期 = %s, want %s", base.Sub2APISyncInterval, DefaultSub2APISyncInterval)
+	}
+	if base.Sub2APIInstanceID != DefaultSub2APIInstanceID {
+		t.Fatalf("默认来源 = %q, want %q", base.Sub2APIInstanceID, DefaultSub2APIInstanceID)
+	}
+	if err := base.normalized().validate(); err != nil {
+		t.Fatalf("默认配置应通过校验: %v", err)
+	}
+
+	bad := base
+	bad.Sub2APISyncInterval = 500 * time.Millisecond
+	if err := bad.normalized().validate(); err == nil {
+		t.Fatal("低于 River 一秒下限的周期必须被拒")
+	}
+
+	bad = base
+	bad.Sub2APIMode = "prod"
+	if err := bad.normalized().validate(); err == nil {
+		t.Fatal("非法模式必须被拒")
+	}
+
+	bad = base
+	bad.Sub2APICredentialRef = "not-a-ref"
+	if err := bad.normalized().validate(); err == nil {
+		t.Fatal("拼错的 CredentialRef 必须在启动时就被拒")
+	}
+
+	good := base
+	good.Sub2APICredentialRef = "secret://sub2api/readonly-token"
+	if err := good.normalized().validate(); err != nil {
+		t.Fatalf("合法 CredentialRef 应通过: %v", err)
+	}
+}
