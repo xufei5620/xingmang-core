@@ -441,3 +441,57 @@ func TestBalanceDeltaNonZeroRemovalLeavesRetiredSetUnchanged(t *testing.T) {
 		}
 	}
 }
+
+func TestBalanceDeltaUnsafeRemovalThroughPreparePreservesCurrentState(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		row  BalanceSnapshotRow
+	}{
+		{name: "positive balance", row: BalanceSnapshotRow{ExternalUserID: "9", ServiceUnits: "1", BaselineMember: true}},
+		{name: "negative marked", row: BalanceSnapshotRow{ExternalUserID: "9", ServiceUnits: "0", BalanceNegative: true, BaselineMember: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			baseline := testBalanceSnapshot(t, "cutover", "2026-08-20T00:00:00Z", "", []BalanceSnapshotRow{test.row})
+			baselineStore, currentStore := testBalanceStores(t, baseline)
+			connector := &BalanceDBConnector{Source: SourceSub2API, SourceID: baseline.SourceID,
+				Manifest: testBalanceManifest(baseline), Baseline: baselineStore, Current: currentStore}
+			cursor := ScanCursor{Version: 2, CutoverAt: baseline.CutoverAt, SnapshotID: baseline.SnapshotID, Completed: true}
+			prepared, err := connector.prepareReconciliationCycle(context.Background(), cursor, func(context.Context) (BalanceSnapshot, error) {
+				return testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", []BalanceSnapshotRow{test.row}), nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			priorState, legacy, exists, err := loadCurrentBalanceReconciliationState(context.Background(), currentStore)
+			if err != nil || !exists || priorState == nil || legacy != nil {
+				t.Fatalf("prior encrypted state was not loadable: exists=%t state=%#v legacy=%#v err=%v", exists, priorState, legacy, err)
+			}
+			before, err := os.ReadFile(currentStore.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			acknowledged := cursor
+			acknowledged.SnapshotID = prepared.Snapshot.SnapshotID
+			_, err = connector.prepareReconciliationCycle(context.Background(), acknowledged, func(context.Context) (BalanceSnapshot, error) {
+				return testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:02:00Z", "", nil), nil
+			})
+			if err == nil || !strings.Contains(err.Error(), "removed an account") {
+				t.Fatalf("unsafe removal did not fail closed: %v", err)
+			}
+			after, err := os.ReadFile(currentStore.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("unsafe removal replaced the encrypted current state")
+			}
+
+			reloaded, legacy, exists, err := loadCurrentBalanceReconciliationState(context.Background(), currentStore)
+			if err != nil || !exists || legacy != nil || !reflect.DeepEqual(reloaded, priorState) {
+				t.Fatalf("unsafe removal did not preserve the reloadable prior state: exists=%t got=%#v want=%#v legacy=%#v err=%v", exists, reloaded, priorState, legacy, err)
+			}
+		})
+	}
+}

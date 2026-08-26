@@ -1,6 +1,7 @@
 package sourceagent
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -271,6 +272,50 @@ func TestEncryptedCutoverStateIsAuthenticatedAndCreateOnly(t *testing.T) {
 	var envelope map[string]any
 	if json.Unmarshal(raw, &envelope) != nil || envelope["ciphertext"] == nil {
 		t.Fatal("cutover state is not an encrypted envelope")
+	}
+}
+
+func TestEncryptedStateFileRejectsPlaintextOverCutoverLimitWithoutReplacingPriorState(t *testing.T) {
+	type statePayload struct {
+		Value string `json:"value"`
+	}
+	directory := t.TempDir()
+	keyPath := filepath.Join(directory, "key")
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := EncryptedStateFile{Path: filepath.Join(directory, "state.enc"), Purpose: "balance_snapshot", Keys: FileSpoolKeyProvider{Path: keyPath}}
+	prior := statePayload{Value: "prior-state"}
+	if err := store.SaveNew(context.Background(), prior); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oversized := statePayload{Value: strings.Repeat("x", cutoverMaxBytes)}
+	if err = store.Replace(context.Background(), oversized); err == nil {
+		t.Fatal("encrypted state accepted plaintext larger than cutoverMaxBytes")
+	}
+	after, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("plaintext-size rejection replaced the prior encrypted state")
+	}
+
+	var reloaded statePayload
+	if err = store.Load(context.Background(), &reloaded); err != nil {
+		t.Fatalf("prior encrypted state was not decryptable after size rejection: %v", err)
+	}
+	if reloaded != prior {
+		t.Fatalf("size rejection did not preserve prior state: got=%#v want=%#v", reloaded, prior)
 	}
 }
 
