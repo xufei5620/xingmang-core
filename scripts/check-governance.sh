@@ -29,4 +29,12 @@ fi
 [ -f .tool-versions ] || err "缺少 .tool-versions"
 [ -f go.mod ] || err "缺少 go.mod"
 
+
+# --- v3(XM-0004): ADR 完整性 ---
+for i in $(seq -w 1 18); do
+  ls docs/adr/ADR-0${i}-*.md >/dev/null 2>&1 || err "缺少 ADR-0${i}"
+done
+[ -f docs/architecture/BASELINE-v2.1.md ] || err "缺少 BASELINE-v2.1.md"
+grep -q "ADR-018" docs/architecture/BASELINE-v2.1.md 2>/dev/null || err "BASELINE 索引不完整"
+
 exit $fail
