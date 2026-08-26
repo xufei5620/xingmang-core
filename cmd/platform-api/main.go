@@ -36,7 +36,15 @@ func main() {
 		os.Exit(2)
 	}
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	// 连接串单独解析：密码走 CredentialRef，明文不进 config、不进日志
+	databaseURL, err := databaseURLFromEnv(ctx, os.Getenv, logger)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "database_url_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "database_pool_failed"), slog.Any("err", err))

@@ -8,10 +8,14 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
 
+// config 只承载**非机密**配置。
+//
+// 数据库连接串刻意不在这里：它可能携带密码，必须走 database.go 的
+// CredentialRef 纪律（宪法 7 条）。把它留在 config 里，早晚会有人为了写测试
+// 而直接塞一个内联密码进来，纪律就从「代码保证」退化成「约定」。
 type config struct {
 	Environment    string
 	ListenAddr     string
-	DatabaseURL    string
 	RequestTimeout time.Duration
 }
 
@@ -29,11 +33,6 @@ func configFromEnv(getenv func(string) string) (config, error) {
 	}
 	if _, err := registry.ParseEnvironment(c.Environment); err != nil {
 		return config{}, fmt.Errorf("ENVIRONMENT: %w", err)
-	}
-
-	c.DatabaseURL = strings.TrimSpace(getenv("XM_DATABASE_URL"))
-	if c.DatabaseURL == "" {
-		return config{}, fmt.Errorf("XM_DATABASE_URL is required")
 	}
 
 	if v := strings.TrimSpace(getenv("LISTEN_ADDR")); v != "" {

@@ -1,0 +1,54 @@
+# Docker 构建上下文裁剪（deploy/docker/*.Dockerfile 用同一个上下文＝仓库根）。
+#
+# 目的不只是快：构建上下文里有什么，就有可能被 COPY 进镜像。
+# .env / secrets / *.key 出现在这里是事故，所以哪怕它们已经在 .gitignore，
+# 也必须在这里再挡一次——.gitignore 管的是 git，不管 docker build。
+
+# --- 版本控制与工具目录 ---
+.git
+.github
+.claude
+.cursorrules
+.editorconfig
+.gitattributes
+.sops.yaml
+.tool-versions
+
+# --- 依赖与构建产物（容器内会重新装/重新构建）---
+node_modules
+**/node_modules
+dist
+**/dist
+storybook-static
+**/storybook-static
+.vite
+**/.vite
+*.tsbuildinfo
+/bin
+*.exe
+*.test
+
+# --- 凭据（宪法 7 条：明文不进镜像）---
+# 用 **/ 前缀：docker 的模式默认只匹配上下文根，不加就漏掉
+# deploy/compose/.env 这种真正会被写出来的位置
+**/.env
+**/.env.*
+**/*.age
+**/*.pem
+**/*.key
+secrets/
+var/
+
+# --- 文档与测试产物：镜像里用不上 ---
+# db/migrations/river/mirror.go 只 embed *.sql，排掉 md 不影响构建
+docs
+coverage
+playwright-report
+test-results
+**/*.md
+
+# --- 系统 ---
+.DS_Store
+Thumbs.db
+.idea
+.vscode

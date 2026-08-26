@@ -14,6 +14,16 @@
 > 后台统一，身份分域，权限统一，动作统一，数据分治，接口集成；
 > 控制平台不进入用户实时请求路径、不拥有第三方业务真相、不直接写第三方业务原表。
 
+## 一键启动（staging）
+
+```bash
+cp deploy/compose/.env.example deploy/compose/.env   # 填 DATABASE_PASSWORD
+docker compose -p xingmang-launch -f deploy/compose/launch.yaml up -d --wait
+```
+
+完整步骤、验证方式与已知问题见 `docs/runbooks/LAUNCH.md`。
+这一档跑的是 Fake 连接器的构造数据（演示/联调用），不是业务真相。
+
 ## 开发
 
 - 后端：`go test ./...`（Go 版本由 go.mod 决定，GOTOOLCHAIN=auto 自动获取）

@@ -1,0 +1,203 @@
+# 星芒统一控制平台 —— staging 一键启动栈（XM-0023）
+#
+# 用法见 docs/runbooks/LAUNCH.md。最短路径：
+#   cp deploy/compose/.env.example deploy/compose/.env   # 然后填密码
+#   docker compose -p xingmang-launch -f deploy/compose/launch.yaml up -d --wait
+#
+# 为什么用独立的项目名 xingmang-launch：
+#   本机上已经跑着 deploy/compose/dev.yaml 起的开发库（compose-postgres-1）。
+#   独立项目名 = 独立网络 + 独立卷 + 独立容器名，这个栈起停不会碰到它。
+#   也刻意不发布 5432/5433，避免和它抢端口。
+#
+# 版本纪律（宪法 §4 / VERSIONS.lock）：所有镜像钉到具体版本，禁止 latest。
+# postgres 连 digest 一起钉——tag 会被上游重新指向，digest 不会。
+name: xingmang-launch
+
+services:
+  # ==========================================================================
+  # 数据库
+  # ==========================================================================
+  postgres:
+    image: docker.io/library/postgres:18@sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7
+    # VERSIONS.lock 记录的是 amd64 清单
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-xingmang}
+      POSTGRES_USER: ${POSTGRES_USER:-xingmang}
+      # 密码走 Docker secret 文件，不作为环境变量出现在容器 inspect 里
+      POSTGRES_PASSWORD_FILE: /run/secrets/database__postgres_password
+    secrets:
+      - source: database__postgres_password
+        target: database__postgres_password
+    volumes:
+      # ⚠️ PG18 必须挂 /var/lib/postgresql，**不是** /var/lib/postgresql/data。
+      # PG18 把集群放在按大版本分的子目录下（.../18/docker），挂到 data 上
+      # 会让初始化脚本看到一个「非空但不是集群」的目录，容器起不来。
+      # 这是实测踩过的坑，不要"顺手改回去"。
+      - postgres18-data:/var/lib/postgresql
+    # 刻意不发布端口：本栈内部互通即可。宿主要连库时用
+    # `docker compose -p xingmang-launch exec postgres psql`，
+    # 既不占 5432/5433，也不把库暴露到宿主网络。
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ==========================================================================
+  # 一次性：数据库迁移（Platform Lifecycle Operation，宪法 3 条）
+  # ==========================================================================
+  # 两步都在这个容器里跑完（见 deploy/docker/migrate-entrypoint.sh）：
+  #   1. db/migrations/*.sql   —— cmd/migrate（golang-migrate）
+  #   2. River 表结构          —— platform-worker -migrate（River pinned bundle）
+  # restart: "no" —— 迁移失败必须停在那里让人看，不能自动重试到看起来成功。
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/go.Dockerfile
+      target: migrate
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-staging}
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+    image: xingmang/migrate:${BUILD_VERSION:-staging}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      # DSN 不含密码（宪法 7 条）；密码经 CredentialRef 解析
+      DATABASE_URL: postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable
+      DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required, see deploy/compose/.env.example}
+
+  # ==========================================================================
+  # 一次性：Bootstrap 引导数据（Platform Lifecycle Operation，宪法 3 条）
+  # ==========================================================================
+  # 幂等 SQL，为什么不走 Action 见脚本头部注释。
+  # 用 postgres 镜像自带的 psql，不额外引入一个镜像版本要治理。
+  bootstrap:
+    image: docker.io/library/postgres:18@sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7
+    platform: linux/amd64
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-xingmang}
+      PGDATABASE: ${POSTGRES_DB:-xingmang}
+      PGPASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+    volumes:
+      - ../bootstrap:/bootstrap:ro
+    # -v ON_ERROR_STOP=1：任何一条 SQL 出错都要非零退出，
+    # 否则 psql 会跳过错误继续跑，最后以 0 退出，栈起来了但数据不对
+    entrypoint: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/bootstrap/001_staging_seed.sql"]
+
+  # ==========================================================================
+  # Platform API
+  # ==========================================================================
+  platform-api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/go.Dockerfile
+      target: platform-api
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-staging}
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+    image: xingmang/platform-api:${BUILD_VERSION:-staging}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # staging：dev-header 鉴权仍可用。改成 production 时本进程会**拒绝启动**
+      # （internal/platform/httpapi.NewDevHeaderResolver），这是有意的闸——
+      # 上生产必须先完成 CR-0001（Keycloak/OIDC）。
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      # 容器内必须绑 0.0.0.0：默认的 127.0.0.1 是给「宿主直跑 + 宿主 Nginx
+      # 反代」形态用的，在容器里会让 web 反代连不上
+      LISTEN_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable
+      DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30s}
+    # 不发布端口：admin-web 与 API 同源，一切经 web 服务进来（免 CORS）。
+    # 需要直连调试时用 docker compose exec / 或同网络的一次性容器。
+    healthcheck:
+      # 运行镜像是 alpine，busybox wget 就够，不必为探针装 curl
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ==========================================================================
+  # Platform Worker（River 队列）
+  # ==========================================================================
+  platform-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/go.Dockerfile
+      target: platform-worker
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-staging}
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+    image: xingmang/platform-worker:${BUILD_VERSION:-staging}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      DATABASE_URL: postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable
+      DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-1m}
+      # Sub2API 连接器模式。fake = 造数据，不连真实上游。
+      # 真实数据要等 XM-0017（Sub2API 只读账号）；在那之前把 real 打开
+      # 只会得到一堆连不上的错误，或者更糟——连上了但用错凭据。
+      # 变量本身由 XM-0022 实现；这里写的就是它的默认值，不构成依赖。
+      XM_SUB2API_MODE: ${XM_SUB2API_MODE:-fake}
+
+  # ==========================================================================
+  # Web（admin-web 静态产物 + /api/ 反代）
+  # ==========================================================================
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/web.Dockerfile
+      target: web
+    image: xingmang/web:${BUILD_VERSION:-staging}
+    restart: unless-stopped
+    depends_on:
+      platform-api:
+        condition: service_healthy
+    ports:
+      # 这个发布口是给**服务器部署**用的。本开发机的宿主→容器端口转发被
+      # 代理 TUN 劫持（SYN 停滞），从宿主浏览器访问多半不通——不是栈的问题，
+      # 验证方式见 docs/runbooks/LAUNCH.md「已知问题」。
+      # 默认绑 127.0.0.1：要对外提供服务时显式改 WEB_BIND，
+      # 别让一个默认值把管理后台开到公网上。
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8088}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/index.html >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  postgres18-data:
+
+secrets:
+  # 从 deploy/compose/.env 的 DATABASE_PASSWORD 读取。
+  # 真实 .env 不入库（.gitignore 已挡），仓库里只有 .env.example。
+  database__postgres_password:
+    environment: DATABASE_PASSWORD
