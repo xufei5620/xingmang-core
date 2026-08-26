@@ -1,0 +1,17 @@
+{
+  "id": "registry.connection.set_status",
+  "version": "1",
+  "risk_level": "L2",
+  "permission": "registry.connection.kill",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {"required": false},
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "connection_id": {"type": "string", "required": true},
+    "status": {"type": "string", "required": true, "enum": ["enabled", "disabled", "killed"]}
+  },
+  "notes": "L2：Foundation-A 下被拒绝。killed 即 Kill Switch 拉闸（ADR-004）；补偿方式 AUTOMATIC——把状态改回 enabled 即可恢复。"
+}

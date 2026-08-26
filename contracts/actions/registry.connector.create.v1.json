@@ -1,0 +1,24 @@
+{
+  "id": "registry.connector.create",
+  "version": "1",
+  "risk_level": "L2",
+  "permission": "registry.connector.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {"required": false},
+  "compensation_mode": "MANUAL",
+  "params": {
+    "key": {"type": "string", "required": true},
+    "version": {"type": "string", "required": true},
+    "contract_version": {"type": "string", "required": true},
+    "connection_schema_path": {"type": "string", "required": true},
+    "target_allowlist": {"type": "string_slice", "required": true},
+    "read_capabilities": {"type": "string_slice", "required": false},
+    "write_capabilities": {"type": "string_slice", "required": false},
+    "supported_upstream_versions": {"type": "string_slice", "required": false},
+    "compatibility_test_path": {"type": "string", "required": false}
+  },
+  "notes": "L2：Foundation-A 下内核会以 ADVANCED_CONTROLS_REQUIRED 拒绝执行，Handler 不会被调用。XM-0030 补齐 Advanced Controls 后方可执行。"
+}
