@@ -72,6 +72,22 @@ func createService(ctx context.Context, p map[string]any) (any, error) {
 单独测试。**摘要的脱敏由调用方负责**——`Record*` 不判断什么是敏感的，宪法 7 条
 的责任落在写 Handler 的人身上。
 
+摘要**不是行的副本**：只挑「改了会影响运营判断」的字段。全量复制会让审计链变成
+一个影子数据库，还会在字段变敏感时（比如将来加了内部凭据路径）悄悄把它带进链里。
+CredentialRef 是个例外——它是引用不是凭据（ADR-014），「这条连接绑了哪个凭据」
+正是事故复盘要问的第一个问题，必须进链。
+
+### 验证 Handler 记了什么
+
+```go
+value, contrib, err := action.CaptureAudit(ctx, handler, params)
+// contrib.ResourceType / ResourceID / Before / After
+```
+
+走内核当然更真实，但内核会先拦掉 L2 以上的动作（Foundation-A 没有 Advanced
+Controls），而恰恰是 Kill Switch 这类高风险动作最需要验证审计内容。`CaptureAudit`
+**不做**任何权限、环境、风险等级判定——它是测试接缝，不是执行通道（宪法 2 条）。
+
 ### 已知缺口：审计写与业务写不在同一事务
 
 `Handler` 自己管理事务，内核拿不到它；审计写发生在 Handler 返回**之后**，

@@ -187,13 +187,14 @@ func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 		StartedAt:     startedAt,
 		FinishedAt:    finishedAt,
 	}
-	resourceType, resourceID, reason, before, after := meta.snapshot()
+	contrib := meta.snapshot()
 	auditEvent := AuditEvent{
 		OccurredAt: startedAt, PrincipalID: p.ID, PrincipalType: p.Type,
 		ActionID: def.ID, ActionVersion: def.Version, ActionRunID: runID,
-		ResourceType: resourceType, ResourceID: resourceID, Reason: reason,
+		ResourceType: contrib.ResourceType, ResourceID: contrib.ResourceID,
+		Reason:      contrib.Reason,
 		Environment: p.Environment, RequestID: req.RequestID,
-		BeforeSummary: before, AfterSummary: after,
+		BeforeSummary: contrib.Before, AfterSummary: contrib.After,
 	}
 
 	if err != nil {

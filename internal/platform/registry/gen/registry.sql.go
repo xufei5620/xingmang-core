@@ -192,6 +192,33 @@ func (q *Queries) CreateService(ctx context.Context, arg CreateServiceParams) (C
 	return i, err
 }
 
+const getConnection = `-- name: GetConnection :one
+SELECT id, connector_id, service_id, environment, credential_ref, target_allowlist, granted_capabilities, kill_switch, status, detected_upstream_version, version_fingerprint, last_verified_at, created_at, updated_at FROM core.connection
+WHERE id = $1
+`
+
+func (q *Queries) GetConnection(ctx context.Context, id uuid.UUID) (CoreConnection, error) {
+	row := q.db.QueryRow(ctx, getConnection, id)
+	var i CoreConnection
+	err := row.Scan(
+		&i.ID,
+		&i.ConnectorID,
+		&i.ServiceID,
+		&i.Environment,
+		&i.CredentialRef,
+		&i.TargetAllowlist,
+		&i.GrantedCapabilities,
+		&i.KillSwitch,
+		&i.Status,
+		&i.DetectedUpstreamVersion,
+		&i.VersionFingerprint,
+		&i.LastVerifiedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getConnector = `-- name: GetConnector :one
 SELECT id, key, version, contract_version, connection_schema_path, target_allowlist, read_capabilities, write_capabilities, supported_upstream_versions, compatibility_test_path, created_at, updated_at FROM core.connector
 WHERE key = $1 AND version = $2

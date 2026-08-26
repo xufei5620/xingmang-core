@@ -105,11 +105,39 @@ func RecordReason(ctx context.Context, reason string) {
 	}
 }
 
-func (m *auditMeta) snapshot() (resourceType, resourceID, reason string, before, after map[string]any) {
+// AuditContribution 是 Handler 通过 Record* 贡献的审计信息。
+type AuditContribution struct {
+	ResourceType string
+	ResourceID   string
+	Reason       string
+	Before       map[string]any
+	After        map[string]any
+}
+
+func (m *auditMeta) snapshot() AuditContribution {
 	if m == nil {
-		return "", "", "", nil, nil
+		return AuditContribution{}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.resourceType, m.resourceID, m.reason, m.before, m.after
+	return AuditContribution{
+		ResourceType: m.resourceType, ResourceID: m.resourceID, Reason: m.reason,
+		Before: m.before, After: m.after,
+	}
+}
+
+// CaptureAudit 在受控上下文里跑一个 Handler，返回它贡献的审计信息。
+//
+// 给 Handler 作者验证「我记了什么进审计链」用。走内核当然更真实，但内核会
+// 先拦掉 L2 以上的动作（Foundation-A 没有 Advanced Controls），而恰恰是
+// Kill Switch 这类高风险动作最需要验证审计内容。
+//
+// 它**不做**任何权限、环境、风险等级判定——那是内核的职责，不要拿它当执行
+// 通道用（宪法 2 条：写操作只走 Action）。
+func CaptureAudit(
+	ctx context.Context, h Handler, params map[string]any,
+) (any, AuditContribution, error) {
+	hctx, meta := withAuditMeta(ctx)
+	v, err := h(hctx, params)
+	return v, meta.snapshot(), err
 }
