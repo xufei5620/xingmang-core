@@ -29,6 +29,13 @@ func newError(code Code, message string, cause error) *Error {
 	return &Error{Code: code, Message: message, cause: cause}
 }
 
+// NewError 构造一个标准 Action 错误。供 HTTP 层与业务模块在需要显式返回
+// 特定错误码时使用；Kernel 内部仍用 newError。
+// cause 只进 Unwrap 链供服务端日志，不进对外文本（规格 §18.4）。
+func NewError(code Code, message string, cause error) error {
+	return newError(code, message, cause)
+}
+
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
 
 // Unwrap 暴露根因给 errors.Is/As 与服务端日志，不进入对外文本。
