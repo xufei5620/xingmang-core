@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -240,9 +241,133 @@ func TestBalanceDeltaLoadsV1StateAsV2WithEmptyRetiredSet(t *testing.T) {
 	state := testBalanceState(t, 1, "balance_delta_v1", nil)
 	_, current := testBalanceStores(t, state.CapturedSnapshot)
 	requireReplaceBalanceState(t, current, state)
+	before, err := os.ReadFile(current.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	loaded, legacy, exists, err := loadCurrentBalanceReconciliationState(context.Background(), current)
-	if err != nil || !exists || legacy != nil || loaded.SchemaVersion != 2 || len(loaded.RetiredZeroAccountIDs) != 0 {
+	if err != nil || !exists || legacy != nil || loaded.SchemaVersion != 2 || loaded.StateKind != "balance_delta_v2" || len(loaded.RetiredZeroAccountIDs) != 0 {
 		t.Fatalf("v1 migration failed: loaded=%#v legacy=%#v exists=%t err=%v", loaded, legacy, exists, err)
+	}
+	after, err := os.ReadFile(current.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("load-only v1 normalization replaced the encrypted current state")
+	}
+}
+
+func TestBalanceDeltaPreparedRetirementIsRetryStable(t *testing.T) {
+	rows := []BalanceSnapshotRow{{ExternalUserID: "1", ServiceUnits: "0", BaselineMember: true}}
+	baseline := testBalanceSnapshot(t, "cutover", "2026-08-20T00:00:00Z", "", rows)
+	baselineStore, currentStore := testBalanceStores(t, baseline)
+	connector := &BalanceDBConnector{Source: SourceSub2API, SourceID: baseline.SourceID,
+		Manifest: testBalanceManifest(baseline), Baseline: baselineStore, Current: currentStore}
+	cursor := ScanCursor{Version: 2, CutoverAt: baseline.CutoverAt, SnapshotID: baseline.SnapshotID, Completed: true}
+	captured := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", nil)
+	captures := 0
+	first, err := connector.prepareReconciliationCycle(context.Background(), cursor, func(context.Context) (BalanceSnapshot, error) {
+		captures++
+		return captured, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRetry, err := os.ReadFile(currentStore.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := connector.prepareReconciliationCycle(context.Background(), cursor, func(context.Context) (BalanceSnapshot, error) {
+		captures++
+		return BalanceSnapshot{}, errors.New("must not recapture")
+	})
+	if err != nil || captures != 1 || !reflect.DeepEqual(first, retry) {
+		t.Fatalf("prepared retirement drifted: first=%#v retry=%#v captures=%d err=%v", first, retry, captures, err)
+	}
+	afterRetry, err := os.ReadFile(currentStore.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeRetry, afterRetry) {
+		t.Fatal("prepared retirement retry replaced the encrypted current state")
+	}
+}
+
+func TestBalanceDeltaRetirementPersistsAcrossAcknowledgedCycles(t *testing.T) {
+	rows := []BalanceSnapshotRow{{ExternalUserID: "1", ServiceUnits: "0", BaselineMember: true}}
+	baseline := testBalanceSnapshot(t, "cutover", "2026-08-20T00:00:00Z", "", rows)
+	baselineStore, currentStore := testBalanceStores(t, baseline)
+	connector := &BalanceDBConnector{Source: SourceSub2API, SourceID: baseline.SourceID,
+		Manifest: testBalanceManifest(baseline), Baseline: baselineStore, Current: currentStore}
+	cursor := ScanCursor{Version: 2, CutoverAt: baseline.CutoverAt, SnapshotID: baseline.SnapshotID, Completed: true}
+	first, err := connector.prepareReconciliationCycle(context.Background(), cursor, func(context.Context) (BalanceSnapshot, error) {
+		return testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", nil), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acknowledged := cursor
+	acknowledged.SnapshotID = first.Snapshot.SnapshotID
+	if _, err = connector.prepareReconciliationCycle(context.Background(), acknowledged, func(context.Context) (BalanceSnapshot, error) {
+		return testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:02:00Z", "", nil), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, _, _, err := loadCurrentBalanceReconciliationState(context.Background(), currentStore)
+	if err != nil || !reflect.DeepEqual(state.RetiredZeroAccountIDs, []string{"1"}) {
+		t.Fatalf("acknowledged retirement was not monotonic: state=%#v err=%v", state, err)
+	}
+}
+
+func TestBalanceDeltaRetirementOverflowPreservesCurrentFile(t *testing.T) {
+	retired := make([]string, maxRetiredBalanceAccounts)
+	for i := range retired {
+		retired[i] = strconv.Itoa(i + 1)
+	}
+	rows := []BalanceSnapshotRow{{ExternalUserID: "100001", ServiceUnits: "0"}}
+	captured := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:00:00Z", "", rows)
+	emission := testBalanceSnapshot(t, "reconciliation", captured.AsOf, strings.Repeat("a", 64), nil)
+	state := balanceReconciliationState{SchemaVersion: 2, StateKind: "balance_delta_v2",
+		BaseSnapshotID: strings.Repeat("a", 64), CapturedSnapshot: captured,
+		EmissionSnapshot: emission, RetiredZeroAccountIDs: retired}
+	baselineStore, currentStore := testBalanceStores(t, captured)
+	requireReplaceBalanceState(t, currentStore, state)
+	before, err := os.ReadFile(currentStore.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := &BalanceDBConnector{Source: SourceSub2API, SourceID: captured.SourceID,
+		Manifest: testBalanceManifest(captured), Baseline: baselineStore, Current: currentStore}
+	cursor := ScanCursor{Version: 2, CutoverAt: captured.CutoverAt,
+		SnapshotID: emission.SnapshotID, Completed: true}
+	_, err = connector.prepareReconciliationCycle(context.Background(), cursor, func(context.Context) (BalanceSnapshot, error) {
+		return testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", nil), nil
+	})
+	after, readErr := os.ReadFile(currentStore.Path)
+	if err == nil || readErr != nil || !bytes.Equal(before, after) {
+		t.Fatalf("overflow did not preserve current state: prepare=%v read=%v", err, readErr)
+	}
+}
+
+func TestBalanceDeltaLegacySnapshotMigratesToV2(t *testing.T) {
+	baseline := testBalanceSnapshot(t, "cutover", "2026-08-20T00:00:00Z", "", nil)
+	baselineStore, currentStore := testBalanceStores(t, baseline)
+	legacy := testBalanceSnapshot(t, "reconciliation", "2026-08-24T00:00:00Z", "", nil)
+	if err := currentStore.Replace(context.Background(), legacy); err != nil {
+		t.Fatal(err)
+	}
+	connector := &BalanceDBConnector{Source: SourceSub2API, SourceID: baseline.SourceID,
+		Manifest: testBalanceManifest(baseline), Baseline: baselineStore, Current: currentStore}
+	cursor := ScanCursor{Version: 2, CutoverAt: baseline.CutoverAt, SnapshotID: legacy.SnapshotID, Completed: true}
+	if _, err := connector.prepareReconciliationCycle(context.Background(), cursor, func(context.Context) (BalanceSnapshot, error) {
+		return testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:00:00Z", "", nil), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, _, _, err := loadCurrentBalanceReconciliationState(context.Background(), currentStore)
+	if err != nil || state.SchemaVersion != 2 || state.StateKind != "balance_delta_v2" || len(state.RetiredZeroAccountIDs) != 0 {
+		t.Fatalf("legacy migration did not write empty v2 retirement state: state=%#v err=%v", state, err)
 	}
 }
 

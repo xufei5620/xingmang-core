@@ -598,6 +598,7 @@ func (c *BalanceDBConnector) prepareReconciliationCycle(ctx context.Context, cur
 		return preparedBalanceCycle{}, err
 	}
 	var previous BalanceSnapshot
+	var retired []string
 	if exists && state != nil {
 		switch cursor.SnapshotID {
 		case state.BaseSnapshotID:
@@ -607,6 +608,7 @@ func (c *BalanceDBConnector) prepareReconciliationCycle(ctx context.Context, cur
 				CeilingCursor: "balance_snapshot:" + lastBalanceUserID(state.CapturedSnapshot.Rows)}, nil
 		case state.EmissionSnapshot.SnapshotID:
 			previous = state.CapturedSnapshot
+			retired = state.RetiredZeroAccountIDs
 		default:
 			return preparedBalanceCycle{}, errors.New("durable balance reconciliation state conflicts with cursor")
 		}
@@ -631,7 +633,7 @@ func (c *BalanceDBConnector) prepareReconciliationCycle(ctx context.Context, cur
 	if err != nil {
 		return preparedBalanceCycle{}, err
 	}
-	prepared, err := buildBalanceReconciliationState(cursor.SnapshotID, previous, captured)
+	prepared, err := buildBalanceReconciliationStateWithRetired(cursor.SnapshotID, previous, captured, retired)
 	if err != nil {
 		return preparedBalanceCycle{}, err
 	}
