@@ -12,4 +12,7 @@ describe("design tokens", () => {
     expect(tokens.color.success).toBeDefined();
     expect(tokens.color.warning).toBeDefined();
   });
+  it("overlay 令牌存在且为 var(--xm-) 引用", () => {
+    expect(tokens.color.overlay).toMatch(/^var\(--xm-/);
+  });
 });

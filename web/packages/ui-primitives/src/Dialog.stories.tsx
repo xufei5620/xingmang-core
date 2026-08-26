@@ -18,7 +18,10 @@ export const Default: Story = {};
 export const Disabled: Story = {
   args: { trigger: <Button disabled>打开</Button> },
 };
-export const DarkMode: Story = { globals: { theme: "dark" } };
+export const DarkMode: Story = {
+  globals: { theme: "dark" },
+  args: { defaultOpen: true },
+};
 export const LongText: Story = {
   args: {
     title: "这是一个非常非常长的对话框标题用于验证换行与关闭按钮布局是否可控",

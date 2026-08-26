@@ -25,6 +25,7 @@
   --xm-color-danger-fg: #ffffff;
   --xm-color-success: var(--xm-palette-green-600);
   --xm-color-warning: var(--xm-palette-amber-500);
+  --xm-color-overlay: rgb(15 23 42 / 0.4);            /* 对话框/抽屉遮罩 */
 
   /* 字体 */
   --xm-font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
@@ -57,4 +58,5 @@
   --xm-color-accent-strong: var(--xm-palette-blue-600);
   --xm-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   --xm-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5);
+  --xm-color-overlay: rgb(0 0 0 / 0.6);
 }

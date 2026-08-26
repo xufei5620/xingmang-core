@@ -29,7 +29,7 @@ export function Dialog({
     >
       <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-fg/40" />
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-overlay" />
         <DialogPrimitive.Content
           {...(description ? {} : { "aria-describedby": undefined })}
           className={cx(

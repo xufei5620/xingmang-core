@@ -12,6 +12,7 @@
   --color-danger-fg: var(--xm-color-danger-fg);
   --color-success: var(--xm-color-success);
   --color-warning: var(--xm-color-warning);
+  --color-overlay: var(--xm-color-overlay);
   --font-sans: var(--xm-font-sans);
   --font-mono: var(--xm-font-mono);
   --radius-sm: var(--xm-radius-sm);

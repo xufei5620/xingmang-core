@@ -15,6 +15,7 @@ export const tokens = {
     dangerFg: "var(--xm-color-danger-fg)",
     success: "var(--xm-color-success)",
     warning: "var(--xm-color-warning)",
+    overlay: "var(--xm-color-overlay)",
   },
   font: { sans: "var(--xm-font-sans)", mono: "var(--xm-font-mono)" },
   radius: { sm: "var(--xm-radius-sm)", md: "var(--xm-radius-md)", lg: "var(--xm-radius-lg)" },
