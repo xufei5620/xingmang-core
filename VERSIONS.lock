@@ -1,0 +1,41 @@
+# VERSIONS.lock — 精确版本锁（规格 §5.3；P-6）
+# 建仓核对日：2026-08-26；来源：官方发布源（go.dev / npmjs / hub.docker / quay.io）
+# 规则：只允许精确版本；禁止范围表达式；禁止 latest。
+
+[toolchain]
+go            = 1.27.0
+node          = 24.13.0
+pnpm          = 11.24.0
+
+[backend]
+postgresql    = 18
+river         = 由 go.mod 锁定（XM-0013 引入时记录于此）
+
+[frontend]
+react         = 19.2.8
+react-dom     = 19.2.8
+react-router  = 7.18.2
+tanstack-query = 5.102.4
+typescript    = 5.9.3
+vite          = 8.2.2
+tailwindcss   = 4.3.3
+storybook     = 10.5.10
+vitest        = 4.1.11
+
+[images]
+# postgres digest 为 2026-08-26 docker manifest inspect（amd64 平台清单）实际值；
+# 首次生产部署 pull 时按 RepoDigest 复核
+postgres.image     = docker.io/library/postgres:18
+postgres.digest    = sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7
+postgres.verified_at = 2026-08-26
+# keycloak 本批不部署；digest 于 XM-0007 部署时锁定（quay 现行最新 patch 26.7.2）
+keycloak.image     = quay.io/keycloak/keycloak:26.7.2
+keycloak.digest    = 待XM-0007部署时锁定
+keycloak.verified_at = 2026-08-26
+
+[github-actions]
+actions/checkout        = fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+actions/setup-go        = 924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+actions/setup-node      = 249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+pnpm/action-setup       = f40ffcd9367d9f12939873eb1018b921a783ffaa  # v4
+gitleaks/gitleaks-action = dcedce43c6f43de0b836d1fe38946645c9c638dc # v2

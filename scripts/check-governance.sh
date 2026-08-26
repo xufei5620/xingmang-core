@@ -18,4 +18,15 @@ for f in AGENTS.md CLAUDE.md GEMINI.md; do
 done
 grep -q "合并权属于人类" PROJECT-CONSTITUTION.md 2>/dev/null || err "宪法缺少核心条款 17"
 
+# --- v2(XM-0003): VERSIONS.lock 精确性（跳过 # 注释行，避免规则说明误报） ---
+if [ -f VERSIONS.lock ]; then
+  grep -v '^\s*#' VERSIONS.lock | grep -Eq '(\^|~|>=|<=|= *latest)' \
+    && err "VERSIONS.lock 含范围表达式或 latest"
+  grep -q "postgres.digest.*sha256:" VERSIONS.lock || err "VERSIONS.lock 缺少 postgres digest"
+else
+  err "缺少 VERSIONS.lock"
+fi
+[ -f .tool-versions ] || err "缺少 .tool-versions"
+[ -f go.mod ] || err "缺少 go.mod"
+
 exit $fail
