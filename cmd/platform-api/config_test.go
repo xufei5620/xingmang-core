@@ -9,20 +9,17 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-func TestConfigFromEnvRequiresEnvironmentAndDatabase(t *testing.T) {
+// 数据库连接串的用例已搬到 database_test.go：它现在走 CredentialRef 纪律，
+// 和「监听地址、超时」这类明文配置不是一类东西。
+
+func TestConfigFromEnvRequiresEnvironment(t *testing.T) {
 	if _, err := configFromEnv(env(map[string]string{})); err == nil {
 		t.Fatal("缺 ENVIRONMENT 应报错")
-	}
-	if _, err := configFromEnv(env(map[string]string{"ENVIRONMENT": "development"})); err == nil {
-		t.Fatal("缺 XM_DATABASE_URL 应报错")
 	}
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	c, err := configFromEnv(env(map[string]string{
-		"ENVIRONMENT":     "development",
-		"XM_DATABASE_URL": "postgres://u:p@localhost:5432/db",
-	}))
+	c, err := configFromEnv(env(map[string]string{"ENVIRONMENT": "development"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,18 +32,26 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 }
 
 func TestConfigFromEnvRejectsUnknownEnvironment(t *testing.T) {
-	if _, err := configFromEnv(env(map[string]string{
-		"ENVIRONMENT":     "prod",
-		"XM_DATABASE_URL": "postgres://u:p@localhost:5432/db",
-	})); err == nil {
+	if _, err := configFromEnv(env(map[string]string{"ENVIRONMENT": "prod"})); err == nil {
 		t.Fatal("非法 ENVIRONMENT 应报错")
+	}
+}
+
+// 容器里必须能绑 0.0.0.0：默认值是给「宿主直跑 + Nginx 反代」的形态用的，
+// compose 形态由 LISTEN_ADDR 覆盖（deploy/compose/launch.yaml）。
+func TestConfigFromEnvOverridesListenAddr(t *testing.T) {
+	c, err := configFromEnv(env(map[string]string{
+		"ENVIRONMENT": "staging",
+		"LISTEN_ADDR": "0.0.0.0:8080",
+	}))
+	if err != nil || c.ListenAddr != "0.0.0.0:8080" {
+		t.Fatalf("c = %+v, err = %v", c, err)
 	}
 }
 
 func TestConfigFromEnvParsesTimeout(t *testing.T) {
 	c, err := configFromEnv(env(map[string]string{
 		"ENVIRONMENT":     "staging",
-		"XM_DATABASE_URL": "postgres://u:p@localhost:5432/db",
 		"REQUEST_TIMEOUT": "5s",
 	}))
 	if err != nil || c.RequestTimeout != 5*time.Second {
@@ -55,7 +60,6 @@ func TestConfigFromEnvParsesTimeout(t *testing.T) {
 	for name, v := range map[string]string{"非法格式": "abc", "零值": "0s", "负值": "-1s"} {
 		if _, err := configFromEnv(env(map[string]string{
 			"ENVIRONMENT":     "staging",
-			"XM_DATABASE_URL": "postgres://u:p@localhost:5432/db",
 			"REQUEST_TIMEOUT": v,
 		})); err == nil {
 			t.Fatalf("%s 的超时应报错", name)
