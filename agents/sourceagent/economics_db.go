@@ -334,7 +334,11 @@ type BalanceDBConnector struct {
 	Now      func() time.Time
 }
 
-const balanceReconciliationStateSchemaVersion = 1
+const (
+	balanceReconciliationStateSchemaVersionV1 = 1
+	balanceReconciliationStateSchemaVersion   = 2
+	maxRetiredBalanceAccounts                 = 100_000
+)
 
 // balanceReconciliationState is the durable sender-side bridge between an
 // acknowledged balance cycle and the next one. CapturedSnapshot is the full
@@ -344,11 +348,12 @@ const balanceReconciliationStateSchemaVersion = 1
 // recoverable if the process stops after replacing Current but before writing
 // the pending batch spool.
 type balanceReconciliationState struct {
-	SchemaVersion    int             `json:"schema_version"`
-	StateKind        string          `json:"state_kind"`
-	BaseSnapshotID   string          `json:"base_snapshot_id"`
-	CapturedSnapshot BalanceSnapshot `json:"captured_snapshot"`
-	EmissionSnapshot BalanceSnapshot `json:"emission_snapshot"`
+	SchemaVersion         int             `json:"schema_version"`
+	StateKind             string          `json:"state_kind"`
+	BaseSnapshotID        string          `json:"base_snapshot_id"`
+	CapturedSnapshot      BalanceSnapshot `json:"captured_snapshot"`
+	EmissionSnapshot      BalanceSnapshot `json:"emission_snapshot"`
+	RetiredZeroAccountIDs []string        `json:"retired_zero_account_ids,omitempty"`
 }
 
 type preparedBalanceCycle struct {
@@ -644,8 +649,23 @@ func loadCurrentBalanceReconciliationState(ctx context.Context, store EncryptedS
 	}
 	var state balanceReconciliationState
 	if stateErr := store.Load(ctx, &state); stateErr == nil {
-		if err = validateBalanceReconciliationState(state); err != nil {
-			return nil, nil, true, err
+		switch state.SchemaVersion {
+		case balanceReconciliationStateSchemaVersion:
+			if err = validateBalanceReconciliationState(state); err != nil {
+				return nil, nil, true, err
+			}
+		case balanceReconciliationStateSchemaVersionV1:
+			if state.StateKind != "balance_delta_v1" || len(state.RetiredZeroAccountIDs) != 0 {
+				return nil, nil, true, errors.New("durable version-1 balance reconciliation state is invalid")
+			}
+			if err = validateBalanceReconciliationStateSnapshots(state); err != nil {
+				return nil, nil, true, err
+			}
+			state.SchemaVersion = balanceReconciliationStateSchemaVersion
+			state.StateKind = "balance_delta_v2"
+			state.RetiredZeroAccountIDs = []string{}
+		default:
+			return nil, nil, true, errors.New("durable balance reconciliation state version is invalid")
 		}
 		return &state, nil, true, nil
 	}
@@ -677,7 +697,7 @@ func buildBalanceReconciliationState(baseSnapshotID string, previous, captured B
 		return balanceReconciliationState{}, err
 	}
 	state := balanceReconciliationState{SchemaVersion: balanceReconciliationStateSchemaVersion,
-		StateKind: "balance_delta_v1", BaseSnapshotID: baseSnapshotID,
+		StateKind: "balance_delta_v2", BaseSnapshotID: baseSnapshotID,
 		CapturedSnapshot: captured, EmissionSnapshot: emission}
 	if err = validateBalanceReconciliationState(state); err != nil {
 		return balanceReconciliationState{}, err
@@ -715,8 +735,17 @@ func changedBalanceRows(previous, captured []BalanceSnapshotRow) ([]BalanceSnaps
 }
 
 func validateBalanceReconciliationState(state balanceReconciliationState) error {
-	if state.SchemaVersion != balanceReconciliationStateSchemaVersion || state.StateKind != "balance_delta_v1" ||
-		!hexHashPattern.MatchString(state.BaseSnapshotID) || validateBalanceSnapshot(state.CapturedSnapshot) != nil ||
+	if state.SchemaVersion != balanceReconciliationStateSchemaVersion || state.StateKind != "balance_delta_v2" {
+		return errors.New("durable balance reconciliation state is invalid")
+	}
+	if err := validateBalanceReconciliationStateSnapshots(state); err != nil {
+		return err
+	}
+	return validateRetiredBalanceAccountIDs(state.RetiredZeroAccountIDs, state.CapturedSnapshot.Rows)
+}
+
+func validateBalanceReconciliationStateSnapshots(state balanceReconciliationState) error {
+	if !hexHashPattern.MatchString(state.BaseSnapshotID) || validateBalanceSnapshot(state.CapturedSnapshot) != nil ||
 		validateBalanceSnapshot(state.EmissionSnapshot) != nil || state.CapturedSnapshot.CheckpointKind != "reconciliation" ||
 		state.EmissionSnapshot.CheckpointKind != "reconciliation" || state.EmissionSnapshot.PreviousSnapshotID != state.BaseSnapshotID ||
 		state.CapturedSnapshot.SourceID != state.EmissionSnapshot.SourceID || state.CapturedSnapshot.SourceType != state.EmissionSnapshot.SourceType ||
@@ -733,6 +762,27 @@ func validateBalanceReconciliationState(state balanceReconciliationState) error 
 			return errors.New("balance emission snapshot is not an exact captured subset")
 		}
 		capturedIndex++
+	}
+	return nil
+}
+
+func validateRetiredBalanceAccountIDs(ids []string, captured []BalanceSnapshotRow) error {
+	if len(ids) > maxRetiredBalanceAccounts {
+		return errors.New("retired zero-balance account set exceeds the safety limit")
+	}
+	previousID := ""
+	capturedIndex := 0
+	for _, id := range ids {
+		if !externalReferencePattern.MatchString(id) || (previousID != "" && compareDecimalIDs(previousID, id) >= 0) {
+			return errors.New("retired zero-balance account IDs are invalid or unordered")
+		}
+		for capturedIndex < len(captured) && compareDecimalIDs(captured[capturedIndex].ExternalUserID, id) < 0 {
+			capturedIndex++
+		}
+		if capturedIndex < len(captured) && captured[capturedIndex].ExternalUserID == id {
+			return errors.New("retired zero-balance account appears in captured rows")
+		}
+		previousID = id
 	}
 	return nil
 }

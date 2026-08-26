@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,22 @@ func testBalanceStores(t *testing.T, baseline BalanceSnapshot) (EncryptedStateFi
 		t.Fatal(err)
 	}
 	return baselineStore, currentStore
+}
+
+func testBalanceState(t *testing.T, schema int, kind string, retired []string) balanceReconciliationState {
+	t.Helper()
+	captured := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "", nil)
+	emission := testBalanceSnapshot(t, "reconciliation", captured.AsOf, strings.Repeat("a", 64), nil)
+	return balanceReconciliationState{SchemaVersion: schema, StateKind: kind,
+		BaseSnapshotID: strings.Repeat("a", 64), CapturedSnapshot: captured,
+		EmissionSnapshot: emission, RetiredZeroAccountIDs: retired}
+}
+
+func requireReplaceBalanceState(t *testing.T, store EncryptedStateFile, state balanceReconciliationState) {
+	t.Helper()
+	if err := store.Replace(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testBalanceManifest(baseline BalanceSnapshot) CutoverManifest {
@@ -202,5 +219,41 @@ func TestBalanceDeltaLoadsLegacyCurrentSnapshotAndRejectsDisappearances(t *testi
 	missing := testBalanceSnapshot(t, "reconciliation", "2026-08-26T00:00:00Z", "", nil)
 	if _, err = buildBalanceReconciliationState(cycle.Snapshot.SnapshotID, captured, missing); err == nil || !strings.Contains(err.Error(), "removed an account") {
 		t.Fatalf("account disappearance did not fail closed: %v", err)
+	}
+}
+
+func TestBalanceDeltaLoadsV1StateAsV2WithEmptyRetiredSet(t *testing.T) {
+	state := testBalanceState(t, 1, "balance_delta_v1", nil)
+	_, current := testBalanceStores(t, state.CapturedSnapshot)
+	requireReplaceBalanceState(t, current, state)
+	loaded, legacy, exists, err := loadCurrentBalanceReconciliationState(context.Background(), current)
+	if err != nil || !exists || legacy != nil || loaded.SchemaVersion != 2 || len(loaded.RetiredZeroAccountIDs) != 0 {
+		t.Fatalf("v1 migration failed: loaded=%#v legacy=%#v exists=%t err=%v", loaded, legacy, exists, err)
+	}
+}
+
+func TestBalanceDeltaRejectsInvalidRetiredSets(t *testing.T) {
+	for _, ids := range [][]string{{"2", "2"}, {"10", "9"}, {"01"}, {"1\n"}} {
+		state := testBalanceState(t, 2, "balance_delta_v2", ids)
+		if err := validateBalanceReconciliationState(state); err == nil {
+			t.Fatalf("invalid retired set accepted: %#v", ids)
+		}
+	}
+
+	captured := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:01:00Z", "",
+		[]BalanceSnapshotRow{{ExternalUserID: "2", ServiceUnits: "0"}})
+	state := testBalanceState(t, 2, "balance_delta_v2", []string{"2"})
+	state.CapturedSnapshot = captured
+	if err := validateBalanceReconciliationState(state); err == nil {
+		t.Fatal("retired set intersecting the captured rows was accepted")
+	}
+
+	oversized := make([]string, maxRetiredBalanceAccounts+1)
+	for index := range oversized {
+		oversized[index] = strconv.Itoa(index + 1)
+	}
+	state = testBalanceState(t, 2, "balance_delta_v2", oversized)
+	if err := validateBalanceReconciliationState(state); err == nil {
+		t.Fatal("oversized retired set was accepted")
 	}
 }
