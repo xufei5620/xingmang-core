@@ -9,9 +9,17 @@
     "test": "vitest run"
   },
   "peerDependencies": { "react": "19.2.8", "react-dom": "19.2.8" },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-label": "2.1.15",
+    "@radix-ui/react-select": "2.3.7",
+    "@radix-ui/react-tabs": "1.1.21",
+    "@radix-ui/react-tooltip": "1.2.16"
+  },
   "devDependencies": {
     "@storybook/react-vite": "10.5.10",
     "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.6",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.0",

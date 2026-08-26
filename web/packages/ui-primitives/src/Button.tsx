@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import { forwardRef, type ButtonHTMLAttributes } from "react";
 import { cx } from "./cx";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -21,18 +21,22 @@ const sizeClass: Record<NonNullable<ButtonProps["size"]>, string> = {
   lg: "h-(--xm-control-h-lg) px-4 text-base",
 };
 
-export function Button({
-  variant = "primary",
-  size = "md",
-  loading = false,
-  disabled,
-  className,
-  children,
-  ...rest
-}: ButtonProps) {
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  {
+    variant = "primary",
+    size = "md",
+    loading = false,
+    disabled,
+    className,
+    children,
+    ...rest
+  },
+  ref,
+) {
   return (
     <button
       {...rest}
+      ref={ref}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       className={cx(
@@ -52,4 +56,4 @@ export function Button({
       {children}
     </button>
   );
-}
+});
