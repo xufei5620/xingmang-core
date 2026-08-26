@@ -37,4 +37,57 @@ done
 [ -f docs/architecture/BASELINE-v2.1.md ] || err "缺少 BASELINE-v2.1.md"
 grep -q "ADR-018" docs/architecture/BASELINE-v2.1.md 2>/dev/null || err "BASELINE 索引不完整"
 
+
+# --- v4(XM-R002): 关闭红队发现的门禁盲区 ---
+# #16: frontend 是 required check，缺 pnpm-workspace.yaml 会让它整段跳过仍绿
+[ -f pnpm-workspace.yaml ] || err "缺少 pnpm-workspace.yaml（frontend 门禁会空跑）"
+for d in web/apps/admin-web web/apps/ui-storybook web/packages/design-tokens web/packages/ui-primitives; do
+  [ -d "$d" ] || err "缺少工作区包 $d（frontend 门禁会空跑）"
+done
+
+# #13: package.json 精确版本（依赖段禁止范围表达式；engines 允许下限声明）
+while IFS= read -r f; do
+  python3 - "$f" <<'PY' || err "$f 依赖含范围表达式（宪法：精确版本）"
+import json, re, sys
+p = sys.argv[1]
+with open(p, encoding="utf-8") as fh:
+    pkg = json.load(fh)
+bad = []
+for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+    for name, spec in (pkg.get(section) or {}).items():
+        if not isinstance(spec, str):
+            continue
+        if spec.startswith("workspace:") or spec.startswith("catalog:") or spec.startswith("link:"):
+            continue
+        if not re.fullmatch(r"\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?", spec):
+            bad.append(f"{section}.{name}={spec}")
+if bad:
+    print("  " + "; ".join(bad), file=sys.stderr)
+    sys.exit(1)
+PY
+done < <(git ls-files '*package.json' | grep -v node_modules)
+
+# #13: CI 中的 Actions 必须钉 commit SHA（40 位十六进制），禁止浮动 tag
+if [ -d .github/workflows ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *"uses:"*)
+        ref="${line#*@}"
+        ref="${ref%% *}"
+        ref="${ref%%\#*}"
+        echo "$ref" | grep -Eq '^[0-9a-f]{40}$' || err "GitHub Action 未钉 commit SHA: $line"
+        ;;
+    esac
+  done < <(grep -h "uses:" .github/workflows/*.yml 2>/dev/null)
+fi
+
+# #17: workflow 文件与 gitleaks 配置须登记，防止 PR 侧新增/改写使门禁空心化
+expected_workflows="ci.yml guard.yml"
+actual_workflows="$(ls .github/workflows 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
+[ "$actual_workflows" = "$expected_workflows" ] \
+  || err "workflow 文件清单变更（期望「$expected_workflows」，实际「$actual_workflows」）：新增/改名需在本脚本登记并经人工评审"
+for f in gitleaks.toml .gitleaks.toml .gitleaksignore; do
+  [ -e "$f" ] && err "$f 未经登记：gitleaks allowlist 可使 secret-scan 空心化，需人工评审后在本脚本放行"
+done
+
 exit $fail

@@ -21,10 +21,12 @@
 
 ## 红线
 
-- 所有写操作走 Action；读取走 Query；禁止绕过。
+- 所有写操作走 Action；读取走 Query；禁止绕过。唯一例外是 Platform Lifecycle
+  Operation（迁移/Bootstrap/Keycloak Provisioning/备份恢复/获批数据修复），
+  走版本化脚本+变更单+人工批准，不得当作绕过 Action 的通道（宪法 2、3 条）。
 - 凭据只经 CredentialRef；禁止在代码/日志/测试中出现明文凭据。
 - 禁止直接写第三方系统原始业务表；禁止任意 Shell/SQL/Docker 命令。
-- Main 禁止直推；一个任务一个分支 `ai/claude/XM-xxxx-<slug>`；人类合并。
+- Main 禁止直推；一个任务一个分支 `ai/<你的工具>/XM-xxxx-<slug>`（见下方专属规则）；人类合并。
 - 金额禁止 float；时间库内 UTC；数据新鲜度必须可见。
 - 禁止自动升级依赖主版本；GitHub Actions 钉 SHA；禁止 `latest` 镜像。
 - 前端禁止硬编码颜色/圆角/阴影；组件先查 Storybook 再新建。

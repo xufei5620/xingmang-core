@@ -20,6 +20,13 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: 治理红线检查
         run: bash scripts/check-governance.sh
+      - name: 安全测试（脚本路径穿越等）
+        run: |
+          for t in tests/security/*.test.sh; do
+            [ -e "$t" ] || continue
+            echo "== $t =="
+            bash "$t"
+          done
 
   secret-scan:
     runs-on: ubuntu-latest
