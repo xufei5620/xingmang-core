@@ -9,7 +9,11 @@
 name: guard
 
 on:
+  # labeled/unlabeled 必须包含：governance-change 标签是放行开关，
+  # 而默认触发类型（opened/synchronize/reopened）不含打标签事件，
+  # 会导致「打了标签但检查仍是旧的失败结果」（XM-R003 端到端验证发现）。
   pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -22,14 +26,16 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出 base 分支（不是 PR 头）
+      # 用 base.ref（分支名）而非 base.sha：后者是 PR 创建/上次同步时的旧 main，
+      # 那个提交可能还没有守卫脚本，也不是正确的 diff 基线（XM-R003）。
+      - name: 检出 base 分支当前 tip（不是 PR 头）
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
       - name: 治理文件防篡改检查
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: bash scripts/guard-governance-files.sh

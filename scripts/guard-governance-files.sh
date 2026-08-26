@@ -9,10 +9,10 @@
 # 规则：PR 若改动受保护的治理文件，必须带 governance-change 标签，
 # 使"悄悄掏空门禁"变成一次显式、可审计、人类合并前必看的动作。
 #
-# 环境变量：BASE_SHA、HEAD_SHA、PR_LABELS（逗号分隔）
+# 环境变量：BASE_REF（base 分支名）、HEAD_SHA、PR_LABELS（逗号分隔）
 set -uo pipefail
 
-: "${BASE_SHA:?缺少 BASE_SHA}"
+: "${BASE_REF:?缺少 BASE_REF}"
 : "${HEAD_SHA:?缺少 HEAD_SHA}"
 labels="${PR_LABELS:-}"
 
@@ -24,12 +24,19 @@ protected_globs=(
   'tests/security/'
 )
 
-git fetch --no-tags --depth=50 origin "$HEAD_SHA" >/dev/null 2>&1 \
-  || git fetch --no-tags origin "$HEAD_SHA" >/dev/null 2>&1 \
+git fetch --no-tags origin "$BASE_REF" >/dev/null 2>&1 \
+  || { echo "无法获取 base 分支 $BASE_REF" >&2; exit 1; }
+git fetch --no-tags origin "$HEAD_SHA" >/dev/null 2>&1 \
   || { echo "无法获取 PR head $HEAD_SHA" >&2; exit 1; }
 
-changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")" || {
-  echo "无法比较 $BASE_SHA..$HEAD_SHA" >&2; exit 1; }
+# 用 merge-base 作为基线（等价 git diff base...head 三点语义）：PR 分支落后于
+# main 时，不把他人已合并的改动误算成本 PR 的改动（XM-R003）。
+base_sha="$(git merge-base "$HEAD_SHA" "origin/$BASE_REF")" || {
+  echo "无法计算 origin/$BASE_REF 与 $HEAD_SHA 的 merge-base" >&2; exit 1; }
+echo "diff 基线（merge-base）: $base_sha"
+
+changed="$(git diff --name-only "$base_sha" "$HEAD_SHA")" || {
+  echo "无法比较 $base_sha..$HEAD_SHA" >&2; exit 1; }
 
 touched=""
 while IFS= read -r f; do
