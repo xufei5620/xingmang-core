@@ -1,0 +1,32 @@
+name: Task Spec
+description: 多 AI 协作任务规格（规格 §17.3 / 附录 F）
+title: "XM-XXXX: <标题>"
+labels: [task]
+body:
+  - type: textarea
+    id: spec
+    attributes:
+      label: Task Spec YAML
+      description: 按宪法：一个任务一个主责 AI、一个分支、一个 Worktree
+      value: |
+        ```yaml
+        task_id: XM-XXXX
+        title:
+        goal:
+        business_context:
+        allowed_paths:
+          - <glob>
+        out_of_scope:
+          - <明确不做>
+        risk_level: L1
+        dependencies: []
+        acceptance_criteria:
+          - <可验证标准>
+        required_tests:
+          - unit
+        owner_role: Implementation Lead
+        review_roles:
+          - Architecture Reviewer
+        ```
+    validations:
+      required: true

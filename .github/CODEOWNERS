@@ -1,0 +1,10 @@
+# 默认全仓库由产品负责人把关
+*                       @xufei5620
+
+# 高风险目录（宪法/契约/迁移/CI/凭据边界）额外强调
+/PROJECT-CONSTITUTION.md @xufei5620
+/docs/adr/              @xufei5620
+/contracts/             @xufei5620
+/db/migrations/         @xufei5620
+/.github/               @xufei5620
+/internal/platform/secrets/ @xufei5620

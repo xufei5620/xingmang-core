@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: 治理红线检查
+        run: bash scripts/check-governance.sh
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: has
+        run: echo "go=$([ -f go.mod ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.has.outputs.go == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - if: steps.has.outputs.go == 'true'
+        name: gofmt 检查
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - if: steps.has.outputs.go == 'true'
+        name: go vet
+        run: go vet ./...
+      - if: steps.has.outputs.go == 'true'
+        name: go test
+        run: go test ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: has
+        run: echo "web=$([ -f pnpm-workspace.yaml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.has.outputs.web == 'true'
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.24.0
+      - if: steps.has.outputs.web == 'true'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.13.0
+          cache: pnpm
+      - if: steps.has.outputs.web == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.has.outputs.web == 'true'
+        name: typecheck
+        run: pnpm -r run typecheck
+      - if: steps.has.outputs.web == 'true'
+        name: unit tests
+        run: pnpm -r run test
+      - if: steps.has.outputs.web == 'true'
+        name: storybook build
+        run: |
+          if [ -d web/apps/ui-storybook ]; then pnpm --filter ui-storybook run build; fi
+      - if: steps.has.outputs.web == 'true'
+        name: admin-web build
+        run: |
+          if [ -d web/apps/admin-web ]; then pnpm --filter admin-web run build; fi
