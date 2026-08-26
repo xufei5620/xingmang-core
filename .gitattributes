@@ -1,0 +1,5 @@
+# 统一 LF（防止 Windows CRLF 破坏 shell 脚本与 gofmt）
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.woff2 binary

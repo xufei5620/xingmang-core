@@ -1,0 +1,18 @@
+# 被管理系统动态清单（Inventory：描述"现在是什么"；随快照更新，不写入 ADR 正文）
+systems:
+  - id: sub2api-prod
+    type: sub2api
+    endpoint: https://api.solov.cc
+    environment: production
+    observed_at: 2026-08-26T00:00:00Z
+    detected_version: "未探测（XM-0017 Sub2API Connector 交付后自动更新）"
+    user_count: 2482
+    source_watermark: "未采集"
+
+  - id: newapi-prod
+    type: newapi
+    endpoint: https://xm.solov.cc
+    environment: production
+    observed_at: 2026-08-26T00:00:00Z
+    detected_version: "v1.0.0-rc.25"
+    user_count: 27
