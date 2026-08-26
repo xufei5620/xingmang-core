@@ -14,6 +14,13 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
+// occurredAtLayout 是固定微秒精度的时间格式。
+//
+// PostgreSQL 的 timestamptz 只到微秒，而 Go 的 time 是纳秒：用 RFC3339Nano
+// 会让「写入前算的哈希」与「读回后重算的哈希」对不上，整条链一读就断。
+// 固定宽度还能避开 RFC3339Nano 裁剪尾部零的行为差异。
+const occurredAtLayout = "2006-01-02T15:04:05.000000Z07:00"
+
 // GenesisHash 是链首事件的 prev_hash。
 const GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -125,7 +132,7 @@ func (e Event) Canonical() ([]byte, error) {
 	}
 	write("id", e.ID.String())
 	write("sequence", fmt.Sprintf("%d", e.Sequence))
-	write("occurred_at", e.OccurredAt.UTC().Format(time.RFC3339Nano))
+	write("occurred_at", e.OccurredAt.UTC().Format(occurredAtLayout))
 	write("principal_id", e.PrincipalID)
 	write("principal_type", string(e.PrincipalType))
 	write("action_id", e.ActionID)
@@ -158,4 +165,47 @@ func (e Event) ComputeHash() (string, error) {
 	}
 	sum := sha256.Sum256(c)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// normalizeMap 把 map 过一遍 JSON 往返，使其表示与「存进 jsonb 再读回」一致。
+//
+// 必要性：调用方可能传 int / int64 等 Go 原生类型，而从 jsonb 读回时数字一律
+// 是 float64。不做归一化，写入前算的哈希与校验时重算的哈希会不一致——
+// 大整数（>2^53）尤其明显。
+func normalizeMap(m map[string]any) (map[string]any, error) {
+	if len(m) == 0 {
+		return map[string]any{}, nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return map[string]any{}, nil
+	}
+	return out, nil
+}
+
+// Normalize 返回把四个 summary 归一化后的事件副本，并把 OccurredAt 截断到
+// 微秒。Append 在计算哈希前调用它，保证入库表示与校验时的表示完全一致。
+func (e Event) Normalize() (Event, error) {
+	var err error
+	if e.BeforeSummary, err = normalizeMap(e.BeforeSummary); err != nil {
+		return Event{}, fmt.Errorf("before_summary: %w", err)
+	}
+	if e.AfterSummary, err = normalizeMap(e.AfterSummary); err != nil {
+		return Event{}, fmt.Errorf("after_summary: %w", err)
+	}
+	if e.ConnectorRequestSummary, err = normalizeMap(e.ConnectorRequestSummary); err != nil {
+		return Event{}, fmt.Errorf("connector_request_summary: %w", err)
+	}
+	if e.ConnectorResponseSummary, err = normalizeMap(e.ConnectorResponseSummary); err != nil {
+		return Event{}, fmt.Errorf("connector_response_summary: %w", err)
+	}
+	e.OccurredAt = e.OccurredAt.UTC().Truncate(time.Microsecond)
+	return e, nil
 }

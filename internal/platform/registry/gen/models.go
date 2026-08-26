@@ -25,6 +25,46 @@ type ActionActionRun struct {
 	FinishedAt    pgtype.Timestamptz
 }
 
+type AuditAuditEvent struct {
+	ID                       uuid.UUID
+	Sequence                 int64
+	OccurredAt               pgtype.Timestamptz
+	RecordedAt               pgtype.Timestamptz
+	PrincipalID              string
+	PrincipalType            string
+	ActionID                 string
+	ActionVersion            string
+	ActionRunID              uuid.UUID
+	ResourceType             string
+	ResourceID               string
+	Environment              string
+	Reason                   string
+	ApprovalID               string
+	RequestID                string
+	TraceID                  string
+	SourceIp                 string
+	BeforeSummary            []byte
+	AfterSummary             []byte
+	ConnectorRequestSummary  []byte
+	ConnectorResponseSummary []byte
+	Result                   string
+	CompensationResult       string
+	PrevHash                 string
+	EventHash                string
+}
+
+type AuditChainRoot struct {
+	ID           uuid.UUID
+	ComputedAt   pgtype.Timestamptz
+	FromSequence int64
+	ToSequence   int64
+	RootHash     string
+	Signature    string
+	KeyID        string
+	ExportedAt   pgtype.Timestamptz
+	ExportTarget string
+}
+
 type CoreConnection struct {
 	ID                      uuid.UUID
 	ConnectorID             uuid.UUID
