@@ -257,3 +257,13 @@ func TestAppendSerializesConcurrentWriters(t *testing.T) {
 		t.Fatalf("链尖 sequence = %d, want %d (%v)", tipSeq, n, err)
 	}
 }
+
+func countEvents(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		"SELECT count(*) FROM audit.audit_event").Scan(&n); err != nil {
+		t.Fatalf("统计审计事件失败: %v", err)
+	}
+	return n
+}

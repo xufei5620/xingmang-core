@@ -33,6 +33,31 @@ go run ./cmd/audit-verify -database "$XM_DATABASE_URL"
 5. 检查数据库账号权限：谁有能力 `DISABLE RULE`？
 6. 事后必须补：应用账号 `REVOKE DELETE, UPDATE`，并缩小 DBA 权限范围。
 
+## audit_write_failed：审计缺口
+
+日志里出现 `error_code=audit_write_failed`（来自 `module=action`）意味着：
+**一次业务变更已经生效，但它的审计事件没写进链**。这是事故，不是告警噪音。
+
+内核不会因此把动作报成失败——业务写已经提交，回滚不了，报失败只会让调用方
+重试从而制造重复变更（见 `docs/modules/action/README.md`「已知缺口」）。
+
+处置：
+
+1. 从日志里取 `action_run_id` 与 `request_id`，在 `action.action_run` 里查到
+   这次执行的完整记录——ActionRun 与审计事件是两次独立写入，前者通常还在：
+
+   ```sql
+   SELECT * FROM action.action_run WHERE id = '<action_run_id>';
+   ```
+
+2. 判断审计库为什么写不进去（连接耗尽？磁盘满？append-only 规则被改动？）。
+   先恢复审计库可用性，再继续第 3 步。
+3. **不要手工补插审计事件。** `audit_event` 是 append-only 的，补插会让
+   `sequence` 与真实时序不符，且新事件的 `prev_hash` 已经指向了后来的链尾——
+   补插只会制造一条看起来完整、实则时序错乱的链。正确做法是把这次缺口
+   记进事故记录，并在下一次链根签名的说明里标注缺失区间。
+4. 缺口窗口内的变更用 `action.action_run` 重建审计视图，作为事故报告附件。
+
 ## 密钥轮换
 
 1. 生成新的 32 字节种子，经 SOPS 存入 `deploy/secrets/<env>.enc.yaml`；

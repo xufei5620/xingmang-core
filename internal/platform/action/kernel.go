@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -60,12 +61,38 @@ type Result struct {
 type Kernel struct {
 	registry *Registry
 	runs     RunStore
+	audit    AuditSink
+	logger   *slog.Logger
 	now      func() time.Time
 }
 
+// KernelOption 配置内核。
+type KernelOption func(*Kernel)
+
+// WithAuditSink 接入审计设施：每次执行（成功或失败）都会写一条审计事件。
+//
+// 不接的话内核照常工作但**没有审计链**——只在测试或尚未接入审计的场景使用。
+func WithAuditSink(sink AuditSink) KernelOption {
+	return func(k *Kernel) { k.audit = sink }
+}
+
+// WithLogger 注入日志器，用于记录审计写入失败这类必须可见的事件。
+func WithLogger(l *slog.Logger) KernelOption {
+	return func(k *Kernel) { k.logger = l }
+}
+
 // NewKernel 创建内核。
-func NewKernel(reg *Registry, runs RunStore) *Kernel {
-	return &Kernel{registry: reg, runs: runs, now: func() time.Time { return time.Now().UTC() }}
+func NewKernel(reg *Registry, runs RunStore, opts ...KernelOption) *Kernel {
+	k := &Kernel{
+		registry: reg,
+		runs:     runs,
+		logger:   slog.Default(),
+		now:      func() time.Time { return time.Now().UTC() },
+	}
+	for _, o := range opts {
+		o(k)
+	}
+	return k
 }
 
 // Execute 执行一次 Action。
@@ -98,6 +125,14 @@ func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 			Status:        RunFailed,
 			ErrorCode:     code,
 			StartedAt:     startedAt,
+		})
+		// 被拒绝的尝试同样进审计链：谁在什么时候试图做什么、为什么被拒，
+		// 是审计最有价值的部分之一
+		k.recordAudit(ctx, AuditEvent{
+			OccurredAt: startedAt, PrincipalID: p.ID, PrincipalType: p.Type,
+			ActionID: def.ID, ActionVersion: def.Version, ActionRunID: runID,
+			Environment: p.Environment, RequestID: req.RequestID,
+			Succeeded: false, ErrorCode: code,
 		})
 		return Result{}, err
 	}
@@ -135,7 +170,9 @@ func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 		return fail(CodeInvalidParams, "参数不符合 Action Schema", err, p)
 	}
 
-	value, err := handler(ctx, req.Params)
+	// 注入审计元信息收集器：Handler 可选地贡献 resource/before/after
+	handlerCtx, meta := withAuditMeta(ctx)
+	value, err := handler(handlerCtx, req.Params)
 	finishedAt := k.now()
 	run := Run{
 		ID:            runID,
@@ -150,16 +187,52 @@ func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 		StartedAt:     startedAt,
 		FinishedAt:    finishedAt,
 	}
+	resourceType, resourceID, reason, before, after := meta.snapshot()
+	auditEvent := AuditEvent{
+		OccurredAt: startedAt, PrincipalID: p.ID, PrincipalType: p.Type,
+		ActionID: def.ID, ActionVersion: def.Version, ActionRunID: runID,
+		ResourceType: resourceType, ResourceID: resourceID, Reason: reason,
+		Environment: p.Environment, RequestID: req.RequestID,
+		BeforeSummary: before, AfterSummary: after,
+	}
+
 	if err != nil {
 		run.Status = RunFailed
 		run.ErrorCode = CodeExecutionFailed
 		k.record(ctx, run)
+		auditEvent.Succeeded = false
+		auditEvent.ErrorCode = CodeExecutionFailed
+		k.recordAudit(ctx, auditEvent)
 		return Result{}, newError(CodeExecutionFailed,
 			fmt.Sprintf("action %s 执行失败", def.ID), err)
 	}
 	run.Status = RunSucceeded
 	k.record(ctx, run)
+	auditEvent.Succeeded = true
+	k.recordAudit(ctx, auditEvent)
 	return Result{RunID: runID, Value: value}, nil
+}
+
+// recordAudit 写审计事件。
+//
+// 审计写失败**不回滚业务变更**——业务写与审计写不在同一事务里（Foundation-A
+// 的已知缺口，见 docs/modules/action/README.md）。但失败必须刺眼：
+// error 级日志 + audit_write_failed 错误码，运维按事故处理。
+func (k *Kernel) recordAudit(ctx context.Context, e AuditEvent) {
+	if k.audit == nil {
+		return
+	}
+	if err := k.audit.Append(ctx, e); err != nil {
+		k.logger.ErrorContext(ctx, "审计事件写入失败（审计缺口）",
+			slog.String("module", "action"),
+			slog.String("action_id", e.ActionID),
+			slog.String("action_run_id", e.ActionRunID.String()),
+			slog.String("request_id", e.RequestID),
+			slog.String("principal_id", e.PrincipalID),
+			slog.String("error_code", "audit_write_failed"),
+			slog.Any("err", err),
+		)
+	}
 }
 
 // record 补齐时间字段并写入审计。

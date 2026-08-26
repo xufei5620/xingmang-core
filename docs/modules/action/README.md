@@ -33,7 +33,9 @@ XM-0030（Action Advanced Controls）补齐后，这些 Action 才会真正可�
 ```go
 reg := action.NewRegistry()
 _ = registry.RegisterActions(reg, registryStore)
-kernel := action.NewKernel(reg, action.NewPgRunStore(pool, logger))
+kernel := action.NewKernel(reg, action.NewPgRunStore(pool, logger),
+    action.WithAuditSink(audit.NewActionSink(audit.NewStore(pool))),
+    action.WithLogger(logger))
 
 res, err := kernel.Execute(ctx, action.Request{
     ActionID: "registry.service.create", ActionVersion: "1",
@@ -43,8 +45,49 @@ res, err := kernel.Execute(ctx, action.Request{
 
 `ctx` 必须携带 Principal（`principal.WithPrincipal`），否则一律拒绝。
 
+## 审计接线
+
+每次执行——**包括被拒绝的尝试**——都会往哈希链写一条审计事件（规格 §4.4）。
+被拒的尝试同样进链：只审计成功的动作，等于把「谁在试探权限边界」整条线索丢掉。
+
+内核不 import `audit` 包。它只声明 `action.AuditSink` 接口，适配器
+`audit.NewActionSink` 住在 audit 包里——「怎么变成一条审计事件」属于审计设施
+自己的知识，两个核心包因此保持互不依赖。
+
+### Handler 贡献业务信息
+
+`resource_type` / `resource_id` / 前后摘要只有 Handler 知道，内核无从得知。
+Handler 通过 ctx 可选地贡献：
+
+```go
+func createService(ctx context.Context, p map[string]any) (any, error) {
+    action.RecordResource(ctx, "core.service", id)
+    action.RecordBefore(ctx, map[string]any{"exists": false})
+    action.RecordAfter(ctx, map[string]any{"exists": true})
+    return result, nil
+}
+```
+
+不调用也能正常工作（事件里这些字段为空），Handler 因此可以脱离 Action 上下文
+单独测试。**摘要的脱敏由调用方负责**——`Record*` 不判断什么是敏感的，宪法 7 条
+的责任落在写 Handler 的人身上。
+
+### 已知缺口：审计写与业务写不在同一事务
+
+`Handler` 自己管理事务，内核拿不到它；审计写发生在 Handler 返回**之后**，
+是一次独立的数据库写入。因此存在一个窗口：业务变更已提交，审计写失败。
+
+这种情况下内核**照常返回成功**，不把动作报成失败——业务写已经生效，回滚不了，
+报失败只会让调用方重试从而制造重复变更。缺口以 `error` 级日志
+（`error_code=audit_write_failed`）记录，运维按事故处理，见
+`docs/modules/audit/RUNBOOK.md`。
+
+补法留给 Foundation-B：事务型 outbox——Handler 的事务里插一条 outbox 记录，
+由后台任务搬进审计链，业务写与审计意图从此原子。Foundation-A 不做，
+因为它要求 Handler 交出事务控制权，是一次跨所有 Action 的接口变更。
+
 ## 相关
 
 - ADR-003（Action 唯一写入口）、规格 §4.1/§4.4/§18.4/§18.5/§19.5
 - 契约：`contracts/actions/*.json`
-- 后续：XM-0030 Action Advanced Controls；XM-0011 基础审计外部锚点
+- 后续：XM-0030 Action Advanced Controls；Foundation-B 事务型 outbox（见上）

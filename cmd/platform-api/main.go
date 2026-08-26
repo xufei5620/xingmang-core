@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
@@ -58,7 +59,14 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
-	kernel := action.NewKernel(actionRegistry, action.NewPgRunStore(pool, logger))
+	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
+	auditStore := audit.NewStore(pool)
+	kernel := action.NewKernel(
+		actionRegistry,
+		action.NewPgRunStore(pool, logger),
+		action.WithAuditSink(audit.NewActionSink(auditStore)),
+		action.WithLogger(logger),
+	)
 	opsStore := ops.NewStore(pool)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
