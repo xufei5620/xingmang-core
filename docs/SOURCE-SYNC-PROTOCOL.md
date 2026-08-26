@@ -79,16 +79,31 @@ ordinary signed batch sequence. A static full capture therefore publishes a
 complete, healthy, signed zero-record cycle and advances the balances watermark
 without creating another `balance_checkpoint` event.
 
-The encrypted mutable balance file stores both the latest full capture and its
-prepared change snapshot. It accepts the prior legacy full-snapshot format and
-migrates it only when beginning the next cycle. If the process stops after
-preparing that file but before creating `pending.enc`, the unchanged committed
-cursor selects the exact prepared snapshot on restart; the source is not read
-again. Once the exact ACK commits the cursor, that full capture becomes the
-comparison base for the following cycle. A previously present account missing
-from a later full capture fails closed because V3 balances have no deletion
-tombstone. This delta rule is balances-only: payments, usage and credits retain
-their immutable fact rules and are never coalesced.
+The encrypted mutable balance file uses `balance_delta_v2` state. It stores the
+latest full capture, its prepared change snapshot and a numeric-sorted, unique,
+monotonic `retired_zero_account_ids` set as one atomic value. A prior
+`balance_delta_v1` value or legacy full-snapshot value is accepted only when it
+validates and exactly matches the committed cursor. It is normalized in memory
+with an empty retirement set; loading alone does not replace the ciphertext,
+and the next newly prepared cycle writes the complete v2 value atomically.
+
+For every later atomic full capture, a previously acknowledged row may be
+missing only when its canonical service-unit balance is exactly `"0"` and
+`balance_negative=false`. That omission emits no synthetic
+`balance_checkpoint`; its external user ID is added durably to the candidate
+retirement set. A missing positive row, a row marked negative, malformed prior
+state, an invalid/oversized/non-monotonic retirement set, or a captured row
+whose ID is already retired fails closed before `balance-current.enc`, a batch,
+watermark or receiver event is published. Reappearance is forbidden regardless
+of the row's current balance, negative flag or baseline membership.
+
+If the process stops after atomically preparing `balance-current.enc` but
+before creating `pending.enc`, the unchanged committed cursor selects the exact
+prepared emission snapshot and retirement set on restart; the source is not
+read again. Only the exact ACK makes that captured full snapshot and retirement
+set the comparison base for the following cycle, and later cycles may only add
+retired IDs. This delta/retirement rule is balances-only: payments, usage and
+credits retain their immutable fact rules and are never coalesced.
 
 On the receiver, omission from a published balance delta means unchanged only
 for an already bound account whose catch-up is complete. If new payment,

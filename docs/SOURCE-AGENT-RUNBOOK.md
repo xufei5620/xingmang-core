@@ -25,12 +25,19 @@ an install or rollback contract.
 | New API | `balances` V3 | `BalanceDBConnector` | atomic full capture, change-snapshot pages | encrypted cutover/baseline required |
 
 Each row is an independent non-root container with a distinct writable 0700
-state directory, state file, encrypted spool, 32-byte spool key, mTLS client
-identity and Ed25519 signing key. Never share a writable state volume between
-rows. The invoice API/web containers receive none of these mounts or variables.
-Only V2 identity streams have a reconcile inventory: V3 immutable facts never
-emit deletion tombstones. The ten state directories plus encrypted cutover
-files are one backup/restore unit.
+state directory, `state.json`, encrypted `pending.enc`, 32-byte spool key, mTLS
+client identity and Ed25519 signing key. A balances row additionally owns
+`balance-current.enc` and its balance-snapshot/state AES key. Never share a
+writable state volume between rows. The invoice API/web containers receive none
+of these mounts or variables. Only V2 identity streams have a reconcile
+inventory: V3 immutable facts never emit deletion tombstones.
+
+For each balances stream, `state.json`, `balance-current.enc`, `pending.enc`
+when present, the matching balance-snapshot/state key, matching spool key, exact
+approved source-agent image ID/digest and SHA-256 hashes are one indivisible
+recovery generation. The ten state directories, their matching key material
+inside the approved encrypted/offline secret backup, exact image evidence and
+the encrypted cutover files form the complete backup/restore unit.
 
 ## 2. Receiver prerequisites
 
@@ -287,12 +294,28 @@ For each stream, prove in order:
    `A -> B -> A` transition each produce exactly one new checkpoint; kill once
    before `pending.enc` creation and once after it, then prove both restarts
    retain the exact prepared event IDs and body;
-9. a missing previously captured balance account fails closed and cannot
-   publish a false complete watermark;
-10. the configured reconciliation/full-scan deadline is alerted if missed;
-11. `/source-agent-prod healthcheck` remains healthy and the invoice admin
+9. in an approved disposable projection fixture, remove a previously
+   acknowledged balances row whose canonical service-unit balance is exactly
+   `"0"` and `balance_negative=false`; the cycle succeeds, emits no synthetic
+   checkpoint for that ID, and after the exact ACK `balance-current.enc` retains
+   the ID in the durable retirement set across the next cycle;
+10. repeat separately with a positive row and with a row whose
+   `balance_negative=true`; each cycle fails before replacing the prior
+   decryptable state, creating a new pending batch or publishing a complete
+   watermark;
+11. reintroduce the retired ID in the disposable projection fixture; zero,
+   positive, negative-marked, baseline and non-baseline forms must all fail
+   before state, batch, watermark or receiver publication;
+12. the configured reconciliation/full-scan deadline is alerted if missed;
+13. `/source-agent-prod healthcheck` remains healthy and the invoice admin
    `/api/v1/admin/source-health` shows both identity streams and all eight economic streams fresh, processed,
    version-matched and projection-healthy.
+
+The production rollout is not complete until all ten source agents run the one
+exact approved image ID bound to the signed release manifest, no ingest event is
+queued/failed/dead, the New API and Sub2API test identities are merged into one
+invoice user, both eligibility states are active, no historical or pre-policy
+amount is claimable, and public `/readyz` returns HTTP 200.
 
 Transient failures back off with jitter. Authentication, contract, oversize and
 sequence conflicts stop immediately. Other repeated failures open the circuit
@@ -313,18 +336,39 @@ but alerts must not rely on restart alone.
   state/spool. Run the v2 signature vector before restart.
 - If a spool is present, restore the matching spool key and let the agent finish
   exact replay. Do not delete it while receiver commit status is unknown.
-- For the first balance-delta sender upgrade, preserve the legacy
-  `balance-current.enc` and cursor as one generation. Startup replays any
-  existing `pending.enc` before entering `BalanceDBConnector`. A completed
-  legacy cursor whose snapshot ID exactly matches the legacy current file is
-  migrated only while preparing the next cycle. A mismatch fails closed and
-  requires receiver/cursor evidence; never delete or recapture around it.
+- Before the first retired-zero/v2 balance-state rollout, stop the affected
+  balances stream. Prove that production still runs the prior fail-closed image
+  and that no binary which accepted a missing zero account has ever prepared or
+  acknowledged its state. Empty-retirement migration is allowed only when the
+  last failing cycle created no `pending.enc` and did not replace
+  `balance-current.enc`; otherwise keep the rollout blocked.
+- Archive one immutable recovery generation containing `state.json`,
+  `balance-current.enc`, `pending.enc` when present, the matching
+  balance-snapshot/state AES key, matching spool key, the exact approved current
+  image ID/digest, receiver sequence/commit evidence and SHA-256 hashes. Keep
+  key material in the approved encrypted/offline secret backup, not in the
+  ordinary incident-evidence directory. Do not mix files, keys, image evidence
+  or hashes from different capture times.
+- Startup replays any existing `pending.enc` before entering
+  `BalanceDBConnector`. A valid `balance_delta_v1` value and a legacy full
+  snapshot are normalized in memory with an empty retirement set only when the
+  cursor/snapshot IDs match exactly; load-only validation does not rewrite the
+  encrypted current file. The next newly prepared cycle atomically writes the
+  full `balance_delta_v2` value. Any mismatch fails closed and requires
+  receiver/cursor evidence; never delete or recapture around it.
 - Balance crash boundaries are explicit: before `balance-current.enc` replace,
   the old acknowledged base remains authoritative; after replace but before
   `pending.enc`, the new encrypted state carries the old cursor snapshot ID and
-  is reused without another source read; after pending creation, normal exact
-  pending replay/ACK/CAS cleanup applies. Back up the cursor, current file,
-  pending spool and both matching AES keys together.
+  is reused byte-for-byte without another source read; after pending creation,
+  normal exact pending replay/ACK/CAS cleanup applies. A retry may not remove or
+  reset retired IDs, and only the exact ACK makes the prepared retirement set
+  the acknowledged base.
+- The first successful `balance_delta_v2` write, or any receiver ACK committed
+  after the v2 rollout begins, is a one-way rollback boundary. The old image
+  may be restored only while neither event has occurred. After either boundary,
+  retain the accepted cursor/state generation and deploy a forward-compatible
+  fix; never restore an older cursor or `balance-current.enc` over accepted
+  receiver sequences.
 - A 409 requires receiver/source+stream reconciliation by an operator; blind
   retries or state-file edits are prohibited.
 - Key rotation: register the new source+stream public key first, rotate the
@@ -335,9 +379,12 @@ but alerts must not rely on restart alone.
 
 `inspect-pending` is evidence collection, not permission to reset or migrate a
 stream. Before this incident-only procedure, the operator must have an approved
-maintenance ticket, the exact currently bound source-agent image digest, a
-recovery copy of the entire stream directory plus its matching spool key, and a
-separate receiver-side sequence/commit check. Never modify Sub2API/New API or
+maintenance ticket and an immutable recovery generation: the exact currently
+bound source-agent image ID/digest, `state.json`, `balance-current.enc` for a
+balances stream, `pending.enc`, the matching spool and balance-snapshot/state
+keys, SHA-256 hashes, and a separate receiver-side sequence/commit check. Keep
+the keys in the approved encrypted/offline secret backup rather than copying
+them into the incident-evidence directory. Never modify Sub2API/New API or
 their databases for this inspection.
 
 The affected stream container must be stopped first. Prove that Compose reports
@@ -400,12 +447,14 @@ test -z "$(find "$state_dir" -maxdepth 1 -type f -name '*.lock' -print -quit)"
 The JSON deliberately contains only identifiers, counts, SHA-256 values and
 consistency results. It contains no event records, raw cursor values, DSN,
 certificate/key bytes or tokens. Preserve it as mode 0600 incident evidence.
-If it reports `pending=true`, preserve state, `pending.enc`, balance snapshot
-(when applicable), spool key and receiver evidence as one generation. Do not
-delete the spool, initialize a replacement state, rotate its key or claim
-sequence zero. Any inspection error or ciphertext hash drift keeps the migration
-blocked. The one-time unused-candidate replacement procedure remains forbidden
-when any pending spool exists.
+If it reports `pending=true`, preserve `state.json`, `pending.enc`,
+`balance-current.enc` when applicable, both matching encryption keys, exact
+image ID/digest, hashes and receiver evidence as one recovery generation. Do
+not delete the spool, initialize a replacement state, rotate either key or
+claim sequence zero. Any inspection error, missing generation member or
+ciphertext hash drift keeps the migration blocked. The one-time
+unused-candidate replacement procedure remains forbidden when any pending spool
+exists.
 
 ## 9. Reconciliation, dependency waits and version approval
 
