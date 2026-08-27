@@ -49,7 +49,14 @@ type Deps struct {
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
 	FinanceSummaries FinanceSummaryLister
-	RequestTimeout   time.Duration
+	// FinanceRunwayThresholds 是可用天数的告警档（XM-0049）。
+	//
+	// ⚠️ 由装配层从环境变量解析后注入，**必须与 platform-worker 的告警规则
+	// 用同一组值**——两处漂开会让「看板说还有 11 天」与「告警说已经低于阈值」
+	// 同时出现在一个人面前。两个进程共用 finance.ParseRunwayThresholds。
+	// 零值时端点回落到 finance.DefaultRunwayThresholds()。
+	FinanceRunwayThresholds finance.RunwayThresholds
+	RequestTimeout          time.Duration
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -168,9 +175,11 @@ func NewRouter(d Deps) http.Handler {
 		// ——渠道看**钱**，上游看**供给**（余额 / 可用天数 / 充值成本率）。
 		// 理由见 internal/platform/finance/summary.go 顶部。
 		api.With(RequireScope(finance.ScopeRead)).
-			Get("/finance/channels/summary", ListChannelSummaryHandler(d.FinanceSummaries))
+			Get("/finance/channels/summary",
+				ListChannelSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))
 		api.With(RequireScope(finance.ScopeRead)).
-			Get("/finance/upstreams/summary", ListUpstreamSummaryHandler(d.FinanceSummaries))
+			Get("/finance/upstreams/summary",
+				ListUpstreamSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))
 	})
 	return r
 }

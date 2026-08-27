@@ -102,6 +102,13 @@ func accountFromRow(r gen.FinanceUpstreamAccount) (UpstreamAccount, error) {
 	if err != nil {
 		return UpstreamAccount{}, fmt.Errorf("账号 %s: %w", r.ID, err)
 	}
+	// 分组倍率走同一条 NUMERIC ↔ Ratio 精确换算（XM-0049）。
+	// 它不参与成本，但读回路径上照样不经 float：一个 1.15 变成
+	// 1.1499999999999999 的分组倍率在页面上一样是错的。
+	groupRate, err := numericToRatio(r.GroupRate)
+	if err != nil {
+		return UpstreamAccount{}, fmt.Errorf("账号 %s 的 group_rate: %w", r.ID, err)
+	}
 	return UpstreamAccount{
 		ID:            r.ID,
 		SystemType:    SystemType(r.SystemType),
@@ -109,6 +116,7 @@ func accountFromRow(r gen.FinanceUpstreamAccount) (UpstreamAccount, error) {
 		BaseURL:       textValue(r.BaseUrl),
 		CredentialRef: r.CredentialRef,
 		RechargeRatio: ratio,
+		GroupRate:     groupRate,
 		Currency:      r.Currency,
 		BusinessDayTZ: r.BusinessDayTz,
 		PlatformID:    textValue(r.PlatformID),
@@ -179,6 +187,7 @@ func (s *Store) CreateAccount(ctx context.Context, in UpstreamAccount) (Upstream
 		BaseUrl:       textPtr(in.BaseURL),
 		CredentialRef: in.CredentialRef,
 		RechargeRatio: ratioToNumeric(in.RechargeRatio),
+		GroupRate:     ratioToNumeric(in.GroupRate),
 		Currency:      in.Currency,
 		BusinessDayTz: in.BusinessDayTZ,
 		PlatformID:    textPtr(in.PlatformID),
@@ -208,6 +217,7 @@ func (s *Store) UpdateAccount(ctx context.Context, in UpstreamAccount) (Upstream
 		BaseUrl:       textPtr(in.BaseURL),
 		CredentialRef: in.CredentialRef,
 		RechargeRatio: ratioToNumeric(in.RechargeRatio),
+		GroupRate:     ratioToNumeric(in.GroupRate),
 		Currency:      in.Currency,
 		BusinessDayTz: in.BusinessDayTZ,
 		PlatformID:    textPtr(in.PlatformID),

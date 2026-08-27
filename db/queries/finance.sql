@@ -18,12 +18,13 @@
 -- 在用这个上游账号」的归属标注，不是成本口径的一部分。可空 = 未配对。
 INSERT INTO finance.upstream_account (
     id, system_type, access_method, base_url, credential_ref,
-    recharge_ratio, currency, business_day_tz, status, environment, platform_id,
-    created_at, updated_at
+    recharge_ratio, group_rate, currency, business_day_tz, status, environment,
+    platform_id, created_at, updated_at
 ) VALUES (
     sqlc.arg(id), sqlc.arg(system_type), sqlc.arg(access_method),
     sqlc.narg(base_url), sqlc.arg(credential_ref),
-    sqlc.narg(recharge_ratio), sqlc.arg(currency), sqlc.arg(business_day_tz),
+    sqlc.narg(recharge_ratio), sqlc.narg(group_rate),
+    sqlc.arg(currency), sqlc.arg(business_day_tz),
     sqlc.arg(status), sqlc.arg(environment), sqlc.narg(platform_id),
     now(), now()
 )
@@ -41,10 +42,14 @@ RETURNING *;
 -- 它只是一条归属标注，改它不改变任何一个金额怎么算；而台账侧的 COALESCE 方向是
 -- 「空缺可补、已有不动」（§5.3），历史行的归属不会被追溯改写。
 -- 换句话说，改它只影响此后新算的行——这正是「绑定变更不改上个月报表」的含义。
+--
+-- group_rate 也在可编辑范围内（XM-0049）：它是定价分组的展示标注，
+-- **不参与任何成本或收入计算**（§10.2），改它不改变任何一个金额怎么算。
 UPDATE finance.upstream_account SET
     base_url        = sqlc.narg(base_url),
     credential_ref  = sqlc.arg(credential_ref),
     recharge_ratio  = sqlc.narg(recharge_ratio),
+    group_rate      = sqlc.narg(group_rate),
     currency        = sqlc.arg(currency),
     business_day_tz = sqlc.arg(business_day_tz),
     status          = sqlc.arg(status),

@@ -190,7 +190,9 @@ func main() {
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。
 		FinanceSummaries: finance.NewSummaryStore(pool, nil),
-		RequestTimeout:   cfg.RequestTimeout,
+		// 阈值从环境变量解析后注入，与 platform-worker 的告警规则同源
+		FinanceRunwayThresholds: cfg.FinanceRunwayThresholds,
+		RequestTimeout:          cfg.RequestTimeout,
 	})
 
 	srv := &http.Server{

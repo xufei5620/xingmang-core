@@ -38,9 +38,42 @@
 | `metric.sync.consecutive_failed` | 同步连续失败 | `ops.metric_observation_sample` | 最近 3 条样本连续为 `failed` | 3 个采集周期 | **critical** | 出现任意一条成功样本 | `metric.sync.consecutive_failed:<env>:<metric_key>` |
 | `channel.token.invalid` | 渠道 token 失效 | `sub2api.channels.balance` 的 `channels[].token_valid` | `token_valid` **明确为** `false` | 0 | warning | 恢复为 `true`，或该渠道从上游清单消失 | `channel.token.invalid:<env>:<channel_id>` |
 | `channel.balance.low` | 渠道余额不足 | `sub2api.channels.balance` 的 `channels[].balance_minor_units` | 余额 < 阈值（默认 500000 最小货币单位） | 0 | warning | 余额回到阈值之上，或该渠道消失 | `channel.balance.low:<env>:<channel_id>` |
+| `upstream.runway.low` | 上游可用天数不足 | `finance.balance_history` ÷ `finance.profit_daily`（近 7 个完整业务日的日均消耗，设计稿 §10.4） | 计量型上游的可用天数**算得出来**且 < warning 档（默认 10 天） | 0 | warning（< critical 档 5 天升为 **critical**） | 天数回到告警档之上，或不再算得出天数 | `upstream.runway.low:<env>:<upstream_account_id>` |
 
 余下三项（通知渠道 / 静默策略 / 负责人）全部规则相同：
 渠道 = 已配置的 telegram + webhook；静默策略见下一节；负责人 = `platform-ops`。
+
+### 可用天数规则（R5）的三处取舍
+
+**它是唯一一条不读 ops 观测的规则。** 前四条的数据来源都是
+`ops.metric_observation`，而可用天数是平台**自己算出来的**（余额 ÷ 近 7 日
+日均消耗，两侧原料都在自己的库里）。把它塞进一条 ops 指标再由本包解 JSON，
+会多出一处「谁来算」与一处「怎么解」，而算它的代码本来就在 `finance` 里。
+所以本包声明了一个瘦接口 `RunwaySource`，由 `*finance.SummaryStore` 满足；
+`finance` 不 import `alerts`，没有环。
+
+**算不出天数的一律不告警。** 「余额还没读到」是采集覆盖率的问题
+（设计稿 §7 的覆盖率边界——两个真实驱动的余额读取都还没接通，**当前是常态**），
+不是「快见底了」。把它报成告警，每个环境一上来就是满屏红，
+然后这条规则就会被静默掉——那才是真正把预警关掉的方式。
+订阅型渠道同理：它没有余额这个概念（§7 末段），判据是接入方式而不是有没有数。
+
+**一条规则两档，不是两条规则。** 严重度逐条按天数算（`Finding.Severity`
+才是落库的那个，`Rule.Severity` 只是文档字段）。拆成「< 10」与「< 5」两条的话，
+一个 3 天的上游会同时命中两条，于是一个条件产出两条告警、要静默两次。
+
+**阈值与看板共用一份解析。** `XM_FINANCE_RUNWAY_WARN_DAYS` /
+`XM_FINANCE_RUNWAY_CRIT_DAYS` 由 platform-worker（本规则）与 platform-api
+（`/finance/upstreams/summary` 回报给前端）各自读取，但**共用
+`finance.ParseRunwayThresholds` 这一个函数**。两处各写一遍解析，
+「看板说还有 11 天」与「告警说已经低于阈值」就会同时出现在一个人面前。
+函数保证解析一致，**部署一致靠 `deploy/compose/launch.yaml`**——
+两个服务取的是同一个 `.env` 变量。
+
+非法阈值（不递增、非正、非整数）**回落默认档**而不是照单全收：
+失效方向与余额阈值相反——余额阈值配错是「永不触发」，
+可用天数档配错是**「永远触发」**（`levelFor` 的兜底把每一条上游判成 critical，
+一次配置手滑变成满屏红）。
 
 ### 几个刻意的取舍
 

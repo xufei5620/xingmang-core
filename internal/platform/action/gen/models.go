@@ -253,6 +253,7 @@ type FinanceUpstreamAccount struct {
 	CreatedAt     pgtype.Timestamptz
 	UpdatedAt     pgtype.Timestamptz
 	PlatformID    *string
+	GroupRate     pgtype.Numeric
 }
 
 type OpsMetricObservation struct {

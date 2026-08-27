@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
@@ -194,10 +195,15 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		now:    time.Now().UTC().Truncate(time.Second),
 	}
 	f.reconciler = alerts.NewReconciler(alerts.ReconcilerOptions{
-		Store:     alertStore,
-		Evaluator: alerts.NewEvaluator(opsStore, alerts.RuleConfig{}),
-		Notifier:  e2eNotifier(t, bot),
-		Logger:    discardTestLogger(),
+		Store: alertStore,
+		// 可用天数来源用真 SummaryStore（XM-0049）：本用例的库里没有登记簿
+		// 账号，所以它每轮返回空清单——R5 因此不产出命中，前四条规则的
+		// 端到端断言不受影响。用真实现而不是内存假货，是为了让「装配起得来」
+		// 也被这条 e2e 覆盖到。
+		Evaluator: alerts.NewEvaluator(
+			opsStore, finance.NewSummaryStore(pool, nil), alerts.RuleConfig{}),
+		Notifier: e2eNotifier(t, bot),
+		Logger:   discardTestLogger(),
 		// 固定时钟：让「第二轮」「第三轮」之间的时间推进是可控的，
 		// 而不是靠 sleep 去等真实时钟走动。
 		Now: func() time.Time { return f.now },

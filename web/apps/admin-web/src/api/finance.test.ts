@@ -86,6 +86,30 @@ describe("listChannelSummaries：null 是「给不出」，不是 0", () => {
     expect(page.items[0]!.coverage.complete).toBe(false);
   });
 
+  it("分组倍率缺席时保持 undefined，不折成空串（XM-0049）", async () => {
+    // 后端刻意用「不出这个字段」表达「这条渠道没有分组倍率」——
+    // 折成 "" 会让它看起来像一个被清空的值，而下一步就是有人写
+    // 「空串当 1」，那正是 §10.2 禁止的重复乘算。
+    const page = await listChannelSummaries(
+      {},
+      fakeClient({ items: [{ id: "c1", recharge_ratio: "1.5" }] }),
+      config,
+    );
+    expect(page.items[0]!.groupRate).toBeUndefined();
+    expect("groupRate" in page.items[0]!).toBe(false);
+  });
+
+  it("分组倍率有值时原样带出（定点字符串，不经浮点）", async () => {
+    const page = await listChannelSummaries(
+      {},
+      fakeClient({ items: [{ id: "c1", group_rate: "1.15", recharge_ratio: "1.5" }] }),
+      config,
+    );
+    expect(page.items[0]!.groupRate).toBe("1.15");
+    // 与充值倍率是两个独立的量
+    expect(page.items[0]!.rechargeRatio).toBe("1.5");
+  });
+
   it("items 为 null 时按空数组处理，页面不会炸", async () => {
     const page = await listChannelSummaries({}, fakeClient({ items: null }), config);
     expect(page.items).toEqual([]);
