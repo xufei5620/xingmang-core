@@ -10,6 +10,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
@@ -19,19 +20,20 @@ const defaultRequestTimeout = 30 * time.Second
 
 // Deps 是路由装配所需的全部依赖。显式传入而非全局变量，便于测试替换。
 type Deps struct {
-	Logger         *slog.Logger
-	Service        string
-	Environment    string
-	DB             Pinger
-	Resolver       PrincipalResolver
-	Kernel         ActionExecutor
-	ActionRegistry *action.Registry
-	Services       ServiceLister
-	Metrics        MetricLister
-	MetricHistory  MetricHistoryLister
-	AuditEvents    AuditEventLister
-	Alerts         AlertLister
-	RequestTimeout time.Duration
+	Logger          *slog.Logger
+	Service         string
+	Environment     string
+	DB              Pinger
+	Resolver        PrincipalResolver
+	Kernel          ActionExecutor
+	ActionRegistry  *action.Registry
+	Services        ServiceLister
+	Metrics         MetricLister
+	MetricHistory   MetricHistoryLister
+	AuditEvents     AuditEventLister
+	Alerts          AlertLister
+	FinanceAccounts UpstreamAccountLister
+	RequestTimeout  time.Duration
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -83,6 +85,14 @@ func NewRouter(d Deps) http.Handler {
 		// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 		api.With(RequireScope(alerts.ScopeRead)).
 			Get("/alerts", ListAlertsHandler(d.Alerts))
+		// 成本登记簿**不复用 ops.read**：它列的是每个上游账号的凭据引用、
+		// 充值倍率与令牌映射。倍率是商业条款（我们从上游拿到几折），
+		// 映射是成本归属的对账键，两样都比看板上的余额数字敏感一个量级
+		// （见 finance.ScopeRead 的注释）。
+		// 写路径（登记、改倍率、维护映射）不在这里——它们是 L1 Action，
+		// 走 POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/upstream-accounts", ListUpstreamAccountsHandler(d.FinanceAccounts))
 	})
 	return r
 }

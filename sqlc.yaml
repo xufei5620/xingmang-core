@@ -85,3 +85,20 @@ sql:
           - db_type: "uuid"
             nullable: true
             go_type: "github.com/google/uuid.UUID"
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/finance.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/finance/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type: "github.com/google/uuid.UUID"

@@ -20,6 +20,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
@@ -78,6 +79,16 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	// 成本登记簿的写操作（登记上游账号、改充值倍率、维护令牌映射）同样
+	// 必须经 Action 内核（宪法 2 条 / ADR-003）。注册失败即拒绝启动：
+	// 一个「登记簿页面有按钮但后端没注册动作」的进程，会让运维在真要
+	// 改倍率的时候才发现保存键点不动。
+	financeStore := finance.NewStore(pool)
+	if err := finance.RegisterActions(actionRegistry, financeStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
 	kernel := action.NewKernel(
@@ -102,9 +113,12 @@ func main() {
 		MetricHistory: opsStore,
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
-		AuditEvents:    auditStore,
-		Alerts:         alertStore,
-		RequestTimeout: cfg.RequestTimeout,
+		AuditEvents: auditStore,
+		Alerts:      alertStore,
+		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler
+		// 不各开一条访问路径
+		FinanceAccounts: financeStore,
+		RequestTimeout:  cfg.RequestTimeout,
 	})
 
 	srv := &http.Server{

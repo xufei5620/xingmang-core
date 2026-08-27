@@ -1,0 +1,18 @@
+{
+  "id": "finance.token_map.remove",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.token_map.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {"required": false},
+  "compensation_mode": "MANUAL",
+  "params": {
+    "upstream_account_id": {"type": "string", "required": true},
+    "upstream_token_id": {"type": "string", "required": true},
+    "reason": {"type": "string", "required": true}
+  },
+  "notes": "XM-0037a 删除令牌映射。必须存在：一条写错的映射会持续把成本记到别的渠道上，没有删除路径时唯一的补救是直接改库——那正是宪法 2 条要挡的绕过。删不到返回 INVALID_PARAMS 而不是静默成功：一个「以为删掉了」的错误映射会继续错下去，而运营已经不再看它了。补偿方式 MANUAL——删除本身不可自动回滚，重新登记要人来做（前态在审计的 before 摘要里）。reason 必填并进审计。"
+}
