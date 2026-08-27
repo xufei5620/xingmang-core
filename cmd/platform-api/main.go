@@ -121,6 +121,22 @@ func main() {
 		os.Exit(2)
 	}
 
+	// 用户清单（XM-0046）。与 reqlog 同一条纪律：配错了就拒绝启动。
+	// 默认 fake（理由见 parseUsersMode）——样本客户一眼可辨，且 data_source
+	// 带 -fake，前端据此挂演示横幅。
+	usersMode, err := parseUsersMode(os.Getenv("XM_PLATFORM_USERS_MODE"))
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "platform_users_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	platformUserService, err := buildPlatformUsers(usersMode)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "platform_users_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:         logger,
 		Service:        "platform-api",
@@ -139,6 +155,8 @@ func main() {
 		Alerts:      alertStore,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
+		// nil 时用户端点不挂载（见 httpapi.Deps.PlatformUsers）
+		PlatformUsers: platformUsersOrNil(platformUserService),
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler
 		// 不各开一条访问路径
 		FinanceAccounts: financeStore,

@@ -524,6 +524,11 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if slices.Contains(staff, "audit.read") {
 		t.Fatal("staff 默认不该含 audit.read：PERMISSIONS.md 论证过它要单独授予")
 	}
+	// XM-0046：逐用户资金明细与 request.read 同一档，staff 同样不该默认拿到。
+	// ops.read 看到的是聚合数字，这是逐条——「看板角色不应顺带看见全平台客户的账」
+	if slices.Contains(staff, "platform.users.read") {
+		t.Fatal("staff 默认不该含 platform.users.read：它是逐用户的资金明细，不是看板数字")
+	}
 	for _, sc := range staff {
 		if strings.Contains(sc, ".manage") {
 			t.Fatalf("staff 默认不该含写权限: %q", sc)
@@ -542,6 +547,9 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	// admin 角色今天在 Realm 里还不存在，所以这一行不会命中——正因为不会命中，
 	// 才更需要一条测试拦住「以后顺手加回去」：没有人会回过头质疑一张已经跑了
 	// 半年的默认表。要授予就用 XM_OIDC_ROLE_SCOPES 显式配一个专门的角色。
+	if !slices.Contains(admin, "platform.users.read") {
+		t.Fatalf("admin 应含 platform.users.read（用户管理页签的读权限）, got %v", admin)
+	}
 	if !slices.Contains(admin, "request.read") {
 		t.Fatalf("admin 应含 request.read（请求元数据列表）, got %v", admin)
 	}
