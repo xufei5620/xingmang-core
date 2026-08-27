@@ -5,9 +5,19 @@ systems:
     endpoint: https://api.solov.cc
     environment: production
     observed_at: 2026-08-26T00:00:00Z
+    # detected_version 只填**探测**出来的值。这个实例至今没跑过 Version()，
+    # 所以它仍是「未探测」——把下面那个源码核对版本抄上来就是把一次代码阅读
+    # 伪装成一次观测，本清单描述的是「现在是什么」，不是「大概是什么」。
     detected_version: "未探测（XM-0017 已交付只读客户端，等待真实凭据后由 Version() 回填）"
+    # 客户端当前逐字段核对过的上游源码版本（不是本实例的运行版本）。
+    # 0.1.183 = K:/sub2api-src @ efb46db，见 EV-2026-08-27-sub2api-read-survey.md；
+    # 客户端同时兼容 0.1.133 与 0.1.183 两版的支付金额形状（XM-R013）。
+    client_verified_against: "0.1.183（源码核对，非实例探测）"
     user_count: 2482
     source_watermark: "未采集"
+    # 拿到凭据后开采之前必须做的两件事，详见 contracts/connectors/sub2api.read.v1.md
+    # 的「接入前置」：① 对采集账号 POST /api/v1/admin/compliance/accept，
+    # 否则 admin 组全部 GET 返 423；② 5 个 mock 端点不得采集。
 
   - id: newapi-prod
     type: newapi

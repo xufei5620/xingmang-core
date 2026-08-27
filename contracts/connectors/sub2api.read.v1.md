@@ -38,6 +38,30 @@ sub2api.health.read             运营健康
 | `OrderSummary` | 业务日、收入、成本、订单数 |
 | `ChannelBalance` | 渠道 ID/名、余额、Token 是否有效 |
 
+### `OrderSummary.RevenueMinorUnits` 的口径（XM-R013 明确）
+
+**毛收入，单一币种。** 具体地：
+
+- **毛**：上游 `payment/dashboard` 的 `daily_series` 按 `paid_at` 累加订单的
+  `pay_amount`，**不扣退款**。上游有退款（`RefundResult`），但退款不回冲这条
+  日序列。所以这个数字是"当天收进来多少"，不是"当天净赚多少"；
+- **单一币种**：值只属于 `Currency` 这一个币种。上游 0.1.183 起把金额按
+  **币种分桶**（`CurrencyAmounts = map[ISO4217]float64`），本客户端按
+  `Currency` 取对应那一桶，**绝不跨币种相加**——上游源码里写着同一条纪律
+  （"Amounts in different currencies must never be added together"）；
+- 那一天**存在其他币种的收入**时（本契约装不下），或者 `Currency` 那一桶
+  **压根不存在**时，`IsPartial = true`，收入按取到的部分报（取不到就是 0）。
+  取不到时**不拿别的币种顶替**：顶替得到的是一个看起来完全正常的错数字。
+
+⚠️ **`OrderCount` 是跨币种的**：上游按天累加订单条数时不分币种。
+多币种的日子里它覆盖的范围比 `RevenueMinorUnits` 大，两者**不构成均价**。
+
+⚠️ **收入币种与成本币种在上游是两个独立概念**：`pay_amount` 的币种是
+**逐订单**的（上游默认 `CNY`），而用户余额、用量成本、账号额度全线按
+**美元**记账。本契约只有一个 `Currency` 字段，由 `WithCurrency` 显式声明。
+声明值与上游支付币种不一致时，收入会变成 `0 + IsPartial`——
+这是**有意的失败形态**：宁可报不出来，也不给一个错的数。
+
 ## 四道只读闸（ADR-018）
 
 | 闸 | 落地位置 | 状态 |
@@ -72,6 +96,7 @@ XM-0017 交付的是**官方 HTTP 只读 API** 通道——按 ADR-004 的读通
 | `rate_limited` | 429 / Retry-After |
 | `not_supported` | 上游版本不支持该能力 |
 | `bad_response` | 响应格式非法、字段缺失、超大 |
+| `auth`（423 Locked） | 上游 0.1.183 起的**合规确认门**：该 admin 账号没做过合规确认，admin 组全部 GET 返 423。见下方「接入前置」 |
 | `forbidden_target` | 目标不在 allowlist |
 | `write_attempt` | 只读通道上出现写请求 |
 
@@ -84,11 +109,65 @@ XM-0017 交付的是**官方 HTTP 只读 API** 通道——按 ADR-004 的读通
 
 兼容矩阵：`sub2api.SupportedUpstreamVersions`，当前登记 `0.1` 一条线
 （只写到 major.minor，补丁升级不判为不支持）。上游的版本串来自编译期嵌入的
-`VERSION` 文件，形如 `0.1.133`，**没有 `v` 前缀**。
+`VERSION` 文件（`backend/cmd/server/VERSION`），形如 `0.1.183`，
+~~**没有 `v` 前缀**（待验证）~~ → **已确认无 `v` 前缀**：`GET
+/api/v1/admin/system/version` 的 handler 只回 `{"version": <VERSION 原文>}`，
+VERSION 文件里就是裸的 `0.1.183`。
 
-⚠️ 这条矩阵尚未对真实实例验证过——真实只读凭据到位后第一件事就是跑一次
-`Version()`，把实际探测值回填这里、`SupportedUpstreamVersions` 与
-`docs/inventory/managed-systems.yaml`。
+### 逐补丁版核对记录
+
+| 上游版本 | 核对方式 | 结论 |
+|---|---|---|
+| `0.1.133` | XM-0017 实现时的基线 | 7 条在用路由的字段名与形状全部对上 |
+| `0.1.183` | XM-R013 对源码 `K:/sub2api-src @ efb46db` 逐字段核对（EV-2026-08-27） | 5 条路由不变；**2 处破坏性差异已修**（见下），客户端同时兼容两版形状 |
+
+0.1.133 → 0.1.183 的两处破坏性差异：
+
+1. **`/admin/payment/dashboard` 金额改成币种 map。** `DashboardStats` /
+   `DailyStats` 的 `amount` 从标量 `float64` 变成
+   `CurrencyAmounts = map[string]float64`。按标量解会拿到 `{"CNY":…}` 的
+   **字面量文本**，金额解析直接失败 → `bad_response`。
+   **这条在空实例上测不出来**：没有已支付订单的日子上游给的是空对象 `{}`，
+   按标量解会被当成 0，一路正常——只有真的有收入的那天才炸；
+2. **admin 组新增 `AdminComplianceGuard`**，未确认合规时全部 GET 返 423
+   （见「接入前置」与错误映射表）。
+
+⚠️ **仍未对真实实例跑过 `Version()`。** 上面是对上游**源码**的核对，
+不是一次观测——`api.solov.cc` 实际跑的是哪个补丁版目前仍未知。
+只读凭据到位后第一件事仍是跑一次 `Version()`，把探测值回填
+`docs/inventory/managed-systems.yaml`（矩阵本身多半不用动，`0.1` 已覆盖）。
+
+## 接入前置（拿到凭据后、开采之前必须做的两件事）
+
+依据：`docs/evidence/EV-2026-08-27-sub2api-read-survey.md`。
+
+### 1. 先做一次合规确认，否则 admin 组一条都读不出来
+
+上游 0.1.183 起在 `/api/v1/admin`（以及 payment 的 admin 子组）挂了
+`AdminComplianceGuard`。采集凭据对应的 admin 账号没确认过合规声明时，
+**所有** admin GET 返 `423 Locked`，正文 `code=ADMIN_COMPLIANCE_ACK_REQUIRED`。
+
+- 处置：由**人**对该账号执行一次 `POST /api/v1/admin/compliance/accept`。
+  平台是只读通道，发不出这个 POST，也不该发（ADR-018 闸 4）；
+- 现状可查：`GET /api/v1/admin/compliance`（这条路由在 guard 的白名单里）；
+- 漏做的表现：看板上这批指标全部 `failed` + `last_error_code=auth`。
+
+### 2. 这 5 个端点返回写死的假数据，列入永久黑名单
+
+它们 HTTP 200、形状也正常，但 handler 里就是常量（上游源码注释：
+"Return mock data for now"）。采了会得到一批**永远不动且看起来正常**的指标
+——比读不到更糟：读不到会告警，假数据不会。
+
+```
+/api/v1/admin/users/:id/usage
+/api/v1/admin/dashboard/realtime
+/api/v1/admin/redeem-codes/stats
+/api/v1/admin/groups/:id/stats
+/api/v1/admin/proxies/:id/stats
+```
+
+本契约在用的 7 条路由都不在这份名单里。将来加路由前先回上游源码确认
+handler 真的查了库。
 
 ## 指标输出
 
