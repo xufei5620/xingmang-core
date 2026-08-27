@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   FreshnessBadge,
+  PageHeader,
   ServiceStatusBadge,
   formatDuration,
   formatUtcTimestamp,
@@ -17,7 +18,6 @@ import {
 } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
 import { ObserveServiceDialog } from "../components/ObserveServiceDialog";
-import { PageHeader } from "../components/PageHeader";
 import { RegisterServiceDialog } from "../components/RegisterServiceDialog";
 
 const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";

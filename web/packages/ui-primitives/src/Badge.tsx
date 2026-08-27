@@ -19,8 +19,9 @@ const toneClass: Record<BadgeTone, string> = {
   neutral: "border-edge bg-surface-muted text-fg-muted",
   info: "border-accent bg-accent/10 text-accent",
   success: "border-success bg-success/10 text-success",
-  // warning 用 text-fg 而不是 text-warning：琥珀色字压在浅底上对比度不足，
-  // 靠底色与描边传达语气，文字保持可读（无障碍优先于配色一致）
+  // warning 用 text-fg 而不是 text-warning：琥珀本身就是最难在浅底上读清的
+  // 一档，token 换成深琥珀后 text-warning 只是刚过 AA，而这里的文字往往只有
+  // 四个字。语气交给底色与描边，文字取最高对比度（无障碍优先于配色一致）
   warning: "border-warning bg-warning/15 text-fg",
   danger: "border-danger bg-danger/10 text-danger",
 };

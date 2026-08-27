@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { PageHeader } from "@xingmang/ui-admin";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { listAlerts } from "../api/alerts";
@@ -7,7 +8,6 @@ import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { AlertSummaryCard } from "../components/AlertSummaryCard";
 import { ApiStateView } from "../components/ApiStateView";
 import { MetricCardGrid } from "../components/MetricCardGrid";
-import { PageHeader } from "../components/PageHeader";
 import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
 import { PLATFORM_CATALOG, platformOfMetricKey } from "../lib/platforms";
 

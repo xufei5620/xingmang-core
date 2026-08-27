@@ -10,7 +10,7 @@ describe("AdminShell", () => {
       </AdminShell>,
     );
     expect(screen.getByText("星芒统一控制平台")).not.toBeNull();
-    expect(screen.getByRole("navigation")).not.toBeNull();
+    expect(screen.getByRole("navigation", { name: "主导航" })).not.toBeNull();
     expect(screen.getByText("运营总览")).not.toBeNull();
     expect(screen.getByRole("main").textContent).toContain("内容区");
   });
@@ -45,5 +45,38 @@ describe("AdminShell", () => {
     expect(screen.getByText("管理员")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
     expect(onLogout).toHaveBeenCalledOnce();
+  });
+
+  it("提示条同样在主内容区之外：换页时「你在哪」这件事不该被重画", () => {
+    render(
+      <AdminShell nav={null} contextStrip={<p>全局 / 运营总览</p>}>
+        <p>内容区</p>
+      </AdminShell>,
+    );
+    const strip = screen.getByText("全局 / 运营总览");
+    expect(screen.getByRole("main").contains(strip)).toBe(false);
+  });
+
+  it("顶栏占住全局搜索的位置，但明确点不动（阶段 2 才实装）", () => {
+    render(
+      <AdminShell nav={null}>
+        <p>内容区</p>
+      </AdminShell>,
+    );
+    // 能聚焦、能输入却什么都搜不到的框，比没有框更像「搜索坏了」
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("searchbox")).toBeNull();
+    const placeholder = screen.getByText(/搜索平台、渠道、审计事件/);
+    expect(placeholder.closest("[aria-disabled='true']")).not.toBeNull();
+  });
+
+  it("传了 search 就用调用方给的，占位让位", () => {
+    render(
+      <AdminShell nav={null} search={<input aria-label="全局搜索" />}>
+        <p>内容区</p>
+      </AdminShell>,
+    );
+    expect(screen.getByRole("textbox", { name: "全局搜索" })).not.toBeNull();
+    expect(screen.queryByText(/搜索平台、渠道、审计事件/)).toBeNull();
   });
 });

@@ -1,9 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
-import { AdminShell, NavItemDisabled, NavSection } from "@xingmang/ui-admin";
-import { NavLink, Outlet, createBrowserRouter, redirect, useNavigate } from "react-router";
+import {
+  AdminShell,
+  ContextStrip,
+  NavItemDisabled,
+  NavSection,
+  navItemClass,
+} from "@xingmang/ui-admin";
+import {
+  NavLink,
+  Outlet,
+  createBrowserRouter,
+  redirect,
+  useLocation,
+  useNavigate,
+} from "react-router";
+import { appApiConfig } from "./api/config";
 import { listServices } from "./api/platform";
 import { devLogout, isAuthenticated } from "./auth";
 import { DemoDataBanner } from "./components/DemoDataBanner";
+import { breadcrumbsFor, environmentLabel } from "./lib/breadcrumbs";
 import {
   groupPlatforms,
   pendingBadge,
@@ -25,11 +40,8 @@ function requireAuth() {
   return null;
 }
 
-function navLinkClass({ isActive }: { isActive: boolean }): string {
-  return isActive
-    ? "block rounded-md bg-surface-muted px-3 py-2 font-medium text-accent"
-    : "block rounded-md px-3 py-2 text-fg-muted hover:bg-surface-muted";
-}
+// 导航项的样式由 ui-admin 给（navItemClass）：左栏在深色轨道上，用的是不随主题
+// 翻转的 nav-* 令牌，应用侧照着内容区的 surface/fg 再拼一份就会一半亮一半暗。
 
 /** 「被管平台」段：由 `GET /api/v1/services` 驱动。
  *
@@ -97,7 +109,7 @@ function PlatformNavItem({
   }
 
   return (
-    <NavLink to={`/platforms/${spec.serviceType}`} className={navLinkClass}>
+    <NavLink to={`/platforms/${spec.serviceType}`} className={navItemClass}>
       {spec.label}
     </NavLink>
   );
@@ -111,16 +123,16 @@ function ShellNav() {
   return (
     <>
       <NavSection title="全局">
-        <NavLink to="/dashboard" className={navLinkClass}>
+        <NavLink to="/dashboard" className={navItemClass}>
           运营总览
         </NavLink>
         {/* 告警中心归 XM-0033，合并 release 时已上线，占位换成了真链接。
             位置照 ADMIN-IA 的全局段顺序（运营总览 / 告警中心 / 审计事件），
             而不是 XM-0033 在旧扁平导航里的那个位置 */}
-        <NavLink to="/alerts" className={navLinkClass}>
+        <NavLink to="/alerts" className={navItemClass}>
           告警中心
         </NavLink>
-        <NavLink to="/audit" className={navLinkClass}>
+        <NavLink to="/audit" className={navItemClass}>
           审计事件
         </NavLink>
       </NavSection>
@@ -130,7 +142,7 @@ function ShellNav() {
       </NavSection>
 
       <NavSection title="平台治理">
-        <NavLink to="/registry" className={navLinkClass}>
+        <NavLink to="/registry" className={navItemClass}>
           注册表
         </NavLink>
         <NavItemDisabled
@@ -143,7 +155,7 @@ function ShellNav() {
           hint="未接入"
           title="变更单列表与审批中心，随 XM-0030（Foundation-B）上线"
         />
-        <NavLink to="/settings" className={navLinkClass}>
+        <NavLink to="/settings" className={navItemClass}>
           设置
         </NavLink>
       </NavSection>
@@ -153,11 +165,18 @@ function ShellNav() {
 
 export function ShellLayout() {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const env = environmentLabel(appApiConfig.environment);
   return (
     <AdminShell
       // 横幅挂在壳上而不是各页页头：它要盖住每一个页面，包括审计页
       banner={<DemoDataBanner />}
       nav={<ShellNav />}
+      // 面包屑与环境同样挂在壳上：它们回答的是「你在哪、这屏数据算不算数」，
+      // 换页时这两个问题都还在，答案不该跟着页面一起被重画
+      contextStrip={
+        <ContextStrip crumbs={breadcrumbsFor(pathname)} environment={{ ...env, tone: "info" }} />
+      }
       user={{ name: "开发模式" }}
       onLogout={() => {
         devLogout();
