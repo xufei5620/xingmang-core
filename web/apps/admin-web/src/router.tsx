@@ -24,6 +24,7 @@ import { appApiConfig } from "./api/config";
 import { listServices } from "./api/platform";
 import { devLogout, isAuthenticated } from "./auth";
 import { DemoDataBanner } from "./components/DemoDataBanner";
+import { GlobalSearch } from "./components/GlobalSearch";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { breadcrumbsFor, environmentLabel } from "./lib/breadcrumbs";
 import {
@@ -180,6 +181,9 @@ export function ShellLayout() {
       // 横幅挂在壳上而不是各页页头：它要盖住每一个页面，包括审计页
       banner={<DemoDataBanner />}
       nav={<ShellNav pathname={pathname} />}
+      // 顶栏的全局搜索。XM-0043 之前这里是壳自带的禁用占位——一个能看见
+      // 却点不动的搜索框。现在换成真的:Ctrl/Cmd + K 打开，只导航不执行
+      search={<GlobalSearch />}
       // 面包屑与环境同样挂在壳上：它们回答的是「你在哪、这屏数据算不算数」，
       // 换页时这两个问题都还在，答案不该跟着页面一起被重画
       contextStrip={

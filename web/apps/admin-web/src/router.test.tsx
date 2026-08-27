@@ -338,43 +338,116 @@ describe("admin-web 路由（登录前/后壳）", () => {
   });
 });
 
-describe("运营总览页", () => {
+describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）", () => {
   beforeEach(() => {
     devLogin();
     stubFetch(okHandler);
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("指标卡片显示友好名、金额与新鲜度徽章", async () => {
+  it("版式照原型：四格计数 + 我的待处理 + 运营焦点 + 最近活动 + 平台状态矩阵", async () => {
     renderRoute("/dashboard");
-    expect(await screen.findByText("Sub2API 日收入")).not.toBeNull();
-    expect(screen.getByText("¥1,234.56")).not.toBeNull();
-    expect(screen.getByText("数据延迟")).not.toBeNull();
-    expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC · 落后 2 小时/)).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "运营工作台", level: 2 })).not.toBeNull();
+    // 四格在 ApiStateView 里面，要等告警回来才渲染
+    await screen.findByRole("heading", { name: "紧急", level: 3 });
+    for (const block of ["我的待处理", "运营焦点", "最近活动", "平台状态矩阵"]) {
+      expect(screen.getByRole("heading", { name: block, level: 3 })).not.toBeNull();
+    }
+    for (const tile of ["紧急", "今日到期", "阻塞", "最近恢复"]) {
+      expect(screen.getByRole("heading", { name: tile, level: 3 })).not.toBeNull();
+    }
   });
 
-  it("未初始化的指标显示「未初始化」而不是 ¥0.00（宪法 12 条）", async () => {
+  it("**不合成总健康分**：运营焦点三行分开，屏幕上没有任何一个综合评分", async () => {
+    // 交接文档 §9.1 明令禁止。一个 87 分的看板没法回答「我现在该去修哪个」，
+    // 而任何一条恶化都会被另外两条稀释掉
     renderRoute("/dashboard");
-    await screen.findByText("Sub2API 用户余额");
-    expect(screen.getAllByText("未初始化").length).toBeGreaterThan(0);
-    expect(screen.queryByText("¥0.00")).toBeNull();
+    await screen.findByText("可靠性");
+    for (const domain of ["可靠性", "财务", "安全"]) {
+      expect(screen.getByText(domain)).not.toBeNull();
+    }
+    // 判据是「屏幕上有没有一个把三条信号揉成一个数的评分」，不是搜关键词——
+    // 页头那句「不合成总健康分」本身就含「总健康分」四个字
+    expect(screen.queryByText(/^\s*\d+\s*分\s*$/)).toBeNull();
+    expect(screen.queryByText(/\d+\s*\/\s*100/)).toBeNull();
+    // 三个领域各有各的状态徽章，没有被合并成一格
+    expect(screen.getAllByText("未接入").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("请求带上开发期身份头", async () => {
-    const fetchMock = stubFetch(okHandler);
+  it("「紧急」数的是未解决的严重告警", async () => {
+    // alertsBody：1 条 critical（OPEN）+ 1 条 warning（SILENCED）
     renderRoute("/dashboard");
-    await screen.findByText("Sub2API 日收入");
-    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
-    expect(init.headers).toMatchObject({
-      "X-Dev-Principal-ID": "dev-operator",
-      "X-Dev-Principal-Type": "HUMAN",
-      // 读看板要 registry.read + ops.read；审计页要 audit.read；
-      // 服务登记/观测上报要 registry.service.manage（XM-0026 加的）；
-      // 告警的确认与静默各要一个（XM-0033，刻意不合并成一个 scope）。
-      // 告警的**读**路径复用 ops.read，所以这里没有第七个。
-      "X-Dev-Scopes":
-        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,request.read,request.content.read",
-    });
+    const urgent = (await screen.findByRole("heading", { name: "紧急", level: 3 })).closest(
+      "article",
+    );
+    expect(within(urgent as HTMLElement).getByText("1")).not.toBeNull();
+    expect(within(urgent as HTMLElement).getByRole("link", { name: /查看全部告警/ })).not.toBeNull();
+  });
+
+  it("没有数据源的两格显示「—」并标「未接入」，不显示 0", async () => {
+    // 0 会被读成「今天没有到期项」，而事实是这条线还没接
+    renderRoute("/dashboard");
+    const due = (await screen.findByRole("heading", { name: "今日到期", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(due).getByText("—")).not.toBeNull();
+    expect(within(due).getByText("未接入")).not.toBeNull();
+    expect(within(due).queryByText("0")).toBeNull();
+  });
+
+  it("我的待处理列出活跃告警，并说明其余分类为什么是空的", async () => {
+    renderRoute("/dashboard");
+    expect(await screen.findByText("指标 sub2api.revenue.daily 同步失败")).not.toBeNull();
+    // 今天「故障」一类里躺的其实是活跃告警，Incident 对象还没建——
+    // 不说的话，人会以为这些已经是收敛过的故障单
+    expect(screen.getByText(/其余各类的空是「还没接」，不是「没有问题」/)).not.toBeNull();
+  });
+
+  it("筛选进 ?work=，选到没有数据源的分类时说清楚被什么挡着", async () => {
+    renderRoute("/dashboard?work=approvals");
+    const empty = await screen.findByText("「待审批」还没有数据源");
+    // Foundation-B 在「今日到期」那一格里也出现过，所以要限定在这一块里找
+    expect(within(empty.closest("div") as HTMLElement).getByText(/Foundation-B/)).not.toBeNull();
+    // 一个筛过的工作台是可以贴给同事的地址（交接文档 §8）
+    expect(screen.getByRole("button", { name: "待审批" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("没有数据源的分类，后端挂了也照样说「还没接」，不显示成加载失败", async () => {
+    // 这一类的空与这次请求成不成功无关。套进 ApiStateView 的话，后端一挂就
+    // 显示「加载失败」——把「还没接」说成一次网络故障，人会去点重试，
+    // 而重试一万次也不会有内容
+    stubFetch(() =>
+      fakeResponse(503, { error: { code: "UNAVAILABLE", message: "上游不可用" } }),
+    );
+    renderRoute("/dashboard?work=finance");
+    expect(await screen.findByText("「财务异常」还没有数据源")).not.toBeNull();
+  });
+
+  it("平台状态矩阵按平台给出阶段、状态、新鲜度与活动事件", async () => {
+    renderRoute("/dashboard");
+    // 矩阵在 ApiStateView 里面，等注册表与指标都回来
+    const link = await screen.findByRole("link", { name: "Sub2API" });
+    const matrix = link.closest("section") as HTMLElement;
+    // servicesBody 只登记了 sub2api（degraded）
+    expect(within(matrix).getByText("降级")).not.toBeNull();
+    // 没登记的平台说「未登记 / 未接入·Mx」，不说「正常」
+    expect(within(matrix).getByText("未接入·M4")).not.toBeNull();
+    // 开票系统在矩阵里，但入口落在治理段而不是一个平台页
+    expect(within(matrix).getByRole("link", { name: "开票系统" }).getAttribute("href")).toBe(
+      "/finance?sub=invoicing",
+    );
+  });
+
+  it("五条 query 各自独立：指标端点挂掉时告警那几格照常显示", async () => {
+    // 规格 §9.2 把告警列为工作台的固定一项：指标挂了正是最需要看见告警的时候
+    stubFetch((url) =>
+      url.startsWith("/api/v1/metrics")
+        ? fakeResponse(500, { error: { code: "INTERNAL", message: "服务内部错误" } })
+        : okHandler(url),
+    );
+    renderRoute("/dashboard");
+    expect(await screen.findByText("指标 sub2api.revenue.daily 同步失败")).not.toBeNull();
+    expect(screen.getAllByText("加载失败").length).toBeGreaterThan(0);
   });
 
   it("403 时提示缺少的权限名", async () => {
@@ -384,9 +457,6 @@ describe("运营总览页", () => {
       }),
     );
     renderRoute("/dashboard");
-    // 总览页有两条独立的 query（指标 + 告警），两个都会进错误态：
-    // 用 findAll 而不是 find。它们**必须**分开，指标端点挂掉时告警卡
-    // 仍要能显示（规格 §9.2 把告警列为总览的固定一项）。
     expect((await screen.findAllByText("无权访问")).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/ops\.read/).length).toBeGreaterThan(0);
   });
@@ -396,6 +466,37 @@ describe("运营总览页", () => {
     renderRoute("/dashboard");
     expect((await screen.findAllByText("加载失败")).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "重试" }).length).toBeGreaterThan(0);
+  });
+
+  it("请求带上开发期身份头", async () => {
+    const fetchMock = stubFetch(okHandler);
+    renderRoute("/dashboard");
+    await screen.findByRole("heading", { name: "我的待处理", level: 3 });
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.headers).toMatchObject({
+      "X-Dev-Principal-ID": "dev-operator",
+      "X-Dev-Principal-Type": "HUMAN",
+      "X-Dev-Scopes":
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,request.read,request.content.read",
+    });
+  });
+
+  it("最近活动来自审计记录，并给出通往审计页的入口", async () => {
+    renderRoute("/dashboard");
+    const event = await screen.findByText("registry.service.create@1");
+    const activity = event.closest("section") as HTMLElement;
+    expect(within(activity).getByRole("link", { name: /查看审计记录/ })).not.toBeNull();
+  });
+
+  it("零告警时说「没有待处理事项」，并提醒这一屏不代表全部待办", async () => {
+    stubFetch((url) =>
+      url.startsWith("/api/v1/alerts") ? fakeResponse(200, { items: [] }) : okHandler(url),
+    );
+    renderRoute("/dashboard");
+    expect(await screen.findByText("没有待处理事项")).not.toBeNull();
+    // 零不等于「都处理完了」：还有四类根本没接
+    expect(screen.getByText(/并不代表全部待办/)).not.toBeNull();
+    expect(screen.getByText("当前没有未解决的严重告警")).not.toBeNull();
   });
 });
 
@@ -419,7 +520,7 @@ describe("演示数据横幅", () => {
   it("source 没命中就不挂——误报会把横幅变成人人无视的噪音", async () => {
     stubFetch(okHandler); // metricsBody 里的 source 是 sub2api-prod
     renderRoute("/dashboard");
-    await screen.findByText("Sub2API 日收入");
+    await screen.findByRole("heading", { name: "我的待处理", level: 3 });
     expect(screen.queryByText(/当前展示的是演示数据/)).toBeNull();
   });
 });
@@ -441,16 +542,18 @@ describe("注册表页（原服务清单）", () => {
   });
 });
 
-describe("总览页的迷你趋势图", () => {
+describe("平台概览的迷你趋势图", () => {
   beforeEach(() => {
     devLogin();
     stubFetch(okHandler);
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  // 折线随 XM-0043 从工作台挪到了平台概览页：裁定 #3 砍掉「指标趋势」页签之后，
+  // 历史曲线的落点就是各平台概览的指标卡（ADMIN-IA §8.1）
   it("卡片渲染之后才去拉历史，拿到后画出折线", async () => {
     const fetchMock = stubFetch(okHandler);
-    renderRoute("/dashboard");
+    renderRoute("/platforms/sub2api");
 
     // 首屏那一批请求里没有 history：它是挂载之后才发的
     await screen.findByText("Sub2API 日收入");
@@ -467,7 +570,7 @@ describe("总览页的迷你趋势图", () => {
         ? fakeResponse(500, { error: { code: "INTERNAL", message: "服务内部错误" } })
         : okHandler(url),
     );
-    renderRoute("/dashboard");
+    renderRoute("/platforms/sub2api");
 
     expect(await screen.findByText("¥1,234.56")).not.toBeNull();
     expect((await screen.findAllByText("趋势不可用")).length).toBeGreaterThan(0);
@@ -475,8 +578,23 @@ describe("总览页的迷你趋势图", () => {
     expect(screen.queryByText("加载失败")).toBeNull();
   });
 
+  it("指标卡显示友好名、金额与新鲜度徽章", async () => {
+    renderRoute("/platforms/sub2api");
+    expect(await screen.findByText("Sub2API 日收入")).not.toBeNull();
+    expect(screen.getByText("¥1,234.56")).not.toBeNull();
+    expect(screen.getByText("数据延迟")).not.toBeNull();
+    expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC · 落后 2 小时/)).not.toBeNull();
+  });
+
+  it("未初始化的指标显示「未初始化」而不是 ¥0.00（宪法 12 条）", async () => {
+    renderRoute("/platforms/sub2api");
+    await screen.findByText("Sub2API 用户余额");
+    expect(screen.getAllByText("未初始化").length).toBeGreaterThan(0);
+    expect(screen.queryByText("¥0.00")).toBeNull();
+  });
+
   it("头部显示最后刷新时刻（HH:MM:SS）", async () => {
-    renderRoute("/dashboard");
+    renderRoute("/platforms/sub2api");
     await screen.findByText("Sub2API 日收入");
     expect(screen.getByText(/最后刷新 \d{2}:\d{2}:\d{2}/)).not.toBeNull();
   });
@@ -1364,20 +1482,6 @@ describe("未实装页的诚实占位与门禁", () => {
 });
 
 
-describe("总览卡片的平台入口", () => {
-  beforeEach(() => {
-    devLogin();
-    stubFetch(okHandler);
-  });
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("sub2api.* 卡片带「查看平台 →」，链到该平台详情", async () => {
-    renderRoute("/dashboard");
-    const links = await screen.findAllByRole("link", { name: "查看平台 Sub2API" });
-    expect(links.length).toBeGreaterThan(0);
-    expect(links[0]?.getAttribute("href")).toBe("/platforms/sub2api");
-  });
-});
 
 describe("横切行为在迁移后仍然在场", () => {
   beforeEach(() => devLogin());
@@ -1580,39 +1684,3 @@ describe("创建静默窗口（写路径）", () => {
   });
 });
 
-describe("运营总览的告警卡", () => {
-  beforeEach(() => devLogin());
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("显示活跃告警计数与严重度分布", async () => {
-    stubFetch(okHandler);
-    renderRoute("/dashboard");
-    // alertsBody 里两条：1 严重 + 1 警告（已静默的照样算）
-    expect(await screen.findByText("严重 1")).not.toBeNull();
-    expect(screen.getByText("警告 1")).not.toBeNull();
-    expect(screen.getByRole("link", { name: "查看全部告警" })).not.toBeNull();
-  });
-
-  it("零告警显示「无活动告警」而不是一个大大的 0", async () => {
-    // 0 和「还没接上」在一个数字上长得一模一样，而这两件事在运营上完全相反
-    stubFetch((url) =>
-      url.startsWith("/api/v1/alerts") ? fakeResponse(200, { items: [] }) : okHandler(url),
-    );
-    renderRoute("/dashboard");
-    expect(await screen.findByText("无活动告警")).not.toBeNull();
-    expect(screen.queryByText("严重 0")).toBeNull();
-  });
-
-  it("指标端点挂掉时告警卡照常显示（两条 query 是分开的）", async () => {
-    stubFetch((url) => {
-      if (url.startsWith("/api/v1/alerts")) return okHandler(url);
-      if (url.startsWith("/api/v1/metrics"))
-        return fakeResponse(500, { error: { code: "INTERNAL", message: "服务内部错误" } });
-      return okHandler(url);
-    });
-    renderRoute("/dashboard");
-    // 规格 §9.2 把告警列为总览的固定一项：指标挂了正是最需要看见告警的时候
-    expect(await screen.findByText("严重 1")).not.toBeNull();
-    expect(screen.getAllByText("加载失败").length).toBeGreaterThan(0);
-  });
-});

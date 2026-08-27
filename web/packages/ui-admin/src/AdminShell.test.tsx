@@ -57,7 +57,7 @@ describe("AdminShell", () => {
     expect(screen.getByRole("main").contains(strip)).toBe(false);
   });
 
-  it("顶栏占住全局搜索的位置，但明确点不动（阶段 2 才实装）", () => {
+  it("没接搜索时顶栏占住位置，但明确点不动", () => {
     render(
       <AdminShell nav={null}>
         <p>内容区</p>
@@ -66,7 +66,7 @@ describe("AdminShell", () => {
     // 能聚焦、能输入却什么都搜不到的框，比没有框更像「搜索坏了」
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("searchbox")).toBeNull();
-    const placeholder = screen.getByText(/搜索平台、渠道、审计事件/);
+    const placeholder = screen.getByText(/全局搜索未接入/);
     expect(placeholder.closest("[aria-disabled='true']")).not.toBeNull();
   });
 
@@ -77,6 +77,6 @@ describe("AdminShell", () => {
       </AdminShell>,
     );
     expect(screen.getByRole("textbox", { name: "全局搜索" })).not.toBeNull();
-    expect(screen.queryByText(/搜索平台、渠道、审计事件/)).toBeNull();
+    expect(screen.queryByText(/全局搜索未接入/)).toBeNull();
   });
 });
