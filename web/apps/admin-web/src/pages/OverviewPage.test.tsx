@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OVERVIEW_POLL_INTERVAL_MS } from "../lib/autoRefresh";
 import { OverviewPage } from "./OverviewPage";
@@ -30,6 +31,10 @@ const metricsBody = {
   ],
 };
 
+/** 告警卡的响应。空清单：这个文件只关心自动刷新，不关心告警内容。
+ *  但它必须被 stub——总览页会真的去拉 /api/v1/alerts（XM-0033）。 */
+const alertsBody = { items: [] };
+
 const historyBody = {
   items: [0, 1, 2].map((i) => ({
     observed_at: `2026-08-26T0${i}:00:00Z`,
@@ -52,9 +57,13 @@ function renderPage() {
     // 缓存窗口会把第二次请求吃掉，那就测不到刷新本身了
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
+  // MemoryRouter 是必需的：告警卡里有一个通往 /alerts 的 <Link>，
+  // 没有路由上下文时 react-router 会直接抛异常（XM-0033）。
   render(
     <QueryClientProvider client={queryClient}>
-      <OverviewPage />
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -71,11 +80,12 @@ describe("总览页的 60 秒自动刷新（Codex #4）", () => {
     // shouldAdvanceTime：让 @testing-library 的 waitFor 仍能在假时钟下推进，
     // 否则 findBy* 会永远等下去
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    fetchMock = vi.fn((input: string) =>
-      Promise.resolve(
-        fakeResponse(input.startsWith("/api/v1/metrics/history") ? historyBody : metricsBody),
-      ),
-    );
+    fetchMock = vi.fn((input: string) => {
+      // history 必须排在 metrics 前面：两者的前缀是包含关系
+      if (input.startsWith("/api/v1/metrics/history")) return Promise.resolve(fakeResponse(historyBody));
+      if (input.startsWith("/api/v1/alerts")) return Promise.resolve(fakeResponse(alertsBody));
+      return Promise.resolve(fakeResponse(metricsBody));
+    });
     vi.stubGlobal("fetch", fetchMock);
   });
 

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
@@ -68,6 +69,15 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	// 告警的确认与静默是写操作，必须经 Action 内核（宪法 2 条 / ADR-003）。
+	// 注册失败即拒绝启动：一个「告警页有按钮但后端没注册动作」的进程，
+	// 会让运维在真出事的时候才发现确认键点不动。
+	alertStore := alerts.NewStore(pool)
+	if err := alerts.RegisterActions(actionRegistry, alertStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
 	kernel := action.NewKernel(
@@ -93,6 +103,7 @@ func main() {
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
 		AuditEvents:    auditStore,
+		Alerts:         alertStore,
 		RequestTimeout: cfg.RequestTimeout,
 	})
 

@@ -38,6 +38,13 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "sub2api_credential_ref_invalid")
 		os.Exit(2)
 	}
+	// 告警投递凭据的 Provider（XM-0033）。同样装配在进程入口，
+	// 告警模块只拿接口。引用没配时返回 nil，不是错误——见 alertSecretsFromEnv。
+	config.AlertSecrets, err = alertSecretsFromEnv(os.Getenv, logger, config.Environment, config.AlertTelegramBotRef)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "alert_credential_ref_invalid")
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -78,7 +85,15 @@ func main() {
 		"sub2api_sync_enabled", config.Sub2APISyncEnabled,
 		"sub2api_mode", string(config.Sub2APIMode),
 		"sub2api_source", config.Sub2APIInstanceID,
-		"sub2api_sync_interval", config.Sub2APISyncInterval.String())
+		"sub2api_sync_interval", config.Sub2APISyncInterval.String(),
+		// 告警同理：运维必须能一眼看出这个进程会不会评估告警、会不会投递、
+		// 往哪儿投。**只打渠道是否配置，不打 chat_id、不打 webhook 地址**——
+		// 后者常常本身就是凭据（宪法 7 条）。
+		"alert_evaluate_enabled", config.AlertEvaluateEnabled,
+		"alert_evaluate_interval", config.AlertEvaluateInterval.String(),
+		"alert_telegram_configured", config.AlertTelegramBotRef != "" && config.AlertTelegramChatID != "",
+		"alert_webhook_configured", config.AlertWebhookURL != "",
+		"alert_balance_threshold_minor_units", config.AlertBalanceThresholdMinorUnits)
 
 	<-ctx.Done()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

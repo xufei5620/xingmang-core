@@ -2,6 +2,7 @@ import { AdminShell } from "@xingmang/ui-admin";
 import { NavLink, Outlet, createBrowserRouter, redirect, useNavigate } from "react-router";
 import { devLogout, isAuthenticated } from "./auth";
 import { DemoDataBanner } from "./components/DemoDataBanner";
+import { AlertsPage } from "./pages/AlertsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -36,6 +37,9 @@ export function ShellLayout() {
           <NavLink to="/services" className={navLinkClass}>
             服务清单
           </NavLink>
+          <NavLink to="/alerts" className={navLinkClass}>
+            告警中心
+          </NavLink>
           <NavLink to="/audit" className={navLinkClass}>
             审计事件
           </NavLink>
@@ -64,6 +68,7 @@ export const routes = [
       { path: "dashboard", Component: OverviewPage },
       { path: "channels", Component: ChannelsPage },
       { path: "services", Component: ServicesPage },
+      { path: "alerts", Component: AlertsPage },
       { path: "audit", Component: AuditPage },
     ],
   },

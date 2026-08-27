@@ -31,6 +31,12 @@ export const DEFAULT_SCOPES = [
   "ops.read",
   "audit.read",
   "registry.service.manage",
+  // XM-0033 告警中心的两个写权限。**刻意分开两个 scope**：确认只是说
+  // 「我看见了」，静默是让告警不再出现也不再投递，爆炸半径差一个量级
+  // （internal/platform/alerts/permissions.go）。
+  // 读路径复用 ops.read，不需要再加。
+  "alerts.alert.manage",
+  "alerts.silence.manage",
 ];
 
 function parseScopes(raw: string | undefined): string[] {

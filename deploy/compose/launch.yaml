@@ -176,6 +176,21 @@ services:
       # 而不是拿一个占位值去连上游（宪法 7 条：凭据只经 CredentialRef，
       # 这个变量只是 env Provider 的落点，Connector 并不认识它）。
       XM_SUB2API_TOKEN: ${XM_SUB2API_TOKEN:-}
+      # --- 告警中心（XM-0033，规格 §9.3 / §9.4）-----------------------------
+      # 与 Sub2API 那几项相反：告警渠道**配错就让进程起不来**（ref 拼错、
+      # URL 不是 https、只配了一半）。理由见 docs/modules/alerts/README.md——
+      # 一个没建起来的告警渠道不会有任何后续痕迹，只会在真出事那天才被发现。
+      # 三个都不配是允许的：告警照常评估落库，每轮打一条「仅落库未投递」。
+      XM_ALERT_EVALUATE_ENABLED: ${XM_ALERT_EVALUATE_ENABLED:-true}
+      XM_ALERT_EVALUATE_INTERVAL: ${XM_ALERT_EVALUATE_INTERVAL:-60s}
+      XM_ALERT_TELEGRAM_BOT_REF: ${XM_ALERT_TELEGRAM_BOT_REF:-}
+      XM_ALERT_TELEGRAM_CHAT_ID: ${XM_ALERT_TELEGRAM_CHAT_ID:-}
+      # Bot Token 明文，是上面那个 ref 在 env Provider 下的落点。
+      # ⚠️ 这个 Bot 只服务平台内部告警。外部看门狗必须用**另一个** Bot
+      #    （规格 §9.4 红线，见 deploy/watchdog/README.md）。
+      XM_ALERT_TELEGRAM_TOKEN: ${XM_ALERT_TELEGRAM_TOKEN:-}
+      XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
+      XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS: ${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}
 
   # ==========================================================================
   # Web（admin-web 静态产物 + /api/ 反代）
