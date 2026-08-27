@@ -391,3 +391,67 @@ func TestNewAPIRevenueDegradedNeverLeaksPassword(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigFromEnvReadsRetentionSettings：XM-R012 保留期可配。
+func TestConfigFromEnvReadsRetentionSettings(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                     "staging",
+		"XM_RETENTION_ENABLED":            "true",
+		"XM_RETENTION_INTERVAL":           "6h",
+		"XM_METRIC_SAMPLE_RETENTION_DAYS": "30",
+		"XM_ALERT_RETENTION_DAYS":         "365",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RetentionEnabled || cfg.RetentionInterval != 6*time.Hour {
+		t.Fatalf("清理开关/周期 = %v / %s", cfg.RetentionEnabled, cfg.RetentionInterval)
+	}
+	if cfg.MetricSampleRetentionDays != 30 || cfg.AlertRetentionDays != 365 {
+		t.Fatalf("保留天数 = %d / %d", cfg.MetricSampleRetentionDays, cfg.AlertRetentionDays)
+	}
+}
+
+// TestConfigFromEnvRejectsNonPositiveRetentionDays：0 天不是「不清理」。
+//
+// 0 天最自然的读法是「不保留」，也就是**把整张表删空**；而想表达「不清理」的人
+// 该去关 XM_RETENTION_ENABLED。两种意图差得太远，不能让一个手滑的 0 去猜——
+// 猜错的那一次没有撤销键。
+func TestConfigFromEnvRejectsNonPositiveRetentionDays(t *testing.T) {
+	// 用切片而不是 map：同一个变量要试多个坏值。
+	for _, bad := range []struct{ key, value string }{
+		{"XM_METRIC_SAMPLE_RETENTION_DAYS", "0"},
+		{"XM_METRIC_SAMPLE_RETENTION_DAYS", "-1"},
+		{"XM_ALERT_RETENTION_DAYS", "0"},
+		{"XM_ALERT_RETENTION_DAYS", "-30"},
+		{"XM_RETENTION_INTERVAL", "not-a-duration"},
+		{"XM_RETENTION_ENABLED", "maybe"},
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", bad.key: bad.value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q 应当被拒绝", bad.key, bad.value)
+		}
+	}
+}
+
+// TestConfigFromEnvHasNoAuditRetentionKnob：审计没有保留天数这个旋钮。
+//
+// 审计链一条都不删（宪法 11 条 append-only，理由见 jobs/retention.go 文件头）。
+// 给一个删不掉东西的旋钮比不给更误导：填了之后审计表照涨，而填的人以为自己
+// 已经配好了清理。
+func TestConfigFromEnvHasNoAuditRetentionKnob(t *testing.T) {
+	var asked []string
+	values := map[string]string{"ENVIRONMENT": "test"}
+	if _, err := configFromEnv(func(name string) string {
+		asked = append(asked, name)
+		return values[name]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range asked {
+		if strings.Contains(name, "AUDIT") && strings.Contains(name, "RETENTION") {
+			t.Fatalf("不该存在审计保留期变量，却读了 %s", name)
+		}
+	}
+}

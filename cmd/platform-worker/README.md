@@ -134,3 +134,47 @@ then hands the same string to pgx is no check at all. Only `sslmode`,
 `target_session_attrs` and the `pool_*` settings are accepted; anything else is
 rejected in every environment. The loopback guard on the integration test asks
 pgx which hosts it will actually dial rather than reading the URL.
+
+## 保留期清理（XM-R012）
+
+River 周期任务 `retention_prune`，默认每 24 小时一轮，跑在 `maintenance` 队列。
+它删两类数据：
+
+| 目标 | 条件 | 默认保留 | 环境变量 |
+| --- | --- | --- | --- |
+| `ops.metric_observation_sample` | `synced_at` 早于 cutoff | 90 天 | `XM_METRIC_SAMPLE_RETENTION_DAYS` |
+| `alerts.alert` | **已解决**且 `resolved_at` 早于 cutoff | 180 天 | `XM_ALERT_RETENTION_DAYS` |
+
+开关是 `XM_RETENTION_ENABLED`（默认 `true`），周期是 `XM_RETENTION_INTERVAL`。
+天数必须为正——填 `0` 会让 worker **拒绝启动**：0 天最自然的读法是「不保留」，
+也就是把整张表删空，而想表达「不清理」的人该去关上面那个开关。两种意图差得
+太远，不能让一个手滑的 0 去猜。
+
+**审计事件不在清理范围内，一条都不删。** 这不是尚未实现：宪法 11 条要求审计
+append-only 并在库外锚定；删掉中间任意一条都会断链，`VerifyChain` 会立刻报
+`sequence_gap`；而且 `audit.audit_event` 上的 `audit_event_no_delete` 规则
+（迁移 000003）让 `DELETE` 变成静默空操作——写了也删不掉，只会报告「删了 0 行」
+并显示成功。因此这里**没有**审计保留天数这个变量：给一个删不掉东西的旋钮，
+比不给更误导。审计的容量问题走归档（导出 + 链根锚定后转冷存储），另立任务。
+完整理由见 `internal/platform/jobs/retention.go` 文件头。
+
+**未解决的告警永远不删**，与年龄无关。一条至今没人处理的老告警恰恰是最不该
+被删的那种，而按 `created_at` 之类的条件筛会把它删掉且没有任何报错。
+
+### 运行中看什么
+
+每轮完成打一条 `job_completed`，带 `metric_samples_deleted`、
+`resolved_alerts_deleted`、两个保留天数，以及固定的
+`audit_events=never_pruned`（把「没清审计是有意为之」写进日志，
+免得半年后翻日志的人以为是漏了）。
+
+积压很大时（首次启用可能有上百万行）单轮最多跑 500 批、每批 2000 行，
+删不完会打一条 `retention_batch_limit_reached` 的 Warn 然后正常结束——
+明天那轮接着删。**持续**出现这条 Warn 才说明保留期或清理频率需要调整。
+
+### 权限
+
+清理任务需要 `ops.metric_observation_sample` 与 `alerts.alert` 上的 `DELETE`。
+这与旧文档里「对应用账号 `REVOKE UPDATE, DELETE`」的说法冲突，**以本节为准**：
+`UPDATE` 永远不该有（改一条已记录的样本等于篡改历史），`DELETE` 只允许按时间
+窗口批量发生。现状证据查询见 `deploy/bootstrap/002_grants_evidence.sql`。
