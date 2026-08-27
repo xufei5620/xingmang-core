@@ -31,21 +31,9 @@ const metricsBody = {
   ],
 };
 
-/** 告警卡的响应。空清单：这个文件只关心自动刷新，不关心告警内容。
- *  但它必须被 stub——总览页会真的去拉 /api/v1/alerts（XM-0033）。 */
 const alertsBody = { items: [] };
-
-const historyBody = {
-  items: [0, 1, 2].map((i) => ({
-    observed_at: `2026-08-26T0${i}:00:00Z`,
-    synced_at: `2026-08-26T0${i}:05:00Z`,
-    status: "ok",
-    is_partial: false,
-    watermark: `wm-${i}`,
-    last_error_code: "",
-    value: { amount_minor_units: 1000 + i * 100, currency: "CNY" },
-  })),
-};
+const servicesBody = { items: [] };
+const auditBody = { items: [], next_before: 0 };
 
 function fakeResponse(body: unknown): Response {
   return { ok: true, status: 200, json: () => Promise.resolve(body) } as unknown as Response;
@@ -57,8 +45,8 @@ function renderPage() {
     // 缓存窗口会把第二次请求吃掉，那就测不到刷新本身了
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  // MemoryRouter 是必需的：告警卡里有一个通往 /alerts 的 <Link>（XM-0033），
-  // 指标卡上还有「查看平台 →」（XM-0034）。没有路由上下文 react-router 直接抛异常。
+  // MemoryRouter 是必需的：工作台里到处都是 <Link>（告警、审计、平台矩阵），
+  // 没有路由上下文 react-router 直接抛异常
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
@@ -68,12 +56,11 @@ function renderPage() {
   );
 }
 
-function historyCalls(fetchMock: ReturnType<typeof vi.fn>): number {
-  return fetchMock.mock.calls.filter((c) => String(c[0]).startsWith("/api/v1/metrics/history"))
-    .length;
+function alertCalls(fetchMock: ReturnType<typeof vi.fn>): number {
+  return fetchMock.mock.calls.filter((c) => String(c[0]).startsWith("/api/v1/alerts")).length;
 }
 
-describe("总览页的 60 秒自动刷新（Codex #4）", () => {
+describe("运营工作台的 60 秒自动刷新（Codex #4）", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -81,9 +68,9 @@ describe("总览页的 60 秒自动刷新（Codex #4）", () => {
     // 否则 findBy* 会永远等下去
     vi.useFakeTimers({ shouldAdvanceTime: true });
     fetchMock = vi.fn((input: string) => {
-      // history 必须排在 metrics 前面：两者的前缀是包含关系
-      if (input.startsWith("/api/v1/metrics/history")) return Promise.resolve(fakeResponse(historyBody));
       if (input.startsWith("/api/v1/alerts")) return Promise.resolve(fakeResponse(alertsBody));
+      if (input.startsWith("/api/v1/services")) return Promise.resolve(fakeResponse(servicesBody));
+      if (input.startsWith("/api/v1/audit")) return Promise.resolve(fakeResponse(auditBody));
       return Promise.resolve(fakeResponse(metricsBody));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -94,32 +81,30 @@ describe("总览页的 60 秒自动刷新（Codex #4）", () => {
     vi.unstubAllGlobals();
   });
 
-  it("计时器到点后趋势历史被重新拉取，而不是永远停在首次加载", async () => {
+  it("计时器到点后重新拉取，而不是永远停在首屏", async () => {
     renderPage();
-    // 折线是挂载后才拉的，先等它出现
-    expect(await screen.findByRole("img", { name: /近 24 小时趋势/ })).not.toBeNull();
-    const before = historyCalls(fetchMock);
+    await screen.findByText("我的待处理");
+    const before = alertCalls(fetchMock);
     expect(before).toBeGreaterThan(0);
 
     await act(async () => {
       vi.advanceTimersByTime(OVERVIEW_POLL_INTERVAL_MS);
     });
 
-    // 页头写着「每 60 秒自动刷新」，那折线就必须真的跟着走：
-    // 只 refetch ['metrics'] 的话主数字会更新、折线永远停在首屏那一刻
-    await waitFor(() => expect(historyCalls(fetchMock)).toBeGreaterThan(before));
+    // 页头写着「每 60 秒自动刷新」，那这一屏就必须真的跟着走
+    await waitFor(() => expect(alertCalls(fetchMock)).toBeGreaterThan(before));
   });
 
-  it("页面不可见时不拉——包括折线（刷新入口只有一个，规则也只有一份）", async () => {
+  it("页面不可见时不拉——刷新入口只有一个，规则也只有一份", async () => {
     renderPage();
-    await screen.findByRole("img", { name: /近 24 小时趋势/ });
-    const before = historyCalls(fetchMock);
+    await screen.findByText("我的待处理");
+    const before = alertCalls(fetchMock);
 
     const spy = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     await act(async () => {
       vi.advanceTimersByTime(OVERVIEW_POLL_INTERVAL_MS);
     });
-    expect(historyCalls(fetchMock)).toBe(before);
+    expect(alertCalls(fetchMock)).toBe(before);
     spy.mockRestore();
   });
 });

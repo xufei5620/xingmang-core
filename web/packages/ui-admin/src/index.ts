@@ -1,4 +1,13 @@
 export { AdminShell, type AdminShellProps } from "./AdminShell";
+export {
+  CommandPalette,
+  CommandPaletteTrigger,
+  filterCommandItems,
+  useCommandPaletteHotkey,
+  type CommandItem,
+  type CommandPaletteProps,
+  type CommandPaletteTriggerProps,
+} from "./CommandPalette";
 export { ContextStrip, type ContextCrumb, type ContextStripProps } from "./ContextStrip";
 export { MetricCard, type MetricCardProps } from "./MetricCard";
 export {
@@ -39,6 +48,7 @@ export {
   type FreshnessBadgeProps,
 } from "./StatusBadges";
 export { Sparkline, type SparklineProps } from "./Sparkline";
+export { StatTile, type StatTileProps } from "./StatTile";
 export {
   buildSparkline,
   DEFAULT_SPARKLINE_BOX,

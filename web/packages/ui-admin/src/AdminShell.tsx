@@ -25,6 +25,9 @@ export interface AdminShellProps {
 
 /** 顶栏搜索占位。
  *
+ *  真正的全局搜索是 CommandPalette（XM-0043 已上线），由应用经 `search` 插槽注入。
+ *  这个占位留给**没有接搜索的上下文**（例如只渲染壳的 Storybook 故事）。
+ *
  *  用 <span aria-disabled> 而不是 <input> 或 <button>：一个能聚焦、能输入却
  *  什么都搜不到的框比没有框更糟——人会以为是搜索坏了。理由同 NavItemDisabled，
  *  位置必须先占住（§11.2 顶栏含全局搜索），但必须明确地点不动。 */
@@ -32,10 +35,10 @@ function SearchPlaceholder() {
   return (
     <span
       aria-disabled="true"
-      title="全局搜索属于 UI 交接阶段 2，当前只占位"
+      title="这个上下文没有接入全局搜索；应用侧经 search 插槽注入 CommandPalette"
       className="flex h-8 w-80 max-w-full cursor-not-allowed items-center justify-between gap-2 rounded-md border border-edge bg-surface-muted px-2 text-xs text-fg-muted"
     >
-      <span className="truncate">搜索平台、渠道、审计事件（阶段 2）</span>
+      <span className="truncate">全局搜索未接入</span>
       <kbd className="shrink-0 rounded-sm border border-edge px-1 font-mono text-xs">Ctrl K</kbd>
     </span>
   );
