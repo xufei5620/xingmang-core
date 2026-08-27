@@ -94,6 +94,61 @@ func (q *Queries) GetProfitDaily(ctx context.Context, arg GetProfitDailyParams) 
 	return i, err
 }
 
+const getProxyAsset = `-- name: GetProxyAsset :one
+SELECT id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, opened_on, expires_on, terminated_on, shared_account_count, buy_platform, buy_address, credential_ref, mounted, environment, created_at, updated_at FROM finance.proxy_asset WHERE id = $1
+`
+
+func (q *Queries) GetProxyAsset(ctx context.Context, id uuid.UUID) (FinanceProxyAsset, error) {
+	row := q.db.QueryRow(ctx, getProxyAsset, id)
+	var i FinanceProxyAsset
+	err := row.Scan(
+		&i.ID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.OpenedOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.SharedAccountCount,
+		&i.BuyPlatform,
+		&i.BuyAddress,
+		&i.CredentialRef,
+		&i.Mounted,
+		&i.Environment,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getSubscriptionCostBatch = `-- name: GetSubscriptionCostBatch :one
+SELECT id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at FROM finance.subscription_cost_batch WHERE id = $1
+`
+
+func (q *Queries) GetSubscriptionCostBatch(ctx context.Context, id uuid.UUID) (FinanceSubscriptionCostBatch, error) {
+	row := q.db.QueryRow(ctx, getSubscriptionCostBatch, id)
+	var i FinanceSubscriptionCostBatch
+	err := row.Scan(
+		&i.ID,
+		&i.UpstreamAccountID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.StartsOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.AccountCount,
+		&i.ProxyBatchID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getTokenMapping = `-- name: GetTokenMapping :one
 SELECT upstream_account_id, upstream_token_id, own_account_id, credential_ref, created_at, updated_at FROM finance.token_map
 WHERE upstream_account_id = $1 AND upstream_token_id = $2
@@ -119,7 +174,7 @@ func (q *Queries) GetTokenMapping(ctx context.Context, arg GetTokenMappingParams
 }
 
 const getUpstreamAccount = `-- name: GetUpstreamAccount :one
-SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at FROM finance.upstream_account WHERE id = $1
+SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id FROM finance.upstream_account WHERE id = $1
 `
 
 func (q *Queries) GetUpstreamAccount(ctx context.Context, id uuid.UUID) (FinanceUpstreamAccount, error) {
@@ -138,6 +193,160 @@ func (q *Queries) GetUpstreamAccount(ctx context.Context, id uuid.UUID) (Finance
 		&i.Environment,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PlatformID,
+	)
+	return i, err
+}
+
+const insertProxyAsset = `-- name: InsertProxyAsset :one
+INSERT INTO finance.proxy_asset (
+    id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency,
+    opened_on, expires_on, shared_account_count,
+    buy_platform, buy_address, credential_ref, mounted, environment,
+    created_at, updated_at
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10, $11, $12,
+    $13, $14, now(), now()
+)
+RETURNING id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, opened_on, expires_on, terminated_on, shared_account_count, buy_platform, buy_address, credential_ref, mounted, environment, created_at, updated_at
+`
+
+type InsertProxyAssetParams struct {
+	ID                 uuid.UUID
+	PaidMinor          int64
+	SurchargeMinor     int64
+	RefundedMinor      int64
+	RefundedOn         pgtype.Date
+	Currency           string
+	OpenedOn           pgtype.Date
+	ExpiresOn          pgtype.Date
+	SharedAccountCount int32
+	BuyPlatform        *string
+	BuyAddress         *string
+	CredentialRef      *string
+	Mounted            bool
+	Environment        string
+}
+
+// 登记一份代理资产。金额与期间同样登记后冻结（理由同批次）。
+func (q *Queries) InsertProxyAsset(ctx context.Context, arg InsertProxyAssetParams) (FinanceProxyAsset, error) {
+	row := q.db.QueryRow(ctx, insertProxyAsset,
+		arg.ID,
+		arg.PaidMinor,
+		arg.SurchargeMinor,
+		arg.RefundedMinor,
+		arg.RefundedOn,
+		arg.Currency,
+		arg.OpenedOn,
+		arg.ExpiresOn,
+		arg.SharedAccountCount,
+		arg.BuyPlatform,
+		arg.BuyAddress,
+		arg.CredentialRef,
+		arg.Mounted,
+		arg.Environment,
+	)
+	var i FinanceProxyAsset
+	err := row.Scan(
+		&i.ID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.OpenedOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.SharedAccountCount,
+		&i.BuyPlatform,
+		&i.BuyAddress,
+		&i.CredentialRef,
+		&i.Mounted,
+		&i.Environment,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertSubscriptionCostBatch = `-- name: InsertSubscriptionCostBatch :one
+
+INSERT INTO finance.subscription_cost_batch (
+    id, upstream_account_id, paid_minor, surcharge_minor,
+    refunded_minor, refunded_on, currency,
+    starts_on, expires_on, account_count, proxy_batch_id,
+    created_at, updated_at
+) VALUES (
+    $1, $2,
+    $3, $4,
+    $5, $6, $7,
+    $8, $9, $10,
+    $11, now(), now()
+)
+RETURNING id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at
+`
+
+type InsertSubscriptionCostBatchParams struct {
+	ID                uuid.UUID
+	UpstreamAccountID uuid.UUID
+	PaidMinor         int64
+	SurchargeMinor    int64
+	RefundedMinor     int64
+	RefundedOn        pgtype.Date
+	Currency          string
+	StartsOn          pgtype.Date
+	ExpiresOn         pgtype.Date
+	AccountCount      int32
+	ProxyBatchID      *uuid.UUID
+}
+
+// ---------------------------------------------------------------------------
+// XM-0037c 订阅成本批次 · 代理资产 · 摊销损失（设计稿 §2.5 + §3.5 + §12.1）。
+//
+// 与上面两段的分别：登记簿是「怎么算」，台账是「算出了什么」，本段是
+// **「付了多少钱」**。摊销值不在这里算——它是这些行的纯函数
+// （internal/platform/finance/amortization.go），算完写进 profit_daily。
+// 在库里再落一份摊销结果只会多一份会漂的副本。
+// ---------------------------------------------------------------------------
+// 登记一笔订阅付款。**续费是再来一条，不是改这一条**（§3.5/§10.3）。
+//
+// 没有 UpdateSubscriptionCostBatch：金额、期间、账号数登记后冻结。
+// 允许原地改会让「上个月按 99 摊」在改完之后变成「上个月按 129 摊」，
+// 而历史台账已经按 99 入过账了——两份记录从此对不上，且没有任何报错。
+// 可变的只有下面三条：退款、代理关联、终止。
+func (q *Queries) InsertSubscriptionCostBatch(ctx context.Context, arg InsertSubscriptionCostBatchParams) (FinanceSubscriptionCostBatch, error) {
+	row := q.db.QueryRow(ctx, insertSubscriptionCostBatch,
+		arg.ID,
+		arg.UpstreamAccountID,
+		arg.PaidMinor,
+		arg.SurchargeMinor,
+		arg.RefundedMinor,
+		arg.RefundedOn,
+		arg.Currency,
+		arg.StartsOn,
+		arg.ExpiresOn,
+		arg.AccountCount,
+		arg.ProxyBatchID,
+	)
+	var i FinanceSubscriptionCostBatch
+	err := row.Scan(
+		&i.ID,
+		&i.UpstreamAccountID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.StartsOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.AccountCount,
+		&i.ProxyBatchID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -146,16 +355,16 @@ const insertUpstreamAccount = `-- name: InsertUpstreamAccount :one
 
 INSERT INTO finance.upstream_account (
     id, system_type, access_method, base_url, credential_ref,
-    recharge_ratio, currency, business_day_tz, status, environment,
+    recharge_ratio, currency, business_day_tz, status, environment, platform_id,
     created_at, updated_at
 ) VALUES (
     $1, $2, $3,
     $4, $5,
     $6, $7, $8,
-    $9, $10,
+    $9, $10, $11,
     now(), now()
 )
-RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at
+RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id
 `
 
 type InsertUpstreamAccountParams struct {
@@ -169,6 +378,7 @@ type InsertUpstreamAccountParams struct {
 	BusinessDayTz string
 	Status        string
 	Environment   string
+	PlatformID    *string
 }
 
 // XM-0037a 成本登记簿（设计稿 §2.1）。
@@ -184,6 +394,9 @@ type InsertUpstreamAccountParams struct {
 // 三类接入方式的倍率约束（计量型必填、订阅型必空）在库层 CHECK 上，
 // 不在这条语句里重复：约束写在表上，任何写入路径都绕不开；
 // 写在语句里，下一条语句就可能漏掉。
+//
+// platform_id（XM-0037c 增补，§5.2）在登记这一刻就可以给：它是「哪个自营平台
+// 在用这个上游账号」的归属标注，不是成本口径的一部分。可空 = 未配对。
 func (q *Queries) InsertUpstreamAccount(ctx context.Context, arg InsertUpstreamAccountParams) (FinanceUpstreamAccount, error) {
 	row := q.db.QueryRow(ctx, insertUpstreamAccount,
 		arg.ID,
@@ -196,6 +409,7 @@ func (q *Queries) InsertUpstreamAccount(ctx context.Context, arg InsertUpstreamA
 		arg.BusinessDayTz,
 		arg.Status,
 		arg.Environment,
+		arg.PlatformID,
 	)
 	var i FinanceUpstreamAccount
 	err := row.Scan(
@@ -211,12 +425,13 @@ func (q *Queries) InsertUpstreamAccount(ctx context.Context, arg InsertUpstreamA
 		&i.Environment,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PlatformID,
 	)
 	return i, err
 }
 
 const listActiveUpstreamAccountsByAccessMethod = `-- name: ListActiveUpstreamAccountsByAccessMethod :many
-SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at FROM finance.upstream_account
+SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id FROM finance.upstream_account
 WHERE environment = $1 AND status = 'active' AND access_method = $2
 ORDER BY system_type, base_url NULLS LAST, id
 `
@@ -250,6 +465,65 @@ func (q *Queries) ListActiveUpstreamAccountsByAccessMethod(ctx context.Context, 
 			&i.BusinessDayTz,
 			&i.Status,
 			&i.Environment,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PlatformID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAmortizableBatches = `-- name: ListAmortizableBatches :many
+SELECT id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at FROM finance.subscription_cost_batch
+WHERE upstream_account_id = $1
+  AND starts_on  <= $2
+  AND expires_on >= $2
+  AND (terminated_on IS NULL OR terminated_on > $2)
+ORDER BY starts_on, id
+`
+
+type ListAmortizableBatchesParams struct {
+	UpstreamAccountID uuid.UUID
+	BusinessDay       pgtype.Date
+}
+
+// 摊销每轮的取数：这个账号、覆盖这个业务日、且尚未失效的批次。
+//
+// 三条谓词就是 §3.5 的「starts_on ≤ business_day ≤ expires_on 且未 terminated」。
+// 终止用 `terminated_on > day` 而不是 `>=`：终止当天已经不摊了
+// （§3.5 把 terminated_on..expires_on 整段算作剩余未摊销额）。
+//
+// 代理不在这条语句里 join 回来：一个账号当日通常只有一两条批次，
+// 单独取代理既让 SQL 保持可读，也让「同一份代理被两条批次引用」这件事在
+// Go 侧显式去重（见 AmortizeDay），而不是靠一个 DISTINCT 碰运气。
+func (q *Queries) ListAmortizableBatches(ctx context.Context, arg ListAmortizableBatchesParams) ([]FinanceSubscriptionCostBatch, error) {
+	rows, err := q.db.Query(ctx, listAmortizableBatches, arg.UpstreamAccountID, arg.BusinessDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FinanceSubscriptionCostBatch{}
+	for rows.Next() {
+		var i FinanceSubscriptionCostBatch
+		if err := rows.Scan(
+			&i.ID,
+			&i.UpstreamAccountID,
+			&i.PaidMinor,
+			&i.SurchargeMinor,
+			&i.RefundedMinor,
+			&i.RefundedOn,
+			&i.Currency,
+			&i.StartsOn,
+			&i.ExpiresOn,
+			&i.TerminatedOn,
+			&i.AccountCount,
+			&i.ProxyBatchID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -321,6 +595,209 @@ func (q *Queries) ListProfitDailyByEnvironment(ctx context.Context, arg ListProf
 			&i.CostObservedAt,
 			&i.RevenueObservedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProxyAssetsByEnvironment = `-- name: ListProxyAssetsByEnvironment :many
+SELECT p.id, p.paid_minor, p.surcharge_minor, p.refunded_minor, p.refunded_on, p.currency, p.opened_on, p.expires_on, p.terminated_on, p.shared_account_count, p.buy_platform, p.buy_address, p.credential_ref, p.mounted, p.environment, p.created_at, p.updated_at, l.loss_minor AS loss_minor, l.booked_on AS loss_booked_on
+FROM finance.proxy_asset p
+LEFT JOIN finance.amortization_loss l ON l.proxy_asset_id = p.id
+WHERE p.environment = $1
+ORDER BY p.opened_on DESC, p.id
+LIMIT $2
+`
+
+type ListProxyAssetsByEnvironmentParams struct {
+	Environment string
+	RowLimit    int32
+}
+
+type ListProxyAssetsByEnvironmentRow struct {
+	ID                 uuid.UUID
+	PaidMinor          int64
+	SurchargeMinor     int64
+	RefundedMinor      int64
+	RefundedOn         pgtype.Date
+	Currency           string
+	OpenedOn           pgtype.Date
+	ExpiresOn          pgtype.Date
+	TerminatedOn       pgtype.Date
+	SharedAccountCount int32
+	BuyPlatform        *string
+	BuyAddress         *string
+	CredentialRef      *string
+	Mounted            bool
+	Environment        string
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+	LossMinor          *int64
+	LossBookedOn       pgtype.Date
+}
+
+// Query 侧：某环境的代理资产，带上已结转的损失。
+func (q *Queries) ListProxyAssetsByEnvironment(ctx context.Context, arg ListProxyAssetsByEnvironmentParams) ([]ListProxyAssetsByEnvironmentRow, error) {
+	rows, err := q.db.Query(ctx, listProxyAssetsByEnvironment, arg.Environment, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProxyAssetsByEnvironmentRow{}
+	for rows.Next() {
+		var i ListProxyAssetsByEnvironmentRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaidMinor,
+			&i.SurchargeMinor,
+			&i.RefundedMinor,
+			&i.RefundedOn,
+			&i.Currency,
+			&i.OpenedOn,
+			&i.ExpiresOn,
+			&i.TerminatedOn,
+			&i.SharedAccountCount,
+			&i.BuyPlatform,
+			&i.BuyAddress,
+			&i.CredentialRef,
+			&i.Mounted,
+			&i.Environment,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LossMinor,
+			&i.LossBookedOn,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProxyAssetsByIDs = `-- name: ListProxyAssetsByIDs :many
+SELECT id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, opened_on, expires_on, terminated_on, shared_account_count, buy_platform, buy_address, credential_ref, mounted, environment, created_at, updated_at FROM finance.proxy_asset WHERE id = ANY($1::uuid[])
+`
+
+// 摊销每轮按批次引用的那几份代理取回。
+//
+// = ANY(数组) 而不是逐个查：一个账号当日的批次可能共享同一份代理，
+// 逐个查会把同一行读回两次，于是去重这件事要在两个地方各做一遍。
+func (q *Queries) ListProxyAssetsByIDs(ctx context.Context, ids []uuid.UUID) ([]FinanceProxyAsset, error) {
+	rows, err := q.db.Query(ctx, listProxyAssetsByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FinanceProxyAsset{}
+	for rows.Next() {
+		var i FinanceProxyAsset
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaidMinor,
+			&i.SurchargeMinor,
+			&i.RefundedMinor,
+			&i.RefundedOn,
+			&i.Currency,
+			&i.OpenedOn,
+			&i.ExpiresOn,
+			&i.TerminatedOn,
+			&i.SharedAccountCount,
+			&i.BuyPlatform,
+			&i.BuyAddress,
+			&i.CredentialRef,
+			&i.Mounted,
+			&i.Environment,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSubscriptionCostBatchesByEnvironment = `-- name: ListSubscriptionCostBatchesByEnvironment :many
+SELECT b.id, b.upstream_account_id, b.paid_minor, b.surcharge_minor, b.refunded_minor, b.refunded_on, b.currency, b.starts_on, b.expires_on, b.terminated_on, b.account_count, b.proxy_batch_id, b.created_at, b.updated_at, l.loss_minor AS loss_minor, l.booked_on AS loss_booked_on
+FROM finance.subscription_cost_batch b
+JOIN finance.upstream_account ua ON ua.id = b.upstream_account_id
+LEFT JOIN finance.amortization_loss l ON l.batch_id = b.id
+WHERE ua.environment = $1
+  AND ($2::uuid IS NULL
+       OR b.upstream_account_id = $2)
+ORDER BY b.starts_on DESC, b.id
+LIMIT $3
+`
+
+type ListSubscriptionCostBatchesByEnvironmentParams struct {
+	Environment       string
+	UpstreamAccountID *uuid.UUID
+	RowLimit          int32
+}
+
+type ListSubscriptionCostBatchesByEnvironmentRow struct {
+	ID                uuid.UUID
+	UpstreamAccountID uuid.UUID
+	PaidMinor         int64
+	SurchargeMinor    int64
+	RefundedMinor     int64
+	RefundedOn        pgtype.Date
+	Currency          string
+	StartsOn          pgtype.Date
+	ExpiresOn         pgtype.Date
+	TerminatedOn      pgtype.Date
+	AccountCount      int32
+	ProxyBatchID      *uuid.UUID
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+	LossMinor         *int64
+	LossBookedOn      pgtype.Date
+}
+
+// Query 侧：某环境（可选：某账号）的订阅批次，带上已结转的损失。
+//
+// 环境经 JOIN 登记簿判定，不在批次上再存一份（宪法 15 条，同 profit_daily）。
+// 损失用 LEFT JOIN 带出来而不是另开一个端点：「这批订阅退订时亏了多少」
+// 与「这批订阅是什么」是同一个问题的两半，分成两次请求只会让前端拼错。
+// 多取一行（LIMIT n+1）让调用方判断截断。
+func (q *Queries) ListSubscriptionCostBatchesByEnvironment(ctx context.Context, arg ListSubscriptionCostBatchesByEnvironmentParams) ([]ListSubscriptionCostBatchesByEnvironmentRow, error) {
+	rows, err := q.db.Query(ctx, listSubscriptionCostBatchesByEnvironment, arg.Environment, arg.UpstreamAccountID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSubscriptionCostBatchesByEnvironmentRow{}
+	for rows.Next() {
+		var i ListSubscriptionCostBatchesByEnvironmentRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UpstreamAccountID,
+			&i.PaidMinor,
+			&i.SurchargeMinor,
+			&i.RefundedMinor,
+			&i.RefundedOn,
+			&i.Currency,
+			&i.StartsOn,
+			&i.ExpiresOn,
+			&i.TerminatedOn,
+			&i.AccountCount,
+			&i.ProxyBatchID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LossMinor,
+			&i.LossBookedOn,
 		); err != nil {
 			return nil, err
 		}
@@ -405,7 +882,7 @@ func (q *Queries) ListTokenMappingsByEnvironment(ctx context.Context, environmen
 }
 
 const listUpstreamAccountsByEnvironment = `-- name: ListUpstreamAccountsByEnvironment :many
-SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at FROM finance.upstream_account
+SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id FROM finance.upstream_account
 WHERE environment = $1
 ORDER BY system_type, base_url NULLS LAST, id
 `
@@ -436,6 +913,7 @@ func (q *Queries) ListUpstreamAccountsByEnvironment(ctx context.Context, environ
 			&i.Environment,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PlatformID,
 		); err != nil {
 			return nil, err
 		}
@@ -447,12 +925,135 @@ func (q *Queries) ListUpstreamAccountsByEnvironment(ctx context.Context, environ
 	return items, nil
 }
 
+const setProxyAssetRefund = `-- name: SetProxyAssetRefund :one
+UPDATE finance.proxy_asset SET
+    refunded_minor = $1,
+    refunded_on    = $2,
+    updated_at     = now()
+WHERE id = $3
+RETURNING id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, opened_on, expires_on, terminated_on, shared_account_count, buy_platform, buy_address, credential_ref, mounted, environment, created_at, updated_at
+`
+
+type SetProxyAssetRefundParams struct {
+	RefundedMinor int64
+	RefundedOn    pgtype.Date
+	ID            uuid.UUID
+}
+
+// 理由与 SetSubscriptionCostBatchRefund 逐条相同。
+func (q *Queries) SetProxyAssetRefund(ctx context.Context, arg SetProxyAssetRefundParams) (FinanceProxyAsset, error) {
+	row := q.db.QueryRow(ctx, setProxyAssetRefund, arg.RefundedMinor, arg.RefundedOn, arg.ID)
+	var i FinanceProxyAsset
+	err := row.Scan(
+		&i.ID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.OpenedOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.SharedAccountCount,
+		&i.BuyPlatform,
+		&i.BuyAddress,
+		&i.CredentialRef,
+		&i.Mounted,
+		&i.Environment,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setSubscriptionCostBatchProxy = `-- name: SetSubscriptionCostBatchProxy :one
+UPDATE finance.subscription_cost_batch SET
+    proxy_batch_id = $1,
+    updated_at     = now()
+WHERE id = $2
+RETURNING id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at
+`
+
+type SetSubscriptionCostBatchProxyParams struct {
+	ProxyBatchID *uuid.UUID
+	ID           uuid.UUID
+}
+
+// 改批次关联的代理资产（NULL = 取消关联，代理成本归 0）。
+//
+// 允许改是安全的：摊销只写当天的台账行，历史业务日过去冻结（§5.3），
+// 所以改关联不会追溯改写任何一天——§12 拍板要的「代理分摊按当日挂载快照」
+// 由台账的冻结纪律免费提供。
+func (q *Queries) SetSubscriptionCostBatchProxy(ctx context.Context, arg SetSubscriptionCostBatchProxyParams) (FinanceSubscriptionCostBatch, error) {
+	row := q.db.QueryRow(ctx, setSubscriptionCostBatchProxy, arg.ProxyBatchID, arg.ID)
+	var i FinanceSubscriptionCostBatch
+	err := row.Scan(
+		&i.ID,
+		&i.UpstreamAccountID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.StartsOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.AccountCount,
+		&i.ProxyBatchID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setSubscriptionCostBatchRefund = `-- name: SetSubscriptionCostBatchRefund :one
+UPDATE finance.subscription_cost_batch SET
+    refunded_minor = $1,
+    refunded_on    = $2,
+    updated_at     = now()
+WHERE id = $3
+RETURNING id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at
+`
+
+type SetSubscriptionCostBatchRefundParams struct {
+	RefundedMinor int64
+	RefundedOn    pgtype.Date
+	ID            uuid.UUID
+}
+
+// 累计退款额与它的生效日（§3.5：部分退款冲减成本基础）。
+//
+// 「只增不减」在领域层执行——库层表达不了「相对上一版的变化方向」。
+// refunded_on 决定从哪天起重算剩余未摊天（§12.1），所以它跟着退款额一起改：
+// 分成两个动作就会出现「金额改了、日期还是上一次的」这种半截状态。
+func (q *Queries) SetSubscriptionCostBatchRefund(ctx context.Context, arg SetSubscriptionCostBatchRefundParams) (FinanceSubscriptionCostBatch, error) {
+	row := q.db.QueryRow(ctx, setSubscriptionCostBatchRefund, arg.RefundedMinor, arg.RefundedOn, arg.ID)
+	var i FinanceSubscriptionCostBatch
+	err := row.Scan(
+		&i.ID,
+		&i.UpstreamAccountID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.StartsOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.AccountCount,
+		&i.ProxyBatchID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const setUpstreamAccountRechargeRatio = `-- name: SetUpstreamAccountRechargeRatio :one
 UPDATE finance.upstream_account SET
     recharge_ratio = $1,
     updated_at     = now()
 WHERE id = $2
-RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at
+RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id
 `
 
 type SetUpstreamAccountRechargeRatioParams struct {
@@ -484,6 +1085,7 @@ func (q *Queries) SetUpstreamAccountRechargeRatio(ctx context.Context, arg SetUp
 		&i.Environment,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PlatformID,
 	)
 	return i, err
 }
@@ -578,6 +1180,85 @@ func (q *Queries) SumProfitDailyByPlatform(ctx context.Context, arg SumProfitDai
 		return nil, err
 	}
 	return items, nil
+}
+
+const terminateProxyAsset = `-- name: TerminateProxyAsset :one
+UPDATE finance.proxy_asset SET
+    terminated_on = $1,
+    updated_at    = now()
+WHERE id = $2 AND terminated_on IS NULL
+RETURNING id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, opened_on, expires_on, terminated_on, shared_account_count, buy_platform, buy_address, credential_ref, mounted, environment, created_at, updated_at
+`
+
+type TerminateProxyAssetParams struct {
+	TerminatedOn pgtype.Date
+	ID           uuid.UUID
+}
+
+// 理由与 TerminateSubscriptionCostBatch 逐条相同。
+func (q *Queries) TerminateProxyAsset(ctx context.Context, arg TerminateProxyAssetParams) (FinanceProxyAsset, error) {
+	row := q.db.QueryRow(ctx, terminateProxyAsset, arg.TerminatedOn, arg.ID)
+	var i FinanceProxyAsset
+	err := row.Scan(
+		&i.ID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.OpenedOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.SharedAccountCount,
+		&i.BuyPlatform,
+		&i.BuyAddress,
+		&i.CredentialRef,
+		&i.Mounted,
+		&i.Environment,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const terminateSubscriptionCostBatch = `-- name: TerminateSubscriptionCostBatch :one
+UPDATE finance.subscription_cost_batch SET
+    terminated_on = $1,
+    updated_at    = now()
+WHERE id = $2 AND terminated_on IS NULL
+RETURNING id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at
+`
+
+type TerminateSubscriptionCostBatchParams struct {
+	TerminatedOn pgtype.Date
+	ID           uuid.UUID
+}
+
+// 提前失效：填 terminated_on，**当天起不再摊销**，剩余转损失（§3.5）。
+//
+// `AND terminated_on IS NULL` 让重复终止在库层就打不进去：终止是一次性事件
+// （它结转一笔损失），改终止日等于让那笔已经出现在报表上的损失悄悄变个数。
+// 调用方在此之前已经读过一次，能分清「没有这一条」与「已经终止过」。
+func (q *Queries) TerminateSubscriptionCostBatch(ctx context.Context, arg TerminateSubscriptionCostBatchParams) (FinanceSubscriptionCostBatch, error) {
+	row := q.db.QueryRow(ctx, terminateSubscriptionCostBatch, arg.TerminatedOn, arg.ID)
+	var i FinanceSubscriptionCostBatch
+	err := row.Scan(
+		&i.ID,
+		&i.UpstreamAccountID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.StartsOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.AccountCount,
+		&i.ProxyBatchID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updateProfitDailyCost = `-- name: UpdateProfitDailyCost :one
@@ -719,6 +1400,60 @@ func (q *Queries) UpdateProfitDailyRevenue(ctx context.Context, arg UpdateProfit
 	return i, err
 }
 
+const updateProxyAsset = `-- name: UpdateProxyAsset :one
+UPDATE finance.proxy_asset SET
+    buy_platform   = $1,
+    buy_address    = $2,
+    credential_ref = $3,
+    mounted        = $4,
+    updated_at     = now()
+WHERE id = $5
+RETURNING id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, opened_on, expires_on, terminated_on, shared_account_count, buy_platform, buy_address, credential_ref, mounted, environment, created_at, updated_at
+`
+
+type UpdateProxyAssetParams struct {
+	BuyPlatform   *string
+	BuyAddress    *string
+	CredentialRef *string
+	Mounted       bool
+	ID            uuid.UUID
+}
+
+// 改代理的可编辑字段：挂载状态与购买信息 / 凭据引用。
+//
+// mounted 可改，且**不追溯**：未挂载的日子摊 0、挂上之后的日子摊钱，
+// 各自冻结在各自那天的台账行里（§5.3）。
+func (q *Queries) UpdateProxyAsset(ctx context.Context, arg UpdateProxyAssetParams) (FinanceProxyAsset, error) {
+	row := q.db.QueryRow(ctx, updateProxyAsset,
+		arg.BuyPlatform,
+		arg.BuyAddress,
+		arg.CredentialRef,
+		arg.Mounted,
+		arg.ID,
+	)
+	var i FinanceProxyAsset
+	err := row.Scan(
+		&i.ID,
+		&i.PaidMinor,
+		&i.SurchargeMinor,
+		&i.RefundedMinor,
+		&i.RefundedOn,
+		&i.Currency,
+		&i.OpenedOn,
+		&i.ExpiresOn,
+		&i.TerminatedOn,
+		&i.SharedAccountCount,
+		&i.BuyPlatform,
+		&i.BuyAddress,
+		&i.CredentialRef,
+		&i.Mounted,
+		&i.Environment,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateUpstreamAccount = `-- name: UpdateUpstreamAccount :one
 UPDATE finance.upstream_account SET
     base_url        = $1,
@@ -727,9 +1462,10 @@ UPDATE finance.upstream_account SET
     currency        = $4,
     business_day_tz = $5,
     status          = $6,
+    platform_id     = $7,
     updated_at      = now()
-WHERE id = $7
-RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at
+WHERE id = $8
+RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id
 `
 
 type UpdateUpstreamAccountParams struct {
@@ -739,6 +1475,7 @@ type UpdateUpstreamAccountParams struct {
 	Currency      string
 	BusinessDayTz string
 	Status        string
+	PlatformID    *string
 	ID            uuid.UUID
 }
 
@@ -748,6 +1485,11 @@ type UpdateUpstreamAccountParams struct {
 // 一条生产账号搬进 staging），后者是成本口径的分叉点（§2.0，改它会让同一个
 // 账号的历史成本前后用两套算法算出来，而台账里没有任何痕迹）。
 // 这两样要变，只能新登记一条并停用旧的。
+//
+// platform_id **在可编辑范围内**（XM-0037c，§5.2），与 access_method 刻意相反：
+// 它只是一条归属标注，改它不改变任何一个金额怎么算；而台账侧的 COALESCE 方向是
+// 「空缺可补、已有不动」（§5.3），历史行的归属不会被追溯改写。
+// 换句话说，改它只影响此后新算的行——这正是「绑定变更不改上个月报表」的含义。
 func (q *Queries) UpdateUpstreamAccount(ctx context.Context, arg UpdateUpstreamAccountParams) (FinanceUpstreamAccount, error) {
 	row := q.db.QueryRow(ctx, updateUpstreamAccount,
 		arg.BaseUrl,
@@ -756,6 +1498,7 @@ func (q *Queries) UpdateUpstreamAccount(ctx context.Context, arg UpdateUpstreamA
 		arg.Currency,
 		arg.BusinessDayTz,
 		arg.Status,
+		arg.PlatformID,
 		arg.ID,
 	)
 	var i FinanceUpstreamAccount
@@ -770,6 +1513,106 @@ func (q *Queries) UpdateUpstreamAccount(ctx context.Context, arg UpdateUpstreamA
 		&i.BusinessDayTz,
 		&i.Status,
 		&i.Environment,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PlatformID,
+	)
+	return i, err
+}
+
+const upsertAmortizationLossForBatch = `-- name: UpsertAmortizationLossForBatch :one
+INSERT INTO finance.amortization_loss (
+    id, batch_id, loss_minor, currency, booked_on, created_at, updated_at
+) VALUES (
+    $1, $2, $3,
+    $4, $5, now(), now()
+)
+ON CONFLICT (batch_id) WHERE batch_id IS NOT NULL DO UPDATE SET
+    loss_minor = EXCLUDED.loss_minor,
+    currency   = EXCLUDED.currency,
+    booked_on  = EXCLUDED.booked_on,
+    updated_at = now()
+RETURNING id, batch_id, proxy_asset_id, loss_minor, currency, booked_on, created_at, updated_at
+`
+
+type UpsertAmortizationLossForBatchParams struct {
+	ID        uuid.UUID
+	BatchID   *uuid.UUID
+	LossMinor int64
+	Currency  string
+	BookedOn  pgtype.Date
+}
+
+// 结转一笔批次的提前失效损失（§12 拍板：单列科目，不进渠道当日成本）。
+//
+// 用 UPSERT 而不是纯 INSERT：损失是**派生事实**不是事件流水——一个失效主体
+// 最多一行，回答「这批钱最终有多少没摊出去」。终止之后才到账的退款会让这个数
+// 变小，届时本行按新基础重算，前后态进 Action 审计（而不是追加一条冲正：
+// v1 的损失科目不做复式记账）。
+//
+// ON CONFLICT 带索引谓词，是因为唯一索引是部分索引
+// （amortization_loss_batch_key ... WHERE batch_id IS NOT NULL）。
+func (q *Queries) UpsertAmortizationLossForBatch(ctx context.Context, arg UpsertAmortizationLossForBatchParams) (FinanceAmortizationLoss, error) {
+	row := q.db.QueryRow(ctx, upsertAmortizationLossForBatch,
+		arg.ID,
+		arg.BatchID,
+		arg.LossMinor,
+		arg.Currency,
+		arg.BookedOn,
+	)
+	var i FinanceAmortizationLoss
+	err := row.Scan(
+		&i.ID,
+		&i.BatchID,
+		&i.ProxyAssetID,
+		&i.LossMinor,
+		&i.Currency,
+		&i.BookedOn,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertAmortizationLossForProxy = `-- name: UpsertAmortizationLossForProxy :one
+INSERT INTO finance.amortization_loss (
+    id, proxy_asset_id, loss_minor, currency, booked_on, created_at, updated_at
+) VALUES (
+    $1, $2, $3,
+    $4, $5, now(), now()
+)
+ON CONFLICT (proxy_asset_id) WHERE proxy_asset_id IS NOT NULL DO UPDATE SET
+    loss_minor = EXCLUDED.loss_minor,
+    currency   = EXCLUDED.currency,
+    booked_on  = EXCLUDED.booked_on,
+    updated_at = now()
+RETURNING id, batch_id, proxy_asset_id, loss_minor, currency, booked_on, created_at, updated_at
+`
+
+type UpsertAmortizationLossForProxyParams struct {
+	ID           uuid.UUID
+	ProxyAssetID *uuid.UUID
+	LossMinor    int64
+	Currency     string
+	BookedOn     pgtype.Date
+}
+
+func (q *Queries) UpsertAmortizationLossForProxy(ctx context.Context, arg UpsertAmortizationLossForProxyParams) (FinanceAmortizationLoss, error) {
+	row := q.db.QueryRow(ctx, upsertAmortizationLossForProxy,
+		arg.ID,
+		arg.ProxyAssetID,
+		arg.LossMinor,
+		arg.Currency,
+		arg.BookedOn,
+	)
+	var i FinanceAmortizationLoss
+	err := row.Scan(
+		&i.ID,
+		&i.BatchID,
+		&i.ProxyAssetID,
+		&i.LossMinor,
+		&i.Currency,
+		&i.BookedOn,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -846,6 +1689,101 @@ type UpsertProfitDailyParams struct {
 // 倍率折的」，而这一行的 cost 正在被同一句覆盖成新折算值（§6.3）。
 func (q *Queries) UpsertProfitDaily(ctx context.Context, arg UpsertProfitDailyParams) (FinanceProfitDaily, error) {
 	row := q.db.QueryRow(ctx, upsertProfitDaily,
+		arg.UpstreamAccountID,
+		arg.BusinessDay,
+		arg.BusinessDayTz,
+		arg.TokenID,
+		arg.AccountID,
+		arg.PlatformID,
+		arg.RevenueMinor,
+		arg.CostMinor,
+		arg.Currency,
+		arg.RatioSnapshot,
+		arg.Source,
+		arg.CostObservedAt,
+		arg.RevenueObservedAt,
+	)
+	var i FinanceProfitDaily
+	err := row.Scan(
+		&i.UpstreamAccountID,
+		&i.BusinessDay,
+		&i.BusinessDayTz,
+		&i.TokenID,
+		&i.AccountID,
+		&i.PlatformID,
+		&i.RevenueMinor,
+		&i.CostMinor,
+		&i.ProfitMinor,
+		&i.Currency,
+		&i.RatioSnapshot,
+		&i.Source,
+		&i.CostObservedAt,
+		&i.RevenueObservedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertProfitDailyAmortizedCost = `-- name: UpsertProfitDailyAmortizedCost :one
+INSERT INTO finance.profit_daily (
+    upstream_account_id, business_day, business_day_tz, token_id, account_id,
+    platform_id, revenue_minor, cost_minor, currency, ratio_snapshot,
+    source, cost_observed_at, revenue_observed_at, updated_at
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10, $11,
+    $12, $13, now()
+)
+ON CONFLICT (upstream_account_id, business_day, token_id) DO UPDATE SET
+    business_day_tz  = EXCLUDED.business_day_tz,
+    account_id       = EXCLUDED.account_id,
+    platform_id      = COALESCE(finance.profit_daily.platform_id, EXCLUDED.platform_id),
+    cost_minor       = EXCLUDED.cost_minor,
+    cost_observed_at = EXCLUDED.cost_observed_at,
+    revenue_minor    = COALESCE(EXCLUDED.revenue_minor, finance.profit_daily.revenue_minor),
+    revenue_observed_at = CASE
+        WHEN EXCLUDED.revenue_minor IS NOT NULL THEN EXCLUDED.revenue_observed_at
+        ELSE finance.profit_daily.revenue_observed_at
+    END,
+    currency         = EXCLUDED.currency,
+    ratio_snapshot   = EXCLUDED.ratio_snapshot,
+    source           = EXCLUDED.source,
+    updated_at       = now()
+RETURNING upstream_account_id, business_day, business_day_tz, token_id, account_id, platform_id, revenue_minor, cost_minor, profit_minor, currency, ratio_snapshot, source, cost_observed_at, revenue_observed_at, updated_at
+`
+
+type UpsertProfitDailyAmortizedCostParams struct {
+	UpstreamAccountID uuid.UUID
+	BusinessDay       pgtype.Date
+	BusinessDayTz     string
+	TokenID           string
+	AccountID         string
+	PlatformID        *string
+	RevenueMinor      *int64
+	CostMinor         *int64
+	Currency          string
+	RatioSnapshot     pgtype.Numeric
+	Source            string
+	CostObservedAt    pgtype.Timestamptz
+	RevenueObservedAt pgtype.Timestamptz
+}
+
+// 订阅型渠道的入账（§3.5，ratio_snapshot 恒为 1——§12 拍板）。
+//
+// **与 UpsertProfitDaily 的唯一区别，也是本片对 §5.1 的唯一偏离**：
+// 收入侧未知时**照样建行**。理由记在 docs/modules/finance/README.md，一句话：
+// §5.1 的「只有一侧就不建行」防的是「拿一次失败的读取拼出一行」，而订阅成本
+// 不是读来的——它是我们自己付出去的钱按天摊开的算术，不存在读不到。
+// 把它压住，平台自己承诺的支出会在收入通道接上之前完全不可见。
+//
+// 收入侧用 COALESCE 而不是直接覆盖：本轮读到就刷新，没读到就保留今天早些时候
+// 已经读到的那个值——与 UpdateProfitDailyCost「一次失败的读取不该把另一侧
+// 连带抹掉」是同一条纪律。observed_at 跟着值走，否则会出现「值是上一轮的、
+// 时间戳是这一轮的」这种替陈旧数据背书的组合。
+func (q *Queries) UpsertProfitDailyAmortizedCost(ctx context.Context, arg UpsertProfitDailyAmortizedCostParams) (FinanceProfitDaily, error) {
+	row := q.db.QueryRow(ctx, upsertProfitDailyAmortizedCost,
 		arg.UpstreamAccountID,
 		arg.BusinessDay,
 		arg.BusinessDayTz,

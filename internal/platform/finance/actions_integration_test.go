@@ -30,11 +30,14 @@ func actionPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("Ping 失败: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	// profit_daily（XM-0037b）必须一起列出：它对 upstream_account 的外键是
-	// ON DELETE RESTRICT（历史台账不该随账号一起消失），而 TRUNCATE 要求
-	// 一次列全所有引用方，漏掉它这条语句会直接报错。
+	// profit_daily（XM-0037b）与订阅那三张表（XM-0037c）必须一起列出：
+	// 它们对 upstream_account 的外键是 ON DELETE RESTRICT（历史台账与付款
+	// 记录不该随账号一起消失），而 TRUNCATE 要求一次列全所有引用方，
+	// 漏掉任何一张这条语句会直接报错。
 	if _, err := pool.Exec(ctx,
-		"TRUNCATE finance.profit_daily, finance.token_map, finance.upstream_account"); err != nil {
+		"TRUNCATE finance.amortization_loss, finance.subscription_cost_batch, "+
+			"finance.proxy_asset, finance.profit_daily, finance.token_map, "+
+			"finance.upstream_account"); err != nil {
 		t.Fatalf("清空登记簿失败: %v", err)
 	}
 	return pool

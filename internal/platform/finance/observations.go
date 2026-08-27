@@ -68,6 +68,20 @@ func (r CollectResult) ProfitObservation(
 		"rows_skipped_nothing_known": r.RowsSkippedNothingKnown,
 		"rows_skipped_one_sided":     r.RowsSkippedOneSided,
 		"rows_failed":                r.RowsFailed,
+		// 账号级聚合行（§12.2）：这几把令牌从此没有独立的下钻行。
+		// 数字忽然变大意味着有人给某个自营账号加挂了第二把 key——
+		// 一次值得知道的拓扑变化，不该静默发生。
+		"rows_aggregated": r.RowsAggregated,
+		// 订阅型（XM-0037c，§3.5）。与计量型分开呈现：两者的成本来路完全不同
+		// （一个是读来的、一个是算出来的），合成一个数之后，
+		// 「上游读不到」与「批次没登记」在看板上会长得一模一样。
+		"subscription_accounts_total": r.SubscriptionAccountsTotal,
+		"subscription_rows_written":   r.SubscriptionRowsWritten,
+		// 只有成本、收入未知的行数。不是失败——订阅渠道的收入通道 v1 常常
+		// 还没接——但必须可见：那些行的毛利全是 NULL，看板得说得出为什么。
+		"subscription_rows_cost_only": r.SubscriptionRowsCostOnly,
+		"rows_skipped_no_batch":       r.RowsSkippedNoBatch,
+		"rows_skipped_no_owner":       r.RowsSkippedNoOwner,
 		// 合计只覆盖两侧都已知的那些行，所以行数必须一起给——
 		// 否则「十行里有一行算得出毛利」与「十行都算得出」呈现完全相同。
 		"rows_with_profit": r.RowsWithProfit,

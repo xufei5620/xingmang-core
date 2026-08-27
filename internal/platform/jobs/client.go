@@ -560,7 +560,10 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			Mode:        cfg.FinanceCollectMode,
 			Store:       ops.NewStore(pool),
 			Registry:    finance.NewStore(pool),
-			Ledger:      finance.NewProfitStore(pool, nil),
+			// 订阅摊销的取数端（XM-0037c）。与登记簿分成两个仓储：
+			// 登记簿是「怎么算」，批次与代理是「付了多少钱」。
+			Subscriptions: finance.NewSubscriptionStore(pool),
+			Ledger:        finance.NewProfitStore(pool, nil),
 			NewClient: NewFinanceCollectClientFactory(
 				cfg.FinanceCollectMode,
 				finance.RealMeteringConfig{

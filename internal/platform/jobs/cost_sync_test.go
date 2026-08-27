@@ -68,6 +68,29 @@ func (l *financeLedger) WriteRow(
 	return row, nil
 }
 
+// WriteAmortizedRow 是订阅型那条入账路径（XM-0037c）。本包只测「多久跑一次、
+// 失败要不要重试、日志长什么样」，两条路径的**纪律差别**在
+// internal/platform/finance 的用例里，所以这里照样只记下来。
+func (l *financeLedger) WriteAmortizedRow(
+	_ context.Context, row finance.ProfitRow,
+) (finance.ProfitRow, error) {
+	l.rows = append(l.rows, row)
+	return row, nil
+}
+
+// financeSubscriptions 是 Worker 测试用的内存订阅登记（XM-0037c）。
+//
+// 默认没有任何批次：本包的用例只跑计量型那一轮，订阅型的行为在
+// finance 包里测。它存在只是为了让装配完整——采集器把它列为必填，
+// 漏了会整轮失败（那正是 TestFinanceCollectRefusesIncompleteWiring 要钉的）。
+type financeSubscriptions struct{}
+
+func (financeSubscriptions) ListAmortizableBatches(
+	_ context.Context, _ uuid.UUID, _ time.Time,
+) ([]finance.AmortizableBatch, error) {
+	return nil, nil
+}
+
 func financeAccount() finance.UpstreamAccount {
 	return finance.UpstreamAccount{
 		ID:            uuid.New(),
@@ -87,15 +110,16 @@ func newFinanceWorker(
 	store ObservationStore, registry finance.AccountRegistry, ledger finance.LedgerWriter,
 ) *FinanceCollectWorker {
 	return NewFinanceCollectWorker(FinanceCollectOptions{
-		Logger:      discardFinanceLogger(),
-		Environment: "staging",
-		InstanceID:  DefaultFinanceCollectInstanceID,
-		Mode:        FinanceCollectModeFake,
-		Store:       store,
-		Registry:    registry,
-		Ledger:      ledger,
-		NewClient:   finance.NewFakeMeteringClientFactory(func() time.Time { return fixedNow }),
-		Now:         func() time.Time { return fixedNow },
+		Logger:        discardFinanceLogger(),
+		Environment:   "staging",
+		InstanceID:    DefaultFinanceCollectInstanceID,
+		Mode:          FinanceCollectModeFake,
+		Store:         store,
+		Registry:      registry,
+		Subscriptions: financeSubscriptions{},
+		Ledger:        ledger,
+		NewClient:     finance.NewFakeMeteringClientFactory(func() time.Time { return fixedNow }),
+		Now:           func() time.Time { return fixedNow },
 	})
 }
 
@@ -221,19 +245,30 @@ func TestFinanceCollectReturnsErrorWhenObservationWriteFails(t *testing.T) {
 func TestFinanceCollectRefusesIncompleteWiring(t *testing.T) {
 	cases := map[string]FinanceCollectOptions{
 		"缺 store": {
-			Registry: &financeRegistry{}, Ledger: &financeLedger{},
+			Registry: &financeRegistry{}, Subscriptions: financeSubscriptions{},
+			Ledger:    &financeLedger{},
 			NewClient: finance.NewFakeMeteringClientFactory(nil),
 		},
 		"缺 registry": {
-			Store: newMemoryStore(), Ledger: &financeLedger{},
+			Store: newMemoryStore(), Subscriptions: financeSubscriptions{},
+			Ledger:    &financeLedger{},
+			NewClient: finance.NewFakeMeteringClientFactory(nil),
+		},
+		// 漏了订阅取数端不能只是「跳过订阅型那一轮」：那样报表上几条订阅
+		// 渠道的成本会全部消失，而毛利恰好等于收入（宪法 12 条）。
+		"缺 subscriptions": {
+			Store: newMemoryStore(), Registry: &financeRegistry{},
+			Ledger:    &financeLedger{},
 			NewClient: finance.NewFakeMeteringClientFactory(nil),
 		},
 		"缺 ledger": {
 			Store: newMemoryStore(), Registry: &financeRegistry{},
-			NewClient: finance.NewFakeMeteringClientFactory(nil),
+			Subscriptions: financeSubscriptions{},
+			NewClient:     finance.NewFakeMeteringClientFactory(nil),
 		},
 		"缺 client factory": {
-			Store: newMemoryStore(), Registry: &financeRegistry{}, Ledger: &financeLedger{},
+			Store: newMemoryStore(), Registry: &financeRegistry{},
+			Subscriptions: financeSubscriptions{}, Ledger: &financeLedger{},
 		},
 	}
 	for name, opts := range cases {

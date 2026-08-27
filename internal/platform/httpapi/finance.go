@@ -60,6 +60,12 @@ type upstreamAccountItem struct {
 	// 显式声明）。前端展示金额与日期时必须按它解释，而不是按浏览器时区。
 	BusinessDayTZ string `json:"business_day_tz"`
 
+	// PlatformID 是「哪个自营平台在用这个上游账号」的归属标注（§5.2，XM-0037c）。
+	//
+	// 空串 = 未配对。台账的 platform_id 从这里取值（采集器的 PlatformResolver），
+	// 于是 037d 的四桶归集里「未归属」那一桶，对应的就是这一列为空的账号。
+	PlatformID string `json:"platform_id"`
+
 	Status      string `json:"status"`
 	Environment string `json:"environment"`
 
@@ -98,6 +104,7 @@ func accountToItem(a finance.UpstreamAccount, mappings []finance.TokenMapping) u
 		RechargeCostRate: a.RechargeCostRate(),
 		Currency:         a.Currency,
 		BusinessDayTZ:    a.BusinessDayTZ,
+		PlatformID:       a.PlatformID,
 		Status:           string(a.Status),
 		Environment:      a.Environment,
 		Metered:          a.AccessMethod.IsMetered(),

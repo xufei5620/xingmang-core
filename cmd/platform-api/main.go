@@ -89,6 +89,16 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	// 订阅成本批次与代理资产的写操作（XM-0037c）分开注册：它们吃的是另一个
+	// 仓储（付款记录，不是接入配置）。同样注册失败即拒绝启动——
+	// 一笔登记不进来的订阅付款，会让那条渠道的成本永远是 NULL。
+	financeSubscriptions := finance.NewSubscriptionStore(pool)
+	if err := finance.RegisterSubscriptionActions(
+		actionRegistry, financeSubscriptions, financeStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
 	kernel := action.NewKernel(
@@ -135,8 +145,10 @@ func main() {
 		// 利润台账是**只读**的：API 进程拿到的这个仓储只用来查询。
 		// 时钟传 nil（=time.Now）——「今日可覆盖、过去冻结」是写入侧的纪律，
 		// 本进程没有任何写入路径会用到它。
-		FinanceProfit:  finance.NewProfitStore(pool, nil),
-		RequestTimeout: cfg.RequestTimeout,
+		FinanceProfit: finance.NewProfitStore(pool, nil),
+		// 订阅付款的读与写同样共用一个仓储（同登记簿）
+		FinanceSubscriptions: financeSubscriptions,
+		RequestTimeout:       cfg.RequestTimeout,
 	})
 
 	srv := &http.Server{

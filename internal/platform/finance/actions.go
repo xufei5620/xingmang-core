@@ -111,6 +111,12 @@ func accountSummary(a UpstreamAccount) map[string]any {
 		"status":          string(a.Status),
 		"environment":     a.Environment,
 	}
+	// 未归属时**不写这个键**（同下面的 recharge_ratio）：「没有归属」与
+	// 「归属到某个平台」在审计上是两件事，写一个空串会让前者看起来像
+	// 「归属被清空成了空字符串」。
+	if a.PlatformID != "" {
+		m["platform_id"] = a.PlatformID
+	}
 	// 未配倍率时**不写这个键**，而不是写 "0" 或 ""：
 	// 「没有倍率」（订阅型）与「倍率是某个值」在审计上是两件事。
 	if !a.RechargeRatio.IsZero() {
@@ -194,6 +200,12 @@ func accountSetDef() action.Definition {
 			{Name: "recharge_ratio", Type: action.FieldString},
 			{Name: "currency", Type: action.FieldString},
 			{Name: "business_day_tz", Type: action.FieldString},
+			// platform_id 是「哪个自营平台在用这个上游账号」的归属标注
+			// （§5.2，XM-0037c）。**可空、且登记后可改**——与上面刻意
+			// 不可改的 access_method 相反：它不改变任何一个金额怎么算，
+			// 而台账侧 platform_id 的 COALESCE 方向是「空缺可补、已有不动」
+			// （§5.3），历史行的归属不会被追溯改写。传空串 = 取消归属。
+			{Name: "platform_id", Type: action.FieldString},
 			{Name: "status", Type: action.FieldString, Enum: statusEnum},
 		}},
 		Environments:   allEnvironments,
@@ -233,6 +245,7 @@ func accountSetHandler(store *Store) action.Handler {
 			RechargeRatio: ratio,
 			Currency:      defaultIfBlank(action.StringParam(params, "currency"), DefaultCurrency),
 			BusinessDayTZ: defaultIfBlank(action.StringParam(params, "business_day_tz"), DefaultBusinessDayTZ),
+			PlatformID:    strings.TrimSpace(action.StringParam(params, "platform_id")),
 			Status:        Status(defaultIfBlank(action.StringParam(params, "status"), string(StatusActive))),
 			Environment:   p.Environment,
 		}

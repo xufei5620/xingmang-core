@@ -45,8 +45,14 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	// profit_daily（XM-0037b）**必须**列进来：它对 upstream_account 的外键是
 	// ON DELETE RESTRICT（历史台账不该随账号一起消失），而 TRUNCATE 要求
 	// 一次列全所有引用方，漏掉它这条语句会直接报错。
+	//
+	// XM-0037c 的三张表同样要列全：amortization_loss 引用批次与代理，
+	// 批次引用代理与登记簿——TRUNCATE 要求一次列全所有引用方，
+	// 漏掉任何一张这条语句会直接报错。
 	if _, err := pool.Exec(ctx,
-		"TRUNCATE finance.profit_daily, finance.token_map, finance.upstream_account"); err != nil {
+		"TRUNCATE finance.amortization_loss, finance.subscription_cost_batch, "+
+			"finance.proxy_asset, finance.profit_daily, finance.token_map, "+
+			"finance.upstream_account"); err != nil {
 		t.Fatalf("清空登记簿失败: %v", err)
 	}
 	return pool

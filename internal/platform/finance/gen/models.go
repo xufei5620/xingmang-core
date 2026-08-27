@@ -154,6 +154,17 @@ type CoreService struct {
 	UpdatedAt        pgtype.Timestamptz
 }
 
+type FinanceAmortizationLoss struct {
+	ID           uuid.UUID
+	BatchID      *uuid.UUID
+	ProxyAssetID *uuid.UUID
+	LossMinor    int64
+	Currency     string
+	BookedOn     pgtype.Date
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
+}
+
 type FinanceProfitDaily struct {
 	UpstreamAccountID uuid.UUID
 	BusinessDay       pgtype.Date
@@ -169,6 +180,43 @@ type FinanceProfitDaily struct {
 	Source            string
 	CostObservedAt    pgtype.Timestamptz
 	RevenueObservedAt pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+type FinanceProxyAsset struct {
+	ID                 uuid.UUID
+	PaidMinor          int64
+	SurchargeMinor     int64
+	RefundedMinor      int64
+	RefundedOn         pgtype.Date
+	Currency           string
+	OpenedOn           pgtype.Date
+	ExpiresOn          pgtype.Date
+	TerminatedOn       pgtype.Date
+	SharedAccountCount int32
+	BuyPlatform        *string
+	BuyAddress         *string
+	CredentialRef      *string
+	Mounted            bool
+	Environment        string
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+}
+
+type FinanceSubscriptionCostBatch struct {
+	ID                uuid.UUID
+	UpstreamAccountID uuid.UUID
+	PaidMinor         int64
+	SurchargeMinor    int64
+	RefundedMinor     int64
+	RefundedOn        pgtype.Date
+	Currency          string
+	StartsOn          pgtype.Date
+	ExpiresOn         pgtype.Date
+	TerminatedOn      pgtype.Date
+	AccountCount      int32
+	ProxyBatchID      *uuid.UUID
+	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
 }
 
@@ -194,6 +242,7 @@ type FinanceUpstreamAccount struct {
 	Environment   string
 	CreatedAt     pgtype.Timestamptz
 	UpdatedAt     pgtype.Timestamptz
+	PlatformID    *string
 }
 
 type OpsMetricObservation struct {

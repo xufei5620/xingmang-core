@@ -3,22 +3,75 @@
   "version": "1",
   "risk_level": "L1",
   "permission": "finance.upstream_account.manage",
-  "principal_types": ["HUMAN"],
-  "environments": ["development", "staging", "production"],
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
   "idempotency": "REQUIRED_FOUNDATION_B",
   "write_confirmation": "REQUIRED_FOUNDATION_B",
-  "approval": {"required": false},
+  "approval": {
+    "required": false
+  },
   "compensation_mode": "AUTOMATIC",
   "params": {
-    "upstream_account_id": {"type": "string", "required": false},
-    "system_type": {"type": "string", "required": true, "enum": ["sub2api", "newapi", "official"]},
-    "access_method": {"type": "string", "required": true, "enum": ["upstream_key", "official_api", "subscription_account"]},
-    "credential_ref": {"type": "string", "required": true},
-    "base_url": {"type": "string", "required": false},
-    "recharge_ratio": {"type": "string", "required": false},
-    "currency": {"type": "string", "required": false},
-    "business_day_tz": {"type": "string", "required": false},
-    "status": {"type": "string", "required": false, "enum": ["active", "disabled"]}
+    "upstream_account_id": {
+      "type": "string",
+      "required": false
+    },
+    "system_type": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "sub2api",
+        "newapi",
+        "official"
+      ]
+    },
+    "access_method": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "upstream_key",
+        "official_api",
+        "subscription_account"
+      ]
+    },
+    "credential_ref": {
+      "type": "string",
+      "required": true
+    },
+    "base_url": {
+      "type": "string",
+      "required": false
+    },
+    "recharge_ratio": {
+      "type": "string",
+      "required": false
+    },
+    "currency": {
+      "type": "string",
+      "required": false
+    },
+    "business_day_tz": {
+      "type": "string",
+      "required": false
+    },
+    "platform_id": {
+      "type": "string",
+      "required": false
+    },
+    "status": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "active",
+        "disabled"
+      ]
+    }
   },
-  "notes": "XM-0037a 成本登记簿（设计稿 §2.1/§8.3）。L1 = 修改低风险平台配置：不触碰第三方系统、不改变运行中的服务，写错改回即可（历史台账由 ratio_snapshot 逐行冻结，不被追溯篡改，§6.3）。upstream_account_id 留空=新登记，填了=改这一条。无 environment 参数——环境取自调用者身份（宪法 15 条）；access_method 与 system_type 登记后不可改（成本口径的分叉点，改它会让同一账号的历史成本前后用两套算法而台账无痕迹），要变只能新登记一条并停用旧的。recharge_ratio 是**定点十进制字符串**不是数字：JSON 数字一路解成 float64，1.15 进来就已经不是 1.15（宪法 13 条：比例用 Decimal）；它是**除数**（对齐 SoloAI 0084），§13 的 rechargeCostRate=1/recharge_ratio 只是展示投影不入库（§3.4）。计量型（upstream_key）必须配倍率、订阅型必须不配、official_api 不约束（v1 口径待定）。credential_ref 只接受 secret://<scope>/<name>（ADR-014），领域层与数据库 CHECK 双重校验，且被拒时错误**不回显**被拒的值。"
+  "notes": "XM-0037a 成本登记簿（设计稿 §2.1/§8.3）。L1 = 修改低风险平台配置：不触碰第三方系统、不改变运行中的服务，写错改回即可（历史台账由 ratio_snapshot 逐行冻结，不被追溯篡改，§6.3）。upstream_account_id 留空=新登记，填了=改这一条。无 environment 参数——环境取自调用者身份（宪法 15 条）；access_method 与 system_type 登记后不可改（成本口径的分叉点，改它会让同一账号的历史成本前后用两套算法而台账无痕迹），要变只能新登记一条并停用旧的。recharge_ratio 是**定点十进制字符串**不是数字：JSON 数字一路解成 float64，1.15 进来就已经不是 1.15（宪法 13 条：比例用 Decimal）；它是**除数**（对齐 SoloAI 0084），§13 的 rechargeCostRate=1/recharge_ratio 只是展示投影不入库（§3.4）。计量型（upstream_key）必须配倍率、订阅型必须不配、official_api 不约束（v1 口径待定）。credential_ref 只接受 secret://<scope>/<name>（ADR-014），领域层与数据库 CHECK 双重校验，且被拒时错误**不回显**被拒的值。 **XM-0037c 增补 platform_id**：「哪个自营平台在用这个上游账号」的归属标注（§5.2），可空（NULL=未配对）、且**登记后可改**——与 access_method 刻意相反：它不改变任何一个金额怎么算，而台账侧 platform_id 的 COALESCE 方向是「空缺可补、已有不动」（§5.3），历史行的归属不会被追溯改写，改它只影响此后新算的行。它是采集器 PlatformResolver 的取值处，四桶归集（§5.2）里的「未归属」那一桶对应的就是这一列为空的账号。形态与 core.service.instance_id 同一套正则，传空串 = 取消归属。"
 }

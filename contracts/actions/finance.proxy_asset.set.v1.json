@@ -1,0 +1,67 @@
+{
+  "id": "finance.proxy_asset.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.subscription.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "proxy_asset_id": {
+      "type": "string",
+      "required": false
+    },
+    "paid_minor": {
+      "type": "string",
+      "required": false
+    },
+    "surcharge_minor": {
+      "type": "string",
+      "required": false
+    },
+    "currency": {
+      "type": "string",
+      "required": false
+    },
+    "opened_on": {
+      "type": "string",
+      "required": false
+    },
+    "expires_on": {
+      "type": "string",
+      "required": false
+    },
+    "shared_account_count": {
+      "type": "int",
+      "required": false
+    },
+    "buy_platform": {
+      "type": "string",
+      "required": false
+    },
+    "buy_address": {
+      "type": "string",
+      "required": false
+    },
+    "credential_ref": {
+      "type": "string",
+      "required": false
+    },
+    "mounted": {
+      "type": "bool",
+      "required": false
+    }
+  },
+  "notes": "XM-0037c 代理资产登记 / 修改（设计稿 §2.5/§10.3）。proxy_asset_id 留空=新登记，填了=改这一条（同 finance.upstream_account.set，两者参数集合几乎相同，拆成两个 Action 只会让调用方在选哪个上出错）。**可编辑的只有挂载状态与购买信息 / 凭据引用**；金额与期间登记后冻结，带 id 调用时被忽略（前端最自然的做法是把整个表单回传，为此报错会让人以为整次提交失败；真正的护栏在库与仓储：那几列没有 UPDATE 路径）。mounted=false ⇒ 每日代理成本**明确为 0**（§10.3），是已知的 0 不是未知。改 mounted **不追溯**：摊销只写当天的台账行、历史业务日过去冻结（§5.3），所以每一天写进台账的都是那一天的挂载状态——§12 拍板要的「代理分摊按当日挂载快照」由台账的冻结纪律免费提供。credential_ref 只接受 secret://<scope>/<name>（ADR-014）：代理的账号密码一步都不进库，被拒时错误**不回显**被拒的值。buy_address 若是 URL 不得带 user:pass@ 段（明文凭据最常见的藏身处）。环境取自调用者身份（宪法 15 条）。"
+}
