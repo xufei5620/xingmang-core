@@ -4,17 +4,24 @@ import { Fragment, useState } from "react";
 import { AUDIT_PAGE_SIZE, listAuditEvents, type AuditEventItem } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
 import { PageHeader } from "../components/PageHeader";
-import { formatSummary, toAuditRow } from "../lib/audit";
+import {
+  chainLinkBetween,
+  describeChainLink,
+  formatSummary,
+  toAuditRow,
+  type ChainLink,
+} from "../lib/audit";
 
 const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";
 const TD = "px-3 py-2 align-top text-sm text-fg";
 
 /** 审计事件页（规格 §4.4 / ADR-013：哈希链）。
  *
- *  这一页存在的理由不是「有个列表好看」，而是让哈希链**可被人验证**：
- *  每行给出自己的 event_hash 与它记录的 prev_hash，倒序排列时前序哈希应当
- *  等于下一行的事件哈希。对不上就意味着链断了，这件事必须肉眼可查，
- *  而不是藏在一个只有后端才会跑的校验任务里。 */
+ *  这一页把每条事件的 event_hash 与 prev_hash 摆出来，让人看得见链的形状；
+ *  它**不是**校验工具。后端的链是全局的，本页按环境过滤，序号出现缺口是正常的，
+ *  这时相邻两行的哈希本就不必相等（Codex #6）；响应也不含 canonical 全字段，
+ *  本页根本算不出 hash。所以：序号真的相邻时才做比对，其余情形只如实说明，
+ *  完整校验以 audit-verify 工具与链根签名为准。 */
 export function AuditPage() {
   const query = useInfiniteQuery({
     queryKey: ["audit-events"],
@@ -35,7 +42,7 @@ export function AuditPage() {
     <section>
       <PageHeader
         title="审计事件"
-        description={`按序号倒序，每次加载 ${AUDIT_PAGE_SIZE} 条；每行给出事件哈希与它记录的前序哈希，用于核对哈希链是否连续。`}
+        description={`按序号倒序，每次加载 ${AUDIT_PAGE_SIZE} 条；每行给出事件哈希与它记录的前序哈希。本页按环境过滤的是一条全局链，序号出现缺口属正常，缺口两侧的哈希不必相等。完整性校验以 audit-verify 工具与链根签名为准，本页仅展示。`}
         onRefresh={() => void query.refetch()}
         refreshing={query.isFetching && !query.isFetchingNextPage}
         lastRefreshedAt={query.dataUpdatedAt || undefined}
@@ -113,9 +120,11 @@ function AuditTable({ events }: { events: AuditEventItem[] }) {
           </tr>
         </thead>
         <tbody>
-          {events.map((event) => {
+          {events.map((event, index) => {
             const row = toAuditRow(event);
             const open = expanded.has(row.sequence);
+            // 列表倒序：紧跟其后的那一行序号更小，才是链上「上一条」的候选
+            const link = chainLinkBetween(event, events[index + 1]);
             return (
               <Fragment key={row.sequence}>
                 <tr className="border-b border-edge last:border-b-0">
@@ -151,27 +160,25 @@ function AuditTable({ events }: { events: AuditEventItem[] }) {
                     ) : null}
                   </td>
                   <td className={TD}>
-                    <ChainCell row={row} />
+                    <ChainCell row={row} link={link} />
                   </td>
                   <td className={TD}>
-                    {row.hasDetail ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-expanded={open}
-                        onClick={() => toggle(row.sequence)}
-                      >
-                        {open ? "收起" : "前后摘要"}
-                      </Button>
-                    ) : (
-                      <span className="text-xs text-fg-muted">无摘要</span>
-                    )}
+                    {/* 展开按钮不再以「有没有摘要」为条件：完整哈希也在里面，
+                        而哈希是每行都有的（Codex #9：不能只给 8 位前缀 + hover） */}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-expanded={open}
+                      onClick={() => toggle(row.sequence)}
+                    >
+                      {open ? "收起" : "详情"}
+                    </Button>
                   </td>
                 </tr>
                 {open ? (
                   <tr className="border-b border-edge bg-surface-muted last:border-b-0">
                     <td className={TD} colSpan={8}>
-                      <SummaryPanel event={event} />
+                      <DetailPanel event={event} link={link} />
                     </td>
                   </tr>
                 ) : null}
@@ -184,35 +191,47 @@ function AuditTable({ events }: { events: AuditEventItem[] }) {
   );
 }
 
-/** 哈希单元格：本行事件哈希 + 它记录的前序哈希。
+/** 链关系标记的语气 → 令牌类。danger 只留给「序号相邻却对不上」这一种真信号。 */
+const LINK_TONE_CLASS: Record<"neutral" | "success" | "danger", string> = {
+  neutral: "text-fg-muted",
+  success: "text-success",
+  danger: "text-danger",
+};
+
+/** 哈希单元格：本行事件哈希前缀 + 与相邻行的关系。
  *
- *  列表是倒序的，所以「前序」指的是**下一行**。把这句话写进 title 而不是
- *  指望人自己推断——一条对不上的链是事故信号，不该靠猜。 */
-function ChainCell({ row }: { row: ReturnType<typeof toAuditRow> }) {
+ *  完整哈希放在展开区里（不是只有 hover title），因为它是这一页唯一能拿去
+ *  跟 audit-verify 对账的东西，而键盘用户碰不到 title。 */
+function ChainCell({ row, link }: { row: ReturnType<typeof toAuditRow>; link: ChainLink }) {
+  const shown = describeChainLink(link);
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="font-mono text-xs" title={row.hashFull || "事件哈希缺失"}>
-        {row.hashShort}
-      </span>
-      {row.isGenesis ? (
-        <span className="text-xs text-fg-muted" title="链首事件，prev_hash 为全 0">
-          链首
-        </span>
-      ) : (
-        <span
-          className="font-mono text-xs text-fg-muted"
-          title={`前序哈希 ${row.prevHashFull}；列表按序号倒序，它应当与下一行的事件哈希相同`}
-        >
-          ↓ {row.prevHashShort}
-        </span>
-      )}
+      <span className="font-mono text-xs">{row.hashShort}</span>
+      <span className={`text-xs ${LINK_TONE_CLASS[shown.tone]}`}>{shown.label}</span>
     </div>
   );
 }
 
-function SummaryPanel({ event }: { event: AuditEventItem }) {
+function DetailPanel({ event, link }: { event: AuditEventItem; link: ChainLink }) {
+  const shown = describeChainLink(link);
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="min-w-0 md:col-span-2">
+        <p className="mb-1 text-xs font-medium text-fg">哈希链</p>
+        <dl className="flex flex-col gap-1 text-xs">
+          <div className="flex flex-col gap-0.5">
+            <dt className="text-fg-muted">事件哈希 event_hash</dt>
+            <dd className="font-mono break-all text-fg">{event.event_hash || "（缺失）"}</dd>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <dt className="text-fg-muted">前序哈希 prev_hash</dt>
+            <dd className="font-mono break-all text-fg">{event.prev_hash || "（缺失）"}</dd>
+          </div>
+        </dl>
+        <p className={`mt-1 text-xs ${LINK_TONE_CLASS[shown.tone]}`}>
+          {shown.label}：{shown.detail}
+        </p>
+      </div>
       <SummaryBlock title="变更前" summary={event.before_summary} />
       <SummaryBlock title="变更后" summary={event.after_summary} />
       {event.request_id ? (

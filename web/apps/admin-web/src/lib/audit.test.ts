@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEventItem } from "../api/platform";
 import {
+  chainLinkBetween,
   describeAuditResult,
+  describeChainLink,
   formatSummary,
   GENESIS_HASH,
   HASH_PREFIX_LENGTH,
@@ -128,6 +130,55 @@ describe("toAuditRow：时间与摘要", () => {
 
   it("空对象摘要不算详情——展开一片 {} 只是噪音", () => {
     expect(toAuditRow(event({ after_summary: {}, before_summary: {} })).hasDetail).toBe(false);
+  });
+});
+
+describe("chainLinkBetween：环境过滤后的链只在序号相邻时才比对（Codex #6）", () => {
+  it("序号连续且哈希接得上 → 相连", () => {
+    const link = chainLinkBetween(
+      event({ sequence: 43, prev_hash: HASH_A }),
+      event({ sequence: 42, event_hash: HASH_A }),
+    );
+    expect(link).toEqual({ kind: "adjacent", matches: true });
+    expect(describeChainLink(link).tone).toBe("success");
+  });
+
+  it("序号连续但哈希对不上 → 这才是真信号，染成 danger", () => {
+    const link = chainLinkBetween(
+      event({ sequence: 43, prev_hash: HASH_B }),
+      event({ sequence: 42, event_hash: HASH_A }),
+    );
+    expect(link).toEqual({ kind: "adjacent", matches: false });
+    expect(describeChainLink(link).tone).toBe("danger");
+  });
+
+  it("序号有缺口时不比对，只说中间隔了几条其他环境事件", () => {
+    // 后端按 environment 过滤一条**全局**链，6/4/2 这样的缺口是正常的；
+    // 在缺口两侧比 prev_hash 与 event_hash，链再健康也必然不等
+    const link = chainLinkBetween(
+      event({ sequence: 6, prev_hash: HASH_B }),
+      event({ sequence: 2, event_hash: HASH_A }),
+    );
+    expect(link).toEqual({ kind: "gap", hidden: 3 });
+    const shown = describeChainLink(link);
+    expect(shown.label).toBe("中间有 3 条其他环境事件");
+    // 缺口不是异常，绝不能染成红色
+    expect(shown.tone).toBe("neutral");
+  });
+
+  it("链首（prev_hash 全 0）优先于一切比对", () => {
+    const link = chainLinkBetween(event({ sequence: 1, prev_hash: GENESIS_HASH }), undefined);
+    expect(link).toEqual({ kind: "genesis" });
+    expect(describeChainLink(link).label).toBe("链首");
+  });
+
+  it("本页没有下一行、或数据不是倒序时，老实说比不了", () => {
+    expect(chainLinkBetween(event({ sequence: 9 }), undefined)).toEqual({ kind: "unknown" });
+    // 序号没变小：数据顺序本身就不可信，任何比对结论都是编的
+    expect(
+      chainLinkBetween(event({ sequence: 9 }), event({ sequence: 9, event_hash: HASH_A })),
+    ).toEqual({ kind: "unknown" });
+    expect(describeChainLink({ kind: "unknown" }).tone).toBe("neutral");
   });
 });
 

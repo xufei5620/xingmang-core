@@ -1,6 +1,7 @@
 import { AdminShell } from "@xingmang/ui-admin";
 import { NavLink, Outlet, createBrowserRouter, redirect, useNavigate } from "react-router";
 import { devLogout, isAuthenticated } from "./auth";
+import { DemoDataBanner } from "./components/DemoDataBanner";
 import { AuditPage } from "./pages/AuditPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -22,6 +23,8 @@ export function ShellLayout() {
   const navigate = useNavigate();
   return (
     <AdminShell
+      // 横幅挂在壳上而不是各页页头：它要盖住每一个页面，包括审计页
+      banner={<DemoDataBanner />}
       nav={
         <>
           <NavLink to="/dashboard" className={navLinkClass}>

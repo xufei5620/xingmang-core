@@ -55,6 +55,36 @@ export function serviceFieldLabel(field: ServiceFormField): string {
   return LABELS[field];
 }
 
+/** 查询参数名里出现这些词，就当作有人把凭据填进了地址栏。
+ *
+ *  与后端 XM-0031 的同一条规则并行：endpoint 会被写进审计摘要，审计投影又原样
+ *  返回并展示，于是一个 `?token=...` 就成了一条可复现的凭据回显链（Codex #7）。
+ *  前端不是安全边界——服务端才是——但让人在提交前就看见「这里不能放密钥」，
+ *  比事后去审计库里追一条已经泄露的记录便宜得多。 */
+const CREDENTIAL_QUERY_WORDS = ["token", "key", "secret", "password"];
+
+/** URL 里的凭据形态：userinfo（`user:pass@host`）或疑似凭据的查询参数。
+ *  返回提示语，没问题时返回空串。 */
+function credentialShapeIn(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    // 解析不出来的地址交给前面的 https:// 前缀规则去说，这里不重复报错
+    return "";
+  }
+  if (url.username || url.password) {
+    return "不能把用户名/密码写进地址（形如 https://user:pass@host）：它会随审计摘要一起被记录并展示";
+  }
+  for (const name of url.searchParams.keys()) {
+    const lower = name.toLowerCase();
+    if (CREDENTIAL_QUERY_WORDS.some((word) => lower.includes(word))) {
+      return `查询参数 ${name} 看起来是凭据：地址会随审计摘要一起被记录并展示，不能放 token/key/secret/password`;
+    }
+  }
+  return "";
+}
+
 /** 校验表单。返回空对象表示前端这一关过了（后端仍可能拒）。
  *
  *  值一律先 trim 再判：末尾一个空格换来一个 400，人还得自己去数空格。 */
@@ -82,6 +112,14 @@ export function validateServiceForm(values: ServiceFormValues): ServiceFormError
     !v.internal_endpoint.startsWith("https://")
   ) {
     errors.internal_endpoint = "内网地址必须以 http:// 或 https:// 开头";
+  }
+
+  // 三个 URL 字段都过一遍凭据形态。放在最后：前缀规则先判完，
+  // 一个字段上只显示一条最该先修的错
+  for (const field of ["endpoint", "internal_endpoint", "native_console_url"] as const) {
+    if (!v[field] || errors[field]) continue;
+    const problem = credentialShapeIn(v[field]);
+    if (problem) errors[field] = `${LABELS[field]}${problem}`;
   }
   return errors;
 }

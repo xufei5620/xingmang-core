@@ -6,12 +6,24 @@
 
 /** 一个时间序列样本。 */
 export interface SparkSample {
-  /** 横轴位置：观测时刻的毫秒时间戳。 */
+  /** 横轴位置：**采集时刻**（synced_at）的毫秒时间戳。
+   *
+   *  刻意不是「观测时刻」：同步失败时后端保留的是上一次成功的 observed_at，
+   *  拿它当横轴会把连续几次失败全部堆到那个旧的成功点上，红色失败区间凭空消失。 */
   at: number;
   /** 主数值；null 表示这个样本没有可信数值。 */
   value: number | null;
   /** 这次同步是否失败。失败样本不参与折线，只在原位标一笔。 */
   failed: boolean;
+  /** 这次观测是否只拿到了部分数据（后端 is_partial）。
+   *
+   *  部分数据可能偏小，画成一条正常实线等于宣称一个它没有的完整性
+   *  （宪法 12 条），所以要在**线型**上与完整数据分开，而不是只换个颜色。 */
+  partial?: boolean;
+  /** 数据本身的时刻（observed_at）的毫秒时间戳；null/缺省表示上游没给。
+   *
+   *  只作为点的附加信息（悬停、摘要），**不参与横轴**——理由见 `at`。 */
+  observedAt?: number | null;
 }
 
 /** 画布尺寸（用户坐标系，不是 CSS 像素）。 */
@@ -28,10 +40,14 @@ export interface SparkPoint {
 }
 
 export interface SparklineGeometry {
-  /** 折线段的 points 属性值。失败/缺值处折线断开，所以可能有多段。 */
+  /** 完整数据折线段的 points 属性值。失败/缺值处折线断开，所以可能有多段。 */
   segments: string[];
+  /** 触及部分数据点的折线段——调用方用虚线画，形状上与 segments 分开。 */
+  partialSegments: string[];
   /** 失败样本的位置。 */
   failedPoints: SparkPoint[];
+  /** 部分数据样本的位置（用于叠一个独立标记）。 */
+  partialPoints: SparkPoint[];
   /** 最后一个成功样本的位置，用来标出「当前值」落在哪。 */
   lastPoint: SparkPoint | null;
 }
@@ -60,6 +76,10 @@ function numericValue(s: SparkSample): number | null {
  *  把它当成一次新观测画上去就是伪造了一个读数）。 */
 export function plottableCount(samples: SparkSample[]): number {
   return samples.filter(isPlottable).length;
+}
+
+function fmt(p: SparkPoint): string {
+  return `${p.x},${p.y}`;
 }
 
 /** 计算折线几何；样本不足以构成趋势时返回 null，由调用方显示占位文案。
@@ -97,17 +117,49 @@ export function buildSparkline(
     vMax === vMin ? box.padding + innerH / 2 : box.padding + (1 - (v - vMin) / (vMax - vMin)) * innerH;
 
   const segments: string[] = [];
+  const partialSegments: string[] = [];
   const failedPoints: SparkPoint[] = [];
-  let current: string[] = [];
+  const partialPoints: SparkPoint[] = [];
   let lastPoint: SparkPoint | null = null;
+
+  // 当前这一段连续可画的样本（失败/缺值处断开）
+  let run: Array<{ point: SparkPoint; partial: boolean }> = [];
+
+  const pushPiece = (from: number, to: number, partial: boolean) => {
+    const points = run
+      .slice(from, to + 1)
+      .map((r) => fmt(r.point))
+      .join(" ");
+    (partial ? partialSegments : segments).push(points);
+  };
 
   // 孤立的成功样本（前后都是失败）也要留下痕迹：单点 polyline 什么都不画，
   // 所以把坐标写两遍，配合 round linecap 渲染成一个点。丢掉它等于宣称
   // 那个时刻没有采集成功过
   const flush = () => {
-    if (current.length >= MIN_TREND_POINTS) segments.push(current.join(" "));
-    else if (current.length === 1) segments.push(`${current[0]} ${current[0]}`);
-    current = [];
+    if (run.length === 0) return;
+    if (run.length === 1) {
+      const only = run[0]!;
+      const dot = `${fmt(only.point)} ${fmt(only.point)}`;
+      (only.partial ? partialSegments : segments).push(dot);
+      run = [];
+      return;
+    }
+    // 逐小段判线型：只要一端是部分数据，这一小段就归到虚线里去。
+    // 相邻同型的小段合并成一条 polyline，于是「没有部分数据」时路径字符串
+    // 与拆分之前逐字一致——线型是新增的信息，不是把老图重画一遍
+    let start = 0;
+    let flag = run[0]!.partial || run[1]!.partial;
+    for (let i = 1; i < run.length; i++) {
+      const piecePartial = run[i - 1]!.partial || run[i]!.partial;
+      if (piecePartial !== flag) {
+        pushPiece(start, i - 1, flag);
+        start = i - 1;
+        flag = piecePartial;
+      }
+    }
+    pushPiece(start, run.length - 1, flag);
+    run = [];
   };
 
   ordered.forEach((s, index) => {
@@ -116,7 +168,9 @@ export function buildSparkline(
 
     if (isPlottable(s) && v !== null) {
       const point = { x, y: round2(yOf(v)) };
-      current.push(`${point.x},${point.y}`);
+      const partial = s.partial === true;
+      run.push({ point, partial });
+      if (partial) partialPoints.push(point);
       lastPoint = point;
       return;
     }
@@ -128,5 +182,74 @@ export function buildSparkline(
   });
   flush();
 
-  return { segments, failedPoints, lastPoint };
+  return { segments, partialSegments, failedPoints, partialPoints, lastPoint };
+}
+
+// --- 文字摘要（无障碍） ---
+
+/** 折线的方向。样本不足以判断时是 unknown，不硬凑一个「平稳」。 */
+export type SparkDirection = "up" | "down" | "flat" | "unknown";
+
+export interface SparkSummary {
+  /** 样本总数（含失败样本）。 */
+  total: number;
+  /** 能画进折线的样本数。 */
+  plottable: number;
+  /** 同步失败的样本数。 */
+  failed: number;
+  /** 只拿到部分数据的样本数。 */
+  partial: number;
+  direction: SparkDirection;
+}
+
+export function summarizeSparkline(samples: SparkSample[]): SparkSummary {
+  const plottable = samples.filter(isPlottable);
+  const first = plottable[0]?.value ?? null;
+  const last = plottable[plottable.length - 1]?.value ?? null;
+  const direction: SparkDirection =
+    plottable.length < MIN_TREND_POINTS || first === null || last === null
+      ? "unknown"
+      : last > first
+        ? "up"
+        : last < first
+          ? "down"
+          : "flat";
+  return {
+    total: samples.length,
+    plottable: plottable.length,
+    failed: samples.filter((s) => s.failed).length,
+    partial: samples.filter((s) => s.partial === true).length,
+    direction,
+  };
+}
+
+const DIRECTION_TEXT: Record<SparkDirection, string> = {
+  up: "整体上升",
+  down: "整体下降",
+  flat: "整体持平",
+  unknown: "样本不足以判断方向",
+};
+
+/** 折线的文字摘要。
+ *
+ *  折线本身读不出来，屏幕阅读器只能靠这句话知道图上发生了什么。方向、失败数、
+ *  部分数据数三样都要说：它们恰好是「图看起来正常、数据其实不正常」的三种情形。 */
+export function describeSparkline(samples: SparkSample[]): string {
+  const s = summarizeSparkline(samples);
+  const parts = [DIRECTION_TEXT[s.direction], `共 ${s.total} 个采样点`];
+  if (s.failed > 0) parts.push(`${s.failed} 次同步失败`);
+  if (s.partial > 0) parts.push(`含 ${s.partial} 个部分数据点`);
+  return parts.join("，");
+}
+
+/** 图上必须用文字说清的那部分：失败与部分数据。没有可说的就返回空串。
+ *
+ *  与 describeSparkline 分开：这一句要**看得见**。只靠颜色（红色断点、
+ *  黄色虚线）区分完整性，色觉障碍者什么也读不到（规格 §7.7 无障碍）。 */
+export function sparklineCaveats(samples: SparkSample[]): string {
+  const s = summarizeSparkline(samples);
+  const parts: string[] = [];
+  if (s.failed > 0) parts.push(`${s.failed} 次同步失败（折线在此断开）`);
+  if (s.partial > 0) parts.push(`含 ${s.partial} 个部分数据点（虚线，数值可能偏小）`);
+  return parts.join("；");
 }
