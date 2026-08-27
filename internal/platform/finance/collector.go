@@ -40,13 +40,31 @@ type AccountRegistry interface {
 	) ([]TokenMapping, error)
 }
 
+// SubscriptionRegistry 是摊销用到的订阅登记只读子集（*SubscriptionStore 满足）。
+//
+// 与 AccountRegistry 分开而不是并进去：计量型采集一个方法都用不上它，
+// 合成一个接口只会让内存假货为了跑一条计量型用例去实现三个空方法。
+type SubscriptionRegistry interface {
+	ListAmortizableBatches(
+		ctx context.Context, accountID uuid.UUID, day time.Time,
+	) ([]AmortizableBatch, error)
+}
+
 // LedgerWriter 是采集用到的台账写入子集（*ProfitStore 满足）。
 //
-// 刻意只有 WriteRow 一个方法：三条纪律全在它里面，接口里没有第二个写入口，
-// 采集就不可能绕过它们——编译期挡住，比注释挡住可靠
-// （同 jobs.ObservationStore 不声明 Upsert 的理由）。
+// 两个方法对应两条不同的入账纪律，**刻意不合并成一个**：
+//
+//	WriteRow           计量型：§5.1 三条分支（读不到写 NULL、只有一侧不建行）
+//	WriteAmortizedRow  订阅型：成本是算出来的，收入未知时照样建行（见那里的注释）
+//
+// 分开是为了让「这一行按哪条纪律入账」在**调用点**就定下来，而不是靠某个
+// 字段的取值在库层临时判断——后者会让一次计量型的读取失败在某个角落里
+// 走进「照样建行」那条路，写出一行毛利 = −成本的记录。
+// 接口里没有第三个写入口，采集因而绕不过这两条（同 jobs.ObservationStore
+// 不声明 Upsert 的理由）。
 type LedgerWriter interface {
 	WriteRow(ctx context.Context, row ProfitRow) (ProfitRow, error)
+	WriteAmortizedRow(ctx context.Context, row ProfitRow) (ProfitRow, error)
 }
 
 // MeteringClientFactory 按上游账号构造一个只读取数客户端。
@@ -60,14 +78,15 @@ type MeteringClientFactory func(
 
 // PlatformResolver 给出一条映射的自营平台归属（§5.2 的分桶键）。
 //
-// 返回空串 = 未配对，落库为 NULL 并进「未归属」那一桶——**这是当前的正常状态**：
-// 登记簿（§2.1）里没有任何一列记录「这个自营账号属于哪个自营平台」，
-// 平台归属的配置面是 XM-0037c/d 的事。
+// 返回空串 = 未配对，落库为 NULL 并进「未归属」那一桶。
 //
-// 那为什么现在就要这个钩子？因为 §1.3 要求 platform_id **第一天就写全**——
-// 指的是「写入路径从第一天起就带着这一列」，不是「第一天就必须有值」（§2.2
-// 明确 NULL = 写入当时未配对）。留下解析点，037d 接上归属配置时只需注入一个
-// 函数，不必回来改台账的写入路径——而改写入路径正是 SoloAI 演进期
+// **XM-0037c 起它有真实取值了**：登记簿新增了 upstream_account.platform_id
+// （迁移 000010），默认解析器就读那一列。037b 留这个钩子时登记簿里还没有
+// 任何一列能回答「这个上游账号被哪个自营平台在用」，于是它恒返回空串。
+//
+// 钩子本身保留而不是改成直接读字段：037d 可能需要更细的归属规则
+// （同一个上游账号的不同令牌供给不同平台），届时注入一个函数即可，
+// 不必回来改台账的写入路径——而改写入路径正是 SoloAI 演进期
 // 「写入方漏写 platform_id」那个缺陷的来源。
 type PlatformResolver func(account UpstreamAccount, mapping TokenMapping) string
 
@@ -79,7 +98,9 @@ type CollectorOptions struct {
 	InstanceID string
 
 	Registry AccountRegistry
-	Ledger   LedgerWriter
+	// Subscriptions 供订阅型渠道的摊销取数（XM-0037c，§3.5）。
+	Subscriptions SubscriptionRegistry
+	Ledger        LedgerWriter
 
 	NewClient       MeteringClientFactory
 	ResolvePlatform PlatformResolver
@@ -96,6 +117,7 @@ type Collector struct {
 	instanceID  string
 
 	registry        AccountRegistry
+	subscriptions   SubscriptionRegistry
 	ledger          LedgerWriter
 	newClient       MeteringClientFactory
 	resolvePlatform PlatformResolver
@@ -111,15 +133,19 @@ func NewCollector(opts CollectorOptions) *Collector {
 		opts.Now = time.Now
 	}
 	if opts.ResolvePlatform == nil {
-		// 默认「未配对」而不是编一个平台名：一个猜出来的归属会让四桶里
-		// 「有效平台」那一桶凭空多出金额，且完全看不出是猜的（宪法 12 条）。
-		opts.ResolvePlatform = func(UpstreamAccount, TokenMapping) string { return "" }
+		// 默认读登记簿那一列（XM-0037c 新增），而不是编一个平台名：
+		// 一个猜出来的归属会让四桶里「有效平台」那一桶凭空多出金额，
+		// 且完全看不出是猜的（宪法 12 条）。没配就是空串 = 未归属。
+		opts.ResolvePlatform = func(account UpstreamAccount, _ TokenMapping) string {
+			return account.PlatformID
+		}
 	}
 	return &Collector{
 		logger:          opts.Logger,
 		environment:     opts.Environment,
 		instanceID:      opts.InstanceID,
 		registry:        opts.Registry,
+		subscriptions:   opts.Subscriptions,
 		ledger:          opts.Ledger,
 		newClient:       opts.NewClient,
 		resolvePlatform: opts.ResolvePlatform,
@@ -144,6 +170,37 @@ type CollectResult struct {
 	RowsSkippedOneSided int
 	// RowsFailed：写库失败或行本身非法——这一类才是真故障。
 	RowsFailed int
+
+	// RowsAggregated：因「多把令牌供给同一自营账号」而写成**账号级聚合行**
+	// 的行数（§12.2 的渠道键裁定）。
+	//
+	// 单独计数是因为它改变了台账的粒度：那几把令牌从此没有独立的下钻行。
+	// 数字忽然变大意味着有人给某个自营账号加挂了第二把 key——那是一次
+	// 值得知道的拓扑变化，而不是一个静默发生的聚合。
+	RowsAggregated int
+
+	// --- 订阅型渠道（XM-0037c，§3.5）---
+
+	// SubscriptionAccountsTotal 是本轮遍历到的订阅型账号数。
+	SubscriptionAccountsTotal int
+	// SubscriptionRowsWritten 是摊销入账的行数（RowsWritten 的子集）。
+	SubscriptionRowsWritten int
+	// SubscriptionRowsCostOnly 是其中**收入未知**的行数。
+	//
+	// 它不是失败：订阅型渠道的收入通道在 v1 常常还没接（newapi 的收入 DSN
+	// 是单独一片）。但它必须可见——一批只有成本没有收入的行会让渠道毛利
+	// 全是 NULL，看板上得说得出为什么（宪法 12 条）。
+	SubscriptionRowsCostOnly int
+	// RowsSkippedNoBatch：订阅账号当日没有任何覆盖批次 → 成本未知，跳过。
+	//
+	// 「还没登记批次」与「订阅真的到期了」在库里长得一样，平台分不出来，
+	// 所以两者都落成「未知」并计进这个数，让运营去补一笔批次或停用账号。
+	RowsSkippedNoBatch int
+	// RowsSkippedNoOwner：订阅账号没有唯一的自营账号可归属，跳过。
+	//
+	// 摊销成本是**账号级**的一笔钱，它必须记在某一个自营账号头上；
+	// 零个映射（还没配）与多个不同的自营账号（拆分口径未定）都给不出那个头。
+	RowsSkippedNoOwner int
 
 	// RowsWithProfit 是写完之后**两侧都已知**、因而算得出毛利的行数。
 	//
@@ -237,43 +294,92 @@ func (c *Collector) CollectOnce(ctx context.Context) (CollectResult, error) {
 	if c.registry == nil || c.ledger == nil || c.newClient == nil {
 		return result, errors.New("finance: collector 缺少 registry / ledger / client factory")
 	}
+	if c.subscriptions == nil {
+		// 必填而不是「没配就跳过订阅型」：跳过的话，一个装配漏了这一项的部署
+		// 会安安静静地把订阅渠道的成本全部漏掉——报表上那几条渠道的毛利
+		// 恰好等于收入，看起来完全正常（宪法 12 条）。
+		return result, errors.New("finance: collector 缺少 subscriptions registry（订阅型渠道的摊销取数）")
+	}
 
-	// 只取计量型：三种接入方式对应三条完全不同的成本算法（§2.0），
-	// 订阅型走 §3.5 摊销（XM-0037c），official_api v1 占位后置（§12）。
-	// 按接入方式取清单而不是取全量再在内存里 switch——漏掉一个新枚举值时，
-	// 前者什么都不做，后者会拿计量型的算法去算它。
+	// 两轮分别按接入方式取清单，而不是取全量再在内存里 switch：
+	// 三种接入方式对应三条完全不同的成本算法（§2.0），漏掉一个新枚举值时，
+	// 按方式取什么都不做，取全量再 switch 会拿其中一套算法去算它。
+	// official_api v1 占位后置（§12 拍板），因而两轮都不碰它。
+	if err := c.collectMetered(ctx, &result); err != nil {
+		return result, err
+	}
+	if err := c.collectSubscriptions(ctx, &result); err != nil {
+		return result, err
+	}
+
+	if result.RowsFailed > 0 || result.RowsSkippedNothingKnown > 0 ||
+		result.RowsSkippedOneSided > 0 || result.RowsSkippedNoBatch > 0 ||
+		result.RowsSkippedNoOwner > 0 {
+		result.Partial = true
+	}
+	return result, nil
+}
+
+// collectMetered 跑计量型那一轮（§3.1/§3.2，XM-0037b 的原路径）。
+func (c *Collector) collectMetered(ctx context.Context, result *CollectResult) error {
 	accounts, err := c.registry.ListActiveAccountsByAccessMethod(
 		ctx, c.environment, AccessUpstreamKey)
 	if err != nil {
-		return result, fmt.Errorf("取计量型账号清单: %w", err)
+		return fmt.Errorf("取计量型账号清单: %w", err)
 	}
 	result.AccountsTotal = len(accounts)
 
 	for _, account := range accounts {
 		if err := ctx.Err(); err != nil {
 			// 上下文取消说明本进程在关机，不是采集出问题。剩下的账号留到下一轮。
-			return result, err
+			return err
 		}
-		if err := c.collectAccount(ctx, account, &result); err != nil {
-			result.AccountsFailed++
-			result.Partial = true
-			if result.FirstError == nil {
-				result.FirstError = err
-			}
-			c.logger.LogAttrs(ctx, slog.LevelWarn, "finance_collect_account_failed",
-				slog.String("module", "platform.finance"),
-				slog.String("environment", c.environment),
-				slog.String("upstream_account_id", account.ID.String()),
-				slog.String("system_type", string(account.SystemType)),
-				slog.String("error_code", string(connector.KindOf(err))),
-			)
+		if err := c.collectAccount(ctx, account, result); err != nil {
+			c.recordAccountFailure(ctx, account, result, err)
 		}
 	}
-	if result.RowsFailed > 0 || result.RowsSkippedNothingKnown > 0 ||
-		result.RowsSkippedOneSided > 0 {
-		result.Partial = true
+	return nil
+}
+
+// collectSubscriptions 跑订阅型那一轮（§3.5 摊销，XM-0037c）。
+//
+// 与计量型完全对称的失败隔离：一个账号的批次配错了不该让其余账号今天也没有数。
+func (c *Collector) collectSubscriptions(ctx context.Context, result *CollectResult) error {
+	accounts, err := c.registry.ListActiveAccountsByAccessMethod(
+		ctx, c.environment, AccessSubscriptionAccount)
+	if err != nil {
+		return fmt.Errorf("取订阅型账号清单: %w", err)
 	}
-	return result, nil
+	result.SubscriptionAccountsTotal = len(accounts)
+
+	for _, account := range accounts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := c.amortizeAccount(ctx, account, result); err != nil {
+			c.recordAccountFailure(ctx, account, result, err)
+		}
+	}
+	return nil
+}
+
+// recordAccountFailure 把一个账号整体没采成计进结果并落结构化日志。
+func (c *Collector) recordAccountFailure(
+	ctx context.Context, account UpstreamAccount, result *CollectResult, err error,
+) {
+	result.AccountsFailed++
+	result.Partial = true
+	if result.FirstError == nil {
+		result.FirstError = err
+	}
+	c.logger.LogAttrs(ctx, slog.LevelWarn, "finance_collect_account_failed",
+		slog.String("module", "platform.finance"),
+		slog.String("environment", c.environment),
+		slog.String("upstream_account_id", account.ID.String()),
+		slog.String("system_type", string(account.SystemType)),
+		slog.String("access_method", string(account.AccessMethod)),
+		slog.String("error_code", string(connector.KindOf(err))),
+	)
 }
 
 // collectAccount 采集一个上游账号。
@@ -308,69 +414,61 @@ func (c *Collector) collectAccount(
 
 	// 收入按**自营账号**取一次（§3.2 的端点是账号级），而不是每个令牌取一次：
 	// 同一账号取 N 次会拿到 N 个相同的数，白打上游 N-1 次。
-	revenues, ambiguous := c.readRevenues(ctx, client, account, mappings, dayText, result)
-	if len(ambiguous) > 0 {
-		result.Partial = true
-	}
+	groups := groupByOwnAccount(mappings)
+	revenues := c.readRevenues(ctx, client, account, groups, dayText, result)
 
-	for _, mapping := range mappings {
-		if _, skip := ambiguous[mapping.OwnAccountID]; skip {
-			// 归属歧义：这一组令牌今天不入账，理由见 readRevenues。
+	for _, group := range groups {
+		if len(group.Mappings) == 1 {
+			// 单令牌账号维持**令牌级行**，保留下钻（§12.2）。
+			c.collectToken(ctx, client, account, group.Mappings[0], day, dayText, revenues, result)
 			continue
 		}
-		c.collectToken(ctx, client, account, mapping, day, dayText, revenues, result)
+		c.collectAggregatedAccount(ctx, client, account, group, day, dayText, revenues, result)
 	}
 	return nil
 }
 
+// ownAccountGroup 是「同一个自营账号名下的全部上游令牌」。
+type ownAccountGroup struct {
+	OwnAccountID string
+	Mappings     []TokenMapping
+}
+
+// groupByOwnAccount 按自营账号把映射分组，顺序确定。
+//
+// 确定的顺序不是洁癖：分组顺序决定了日志里事件出现的次序，也决定了
+// 聚合行取哪一条映射去解析 platform_id。让它随 map 迭代顺序变，
+// 会让同一份配置在两轮采集里产出两种归属。
+func groupByOwnAccount(mappings []TokenMapping) []ownAccountGroup {
+	index := make(map[string]int, len(mappings))
+	out := make([]ownAccountGroup, 0, len(mappings))
+	for _, m := range mappings {
+		if i, seen := index[m.OwnAccountID]; seen {
+			out[i].Mappings = append(out[i].Mappings, m)
+			continue
+		}
+		index[m.OwnAccountID] = len(out)
+		out = append(out, ownAccountGroup{OwnAccountID: m.OwnAccountID, Mappings: []TokenMapping{m}})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].OwnAccountID < out[j].OwnAccountID })
+	for i := range out {
+		sort.Slice(out[i].Mappings, func(a, b int) bool {
+			return out[i].Mappings[a].UpstreamTokenID < out[i].Mappings[b].UpstreamTokenID
+		})
+	}
+	return out
+}
+
 // readRevenues 逐自营账号读一次使用计费收入（§3.2）。
 //
-// 第二个返回值是「收入归属有歧义」的自营账号集合。歧义来自登记簿允许的一种
-// 真实形态：**多把上游令牌供给同一个自营账号**（token_map 的反向索引刻意不是
-// 唯一索引，见 000008 迁移的注释）。此时收入是账号级的一个数，而台账的行是
-// 令牌级的——把同一个收入写进 N 行，按渠道 SUM 就会把它算 N 遍；
-// 只写进其中一行，另外几行就变成「成本已知、收入未知」，按 §5.1 不建行，
-// 那几笔成本会从台账里消失。
-//
-// 两条路都会产出一个**看起来完全正常的错数字**，而设计稿没有给这种形态的
-// 归属规则。所以这里的选择是：**这一组令牌今天不入账，并把歧义显式报出来**
-// （宪法 12 条：宁可缺一块并说清楚，也不给一个不知道错在哪的数）。
-// 需要产品定义 N:1 的收入拆分口径，已记入 PR 的 follow_ups。
+// 一个自营账号一次，与它名下挂了几把令牌无关——端点本来就是账号级的。
 func (c *Collector) readRevenues(
 	ctx context.Context, client metering.ReadClient, account UpstreamAccount,
-	mappings []TokenMapping, dayText string, result *CollectResult,
-) (map[string]metering.AccountRevenue, map[string]struct{}) {
-	tokensPerAccount := make(map[string]int, len(mappings))
-	for _, m := range mappings {
-		tokensPerAccount[m.OwnAccountID]++
-	}
-
-	revenues := make(map[string]metering.AccountRevenue, len(tokensPerAccount))
-	ambiguous := make(map[string]struct{})
-	for _, m := range mappings {
-		ownAccountID := m.OwnAccountID
-		if _, done := revenues[ownAccountID]; done {
-			continue
-		}
-		if _, known := ambiguous[ownAccountID]; known {
-			continue
-		}
-		if tokensPerAccount[ownAccountID] > 1 {
-			ambiguous[ownAccountID] = struct{}{}
-			c.logger.LogAttrs(ctx, slog.LevelWarn, "finance_revenue_attribution_ambiguous",
-				slog.String("module", "platform.finance"),
-				slog.String("environment", c.environment),
-				slog.String("upstream_account_id", account.ID.String()),
-				slog.String("own_account_id", ownAccountID),
-				slog.Int("token_count", tokensPerAccount[ownAccountID]),
-				slog.String("error_code", "revenue_attribution_ambiguous"),
-				slog.String("hint", "同一自营账号挂了多把上游令牌；账号级收入无法逐令牌归属，"+
-					"本轮不入账。需产品定义拆分口径（设计稿 §12.2 的「渠道键」问题）"),
-			)
-			continue
-		}
-
-		revenue, err := client.AccountRevenue(ctx, ownAccountID, dayText)
+	groups []ownAccountGroup, dayText string, result *CollectResult,
+) map[string]metering.AccountRevenue {
+	revenues := make(map[string]metering.AccountRevenue, len(groups))
+	for _, group := range groups {
+		revenue, err := client.AccountRevenue(ctx, group.OwnAccountID, dayText)
 		if err != nil {
 			// 读不到 = 未知，不是 0（§5.1）。不进 revenues，后面就写 NULL。
 			//
@@ -386,7 +484,7 @@ func (c *Collector) readRevenues(
 				slog.String("module", "platform.finance"),
 				slog.String("environment", c.environment),
 				slog.String("upstream_account_id", account.ID.String()),
-				slog.String("own_account_id", ownAccountID),
+				slog.String("own_account_id", group.OwnAccountID),
 				slog.String("business_day", dayText),
 				slog.String("error_code", string(kind)),
 			)
@@ -396,10 +494,113 @@ func (c *Collector) readRevenues(
 			result.Partial = true
 			continue
 		}
-		revenues[ownAccountID] = revenue
+		revenues[group.OwnAccountID] = revenue
 		result.Revenues = append(result.Revenues, revenue)
 	}
-	return revenues, ambiguous
+	return revenues
+}
+
+// collectAggregatedAccount 把「多把令牌供给同一个自营账号」写成一行
+// **账号级聚合行**（§12.2 的渠道键裁定，XM-0037c）。
+//
+// 037b 在这里的选择是「整组不入账」，因为收入端点是账号级的、而台账的行是
+// 令牌级的，两条显而易见的路都产出错数字：把同一个收入写进 N 行，按渠道 SUM
+// 会算 N 遍；只写进其中一行，另外几行变成「成本已知、收入未知」按 §5.1
+// 不建行，那几笔成本从台账里消失。
+//
+// 产品口径已定：**写一行账号级聚合行**——成本取该账号名下全部令牌之和，
+// 收入取账号级那一个数，主键第三段用 `account:<own_account_id>` 哨兵。
+// 收入只出现一次（不重复计），成本一分不少（不蒸发），按 upstream_account
+// 上卷的总数与逐令牌写法完全一致。代价是这几把令牌没有独立的下钻行——
+// 那正是 RowsAggregated 单独计数的原因。
+//
+// **任一令牌的成本读不到，整行的成本就是未知**（不是「已知的那几把之和」）：
+// 部分之和会给出一个偏低且看不出偏低的成本，那正是 §5.1 要挡的错数字。
+// 与 PlatformBucket.ProfitMinorSum 在覆盖行数不足时返回 nil 是同一条纪律。
+func (c *Collector) collectAggregatedAccount(
+	ctx context.Context, client metering.ReadClient,
+	account UpstreamAccount, group ownAccountGroup,
+	day time.Time, dayText string,
+	revenues map[string]metering.AccountRevenue, result *CollectResult,
+) {
+	row := ProfitRow{
+		UpstreamAccountID: account.ID,
+		BusinessDay:       day,
+		BusinessDayTZ:     account.BusinessDayTZ,
+		TokenID:           AccountGrainTokenID(group.OwnAccountID),
+		AccountID:         group.OwnAccountID,
+		PlatformID:        c.resolvePlatform(account, group.Mappings[0]),
+		Currency:          account.Currency,
+		Source:            c.instanceID,
+		RatioSnapshot:     account.RechargeRatio,
+	}
+
+	var (
+		total     int64
+		allKnown  = true
+		oldest    time.Time
+		anyCost   bool
+		firstCost metering.TokenCost
+	)
+	for _, mapping := range group.Mappings {
+		// 即使已经有令牌读失败也继续读完：每一把的失败都该各自进日志，
+		// 提前退出会让运维只看得见第一把坏的那个。
+		cost, ok := c.readCost(ctx, client, account, mapping, dayText, result)
+		if !ok {
+			allKnown = false
+			continue
+		}
+		result.Costs = append(result.Costs, cost)
+		total += cost.CostMinorUnits
+		if !anyCost {
+			anyCost, firstCost = true, cost
+		}
+		// 观测时刻取**最旧**的那个：聚合值的新鲜度由最不新鲜的成员决定，
+		// 取最新会让一把刚刷新的令牌替其余几把陈旧的读数背书
+		// （同 metering.aggregateSnapshot）。
+		if !cost.ObservedAt.IsZero() && (oldest.IsZero() || cost.ObservedAt.Before(oldest)) {
+			oldest = cost.ObservedAt
+		}
+	}
+
+	if allKnown && anyCost {
+		row.CostMinor = &total
+		row.RatioSnapshot = firstCost.RatioSnapshot
+		if firstCost.Currency != "" {
+			row.Currency = firstCost.Currency
+		}
+		if !oldest.IsZero() {
+			observed := oldest.UTC()
+			row.CostObservedAt = &observed
+		}
+	}
+	if revenue, ok := revenues[group.OwnAccountID]; ok {
+		minor := revenue.RevenueMinorUnits
+		row.RevenueMinor = &minor
+		if !revenue.ObservedAt.IsZero() {
+			observed := revenue.ObservedAt.UTC()
+			row.RevenueObservedAt = &observed
+		}
+		if revenue.Currency != "" && row.CostMinor == nil {
+			row.Currency = revenue.Currency
+		}
+	}
+
+	c.logger.LogAttrs(ctx, slog.LevelInfo, "finance_revenue_attribution_aggregated",
+		slog.String("module", "platform.finance"),
+		slog.String("environment", c.environment),
+		slog.String("upstream_account_id", account.ID.String()),
+		slog.String("own_account_id", group.OwnAccountID),
+		slog.String("business_day", dayText),
+		slog.Int("token_count", len(group.Mappings)),
+		slog.Bool("cost_fully_known", allKnown && anyCost),
+		slog.String("hint", "同一自营账号挂了多把上游令牌：写账号级聚合行"+
+			"（成本取各令牌之和、收入只计一次），这几把令牌没有独立的下钻行"),
+	)
+
+	if c.writeRow(ctx, account, row, dayText, result) {
+		result.RowsAggregated++
+	}
 }
 
 // collectToken 采集一个令牌并写一行台账。
@@ -454,6 +655,17 @@ func (c *Collector) collectToken(
 		}
 	}
 
+	c.writeRow(ctx, account, row, dayText, result)
+}
+
+// writeRow 把一行计量型台账交给 §5.1 的三条分支，并把三种结果分开计数。
+//
+// 返回是否真的写进去了。令牌级行与账号级聚合行共用它——两者的入账纪律
+// 完全相同，分头写两遍只会让其中一处漏掉某一类计数。
+func (c *Collector) writeRow(
+	ctx context.Context, account UpstreamAccount, row ProfitRow,
+	dayText string, result *CollectResult,
+) bool {
 	switch stored, err := c.ledger.WriteRow(ctx, row); {
 	case err == nil:
 		result.RowsWritten++
@@ -462,6 +674,7 @@ func (c *Collector) collectToken(
 		// 于是存进去的那一行可能两侧都全，而手里这个 row 只有一侧。
 		// 拿手里的算会把已经入账的收入漏掉。
 		result.accumulate(stored)
+		return true
 	case errors.Is(err, ErrProfitNothingKnown):
 		// 两侧都没读到：这一对今天没有可入账的事实。不是故障。
 		result.RowsSkippedNothingKnown++
@@ -478,12 +691,205 @@ func (c *Collector) collectToken(
 			slog.String("module", "platform.finance"),
 			slog.String("environment", c.environment),
 			slog.String("upstream_account_id", account.ID.String()),
-			slog.String("upstream_token_id", mapping.UpstreamTokenID),
+			slog.String("upstream_token_id", row.TokenID),
 			slog.String("business_day", dayText),
 			slog.String("error_code", string(connector.KindOf(err))),
 		)
 	}
+	return false
 }
+
+// amortizeAccount 给一个订阅型账号算当日摊销并入账（§3.5，XM-0037c）。
+//
+// 与计量型那条路的三处不同，每一处都有它自己的理由：
+//
+//  1. **成本不是读来的**——它是登记的付款按天、按账号摊出来的算术。
+//     所以这里没有「成本读失败」这种事，只有「当天没有批次覆盖」（未知）。
+//  2. **行是账号级的**（token_id 用 `account:` 哨兵）：摊销值本来就没有令牌维度，
+//     编一个令牌出来会让下钻点开一个不存在的东西。
+//  3. **收入未知时照样建行**（WriteAmortizedRow）：理由见那个方法的注释。
+//
+// 返回 error 表示这个账号整体没采成（业务日算不出、取不到批次、币种混杂）。
+// 「没有批次」「归属不出唯一自营账号」都不是失败——它们是配置还没到位，
+// 各自计数并显式报出来，重试一百次也不会变。
+func (c *Collector) amortizeAccount(
+	ctx context.Context, account UpstreamAccount, result *CollectResult,
+) error {
+	loc, err := account.BusinessDayLocation()
+	if err != nil {
+		return err
+	}
+	day := BusinessDayAt(c.now(), loc)
+	dayText := day.Format(ProfitBusinessDayLayout)
+
+	mappings, err := c.registry.ListTokenMappingsByAccount(ctx, account.ID)
+	if err != nil {
+		return fmt.Errorf("取令牌映射: %w", err)
+	}
+	owner, ok := soleOwnAccount(mappings)
+	if !ok {
+		// 摊销成本是账号级的一笔钱，必须记在某一个自营账号头上。
+		// 零个映射（还没配）与多个不同的自营账号（拆分口径未定）都给不出那个头。
+		result.RowsSkippedNoOwner++
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "finance_subscription_owner_unresolved",
+			slog.String("module", "platform.finance"),
+			slog.String("environment", c.environment),
+			slog.String("upstream_account_id", account.ID.String()),
+			slog.String("business_day", dayText),
+			slog.Int("mapping_count", len(mappings)),
+			slog.Int("distinct_own_accounts", countDistinctOwners(mappings)),
+			slog.String("error_code", "subscription_owner_unresolved"),
+			slog.String("hint", "订阅账号需要恰好一个自营账号来承接摊销成本："+
+				"零个 = 还没配 token_map；多个 = 一笔订阅摊给几个自营账号的口径未定"),
+		)
+		return nil
+	}
+
+	batches, err := c.subscriptions.ListAmortizableBatches(ctx, account.ID, day)
+	if err != nil {
+		return fmt.Errorf("取订阅批次: %w", err)
+	}
+	cost, err := AmortizeDay(batches, day)
+	switch {
+	case errors.Is(err, ErrNoAmortizableBatch):
+		// 成本**未知**，不是 0（见 ErrNoAmortizableBatch 的注释）。
+		result.RowsSkippedNoBatch++
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "finance_subscription_no_batch",
+			slog.String("module", "platform.finance"),
+			slog.String("environment", c.environment),
+			slog.String("upstream_account_id", account.ID.String()),
+			slog.String("own_account_id", owner),
+			slog.String("business_day", dayText),
+			slog.String("error_code", "subscription_no_covering_batch"),
+			slog.String("hint", "当日无覆盖的订阅批次：成本按未知处理（不写 0）。"+
+				"补一笔续费批次，或把账号停用"),
+		)
+		return nil
+	case err != nil:
+		// 币种混杂之类：这个账号今天算不出成本，计为账号失败。
+		return err
+	}
+
+	row := ProfitRow{
+		UpstreamAccountID: account.ID,
+		BusinessDay:       day,
+		BusinessDayTZ:     account.BusinessDayTZ,
+		TokenID:           AccountGrainTokenID(owner),
+		AccountID:         owner,
+		PlatformID:        c.resolvePlatform(account, mappings[0]),
+		CostMinor:         &cost.CostMinor,
+		Currency:          cost.Currency,
+		Source:            c.instanceID,
+		// §12 拍板：摊销行的 ratio_snapshot 恒为 1——摊销值即成本，未经折算。
+		RatioSnapshot: AmortizationRatio,
+		// 成本的「观测时刻」就是这一轮算它的时刻：它不是从上游读来的读数，
+		// 而是此刻按登记簿现算的。留空会让看板把一个每轮都在刷新的值
+		// 显示成「从未采到」（宪法 12 条）。
+		CostObservedAt: timePtr(c.now().UTC()),
+	}
+	if revenue, ok := c.readSubscriptionRevenue(ctx, account, owner, dayText, result); ok {
+		minor := revenue.RevenueMinorUnits
+		row.RevenueMinor = &minor
+		if !revenue.ObservedAt.IsZero() {
+			observed := revenue.ObservedAt.UTC()
+			row.RevenueObservedAt = &observed
+		}
+	}
+
+	stored, err := c.ledger.WriteAmortizedRow(ctx, row)
+	if err != nil {
+		result.RowsFailed++
+		result.Partial = true
+		if result.FirstError == nil {
+			result.FirstError = err
+		}
+		c.logger.LogAttrs(ctx, slog.LevelError, "finance_ledger_write_failed",
+			slog.String("module", "platform.finance"),
+			slog.String("environment", c.environment),
+			slog.String("upstream_account_id", account.ID.String()),
+			slog.String("own_account_id", owner),
+			slog.String("business_day", dayText),
+			slog.String("error_code", string(connector.KindOf(err))),
+		)
+		return nil
+	}
+	result.RowsWritten++
+	result.SubscriptionRowsWritten++
+	if stored.RevenueMinor == nil {
+		result.SubscriptionRowsCostOnly++
+	}
+	result.accumulate(stored)
+	return nil
+}
+
+// readSubscriptionRevenue 读订阅账号的账号级使用计费收入（§3.2）。
+//
+// **收入通道缺席是常态，不是故障**：订阅型渠道的收入源在 v1 常常还没接
+// （newapi 的收入 DSN 是单独一片），而没有 base_url 的账号根本建不起客户端。
+// 那种情况下这里安静地返回未知——成本照常入账，毛利显示为 NULL。
+//
+// 不为此打日志：它是一个稳定的配置事实（登记簿里看得见），每 5 分钟
+// 重复一次只会把真正的读取失败淹掉。规模由 SubscriptionRowsCostOnly 呈现。
+func (c *Collector) readSubscriptionRevenue(
+	ctx context.Context, account UpstreamAccount, ownAccountID, dayText string,
+	result *CollectResult,
+) (metering.AccountRevenue, bool) {
+	if strings.TrimSpace(account.BaseURL) == "" {
+		return metering.AccountRevenue{}, false
+	}
+	client, err := c.newClient(ctx, account)
+	if err != nil {
+		return metering.AccountRevenue{}, false
+	}
+	revenue, err := client.AccountRevenue(ctx, ownAccountID, dayText)
+	if err != nil {
+		kind := connector.KindOf(err)
+		if kind == connector.KindNotSupported {
+			// 这条渠道没有收入端点——同上，安静地当作未知。
+			return metering.AccountRevenue{}, false
+		}
+		// 有端点却读不到：那是真的读取失败，与计量型同一条处理。
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "finance_revenue_read_failed",
+			slog.String("module", "platform.finance"),
+			slog.String("environment", c.environment),
+			slog.String("upstream_account_id", account.ID.String()),
+			slog.String("own_account_id", ownAccountID),
+			slog.String("business_day", dayText),
+			slog.String("error_code", string(kind)),
+		)
+		if result.FirstError == nil {
+			result.FirstError = err
+		}
+		result.Partial = true
+		return metering.AccountRevenue{}, false
+	}
+	result.Revenues = append(result.Revenues, revenue)
+	return revenue, true
+}
+
+// soleOwnAccount 取「这批映射唯一指向的自营账号」；不唯一时返回 false。
+func soleOwnAccount(mappings []TokenMapping) (string, bool) {
+	if len(mappings) == 0 {
+		return "", false
+	}
+	owner := mappings[0].OwnAccountID
+	for _, m := range mappings[1:] {
+		if m.OwnAccountID != owner {
+			return "", false
+		}
+	}
+	return owner, true
+}
+
+func countDistinctOwners(mappings []TokenMapping) int {
+	seen := make(map[string]struct{}, len(mappings))
+	for _, m := range mappings {
+		seen[m.OwnAccountID] = struct{}{}
+	}
+	return len(seen)
+}
+
+func timePtr(t time.Time) *time.Time { return &t }
 
 // readCost 读一个令牌的上游实扣并折算成平台成本（§3.1 + §2.4）。
 func (c *Collector) readCost(

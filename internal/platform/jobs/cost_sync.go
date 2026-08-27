@@ -132,10 +132,12 @@ type FinanceCollectOptions struct {
 	// 运维必须能从日志里一眼看出这批数字是不是 Fake 产的。
 	Mode FinanceCollectMode
 
-	// Store 落运营指标；Registry 与 Ledger 是采集的两端。
+	// Store 落运营指标；Registry / Subscriptions 与 Ledger 是采集的两端。
 	Store    ObservationStore
 	Registry finance.AccountRegistry
-	Ledger   finance.LedgerWriter
+	// Subscriptions 供订阅型渠道的摊销取数（XM-0037c，§3.5）。
+	Subscriptions finance.SubscriptionRegistry
+	Ledger        finance.LedgerWriter
 
 	NewClient       finance.MeteringClientFactory
 	ResolvePlatform finance.PlatformResolver
@@ -156,6 +158,7 @@ type FinanceCollectWorker struct {
 
 	store           ObservationStore
 	registry        finance.AccountRegistry
+	subscriptions   finance.SubscriptionRegistry
 	ledger          finance.LedgerWriter
 	newClient       finance.MeteringClientFactory
 	resolvePlatform finance.PlatformResolver
@@ -183,6 +186,7 @@ func NewFinanceCollectWorker(opts FinanceCollectOptions) *FinanceCollectWorker {
 		mode:            opts.Mode,
 		store:           opts.Store,
 		registry:        opts.Registry,
+		subscriptions:   opts.Subscriptions,
 		ledger:          opts.Ledger,
 		newClient:       opts.NewClient,
 		resolvePlatform: opts.ResolvePlatform,
@@ -213,8 +217,8 @@ func (w *FinanceCollectWorker) Work(
 	if w.store == nil {
 		return errors.New("jobs: finance collect worker has no observation store")
 	}
-	if w.registry == nil || w.ledger == nil {
-		return errors.New("jobs: finance collect worker has no registry / ledger")
+	if w.registry == nil || w.subscriptions == nil || w.ledger == nil {
+		return errors.New("jobs: finance collect worker has no registry / subscriptions / ledger")
 	}
 	if w.newClient == nil {
 		return errors.New("jobs: finance collect worker has no metering client factory")
@@ -226,6 +230,7 @@ func (w *FinanceCollectWorker) Work(
 		Environment:     w.environment,
 		InstanceID:      w.instanceID,
 		Registry:        w.registry,
+		Subscriptions:   w.subscriptions,
 		Ledger:          w.ledger,
 		NewClient:       w.newClient,
 		ResolvePlatform: w.resolvePlatform,
@@ -291,6 +296,12 @@ func (w *FinanceCollectWorker) Work(
 		slog.Int("rows_skipped_nothing_known", result.RowsSkippedNothingKnown),
 		slog.Int("rows_skipped_one_sided", result.RowsSkippedOneSided),
 		slog.Int("rows_failed", result.RowsFailed),
+		slog.Int("rows_aggregated", result.RowsAggregated),
+		slog.Int("subscription_accounts_total", result.SubscriptionAccountsTotal),
+		slog.Int("subscription_rows_written", result.SubscriptionRowsWritten),
+		slog.Int("subscription_rows_cost_only", result.SubscriptionRowsCostOnly),
+		slog.Int("rows_skipped_no_batch", result.RowsSkippedNoBatch),
+		slog.Int("rows_skipped_no_owner", result.RowsSkippedNoOwner),
 	)
 	return nil
 }

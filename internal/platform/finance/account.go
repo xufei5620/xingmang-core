@@ -154,6 +154,17 @@ type UpstreamAccount struct {
 	// BusinessDayTZ 是业务日切日时区的固定偏移，如 "+08:00"（宪法 14 条）。
 	BusinessDayTZ string
 
+	// PlatformID 是「哪个自营平台在用这个上游账号」的归属标注（§5.2，XM-0037c）。
+	//
+	// 空串 = 未配对，落库为 NULL。它是采集器 PlatformResolver 的取值处——
+	// 037b 留下那个钩子时登记簿里还没有任何一列能回答这个问题，于是台账的
+	// platform_id 恒为 NULL、四桶恒只剩「未归属」一桶。
+	//
+	// **登记后可改**，与 AccessMethod（登记后不可改）刻意相反：它只是一条标注，
+	// 改它不改变任何一个金额怎么算；而台账侧 platform_id 的 COALESCE 方向是
+	// 「空缺可补、已有不动」（§5.3），历史行的归属不会被追溯改写。
+	PlatformID string
+
 	Status      Status
 	Environment string
 
@@ -260,6 +271,14 @@ func (a UpstreamAccount) Validate() error {
 	if !businessDayTZPattern.MatchString(a.BusinessDayTZ) {
 		return fmt.Errorf("business_day_tz %q 须为固定偏移如 +08:00（不接受 IANA 时区名）: %w",
 			a.BusinessDayTZ, ErrInvalidFormat)
+	}
+
+	if a.PlatformID != "" && !platformIDPattern.MatchString(a.PlatformID) {
+		// 与 ProfitRow.Validate 同一条：形态错的 platform_id 永远匹配不上任何
+		// 平台，会永久停在四桶的「指向已移除平台」那一桶里，
+		// 而那一桶本该表示「平台真的下线了」。
+		return fmt.Errorf("platform_id %q 须匹配 %s: %w",
+			a.PlatformID, platformIDPattern.String(), ErrInvalidFormat)
 	}
 
 	return a.validateRatio()

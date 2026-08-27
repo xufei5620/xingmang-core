@@ -135,3 +135,31 @@ func StringParam(params map[string]any, name string) string {
 	s, _ := params[name].(string)
 	return s
 }
+
+// IntParam 从已校验的参数中取出整数（缺失返回 0）。
+//
+// 三种来源都收：Go 直接构造的 int / int64，以及 JSON 解码后的 float64。
+// 最后一种是 HTTP 路径的常态——encoding/json 把所有数字解成 float64。
+// checkField 已经拒绝过带小数部分的值，所以这里的转换不会丢东西。
+//
+// **不用它取金额**：float64 在 scale-6 下超过 $9,007,199 就开始丢精度，
+// 而丢掉的那一位不会报错（宪法 13 条）。金额一律走字符串参数
+// （见 finance.requiredMinorParam）。
+func IntParam(params map[string]any, name string) int {
+	switch n := params[name].(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+// BoolParam 从已校验的参数中取出布尔值（缺失返回 false）。
+func BoolParam(params map[string]any, name string) bool {
+	b, _ := params[name].(bool)
+	return b
+}

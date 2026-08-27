@@ -105,11 +105,45 @@ func (m *memLedger) WriteRow(_ context.Context, row finance.ProfitRow) (finance.
 	return merged, nil
 }
 
+// WriteAmortizedRow 复刻订阅型那条分支（XM-0037c）：成本是算出来的，
+// **收入未知时照样建行**。与 WriteRow 是两条纪律，所以这里也分两个方法写——
+// 合成一个的话，「计量型读失败」会走进「照样建行」那条路而测试发现不了。
+func (m *memLedger) WriteAmortizedRow(
+	_ context.Context, row finance.ProfitRow,
+) (finance.ProfitRow, error) {
+	if err := row.Validate(); err != nil {
+		return finance.ProfitRow{}, err
+	}
+	if row.CostMinor == nil {
+		return finance.ProfitRow{}, errors.New("摊销入账必须带成本")
+	}
+	if row.TokenID == m.failOn {
+		return finance.ProfitRow{}, errors.New("库炸了")
+	}
+	key := m.key(row)
+	merged := row
+	if existing, found := m.rows[key]; found {
+		if existing.PlatformID != "" {
+			merged.PlatformID = existing.PlatformID
+		}
+		// 收入侧本轮没读到就保留库里已有的（同 UpsertProfitDailyAmortizedCost）
+		if merged.RevenueMinor == nil {
+			merged.RevenueMinor = existing.RevenueMinor
+			merged.RevenueObservedAt = existing.RevenueObservedAt
+		}
+	}
+	merged.UpdatedAt = collectNow
+	m.rows[key] = merged
+	return merged, nil
+}
+
 // memRegistry 是内存登记簿。
 type memRegistry struct {
 	accounts []finance.UpstreamAccount
-	mappings map[uuid.UUID][]finance.TokenMapping
-	listErr  error
+	// subscriptionAccounts 是订阅型那一轮的清单（XM-0037c）。
+	subscriptionAccounts []finance.UpstreamAccount
+	mappings             map[uuid.UUID][]finance.TokenMapping
+	listErr              error
 }
 
 func (m *memRegistry) ListActiveAccountsByAccessMethod(
@@ -118,11 +152,32 @@ func (m *memRegistry) ListActiveAccountsByAccessMethod(
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
-	if method != finance.AccessUpstreamKey {
-		// 采集只该来要计量型；要别的说明分叉点判错了（§2.0）
+	switch method {
+	case finance.AccessUpstreamKey:
+		return m.accounts, nil
+	case finance.AccessSubscriptionAccount:
+		return m.subscriptionAccounts, nil
+	default:
+		// official_api v1 占位后置（§12 拍板），采集两轮都不该来要它
 		return nil, nil
 	}
-	return m.accounts, nil
+}
+
+// memSubscriptions 是内存订阅登记（XM-0037c 的摊销取数端）。
+type memSubscriptions struct {
+	batches map[uuid.UUID][]finance.AmortizableBatch
+	listErr error
+}
+
+func (m *memSubscriptions) ListAmortizableBatches(
+	_ context.Context, accountID uuid.UUID, day time.Time,
+) ([]finance.AmortizableBatch, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	// 覆盖判定留给 AmortizeDay（它才是口径的所在），这里只按账号取。
+	_ = day
+	return m.batches[accountID], nil
 }
 
 func (m *memRegistry) ListTokenMappingsByAccount(
@@ -219,6 +274,7 @@ func mapping(accountID uuid.UUID, token, own string) finance.TokenMapping {
 
 type collectFixture struct {
 	registry *memRegistry
+	subs     *memSubscriptions
 	ledger   *memLedger
 	clients  map[uuid.UUID]metering.ReadClient
 	factErrs map[uuid.UUID]error
@@ -227,11 +283,12 @@ type collectFixture struct {
 
 func (f *collectFixture) collector() *finance.Collector {
 	return finance.NewCollector(finance.CollectorOptions{
-		Logger:      quietLogger(),
-		Environment: "production",
-		InstanceID:  "finance-collect-test",
-		Registry:    f.registry,
-		Ledger:      f.ledger,
+		Logger:        quietLogger(),
+		Environment:   "production",
+		InstanceID:    "finance-collect-test",
+		Registry:      f.registry,
+		Subscriptions: f.subs,
+		Ledger:        f.ledger,
 		NewClient: func(_ context.Context, a finance.UpstreamAccount) (metering.ReadClient, error) {
 			if err := f.factErrs[a.ID]; err != nil {
 				return nil, err
@@ -246,6 +303,7 @@ func (f *collectFixture) collector() *finance.Collector {
 func newFixture(accounts ...finance.UpstreamAccount) *collectFixture {
 	return &collectFixture{
 		registry: &memRegistry{accounts: accounts, mappings: map[uuid.UUID][]finance.TokenMapping{}},
+		subs:     &memSubscriptions{batches: map[uuid.UUID][]finance.AmortizableBatch{}},
 		ledger:   newMemLedger(),
 		clients:  map[uuid.UUID]metering.ReadClient{},
 		factErrs: map[uuid.UUID]error{},
@@ -426,14 +484,18 @@ func TestCollectFailsWhenWorklistUnavailable(t *testing.T) {
 	}
 }
 
-// TestCollectRefusesAmbiguousRevenueAttribution 钉住那条「设计稿没给规则、
-// 两条路都是错数字」的形态：多把令牌供给同一个自营账号时，
-// 账号级收入无法逐令牌归属，本轮不入账并显式标记 partial。
+// TestCollectAggregatesMultiTokenAccount 钉住 §12.2 的渠道键裁定
+// （XM-0037c 落地，取代 037b 的「整组不入账」）。
 //
-// 为什么不选另外两条路：把同一个收入写进 N 行，按渠道 SUM 会算 N 遍；
-// 只写进其中一行，另外几行变成「成本已知、收入未知」按 §5.1 不建行，
-// 那几笔成本会从台账里消失。两条都不报错。
-func TestCollectRefusesAmbiguousRevenueAttribution(t *testing.T) {
+// 形态：一个自营账号挂两把上游令牌（token_map 的反向索引刻意不是唯一索引），
+// 另一个账号只挂一把。收入端点是**账号级**的，台账的行是**令牌级**的。
+//
+// 037b 的处理是那一组令牌整体不入账并报歧义——成本行蒸发。现在的口径是：
+//   - 多令牌账号 → 一行**账号级聚合行**，成本取两把令牌之和，收入只计一次；
+//   - 单令牌账号 → 维持令牌级行，保留下钻。
+//
+// 三条断言分别挡住三种错法：收入被算两遍、成本蒸发、聚合行撞主键。
+func TestCollectAggregatesMultiTokenAccount(t *testing.T) {
 	id := uuid.New()
 	f := newFixture(collectAccount(id))
 	f.registry.mappings[id] = []finance.TokenMapping{
@@ -447,20 +509,114 @@ func TestCollectRefusesAmbiguousRevenueAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("采集失败: %v", err)
 	}
-	if result.RowsWritten != 1 {
-		t.Fatalf("只有无歧义的那一条该入账: %+v", result)
+	if result.RowsWritten != 2 {
+		t.Fatalf("两个自营账号各一行（聚合 + 令牌级）: %+v", result)
 	}
-	if _, ok := f.ledger.rows[fmt.Sprintf("%s|%s|tok-c", id, collectDay)]; !ok {
-		t.Fatal("无歧义的 tok-c 应正常入账")
+	if result.RowsAggregated != 1 {
+		t.Fatalf("聚合行应单独计数: %+v", result)
 	}
+
+	// 单令牌账号：令牌级行，下钻保留
+	solo, ok := f.ledger.rows[fmt.Sprintf("%s|%s|tok-c", id, collectDay)]
+	if !ok {
+		t.Fatal("单令牌账号应维持令牌级行")
+	}
+	if solo.CostMinor == nil || *solo.CostMinor != 3_875_819 {
+		t.Fatalf("单令牌成本 = %v, want 3875819", solo.CostMinor)
+	}
+
+	// 多令牌账号：一行账号级聚合行，token_id 用哨兵
+	sentinel := finance.AccountGrainTokenID("acct-shared")
+	shared, ok := f.ledger.rows[fmt.Sprintf("%s|%s|%s", id, collectDay, sentinel)]
+	if !ok {
+		t.Fatalf("多令牌账号应写账号级聚合行（token_id=%s）", sentinel)
+	}
+	// 成本一分不少：两把令牌之和
+	if shared.CostMinor == nil || *shared.CostMinor != 2*3_875_819 {
+		t.Fatalf("聚合成本 = %v, want %d（两把令牌之和，不得蒸发）",
+			shared.CostMinor, 2*3_875_819)
+	}
+	// 收入只计一次：账号级端点给的就是这一个数
+	if shared.RevenueMinor == nil || *shared.RevenueMinor != 12_345_600 {
+		t.Fatalf("聚合收入 = %v, want 12345600（只计一次，不得按令牌数翻倍）",
+			shared.RevenueMinor)
+	}
+	if shared.AccountID != "acct-shared" {
+		t.Fatalf("account_id = %q，聚合行仍须指向那个自营账号", shared.AccountID)
+	}
+	// 逐令牌的行不该再存在——它们的成本已经并进聚合行了
 	for _, token := range []string{"tok-a", "tok-b"} {
-		if _, ok := f.ledger.rows[fmt.Sprintf("%s|%s|%s", id, collectDay, token)]; ok {
-			t.Fatalf("有归属歧义的 %s 不该入账", token)
+		if _, present := f.ledger.rows[fmt.Sprintf("%s|%s|%s", id, collectDay, token)]; present {
+			t.Fatalf("%s 不该再有独立的令牌级行（成本会被算两遍）", token)
 		}
 	}
-	if !result.Partial {
-		t.Fatal("归属歧义必须标记 partial —— 缺一块要说清楚")
+	// 按上游账号上卷（037d 的用法）与逐令牌写法完全一致
+	if result.CostMinorSum != 3*3_875_819 {
+		t.Fatalf("上卷成本 = %d, want %d", result.CostMinorSum, 3*3_875_819)
 	}
+}
+
+// TestCollectAggregatedCostUnknownWhenAnyTokenFails 钉住聚合行的 §5.1：
+// **任一令牌读不到，整行成本就是未知**，不是「已知的那几把之和」。
+//
+// 部分之和会给出一个偏低且看不出偏低的成本——那正是 §5.1 要挡的错数字。
+// 与 PlatformBucket.ProfitMinorSum 在覆盖行数不足时返回 nil 是同一条纪律。
+func TestCollectAggregatedCostUnknownWhenAnyTokenFails(t *testing.T) {
+	id := uuid.New()
+	f := newFixture(collectAccount(id))
+	f.registry.mappings[id] = []finance.TokenMapping{
+		mapping(id, "tok-a", "acct-shared"),
+		mapping(id, "tok-b", "acct-shared"),
+	}
+	f.clients[id] = &partialCostClient{stub: newStub(), failToken: "tok-b"}
+
+	result, err := f.collector().CollectOnce(context.Background())
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	// 成本未知 + 收入已知 + 台账无此行 → 按 §5.1 不建行
+	if result.RowsSkippedOneSided != 1 || result.RowsWritten != 0 {
+		t.Fatalf("成本部分未知时不该建行: %+v", result)
+	}
+	if len(f.ledger.rows) != 0 {
+		t.Fatal("不该写出一个只含半数令牌成本的聚合行")
+	}
+	if !result.Partial {
+		t.Fatal("有读取失败必须标记 partial")
+	}
+}
+
+// partialCostClient 让**指定的那一把令牌**读失败，其余照常。
+//
+// stubClient 的 costErr 是全令牌一起失败的，而聚合行的纪律恰恰要靠
+// 「只坏一把」才测得出来。
+type partialCostClient struct {
+	stub      *stubClient
+	failToken string
+}
+
+func (c *partialCostClient) Version(ctx context.Context) (connector.VersionInfo, error) {
+	return c.stub.Version(ctx)
+}
+func (c *partialCostClient) Health(ctx context.Context) (connector.HealthResult, error) {
+	return c.stub.Health(ctx)
+}
+func (c *partialCostClient) Capabilities(ctx context.Context) ([]registry.Capability, error) {
+	return c.stub.Capabilities(ctx)
+}
+func (c *partialCostClient) TokenUsage(
+	ctx context.Context, token metering.TokenRef, day string,
+) (metering.TokenUsage, error) {
+	if token.UpstreamTokenID == c.failToken {
+		return metering.TokenUsage{}, connector.NewError(
+			connector.KindUnavailable, "metering.token.usage_read", nil)
+	}
+	return c.stub.TokenUsage(ctx, token, day)
+}
+func (c *partialCostClient) AccountRevenue(
+	ctx context.Context, ownAccountID, day string,
+) (metering.AccountRevenue, error) {
+	return c.stub.AccountRevenue(ctx, ownAccountID, day)
 }
 
 // TestCollectRevenueNotSupportedIsNotAnError：newapi 的收入走自营库直连（§3.2），
@@ -553,13 +709,14 @@ func TestCollectWithFakeClientFactory(t *testing.T) {
 	}
 	ledger := newMemLedger()
 	collector := finance.NewCollector(finance.CollectorOptions{
-		Logger:      quietLogger(),
-		Environment: "staging",
-		InstanceID:  "finance-collect-staging",
-		Registry:    registry,
-		Ledger:      ledger,
-		NewClient:   finance.NewFakeMeteringClientFactory(func() time.Time { return collectNow }),
-		Now:         func() time.Time { return collectNow },
+		Logger:        quietLogger(),
+		Environment:   "staging",
+		InstanceID:    "finance-collect-staging",
+		Registry:      registry,
+		Subscriptions: &memSubscriptions{},
+		Ledger:        ledger,
+		NewClient:     finance.NewFakeMeteringClientFactory(func() time.Time { return collectNow }),
+		Now:           func() time.Time { return collectNow },
 	})
 
 	result, err := collector.CollectOnce(context.Background())

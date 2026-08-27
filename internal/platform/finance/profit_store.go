@@ -174,6 +174,65 @@ func (s *ProfitStore) WriteRow(ctx context.Context, row ProfitRow) (ProfitRow, e
 	// 两侧全未知走不到这里：Validate 已经返回 ErrProfitNothingKnown。
 }
 
+// WriteAmortizedRow 写一行**订阅型**台账：成本来自 §3.5 的摊销（XM-0037c）。
+//
+// 它与 WriteRow 的唯一区别，也是本模块对 §5.1 的**唯一一处偏离**：
+// 收入侧未知时**照样建行**（而 WriteRow 会返回 ErrProfitOneSidedNoRow）。
+//
+// 偏离的理由必须说清，否则下一个人会「顺手」把两条路合并：
+// §5.1 的「只有一侧就不建行」防的是**拿一次失败的读取拼出一行**——上游没答话，
+// 我们就没有可断言的事实，宁可这一对今天不出现。而订阅成本不是读来的：
+// 它是我们自己付出去的钱按天摊开的算术，输入全在自己库里，**不存在读不到**。
+// 把它一并压住的代价是：一条还没接上收入通道的订阅渠道（v1 的常态——
+// newapi 的收入 DSN 是单独一片）会一行台账都没有，平台自己承诺的支出
+// 在报表上完全不可见。那比「成本已知、收入 NULL、毛利 NULL」更不诚实。
+//
+// 三道收窄让这条路不会被计量型误用：
+//   - 成本必须已知（摊销算得出来才该调它）；
+//   - ratio_snapshot 必须是 1（§12 拍板给摊销行定的语义：未经折算）；
+//   - 收入侧仍照 §5.1 保留「未知即 NULL」，绝不写 0。
+//
+// 它们是收窄不是证明——真正的边界是调用方只有采集器的订阅分支一处。
+func (s *ProfitStore) WriteAmortizedRow(ctx context.Context, row ProfitRow) (ProfitRow, error) {
+	if err := row.Validate(); err != nil {
+		return ProfitRow{}, err
+	}
+	if row.CostMinor == nil {
+		return ProfitRow{}, fmt.Errorf(
+			"摊销入账必须带成本（算不出来时该跳过，不该建行）: %w", ErrInconsistent)
+	}
+	if row.RatioSnapshot.String() != AmortizationRatio.String() {
+		return ProfitRow{}, fmt.Errorf(
+			"摊销行的 ratio_snapshot 必须是 %s（§12 拍板：摊销值即成本，未经折算），got %s: %w",
+			AmortizationRatio, row.RatioSnapshot, ErrInconsistent)
+	}
+	if err := s.assertWritableDay(row); err != nil {
+		return ProfitRow{}, err
+	}
+
+	out, err := s.q.UpsertProfitDailyAmortizedCost(ctx, gen.UpsertProfitDailyAmortizedCostParams{
+		UpstreamAccountID: row.UpstreamAccountID,
+		BusinessDay:       dateValue(row.BusinessDay),
+		BusinessDayTz:     row.BusinessDayTZ,
+		TokenID:           row.TokenID,
+		AccountID:         row.AccountID,
+		PlatformID:        textPtr(row.PlatformID),
+		RevenueMinor:      row.RevenueMinor,
+		// 列可空（§5.1 的 NULL=未知），故生成的参数是 *int64；
+		// 上面已经拦下 nil，走到这里必然有值。
+		CostMinor:         row.CostMinor,
+		Currency:          row.Currency,
+		RatioSnapshot:     ratioToNumeric(row.RatioSnapshot),
+		Source:            row.Source,
+		CostObservedAt:    tsPtr(row.CostObservedAt),
+		RevenueObservedAt: tsPtr(row.RevenueObservedAt),
+	})
+	if err != nil {
+		return ProfitRow{}, fmt.Errorf("upsert amortized profit_daily: %w", err)
+	}
+	return profitFromRow(out)
+}
+
 func (s *ProfitStore) upsertBothSides(ctx context.Context, row ProfitRow) (ProfitRow, error) {
 	out, err := s.q.UpsertProfitDaily(ctx, gen.UpsertProfitDailyParams{
 		UpstreamAccountID: row.UpstreamAccountID,

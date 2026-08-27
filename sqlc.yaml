@@ -14,9 +14,17 @@ sql:
         overrides:
           - db_type: "uuid"
             go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
           - db_type: "uuid"
             nullable: true
-            go_type: "github.com/google/uuid.UUID"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
   - engine: "postgresql"
     schema: "db/migrations"
     queries: "db/queries/action.sql"
@@ -31,9 +39,17 @@ sql:
         overrides:
           - db_type: "uuid"
             go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
           - db_type: "uuid"
             nullable: true
-            go_type: "github.com/google/uuid.UUID"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
   - engine: "postgresql"
     schema: "db/migrations"
     queries: "db/queries/audit.sql"
@@ -48,9 +64,17 @@ sql:
         overrides:
           - db_type: "uuid"
             go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
           - db_type: "uuid"
             nullable: true
-            go_type: "github.com/google/uuid.UUID"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
   - engine: "postgresql"
     schema: "db/migrations"
     queries: "db/queries/ops.sql"
@@ -65,9 +89,17 @@ sql:
         overrides:
           - db_type: "uuid"
             go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
           - db_type: "uuid"
             nullable: true
-            go_type: "github.com/google/uuid.UUID"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
   - engine: "postgresql"
     schema: "db/migrations"
     queries: "db/queries/alerts.sql"
@@ -82,9 +114,17 @@ sql:
         overrides:
           - db_type: "uuid"
             go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
           - db_type: "uuid"
             nullable: true
-            go_type: "github.com/google/uuid.UUID"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
   - engine: "postgresql"
     schema: "db/migrations"
     queries: "db/queries/finance.sql"
@@ -99,6 +139,14 @@ sql:
         overrides:
           - db_type: "uuid"
             go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
           - db_type: "uuid"
             nullable: true
-            go_type: "github.com/google/uuid.UUID"
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true

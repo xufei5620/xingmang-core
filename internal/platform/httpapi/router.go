@@ -41,7 +41,9 @@ type Deps struct {
 	RequestLogs     RequestLogQuerier
 	FinanceAccounts UpstreamAccountLister
 	FinanceProfit   ProfitDailyLister
-	RequestTimeout  time.Duration
+	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
+	FinanceSubscriptions SubscriptionLister
+	RequestTimeout       time.Duration
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -128,6 +130,18 @@ func NewRouter(d Deps) http.Handler {
 		// Platform Lifecycle Operation（宪法 2 条），不是一个 API。
 		api.With(RequireScope(finance.ScopeRead)).
 			Get("/finance/profit-daily", ListProfitDailyHandler(d.FinanceProfit))
+
+		// 订阅成本批次与代理资产（XM-0037c）同样复用 finance.read：
+		// 它们里的金额就是订阅型渠道成本的**来源**，能看台账里那个成本的人
+		// 已经知道它的量级，泄漏面完全相同。代理的 credential_ref 只出引用
+		// （ADR-014、UI 交接 §14.2），明文一步都不进库。
+		//
+		// 写路径（登记、退款、终止）不在这里——它们是 L1 Action，
+		// 走 POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/subscription-batches", ListSubscriptionBatchesHandler(d.FinanceSubscriptions))
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/proxy-assets", ListProxyAssetsHandler(d.FinanceSubscriptions))
 	})
 	return r
 }

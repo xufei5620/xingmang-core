@@ -111,6 +111,7 @@ func accountFromRow(r gen.FinanceUpstreamAccount) (UpstreamAccount, error) {
 		RechargeRatio: ratio,
 		Currency:      r.Currency,
 		BusinessDayTZ: r.BusinessDayTz,
+		PlatformID:    textValue(r.PlatformID),
 		Status:        Status(r.Status),
 		Environment:   r.Environment,
 		CreatedAt:     fromTS(r.CreatedAt),
@@ -180,6 +181,7 @@ func (s *Store) CreateAccount(ctx context.Context, in UpstreamAccount) (Upstream
 		RechargeRatio: ratioToNumeric(in.RechargeRatio),
 		Currency:      in.Currency,
 		BusinessDayTz: in.BusinessDayTZ,
+		PlatformID:    textPtr(in.PlatformID),
 		Status:        string(in.Status),
 		Environment:   in.Environment,
 	})
@@ -208,6 +210,7 @@ func (s *Store) UpdateAccount(ctx context.Context, in UpstreamAccount) (Upstream
 		RechargeRatio: ratioToNumeric(in.RechargeRatio),
 		Currency:      in.Currency,
 		BusinessDayTz: in.BusinessDayTZ,
+		PlatformID:    textPtr(in.PlatformID),
 		Status:        string(in.Status),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {

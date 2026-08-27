@@ -13,15 +13,18 @@
 -- 三类接入方式的倍率约束（计量型必填、订阅型必空）在库层 CHECK 上，
 -- 不在这条语句里重复：约束写在表上，任何写入路径都绕不开；
 -- 写在语句里，下一条语句就可能漏掉。
+--
+-- platform_id（XM-0037c 增补，§5.2）在登记这一刻就可以给：它是「哪个自营平台
+-- 在用这个上游账号」的归属标注，不是成本口径的一部分。可空 = 未配对。
 INSERT INTO finance.upstream_account (
     id, system_type, access_method, base_url, credential_ref,
-    recharge_ratio, currency, business_day_tz, status, environment,
+    recharge_ratio, currency, business_day_tz, status, environment, platform_id,
     created_at, updated_at
 ) VALUES (
     sqlc.arg(id), sqlc.arg(system_type), sqlc.arg(access_method),
     sqlc.narg(base_url), sqlc.arg(credential_ref),
     sqlc.narg(recharge_ratio), sqlc.arg(currency), sqlc.arg(business_day_tz),
-    sqlc.arg(status), sqlc.arg(environment),
+    sqlc.arg(status), sqlc.arg(environment), sqlc.narg(platform_id),
     now(), now()
 )
 RETURNING *;
@@ -33,6 +36,11 @@ RETURNING *;
 -- 一条生产账号搬进 staging），后者是成本口径的分叉点（§2.0，改它会让同一个
 -- 账号的历史成本前后用两套算法算出来，而台账里没有任何痕迹）。
 -- 这两样要变，只能新登记一条并停用旧的。
+--
+-- platform_id **在可编辑范围内**（XM-0037c，§5.2），与 access_method 刻意相反：
+-- 它只是一条归属标注，改它不改变任何一个金额怎么算；而台账侧的 COALESCE 方向是
+-- 「空缺可补、已有不动」（§5.3），历史行的归属不会被追溯改写。
+-- 换句话说，改它只影响此后新算的行——这正是「绑定变更不改上个月报表」的含义。
 UPDATE finance.upstream_account SET
     base_url        = sqlc.narg(base_url),
     credential_ref  = sqlc.arg(credential_ref),
@@ -40,6 +48,7 @@ UPDATE finance.upstream_account SET
     currency        = sqlc.arg(currency),
     business_day_tz = sqlc.arg(business_day_tz),
     status          = sqlc.arg(status),
+    platform_id     = sqlc.narg(platform_id),
     updated_at      = now()
 WHERE id = sqlc.arg(id)
 RETURNING *;
@@ -297,3 +306,251 @@ JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
 WHERE ua.environment  = sqlc.arg(environment)
   AND pd.business_day >= sqlc.arg(from_day)
   AND pd.business_day <= sqlc.arg(to_day);
+
+-- ---------------------------------------------------------------------------
+-- XM-0037c 订阅成本批次 · 代理资产 · 摊销损失（设计稿 §2.5 + §3.5 + §12.1）。
+--
+-- 与上面两段的分别：登记簿是「怎么算」，台账是「算出了什么」，本段是
+-- **「付了多少钱」**。摊销值不在这里算——它是这些行的纯函数
+-- （internal/platform/finance/amortization.go），算完写进 profit_daily。
+-- 在库里再落一份摊销结果只会多一份会漂的副本。
+-- ---------------------------------------------------------------------------
+
+-- name: InsertSubscriptionCostBatch :one
+-- 登记一笔订阅付款。**续费是再来一条，不是改这一条**（§3.5/§10.3）。
+--
+-- 没有 UpdateSubscriptionCostBatch：金额、期间、账号数登记后冻结。
+-- 允许原地改会让「上个月按 99 摊」在改完之后变成「上个月按 129 摊」，
+-- 而历史台账已经按 99 入过账了——两份记录从此对不上，且没有任何报错。
+-- 可变的只有下面三条：退款、代理关联、终止。
+INSERT INTO finance.subscription_cost_batch (
+    id, upstream_account_id, paid_minor, surcharge_minor,
+    refunded_minor, refunded_on, currency,
+    starts_on, expires_on, account_count, proxy_batch_id,
+    created_at, updated_at
+) VALUES (
+    sqlc.arg(id), sqlc.arg(upstream_account_id),
+    sqlc.arg(paid_minor), sqlc.arg(surcharge_minor),
+    sqlc.arg(refunded_minor), sqlc.narg(refunded_on), sqlc.arg(currency),
+    sqlc.arg(starts_on), sqlc.arg(expires_on), sqlc.arg(account_count),
+    sqlc.narg(proxy_batch_id), now(), now()
+)
+RETURNING *;
+
+-- name: SetSubscriptionCostBatchRefund :one
+-- 累计退款额与它的生效日（§3.5：部分退款冲减成本基础）。
+--
+-- 「只增不减」在领域层执行——库层表达不了「相对上一版的变化方向」。
+-- refunded_on 决定从哪天起重算剩余未摊天（§12.1），所以它跟着退款额一起改：
+-- 分成两个动作就会出现「金额改了、日期还是上一次的」这种半截状态。
+UPDATE finance.subscription_cost_batch SET
+    refunded_minor = sqlc.arg(refunded_minor),
+    refunded_on    = sqlc.narg(refunded_on),
+    updated_at     = now()
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- name: SetSubscriptionCostBatchProxy :one
+-- 改批次关联的代理资产（NULL = 取消关联，代理成本归 0）。
+--
+-- 允许改是安全的：摊销只写当天的台账行，历史业务日过去冻结（§5.3），
+-- 所以改关联不会追溯改写任何一天——§12 拍板要的「代理分摊按当日挂载快照」
+-- 由台账的冻结纪律免费提供。
+UPDATE finance.subscription_cost_batch SET
+    proxy_batch_id = sqlc.narg(proxy_batch_id),
+    updated_at     = now()
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- name: TerminateSubscriptionCostBatch :one
+-- 提前失效：填 terminated_on，**当天起不再摊销**，剩余转损失（§3.5）。
+--
+-- `AND terminated_on IS NULL` 让重复终止在库层就打不进去：终止是一次性事件
+-- （它结转一笔损失），改终止日等于让那笔已经出现在报表上的损失悄悄变个数。
+-- 调用方在此之前已经读过一次，能分清「没有这一条」与「已经终止过」。
+UPDATE finance.subscription_cost_batch SET
+    terminated_on = sqlc.arg(terminated_on),
+    updated_at    = now()
+WHERE id = sqlc.arg(id) AND terminated_on IS NULL
+RETURNING *;
+
+-- name: GetSubscriptionCostBatch :one
+SELECT * FROM finance.subscription_cost_batch WHERE id = $1;
+
+-- name: ListAmortizableBatches :many
+-- 摊销每轮的取数：这个账号、覆盖这个业务日、且尚未失效的批次。
+--
+-- 三条谓词就是 §3.5 的「starts_on ≤ business_day ≤ expires_on 且未 terminated」。
+-- 终止用 `terminated_on > day` 而不是 `>=`：终止当天已经不摊了
+-- （§3.5 把 terminated_on..expires_on 整段算作剩余未摊销额）。
+--
+-- 代理不在这条语句里 join 回来：一个账号当日通常只有一两条批次，
+-- 单独取代理既让 SQL 保持可读，也让「同一份代理被两条批次引用」这件事在
+-- Go 侧显式去重（见 AmortizeDay），而不是靠一个 DISTINCT 碰运气。
+SELECT * FROM finance.subscription_cost_batch
+WHERE upstream_account_id = sqlc.arg(upstream_account_id)
+  AND starts_on  <= sqlc.arg(business_day)
+  AND expires_on >= sqlc.arg(business_day)
+  AND (terminated_on IS NULL OR terminated_on > sqlc.arg(business_day))
+ORDER BY starts_on, id;
+
+-- name: ListSubscriptionCostBatchesByEnvironment :many
+-- Query 侧：某环境（可选：某账号）的订阅批次，带上已结转的损失。
+--
+-- 环境经 JOIN 登记簿判定，不在批次上再存一份（宪法 15 条，同 profit_daily）。
+-- 损失用 LEFT JOIN 带出来而不是另开一个端点：「这批订阅退订时亏了多少」
+-- 与「这批订阅是什么」是同一个问题的两半，分成两次请求只会让前端拼错。
+-- 多取一行（LIMIT n+1）让调用方判断截断。
+SELECT b.*, l.loss_minor AS loss_minor, l.booked_on AS loss_booked_on
+FROM finance.subscription_cost_batch b
+JOIN finance.upstream_account ua ON ua.id = b.upstream_account_id
+LEFT JOIN finance.amortization_loss l ON l.batch_id = b.id
+WHERE ua.environment = sqlc.arg(environment)
+  AND (sqlc.narg(upstream_account_id)::uuid IS NULL
+       OR b.upstream_account_id = sqlc.narg(upstream_account_id))
+ORDER BY b.starts_on DESC, b.id
+LIMIT sqlc.arg(row_limit);
+
+-- name: InsertProxyAsset :one
+-- 登记一份代理资产。金额与期间同样登记后冻结（理由同批次）。
+INSERT INTO finance.proxy_asset (
+    id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency,
+    opened_on, expires_on, shared_account_count,
+    buy_platform, buy_address, credential_ref, mounted, environment,
+    created_at, updated_at
+) VALUES (
+    sqlc.arg(id), sqlc.arg(paid_minor), sqlc.arg(surcharge_minor),
+    sqlc.arg(refunded_minor), sqlc.narg(refunded_on), sqlc.arg(currency),
+    sqlc.arg(opened_on), sqlc.arg(expires_on), sqlc.arg(shared_account_count),
+    sqlc.narg(buy_platform), sqlc.narg(buy_address), sqlc.narg(credential_ref),
+    sqlc.arg(mounted), sqlc.arg(environment), now(), now()
+)
+RETURNING *;
+
+-- name: UpdateProxyAsset :one
+-- 改代理的可编辑字段：挂载状态与购买信息 / 凭据引用。
+--
+-- mounted 可改，且**不追溯**：未挂载的日子摊 0、挂上之后的日子摊钱，
+-- 各自冻结在各自那天的台账行里（§5.3）。
+UPDATE finance.proxy_asset SET
+    buy_platform   = sqlc.narg(buy_platform),
+    buy_address    = sqlc.narg(buy_address),
+    credential_ref = sqlc.narg(credential_ref),
+    mounted        = sqlc.arg(mounted),
+    updated_at     = now()
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- name: SetProxyAssetRefund :one
+-- 理由与 SetSubscriptionCostBatchRefund 逐条相同。
+UPDATE finance.proxy_asset SET
+    refunded_minor = sqlc.arg(refunded_minor),
+    refunded_on    = sqlc.narg(refunded_on),
+    updated_at     = now()
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- name: TerminateProxyAsset :one
+-- 理由与 TerminateSubscriptionCostBatch 逐条相同。
+UPDATE finance.proxy_asset SET
+    terminated_on = sqlc.arg(terminated_on),
+    updated_at    = now()
+WHERE id = sqlc.arg(id) AND terminated_on IS NULL
+RETURNING *;
+
+-- name: GetProxyAsset :one
+SELECT * FROM finance.proxy_asset WHERE id = $1;
+
+-- name: ListProxyAssetsByIDs :many
+-- 摊销每轮按批次引用的那几份代理取回。
+--
+-- = ANY(数组) 而不是逐个查：一个账号当日的批次可能共享同一份代理，
+-- 逐个查会把同一行读回两次，于是去重这件事要在两个地方各做一遍。
+SELECT * FROM finance.proxy_asset WHERE id = ANY(sqlc.arg(ids)::uuid[]);
+
+-- name: ListProxyAssetsByEnvironment :many
+-- Query 侧：某环境的代理资产，带上已结转的损失。
+SELECT p.*, l.loss_minor AS loss_minor, l.booked_on AS loss_booked_on
+FROM finance.proxy_asset p
+LEFT JOIN finance.amortization_loss l ON l.proxy_asset_id = p.id
+WHERE p.environment = sqlc.arg(environment)
+ORDER BY p.opened_on DESC, p.id
+LIMIT sqlc.arg(row_limit);
+
+-- name: UpsertAmortizationLossForBatch :one
+-- 结转一笔批次的提前失效损失（§12 拍板：单列科目，不进渠道当日成本）。
+--
+-- 用 UPSERT 而不是纯 INSERT：损失是**派生事实**不是事件流水——一个失效主体
+-- 最多一行，回答「这批钱最终有多少没摊出去」。终止之后才到账的退款会让这个数
+-- 变小，届时本行按新基础重算，前后态进 Action 审计（而不是追加一条冲正：
+-- v1 的损失科目不做复式记账）。
+--
+-- ON CONFLICT 带索引谓词，是因为唯一索引是部分索引
+-- （amortization_loss_batch_key ... WHERE batch_id IS NOT NULL）。
+INSERT INTO finance.amortization_loss (
+    id, batch_id, loss_minor, currency, booked_on, created_at, updated_at
+) VALUES (
+    sqlc.arg(id), sqlc.arg(batch_id), sqlc.arg(loss_minor),
+    sqlc.arg(currency), sqlc.arg(booked_on), now(), now()
+)
+ON CONFLICT (batch_id) WHERE batch_id IS NOT NULL DO UPDATE SET
+    loss_minor = EXCLUDED.loss_minor,
+    currency   = EXCLUDED.currency,
+    booked_on  = EXCLUDED.booked_on,
+    updated_at = now()
+RETURNING *;
+
+-- name: UpsertAmortizationLossForProxy :one
+INSERT INTO finance.amortization_loss (
+    id, proxy_asset_id, loss_minor, currency, booked_on, created_at, updated_at
+) VALUES (
+    sqlc.arg(id), sqlc.arg(proxy_asset_id), sqlc.arg(loss_minor),
+    sqlc.arg(currency), sqlc.arg(booked_on), now(), now()
+)
+ON CONFLICT (proxy_asset_id) WHERE proxy_asset_id IS NOT NULL DO UPDATE SET
+    loss_minor = EXCLUDED.loss_minor,
+    currency   = EXCLUDED.currency,
+    booked_on  = EXCLUDED.booked_on,
+    updated_at = now()
+RETURNING *;
+
+-- name: UpsertProfitDailyAmortizedCost :one
+-- 订阅型渠道的入账（§3.5，ratio_snapshot 恒为 1——§12 拍板）。
+--
+-- **与 UpsertProfitDaily 的唯一区别，也是本片对 §5.1 的唯一偏离**：
+-- 收入侧未知时**照样建行**。理由记在 docs/modules/finance/README.md，一句话：
+-- §5.1 的「只有一侧就不建行」防的是「拿一次失败的读取拼出一行」，而订阅成本
+-- 不是读来的——它是我们自己付出去的钱按天摊开的算术，不存在读不到。
+-- 把它压住，平台自己承诺的支出会在收入通道接上之前完全不可见。
+--
+-- 收入侧用 COALESCE 而不是直接覆盖：本轮读到就刷新，没读到就保留今天早些时候
+-- 已经读到的那个值——与 UpdateProfitDailyCost「一次失败的读取不该把另一侧
+-- 连带抹掉」是同一条纪律。observed_at 跟着值走，否则会出现「值是上一轮的、
+-- 时间戳是这一轮的」这种替陈旧数据背书的组合。
+INSERT INTO finance.profit_daily (
+    upstream_account_id, business_day, business_day_tz, token_id, account_id,
+    platform_id, revenue_minor, cost_minor, currency, ratio_snapshot,
+    source, cost_observed_at, revenue_observed_at, updated_at
+) VALUES (
+    sqlc.arg(upstream_account_id), sqlc.arg(business_day), sqlc.arg(business_day_tz),
+    sqlc.arg(token_id), sqlc.arg(account_id), sqlc.narg(platform_id),
+    sqlc.narg(revenue_minor), sqlc.arg(cost_minor), sqlc.arg(currency),
+    sqlc.arg(ratio_snapshot), sqlc.arg(source),
+    sqlc.narg(cost_observed_at), sqlc.narg(revenue_observed_at), now()
+)
+ON CONFLICT (upstream_account_id, business_day, token_id) DO UPDATE SET
+    business_day_tz  = EXCLUDED.business_day_tz,
+    account_id       = EXCLUDED.account_id,
+    platform_id      = COALESCE(finance.profit_daily.platform_id, EXCLUDED.platform_id),
+    cost_minor       = EXCLUDED.cost_minor,
+    cost_observed_at = EXCLUDED.cost_observed_at,
+    revenue_minor    = COALESCE(EXCLUDED.revenue_minor, finance.profit_daily.revenue_minor),
+    revenue_observed_at = CASE
+        WHEN EXCLUDED.revenue_minor IS NOT NULL THEN EXCLUDED.revenue_observed_at
+        ELSE finance.profit_daily.revenue_observed_at
+    END,
+    currency         = EXCLUDED.currency,
+    ratio_snapshot   = EXCLUDED.ratio_snapshot,
+    source           = EXCLUDED.source,
+    updated_at       = now()
+RETURNING *;
