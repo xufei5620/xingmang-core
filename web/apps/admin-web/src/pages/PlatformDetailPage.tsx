@@ -4,6 +4,7 @@ import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router";
 import { listMetrics, listServices } from "../api/platform";
+import { BlueprintTabView, blueprintTabForPlatform } from "../blueprints";
 import { ApiStateView } from "../components/ApiStateView";
 import { ChannelsPanel } from "../components/ChannelsPanel";
 import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
@@ -243,8 +244,13 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       // 只读网关——正文永不落平台库。脱敏、`request.content.read` 与查看审计
       // 属于第 8 片
       return <RequestsPanel platform={spec.serviceType} />;
-    default:
+    default: {
+      // 有蓝图规格的平台页签走蓝图（UI 第 6 片，目前只有服务器的 7 格）：
+      // 页签结构与列头照原型，数字一个不显示。没有的仍是那句「尚未实现」。
+      const blueprint = blueprintTabForPlatform(spec.serviceType, tab.value);
+      if (blueprint) return <BlueprintTabView tab={blueprint} />;
       return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
+    }
   }
 }
 

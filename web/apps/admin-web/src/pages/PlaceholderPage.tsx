@@ -1,6 +1,13 @@
 import { navItemByPath, navStageHint, PageHeader, type NavItemSpec } from "@xingmang/ui-admin";
 import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import { useLocation, useSearchParams } from "react-router";
+import {
+  BlueprintBanner,
+  BlueprintTabView,
+  BlueprintTiles,
+  blueprintForPath,
+  type BlueprintPage,
+} from "../blueprints";
 import { NotFoundView } from "./NotFoundPage";
 
 /** 每一页「将来放什么、归谁做」的一句话。
@@ -66,15 +73,21 @@ function PlaceholderBody({ item }: { item: NavItemSpec }) {
     setSearchParams(next, { replace: true });
   };
 
+  // 有蓝图规格的页走蓝图（UI 第 6 片）：页签、列头与卡片结构照原型，
+  // 数字一个不显示。没有的继续走下面的通用占位，行为不变。
+  const blueprint = blueprintForPath(item.path);
+
   return (
     <section>
       <PageHeader
         title={item.label}
         status={hint ? <Badge tone="warning">{hint}</Badge> : null}
-        description={PLACEHOLDER_COPY[item.path]}
+        description={blueprint?.description ?? PLACEHOLDER_COPY[item.path]}
       />
       <div className="flex flex-col gap-3">
+        {blueprint?.banner ? <BlueprintBanner text={blueprint.banner} /> : null}
         <PlaceholderGate item={item} />
+        {blueprint?.tiles ? <BlueprintTiles tiles={blueprint.tiles} /> : null}
         {item.subTabs.length > 0 ? (
           <Tabs
             value={active}
@@ -82,12 +95,7 @@ function PlaceholderBody({ item }: { item: NavItemSpec }) {
             items={item.subTabs.map((tab) => ({
               value: tab.id,
               label: tab.label,
-              content: (
-                <EmptyState
-                  title={`「${tab.label}」尚未实现`}
-                  description={`本次（XM-0042）只重构了导航与路由：这一格的位置、命名与地址已经定下来，内容按实施计划的后续切片实现。阶段 ${item.stage}。`}
-                />
-              ),
+              content: subTabContent(blueprint, tab.id, tab.label, item.stage),
             }))}
           />
         ) : (
@@ -98,6 +106,28 @@ function PlaceholderBody({ item }: { item: NavItemSpec }) {
         )}
       </div>
     </section>
+  );
+}
+
+/** 一个子页签渲染什么：有蓝图就渲染蓝图，没有就还是那句诚实的「尚未实现」。
+ *
+ *  按 **id** 匹配而不是按下标：navigation.ts 与蓝图规格是两份数据，
+ *  按下标对齐的话，其中一边插一格就会让后面全部错位——而错位之后每一格
+ *  看起来都仍然正常，只是内容对不上标题。`blueprints.test.ts` 另有一条
+ *  断言两边的 id 集合逐一相等，这里是运行时的第二道。 */
+function subTabContent(
+  blueprint: BlueprintPage | undefined,
+  tabId: string,
+  tabLabel: string,
+  stage: string,
+) {
+  const spec = blueprint?.tabs.find((tab) => tab.id === tabId);
+  if (spec) return <BlueprintTabView tab={spec} />;
+  return (
+    <EmptyState
+      title={`「${tabLabel}」尚未实现`}
+      description={`本次（XM-0042）只重构了导航与路由：这一格的位置、命名与地址已经定下来，内容按实施计划的后续切片实现。阶段 ${stage}。`}
+    />
   );
 }
 
