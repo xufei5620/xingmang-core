@@ -67,8 +67,23 @@ Platform API 的 HTTP 层（规格 §5.5）。
 
 ## 身份
 
-`PrincipalResolver` 接口有两个实现路径：Foundation-A 的 `DevHeaderResolver`
-（生产硬拒绝）与 XM-0008 的 OIDC 实现。换实现时 handler 不需要改动。
+`PrincipalResolver` 有两个实现，由 `XM_AUTH_MODE` 选择，handler 与路由不需要改动：
+
+| `XM_AUTH_MODE` | 实现 | 身份来源 | 允许的环境 |
+|---|---|---|---|
+| `dev-header` | `httpapi.DevHeaderResolver` | `X-Dev-*` 请求头 | development / staging |
+| `oidc` | `oidcauth.Resolver`（XM-0008） | Keycloak `solov-staff` 的 Access Token | 全部（生产只能用它） |
+
+默认值跟着 `ENVIRONMENT` 走：生产默认 `oidc`，其余默认 `dev-header`——
+**XM-0008 不改 development / staging 的现状**。生产 + `dev-header` 拒绝启动，
+`oidc` 缺 `XM_OIDC_ISSUER` / `XM_OIDC_AUDIENCE` 也拒绝启动（Fail Closed）。
+
+`oidcauth` 只用标准库手工校验 RS256 + JWKS，没有新增依赖。它不导入本包——
+接口靠 Go 的结构化满足，装配点在 `cmd/platform-api/auth.go`。
+
+**切换到真实登录的完整步骤、RoleScopeMap 的人工审定要求、令牌校验清单与已知
+取舍：见 [`AUTH-SWITCH.md`](./AUTH-SWITCH.md)。** 前置是 CR-0001 由人执行完毕；
+代码侧从未连接过任何真实 Keycloak（测试用 httptest 假 IdP）。
 
 ## 端到端验证记录（2026-08-26）
 

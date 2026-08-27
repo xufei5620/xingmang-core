@@ -52,9 +52,10 @@ func main() {
 	}
 	defer pool.Close()
 
-	resolver, err := httpapi.NewDevHeaderResolver(cfg.Environment)
+	// 身份解析器由 XM_AUTH_MODE 决定（dev-header / oidc）。
+	// 生产只允许 oidc，且缺 issuer/audience 直接拒绝启动——见 authConfigFromEnv
+	resolver, err := newPrincipalResolver(cfg, logger)
 	if err != nil {
-		// 生产环境走到这里说明还没接 OIDC（XM-0008）——不允许无鉴权启动
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "no_principal_resolver"), slog.Any("err", err))
 		os.Exit(2)
