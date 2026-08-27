@@ -1,3 +1,30 @@
+# ⚠️ 更正(代理自查):区分「现行 v2.5.102」与「未发布增强版」
+
+上一版报告混入了本地未合并特性分支(阶段C/D/E)的增强,误当现行。按 GitHub
+默认分支 HEAD=8f6b3b08(v2.5.102)逐个 git cat-file 核对后:
+
+**现行 v2.5.102 确有(标准答案,照搬)**:成本公式 actual_cost÷recharge_ratio、
+两取数函数(端点/鉴权/type=2/÷500000)、收入=sub2api admin today.user_cost、
+relay_profit_daily 六列(station,day,token_id,account_id,revenue,cost,updated_at)、
+利润=收入-成本、CST/USD、每站一个 recharge_ratio(无模型成本单价表)、
+5min 余额扫描落 relay_balance_history。
+
+**现行没有(下方"增强版"章节描述的是未发布分支,勿当现行)**:
+- ratio_snapshot(倍率不冻结,改倍率历史无痕漂移)
+- platform_id/多平台四桶归集
+- relay_model_usage_hourly、runway 燃尽、newapi 自营库直查收入、multi_provider(0172)
+
+**现行的已知缺陷(平台可做得更好,别照抄)**:
+- **取数失败写 0 不是跳过/NULL**(relay_profit.go:112,117 普通 float64)→ 成本失败当天
+  利润虚高≈收入、收入失败利润转负,且不报错。平台影子对比要么复刻此行为求 14 天 0 差异,
+  要么对齐到已修复版——**取决于线上真实版本**。
+
+**‼️ 必须产品确认**:admin.solov.cc 线上实际跑哪版无法从源码判断。GitHub 默认分支=v2.5.102,
+但 dist 快照带 0180/0182(增强版)——可能有更新内部部署。两版在"失败写0/有无 ratio_snapshot/
+platform_id/runway"上行为不同,直接决定影子对比能否 14 天 0 差异。**接成本线前必须确认线上版本。**
+
+---
+
 # EV:SoloAI 现行成本/毛利核算方法(2026-08-27,v2.5.102)
 
 - 来源:Opus soloai-cost-study 代理对 K:/soloai/soloai-v2-src 的只读研究
