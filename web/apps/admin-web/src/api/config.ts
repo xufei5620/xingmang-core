@@ -37,6 +37,11 @@ export const DEFAULT_SCOPES = [
   // 读路径复用 ops.read，不需要再加。
   "alerts.alert.manage",
   "alerts.silence.manage",
+  // XM-0039 请求详情。**刻意分开两级**：request.read 只看元数据列表；
+  // request.content.read 才能看对话正文，且服务端每次读取都写审计事件
+  // （internal/platform/requestlog/permissions.go）。
+  "request.read",
+  "request.content.read",
 ];
 
 function parseScopes(raw: string | undefined): string[] {

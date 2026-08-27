@@ -374,7 +374,7 @@ describe("运营总览页", () => {
       // 告警的确认与静默各要一个（XM-0033，刻意不合并成一个 scope）。
       // 告警的**读**路径复用 ops.read，所以这里没有第七个。
       "X-Dev-Scopes":
-        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage",
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,request.read,request.content.read",
     });
   });
 
