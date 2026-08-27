@@ -80,7 +80,8 @@
    一条索引就够，等值 + 范围 + 排序全覆盖。
 
 分表还顺带让两种语义在**类型**上就分得开：`Store.Upsert` 与 `Store.InsertSample`
-是两个方法，谁也不会误用成另一个。
+是两个方法，谁也不会误用成另一个。采集路径两者都不用，用把它们包进同一个事务的
+`Store.UpsertWithSample`（见下面「最新态与样本同事务写入」）。
 
 ### 横轴是 synced_at，不是 observed_at
 
@@ -97,17 +98,58 @@
 样本表和最新态表共用同一条 CHECK：`(status = 'failed') = (last_error_code <> '')`。
 放行一条没有错误码的失败样本，图上就会出现一段没人解释得了的红。
 
-### 样本写失败 → 任务失败 → River 重试
+### 最新态与样本**同事务**写入（XM-R010）
 
-同步任务里 `Upsert` 之后紧跟 `InsertSample`，样本写失败会让整个 Job 返回 error。
+采集路径调用 `Store.UpsertWithSample`：一条指标的最新态与它的历史样本在**同一个
+数据库事务**里写完，要么都生效，要么两张表都没动。
 
-选它而不是「只记 error 日志放过去」，是因为两种代价不对称：重试会让本轮已写成功的
-那几条样本各多出一条重复点——同一个 `synced_at` 上两个点，图上是同一个位置，无害
-且可后期去重；而放过去的代价是历史**永久缺一个点**——那一刻的上游数据已经过去了，
-没有任何补数途径，而缺口恰好最可能出现在库压力大、也就是最值得回看的时候。
-可恢复的重复 vs 不可恢复的缺失，选前者。
+#### 此前的写法错在哪
 
-重试是安全的：`Upsert` 幂等（整行覆盖），`InsertSample` 只是再 INSERT 一次。
+XM-0024 的实现是先 `Upsert` 提交、再单独 `InsertSample`，并在注释与本文里声称
+「样本失败让 River 重试，代价只是同一个 `synced_at` 上多出一个重复点，图上同一
+位置，无害」。**这个说法是错的**（Codex 冷审 PR #48 第 1 条）：
+
+- 同步任务每次执行——首轮和每一次重试——都**重新取当前时间、重新读一遍上游**。
+  重试写的是 T2 的新快照，不是 T1 那份的补写。
+- 所以样本写失败留下的不是「重复点」，而是两个不可接受的事实：**T1 那个点永久
+  缺失**（那一刻的上游数据已经过去，没有补数途径），同时最新态却已经提交，库里
+  自称「T1 采到了 V」——一条**历史里查无对证**的记录。
+- 本轮先写成功的那几条指标，重试时还会各添一个 T2 的点，值可能与 T1 不同。
+
+#### 现在的语义
+
+不变式：**最新态里出现过的每一个 `(metric_key, synced_at)`，历史里都有对应的点。**
+
+写失败 = 两张表都没动 = 这条指标这一轮什么都没说。River 重试取新的 `now`、重读
+上游，是一次**完整重放**而不是打补丁：上一轮没有留下任何半截状态，也就没有缺口
+需要补。任务日志里的错误码相应合成一个 `observation_write_failed`——分成
+`upsert` / `sample` 两个码，前提是两写会分别失败留下半截状态，现在不会了。
+
+#### 事务粒度是**一条指标**，不是一整轮
+
+一轮同步写五条指标，每条各开一个事务。整轮同事务会让一条指标的库错连带回滚另外
+四条已经算好的观测——包括那几条如实记录上游失败的 `failed` 观测，把「四条真话 +
+一条写不进去」变成「一条都不写」。
+
+所以一轮**可能只写进去前几条**：撞错的那条及其后的指标这一轮两张表都没有记录，
+重试时它们从 T2 开始有点，先写成功的那几条则在 T1 和 T2 各有一个点。这不是缺口
+——**没有任何一条曲线声称自己在 T1 有值却查不到**，只是几条曲线的起点不同。缺口
+指的是「最新态说有、历史里没有」，那个才是被根除的东西。
+
+#### 回归测试
+
+- `internal/platform/ops/atomicity_store_test.go`：真库上给样本表挂一个只针对本
+  用例 `source` 的 `BEFORE INSERT` 触发器，让**第二条**语句必然失败，断言最新态
+  也没留下；拆掉触发器后重放，两张表各恰好一条、都停在 T2。
+- `internal/platform/jobs/sub2api_sync_atomicity_integration_test.go`：真库 + 真
+  `ops.Store` 上**跑两次 `Work`**，闭合冷审点名的「从未真正执行第二次 Work」。
+- 单元层 `TestSub2APISyncRetryIsCleanReplay` /
+  `TestSub2APISyncPartialRoundLeavesNoOrphanLatestState`。
+
+用触发器而不是「构造一条非法的值」，是因为两张表的列约束逐条对齐：任何能让样本
+`INSERT` 撞库错的值，都会让同一事务里前一条 `upsert` 先撞上同一条错，那样测到的
+是「第一条语句失败」，证明不了「第一条成功、第二条失败时前者也被撤销」。也没有在
+产品代码里留测试钩子——一个「让写入失败」的开关会被编译进生产二进制。
 
 ### 历史点不带 freshness
 
@@ -158,7 +200,8 @@ River 重试、多副本、同一秒内两次采集都能产生相同的 `synced
 ### 没有 UPDATE / DELETE 路径，也没有加防改规则
 
 `db/queries/ops.sql` 里这张表只有 `INSERT` 与 `SELECT` 两条语句，
-`ops.Store` 也只暴露 `InsertSample` / `ListSamples`。
+`ops.Store` 也只暴露 `UpsertWithSample` / `InsertSample` / `ListSamples`
+（前两个都只 INSERT，没有任何 UPDATE/DELETE 语句可用）。
 
 **没有**像 `audit.audit_event` 那样加 `DO INSTEAD NOTHING` 规则，因为两张表的义务
 不同。audit 是合规证据，宪法 11 条要求 append-only 并在库外锚定签名摘要，
@@ -185,8 +228,8 @@ River 重试、多副本、同一秒内两次采集都能产生相同的 `synced
 
 `internal/platform/jobs` 的 Sub2API 周期同步任务（XM-0022）：默认每 300 秒
 读一次 `connectors/sub2api` 的只读契约，经 `sub2api.ToObservations` 转成
-Observation 后逐条 `Store.Upsert`，紧接着 `Store.InsertSample` 追加一个历史点
-（XM-0024，见「历史样本」一节）。运行手册见 `cmd/platform-worker/README.md`。
+Observation 后逐条 `Store.UpsertWithSample`——最新态与历史点在同一个事务里写完
+（XM-0024 + XM-R010，见「历史样本」一节）。运行手册见 `cmd/platform-worker/README.md`。
 
 三条调用方必须知道的纪律：
 
