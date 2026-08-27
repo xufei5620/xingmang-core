@@ -57,3 +57,39 @@ ADR-016：Keycloak 只发 `staff` 这类粗粒度角色，`registry.read` / `ops
 Foundation-A 期间 Principal 由 `NewDevHeaderResolver` 从 `X-Dev-Scopes` 头注入
 （该 Resolver 在 `environment == "production"` 时构造即失败）。XM-0008 接入 Keycloak
 后换成从 OIDC 令牌解析，本文件的权限表不变。
+
+## XM-0008 后：scope 从哪儿来
+
+权限表**一行没改**——变的只是 Principal.Scopes 的来源。
+
+`XM_AUTH_MODE` 选择身份解析器（切换步骤见 `AUTH-SWITCH.md`）：
+
+| 模式 | scope 来源 | 允许的环境 |
+|---|---|---|
+| `dev-header` | `X-Dev-Scopes` 请求头 | development / staging |
+| `oidc` | `realm_access.roles` 经 **RoleScopeMap** 翻译 | 全部（生产只能用它） |
+
+`oidc` 模式下这条链是：
+
+```text
+Keycloak Realm 角色（staff）
+  → RoleScopeMap（平台配置，不在 Keycloak 里）
+    → Principal.Scopes（registry.read / ops.read / …）
+      → 路由上的 RequireScope 与 Action 内核判定（本文件上面那些表）
+```
+
+三点必须清楚：
+
+- **RoleScopeMap 是授权策略，不是实现细节。** 它决定「登录进来的员工默认能看到
+  什么」，因此 `oidcauth.DefaultRoleScopeMap` 只是代码里的默认值，**上生产前
+  必须人工审定**并落到 `XM_OIDC_ROLE_SCOPES`。默认表刻意保守：`staff` 只翻译成
+  `registry.read` + `ops.read`，**不含 `audit.read`**——理由就是本文件上面那段
+  「audit.read 又比 ops.read 高一档」。CR-0001 里 `staff` 是唯一的 Realm 角色，
+  把 audit.read 塞进去等于每个员工默认看见全平台操作明细；
+- **令牌里出现细粒度权限 = 配置漂移。** `registry.*` / `ops.*` / `audit.*` /
+  `platform.*` / `action.*` / `connector.*` 无论出现在 `realm_access.roles`、
+  OAuth 的 `scope` 还是 `resource_access` 里，平台一律**忽略**并记 WARN
+  （`error_code=keycloak_scope_drift`）。这是 ADR-016 的探针：平台侧忽略只是
+  止血，修复要回到 Realm 那边走变更单；
+- **`Environment` 仍然只来自服务配置。** 令牌里写什么都不作数（规格 §20.5）。
+  上面「环境范围」一节的规则因此完全不受影响。

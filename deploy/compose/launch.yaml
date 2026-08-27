@@ -115,9 +115,13 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      # staging：dev-header 鉴权仍可用。改成 production 时本进程会**拒绝启动**
-      # （internal/platform/httpapi.NewDevHeaderResolver），这是有意的闸——
+      # staging：dev-header 鉴权仍可用（XM_AUTH_MODE 的默认值跟着本变量走）。
+      # 改成 production 而**不**同时切到 OIDC，本进程会拒绝启动——这是有意的闸，
       # 上生产必须先完成 CR-0001（Keycloak/OIDC）。
+      #
+      # ⚠️ XM-0008 的 XM_AUTH_MODE / XM_OIDC_* 目前**没有**在这里透传：
+      #    切换到真实登录那天需要先在本段加三行 environment。步骤与审定要求见
+      #    docs/modules/httpapi/AUTH-SWITCH.md。
       ENVIRONMENT: ${ENVIRONMENT:-staging}
       # 容器内必须绑 0.0.0.0：默认的 127.0.0.1 是给「宿主直跑 + 宿主 Nginx
       # 反代」形态用的，在容器里会让 web 反代连不上
