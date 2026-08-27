@@ -3,8 +3,13 @@ import {
   AdminShell,
   ContextStrip,
   NavItemDisabled,
+  NavItemLabel,
   NavSection,
+  NavSectionCollapsible,
   navItemClass,
+  navStageHint,
+  NAV_GROUPS,
+  type NavGroupSpec,
 } from "@xingmang/ui-admin";
 import {
   NavLink,
@@ -13,24 +18,29 @@ import {
   redirect,
   useLocation,
   useNavigate,
+  type LoaderFunctionArgs,
 } from "react-router";
 import { appApiConfig } from "./api/config";
 import { listServices } from "./api/platform";
 import { devLogout, isAuthenticated } from "./auth";
 import { DemoDataBanner } from "./components/DemoDataBanner";
+import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { breadcrumbsFor, environmentLabel } from "./lib/breadcrumbs";
 import {
   groupPlatforms,
-  pendingBadge,
-  platformOpens,
-  RESOURCES_TAB,
+  platformNavHint,
+  resolvePlatformTab,
+  CHANNELS_REDIRECT,
+  LEGACY_PLATFORM_ROUTES,
   type PlatformEntry,
   type RegistryState,
 } from "./lib/platforms";
 import { AlertsPage } from "./pages/AlertsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { LoginPage } from "./pages/LoginPage";
+import { NotFoundPage } from "./pages/NotFoundPage";
 import { OverviewPage } from "./pages/OverviewPage";
+import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { PlatformDetailPage } from "./pages/PlatformDetailPage";
 import { RegistryPage } from "./pages/RegistryPage";
 import { RequestDetailPage } from "./pages/RequestDetailPage";
@@ -44,13 +54,13 @@ function requireAuth() {
 // 导航项的样式由 ui-admin 给（navItemClass）：左栏在深色轨道上，用的是不随主题
 // 翻转的 nav-* 令牌，应用侧照着内容区的 surface/fg 再拼一份就会一半亮一半暗。
 
-/** 「被管平台」段：由 `GET /api/v1/services` 驱动。
+/** 「平台」段：由 `GET /api/v1/services` 驱动。
  *
- *  段里的条目 = 平台目录（ADMIN-IA 平台表）叠上 Registry 的实际登记情况。
+ *  段里的条目 = 平台目录（ADMIN-IA v3 §一 分组 2）叠上 Registry 的实际登记情况。
  *  两者都要：只看 Registry，还没接的平台会从导航上消失（§12 惯例不允许）；
  *  只看目录，新登记的平台要等有人改代码才出现（ADMIN-IA 要求「登记即出现」）。
  *
- *  复用 ['services'] 这个 query key：注册表页本来就要拉它，导航因此在大多数
+ *  复用 ['services'] 这个 query key：资源目录页本来就要拉它，导航因此在大多数
  *  页面上不产生额外请求。 */
 function PlatformNav() {
   const query = useQuery({
@@ -103,63 +113,60 @@ function PlatformNavItem({
     );
   }
 
-  // 判据是「点进去有没有东西」而不是「注册表里有没有」：NewAPI 的内容来自
-  // newapi.* 指标，与注册表无关（见 lib/platforms 的 platformOpens）。
-  if (!platformOpens(entry)) {
-    return <NavItemDisabled label={spec.label} hint={pendingBadge(spec.plan)} title={spec.scope} />;
-  }
-
+  // 4 个平台一律可点。原型把它们全画成可进入的（CPA 是占位页、服务器是 wip），
+  // 而「点进去只有骨架」这件事由右侧的状态标签与各页签里的占位说清楚——
+  // 一个灰掉的条目只能表达「不能点」，表达不了「能看结构、还没有数据」
   return (
-    <NavLink to={`/platforms/${spec.serviceType}`} className={navItemClass}>
-      {spec.label}
+    <NavLink to={`/platforms/${spec.serviceType}`} className={navItemClass} title={spec.scope}>
+      <NavItemLabel label={spec.label} hint={platformNavHint(entry)} />
     </NavLink>
   );
 }
 
-/** 三段式侧边导航（ADMIN-IA 一、三段式总树）。
- *
- *  段序与条目顺序都照文档，不按「常用程度」重排：这份导航是运营心智的
- *  外化——先看全平台横切，再看某个被管系统，最后才是管平台自己。 */
-function ShellNav() {
+function NavItems({ group }: { group: NavGroupSpec }) {
   return (
     <>
-      <NavSection title="全局">
-        <NavLink to="/dashboard" className={navItemClass}>
-          运营总览
+      {group.items.map((item) => (
+        <NavLink key={item.path} to={item.path} className={navItemClass}>
+          <NavItemLabel label={item.label} hint={navStageHint(item)} />
         </NavLink>
-        {/* 告警中心归 XM-0033，合并 release 时已上线，占位换成了真链接。
-            位置照 ADMIN-IA 的全局段顺序（运营总览 / 告警中心 / 审计事件），
-            而不是 XM-0033 在旧扁平导航里的那个位置 */}
-        <NavLink to="/alerts" className={navItemClass}>
-          告警中心
-        </NavLink>
-        <NavLink to="/audit" className={navItemClass}>
-          审计事件
-        </NavLink>
-      </NavSection>
+      ))}
+    </>
+  );
+}
 
-      <NavSection title="被管平台">
-        <PlatformNav />
-      </NavSection>
+/** 四分组侧边导航（ADMIN-IA v3 §一）。
+ *
+ *  分组标题、条目名称与顺序全部来自 ui-admin 的 NAV_GROUPS——这一份数据同时
+ *  喂给面包屑、路由表与 Storybook。XM-0042 之前这里是手抄的，于是侧栏、面包屑、
+ *  Storybook 三处各自漂了一点。段序不按「常用程度」重排：这份导航是运营心智的
+ *  外化——先看全平台横切，再看某个被管系统，再是管平台自己，最后才是后置能力。 */
+function ShellNav({ pathname }: { pathname: string }) {
+  return (
+    <>
+      {NAV_GROUPS.map((group) => {
+        const children =
+          group.id === "platforms" ? <PlatformNav /> : <NavItems group={group} />;
 
-      <NavSection title="平台治理">
-        <NavLink to="/registry" className={navItemClass}>
-          注册表
-        </NavLink>
-        <NavItemDisabled
-          label="财务中心"
-          hint="未接入·M3"
-          title="跨支付与开票的统一视图（ADR-006 刻意保留，不拆进各平台）；规划于 M3 与开票期"
-        />
-        <NavItemDisabled
-          label="变更与审批"
-          hint="未接入"
-          title="变更单列表与审批中心，随 XM-0030（Foundation-B）上线"
-        />
-        <NavLink to="/settings" className={navItemClass}>
-          设置
-        </NavLink>
-      </NavSection>
+        if (!group.collapsible) {
+          return (
+            <NavSection key={group.id} title={group.title}>
+              {children}
+            </NavSection>
+          );
+        }
+        return (
+          <NavSectionCollapsible
+            key={group.id}
+            title={group.title}
+            hint={group.stage}
+            // 原型的行为：默认收起，进入这一段时自动展开
+            open={group.items.some((item) => pathname.startsWith(item.path))}
+          >
+            {children}
+          </NavSectionCollapsible>
+        );
+      })}
     </>
   );
 }
@@ -172,7 +179,7 @@ export function ShellLayout() {
     <AdminShell
       // 横幅挂在壳上而不是各页页头：它要盖住每一个页面，包括审计页
       banner={<DemoDataBanner />}
-      nav={<ShellNav />}
+      nav={<ShellNav pathname={pathname} />}
       // 面包屑与环境同样挂在壳上：它们回答的是「你在哪、这屏数据算不算数」，
       // 换页时这两个问题都还在，答案不该跟着页面一起被重画
       contextStrip={
@@ -189,6 +196,48 @@ export function ShellLayout() {
   );
 }
 
+/** 平台详情页的 `?tab=` 处理：旧名字改跳、认不出来给 404。
+ *
+ *  放在 loader 而不是组件里，是因为改名的那一半必须真的**换掉地址**——在组件
+ *  里悄悄把旧 tab 画成新页签，人下次收藏的还是旧地址，书签永远修不好。
+ *
+ *  三条出路对应三种不同的事实（见 resolvePlatformTab）：认识且这里有 → 直接渲染；
+ *  认识但换了名字 → 301 到新名字；认不出来 → Not Found,**不回落概览**
+ *  （交接文档 §8：不允许默默回退到第一条）。 */
+function platformTabLoader({ request, params }: LoaderFunctionArgs) {
+  const url = new URL(request.url);
+  const serviceType = params.serviceType ?? "";
+  const resolution = resolvePlatformTab(serviceType, url.searchParams.get("tab"));
+
+  switch (resolution.kind) {
+    case "redirect": {
+      const next = new URL(url);
+      next.searchParams.set("tab", resolution.tab);
+      return redirect(`${next.pathname}${next.search}`);
+    }
+    case "moved":
+      return redirect(resolution.path);
+    case "notFound":
+      // 原因走 body 而不是 statusText：后者是 HTTP 的 reason-phrase，规范只允许
+      // ASCII，塞中文会让 Response 构造函数直接抛 TypeError——于是 404 变成
+      // 一屏「这一页出错了」，而真正的原因（页签名不认识）反而丢了。
+      // React Router 会把 body 读出来放进 ErrorResponse.data
+      throw new Response(`${serviceType} 没有名为 ${resolution.tab} 的页签`, {
+        status: 404,
+      });
+    case "ok":
+      return null;
+  }
+}
+
+/** 未实装页的路由位，由导航数据生成。
+ *
+ *  逐条手写的话，「加一页」就变成两处要改（navigation.ts + 这里），而漏改的那一半
+ *  正好是本任务要消灭的那种漂移：侧栏上有条目、点进去 404。 */
+const placeholderRoutes = NAV_GROUPS.flatMap((group) => group.items)
+  .filter((item) => !item.built)
+  .map((item) => ({ path: item.path.slice(1), Component: PlaceholderPage }));
+
 export const routes = [
   { path: "/login", Component: LoginPage },
   {
@@ -196,27 +245,48 @@ export const routes = [
     loader: requireAuth,
     Component: ShellLayout,
     children: [
-      { index: true, loader: () => redirect("/dashboard") },
-      // 路径保持 /dashboard 与 /audit 不变：XM-0006 起就是这两个地址，
-      // 改了会打断已有书签
-      { path: "dashboard", Component: OverviewPage },
-      // 告警中心来自 XM-0033；/channels 与 /services 不再挂页面，
-      // 改为下面的重定向（ADMIN-IA 三、迁移映射）
-      { path: "alerts", Component: AlertsPage },
-      { path: "audit", Component: AuditPage },
-      { path: "platforms/:serviceType", Component: PlatformDetailPage },
-      // 请求详情是**完整页**而不是抽屉（§11.4：核心对象用完整详情页）。
-      // 挂在平台下面而不是全局 /requests/:id：同一个 id 在两个来源之间
-      // 不保证唯一，路径里少了平台就没法保证读的是哪一条
-      { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
-      { path: "registry", Component: RegistryPage },
-      { path: "settings", Component: SettingsPage },
+      {
+        // 无路径的布局路由，只为把 ErrorBoundary 挂在壳**内部**:404 与页面级异常
+        // 渲染在主内容区，导航、面包屑、演示横幅都还在。挂到上面那层的话，
+        // 一次 404 会连左栏一起换掉，人连「回哪去」都没得选
+        ErrorBoundary: RouteErrorBoundary,
+        children: [
+          { index: true, loader: () => redirect("/dashboard") },
+          // 路径保持 /dashboard 与 /audit 不变：XM-0006 起就是这两个地址，
+          // 改了会打断已有书签。页面**改名**(运营总览→运营工作台、
+          // 审计事件→审计记录)不改地址，这正是交接文档 §8 要的那种迁移
+          { path: "dashboard", Component: OverviewPage },
+          { path: "alerts", Component: AlertsPage },
+          { path: "audit", Component: AuditPage },
+          {
+            path: "platforms/:serviceType",
+            loader: platformTabLoader,
+            Component: PlatformDetailPage,
+          },
+          // 请求详情是**完整页**而不是抽屉(§11.4、原型 RECOVERY.md「No right-side
+          // detail drawers」)。挂在平台下面而不是全局 /requests/:id：同一个 id 在
+          // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
+          { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
+          { path: "registry", Component: RegistryPage },
+          { path: "settings", Component: SettingsPage },
+          ...placeholderRoutes,
 
-      // --- v1 旧路径（ADMIN-IA 三、迁移映射）---
-      // 只重定向、不再渲染页面。运行手册与 Issue 里贴过这两个地址，
-      // 导航重构不该让它们变成 404
-      { path: "services", loader: () => redirect("/registry") },
-      { path: "channels", loader: () => redirect(`/platforms/sub2api?tab=${RESOURCES_TAB}`) },
+          // --- 旧路径 redirect(ADMIN-IA v3 §4.1 全表)---
+          // 只重定向、不再渲染页面。静态段在 react-router 里排在动态段之前，
+          // 所以这三条一定压过 platforms/:serviceType，与书写顺序无关
+          ...Object.entries(LEGACY_PLATFORM_ROUTES).map(([serviceType, to]) => ({
+            path: `platforms/${serviceType}`,
+            loader: () => redirect(to),
+          })),
+          // v1 旧路径。运行手册与 Issue 里贴过这两个地址，导航重构不该让它们变成 404
+          { path: "services", loader: () => redirect("/registry") },
+          { path: "channels", loader: () => redirect(CHANNELS_REDIRECT) },
+
+          // 兜底 404。没有它，任何没匹配上的旧书签会落到 react-router 的默认
+          // 错误页——一屏英文堆栈，既不说这是 404，也回不去
+          { path: "*", Component: NotFoundPage },
+        ],
+      },
     ],
   },
 ];

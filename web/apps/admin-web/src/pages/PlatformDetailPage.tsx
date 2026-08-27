@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { PageHeader } from "@xingmang/ui-admin";
-import { EmptyState, Tabs } from "@xingmang/ui-primitives";
+import { PageHeader, type PlatformTabSpec } from "@xingmang/ui-admin";
+import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router";
 import { listMetrics, listServices } from "../api/platform";
@@ -12,31 +12,34 @@ import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { RequestsPanel } from "../components/RequestsPanel";
 import {
   findPlatform,
-  normalizeTab,
+  pendingBadge,
   pendingHeadline,
   platformOfMetricKey,
   platformOpens,
-  PLATFORM_TABS,
+  resolvePlatformTab,
   tabsForPlatform,
+  DEFAULT_PLATFORM_TAB,
   type PlatformEntry,
-  type PlatformTabValue,
 } from "../lib/platforms";
 
-/** 平台详情页：全平台共用的统一页签模板（ADMIN-IA 二、统一页签模板）。
+/** 平台详情页。页签集合**按平台各不相同**（ADMIN-IA v3 §2.1）。
  *
- *  这一页是 XM-0034 的主要产出。以后接入一个平台 = 把这六格填上，
- *  不再各自发明一套页面结构与命名——「统一命名」这句话的落点就在这里。
+ *  这是 XM-0042 换掉的那件事：v2 是「全平台统一 6~7 格模板」，而原型给 4 个平台
+ *  画的是 4 套不同的页签条（9 / 9 / 5 / 7）。统一模板看着整齐，代价是每个平台都
+ *  有几格是空的、又缺几格它真正需要的——服务器需要「域名与证书」，而模板里没有。
  *
  *  页签选择放在 URL 的 `?tab=` 上而不是组件 state：这样某一格是可以贴给同事的
- *  地址，旧的 /channels 书签也才有地方可以重定向过去。 */
+ *  地址，旧的 /channels 书签也才有地方可以重定向过去。子页签同理走 `?sub=`。 */
 export function PlatformDetailPage() {
   const params = useParams();
   const serviceType = params.serviceType ?? "";
   const [searchParams, setSearchParams] = useSearchParams();
-  // 传 serviceType：`?tab=requests` 贴到没有请求数据的平台上时，选中一个
-  // 根本没渲染的页签会得到一屏空白，回到概览至少是一个说得通的页面
-  const activeTab = normalizeTab(searchParams.get("tab"), serviceType);
   const queryClient = useQueryClient();
+
+  // 旧页签名改跳、认不出来的 404，都已经在路由 loader 里处理掉了
+  // (见 router 的 platformTabLoader)，到这里剩下的一定是合法值
+  const resolution = resolvePlatformTab(serviceType, searchParams.get("tab"));
+  const activeTab = resolution.kind === "ok" ? resolution.tab : DEFAULT_PLATFORM_TAB;
 
   const servicesQuery = useQuery({
     queryKey: ["services"],
@@ -50,6 +53,15 @@ export function PlatformDetailPage() {
   const selectTab = (value: string) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
+    // 换大页签时把子页签清掉：`?sub=` 属于上一格，带着它跳过去要么无效、
+    // 要么恰好撞上新格子里的同名子页签，后者比无效更难发现
+    next.delete("sub");
+    setSearchParams(next, { replace: true });
+  };
+
+  const selectSub = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("sub", value);
     setSearchParams(next, { replace: true });
   };
 
@@ -61,10 +73,21 @@ export function PlatformDetailPage() {
     void queryClient.invalidateQueries({ queryKey: [METRIC_HISTORY_QUERY_PREFIX] });
   };
 
+  const pending = entry && !platformOpens(entry);
+
   return (
     <section>
       <PageHeader
         title={entry?.spec.label ?? serviceType}
+        // 状态与标题同层（§11.2）：「服务器」和「服务器·未接入·M2」在运营眼里
+        // 是完全不同的两页，这件事不能等人滚到页面中间才发现
+        status={
+          pending ? (
+            <Badge tone="warning" title={pendingHeadline(entry.spec.plan)}>
+              {pendingBadge(entry.spec.plan)}
+            </Badge>
+          ) : null
+        }
         description={entry?.spec.scope}
         onRefresh={refreshAll}
         refreshing={servicesQuery.isFetching}
@@ -79,7 +102,9 @@ export function PlatformDetailPage() {
           entry={entry}
           serviceType={serviceType}
           activeTab={activeTab}
+          activeSub={searchParams.get("sub")}
           onTabChange={selectTab}
+          onSubChange={selectSub}
         />
       </ApiStateView>
     </section>
@@ -90,12 +115,16 @@ function PlatformBody({
   entry,
   serviceType,
   activeTab,
+  activeSub,
   onTabChange,
+  onSubChange,
 }: {
   entry: PlatformEntry | undefined;
   serviceType: string;
-  activeTab: PlatformTabValue;
+  activeTab: string;
+  activeSub: string | null;
   onTabChange: (value: string) => void;
+  onSubChange: (value: string) => void;
 }) {
   if (!entry) {
     return (
@@ -106,17 +135,14 @@ function PlatformBody({
     );
   }
 
-  // 未接入的平台给一整屏占位，而不是六个空页签：页签摆在那里等于承诺点进去有东西，
-  // 而这里一格都还没有。§12 惯例要的是「显示为未接入」，不是「显示成接入了但空」
-  // 判据是「点进去有没有东西」而不是「注册表里有没有」——与导航共用同一个
-  // 判据，否则会出现导航亮着链接、点进来却是一屏「未接入」（见 platformOpens）
-  if (!platformOpens(entry)) {
-    // 这一句话的范围已经由页头的 description 给出（对所有平台都一样），
-    // 占位里不再重复一遍——同一句话在同一屏出现两次，读的人会以为是两件事
+  const tabs = tabsForPlatform(serviceType);
+  if (tabs.length === 0) {
+    // Registry 里登记了、但 ADMIN-IA 还没给它定页签。不编一套模板套上去：
+    // 编出来的六格页签会让人以为我们已经想清楚这个平台该怎么管
     return (
       <EmptyState
-        title={pendingHeadline(entry.spec.plan)}
-        description={`接入后本页按统一页签模板展开：${PLATFORM_TABS.map((tab) => tab.label).join(" / ")}`}
+        title="这个平台还没有页签定义"
+        description={`${serviceType} 在服务注册表里有登记，但 ADMIN-IA 还没给它定义页签集合。要接入它，先在 docs/architecture/ADMIN-IA.md 里补一行，再改 ui-admin 的 navigation.ts。`}
       />
     );
   }
@@ -125,82 +151,110 @@ function PlatformBody({
     <Tabs
       value={activeTab}
       onValueChange={onTabChange}
-      items={tabsForPlatform(serviceType).map((tab) => ({
+      items={tabs.map((tab) => ({
         value: tab.value,
         label: tab.label,
-        content: tabContent(tab.value, entry),
+        content: (
+          <TabBody tab={tab} entry={entry} activeSub={activeSub} onSubChange={onSubChange} />
+        ),
       }))}
     />
   );
 }
 
-/** 一格页签的内容。
+/** 一格页签的内容。有子页签的先展开子页签条，再往里放内容。 */
+function TabBody({
+  tab,
+  entry,
+  activeSub,
+  onSubChange,
+}: {
+  tab: PlatformTabSpec;
+  entry: PlatformEntry;
+  activeSub: string | null;
+  onSubChange: (value: string) => void;
+}) {
+  if (tab.subTabs.length === 0) return tabContent(tab, entry);
+
+  const active = activeSub === null || activeSub === "" ? tab.subTabs[0]?.id : activeSub;
+  if (!tab.subTabs.some((sub) => sub.id === active)) {
+    // 与未知 `?tab=` 同一条规矩：不静默回落第一格（交接文档 §8）。
+    // 这里用 EmptyState 而不是整页的 NotFoundView——页头已经是平台名了，
+    // 再叠一个「页面不存在」的标题，人会以为整个平台都没了
+    return (
+      <EmptyState
+        title="没有这个子页签"
+        description={`「${tab.label}」下没有名为 ${activeSub} 的子页签；地址可能已过期或拼写有误。本格现有：${tab.subTabs.map((s) => s.label).join(" / ")}。`}
+      />
+    );
+  }
+
+  return (
+    <Tabs
+      value={active}
+      onValueChange={onSubChange}
+      items={tab.subTabs.map((sub) => ({
+        value: sub.id,
+        label: sub.label,
+        content: (
+          <EmptyState
+            title={`「${sub.label}」尚未实现`}
+            description={pendingNote(entry, tab)}
+          />
+        ),
+      }))}
+    />
+  );
+}
+
+/** 未实装页签的一句话。
  *
- *  没实现的格子渲染诚实占位：一句话说明将来放什么，以及归哪个任务。
+ *  说清楚两件事：这一格现在为什么空（本片只搬导航），以及它归哪个阶段。
  *  空白页签会让人以为「这个平台没有告警」——而事实是这块还没建。 */
-function tabContent(tab: PlatformTabValue, entry: PlatformEntry): ReactNode {
+function pendingNote(entry: PlatformEntry, tab: PlatformTabSpec): string {
+  const stage = tab.stage ?? (entry.spec.plan.kind === "milestone" ? entry.spec.plan.milestone : "");
+  const suffix = stage ? `阶段 ${stage}。` : "";
+  return `XM-0042 只重构了导航与路由：这一格的位置、命名与地址已经定下来，内容按实施计划的后续切片实现。${suffix}`;
+}
+
+function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
   const { spec } = entry;
-  switch (tab) {
+  switch (tab.value) {
     case "overview":
       return <PlatformOverview serviceType={spec.serviceType} label={spec.label} />;
-    case "trends":
-      return (
-        <EmptyState
-          title="指标趋势尚未实现"
-          description="将显示本平台全部 metric 的历史曲线。历史观测接口（XM-0024）已就绪，页面待建；ADMIN-IA 未给该页签指派任务号。"
-        />
-      );
-    case "resources":
-      // 两个平台的「资源」都是渠道，但**指标形状不同**（sub2api 是余额+令牌，
-      // newapi 是启停+错误率+延迟），所以是两个组件而不是一个带参数的通用表：
-      // 硬凑成一张表要么列对不上，要么长出一堆各平台各半空的列。
+    case "upstream":
+      // 两个平台的渠道表**指标形状不同**(sub2api 是余额+令牌，newapi 是启停+
+      // 错误率+延迟)，所以是两个组件而不是一个带参数的通用表：硬凑成一张表
+      // 要么列对不上，要么长出一堆各平台各半空的列。
+      //
+      // 原型把 v2 的「渠道/资源」拆成了「渠道管理」(一行=一个账号/一把 Key)与
+      // 「上游管理」（按上游供应商汇总）两格。现有面板是前者，原样挂在这里；
+      // 收窄语义与单渠道毛利核算属于第 5 片（依赖 XM-0037 成本线）
       switch (spec.serviceType) {
         case "sub2api":
-          // Sub2API 的资源就是渠道，页面已有（原 /channels 整体迁入）
           return <ChannelsPanel />;
         case "newapi":
           return <NewApiChannelsPanel />;
         default:
-          return (
-            <EmptyState
-              title="渠道/资源尚未实现"
-              description={`将显示 ${spec.label} 的资源清单（渠道／账号／模型，按该平台的语义）。`}
-            />
-          );
+          return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
       }
-    case "requests":
-      // 只对有请求数据的平台渲染（tabsForPlatform 已经把这一格从别的平台上
-      // 摘掉了）。数据来自生产上已在运行的外挂请求审计系统，平台只是带权限
-      // 与审计的只读网关——正文永不落平台库
+    case "usage":
+      // 数据来自生产上已在运行的外挂请求审计系统，平台只是带权限与审计的
+      // 只读网关——正文永不落平台库。脱敏、`request.content.read` 与查看审计
+      // 属于第 8 片
       return <RequestsPanel platform={spec.serviceType} />;
-    case "connection":
-      return (
-        <EmptyState
-          title="连接与凭据尚未实现"
-          description="将显示 Connection 状态、CredentialRef（永不显示明文）与 Kill Switch。ADMIN-IA 未给该页签指派任务号。"
-        />
-      );
-    case "alerts":
-      return (
-        <EmptyState
-          title="告警尚未实现"
-          description="将显示全局告警中心按本平台过滤的视图，随 XM-0033 告警中心上线。"
-        />
-      );
-    case "operations":
-      return (
-        <EmptyState
-          title="操作尚未实现"
-          description="将列出本平台可用的 Action；L2 及以上标注「需审批（F-B）」，随 XM-0030 Action Advanced Controls 上线。"
-        />
-      );
+    default:
+      return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
   }
 }
 
 /** 概览页签：本平台的指标卡。
  *
  *  按 metric_key 的平台前缀过滤，所以这一格对任何平台都成立，不是 Sub2API 专用：
- *  下一个平台的指标一开始上报，它的概览就自动有内容。 */
+ *  下一个平台的指标一开始上报，它的概览就自动有内容。
+ *
+ *  裁定 #3 砍掉了「指标趋势」页签之后，历史曲线的落点就是这里的卡片
+ *  (MetricCard 里的 Sparkline)——功能没丢，只是不再单列一格。 */
 function PlatformOverview({ serviceType, label }: { serviceType: string; label: string }) {
   const query = useQuery({
     queryKey: ["metrics"],
@@ -226,7 +280,7 @@ function PlatformOverview({ serviceType, label }: { serviceType: string; label: 
       </ApiStateView>
       {/* ADMIN-IA 给概览的内容契约是「关键指标卡 + 新鲜度 + 活动告警数」。
           前两样在卡片里，第三样还没有——缺了就说缺了，不装作契约已经满足 */}
-      <p className="text-xs text-fg-muted">活动告警数随 XM-0033 告警中心上线后补上。</p>
+      <p className="text-xs text-fg-muted">活动告警数随第 3 片（运营工作台）一并补上。</p>
     </div>
   );
 }

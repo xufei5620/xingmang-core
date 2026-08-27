@@ -7,39 +7,53 @@ import {
 } from "@xingmang/ui-primitives";
 import { AdminShell } from "./AdminShell";
 import { ContextStrip } from "./ContextStrip";
-import { NavItemDisabled, NavSection, navItemClass } from "./Nav";
+import { NavItemDisabled, NavItemLabel, NavSection, NavSectionCollapsible, navItemClass } from "./Nav";
+import { navStageHint, NAV_GROUPS, PLATFORM_NAV_ITEMS } from "./navigation";
 
-const meta = {
-  title: "Admin/AdminShell",
-  component: AdminShell,
-  parameters: { layout: "fullscreen" },
-} satisfies Meta<typeof AdminShell>;
-export default meta;
-type Story = StoryObj<typeof meta>;
-
-/** 三段式导航（ADMIN-IA v2）：全局 / 被管平台 / 平台治理。
- *  应用侧把这些 span 换成自己的 NavLink，壳本身不依赖 router。
+/** 侧栏由 navigation.ts 渲染，与真实应用同一份数据（ADMIN-IA v3 §一）。
+ *
+ *  这一点是 XM-0042 的产出之一：以前这个故事里的导航是手抄的，于是文档改了名
+ *  之后 Storybook 还在展示旧的三段式。设计评审看的是 Storybook，而 Storybook
+ *  在骗人——那比没有 Storybook 更糟。
+ *
+ *  应用侧把这些 span 换成自己的 NavLink，壳本身不依赖 router;
  *  类名一律走 navItemClass——深色轨道上的配色由包决定，调用方不自己拼。 */
 const nav = (
   <>
-    <NavSection title="全局">
-      <span className={navItemClass({ isActive: true })}>运营总览</span>
-      <span className={navItemClass({ isActive: false })}>告警中心</span>
-      <span className={navItemClass({ isActive: false })}>审计事件</span>
-    </NavSection>
-    <NavSection title="被管平台">
-      <span className={navItemClass({ isActive: false })}>Sub2API</span>
-      {/* NewAPI 自 XM-0035 起页面已建（内容来自 newapi.* 指标），
-          所以它在这里是普通条目而不是禁用占位；禁用的样子看 CPA 那条 */}
-      <span className={navItemClass({ isActive: false })}>NewAPI</span>
-      <NavItemDisabled label="CPA" hint="未接入·M4" />
-      <NavItemDisabled label="开票系统" hint="契约草案·XM-0028" />
-    </NavSection>
-    <NavSection title="平台治理">
-      <span className={navItemClass({ isActive: false })}>注册表</span>
-      <NavItemDisabled label="财务中心" hint="未接入·M3" />
-      <span className={navItemClass({ isActive: false })}>设置</span>
-    </NavSection>
+    {NAV_GROUPS.map((group) => {
+      const items =
+        group.id === "platforms" ? (
+          // 平台段在真实应用里由 Registry 驱动。这里给一份典型状态:
+          // 已登记的不挂标签，未接入的挂里程碑——两种都要能看见
+          PLATFORM_NAV_ITEMS.map((platform, index) => (
+            <span key={platform.serviceType} className={navItemClass({ isActive: false })}>
+              <NavItemLabel
+                label={platform.label}
+                hint={index < 2 ? undefined : `未接入·${platform.stage}`}
+              />
+            </span>
+          ))
+        ) : (
+          group.items.map((item) => (
+            <span
+              key={item.path}
+              className={navItemClass({ isActive: item.path === "/dashboard" })}
+            >
+              <NavItemLabel label={item.label} hint={navStageHint(item)} />
+            </span>
+          ))
+        );
+
+      return group.collapsible ? (
+        <NavSectionCollapsible key={group.id} title={group.title} hint={group.stage}>
+          {items}
+        </NavSectionCollapsible>
+      ) : (
+        <NavSection key={group.id} title={group.title}>
+          {items}
+        </NavSection>
+      );
+    })}
   </>
 );
 
@@ -47,7 +61,7 @@ const contextStrip = (
   <ContextStrip
     crumbs={[
       { key: "section", label: "全局" },
-      { key: "page", label: "运营总览" },
+      { key: "page", label: "运营工作台" },
     ]}
     environment={{
       label: "环境 由服务端解析",
@@ -65,7 +79,52 @@ const base = {
   children: <p className="text-sm">页面内容</p>,
 };
 
+const meta = {
+  title: "Admin/AdminShell",
+  component: AdminShell,
+  parameters: { layout: "fullscreen" },
+} satisfies Meta<typeof AdminShell>;
+export default meta;
+type Story = StoryObj<typeof meta>;
+
 export const Default: Story = { args: base };
+
+/** 「扩展能力」展开的样子。原型里这一组默认收起，进入 `#/ext/*` 时自动展开。
+ *  收起不是「藏起来」：标题与「后置」标签始终在场，人能看出还有这么一段。 */
+export const 扩展能力展开: Story = {
+  args: {
+    ...base,
+    nav: (
+      <NavSectionCollapsible title="扩展能力" hint="后置" open>
+        {NAV_GROUPS.find((g) => g.id === "ext")?.items.map((item) => (
+          <span key={item.path} className={navItemClass({ isActive: false })}>
+            <NavItemLabel label={item.label} hint={navStageHint(item)} />
+          </span>
+        ))}
+      </NavSectionCollapsible>
+    ),
+  },
+};
+
+/** 读不到服务注册表时平台段的样子。
+ *  刻意不显示成「未接入」：那是拿一次 403 或一次加载中，去断言平台没有接入。 */
+export const 注册表读取失败: Story = {
+  args: {
+    ...base,
+    nav: (
+      <NavSection title="平台">
+        {PLATFORM_NAV_ITEMS.map((platform) => (
+          <NavItemDisabled
+            key={platform.serviceType}
+            label={platform.label}
+            hint="读取失败"
+            title="服务注册表读取失败，无法判断该平台是否已接入"
+          />
+        ))}
+      </NavSection>
+    ),
+  },
+};
 
 /** 数据还在路上时壳保持不动：导航、面包屑、环境标识都在原位，只有主内容区在转。
  *  壳跟着一起闪，人会以为整页重载了。 */
@@ -106,7 +165,7 @@ export const PermissionDenied: Story = {
   args: { ...base, children: <PermissionDeniedView permission="ops.read" /> },
 };
 
-/** 超长标题、导航项、面包屑与用户名都必须截断在自己的格子里：
+/** 超长标题、导航项、面包屑与用户名都必须截断在自己的格子里:
  *  左栏不许被撑宽，顶栏不许换行。 */
 export const LongText: Story = {
   args: {
@@ -115,18 +174,18 @@ export const LongText: Story = {
     contextStrip: (
       <ContextStrip
         crumbs={[
-          { key: "section", label: "被管平台" },
+          { key: "section", label: "平台" },
           { key: "page", label: "Sub2API 订阅转 API 售卖与计费（华东一区只读副本）" },
         ]}
         environment={{ label: "环境 production-cn-east-1-readonly", tone: "info" }}
       />
     ),
     nav: (
-      <NavSection title="被管平台">
+      <NavSection title="平台">
         <span className={navItemClass({ isActive: true })}>
-          Sub2API 订阅转 API 售卖与计费（华东一区）
+          <NavItemLabel label="Sub2API 订阅转 API 售卖与计费（华东一区）" />
         </span>
-        <NavItemDisabled label="开票系统（Codex 线，契约冻结中）" hint="契约草案·XM-0028" />
+        <NavItemDisabled label="服务器（Server Agent 待接入，ADR-015）" hint="未接入·M2" />
       </NavSection>
     ),
     user: { name: "王小明（平台运营 · 只读）" },

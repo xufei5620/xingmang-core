@@ -302,20 +302,19 @@ describe("admin-web 路由（登录前/后壳）", () => {
     expect(await screen.findByText("开发模式进入")).not.toBeNull();
   });
 
-  it("已登录访问 /dashboard 显示三段式导航（ADMIN-IA v2）", async () => {
+  it("已登录访问 /dashboard 显示四分组导航（ADMIN-IA v3）", async () => {
     devLogin();
     renderRoute("/dashboard");
-    expect(await screen.findByRole("heading", { name: "运营总览", level: 2 })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "运营工作台", level: 2 })).not.toBeNull();
 
     const nav = await screen.findByRole("navigation", { name: "主导航" });
-    for (const section of ["全局", "被管平台", "平台治理"]) {
+    for (const section of ["全局", "平台", "平台治理", "扩展能力"]) {
       expect(within(nav).getByRole("heading", { name: section })).not.toBeNull();
     }
-    // 告警中心来自 XM-0033，已合入 release，所以它是真链接而不是占位
-    for (const name of ["运营总览", "告警中心", "审计事件", "注册表", "设置"]) {
+    for (const name of ["运营工作台", "告警与故障", "审计记录", "资源目录", "设置"]) {
       expect(within(nav).getByRole("link", { name })).not.toBeNull();
     }
-    // 被管平台段由 /api/v1/services 驱动，要等这一次请求回来
+    // 平台段由 /api/v1/services 驱动，要等这一次请求回来
     expect(await within(nav).findByRole("link", { name: "Sub2API" })).not.toBeNull();
   });
 
@@ -324,7 +323,7 @@ describe("admin-web 路由（登录前/后壳）", () => {
     renderRoute("/dashboard");
     const crumbs = await screen.findByRole("navigation", { name: "面包屑" });
     expect(within(crumbs).getByText("全局")).not.toBeNull();
-    expect(within(crumbs).getByText("运营总览").getAttribute("aria-current")).toBe("page");
+    expect(within(crumbs).getByText("运营工作台").getAttribute("aria-current")).toBe("page");
     // 测试环境没有 VITE_XM_ENVIRONMENT：显示的是「由服务端解析」这条口径，
     // 而不是猜一个环境名（见 lib/breadcrumbs）
     expect(screen.getByText(/环境 由服务端解析/)).not.toBeNull();
@@ -335,7 +334,7 @@ describe("admin-web 路由（登录前/后壳）", () => {
     renderRoute("/registry");
     const crumbs = await screen.findByRole("navigation", { name: "面包屑" });
     expect(within(crumbs).getByText("平台治理")).not.toBeNull();
-    expect(within(crumbs).getByText("注册表").getAttribute("aria-current")).toBe("page");
+    expect(within(crumbs).getByText("资源目录").getAttribute("aria-current")).toBe("page");
   });
 });
 
@@ -483,7 +482,7 @@ describe("总览页的迷你趋势图", () => {
   });
 });
 
-describe("Sub2API 平台详情·渠道/资源页签（原渠道明细页）", () => {
+describe("Sub2API 平台详情·渠道管理页签（原渠道明细页）", () => {
   beforeEach(() => {
     devLogin();
     stubFetch((url) =>
@@ -495,7 +494,7 @@ describe("Sub2API 平台详情·渠道/资源页签（原渠道明细页）", ()
   afterEach(() => vi.unstubAllGlobals());
 
   it("逐渠道列出余额、币种与令牌状态，并带上该指标的新鲜度", async () => {
-    renderRoute("/platforms/sub2api?tab=resources");
+    renderRoute("/platforms/sub2api?tab=upstream");
     expect(await screen.findByText("渠道甲")).not.toBeNull();
     expect(screen.getByText("¥100.00")).not.toBeNull();
     expect(screen.getByText("¥25.00")).not.toBeNull();
@@ -529,7 +528,7 @@ describe("Sub2API 平台详情·渠道/资源页签（原渠道明细页）", ()
         ? fakeResponse(200, uninitialized)
         : okHandler(url),
     );
-    renderRoute("/platforms/sub2api?tab=resources");
+    renderRoute("/platforms/sub2api?tab=upstream");
     // 页头徽章与空态各一处，都在说同一件事
     expect((await screen.findAllByText("未初始化")).length).toBe(2);
     expect(screen.getByText(/没有可信的渠道明细/)).not.toBeNull();
@@ -542,7 +541,7 @@ describe("Sub2API 平台详情·渠道/资源页签（原渠道明细页）", ()
         ? fakeResponse(200, { items: [] })
         : okHandler(url),
     );
-    renderRoute("/platforms/sub2api?tab=resources");
+    renderRoute("/platforms/sub2api?tab=upstream");
     expect(await screen.findByText("暂无渠道余额指标")).not.toBeNull();
   });
 });
@@ -564,15 +563,15 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     renderRoute("/platforms/newapi");
     // servicesBody 里没有 newapi——页面靠指标活着，不靠登记
     expect(await screen.findByRole("tab", { name: "概览" })).not.toBeNull();
-    // 七格：模板六格 + XM-0039 的「请求」（NewAPI 在 reqlog 的抄录范围内）
-    expect(screen.getAllByRole("tab")).toHaveLength(7);
-    // 断言的是**正文里**那一屏占位没出现，而不是全屏搜「未接入」——
-    // 导航上 CPA / 支付 / 服务器确实还挂着「未接入·Mx」，那是对的。
-    expect(screen.queryByText("本环境未登记该平台的实例")).toBeNull();
+    // 九格：ADMIN-IA v3 §2.1 的 8 格 + 裁定 #1 恢复的「渠道保障」
+    expect(screen.getAllByRole("tab")).toHaveLength(9);
+    // 断言的是**页头上**没挂「未登记」徽章，而不是全屏搜「未接入」——
+    // 导航上 CPA / 服务器确实还挂着「未接入·Mx」，那是对的。
+    expect(screen.queryByText("未登记")).toBeNull();
   });
 
   it("渠道表逐渠道给出启停、余额、错误率、模型数与延迟", async () => {
-    renderRoute("/platforms/newapi?tab=resources");
+    renderRoute("/platforms/newapi?tab=upstream");
     expect(await screen.findByText("上游甲")).not.toBeNull();
     expect(screen.getByText("上游乙")).not.toBeNull();
     expect(screen.getByText("自建丙")).not.toBeNull();
@@ -595,7 +594,7 @@ describe("NewAPI 平台详情（XM-0035）", () => {
   });
 
   it("余额未配置显示「未配置」，不显示成 ¥0.00（两者是相反的两件事）", async () => {
-    renderRoute("/platforms/newapi?tab=resources");
+    renderRoute("/platforms/newapi?tab=upstream");
     expect(await screen.findByText("自建丙")).not.toBeNull();
     expect(screen.getByText("未配置")).not.toBeNull();
     // ¥0.00 只应在真的有一条余额为 0 的渠道时出现——本夹具里没有
@@ -603,7 +602,7 @@ describe("NewAPI 平台详情（XM-0035）", () => {
   });
 
   it("表头摘要给出渠道数、启用数与异常判据本身", async () => {
-    renderRoute("/platforms/newapi?tab=resources");
+    renderRoute("/platforms/newapi?tab=upstream");
     expect(await screen.findByText("上游甲")).not.toBeNull();
     expect(screen.getByText(/3 个渠道 · 启用 2/)).not.toBeNull();
     // 判据一起显示：看板说「异常 N」时，人要能当场看出异常是按什么算的
@@ -630,7 +629,7 @@ describe("NewAPI 平台详情（XM-0035）", () => {
         ? fakeResponse(200, { items: [] })
         : okHandler(url),
     );
-    renderRoute("/platforms/newapi?tab=resources");
+    renderRoute("/platforms/newapi?tab=upstream");
     expect(await screen.findByText("暂无渠道状态指标")).not.toBeNull();
   });
 
@@ -656,7 +655,7 @@ describe("NewAPI 平台详情（XM-0035）", () => {
         ? fakeResponse(200, uninitialized)
         : okHandler(url),
     );
-    renderRoute("/platforms/newapi?tab=resources");
+    renderRoute("/platforms/newapi?tab=upstream");
     expect((await screen.findAllByText("未初始化")).length).toBe(2);
     expect(screen.getByText(/没有可信的渠道明细/)).not.toBeNull();
     expect(screen.queryByText("上游甲")).toBeNull();
@@ -920,42 +919,181 @@ describe("上报观测（写路径）", () => {
   });
 });
 
-// --- XM-0034 导航重构 ---
+// --- XM-0042 导航重构（ADMIN-IA v3，严格对齐 UI 原型）---
 
-describe("三段式导航：被管平台段由 Registry 驱动", () => {
+describe("四分组侧栏：分组与条目逐字对齐 ADMIN-IA v3 §一", () => {
   beforeEach(() => {
     devLogin();
     stubFetch(okHandler);
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("Registry 里有的平台可点，没有的在场但点不动（§12 惯例：显示未接入，不隐藏）", async () => {
+  it("四个分组标题逐字：全局 / 平台 / 平台治理 / 扩展能力", async () => {
     renderRoute("/dashboard");
     const nav = await screen.findByRole("navigation", { name: "主导航" });
-    // servicesBody 只登记了 sub2api
-    expect(await within(nav).findByRole("link", { name: "Sub2API" })).not.toBeNull();
-
-    // CPA 没登记也没建页：文字在、里程碑标签在，但不是链接
-    expect(within(nav).getByText("CPA")).not.toBeNull();
-    expect(within(nav).getByText("未接入·M4")).not.toBeNull();
-    expect(within(nav).queryByRole("link", { name: /CPA/ })).toBeNull();
+    // v2 的「被管平台」在原型里写作「平台」，侧栏渲染代码写死的就是这两个字
+    for (const section of ["全局", "平台", "平台治理", "扩展能力"]) {
+      expect(within(nav).getByRole("heading", { name: section })).not.toBeNull();
+    }
+    expect(within(nav).queryByRole("heading", { name: "被管平台" })).toBeNull();
   });
 
-  it("NewAPI 没登记也是链接：它的内容来自指标，不依赖注册表（XM-0035）", async () => {
+  it("全局段五条，顺序与命名逐字", async () => {
     renderRoute("/dashboard");
     const nav = await screen.findByRole("navigation", { name: "主导航" });
-    // servicesBody 里没有 newapi，但页面照样点得进去——概览与渠道表读的是
-    // /metrics（采集任务写的），注册表只服务于尚未实现的「连接与凭据」那一格。
-    // 挂着「未接入」而页面明明有五条指标可显示，那是看板在说谎。
+    await within(nav).findByRole("link", { name: /Sub2API/ });
+    const expected = ["运营工作台", "告警与故障", "操作与审批", "后台任务", "审计记录"];
+    const found = within(nav)
+      .getAllByRole("link")
+      .map((el) => el.textContent ?? "")
+      .filter((text) => expected.some((label) => text.startsWith(label)));
+    expect(found.map((text) => expected.find((label) => text.startsWith(label)))).toEqual(expected);
+  });
+
+  it("治理段七条，顺序与命名逐字（「注册表」已改名「资源目录」）", async () => {
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    const expected = [
+      "资源目录",
+      "人员与权限",
+      "跨平台财务",
+      "运行保障",
+      "版本与发布",
+      "界面规范",
+      "设置",
+    ];
+    for (const label of expected) {
+      expect(within(nav).getByRole("link", { name: new RegExp(label) })).not.toBeNull();
+    }
+    // 旧名字一个都不许留：同一页在侧栏与页头上有两个名字，坐标就没用了
+    for (const gone of ["注册表", "财务中心", "变更与审批"]) {
+      expect(within(nav).queryByText(gone)).toBeNull();
+    }
+  });
+
+  it("未实装的页仍然是可点的链接，右侧标着「未建·<阶段>」", async () => {
+    // 灰掉它只能表达「不能点」，表达不了「能看结构与命名、还没有内容」，
+    // 而后者才是这几页现在的状态（§12 惯例要的是别把没接的说成接了）
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    const actions = within(nav).getByRole("link", { name: /操作与审批/ });
+    expect(actions.getAttribute("href")).toBe("/actions");
+    // F-B 有两条（操作与审批、版本与发布），所以是 getAllByText
+    expect(within(nav).getAllByText("未建·F-B").length).toBe(2);
+    // 已实装的页不挂标签：一个写着「F-A」的标签贴在正常工作的页面旁边什么也没说
+    expect(within(nav).getByRole("link", { name: "运营工作台" })).not.toBeNull();
+  });
+
+  it("面包屑跟着新命名走", async () => {
+    renderRoute("/registry");
+    const crumbs = await screen.findByRole("navigation", { name: "面包屑" });
+    expect(within(crumbs).getByText("平台治理")).not.toBeNull();
+    expect(within(crumbs).getByText("资源目录").getAttribute("aria-current")).toBe("page");
+  });
+});
+
+describe("扩展能力段：可折叠、默认收起、进入时自动展开", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  function extDetails(nav: HTMLElement): HTMLDetailsElement {
+    const details = nav.querySelector("details");
+    if (!details) throw new Error("扩展能力段不是 <details>");
+    return details as HTMLDetailsElement;
+  }
+
+  it("在别的页面上默认收起，但标题与「后置」标签始终在场", async () => {
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    expect(extDetails(nav).open).toBe(false);
+    // 收起不是隐藏：人要能看出还有这么一段
+    expect(within(nav).getByRole("heading", { name: "扩展能力" })).not.toBeNull();
+    expect(within(nav).getByText("后置")).not.toBeNull();
+  });
+
+  it("进入 /ext/* 时自动展开（原型行为）", async () => {
+    renderRoute("/ext/ai");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    expect(extDetails(nav).open).toBe(true);
+  });
+
+  it("四条命名逐字，注意「AI能力管理」没有空格", async () => {
+    renderRoute("/ext/app");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    for (const label of ["应用与配置", "接口与自动化", "内容发布", "AI能力管理"]) {
+      expect(within(nav).getByRole("link", { name: new RegExp(label) })).not.toBeNull();
+    }
+  });
+});
+
+describe("平台段：Registry 驱动 + 显式排除名单", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("只有 4 个平台，且都可点", async () => {
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    for (const label of ["Sub2API", "NewAPI", "CPA", "服务器"]) {
+      expect(await within(nav).findByRole("link", { name: new RegExp(label) })).not.toBeNull();
+    }
+  });
+
+  it("开票系统 / 支付 / 模型保障不再出现在平台段", async () => {
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    await within(nav).findByRole("link", { name: /Sub2API/ });
+    for (const gone of ["开票系统", "支付", "模型保障"]) {
+      expect(within(nav).queryByText(gone)).toBeNull();
+    }
+  });
+
+  it("Registry 里登记了 payment/invoice 也不会爬回平台段", async () => {
+    // 后端 registry 认得这两个 service_type。只从目录里删掉的话，
+    // 「登记即出现」那条规则会把它们以原始键名重新塞回侧栏
+    stubFetch((url) =>
+      url.startsWith("/api/v1/services")
+        ? fakeResponse(200, {
+            items: [
+              { ...servicesBody.items[0], service_type: "payment", instance_id: "payment-dev" },
+              {
+                ...servicesBody.items[0],
+                id: "33333333-3333-3333-3333-333333333333",
+                service_type: "invoice",
+                instance_id: "invoice-dev",
+              },
+            ],
+          })
+        : okHandler(url),
+    );
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    await within(nav).findByRole("link", { name: /Sub2API/ });
+    expect(within(nav).queryByText("payment")).toBeNull();
+    expect(within(nav).queryByText("invoice")).toBeNull();
+  });
+
+  it("未接入的平台照样可点，右侧挂里程碑标签", async () => {
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
+    const cpa = await within(nav).findByRole("link", { name: /CPA/ });
+    expect(cpa.getAttribute("href")).toBe("/platforms/cpa");
+    expect(within(nav).getByText("未接入·M4")).not.toBeNull();
+    // 服务器从「未接入·M2 且点不动」提为可进入：原型把它画成了完整的资产中心
+    expect(within(nav).getByRole("link", { name: /服务器/ })).not.toBeNull();
+    expect(within(nav).getByText("未接入·M2")).not.toBeNull();
+  });
+
+  it("NewAPI 没登记也不挂标签：它的内容来自指标，不依赖注册表（XM-0035）", async () => {
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     expect(await within(nav).findByRole("link", { name: "NewAPI" })).not.toBeNull();
     expect(within(nav).queryByText("未接入·M1")).toBeNull();
-  });
-
-  it("开票系统标成契约草案，不冒充成某个里程碑", async () => {
-    renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation", { name: "主导航" });
-    await within(nav).findByRole("link", { name: "Sub2API" });
-    expect(within(nav).getByText("契约草案·XM-0028")).not.toBeNull();
   });
 
   it("读不到注册表时说「读取失败」，不说「未接入」", async () => {
@@ -971,171 +1109,111 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
     // 拿一次 403 去断言「这个平台没接入」，与新鲜度铁律禁止的是同一类事
     expect((await within(nav).findAllByText("读取失败")).length).toBeGreaterThan(0);
     expect(within(nav).queryByText("未接入·M4")).toBeNull();
-    // 内容来自指标的平台也一样：注册表读不到时说「读取失败」而不是直接放行。
-    // 这一格现在确实不依赖注册表，但**此刻我们还不知道这一点**——判据要等
-    // 注册表这次请求有结果才谈得上，说不知道就是说不知道（§9.1 同一条道理）。
-    expect(within(nav).queryByRole("link", { name: "NewAPI" })).toBeNull();
+    expect(within(nav).queryByRole("link", { name: /NewAPI/ })).toBeNull();
   });
 });
 
-describe("三段式导航：全局段顺序与禁用项", () => {
+describe("旧路径 redirect 全表（ADMIN-IA v3 §4.1，逐条断言）", () => {
   beforeEach(() => {
     devLogin();
     stubFetch(okHandler);
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("告警中心排在全局段的运营总览与审计事件之间（XM-0033 已合入，占位换成真链接）", async () => {
-    renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation", { name: "主导航" });
-    const alerts = within(nav).getByRole("link", { name: "告警中心" });
-    expect(alerts.getAttribute("href")).toBe("/alerts");
-    // 顺序照 ADMIN-IA 的全局段：运营总览 / 告警中心 / 审计事件
-    const globalLinks = within(nav)
-      .getAllByRole("link")
-      .map((el) => el.textContent)
-      .filter((t) => t && ["运营总览", "告警中心", "审计事件"].includes(t));
-    expect(globalLinks).toEqual(["运营总览", "告警中心", "审计事件"]);
+  it("/platforms/invoice → Sub2API 支付与财务 · 开票", async () => {
+    renderRoute("/platforms/invoice");
+    expect(await screen.findByRole("tab", { name: "支付与财务", selected: true })).not.toBeNull();
+    expect(await screen.findByRole("tab", { name: "开票", selected: true })).not.toBeNull();
   });
 
-  it("财务中心与变更与审批同样是禁用态，而不是从导航上消失", async () => {
-    renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation", { name: "主导航" });
-    for (const label of ["财务中心", "变更与审批"]) {
-      expect(within(nav).getByText(label)).not.toBeNull();
-      expect(within(nav).queryByRole("link", { name: new RegExp(label) })).toBeNull();
-    }
+  it("/platforms/payment → 治理段的跨平台财务", async () => {
+    renderRoute("/platforms/payment");
+    expect(await screen.findByRole("heading", { name: "跨平台财务", level: 2 })).not.toBeNull();
   });
-});
 
-describe("v1 旧路径重定向（书签不失效）", () => {
-  beforeEach(() => {
-    devLogin();
-    stubFetch(okHandler);
+  it("/platforms/model-assurance → Sub2API 渠道保障（裁定 #1）", async () => {
+    renderRoute("/platforms/model-assurance");
+    expect(await screen.findByRole("tab", { name: "渠道保障", selected: true })).not.toBeNull();
   });
-  afterEach(() => vi.unstubAllGlobals());
 
-  it("/services 重定向到平台治理·注册表", async () => {
+  it("?tab=resources → ?tab=upstream（渠道/资源拆成渠道管理 + 上游管理）", async () => {
+    renderRoute("/platforms/sub2api?tab=upstream");
+    expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
+  });
+
+  it("?tab=requests → ?tab=usage（「请求」改名「请求详情」）", async () => {
+    renderRoute("/platforms/sub2api?tab=requests");
+    expect(await screen.findByRole("tab", { name: "请求详情", selected: true })).not.toBeNull();
+  });
+
+  it("?tab=connection → ?tab=creds", async () => {
+    renderRoute("/platforms/sub2api?tab=connection");
+    expect(await screen.findByRole("tab", { name: "连接与凭据", selected: true })).not.toBeNull();
+  });
+
+  it("?tab=trends → ?tab=overview（裁定 #3：趋势并进各页卡片）", async () => {
+    renderRoute("/platforms/sub2api?tab=trends");
+    expect(await screen.findByRole("tab", { name: "概览", selected: true })).not.toBeNull();
+  });
+
+  it("?tab=operations → /actions（裁定 #4：Action 收进全局「操作与审批」）", async () => {
+    renderRoute("/platforms/sub2api?tab=operations");
+    expect(await screen.findByRole("heading", { name: "操作与审批", level: 2 })).not.toBeNull();
+  });
+
+  it("原型自带的三条服务器别名：containers/certs/logs", async () => {
+    renderRoute("/platforms/server?tab=containers");
+    expect(await screen.findByRole("tab", { name: "服务与容器", selected: true })).not.toBeNull();
+  });
+
+  it("/services → 资源目录（v1 旧路径，保留）", async () => {
     renderRoute("/services");
-    expect(await screen.findByRole("heading", { name: "注册表", level: 2 })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "资源目录", level: 2 })).not.toBeNull();
     expect(await screen.findByText("sub2api-dev")).not.toBeNull();
   });
 
-  it("/channels 重定向到 Sub2API 的渠道/资源页签，而不是概览", async () => {
+  it("/channels → Sub2API 的渠道管理，而不是概览", async () => {
     renderRoute("/channels");
     expect(await screen.findByRole("heading", { name: "Sub2API", level: 2 })).not.toBeNull();
-    expect(await screen.findByRole("tab", { name: "渠道/资源", selected: true })).not.toBeNull();
+    expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
   });
 });
 
-describe("平台详情：统一页签模板", () => {
+describe("未知页签与未知路径：Not Found，不静默回落", () => {
   beforeEach(() => {
     devLogin();
     stubFetch(okHandler);
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("页签的顺序与命名逐格对齐 ADMIN-IA（「请求」为 XM-0039 新增）", async () => {
-    renderRoute("/platforms/sub2api");
-    const tabs = await screen.findAllByRole("tab");
-    expect(tabs.map((tab) => tab.textContent)).toEqual([
-      "概览",
-      "指标趋势",
-      "渠道/资源",
-      "请求",
-      "连接与凭据",
-      "告警",
-      "操作",
-    ]);
-  });
-
-  it("不在抄录范围内的平台不显示「请求」页签", async () => {
-    // 挂一个永远空的「请求」页签，等于告诉运营「这个平台没有请求」，
-    // 而事实是请求审计系统压根没抄它（XM-0039）。
-    //
-    // 这里必须用一个**已登记**的平台：未接入的平台一格页签都不出，
-    // 那证明不了「请求」这一格是被摘掉的
-    stubFetch((url) =>
-      url.startsWith("/api/v1/services")
-        ? fakeResponse(200, {
-            items: [
-              {
-                ...servicesBody.items[0],
-                id: "22222222-2222-2222-2222-222222222222",
-                service_type: "payment",
-                instance_id: "payment-dev",
-              },
-            ],
-          })
-        : okHandler(url),
-    );
-    renderRoute("/platforms/payment");
-    const tabs = await screen.findAllByRole("tab");
-    expect(tabs.map((tab) => tab.textContent)).not.toContain("请求");
-    expect(tabs).toHaveLength(6);
-  });
-
-  it("默认落在概览，且只显示本平台的指标卡", async () => {
-    renderRoute("/platforms/sub2api");
-    expect(await screen.findByRole("tab", { name: "概览", selected: true })).not.toBeNull();
-    // 复用总览的卡片组件，新鲜度徽章跟着一起过来（规格 §9.1）
-    expect(await screen.findByText("Sub2API 日收入")).not.toBeNull();
-    expect(screen.getByText("数据延迟")).not.toBeNull();
-  });
-
-  it("点「渠道/资源」能切过去，渲染的是迁移进来的渠道面板", async () => {
-    renderRoute("/platforms/sub2api");
-    // 先等页签渲染出来，再按名字找：带 name 的查询在 jsdom 里每次重试都要算一遍
-    // 可访问名，和「等接口回来」挤在同一个超时里容易假失败
-    await screen.findAllByRole("tab");
-    // Radix 的页签用 mousedown 激活（不是 click）——fireEvent.click 不带 mousedown，
-    // 点了不会切。ui-primitives 的用例用 userEvent 走完整指针序列，
-    // 但 admin-web 没有这个依赖，本任务也不许新增，于是直接发它真正监听的那个事件
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "渠道/资源" }), { button: 0 });
-    expect(await screen.findByRole("tab", { name: "渠道/资源", selected: true })).not.toBeNull();
-    // okHandler 的指标里没有渠道余额这一条，面板据此给空态而不是一张空表
-    expect(await screen.findByText("暂无渠道余额指标")).not.toBeNull();
-  });
-
-  it("?tab= 可以直接深链到某一格", async () => {
-    renderRoute("/platforms/sub2api?tab=operations");
-    expect(await screen.findByRole("tab", { name: "操作", selected: true })).not.toBeNull();
-  });
-
-  it("拼错的 tab 参数不报错，回到概览", async () => {
+  it("拼错的 ?tab= 给 Not Found，不再悄悄显示概览", async () => {
+    // 旧行为是回落 overview：贴一个拼错的地址过去，屏幕上显示的是概览，
+    // 而人以为自己看的是刚贴进去的那一格（交接文档 §8 明令禁止）
     renderRoute("/platforms/sub2api?tab=拼错了");
-    expect(await screen.findByRole("tab", { name: "概览", selected: true })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+    expect(screen.getByText(/没有名为 拼错了 的页签/)).not.toBeNull();
   });
 
-  it("未实现的页签给诚实占位：写明将来放什么、归哪个任务", async () => {
-    renderRoute("/platforms/sub2api?tab=alerts");
-    expect(await screen.findByText(/随 XM-0033 告警中心上线/)).not.toBeNull();
+  it("别名在这个平台上不存在时也是 Not Found，不硬跳", async () => {
+    // ?tab=logs 是服务器的历史别名，Sub2API 没有「监控与告警」这一格
+    renderRoute("/platforms/sub2api?tab=logs");
+    expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
   });
 
-  it("操作页签注明 L2+ 需审批，不假装现在就能执行", async () => {
-    renderRoute("/platforms/sub2api?tab=operations");
-    expect(await screen.findByText(/XM-0030/)).not.toBeNull();
-  });
-});
-
-describe("平台详情：未接入与未知平台", () => {
-  beforeEach(() => {
-    devLogin();
-    stubFetch(okHandler);
-  });
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("未接入平台给一整屏占位 + 规格里的一句话范围，而不是六个空页签", async () => {
-    renderRoute("/platforms/cpa");
-    expect(await screen.findByText("未接入，规划于 M4")).not.toBeNull();
-    expect(screen.getByText(/推广投放与结算/)).not.toBeNull();
-    // 摆出页签等于承诺点进去有东西，而这里一格都还没有
-    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+  it("拼错的 ?sub= 就地说清楚，不回落第一格", async () => {
+    renderRoute("/platforms/sub2api?tab=finance&sub=拼错了");
+    expect(await screen.findByText("没有这个子页签")).not.toBeNull();
+    // 平台页头还在：错的是子页签，不是整个平台
+    expect(screen.getByRole("heading", { name: "Sub2API", level: 2 })).not.toBeNull();
   });
 
-  it("契约草案平台的占位说的是「等冻结」，不是某个里程碑", async () => {
-    renderRoute("/platforms/invoice");
-    expect(await screen.findByText(/契约草案 XM-0028 待冻结/)).not.toBeNull();
+  it("没匹配上的路径落到 404 页，而不是框架的英文报错页", async () => {
+    renderRoute("/查无此页");
+    expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+    expect(screen.getByText(/查无此页/)).not.toBeNull();
+    // 404 渲染在壳内部：导航还在，人有地方可去
+    expect(screen.getByRole("navigation", { name: "主导航" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "回到运营工作台" })).not.toBeNull();
   });
 
   it("目录与注册表都不认识的平台明说未知，不是白屏", async () => {
@@ -1143,6 +1221,148 @@ describe("平台详情：未接入与未知平台", () => {
     expect(await screen.findByText("未知平台")).not.toBeNull();
   });
 });
+
+describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("Sub2API 九格，顺序与命名逐字（第 9 格是裁定 #1 恢复的渠道保障）", async () => {
+    renderRoute("/platforms/sub2api");
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "概览",
+      "用户管理",
+      "渠道管理",
+      "上游管理",
+      "支付与财务",
+      "请求详情",
+      "连接与凭据",
+      "告警",
+      "渠道保障",
+    ]);
+  });
+
+  it("服务器七格：原型把它画成了完整的资产中心，不是统一模板", async () => {
+    renderRoute("/platforms/server");
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "概览",
+      "服务器资产",
+      "供应商与采购",
+      "服务与容器",
+      "域名与证书",
+      "监控与告警",
+      "连接与凭据",
+    ]);
+  });
+
+  it("CPA 五格，「渠道保障」按原型字面排在第 4 格", async () => {
+    renderRoute("/platforms/cpa");
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "概览",
+      "用户管理",
+      "渠道管理",
+      "渠道保障",
+      "支付与财务",
+    ]);
+  });
+
+  it("未接入的平台展开页签骨架 + 页头挂状态徽章，而不是一整屏占位", async () => {
+    // 摆出页签在这里是**有内容**的：命名、顺序与地址就是本片的产出，
+    // 「还没有数据」由页头徽章与每一格里的占位说清楚
+    renderRoute("/platforms/cpa");
+    expect((await screen.findAllByRole("tab")).length).toBe(5);
+    expect(screen.getByRole("heading", { name: "CPA", level: 2 })).not.toBeNull();
+    // 侧栏一处、页头徽章一处——两处说的是同一件事，都该在场
+    expect(screen.getAllByText("未接入·M4").length).toBe(2);
+  });
+
+  it("默认落在概览，且只显示本平台的指标卡", async () => {
+    renderRoute("/platforms/sub2api");
+    expect(await screen.findByRole("tab", { name: "概览", selected: true })).not.toBeNull();
+    // 裁定 #3 砍掉「指标趋势」页签后，历史曲线的落点就是概览这些卡片
+    expect(await screen.findByText("Sub2API 日收入")).not.toBeNull();
+    expect(screen.getByText("数据延迟")).not.toBeNull();
+  });
+
+  it("点「渠道管理」能切过去，渲染的是迁移进来的渠道面板", async () => {
+    renderRoute("/platforms/sub2api");
+    await screen.findAllByRole("tab");
+    // Radix 的页签用 mousedown 激活（不是 click）——fireEvent.click 不带 mousedown，
+    // 点了不会切
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "渠道管理" }), { button: 0 });
+    expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
+    // okHandler 的指标里没有渠道余额这一条，面板据此给空态而不是一张空表
+    expect(await screen.findByText("暂无渠道余额指标")).not.toBeNull();
+  });
+
+  it("有子页签的格子展开子页签条，逐字对齐 §2.2", async () => {
+    renderRoute("/platforms/sub2api?tab=finance");
+    expect(await screen.findByRole("tab", { name: "资金概览" })).not.toBeNull();
+    for (const label of ["充值订单", "退款与冲正", "利润核算", "开票"]) {
+      expect(screen.getByRole("tab", { name: label })).not.toBeNull();
+    }
+  });
+
+  it("NewAPI 的支付与财务只有两格且没有开票（裁定 #2：维持原型）", async () => {
+    renderRoute("/platforms/newapi?tab=finance");
+    expect(await screen.findByRole("tab", { name: "资金与订单" })).not.toBeNull();
+    expect(screen.getByRole("tab", { name: "利润核算" })).not.toBeNull();
+    expect(screen.queryByRole("tab", { name: "开票" })).toBeNull();
+  });
+
+  it("未实现的页签给诚实占位：说明现在为什么空、归哪个阶段", async () => {
+    renderRoute("/platforms/sub2api?tab=alerts");
+    expect(await screen.findByText("「告警」尚未实现")).not.toBeNull();
+    expect(screen.getByText(/只重构了导航与路由/)).not.toBeNull();
+  });
+});
+
+describe("未实装页的诚实占位与门禁", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("占位页有页头、「未建」徽章与子页签条", async () => {
+    renderRoute("/jobs");
+    expect(await screen.findByRole("heading", { name: "后台任务", level: 2 })).not.toBeNull();
+    // 只看正文：侧栏上「未建·F-A」不止一条（后台任务、人员与权限都是 F-A）
+    expect(within(screen.getByRole("main")).getByText("未建·F-A")).not.toBeNull();
+    for (const label of ["运行中", "定时任务", "同步批次", "失败与重试", "多次失败任务"]) {
+      expect(screen.getByRole("tab", { name: label })).not.toBeNull();
+    }
+  });
+
+  it("操作与审批页显示 F-B 门禁，不提供任何执行入口", async () => {
+    // ADMIN-IA §七：F-B 未完成前必须显示门禁，不可伪造执行
+    renderRoute("/actions");
+    expect(await screen.findByText(/审批链（Foundation-B）尚未上线/)).not.toBeNull();
+    expect(screen.getByText(/不提供任何执行入口/)).not.toBeNull();
+  });
+
+  it("扩展能力四页标注「仅预览、不保存、不发布、不执行」", async () => {
+    renderRoute("/ext/publishing");
+    expect(await screen.findByText(/仅预览、不保存、不发布、不执行/)).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "内容发布", level: 2 })).not.toBeNull();
+  });
+
+  it("子页签进 ?sub=，可分享可恢复", async () => {
+    renderRoute("/ops?sub=model-quality");
+    expect(await screen.findByRole("tab", { name: "模型质量保障", selected: true })).not.toBeNull();
+  });
+
+  it("占位页拼错的 ?sub= 给 Not Found，不回落第一格", async () => {
+    renderRoute("/ops?sub=拼错了");
+    expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+  });
+});
+
 
 describe("总览卡片的平台入口", () => {
   beforeEach(() => {

@@ -1,5 +1,5 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { PageHeader } from "@xingmang/ui-admin";
+import { navLabel, PageHeader } from "@xingmang/ui-admin";
 import { Badge, Button, EmptyState } from "@xingmang/ui-primitives";
 import { Fragment, useState } from "react";
 import { AUDIT_PAGE_SIZE, listAuditEvents, type AuditEventItem } from "../api/platform";
@@ -41,7 +41,7 @@ export function AuditPage() {
   return (
     <section>
       <PageHeader
-        title="审计事件"
+        title={navLabel("/audit")}
         description={`按序号倒序，每次加载 ${AUDIT_PAGE_SIZE} 条；每行给出事件哈希与它记录的前序哈希。本页按环境过滤的是一条全局链，序号出现缺口属正常，缺口两侧的哈希不必相等。完整性校验以 audit-verify 工具与链根签名为准，本页仅展示。`}
         onRefresh={() => void query.refetch()}
         refreshing={query.isFetching && !query.isFetchingNextPage}
