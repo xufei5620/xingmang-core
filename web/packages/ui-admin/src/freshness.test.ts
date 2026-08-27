@@ -5,6 +5,7 @@ import {
   formatDuration,
   formatFreshnessDetail,
   formatFreshnessNote,
+  formatLocalTimestamp,
   formatUtcTimestamp,
   type FreshnessContract,
 } from "./freshness";
@@ -119,5 +120,29 @@ describe("formatFreshnessDetail：精确秒数不丢", () => {
   it("从未采集时说明里也不出现 0 秒", () => {
     const detail = formatFreshnessDetail(freshness({ staleness_seconds: null }));
     expect(detail).toBe("从未成功采集；阈值 1800 秒");
+  });
+});
+
+describe("formatLocalTimestamp：本地时间但时区显式", () => {
+  it("形状为 `YYYY-MM-DD HH:mm:ss (UTC±HH:mm)`，绝不省略时区", () => {
+    expect(formatLocalTimestamp("2026-08-26T10:00:00Z")).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC[+-]\d{2}:\d{2}\)$/,
+    );
+  });
+
+  it("年月日时分秒取运行环境的本地时区（不断言具体时区，CI 时区未知）", () => {
+    const iso = "2026-08-26T10:00:00Z";
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    expect(formatLocalTimestamp(iso)).toContain(
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+        `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+    );
+  });
+
+  it("空值与非法值的处理与 UTC 版一致：不吞信息也不编时间", () => {
+    expect(formatLocalTimestamp(null)).toBe("—");
+    expect(formatLocalTimestamp("")).toBe("—");
+    expect(formatLocalTimestamp("不是时间")).toBe("不是时间");
   });
 });

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { MetricItem } from "../api/platform";
-import { metricLabel, presentMetric } from "./metrics";
+import type { MetricHistoryItem, MetricItem } from "../api/platform";
+import {
+  channelTotal,
+  metricLabel,
+  metricPrimaryValue,
+  metricSeriesValue,
+  presentMetric,
+  readChannelRows,
+  toSparkSamples,
+} from "./metrics";
 
 function metric(over: Partial<MetricItem> = {}): MetricItem {
   return {
@@ -170,5 +178,155 @@ describe("metricLabel", () => {
   it("已登记的取友好名，未登记的原样返回", () => {
     expect(metricLabel("sub2api.users.total")).toBe("Sub2API 用户数");
     expect(metricLabel("x.y.z")).toBe("x.y.z");
+  });
+});
+
+describe("metricPrimaryValue：卡片正文与趋势图共用同一个字段", () => {
+  it("每个已登记指标取的字段与卡片主位显示的那个数一致", () => {
+    const cases: Array<[string, Record<string, unknown>, bigint, "money" | "count"]> = [
+      ["sub2api.users.total", { total_users: 12345, active_users: 1 }, 12345n, "count"],
+      ["sub2api.users.balance", { balance_minor_units: 505050 }, 505050n, "money"],
+      ["sub2api.revenue.daily", { amount_minor_units: 123456 }, 123456n, "money"],
+      ["sub2api.cost.daily", { amount_minor_units: 9900 }, 9900n, "money"],
+      ["sub2api.channels.balance", { channel_count: 3 }, 3n, "count"],
+    ];
+    for (const [key, value, raw, kind] of cases) {
+      expect(metricPrimaryValue(key, value)).toMatchObject({ raw, kind });
+    }
+  });
+
+  it("渠道余额没给 channel_count 时退到数组长度", () => {
+    expect(metricPrimaryValue("sub2api.channels.balance", { channels: [{}, {}] }).raw).toBe(2n);
+  });
+
+  it("value 为 null 时给 null，不当成 0", () => {
+    expect(metricPrimaryValue("sub2api.revenue.daily", null).raw).toBeNull();
+  });
+});
+
+describe("metricSeriesValue：趋势图纵轴取值", () => {
+  it("取的是整数原值（最小单位不做任何换算）", () => {
+    expect(metricSeriesValue("sub2api.revenue.daily", { amount_minor_units: 123456 })).toBe(123456);
+  });
+
+  it("取不到可信数值时给 null，让趋势图显示「暂无趋势」而不是画 0", () => {
+    expect(metricSeriesValue("sub2api.revenue.daily", {})).toBeNull();
+    expect(metricSeriesValue("sub2api.revenue.daily", null)).toBeNull();
+  });
+
+  it("超出安全整数范围时给 null——那种值换算成 number 已经不准了", () => {
+    const huge = "9007199254740993"; // 2^53 + 1
+    expect(metricSeriesValue("sub2api.users.balance", { balance_minor_units: huge })).toBeNull();
+    expect(
+      metricSeriesValue("sub2api.users.balance", { balance_minor_units: "9007199254740991" }),
+    ).toBe(9007199254740991);
+  });
+
+  it("未登记指标沿用兜底口径：先金额后计数", () => {
+    expect(metricSeriesValue("newapi.wallet", { amount_minor_units: 250, currency: "USD" })).toBe(
+      250,
+    );
+    expect(metricSeriesValue("newapi.tokens", { total: 7 })).toBe(7);
+  });
+});
+
+describe("toSparkSamples：历史观测 → 趋势样本", () => {
+  function history(over: Partial<MetricHistoryItem> = {}): MetricHistoryItem {
+    return {
+      observed_at: "2026-08-26T10:00:00Z",
+      synced_at: "2026-08-26T10:05:00Z",
+      status: "ok",
+      is_partial: false,
+      watermark: "wm-1",
+      last_error_code: "",
+      value: { amount_minor_units: 100, currency: "CNY" },
+      ...over,
+    };
+  }
+
+  it("横轴优先用 observed_at", () => {
+    const [s] = toSparkSamples("sub2api.revenue.daily", [history()]);
+    expect(s?.at).toBe(Date.parse("2026-08-26T10:00:00Z"));
+    expect(s?.value).toBe(100);
+    expect(s?.failed).toBe(false);
+  });
+
+  it("没有 observed_at 时退到 synced_at，而不是把整条样本丢掉", () => {
+    const [s] = toSparkSamples("sub2api.revenue.daily", [history({ observed_at: null })]);
+    expect(s?.at).toBe(Date.parse("2026-08-26T10:05:00Z"));
+  });
+
+  it("时间完全解析不出来的样本才丢弃（NaN 会让整条路径消失）", () => {
+    const samples = toSparkSamples("sub2api.revenue.daily", [
+      history({ observed_at: "不是时间", synced_at: "也不是" }),
+      history(),
+    ]);
+    expect(samples).toHaveLength(1);
+  });
+
+  it("status 不是 ok 一律记为失败——不认识的状态不能默认当成成功观测", () => {
+    const samples = toSparkSamples("sub2api.revenue.daily", [
+      history({ status: "failed" }),
+      history({ status: "partial" }),
+      history({ status: "ok" }),
+    ]);
+    expect(samples.map((s) => s.failed)).toEqual([true, true, false]);
+  });
+});
+
+describe("readChannelRows / channelTotal", () => {
+  const channels = [
+    { channel_id: "a", channel_name: "渠道甲", balance_minor_units: 10000, currency: "CNY", token_valid: true },
+    { channel_id: "b", channel_name: "渠道乙", balance_minor_units: 2500, currency: "CNY", token_valid: false },
+  ];
+
+  it("解析出逐渠道字段，与连接器写入的形状一一对应", () => {
+    const rows = readChannelRows({ channels });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({
+      channelId: "a",
+      channelName: "渠道甲",
+      balanceMinorUnits: 10000n,
+      currency: "CNY",
+      tokenValid: true,
+    });
+    expect(rows[1]?.tokenValid).toBe(false);
+  });
+
+  it("token_valid 缺失时给 null——不默认当作有效", () => {
+    const rows = readChannelRows({ channels: [{ channel_id: "c" }] });
+    expect(rows[0]?.tokenValid).toBeNull();
+  });
+
+  it("余额不是合法整数时给 null，由展示层说「数值异常」", () => {
+    const rows = readChannelRows({ channels: [{ balance_minor_units: 1.5 }] });
+    expect(rows[0]?.balanceMinorUnits).toBeNull();
+  });
+
+  it("channels 不是数组（或 value 为 null）时给空数组，页面不会炸", () => {
+    expect(readChannelRows(null)).toEqual([]);
+    expect(readChannelRows({})).toEqual([]);
+    expect(readChannelRows({ channels: "nope" })).toEqual([]);
+  });
+
+  it("同币种给合计，用 BigInt 相加不经过浮点", () => {
+    expect(channelTotal(readChannelRows({ channels }))).toEqual({ total: 12500n, currency: "CNY" });
+  });
+
+  it("币种不一致、有非法余额、或没有渠道时都不给合计", () => {
+    expect(
+      channelTotal(
+        readChannelRows({
+          channels: [
+            { balance_minor_units: 1, currency: "CNY" },
+            { balance_minor_units: 1, currency: "USD" },
+          ],
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      channelTotal(readChannelRows({ channels: [{ balance_minor_units: "x", currency: "CNY" }] })),
+    ).toBeNull();
+    expect(channelTotal([])).toBeNull();
   });
 });
