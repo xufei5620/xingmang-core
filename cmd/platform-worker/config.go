@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 )
 
@@ -186,6 +187,16 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		}
 		config.AlertEvaluateInterval = interval
 	}
+	// 可用天数告警档（XM-0049）。与 platform-api 的 summary 端点共用
+	// finance.ParseRunwayThresholds——两处各写一遍解析，
+	// 「看板说还有 11 天」与「告警说已经低于阈值」就会同时出现。
+	runway, err := finance.ParseRunwayThresholds(
+		getenv("XM_FINANCE_RUNWAY_WARN_DAYS"), getenv("XM_FINANCE_RUNWAY_CRIT_DAYS"))
+	if err != nil {
+		return jobs.Config{}, fmt.Errorf("可用天数告警档: %w", err)
+	}
+	config.AlertRunwayThresholds = runway
+
 	if value := strings.TrimSpace(getenv("XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS")); value != "" {
 		// 单位是**最小货币单位**的整数（宪法 13 条：金额禁止 float）。
 		// ParseInt 而不是 ParseFloat：一个写成 "5000.5" 的阈值说明写的人

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
@@ -14,6 +15,28 @@ import (
 //
 // 规则判定是本模块最容易写错的部分，它必须能在没有数据库的机器上被完整
 // 测试——包括「连续失败第 2 轮不告警、第 3 轮告警」这种要精确控制历史的用例。
+// fakeRunwaySource 是可用天数规则的内存来源（XM-0049）。
+//
+// 零值就是「一个上游都没有」——前四条规则的用例因此不必关心它，
+// 但**必须传一个**：Evaluate 对 nil 来源报错，那是刻意的
+// （一条因为装配漏项而永远不响的规则，只会在真出事那天才被发现）。
+type fakeRunwaySource struct {
+	items []finance.UpstreamRunway
+	err   error
+	// gotThresholds 记下评估器传下来的阈值，用来钉住「告警与看板共用一份」。
+	gotThresholds finance.RunwayThresholds
+}
+
+func (f *fakeRunwaySource) UpstreamRunways(
+	_ context.Context, _ string, thresholds finance.RunwayThresholds,
+) ([]finance.UpstreamRunway, error) {
+	f.gotThresholds = thresholds
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.items, nil
+}
+
 type fakeMetricSource struct {
 	observations []ops.Observation
 	samples      map[string][]ops.Observation
@@ -85,7 +108,8 @@ func okSample(key string, syncedAt time.Time) ops.Observation {
 
 func evaluate(t *testing.T, src *fakeMetricSource, now time.Time) []Finding {
 	t.Helper()
-	findings, err := NewEvaluator(src, RuleConfig{}).Evaluate(context.Background(), testEnv, now)
+	findings, err := NewEvaluator(src, &fakeRunwaySource{}, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, now)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -484,8 +508,12 @@ func TestSilenceMatches(t *testing.T) {
 // 一项都不许空。这条测试是那份要求在代码里的落点。
 func TestRulesDeclareAllNineSpecFields(t *testing.T) {
 	rules := Rules(DefaultRuleConfig())
-	if len(rules) != 5 {
-		t.Fatalf("第一批规则应有 5 条，实际 %d 条", len(rules))
+	// 5 条第一批（XM-0033）+ 1 条可用天数（XM-0049）。
+	// 这个数字**要求每加一条规则都改一次测试**，那是刻意的：
+	// 规则集是外部契约（静默窗口按 rule_key 匹配、文档按它列表），
+	// 加一条规则必须是一次有人看过的改动。
+	if len(rules) != 6 {
+		t.Fatalf("规则应有 6 条，实际 %d 条", len(rules))
 	}
 	seen := map[string]bool{}
 	for _, r := range rules {
@@ -546,13 +574,14 @@ func TestRuleConfigNormalizationRejectsDisablingThresholds(t *testing.T) {
 	// 正是最常见的调用方式，只挡负数会让「忘了填阈值」变成一条永不触发
 	// 的规则。这条断言是那个 bug 的回归。
 	for _, threshold := range []int64{0, -1} {
-		e := NewEvaluator(&fakeMetricSource{}, RuleConfig{BalanceThresholdMinorUnits: threshold})
+		e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{},
+			RuleConfig{BalanceThresholdMinorUnits: threshold})
 		if got := e.Config().BalanceThresholdMinorUnits; got != DefaultBalanceThresholdMinorUnits {
 			t.Fatalf("阈值 %d 应回落到默认值，实际 %d", threshold, got)
 		}
 	}
 
-	e := NewEvaluator(&fakeMetricSource{}, RuleConfig{
+	e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, RuleConfig{
 		CollectionInterval:          -time.Hour,
 		BalanceThresholdMinorUnits:  -1,
 		ConsecutiveFailureThreshold: 0,

@@ -17,6 +17,8 @@ package finance
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -55,6 +57,72 @@ type RunwayThresholds struct {
 // 真正的可配置化（设置表或环境变量）记在 PR 的 follow_ups 里。
 func DefaultRunwayThresholds() RunwayThresholds {
 	return RunwayThresholds{CriticalDays: 5, WarningDays: 10, SeriousDays: 20}
+}
+
+// ParseRunwayThresholds 从两个字符串解析告警阈值（XM-0049）。
+//
+// **这是全平台唯一的一份解析。** 阈值有两个消费者，跑在**两个进程**里：
+// platform-api 的 `/finance/upstreams/summary` 要把它回报给前端，
+// platform-worker 的告警规则要拿它判档。两处各写一遍解析，
+// 「看板说还有 11 天」与「告警说已经低于阈值」就会同时出现在一个人面前——
+// 那时没人知道该信哪个。所以两个 cmd 都调这个函数。
+//
+// ⚠️ 两个进程仍然必须被配成**同一组环境变量**：函数保证解析一致，
+// 保证不了部署一致。这一条记在 deploy/compose/.env.example 里。
+//
+// 空串回落到默认值（10 / 5）；非法值**报错**而不是回落——
+// 一个把 `XM_FINANCE_RUNWAY_WARN_DAYS=ten` 写错的部署，
+// 静默用回默认值会让人以为自己调过了。
+//
+// serious 档不可配（本片只开放 warning / critical 两个环境变量），
+// 但它必须始终**严格大于 warning**，否则 Validate 会判定三档不递增、
+// levelFor 退回 critical，于是所有渠道都变红。所以它取
+// `max(默认 20, warning + 1)` —— 自动让位而不是报错：serious 是最松的一档，
+// 它的作用只是给「还算充裕」一个颜色，让位不损失任何告警能力。
+func ParseRunwayThresholds(warnDays, critDays string) (RunwayThresholds, error) {
+	defaults := DefaultRunwayThresholds()
+
+	warning, err := parsePositiveDays(warnDays, defaults.WarningDays, "warning")
+	if err != nil {
+		return RunwayThresholds{}, err
+	}
+	critical, err := parsePositiveDays(critDays, defaults.CriticalDays, "critical")
+	if err != nil {
+		return RunwayThresholds{}, err
+	}
+	if critical >= warning {
+		return RunwayThresholds{}, fmt.Errorf(
+			"critical 档 %d 必须严格小于 warning 档 %d（天数越少越严重）: %w",
+			critical, warning, ErrInconsistent)
+	}
+
+	serious := defaults.SeriousDays
+	if serious <= warning {
+		serious = warning + 1
+	}
+	out := RunwayThresholds{
+		CriticalDays: critical, WarningDays: warning, SeriousDays: serious,
+	}
+	if err := out.Validate(); err != nil {
+		return RunwayThresholds{}, err
+	}
+	return out, nil
+}
+
+// parsePositiveDays 解析一个「天数」环境变量；空串用默认值。
+func parsePositiveDays(raw string, fallback int, name string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s 档 %q 必须是整数: %w", name, raw, ErrInvalidFormat)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s 档 %d 必须为正: %w", name, value, ErrInvalidFormat)
+	}
+	return value, nil
 }
 
 // Validate 校验三档严格递增。

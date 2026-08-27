@@ -98,7 +98,7 @@ func failingMetric(key string, now time.Time) ops.Observation {
 func newTestReconciler(store AlertStore, src MetricSource, notifier Notifier, now time.Time) *Reconciler {
 	return NewReconciler(ReconcilerOptions{
 		Store:     store,
-		Evaluator: NewEvaluator(src, RuleConfig{}),
+		Evaluator: NewEvaluator(src, &fakeRunwaySource{}, RuleConfig{}),
 		Notifier:  notifier,
 		Logger:    discardLogger(),
 		Now:       func() time.Time { return now },

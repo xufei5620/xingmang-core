@@ -28,6 +28,19 @@ type FinanceSummaryLister interface {
 	UpstreamSummaries(ctx context.Context, q finance.SummaryQuery) ([]finance.UpstreamSummary, error)
 }
 
+// runwayThresholdsOrDefault 补齐未注入的阈值。
+//
+// ⚠️ 阈值**必须由装配层注入**（cmd/platform-api 从环境变量解析），
+// 不能在这里就地取默认：告警那一侧（platform-worker）读的是同一组环境变量，
+// 两处一个用配置一个用默认，「看板说还有 11 天」与「告警说已经低于阈值」
+// 就会同时出现在一个人面前。回落只是为了让没配的部署也起得来。
+func runwayThresholdsOrDefault(t finance.RunwayThresholds) finance.RunwayThresholds {
+	if err := t.Validate(); err != nil {
+		return finance.DefaultRunwayThresholds()
+	}
+	return t
+}
+
 const (
 	// maxSummaryWindowDays 是业务日窗口上限（92 天 ≈ 一个季度，同 profit-daily）。
 	//
@@ -130,13 +143,21 @@ type channelSummaryItem struct {
 	// （§3.4）。两个都是定点十进制**字符串**：JSON 数字一路解成 double，
 	// 1.15 到了页面上就变成 1.1499999999999999（宪法 13 条）。
 	//
-	// ⚠️ §13 的 ChannelSummary 还有一个 `groupRate`（分组倍率）。
-	// 登记簿里**没有这一列**（§2.1 只说它「独立存储/展示」，没给存储），
-	// 所以本响应不出这个字段——编一个 "1" 出来会被前端乘进成本里。
 	RechargeRatio    string `json:"recharge_ratio"`
 	RechargeCostRate string `json:"recharge_cost_rate"`
-	BusinessDayTZ    string `json:"business_day_tz"`
-	Status           string `json:"status"`
+	// GroupRate 是 §13 的 `groupRate`（分组倍率，XM-0049 补上存储）。
+	//
+	// ⚠️ 它与上面两个是**完全不同的量**：recharge_ratio 是成本折算的除数，
+	// group_rate 只是定价分组的展示标注——§10.2 明确要求「分组倍率独立，
+	// 前端不重复乘算」，后端也一次都不会乘它。
+	//
+	// **omitempty：没配就不出这个字段**，而不是给一个 ""。与 recharge_ratio
+	// 恒出（计量型必须有它，空串本身就是「这条渠道没有倍率」的信息）不同，
+	// 分组倍率对绝大多数渠道本就不存在——出一个空字段只会让前端多写一次
+	// 「这个空串是什么意思」的判断。
+	GroupRate     string `json:"group_rate,omitempty"`
+	BusinessDayTZ string `json:"business_day_tz"`
+	Status        string `json:"status"`
 	// TokenCount 是该账号名下的令牌映射数（§13 的 keyCount）。
 	TokenCount int `json:"token_count"`
 
@@ -178,8 +199,10 @@ type upstreamSummaryItem struct {
 	// RechargeCostRate 是 §13 的 rechargeCostRate = 1 / 充值倍率（展示投影）。
 	// 未配倍率（订阅型）时为空串——不编一个 "1.000000" 冒充「没打折」。
 	RechargeCostRate string `json:"recharge_cost_rate"`
-	CredentialRef    string `json:"credential_ref"`
-	Status           string `json:"status"`
+	// GroupRate 同渠道项：没配就不出这个字段，且它不参与任何计算。
+	GroupRate     string `json:"group_rate,omitempty"`
+	CredentialRef string `json:"credential_ref"`
+	Status        string `json:"status"`
 	// TokenCount 是 §13 的 keyCount。
 	TokenCount int `json:"token_count"`
 
@@ -269,17 +292,6 @@ func runwayOf(r finance.Runway) runwayItem {
 	return out
 }
 
-// channelName 拼一个稳定的、给人看的渠道名。
-//
-// 后端拼而不是前端拼：这个名字会出现在告警、审计与看板三处，
-// 三处各拼一遍迟早会有一处不一样。
-func channelName(a finance.UpstreamAccount) string {
-	if a.BaseURL != "" {
-		return string(a.SystemType) + " · " + a.BaseURL
-	}
-	return string(a.SystemType) + " · " + string(a.AccessMethod)
-}
-
 // SupplierKeyOf 给出「哪些账号背后是同一个上游供应商」的归并键（§7）。
 //
 // 有 base_url 的按 `system_type|base_url` 归并（§7 的 newapi 去重口径）；
@@ -295,7 +307,7 @@ func SupplierKeyOf(a finance.UpstreamAccount) string {
 func channelToItem(s finance.UpstreamSummary) channelSummaryItem {
 	return channelSummaryItem{
 		ID:               s.Account.ID.String(),
-		Name:             channelName(s.Account),
+		Name:             finance.AccountDisplayName(s.Account),
 		SystemType:       string(s.Account.SystemType),
 		AccessMethod:     string(s.Account.AccessMethod),
 		Metered:          s.Account.AccessMethod.IsMetered(),
@@ -304,6 +316,7 @@ func channelToItem(s finance.UpstreamSummary) channelSummaryItem {
 		CredentialRef:    s.Account.CredentialRef,
 		RechargeRatio:    s.Account.RechargeRatio.String(),
 		RechargeCostRate: s.Account.RechargeCostRate(),
+		GroupRate:        s.Account.GroupRate.String(),
 		BusinessDayTZ:    s.Account.BusinessDayTZ,
 		Status:           string(s.Account.Status),
 		TokenCount:       s.TokenCount,
@@ -320,12 +333,13 @@ func channelToItem(s finance.UpstreamSummary) channelSummaryItem {
 func upstreamToItem(s finance.UpstreamSummary) upstreamSummaryItem {
 	return upstreamSummaryItem{
 		ID:               s.Account.ID.String(),
-		Name:             channelName(s.Account),
+		Name:             finance.AccountDisplayName(s.Account),
 		SupplierKey:      SupplierKeyOf(s.Account),
 		SystemType:       string(s.Account.SystemType),
 		AccessMethod:     string(s.Account.AccessMethod),
 		BaseURL:          s.Account.BaseURL,
 		RechargeCostRate: s.RechargeCostRate(),
+		GroupRate:        s.Account.GroupRate.String(),
 		CredentialRef:    s.Account.CredentialRef,
 		Status:           string(s.Account.Status),
 		TokenCount:       s.TokenCount,
@@ -342,9 +356,11 @@ func upstreamToItem(s finance.UpstreamSummary) upstreamSummaryItem {
 //
 // 复用 finance.ScopeRead，不另立 scope：这里的每一个数都是台账的向上聚合，
 // 能看台账的人已经能自己加出来，泄漏面完全相同。
-func ListChannelSummaryHandler(store FinanceSummaryLister) http.HandlerFunc {
+func ListChannelSummaryHandler(
+	store FinanceSummaryLister, thresholds finance.RunwayThresholds,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		items, from, to, err := loadSummaries(r, store)
+		items, from, to, err := loadSummaries(r, store, thresholds)
 		if err != nil {
 			WriteError(w, r, err)
 			return
@@ -377,9 +393,11 @@ func ListChannelSummaryHandler(store FinanceSummaryLister) http.HandlerFunc {
 }
 
 // ListUpstreamSummaryHandler 返回逐上游的供给侧供数（§13 UpstreamSummary + §10.4）。
-func ListUpstreamSummaryHandler(store FinanceSummaryLister) http.HandlerFunc {
+func ListUpstreamSummaryHandler(
+	store FinanceSummaryLister, thresholds finance.RunwayThresholds,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		items, from, to, err := loadSummaries(r, store)
+		items, from, to, err := loadSummaries(r, store, thresholds)
 		if err != nil {
 			WriteError(w, r, err)
 			return
@@ -396,7 +414,7 @@ func ListUpstreamSummaryHandler(store FinanceSummaryLister) http.HandlerFunc {
 		for reason, count := range coverage.Reasons {
 			reasons[string(reason)] = count
 		}
-		thresholds := finance.DefaultRunwayThresholds()
+		effective := runwayThresholdsOrDefault(thresholds)
 		WriteJSON(w, http.StatusOK, upstreamSummaryPage{
 			Items: out,
 			From:  from.Format(finance.ProfitBusinessDayLayout),
@@ -405,18 +423,18 @@ func ListUpstreamSummaryHandler(store FinanceSummaryLister) http.HandlerFunc {
 				Total: coverage.Total, Known: coverage.Known, Reasons: reasons,
 			},
 			Thresholds: runwayThresholdsItem{
-				CriticalDays: thresholds.CriticalDays,
-				WarningDays:  thresholds.WarningDays,
-				SeriousDays:  thresholds.SeriousDays,
+				CriticalDays: effective.CriticalDays,
+				WarningDays:  effective.WarningDays,
+				SeriousDays:  effective.SeriousDays,
 			},
 		})
 	}
 }
 
 // loadSummaries 是两个端点共用的取数：身份 → 环境 → 窗口 → 仓储。
-func loadSummaries(r *http.Request, store FinanceSummaryLister) (
-	[]finance.UpstreamSummary, time.Time, time.Time, error,
-) {
+func loadSummaries(
+	r *http.Request, store FinanceSummaryLister, thresholds finance.RunwayThresholds,
+) ([]finance.UpstreamSummary, time.Time, time.Time, error) {
 	p, ok := principal.FromContext(r.Context())
 	if !ok {
 		return nil, time.Time{}, time.Time{},
@@ -435,7 +453,7 @@ func loadSummaries(r *http.Request, store FinanceSummaryLister) (
 		Environment: string(env),
 		From:        from,
 		To:          to,
-		Thresholds:  finance.DefaultRunwayThresholds(),
+		Thresholds:  runwayThresholdsOrDefault(thresholds),
 	})
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, err

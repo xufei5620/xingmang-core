@@ -144,6 +144,13 @@ services:
       #    而只读连接配置要求 https（同文档 §5）。
       # --- 成本线演示种子(XM-0037d):非生产演示用,生产模式进程内硬拒 ---
       XM_FINANCE_FAKE_SEED: ${XM_FINANCE_FAKE_SEED:-false}
+      # --- 可用天数告警档(XM-0049) ---
+      # ⚠️ **必须与 platform-worker 配成同一组值**:api 侧回报给看板、
+      #    worker 侧拿来判告警档,两处漂开会让「看板说还有 11 天」与
+      #    「告警说已经低于阈值」同时出现。两边都从同一个 .env 变量取,
+      #    正是为了让它们不可能配不一样。
+      XM_FINANCE_RUNWAY_WARN_DAYS: ${XM_FINANCE_RUNWAY_WARN_DAYS:-}
+      XM_FINANCE_RUNWAY_CRIT_DAYS: ${XM_FINANCE_RUNWAY_CRIT_DAYS:-}
       XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
       XM_REQLOG_ENDPOINT: ${XM_REQLOG_ENDPOINT:-}
       XM_REQLOG_TARGET_ALLOWLIST: ${XM_REQLOG_TARGET_ALLOWLIST:-}
@@ -255,6 +262,10 @@ services:
       XM_ALERT_TELEGRAM_TOKEN: ${XM_ALERT_TELEGRAM_TOKEN:-}
       XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
       XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS: ${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}
+      # --- 可用天数告警档(XM-0049) ---
+      # ⚠️ 与 platform-api 取同一个 .env 变量,见那边的说明。
+      XM_FINANCE_RUNWAY_WARN_DAYS: ${XM_FINANCE_RUNWAY_WARN_DAYS:-}
+      XM_FINANCE_RUNWAY_CRIT_DAYS: ${XM_FINANCE_RUNWAY_CRIT_DAYS:-}
 
   # ==========================================================================
   # Web（admin-web 静态产物 + /api/ 反代）

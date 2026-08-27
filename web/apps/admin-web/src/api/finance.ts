@@ -80,6 +80,16 @@ export interface ChannelSummary {
   credentialRef: string;
   rechargeRatio: string;
   rechargeCostRate: string;
+  /** 分组倍率（§10.2 + §13 的 groupRate）。
+   *
+   *  ⚠️ **它不是成本的一部分，前端绝不能拿它去乘任何金额。**
+   *  §10.2 的原话是「分组倍率独立存储 / 展示，不并入 recharge_ratio，
+   *  前端不重复乘算」——后端已经一次都没乘过它，这里再乘一遍就成了
+   *  「重复乘算」本身。
+   *
+   *  后端**没配就不出这个字段**，所以它是 `undefined` 而不是空串：
+   *  「这条渠道没有分组倍率」是多数渠道的正常状态，不是 1。 */
+  groupRate?: string;
   businessDayTz: string;
   status: string;
   tokenCount: number;
@@ -103,6 +113,8 @@ export interface UpstreamSummary {
   accessMethod: string;
   baseUrl: string;
   rechargeCostRate: string;
+  /** 同 ChannelSummary.groupRate：不参与任何计算，没配就 undefined。 */
+  groupRate?: string;
   credentialRef: string;
   status: string;
   tokenCount: number;
@@ -188,6 +200,7 @@ interface RawChannel {
   credential_ref?: string;
   recharge_ratio?: string;
   recharge_cost_rate?: string;
+  group_rate?: string;
   business_day_tz?: string;
   status?: string;
   token_count?: number;
@@ -281,6 +294,9 @@ function toChannel(raw: RawChannel): ChannelSummary {
     credentialRef: raw.credential_ref ?? "",
     rechargeRatio: raw.recharge_ratio ?? "",
     rechargeCostRate: raw.recharge_cost_rate ?? "",
+    // 缺席时保持 undefined，**不折成空串**：后端刻意用「不出这个字段」
+    // 表达「没有分组倍率」，折成 "" 会让它看起来像一个被清空的值。
+    ...(raw.group_rate ? { groupRate: raw.group_rate } : {}),
     businessDayTz: raw.business_day_tz ?? "",
     status: raw.status ?? "",
     tokenCount: raw.token_count ?? 0,
@@ -306,6 +322,7 @@ function toUpstream(raw: RawUpstream): UpstreamSummary {
     accessMethod: base.accessMethod,
     baseUrl: base.baseUrl,
     rechargeCostRate: base.rechargeCostRate,
+    ...(base.groupRate ? { groupRate: base.groupRate } : {}),
     credentialRef: base.credentialRef,
     status: base.status,
     tokenCount: base.tokenCount,

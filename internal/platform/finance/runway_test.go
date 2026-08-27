@@ -1,6 +1,7 @@
 package finance_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -354,4 +355,72 @@ func TestRunwayAlwaysYieldsDaysOrReason(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestParseRunwayThresholds 钉住**全平台唯一那份阈值解析**（XM-0049）。
+//
+// 它有两个消费者、跑在两个进程里：platform-api 的 summary 端点要把它回报给
+// 前端，platform-worker 的告警规则要拿它判档。两处各写一遍解析，
+// 「看板说还有 11 天」与「告警说已经低于阈值」就会同时出现在一个人面前。
+func TestParseRunwayThresholds(t *testing.T) {
+	t.Run("空串用默认档", func(t *testing.T) {
+		got, err := finance.ParseRunwayThresholds("", "")
+		if err != nil {
+			t.Fatalf("空串应回落默认: %v", err)
+		}
+		if got != finance.DefaultRunwayThresholds() {
+			t.Fatalf("got %+v, want %+v", got, finance.DefaultRunwayThresholds())
+		}
+	})
+
+	t.Run("显式值生效", func(t *testing.T) {
+		got, err := finance.ParseRunwayThresholds("14", "7")
+		if err != nil {
+			t.Fatalf("解析失败: %v", err)
+		}
+		if got.WarningDays != 14 || got.CriticalDays != 7 {
+			t.Fatalf("got %+v", got)
+		}
+		if err := got.Validate(); err != nil {
+			t.Fatalf("解析结果必须自洽: %v", err)
+		}
+	})
+
+	t.Run("warning 超过默认 serious 时 serious 自动让位", func(t *testing.T) {
+		// serious 是最松的一档，作用只是给「还算充裕」一个颜色。
+		// 不让位的话三档不递增 → levelFor 的兜底把**每一条**上游判成 critical，
+		// 一次配置手滑变成满屏红。
+		got, err := finance.ParseRunwayThresholds("30", "5")
+		if err != nil {
+			t.Fatalf("解析失败: %v", err)
+		}
+		if got.SeriousDays <= got.WarningDays {
+			t.Fatalf("serious 应让位到 warning 之上, got %+v", got)
+		}
+		if err := got.Validate(); err != nil {
+			t.Fatalf("让位后仍须严格递增: %v", err)
+		}
+	})
+
+	t.Run("非法值报错而不是回落默认", func(t *testing.T) {
+		// 静默回落会让一个把 WARN_DAYS 写成 "ten" 的部署以为自己调过了
+		for _, tc := range [][2]string{
+			{"ten", "5"}, {"10", "five"}, {"0", "5"}, {"10", "0"},
+			{"-1", "5"}, {"10", "-1"},
+		} {
+			if _, err := finance.ParseRunwayThresholds(tc[0], tc[1]); err == nil {
+				t.Fatalf("warn=%q crit=%q 应报错", tc[0], tc[1])
+			}
+		}
+	})
+
+	t.Run("critical 不小于 warning 时报错", func(t *testing.T) {
+		// 天数越少越严重：critical 必须是更紧的那一档
+		for _, tc := range [][2]string{{"5", "10"}, {"5", "5"}} {
+			_, err := finance.ParseRunwayThresholds(tc[0], tc[1])
+			if !errors.Is(err, finance.ErrInconsistent) {
+				t.Fatalf("warn=%q crit=%q 应报 ErrInconsistent, got %v", tc[0], tc[1], err)
+			}
+		}
+	})
 }
