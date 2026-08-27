@@ -71,9 +71,21 @@ const (
 // 只写到 major.minor：补丁版本升级不该让整条采集链路判为不支持，
 // 而 minor 变更在这个上游意味着接口可能动过，值得人看一眼。
 //
-// ⚠️ 这份矩阵目前是**按 docs/inventory 记录的上游版本线填的**，尚未对着真实
-// 上游验证过（真实只读账号未到位）。账号到位后第一件事就是跑一次
-// Version()，把实际探测值补进这里与 docs/inventory/managed-systems.yaml。
+// 已逐字段核对过源码的补丁版：
+//
+//	0.1.133  最初实现（XM-0017）依据的基线
+//	0.1.183  XM-R013 依据的基线（K:/sub2api-src @ efb46db）。相对 0.1.133 有
+//	         两处破坏性差异，都已在本包修掉：支付看板金额改成币种 map
+//	         （见 upstream.go 的 currencyBuckets）、admin 组新增合规门返 423
+//	         （见 classifyStatus）。本包同时兼容两种金额形状。
+//
+// 矩阵值仍是 "0.1" 而不是逐个列补丁版：前缀匹配已经覆盖 0.1.133 与 0.1.183，
+// 再写一条 "0.1.183" 是不生效的重复项，反而会让人误读成「只认这一版」。
+//
+// ⚠️ 仍然**没有对真实实例跑过 Version()**：以上是对上游源码的核对，
+// 不是一次观测。api.solov.cc 实际跑的是哪个补丁版目前仍未知。
+// 凭据到位后第一件事就是跑一次 Version()，把探测值补进
+// docs/inventory/managed-systems.yaml（矩阵本身多半不用动）。
 var SupportedUpstreamVersions = []string{"0.1"}
 
 // Option 调整客户端的构造。
@@ -372,6 +384,19 @@ func classifyStatus(code int) connector.ErrorKind {
 	switch {
 	case code == http.StatusUnauthorized, code == http.StatusForbidden:
 		return connector.KindAuth
+	case code == http.StatusLocked:
+		// 423 在这个上游是**合规确认门**（0.1.183 起的 AdminComplianceGuard）：
+		// 采集凭据对应的 admin 账号没确认过合规声明时，整个 admin 组的 GET
+		// 全部返 423，正文 code=ADMIN_COMPLIANCE_ACK_REQUIRED。
+		//
+		// 落进 default 会归 bad_response——那等于告诉运维「上游的响应格式非法」，
+		// 于是有人去核字段名、去查上游改了什么版，而真正要做的只有一件事：
+		// 去上游把那个一次性的合规确认点掉（见 upstream.go 顶部的接入前置清单）。
+		//
+		// 归 auth 而不是 not_supported：这项能力上游是有的，只是**这个账号
+		// 现在没被授权用**——和「凭据权限不足」是同一种处置，
+		// 而且和 401/403 一样，原样重试永远不会自己变好。
+		return connector.KindAuth
 	case code == http.StatusTooManyRequests:
 		return connector.KindRateLimited
 	case code == http.StatusNotFound, code == http.StatusMethodNotAllowed, code == http.StatusNotImplemented:
@@ -466,13 +491,15 @@ func (c *client) Version(ctx context.Context) (connector.VersionInfo, error) {
 	if err != nil {
 		return connector.VersionInfo{}, err
 	}
-	detected := strings.TrimSpace(version.version)
+	detected := strings.TrimSpace(version)
 	if detected == "" {
 		detected = unknownVersion
 	}
 	return connector.VersionInfo{
-		Detected:    detected,
-		Fingerprint: fingerprint(c.endpoint.Host, detected, version.fingerprintExtra),
+		Detected: detected,
+		// 指纹只由端点主机 + 版本串构成：上游的 /admin/system/version
+		// **只发 version 一个字段**，再没有别的稳定标识可掺（见 fetchVersion）。
+		Fingerprint: fingerprint(c.endpoint.Host, detected),
 		Supported:   versionSupported(detected, c.supported),
 		DetectedAt:  meta.receivedAt,
 	}, nil

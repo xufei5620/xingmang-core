@@ -28,6 +28,33 @@ import (
 // 那两样错了之后数字看起来完全正常。
 //
 // 上游改版时，要改的应该只有这一个文件。
+//
+// ---------------------------------------------------------------------------
+// 接入真实实例前置清单（XM-R013，依据 0.1.183 源码普查）
+// ---------------------------------------------------------------------------
+//
+//  1. **先做合规确认，否则 admin 组一条都读不出来。**
+//     0.1.183 在 /api/v1/admin 组（以及 payment 的 admin 子组）挂了
+//     AdminComplianceGuard：该 admin 账号没确认过合规声明时，**所有** admin
+//     GET 都返 423 Locked，正文 code=ADMIN_COMPLIANCE_ACK_REQUIRED。
+//     采集凭据对应的账号必须先 `POST /api/v1/admin/compliance/accept` 一次
+//     （人工做，只做一次；平台是只读通道，发不出这个 POST，也不该发）。
+//     现状可用 `GET /api/v1/admin/compliance` 查——它自己在 guard 的白名单里。
+//     423 在 classifyStatus 里归 auth，见那里的注释。
+//
+//  2. **这 5 个端点返回的是写死的假数据，永远不要采。**
+//     它们 HTTP 200、形状也正常，但 handler 里就是常量（源码注释写着
+//     "Return mock data for now"）。采了会得到一批**永远不动且看起来正常**
+//     的指标——比读不到更糟：
+//
+//     /api/v1/admin/users/:id/usage
+//     /api/v1/admin/dashboard/realtime
+//     /api/v1/admin/redeem-codes/stats
+//     /api/v1/admin/groups/:id/stats
+//     /api/v1/admin/proxies/:id/stats
+//
+//     本文件在用的 7 条路由都不在这份名单里；将来加路由前先回源码确认
+//     handler 真的查了库。
 
 const (
 	// routeHealth 挂在引擎根上，**不带 /api/v1 前缀，也不需要认证**，
@@ -225,32 +252,34 @@ func minimalPageQuery() url.Values {
 // 版本与健康
 // ---------------------------------------------------------------------------
 
-type upstreamVersion struct {
-	version string
-	// fingerprintExtra 是除版本号之外能标识"这是哪个上游"的补充信息。
-	fingerprintExtra string
-}
-
-func (c *client) fetchVersion(ctx context.Context, op string) (upstreamVersion, respMeta, error) {
+// fetchVersion 取上游版本串。
+//
+// **这条路由只给 version 一个字段。** 0.1.133 到 0.1.183 的 handler 都是
+//
+//	response.Success(c, gin.H{"version": info.CurrentVersion})
+//
+// 之前这里还解析 commit / build_type 并把它们拼进版本指纹——那两个字段
+// 上游从来没发过，于是拼出来的补充信息恒等于常量 "|"，对指纹的贡献是零。
+// 一个恒定值参与指纹只会让人以为指纹比实际更有分辨力（XM-R013 清掉）。
+// 指纹现在只由「端点主机 + 版本串」构成，见 Version() 里的 fingerprint 调用。
+//
+// build_type 确实存在，但在 /admin/system/check-updates 那条路由上，
+// 而那条路由会**主动去打 GitHub**——采集链路不该顺手触发上游的外网请求。
+func (c *client) fetchVersion(ctx context.Context, op string) (string, respMeta, error) {
 	var env upstreamEnvelope
 	meta, err := c.get(ctx, op, routeVersion, nil, &env)
 	if err != nil {
-		return upstreamVersion{}, meta, err
+		return "", meta, err
 	}
-	// 上游的版本串来自编译期嵌入的 VERSION 文件，形如 "0.1.133"——
-	// **没有 v 前缀**。normalizeVersion 两种都吃，这里不做假设。
+	// 上游的版本串来自编译期嵌入的 VERSION 文件，形如 "0.1.183"——
+	// **没有 v 前缀**（0.1.183 源码核对过）。normalizeVersion 两种都吃。
 	var payload struct {
-		Version   string `json:"version"`
-		Commit    string `json:"commit"`
-		BuildType string `json:"build_type"`
+		Version string `json:"version"`
 	}
 	if err := env.decode(op, &payload); err != nil {
-		return upstreamVersion{}, meta, err
+		return "", meta, err
 	}
-	return upstreamVersion{
-		version:          strings.TrimSpace(payload.Version),
-		fingerprintExtra: strings.TrimSpace(payload.Commit + "|" + payload.BuildType),
-	}, meta, nil
+	return strings.TrimSpace(payload.Version), meta, nil
 }
 
 func (c *client) fetchHealth(ctx context.Context, op string) (bool, respMeta, error) {
@@ -421,7 +450,7 @@ func (c *client) fetchDailyOrders(ctx context.Context, day time.Time) (OrderSumm
 	const op = "sub2api.orders.read"
 	dayText := day.Format(sub2apiBusinessDayLayout)
 
-	revenue, orderCount, revenueFound, err := c.fetchPaymentDay(ctx, op, day, dayText)
+	pay, err := c.fetchPaymentDay(ctx, op, day, dayText)
 	if err != nil {
 		return OrderSummary{}, err
 	}
@@ -443,14 +472,114 @@ func (c *client) fetchDailyOrders(ctx context.Context, day time.Time) (OrderSumm
 			// 单边缺失是"那天没有订单/没有用量"的正常表达，
 			// 双边都缺才说明我们很可能压根没拿到那天的数据，
 			// 而三个 0 看起来和"那天真的是 0"一模一样。
-			IsPartial: !revenueFound && !costFound,
+			//
+			// currencyGap 是另一条独立的理由：那天有收入，但落在本契约
+			// 装不下的币种里，见 paymentDay.currencyGap。
+			IsPartial: (!pay.found && !costFound) || pay.currencyGap,
 		},
 		Day:               dayText,
-		RevenueMinorUnits: revenue,
+		RevenueMinorUnits: pay.revenue,
 		CostMinorUnits:    cost,
 		Currency:          c.currency,
-		OrderCount:        orderCount,
+		OrderCount:        pay.orderCount,
 	}, nil
+}
+
+// paymentDay 是支付看板对某个业务日的回答。
+//
+// 用结构体而不是四个返回值：自从金额按币种分桶之后，"这一天读到了什么"
+// 有三个彼此独立的维度（有没有这一天、这一天的合约币种金额、有没有
+// 装不下的币种），挤在返回值列表里靠位置区分很容易接错。
+type paymentDay struct {
+	// revenue 是**合约币种**那一桶的金额，整数最小货币单位。
+	revenue int64
+	// orderCount 是这一天的已支付订单数。
+	//
+	// ⚠️ 它是**跨币种**的：上游按天累加订单数时不分币种（daily_series 的
+	// count 就是那天所有已支付订单的条数）。所以多币种的日子里
+	// orderCount 覆盖的范围比 revenue 大，两者不构成"均价"。
+	orderCount int64
+	// found 表示序列里有这一天（哪怕金额是空桶）。
+	found bool
+	// currencyGap 表示这一天有收入落在合约币种之外的桶里，
+	// 那部分金额被丢掉了——必须体现成部分数据，见 fetchPaymentDay。
+	currencyGap bool
+}
+
+// currencyBuckets 是 0.1.183 起支付看板的金额形状：币种码 → 金额。
+//
+// 上游 0.1.183 把 DashboardStats/DailyStats 的 amount 从标量 float64 改成了
+// `CurrencyAmounts = map[string]float64`（源码注释："Amounts in different
+// currencies must never be added together"）。币种码经
+// payment.NormalizePaymentCurrency 规范化，一定是 3 位大写 ISO 4217。
+type currencyBuckets map[string]rawAmount
+
+// legacyScalarCurrency 是"上游给的是标量、没说币种"这一桶的键。
+//
+// 空串不可能与真实币种码相撞：上游的 NormalizePaymentCurrency 只放行
+// 恰好 3 位的大写 ISO 4217 字母码。
+const legacyScalarCurrency = ""
+
+// UnmarshalJSON 同时吃两种形状：0.1.183 的币种 map 与更早版本的标量。
+//
+// 为什么要向后兼容而不是只认新形状：兼容矩阵登记的是整条 `0.1` 线，
+// 而金额改成 map 是这条线中间某个补丁版的事（具体哪一版无从考证——
+// 手头的上游源码是 depth=1 的浅克隆，没有历史可二分）。只认 map 等于
+// 把"0.1.183 上炸"换成"0.1.133 上炸"，一个阻塞换另一个阻塞。
+//
+// 标量落进无币种桶而不是直接当成合约币种：币种信息是**上游没给的**，
+// 这个事实要保留到 pick 里再按运维声明去解释，而不是在解码这一步就
+// 假装上游说过。
+func (b *currencyBuckets) UnmarshalJSON(raw []byte) error {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		*b = nil
+		return nil
+	}
+	if strings.HasPrefix(text, "{") {
+		var m map[string]rawAmount
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return err
+		}
+		*b = m
+		return nil
+	}
+	var scalar rawAmount
+	if err := scalar.UnmarshalJSON(raw); err != nil {
+		return err
+	}
+	*b = currencyBuckets{legacyScalarCurrency: scalar}
+	return nil
+}
+
+// pick 取出 currency 那一桶。
+//
+// 第三个返回值说明"除它以外还有别的币种"——那意味着这一天有我们**看得见
+// 却报不出来**的收入。契约的 OrderSummary 只有一个 Currency 字段，
+// 跨币种相加是明令禁止的（规格 §5.9、上游源码同样的纪律），
+// 所以只能报一桶 + 如实标记不完整，不能悄悄合计。
+func (b currencyBuckets) pick(currency string) (rawAmount, bool, bool) {
+	// 旧上游的标量：那时 daily_series 的 amount 就是"当天全部已支付订单
+	// 之和"，一个币种字段都没有。唯一的币种信息来自运维的 WithCurrency
+	// 声明，按它解释即可——这正是 0.1.183 之前既有的（也是唯一可能的）口径。
+	if v, ok := b[legacyScalarCurrency]; ok && len(b) == 1 {
+		return v, true, false
+	}
+
+	want := strings.ToUpper(strings.TrimSpace(currency))
+	var (
+		got   rawAmount
+		found bool
+		other bool
+	)
+	for code, amount := range b {
+		if strings.ToUpper(strings.TrimSpace(code)) == want {
+			got, found = amount, true
+			continue
+		}
+		other = true
+	}
+	return got, found, other
 }
 
 // fetchPaymentDay 取某业务日的充值收入与已支付订单数。
@@ -459,46 +588,74 @@ func (c *client) fetchDailyOrders(ctx context.Context, day time.Time) (OrderSumm
 // 而且它按**上游服务器自己配置的时区**（默认 Asia/Shanghai）分日，
 // 没有 timezone 参数可以覆盖。业务日边界因此可能与平台的声明不一致，
 // 这是账号到位后必须核对的第一梯队事项（见 RUNBOOK 验证清单）。
+//
+// ⚠️ **金额按币种分桶（0.1.183 破坏性变更，XM-R013 修）。**
+// 旧代码把 amount 解进单个 rawAmount，在 0.1.183 上会拿到
+// `{"CNY":100.5}` 这个**对象的字面量文本**，decimalToMinorUnits 一看
+// 全是非数字字符就报错 → 整条 DailyOrders 变成 bad_response。
+//
+// 为什么空实例联调测不出来：0.1.183 的 buildDailySeries 对**没有已支付订单**
+// 的那天给的是 `"amount":{}`（空 map），空 map 在旧代码里被 rawAmount 收成
+// 空串、minorUnits 按 0 处理——一路全绿。金额桶只有在**真的有人充了钱**
+// 那天才非空，所以这个 bug 会精准地等到第一笔真实收入才炸。
+// 回归测试因此必须构造"某天有已支付订单且金额是币种 map"的场景，
+// 见 TestRealClientReadsCurrencyBucketedRevenue。
 func (c *client) fetchPaymentDay(
 	ctx context.Context, op string, day time.Time, dayText string,
-) (revenue, orderCount int64, found bool, err error) {
+) (paymentDay, error) {
 	days := daysBack(c.clock(), day, c.businessDay)
 	if days > maxPaymentLookbackDays {
-		return 0, 0, false, connector.NewError(connector.KindNotSupported, op,
+		return paymentDay{}, connector.NewError(connector.KindNotSupported, op,
 			fmt.Errorf("业务日 %s 超出上游 %d 天的回溯窗口", dayText, maxPaymentLookbackDays))
 	}
 
 	var env upstreamEnvelope
 	if _, err := c.get(ctx, op, routePaymentDashboard, url.Values{"days": {strconv.Itoa(days)}}, &env); err != nil {
-		return 0, 0, false, err
+		return paymentDay{}, err
 	}
 	var payload struct {
 		DailySeries []struct {
-			Date   string    `json:"date"`
-			Amount rawAmount `json:"amount"`
-			Count  rawAmount `json:"count"`
+			Date   string          `json:"date"`
+			Amount currencyBuckets `json:"amount"`
+			Count  rawAmount       `json:"count"`
 		} `json:"daily_series"`
 	}
 	if err := env.decode(op, &payload); err != nil {
-		return 0, 0, false, err
+		return paymentDay{}, err
 	}
 	for _, item := range payload.DailySeries {
 		if strings.TrimSpace(item.Date) != dayText {
 			continue
 		}
-		amount, err := item.Amount.minorUnits(c.scale)
-		if err != nil {
-			return 0, 0, false, connector.NewError(connector.KindBadResponse, op, err)
-		}
 		count, err := item.Count.count()
 		if err != nil {
-			return 0, 0, false, connector.NewError(connector.KindBadResponse, op, err)
+			return paymentDay{}, connector.NewError(connector.KindBadResponse, op, err)
 		}
-		return amount, count, true, nil
+		out := paymentDay{orderCount: count, found: true}
+
+		amount, ok, other := item.Amount.pick(c.currency)
+		out.currencyGap = other
+		if !ok {
+			// 合约币种那一桶不存在。**不报错也不换一桶顶上**：
+			// 报错会让整天的成本侧也一起读不到（其实是好的），换一桶
+			// 则会把另一个币种的数字当成本币种的收入——那是"看起来完全
+			// 正常的错数字"，最难查。
+			//
+			// 所以收入留 0 并标记为部分数据（规格 §9.1：部分数据可见）。
+			// 桶里一个币种都没有（`"amount":{}`）时 other 也是 false，
+			// 这是"那天没人充值"的正常表达，不该标记为不完整。
+			return out, nil
+		}
+		v, err := amount.minorUnits(c.scale)
+		if err != nil {
+			return paymentDay{}, connector.NewError(connector.KindBadResponse, op, err)
+		}
+		out.revenue = v
+		return out, nil
 	}
 	// 序列里没有这一天：多半是那天没有已支付订单。返回 0 但把 found=false
 	// 带出去，让调用方结合成本侧一起判断要不要标记为部分数据。
-	return 0, 0, false, nil
+	return paymentDay{}, nil
 }
 
 // fetchUsageCostDay 取某业务日的用量成本。

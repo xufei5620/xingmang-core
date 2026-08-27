@@ -115,6 +115,22 @@ const fakeAccountItems = `[
 
 const fakeAccountCount = 3
 
+// fakePaymentAmount 是"今天"那条 daily_series 的 amount 字段。
+//
+// **形状是 0.1.183 的币种 map，不是标量。** 上游把 DailyStats.Amount 从
+// float64 改成了 CurrencyAmounts=map[币种码]float64，币种码经
+// NormalizePaymentCurrency 规范化成 3 位大写 ISO 4217。
+// 假上游必须跟着真实形状走，否则这套测试守的是一个已经不存在的上游。
+const fakePaymentAmount = `{"USD":12345.60}`
+
+// fakePaymentEmptyAmount 是"那天没有已支付订单"的形状。
+//
+// 上游的 buildDailySeries 对没有订单的日子给的是 `make(CurrencyAmounts)`，
+// 序列化出来就是空对象——**不是 0，也不是 null**。
+// 这个形状正是旧代码能一路全绿的原因：空对象被旧的 rawAmount 收成空串、
+// 按 0 处理，于是空实例联调怎么测都不会红。
+const fakePaymentEmptyAmount = `{}`
+
 // ---------------------------------------------------------------------------
 // 假上游
 // ---------------------------------------------------------------------------
@@ -140,6 +156,9 @@ type fakeUpstream struct {
 	redirectTo string
 	// accountItems / accountTotal 允许单个测试替换渠道数据。
 	accountItems string
+	// paymentAmount 允许单个测试替换"今天"那条 daily_series 的金额形状
+	// （多币种、缺合约币种、旧版本的标量……）。
+	paymentAmount string
 
 	server *httptest.Server
 
@@ -149,7 +168,11 @@ type fakeUpstream struct {
 
 func startFakeUpstream(t *testing.T, opts sub2api.FakeOptions, tweak ...func(*fakeUpstream)) *fakeUpstream {
 	t.Helper()
-	u := &fakeUpstream{t: t, opts: opts, accountItems: fakeAccountItems}
+	u := &fakeUpstream{
+		t: t, opts: opts,
+		accountItems:  fakeAccountItems,
+		paymentAmount: fakePaymentAmount,
+	}
 	for _, fn := range tweak {
 		fn(u)
 	}
@@ -296,14 +319,18 @@ func (u *fakeUpstream) handleVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	version := strings.TrimSpace(u.opts.Version)
 	if version == "" {
-		// 上游 VERSION 文件里的形态：裸的 x.y.z，没有 v 前缀
-		version = "0.1.133"
+		// 上游 VERSION 文件里的形态：裸的 x.y.z，没有 v 前缀。
+		// 0.1.183 = XM-R013 逐字段核对过的那一版（源码 @ efb46db）。
+		version = "0.1.183"
 	}
 	if u.opts.UnsupportedVersion {
 		version = "9.9.9"
 	}
-	writeRaw(w, http.StatusOK, envelope(fmt.Sprintf(
-		`{"version":%q,"commit":"deadbeef","build_type":"docker"}`, version)))
+	// 只发 version 一个字段——上游这条 handler 从 0.1.133 到 0.1.183 一直是
+	// `response.Success(c, gin.H{"version": info.CurrentVersion})`。
+	// 假上游以前还发 commit/build_type，那是**凭空发明的字段**，
+	// 让"客户端解析了两个不存在的字段"这件事在测试里看不出来（XM-R013 清掉）。
+	writeRaw(w, http.StatusOK, envelope(fmt.Sprintf(`{"version":%q}`, version)))
 }
 
 func (u *fakeUpstream) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -339,15 +366,18 @@ func (u *fakeUpstream) handlePayment(w http.ResponseWriter, r *http.Request) {
 	series := make([]string, 0, days)
 	for i := 0; i < days; i++ {
 		date := u.now().AddDate(0, 0, -i).Format("2006-01-02")
-		amount, count := `0`, 0
+		amount, count := fakePaymentEmptyAmount, 0
 		if i == 0 {
-			amount, count = `12345.60`, 168
+			amount, count = u.paymentAmount, 168
 		}
 		series = append(series, fmt.Sprintf(`{"date":%q,"amount":%s,"count":%d}`, date, amount, count))
 	}
+	// 顶层的 today_amount/total_amount/avg_amount 在 0.1.183 里同样是币种 map。
+	// 客户端一个都不读（收入只走 daily_series），但假上游照抄真实形状——
+	// 哪天有人想读它们，看到的必须是上游真会发的东西。
 	writeRaw(w, http.StatusOK, envelope(fmt.Sprintf(
-		`{"today_amount":12345.60,"total_amount":99999.99,"today_count":168,
-		  "total_count":2100,"avg_amount":47.6,"pending_orders":2,
+		`{"today_amount":{"USD":12345.60},"total_amount":{"USD":99999.99},"today_count":168,
+		  "total_count":2100,"avg_amount":{"USD":47.6},"pending_orders":2,
 		  "daily_series":[%s]}`, strings.Join(series, ","))))
 }
 
@@ -478,11 +508,11 @@ func TestRealClientMapsUpstreamShapes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v.Detected != "0.1.133" {
-			t.Fatalf("Detected = %q, want 0.1.133", v.Detected)
+		if v.Detected != "0.1.183" {
+			t.Fatalf("Detected = %q, want 0.1.183", v.Detected)
 		}
 		if !v.Supported {
-			t.Fatalf("0.1.133 应在兼容矩阵内: %+v", v)
+			t.Fatalf("0.1.183 应在兼容矩阵内: %+v", v)
 		}
 		if !strings.HasPrefix(v.Fingerprint, "sha256:") {
 			t.Fatalf("指纹形态不对: %q", v.Fingerprint)
@@ -614,6 +644,155 @@ func TestRealClientMapsUpstreamShapes(t *testing.T) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// XM-R013 回归：支付看板金额按币种分桶（上游 0.1.183 的破坏性变更）
+//
+// **为什么空实例联调测不出这个 bug。** 上游对没有已支付订单的日子给的是
+// `"amount":{}`——空对象。旧代码把 amount 解进单个 rawAmount，空对象被收成
+// 空串、按 0 处理，于是没有充值记录的实例上怎么跑都全绿。桶里有东西只发生在
+// **真的有人付过钱**的那天，那时旧代码拿到的是 `{"CNY":123.45}` 的字面量文本，
+// decimalToMinorUnits 直接报错 → 整条 DailyOrders 变 bad_response。
+//
+// 所以下面每个用例都刻意让"那天有已支付订单"，这正是空实例覆盖不到的那一格。
+// ---------------------------------------------------------------------------
+
+// paymentDayFixture 起一个假上游，让 2026-08-27 那天有已支付订单，
+// 金额形状由 amountJSON 决定。
+func paymentDayFixture(t *testing.T, amountJSON string, extra ...sub2api.Option) sub2api.OrderSummary {
+	t.Helper()
+	upstream := startFakeUpstream(t, sub2api.FakeOptions{}, func(u *fakeUpstream) {
+		u.paymentAmount = amountJSON
+	})
+	orders, err := upstream.newClient(t, extra...).DailyOrders(t.Context(), "2026-08-27")
+	if err != nil {
+		t.Fatalf("金额形状 %s 不该报错: %v", amountJSON, err)
+	}
+	return orders
+}
+
+// TestRealClientReadsCurrencyBucketedRevenue 是这次修复的主回归：
+// 有真实收入的一天，金额是币种 map，必须换算成分。
+func TestRealClientReadsCurrencyBucketedRevenue(t *testing.T) {
+	orders := paymentDayFixture(t, `{"CNY":123.45}`, sub2api.WithCurrency("CNY"))
+
+	if orders.RevenueMinorUnits != 12345 {
+		t.Fatalf("收入 = %d, want 12345（123.45 元 = 12345 分）", orders.RevenueMinorUnits)
+	}
+	if orders.Currency != "CNY" {
+		t.Fatalf("币种 = %q, want CNY", orders.Currency)
+	}
+	if orders.OrderCount != 168 {
+		t.Fatalf("订单数 = %d, want 168", orders.OrderCount)
+	}
+	if orders.IsPartial {
+		t.Fatal("合约币种那一桶取到了、也没有别的币种，不该标记为部分数据")
+	}
+}
+
+// TestRealClientPicksContractCurrencyBucket：多币种的日子取合约币种那一桶，
+// **绝不跨币种相加**（上游源码里同一条纪律："Amounts in different currencies
+// must never be added together"）。
+//
+// 同时断言这种日子必须标记为部分数据：另外两个币种的收入是真实存在的，
+// 只是这份单币种契约装不下——丢掉了就得说出来（规格 §9.1）。
+func TestRealClientPicksContractCurrencyBucket(t *testing.T) {
+	orders := paymentDayFixture(t,
+		`{"CNY":100.00,"USD":12345.60,"JPY":700}`, sub2api.WithCurrency("USD"))
+
+	if orders.RevenueMinorUnits != 1234560 {
+		t.Fatalf("收入 = %d, want 1234560（只取 USD 那一桶）", orders.RevenueMinorUnits)
+	}
+	// 12345.60+100.00+700 = 13145.60 → 1314560 分：任何等于它的结果都说明
+	// 有人把不同币种加到了一起。
+	if orders.RevenueMinorUnits == 1314560 {
+		t.Fatal("跨币种相加了")
+	}
+	if !orders.IsPartial {
+		t.Fatal("丢掉了 CNY/JPY 两桶真实收入，必须标记为部分数据")
+	}
+}
+
+// TestRealClientMarksPartialWhenContractCurrencyMissing：合约币种那一桶不存在。
+//
+// 这在真实世界里很可能发生：上游的支付币种是**逐订单**的（默认 CNY），
+// 与用户余额/用量成本用的美元记账是两回事，而本契约只有一个 Currency 字段。
+// 配错币种时的正确行为是"报不出来 + 说出来"，不是拿另一个币种的数字顶上——
+// 顶上去得到的是一个看起来完全正常的错数字。
+func TestRealClientMarksPartialWhenContractCurrencyMissing(t *testing.T) {
+	orders := paymentDayFixture(t, `{"CNY":123.45}`, sub2api.WithCurrency("USD"))
+
+	if orders.RevenueMinorUnits != 0 {
+		t.Fatalf("收入 = %d, want 0（USD 那一桶不存在，不能拿 CNY 顶上）",
+			orders.RevenueMinorUnits)
+	}
+	if !orders.IsPartial {
+		t.Fatal("取不到合约币种必须标记为部分数据，否则 0 会被当成「那天没收入」")
+	}
+}
+
+// TestRealClientTreatsEmptyBucketsAsGenuineZero：空桶是"那天没人充值"，
+// 不是"数据缺了"——把它标成部分数据会让看板天天挂着一个假的不完整告警。
+func TestRealClientTreatsEmptyBucketsAsGenuineZero(t *testing.T) {
+	orders := paymentDayFixture(t, `{}`, sub2api.WithCurrency("USD"))
+
+	if orders.RevenueMinorUnits != 0 {
+		t.Fatalf("收入 = %d, want 0", orders.RevenueMinorUnits)
+	}
+	if orders.IsPartial {
+		t.Fatal("空桶 = 那天没有已支付订单，是真实的 0，不该标记为部分数据")
+	}
+}
+
+// TestRealClientStillReadsLegacyScalarAmount：兼容矩阵登记的是整条 0.1 线，
+// 而金额改成 map 是这条线中间某个补丁版的事。只认新形状等于把
+// 「0.1.183 上炸」换成「0.1.133 上炸」——一个阻塞换另一个阻塞。
+func TestRealClientStillReadsLegacyScalarAmount(t *testing.T) {
+	orders := paymentDayFixture(t, `12345.60`, sub2api.WithCurrency("USD"))
+
+	if orders.RevenueMinorUnits != 1234560 {
+		t.Fatalf("收入 = %d, want 1234560（旧上游的标量形状）", orders.RevenueMinorUnits)
+	}
+	if orders.IsPartial {
+		t.Fatal("标量形状下没有别的币种可丢，不该标记为部分数据")
+	}
+}
+
+// TestRealClientClassifiesComplianceGateAsAuth 是第二处阻塞的回归。
+//
+// 上游 0.1.183 起给 admin 组挂了 AdminComplianceGuard：采集凭据对应的账号
+// 没做过合规确认时，**所有** admin GET 返 423 Locked。
+// 423 以前落进 classifyStatus 的 default → bad_response，等于告诉运维
+// 「上游响应格式非法」，把一个一次性的授权动作伪装成上游改版。
+func TestRealClientClassifiesComplianceGateAsAuth(t *testing.T) {
+	// 上游 423 的真实正文形状（middleware/admin_compliance.go）。
+	const complianceBody = `{"code":"ADMIN_COMPLIANCE_ACK_REQUIRED",
+	  "message":"administrator compliance acknowledgement is required",
+	  "metadata":{"version":"v1","document_path_zh":"/docs/compliance-zh.md"}}`
+
+	upstream := startFakeUpstreamWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		writeRaw(w, http.StatusLocked, complianceBody)
+	})
+	_, err := upstream.newClient(t).UserStats(t.Context())
+	if err == nil {
+		t.Fatal("423 必须报错")
+	}
+	if connector.KindOf(err) != connector.KindAuth {
+		t.Fatalf("423 的分类 = %q, want auth（合规门属于「这个账号还没被授权」，err=%v）",
+			connector.KindOf(err), err)
+	}
+	// 分类换了，纪律不能松：上游正文一个字都不许进错误链（宪法 7 条）。
+	for _, dump := range []string{err.Error(), fmt.Sprintf("%+v", err), unwrapDump(err)} {
+		if strings.Contains(dump, "ADMIN_COMPLIANCE_ACK_REQUIRED") ||
+			strings.Contains(dump, "acknowledgement") ||
+			strings.Contains(dump, "document_path_zh") {
+			t.Fatalf("错误链带上了上游响应正文: %s", dump)
+		}
+	}
+	if got := err.Error(); got != "auth: sub2api.users.read" {
+		t.Fatalf("对外错误文本 = %q, want \"auth: sub2api.users.read\"", got)
+	}
+}
+
 // TestRealClientMarksPartialWhenChannelsLackQuota 锁住渠道侧的一条判断：
 // 上游账号没配任何额度上限时，"余额"这个概念根本不存在——
 // 报成 0 会在看板上变成"这个渠道没钱了"的假警报。
@@ -674,7 +853,7 @@ func TestRealClientClassifiesUpstreamStatuses(t *testing.T) {
 // startFakeUpstreamWithHandler 起一个所有路由都走同一个 handler 的假上游。
 func startFakeUpstreamWithHandler(t *testing.T, h http.HandlerFunc) *fakeUpstream {
 	t.Helper()
-	u := &fakeUpstream{t: t, accountItems: fakeAccountItems}
+	u := &fakeUpstream{t: t, accountItems: fakeAccountItems, paymentAmount: fakePaymentAmount}
 	u.server = httptest.NewTLSServer(u.record(h))
 	t.Cleanup(u.server.Close)
 	return u
