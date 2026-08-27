@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/money"
 	"github.com/xufei5620/xingmang-platform/internal/platform/pgdsn"
+	"github.com/xufei5620/xingmang-platform/internal/platform/pgreadonly"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
@@ -48,18 +48,8 @@ import (
 // 所以**任何**往外走的错误都先过 scrubError。
 
 const (
-	// readOnlyParam 是 PostgreSQL 的 GUC 名。它可以在启动包里设置（USERSET），
-	// 因此 pgx 的 RuntimeParams 与连接串里的 options=-c <name>=on 完全等价。
-	readOnlyParam = "default_transaction_read_only"
-
-	// 连接池参数。**别人家的生产库**——保守到底。
-	// 取值对齐 SoloAI platformdb/readonly.go（那套值在生产上稳定跑过）。
-	revenuePoolMaxConns    = 3
-	revenuePoolMinConns    = 0
-	revenuePoolMaxConnLife = 30 * time.Minute
-	revenuePoolMaxConnIdle = 5 * time.Minute
-	revenueConnectTimeout  = 8 * time.Second
-	revenueQueryTimeout    = 30 * time.Second
+	// revenueQueryTimeout 是单次取数的超时。连接与池的参数在 pgreadonly。
+	revenueQueryTimeout = 30 * time.Second
 
 	// revenueCredentialPurpose 进凭据审计（规格 §4.5），不影响解析结果。
 	revenueCredentialPurpose = "newapi revenue readonly dsn"
@@ -67,20 +57,19 @@ const (
 	revenueCredentialCaller = "connector:" + ConnectorKey + ".revenuedb"
 )
 
-// ErrRevenueDBReadWriteRequested 表示连接串**显式**要求了可写连接。
+// 只读闸的实现在 internal/platform/pgreadonly——**平台只有一份**。
 //
-// 不静默改成只读：配置者是带着意图写下 off 的，静默改写会让那个意图
-// （以及它背后的误解）永远没有机会被发现。这条与 SoloAI 的
-// ErrReadWriteRequested 同源。
-var ErrRevenueDBReadWriteRequested = errors.New(
-	"连接串显式要求可写（" + readOnlyParam + "=off）；自营库只允许只读接入，请删掉该参数")
-
-// ErrRevenueDBWriteAttempt 表示有人往只读通道上塞了一条非 SELECT 语句。
-//
-// 这是闸 4 的**机械**表现：它不该在运行期发生（本文件只有 SELECT 常量），
-// 存在的意义是让「将来有人加了一条 UPDATE」在测试里当场变红，
-// 而不是等到某次采集把别人的生产计费数据改掉。
-var ErrRevenueDBWriteAttempt = errors.New("只读通道上出现非 SELECT 语句")
+// 本包与影子对比工具（XM-0037e）都要只读直连别人家的库，两处的四道闸必须是
+// 同一份代码：各写一份的话，两份迟早走偏，而走偏的那一份守的是一条别人以为
+// 还在的防线。下面两个变量保留本包的导出名（外部的 errors.Is 不受影响），
+// 值直接取自那一份。
+var (
+	// ErrRevenueDBReadWriteRequested 表示连接串**显式**要求了可写连接。
+	// 不静默改成只读：配置者是带着意图写下 off 的。
+	ErrRevenueDBReadWriteRequested = pgreadonly.ErrReadWriteRequested
+	// ErrRevenueDBWriteAttempt 表示有人往只读通道上塞了一条非 SELECT 语句。
+	ErrRevenueDBWriteAttempt = pgreadonly.ErrWriteAttempt
+)
 
 // ---------------------------------------------------------------------------
 // SQL：全部语句的唯一定义处
@@ -129,37 +118,10 @@ var revenueDBQueries = []string{newapiRevenueQuery, newapiQuotaPerUnitQuery}
 
 // assertSelectOnly 是闸 4 的机械判据：只放行 SELECT 打头的语句。
 //
-// 白名单而不是黑名单：黑名单要枚举 INSERT/UPDATE/DELETE/TRUNCATE/COPY/
-// CREATE/DROP/ALTER/GRANT/DO/CALL/MERGE…，漏一个就是一个写口子；
-// 白名单只放行一个词，漏不掉。
-//
-// 同时挡掉分号：一条语句里塞第二条（`SELECT 1; DROP TABLE x`）是最经典的
-// 绕过。pgx 的扩展协议本来就不允许多语句，但这里不依赖那个实现细节——
-// 换个驱动或改用 SimpleProtocol 时这道闸仍然在。
-func assertSelectOnly(sql string) error {
-	trimmed := strings.TrimSpace(sql)
-	if trimmed == "" {
-		return fmt.Errorf("空语句: %w", ErrRevenueDBWriteAttempt)
-	}
-	// 去掉行注释，免得 `-- x` 之后藏东西影响首词判断
-	var head string
-	for _, line := range strings.Split(trimmed, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "--") {
-			continue
-		}
-		head = line
-		break
-	}
-	fields := strings.Fields(head)
-	if len(fields) == 0 || !strings.EqualFold(fields[0], "SELECT") {
-		return fmt.Errorf("语句必须以 SELECT 开头: %w", ErrRevenueDBWriteAttempt)
-	}
-	if strings.Contains(trimmed, ";") {
-		return fmt.Errorf("语句含分号（可能是多语句拼接）: %w", ErrRevenueDBWriteAttempt)
-	}
-	return nil
-}
+// 实现在 internal/platform/pgreadonly——平台只有一份（见本文件顶部的说明）。
+// 保留这个包内薄封装是为了让 querySelectOnly 的调用点读起来仍然只关心
+// 「这条语句只读吗」，不必在取数路径上出现另一个包名。
+func assertSelectOnly(sql string) error { return pgreadonly.AssertSelectOnly(sql) }
 
 // ---------------------------------------------------------------------------
 // 连接
@@ -233,134 +195,23 @@ type RevenueSource interface {
 	AccountRevenue(ctx context.Context, ownAccountID string, day string) (AccountRevenue, error)
 }
 
-// newAPIRevenueConfig 把连接串解析成一个「只可能只读」的连接池配置（闸 1 + 闸 2）。
+// newAPIRevenueConfig 把连接串解析成一个「只可能只读」的连接池配置（闸 1 + 闸 2 + 闸 3）。
 //
-// 连接串本身绝不进日志/报错——它带口令。所有 error 只描述形态，不回显原文。
+// 实现在 internal/platform/pgreadonly.Config——平台只有一份。
 func newAPIRevenueConfig(dsn string) (*pgxpool.Config, error) {
-	if strings.TrimSpace(dsn) == "" {
-		return nil, errors.New("连接串为空")
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		// err 可能带连接串片段（pgx 会回显它解析不了的部分），**完全不透出**。
-		// 这里刻意不用 scrubError：解析失败时原文形态未知，遮罩规则可能匹配不上，
-		// 而匹配不上就等于原样泄漏。
-		return nil, errors.New("连接串解析失败（已隐去内容，请检查格式）")
-	}
-	if cfg.ConnConfig.RuntimeParams == nil {
-		cfg.ConnConfig.RuntimeParams = map[string]string{}
-	}
-	if requestsReadWrite(cfg.ConnConfig.RuntimeParams) {
-		return nil, ErrRevenueDBReadWriteRequested
-	}
-
-	// 闸 2：启动包参数。等价于连接串上的 options=-c default_transaction_read_only=on，
-	// 只是走 pgx 的结构化通道而不是拼字符串（拼字符串要同时处理 URL 式与
-	// keyword 式两种语法，还会把口令再抄一遍）。
-	cfg.ConnConfig.RuntimeParams[readOnlyParam] = "on"
-
-	cfg.MaxConns = revenuePoolMaxConns
-	cfg.MinConns = revenuePoolMinConns
-	cfg.MaxConnLifetime = revenuePoolMaxConnLife
-	cfg.MaxConnIdleTime = revenuePoolMaxConnIdle
-
-	// 闸 3：每条新连接当场复核。挂在 AfterConnect 而不是开池时做一次——
-	// 池是懒建连接的，后续新建的连接同样要过这一关。
-	cfg.AfterConnect = VerifyReadOnly
-	return cfg, nil
+	return pgreadonly.Config(dsn)
 }
 
 // VerifyReadOnly 在每条新连接上复核服务端确实处于只读（ADR-018 闸 3）。
 //
-// 导出它是给「自己建池」的装配路径用的（集成测试、将来可能出现的共享池）：
-// 那些地方必须挂上**同一把**复核锁，而不是各写一份——两份实现迟早走偏，
-// 而走偏的那一份守的是一条别人以为还在的防线。挂法：
-//
-//	cfg.AfterConnect = metering.VerifyReadOnly
-//
-// 查**两个** GUC：
-//   - transaction_read_only         当前事务的实际只读状态（防「这条连接现在就能写」）
-//   - default_transaction_read_only 后续事务的默认值（防「下一个事务又变回可写」）
-//
-// 只查前者会漏掉「当前恰好只读、但默认值被 ALTER ROLE / ALTER DATABASE 设成 off」
-// 的库；只查后者会漏掉「默认值对但连接中间件在当前事务上翻了盘」的情形。
-// 启动包参数只是「我请求了只读」，服务端怎么答才是证据——中间可能有 pgbouncer
-// 吞掉启动参数，那种情况下连接会**看起来正常**而实际可写。
+// 转发到 pgreadonly.VerifyReadOnly。保留本包的导出名是为了不破坏已有调用点
+// （集成测试用它给自建的池挂同一把复核锁）；新代码直接用 pgreadonly 那个。
 func VerifyReadOnly(ctx context.Context, conn *pgx.Conn) error {
-	const sql = "SELECT current_setting('transaction_read_only'), current_setting('" +
-		readOnlyParam + "')"
-	var effective, dflt string
-	if err := conn.QueryRow(ctx, sql).Scan(&effective, &dflt); err != nil {
-		return fmt.Errorf("只读复核失败: %s", scrubError(err))
-	}
-	if !isPostgresOn(effective) {
-		return fmt.Errorf("只读复核不通过：服务端 transaction_read_only=%q——"+
-			"启动参数未生效（连接池中间件可能吞掉了它），拒绝使用该连接", effective)
-	}
-	if !isPostgresOn(dflt) {
-		return fmt.Errorf("只读复核不通过：服务端 %s=%q——"+
-			"当前事务虽是只读，但下一个事务会变回可写，拒绝使用该连接", readOnlyParam, dflt)
-	}
-	return nil
+	return pgreadonly.VerifyReadOnly(ctx, conn)
 }
 
-// requestsReadWrite 判断连接串是否**显式**要求可写。
-//
-// 两种写法都要认：独立参数 default_transaction_read_only=off，
-// 以及塞在 options 里的 -c default_transaction_read_only=off。
-//
-// 为什么 options 那种也要认：pgx 把 options 当成一个不透明字符串原样发给服务端，
-// 我们在 RuntimeParams 上写的 on 并不会覆盖它——两者谁生效取决于服务端的解析
-// 顺序，是一个我们控制不了的行为。与其赌，不如拒绝。
-func requestsReadWrite(params map[string]string) bool {
-	if v, ok := params[readOnlyParam]; ok && !isPostgresOn(v) {
-		return true
-	}
-	opts := params["options"]
-	if opts == "" {
-		return false
-	}
-	lower := strings.ToLower(opts)
-	idx := strings.Index(lower, readOnlyParam+"=")
-	if idx < 0 {
-		return false
-	}
-	rest := lower[idx+len(readOnlyParam)+1:]
-	if end := strings.IndexAny(rest, " '\"\t"); end >= 0 {
-		rest = rest[:end]
-	}
-	return !isPostgresOn(rest)
-}
-
-// isPostgresOn 按 PostgreSQL 的布尔字面量判定。off / false / 0 / no 都是「可写」。
-func isPostgresOn(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(strings.Trim(v, "'\""))) {
-	case "on", "true", "1", "yes", "t", "y":
-		return true
-	default:
-		return false
-	}
-}
-
-var (
-	// postgres://user:pass@host…  /  postgresql://user:pass@host…
-	dsnURLPasswordRe = regexp.MustCompile(`(postgres(?:ql)?://[^:/@\s]+):[^@\s]*@`)
-	// keyword/value 形式：password=xxx 或 password='x y'
-	dsnKVPasswordRe = regexp.MustCompile(`(?i)\bpassword\s*=\s*('[^']*'|"[^"]*"|[^\s]+)`)
-)
-
-// scrubError 抹掉错误文本里的数据库口令。
-//
-// pgx 的连接错误里会带整条连接串，而这些错误会进结构化日志。
-// 只抹口令、不抹主机/库名——后者是排障必需的：整条抹成「连接失败」
-// 等于把一个可修的配置错误变成一个查不出原因的黑箱。
-func scrubError(err error) string {
-	if err == nil {
-		return ""
-	}
-	out := dsnURLPasswordRe.ReplaceAllString(err.Error(), "$1:***@")
-	return dsnKVPasswordRe.ReplaceAllString(out, "password=***")
-}
+// scrubError 抹掉错误文本里的数据库口令（实现在 pgreadonly）。
+func scrubError(err error) string { return pgreadonly.ScrubError(err) }
 
 // OpenNewAPIRevenueDB 建立 NewAPI 收入侧的只读连接池。
 //
@@ -413,7 +264,7 @@ func OpenNewAPIRevenueDB(
 		return nil, connector.NewError(connector.KindInternal, "metering.revenuedb.config", err)
 	}
 
-	dialCtx, cancel := context.WithTimeout(ctx, revenueConnectTimeout)
+	dialCtx, cancel := context.WithTimeout(ctx, pgreadonly.ConnectTimeout)
 	defer cancel()
 	pool, err := pgxpool.NewWithConfig(dialCtx, poolCfg)
 	if err != nil {
