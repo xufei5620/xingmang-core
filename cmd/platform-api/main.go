@@ -132,7 +132,11 @@ func main() {
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler
 		// 不各开一条访问路径
 		FinanceAccounts: financeStore,
-		RequestTimeout:  cfg.RequestTimeout,
+		// 利润台账是**只读**的：API 进程拿到的这个仓储只用来查询。
+		// 时钟传 nil（=time.Now）——「今日可覆盖、过去冻结」是写入侧的纪律，
+		// 本进程没有任何写入路径会用到它。
+		FinanceProfit:  finance.NewProfitStore(pool, nil),
+		RequestTimeout: cfg.RequestTimeout,
 	})
 
 	srv := &http.Server{

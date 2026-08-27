@@ -40,6 +40,7 @@ type Deps struct {
 	// 那会让端点存在、一调就 500，前端分不清「没接」和「坏了」。
 	RequestLogs     RequestLogQuerier
 	FinanceAccounts UpstreamAccountLister
+	FinanceProfit   ProfitDailyLister
 	RequestTimeout  time.Duration
 }
 
@@ -116,6 +117,17 @@ func NewRouter(d Deps) http.Handler {
 		// 走 POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 		api.With(RequireScope(finance.ScopeRead)).
 			Get("/finance/upstream-accounts", ListUpstreamAccountsHandler(d.FinanceAccounts))
+
+		// 利润台账（XM-0037b）**复用 finance.read**，不另立一个 scope：
+		// 台账里的毛利就是「倍率 × 用量」的结果，能看登记簿里那个倍率的人
+		// 已经能推出毛利的量级，泄漏面完全相同（对照 alerts.ScopeRead 复用
+		// ops.read 的理由）。为它单独发一个 scope 只会多一处要维护的授权，
+		// 换不来任何实际隔离。
+		//
+		// 台账**没有写路径**：它只由采集任务写（§8.1），回填历史是
+		// Platform Lifecycle Operation（宪法 2 条），不是一个 API。
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/profit-daily", ListProfitDailyHandler(d.FinanceProfit))
 	})
 	return r
 }

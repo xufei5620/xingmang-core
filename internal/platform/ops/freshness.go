@@ -217,6 +217,13 @@ var registeredMetrics = struct {
 		// 钉住两者不同名。
 		"finance.cost.daily":    {},
 		"finance.revenue.daily": {},
+		// 利润台账入账（XM-0037b，internal/platform/finance）。
+		//
+		// 与上面两条同族但**不同层**：那两条观测的是「上游说了什么」，
+		// 这条观测的是「台账记下了什么」。设计稿 §5 的三条不静默纪律本来就会
+		// 让一部分读数不入账（两侧未知跳过、只有一侧不建行），所以两个数
+		// **本就该不同**——合并成一条会让那个差异永远看不见。
+		"finance.profit.daily": {},
 	},
 }
 

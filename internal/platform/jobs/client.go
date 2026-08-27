@@ -12,6 +12,7 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
@@ -93,6 +94,39 @@ type Config struct {
 	// NewAPIInstanceID 是观测的 Source，默认 DefaultNewAPIInstanceID。
 	NewAPIInstanceID string
 
+	// FinanceCollectEnabled 决定是否注册成本采集任务（XM-0037b，设计稿 §8.1）。
+	//
+	// 零值 false 与前两条同一条纪律：用 Config 字面量构造的调用方必须显式
+	// 打开。DefaultConfig 把它打开。它同时是这条采集链路的停用开关
+	// （宪法 26 条）——关掉之后台账不会假装有数：今日行停止刷新，
+	// finance.profit.daily 的 observed_at 不再前进，新鲜度自然降级。
+	FinanceCollectEnabled bool
+	// FinanceCollectInterval 是采集周期，默认 DefaultFinanceCollectInterval
+	// （§12 拍板：可配，默认 5min）。
+	FinanceCollectInterval time.Duration
+	// FinanceCollectRunOnStart 让进程起来就先采一次，而不是干等一个周期。
+	FinanceCollectRunOnStart bool
+	// FinanceCollectRunID 仅供集成测试隔离，生产必须留空。
+	FinanceCollectRunID string
+	// FinanceCollectMode 选择 fake / real 客户端；空值按 fake 处理。
+	FinanceCollectMode FinanceCollectMode
+	// FinanceCollectInstanceID 是观测的 Source 与台账行的 source，
+	// 默认 DefaultFinanceCollectInstanceID。
+	FinanceCollectInstanceID string
+	// FinanceCollectTargetAllowlist 是允许连接的上游主机精确清单（ADR-004）。
+	// real 模式必填；留空不是「放行一切」而是「一个请求都发不出去」。
+	//
+	// endpoint 与凭据引用**不在这里**：那两样逐账号不同，来自成本登记簿
+	// （§2.1）。进程级配置里再放一份只会让两处漂开。
+	FinanceCollectTargetAllowlist []string
+	// FinanceCollectRequestTimeout 是单次上游 HTTP 请求的超时，
+	// 零值回落到 DefaultFinanceCollectRequestTimeout。
+	FinanceCollectRequestTimeout time.Duration
+	// FinanceCollectSecrets 解析登记簿里的账号级与每令牌 CredentialRef。
+	// 装配在进程入口（cmd/），而不是在这里现造：Provider 的选择
+	// （env/SOPS/Vault）是部署决定，不是任务决定（ADR-014）。fake 模式用不到它。
+	FinanceCollectSecrets secrets.SecretProvider
+
 	// AlertEvaluateEnabled 决定是否注册告警评估任务（XM-0033）。
 	//
 	// 与 Sub2APISyncEnabled 同样的零值纪律：用 Config 字面量构造的调用方
@@ -149,6 +183,16 @@ func DefaultConfig() Config {
 		NewAPISyncRunOnStart: true,
 		NewAPIMode:           NewAPIModeFake,
 		NewAPIInstanceID:     DefaultNewAPIInstanceID,
+		// 成本采集同理（XM-0037b）：默认就采、默认走 fake。登记簿里没有
+		// 计量型账号时它每轮什么都不写（AccountsTotal=0），代价只有一条
+		// info 日志；而一条默认关闭的采集链路会让毛利看板一直空着，
+		// 空着与「采集失败」在页面上长得一模一样。
+		FinanceCollectEnabled:        true,
+		FinanceCollectInterval:       DefaultFinanceCollectInterval,
+		FinanceCollectRunOnStart:     true,
+		FinanceCollectMode:           FinanceCollectModeFake,
+		FinanceCollectInstanceID:     DefaultFinanceCollectInstanceID,
+		FinanceCollectRequestTimeout: DefaultFinanceCollectRequestTimeout,
 		// 告警默认就跑：Foundation-A 的退出条件之一是「能触发一条真实告警」
 		// （规格 §22.2），而一个默认关闭的告警系统在需要它的那天多半还是关的。
 		// 没配投递渠道时它照常评估落库，只是每轮打一条 warn 说没投出去。
@@ -185,6 +229,19 @@ func (c Config) normalized() Config {
 	}
 	if strings.TrimSpace(c.NewAPIInstanceID) == "" {
 		c.NewAPIInstanceID = defaults.NewAPIInstanceID
+	}
+	if c.FinanceCollectInterval == 0 {
+		c.FinanceCollectInterval = defaults.FinanceCollectInterval
+	}
+	if c.FinanceCollectRequestTimeout <= 0 {
+		// 漏填超时回落到默认值，绝不能变成「没有超时」（规格 §18.1-4）
+		c.FinanceCollectRequestTimeout = defaults.FinanceCollectRequestTimeout
+	}
+	if strings.TrimSpace(string(c.FinanceCollectMode)) == "" {
+		c.FinanceCollectMode = defaults.FinanceCollectMode
+	}
+	if strings.TrimSpace(c.FinanceCollectInstanceID) == "" {
+		c.FinanceCollectInstanceID = defaults.FinanceCollectInstanceID
 	}
 	if c.AlertEvaluateInterval == 0 {
 		c.AlertEvaluateInterval = defaults.AlertEvaluateInterval
@@ -306,6 +363,35 @@ func (c Config) validate() error {
 				"NewAPI 的真实只读客户端尚未实现（XM-0038），因此现阶段生产只能显式关闭同步：" +
 				"XM_NEWAPI_SYNC_ENABLED=false")
 	}
+	if _, err := ParseFinanceCollectMode(string(c.FinanceCollectMode)); err != nil {
+		return err
+	}
+	if c.FinanceCollectRunID != "" && c.Environment == "production" {
+		// 与 Sub2APISyncRunID 同一条理由，外加一条本任务独有的：多个副本
+		// 各跑各的会同时 upsert 同一批今日行，最后留下的是哪一轮的读数
+		// 取决于谁最后写完——而它们读的是不同时刻的上游。
+		return fmt.Errorf("finance collect run ID must not be set in production")
+	}
+	if c.FinanceCollectEnabled && c.FinanceCollectInterval < time.Second {
+		return fmt.Errorf("finance collect interval %s is below River's one-second minimum",
+			c.FinanceCollectInterval)
+	}
+	if c.FinanceCollectEnabled && c.FinanceCollectMode == FinanceCollectModeFake &&
+		c.Environment == "production" {
+		// 生产环境启动即拒（fail closed）——与 Sub2API / NewAPI 完全同一条纪律，
+		// 但后果更重：Fake 的读数不只进 ops 指标，还会被**写进利润台账**
+		// （finance.profit_daily）。台账是过去冻结的（§5.3），一旦让 Fake 的
+		// 数字落进某一天的行，那一天的毛利就永久是假的——没有任何后续采集
+		// 会去覆盖一个历史业务日，只能靠人工数据修复（宪法 2 条的
+		// Platform Lifecycle Operation）把它挖出来。
+		//
+		// 为什么在启动时拒绝而不是运行时降级：默认值就是 fake，
+		// 所以「忘了配」的结果恰好是最危险的那一种。
+		return fmt.Errorf(
+			"环境 production 不允许 finance collect fake 模式：Fake 的读数会被写进利润台账，" +
+				"而历史业务日过去冻结、不会被后续采集覆盖。" +
+				"请配置 XM_FINANCE_COLLECT_MODE=real（或显式关闭采集 XM_FINANCE_COLLECT_ENABLED=false）")
+	}
 	if c.AlertEvaluateEnabled && c.AlertEvaluateInterval < time.Second {
 		return fmt.Errorf("alert evaluate interval %s is below River's one-second minimum", c.AlertEvaluateInterval)
 	}
@@ -408,6 +494,54 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			&river.PeriodicJobOpts{
 				ID:         NewAPISyncJobKind,
 				RunOnStart: cfg.NewAPISyncRunOnStart,
+			},
+		))
+	}
+
+	if cfg.FinanceCollectEnabled {
+		// 两个仓储在这里从既有连接池构造：任务只依赖 finance.AccountRegistry
+		// 与 finance.LedgerWriter 两个接口，换成内存实现就能在没有库的机器上
+		// 跑完三条不静默纪律的分支（同 ObservationStore 的理由）。
+		//
+		// 台账仓储拿的是**同一个时钟**：「今日可覆盖、过去冻结」（§5.3）的
+		// 判据与业务日切分必须来自同一个 now，否则跨零点那一瞬会出现
+		// 「按 A 时钟算是今天、按 B 时钟算是昨天」的写入，然后被冻结纪律拒掉。
+		river.AddWorker(workers, NewFinanceCollectWorker(FinanceCollectOptions{
+			Logger:      cfg.Logger,
+			Environment: cfg.Environment,
+			InstanceID:  cfg.FinanceCollectInstanceID,
+			Mode:        cfg.FinanceCollectMode,
+			Store:       ops.NewStore(pool),
+			Registry:    finance.NewStore(pool),
+			Ledger:      finance.NewProfitStore(pool, nil),
+			NewClient: NewFinanceCollectClientFactory(
+				cfg.FinanceCollectMode,
+				finance.RealMeteringConfig{
+					TargetAllowlist: cfg.FinanceCollectTargetAllowlist,
+					Secrets:         cfg.FinanceCollectSecrets,
+					Timeout:         cfg.FinanceCollectRequestTimeout,
+					Environment:     cfg.Environment,
+					InstanceID:      cfg.FinanceCollectInstanceID,
+				},
+				nil,
+			),
+			// ResolvePlatform 留空 = 全部落「未归属」桶（§5.2）。
+			// 登记簿里还没有「自营账号属于哪个自营平台」这一列，
+			// 编一个归属出来会让四桶里的有效平台桶凭空多出金额（宪法 12 条）。
+			// 037c/d 接上归属配置时只注入一个函数，写入路径不动。
+		}))
+		periodic = append(periodic, river.NewPeriodicJob(
+			river.PeriodicInterval(cfg.FinanceCollectInterval),
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := FinanceCollectArgs{RunID: cfg.FinanceCollectRunID}
+				opts := args.InsertOpts()
+				// 唯一性周期跟随配置的节奏；参数层的默认值只服务于临时插入。
+				opts.UniqueOpts.ByPeriod = cfg.FinanceCollectInterval
+				return args, &opts
+			},
+			&river.PeriodicJobOpts{
+				ID:         FinanceCollectJobKind,
+				RunOnStart: cfg.FinanceCollectRunOnStart,
 			},
 		))
 	}
