@@ -41,22 +41,34 @@ uses River's default retry policy and the `default` plus `maintenance` queues.
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `XM_SUB2API_MODE` | `fake` | `fake` 用 `sub2api.NewFake`；`real` 是 XM-0017 的落点 |
+| `XM_SUB2API_MODE` | `fake` | `fake` 用 `sub2api.NewFake`；`real` 走真实只读客户端（XM-0017） |
 | `XM_SUB2API_INSTANCE_ID` | `sub2api-staging` | 写进观测的 `source`，看板必须显示 |
 | `XM_SUB2API_SYNC_ENABLED` | `true` | 采集链路的停用开关（宪法 26 条） |
 | `XM_SUB2API_SYNC_INTERVAL` | `300s` | 同步周期，下限 1 秒（River 限制） |
-| `XM_SUB2API_CREDENTIAL_REF` | 空 | XM-0017 预留。**当前只校验引用形状，不解析明文** |
+| `XM_SUB2API_ENDPOINT` | 空 | real 模式必填，必须 https |
+| `XM_SUB2API_TARGET_ALLOWLIST` | 空 | real 模式必填，逗号分隔的**精确**主机清单；留空 = 一个请求都发不出去 |
+| `XM_SUB2API_CREDENTIAL_REF` | 空 | real 模式必填，`secret://<scope>/<name>`。**本层只校验形状，不解析明文** |
+| `XM_SUB2API_TOKEN` | 空 | 上面那个引用在 env Provider 下的落点（登记表见 `sub2api.go`）。Connector 不认识这个名字 |
 
 ### 为什么默认是 fake
 
-真实只读账号还没开出来（XM-0017）。默认设成 `real` 会让每个新环境一上来
+真实只读凭据要一个个环境去开。默认设成 `real` 会让每个新环境一上来
 就满屏同步失败，什么信息也没给出。默认 `fake` 让上层（看板、告警）先跑起来，
 而默认来源标识 `sub2api-staging` 保证这批数字一眼可辨——Fake 数据绝不伪装
 成真实来源。进程启动时 `worker_started` 日志里也会带上
 `sub2api_mode` / `sub2api_source`。
 
-配成 `real` 不会崩：客户端工厂返回一个分类为 `not_supported` 的错误，
-同步任务照常把五条指标写成 `status=failed`、`last_error_code=not_supported`。
+### 切到 real 会发生什么
+
+配置齐全时工厂现场构造真实客户端（每轮同步现解析 CredentialRef、现建传输层
+——凭据会轮换，握着不放的连接不会知道）。完整切换步骤、验证方法与故障对照表
+见 `docs/modules/connector/RUNBOOK.md`。
+
+四项连接配置缺任意一项时 `real` **也不会崩**：工厂返回一个分类为
+`not_supported` 的错误，错误链里说清缺哪个环境变量，同步任务照常把五条指标
+写成 `status=failed`、`last_error_code=not_supported`。配置写错了（endpoint
+不是 https、主机不在自己的 allowlist 里）则归 `internal`——运维一看 error_code
+就知道该去补配置还是去改配置。
 
 ### 失败也要写
 

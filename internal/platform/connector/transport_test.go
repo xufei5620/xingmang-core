@@ -146,3 +146,30 @@ func TestNewReadOnlyClientHasTimeout(t *testing.T) {
 		t.Fatal("超时为零时应回落到默认值，绝不能没有超时（规格 §18.1-4）")
 	}
 }
+
+func TestNewReadOnlyClientWithBaseKeepsGuards(t *testing.T) {
+	// 可注入的是「怎么连」，不是「能不能连」：换掉底层 RoundTripper 之后，
+	// 写方法与 allowlist 之外的主机照样走不通。
+	base := &recordingTransport{}
+	c := NewReadOnlyClientWithBase(base, []string{"api.solov.cc"}, 5*time.Second)
+
+	if _, err := c.Do(req(t, http.MethodGet, "https://api.solov.cc/v1/users")); err != nil {
+		t.Fatalf("allowlist 内的 GET 应放行: %v", err)
+	}
+	if base.calls != 1 {
+		t.Fatalf("注入的 base 应被真正使用, calls = %d", base.calls)
+	}
+
+	if _, err := c.Do(req(t, http.MethodPost, "https://api.solov.cc/v1/users")); KindOf(err) != KindWriteAttempt {
+		t.Fatalf("写方法的错误分类 = %q, want write_attempt", KindOf(err))
+	}
+	if _, err := c.Do(req(t, http.MethodGet, "https://evil.example.com/v1")); KindOf(err) != KindForbiddenTarget {
+		t.Fatalf("allowlist 之外的错误分类 = %q, want forbidden_target", KindOf(err))
+	}
+	if base.calls != 1 {
+		t.Fatalf("被拒的请求不应发出，base.calls = %d", base.calls)
+	}
+	if c.Timeout <= 0 {
+		t.Fatal("必须有超时（规格 §18.1-4）")
+	}
+}

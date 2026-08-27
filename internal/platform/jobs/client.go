@@ -54,9 +54,22 @@ type Config struct {
 	Sub2APIMode Sub2APIMode
 	// Sub2APIInstanceID 是观测的 Source，默认 DefaultSub2APIInstanceID。
 	Sub2APIInstanceID string
-	// Sub2APICredentialRef 是 XM-0017 的预留入参：本任务只校验引用的**形状**，
-	// 不解析出任何明文（凭据只经 CredentialRef，ADR-014、宪法 7 条）。
+	// Sub2APICredentialRef 是只读凭据的引用（secret://<scope>/<name>）。
+	// 本层只校验引用的**形状**，不解析出任何明文；明文由 Sub2APISecrets
+	// 在客户端构造请求头的那一瞬才出现（ADR-014、宪法 7 条）。
 	Sub2APICredentialRef string
+	// Sub2APIEndpoint 是上游只读端点（必须 https）。real 模式必填。
+	Sub2APIEndpoint string
+	// Sub2APITargetAllowlist 是允许连接的主机精确清单（ADR-004）。real 模式必填。
+	// 留空不是「放行一切」而是「一个请求都发不出去」——护栏 fail closed。
+	Sub2APITargetAllowlist []string
+	// Sub2APIRequestTimeout 是单次上游 HTTP 请求的超时，
+	// 零值回落到 DefaultSub2APIRequestTimeout。
+	Sub2APIRequestTimeout time.Duration
+	// Sub2APISecrets 解析 Sub2APICredentialRef。装配在进程入口（cmd/），
+	// 而不是在这里现造：Provider 的选择（env/SOPS/Vault）是部署决定，
+	// 不是任务决定（ADR-014）。fake 模式用不到它。
+	Sub2APISecrets secrets.SecretProvider
 }
 
 // DefaultConfig returns the safe local-development baseline.
@@ -76,6 +89,7 @@ func DefaultConfig() Config {
 		Sub2APISyncRunOnStart: true,
 		Sub2APIMode:           Sub2APIModeFake,
 		Sub2APIInstanceID:     DefaultSub2APIInstanceID,
+		Sub2APIRequestTimeout: DefaultSub2APIRequestTimeout,
 	}
 }
 
@@ -92,6 +106,10 @@ func (c Config) normalized() Config {
 	}
 	if c.Sub2APISyncInterval == 0 {
 		c.Sub2APISyncInterval = defaults.Sub2APISyncInterval
+	}
+	if c.Sub2APIRequestTimeout <= 0 {
+		// 漏填超时回落到默认值，绝不能变成「没有超时」（规格 §18.1-4）
+		c.Sub2APIRequestTimeout = defaults.Sub2APIRequestTimeout
 	}
 	if strings.TrimSpace(string(c.Sub2APIMode)) == "" {
 		c.Sub2APIMode = defaults.Sub2APIMode
@@ -197,7 +215,15 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			InstanceID:  cfg.Sub2APIInstanceID,
 			Mode:        cfg.Sub2APIMode,
 			Store:       ops.NewStore(pool),
-			NewClient:   NewSub2APIClientFactory(cfg.Sub2APIMode, cfg.Sub2APICredentialRef),
+			NewClient: NewSub2APIClientFactory(cfg.Sub2APIMode, Sub2APIRealConfig{
+				Endpoint:        cfg.Sub2APIEndpoint,
+				TargetAllowlist: cfg.Sub2APITargetAllowlist,
+				CredentialRef:   cfg.Sub2APICredentialRef,
+				Environment:     cfg.Environment,
+				InstanceID:      cfg.Sub2APIInstanceID,
+				Timeout:         cfg.Sub2APIRequestTimeout,
+				Secrets:         cfg.Sub2APISecrets,
+			}),
 		}))
 		periodic = append(periodic, river.NewPeriodicJob(
 			river.PeriodicInterval(cfg.Sub2APISyncInterval),

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
 func TestConfigFromEnv(t *testing.T) {
@@ -42,7 +45,7 @@ func TestConfigFromEnvRequiresExplicitEnvironment(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnvDefaultsSub2APIToFake：真实只读账号还没就绪（XM-0017），
+// TestConfigFromEnvDefaultsSub2APIToFake：真实凭据要一个个环境去开，
 // 默认必须是 fake；来源标识也必须一眼可辨，不能伪装成真实来源。
 func TestConfigFromEnvDefaultsSub2APIToFake(t *testing.T) {
 	values := map[string]string{"ENVIRONMENT": "staging"}
@@ -105,5 +108,90 @@ func TestConfigFromEnvRejectsInvalidSub2APIValues(t *testing.T) {
 		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
 			t.Fatalf("%s=%q should fail", key, value)
 		}
+	}
+}
+
+// TestConfigFromEnvReadsSub2APIConnection：XM-0017 的连接配置。
+//
+// 缺配置**不在启动时报错**：一个配错的采集通道不该把心跳和别的任务一起
+// 拖垮，缺什么会在每轮同步写成一条说得清的 SyncFailed 观测。
+func TestConfigFromEnvReadsSub2APIConnection(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                 "staging",
+		"XM_SUB2API_MODE":             "real",
+		"XM_SUB2API_ENDPOINT":         "https://api.solov.cc",
+		"XM_SUB2API_TARGET_ALLOWLIST": " api.solov.cc , API.Backup.Solov.CC ,, ",
+		"XM_SUB2API_CREDENTIAL_REF":   "secret://sub2api/readonly-token",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sub2APIEndpoint != "https://api.solov.cc" {
+		t.Fatalf("endpoint = %q", cfg.Sub2APIEndpoint)
+	}
+	// 拆分只做去空白与转小写，不做补全：allowlist 的全部价值就在于
+	// 它是人显式写下的那一份。
+	want := []string{"api.solov.cc", "api.backup.solov.cc"}
+	if len(cfg.Sub2APITargetAllowlist) != len(want) {
+		t.Fatalf("allowlist = %v, want %v", cfg.Sub2APITargetAllowlist, want)
+	}
+	for i := range want {
+		if cfg.Sub2APITargetAllowlist[i] != want[i] {
+			t.Fatalf("allowlist = %v, want %v", cfg.Sub2APITargetAllowlist, want)
+		}
+	}
+	if cfg.Sub2APIRequestTimeout <= 0 {
+		t.Fatal("单次请求必须有超时（规格 §18.1-4）")
+	}
+
+	// 一项都没配时也不报错：mode 还可能是 fake
+	bare := map[string]string{"ENVIRONMENT": "staging", "XM_SUB2API_MODE": "real"}
+	cfg, err = configFromEnv(func(key string) string { return bare[key] })
+	if err != nil {
+		t.Fatalf("缺连接配置不该让 worker 起不来: %v", err)
+	}
+	if cfg.Sub2APIEndpoint != "" || len(cfg.Sub2APITargetAllowlist) != 0 {
+		t.Fatalf("没配的东西不该被凭空造出来: %+v", cfg)
+	}
+}
+
+func TestSub2APISecretsFromEnv(t *testing.T) {
+	values := map[string]string{"XM_SUB2API_TOKEN": "placeholder-placeholder"}
+	getenv := func(key string) string { return values[key] }
+
+	// 没配引用 = 没有 Provider，但**不是错误**：fake 模式根本用不到它。
+	provider, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "")
+	if provider != nil || err != nil {
+		t.Fatalf("没配引用时应返回 (nil, nil), got %v %v", provider, err)
+	}
+
+	// 引用拼错了要在启动时就炸：这是配置错误，等到采集那天才发现更贵
+	if _, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "not-a-ref"); err == nil {
+		t.Fatal("非法 CredentialRef 必须被拒")
+	}
+
+	provider, err = sub2apiSecretsFromEnv(getenv, nil, "staging", "secret://sub2api/readonly-token")
+	if err != nil || provider == nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	ref := secrets.MustCredentialRef("secret://sub2api/readonly-token")
+	value, err := provider.Resolve(t.Context(), ref, "test")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if value.Reveal() != "placeholder-placeholder" {
+		t.Fatal("解析出的值不对")
+	}
+	// 打印/日志一律脱敏（宪法 7 条）——这条纪律由 SecretValue 的类型保证，
+	// 这里再钉一次是因为装配处最容易有人顺手把它 fmt 出来。
+	if got := fmt.Sprintf("%v/%s", value, value); strings.Contains(got, "placeholder") {
+		t.Fatalf("SecretValue 不该被打印出明文: %s", got)
+	}
+
+	// 登记表之外的引用解析不出来：禁止静默回退到别的数据源（规格 §18.1-5）
+	other := secrets.MustCredentialRef("secret://sub2api/another-token")
+	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
+		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
 	}
 }

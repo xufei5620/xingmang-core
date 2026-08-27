@@ -77,11 +77,23 @@ func hostOnly(hostPort string) string {
 //
 // 超时是硬性要求（规格 §18.1-4：所有外部 I/O 必须有超时）。
 func NewReadOnlyClient(allowlist []string, timeout time.Duration) *http.Client {
+	return NewReadOnlyClientWithBase(nil, allowlist, timeout)
+}
+
+// NewReadOnlyClientWithBase 与 NewReadOnlyClient 相同，但允许指定底层
+// RoundTripper（base 为 nil 时用 http.DefaultTransport）。
+//
+// 存在的理由只有一个：契约测试要对着 httptest.NewTLSServer 的自签证书跑，
+// 必须换掉底层的 TLS 配置。**护栏一个都不能少**——base 依旧被
+// ReadOnlyTransport 包在里面，所以非 GET/HEAD、allowlist 之外的主机、
+// 重定向，在测试路径上和生产路径上被同一份代码拒绝。
+// 换句话说：可注入的是「怎么连」，不是「能不能连」。
+func NewReadOnlyClientWithBase(base http.RoundTripper, allowlist []string, timeout time.Duration) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
 	return &http.Client{
-		Transport: NewReadOnlyTransport(nil, allowlist),
+		Transport: NewReadOnlyTransport(base, allowlist),
 		Timeout:   timeout,
 		// 不跟随重定向：上游一个 302 就能把请求引到 allowlist 之外
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
