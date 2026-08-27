@@ -29,7 +29,23 @@ ORDER BY sequence;
 -- 游标用 sequence 而不是 occurred_at：sequence 由链唯一且严格递增，
 -- 时间戳会撞（同一微秒内两条）导致翻页重复或漏读。
 -- before_seq = 0 表示「从最新一条开始」，省掉一个「首页」专用查询。
-SELECT * FROM audit.audit_event
+--
+-- 显式列而不是 SELECT *（XM-0031，回归 Codex 冷审 PR #47 第 3 条 /
+-- PR #43 head `0a0642c` 第 3 条）：两个 connector 摘要
+-- （connector_request_summary / connector_response_summary）是 jsonb 且没有
+-- 大小约束，而读 API **根本不返回它们**（见 httpapi/auditEventItem 的字段清单）。
+-- SELECT * 会把它们一路解码搬进进程内存，于是 limit=100 只是行数上限，不是
+-- 字节上限——一页也可能是几十 MB。不取的列就别取。
+--
+-- 走 (environment, sequence DESC) 复合索引（迁移 000006）：没有它时，稀疏环境
+-- （staging 事件远少于 production）的一页要沿全局 sequence 倒扫整条链才凑够
+-- row_limit 行；查一个空环境更是全表。
+SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type,
+       action_id, action_version, action_run_id, resource_type, resource_id,
+       environment, reason, approval_id, request_id, trace_id, source_ip,
+       before_summary, after_summary, result, compensation_result,
+       prev_hash, event_hash
+FROM audit.audit_event
 WHERE environment = @environment
   AND (@before_seq::bigint = 0 OR sequence < @before_seq::bigint)
 ORDER BY sequence DESC

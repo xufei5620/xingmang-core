@@ -55,6 +55,11 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/readyz", ReadyHandler(d.DB))
 
 	r.Route("/api/v1", func(api chi.Router) {
+		// /api/v1 下每一条响应都是按 Principal 与环境裁剪过的数据——审计前后
+		// 镜像、收入余额、服务清单——没有一条可以被共享缓存或浏览器落盘
+		// （XM-0031，回归 Codex 冷审 PR #47 第 8 条）。装在整组上而不是逐个
+		// 端点：新加的端点自动继承，不靠作者记得。探针不在这一组，保持可缓存。
+		api.Use(NoStore)
 		api.Use(RequirePrincipal(d.Resolver))
 		api.Get("/actions", ListActionsHandler(d.ActionRegistry))
 		api.Post("/actions/{actionID}/versions/{version}/execute", ExecuteActionHandler(d.Kernel))

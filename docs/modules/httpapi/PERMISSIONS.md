@@ -57,3 +57,14 @@ ADR-016：Keycloak 只发 `staff` 这类粗粒度角色，`registry.read` / `ops
 Foundation-A 期间 Principal 由 `NewDevHeaderResolver` 从 `X-Dev-Scopes` 头注入
 （该 Resolver 在 `environment == "production"` 时构造即失败）。XM-0008 接入 Keycloak
 后换成从 OIDC 令牌解析，本文件的权限表不变。
+
+## 未关闭：staging 的 scope 仍是调用方自授
+
+Codex 冷审多次判定 P1（PR #47 第 1 条、PR #48 第 5 条、PR #43 head `ba8e275` 第 1 条
+与 `0a0642c` 第 1 条）：**上面这张权限表在 staging 不构成鉴权**。`RequireScope` 校验
+的是调用方自己在 `X-Dev-Scopes` 里填写的字符串，而 `deploy/nginx/launch.conf` 原样
+透传这些头；任何能到达 staging 的人都能自称 `HUMAN` 并带上 `audit.read`。
+
+XM-0031 **没有**修这条——它属于 XM-0008/OIDC（由另一条工作线负责），也需要受信反代
+边界与限流一起落地。在那之前，这些端点不得在可对外到达的环境启用。本节存在的意义
+是不让上面那张表被误读成「已经有鉴权了」。

@@ -107,6 +107,55 @@ func eventFromRow(r gen.AuditAuditEvent) (Event, error) {
 	}, nil
 }
 
+// eventFromRecentRow 把 ListRecent 的**投影**行转成 Event。
+//
+// 与 eventFromRow 的差别只有一处：投影不取两个 connector 摘要，所以返回的
+// Event 里它们恒为空 map（XM-0031，见 db/queries/audit.sql 的说明——那两列是
+// 无大小约束的 jsonb，读 API 根本不返回它们，取回来只是白占内存）。
+//
+// **因此 ListRecent 返回的 Event 不能用来校验链**：ComputeHash 把四个摘要都
+// 算进 canonical，缺两个就必然对不上。链校验走 List / VerifyChain，那条路径
+// 取全列。这也是为什么不把两个函数合并成一个「摘要可空」的版本——让「能算
+// 哈希的事件」与「给人看的事件」在类型来源上就分开，比留一个注释可靠。
+func eventFromRecentRow(r gen.ListRecentAuditEventsRow) (Event, error) {
+	before, err := jsonToMap(r.BeforeSummary)
+	if err != nil {
+		return Event{}, fmt.Errorf("before_summary: %w", err)
+	}
+	after, err := jsonToMap(r.AfterSummary)
+	if err != nil {
+		return Event{}, fmt.Errorf("after_summary: %w", err)
+	}
+	return Event{
+		ID:            r.ID,
+		Sequence:      r.Sequence,
+		OccurredAt:    fromTS(r.OccurredAt),
+		RecordedAt:    fromTS(r.RecordedAt),
+		PrincipalID:   r.PrincipalID,
+		PrincipalType: principal.Type(r.PrincipalType),
+		ActionID:      r.ActionID,
+		ActionVersion: r.ActionVersion,
+		ActionRunID:   r.ActionRunID,
+		ResourceType:  r.ResourceType,
+		ResourceID:    r.ResourceID,
+		Environment:   r.Environment,
+		Reason:        r.Reason,
+		ApprovalID:    r.ApprovalID,
+		RequestID:     r.RequestID,
+		TraceID:       r.TraceID,
+		SourceIP:      r.SourceIp,
+		BeforeSummary: before,
+		AfterSummary:  after,
+		// ConnectorRequestSummary / ConnectorResponseSummary 刻意留空，见上。
+		ConnectorRequestSummary:  map[string]any{},
+		ConnectorResponseSummary: map[string]any{},
+		Result:                   Result(r.Result),
+		CompensationResult:       r.CompensationResult,
+		PrevHash:                 r.PrevHash,
+		EventHash:                r.EventHash,
+	}, nil
+}
+
 // Tip 返回链尖的 sequence 与 event_hash。空链返回 (0, GenesisHash, nil)。
 func (s *Store) Tip(ctx context.Context) (int64, string, error) {
 	row, err := gen.New(s.pool).GetAuditTip(ctx)
@@ -267,6 +316,9 @@ const (
 //
 // 本方法只读，不参与哈希链的构建，也不校验链——调用方拿到的 event_hash /
 // prev_hash 是库里的原样值，是否可信由 VerifyChain 回答。
+//
+// 返回的 Event 是**读投影**，两个 connector 摘要恒为空（XM-0031，理由见
+// eventFromRecentRow 与 db/queries/audit.sql）。**不要对它调用 ComputeHash**。
 func (s *Store) ListRecent(ctx context.Context, environment string, beforeSeq int64, limit int32) ([]Event, error) {
 	if limit <= 0 {
 		limit = DefaultListLimit
@@ -288,7 +340,7 @@ func (s *Store) ListRecent(ctx context.Context, environment string, beforeSeq in
 	}
 	out := make([]Event, 0, len(rows))
 	for _, r := range rows {
-		e, err := eventFromRow(r)
+		e, err := eventFromRecentRow(r)
 		if err != nil {
 			return nil, err
 		}

@@ -8,7 +8,7 @@ Schema：`ops`。迁移：`db/migrations/000004_init_ops.up.sql`（forward-only�
 
 | 列 | 说明 |
 |---|---|
-| metric_key | `^[a-z0-9][a-z0-9_.-]{0,127}$`，允许点分（`sub2api.revenue.daily`） |
+| metric_key | 落库判据是形态 `^[a-z0-9][a-z0-9_.-]{0,127}$`，允许点分（`sub2api.revenue.daily`）；HTTP 查询另加白名单（`ops.KnownMetricKey`） |
 | source | 数据来源，前端必须显示 |
 | environment | FK → core.environment |
 | **observed_at** | **可空**——空表示从未成功采集。空 + `last_error_code` 也为空才是「未初始化」；空 + 有错误码是「第一次就失败了」，判 `failed` |

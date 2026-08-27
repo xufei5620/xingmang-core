@@ -21,16 +21,17 @@ type fakeHistoryLister struct {
 	gotLimit  int32
 	callCount int
 
-	samples []ops.Observation
-	err     error
+	samples   []ops.Observation
+	truncated bool
+	err       error
 }
 
 func (f *fakeHistoryLister) ListSamples(
 	_ context.Context, environment, metricKey string, since time.Time, limit int32,
-) ([]ops.Observation, error) {
+) ([]ops.Observation, bool, error) {
 	f.gotEnv, f.gotKey, f.gotSince, f.gotLimit = environment, metricKey, since, limit
 	f.callCount++
-	return f.samples, f.err
+	return f.samples, f.truncated, f.err
 }
 
 // historyRouter 单独装一个路由，不动 testhelpers_test.go 里共用的
@@ -108,12 +109,15 @@ type historyBody struct {
 	Items []struct {
 		ObservedAt    *string        `json:"observed_at"`
 		SyncedAt      string         `json:"synced_at"`
+		Source        string         `json:"source"`
 		Status        string         `json:"status"`
 		IsPartial     bool           `json:"is_partial"`
 		Watermark     string         `json:"watermark"`
 		LastErrorCode string         `json:"last_error_code"`
 		Value         map[string]any `json:"value"`
 	} `json:"items"`
+	Truncated bool  `json:"truncated"`
+	Limit     int32 `json:"limit"`
 }
 
 // TestMetricHistoryContractShape 锁住响应契约：字段名、顺序、失败点的成色。
@@ -156,6 +160,123 @@ func TestMetricHistoryContractShape(t *testing.T) {
 	// 但每个点都带 status/is_partial/observed_at/last_error_code，不是裸数字。
 	if strings.Contains(rec.Body.String(), `"freshness"`) {
 		t.Fatalf("历史点不该带派生的 freshness: %s", rec.Body.String())
+	}
+	// 每个点都带 source（XM-0031，回归 Codex 冷审 PR #48 第 3 条）
+	for i, it := range got.Items {
+		if it.Source != "sub2api-staging" {
+			t.Fatalf("第 %d 点缺少 source: %+v", i, it)
+		}
+	}
+	// 顶层截断事实：本次没截断
+	if got.Truncated {
+		t.Fatalf("未截断时 truncated 应为 false: %s", rec.Body.String())
+	}
+	if got.Limit != ops.MaxSampleLimit {
+		t.Fatalf("limit = %d, want %d", got.Limit, ops.MaxSampleLimit)
+	}
+}
+
+// TestMetricHistoryReportsSourcePerPoint 回归 Codex 冷审 PR #48 第 3 条：
+// 「历史查询混合不同 source，却从响应中删除 source，Fake→real 会被画成同一
+// 条曲线」。
+//
+// 查询只按 (environment, metric_key) 过滤，所以一条曲线上完全可能混着不同
+// 来源。source 必须**逐点**返回，前端才能在换源处断线或加标记。
+func TestMetricHistoryReportsSourcePerPoint(t *testing.T) {
+	base := time.Date(2026, 8, 27, 3, 0, 0, 0, time.UTC)
+	fake := historySample(seriesName, base, ops.SyncOK, "")
+	fake.Source = "sub2api-staging" // Fake 默认来源
+	real1 := historySample(seriesName, base.Add(5*time.Minute), ops.SyncOK, "")
+	real1.Source = "sub2api-prod" // 切到真实实例之后
+
+	rec := getHistory(t, historyRouter(t, &fakeHistoryLister{
+		samples: []ops.Observation{fake, real1},
+	}), historyQuery(""))
+
+	var got historyBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应非预期结构: %v (%s)", err, rec.Body.String())
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("应有 2 项: %+v", got.Items)
+	}
+	if got.Items[0].Source != "sub2api-staging" || got.Items[1].Source != "sub2api-prod" {
+		t.Fatalf("换源必须逐点可见: %q -> %q",
+			got.Items[0].Source, got.Items[1].Source)
+	}
+}
+
+// TestMetricHistoryReportsTruncation 回归 Codex 冷审 PR #48 第 2 条：
+// 「允许 168 小时，却静默截成最新 1000 点，响应没有任何『被截断』的事实」。
+func TestMetricHistoryReportsTruncation(t *testing.T) {
+	base := time.Date(2026, 8, 27, 3, 0, 0, 0, time.UTC)
+	lister := &fakeHistoryLister{
+		samples:   []ops.Observation{historySample(seriesName, base, ops.SyncOK, "")},
+		truncated: true,
+	}
+	rec := getHistory(t, historyRouter(t, lister), historyQuery("&hours=168"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got historyBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应非预期结构: %v (%s)", err, rec.Body.String())
+	}
+	if !got.Truncated {
+		t.Fatalf("仓储报告截断时响应必须如实转达: %s", rec.Body.String())
+	}
+	// limit 让 truncated 可解释：前端能说「只显示了最近 N 个点」
+	if got.Limit != ops.MaxSampleLimit {
+		t.Fatalf("limit = %d, want %d", got.Limit, ops.MaxSampleLimit)
+	}
+	// 字段必须真的在 JSON 里（而不是被 omitempty 之类吞掉）
+	if !strings.Contains(rec.Body.String(), `"truncated":true`) {
+		t.Fatalf("响应缺少 truncated 字段: %s", rec.Body.String())
+	}
+
+	// 未截断时字段照样在，值为 false——恒在的字段才不需要前端区分
+	// 「没有这个字段」与「值为 false」
+	plain := getHistory(t, historyRouter(t, &fakeHistoryLister{}), historyQuery(""))
+	if !strings.Contains(plain.Body.String(), `"truncated":false`) {
+		t.Fatalf("未截断时也必须显式给出 truncated:false: %s", plain.Body.String())
+	}
+}
+
+// TestMetricHistoryRejectsUnregisteredMetricKey 回归 Codex 冷审 PR #48
+// 第 6 条：「『拼错 metric_key 会 400』并未实现」。
+//
+// 形态合法但不存在的指标以前返回 200 + 空数组，被读成「这个指标真的没数据」
+// ——正是当时的注释声称要避免的那件事。
+func TestMetricHistoryRejectsUnregisteredMetricKey(t *testing.T) {
+	// 形态完全合法（小写、点分），但没有任何模块注册过它
+	for _, unknown := range []string{
+		"foo.bar",
+		"sub2api.revenu.daily",   // 拼错一个字母
+		"sub2api.revenue.dail",   // 少一个字母
+		"newapi.tokens.consumed", // 尚未接入的模块
+	} {
+		lister := &fakeHistoryLister{}
+		rec := getHistory(t, historyRouter(t, lister), metricKeyParam+unknown)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%q 应 400, got %d (%s)", unknown, rec.Code, rec.Body.String())
+		}
+		if lister.callCount != 0 {
+			t.Fatalf("%q: 指标不存在时不该查库", unknown)
+		}
+		// 错误文案要告诉调用方有哪些指标可用，否则只能靠猜
+		if !strings.Contains(rec.Body.String(), "sub2api.revenue.daily") {
+			t.Fatalf("%q: 错误应列出已注册指标: %s", unknown, rec.Body.String())
+		}
+	}
+
+	// 已注册的指标照常放行
+	lister := &fakeHistoryLister{}
+	if rec := getHistory(t, historyRouter(t, lister), historyQuery("")); rec.Code != http.StatusOK {
+		t.Fatalf("已注册指标应 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if lister.callCount != 1 {
+		t.Fatalf("已注册指标应查库一次, got %d", lister.callCount)
 	}
 }
 

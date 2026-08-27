@@ -1,0 +1,28 @@
+-- XM-0031：审计只读 API 的复合索引。
+--
+-- 回归 Codex 冷审 PR #47 第 3 条 / PR #43 head `0a0642c` 第 3 条：
+-- 「`db/queries/audit.sql` 在没有 `(environment, sequence DESC)` 索引时按稀疏
+-- 环境倒扫全局链」。
+--
+-- 000003 建的索引是 sequence / event_hash / action_run_id /
+-- (principal_id, occurred_at) / occurred_at，没有一个能服务
+-- `WHERE environment = $1 [AND sequence < $2] ORDER BY sequence DESC LIMIT n`
+-- 这条形状。规划器只能沿 audit_event_sequence_key 倒扫，逐行过滤 environment，
+-- 直到凑够 LIMIT 行。当 production 事件远多于 staging 时，staging 的一页要扫过
+-- 中间所有 production 行；查一个还没有事件的环境则是扫完整条链才返回空——
+-- 一个 limit=100 的请求变成全表扫描，这是低成本的数据库 DoS 路径。
+--
+-- 复合索引把 environment 放前、sequence DESC 放后：等值过滤 + 有序取前 N，
+-- 规划器可以直接从索引上「跳到这个环境的最大 sequence 往回走 n 行」，代价与
+-- 环境稀疏程度无关。sequence < before_seq 的游标条件也走同一条索引。
+--
+-- DESC 写进索引定义而不是靠反向扫描：PostgreSQL 能反向扫升序索引，代价接近，
+-- 但显式 DESC 让索引的意图与查询逐字对应，将来有人改查询方向时 EXPLAIN 会
+-- 立刻显形，而不是悄悄退化。
+--
+-- 不用 CONCURRENTLY：迁移在事务里跑（cmd/migrate），CONCURRENTLY 不能在事务
+-- 内执行。当前 audit_event 量级（launch 前是千级）建索引是毫秒级；真到需要
+-- 在线建索引的量级时，那属于一次有变更单的 Platform Lifecycle Operation，
+-- 不该藏在一条普通迁移里。
+CREATE INDEX audit_event_environment_sequence_idx
+    ON audit.audit_event (environment, sequence DESC);

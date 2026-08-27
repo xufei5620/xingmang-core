@@ -76,9 +76,14 @@ func RequirePrincipal(resolver PrincipalResolver) func(http.Handler) http.Handle
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, err := resolver.Resolve(r)
 			if err != nil {
+				// 解析失败时不记 principal_id：调用方**声称**的身份不是身份，
+				// 把它写进访问日志等于让伪造者往可归责记录里塞任意值。
 				WriteError(w, r, err)
 				return
 			}
+			// 告知访问日志（XM-0031）。放在这里而不是各 handler 里：身份在这
+			// 一处解析，归责记录就该在这一处生成，漏不掉也伪造不了。
+			recordPrincipalID(r.Context(), p.ID)
 			next.ServeHTTP(w, r.WithContext(principal.WithPrincipal(r.Context(), p)))
 		})
 	}

@@ -7,7 +7,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
@@ -22,6 +25,18 @@ import (
 
 func auditedKernel(t *testing.T, def action.Definition, h action.Handler) (*action.Kernel, *audit.Store) {
 	t.Helper()
+	k, store, _ := auditedKernelWithPool(t, def, h)
+	return k, store
+}
+
+// auditedKernelWithPool 额外交出连接池。
+//
+// **testPool 每次调用都会 TRUNCATE**，所以需要在用例中途直接查库的测试必须
+// 复用这一个池，不能再调一次 testPool——那会把刚写进去的事件清空。
+func auditedKernelWithPool(
+	t *testing.T, def action.Definition, h action.Handler,
+) (*action.Kernel, *audit.Store, *pgxpool.Pool) {
+	t.Helper()
 	pool := testPool(t)
 	if _, err := pool.Exec(context.Background(), "TRUNCATE action.action_run"); err != nil {
 		t.Fatalf("清空 action_run 失败: %v", err)
@@ -35,7 +50,7 @@ func auditedKernel(t *testing.T, def action.Definition, h action.Handler) (*acti
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	k := action.NewKernel(reg, action.NewPgRunStore(pool, logger),
 		action.WithAuditSink(audit.NewActionSink(store)), action.WithLogger(logger))
-	return k, store
+	return k, store, pool
 }
 
 func demoDef() action.Definition {
@@ -126,6 +141,81 @@ func TestActionExecutionsFormAVerifiableChain(t *testing.T) {
 	// 用 len 而非 != nil：空 jsonb 读回是空 map，不是 nil
 	if events[1].ResourceID != "" || len(events[1].AfterSummary) != 0 {
 		t.Errorf("被拒事件不应带资源信息: %+v", events[1])
+	}
+}
+
+// TestLeakyHandlerCredentialsNeverReachTheChain 是 XM-0031 边界脱敏的端到端
+// 证明（回归 Codex 冷审 PR #47 第 2 条 / PR #43 head `0a0642c` 第 2 条）。
+//
+// 单元测试（actionsink_redact_test.go）证明了映射函数会脱敏；这里证明的是另一
+// 件事——一个**忘了脱敏的 Handler** 交出来的凭据，在真实数据库里那条不可篡改
+// 的链上确实是 [REDACTED]，而且链本身仍然完整（脱敏发生在算哈希之前）。
+func TestLeakyHandlerCredentialsNeverReachTheChain(t *testing.T) {
+	const plaintext = "hunter2-should-never-reach-the-chain"
+
+	k, store, pool := auditedKernelWithPool(t, demoDef(), func(ctx context.Context, _ map[string]any) (any, error) {
+		action.RecordResource(ctx, "core.service", "sub2api-prod")
+		// 刻意模拟一个忘了脱敏的 Handler：凭据直接进摘要
+		action.RecordBefore(ctx, map[string]any{"password": plaintext})
+		action.RecordAfter(ctx, map[string]any{
+			"instance_id": "sub2api-prod",
+			"api_key":     plaintext,
+			"nested":      map[string]any{"connector_token": plaintext},
+		})
+		return "ok", nil
+	})
+
+	if _, err := k.Execute(actorCtx("registry.service.manage"), action.Request{
+		ActionID: "registry.service.create", ActionVersion: "1", RequestID: "req-leak",
+		Params: map[string]any{"service_type": "sub2api"},
+	}); err != nil {
+		t.Fatalf("执行: %v", err)
+	}
+
+	events, err := store.List(context.Background(), 1, 100)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("审计事件数 = %d, want 1", len(events))
+	}
+	e := events[0]
+
+	if e.BeforeSummary["password"] != "[REDACTED]" {
+		t.Fatalf("链上 before_summary.password = %v, want [REDACTED]", e.BeforeSummary["password"])
+	}
+	if e.AfterSummary["api_key"] != "[REDACTED]" {
+		t.Fatalf("链上 after_summary.api_key = %v, want [REDACTED]", e.AfterSummary["api_key"])
+	}
+	nested, ok := e.AfterSummary["nested"].(map[string]any)
+	if !ok || nested["connector_token"] != "[REDACTED]" {
+		t.Fatalf("链上嵌套摘要未脱敏: %+v", e.AfterSummary["nested"])
+	}
+	// 非敏感字段照常留下：脱敏不是把摘要清空
+	if e.AfterSummary["instance_id"] != "sub2api-prod" {
+		t.Fatalf("非敏感字段被误伤: %+v", e.AfterSummary)
+	}
+
+	// 库里那条 jsonb 的原始字节里也不能有明文——读 API 只是最后一道，
+	// 真正的要求是它从一开始就没写进去。
+	var raw string
+	// 复用同一个 pool——testPool 每次调用都会 TRUNCATE
+	if err := pool.QueryRow(context.Background(),
+		`SELECT before_summary::text || after_summary::text FROM audit.audit_event WHERE sequence = $1`,
+		e.Sequence).Scan(&raw); err != nil {
+		t.Fatalf("读回原始 jsonb 失败: %v", err)
+	}
+	if strings.Contains(raw, plaintext) {
+		t.Fatalf("明文凭据落进了库: %s", raw)
+	}
+
+	// 脱敏发生在算哈希之前，所以链仍然完整
+	problem, err := store.VerifyChain(context.Background(), 1, 100)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if problem != nil {
+		t.Fatalf("脱敏后链断了: %+v", problem)
 	}
 }
 

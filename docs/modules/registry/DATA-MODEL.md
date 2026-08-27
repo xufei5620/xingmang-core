@@ -20,7 +20,7 @@ Schema：`core`。迁移：`db/migrations/000001_init_core_registry.up.sql`（fo
 |---|---|
 | service_type / instance_id | `^[a-z0-9][a-z0-9-]{0,63}$` |
 | environment | FK → core.environment |
-| endpoint | 必须 `https://` 开头 |
+| endpoint | 必须 `https://` 开头；**不得带凭据**——userinfo（`user:pass@`）或 token/key/secret/password 类查询参数一律拒绝（XM-0031） |
 | status | active / degraded / retired |
 | source_watermark / observed_at | 数据新鲜度回写（规格 §9.1）；observed_at 可空表示未采集 |
 
@@ -52,6 +52,7 @@ Schema：`core`。迁移：`db/migrations/000001_init_core_registry.up.sql`（fo
 |---|---|---|
 | 标识符字符集 | ✓ | ✓ CHECK |
 | endpoint 必须 https | ✓ | ✓ CHECK |
+| endpoint 不含凭据 | ✓ | ✗（需解析 URL，不适合 CHECK） |
 | allowlist 非空 | ✓ | ✓ CHECK |
 | credential_ref 形态 | ✓（并复用 secrets.ParseCredentialRef） | ✓ CHECK |
 | 写能力必须有 Kill Switch | ✓ | ✗（跨列语义，由领域层保证） |
