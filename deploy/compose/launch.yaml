@@ -142,6 +142,8 @@ services:
       #    形状未核实（见 contracts/connectors/reqlog.read.v1.md §8），端点会
       #    返回 501。real 还有一处未拍板的冲突：控制台是 http://127.0.0.1:9300
       #    而只读连接配置要求 https（同文档 §5）。
+      # --- 成本线演示种子(XM-0037d):非生产演示用,生产模式进程内硬拒 ---
+      XM_FINANCE_FAKE_SEED: ${XM_FINANCE_FAKE_SEED:-false}
       XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
       XM_REQLOG_ENDPOINT: ${XM_REQLOG_ENDPOINT:-}
       XM_REQLOG_TARGET_ALLOWLIST: ${XM_REQLOG_TARGET_ALLOWLIST:-}
