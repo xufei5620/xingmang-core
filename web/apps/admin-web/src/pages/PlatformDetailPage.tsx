@@ -3,6 +3,7 @@ import { PageHeader, type PlatformTabSpec } from "@xingmang/ui-admin";
 import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router";
+import { platformHasUpstreamRegistry } from "../api/finance";
 import { listMetrics, listServices } from "../api/platform";
 import { platformHasUsers } from "../api/users";
 import { BlueprintTabView, blueprintTabForPlatform } from "../blueprints";
@@ -16,6 +17,7 @@ import { assuranceSubTab } from "../components/PlatformAssurancePanel";
 import { financeSubTab } from "../components/PlatformFinancePanel";
 import { PlatformUsersPanel } from "../components/PlatformUsersPanel";
 import { RequestsPanel } from "../components/RequestsPanel";
+import { UpstreamAccountsPanel } from "../components/UpstreamAccountsPanel";
 import {
   findPlatform,
   pendingBadge,
@@ -43,7 +45,7 @@ export function PlatformDetailPage() {
   const queryClient = useQueryClient();
 
   // 旧页签名改跳、认不出来的 404，都已经在路由 loader 里处理掉了
-  // (见 router 的 platformTabLoader)，到这里剩下的一定是合法值
+  // （见 router 的 platformTabLoader），到这里剩下的一定是合法值
   const resolution = resolvePlatformTab(serviceType, searchParams.get("tab"));
   const activeTab = resolution.kind === "ok" ? resolution.tab : DEFAULT_PLATFORM_TAB;
 
@@ -213,10 +215,10 @@ function TabBody({
   );
 }
 
-/** 有内容的子页签走各自的面板;没有的返回 undefined,由调用方回落到通用占位。
+/** 有内容的子页签走各自的面板；没有的返回 undefined，由调用方回落到通用占位。
  *
- *  做成一个解析器而不是在 TabBody 里堆 switch:页签内容是**按片交付**的,
- *  每一片只往这里加一行,不必碰渲染逻辑。 */
+ *  做成一个解析器而不是在 TabBody 里堆 switch：页签内容是**按片交付**的,
+ *  每一片只往这里加一行，不必碰渲染逻辑。 */
 function subTabContent(
   tab: PlatformTabSpec,
   subId: string,
@@ -224,7 +226,7 @@ function subTabContent(
 ): ReactNode | undefined {
   switch (tab.value) {
     case "model":
-      // 渠道保障:UI 蓝图态。布局与文案照原型,数据一行都没有——
+      // 渠道保障：UI 蓝图态。布局与文案照原型，数据一行都没有——
       // 交接文档 §9.7 明写「真实探针不能提前冒充已上线」
       return assuranceSubTab(subId);
     case "finance":
@@ -255,8 +257,8 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       // 要么列对不上，要么长出一堆各平台各半空的列。
       //
       // 原型把 v2 的「渠道/资源」拆成了「渠道管理」(一行=一个账号/一把 Key)与
-      // 「上游管理」（按上游供应商汇总）两格。现有面板是前者，原样挂在这里；
-      // 收窄语义与单渠道毛利核算属于第 5 片（依赖 XM-0037 成本线）
+      // 「上游管理」（按上游账号汇总）两格。这里是前者，按交接文档 §9.5 收窄；
+      // 后者见下面的 suppliers 格
       switch (spec.serviceType) {
         case "sub2api":
           return <ChannelsPanel />;
@@ -265,9 +267,23 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
         default:
           return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
       }
+    case "suppliers":
+      // 上游管理 = XM-0037a 成本登记簿的 UI（交接文档 §9.6）。
+      //
+      // 必须过 platformHasUpstreamRegistry：服务器那一格的 value 也是
+      // `suppliers`，但它是「供应商与采购」（机器与机房）。不判一下就渲染
+      // 成本登记簿，会得到一个看起来完全正常、内容却完全错位的页面。
+      //
+      // 不匹配时**落回蓝图那条路**而不是直接给占位：服务器的这一格由
+      // UI 第 6 片画了蓝图，在这里截胡会把它悄悄下线（`default` 分支才认蓝图）
+      return platformHasUpstreamRegistry(spec.serviceType) ? (
+        <UpstreamAccountsPanel platform={spec.serviceType} />
+      ) : (
+        fallbackTabContent(entry, tab)
+      );
     case "users":
-      // 逐用户资金明细。邮箱在**连接器**层就打了码,平台不持有明文;
-      // 逐用户充值/消费在 v1 上游契约里给不出,面板里逐格说明(原型 warnbar)
+      // 逐用户资金明细。邮箱在**连接器**层就打了码，平台不持有明文;
+      // 逐用户充值/消费在 v1 上游契约里给不出，面板里逐格说明（原型 warnbar）
       return platformHasUsers(spec.serviceType) ? (
         <PlatformUsersPanel platform={spec.serviceType} />
       ) : (
@@ -278,14 +294,23 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       // 只读网关——正文永不落平台库。脱敏、`request.content.read` 与查看审计
       // 属于第 8 片
       return <RequestsPanel platform={spec.serviceType} />;
-    default: {
-      // 有蓝图规格的平台页签走蓝图（UI 第 6 片，目前只有服务器的 7 格）：
-      // 页签结构与列头照原型，数字一个不显示。没有的仍是那句「尚未实现」。
-      const blueprint = blueprintTabForPlatform(spec.serviceType, tab.value);
-      if (blueprint) return <BlueprintTabView tab={blueprint} />;
-      return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
-    }
+    default:
+      return fallbackTabContent(entry, tab);
   }
+}
+
+/** 没有专属面板的页签落到哪里。
+ *
+ *  有蓝图规格的走蓝图（UI 第 6 片，目前只有服务器的 7 格）：页签结构与列头
+ *  照原型，数字一个不显示。没有的才是那句「尚未实现」。
+ *
+ *  抽成函数而不是只留在 `default` 分支里：`suppliers` 这类**一个 value 两种
+ *  语义**的页签必须先判平台、判不中再回到这条路——写在 default 里的话，
+ *  任何一个 case 拦下它就等于把蓝图悄悄下线了。 */
+function fallbackTabContent(entry: PlatformEntry, tab: PlatformTabSpec): ReactNode {
+  const blueprint = blueprintTabForPlatform(entry.spec.serviceType, tab.value);
+  if (blueprint) return <BlueprintTabView tab={blueprint} />;
+  return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
 }
 
 /** 概览页签：本平台的指标卡。

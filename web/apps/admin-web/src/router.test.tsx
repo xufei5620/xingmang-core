@@ -538,8 +538,11 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     expect(init.headers).toMatchObject({
       "X-Dev-Principal-ID": "dev-operator",
       "X-Dev-Principal-Type": "HUMAN",
+      // 逐字断言而不是「包含 finance.read」：这一行是开发身份到底带了哪些权限的
+      // 唯一现场，多带一个 scope 要在 diff 里看得见——本地随手加一个用完忘了删,
+      // 正是「在我机器上好好的」那类问题的来源
       "X-Dev-Scopes":
-        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read,platform.users.read",
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read,platform.users.read,finance.upstream_account.manage,finance.recharge_ratio.manage,finance.token_map.manage",
     });
   });
 
@@ -1441,6 +1444,22 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
       "监控与告警",
       "连接与凭据",
     ]);
+  });
+
+  it("`suppliers` 在 Sub2API 上是成本登记簿", async () => {
+    renderRoute("/platforms/sub2api?tab=suppliers");
+    expect(await screen.findByText(/由平台手工登记不同上游/)).not.toBeNull();
+  });
+
+  it("`suppliers` 在服务器上仍是采购蓝图——**同一个 value，两种语义**", async () => {
+    // 上游管理那一格若不判平台就直接接管，服务器的「供应商与采购」蓝图
+    // 会被悄悄换掉：页面看起来完全正常，只是内容没了
+    renderRoute("/platforms/server?tab=suppliers");
+    // 断言蓝图的**内容**而不是页签按钮：按钮无论如何都在，被换掉的是面板里的东西
+    expect(await screen.findByText(/供应商、购买账号与采购记录由平台自己登记/)).not.toBeNull();
+    expect(screen.getAllByText("购买账号").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/由平台手工登记不同上游/)).toBeNull();
+    expect(screen.queryByText("「供应商与采购」尚未实现")).toBeNull();
   });
 
   it("CPA 五格，「渠道保障」按原型字面排在第 4 格", async () => {

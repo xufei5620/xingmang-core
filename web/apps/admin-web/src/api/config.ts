@@ -49,6 +49,15 @@ export const DEFAULT_SCOPES = [
   // XM-0046 用户管理。**不复用 ops.read**：那看到的是聚合数字，
   // 这是逐用户的资金明细（internal/platform/platformusers/permissions.go）。
   "platform.users.read",
+  // XM-0048 上游管理（成本登记簿）的写路径。读路径复用上面 XM-0037d 已加的
+  // finance.read —— 登记簿与看板供数是同一个 ScopeRead。
+  //
+  // 三个写权限**刻意分开**，依据是爆炸半径而不是整齐：改倍率直接决定
+  // 毛利报表长什么样，写错令牌映射会把成本记到别的渠道上（两条渠道一个虚高
+  // 一个虚低、合计却完全正确，是最难从总数上看出来的一类错误）。
+  "finance.upstream_account.manage",
+  "finance.recharge_ratio.manage",
+  "finance.token_map.manage",
 ];
 
 function parseScopes(raw: string | undefined): string[] {
