@@ -87,11 +87,30 @@ type Config struct {
 	NewAPISyncRunID string
 	// NewAPIMode 选择 fake / real 客户端；空值按 fake 处理。
 	//
-	// real 在 XM-0038 之前必然失败（真实客户端还没写），失败会作为
-	// not_supported 的观测落库而不是让进程起不来——见 NewNewAPIClientFactory。
+	// real 在配置不全时失败，失败会作为 not_supported 的观测落库而不是让
+	// 进程起不来——见 NewNewAPIClientFactory。
 	NewAPIMode NewAPIMode
 	// NewAPIInstanceID 是观测的 Source，默认 DefaultNewAPIInstanceID。
 	NewAPIInstanceID string
+	// NewAPICredentialRef 是只读凭据的引用（secret://<scope>/<name>）。
+	// 本层只校验引用的**形状**，不解析出任何明文；明文由 NewAPISecrets
+	// 在客户端构造 Authorization 头的那一瞬才出现（ADR-014、宪法 7 条）。
+	NewAPICredentialRef string
+	// NewAPIEndpoint 是上游只读端点（必须 https）。real 模式必填。
+	NewAPIEndpoint string
+	// NewAPITargetAllowlist 是允许连接的主机精确清单（ADR-004）。real 模式必填。
+	// 留空不是「放行一切」而是「一个请求都发不出去」——护栏 fail closed。
+	NewAPITargetAllowlist []string
+	// NewAPIUserID 是旧版本 NewAPI 需要的 New-Api-User 头（管理员用户 id）。
+	// **可选**，不是凭据；新版本上游会忽略它。见 NewAPIRealConfig.UserID。
+	NewAPIUserID string
+	// NewAPIRequestTimeout 是单次上游 HTTP 请求的超时，
+	// 零值回落到 DefaultNewAPIRequestTimeout。
+	NewAPIRequestTimeout time.Duration
+	// NewAPISecrets 解析 NewAPICredentialRef。装配在进程入口（cmd/），
+	// 而不是在这里现造：Provider 的选择（env/SOPS/Vault）是部署决定，
+	// 不是任务决定（ADR-014）。fake 模式用不到它。
+	NewAPISecrets secrets.SecretProvider
 
 	// AlertEvaluateEnabled 决定是否注册告警评估任务（XM-0033）。
 	//
@@ -140,15 +159,16 @@ func DefaultConfig() Config {
 		Sub2APIMode:           Sub2APIModeFake,
 		Sub2APIInstanceID:     DefaultSub2APIInstanceID,
 		Sub2APIRequestTimeout: DefaultSub2APIRequestTimeout,
-		// NewAPI 同理（XM-0035）：默认就采、默认走 fake，因为真实只读客户端
-		// 还没写（XM-0038）。看板要的是「持续更新的新鲜度数据」——
-		// 一条默认关闭的采集链路会让 NewAPI 平台页一直空着，而空着与
-		// 「采集失败」在页面上长得一模一样。
+		// NewAPI 同理（XM-0035）：默认就采、默认走 fake，因为真实只读凭据
+		// 还没就绪（XM-0038 交付了客户端，凭据由用户自配）。看板要的是
+		// 「持续更新的新鲜度数据」——一条默认关闭的采集链路会让 NewAPI
+		// 平台页一直空着，而空着与「采集失败」在页面上长得一模一样。
 		NewAPISyncEnabled:    true,
 		NewAPISyncInterval:   DefaultNewAPISyncInterval,
 		NewAPISyncRunOnStart: true,
 		NewAPIMode:           NewAPIModeFake,
 		NewAPIInstanceID:     DefaultNewAPIInstanceID,
+		NewAPIRequestTimeout: DefaultNewAPIRequestTimeout,
 		// 告警默认就跑：Foundation-A 的退出条件之一是「能触发一条真实告警」
 		// （规格 §22.2），而一个默认关闭的告警系统在需要它的那天多半还是关的。
 		// 没配投递渠道时它照常评估落库，只是每轮打一条 warn 说没投出去。
@@ -185,6 +205,10 @@ func (c Config) normalized() Config {
 	}
 	if strings.TrimSpace(c.NewAPIInstanceID) == "" {
 		c.NewAPIInstanceID = defaults.NewAPIInstanceID
+	}
+	if c.NewAPIRequestTimeout <= 0 {
+		// 漏填超时回落到默认值，绝不能变成「没有超时」（规格 §18.1-4）
+		c.NewAPIRequestTimeout = defaults.NewAPIRequestTimeout
 	}
 	if c.AlertEvaluateInterval == 0 {
 		c.AlertEvaluateInterval = defaults.AlertEvaluateInterval
@@ -295,16 +319,21 @@ func (c Config) validate() error {
 		// 为什么在启动时拒绝而不是运行时降级：默认值（DefaultConfig）是
 		// NewAPIMode=fake，所以「忘了配」的结果恰好是最危险的那一种。
 		//
-		// ⚠️ NewAPI 与 Sub2API 在这里有一处实际差别：Sub2API 可以改配 real
-		// 顶上，NewAPI 的 real 在 XM-0038 之前**根本不存在**。所以生产环境
-		// 现阶段唯一走得通的选择是显式关掉这条采集
-		// （XM_NEWAPI_SYNC_ENABLED=false）——错误信息必须把这一点说清楚，
-		// 否则运维会按 Sub2API 的经验去配一个还不存在的 real 模式，
-		// 然后收获满屏 not_supported。
+		// XM-0038 之后 real 模式真的走得通了，所以这里的出路与 Sub2API 一致：
+		// 配 real（见 docs/runbooks/SWITCH-NEWAPI-REAL.md），或者显式关掉
+		// 这条采集。之前那条「real 根本不存在、生产只能关同步」的说法已经
+		// 过时，留着会让运维照旧去关同步，白白丢掉一条能用的采集链路。
 		return fmt.Errorf(
-			"环境 production 不允许 newapi fake 模式：Fake 会把演示数据写成生产运营读数。" +
-				"NewAPI 的真实只读客户端尚未实现（XM-0038），因此现阶段生产只能显式关闭同步：" +
-				"XM_NEWAPI_SYNC_ENABLED=false")
+			"环境 production 不允许 newapi fake 模式：Fake 会把演示数据写成生产运营读数，" +
+				"请配置 XM_NEWAPI_MODE=real（见 docs/runbooks/SWITCH-NEWAPI-REAL.md），" +
+				"或者显式关闭同步 XM_NEWAPI_SYNC_ENABLED=false")
+	}
+	if ref := strings.TrimSpace(c.NewAPICredentialRef); ref != "" {
+		// 只校验引用的**形状**，不解析出任何明文（ADR-014）。拼错的引用在
+		// 进程启动时就该炸，而不是等到第一轮同步才发现。
+		if _, err := secrets.ParseCredentialRef(ref); err != nil {
+			return fmt.Errorf("newapi credential ref: %w", err)
+		}
 	}
 	if c.AlertEvaluateEnabled && c.AlertEvaluateInterval < time.Second {
 		return fmt.Errorf("alert evaluate interval %s is below River's one-second minimum", c.AlertEvaluateInterval)
@@ -394,7 +423,16 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			InstanceID:  cfg.NewAPIInstanceID,
 			Mode:        cfg.NewAPIMode,
 			Store:       ops.NewStore(pool),
-			NewClient:   NewNewAPIClientFactory(cfg.NewAPIMode),
+			NewClient: NewNewAPIClientFactory(cfg.NewAPIMode, NewAPIRealConfig{
+				Endpoint:        cfg.NewAPIEndpoint,
+				TargetAllowlist: cfg.NewAPITargetAllowlist,
+				CredentialRef:   cfg.NewAPICredentialRef,
+				UserID:          cfg.NewAPIUserID,
+				Environment:     cfg.Environment,
+				InstanceID:      cfg.NewAPIInstanceID,
+				Timeout:         cfg.NewAPIRequestTimeout,
+				Secrets:         cfg.NewAPISecrets,
+			}),
 		}))
 		periodic = append(periodic, river.NewPeriodicJob(
 			river.PeriodicInterval(cfg.NewAPISyncInterval),

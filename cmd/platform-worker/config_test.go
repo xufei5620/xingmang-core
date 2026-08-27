@@ -195,3 +195,97 @@ func TestSub2APISecretsFromEnv(t *testing.T) {
 		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
 	}
 }
+
+// TestConfigFromEnvReadsNewAPIConnection：XM-0038 的连接配置。
+//
+// 与 Sub2API 同一条纪律：缺配置**不在启动时报错**——一个配错的采集通道不该
+// 把心跳和别的任务一起拖垮，缺什么会在每轮同步写成一条说得清的 SyncFailed
+// 观测（规格 §9.1）。
+func TestConfigFromEnvReadsNewAPIConnection(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                "staging",
+		"XM_NEWAPI_MODE":             "real",
+		"XM_NEWAPI_ENDPOINT":         "https://xm.solov.cc",
+		"XM_NEWAPI_TARGET_ALLOWLIST": " xm.solov.cc , XM.Backup.Solov.CC ,, ",
+		"XM_NEWAPI_CREDENTIAL_REF":   "secret://newapi/readonly-token",
+		"XM_NEWAPI_USER_ID":          " 1 ",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NewAPIMode != jobs.NewAPIModeReal {
+		t.Fatalf("mode = %q, want real", cfg.NewAPIMode)
+	}
+	if cfg.NewAPIEndpoint != "https://xm.solov.cc" {
+		t.Fatalf("endpoint = %q", cfg.NewAPIEndpoint)
+	}
+	if cfg.NewAPICredentialRef != "secret://newapi/readonly-token" {
+		t.Fatalf("credential ref = %q", cfg.NewAPICredentialRef)
+	}
+	// user id 是可选的普通配置，不是凭据——去空白即可。
+	if cfg.NewAPIUserID != "1" {
+		t.Fatalf("user id = %q, want 1", cfg.NewAPIUserID)
+	}
+	// 拆分只做去空白与转小写，不做补全：allowlist 的全部价值就在于
+	// 它是人显式写下的那一份。
+	want := []string{"xm.solov.cc", "xm.backup.solov.cc"}
+	if len(cfg.NewAPITargetAllowlist) != len(want) {
+		t.Fatalf("allowlist = %v, want %v", cfg.NewAPITargetAllowlist, want)
+	}
+	for i := range want {
+		if cfg.NewAPITargetAllowlist[i] != want[i] {
+			t.Fatalf("allowlist = %v, want %v", cfg.NewAPITargetAllowlist, want)
+		}
+	}
+
+	// 一项都没配时也不报错：mode 还可能是 fake
+	bare := map[string]string{"ENVIRONMENT": "staging", "XM_NEWAPI_MODE": "real"}
+	cfg, err = configFromEnv(func(key string) string { return bare[key] })
+	if err != nil {
+		t.Fatalf("缺连接配置不该让 worker 起不来: %v", err)
+	}
+	if cfg.NewAPIEndpoint != "" || len(cfg.NewAPITargetAllowlist) != 0 || cfg.NewAPIUserID != "" {
+		t.Fatalf("没配的东西不该被凭空造出来: %+v", cfg)
+	}
+}
+
+func TestNewAPISecretsFromEnv(t *testing.T) {
+	values := map[string]string{"XM_NEWAPI_TOKEN": "placeholder-placeholder"}
+	getenv := func(key string) string { return values[key] }
+
+	// 没配引用 = 没有 Provider，但**不是错误**：fake 模式根本用不到它。
+	provider, err := newapiSecretsFromEnv(getenv, nil, "staging", "")
+	if provider != nil || err != nil {
+		t.Fatalf("没配引用时应返回 (nil, nil), got %v %v", provider, err)
+	}
+
+	// 引用拼错了要在启动时就炸：这是配置错误，等到采集那天才发现更贵
+	if _, err := newapiSecretsFromEnv(getenv, nil, "staging", "not-a-ref"); err == nil {
+		t.Fatal("非法 CredentialRef 必须被拒")
+	}
+
+	provider, err = newapiSecretsFromEnv(getenv, nil, "staging", "secret://newapi/readonly-token")
+	if err != nil || provider == nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	ref := secrets.MustCredentialRef("secret://newapi/readonly-token")
+	value, err := provider.Resolve(t.Context(), ref, "test")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if value.Reveal() != "placeholder-placeholder" {
+		t.Fatal("解析出的值不对")
+	}
+	// 打印/日志一律脱敏（宪法 7 条）
+	if got := fmt.Sprintf("%v/%s", value, value); strings.Contains(got, "placeholder") {
+		t.Fatalf("SecretValue 不该被打印出明文: %s", got)
+	}
+
+	// 两条采集链路各用各的登记表：NewAPI 的 Provider 绝不能解析出
+	// Sub2API 的引用，否则一次凭据轮换会静默影响到另一条链路。
+	other := secrets.MustCredentialRef("secret://sub2api/readonly-token")
+	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
+		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}
