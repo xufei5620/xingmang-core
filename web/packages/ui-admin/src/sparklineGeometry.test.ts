@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildSparkline,
   DEFAULT_SPARKLINE_BOX,
+  describeSparkline,
   MIN_TREND_POINTS,
   plottableCount,
+  sparklineCaveats,
+  summarizeSparkline,
   type SparkSample,
 } from "./sparklineGeometry";
 
@@ -15,6 +18,10 @@ function ok(at: number, value: number): SparkSample {
 
 function failed(at: number, value: number | null): SparkSample {
   return { at, value, failed: true };
+}
+
+function partial(at: number, value: number): SparkSample {
+  return { at, value, failed: false, partial: true };
 }
 
 describe("plottableCount：只有成功样本能进折线", () => {
@@ -115,6 +122,67 @@ describe("buildSparkline：失败样本断开折线", () => {
   it("lastPoint 指向最后一个成功样本，而不是最后一个样本", () => {
     const g = buildSparkline([ok(0, 0), ok(50, 10), failed(100, 10)], BOX);
     expect(g?.lastPoint).toEqual({ x: 50, y: 0 });
+  });
+});
+
+describe("buildSparkline：部分数据走独立线型（Codex #5）", () => {
+  it("没有部分数据时 partialSegments 为空，实线路径与从前逐字一致", () => {
+    const g = buildSparkline([ok(0, 0), ok(50, 5), ok(100, 10)], BOX);
+    expect(g?.segments).toEqual(["0,20 50,10 100,0"]);
+    expect(g?.partialSegments).toEqual([]);
+    expect(g?.partialPoints).toEqual([]);
+  });
+
+  it("触及部分数据点的那一小段进虚线，其余仍是实线", () => {
+    const g = buildSparkline([ok(0, 0), ok(50, 5), partial(100, 10)], BOX);
+    // 0→50 两端都完整，走实线；50→100 有一端是部分数据，走虚线
+    expect(g?.segments).toEqual(["0,20 50,10"]);
+    expect(g?.partialSegments).toEqual(["50,10 100,0"]);
+    expect(g?.partialPoints).toEqual([{ x: 100, y: 0 }]);
+  });
+
+  it("整段都是部分数据时不留实线——不能有半点像完整读数", () => {
+    const g = buildSparkline([partial(0, 0), partial(50, 5), partial(100, 10)], BOX);
+    expect(g?.segments).toEqual([]);
+    expect(g?.partialSegments).toEqual(["0,20 50,10 100,0"]);
+  });
+
+  it("失败断开与部分数据虚线互不干扰", () => {
+    const g = buildSparkline([ok(0, 0), failed(25, 0), partial(50, 5), ok(100, 10)], BOX);
+    // 25 处断开：左边只剩一个孤立完整点，右边是 partial→ok 的一段虚线
+    expect(g?.segments).toEqual(["0,20 0,20"]);
+    expect(g?.partialSegments).toEqual(["50,10 100,0"]);
+    expect(g?.failedPoints).toEqual([{ x: 25, y: 20 }]);
+  });
+});
+
+describe("文字摘要：图上的信息必须也能被读出来（Codex #9）", () => {
+  it("方向按首末可画样本判定，样本不足时不硬凑一个「平稳」", () => {
+    expect(summarizeSparkline([ok(0, 1), ok(1, 5)]).direction).toBe("up");
+    expect(summarizeSparkline([ok(0, 5), ok(1, 1)]).direction).toBe("down");
+    expect(summarizeSparkline([ok(0, 5), ok(1, 5)]).direction).toBe("flat");
+    expect(summarizeSparkline([ok(0, 5)]).direction).toBe("unknown");
+    expect(summarizeSparkline([]).direction).toBe("unknown");
+  });
+
+  it("统计失败与部分数据的个数", () => {
+    const s = summarizeSparkline([ok(0, 1), failed(1, 1), partial(2, 2), partial(3, 3)]);
+    expect(s).toMatchObject({ total: 4, plottable: 3, failed: 1, partial: 2 });
+  });
+
+  it("aria 摘要带方向、总点数、失败数与部分数据数", () => {
+    const text = describeSparkline([ok(0, 1), failed(1, 1), partial(2, 5)]);
+    expect(text).toContain("整体上升");
+    expect(text).toContain("共 3 个采样点");
+    expect(text).toContain("1 次同步失败");
+    expect(text).toContain("含 1 个部分数据点");
+  });
+
+  it("可见提示只在真有失败/部分数据时出现，且明说「含 N 个部分数据点」", () => {
+    expect(sparklineCaveats([ok(0, 1), ok(1, 2)])).toBe("");
+    const text = sparklineCaveats([ok(0, 1), partial(1, 2), partial(2, 3), failed(3, 3)]);
+    expect(text).toContain("含 2 个部分数据点");
+    expect(text).toContain("1 次同步失败");
   });
 });
 

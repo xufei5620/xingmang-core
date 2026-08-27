@@ -58,13 +58,55 @@ Foundation-A 期间 Principal 由 `NewDevHeaderResolver` 从 `X-Dev-Scopes` 头�
 （该 Resolver 在 `environment == "production"` 时构造即失败）。XM-0008 接入 Keycloak
 后换成从 OIDC 令牌解析，本文件的权限表不变。
 
-## 未关闭：staging 的 scope 仍是调用方自授
+## XM-0008 后：scope 从哪儿来
+
+权限表**一行没改**——变的只是 Principal.Scopes 的来源。
+
+`XM_AUTH_MODE` 选择身份解析器（切换步骤见 `AUTH-SWITCH.md`）：
+
+| 模式 | scope 来源 | 允许的环境 |
+|---|---|---|
+| `dev-header` | `X-Dev-Scopes` 请求头 | development / staging |
+| `oidc` | `realm_access.roles` 经 **RoleScopeMap** 翻译 | 全部（生产只能用它） |
+
+`oidc` 模式下这条链是：
+
+```text
+Keycloak Realm 角色（staff）
+  → RoleScopeMap（平台配置，不在 Keycloak 里）
+    → Principal.Scopes（registry.read / ops.read / …）
+      → 路由上的 RequireScope 与 Action 内核判定（本文件上面那些表）
+```
+
+三点必须清楚：
+
+- **RoleScopeMap 是授权策略，不是实现细节。** 它决定「登录进来的员工默认能看到
+  什么」，因此 `oidcauth.DefaultRoleScopeMap` 只是代码里的默认值，**上生产前
+  必须人工审定**并落到 `XM_OIDC_ROLE_SCOPES`。默认表刻意保守：`staff` 只翻译成
+  `registry.read` + `ops.read`，**不含 `audit.read`**——理由就是本文件上面那段
+  「audit.read 又比 ops.read 高一档」。CR-0001 里 `staff` 是唯一的 Realm 角色，
+  把 audit.read 塞进去等于每个员工默认看见全平台操作明细；
+- **令牌里出现细粒度权限 = 配置漂移。** `registry.*` / `ops.*` / `audit.*` /
+  `platform.*` / `action.*` / `connector.*` 无论出现在 `realm_access.roles`、
+  OAuth 的 `scope` 还是 `resource_access` 里，平台一律**忽略**并记 WARN
+  （`error_code=keycloak_scope_drift`）。这是 ADR-016 的探针：平台侧忽略只是
+  止血，修复要回到 Realm 那边走变更单；
+- **`Environment` 仍然只来自服务配置。** 令牌里写什么都不作数（规格 §20.5）。
+  上面「环境范围」一节的规则因此完全不受影响。
+
+## 未关闭：`dev-header` 模式下 scope 仍是调用方自授
 
 Codex 冷审多次判定 P1（PR #47 第 1 条、PR #48 第 5 条、PR #43 head `ba8e275` 第 1 条
-与 `0a0642c` 第 1 条）：**上面这张权限表在 staging 不构成鉴权**。`RequireScope` 校验
-的是调用方自己在 `X-Dev-Scopes` 里填写的字符串，而 `deploy/nginx/launch.conf` 原样
-透传这些头；任何能到达 staging 的人都能自称 `HUMAN` 并带上 `audit.read`。
+与 `0a0642c` 第 1 条）：**上面那张权限表在 `dev-header` 模式下不构成鉴权**。
+`RequireScope` 校验的是调用方自己在 `X-Dev-Scopes` 里填写的字符串，而
+`deploy/nginx/launch.conf` 原样透传这些头；任何能到达该栈的人都能自称 `HUMAN`
+并带上 `audit.read`。
 
-XM-0031 **没有**修这条——它属于 XM-0008/OIDC（由另一条工作线负责），也需要受信反代
-边界与限流一起落地。在那之前，这些端点不得在可对外到达的环境启用。本节存在的意义
-是不让上面那张表被误读成「已经有鉴权了」。
+XM-0008 把**能力**做好了（`XM_AUTH_MODE=oidc` 时 scope 来自 Realm 角色经
+RoleScopeMap 翻译，生产更是硬性只能用 oidc）。但这条 P1 要到**部署实际切到 oidc**
+那天才算关闭：`deploy/compose/launch.yaml:118-122` 明确写着 staging 仍走
+`dev-header`，`XM_AUTH_MODE` / `XM_OIDC_*` 目前没有在那里透传。
+
+XM-0031 没有动这条——它属于 XM-0008/CR-0001 的执行侧，还需要受信反代边界与限流
+一起落地。在那之前，这些端点不得在可对外到达的环境启用。本节存在的意义是不让上面
+那张表被误读成「已经有鉴权了」。

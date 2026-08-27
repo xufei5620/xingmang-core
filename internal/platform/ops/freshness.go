@@ -110,7 +110,7 @@ type Freshness struct {
 // 事实，后者必须可见。第一次同步失败时任务写的是 SyncFailed +
 // last_error_code，但没有任何历史值可留，于是 ObservedAt / LastSuccess 都是
 // nil；旧的优先级会在检查 failed 之前先返回 uninitialized，把一个**正在发生
-// 的故障**（real 模式未实现、凭据错误、上游拒绝）显示成中性的「尚未接入」。
+// 的故障**（凭据错误、连接配置缺项、上游拒绝）显示成中性的「尚未接入」。
 // 前端把 uninitialized 定为 neutral 徽章，于是错误码只剩 hover title 能看见。
 //
 // 判据是 LastErrorCode 非空（等价于 Status==SyncFailed，见
@@ -181,9 +181,9 @@ func ValidMetricKey(key string) bool {
 // 无从区分「这个指标真的没有数据」与「这个指标根本不存在」——后者是调用错误，
 // 静默返回空正是宪法 12 条禁止的「用沉默撒谎」。
 //
-// 值来自 `connectors/sub2api` 的 Metric* 常量，但**不 import 它**：
-// connectors/sub2api 依赖本包（ToObservations 返回 ops.Observation），反向
-// import 会成环。字面量重复的代价由 ops_test 里的一致性测试兜住——那个测试
+// 值来自各 connector 的 Metric* 常量（`connectors/sub2api`、`connectors/invoice`），
+// 但**不 import 它们**：那些包依赖本包（ToObservations 返回 ops.Observation），
+// 反向 import 会成环。字面量重复的代价由 ops_test 里的一致性测试兜住——那个测试
 // 在外部测试包里，可以同时看见两边，任何一边加减指标都会当场失败。
 //
 // 扩展口是 RegisterMetricKey：将来 NewAPI / CPA 等采集模块在自己的 init 里
@@ -198,6 +198,8 @@ var registeredMetrics = struct {
 		"sub2api.revenue.daily":    {},
 		"sub2api.cost.daily":       {},
 		"sub2api.channels.balance": {},
+		"invoice.requests.daily":   {},
+		"invoice.amount.daily":     {},
 	},
 }
 

@@ -1,6 +1,7 @@
 # CR-0002:平台 ↔ 开票系统只读对接需求
 
-- 状态:待 Codex 线响应(填写「Codex 侧待填」各节)
+- 状态:**待开票线确认**(开票线已在 #49 两轮反馈门禁,本文档已按其修订;
+  确认前本 CR 不构成跨线批准,XM-0028 契约保持草案)
 - 提出方:平台线(Claude)
 - 承接方:开票系统线(Win Codex)
 - 依据:ADR-018(开票/平台通道隔离,四道只读闸)、ADR-004(Connector 隔离)、
@@ -77,6 +78,63 @@ Connector 骨架、新鲜度模型、契约测试套件(见 connectors/sub2api/)
       能取到带水位的样例数据(staging 层级暂不要求,生产再切 bearer);
 - [ ] 平台侧完成 connectors/invoice 契约 + Fake + 契约测试(XM-0028,不被阻塞,先行);
 - [ ] bearer 凭证落地后平台完成真实客户端(XM-0029)。
+
+## 明确不变(开票线要求,平台承诺)
+
+- 平台**永不**导入/复用开票系统 Bridge V4 的角色、函数、Agent、凭据;
+- 平台**不复制、不推导**开票资格算法;daily-summary 只聚合开票系统已确定的请求事实;
+- 「失败数/待处理数」的状态集合口径由**开票系统冻结**,平台不自行解释 9 个状态;
+- 现有 /api/v1/ 与 admin 路由的鉴权行为不因本 CR 改变。
+
+## 环境映射(诚实原则)
+
+开票系统现仅有 development/production 两级。平台 staging 读取 invoice development 时:
+- 响应与看板必须保留真实 `source_environment=development`,并带醒目非生产标识;
+- **不得**把 invoice development 冒充 staging;production 权限绝不从任何环境继承。
+是否新增隔离的 integration 环境由开票线决定,本 CR 不预设。
+
+## dev mock 的定位
+
+`AUTH_MODE=mock` 联调仅为**开发契约 smoke**(验证 DTO/分页/水位形状),
+**不构成只读安全验收**。staging/只读凭证验收保持未完成状态;
+production bearer 完成前不得宣称 ADR-018 四闸通过。
+
+## Wire 契约补充(采纳开票线意见)
+
+- 金额:HTTP JSON 中 `amount_minor` 以**十进制字符串**编码 int64(防经
+  map/float64 在 >2^53 丢精度),平台解码使用 UseNumber 并做范围校验;
+  同时返回 ISO 4217 currency;多币种必须分组,禁止跨币种求和;
+- 水位:`watermark` 的作用域、单调性、与分页快照的一致性、source 迟到/失败时
+  如何标 `is_partial`——**语义由开票线冻结后写入本节**,平台不自行推导
+  (min(watermark_at) 与 max(updated_at) 不视为天然等价的完整性水位);
+- 公共包络:environment、来源 observed_at(请求时刻不得冒充)、is_partial、
+  contract_version;
+- 版本:`GET /readonly/v1/version` 返回 service_version / contract_version /
+  capabilities,未知或不兼容版本平台侧 fail closed;**不改动既有 /healthz 响应**;
+- 错误:安全 error_code,不返回供应商原文。
+
+## 服务端只读证明(ADR-018 两闸回补)
+
+- /readonly/v1/ 数据访问使用只读 DB 角色或显式 read-only transaction(等价的
+  库层不可写证明);
+- 运行身份仅授予手写投影所需 SELECT;启动或验收测试查询实际 grants,
+  证明写 SQL、admin handler、导出与原业务 API 均不可达;
+- 平台 token 对全部写/管理/导出路径在 handler 之前被拒,并有测试。
+
+## Keycloak 变更(独立 CR,占位 CR-0003)
+
+`client_credentials + invoice-readonly` 触碰身份基础设施,须另立可执行变更单:
+Realm(不动被 ADR-016 冻结的 solov 用户 Realm;若用 solov-staff 或第二 issuer
+须显式列明并经开票线确认)、issuer、client_id、audience、azp、scope/role 映射、
+token TTL、轮换/吊销、回滚方案、执行者。**本 CR 不含任何 Keycloak 执行内容。**
+
+## 职责边界
+
+- 本 CR 文档的修订由**平台线**提交,开票线(Win Codex)在 Issue #49 复核确认,
+  不编辑平台仓库;
+- /readonly/v1/ 的实施在开票系统仓库的独立任务中进行;
+- 平台 connectors/invoice 归 XM-0028/0029,且 XM-0028 在双方确认前为**草案**,
+  其 Fake/契约测试字段不构成冻结。
 
 ## 平台侧任务链
 

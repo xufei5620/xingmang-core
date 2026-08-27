@@ -53,7 +53,7 @@ export function ServicesPage() {
     <section>
       <PageHeader
         title="服务清单"
-        description={`采集时间超过 ${formatDuration(SERVICE_STALENESS_THRESHOLD_SECONDS)} 记为数据延迟（阈值由前端设定，registry 未提供）。`}
+        description={`采集时间超过 ${formatDuration(SERVICE_STALENESS_THRESHOLD_SECONDS)} 记为数据延迟（阈值由前端设定，registry 未提供）。这是一个对所有服务一刀切的临时值，各服务的真实阈值待后端契约提供（XM-0017）。`}
         onRefresh={() => void query.refetch()}
         refreshing={query.isFetching}
         lastRefreshedAt={query.dataUpdatedAt || undefined}
@@ -61,7 +61,10 @@ export function ServicesPage() {
           <RegisterServiceDialog
             environment={environment}
             onRegistered={(runId) =>
-              afterWrite(`已登记，run_id=${runId}，可在审计页查看这条事件`)
+              // 不承诺「一定能在审计页看到」：业务写、ActionRun、审计追加三段不是
+              // 原子的，审计还是 fail-open（#38/#40 未关闭），写成功而审计没落库
+              // 是可能发生的。UI 不能把一个尚未成立的后端保证说成事实（Codex #10）
+              afterWrite(`已登记，run_id=${runId}；审计事件通常几秒内出现在审计页`)
             }
           />
         }
@@ -161,7 +164,7 @@ function ServicesTable({
                   service={s}
                   onObserved={(runId) =>
                     onObserved(
-                      `已上报观测，run_id=${runId}，可在审计页查看这条事件`,
+                      `已上报观测，run_id=${runId}；审计事件通常几秒内出现在审计页`,
                     )
                   }
                 />

@@ -85,6 +85,53 @@ describe("validateServiceForm：地址协议（对齐 registry.Service.Validate�
   });
 });
 
+describe("validateServiceForm：地址里的凭据形态（Codex #7，与后端 XM-0031 并行）", () => {
+  it("userinfo（user:pass@host）被拒——它会随审计摘要一起被记录并展示", () => {
+    const errors = validateServiceForm(form({ endpoint: "https://u:p@sub2api.example.com" }));
+    expect(errors.endpoint).toContain("用户名/密码");
+  });
+
+  it("只有用户名没有密码同样被拒", () => {
+    expect(
+      validateServiceForm(form({ endpoint: "https://admin@sub2api.example.com" })).endpoint,
+    ).toBeDefined();
+  });
+
+  it("查询参数名含 token/key/secret/password 一律被拒（大小写不敏感）", () => {
+    for (const bad of [
+      "https://x.example.com/?token=abc",
+      "https://x.example.com/?api_key=abc",
+      "https://x.example.com/?Client-Secret=abc",
+      "https://x.example.com/?PASSWORD=abc",
+    ]) {
+      expect(validateServiceForm(form({ endpoint: bad })).endpoint).toBeDefined();
+    }
+  });
+
+  it("普通查询参数不误伤", () => {
+    expect(
+      validateServiceForm(form({ endpoint: "https://x.example.com/?tenant=abc&page=2" })).endpoint,
+    ).toBeUndefined();
+  });
+
+  it("内网地址与原生后台入口走同一条规则", () => {
+    expect(
+      validateServiceForm(form({ internal_endpoint: "http://u:p@10.0.0.1" })).internal_endpoint,
+    ).toBeDefined();
+    expect(
+      validateServiceForm(form({ native_console_url: "https://c.example.com/?secret=1" }))
+        .native_console_url,
+    ).toBeDefined();
+  });
+
+  it("协议错误优先报协议：一个字段一次只说最该先修的那条", () => {
+    // http + token 同时有问题时，先说 https —— 两条一起报会让人不知道从哪改起
+    expect(validateServiceForm(form({ endpoint: "http://x.example.com/?token=1" })).endpoint).toContain(
+      "https://",
+    );
+  });
+});
+
 describe("buildServiceCreateParams", () => {
   it("environment 来自身份而不是表单，必填五项齐全", () => {
     const params = buildServiceCreateParams(form(), "staging");

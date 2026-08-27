@@ -249,6 +249,31 @@ describe("运营总览页", () => {
   });
 });
 
+describe("演示数据横幅", () => {
+  beforeEach(() => devLogin());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("指标 source 命中已知演示实例时挂出横幅，且没有关闭按钮（Codex #8）", async () => {
+    const demo = { items: metricsBody.items.map((m) => ({ ...m, source: "sub2api-staging" })) };
+    stubFetch((url) =>
+      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
+        ? fakeResponse(200, demo)
+        : okHandler(url),
+    );
+    renderRoute("/dashboard");
+    expect(await screen.findByText(/当前展示的是演示数据（Fake 连接器）/)).not.toBeNull();
+    // 可关闭的警告等于「点一次就永远看不见的警告」
+    expect(screen.queryByRole("button", { name: /关闭|知道了|不再提示/ })).toBeNull();
+  });
+
+  it("source 没命中就不挂——误报会把横幅变成人人无视的噪音", async () => {
+    stubFetch(okHandler); // metricsBody 里的 source 是 sub2api-prod
+    renderRoute("/dashboard");
+    await screen.findByText("Sub2API 日收入");
+    expect(screen.queryByText(/当前展示的是演示数据/)).toBeNull();
+  });
+});
+
 describe("服务清单页", () => {
   beforeEach(() => {
     devLogin();
@@ -385,12 +410,45 @@ describe("审计事件页", () => {
     expect(screen.getByText("core.service/svc-1")).not.toBeNull();
     expect(screen.getByText("成功")).not.toBeNull();
     expect(screen.getByText("aaaaaaaa")).not.toBeNull();
-    expect(screen.getByText(/bbbbbbbb/)).not.toBeNull();
+  });
+
+  it("本页只有一条时不装作能验链，明说上一条不在本页（Codex #6）", async () => {
+    renderRoute("/audit");
+    expect(await screen.findByText("上一条不在本页")).not.toBeNull();
+    // 页头不再断言「前序哈希必须等于下一行的事件哈希」
+    expect(screen.queryByText(/必须.*相等/)).toBeNull();
+    expect(screen.getByText(/完整性校验以 audit-verify 工具与链根签名为准/)).not.toBeNull();
+  });
+
+  it("环境过滤造成的序号缺口显示成中性说明，不报断链", async () => {
+    // 后端的链是全局的，本页按环境过滤，6/4/2 这样的缺口完全正常：
+    // 缺口两侧的 prev_hash 与 event_hash 本就不必相等
+    stubFetch((url) =>
+      url.startsWith("/api/v1/audit/events")
+        ? fakeResponse(200, {
+            items: [
+              { ...auditEvent, sequence: 6, event_hash: "c".repeat(64), prev_hash: "x".repeat(64) },
+              { ...auditEvent, sequence: 2, event_hash: "d".repeat(64) },
+            ],
+            next_before: 0,
+          })
+        : okHandler(url),
+    );
+    renderRoute("/audit");
+    expect(await screen.findByText("中间有 3 条其他环境事件")).not.toBeNull();
+    expect(screen.queryByText("与相邻行对不上")).toBeNull();
+  });
+
+  it("展开区给出完整哈希，不是只有 8 位前缀 + hover（Codex #9）", async () => {
+    renderRoute("/audit");
+    fireEvent.click(await screen.findByRole("button", { name: "详情" }));
+    expect(await screen.findByText("a".repeat(64))).not.toBeNull();
+    expect(screen.getByText("b".repeat(64))).not.toBeNull();
   });
 
   it("行可展开显示前后摘要，前态为 null 时明说「无」", async () => {
     renderRoute("/audit");
-    fireEvent.click(await screen.findByRole("button", { name: "前后摘要" }));
+    fireEvent.click(await screen.findByRole("button", { name: "详情" }));
     expect(await screen.findByText("（无）")).not.toBeNull();
     expect(screen.getByText(/sub2api-dev/)).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "收起" }));
@@ -476,6 +534,30 @@ describe("登记服务（写路径）", () => {
     expect(fetchMock.mock.calls.length).toBe(before);
   });
 
+  it("提交失败时焦点移到错误摘要（Codex #9：不然读屏用户只听到一片沉默）", async () => {
+    stubFetch(okHandler);
+    const dialog = await openDialog();
+    fireEvent.click(dialog.getByRole("button", { name: "登记" }));
+
+    const summary = await screen.findByText(/还有 4 处需要修正/);
+    const focusTarget = summary.closest("[tabindex]");
+    await waitFor(() => expect(document.activeElement).toBe(focusTarget));
+  });
+
+  it("地址里带凭据时就地拒绝，不把 token 送进审计摘要（Codex #7）", async () => {
+    const fetchMock = stubFetch(okHandler);
+    const dialog = await openDialog();
+    fillRequired();
+    fireEvent.change(screen.getByLabelText(/对外地址/), {
+      target: { value: "https://u:p@new.example.com/?token=abc" },
+    });
+    const before = fetchMock.mock.calls.length;
+
+    fireEvent.click(dialog.getByRole("button", { name: "登记" }));
+    expect(await screen.findByText(/用户名\/密码/)).not.toBeNull();
+    expect(fetchMock.mock.calls.length).toBe(before);
+  });
+
   it("标识符非法时按后端同一条正则给出提示", async () => {
     stubFetch(okHandler);
     const dialog = await openDialog();
@@ -511,8 +593,10 @@ describe("登记服务（写路径）", () => {
     expect((init.headers as Record<string, string>)["X-Request-ID"]).toMatch(
       /^[A-Za-z0-9._:-]{1,128}$/,
     );
-    // 成功回执要把 run_id 指回审计页，形成闭环
-    expect(screen.getByText(/可在审计页查看这条事件/)).not.toBeNull();
+    // 回执把 run_id 指回审计页，但**不承诺**那里一定有这条事件：
+    // 业务写/ActionRun/审计三段非原子且 fail-open（Codex #10）
+    expect(screen.getByText(/审计事件通常几秒内出现在审计页/)).not.toBeNull();
+    expect(screen.queryByText(/可在审计页查看这条事件/)).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

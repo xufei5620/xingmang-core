@@ -36,7 +36,7 @@
 ### 失败排在未初始化前面（XM-0031 修正）
 
 原来的次序是「未初始化 > 失败」，于是**第一次采集就失败**的指标被判成
-`uninitialized`。那是把一个正在发生的故障（real 模式未实现、凭据过期、上游
+`uninitialized`。那是把一个正在发生的故障（凭据过期、连接配置缺项、上游
 拒绝）说成中性的「尚未接入」——前端把 `uninitialized` 定为 neutral 徽章，
 错误码只剩 hover title 能看见。
 
@@ -201,16 +201,17 @@ Observation 后逐条 `Store.Upsert`，紧接着 `Store.InsertSample` 追加一�
 会被抹成「从未采集」。这条留给调用方而不是藏进 SQL：「保留旧值」在补数据、
 改口径、换来源这些场景下并不总是对的，仓储层替所有人默默做决定会更难排查。
 
-**Fake 数据不伪装成真实来源，而且 production 根本不许用它。** XM-0017 之前同步
-任务跑在 fake 模式，`source` 默认是 `sub2api-staging`——`source` 是前端必须显示
-的字段（`/metrics` 与 `/metrics/history` 都逐点返回），它同时承担「这批数字从哪
-来」的告知义务。
+**Fake 数据不伪装成真实来源，而且 production 根本不许用它。** 真实只读凭据要一个
+个环境去开，未开的环境仍跑 fake 模式，`source` 默认是 `sub2api-staging`——`source`
+是前端必须显示的字段（`/metrics` 与 `/metrics/history` 都逐点返回），它同时承担
+「这批数字从哪来」的告知义务。
 
 XM-0031 起，`environment=production` 且同步开启时配 `fake` 会让 Worker
 **启动即退出**：构造出来的用户/收入/余额一旦写进本表，看板就会以正常主数字 +
 「数据新鲜」徽章呈现它们，`source` 那行小字挡不住这件事。生产只有两条合法出路：
-`XM_SUB2API_MODE=real`（XM-0017 之前会每周期写一条明确的 `SyncFailed`，那是诚实
-的失败），或显式关闭同步。详见 `cmd/platform-worker/README.md`。
+`XM_SUB2API_MODE=real`（连接配置缺项时每周期写一条明确的 `SyncFailed` +
+`last_error_code=not_supported`，那是诚实的失败，不是假数据），或显式关闭同步。
+详见 `cmd/platform-worker/README.md`。
 
 ## 指标白名单（XM-0031）
 
@@ -221,7 +222,8 @@ XM-0031 起，`environment=production` 且同步开启时配 `fake` 会让 Worke
 区分「这个指标真的没有数据」与「这个指标根本不存在」——后者是调用错误，静默返回
 空正是「用沉默撒谎」。现在未注册的指标当场 400，错误文案列出全部已注册指标。
 
-白名单在 `ops` 里是**字面量重复**（`connectors/sub2api` 依赖本包，反向 import 会
-成环），漂移由 `internal/platform/ops/metrickeys_test.go` 的一致性测试兜住——它在
-外部测试包里，同时看得见两边。新采集模块用 `ops.RegisterMetricKey` 注册自己的
-指标，不必回来改这张表。
+白名单在 `ops` 里是**字面量重复**（`connectors/*` 依赖本包，反向 import 会成环），
+覆盖 `connectors/sub2api` 的五条与 `connectors/invoice` 的两条。漂移由
+`internal/platform/ops/metrickeys_test.go` 的一致性测试兜住——它在外部测试包里，
+同时看得见两边，任何一边加减指标都会当场失败。新采集模块可以用
+`ops.RegisterMetricKey` 在自己的 init 里注册，不必回来改这张表。

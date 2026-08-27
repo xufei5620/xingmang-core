@@ -17,6 +17,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
 // fixedNow 是所有单元测试共用的固定时钟：新鲜度全是时间的函数，
@@ -290,13 +291,16 @@ func TestSub2APISyncFailureStillWrites(t *testing.T) {
 	}
 }
 
-// TestSub2APISyncRealModeRecordsNotImplemented 是验收门禁 (c)：
-// real 模式当前必然失败，但必须失败得**看得见**，而不是崩溃或静默。
-func TestSub2APISyncRealModeRecordsNotImplemented(t *testing.T) {
+// TestSub2APISyncRealModeWithoutConfigRecordsFailure：real 模式在配置未就绪时
+// 必然失败，但必须失败得**看得见**，而不是崩溃或静默。
+//
+// XM-0017 之后真实客户端已经存在，这条路径改由「四个变量没配齐」触发；
+// 断言不变——看板要看得见这条指标存在且正在失败（规格 §9.1）。
+func TestSub2APISyncRealModeWithoutConfigRecordsFailure(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
 	// 走真正的生产工厂，不是测试替身——接缝本身就是被测对象。
-	factory := NewSub2APIClientFactory(Sub2APIModeReal, "")
+	factory := NewSub2APIClientFactory(Sub2APIModeReal, Sub2APIRealConfig{})
 	worker := NewSub2APISyncWorker(Sub2APISyncOptions{
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
@@ -307,7 +311,7 @@ func TestSub2APISyncRealModeRecordsNotImplemented(t *testing.T) {
 	})
 
 	if err := worker.Work(context.Background(), syncJob()); err != nil {
-		t.Fatalf("Work = %v, want nil（未实现是事实，不是任务失败）", err)
+		t.Fatalf("Work = %v, want nil（配置未就绪是事实，不是任务失败）", err)
 	}
 	if len(store.keys()) != len(contractMetricKeys) {
 		t.Fatalf("real 模式落库指标 = %v, want 全部 %v", store.keys(), contractMetricKeys)
@@ -328,9 +332,9 @@ func TestSub2APISyncRealModeRecordsNotImplemented(t *testing.T) {
 }
 
 func TestSub2APIClientFactoryRealErrorIsClassified(t *testing.T) {
-	_, err := NewSub2APIClientFactory(Sub2APIModeReal, "")(context.Background())
+	_, err := NewSub2APIClientFactory(Sub2APIModeReal, Sub2APIRealConfig{})(context.Background())
 	if err == nil {
-		t.Fatal("real 模式当前必须返回错误")
+		t.Fatal("配置未就绪的 real 模式必须返回错误")
 	}
 	if got := connector.KindOf(err); got != connector.KindNotSupported {
 		t.Fatalf("KindOf = %q, want %q", got, connector.KindNotSupported)
@@ -338,14 +342,61 @@ func TestSub2APIClientFactoryRealErrorIsClassified(t *testing.T) {
 	if !errors.Is(err, ErrSub2APIRealClientUnavailable) {
 		t.Fatalf("根因应可被 errors.Is 认出: %v", err)
 	}
+	// 缺哪个变量必须说得出来：运维手里拿的是 .env，不是源码。
+	for _, want := range []string{
+		"XM_SUB2API_ENDPOINT", "XM_SUB2API_TARGET_ALLOWLIST", "XM_SUB2API_CREDENTIAL_REF",
+	} {
+		if !strings.Contains(fmt.Sprint(errors.Unwrap(err)), want) {
+			t.Fatalf("错误链里应说清缺 %s: %v", want, errors.Unwrap(err))
+		}
+	}
+	// 对外文本仍然只有分类 + 操作名（ADR-004）：变量清单在 Unwrap 链里，
+	// 不在 Error() 里——后者会进日志与看板。
+	if got := err.Error(); got != "not_supported: sub2api.client.real" {
+		t.Fatalf("对外错误文本 = %q，不该带配置细节", got)
+	}
 
-	client, err := NewSub2APIClientFactory(Sub2APIModeFake, "")(context.Background())
+	client, err := NewSub2APIClientFactory(Sub2APIModeFake, Sub2APIRealConfig{})(context.Background())
 	if err != nil || client == nil {
 		t.Fatalf("fake 模式应构造成功: client=%v err=%v", client, err)
 	}
 
-	if _, err := NewSub2APIClientFactory(Sub2APIMode("wat"), "")(context.Background()); connector.KindOf(err) != connector.KindInternal {
+	if _, err := NewSub2APIClientFactory(Sub2APIMode("wat"), Sub2APIRealConfig{})(context.Background()); connector.KindOf(err) != connector.KindInternal {
 		t.Fatalf("未知模式应归为 internal, got %v", err)
+	}
+}
+
+// TestSub2APIClientFactoryRealBuildsClient 锁住接缝真的接活了：
+// 配置齐全时 real 模式必须造出一个客户端，而不是继续返回「未配置」。
+func TestSub2APIClientFactoryRealBuildsClient(t *testing.T) {
+	provider, err := secrets.NewEnvProvider(
+		map[string]string{"secret://sub2api/readonly-token": "XM_TEST_SUB2API_TOKEN"},
+		secrets.WithLookup(func(string) (string, bool) { return "test-token-value", true }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Sub2APIRealConfig{
+		Endpoint:        "https://api.example.test",
+		TargetAllowlist: []string{"api.example.test"},
+		CredentialRef:   "secret://sub2api/readonly-token",
+		Environment:     "staging",
+		InstanceID:      "sub2api-test",
+		Timeout:         DefaultSub2APIRequestTimeout,
+		Secrets:         provider,
+	}
+	client, err := NewSub2APIClientFactory(Sub2APIModeReal, cfg)(context.Background())
+	if err != nil || client == nil {
+		t.Fatalf("配置齐全时应造出真实客户端: client=%v err=%v", client, err)
+	}
+
+	// 配错（endpoint 不是 https）与没配分开归类：前者是我们自己的部署配置
+	// 有问题，归 internal；后者归 not_supported。运维一看 error_code
+	// 就知道该去补配置还是去改配置。
+	bad := cfg
+	bad.Endpoint = "http://api.example.test"
+	if _, err := NewSub2APIClientFactory(Sub2APIModeReal, bad)(context.Background()); connector.KindOf(err) != connector.KindInternal {
+		t.Fatalf("配错的连接配置应归 internal, got %v (%v)", connector.KindOf(err), err)
 	}
 }
 
@@ -725,8 +776,10 @@ func TestSub2APIFakeModeRejectedInProduction(t *testing.T) {
 		t.Fatalf("production 下关闭同步应通过: %v", err)
 	}
 
-	// real 模式在 production 通过校验：XM-0017 之前它会每周期写一条明确的
-	// SyncFailed，那是诚实的失败，不是假数据。
+	// real 模式在 production 通过校验：连接配置缺项时它会每周期写一条明确的
+	// SyncFailed + last_error_code=not_supported，那是诚实的失败，不是假数据。
+	// 连接配置本身的必填校验归工厂管（见 NewSub2APIClientFactory），本条只管
+	// 「不许拿 Fake 冒充生产读数」。
 	realMode := DefaultConfig()
 	realMode.Environment = "production"
 	realMode.Sub2APIMode = Sub2APIModeReal
@@ -734,8 +787,8 @@ func TestSub2APIFakeModeRejectedInProduction(t *testing.T) {
 		t.Fatalf("production + real 应通过: %v", err)
 	}
 
-	// staging / development 保持允许：真实只读账号就绪前，这两个环境要靠
-	// Fake 把整条采集链路跑通。
+	// staging / development 保持允许：真实只读凭据要一个个环境去开，
+	// 未开的环境仍要靠 Fake 把整条采集链路跑通。
 	for _, env := range []string{"staging", "development"} {
 		ok := DefaultConfig()
 		ok.Environment = env

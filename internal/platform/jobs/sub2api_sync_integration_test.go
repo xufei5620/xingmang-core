@@ -152,7 +152,7 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 		InstanceID:  source,
 		Mode:        Sub2APIModeReal,
 		Store:       store,
-		NewClient:   NewSub2APIClientFactory(Sub2APIModeReal, ""),
+		NewClient:   NewSub2APIClientFactory(Sub2APIModeReal, Sub2APIRealConfig{}),
 	})
 	if err := failing.Work(ctx, syncJob()); err != nil {
 		t.Fatalf("real 模式的 Work = %v, want nil（未实现是事实，不是任务失败）", err)

@@ -28,9 +28,13 @@ describe("formatMinorUnits：整数最小单位 → 展示", () => {
     expect(formatMinorUnits(0, "KRW")).toBe("₩0");
   });
 
-  it("未知币种用代码前缀，不猜符号", () => {
-    expect(formatMinorUnits(100, "XYZ")).toBe("XYZ 1.00");
-    expect(formatMinorUnits(100, "")).toBe("1.00");
+  it("未知/空币种 fail closed：不猜小数位，原样给出最小单位数值（Codex #8）", () => {
+    // 以前这里断言 "XYZ 1.00"，把「默认两位」这个猜测固化成了契约。
+    // 可 BHD/KWD 是三位、JPY/KRW 是零位，猜错的结果是金额显示错 10~100 倍，
+    // 而且错得非常像真的——所以现在明说单位未知，把原始值端出来
+    expect(formatMinorUnits(100, "XYZ")).toBe("XYZ 100（最小单位，金额单位未知）");
+    expect(formatMinorUnits(100, "")).toBe("100（最小单位，金额单位未知）");
+    expect(formatMinorUnits(-1234567, "XYZ")).toBe("-XYZ 1,234,567（最小单位，金额单位未知）");
   });
 
   it("币种代码大小写不敏感", () => {
@@ -70,10 +74,11 @@ describe("底层工具", () => {
     expect(groupDigits("1234")).toBe("1,234");
     expect(groupDigits("1234567")).toBe("1,234,567");
   });
-  it("currencyExponent 默认两位", () => {
+  it("currencyExponent 认不出就返回 null，不兜底成两位", () => {
     expect(currencyExponent("CNY")).toBe(2);
     expect(currencyExponent("JPY")).toBe(0);
-    expect(currencyExponent("ZZZ")).toBe(2);
+    expect(currencyExponent("ZZZ")).toBeNull();
+    expect(currencyExponent("")).toBeNull();
   });
   it("toIntegerValue 只接受安全整数", () => {
     expect(toIntegerValue(42)).toBe(42n);
