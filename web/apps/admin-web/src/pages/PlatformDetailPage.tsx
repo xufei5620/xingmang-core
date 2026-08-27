@@ -4,12 +4,16 @@ import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router";
 import { listMetrics, listServices } from "../api/platform";
+import { platformHasUsers } from "../api/users";
 import { ApiStateView } from "../components/ApiStateView";
 import { ChannelsPanel } from "../components/ChannelsPanel";
 import { FinanceSummaryCards } from "../components/FinanceSummaryCards";
 import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
 import { MetricCardGrid } from "../components/MetricCardGrid";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
+import { assuranceSubTab } from "../components/PlatformAssurancePanel";
+import { financeSubTab } from "../components/PlatformFinancePanel";
+import { PlatformUsersPanel } from "../components/PlatformUsersPanel";
 import { RequestsPanel } from "../components/RequestsPanel";
 import {
   findPlatform,
@@ -197,7 +201,7 @@ function TabBody({
       items={tab.subTabs.map((sub) => ({
         value: sub.id,
         label: sub.label,
-        content: (
+        content: subTabContent(tab, sub.id, entry) ?? (
           <EmptyState
             title={`「${sub.label}」尚未实现`}
             description={pendingNote(entry, tab)}
@@ -206,6 +210,27 @@ function TabBody({
       }))}
     />
   );
+}
+
+/** 有内容的子页签走各自的面板;没有的返回 undefined,由调用方回落到通用占位。
+ *
+ *  做成一个解析器而不是在 TabBody 里堆 switch:页签内容是**按片交付**的,
+ *  每一片只往这里加一行,不必碰渲染逻辑。 */
+function subTabContent(
+  tab: PlatformTabSpec,
+  subId: string,
+  entry: PlatformEntry,
+): ReactNode | undefined {
+  switch (tab.value) {
+    case "model":
+      // 渠道保障:UI 蓝图态。布局与文案照原型,数据一行都没有——
+      // 交接文档 §9.7 明写「真实探针不能提前冒充已上线」
+      return assuranceSubTab(subId);
+    case "finance":
+      return financeSubTab(entry.spec.serviceType, subId);
+    default:
+      return undefined;
+  }
 }
 
 /** 未实装页签的一句话。
@@ -239,6 +264,14 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
         default:
           return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
       }
+    case "users":
+      // 逐用户资金明细。邮箱在**连接器**层就打了码,平台不持有明文;
+      // 逐用户充值/消费在 v1 上游契约里给不出,面板里逐格说明(原型 warnbar)
+      return platformHasUsers(spec.serviceType) ? (
+        <PlatformUsersPanel platform={spec.serviceType} />
+      ) : (
+        <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />
+      );
     case "usage":
       // 数据来自生产上已在运行的外挂请求审计系统，平台只是带权限与审计的
       // 只读网关——正文永不落平台库。脱敏、`request.content.read` 与查看审计

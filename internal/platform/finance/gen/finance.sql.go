@@ -1205,6 +1205,105 @@ func (q *Queries) SetUpstreamAccountRechargeRatio(ctx context.Context, arg SetUp
 	return i, err
 }
 
+const shadowProfitByAccountDay = `-- name: ShadowProfitByAccountDay :many
+SELECT
+    pd.account_id::text                  AS account_id,
+    pd.business_day                      AS business_day,
+    COUNT(*)::bigint                     AS row_count,
+    COUNT(pd.revenue_minor)::bigint      AS revenue_known_rows,
+    COUNT(pd.cost_minor)::bigint         AS cost_known_rows,
+    COALESCE(SUM(pd.revenue_minor), 0)::bigint AS revenue_minor_sum,
+    COALESCE(SUM(pd.cost_minor), 0)::bigint    AS cost_minor_sum,
+    COUNT(DISTINCT pd.currency)::bigint  AS currency_count,
+    MIN(pd.currency)::text               AS currency,
+    COUNT(DISTINCT pd.business_day_tz)::bigint AS business_day_tz_count,
+    MIN(pd.business_day_tz)::text        AS business_day_tz
+FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment   = $1
+  AND ua.access_method = 'upstream_key'
+  AND pd.business_day >= $2
+  AND pd.business_day <= $3
+GROUP BY pd.account_id, pd.business_day
+ORDER BY pd.business_day, pd.account_id
+`
+
+type ShadowProfitByAccountDayParams struct {
+	Environment string
+	FromDay     pgtype.Date
+	ToDay       pgtype.Date
+}
+
+type ShadowProfitByAccountDayRow struct {
+	AccountID          string
+	BusinessDay        pgtype.Date
+	RowCount           int64
+	RevenueKnownRows   int64
+	CostKnownRows      int64
+	RevenueMinorSum    int64
+	CostMinorSum       int64
+	CurrencyCount      int64
+	Currency           string
+	BusinessDayTzCount int64
+	BusinessDayTz      string
+}
+
+// 影子对比的平台侧取数（XM-0037e，设计稿 §9）。
+//
+// 粒度是 **(account_id, business_day)**：SoloAI 的 relay_profit_daily 主键是
+// (station_id, day, token_id)，两侧都按 account_id 聚合掉令牌维度才配得上对
+// （§9 的对比 SQL 就是这么写的）。account_id 在两边是同一个东西——都是令牌
+// 映射表的**值**（sub2api 为自营账号 id，newapi 为 channel_id）。
+//
+// **只取 access_method='upstream_key'**：影子对比的范围就是计量型渠道（§9）。
+// 订阅型与 official_api 在 SoloAI 侧没有对象，混进来会全部变成「平台有、
+// SoloAI 无」的假差异，把真差异淹掉。
+//
+// 金额留在 scale-6 微单位**不在 SQL 里折分**：折算规则（半进）要与 SoloAI 侧
+// 用同一份代码，写进 SQL 就变成两份实现了。SUM 用 bigint 保持整数（宪法 13 条）。
+//
+// 未知（NULL）与已知 0 必须分得开（§5.1）。这里靠**两个**字段表达，
+// 而不是靠一个可空的 SUM：
+//
+//	known_rows = 0        → 这个账号这天该侧**整天未知**（SUM 无意义）
+//	0 < known_rows < rows → 部分未知（SUM 只含已知行，报告里要标出来）
+//	known_rows = rows     → 全部已知
+//
+// SUM 本身 COALESCE 到 0：SUM 会跳过 NULL，所以它在 known_rows>0 时就是
+// 「已知行之和」；用 known_rows 判未知比让 sqlc 生成一个可空整数更直白，
+// 也与 SumProfitDailyByPlatform 的写法一致。
+func (q *Queries) ShadowProfitByAccountDay(ctx context.Context, arg ShadowProfitByAccountDayParams) ([]ShadowProfitByAccountDayRow, error) {
+	rows, err := q.db.Query(ctx, shadowProfitByAccountDay, arg.Environment, arg.FromDay, arg.ToDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ShadowProfitByAccountDayRow{}
+	for rows.Next() {
+		var i ShadowProfitByAccountDayRow
+		if err := rows.Scan(
+			&i.AccountID,
+			&i.BusinessDay,
+			&i.RowCount,
+			&i.RevenueKnownRows,
+			&i.CostKnownRows,
+			&i.RevenueMinorSum,
+			&i.CostMinorSum,
+			&i.CurrencyCount,
+			&i.Currency,
+			&i.BusinessDayTzCount,
+			&i.BusinessDayTz,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const sumProfitDailyByPlatform = `-- name: SumProfitDailyByPlatform :many
 SELECT
     CASE

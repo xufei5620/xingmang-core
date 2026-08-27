@@ -278,6 +278,49 @@ const financeUpstreamsBody = {
   runway_thresholds: { critical_days: 5, warning_days: 10, serious_days: 20 },
 };
 
+/** 用户清单样本。第二条刻意让逐用户流水缺席（minor_units: null）——
+ *  原型的 warnbar 说 v1 只读契约给不出，这件事必须能在界面上看见。 */
+const usersBody = {
+  items: [
+    {
+      id: "u_10241",
+      username: "张伟",
+      email_masked: "zh***@example.com",
+      status: "active",
+      balance: { minor_units: "1284500", currency: "CNY" },
+      period_recharge: { minor_units: "120000", currency: "CNY" },
+      period_consumed: { minor_units: "31200", currency: "CNY" },
+      last_active_at: "2026-08-28T09:00:00Z",
+      token_prefix: "sk-a1b2",
+    },
+    {
+      id: "u_10207",
+      username: "试用账号 07",
+      email_masked: "",
+      status: "limited",
+      // 已知的零余额：必须显示成 ¥0.00，不能和「上游没给」混同
+      balance: { minor_units: "0", currency: "CNY" },
+      period_recharge: { minor_units: null, currency: "" },
+      period_consumed: { minor_units: null, currency: "" },
+      last_active_at: null,
+      token_prefix: "",
+    },
+  ],
+  next_cursor: "",
+  total_count: { value: 2 },
+  total_balance: { minor_units: "1284500", currency: "CNY" },
+  data_source: "sub2api-fake",
+  freshness: {
+    state: "fresh",
+    staleness_seconds: 5,
+    threshold_seconds: 60,
+    is_partial: false,
+    observed_at: "2026-08-28T10:00:00Z",
+    last_success: "2026-08-28T10:00:00Z",
+    last_error_code: "",
+  },
+};
+
 function okHandler(url: string): Response {
   // history 必须排在 metrics 前面：两者的前缀是包含关系
   if (url.startsWith("/api/v1/metrics/history")) return fakeResponse(200, historyBody);
@@ -287,6 +330,7 @@ function okHandler(url: string): Response {
     return fakeResponse(200, financeUpstreamsBody);
   if (url.startsWith("/api/v1/metrics")) return fakeResponse(200, metricsBody);
   if (url.startsWith("/api/v1/services")) return fakeResponse(200, servicesBody);
+  if (url.includes("/users")) return fakeResponse(200, usersBody);
   if (url.startsWith("/api/v1/alerts")) return fakeResponse(200, alertsBody);
   if (url.startsWith("/api/v1/audit/events"))
     return fakeResponse(200, { items: [auditEvent], next_before: 0 });
@@ -495,7 +539,7 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
       "X-Dev-Principal-ID": "dev-operator",
       "X-Dev-Principal-Type": "HUMAN",
       "X-Dev-Scopes":
-        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read",
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read,platform.users.read",
     });
   });
 
@@ -634,8 +678,10 @@ describe("Sub2API 平台详情·渠道管理页签（原渠道明细页）", () 
     expect(await screen.findByText("渠道甲")).not.toBeNull();
     expect(screen.getByText("¥100.00")).not.toBeNull();
     expect(screen.getByText("¥25.00")).not.toBeNull();
-    expect(screen.getByText("有效")).not.toBeNull();
-    expect(screen.getByText("失效")).not.toBeNull();
+    // 「有效 / 失效」现在也出现在筛选下拉的 <option> 里，所以限定在表格内找
+    const channelTable = within(screen.getByRole("table"));
+    expect(channelTable.getByText("有效")).not.toBeNull();
+    expect(channelTable.getByText("失效")).not.toBeNull();
     // 新鲜度徽章与数据时间跟着面板搬进页签，没有在迁移里丢掉（规格 §9.1）
     expect(screen.getByText("数据新鲜")).not.toBeNull();
     expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC/)).not.toBeNull();
@@ -712,8 +758,9 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     expect(screen.getByText("上游乙")).not.toBeNull();
     expect(screen.getByText("自建丙")).not.toBeNull();
 
-    expect(screen.getAllByText("启用")).toHaveLength(2);
-    expect(screen.getByText("停用")).not.toBeNull();
+    const newapiTable = within(screen.getByRole("table"));
+    expect(newapiTable.getAllByText("启用")).toHaveLength(2);
+    expect(newapiTable.getByText("停用")).not.toBeNull();
     expect(screen.getByText("¥100.00")).not.toBeNull();
 
     // ppm → 百分比，两位小数，纯整数运算：1200 ppm = 0.12%，187500 ppm = 18.75%
@@ -810,7 +857,8 @@ describe("审计事件页", () => {
     expect(await screen.findByText("registry.service.create@1")).not.toBeNull();
     expect(screen.getByText("2")).not.toBeNull();
     expect(screen.getByText("core.service/svc-1")).not.toBeNull();
-    expect(screen.getByText("成功")).not.toBeNull();
+    // 「成功」也是「结果」筛选下拉里的一个选项
+    expect(within(screen.getByRole("table")).getByText("成功")).not.toBeNull();
     expect(screen.getByText("aaaaaaaa")).not.toBeNull();
   });
 
@@ -879,7 +927,7 @@ describe("审计事件页", () => {
     );
     renderRoute("/audit");
     expect(await screen.findByText("还没有审计事件")).not.toBeNull();
-    expect(screen.getByText("在注册表页执行一次动作试试")).not.toBeNull();
+    expect(screen.getByText("在资源目录页执行一次动作试试")).not.toBeNull();
   });
 
   it("缺 audit.read 时提示缺哪个权限", async () => {
@@ -1458,6 +1506,151 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
   });
 });
 
+describe("用户管理页签（交接文档 §9.3、原型 V[\"s2/users\"]）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("列出用户，并把原型那句 v1 契约边界原样说出来", async () => {
+    renderRoute("/platforms/sub2api?tab=users");
+    expect(await screen.findByText("张伟")).not.toBeNull();
+    // 这一页的边界由**上游契约**决定，不是我们没做
+    expect(screen.getByText(/仅提供用户总数与总余额/)).not.toBeNull();
+    expect(screen.getByText(/不是这些用户没有充值/)).not.toBeNull();
+  });
+
+  it("缺席的逐用户流水显示「—」，而已知的零余额显示 ¥0.00", async () => {
+    // 两者压成一个，人就分不出「这个月没充值」和「我们不知道」
+    renderRoute("/platforms/sub2api?tab=users");
+    await screen.findByText("试用账号 07");
+    const table = within(screen.getByRole("table"));
+    expect(table.getAllByText("—").length).toBeGreaterThan(0);
+    expect(table.getByText("¥0.00")).not.toBeNull();
+  });
+
+  it("邮箱是打过码的，明文一个字都不出现", async () => {
+    renderRoute("/platforms/sub2api?tab=users");
+    await screen.findByText("张伟");
+    expect(screen.getByText("zh***@example.com")).not.toBeNull();
+    expect(screen.queryByText(/zhangwei@/)).toBeNull();
+  });
+
+  it("上游没记联系方式与从未活跃，各有各的说法", async () => {
+    renderRoute("/platforms/sub2api?tab=users");
+    await screen.findByText("试用账号 07");
+    // 从未活跃 ≠ 很久以前活跃过
+    expect(screen.getByText("从未活跃")).not.toBeNull();
+  });
+
+  it("顶部两格未接入的显示「—」而不是 0", async () => {
+    // 显示 0 会被读成「这个区间没人充值」
+    renderRoute("/platforms/sub2api?tab=users");
+    await screen.findByText("张伟");
+    const recharge = (await screen.findByRole("heading", { name: "区间充值", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(recharge).getByText("—")).not.toBeNull();
+    expect(within(recharge).getByText("未接入")).not.toBeNull();
+  });
+
+  it("总余额与新鲜度都在场", async () => {
+    renderRoute("/platforms/sub2api?tab=users");
+    await screen.findByText("张伟");
+    // 样本里张伟的余额恰好等于总余额，所以要限定在那一格里找
+    const total = screen.getByRole("heading", { name: "所有用户总余额", level: 3 })
+      .closest("article") as HTMLElement;
+    expect(within(total).getByText("¥12,845.00")).not.toBeNull();
+    expect(screen.getAllByText("数据新鲜").length).toBeGreaterThan(0);
+  });
+
+  it("CPA 没有用户清单——不挂一个永远空的页签", async () => {
+    // CPA 的「用户」是代理商，语义不同；挂空页签等于说「这个平台没有用户」
+    renderRoute("/platforms/cpa?tab=users");
+    expect(await screen.findByText(/「用户管理」尚未实现/)).not.toBeNull();
+  });
+});
+
+describe("渠道保障页签（裁定 #1 的 A 落地，UI 蓝图态）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("三个子页签逐字，且都带原型那句 warnbar", async () => {
+    renderRoute("/platforms/sub2api?tab=model");
+    for (const label of ["保障概览", "检测任务", "历史记录"]) {
+      expect(await screen.findByRole("tab", { name: label })).not.toBeNull();
+    }
+    expect(screen.getByText(/这是目标布局/)).not.toBeNull();
+  });
+
+  it("**一行检测结果都不显示**——交接文档 §9.7：真实探针不能提前冒充已上线", async () => {
+    renderRoute("/platforms/sub2api?tab=model&sub=history");
+    expect(await screen.findByText("还没有保障历史")).not.toBeNull();
+    // 原型样例里的那些「结果」不许出现在界面上
+    expect(screen.queryByText(/probe-88/)).toBeNull();
+    expect(screen.queryByText("疑似退化")).toBeNull();
+  });
+
+  it("画出列结构，让蓝图有内容可看", async () => {
+    renderRoute("/platforms/sub2api?tab=model&sub=probes");
+    for (const col of ["任务", "渠道", "目标模型", "策略", "最近一次", "结果"]) {
+      expect(await screen.findByRole("columnheader", { name: col })).not.toBeNull();
+    }
+  });
+
+  it("四格计数显示「—」而不是原型里的 5 / 11 / 38 / 2", async () => {
+    renderRoute("/platforms/sub2api?tab=model");
+    const tile = (await screen.findByRole("heading", { name: "受保障渠道", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(tile).getByText("—")).not.toBeNull();
+  });
+});
+
+describe("支付与财务页签（框架）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("Sub2API 五个子页签逐字（IA v3 §2.2）", async () => {
+    renderRoute("/platforms/sub2api?tab=finance");
+    for (const label of ["资金概览", "充值订单", "退款与冲正", "利润核算", "开票"]) {
+      expect(await screen.findByRole("tab", { name: label })).not.toBeNull();
+    }
+  });
+
+  it("NewAPI 只有两格，**刻意不补齐**（裁定 #2 维持原型）", async () => {
+    renderRoute("/platforms/newapi?tab=finance");
+    expect(await screen.findByRole("tab", { name: "资金与订单" })).not.toBeNull();
+    expect(screen.getByRole("tab", { name: "利润核算" })).not.toBeNull();
+    expect(screen.queryByRole("tab", { name: "开票" })).toBeNull();
+  });
+
+  it("§9.8 的硬口径印在界面上：充值不是收入", async () => {
+    // 把充值当收入，整条利润线从第一步就错了
+    renderRoute("/platforms/sub2api?tab=finance");
+    expect(await screen.findByText(/「用户充值」不是当期收入/)).not.toBeNull();
+  });
+
+  it("开票格说清楚阻塞点是契约（CR-0002），不是工期", async () => {
+    renderRoute("/platforms/sub2api?tab=finance&sub=invoices");
+    expect(await screen.findByText(/CR-0002/)).not.toBeNull();
+    // 平台侧不得实现开票资格算法（ADR-006）
+    expect(screen.getByText(/不得实现开票资格算法/)).not.toBeNull();
+  });
+
+  it("退款格明说上线后也不会有「直接退款」按钮", async () => {
+    renderRoute("/platforms/sub2api?tab=finance&sub=refunds");
+    expect(await screen.findByText(/不会有「直接退款」的按钮/)).not.toBeNull();
+  });
+});
+
 describe("未实装页的诚实占位与门禁", () => {
   beforeEach(() => {
     devLogin();
@@ -1568,9 +1761,10 @@ describe("告警中心页", () => {
     renderRoute("/alerts");
     expect(await screen.findByText("指标 sub2api.revenue.daily 同步失败")).not.toBeNull();
 
-    // 严重度与状态各是一个徽章
-    expect(screen.getByText("严重")).not.toBeNull();
-    expect(screen.getByText("未处理")).not.toBeNull();
+    // 严重度与状态各是一个徽章。两者也都出现在筛选下拉里，所以限定在表格内找
+    const alertsTable = within(screen.getByRole("table"));
+    expect(alertsTable.getByText("严重")).not.toBeNull();
+    expect(alertsTable.getByText("未处理")).not.toBeNull();
     // 首见与最近都要显示：只有一个就答不出「这个问题持续了多久」
     expect(screen.getByText(/首次 2026-08-26 10:00:00 UTC/)).not.toBeNull();
     expect(screen.getAllByText(/最近 2026-08-26 10:05:00 UTC/).length).toBeGreaterThan(0);
@@ -1591,8 +1785,10 @@ describe("告警中心页", () => {
     renderRoute("/alerts");
     await screen.findByText("渠道乙 余额不足");
     // 它仍然在活跃列表里
-    expect(screen.getByText("已静默")).not.toBeNull();
-    expect(screen.queryByText("已解决")).toBeNull();
+    const silencedTable = within(screen.getByRole("table"));
+    expect(silencedTable.getByText("已静默")).not.toBeNull();
+    // 「已解决」在筛选下拉里是一个选项，但**表里没有这一行**——静默不是解决
+    expect(silencedTable.queryByText("已解决")).toBeNull();
   });
 
   it("只有 OPEN / REOPENED 有「确认」按钮（与后端 WHERE 子句同一条规则）", async () => {

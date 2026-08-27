@@ -1,5 +1,4 @@
-import { PageHeader } from "@xingmang/ui-admin";
-import { ErrorState } from "@xingmang/ui-primitives";
+import { PageHeader, PageState } from "@xingmang/ui-admin";
 import { isRouteErrorResponse, useLocation, useRouteError } from "react-router";
 import { NotFoundView } from "../pages/NotFoundPage";
 
@@ -34,7 +33,7 @@ export function RouteErrorBoundary() {
       <PageHeader title="这一页出错了" />
       {/* 不提供「重试」：这一类错误是渲染时抛出来的，重试同一个地址会再抛一次。
           能做的是把错误原样给出来，好让人贴给我们 */}
-      <ErrorState message={message} />
+      <PageState kind="error" message={message} />
     </section>
   );
 }

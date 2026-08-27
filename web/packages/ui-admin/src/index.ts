@@ -9,6 +9,42 @@ export {
   type CommandPaletteTriggerProps,
 } from "./CommandPalette";
 export { ContextStrip, type ContextCrumb, type ContextStripProps } from "./ContextStrip";
+export {
+  DataTableV2,
+  type DataTableColumn,
+  type DataTableFilterSpec,
+  type DataTableV2Props,
+} from "./DataTableV2";
+export {
+  ariaSort,
+  compareValues,
+  describeCriteria,
+  filterRows,
+  matchesView,
+  nextSort,
+  normalizeText,
+  normalizeViewName,
+  pageSelection,
+  paginate,
+  rowText,
+  sortHint,
+  sortRows,
+  sortValue,
+  toggleKeys,
+  CUSTOM_VIEW_NAME,
+  DENSITY_LABELS,
+  type CellValue,
+  type Density,
+  type PageSlice,
+  type SavedView,
+  type SelectionState,
+  type SortDirection,
+  type TableFilters,
+  type TableRow,
+  type TableSort,
+  type TableViewState,
+} from "./dataTable";
+export { PageState, type PageStateKind, type PageStateProps } from "./PageState";
 export { MetricCard, type MetricCardProps } from "./MetricCard";
 export {
   NavSection,

@@ -12,6 +12,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
 )
@@ -38,7 +39,10 @@ type Deps struct {
 	// 允许为 nil 而不是必填：这条链路依赖一个**外挂**系统（reqlog），
 	// 一个没部署它的环境不该因此起不来。而挂了 nil 却照样注册路由更糟——
 	// 那会让端点存在、一调就 500，前端分不清「没接」和「坏了」。
-	RequestLogs     RequestLogQuerier
+	RequestLogs RequestLogQuerier
+	// PlatformUsers 为 nil 时「用户管理」端点不挂载（XM-0046）。
+	// 与 RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
+	PlatformUsers   PlatformUsersQuerier
 	FinanceAccounts UpstreamAccountLister
 	FinanceProfit   ProfitDailyLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
@@ -111,6 +115,18 @@ func NewRouter(d Deps) http.Handler {
 			api.With(RequireScope(requestlog.ScopeContentRead)).
 				Get("/platforms/{platform}/requests/{requestID}",
 					GetPlatformRequestContentHandler(d.RequestLogs))
+		}
+
+		// 被管平台的终端用户清单（XM-0046）。**不复用 ops.read**：
+		// ops.read 看到的是聚合数字（平台有多少用户、总余额多少），这里是
+		// **逐用户**的资金明细——即便邮箱已经在契约层打了码，一份逐用户清单
+		// 也足以还原一家客户的经营规模，与 request.read 同一档
+		// （见 platformusers.ScopeRead 的注释）。
+		//
+		// 没有配用户连接器的部署不挂载这条：前端据此分得清「没接」和「坏了」。
+		if d.PlatformUsers != nil {
+			api.With(RequireScope(platformusers.ScopeRead)).
+				Get("/platforms/{platform}/users", ListPlatformUsersHandler(d.PlatformUsers))
 		}
 
 		// 成本登记簿**不复用 ops.read**：它列的是每个上游账号的凭据引用、
