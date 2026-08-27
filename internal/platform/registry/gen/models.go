@@ -84,6 +84,8 @@ type AuditAuditEvent struct {
 	CompensationResult       string
 	PrevHash                 string
 	EventHash                string
+	// 算 event_hash 时用的 canonical 编码版本：1=上线时的未转义拼接（冻结，仅校验历史行）；2=长度前缀。本列不参与哈希。
+	CanonicalVersion int16
 }
 
 type AuditChainRoot struct {

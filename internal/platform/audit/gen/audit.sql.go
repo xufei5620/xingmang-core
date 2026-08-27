@@ -57,12 +57,12 @@ INSERT INTO audit.audit_event (
     environment, reason, approval_id, request_id, trace_id, source_ip,
     before_summary, after_summary, connector_request_summary,
     connector_response_summary, result, compensation_result,
-    prev_hash, event_hash
+    prev_hash, event_hash, canonical_version
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+    $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
 )
-RETURNING id, sequence, occurred_at, recorded_at, principal_id, principal_type, action_id, action_version, action_run_id, resource_type, resource_id, environment, reason, approval_id, request_id, trace_id, source_ip, before_summary, after_summary, connector_request_summary, connector_response_summary, result, compensation_result, prev_hash, event_hash
+RETURNING id, sequence, occurred_at, recorded_at, principal_id, principal_type, action_id, action_version, action_run_id, resource_type, resource_id, environment, reason, approval_id, request_id, trace_id, source_ip, before_summary, after_summary, connector_request_summary, connector_response_summary, result, compensation_result, prev_hash, event_hash, canonical_version
 `
 
 type InsertAuditEventParams struct {
@@ -91,6 +91,7 @@ type InsertAuditEventParams struct {
 	CompensationResult       string
 	PrevHash                 string
 	EventHash                string
+	CanonicalVersion         int16
 }
 
 func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) (AuditAuditEvent, error) {
@@ -120,6 +121,7 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 		arg.CompensationResult,
 		arg.PrevHash,
 		arg.EventHash,
+		arg.CanonicalVersion,
 	)
 	var i AuditAuditEvent
 	err := row.Scan(
@@ -148,6 +150,7 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 		&i.CompensationResult,
 		&i.PrevHash,
 		&i.EventHash,
+		&i.CanonicalVersion,
 	)
 	return i, err
 }
@@ -195,7 +198,7 @@ func (q *Queries) InsertChainRoot(ctx context.Context, arg InsertChainRootParams
 }
 
 const listAuditEvents = `-- name: ListAuditEvents :many
-SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type, action_id, action_version, action_run_id, resource_type, resource_id, environment, reason, approval_id, request_id, trace_id, source_ip, before_summary, after_summary, connector_request_summary, connector_response_summary, result, compensation_result, prev_hash, event_hash FROM audit.audit_event
+SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type, action_id, action_version, action_run_id, resource_type, resource_id, environment, reason, approval_id, request_id, trace_id, source_ip, before_summary, after_summary, connector_request_summary, connector_response_summary, result, compensation_result, prev_hash, event_hash, canonical_version FROM audit.audit_event
 WHERE sequence >= $1 AND sequence <= $2
 ORDER BY sequence
 `
@@ -240,6 +243,7 @@ func (q *Queries) ListAuditEvents(ctx context.Context, arg ListAuditEventsParams
 			&i.CompensationResult,
 			&i.PrevHash,
 			&i.EventHash,
+			&i.CanonicalVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -256,7 +260,7 @@ SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type,
        action_id, action_version, action_run_id, resource_type, resource_id,
        environment, reason, approval_id, request_id, trace_id, source_ip,
        before_summary, after_summary, result, compensation_result,
-       prev_hash, event_hash
+       prev_hash, event_hash, canonical_version
 FROM audit.audit_event
 WHERE environment = $1
   AND ($2::bigint = 0 OR sequence < $2::bigint)
@@ -294,6 +298,7 @@ type ListRecentAuditEventsRow struct {
 	CompensationResult string
 	PrevHash           string
 	EventHash          string
+	CanonicalVersion   int16
 }
 
 // 看板用的倒序分页读取：只看某个环境，从 before_seq 往回翻。
@@ -344,6 +349,7 @@ func (q *Queries) ListRecentAuditEvents(ctx context.Context, arg ListRecentAudit
 			&i.CompensationResult,
 			&i.PrevHash,
 			&i.EventHash,
+			&i.CanonicalVersion,
 		); err != nil {
 			return nil, err
 		}

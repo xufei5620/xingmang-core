@@ -104,6 +104,9 @@ func eventFromRow(r gen.AuditAuditEvent) (Event, error) {
 		CompensationResult:       r.CompensationResult,
 		PrevHash:                 r.PrevHash,
 		EventHash:                r.EventHash,
+		// 校验时按这一列选编码：不读回来的话，历史行（v1）会被当成 v2 重算，
+		// 整条链报 hash_mismatch（XM-R009）。
+		CanonicalVersion: r.CanonicalVersion,
 	}, nil
 }
 
@@ -153,6 +156,11 @@ func eventFromRecentRow(r gen.ListRecentAuditEventsRow) (Event, error) {
 		CompensationResult:       r.CompensationResult,
 		PrevHash:                 r.PrevHash,
 		EventHash:                r.EventHash,
+		// 这一列**必须取**，哪怕这个投影刻意省掉了两个 connector 摘要：
+		// 它决定用哪版编码重算哈希，漏了就会把 v2 写入的行按 v1 重算、
+		// 全部报「哈希不符」。它是 smallint，与那两个无界 jsonb 不是一回事，
+		// 不在「不取的列就别取」那条纪律的射程内。
+		CanonicalVersion: r.CanonicalVersion,
 	}, nil
 }
 
@@ -214,6 +222,11 @@ func (s *Store) Append(ctx context.Context, e Event) (Event, error) {
 		return Event{}, fmt.Errorf("normalize: %w", err)
 	}
 
+	// 新写入一律用当前版本（XM-R009）。**必须在算哈希之前钉住**：
+	// Canonical 按这个字段选编码，写完哈希再改它就等于给这一行配了个
+	// 对不上的版本号。
+	e.CanonicalVersion = CurrentCanonicalVersion
+
 	hash, err := e.ComputeHash()
 	if err != nil {
 		return Event{}, fmt.Errorf("compute hash: %w", err)
@@ -263,6 +276,10 @@ func (s *Store) Append(ctx context.Context, e Event) (Event, error) {
 		CompensationResult:       e.CompensationResult,
 		PrevHash:                 e.PrevHash,
 		EventHash:                e.EventHash,
+		// 必须显式写：Go 结构体字面量省略字段会填零值，而 0 不在库层
+		// CHECK 允许的 (1, 2) 里——插入会被拒。漏写不会静默通过，
+		// 但报错信息是约束名，看的人未必立刻想到是这里少了一行。
+		CanonicalVersion: e.CanonicalVersion,
 	})
 	if err != nil {
 		return Event{}, fmt.Errorf("insert audit event: %w", err)
