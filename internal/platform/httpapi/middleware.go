@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,15 +47,67 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
+// principalRecorder 是身份中间件写给访问日志的单向信道。
+//
+// 为什么需要它：RequirePrincipal 用 `r.WithContext(...)` 把 Principal 放进一个
+// **派生**上下文，那个上下文只对内层可见；AccessLog 包在外面，手里的 `r` 永远
+// 是解析之前的那个，读不到身份。要么把身份解析挪到最外层（那样 panic 恢复与
+// 请求 ID 就排在鉴权之后，顺序更糟），要么留一个显式的可变槽——选后者。
+//
+// 带锁不是过度设计：Timeout 中间件用 http.TimeoutHandler，它在**另一个
+// goroutine** 里跑内层链，超时后自己先返回。于是 AccessLog 读 id 时内层可能
+// 还在写。没有锁这就是一个真实的数据竞争，而且只在超时路径上偶发。
+type principalRecorder struct {
+	mu sync.Mutex
+	id string
+}
+
+func (p *principalRecorder) set(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.id = id
+}
+
+func (p *principalRecorder) get() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.id
+}
+
+type principalRecorderKey struct{}
+
+// recordPrincipalID 把已解析的身份告知访问日志。
+// 没有槽（例如单测直接调 handler）时静默返回——日志字段缺失不该让请求失败。
+func recordPrincipalID(ctx context.Context, id string) {
+	if rec, ok := ctx.Value(principalRecorderKey{}).(*principalRecorder); ok {
+		rec.set(id)
+	}
+}
+
 // AccessLog 按规格 §18.8 的字段记录访问日志。
 //
-// 只记录方法、路径、状态、耗时与 request_id —— **不记录任何 Header**，
-// 因为 Authorization / Cookie 会带 Token（宪法 7 条）。
+// 记录方法、路径、状态、耗时、request_id 与 principal_id ——
+// **不记录任何 Header**，因为 Authorization / Cookie 会带 Token（宪法 7 条）。
+//
+// principal_id 是 XM-0031 补的（回归 Codex 冷审 PR #47 第 4 条 / PR #43 head
+// `0a0642c` 第 4 条）：「高敏读取不可归责……事后无法回答谁拉取过审计数据」。
+// /api/v1/audit/events 会返回操作前后镜像，/api/v1/metrics 会返回收入与余额；
+// 这类读取出了事必须能回答「是谁在什么时候拉走的」。只记 method/path/status
+// 时，日志能证明「有人拉过 100 条审计」，却证明不了是谁。
+//
+// 身份未解析时（探针、403 的无身份请求、身份解析本身失败）记空串而不是省略
+// 字段：字段恒在，日志检索不必区分「没有这个字段」与「值为空」；而空串本身
+// 就是一个事实——这次访问没有可归责的身份。
+//
+// **只记 principal_id，不记 scopes / issuer / 身份类型**：ID 足以归责，其余是
+// 授权决策的输入，进日志只会扩大留存面。需要复原授权判定时看审计链。
 func AccessLog(logger *slog.Logger, service, environment string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w}
+			who := &principalRecorder{}
+			r = r.WithContext(context.WithValue(r.Context(), principalRecorderKey{}, who))
 			next.ServeHTTP(rec, r)
 			if rec.status == 0 {
 				rec.status = http.StatusOK
@@ -63,6 +117,7 @@ func AccessLog(logger *slog.Logger, service, environment string) func(http.Handl
 				slog.String("module", "httpapi"),
 				slog.String("environment", environment),
 				slog.String("request_id", RequestIDFrom(r.Context())),
+				slog.String("principal_id", who.get()),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", rec.status),
@@ -70,6 +125,31 @@ func AccessLog(logger *slog.Logger, service, environment string) func(http.Handl
 			)
 		})
 	}
+}
+
+// NoStore 给响应打上 `Cache-Control: no-store`。
+//
+// 为什么是路由中间件而不是塞进 WriteJSON（XM-0031，回归 Codex 冷审 PR #47
+// 第 8 条 / PR #43 head `0a0642c` 第 5 条）：
+//
+//  1. **这是策略，不是编码细节。** WriteJSON 回答「怎么把值变成字节」，
+//     缓存语义回答「谁可以把这些字节存下来」。把后者藏进序列化 helper，
+//     路由表就不再是「哪个端点受什么约束」的完整清单——而 RequireScope 已经
+//     立了「约束写在路由上」这个规矩，两套地方声明会分叉。
+//  2. **作用范围要能被看见。** 装在 /api/v1 整组上，新加的端点自动继承，
+//     不依赖作者记得调用某个特定的写出函数；而 /healthz、/readyz 保持可缓存
+//     ——反代与看门狗对探针做几秒微缓存是合理的，不该被顺手波及。
+//  3. **错误响应也要覆盖。** 中间件在写响应头之前就设好，无论 handler 走的是
+//     WriteJSON、WriteError 还是 TimeoutHandler 的固定错误体。
+//
+// 指令只写 `no-store`，不写 `private, no-store`：no-store 禁止**任何**缓存
+// （共享的与私有的）把响应落到存储，严格强于只约束共享缓存的 private。两个
+// 并列会让人以为它们互补，将来有人「优化」成只留 private 时也看不出退化。
+func NoStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Recover 把 panic 转成 500，细节只进日志不进响应。

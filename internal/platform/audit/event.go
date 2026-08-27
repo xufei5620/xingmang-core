@@ -172,6 +172,19 @@ func (e Event) ComputeHash() (string, error) {
 // 必要性：调用方可能传 int / int64 等 Go 原生类型，而从 jsonb 读回时数字一律
 // 是 float64。不做归一化，写入前算的哈希与校验时重算的哈希会不一致——
 // 大整数（>2^53）尤其明显。
+//
+// **这里刻意不用 `json.Decoder.UseNumber()`，与 `internal/platform/ops` 相反**
+// （XM-0031）。ops 那边读 value_json 必须保 json.Number，因为它装的是金额的
+// minor units，float64 会永久丢精度；本函数的目标不是保精度，而是让写入前的
+// 表示与读回后的表示**逐字节相同**——`eventFromRow` 用的是默认
+// `json.Unmarshal`（float64），归一化就必须归到同一个表示上，链才校验得过。
+// 改成 UseNumber 会让全部历史事件的哈希一次性对不上，等于把整条审计链作废。
+//
+// 代价是审计摘要里的大整数在链上以 float64 的形态参与哈希，可能丢精度。这被
+// 接受，因为审计摘要**不承载金额口径**：它记的是「谁在什么时候改了什么」，
+// 金额的权威值在业务表与 ops 指标里。若将来要把金额放进摘要，正确做法是让
+// 调用方以 decimal string 写入（字符串不经数字解码，两边表示天然一致），
+// 而不是动这里的归一化。
 func normalizeMap(m map[string]any) (map[string]any, error) {
 	if len(m) == 0 {
 		return map[string]any{}, nil

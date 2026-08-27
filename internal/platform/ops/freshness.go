@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,11 +15,14 @@ import (
 type State string
 
 const (
-	StateUninitialized State = "uninitialized" // 从未成功采集
-	StateFailed        State = "failed"        // 最近一次同步失败
-	StateStale         State = "stale"         // 超过新鲜度阈值
-	StatePartial       State = "partial"       // 数据不完整
-	StateFresh         State = "fresh"         // 新鲜且完整
+	// StateUninitialized：从未成功采集过，**且当前没有失败**——也就是「这条
+	// 指标还没接上」。它是中性状态，不代表出问题。带着错误码的记录一律不是
+	// 它（见 Freshness 的优先级说明）。
+	StateUninitialized State = "uninitialized"
+	StateFailed        State = "failed"  // 最近一次同步失败（含第一次就失败）
+	StateStale         State = "stale"   // 超过新鲜度阈值
+	StatePartial       State = "partial" // 数据不完整
+	StateFresh         State = "fresh"   // 新鲜且完整
 )
 
 // SyncStatus 是最近一次同步的结果。
@@ -95,10 +100,25 @@ type Freshness struct {
 
 // Freshness 依据给定时刻判定新鲜度。
 //
-// 优先级：未初始化 > 失败 > 延迟 > 部分 > 新鲜。
+// 优先级：失败 > 未初始化 > 延迟 > 部分 > 新鲜。
 // 理由：从运维视角，「同步失败了」比「数据旧了」更需要立即动作；
 // 「数据旧了」又比「数据不全」更严重——不全但新的数据至少反映当前。
 // 被主状态盖住的信息仍在 IsPartial / LastErrorCode 等字段里，不丢。
+//
+// 失败排在未初始化**前面**（XM-0031 修正，回归 Codex 冷审 PR #43 head
+// `ba8e275` 第 3 条）：「从未采集过」与「第一次采集就失败了」是两个不同的
+// 事实，后者必须可见。第一次同步失败时任务写的是 SyncFailed +
+// last_error_code，但没有任何历史值可留，于是 ObservedAt / LastSuccess 都是
+// nil；旧的优先级会在检查 failed 之前先返回 uninitialized，把一个**正在发生
+// 的故障**（凭据错误、连接配置缺项、上游拒绝）显示成中性的「尚未接入」。
+// 前端把 uninitialized 定为 neutral 徽章，于是错误码只剩 hover title 能看见。
+//
+// 判据是 LastErrorCode 非空（等价于 Status==SyncFailed，见
+// validateStatusConsistency）而不是「LastSuccess 也为 nil」：正常的首次失败两者
+// 都为空，但万一出现「有 last_success 却没有 observed_at」这种上游写坏的行，
+// 有错误码时仍然判 failed 才是诚实的——把一条带着错误码的记录说成
+// 「尚未接入」，无论 LastSuccess 是什么值都是在撒谎。
+// LastSuccess 仍如实返回，前端可据此区分「一直没成功过」与「曾经成功过」。
 func (o Observation) Freshness(now time.Time) Freshness {
 	f := Freshness{
 		IsPartial:        o.IsPartial,
@@ -110,6 +130,13 @@ func (o Observation) Freshness(now time.Time) Freshness {
 	}
 
 	if o.ObservedAt == nil {
+		// 没有观测时刻：区分「一次都没采过」与「第一次采就失败了」。
+		// StalenessSeconds 两种情况都留 nil——没有 observed_at 就没有可算的
+		// 滞后量，编一个 0 会让失败看起来像刚刚成功过。
+		if o.LastErrorCode != "" {
+			f.State = StateFailed
+			return f
+		}
 		f.State = StateUninitialized
 		return f
 	}
@@ -134,13 +161,86 @@ func (o Observation) Freshness(now time.Time) Freshness {
 	return f
 }
 
-// ValidMetricKey 报告 key 是否是合法的指标键。
+// ValidMetricKey 报告 key 是否**形态**合法。
 //
-// 导出它是给 HTTP 层用的：查询参数里拼错的 key 应该当场 400，而不是查出
-// 一个空列表让前端以为「这个指标真的没有数据」。判据必须与落库时同一条，
-// 所以共用同一个正则而不是在 handler 里再写一遍。
+// 它只验形状，不验存在性——这是落库时的判据（见 validateShared）。
+// 「这个指标存不存在」是另一个问题，由 KnownMetricKey 回答。
+//
+// 从前这里的注释宣称它能让「查询参数里拼错的 key 当场 400」，那是不成立的
+// （Codex 冷审 PR #48 第 6 条）：`foo.bar` 形态完全合法，照样返回 200 空数组，
+// 正好落进注释声称要避免的「被当成真无数据」。注释与实现的差距已按 XM-0031
+// 补上——HTTP 层改用 KnownMetricKey，本函数的契约诚实地缩回「只验形态」。
 func ValidMetricKey(key string) bool {
 	return metricKeyPattern.MatchString(key)
+}
+
+// registeredMetrics 是平台已知的指标白名单。
+//
+// 为什么用白名单而不是只验形态（XM-0031，回归 Codex 冷审 PR #48 第 6 条）：
+// 只验形态时，一个拼错的 `sub2api.revenu.daily` 会返回 200 + 空数组，而前端
+// 无从区分「这个指标真的没有数据」与「这个指标根本不存在」——后者是调用错误，
+// 静默返回空正是宪法 12 条禁止的「用沉默撒谎」。
+//
+// 值来自各 connector 的 Metric* 常量（`connectors/sub2api`、`connectors/invoice`），
+// 但**不 import 它们**：那些包依赖本包（ToObservations 返回 ops.Observation），
+// 反向 import 会成环。字面量重复的代价由 ops_test 里的一致性测试兜住——那个测试
+// 在外部测试包里，可以同时看见两边，任何一边加减指标都会当场失败。
+//
+// 扩展口是 RegisterMetricKey：将来 NewAPI / CPA 等采集模块在自己的 init 里
+// 注册各自的指标，不必回来改这张表。
+var registeredMetrics = struct {
+	mu   sync.RWMutex
+	keys map[string]struct{}
+}{
+	keys: map[string]struct{}{
+		"sub2api.users.total":      {},
+		"sub2api.users.balance":    {},
+		"sub2api.revenue.daily":    {},
+		"sub2api.cost.daily":       {},
+		"sub2api.channels.balance": {},
+		"invoice.requests.daily":   {},
+		"invoice.amount.daily":     {},
+	},
+}
+
+// RegisterMetricKey 注册一个新的指标键，让它能通过 HTTP 层的存在性校验。
+//
+// 供其他采集模块在 init / 启动装配时调用。形态非法直接返回错误——一个连落库
+// 都通不过的键注册进来毫无意义。重复注册是幂等的，不报错：多个模块共享同一
+// 条指标是合理的，为此让进程起不来不划算。
+func RegisterMetricKey(key string) error {
+	if !ValidMetricKey(key) {
+		return fmt.Errorf("metric_key=%q 须匹配 ^[a-z0-9][a-z0-9_.-]{0,127}$: %w",
+			key, ErrInvalidFormat)
+	}
+	registeredMetrics.mu.Lock()
+	defer registeredMetrics.mu.Unlock()
+	registeredMetrics.keys[key] = struct{}{}
+	return nil
+}
+
+// KnownMetricKey 报告 key 是否是**已注册**的指标。
+//
+// HTTP 查询用它而不是 ValidMetricKey：不存在的指标必须当场 400，
+// 不能返回一个会被读成「真的没数据」的空数组。
+func KnownMetricKey(key string) bool {
+	registeredMetrics.mu.RLock()
+	defer registeredMetrics.mu.RUnlock()
+	_, ok := registeredMetrics.keys[key]
+	return ok
+}
+
+// RegisteredMetricKeys 返回全部已注册的指标键（升序）。
+// 给错误文案与一致性测试用：告诉调用方「有哪些」比只说「你写错了」有用。
+func RegisteredMetricKeys() []string {
+	registeredMetrics.mu.RLock()
+	defer registeredMetrics.mu.RUnlock()
+	out := make([]string, 0, len(registeredMetrics.keys))
+	for k := range registeredMetrics.keys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Validate 校验观测记录的领域不变量。

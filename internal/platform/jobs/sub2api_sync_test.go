@@ -269,12 +269,17 @@ func TestSub2APISyncFailureStillWrites(t *testing.T) {
 				if !row.SyncedAt.Equal(fixedNow) {
 					t.Fatalf("%s synced_at = %v, want %v（同步尝试过，这是任务还活着的证据）", key, row.SyncedAt, fixedNow)
 				}
-				// 从未成功过：observed_at 留空 → 未初始化，而不是拿 now 冒充一次采集。
+				// 从未成功过：observed_at 留空，而不是拿 now 冒充一次采集。
 				if row.ObservedAt != nil {
 					t.Fatalf("%s observed_at = %v, want nil", key, row.ObservedAt)
 				}
-				if state := row.Freshness(fixedNow).State; state != ops.StateUninitialized {
-					t.Fatalf("%s freshness = %q, want uninitialized", key, state)
+				// 但状态是 **failed** 而不是 uninitialized（XM-0031 修正，
+				// 回归 Codex 冷审 PR #43 head `ba8e275` 第 3 条）：
+				// 「一次都没采过」与「第一次采就失败了」是两个事实，后者是
+				// 正在发生的故障，不能显示成中性的「尚未接入」。
+				// 本用例此前断言 uninitialized，固化的正是被审出来的那个谎。
+				if state := row.Freshness(fixedNow).State; state != ops.StateFailed {
+					t.Fatalf("%s freshness = %q, want failed（首次失败不是未初始化）", key, state)
 				}
 			}
 			for _, want := range []string{`"event":"job_completed"`, `"success":false`, `"metrics_failed":5`, `"error_code":"` + string(kind) + `"`} {
@@ -731,5 +736,65 @@ func TestSub2APISyncConfigValidation(t *testing.T) {
 	good.Sub2APICredentialRef = "secret://sub2api/readonly-token"
 	if err := good.normalized().validate(); err != nil {
 		t.Fatalf("合法 CredentialRef 应通过: %v", err)
+	}
+}
+
+// TestSub2APIFakeModeRejectedInProduction 回归 Codex 冷审 PR #43
+// （head `932a11e` 与 `ba8e275` 第 4 条）：production 默认启用 Fake，构造出来的
+// 用户/收入/余额会被同步任务写进运营表，再被看板当成正常主数字呈现。
+//
+// 断言的是**启动即拒**而不是运行时降级：DefaultConfig 的默认模式就是 fake，
+// 「忘了配」的结果恰好是最危险的那一种，只有让进程起不来这个疏忽才必然被发现。
+func TestSub2APIFakeModeRejectedInProduction(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Environment = "production"
+	cfg.Sub2APIMode = Sub2APIModeFake
+
+	err := cfg.normalized().validate()
+	if err == nil {
+		t.Fatal("production + fake 必须被拒绝：演示数据不得成为生产运营读数")
+	}
+	// 错误必须说清怎么修，否则运维只会把同步整个关掉。
+	if !strings.Contains(err.Error(), "XM_SUB2API_MODE=real") {
+		t.Fatalf("错误信息必须指出修法，got %q", err.Error())
+	}
+
+	// 空模式经 normalized() 补成 fake，同样要被拒——否则「不配置」能绕过。
+	empty := DefaultConfig()
+	empty.Environment = "production"
+	empty.Sub2APIMode = ""
+	if err := empty.normalized().validate(); err == nil {
+		t.Fatal("production 下未配置模式（默认 fake）同样必须被拒")
+	}
+
+	// 显式关闭同步是允许的：不采集不等于采集假数据。
+	off := DefaultConfig()
+	off.Environment = "production"
+	off.Sub2APIMode = Sub2APIModeFake
+	off.Sub2APISyncEnabled = false
+	if err := off.normalized().validate(); err != nil {
+		t.Fatalf("production 下关闭同步应通过: %v", err)
+	}
+
+	// real 模式在 production 通过校验：连接配置缺项时它会每周期写一条明确的
+	// SyncFailed + last_error_code=not_supported，那是诚实的失败，不是假数据。
+	// 连接配置本身的必填校验归工厂管（见 NewSub2APIClientFactory），本条只管
+	// 「不许拿 Fake 冒充生产读数」。
+	realMode := DefaultConfig()
+	realMode.Environment = "production"
+	realMode.Sub2APIMode = Sub2APIModeReal
+	if err := realMode.normalized().validate(); err != nil {
+		t.Fatalf("production + real 应通过: %v", err)
+	}
+
+	// staging / development 保持允许：真实只读凭据要一个个环境去开，
+	// 未开的环境仍要靠 Fake 把整条采集链路跑通。
+	for _, env := range []string{"staging", "development"} {
+		ok := DefaultConfig()
+		ok.Environment = env
+		ok.Sub2APIMode = Sub2APIModeFake
+		if err := ok.normalized().validate(); err != nil {
+			t.Fatalf("%s + fake 应通过: %v", env, err)
+		}
 	}
 }

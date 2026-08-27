@@ -43,6 +43,54 @@ func TestFreshnessUninitialized(t *testing.T) {
 	}
 }
 
+// TestFreshnessFirstSyncFailureIsNotUninitialized 回归 Codex 冷审 PR #43
+// （head `ba8e275` 第 3 条）：#44 的首次真实同步失败被 #46 伪装成 neutral
+// 「未初始化」。
+//
+// 「从未采集过」与「第一次采集就失败了」是两个事实。第一次失败时任务写
+// SyncFailed + last_error_code，但没有历史值可留，observed_at / last_success
+// 都是 nil；旧优先级在检查 failed 之前先返回 uninitialized，于是 real 模式
+// 未实现、凭据错误这类**正在发生的故障**在前端显示成无害的「尚未接入」。
+func TestFreshnessFirstSyncFailureIsNotUninitialized(t *testing.T) {
+	// 事实一：一次都没采过——中性的 uninitialized
+	never := obs()
+	never.ObservedAt = nil
+	never.LastSuccess = nil
+	never.Status = SyncOK
+	never.LastErrorCode = ""
+	if f := never.Freshness(now()); f.State != StateUninitialized {
+		t.Fatalf("从未采集应为 uninitialized, got %q", f.State)
+	}
+
+	// 事实二：第一次采集就失败了——必须是 failed，不能是 uninitialized
+	firstFail := obs()
+	firstFail.ObservedAt = nil
+	firstFail.LastSuccess = nil
+	firstFail.Status = SyncFailed
+	firstFail.LastErrorCode = "not_supported"
+	f := firstFail.Freshness(now())
+	if f.State != StateFailed {
+		t.Fatalf("首次采集失败应为 failed（而非 uninitialized）, got %q", f.State)
+	}
+	// 故障原因必须随主状态一起返回，前端才不用把它塞进 hover title
+	if f.LastErrorCode != "not_supported" {
+		t.Fatalf("错误码丢失: %+v", f)
+	}
+	// 没有 observed_at 就没有可算的滞后量——不能编一个 0 让失败看起来像刚采过
+	if f.StalenessSeconds != nil {
+		t.Fatalf("无 observed_at 时不应有 staleness: %v", *f.StalenessSeconds)
+	}
+	// 「从未成功过」这条事实仍要能被读出来
+	if f.LastSuccess != nil {
+		t.Fatalf("首次失败时 LastSuccess 应为 nil: %v", *f.LastSuccess)
+	}
+
+	// 领域层不变量：这条记录本身是合法的（失败必须带错误码）
+	if err := firstFail.Validate(); err != nil {
+		t.Fatalf("首次失败观测应是合法记录: %v", err)
+	}
+}
+
 func TestFreshnessFreshAndPartial(t *testing.T) {
 	o := obs()
 	if f := o.Freshness(now()); f.State != StateFresh {
@@ -96,6 +144,16 @@ func TestFreshnessPriority(t *testing.T) {
 	o.LastErrorCode = ""
 	if f := o.Freshness(now()); f.State != StateStale {
 		t.Fatalf("延迟应优先于部分, got %q", f.State)
+	}
+
+	// 失败优先于未初始化：没有 observed_at 但带着错误码，说明正在出故障，
+	// 不是「还没接上」（XM-0031，见 TestFreshnessFirstSyncFailureIsNotUninitialized）
+	o.ObservedAt = nil
+	o.LastSuccess = nil
+	o.Status = SyncFailed
+	o.LastErrorCode = "upstream_timeout"
+	if f := o.Freshness(now()); f.State != StateFailed {
+		t.Fatalf("失败应优先于未初始化, got %q", f.State)
 	}
 }
 

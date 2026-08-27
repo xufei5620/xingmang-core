@@ -21,6 +21,10 @@ var (
 	ErrAllowlistRequired = errors.New("target allowlist required")
 	// ErrKillSwitchRequired：具写能力却未声明 Kill Switch（ADR-004）。
 	ErrKillSwitchRequired = errors.New("kill switch required for write capabilities")
+	// ErrCredentialInEndpoint：endpoint 里带了凭据（userinfo 或 token 类查询
+	// 参数）。凭据只经 CredentialRef（ADR-014、宪法 7 条）；写进 endpoint 会
+	// 经审计摘要进入不可篡改的审计链，再被审计 API 原样回显。
+	ErrCredentialInEndpoint = errors.New("credential must not appear in endpoint URL")
 )
 
 // identifierPattern 与 CredentialRef 同族字符集，保证标识符可安全用于

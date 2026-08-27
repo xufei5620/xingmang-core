@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -62,12 +63,46 @@ func fromTS(t pgtype.Timestamptz) time.Time {
 	return t.Time.UTC()
 }
 
-func observationFromRow(r gen.OpsMetricObservation) (Observation, error) {
+// decodeValueJSON 把 jsonb 列解成 map，数字保持 json.Number 而不是 float64。
+//
+// 为什么必须是 UseNumber（XM-0031，回归 Codex 冷审 PR #48 第 4 条 /
+// PR #43 head `419ecf8`）：value_json 里装的是金额的 **minor units**
+// （`balance_minor_units`、`amount_minor` 等 int64）。默认 json.Unmarshal 把
+// 所有数字解成 float64，尾数只有 53 位，超过 2^53（约 9.007e15）的整数一读回
+// 就静默丢精度——9007199254740995 会变成 9007199254740996。这张表长期保存财务
+// 趋势，失真是**永久**的：库里那条 jsonb 还是对的，但每一次读取都返回错的值，
+// 而且错得毫无痕迹。宪法「金额禁止 float」在这条读回路径上必须机械成立。
+//
+// json.Number 是原始字面量的字符串包装，encoding/json 编码它时原样写出数字
+// 字面量（不加引号），所以 HTTP 响应里仍是 JSON number，前端契约不变。
+//
+// **与 audit 包的差异是刻意的**：`internal/platform/audit` 的
+// `Event.Normalize()` 反过来**故意**做 float64 归一化。那里的目标不是保精度，
+// 而是让「写入前算的哈希」与「从 jsonb 读回后重算的哈希」逐字节相同——
+// 归一化到与 jsonb 读回一致的表示，链才校验得过。审计摘要不承载金额口径，
+// 运营指标承载；两者的正确答案因此相反。**不要**把这里的 UseNumber 搬进
+// audit，那会让全部历史链一次性失效。
+func decodeValueJSON(raw []byte) (map[string]any, error) {
 	value := map[string]any{}
-	if len(r.ValueJson) > 0 {
-		if err := json.Unmarshal(r.ValueJson, &value); err != nil {
-			return Observation{}, fmt.Errorf("value_json: %w", err)
-		}
+	if len(raw) == 0 {
+		return value, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&value); err != nil {
+		return nil, fmt.Errorf("value_json: %w", err)
+	}
+	if value == nil {
+		// jsonb 里存的是字面量 null：当作空对象，调用方不必再判一次 nil
+		value = map[string]any{}
+	}
+	return value, nil
+}
+
+func observationFromRow(r gen.OpsMetricObservation) (Observation, error) {
+	value, err := decodeValueJSON(r.ValueJson)
+	if err != nil {
+		return Observation{}, err
 	}
 	return Observation{
 		ID:                        r.ID,
@@ -192,39 +227,56 @@ func (s *Store) InsertSample(ctx context.Context, o Observation) error {
 	return nil
 }
 
-// ListSamples 按 synced_at 升序返回某环境某指标在 since 之后的样本。
+// ListSamples 按 (synced_at, id) 升序返回某环境某指标在 since 之后的样本，
+// 并如实报告窗口内是否有更旧的样本被丢掉。
 //
 // limit <= 0 或超过 MaxSampleLimit 时钳到 MaxSampleLimit：这是仓储层的硬闸门，
 // 不指望每个调用方都记得传合理值——一个手滑的 0 不该变成全表扫描。
 // 窗口内样本超量时被丢掉的是**最旧**的那些（理由见 db/queries/ops.sql）。
 //
+// 第二个返回值 truncated 报告「窗口里还有更旧的样本，但没返回」（XM-0031，
+// 回归 Codex 冷审 PR #48 第 2 条：「允许 168 小时，却静默截成最新 1000 点，
+// 响应没有任何『被截断』的事实」）。判据是多取一行：向库要 limit+1 条，真拿
+// 到 limit+1 条就说明窗口内至少还剩一条。多一行的代价是常数，换来的是让「前
+// 3.5 天真的没有数据」与「服务端把它裁掉了」变成两个可区分的事实（宪法 12 条）。
+//
+// 它是**返回值**而不是一个可选字段：签名强迫每个调用方处理截断，忘记传给前端
+// 会在编译期就显形。悄悄丢一半窗口正是这条修复要根除的东西。
+//
 // 返回值复用 Observation，但样本表不存 ID / LastSuccess /
 // StalenessThresholdSeconds，这三个字段在返回值里恒为零值。**不要对样本调用
 // Freshness()**：新鲜度是相对「现在」算的派生量，对一个历史时刻算它没有意义，
 // 何况阈值为零会让每个点都被判成 stale。历史点位需要的解释信息
-// （status / is_partial / observed_at / last_error_code）都已逐点带回。
+// （status / is_partial / observed_at / last_error_code / source）都已逐点带回。
 func (s *Store) ListSamples(
 	ctx context.Context, environment, metricKey string, since time.Time, limit int32,
-) ([]Observation, error) {
+) ([]Observation, bool, error) {
 	if limit <= 0 || limit > MaxSampleLimit {
 		limit = MaxSampleLimit
 	}
+	// 多取一行专门用来判断截断，它不会进返回值。
 	rows, err := s.q.ListMetricObservationSamples(ctx, gen.ListMetricObservationSamplesParams{
 		Environment: environment,
 		MetricKey:   metricKey,
 		SyncedAt:    ts(since),
-		Limit:       limit,
+		Limit:       limit + 1,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list metric observation samples: %w", err)
+		return nil, false, fmt.Errorf("list metric observation samples: %w", err)
+	}
+	truncated := int32(len(rows)) > limit
+	if truncated {
+		// 行是升序的，多出来的那条在最前面（最旧）——正是被丢弃的方向。
+		rows = rows[len(rows)-int(limit):]
 	}
 	out := make([]Observation, 0, len(rows))
 	for _, r := range rows {
-		value := map[string]any{}
-		if len(r.ValueJson) > 0 {
-			if err := json.Unmarshal(r.ValueJson, &value); err != nil {
-				return nil, fmt.Errorf("value_json: %w", err)
-			}
+		// 与最新态同一条解码规则：金额 minor units 保持 json.Number，
+		// 不经 float64（见 decodeValueJSON）。历史序列尤其关键——趋势图上
+		// 一个被截断的大额会被当成真实的业务波动。
+		value, err := decodeValueJSON(r.ValueJson)
+		if err != nil {
+			return nil, false, err
 		}
 		out = append(out, Observation{
 			MetricKey:     r.MetricKey,
@@ -239,5 +291,5 @@ func (s *Store) ListSamples(
 			Value:         value,
 		})
 	}
-	return out, nil
+	return out, truncated, nil
 }

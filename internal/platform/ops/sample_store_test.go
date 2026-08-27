@@ -2,6 +2,9 @@ package ops_test
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,7 +52,7 @@ func TestInsertSampleReturnsSeriesInAscendingOrder(t *testing.T) {
 		}
 	}
 
-	got, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", base.Add(-time.Hour), 100)
+	got, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", base.Add(-time.Hour), 100)
 	if err != nil {
 		t.Fatalf("ListSamples: %v", err)
 	}
@@ -92,7 +95,7 @@ func TestListSamplesFiltersByWindowAndKeyAndEnvironment(t *testing.T) {
 	}
 
 	// 1 小时窗口：只该剩 inWindow 一条
-	got, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-time.Hour), 100)
+	got, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-time.Hour), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +107,7 @@ func TestListSamplesFiltersByWindowAndKeyAndEnvironment(t *testing.T) {
 	}
 
 	// 放宽到 4 小时：窗口外那条回来了，仍然不含别的指标/环境
-	wide, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-4*time.Hour), 100)
+	wide, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-4*time.Hour), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +132,7 @@ func TestListSamplesLimitKeepsNewest(t *testing.T) {
 		}
 	}
 
-	got, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", base.Add(-time.Hour), 2)
+	got, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", base.Add(-time.Hour), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +146,137 @@ func TestListSamplesLimitKeepsNewest(t *testing.T) {
 
 	// limit <= 0 与超上限都钳到 MaxSampleLimit，而不是变成全表扫描
 	for _, limit := range []int32{0, -1, ops.MaxSampleLimit + 1} {
-		all, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", base.Add(-time.Hour), limit)
+		all, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", base.Add(-time.Hour), limit)
 		if err != nil {
 			t.Fatalf("limit=%d: %v", limit, err)
 		}
 		if len(all) != 5 {
 			t.Fatalf("limit=%d 应钳到上限并返回全部 5 条, got %d", limit, len(all))
+		}
+	}
+}
+
+// TestListSamplesReportsTruncation 回归 Codex 冷审 PR #48 第 2 条：
+// 「允许 168 小时，却静默截成最新 1000 点，响应没有任何『被截断』的事实」。
+//
+// 「前 3.5 天真的没有数据」与「服务端把它裁掉了」必须是两个可区分的事实，
+// 否则前端会把一个不完整的窗口画成完整趋势（宪法 12 条）。
+func TestListSamplesReportsTruncation(t *testing.T) {
+	s := ops.NewStore(samplePool(t))
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+
+	for i := 0; i < 5; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := s.InsertSample(ctx, sampleAt("sub2api.revenue.daily", at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since := base.Add(-time.Hour)
+
+	// 窗口内 5 条、只要 2 条 → 截断
+	got, truncated, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", since, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("窗口内还有更旧的样本没返回时必须报告截断")
+	}
+	if len(got) != 2 {
+		t.Fatalf("截断时仍应返回恰好 limit 条, got %d", len(got))
+	}
+	// 截断保留的仍是最新的那批——多取的那一行是判据，不能混进结果
+	if !got[1].SyncedAt.Equal(base.Add(4 * time.Minute)) {
+		t.Fatalf("截断后最后一点 = %v, want %v", got[1].SyncedAt, base.Add(4*time.Minute))
+	}
+
+	// 边界：窗口内恰好 5 条、limit 也是 5 → **不算**截断。
+	// 这是多取一行判据的关键边界：limit+1 只取到 5 条，说明没有更旧的了。
+	exact, truncated, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", since, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("窗口内条数恰好等于 limit 时不该报告截断")
+	}
+	if len(exact) != 5 {
+		t.Fatalf("样本数 = %d, want 5", len(exact))
+	}
+
+	// limit 大于窗口内条数 → 不截断
+	if _, truncated, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", since, 100); err != nil {
+		t.Fatal(err)
+	} else if truncated {
+		t.Fatal("limit 富余时不该报告截断")
+	}
+
+	// 空窗口 → 不截断（「没有数据」不是「被裁掉了」）
+	if items, truncated, err := s.ListSamples(
+		ctx, "production", "sub2api.revenue.daily", time.Now().UTC().Add(time.Hour), 100,
+	); err != nil {
+		t.Fatal(err)
+	} else if truncated || len(items) != 0 {
+		t.Fatalf("空窗口应为 0 条且不截断: %d 条, truncated=%v", len(items), truncated)
+	}
+}
+
+// TestListSamplesOrdersTiedTimestampsDeterministically 回归 Codex 冷审
+// PR #48 第 7 条：「同时间戳样本没有确定排序或幂等键」。
+//
+// River 重试、多副本、同一秒内两次采集都能产生相同的 synced_at。只按
+// synced_at 排序时，撞点的相对顺序由 PostgreSQL 自行决定，于是 limit 边界上
+// 「留哪一条」在两次相同的查询之间可能不同——趋势图会莫名抖动且无法复现。
+func TestListSamplesOrdersTiedTimestampsDeterministically(t *testing.T) {
+	s := ops.NewStore(samplePool(t))
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Minute)
+
+	// 同一个 synced_at 上写 6 条，只有 watermark 不同——靠它认出是哪一条
+	for i := 0; i < 6; i++ {
+		o := sampleAt("sub2api.revenue.daily", at)
+		o.Watermark = "wm-" + strconv.Itoa(i)
+		if err := s.InsertSample(ctx, o); err != nil {
+			t.Fatalf("InsertSample %d: %v", i, err)
+		}
+	}
+	since := at.Add(-time.Hour)
+
+	// 全量：顺序必须与写入顺序（= id 顺序）一致，且多次查询完全相同
+	var first []string
+	for round := 0; round < 3; round++ {
+		got, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", since, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		marks := make([]string, 0, len(got))
+		for _, o := range got {
+			marks = append(marks, o.Watermark)
+		}
+		if round == 0 {
+			first = marks
+			want := []string{"wm-0", "wm-1", "wm-2", "wm-3", "wm-4", "wm-5"}
+			if strings.Join(marks, ",") != strings.Join(want, ",") {
+				t.Fatalf("同时间戳样本应按 id 升序: got %v, want %v", marks, want)
+			}
+			continue
+		}
+		if strings.Join(marks, ",") != strings.Join(first, ",") {
+			t.Fatalf("第 %d 轮顺序与第一轮不同: %v vs %v", round, marks, first)
+		}
+	}
+
+	// limit 边界：全部撞在同一时刻时，留下的必须**确定**是 id 最大的那两条
+	for round := 0; round < 3; round++ {
+		got, truncated, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", since, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !truncated {
+			t.Fatal("6 条取 2 条必须报告截断")
+		}
+		if len(got) != 2 || got[0].Watermark != "wm-4" || got[1].Watermark != "wm-5" {
+			t.Fatalf("第 %d 轮 limit 边界选择不确定: %+v", round,
+				[]string{got[0].Watermark, got[1].Watermark})
 		}
 	}
 }
@@ -174,7 +302,7 @@ func TestInsertSampleKeepsFailedObservations(t *testing.T) {
 		t.Fatalf("失败样本必须写得进去: %v", err)
 	}
 
-	got, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-time.Hour), 100)
+	got, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-time.Hour), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +337,7 @@ func TestInsertSampleAllowsUninitializedObservation(t *testing.T) {
 	if err := s.InsertSample(ctx, o); err != nil {
 		t.Fatalf("InsertSample: %v", err)
 	}
-	got, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-time.Hour), 100)
+	got, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-time.Hour), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +358,116 @@ func TestInsertSampleRejectsSilentFailure(t *testing.T) {
 	o.Status = ops.SyncFailed // 没有 LastErrorCode
 	if err := s.InsertSample(context.Background(), o); err == nil {
 		t.Fatal("失败但无错误码必须被拒")
+	}
+}
+
+// TestMoneyRoundTripKeepsPrecisionBeyondFloat64 回归 Codex 冷审 PR #48 第 4 条
+// （PR #43 head `419ecf8` 同条）：「金额历史经 map[string]any 读回会退化为
+// float64，超过 2^53 的 integer minor units 已经丢精度」。
+//
+// 9007199254740995 = 2^53 + 3。float64 的尾数只有 53 位，装不下它：默认
+// json.Unmarshal 读回会得到 9007199254740996，静默差 1。这张表长期保存财务
+// 趋势，一旦失真就是**永久**的——库里那条 jsonb 还是对的，但每次读取都返回
+// 错的值。最新态与历史样本两条读回路径都要验。
+func TestMoneyRoundTripKeepsPrecisionBeyondFloat64(t *testing.T) {
+	pool := samplePool(t)
+	s := ops.NewStore(pool)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// 2^53 + 3：float64 表示不出来的最小一类整数
+	const bigMinor = "9007199254740995"
+	// 另取一个更大的、以及一个负的（透支余额），确保不是只对某个特例成立
+	const hugeMinor = "9223372036854775807" // int64 上限
+	const negMinor = "-9007199254740995"
+
+	value := map[string]any{
+		"amount_minor":          json.Number(bigMinor),
+		"balance_minor_units":   json.Number(hugeMinor),
+		"overdraft_minor_units": json.Number(negMinor),
+		"currency":              "CNY",
+	}
+
+	// ---- 历史样本路径（ListSamples）----
+	o := sampleAt("sub2api.revenue.daily", now.Add(-5*time.Minute))
+	o.Value = value
+	if err := s.InsertSample(ctx, o); err != nil {
+		t.Fatalf("InsertSample: %v", err)
+	}
+	got, _, err := s.ListSamples(ctx, "production", "sub2api.revenue.daily", now.Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("样本数 = %d, want 1", len(got))
+	}
+	assertExactMinor(t, "ListSamples", got[0].Value, bigMinor, hugeMinor, negMinor)
+
+	// ---- 最新态路径（Upsert 读回 / Get / ListByEnvironment）----
+	latest := sample("sub2api.revenue.daily")
+	latest.Value = value
+	back, err := s.Upsert(ctx, latest)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	assertExactMinor(t, "Upsert 读回", back.Value, bigMinor, hugeMinor, negMinor)
+
+	fetched, err := s.Get(ctx, "sub2api.revenue.daily", "production")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	assertExactMinor(t, "Get", fetched.Value, bigMinor, hugeMinor, negMinor)
+
+	listed, err := s.ListByEnvironment(ctx, "production")
+	if err != nil {
+		t.Fatalf("ListByEnvironment: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("最新态条数 = %d, want 1", len(listed))
+	}
+	assertExactMinor(t, "ListByEnvironment", listed[0].Value, bigMinor, hugeMinor, negMinor)
+
+	// 再往前一步：值序列化回 JSON 时必须是**数字字面量**，不能是带引号的
+	// 字符串——否则前端契约变了，图上会画不出来。
+	encoded, err := json.Marshal(listed[0].Value)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	body := string(encoded)
+	if !strings.Contains(body, `"amount_minor":`+bigMinor) {
+		t.Fatalf("金额必须原样输出为数字字面量: %s", body)
+	}
+	if strings.Contains(body, `"`+bigMinor+`"`) {
+		t.Fatalf("金额被序列化成了字符串，契约漂移: %s", body)
+	}
+}
+
+// assertExactMinor 断言三个金额字段逐字精确，且类型是 json.Number
+// （不是 float64——那正是被修的退化）。
+func assertExactMinor(t *testing.T, path string, value map[string]any, want ...string) {
+	t.Helper()
+	keys := []string{"amount_minor", "balance_minor_units", "overdraft_minor_units"}
+	for i, key := range keys {
+		raw, ok := value[key]
+		if !ok {
+			t.Fatalf("%s: 缺少 %s", path, key)
+		}
+		num, ok := raw.(json.Number)
+		if !ok {
+			t.Fatalf("%s: %s 类型 = %T（值 %v），want json.Number——float64 会丢精度",
+				path, key, raw, raw)
+		}
+		if num.String() != want[i] {
+			t.Fatalf("%s: %s = %s, want %s（精度丢失）", path, key, num.String(), want[i])
+		}
+		// 能无损转回 int64 才算真的没丢
+		n, err := num.Int64()
+		if err != nil {
+			t.Fatalf("%s: %s 不是整数: %v", path, key, err)
+		}
+		if strconv.FormatInt(n, 10) != want[i] {
+			t.Fatalf("%s: %s 转 int64 后 = %d, want %s", path, key, n, want[i])
+		}
 	}
 }
 

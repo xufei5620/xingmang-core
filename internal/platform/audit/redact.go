@@ -58,11 +58,33 @@ func redactWith(m map[string]any, match func(string) bool) map[string]any {
 			out[k] = redactedPlaceholder
 			continue
 		}
-		if nested, ok := v.(map[string]any); ok {
-			out[k] = redactWith(nested, match)
-			continue
-		}
-		out[k] = v
+		out[k] = redactValue(v, match)
 	}
 	return out
+}
+
+// redactValue 递归处理一个值：map 逐键判定，切片逐元素下钻，其余原样返回。
+//
+// 切片必须下钻（XM-0031）：审计摘要里已经有 target_allowlist、
+// granted_capabilities 这类数组，而 jsonb 允许对象数组。只递归 map 时，
+// `{"connections":[{"token":"..."}]}` 会整个躲过脱敏——一个按键名脱敏的
+// 函数漏掉一整种容器，等于给凭据留了条法定通道。
+//
+// 元素为 map 时递归返回**新的** map，所以切片也要新建而不是复用入参底层
+// 数组：redactWith 承诺不修改入参，就地改写会让调用方手里的原始摘要被悄悄
+// 改掉（而它可能还要用于别的用途，比如返回给 Action 调用方）。
+func redactValue(v any, match func(string) bool) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return redactWith(t, match)
+	case []any:
+		out := make([]any, len(t))
+		for i, item := range t {
+			out[i] = redactValue(item, match)
+		}
+		return out
+	default:
+		// 具体类型的切片（[]string 等）不含嵌套 map，无需下钻。
+		return v
+	}
 }

@@ -41,7 +41,7 @@ uses River's default retry policy and the `default` plus `maintenance` queues.
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `XM_SUB2API_MODE` | `fake` | `fake` 用 `sub2api.NewFake`；`real` 走真实只读客户端（XM-0017） |
+| `XM_SUB2API_MODE` | `fake` | `fake` 用 `sub2api.NewFake`；`real` 走真实只读客户端（XM-0017）。**`production` 环境下 `fake` 启动即拒**，见下 |
 | `XM_SUB2API_INSTANCE_ID` | `sub2api-staging` | 写进观测的 `source`，看板必须显示 |
 | `XM_SUB2API_SYNC_ENABLED` | `true` | 采集链路的停用开关（宪法 26 条） |
 | `XM_SUB2API_SYNC_INTERVAL` | `300s` | 同步周期，下限 1 秒（River 限制） |
@@ -69,6 +69,22 @@ uses River's default retry policy and the `default` plus `maintenance` queues.
 写成 `status=failed`、`last_error_code=not_supported`。配置写错了（endpoint
 不是 https、主机不在自己的 allowlist 里）则归 `internal`——运维一看 error_code
 就知道该去补配置还是去改配置。
+
+### production 环境禁止 fake（XM-0031）
+
+`XM_ENVIRONMENT=production` 且同步开启时，`XM_SUB2API_MODE=fake` 会让进程
+**启动即退出**，不是降级也不是告警。
+
+理由是这条默认值的失效方向：默认就是 `fake`，所以「忘了配」的结果恰好是最
+危险的那一种——构造出来的用户数、收入、余额被原样写进 `ops.metric_observation`
+与样本表，看板再以正常主数字 + 「数据新鲜」徽章呈现它们。只有让进程起不来，
+这个疏忽才必然在上线前被发现；一条启动日志会淹没在噪声里。
+
+生产上两个合法出路：配 `XM_SUB2API_MODE=real`（连接配置齐全就走真实客户端；缺配置
+时每周期写一条 `SyncFailed` + `last_error_code=not_supported`，那是诚实的失败，
+不是假数据），或显式 `XM_SUB2API_SYNC_ENABLED=false` 关掉这条采集链路。
+staging / development 不受限制——真实只读凭据要一个个环境去开，这两个环境仍要靠
+Fake 把整条采集链路跑通。
 
 ### 失败也要写
 

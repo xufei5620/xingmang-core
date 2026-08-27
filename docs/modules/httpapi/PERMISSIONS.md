@@ -93,3 +93,20 @@ Keycloak Realm 角色（staff）
   止血，修复要回到 Realm 那边走变更单；
 - **`Environment` 仍然只来自服务配置。** 令牌里写什么都不作数（规格 §20.5）。
   上面「环境范围」一节的规则因此完全不受影响。
+
+## 未关闭：`dev-header` 模式下 scope 仍是调用方自授
+
+Codex 冷审多次判定 P1（PR #47 第 1 条、PR #48 第 5 条、PR #43 head `ba8e275` 第 1 条
+与 `0a0642c` 第 1 条）：**上面那张权限表在 `dev-header` 模式下不构成鉴权**。
+`RequireScope` 校验的是调用方自己在 `X-Dev-Scopes` 里填写的字符串，而
+`deploy/nginx/launch.conf` 原样透传这些头；任何能到达该栈的人都能自称 `HUMAN`
+并带上 `audit.read`。
+
+XM-0008 把**能力**做好了（`XM_AUTH_MODE=oidc` 时 scope 来自 Realm 角色经
+RoleScopeMap 翻译，生产更是硬性只能用 oidc）。但这条 P1 要到**部署实际切到 oidc**
+那天才算关闭：`deploy/compose/launch.yaml:118-122` 明确写着 staging 仍走
+`dev-header`，`XM_AUTH_MODE` / `XM_OIDC_*` 目前没有在那里透传。
+
+XM-0031 没有动这条——它属于 XM-0008/CR-0001 的执行侧，还需要受信反代边界与限流
+一起落地。在那之前，这些端点不得在可对外到达的环境启用。本节存在的意义是不让上面
+那张表被误读成「已经有鉴权了」。

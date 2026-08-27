@@ -65,19 +65,38 @@ append-only 规则能挡住误操作，但挡不住拥有 DBA 权限的人——
 「这条记录可不可信」由 `VerifyChain` 与 Chain Root 签名回答，不由列表接口顺带回答——
 让读接口顺手做校验，会让一次翻页变成一次全链扫描。
 
-### 待办：索引
+### 索引与投影（XM-0031）
 
-当前没有 `(environment, sequence DESC)` 复合索引，查询靠 `audit_event_sequence_key`
-的反向扫描 + 过滤。事件量小、且各环境事件密度接近时够用；一旦生产事件远多于
-staging，翻 staging 的页会退化成扫大量生产行。链上事件累积到十万量级前应补一条
-forward-only 迁移加该索引（规格 §5.7：不得改已发布的迁移）。
+`ListRecentAuditEvents` 走迁移 `000006` 建的 `(environment, sequence DESC)`
+复合索引。没有它时，规划器只能沿 `audit_event_sequence_key` 倒扫全局链、逐行
+过滤 environment：production 事件远多于 staging 时，翻一页 staging 要扫过中间
+所有 production 行；查一个还没有事件的环境更是扫完整条链才返回空——一个
+`limit=100` 的请求变成全表扫描，那是低成本的数据库 DoS 路径。
+
+查询同时改成**显式列投影**，不再 `SELECT *`。两个 connector 摘要
+（`connector_request_summary` / `connector_response_summary`）是无大小约束的
+jsonb，而读 API 根本不返回它们；`SELECT *` 会把它们一路解码搬进进程内存，于是
+`limit=100` 只是行数上限，不是字节上限——一页也可能是几十 MB。
+
+代价：`Store.ListRecent` 返回的 `Event` 是**读投影**，两个 connector 摘要恒为空，
+**不能对它调用 `ComputeHash`**（缺两个摘要必然对不上）。链校验走 `List` /
+`VerifyChain`，那条路径取全列。两者在类型来源上就分开，比留一句注释可靠。
 
 ## 边界
 
 - **`Canonical()` 的字段集合与顺序一旦上线即冻结**：改动会使全部历史链失效。
   需要新增字段时应发新版规范化函数并在 chain_root 标注版本，而不是就地修改。
-- 脱敏责任在调用方：本包提供 `Redact`/`RedactDefault`，但不代替调用方判断
-  什么是敏感的。
+- **摘要在入链口强制脱敏**（XM-0031）：`ActionSink.Append` 在写链之前把
+  `Before/After` 过一遍 `RedactDefault`。这是纵深防御，不是把责任从 Handler
+  挪过来——Handler 仍然该脱敏（只有它拦得住以别的名字混进来的凭据），但整条链
+  上必须有一个机械保证：一个新写的 Handler 忘了脱敏，凭据就会一路进链再经
+  `/api/v1/audit/events` 回显。宪法 7 条要求边界机械 fail closed，而 ActionSink
+  是所有 Action 审计事件唯一的入链口。
+  脱敏必须在**写入**侧：链不可篡改，明文一旦进链就永远在库、在链根、在备份里，
+  改读 API 只是不再显示它。
+- `Redact`/`RedactDefault` 按**键名**匹配（含大小写变体与嵌套 map、切片下钻），
+  **不判断值本身是否敏感**。藏在值里的凭据要靠上游拦——比如 `endpoint` 里的
+  `user:pass@`，由 `registry.Service.Validate` 在登记时就拒掉。
 - 与 Action 内核的接线（每次执行都写审计事件）**不在本模块**，见 follow-up。
 
 ## 两个只有真实数据库能发现的坑（已修）
@@ -87,3 +106,10 @@ forward-only 迁移加该索引（规格 §5.7：不得改已发布的迁移）�
    现用固定微秒格式并在 `Normalize()` 截断。
 2. **jsonb 数字类型**：读回后数字一律是 `float64`。调用方传 `int` 时表示不一致，
    大整数（>2^53）尤其明显。`Append` 前走 JSON 往返归一化。
+
+   注意本包的归一化方向与 `internal/platform/ops` **相反**且刻意如此：ops 读
+   `value_json` 用 `json.Decoder.UseNumber()` 保 `json.Number`，因为那里装的是
+   金额 minor units，float64 会永久丢精度；本包的目标不是保精度，而是让写入前
+   与读回后的表示**逐字节相同**，链才校验得过。把 UseNumber 搬进本包会让全部
+   历史事件的哈希一次性对不上。审计摘要不承载金额口径；真要放金额，正确做法是
+   让调用方以 decimal string 写入。

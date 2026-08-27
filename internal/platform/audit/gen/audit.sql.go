@@ -252,7 +252,12 @@ func (q *Queries) ListAuditEvents(ctx context.Context, arg ListAuditEventsParams
 }
 
 const listRecentAuditEvents = `-- name: ListRecentAuditEvents :many
-SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type, action_id, action_version, action_run_id, resource_type, resource_id, environment, reason, approval_id, request_id, trace_id, source_ip, before_summary, after_summary, connector_request_summary, connector_response_summary, result, compensation_result, prev_hash, event_hash FROM audit.audit_event
+SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type,
+       action_id, action_version, action_run_id, resource_type, resource_id,
+       environment, reason, approval_id, request_id, trace_id, source_ip,
+       before_summary, after_summary, result, compensation_result,
+       prev_hash, event_hash
+FROM audit.audit_event
 WHERE environment = $1
   AND ($2::bigint = 0 OR sequence < $2::bigint)
 ORDER BY sequence DESC
@@ -265,19 +270,56 @@ type ListRecentAuditEventsParams struct {
 	RowLimit    int32
 }
 
+type ListRecentAuditEventsRow struct {
+	ID                 uuid.UUID
+	Sequence           int64
+	OccurredAt         pgtype.Timestamptz
+	RecordedAt         pgtype.Timestamptz
+	PrincipalID        string
+	PrincipalType      string
+	ActionID           string
+	ActionVersion      string
+	ActionRunID        uuid.UUID
+	ResourceType       string
+	ResourceID         string
+	Environment        string
+	Reason             string
+	ApprovalID         string
+	RequestID          string
+	TraceID            string
+	SourceIp           string
+	BeforeSummary      []byte
+	AfterSummary       []byte
+	Result             string
+	CompensationResult string
+	PrevHash           string
+	EventHash          string
+}
+
 // 看板用的倒序分页读取：只看某个环境，从 before_seq 往回翻。
 // 游标用 sequence 而不是 occurred_at：sequence 由链唯一且严格递增，
 // 时间戳会撞（同一微秒内两条）导致翻页重复或漏读。
 // before_seq = 0 表示「从最新一条开始」，省掉一个「首页」专用查询。
-func (q *Queries) ListRecentAuditEvents(ctx context.Context, arg ListRecentAuditEventsParams) ([]AuditAuditEvent, error) {
+//
+// 显式列而不是 SELECT *（XM-0031，回归 Codex 冷审 PR #47 第 3 条 /
+// PR #43 head `0a0642c` 第 3 条）：两个 connector 摘要
+// （connector_request_summary / connector_response_summary）是 jsonb 且没有
+// 大小约束，而读 API **根本不返回它们**（见 httpapi/auditEventItem 的字段清单）。
+// SELECT * 会把它们一路解码搬进进程内存，于是 limit=100 只是行数上限，不是
+// 字节上限——一页也可能是几十 MB。不取的列就别取。
+//
+// 走 (environment, sequence DESC) 复合索引（迁移 000006）：没有它时，稀疏环境
+// （staging 事件远少于 production）的一页要沿全局 sequence 倒扫整条链才凑够
+// row_limit 行；查一个空环境更是全表。
+func (q *Queries) ListRecentAuditEvents(ctx context.Context, arg ListRecentAuditEventsParams) ([]ListRecentAuditEventsRow, error) {
 	rows, err := q.db.Query(ctx, listRecentAuditEvents, arg.Environment, arg.BeforeSeq, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []AuditAuditEvent{}
+	items := []ListRecentAuditEventsRow{}
 	for rows.Next() {
-		var i AuditAuditEvent
+		var i ListRecentAuditEventsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Sequence,
@@ -298,8 +340,6 @@ func (q *Queries) ListRecentAuditEvents(ctx context.Context, arg ListRecentAudit
 			&i.SourceIp,
 			&i.BeforeSummary,
 			&i.AfterSummary,
-			&i.ConnectorRequestSummary,
-			&i.ConnectorResponseSummary,
 			&i.Result,
 			&i.CompensationResult,
 			&i.PrevHash,

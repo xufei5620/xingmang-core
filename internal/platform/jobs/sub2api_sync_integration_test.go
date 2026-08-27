@@ -182,7 +182,7 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 	// 还能看见前面那段成功——这正是分表的意义。
 	since := time.Now().UTC().Add(-time.Hour)
 	for key := range before {
-		samples, err := store.ListSamples(ctx, environment, key, since, ops.MaxSampleLimit)
+		samples, _, err := store.ListSamples(ctx, environment, key, since, ops.MaxSampleLimit)
 		if err != nil {
 			t.Fatalf("%s ListSamples: %v", key, err)
 		}
@@ -209,7 +209,7 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 	}
 
 	// 窗口过滤：把 since 推到未来，一条都不该返回。
-	future, err := store.ListSamples(ctx, environment, sub2api.MetricUsersTotal,
+	future, _, err := store.ListSamples(ctx, environment, sub2api.MetricUsersTotal,
 		time.Now().UTC().Add(time.Hour), ops.MaxSampleLimit)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 	}
 
 	// limit 生效，且丢掉的是最旧的那些——曲线右端必须始终贴着「现在」。
-	limited, err := store.ListSamples(ctx, environment, sub2api.MetricUsersTotal, since, 1)
+	limited, truncated, err := store.ListSamples(ctx, environment, sub2api.MetricUsersTotal, since, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,5 +228,10 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 	}
 	if limited[0].Status != ops.SyncFailed {
 		t.Fatalf("limit 应保留最新的那条（失败样本）: %+v", limited[0])
+	}
+	// 被裁掉的部分必须如实报告，而不是让调用方以为窗口就这么点数据
+	// （XM-0031，回归 Codex 冷审 PR #48 第 2 条）
+	if !truncated {
+		t.Fatal("窗口内还有更旧的样本时必须报告 truncated")
 	}
 }

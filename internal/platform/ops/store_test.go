@@ -2,6 +2,7 @@ package ops_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -87,7 +88,8 @@ func TestUpsertOverwritesSameKeyAndEnvironment(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("应只有 1 条: %+v", list)
 	}
-	if list[0].Watermark != "wm-2" || list[0].Value["amount_minor"].(float64) != 999999 {
+	// 数字读回是 json.Number 而不是 float64（XM-0031，见 decodeValueJSON）
+	if list[0].Watermark != "wm-2" || list[0].Value["amount_minor"] != json.Number("999999") {
 		t.Fatalf("未被覆盖: %+v", list[0])
 	}
 }
@@ -121,15 +123,14 @@ func TestUpsertIsolatesEnvironments(t *testing.T) {
 
 func TestUpsertUninitializedObservation(t *testing.T) {
 	// 从未成功采集：observed_at 为空，但记录本身要能落库——
-	// 前端需要据此显示「未初始化」而不是干脆看不到这个指标
+	// 前端需要据此显示这个指标存在，而不是干脆看不到它。
 	s := ops.NewStore(testPool(t))
 	ctx := context.Background()
 
+	// 一次都没采过（没有错误码）→ 中性的 uninitialized
 	o := sample("sub2api.revenue.daily")
 	o.ObservedAt = nil
 	o.LastSuccess = nil
-	o.Status = ops.SyncFailed
-	o.LastErrorCode = "never_synced"
 
 	got, err := s.Upsert(ctx, o)
 	if err != nil {
@@ -138,9 +139,29 @@ func TestUpsertUninitializedObservation(t *testing.T) {
 	if got.ObservedAt != nil {
 		t.Fatal("observed_at 应保持为空")
 	}
-	f := got.Freshness(time.Now().UTC())
-	if f.State != ops.StateUninitialized {
+	if f := got.Freshness(time.Now().UTC()); f.State != ops.StateUninitialized {
 		t.Fatalf("state = %q, want uninitialized", f.State)
+	}
+
+	// 第一次采集就失败：同样没有 observed_at，但带着错误码 → failed
+	// （XM-0031，回归 Codex 冷审 PR #43 head `ba8e275` 第 3 条）。
+	// 本用例此前把这条也断言成 uninitialized，固化的正是那个谎。
+	failed := sample("sub2api.cost.daily")
+	failed.ObservedAt = nil
+	failed.LastSuccess = nil
+	failed.Status = ops.SyncFailed
+	failed.LastErrorCode = "never_synced"
+
+	gotFailed, err := s.Upsert(ctx, failed)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	f := gotFailed.Freshness(time.Now().UTC())
+	if f.State != ops.StateFailed {
+		t.Fatalf("首次采集失败 state = %q, want failed", f.State)
+	}
+	if f.LastErrorCode != "never_synced" {
+		t.Fatalf("错误码应随主状态一起返回: %+v", f)
 	}
 }
 
