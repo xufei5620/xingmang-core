@@ -155,6 +155,26 @@ type Config struct {
 	// 必须按进程持有（含 Close），不能让每轮采集各开一个。
 	FinanceNewAPIRevenue metering.RevenueSource
 
+	// RetentionEnabled 决定是否注册保留期清理任务（XM-R012）。
+	//
+	// 与其他采集开关同样的零值纪律：用 Config 字面量构造的调用方必须显式
+	// 打开，DefaultConfig 把它打开。它同时是这条链路的停用开关（宪法 26 条）
+	// ——上线初期想先观察表增长时能关掉，而不必改代码。
+	RetentionEnabled bool
+	// RetentionInterval 是清理周期，默认 DefaultRetentionInterval（24h）。
+	RetentionInterval time.Duration
+	// RetentionRunOnStart 让进程起来就先清一次。
+	//
+	// 默认 **false**（与采集任务相反）：清理是删数据，进程一起来就删让人没有
+	// 机会先看一眼配置对不对。等第一个周期到，运维有一天时间发现配错了。
+	RetentionRunOnStart bool
+	// RetentionRunID 仅供集成测试隔离，生产必须留空。
+	RetentionRunID string
+	// MetricSampleRetentionDays / AlertRetentionDays 是两类保留天数，
+	// 零值回落到各自的默认值（90 / 180）。
+	MetricSampleRetentionDays int
+	AlertRetentionDays        int
+
 	// AlertEvaluateEnabled 决定是否注册告警评估任务（XM-0033）。
 	//
 	// 与 Sub2APISyncEnabled 同样的零值纪律：用 Config 字面量构造的调用方
@@ -231,6 +251,14 @@ func DefaultConfig() Config {
 		// 告警默认就跑：Foundation-A 的退出条件之一是「能触发一条真实告警」
 		// （规格 §22.2），而一个默认关闭的告警系统在需要它的那天多半还是关的。
 		// 没配投递渠道时它照常评估落库，只是每轮打一条 warn 说没投出去。
+		// 保留期清理默认开启（XM-R012）：一张没有清理路径的追加表迟早会成为
+		// 运维事故，而默认关掉等于把这件事留给「以后有人想起来」。
+		// RunOnStart 保持 false——清理是删数据，见那个字段的注释。
+		RetentionEnabled:          true,
+		RetentionInterval:         DefaultRetentionInterval,
+		MetricSampleRetentionDays: DefaultMetricSampleRetentionDays,
+		AlertRetentionDays:        DefaultAlertRetentionDays,
+
 		AlertEvaluateEnabled:            true,
 		AlertEvaluateInterval:           DefaultAlertEvaluateInterval,
 		AlertEvaluateRunOnStart:         true,
@@ -282,6 +310,15 @@ func (c Config) normalized() Config {
 	}
 	if strings.TrimSpace(c.FinanceCollectInstanceID) == "" {
 		c.FinanceCollectInstanceID = defaults.FinanceCollectInstanceID
+	}
+	if c.RetentionInterval == 0 {
+		c.RetentionInterval = defaults.RetentionInterval
+	}
+	if c.MetricSampleRetentionDays <= 0 {
+		c.MetricSampleRetentionDays = defaults.MetricSampleRetentionDays
+	}
+	if c.AlertRetentionDays <= 0 {
+		c.AlertRetentionDays = defaults.AlertRetentionDays
 	}
 	if c.AlertEvaluateInterval == 0 {
 		c.AlertEvaluateInterval = defaults.AlertEvaluateInterval
@@ -605,6 +642,37 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			&river.PeriodicJobOpts{
 				ID:         FinanceCollectJobKind,
 				RunOnStart: cfg.FinanceCollectRunOnStart,
+			},
+		))
+	}
+
+	if cfg.RetentionEnabled {
+		// XM-R012 保留期清理。两个仓储从既有连接池构造；任务只依赖
+		// SamplePruner / AlertPruner 两个单方法接口，换成内存实现就能在没有
+		// 库的机器上跑完整条分批循环。
+		//
+		// **审计事件不在这里**：审计链一条都不删（宪法 11 条 append-only，
+		// 删中间任意一条都会断链，而且库层规则会让 DELETE 静默空转）。
+		// 理由完整写在 retention.go 的文件头。
+		river.AddWorker(workers, NewRetentionWorker(RetentionOptions{
+			Logger:              cfg.Logger,
+			Environment:         cfg.Environment,
+			Samples:             ops.NewStore(pool),
+			Alerts:              alerts.NewStore(pool),
+			SampleRetentionDays: cfg.MetricSampleRetentionDays,
+			AlertRetentionDays:  cfg.AlertRetentionDays,
+		}))
+		periodic = append(periodic, river.NewPeriodicJob(
+			river.PeriodicInterval(cfg.RetentionInterval),
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := RetentionArgs{RunID: cfg.RetentionRunID}
+				opts := args.InsertOpts()
+				opts.UniqueOpts.ByPeriod = cfg.RetentionInterval
+				return args, &opts
+			},
+			&river.PeriodicJobOpts{
+				ID:         RetentionJobKind,
+				RunOnStart: cfg.RetentionRunOnStart,
 			},
 		))
 	}

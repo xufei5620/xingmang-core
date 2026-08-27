@@ -482,3 +482,18 @@ func (s *Store) ListSilences(ctx context.Context, environment string, limit int3
 	}
 	return out, nil
 }
+
+// PruneResolved 删除 resolved_at 早于 cutoff 的**已解决**告警，一次最多 batchSize 行。
+//
+// XM-R012（Issue #75）。只删已解决的：活跃告警（OPEN / ACKNOWLEDGED /
+// SILENCED / REOPENED）永远不删，不管它多老——一条挂了半年没人管的告警恰恰是
+// 最该被看见的那条，清掉它等于用清理任务掩盖运维欠账。判据在 SQL 里
+// （db/queries/alerts.sql），不在这里，于是绕过本方法的调用也删不掉活跃告警。
+//
+// 返回本批实际删除的行数；调用方循环到返回值 < batchSize 为止。
+func (s *Store) PruneResolved(ctx context.Context, cutoff time.Time, batchSize int32) (int64, error) {
+	return s.q.PruneResolvedAlerts(ctx, gen.PruneResolvedAlertsParams{
+		Cutoff:    ts(cutoff.UTC()),
+		BatchSize: batchSize,
+	})
+}

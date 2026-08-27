@@ -12,10 +12,10 @@ INSERT INTO audit.audit_event (
     environment, reason, approval_id, request_id, trace_id, source_ip,
     before_summary, after_summary, connector_request_summary,
     connector_response_summary, result, compensation_result,
-    prev_hash, event_hash
+    prev_hash, event_hash, canonical_version
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+    $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
 )
 RETURNING *;
 
@@ -44,7 +44,7 @@ SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type,
        action_id, action_version, action_run_id, resource_type, resource_id,
        environment, reason, approval_id, request_id, trace_id, source_ip,
        before_summary, after_summary, result, compensation_result,
-       prev_hash, event_hash
+       prev_hash, event_hash, canonical_version
 FROM audit.audit_event
 WHERE environment = @environment
   AND (@before_seq::bigint = 0 OR sequence < @before_seq::bigint)

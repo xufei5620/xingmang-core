@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/oidcauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
@@ -39,6 +40,10 @@ type config struct {
 	// **部署一致要靠 .env**——两个进程配成不同的值，会让「看板说还有 11 天」
 	// 与「告警说已经低于阈值」同时出现在一个人面前。
 	FinanceRunwayThresholds finance.RunwayThresholds
+
+	// RateLimit 是 /api/v1 的限流配额（XM-R011）。
+	// 零值走 httpapi 的默认值；两项都可用环境变量调，但**关不掉**。
+	RateLimit httpapi.RateLimitConfig
 }
 
 // authMode 是身份解析器的选择开关（XM_AUTH_MODE）。
@@ -90,6 +95,32 @@ func configFromEnv(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("REQUEST_TIMEOUT must be positive, got %s", v)
 		}
 		c.RequestTimeout = d
+	}
+
+	// 限流配额（XM-R011）。非法值一律拒绝启动，不回落到默认值：
+	// 「以为调宽了其实没生效」会让人在一次真实的流量高峰里查错方向。
+	if v := strings.TrimSpace(getenv("XM_RATE_LIMIT_PER_MINUTE")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return config{}, fmt.Errorf("XM_RATE_LIMIT_PER_MINUTE: %w", err)
+		}
+		if n <= 0 {
+			// 0 或负数最自然的读法是「不限流」，但那正是本任务要消灭的状态。
+			// 要放宽就填一个大数字——那是一个看得见的决定。
+			return config{}, fmt.Errorf(
+				"XM_RATE_LIMIT_PER_MINUTE 必须为正（限流不可关闭；要放宽请填一个更大的值），got %s", v)
+		}
+		c.RateLimit.PerMinute = n
+	}
+	if v := strings.TrimSpace(getenv("XM_RATE_LIMIT_BURST")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return config{}, fmt.Errorf("XM_RATE_LIMIT_BURST: %w", err)
+		}
+		if n <= 0 {
+			return config{}, fmt.Errorf("XM_RATE_LIMIT_BURST 必须为正，got %s", v)
+		}
+		c.RateLimit.Burst = n
 	}
 
 	if value := strings.TrimSpace(getenv("XM_FINANCE_FAKE_SEED")); value != "" {

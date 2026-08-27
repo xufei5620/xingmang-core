@@ -27,7 +27,8 @@ const MaxSampleLimit int32 = 1000
 //   - ops.metric_observation：每个 (metric_key, environment) 只保留最新一条，
 //     回答「现在是什么」，整行覆盖；
 //   - ops.metric_observation_sample：追加型样本，回答「这段时间是怎么变的」，
-//     只有 INSERT 与 SELECT，没有任何 UPDATE/DELETE 路径。
+//     只有 INSERT 与 SELECT，没有 UPDATE 路径；唯一的 DELETE 是保留期清理
+//     （PruneSamples，XM-R012），按时间批量删除过期样本，不改任何一行的内容。
 type Store struct {
 	// pool 只服务于需要**多条语句原子生效**的写入（UpsertWithSample）。
 	// 单语句路径继续走 q，不必每次都开一个事务。
@@ -394,4 +395,22 @@ func (s *Store) ListSamples(
 		})
 	}
 	return out, truncated, nil
+}
+
+// PruneSamples 删除 synced_at 早于 cutoff 的样本，**一次最多 batchSize 行**。
+//
+// XM-R012（Codex 冷审 #48 第 8 条）：这张表 5 分钟粒度 ≈ 288 条/日/指标，
+// 十几条指标一年就是百万量级，而在此之前没有任何清理路径。
+//
+// 返回本批实际删除的行数。调用方循环调用直到返回值 < batchSize——
+// 分批的理由（长事务、行锁、WAL、与采集任务抢同一张表）见 db/queries/ops.sql。
+//
+// **不在这里循环**：一个「删到干净为止」的方法在积压很大时会跑很久，而它的
+// 调用方（River 任务）需要在批之间检查 ctx 是否已取消、并把进度记进日志。
+// 把循环留给调用方，这一层只负责「删一批」这件能被清楚描述的事。
+func (s *Store) PruneSamples(ctx context.Context, cutoff time.Time, batchSize int32) (int64, error) {
+	return s.q.PruneMetricSamples(ctx, gen.PruneMetricSamplesParams{
+		Cutoff:    pgtype.Timestamptz{Time: cutoff.UTC(), Valid: true},
+		BatchSize: batchSize,
+	})
 }

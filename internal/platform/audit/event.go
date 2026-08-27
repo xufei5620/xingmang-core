@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,6 +67,13 @@ type Event struct {
 
 	PrevHash  string
 	EventHash string
+
+	// CanonicalVersion 是算 EventHash 时用的编码版本（XM-R009）。
+	//
+	// 逐行存，因为**换编码会让既有链的重算哈希全部对不上**：不记住每一行
+	// 当初用的是哪版，一次修复就会把整条历史链判成「已被篡改」。
+	// 0 视作 1，兼容内存里构造的零值 Event（库里那一列的 DEFAULT 也是 1）。
+	CanonicalVersion int16
 }
 
 // canonicalJSON 把 map 按键排序后序列化，保证确定性。
@@ -101,11 +109,160 @@ func canonicalJSON(m map[string]any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// canonical 编码版本（XM-R009）。
+//
+// 版本号逐行存在 audit.audit_event.canonical_version 里，校验时按它选编码。
+// **旧版本永不删除**：删掉 v1 就等于宣布所有历史行无法校验。
+const (
+	// CanonicalV1 是上线时的编码：`key=value\n` 直接拼接，**值不转义**。
+	//
+	// 它可构造碰撞（见 canonicalV1 的注释），**冻结在这里只为校验历史行**，
+	// 任何新写入都不得再用它。
+	CanonicalV1 int16 = 1
+	// CanonicalV2 是长度前缀编码：`key=<字节数>:value\n`。
+	CanonicalV2 int16 = 2
+
+	// CurrentCanonicalVersion 是新事件一律采用的版本。
+	CurrentCanonicalVersion = CanonicalV2
+)
+
 // Canonical 返回参与哈希的规范化字节序列。
 //
 // **字段集合与顺序一旦上线即冻结**：改动会使全部历史链失效。
 // 用换行分隔并显式写字段名，让人能肉眼比对。
+//
+// 编码按 e.CanonicalVersion 选：0 视作 1，兼容「从没写过这一列」的历史行
+// （列的 DEFAULT 是 1，但内存里构造的零值 Event 拿到的是 0）。
 func (e Event) Canonical() ([]byte, error) {
+	switch e.CanonicalVersion {
+	case 0, CanonicalV1:
+		return e.canonicalV1()
+	case CanonicalV2:
+		return e.canonicalV2()
+	default:
+		// 认不出的版本**报错而不是挑一个顶上**：挑错编码算出来的哈希必然
+		// 对不上，那会把「我们不认识这个版本」显示成「这一行被篡改了」，
+		// 于是排查方向从「代码版本不对」跑偏到「有人动了审计库」。
+		return nil, fmt.Errorf("未知的 canonical 版本 %d：这条记录需要更新版的校验代码",
+			e.CanonicalVersion)
+	}
+}
+
+// canonicalFields 是参与哈希的字段序列。
+//
+// 抽出来给两个版本共用：**字段集合与顺序必须逐字一致**，否则 v1 与 v2 校验
+// 的就不是同一份内容了。两个版本的差别只在「怎么把这些 (key, value) 拼成
+// 字节」，不在「哪些字段参与」。
+func (e Event) canonicalFields() ([][2]string, error) {
+	before, err := canonicalJSON(e.BeforeSummary)
+	if err != nil {
+		return nil, err
+	}
+	after, err := canonicalJSON(e.AfterSummary)
+	if err != nil {
+		return nil, err
+	}
+	creq, err := canonicalJSON(e.ConnectorRequestSummary)
+	if err != nil {
+		return nil, err
+	}
+	cresp, err := canonicalJSON(e.ConnectorResponseSummary)
+	if err != nil {
+		return nil, err
+	}
+	return [][2]string{
+		{"id", e.ID.String()},
+		{"sequence", fmt.Sprintf("%d", e.Sequence)},
+		{"occurred_at", e.OccurredAt.UTC().Format(occurredAtLayout)},
+		{"principal_id", e.PrincipalID},
+		{"principal_type", string(e.PrincipalType)},
+		{"action_id", e.ActionID},
+		{"action_version", e.ActionVersion},
+		{"action_run_id", e.ActionRunID.String()},
+		{"resource_type", e.ResourceType},
+		{"resource_id", e.ResourceID},
+		{"environment", e.Environment},
+		{"reason", e.Reason},
+		{"approval_id", e.ApprovalID},
+		{"request_id", e.RequestID},
+		{"trace_id", e.TraceID},
+		{"source_ip", e.SourceIP},
+		{"before_summary", string(before)},
+		{"after_summary", string(after)},
+		{"connector_request_summary", string(creq)},
+		{"connector_response_summary", string(cresp)},
+		{"result", string(e.Result)},
+		{"compensation_result", e.CompensationResult},
+		{"prev_hash", e.PrevHash},
+	}, nil
+}
+
+// canonicalV1 是上线时的编码。**冻结：一个字节都不许改。**
+//
+// 它有一个已知缺陷（XM-R009，Codex 冷审 #35）：值不转义，于是含换行的字段
+// 能伪造出后面的字段。
+//
+//	A：reason = "巡检\napproval_id=APR-1"，approval_id = ""
+//	B：reason = "巡检"，                    approval_id = "APR-1"
+//
+// 两者拼出来的字节完全相同 → 同一个哈希 → 链上分不出「批过」和「没批过」。
+//
+// 那为什么还留着：历史行的哈希就是这么算出来的。删掉它，那些行会全部
+// 重算失败、报成「已被篡改」——用一次修复毁掉唯一的证据链，比漏洞本身更糟。
+// 新写入一律走 v2（见 CurrentCanonicalVersion），所以这条路径只会越来越少被走到。
+func (e Event) canonicalV1() ([]byte, error) {
+	fields, err := e.canonicalFields()
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	for _, kv := range fields {
+		buf.WriteString(kv[0])
+		buf.WriteByte('=')
+		buf.WriteString(kv[1])
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes(), nil
+}
+
+// canonicalV2 是长度前缀编码：`key=<字节数>:value\n`。
+//
+// **为什么长度前缀而不是转义**：转义要选一套转义规则，而每一套都得回答
+// 「转义字符本身怎么写」，写错一处就又是一个碰撞。长度前缀没有这个问题——
+// 读的人拿到字节数就知道值到哪儿结束，值里含什么都不影响解析。
+//
+// **为什么不整体上 JSON**：也能做，但会丢掉这份编码现在的一个实际好处——
+// 人能把它打印出来肉眼比对（原注释里点名了这一点）。长度前缀两者兼得：
+// 仍是一行一个字段、字段名明文，只是值前面多一个数字。
+//
+// **单射性**：字段名与顺序是编译期常量（canonicalFields 里写死的字面量，
+// 没有一个来自用户输入），所以每一行的 `key=` 前缀是固定的；其后的
+// `<字节数>:` 唯一确定了值的边界。于是「字节序列 → (字段, 值) 序列」的
+// 还原是唯一的，两组不同的值不可能拼出同一串字节。
+//
+// 末尾的 `\n` 因此只是给人看的分隔，不承担任何解析职责——这正是 v1 的
+// 问题所在：它让 `\n` 同时当分隔符和普通数据。
+func (e Event) canonicalV2() ([]byte, error) {
+	fields, err := e.canonicalFields()
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	for _, kv := range fields {
+		buf.WriteString(kv[0])
+		buf.WriteByte('=')
+		buf.WriteString(strconv.Itoa(len(kv[1])))
+		buf.WriteByte(':')
+		buf.WriteString(kv[1])
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes(), nil
+}
+
+// canonicalV1Legacy 保留旧实现的行内写法，供测试逐字比对用。
+//
+//nolint:unused // 只在 event_test.go 里被调用
+func (e Event) canonicalV1Legacy() ([]byte, error) {
 	before, err := canonicalJSON(e.BeforeSummary)
 	if err != nil {
 		return nil, err

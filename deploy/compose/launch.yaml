@@ -130,6 +130,12 @@ services:
       DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30s}
+      # /api/v1 的限流配额（XM-R011）。每 (Principal, 路由) 每分钟的请求数 +
+      # 瞬时并发额度。**关不掉**：填 0 或负数会让 API 拒绝启动——要放宽就填一个
+      # 更大的数字，那是一个看得见的决定。探针（/healthz、/readyz）不受影响。
+      # ⚠️ 计数在**进程内存**里，多副本时每个副本各算各的（实际额度是副本数倍）。
+      XM_RATE_LIMIT_PER_MINUTE: ${XM_RATE_LIMIT_PER_MINUTE:-120}
+      XM_RATE_LIMIT_BURST: ${XM_RATE_LIMIT_BURST:-20}
       # --- 请求详情 / reqlog 只读网关（XM-0039，交接文档 §9.4）--------------
       # 数据源是生产上已在运行的**外挂**「请求审计系统」，平台只做带权限与
       # 审计的只读网关：请求正文永不落平台库、不缓存、默认不可导出。
@@ -247,6 +253,23 @@ services:
       XM_NEWAPI_REVENUE_DSN: ${XM_NEWAPI_REVENUE_DSN:-}
       XM_NEWAPI_REVENUE_PASSWORD_REF: ${XM_NEWAPI_REVENUE_PASSWORD_REF:-}
       XM_NEWAPI_REVENUE_PASSWORD: ${XM_NEWAPI_REVENUE_PASSWORD:-}
+      # --- 保留期清理（XM-R012）---------------------------------------------
+      # ops.metric_observation_sample 以 5 分钟粒度追加（约 288 条/日/指标），
+      # 在此之前没有任何清理路径。默认开启：一张没有清理路径的追加表迟早会
+      # 成为运维事故。关掉它是一个显式的停用动作（宪法 26 条）。
+      #
+      # ⚠️ 审计事件**不在清理范围内**，因此这里没有「审计保留天数」这个变量。
+      #    审计链 append-only（宪法 11 条），删中间任意一条都会断链，而且
+      #    audit.audit_event 上的 DO INSTEAD NOTHING 规则让 DELETE 静默空转。
+      #    理由完整写在 internal/platform/jobs/retention.go 的文件头。
+      #    审计的容量问题走归档（导出 + 链根锚定后转冷存储），是另一件事。
+      #
+      # 天数填 0 或负数会让 worker **拒绝启动**：0 天最自然的读法是「不保留」，
+      # 也就是把整张表删空，而想表达「不清理」的人该来关上面那个开关。
+      XM_RETENTION_ENABLED: ${XM_RETENTION_ENABLED:-true}
+      XM_RETENTION_INTERVAL: ${XM_RETENTION_INTERVAL:-24h}
+      XM_METRIC_SAMPLE_RETENTION_DAYS: ${XM_METRIC_SAMPLE_RETENTION_DAYS:-90}
+      XM_ALERT_RETENTION_DAYS: ${XM_ALERT_RETENTION_DAYS:-180}
       # --- 告警中心（XM-0033，规格 §9.3 / §9.4）-----------------------------
       # 与 Sub2API 那几项相反：告警渠道**配错就让进程起不来**（ref 拼错、
       # URL 不是 https、只配了一半）。理由见 docs/modules/alerts/README.md——

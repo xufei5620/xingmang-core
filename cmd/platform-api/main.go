@@ -193,6 +193,7 @@ func main() {
 		// 阈值从环境变量解析后注入，与 platform-worker 的告警规则同源
 		FinanceRunwayThresholds: cfg.FinanceRunwayThresholds,
 		RequestTimeout:          cfg.RequestTimeout,
+		RateLimit:               cfg.RateLimit,
 	})
 
 	srv := &http.Server{

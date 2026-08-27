@@ -40,6 +40,17 @@ PostgreSQL 规则让 DELETE/UPDATE 成为**静默空操作**而非报错。因�
 「执行后值没变」，不是「语句报错」。部署时还应对应用账号
 `REVOKE DELETE, UPDATE ON audit.audit_event`——规则是第二道防线。
 
+⚠️ 那个 `REVOKE` 今天**没有生效**（XM-R012 查证）：当前部署里应用账号
+既是超级用户又是表 owner，超级用户绕过一切权限检查。审计表实际靠的是上面
+那两条规则，它们与角色无关，超级用户也拦得住；但 `action.action_run` 与
+`ops.metric_observation_sample` 没有规则，对它们来说这句承诺目前是空的。
+现状证据查询：`deploy/bootstrap/002_grants_evidence.sql`。要让承诺变真需要把
+迁移用的 owner 与应用用的受限角色拆开，属于部署拓扑变更，另立任务。
+
+保留期清理**不动审计**：一条都不删。理由见
+`internal/platform/jobs/retention.go` 文件头（宪法 11 条 append-only；
+删中间任意一条会断链；而且上面的规则会让 DELETE 静默空转）。
+
 ## 并发追加
 
 `Append` 在事务内先取 `pg_advisory_xact_lock(4771001)`，串行化「读链尖 →

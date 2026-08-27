@@ -162,6 +162,51 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.FinanceCollectRequestTimeout = timeout
 	}
 
+	// XM-R012：保留期清理。天数可配，**清理本身没有关闭开关以外的旁路**——
+	// 一张没有清理路径的追加表迟早会成为运维事故。
+	//
+	// ⚠️ 审计事件不在清理范围内（宪法 11 条 append-only），所以这里没有
+	// 「审计保留天数」这个变量：给一个删不掉东西的旋钮，比不给更误导。
+	if value := getenv("XM_RETENTION_ENABLED"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("retention enabled: %w", err)
+		}
+		config.RetentionEnabled = enabled
+	}
+	if value := getenv("XM_RETENTION_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("retention interval: %w", err)
+		}
+		config.RetentionInterval = interval
+	}
+	if value := strings.TrimSpace(getenv("XM_METRIC_SAMPLE_RETENTION_DAYS")); value != "" {
+		days, err := strconv.Atoi(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("metric sample retention days: %w", err)
+		}
+		if days <= 0 {
+			// 0 最自然的读法是「不保留」，也就是把整张表删空——而想表达
+			// 「不清理」的人该去关 XM_RETENTION_ENABLED。两种意图差得太远，
+			// 不能让一个手滑的 0 去猜。
+			return jobs.Config{}, fmt.Errorf(
+				"XM_METRIC_SAMPLE_RETENTION_DAYS 必须为正（想停清理请置 XM_RETENTION_ENABLED=false），got %s", value)
+		}
+		config.MetricSampleRetentionDays = days
+	}
+	if value := strings.TrimSpace(getenv("XM_ALERT_RETENTION_DAYS")); value != "" {
+		days, err := strconv.Atoi(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("alert retention days: %w", err)
+		}
+		if days <= 0 {
+			return jobs.Config{}, fmt.Errorf(
+				"XM_ALERT_RETENTION_DAYS 必须为正（想停清理请置 XM_RETENTION_ENABLED=false），got %s", value)
+		}
+		config.AlertRetentionDays = days
+	}
+
 	// XM-0033：告警评估与投递（规格 §9.3 / §9.4）。
 	//
 	// 投递渠道的三个变量只**读进配置、不解析**：Bot Token 只经 CredentialRef

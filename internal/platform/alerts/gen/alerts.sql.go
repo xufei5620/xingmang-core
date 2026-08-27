@@ -611,6 +611,42 @@ func (q *Queries) MarkAlertNotifyFailed(ctx context.Context, arg MarkAlertNotify
 	return err
 }
 
+const pruneResolvedAlerts = `-- name: PruneResolvedAlerts :execrows
+WITH victims AS (
+    SELECT a.id FROM alerts.alert a
+    WHERE a.status = 'RESOLVED'
+      AND a.resolved_at IS NOT NULL
+      AND a.resolved_at < $1
+    ORDER BY a.resolved_at
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM alerts.alert a
+USING victims v
+WHERE a.id = v.id
+`
+
+type PruneResolvedAlertsParams struct {
+	Cutoff    pgtype.Timestamptz
+	BatchSize int32
+}
+
+// XM-R012 告警历史保留期清理（Issue #75）。
+//
+// **只删已解决的告警**（RESOLVED），而且只删 resolved_at 早于保留期的。
+// 活跃告警（OPEN / ACKNOWLEDGED / SILENCED / REOPENED）永远不删，不管它多老:
+// 一条挂了半年没人管的告警恰恰是最该被看见的那条，把它清掉等于用清理任务
+// 掩盖运维欠账。
+//
+// 分批与 ops.PruneMetricSamples 同理（长事务 + 行锁 + WAL），细节见那里。
+func (q *Queries) PruneResolvedAlerts(ctx context.Context, arg PruneResolvedAlertsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, pruneResolvedAlerts, arg.Cutoff, arg.BatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const resolveAlert = `-- name: ResolveAlert :one
 UPDATE alerts.alert SET
     status      = 'RESOLVED',
