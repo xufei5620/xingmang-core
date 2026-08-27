@@ -18,6 +18,7 @@ export const tokens = {
     success: "var(--xm-color-success)",
     warning: "var(--xm-color-warning)",
     overlay: "var(--xm-color-overlay)",
+    tableStripe: "var(--xm-color-table-stripe)",
   },
   /** 深色左侧导航专用。与 color.* 分开是因为它**不随主题翻转**——
    *  浅色运营台配深色导航是这套设计的固定结构（UI 交接文档 §11.1）。 */

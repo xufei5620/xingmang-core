@@ -14,7 +14,9 @@
 > #2 / #5 一并答复,逐条记录在 `ADMIN-IA.md` §八。
 > **第 1 片(导航重构与路由迁移)已实施 —— XM-0042,PR #85,已合入 `9a02aae`。**
 >
-> **运营工作台 + 全局搜索已实施 —— XM-0043,分支 `ai/claude/XM-0043-ops-workbench`。**
+> **运营工作台 + 全局搜索已实施 —— XM-0043,PR #87,已合入 `fa1cfd2`。**
+>
+> **DataTableV2 + PageState 已实施 —— XM-0045,分支 `ai/claude/XM-0045-datatable-pagestate`。**
 > (按 UI 交接文档 §15 的阶段编号它是阶段 2;本文件 §4 的表里排在第 3 行,
 > 因为 Design Tokens 与 AdminShell 那一片已由 XM-0040 提前完成。)
 
@@ -198,7 +200,7 @@
 |---|---|---|
 | 2 | Design Tokens 对齐(靛蓝/深色侧栏/浅色内容区)+ AdminShell 完善 + PageState 八状态 —— ✅ 已由 **XM-0040** 完成(UI 交接阶段 1) | 纯前端 |
 | 3 | 运营工作台 + 全局搜索 Command Palette —— ✅ **已实施(XM-0043)** | 工作台接现有 Query;搜索这一版**只导航**,索引来自 `navigation.ts`,因此**不需要新端点**。对象搜索(用户/订单/渠道/服务器/告警编号)留待后端搜索端点就绪 |
-| 4 | DataTableV2 + Saved View + BulkActionBar | 纯前端;是 5/6/7 的前置 |
+| 4 | DataTableV2 + Saved View + BulkActionBar —— ✅ **已实施(XM-0045)** | 纯前端;是 5/6/7 的前置。**SavedView 只做会话内**(交接文档把持久化排在后面的阶段,界面上写明「不会同步或写入浏览器存储」);**BulkActionBar 只留插槽**——批量操作是写操作,得走 Action 且 L2 以上要审批 |
 | 5 | 平台「渠道管理」+「上游管理」+ 渠道/上游详情页 | **XM-0037 成本线**(台账+登记簿) |
 | 6 | 平台「用户管理」列表+详情(日/周/月聚合) | users Query |
 | 7 | 平台「支付与财务」5 子页签 + 开票详情 | 支付 Connector(M3)+ XM-0037 + #6 拍板 |

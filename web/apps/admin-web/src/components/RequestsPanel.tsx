@@ -1,7 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { FreshnessBadge, FreshnessNote, formatLocalTimestamp } from "@xingmang/ui-admin";
-import { Badge, Button, EmptyState, Input, Select } from "@xingmang/ui-primitives";
-import { useState } from "react";
+import {
+  DataTableV2,
+  FreshnessBadge,
+  formatLocalTimestamp,
+  FreshnessNote,
+  PageState,
+  type DataTableColumn,
+} from "@xingmang/ui-admin";
+import { Badge, Button, Input, Select } from "@xingmang/ui-primitives";
+import { useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   listPlatformRequests,
@@ -22,8 +29,6 @@ import {
 } from "../lib/requests";
 import { ApiStateView } from "./ApiStateView";
 
-const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";
-const TD = "px-3 py-2 align-top text-sm text-fg";
 
 /** 状态筛选的选项。空串是「全部」——Radix Select 不接受空串作为 value，
  *  所以用一个显式的哨兵值，在读写两侧各翻译一次。 */
@@ -144,39 +149,43 @@ export function RequestsPanel({ platform }: { platform: string }) {
               </p>
             </div>
 
-            {page.items.length === 0 ? (
-              <EmptyState
-                title={hasFilters ? "没有符合条件的请求" : "这个平台还没有请求记录"}
-                description={
-                  hasFilters
-                    ? "换个条件，或清除筛选看全部。也可能是这段时间已经出了保留窗口。"
-                    : "请求审计系统还没有抄到这个平台的调用；也可能这条链路尚未接通。"
-                }
-                action={
-                  hasFilters ? (
-                    <Button variant="secondary" size="sm" onClick={clearFilters}>
-                      清除筛选
-                    </Button>
-                  ) : undefined
-                }
-              />
-            ) : (
-              <RequestTable platform={platform} rows={page.items} />
-            )}
-
-            <Pager
-              hasPrev={cursorStack.length > 0}
-              hasNext={page.nextCursor !== ""}
-              onPrev={() => {
-                const stack = [...cursorStack];
-                const prev = stack.pop() ?? "";
-                setCursorStack(stack);
-                setCursor(prev);
-              }}
-              onNext={() => {
-                setCursorStack([...cursorStack, cursor]);
-                setCursor(page.nextCursor);
-              }}
+            <RequestTable
+              platform={platform}
+              rows={page.items}
+              emptyState={
+                <PageState
+                  kind="empty"
+                  title={hasFilters ? "没有符合条件的请求" : "这个平台还没有请求记录"}
+                  description={
+                    hasFilters
+                      ? "换个条件，或清除筛选看全部。也可能是这段时间已经出了保留窗口。"
+                      : "请求审计系统还没有抄到这个平台的调用；也可能这条链路尚未接通。"
+                  }
+                  action={
+                    hasFilters ? (
+                      <Button variant="secondary" size="sm" onClick={clearFilters}>
+                        清除筛选
+                      </Button>
+                    ) : undefined
+                  }
+                />
+              }
+              footerExtra={
+                <Pager
+                  hasPrev={cursorStack.length > 0}
+                  hasNext={page.nextCursor !== ""}
+                  onPrev={() => {
+                    const stack = [...cursorStack];
+                    const prev = stack.pop() ?? "";
+                    setCursorStack(stack);
+                    setCursor(prev);
+                  }}
+                  onNext={() => {
+                    setCursorStack([...cursorStack, cursor]);
+                    setCursor(page.nextCursor);
+                  }}
+                />
+              }
             />
           </div>
         )}
@@ -297,77 +306,122 @@ function fromLocalInput(local: string): string {
   return d.toISOString();
 }
 
-function RequestTable({ platform, rows }: { platform: string; rows: RequestSummary[] }) {
+function requestColumns(platform: string): DataTableColumn<RequestSummary>[] {
+  return [
+    {
+      id: "time",
+      header: "时间",
+      primary: true,
+      value: (row) => row.occurred_at,
+      cell: (row) => (
+        <span className="tabular-nums whitespace-nowrap">
+          {formatLocalTimestamp(row.occurred_at)}
+          {row.stream ? <p className="text-xs text-fg-muted">流式</p> : null}
+        </span>
+      ),
+    },
+    {
+      id: "username",
+      header: "用户",
+      value: (row) => row.username,
+      cell: (row) =>
+        isUnmappedUser(row.username) ? (
+          <span
+            className="text-fg-muted"
+            title={`令牌 ${row.token_prefix} 没有映射到用户名——不是「没有用户」，是没查到它叫什么`}
+          >
+            {formatUsername(row.username)}
+          </span>
+        ) : (
+          <span className="font-medium">{row.username}</span>
+        ),
+    },
+    {
+      id: "model",
+      header: "模型",
+      value: (row) => row.model,
+      cell: (row) => row.model || MISSING_VALUE_TEXT,
+    },
+    {
+      id: "status",
+      header: "状态",
+      value: (row) => describeStatus(row.status).label,
+      // 按状态码排，不按文案：「成功」「失败」按中文比较排出来没有意义
+      sortAs: (row) => row.status,
+      cell: (row) => <StatusBadge status={row.status} />,
+    },
+    {
+      id: "duration",
+      header: "耗时",
+      numeric: true,
+      value: (row) => row.duration_ms,
+      cell: (row) => formatMillis(row.duration_ms),
+    },
+    {
+      id: "ttfb",
+      header: "首字节",
+      numeric: true,
+      headerTitle:
+        "首字节时间。「—」表示上游没记（通常是非流式请求），与 0 ms（缓存命中）不是一回事",
+      value: (row) => row.ttfb_ms,
+      cell: (row) => formatTTFB(row.ttfb_ms),
+    },
+    {
+      id: "tokens",
+      header: "Token",
+      numeric: true,
+      headerTitle: "输入 / 输出 / 缓存",
+      // 三个数拼成的一格没有单一排序键，所以只显示、不排序
+      cell: (row) => formatTokens(row),
+    },
+    {
+      id: "clientIp",
+      header: "来源 IP",
+      value: (row) => row.client_ip,
+      headerTitle: "末段已脱敏",
+      cell: (row) => (
+        <span className="font-mono text-xs">{row.client_ip || MISSING_VALUE_TEXT}</span>
+      ),
+    },
+    {
+      id: "detail",
+      header: "详情",
+      cell: (row) => (
+        // 核心对象走完整详情页，不用右侧抽屉（§11.4）。
+        // 链接而不是按钮：详情页要能被贴给同事、被收藏
+        <Link
+          to={`/platforms/${platform}/requests/${encodeURIComponent(row.id)}`}
+          className="text-sm font-medium text-accent hover:underline"
+        >
+          查看内容
+        </Link>
+      ),
+    },
+  ];
+}
+
+function RequestTable({
+  platform,
+  rows,
+  emptyState,
+  footerExtra,
+}: {
+  platform: string;
+  rows: RequestSummary[];
+  emptyState: ReactNode;
+  footerExtra: ReactNode;
+}) {
   return (
-    // 横向溢出只发生在表格容器内部，不撑宽整个页面（§11.2）
-    <div className="overflow-x-auto rounded-lg border border-edge bg-surface shadow-sm">
-      <table className="w-full border-collapse">
-        <thead className="border-b border-edge bg-surface-muted">
-          <tr>
-            <th className={TH}>时间</th>
-            <th className={TH}>用户</th>
-            <th className={TH}>模型</th>
-            <th className={TH}>状态</th>
-            <th className={TH}>耗时</th>
-            <th className={TH}>首字节</th>
-            <th className={TH} title="输入 / 输出 / 缓存">
-              Token
-            </th>
-            <th className={TH}>来源 IP</th>
-            <th className={TH}>详情</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.id} className="border-b border-edge last:border-b-0">
-              <td className={`${TD} tabular-nums whitespace-nowrap`}>
-                {formatLocalTimestamp(row.occurred_at)}
-                {row.stream ? (
-                  <p className="text-xs text-fg-muted">流式</p>
-                ) : null}
-              </td>
-              <td className={TD}>
-                {isUnmappedUser(row.username) ? (
-                  <span
-                    className="text-fg-muted"
-                    title={`令牌 ${row.token_prefix} 没有映射到用户名——不是「没有用户」，是没查到它叫什么`}
-                  >
-                    {formatUsername(row.username)}
-                  </span>
-                ) : (
-                  <span className="font-medium">{row.username}</span>
-                )}
-              </td>
-              <td className={TD}>{row.model || MISSING_VALUE_TEXT}</td>
-              <td className={TD}>
-                <StatusBadge status={row.status} />
-              </td>
-              <td className={`${TD} tabular-nums`}>{formatMillis(row.duration_ms)}</td>
-              <td
-                className={`${TD} tabular-nums`}
-                title="首字节时间。「—」表示上游没记（通常是非流式请求），与 0 ms（缓存命中）不是一回事"
-              >
-                {formatTTFB(row.ttfb_ms)}
-              </td>
-              <td className={`${TD} tabular-nums`}>{formatTokens(row)}</td>
-              <td className={`${TD} font-mono text-xs`} title="末段已脱敏">
-                {row.client_ip || MISSING_VALUE_TEXT}
-              </td>
-              <td className={TD}>
-                {/* 核心对象走完整详情页，不用右侧抽屉（§11.4）。
-                    链接而不是按钮：详情页要能被贴给同事、被收藏 */}
-                <Link
-                  to={`/platforms/${platform}/requests/${encodeURIComponent(row.id)}`}
-                  className="text-sm font-medium text-accent hover:underline"
-                >
-                  查看内容
-                </Link>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTableV2
+      caption="请求列表：时间、用户、模型、状态、耗时与 Token 用量"
+      columns={requestColumns(platform)}
+      rows={rows}
+      rowKey={(row) => row.id}
+      // 不传 pageSize、不开表内搜索：筛选与翻页都在服务端（reqlog 游标分页）。
+      // 再加一个只筛当前这一页的搜索框，人会以为自己搜的是全部请求
+      footerExtra={footerExtra}
+      emptyState={emptyState}
+    />
   );
 }
 

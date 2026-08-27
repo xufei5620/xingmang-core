@@ -1,6 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { FreshnessBadge, FreshnessNote } from "@xingmang/ui-admin";
-import { Badge, EmptyState } from "@xingmang/ui-primitives";
+import {
+  DataTableV2,
+  FreshnessBadge,
+  FreshnessNote,
+  PageState,
+  type DataTableColumn,
+} from "@xingmang/ui-admin";
+import { Badge } from "@xingmang/ui-primitives";
 import { listMetrics, type MetricItem } from "../api/platform";
 import { ApiStateView } from "./ApiStateView";
 import {
@@ -16,8 +22,6 @@ import {
   toIntegerValue,
 } from "../lib/money";
 
-const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";
-const TD = "px-3 py-2 align-top text-sm text-fg";
 
 /** 未配置余额时的显示文案。
  *
@@ -68,7 +72,8 @@ export function NewApiChannelsPanel() {
 function NewApiChannelsView({ metric }: { metric: MetricItem | undefined }) {
   if (!metric) {
     return (
-      <EmptyState
+      <PageState
+        kind="empty"
         title="暂无渠道状态指标"
         description={`该环境下还没有 ${NEWAPI_CHANNELS_METRIC_KEY} 的观测；NewAPI 采集任务跑起来后会出现在这里`}
       />
@@ -79,7 +84,8 @@ function NewApiChannelsView({ metric }: { metric: MetricItem | undefined }) {
   // 画成一张「0 个渠道」的表就是编数据（宪法 12 条）
   if (metric.freshness.state === "uninitialized") {
     return (
-      <EmptyState
+      <PageState
+        kind="empty"
         title="未初始化"
         description={`${metricLabel(metric.metric_key)} 从未成功采集过，没有可信的渠道明细可显示`}
       />
@@ -106,13 +112,70 @@ function NewApiChannelsView({ metric }: { metric: MetricItem | undefined }) {
         </p>
       </div>
 
-      {rows.length === 0 ? (
-        <EmptyState title="没有渠道" description="这次观测里 channels 为空数组" />
-      ) : (
-        <NewApiChannelTable rows={rows} thresholdPPM={value["unhealthy_threshold_ppm"]} />
-      )}
+      <NewApiChannelTable rows={rows} thresholdPPM={value["unhealthy_threshold_ppm"]} />
     </div>
   );
+}
+
+/** 启停状态的文本形态。排序、搜索与筛选都用它。 */
+function enabledText(enabled: boolean | null): string {
+  if (enabled === null) return "未知";
+  return enabled ? "启用" : "停用";
+}
+
+function newApiChannelColumns(thresholdPPM: unknown): DataTableColumn<NewApiChannelRow>[] {
+  return [
+    {
+      id: "channel",
+      header: "渠道",
+      primary: true,
+      value: (row) => [row.name, row.channelId, row.type].filter(Boolean).join(" "),
+      cell: (row) => (
+        <>
+          <span className="font-medium">{row.name || row.channelId || "—"}</span>
+          <p className="font-mono text-xs text-fg-muted">
+            {row.channelId}
+            {row.type ? ` · ${row.type}` : null}
+          </p>
+        </>
+      ),
+    },
+    {
+      id: "enabled",
+      header: "状态",
+      value: (row) => enabledText(row.enabled),
+      cell: (row) => <EnabledBadge enabled={row.enabled} />,
+    },
+    {
+      id: "balance",
+      header: "余额",
+      numeric: true,
+      // 未配置余额排在最后而不是当成 0：两者是相反的两件事
+      value: (row) => row.balanceMinorUnits ?? null,
+      cell: (row) => <BalanceCell row={row} />,
+    },
+    {
+      id: "errorRate",
+      header: "错误率",
+      numeric: true,
+      value: (row) => row.errorRatePPM,
+      cell: (row) => <ErrorRateCell row={row} thresholdPPM={thresholdPPM} />,
+    },
+    {
+      id: "modelCount",
+      header: "模型数",
+      numeric: true,
+      value: (row) => row.modelCount,
+      cell: (row) => formatCount(row.modelCount),
+    },
+    {
+      id: "latency",
+      header: "延迟",
+      numeric: true,
+      value: (row) => row.latencyMS,
+      cell: (row) => (row.latencyMS === null ? "—" : `${formatCount(row.latencyMS)} ms`),
+    },
+  ];
 }
 
 function NewApiChannelTable({
@@ -123,47 +186,19 @@ function NewApiChannelTable({
   thresholdPPM: unknown;
 }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-edge bg-surface shadow-sm">
-      <table className="w-full border-collapse">
-        <thead className="border-b border-edge bg-surface-muted">
-          <tr>
-            <th className={TH}>渠道</th>
-            <th className={TH}>状态</th>
-            <th className={TH}>余额</th>
-            <th className={TH}>错误率</th>
-            <th className={TH}>模型数</th>
-            <th className={TH}>延迟</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            // channel_id 可能缺失（上游没给），退到下标兜底，避免 key 冲突
-            <tr key={row.channelId || `#${index}`} className="border-b border-edge last:border-b-0">
-              <td className={TD}>
-                <span className="font-medium">{row.name || row.channelId || "—"}</span>
-                <p className="font-mono text-xs text-fg-muted">
-                  {row.channelId}
-                  {row.type ? ` · ${row.type}` : null}
-                </p>
-              </td>
-              <td className={TD}>
-                <EnabledBadge enabled={row.enabled} />
-              </td>
-              <td className={`${TD} tabular-nums`}>
-                <BalanceCell row={row} />
-              </td>
-              <td className={`${TD} tabular-nums`}>
-                <ErrorRateCell row={row} thresholdPPM={thresholdPPM} />
-              </td>
-              <td className={`${TD} tabular-nums`}>{formatCount(row.modelCount)}</td>
-              <td className={`${TD} tabular-nums`}>
-                {row.latencyMS === null ? "—" : `${formatCount(row.latencyMS)} ms`}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <DataTableV2
+      caption="NewAPI 逐渠道启停、余额、错误率、模型数与延迟"
+      columns={newApiChannelColumns(thresholdPPM)}
+      rows={rows}
+      // channel_id 可能缺失（上游没给），退到下标兜底，避免 key 冲突
+      rowKey={(row) => row.channelId || `#${rows.indexOf(row)}`}
+      pageSize={10}
+      searchable
+      filters={[{ columnId: "enabled", label: "状态", options: ["启用", "停用", "未知"] }]}
+      emptyState={
+        <PageState kind="empty" title="没有渠道" description="这次观测里 channels 为空数组" />
+      }
+    />
   );
 }
 
@@ -212,7 +247,7 @@ function BalanceCell({ row }: { row: NewApiChannelRow }) {
  *  否则表里标红的条数和上面那句「异常 N」对不上）。 */
 function ErrorRateCell({ row, thresholdPPM }: { row: NewApiChannelRow; thresholdPPM: unknown }) {
   const text = formatErrorRatePPM(row.errorRatePPM);
-  // 走 toIntegerValue 而不是 `typeof === "number"` + BigInt()：后者对
+  // 走 toIntegerValue 而不是 `typeof === "number"` + BigInt（）：后者对
   // 超出安全整数范围的 JSON 数字会抛异常，把一整格页面炸掉。判据取不到时
   // 不标红——**宁可漏标也不错标**：一个错标成红色的健康渠道会让人去查
   // 一个并不存在的故障。

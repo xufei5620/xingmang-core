@@ -616,8 +616,10 @@ describe("Sub2API 平台详情·渠道管理页签（原渠道明细页）", () 
     expect(await screen.findByText("渠道甲")).not.toBeNull();
     expect(screen.getByText("¥100.00")).not.toBeNull();
     expect(screen.getByText("¥25.00")).not.toBeNull();
-    expect(screen.getByText("有效")).not.toBeNull();
-    expect(screen.getByText("失效")).not.toBeNull();
+    // 「有效 / 失效」现在也出现在筛选下拉的 <option> 里，所以限定在表格内找
+    const channelTable = within(screen.getByRole("table"));
+    expect(channelTable.getByText("有效")).not.toBeNull();
+    expect(channelTable.getByText("失效")).not.toBeNull();
     // 新鲜度徽章与数据时间跟着面板搬进页签，没有在迁移里丢掉（规格 §9.1）
     expect(screen.getByText("数据新鲜")).not.toBeNull();
     expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC/)).not.toBeNull();
@@ -694,8 +696,9 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     expect(screen.getByText("上游乙")).not.toBeNull();
     expect(screen.getByText("自建丙")).not.toBeNull();
 
-    expect(screen.getAllByText("启用")).toHaveLength(2);
-    expect(screen.getByText("停用")).not.toBeNull();
+    const newapiTable = within(screen.getByRole("table"));
+    expect(newapiTable.getAllByText("启用")).toHaveLength(2);
+    expect(newapiTable.getByText("停用")).not.toBeNull();
     expect(screen.getByText("¥100.00")).not.toBeNull();
 
     // ppm → 百分比，两位小数，纯整数运算：1200 ppm = 0.12%，187500 ppm = 18.75%
@@ -792,7 +795,8 @@ describe("审计事件页", () => {
     expect(await screen.findByText("registry.service.create@1")).not.toBeNull();
     expect(screen.getByText("2")).not.toBeNull();
     expect(screen.getByText("core.service/svc-1")).not.toBeNull();
-    expect(screen.getByText("成功")).not.toBeNull();
+    // 「成功」也是「结果」筛选下拉里的一个选项
+    expect(within(screen.getByRole("table")).getByText("成功")).not.toBeNull();
     expect(screen.getByText("aaaaaaaa")).not.toBeNull();
   });
 
@@ -861,7 +865,7 @@ describe("审计事件页", () => {
     );
     renderRoute("/audit");
     expect(await screen.findByText("还没有审计事件")).not.toBeNull();
-    expect(screen.getByText("在注册表页执行一次动作试试")).not.toBeNull();
+    expect(screen.getByText("在资源目录页执行一次动作试试")).not.toBeNull();
   });
 
   it("缺 audit.read 时提示缺哪个权限", async () => {
@@ -1550,9 +1554,10 @@ describe("告警中心页", () => {
     renderRoute("/alerts");
     expect(await screen.findByText("指标 sub2api.revenue.daily 同步失败")).not.toBeNull();
 
-    // 严重度与状态各是一个徽章
-    expect(screen.getByText("严重")).not.toBeNull();
-    expect(screen.getByText("未处理")).not.toBeNull();
+    // 严重度与状态各是一个徽章。两者也都出现在筛选下拉里，所以限定在表格内找
+    const alertsTable = within(screen.getByRole("table"));
+    expect(alertsTable.getByText("严重")).not.toBeNull();
+    expect(alertsTable.getByText("未处理")).not.toBeNull();
     // 首见与最近都要显示：只有一个就答不出「这个问题持续了多久」
     expect(screen.getByText(/首次 2026-08-26 10:00:00 UTC/)).not.toBeNull();
     expect(screen.getAllByText(/最近 2026-08-26 10:05:00 UTC/).length).toBeGreaterThan(0);
@@ -1573,8 +1578,10 @@ describe("告警中心页", () => {
     renderRoute("/alerts");
     await screen.findByText("渠道乙 余额不足");
     // 它仍然在活跃列表里
-    expect(screen.getByText("已静默")).not.toBeNull();
-    expect(screen.queryByText("已解决")).toBeNull();
+    const silencedTable = within(screen.getByRole("table"));
+    expect(silencedTable.getByText("已静默")).not.toBeNull();
+    // 「已解决」在筛选下拉里是一个选项，但**表里没有这一行**——静默不是解决
+    expect(silencedTable.queryByText("已解决")).toBeNull();
   });
 
   it("只有 OPEN / REOPENED 有「确认」按钮（与后端 WHERE 子句同一条规则）", async () => {

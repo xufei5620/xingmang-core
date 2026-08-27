@@ -1,6 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { formatUtcTimestamp, navLabel, PageHeader } from "@xingmang/ui-admin";
-import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
+import {
+  DataTableV2,
+  formatUtcTimestamp,
+  navLabel,
+  PageHeader,
+  PageState,
+  type DataTableColumn,
+} from "@xingmang/ui-admin";
+import { Badge, Tabs } from "@xingmang/ui-primitives";
 import { useState } from "react";
 import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
@@ -13,9 +20,6 @@ import {
   sortForDisplay,
 } from "../lib/alerts";
 import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
-
-const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";
-const TD = "px-3 py-2 align-top text-sm text-fg";
 
 /** react-query 的缓存键前缀。总览页的告警卡也用它，两处共用一份缓存。 */
 export const ALERTS_QUERY_KEY = "alerts";
@@ -97,6 +101,135 @@ export function AlertsPage() {
   );
 }
 
+/** 严重度的排序等级。显示的是「严重/警告/提示」，但按中文比较排出来是
+ *  「严重 < 提示 < 警告」——一个毫无意义的顺序。 */
+const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+
+function alertColumns(
+  onAcknowledged: (message: string) => void,
+): DataTableColumn<AlertItem>[] {
+  return [
+    {
+      id: "severity",
+      header: "严重度",
+      value: (alert) => describeSeverity(alert.severity).label,
+      // 未知严重度按最高排，与 describeSeverity 的判断一致
+      sortAs: (alert) => SEVERITY_RANK[alert.severity] ?? -1,
+      cell: (alert) => {
+        const severity = describeSeverity(alert.severity);
+        return (
+          <Badge tone={severity.tone} title={severity.hint}>
+            {severity.label}
+          </Badge>
+        );
+      },
+    },
+    {
+      id: "status",
+      header: "状态",
+      value: (alert) => describeStatus(alert.status).label,
+      cell: (alert) => {
+        const status = describeStatus(alert.status);
+        return (
+          <Badge tone={status.tone} title={status.hint}>
+            {status.label}
+          </Badge>
+        );
+      },
+    },
+    {
+      id: "title",
+      header: "告警",
+      primary: true,
+      // 规则键与来源指标键都进搜索：运维记得的往往是指标名而不是标题
+      value: (alert) =>
+        [alert.title, ruleLabel(alert.rule_key), alert.detail, alert.source_metric_key]
+          .filter(Boolean)
+          .join(" "),
+      cell: (alert) => (
+        <>
+          <span className="font-medium">{alert.title}</span>
+          <p className="mt-0.5 text-xs text-fg-muted">{ruleLabel(alert.rule_key)}</p>
+          {alert.detail ? <p className="mt-1 text-xs text-fg-muted">{alert.detail}</p> : null}
+          {alert.source_metric_key ? (
+            <p className="mt-1 font-mono text-xs break-all text-fg-muted">
+              {alert.source_metric_key}
+            </p>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      id: "seen",
+      header: "首次 / 最近",
+      // 排序按「最近」：人找的是「还在响的」，不是「最早开始的」
+      value: (alert) => alert.last_seen_at,
+      cell: (alert) => (
+        <>
+          {/* 两个时刻都显示：只有一个就答不出「这个问题持续了多久」，
+              而那正是判断要不要升级处理的第一个依据。 */}
+          <span className="block text-xs text-fg-muted">
+            首次 {formatUtcTimestamp(alert.opened_at)}
+          </span>
+          <span className="block text-xs text-fg-muted">
+            最近 {formatUtcTimestamp(alert.last_seen_at)}
+          </span>
+          {alert.resolved_at ? (
+            <span className="block text-xs text-fg-muted">
+              恢复 {formatUtcTimestamp(alert.resolved_at)}
+            </span>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      id: "fireCount",
+      header: "次数",
+      numeric: true,
+      value: (alert) => alert.fire_count,
+      cell: (alert) => (
+        <span title="被去重合并掉的命中次数（含首次）">{alert.fire_count}</span>
+      ),
+    },
+    {
+      id: "notify",
+      header: "投递",
+      value: (alert) => describeNotifyStatus(alert.notify_status).label,
+      cell: (alert) => {
+        const notify = describeNotifyStatus(alert.notify_status);
+        return (
+          <div className="flex flex-col gap-1">
+            <Badge tone={notify.tone} title={notify.hint}>
+              {notify.label}
+            </Badge>
+            {alert.notified_at ? (
+              <span className="text-xs text-fg-muted">{formatUtcTimestamp(alert.notified_at)}</span>
+            ) : null}
+            {/* 失败原因原样显示：它已由服务端脱敏（绝不含 Bot Token），
+                而「为什么没投出去」是运维此刻唯一需要的信息。 */}
+            {alert.notify_error ? (
+              <span className="text-xs break-all text-danger">{alert.notify_error}</span>
+            ) : null}
+          </div>
+        );
+      },
+    },
+    {
+      id: "actions",
+      header: "操作",
+      // 没有 value：这一列只有按钮，既不该排序也不该进搜索
+      cell: (alert) => (
+        <AcknowledgeAlertButton
+          alert={alert}
+          onAcknowledged={(runId) =>
+            onAcknowledged(`已确认，run_id=${runId}；审计事件通常几秒内出现在审计页`)
+          }
+        />
+      ),
+    },
+  ];
+}
+
 function AlertsTable({
   items,
   scope,
@@ -106,121 +239,40 @@ function AlertsTable({
   scope: Scope;
   onAcknowledged: (message: string) => void;
 }) {
-  if (items.length === 0) {
-    return (
-      <EmptyState
-        title={scope === "active" ? "无活动告警" : "暂无告警记录"}
-        description={
-          scope === "active"
-            ? "该环境下当前没有活跃告警。这是好消息，但请确认 Platform Worker 的评估任务在跑——一个停掉的评估器同样显示为零告警。"
-            : "该环境下还没有产生过任何告警；采集任务跑起来并出现异常后会出现在这里"
-        }
-      />
-    );
-  }
-
   return (
-    <div className="overflow-x-auto rounded-lg border border-edge bg-surface shadow-sm">
-      <table className="w-full border-collapse">
-        <thead className="border-b border-edge bg-surface-muted">
-          <tr>
-            <th className={TH}>严重度</th>
-            <th className={TH}>状态</th>
-            <th className={TH}>告警</th>
-            <th className={TH}>首次 / 最近</th>
-            <th className={TH}>次数</th>
-            <th className={TH}>投递</th>
-            <th className={TH}>
-              <span className="sr-only">操作</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {sortForDisplay(items).map((alert) => (
-            <AlertRow key={alert.id} alert={alert} onAcknowledged={onAcknowledged} />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function AlertRow({
-  alert,
-  onAcknowledged,
-}: {
-  alert: AlertItem;
-  onAcknowledged: (message: string) => void;
-}) {
-  const severity = describeSeverity(alert.severity);
-  const status = describeStatus(alert.status);
-  const notify = describeNotifyStatus(alert.notify_status);
-
-  return (
-    <tr className="border-b border-edge last:border-b-0">
-      <td className={TD}>
-        <Badge tone={severity.tone} title={severity.hint}>
-          {severity.label}
-        </Badge>
-      </td>
-      <td className={TD}>
-        <Badge tone={status.tone} title={status.hint}>
-          {status.label}
-        </Badge>
-      </td>
-      <td className={TD}>
-        <span className="font-medium">{alert.title}</span>
-        <p className="mt-0.5 text-xs text-fg-muted">{ruleLabel(alert.rule_key)}</p>
-        {alert.detail ? <p className="mt-1 text-xs text-fg-muted">{alert.detail}</p> : null}
-        {alert.source_metric_key ? (
-          <p className="mt-1 font-mono text-xs break-all text-fg-muted">
-            {alert.source_metric_key}
-          </p>
-        ) : null}
-      </td>
-      <td className={TD}>
-        {/* 两个时刻都显示：只有一个就答不出「这个问题持续了多久」，
-            而那正是判断要不要升级处理的第一个依据。 */}
-        <span className="block text-xs text-fg-muted">
-          首次 {formatUtcTimestamp(alert.opened_at)}
+    <DataTableV2
+      caption="告警列表：严重度、状态、首次与最近发现、命中次数与投递结果"
+      columns={alertColumns(onAcknowledged)}
+      // 默认顺序仍是「最严重的在最上面」：DataTableV2 不排序时保持入参顺序
+      rows={sortForDisplay(items)}
+      rowKey={(alert) => alert.id}
+      pageSize={20}
+      searchable
+      filters={[
+        { columnId: "severity", label: "严重度", options: ["严重", "警告", "提示"] },
+        { columnId: "status", label: "状态", options: ["未处理", "已确认", "已静默", "已解决", "复发"] },
+      ]}
+      selectable
+      bulkActions={(keys) => (
+        // **只统计，不执行**：批量确认是写操作，得走 Action 且 L2 以上要审批
+        // （宪法 2、3 条）。在这里放一个能直接点的「批量确认」，等于绕过审批，
+        // 所以这一格只说明它现在还不能做什么
+        <span className="text-fg-muted">
+          已选中 {keys.length} 条；批量确认随 Foundation-B（XM-0030）上线——
+          写操作只走 Action，这里不执行任何真实操作。
         </span>
-        <span className="block text-xs text-fg-muted">
-          最近 {formatUtcTimestamp(alert.last_seen_at)}
-        </span>
-        {alert.resolved_at ? (
-          <span className="block text-xs text-fg-muted">
-            恢复 {formatUtcTimestamp(alert.resolved_at)}
-          </span>
-        ) : null}
-      </td>
-      <td className={TD}>
-        <span className="tabular-nums" title="被去重合并掉的命中次数（含首次）">
-          {alert.fire_count}
-        </span>
-      </td>
-      <td className={TD}>
-        <div className="flex flex-col gap-1">
-          <Badge tone={notify.tone} title={notify.hint}>
-            {notify.label}
-          </Badge>
-          {alert.notified_at ? (
-            <span className="text-xs text-fg-muted">{formatUtcTimestamp(alert.notified_at)}</span>
-          ) : null}
-          {/* 失败原因原样显示：它已由服务端脱敏（绝不含 Bot Token），
-              而「为什么没投出去」是运维此刻唯一需要的信息。 */}
-          {alert.notify_error ? (
-            <span className="text-xs break-all text-danger">{alert.notify_error}</span>
-          ) : null}
-        </div>
-      </td>
-      <td className={TD}>
-        <AcknowledgeAlertButton
-          alert={alert}
-          onAcknowledged={(runId) =>
-            onAcknowledged(`已确认，run_id=${runId}；审计事件通常几秒内出现在审计页`)
+      )}
+      emptyState={
+        <PageState
+          kind="empty"
+          title={scope === "active" ? "无活动告警" : "暂无告警记录"}
+          description={
+            scope === "active"
+              ? "该环境下当前没有活跃告警。这是好消息，但请确认 Platform Worker 的评估任务在跑——一个停掉的评估器同样显示为零告警。"
+              : "该环境下还没有产生过任何告警；采集任务跑起来并出现异常后会出现在这里"
           }
         />
-      </td>
-    </tr>
+      }
+    />
   );
 }
