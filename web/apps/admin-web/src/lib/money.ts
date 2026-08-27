@@ -27,12 +27,17 @@ const CURRENCY_SYMBOL: Record<string, string> = {
   KRW: "₩",
 };
 
-/** 未知币种时的默认最小单位指数。多数币种是 2 位。 */
-const DEFAULT_EXPONENT = 2;
-
 /** 值明显不是整数最小单位时的显示文案。
  *  宁可显眼地写「数值异常」，也不能悄悄显示一个算错的金额。 */
 export const INVALID_VALUE_TEXT = "数值异常";
+
+/** 认不出币种时的显示文案。
+ *
+ *  这里以前默认按 2 位小数猜（`?? 2`），碰上 JPY 之外任何零小数位或三小数位
+ *  币种（BHD/KWD 是 3 位）就会把金额显示错 10~100 倍，而且错得非常像真的。
+ *  猜不出就 fail closed：说清「单位未知」，把原始最小单位数值原样端出来，
+ *  让人自己拿去对账，绝不替他做一个没同意的换算（宪法 13 条 / Codex #8）。 */
+export const UNKNOWN_CURRENCY_TEXT = "金额单位未知";
 
 /** 三位一组加千分位。自己写而不用 Intl：Intl 只吃 number，
  *  把 BigInt 转回 number 就把「禁止 Float」这条规矩绕过去了。 */
@@ -57,14 +62,16 @@ export function toIntegerValue(value: unknown): bigint | null {
   return null;
 }
 
-/** 币种的最小单位指数。 */
-export function currencyExponent(currency: string): number {
-  return CURRENCY_EXPONENT[currency.toUpperCase()] ?? DEFAULT_EXPONENT;
+/** 币种的最小单位指数；**认不出就返回 null**，调用方必须自己处理这一支。
+ *  返回 2 兜底等于替所有未知币种编了一个小数位数。 */
+export function currencyExponent(currency: string): number | null {
+  return CURRENCY_EXPONENT[currency.toUpperCase()] ?? null;
 }
 
 /** 整数最小单位 → 展示字符串，例如 (123456, "CNY") → "¥1,234.56"。
  *
- *  未知币种用「代码 + 空格 + 数字」（"XYZ 1.00"），不猜符号。 */
+ *  未知/空币种不换算：显示原始最小单位数值并标注「金额单位未知」，
+ *  例如 (100, "XYZ") → "XYZ 100（最小单位，金额单位未知）"。 */
 export function formatMinorUnits(minorUnits: unknown, currency: string): string {
   const value = toIntegerValue(minorUnits);
   if (value === null) return INVALID_VALUE_TEXT;
@@ -74,6 +81,11 @@ export function formatMinorUnits(minorUnits: unknown, currency: string): string 
   const negative = value < 0n;
   const abs = negative ? -value : value;
 
+  if (exponent === null) {
+    const raw = `${code ? `${code} ` : ""}${groupDigits(abs.toString())}（最小单位，${UNKNOWN_CURRENCY_TEXT}）`;
+    return negative ? `-${raw}` : raw;
+  }
+
   const divisor = 10n ** BigInt(exponent);
   const whole = abs / divisor;
   const fraction = abs % divisor;
@@ -82,7 +94,7 @@ export function formatMinorUnits(minorUnits: unknown, currency: string): string 
   if (exponent > 0) text += `.${fraction.toString().padStart(exponent, "0")}`;
 
   const symbol = CURRENCY_SYMBOL[code];
-  const body = symbol ? `${symbol}${text}` : `${code ? `${code} ` : ""}${text}`;
+  const body = symbol ? `${symbol}${text}` : `${code} ${text}`;
   return negative ? `-${body}` : body;
 }
 

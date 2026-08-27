@@ -244,21 +244,43 @@ describe("toSparkSamples：历史观测 → 趋势样本", () => {
     };
   }
 
-  it("横轴优先用 observed_at", () => {
+  it("横轴用 synced_at（采集时刻），observed_at 作为附加数据时间保留", () => {
     const [s] = toSparkSamples("sub2api.revenue.daily", [history()]);
-    expect(s?.at).toBe(Date.parse("2026-08-26T10:00:00Z"));
+    expect(s?.at).toBe(Date.parse("2026-08-26T10:05:00Z"));
+    expect(s?.observedAt).toBe(Date.parse("2026-08-26T10:00:00Z"));
     expect(s?.value).toBe(100);
     expect(s?.failed).toBe(false);
   });
 
-  it("没有 observed_at 时退到 synced_at，而不是把整条样本丢掉", () => {
-    const [s] = toSparkSamples("sub2api.revenue.daily", [history({ observed_at: null })]);
-    expect(s?.at).toBe(Date.parse("2026-08-26T10:05:00Z"));
+  it("连续失败样本的横轴逐点递增，不会全堆回上一次成功的观测时刻（Codex #3）", () => {
+    // XM-0024 的失败样本保留上一次成功的 observed_at（10:00）。
+    // 用 observed_at 当横轴，10:05 与 10:10 两次失败会重叠回 10:00 那个成功点，
+    // 红色的失败区间就此消失——这正是「那段是红的」这个语义被抹掉的方式
+    const samples = toSparkSamples("sub2api.revenue.daily", [
+      history({ synced_at: "2026-08-26T10:00:00Z" }),
+      history({ status: "failed", synced_at: "2026-08-26T10:05:00Z" }),
+      history({ status: "failed", synced_at: "2026-08-26T10:10:00Z" }),
+    ]);
+    expect(samples.map((s) => s.at)).toEqual([
+      Date.parse("2026-08-26T10:00:00Z"),
+      Date.parse("2026-08-26T10:05:00Z"),
+      Date.parse("2026-08-26T10:10:00Z"),
+    ]);
+    // 三个点的 observed_at 都是 10:00（失败保留旧值），横轴却各不相同
+    expect(new Set(samples.map((s) => s.observedAt)).size).toBe(1);
+    expect(samples.map((s) => s.failed)).toEqual([false, true, true]);
   });
 
-  it("时间完全解析不出来的样本才丢弃（NaN 会让整条路径消失）", () => {
+  it("没有 observed_at 不影响横轴，只是附加数据时间为 null", () => {
+    const [s] = toSparkSamples("sub2api.revenue.daily", [history({ observed_at: null })]);
+    expect(s?.at).toBe(Date.parse("2026-08-26T10:05:00Z"));
+    expect(s?.observedAt).toBeNull();
+  });
+
+  it("synced_at 解析不出来的样本才丢弃（NaN 会让整条路径消失）", () => {
     const samples = toSparkSamples("sub2api.revenue.daily", [
-      history({ observed_at: "不是时间", synced_at: "也不是" }),
+      // observed_at 能解析也不救它：横轴只认 synced_at
+      history({ synced_at: "不是时间" }),
       history(),
     ]);
     expect(samples).toHaveLength(1);
@@ -271,6 +293,14 @@ describe("toSparkSamples：历史观测 → 趋势样本", () => {
       history({ status: "ok" }),
     ]);
     expect(samples.map((s) => s.failed)).toEqual([true, true, false]);
+  });
+
+  it("is_partial 透传给折线：部分数据不能混进正常实线（Codex #5）", () => {
+    const samples = toSparkSamples("sub2api.revenue.daily", [
+      history({ is_partial: true }),
+      history(),
+    ]);
+    expect(samples.map((s) => s.partial)).toEqual([true, false]);
   });
 });
 

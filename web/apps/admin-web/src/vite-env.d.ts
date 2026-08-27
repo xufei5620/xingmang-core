@@ -11,6 +11,10 @@ interface ImportMetaEnv {
   readonly VITE_XM_SCOPES?: string;
   /** 显式查询环境。默认不传，理由见 src/api/config.ts。 */
   readonly VITE_XM_ENVIRONMENT?: string;
+  /** 演示数据横幅模式："demo" 强制显示 / "real" 强制关闭 / 其余按 source 自动判定。 */
+  readonly VITE_XM_DATA_BADGE?: string;
+  /** 已知演示实例的 source 列表（逗号分隔）；不配用 lib/demoData 里的默认值。 */
+  readonly VITE_XM_DEMO_SOURCES?: string;
 }
 
 interface ImportMeta {

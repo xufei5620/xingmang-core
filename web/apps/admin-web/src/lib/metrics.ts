@@ -115,24 +115,33 @@ export function metricSeriesValue(
 
 /** 历史观测序列 → 趋势图样本。
  *
- *  横轴优先用 observed_at（数据本身的时刻）；上游没给才退到 synced_at
- *  （我们采集的时刻）。两者含义不同，但把「不知道观测时刻的样本」直接扔掉
- *  会让趋势图凭空少一段，退一步用采集时刻至少形状还在。
+ *  横轴**一律**用 synced_at（我们采集的时刻），不是 observed_at：
+ *  XM-0024 的失败样本会保留上一次成功的 observed_at，拿它当横轴，10:05、10:10
+ *  两次连续失败就会全部堆回 10:00 那个成功点上，红色的失败区间凭空消失——
+ *  历史表建立「那段是红的」这个语义，靠的就是这一条（Codex #3）。
  *
- *  时间解析不出来的样本才真的丢弃：NaN 进了坐标计算会让整条路径消失。 */
+ *  observed_at 不丢，作为点的附加「数据时间」跟着样本走：两者含义不同，
+ *  「什么时候采的」和「数据本身是什么时候的」都得留着，只是不能混用。
+ *
+ *  synced_at 解析不出来的样本才丢弃：NaN 进了坐标计算会让整条路径消失，
+ *  而这种样本本身就是数据完整性事故，不该被 observed_at 顶替着蒙混过去。 */
 export function toSparkSamples(
   metricKey: string,
   items: MetricHistoryItem[],
 ): SparkSample[] {
   const samples: SparkSample[] = [];
   for (const item of items) {
-    const at = Date.parse(item.observed_at ?? item.synced_at);
+    const at = Date.parse(item.synced_at);
     if (!Number.isFinite(at)) continue;
+    const observed = item.observed_at === null ? Number.NaN : Date.parse(item.observed_at);
     samples.push({
       at,
       value: metricSeriesValue(metricKey, item.value),
       // 除了 ok 一律按失败处理：不认识的状态不能默认当成一次成功观测
       failed: item.status !== "ok",
+      // 部分数据可能偏小，交给折线用虚线画出来，而不是混进正常实线里
+      partial: item.is_partial === true,
+      observedAt: Number.isFinite(observed) ? observed : null,
     });
   }
   return samples;

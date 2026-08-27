@@ -98,6 +98,80 @@ export function toAuditRow(event: AuditEventItem): AuditRow {
   };
 }
 
+// --- 相邻行的链关系 ---
+
+/** 本页两条相邻可见事件之间的关系。
+ *
+ *  这一层存在的原因是一个真实的误报（Codex #6）：后端的哈希链是**全局**的，
+ *  而本页按 environment 过滤，于是 6 / 4 / 2 这样的序号缺口是完全正常的。
+ *  在有缺口的两行之间比 prev_hash 与 event_hash，链再正确也必然不相等——
+ *  「肉眼验链」于是会在一条健康的链上稳定地喊断链。
+ *
+ *  所以：**只有序号真的相邻（差 1）时才比对**，其余情形老老实实说
+ *  「这里看不到上一条」，而不是把一个比不了的比较结果渲染成结论。 */
+export type ChainLink =
+  | { kind: "genesis" }
+  /** 序号连续，可以就地比对。 */
+  | { kind: "adjacent"; matches: boolean }
+  /** 中间隔着 hidden 条本页看不到的事件（其他环境）。 */
+  | { kind: "gap"; hidden: number }
+  /** 本页没有序号相邻的上一条（翻到页尾，或数据乱序）。 */
+  | { kind: "unknown" };
+
+/** 判断某行与它下面那一行（列表倒序，所以是序号更小的那条）的链关系。 */
+export function chainLinkBetween(
+  row: Pick<AuditEventItem, "sequence" | "prev_hash">,
+  older: Pick<AuditEventItem, "sequence" | "event_hash"> | undefined,
+): ChainLink {
+  if (row.prev_hash === GENESIS_HASH) return { kind: "genesis" };
+  if (older === undefined) return { kind: "unknown" };
+  const step = row.sequence - older.sequence;
+  if (step === 1) return { kind: "adjacent", matches: row.prev_hash === older.event_hash };
+  if (step > 1) return { kind: "gap", hidden: step - 1 };
+  // step <= 0：序号没有变小，说明数据不是按倒序来的。这时候任何比对结论都不可信
+  return { kind: "unknown" };
+}
+
+export interface ChainLinkDisplay {
+  label: string;
+  detail: string;
+  /** neutral 表示「这不是异常信号」——缺口不该被染成红色。 */
+  tone: "neutral" | "success" | "danger";
+}
+
+export function describeChainLink(link: ChainLink): ChainLinkDisplay {
+  switch (link.kind) {
+    case "genesis":
+      return { label: "链首", detail: "链首事件，prev_hash 为全 0", tone: "neutral" };
+    case "adjacent":
+      return link.matches
+        ? {
+            label: "相连",
+            detail: "序号连续，且本行 prev_hash 等于下一行的事件哈希",
+            tone: "success",
+          }
+        : {
+            label: "与相邻行对不上",
+            detail:
+              "序号连续，但本行 prev_hash 与下一行的事件哈希不同；请用 audit-verify 复核整条链",
+            tone: "danger",
+          };
+    case "gap":
+      return {
+        label: `中间有 ${link.hidden} 条其他环境事件`,
+        detail:
+          "哈希链是全局的，本页按环境过滤后出现序号缺口属正常；相邻两行的哈希本就不必相等",
+        tone: "neutral",
+      };
+    case "unknown":
+      return {
+        label: "上一条不在本页",
+        detail: "本页没有序号相邻的上一条事件，无法在这里比对",
+        tone: "neutral",
+      };
+  }
+}
+
 /** 摘要 → 展开区里显示的 JSON 文本。
  *
  *  null 与空对象要分开说：新建资源没有前态（null），

@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { EmptyState } from "@xingmang/ui-primitives";
 import { listMetrics, METRIC_HISTORY_HOURS, type MetricItem } from "../api/platform";
+import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { ApiStateView } from "../components/ApiStateView";
 import { MetricCard } from "../components/MetricCard";
 import { MetricSparkline } from "../components/MetricSparkline";
@@ -15,19 +16,29 @@ import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
  *  自动轮询只在页面可见时进行（见 lib/autoRefresh），并且**不取代**手动刷新
  *  按钮：出事时人要能立刻要一次新的，而不是等下一个 60 秒。 */
 export function OverviewPage() {
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["metrics"],
     queryFn: ({ signal }) => listMetrics({ signal }),
   });
 
-  useAutoRefresh(() => void query.refetch());
+  // 手动刷新与自动刷新走同一条路：卡片数值和它下面那条折线必须一起更新。
+  // 折线挂在独立的 ['metric-history', ...] key 上，只 refetch ['metrics'] 的话
+  // 主数字会走、折线永远停在首次加载那一刻——页头却写着「每 60 秒刷新」，
+  // 于是界面自己说了一句假话（Codex #4）
+  const refreshAll = () => {
+    void query.refetch();
+    void queryClient.invalidateQueries({ queryKey: [METRIC_HISTORY_QUERY_PREFIX] });
+  };
+
+  useAutoRefresh(refreshAll);
 
   return (
     <section>
       <PageHeader
         title="运营总览"
         description={`所有数值都带数据时间与新鲜度状态；没有新鲜度就没有数字。折线为近 ${METRIC_HISTORY_HOURS} 小时趋势，每 ${OVERVIEW_POLL_INTERVAL_MS / 1000} 秒自动刷新（页面不可见时暂停）。`}
-        onRefresh={() => void query.refetch()}
+        onRefresh={refreshAll}
         refreshing={query.isFetching}
         // dataUpdatedAt 是「最近一次成功取到数据」的时刻，不是最近一次发起请求：
         // 请求失败时这行字不该往前跳，否则人会以为看到的是新数据
