@@ -66,6 +66,12 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 			`DELETE FROM ops.metric_observation WHERE source = $1`, source); err != nil {
 			t.Errorf("清理观测记录: %v", err)
 		}
+		// 样本表按 source 清理：本用例的 source 带纳秒后缀，不会误删别人的数据。
+		// 这是**测试**的清理，不是产品路径——代码里没有删除样本的接口。
+		if _, err := pool.Exec(cleanupCtx,
+			`DELETE FROM ops.metric_observation_sample WHERE source = $1`, source); err != nil {
+			t.Errorf("清理历史样本: %v", err)
+		}
 	}()
 
 	client, err := NewClient(pool, Config{
@@ -170,5 +176,57 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 		if state := row.Freshness(time.Now().UTC()).State; state != ops.StateFailed {
 			t.Fatalf("%s freshness = %q, want failed（看板必须诚实显示失败）", key, state)
 		}
+	}
+
+	// 第三段：历史样本（XM-0024）。最新态被整行覆盖成失败了，但趋势图必须
+	// 还能看见前面那段成功——这正是分表的意义。
+	since := time.Now().UTC().Add(-time.Hour)
+	for key := range before {
+		samples, err := store.ListSamples(ctx, environment, key, since, ops.MaxSampleLimit)
+		if err != nil {
+			t.Fatalf("%s ListSamples: %v", key, err)
+		}
+		if len(samples) < 2 {
+			t.Fatalf("%s 样本 = %d 条, want >= 2（至少一条成功 + 一条失败）", key, len(samples))
+		}
+		for i := 1; i < len(samples); i++ {
+			if samples[i].SyncedAt.Before(samples[i-1].SyncedAt) {
+				t.Fatalf("%s 样本未按 synced_at 升序: %v -> %v",
+					key, samples[i-1].SyncedAt, samples[i].SyncedAt)
+			}
+		}
+		if samples[0].Status != ops.SyncOK {
+			t.Fatalf("%s 第一个样本应为成功: %+v", key, samples[0])
+		}
+		// 失败观测也留样：这是趋势图上「那段红」的唯一数据来源。
+		last := samples[len(samples)-1]
+		if last.Status != ops.SyncFailed || last.LastErrorCode != string(connector.KindNotSupported) {
+			t.Fatalf("%s 最后一个样本应是带错误码的失败样本: %+v", key, last)
+		}
+		if last.Source != source || last.Environment != environment {
+			t.Fatalf("%s 样本的来源/环境字段不对: %+v", key, last)
+		}
+	}
+
+	// 窗口过滤：把 since 推到未来，一条都不该返回。
+	future, err := store.ListSamples(ctx, environment, sub2api.MetricUsersTotal,
+		time.Now().UTC().Add(time.Hour), ops.MaxSampleLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(future) != 0 {
+		t.Fatalf("窗口外不该返回样本, got %d 条", len(future))
+	}
+
+	// limit 生效，且丢掉的是最旧的那些——曲线右端必须始终贴着「现在」。
+	limited, err := store.ListSamples(ctx, environment, sub2api.MetricUsersTotal, since, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 {
+		t.Fatalf("limit=1 应只返回 1 条, got %d", len(limited))
+	}
+	if limited[0].Status != ops.SyncFailed {
+		t.Fatalf("limit 应保留最新的那条（失败样本）: %+v", limited[0])
 	}
 }

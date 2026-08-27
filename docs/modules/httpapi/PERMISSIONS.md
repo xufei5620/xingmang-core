@@ -13,9 +13,10 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 
 | 端点 | 所需权限 | 常量 |
 |---|---|---|
-| `GET /api/v1/services`     | `registry.read` | `registry.ScopeRead` |
-| `GET /api/v1/metrics`      | `ops.read`      | `ops.ScopeRead` |
-| `GET /api/v1/audit/events` | `audit.read`    | `audit.ScopeRead` |
+| `GET /api/v1/services`        | `registry.read` | `registry.ScopeRead` |
+| `GET /api/v1/metrics`         | `ops.read`      | `ops.ScopeRead` |
+| `GET /api/v1/metrics/history` | `ops.read`      | `ops.ScopeRead` |
+| `GET /api/v1/audit/events`    | `audit.read`    | `audit.ScopeRead` |
 
 三个 scope **分开授予**，不共用一个「读」权限：指标里将来会有收入、余额这类业务数据
 （XM-0017 接入 Sub2API 之后），比「有哪些服务」敏感一个量级。共用一个 scope 意味着

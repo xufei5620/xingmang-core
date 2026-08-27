@@ -27,6 +27,7 @@ type Deps struct {
 	ActionRegistry *action.Registry
 	Services       ServiceLister
 	Metrics        MetricLister
+	MetricHistory  MetricHistoryLister
 	AuditEvents    AuditEventLister
 	RequestTimeout time.Duration
 }
@@ -63,6 +64,9 @@ func NewRouter(d Deps) http.Handler {
 			Get("/services", ListServicesHandler(d.Services))
 		api.With(RequireScope(ops.ScopeRead)).
 			Get("/metrics", ListMetricsHandler(d.Metrics))
+		// 历史样本与最新态同属运营指标，共用 ops.read
+		api.With(RequireScope(ops.ScopeRead)).
+			Get("/metrics/history", ListMetricHistoryHandler(d.MetricHistory))
 		// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
 		api.With(RequireScope(audit.ScopeRead)).
 			Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))

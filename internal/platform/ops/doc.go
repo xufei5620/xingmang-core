@@ -9,4 +9,9 @@
 //   - staleness_seconds 不持久化（规格 §9.1 明文要求），每次按 now - observed_at 算；
 //   - observed_at 可空，表示「从未成功采集过」——这是「未初始化」状态的来源，
 //     不要用零值时间冒充。
+//
+// 本包管两张语义相反的表：ops.metric_observation 覆盖式保存最新态，回答
+// 「现在是什么」；ops.metric_observation_sample 追加式保存样本，回答
+// 「这段时间是怎么变的」（XM-0024）。分表的理由见 docs/modules/ops/README.md。
+// 样本不参与新鲜度判定——不要对 ListSamples 的返回值调用 Freshness()。
 package ops

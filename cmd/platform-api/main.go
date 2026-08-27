@@ -87,6 +87,8 @@ func main() {
 		ActionRegistry: actionRegistry,
 		Services:       registryStore,
 		Metrics:        opsStore,
+		// 历史样本复用同一个 Store：最新态与样本是同一个仓储的两张表
+		MetricHistory: opsStore,
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
 		AuditEvents:    auditStore,
