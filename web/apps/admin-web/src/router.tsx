@@ -18,6 +18,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlatformDetailPage } from "./pages/PlatformDetailPage";
 import { RegistryPage } from "./pages/RegistryPage";
+import { RequestDetailPage } from "./pages/RequestDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 function requireAuth() {
@@ -185,6 +186,10 @@ export const routes = [
       { path: "alerts", Component: AlertsPage },
       { path: "audit", Component: AuditPage },
       { path: "platforms/:serviceType", Component: PlatformDetailPage },
+      // 请求详情是**完整页**而不是抽屉（§11.4：核心对象用完整详情页）。
+      // 挂在平台下面而不是全局 /requests/:id：同一个 id 在两个来源之间
+      // 不保证唯一，路径里少了平台就没法保证读的是哪一条
+      { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
       { path: "registry", Component: RegistryPage },
       { path: "settings", Component: SettingsPage },
 

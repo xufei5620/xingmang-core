@@ -10,10 +10,14 @@
 /** 已知的演示实例（Fake 连接器写入的 source）。可用 VITE_XM_DEMO_SOURCES 覆盖。
  *
  *  每一项与后端的默认来源标识**逐字对应**（jobs.DefaultSub2APIInstanceID、
- *  jobs.DefaultNewAPIInstanceID）。匹配是整串相等而不是前缀，所以接入新的
- *  Fake 连接器时必须回来加一行——漏了不会报错，只会让那批演示数字在页面上
- *  与真实运营读数长得一模一样，正是本文件要防的那件事。 */
-export const DEFAULT_DEMO_SOURCES = ["sub2api-staging", "newapi-staging"];
+ *  jobs.DefaultNewAPIInstanceID、reqlog.FakeInstance）。匹配是整串相等而不是
+ *  前缀，所以接入新的 Fake 连接器时必须回来加一行——漏了不会报错，只会让那批
+ *  演示数字在页面上与真实运营读数长得一模一样，正是本文件要防的那件事。
+ *
+ *  `reqlog-fake` 的赌注比另外两项高一档（XM-0039）：它挂的不是几个假数字，
+ *  而是一整页编造的用户对话。真实 reqlog 实例叫 `reqlog-<环境>`，
+ *  永远不会命中这一行。 */
+export const DEFAULT_DEMO_SOURCES = ["sub2api-staging", "newapi-staging", "reqlog-fake"];
 
 /** 横幅文案。写死在这里而不是散在组件里：它是一句对外承诺的反面，
  *  改动应当显眼到能被 review 抓住。 */
