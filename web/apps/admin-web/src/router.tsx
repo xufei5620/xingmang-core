@@ -7,6 +7,7 @@ import { DemoDataBanner } from "./components/DemoDataBanner";
 import {
   groupPlatforms,
   pendingBadge,
+  platformOpens,
   RESOURCES_TAB,
   type PlatformEntry,
   type RegistryState,
@@ -71,7 +72,7 @@ function PlatformNavItem({
   entry: PlatformEntry;
   registryState: RegistryState;
 }) {
-  const { spec, registered } = entry;
+  const { spec } = entry;
 
   // Registry 还没读到／读失败时，不敢说任何平台「未接入」——那是拿一次
   // 加载中或一次 403 去断言平台没接。说不知道就是说不知道（§9.1 同一条道理）
@@ -89,7 +90,9 @@ function PlatformNavItem({
     );
   }
 
-  if (!registered) {
+  // 判据是「点进去有没有东西」而不是「注册表里有没有」：NewAPI 的内容来自
+  // newapi.* 指标，与注册表无关（见 lib/platforms 的 platformOpens）。
+  if (!platformOpens(entry)) {
     return <NavItemDisabled label={spec.label} hint={pendingBadge(spec.plan)} title={spec.scope} />;
   }
 

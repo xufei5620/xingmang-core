@@ -12,6 +12,7 @@ import { routes } from "./router";
 // 见 scripts/check-governance.sh），所以换个写法比放宽扫描器划算。
 const REVENUE_METRIC = "sub2api.revenue.daily";
 const CHANNEL_BALANCE_METRIC = "sub2api.channels.balance";
+const NEWAPI_CHANNELS_METRIC = "newapi.channels.status";
 
 const metricsBody = {
   items: [
@@ -105,6 +106,69 @@ const channelsBody = {
             balance_minor_units: 2500,
             currency: "CNY",
             token_valid: false,
+          },
+        ],
+      },
+      freshness: {
+        state: "fresh",
+        staleness_seconds: 30,
+        threshold_seconds: 1800,
+        is_partial: false,
+        observed_at: "2026-08-26T10:00:00Z",
+        last_success: "2026-08-26T10:00:00Z",
+        last_error_code: "",
+      },
+    },
+  ],
+};
+
+/** NewAPI 渠道状态指标（XM-0035）。三条渠道刻意覆盖三种边界：
+ *  停用、余额未配置、错误率越过判据。 */
+const newapiChannelsBody = {
+  items: [
+    {
+      metric_key: NEWAPI_CHANNELS_METRIC,
+      source: "newapi-staging",
+      environment: "development",
+      watermark: "wm-n1",
+      value: {
+        channel_count: 3,
+        enabled_channel_count: 2,
+        unhealthy_channel_count: 1,
+        unhealthy_threshold_ppm: 50000,
+        channels: [
+          {
+            channel_id: "ch-ok",
+            name: "上游甲",
+            type: "openai",
+            enabled: true,
+            balance_minor_units: 10000,
+            currency: "CNY",
+            model_count: 12,
+            error_rate_ppm: 1200,
+            latency_ms: 480,
+          },
+          {
+            channel_id: "ch-off",
+            name: "上游乙",
+            type: "gemini",
+            enabled: false,
+            balance_minor_units: 2500,
+            currency: "CNY",
+            model_count: 5,
+            error_rate_ppm: 0,
+            latency_ms: 0,
+          },
+          {
+            // 余额键**缺席** = 未配置余额（与 balance_minor_units: 0 相反）
+            channel_id: "ch-nobal",
+            name: "自建丙",
+            type: "ollama",
+            enabled: true,
+            currency: "CNY",
+            model_count: 3,
+            error_rate_ppm: 187500,
+            latency_ms: 2340,
           },
         ],
       },
@@ -464,6 +528,121 @@ describe("Sub2API 平台详情·渠道/资源页签（原渠道明细页）", ()
   });
 });
 
+describe("NewAPI 平台详情（XM-0035）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch((url) =>
+      url.startsWith("/api/v1/metrics/history")
+        ? okHandler(url)
+        : url.startsWith("/api/v1/metrics")
+          ? fakeResponse(200, newapiChannelsBody)
+          : okHandler(url),
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("注册表里没有 newapi 也照样展开六格页签，而不是一屏「未接入」", async () => {
+    renderRoute("/platforms/newapi");
+    // servicesBody 里没有 newapi——页面靠指标活着，不靠登记
+    expect(await screen.findByRole("tab", { name: "概览" })).not.toBeNull();
+    expect(screen.getAllByRole("tab")).toHaveLength(6);
+    // 断言的是**正文里**那一屏占位没出现，而不是全屏搜「未接入」——
+    // 导航上 CPA / 支付 / 服务器确实还挂着「未接入·Mx」，那是对的。
+    expect(screen.queryByText("本环境未登记该平台的实例")).toBeNull();
+  });
+
+  it("渠道表逐渠道给出启停、余额、错误率、模型数与延迟", async () => {
+    renderRoute("/platforms/newapi?tab=resources");
+    expect(await screen.findByText("上游甲")).not.toBeNull();
+    expect(screen.getByText("上游乙")).not.toBeNull();
+    expect(screen.getByText("自建丙")).not.toBeNull();
+
+    expect(screen.getAllByText("启用")).toHaveLength(2);
+    expect(screen.getByText("停用")).not.toBeNull();
+    expect(screen.getByText("¥100.00")).not.toBeNull();
+
+    // ppm → 百分比，两位小数，纯整数运算：1200 ppm = 0.12%，187500 ppm = 18.75%
+    expect(screen.getByText("0.12%")).not.toBeNull();
+    expect(screen.getByText("18.75%")).not.toBeNull();
+    // 停用渠道的 0 ppm 照样显示成 0.00%，不显示成「—」
+    expect(screen.getByText("0.00%")).not.toBeNull();
+
+    expect(screen.getByText("2,340 ms")).not.toBeNull();
+    // 新鲜度徽章与数据时间必须跟着表走（规格 §9.1）：一张看着很具体的明细表
+    // 最容易让人忘记问「这是什么时候的数」
+    expect(screen.getByText("数据新鲜")).not.toBeNull();
+    expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC/)).not.toBeNull();
+  });
+
+  it("余额未配置显示「未配置」，不显示成 ¥0.00（两者是相反的两件事）", async () => {
+    renderRoute("/platforms/newapi?tab=resources");
+    expect(await screen.findByText("自建丙")).not.toBeNull();
+    expect(screen.getByText("未配置")).not.toBeNull();
+    // ¥0.00 只应在真的有一条余额为 0 的渠道时出现——本夹具里没有
+    expect(screen.queryByText("¥0.00")).toBeNull();
+  });
+
+  it("表头摘要给出渠道数、启用数与异常判据本身", async () => {
+    renderRoute("/platforms/newapi?tab=resources");
+    expect(await screen.findByText("上游甲")).not.toBeNull();
+    expect(screen.getByText(/3 个渠道 · 启用 2/)).not.toBeNull();
+    // 判据一起显示：看板说「异常 N」时，人要能当场看出异常是按什么算的
+    expect(screen.getByText(/异常判据 错误率 ≥ 5\.00%/)).not.toBeNull();
+  });
+
+  it("概览页签把 newapi.* 指标渲染成卡片", async () => {
+    renderRoute("/platforms/newapi");
+    expect(await screen.findByText("NewAPI 渠道状态")).not.toBeNull();
+    expect(screen.getByText("3 个渠道")).not.toBeNull();
+    expect(screen.getByText(/启用 2 · 异常 1/)).not.toBeNull();
+  });
+
+  it("演示来源 newapi-staging 会挂出演示横幅（Fake 数据不得冒充真实运营数据）", async () => {
+    renderRoute("/platforms/newapi");
+    expect(
+      await screen.findByText(/当前展示的是演示数据（Fake 连接器）/),
+    ).not.toBeNull();
+  });
+
+  it("该环境没有渠道状态指标时给空态而不是空表", async () => {
+    stubFetch((url) =>
+      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
+        ? fakeResponse(200, { items: [] })
+        : okHandler(url),
+    );
+    renderRoute("/platforms/newapi?tab=resources");
+    expect(await screen.findByText("暂无渠道状态指标")).not.toBeNull();
+  });
+
+  it("指标未初始化时不画表，明说没有可信明细（宪法 12 条）", async () => {
+    const uninitialized = {
+      items: [
+        {
+          ...newapiChannelsBody.items[0],
+          freshness: {
+            state: "uninitialized",
+            staleness_seconds: null,
+            threshold_seconds: 1800,
+            is_partial: false,
+            observed_at: null,
+            last_success: null,
+            last_error_code: "",
+          },
+        },
+      ],
+    };
+    stubFetch((url) =>
+      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
+        ? fakeResponse(200, uninitialized)
+        : okHandler(url),
+    );
+    renderRoute("/platforms/newapi?tab=resources");
+    expect((await screen.findAllByText("未初始化")).length).toBe(2);
+    expect(screen.getByText(/没有可信的渠道明细/)).not.toBeNull();
+    expect(screen.queryByText("上游甲")).toBeNull();
+  });
+});
+
 describe("审计事件页", () => {
   beforeEach(() => {
     devLogin();
@@ -736,10 +915,20 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
     // servicesBody 只登记了 sub2api
     expect(await within(nav).findByRole("link", { name: "Sub2API" })).not.toBeNull();
 
-    // NewAPI 没登记：文字在、里程碑标签在，但不是链接
-    expect(within(nav).getByText("NewAPI")).not.toBeNull();
-    expect(within(nav).getByText("未接入·M1")).not.toBeNull();
-    expect(within(nav).queryByRole("link", { name: /NewAPI/ })).toBeNull();
+    // CPA 没登记也没建页：文字在、里程碑标签在，但不是链接
+    expect(within(nav).getByText("CPA")).not.toBeNull();
+    expect(within(nav).getByText("未接入·M4")).not.toBeNull();
+    expect(within(nav).queryByRole("link", { name: /CPA/ })).toBeNull();
+  });
+
+  it("NewAPI 没登记也是链接：它的内容来自指标，不依赖注册表（XM-0035）", async () => {
+    renderRoute("/dashboard");
+    const nav = await screen.findByRole("navigation");
+    // servicesBody 里没有 newapi，但页面照样点得进去——概览与渠道表读的是
+    // /metrics（采集任务写的），注册表只服务于尚未实现的「连接与凭据」那一格。
+    // 挂着「未接入」而页面明明有五条指标可显示，那是看板在说谎。
+    expect(await within(nav).findByRole("link", { name: "NewAPI" })).not.toBeNull();
+    expect(within(nav).queryByText("未接入·M1")).toBeNull();
   });
 
   it("开票系统标成契约草案，不冒充成某个里程碑", async () => {
@@ -761,7 +950,11 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
     const nav = await screen.findByRole("navigation");
     // 拿一次 403 去断言「这个平台没接入」，与新鲜度铁律禁止的是同一类事
     expect((await within(nav).findAllByText("读取失败")).length).toBeGreaterThan(0);
-    expect(within(nav).queryByText("未接入·M1")).toBeNull();
+    expect(within(nav).queryByText("未接入·M4")).toBeNull();
+    // 内容来自指标的平台也一样：注册表读不到时说「读取失败」而不是直接放行。
+    // 这一格现在确实不依赖注册表，但**此刻我们还不知道这一点**——判据要等
+    // 注册表这次请求有结果才谈得上，说不知道就是说不知道（§9.1 同一条道理）。
+    expect(within(nav).queryByRole("link", { name: "NewAPI" })).toBeNull();
   });
 });
 
@@ -886,9 +1079,9 @@ describe("平台详情：未接入与未知平台", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("未接入平台给一整屏占位 + 规格里的一句话范围，而不是六个空页签", async () => {
-    renderRoute("/platforms/newapi");
-    expect(await screen.findByText("未接入，规划于 M1")).not.toBeNull();
-    expect(screen.getByText(/上游模型网关/)).not.toBeNull();
+    renderRoute("/platforms/cpa");
+    expect(await screen.findByText("未接入，规划于 M4")).not.toBeNull();
+    expect(screen.getByText(/推广投放与结算/)).not.toBeNull();
     // 摆出页签等于承诺点进去有东西，而这里一格都还没有
     expect(screen.queryAllByRole("tab")).toHaveLength(0);
   });

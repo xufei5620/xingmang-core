@@ -7,8 +7,13 @@
  *  所以判定放在**运行时**而不是构建期开关：构建期开关只能保证「我们以为的」
  *  环境，运行时看 source 才能反映「实际画出来的这批数字来自哪里」。 */
 
-/** 已知的演示实例（Fake 连接器写入的 source）。可用 VITE_XM_DEMO_SOURCES 覆盖。 */
-export const DEFAULT_DEMO_SOURCES = ["sub2api-staging"];
+/** 已知的演示实例（Fake 连接器写入的 source）。可用 VITE_XM_DEMO_SOURCES 覆盖。
+ *
+ *  每一项与后端的默认来源标识**逐字对应**（jobs.DefaultSub2APIInstanceID、
+ *  jobs.DefaultNewAPIInstanceID）。匹配是整串相等而不是前缀，所以接入新的
+ *  Fake 连接器时必须回来加一行——漏了不会报错，只会让那批演示数字在页面上
+ *  与真实运营读数长得一模一样，正是本文件要防的那件事。 */
+export const DEFAULT_DEMO_SOURCES = ["sub2api-staging", "newapi-staging"];
 
 /** 横幅文案。写死在这里而不是散在组件里：它是一句对外承诺的反面，
  *  改动应当显眼到能被 review 抓住。 */

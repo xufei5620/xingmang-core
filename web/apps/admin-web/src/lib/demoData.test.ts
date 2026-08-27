@@ -57,3 +57,23 @@ describe("shouldShowDemoBanner", () => {
     expect(shouldShowDemoBanner(["sub2api-staging"], { ...auto, mode: "real" })).toBe(false);
   });
 });
+
+describe("NewAPI 的 Fake 来源（XM-0035）", () => {
+  it("newapi-staging 认得出是演示数据", () => {
+    // 与 jobs.DefaultNewAPIInstanceID 逐字对应。整串相等匹配，不做前缀——
+    // 改了后端那个默认值就必须同步改这里，否则演示数据会失去「这是假的」
+    // 这层标注，在页面上与真实运营读数长得一模一样。
+    expect(isDemoSource("newapi-staging", DEFAULT_DEMO_SOURCES)).toBe(true);
+    expect(isDemoSource("newapi-prod", DEFAULT_DEMO_SOURCES)).toBe(false);
+    expect(isDemoSource("newapi", DEFAULT_DEMO_SOURCES)).toBe(false);
+  });
+
+  it("只要有一条演示来源就挂横幅，哪怕同屏还有真实来源", () => {
+    expect(
+      shouldShowDemoBanner(["sub2api-prod", "newapi-staging"], {
+        mode: "auto",
+        demoSources: DEFAULT_DEMO_SOURCES,
+      }),
+    ).toBe(true);
+  });
+});

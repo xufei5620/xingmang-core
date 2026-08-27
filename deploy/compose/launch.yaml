@@ -176,6 +176,20 @@ services:
       # 而不是拿一个占位值去连上游（宪法 7 条：凭据只经 CredentialRef，
       # 这个变量只是 env Provider 的落点，Connector 并不认识它）。
       XM_SUB2API_TOKEN: ${XM_SUB2API_TOKEN:-}
+      # --- NewAPI 连接器（XM-0035，规格 §8.4）--------------------------------
+      # fake = 造数据，不连真实上游。真实只读客户端尚未实现（XM-0038），
+      # 所以 real 现在**必然**失败：每轮同步往看板写一条 not_supported 的
+      # 失败观测，看板看得见这条指标存在且正在失败，而不是数据静静停更。
+      #
+      # ⚠️ 生产环境不接受 fake（会把演示数据写成运营读数），而 real 还不存在——
+      #    因此生产现阶段唯一走得通的配置是 XM_NEWAPI_SYNC_ENABLED=false。
+      #    配错了 worker 会**拒绝启动**并在错误信息里说清这一点。
+      XM_NEWAPI_MODE: ${XM_NEWAPI_MODE:-fake}
+      XM_NEWAPI_SYNC_ENABLED: ${XM_NEWAPI_SYNC_ENABLED:-true}
+      XM_NEWAPI_SYNC_INTERVAL: ${XM_NEWAPI_SYNC_INTERVAL:-300s}
+      # 观测的 Source，会原样显示在看板上。默认带 -staging 后缀：
+      # 前端的演示横幅按这个字符串整串相等匹配，改了要同步改前端。
+      XM_NEWAPI_INSTANCE_ID: ${XM_NEWAPI_INSTANCE_ID:-newapi-staging}
       # --- 告警中心（XM-0033，规格 §9.3 / §9.4）-----------------------------
       # 与 Sub2API 那几项相反：告警渠道**配错就让进程起不来**（ref 拼错、
       # URL 不是 https、只配了一半）。理由见 docs/modules/alerts/README.md——

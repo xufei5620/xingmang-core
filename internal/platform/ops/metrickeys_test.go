@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/xufei5620/xingmang-platform/connectors/invoice"
+	"github.com/xufei5620/xingmang-platform/connectors/newapi"
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
@@ -30,6 +31,11 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		sub2api.MetricChannelBalance,
 		invoice.MetricRequestsDaily,
 		invoice.MetricAmountDaily,
+		newapi.MetricUsersTotal,
+		newapi.MetricRechargeDaily,
+		newapi.MetricSubscriptionDaily,
+		newapi.MetricChannelsStatus,
+		newapi.MetricModelsUsage,
 	}
 
 	for _, key := range fromContracts {

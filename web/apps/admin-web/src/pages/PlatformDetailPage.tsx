@@ -5,6 +5,7 @@ import { useParams, useSearchParams } from "react-router";
 import { listMetrics, listServices } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
 import { ChannelsPanel } from "../components/ChannelsPanel";
+import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
 import { MetricCardGrid } from "../components/MetricCardGrid";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { PageHeader } from "../components/PageHeader";
@@ -13,6 +14,7 @@ import {
   normalizeTab,
   pendingHeadline,
   platformOfMetricKey,
+  platformOpens,
   PLATFORM_TABS,
   type PlatformEntry,
   type PlatformTabValue,
@@ -102,7 +104,9 @@ function PlatformBody({
 
   // 未接入的平台给一整屏占位，而不是六个空页签：页签摆在那里等于承诺点进去有东西，
   // 而这里一格都还没有。§12 惯例要的是「显示为未接入」，不是「显示成接入了但空」
-  if (!entry.registered) {
+  // 判据是「点进去有没有东西」而不是「注册表里有没有」——与导航共用同一个
+  // 判据，否则会出现导航亮着链接、点进来却是一屏「未接入」（见 platformOpens）
+  if (!platformOpens(entry)) {
     // 这一句话的范围已经由页头的 description 给出（对所有平台都一样），
     // 占位里不再重复一遍——同一句话在同一屏出现两次，读的人会以为是两件事
     return (
@@ -143,15 +147,23 @@ function tabContent(tab: PlatformTabValue, entry: PlatformEntry): ReactNode {
         />
       );
     case "resources":
-      // Sub2API 的资源就是渠道，页面已有（原 /channels 整体迁入）
-      return spec.serviceType === "sub2api" ? (
-        <ChannelsPanel />
-      ) : (
-        <EmptyState
-          title="渠道/资源尚未实现"
-          description={`将显示 ${spec.label} 的资源清单（渠道／账号／模型，按该平台的语义）。`}
-        />
-      );
+      // 两个平台的「资源」都是渠道，但**指标形状不同**（sub2api 是余额+令牌，
+      // newapi 是启停+错误率+延迟），所以是两个组件而不是一个带参数的通用表：
+      // 硬凑成一张表要么列对不上，要么长出一堆各平台各半空的列。
+      switch (spec.serviceType) {
+        case "sub2api":
+          // Sub2API 的资源就是渠道，页面已有（原 /channels 整体迁入）
+          return <ChannelsPanel />;
+        case "newapi":
+          return <NewApiChannelsPanel />;
+        default:
+          return (
+            <EmptyState
+              title="渠道/资源尚未实现"
+              description={`将显示 ${spec.label} 的资源清单（渠道／账号／模型，按该平台的语义）。`}
+            />
+          );
+      }
     case "connection":
       return (
         <EmptyState

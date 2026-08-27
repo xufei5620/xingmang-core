@@ -6,6 +6,7 @@ import {
   groupDigits,
   INVALID_VALUE_TEXT,
   toIntegerValue,
+  formatErrorRatePPM,
 } from "./money";
 
 describe("formatMinorUnits：整数最小单位 → 展示", () => {
@@ -85,5 +86,43 @@ describe("底层工具", () => {
     expect(toIntegerValue("42")).toBe(42n);
     expect(toIntegerValue(4.2)).toBeNull();
     expect(toIntegerValue({})).toBeNull();
+  });
+});
+
+describe("错误率（ppm → 百分比）", () => {
+  it("按两位小数展示，1% = 10000 ppm", () => {
+    expect(formatErrorRatePPM(0)).toBe("0.00%");
+    expect(formatErrorRatePPM(1_200)).toBe("0.12%");
+    expect(formatErrorRatePPM(10_000)).toBe("1.00%");
+    expect(formatErrorRatePPM(187_500)).toBe("18.75%");
+    expect(formatErrorRatePPM(1_000_000)).toBe("100.00%");
+  });
+
+  it("小到 1 ppm 也不被抹成 0——ppm 的分辨率正是为此选的", () => {
+    // 100 ppm = 0.01%，一个健康网关的常见量级。用百分之整数表达时它与 0
+    // 无法区分，那正是契约层选 ppm 的理由。
+    expect(formatErrorRatePPM(100)).toBe("0.01%");
+    // 低于两位小数能表达的部分被截掉，但这不影响「它不是 0」这个判断——
+    // 1 ppm 显示成 0.00% 是展示精度的下限，不是数据被抹平
+    expect(formatErrorRatePPM(1)).toBe("0.00%");
+  });
+
+  it("截断而不是四舍五入：错误率不能显示得比实际低", () => {
+    // 49999 ppm = 4.9999%，进位会显示成 5.00%，看着刚好压在 5% 的判据上
+    expect(formatErrorRatePPM(49_999)).toBe("4.99%");
+    expect(formatErrorRatePPM(50_000)).toBe("5.00%");
+  });
+
+  it("非整数与非法值给「数值异常」，不悄悄显示一个算错的比率", () => {
+    expect(formatErrorRatePPM(1.5)).toBe(INVALID_VALUE_TEXT);
+    expect(formatErrorRatePPM("abc")).toBe(INVALID_VALUE_TEXT);
+    expect(formatErrorRatePPM(null)).toBe(INVALID_VALUE_TEXT);
+    expect(formatErrorRatePPM(undefined)).toBe(INVALID_VALUE_TEXT);
+    // 超过安全整数范围的 JSON 数字已经丢了精度，不能拿来显示
+    expect(formatErrorRatePPM(Number.MAX_SAFE_INTEGER + 2)).toBe(INVALID_VALUE_TEXT);
+  });
+
+  it("负值不被吞掉：它是上游给错了，该看得出来", () => {
+    expect(formatErrorRatePPM(-1_200)).toBe("-0.12%");
   });
 });
