@@ -5,7 +5,7 @@ systems:
     endpoint: https://api.solov.cc
     environment: production
     observed_at: 2026-08-26T00:00:00Z
-    detected_version: "未探测（XM-0017 Sub2API Connector 交付后自动更新）"
+    detected_version: "未探测（XM-0017 已交付只读客户端，等待真实凭据后由 Version() 回填）"
     user_count: 2482
     source_watermark: "未采集"
 

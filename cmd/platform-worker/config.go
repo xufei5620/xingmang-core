@@ -49,8 +49,15 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.Sub2APIInstanceID = value
 	}
 	// 只读进配置、不解析：凭据只经 CredentialRef（ADR-014、宪法 7 条）。
-	// XM-0017 接上真实客户端时才会有人用它，jobs.Config 现在只校验它的形状。
+	// 明文由 SecretProvider 在客户端构造 Authorization 头的那一瞬才出现，
+	// 这里与 jobs.Config 都只看见引用本身。
 	config.Sub2APICredentialRef = strings.TrimSpace(getenv("XM_SUB2API_CREDENTIAL_REF"))
+	// real 模式的连接配置（XM-0017）。三项缺任意一项，real 模式都立不起来，
+	// 但**不在启动时报错**：缺配置会在每轮同步写成一条说得清缺哪个的
+	// SyncFailed 观测，看板看得见（规格 §9.1）。启动即崩的话，一个配错的
+	// 采集通道会把整个 worker（心跳、其他任务）一起拖下水。
+	config.Sub2APIEndpoint = strings.TrimSpace(getenv("XM_SUB2API_ENDPOINT"))
+	config.Sub2APITargetAllowlist = parseHostAllowlist(getenv("XM_SUB2API_TARGET_ALLOWLIST"))
 	if value := getenv("XM_SUB2API_SYNC_ENABLED"); value != "" {
 		// 采集链路的停用开关（宪法 26 条）：上游出事时能立刻停掉读取，
 		// 而不必改代码重发版。关掉之后看板不会假装新鲜——observed_at 不再
@@ -69,4 +76,20 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.Sub2APISyncInterval = interval
 	}
 	return config, nil
+}
+
+// parseHostAllowlist 把逗号分隔的主机清单拆成精确匹配用的切片。
+//
+// 只做拆分、去空白、转小写——**不做**任何补全或推断（比如"从 endpoint 猜
+// 一个主机塞进去"）。allowlist 的全部价值就在于它是人显式写下的那一份，
+// 系统替人填进去的那一项等于没有。
+func parseHostAllowlist(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		host := strings.ToLower(strings.TrimSpace(part))
+		if host != "" {
+			out = append(out, host)
+		}
+	}
+	return out
 }

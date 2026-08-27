@@ -161,10 +161,17 @@ services:
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
       HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-1m}
       # Sub2API 连接器模式。fake = 造数据，不连真实上游。
-      # 真实数据要等 XM-0017（Sub2API 只读账号）；在那之前把 real 打开
-      # 只会得到一堆连不上的错误，或者更糟——连上了但用错凭据。
-      # 变量本身由 XM-0022 实现；这里写的就是它的默认值，不构成依赖。
+      # 切 real 需要下面四项一起配齐（XM-0017），缺任一项 worker 照常起，
+      # 只是每轮同步往看板写一条 not_supported 的失败观测并说清缺哪个变量。
+      # 切换步骤见 docs/modules/connector/RUNBOOK.md。
       XM_SUB2API_MODE: ${XM_SUB2API_MODE:-fake}
+      XM_SUB2API_ENDPOINT: ${XM_SUB2API_ENDPOINT:-}
+      XM_SUB2API_TARGET_ALLOWLIST: ${XM_SUB2API_TARGET_ALLOWLIST:-}
+      XM_SUB2API_CREDENTIAL_REF: ${XM_SUB2API_CREDENTIAL_REF:-}
+      # 只读账号的 API Token 明文。默认空：没配就是没有真实读取能力，
+      # 而不是拿一个占位值去连上游（宪法 7 条：凭据只经 CredentialRef，
+      # 这个变量只是 env Provider 的落点，Connector 并不认识它）。
+      XM_SUB2API_TOKEN: ${XM_SUB2API_TOKEN:-}
 
   # ==========================================================================
   # Web（admin-web 静态产物 + /api/ 反代）

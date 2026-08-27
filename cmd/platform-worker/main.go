@@ -31,6 +31,13 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "database_url_invalid")
 		os.Exit(2)
 	}
+	// Sub2API 只读凭据的 Provider（XM-0017）。装配在进程入口，任务层只拿接口。
+	// 引用没配时返回 nil，不是错误——见 sub2apiSecretsFromEnv 的注释。
+	config.Sub2APISecrets, err = sub2apiSecretsFromEnv(os.Getenv, logger, config.Environment, config.Sub2APICredentialRef)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "sub2api_credential_ref_invalid")
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
 const (
@@ -40,6 +41,13 @@ const (
 	// sub2apiBusinessDayLayout 是业务日格式（规格 §5.9：业务日结时区显式声明）。
 	sub2apiBusinessDayLayout = "2006-01-02"
 
+	// DefaultSub2APIRequestTimeout 是**单次**上游 HTTP 读取的超时。
+	//
+	// 比 sub2apiReadTimeout(20s) 小是有意的：三次读取串行跑，一个卡死的连接
+	// 不该把整轮的读取预算独吞。两层超时各管一段——这层管「一次请求」，
+	// 外面那层管「这一轮」。
+	DefaultSub2APIRequestTimeout = 10 * time.Second
+
 	// sub2apiReadTimeout 只约束「读上游」这一段，不约束整个 Work。
 	//
 	// 分开是有意的：读超时必须还留得下时间把「同步失败」写进库。如果让
@@ -59,13 +67,19 @@ const (
 	Sub2APIModeReal Sub2APIMode = "real"
 )
 
-// ErrSub2APIRealClientUnavailable 是 real 模式当前的确定性失败。
+// ErrSub2APIRealClientUnavailable 是 real 模式**配置未就绪**时的确定性失败。
 //
-// 「XM-0017 未实现，等待只读账号」是一个**事实**，不是异常：与其让配置成
+// XM-0017 之后真实客户端已经存在，但它需要三样东西才立得起来：只读端点、
+// 目标 allowlist、以及一个能解析出只读凭据的 CredentialRef。三者缺一，
+// real 模式就还是走不通——而「走不通」是一个**事实**，不是异常：与其让配置成
 // real 的进程无声无息什么都不采，不如让它每个周期都往库里写一条明确的
 // SyncFailed，看板照样看得见这条指标存在、且正在失败（规格 §9.1）。
+//
+// 分类保持 not_supported（而不是 internal）：它表达的是「本部署还不具备
+// 真实读取能力」，与「配了但配错了」区分开——后者归 internal，运维一看
+// error_code 就知道该去补配置还是去改配置。
 var ErrSub2APIRealClientUnavailable = errors.New(
-	"sub2api 真实只读客户端未实现：XM-0017 未实现，等待只读账号")
+	"sub2api 真实只读客户端未配置：缺少只读端点/allowlist/凭据引用")
 
 // ObservationStore 是本任务用到的 ops 仓储子集。
 //
@@ -87,17 +101,63 @@ type ObservationStore interface {
 // 进程启动时构造一次然后一直握着。
 type Sub2APIClientFactory func(ctx context.Context) (sub2api.ReadClient, error)
 
-// NewSub2APIClientFactory 是 XM-0017 真实实现的落点。
+// Sub2APIRealConfig 是 real 模式构造真实只读客户端所需的全部输入。
 //
-// 现在只有 fake 一条路走得通。real 模式返回**分类明确**的错误而不是 nil
-// client：调用方按 connector.KindOf 归类后写成 SyncFailed 观测，
-// 看板显示「同步失败」，而不是数据静静停更（规格 §9.1）。
+// 它刻意只装「连哪儿、用谁的凭据、多久超时」，不装任何凭据材料本身：
+// 凭据只经 CredentialRef，明文由 SecretProvider 在**构造 Authorization 头
+// 的那一瞬**才出现（ADR-014、宪法 7 条）。
+type Sub2APIRealConfig struct {
+	// Endpoint 是上游只读端点，必须 https。
+	Endpoint string
+	// TargetAllowlist 是允许连接的主机精确清单；为空时一个请求都发不出去。
+	TargetAllowlist []string
+	// CredentialRef 形如 secret://<scope>/<name>。
+	CredentialRef string
+	// Environment / InstanceID 进连接配置，同时是观测的 Source。
+	Environment string
+	InstanceID  string
+	// Timeout 是单次 HTTP 请求的超时；零值由客户端回落到保守默认。
+	Timeout time.Duration
+	// Secrets 解析 CredentialRef。缺它等于没有凭据，real 模式走不通。
+	Secrets secrets.SecretProvider
+}
+
+// missing 列出缺了哪几项配置。
 //
-// credentialRef 在这里**只被接住、不被解析出明文**。凭据只经 CredentialRef
-// （ADR-014、宪法 7 条），本任务不碰任何凭据材料；XM-0017 接上真实客户端时，
-// 在这里用 secrets.Provider + connector.ReadOnlyTransport 把它换成实现，
-// 其余调用点一行都不用改。
-func NewSub2APIClientFactory(mode Sub2APIMode, credentialRef string) Sub2APIClientFactory {
+// 返回**清单**而不是第一个错：运维一次就能把配置补齐，而不是补一个重启一次
+// 再看下一个缺什么。字段名用环境变量名而不是 Go 字段名——看日志的人手里
+// 拿的是 .env，不是源码。
+func (c Sub2APIRealConfig) missing() []string {
+	var out []string
+	if strings.TrimSpace(c.Endpoint) == "" {
+		out = append(out, "XM_SUB2API_ENDPOINT")
+	}
+	if len(c.TargetAllowlist) == 0 {
+		out = append(out, "XM_SUB2API_TARGET_ALLOWLIST")
+	}
+	if strings.TrimSpace(c.CredentialRef) == "" {
+		out = append(out, "XM_SUB2API_CREDENTIAL_REF")
+	}
+	if c.Secrets == nil {
+		// 装配问题而不是环境变量问题，但同样让 real 模式立不起来，
+		// 所以并进同一份清单，用能让人找到装配点的名字。
+		out = append(out, "secret provider")
+	}
+	return out
+}
+
+// NewSub2APIClientFactory 按模式构造只读客户端。
+//
+// real 模式在这里真正接活（XM-0017）：每轮同步现解析 CredentialRef、
+// 现建传输层，而不是在进程启动时构造一次然后一直握着——凭据会轮换，
+// 握着的连接不会知道。
+//
+// 配置不全时返回**分类明确**的错误而不是 nil client：调用方按
+// connector.KindOf 归类后写成 SyncFailed 观测，看板显示「同步失败」
+// 并说得出失败原因，而不是数据静静停更（规格 §9.1）。
+func NewSub2APIClientFactory(mode Sub2APIMode, cfg Sub2APIRealConfig) Sub2APIClientFactory {
+	// 形参是 context.Context 而不是具名 ctx：真实客户端的构造不做任何 I/O，
+	// 凭据在首次读取时才解析——那时用的是**请求的** ctx，取消才管用。
 	return func(context.Context) (sub2api.ReadClient, error) {
 		switch mode {
 		case Sub2APIModeFake:
@@ -105,12 +165,23 @@ func NewSub2APIClientFactory(mode Sub2APIMode, credentialRef string) Sub2APIClie
 			// 随机化只会让「这条数据是假的」更难被看出来。
 			return sub2api.NewFake(sub2api.FakeOptions{}), nil
 		case Sub2APIModeReal:
-			// _ = credentialRef：XM-0017 的入参已经就位，但现在解析它没有意义
-			// ——没有实现可以用它。留着形参而不是留个 TODO，是为了让接缝的形状
-			// 在编译期就固定下来。
-			_ = credentialRef
-			return nil, connector.NewError(
-				connector.KindNotSupported, "sub2api.client.real", ErrSub2APIRealClientUnavailable)
+			if missing := cfg.missing(); len(missing) > 0 {
+				return nil, connector.NewError(
+					connector.KindNotSupported, "sub2api.client.real",
+					fmt.Errorf("缺少 %s: %w", strings.Join(missing, ", "), ErrSub2APIRealClientUnavailable))
+			}
+			// 配置**写错了**（endpoint 不是 https、主机不在自己的 allowlist 里…）
+			// 与配置**没写**分开归类：前者由客户端归 internal——是我们自己的部署
+			// 配置有问题，不是上游不支持；后者归 not_supported（见上面的 missing）。
+			// 凭据解析失败两者都不是，它在首次读取时归 auth。
+			return sub2api.NewClient(connector.Config{
+				ServiceInstanceID: cfg.InstanceID,
+				Environment:       cfg.Environment,
+				Endpoint:          cfg.Endpoint,
+				CredentialRef:     cfg.CredentialRef,
+				TargetAllowlist:   cfg.TargetAllowlist,
+				Timeout:           cfg.Timeout,
+			}, cfg.Secrets)
 		default:
 			return nil, connector.NewError(
 				connector.KindInternal, "sub2api.client.mode",
