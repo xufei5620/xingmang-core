@@ -87,6 +87,9 @@ func main() {
 		ActionRegistry: actionRegistry,
 		Services:       registryStore,
 		Metrics:        opsStore,
+		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
+		// 实现，不另开一条访问审计表的路径
+		AuditEvents:    auditStore,
 		RequestTimeout: cfg.RequestTimeout,
 	})
 

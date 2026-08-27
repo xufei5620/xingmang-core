@@ -244,6 +244,59 @@ func (s *Store) List(ctx context.Context, from, to int64) ([]Event, error) {
 	return out, nil
 }
 
+// 倒序分页读取的边界（看板/审计视图用）。
+const (
+	// MaxListLimit 是单页上限。审计事件带前后摘要，一条能有几 KB；
+	// 不封顶的话一个 limit=100000 就能把整条链拉进内存，既是内存风险
+	// 也是「一次性拖走全部操作明细」的取数便利。超出一律夹到上限而不是
+	// 报错——分页参数不是安全边界，静默收敛比让调用方重试更实用。
+	MaxListLimit = 100
+	// DefaultListLimit 是未指定 limit 时的默认页大小。
+	DefaultListLimit = 50
+)
+
+// ListRecent 按 sequence **降序**读取某环境最近的审计事件（看板首屏与翻页）。
+//
+// 与 List 的区别不只是方向：List 服务于链校验（必须连续、必须全环境），
+// ListRecent 服务于人看——按环境过滤且分页。两者不能合并，因为
+// 「过滤后的区间」对链校验毫无意义（过滤本身就会制造序号缺口）。
+//
+// beforeSeq = 0 表示从最新一条开始；否则只返回 sequence 严格小于它的事件，
+// 于是「上一页最后一条的 sequence」可以直接当下一页的游标，不重不漏。
+// limit <= 0 用默认值，超过 MaxListLimit 夹到上限。
+//
+// 本方法只读，不参与哈希链的构建，也不校验链——调用方拿到的 event_hash /
+// prev_hash 是库里的原样值，是否可信由 VerifyChain 回答。
+func (s *Store) ListRecent(ctx context.Context, environment string, beforeSeq int64, limit int32) ([]Event, error) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	if limit > MaxListLimit {
+		limit = MaxListLimit
+	}
+	if beforeSeq < 0 {
+		// 负游标没有意义；按「从最新开始」处理，避免把 -1 当成有效上界
+		beforeSeq = 0
+	}
+	rows, err := gen.New(s.pool).ListRecentAuditEvents(ctx, gen.ListRecentAuditEventsParams{
+		Environment: environment,
+		BeforeSeq:   beforeSeq,
+		RowLimit:    limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list recent audit events: %w", err)
+	}
+	out := make([]Event, 0, len(rows))
+	for _, r := range rows {
+		e, err := eventFromRow(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 // ChainProblem 描述链校验发现的第一个问题。
 type ChainProblem struct {
 	Sequence int64

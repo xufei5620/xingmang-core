@@ -34,6 +34,44 @@ append-only 规则能挡住误操作，但挡不住拥有 DBA 权限的人——
 签名密钥只经 `secrets.SecretProvider` 按 CredentialRef 解析（ADR-014），
 `SignerFromSecret` 是本包唯一接触密钥材料的入口。
 
+## 对外读取（XM-0025）
+
+`Store.ListRecent(ctx, environment, beforeSeq, limit)` 是给人看的读取入口，
+经 `GET /api/v1/audit/events` 暴露（权限 `audit.ScopeRead`，见
+`docs/modules/httpapi/PERMISSIONS.md`）。
+
+它与用于链校验的 `List(from, to)` **不能合并**，尽管都在读同一张表：
+
+| | `List` | `ListRecent` |
+|---|---|---|
+| 用途 | `VerifyChain` 校验 | 看板展示 |
+| 顺序 | sequence 升序 | sequence **降序** |
+| 过滤 | 不过滤（必须连续） | 按 environment |
+| 分页 | 区间 [from, to] | 游标 + limit（上限 100） |
+
+关键在过滤：审计链的 sequence 是**全局**的，按环境过滤后序号必然带缺口，
+而「有缺口」正是 `VerifyChain` 要报的 `sequence_gap`。让校验读一份过滤过的
+数据，等于让它对着自己造出来的缺口报警。
+
+分页游标用 `sequence` 而不是 `occurred_at`：序号由链唯一且严格递增，
+时间戳会撞（同一微秒内两条），撞了就会翻页重复或漏读。
+`before_seq` 是**开区间**上界（严格小于），所以「上一页最后一条的 sequence」
+可以直接当下一页的游标。`before_seq=0` 表示从最新一条开始。
+
+`limit` 上限 100，超出静默夹到上限而不是报错：审计事件带前后摘要，一条能有几 KB，
+不封顶的话一次 `limit=100000` 就能把整条链拖走——既是内存风险，也是取数便利。
+
+读路径**不校验链**：返回的 `event_hash` / `prev_hash` 是库里的原样值。
+「这条记录可不可信」由 `VerifyChain` 与 Chain Root 签名回答，不由列表接口顺带回答——
+让读接口顺手做校验，会让一次翻页变成一次全链扫描。
+
+### 待办：索引
+
+当前没有 `(environment, sequence DESC)` 复合索引，查询靠 `audit_event_sequence_key`
+的反向扫描 + 过滤。事件量小、且各环境事件密度接近时够用；一旦生产事件远多于
+staging，翻 staging 的页会退化成扫大量生产行。链上事件累积到十万量级前应补一条
+forward-only 迁移加该索引（规格 §5.7：不得改已发布的迁移）。
+
 ## 边界
 
 - **`Canonical()` 的字段集合与顺序一旦上线即冻结**：改动会使全部历史链失效。
