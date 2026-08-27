@@ -191,6 +191,7 @@ func main() {
 		// 而本进程没有任何写入路径会用到注入时钟。
 		FinanceSummaries: finance.NewSummaryStore(pool, nil),
 		RequestTimeout:   cfg.RequestTimeout,
+		RateLimit:        cfg.RateLimit,
 	})
 
 	srv := &http.Server{

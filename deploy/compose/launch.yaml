@@ -130,6 +130,12 @@ services:
       DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30s}
+      # /api/v1 的限流配额（XM-R011）。每 (Principal, 路由) 每分钟的请求数 +
+      # 瞬时并发额度。**关不掉**：填 0 或负数会让 API 拒绝启动——要放宽就填一个
+      # 更大的数字，那是一个看得见的决定。探针（/healthz、/readyz）不受影响。
+      # ⚠️ 计数在**进程内存**里，多副本时每个副本各算各的（实际额度是副本数倍）。
+      XM_RATE_LIMIT_PER_MINUTE: ${XM_RATE_LIMIT_PER_MINUTE:-120}
+      XM_RATE_LIMIT_BURST: ${XM_RATE_LIMIT_BURST:-20}
       # --- 请求详情 / reqlog 只读网关（XM-0039，交接文档 §9.4）--------------
       # 数据源是生产上已在运行的**外挂**「请求审计系统」，平台只做带权限与
       # 审计的只读网关：请求正文永不落平台库、不缓存、默认不可导出。

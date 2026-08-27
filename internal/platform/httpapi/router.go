@@ -50,6 +50,11 @@ type Deps struct {
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
 	FinanceSummaries FinanceSummaryLister
 	RequestTimeout   time.Duration
+	// RateLimit 是 /api/v1 的限流参数（XM-R011）。零值走默认配额。
+	//
+	// **没有「关掉」这个选项**：一个能被关掉的限流在出事那天多半是关着的。
+	// 要放宽就把 PerMinute 调大，那是一个看得见的数字。
+	RateLimit RateLimitConfig
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -81,6 +86,10 @@ func NewRouter(d Deps) http.Handler {
 		// 端点：新加的端点自动继承，不靠作者记得。探针不在这一组，保持可缓存。
 		api.Use(NoStore)
 		api.Use(RequirePrincipal(d.Resolver))
+		// 限流（XM-R011）**装在 RequirePrincipal 之后**：桶键要用已解析的
+		// 身份，而不是调用方声称的那个。装反了等于让伪造者换个 Header 就
+		// 换一个新桶。探针不在这一组，天然豁免——靠装配位置，不靠豁免名单。
+		api.Use(RateLimit(NewRateLimiter(d.RateLimit), logger))
 		api.Get("/actions", ListActionsHandler(d.ActionRegistry))
 		api.Post("/actions/{actionID}/versions/{version}/execute", ExecuteActionHandler(d.Kernel))
 		// 读也要权限（规格 §2.4）。声明在路由上，让路由表成为
