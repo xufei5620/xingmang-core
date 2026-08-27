@@ -15,6 +15,7 @@
 
 import { apiClient, type ApiClient } from "./client";
 import { appApiConfig, type PlatformApiConfig } from "./config";
+import { executeAction, type ActionRun, type ListOptions } from "./platform";
 
 /** §13 的 `Money`：大整数按字符串传（超 2^53 不丢精度）。 */
 export interface Money {
@@ -388,4 +389,284 @@ export async function listUpstreamSummaries(
       seriousDays: body.runway_thresholds?.serious_days ?? 0,
     },
   };
+}
+
+// ============================================================================
+// XM-0048 成本登记簿（读 + 四个写 Action）
+//
+// 与上面的看板供数**同文件不同层**：上面是按业务日窗口聚合出来的投影
+// （收入/成本/毛利/可用天数），下面是登记簿本身——「这个上游账号是怎么配的」。
+// 放在一起是因为它们共用 finance.read 与同一批领域概念（倍率、凭据引用、
+// 接入方式）；分成两个文件，读的人会以为那是两套互不相干的东西。
+// ============================================================================
+
+
+/** 登记簿端点的**线上原始金额形状**（snake_case）。
+ *
+ *  与上半部分的 `Money` 是同一个概念的两种形态：那边是映射之后的展示模型,
+ *  这边是批次/代理资产端点原样吐出来的。**没有在这里也加一层映射**——
+ *  那两个端点只有一个消费者（行展开区），映射层的价值全在「多处消费时形状一致」,
+ *  为一个消费者建一层，只是多一个会漂的地方。
+ *
+ *  `scale` 与 `currency` 都要：展示时交给 `formatScaledMinorUnits`,
+ *  它按 scale 降到币种的最小单位。把 6 硬编码在某个格式化函数里,
+ *  一旦与后端漂开，所有金额差一万倍且看起来完全正常（宪法 13 条）。 */
+export interface MoneyItem {
+  amount_minor: string;
+  currency: string;
+  scale: number;
+}
+
+/** 一条令牌映射（成本侧键 ↔ 收入侧键）。 */
+export interface TokenMappingItem {
+  upstream_token_id: string;
+  own_account_id: string;
+  /** **引用**不是凭据（ADR-014）。空串=这条映射没有每令牌凭据，那是正常状态。 */
+  credential_ref: string;
+  updated_at: string;
+}
+
+/** 登记簿一行：一个上游账号。 */
+export interface UpstreamAccountItem {
+  id: string;
+  system_type: string;
+  access_method: string;
+  base_url: string;
+  /** 只有引用，永不回明文。 */
+  credential_ref: string;
+  /** 规范存储量（除数，定点十进制字符串）。空串=未配置（订阅型本就没有倍率）。 */
+  recharge_ratio: string;
+  /** 展示投影 = 1 / recharge_ratio。**只拿它显示，绝不用它反算成本**。 */
+  recharge_cost_rate: string;
+  currency: string;
+  /** 业务日切日时区。展示金额与日期时按它解释，不按浏览器时区（宪法 14 条）。 */
+  business_day_tz: string;
+  /** 空串 = 未配对。台账的归属从这里取值。 */
+  platform_id: string;
+  status: string;
+  environment: string;
+  /** true = 走「实扣 ÷ 倍率」的计量口径；false = 订阅摊销口径。
+   *  由后端算好，前端不按 access_method 再判一次——那个判断散到几个页面
+   *  之后迟早有一个漏掉新枚举值。 */
+  metered: boolean;
+  token_mappings: TokenMappingItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubscriptionBatchItem {
+  id: string;
+  upstream_account_id: string;
+  paid: MoneyItem;
+  surcharge: MoneyItem;
+  refunded: MoneyItem;
+  cost_basis: MoneyItem;
+  account_share: MoneyItem;
+  daily_amortization: MoneyItem | null;
+  currency: string;
+  starts_on: string;
+  expires_on: string;
+  effective_days: number;
+  refunded_on: string | null;
+  terminated_on: string | null;
+  account_count: number;
+  proxy_asset_id: string | null;
+}
+
+export interface ProxyAssetItem {
+  id: string;
+  paid: MoneyItem;
+  surcharge: MoneyItem;
+  refunded: MoneyItem;
+  cost_basis: MoneyItem;
+  account_share: MoneyItem;
+  daily_amortization: MoneyItem | null;
+  currency: string;
+  opened_on: string;
+  expires_on: string;
+  effective_days: number;
+  refunded_on: string | null;
+  terminated_on: string | null;
+  shared_account_count: number;
+  buy_platform: string;
+  buy_address: string;
+  /** 引用而非凭据：代理的账号密码从不进库。 */
+  credential_ref: string;
+  /** false ⇒ daily_amortization 是**已知的 0**，不是未知——
+   *  「这份代理今天没在服务」与「没算出来」是两回事。 */
+  mounted: boolean;
+  environment: string;
+}
+
+interface ListResponse<T> {
+  items: T[] | null;
+}
+
+/** 读取成本登记簿需要的权限。
+ *
+ *  **不复用 ops.read**：登记簿列的是每个上游账号的凭据引用、充值倍率与令牌
+ *  映射。倍率是商业条款（我们从上游拿到几折），比看板上的余额数字敏感一个量级
+ *  （internal/platform/finance/permissions.go）。 */
+export const FINANCE_READ_PERMISSION = "finance.read";
+
+/** 三个写权限。**刻意分开**，依据是爆炸半径而不是整齐:
+ *  改倍率直接决定毛利报表长什么样，写错令牌映射会把成本记到别的渠道上
+ *  （两条渠道一个虚高一个虚低，合计却完全正确——最难从总数上看出来的一类错误）。 */
+export const UPSTREAM_ACCOUNT_MANAGE_PERMISSION = "finance.upstream_account.manage";
+export const RECHARGE_RATIO_MANAGE_PERMISSION = "finance.recharge_ratio.manage";
+export const TOKEN_MAP_MANAGE_PERMISSION = "finance.token_map.manage";
+
+/** 哪些平台有「上游管理」这一格。
+ *
+ *  只有 sub2api / newapi。服务器那一格也叫 `suppliers`，标签是「供应商与采购」——
+ *  说的是机器与机房，不是上游 API 供应商。按 tab.value 分发时必须先过这道判定,
+ *  否则服务器页会渲染出一张 API 成本登记簿，而且看起来完全正常。 */
+const PLATFORMS_WITH_UPSTREAM_REGISTRY = new Set(["sub2api", "newapi"]);
+
+export function platformHasUpstreamRegistry(serviceType: string): boolean {
+  return PLATFORMS_WITH_UPSTREAM_REGISTRY.has(serviceType);
+}
+
+/** 三个只读查询的 react-query key。
+ *
+ *  抽成常量而不是在各处写字面量：登记簿页与它的行展开区分属两个组件，
+ *  写完之后要失效的是**同一个** key——两处各写一遍字符串，
+ *  改动一处就会变成「写成功了但表没刷新」，而这种 bug 只在真机上看得见。
+ *
+ *  (顺带避开 gitleaks 的 generic-api-key 误报：`queryKey: "长横线串"`
+ *  正是它的匹配形状，而本仓库禁止用 allowlist 消音。) */
+export const UPSTREAM_ACCOUNTS_QUERY = "finance-upstream-accounts";
+export const SUBSCRIPTION_BATCHES_QUERY = "finance-subscription-batches";
+export const PROXY_ASSETS_QUERY = "finance-proxy-assets";
+/** 上游汇总（本文件上半部分的 `listUpstreamSummaries`）。
+ *  与登记簿分开的 key：改倍率要刷登记簿，但不会立刻改变已入账的窗口汇总。 */
+export const UPSTREAM_SUMMARY_QUERY = "finance-upstream-summary";
+
+export async function listUpstreamAccounts(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<UpstreamAccountItem[]> {
+  const body = await client.get<ListResponse<UpstreamAccountItem>>(
+    "/api/v1/finance/upstream-accounts",
+    { ...(options.signal ? { signal: options.signal } : {}) },
+  );
+  return body.items ?? [];
+}
+
+export async function listSubscriptionBatches(
+  upstreamAccountId: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SubscriptionBatchItem[]> {
+  const body = await client.get<ListResponse<SubscriptionBatchItem>>(
+    "/api/v1/finance/subscription-batches",
+    {
+      searchParams: { upstream_account_id: upstreamAccountId },
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
+  return body.items ?? [];
+}
+
+export async function listProxyAssets(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ProxyAssetItem[]> {
+  const body = await client.get<ListResponse<ProxyAssetItem>>("/api/v1/finance/proxy-assets", {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return body.items ?? [];
+}
+
+/** 登记 / 修改上游账号(`finance.upstream_account.set@1`)。
+ *
+ *  写路径唯一入口是 Action（宪法 2 条）。`upstream_account_id` 留空 = 新建。 */
+export function setUpstreamAccount(
+  params: Record<string, string>,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "finance.upstream_account.set", version: "1", params },
+    options,
+    client,
+  );
+}
+
+/** 修改充值倍率(`finance.recharge_ratio.set@1`)。
+ *
+ *  `reason` 是**必填**的：倍率是唯一会改变成本口径的字段，改完不会报错,
+ *  只会让台账从那一刻起静静地错着。没有理由的改动在事后复盘时与手滑不可区分。 */
+export function setRechargeRatio(
+  params: { upstream_account_id: string; recharge_ratio: string; reason: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "finance.recharge_ratio.set", version: "1", params },
+    options,
+    client,
+  );
+}
+
+/** 维护令牌映射(`finance.token_map.set@1`)。
+ *
+ *  参数：`upstream_account_id`、`upstream_token_id`、`own_account_id` 必填,
+ *  `credential_ref` 可选（newapi 侧走账号级会话，没有每令牌凭据）。
+ *
+ *  收 `Record<string, string>` 而不是逐字段的类型：可选字段**不传**与传空串
+ *  在这个 Action 上是两回事，用 `credential_ref?: string` 表达不了「省略」,
+ *  组装的责任交给 lib/upstreamForm.buildTokenMapParams，那里有测试盯着。 */
+export function setTokenMapping(
+  params: Record<string, string>,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "finance.token_map.set", version: "1", params },
+    options,
+    client,
+  );
+}
+
+/** 移除令牌映射(`finance.token_map.remove@1`)。`reason` 必填，理由同倍率。 */
+export function removeTokenMapping(
+  params: { upstream_account_id: string; upstream_token_id: string; reason: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "finance.token_map.remove", version: "1", params },
+    options,
+    client,
+  );
+}
+
+/** 接入方式的展示口径。
+ *
+ *  三种方式的成本口径完全不同，不能只显示一个英文枚举值让人自己去猜。 */
+export function describeAccessMethod(raw: string): { label: string; hint: string } {
+  switch (raw) {
+    case "upstream_key":
+      return { label: "上游中转", hint: "按每令牌实扣 ÷ 倍率折算成本（计量口径）" };
+    case "official_api":
+      return { label: "官方 API", hint: "直连官方，成本口径待接（设计稿 §3.1 占位）" };
+    case "subscription_account":
+      return { label: "订阅账号", hint: "按订阅批次摊销到每天（不适用充值倍率）" };
+    default:
+      // 不认识的枚举值原样显示 + 标注，不猜：前端不认识不等于配置错了
+      return { label: raw || "—", hint: `前端不认识这个接入方式：${raw}` };
+  }
+}
+
+/** 凭据的展示口径。**永远只说状态，不显示值**（ADR-014、宪法 7 条）。 */
+export function describeCredential(ref: string): { label: string; configured: boolean; hint: string } {
+  if (!ref) {
+    return {
+      label: "未配置",
+      configured: false,
+      hint: "这条没有凭据引用；对 newapi 侧走账号级会话的映射来说这是正常状态",
+    };
+  }
+  return { label: "已配置", configured: true, hint: `凭据引用 ${ref}；平台永不持有明文` };
 }

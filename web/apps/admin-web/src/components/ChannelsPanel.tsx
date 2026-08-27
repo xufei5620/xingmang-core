@@ -7,8 +7,12 @@ import {
   type DataTableColumn,
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
+import type { ChannelSummary } from "../api/finance";
 import { listMetrics, type MetricItem } from "../api/platform";
 import { ApiStateView } from "./ApiStateView";
+import { channelEconomicsColumns } from "./ChannelEconomicsColumns";
+import { ChannelScopeNote } from "./ChannelScopeNote";
+import { indexChannelSummaries } from "../lib/channelEconomics";
 import {
   channelTotal,
   CHANNEL_BALANCE_METRIC_KEY,
@@ -39,10 +43,11 @@ export function ChannelsPanel() {
     <section className="flex flex-col gap-3">
       <header className="flex items-start justify-between gap-3">
         <p className="text-xs text-fg-muted">
-          逐渠道余额与令牌状态，取自渠道余额指标的最近一次观测。
+          一行 = 一个 Sub2API 账号 / 一把 Key。余额与令牌状态取自渠道余额指标的最近一次观测。
         </p>
         {metric ? <FreshnessBadge freshness={metric.freshness} /> : null}
       </header>
+      <ChannelScopeNote platform="sub2api" />
       <ApiStateView
         isPending={query.isPending}
         error={query.error}
@@ -105,10 +110,19 @@ function tokenText(valid: boolean | null): string {
   return valid ? "有效" : "失效";
 }
 
+function channelColumns(
+  summaries: Map<string, ChannelSummary>,
+): DataTableColumn<ChannelRow>[] {
+  return [
+    ...CHANNEL_COLUMNS,
+    ...channelEconomicsColumns<ChannelRow>((row) => row.channelId, summaries),
+  ];
+}
+
 const CHANNEL_COLUMNS: DataTableColumn<ChannelRow>[] = [
   {
     id: "channel",
-    header: "渠道",
+    header: "Sub2API 账号",
     primary: true,
     value: (row) => row.channelName || row.channelId || "",
     cell: (row) => (
@@ -144,10 +158,14 @@ const CHANNEL_COLUMNS: DataTableColumn<ChannelRow>[] = [
 ];
 
 function ChannelTable({ rows }: { rows: ChannelRow[] }) {
+  // XM-0037d 的 ChannelSummary 端点还没上线。空索引 = 经营三列显示「未接入」;
+  // 接线时这一行换成 useQuery，列定义与表结构都不用动
+  const summaries = indexChannelSummaries(undefined);
+
   return (
     <DataTableV2
-      caption="Sub2API 逐渠道余额与令牌状态"
-      columns={CHANNEL_COLUMNS}
+      caption="Sub2API 逐账号余额、令牌状态与经营口径"
+      columns={channelColumns(summaries)}
       rows={rows}
       // channel_id 可能缺失（上游没给），退到下标兜底，避免 key 冲突
       rowKey={(row) => row.channelId || `#${rows.indexOf(row)}`}

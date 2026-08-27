@@ -7,8 +7,12 @@ import {
   type DataTableColumn,
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
+import type { ChannelSummary } from "../api/finance";
 import { listMetrics, type MetricItem } from "../api/platform";
 import { ApiStateView } from "./ApiStateView";
+import { channelEconomicsColumns } from "./ChannelEconomicsColumns";
+import { ChannelScopeNote } from "./ChannelScopeNote";
+import { indexChannelSummaries } from "../lib/channelEconomics";
 import {
   metricLabel,
   NEWAPI_CHANNELS_METRIC_KEY,
@@ -54,10 +58,11 @@ export function NewApiChannelsPanel() {
     <section className="flex flex-col gap-3">
       <header className="flex items-start justify-between gap-3">
         <p className="text-xs text-fg-muted">
-          逐渠道的启停、余额、错误率与延迟，取自渠道状态指标的最近一次观测。
+          一行 = NewAPI 里的一条渠道。启停、余额、错误率与延迟取自渠道状态指标的最近一次观测。
         </p>
         {metric ? <FreshnessBadge freshness={metric.freshness} /> : null}
       </header>
+      <ChannelScopeNote platform="newapi" />
       <ApiStateView
         isPending={query.isPending}
         error={query.error}
@@ -123,11 +128,14 @@ function enabledText(enabled: boolean | null): string {
   return enabled ? "启用" : "停用";
 }
 
-function newApiChannelColumns(thresholdPPM: unknown): DataTableColumn<NewApiChannelRow>[] {
+function newApiChannelColumns(
+  thresholdPPM: unknown,
+  summaries: Map<string, ChannelSummary>,
+): DataTableColumn<NewApiChannelRow>[] {
   return [
     {
       id: "channel",
-      header: "渠道",
+      header: "NewAPI 渠道",
       primary: true,
       value: (row) => [row.name, row.channelId, row.type].filter(Boolean).join(" "),
       cell: (row) => (
@@ -175,6 +183,7 @@ function newApiChannelColumns(thresholdPPM: unknown): DataTableColumn<NewApiChan
       value: (row) => row.latencyMS,
       cell: (row) => (row.latencyMS === null ? "—" : `${formatCount(row.latencyMS)} ms`),
     },
+    ...channelEconomicsColumns<NewApiChannelRow>((row) => row.channelId, summaries),
   ];
 }
 
@@ -185,10 +194,13 @@ function NewApiChannelTable({
   rows: NewApiChannelRow[];
   thresholdPPM: unknown;
 }) {
+  // 同 ChannelsPanel：XM-0037d 的端点上线前是空索引，经营三列显示「未接入」
+  const summaries = indexChannelSummaries(undefined);
+
   return (
     <DataTableV2
-      caption="NewAPI 逐渠道启停、余额、错误率、模型数与延迟"
-      columns={newApiChannelColumns(thresholdPPM)}
+      caption="NewAPI 逐渠道启停、余额、错误率、模型数、延迟与经营口径"
+      columns={newApiChannelColumns(thresholdPPM, summaries)}
       rows={rows}
       // channel_id 可能缺失（上游没给），退到下标兜底，避免 key 冲突
       rowKey={(row) => row.channelId || `#${rows.indexOf(row)}`}
