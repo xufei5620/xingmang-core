@@ -1,3 +1,24 @@
+# ✅ 版本已确认(2026-08-28,用户提供线上版本号)
+
+**admin.solov.cc 线上 = SoloAI v2.5.130,commit 14e6f617**(= Merge PR #211
+codex/mail-analysis-review-clusters)。已 git checkout 核实:0172/0176/0177/0179/
+0180/0182 增强迁移全在、internal/platformdb 目录在、relay_profit.go 有
+ErrProfitNothingKnown(两侧失败不静默)+revToday==nil 判断+ratio_snapshot。
+
+**结论:线上是"增强版",不是 v2.5.102 核心版。**
+→ **本文件下方初版报告(增强版描述)对线上正确,平台按它对齐。**
+→ 上一节"更正为 v2.5.102 核心版"仅适用于 GitHub 默认分支(非线上),已作废,保留供追溯。
+
+平台影子对比按**增强版**口径,这也更好——采纳其全部良好设计:
+- 取数失败**存 NULL/跳过绝不写 0**(ErrProfitNothingKnown,relay_profit.go:129)
+- ratio_snapshot 逐行冻结倍率(migrations/0176)
+- platform_id 多平台四桶归集(0179/0182)
+- newapi 自营库直查收入(platformdb/channel_revenue.go)
+- runway 燃尽预警(0177)
+平台新建即从第一天写全这些,无 SoloAI 演进期的 NULL 兼容包袱。
+
+---
+
 # ⚠️ 更正(代理自查):区分「现行 v2.5.102」与「未发布增强版」
 
 上一版报告混入了本地未合并特性分支(阶段C/D/E)的增强,误当现行。按 GitHub
