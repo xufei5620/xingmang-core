@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OVERVIEW_POLL_INTERVAL_MS } from "../lib/autoRefresh";
 import { OverviewPage } from "./OverviewPage";
@@ -54,7 +55,10 @@ function renderPage() {
   });
   render(
     <QueryClientProvider client={queryClient}>
-      <OverviewPage />
+      {/* XM-0034 起卡片上带「查看平台 →」链接，渲染需要 router 上下文 */}
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

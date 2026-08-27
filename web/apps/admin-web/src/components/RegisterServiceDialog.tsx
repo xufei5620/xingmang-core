@@ -18,7 +18,7 @@ import { ActionErrorNote } from "./ActionErrorNote";
 const PERMISSION = "registry.service.manage";
 
 export interface RegisterServiceDialogProps {
-  /** 当前身份所属环境；空串表示前端不知道（见 ServicesPage 的解析顺序）。 */
+  /** 当前身份所属环境；空串表示前端不知道（见 RegistryPage 的解析顺序）。 */
   environment: string;
   /** 登记成功后回调，参数是 action_run_id。 */
   onRegistered: (runId: string) => void;
@@ -138,7 +138,7 @@ export function RegisterServiceDialog({ environment, onRegistered }: RegisterSer
         </FormField>
         {environment ? null : (
           <p className="text-xs text-danger" role="alert">
-            前端无法确定当前身份的环境（未配置 VITE_XM_ENVIRONMENT，服务清单与指标也都是空的）。
+            前端无法确定当前身份的环境（未配置 VITE_XM_ENVIRONMENT，注册表与指标也都是空的）。
             填错环境只会换来一个 403，所以这里不猜。
           </p>
         )}

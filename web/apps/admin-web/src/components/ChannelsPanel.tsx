@@ -2,8 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FreshnessBadge, FreshnessNote } from "@xingmang/ui-admin";
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import { listMetrics, type MetricItem } from "../api/platform";
-import { ApiStateView } from "../components/ApiStateView";
-import { PageHeader } from "../components/PageHeader";
+import { ApiStateView } from "./ApiStateView";
 import {
   channelTotal,
   CHANNEL_BALANCE_METRIC_KEY,
@@ -19,9 +18,13 @@ const TD = "px-3 py-2 align-top text-sm text-fg";
 /** 渠道明细：把总览卡片上那句「N 个渠道」摊开成逐渠道的余额与令牌状态。
  *
  *  数据来源是 `sub2api.channels.balance` 这一条指标的 value，不是另一个接口——
- *  因此它的新鲜度就是那条指标的新鲜度，页头必须原样带上（规格 §9.1）：
- *  一张看着很具体的明细表最容易让人忘记问「这是什么时候的数」。 */
-export function ChannelsPage() {
+ *  因此它的新鲜度就是那条指标的新鲜度，必须原样带上（规格 §9.1）：
+ *  一张看着很具体的明细表最容易让人忘记问「这是什么时候的数」。
+ *
+ *  XM-0034 起它从独立页面（/channels）变成 Sub2API 平台详情的「渠道/资源」
+ *  页签内容，所以自己不再画页头——页头归平台页所有。但新鲜度徽章跟着搬进来了：
+ *  它原先挂在页头上，页头没了不等于这条约束可以跟着没。 */
+export function ChannelsPanel() {
   const query = useQuery({
     queryKey: ["metrics"],
     queryFn: ({ signal }) => listMetrics({ signal }),
@@ -30,15 +33,13 @@ export function ChannelsPage() {
   const metric = (query.data ?? []).find((m) => m.metric_key === CHANNEL_BALANCE_METRIC_KEY);
 
   return (
-    <section>
-      <PageHeader
-        title="渠道余额"
-        description="逐渠道余额与令牌状态，取自渠道余额指标的最近一次观测。"
-        onRefresh={() => void query.refetch()}
-        refreshing={query.isFetching}
-        lastRefreshedAt={query.dataUpdatedAt || undefined}
-        {...(metric ? { actions: <FreshnessBadge freshness={metric.freshness} /> } : {})}
-      />
+    <section className="flex flex-col gap-3">
+      <header className="flex items-start justify-between gap-3">
+        <p className="text-xs text-fg-muted">
+          逐渠道余额与令牌状态，取自渠道余额指标的最近一次观测。
+        </p>
+        {metric ? <FreshnessBadge freshness={metric.freshness} /> : null}
+      </header>
       <ApiStateView
         isPending={query.isPending}
         error={query.error}

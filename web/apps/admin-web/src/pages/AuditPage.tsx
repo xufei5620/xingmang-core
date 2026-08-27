@@ -73,7 +73,7 @@ interface AuditViewProps {
 function AuditView({ events, hasMore, loadingMore, onLoadMore }: AuditViewProps) {
   if (events.length === 0) {
     return (
-      <EmptyState title="还没有审计事件" description="在服务清单页执行一次动作试试" />
+      <EmptyState title="还没有审计事件" description="在注册表页执行一次动作试试" />
     );
   }
   return (

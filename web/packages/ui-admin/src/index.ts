@@ -1,5 +1,11 @@
 export { AdminShell, type AdminShellProps } from "./AdminShell";
 export {
+  NavSection,
+  NavItemDisabled,
+  type NavSectionProps,
+  type NavItemDisabledProps,
+} from "./Nav";
+export {
   FreshnessBadge,
   FreshnessNote,
   ServiceStatusBadge,

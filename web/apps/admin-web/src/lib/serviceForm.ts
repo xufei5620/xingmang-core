@@ -168,7 +168,7 @@ export function buildServiceCreateParams(
 
 /** 观测上报的默认水位：`wm-<UTC 紧凑时间戳>`。
  *
- *  用可读的 UTC 时间而不是 epoch 秒：水位会原样显示在服务清单页上，
+ *  用可读的 UTC 时间而不是 epoch 秒：水位会原样显示在注册表页上，
  *  人一眼要能看出「这是什么时候的数据」，而不是去心算一串数字。
  *  可编辑——真正的水位应当来自上游，手填只是 Foundation-A 的过渡手段。 */
 export function defaultWatermark(now: Date = new Date()): string {
