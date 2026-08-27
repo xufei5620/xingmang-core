@@ -35,13 +35,50 @@ Connector 骨架、新鲜度模型、契约测试套件(见 connectors/sub2api/)
    矩阵将钉住你们声明的版本。
 5. **环境**:staging 先行;生产端点与网络可达性(平台从哪个网段访问)。
 
-## 验收标准
+## 平台侧勘察补充(2026-08-27,只读勘察 invoice-system 代码后按事实修订)
 
-- [ ] Codex 在本文件「待填」各节补全并提 PR(走 governance-change 无关路径,普通评审);
-- [ ] 上述端点在 staging 可用,平台用 curl + 只读 token 能取到带水位的样例数据;
-- [ ] 平台侧据此完成 connectors/invoice 契约 + 真实客户端,契约测试全绿。
+勘察结论(引用均为 invoice-system 仓库路径):
 
-## 平台侧任务链(本 CR 落地后)
+- **金额纪律已合规**:全后端零 float,`amount_minor BIGINT` + `currency CHAR(3)`
+  (migrations/0001_init.sql:104-128),无需整改。
+- **状态枚举 9 项已存在且 DB/Go 一致**(0001_init.sql:124-127、internal/domain/types.go:59-67):
+  pending_review / needs_changes / approved / rejected / user_cancelled /
+  manual_issuing / issued_awaiting_document / issued / refund_attention。
+- **时区已合规**:全部 TIMESTAMPTZ,显示时区固定 Asia/Shanghai(0011:30)。
+- **水位机制已存在**:source_economic_stream_watermarks 的 min(watermark_at)
+  已在 consumption.go:369 使用;开票记录自身可用 max(updated_at)。
+- **/healthz 已存在**(httpapi/server.go:155-157);**/version 不存在**(最小缺口,建议首件做)。
+- **⚠️ 现有 admin 查询端点不可复用**:admin_dto.go:10 直接内嵌 domain.InvoiceRequest,
+  会吐出 TaxID/BankAccount/Address/Phone/Email 全量 PII;且浏览器会话 cookie 绑定
+  IP+UA、明确拒绝 Authorization 头(production_auth.go:135-137),机器无法持有。
+  **只读投影必须新建,DTO 手写字段白名单,禁止 embed 领域结构。**
+- **凭证地基已有**:internal/auth/bearer.go 有完整、带测试、未接线的 OIDC bearer
+  校验器——接到新的 /readonly/v1/ 分支即可,/api/v1/ 拒绝 bearer 的行为保持不变。
+- **staging 层级不存在**(APP_ENV 仅 development/production),补齐属中-大工程。
 
-XM-0028 invoice 只读契约 + Fake + 契约测试(不阻塞,先行)→
-XM-0029 真实 InvoiceClient + 看板卡片(依赖本 CR)。
+### 建议实现(Codex 侧,多数零件已存在)
+
+1. 新增 `/readonly/v1/` 路由树,只注册 GET;DTO 白名单:id / request_no / status /
+   amount_minor / currency / source_type / submitted_at / updated_at(**无 profile/税号/邮箱**);
+2. `GET /readonly/v1/invoice-requests?from=&to=&status=&limit=&cursor=`
+   (复用现有分页/状态过滤,RequestPageQuery 补 From/To 两字段);
+3. `GET /readonly/v1/daily-summary?date=YYYY-MM-DD`(按 Asia/Shanghai 业务日现算
+   count / sum(amount_minor) / 失败数 / 待处理数,无需建表);
+4. 响应带 `observed_at` + `watermark_at`(复用现成水位);
+5. 凭证:Keycloak client_credentials + invoice-readonly role,只在 /readonly/v1/
+   校验 audience/azp;平台以 secret://invoice-<env>/<name> 引用;
+6. `GET /version`(ldflags 注入 tag+sha),/healthz 补同一版本字段。
+
+## 验收标准(修订:staging 降级,避免阻塞)
+
+- [ ] Codex 在本文件「待填」各节补全并提 PR(状态枚举/金额语义/时区/healthz 四节
+      现在就能填,无需写代码);
+- [ ] Codex 在 **dev compose(AUTH_MODE=mock)** 上暴露 /readonly/v1/,平台 curl
+      能取到带水位的样例数据(staging 层级暂不要求,生产再切 bearer);
+- [ ] 平台侧完成 connectors/invoice 契约 + Fake + 契约测试(XM-0028,不被阻塞,先行);
+- [ ] bearer 凭证落地后平台完成真实客户端(XM-0029)。
+
+## 平台侧任务链
+
+XM-0028 invoice 只读契约 + Fake + 契约测试(**不被本 CR 阻塞,先行**)→
+XM-0029 真实 InvoiceClient + 看板卡片(依赖上述凭证与端点落地)。
