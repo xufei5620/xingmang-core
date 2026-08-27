@@ -5,6 +5,7 @@ import {
   ServiceStatusBadge,
   formatDuration,
   formatUtcTimestamp,
+  navLabel,
 } from "@xingmang/ui-admin";
 import { EmptyState } from "@xingmang/ui-primitives";
 import { useState } from "react";
@@ -55,7 +56,7 @@ export function RegistryPage() {
   return (
     <section>
       <PageHeader
-        title="注册表"
+        title={navLabel("/registry")}
         description={`采集时间超过 ${formatDuration(SERVICE_STALENESS_THRESHOLD_SECONDS)} 记为数据延迟（阈值由前端设定，registry 未提供）。这是一个对所有服务一刀切的临时值，各服务的真实阈值待后端契约提供（XM-0017）。`}
         onRefresh={() => void query.refetch()}
         refreshing={query.isFetching}

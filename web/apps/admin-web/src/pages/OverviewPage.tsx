@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { PageHeader } from "@xingmang/ui-admin";
+import { PageHeader, navLabel } from "@xingmang/ui-admin";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { listAlerts } from "../api/alerts";
@@ -50,7 +50,7 @@ export function OverviewPage() {
   return (
     <section>
       <PageHeader
-        title="运营总览"
+        title={navLabel("/dashboard")}
         description={`所有数值都带数据时间与新鲜度状态；没有新鲜度就没有数字。折线为近 ${METRIC_HISTORY_HOURS} 小时趋势，每 ${OVERVIEW_POLL_INTERVAL_MS / 1000} 秒自动刷新（页面不可见时暂停）。`}
         onRefresh={refreshAll}
         refreshing={query.isFetching || alertsQuery.isFetching}

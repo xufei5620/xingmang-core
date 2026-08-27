@@ -7,16 +7,16 @@ describe("ContextStrip", () => {
     render(
       <ContextStrip
         crumbs={[
-          { key: "section", label: "被管平台" },
+          { key: "section", label: "平台" },
           { key: "page", label: "Sub2API" },
         ]}
       />,
     );
     const nav = screen.getByRole("navigation", { name: "面包屑" });
-    expect(nav.textContent).toContain("被管平台");
+    expect(nav.textContent).toContain("平台");
     // aria-current 只给最后一项：前面几级是路径，最后一级才是「你在这」
     expect(screen.getByText("Sub2API").getAttribute("aria-current")).toBe("page");
-    expect(screen.getByText("被管平台").getAttribute("aria-current")).toBeNull();
+    expect(screen.getByText("平台").getAttribute("aria-current")).toBeNull();
   });
 
   it("分隔符不进无障碍树：它是形状，不是内容", () => {

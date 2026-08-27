@@ -1,4 +1,4 @@
-import { PageHeader } from "@xingmang/ui-admin";
+import { navLabel, PageHeader } from "@xingmang/ui-admin";
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { appApiConfig } from "../api/config";
@@ -13,7 +13,7 @@ export function SettingsPage() {
   return (
     <section>
       <PageHeader
-        title="设置"
+        title={navLabel("/settings")}
         description="身份与权限只读展示；写操作一律走 Action，凭据只经 CredentialRef，永不显示明文。"
       />
       <div className="flex flex-col gap-4">

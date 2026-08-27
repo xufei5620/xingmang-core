@@ -24,7 +24,7 @@ const serverResolved = {
 };
 
 const platformCrumbs = [
-  { key: "section", label: "被管平台" },
+  { key: "section", label: "平台" },
   { key: "page", label: "Sub2API" },
 ];
 
@@ -76,7 +76,7 @@ export const PermissionDenied: Story = {
 export const LongText: Story = {
   args: {
     crumbs: [
-      { key: "section", label: "被管平台" },
+      { key: "section", label: "平台" },
       { key: "platform", label: "Sub2API 订阅转 API 售卖与计费（华东一区只读副本）" },
       { key: "page", label: "渠道令牌与余额明细 · 按上游分组 · 仅显示令牌失效项" },
     ],

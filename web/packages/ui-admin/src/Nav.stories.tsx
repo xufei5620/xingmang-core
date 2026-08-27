@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { NavItemDisabled, NavSection } from "./Nav";
+import { NavItemDisabled, NavItemLabel, NavSection, NavSectionCollapsible, navItemClass } from "./Nav";
+import { navStageHint, GLOBAL_NAV_ITEMS, NAV_GROUPS, PLATFORM_NAV_ITEMS } from "./navigation";
 
 const meta = {
   title: "Admin/Nav",
@@ -8,41 +9,44 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-const linkClass = "block rounded-md px-3 py-2 text-fg-muted hover:bg-surface-muted";
-const activeClass = "block rounded-md bg-surface-muted px-3 py-2 font-medium text-accent";
+const item = (label: string, hint?: string, active = false) => (
+  <span key={label} className={navItemClass({ isActive: active })}>
+    <NavItemLabel label={label} hint={hint} />
+  </span>
+);
 
-/** 一段导航：段标题 + 若干条目。 */
+/** 一段导航：段标题 + 若干条目。条目来自 ADMIN-IA v3 的可执行副本
+ *  (navigation.ts)，不是手抄的——手抄的那份在 XM-0042 之前已经漂了。 */
 export const Default: Story = {
   args: {
     title: "全局",
-    children: (
-      <>
-        <span className={activeClass}>运营总览</span>
-        <NavItemDisabled label="告警中心" hint="即将上线" title="告警中心随 XM-0033 上线" />
-        <span className={linkClass}>审计事件</span>
-      </>
+    children: GLOBAL_NAV_ITEMS.map((navItem) =>
+      item(navItem.label, navStageHint(navItem), navItem.path === "/dashboard"),
     ),
   },
 };
 
-/** 被管平台段：Registry 里有的可点，没有的显示为未接入并带里程碑标签。
+/** 平台段：4 个平台一律可点（原型把它们全画成可进入的），右侧标签说明
+ *  「点进去有没有真数据」。
  *
  *  未接入的条目**留在导航上**而不是隐藏（规格 §12 惯例）——看不见的东西，
- *  运营会以为平台压根不管这摊事。 */
-export const 被管平台: Story = {
+ *  运营会以为平台压根不管这摊事；而灰掉它只能表达「不能点」，表达不了
+ *  「能看结构、还没有数据」，后者才是服务器与 CPA 现在的状态。 */
+export const 平台: Story = {
   args: {
-    title: "被管平台",
-    children: (
-      <>
-        <span className={activeClass}>Sub2API</span>
-        {/* NewAPI 自 XM-0035 起页面已建，是普通条目；下面几条才是未接入的样子 */}
-        <span className={linkClass}>NewAPI</span>
-        <NavItemDisabled label="CPA" hint="未接入·M4" />
-        <NavItemDisabled label="开票系统" hint="契约草案·XM-0028" />
-        <NavItemDisabled label="支付" hint="未接入·M3" />
-        <NavItemDisabled label="服务器" hint="未接入·M2" />
-        <NavItemDisabled label="模型保障" hint="未接入·M1.5" />
-      </>
+    title: "平台",
+    children: PLATFORM_NAV_ITEMS.map((platform, index) =>
+      item(platform.label, index < 2 ? undefined : `未接入·${platform.stage}`, index === 0),
+    ),
+  },
+};
+
+/** 治理段：七页里有四页还只是路由位，右侧「未建·<阶段>」把这件事说出来。 */
+export const 平台治理: Story = {
+  args: {
+    title: "平台治理",
+    children: (NAV_GROUPS.find((g) => g.id === "governance")?.items ?? []).map((navItem) =>
+      item(navItem.label, navStageHint(navItem)),
     ),
   },
 };
@@ -53,20 +57,29 @@ export const 被管平台: Story = {
  *  不知道就说不知道。 */
 export const 注册表读取失败: Story = {
   args: {
-    title: "被管平台",
-    children: (
-      <>
-        <NavItemDisabled
-          label="Sub2API"
-          hint="读取失败"
-          title="服务注册表读取失败，无法判断该平台是否已接入"
-        />
-        <NavItemDisabled
-          label="NewAPI"
-          hint="读取失败"
-          title="服务注册表读取失败，无法判断该平台是否已接入"
-        />
-      </>
-    ),
+    title: "平台",
+    children: PLATFORM_NAV_ITEMS.slice(0, 2).map((platform) => (
+      <NavItemDisabled
+        key={platform.serviceType}
+        label={platform.label}
+        hint="读取失败"
+        title="服务注册表读取失败，无法判断该平台是否已接入"
+      />
+    )),
   },
+};
+
+/** 可折叠的「扩展能力」段（原型里唯一一个）。默认收起、带「后置」标签，
+ *  进入 `#/ext/*` 时自动展开。收起 ≠ 隐藏：标题始终在场。 */
+export const 扩展能力: Story = {
+  render: () => (
+    <div className="w-60 bg-nav-surface p-2 text-nav-fg">
+      <NavSectionCollapsible title="扩展能力" hint="后置">
+        {(NAV_GROUPS.find((g) => g.id === "ext")?.items ?? []).map((navItem) =>
+          item(navItem.label, navStageHint(navItem)),
+        )}
+      </NavSectionCollapsible>
+    </div>
+  ),
+  args: { title: "扩展能力", children: null },
 };

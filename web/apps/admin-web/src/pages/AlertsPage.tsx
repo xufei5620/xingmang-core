@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { formatUtcTimestamp, PageHeader } from "@xingmang/ui-admin";
+import { formatUtcTimestamp, navLabel, PageHeader } from "@xingmang/ui-admin";
 import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import { useState } from "react";
 import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
@@ -59,7 +59,7 @@ export function AlertsPage() {
   return (
     <section>
       <PageHeader
-        title="告警中心"
+        title={navLabel("/alerts")}
         description={`规则命中后按去重键收敛成一条告警并计数；条件不再成立会自动恢复。每 ${OVERVIEW_POLL_INTERVAL_MS / 1000} 秒自动刷新（页面不可见时暂停）。`}
         onRefresh={refresh}
         refreshing={query.isFetching}

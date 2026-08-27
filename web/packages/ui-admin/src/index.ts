@@ -3,11 +3,34 @@ export { ContextStrip, type ContextCrumb, type ContextStripProps } from "./Conte
 export { MetricCard, type MetricCardProps } from "./MetricCard";
 export {
   NavSection,
+  NavSectionCollapsible,
   NavItemDisabled,
+  NavItemLabel,
   navItemClass,
   type NavSectionProps,
+  type NavSectionCollapsibleProps,
   type NavItemDisabledProps,
+  type NavItemLabelProps,
 } from "./Nav";
+export {
+  allNavItems,
+  navItemByPath,
+  navLabel,
+  navStageHint,
+  placeholderNavItems,
+  platformNavSpec,
+  EXT_NAV_ITEMS,
+  GLOBAL_NAV_ITEMS,
+  GOVERNANCE_NAV_ITEMS,
+  NAV_GROUPS,
+  PLATFORM_GROUP_TITLE,
+  PLATFORM_NAV_ITEMS,
+  type NavGroupSpec,
+  type NavItemSpec,
+  type NavSubTab,
+  type PlatformNavSpec,
+  type PlatformTabSpec,
+} from "./navigation";
 export { PageHeader, type PageHeaderProps } from "./PageHeader";
 export {
   FreshnessBadge,
