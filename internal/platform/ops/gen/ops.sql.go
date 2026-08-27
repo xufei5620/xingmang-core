@@ -44,6 +44,108 @@ func (q *Queries) GetMetricObservation(ctx context.Context, arg GetMetricObserva
 	return i, err
 }
 
+const insertMetricObservationSample = `-- name: InsertMetricObservationSample :exec
+INSERT INTO ops.metric_observation_sample (
+    metric_key, source, environment, observed_at, synced_at,
+    status, is_partial, watermark, last_error_code, value_json
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+)
+`
+
+type InsertMetricObservationSampleParams struct {
+	MetricKey     string
+	Source        string
+	Environment   string
+	ObservedAt    pgtype.Timestamptz
+	SyncedAt      pgtype.Timestamptz
+	Status        string
+	IsPartial     bool
+	Watermark     string
+	LastErrorCode string
+	ValueJson     []byte
+}
+
+func (q *Queries) InsertMetricObservationSample(ctx context.Context, arg InsertMetricObservationSampleParams) error {
+	_, err := q.db.Exec(ctx, insertMetricObservationSample,
+		arg.MetricKey,
+		arg.Source,
+		arg.Environment,
+		arg.ObservedAt,
+		arg.SyncedAt,
+		arg.Status,
+		arg.IsPartial,
+		arg.Watermark,
+		arg.LastErrorCode,
+		arg.ValueJson,
+	)
+	return err
+}
+
+const listMetricObservationSamples = `-- name: ListMetricObservationSamples :many
+SELECT id, metric_key, source, environment, observed_at, synced_at,
+       status, is_partial, watermark, last_error_code, value_json
+FROM (
+    SELECT id, metric_key, source, environment, observed_at, synced_at,
+           status, is_partial, watermark, last_error_code, value_json
+    FROM ops.metric_observation_sample
+    WHERE environment = $1 AND metric_key = $2 AND synced_at >= $3
+    ORDER BY synced_at DESC
+    LIMIT $4
+) AS recent
+ORDER BY recent.synced_at
+`
+
+type ListMetricObservationSamplesParams struct {
+	Environment string
+	MetricKey   string
+	SyncedAt    pgtype.Timestamptz
+	Limit       int32
+}
+
+// 先按 synced_at DESC 取窗口内最近的 limit 条，再翻成升序返回。
+//
+// 直接写 ORDER BY synced_at ASC LIMIT n 会在窗口内样本超量时留下**最旧**的
+// 那批：请求 168 小时（5 分钟粒度约 2016 条，超过 1000 的上限）时，曲线会画到
+// 三天半前就断掉，看起来像同步早就死了。丢弃最旧的样本至少让曲线右端始终贴着
+// 「现在」，左端真实起点由响应里第一个 synced_at 如实告知。
+func (q *Queries) ListMetricObservationSamples(ctx context.Context, arg ListMetricObservationSamplesParams) ([]OpsMetricObservationSample, error) {
+	rows, err := q.db.Query(ctx, listMetricObservationSamples,
+		arg.Environment,
+		arg.MetricKey,
+		arg.SyncedAt,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OpsMetricObservationSample{}
+	for rows.Next() {
+		var i OpsMetricObservationSample
+		if err := rows.Scan(
+			&i.ID,
+			&i.MetricKey,
+			&i.Source,
+			&i.Environment,
+			&i.ObservedAt,
+			&i.SyncedAt,
+			&i.Status,
+			&i.IsPartial,
+			&i.Watermark,
+			&i.LastErrorCode,
+			&i.ValueJson,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMetricObservationsByEnvironment = `-- name: ListMetricObservationsByEnvironment :many
 SELECT id, metric_key, source, environment, observed_at, synced_at, watermark, status, is_partial, last_success, last_error_code, staleness_threshold_seconds, value_json, updated_at FROM ops.metric_observation
 WHERE environment = $1

@@ -134,12 +134,49 @@ func (o Observation) Freshness(now time.Time) Freshness {
 	return f
 }
 
+// ValidMetricKey 报告 key 是否是合法的指标键。
+//
+// 导出它是给 HTTP 层用的：查询参数里拼错的 key 应该当场 400，而不是查出
+// 一个空列表让前端以为「这个指标真的没有数据」。判据必须与落库时同一条，
+// 所以共用同一个正则而不是在 handler 里再写一遍。
+func ValidMetricKey(key string) bool {
+	return metricKeyPattern.MatchString(key)
+}
+
 // Validate 校验观测记录的领域不变量。
 func (o Observation) Validate() error {
+	if err := o.validateShared(); err != nil {
+		return err
+	}
+	if o.StalenessThresholdSeconds <= 0 {
+		return fmt.Errorf("staleness_threshold_seconds 必须为正: %w", ErrInvalidFormat)
+	}
+	return o.validateStatusConsistency()
+}
+
+// ValidateSample 校验历史样本的领域不变量。
+//
+// 与 Validate 只差一条：样本不校验 staleness_threshold_seconds。阈值回答的是
+// 「现在这条数据算不算旧」，那是最新态才需要的判据；历史点位记录的是**当时**
+// 的事实，对着一个过去的时刻重算新鲜度没有意义，所以样本表压根不存它
+// （见 db/migrations/000005_ops_history.up.sql）。
+//
+// 「失败必须带错误码」这条**照样**校验——趋势图上那段红完全靠 status 与
+// last_error_code 渲染，这里放行一条没有原因的失败样本，图上就会出现一段
+// 没人解释得了的红。
+func (o Observation) ValidateSample() error {
+	if err := o.validateShared(); err != nil {
+		return err
+	}
+	return o.validateStatusConsistency()
+}
+
+// validateShared 是最新态与样本共有的字段校验。
+func (o Observation) validateShared() error {
 	if o.MetricKey == "" {
 		return fmt.Errorf("metric_key: %w", ErrMissingField)
 	}
-	if !metricKeyPattern.MatchString(o.MetricKey) {
+	if !ValidMetricKey(o.MetricKey) {
 		return fmt.Errorf("metric_key=%q 须匹配 ^[a-z0-9][a-z0-9_.-]{0,127}$: %w",
 			o.MetricKey, ErrInvalidFormat)
 	}
@@ -152,17 +189,18 @@ func (o Observation) Validate() error {
 	if _, err := ParseSyncStatus(string(o.Status)); err != nil {
 		return err
 	}
-	if o.StalenessThresholdSeconds <= 0 {
-		return fmt.Errorf("staleness_threshold_seconds 必须为正: %w", ErrInvalidFormat)
+	if o.SyncedAt.IsZero() {
+		return fmt.Errorf("synced_at: %w", ErrMissingField)
 	}
-	// 失败必须带错误码，成功必须不带——与数据库 CHECK 同一条规则，
-	// 让「静默失败」在领域层与库层都不可表示
+	return nil
+}
+
+// validateStatusConsistency：失败必须带错误码，成功必须不带——与数据库 CHECK
+// 同一条规则，让「静默失败」在领域层与库层都不可表示。
+func (o Observation) validateStatusConsistency() error {
 	if (o.Status == SyncFailed) != (o.LastErrorCode != "") {
 		return fmt.Errorf("status=%s 与 last_error_code=%q 不一致: %w",
 			o.Status, o.LastErrorCode, ErrInconsistent)
-	}
-	if o.SyncedAt.IsZero() {
-		return fmt.Errorf("synced_at: %w", ErrMissingField)
 	}
 	return nil
 }

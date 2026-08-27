@@ -31,9 +31,12 @@ var errNoRows = errors.New("no rows in result set")
 // 它照样跑 Observation.Validate()——真实的 ops.Store 会跑，数据库还有同一条
 // 一致性 CHECK。不跑的话，本测试就证明不了「失败观测真的写得进去」。
 type memoryStore struct {
-	rows      map[string]ops.Observation
-	writes    []ops.Observation
+	rows   map[string]ops.Observation
+	writes []ops.Observation
+	// samples 是追加型历史样本（XM-0024），顺序即写入顺序。
+	samples   []ops.Observation
 	upsertErr error
+	sampleErr error
 }
 
 func newMemoryStore() *memoryStore {
@@ -62,6 +65,30 @@ func (s *memoryStore) Upsert(_ context.Context, o ops.Observation) (ops.Observat
 	s.rows[s.key(o.MetricKey, o.Environment)] = o
 	s.writes = append(s.writes, o)
 	return o, nil
+}
+
+// InsertSample 照样跑 ValidateSample()——真实的 ops.Store 会跑，数据库还有
+// 同一条一致性 CHECK。不跑的话，本测试就证明不了「失败样本真的留得下」。
+func (s *memoryStore) InsertSample(_ context.Context, o ops.Observation) error {
+	if s.sampleErr != nil {
+		return s.sampleErr
+	}
+	if err := o.ValidateSample(); err != nil {
+		return err
+	}
+	s.samples = append(s.samples, o)
+	return nil
+}
+
+// samplesFor 返回某指标的全部样本，按写入顺序。
+func (s *memoryStore) samplesFor(metricKey string) []ops.Observation {
+	out := make([]ops.Observation, 0, len(s.samples))
+	for _, sample := range s.samples {
+		if sample.MetricKey == metricKey {
+			out = append(out, sample)
+		}
+	}
+	return out
 }
 
 func (s *memoryStore) byKey(t *testing.T, metricKey string) ops.Observation {
@@ -490,6 +517,85 @@ func TestSub2APISyncUpsertFailureIsRetryable(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"error_code":"observation_upsert_failed"`) {
 		t.Fatalf("日志缺少写库失败的错误码: %s", logs.String())
+	}
+}
+
+// TestSub2APISyncAppendsSampleForEveryObservation：每轮同步的每条观测都要
+// 在历史表里留下一个点，成功轮如此，失败轮更如此——趋势图上那段红就是从
+// 失败样本画出来的（XM-0024）。
+func TestSub2APISyncAppendsSampleForEveryObservation(t *testing.T) {
+	store := newMemoryStore()
+	var logs bytes.Buffer
+
+	ok := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
+	if err := ok.Work(context.Background(), syncJob()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.samples) != len(contractMetricKeys) {
+		t.Fatalf("成功轮样本数 = %d, want %d", len(store.samples), len(contractMetricKeys))
+	}
+
+	later := fixedNow.Add(10 * time.Minute)
+	failing := NewSub2APISyncWorker(Sub2APISyncOptions{
+		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
+		Environment: "staging",
+		InstanceID:  DefaultSub2APIInstanceID,
+		Mode:        Sub2APIModeFake,
+		Store:       store,
+		NewClient:   fakeFactory(sub2api.FakeOptions{FailWith: connector.KindUnavailable}),
+		Now:         func() time.Time { return later },
+	})
+	if err := failing.Work(context.Background(), syncJob()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.samples) != 2*len(contractMetricKeys) {
+		t.Fatalf("失败轮也必须留样：样本数 = %d, want %d",
+			len(store.samples), 2*len(contractMetricKeys))
+	}
+
+	// 最新态只剩最后一条（整行覆盖），历史里两条都在——这正是分表的意义。
+	if len(store.rows) != len(contractMetricKeys) {
+		t.Fatalf("最新态应仍只有 %d 行, got %d", len(contractMetricKeys), len(store.rows))
+	}
+	series := store.samplesFor(sub2api.MetricUsersTotal)
+	if len(series) != 2 {
+		t.Fatalf("users.total 样本 = %d 条, want 2", len(series))
+	}
+	if series[0].Status != ops.SyncOK || !series[0].SyncedAt.Equal(fixedNow) {
+		t.Fatalf("第一个点应是成功样本: %+v", series[0])
+	}
+	if series[1].Status != ops.SyncFailed || !series[1].SyncedAt.Equal(later) {
+		t.Fatalf("第二个点应是失败样本: %+v", series[1])
+	}
+	if series[1].LastErrorCode != string(connector.KindUnavailable) {
+		t.Fatalf("失败样本必须带错误码，否则图上会出现一段没人解释得了的红: %+v", series[1])
+	}
+	// 横轴是 synced_at：失败样本没有新的 observed_at，用 observed_at 排会把
+	// 那段红全堆在最后一次成功的位置上。
+	if !series[1].SyncedAt.After(series[0].SyncedAt) {
+		t.Fatalf("样本 synced_at 必须随时间前进: %v -> %v", series[0].SyncedAt, series[1].SyncedAt)
+	}
+}
+
+// TestSub2APISyncSampleFailureIsRetryable：样本写失败也要让 River 重试。
+//
+// 重复一个点是可恢复的（同一 synced_at 上两个点，图上同一位置）；
+// 缺一个点不可恢复——那一刻的上游数据已经过去了，没有补数途径。
+func TestSub2APISyncSampleFailureIsRetryable(t *testing.T) {
+	store := newMemoryStore()
+	store.sampleErr = errors.New("connection refused")
+	var logs bytes.Buffer
+	worker := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
+
+	if err := worker.Work(context.Background(), syncJob()); err == nil {
+		t.Fatal("样本写失败必须返回 error 让 River 重试")
+	}
+	if !strings.Contains(logs.String(), `"error_code":"observation_sample_failed"`) {
+		t.Fatalf("日志缺少样本写失败的错误码: %s", logs.String())
+	}
+	// 先 Upsert 后 InsertSample：样本挂了，最新态至少已经是对的。
+	if len(store.writes) == 0 {
+		t.Fatal("样本失败前应已写入最新态")
 	}
 }
 

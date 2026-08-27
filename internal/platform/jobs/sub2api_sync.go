@@ -69,12 +69,15 @@ var ErrSub2APIRealClientUnavailable = errors.New(
 
 // ObservationStore 是本任务用到的 ops 仓储子集。
 //
-// 只声明用得到的两个方法而不是直接依赖 *ops.Store：单元测试能用固定时钟 +
+// 只声明用得到的三个方法而不是直接依赖 *ops.Store：单元测试能用固定时钟 +
 // 内存实现跑完整条失败路径，不必为了验证「失败也要写」而先起一个库。
 // *ops.Store 天然满足本接口。
 type ObservationStore interface {
 	Get(ctx context.Context, metricKey, environment string) (ops.Observation, error)
 	Upsert(ctx context.Context, o ops.Observation) (ops.Observation, error)
+	// InsertSample 追加历史样本（XM-0024）。与 Upsert 并列调用而不是二选一：
+	// Upsert 维护「现在是什么」，样本维护「一路是怎么过来的」。
+	InsertSample(ctx context.Context, o ops.Observation) error
 }
 
 // Sub2APIClientFactory 按需构造一个只读客户端。
@@ -220,7 +223,8 @@ func NewSub2APISyncWorker(opts Sub2APISyncOptions) *Sub2APISyncWorker {
 // 返回 error 的条件很窄，只有**写库失败**才算任务失败：上游读取失败已经
 // 作为 SyncFailed 观测落库了，看板看得见，再让 River 重试只会和 300s 的
 // 周期重复排队，而且下一次重试会把刚写好的失败态原样覆盖一遍。真正需要
-// 重试的是「话都没说出口」——观测没写进库。
+// 重试的是「话都没说出口」——观测没写进库，或者历史样本没追加上
+// （XM-0024，理由见下面 InsertSample 调用处）。
 func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISyncArgs]) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -261,6 +265,25 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_upsert_failed",
 				slog.String("metric_key", observation.MetricKey))
 			return fmt.Errorf("upsert %s: %w", observation.MetricKey, err)
+		}
+		// 再追加一条历史样本（XM-0024）。先 Upsert 后 InsertSample 是有意的：
+		// 看板首页读的是最新态，样本写失败时至少「现在是什么」已经是对的。
+		//
+		// **成功与失败的观测都留样。** 失败样本正是趋势图上那段红的数据来源；
+		// 不留样，图上只会看到一段平直的旧值，看不出中间断过。
+		if err := w.store.InsertSample(ctx, observation); err != nil {
+			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_sample_failed",
+				slog.String("metric_key", observation.MetricKey))
+			// 返回 error 让 River 重试，而不是只记日志放过去。
+			//
+			// 代价是重试会让本轮已经写成功的那几条样本各多出一条重复点——
+			// 同一个 synced_at 上两个点，图上是同一个位置，无害。
+			// 反过来，只记日志的代价是历史**永久缺一个点**：那一刻的上游数据
+			// 已经过去了，没有任何补数途径，而缺口恰好最可能出现在库压力大、
+			// 也就是最值得回看的时候。可恢复的重复 vs 不可恢复的缺失，选前者。
+			//
+			// 重试是安全的：Upsert 幂等（整行覆盖），本方法只是再 INSERT 一次。
+			return fmt.Errorf("insert sample %s: %w", observation.MetricKey, err)
 		}
 	}
 

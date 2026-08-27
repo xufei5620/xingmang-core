@@ -137,3 +137,17 @@ type OpsMetricObservation struct {
 	ValueJson                 []byte
 	UpdatedAt                 pgtype.Timestamptz
 }
+
+type OpsMetricObservationSample struct {
+	ID            int64
+	MetricKey     string
+	Source        string
+	Environment   string
+	ObservedAt    pgtype.Timestamptz
+	SyncedAt      pgtype.Timestamptz
+	Status        string
+	IsPartial     bool
+	Watermark     string
+	LastErrorCode string
+	ValueJson     []byte
+}
