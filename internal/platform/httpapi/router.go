@@ -10,6 +10,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
@@ -37,8 +38,9 @@ type Deps struct {
 	// 允许为 nil 而不是必填：这条链路依赖一个**外挂**系统（reqlog），
 	// 一个没部署它的环境不该因此起不来。而挂了 nil 却照样注册路由更糟——
 	// 那会让端点存在、一调就 500，前端分不清「没接」和「坏了」。
-	RequestLogs    RequestLogQuerier
-	RequestTimeout time.Duration
+	RequestLogs     RequestLogQuerier
+	FinanceAccounts UpstreamAccountLister
+	RequestTimeout  time.Duration
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -105,6 +107,15 @@ func NewRouter(d Deps) http.Handler {
 				Get("/platforms/{platform}/requests/{requestID}",
 					GetPlatformRequestContentHandler(d.RequestLogs))
 		}
+
+		// 成本登记簿**不复用 ops.read**：它列的是每个上游账号的凭据引用、
+		// 充值倍率与令牌映射。倍率是商业条款（我们从上游拿到几折），
+		// 映射是成本归属的对账键，两样都比看板上的余额数字敏感一个量级
+		// （见 finance.ScopeRead 的注释）。
+		// 写路径（登记、改倍率、维护映射）不在这里——它们是 L1 Action，
+		// 走 POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/upstream-accounts", ListUpstreamAccountsHandler(d.FinanceAccounts))
 	})
 	return r
 }

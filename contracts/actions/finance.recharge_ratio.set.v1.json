@@ -1,0 +1,18 @@
+{
+  "id": "finance.recharge_ratio.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.recharge_ratio.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {"required": false},
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "upstream_account_id": {"type": "string", "required": true},
+    "recharge_ratio": {"type": "string", "required": true},
+    "reason": {"type": "string", "required": true}
+  },
+  "notes": "XM-0037a 充值倍率修改（设计稿 §6.3）。与 finance.upstream_account.set 分开是刻意的：倍率是**唯一**会改变成本口径的字段，可随时改写且 SoloAI 侧无历史（迁移 0084）。独立 Action ID + 独立权限，让「这个月倍率被谁改过几次」是一次审计检索就能答的问题，而不是靠比对每条通用更新的 before/after。reason 必填并经 action.RecordReason 进事件的 reason 列——改倍率直接改变毛利报表，事后复盘的第一个问题就是「当时为什么改」。**不追溯历史**：已入账的 profit_daily 行各自冻结了当时的 ratio_snapshot（XM-0037b 实现），改倍率只影响此后新算的行，这正是「上游涨价」与「倍率被调整」能被分开的原因。倍率是定点十进制字符串（理由同 upstream_account.set）；非正倍率一律拒绝——算术层对 ratio<=0 有对齐 SoloAI relay_profit.go:97 的「按 1 处理」兜底，但登记簿不生产这种行，否则「上游涨价」与「倍率填成 0」在台账上无法区分（宪法 12 条）。订阅型渠道没有倍率（成本走 §3.5 摊销），对它调用本动作会被拒。"
+}

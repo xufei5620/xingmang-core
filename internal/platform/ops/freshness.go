@@ -207,6 +207,16 @@ var registeredMetrics = struct {
 		"newapi.subscription.daily": {},
 		"newapi.channels.status":    {},
 		"newapi.models.usage":       {},
+		// 计量型渠道成本核算（XM-0037a，connectors/metering）。
+		//
+		// ⚠️ 与上面的 `sub2api.cost.daily` **不是同一个口径**，也绝不能合并：
+		// 那条读的是 admin 面板 trend[].cost（自营实例口径，刻意避开
+		// actual_cost），这条是核算成本（每令牌 /v1/usage actual_cost ÷
+		// recharge_ratio）。设计稿 XM-0037 §3.1 有显著标注；
+		// connectors/metering 的 TestMetricKeysDoNotCollideWithPanelCost
+		// 钉住两者不同名。
+		"finance.cost.daily":    {},
+		"finance.revenue.daily": {},
 	},
 }
 

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/xufei5620/xingmang-platform/connectors/invoice"
+	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/connectors/newapi"
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
@@ -36,6 +37,11 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		newapi.MetricSubscriptionDaily,
 		newapi.MetricChannelsStatus,
 		newapi.MetricModelsUsage,
+		// 计量型成本核算（XM-0037a）。与 sub2api.MetricCostDaily 同时列在
+		// 这份清单里正是重点：两者**必须**是两个不同的键（口径不同，§3.1），
+		// 下面的长度断言会在有人把它们合并时当场失败。
+		metering.MetricCostDaily,
+		metering.MetricRevenueDaily,
 	}
 
 	for _, key := range fromContracts {

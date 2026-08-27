@@ -154,6 +154,30 @@ type CoreService struct {
 	UpdatedAt        pgtype.Timestamptz
 }
 
+type FinanceTokenMap struct {
+	UpstreamAccountID uuid.UUID
+	UpstreamTokenID   string
+	OwnAccountID      string
+	CredentialRef     *string
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+type FinanceUpstreamAccount struct {
+	ID            uuid.UUID
+	SystemType    string
+	AccessMethod  string
+	BaseUrl       *string
+	CredentialRef string
+	RechargeRatio pgtype.Numeric
+	Currency      string
+	BusinessDayTz string
+	Status        string
+	Environment   string
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
 type OpsMetricObservation struct {
 	ID                        uuid.UUID
 	MetricKey                 string
