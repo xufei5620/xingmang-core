@@ -13,6 +13,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/newapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
 const (
@@ -39,6 +40,17 @@ const (
 	newapiSyncModule      = "platform.jobs"
 	newapiSyncMaxAttempts = 3
 
+	// DefaultNewAPIRequestTimeout 是**单次**上游 HTTP 读取的超时。
+	//
+	// 比 newapiReadTimeout(20s) 小是有意的：一轮同步要串行发很多次请求
+	// （四个读方法，其中渠道错误率还要逐渠道两次 COUNT），一个卡死的连接
+	// 不该把整轮的读取预算独吞。两层超时各管一段——这层管「一次请求」，
+	// 外面那层管「这一轮」。
+	//
+	// 比 Sub2API 的 10s 略紧一点没有意义，取同一个值：两条采集链路的
+	// 网络特征相同，两个不同的数字只会让人猜哪个才是「对的」。
+	DefaultNewAPIRequestTimeout = 10 * time.Second
+
 	// newapiReadTimeout 只约束「读上游」这一段，不约束整个 Work。
 	//
 	// 分开是有意的：读超时必须还留得下时间把「同步失败」写进库。如果让
@@ -52,45 +64,98 @@ const (
 type NewAPIMode string
 
 const (
-	// NewAPIModeFake 用 newapi.NewFake：XM-0038 之前唯一走得通的模式。
+	// NewAPIModeFake 用 newapi.NewFake：不连真实上游，产出固定的演示数据。
 	NewAPIModeFake NewAPIMode = "fake"
-	// NewAPIModeReal 走真实只读客户端；XM-0038 之前必然失败（见工厂注释）。
+	// NewAPIModeReal 走真实只读客户端（XM-0038）；三个连接变量没配齐时
+	// 每轮写一条 not_supported 的失败观测（见工厂注释）。
 	NewAPIModeReal NewAPIMode = "real"
 )
 
-// ErrNewAPIRealClientUnavailable 是 real 模式在 XM-0038 之前的确定性失败。
+// ErrNewAPIRealClientUnavailable 是 real 模式**配置未就绪**时的确定性失败。
 //
-// 与 sub2api 那条同名错误的差别值得说清楚：sub2api 的真实客户端**已经存在**，
-// 它那条错误表达的是「客户端在，配置没配齐」；NewAPI 这里连客户端本身都还
-// 没写（XM-0038），所以 real 模式不是「配了就能用」，而是**现在无论怎么配
-// 都走不通**。因此本包不提供 endpoint / allowlist / credential 这些配置项：
-// 加一堆没有任何代码会读的环境变量，只会让人以为配齐了就能切真实数据。
+// XM-0038 之后真实客户端已经存在，但它需要三样东西才立得起来：只读端点、
+// 目标 allowlist、以及一个能解析出只读凭据的 CredentialRef。三者缺一，
+// real 模式就还是走不通——而「走不通」是一个**事实**，不是异常：与其让配置成
+// real 的进程无声无息什么都不采，不如让它每个周期都往库里写一条明确的
+// SyncFailed，看板照样看得见这条指标存在、且正在失败（规格 §9.1）。
 //
-// 「走不通」是一个**事实**，不是异常：与其让配置成 real 的进程无声无息什么
-// 都不采，不如让它每个周期都往库里写一条明确的 SyncFailed，看板照样看得见
-// 这条指标存在、且正在失败（规格 §9.1）。
-//
-// 分类是 not_supported（而不是 internal）：它表达的是「本部署还不具备真实
-// 读取能力」，运维一看 error_code 就知道这是在等一个未交付的任务，
-// 而不是自己哪里配错了。
+// 分类保持 not_supported（而不是 internal）：它表达的是「本部署还不具备
+// 真实读取能力」，与「配了但配错了」区分开——后者归 internal，运维一看
+// error_code 就知道该去补配置还是去改配置。
 var ErrNewAPIRealClientUnavailable = errors.New(
-	"newapi 真实只读客户端尚未实现（XM-0038）：Foundation-A 阶段只能用 fake 模式")
+	"newapi 真实只读客户端未配置：缺少只读端点/allowlist/凭据引用")
 
 // NewAPIClientFactory 按需构造一个只读客户端。
 //
 // 用工厂而不是直接持有一个 ReadClient：真实实现（XM-0038）需要在每轮同步时
-// 解析 CredentialRef、按 §8.4 的 Connector → CredentialRef → SecretProvider →
-// 只读 DSN 链路建连接，那是有生命周期的东西，不该在进程启动时构造一次然后
-// 一直握着——凭据会轮换，握着的连接不会知道。
+// 解析 CredentialRef、按连接配置建传输层，那是有生命周期的东西，不该在进程
+// 启动时构造一次然后一直握着——凭据会轮换，握着的连接不会知道。
 type NewAPIClientFactory func(ctx context.Context) (newapi.ReadClient, error)
+
+// NewAPIRealConfig 是 real 模式构造真实只读客户端所需的全部输入。
+//
+// 它刻意只装「连哪儿、用谁的凭据、多久超时」，不装任何凭据材料本身：
+// 凭据只经 CredentialRef，明文由 SecretProvider 在**构造 Authorization 头
+// 的那一瞬**才出现（ADR-014、宪法 7 条）。
+type NewAPIRealConfig struct {
+	// Endpoint 是上游只读端点，必须 https。
+	Endpoint string
+	// TargetAllowlist 是允许连接的主机精确清单；为空时一个请求都发不出去。
+	TargetAllowlist []string
+	// CredentialRef 形如 secret://<scope>/<name>。
+	CredentialRef string
+	// UserID 是旧版本 NewAPI 需要的 New-Api-User 头（管理员的用户 id）。
+	//
+	// **可选**：普查依据的上游源码里这个头已经不参与鉴权，但真实实例跑的
+	// 补丁版未知，而旧版本上没有它就是 401。它不是凭据（用户 id 不是秘密），
+	// 所以走普通配置项而不是 CredentialRef——缺它也不会让 real 模式立不起来。
+	UserID string
+	// Environment / InstanceID 进连接配置，同时是观测的 Source。
+	Environment string
+	InstanceID  string
+	// Timeout 是单次 HTTP 请求的超时；零值由客户端回落到保守默认。
+	Timeout time.Duration
+	// Secrets 解析 CredentialRef。缺它等于没有凭据，real 模式走不通。
+	Secrets secrets.SecretProvider
+}
+
+// missing 列出缺了哪几项配置。
+//
+// 返回**清单**而不是第一个错：运维一次就能把配置补齐，而不是补一个重启一次
+// 再看下一个缺什么。字段名用环境变量名而不是 Go 字段名——看日志的人手里
+// 拿的是 .env，不是源码。
+//
+// UserID 不在清单里：它是可选的（见该字段的注释）。
+func (c NewAPIRealConfig) missing() []string {
+	var out []string
+	if strings.TrimSpace(c.Endpoint) == "" {
+		out = append(out, "XM_NEWAPI_ENDPOINT")
+	}
+	if len(c.TargetAllowlist) == 0 {
+		out = append(out, "XM_NEWAPI_TARGET_ALLOWLIST")
+	}
+	if strings.TrimSpace(c.CredentialRef) == "" {
+		out = append(out, "XM_NEWAPI_CREDENTIAL_REF")
+	}
+	if c.Secrets == nil {
+		// 装配问题而不是环境变量问题，但同样让 real 模式立不起来，
+		// 所以并进同一份清单，用能让人找到装配点的名字。
+		out = append(out, "secret provider")
+	}
+	return out
+}
 
 // NewNewAPIClientFactory 按模式构造只读客户端。
 //
-// real 模式在 XM-0038 之前返回**分类明确**的错误而不是 nil client：调用方按
-// connector.KindOf 归类后写成 SyncFailed 观测，看板显示「同步失败」并说得出
-// 失败原因，而不是数据静静停更（规格 §9.1）。
-func NewNewAPIClientFactory(mode NewAPIMode) NewAPIClientFactory {
-	// 形参是 context.Context 而不是具名 ctx：这一层不做任何 I/O。
+// real 模式在这里真正接活（XM-0038）：每轮同步现解析 CredentialRef、
+// 现建传输层，而不是在进程启动时构造一次然后一直握着。
+//
+// 配置不全时返回**分类明确**的错误而不是 nil client：调用方按
+// connector.KindOf 归类后写成 SyncFailed 观测，看板显示「同步失败」
+// 并说得出失败原因，而不是数据静静停更（规格 §9.1）。
+func NewNewAPIClientFactory(mode NewAPIMode, cfg NewAPIRealConfig) NewAPIClientFactory {
+	// 形参是 context.Context 而不是具名 ctx：真实客户端的构造不做任何 I/O，
+	// 凭据在首次读取时才解析——那时用的是**请求的** ctx，取消才管用。
 	return func(context.Context) (newapi.ReadClient, error) {
 		switch mode {
 		case NewAPIModeFake:
@@ -98,9 +163,27 @@ func NewNewAPIClientFactory(mode NewAPIMode) NewAPIClientFactory {
 			// 随机化只会让「这条数据是假的」更难被看出来。
 			return newapi.NewFake(newapi.FakeOptions{}), nil
 		case NewAPIModeReal:
-			return nil, connector.NewError(
-				connector.KindNotSupported, "newapi.client.real",
-				ErrNewAPIRealClientUnavailable)
+			if missing := cfg.missing(); len(missing) > 0 {
+				return nil, connector.NewError(
+					connector.KindNotSupported, "newapi.client.real",
+					fmt.Errorf("缺少 %s: %w", strings.Join(missing, ", "), ErrNewAPIRealClientUnavailable))
+			}
+			// 配置**写错了**（endpoint 不是 https、主机不在自己的 allowlist 里…）
+			// 与配置**没写**分开归类：前者由客户端归 internal——是我们自己的部署
+			// 配置有问题，不是上游不支持；后者归 not_supported（见上面的 missing）。
+			// 凭据解析失败两者都不是，它在首次读取时归 auth。
+			var opts []newapi.Option
+			if id := strings.TrimSpace(cfg.UserID); id != "" {
+				opts = append(opts, newapi.WithUserID(id))
+			}
+			return newapi.NewClient(connector.Config{
+				ServiceInstanceID: cfg.InstanceID,
+				Environment:       cfg.Environment,
+				Endpoint:          cfg.Endpoint,
+				CredentialRef:     cfg.CredentialRef,
+				TargetAllowlist:   cfg.TargetAllowlist,
+				Timeout:           cfg.Timeout,
+			}, cfg.Secrets, opts...)
 		default:
 			return nil, connector.NewError(
 				connector.KindInternal, "newapi.client.mode",
@@ -111,8 +194,8 @@ func NewNewAPIClientFactory(mode NewAPIMode) NewAPIClientFactory {
 
 // ParseNewAPIMode 解析模式，空串按 fake 处理。
 //
-// 默认 fake 而不是 real：真实客户端还没写（XM-0038），把默认设成 real
-// 只会让每个新环境一上来就满屏同步失败。
+// 默认 fake 而不是 real：真实只读凭据还没就绪，把默认设成 real 只会让每个
+// 新环境一上来就满屏同步失败。
 func ParseNewAPIMode(s string) (NewAPIMode, error) {
 	switch mode := NewAPIMode(strings.TrimSpace(s)); mode {
 	case "":
@@ -343,8 +426,8 @@ func (w *NewAPISyncWorker) read(ctx context.Context, day string) (newapiReads, n
 
 	client, err := w.newClient(readCtx)
 	if err != nil {
-		// real 模式在 XM-0038 之前必然走这一支：五条指标全部写成
-		// not_supported 的失败观测，而不是静静地什么都不采。
+		// 配置未就绪的 real 模式走这一支：五条指标全部写成 not_supported
+		// 的失败观测，而不是静静地什么都不采。
 		return newapiReads{}, newapiReadErrors{
 			stats: err, orders: err, channels: err, usages: err,
 		}
@@ -352,6 +435,9 @@ func (w *NewAPISyncWorker) read(ctx context.Context, day string) (newapiReads, n
 
 	var reads newapiReads
 	var errs newapiReadErrors
+	// 四次读取串行：真实客户端在一轮里共用同一个 quota_per_unit 缓存与
+	// 同一次凭据解析，并发跑只会让第一轮多打几次 /api/status 与 Provider，
+	// 换不到什么——这条链路的瓶颈是上游的 COUNT，不是往返次数。
 	reads.stats, errs.stats = client.UserStats(readCtx)
 	reads.orders, errs.orders = client.DailyOrders(readCtx, day)
 	reads.channels, errs.channels = client.Channels(readCtx)

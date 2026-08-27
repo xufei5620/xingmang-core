@@ -38,6 +38,13 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "sub2api_credential_ref_invalid")
 		os.Exit(2)
 	}
+	// NewAPI 只读凭据的 Provider（XM-0038）。与 Sub2API 同一套装配、
+	// 两份实例：两条采集链路各用各的凭据与登记表。
+	config.NewAPISecrets, err = newapiSecretsFromEnv(os.Getenv, logger, config.Environment, config.NewAPICredentialRef)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "newapi_credential_ref_invalid")
+		os.Exit(2)
+	}
 	// 告警投递凭据的 Provider（XM-0033）。同样装配在进程入口，
 	// 告警模块只拿接口。引用没配时返回 nil，不是错误——见 alertSecretsFromEnv。
 	config.AlertSecrets, err = alertSecretsFromEnv(os.Getenv, logger, config.Environment, config.AlertTelegramBotRef)

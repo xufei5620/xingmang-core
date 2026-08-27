@@ -147,18 +147,18 @@ func TestNewAPISyncPostgresIntegration(t *testing.T) {
 
 	assertChannelBalanceSemanticsSurviveJSONB(t, before[newapi.MetricChannelsStatus])
 
-	// 第二段：real 模式当前必然失败（XM-0038 未交付）。停掉 River 直接驱动
-	// Worker——这里要验的是 Upsert 的覆盖语义，不是 River 的调度。
+	// 第二段：配置未就绪的 real 模式必然失败。停掉 River 直接驱动 Worker——
+	// 这里要验的是 Upsert 的覆盖语义，不是 River 的调度。
 	stop()
 	failing := NewNewAPISyncWorker(NewAPISyncOptions{
 		Environment: environment,
 		InstanceID:  source,
 		Mode:        NewAPIModeReal,
 		Store:       store,
-		NewClient:   NewNewAPIClientFactory(NewAPIModeReal),
+		NewClient:   NewNewAPIClientFactory(NewAPIModeReal, NewAPIRealConfig{}),
 	})
 	if err := failing.Work(ctx, newapiSyncJob()); err != nil {
-		t.Fatalf("real 模式的 Work = %v, want nil（未实现是事实，不是任务失败）", err)
+		t.Fatalf("real 模式的 Work = %v, want nil（配置未就绪是事实，不是任务失败）", err)
 	}
 	for key, previous := range before {
 		row, err := store.Get(ctx, key, environment)

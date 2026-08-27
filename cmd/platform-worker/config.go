@@ -76,13 +76,8 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.Sub2APISyncInterval = interval
 	}
 
-	// XM-0035：NewAPI 周期同步。默认 fake——真实只读客户端还没写（XM-0038），
+	// XM-0035/XM-0038：NewAPI 周期同步。默认 fake——真实只读凭据由用户自配，
 	// 把默认设成 real 只会让每个新环境一上来就满屏 not_supported。
-	//
-	// 这里刻意**不**登记 endpoint / allowlist / credential ref 三项：
-	// XM-0038 之前没有任何代码会读它们，先放出来只会让人以为「配齐就能切真实
-	// 数据」。规格 §8.4 要求的 Connector → CredentialRef → SecretProvider →
-	// 只读 DSN 链路随真实客户端一起落地。
 	newapiMode, err := jobs.ParseNewAPIMode(getenv("XM_NEWAPI_MODE"))
 	if err != nil {
 		return jobs.Config{}, err
@@ -91,9 +86,23 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 	if value := strings.TrimSpace(getenv("XM_NEWAPI_INSTANCE_ID")); value != "" {
 		config.NewAPIInstanceID = value
 	}
+	// 只读进配置、不解析：凭据只经 CredentialRef（ADR-014、宪法 7 条）。
+	// 明文由 SecretProvider 在客户端构造 Authorization 头的那一瞬才出现，
+	// 这里与 jobs.Config 都只看见引用本身。
+	config.NewAPICredentialRef = strings.TrimSpace(getenv("XM_NEWAPI_CREDENTIAL_REF"))
+	// real 模式的连接配置（XM-0038）。三项缺任意一项，real 模式都立不起来，
+	// 但**不在启动时报错**：缺配置会在每轮同步写成一条说得清缺哪个的
+	// SyncFailed 观测，看板看得见（规格 §9.1）。启动即崩的话，一个配错的
+	// 采集通道会把整个 worker（心跳、其他任务）一起拖下水。
+	config.NewAPIEndpoint = strings.TrimSpace(getenv("XM_NEWAPI_ENDPOINT"))
+	config.NewAPITargetAllowlist = parseHostAllowlist(getenv("XM_NEWAPI_TARGET_ALLOWLIST"))
+	// 可选：旧版本 NewAPI 需要的 New-Api-User 头（管理员用户 id）。
+	// 它**不是**凭据，新版本上游会忽略它——缺它不会让 real 模式立不起来。
+	config.NewAPIUserID = strings.TrimSpace(getenv("XM_NEWAPI_USER_ID"))
 	if value := getenv("XM_NEWAPI_SYNC_ENABLED"); value != "" {
-		// 采集链路的停用开关（宪法 26 条）。它同时是**生产环境现阶段唯一
-		// 走得通的配置**：生产不许 fake，而 real 还不存在（XM-0038）。
+		// 采集链路的停用开关（宪法 26 条）：上游出事时能立刻停掉读取，
+		// 而不必改代码重发版。关掉之后看板不会假装新鲜——observed_at 不再
+		// 前进，新鲜度自然降级（规格 §9.1）。
 		enabled, err := strconv.ParseBool(value)
 		if err != nil {
 			return jobs.Config{}, fmt.Errorf("newapi sync enabled: %w", err)

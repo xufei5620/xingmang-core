@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/newapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
 // newapiMetricKeys 是 NewAPI 契约当前产出的全部指标键。
@@ -191,13 +193,12 @@ func TestNewAPISyncFailureStillWrites(t *testing.T) {
 	}
 }
 
-// TestNewAPISyncRealModeRecordsNotSupported：real 模式在 XM-0038 之前必然
-// 失败，但必须失败得**看得见**，而不是崩溃或静默。
+// TestNewAPISyncRealModeRecordsNotSupported：配置未就绪的 real 模式必然失败，
+// 但必须失败得**看得见**，而不是崩溃或静默。
 //
-// 这条与 sub2api 的同名用例形状一样、成因不同：sub2api 的真实客户端已经
-// 存在，那边测的是「配置没配齐」；这里根本没有真实客户端，测的是
-// 「这个能力还没交付」。两者都必须归到 not_supported 并落库，
-// 让看板看得见这条指标存在且正在失败（规格 §9.1）。
+// XM-0038 之后真实客户端已经存在，这条测的因此与 sub2api 的同名用例完全同构：
+// 「客户端在，配置没配齐」。归到 not_supported 并落库，让看板看得见这条指标
+// 存在且正在失败（规格 §9.1）。
 func TestNewAPISyncRealModeRecordsNotSupported(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
@@ -207,12 +208,12 @@ func TestNewAPISyncRealModeRecordsNotSupported(t *testing.T) {
 		Environment: "staging",
 		Mode:        NewAPIModeReal,
 		Store:       store,
-		NewClient:   NewNewAPIClientFactory(NewAPIModeReal),
+		NewClient:   NewNewAPIClientFactory(NewAPIModeReal, NewAPIRealConfig{}),
 		Now:         func() time.Time { return fixedNow },
 	})
 
 	if err := worker.Work(context.Background(), newapiSyncJob()); err != nil {
-		t.Fatalf("Work = %v, want nil（真实客户端未交付是事实，不是任务失败）", err)
+		t.Fatalf("Work = %v, want nil（配置未就绪是事实，不是任务失败）", err)
 	}
 	if len(store.keys()) != len(newapiMetricKeys) {
 		t.Fatalf("real 模式落库指标 = %v, want 全部 %v", store.keys(), newapiMetricKeys)
@@ -228,16 +229,18 @@ func TestNewAPISyncRealModeRecordsNotSupported(t *testing.T) {
 		}
 	}
 	// 错误分类进库与日志，内部原始文本不进（ADR-004）。
-	if strings.Contains(logs.String(), "XM-0038") {
+	// 缺失变量清单只该出现在 Unwrap 链里，供人排查时展开看，
+	// 不该被结构化日志顺手搬进去。
+	if strings.Contains(logs.String(), "XM_NEWAPI_ENDPOINT") {
 		t.Fatalf("结构化日志不该带原始错误文本: %s", logs.String())
 	}
 }
 
 func TestNewAPIClientFactoryClassifiesModes(t *testing.T) {
 	// real：not_supported，且根因可被 errors.Is 追溯（供日志与排查用）
-	_, err := NewNewAPIClientFactory(NewAPIModeReal)(context.Background())
+	_, err := NewNewAPIClientFactory(NewAPIModeReal, NewAPIRealConfig{})(context.Background())
 	if err == nil {
-		t.Fatal("XM-0038 之前的 real 模式必须返回错误")
+		t.Fatal("配置未就绪的 real 模式必须返回错误")
 	}
 	if got := connector.KindOf(err); got != connector.KindNotSupported {
 		t.Fatalf("KindOf = %q, want %q", got, connector.KindNotSupported)
@@ -245,18 +248,77 @@ func TestNewAPIClientFactoryClassifiesModes(t *testing.T) {
 	if !errors.Is(err, ErrNewAPIRealClientUnavailable) {
 		t.Fatalf("根因应可追溯到 ErrNewAPIRealClientUnavailable: %v", err)
 	}
+	// 缺哪个变量必须说得出来：运维手里拿的是 .env，不是源码。
+	for _, want := range []string{
+		"XM_NEWAPI_ENDPOINT", "XM_NEWAPI_TARGET_ALLOWLIST", "XM_NEWAPI_CREDENTIAL_REF",
+	} {
+		if !strings.Contains(fmt.Sprint(errors.Unwrap(err)), want) {
+			t.Fatalf("错误链里应说清缺 %s: %v", want, errors.Unwrap(err))
+		}
+	}
+	// 对外文本仍然只有分类 + 操作名（ADR-004）：变量清单在 Unwrap 链里，
+	// 不在 Error() 里——后者会进日志与看板。
+	if got := err.Error(); got != "not_supported: newapi.client.real" {
+		t.Fatalf("对外错误文本 = %q，不该带配置细节", got)
+	}
 
 	// 未知模式归 internal：那是我们自己的配置/装配问题，不是上游不支持。
-	// 两者分开归类，运维一看 error_code 就知道该去补配置还是等任务交付。
-	_, err = NewNewAPIClientFactory(NewAPIMode("bogus"))(context.Background())
+	// 两者分开归类，运维一看 error_code 就知道该去补配置还是去改配置。
+	_, err = NewNewAPIClientFactory(NewAPIMode("bogus"), NewAPIRealConfig{})(context.Background())
 	if got := connector.KindOf(err); got != connector.KindInternal {
 		t.Fatalf("未知模式 KindOf = %q, want %q", got, connector.KindInternal)
 	}
 
 	// fake：拿得到一个可用的客户端
-	client, err := NewNewAPIClientFactory(NewAPIModeFake)(context.Background())
+	client, err := NewNewAPIClientFactory(NewAPIModeFake, NewAPIRealConfig{})(context.Background())
 	if err != nil || client == nil {
 		t.Fatalf("fake 模式应返回可用客户端: %v", err)
+	}
+}
+
+// TestNewAPIClientFactoryRealBuildsClient 锁住接缝真的接活了（XM-0038）：
+// 配置齐全时 real 模式必须造出一个客户端，而不是继续返回「未配置」。
+//
+// 这条是这次交付最关键的一条集成断言：连接器本身的契约测试再全，
+// 只要工厂这一层没接上，运维配好了变量也依然只会看到 not_supported。
+func TestNewAPIClientFactoryRealBuildsClient(t *testing.T) {
+	provider, err := secrets.NewEnvProvider(
+		map[string]string{"secret://newapi/readonly-token": "XM_TEST_NEWAPI_TOKEN"},
+		secrets.WithLookup(func(string) (string, bool) { return "placeholder-placeholder", true }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := NewAPIRealConfig{
+		Endpoint:        "https://xm.example.test",
+		TargetAllowlist: []string{"xm.example.test"},
+		CredentialRef:   "secret://newapi/readonly-token",
+		Environment:     "staging",
+		InstanceID:      "newapi-test",
+		Timeout:         DefaultNewAPIRequestTimeout,
+		Secrets:         provider,
+	}
+	client, err := NewNewAPIClientFactory(NewAPIModeReal, cfg)(context.Background())
+	if err != nil || client == nil {
+		t.Fatalf("配置齐全时应造出真实客户端: client=%v err=%v", client, err)
+	}
+
+	// New-Api-User 是**可选**的：新版本上游忽略它，旧版本需要它。
+	// 缺它不该让 real 模式立不起来——否则运维会为了一个新版本根本不读的头
+	// 去翻用户 id。
+	withUser := cfg
+	withUser.UserID = "1"
+	if _, err := NewNewAPIClientFactory(NewAPIModeReal, withUser)(context.Background()); err != nil {
+		t.Fatalf("配了 user id 也应造得出客户端: %v", err)
+	}
+
+	// 配错（endpoint 不是 https）与没配分开归类：前者是我们自己的部署配置
+	// 有问题，归 internal；后者归 not_supported。运维一看 error_code
+	// 就知道该去补配置还是去改配置。
+	bad := cfg
+	bad.Endpoint = "http://xm.example.test"
+	if _, err := NewNewAPIClientFactory(NewAPIModeReal, bad)(context.Background()); connector.KindOf(err) != connector.KindInternal {
+		t.Fatalf("配错的连接配置应归 internal, got %v (%v)", connector.KindOf(err), err)
 	}
 }
 
@@ -553,7 +615,7 @@ func TestParseNewAPIMode(t *testing.T) {
 		want    NewAPIMode
 		wantErr bool
 	}{
-		// 空串按 fake：真实客户端还没写（XM-0038），默认 real 只会让每个
+		// 空串按 fake：真实只读凭据由用户自配，默认 real 只会让每个
 		// 新环境一上来就满屏同步失败。
 		{in: "", want: NewAPIModeFake},
 		{in: "fake", want: NewAPIModeFake},
@@ -650,14 +712,16 @@ func TestNewAPIFakeModeRejectedInProduction(t *testing.T) {
 	if err == nil {
 		t.Fatal("生产 + fake 必须拒绝启动")
 	}
-	// 错误信息必须给出**这个环境下真正走得通**的出路。NewAPI 与 Sub2API 在
-	// 这里不同：那边可以改配 real，这边的 real 还不存在（XM-0038），
-	// 唯一出路是显式关闭同步。指错路等于让运维去配一个不存在的东西。
-	if !strings.Contains(err.Error(), "XM_NEWAPI_SYNC_ENABLED=false") {
-		t.Fatalf("错误信息应指出唯一可行出路: %v", err)
+	// 错误信息必须给出**这个环境下真正走得通**的出路。XM-0038 之后有两条：
+	// 配 real（真实客户端已经存在），或者显式关闭同步。两条都得说，
+	// 只说一条会让运维以为另一条不可行。
+	for _, want := range []string{"XM_NEWAPI_MODE=real", "XM_NEWAPI_SYNC_ENABLED=false"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误信息应指出可行出路 %s: %v", want, err)
+		}
 	}
 
-	// staging / development 保持允许：XM-0038 之前这两个环境本来就要靠
+	// staging / development 保持允许：真实凭据就绪前，这两个环境本来就要靠
 	// Fake 把整条采集链路跑通。
 	for _, env := range []string{"staging", "development"} {
 		c := DefaultConfig()
