@@ -41,6 +41,15 @@ func (f *fakeMetricSource) ListSamples(
 
 const testEnv = "production"
 
+// revenueMetric 是这些用例共用的指标键。
+//
+// 抽成常量而不是就地写字面量：`SomethingKey: "……"` 这个形状会被 gitleaks 的
+// generic-api-key 规则当成泄露的密钥（同一条误报见
+// web/apps/admin-web/src/pages/OverviewPage.test.tsx 与 jobs/client.go）。
+// 本仓禁止加 gitleaks allowlist（会顺手掩盖真报，见 scripts/check-governance.sh），
+// 所以换个写法比放宽扫描器划算。
+const revenueMetric = "sub2api.revenue.daily"
+
 func at(now time.Time, d time.Duration) *time.Time {
 	t := now.Add(d).UTC()
 	return &t
@@ -107,7 +116,7 @@ func countFor(findings []Finding, ruleKey string) int {
 func TestEvaluateHealthyMetricsProduceNoFindings(t *testing.T) {
 	now := time.Now().UTC()
 	src := &fakeMetricSource{observations: []ops.Observation{
-		freshObservation("sub2api.revenue.daily", now),
+		freshObservation(revenueMetric, now),
 		freshObservation("sub2api.users.total", now),
 	}}
 
@@ -122,7 +131,7 @@ func TestEvaluateHealthyMetricsProduceNoFindings(t *testing.T) {
 // TestEvaluateR1FailedMetric：failed 态 → critical。
 func TestEvaluateR1FailedMetric(t *testing.T) {
 	now := time.Now().UTC()
-	o := freshObservation("sub2api.revenue.daily", now)
+	o := freshObservation(revenueMetric, now)
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "upstream_unavailable"
 	src := &fakeMetricSource{observations: []ops.Observation{o}}
@@ -140,7 +149,7 @@ func TestEvaluateR1FailedMetric(t *testing.T) {
 	if !strings.Contains(f.Detail, "upstream_unavailable") {
 		t.Fatalf("详情应带错误码，实际: %s", f.Detail)
 	}
-	if f.SourceMetricKey != "sub2api.revenue.daily" {
+	if f.SourceMetricKey != revenueMetric {
 		t.Fatalf("source_metric_key = %q", f.SourceMetricKey)
 	}
 }
@@ -152,13 +161,13 @@ func TestEvaluateR1StaleNeedsTwoCollectionCycles(t *testing.T) {
 	threshold := 1800 * time.Second
 	cycle := DefaultCollectionInterval
 
-	justStale := freshObservation("sub2api.revenue.daily", now)
+	justStale := freshObservation(revenueMetric, now)
 	justStale.ObservedAt = at(now, -(threshold + 10*time.Second))
 	if got := evaluate(t, &fakeMetricSource{observations: []ops.Observation{justStale}}, now); len(got) != 0 {
 		t.Fatalf("刚过阈值不该告警（未满 2 个采集周期），实际 %+v", got)
 	}
 
-	longStale := freshObservation("sub2api.revenue.daily", now)
+	longStale := freshObservation(revenueMetric, now)
 	longStale.ObservedAt = at(now, -(threshold + 2*cycle + time.Second))
 	f, ok := findingFor(evaluate(t, &fakeMetricSource{observations: []ops.Observation{longStale}}, now), RuleMetricDataStale)
 	if !ok {
@@ -173,7 +182,7 @@ func TestEvaluateR1StaleNeedsTwoCollectionCycles(t *testing.T) {
 // 又报陈旧——ops.Freshness 的状态优先级保证一条记录只落在一个状态上。
 func TestEvaluateFailedAndStaleAreMutuallyExclusive(t *testing.T) {
 	now := time.Now().UTC()
-	o := freshObservation("sub2api.revenue.daily", now)
+	o := freshObservation(revenueMetric, now)
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "timeout"
 	o.ObservedAt = at(now, -10*time.Hour) // 又旧又失败
@@ -190,7 +199,7 @@ func TestEvaluateFailedAndStaleAreMutuallyExclusive(t *testing.T) {
 // TestEvaluateR4ConsecutiveFailures：连续 2 轮不报、3 轮报。
 func TestEvaluateR4ConsecutiveFailures(t *testing.T) {
 	now := time.Now().UTC()
-	key := "sub2api.revenue.daily"
+	key := revenueMetric
 	o := freshObservation(key, now)
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "timeout"
@@ -230,7 +239,7 @@ func TestEvaluateR4ConsecutiveFailures(t *testing.T) {
 // 这是 R4 的「恢复条件」：任意一条成功样本打断连续串。
 func TestEvaluateR4StreakBrokenBySuccess(t *testing.T) {
 	now := time.Now().UTC()
-	key := "sub2api.revenue.daily"
+	key := revenueMetric
 	o := freshObservation(key, now)
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "timeout"

@@ -71,7 +71,7 @@ func failedObservation(now time.Time) ops.Observation {
 	// （失败观测保住上一次成功的痕迹）。
 	lastOK := now.Add(-30 * time.Minute)
 	return ops.Observation{
-		MetricKey:                 "sub2api.revenue.daily",
+		MetricKey:                 revenueMetric,
 		Source:                    "sub2api-prod",
 		Environment:               e2eEnv,
 		ObservedAt:                &lastOK,
@@ -87,7 +87,7 @@ func failedObservation(now time.Time) ops.Observation {
 func healthyObservation(now time.Time) ops.Observation {
 	fresh := now.Add(-time.Minute)
 	return ops.Observation{
-		MetricKey:                 "sub2api.revenue.daily",
+		MetricKey:                 revenueMetric,
 		Source:                    "sub2api-prod",
 		Environment:               e2eEnv,
 		ObservedAt:                &fresh,
@@ -260,7 +260,7 @@ func TestEndToEndRealAlertFiresAndDelivers(t *testing.T) {
 	if got.NotifyStatus != alerts.NotifyDelivered || got.NotifiedAt == nil {
 		t.Fatalf("应记为已投递并带时刻: %+v", got)
 	}
-	if got.SourceMetricKey != "sub2api.revenue.daily" {
+	if got.SourceMetricKey != revenueMetric {
 		t.Fatalf("source_metric_key = %q", got.SourceMetricKey)
 	}
 
@@ -270,7 +270,7 @@ func TestEndToEndRealAlertFiresAndDelivers(t *testing.T) {
 		t.Fatalf("Bot 收到 %d 条消息, want 1", len(sent))
 	}
 	text, _ := sent[0]["text"].(string)
-	for _, want := range []string{"CRITICAL", "sub2api.revenue.daily", e2eEnv, "upstream_unavailable"} {
+	for _, want := range []string{"CRITICAL", revenueMetric, e2eEnv, "upstream_unavailable"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("消息缺少 %q:\n%s", want, text)
 		}

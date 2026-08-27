@@ -52,7 +52,7 @@ func testAlert() Alert {
 		Title:           "指标 sub2api.revenue.daily 同步失败",
 		Detail:          "来源 sub2api-prod，错误码 timeout。",
 		Environment:     "production",
-		SourceMetricKey: "sub2api.revenue.daily",
+		SourceMetricKey: revenueMetric,
 		OpenedAt:        now,
 		LastSeenAt:      now.Add(3 * time.Minute),
 		FireCount:       4,
@@ -103,7 +103,7 @@ func TestTelegramNotifierSendsMessage(t *testing.T) {
 		t.Fatalf("chat_id 未送达: %v", gotBody["chat_id"])
 	}
 	text, _ := gotBody["text"].(string)
-	for _, want := range []string{"CRITICAL", "sub2api.revenue.daily", "production", RuleMetricSyncFailed, "累计 4 次"} {
+	for _, want := range []string{"CRITICAL", revenueMetric, "production", RuleMetricSyncFailed, "累计 4 次"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("消息正文缺少 %q:\n%s", want, text)
 		}

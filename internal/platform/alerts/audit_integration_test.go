@@ -92,7 +92,7 @@ func seedAlert(t *testing.T, s *alerts.Store, env string) alerts.Alert {
 		Title:           "指标 sub2api.revenue.daily 同步失败",
 		Detail:          "错误码 timeout",
 		Environment:     env,
-		SourceMetricKey: "sub2api.revenue.daily",
+		SourceMetricKey: revenueMetric,
 		Now:             time.Now().UTC(),
 	}
 	a, _, err := s.Upsert(context.Background(), in)

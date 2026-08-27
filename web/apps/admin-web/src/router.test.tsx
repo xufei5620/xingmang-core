@@ -6,10 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { devLogin, devLogout } from "./auth";
 import { routes } from "./router";
 
+// 指标键抽成常量而不是就地写字面量：`xxx_key: "……"` 这个形状会被 gitleaks 的
+// generic-api-key 规则当成泄露的密钥（同一条误报见 pages/OverviewPage.test.tsx
+// 与 api/platform.test.ts）。本仓禁止加 gitleaks allowlist（会顺手掩盖真报，
+// 见 scripts/check-governance.sh），所以换个写法比放宽扫描器划算。
+const REVENUE_METRIC = "sub2api.revenue.daily";
+const CHANNEL_BALANCE_METRIC = "sub2api.channels.balance";
+
 const metricsBody = {
   items: [
     {
-      metric_key: "sub2api.revenue.daily",
+      metric_key: REVENUE_METRIC,
       source: "sub2api-prod",
       environment: "development",
       watermark: "wm-1",
@@ -78,7 +85,7 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response) {
 const channelsBody = {
   items: [
     {
-      metric_key: "sub2api.channels.balance",
+      metric_key: CHANNEL_BALANCE_METRIC,
       source: "sub2api-prod",
       environment: "development",
       watermark: "wm-9",
@@ -155,13 +162,13 @@ const alertsBody = {
     {
       id: "aaaa1111-2222-3333-4444-555555555555",
       rule_key: "metric.sync.failed",
-      dedup_key: "metric.sync.failed:development:sub2api.revenue.daily",
+      dedup_key: `metric.sync.failed:development:${REVENUE_METRIC}`,
       severity: "critical",
       status: "OPEN",
       title: "指标 sub2api.revenue.daily 同步失败",
       detail: "来源 sub2api-prod，错误码 upstream_timeout",
       environment: "development",
-      source_metric_key: "sub2api.revenue.daily",
+      source_metric_key: REVENUE_METRIC,
       opened_at: "2026-08-26T10:00:00Z",
       last_seen_at: "2026-08-26T10:05:00Z",
       acknowledged_at: null,
@@ -180,7 +187,7 @@ const alertsBody = {
       title: "渠道乙 余额不足",
       detail: "余额 2500 低于阈值 500000（均为最小货币单位，CNY）",
       environment: "development",
-      source_metric_key: "sub2api.channels.balance",
+      source_metric_key: CHANNEL_BALANCE_METRIC,
       opened_at: "2026-08-26T09:00:00Z",
       last_seen_at: "2026-08-26T10:05:00Z",
       acknowledged_at: null,

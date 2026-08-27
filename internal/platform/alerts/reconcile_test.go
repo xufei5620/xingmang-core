@@ -110,7 +110,7 @@ func TestReconcileOpensAlertAndDelivers(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
 	notifier := &stubNotifier{name: "stub"}
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric("sub2api.revenue.daily", now)}}
+	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
 
 	pendingID := uuid.New()
 	store.pending = []Alert{{ID: pendingID, RuleKey: RuleMetricSyncFailed, Status: StatusOpen}}
@@ -134,7 +134,7 @@ func TestReconcileOpensAlertAndDelivers(t *testing.T) {
 func TestReconcileSecondRoundMerges(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric("sub2api.revenue.daily", now)}}
+	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
 	r := newTestReconciler(store, src, &stubNotifier{}, now)
 
 	if _, err := r.Reconcile(context.Background(), testEnv); err != nil {
@@ -159,9 +159,9 @@ func TestReconcileAutoResolvesAlertsThatStoppedFiring(t *testing.T) {
 	store.active = []Alert{
 		{ID: goneID, RuleKey: RuleChannelBalanceLow, DedupKey: "channel.balance.low:production:ch-old", Status: StatusOpen},
 		{ID: stillID, RuleKey: RuleMetricSyncFailed,
-			DedupKey: RuleMetricSyncFailed + ":" + testEnv + ":sub2api.revenue.daily", Status: StatusOpen},
+			DedupKey: RuleMetricSyncFailed + ":" + testEnv + ":" + revenueMetric, Status: StatusOpen},
 	}
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric("sub2api.revenue.daily", now)}}
+	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
 
 	res, err := newTestReconciler(store, src, &stubNotifier{}, now).Reconcile(context.Background(), testEnv)
 	if err != nil {
@@ -183,7 +183,7 @@ func TestReconcileAutoResolvesAlertsThatStoppedFiring(t *testing.T) {
 func TestReconcileDoesNotResolveAlertsOpenedThisRound(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric("sub2api.revenue.daily", now)}}
+	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
 
 	res, err := newTestReconciler(store, src, &stubNotifier{}, now).Reconcile(context.Background(), testEnv)
 	if err != nil {
@@ -201,7 +201,7 @@ func TestReconcileDoesNotResolveAlertsOpenedThisRound(t *testing.T) {
 // Silenced 为真（真正的状态落库由 store_test.go 对真库验）。
 func TestReconcileMarksSilencedWhenWindowMatches(t *testing.T) {
 	now := time.Now().UTC()
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric("sub2api.revenue.daily", now)}}
+	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
 
 	t.Run("按规则静默", func(t *testing.T) {
 		store := newRecordingStore()
@@ -324,7 +324,7 @@ func TestReconcileFailsOnStoreWriteError(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
 	store.upsertErr = errors.New("connection refused")
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric("sub2api.revenue.daily", now)}}
+	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
 
 	if _, err := newTestReconciler(store, src, &stubNotifier{}, now).Reconcile(context.Background(), testEnv); err == nil {
 		t.Fatal("写库失败必须让整轮失败——那是唯一需要重试的情况")
