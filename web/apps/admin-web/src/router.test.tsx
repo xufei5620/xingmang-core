@@ -307,7 +307,7 @@ describe("admin-web 路由（登录前/后壳）", () => {
     renderRoute("/dashboard");
     expect(await screen.findByRole("heading", { name: "运营总览", level: 2 })).not.toBeNull();
 
-    const nav = await screen.findByRole("navigation");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     for (const section of ["全局", "被管平台", "平台治理"]) {
       expect(within(nav).getByRole("heading", { name: section })).not.toBeNull();
     }
@@ -317,6 +317,25 @@ describe("admin-web 路由（登录前/后壳）", () => {
     }
     // 被管平台段由 /api/v1/services 驱动，要等这一次请求回来
     expect(await within(nav).findByRole("link", { name: "Sub2API" })).not.toBeNull();
+  });
+
+  it("提示条给出当前位置与环境口径", async () => {
+    devLogin();
+    renderRoute("/dashboard");
+    const crumbs = await screen.findByRole("navigation", { name: "面包屑" });
+    expect(within(crumbs).getByText("全局")).not.toBeNull();
+    expect(within(crumbs).getByText("运营总览").getAttribute("aria-current")).toBe("page");
+    // 测试环境没有 VITE_XM_ENVIRONMENT：显示的是「由服务端解析」这条口径，
+    // 而不是猜一个环境名（见 lib/breadcrumbs）
+    expect(screen.getByText(/环境 由服务端解析/)).not.toBeNull();
+  });
+
+  it("换页时提示条跟着换位置", async () => {
+    devLogin();
+    renderRoute("/registry");
+    const crumbs = await screen.findByRole("navigation", { name: "面包屑" });
+    expect(within(crumbs).getByText("平台治理")).not.toBeNull();
+    expect(within(crumbs).getByText("注册表").getAttribute("aria-current")).toBe("page");
   });
 });
 
@@ -911,7 +930,7 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
 
   it("Registry 里有的平台可点，没有的在场但点不动（§12 惯例：显示未接入，不隐藏）", async () => {
     renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     // servicesBody 只登记了 sub2api
     expect(await within(nav).findByRole("link", { name: "Sub2API" })).not.toBeNull();
 
@@ -923,7 +942,7 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
 
   it("NewAPI 没登记也是链接：它的内容来自指标，不依赖注册表（XM-0035）", async () => {
     renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     // servicesBody 里没有 newapi，但页面照样点得进去——概览与渠道表读的是
     // /metrics（采集任务写的），注册表只服务于尚未实现的「连接与凭据」那一格。
     // 挂着「未接入」而页面明明有五条指标可显示，那是看板在说谎。
@@ -933,7 +952,7 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
 
   it("开票系统标成契约草案，不冒充成某个里程碑", async () => {
     renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     await within(nav).findByRole("link", { name: "Sub2API" });
     expect(within(nav).getByText("契约草案·XM-0028")).not.toBeNull();
   });
@@ -947,7 +966,7 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
         : okHandler(url),
     );
     renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     // 拿一次 403 去断言「这个平台没接入」，与新鲜度铁律禁止的是同一类事
     expect((await within(nav).findAllByText("读取失败")).length).toBeGreaterThan(0);
     expect(within(nav).queryByText("未接入·M4")).toBeNull();
@@ -967,7 +986,7 @@ describe("三段式导航：全局段顺序与禁用项", () => {
 
   it("告警中心排在全局段的运营总览与审计事件之间（XM-0033 已合入，占位换成真链接）", async () => {
     renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     const alerts = within(nav).getByRole("link", { name: "告警中心" });
     expect(alerts.getAttribute("href")).toBe("/alerts");
     // 顺序照 ADMIN-IA 的全局段：运营总览 / 告警中心 / 审计事件
@@ -980,7 +999,7 @@ describe("三段式导航：全局段顺序与禁用项", () => {
 
   it("财务中心与变更与审批同样是禁用态，而不是从导航上消失", async () => {
     renderRoute("/dashboard");
-    const nav = await screen.findByRole("navigation");
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     for (const label of ["财务中心", "变更与审批"]) {
       expect(within(nav).getByText(label)).not.toBeNull();
       expect(within(nav).queryByRole("link", { name: new RegExp(label) })).toBeNull();

@@ -1,62 +1,163 @@
 /* 星芒设计令牌。业务代码禁止硬编码颜色/圆角/阴影（规格 §7.7），只用这些变量
-   或由 tailwind.css 映射出的工具类。 */
-:root {
-  /* 基础色板 */
-  --xm-palette-gray-50: #f8fafc;  --xm-palette-gray-100: #f1f5f9;
-  --xm-palette-gray-200: #e2e8f0; --xm-palette-gray-300: #cbd5e1;
-  --xm-palette-gray-500: #64748b; --xm-palette-gray-700: #334155;
-  --xm-palette-gray-800: #1e293b; --xm-palette-gray-900: #0f172a;
-  --xm-palette-blue-500: #3b82f6; --xm-palette-blue-600: #2563eb;
-  --xm-palette-blue-700: #1d4ed8;
-  --xm-palette-red-500: #ef4444;  --xm-palette-red-600: #dc2626;
-  --xm-palette-green-600: #16a34a;--xm-palette-amber-500: #f59e0b;
+   或由 tailwind.css 映射出的工具类。
 
-  /* 语义色（明亮主题） */
-  --xm-color-canvas: var(--xm-palette-gray-100);      /* 页面底 */
+   视觉方向（UI 交接文档 §11.1）：企业级浅色运营台、深色左侧导航、克制的靛蓝
+   交互强调；绿/琥珀/红只表示语义状态。色值取自原型设计系统而不是 Tailwind 默认
+   色板——默认 slate/blue 的彩度在整屏数据表上偏艳，原型那套把明度铺平、彩度压低，
+   密集表格盯久了才不刺眼。语义角色一个没动，动的只是它们指向的值。 */
+:root {
+  /* --- 基础色板 --- */
+  /* 中性色：偏冷的石板灰。900 同时是深色导航的底色，所以它必须够深。 */
+  --xm-palette-gray-25: #fbfcfe;  --xm-palette-gray-50: #f7f9fc;
+  --xm-palette-gray-100: #eff3f8; --xm-palette-gray-200: #e4e9f1;
+  --xm-palette-gray-300: #d4dae5; --xm-palette-gray-500: #758195;
+  --xm-palette-gray-600: #5d687a; --xm-palette-gray-700: #404a5a;
+  --xm-palette-gray-800: #28323f; --xm-palette-gray-900: #1c2430;
+  --xm-palette-gray-950: #141b24;
+  /* 交互强调：靛蓝。600/700 用在浅底，300 用在深底（导航、暗色主题）。 */
+  --xm-palette-indigo-50: #eef0ff;  --xm-palette-indigo-100: #e1e5ff;
+  --xm-palette-indigo-300: #aab4f2; --xm-palette-indigo-500: #5a6ad6;
+  --xm-palette-indigo-600: #4353b8; --xm-palette-indigo-700: #35439c;
+  /* 语义状态色。深浅各一档：深的给浅底当文字/描边，浅的给深底用。
+     两档都按 4.5:1 选过——状态是给人做判断用的，看不清等于没有。 */
+  --xm-palette-red-400: #e57b72;   --xm-palette-red-600: #b23a32;
+  --xm-palette-green-400: #3fae7c; --xm-palette-green-600: #16724a;
+  --xm-palette-amber-400: #d5a03f; --xm-palette-amber-600: #9a6818;
+
+  /* --- 语义色（浅色运营台） --- */
+  --xm-color-canvas: var(--xm-palette-gray-50);       /* 页面底 */
   --xm-color-surface: #ffffff;                        /* 卡片/面板 */
-  --xm-color-surface-muted: var(--xm-palette-gray-50);
+  --xm-color-surface-muted: var(--xm-palette-gray-100);
   --xm-color-fg: var(--xm-palette-gray-900);
-  --xm-color-fg-muted: var(--xm-palette-gray-500);
+  /* fg-muted 取 600 而不是 500：500（#758195）压在白底上只有 3.9:1，
+     整个后台的说明文字、表头、次要标签全走这个令牌，达不到 AA 就是全站达不到。 */
+  --xm-color-fg-muted: var(--xm-palette-gray-600);
   --xm-color-edge: var(--xm-palette-gray-200);        /* 边框 */
-  --xm-color-accent: var(--xm-palette-blue-600);
-  --xm-color-accent-strong: var(--xm-palette-blue-700);
+  --xm-color-edge-strong: var(--xm-palette-gray-300); /* 输入控件等需要被摸到的边 */
+  --xm-color-accent: var(--xm-palette-indigo-600);
+  --xm-color-accent-strong: var(--xm-palette-indigo-700);
   --xm-color-accent-fg: #ffffff;
+  --xm-color-accent-soft: var(--xm-palette-indigo-50); /* 选中行、软底标签 */
   --xm-color-danger: var(--xm-palette-red-600);
   --xm-color-danger-fg: #ffffff;
   --xm-color-success: var(--xm-palette-green-600);
-  --xm-color-warning: var(--xm-palette-amber-500);
-  --xm-color-overlay: rgb(15 23 42 / 0.4);            /* 对话框/抽屉遮罩 */
+  --xm-color-warning: var(--xm-palette-amber-600);
+  --xm-color-overlay: rgb(28 36 48 / 0.4);            /* 对话框/抽屉遮罩 */
 
-  /* 字体 */
+  /* --- 深色左侧导航 ---
+     不是「暗色模式的导航」，是这套设计在**任何**主题下的固定结构（§11.1：
+     浅色运营台 + 深色左侧导航）。所以它自成一组令牌，而不是复用 surface/fg——
+     后者会随主题翻转，导航不翻。取值按 #1c2430 底算过对比度。 */
+  --xm-color-nav-surface: var(--xm-palette-gray-900);
+  --xm-color-nav-fg: var(--xm-palette-gray-50);
+  --xm-color-nav-fg-muted: #9aa5b6;                   /* 6.3:1 on nav-surface */
+  --xm-color-nav-edge: #2b3543;
+  --xm-color-nav-hover: #263041;
+  --xm-color-nav-active-bg: #2c3752;
+  --xm-color-nav-active-fg: var(--xm-palette-indigo-300);
+  /* 选中项左侧那道靛蓝亮边（原型称 starlight rail）。整套设计里只有三处用它：
+     导航选中项、页面标题、指标卡顶边——再多就不是标识而是装饰了。 */
+  --xm-color-nav-accent: var(--xm-palette-indigo-300);
+
+  /* --- 字体 --- */
   --xm-font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --xm-font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 
-  /* 间距（4px 基） */
-  --xm-space-1: 0.25rem; --xm-space-2: 0.5rem; --xm-space-3: 0.75rem;
-  --xm-space-4: 1rem;    --xm-space-6: 1.5rem; --xm-space-8: 2rem;
+  /* --- 间距（4px 基准，§11.1） --- */
+  --xm-space-1: 0.25rem; --xm-space-2: 0.5rem;  --xm-space-3: 0.75rem;
+  --xm-space-4: 1rem;    --xm-space-5: 1.25rem; --xm-space-6: 1.5rem;
+  --xm-space-8: 2rem;    --xm-space-10: 2.5rem;
 
-  /* 圆角 */
-  --xm-radius-sm: 0.25rem; --xm-radius-md: 0.5rem; --xm-radius-lg: 0.75rem;
+  /* --- 圆角：6 小 / 8 控件 / 10 卡片 / 12 浮层 --- */
+  --xm-radius-sm: 0.375rem; --xm-radius-md: 0.5rem;
+  --xm-radius-lg: 0.625rem; --xm-radius-xl: 0.75rem;
 
-  /* 阴影 */
-  --xm-shadow-sm: 0 1px 2px 0 rgb(15 23 42 / 0.06);
-  --xm-shadow-md: 0 4px 12px -2px rgb(15 23 42 / 0.10);
+  /* --- 阴影：先描边、后投影（§11.1 卡片低阴影细边框，不过度玻璃化） --- */
+  --xm-shadow-sm: 0 1px 2px 0 rgb(28 36 48 / 0.05);
+  --xm-shadow-md: 0 6px 16px -6px rgb(28 36 48 / 0.12), 0 2px 4px -2px rgb(28 36 48 / 0.06);
 
-  /* 密度（管理后台默认紧凑） */
+  /* --- 密度（管理后台默认紧凑） --- */
   --xm-control-h-sm: 1.75rem; --xm-control-h-md: 2.25rem; --xm-control-h-lg: 2.75rem;
+
+  /* --- 暗色主题取值 ---
+     定义在这里、由下面两个守卫块**引用**，于是色值只有一份：三态守卫最常见的
+     事故就是改了 [data-theme] 那份、忘了 prefers-color-scheme 那份，两个主题从此
+     慢慢分叉。这些变量自己不参与渲染，只作为下面 alias 的来源。
+
+     accent-fg / danger-fg 在暗色下翻成深色：暗色主题的强调色必须够亮才能当文字
+     （亮底 + 白字只有 2.7:1），够亮之后压在它上面的就只能是深色字。 */
+  --xm-dark-canvas: var(--xm-palette-gray-950);
+  --xm-dark-surface: var(--xm-palette-gray-900);
+  --xm-dark-surface-muted: #232c39;
+  --xm-dark-fg: var(--xm-palette-gray-100);
+  --xm-dark-fg-muted: #a3aebf;
+  --xm-dark-edge: #333e4d;
+  --xm-dark-edge-strong: #45525f;
+  --xm-dark-accent: #8f9ae0;
+  --xm-dark-accent-strong: #a9b2ea;
+  --xm-dark-accent-fg: var(--xm-palette-gray-950);
+  --xm-dark-accent-soft: #262f47;
+  --xm-dark-danger: var(--xm-palette-red-400);
+  --xm-dark-danger-fg: var(--xm-palette-gray-950);
+  --xm-dark-success: var(--xm-palette-green-400);
+  --xm-dark-warning: var(--xm-palette-amber-400);
+  --xm-dark-overlay: rgb(0 0 0 / 0.6);
+  /* 导航在暗色下比画布再暗一档，否则整屏一个色，左栏就消失了 */
+  --xm-dark-nav-surface: #11171f;
+  --xm-dark-nav-edge: #242e3b;
+  --xm-shadow-sm-dark: 0 1px 2px 0 rgb(0 0 0 / 0.45);
+  --xm-shadow-md-dark: 0 6px 16px -6px rgb(0 0 0 / 0.6), 0 2px 4px -2px rgb(0 0 0 / 0.4);
 }
 
-/* 暗色主题：切换 html[data-theme="dark"] */
+/* 暗色主题守卫一：跟随系统，但让显式的 data-theme="light" 能压住它。
+   没有 :not([data-theme="light"]) 的话，用户在系统深色下选「亮色」会选不动。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --xm-color-canvas: var(--xm-dark-canvas);
+    --xm-color-surface: var(--xm-dark-surface);
+    --xm-color-surface-muted: var(--xm-dark-surface-muted);
+    --xm-color-fg: var(--xm-dark-fg);
+    --xm-color-fg-muted: var(--xm-dark-fg-muted);
+    --xm-color-edge: var(--xm-dark-edge);
+    --xm-color-edge-strong: var(--xm-dark-edge-strong);
+    --xm-color-accent: var(--xm-dark-accent);
+    --xm-color-accent-strong: var(--xm-dark-accent-strong);
+    --xm-color-accent-fg: var(--xm-dark-accent-fg);
+    --xm-color-accent-soft: var(--xm-dark-accent-soft);
+    --xm-color-danger: var(--xm-dark-danger);
+    --xm-color-danger-fg: var(--xm-dark-danger-fg);
+    --xm-color-success: var(--xm-dark-success);
+    --xm-color-warning: var(--xm-dark-warning);
+    --xm-color-overlay: var(--xm-dark-overlay);
+    --xm-color-nav-surface: var(--xm-dark-nav-surface);
+    --xm-color-nav-edge: var(--xm-dark-nav-edge);
+    --xm-shadow-sm: var(--xm-shadow-sm-dark);
+    --xm-shadow-md: var(--xm-shadow-md-dark);
+  }
+}
+
+/* 暗色主题守卫二：显式选择。不加 :root 前缀是有意的——这样一个
+   `<div data-theme="dark">` 也能就地翻成暗色，Storybook 的暗色故事因此不必去
+   改 documentElement（改全局的故事会互相污染，截图对不上）。 */
 [data-theme="dark"] {
-  --xm-color-canvas: var(--xm-palette-gray-900);
-  --xm-color-surface: var(--xm-palette-gray-800);
-  --xm-color-surface-muted: #16202e;
-  --xm-color-fg: var(--xm-palette-gray-100);
-  --xm-color-fg-muted: #94a3b8;
-  --xm-color-edge: var(--xm-palette-gray-700);
-  --xm-color-accent: var(--xm-palette-blue-500);
-  --xm-color-accent-strong: var(--xm-palette-blue-600);
-  --xm-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
-  --xm-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5);
-  --xm-color-overlay: rgb(0 0 0 / 0.6);
+  --xm-color-canvas: var(--xm-dark-canvas);
+  --xm-color-surface: var(--xm-dark-surface);
+  --xm-color-surface-muted: var(--xm-dark-surface-muted);
+  --xm-color-fg: var(--xm-dark-fg);
+  --xm-color-fg-muted: var(--xm-dark-fg-muted);
+  --xm-color-edge: var(--xm-dark-edge);
+  --xm-color-edge-strong: var(--xm-dark-edge-strong);
+  --xm-color-accent: var(--xm-dark-accent);
+  --xm-color-accent-strong: var(--xm-dark-accent-strong);
+  --xm-color-accent-fg: var(--xm-dark-accent-fg);
+  --xm-color-accent-soft: var(--xm-dark-accent-soft);
+  --xm-color-danger: var(--xm-dark-danger);
+  --xm-color-danger-fg: var(--xm-dark-danger-fg);
+  --xm-color-success: var(--xm-dark-success);
+  --xm-color-warning: var(--xm-dark-warning);
+  --xm-color-overlay: var(--xm-dark-overlay);
+  --xm-color-nav-surface: var(--xm-dark-nav-surface);
+  --xm-color-nav-edge: var(--xm-dark-nav-edge);
+  --xm-shadow-sm: var(--xm-shadow-sm-dark);
+  --xm-shadow-md: var(--xm-shadow-md-dark);
 }

@@ -1,7 +1,7 @@
+import { PageHeader } from "@xingmang/ui-admin";
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { appApiConfig } from "../api/config";
-import { PageHeader } from "../components/PageHeader";
 
 /** 设置：平台治理段里「管平台自己」的那一页（ADMIN-IA 一、平台治理）。
  *

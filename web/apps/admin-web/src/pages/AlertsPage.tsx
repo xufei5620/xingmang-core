@@ -1,12 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { formatUtcTimestamp } from "@xingmang/ui-admin";
+import { formatUtcTimestamp, PageHeader } from "@xingmang/ui-admin";
 import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import { useState } from "react";
 import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
 import { ApiStateView } from "../components/ApiStateView";
 import { CreateSilenceDialog } from "../components/CreateSilenceDialog";
-import { PageHeader } from "../components/PageHeader";
 import {
   describeNotifyStatus,
   describeSeverity,

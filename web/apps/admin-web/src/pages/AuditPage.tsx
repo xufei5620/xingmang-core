@@ -1,9 +1,9 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
+import { PageHeader } from "@xingmang/ui-admin";
 import { Badge, Button, EmptyState } from "@xingmang/ui-primitives";
 import { Fragment, useState } from "react";
 import { AUDIT_PAGE_SIZE, listAuditEvents, type AuditEventItem } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
-import { PageHeader } from "../components/PageHeader";
 import {
   chainLinkBetween,
   describeChainLink,

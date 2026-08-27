@@ -1,63 +1,38 @@
-import { FreshnessBadge, FreshnessNote } from "@xingmang/ui-admin";
-import { cx } from "@xingmang/ui-primitives";
+import { MetricCard as MetricCardView } from "@xingmang/ui-admin";
 import type { ReactNode } from "react";
 import type { MetricItem } from "../api/platform";
 import { presentMetric } from "../lib/metrics";
 
 export interface MetricCardProps {
   item: MetricItem;
-  /** 趋势图槽位。做成插槽而不是卡片自己去拉历史：卡片因此仍然是纯展示组件，
-   *  渲染它不需要 QueryClient，趋势失败也天然溢不出来。 */
+  /** 趋势图槽位，透传给展示组件。 */
   trend?: ReactNode;
-  /** 平台入口槽位（「查看平台 →」）。理由同 trend：卡片不认识路由，
-   *  链接由调用方给——平台详情页自己就是终点，那里渲染卡片时不传。 */
+  /** 平台入口槽位（「查看平台 →」），透传给展示组件。 */
   link?: ReactNode;
 }
 
-/** 单个指标卡片。
+/** 指标卡的应用侧适配层：把 MetricItem 按本应用的口径解释成可显示的文本，
+ *  再交给 ui-admin 的展示组件画。
  *
- *  结构上把「数值」和「新鲜度」焊在一起：徽章与数据时间是卡片的固定部件，
- *  不是可选项——规格 §9.1 不允许出现一张只有数字的卡片。 */
+ *  拆成两层是因为这两件事的归属不同：**长什么样**属于设计系统（要能在
+ *  Storybook 里独立摆出八种状态，不能拖着 metric_key 注册表和金额格式化一起进去），
+ *  **一个 metric_key 该显示成什么**属于应用（口径来自各 connector 的契约，
+ *  见 lib/metrics）。合在一起的话，Storybook 里每摆一个状态都要先编一份
+ *  后端返回值，摆出来的却仍然只是 presentMetric 的输出。 */
 export function MetricCard({ item, trend, link }: MetricCardProps) {
   const shown = presentMetric(item);
   return (
-    <article className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4 shadow-sm">
-      <header className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h3 className="truncate text-sm font-medium text-fg" title={shown.label}>
-            {shown.label}
-          </h3>
-          <p className="truncate font-mono text-xs text-fg-muted" title={item.metric_key}>
-            {item.metric_key}
-          </p>
-        </div>
-        <FreshnessBadge freshness={item.freshness} />
-      </header>
-
-      <p
-        className={cx(
-          "text-2xl font-semibold tabular-nums",
-          // 没有可信数值时弱化：一个灰掉的「未初始化」不会被当成读数
-          shown.unavailable ? "text-fg-muted" : "text-fg",
-        )}
-      >
-        {shown.primary}
-      </p>
-      {shown.secondary ? <p className="text-xs text-fg-muted">{shown.secondary}</p> : null}
-
-      {/* 趋势画在数值下方而不是背景里：叠在数字后面的折线会降低数字的对比度，
-          而这里数字才是主角 */}
-      {trend ? <div className="min-h-10">{trend}</div> : null}
-
-      <div className="mt-auto border-t border-edge pt-2">
-        <FreshnessNote freshness={item.freshness} />
-        <p className="text-xs text-fg-muted">
-          来源 {item.source || "—"}
-          {item.watermark ? ` · 水位 ${item.watermark}` : null}
-        </p>
-        {/* 平台入口排在新鲜度之后：先让人看清这个数可不可信，再请他点进去 */}
-        {link ? <div className="mt-2">{link}</div> : null}
-      </div>
-    </article>
+    <MetricCardView
+      label={shown.label}
+      metricKey={item.metric_key}
+      value={shown.primary}
+      unavailable={shown.unavailable}
+      secondary={shown.secondary}
+      freshness={item.freshness}
+      source={item.source}
+      watermark={item.watermark}
+      trend={trend}
+      link={link}
+    />
   );
 }

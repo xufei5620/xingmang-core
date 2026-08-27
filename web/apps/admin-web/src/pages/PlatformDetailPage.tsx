@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { PageHeader } from "@xingmang/ui-admin";
 import { EmptyState, Tabs } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router";
@@ -8,7 +9,6 @@ import { ChannelsPanel } from "../components/ChannelsPanel";
 import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
 import { MetricCardGrid } from "../components/MetricCardGrid";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
-import { PageHeader } from "../components/PageHeader";
 import {
   findPlatform,
   normalizeTab,

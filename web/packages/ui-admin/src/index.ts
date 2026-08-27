@@ -1,10 +1,14 @@
 export { AdminShell, type AdminShellProps } from "./AdminShell";
+export { ContextStrip, type ContextCrumb, type ContextStripProps } from "./ContextStrip";
+export { MetricCard, type MetricCardProps } from "./MetricCard";
 export {
   NavSection,
   NavItemDisabled,
+  navItemClass,
   type NavSectionProps,
   type NavItemDisabledProps,
 } from "./Nav";
+export { PageHeader, type PageHeaderProps } from "./PageHeader";
 export {
   FreshnessBadge,
   FreshnessNote,
