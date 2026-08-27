@@ -11,6 +11,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
@@ -70,6 +71,34 @@ type Config struct {
 	// 而不是在这里现造：Provider 的选择（env/SOPS/Vault）是部署决定，
 	// 不是任务决定（ADR-014）。fake 模式用不到它。
 	Sub2APISecrets secrets.SecretProvider
+
+	// AlertEvaluateEnabled 决定是否注册告警评估任务（XM-0033）。
+	//
+	// 与 Sub2APISyncEnabled 同样的零值纪律：用 Config 字面量构造的调用方
+	// 必须显式打开，DefaultConfig 把它打开。它同时是这条告警链路的停用
+	// 开关（宪法 26 条）——关掉之后告警不会假装正常，页面上的告警会停在
+	// 最后一次评估的状态，last_seen_at 不再前进。
+	AlertEvaluateEnabled bool
+	// AlertEvaluateInterval 是评估周期，默认 DefaultAlertEvaluateInterval。
+	AlertEvaluateInterval time.Duration
+	// AlertEvaluateRunOnStart 让进程起来就先评估一次，而不是干等一个周期。
+	AlertEvaluateRunOnStart bool
+	// AlertEvaluateRunID 仅供集成测试隔离，生产必须留空——留空才让所有副本
+	// 共享同一条唯一性记录，同一个周期只评估一次、只投递一次。
+	AlertEvaluateRunID string
+	// AlertTelegramBotRef 是 Telegram Bot Token 的引用（secret://<scope>/<name>）。
+	// 本层只校验引用的**形状**，不解析出任何明文；明文由 AlertSecrets 在
+	// 构造 Bot API URL 的那一瞬才出现（ADR-014、宪法 7 条）。
+	AlertTelegramBotRef string
+	// AlertTelegramChatID 是投递目标会话。它不是秘密。
+	AlertTelegramChatID string
+	// AlertWebhookURL 是自建投递端点，必须 https。
+	AlertWebhookURL string
+	// AlertSecrets 解析 AlertTelegramBotRef。装配在进程入口（cmd/）。
+	AlertSecrets secrets.SecretProvider
+	// AlertBalanceThresholdMinorUnits 是渠道余额告警阈值（最小货币单位，
+	// 宪法 13 条：金额禁止 float）。零值回落到 alerts 包的默认值。
+	AlertBalanceThresholdMinorUnits int64
 }
 
 // DefaultConfig returns the safe local-development baseline.
@@ -90,6 +119,13 @@ func DefaultConfig() Config {
 		Sub2APIMode:           Sub2APIModeFake,
 		Sub2APIInstanceID:     DefaultSub2APIInstanceID,
 		Sub2APIRequestTimeout: DefaultSub2APIRequestTimeout,
+		// 告警默认就跑：Foundation-A 的退出条件之一是「能触发一条真实告警」
+		// （规格 §22.2），而一个默认关闭的告警系统在需要它的那天多半还是关的。
+		// 没配投递渠道时它照常评估落库，只是每轮打一条 warn 说没投出去。
+		AlertEvaluateEnabled:            true,
+		AlertEvaluateInterval:           DefaultAlertEvaluateInterval,
+		AlertEvaluateRunOnStart:         true,
+		AlertBalanceThresholdMinorUnits: alerts.DefaultBalanceThresholdMinorUnits,
 	}
 }
 
@@ -110,6 +146,14 @@ func (c Config) normalized() Config {
 	if c.Sub2APIRequestTimeout <= 0 {
 		// 漏填超时回落到默认值，绝不能变成「没有超时」（规格 §18.1-4）
 		c.Sub2APIRequestTimeout = defaults.Sub2APIRequestTimeout
+	}
+	if c.AlertEvaluateInterval == 0 {
+		c.AlertEvaluateInterval = defaults.AlertEvaluateInterval
+	}
+	if c.AlertBalanceThresholdMinorUnits <= 0 {
+		// 零或负阈值等于「永不触发」，但看起来像是配了一个阈值。
+		// 回落到默认值而不是照单全收——静默失效的护栏比没有护栏更危险。
+		c.AlertBalanceThresholdMinorUnits = defaults.AlertBalanceThresholdMinorUnits
 	}
 	if strings.TrimSpace(string(c.Sub2APIMode)) == "" {
 		c.Sub2APIMode = defaults.Sub2APIMode
@@ -189,6 +233,14 @@ func (c Config) validate() error {
 			return fmt.Errorf("sub2api credential ref: %w", err)
 		}
 	}
+	if c.AlertEvaluateEnabled && c.AlertEvaluateInterval < time.Second {
+		return fmt.Errorf("alert evaluate interval %s is below River's one-second minimum", c.AlertEvaluateInterval)
+	}
+	if c.AlertEvaluateRunID != "" && c.Environment == "production" {
+		// 与 Sub2APISyncRunID 同一条理由：RunID 只服务于集成测试隔离。
+		// 生产配上它等于给每个副本发一张免签，同一条告警会被投递 N 次。
+		return fmt.Errorf("alert evaluate run ID must not be set in production")
+	}
 	return nil
 }
 
@@ -255,6 +307,65 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			&river.PeriodicJobOpts{
 				ID:         Sub2APISyncJobKind,
 				RunOnStart: cfg.Sub2APISyncRunOnStart,
+			},
+		))
+	}
+
+	if cfg.AlertEvaluateEnabled {
+		// 渠道在这里装配。配错（ref 拼错、URL 不是 https、只配了一半）
+		// 会让进程起不来——理由见 newAlertNotifier 的注释：一个没建起来的
+		// 告警渠道不会有任何后续痕迹，只会在真出事那天才被发现。
+		notifier, err := newAlertNotifier(AlertNotifierConfig{
+			TelegramBotRef: cfg.AlertTelegramBotRef,
+			TelegramChatID: cfg.AlertTelegramChatID,
+			WebhookURL:     cfg.AlertWebhookURL,
+			Secrets:        cfg.AlertSecrets,
+			Logger:         cfg.Logger,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("告警投递渠道: %w", err)
+		}
+		if notifier.Len() == 0 {
+			// 「一个渠道都没配」是允许的（本地开发、刚起的环境），但必须在
+			// 启动时就说出来，而不是等第一条告警来的时候才在某一行 warn 里
+			// 一闪而过。规格 §9.4 的闭环在这个状态下是断的。
+			cfg.Logger.Warn("alert_notifier_not_configured",
+				slog.String("module", "platform.jobs"),
+				slog.String("environment", cfg.Environment),
+				slog.String("error_code", "no_notifier_configured"),
+				slog.String("hint", "告警只会落库，不会通知任何人；配置 XM_ALERT_TELEGRAM_BOT_REF + XM_ALERT_TELEGRAM_CHAT_ID 或 XM_ALERT_WEBHOOK_URL"))
+		}
+
+		// 「采集周期」直接取 Sub2API 的同步周期，而不是再开一个可配项：
+		// R1b 的「陈旧持续 ≥2 采集周期」里的采集周期，指的就是这条链路的
+		// 采集节奏。多一个变量只会让两者漂开，然后规则按一个不存在的节奏
+		// 去判断持续时间。
+		evaluator := alerts.NewEvaluator(ops.NewStore(pool), alerts.RuleConfig{
+			CollectionInterval:         cfg.Sub2APISyncInterval,
+			BalanceThresholdMinorUnits: cfg.AlertBalanceThresholdMinorUnits,
+		})
+		river.AddWorker(workers, NewAlertEvaluateWorker(AlertEvaluateOptions{
+			Logger:      cfg.Logger,
+			Environment: cfg.Environment,
+			Reconciler: alerts.NewReconciler(alerts.ReconcilerOptions{
+				Store:     alerts.NewStore(pool),
+				Evaluator: evaluator,
+				Notifier:  notifier,
+				Logger:    cfg.Logger,
+			}),
+		}))
+		periodic = append(periodic, river.NewPeriodicJob(
+			river.PeriodicInterval(cfg.AlertEvaluateInterval),
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := AlertEvaluateArgs{RunID: cfg.AlertEvaluateRunID}
+				opts := args.InsertOpts()
+				// 唯一性周期跟随配置的节奏；参数层的默认值只服务于临时插入。
+				opts.UniqueOpts.ByPeriod = cfg.AlertEvaluateInterval
+				return args, &opts
+			},
+			&river.PeriodicJobOpts{
+				ID:         AlertEvaluateJobKind,
+				RunOnStart: cfg.AlertEvaluateRunOnStart,
 			},
 		))
 	}

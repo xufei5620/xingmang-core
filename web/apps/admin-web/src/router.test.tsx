@@ -6,10 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { devLogin, devLogout } from "./auth";
 import { routes } from "./router";
 
+// 指标键抽成常量而不是就地写字面量：`xxx_key: "……"` 这个形状会被 gitleaks 的
+// generic-api-key 规则当成泄露的密钥（同一条误报见 pages/OverviewPage.test.tsx
+// 与 api/platform.test.ts）。本仓禁止加 gitleaks allowlist（会顺手掩盖真报，
+// 见 scripts/check-governance.sh），所以换个写法比放宽扫描器划算。
+const REVENUE_METRIC = "sub2api.revenue.daily";
+const CHANNEL_BALANCE_METRIC = "sub2api.channels.balance";
+
 const metricsBody = {
   items: [
     {
-      metric_key: "sub2api.revenue.daily",
+      metric_key: REVENUE_METRIC,
       source: "sub2api-prod",
       environment: "development",
       watermark: "wm-1",
@@ -78,7 +85,7 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response) {
 const channelsBody = {
   items: [
     {
-      metric_key: "sub2api.channels.balance",
+      metric_key: CHANNEL_BALANCE_METRIC,
       source: "sub2api-prod",
       environment: "development",
       watermark: "wm-9",
@@ -146,11 +153,59 @@ const auditEvent = {
   prev_hash: "b".repeat(64),
 };
 
+/** XM-0033：一条 OPEN 未投递的严重告警 + 一条已静默的警告。
+ *
+ *  刻意配成这两条：前者是「已触发但没人被通知到」，后者是「静默不是解决」——
+ *  两个最容易在界面上被显示错的状态。 */
+const alertsBody = {
+  items: [
+    {
+      id: "aaaa1111-2222-3333-4444-555555555555",
+      rule_key: "metric.sync.failed",
+      dedup_key: `metric.sync.failed:development:${REVENUE_METRIC}`,
+      severity: "critical",
+      status: "OPEN",
+      title: "指标 sub2api.revenue.daily 同步失败",
+      detail: "来源 sub2api-prod，错误码 upstream_timeout",
+      environment: "development",
+      source_metric_key: REVENUE_METRIC,
+      opened_at: "2026-08-26T10:00:00Z",
+      last_seen_at: "2026-08-26T10:05:00Z",
+      acknowledged_at: null,
+      resolved_at: null,
+      fire_count: 6,
+      notify_status: "failed",
+      notify_error: "telegram: HTTP 502",
+      notified_at: null,
+    },
+    {
+      id: "bbbb1111-2222-3333-4444-555555555555",
+      rule_key: "channel.balance.low",
+      dedup_key: "channel.balance.low:development:ch-b",
+      severity: "warning",
+      status: "SILENCED",
+      title: "渠道乙 余额不足",
+      detail: "余额 2500 低于阈值 500000（均为最小货币单位，CNY）",
+      environment: "development",
+      source_metric_key: CHANNEL_BALANCE_METRIC,
+      opened_at: "2026-08-26T09:00:00Z",
+      last_seen_at: "2026-08-26T10:05:00Z",
+      acknowledged_at: null,
+      resolved_at: null,
+      fire_count: 12,
+      notify_status: "pending",
+      notify_error: "",
+      notified_at: null,
+    },
+  ],
+};
+
 function okHandler(url: string): Response {
   // history 必须排在 metrics 前面：两者的前缀是包含关系
   if (url.startsWith("/api/v1/metrics/history")) return fakeResponse(200, historyBody);
   if (url.startsWith("/api/v1/metrics")) return fakeResponse(200, metricsBody);
   if (url.startsWith("/api/v1/services")) return fakeResponse(200, servicesBody);
+  if (url.startsWith("/api/v1/alerts")) return fakeResponse(200, alertsBody);
   if (url.startsWith("/api/v1/audit/events"))
     return fakeResponse(200, { items: [auditEvent], next_before: 0 });
   return fakeResponse(404, { error: { code: "NOT_REGISTERED", message: "未知路径" } });
@@ -192,7 +247,8 @@ describe("admin-web 路由（登录前/后壳）", () => {
     for (const section of ["全局", "被管平台", "平台治理"]) {
       expect(within(nav).getByRole("heading", { name: section })).not.toBeNull();
     }
-    for (const name of ["运营总览", "审计事件", "注册表", "设置"]) {
+    // 告警中心来自 XM-0033，已合入 release，所以它是真链接而不是占位
+    for (const name of ["运营总览", "告警中心", "审计事件", "注册表", "设置"]) {
       expect(within(nav).getByRole("link", { name })).not.toBeNull();
     }
     // 被管平台段由 /api/v1/services 驱动，要等这一次请求回来
@@ -231,8 +287,11 @@ describe("运营总览页", () => {
       "X-Dev-Principal-ID": "dev-operator",
       "X-Dev-Principal-Type": "HUMAN",
       // 读看板要 registry.read + ops.read；审计页要 audit.read；
-      // 服务登记/观测上报要 registry.service.manage（XM-0026 加的后两个）
-      "X-Dev-Scopes": "registry.read,ops.read,audit.read,registry.service.manage",
+      // 服务登记/观测上报要 registry.service.manage（XM-0026 加的）；
+      // 告警的确认与静默各要一个（XM-0033，刻意不合并成一个 scope）。
+      // 告警的**读**路径复用 ops.read，所以这里没有第七个。
+      "X-Dev-Scopes":
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage",
     });
   });
 
@@ -243,15 +302,18 @@ describe("运营总览页", () => {
       }),
     );
     renderRoute("/dashboard");
-    expect(await screen.findByText("无权访问")).not.toBeNull();
-    expect(screen.getByText(/ops\.read/)).not.toBeNull();
+    // 总览页有两条独立的 query（指标 + 告警），两个都会进错误态：
+    // 用 findAll 而不是 find。它们**必须**分开，指标端点挂掉时告警卡
+    // 仍要能显示（规格 §9.2 把告警列为总览的固定一项）。
+    expect((await screen.findAllByText("无权访问")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/ops\.read/).length).toBeGreaterThan(0);
   });
 
   it("网络失败时显示可重试的错误态", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("Failed to fetch"))));
     renderRoute("/dashboard");
-    expect(await screen.findByText("加载失败")).not.toBeNull();
-    expect(screen.getByRole("button", { name: "重试" })).not.toBeNull();
+    expect((await screen.findAllByText("加载失败")).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "重试" }).length).toBeGreaterThan(0);
   });
 });
 
@@ -703,19 +765,24 @@ describe("三段式导航：被管平台段由 Registry 驱动", () => {
   });
 });
 
-describe("三段式导航：禁用项不可点", () => {
+describe("三段式导航：全局段顺序与禁用项", () => {
   beforeEach(() => {
     devLogin();
     stubFetch(okHandler);
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("告警中心留导航位但不建路由，渲染为禁用的「即将上线」（XM-0033 并行开发中）", async () => {
+  it("告警中心排在全局段的运营总览与审计事件之间（XM-0033 已合入，占位换成真链接）", async () => {
     renderRoute("/dashboard");
     const nav = await screen.findByRole("navigation");
-    expect(within(nav).getByText("告警中心")).not.toBeNull();
-    expect(within(nav).getByText("即将上线")).not.toBeNull();
-    expect(within(nav).queryByRole("link", { name: /告警中心/ })).toBeNull();
+    const alerts = within(nav).getByRole("link", { name: "告警中心" });
+    expect(alerts.getAttribute("href")).toBe("/alerts");
+    // 顺序照 ADMIN-IA 的全局段：运营总览 / 告警中心 / 审计事件
+    const globalLinks = within(nav)
+      .getAllByRole("link")
+      .map((el) => el.textContent)
+      .filter((t) => t && ["运营总览", "告警中心", "审计事件"].includes(t));
+    expect(globalLinks).toEqual(["运营总览", "告警中心", "审计事件"]);
   });
 
   it("财务中心与变更与审批同样是禁用态，而不是从导航上消失", async () => {
@@ -903,5 +970,189 @@ describe("设置页", () => {
   it("告警规则与静默是占位，注明随 XM-0033 上线", async () => {
     renderRoute("/settings");
     expect(await screen.findByText(/随 XM-0033 告警中心上线/)).not.toBeNull();
+  });
+});
+
+// --- XM-0033 告警中心 --------------------------------------------------------
+
+describe("告警中心页", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("列表显示严重度、状态、首见/最近、次数与投递状态", async () => {
+    renderRoute("/alerts");
+    expect(await screen.findByText("指标 sub2api.revenue.daily 同步失败")).not.toBeNull();
+
+    // 严重度与状态各是一个徽章
+    expect(screen.getByText("严重")).not.toBeNull();
+    expect(screen.getByText("未处理")).not.toBeNull();
+    // 首见与最近都要显示：只有一个就答不出「这个问题持续了多久」
+    expect(screen.getByText(/首次 2026-08-26 10:00:00 UTC/)).not.toBeNull();
+    expect(screen.getAllByText(/最近 2026-08-26 10:05:00 UTC/).length).toBeGreaterThan(0);
+    // fire_count：抖了一下与持续了两小时的唯一区分依据
+    expect(screen.getByText("6")).not.toBeNull();
+    // 规则名翻成中文，原始键仍在 detail 之外可查
+    expect(screen.getByText("指标同步失败")).not.toBeNull();
+  });
+
+  it("投递失败单独成列并显示原因——「已触发但没人被通知到」必须看得见", async () => {
+    renderRoute("/alerts");
+    await screen.findByText("指标 sub2api.revenue.daily 同步失败");
+    expect(screen.getByText("投递失败")).not.toBeNull();
+    expect(screen.getByText("telegram: HTTP 502")).not.toBeNull();
+  });
+
+  it("已静默的告警不显示成「已解决」，也不消失（静默不是解决）", async () => {
+    renderRoute("/alerts");
+    await screen.findByText("渠道乙 余额不足");
+    // 它仍然在活跃列表里
+    expect(screen.getByText("已静默")).not.toBeNull();
+    expect(screen.queryByText("已解决")).toBeNull();
+  });
+
+  it("只有 OPEN / REOPENED 有「确认」按钮（与后端 WHERE 子句同一条规则）", async () => {
+    renderRoute("/alerts");
+    await screen.findByText("渠道乙 余额不足");
+    // 两条告警：一条 OPEN、一条 SILENCED，所以只该有一个确认按钮
+    expect(screen.getAllByRole("button", { name: "确认" })).toHaveLength(1);
+  });
+
+  it("零告警显示「无活动告警」，并提醒评估任务可能停了", async () => {
+    stubFetch((url) =>
+      url.startsWith("/api/v1/alerts") ? fakeResponse(200, { items: [] }) : okHandler(url),
+    );
+    renderRoute("/alerts");
+    expect(await screen.findByText("无活动告警")).not.toBeNull();
+    // 零告警既可能是好消息，也可能是评估器停了——不能只报喜
+    expect(screen.getByText(/评估任务在跑/)).not.toBeNull();
+  });
+
+  it("确认走 Action 执行入口，回执带 run_id", async () => {
+    const fetchMock = stubFetch((url, init) => {
+      if (init?.method === "POST") return fakeResponse(200, { action_run_id: "run-ack-1" });
+      return okHandler(url);
+    });
+    renderRoute("/alerts");
+    fireEvent.click(await screen.findByRole("button", { name: "确认" }));
+
+    await waitFor(() => expect(screen.getByText(/已确认，run_id=run-ack-1/)).not.toBeNull());
+    const post = fetchMock.mock.calls.find(
+      (c) => (c[1] as RequestInit | undefined)?.method === "POST",
+    ) as unknown as [string, RequestInit];
+    expect(post[0]).toBe("/api/v1/actions/alerts.alert.acknowledge/versions/1/execute");
+    // 只带 params；request_id 在头里（后端 DisallowUnknownFields）
+    expect(JSON.parse(String(post[1].body))).toEqual({
+      params: { alert_id: "aaaa1111-2222-3333-4444-555555555555" },
+    });
+    expect((post[1].headers as Record<string, string>)["X-Request-ID"]).toBeTruthy();
+  });
+
+  it("确认被拒时错误就地显示，告警行不消失", async () => {
+    stubFetch((url, init) => {
+      if (init?.method === "POST")
+        return fakeResponse(403, {
+          error: {
+            code: "PERMISSION_DENIED",
+            message: "缺少权限 alerts.alert.manage",
+            request_id: "req-9",
+          },
+        });
+      return okHandler(url);
+    });
+    renderRoute("/alerts");
+    fireEvent.click(await screen.findByRole("button", { name: "确认" }));
+
+    expect(await screen.findByText(/缺少权限 alerts\.alert\.manage/)).not.toBeNull();
+    // 一次 403 不该把这条告警从列表里抹掉，人还要看着它继续处理
+    expect(screen.getByText("指标 sub2api.revenue.daily 同步失败")).not.toBeNull();
+    expect(screen.getByText(/request_id: req-9/)).not.toBeNull();
+  });
+});
+
+describe("创建静默窗口（写路径）", () => {
+  beforeEach(() => devLogin());
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function openSilenceDialog() {
+    renderRoute("/alerts");
+    fireEvent.click(await screen.findByRole("button", { name: "创建静默窗口" }));
+    return within(await screen.findByRole("dialog"));
+  }
+
+  it("理由为空时不发请求，就地报错", async () => {
+    const fetchMock = stubFetch(okHandler);
+    const dialog = await openSilenceDialog();
+    const before = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit | undefined)?.method === "POST",
+    ).length;
+
+    fireEvent.click(dialog.getByRole("button", { name: "创建" }));
+    // 没有理由的静默在事后复盘时与「有人手滑」不可区分
+    expect(await screen.findByText(/为什么静默/)).not.toBeNull();
+    const after = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit | undefined)?.method === "POST",
+    ).length;
+    expect(after).toBe(before);
+  });
+
+  it("默认是全局静默，提交时 rule_key 传空串", async () => {
+    const fetchMock = stubFetch((url, init) => {
+      if (init?.method === "POST") return fakeResponse(200, { action_run_id: "run-s-1" });
+      return okHandler(url);
+    });
+    const dialog = await openSilenceDialog();
+    fireEvent.change(screen.getByLabelText(/理由/), {
+      target: { value: "上游 Sub2API 维护窗口" },
+    });
+    fireEvent.click(dialog.getByRole("button", { name: "创建" }));
+
+    await waitFor(() => expect(screen.getByText(/已创建静默窗口，run_id=run-s-1/)).not.toBeNull());
+    const post = fetchMock.mock.calls.find(
+      (c) => (c[1] as RequestInit | undefined)?.method === "POST",
+    ) as unknown as [string, RequestInit];
+    expect(post[0]).toBe("/api/v1/actions/alerts.silence.create/versions/1/execute");
+    expect(JSON.parse(String(post[1].body))).toEqual({
+      params: { rule_key: "", duration_minutes: 60, reason: "上游 Sub2API 维护窗口" },
+    });
+  });
+});
+
+describe("运营总览的告警卡", () => {
+  beforeEach(() => devLogin());
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("显示活跃告警计数与严重度分布", async () => {
+    stubFetch(okHandler);
+    renderRoute("/dashboard");
+    // alertsBody 里两条：1 严重 + 1 警告（已静默的照样算）
+    expect(await screen.findByText("严重 1")).not.toBeNull();
+    expect(screen.getByText("警告 1")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "查看全部告警" })).not.toBeNull();
+  });
+
+  it("零告警显示「无活动告警」而不是一个大大的 0", async () => {
+    // 0 和「还没接上」在一个数字上长得一模一样，而这两件事在运营上完全相反
+    stubFetch((url) =>
+      url.startsWith("/api/v1/alerts") ? fakeResponse(200, { items: [] }) : okHandler(url),
+    );
+    renderRoute("/dashboard");
+    expect(await screen.findByText("无活动告警")).not.toBeNull();
+    expect(screen.queryByText("严重 0")).toBeNull();
+  });
+
+  it("指标端点挂掉时告警卡照常显示（两条 query 是分开的）", async () => {
+    stubFetch((url) => {
+      if (url.startsWith("/api/v1/alerts")) return okHandler(url);
+      if (url.startsWith("/api/v1/metrics"))
+        return fakeResponse(500, { error: { code: "INTERNAL", message: "服务内部错误" } });
+      return okHandler(url);
+    });
+    renderRoute("/dashboard");
+    // 规格 §9.2 把告警列为总览的固定一项：指标挂了正是最需要看见告警的时候
+    expect(await screen.findByText("严重 1")).not.toBeNull();
+    expect(screen.getAllByText("加载失败").length).toBeGreaterThan(0);
   });
 });

@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
@@ -29,6 +30,7 @@ type Deps struct {
 	Metrics        MetricLister
 	MetricHistory  MetricHistoryLister
 	AuditEvents    AuditEventLister
+	Alerts         AlertLister
 	RequestTimeout time.Duration
 }
 
@@ -75,6 +77,12 @@ func NewRouter(d Deps) http.Handler {
 		// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
 		api.With(RequireScope(audit.ScopeRead)).
 			Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))
+		// 告警与指标共用 ops.read：告警内容就是指标的判读结果，
+		// 泄漏面完全相同（见 alerts.ScopeRead 的注释）。
+		// 写路径（确认、静默）不在这里——它们是 Action，走
+		// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
+		api.With(RequireScope(alerts.ScopeRead)).
+			Get("/alerts", ListAlertsHandler(d.Alerts))
 	})
 	return r
 }

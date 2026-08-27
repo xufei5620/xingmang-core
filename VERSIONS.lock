@@ -42,6 +42,12 @@ postgres.verified_at = 2026-08-26
 keycloak.image     = quay.io/keycloak/keycloak:26.7.2
 keycloak.digest    = 待XM-0007部署时锁定
 keycloak.verified_at = 2026-08-26
+# uptime-kuma 是外部看门狗（XM-0033，deploy/watchdog/）。它**不属于平台栈**，
+# 部署在异故障域的另一台机器上（宪法 23 条），但版本纪律一视同仁。
+# digest 为 2026-08-27 docker manifest inspect（amd64 平台清单）实际值。
+uptime-kuma.image     = docker.io/louislam/uptime-kuma:1.23.16
+uptime-kuma.digest    = sha256:b4c3a4d186b4612b3a7bbb39c56a634626276615c21871c837a86e4a43d8e047
+uptime-kuma.verified_at = 2026-08-27
 
 [github-actions]
 actions/checkout        = fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5

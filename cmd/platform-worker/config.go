@@ -75,6 +75,45 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		}
 		config.Sub2APISyncInterval = interval
 	}
+
+	// XM-0033：告警评估与投递（规格 §9.3 / §9.4）。
+	//
+	// 投递渠道的三个变量只**读进配置、不解析**：Bot Token 只经 CredentialRef
+	// （ADR-014、宪法 7 条），明文由 SecretProvider 在构造 Bot API URL 的
+	// 那一瞬才出现。这里与 jobs.Config 都只看见引用本身。
+	config.AlertTelegramBotRef = strings.TrimSpace(getenv("XM_ALERT_TELEGRAM_BOT_REF"))
+	config.AlertTelegramChatID = strings.TrimSpace(getenv("XM_ALERT_TELEGRAM_CHAT_ID"))
+	config.AlertWebhookURL = strings.TrimSpace(getenv("XM_ALERT_WEBHOOK_URL"))
+	if value := getenv("XM_ALERT_EVALUATE_ENABLED"); value != "" {
+		// 告警链路的停用开关（宪法 26 条）。关掉之后告警页不会假装正常：
+		// 已有告警的 last_seen_at 停止前进，新问题不会被发现——这是一个
+		// 显式的、看得出来的降级，不是静默失效。
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("alert evaluate enabled: %w", err)
+		}
+		config.AlertEvaluateEnabled = enabled
+	}
+	if value := getenv("XM_ALERT_EVALUATE_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("alert evaluate interval: %w", err)
+		}
+		config.AlertEvaluateInterval = interval
+	}
+	if value := strings.TrimSpace(getenv("XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS")); value != "" {
+		// 单位是**最小货币单位**的整数（宪法 13 条：金额禁止 float）。
+		// ParseInt 而不是 ParseFloat：一个写成 "5000.5" 的阈值说明写的人
+		// 搞错了口径，此时报错比四舍五入成一个谁都没想要的值好。
+		threshold, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("alert balance threshold（须为最小货币单位的整数）: %w", err)
+		}
+		if threshold <= 0 {
+			return jobs.Config{}, fmt.Errorf("alert balance threshold 必须为正，got %d", threshold)
+		}
+		config.AlertBalanceThresholdMinorUnits = threshold
+	}
 	return config, nil
 }
 

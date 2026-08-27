@@ -1,0 +1,54 @@
+# 星芒统一控制平台 —— 外部看门狗（XM-0033，规格 §9.4、宪法 23 条）
+#
+# ⚠️ 这个栈**不属于**平台。它必须跑在另一个故障域里——另一台机器、
+#    另一个机房、另一个云账号。跟平台跑在同一台宿主上等于没有看门狗：
+#    那台机器掉电时，唯一会告诉你的东西也跟着掉电了。
+#
+# ⚠️ 它的通知链也**不经过平台**：独立的 Telegram Bot、独立的收件人。
+#    复用平台那个 Bot 的后果是——平台挂了，看门狗发现了，然后发不出去。
+#    规格 §9.4 的原话：「外部看门狗通知不得经过星芒平台」。
+#
+# 用法与配置见同目录 README.md。刻意**不**并进 deploy/compose/launch.yaml：
+# 一条 `docker compose -f launch.yaml up` 就能把看门狗和被监控对象一起拉起来
+# 的设计，本身就是在鼓励把它们放在同一台机器上。
+#
+# 版本纪律（宪法 §4 / VERSIONS.lock）：镜像钉到具体版本 + digest，禁止 latest。
+name: xingmang-watchdog
+
+services:
+  uptime-kuma:
+    # digest 与 VERSIONS.lock 的 uptime-kuma.digest 一致（amd64 平台清单，
+    # 2026-08-27 由 docker manifest inspect 实际取得）。
+    # tag 会被上游重新指向，digest 不会——一个被悄悄换掉的看门狗镜像，
+    # 是所有监控里最不该出现的东西。
+    image: docker.io/louislam/uptime-kuma:1.23.16@sha256:b4c3a4d186b4612b3a7bbb39c56a634626276615c21871c837a86e4a43d8e047
+    platform: linux/amd64
+    # unless-stopped 而不是 always：手工停掉它是一个**决定**，
+    # 重启宿主时不该把这个决定悄悄推翻。
+    restart: unless-stopped
+    volumes:
+      # 监控配置、历史与通知渠道都在这个卷里。备份它——重建看门狗时
+      # 最贵的不是容器，是那份「监控哪些东西、告诉谁」的配置。
+      - uptime-kuma-data:/app/data
+    ports:
+      # 默认绑回环：看门狗的控制台能看到平台的内部地址与状态，
+      # 不该因为一个默认值就开到公网。远程访问走 SSH 隧道，
+      # 或者在前面加一层带 TLS 与鉴权的入口（见 README「暴露方式」）。
+      - "${WATCHDOG_BIND:-127.0.0.1}:${WATCHDOG_PORT:-3001}:3001"
+    environment:
+      # 容器内时区固定 UTC，与平台一致（宪法 14 条）。
+      # 看门狗的时间戳要能和平台日志逐条对上，差 8 小时的两份时间线
+      # 在复盘时比没有时间线更糟。
+      TZ: UTC
+    healthcheck:
+      # Uptime Kuma 自带的健康检查脚本。看门狗自己也会挂，
+      # 而「看门狗挂了」没有第二个看门狗会发现——所以至少让 Docker
+      # 能把它重新拉起来（见 README「谁来看着看门狗」）。
+      test: ["CMD-SHELL", "extra/healthcheck || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  uptime-kuma-data:

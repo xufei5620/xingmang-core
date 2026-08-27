@@ -25,6 +25,39 @@ type ActionActionRun struct {
 	FinishedAt    pgtype.Timestamptz
 }
 
+type AlertsAlert struct {
+	ID              uuid.UUID
+	RuleKey         string
+	DedupKey        string
+	Severity        string
+	Status          string
+	Title           string
+	Detail          string
+	Environment     string
+	OpenedAt        pgtype.Timestamptz
+	AcknowledgedAt  pgtype.Timestamptz
+	ResolvedAt      pgtype.Timestamptz
+	LastSeenAt      pgtype.Timestamptz
+	FireCount       int32
+	SourceMetricKey string
+	NotifyStatus    string
+	NotifyError     string
+	NotifiedAt      pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
+type AlertsAlertSilence struct {
+	ID          uuid.UUID
+	RuleKey     string
+	Environment string
+	Reason      string
+	StartsAt    pgtype.Timestamptz
+	EndsAt      pgtype.Timestamptz
+	CreatedBy   string
+	CreatedAt   pgtype.Timestamptz
+}
+
 type AuditAuditEvent struct {
 	ID                       uuid.UUID
 	Sequence                 int64

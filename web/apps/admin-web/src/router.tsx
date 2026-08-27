@@ -11,6 +11,7 @@ import {
   type PlatformEntry,
   type RegistryState,
 } from "./lib/platforms";
+import { AlertsPage } from "./pages/AlertsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { LoginPage } from "./pages/LoginPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -110,10 +111,12 @@ function ShellNav() {
         <NavLink to="/dashboard" className={navLinkClass}>
           运营总览
         </NavLink>
-        {/* 告警中心的页面与路由属于 XM-0033，正在并行开发。这里只占位、不建
-            路由：两条分支各建一个 /alerts 合并时必然打架，而干脆不写又会让
-            「这块马上就有」从导航上消失。合并时用对方的 NavLink 换掉这一行 */}
-        <NavItemDisabled label="告警中心" hint="即将上线" title="告警中心随 XM-0033 上线" />
+        {/* 告警中心归 XM-0033，合并 release 时已上线，占位换成了真链接。
+            位置照 ADMIN-IA 的全局段顺序（运营总览 / 告警中心 / 审计事件），
+            而不是 XM-0033 在旧扁平导航里的那个位置 */}
+        <NavLink to="/alerts" className={navLinkClass}>
+          告警中心
+        </NavLink>
         <NavLink to="/audit" className={navLinkClass}>
           审计事件
         </NavLink>
@@ -174,6 +177,9 @@ export const routes = [
       // 路径保持 /dashboard 与 /audit 不变：XM-0006 起就是这两个地址，
       // 改了会打断已有书签
       { path: "dashboard", Component: OverviewPage },
+      // 告警中心来自 XM-0033；/channels 与 /services 不再挂页面，
+      // 改为下面的重定向（ADMIN-IA 三、迁移映射）
+      { path: "alerts", Component: AlertsPage },
       { path: "audit", Component: AuditPage },
       { path: "platforms/:serviceType", Component: PlatformDetailPage },
       { path: "registry", Component: RegistryPage },
