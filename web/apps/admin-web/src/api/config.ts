@@ -42,6 +42,9 @@ export const DEFAULT_SCOPES = [
   // （internal/platform/requestlog/permissions.go）。
   "request.read",
   "request.content.read",
+  // XM-0046 用户管理。**不复用 ops.read**：那看到的是聚合数字，
+  // 这是逐用户的资金明细（internal/platform/platformusers/permissions.go）。
+  "platform.users.read",
 ];
 
 function parseScopes(raw: string | undefined): string[] {

@@ -75,6 +75,13 @@ func looksLikePlatformScope(role string) bool {
 //     要授予就用 XM_OIDC_ROLE_SCOPES 显式配一个专门的角色。
 //     `resolver_test.go` 的 TestDefaultRoleScopeMapIsConservative 钉住了这个决定。
 //
+//  5. **staff 不含 platform.users.read**（XM-0046）。与第 3 条同一档：
+//     它是**逐用户**的资金明细（余额、区间充值、区间消费、最后活跃），
+//     即便邮箱已在契约层打码，一份逐用户清单也足以还原一家客户的经营规模。
+//     ops.read 看到的是聚合数字，这是逐条——「看板角色拿到 ops.read 不应顺带
+//     看见全平台客户的账」。给 admin，是因为它与 request.read 泄漏面相当
+//     （一个回答「他用了什么」，一个回答「他花了多少」）。
+//
 // 结果：CR-0001 执行完当天切过来，员工能登录、能看服务清单与运营指标；审计页、
 // 请求列表、请求正文与写操作都会 403，直到有人显式授权。
 // Fail Closed 比「先放开再收」便宜得多。
@@ -92,6 +99,8 @@ func DefaultRoleScopeMap() map[string][]string {
 			// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。
 			// 见上面第 4 条。
 			"request.read",
+			// XM-0046：逐用户资金清单，与 request.read 同一档（见上面第 5 条）
+			"platform.users.read",
 		},
 	}
 }
