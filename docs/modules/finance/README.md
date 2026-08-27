@@ -18,8 +18,10 @@
 （下称「设计稿」，§ 号均指它）。本文只记**实现层的取舍与偏差**，
 不复述口径——口径以设计稿全文为准。
 
-**范围到切分 d 为止。** 只剩影子对比（§9，XM-0037e）。
-newapi 的收入 DSN 已由 XM-0044 接上。
+**成本线 a~e 五片已齐**（影子对比 §9 见 XM-0037e），
+newapi 的收入 DSN 由 XM-0044 接上，收尾包（分组倍率存储、可用天数告警、
+阈值可配）见 XM-0049。剩余的 follow-up 都要外部输入：sub2api 余额的响应样本、
+newapi 的上游配置变更。
 
 ---
 
@@ -930,12 +932,15 @@ Fake 驱动实现了完整的余额读取（还带一条缓慢下降的序列，
 分成两个形状仍然值得：§13 的两个接口有各自的字段集与各自的页面，
 而把余额与可用天数塞进渠道摘要，会让「渠道」这个词同时指两件事。
 
-#### §13 里有一个字段我们给不出：`groupRate`
+#### §13 的 `groupRate`：037d 给不出，XM-0049 补上了存储
 
-`ChannelSummary.groupRate`（分组倍率）在登记簿里**没有对应的列**——
-§2.1 只说它「独立存储 / 展示」，没给存储。所以响应里没有这个字段，
-而不是编一个 `"1"`：那个 1 会被前端乘进成本里（§10.2 明确要求
-「分组倍率独立，前端不重复乘算」）。要它就得先加一列，记在 follow_ups。
+`ChannelSummary.groupRate`（分组倍率）在 037d 时登记簿里**没有对应的列**
+（§2.1 只说它「独立存储 / 展示」，没给存储），所以那一片的响应里没有这个字段
+——而不是编一个 `"1"`：那个 1 会被前端乘进成本里。
+
+XM-0049 补上了 `upstream_account.group_rate`（迁移 000012）。
+纪律没变，只是从「没有存储所以不出」变成「没配所以不出」——见下文
+「分组倍率」一节。
 
 ---
 
@@ -1048,6 +1053,83 @@ Fake 驱动实现了完整的余额读取（还带一条缓慢下降的序列，
 
 ---
 
+## 收尾包（XM-0049）
+
+成本线 a~e 之后剩下的三件小事，都是 037d Handoff 里自己列的 follow-up。
+
+### 分组倍率：一个什么都不做的字段
+
+`upstream_account.group_rate`（迁移 000012）是 §13 的 `ChannelSummary.groupRate`
+的存储。它最重要的性质是**它什么都不做**——只被存下来、读回来、展示出去，
+一次都不参与成本或收入的计算。
+
+⚠️ **它与 `recharge_ratio` 是两个完全不同的量**，这是本节唯一真正要记住的事：
+
+| | `recharge_ratio` | `group_rate` |
+|---|---|---|
+| 是什么 | 上游**充值**倍率 | 自营侧的**分组**倍率（§10.2） |
+| 参与计算吗 | 是——成本 = 上游实扣 **÷** 它（§3.4） | **否，一次都不** |
+| 台账里有痕迹吗 | 有，逐行冻结进 `ratio_snapshot`（§6.3） | 没有 |
+| 谁必须有 | 计量型必填、订阅型必空 | 对三种接入方式都可选 |
+
+§10.2 的原话是「分组倍率独立存储 / 展示，**不并入 recharge_ratio**，
+前端不重复乘算」。把它乘进成本会让每条渠道按各自的分组倍率错一遍——
+每条都错、比例还各不相同，在报表上完全看不出来。
+
+守这条的不是注释，是一条**行为**用例：
+`TestGroupRateNeverEntersCostArithmetic` 造两个只差一个分组倍率（3.0，
+足够扎眼）的账号跑一轮采集，断言写出来的台账逐位相同。
+哪天有人在折算里顺手乘了它，那条会红。
+
+响应侧的纪律是 **`omitempty`：没配就不出这个字段**，而不是给一个 `""`。
+与 `recharge_ratio` 恒出不同（计量型必须有它，空串本身就是「这条渠道没有倍率」
+的信息）——分组倍率对绝大多数渠道本就不存在，出一个空字段只会让前端多写一次
+「这个空串是什么意思」的判断，而那个判断迟早有一处会写成「空串当 1」。
+前端类型因此是 `groupRate?: string`，缺席时是 `undefined` 而不是 `""`。
+
+它没有算术层的兜底可依赖——不参与任何计算，所以**领域层与库层的两道
+「必须为正」CHECK 是它仅有的护栏**。
+
+### 可用天数告警（R5）
+
+UI 交接 §10.4 的最后一条要求：「低于阈值时进入告警和待处理队列」。
+037d 只产出了 `level`，这一片把它接进现有的规则引擎。
+
+规则本身、它的三处取舍与规则表，见
+`docs/modules/alerts/README.md`（那里是规则的权威清单）。这里只记与本模块
+相关的一件事：**告警读的是 `SummaryStore.UpstreamRunways`，一个不含金额窗口
+的瘦查询**，与看板的 `UpstreamSummaries` **共用同一段计算**（`runwayFor`）。
+
+共用一段而不是各算各的，是因为它们的答案会被并排看到：看板显示「还有 11 天」
+而告警说「已经低于 10 天」，那时没人知道该信哪个。瘦查询则省掉两条与判据
+无关的聚合——告警每 60 秒跑一轮，看板只在有人打开页面时跑。
+
+### 阈值可配：一份解析，两个进程
+
+```
+XM_FINANCE_RUNWAY_WARN_DAYS   默认 10
+XM_FINANCE_RUNWAY_CRIT_DAYS   默认 5
+```
+
+两个消费者跑在**两个进程**里：platform-api 的 `/finance/upstreams/summary`
+要把阈值回报给前端，platform-worker 的告警规则要拿它判档。所以：
+
+- **解析只有一份**：`finance.ParseRunwayThresholds`，两个 `cmd` 都调它；
+- **部署一致靠 compose**：`launch.yaml` 里两个服务取同一个 `.env` 变量；
+- **非法值拒绝启动**，不回落默认——一个把 `WARN_DAYS` 写成 `ten` 的部署，
+  静默用回 10 会让人以为自己调过了；
+- HTTP 端点**不就地取默认**，阈值由装配层注入（`Deps.FinanceRunwayThresholds`）
+  ——就地取默认的话，worker 按环境变量判档、api 按默认值回报，两者会分叉。
+
+第三档 `serious`（默认 20，最松的一档，只影响颜色）目前不可配。
+若 `WARN_DAYS` 被调到 ≥20，它会**自动让位**到 `WARN+1`：不让位的话三档不递增，
+`levelFor` 的兜底会把**每一条**上游判成 critical——一次配置手滑变成满屏红。
+让位不损失任何告警能力（serious 的作用只是给「还算充裕」一个颜色）。
+
+设置面 UI 后置。
+
+---
+
 ## 相关文件
 
 | 文件 | 作用 |
@@ -1083,6 +1165,9 @@ Fake 驱动实现了完整的余额读取（还带一条缓慢下降的序列，
 | `internal/platform/httpapi/finance_summary.go` | `GET /api/v1/finance/{channels,upstreams}/summary` |
 | `web/apps/admin-web/src/api/finance.ts` | 看板供数的前端客户端 |
 | `web/apps/admin-web/src/components/FinanceSummaryCards.tsx` | 平台概览的成本三卡 + 贡献利润占位 |
+| `db/migrations/000012_finance_group_rate.{up,down}.sql` | 分组倍率存储（一个什么都不做的字段） |
+| `internal/platform/finance/runway.go` | 可用天数计算 + **唯一那份阈值解析** |
+| `internal/platform/alerts/rules.go` | 可用天数告警（R5，本包唯一一条不读 ops 观测的规则） |
 | `contracts/actions/finance.*.json` | Action 契约 |
 | `connectors/metering/` | 消费本登记簿的计量取数连接器 |
 | `contracts/connectors/metering.read.v1.md` | 取数契约 |

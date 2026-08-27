@@ -122,6 +122,11 @@ func accountSummary(a UpstreamAccount) map[string]any {
 	if !a.RechargeRatio.IsZero() {
 		m["recharge_ratio"] = a.RechargeRatio.String()
 	}
+	// 同上：未配分组倍率时**不写这个键**。「没有分组倍率」是多数渠道的
+	// 正常状态，写一个 "" 会让它看起来像「分组倍率被清空了」。
+	if !a.GroupRate.IsZero() {
+		m["group_rate"] = a.GroupRate.String()
+	}
 	return m
 }
 
@@ -198,6 +203,11 @@ func accountSetDef() action.Definition {
 			// （宪法 13 条：比例使用 Decimal）。所以倍率必须以字符串传，
 			// 由 money.ParseRatio 在整数域里解析。
 			{Name: "recharge_ratio", Type: action.FieldString},
+			// group_rate 是**分组倍率**（§10.2 + §13 的 groupRate，XM-0049），
+			// 与 recharge_ratio 是两个完全不同的量：后者是成本折算的
+			// 除数，前者只是定价分组的展示标注，**后端一次都不会乘它**。
+			// 同样是定点十进制字符串，理由同上。可空（多数渠道没有）。
+			{Name: "group_rate", Type: action.FieldString},
 			{Name: "currency", Type: action.FieldString},
 			{Name: "business_day_tz", Type: action.FieldString},
 			// platform_id 是「哪个自营平台在用这个上游账号」的归属标注
@@ -236,6 +246,10 @@ func accountSetHandler(store *Store) action.Handler {
 		if err != nil {
 			return nil, err
 		}
+		groupRate, err := optionalRatioParam(params, "group_rate")
+		if err != nil {
+			return nil, err
+		}
 
 		desired := UpstreamAccount{
 			SystemType:    systemType,
@@ -243,6 +257,7 @@ func accountSetHandler(store *Store) action.Handler {
 			BaseURL:       strings.TrimSpace(action.StringParam(params, "base_url")),
 			CredentialRef: strings.TrimSpace(action.StringParam(params, "credential_ref")),
 			RechargeRatio: ratio,
+			GroupRate:     groupRate,
 			Currency:      defaultIfBlank(action.StringParam(params, "currency"), DefaultCurrency),
 			BusinessDayTZ: defaultIfBlank(action.StringParam(params, "business_day_tz"), DefaultBusinessDayTZ),
 			PlatformID:    strings.TrimSpace(action.StringParam(params, "platform_id")),

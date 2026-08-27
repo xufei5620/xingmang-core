@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,20 +35,23 @@ func (f *fakeSummaryLister) UpstreamSummaries(
 	return f.items, f.err
 }
 
-func summaryRouter(t *testing.T, lister FinanceSummaryLister) http.Handler {
+func summaryRouter(
+	t *testing.T, lister FinanceSummaryLister, thresholds finance.RunwayThresholds,
+) http.Handler {
 	t.Helper()
 	res, err := NewDevHeaderResolver("development")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return NewRouter(Deps{
-		Logger:           discardLogger(),
-		Service:          "platform-api",
-		Environment:      "development",
-		DB:               fakePinger{},
-		Resolver:         res,
-		ActionRegistry:   action.NewRegistry(),
-		FinanceSummaries: lister,
+		Logger:                  discardLogger(),
+		Service:                 "platform-api",
+		Environment:             "development",
+		DB:                      fakePinger{},
+		Resolver:                res,
+		ActionRegistry:          action.NewRegistry(),
+		FinanceSummaries:        lister,
+		FinanceRunwayThresholds: thresholds,
 	})
 }
 
@@ -55,10 +59,19 @@ func getSummary(
 	t *testing.T, lister FinanceSummaryLister, path, scopes, query string,
 ) *httptest.ResponseRecorder {
 	t.Helper()
+	// 零值阈值 = 装配层没注入，端点回落默认档（见 runwayThresholdsOrDefault）
+	return getSummaryWith(t, lister, finance.RunwayThresholds{}, path, scopes, query)
+}
+
+func getSummaryWith(
+	t *testing.T, lister FinanceSummaryLister, thresholds finance.RunwayThresholds,
+	path, scopes, query string,
+) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path+query, nil)
 	devHeaders(req, scopes)
 	rec := httptest.NewRecorder()
-	summaryRouter(t, lister).ServeHTTP(rec, req)
+	summaryRouter(t, lister, thresholds).ServeHTTP(rec, req)
 	return rec
 }
 
@@ -316,5 +329,93 @@ func TestSupplierKeyIsUniquePerAccountToday(t *testing.T) {
 	// 同一个账号两次必须给出同一个键——否则前端的 groupBy 会把它拆开
 	if SupplierKeyOf(withURL.Account) != SupplierKeyOf(withURL.Account) {
 		t.Fatal("供应商键必须稳定")
+	}
+}
+
+// TestGroupRateOmittedWhenUnset 钉住「没配就不出这个字段」（XM-0049）。
+//
+// 分组倍率对绝大多数渠道本就不存在。出一个空串会让前端多写一次
+// 「这个空串是什么意思」的判断，而那个判断迟早有一处会写成
+// 「空串当 1」——那正是 §10.2 禁止的重复乘算。
+func TestGroupRateOmittedWhenUnset(t *testing.T) {
+	item := meteredSummary() // 没配分组倍率
+	lister := &fakeSummaryLister{items: []finance.UpstreamSummary{item}}
+
+	// 两个端点各自恒出的那个倍率字段（渠道项出规范存储量，上游项出展示投影）
+	alwaysPresent := map[string]string{
+		"/api/v1/finance/channels/summary":  "recharge_ratio",
+		"/api/v1/finance/upstreams/summary": "recharge_cost_rate",
+	}
+	for path, ratioField := range alwaysPresent {
+		rec := getSummary(t, lister, path, "finance.read", "")
+		if strings.Contains(rec.Body.String(), "group_rate") {
+			t.Fatalf("%s 未配分组倍率时不该出这个字段: %s", path, rec.Body.String())
+		}
+		// 对照：充值侧的倍率字段**恒出**——空串本身就是「这条渠道没有倍率」
+		// 的信息，而分组倍率对多数渠道本就不存在，缺席才是它的正常状态
+		if !strings.Contains(rec.Body.String(), ratioField) {
+			t.Fatalf("%s 应恒出 %s", path, ratioField)
+		}
+	}
+}
+
+// TestGroupRatePresentWhenSet：配了就原样出，且是**字符串**。
+//
+// JSON 数字一路解成 double，1.15 到了页面上就变成 1.1499999999999999
+// （宪法 13 条：比例用 Decimal）。
+func TestGroupRatePresentWhenSet(t *testing.T) {
+	item := meteredSummary()
+	item.Account.GroupRate = money.MustParseRatio("1.15")
+	lister := &fakeSummaryLister{items: []finance.UpstreamSummary{item}}
+
+	rec := getSummary(t, lister, "/api/v1/finance/channels/summary", "finance.read", "")
+	var page struct {
+		Items []struct {
+			GroupRate     string `json:"group_rate"`
+			RechargeRatio string `json:"recharge_ratio"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if page.Items[0].GroupRate != "1.15" {
+		t.Fatalf("group_rate = %q, want 1.15", page.Items[0].GroupRate)
+	}
+	// 与充值倍率是两个独立的量，互不影响
+	if page.Items[0].RechargeRatio != "1.5" {
+		t.Fatalf("recharge_ratio 不该被分组倍率动过: %q", page.Items[0].RechargeRatio)
+	}
+}
+
+// TestRunwayThresholdsComeFromAssembly 钉住「告警与看板共用一份阈值」在
+// HTTP 这一侧的落点：端点回报的是**装配层注入的那份**，不是就地取的默认。
+//
+// 就地取默认的话，platform-worker 按环境变量判档、platform-api 按默认值回报，
+// 「看板说还有 11 天」与「告警说已经低于阈值」会同时出现在一个人面前。
+func TestRunwayThresholdsComeFromAssembly(t *testing.T) {
+	custom, err := finance.ParseRunwayThresholds("30", "15")
+	if err != nil {
+		t.Fatalf("解析阈值: %v", err)
+	}
+	lister := &fakeSummaryLister{}
+	rec := getSummaryWith(t, lister, custom,
+		"/api/v1/finance/upstreams/summary", "finance.read", "")
+
+	var page struct {
+		Thresholds struct {
+			CriticalDays int `json:"critical_days"`
+			WarningDays  int `json:"warning_days"`
+			SeriousDays  int `json:"serious_days"`
+		} `json:"runway_thresholds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if page.Thresholds.WarningDays != 30 || page.Thresholds.CriticalDays != 15 {
+		t.Fatalf("端点应回报注入的阈值, got %+v", page.Thresholds)
+	}
+	// 仓储也要收到同一份——否则 Level 与回报的档会分叉
+	if lister.got.Thresholds != custom {
+		t.Fatalf("传给仓储的阈值 = %+v, want %+v", lister.got.Thresholds, custom)
 	}
 }

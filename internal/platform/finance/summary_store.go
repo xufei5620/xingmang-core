@@ -169,6 +169,113 @@ func (s *SummaryStore) ChannelSummaries(
 	return out, nil
 }
 
+// UpstreamRunway 是一个上游账号的可用天数，**不含任何金额窗口**（XM-0049）。
+//
+// 单独一个瘦类型给告警规则用：它只关心「哪条上游快见底了」，
+// 不关心今天赚了多少。让告警去拉整份 UpstreamSummary，等于每轮评估
+// 多跑两条与判据无关的聚合查询，还把 alerts 包和收入/成本的形状绑在一起。
+type UpstreamRunway struct {
+	AccountID uuid.UUID
+	// Name 是给人看的名字（`system_type · base_url`），进告警标题。
+	Name         string
+	SystemType   SystemType
+	AccessMethod AccessMethod
+	Runway       Runway
+}
+
+// UpstreamRunways 只算可用天数，跳过金额窗口（XM-0049）。
+//
+// 与 UpstreamSummaries **共用同一段计算**（都走下面的 runwayFor），
+// 所以看板上那个天数与告警判据上的天数出自同一份代码——
+// 两处各算一遍迟早在某个边界上分叉，而那时没人知道该信哪个。
+func (s *SummaryStore) UpstreamRunways(
+	ctx context.Context, environment string, thresholds RunwayThresholds,
+) ([]UpstreamRunway, error) {
+	if environment == "" {
+		return nil, fmt.Errorf("environment: %w", ErrMissingField)
+	}
+	accountRows, err := s.q.ListUpstreamAccountsByEnvironment(ctx, environment)
+	if err != nil {
+		return nil, fmt.Errorf("list upstream accounts: %w", err)
+	}
+	accounts, err := accountsFromRows(accountRows)
+	if err != nil {
+		return nil, err
+	}
+	balances, recent, thresholds, now, err := s.runwayInputs(ctx, environment, thresholds)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]UpstreamRunway, 0, len(accounts))
+	for _, account := range accounts {
+		balance := balancePtr(balances, account.ID)
+		out = append(out, UpstreamRunway{
+			AccountID:    account.ID,
+			Name:         AccountDisplayName(account),
+			SystemType:   account.SystemType,
+			AccessMethod: account.AccessMethod,
+			Runway:       runwayFor(account, balance, recent[account.ID], thresholds, now),
+		})
+	}
+	return out, nil
+}
+
+// runwayInputs 取可用天数两侧的原料并补齐阈值与时钟。
+func (s *SummaryStore) runwayInputs(
+	ctx context.Context, environment string, thresholds RunwayThresholds,
+) (map[uuid.UUID]BalanceReading, map[uuid.UUID]recentCostRow, RunwayThresholds, time.Time, error) {
+	balances, err := s.latestBalances(ctx, environment)
+	if err != nil {
+		return nil, nil, thresholds, time.Time{}, err
+	}
+	recent, err := s.recentCost(ctx, environment)
+	if err != nil {
+		return nil, nil, thresholds, time.Time{}, err
+	}
+	if err := thresholds.Validate(); err != nil {
+		// 调用方没给（或给错）阈值时回落到默认档，而不是让 levelFor
+		// 的兜底把所有渠道都判成 critical。
+		thresholds = DefaultRunwayThresholds()
+	}
+	return balances, recent, thresholds, s.now().UTC(), nil
+}
+
+func balancePtr(balances map[uuid.UUID]BalanceReading, id uuid.UUID) *BalanceReading {
+	balance, ok := balances[id]
+	if !ok {
+		return nil
+	}
+	return &balance
+}
+
+// runwayFor 是**唯一**一处把账号 + 余额 + 近期消耗喂给 ComputeRunway 的地方。
+func runwayFor(
+	account UpstreamAccount, balance *BalanceReading,
+	cost recentCostRow, thresholds RunwayThresholds, now time.Time,
+) Runway {
+	return ComputeRunway(RunwayInput{
+		AccessMethod: account.AccessMethod,
+		Balance:      balance,
+		CostMinorSum: cost.sum,
+		CoveredDays:  cost.coveredDays,
+		CostCurrency: cost.currency,
+		Now:          now,
+		Thresholds:   thresholds,
+	})
+}
+
+// AccountDisplayName 给出一个稳定的、给人看的渠道 / 上游名。
+//
+// 后端拼而不是各处各拼：这个名字会出现在告警标题、审计与看板三处，
+// 三处各拼一遍迟早会有一处不一样，然后没人能确定说的是不是同一条渠道。
+func AccountDisplayName(a UpstreamAccount) string {
+	if a.BaseURL != "" {
+		return string(a.SystemType) + " · " + a.BaseURL
+	}
+	return string(a.SystemType) + " · " + string(a.AccessMethod)
+}
+
 // UpstreamSummaries 给出逐上游的供给侧供数：余额、可用天数、充值成本率。
 //
 // 可用天数的两侧在这里合流：分子是 balance_history 的最新一行，
@@ -183,20 +290,10 @@ func (s *SummaryStore) UpstreamSummaries(
 		return nil, err
 	}
 
-	balances, err := s.latestBalances(ctx, q.Environment)
+	balances, recent, thresholds, now, err := s.runwayInputs(ctx, q.Environment, q.Thresholds)
 	if err != nil {
 		return nil, err
 	}
-	recent, err := s.recentCost(ctx, q.Environment)
-	if err != nil {
-		return nil, err
-	}
-
-	thresholds := q.Thresholds
-	if err := thresholds.Validate(); err != nil {
-		thresholds = DefaultRunwayThresholds()
-	}
-	now := s.now().UTC()
 
 	out := make([]UpstreamSummary, 0, len(accounts))
 	for _, account := range accounts {
@@ -204,21 +301,11 @@ func (s *SummaryStore) UpstreamSummaries(
 			Account:    account,
 			TokenCount: tokenCounts[account.ID],
 			Window:     windows[account.ID],
+			Balance:    balancePtr(balances, account.ID),
 		}
-		if balance, ok := balances[account.ID]; ok {
-			copied := balance
-			item.Balance = &copied
-		}
-		cost := recent[account.ID]
-		item.Runway = ComputeRunway(RunwayInput{
-			AccessMethod: account.AccessMethod,
-			Balance:      item.Balance,
-			CostMinorSum: cost.sum,
-			CoveredDays:  cost.coveredDays,
-			CostCurrency: cost.currency,
-			Now:          now,
-			Thresholds:   thresholds,
-		})
+		// 与 UpstreamRunways 走同一段计算——看板上那个天数与告警判据上的
+		// 天数因此出自同一份代码。
+		item.Runway = runwayFor(account, item.Balance, recent[account.ID], thresholds, now)
 		out = append(out, item)
 	}
 	return out, nil

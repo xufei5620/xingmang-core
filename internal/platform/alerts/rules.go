@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
@@ -25,6 +26,12 @@ const (
 	RuleChannelBalanceLow = "channel.balance.low"
 	// RuleSyncConsecutiveFailed：某条指标连续 N 轮同步失败。
 	RuleSyncConsecutiveFailed = "metric.sync.consecutive_failed"
+	// RuleUpstreamRunwayLow：某个计量型上游的可用天数低于告警档（XM-0049）。
+	//
+	// UI 交接 §10.4 的最后一条要求：「低于阈值时进入告警和待处理队列」。
+	// 前四条规则读的都是 ops 观测，这一条读的是 finance 的可用天数——
+	// 它是本包第一条**不来自 ops.metric_observation** 的规则，理由见 RunwaySource。
+	RuleUpstreamRunwayLow = "upstream.runway.low"
 )
 
 // 默认配置。三个数字都可由部署覆盖（见 RuleConfig 各字段与 cmd/platform-worker）。
@@ -114,6 +121,13 @@ type RuleConfig struct {
 	ConsecutiveFailureThreshold int
 	// ChannelBalanceMetricKey 是渠道规则读的聚合指标键。
 	ChannelBalanceMetricKey string
+	// RunwayThresholds 是可用天数的三档阈值（XM-0049）。
+	//
+	// ⚠️ 它必须与 `/finance/upstreams/summary` 回报给前端的那一份**完全相同**，
+	// 否则「看板说还有 11 天」与「告警说已经低于阈值」会同时出现在一个人面前。
+	// 两个进程各自从环境变量解析，但**共用 finance.ParseRunwayThresholds
+	// 这一个函数**——函数保证解析一致，部署一致由 .env 保证。
+	RunwayThresholds finance.RunwayThresholds
 	// Owner 是这批规则的负责人（§9.3 要求每条规则都有）。
 	Owner string
 }
@@ -125,6 +139,7 @@ func DefaultRuleConfig() RuleConfig {
 		BalanceThresholdMinorUnits:  DefaultBalanceThresholdMinorUnits,
 		ConsecutiveFailureThreshold: DefaultConsecutiveFailureThreshold,
 		ChannelBalanceMetricKey:     DefaultChannelBalanceMetricKey,
+		RunwayThresholds:            finance.DefaultRunwayThresholds(),
 		Owner:                       "platform-ops",
 	}
 }
@@ -150,6 +165,13 @@ func (c RuleConfig) normalized() RuleConfig {
 	}
 	if strings.TrimSpace(c.ChannelBalanceMetricKey) == "" {
 		c.ChannelBalanceMetricKey = d.ChannelBalanceMetricKey
+	}
+	if err := c.RunwayThresholds.Validate(); err != nil {
+		// 未初始化或不递增的阈值会让 levelFor 的兜底把**每一条**上游判成
+		// critical——一次配置手滑变成满屏红。回落到默认档而不是照单全收
+		// （同 BalanceThresholdMinorUnits 的理由，只是失效方向相反：
+		// 那个是永不触发，这个是永远触发）。
+		c.RunwayThresholds = d.RunwayThresholds
 	}
 	if strings.TrimSpace(c.Owner) == "" {
 		c.Owner = d.Owner
@@ -227,6 +249,25 @@ func Rules(cfg RuleConfig) []Rule {
 			Owner:         cfg.Owner,
 		},
 		{
+			Key:   RuleUpstreamRunwayLow,
+			Title: "上游可用天数不足",
+			Source: "finance.balance_history（余额）÷ finance.profit_daily" +
+				"（近 7 个完整业务日的日均消耗），见设计稿 §10.4",
+			Condition: fmt.Sprintf(
+				"计量型上游的可用天数算得出来且 < %d 天（< %d 天升为 critical）",
+				cfg.RunwayThresholds.WarningDays, cfg.RunwayThresholds.CriticalDays),
+			For: 0,
+			// 声明的是**进入告警的那一档**；实际严重度逐条按天数算
+			// （Finding.Severity 才是落库的那个）。
+			Severity: SeverityWarning,
+			Recovery: "可用天数回到告警档之上，或该上游不再算得出天数" +
+				"（余额读不到 / 无消耗 / 停用）",
+			DedupKey:      RuleUpstreamRunwayLow + ":<environment>:<upstream_account_id>",
+			Channels:      defaultChannels,
+			SilencePolicy: silencePolicyText,
+			Owner:         cfg.Owner,
+		},
+		{
 			Key:           RuleSyncConsecutiveFailed,
 			Title:         "同步连续失败",
 			Source:        "ops.metric_observation_sample（XM-0024 历史样本）",
@@ -286,6 +327,24 @@ type MetricSource interface {
 	ListSamples(ctx context.Context, environment, metricKey string, since time.Time, limit int32) ([]ops.Observation, bool, error)
 }
 
+// RunwaySource 是可用天数规则用到的 finance 子集（*finance.SummaryStore 满足）。
+//
+// ⚠️ **本包第一次依赖一个领域包**（前四条规则只读 ops 观测）。值得说清为什么
+// 这次没有沿用「字面量指标键 + 一致性测试」那条老路：
+//
+// 那条路解决的是「别让平台层绑死某一个 Connector」——上游是可换的。
+// 可用天数不是从上游读来的数，它是**平台自己算出来的**（余额 ÷ 近 7 日日均消耗，
+// 两侧都在平台的库里）。把它塞进一条 ops 指标再由本包解 JSON，
+// 会多出一处「谁来算」与一处「怎么解」，而算它的代码本来就在 finance 里。
+//
+// 接口只声明一个方法，返回的也是最瘦的那个类型（不含收入/成本窗口）：
+// 告警只关心「哪条上游快见底了」。finance 不 import alerts，没有环。
+type RunwaySource interface {
+	UpstreamRunways(
+		ctx context.Context, environment string, thresholds finance.RunwayThresholds,
+	) ([]finance.UpstreamRunway, error)
+}
+
 // Evaluator 按第一批规则评估某个环境的当前状态。
 //
 // 它**只算不写**：产出 Finding 清单，落库、去重、静默判定与自动恢复由
@@ -294,11 +353,16 @@ type MetricSource interface {
 type Evaluator struct {
 	cfg    RuleConfig
 	source MetricSource
+	runway RunwaySource
 }
 
 // NewEvaluator 创建评估器。
-func NewEvaluator(source MetricSource, cfg RuleConfig) *Evaluator {
-	return &Evaluator{cfg: cfg.normalized(), source: source}
+//
+// 两个来源都是**必填**：缺哪一个 Evaluate 都会报错，而不是静默少跑几条规则。
+// 一条因为装配漏项而永远不响的告警规则，只会在真出事那天才被发现
+// （同 BalanceThresholdMinorUnits 回落默认值的理由）。
+func NewEvaluator(source MetricSource, runway RunwaySource, cfg RuleConfig) *Evaluator {
+	return &Evaluator{cfg: cfg.normalized(), source: source, runway: runway}
 }
 
 // Config 返回归一化后的阈值配置（供日志与文档打印实际生效值）。
@@ -310,6 +374,9 @@ func (e *Evaluator) Config() RuleConfig { return e.cfg }
 func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.Time) ([]Finding, error) {
 	if e.source == nil {
 		return nil, fmt.Errorf("alerts: evaluator 没有指标来源")
+	}
+	if e.runway == nil {
+		return nil, fmt.Errorf("alerts: evaluator 没有可用天数来源")
 	}
 	if environment == "" {
 		return nil, fmt.Errorf("environment: %w", ErrMissingField)
@@ -387,8 +454,67 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		}
 	}
 
+	runwayFindings, err := e.runwayFindings(ctx, environment)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, runwayFindings...)
+
 	sort.Slice(findings, func(i, j int) bool { return findings[i].DedupKey < findings[j].DedupKey })
 	return findings, nil
+}
+
+// runwayFindings 算 R5 的命中：可用天数低于告警档（§10.4 最后一条要求）。
+//
+// 三条判据上的选择：
+//
+//  1. **只看计量型上游**。订阅型的成本是固定摊销，可用天数对它没有意义
+//     （§7 末段），ComputeRunway 对它直接返回 not_applicable。
+//  2. **算不出天数的一律不告警**。「余额还没读到」是采集覆盖率的问题
+//     （§7 的覆盖率边界，当前是常态），不是「快见底了」。把它报成告警，
+//     每个环境一上来就是满屏红，然后这条规则就被静默掉了——
+//     那才是真正把预警关掉的方式。
+//  3. **严重度逐条按天数算**，而不是每档一条规则。两条规则的话，
+//     一个 3 天的上游会同时命中「< 10」与「< 5」两条，
+//     于是一个条件产出两条告警、要静默两次。
+func (e *Evaluator) runwayFindings(ctx context.Context, environment string) ([]Finding, error) {
+	items, err := e.runway.UpstreamRunways(ctx, environment, e.cfg.RunwayThresholds)
+	if err != nil {
+		return nil, fmt.Errorf("读取可用天数: %w", err)
+	}
+
+	var out []Finding
+	for _, item := range items {
+		if !item.AccessMethod.IsMetered() {
+			continue
+		}
+		days := item.Runway.Days
+		if days == nil || *days >= e.cfg.RunwayThresholds.WarningDays {
+			continue
+		}
+		severity := SeverityWarning
+		if *days < e.cfg.RunwayThresholds.CriticalDays {
+			severity = SeverityCritical
+		}
+		out = append(out, Finding{
+			RuleKey: RuleUpstreamRunwayLow,
+			// 去重键含 upstream_account_id：同一环境下几条上游各自成一条告警，
+			// 而同一条上游连续几轮命中只合并成一条。
+			DedupKey: dedupKey(RuleUpstreamRunwayLow, environment, item.AccountID.String()),
+			Severity: severity,
+			Title:    fmt.Sprintf("上游 %s 可用天数仅剩 %d 天", item.Name, *days),
+			Detail: fmt.Sprintf(
+				"按近 %d 个完整业务日的日均消耗估算（实到 %d 天）。告警档 <%d 天，"+
+					"critical 档 <%d 天。%s请及时充值，或核对上游余额读数是否还在更新。",
+				item.Runway.WindowDays, item.Runway.CoveredDays,
+				e.cfg.RunwayThresholds.WarningDays, e.cfg.RunwayThresholds.CriticalDays,
+				describeObservedAt(item.Runway.BalanceObservedAt)),
+			// 可用天数不来自某一条 ops 指标，留空而不是编一个键——
+			// 一个指向不存在指标的告警会让人点进去看到空白页。
+			SourceMetricKey: "",
+		})
+	}
+	return out, nil
 }
 
 // channelFindings 从渠道余额聚合指标里算出 R2 / R3 的命中。

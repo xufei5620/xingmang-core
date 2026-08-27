@@ -150,6 +150,18 @@ type UpstreamAccount struct {
 	// 计量型必须有，订阅型必须没有，见 Validate。
 	RechargeRatio money.Ratio
 
+	// GroupRate 是自营侧的**分组倍率**（§10.2 + §13 的 groupRate，XM-0049）。
+	//
+	// ⚠️ **它一次都不参与成本或收入计算。** §10.2 的原话是「分组倍率独立存储 /
+	// 展示，不并入 recharge_ratio，前端不重复乘算」。它与 RechargeRatio 是两个
+	// 完全不同的量：后者是成本折算的除数（逐行冻结进 ratio_snapshot），
+	// 前者只是定价分组的展示标注。把它乘进成本会让每条渠道按各自的分组倍率
+	// 错一遍，而那种错在报表上完全看不出来。
+	//
+	// 零值 = 未配置，且这是绝大多数渠道的正常状态——没有分组倍率就是没有，
+	// 不是 1（§13 的 groupRate 本就是可选字段）。
+	GroupRate money.Ratio
+
 	Currency string
 	// BusinessDayTZ 是业务日切日时区的固定偏移，如 "+08:00"（宪法 14 条）。
 	BusinessDayTZ string
@@ -271,6 +283,12 @@ func (a UpstreamAccount) Validate() error {
 	if !businessDayTZPattern.MatchString(a.BusinessDayTZ) {
 		return fmt.Errorf("business_day_tz %q 须为固定偏移如 +08:00（不接受 IANA 时区名）: %w",
 			a.BusinessDayTZ, ErrInvalidFormat)
+	}
+
+	if !a.GroupRate.IsZero() && !a.GroupRate.IsPositive() {
+		// 没有算术层的兜底可依赖——group_rate 不参与任何计算，
+		// 所以领域层与库层的两道 CHECK 是它仅有的护栏。
+		return fmt.Errorf("group_rate=%s 必须为正: %w", a.GroupRate, ErrInvalidFormat)
 	}
 
 	if a.PlatformID != "" && !platformIDPattern.MatchString(a.PlatformID) {
