@@ -24,6 +24,17 @@ SELECT * FROM audit.audit_event
 WHERE sequence >= $1 AND sequence <= $2
 ORDER BY sequence;
 
+-- name: ListRecentAuditEvents :many
+-- 看板用的倒序分页读取：只看某个环境，从 before_seq 往回翻。
+-- 游标用 sequence 而不是 occurred_at：sequence 由链唯一且严格递增，
+-- 时间戳会撞（同一微秒内两条）导致翻页重复或漏读。
+-- before_seq = 0 表示「从最新一条开始」，省掉一个「首页」专用查询。
+SELECT * FROM audit.audit_event
+WHERE environment = @environment
+  AND (@before_seq::bigint = 0 OR sequence < @before_seq::bigint)
+ORDER BY sequence DESC
+LIMIT @row_limit::int;
+
 -- name: InsertChainRoot :one
 INSERT INTO audit.chain_root (
     id, computed_at, from_sequence, to_sequence, root_hash, signature, key_id

@@ -251,6 +251,70 @@ func (q *Queries) ListAuditEvents(ctx context.Context, arg ListAuditEventsParams
 	return items, nil
 }
 
+const listRecentAuditEvents = `-- name: ListRecentAuditEvents :many
+SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type, action_id, action_version, action_run_id, resource_type, resource_id, environment, reason, approval_id, request_id, trace_id, source_ip, before_summary, after_summary, connector_request_summary, connector_response_summary, result, compensation_result, prev_hash, event_hash FROM audit.audit_event
+WHERE environment = $1
+  AND ($2::bigint = 0 OR sequence < $2::bigint)
+ORDER BY sequence DESC
+LIMIT $3::int
+`
+
+type ListRecentAuditEventsParams struct {
+	Environment string
+	BeforeSeq   int64
+	RowLimit    int32
+}
+
+// 看板用的倒序分页读取：只看某个环境，从 before_seq 往回翻。
+// 游标用 sequence 而不是 occurred_at：sequence 由链唯一且严格递增，
+// 时间戳会撞（同一微秒内两条）导致翻页重复或漏读。
+// before_seq = 0 表示「从最新一条开始」，省掉一个「首页」专用查询。
+func (q *Queries) ListRecentAuditEvents(ctx context.Context, arg ListRecentAuditEventsParams) ([]AuditAuditEvent, error) {
+	rows, err := q.db.Query(ctx, listRecentAuditEvents, arg.Environment, arg.BeforeSeq, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuditAuditEvent{}
+	for rows.Next() {
+		var i AuditAuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sequence,
+			&i.OccurredAt,
+			&i.RecordedAt,
+			&i.PrincipalID,
+			&i.PrincipalType,
+			&i.ActionID,
+			&i.ActionVersion,
+			&i.ActionRunID,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.Environment,
+			&i.Reason,
+			&i.ApprovalID,
+			&i.RequestID,
+			&i.TraceID,
+			&i.SourceIp,
+			&i.BeforeSummary,
+			&i.AfterSummary,
+			&i.ConnectorRequestSummary,
+			&i.ConnectorResponseSummary,
+			&i.Result,
+			&i.CompensationResult,
+			&i.PrevHash,
+			&i.EventHash,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAuditChain = `-- name: LockAuditChain :exec
 SELECT pg_advisory_xact_lock(4771001)
 `

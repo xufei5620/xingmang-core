@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
@@ -26,6 +27,7 @@ type Deps struct {
 	ActionRegistry *action.Registry
 	Services       ServiceLister
 	Metrics        MetricLister
+	AuditEvents    AuditEventLister
 	RequestTimeout time.Duration
 }
 
@@ -61,6 +63,9 @@ func NewRouter(d Deps) http.Handler {
 			Get("/services", ListServicesHandler(d.Services))
 		api.With(RequireScope(ops.ScopeRead)).
 			Get("/metrics", ListMetricsHandler(d.Metrics))
+		// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
+		api.With(RequireScope(audit.ScopeRead)).
+			Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))
 	})
 	return r
 }

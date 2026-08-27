@@ -21,9 +21,43 @@ Platform API 的 HTTP 层（规格 §5.5）。
 | GET | `/api/v1/actions` | 是 |
 | POST | `/api/v1/actions/{id}/versions/{version}/execute` | 是 |
 | GET | `/api/v1/services?environment=` | 是 |
+| GET | `/api/v1/audit/events?limit=&before_seq=` | 是 |
 
 执行路径用 `/versions/{version}/execute` 而非 `:execute` 后缀——chi 对路径参数后
 紧跟冒号字面量的解析存在歧义，显式分段更稳。
+
+## `GET /api/v1/audit/events` 响应契约
+
+权限 `audit.read`；环境不可指定，恒为调用者 Principal 的环境。
+`limit` 默认 50、上限 100（超出静默夹到上限）；`before_seq` 是**开区间**游标。
+
+```json
+{"items":[{"sequence":123,"occurred_at":"2026-08-26T10:00:00.123456Z",
+  "principal_id":"staff_alice","principal_type":"HUMAN",
+  "action_id":"registry.service.create","action_version":"1",
+  "action_run_id":"<uuid>","resource_type":"core.service","resource_id":"sub2api-prod",
+  "environment":"staging","request_id":"req-1","result":"succeeded","error_code":"",
+  "before_summary":null,"after_summary":{"exists":true},
+  "event_hash":"<64hex>","prev_hash":"<64hex>"}],
+ "next_before":122}
+```
+
+三处前端需要知道的约定：
+
+- `error_code` 映射自 `Event.CompensationResult`（失败事件里记的是补偿动作的结果码）。
+  `compensation_result` 是内核内部的说法，不进契约。
+- **空摘要序列化为 `null` 而不是 `{}`**。库里 jsonb 列 `NOT NULL DEFAULT '{}'`，
+  读回来是非 nil 空 map，由 handler 转成 `null`。`{}` 和 `null` 是两种事实：
+  前者「记录了摘要但内容为空」，后者「这个动作没有前后镜像」（读类动作、被拒绝的执行）。
+  都渲染成 `{}` 的话前端得自己写 `Object.keys().length` 去猜。
+- `next_before = 0` 表示**确定**没有下一页；非 0 时把它当作下一次请求的 `before_seq`。
+  本页条数少于请求的 `limit` 即判定到底。页面正好被填满而后面恰好没有数据时
+  `next_before` 仍非 0，下一次请求返回空页——刻意如此：精确判断「还有没有」
+  要多查一行或多打一次 COUNT，代价换来的只是省掉一次空请求。
+
+响应**不是** `audit.Event` 的直接序列化：`reason` / `approval_id` / `trace_id` /
+`source_ip` 与两个 connector 摘要不外露（内部排障字段，或可能带上游返回的敏感片段）。
+新增字段必须是显式动作——响应体是契约，不是结构体的倒影。
 
 ## 错误码 → HTTP
 
