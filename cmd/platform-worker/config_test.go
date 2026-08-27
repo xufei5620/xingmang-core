@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
@@ -287,5 +288,106 @@ func TestNewAPISecretsFromEnv(t *testing.T) {
 	other := secrets.MustCredentialRef("secret://sub2api/readonly-token")
 	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
 		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}
+
+// TestNewAPIRevenueFromEnvNotConfigured：没配 DSN = 这条能力没启用，**不是错误**。
+//
+// 这条锁住 XM-0044 最重要的兼容性承诺：没配的部署行为与本任务之前逐字相同
+// （收入侧 not_supported、台账写 NULL）。
+func TestNewAPIRevenueFromEnvNotConfigured(t *testing.T) {
+	for _, dsn := range []string{"", "   "} {
+		values := map[string]string{"XM_NEWAPI_REVENUE_DSN": dsn}
+		src, closer, err := newapiRevenueFromEnv(
+			t.Context(), func(k string) string { return values[k] }, nil, "staging")
+		if src != nil || closer != nil || err != nil {
+			t.Fatalf("没配 DSN 应返回 (nil, nil, nil), got (src=%v, closer!=nil=%v, err=%v)",
+				src, closer != nil, err)
+		}
+	}
+}
+
+// TestNewAPIRevenueFromEnvDegradesLoudly：配了但立不起来时，**不能伪装成没配**。
+//
+// 两者在台账里都写 NULL（收入未知），但对运维是完全不同的两件事：
+// 没配 → not_supported（这条链路还没接通，正常）；
+// 配错 → unavailable（你配了但它不通，要去修）。
+// 把 source 留成 nil 会让后者显示成前者，然后一个拼错的 DSN 可以安静躺几个星期。
+func TestNewAPIRevenueFromEnvDegradesLoudly(t *testing.T) {
+	cases := []struct {
+		name   string
+		values map[string]string
+		hint   string
+	}{
+		{
+			name: "配了 DSN 没配口令引用",
+			values: map[string]string{
+				"XM_NEWAPI_REVENUE_DSN": "postgres://reader@db.example.test/newapi",
+			},
+			hint: "XM_NEWAPI_REVENUE_PASSWORD_REF",
+		},
+		{
+			name: "口令引用拼错",
+			values: map[string]string{
+				"XM_NEWAPI_REVENUE_DSN":          "postgres://reader@db.example.test/newapi",
+				"XM_NEWAPI_REVENUE_PASSWORD_REF": "not-a-ref",
+			},
+			hint: "XM_NEWAPI_REVENUE_PASSWORD_REF",
+		},
+		{
+			// 连接串里带内联口令：pgdsn 会拒（宪法 7 条）。
+			name: "DSN 里带内联口令",
+			values: map[string]string{
+				"XM_NEWAPI_REVENUE_DSN":          "postgres://reader:inline@db.example.test/newapi",
+				"XM_NEWAPI_REVENUE_PASSWORD_REF": "secret://newapi/revenue-db",
+				"XM_NEWAPI_REVENUE_PASSWORD":     "placeholder-placeholder",
+			},
+			hint: "CredentialRef",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, closer, err := newapiRevenueFromEnv(
+				t.Context(), func(k string) string { return tc.values[k] }, nil, "staging")
+			if err == nil {
+				t.Fatal("配错了必须回一个错误供启动日志用")
+			}
+			if !strings.Contains(err.Error(), tc.hint) {
+				t.Fatalf("错误应说清问题出在哪（含 %q）: %v", tc.hint, err)
+			}
+			if closer != nil {
+				t.Fatal("没建起池就不该回 closer")
+			}
+			if src == nil {
+				t.Fatal("配错了也必须挂一个降级通道——留 nil 会让「配错」伪装成「没配」")
+			}
+			// 降级通道必须报 unavailable，**不是** not_supported。
+			_, readErr := src.AccountRevenue(t.Context(), "1", "2026-08-28")
+			if got := connector.KindOf(readErr); got != connector.KindUnavailable {
+				t.Fatalf("降级通道的分类 = %q, want unavailable（「配了但不通」≠「没配」）", got)
+			}
+		})
+	}
+}
+
+// TestNewAPIRevenueDegradedNeverLeaksPassword：降级通道带着的那个错误会进启动日志。
+func TestNewAPIRevenueDegradedNeverLeaksPassword(t *testing.T) {
+	values := map[string]string{
+		"XM_NEWAPI_REVENUE_DSN":          "postgres://reader:hunter2@db.example.test/newapi",
+		"XM_NEWAPI_REVENUE_PASSWORD_REF": "secret://newapi/revenue-db",
+	}
+	src, _, err := newapiRevenueFromEnv(
+		t.Context(), func(k string) string { return values[k] }, nil, "staging")
+	if err == nil {
+		t.Fatal("内联口令必须被拒")
+	}
+	_, readErr := src.AccountRevenue(t.Context(), "1", "2026-08-28")
+	for name, dump := range map[string]string{
+		"startup_error": err.Error(),
+		"read_error":    fmt.Sprintf("%v/%+v", readErr, readErr),
+	} {
+		if strings.Contains(dump, "hunter2") {
+			t.Fatalf("%s 泄漏了数据库口令: %s", name, dump)
+		}
 	}
 }

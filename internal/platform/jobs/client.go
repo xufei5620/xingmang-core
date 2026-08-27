@@ -11,6 +11,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
+	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
@@ -145,6 +146,14 @@ type Config struct {
 	// 装配在进程入口（cmd/），而不是在这里现造：Provider 的选择
 	// （env/SOPS/Vault）是部署决定，不是任务决定（ADR-014）。fake 模式用不到它。
 	FinanceCollectSecrets secrets.SecretProvider
+	// FinanceNewAPIRevenue 是 newapi 收入侧的只读数据库通道（XM-0044，§3.2）。
+	//
+	// **nil 是合法且是默认**：没配 XM_NEWAPI_REVENUE_DSN 时收入继续
+	// not_supported、台账写 NULL——那是「这条链路还没接通」的如实表达。
+	//
+	// 与 FinanceCollectSecrets 同样装配在进程入口：连接池连的是别人家的生产库，
+	// 必须按进程持有（含 Close），不能让每轮采集各开一个。
+	FinanceNewAPIRevenue metering.RevenueSource
 
 	// AlertEvaluateEnabled 决定是否注册告警评估任务（XM-0033）。
 	//
@@ -560,6 +569,9 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 					Timeout:         cfg.FinanceCollectRequestTimeout,
 					Environment:     cfg.Environment,
 					InstanceID:      cfg.FinanceCollectInstanceID,
+					// XM-0044：newapi 收入侧的只读 DSN 通道。nil = 没配，
+					// 收入继续 not_supported、台账写 NULL（§5.1）。
+					NewAPIRevenue: cfg.FinanceNewAPIRevenue,
 				},
 				nil,
 			),

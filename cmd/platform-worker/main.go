@@ -45,6 +45,26 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "newapi_credential_ref_invalid")
 		os.Exit(2)
 	}
+	// NewAPI 收入侧的只读 DSN 通道（XM-0044，设计稿 §3.2）。装配在进程入口：
+	// 连接池连的是别人家的生产库，必须按进程持有并在退出时关闭。
+	//
+	// 配错**不让 worker 起不来**（一个采集通道不该拖垮心跳与别的任务），
+	// 但也绝不静默降级成「没配」：那时挂上去的是一个如实报 unavailable 的
+	// 降级通道，采集日志里看得见（见 degradedRevenueSource）。
+	revenueSource, closeRevenue, err := newapiRevenueFromEnv(ctx, os.Getenv, logger, config.Environment)
+	if err != nil {
+		logger.ErrorContext(ctx, "newapi_revenue_dsn_unavailable",
+			"event", "newapi_revenue_dsn_unavailable", "module", "platform.worker",
+			"environment", config.Environment, "principal_id", "worker:platform",
+			"error_code", "newapi_revenue_dsn_unavailable",
+			// err 已过 scrubError，口令不在里面。
+			"detail", err.Error())
+	}
+	if closeRevenue != nil {
+		defer closeRevenue()
+	}
+	config.FinanceNewAPIRevenue = revenueSource
+
 	// 告警投递凭据的 Provider（XM-0033）。同样装配在进程入口，
 	// 告警模块只拿接口。引用没配时返回 nil，不是错误——见 alertSecretsFromEnv。
 	config.AlertSecrets, err = alertSecretsFromEnv(os.Getenv, logger, config.Environment, config.AlertTelegramBotRef)
@@ -110,6 +130,9 @@ func main() {
 		"finance_collect_interval", config.FinanceCollectInterval.String(),
 		"finance_collect_allowlist_size", len(config.FinanceCollectTargetAllowlist),
 		"finance_collect_secrets_configured", config.FinanceCollectSecrets != nil,
+		// newapi 收入侧走的是只读 DSN（§3.2），与上面那条 HTTP 采集是两条通道。
+		// 打出来才看得出台账里 newapi 那几行的收入是「真读了」还是「写 NULL」。
+		"newapi_revenue_dsn_configured", config.FinanceNewAPIRevenue != nil,
 		// 告警同理：运维必须能一眼看出这个进程会不会评估告警、会不会投递、
 		// 往哪儿投。**只打渠道是否配置，不打 chat_id、不打 webhook 地址**——
 		// 后者常常本身就是凭据（宪法 7 条）。
