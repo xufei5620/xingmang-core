@@ -19,6 +19,9 @@ type config struct {
 	ListenAddr     string
 	RequestTimeout time.Duration
 	Auth           authConfig
+	// Reqlog 是「请求详情」这条链路的配置（XM-0039）。
+	// 同样不含机密：凭据只有 CredentialRef 形态的引用（宪法 7 条）。
+	Reqlog reqlogConfig
 }
 
 // authMode 是身份解析器的选择开关（XM_AUTH_MODE）。
@@ -77,6 +80,12 @@ func configFromEnv(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	c.Auth = auth
+
+	reqlogCfg, err := reqlogConfigFromEnv(getenv)
+	if err != nil {
+		return config{}, err
+	}
+	c.Reqlog = reqlogCfg
 	return c, nil
 }
 

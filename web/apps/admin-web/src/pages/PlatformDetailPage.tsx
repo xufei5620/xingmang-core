@@ -9,6 +9,7 @@ import { ChannelsPanel } from "../components/ChannelsPanel";
 import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
 import { MetricCardGrid } from "../components/MetricCardGrid";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
+import { RequestsPanel } from "../components/RequestsPanel";
 import {
   findPlatform,
   normalizeTab,
@@ -16,6 +17,7 @@ import {
   platformOfMetricKey,
   platformOpens,
   PLATFORM_TABS,
+  tabsForPlatform,
   type PlatformEntry,
   type PlatformTabValue,
 } from "../lib/platforms";
@@ -31,7 +33,9 @@ export function PlatformDetailPage() {
   const params = useParams();
   const serviceType = params.serviceType ?? "";
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab = normalizeTab(searchParams.get("tab"));
+  // 传 serviceType：`?tab=requests` 贴到没有请求数据的平台上时，选中一个
+  // 根本没渲染的页签会得到一屏空白，回到概览至少是一个说得通的页面
+  const activeTab = normalizeTab(searchParams.get("tab"), serviceType);
   const queryClient = useQueryClient();
 
   const servicesQuery = useQuery({
@@ -121,7 +125,7 @@ function PlatformBody({
     <Tabs
       value={activeTab}
       onValueChange={onTabChange}
-      items={PLATFORM_TABS.map((tab) => ({
+      items={tabsForPlatform(serviceType).map((tab) => ({
         value: tab.value,
         label: tab.label,
         content: tabContent(tab.value, entry),
@@ -164,6 +168,11 @@ function tabContent(tab: PlatformTabValue, entry: PlatformEntry): ReactNode {
             />
           );
       }
+    case "requests":
+      // 只对有请求数据的平台渲染（tabsForPlatform 已经把这一格从别的平台上
+      // 摘掉了）。数据来自生产上已在运行的外挂请求审计系统，平台只是带权限
+      // 与审计的只读网关——正文永不落平台库
+      return <RequestsPanel platform={spec.serviceType} />;
     case "connection":
       return (
         <EmptyState

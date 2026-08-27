@@ -530,8 +530,31 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 		}
 	}
 	// 改这张表意味着改「登录进来的人默认能做什么」——不是重构，是授权决定
-	if _, ok := m["admin"]; !ok {
+	admin, ok := m["admin"]
+	if !ok {
 		t.Fatal("默认表应保留 admin 位（Realm 里今天还没有这个角色）")
+	}
+
+	// XM-0039：请求元数据与请求正文分两档，**admin 只拿前者**。
+	//
+	// 这条断言钉的是一次产品裁定（2026-08-28 验收）：看全平台用户对话正文的
+	// 应该是显式授权的客诉/风控岗，不是每个管理员顺带获得的能力。
+	// admin 角色今天在 Realm 里还不存在，所以这一行不会命中——正因为不会命中，
+	// 才更需要一条测试拦住「以后顺手加回去」：没有人会回过头质疑一张已经跑了
+	// 半年的默认表。要授予就用 XM_OIDC_ROLE_SCOPES 显式配一个专门的角色。
+	if !slices.Contains(admin, "request.read") {
+		t.Fatalf("admin 应含 request.read（请求元数据列表）, got %v", admin)
+	}
+	if slices.Contains(admin, "request.content.read") {
+		t.Fatal("admin 默认**不该**含 request.content.read：" +
+			"用户与模型的完整对话要显式授权给客诉/风控岗，" +
+			"「admin 是全权角色」不构成理由（见 DefaultRoleScopeMap 注释第 4 条）")
+	}
+	// staff 更不该有这两项里的任何一项
+	for _, sc := range []string{"request.read", "request.content.read"} {
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 默认不该含 %s", sc)
+		}
 	}
 }
 

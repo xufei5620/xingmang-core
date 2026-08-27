@@ -14,6 +14,39 @@
 | `LISTEN_ADDR` | 否 | `127.0.0.1:8080` | 绑回环，由宿主 Nginx 反代（规格 §21.2）；容器内设 `0.0.0.0:8080` |
 | `REQUEST_TIMEOUT` | 否 | `30s` | 单请求期限 |
 
+### 请求详情 / reqlog 只读网关（XM-0039）
+
+| 变量 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `XM_REQLOG_MODE` | 否 | `off` | `off` 两个端点不挂载；`fake` 演示样本；`real` 走真实客户端骨架 |
+| `XM_REQLOG_ENDPOINT` | real 必填 | — | 必须 https（见下方未决冲突） |
+| `XM_REQLOG_TARGET_ALLOWLIST` | real 必填 | — | 逗号分隔的**精确**主机清单；留空 = 一个请求都发不出去 |
+| `XM_REQLOG_CREDENTIAL_REF` | real 必填 | — | `secret://<scope>/<name>`。**本层只校验形状，不解析明文** |
+| `XM_REQLOG_TOKEN` | — | — | 上面那个引用在 env Provider 下的落点，形态是 `用户名:口令` **整串** |
+| `XM_REQLOG_TIMEOUT` | 否 | `30s` | 单次控制台读取超时 |
+
+三条与 worker 侧连接器不同的纪律，理由见
+`contracts/connectors/reqlog.read.v1.md` §7：
+
+- **默认 `off` 而不是 `fake`**——这条通道读的是用户与模型的完整对话；
+- **生产禁 `fake`**，启动即拒；
+- **`real` 配置不全启动即拒**（worker 那边是写失败观测继续跑）。
+
+⚠️ 两处现状：`real` 模式**读不出数据**（控制台 API 形状未核实，端点返回 501）；
+且控制台是 `http://127.0.0.1:9300`（回环明文）而只读连接配置要求 https，
+这条冲突尚未拍板（同文档 §5）。
+
+需要的权限：列表 `request.read`，正文 `request.content.read`。
+两者都不在 `DefaultRoleScopeMap` 的 `staff` 里；`admin` 只有前者——
+**看正文要显式授予一个专门的角色**（XM-0039 验收裁定，理由见
+`docs/modules/httpapi/AUTH-SWITCH.md`）：
+
+```bash
+XM_OIDC_ROLE_SCOPES='{"request-auditor":["request.read","request.content.read"]}'
+```
+
+**每次读取正文都会写一条 `request.content.viewed` 审计事件；写不进去就不返回内容。**
+
 ### 连接串纪律（宪法 7 条 / XM-R008）
 
 `cmd/platform-api/database.go` 与 `cmd/platform-worker/database.go` 是同一套

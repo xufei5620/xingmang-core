@@ -130,6 +130,27 @@ services:
       DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30s}
+      # --- 请求详情 / reqlog 只读网关（XM-0039，交接文档 §9.4）--------------
+      # 数据源是生产上已在运行的**外挂**「请求审计系统」，平台只做带权限与
+      # 审计的只读网关：请求正文永不落平台库、不缓存、默认不可导出。
+      #
+      # 默认 off（不是 fake）：两个端点整组不挂载。这条通道读的是用户与模型的
+      # 完整对话，一个默认开着的 fake 会把编造的问答摆进一个长得像真的详情页，
+      # 而有人会照着它回复客诉。要演示就显式配 fake，那是一次有意的选择。
+      #
+      # ⚠️ 生产不接受 fake（启动即拒）；real 现在也读不出数据——控制台 API
+      #    形状未核实（见 contracts/connectors/reqlog.read.v1.md §8），端点会
+      #    返回 501。real 还有一处未拍板的冲突：控制台是 http://127.0.0.1:9300
+      #    而只读连接配置要求 https（同文档 §5）。
+      XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
+      XM_REQLOG_ENDPOINT: ${XM_REQLOG_ENDPOINT:-}
+      XM_REQLOG_TARGET_ALLOWLIST: ${XM_REQLOG_TARGET_ALLOWLIST:-}
+      XM_REQLOG_CREDENTIAL_REF: ${XM_REQLOG_CREDENTIAL_REF:-}
+      # 控制台 Basic Auth 的 `用户名:口令` **整串**。默认空：没配就是没有真实
+      # 读取能力，而不是拿占位值去连（宪法 7 条：凭据只经 CredentialRef，
+      # 这个变量只是 env Provider 的落点，Connector 并不认识它）。
+      XM_REQLOG_TOKEN: ${XM_REQLOG_TOKEN:-}
+      XM_REQLOG_TIMEOUT: ${XM_REQLOG_TIMEOUT:-30s}
     # 不发布端口：admin-web 与 API 同源，一切经 web 服务进来（免 CORS）。
     # 需要直连调试时用 docker compose exec / 或同网络的一次性容器。
     healthcheck:

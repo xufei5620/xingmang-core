@@ -209,12 +209,46 @@ export const PLATFORM_TABS = [
   { value: "overview", label: "概览" },
   { value: "trends", label: "指标趋势" },
   { value: "resources", label: "渠道/资源" },
+  // 「请求」只对有请求数据的平台显示（见 platformHasRequests）。它排在资源
+  // 之后、连接之前：运营找一条请求时，心里的路径是「哪个平台 → 哪个用户的
+  // 哪次调用」，而不是先想连接配置
+  { value: "requests", label: "请求" },
   { value: "connection", label: "连接与凭据" },
   { value: "alerts", label: "告警" },
   { value: "operations", label: "操作" },
 ] as const;
 
 export type PlatformTabValue = (typeof PLATFORM_TABS)[number]["value"];
+
+/** 哪些平台有请求数据。
+ *
+ *  与后端 requestlog.SupportsPlatform 逐字对应：reqlog 是 nginx 与
+ *  NewAPI/Sub2API 之间的透明代理，只抄这两家的 /v1/*。别的被管平台
+ *  （CPA、开票、支付、服务器）根本不在它的代理路径上。
+ *
+ *  为什么不给所有平台都挂上、让后端回 404：一个永远空的「请求」页签等于
+ *  告诉运营「这个平台没有请求」，而事实是我们压根没抄它。§12 惯例要的是
+ *  别把没接的说成接了——**也别把没抄的说成没有**。 */
+const PLATFORMS_WITH_REQUESTS = new Set(["sub2api", "newapi"]);
+
+export function platformHasRequests(serviceType: string): boolean {
+  return PLATFORMS_WITH_REQUESTS.has(serviceType);
+}
+
+/** 某个平台实际要显示的页签。
+ *
+ *  做成函数而不是让详情页自己过滤：页签清单是「全平台命名一致」这句话的
+ *  载体，一旦允许调用点各自增删，第二个平台上这句话就不成立了。
+ *  这里是唯一的例外口子，且理由写死在 platformHasRequests 里。 */
+export function tabsForPlatform(serviceType: string): readonly PlatformTab[] {
+  if (platformHasRequests(serviceType)) return PLATFORM_TABS;
+  return PLATFORM_TABS.filter((tab) => tab.value !== "requests");
+}
+
+export interface PlatformTab {
+  value: PlatformTabValue;
+  label: string;
+}
 
 /** 默认页签：ADMIN-IA 规定概览「永远第 1 格」。 */
 export const DEFAULT_PLATFORM_TAB: PlatformTabValue = "overview";
@@ -226,9 +260,17 @@ export const RESOURCES_TAB: PlatformTabValue = "resources";
 /** `?tab=` 参数 → 页签。认不出来的一律回到概览。
  *
  *  不对未知值报错：URL 是人手改的、书签是旧的，把一个拼错的查询参数升级成
- *  一屏错误页，除了拦住人什么也没做成。 */
-export function normalizeTab(raw: string | null | undefined): PlatformTabValue {
-  const hit = PLATFORM_TABS.find((tab) => tab.value === raw);
+ *  一屏错误页，除了拦住人什么也没做成。
+ *
+ *  传了 serviceType 就同时校验「这个平台有没有这一格」：`?tab=requests`
+ *  贴到 CPA 上时，选中一个根本没渲染的页签会得到一屏空白，
+ *  而回到概览至少是一个说得通的页面。 */
+export function normalizeTab(
+  raw: string | null | undefined,
+  serviceType?: string,
+): PlatformTabValue {
+  const available = serviceType === undefined ? PLATFORM_TABS : tabsForPlatform(serviceType);
+  const hit = available.find((tab) => tab.value === raw);
   return hit ? hit.value : DEFAULT_PLATFORM_TAB;
 }
 

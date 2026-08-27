@@ -21,6 +21,11 @@ var platformScopePrefixes = []string{
 	"platform.",
 	"action.",
 	"connector.",
+	// XM-0039：request.read / request.content.read。后者管的是用户与模型的
+	// 完整对话内容——正因为它敏感，更不能让它以 Realm 角色的形式存在：
+	// Keycloak 里建出一个 request.content.read 角色，就等于把「谁能看全平台
+	// 用户对话」这个决定挪出了平台数据库的管辖（ADR-016 / CR-0001 §5）。
+	"request.",
 }
 
 // looksLikePlatformScope 判断一个角色名是否长成平台细粒度权限的样子。
@@ -47,12 +52,32 @@ func looksLikePlatformScope(role string) bool {
 //     写操作的内容摊开。「看板角色拿到 ops.read 不应顺带看见全平台的操作明细」
 //     ——把 audit.read 塞进唯一的 staff 角色，等于让每个员工默认看见全部操作明细，
 //     和那段论证直接冲突。要给，就该是显式的人工决定；
+//
 //  2. **admin 这个角色今天并不存在**。CR-0001 §5 只创建 `staff` 一个 Realm Role。
 //     这里预留 admin 的映射是为了「加角色时不用改代码」，但 Realm 里加角色本身
 //     需要另开一张变更单。在那之前这一行永远不会命中。
 //
-// 结果：CR-0001 执行完当天切过来，员工能登录、能看服务清单与运营指标；审计页与
-// 写操作会 403，直到有人显式授权。Fail Closed 比「先放开再收」便宜得多。
+//  3. **staff 不含 request.read / request.content.read**（XM-0039）。同上一条
+//     论证再进一档：request.read 是**逐条**的调用清单（谁、几点、什么模型、
+//     多少 token），足以还原一个人的使用轨迹；request.content.read 更是用户与
+//     模型之间的完整对话——用户自己粘进去的合同、简历、身份信息、源码都在里面
+//     （交接文档 §9.4 把它列为高敏数据）；
+//
+//  4. **admin 也不含 request.content.read**（XM-0039 验收裁定，2026-08-28）。
+//     这一项曾经写在下面那张表里，理由是「admin 是全权角色，全权就该包含它」——
+//     产品负责人按最小权限原则推翻了它：看全平台用户对话正文的应该是**显式授权
+//     的客诉/风控岗**，而不是每个管理员顺带获得的能力。
+//
+//     裁定还有一句更要紧的理由：**今天不改，以后就石化了**。admin 角色在 Realm
+//     里还不存在（CR-0001 只建了 staff），所以这一行今天不会命中；等它真的被
+//     创建那天，没有人会回过头来质疑一张已经跑了半年的默认表。
+//
+//     要授予就用 XM_OIDC_ROLE_SCOPES 显式配一个专门的角色。
+//     `resolver_test.go` 的 TestDefaultRoleScopeMapIsConservative 钉住了这个决定。
+//
+// 结果：CR-0001 执行完当天切过来，员工能登录、能看服务清单与运营指标；审计页、
+// 请求列表、请求正文与写操作都会 403，直到有人显式授权。
+// Fail Closed 比「先放开再收」便宜得多。
 func DefaultRoleScopeMap() map[string][]string {
 	return map[string][]string{
 		"staff": {"registry.read", "ops.read"},
@@ -63,6 +88,10 @@ func DefaultRoleScopeMap() map[string][]string {
 			"registry.service.manage",
 			"registry.connector.manage",
 			"registry.connection.manage",
+			// request.read 在这里，request.content.read **刻意不在**——
+			// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。
+			// 见上面第 4 条。
+			"request.read",
 		},
 	}
 }

@@ -88,6 +88,18 @@ func main() {
 	)
 	opsStore := ops.NewStore(pool)
 
+	// 请求详情（XM-0039）。没配 XM_REQLOG_MODE 时返回 nil，路由不挂载那两个
+	// 端点——reqlog 是个外挂系统，没部署它的环境该照常起来。
+	//
+	// 但**配错了就拒绝启动**：这条通道读的是用户与模型的完整对话，
+	// 一个半套配置的部署更可能是「以为配好了」而不是「有意不配」。
+	requestLogs, err := newRequestLogService(cfg.Reqlog, cfg.Environment, auditStore, logger)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "reqlog_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:         logger,
 		Service:        "platform-api",
@@ -102,8 +114,10 @@ func main() {
 		MetricHistory: opsStore,
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
-		AuditEvents:    auditStore,
-		Alerts:         alertStore,
+		AuditEvents: auditStore,
+		Alerts:      alertStore,
+		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
+		RequestLogs:    requestLogsOrNil(requestLogs),
 		RequestTimeout: cfg.RequestTimeout,
 	})
 

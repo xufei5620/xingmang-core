@@ -5,6 +5,8 @@ import {
   findPlatform,
   groupPlatforms,
   normalizeTab,
+  platformHasRequests,
+  tabsForPlatform,
   pendingBadge,
   pendingHeadline,
   platformOfMetricKey,
@@ -103,11 +105,12 @@ describe("未接入状态的文案", () => {
 });
 
 describe("统一页签模板", () => {
-  it("顺序与命名逐格对齐 ADMIN-IA 的页签表", () => {
+  it("顺序与命名逐格对齐 ADMIN-IA 的页签表（「请求」为 XM-0039 新增）", () => {
     expect(PLATFORM_TABS.map((tab) => tab.label)).toEqual([
       "概览",
       "指标趋势",
       "渠道/资源",
+      "请求",
       "连接与凭据",
       "告警",
       "操作",
@@ -127,6 +130,35 @@ describe("统一页签模板", () => {
 
   it("旧 /channels 重定向指向的页签确实在模板里", () => {
     expect(PLATFORM_TABS.some((tab) => tab.value === RESOURCES_TAB)).toBe(true);
+  });
+});
+
+describe("「请求」页签只对有请求数据的平台显示（XM-0039）", () => {
+  it("reqlog 只抄 NewAPI 与 Sub2API", () => {
+    // 与后端 requestlog.SupportsPlatform 逐字对应。给别的平台挂一个永远空的
+    // 页签，等于告诉运营「这个平台没有请求」，而事实是我们压根没抄它
+    expect(platformHasRequests("sub2api")).toBe(true);
+    expect(platformHasRequests("newapi")).toBe(true);
+    for (const p of ["cpa", "invoice", "payment", "server", "model-assurance", ""]) {
+      expect(platformHasRequests(p)).toBe(false);
+    }
+  });
+
+  it("没有请求数据的平台，页签清单里不出现「请求」", () => {
+    expect(tabsForPlatform("sub2api").some((t) => t.value === "requests")).toBe(true);
+    expect(tabsForPlatform("cpa").some((t) => t.value === "requests")).toBe(false);
+    // 摘掉一格之后其余六格顺序不变——统一模板这句话不能因为一个例外就松掉
+    expect(tabsForPlatform("cpa").map((t) => t.value)).toEqual(
+      PLATFORM_TABS.filter((t) => t.value !== "requests").map((t) => t.value),
+    );
+  });
+
+  it("`?tab=requests` 贴到没有请求数据的平台上时回到概览", () => {
+    // 选中一个根本没渲染的页签会得到一屏空白；回到概览至少是个说得通的页面
+    expect(normalizeTab("requests", "sub2api")).toBe("requests");
+    expect(normalizeTab("requests", "cpa")).toBe(DEFAULT_PLATFORM_TAB);
+    // 不传 serviceType 时只校验页签名本身（调用方还不知道是哪个平台）
+    expect(normalizeTab("requests")).toBe("requests");
   });
 });
 

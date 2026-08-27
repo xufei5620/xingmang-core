@@ -85,9 +85,9 @@ ADR-016 与 CR-0001 §5：**平台细粒度权限不进 Keycloak**。Realm 只�
 | Realm 角色 | 翻译成的平台 scope | 状态 |
 |---|---|---|
 | `staff` | `registry.read`、`ops.read` | CR-0001 §5 会创建这个角色 |
-| `admin` | 上面两个 + `audit.read` + `registry.service.manage` + `registry.connector.manage` + `registry.connection.manage` | **Realm 里今天没有这个角色**，预留位 |
+| `admin` | 上面两个 + `audit.read` + `registry.service.manage` + `registry.connector.manage` + `registry.connection.manage` + `request.read` | **Realm 里今天没有这个角色**，预留位 |
 
-两处刻意的保守，审定时可以推翻，但请先读完理由：
+三处刻意的保守，前两处审定时可以推翻，第三处**已经裁定过**，请先读完理由：
 
 - **`staff` 默认不含 `audit.read`。** `PERMISSIONS.md` 已经论证过它比 `ops.read`
   高一档：审计事件带 `before_summary` / `after_summary`，是被改动对象的前后镜像；
@@ -95,7 +95,16 @@ ADR-016 与 CR-0001 §5：**平台细粒度权限不进 Keycloak**。Realm 只�
   是**唯一**的 Realm 角色——把 audit.read 塞进去，等于每个员工默认看见全部操作
   明细，和那段论证直接冲突。要给，应当是一次显式的人工决定；
 - **`admin` 今天不会命中。** CR-0001 §5 只创建 `staff`。要加角色需要另开一张
-  变更单（ADR-016 的变更单机制）。预留这一行只是为了「加角色时不用改代码」。
+  变更单（ADR-016 的变更单机制）。预留这一行只是为了「加角色时不用改代码」；
+- **`admin` 含 `request.read`，但没有 `request.content.read`**（XM-0039 验收
+  裁定，2026-08-28）。两者差着一个量级：前者是逐条的调用清单（谁、几点、什么
+  模型、多少 token），后者是**用户与模型之间的完整对话**——用户自己粘进去的
+  合同、简历、身份信息、源码都在里面（交接文档 §9.4 列为高敏数据）。
+  按最小权限原则，看正文的应该是显式授权的客诉/风控岗，而不是每个管理员顺带
+  获得的能力。这一条与上面两条不同：**它不是留待审定的默认值，是已经做出的
+  决定**，`oidcauth/resolver_test.go` 有断言钉住，防止以后被顺手加回去。
+  要授予就配一个专门的角色：
+  `XM_OIDC_ROLE_SCOPES='{"request-auditor":["request.read","request.content.read"]}'`。
 
 于是 CR-0001 执行完当天的效果是：员工能登录、能看服务清单与运营指标；
 审计页与所有写操作会 403，直到有人显式授权。**Fail Closed 比「先放开再收」便宜。**
@@ -113,7 +122,7 @@ ADR-016 禁止的东西。
 ## 五、配置漂移会被记 warn
 
 令牌里出现平台形态的权限串（`registry.*` / `ops.*` / `audit.*` / `platform.*` /
-`action.*` / `connector.*`），无论在 `realm_access.roles`、`scope` 还是
+`action.*` / `connector.*` / `request.*`），无论在 `realm_access.roles`、`scope` 还是
 `resource_access` 里，平台都**忽略**并记一条 WARN：
 
 ```json

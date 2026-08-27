@@ -560,11 +560,12 @@ describe("NewAPI 平台详情（XM-0035）", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("注册表里没有 newapi 也照样展开六格页签，而不是一屏「未接入」", async () => {
+  it("注册表里没有 newapi 也照样展开全部页签，而不是一屏「未接入」", async () => {
     renderRoute("/platforms/newapi");
     // servicesBody 里没有 newapi——页面靠指标活着，不靠登记
     expect(await screen.findByRole("tab", { name: "概览" })).not.toBeNull();
-    expect(screen.getAllByRole("tab")).toHaveLength(6);
+    // 七格：模板六格 + XM-0039 的「请求」（NewAPI 在 reqlog 的抄录范围内）
+    expect(screen.getAllByRole("tab")).toHaveLength(7);
     // 断言的是**正文里**那一屏占位没出现，而不是全屏搜「未接入」——
     // 导航上 CPA / 支付 / 服务器确实还挂着「未接入·Mx」，那是对的。
     expect(screen.queryByText("本环境未登记该平台的实例")).toBeNull();
@@ -1034,17 +1035,44 @@ describe("平台详情：统一页签模板", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("六格页签的顺序与命名逐格对齐 ADMIN-IA", async () => {
+  it("页签的顺序与命名逐格对齐 ADMIN-IA（「请求」为 XM-0039 新增）", async () => {
     renderRoute("/platforms/sub2api");
     const tabs = await screen.findAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "概览",
       "指标趋势",
       "渠道/资源",
+      "请求",
       "连接与凭据",
       "告警",
       "操作",
     ]);
+  });
+
+  it("不在抄录范围内的平台不显示「请求」页签", async () => {
+    // 挂一个永远空的「请求」页签，等于告诉运营「这个平台没有请求」，
+    // 而事实是请求审计系统压根没抄它（XM-0039）。
+    //
+    // 这里必须用一个**已登记**的平台：未接入的平台一格页签都不出，
+    // 那证明不了「请求」这一格是被摘掉的
+    stubFetch((url) =>
+      url.startsWith("/api/v1/services")
+        ? fakeResponse(200, {
+            items: [
+              {
+                ...servicesBody.items[0],
+                id: "22222222-2222-2222-2222-222222222222",
+                service_type: "payment",
+                instance_id: "payment-dev",
+              },
+            ],
+          })
+        : okHandler(url),
+    );
+    renderRoute("/platforms/payment");
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).not.toContain("请求");
+    expect(tabs).toHaveLength(6);
   });
 
   it("默认落在概览，且只显示本平台的指标卡", async () => {

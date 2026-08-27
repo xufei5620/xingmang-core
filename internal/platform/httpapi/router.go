@@ -12,6 +12,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
+	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
 )
 
 // defaultRequestTimeout 是单请求的默认期限。
@@ -31,6 +32,12 @@ type Deps struct {
 	MetricHistory  MetricHistoryLister
 	AuditEvents    AuditEventLister
 	Alerts         AlertLister
+	// RequestLogs 为 nil 时「请求」两个端点不挂载（504 之外的 404）。
+	//
+	// 允许为 nil 而不是必填：这条链路依赖一个**外挂**系统（reqlog），
+	// 一个没部署它的环境不该因此起不来。而挂了 nil 却照样注册路由更糟——
+	// 那会让端点存在、一调就 500，前端分不清「没接」和「坏了」。
+	RequestLogs    RequestLogQuerier
 	RequestTimeout time.Duration
 }
 
@@ -83,6 +90,21 @@ func NewRouter(d Deps) http.Handler {
 		// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 		api.With(RequireScope(alerts.ScopeRead)).
 			Get("/alerts", ListAlertsHandler(d.Alerts))
+
+		// 请求详情（XM-0039）。两条端点、两个权限，分级是这条能力的前提：
+		// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。
+		// 交接文档 §9.4 把后者列为高敏数据，所以它不是 request.read 的
+		// 一个子页面，而是另一次授权。
+		//
+		// 没有配 reqlog 的部署整组不挂载：端点不存在（404）比端点存在却
+		// 一调就 500 诚实——前端据此分得清「没接」和「坏了」。
+		if d.RequestLogs != nil {
+			api.With(RequireScope(requestlog.ScopeRead)).
+				Get("/platforms/{platform}/requests", ListPlatformRequestsHandler(d.RequestLogs))
+			api.With(RequireScope(requestlog.ScopeContentRead)).
+				Get("/platforms/{platform}/requests/{requestID}",
+					GetPlatformRequestContentHandler(d.RequestLogs))
+		}
 	})
 	return r
 }
