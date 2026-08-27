@@ -26,6 +26,21 @@ export interface PlatformSpec {
   plan: PlatformPlan;
   /** 一句话范围。未接入平台的详情页上，这是唯一能诚实给出的内容。 */
   scope: string;
+  /** 页面内容不依赖服务注册表时置 true——没登记也照样打开（XM-0035）。
+   *
+   *  为什么需要这个开关：`registered` 现在同时被拿去回答两个问题——
+   *  「注册表里有没有这个实例」和「这一页点进去有没有东西」。对 NewAPI 这
+   *  两个答案不一致：它的概览与渠道表读的是 `/metrics`（采集任务写的），
+   *  与注册表毫无关系。采集任务一跑起来页面就有真内容，而注册表可能一直空着
+   *  ——登记是 Connection 那一格（尚未实现）才需要的东西。
+   *
+   *  不置这个开关的后果不是「少一个链接」，而是**看板在说谎**：页面明明有
+   *  五条指标可显示，导航却挂着「未接入」。§12 惯例要的是别把没接的说成接了，
+   *  不是把接了的说成没接。
+   *
+   *  Sub2API 论理也符合这个条件（它的两格同样读指标），但它现在的行为有既有
+   *  用例锁着，改它是另一个决定，不搭在本任务里（见 PR 的 follow_ups）。 */
+  opensWithoutRegistry?: boolean;
 }
 
 /** 被管平台目录 —— 导航「被管平台」段与平台详情页共用的唯一清单。
@@ -46,8 +61,12 @@ export const PLATFORM_CATALOG: readonly PlatformSpec[] = [
   {
     serviceType: "newapi",
     label: "NewAPI",
-    plan: { kind: "milestone", milestone: "M1" },
-    scope: "上游模型网关：渠道、令牌与用量，接入后走标准模板。",
+    // XM-0035 起页面已建（概览 + 渠道/资源两格实装，数据来自 newapi.* 指标）。
+    // 真实上游只读客户端仍在等 XM-0038——但那是**数据是真是假**的问题，
+    // 由指标卡的来源与演示横幅回答，不是「页面建没建」的问题。
+    plan: { kind: "shipped" },
+    opensWithoutRegistry: true,
+    scope: "上游模型网关：渠道状态与错误率、用户与余额、充值/订阅、模型用量。",
   },
   {
     serviceType: "cpa",
@@ -134,6 +153,17 @@ export function groupPlatforms(services: readonly ServiceItem[]): PlatformEntry[
     });
   }
   return entries;
+}
+
+/** 这个平台的详情页现在点进去有没有东西。
+ *
+ *  「注册表里登记了」是其中一种情况，不是唯一一种：内容来自指标表的平台
+ *  （见 PlatformSpec.opensWithoutRegistry）没登记也照样有内容可显示。
+ *
+ *  导航与详情页共用这一个判据，否则两边会漂开——导航亮着链接、点进去却是
+ *  一屏「未接入」，那比两边都灰着更让人困惑。 */
+export function platformOpens(entry: PlatformEntry): boolean {
+  return entry.registered || entry.spec.opensWithoutRegistry === true;
 }
 
 /** 取单个平台条目。找不到表示目录与 Registry 都不认识它。 */

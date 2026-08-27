@@ -76,6 +76,38 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.Sub2APISyncInterval = interval
 	}
 
+	// XM-0035：NewAPI 周期同步。默认 fake——真实只读客户端还没写（XM-0038），
+	// 把默认设成 real 只会让每个新环境一上来就满屏 not_supported。
+	//
+	// 这里刻意**不**登记 endpoint / allowlist / credential ref 三项：
+	// XM-0038 之前没有任何代码会读它们，先放出来只会让人以为「配齐就能切真实
+	// 数据」。规格 §8.4 要求的 Connector → CredentialRef → SecretProvider →
+	// 只读 DSN 链路随真实客户端一起落地。
+	newapiMode, err := jobs.ParseNewAPIMode(getenv("XM_NEWAPI_MODE"))
+	if err != nil {
+		return jobs.Config{}, err
+	}
+	config.NewAPIMode = newapiMode
+	if value := strings.TrimSpace(getenv("XM_NEWAPI_INSTANCE_ID")); value != "" {
+		config.NewAPIInstanceID = value
+	}
+	if value := getenv("XM_NEWAPI_SYNC_ENABLED"); value != "" {
+		// 采集链路的停用开关（宪法 26 条）。它同时是**生产环境现阶段唯一
+		// 走得通的配置**：生产不许 fake，而 real 还不存在（XM-0038）。
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("newapi sync enabled: %w", err)
+		}
+		config.NewAPISyncEnabled = enabled
+	}
+	if value := getenv("XM_NEWAPI_SYNC_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("newapi sync interval: %w", err)
+		}
+		config.NewAPISyncInterval = interval
+	}
+
 	// XM-0033：告警评估与投递（规格 §9.3 / §9.4）。
 	//
 	// 投递渠道的三个变量只**读进配置、不解析**：Bot Token 只经 CredentialRef

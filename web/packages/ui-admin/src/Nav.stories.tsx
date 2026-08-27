@@ -35,7 +35,8 @@ export const 被管平台: Story = {
     children: (
       <>
         <span className={activeClass}>Sub2API</span>
-        <NavItemDisabled label="NewAPI" hint="未接入·M1" />
+        {/* NewAPI 自 XM-0035 起页面已建，是普通条目；下面几条才是未接入的样子 */}
+        <span className={linkClass}>NewAPI</span>
         <NavItemDisabled label="CPA" hint="未接入·M4" />
         <NavItemDisabled label="开票系统" hint="契约草案·XM-0028" />
         <NavItemDisabled label="支付" hint="未接入·M3" />

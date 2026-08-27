@@ -22,10 +22,10 @@ describe("NavItemDisabled", () => {
   });
 
   it("既不是链接也不是按钮：点不动才叫禁用", () => {
-    render(<NavItemDisabled label="NewAPI" hint="未接入·M1" />);
+    render(<NavItemDisabled label="CPA" hint="未接入·M4" />);
     // 一个没有目标的链接会被键盘和读屏当成可达入口，点下去什么都不发生
-    expect(screen.queryByRole("link", { name: /NewAPI/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /NewAPI/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /CPA/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /CPA/ })).toBeNull();
   });
 
   it("标记 aria-disabled，辅助技术能读出它是禁用的", () => {

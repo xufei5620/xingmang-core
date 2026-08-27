@@ -14,13 +14,19 @@ export interface MetricPresentation {
   unavailable: boolean;
 }
 
-/** metric_key → 友好名。键取自 connectors/sub2api/contract.go 的指标常量。 */
+/** metric_key → 友好名。键取自各 connector 的 Metric* 常量
+ *  （connectors/sub2api/contract.go、connectors/newapi/contract.go）。 */
 const METRIC_LABELS: Record<string, string> = {
   "sub2api.users.total": "Sub2API 用户数",
   "sub2api.users.balance": "Sub2API 用户余额",
   "sub2api.revenue.daily": "Sub2API 日收入",
   "sub2api.cost.daily": "Sub2API 日成本",
   "sub2api.channels.balance": "Sub2API 渠道余额",
+  "newapi.users.total": "NewAPI 用户数",
+  "newapi.recharge.daily": "NewAPI 日充值",
+  "newapi.subscription.daily": "NewAPI 日订阅",
+  "newapi.channels.status": "NewAPI 渠道状态",
+  "newapi.models.usage": "NewAPI 模型用量",
 };
 
 /** 没有可信数值时主位显示的占位符。 */
@@ -73,6 +79,22 @@ const PRIMARY_READERS: Record<string, PrimaryReader> = {
   }),
   "sub2api.cost.daily": (v) => ({ raw: toIntegerValue(v["amount_minor_units"]), kind: "money" }),
   "sub2api.channels.balance": (v) => ({ raw: channelCountOf(v), kind: "count" }),
+  "newapi.users.total": (v) => ({ raw: toIntegerValue(v["total_users"]), kind: "count" }),
+  "newapi.recharge.daily": (v) => ({
+    raw: toIntegerValue(v["amount_minor_units"]),
+    kind: "money",
+  }),
+  "newapi.subscription.daily": (v) => ({
+    raw: toIntegerValue(v["amount_minor_units"]),
+    kind: "money",
+  }),
+  // 渠道状态的主数值是渠道条数，与 sub2api.channels.balance 同一条理由：
+  // 余额可能币种不一、还可能压根没配，合计不成立（见 NewApiChannelRow.balanceMinorUnits）
+  "newapi.channels.status": (v) => ({ raw: channelCountOf(v), kind: "count" }),
+  "newapi.models.usage": (v) => ({
+    raw: toIntegerValue(v["total_request_count"]),
+    kind: "count",
+  }),
 };
 
 /** 未登记指标的主数值：认得出金额就按金额，认得出整数就按计数，都认不出给 null。 */
@@ -197,6 +219,62 @@ export function channelTotal(rows: ChannelRow[]): { total: bigint; currency: str
   return { total, currency: [...currencies][0] ?? "" };
 }
 
+// --- NewAPI 渠道状态 ---
+
+/** NewAPI 渠道状态指标里的一行（写入形状见 connectors/newapi/contract.go）。 */
+export interface NewApiChannelRow {
+  channelId: string;
+  name: string;
+  type: string;
+  /** null 表示上游没给这个字段——显示成「未知」，不默认当作启用。 */
+  enabled: boolean | null;
+  /** undefined = **未配置余额**（键不存在）；null = 值不是合法整数最小单位。
+   *
+   *  三态而不是两态：`undefined` 与 `0` 在业务上是相反的两件事——前者是
+   *  「这个渠道本来就不按余额计费」，后者是「配了，而且已经花光了，要立刻处理」。
+   *  契约层为此把余额做成可空并在 nil 时**不写这个键**，显示层必须把这个
+   *  区分接住，否则契约那一层的努力到这里就白费了。 */
+  balanceMinorUnits: bigint | null | undefined;
+  currency: string;
+  modelCount: bigint | null;
+  /** 错误率，ppm 整数。null 表示取不到可信数值。 */
+  errorRatePPM: bigint | null;
+  latencyMS: bigint | null;
+}
+
+function readNewApiChannelRow(raw: Record<string, unknown>): NewApiChannelRow {
+  const enabled = raw["enabled"];
+  return {
+    channelId: readString(raw, "channel_id") ?? "",
+    name: readString(raw, "name") ?? "",
+    type: readString(raw, "type") ?? "",
+    enabled: typeof enabled === "boolean" ? enabled : null,
+    // 键不存在 → undefined（未配置）；键在但值不合法 → null（数值异常）。
+    // `in` 判断而不是 `?? undefined`：后者会把一个显式的 null 也读成未配置。
+    balanceMinorUnits:
+      "balance_minor_units" in raw ? toIntegerValue(raw["balance_minor_units"]) : undefined,
+    currency: currencyOf(raw),
+    modelCount: toIntegerValue(raw["model_count"]),
+    errorRatePPM: toIntegerValue(raw["error_rate_ppm"]),
+    latencyMS: toIntegerValue(raw["latency_ms"]),
+  };
+}
+
+/** 从 NewAPI 渠道状态指标的 value 里解析出逐渠道明细。
+ *  卡片摘要与渠道表共用这一个解析函数，避免两处各解析一遍再解析出分歧。 */
+export function readNewApiChannelRows(
+  value: Record<string, unknown> | null,
+): NewApiChannelRow[] {
+  const raw = value?.["channels"];
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[])
+    .filter((c): c is Record<string, unknown> => typeof c === "object" && c !== null)
+    .map(readNewApiChannelRow);
+}
+
+/** NewAPI 渠道状态指标的键。渠道表要从指标列表里挑出这一条。 */
+export const NEWAPI_CHANNELS_METRIC_KEY = "newapi.channels.status";
+
 // --- 卡片渲染 ---
 
 interface ValueRender {
@@ -234,6 +312,28 @@ function renderChannelBalance(value: Record<string, unknown>): ValueRender {
   };
 }
 
+/** 渠道状态是个聚合指标，值里是一个数组，单独处理。
+ *
+ *  主数值是渠道条数，补充说明给「启用 / 异常」两个数——这三个数正是运营
+ *  在总览上要一眼看到的东西（「几个渠道、几个开着、几个不对劲」）。
+ *
+ *  不给合计余额：币种可能不一致，而且部分渠道压根没配余额，
+ *  一个把「未配置」当 0 加进去的合计是纯粹的错数。 */
+function renderNewApiChannelStatus(value: Record<string, unknown>): ValueRender {
+  const enabled = toIntegerValue(value["enabled_channel_count"]);
+  const unhealthy = toIntegerValue(value["unhealthy_channel_count"]);
+
+  return {
+    primary: `${formatPrimary(metricPrimaryValue(NEWAPI_CHANNELS_METRIC_KEY, value), "")} 个渠道`,
+    secondary: joinParts([
+      enabled === null ? undefined : `启用 ${formatCount(enabled)}`,
+      // 0 个异常也要说出来：不显示与「没算过」在页面上长得一样，
+      // 而「查过了，都正常」是一条真正的信息
+      unhealthy === null ? undefined : `异常 ${formatCount(unhealthy)}`,
+    ]),
+  };
+}
+
 const RENDERERS: Record<string, Renderer> = {
   "sub2api.users.total": (v) => ({
     primary: formatPrimary(metricPrimaryValue("sub2api.users.total", v), ""),
@@ -255,6 +355,33 @@ const RENDERERS: Record<string, Renderer> = {
     secondary: joinParts([readString(v, "day") ? `业务日 ${readString(v, "day")}` : undefined]),
   }),
   "sub2api.channels.balance": renderChannelBalance,
+  "newapi.users.total": (v) => ({
+    primary: formatPrimary(metricPrimaryValue("newapi.users.total", v), ""),
+    secondary: joinParts([
+      `活跃 ${formatCount(v["active_users"])}`,
+      v["balance_minor_units"] === undefined
+        ? undefined
+        : `余额 ${formatMinorUnits(v["balance_minor_units"], currencyOf(v))}`,
+    ]),
+  }),
+  "newapi.recharge.daily": (v) => ({
+    primary: formatPrimary(metricPrimaryValue("newapi.recharge.daily", v), currencyOf(v)),
+    secondary: joinParts([
+      readString(v, "day") ? `业务日 ${readString(v, "day")}` : undefined,
+      v["order_count"] === undefined ? undefined : `${formatCount(v["order_count"])} 单`,
+    ]),
+  }),
+  "newapi.subscription.daily": (v) => ({
+    primary: formatPrimary(metricPrimaryValue("newapi.subscription.daily", v), currencyOf(v)),
+    secondary: joinParts([readString(v, "day") ? `业务日 ${readString(v, "day")}` : undefined]),
+  }),
+  "newapi.channels.status": renderNewApiChannelStatus,
+  "newapi.models.usage": (v) => ({
+    primary: `${formatPrimary(metricPrimaryValue("newapi.models.usage", v), "")} 次请求`,
+    secondary: joinParts([
+      v["model_count"] === undefined ? undefined : `${formatCount(v["model_count"])} 个模型`,
+    ]),
+  }),
 };
 
 /** 未登记指标的兜底渲染：认得出金额就按金额显示，认得出整数就按计数显示，

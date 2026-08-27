@@ -768,10 +768,15 @@ func TestSub2APIFakeModeRejectedInProduction(t *testing.T) {
 	}
 
 	// 显式关闭同步是允许的：不采集不等于采集假数据。
+	//
+	// NewAPI 的同步也要一起关掉（XM-0035 给它加了同款生产闸，默认同样是
+	// fake）：本用例验的是「Sub2API 这条闸能被正确满足」，不该被另一条闸
+	// 的默认值顺带拦下。两条闸各自独立，这里只隔离出被测的那一条。
 	off := DefaultConfig()
 	off.Environment = "production"
 	off.Sub2APIMode = Sub2APIModeFake
 	off.Sub2APISyncEnabled = false
+	off.NewAPISyncEnabled = false
 	if err := off.normalized().validate(); err != nil {
 		t.Fatalf("production 下关闭同步应通过: %v", err)
 	}
@@ -783,6 +788,7 @@ func TestSub2APIFakeModeRejectedInProduction(t *testing.T) {
 	realMode := DefaultConfig()
 	realMode.Environment = "production"
 	realMode.Sub2APIMode = Sub2APIModeReal
+	realMode.NewAPISyncEnabled = false // 同上：隔离出 Sub2API 这一条闸
 	if err := realMode.normalized().validate(); err != nil {
 		t.Fatalf("production + real 应通过: %v", err)
 	}

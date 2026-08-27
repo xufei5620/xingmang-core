@@ -8,6 +8,7 @@ import {
   pendingBadge,
   pendingHeadline,
   platformOfMetricKey,
+  platformOpens,
   PLATFORM_CATALOG,
   PLATFORM_TABS,
   RESOURCES_TAB,
@@ -137,5 +138,32 @@ describe("指标键 → 平台", () => {
   it("没有点的键不硬凑一个平台出来", () => {
     expect(platformOfMetricKey("weird_metric")).toBe("");
     expect(platformOfMetricKey(".leading")).toBe("");
+  });
+});
+
+describe("页面开不开：登记 vs 有内容（XM-0035）", () => {
+  it("NewAPI 没登记也照样开：它的内容来自 newapi.* 指标，不依赖注册表", () => {
+    const entry = findPlatform("newapi", []);
+    expect(entry?.registered).toBe(false);
+    // 挂着「未接入」而页面明明有指标可显示，那是看板在说谎。
+    // §12 惯例要的是别把没接的说成接了，不是把接了的说成没接。
+    expect(entry && platformOpens(entry)).toBe(true);
+  });
+
+  it("还没建页的平台不因此一起放行——开关是逐平台声明的，不是全局放宽", () => {
+    const cpa = findPlatform("cpa", []);
+    expect(cpa && platformOpens(cpa)).toBe(false);
+    const invoice = findPlatform("invoice", []);
+    expect(invoice && platformOpens(invoice)).toBe(false);
+  });
+
+  it("登记了就开，与声明无关", () => {
+    const cpa = findPlatform("cpa", [service("cpa", "cpa-1")]);
+    expect(cpa && platformOpens(cpa)).toBe(true);
+  });
+
+  it("NewAPI 的目录状态是「已建页」，不再是某个里程碑", () => {
+    const spec = PLATFORM_CATALOG.find((p) => p.serviceType === "newapi");
+    expect(spec?.plan.kind).toBe("shipped");
   });
 });

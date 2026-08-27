@@ -7,6 +7,7 @@ import {
   metricSeriesValue,
   presentMetric,
   readChannelRows,
+  readNewApiChannelRows,
   toSparkSamples,
 } from "./metrics";
 
@@ -358,5 +359,122 @@ describe("readChannelRows / channelTotal", () => {
       channelTotal(readChannelRows({ channels: [{ balance_minor_units: "x", currency: "CNY" }] })),
     ).toBeNull();
     expect(channelTotal([])).toBeNull();
+  });
+});
+
+// 指标键抽成常量而不是就地写字面量：`xxx_key: "……"` 这个形状会被 gitleaks 的
+// generic-api-key 规则当成泄露的密钥（同一条误报见 router.test.tsx）。本仓禁止
+// 加 gitleaks allowlist（会顺手掩盖真报，见 scripts/check-governance.sh），
+// 所以换个写法比放宽扫描器划算。
+const NEWAPI_CHANNELS_METRIC = "newapi.channels.status";
+const NEWAPI_RECHARGE_METRIC = "newapi.recharge.daily";
+const NEWAPI_SUBSCRIPTION_METRIC = "newapi.subscription.daily";
+
+describe("NewAPI 渠道状态（XM-0035）", () => {
+  const rows = () =>
+    readNewApiChannelRows({
+      channels: [
+        {
+          channel_id: "ch-1",
+          name: "上游甲",
+          type: "openai",
+          enabled: true,
+          balance_minor_units: 10000,
+          currency: "CNY",
+          model_count: 12,
+          error_rate_ppm: 1200,
+          latency_ms: 480,
+        },
+        // 余额键缺席 = 未配置
+        { channel_id: "ch-2", name: "自建乙", enabled: false, currency: "CNY" },
+        // 余额确实是 0 = 已耗尽
+        { channel_id: "ch-3", name: "上游丙", enabled: true, balance_minor_units: 0, currency: "CNY" },
+      ],
+    });
+
+  it("余额三态：未配置 / 已耗尽 / 有值，互不合流", () => {
+    const [withBalance, unconfigured, zero] = rows();
+    expect(withBalance?.balanceMinorUnits).toBe(10000n);
+    // undefined ≠ 0n：前者是「这个渠道不按余额计费」，后者是「花光了，要立刻处理」。
+    // 合流成一个值，看板上就会出现一排理直气壮的 ¥0.00，运营分不出哪个该救。
+    expect(unconfigured?.balanceMinorUnits).toBeUndefined();
+    expect(zero?.balanceMinorUnits).toBe(0n);
+  });
+
+  it("启停缺字段时是 null 而不是默认 false——不替上游断言", () => {
+    expect(rows()[0]?.enabled).toBe(true);
+    expect(rows()[1]?.enabled).toBe(false);
+    expect(readNewApiChannelRows({ channels: [{ channel_id: "x" }] })[0]?.enabled).toBeNull();
+  });
+
+  it("错误率读成 bigint，不经过浮点", () => {
+    expect(rows()[0]?.errorRatePPM).toBe(1200n);
+    expect(typeof rows()[0]?.errorRatePPM).toBe("bigint");
+  });
+
+  it("channels 不是数组时给空数组，不抛错也不编数据", () => {
+    expect(readNewApiChannelRows(null)).toEqual([]);
+    expect(readNewApiChannelRows({})).toEqual([]);
+    expect(readNewApiChannelRows({ channels: "nope" })).toEqual([]);
+  });
+
+  it("渠道状态卡片给出渠道数、启用数与异常数", () => {
+    const shown = presentMetric(
+      metric({
+        metric_key: NEWAPI_CHANNELS_METRIC,
+        value: {
+          channel_count: 6,
+          enabled_channel_count: 5,
+          unhealthy_channel_count: 1,
+          channels: [],
+        },
+      }),
+    );
+    expect(shown.label).toBe("NewAPI 渠道状态");
+    expect(shown.primary).toBe("6 个渠道");
+    // 异常为 0 也要说出来：不显示与「没算过」在页面上长得一样
+    expect(shown.secondary).toContain("启用 5");
+    expect(shown.secondary).toContain("异常 1");
+  });
+
+  it("充值与订阅是两条指标，各自带业务日", () => {
+    const recharge = presentMetric(
+      metric({
+        metric_key: NEWAPI_RECHARGE_METRIC,
+        value: { day: "2026-08-27", amount_minor_units: 864200, currency: "CNY", order_count: 94 },
+      }),
+    );
+    expect(recharge.label).toBe("NewAPI 日充值");
+    expect(recharge.primary).toBe("¥8,642.00");
+    expect(recharge.secondary).toContain("94 单");
+
+    const subscription = presentMetric(
+      metric({
+        metric_key: NEWAPI_SUBSCRIPTION_METRIC,
+        value: { day: "2026-08-27", amount_minor_units: 318000, currency: "CNY" },
+      }),
+    );
+    expect(subscription.label).toBe("NewAPI 日订阅");
+    expect(subscription.primary).toBe("¥3,180.00");
+  });
+
+  it("从未采集时不显示数字，哪怕 value 里还留着 0（宪法 12 条）", () => {
+    const shown = presentMetric(
+      metric({
+        metric_key: NEWAPI_CHANNELS_METRIC,
+        value: { channel_count: 0, channels: [] },
+        freshness: {
+          state: "uninitialized",
+          staleness_seconds: null,
+          threshold_seconds: 1800,
+          is_partial: false,
+          observed_at: null,
+          last_success: null,
+          last_error_code: "",
+        },
+      }),
+    );
+    expect(shown.primary).toBe("未初始化");
+    expect(shown.unavailable).toBe(true);
   });
 });

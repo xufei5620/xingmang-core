@@ -1,8 +1,12 @@
-/** 金额与计数的展示格式化。
+/** 金额、计数与比率的展示格式化。
  *
  *  宪法 13 条：金额禁止 Float，货币金额一律用整数最小单位。所以这里全程
  *  BigInt 整除 + 取余拼字符串，**没有一次除法是浮点的**——`123456 / 100` 这种
- *  写法在别的地方也许无害，在金额上就是错的开始。 */
+ *  写法在别的地方也许无害，在金额上就是错的开始。
+ *
+ *  比率（错误率，ppm）走同一条纪律、同一套整除取余的手法，所以放在同一个
+ *  文件里：把「显示用的除法一律整数」这件事集中在一处，比按「这是钱还是比率」
+ *  分成两个文件更不容易漏。 */
 
 /** 最小单位指数：1 个货币单位 = 10^exponent 个最小单位。 */
 const CURRENCY_EXPONENT: Record<string, number> = {
@@ -95,6 +99,33 @@ export function formatMinorUnits(minorUnits: unknown, currency: string): string 
 
   const symbol = CURRENCY_SYMBOL[code];
   const body = symbol ? `${symbol}${text}` : `${code} ${text}`;
+  return negative ? `-${body}` : body;
+}
+
+/** ppm（百万分之一）整数 → 百分比展示字符串，两位小数。
+ *
+ *  例：`1200` → `"0.12%"`，`187500` → `"18.75%"`，`0` → `"0.00%"`。
+ *
+ *  **全程整数运算，不经过一次浮点。** 写成 `(ppm / 10000).toFixed(2)` 看着更短，
+ *  但那正是契约层用 ppm 整数要避免的东西（见 connectors/newapi 的
+ *  ErrorRatePPM 注释）：数据在类型上守住了不用浮点，显示层再把它丢回 float
+ *  等于把纪律守到最后一米又松手。整数位取 `ppm / 10000`，两位小数取
+ *  `ppm % 10000 / 100` 再左补零。
+ *
+ *  取值不是合法整数时返回「数值异常」，与金额同一条处理：宁可显眼地说不对，
+ *  也不能悄悄显示一个算错的比率。 */
+export function formatErrorRatePPM(value: unknown): string {
+  const ppm = toIntegerValue(value);
+  if (ppm === null) return INVALID_VALUE_TEXT;
+
+  const negative = ppm < 0n;
+  const abs = negative ? -ppm : ppm;
+  const whole = abs / 10_000n;
+  // 截断而不是四舍五入：错误率显示成比实际**低**的值是危险的方向，
+  // 而进位只会在 x.xx5 上把它抬高。截断至少不会让 4.999% 显示成 5.00%
+  // 从而看着刚好压在阈值上。
+  const fraction = (abs % 10_000n) / 100n;
+  const body = `${groupDigits(whole.toString())}.${fraction.toString().padStart(2, "0")}%`;
   return negative ? `-${body}` : body;
 }
 

@@ -72,6 +72,27 @@ type Config struct {
 	// 不是任务决定（ADR-014）。fake 模式用不到它。
 	Sub2APISecrets secrets.SecretProvider
 
+	// NewAPISyncEnabled 决定是否注册 NewAPI 周期同步任务（XM-0035）。
+	//
+	// 零值 false 与 Sub2APISyncEnabled 同一条纪律：用 Config 字面量构造的
+	// 调用方（集成测试等）必须显式打开。DefaultConfig 把它打开。
+	// 它同时是这条采集链路的停用开关（宪法 26 条）。
+	NewAPISyncEnabled bool
+	// NewAPISyncInterval 是同步周期，默认 DefaultNewAPISyncInterval。
+	NewAPISyncInterval time.Duration
+	// NewAPISyncRunOnStart 让进程起来就先采一次，而不是干等一个周期。
+	NewAPISyncRunOnStart bool
+	// NewAPISyncRunID 仅供集成测试隔离，生产必须留空——留空才让所有副本
+	// 共享同一条唯一性记录，同一个周期只采一次。
+	NewAPISyncRunID string
+	// NewAPIMode 选择 fake / real 客户端；空值按 fake 处理。
+	//
+	// real 在 XM-0038 之前必然失败（真实客户端还没写），失败会作为
+	// not_supported 的观测落库而不是让进程起不来——见 NewNewAPIClientFactory。
+	NewAPIMode NewAPIMode
+	// NewAPIInstanceID 是观测的 Source，默认 DefaultNewAPIInstanceID。
+	NewAPIInstanceID string
+
 	// AlertEvaluateEnabled 决定是否注册告警评估任务（XM-0033）。
 	//
 	// 与 Sub2APISyncEnabled 同样的零值纪律：用 Config 字面量构造的调用方
@@ -119,6 +140,15 @@ func DefaultConfig() Config {
 		Sub2APIMode:           Sub2APIModeFake,
 		Sub2APIInstanceID:     DefaultSub2APIInstanceID,
 		Sub2APIRequestTimeout: DefaultSub2APIRequestTimeout,
+		// NewAPI 同理（XM-0035）：默认就采、默认走 fake，因为真实只读客户端
+		// 还没写（XM-0038）。看板要的是「持续更新的新鲜度数据」——
+		// 一条默认关闭的采集链路会让 NewAPI 平台页一直空着，而空着与
+		// 「采集失败」在页面上长得一模一样。
+		NewAPISyncEnabled:    true,
+		NewAPISyncInterval:   DefaultNewAPISyncInterval,
+		NewAPISyncRunOnStart: true,
+		NewAPIMode:           NewAPIModeFake,
+		NewAPIInstanceID:     DefaultNewAPIInstanceID,
 		// 告警默认就跑：Foundation-A 的退出条件之一是「能触发一条真实告警」
 		// （规格 §22.2），而一个默认关闭的告警系统在需要它的那天多半还是关的。
 		// 没配投递渠道时它照常评估落库，只是每轮打一条 warn 说没投出去。
@@ -146,6 +176,15 @@ func (c Config) normalized() Config {
 	if c.Sub2APIRequestTimeout <= 0 {
 		// 漏填超时回落到默认值，绝不能变成「没有超时」（规格 §18.1-4）
 		c.Sub2APIRequestTimeout = defaults.Sub2APIRequestTimeout
+	}
+	if c.NewAPISyncInterval == 0 {
+		c.NewAPISyncInterval = defaults.NewAPISyncInterval
+	}
+	if strings.TrimSpace(string(c.NewAPIMode)) == "" {
+		c.NewAPIMode = defaults.NewAPIMode
+	}
+	if strings.TrimSpace(c.NewAPIInstanceID) == "" {
+		c.NewAPIInstanceID = defaults.NewAPIInstanceID
 	}
 	if c.AlertEvaluateInterval == 0 {
 		c.AlertEvaluateInterval = defaults.AlertEvaluateInterval
@@ -233,6 +272,40 @@ func (c Config) validate() error {
 			return fmt.Errorf("sub2api credential ref: %w", err)
 		}
 	}
+	if _, err := ParseNewAPIMode(string(c.NewAPIMode)); err != nil {
+		return err
+	}
+	if c.NewAPISyncRunID != "" && c.Environment == "production" {
+		// 与 Sub2APISyncRunID 同一条理由：RunID 只服务于集成测试隔离。
+		// 生产留空才让所有副本共享同一条唯一性记录，同一个周期只采一次。
+		return fmt.Errorf("newapi sync run ID must not be set in production")
+	}
+	if c.NewAPISyncEnabled && c.NewAPISyncInterval < time.Second {
+		return fmt.Errorf("newapi sync interval %s is below River's one-second minimum", c.NewAPISyncInterval)
+	}
+	if c.NewAPISyncEnabled && c.NewAPIMode == NewAPIModeFake && c.Environment == "production" {
+		// 生产环境启动即拒（fail closed）——与 Sub2API 完全同一条纪律。
+		//
+		// Fake 客户端返回的是**构造出来的**用户数、充值额、渠道错误率，
+		// 而同步任务会把它们原样写进 ops.metric_observation / _sample。
+		// 一旦落库，看板就以正常主数字 + 「数据新鲜」徽章呈现它们，
+		// 只在底部小字里写一个 source——那已经不是「库里有演示数据」的风险，
+		// 而是生产运营读数直接是假的（宪法 12 条）。
+		//
+		// 为什么在启动时拒绝而不是运行时降级：默认值（DefaultConfig）是
+		// NewAPIMode=fake，所以「忘了配」的结果恰好是最危险的那一种。
+		//
+		// ⚠️ NewAPI 与 Sub2API 在这里有一处实际差别：Sub2API 可以改配 real
+		// 顶上，NewAPI 的 real 在 XM-0038 之前**根本不存在**。所以生产环境
+		// 现阶段唯一走得通的选择是显式关掉这条采集
+		// （XM_NEWAPI_SYNC_ENABLED=false）——错误信息必须把这一点说清楚，
+		// 否则运维会按 Sub2API 的经验去配一个还不存在的 real 模式，
+		// 然后收获满屏 not_supported。
+		return fmt.Errorf(
+			"环境 production 不允许 newapi fake 模式：Fake 会把演示数据写成生产运营读数。" +
+				"NewAPI 的真实只读客户端尚未实现（XM-0038），因此现阶段生产只能显式关闭同步：" +
+				"XM_NEWAPI_SYNC_ENABLED=false")
+	}
 	if c.AlertEvaluateEnabled && c.AlertEvaluateInterval < time.Second {
 		return fmt.Errorf("alert evaluate interval %s is below River's one-second minimum", c.AlertEvaluateInterval)
 	}
@@ -307,6 +380,34 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			&river.PeriodicJobOpts{
 				ID:         Sub2APISyncJobKind,
 				RunOnStart: cfg.Sub2APISyncRunOnStart,
+			},
+		))
+	}
+
+	if cfg.NewAPISyncEnabled {
+		// 与 Sub2API 同样的装配方式：仓储在这里从既有连接池构造，任务只依赖
+		// ObservationStore 接口，换成内存实现就能在没有库的机器上跑完整条
+		// 失败路径的单元测试。
+		river.AddWorker(workers, NewNewAPISyncWorker(NewAPISyncOptions{
+			Logger:      cfg.Logger,
+			Environment: cfg.Environment,
+			InstanceID:  cfg.NewAPIInstanceID,
+			Mode:        cfg.NewAPIMode,
+			Store:       ops.NewStore(pool),
+			NewClient:   NewNewAPIClientFactory(cfg.NewAPIMode),
+		}))
+		periodic = append(periodic, river.NewPeriodicJob(
+			river.PeriodicInterval(cfg.NewAPISyncInterval),
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := NewAPISyncArgs{RunID: cfg.NewAPISyncRunID}
+				opts := args.InsertOpts()
+				// 唯一性周期跟随配置的节奏；参数层的默认值只服务于临时插入。
+				opts.UniqueOpts.ByPeriod = cfg.NewAPISyncInterval
+				return args, &opts
+			},
+			&river.PeriodicJobOpts{
+				ID:         NewAPISyncJobKind,
+				RunOnStart: cfg.NewAPISyncRunOnStart,
 			},
 		))
 	}

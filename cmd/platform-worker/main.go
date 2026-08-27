@@ -86,6 +86,12 @@ func main() {
 		"sub2api_mode", string(config.Sub2APIMode),
 		"sub2api_source", config.Sub2APIInstanceID,
 		"sub2api_sync_interval", config.Sub2APISyncInterval.String(),
+		// NewAPI 同理（XM-0035）：运维必须能一眼看出这批数字是 Fake 产的
+		// 还是真实上游来的，而不是等发现数字不对再回来翻配置。
+		"newapi_sync_enabled", config.NewAPISyncEnabled,
+		"newapi_mode", string(config.NewAPIMode),
+		"newapi_source", config.NewAPIInstanceID,
+		"newapi_sync_interval", config.NewAPISyncInterval.String(),
 		// 告警同理：运维必须能一眼看出这个进程会不会评估告警、会不会投递、
 		// 往哪儿投。**只打渠道是否配置，不打 chat_id、不打 webhook 地址**——
 		// 后者常常本身就是凭据（宪法 7 条）。

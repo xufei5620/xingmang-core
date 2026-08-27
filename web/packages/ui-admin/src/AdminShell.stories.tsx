@@ -25,7 +25,10 @@ const nav = (
     </NavSection>
     <NavSection title="被管平台">
       <span className={linkClass}>Sub2API</span>
-      <NavItemDisabled label="NewAPI" hint="未接入·M1" />
+      {/* NewAPI 自 XM-0035 起页面已建（内容来自 newapi.* 指标），
+          所以它在这里是普通条目而不是禁用占位；禁用的样子看 CPA 那条 */}
+      <span className={linkClass}>NewAPI</span>
+      <NavItemDisabled label="CPA" hint="未接入·M4" />
       <NavItemDisabled label="开票系统" hint="契约草案·XM-0028" />
     </NavSection>
     <NavSection title="平台治理">
