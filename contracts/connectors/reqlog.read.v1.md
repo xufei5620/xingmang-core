@@ -152,8 +152,17 @@ reqlog 按天分目录存放，真实标识很可能长成 `20260828/000123`。�
 - `reason` 是可选查询参数，原样写进审计的 `reason` 列。**是否必填是产品决定**
   （每看一条都要打字会改变日常操作手感），当前未强制。
 
-`RoleScopeMap`：两个 scope 都**不给 `staff`**；`admin`（Realm 里今天并不存在）
-预留了两项，其中 `request.content.read` 标注为最该被审定推翻的一项。
+`RoleScopeMap`（**已裁定，2026-08-28 XM-0039 验收**）：
+
+- `staff` **两个 scope 都不给**；
+- `admin`（Realm 里今天并不存在）只给 `request.read`，
+  **不给 `request.content.read`**。
+
+裁定理由（按最小权限原则）：看全平台用户对话正文的应该是**显式授权的
+客诉/风控岗**，而不是每个管理员顺带获得的能力——「admin 是全权角色」
+在明文对话面前不构成理由。要授予就用 `XM_OIDC_ROLE_SCOPES` 配一个专门的角色。
+`oidcauth/resolver_test.go` 的 `TestDefaultRoleScopeMapIsConservative`
+钉住了这个决定，防止以后被顺手加回去。
 
 ## 5. 四道只读闸（ADR-018）
 

@@ -37,9 +37,15 @@
 这条冲突尚未拍板（同文档 §5）。
 
 需要的权限：列表 `request.read`，正文 `request.content.read`。
-两者都不在 `DefaultRoleScopeMap` 的 `staff` 里，需显式授予
-（`XM_OIDC_ROLE_SCOPES`）。**每次读取正文都会写一条 `request.content.viewed`
-审计事件；写不进去就不返回内容。**
+两者都不在 `DefaultRoleScopeMap` 的 `staff` 里；`admin` 只有前者——
+**看正文要显式授予一个专门的角色**（XM-0039 验收裁定，理由见
+`docs/modules/httpapi/AUTH-SWITCH.md`）：
+
+```bash
+XM_OIDC_ROLE_SCOPES='{"request-auditor":["request.read","request.content.read"]}'
+```
+
+**每次读取正文都会写一条 `request.content.viewed` 审计事件；写不进去就不返回内容。**
 
 ### 连接串纪律（宪法 7 条 / XM-R008）
 

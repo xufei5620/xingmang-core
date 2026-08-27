@@ -61,13 +61,19 @@ func looksLikePlatformScope(role string) bool {
 //     论证再进一档：request.read 是**逐条**的调用清单（谁、几点、什么模型、
 //     多少 token），足以还原一个人的使用轨迹；request.content.read 更是用户与
 //     模型之间的完整对话——用户自己粘进去的合同、简历、身份信息、源码都在里面
-//     （交接文档 §9.4 把它列为高敏数据）。
+//     （交接文档 §9.4 把它列为高敏数据）；
 //
-// ⚠️ **admin 这一行里的 request.content.read 是本文件里最该被审定推翻的一项。**
-// 它写在这里的理由只是「admin 是全权角色，全权就该包含它」，而这个理由在
-// 「全平台用户对话内容」面前不一定站得住：真实运营里需要看正文的往往是少数
-// 客诉/风控岗，不是每个管理员。Realm 里真要创建 admin 角色的那天，
-// 正确做法多半是把这一项拆到一个单独的角色上，用 XM_OIDC_ROLE_SCOPES 覆盖。
+//  4. **admin 也不含 request.content.read**（XM-0039 验收裁定，2026-08-28）。
+//     这一项曾经写在下面那张表里，理由是「admin 是全权角色，全权就该包含它」——
+//     产品负责人按最小权限原则推翻了它：看全平台用户对话正文的应该是**显式授权
+//     的客诉/风控岗**，而不是每个管理员顺带获得的能力。
+//
+//     裁定还有一句更要紧的理由：**今天不改，以后就石化了**。admin 角色在 Realm
+//     里还不存在（CR-0001 只建了 staff），所以这一行今天不会命中；等它真的被
+//     创建那天，没有人会回过头来质疑一张已经跑了半年的默认表。
+//
+//     要授予就用 XM_OIDC_ROLE_SCOPES 显式配一个专门的角色。
+//     `resolver_test.go` 的 TestDefaultRoleScopeMapIsConservative 钉住了这个决定。
 //
 // 结果：CR-0001 执行完当天切过来，员工能登录、能看服务清单与运营指标；审计页、
 // 请求列表、请求正文与写操作都会 403，直到有人显式授权。
@@ -82,8 +88,10 @@ func DefaultRoleScopeMap() map[string][]string {
 			"registry.service.manage",
 			"registry.connector.manage",
 			"registry.connection.manage",
+			// request.read 在这里，request.content.read **刻意不在**——
+			// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。
+			// 见上面第 4 条。
 			"request.read",
-			"request.content.read",
 		},
 	}
 }
