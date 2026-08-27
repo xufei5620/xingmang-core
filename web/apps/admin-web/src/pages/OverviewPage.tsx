@@ -1,7 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { EmptyState } from "@xingmang/ui-primitives";
+import { listAlerts } from "../api/alerts";
 import { listMetrics, METRIC_HISTORY_HOURS, type MetricItem } from "../api/platform";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
+import { AlertSummaryCard } from "../components/AlertSummaryCard";
 import { ApiStateView } from "../components/ApiStateView";
 import { MetricCard } from "../components/MetricCard";
 import { MetricSparkline } from "../components/MetricSparkline";
@@ -21,6 +23,13 @@ export function OverviewPage() {
     queryKey: ["metrics"],
     queryFn: ({ signal }) => listMetrics({ signal }),
   });
+  // 告警走**独立**的 query，不并进 metrics：两者的失败必须能分开显示。
+  // 合成一条的话，指标端点挂掉会把告警卡一起换成错误态，而那正是最需要
+  // 看见告警的时候（规格 §9.2 把告警列为总览的固定一项）。
+  const alertsQuery = useQuery({
+    queryKey: ["alerts", "active"],
+    queryFn: ({ signal }) => listAlerts({ signal }),
+  });
 
   // 手动刷新与自动刷新走同一条路：卡片数值和它下面那条折线必须一起更新。
   // 折线挂在独立的 ['metric-history', ...] key 上，只 refetch ['metrics'] 的话
@@ -28,6 +37,7 @@ export function OverviewPage() {
   // 于是界面自己说了一句假话（Codex #4）
   const refreshAll = () => {
     void query.refetch();
+    void alertsQuery.refetch();
     void queryClient.invalidateQueries({ queryKey: [METRIC_HISTORY_QUERY_PREFIX] });
   };
 
@@ -39,11 +49,26 @@ export function OverviewPage() {
         title="运营总览"
         description={`所有数值都带数据时间与新鲜度状态；没有新鲜度就没有数字。折线为近 ${METRIC_HISTORY_HOURS} 小时趋势，每 ${OVERVIEW_POLL_INTERVAL_MS / 1000} 秒自动刷新（页面不可见时暂停）。`}
         onRefresh={refreshAll}
-        refreshing={query.isFetching}
+        refreshing={query.isFetching || alertsQuery.isFetching}
         // dataUpdatedAt 是「最近一次成功取到数据」的时刻，不是最近一次发起请求：
         // 请求失败时这行字不该往前跳，否则人会以为看到的是新数据
         lastRefreshedAt={query.dataUpdatedAt || undefined}
       />
+      {/* 告警卡在指标网格**上方**：它回答的是「现在有什么要处理」，
+          比任何一个数值都优先。它有自己的加载/错误态，指标端点挂掉时
+          这张卡照常显示。 */}
+      <div className="mb-4">
+        <ApiStateView
+          isPending={alertsQuery.isPending}
+          error={alertsQuery.error}
+          onRetry={() => void alertsQuery.refetch()}
+        >
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <AlertSummaryCard alerts={alertsQuery.data ?? []} />
+          </div>
+        </ApiStateView>
+      </div>
+
       <ApiStateView
         isPending={query.isPending}
         error={query.error}
