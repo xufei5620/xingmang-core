@@ -58,6 +58,15 @@ out_of_scope / acceptance_criteria / required_tests，超出范围先停。
 - 禁止硬编码设计令牌；一律用 @xingmang/design-tokens 与既有工具类。
 - 分支：`ai/cursor/XM-xxxx-<slug>`；vitest 保持 globals:true 配置不变。
 
+## 云端 Claude（claude.ai/code）专属规则
+
+- 身份仍是 claude，但分支加 `-web` 后缀区分本地实例：`ai/claude/XM-xxxx-<slug>-web`。
+- 主战场：独立冷评审（红队式，发现以 review 标签的 Issue 提交，只报告不修复）、
+  设计文档/ADR、前端组件与 Storybook（云端为 Linux，无本机 pnpm/Defender 坑）、
+  Go 单测级开发。不派需要本机 Docker E2E 的部署/调试任务。
+- 本地门禁跑不了容器集成测试属正常：推分支后以 GitHub Actions 的 backend job 为准。
+- 其余红线与所有 AI 相同：不直推 main、不合并任何 PR、凭据只经 CredentialRef。
+
 ## 自动轮询协议（所有 AI 通用）
 
 每轮固定动作：
