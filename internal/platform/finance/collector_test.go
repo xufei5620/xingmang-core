@@ -137,6 +137,40 @@ func (m *memLedger) WriteAmortizedRow(
 	return merged, nil
 }
 
+// memBalances 是内存余额记录器，**复刻**「仅变化时落一条」那条分支
+// （XM-0037d，§7）。
+//
+// 复刻而不是调真 Store，是因为这里要测的是采集器对两种返回的**分类**：
+// 哪些算「变了」哪些算「确认了」。库层那条分支自己的正确性由
+// summary_store_integration_test.go 在真库上验证。
+type memBalances struct {
+	rows     map[uuid.UUID]finance.BalanceReading
+	writeErr error
+}
+
+func newMemBalances() *memBalances {
+	return &memBalances{rows: map[uuid.UUID]finance.BalanceReading{}}
+}
+
+func (m *memBalances) RecordBalance(
+	_ context.Context, in finance.BalanceReading,
+) (finance.BalanceReading, error) {
+	if m.writeErr != nil {
+		return finance.BalanceReading{}, m.writeErr
+	}
+	if err := in.Validate(); err != nil {
+		return finance.BalanceReading{}, err
+	}
+	if existing, found := m.rows[in.UpstreamAccountID]; found && existing.SameValueAs(in) {
+		existing.ObservedAt = in.ObservedAt
+		m.rows[in.UpstreamAccountID] = existing
+		return existing, finance.ErrBalanceUnchanged
+	}
+	in.CapturedAt = in.ObservedAt
+	m.rows[in.UpstreamAccountID] = in
+	return in, nil
+}
+
 // memRegistry 是内存登记簿。
 type memRegistry struct {
 	accounts []finance.UpstreamAccount
@@ -193,10 +227,13 @@ func (m *memRegistry) ListTokenMappingsByAccount(
 type stubClient struct {
 	costErr    error
 	revenueErr error
+	balanceErr error
 	usageMinor int64
 	revMinor   int64
-	observedAt time.Time
-	currency   string
+	// balanceMinor 是 UpstreamBalance 返回的余额（XM-0037d）。
+	balanceMinor int64
+	observedAt   time.Time
+	currency     string
 }
 
 func (s *stubClient) Version(context.Context) (connector.VersionInfo, error) {
@@ -239,12 +276,29 @@ func (s *stubClient) AccountRevenue(
 	}, nil
 }
 
+// UpstreamBalance 让余额也能被逐用例控制（XM-0037d）。
+//
+// balanceErr 单独一个字段而不是复用 costErr：余额与成本是两条独立的读取，
+// §2.3 明确余额**不参与成本**——把它们绑在一起测，就永远测不到
+// 「余额读失败但成本照常入账」这条真实路径。
+func (s *stubClient) UpstreamBalance(context.Context) (metering.UpstreamBalance, error) {
+	if s.balanceErr != nil {
+		return metering.UpstreamBalance{}, s.balanceErr
+	}
+	return metering.UpstreamBalance{
+		Snapshot:          metering.Snapshot{ObservedAt: s.observedAt, Watermark: "balance@1"},
+		BalanceMinorUnits: s.balanceMinor,
+		Currency:          s.currency,
+	}, nil
+}
+
 func newStub() *stubClient {
 	return &stubClient{
-		usageMinor: 5_813_729, // §2.4 worked example
-		revMinor:   12_345_600,
-		observedAt: collectNow.Add(-time.Minute),
-		currency:   "USD",
+		usageMinor:   5_813_729, // §2.4 worked example
+		revMinor:     12_345_600,
+		balanceMinor: 420_000_000, // $420，够跑 100 多天：默认演示不该一上来就是红的
+		observedAt:   collectNow.Add(-time.Minute),
+		currency:     "USD",
 	}
 }
 
@@ -275,6 +329,7 @@ func mapping(accountID uuid.UUID, token, own string) finance.TokenMapping {
 type collectFixture struct {
 	registry *memRegistry
 	subs     *memSubscriptions
+	balances *memBalances
 	ledger   *memLedger
 	clients  map[uuid.UUID]metering.ReadClient
 	factErrs map[uuid.UUID]error
@@ -288,6 +343,7 @@ func (f *collectFixture) collector() *finance.Collector {
 		InstanceID:    "finance-collect-test",
 		Registry:      f.registry,
 		Subscriptions: f.subs,
+		Balances:      f.balances,
 		Ledger:        f.ledger,
 		NewClient: func(_ context.Context, a finance.UpstreamAccount) (metering.ReadClient, error) {
 			if err := f.factErrs[a.ID]; err != nil {
@@ -304,6 +360,7 @@ func newFixture(accounts ...finance.UpstreamAccount) *collectFixture {
 	return &collectFixture{
 		registry: &memRegistry{accounts: accounts, mappings: map[uuid.UUID][]finance.TokenMapping{}},
 		subs:     &memSubscriptions{batches: map[uuid.UUID][]finance.AmortizableBatch{}},
+		balances: newMemBalances(),
 		ledger:   newMemLedger(),
 		clients:  map[uuid.UUID]metering.ReadClient{},
 		factErrs: map[uuid.UUID]error{},
@@ -618,6 +675,9 @@ func (c *partialCostClient) AccountRevenue(
 ) (metering.AccountRevenue, error) {
 	return c.stub.AccountRevenue(ctx, ownAccountID, day)
 }
+func (c *partialCostClient) UpstreamBalance(ctx context.Context) (metering.UpstreamBalance, error) {
+	return c.stub.UpstreamBalance(ctx)
+}
 
 // TestCollectRevenueNotSupportedIsNotAnError：newapi 的收入走自营库直连（§3.2），
 // 不在这条 HTTP 契约上。它每轮都会 not_supported，那是**预期内的常态**，
@@ -714,6 +774,7 @@ func TestCollectWithFakeClientFactory(t *testing.T) {
 		InstanceID:    "finance-collect-staging",
 		Registry:      registry,
 		Subscriptions: &memSubscriptions{},
+		Balances:      newMemBalances(),
 		Ledger:        ledger,
 		NewClient:     finance.NewFakeMeteringClientFactory(func() time.Time { return collectNow }),
 		Now:           func() time.Time { return collectNow },

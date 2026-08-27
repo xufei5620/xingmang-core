@@ -55,6 +55,7 @@ func RunSuite(t *testing.T, newClient Factory) {
 	t.Run("答不出的业务日归not_supported", func(t *testing.T) { testUnanswerableDayIsNotSupported(t, newClient) })
 	t.Run("业务日按声明时区切分", func(t *testing.T) { testBusinessDayUsesDeclaredTimezone(t, newClient) })
 	t.Run("能力可少于清单", func(t *testing.T) { testCapabilitiesMayBeSubset(t, newClient) })
+	t.Run("余额是账号级当前值或明说不支持", func(t *testing.T) { testBalanceIsCurrentValueOrNotSupported(t, newClient) })
 }
 
 func baseOptions() metering.FakeOptions {
@@ -115,16 +116,74 @@ func testEveryResultCarriesSnapshot(t *testing.T, newClient Factory) {
 
 func assertSnapshot(t *testing.T, what string, s metering.Snapshot) {
 	t.Helper()
+	assertSnapshotFields(t, what, s)
+	// 水位必须带业务日：光有时间戳分不清「这是哪一天的读数」，
+	// 而成本台账最怕的正是日期错位（§4）
+	if !strings.HasPrefix(s.Watermark, "day:") {
+		t.Fatalf("%s 的水位 %q 应带业务日前缀 day:", what, s.Watermark)
+	}
+}
+
+// assertSnapshotFields 只验「有观测时刻、有水位」，不管水位的前缀。
+//
+// 余额没有业务日（它是一个当前值，不是某一天的累计量），所以它的水位
+// 用不了 day: 前缀——但「不能是裸数字」这条对它一样成立（规格 §9.1）。
+func assertSnapshotFields(t *testing.T, what string, s metering.Snapshot) {
+	t.Helper()
 	if s.ObservedAt.IsZero() {
 		t.Fatalf("%s 缺少 ObservedAt——裸数字在类型层面就不该存在", what)
 	}
 	if strings.TrimSpace(s.Watermark) == "" {
 		t.Fatalf("%s 缺少 Watermark", what)
 	}
-	// 水位必须带业务日：光有时间戳分不清「这是哪一天的读数」，
-	// 而成本台账最怕的正是日期错位（§4）
-	if !strings.HasPrefix(s.Watermark, "day:") {
-		t.Fatalf("%s 的水位 %q 应带业务日前缀 day:", what, s.Watermark)
+}
+
+// testBalanceIsCurrentValueOrNotSupported 钉住余额读取的三条契约（§2.3 + §7）。
+//
+//  1. 读得到时必须带观测时刻与币种——§10.4 要求「必须显示观测时间」且
+//     「余额和消耗单位一致」，两者缺一，可用天数就算不出可信的数；
+//  2. 读不到时必须归 **not_supported**，而不是一个未分类的错误：覆盖率低是
+//     这条能力的已知事实（newapi 主力盲区、订阅制上游没有余额），
+//     调用方要靠这个分类把可用天数落成「未接入」而不是「采集失败」；
+//  3. 声明了 balance_read 能力就必须答得出，反之亦然——一项**声明了却兑现
+//     不了**的能力，会让上层反复去打一个注定失败的读取。
+func testBalanceIsCurrentValueOrNotSupported(t *testing.T, newClient Factory) {
+	c := newClient(baseOptions())
+	ctx := context.Background()
+
+	caps, err := c.Capabilities(ctx)
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	declared := false
+	for _, cap := range caps {
+		if string(cap) == "metering.upstream.balance_read" {
+			declared = true
+		}
+	}
+
+	balance, err := c.UpstreamBalance(ctx)
+	switch {
+	case err == nil:
+		if !declared {
+			t.Fatal("答得出余额却没有在 Capabilities 里声明 balance_read")
+		}
+		assertSnapshotFields(t, "UpstreamBalance", balance.Snapshot)
+		if strings.TrimSpace(balance.Currency) == "" {
+			t.Fatal("余额缺币种——§10.4 要求余额与消耗单位一致，缺了就比不了")
+		}
+		if strings.HasPrefix(balance.Watermark, "day:") {
+			t.Fatalf("余额的水位 %q 不该带业务日前缀：它是当前值，不属于某一天",
+				balance.Watermark)
+		}
+	case connector.KindOf(err) == connector.KindNotSupported:
+		if declared {
+			t.Fatal("声明了 balance_read 却返回 not_supported——" +
+				"上层会反复去打一个注定失败的读取")
+		}
+	default:
+		t.Fatalf("余额读不到时必须归 not_supported，got %s: %v",
+			connector.KindOf(err), err)
 	}
 }
 

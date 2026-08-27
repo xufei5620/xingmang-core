@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,13 @@ type config struct {
 	// Reqlog 是「请求详情」这条链路的配置（XM-0039）。
 	// 同样不含机密：凭据只有 CredentialRef 形态的引用（宪法 7 条）。
 	Reqlog reqlogConfig
+
+	// FinanceDemoSeed 决定启动时是否种一批**演示**登记簿记录（XM-0037d）。
+	//
+	// 默认 false，**生产环境即便置 true 也会拒绝启动**（见 finance.SeedDemoData）：
+	// 演示数据一旦落进生产登记簿，采集就会照着它去打一批 .invalid 域名，
+	// 而台账里会多出几条永远算不出成本的渠道。
+	FinanceDemoSeed bool
 }
 
 // authMode 是身份解析器的选择开关（XM_AUTH_MODE）。
@@ -73,6 +81,16 @@ func configFromEnv(getenv func(string) string) (config, error) {
 			return config{}, fmt.Errorf("REQUEST_TIMEOUT must be positive, got %s", v)
 		}
 		c.RequestTimeout = d
+	}
+
+	if value := strings.TrimSpace(getenv("XM_FINANCE_FAKE_SEED")); value != "" {
+		seed, err := strconv.ParseBool(value)
+		if err != nil {
+			// 非法值一律拒绝启动，不回落成 false：「以为开了但没开」会让人
+			// 对着一片空看板查半天采集链路。
+			return config{}, fmt.Errorf("XM_FINANCE_FAKE_SEED=%q 必须是布尔值: %w", value, err)
+		}
+		c.FinanceDemoSeed = seed
 	}
 
 	auth, err := authConfigFromEnv(getenv, c.Environment)

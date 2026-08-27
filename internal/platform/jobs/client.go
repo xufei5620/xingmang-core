@@ -563,7 +563,10 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			// 订阅摊销的取数端（XM-0037c）。与登记簿分成两个仓储：
 			// 登记簿是「怎么算」，批次与代理是「付了多少钱」。
 			Subscriptions: finance.NewSubscriptionStore(pool),
-			Ledger:        finance.NewProfitStore(pool, nil),
+			// 余额历史（XM-0037d）。与台账分开是因为它**不参与成本**（§2.3）：
+			// 台账里的每一个数都会进毛利，余额一个都不会。
+			Balances: finance.NewSummaryStore(pool, nil),
+			Ledger:   finance.NewProfitStore(pool, nil),
 			NewClient: NewFinanceCollectClientFactory(
 				cfg.FinanceCollectMode,
 				finance.RealMeteringConfig{

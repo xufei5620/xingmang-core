@@ -47,7 +47,9 @@ type Deps struct {
 	FinanceProfit   ProfitDailyLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
-	RequestTimeout       time.Duration
+	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
+	FinanceSummaries FinanceSummaryLister
+	RequestTimeout   time.Duration
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -158,6 +160,17 @@ func NewRouter(d Deps) http.Handler {
 			Get("/finance/subscription-batches", ListSubscriptionBatchesHandler(d.FinanceSubscriptions))
 		api.With(RequireScope(finance.ScopeRead)).
 			Get("/finance/proxy-assets", ListProxyAssetsHandler(d.FinanceSubscriptions))
+
+		// 看板供数（XM-0037d，§8.5 + UI 交接 §13）。同样复用 finance.read：
+		// 这里的每一个数都是台账的向上聚合，能看台账的人已经能自己加出来。
+		//
+		// 两个端点当前是同一个粒度（一个 upstream_account 一行），差别在投影
+		// ——渠道看**钱**，上游看**供给**（余额 / 可用天数 / 充值成本率）。
+		// 理由见 internal/platform/finance/summary.go 顶部。
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/channels/summary", ListChannelSummaryHandler(d.FinanceSummaries))
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/upstreams/summary", ListUpstreamSummaryHandler(d.FinanceSummaries))
 	})
 	return r
 }

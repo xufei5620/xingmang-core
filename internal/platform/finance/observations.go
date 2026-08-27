@@ -82,6 +82,14 @@ func (r CollectResult) ProfitObservation(
 		"subscription_rows_cost_only": r.SubscriptionRowsCostOnly,
 		"rows_skipped_no_batch":       r.RowsSkippedNoBatch,
 		"rows_skipped_no_owner":       r.RowsSkippedNoOwner,
+		// 上游余额（XM-0037d，§2.3/§7）。changed 与 confirmed 分开呈现：
+		// 一个长期只有 confirmed 而 changed 恒为 0 的上游，要么真的没在消耗，
+		// 要么它的余额**卡住了**（§7 点名的 newapi 死水形态）——
+		// 合成一个「已采集」之后，那两种情况在看板上长得一模一样。
+		"balances_changed":     r.BalancesRecorded,
+		"balances_confirmed":   r.BalancesConfirmed,
+		"balances_unsupported": r.BalancesUnsupported,
+		"balances_failed":      r.BalancesFailed,
 		// 合计只覆盖两侧都已知的那些行，所以行数必须一起给——
 		// 否则「十行里有一行算得出毛利」与「十行都算得出」呈现完全相同。
 		"rows_with_profit": r.RowsWithProfit,

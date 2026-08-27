@@ -50,7 +50,8 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	// 批次引用代理与登记簿——TRUNCATE 要求一次列全所有引用方，
 	// 漏掉任何一张这条语句会直接报错。
 	if _, err := pool.Exec(ctx,
-		"TRUNCATE finance.amortization_loss, finance.subscription_cost_batch, "+
+		"TRUNCATE finance.balance_history, finance.amortization_loss, "+
+			"finance.subscription_cost_batch, "+
 			"finance.proxy_asset, finance.profit_daily, finance.token_map, "+
 			"finance.upstream_account"); err != nil {
 		t.Fatalf("清空登记簿失败: %v", err)

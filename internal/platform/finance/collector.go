@@ -50,6 +50,15 @@ type SubscriptionRegistry interface {
 	) ([]AmortizableBatch, error)
 }
 
+// BalanceRecorder 是采集用到的余额写入子集（*SummaryStore 满足）。
+//
+// 单独一个接口而不是并进 LedgerWriter，因为它写的东西**不参与成本**
+// （§2.3）：台账里的每一个数都会进毛利，余额一个都不会。
+// 两者混在一个接口里，「这个方法写的东西算不算成本」就成了一件要靠记忆的事。
+type BalanceRecorder interface {
+	RecordBalance(ctx context.Context, in BalanceReading) (BalanceReading, error)
+}
+
 // LedgerWriter 是采集用到的台账写入子集（*ProfitStore 满足）。
 //
 // 两个方法对应两条不同的入账纪律，**刻意不合并成一个**：
@@ -100,7 +109,9 @@ type CollectorOptions struct {
 	Registry AccountRegistry
 	// Subscriptions 供订阅型渠道的摊销取数（XM-0037c，§3.5）。
 	Subscriptions SubscriptionRegistry
-	Ledger        LedgerWriter
+	// Balances 落上游余额读数，供可用天数用（XM-0037d，§2.3/§7）。
+	Balances BalanceRecorder
+	Ledger   LedgerWriter
 
 	NewClient       MeteringClientFactory
 	ResolvePlatform PlatformResolver
@@ -118,6 +129,7 @@ type Collector struct {
 
 	registry        AccountRegistry
 	subscriptions   SubscriptionRegistry
+	balances        BalanceRecorder
 	ledger          LedgerWriter
 	newClient       MeteringClientFactory
 	resolvePlatform PlatformResolver
@@ -146,6 +158,7 @@ func NewCollector(opts CollectorOptions) *Collector {
 		instanceID:      opts.InstanceID,
 		registry:        opts.Registry,
 		subscriptions:   opts.Subscriptions,
+		balances:        opts.Balances,
 		ledger:          opts.Ledger,
 		newClient:       opts.NewClient,
 		resolvePlatform: opts.ResolvePlatform,
@@ -196,6 +209,24 @@ type CollectResult struct {
 	// 「还没登记批次」与「订阅真的到期了」在库里长得一样，平台分不出来，
 	// 所以两者都落成「未知」并计进这个数，让运营去补一笔批次或停用账号。
 	RowsSkippedNoBatch int
+	// --- 上游余额（XM-0037d，§2.3/§7）---
+
+	// BalancesRecorded 是**值发生了变化**因而新开一段游程的条数。
+	// BalancesConfirmed 是值没变、只刷新了观测时刻的条数。
+	//
+	// 两者分开是余额这条链路最要紧的一组计数：一个长期只有 confirmed
+	// 而 recorded 恒为 0 的上游，要么真的没在消耗，要么它的余额**卡住了**
+	// （§7 点名的 newapi 死水形态）。合成一个「已采集」之后，
+	// 那两种情况在看板上长得一模一样。
+	BalancesRecorded  int
+	BalancesConfirmed int
+	// BalancesUnsupported 是上游答不出余额的账号数——**当前的常态**
+	// （§7 的覆盖率边界：两个真实驱动的余额读取都还没接通）。
+	// 它不是失败，但它决定了可用天数的覆盖率，必须看得见。
+	BalancesUnsupported int
+	// BalancesFailed 是真正的读取或写入失败。
+	BalancesFailed int
+
 	// RowsSkippedNoOwner：订阅账号没有唯一的自营账号可归属，跳过。
 	//
 	// 摊销成本是**账号级**的一笔钱，它必须记在某一个自营账号头上；
@@ -299,6 +330,12 @@ func (c *Collector) CollectOnce(ctx context.Context) (CollectResult, error) {
 		// 会安安静静地把订阅渠道的成本全部漏掉——报表上那几条渠道的毛利
 		// 恰好等于收入，看起来完全正常（宪法 12 条）。
 		return result, errors.New("finance: collector 缺少 subscriptions registry（订阅型渠道的摊销取数）")
+	}
+	if c.balances == nil {
+		// 同样必填。余额漏采的后果比成本漏采轻——可用天数会显示成
+		// 「未读到余额」而不是一个错数字——但「装配漏了一项」这件事本身
+		// 在两处一样不该靠人去发现。
+		return result, errors.New("finance: collector 缺少 balance recorder（上游余额，§2.3）")
 	}
 
 	// 两轮分别按接入方式取清单，而不是取全量再在内存里 switch：
@@ -411,6 +448,13 @@ func (c *Collector) collectAccount(
 	if err != nil {
 		return fmt.Errorf("建取数客户端: %w", err)
 	}
+
+	// 余额顺带读一次（§2.3/§7）。放在这里而不是单开一轮：客户端已经建好了，
+	// 再建一次等于把凭据多解析一遍、多握一个连接。
+	//
+	// 它的失败**不影响成本入账**——余额不参与成本（§2.3），
+	// 所以这里不返回 error，只计数并落日志。
+	c.collectBalance(ctx, client, account, result)
 
 	// 收入按**自营账号**取一次（§3.2 的端点是账号级），而不是每个令牌取一次：
 	// 同一账号取 N 次会拿到 N 个相同的数，白打上游 N-1 次。
@@ -890,6 +934,97 @@ func countDistinctOwners(mappings []TokenMapping) int {
 }
 
 func timePtr(t time.Time) *time.Time { return &t }
+
+// collectBalance 读一次上游余额并按 §7 的「仅变化时落一条」写进历史。
+//
+// **它不影响成本入账**：余额不参与成本（§2.3），所以失败在这里被吸收成
+// 一个计数和一条日志，而不是让整个账号的采集失败。
+//
+// not_supported 是**预期内的常态**而不是故障（§7 的覆盖率边界：两个真实驱动
+// 的余额读取都还没接通，订阅制上游根本没有余额）。所以它落 Info 而不是 Warn，
+// 也不进 FirstError——否则每 5 分钟就会有一批红，把真正的失败淹掉。
+func (c *Collector) collectBalance(
+	ctx context.Context, client metering.ReadClient,
+	account UpstreamAccount, result *CollectResult,
+) {
+	reading, err := client.UpstreamBalance(ctx)
+	if err != nil {
+		kind := connector.KindOf(err)
+		if kind == connector.KindNotSupported {
+			result.BalancesUnsupported++
+			c.logger.LogAttrs(ctx, slog.LevelInfo, "finance_balance_not_supported",
+				slog.String("module", "platform.finance"),
+				slog.String("environment", c.environment),
+				slog.String("upstream_account_id", account.ID.String()),
+				slog.String("system_type", string(account.SystemType)),
+				slog.String("error_code", string(kind)),
+				slog.String("hint", "上游答不出余额（§7 覆盖率边界）：可用天数将显示为未接入，"+
+					"而不是一个编出来的天数"),
+			)
+			return
+		}
+		result.BalancesFailed++
+		result.Partial = true
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "finance_balance_read_failed",
+			slog.String("module", "platform.finance"),
+			slog.String("environment", c.environment),
+			slog.String("upstream_account_id", account.ID.String()),
+			slog.String("error_code", string(kind)),
+		)
+		return
+	}
+
+	observedAt := reading.ObservedAt
+	if observedAt.IsZero() {
+		// 上游没给观测时刻时用本轮时钟。这是一次**退化**，不是等价物：
+		// 语义从「余额什么时候是这个数」滑向「我们什么时候问的」。
+		// 契约要求 ObservedAt 非零（contracttest 钉住），所以正常走不到这里；
+		// 留着是因为「悄悄用零值时间」会让整条新鲜度链路给出 1970 年。
+		observedAt = c.now().UTC()
+	}
+	currency := reading.Currency
+	if currency == "" {
+		currency = account.Currency
+	}
+
+	stored, err := c.balances.RecordBalance(ctx, BalanceReading{
+		UpstreamAccountID: account.ID,
+		BalanceMinor:      reading.BalanceMinorUnits,
+		Currency:          currency,
+		ObservedAt:        observedAt.UTC(),
+		Source:            c.instanceID,
+	})
+	switch {
+	case err == nil:
+		result.BalancesRecorded++
+		c.logger.LogAttrs(ctx, slog.LevelInfo, "finance_balance_changed",
+			slog.String("module", "platform.finance"),
+			slog.String("environment", c.environment),
+			slog.String("upstream_account_id", account.ID.String()),
+			slog.String("currency", stored.Currency),
+			// **不记余额金额本身**：它是按环境与权限裁剪过的数据
+			// （finance.ScopeRead 单独授予），写进进程日志等于绕开那道授权。
+			slog.Time("balance_observed_at", stored.ObservedAt),
+		)
+	case errors.Is(err, ErrBalanceUnchanged):
+		// 值没变，只刷新了观测时刻——一周不动的余额每轮都走这里，
+		// 那正是 §7「仅变化时落一条」要的行为。不是故障，不落日志（每 5 分钟
+		// 一条 × 每个账号 = 纯噪声），只计数。
+		result.BalancesConfirmed++
+	default:
+		result.BalancesFailed++
+		result.Partial = true
+		if result.FirstError == nil {
+			result.FirstError = err
+		}
+		c.logger.LogAttrs(ctx, slog.LevelError, "finance_balance_write_failed",
+			slog.String("module", "platform.finance"),
+			slog.String("environment", c.environment),
+			slog.String("upstream_account_id", account.ID.String()),
+			slog.String("error_code", string(connector.KindOf(err))),
+		)
+	}
+}
 
 // readCost 读一个令牌的上游实扣并折算成平台成本（§3.1 + §2.4）。
 func (c *Collector) readCost(

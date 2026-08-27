@@ -554,6 +554,132 @@ ON CONFLICT (upstream_account_id, business_day, token_id) DO UPDATE SET
     source           = EXCLUDED.source,
     updated_at       = now()
 RETURNING *;
+
+-- ---------------------------------------------------------------------------
+-- XM-0037d 上游余额历史 + 看板供数（设计稿 §2.3 + §7 + §8.5 + UI 交接 §13）。
+--
+-- 余额是本文件里**唯一不参与成本核算**的量（§2.3）：它只做可用天数的分子。
+-- 分母来自 profit_daily——那才是成本的权威。
+-- ---------------------------------------------------------------------------
+
+-- name: GetLatestBalance :one
+-- 取一个账号最新的那一行余额（游程的最后一段）。
+--
+-- 采集每轮先读它做变化检测：值一样就只刷新 observed_at（TouchBalance），
+-- 变了才插新行（§7「仅变化时落一条」）。
+-- observed_at DESC + id DESC 让「最新」有确定的答案——同一毫秒内的两行
+-- 若没有 id 兜底，取到哪一行取决于物理顺序。
+SELECT * FROM finance.balance_history
+WHERE upstream_account_id = $1
+ORDER BY observed_at DESC, id DESC
+LIMIT 1;
+
+-- name: InsertBalance :one
+-- 余额变了：开一段新的游程。captured_at 与 observed_at 同时落在此刻。
+INSERT INTO finance.balance_history (
+    upstream_account_id, balance_minor, currency, captured_at, observed_at, source
+) VALUES (
+    sqlc.arg(upstream_account_id), sqlc.arg(balance_minor), sqlc.arg(currency),
+    sqlc.arg(observed_at), sqlc.arg(observed_at), sqlc.arg(source)
+)
+RETURNING *;
+
+-- name: TouchBalance :one
+-- 余额没变：把游程的右端点推到此刻，**不新增行**。
+--
+-- 这条 UPDATE 是「仅变化时落一条」与「数据过期不显示伪精确天数」两条要求的
+-- 交汇点：不更新的话，一个健康账号的余额一周没动就会被判成观测过期，
+-- 于是可用天数被抹掉——把正常状态显示成故障。
+--
+-- 只往前推（`observed_at < $2` 才更新）：多副本并发时，一个慢半拍的轮次
+-- 不该把观测时刻往回拨。
+UPDATE finance.balance_history SET
+    observed_at = sqlc.arg(observed_at),
+    source      = sqlc.arg(source)
+WHERE id = sqlc.arg(id) AND observed_at < sqlc.arg(observed_at)
+RETURNING *;
+
+-- name: ListLatestBalancesByEnvironment :many
+-- 某环境下每个账号最新的那一行余额，供看板一次取回。
+--
+-- DISTINCT ON 而不是逐账号查一次：账号在几十到几百的量级，
+-- N+1 会让一个看板请求变成几百次往返。
+SELECT DISTINCT ON (bh.upstream_account_id) bh.*
+FROM finance.balance_history bh
+JOIN finance.upstream_account ua ON ua.id = bh.upstream_account_id
+WHERE ua.environment = $1
+ORDER BY bh.upstream_account_id, bh.observed_at DESC, bh.id DESC;
+
+-- name: SummarizeProfitDailyByAccount :many
+-- 看板供数的主查询：某环境、某业务日区间，**按上游账号上卷**的收入/成本/毛利。
+--
+-- 渠道键 = `upstream_account`（§12.2 的默认裁定，037d 沿用）：令牌是它的下钻，
+-- 下钻行走 GET /api/v1/finance/profit-daily。
+--
+-- 三组「覆盖率」列与金额一起回，缺一不可（宪法 12 条）：
+--   row_count                总行数；
+--   revenue_known_rows/cost_known_rows  该侧非 NULL 的行数——SUM 会跳过 NULL，
+--                            只给和不给覆盖行数，调用方无从判断这个和代表了几行；
+--   currency_count           不同币种的最小单位不能相加，>1 时那个和是错数。
+--
+-- 观测时刻取**最旧**的那个（MIN）：聚合值的新鲜度由最不新鲜的成员决定，
+-- 取最新会让一条刚刷新的行替其余几十条陈旧的读数背书。
+--
+-- account_grain_rows 数的是账号级聚合行（token_id 以 'account:' 开头，
+-- XM-0037c）。它单独回报是因为那些行**没有独立的令牌下钻**——
+-- 前端要能说出「这个渠道的 3 行里有 1 行是账号级聚合」，而不是让人点开一个空表。
+SELECT
+    pd.upstream_account_id                     AS upstream_account_id,
+    COUNT(*)::bigint                           AS row_count,
+    COUNT(pd.revenue_minor)::bigint            AS revenue_known_rows,
+    COUNT(pd.cost_minor)::bigint               AS cost_known_rows,
+    COALESCE(SUM(pd.revenue_minor), 0)::bigint AS revenue_minor_sum,
+    COALESCE(SUM(pd.cost_minor), 0)::bigint    AS cost_minor_sum,
+    COUNT(DISTINCT pd.currency)::bigint        AS currency_count,
+    MIN(pd.currency)::text                     AS currency,
+    COUNT(*) FILTER (WHERE pd.token_id LIKE 'account:%')::bigint AS account_grain_rows,
+    -- 显式 ::timestamptz：不加的话 sqlc 推不出 MIN/MAX 的类型，
+    -- 生成的字段会是 interface{}，于是「观测时刻」在 Go 侧变成一个
+    -- 要靠类型断言才能用的东西——那正是最容易漏判 NULL 的形状。
+    MIN(pd.cost_observed_at)::timestamptz       AS oldest_cost_observed_at,
+    MIN(pd.revenue_observed_at)::timestamptz    AS oldest_revenue_observed_at,
+    MAX(pd.updated_at)::timestamptz             AS latest_updated_at,
+    MIN(pd.source)::text                       AS source
+FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = sqlc.arg(environment)
+  AND pd.business_day >= sqlc.arg(from_day)
+  AND pd.business_day <= sqlc.arg(to_day)
+GROUP BY pd.upstream_account_id;
+
+-- name: SumRecentCostByAccount :many
+-- 可用天数的**分母**：某环境下每个账号在窗口内的已知成本之和与覆盖天数（§10.4）。
+--
+-- 与上面那条分开而不是复用：两者的窗口不同，且**必须不同**——
+-- 看板的窗口由调用方给（默认今天），而日均消耗固定取近 7 个**完整**业务日
+-- （不含今天：今天还在累积，算进去会让日均偏低、可用天数虚高）。
+--
+-- covered_days 数的是**有已知成本的业务日**，不是窗口天数：只采到 3 天数据时
+-- 除以 7 会把日均压低到实际的四成，可用天数因而虚高一倍多——
+-- 一个偏乐观的预警值，正好是最危险的方向。日均由调用方用这两个数去除。
+--
+-- 「该上游全部映射渠道」（§10.4）在这里就是按 upstream_account_id 分组：
+-- 一个上游账号名下的全部令牌都写进同一个 upstream_account_id 的行
+-- （令牌级行 + 账号级聚合行都算），SUM 天然覆盖到它们。
+SELECT
+    pd.upstream_account_id                  AS upstream_account_id,
+    COALESCE(SUM(pd.cost_minor), 0)::bigint AS cost_minor_sum,
+    COUNT(DISTINCT pd.business_day) FILTER (WHERE pd.cost_minor IS NOT NULL)::bigint
+                                            AS covered_days,
+    COUNT(DISTINCT pd.currency)::bigint     AS currency_count,
+    MIN(pd.currency)::text                  AS currency
+FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = sqlc.arg(environment)
+  AND pd.business_day >= sqlc.arg(from_day)
+  AND pd.business_day <= sqlc.arg(to_day)
+  AND pd.cost_minor IS NOT NULL
+GROUP BY pd.upstream_account_id;
 -- name: ShadowProfitByAccountDay :many
 -- 影子对比的平台侧取数（XM-0037e，设计稿 §9）。
 --

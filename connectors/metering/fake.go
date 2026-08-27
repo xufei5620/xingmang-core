@@ -50,6 +50,16 @@ type FakeOptions struct {
 	// 零值 false 会让默认 Fake 拒答收入，所以它是**指针**：不设就支持。
 	RevenueSupported *bool
 
+	// BalanceSupported 为 false 时 UpstreamBalance 返回 not_supported，
+	// 模拟 §7 说的那两种真实盲区：newapi 的 channel.balance 是一潭死水
+	// （上游没开 CHANNEL_UPDATE_FREQUENCY），订阅制上游压根没有余额。
+	// 同样是**指针**：不设就支持，零值 false 会让默认 Fake 拒答余额。
+	BalanceSupported *bool
+
+	// BalanceMinorUnits 覆盖 Fake 的余额起点（整数最小单位 @ UsageScale）；
+	// 0 用默认值。
+	BalanceMinorUnits int64
+
 	// Now 可注入固定时钟，默认 time.Now。
 	Now func() time.Time
 	// BusinessDay 是业务日时区；nil 则用 CST 固定 +08:00。
@@ -88,6 +98,13 @@ func NewFake(opts FakeOptions) ReadClient {
 	if opts.RevenueSupported == nil {
 		yes := true
 		opts.RevenueSupported = &yes
+	}
+	if opts.BalanceSupported == nil {
+		yes := true
+		opts.BalanceSupported = &yes
+	}
+	if opts.BalanceMinorUnits == 0 {
+		opts.BalanceMinorUnits = fakeDefaultBalanceMinorUnits
 	}
 	return &fakeClient{opts: opts}
 }
@@ -198,6 +215,9 @@ func (f *fakeClient) Capabilities(ctx context.Context) ([]registry.Capability, e
 		if c == "metering.account.revenue_read" && !*f.opts.RevenueSupported {
 			continue
 		}
+		if c == "metering.upstream.balance_read" && !*f.opts.BalanceSupported {
+			continue
+		}
 		out = append(out, c)
 	}
 	return out, nil
@@ -269,3 +289,61 @@ func (f *fakeClient) AccountRevenue(
 		RevenueMinorUnits: 12_345_600,
 	}, nil
 }
+
+// fakeDefaultBalanceMinorUnits 是 Fake 的余额起点：$420.00 @ scale-6。
+//
+// 取一个**能被可用天数算出漂亮数字**的量级：Fake 的日成本是
+// 5813729 ÷ 1.5 ≈ 3875819 微单位（§2.4 worked example），
+// 420000000 ÷ 3875819 ≈ 108 天——落在「充裕」档，
+// 于是默认演示不会一上来就是一片红。要演示告警把它调小即可。
+const fakeDefaultBalanceMinorUnits int64 = 420_000_000
+
+// UpstreamBalance 返回一条假的余额读数（§2.3 + §7）。
+//
+// 它**随时间缓慢下降**而不是一个常数：可用天数的整条链路（游程编码落库、
+// 「只在变化时插入新行」、新鲜度取 observed_at）只有在余额真的会变的时候
+// 才跑得到那几个分支。一个恒定的 Fake 余额会让「变化检测」永远走不到
+// insert 那一支，于是那段代码在演示里从未被执行过。
+//
+// 下降速度按**每小时**一档：采集默认 5 分钟一轮，每小时变一次意味着
+// 一小时内的十二轮里有十一轮走「值没变，只更新 observed_at」那条路——
+// 正是真实部署里的比例。
+func (f *fakeClient) UpstreamBalance(ctx context.Context) (UpstreamBalance, error) {
+	const op = "metering.upstream.balance_read"
+	if err := f.wait(ctx); err != nil {
+		return UpstreamBalance{}, connector.NewError(connector.KindUnavailable, op, err)
+	}
+	if !*f.opts.BalanceSupported {
+		return UpstreamBalance{}, connector.NewError(connector.KindNotSupported, op,
+			fmt.Errorf("本上游答不出余额（§7：newapi 需上游先开 CHANNEL_UPDATE_FREQUENCY；"+
+				"订阅制上游没有余额这个概念）"))
+	}
+	if err := f.fail(op); err != nil {
+		return UpstreamBalance{}, err
+	}
+
+	observedAt := f.observedAt()
+	// 以 UTC 小时数为台阶。用 Unix 小时而不是「距某个起点的时长」：
+	// 后者要选一个起点，而任何起点都会让 Fake 的输出依赖它被调用的日期。
+	hours := observedAt.Unix() / 3600
+	balance := f.opts.BalanceMinorUnits - (hours%240)*fakeBalanceHourlyDrainMinorUnits
+	return UpstreamBalance{
+		Snapshot: Snapshot{
+			ObservedAt: observedAt,
+			// 余额没有业务日：它是一个当前值，不是某一天的累计量。
+			// 水位因此用 balance 前缀而不是 day:——让两种读数的水位
+			// 在日志里一眼分得开。
+			Watermark: fmt.Sprintf("balance@%d", observedAt.Unix()),
+			IsPartial: f.opts.Partial,
+		},
+		BalanceMinorUnits: balance,
+		Currency:          DefaultCurrency,
+	}, nil
+}
+
+// fakeBalanceHourlyDrainMinorUnits 是 Fake 余额每小时的下降量（$0.15）。
+//
+// 240 小时（10 天）一个周期后回到起点：演示环境长期跑着，
+// 单调下降迟早会把余额跑成一个巨大的负数，那会让「透支预警」
+// 变成一条永远亮着的红灯，反而没人看了。
+const fakeBalanceHourlyDrainMinorUnits int64 = 150_000
