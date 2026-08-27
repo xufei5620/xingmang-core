@@ -103,6 +103,47 @@ export function formatUtcTimestamp(iso: string | null): string {
   );
 }
 
+/** 本地时区偏移，形如 `UTC+08:00`。 */
+function localOffsetLabel(d: Date): string {
+  // getTimezoneOffset 是「UTC 减本地」的分钟数，所以东八区返回 -480，符号要翻过来
+  const minutes = -d.getTimezoneOffset();
+  const sign = minutes < 0 ? "-" : "+";
+  const abs = Math.abs(minutes);
+  return `UTC${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+}
+
+/** RFC3339 时间串 → 本地时区的 `YYYY-MM-DD HH:mm:ss (UTC+08:00)`。
+ *
+ *  审计事件是「谁在什么时候做了什么」，读的人要拿它和自己的记忆、和 IM 记录
+ *  对时间，所以列表里显示本地时间才有用；但**必须把时区写出来**，否则截图
+ *  发给另一个时区的人就成了错的（宪法 14 条：时区必须显式）。
+ *  权威的 UTC 值不丢，由调用方放进 title。
+ *
+ *  不走 toLocaleString：它的输出随运行环境的语言设置变来变去，
+ *  两个人截图对不上，测试也不可复现。 */
+export function formatLocalTimestamp(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso; // 解析不了就原样显示，不吞掉信息
+  return (
+    `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ` +
+    `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())} ` +
+    `(${localOffsetLabel(d)})`
+  );
+}
+
+/** 毫秒时间戳 → 本地 `HH:mm:ss`。
+ *
+ *  只给「最后刷新于几点」这类当下发生的事用：人是拿它和手表对，秒级就够，
+ *  年月日反而是噪音。**不用于数据时间**——那个必须带日期与时区
+ *  （formatUtcTimestamp / formatLocalTimestamp）。 */
+export function formatLocalClock(epochMs: number | null | undefined): string {
+  if (epochMs === null || epochMs === undefined || !Number.isFinite(epochMs)) return "—";
+  const d = new Date(epochMs);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
 /** 新鲜度一行说明：「数据时间 … · 落后 …」。
  *
  *  规格 §9.1 要求数据时间与落后秒数都可见，所以这两段是一起产出的，

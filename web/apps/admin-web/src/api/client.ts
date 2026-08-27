@@ -53,8 +53,18 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+export interface PostOptions extends RequestOptions {
+  /** 幂等/追踪用的请求 ID，作为 `X-Request-ID` 发出。
+   *
+   *  **不放进请求体**：后端 ExecuteActionHandler 用 `DisallowUnknownFields`
+   *  解析 `{"params":{…}}`，多一个 request_id 字段会直接 400；它真正的来源是
+   *  RequestID 中间件读的 `X-Request-ID` 头（httpapi/middleware.go）。 */
+  requestId?: string;
+}
+
 export interface ApiClient {
   get<T>(path: string, options?: RequestOptions): Promise<T>;
+  post<T>(path: string, body: unknown, options?: PostOptions): Promise<T>;
 }
 
 export interface ApiClientOptions {
@@ -102,38 +112,66 @@ async function toApiError(response: Response): Promise<ApiError> {
 
 /** 创建 API 客户端。所有请求都从这里出去，身份头只在这里注入一次。 */
 export function createApiClient({ config, fetchImpl }: ApiClientOptions): ApiClient {
-  return {
-    async get<T>(path: string, options: RequestOptions = {}): Promise<T> {
-      // 默认实现取调用时刻的 globalThis.fetch 而不是模块加载时刻：
-      // 测试可以在 import 之后再替换 fetch
-      const doFetch: FetchLike = fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
-      const url = buildUrl(config, path, options.searchParams);
+  async function request<T>(path: string, init: RequestInit, options: RequestOptions): Promise<T> {
+    // 默认实现取调用时刻的 globalThis.fetch 而不是模块加载时刻：
+    // 测试可以在 import 之后再替换 fetch
+    const doFetch: FetchLike = fetchImpl ?? ((input, i) => globalThis.fetch(input, i));
+    const url = buildUrl(config, path, options.searchParams);
 
-      let response: Response;
-      try {
-        response = await doFetch(url, {
+    let response: Response;
+    try {
+      response = await doFetch(url, {
+        ...init,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (cause) {
+      // AbortError 是调用方主动取消（切页面/换查询），原样抛出，
+      // 不要包装成「网络不可用」在界面上吓人
+      if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+      throw new ApiError(
+        NETWORK_STATUS,
+        NETWORK_CODE,
+        "无法连接平台 API，请检查服务是否启动或网络是否可达",
+      );
+    }
+
+    if (!response.ok) throw await toApiError(response);
+
+    try {
+      return (await response.json()) as T;
+    } catch {
+      throw new ApiError(response.status, BAD_RESPONSE_CODE, "平台 API 返回的不是合法 JSON");
+    }
+  }
+
+  return {
+    get<T>(path: string, options: RequestOptions = {}): Promise<T> {
+      return request<T>(
+        path,
+        {
           method: "GET",
           headers: { Accept: "application/json", ...devPrincipalHeaders(config) },
-          ...(options.signal ? { signal: options.signal } : {}),
-        });
-      } catch (cause) {
-        // AbortError 是调用方主动取消（切页面/换查询），原样抛出，
-        // 不要包装成「网络不可用」在界面上吓人
-        if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
-        throw new ApiError(
-          NETWORK_STATUS,
-          NETWORK_CODE,
-          "无法连接平台 API，请检查服务是否启动或网络是否可达",
-        );
-      }
+        },
+        options,
+      );
+    },
 
-      if (!response.ok) throw await toApiError(response);
-
-      try {
-        return (await response.json()) as T;
-      } catch {
-        throw new ApiError(response.status, BAD_RESPONSE_CODE, "平台 API 返回的不是合法 JSON");
-      }
+    /** 写路径。目前只有 Action 执行入口用它（ADR-003：写操作唯一入口）。 */
+    post<T>(path: string, body: unknown, options: PostOptions = {}): Promise<T> {
+      return request<T>(
+        path,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            ...devPrincipalHeaders(config),
+            ...(options.requestId ? { "X-Request-ID": options.requestId } : {}),
+          },
+          body: JSON.stringify(body),
+        },
+        options,
+      );
     },
   };
 }

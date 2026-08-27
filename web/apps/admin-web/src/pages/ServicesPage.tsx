@@ -1,19 +1,29 @@
 import { useQuery } from "@tanstack/react-query";
-import { FreshnessBadge, ServiceStatusBadge, formatDuration, formatUtcTimestamp } from "@xingmang/ui-admin";
-import { EmptyState } from "@xingmang/ui-primitives";
 import {
+  FreshnessBadge,
+  ServiceStatusBadge,
+  formatDuration,
+  formatUtcTimestamp,
+} from "@xingmang/ui-admin";
+import { EmptyState } from "@xingmang/ui-primitives";
+import { useState } from "react";
+import { appApiConfig } from "../api/config";
+import {
+  listMetrics,
   listServices,
   serviceFreshness,
   SERVICE_STALENESS_THRESHOLD_SECONDS,
   type ServiceItem,
 } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
+import { ObserveServiceDialog } from "../components/ObserveServiceDialog";
 import { PageHeader } from "../components/PageHeader";
+import { RegisterServiceDialog } from "../components/RegisterServiceDialog";
 
 const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";
 const TD = "px-3 py-2 align-top text-sm text-fg";
 
-/** 服务清单：被管理系统实例一览。
+/** 服务清单：被管理系统实例一览 + 两个写路径（登记 / 上报观测）。
  *
  *  采集时间同样按新鲜度语义展示——「实例在册」不等于「数据是新的」。 */
 export function ServicesPage() {
@@ -21,6 +31,23 @@ export function ServicesPage() {
     queryKey: ["services"],
     queryFn: ({ signal }) => listServices({ signal }),
   });
+  // 只为拿到「当前身份属于哪个环境」而顺带读一次指标；已经缓存过就不会再发请求
+  const metricsQuery = useQuery({
+    queryKey: ["metrics"],
+    queryFn: ({ signal }) => listMetrics({ signal }),
+  });
+
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const environment = resolveEnvironment(
+    query.data ?? [],
+    (metricsQuery.data ?? []).map((m) => m.environment),
+  );
+
+  const afterWrite = (message: string) => {
+    setNotice(message);
+    void query.refetch();
+  };
 
   return (
     <section>
@@ -29,24 +56,63 @@ export function ServicesPage() {
         description={`采集时间超过 ${formatDuration(SERVICE_STALENESS_THRESHOLD_SECONDS)} 记为数据延迟（阈值由前端设定，registry 未提供）。`}
         onRefresh={() => void query.refetch()}
         refreshing={query.isFetching}
+        lastRefreshedAt={query.dataUpdatedAt || undefined}
+        actions={
+          <RegisterServiceDialog
+            environment={environment}
+            onRegistered={(runId) =>
+              afterWrite(`已登记，run_id=${runId}，可在审计页查看这条事件`)
+            }
+          />
+        }
       />
+
+      {notice ? (
+        // status 而不是 alert：这是一条成功回执，不该抢走屏幕阅读器的当前焦点
+        <p
+          role="status"
+          className="mb-3 rounded-md border border-success bg-success/10 px-3 py-2 text-xs text-success"
+        >
+          {notice}
+        </p>
+      ) : null}
+
       <ApiStateView
         isPending={query.isPending}
         error={query.error}
         onRetry={() => void query.refetch()}
       >
-        <ServicesTable items={query.data ?? []} />
+        <ServicesTable items={query.data ?? []} onObserved={afterWrite} />
       </ApiStateView>
     </section>
   );
 }
 
-function ServicesTable({ items }: { items: ServiceItem[] }) {
+/** 当前身份所属环境。
+ *
+ *  前端并不真的知道服务端把自己配成了哪个环境（config.ts 说明了为什么默认不传
+ *  environment），但写 Action 时 environment 是必填参数。于是按可信度取值：
+ *  显式配置 > 已有服务记录 > 已有指标记录。三样都没有就返回空串，
+ *  由表单显示「未知」并禁用提交——猜一个只会换来 409/403。 */
+export function resolveEnvironment(services: ServiceItem[], metricEnvironments: string[]): string {
+  if (appApiConfig.environment) return appApiConfig.environment;
+  const fromService = services.find((s) => s.environment)?.environment;
+  if (fromService) return fromService;
+  return metricEnvironments.find((e) => e) ?? "";
+}
+
+function ServicesTable({
+  items,
+  onObserved,
+}: {
+  items: ServiceItem[];
+  onObserved: (message: string) => void;
+}) {
   if (items.length === 0) {
     return (
       <EmptyState
         title="暂无服务"
-        description="该环境下还没有登记任何被管理系统实例；通过 registry.service.create Action 登记后会出现在这里"
+        description="该环境下还没有登记任何被管理系统实例；用右上角的「登记服务」按钮登记第一个"
       />
     );
   }
@@ -62,6 +128,9 @@ function ServicesTable({ items }: { items: ServiceItem[] }) {
             <th className={TH}>状态</th>
             <th className={TH}>接入地址</th>
             <th className={TH}>数据新鲜度</th>
+            <th className={TH}>
+              <span className="sr-only">操作</span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -86,6 +155,16 @@ function ServicesTable({ items }: { items: ServiceItem[] }) {
               </td>
               <td className={TD}>
                 <ServiceFreshnessCell service={s} />
+              </td>
+              <td className={TD}>
+                <ObserveServiceDialog
+                  service={s}
+                  onObserved={(runId) =>
+                    onObserved(
+                      `已上报观测，run_id=${runId}，可在审计页查看这条事件`,
+                    )
+                  }
+                />
               </td>
             </tr>
           ))}

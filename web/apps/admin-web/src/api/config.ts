@@ -16,8 +16,22 @@ export interface PlatformApiConfig {
 /** 后端 `principal.ParseType` 接受的两种主体类型（宪法 6 条：人机身份分域）。 */
 export type PrincipalType = "HUMAN" | "MACHINE";
 
-/** 看板只读，需要这两个 scope（对应后端路由上的 RequireScope）。 */
-export const DEFAULT_SCOPES = ["registry.read", "ops.read"];
+/** 开发身份默认持有的 scope。
+ *
+ *  前两个是只读看板要的（对应后端路由上的 RequireScope）；后两个是 XM-0026
+ *  新增的：audit.read 用于审计事件页，registry.service.manage 是
+ *  registry.service.create / observe 两个 Action 的 Permission
+ *  （internal/platform/registry/actions.go）。
+ *
+ *  这里多给一个 scope **不等于**放权：服务端才是最终裁决者，
+ *  拿着不该有的 scope 请求照样 403（宪法：前端隐藏不构成安全控制）。
+ *  TODO(XM-0008): 这份清单由 Keycloak 下发的 Access Token 取代。 */
+export const DEFAULT_SCOPES = [
+  "registry.read",
+  "ops.read",
+  "audit.read",
+  "registry.service.manage",
+];
 
 function parseScopes(raw: string | undefined): string[] {
   if (!raw) return DEFAULT_SCOPES;

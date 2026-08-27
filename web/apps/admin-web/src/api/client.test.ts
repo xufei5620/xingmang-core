@@ -118,6 +118,57 @@ describe("createApiClient：每个请求都注入身份头", () => {
   });
 });
 
+describe("createApiClient：POST（写路径）", () => {
+  it("请求体只有 params——后端 DisallowUnknownFields，多一个字段就是 400", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ action_run_id: "run-1" }));
+    await createApiClient({ config, fetchImpl }).post(
+      "/api/v1/actions/registry.service.create/versions/1/execute",
+      { params: { instance_id: "sub2api-dev" } },
+      { requestId: "req-abc" },
+    );
+
+    const init = fetchImpl.mock.calls[0]?.[1];
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({ params: { instance_id: "sub2api-dev" } });
+  });
+
+  it("request_id 走 X-Request-ID 头而不是请求体（httpapi/middleware.go 读的是头）", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ action_run_id: "run-1" }));
+    await createApiClient({ config, fetchImpl }).post("/x", { params: {} }, { requestId: "req-7" });
+
+    const headers = fetchImpl.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["X-Request-ID"]).toBe("req-7");
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["X-Dev-Principal-ID"]).toBe("dev-operator");
+    expect(String(fetchImpl.mock.calls[0]?.[1]?.body)).not.toContain("request_id");
+  });
+
+  it("没给 requestId 就不带这个头，让后端自己生成一个", async () => {
+    const fetchImpl = mockFetch(jsonResponse({}));
+    await createApiClient({ config, fetchImpl }).post("/x", {});
+    const headers = fetchImpl.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect("X-Request-ID" in headers).toBe(false);
+  });
+
+  it("写路径的错误映射与读路径一致（403 抠得出权限名）", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse(
+        {
+          error: {
+            code: "PERMISSION_DENIED",
+            message: "缺少权限 registry.service.manage",
+            request_id: "req-9",
+          },
+        },
+        403,
+      ),
+    );
+    const api = await expectApiError(createApiClient({ config, fetchImpl }).post("/x", {}));
+    expect(api.missingScope).toBe("registry.service.manage");
+    expect(api.requestId).toBe("req-9");
+  });
+});
+
 describe("createApiClient：错误映射", () => {
   it("403 抓出缺少的权限名，供界面直接提示", async () => {
     const fetchImpl = mockFetch(
