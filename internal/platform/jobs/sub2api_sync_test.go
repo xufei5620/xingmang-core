@@ -35,9 +35,12 @@ type memoryStore struct {
 	rows   map[string]ops.Observation
 	writes []ops.Observation
 	// samples 是追加型历史样本（XM-0024），顺序即写入顺序。
-	samples   []ops.Observation
-	upsertErr error
-	sampleErr error
+	samples []ops.Observation
+	// writeErr 让每一次 UpsertWithSample 都失败，模拟库不可用。
+	writeErr error
+	// failWriteFor 只让某一条指标的写入失败，模拟一轮里第 N 条撞库错——
+	// 这才是「孤儿最新态」原本会出现的场景。
+	failWriteFor string
 }
 
 func newMemoryStore() *memoryStore {
@@ -56,29 +59,29 @@ func (s *memoryStore) Get(_ context.Context, metricKey, environment string) (ops
 	return row, nil
 }
 
-func (s *memoryStore) Upsert(_ context.Context, o ops.Observation) (ops.Observation, error) {
-	if s.upsertErr != nil {
-		return ops.Observation{}, s.upsertErr
+// UpsertWithSample 模拟 ops.Store 的事务语义：失败时**两张表都不写**
+// （XM-R010）。这一点是本内存实现最重要的性质——若它在报错前先落最新态，
+// 用它跑的测试就会把要证伪的那个 bug 当成正常行为放过去。
+//
+// 照样跑 Validate() / ValidateSample()——真实的 ops.Store 会跑，数据库还有
+// 同一条一致性 CHECK。不跑的话，本测试就证明不了「失败观测真的写得进去」。
+func (s *memoryStore) UpsertWithSample(_ context.Context, o ops.Observation) (ops.Observation, error) {
+	if s.writeErr != nil {
+		return ops.Observation{}, s.writeErr
+	}
+	if s.failWriteFor != "" && s.failWriteFor == o.MetricKey {
+		return ops.Observation{}, fmt.Errorf("注入的写入失败: %s", o.MetricKey)
 	}
 	if err := o.Validate(); err != nil {
 		return ops.Observation{}, err
 	}
+	if err := o.ValidateSample(); err != nil {
+		return ops.Observation{}, err
+	}
 	s.rows[s.key(o.MetricKey, o.Environment)] = o
 	s.writes = append(s.writes, o)
-	return o, nil
-}
-
-// InsertSample 照样跑 ValidateSample()——真实的 ops.Store 会跑，数据库还有
-// 同一条一致性 CHECK。不跑的话，本测试就证明不了「失败样本真的留得下」。
-func (s *memoryStore) InsertSample(_ context.Context, o ops.Observation) error {
-	if s.sampleErr != nil {
-		return s.sampleErr
-	}
-	if err := o.ValidateSample(); err != nil {
-		return err
-	}
 	s.samples = append(s.samples, o)
-	return nil
+	return o, nil
 }
 
 // samplesFor 返回某指标的全部样本，按写入顺序。
@@ -559,11 +562,11 @@ func TestSub2APISyncMetricMappingIsExhaustive(t *testing.T) {
 	}
 }
 
-// TestSub2APISyncUpsertFailureIsRetryable：写库失败才是真正要重试的失败
+// TestSub2APISyncWriteFailureIsRetryable：写库失败才是真正要重试的失败
 // ——话根本没说出口。
-func TestSub2APISyncUpsertFailureIsRetryable(t *testing.T) {
+func TestSub2APISyncWriteFailureIsRetryable(t *testing.T) {
 	store := newMemoryStore()
-	store.upsertErr = errors.New("connection refused")
+	store.writeErr = errors.New("connection refused")
 	var logs bytes.Buffer
 	worker := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
 
@@ -571,7 +574,7 @@ func TestSub2APISyncUpsertFailureIsRetryable(t *testing.T) {
 	if err == nil {
 		t.Fatal("写库失败必须返回 error 让 River 重试")
 	}
-	if !strings.Contains(logs.String(), `"error_code":"observation_upsert_failed"`) {
+	if !strings.Contains(logs.String(), `"error_code":"observation_write_failed"`) {
 		t.Fatalf("日志缺少写库失败的错误码: %s", logs.String())
 	}
 }
@@ -633,25 +636,98 @@ func TestSub2APISyncAppendsSampleForEveryObservation(t *testing.T) {
 	}
 }
 
-// TestSub2APISyncSampleFailureIsRetryable：样本写失败也要让 River 重试。
+// TestSub2APISyncRetryIsCleanReplay：**真正跑第二次 Work**，证明重试语义
+// （XM-R010，回归 Codex 冷审 PR #48 第 1 条点名的测试缺口）。
 //
-// 重复一个点是可恢复的（同一 synced_at 上两个点，图上同一位置）；
-// 缺一个点不可恢复——那一刻的上游数据已经过去了，没有补数途径。
-func TestSub2APISyncSampleFailureIsRetryable(t *testing.T) {
+// 旧测试只断言「返回 error 且最新态已写」，恰恰把 bug 当成了正确行为：
+// 最新态写了、样本没写，库里就多出一个历史里查无对证的 T1。现在两写同事务，
+// 第一轮失败 = 两张表都没动，第二轮用新的 now 重读上游是一次**完整重放**，
+// 不是给 T1 打补丁。所以第二轮之后每条指标恰好一份最新态 + 一份样本，
+// 且第一轮那个 synced_at 不该在任何地方留下痕迹。
+func TestSub2APISyncRetryIsCleanReplay(t *testing.T) {
 	store := newMemoryStore()
-	store.sampleErr = errors.New("connection refused")
+	store.writeErr = errors.New("connection refused")
+	var logs bytes.Buffer
+
+	// 第一次尝试：库挂了。
+	first := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
+	if err := first.Work(context.Background(), syncJob()); err == nil {
+		t.Fatal("写库失败必须返回 error 让 River 重试")
+	}
+	if len(store.writes) != 0 || len(store.samples) != 0 {
+		t.Fatalf("事务失败必须两张表都不写: 最新态 %d 条、样本 %d 条",
+			len(store.writes), len(store.samples))
+	}
+
+	// River 重试：新的 now、重新读一遍上游。
+	store.writeErr = nil
+	later := fixedNow.Add(5 * time.Minute)
+	second := NewSub2APISyncWorker(Sub2APISyncOptions{
+		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
+		Environment: "staging",
+		InstanceID:  DefaultSub2APIInstanceID,
+		Mode:        Sub2APIModeFake,
+		Store:       store,
+		NewClient:   fakeFactory(sub2api.FakeOptions{}),
+		Now:         func() time.Time { return later },
+	})
+	if err := second.Work(context.Background(), syncJob()); err != nil {
+		t.Fatalf("重试轮必须成功: %v", err)
+	}
+
+	if len(store.rows) != len(contractMetricKeys) {
+		t.Fatalf("最新态 = %d 行, want %d", len(store.rows), len(contractMetricKeys))
+	}
+	if len(store.samples) != len(contractMetricKeys) {
+		t.Fatalf("样本 = %d 条, want %d（第一轮不该留下任何点）",
+			len(store.samples), len(contractMetricKeys))
+	}
+	for _, key := range contractMetricKeys {
+		series := store.samplesFor(key)
+		if len(series) != 1 {
+			t.Fatalf("%s 样本 = %d 条, want 1", key, len(series))
+		}
+		if !series[0].SyncedAt.Equal(later) {
+			t.Fatalf("%s 样本停在 %v, want %v（失败轮的 synced_at 不该留下痕迹）",
+				key, series[0].SyncedAt, later)
+		}
+		row := store.byKey(t, key)
+		if !row.SyncedAt.Equal(later) {
+			t.Fatalf("%s 最新态停在 %v, want %v", key, row.SyncedAt, later)
+		}
+	}
+}
+
+// TestSub2APISyncPartialRoundLeavesNoOrphanLatestState：一轮里第 N 条撞库错时，
+// 那条指标在两张表里都不该出现——「最新态有、历史没有」正是 XM-R010 修的病。
+//
+// 已经写成功的那几条留在库里是**对的**：它们各自的两写都提交了，最新态与
+// 历史一致。事务粒度是单条指标，不是整轮（理由见 ops.Store.UpsertWithSample）。
+func TestSub2APISyncPartialRoundLeavesNoOrphanLatestState(t *testing.T) {
+	store := newMemoryStore()
+	store.failWriteFor = sub2api.MetricRevenueDaily
 	var logs bytes.Buffer
 	worker := newTestSyncWorker(store, fakeFactory(sub2api.FakeOptions{}), &logs)
 
 	if err := worker.Work(context.Background(), syncJob()); err == nil {
-		t.Fatal("样本写失败必须返回 error 让 River 重试")
+		t.Fatal("有指标写不进去时必须返回 error 让 River 重试")
 	}
-	if !strings.Contains(logs.String(), `"error_code":"observation_sample_failed"`) {
-		t.Fatalf("日志缺少样本写失败的错误码: %s", logs.String())
+	if _, ok := store.rows[store.key(sub2api.MetricRevenueDaily, "staging")]; ok {
+		t.Fatal("写失败的指标不该留下最新态")
 	}
-	// 先 Upsert 后 InsertSample：样本挂了，最新态至少已经是对的。
-	if len(store.writes) == 0 {
-		t.Fatal("样本失败前应已写入最新态")
+	if len(store.samplesFor(sub2api.MetricRevenueDaily)) != 0 {
+		t.Fatal("写失败的指标不该留下样本")
+	}
+	// 核心不变式：最新态里出现过的每一条，历史里都有对应的点。
+	if len(store.writes) != len(store.samples) {
+		t.Fatalf("孤儿最新态：最新态 %d 条、样本 %d 条", len(store.writes), len(store.samples))
+	}
+	for _, row := range store.writes {
+		series := store.samplesFor(row.MetricKey)
+		if len(series) != 1 || !series[0].SyncedAt.Equal(row.SyncedAt) {
+			t.Fatalf("%s 的最新态 synced_at=%v 在历史里查无对证: %+v",
+				row.MetricKey, row.SyncedAt, series)
+		}
 	}
 }
 

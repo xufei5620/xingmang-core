@@ -29,12 +29,15 @@ const MaxSampleLimit int32 = 1000
 //   - ops.metric_observation_sample：追加型样本，回答「这段时间是怎么变的」，
 //     只有 INSERT 与 SELECT，没有任何 UPDATE/DELETE 路径。
 type Store struct {
-	q *gen.Queries
+	// pool 只服务于需要**多条语句原子生效**的写入（UpsertWithSample）。
+	// 单语句路径继续走 q，不必每次都开一个事务。
+	pool *pgxpool.Pool
+	q    *gen.Queries
 }
 
 // NewStore 创建仓储。
 func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{q: gen.New(pool)}
+	return &Store{pool: pool, q: gen.New(pool)}
 }
 
 func ts(t time.Time) pgtype.Timestamptz {
@@ -122,24 +125,33 @@ func observationFromRow(r gen.OpsMetricObservation) (Observation, error) {
 	}, nil
 }
 
-// Upsert 写入或覆盖某个 (metric_key, environment) 的最新观测。
-func (s *Store) Upsert(ctx context.Context, o Observation) (Observation, error) {
-	if err := o.Validate(); err != nil {
-		return Observation{}, err
-	}
-	if o.ID == uuid.Nil {
-		o.ID = uuid.New()
-	}
+// marshalValue 把观测值编码成 jsonb 列的字节。
+//
+// nil 与空 map 都编码成 `{}`：库里那一列是 NOT NULL，而「这一刻没有值」
+// 由 status/observed_at 表达，不该再靠一个 NULL 说第二遍。
+func marshalValue(o Observation) ([]byte, error) {
 	value := o.Value
 	if value == nil {
 		value = map[string]any{}
 	}
 	valueJSON, err := json.Marshal(value)
 	if err != nil {
-		return Observation{}, fmt.Errorf("value_json: %w", err)
+		return nil, fmt.Errorf("value_json: %w", err)
 	}
+	return valueJSON, nil
+}
 
-	row, err := s.q.UpsertMetricObservation(ctx, gen.UpsertMetricObservationParams{
+// upsertParams / sampleParams 把领域对象翻成两条语句各自的参数。
+//
+// 抽出来是因为 UpsertWithSample 要在事务里重跑同样的翻译（XM-R010）。
+// 让「字段怎么映射到列」只有一份实现：将来给观测加字段时，忘了改事务路径
+// 会在编译期就显形，而不是让事务写出一份少几列的样本。
+func upsertParams(o Observation) (gen.UpsertMetricObservationParams, error) {
+	valueJSON, err := marshalValue(o)
+	if err != nil {
+		return gen.UpsertMetricObservationParams{}, err
+	}
+	return gen.UpsertMetricObservationParams{
 		ID:                        o.ID,
 		MetricKey:                 o.MetricKey,
 		Source:                    o.Source,
@@ -153,7 +165,47 @@ func (s *Store) Upsert(ctx context.Context, o Observation) (Observation, error) 
 		LastErrorCode:             o.LastErrorCode,
 		StalenessThresholdSeconds: o.StalenessThresholdSeconds,
 		ValueJson:                 valueJSON,
-	})
+	}, nil
+}
+
+func sampleParams(o Observation) (gen.InsertMetricObservationSampleParams, error) {
+	valueJSON, err := marshalValue(o)
+	if err != nil {
+		return gen.InsertMetricObservationSampleParams{}, err
+	}
+	return gen.InsertMetricObservationSampleParams{
+		MetricKey:     o.MetricKey,
+		Source:        o.Source,
+		Environment:   o.Environment,
+		ObservedAt:    tsPtr(o.ObservedAt),
+		SyncedAt:      ts(o.SyncedAt),
+		Status:        string(o.Status),
+		IsPartial:     o.IsPartial,
+		Watermark:     o.Watermark,
+		LastErrorCode: o.LastErrorCode,
+		ValueJson:     valueJSON,
+	}, nil
+}
+
+// Upsert 写入或覆盖某个 (metric_key, environment) 的最新观测。
+//
+// **周期同步任务不该用它**，用 UpsertWithSample：单独调用 Upsert 只更新
+// 「现在是什么」，历史序列会缺掉这一刻（理由见 UpsertWithSample 的注释）。
+// 本方法留给「只关心最新态、本来就不该留历史点」的场景——手工订正一行、
+// 一次性回填、以及只验证最新态语义的测试。
+func (s *Store) Upsert(ctx context.Context, o Observation) (Observation, error) {
+	if err := o.Validate(); err != nil {
+		return Observation{}, err
+	}
+	if o.ID == uuid.Nil {
+		o.ID = uuid.New()
+	}
+	params, err := upsertParams(o)
+	if err != nil {
+		return Observation{}, err
+	}
+
+	row, err := s.q.UpsertMetricObservation(ctx, params)
 	if err != nil {
 		return Observation{}, fmt.Errorf("upsert metric observation: %w", err)
 	}
@@ -191,9 +243,11 @@ func (s *Store) Get(ctx context.Context, metricKey, environment string) (Observa
 
 // InsertSample 追加一条历史样本。
 //
-// 与 Upsert 并列调用，不是替代：Upsert 维护「现在是什么」，本方法维护
-// 「一路是怎么过来的」。**失败观测也要追加**——趋势图上那段红正是从
-// status=failed 的样本里画出来的，不写就等于让图假装那段时间什么都没发生。
+// **周期同步任务不该用它**，用 UpsertWithSample。本方法留给「只补一个历史点、
+// 不动最新态」的场景：历史回填、以及只验证样本表语义的测试。
+//
+// **失败观测也要追加**——趋势图上那段红正是从 status=failed 的样本里画出来的，
+// 不写就等于让图假装那段时间什么都没发生。
 //
 // 不返回写入行：样本没有需要回读的服务端生成字段（自增 id 只服务于唯一性），
 // 返回一个没人用的结构体只会诱使调用方去依赖它。
@@ -201,30 +255,78 @@ func (s *Store) InsertSample(ctx context.Context, o Observation) error {
 	if err := o.ValidateSample(); err != nil {
 		return err
 	}
-	value := o.Value
-	if value == nil {
-		value = map[string]any{}
-	}
-	valueJSON, err := json.Marshal(value)
+	params, err := sampleParams(o)
 	if err != nil {
-		return fmt.Errorf("value_json: %w", err)
+		return err
 	}
-
-	if err := s.q.InsertMetricObservationSample(ctx, gen.InsertMetricObservationSampleParams{
-		MetricKey:     o.MetricKey,
-		Source:        o.Source,
-		Environment:   o.Environment,
-		ObservedAt:    tsPtr(o.ObservedAt),
-		SyncedAt:      ts(o.SyncedAt),
-		Status:        string(o.Status),
-		IsPartial:     o.IsPartial,
-		Watermark:     o.Watermark,
-		LastErrorCode: o.LastErrorCode,
-		ValueJson:     valueJSON,
-	}); err != nil {
+	if err := s.q.InsertMetricObservationSample(ctx, params); err != nil {
 		return fmt.Errorf("insert metric observation sample: %w", err)
 	}
 	return nil
+}
+
+// UpsertWithSample 在**同一个事务**里更新最新态并追加历史样本，是采集路径
+// 唯一正确的写入方式（XM-R010，回归 Codex 冷审 PR #48 第 1 条）。
+//
+// 为什么必须同事务，而不是「先 Upsert 再 InsertSample，样本失败就重试」：
+// 采集任务每次执行（首轮和每一次重试）都重新取当前时间、重新读一遍上游。
+// 两写分离时，样本那一条挂掉会留下一个**自相矛盾**的库：最新态已经宣称
+// 「T1 采到了 V」，历史里却永远没有 T1 这个点——T1 那一刻的上游数据已经过去，
+// 没有任何补数途径。重试写的是 T2 的新快照，补不回 T1；对本轮已经写成功的
+// 那几条指标，重试还会再添一个 T2 的点，值可能与 T1 不同。所以旧注释与
+// README 说的「同一个 synced_at 上两个点、图上同一位置、无害」是**错的**：
+// 重复点根本不在同一个 synced_at 上，而缺失的那个点不可恢复。
+//
+// 同事务之后语义变得干净：要么最新态与样本一起生效，要么两张表都没动。
+// 失败时重试用新的 now 重读上游是**完整重放**而不是打补丁——上一轮什么都
+// 没写进去，没有缺口需要补，也不存在只写了一半的自相矛盾状态。
+//
+// 一次事务只包**一条指标**的两写，不包整轮五条：整轮同事务会让一条指标的
+// 库错误连带回滚另外四条已经算好的观测（包括那几条如实记录上游失败的
+// failed 观测），把「四条真话 + 一条写不进去」变成「一条都不写」。粒度落在
+// 单条指标上，不变式是「最新态里出现过的每一个 (metric_key, synced_at)，
+// 历史里都有对应的点」——这正是被打破的那一条。整轮里其余指标是否写成功，
+// 各自独立，不构成任何序列的缺口（见 docs/modules/ops/README.md）。
+//
+// 只跑 Validate 不再跑 ValidateSample：Validate 是它的超集（多校验一条
+// staleness_threshold_seconds > 0，那是最新态才存的列），重复调用只是噪音。
+func (s *Store) UpsertWithSample(ctx context.Context, o Observation) (Observation, error) {
+	if err := o.Validate(); err != nil {
+		return Observation{}, err
+	}
+	if o.ID == uuid.Nil {
+		o.ID = uuid.New()
+	}
+	upsert, err := upsertParams(o)
+	if err != nil {
+		return Observation{}, err
+	}
+	sample, err := sampleParams(o)
+	if err != nil {
+		return Observation{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Observation{}, fmt.Errorf("begin: %w", err)
+	}
+	// 任何提前 return 都回滚；Commit 成功后这次 Rollback 是空操作。
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	q := gen.New(tx)
+	row, err := q.UpsertMetricObservation(ctx, upsert)
+	if err != nil {
+		return Observation{}, fmt.Errorf("upsert metric observation: %w", err)
+	}
+	if err := q.InsertMetricObservationSample(ctx, sample); err != nil {
+		// 上面那条 upsert 会随事务一起消失——这正是本方法存在的理由。
+		return Observation{}, fmt.Errorf("insert metric observation sample: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Observation{}, fmt.Errorf("commit: %w", err)
+	}
+	// 提交后才解码返回值：解码失败不该让一次已经写成功的采集被报成失败。
+	return observationFromRow(row)
 }
 
 // ListSamples 按 (synced_at, id) 升序返回某环境某指标在 since 之后的样本，

@@ -83,15 +83,18 @@ var ErrSub2APIRealClientUnavailable = errors.New(
 
 // ObservationStore 是本任务用到的 ops 仓储子集。
 //
-// 只声明用得到的三个方法而不是直接依赖 *ops.Store：单元测试能用固定时钟 +
+// 只声明用得到的两个方法而不是直接依赖 *ops.Store：单元测试能用固定时钟 +
 // 内存实现跑完整条失败路径，不必为了验证「失败也要写」而先起一个库。
 // *ops.Store 天然满足本接口。
+//
+// 刻意**不**声明 Upsert / InsertSample（XM-R010）：这两个方法在 ops 里仍然
+// 存在，但采集路径分两次调用它们正是被修掉的那个 bug。接口里没有它们，
+// 这个任务就不可能再退回旧写法——编译期挡住，比注释挡住可靠。
 type ObservationStore interface {
 	Get(ctx context.Context, metricKey, environment string) (ops.Observation, error)
-	Upsert(ctx context.Context, o ops.Observation) (ops.Observation, error)
-	// InsertSample 追加历史样本（XM-0024）。与 Upsert 并列调用而不是二选一：
-	// Upsert 维护「现在是什么」，样本维护「一路是怎么过来的」。
-	InsertSample(ctx context.Context, o ops.Observation) error
+	// UpsertWithSample 在同一事务里写最新态与历史样本：要么都生效，要么
+	// 两张表都没动（XM-R010，理由见 ops.Store.UpsertWithSample）。
+	UpsertWithSample(ctx context.Context, o ops.Observation) (ops.Observation, error)
 }
 
 // Sub2APIClientFactory 按需构造一个只读客户端。
@@ -294,8 +297,12 @@ func NewSub2APISyncWorker(opts Sub2APISyncOptions) *Sub2APISyncWorker {
 // 返回 error 的条件很窄，只有**写库失败**才算任务失败：上游读取失败已经
 // 作为 SyncFailed 观测落库了，看板看得见，再让 River 重试只会和 300s 的
 // 周期重复排队，而且下一次重试会把刚写好的失败态原样覆盖一遍。真正需要
-// 重试的是「话都没说出口」——观测没写进库，或者历史样本没追加上
-// （XM-0024，理由见下面 InsertSample 调用处）。
+// 重试的是「话都没说出口」——这一轮的观测一个字都没写进库。
+//
+// 重试语义（XM-R010）：每次执行都重新取 now、重新读一遍上游，所以重试写的
+// 是一份**新快照**而不是失败那一份的补写。这没问题，恰恰是因为写失败的那条
+// 指标什么都没留下——最新态与样本同事务，失败即两张表都没动。库里于是永远
+// 不会出现「最新态说 T1 采到了，历史里却没有 T1」这种自相矛盾。
 func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISyncArgs]) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -332,29 +339,22 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 			observation = w.failureObservation(ctx, observation, now, connector.KindOf(err))
 			failed++
 		}
-		if _, err := w.store.Upsert(ctx, observation); err != nil {
-			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_upsert_failed",
-				slog.String("metric_key", observation.MetricKey))
-			return fmt.Errorf("upsert %s: %w", observation.MetricKey, err)
-		}
-		// 再追加一条历史样本（XM-0024）。先 Upsert 后 InsertSample 是有意的：
-		// 看板首页读的是最新态，样本写失败时至少「现在是什么」已经是对的。
+		// 最新态与历史样本一次写完，同一个事务（XM-R010）。
 		//
 		// **成功与失败的观测都留样。** 失败样本正是趋势图上那段红的数据来源；
 		// 不留样，图上只会看到一段平直的旧值，看不出中间断过。
-		if err := w.store.InsertSample(ctx, observation); err != nil {
-			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_sample_failed",
+		if _, err := w.store.UpsertWithSample(ctx, observation); err != nil {
+			// 只有一个错误码，因为只有一个结果：这条指标这一轮**什么都没写**。
+			// 旧代码分 observation_upsert_failed / observation_sample_failed 两
+			// 个码，是因为那时两写会分别失败、留下半截状态；现在事务保证不会。
+			// 具体是哪条语句撞的库错在 error 里（ops 层用不同的动词包裹），
+			// 但运维要处置的事实只有这一个。
+			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_write_failed",
 				slog.String("metric_key", observation.MetricKey))
-			// 返回 error 让 River 重试，而不是只记日志放过去。
-			//
-			// 代价是重试会让本轮已经写成功的那几条样本各多出一条重复点——
-			// 同一个 synced_at 上两个点，图上是同一个位置，无害。
-			// 反过来，只记日志的代价是历史**永久缺一个点**：那一刻的上游数据
-			// 已经过去了，没有任何补数途径，而缺口恰好最可能出现在库压力大、
-			// 也就是最值得回看的时候。可恢复的重复 vs 不可恢复的缺失，选前者。
-			//
-			// 重试是安全的：Upsert 幂等（整行覆盖），本方法只是再 INSERT 一次。
-			return fmt.Errorf("insert sample %s: %w", observation.MetricKey, err)
+			// 返回 error 让 River 重试，而不是只记日志放过去：只记日志的代价是
+			// 历史**永久缺一个点**——那一刻的上游数据已经过去了，没有补数途径，
+			// 而缺口恰好最可能出现在库压力大、也就是最值得回看的时候。
+			return fmt.Errorf("write %s: %w", observation.MetricKey, err)
 		}
 	}
 
