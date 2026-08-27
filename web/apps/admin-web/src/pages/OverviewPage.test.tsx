@@ -57,8 +57,8 @@ function renderPage() {
     // 缓存窗口会把第二次请求吃掉，那就测不到刷新本身了
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  // MemoryRouter 是必需的：告警卡里有一个通往 /alerts 的 <Link>，
-  // 没有路由上下文时 react-router 会直接抛异常（XM-0033）。
+  // MemoryRouter 是必需的：告警卡里有一个通往 /alerts 的 <Link>（XM-0033），
+  // 指标卡上还有「查看平台 →」（XM-0034）。没有路由上下文 react-router 直接抛异常。
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>

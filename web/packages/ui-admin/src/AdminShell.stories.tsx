@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { EmptyState } from "@xingmang/ui-primitives";
 import { AdminShell } from "./AdminShell";
+import { NavItemDisabled, NavSection } from "./Nav";
 
 const meta = {
   title: "Admin/AdminShell",
@@ -10,12 +11,28 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+const linkClass = "block rounded-md px-3 py-2 text-fg-muted";
+const activeClass = "block rounded-md bg-surface-muted px-3 py-2 font-medium text-accent";
+
+/** 三段式导航（ADMIN-IA v2）：全局 / 被管平台 / 平台治理。
+ *  应用侧把这些 span 换成自己的 NavLink，壳本身不依赖 router。 */
 const nav = (
   <>
-    <span className="block rounded-md bg-surface-muted px-3 py-2 font-medium text-accent">
-      运营总览
-    </span>
-    <span className="block rounded-md px-3 py-2 text-fg-muted">告警中心（后续）</span>
+    <NavSection title="全局">
+      <span className={activeClass}>运营总览</span>
+      <NavItemDisabled label="告警中心" hint="即将上线" />
+      <span className={linkClass}>审计事件</span>
+    </NavSection>
+    <NavSection title="被管平台">
+      <span className={linkClass}>Sub2API</span>
+      <NavItemDisabled label="NewAPI" hint="未接入·M1" />
+      <NavItemDisabled label="开票系统" hint="契约草案·XM-0028" />
+    </NavSection>
+    <NavSection title="平台治理">
+      <span className={linkClass}>注册表</span>
+      <NavItemDisabled label="财务中心" hint="未接入·M3" />
+      <span className={linkClass}>设置</span>
+    </NavSection>
   </>
 );
 

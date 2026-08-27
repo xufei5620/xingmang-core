@@ -9,13 +9,16 @@ export interface MetricCardProps {
   /** 趋势图槽位。做成插槽而不是卡片自己去拉历史：卡片因此仍然是纯展示组件，
    *  渲染它不需要 QueryClient，趋势失败也天然溢不出来。 */
   trend?: ReactNode;
+  /** 平台入口槽位（「查看平台 →」）。理由同 trend：卡片不认识路由，
+   *  链接由调用方给——平台详情页自己就是终点，那里渲染卡片时不传。 */
+  link?: ReactNode;
 }
 
 /** 单个指标卡片。
  *
  *  结构上把「数值」和「新鲜度」焊在一起：徽章与数据时间是卡片的固定部件，
  *  不是可选项——规格 §9.1 不允许出现一张只有数字的卡片。 */
-export function MetricCard({ item, trend }: MetricCardProps) {
+export function MetricCard({ item, trend, link }: MetricCardProps) {
   const shown = presentMetric(item);
   return (
     <article className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4 shadow-sm">
@@ -52,6 +55,8 @@ export function MetricCard({ item, trend }: MetricCardProps) {
           来源 {item.source || "—"}
           {item.watermark ? ` · 水位 ${item.watermark}` : null}
         </p>
+        {/* 平台入口排在新鲜度之后：先让人看清这个数可不可信，再请他点进去 */}
+        {link ? <div className="mt-2">{link}</div> : null}
       </div>
     </article>
   );

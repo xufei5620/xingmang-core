@@ -23,10 +23,13 @@ import { RegisterServiceDialog } from "../components/RegisterServiceDialog";
 const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";
 const TD = "px-3 py-2 align-top text-sm text-fg";
 
-/** 服务清单：被管理系统实例一览 + 两个写路径（登记 / 上报观测）。
+/** 注册表：被管理系统实例一览 + 两个写路径（登记 / 上报观测）。
+ *
+ *  XM-0034 起从「服务清单」改挂到平台治理段（ADMIN-IA 三、迁移映射），
+ *  路径由 /services 改为 /registry，页面内容整体照搬——旧地址仍会重定向过来。
  *
  *  采集时间同样按新鲜度语义展示——「实例在册」不等于「数据是新的」。 */
-export function ServicesPage() {
+export function RegistryPage() {
   const query = useQuery({
     queryKey: ["services"],
     queryFn: ({ signal }) => listServices({ signal }),
@@ -52,7 +55,7 @@ export function ServicesPage() {
   return (
     <section>
       <PageHeader
-        title="服务清单"
+        title="注册表"
         description={`采集时间超过 ${formatDuration(SERVICE_STALENESS_THRESHOLD_SECONDS)} 记为数据延迟（阈值由前端设定，registry 未提供）。这是一个对所有服务一刀切的临时值，各服务的真实阈值待后端契约提供（XM-0017）。`}
         onRefresh={() => void query.refetch()}
         refreshing={query.isFetching}
@@ -69,6 +72,12 @@ export function ServicesPage() {
           />
         }
       />
+
+      {/* ADMIN-IA 给注册表的职责是「服务/连接器/连接三张表」，眼下只有服务这一张。
+          少的两张明说出来，否则这一页看起来就像注册表的全部（§12 惯例） */}
+      <p className="mb-3 text-xs text-fg-muted">
+        当前只有「服务」一张表；连接器与连接两张表尚未建，登记同样走 Action。
+      </p>
 
       {notice ? (
         // status 而不是 alert：这是一条成功回执，不该抢走屏幕阅读器的当前焦点

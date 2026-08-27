@@ -1,14 +1,15 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { EmptyState } from "@xingmang/ui-primitives";
+import type { ReactNode } from "react";
+import { Link } from "react-router";
 import { listAlerts } from "../api/alerts";
 import { listMetrics, METRIC_HISTORY_HOURS, type MetricItem } from "../api/platform";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { AlertSummaryCard } from "../components/AlertSummaryCard";
 import { ApiStateView } from "../components/ApiStateView";
-import { MetricCard } from "../components/MetricCard";
-import { MetricSparkline } from "../components/MetricSparkline";
+import { MetricCardGrid } from "../components/MetricCardGrid";
 import { PageHeader } from "../components/PageHeader";
 import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
+import { PLATFORM_CATALOG, platformOfMetricKey } from "../lib/platforms";
 
 /** 运营总览：指标卡片网格 + 24 小时趋势。
  *
@@ -16,7 +17,10 @@ import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
  *  数据」在看板上的落点，不是装饰。
  *
  *  自动轮询只在页面可见时进行（见 lib/autoRefresh），并且**不取代**手动刷新
- *  按钮：出事时人要能立刻要一次新的，而不是等下一个 60 秒。 */
+ *  按钮：出事时人要能立刻要一次新的，而不是等下一个 60 秒。
+ *
+ *  XM-0034 起每张卡片多一个平台入口：总览回答「哪里不对劲」，平台页回答
+ *  「这个系统到底怎么了」，两问之间不该让人回到导航上重新找一遍。 */
 export function OverviewPage() {
   const queryClient = useQueryClient();
   const query = useQuery({
@@ -74,30 +78,34 @@ export function OverviewPage() {
         error={query.error}
         onRetry={() => void query.refetch()}
       >
-        <MetricGrid items={query.data ?? []} />
+        <MetricCardGrid
+          items={query.data ?? []}
+          emptyTitle="暂无指标"
+          emptyDescription="该环境下还没有采集到任何指标观测；接入 Connector 采集任务后会出现在这里"
+          renderLink={platformLink}
+        />
       </ApiStateView>
     </section>
   );
 }
 
-function MetricGrid({ items }: { items: MetricItem[] }) {
-  if (items.length === 0) {
-    return (
-      <EmptyState
-        title="暂无指标"
-        description="该环境下还没有采集到任何指标观测；接入 Connector 采集任务后会出现在这里"
-      />
-    );
-  }
+/** 指标卡片上的平台入口。
+ *
+ *  只有指标键的平台前缀能在平台目录里找到时才给链接：给一个目录里没有的平台
+ *  挂入口，点进去只会是一屏「未知平台」，还不如没有这个入口。 */
+function platformLink(item: MetricItem): ReactNode {
+  const serviceType = platformOfMetricKey(item.metric_key);
+  const spec = PLATFORM_CATALOG.find((platform) => platform.serviceType === serviceType);
+  if (!spec) return null;
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      {items.map((item) => (
-        <MetricCard
-          key={`${item.metric_key}@${item.environment}`}
-          item={item}
-          trend={<MetricSparkline item={item} />}
-        />
-      ))}
-    </div>
+    <Link
+      to={`/platforms/${spec.serviceType}`}
+      // 可见文案对所有卡片都一样，但读屏用户是按链接列表逐条听的，
+      // 一连五个「查看平台」分不出彼此——平台名补在无障碍名称里
+      aria-label={`查看平台 ${spec.label}`}
+      className="text-xs font-medium text-accent hover:underline"
+    >
+      查看平台 →
+    </Link>
   );
 }
