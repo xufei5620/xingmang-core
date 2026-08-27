@@ -83,6 +83,25 @@ const DefaultCurrency = "USD"
 // 且**不报错**，那种偏差在影子对比里会表现成一整天的错位。
 const DefaultBusinessDayTZ = "+08:00"
 
+// DefaultBusinessDayLocation 返回 DefaultBusinessDayTZ 对应的固定偏移时区。
+//
+// 用 FixedZone 而不是 time.LoadLocation("Asia/Shanghai")：后者依赖容器里有
+// tzdata（scratch 镜像里会失败），而且是一个**会随 tzdata 更新而变**的定义。
+// 核算口径里的 CST 必须是固定偏移（§4 标 ★）。
+//
+// 调用方是那些**手里没有具体账号**的地方（如 Query 端点算默认日期窗口）；
+// 有账号时一律用 UpstreamAccount.BusinessDayLocation，有台账行时一律用
+// ProfitRow.BusinessDayLocation——那两个拿的是各自冻结的偏移，
+// 而这个只是平台默认值。
+func DefaultBusinessDayLocation() *time.Location {
+	loc, err := fixedZone(DefaultBusinessDayTZ)
+	if err != nil {
+		// 常量本身不合法只可能是有人改坏了它，那属于编译期就该发现的错误。
+		panic(err)
+	}
+	return loc
+}
+
 var (
 	// ErrNotFound：登记簿里没有这条记录。
 	ErrNotFound = errors.New("finance: not found")
@@ -103,6 +122,13 @@ var businessDayTZPattern = regexp.MustCompile(`^[+-][0-9]{2}:[0-9]{2}$`)
 
 // currencyPattern 是 ISO 4217 三位大写字母码。
 var currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
+
+// platformIDPattern 是自营平台标识的形态，与 core.service.instance_id 同一套
+// （XM-0037b 的台账用它做平台归属分桶，§5.2）。
+//
+// 两边必须同形，否则一个形态合法但对不上的 platform_id 会永久停在
+// 「指向已移除平台」那一桶里，而那一桶本该表示「平台真的下线了」。
+var platformIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
 // UpstreamAccount 是登记簿的一行：一个上游账号 / 渠道的成本配置（§2.1）。
 type UpstreamAccount struct {
@@ -346,17 +372,26 @@ func (a UpstreamAccount) RechargeCostRate() string {
 // 也不依赖容器里有没有 tzdata——一个 scratch 镜像里 LoadLocation 会失败，
 // 而业务日切日不该因为基础镜像瘦身就换个口径（宪法 14 条）。
 func (a UpstreamAccount) BusinessDayLocation() (*time.Location, error) {
-	if !businessDayTZPattern.MatchString(a.BusinessDayTZ) {
-		return nil, fmt.Errorf("business_day_tz %q 非法: %w", a.BusinessDayTZ, ErrInvalidFormat)
+	return fixedZone(a.BusinessDayTZ)
+}
+
+// fixedZone 把 ±HH:MM 解析成固定偏移时区。
+//
+// 登记簿（当前配置）与利润台账（逐行冻结的历史值，XM-0037b）共用它：
+// 两处各写一遍解析，迟早有一处把 "-05:30" 的符号搞反，而那种错不会报错，
+// 只会让某一批业务日整体错开一天。
+func fixedZone(offset string) (*time.Location, error) {
+	if !businessDayTZPattern.MatchString(offset) {
+		return nil, fmt.Errorf("business_day_tz %q 非法: %w", offset, ErrInvalidFormat)
 	}
 	sign := 1
-	if a.BusinessDayTZ[0] == '-' {
+	if offset[0] == '-' {
 		sign = -1
 	}
-	hours := int(a.BusinessDayTZ[1]-'0')*10 + int(a.BusinessDayTZ[2]-'0')
-	minutes := int(a.BusinessDayTZ[4]-'0')*10 + int(a.BusinessDayTZ[5]-'0')
+	hours := int(offset[1]-'0')*10 + int(offset[2]-'0')
+	minutes := int(offset[4]-'0')*10 + int(offset[5]-'0')
 	if hours > 14 || minutes > 59 {
-		return nil, fmt.Errorf("business_day_tz %q 偏移超出范围: %w", a.BusinessDayTZ, ErrInvalidFormat)
+		return nil, fmt.Errorf("business_day_tz %q 偏移超出范围: %w", offset, ErrInvalidFormat)
 	}
-	return time.FixedZone(a.BusinessDayTZ, sign*(hours*3600+minutes*60)), nil
+	return time.FixedZone(offset, sign*(hours*3600+minutes*60)), nil
 }

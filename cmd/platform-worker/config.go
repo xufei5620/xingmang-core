@@ -108,6 +108,50 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.NewAPISyncInterval = interval
 	}
 
+	// XM-0037b：成本采集与利润台账入账（设计稿 §8.1）。默认 fake——
+	// 真实只读凭据还没就绪，把默认设成 real 只会让每个新环境一上来就
+	// 满屏采集失败。
+	//
+	// 这里刻意**不**登记 endpoint 与 credential ref：那两样逐账号不同，
+	// 来自成本登记簿（§2.1 的 base_url / credential_ref），由 Action 维护。
+	// 在进程配置里再放一份，两处迟早会漂，而漂了之后采集会用着 A 的地址、
+	// B 的凭据，报出来的错还是「认证失败」。
+	financeMode, err := jobs.ParseFinanceCollectMode(getenv("XM_FINANCE_COLLECT_MODE"))
+	if err != nil {
+		return jobs.Config{}, err
+	}
+	config.FinanceCollectMode = financeMode
+	if value := strings.TrimSpace(getenv("XM_FINANCE_COLLECT_INSTANCE_ID")); value != "" {
+		config.FinanceCollectInstanceID = value
+	}
+	config.FinanceCollectTargetAllowlist = parseHostAllowlist(
+		getenv("XM_FINANCE_COLLECT_TARGET_ALLOWLIST"))
+	if value := getenv("XM_FINANCE_COLLECT_ENABLED"); value != "" {
+		// 采集链路的停用开关（宪法 26 条）：上游出事时能立刻停掉读取，
+		// 而不必改代码重发版。关掉之后台账不会假装有数——今日行停止刷新，
+		// finance.profit.daily 的 observed_at 不再前进，新鲜度自然降级。
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("finance collect enabled: %w", err)
+		}
+		config.FinanceCollectEnabled = enabled
+	}
+	if value := getenv("XM_FINANCE_COLLECT_INTERVAL"); value != "" {
+		// §12 拍板：采集频率可配，默认 5min。
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("finance collect interval: %w", err)
+		}
+		config.FinanceCollectInterval = interval
+	}
+	if value := getenv("XM_FINANCE_COLLECT_REQUEST_TIMEOUT"); value != "" {
+		timeout, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("finance collect request timeout: %w", err)
+		}
+		config.FinanceCollectRequestTimeout = timeout
+	}
+
 	// XM-0033：告警评估与投递（规格 §9.3 / §9.4）。
 	//
 	// 投递渠道的三个变量只**读进配置、不解析**：Bot Token 只经 CredentialRef

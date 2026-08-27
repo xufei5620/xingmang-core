@@ -154,6 +154,24 @@ type CoreService struct {
 	UpdatedAt        pgtype.Timestamptz
 }
 
+type FinanceProfitDaily struct {
+	UpstreamAccountID uuid.UUID
+	BusinessDay       pgtype.Date
+	BusinessDayTz     string
+	TokenID           string
+	AccountID         string
+	PlatformID        *string
+	RevenueMinor      *int64
+	CostMinor         *int64
+	ProfitMinor       *int64
+	Currency          string
+	RatioSnapshot     pgtype.Numeric
+	Source            string
+	CostObservedAt    pgtype.Timestamptz
+	RevenueObservedAt pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
 type FinanceTokenMap struct {
 	UpstreamAccountID uuid.UUID
 	UpstreamTokenID   string

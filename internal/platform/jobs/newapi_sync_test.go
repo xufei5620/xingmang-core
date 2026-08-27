@@ -673,6 +673,9 @@ func TestNewAPIFakeModeRejectedInProduction(t *testing.T) {
 	c = DefaultConfig()
 	c.Environment = "production"
 	c.Sub2APISyncEnabled = false
+	// 成本采集（XM-0037b）有同款生产闸，默认同样是 fake：关掉它，
+	// 让本用例只隔离出 NewAPI 那一条。
+	c.FinanceCollectEnabled = false
 	c.NewAPIMode = NewAPIModeReal
 	if err := c.normalized().validate(); err != nil {
 		t.Fatalf("生产 + real 应通过: %v", err)
@@ -682,7 +685,8 @@ func TestNewAPIFakeModeRejectedInProduction(t *testing.T) {
 	c = DefaultConfig()
 	c.Environment = "production"
 	c.NewAPISyncEnabled = false
-	c.Sub2APISyncEnabled = false // 隔离出 NewAPI 这一条，不被 sub2api 的同款闸拦下
+	c.Sub2APISyncEnabled = false    // 隔离出 NewAPI 这一条，不被 sub2api 的同款闸拦下
+	c.FinanceCollectEnabled = false // 成本采集（XM-0037b）同款闸，同样隔离掉
 	if err := c.normalized().validate(); err != nil {
 		t.Fatalf("生产 + 显式关闭同步应放行: %v", err)
 	}

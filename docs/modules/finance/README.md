@@ -1,15 +1,19 @@
-# finance —— 成本登记簿（XM-0037a）
+# finance —— 成本登记簿 + 利润台账（XM-0037a / b）
 
-成本核算的**配置底座**：每个上游账号一行（接入方式、凭据引用、充值倍率、
-业务日时区），加上「上游令牌 ↔ 自营账号」的映射。
+成本核算的**配置底座**与**入账事实**两层：
+
+- **登记簿（a）**：每个上游账号一行（接入方式、凭据引用、充值倍率、
+  业务日时区），加上「上游令牌 ↔ 自营账号」的映射。
+- **利润台账（b）**：每（上游账号，业务日，上游令牌）一行的收入 / 成本 /
+  毛利，由 River 周期任务写入，只读 Query 供出。
 
 规格权威是 `docs/superpowers/plans/2026-08-28-xm-0037-cost-accounting-design.md`
 （下称「设计稿」，§ 号均指它）。本文只记**实现层的取舍与偏差**，
 不复述口径——口径以设计稿全文为准。
 
-**范围只有切分 a。** 利润台账 `profit_daily`（§2.2）、余额历史（§2.3）、
-订阅成本批次与代理资产（§2.5）、看板供数（§8.5）、影子对比（§9）
-分别属于 XM-0037b / c / d / e，各自新增迁移与代码。
+**范围到切分 b 为止。** 余额历史（§2.3）、订阅成本批次与代理资产（§2.5）、
+看板供数（§8.5）、影子对比（§9）分别属于 XM-0037c / d / e，
+各自新增迁移与代码。
 
 ---
 
@@ -208,18 +212,192 @@ tzdata——scratch 镜像里 `LoadLocation` 会失败，而业务日切日不�
 
 ---
 
+## 利润台账（XM-0037b）
+
+台账是**事实**，登记簿是**配置**：配置随时可改，台账过去冻结。两者分成两个
+仓储类型（`Store` / `ProfitStore`）就是为了让「哪些方法受 §5.3 约束」
+不必靠记忆。
+
+### 三条不静默纪律各自落在哪一层
+
+设计稿 §5 的三条纪律没有一条能只靠一层保证，所以每条都写了明确的落点：
+
+| 纪律 | 领域层 | 库层 | 采集层 |
+|---|---|---|---|
+| §5.1 取数失败写 NULL 不写 0 | 金额是 `*int64`；`Validate` 拦两侧全空 | 金额列可空 + `profit_daily_not_entirely_unknown` CHECK | 读不到 → 该侧留 nil，不写 0 |
+| §5.2 平台归属四桶 | `PlatformBucket` / 恒等式类型 | `SumProfitDailyByPlatform` 不 COALESCE、不 INNER JOIN | —— |
+| §5.3 今日可覆盖、过去冻结 | `assertWritableDay`（唯一关口） | 表达不了（`now()` 不是 IMMUTABLE） | 业务日按账号时区现算 |
+
+第三条**只能**在 Go 层：Postgres 的 CHECK 只接受 IMMUTABLE 表达式，
+而判据是「现在是哪天」。所以 `ProfitStore` 里没有第二个 INSERT/UPDATE 入口
+——写入路径必须全部经过那一个关口。
+
+### 「只有一侧已知 → 纯 UPDATE 不建行」
+
+这是最容易被顺手优化掉的一条，代价说清楚：缺一侧就没有可断言的利润。
+把未知的那侧当 0 建行，报表上会出现一条「毛利 = 收入」的记录，
+它不报错、不缺字段、看起来完全正常，而它是假的（宪法 12 条）。
+
+两个「跳过」（`ErrProfitNothingKnown` / `ErrProfitOneSidedNoRow`）是
+**语义错误而不是故障**：采集器把它们计入跳过并继续，不当采集失败去重试——
+重试也不会让上游多出一个数来。三类计数在观测里分开呈现，合成一个 failed
+之后，看板上的红点就再也说不清该不该有人起来处理。
+
+### 相对设计稿 §2.2 的四处列增补
+
+§2.2 给了 `profit_daily` 的列清单。实现多了四列，都不是口径改动：
+
+1. **`business_day_tz`**（逐行冻结的切日偏移）。登记簿的
+   `business_day_tz` 是可改的（`finance.upstream_account.set` 允许改它），
+   改完之后历史行的 `business_day` 究竟按哪个偏移切出来的就再也说不清了。
+   与 `ratio_snapshot` 要逐行冻结（§6.3）是同一个道理；宪法 14 条要求
+   「业务日结时区显式声明」，声明在行里才叫显式。
+2. **`source`**、3. **`cost_observed_at`**、4. **`revenue_observed_at`**
+   （数据来源与新鲜度）。台账是 037d 看板 `ChannelSummary` 的唯一供数
+   （§12.2），而 §13 要求每个展示值带 `observedAt` / `source`——
+   ops 指标是**环境级聚合**，答不出「这一行的数字是什么时候、谁读来的」。
+   两侧各一个观测时刻而不是合并成一个：它们读的是不同上游、在不同时刻、
+   可以各自失败（§5.1 要求它们能分别为 NULL）。合成一个的话，一次新鲜的
+   收入读取就会替一份陈旧的成本读数背书。
+
+另有一列 **`profit_minor` 是生成列**，不是第三个可写金额列。§2.2 把毛利
+定义为 `revenue_minor - cost_minor`（一个减法，不是一列数据），所以让库
+去算：三个数不可能漂移，且 NULL 传播天然正确——任一侧未知，毛利就是未知，
+而不是「等于另一侧」。
+
+### 四桶用 EXISTS，不用 LEFT JOIN
+
+§5.2 字面写的是 `LEFT JOIN`。实现用 `EXISTS`，因为 `core.service` 的唯一键是
+`(service_type, instance_id)`：只按 `instance_id` 左连会在同名不同类型时
+**放大行数**，而放大之后恒等式（四桶行数之和 == 独立窗口计数）会以一种
+非常难查的方式失败。`EXISTS` 保留了 LEFT JOIN 的意图（不丢行），
+且结构上不可能改变行数。
+
+恒等式在 `SumByPlatform` 内部当场校验，不平就报
+`ErrPlatformBucketMismatch` 并把差额写进错误文本——返回一个凑合的结果
+等于把一个可查的故障变成一份可信的错报表。两条查询跑在同一个
+**REPEATABLE READ 只读事务**里：不这样的话，两次查询之间新写进来的一行
+会让恒等式失败，而那是采集任务的正常节奏，不是分桶出错。
+
+### `platform_id` 现在必然为 NULL
+
+登记簿（§2.1）里没有任何一列记录「这个自营账号属于哪个自营平台」，
+平台归属的配置面是 037c/d 的事。所以采集器的 `PlatformResolver` 默认返回
+空串 → 落库 NULL → 全部进「未归属」那一桶。
+
+§1.3 要求 platform_id「第一天就写全」指的是**写入路径从第一天起就带着
+这一列**（不复刻 SoloAI「写入方漏写」的缺陷），不是「第一天就必须有值」
+——§2.2 明确 NULL = 写入当时未配对。留下 `PlatformResolver` 这个钩子，
+037d 接上归属配置时只需注入一个函数，不必回来改台账的写入路径。
+
+`COALESCE` 方向是「空缺可补、已有不动」（§5.3）：绑定变更只影响新行，
+不追溯改写历史归属——否则今天调一次绑定，上个月的平台毛利就变了。
+
+### 收入归属歧义：N 把令牌供给同一个自营账号
+
+`token_map` 的反向索引刻意不是唯一索引（见 000008 迁移），所以「一个自营
+账号由多把上游 key 供给」是登记簿允许的形态。但收入端点是**账号级**的
+（§3.2），而台账的行是**令牌级**的，于是这种形态下没有可用的归属规则：
+
+- 把同一个收入写进 N 行 → 按渠道 SUM 会算 N 遍；
+- 只写进其中一行 → 另外几行变成「成本已知、收入未知」，按 §5.1 不建行，
+  那几笔成本会从台账里消失。
+
+两条路都产出一个**看起来完全正常的错数字**，而设计稿没有给这种形态的
+归属规则。所以采集器的选择是：**这一组令牌本轮不入账，并把歧义显式报出来**
+（结构化日志 `finance_revenue_attribution_ambiguous` + 观测标 partial）。
+宁可缺一块并说清楚，也不给一个不知道错在哪的数。**需要产品定义 N:1 的
+收入拆分口径**，已记入 PR 的 follow_ups。
+
+### newapi 现在只有成本一侧
+
+newapi 的收入走自营 new-api 库的**只读直连**（§3.2 的 `quota_data`），
+不在 `connectors/metering` 这条 HTTP 契约上——它的 `AccountRevenue` 每轮
+都返回 `not_supported`。那是**预期内的常态**，不记为采集失败。
+
+后果是：在收入通道接上之前，newapi 账号只有成本一侧，因而按 §5.1
+**不建行**。这不是采集坏了，是纪律生效。收入通道属于后续切片。
+
+### 周期任务与环境变量
+
+`internal/platform/jobs/cost_sync.go`，job kind `finance_cost_sync`，
+默认 5 分钟（§12 拍板：可配）。
+
+| 环境变量 | 作用 |
+|---|---|
+| `XM_FINANCE_COLLECT_ENABLED` | 停用开关（宪法 26 条） |
+| `XM_FINANCE_COLLECT_INTERVAL` | 采集周期，默认 `5m` |
+| `XM_FINANCE_COLLECT_MODE` | `fake`（默认）/ `real` |
+| `XM_FINANCE_COLLECT_INSTANCE_ID` | 观测与台账行的 `source` |
+| `XM_FINANCE_COLLECT_TARGET_ALLOWLIST` | real 模式的主机精确清单（ADR-004） |
+| `XM_FINANCE_COLLECT_REQUEST_TIMEOUT` | 单次上游请求超时 |
+
+设计稿 §8.1 建议的前缀是 `XM_COST_SYNC_*`；实现用 `XM_FINANCE_COLLECT_*`
+与文件名 `cost_sync.go` 并存——前缀与模块名（finance）对齐，
+运维按模块找变量比按任务名找更顺手。
+
+**endpoint 与凭据引用不进环境变量**：那两样逐账号不同，来自登记簿
+（§2.1 的 `base_url` / `credential_ref`）。进程配置里再放一份，两处迟早会漂，
+而漂了之后采集会用着 A 的地址、B 的凭据，报出来的错还是「认证失败」。
+
+**生产环境禁 fake，启动即拒**。与 sub2api / newapi 同一条纪律，
+但后果更重：Fake 的读数不只进 ops 指标，还会被**写进利润台账**，
+而历史业务日过去冻结（§5.3），没有任何后续采集会去覆盖它——
+只能靠人工数据修复（宪法 2 条的 Platform Lifecycle Operation）挖出来。
+
+### 任务超时为什么放宽到 2 分钟
+
+`sub2api_sync` 是**固定三次**上游读取，River 默认 1 分钟够用。本任务是
+O(账号数 × 令牌数) 次——成本侧每个令牌一次请求（§3.1 的 apikey 自鉴权
+决定了它无法批量），收入侧每个自营账号一次。几十把令牌就是几十次串行往返。
+1 分钟会让规模稍大的部署每轮都被掐断在半路，而半路被掐断的那一轮
+**已经写进去一部分行了**（逐行 upsert），看板上会是一份每轮都不完整、
+且每轮缺的不是同一批的台账。
+
+### 指标：三条，不是两条
+
+`finance.cost.daily` / `finance.revenue.daily`（`connectors/metering` 定义，
+观测「上游说了什么」）+ `finance.profit.daily`（本包定义，观测
+「台账记下了什么」）。
+
+两者**本就该不同**：三条纪律会让一部分读数不入账。合并成一条会让那个
+差异永远看不见。
+
+### Query：`GET /api/v1/finance/profit-daily`
+
+复用 `finance.ScopeRead`，不另立 scope：台账里的毛利就是「倍率 × 用量」的
+结果，能看登记簿里那个倍率的人已经能推出毛利的量级，泄漏面完全相同。
+
+响应形状是 UI 交接 §13：`Money{amount_minor: string, currency, scale}`。
+**三个金额都可空**，`null` = 未知——把未知渲染成 `"0"` 会让页面显示一个
+笃定的 $0.00，而真相是我们那天没读到数。业务日以 `YYYY-MM-DD` 出，
+不是 RFC3339 时刻：它是一个日历日，渲染成带时区的时间戳会让前端按浏览器
+时区再解释一次，跨零点的用户看到的就是前一天。
+
+**台账没有写路径。** 它只由采集任务写；回填历史是 Platform Lifecycle
+Operation（宪法 2 条），不是一个 API。
+
+---
+
 ## 相关文件
 
 | 文件 | 作用 |
 |---|---|
-| `db/migrations/000008_finance_registry.{up,down}.sql` | 两张表与全部库层约束 |
+| `db/migrations/000008_finance_registry.{up,down}.sql` | 登记簿两张表与全部库层约束 |
+| `db/migrations/000009_finance_profit_daily.{up,down}.sql` | 利润台账与库层约束（§2.2 + §5.1 的 CHECK） |
 | `db/queries/finance.sql` | sqlc 查询 |
 | `internal/platform/finance/account.go` | 领域类型与校验 |
 | `internal/platform/finance/store.go` | 仓储（含 NUMERIC ↔ Ratio 的精确换算） |
 | `internal/platform/finance/actions.go` | 四个 L1 Action |
 | `internal/platform/finance/permissions.go` | 四个 scope |
 | `internal/platform/money/` | 整数定点金额与倍率算术（本模块与 037b/c/e 共用） |
+| `internal/platform/finance/profit.go` | 台账领域类型与三条纪律的类型层表达 |
+| `internal/platform/finance/profit_store.go` | 台账仓储（三条分支写入 + 四桶归集 + 恒等式） |
+| `internal/platform/finance/collector.go` | 一轮采集：登记簿 → 取数 → 折算 → 入账 |
+| `internal/platform/finance/observations.go` | `finance.profit.daily` 观测 |
+| `internal/platform/jobs/cost_sync.go` | River 周期任务（默认 5min） |
 | `internal/platform/httpapi/finance.go` | `GET /api/v1/finance/upstream-accounts` |
+| `internal/platform/httpapi/profit_daily.go` | `GET /api/v1/finance/profit-daily` |
 | `contracts/actions/finance.*.json` | Action 契约 |
 | `connectors/metering/` | 消费本登记簿的计量取数连接器 |
 | `contracts/connectors/metering.read.v1.md` | 取数契约 |

@@ -125,3 +125,175 @@ SELECT tm.* FROM finance.token_map tm
 JOIN finance.upstream_account ua ON ua.id = tm.upstream_account_id
 WHERE ua.environment = $1
 ORDER BY tm.upstream_account_id, tm.upstream_token_id;
+
+-- ---------------------------------------------------------------------------
+-- XM-0037b 利润台账（设计稿 §2.2 + §5 三条不静默纪律）。
+--
+-- 三条纪律在本文件里的落点：
+--   §5.1 取数失败写 NULL 不写 0：写入分成三条语句——两侧已知走 Upsert，
+--        只有一侧已知走对应的 Update（**纯 UPDATE 不建行**），两侧全未知
+--        在领域层就被 ErrProfitNothingKnown 拦下，根本到不了这里。
+--   §5.2 平台归属四桶：SumProfitDailyByPlatform 不 COALESCE、不 INNER JOIN，
+--        「指向已移除平台」与「未归属」各自成桶；恒等式由
+--        CountProfitDailyInWindow 提供的独立窗口计数校验。
+--   §5.3 今日可覆盖、过去冻结：`business_day` 的可写性无法用 SQL 表达
+--        （now() 不是 IMMUTABLE），由 finance.ProfitStore 单点把关。
+--        本文件只保证 platform_id 的 COALESCE 方向是「空缺可补、已有不动」。
+-- ---------------------------------------------------------------------------
+
+-- name: UpsertProfitDaily :one
+-- 两侧都已知时的写入：今日行反复覆盖，过去行由领域层拦在外面（§5.3）。
+--
+-- platform_id 用 `COALESCE(已有, 新值)` 而不是直接覆盖（§5.3 逐字要求
+-- 「空缺可补、已有不动」，对齐 SoloAI relay_profit.go:77）：绑定变更只影响
+-- 新行，不追溯改写历史归属——否则今天调一次绑定，上个月的平台毛利就变了。
+--
+-- ratio_snapshot 每轮按当前倍率覆盖是对的：它冻结的是「本行 cost 是用哪个
+-- 倍率折的」，而这一行的 cost 正在被同一句覆盖成新折算值（§6.3）。
+INSERT INTO finance.profit_daily (
+    upstream_account_id, business_day, business_day_tz, token_id, account_id,
+    platform_id, revenue_minor, cost_minor, currency, ratio_snapshot,
+    source, cost_observed_at, revenue_observed_at, updated_at
+) VALUES (
+    sqlc.arg(upstream_account_id), sqlc.arg(business_day), sqlc.arg(business_day_tz),
+    sqlc.arg(token_id), sqlc.arg(account_id), sqlc.narg(platform_id),
+    sqlc.arg(revenue_minor), sqlc.arg(cost_minor), sqlc.arg(currency),
+    sqlc.arg(ratio_snapshot), sqlc.arg(source),
+    sqlc.narg(cost_observed_at), sqlc.narg(revenue_observed_at), now()
+)
+ON CONFLICT (upstream_account_id, business_day, token_id) DO UPDATE SET
+    business_day_tz     = EXCLUDED.business_day_tz,
+    account_id          = EXCLUDED.account_id,
+    platform_id         = COALESCE(finance.profit_daily.platform_id, EXCLUDED.platform_id),
+    revenue_minor       = EXCLUDED.revenue_minor,
+    cost_minor          = EXCLUDED.cost_minor,
+    currency            = EXCLUDED.currency,
+    ratio_snapshot      = EXCLUDED.ratio_snapshot,
+    source              = EXCLUDED.source,
+    cost_observed_at    = EXCLUDED.cost_observed_at,
+    revenue_observed_at = EXCLUDED.revenue_observed_at,
+    updated_at          = now()
+RETURNING *;
+
+-- name: UpdateProfitDailyCost :one
+-- 只有成本这一侧已知时的写入：**纯 UPDATE，不建行**（§5.1）。
+--
+-- 缺收入侧就没有可断言的利润，宁可这一对今天不出现，也不把未知的收入写成 0
+-- ——那会让毛利凭空等于负成本。行已存在（今天早些时候两侧都读到过）时照常
+-- 刷新成本，因为那条行的利润仍然算得出来。
+--
+-- 只碰成本侧的列。收入侧一个字都不动：一次失败的成本读取不该把今天已经读到的
+-- 收入连带抹掉，反过来同理（见 UpdateProfitDailyRevenue）。
+--
+-- 用 RETURNING + :one 而不是 :execrows：行不存在时 pgx 直接给 ErrNoRows，
+-- 「更新了」与「没有这一行」在一次往返里就分得清，不必再查一次
+-- （再查一次既不原子，也会在两次之间被别的副本插进去一行）。
+UPDATE finance.profit_daily SET
+    account_id       = sqlc.arg(account_id),
+    platform_id      = COALESCE(platform_id, sqlc.narg(platform_id)),
+    cost_minor       = sqlc.arg(cost_minor),
+    cost_observed_at = sqlc.narg(cost_observed_at),
+    ratio_snapshot   = sqlc.arg(ratio_snapshot),
+    currency         = sqlc.arg(currency),
+    source           = sqlc.arg(source),
+    updated_at       = now()
+WHERE upstream_account_id = sqlc.arg(upstream_account_id)
+  AND business_day        = sqlc.arg(business_day)
+  AND token_id            = sqlc.arg(token_id)
+RETURNING *;
+
+-- name: UpdateProfitDailyRevenue :one
+-- 只有收入这一侧已知时的写入：**纯 UPDATE，不建行**（理由同上）。
+--
+-- 不碰 ratio_snapshot：那一列冻结的是「本行 cost 实际用哪个倍率折的」（§6.3），
+-- 这一轮根本没有折算发生，写进去等于给一个不存在的折算留证据。
+UPDATE finance.profit_daily SET
+    account_id          = sqlc.arg(account_id),
+    platform_id         = COALESCE(platform_id, sqlc.narg(platform_id)),
+    revenue_minor       = sqlc.arg(revenue_minor),
+    revenue_observed_at = sqlc.narg(revenue_observed_at),
+    currency            = sqlc.arg(currency),
+    source              = sqlc.arg(source),
+    updated_at          = now()
+WHERE upstream_account_id = sqlc.arg(upstream_account_id)
+  AND business_day        = sqlc.arg(business_day)
+  AND token_id            = sqlc.arg(token_id)
+RETURNING *;
+
+-- name: GetProfitDaily :one
+SELECT * FROM finance.profit_daily
+WHERE upstream_account_id = $1 AND business_day = $2 AND token_id = $3;
+
+-- name: ListProfitDailyByEnvironment :many
+-- Query 侧：某环境、某业务日区间的台账（可按平台过滤）。
+--
+-- 环境经 JOIN 登记簿判定，而不是在台账上再存一份（宪法 15 条：环境是身份边界，
+-- 存两份迟早会漂）。行数上限由调用方传入并**回报是否被截断**——
+-- 一个被悄悄截断的区间会被读成「这几天真的没有数据」（宪法 12 条）。
+--
+-- 多取一行（LIMIT n+1）让调用方判断截断：单查一次就能回答「还有没有更多」，
+-- 比先 COUNT 再查省一次全表扫。
+SELECT pd.* FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = sqlc.arg(environment)
+  AND pd.business_day >= sqlc.arg(from_day)
+  AND pd.business_day <= sqlc.arg(to_day)
+  AND (sqlc.narg(platform_id)::text IS NULL OR pd.platform_id = sqlc.narg(platform_id))
+ORDER BY pd.business_day DESC, pd.upstream_account_id, pd.token_id
+LIMIT sqlc.arg(row_limit);
+
+-- name: SumProfitDailyByPlatform :many
+-- 平台归属四桶（§5.2）：有效平台 / 指向已移除平台 / 未归属，各自成桶。
+--
+-- **不 COALESCE platform_id**：把 NULL 折成 'unknown' 之类的字符串会让
+-- 「未归属」与「有一个叫 unknown 的平台」再也分不开。
+-- **不 INNER JOIN core.service**：那会把「指向已移除平台」的行整批静默丢掉，
+-- 金额凭空少一块而总数看起来毫无异常——这正是本纪律要挡的事。
+--
+-- 用 EXISTS 而不是设计稿 §5.2 字面写的 LEFT JOIN：core.service 的唯一键是
+-- (service_type, instance_id)，只按 instance_id 左连会在同名不同类型时**放大行数**，
+-- 而放大之后恒等式（四桶行数之和 == 独立窗口计数）会以一种非常难查的方式失败。
+-- EXISTS 保留了 LEFT JOIN 的意图（不丢行），且结构上不可能改变行数。
+--
+-- 金额列可空（§5.1 的 NULL=未知），所以除了 SUM 还回 `*_known_rows`：
+-- SUM 会跳过 NULL，只给和不给覆盖行数，调用方无从判断这个和代表了几行。
+-- 币种不同的最小单位不能相加，故一并回 currency_count 让调用方自己分桶。
+SELECT
+    CASE
+        WHEN pd.platform_id IS NULL THEN 'unattributed'
+        WHEN EXISTS (
+            SELECT 1 FROM core.service s
+            WHERE s.instance_id = pd.platform_id
+              AND s.environment = ua.environment
+              AND s.status <> 'retired'
+        ) THEN 'platform'
+        ELSE 'removed_platform'
+    END::text AS bucket,
+    pd.platform_id                             AS platform_id,
+    COUNT(*)::bigint                           AS row_count,
+    COUNT(pd.revenue_minor)::bigint            AS revenue_known_rows,
+    COUNT(pd.cost_minor)::bigint               AS cost_known_rows,
+    COALESCE(SUM(pd.revenue_minor), 0)::bigint AS revenue_minor_sum,
+    COALESCE(SUM(pd.cost_minor), 0)::bigint    AS cost_minor_sum,
+    COUNT(DISTINCT pd.currency)::bigint        AS currency_count,
+    MIN(pd.currency)::text                     AS currency
+FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = sqlc.arg(environment)
+  AND pd.business_day >= sqlc.arg(from_day)
+  AND pd.business_day <= sqlc.arg(to_day)
+GROUP BY 1, pd.platform_id
+ORDER BY 1, pd.platform_id NULLS LAST;
+
+-- name: CountProfitDailyInWindow :one
+-- 恒等式的右边（§5.2）：同一窗口的**独立**行数，不经任何分桶逻辑。
+--
+-- 独立算一遍才是校验：拿分桶查询自己的 SUM(row_count) 去验自己，
+-- 分桶写错时两边会一起错，恒等式永远成立、永远查不出问题。
+-- 调用方在同一个 REPEATABLE READ 事务里跑这两条，让「快照不同」
+-- 不会被误报成「分桶丢了行」。
+SELECT COUNT(*)::bigint FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = sqlc.arg(environment)
+  AND pd.business_day >= sqlc.arg(from_day)
+  AND pd.business_day <= sqlc.arg(to_day);

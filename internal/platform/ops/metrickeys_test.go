@@ -8,6 +8,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/connectors/newapi"
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
@@ -42,6 +43,11 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		// 下面的长度断言会在有人把它们合并时当场失败。
 		metering.MetricCostDaily,
 		metering.MetricRevenueDaily,
+		// 利润台账入账（XM-0037b）。它不来自 Connector 契约而来自
+		// internal/platform/finance——本用例的名字说的是「契约」，但它真正
+		// 守的是「白名单与指标常量的唯一来源」这条不变量，指标常量定义在
+		// 哪个包不改变这一点。
+		finance.MetricProfitDaily,
 	}
 
 	for _, key := range fromContracts {

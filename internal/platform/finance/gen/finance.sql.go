@@ -12,6 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countProfitDailyInWindow = `-- name: CountProfitDailyInWindow :one
+SELECT COUNT(*)::bigint FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = $1
+  AND pd.business_day >= $2
+  AND pd.business_day <= $3
+`
+
+type CountProfitDailyInWindowParams struct {
+	Environment string
+	FromDay     pgtype.Date
+	ToDay       pgtype.Date
+}
+
+// 恒等式的右边（§5.2）：同一窗口的**独立**行数，不经任何分桶逻辑。
+//
+// 独立算一遍才是校验：拿分桶查询自己的 SUM(row_count) 去验自己，
+// 分桶写错时两边会一起错，恒等式永远成立、永远查不出问题。
+// 调用方在同一个 REPEATABLE READ 事务里跑这两条，让「快照不同」
+// 不会被误报成「分桶丢了行」。
+func (q *Queries) CountProfitDailyInWindow(ctx context.Context, arg CountProfitDailyInWindowParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countProfitDailyInWindow, arg.Environment, arg.FromDay, arg.ToDay)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const deleteTokenMapping = `-- name: DeleteTokenMapping :execrows
 DELETE FROM finance.token_map
 WHERE upstream_account_id = $1 AND upstream_token_id = $2
@@ -31,6 +58,40 @@ func (q *Queries) DeleteTokenMapping(ctx context.Context, arg DeleteTokenMapping
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const getProfitDaily = `-- name: GetProfitDaily :one
+SELECT upstream_account_id, business_day, business_day_tz, token_id, account_id, platform_id, revenue_minor, cost_minor, profit_minor, currency, ratio_snapshot, source, cost_observed_at, revenue_observed_at, updated_at FROM finance.profit_daily
+WHERE upstream_account_id = $1 AND business_day = $2 AND token_id = $3
+`
+
+type GetProfitDailyParams struct {
+	UpstreamAccountID uuid.UUID
+	BusinessDay       pgtype.Date
+	TokenID           string
+}
+
+func (q *Queries) GetProfitDaily(ctx context.Context, arg GetProfitDailyParams) (FinanceProfitDaily, error) {
+	row := q.db.QueryRow(ctx, getProfitDaily, arg.UpstreamAccountID, arg.BusinessDay, arg.TokenID)
+	var i FinanceProfitDaily
+	err := row.Scan(
+		&i.UpstreamAccountID,
+		&i.BusinessDay,
+		&i.BusinessDayTz,
+		&i.TokenID,
+		&i.AccountID,
+		&i.PlatformID,
+		&i.RevenueMinor,
+		&i.CostMinor,
+		&i.ProfitMinor,
+		&i.Currency,
+		&i.RatioSnapshot,
+		&i.Source,
+		&i.CostObservedAt,
+		&i.RevenueObservedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getTokenMapping = `-- name: GetTokenMapping :one
@@ -202,6 +263,75 @@ func (q *Queries) ListActiveUpstreamAccountsByAccessMethod(ctx context.Context, 
 	return items, nil
 }
 
+const listProfitDailyByEnvironment = `-- name: ListProfitDailyByEnvironment :many
+SELECT pd.upstream_account_id, pd.business_day, pd.business_day_tz, pd.token_id, pd.account_id, pd.platform_id, pd.revenue_minor, pd.cost_minor, pd.profit_minor, pd.currency, pd.ratio_snapshot, pd.source, pd.cost_observed_at, pd.revenue_observed_at, pd.updated_at FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = $1
+  AND pd.business_day >= $2
+  AND pd.business_day <= $3
+  AND ($4::text IS NULL OR pd.platform_id = $4)
+ORDER BY pd.business_day DESC, pd.upstream_account_id, pd.token_id
+LIMIT $5
+`
+
+type ListProfitDailyByEnvironmentParams struct {
+	Environment string
+	FromDay     pgtype.Date
+	ToDay       pgtype.Date
+	PlatformID  *string
+	RowLimit    int32
+}
+
+// Query 侧：某环境、某业务日区间的台账（可按平台过滤）。
+//
+// 环境经 JOIN 登记簿判定，而不是在台账上再存一份（宪法 15 条：环境是身份边界，
+// 存两份迟早会漂）。行数上限由调用方传入并**回报是否被截断**——
+// 一个被悄悄截断的区间会被读成「这几天真的没有数据」（宪法 12 条）。
+//
+// 多取一行（LIMIT n+1）让调用方判断截断：单查一次就能回答「还有没有更多」，
+// 比先 COUNT 再查省一次全表扫。
+func (q *Queries) ListProfitDailyByEnvironment(ctx context.Context, arg ListProfitDailyByEnvironmentParams) ([]FinanceProfitDaily, error) {
+	rows, err := q.db.Query(ctx, listProfitDailyByEnvironment,
+		arg.Environment,
+		arg.FromDay,
+		arg.ToDay,
+		arg.PlatformID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FinanceProfitDaily{}
+	for rows.Next() {
+		var i FinanceProfitDaily
+		if err := rows.Scan(
+			&i.UpstreamAccountID,
+			&i.BusinessDay,
+			&i.BusinessDayTz,
+			&i.TokenID,
+			&i.AccountID,
+			&i.PlatformID,
+			&i.RevenueMinor,
+			&i.CostMinor,
+			&i.ProfitMinor,
+			&i.Currency,
+			&i.RatioSnapshot,
+			&i.Source,
+			&i.CostObservedAt,
+			&i.RevenueObservedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTokenMappingsByAccount = `-- name: ListTokenMappingsByAccount :many
 SELECT upstream_account_id, upstream_token_id, own_account_id, credential_ref, created_at, updated_at FROM finance.token_map
 WHERE upstream_account_id = $1
@@ -358,6 +488,237 @@ func (q *Queries) SetUpstreamAccountRechargeRatio(ctx context.Context, arg SetUp
 	return i, err
 }
 
+const sumProfitDailyByPlatform = `-- name: SumProfitDailyByPlatform :many
+SELECT
+    CASE
+        WHEN pd.platform_id IS NULL THEN 'unattributed'
+        WHEN EXISTS (
+            SELECT 1 FROM core.service s
+            WHERE s.instance_id = pd.platform_id
+              AND s.environment = ua.environment
+              AND s.status <> 'retired'
+        ) THEN 'platform'
+        ELSE 'removed_platform'
+    END::text AS bucket,
+    pd.platform_id                             AS platform_id,
+    COUNT(*)::bigint                           AS row_count,
+    COUNT(pd.revenue_minor)::bigint            AS revenue_known_rows,
+    COUNT(pd.cost_minor)::bigint               AS cost_known_rows,
+    COALESCE(SUM(pd.revenue_minor), 0)::bigint AS revenue_minor_sum,
+    COALESCE(SUM(pd.cost_minor), 0)::bigint    AS cost_minor_sum,
+    COUNT(DISTINCT pd.currency)::bigint        AS currency_count,
+    MIN(pd.currency)::text                     AS currency
+FROM finance.profit_daily pd
+JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
+WHERE ua.environment  = $1
+  AND pd.business_day >= $2
+  AND pd.business_day <= $3
+GROUP BY 1, pd.platform_id
+ORDER BY 1, pd.platform_id NULLS LAST
+`
+
+type SumProfitDailyByPlatformParams struct {
+	Environment string
+	FromDay     pgtype.Date
+	ToDay       pgtype.Date
+}
+
+type SumProfitDailyByPlatformRow struct {
+	Bucket           string
+	PlatformID       *string
+	RowCount         int64
+	RevenueKnownRows int64
+	CostKnownRows    int64
+	RevenueMinorSum  int64
+	CostMinorSum     int64
+	CurrencyCount    int64
+	Currency         string
+}
+
+// 平台归属四桶（§5.2）：有效平台 / 指向已移除平台 / 未归属，各自成桶。
+//
+// **不 COALESCE platform_id**：把 NULL 折成 'unknown' 之类的字符串会让
+// 「未归属」与「有一个叫 unknown 的平台」再也分不开。
+// **不 INNER JOIN core.service**：那会把「指向已移除平台」的行整批静默丢掉，
+// 金额凭空少一块而总数看起来毫无异常——这正是本纪律要挡的事。
+//
+// 用 EXISTS 而不是设计稿 §5.2 字面写的 LEFT JOIN：core.service 的唯一键是
+// (service_type, instance_id)，只按 instance_id 左连会在同名不同类型时**放大行数**，
+// 而放大之后恒等式（四桶行数之和 == 独立窗口计数）会以一种非常难查的方式失败。
+// EXISTS 保留了 LEFT JOIN 的意图（不丢行），且结构上不可能改变行数。
+//
+// 金额列可空（§5.1 的 NULL=未知），所以除了 SUM 还回 `*_known_rows`：
+// SUM 会跳过 NULL，只给和不给覆盖行数，调用方无从判断这个和代表了几行。
+// 币种不同的最小单位不能相加，故一并回 currency_count 让调用方自己分桶。
+func (q *Queries) SumProfitDailyByPlatform(ctx context.Context, arg SumProfitDailyByPlatformParams) ([]SumProfitDailyByPlatformRow, error) {
+	rows, err := q.db.Query(ctx, sumProfitDailyByPlatform, arg.Environment, arg.FromDay, arg.ToDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumProfitDailyByPlatformRow{}
+	for rows.Next() {
+		var i SumProfitDailyByPlatformRow
+		if err := rows.Scan(
+			&i.Bucket,
+			&i.PlatformID,
+			&i.RowCount,
+			&i.RevenueKnownRows,
+			&i.CostKnownRows,
+			&i.RevenueMinorSum,
+			&i.CostMinorSum,
+			&i.CurrencyCount,
+			&i.Currency,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateProfitDailyCost = `-- name: UpdateProfitDailyCost :one
+UPDATE finance.profit_daily SET
+    account_id       = $1,
+    platform_id      = COALESCE(platform_id, $2),
+    cost_minor       = $3,
+    cost_observed_at = $4,
+    ratio_snapshot   = $5,
+    currency         = $6,
+    source           = $7,
+    updated_at       = now()
+WHERE upstream_account_id = $8
+  AND business_day        = $9
+  AND token_id            = $10
+RETURNING upstream_account_id, business_day, business_day_tz, token_id, account_id, platform_id, revenue_minor, cost_minor, profit_minor, currency, ratio_snapshot, source, cost_observed_at, revenue_observed_at, updated_at
+`
+
+type UpdateProfitDailyCostParams struct {
+	AccountID         string
+	PlatformID        *string
+	CostMinor         *int64
+	CostObservedAt    pgtype.Timestamptz
+	RatioSnapshot     pgtype.Numeric
+	Currency          string
+	Source            string
+	UpstreamAccountID uuid.UUID
+	BusinessDay       pgtype.Date
+	TokenID           string
+}
+
+// 只有成本这一侧已知时的写入：**纯 UPDATE，不建行**（§5.1）。
+//
+// 缺收入侧就没有可断言的利润，宁可这一对今天不出现，也不把未知的收入写成 0
+// ——那会让毛利凭空等于负成本。行已存在（今天早些时候两侧都读到过）时照常
+// 刷新成本，因为那条行的利润仍然算得出来。
+//
+// 只碰成本侧的列。收入侧一个字都不动：一次失败的成本读取不该把今天已经读到的
+// 收入连带抹掉，反过来同理（见 UpdateProfitDailyRevenue）。
+//
+// 用 RETURNING + :one 而不是 :execrows：行不存在时 pgx 直接给 ErrNoRows，
+// 「更新了」与「没有这一行」在一次往返里就分得清，不必再查一次
+// （再查一次既不原子，也会在两次之间被别的副本插进去一行）。
+func (q *Queries) UpdateProfitDailyCost(ctx context.Context, arg UpdateProfitDailyCostParams) (FinanceProfitDaily, error) {
+	row := q.db.QueryRow(ctx, updateProfitDailyCost,
+		arg.AccountID,
+		arg.PlatformID,
+		arg.CostMinor,
+		arg.CostObservedAt,
+		arg.RatioSnapshot,
+		arg.Currency,
+		arg.Source,
+		arg.UpstreamAccountID,
+		arg.BusinessDay,
+		arg.TokenID,
+	)
+	var i FinanceProfitDaily
+	err := row.Scan(
+		&i.UpstreamAccountID,
+		&i.BusinessDay,
+		&i.BusinessDayTz,
+		&i.TokenID,
+		&i.AccountID,
+		&i.PlatformID,
+		&i.RevenueMinor,
+		&i.CostMinor,
+		&i.ProfitMinor,
+		&i.Currency,
+		&i.RatioSnapshot,
+		&i.Source,
+		&i.CostObservedAt,
+		&i.RevenueObservedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateProfitDailyRevenue = `-- name: UpdateProfitDailyRevenue :one
+UPDATE finance.profit_daily SET
+    account_id          = $1,
+    platform_id         = COALESCE(platform_id, $2),
+    revenue_minor       = $3,
+    revenue_observed_at = $4,
+    currency            = $5,
+    source              = $6,
+    updated_at          = now()
+WHERE upstream_account_id = $7
+  AND business_day        = $8
+  AND token_id            = $9
+RETURNING upstream_account_id, business_day, business_day_tz, token_id, account_id, platform_id, revenue_minor, cost_minor, profit_minor, currency, ratio_snapshot, source, cost_observed_at, revenue_observed_at, updated_at
+`
+
+type UpdateProfitDailyRevenueParams struct {
+	AccountID         string
+	PlatformID        *string
+	RevenueMinor      *int64
+	RevenueObservedAt pgtype.Timestamptz
+	Currency          string
+	Source            string
+	UpstreamAccountID uuid.UUID
+	BusinessDay       pgtype.Date
+	TokenID           string
+}
+
+// 只有收入这一侧已知时的写入：**纯 UPDATE，不建行**（理由同上）。
+//
+// 不碰 ratio_snapshot：那一列冻结的是「本行 cost 实际用哪个倍率折的」（§6.3），
+// 这一轮根本没有折算发生，写进去等于给一个不存在的折算留证据。
+func (q *Queries) UpdateProfitDailyRevenue(ctx context.Context, arg UpdateProfitDailyRevenueParams) (FinanceProfitDaily, error) {
+	row := q.db.QueryRow(ctx, updateProfitDailyRevenue,
+		arg.AccountID,
+		arg.PlatformID,
+		arg.RevenueMinor,
+		arg.RevenueObservedAt,
+		arg.Currency,
+		arg.Source,
+		arg.UpstreamAccountID,
+		arg.BusinessDay,
+		arg.TokenID,
+	)
+	var i FinanceProfitDaily
+	err := row.Scan(
+		&i.UpstreamAccountID,
+		&i.BusinessDay,
+		&i.BusinessDayTz,
+		&i.TokenID,
+		&i.AccountID,
+		&i.PlatformID,
+		&i.RevenueMinor,
+		&i.CostMinor,
+		&i.ProfitMinor,
+		&i.Currency,
+		&i.RatioSnapshot,
+		&i.Source,
+		&i.CostObservedAt,
+		&i.RevenueObservedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateUpstreamAccount = `-- name: UpdateUpstreamAccount :one
 UPDATE finance.upstream_account SET
     base_url        = $1,
@@ -410,6 +771,111 @@ func (q *Queries) UpdateUpstreamAccount(ctx context.Context, arg UpdateUpstreamA
 		&i.Status,
 		&i.Environment,
 		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertProfitDaily = `-- name: UpsertProfitDaily :one
+
+INSERT INTO finance.profit_daily (
+    upstream_account_id, business_day, business_day_tz, token_id, account_id,
+    platform_id, revenue_minor, cost_minor, currency, ratio_snapshot,
+    source, cost_observed_at, revenue_observed_at, updated_at
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10, $11,
+    $12, $13, now()
+)
+ON CONFLICT (upstream_account_id, business_day, token_id) DO UPDATE SET
+    business_day_tz     = EXCLUDED.business_day_tz,
+    account_id          = EXCLUDED.account_id,
+    platform_id         = COALESCE(finance.profit_daily.platform_id, EXCLUDED.platform_id),
+    revenue_minor       = EXCLUDED.revenue_minor,
+    cost_minor          = EXCLUDED.cost_minor,
+    currency            = EXCLUDED.currency,
+    ratio_snapshot      = EXCLUDED.ratio_snapshot,
+    source              = EXCLUDED.source,
+    cost_observed_at    = EXCLUDED.cost_observed_at,
+    revenue_observed_at = EXCLUDED.revenue_observed_at,
+    updated_at          = now()
+RETURNING upstream_account_id, business_day, business_day_tz, token_id, account_id, platform_id, revenue_minor, cost_minor, profit_minor, currency, ratio_snapshot, source, cost_observed_at, revenue_observed_at, updated_at
+`
+
+type UpsertProfitDailyParams struct {
+	UpstreamAccountID uuid.UUID
+	BusinessDay       pgtype.Date
+	BusinessDayTz     string
+	TokenID           string
+	AccountID         string
+	PlatformID        *string
+	RevenueMinor      *int64
+	CostMinor         *int64
+	Currency          string
+	RatioSnapshot     pgtype.Numeric
+	Source            string
+	CostObservedAt    pgtype.Timestamptz
+	RevenueObservedAt pgtype.Timestamptz
+}
+
+// ---------------------------------------------------------------------------
+// XM-0037b 利润台账（设计稿 §2.2 + §5 三条不静默纪律）。
+//
+// 三条纪律在本文件里的落点：
+//
+//	§5.1 取数失败写 NULL 不写 0：写入分成三条语句——两侧已知走 Upsert，
+//	     只有一侧已知走对应的 Update（**纯 UPDATE 不建行**），两侧全未知
+//	     在领域层就被 ErrProfitNothingKnown 拦下，根本到不了这里。
+//	§5.2 平台归属四桶：SumProfitDailyByPlatform 不 COALESCE、不 INNER JOIN，
+//	     「指向已移除平台」与「未归属」各自成桶；恒等式由
+//	     CountProfitDailyInWindow 提供的独立窗口计数校验。
+//	§5.3 今日可覆盖、过去冻结：`business_day` 的可写性无法用 SQL 表达
+//	     （now() 不是 IMMUTABLE），由 finance.ProfitStore 单点把关。
+//	     本文件只保证 platform_id 的 COALESCE 方向是「空缺可补、已有不动」。
+//
+// ---------------------------------------------------------------------------
+// 两侧都已知时的写入：今日行反复覆盖，过去行由领域层拦在外面（§5.3）。
+//
+// platform_id 用 `COALESCE(已有, 新值)` 而不是直接覆盖（§5.3 逐字要求
+// 「空缺可补、已有不动」，对齐 SoloAI relay_profit.go:77）：绑定变更只影响
+// 新行，不追溯改写历史归属——否则今天调一次绑定，上个月的平台毛利就变了。
+//
+// ratio_snapshot 每轮按当前倍率覆盖是对的：它冻结的是「本行 cost 是用哪个
+// 倍率折的」，而这一行的 cost 正在被同一句覆盖成新折算值（§6.3）。
+func (q *Queries) UpsertProfitDaily(ctx context.Context, arg UpsertProfitDailyParams) (FinanceProfitDaily, error) {
+	row := q.db.QueryRow(ctx, upsertProfitDaily,
+		arg.UpstreamAccountID,
+		arg.BusinessDay,
+		arg.BusinessDayTz,
+		arg.TokenID,
+		arg.AccountID,
+		arg.PlatformID,
+		arg.RevenueMinor,
+		arg.CostMinor,
+		arg.Currency,
+		arg.RatioSnapshot,
+		arg.Source,
+		arg.CostObservedAt,
+		arg.RevenueObservedAt,
+	)
+	var i FinanceProfitDaily
+	err := row.Scan(
+		&i.UpstreamAccountID,
+		&i.BusinessDay,
+		&i.BusinessDayTz,
+		&i.TokenID,
+		&i.AccountID,
+		&i.PlatformID,
+		&i.RevenueMinor,
+		&i.CostMinor,
+		&i.ProfitMinor,
+		&i.Currency,
+		&i.RatioSnapshot,
+		&i.Source,
+		&i.CostObservedAt,
+		&i.RevenueObservedAt,
 		&i.UpdatedAt,
 	)
 	return i, err

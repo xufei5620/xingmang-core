@@ -92,6 +92,17 @@ func main() {
 		"newapi_mode", string(config.NewAPIMode),
 		"newapi_source", config.NewAPIInstanceID,
 		"newapi_sync_interval", config.NewAPISyncInterval.String(),
+		// 成本采集同理（XM-0037b）。多一条 secrets_configured：real 模式还需要
+		// 一个能解析**登记簿里那些引用**的 SecretProvider，而那些引用在进程
+		// 启动时还不知道（它们在库里，由 Action 维护），所以现阶段它必然是
+		// false——把这个事实打在启动日志里，比让人配完 real 再去猜为什么
+		// 每个账号都报 not_supported 强。
+		"finance_collect_enabled", config.FinanceCollectEnabled,
+		"finance_collect_mode", string(config.FinanceCollectMode),
+		"finance_collect_source", config.FinanceCollectInstanceID,
+		"finance_collect_interval", config.FinanceCollectInterval.String(),
+		"finance_collect_allowlist_size", len(config.FinanceCollectTargetAllowlist),
+		"finance_collect_secrets_configured", config.FinanceCollectSecrets != nil,
 		// 告警同理：运维必须能一眼看出这个进程会不会评估告警、会不会投递、
 		// 往哪儿投。**只打渠道是否配置，不打 chat_id、不打 webhook 地址**——
 		// 后者常常本身就是凭据（宪法 7 条）。
