@@ -251,24 +251,17 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 			observation = w.failureObservation(ctx, observation, now, connector.KindOf(err))
 			failed++
 		}
-		if _, err := w.store.Upsert(ctx, observation); err != nil {
-			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_upsert_failed",
-				slog.String("metric_key", observation.MetricKey))
-			return fmt.Errorf("upsert %s: %w", observation.MetricKey, err)
-		}
-		// 再追加一条历史样本（XM-0024）。先 Upsert 后 InsertSample 是有意的：
-		// 看板首页读的是最新态，样本写失败时至少「现在是什么」已经是对的。
+		// 最新态与历史样本同一事务写入（XM-R010）：要么都生效,要么两张表
+		// 都没动——事务失败即 River 干净重放,不存在半截状态与历史缺口。
+		// 本任务基于修复前基线开发,合并时由集成方改为事务写法,与
+		// sub2api_sync 保持一致。
 		//
 		// **成功与失败的观测都留样。** 失败样本正是趋势图上那段红的数据来源；
 		// 不留样，图上只会看到一段平直的旧值，看不出中间断过。
-		if err := w.store.InsertSample(ctx, observation); err != nil {
-			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_sample_failed",
+		if _, err := w.store.UpsertWithSample(ctx, observation); err != nil {
+			w.logJob(ctx, job, slog.LevelError, "job_failed", false, "observation_write_failed",
 				slog.String("metric_key", observation.MetricKey))
-			// 返回 error 让 River 重试，而不是只记日志放过去：重复的样本点
-			// 落在同一个 synced_at 上，图上是同一个位置，无害；而永久缺一个
-			// 点是不可恢复的，缺口还恰好最可能出现在库压力大、也就是最值得
-			// 回看的时候。可恢复的重复 vs 不可恢复的缺失，选前者。
-			return fmt.Errorf("insert sample %s: %w", observation.MetricKey, err)
+			return fmt.Errorf("write observation %s: %w", observation.MetricKey, err)
 		}
 	}
 

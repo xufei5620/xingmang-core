@@ -456,11 +456,11 @@ func TestNewAPISyncMetricMappingIsExhaustive(t *testing.T) {
 	}
 }
 
-// TestNewAPISyncUpsertFailureIsRetryable：写库失败才是真正要重试的失败
-// ——话根本没说出口。
-func TestNewAPISyncUpsertFailureIsRetryable(t *testing.T) {
+// TestNewAPISyncWriteFailureIsRetryable：写库失败才是真正要重试的失败
+// ——话根本没说出口。事务化(XM-R010)后最新态与样本一体成败,只有一个错误码。
+func TestNewAPISyncWriteFailureIsRetryable(t *testing.T) {
 	store := newMemoryStore()
-	store.upsertErr = errors.New("connection reset")
+	store.writeErr = errors.New("connection reset")
 	var logs bytes.Buffer
 
 	err := newTestNewAPISyncWorker(store, newapiFakeFactory(newapi.FakeOptions{}), &logs).
@@ -468,8 +468,8 @@ func TestNewAPISyncUpsertFailureIsRetryable(t *testing.T) {
 	if err == nil {
 		t.Fatal("写库失败必须返回 error 让 River 重试")
 	}
-	if !strings.Contains(logs.String(), "observation_upsert_failed") {
-		t.Fatalf("日志缺少 observation_upsert_failed: %s", logs.String())
+	if !strings.Contains(logs.String(), "observation_write_failed") {
+		t.Fatalf("日志缺少 observation_write_failed: %s", logs.String())
 	}
 }
 
@@ -512,22 +512,9 @@ func TestNewAPISyncAppendsSampleForEveryObservation(t *testing.T) {
 	}
 }
 
-func TestNewAPISyncSampleFailureIsRetryable(t *testing.T) {
-	store := newMemoryStore()
-	store.sampleErr = errors.New("disk full")
-	var logs bytes.Buffer
-
-	err := newTestNewAPISyncWorker(store, newapiFakeFactory(newapi.FakeOptions{}), &logs).
-		Work(context.Background(), newapiSyncJob())
-	if err == nil {
-		// 只记日志放过去的代价是历史**永久缺一个点**：那一刻的上游数据已经
-		// 过去了，没有任何补数途径。可恢复的重复 vs 不可恢复的缺失，选前者。
-		t.Fatal("样本写失败必须返回 error 让 River 重试")
-	}
-	if !strings.Contains(logs.String(), "observation_sample_failed") {
-		t.Fatalf("日志缺少 observation_sample_failed: %s", logs.String())
-	}
-}
+// 事务化(XM-R010)后不存在「最新态成功而样本失败」的半截状态,
+// 单独的样本失败路径随之消失——由上面的 WriteFailure 测试与 ops 层的
+// 原子性集成测试共同覆盖。
 
 // TestNewAPISyncHonorsCancellation：上下文被取消说明本进程在关机，不是上游
 // 出问题。把它记成 failed 会让看板把一次正常重启显示成同步故障——
