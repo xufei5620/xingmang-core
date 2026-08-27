@@ -522,3 +522,24 @@ FROM finance.profit_daily WHERE business_day >= :since GROUP BY account_id, busi
 | 指标键 | `internal/platform/ops/freshness.go`、`ops/metrickeys_test.go` |
 | 只读通道/迁移 | ADR-018;新迁移从 `db/migrations/000008_*` 起 |
 | 宪法 | 2(Action)、9/10(审批/AI)、12(新鲜度)、13(金额禁 float、比例 Decimal)、14(UTC、业务日显式) |
+
+---
+
+## 12. 拍板记录(2026-08-28,产品负责人经 AskUserQuestion 确认)
+
+**开工方式:按默认全线开工 a~e。** 业务默认一并生效:
+
+| 拍板项 | 结果 |
+|---|---|
+| 订阅有效天数口径 | 自然日,CST+08:00,起止**含两端** |
+| 提前失效剩余未摊销 | **单列损失科目**,不计入渠道当日成本(毛利不受一次性冲击,损失单独可见可追溯) |
+| 多币种汇率源 | v1 手工汇率表,每条必带 rate_at/source/base/quote |
+| 贡献利润两数据源(支付手续费/基础设施归因) | 未定 → 贡献利润卡诚实占位,待 M3 支付接入再接 |
+
+技术项(产品负责人授权 AI 拍定):scale-6 微美元整数;影子对比严格 0 差异+容差旋钮默认关、
+仅计量型渠道;recharge_ratio 除数为规范量、「充值成本率」仅展示投影;令牌映射手工 Action+
+自动发现候选、sk- 走 SecretProvider;platform_id 四桶第一天写全、看板分桶后启;采集频率可配
+默认 5min;official_api 成本口径占位后置;代理分摊按当日挂载快照;runway 随 037d 做并标注
+覆盖率边界。
+
+**本节之后,§11 的问题全部关闭;实施以本文档全文为规格,切分 a~e 逐片出 PR。**
