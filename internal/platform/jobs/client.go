@@ -146,6 +146,24 @@ func (c Config) validate() error {
 	if c.Sub2APISyncEnabled && c.Sub2APISyncInterval < time.Second {
 		return fmt.Errorf("sub2api sync interval %s is below River's one-second minimum", c.Sub2APISyncInterval)
 	}
+	if c.Sub2APISyncEnabled && c.Sub2APIMode == Sub2APIModeFake && c.Environment == "production" {
+		// 生产环境启动即拒（fail closed）。
+		//
+		// Fake 客户端返回的是**构造出来的**用户数、收入、余额，而同步任务会把
+		// 它们原样写进 ops.metric_observation / _sample。一旦落库，看板就以正常
+		// 主数字 + 「数据新鲜」徽章呈现它们，只在底部小字里写一个 source——
+		// 那已经不是「库里有演示数据」的风险，而是生产运营读数直接是假的。
+		//
+		// 为什么在启动时拒绝而不是运行时降级：默认值（DefaultConfig）是
+		// Sub2APIMode=fake，所以「忘了配」的结果恰好是最危险的那一种。只有让
+		// 进程起不来，这个疏忽才必然被发现；写一条告警日志会淹没在启动噪声里。
+		//
+		// staging / development 保持允许：XM-0017 的真实只读账号就绪前，
+		// 这两个环境本来就要靠 Fake 把整条采集链路跑通。
+		return fmt.Errorf(
+			"环境 production 不允许 sub2api fake 模式：Fake 会把演示数据写成生产运营读数，" +
+				"请配置 XM_SUB2API_MODE=real（或显式关闭同步 XM_SUB2API_SYNC_ENABLED=false）")
+	}
 	if ref := strings.TrimSpace(c.Sub2APICredentialRef); ref != "" {
 		// 只校验引用的**形状**，不解析出任何明文（ADR-014）。拼错的引用在
 		// 进程启动时就该炸，而不是等 XM-0017 接上真实客户端那天才发现。
