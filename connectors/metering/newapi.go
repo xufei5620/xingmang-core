@@ -86,6 +86,13 @@ type newapiClient struct {
 	// sessionRef 是账号级会话凭据的引用（`<user_id>:<session>` 那一份）。
 	sessionRef string
 
+	// revenue 是收入侧的只读数据库通道（XM-0044）。
+	//
+	// nil = 没配 XM_NEWAPI_REVENUE_DSN = AccountRevenue 继续返回 not_supported。
+	// 它是**注入**进来的而不是本客户端自己开的：连接池要按进程持有
+	// （对别人的生产库开 N 个池就是占 N 倍连接），而本客户端每轮采集重建。
+	revenue RevenueSource
+
 	// mu 保护 quota_per_unit 缓存。
 	//
 	// 客户端的生命周期是**一轮采集**，缓存的意义是一轮里的几十次取数不必
@@ -114,7 +121,11 @@ func NewNewAPIClient(
 	if _, err := secrets.ParseCredentialRef(cfg.CredentialRef); err != nil {
 		return nil, connector.NewError(connector.KindInternal, "metering.newapi.config", err)
 	}
-	return &newapiClient{httpBase: base, sessionRef: cfg.CredentialRef}, nil
+	return &newapiClient{
+		httpBase:   base,
+		sessionRef: cfg.CredentialRef,
+		revenue:    revenueSourceFrom(opts),
+	}, nil
 }
 
 // newapiStatus 是 /api/status 的响应形状。
@@ -337,27 +348,36 @@ func (c *newapiClient) TokenUsage(
 	return usage, nil
 }
 
-// AccountRevenue 在 NewAPI 侧不走 HTTP。
+// AccountRevenue 在 NewAPI 侧**不走 HTTP**，而是委托给只读数据库通道。
 //
-// §3.2 的口径是**只读直连自营 new-api 库**：
+// §3.2 的口径是只读直连自营 new-api 库：
 //
 //	SELECT COALESCE(SUM(quota),0) FROM quota_data
-//	WHERE created_at >= <CST今日00:00 unix> AND channel_id::text = <own_account_id>
+//	WHERE created_at >= <业务日 00:00 unix> AND channel_id::text = <own_account_id>
 //
 // 那是一条数据库通道（ADR-018 的闸 2/3 原文正是针对数据库通道的），
 // 与本包的 HTTP 底座是两套东西：不同的凭据形态（DSN vs 会话）、
 // 不同的只读保证（服务端 default_transaction_read_only vs 方法白名单）。
-// 硬塞进本客户端只会让两种通道的护栏互相稀释。
 //
-// 返回 not_supported 而不是 0：一个理直气壮的 0 会让 037b 把它当成
-// 「今天没有收入」写进台账，于是毛利凭空等于成本的负数（§5.1 明令禁止）。
+// 所以它**不是被塞进本客户端**的，而是一个独立实现（revenuedb.go 的
+// NewAPIRevenueDB，自带四道闸与 SELECT 白名单），由 WithRevenueSource 挂进来，
+// 本方法只做一次转发。两条通道的护栏各自完整，互不稀释——这正是原先那句
+// 「硬塞进本客户端只会让两种通道的护栏互相稀释」要守住的东西。
+//
+// **没挂通道时保持原状：返回 not_supported。** 一个理直气壮的 0 会让 037b
+// 把它当成「今天没有收入」写进台账，于是毛利凭空等于成本的负数
+// （§5.1 明令禁止）。XM_NEWAPI_REVENUE_DSN 没配的部署就停在这一支，
+// 行为与 XM-0044 之前逐字相同。
 func (c *newapiClient) AccountRevenue(
 	ctx context.Context, ownAccountID string, day string,
 ) (AccountRevenue, error) {
 	const op = "metering.account.revenue_read"
-	return AccountRevenue{}, connector.NewError(connector.KindNotSupported, op,
-		fmt.Errorf("newapi 的使用计费收入在自营 new-api 库的 quota_data 表里（§3.2），"+
-			"走只读数据库通道而不是 HTTP；本 HTTP 客户端不提供该能力"))
+	if c.revenue == nil {
+		return AccountRevenue{}, connector.NewError(connector.KindNotSupported, op,
+			fmt.Errorf("newapi 的使用计费收入在自营 new-api 库的 quota_data 表里（§3.2），"+
+				"走只读数据库通道而不是 HTTP；本部署没有配置 XM_NEWAPI_REVENUE_DSN"))
+	}
+	return c.revenue.AccountRevenue(ctx, ownAccountID, day)
 }
 
 // authorize 返回一个把会话凭据写进请求头的回调。

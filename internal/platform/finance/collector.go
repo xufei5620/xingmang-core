@@ -578,6 +578,17 @@ type RealMeteringConfig struct {
 	// Environment / InstanceID 进连接配置（connector.Config 要求非空）。
 	Environment string
 	InstanceID  string
+
+	// NewAPIRevenue 是 NewAPI 收入侧的只读数据库通道（XM-0044，§3.2）。
+	//
+	// **nil 是合法且是默认**：没配 XM_NEWAPI_REVENUE_DSN 的部署里，
+	// newapi 账号的收入继续返回 not_supported、台账写 NULL——那是「这条链路
+	// 还没接通」的如实表达，不是故障（collector 里 not_supported 走 Info 级）。
+	//
+	// 它是**进程级**的一个实例而不是逐账号新建：连接池连的是别人家的生产库，
+	// 每个账号开一个池就是占 N 倍连接（对齐 SoloAI BorrowSource 的取舍）。
+	// 因此这里收的是一个已经建好的通道，生命周期由进程入口负责（含 Close）。
+	NewAPIRevenue metering.RevenueSource
 }
 
 // missing 列出缺了哪几项配置。
@@ -651,6 +662,12 @@ func NewRealMeteringClientFactory(
 		case SystemSub2API:
 			return metering.NewSub2APIClient(conn, cfg.Secrets, opts...)
 		case SystemNewAPI:
+			// 收入通道挂上去（XM-0044）。nil 时这一项等于没传，
+			// AccountRevenue 保持 not_supported——「没配」与「配了但连不上」
+			// 是两件事，前者不该被记成故障。
+			if cfg.NewAPIRevenue != nil {
+				opts = append(opts, metering.WithRevenueSource(cfg.NewAPIRevenue))
+			}
 			return metering.NewNewAPIClient(conn, cfg.Secrets, opts...)
 		default:
 			return nil, connector.NewError(

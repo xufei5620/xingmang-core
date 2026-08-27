@@ -3,6 +3,7 @@ package metering_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -644,9 +645,15 @@ func TestNewAPIRefusesNonPositiveQuotaPerUnit(t *testing.T) {
 	}
 }
 
-// TestNewAPIRevenueIsNotSupported：newapi 的收入在自营库里（§3.2），
-// 走只读数据库通道。返回一个理直气壮的 0 会让 037b 把它当成
-// 「今天没有收入」写进台账，于是毛利凭空等于成本的负数（§5.1 明令禁止）。
+// TestNewAPIRevenueIsNotSupported：**没挂只读数据库通道时**，newapi 的收入
+// 仍然报 not_supported。
+//
+// newapi 的收入在自营库里（§3.2），HTTP 面根本答不出。返回一个理直气壮的 0
+// 会让 037b 把它当成「今天没有收入」写进台账，于是毛利凭空等于成本的负数
+// （§5.1 明令禁止）。
+//
+// XM-0044 之后这条依然要绿：没配 XM_NEWAPI_REVENUE_DSN 的部署行为必须与
+// 之前逐字相同——这是那次改动最重要的兼容性承诺。
 func TestNewAPIRevenueIsNotSupported(t *testing.T) {
 	opts := metering.FakeOptions{Now: func() time.Time { return contracttest.Today }}
 	f := newFixture(t, opts, false)
@@ -657,6 +664,69 @@ func TestNewAPIRevenueIsNotSupported(t *testing.T) {
 	_, err = c.AccountRevenue(context.Background(), "42", contracttest.TodayText)
 	if got := connector.KindOf(err); got != connector.KindNotSupported {
 		t.Fatalf("newapi 收入应归 %s，got %s（%v）", connector.KindNotSupported, got, err)
+	}
+}
+
+// stubRevenueSource 记录被问了什么，并回一个固定答案。
+type stubRevenueSource struct {
+	gotAccount string
+	gotDay     string
+	revenue    metering.AccountRevenue
+	err        error
+}
+
+func (s *stubRevenueSource) AccountRevenue(
+	_ context.Context, ownAccountID string, day string,
+) (metering.AccountRevenue, error) {
+	s.gotAccount, s.gotDay = ownAccountID, day
+	return s.revenue, s.err
+}
+
+// TestNewAPIRevenueDelegatesToConfiguredSource：挂上只读数据库通道之后，
+// AccountRevenue 必须**原样转发**给它（XM-0044）。
+//
+// 两件事各测一次：参数不能在转发路上被改（账号 id 与业务日错一个，
+// 钱就记到别人头上或别的天上），以及通道报的错要原样透出来——
+// 尤其**不能**被 HTTP 客户端重新包成 not_supported，那会让「配了但连不上」
+// 伪装成「这条链路还没接通」。
+func TestNewAPIRevenueDelegatesToConfiguredSource(t *testing.T) {
+	opts := metering.FakeOptions{Now: func() time.Time { return contracttest.Today }}
+	f := newFixture(t, opts, false)
+
+	stub := &stubRevenueSource{revenue: metering.AccountRevenue{
+		OwnAccountID:      "42",
+		Day:               contracttest.TodayText,
+		RevenueMinorUnits: 1_234_567,
+		Currency:          "USD",
+	}}
+	c, err := metering.NewNewAPIClient(f.config, fakeProvider(t),
+		append(f.options(opts), metering.WithRevenueSource(stub))...)
+	if err != nil {
+		t.Fatalf("构造失败: %v", err)
+	}
+
+	got, err := c.AccountRevenue(context.Background(), "42", contracttest.TodayText)
+	if err != nil {
+		t.Fatalf("挂了通道之后不该再报 not_supported: %v", err)
+	}
+	if stub.gotAccount != "42" || stub.gotDay != contracttest.TodayText {
+		t.Fatalf("转发的参数被改了: account=%q day=%q", stub.gotAccount, stub.gotDay)
+	}
+	if got.RevenueMinorUnits != 1_234_567 || got.Currency != "USD" {
+		t.Fatalf("转发的结果被改了: %+v", got)
+	}
+
+	// 通道自己报的错必须原样透出，分类不得被改写。
+	failing := &stubRevenueSource{err: connector.NewError(
+		connector.KindUnavailable, "metering.account.revenue_read", errors.New("库连不上"))}
+	c2, err := metering.NewNewAPIClient(f.config, fakeProvider(t),
+		append(f.options(opts), metering.WithRevenueSource(failing))...)
+	if err != nil {
+		t.Fatalf("构造失败: %v", err)
+	}
+	if _, err := c2.AccountRevenue(context.Background(), "42", contracttest.TodayText); connector.KindOf(err) != connector.KindUnavailable {
+		t.Fatalf("通道报的 unavailable 不该被改写成 %q——"+
+			"「配了但连不上」与「没配」是两件事", connector.KindOf(err))
 	}
 }
 

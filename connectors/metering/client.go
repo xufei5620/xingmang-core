@@ -77,6 +77,37 @@ type clientOptions struct {
 	businessDay       *time.Location
 	currency          string
 	supportedVersions []string
+	// revenue 只被 NewAPI 驱动读（收入走只读 DSN，见 revenuedb.go）。
+	// Sub2API 的收入在 HTTP 上就有，它忽略这一项。
+	revenue RevenueSource
+}
+
+// WithRevenueSource 给驱动挂上收入侧的取数通道（XM-0044）。
+//
+// 目前只有 NewAPI 驱动用得上：它的使用计费收入在自营 new-api 库的 quota_data
+// 表里，HTTP 面根本答不出（§3.2）。不挂时 AccountRevenue 保持 not_supported，
+// 与 XM-0044 之前逐字相同——「没配这条链路」是一个事实，台账写 NULL 而不是 0。
+//
+// 传进来的是一个**已经建好**的通道而不是一份配置：连接池要按进程持有
+// （对别人的生产库开 N 个池就是占 N 倍连接），而驱动每轮采集重建。
+func WithRevenueSource(src RevenueSource) Option {
+	return func(o *clientOptions) { o.revenue = src }
+}
+
+// revenueSourceFrom 从选项里挑出收入通道。
+//
+// 单独再跑一遍 opts 而不是让 httpBase 顺手带出来：httpBase 是两个驱动共用的
+// HTTP 底座，往它身上挂一个只有 NewAPI 用得到的数据库通道字段，
+// 等于让 Sub2API 驱动也长出一个永远为 nil 的成员。选项是纯 setter，
+// 多跑一遍没有副作用。
+func revenueSourceFrom(opts []Option) RevenueSource {
+	var o clientOptions
+	for _, fn := range opts {
+		if fn != nil {
+			fn(&o)
+		}
+	}
+	return o.revenue
 }
 
 // WithBaseTransport 指定底层 RoundTripper（默认 http.DefaultTransport）。

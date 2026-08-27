@@ -224,6 +224,20 @@ services:
       # 可选：旧版本 NewAPI 要求的 New-Api-User 头（管理员的用户 id）。
       # 新版本上游已经不读它，留空即可；只有连老实例返 401 时才需要填。
       XM_NEWAPI_USER_ID: ${XM_NEWAPI_USER_ID:-}
+      # --- NewAPI 收入只读直查（XM-0044，设计稿 §3.2）------------------------
+      # 利润台账的**收入侧**走的是只读 DSN，不是上面那条 HTTP 通道：
+      # 上游的 HTTP 面答不出「某个渠道今天赚了多少」，而 quota_data 表里
+      # channel_id 与 quota 都有，一条 SUM 就够。
+      #
+      # 没配 = 收入侧写 NULL（未知），**不是 0**——把未知写成 0 会让毛利
+      # 凭空等于成本的负数。配置步骤与建只读角色的 SQL 见
+      # docs/runbooks/SWITCH-NEWAPI-REAL.md 的「收入只读直查」一节。
+      #
+      # ⚠️ 连接串里**不许带密码**（?password= 也不行）：pgx 会把 query 当连接
+      #    设置读并覆盖 DSN 的表面声明，那是真实的绕过口子。口令只经 CredentialRef。
+      XM_NEWAPI_REVENUE_DSN: ${XM_NEWAPI_REVENUE_DSN:-}
+      XM_NEWAPI_REVENUE_PASSWORD_REF: ${XM_NEWAPI_REVENUE_PASSWORD_REF:-}
+      XM_NEWAPI_REVENUE_PASSWORD: ${XM_NEWAPI_REVENUE_PASSWORD:-}
       # --- 告警中心（XM-0033，规格 §9.3 / §9.4）-----------------------------
       # 与 Sub2API 那几项相反：告警渠道**配错就让进程起不来**（ref 拼错、
       # URL 不是 https、只配了一半）。理由见 docs/modules/alerts/README.md——
