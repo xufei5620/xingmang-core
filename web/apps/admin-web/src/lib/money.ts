@@ -137,3 +137,48 @@ export function formatCount(value: unknown): string {
   const digits = groupDigits((negative ? -n : n).toString());
   return negative ? `-${digits}` : digits;
 }
+
+/** 把「任意标度的整数最小单位」按币种的最小单位格式化（XM-0037d）。
+ *
+ *  成本核算这条线的金额是 **scale-6 微单位**（`money.MicroScale`，设计稿 §2.4），
+ *  而 `formatMinorUnits` 按的是**币种自己的**最小单位小数位（USD/CNY 是 2）。
+ *  把前者直接喂给后者，$29.99 会显示成 $299,900.00——**差一万倍，且不报错**。
+ *
+ *  所以后端在每个金额上都带了 `scale`，前端据此降标度，而不是把 6 硬编码在
+ *  某个格式化函数里：那个 6 一旦与后端漂开，所有金额都会静静地错着。
+ *
+ *  **全程 BigInt，一次浮点都不经过**（宪法 13 条）。降标度用半进
+ *  （away from zero），与后端 `money.Rescale` 是同一条舍入规则——
+ *  两边用不同的舍入方式，同一笔钱在页面上和在台账里会差一分。
+ *
+ *  scale 不是合法非负整数、或币种未登记时，退回 `formatMinorUnits` 的既有行为
+ *  （「数值异常」/「金额单位未知」）：宁可显眼地说不对，也不能悄悄显示一个算错的数。 */
+export function formatScaledMinorUnits(
+  minorUnits: unknown,
+  currency: string,
+  scale: unknown,
+): string {
+  const value = toIntegerValue(minorUnits);
+  if (value === null) return INVALID_VALUE_TEXT;
+
+  const from = toIntegerValue(scale);
+  if (from === null || from < 0n || from > 18n) return INVALID_VALUE_TEXT;
+
+  const to = currencyExponent((currency || "").toUpperCase());
+  // 币种未登记时不猜小数位：交给 formatMinorUnits 去说「金额单位未知」，
+  // 原样把整数给出来，而不是先按一个猜出来的标度换算一遍。
+  if (to === null) return formatMinorUnits(value, currency);
+
+  const target = BigInt(to);
+  if (from === target) return formatMinorUnits(value, currency);
+  if (from < target) {
+    return formatMinorUnits(value * 10n ** (target - from), currency);
+  }
+
+  const divisor = 10n ** (from - target);
+  const negative = value < 0n;
+  const abs = negative ? -value : value;
+  // +divisor/2 就是整数域里的半进（away from zero）
+  const scaled = (abs + divisor / 2n) / divisor;
+  return formatMinorUnits(negative ? -scaled : scaled, currency);
+}

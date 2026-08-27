@@ -260,3 +260,35 @@ func ReciprocalString(r Ratio, scale int) (string, error) {
 	}
 	return fixedDecimalString(quotient.Int64(), scale), nil
 }
+
+// RatioString 把两个整数最小单位的量相除，渲染成定点十进制**字符串**。
+//
+// 用途是毛利率这类展示比率（§3.3：`margin = grossProfit / usageRevenue`）。
+// 三条纪律：
+//
+//   - **全程整数**：分子先放大 10^scale 再整除并半进，一次舍入，零 float
+//     （宪法 13 条）。中间乘积走 math/big——毛利可以是几百万微单位，
+//     再乘 10^6 就出 int64 了。
+//   - **返回字符串而不是数值**：比率一旦以 JSON 数字出去，前端会用 double
+//     接住它，0.15 变成 0.15000000000000002。与 ReciprocalString 同一条。
+//   - **分母 ≤ 0 时报错，不返回 0**：`revenue ≤ 0` 时毛利率没有意义
+//     （对齐 SoloAI relay_profit.go:331 的 nil），调用方据此显示「—」。
+//     返回 0 会让「没有收入」看起来像「毛利率是零」。
+func RatioString(numerator, denominator int64, scale int) (string, error) {
+	if denominator <= 0 {
+		return "", fmt.Errorf("分母 %d 必须为正（收入 ≤ 0 时毛利率无意义）: %w",
+			denominator, ErrFormat)
+	}
+	if scale < 0 || scale > maxScale {
+		return "", fmt.Errorf("scale %d 超出 0~%d: %w", scale, maxScale, ErrFormat)
+	}
+	num := new(big.Int).Mul(
+		big.NewInt(numerator),
+		new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil),
+	)
+	quotient := divRoundHalfUp(num, big.NewInt(denominator))
+	if !quotient.IsInt64() {
+		return "", fmt.Errorf("比率 %s 超出 int64: %w", quotient, ErrOverflow)
+	}
+	return fixedDecimalString(quotient.Int64(), scale), nil
+}

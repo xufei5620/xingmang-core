@@ -6,6 +6,7 @@ import { useParams, useSearchParams } from "react-router";
 import { listMetrics, listServices } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
 import { ChannelsPanel } from "../components/ChannelsPanel";
+import { FinanceSummaryCards } from "../components/FinanceSummaryCards";
 import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
 import { MetricCardGrid } from "../components/MetricCardGrid";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
@@ -278,9 +279,23 @@ function PlatformOverview({ serviceType, label }: { serviceType: string; label: 
           emptyDescription={`该环境下还没有 ${serviceType}.* 的指标观测；${label} 的采集任务跑起来后会出现在这里`}
         />
       </ApiStateView>
+      {/* 成本三卡只挂在**计量型上游**那两个平台上（XM-0037d）。
+          CPA 与服务器没有上游账号，给它们挂一组恒为「未接入」的成本卡，
+          等于把一句「这里本来就没有这个概念」显示成一处缺口。 */}
+      {FINANCE_CARD_PLATFORMS.has(serviceType) ? (
+        <FinanceSummaryCards systemType={serviceType} label={label} />
+      ) : null}
       {/* ADMIN-IA 给概览的内容契约是「关键指标卡 + 新鲜度 + 活动告警数」。
           前两样在卡片里，第三样还没有——缺了就说缺了，不装作契约已经满足 */}
       <p className="text-xs text-fg-muted">活动告警数随第 3 片（运营工作台）一并补上。</p>
     </div>
   );
 }
+
+/** 挂成本三卡的平台。
+ *
+ *  与 `finance.upstream_account.system_type` 的取值对齐（`sub2api` / `newapi`）：
+ *  卡片按 systemType 过滤渠道，platform 的 serviceType 与它同名不是巧合，
+ *  是登记簿刻意用了同一套标识。第三个取值 `official` 没有对应的平台页
+ *  （官方 API 直连的成本口径 v1 占位后置），所以不在这里。 */
+const FINANCE_CARD_PLATFORMS: ReadonlySet<string> = new Set(["sub2api", "newapi"]);

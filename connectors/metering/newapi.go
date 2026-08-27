@@ -2,6 +2,7 @@ package metering
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -406,4 +407,31 @@ func (c *newapiClient) authorize(ctx context.Context, op string) func(*http.Requ
 		})
 		return nil
 	}
+}
+
+// UpstreamBalance 在 NewAPI 侧**尚未接通**，返回 not_supported（§7）。
+//
+// 这一条的障碍比 sub2api 那条更硬，而且是上游侧的：§7 明确记着
+// 「NewAPI 读 `channel.balance`（**需上游先开 CHANNEL_UPDATE_FREQUENCY，
+// 否则死水**；覆盖率低）」——也就是说即便平台把读取实现了，
+// 多数部署拿回来的仍然是一个从未刷新过的旧数字。
+//
+// 一个死水余额比没有余额更危险：它会算出一个**看起来精确、实际上停在
+// 上个月**的可用天数，而看板上没有任何东西提示它是死的。
+//
+// 所以这里停在 not_supported。接通它的前置不在本仓：
+//  1. 上游开启 CHANNEL_UPDATE_FREQUENCY；
+//  2. 确认 channel.balance 的刷新时间戳也能读到——没有那个时间戳，
+//     §10.4 的「必须显示观测时间」就无从满足，而**平台不该拿本地读取时刻
+//     冒充上游的余额时间**（同 respMeta.observedAt 那条退化路径的纪律）。
+func (c *newapiClient) UpstreamBalance(ctx context.Context) (UpstreamBalance, error) {
+	const op = "metering.upstream.balance_read"
+	if err := ctx.Err(); err != nil {
+		return UpstreamBalance{}, connector.NewError(connector.KindUnavailable, op, err)
+	}
+	return UpstreamBalance{}, connector.NewError(connector.KindNotSupported, op,
+		errors.New("newapi 余额读取尚未接通：channel.balance 需上游先开 "+
+			"CHANNEL_UPDATE_FREQUENCY 否则是死水（§7），且需要一并读到它的刷新时刻——"+
+			"没有那个时刻就满足不了「必须显示观测时间」，而拿本地读取时刻冒充会让"+
+			"一个停更的余额看起来很新鲜"))
 }

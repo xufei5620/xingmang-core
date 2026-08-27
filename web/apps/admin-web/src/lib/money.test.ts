@@ -3,6 +3,7 @@ import {
   currencyExponent,
   formatCount,
   formatMinorUnits,
+  formatScaledMinorUnits,
   groupDigits,
   INVALID_VALUE_TEXT,
   toIntegerValue,
@@ -124,5 +125,45 @@ describe("错误率（ppm → 百分比）", () => {
 
   it("负值不被吞掉：它是上游给错了，该看得出来", () => {
     expect(formatErrorRatePPM(-1_200)).toBe("-0.12%");
+  });
+});
+
+describe("formatScaledMinorUnits：任意标度 → 币种最小单位（XM-0037d）", () => {
+  it("scale-6 微单位按币种降到两位小数——直接喂 formatMinorUnits 会差一万倍", () => {
+    // $29.99 在成本核算里是 29_990_000 微单位（设计稿 §2.4）
+    expect(formatScaledMinorUnits("29990000", "USD", 6)).toBe("$29.99");
+    // 同一个数按币种最小单位读会变成 $299,900.00——这正是本函数要挡的
+    expect(formatMinorUnits("29990000", "USD")).toBe("$299,900.00");
+  });
+
+  it("降标度用半进，与后端 money.Rescale 同一条舍入规则", () => {
+    // 0.005 微美元级：1_234_500 → 1.2345 → 1.23；1_235_000 → 1.235 → 1.24
+    expect(formatScaledMinorUnits("1234500", "USD", 6)).toBe("$1.23");
+    expect(formatScaledMinorUnits("1235000", "USD", 6)).toBe("$1.24");
+    // 负数半进 away from zero，与后端一致
+    expect(formatScaledMinorUnits("-1235000", "USD", 6)).toBe("-$1.24");
+  });
+
+  it("标度与币种一致时原样透传", () => {
+    expect(formatScaledMinorUnits("123456", "CNY", 2)).toBe("¥1,234.56");
+  });
+
+  it("标度低于币种小数位时升标度（不丢精度）", () => {
+    // scale-0 的 12 元 → 1200 分
+    expect(formatScaledMinorUnits("12", "CNY", 0)).toBe("¥12.00");
+  });
+
+  it("标度非法一律「数值异常」，不猜一个默认值", () => {
+    expect(formatScaledMinorUnits("100", "USD", Number.NaN)).toBe(INVALID_VALUE_TEXT);
+    expect(formatScaledMinorUnits("100", "USD", -1)).toBe(INVALID_VALUE_TEXT);
+    expect(formatScaledMinorUnits("100", "USD", "abc")).toBe(INVALID_VALUE_TEXT);
+    expect(formatScaledMinorUnits("abc", "USD", 6)).toBe(INVALID_VALUE_TEXT);
+  });
+
+  it("未登记币种不按猜出来的标度换算，退回既有的「金额单位未知」", () => {
+    const got = formatScaledMinorUnits("29990000", "XYZ", 6);
+    expect(got).toContain("金额单位未知");
+    // 换算过的话这里会是 29.99，而我们并不知道 XYZ 有几位小数
+    expect(got).toContain("29,990,000");
   });
 });

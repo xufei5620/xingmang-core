@@ -264,9 +264,27 @@ const alertsBody = {
   ],
 };
 
+/** 成本看板供数的最小响应体（XM-0037d）。
+ *
+ *  平台概览页从 XM-0037d 起会拉这两个端点（成本三卡）。给它们一个**空但合法**
+ *  的响应，而不是让它们落到 404 分支：那会让「趋势图挂了」这类用例看到一个
+ *  与它无关的错误态，然后有人会去改断言而不是去查真正的原因。 */
+const financeChannelsBody = { items: [], from: "2026-08-28", to: "2026-08-28" };
+const financeUpstreamsBody = {
+  items: [],
+  from: "2026-08-28",
+  to: "2026-08-28",
+  runway_coverage: { total: 0, known: 0, reasons: {} },
+  runway_thresholds: { critical_days: 5, warning_days: 10, serious_days: 20 },
+};
+
 function okHandler(url: string): Response {
   // history 必须排在 metrics 前面：两者的前缀是包含关系
   if (url.startsWith("/api/v1/metrics/history")) return fakeResponse(200, historyBody);
+  if (url.startsWith("/api/v1/finance/channels/summary"))
+    return fakeResponse(200, financeChannelsBody);
+  if (url.startsWith("/api/v1/finance/upstreams/summary"))
+    return fakeResponse(200, financeUpstreamsBody);
   if (url.startsWith("/api/v1/metrics")) return fakeResponse(200, metricsBody);
   if (url.startsWith("/api/v1/services")) return fakeResponse(200, servicesBody);
   if (url.startsWith("/api/v1/alerts")) return fakeResponse(200, alertsBody);
@@ -477,7 +495,7 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
       "X-Dev-Principal-ID": "dev-operator",
       "X-Dev-Principal-Type": "HUMAN",
       "X-Dev-Scopes":
-        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,request.read,request.content.read",
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read",
     });
   });
 

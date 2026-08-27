@@ -37,6 +37,10 @@ export const DEFAULT_SCOPES = [
   // 读路径复用 ops.read，不需要再加。
   "alerts.alert.manage",
   "alerts.silence.manage",
+  // XM-0037d 成本看板。**不复用 ops.read**：登记簿与台账里的是倍率
+  // （我们从上游拿到几折）与逐渠道毛利，比看板上的余额数字敏感一个量级
+  // （internal/platform/finance/permissions.go 的 ScopeRead）。
+  "finance.read",
   // XM-0039 请求详情。**刻意分开两级**：request.read 只看元数据列表；
   // request.content.read 才能看对话正文，且服务端每次读取都写审计事件
   // （internal/platform/requestlog/permissions.go）。

@@ -165,6 +165,16 @@ type FinanceAmortizationLoss struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type FinanceBalanceHistory struct {
+	ID                int64
+	UpstreamAccountID uuid.UUID
+	BalanceMinor      int64
+	Currency          string
+	CapturedAt        pgtype.Timestamptz
+	ObservedAt        pgtype.Timestamptz
+	Source            string
+}
+
 type FinanceProfitDaily struct {
 	UpstreamAccountID uuid.UUID
 	BusinessDay       pgtype.Date

@@ -78,6 +78,18 @@ func (l *financeLedger) WriteAmortizedRow(
 	return row, nil
 }
 
+// financeBalances 是 Worker 测试用的内存余额记录器（XM-0037d）。
+//
+// 与 financeSubscriptions 同一个理由：本包只测「多久跑一次、失败要不要重试、
+// 日志长什么样」，余额那条「仅变化时落一条」的纪律在 finance 包里测。
+type financeBalances struct{}
+
+func (financeBalances) RecordBalance(
+	_ context.Context, in finance.BalanceReading,
+) (finance.BalanceReading, error) {
+	return in, nil
+}
+
 // financeSubscriptions 是 Worker 测试用的内存订阅登记（XM-0037c）。
 //
 // 默认没有任何批次：本包的用例只跑计量型那一轮，订阅型的行为在
@@ -117,6 +129,7 @@ func newFinanceWorker(
 		Store:         store,
 		Registry:      registry,
 		Subscriptions: financeSubscriptions{},
+		Balances:      financeBalances{},
 		Ledger:        ledger,
 		NewClient:     finance.NewFakeMeteringClientFactory(func() time.Time { return fixedNow }),
 		Now:           func() time.Time { return fixedNow },
@@ -246,11 +259,13 @@ func TestFinanceCollectRefusesIncompleteWiring(t *testing.T) {
 	cases := map[string]FinanceCollectOptions{
 		"缺 store": {
 			Registry: &financeRegistry{}, Subscriptions: financeSubscriptions{},
+			Balances:  financeBalances{},
 			Ledger:    &financeLedger{},
 			NewClient: finance.NewFakeMeteringClientFactory(nil),
 		},
 		"缺 registry": {
 			Store: newMemoryStore(), Subscriptions: financeSubscriptions{},
+			Balances:  financeBalances{},
 			Ledger:    &financeLedger{},
 			NewClient: finance.NewFakeMeteringClientFactory(nil),
 		},
@@ -258,17 +273,27 @@ func TestFinanceCollectRefusesIncompleteWiring(t *testing.T) {
 		// 渠道的成本会全部消失，而毛利恰好等于收入（宪法 12 条）。
 		"缺 subscriptions": {
 			Store: newMemoryStore(), Registry: &financeRegistry{},
+			Balances:  financeBalances{},
 			Ledger:    &financeLedger{},
 			NewClient: finance.NewFakeMeteringClientFactory(nil),
 		},
-		"缺 ledger": {
+		// 漏了余额记录器的后果比漏订阅轻——可用天数会显示成「未读到余额」
+		// 而不是一个错数字——但「装配漏了一项」这件事本身一样不该靠人去发现。
+		"缺 balances": {
 			Store: newMemoryStore(), Registry: &financeRegistry{},
 			Subscriptions: financeSubscriptions{},
+			Ledger:        &financeLedger{},
 			NewClient:     finance.NewFakeMeteringClientFactory(nil),
+		},
+		"缺 ledger": {
+			Store: newMemoryStore(), Registry: &financeRegistry{},
+			Subscriptions: financeSubscriptions{}, Balances: financeBalances{},
+			NewClient: finance.NewFakeMeteringClientFactory(nil),
 		},
 		"缺 client factory": {
 			Store: newMemoryStore(), Registry: &financeRegistry{},
-			Subscriptions: financeSubscriptions{}, Ledger: &financeLedger{},
+			Subscriptions: financeSubscriptions{}, Balances: financeBalances{},
+			Ledger: &financeLedger{},
 		},
 	}
 	for name, opts := range cases {

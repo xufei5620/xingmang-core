@@ -2,6 +2,7 @@ package metering
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -362,4 +363,30 @@ func (c *sub2apiClient) authorizeAdmin(ctx context.Context, op string) func(*htt
 		req.Header.Set(sub2apiAdminAuthHeader, value.Reveal())
 		return nil
 	}
+}
+
+// UpstreamBalance 在 Sub2API 侧**尚未接通**，返回 not_supported（§7）。
+//
+// 口径是清楚的：走管理员 token 读 `/admin/accounts`，余额在每个账号的
+// `extra` 快照里（SoloAI relay_scheduler.go:461 就是这么取的），
+// 平台**不**调 `update_balance`——那是写操作，而且会禁渠道。
+//
+// 没有实现的**只有一样**：`extra` 的具体形状。它在 SoloAI 侧是一个随上游版本
+// 演进的自由 JSON，本仓没有可核对的样本，也没有 OpenAPI 规格
+// （见本文件开头对 sub2api 的说明）。而余额是要拿去除的分母——
+// 字段名猜错一个层级，得到的不是报错，是一个**看起来完全正常的可用天数**。
+//
+// 所以这里停在 not_supported 而不是先写一个「大概是这个字段」的解析：
+// 可用天数因此显示为「未接入」而不是一个假的数字（§10.4 + 宪法 12 条），
+// 而 §12 拍板要的正是「runway 随 037d 做并标注覆盖率边界」。
+// 接通它需要的是一份真实响应样本，不是更多代码。
+func (c *sub2apiClient) UpstreamBalance(ctx context.Context) (UpstreamBalance, error) {
+	const op = "metering.upstream.balance_read"
+	if err := ctx.Err(); err != nil {
+		return UpstreamBalance{}, connector.NewError(connector.KindUnavailable, op, err)
+	}
+	return UpstreamBalance{}, connector.NewError(connector.KindNotSupported, op,
+		errors.New("sub2api 余额读取尚未接通：口径是管理员 token 读 /admin/accounts 的 "+
+			"extra 快照（§7），但该字段的形状需要一份真实响应样本才能确定——"+
+			"猜错层级会得到一个看起来完全正常的错误可用天数"))
 }

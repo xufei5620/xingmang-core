@@ -109,6 +109,26 @@ func main() {
 	)
 	opsStore := ops.NewStore(pool)
 
+	// 演示数据种子（XM-0037d）：只在显式开启时跑，**生产硬拒**。
+	//
+	// 放在内核建好之后：它调的就是运营手工登记时调的那几个 L1 Action，
+	// 参数校验、跨环境闸门、审计链一样都不少（宪法 2 条）。
+	// 失败即拒绝启动——一个「以为种上了」的环境会让人对着空看板查采集链路。
+	if cfg.FinanceDemoSeed {
+		seeded, err := finance.SeedDemoData(ctx, finance.DemoSeedOptions{
+			Environment: cfg.Environment,
+			Kernel:      kernel,
+			Registry:    financeStore,
+			Logger:      logger,
+		})
+		if err != nil {
+			logger.Error("api_start_failed", slog.String("module", "platform.api"),
+				slog.String("error_code", "finance_demo_seed_failed"), slog.Any("err", err))
+			os.Exit(2)
+		}
+		_ = seeded // 结果已在 SeedDemoData 内部落日志
+	}
+
 	// 请求详情（XM-0039）。没配 XM_REQLOG_MODE 时返回 nil，路由不挂载那两个
 	// 端点——reqlog 是个外挂系统，没部署它的环境该照常起来。
 	//
@@ -148,7 +168,11 @@ func main() {
 		FinanceProfit: finance.NewProfitStore(pool, nil),
 		// 订阅付款的读与写同样共用一个仓储（同登记簿）
 		FinanceSubscriptions: financeSubscriptions,
-		RequestTimeout:       cfg.RequestTimeout,
+		// 看板供数是**只读**的：余额由采集任务写，这里只查询。
+		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
+		// 而本进程没有任何写入路径会用到注入时钟。
+		FinanceSummaries: finance.NewSummaryStore(pool, nil),
+		RequestTimeout:   cfg.RequestTimeout,
 	})
 
 	srv := &http.Server{

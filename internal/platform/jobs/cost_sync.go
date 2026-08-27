@@ -137,7 +137,9 @@ type FinanceCollectOptions struct {
 	Registry finance.AccountRegistry
 	// Subscriptions 供订阅型渠道的摊销取数（XM-0037c，§3.5）。
 	Subscriptions finance.SubscriptionRegistry
-	Ledger        finance.LedgerWriter
+	// Balances 落上游余额读数，供可用天数用（XM-0037d，§2.3/§7）。
+	Balances finance.BalanceRecorder
+	Ledger   finance.LedgerWriter
 
 	NewClient       finance.MeteringClientFactory
 	ResolvePlatform finance.PlatformResolver
@@ -159,6 +161,7 @@ type FinanceCollectWorker struct {
 	store           ObservationStore
 	registry        finance.AccountRegistry
 	subscriptions   finance.SubscriptionRegistry
+	balances        finance.BalanceRecorder
 	ledger          finance.LedgerWriter
 	newClient       finance.MeteringClientFactory
 	resolvePlatform finance.PlatformResolver
@@ -187,6 +190,7 @@ func NewFinanceCollectWorker(opts FinanceCollectOptions) *FinanceCollectWorker {
 		store:           opts.Store,
 		registry:        opts.Registry,
 		subscriptions:   opts.Subscriptions,
+		balances:        opts.Balances,
 		ledger:          opts.Ledger,
 		newClient:       opts.NewClient,
 		resolvePlatform: opts.ResolvePlatform,
@@ -217,8 +221,9 @@ func (w *FinanceCollectWorker) Work(
 	if w.store == nil {
 		return errors.New("jobs: finance collect worker has no observation store")
 	}
-	if w.registry == nil || w.subscriptions == nil || w.ledger == nil {
-		return errors.New("jobs: finance collect worker has no registry / subscriptions / ledger")
+	if w.registry == nil || w.subscriptions == nil || w.balances == nil || w.ledger == nil {
+		return errors.New(
+			"jobs: finance collect worker has no registry / subscriptions / balances / ledger")
 	}
 	if w.newClient == nil {
 		return errors.New("jobs: finance collect worker has no metering client factory")
@@ -231,6 +236,7 @@ func (w *FinanceCollectWorker) Work(
 		InstanceID:      w.instanceID,
 		Registry:        w.registry,
 		Subscriptions:   w.subscriptions,
+		Balances:        w.balances,
 		Ledger:          w.ledger,
 		NewClient:       w.newClient,
 		ResolvePlatform: w.resolvePlatform,
@@ -302,6 +308,10 @@ func (w *FinanceCollectWorker) Work(
 		slog.Int("subscription_rows_cost_only", result.SubscriptionRowsCostOnly),
 		slog.Int("rows_skipped_no_batch", result.RowsSkippedNoBatch),
 		slog.Int("rows_skipped_no_owner", result.RowsSkippedNoOwner),
+		slog.Int("balances_changed", result.BalancesRecorded),
+		slog.Int("balances_confirmed", result.BalancesConfirmed),
+		slog.Int("balances_unsupported", result.BalancesUnsupported),
+		slog.Int("balances_failed", result.BalancesFailed),
 	)
 	return nil
 }

@@ -60,6 +60,10 @@ var ReadCapabilities = []registry.Capability{
 	"metering.health.read",
 	"metering.token.usage_read",
 	"metering.account.revenue_read",
+	// ⚠️ 余额是**覆盖率最低**的一项（§7：newapi 主力盲区、订阅制上游没有余额）。
+	// 它单独成一项能力而不是并进 usage_read，正是为了让「这个上游答不答得出
+	// 余额」在 Capabilities() 里就看得见——调用方不必先打一次再看错误分类。
+	"metering.upstream.balance_read",
 }
 
 // ErrInvalidDay：业务日不符合 BusinessDayLayout。
@@ -174,6 +178,33 @@ type AccountRevenue struct {
 	// 所以它们在契约层就必须是两种返回形态，而不是同一个 0。
 	RevenueMinorUnits int64
 	Currency          string
+}
+
+// UpstreamBalance 是**上游账号自己**的余额读数（§2.3 + §7 + §10.4）。
+//
+// 三件事把它与 TokenUsage / AccountRevenue 区分开，每一件都有后果：
+//
+//  1. **它是账号级的，不是令牌级也不是自营账号级**——余额属于那套凭据背后的
+//     上游账户。所以本方法没有参数：客户端本来就是按上游账号构造的。
+//  2. **它不参与成本核算**（§2.3 逐字）。余额差分会被充值污染——正跳变是充值
+//     不是负成本，SoloAI 正因此不用它算成本。它唯一的用途是可用天数预警。
+//  3. **读的是上游已存的余额，平台不去催上游刷新**（§7）：sub2api 走管理员
+//     token 读 `/admin/accounts` 的 extra 快照，newapi 读 `channel.balance`
+//     （需上游先开 CHANNEL_UPDATE_FREQUENCY，否则是一潭死水）。
+//     平台**不**调 `update_balance`——那是写操作，而且会禁渠道。
+type UpstreamBalance struct {
+	Snapshot
+
+	// BalanceMinorUnits 是余额，整数最小单位 @ UsageScale。
+	//
+	// **可以为负**：上游允许透支时余额就是负的，那正是最该报警的时刻。
+	BalanceMinorUnits int64
+
+	// Currency 是余额的币种。
+	//
+	// §10.4 硬性要求「余额和消耗单位一致」：单位不一致时可用天数算出来是一个
+	// 纯粹的错数字，所以币种必须随读数一起回来，由计算侧比对（finance/runway.go）。
+	Currency string
 }
 
 // TokenCost 是折算后的平台成本（§3.1 + §2.4）。
@@ -293,6 +324,17 @@ type ReadClient interface {
 	// 上游没有这条能力时返回 connector.KindNotSupported（例如 newapi 的收入
 	// 在自营 new-api 库里，走的是数据库通道而不是 HTTP，见 newapi 客户端）。
 	AccountRevenue(ctx context.Context, ownAccountID string, day string) (AccountRevenue, error)
+
+	// UpstreamBalance 读本上游账号当前的余额（§2.3 + §7）。
+	//
+	// 没有业务日参数：余额是一个**当前值**，不是某一天的累计量。
+	//
+	// ⚠️ **覆盖率是这条能力的第一等事实**（§7：newapi 是主力盲区、覆盖率低；
+	// 订阅制上游根本没有余额这个概念）。读不到时返回
+	// connector.KindNotSupported，调用方据此把可用天数落成「未知」——
+	// 而不是落成一个 0 天或一个无穷大（§10.4：无消耗或数据过期不显示
+	// 伪精确天数）。
+	UpstreamBalance(ctx context.Context) (UpstreamBalance, error)
 }
 
 // 指标键（写进 ops.metric_observation 的 metric_key）。
