@@ -43,6 +43,10 @@
   --xm-color-success: var(--xm-palette-green-600);
   --xm-color-warning: var(--xm-palette-amber-600);
   --xm-color-overlay: rgb(28 36 48 / 0.4);            /* 对话框/抽屉遮罩 */
+  /* 斑马纹。比 surface-muted 淡一档：surface-muted 是工具条与悬停用的，
+     拿它做隔行底色会让整张表看起来一半是选中态。密集表格靠它数行，
+     但它不能抢过状态徽章——所以只比 surface 深一点点。 */
+  --xm-color-table-stripe: var(--xm-palette-gray-25);
 
   /* --- 深色左侧导航 ---
      不是「暗色模式的导航」，是这套设计在**任何**主题下的固定结构（§11.1：
@@ -102,6 +106,9 @@
   --xm-dark-success: var(--xm-palette-green-400);
   --xm-dark-warning: var(--xm-palette-amber-400);
   --xm-dark-overlay: rgb(0 0 0 / 0.6);
+  /* 暗色下夹在 surface(#1c2430) 与 surface-muted(#232c39) 之间：
+     直接复用 surface-muted 的话，隔行底色和悬停态就分不出来了 */
+  --xm-dark-table-stripe: #1f2732;
   /* 导航在暗色下比画布再暗一档，否则整屏一个色，左栏就消失了 */
   --xm-dark-nav-surface: #11171f;
   --xm-dark-nav-edge: #242e3b;
@@ -129,6 +136,7 @@
     --xm-color-success: var(--xm-dark-success);
     --xm-color-warning: var(--xm-dark-warning);
     --xm-color-overlay: var(--xm-dark-overlay);
+    --xm-color-table-stripe: var(--xm-dark-table-stripe);
     --xm-color-nav-surface: var(--xm-dark-nav-surface);
     --xm-color-nav-edge: var(--xm-dark-nav-edge);
     --xm-shadow-sm: var(--xm-shadow-sm-dark);
@@ -156,6 +164,7 @@
   --xm-color-success: var(--xm-dark-success);
   --xm-color-warning: var(--xm-dark-warning);
   --xm-color-overlay: var(--xm-dark-overlay);
+  --xm-color-table-stripe: var(--xm-dark-table-stripe);
   --xm-color-nav-surface: var(--xm-dark-nav-surface);
   --xm-color-nav-edge: var(--xm-dark-nav-edge);
   --xm-shadow-sm: var(--xm-shadow-sm-dark);

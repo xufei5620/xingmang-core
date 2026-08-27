@@ -1,7 +1,12 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { navLabel, PageHeader } from "@xingmang/ui-admin";
-import { Badge, Button, EmptyState } from "@xingmang/ui-primitives";
-import { Fragment, useState } from "react";
+import {
+  DataTableV2,
+  navLabel,
+  PageHeader,
+  PageState,
+  type DataTableColumn,
+} from "@xingmang/ui-admin";
+import { Badge, Button } from "@xingmang/ui-primitives";
 import { AUDIT_PAGE_SIZE, listAuditEvents, type AuditEventItem } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
 import {
@@ -11,9 +16,6 @@ import {
   toAuditRow,
   type ChainLink,
 } from "../lib/audit";
-
-const TH = "px-3 py-2 text-left text-xs font-medium text-fg-muted";
-const TD = "px-3 py-2 align-top text-sm text-fg";
 
 /** 审计事件页（规格 §4.4 / ADR-013：哈希链）。
  *
@@ -70,124 +72,123 @@ interface AuditViewProps {
   onLoadMore: () => void;
 }
 
+/** 一行 = 一条审计事件 + 它与**序号上的前一条**的链关系。
+ *
+ *  链关系在进表之前就算好，而不是在渲染时看「下一行是谁」：表格可以被排序,
+ *  排完之后相邻的行不再是序号相邻的行。先算好之后，每一行说的都是它自己与
+ *  自己前序的关系——按任何一列排序，这句话都还成立。 */
+interface AuditRowModel {
+  event: AuditEventItem;
+  row: ReturnType<typeof toAuditRow>;
+  link: ChainLink;
+}
+
+function buildAuditRows(events: AuditEventItem[]): AuditRowModel[] {
+  return events.map((event, index) => ({
+    event,
+    row: toAuditRow(event),
+    // 列表倒序：紧跟其后的那一行序号更小，才是链上「上一条」的候选
+    link: chainLinkBetween(event, events[index + 1]),
+  }));
+}
+
+const AUDIT_COLUMNS: DataTableColumn<AuditRowModel>[] = [
+  {
+    id: "sequence",
+    header: "序号",
+    primary: true,
+    numeric: true,
+    value: ({ row }) => row.sequence,
+    cell: ({ row }) => <span className="font-mono">{row.sequence}</span>,
+  },
+  {
+    id: "time",
+    header: "时间",
+    value: ({ event }) => event.occurred_at,
+    // 正文本地时间（人拿它和自己的记忆对），权威 UTC 在悬停里
+    cell: ({ row }) => <span title={row.utcTime}>{row.localTime}</span>,
+  },
+  {
+    id: "principal",
+    header: "主体",
+    value: ({ row }) => `${row.principalId} ${row.principalType}`,
+    cell: ({ row }) => (
+      <>
+        <span className="font-medium">{row.principalId}</span>
+        {row.principalType ? <p className="text-xs text-fg-muted">{row.principalType}</p> : null}
+      </>
+    ),
+  },
+  {
+    id: "action",
+    header: "动作",
+    value: ({ row }) => `${row.action} ${row.runId}`,
+    cell: ({ row }) => (
+      <>
+        <span className="font-mono text-xs">{row.action}</span>
+        {row.runId ? (
+          <p className="font-mono text-xs text-fg-muted" title={`run_id ${row.runId}`}>
+            run {row.runId.slice(0, 8)}
+          </p>
+        ) : null}
+      </>
+    ),
+  },
+  {
+    id: "resource",
+    header: "资源",
+    value: ({ row }) => `${row.resource} ${row.environment}`,
+    cell: ({ row }) => (
+      <>
+        <span className="font-mono text-xs break-all">{row.resource}</span>
+        {row.environment ? <p className="text-xs text-fg-muted">{row.environment}</p> : null}
+      </>
+    ),
+  },
+  {
+    id: "result",
+    header: "结果",
+    value: ({ row }) => `${row.resultLabel} ${row.errorCode}`,
+    cell: ({ row }) => (
+      <>
+        <Badge tone={row.resultTone}>{row.resultLabel}</Badge>
+        {row.errorCode ? <p className="font-mono text-xs text-danger">{row.errorCode}</p> : null}
+      </>
+    ),
+  },
+  {
+    id: "hash",
+    header: "哈希",
+    value: ({ row }) => row.hashShort,
+    cell: ({ row, link }) => <ChainCell row={row} link={link} />,
+  },
+];
+
 function AuditView({ events, hasMore, loadingMore, onLoadMore }: AuditViewProps) {
-  if (events.length === 0) {
-    return (
-      <EmptyState title="还没有审计事件" description="在注册表页执行一次动作试试" />
-    );
-  }
   return (
-    <div className="flex flex-col gap-3">
-      <AuditTable events={events} />
-      <div className="flex items-center justify-center gap-3">
-        {hasMore ? (
+    <DataTableV2
+      caption="审计事件：按序号倒序，每行给出事件哈希与它记录的前序哈希"
+      columns={AUDIT_COLUMNS}
+      rows={buildAuditRows(events)}
+      rowKey={({ row }) => String(row.sequence)}
+      // 不传 pageSize：这一页自己在按游标翻（「加载更多」），
+      // 再叠一层客户端分页，人要点两种「下一页」而它们翻的不是同一批东西
+      searchable
+      filters={[{ columnId: "result", label: "结果", options: ["成功", "失败"] }]}
+      renderExpanded={({ event, link }) => <DetailPanel event={event} link={link} />}
+      footerExtra={
+        hasMore ? (
           <Button variant="secondary" size="sm" onClick={onLoadMore} loading={loadingMore}>
             加载更多
           </Button>
         ) : (
-          <span className="text-xs text-fg-muted">已到最早一条（共 {events.length} 条）</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AuditTable({ events }: { events: AuditEventItem[] }) {
-  // 展开态按 sequence 记：翻页追加数据时下标会变，用下标记会让展开跳到别的行上
-  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
-  const toggle = (sequence: number) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(sequence)) next.add(sequence);
-      return next;
-    });
-
-  return (
-    <div className="overflow-x-auto rounded-lg border border-edge bg-surface shadow-sm">
-      <table className="w-full border-collapse">
-        <thead className="border-b border-edge bg-surface-muted">
-          <tr>
-            <th className={TH}>序号</th>
-            <th className={TH}>时间</th>
-            <th className={TH}>主体</th>
-            <th className={TH}>动作</th>
-            <th className={TH}>资源</th>
-            <th className={TH}>结果</th>
-            <th className={TH}>哈希</th>
-            <th className={TH}>
-              <span className="sr-only">详情</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {events.map((event, index) => {
-            const row = toAuditRow(event);
-            const open = expanded.has(row.sequence);
-            // 列表倒序：紧跟其后的那一行序号更小，才是链上「上一条」的候选
-            const link = chainLinkBetween(event, events[index + 1]);
-            return (
-              <Fragment key={row.sequence}>
-                <tr className="border-b border-edge last:border-b-0">
-                  <td className={`${TD} font-mono tabular-nums`}>{row.sequence}</td>
-                  <td className={TD}>
-                    {/* 正文本地时间（人拿它和自己的记忆对），权威 UTC 在悬停里 */}
-                    <span title={row.utcTime}>{row.localTime}</span>
-                  </td>
-                  <td className={TD}>
-                    <span className="font-medium">{row.principalId}</span>
-                    {row.principalType ? (
-                      <p className="text-xs text-fg-muted">{row.principalType}</p>
-                    ) : null}
-                  </td>
-                  <td className={TD}>
-                    <span className="font-mono text-xs">{row.action}</span>
-                    {row.runId ? (
-                      <p className="font-mono text-xs text-fg-muted" title={`run_id ${row.runId}`}>
-                        run {row.runId.slice(0, 8)}
-                      </p>
-                    ) : null}
-                  </td>
-                  <td className={TD}>
-                    <span className="font-mono text-xs break-all">{row.resource}</span>
-                    {row.environment ? (
-                      <p className="text-xs text-fg-muted">{row.environment}</p>
-                    ) : null}
-                  </td>
-                  <td className={TD}>
-                    <Badge tone={row.resultTone}>{row.resultLabel}</Badge>
-                    {row.errorCode ? (
-                      <p className="font-mono text-xs text-danger">{row.errorCode}</p>
-                    ) : null}
-                  </td>
-                  <td className={TD}>
-                    <ChainCell row={row} link={link} />
-                  </td>
-                  <td className={TD}>
-                    {/* 展开按钮不再以「有没有摘要」为条件：完整哈希也在里面，
-                        而哈希是每行都有的（Codex #9：不能只给 8 位前缀 + hover） */}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      aria-expanded={open}
-                      onClick={() => toggle(row.sequence)}
-                    >
-                      {open ? "收起" : "详情"}
-                    </Button>
-                  </td>
-                </tr>
-                {open ? (
-                  <tr className="border-b border-edge bg-surface-muted last:border-b-0">
-                    <td className={TD} colSpan={8}>
-                      <DetailPanel event={event} link={link} />
-                    </td>
-                  </tr>
-                ) : null}
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+          <span>已到最早一条</span>
+        )
+      }
+      emptyState={
+        <PageState kind="empty" title="还没有审计事件" description="在资源目录页执行一次动作试试" />
+      }
+    />
   );
 }
 
