@@ -1,10 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { FreshnessBadge, FreshnessNote, MetricCard, StatTile, type FreshnessContract } from "@xingmang/ui-admin";
+import { FreshnessBadge, FreshnessNote, MetricCard, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { Fragment, useMemo, useState } from "react";
 import { listChannelSummaries } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
-import { aggregateChannelMoney, periodRangeFor, type ChannelMoneyAggregate, type FinancePeriodMode } from "../lib/financeOverview";
+import { aggregateChannelMoney, aggregateFailureText, aggregateFreshness, periodRangeFor, type ChannelMoneyAggregate, type FinancePeriodMode } from "../lib/financeOverview";
 import { ApiStateView } from "./ApiStateView";
 import { PeriodRangeControl } from "./PeriodRangeControl";
 
@@ -20,22 +20,6 @@ function aggregateText(aggregate: ChannelMoneyAggregate): string {
   return aggregate.money ? formatScaledMinorUnits(aggregate.money.amountMinor, aggregate.money.currency, aggregate.money.scale) : "—";
 }
 
-function aggregateFreshness(aggregate: ChannelMoneyAggregate): FreshnessContract {
-  const complete = aggregate.coverage.totalRows > 0 && aggregate.coverage.completeRows === aggregate.coverage.totalRows;
-  const observedAt = aggregate.oldestObservedAt;
-  const parsed = observedAt ? Date.parse(observedAt) : Number.NaN;
-  const seconds = Number.isNaN(parsed) ? null : Math.max(0, Math.round((Date.now() - parsed) / 1000));
-  return {
-    state: observedAt ? (complete ? (seconds !== null && seconds >= 1800 ? "stale" : "fresh") : "partial") : "uninitialized",
-    threshold_seconds: 1800,
-    staleness_seconds: seconds,
-    is_partial: !complete,
-    observed_at: observedAt,
-    last_success: observedAt,
-    last_error_code: "",
-  };
-}
-
 function coverageText(aggregate: ChannelMoneyAggregate): string {
   const { completeRows, totalRows } = aggregate.coverage;
   return totalRows > 0 && completeRows === totalRows ? `覆盖完整 ${completeRows}/${totalRows} 条渠道` : `覆盖不全 ${completeRows}/${totalRows} 条渠道`;
@@ -47,21 +31,23 @@ function PaymentUnavailableCard({ label }: { label: string }) {
 
 function SourcedMetric({ label, aggregate }: { label: string; aggregate: ChannelMoneyAggregate }) {
   const unavailable = aggregate.money === null;
-  return <MetricCard label={label} value={aggregateText(aggregate)} unavailable={unavailable} secondary={coverageText(aggregate)} freshness={aggregateFreshness(aggregate)} source={aggregate.source || "渠道汇总来源未声明"} />;
+  const reason = aggregateFailureText(aggregate);
+  return <MetricCard label={label} value={aggregateText(aggregate)} unavailable={unavailable} secondary={reason ? `${coverageText(aggregate)} · ${reason}` : coverageText(aggregate)} freshness={aggregateFreshness(aggregate, Date.now())} source={aggregate.source || "渠道汇总来源未声明"} />;
 }
 
 function EvidenceAmount({ aggregate }: { aggregate: ChannelMoneyAggregate }) {
-  if (!aggregate.money) return <span className="text-fg-muted">—</span>;
-  const freshness = aggregateFreshness(aggregate);
-  return <span className="flex flex-wrap items-center justify-end gap-1 text-right tabular-nums"><strong>{aggregateText(aggregate)}</strong><FreshnessBadge freshness={freshness} /><span className="w-full text-xs text-fg-muted">{coverageText(aggregate)} · 来源 {aggregate.source || "渠道汇总来源未声明"}</span><span className="w-full text-xs text-fg-muted"><FreshnessNote freshness={freshness} /></span></span>;
+  const freshness = aggregateFreshness(aggregate, Date.now());
+  const reason = aggregateFailureText(aggregate);
+  return <span className="flex flex-wrap items-center justify-end gap-1 text-right tabular-nums"><strong className={aggregate.money ? undefined : "text-fg-muted"}>{aggregateText(aggregate)}</strong><FreshnessBadge freshness={freshness} /><span className="w-full text-xs text-fg-muted">{coverageText(aggregate)} · 来源 {aggregate.source || "渠道汇总来源未声明"}</span>{reason ? <span className="w-full text-xs text-fg-muted">{reason}</span> : null}<span className="w-full text-xs text-fg-muted"><FreshnessNote freshness={freshness} /></span></span>;
 }
 
 function UnavailableAmount({ note = PAYMENT_CONNECTOR_NOTE }: { note?: string }) {
   return <span className="flex flex-col items-end gap-1 text-right"><span className="text-fg-muted">—</span><span className="text-xs text-fg-muted">{note}</span></span>;
 }
 
-export function Sub2ApiFinanceOverview() {
-  const [date, setDate] = useState(todayDateOnly);
+export function Sub2ApiFinanceOverview({ initialDate }: { initialDate?: string }) {
+  const fallbackDate = initialDate ?? todayDateOnly();
+  const [date, setDate] = useState(fallbackDate);
   const [mode, setMode] = useState<FinancePeriodMode>("day");
   const range = useMemo(() => periodRangeFor(date, mode), [date, mode]);
   const query = useQuery({
@@ -75,7 +61,7 @@ export function Sub2ApiFinanceOverview() {
 
   return <div className="flex flex-col gap-4">
     <p role="status" className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg">「用户充值」不是当期收入：用户发生<strong>使用消费</strong>时才确认使用收入。这两个数在这一页上永远分开列，不相加。</p>
-    <PeriodRangeControl date={date} mode={mode} range={range} onDateChange={setDate} onModeChange={setMode} />
+    <PeriodRangeControl date={date} mode={mode} range={range} onDateChange={(value) => setDate(value || fallbackDate)} onModeChange={setMode} />
     <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

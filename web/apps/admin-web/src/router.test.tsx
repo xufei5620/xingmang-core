@@ -1760,11 +1760,25 @@ describe("支付与财务页签（框架）", () => {
     }
   });
 
+  it("默认 Sub2API 资金概览仍由真实路由渲染统计区间与八卡", async () => {
+    renderRoute("/platforms/sub2api?tab=finance&sub=overview");
+    expect(await screen.findByRole("region", { name: "统计区间" })).not.toBeNull();
+    for (const label of ["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费", "净现金流入", "使用收入", "渠道毛利"]) {
+      expect(await screen.findByRole("heading", { name: label, level: 3 })).not.toBeNull();
+    }
+  });
+
   it("NewAPI 只有两格，**刻意不补齐**（裁定 #2 维持原型）", async () => {
     renderRoute("/platforms/newapi?tab=finance");
     expect(await screen.findByRole("tab", { name: "资金与订单" })).not.toBeNull();
     expect(screen.getByRole("tab", { name: "利润核算" })).not.toBeNull();
     expect(screen.queryByRole("tab", { name: "开票" })).toBeNull();
+  });
+
+  it("NewAPI 资金与订单仍走既有概览，不出现 Sub2API 的资金概览八卡", async () => {
+    renderRoute("/platforms/newapi?tab=finance&sub=orders");
+    expect(await screen.findByText("暂无本平台的资金类指标")).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "区间成功到账", level: 3 })).toBeNull();
   });
 
   it("§9.8 的硬口径印在界面上：充值不是收入", async () => {
@@ -2032,4 +2046,3 @@ describe("创建静默窗口（写路径）", () => {
     });
   });
 });
-

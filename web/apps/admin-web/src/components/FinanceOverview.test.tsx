@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChannelSummary } from "../api/finance";
 import {
   aggregateChannelMoney,
+  aggregateFreshness,
   periodRangeFor,
 } from "../lib/financeOverview";
 import { Sub2ApiFinanceOverview } from "./Sub2ApiFinanceOverview";
@@ -113,11 +114,11 @@ function fakeResponse(body: unknown): Response {
   return { ok: true, status: 200, json: () => Promise.resolve(body) } as Response;
 }
 
-function renderOverview() {
+function renderOverview(initialDate = "2024-02-14") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <Sub2ApiFinanceOverview />
+      <Sub2ApiFinanceOverview initialDate={initialDate} />
     </QueryClientProvider>,
   );
 }
@@ -161,12 +162,35 @@ describe("aggregateChannelMoney", () => {
     ["invalid integer", channel({ usageRevenue: { amountMinor: "12.34", currency: "USD", scale: 6 } })],
     ["mixed currency", channel({ usageRevenue: { amountMinor: "1", currency: "CNY", scale: 6 } })],
     ["mixed scale", channel({ usageRevenue: { amountMinor: "1", currency: "USD", scale: 2 } })],
+    ["formatter-unsupported scale", channel({ usageRevenue: { amountMinor: "1", currency: "USD", scale: 19 } })],
   ])("refuses a %s aggregate instead of publishing a plausible number", (_name, second) => {
     expect(aggregateChannelMoney([channel(), second], "usageRevenue").money).toBeNull();
   });
 
   it("treats an empty Sub2API selection as unavailable instead of zero", () => {
     expect(aggregateChannelMoney([channel({ systemType: "newapi" })], "grossProfit").money).toBeNull();
+  });
+
+  it.each([
+    ["missing money", channel({ usageRevenue: null }), "missing-money"],
+    ["missing observation", channel({ observed: { costObservedAt: null, revenueObservedAt: null, updatedAt: null, source: "finance-summary-a" } }), "missing-observation"],
+    ["invalid observation", channel({ observed: { costObservedAt: "invalid", revenueObservedAt: "invalid", updatedAt: "not-a-timestamp", source: "finance-summary-a" } }), "invalid-observation"],
+  ])("never presents %s as fresh trustworthy evidence", (_name, item, expectedReason) => {
+    const aggregate = aggregateChannelMoney([item], "usageRevenue");
+    expect(aggregateFreshness(aggregate, Date.parse("2026-08-28T04:00:00Z"))).toMatchObject({
+      state: "uninitialized",
+      is_partial: true,
+      last_error_code: expectedReason,
+    });
+  });
+
+  it("does not drop a contributor without an observation when choosing the freshness boundary", () => {
+    const aggregate = aggregateChannelMoney([
+      channel(),
+      channel({ id: "missing-observed", observed: { costObservedAt: null, revenueObservedAt: null, updatedAt: null, source: "finance-summary-b" } }),
+    ], "usageRevenue");
+    expect(aggregate.oldestObservedAt).toBeNull();
+    expect(aggregateFreshness(aggregate, Date.parse("2026-08-28T04:00:00Z"))).toMatchObject({ state: "uninitialized" });
   });
 });
 
@@ -214,9 +238,18 @@ describe("Sub2ApiFinanceOverview", () => {
     await screen.findAllByText("$12.35");
     fireEvent.click(screen.getByRole("button", { name: "周" }));
     await waitFor(() => {
-      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("from=2026-08-24") && String(input).includes("to=2026-08-30"))).toBe(true);
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("from=2024-02-12") && String(input).includes("to=2024-02-18"))).toBe(true);
     });
-    expect(screen.getByText("2026-08-24 至 2026-08-30")).toBeTruthy();
+    expect(screen.getByText("2024-02-12 至 2024-02-18")).toBeTruthy();
+  });
+
+  it("recovers from clearing the native date input instead of crashing the rendered page", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(fakeResponse({ items: [rawChannel(channel())] }))));
+    renderOverview();
+
+    await screen.findAllByText("$12.35");
+    fireEvent.change(screen.getByLabelText("统计日期"), { target: { value: "" } });
+    expect(screen.getByRole("heading", { name: "资金对账", level: 2 })).toBeTruthy();
   });
 
   it("renders the reconciliation, profit bridge, and recent-event structure without false payment data", async () => {
@@ -232,5 +265,18 @@ describe("Sub2ApiFinanceOverview", () => {
     expect(screen.getByText("待处理")).toBeTruthy();
     expect(screen.getByText("失败")).toBeTruthy();
     expect(screen.getByText("退款")).toBeTruthy();
+    expect(screen.getAllByText("$12.35").length).toBeGreaterThan(1);
+    expect(screen.getByText("$2.35")).toBeTruthy();
+    expect(screen.getAllByText("$10.00").length).toBeGreaterThan(1);
+    expect(screen.getByText(/支付费用与可归属基础设施/)).toBeTruthy();
+  });
+
+  it("keeps failed bridge aggregates explainable instead of rendering a bare dash", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(fakeResponse({ items: [rawChannel(channel({ usageRevenue: null }))] }))));
+    renderOverview();
+
+    expect(await screen.findByText("金额缺失")).toBeTruthy();
+    expect(screen.getAllByText(/来源 finance-summary-a/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/覆盖完整 1\/1 条渠道/).length).toBeGreaterThan(0);
   });
 });

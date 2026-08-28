@@ -1,4 +1,5 @@
 import type { ChannelSummary, Money } from "../api/finance";
+import type { FreshnessContract } from "@xingmang/ui-admin";
 
 export type FinancePeriodMode = "day" | "week" | "month";
 
@@ -46,7 +47,19 @@ export interface ChannelMoneyAggregate {
   coverage: { completeRows: number; totalRows: number };
   oldestObservedAt: string | null;
   source: string;
+  failureReasons: AggregationFailure[];
 }
+
+export type AggregationFailure =
+  | "empty"
+  | "missing-money"
+  | "invalid-money"
+  | "currency-mismatch"
+  | "scale-mismatch"
+  | "missing-observation"
+  | "invalid-observation";
+
+const MAX_MONEY_SCALE = 18;
 
 /** Shared money policy for every channel-summary aggregate: integer strings only, one currency, one scale. */
 export function sumMoneyValues(values: (Money | null)[]): Money | null {
@@ -55,7 +68,7 @@ export function sumMoneyValues(values: (Money | null)[]): Money | null {
   let currency = "";
   let scale: number | null = null;
   for (const value of values) {
-    if (!value || !/^-?\d+$/.test(value.amountMinor) || !value.currency || !Number.isInteger(value.scale) || value.scale < 0) return null;
+    if (!value || !/^-?\d+$/.test(value.amountMinor) || !value.currency || !Number.isInteger(value.scale) || value.scale < 0 || value.scale > MAX_MONEY_SCALE) return null;
     if (scale === null) { currency = value.currency; scale = value.scale; }
     else if (currency !== value.currency || scale !== value.scale) return null;
     amount += BigInt(value.amountMinor);
@@ -75,9 +88,85 @@ export function aggregateChannelMoney(
   const rows = items.filter((item) => item.systemType === systemType);
   const coverage = { completeRows: rows.filter((item) => item.coverage.complete).length, totalRows: rows.length };
   const source = [...new Set(rows.map((item) => item.observed.source).filter(Boolean))].join(" · ");
+  const moneyValues = rows.map((row) => row[field]);
+  const moneyFailure = aggregateMoneyFailure(moneyValues);
+  const observationFailure = aggregateObservationFailure(rows);
+  const failureReasons = [moneyFailure, observationFailure].filter(
+    (value): value is AggregationFailure => value !== null,
+  );
   const observations = rows.map((item) => item.observed.updatedAt).filter((value): value is string => Boolean(value)).sort();
-  const base = { contributingRows: rows.length, coverage, oldestObservedAt: observations[0] ?? null, source };
+  const base = {
+    contributingRows: rows.length,
+    coverage,
+    oldestObservedAt: observationFailure ? null : observations[0] ?? null,
+    source,
+    failureReasons,
+  };
   if (rows.length === 0) return { ...base, money: null };
 
-  return { ...base, money: sumMoneyValues(rows.map((row) => row[field])) };
+  return { ...base, money: moneyFailure ? null : sumMoneyValues(moneyValues) };
+}
+
+function aggregateMoneyFailure(values: (Money | null)[]): AggregationFailure | null {
+  if (values.length === 0) return "empty";
+  let currency = "";
+  let scale: number | null = null;
+  for (const value of values) {
+    if (!value) return "missing-money";
+    if (!/^-?\d+$/.test(value.amountMinor) || !value.currency || !Number.isInteger(value.scale) || value.scale < 0 || value.scale > MAX_MONEY_SCALE) return "invalid-money";
+    if (scale === null) { currency = value.currency; scale = value.scale; }
+    else if (currency !== value.currency) return "currency-mismatch";
+    else if (scale !== value.scale) return "scale-mismatch";
+  }
+  return null;
+}
+
+function aggregateObservationFailure(rows: ChannelSummary[]): AggregationFailure | null {
+  for (const row of rows) {
+    const observedAt = row.observed.updatedAt;
+    if (!observedAt) return "missing-observation";
+    if (Number.isNaN(Date.parse(observedAt))) return "invalid-observation";
+  }
+  return null;
+}
+
+/** A value or its freshness is only trustworthy when every contributing row is valid. */
+export function aggregateFreshness(aggregate: ChannelMoneyAggregate, now: number): FreshnessContract {
+  const complete = aggregate.coverage.totalRows > 0 && aggregate.coverage.completeRows === aggregate.coverage.totalRows;
+  const observedAt = aggregate.oldestObservedAt;
+  if (!aggregate.money || aggregate.failureReasons.length > 0 || !observedAt) {
+    return {
+      state: "uninitialized",
+      threshold_seconds: 1800,
+      staleness_seconds: null,
+      is_partial: true,
+      observed_at: null,
+      last_success: null,
+      last_error_code: aggregate.failureReasons[0] ?? "aggregate-unavailable",
+    };
+  }
+  const seconds = Math.max(0, Math.round((now - Date.parse(observedAt)) / 1000));
+  return {
+    state: complete ? (seconds >= 1800 ? "stale" : "fresh") : "partial",
+    threshold_seconds: 1800,
+    staleness_seconds: seconds,
+    is_partial: !complete,
+    observed_at: observedAt,
+    last_success: observedAt,
+    last_error_code: "",
+  };
+}
+
+export function aggregateFailureText(aggregate: ChannelMoneyAggregate): string | null {
+  const reason = aggregate.failureReasons[0];
+  switch (reason) {
+    case "empty": return "没有可汇总的 Sub2API 渠道";
+    case "missing-money": return "金额缺失";
+    case "invalid-money": return "金额或标度无效";
+    case "currency-mismatch": return "币种不一致";
+    case "scale-mismatch": return "金额标度不一致";
+    case "missing-observation": return "缺少观测时间";
+    case "invalid-observation": return "观测时间无效";
+    default: return null;
+  }
 }
