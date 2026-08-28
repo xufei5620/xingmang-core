@@ -434,6 +434,31 @@ postgres://xm_backup_a@postgres:5432/xingmang?sslmode=disable&application_name=p
 | `rotating-a-b` | A、B 同时可 LOGIN，权限必须完全等价且都只继承同一 capability | approved CR、started_at、deadline、old/new identity |
 | `steady-b` | 仅 B 可 LOGIN；A 已 NOLOGIN 且无 membership/活跃连接 | closure evidence、closed_at |
 
+Machine policy 的 `rotation` object 字段固定且全部显式出现：
+
+```json
+{
+  "state": "steady-a",
+  "steady_identity": "xm_api_a",
+  "old_identity": null,
+  "new_identity": null,
+  "approved_change_request": null,
+  "started_at": null,
+  "deadline": null,
+  "closure_evidence": null,
+  "closed_at": null
+}
+```
+
+每个 capability 分别持有一份 rotation object。`steady-a` 只能填 A 为
+`steady_identity`，其余治理字段全为 null；`rotating-a-b` 必须令
+`steady_identity=null`，并填不同且属于该 capability 的 old/new identity、已批准 CR、
+`started_at < deadline`，closure/closed 仍为 null；`steady-b` 必须填 B 为
+`steady_identity`，保留同一 old/new/CR/start/deadline，并增加非空 closure evidence 与
+`started_at < closed_at <= deadline`。时间为 UTC RFC3339Nano。字段缺失、额外字段、
+跳态、过期、身份跨 capability、old/new 相同、旧 membership/LOGIN/session 未清零、
+closure digest 不匹配都 fail closed。
+
 Verifier 对未声明的第二 login、缺/未知 CR、deadline 已过、A/B 权限不等价或 steady
 状态仍有双 membership 一律 fail closed。状态迁移只能
 `steady-a -> rotating-a-b -> steady-b`，不能把永久双 login 当 steady。
@@ -472,6 +497,13 @@ DSN，也绝不连接 staging/production/shared developer DB。cluster 使用
   roles、无平台 schema/表、volume 创建于本 run）；任一不符在执行 SQL 前 STOP；
 - SQL 通过随机 database 的连接上下文/current_database 安全工作；禁止 sed/template
   替换角色、owner、grant 或 policy 内容；
+- compose 唯一允许的 host 映射是 `127.0.0.1::5432`（由 Docker 分配随机端口）；
+  禁止 `0.0.0.0`、`::`、固定 host port 或外部 network；harness 只能按本 run 的
+  Compose project label 查询 postgres service 的实际端口，不能接收 admin DSN 参数；
+- harness 用查得的 `127.0.0.1:<random-port>`、随机 database 与匿名 test secret
+  在内存构造无密码 DSN，并在第一次连接前强制执行 `pgdsn.Validate(dsn,true)` 与
+  `pgdsn.RequireLoopback`；DSN 的 host/query override、错误 project/container label、
+  端口非随机或目标 fingerprint 不符都在执行 SQL 前 STOP；
 - finally 只执行该随机 project 的 `down --volumes --remove-orphans`，再按 project
   label 证明 container/network/volume 全为 0；销毁的是整个临时 cluster，不在共享
   cluster 内逐个 DROP 角色/库；
@@ -564,6 +596,27 @@ legacy admin 未锁定前：
 4. 临时 `xm_restore_once` 只做 data-only COPY/INSERT 与获批 sequence setval，完成后
    NOLOGIN/撤权；
 5. `xm_ops_a`/DBR verifier 只读验收，不复用 backup/migrator/restore credential；
+
+恢复制品固定为 custom-format archive、原始 TOC、经审核的 data-only TOC allowlist 与
+三者 SHA-256。allowlist 只保留当前 base 精确 inventory 中的业务/audit/River
+`TABLE DATA` 与逐条 `SEQUENCE SET`，明确排除 `public.schema_migrations`、
+`public.river_migration` 的 TABLE DATA；未知 schema/object/TOC kind、large object、
+pre-data/post-data entry 进入 data allowlist 都 STOP。target migration metadata 只来自
+刚执行的 platform/River exact migrations，绝不从 source data restore。
+
+唯一允许的 data restore 命令语义为：
+
+```text
+pg_restore --data-only --no-owner --no-privileges --single-transaction
+  --exit-on-error --use-list <approved-data-toc> --dbname <isolated-target> <archive>
+```
+
+禁止 `--clean`、`--create`、`--disable-triggers`、owner/ACL restore、任意 table filter
+覆盖与非空 target。先在 disposable PG18 证明未过滤 data TOC 因重复 migration metadata
+失败且整事务回滚，再重建空 target、跑 migrations、使用批准 allowlist 恢复成功。
+验收分别检查 platform `schema_migrations` version/dirty 等于刚执行结果，以及
+`river_migration` version 集合等于当前 checked-in River migration manifest；不能只用
+“表存在/总行数”代替。
 
 - migration version/dirty；
 - 所有对象 owner/ACL/default ACL；

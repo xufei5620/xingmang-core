@@ -33,6 +33,10 @@ Bash, existing `internal/platform/pgdsn` and `internal/platform/secrets`.
   RepoDigest, verifies fresh identity/labels/version, and destroys the entire project.
 - Inside that isolated cluster only project/container/volume/database names are random；
   production role names and exact SQL bytes are never templated or replaced.
+- The disposable postgres service binds only `127.0.0.1::5432`; Docker chooses the
+  host port. Harness code discovers it only through this run's project label, constructs
+  the password-free DSN internally, and requires `pgdsn.Validate(dsn,true)` +
+  `pgdsn.RequireLoopback(dsn)` before separately injecting the anonymous test password.
 - Role/owner/GRANT SQL is a Platform Lifecycle Operation and needs an exact separate migration approval.
 - CredentialRef names are committed; values are human-configured and never enter repo/log/test output.
 - Staging and production credentials are independent; staging approval never implies production approval.
@@ -98,6 +102,9 @@ Bash, existing `internal/platform/pgdsn` and `internal/platform/secrets`.
 
 ### DBR4 — ops/backup, recovery, legacy lockdown
 
+- Create: `contracts/database/restore-data-policy.v1.json`
+- Create: `internal/platform/dbroles/restore_policy.go`
+- Create: `internal/platform/dbroles/restore_policy_test.go`
 - Modify: `cmd/audit-verify/main.go`
 - Create: `cmd/audit-verify/database_test.go`
 - Modify: `cmd/platform-shadow/main.go`
@@ -155,6 +162,12 @@ if policy.Allows("PUBLIC", "public.river_job_state", "USAGE") {
 }
 ```
 
+Add RED cases named `TestRotationSteadyARequiresOnlyA`,
+`TestRotationRotatingRequiresCRTimesAndDistinctCapabilityIdentities`,
+`TestRotationSteadyBRequiresClosureAndNoOldAccess`, and
+`TestRotationRejectsSkippedExpiredCrossCapabilityAndStaleSession`; each loads literal
+valid/invalid JSON and asserts the stable violation code plus offending capability/identity.
+
 - [ ] **Step 2: Confirm RED**
 
 ```powershell
@@ -185,9 +198,28 @@ The JSON includes:
   "public_schema_owner": "pg_database_owner",
   "custom_schema_default": "deny",
   "public_schema_contract": "river-only",
-  "rotation": {"state":"steady-a","deadline":null,"approved_change_request":null}
+  "rotations": {
+    "xm_api_runtime": {
+      "state": "steady-a",
+      "steady_identity": "xm_api_a",
+      "old_identity": null,
+      "new_identity": null,
+      "approved_change_request": null,
+      "started_at": null,
+      "deadline": null,
+      "closure_evidence": null,
+      "closed_at": null
+    }
+  }
 }
 ```
+
+The same exact object exists for every capability. Loader validation is state-dependent:
+steady-a requires only the A steady identity；rotating-a-b requires distinct in-capability
+old/new identities, approved CR and `started_at < deadline` with no closure；steady-b
+retains that transition and requires B steady identity, closure digest and
+`started_at < closed_at <= deadline`. Missing/unknown fields, skipped transitions,
+expired deadlines, cross-capability identities and stale old LOGIN/membership/session fail.
 
 Object grants distinguish `table_privileges` and exact `column_privileges`, enumerate
 every sequence and existing/default enum/domain ACL (including `river_job_state`), and
@@ -227,6 +259,9 @@ Create fixtures for: superuser/owner runtime, wrong membership/rotation state, d
 schema CREATE, missing/extra table or column privilege, chain_root table UPDATE, sequence USAGE/SELECT/UPDATE,
 routine EXECUTE, enum/domain USAGE and type default ACL drift, unknown role/owner/object, public owner not
 `pg_database_owner`, dynamic RUNWAY SHA gate, and blank application_name. Each violation has stable code/object.
+Rotation fixtures cover every legal state, direct steady-a→steady-b jump, missing CR/start/deadline,
+expired rotating state, identical/cross-capability old/new, closure digest mismatch, steady-b old
+LOGIN/membership and old `pg_stat_activity` session.
 
 - [ ] **Step 2: Implement read-only catalog checks**
 
@@ -272,13 +307,22 @@ git commit -m "feat(database): verify role and grant policy"
 
 Assert tag-only/mismatched digest, pre-existing project labels/container/volume,
 non-fresh cluster, version != 18, external admin URL, bind-mounted data and cleanup
-target without this run's project label are rejected. Fixed production role names are required.
+target without this run's project label are rejected. Also reject `0.0.0.0`/`::` binding,
+fixed host port, externally supplied DSN, discovered port from a wrong project/container label,
+query host override and non-loopback resolution. Fixed production role names are required.
 
 - [ ] **Step 2: Implement random lifecycle and cleanup**
 
 Generate one UUID suffix for Compose project/container/network/volume/database only.
 Bring up the exact `postgres:18@sha256:<VERSIONS.lock digest>` with an anonymous test
-secret and dedicated named volume. Before SQL, verify Compose labels, RepoDigest,
+secret, dedicated named volume and the sole port mapping `127.0.0.1::5432`. Query the
+Docker-assigned port only with `docker compose -p <exact-project> port postgres 5432`,
+require the result to be exactly loopback + a nonconfigured ephemeral port, and cross-check
+the container/project labels. Construct the admin DSN in memory from that port, random DB
+and anonymous secret；never accept a DSN parameter/environment override. Run
+`pgdsn.Validate(dsn,true)` and `pgdsn.RequireLoopback(dsn)` before separately injecting
+the anonymous password into the child connection config. Before SQL,
+verify Compose labels, RepoDigest,
 `server_version_num`, current DB, volume label/creation and fresh catalog (no `xm_*`
 roles/platform schemas). Execute fixture/approved SQL files byte-for-byte with psql
 `ON_ERROR_STOP=1`; SQL uses current database context and fixed production role names,
@@ -287,6 +331,7 @@ never sed/template substitution.
 `finally` runs `docker compose -p <exact-random-project> down --volumes
 --remove-orphans`, then enumerates by that project label and requires zero containers,
 networks and volumes. All teardown failures produce nonzero；no shared-cluster cleanup/reuse.
+After teardown, connection to the discovered port must fail and label enumeration must be zero.
 
 - [ ] **Step 3: Prove positive and negative ACLs**
 
@@ -409,8 +454,10 @@ Commit CredentialRef names only. **STOP:** human configures real secret values a
 reads or sets them. Compose config/static security tests can run with non-secret placeholders.
 
 Rotation is a versioned policy/CR transition: `steady-a -> rotating-a-b -> steady-b`.
-The middle state must name approved CR, old/new identities and deadline；verifier fails
-on unknown/expired CR, dual login outside rotating state, unequal membership or old
+The middle state must name approved CR, old/new identities, started_at and deadline；
+steady-b retains those facts and adds closure evidence/closed_at. Verifier fails on a
+skipped transition, missing/unknown/expired CR, invalid time ordering, same/cross-capability
+identity, dual login outside rotating state, unequal membership or old login/membership/
 sessions after steady-b. Before DBR3 replica/connection-drain evidence, the runbook uses
 an approved maintenance-window stop, connection drain, secret switch and controlled
 restart；it must not claim per-replica seamless rotation.
@@ -475,18 +522,53 @@ errors/logs never expose DSN/password.
 
 ### Task 15: Add backup identity and real restore gate
 
+**Files:** `contracts/database/restore-data-policy.v1.json`,
+`internal/platform/dbroles/restore_policy.go`,
+`internal/platform/dbroles/restore_policy_test.go`,
+`tests/security/database-backup-restore.test.sh`, and
+`tests/security/database-backup-restore.roles.sql`.
+
 Split five identities and never reuse credentials: source `xm_backup_a` runs pg_dump
 with table/sequence SELECT only；cluster admin precreates the fresh target cluster,
 fixed roles and empty random DB；`xm_migrator` applies exact schema/owner/ACL；ephemeral
 `xm_restore_once` runs data-only COPY/INSERT and evidence-required sequence setval；
 `xm_ops_a`/verifier performs read-only acceptance. Test on DBR1's exclusive PG18:
 
-1. dump all platform/audit/River schemas and sequences;
-2. verify checksum and prove backup role cannot CREATE/INSERT/setval;
-3. precreate target as admin, migrate as migrator, restore data as restore-once;
-4. set restore role NOLOGIN/revoke immediately；verify it has no steady policy entry；
-5. verify migration, owner/table+column+sequence+type/default ACL, audit chain and gated RUNWAY rows;
-6. run API/worker restricted smoke tests, then destroy the entire target cluster/volume.
+1. Write RED tests `TestRestorePolicyRejectsMigrationTableDataAndUnknownTOC`,
+   `TestRestorePolicyAllowsExactBusinessTableDataAndSequenceSet`,
+   `TestUnfilteredDataRestoreRollsBackOnMigrationMetadata`, and
+   `TestFilteredDataRestorePreservesTargetMigrationMetadata`.
+2. Create a custom-format archive as backup role using exactly
+   `pg_dump --format=custom --no-owner --no-privileges --file <archive> --dbname <source>`
+   and save SHA-256；prove backup cannot CREATE/INSERT/setval. Save exact
+   `pg_restore --list <archive>` output and SHA-256. Generate the
+   data TOC only through `restore-data-policy.v1.json`: allowed kinds are exact current-base
+   business/audit/River `TABLE DATA` and enumerated `SEQUENCE SET`; explicitly reject
+   TABLE DATA for `public.schema_migrations` and `public.river_migration`, plus unknown
+   schema/object/kind, BLOBS and every pre-data/post-data entry. Save allowlist SHA-256.
+3. Precreate a fresh target as admin and run exact platform + River migrations as
+   migrator. Record platform version/dirty and exact River version set before restore.
+4. First prove the unsafe path: run an unfiltered data-only restore against a disposable
+   copy of that target with `--single-transaction --exit-on-error`; require duplicate
+   migration metadata failure, nonzero exit and byte-for-byte unchanged target state,
+   then destroy that failed target.
+5. Recreate/migrate the target and run only:
+
+   ```text
+   pg_restore --data-only --no-owner --no-privileges --single-transaction \
+     --exit-on-error --use-list <approved-data-toc> \
+     --dbname <isolated-target> <custom-archive>
+   ```
+
+   Reject command assembly containing `--clean`, `--create`, `--disable-triggers`,
+   owner/ACL restore, extra table filters or a nonempty/non-isolated target.
+6. Verify platform `schema_migrations` version/dirty still equals Step 3 and River
+   `river_migration` versions exactly equal the just-run checked-in migration manifest；
+   neither metadata table may contain source-restored rows. Verify restored row counts,
+   per-sequence values, owners/table+column+sequence+type/default ACL, audit chain and
+   gated RUNWAY rows.
+7. Set restore role NOLOGIN/revoke immediately, prove it has no steady policy entry,
+   run API/worker restricted smoke tests, then destroy the target cluster/volume.
 
 Backup failure or omitted object is a hard failure; backup secret/age key cannot share storage with DB backup.
 
@@ -523,6 +605,17 @@ as unknown and fails closed. After AUD has an approved merge SHA on current base
 independent CR must publish a new policy version + exact provisioning/tests；none may
 be folded into `xm_lifecycle_runtime`. No archive role gains audit DELETE；hot-row
 lifecycle remains outside DBR.
+
+## XM-C-DBR0 round-2 review closure matrix
+
+| Review item | Normative closure | Required evidence |
+|---|---|---|
+| restore archive/TOC | custom archive + raw/approved TOC hashes；migration table data excluded；exact safe pg_restore flags；target platform/River metadata only from fresh migrations | unfiltered restore fails and rolls back；filtered restore succeeds；platform version/dirty and exact River versions unchanged |
+| A/B rotation contract | every capability has the full nine-field steady-a/rotating-a-b/steady-b object with state-dependent null/time/identity/closure invariants | valid three-state fixtures plus skip/expiry/CR/identity/old membership-session negative tests |
+| disposable harness transport | only `127.0.0.1::5432` random port；lookup by exact project label；internally built DSN passes `pgdsn.Validate` + `RequireLoopback` | reject 0.0.0.0/IPv6 wildcard/fixed port/external DSN/wrong label/query override；post-teardown port closed and labels zero |
+
+All three rows are mandatory DBR acceptance criteria；none authorizes a live database,
+credential, staging or production change.
 
 ## Per-Slice Verification
 
