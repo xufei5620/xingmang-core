@@ -20,6 +20,7 @@ import {
 } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
 import { RUNWAY_REASON_TEXT, RUNWAY_TONE, runwayNote } from "../lib/runway";
+import { sumMoneyValues } from "../lib/financeOverview";
 import { ApiStateView } from "./ApiStateView";
 
 /** 平台概览页上的成本三卡（XM-0037d，设计稿 §8.5 + UI 交接 §10.3/§10.4/§10.5）。
@@ -92,23 +93,8 @@ interface MoneyTotal {
 }
 
 function totalOf(values: (Money | null)[]): MoneyTotal {
-  if (values.length === 0) return { minor: null, currency: "", scale: Number.NaN };
-  let sum = 0n;
-  let currency = "";
-  let scale = Number.NaN;
-  for (const value of values) {
-    if (!value) return { minor: null, currency: "", scale: Number.NaN };
-    if (!/^-?\d+$/.test(value.amountMinor)) return { minor: null, currency: "", scale: Number.NaN };
-    if (currency === "") {
-      currency = value.currency;
-      scale = value.scale;
-    } else if (currency !== value.currency || scale !== value.scale) {
-      // 不同币种或不同标度的最小单位不能相加，那个和是纯粹的错数。
-      return { minor: null, currency: "", scale: Number.NaN };
-    }
-    sum += BigInt(value.amountMinor);
-  }
-  return { minor: sum, currency, scale };
+  const total = sumMoneyValues(values);
+  return total ? { minor: BigInt(total.amountMinor), currency: total.currency, scale: total.scale } : { minor: null, currency: "", scale: Number.NaN };
 }
 
 function totalText(total: MoneyTotal): { value: string; unavailable: boolean } {

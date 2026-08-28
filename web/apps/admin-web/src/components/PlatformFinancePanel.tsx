@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { PageState } from "@xingmang/ui-admin";
-import { Badge } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { listMetrics } from "../api/platform";
+import { platformOfMetricKey } from "../lib/platforms";
 import { ApiStateView } from "./ApiStateView";
 import { MetricCardGrid } from "./MetricCardGrid";
-import { platformOfMetricKey } from "../lib/platforms";
+import { Sub2ApiFinanceOverview } from "./Sub2ApiFinanceOverview";
 
 /** 支付与财务(原型 `V["s2/finance"]` / `V["newapi/finance"]`)。
  *
@@ -19,7 +19,7 @@ import { platformOfMetricKey } from "../lib/platforms";
  *  这句话不是注解，是这一页最容易被读错的地方——把充值当收入，整条利润线
  *  从第一步就错了。所以它印在「资金概览」上，而不是只写在文档里。 */
 
-/** §9.8 的硬口径，印在界面上。 */
+/** 资金概览：能接的先接——本平台的收入类指标卡是真实的。 */
 function RevenueRuleNote() {
   return (
     <p
@@ -32,17 +32,15 @@ function RevenueRuleNote() {
   );
 }
 
-/** 资金概览：能接的先接——本平台的收入类指标卡是真实的。 */
 function FinanceOverview({ serviceType }: { serviceType: string }) {
   const query = useQuery({
     queryKey: ["metrics"],
     queryFn: ({ signal }) => listMetrics({ signal }),
   });
-  // 只取本平台的金额类指标。判据是指标键的平台前缀，与概览页签同一条
   const items = (query.data ?? []).filter(
-    (m) =>
-      platformOfMetricKey(m.metric_key) === serviceType &&
-      /revenue|cost|balance|recharge/.test(m.metric_key),
+    (metric) =>
+      platformOfMetricKey(metric.metric_key) === serviceType &&
+      /revenue|cost|balance|recharge/.test(metric.metric_key),
   );
 
   return (
@@ -75,10 +73,10 @@ function pending(title: string, description: string): ReactNode {
 }
 
 /** Sub2API 的 5 个子页签（IA v3 §2.2 逐字）。 */
-function sub2apiFinanceSubTab(subId: string, serviceType: string): ReactNode | undefined {
+function sub2apiFinanceSubTab(subId: string): ReactNode | undefined {
   switch (subId) {
     case "overview":
-      return <FinanceOverview serviceType={serviceType} />;
+      return <Sub2ApiFinanceOverview />;
     case "orders":
       return pending(
         "充值订单",
@@ -136,5 +134,5 @@ export function financeSubTab(
   subId: string,
 ): ReactNode | undefined {
   if (serviceType === "newapi") return newapiFinanceSubTab(subId, serviceType);
-  return sub2apiFinanceSubTab(subId, serviceType);
+  return sub2apiFinanceSubTab(subId);
 }
