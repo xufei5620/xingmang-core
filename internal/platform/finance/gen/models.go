@@ -291,3 +291,24 @@ type OpsMetricObservationSample struct {
 	LastErrorCode string
 	ValueJson     []byte
 }
+
+type UiSavedView struct {
+	ID             uuid.UUID
+	OwnerIssuer    string
+	OwnerSubject   string
+	IdentityZone   string
+	Environment    string
+	TableKey       string
+	Name           string
+	StateVersion   int16
+	Query          string
+	Filters        []byte
+	SortColumn     *string
+	SortDirection  *string
+	KnownColumns   []string
+	VisibleColumns []string
+	Density        string
+	StateHash      string
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+}

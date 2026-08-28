@@ -54,8 +54,9 @@ func TestResolveMapsPrincipalFields(t *testing.T) {
 	if p.Environment != "staging" {
 		t.Errorf("Environment = %q, want staging（服务配置）", p.Environment)
 	}
-	// staff 按默认表翻译成两个读权限；offline_access / default-roles-* 静默忽略
-	if want := []string{"ops.read", "registry.read"}; !slices.Equal(p.Scopes, want) {
+	// staff 默认还拿到**仅能读写自己**的个人 SavedView；它不扩大到任何业务数据。
+	// offline_access / default-roles-* 仍静默忽略。
+	if want := []string{"ops.read", "registry.read", "ui.saved_view.manage"}; !slices.Equal(p.Scopes, want) {
 		t.Errorf("Scopes = %v, want %v", p.Scopes, want)
 	}
 	if err := p.Validate(); err != nil {
@@ -420,7 +421,7 @@ func TestFineGrainedRolesIgnoredAndWarned(t *testing.T) {
 	}
 
 	// 关键断言：细粒度角色一个都没被采纳，权限只能来自 staff 的翻译
-	if want := []string{"ops.read", "registry.read"}; !slices.Equal(p.Scopes, want) {
+	if want := []string{"ops.read", "registry.read", "ui.saved_view.manage"}; !slices.Equal(p.Scopes, want) {
 		t.Fatalf("Scopes = %v, want %v（细粒度角色必须被忽略，不得叠加）", p.Scopes, want)
 	}
 	if p.HasScope("registry.service.manage") {
@@ -530,7 +531,7 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 		t.Fatal("staff 默认不该含 platform.users.read：它是逐用户的资金明细，不是看板数字")
 	}
 	for _, sc := range staff {
-		if strings.Contains(sc, ".manage") {
+		if strings.Contains(sc, ".manage") && sc != "ui.saved_view.manage" {
 			t.Fatalf("staff 默认不该含写权限: %q", sc)
 		}
 	}
@@ -552,6 +553,9 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	}
 	if !slices.Contains(admin, "request.read") {
 		t.Fatalf("admin 应含 request.read（请求元数据列表）, got %v", admin)
+	}
+	if !slices.Contains(admin, "ui.saved_view.manage") {
+		t.Fatalf("admin 应含仅限自己的个人 SavedView 权限, got %v", admin)
 	}
 	if slices.Contains(admin, "request.content.read") {
 		t.Fatal("admin 默认**不该**含 request.content.read：" +

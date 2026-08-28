@@ -1,0 +1,17 @@
+{
+  "id": "ui.saved_view.remove",
+  "version": "1",
+  "risk_level": "L0",
+  "permission": "ui.saved_view.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_IDEMPOTENT_NOT_FOUND_IS_ERROR",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {"required": false},
+  "compensation_mode": "NOT_POSSIBLE",
+  "params": {
+    "saved_view_id": {"type": "string", "required": true}
+  },
+  "notes": "XM-B003 personal SavedView removal. The UUID is deleted only inside the caller-derived owner and Environment boundary; a foreign UUID is indistinguishable from a missing UUID. Audit contains only the removed resource UUID and prior state_hash."
+}
+

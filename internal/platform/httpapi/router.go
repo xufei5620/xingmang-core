@@ -15,6 +15,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
+	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
 )
 
 // defaultRequestTimeout 是单请求的默认期限。
@@ -34,6 +35,9 @@ type Deps struct {
 	MetricHistory  MetricHistoryLister
 	AuditEvents    AuditEventLister
 	Alerts         AlertLister
+	// SavedViews 是 Principal/Environment 自隔离的个人表格视图 Query。
+	// 写入仍只走 ui.saved_view.* Action，不在这里增加第二条写路径。
+	SavedViews SavedViewLister
 	// RequestLogs 为 nil 时「请求」两个端点不挂载（504 之外的 404）。
 	//
 	// 允许为 nil 而不是必填：这条链路依赖一个**外挂**系统（reqlog），
@@ -117,6 +121,8 @@ func NewRouter(d Deps) http.Handler {
 		// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 		api.With(RequireScope(alerts.ScopeRead)).
 			Get("/alerts", ListAlertsHandler(d.Alerts))
+		api.With(RequireScope(savedviews.ScopeManage)).
+			Get("/ui/saved-views", ListSavedViewsHandler(d.SavedViews))
 
 		// 请求详情（XM-0039）。两条端点、两个权限，分级是这条能力的前提：
 		// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。

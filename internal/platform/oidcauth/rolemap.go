@@ -26,6 +26,9 @@ var platformScopePrefixes = []string{
 	// Keycloak 里建出一个 request.content.read 角色，就等于把「谁能看全平台
 	// 用户对话」这个决定挪出了平台数据库的管辖（ADR-016 / CR-0001 §5）。
 	"request.",
+	// XM-B003：个人表格视图的细粒度 scope 同样只存在于平台授权层。
+	// Realm 里出现 ui.saved_view.manage 是配置漂移，不是一次合法授权。
+	"ui.",
 }
 
 // looksLikePlatformScope 判断一个角色名是否长成平台细粒度权限的样子。
@@ -87,7 +90,9 @@ func looksLikePlatformScope(role string) bool {
 // Fail Closed 比「先放开再收」便宜得多。
 func DefaultRoleScopeMap() map[string][]string {
 	return map[string][]string{
-		"staff": {"registry.read", "ops.read"},
+		// ui.saved_view.manage 只读写调用者自己的低影响偏好；owner 与 Environment
+		// 均由 Principal 派生，所以给 staff 不会扩大到任何其他人的视图或业务数据。
+		"staff": {"registry.read", "ops.read", "ui.saved_view.manage"},
 		"admin": {
 			"registry.read",
 			"ops.read",
@@ -101,6 +106,7 @@ func DefaultRoleScopeMap() map[string][]string {
 			"request.read",
 			// XM-0046：逐用户资金清单，与 request.read 同一档（见上面第 5 条）
 			"platform.users.read",
+			"ui.saved_view.manage",
 		},
 	}
 }
