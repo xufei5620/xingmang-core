@@ -53,8 +53,13 @@ Bash, existing `internal/platform/pgdsn` and `internal/platform/secrets`.
 ### DBR1 — policy, verifier, disposable PG18
 
 - Create: `contracts/database/role-policy.v1.json`
+- Create: `contracts/database/role-policy-state-event.v1.schema.json`
+- Create: `contracts/database/role-policy-state-events.v1.jsonl`
+- Create: `contracts/database/role-policy-change-request-state.v1.schema.json`
 - Create: `internal/platform/dbroles/policy.go`
 - Create: `internal/platform/dbroles/policy_test.go`
+- Create: `internal/platform/dbroles/transition.go`
+- Create: `internal/platform/dbroles/transition_test.go`
 - Create: `internal/platform/dbroles/verifier.go`
 - Create: `internal/platform/dbroles/verifier_integration_test.go`
 - Create: `cmd/db-role-verify/main.go`
@@ -132,8 +137,10 @@ Bash, existing `internal/platform/pgdsn` and `internal/platform/secrets`.
 - Test: `internal/platform/dbroles/policy_test.go`
 
 **Interfaces:**
-- Consumes: design spec §§5–8.
-- Produces: `dbroles.Policy`, `dbroles.RoleSpec`, `dbroles.ObjectGrant`, and exact policy version `1`.
+- Consumes: design spec §§5–8 and §11.
+- Produces: `dbroles.Policy`, `dbroles.RoleSpec`, `dbroles.ObjectGrant`,
+  `TrustedPolicyState`, `ProposedPolicyState`, `RolePolicyStateEvent`, exact policy version `1`, and
+  `ValidateTransition(previous,current,now)`.
 
 - [ ] **Step 1: Write failing policy tests**
 
@@ -165,13 +172,25 @@ if policy.Allows("PUBLIC", "public.river_job_state", "USAGE") {
 Add RED cases named `TestRotationSteadyARequiresOnlyA`,
 `TestRotationRotatingRequiresCRTimesAndDistinctCapabilityIdentities`,
 `TestRotationSteadyBRequiresClosureAndNoOldAccess`, and
-`TestRotationRejectsSkippedExpiredCrossCapabilityAndStaleSession`; each loads literal
-valid/invalid JSON and asserts the stable violation code plus offending capability/identity.
+`TestRotationRejectsExpiredCrossCapabilityAndStaleSession`; each loads literal current-state
+JSON and asserts the stable violation code plus offending capability/identity.
+
+Separately add `TestValidateTransitionSteadyAToRotatingThenSteadyB` and prove both calls
+return no violations over one approved-then-closed CR and continuous event chain. Add
+`TestValidateTransitionRejectsSteadyAToSteadyB`,
+`TestValidateTransitionRejectsReplayOrDuplicateEvent`,
+`TestValidateTransitionRejectsExpiredRotatingState`,
+`TestValidateTransitionRejectsPreviousPolicyDigestMismatch`, and
+`TestValidateTransitionRejectsCRStateDigestMismatch`, and
+`TestValidateTransitionRejectsClosureDigestMismatch`. Assert stable codes
+`ROTATION_TRANSITION_SKIPPED`, `ROTATION_EVENT_REPLAY`, `ROTATION_DEADLINE_EXPIRED`,
+`ROTATION_PREVIOUS_POLICY_DIGEST_MISMATCH`, `ROTATION_CR_STATE_DIGEST_MISMATCH`, and
+`ROTATION_CLOSURE_DIGEST_MISMATCH`.
 
 - [ ] **Step 2: Confirm RED**
 
 ```powershell
-go test -p 1 ./internal/platform/dbroles -run Policy -count=1
+go test -p 1 ./internal/platform/dbroles -count=1
 ```
 
 Expected: FAIL because the package/policy does not exist.
@@ -218,8 +237,25 @@ The same exact object exists for every capability. Loader validation is state-de
 steady-a requires only the A steady identity；rotating-a-b requires distinct in-capability
 old/new identities, approved CR and `started_at < deadline` with no closure；steady-b
 retains that transition and requires B steady identity, closure digest and
-`started_at < closed_at <= deadline`. Missing/unknown fields, skipped transitions,
-expired deadlines, cross-capability identities and stale old LOGIN/membership/session fail.
+`started_at < closed_at <= deadline`. Missing/unknown fields, expired rotating states,
+cross-capability identities and stale old LOGIN/membership/session fail current-state validation.
+
+Add strict loaders for state-event JSONL and CR-state artifacts. Every policy-byte change
+appends exactly one event；the chain starts with `genesis`, covers ordinary `policy-update`,
+and permits only `rotation-start`/`rotation-close` to change one capability. SHA-256 is over
+exact artifact bytes. `TrustedPolicyState` is accepted only after replay from genesis through
+the current-base terminal event；`ProposedPolicyState` carries the unique candidate event and
+digest-pinned CR state. Implement:
+
+```go
+func ValidateTransition(previous TrustedPolicyState, current ProposedPolicyState, now time.Time) []Violation
+```
+
+Validate event hash chain, sequence +1, unique event ID/tuple, previous/current policy digests,
+CR binding/status/validity, legal from/to state and state-dependent times/closure. Reject direct
+steady-a→steady-b, replay/duplicate, expired rotating state, wrong previous digest and wrong
+CR-state/closure digest with the named stable codes. Completed steady-b remains valid after deadline when
+its pinned `closed_at <= deadline`；only an open rotating state expires.
 
 Object grants distinguish `table_privileges` and exact `column_privileges`, enumerate
 every sequence and existing/default enum/domain ACL (including `river_job_state`), and
@@ -235,9 +271,13 @@ requires `production_database_name`. Neither path rewrites SQL/policy role names
 
 ```powershell
 go fmt ./internal/platform/dbroles
-go test -p 1 ./internal/platform/dbroles -run Policy -count=1
-git add contracts/database/role-policy.v1.json internal/platform/dbroles/policy.go `
-  internal/platform/dbroles/policy_test.go
+go test -p 1 ./internal/platform/dbroles -count=1
+git add contracts/database/role-policy.v1.json `
+  contracts/database/role-policy-state-event.v1.schema.json `
+  contracts/database/role-policy-state-events.v1.jsonl `
+  contracts/database/role-policy-change-request-state.v1.schema.json `
+  internal/platform/dbroles/policy.go internal/platform/dbroles/policy_test.go `
+  internal/platform/dbroles/transition.go internal/platform/dbroles/transition_test.go
 git commit -m "test(database): define least-privilege role policy"
 ```
 
@@ -255,13 +295,14 @@ git commit -m "test(database): define least-privilege role policy"
 
 - [ ] **Step 1: Write RED tests for every evidence family**
 
-Create fixtures for: superuser/owner runtime, wrong membership/rotation state, direct login grant, PUBLIC CONNECT,
+Create fixtures for: superuser/owner runtime, wrong membership/current rotation state, direct login grant, PUBLIC CONNECT,
 schema CREATE, missing/extra table or column privilege, chain_root table UPDATE, sequence USAGE/SELECT/UPDATE,
 routine EXECUTE, enum/domain USAGE and type default ACL drift, unknown role/owner/object, public owner not
 `pg_database_owner`, dynamic RUNWAY SHA gate, and blank application_name. Each violation has stable code/object.
-Rotation fixtures cover every legal state, direct steady-a→steady-b jump, missing CR/start/deadline,
-expired rotating state, identical/cross-capability old/new, closure digest mismatch, steady-b old
-LOGIN/membership and old `pg_stat_activity` session.
+Current-state fixtures cover every legal state, missing CR/start/deadline, expired rotating state,
+identical/cross-capability old/new, steady-b old LOGIN/membership and old `pg_stat_activity`
+session. Task 1 transition fixtures—not one catalog snapshot—cover direct jump, replay/duplicate,
+previous digest and closure digest mismatch.
 
 - [ ] **Step 2: Implement read-only catalog checks**
 
@@ -270,7 +311,8 @@ Query only `pg_roles`, `pg_auth_members`, `pg_database`, `pg_namespace`, `pg_cla
 `information_schema.column_privileges`, `pg_stat_activity`, and `has_*_privilege`.
 Compare table ACL and column `attacl` independently；prove chain_root has no table UPDATE and
 only exported columns have UPDATE. Inspect `defaclobjtype='T'` and existing enum/domain ACL.
-The verifier executes no CREATE/GRANT/ALTER/SET ROLE.
+The verifier executes no CREATE/GRANT/ALTER/SET ROLE. It validates current rotation state only；
+it must not claim transition history from one catalog/policy snapshot.
 
 - [ ] **Step 3: Add CLI safety**
 
@@ -353,7 +395,10 @@ verifier and probes inside it. CI literals are cluster-local and random per run.
 
 - [ ] **Step 5: Add governance rules**
 
-Guard policy/verifier/harness/digest. Fail when a migration creates table,
+Guard policy/verifier/harness/digest. Require every policy-byte change to append one valid
+state event；reject edited/deleted/reordered historical JSONL lines, sequence/event-hash gaps,
+duplicate event IDs/tuples, arbitrary previous-policy files and CR-state digest mismatch.
+Fail when a migration creates table,
 column-sensitive grant, sequence, routine, type or domain without exact policy or a
 `no-runtime-access` marker；also fail on ordinary objects in public, PUBLIC type USAGE,
 role-name substitution, external DBR DSN, or non-digest Postgres image.
@@ -456,7 +501,9 @@ reads or sets them. Compose config/static security tests can run with non-secret
 Rotation is a versioned policy/CR transition: `steady-a -> rotating-a-b -> steady-b`.
 The middle state must name approved CR, old/new identities, started_at and deadline；
 steady-b retains those facts and adds closure evidence/closed_at. Verifier fails on a
-skipped transition, missing/unknown/expired CR, invalid time ordering, same/cross-capability
+skipped transition only through `ValidateTransition` plus the trusted previous-policy/event
+chain；current-state verification alone makes no history claim. Missing/unknown/expired CR,
+invalid time ordering, same/cross-capability
 identity, dual login outside rotating state, unequal membership or old login/membership/
 sessions after steady-b. Before DBR3 replica/connection-drain evidence, the runbook uses
 an approved maintenance-window stop, connection drain, secret switch and controlled
@@ -611,7 +658,7 @@ lifecycle remains outside DBR.
 | Review item | Normative closure | Required evidence |
 |---|---|---|
 | restore archive/TOC | custom archive + raw/approved TOC hashes；migration table data excluded；exact safe pg_restore flags；target platform/River metadata only from fresh migrations | unfiltered restore fails and rolls back；filtered restore succeeds；platform version/dirty and exact River versions unchanged |
-| A/B rotation contract | every capability has the full nine-field steady-a/rotating-a-b/steady-b object with state-dependent null/time/identity/closure invariants | valid three-state fixtures plus skip/expiry/CR/identity/old membership-session negative tests |
+| A/B rotation contract | every capability has the full nine-field three-state object；every policy change appends a digest-chained state event；`ValidateTransition(previous,current,now)` consumes only current-base trusted previous + digest-pinned CR state | legal a→rotating→b chain；direct skip/replay/duplicate/expiry/previous-digest/closure-digest failures；current-state identity/old membership-session negatives |
 | disposable harness transport | only `127.0.0.1::5432` random port；lookup by exact project label；internally built DSN passes `pgdsn.Validate` + `RequireLoopback` | reject 0.0.0.0/IPv6 wildcard/fixed port/external DSN/wrong label/query override；post-teardown port closed and labels zero |
 
 All three rows are mandatory DBR acceptance criteria；none authorizes a live database,

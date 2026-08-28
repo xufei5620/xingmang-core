@@ -459,7 +459,48 @@ Machine policy 的 `rotation` object 字段固定且全部显式出现：
 跳态、过期、身份跨 capability、old/new 相同、旧 membership/LOGIN/session 未清零、
 closure digest 不匹配都 fail closed。
 
-Verifier 对未声明的第二 login、缺/未知 CR、deadline 已过、A/B 权限不等价或 steady
+单份 policy 只能证明“当前状态合法”，不能证明“确实经过前一状态”。DBR1 必须冻结：
+
+```go
+func ValidateTransition(
+    previous TrustedPolicyState,
+    current ProposedPolicyState,
+    now time.Time,
+) []Violation
+```
+
+`TrustedPolicyState` 包含 current base 上的 exact policy bytes、其 SHA-256，以及已从
+genesis 重放验证的 terminal `RolePolicyStateEvent`；`ProposedPolicyState` 包含候选 exact
+policy bytes、唯一 candidate event，以及被 SHA-256 钉住的 machine-readable CR state。
+policy digest 对 Git blob/发布制品原始字节计算，不做 JSON 重排或换行归一化；caller
+不得传任意文件冒充 previous。
+
+每次 policy bytes 改变都必须向 `role-policy-state-events.v1.jsonl` **只追加一行**，即使
+rotation 未变化也不能跳过。event 固定显式字段为：`version`、递增 `sequence`、唯一
+`event_id`、`kind`（`genesis|policy-update|rotation-start|rotation-close`）、
+`previous_event_sha256`、`previous_policy_sha256`、`current_policy_sha256`、`capability`、
+`from_state`、`to_state`、`approved_change_request`、`change_request_state_sha256`、
+`cr_status`、`recorded_at`、`closure_evidence_sha256`。genesis 的 previous 字段为 null；
+普通 policy-update 的 capability/from/to/closure 为 null 且所有 rotation object 必须逐字节
+不变；一次 rotation event 只允许改变一个 capability。
+
+可信 previous 只能来自 current-base ancestor：从 genesis 校验 event SHA-256 chain、连续
+sequence、唯一 event_id 与 terminal policy digest，并由 governance 证明历史行未改写/
+删除。candidate 的 previous event/policy digest 必须命中该 terminal state，current digest
+必须命中候选 policy bytes。CR-state artifact 必须绑定 capability、old/new、前后 policy
+digest、有效期与 deadline；rotation-start 要求 `approved`，rotation-close 要求同一 CR
+已 `closed`，且 CR、event、policy 三处 closure digest 相等。
+
+`ValidateTransition` 只接受 genesis `null -> steady-a`、rotation 不变的 policy-update、
+`steady-a -> rotating-a-b`、`rotating-a-b -> steady-b`。它拒绝直接
+`steady-a -> steady-b`、同态但字段变化、event replay/重复 tuple、sequence/hash 断链、
+CR 未批准/已变更、previous-policy digest 或 closure digest 不匹配。rotation-start 必须
+满足 `started_at <= now < deadline`；open rotating state 在 `now >= deadline` 时失败。
+steady-b 可在 deadline 后重复验当前状态，但已钉住的 `closed_at` 必须满足
+`started_at < closed_at <= deadline`。周期性 catalog verifier 只验 current state；policy
+PR/发布门禁必须重放 event chain 并调用 `ValidateTransition(previous,current,now)`。
+
+Current-state verifier 对未声明的第二 login、缺/未知 CR、rotating deadline 已过、A/B 权限不等价或 steady
 状态仍有双 membership 一律 fail closed。状态迁移只能
 `steady-a -> rotating-a-b -> steady-b`，不能把永久双 login 当 steady。
 
