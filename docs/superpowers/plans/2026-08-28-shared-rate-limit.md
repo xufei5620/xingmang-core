@@ -537,7 +537,10 @@ and never runs from API startup. Revision 2+ still needs separate Action + appen
 go fmt ./internal/platform/ratelimit ./cmd/rate-limit-policy
 go test -p 1 ./internal/platform/ratelimit ./cmd/rate-limit-policy -count=1
 git add internal/platform/ratelimit/postgres.go internal/platform/ratelimit/postgres_test.go `
-  internal/platform/ratelimit/postgres_integration_test.go cmd/rate-limit-policy
+  internal/platform/ratelimit/postgres_integration_test.go `
+  internal/platform/ratelimit/fleet_manifest.go internal/platform/ratelimit/fleet_manifest_test.go `
+  contracts/ops/rate-limit-fleet-manifest.v1.schema.json `
+  contracts/ops/rate-limit-fleet-keyring.v1.json cmd/rate-limit-policy
 git commit -m "feat(ratelimit): add postgres store and policy bootstrap"
 ```
 
@@ -685,7 +688,9 @@ a real ref or alter `deploy/compose/launch.yaml` in RL2.
 Exact cases: missing backend only defaults to memory in development; staging/production missing and every
 unknown/off/auto/open value reject; there is no failure-mode variable. Test
 `principal.Environment == process ENVIRONMENT == ReadyState.Environment == DB policy.environment`
-and HMAC ref scope environment equality. Test a
+and exact HMAC ref scope environment equality. For both slots require
+`ref.Scope() == "rate-limit-" + cfg.Environment`; reject a scope with a wrong prefix, an appended suffix,
+or another valid environment even when the requested name is otherwise valid. Test a
 keyring of exactly one primary plus at most one staged slot: paired ref/version, positive int32, distinct
 version/ref, DB-selected active version present; strict unpadded base64url decoding to exactly 32 bytes;
 timeout <=0 or >= request timeout; max conns !=1..4; and secret value absent from logs/errors/audit.
@@ -694,12 +699,17 @@ timeout <=0 or >= request timeout; max conns !=1..4; and secret value absent fro
 func TestRateLimitPrimaryAndStagedSecretSuccessAndFailureAreAudited(t *testing.T)
 func TestRateLimitSecretAuditHasExactCallerPurposeEnvironmentRefProviderAndCode(t *testing.T)
 func TestRateLimitSecretAuditLogsAndErrorsContainNoMaterialOrDigest(t *testing.T)
+func TestRateLimitHMACRefScopeRejectsWrongPrefixSuffixAndEnvironmentSpoof(t *testing.T)
+func TestRateLimitHMACRefRequiresFixedPrimaryAndStagedNames(t *testing.T)
 ```
 
 - [ ] **Step 2: Build a CredentialRef-backed key source**
 
-Primary and optional staged ref contain only `secret://...` and their scope/name environment must equal
-`cfg.Environment`. Wrap the mapped provider with
+Primary and optional staged refs mechanically require
+`ref.Scope() == "rate-limit-" + cfg.Environment`; equality is exact, not contains/prefix/suffix matching.
+Primary `ref.Name()` is exactly `bucket-hmac-primary` and staged `ref.Name()` is exactly
+`bucket-hmac-staged`; names identify slots only and never encode or select key versions. Wrong scope prefix,
+extra scope suffix and cross-environment spoof cases fail before Resolve/HMAC/consume/handler. Wrap the mapped provider with
 `secrets.NewAudited(inner, recorder, cfg.Environment)`, create resolve context with
 `secrets.WithCaller(ctx,"api:platform")`, then call
 `Resolve(resolveCtx, ref,"platform-api rate-limit bucket HMAC")` for each slot. Tests cover primary/staged

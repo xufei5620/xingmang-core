@@ -139,9 +139,12 @@ Redis 加进 compose。
 principal.Environment == process ENVIRONMENT == ReadyState.Environment == DB policy.environment
 ```
 
-HMAC CredentialRef 的 scope/name 中 environment 也必须等于 process ENVIRONMENT；禁止
-staging 进程解析 production ref。缺身份、类型非法或任一 environment/ref scope 不一致均
-返回 503，且不调用 HMAC、consume 或业务 handler，不能使用 `anonymous` 新桶继续处理。
+primary/staged HMAC CredentialRef 都必须机械要求
+`ref.Scope() == "rate-limit-" + process ENVIRONMENT`；不得用 contains、前缀或后缀匹配，
+也不得从 `ref.Name()` 推断 environment。primary name 固定为 `bucket-hmac-primary`，staged
+name 固定为 `bucket-hmac-staged`，name 只标识 slot，不选择 active key version。错误 scope
+前缀、追加后缀或跨 environment 伪装均返回 503，且不调用 HMAC、consume 或业务 handler；
+缺身份、类型非法时同样 fail closed，不能使用 `anonymous` 新桶继续处理。
 
 chi route template 取不到时，route 字段使用固定 ASCII 哨兵：
 
@@ -207,8 +210,8 @@ digest = HMAC-SHA256(secret key for key_version, canonical bytes)
 建议 primary/staged CredentialRef 形状：
 
 ```text
-secret://rate-limit-<environment>/bucket-hmac-v1
-secret://rate-limit-<environment>/bucket-hmac-v2
+secret://rate-limit-<environment>/bucket-hmac-primary
+secret://rate-limit-<environment>/bucket-hmac-staged
 ```
 
 仓库只存 ref，不存真实 key。ref 通过显式配置提供，不能由字符串拼接偷偷推导，也不能
