@@ -32,9 +32,40 @@ export interface PlatformUserItem {
   balance: AmountBody;
   period_recharge: AmountBody;
   period_consumed: AmountBody;
+  /** 近 30 天消费。**滚动窗口，不随所选区间变**——原型把它和「区间消费」
+   *  并排放，正是为了看出「今天花得少，但一个月来一直很稳」。 */
+  last_30d_consumed: AmountBody;
   /** null 表示从未活跃——与「很久以前活跃过」不是一回事。 */
   last_active_at: string | null;
   token_prefix: string;
+}
+
+/** 统计粒度。与后端 `platformusers.Granularity` 逐字对应。 */
+export type PeriodGranularity = "day" | "week" | "month";
+
+/** 服务端回显的统计区间。
+ *
+ *  `from` / `to` 是**闭区间**业务日。回显它们而不只回粒度：粒度是「周」时，
+ *  人要能看见到底是哪七天——跨月那几天最容易理解错。 */
+export interface PeriodBody {
+  day: string;
+  granularity: PeriodGranularity;
+  from: string;
+  to: string;
+}
+
+/** 区间合计，**带覆盖率**。
+ *
+ *  合计只加得动「上游给得出流水」的那些用户，所以它可能是一个**下界**。
+ *  `covered_users < total_users` 时界面必须说出来，否则一个下界会被读成全量
+ *  （宪法 12 条：禁止裸数字冒充完整数据）。 */
+export interface PeriodTotalsBody {
+  recharge: AmountBody;
+  consumed: AmountBody;
+  covered_users: number;
+  total_users: number;
+  /** covered === total 的便捷判定，避免各处自己比一遍比错。 */
+  complete: boolean;
 }
 
 export interface PlatformUserPage {
@@ -42,6 +73,10 @@ export interface PlatformUserPage {
   next_cursor: string;
   total_count: CountBody;
   total_balance: AmountBody;
+  /** 今日活跃用户数（原型第 1 格的副行）。null = 上游没给。 */
+  active_today: CountBody;
+  period_totals: PeriodTotalsBody;
+  period: PeriodBody;
   data_source: string;
   freshness: FreshnessContract;
 }
@@ -57,6 +92,10 @@ export interface ListPlatformUsersOptions extends ListOptions {
   q?: string;
   status?: PlatformUserStatus | "";
   sort?: PlatformUserSort;
+  /** 统计区间的锚点业务日（YYYY-MM-DD）。不传 = 服务端的「今天」。 */
+  day?: string;
+  /** 统计粒度。不传 = day。 */
+  granularity?: PeriodGranularity;
   limit?: number;
   cursor?: string;
 }
@@ -95,6 +134,11 @@ export async function listPlatformUsers(
         ...(options.q ? { q: options.q } : {}),
         ...(options.status ? { status: options.status } : {}),
         ...(options.sort ? { sort: options.sort } : {}),
+        // 区间**不传默认值**：「今天」必须由服务端按 CST +08:00 解释。
+        // 前端拿浏览器本地日期去填的话，一个在 UTC-5 的运营看到的「今天」
+        // 会比账面业务日早一天（宪法 14 条）。
+        ...(options.day ? { day: options.day } : {}),
+        ...(options.granularity ? { granularity: options.granularity } : {}),
         ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
         ...(options.cursor ? { cursor: options.cursor } : {}),
       },
@@ -120,7 +164,9 @@ export function describeUserStatus(status: string): {
     case "active":
       return { label: "正常", tone: "success", hint: "账号可正常调用" };
     case "limited":
-      return { label: "受限", tone: "warning", hint: "余额不足或被风控标记，上游语义各异" };
+      // 原型逐格写的是「注意」而不是「受限」：这一列的作用是让人一眼挑出
+      // 该看的账号，而不是复述上游的状态机（上游语义各异，说明留在 hint 里）
+      return { label: "注意", tone: "warning", hint: "余额不足或被风控标记，上游语义各异" };
     case "disabled":
       return { label: "停用", tone: "neutral", hint: "账号已停用，不参与调用" };
     default:

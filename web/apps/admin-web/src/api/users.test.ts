@@ -9,7 +9,8 @@ import {
 describe("账号状态的展示口径", () => {
   it("三种已知状态各有各的语气", () => {
     expect(describeUserStatus("active")).toMatchObject({ label: "正常", tone: "success" });
-    expect(describeUserStatus("limited")).toMatchObject({ label: "受限", tone: "warning" });
+    // 原型逐格写的是「注意」（XM-0053 对齐）
+    expect(describeUserStatus("limited")).toMatchObject({ label: "注意", tone: "warning" });
     expect(describeUserStatus("disabled")).toMatchObject({ label: "停用", tone: "neutral" });
   });
 
