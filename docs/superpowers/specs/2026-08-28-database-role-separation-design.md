@@ -170,6 +170,11 @@ per-connection SET ROLE，再单独评估 credentialless owner。
 | `xm_ops_read` | `xm_ops_a` | audit-verify、platform-shadow、只读诊断 |
 | `xm_backup_read` | `xm_backup_a` | pg_dump/恢复演练读取 |
 
+完整数据库恢复另设**一次性** `xm_restore_once` 登录身份/能力，且不属于 steady
+runtime topology：只在独占、空的恢复 cluster 内由获批 restore envelope 创建，
+仅执行 data-only restore 与必要 sequence `setval`，验收后立即 `NOLOGIN` 并撤权。
+它不能用于 source pg_dump，也不能替代 cluster admin、migrator 或 verifier。
+
 membership 固定为：
 
 ```sql
@@ -185,19 +190,26 @@ NOREPLICATION、NOBYPASSRLS；不直接持有表 grants，不互相 membership�
 
 ## 6. 数据库、schema 与 PUBLIC 基线
 
-目标数据库执行：
+目标数据库执行 exact SQL；数据库名从已连接的 `current_database()` 安全引用，
+因此 DBR1 可随机 database 而不替换 SQL bytes：
 
 ```sql
-REVOKE CONNECT, TEMPORARY ON DATABASE xingmang FROM PUBLIC;
-GRANT CONNECT ON DATABASE xingmang
-  TO xm_migrator, xm_api_runtime, xm_worker_runtime,
-     xm_lifecycle_runtime, xm_ops_read, xm_backup_read;
+SELECT format('REVOKE CONNECT, TEMPORARY ON DATABASE %I FROM PUBLIC', current_database()) \gexec
+SELECT format(
+  'GRANT CONNECT ON DATABASE %I TO xm_migrator, xm_api_runtime, xm_worker_runtime, xm_lifecycle_runtime, xm_ops_read, xm_backup_read',
+  current_database()
+) \gexec
 ```
 
 schema 基线：
 
 - `REVOKE ALL ON SCHEMA public FROM PUBLIC`；
-- `core/action/audit/ops/alerts/finance/public` 的 CREATE 只归 owner/migrator；
+- `public` schema owner 保持 PostgreSQL 18 默认的内建虚拟角色
+  `pg_database_owner`，**不**改成 `xm_migrator`；目标数据库 owner 是
+  `xm_migrator`，所以它经 `pg_database_owner` 语义管理 public；
+- verifier 要求 `public.nspowner = pg_database_owner`，且 `pg_database_owner`
+  不是 LOGIN、没有显式 membership；其它 custom schema owner 才是 `xm_migrator`；
+- `core/action/audit/ops/alerts/finance` 的 CREATE 只归 owner/migrator；
 - runtime/ops/backup 只获其所需 schema USAGE；
 - API 不需要 `public`（River）USAGE；
 - worker 需要 `public` + `core/ops/alerts/finance` USAGE；
@@ -225,13 +237,16 @@ schema 基线：
 |---|---|---|---|---|---|
 | `action.action_run` | INSERT | 无 | 无 | SELECT | SELECT |
 | `audit.audit_event` | SELECT/INSERT | 无 | SELECT | SELECT | SELECT |
-| `audit.chain_root` | 无 | 无 | SELECT/INSERT；仅列级 UPDATE `exported_at,export_target` | SELECT | SELECT |
+| `audit.chain_root` | 无 | 无 | table SELECT/INSERT；仅 column UPDATE(`exported_at`,`export_target`) | SELECT | SELECT |
 
 硬约束：
 
 - runtime 对 `action_run` / `audit_event` 无 UPDATE/DELETE/TRUNCATE；
 - rewrite rules 继续作为第二道防线，不能因为 ACL 落地而删除；
 - lifecycle 无权重写 audit_event；
+- `audit.chain_root` 的 table ACL **不得出现 UPDATE**；`root_hash`、`signature`、
+  `key_id`、区间与时间列均不可更新。唯一 UPDATE 是 `pg_attribute.attacl` /
+  `information_schema.column_privileges` 可证明的 `exported_at`,`export_target`；
 - audit archive/backup 本片不获 DELETE；
 - migrator owner 仍能 DDL，这是隔离凭据而不是“连 owner 也不可改”的虚假承诺。
 
@@ -241,7 +256,7 @@ schema 基线：
 |---|---|---|---|---|---|
 | `ops.metric_observation` | SELECT | SELECT/INSERT/UPDATE | SELECT | SELECT | SELECT |
 | `ops.metric_observation_sample` | SELECT | SELECT/INSERT/DELETE | SELECT | SELECT | SELECT |
-| `ops.metric_observation_sample_id_seq` | 无 | USAGE/SELECT/UPDATE | 无 | 无 | SELECT |
+| `ops.metric_observation_sample_id_seq` | 无 | USAGE | 无 | 无 | SELECT |
 
 worker 的 DELETE 是 retention 所需的表级残余风险。首版不加 RLS/SECURITY DEFINER；
 测试必须证明 API/ops 不能 DELETE、worker 不能 UPDATE/TRUNCATE。retention 的 cutoff/batch
@@ -265,7 +280,7 @@ DELETE 只授 worker（resolved-alert retention）；任何 runtime 无 TRUNCATE
 | `subscription_cost_batch` / `proxy_asset` | SELECT/INSERT/UPDATE | SELECT | SELECT | SELECT | SELECT |
 | `profit_daily` / `amortization_loss` | SELECT | SELECT/INSERT/UPDATE | SELECT | SELECT | SELECT |
 | `balance_history` | SELECT | SELECT/INSERT/UPDATE | SELECT | SELECT | SELECT |
-| finance sequences | 无 | 按 INSERT 所需 USAGE/SELECT/UPDATE | 无 | 无 | SELECT |
+| finance sequences | 无 | 逐对象按 INSERT 所需 USAGE | 无 | 无 | 逐对象 SELECT |
 
 API 仍拥有部分表级 DML，因为 Query 与 Action Handler 在同一进程。本角色拆分不声称能防止
 “已攻破 API 进程绕过 Action 直接 SQL”；它只把进程故障域彼此隔离。
@@ -275,8 +290,9 @@ API 仍拥有部分表级 DML，因为 Query 与 Action Handler 在同一进程�
 `public` 保留给 River 与 `schema_migrations`：
 
 - worker 对 `river_*` tables：SELECT/INSERT/UPDATE/DELETE；
-- worker 对 `river_*` sequences：USAGE/SELECT/UPDATE；
+- worker 对每条实际 `river_*` sequence：USAGE；
 - worker 对 River routines：EXECUTE；
+- worker 对 `public.river_job_state` enum：USAGE；PUBLIC 无 USAGE；
 - worker 对 `schema_migrations`：无权限；
 - API/lifecycle/ops 对 River：默认无权限（ops 若后续需要任务诊断，另批只读视图）；
 - migrator owner 全权执行版本化迁移。
@@ -295,7 +311,7 @@ API 仍拥有部分表级 DML，因为 Query 与 Action Handler 在同一进程�
 
 ### 8.2 custom schema：默认拒绝
 
-`core/action/audit/ops/alerts/finance` 中未来 table/sequence/routine 不自动授 runtime。
+`core/action/audit/ops/alerts/finance` 中未来 table/sequence/routine/type/domain 不自动授 runtime。
 每个 migration 必须在同一 up migration 写精确 grants，或写明确的
 `no-runtime-access` 注释。漏 grant 的结果是新代码 fail closed，而不是新表自动开放。
 
@@ -304,15 +320,24 @@ API 仍拥有部分表级 DML，因为 Query 与 Action Handler 在同一进程�
 ```sql
 ALTER DEFAULT PRIVILEGES FOR ROLE xm_migrator
   REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE xm_migrator
+  REVOKE USAGE ON TYPES FROM PUBLIC;
 ```
+
+DBR1 policy/verifier 必须把现有 enum/domain 与 `pg_default_acl.defaclobjtype='T'`
+作为独立 object family；逐 schema 检查 PUBLIC/type ACL。当前已知至少包括
+`public.river_job_state`。新增 enum/domain 未进入 exact policy 或明确
+`no-runtime-access` marker 时 governance fail closed。
 
 ### 8.3 public/River 特例
 
 River bundle 不会写本项目自定义 grants。`public` 被契约化为 River 专用：
 
 - migrator 在 public 创建的未来 table 默认授 worker SELECT/INSERT/UPDATE/DELETE；
-- 未来 sequence 默认授 worker USAGE/SELECT/UPDATE；
+- 未来 sequence 默认只授 worker USAGE；
 - 未来 routine 默认只授 worker EXECUTE；
+- 未来 type/domain 默认撤 PUBLIC USAGE，并只给 exact policy 指定角色；
 - `schema_migrations` 始终显式 REVOKE worker；
 - governance 禁止普通业务表进入 public。
 
@@ -320,6 +345,11 @@ River bundle 不会写本项目自定义 grants。`public` 被契约化为 River
 
 不自动把未来自有表授给 ops/backup。每个 migration 必须显式决定；verifier/pg_dump 在漏 grant
 时失败，避免敏感新表静默进入日常 ops，也避免 backup 静默缺表。
+
+Sequence 权限逐对象声明：业务/worker INSERT 的 `nextval` 只授 `USAGE`；backup
+reader 为完整 dump 授 `SELECT`；`UPDATE`/`setval` 只允许 migrator 或获批一次性
+restore 身份，并由 restore evidence 证明需要。任何 runtime sequence UPDATE 都是
+policy violation，不能以“serial 通常要三个权限”批量放宽。
 
 ## 9. 显式 owner 转移
 
@@ -335,9 +365,11 @@ REASSIGN OWNED BY xingmang TO xm_migrator;
 DBR2 必须生成 before/after owner manifest，并只对以下白名单显式 `ALTER ... OWNER`：
 
 - database `xingmang`；
-- schemas `core/action/audit/ops/alerts/finance`；
-- 上述 schema 的 tables/sequences/routines；
-- public 中 `schema_migrations`、`river_*` tables/sequences/routines；
+- schemas `core/action/audit/ops/alerts/finance`；`public` owner 必须保持
+  `pg_database_owner`，不列入 `ALTER SCHEMA ... OWNER`；
+- 上述 schema 的 tables/sequences/routines/types/domains；
+- public 中 `schema_migrations`、`river_*` tables/sequences/routines 与
+  `river_job_state` type；
 - 相关 indexes/constraints 由 table ownership 规则随表核对。
 
 禁止触碰 `postgres`、template databases、`xm0050_test` 或其它数据库。owner 脚本发现未知
@@ -356,6 +388,7 @@ schema/object kind 时 fail closed，并要求更新审批包，不能用通配�
 | lifecycle | `secret://database/lifecycle` |
 | ops | `secret://database/ops-readonly` |
 | backup | `secret://database/backup` |
+| one-time restore | `secret://database/restore-once`（仅演练窗存在） |
 
 ref 名稳定；轮换时改变登录 role/password 绑定，不把真实值写进仓库、日志、错误或 Handoff。
 
@@ -390,7 +423,20 @@ postgres://xm_backup_a@postgres:5432/xingmang?sslmode=disable&application_name=p
 `application_name` 是证据/排障字段，不是权限边界。production 的 TLS/host 由其独立部署契约决定；
 本设计不把 staging `sslmode=disable` 固化为生产口径。
 
-## 11. 无缝凭据轮换
+## 11. 有状态 A/B 凭据轮换
+
+在 DBR3 证明副本编排、连接排空与逐副本 identity evidence 前，本文**不承诺无缝
+逐副本轮换**；DBR2 及更早只允许维护窗内受控停止/重启。policy 显式建模：
+
+| state | 允许的 LOGIN/membership | 必填治理字段 |
+|---|---|---|
+| `steady-a` | 仅 A 可 LOGIN 且继承唯一 capability；B 不存在或 NOLOGIN/无 membership | policy version |
+| `rotating-a-b` | A、B 同时可 LOGIN，权限必须完全等价且都只继承同一 capability | approved CR、started_at、deadline、old/new identity |
+| `steady-b` | 仅 B 可 LOGIN；A 已 NOLOGIN 且无 membership/活跃连接 | closure evidence、closed_at |
+
+Verifier 对未声明的第二 login、缺/未知 CR、deadline 已过、A/B 权限不等价或 steady
+状态仍有双 membership 一律 fail closed。状态迁移只能
+`steady-a -> rotating-a-b -> steady-b`，不能把永久双 login 当 steady。
 
 runtime capability role 不变；登录身份 A/B 轮换：
 
@@ -398,8 +444,8 @@ runtime capability role 不变；登录身份 A/B 轮换：
 2. 以 `INHERIT TRUE, SET FALSE, ADMIN FALSE` 加入唯一 capability role；
 3. verifier 证明 new role 权限与 old role 等价且不能 SET ROLE migrator/admin；
 4. 新 CredentialRef 内容与 DSN username 在一个版本化 compose 变更中准备；
-5. 启动一份新 replica，证明 `current_user`/`application_name` 与健康/业务链；
-6. 滚动剩余 replica；
+5. DBR3 前在批准维护窗停止对应服务、排空旧连接、切 secret/DSN 后受控重启；
+6. 只有 DBR3 已提供 replica identity/connection-drain evidence 时才可逐副本滚动；
 7. `pg_stat_activity` 证明 old login 连接为 0；
 8. `ALTER ROLE old NOLOGIN`，保留短观察窗；
 9. 观察窗后撤 membership、清理旧 secret；
@@ -412,16 +458,25 @@ migrator/lifecycle/ops/backup 是一次性或人工工具，可在维护窗轮�
 
 ## 12. Verifier 与 disposable PG18 测试
 
-DBR1 只允许本机/CI loopback disposable PostgreSQL 18，绝不连接 staging/production。
+DBR1 harness **自行创建并独占**一个临时 PostgreSQL 18 cluster，不接受外部 admin
+DSN，也绝不连接 staging/production/shared developer DB。cluster 使用
+`VERSIONS.lock`/获批配置中的完整 `postgres:18@sha256:<digest>`，禁止 tag-only。
 
 ### 12.1 harness 安全
 
-- admin DSN 先执行 `pgdsn.Validate` 与 `pgdsn.RequireLoopback`；
-- query `?host=`/hostaddr/service/passfile 覆盖必须被拒；
-- database 与所有测试 role 名包含随机 UUID；
-- 创建前确认目标不是现有业务数据库；
-- finally：终止测试连接 → drop disposable DB → 清 membership/default ACL/owned → drop 测试 roles；
-- 清理部分失败继续其它清理并最终返回非零；
+- 随机化且只随机化 Compose project、container、network、volume 与 database；
+- cluster 内 capability/login/owner 名使用 policy 的**固定生产角色名**，未经字符串
+  替换地执行 exact SQL；独占 cluster 消除了角色名碰撞，不再生成 UUID role；
+- 创建后验证 Compose project/container/volume labels、实际 RepoDigest 等于 pin、
+  `server_version_num` major=18、database fingerprint 与 fresh instance（无 `xm_*`
+  roles、无平台 schema/表、volume 创建于本 run）；任一不符在执行 SQL 前 STOP；
+- SQL 通过随机 database 的连接上下文/current_database 安全工作；禁止 sed/template
+  替换角色、owner、grant 或 policy 内容；
+- finally 只执行该随机 project 的 `down --volumes --remove-orphans`，再按 project
+  label 证明 container/network/volume 全为 0；销毁的是整个临时 cluster，不在共享
+  cluster 内逐个 DROP 角色/库；
+- teardown 部分失败继续枚举并报告，但最终非零；不复用 volume、不保留失败现场为
+  “下次继续”，需要证据时先导出脱敏日志再销毁；
 - 不 TRUNCATE/disable trigger 清理 append-only 表。
 
 ### 12.2 正向能力
@@ -447,6 +502,11 @@ DBR1 只允许本机/CI loopback disposable PostgreSQL 18，绝不连接 staging
 - login role 无法 SET ROLE migrator/admin；
 - grants 不来自 PUBLIC 或意外 membership；
 - 新 fixture object 验证 default privileges 与迁移显式 grant 门禁。
+- chain_root table UPDATE 为 42501、仅两列 UPDATE 成功；`root_hash` 与混合列更新
+  均为 42501 且数据不变；verifier 同时对 `pg_attribute.attacl` 与
+  `information_schema.column_privileges` 做 exact diff；
+- existing/default type/domain ACL 完整，PUBLIC 对 `river_job_state` USAGE 为 false；
+- 每条 sequence 的 runtime USAGE/backup SELECT 与禁止 runtime UPDATE/setval 逐对象证明。
 
 ### 12.4 append-only 两层分别证明
 
@@ -462,7 +522,7 @@ ACL probe 用 runtime role 断言 permission denied；rule/trigger probe 用具�
 1. DBR1 verifier 合入且 disposable PG18 全绿；
 2. DBR2 精确角色/owner/ACL/default ACL diff 获迁移审批；
 3. 角色属性、owner manifest、PUBLIC diff、未知对象清单完成审阅；
-4. 七个 CredentialRef 的真实值由人类配置，未进入仓库/日志；
+4. 七个 steady CredentialRef 与本次恢复演练的一次性 restore ref 由人类配置，未进入仓库/日志；
 5. 全量逻辑备份完成，hash 校验；
 6. 在独立 PG18 恢复并跑 migration version、audit chain、核心 Query；
 7. staging 变更单与维护窗单独批准；
@@ -476,7 +536,7 @@ ACL probe 用 runtime role 断言 permission denied；rule/trigger probe 用具�
 4. no-op 重跑 migrate（migrator）与 bootstrap（lifecycle）；
 5. 切一个 API replica，验证 Query、一个获准 L1 Action、action_run/audit_event；
 6. 切一个 worker，验证 River、sync、finance、alert、retention；
-7. 切 ops/backup，完成 audit-verify 与 pg_dump/restore；
+7. 切 ops/backup，完成 audit-verify 与分离身份的 pg_dump/restore；
 8. 滚动剩余 replicas；
 9. soak 后确认无 `xingmang` 应用连接；
 10. 移除共享 secret，cluster admin 轮换并离线保存。
@@ -497,6 +557,14 @@ legacy admin 未锁定前：
 
 恢复后的 disposable 环境必须证明：
 
+1. source `xm_backup_a` 只做 pg_dump/sequence SELECT，不获 target CREATE/DML；
+2. cluster admin 只预建空 cluster/database、固定 roles，并把 database owner 设为
+   migrator；它不执行 data restore；
+3. `xm_migrator` 只运行 exact migrations/owner/ACL/default ACL；
+4. 临时 `xm_restore_once` 只做 data-only COPY/INSERT 与获批 sequence setval，完成后
+   NOLOGIN/撤权；
+5. `xm_ops_a`/DBR verifier 只读验收，不复用 backup/migrator/restore credential；
+
 - migration version/dirty；
 - 所有对象 owner/ACL/default ACL；
 - audit chain 全链；
@@ -509,7 +577,10 @@ legacy admin 未锁定前：
 
 ### 14.1 RUNWAY
 
-待审设计 `ai/codex/XM-C-RUNWAY0-threshold-spec@83cbca2` 计划新增：
+RUNWAY 不引用待审分支或易漂移 head。每次 DBR policy/SQL packet 必须从批准 CR/Task
+读取 `RUNWAY_APPROVED_MERGE_SHA`，并证明该 SHA 是当前 base 的 ancestor；未提供、
+未 merge、SHA 改变或对应 migration/object diff 不一致都 **STOP**。只有该次最新获批
+merge 中实际存在的对象才进入 policy：
 
 - `finance.runway_threshold_config`：API SELECT/UPDATE、worker SELECT、lifecycle SELECT/首次 INSERT；
 - `finance.runway_threshold_history`：API SELECT/INSERT、lifecycle SELECT/首次 INSERT；
@@ -522,9 +593,20 @@ DBR2+DBR3 权限证据**。若 RUNWAY migration 先合入，DBR owner/ACL manife
 
 ### 14.2 AUDIT archive
 
-审计归档可以先设计导出格式、链根与恢复演练，但 ops/backup 不获 audit DELETE。
-任何“导出后删热库行”都会改变 append-only/哈希链语义，必须独立 ADR/审批，不能借 DBR4
-顺带获得。DBR4 先提供可靠只读与恢复证据，再谈归档生命周期。
+审计归档 docs commit `d642875` 定义四种专用 DB capability，不能合并回宽泛
+`xm_lifecycle_runtime`：
+
+| conditional capability | exact DB 边界 |
+|---|---|
+| `xm_audit_archive_source_reader` | 指定列 SELECT `audit_event`,`chain_root`,`action_run`,`core.environment` |
+| `xm_audit_anchor_writer` | fixed tip read + INSERT `chain_root`；无 table/column UPDATE、DELETE |
+| `xm_audit_archive_catalog_writer` | 仅 archive catalog SELECT/INSERT/advisory lock；无 audit_event/action_run DML |
+| `xm_audit_restore_writer` | 仅 fingerprint 匹配的 empty isolated target，fixed-column INSERT + tx-bound verify；无 UPDATE/DELETE/DDL |
+
+这些角色不进入 DBR policy v1。只有 AUD design 已以获批 merge SHA 进入当前 base、
+独立 CR 批准 exact grants 后，才发布新的 policy version 并扩展 provisioning/verifier；
+旧 policy 遇到这些未知 role/object 必须 fail closed，不能忽略或借 lifecycle 权限运行。
+ops/backup 仍不获 audit DELETE；hot-row lifecycle 仍是独立 ADR/审批。
 
 ## 15. 分片与审批门
 
@@ -567,8 +649,8 @@ DBR2+DBR3 权限证据**。若 RUNWAY migration 先合入，DBR owner/ACL manife
 3. 逐对象 ACL 矩阵，特别是 API 部分 DML 与 worker retention DELETE 残余风险；
 4. custom schema default deny、public 专供 River 的 default privilege 特例；
 5. 禁止宽泛 REASSIGN OWNED，owner 转移只走精确白名单 manifest；
-6. 七个 CredentialRef 与 Docker Secret Provider 路径；
-7. A/B login 无缝轮换；
+6. 七个 steady CredentialRef、一次性 restore ref 与 Docker Secret Provider 路径；
+7. A/B login 的 steady/rotating/steady policy 状态；DBR3 前仅受控重启；
 8. DBR1 只跑 loopback disposable PG18；
 9. DBR2 migration、credentials、staging、production 四类 STOP 相互独立；
 10. DBR2+DBR3 前置于 RUNWAY live activation，DBR4 前置于审计归档 live 设计；
