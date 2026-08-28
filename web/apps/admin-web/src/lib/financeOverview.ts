@@ -1,7 +1,7 @@
 import type { ChannelSummary, Money } from "../api/finance";
-import type { FreshnessContract } from "@xingmang/ui-admin";
+import type { FreshnessContract, PeriodGranularity } from "@xingmang/ui-admin";
 
-export type FinancePeriodMode = "day" | "week" | "month";
+export type FinancePeriodMode = PeriodGranularity;
 
 export interface DateOnlyRange {
   from: string;

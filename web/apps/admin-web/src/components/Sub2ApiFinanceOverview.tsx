@@ -1,12 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { FreshnessBadge, FreshnessNote, MetricCard, StatTile } from "@xingmang/ui-admin";
+import { FreshnessBadge, FreshnessNote, MetricCard, PeriodControls, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { Fragment, useMemo, useState } from "react";
 import { listChannelSummaries } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
 import { aggregateChannelMoney, aggregateFailureText, aggregateFreshness, periodRangeFor, type ChannelMoneyAggregate, type FinancePeriodMode } from "../lib/financeOverview";
 import { ApiStateView } from "./ApiStateView";
-import { PeriodRangeControl } from "./PeriodRangeControl";
 
 const PAYMENT_CONNECTOR_NOTE = "支付 Connector（M3）未接入";
 const PAYMENT_CARD_LABELS = ["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费", "净现金流入"];
@@ -61,7 +60,16 @@ export function Sub2ApiFinanceOverview({ initialDate }: { initialDate?: string }
 
   return <div className="flex flex-col gap-4">
     <p role="status" className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg">「用户充值」不是当期收入：用户发生<strong>使用消费</strong>时才确认使用收入。这两个数在这一页上永远分开列，不相加。</p>
-    <PeriodRangeControl date={date} mode={mode} range={range} onDateChange={(value) => setDate(value || fallbackDate)} onModeChange={setMode} />
+    <PeriodControls
+      day={date}
+      granularity={mode}
+      period={{ day: date, granularity: mode, ...range }}
+      dateLabel="统计日期"
+      dateAriaLabel="统计日期"
+      granularityAriaLabel="统计模式"
+      onDayChange={(value) => setDate(value || fallbackDate)}
+      onGranularityChange={setMode}
+    />
     <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

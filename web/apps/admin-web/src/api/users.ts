@@ -1,5 +1,9 @@
 import { apiClient, type ApiClient } from "./client";
-import type { FreshnessContract } from "@xingmang/ui-admin";
+import type {
+  FreshnessContract,
+  PeriodGranularity,
+  PeriodRange,
+} from "@xingmang/ui-admin";
 import type { ListOptions } from "./platform";
 
 /** 一个**可能缺席**的金额。
@@ -41,18 +45,13 @@ export interface PlatformUserItem {
 }
 
 /** 统计粒度。与后端 `platformusers.Granularity` 逐字对应。 */
-export type PeriodGranularity = "day" | "week" | "month";
+export type { PeriodGranularity } from "@xingmang/ui-admin";
 
 /** 服务端回显的统计区间。
  *
  *  `from` / `to` 是**闭区间**业务日。回显它们而不只回粒度：粒度是「周」时，
  *  人要能看见到底是哪七天——跨月那几天最容易理解错。 */
-export interface PeriodBody {
-  day: string;
-  granularity: PeriodGranularity;
-  from: string;
-  to: string;
-}
+export type PeriodBody = PeriodRange;
 
 /** 区间合计，**带覆盖率**。
  *
