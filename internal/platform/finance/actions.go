@@ -117,6 +117,15 @@ func accountSummary(a UpstreamAccount) map[string]any {
 	if a.PlatformID != "" {
 		m["platform_id"] = a.PlatformID
 	}
+	if a.UpstreamName != "" {
+		m["upstream_name"] = a.UpstreamName
+	}
+	if a.UpstreamContact != "" {
+		m["upstream_contact"] = a.UpstreamContact
+	}
+	if a.UpstreamGroup != "" {
+		m["upstream_group"] = a.UpstreamGroup
+	}
 	// 未配倍率时**不写这个键**，而不是写 "0" 或 ""：
 	// 「没有倍率」（订阅型）与「倍率是某个值」在审计上是两件事。
 	if !a.RechargeRatio.IsZero() {
@@ -208,6 +217,9 @@ func accountSetDef() action.Definition {
 			// 除数，前者只是定价分组的展示标注，**后端一次都不会乘它**。
 			// 同样是定点十进制字符串，理由同上。可空（多数渠道没有）。
 			{Name: "group_rate", Type: action.FieldString},
+			{Name: "upstream_name", Type: action.FieldString},
+			{Name: "upstream_contact", Type: action.FieldString},
+			{Name: "upstream_group", Type: action.FieldString},
 			{Name: "currency", Type: action.FieldString},
 			{Name: "business_day_tz", Type: action.FieldString},
 			// platform_id 是「哪个自营平台在用这个上游账号」的归属标注
@@ -252,17 +264,20 @@ func accountSetHandler(store *Store) action.Handler {
 		}
 
 		desired := UpstreamAccount{
-			SystemType:    systemType,
-			AccessMethod:  accessMethod,
-			BaseURL:       strings.TrimSpace(action.StringParam(params, "base_url")),
-			CredentialRef: strings.TrimSpace(action.StringParam(params, "credential_ref")),
-			RechargeRatio: ratio,
-			GroupRate:     groupRate,
-			Currency:      defaultIfBlank(action.StringParam(params, "currency"), DefaultCurrency),
-			BusinessDayTZ: defaultIfBlank(action.StringParam(params, "business_day_tz"), DefaultBusinessDayTZ),
-			PlatformID:    strings.TrimSpace(action.StringParam(params, "platform_id")),
-			Status:        Status(defaultIfBlank(action.StringParam(params, "status"), string(StatusActive))),
-			Environment:   p.Environment,
+			SystemType:      systemType,
+			AccessMethod:    accessMethod,
+			UpstreamName:    strings.TrimSpace(action.StringParam(params, "upstream_name")),
+			UpstreamContact: strings.TrimSpace(action.StringParam(params, "upstream_contact")),
+			UpstreamGroup:   strings.TrimSpace(action.StringParam(params, "upstream_group")),
+			BaseURL:         strings.TrimSpace(action.StringParam(params, "base_url")),
+			CredentialRef:   strings.TrimSpace(action.StringParam(params, "credential_ref")),
+			RechargeRatio:   ratio,
+			GroupRate:       groupRate,
+			Currency:        defaultIfBlank(action.StringParam(params, "currency"), DefaultCurrency),
+			BusinessDayTZ:   defaultIfBlank(action.StringParam(params, "business_day_tz"), DefaultBusinessDayTZ),
+			PlatformID:      strings.TrimSpace(action.StringParam(params, "platform_id")),
+			Status:          Status(defaultIfBlank(action.StringParam(params, "status"), string(StatusActive))),
+			Environment:     p.Environment,
 		}
 
 		idText := strings.TrimSpace(action.StringParam(params, "upstream_account_id"))

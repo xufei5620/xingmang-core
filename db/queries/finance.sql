@@ -19,13 +19,15 @@
 INSERT INTO finance.upstream_account (
     id, system_type, access_method, base_url, credential_ref,
     recharge_ratio, group_rate, currency, business_day_tz, status, environment,
-    platform_id, created_at, updated_at
+    platform_id, upstream_name, upstream_contact, upstream_group,
+    created_at, updated_at
 ) VALUES (
     sqlc.arg(id), sqlc.arg(system_type), sqlc.arg(access_method),
     sqlc.narg(base_url), sqlc.arg(credential_ref),
     sqlc.narg(recharge_ratio), sqlc.narg(group_rate),
     sqlc.arg(currency), sqlc.arg(business_day_tz),
     sqlc.arg(status), sqlc.arg(environment), sqlc.narg(platform_id),
+    sqlc.narg(upstream_name), sqlc.narg(upstream_contact), sqlc.narg(upstream_group),
     now(), now()
 )
 RETURNING *;
@@ -54,6 +56,9 @@ UPDATE finance.upstream_account SET
     business_day_tz = sqlc.arg(business_day_tz),
     status          = sqlc.arg(status),
     platform_id     = sqlc.narg(platform_id),
+    upstream_name   = sqlc.narg(upstream_name),
+    upstream_contact = sqlc.narg(upstream_contact),
+    upstream_group  = sqlc.narg(upstream_group),
     updated_at      = now()
 WHERE id = sqlc.arg(id)
 RETURNING *;

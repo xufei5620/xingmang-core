@@ -136,6 +136,12 @@ type UpstreamAccount struct {
 	SystemType   SystemType
 	AccessMethod AccessMethod
 
+	// UpstreamName / Contact / Group 是上游管理页手工维护的当前元数据。
+	// 空串 = 未登记，落库为 NULL；它们不参与供应商归并或任何金额计算。
+	UpstreamName    string
+	UpstreamContact string
+	UpstreamGroup   string
+
 	// BaseURL 是上游站网址（https，**不含任何凭证**）。订阅型可能没有可读端点，
 	// 故用空串表示「没有」。
 	BaseURL string

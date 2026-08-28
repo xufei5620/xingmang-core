@@ -110,20 +110,23 @@ func accountFromRow(r gen.FinanceUpstreamAccount) (UpstreamAccount, error) {
 		return UpstreamAccount{}, fmt.Errorf("账号 %s 的 group_rate: %w", r.ID, err)
 	}
 	return UpstreamAccount{
-		ID:            r.ID,
-		SystemType:    SystemType(r.SystemType),
-		AccessMethod:  AccessMethod(r.AccessMethod),
-		BaseURL:       textValue(r.BaseUrl),
-		CredentialRef: r.CredentialRef,
-		RechargeRatio: ratio,
-		GroupRate:     groupRate,
-		Currency:      r.Currency,
-		BusinessDayTZ: r.BusinessDayTz,
-		PlatformID:    textValue(r.PlatformID),
-		Status:        Status(r.Status),
-		Environment:   r.Environment,
-		CreatedAt:     fromTS(r.CreatedAt),
-		UpdatedAt:     fromTS(r.UpdatedAt),
+		ID:              r.ID,
+		SystemType:      SystemType(r.SystemType),
+		AccessMethod:    AccessMethod(r.AccessMethod),
+		UpstreamName:    textValue(r.UpstreamName),
+		UpstreamContact: textValue(r.UpstreamContact),
+		UpstreamGroup:   textValue(r.UpstreamGroup),
+		BaseURL:         textValue(r.BaseUrl),
+		CredentialRef:   r.CredentialRef,
+		RechargeRatio:   ratio,
+		GroupRate:       groupRate,
+		Currency:        r.Currency,
+		BusinessDayTZ:   r.BusinessDayTz,
+		PlatformID:      textValue(r.PlatformID),
+		Status:          Status(r.Status),
+		Environment:     r.Environment,
+		CreatedAt:       fromTS(r.CreatedAt),
+		UpdatedAt:       fromTS(r.UpdatedAt),
 	}, nil
 }
 
@@ -181,18 +184,21 @@ func (s *Store) CreateAccount(ctx context.Context, in UpstreamAccount) (Upstream
 	}
 
 	row, err := s.q.InsertUpstreamAccount(ctx, gen.InsertUpstreamAccountParams{
-		ID:            in.ID,
-		SystemType:    string(in.SystemType),
-		AccessMethod:  string(in.AccessMethod),
-		BaseUrl:       textPtr(in.BaseURL),
-		CredentialRef: in.CredentialRef,
-		RechargeRatio: ratioToNumeric(in.RechargeRatio),
-		GroupRate:     ratioToNumeric(in.GroupRate),
-		Currency:      in.Currency,
-		BusinessDayTz: in.BusinessDayTZ,
-		PlatformID:    textPtr(in.PlatformID),
-		Status:        string(in.Status),
-		Environment:   in.Environment,
+		ID:              in.ID,
+		SystemType:      string(in.SystemType),
+		AccessMethod:    string(in.AccessMethod),
+		BaseUrl:         textPtr(in.BaseURL),
+		CredentialRef:   in.CredentialRef,
+		RechargeRatio:   ratioToNumeric(in.RechargeRatio),
+		GroupRate:       ratioToNumeric(in.GroupRate),
+		Currency:        in.Currency,
+		BusinessDayTz:   in.BusinessDayTZ,
+		PlatformID:      textPtr(in.PlatformID),
+		UpstreamName:    textPtr(in.UpstreamName),
+		UpstreamContact: textPtr(in.UpstreamContact),
+		UpstreamGroup:   textPtr(in.UpstreamGroup),
+		Status:          string(in.Status),
+		Environment:     in.Environment,
 	})
 	if err != nil {
 		return UpstreamAccount{}, fmt.Errorf("insert upstream account: %w", err)
@@ -213,15 +219,18 @@ func (s *Store) UpdateAccount(ctx context.Context, in UpstreamAccount) (Upstream
 		return UpstreamAccount{}, err
 	}
 	row, err := s.q.UpdateUpstreamAccount(ctx, gen.UpdateUpstreamAccountParams{
-		ID:            in.ID,
-		BaseUrl:       textPtr(in.BaseURL),
-		CredentialRef: in.CredentialRef,
-		RechargeRatio: ratioToNumeric(in.RechargeRatio),
-		GroupRate:     ratioToNumeric(in.GroupRate),
-		Currency:      in.Currency,
-		BusinessDayTz: in.BusinessDayTZ,
-		PlatformID:    textPtr(in.PlatformID),
-		Status:        string(in.Status),
+		ID:              in.ID,
+		BaseUrl:         textPtr(in.BaseURL),
+		CredentialRef:   in.CredentialRef,
+		RechargeRatio:   ratioToNumeric(in.RechargeRatio),
+		GroupRate:       ratioToNumeric(in.GroupRate),
+		Currency:        in.Currency,
+		BusinessDayTz:   in.BusinessDayTZ,
+		PlatformID:      textPtr(in.PlatformID),
+		UpstreamName:    textPtr(in.UpstreamName),
+		UpstreamContact: textPtr(in.UpstreamContact),
+		UpstreamGroup:   textPtr(in.UpstreamGroup),
+		Status:          string(in.Status),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UpstreamAccount{}, fmt.Errorf("upstream account %s: %w", in.ID, ErrNotFound)

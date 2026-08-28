@@ -431,11 +431,17 @@ export interface UpstreamAccountItem {
   id: string;
   system_type: string;
   access_method: string;
+  /** 平台手工登记的当前元数据；空串 = 未接入。 */
+  upstream_name: string;
+  upstream_contact: string;
+  upstream_group: string;
   base_url: string;
   /** 只有引用，永不回明文。 */
   credential_ref: string;
   /** 规范存储量（除数，定点十进制字符串）。空串=未配置（订阅型本就没有倍率）。 */
   recharge_ratio: string;
+  /** 分组倍率，仅展示，永不参与金额计算。空串 = 未配置。 */
+  group_rate: string;
   /** 展示投影 = 1 / recharge_ratio。**只拿它显示，绝不用它反算成本**。 */
   recharge_cost_rate: string;
   currency: string;
