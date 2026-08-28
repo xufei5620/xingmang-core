@@ -177,6 +177,20 @@ type FinanceBalanceHistory struct {
 	Source            string
 }
 
+type FinancePlatformChannelBinding struct {
+	ID                uuid.UUID
+	Environment       string
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+	UpstreamAccountID uuid.UUID
+	ValidFrom         pgtype.Timestamptz
+	ValidTo           pgtype.Timestamptz
+	Provenance        string
+	Reason            string
+	CreatedBy         string
+	CreatedAt         pgtype.Timestamptz
+}
+
 type FinanceProfitDaily struct {
 	UpstreamAccountID uuid.UUID
 	BusinessDay       pgtype.Date
