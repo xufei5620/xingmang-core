@@ -270,6 +270,55 @@ const alertsBody = {
  *  的响应，而不是让它们落到 404 分支：那会让「趋势图挂了」这类用例看到一个
  *  与它无关的错误态，然后有人会去改断言而不是去查真正的原因。 */
 const financeChannelsBody = { items: [], from: "2026-08-28", to: "2026-08-28" };
+
+/** 渠道管理页的一行 = 一个上游账号（XM-0052）。
+ *
+ *  两条：一条计量型（有余额与可用天数），一条订阅型（没有余额这个概念）。
+ *  这两种在页面上必须长得不一样——订阅型显示 ¥0.00 余额会被当成「花光了」。 */
+function financeChannelRow(over: Record<string, unknown> = {}) {
+  return {
+    id: "acc-metered",
+    name: "上游甲",
+    system_type: "sub2api",
+    access_method: "upstream_key",
+    metered: true,
+    base_url: "https://relay-a.example.test",
+    platform_id: "sub2api",
+    credential_ref: "secret://xm/upstream/a",
+    recharge_ratio: "1.5",
+    recharge_cost_rate: "0.666667",
+    business_day_tz: "+08:00",
+    status: "active",
+    token_count: 1,
+    usage_revenue: { amount_minor: "100000000", currency: "CNY", scale: 6 },
+    supply_cost: { amount_minor: "70000000", currency: "CNY", scale: 6 },
+    gross_profit: { amount_minor: "30000000", currency: "CNY", scale: 6 },
+    gross_margin: "0.3",
+    coverage: {
+      row_count: 1,
+      revenue_known_rows: 1,
+      cost_known_rows: 1,
+      account_grain_rows: 0,
+      mixed_currency: false,
+      complete: true,
+    },
+    observed: { source: "test" },
+    runway: {
+      days: 12,
+      level: "serious",
+      reason: "",
+      window_days: 7,
+      covered_days: 7,
+      balance: { amount_minor: "3000000000", currency: "CNY", scale: 6 },
+      balance_observed_at: "2026-08-28T02:00:00Z",
+    },
+    ...over,
+  };
+}
+
+function financeChannelsWith(items: unknown[]) {
+  return { items, from: "2026-08-28", to: "2026-08-28" };
+}
 const financeUpstreamsBody = {
   items: [],
   from: "2026-08-28",
@@ -665,69 +714,90 @@ describe("平台概览的迷你趋势图", () => {
   });
 });
 
-describe("Sub2API 平台详情·渠道管理页签（原渠道明细页）", () => {
+describe("Sub2API 平台详情·渠道管理页签（XM-0052 逐格对齐原型）", () => {
+  // 行数据从「渠道余额指标」换成了 finance 汇总端点：一行 = 一个上游账号。
+  // 换粒度的理由见 ChannelTable 的文件头——指标那一行是平台自己的渠道，
+  // 与上游账号的 id 互不认识，按 id join 一条都对不上。
   beforeEach(() => {
     devLogin();
     stubFetch((url) =>
-      url.startsWith("/api/v1/metrics/history") ? okHandler(url) : url.startsWith("/api/v1/metrics")
-        ? fakeResponse(200, channelsBody)
+      url.startsWith("/api/v1/finance/channels/summary")
+        ? fakeResponse(
+            200,
+            financeChannelsWith([
+              financeChannelRow(),
+              financeChannelRow({
+                id: "acc-sub",
+                name: "订阅乙",
+                access_method: "subscription_account",
+                metered: false,
+                runway: {
+                  days: null,
+                  level: "",
+                  reason: "not_applicable",
+                  window_days: 7,
+                  covered_days: 0,
+                },
+              }),
+            ]),
+          )
         : okHandler(url),
     );
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("逐渠道列出余额、币种与令牌状态，并带上该指标的新鲜度", async () => {
+  it("逐个上游账号列出供给成本、我方计费消耗与毛利", async () => {
     renderRoute("/platforms/sub2api?tab=upstream");
-    expect(await screen.findByText("渠道甲")).not.toBeNull();
-    expect(screen.getByText("¥100.00")).not.toBeNull();
-    expect(screen.getByText("¥25.00")).not.toBeNull();
-    // 「有效 / 失效」现在也出现在筛选下拉的 <option> 里，所以限定在表格内找
-    const channelTable = within(screen.getByRole("table"));
-    expect(channelTable.getByText("有效")).not.toBeNull();
-    expect(channelTable.getByText("失效")).not.toBeNull();
-    // 新鲜度徽章与数据时间跟着面板搬进页签，没有在迁移里丢掉（规格 §9.1）
-    expect(screen.getByText("数据新鲜")).not.toBeNull();
-    expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC/)).not.toBeNull();
-    expect(screen.getByText(/合计 ¥125\.00/)).not.toBeNull();
+    expect(await screen.findByText("上游甲")).not.toBeNull();
+    const table = within(screen.getByRole("table"));
+    expect(table.getByText("订阅乙")).not.toBeNull();
+    // scale-6 微单位按标度降到分，不是差一万倍的那个数
+    expect(table.getAllByText("¥70.00").length).toBeGreaterThan(0);
+    expect(table.getAllByText("¥30.00").length).toBeGreaterThan(0);
+    // 毛利率是后端给的，前端只格式化
+    expect(table.getAllByText("30%").length).toBeGreaterThan(0);
   });
 
-  it("指标未初始化时不画表，明说没有可信明细（宪法 12 条）", async () => {
-    const uninitialized = {
-      items: [
-        {
-          ...channelsBody.items[0],
-          freshness: {
-            state: "uninitialized",
-            staleness_seconds: null,
-            threshold_seconds: 1800,
-            is_partial: false,
-            observed_at: null,
-            last_success: null,
-            last_error_code: "",
-          },
-        },
-      ],
-    };
+  it("计量型显示余额与可用天数，订阅型说明它没有余额这个概念", async () => {
+    renderRoute("/platforms/sub2api?tab=upstream");
+    expect(await screen.findByText("上游甲")).not.toBeNull();
+    const table = within(screen.getByRole("table"));
+    expect(table.getByText(/约 12 天/)).not.toBeNull();
+    expect(table.getByText(/余额观测/)).not.toBeNull();
+    // 订阅型不显示 ¥0.00 余额——那会被读成「花光了」
+    expect(table.getByText(/订阅型渠道没有余额，可用天数对它无意义/)).not.toBeNull();
+  });
+
+  it("口径声明照抄原型，并给出去上游管理的入口", async () => {
+    renderRoute("/platforms/sub2api?tab=upstream");
+    expect(
+      await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不在这里汇总上游/),
+    ).not.toBeNull();
+    expect(
+      screen.getByRole("link", { name: "上游管理" }).getAttribute("href"),
+    ).toBe("/platforms/sub2api?tab=suppliers");
+  });
+
+  it("该环境没有上游账号时给空态而不是空表", async () => {
     stubFetch((url) =>
-      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
-        ? fakeResponse(200, uninitialized)
+      url.startsWith("/api/v1/finance/channels/summary")
+        ? fakeResponse(200, financeChannelsWith([]))
         : okHandler(url),
     );
     renderRoute("/platforms/sub2api?tab=upstream");
-    // 页头徽章与空态各一处，都在说同一件事
-    expect((await screen.findAllByText("未初始化")).length).toBe(2);
-    expect(screen.getByText(/没有可信的渠道明细/)).not.toBeNull();
-    expect(screen.queryByText("渠道甲")).toBeNull();
+    expect(await screen.findByText("还没有上游账号")).not.toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
   });
 
-  it("该环境没有渠道余额指标时给空态而不是空表", async () => {
+  it("汇总端点读失败时给错误态，而不是一张空表", async () => {
     stubFetch((url) =>
-      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
-        ? fakeResponse(200, { items: [] })
+      url.startsWith("/api/v1/finance/channels/summary")
+        ? fakeResponse(500, { error: { code: "boom", message: "读取失败" } })
         : okHandler(url),
     );
     renderRoute("/platforms/sub2api?tab=upstream");
-    expect(await screen.findByText("暂无渠道余额指标")).not.toBeNull();
+    expect(await screen.findByRole("button", { name: /重试/ })).not.toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
   });
 });
 
@@ -755,44 +825,54 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     expect(screen.queryByText("未登记")).toBeNull();
   });
 
-  it("渠道表逐渠道给出启停、余额、错误率、模型数与延迟", async () => {
+  // XM-0052：渠道管理页签换成 finance 汇总端点驱动（一行 = 一个上游账号）。
+  //
+  // ⚠️ 原来这里有三列来自 `newapi.channels.status` 指标（启停 / 错误率 / 延迟），
+  // 本片按原型把它们从这张表上去掉了——那条指标一行是 NewAPI 自己的渠道，
+  // 与上游账号对不上号。**逐渠道的错误率因此在 UI 上暂时没有去处**
+  // （概览卡片只给「3 个渠道 · 启用 2 · 异常 1」这种聚合），
+  // 它应该跟着渠道保障（M1.5）一起回来。下面那条概览用例是它仅剩的守卫。
+  it("渠道管理页签按上游账号出行，并显示经营三列", async () => {
+    stubFetch((url) =>
+      url.startsWith("/api/v1/finance/channels/summary")
+        ? fakeResponse(
+            200,
+            financeChannelsWith([
+              financeChannelRow({ id: "np-1", name: "上游甲", system_type: "newapi", platform_id: "newapi" }),
+            ]),
+          )
+        : okHandler(url),
+    );
     renderRoute("/platforms/newapi?tab=upstream");
     expect(await screen.findByText("上游甲")).not.toBeNull();
-    expect(screen.getByText("上游乙")).not.toBeNull();
-    expect(screen.getByText("自建丙")).not.toBeNull();
-
-    const newapiTable = within(screen.getByRole("table"));
-    expect(newapiTable.getAllByText("启用")).toHaveLength(2);
-    expect(newapiTable.getByText("停用")).not.toBeNull();
-    expect(screen.getByText("¥100.00")).not.toBeNull();
-
-    // ppm → 百分比，两位小数，纯整数运算：1200 ppm = 0.12%，187500 ppm = 18.75%
-    expect(screen.getByText("0.12%")).not.toBeNull();
-    expect(screen.getByText("18.75%")).not.toBeNull();
-    // 停用渠道的 0 ppm 照样显示成 0.00%，不显示成「—」
-    expect(screen.getByText("0.00%")).not.toBeNull();
-
-    expect(screen.getByText("2,340 ms")).not.toBeNull();
-    // 新鲜度徽章与数据时间必须跟着表走（规格 §9.1）：一张看着很具体的明细表
-    // 最容易让人忘记问「这是什么时候的数」
-    expect(screen.getByText("数据新鲜")).not.toBeNull();
-    expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC/)).not.toBeNull();
+    const table = within(screen.getByRole("table"));
+    expect(table.getByText("供给成本")).not.toBeNull();
+    expect(table.getByText("我方计费消耗")).not.toBeNull();
+    expect(table.getByText("毛利")).not.toBeNull();
+    // 原型的 NewAPI 表没有「成功率」这一列，Sub2API 才有
+    expect(table.queryByText("成功率")).toBeNull();
   });
 
-  it("余额未配置显示「未配置」，不显示成 ¥0.00（两者是相反的两件事）", async () => {
+  it("说明与 Sub2API 共用上游目录但各自核算", async () => {
+    stubFetch((url) =>
+      url.startsWith("/api/v1/finance/channels/summary")
+        ? fakeResponse(200, financeChannelsWith([]))
+        : okHandler(url),
+    );
     renderRoute("/platforms/newapi?tab=upstream");
-    expect(await screen.findByText("自建丙")).not.toBeNull();
-    expect(screen.getByText("未配置")).not.toBeNull();
-    // ¥0.00 只应在真的有一条余额为 0 的渠道时出现——本夹具里没有
-    expect(screen.queryByText("¥0.00")).toBeNull();
+    expect(
+      await screen.findByText(/NewAPI 与 Sub2API 共用上游目录和充值成本率/),
+    ).not.toBeNull();
   });
 
-  it("表头摘要给出渠道数、启用数与异常判据本身", async () => {
+  it("该环境没有上游账号时给空态而不是空表", async () => {
+    stubFetch((url) =>
+      url.startsWith("/api/v1/finance/channels/summary")
+        ? fakeResponse(200, financeChannelsWith([]))
+        : okHandler(url),
+    );
     renderRoute("/platforms/newapi?tab=upstream");
-    expect(await screen.findByText("上游甲")).not.toBeNull();
-    expect(screen.getByText(/3 个渠道 · 启用 2/)).not.toBeNull();
-    // 判据一起显示：看板说「异常 N」时，人要能当场看出异常是按什么算的
-    expect(screen.getByText(/异常判据 错误率 ≥ 5\.00%/)).not.toBeNull();
+    expect(await screen.findByText("还没有上游账号")).not.toBeNull();
   });
 
   it("概览页签把 newapi.* 指标渲染成卡片", async () => {
@@ -809,43 +889,6 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     ).not.toBeNull();
   });
 
-  it("该环境没有渠道状态指标时给空态而不是空表", async () => {
-    stubFetch((url) =>
-      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
-        ? fakeResponse(200, { items: [] })
-        : okHandler(url),
-    );
-    renderRoute("/platforms/newapi?tab=upstream");
-    expect(await screen.findByText("暂无渠道状态指标")).not.toBeNull();
-  });
-
-  it("指标未初始化时不画表，明说没有可信明细（宪法 12 条）", async () => {
-    const uninitialized = {
-      items: [
-        {
-          ...newapiChannelsBody.items[0],
-          freshness: {
-            state: "uninitialized",
-            staleness_seconds: null,
-            threshold_seconds: 1800,
-            is_partial: false,
-            observed_at: null,
-            last_success: null,
-            last_error_code: "",
-          },
-        },
-      ],
-    };
-    stubFetch((url) =>
-      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
-        ? fakeResponse(200, uninitialized)
-        : okHandler(url),
-    );
-    renderRoute("/platforms/newapi?tab=upstream");
-    expect((await screen.findAllByText("未初始化")).length).toBe(2);
-    expect(screen.getByText(/没有可信的渠道明细/)).not.toBeNull();
-    expect(screen.queryByText("上游甲")).toBeNull();
-  });
 });
 
 describe("审计事件页", () => {
@@ -1499,8 +1542,8 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
     // 点了不会切
     fireEvent.mouseDown(screen.getByRole("tab", { name: "渠道管理" }), { button: 0 });
     expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
-    // okHandler 的指标里没有渠道余额这一条，面板据此给空态而不是一张空表
-    expect(await screen.findByText("暂无渠道余额指标")).not.toBeNull();
+    // okHandler 的 finance 汇总是空的，面板据此给空态而不是一张空表
+    expect(await screen.findByText("还没有上游账号")).not.toBeNull();
   });
 
   it("有子页签的格子展开子页签条，逐字对齐 §2.2", async () => {

@@ -19,6 +19,7 @@ import {
   type UpstreamSummary,
 } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
+import { RUNWAY_REASON_TEXT, RUNWAY_TONE, runwayNote } from "../lib/runway";
 import { ApiStateView } from "./ApiStateView";
 
 /** 平台概览页上的成本三卡（XM-0037d，设计稿 §8.5 + UI 交接 §10.3/§10.4/§10.5）。
@@ -134,25 +135,6 @@ function coverageNote(channels: ChannelSummary[]): string {
   return parts.join(" · ");
 }
 
-/** 可用天数给不出时的说法。**每种都有自己的话**——一个统一的「暂无数据」
- *  会让「这条渠道不该有余额」和「余额采集还没接通」看起来是同一件事。 */
-const RUNWAY_REASON_TEXT: Record<string, string> = {
-  not_applicable: "订阅型渠道没有余额，可用天数对它无意义",
-  no_balance: "尚未读到上游余额（余额采集未接通）",
-  balance_stale: "余额观测已过期，不显示伪精确天数",
-  no_consumption: "窗口内没有已知消耗，除不出天数",
-  currency_mismatch: "余额与消耗币种不一致，不做换算",
-};
-
-/** 三档预警的语气。**名字的严重程度与数值方向相反**（后端沿用 SoloAI 命名）：
- *  天数越少越严重，critical 最紧、serious 最松。 */
-const RUNWAY_TONE: Record<string, "danger" | "warning" | "info" | "success"> = {
-  critical: "danger",
-  warning: "warning",
-  serious: "info",
-  healthy: "success",
-};
-
 /** 从一组上游里挑出**最紧的**那条可用天数。
  *
  *  取最小值而不是平均：可用天数是预警，一条快见底的上游不该被另外几条
@@ -166,12 +148,6 @@ function tightestRunway(upstreams: UpstreamSummary[]): UpstreamSummary | null {
     }
   }
   return tightest;
-}
-
-function runwayNote(runway: Runway, thresholds: RunwayThresholds): string {
-  const window = `近 ${runway.windowDays} 个完整业务日（实到 ${runway.coveredDays} 天）`;
-  const tiers = `告警档 ≤${thresholds.criticalDays}/${thresholds.warningDays}/${thresholds.seriousDays} 天`;
-  return `${window} · ${tiers}`;
 }
 
 /** FinanceSummaryCards 渲染一个平台的成本三卡 + 贡献利润占位。 */
