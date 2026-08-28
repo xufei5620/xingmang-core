@@ -9,6 +9,8 @@ import {
 } from "../api/finance";
 import {
   SUPPORTED_FINANCE_CURRENCIES,
+  MAX_AMOUNT_INPUT_LENGTH,
+  MAX_COUNT_INPUT_LENGTH,
   buildSubscriptionBatchParams,
   effectiveDaysInclusive,
   validateSubscriptionBatchForm,
@@ -19,7 +21,8 @@ import { ActionErrorNote } from "./ActionErrorNote";
 
 export interface SubscriptionBatchDialogProps {
   account: UpstreamAccountItem;
-  proxyPage: ProxyAssetPage;
+  proxyPage?: ProxyAssetPage;
+  proxyPageStatus?: "pending" | "error" | "success";
   disabled?: boolean;
   onDone: (runId: string) => void;
 }
@@ -29,6 +32,7 @@ const NO_PROXY = "__none__";
 export function SubscriptionBatchDialog({
   account,
   proxyPage,
+  proxyPageStatus,
   disabled = false,
   onDone,
 }: SubscriptionBatchDialogProps) {
@@ -38,6 +42,8 @@ export function SubscriptionBatchDialog({
   const [attempts, setAttempts] = useState(0);
   const prefix = useId();
   const summaryRef = useRef<HTMLDivElement>(null);
+  const proxyGateMessage = describeProxyGate(proxyPageStatus, proxyPage);
+  const proxiesReady = proxyGateMessage === null;
 
   const mutation = useMutation({
     mutationFn: (form: SubscriptionBatchFormValues) =>
@@ -79,6 +85,9 @@ export function SubscriptionBatchDialog({
 
   const submit = () => {
     setAttempts((count) => count + 1);
+    // 对话框打开后 Query 也可能从 success 变为 error；提交点再守一次，
+    // 不让不可变批次在未知代理集合下落库。
+    if (!proxiesReady) return;
     const found = validateSubscriptionBatchForm(values);
     setErrors(found);
     if (Object.keys(found).length > 0) return;
@@ -88,16 +97,18 @@ export function SubscriptionBatchDialog({
   const days = effectiveDaysInclusive(values.startsOn, values.expiresOn);
   const proxyOptions = [
     { value: NO_PROXY, label: "不使用代理（代理成本为已知 0）" },
-    ...proxyPage.items.map((proxy) => ({
+    ...(proxyPage?.items ?? []).map((proxy) => ({
       value: proxy.id,
       label: `${proxy.buy_platform || "未标购买平台"} · ${proxy.id} · 到期 ${proxy.expires_on}`,
     })),
   ];
 
   return (
-    <Dialog
+    <div className="flex flex-col items-end gap-1">
+      <Dialog
       open={open}
       onOpenChange={(next) => {
+        if (next && !proxiesReady) return;
         setOpen(next);
         if (next) setValues(initialValues(account));
         else {
@@ -107,7 +118,15 @@ export function SubscriptionBatchDialog({
         }
       }}
       trigger={
-        <Button size="sm" disabled={disabled} title={disabled ? `需要 ${SUBSCRIPTION_MANAGE_PERMISSION}` : undefined}>
+        <Button
+          size="sm"
+          disabled={disabled || !proxiesReady}
+          title={
+            disabled
+              ? `需要 ${SUBSCRIPTION_MANAGE_PERMISSION}`
+              : proxyGateMessage ?? undefined
+          }
+        >
           登记/续费新增批次
         </Button>
       }
@@ -136,6 +155,7 @@ export function SubscriptionBatchDialog({
           >
             <Input
               value={values.paidMajor}
+              maxLength={MAX_AMOUNT_INPUT_LENGTH}
               inputMode="decimal"
               invalid={Boolean(errors.paidMajor)}
               onChange={(event) => set("paidMajor", event.target.value)}
@@ -150,6 +170,7 @@ export function SubscriptionBatchDialog({
           >
             <Input
               value={values.surchargeMajor}
+              maxLength={MAX_AMOUNT_INPUT_LENGTH}
               inputMode="decimal"
               invalid={Boolean(errors.surchargeMajor)}
               onChange={(event) => set("surchargeMajor", event.target.value)}
@@ -168,6 +189,7 @@ export function SubscriptionBatchDialog({
           <FormField label="账号数量" htmlFor={`${prefix}-accounts`} required error={errors.accountCount}>
             <Input
               value={values.accountCount}
+              maxLength={MAX_COUNT_INPUT_LENGTH}
               inputMode="numeric"
               invalid={Boolean(errors.accountCount)}
               onChange={(event) => set("accountCount", event.target.value)}
@@ -208,7 +230,7 @@ export function SubscriptionBatchDialog({
             onValueChange={(value) => set("proxyAssetId", value === NO_PROXY ? "" : value)}
           />
         </FormField>
-        {proxyPage.truncated ? (
+        {proxyPage?.truncated ? (
           <p role="status" className="text-xs text-warning">
             代理选择结果不完整：read page 已截断（limit {proxyPage.limit}），不能据此声称已列出全部代理。
           </p>
@@ -231,13 +253,29 @@ export function SubscriptionBatchDialog({
           <Button type="button" variant="secondary" size="sm" onClick={() => setOpen(false)}>
             取消
           </Button>
-          <Button type="submit" size="sm" loading={mutation.isPending}>
+          <Button type="submit" size="sm" loading={mutation.isPending} disabled={!proxiesReady}>
             登记批次
           </Button>
         </div>
       </form>
-    </Dialog>
+      </Dialog>
+      {proxyGateMessage ? (
+        <p role="status" className="max-w-xs text-right text-xs text-warning">
+          {proxyGateMessage}
+        </p>
+      ) : null}
+    </div>
   );
+}
+
+function describeProxyGate(
+  status: SubscriptionBatchDialogProps["proxyPageStatus"],
+  page: ProxyAssetPage | undefined,
+): string | null {
+  if (status === "pending") return "正在读取代理资产；批次登记暂时锁定。";
+  if (status === "error") return "代理资产读取失败；批次登记已锁定，请先重试只读查询。";
+  if (status !== "success" || !page) return "代理资产列表状态未知；批次登记已锁定。";
+  return null;
 }
 
 function initialValues(account: UpstreamAccountItem): SubscriptionBatchFormValues {

@@ -41,6 +41,10 @@ const SCALE_FACTOR = 1_000_000n;
 const MAX_SIGNED_INT64 = 9_223_372_036_854_775_807n;
 // account_count / shared_account_count 最终落 PostgreSQL integer（int4）。
 const MAX_POSTGRES_INTEGER = 2_147_483_647n;
+/** 对齐后端 money.maxAmountTextLen；必须先于正则与 BigInt 执行。 */
+export const MAX_AMOUNT_INPUT_LENGTH = 40;
+/** int4 最大值是 10 位十进制；先挡超长文本，再进入正则与 BigInt。 */
+export const MAX_COUNT_INPUT_LENGTH = 10;
 
 /** 与 money.CurrencyScale 已登记代码一致；未知币种不猜最小单位位数。 */
 export const SUPPORTED_FINANCE_CURRENCIES = [
@@ -61,6 +65,9 @@ const SUPPORTED_CURRENCY_SET = new Set<string>(SUPPORTED_FINANCE_CURRENCIES);
 const USERINFO_URL = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]*@/;
 
 export function parseScale6MajorUnits(raw: string, required: boolean): AmountParseResult {
+  if (raw.length > MAX_AMOUNT_INPUT_LENGTH) {
+    return { ok: false, error: `金额文本最多 ${MAX_AMOUNT_INPUT_LENGTH} 个字符` };
+  }
   const value = raw.trim();
   if (!value) {
     return required ? { ok: false, error: "金额必填" } : { ok: true, minor: "0" };
@@ -96,7 +103,9 @@ export function validateSubscriptionBatchForm(
   const dates = validateDateRange(values.startsOn, values.expiresOn);
   if (dates.start) errors.startsOn = dates.start;
   if (dates.end) errors.expiresOn = dates.end;
-  if (safePositiveInteger(values.accountCount) === null) {
+  if (values.accountCount.length > MAX_COUNT_INPUT_LENGTH) {
+    errors.accountCount = `账号数量最多 ${MAX_COUNT_INPUT_LENGTH} 个字符`;
+  } else if (safePositiveInteger(values.accountCount) === null) {
     errors.accountCount = "账号数量必须是 1 到 2147483647 的整数";
   }
   return errors;
@@ -137,7 +146,9 @@ export function validateProxyAssetForm(
     const dates = validateDateRange(values.openedOn, values.expiresOn);
     if (dates.start) errors.openedOn = dates.start;
     if (dates.end) errors.expiresOn = dates.end;
-    if (safePositiveInteger(values.sharedAccountCount) === null) {
+    if (values.sharedAccountCount.length > MAX_COUNT_INPUT_LENGTH) {
+      errors.sharedAccountCount = `共享账号数量最多 ${MAX_COUNT_INPUT_LENGTH} 个字符`;
+    } else if (safePositiveInteger(values.sharedAccountCount) === null) {
       errors.sharedAccountCount = "共享账号数量必须是 1 到 2147483647 的整数";
     }
   }
@@ -242,6 +253,7 @@ function dayIndex(raw: string): number | null {
 }
 
 function safePositiveInteger(raw: string): number | null {
+  if (raw.length > MAX_COUNT_INPUT_LENGTH) return null;
   const value = raw.trim();
   if (!/^[1-9]\d*$/.test(value)) return null;
   const integer = BigInt(value);

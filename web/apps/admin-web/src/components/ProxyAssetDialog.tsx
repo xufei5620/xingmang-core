@@ -10,6 +10,8 @@ import {
 import { formatScaledMinorUnits } from "../lib/money";
 import {
   SUPPORTED_FINANCE_CURRENCIES,
+  MAX_AMOUNT_INPUT_LENGTH,
+  MAX_COUNT_INPUT_LENGTH,
   buildProxyAssetParams,
   effectiveDaysInclusive,
   validateProxyAssetForm,
@@ -143,6 +145,7 @@ export function ProxyAssetDialog({
             <FormField label="实际支付" htmlFor={`${prefix}-paid`} required error={errors.paidMajor}>
               <Input
                 value={values.paidMajor}
+                maxLength={MAX_AMOUNT_INPUT_LENGTH}
                 inputMode="decimal"
                 invalid={Boolean(errors.paidMajor)}
                 onChange={(event) => set("paidMajor", event.target.value)}
@@ -152,6 +155,7 @@ export function ProxyAssetDialog({
             <FormField label="附加费用" htmlFor={`${prefix}-surcharge`} error={errors.surchargeMajor} hint="可留空；空白明确写为 0">
               <Input
                 value={values.surchargeMajor}
+                maxLength={MAX_AMOUNT_INPUT_LENGTH}
                 inputMode="decimal"
                 invalid={Boolean(errors.surchargeMajor)}
                 onChange={(event) => set("surchargeMajor", event.target.value)}
@@ -170,6 +174,7 @@ export function ProxyAssetDialog({
             <FormField label="共享账号数量" htmlFor={`${prefix}-shared-count`} required error={errors.sharedAccountCount}>
               <Input
                 value={values.sharedAccountCount}
+                maxLength={MAX_COUNT_INPUT_LENGTH}
                 inputMode="numeric"
                 invalid={Boolean(errors.sharedAccountCount)}
                 onChange={(event) => set("sharedAccountCount", event.target.value)}

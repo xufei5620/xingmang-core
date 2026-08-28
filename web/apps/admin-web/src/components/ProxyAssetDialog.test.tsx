@@ -93,6 +93,10 @@ describe("代理资产登记 / 修改对话框", () => {
     const onDone = vi.fn();
     const dialog = await openDialog(false, onDone);
 
+    expect((dialog.getByLabelText(/实际支付/) as HTMLInputElement).maxLength).toBe(40);
+    expect((dialog.getByLabelText(/附加费用/) as HTMLInputElement).maxLength).toBe(40);
+    expect((dialog.getByLabelText(/共享账号数量/) as HTMLInputElement).maxLength).toBe(10);
+
     fireEvent.change(dialog.getByLabelText(/实际支付/), { target: { value: "6.20" } });
     fireEvent.change(dialog.getByLabelText(/开通日期/), { target: { value: "2026-08-01" } });
     fireEvent.change(dialog.getByLabelText(/到期日期/), { target: { value: "2026-08-31" } });

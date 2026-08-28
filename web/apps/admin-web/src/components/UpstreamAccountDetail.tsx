@@ -188,7 +188,7 @@ function SubscriptionSection({
 
   const batchPage = batches.data;
   const proxyPage = proxies.data;
-  const proxyFallback = { items: [], truncated: false, limit: 0, as_of: "" };
+  const proxyPageStatus = proxies.isError ? "error" : proxies.isSuccess ? "success" : "pending";
   const linkedProxies = (proxyPage?.items ?? []).filter((proxy) =>
     (batchPage?.items ?? []).some((batch) => batch.proxy_asset_id === proxy.id),
   );
@@ -200,7 +200,8 @@ function SubscriptionSection({
           <h4 className="text-xs font-medium text-fg">订阅批次</h4>
           <SubscriptionBatchDialog
             account={account}
-            proxyPage={proxyPage ?? proxyFallback}
+            proxyPage={proxyPage}
+            proxyPageStatus={proxyPageStatus}
             disabled={!canManage}
             onDone={(runId) => afterWrite({ title: "订阅批次已登记", runId })}
           />

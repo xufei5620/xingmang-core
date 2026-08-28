@@ -120,10 +120,8 @@ describe("订阅维护权限与列表诚实性", () => {
   it("read+write 才显示可用的两个独立 Action 控件", async () => {
     const fetchMock = stubSubscriptionPages();
     renderDetail([FINANCE_READ_PERMISSION, SUBSCRIPTION_MANAGE_PERMISSION]);
-    expect(
-      (await screen.findByRole("button", { name: "登记/续费新增批次" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(false);
+    const batchTrigger = await screen.findByRole("button", { name: "登记/续费新增批次" });
+    await vi.waitFor(() => expect((batchTrigger as HTMLButtonElement).disabled).toBe(false));
     expect((screen.getByRole("button", { name: "登记代理资产" }) as HTMLButtonElement).disabled)
       .toBe(false);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/finance/")).length).toBe(2);
@@ -155,6 +153,50 @@ describe("订阅维护权限与列表诚实性", () => {
     expect(screen.getAllByText(/派生金额截至 2026-08-28/).length).toBe(2);
   });
 
+  it("代理页 pending 时批次登记 fail closed，并明确说明正在读取", async () => {
+    const pending = new Promise<Response>(() => {});
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes("/finance/proxy-assets")) return pending;
+      return Promise.resolve(
+        fakeResponse({ items: [], truncated: false, limit: 200, as_of: "2026-08-28" }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderDetail([FINANCE_READ_PERMISSION, SUBSCRIPTION_MANAGE_PERMISSION]);
+
+    expect(await screen.findByText(/正在读取代理资产.*批次登记/)).toBeTruthy();
+    const trigger = screen.getByRole("button", { name: "登记/续费新增批次" });
+    expect((trigger as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/actions/"))).toBe(false);
+  });
+
+  it("代理页 error 时批次登记 fail closed，不把失败伪装成空代理列表", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes("/finance/proxy-assets")) {
+        return Promise.resolve(
+          fakeResponse(
+            { error: { code: "INTERNAL", message: "代理资产读取失败", request_id: "req-proxy" } },
+            500,
+          ),
+        );
+      }
+      return Promise.resolve(
+        fakeResponse({ items: [], truncated: false, limit: 200, as_of: "2026-08-28" }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderDetail([FINANCE_READ_PERMISSION, SUBSCRIPTION_MANAGE_PERMISSION]);
+
+    expect(await screen.findByText(/代理资产读取失败.*批次登记/)).toBeTruthy();
+    const trigger = screen.getByRole("button", { name: "登记/续费新增批次" });
+    expect((trigger as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/actions/"))).toBe(false);
+  });
+
   it("非 subscription_account 行不渲染订阅维护区，也不发批次/代理查询", () => {
     const fetchMock = stubSubscriptionPages();
     renderDetail(
@@ -171,7 +213,9 @@ describe("订阅维护权限与列表诚实性", () => {
       FINANCE_READ_PERMISSION,
       SUBSCRIPTION_MANAGE_PERMISSION,
     ]);
-    fireEvent.click(await screen.findByRole("button", { name: "登记/续费新增批次" }));
+    const batchTrigger = await screen.findByRole("button", { name: "登记/续费新增批次" });
+    await vi.waitFor(() => expect((batchTrigger as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(batchTrigger);
     const dialog = await screen.findByRole("dialog");
     fireEvent.change(screen.getByLabelText(/实际支付/), { target: { value: "29.99" } });
     fireEvent.change(screen.getByLabelText(/开始日期/), { target: { value: "2026-08-01" } });

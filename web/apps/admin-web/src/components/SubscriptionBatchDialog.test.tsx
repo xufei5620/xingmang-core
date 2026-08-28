@@ -53,6 +53,7 @@ async function openDialog(
         <SubscriptionBatchDialog
           account={account()}
           proxyPage={emptyProxies}
+          proxyPageStatus="success"
           onDone={() => {}}
           {...props}
         />
@@ -68,6 +69,9 @@ describe("订阅批次登记对话框", () => {
 
   it("从账号带入币种，日期只派生含两端天数，不计算摊销金额", async () => {
     const dialog = await openDialog();
+    expect((dialog.getByLabelText(/实际支付/) as HTMLInputElement).maxLength).toBe(40);
+    expect((dialog.getByLabelText(/附加费用/) as HTMLInputElement).maxLength).toBe(40);
+    expect((dialog.getByLabelText(/账号数量/) as HTMLInputElement).maxLength).toBe(10);
     expect(dialog.getByRole("combobox", { name: "币种" }).textContent).toContain("USD");
     fireEvent.change(dialog.getByLabelText(/开始日期/), { target: { value: "2026-08-01" } });
     fireEvent.change(dialog.getByLabelText(/到期日期/), { target: { value: "2026-08-31" } });
@@ -115,6 +119,7 @@ describe("订阅批次登记对话框", () => {
           <SubscriptionBatchDialog
             account={account()}
             proxyPage={emptyProxies}
+            proxyPageStatus="success"
             disabled
             onDone={() => {}}
           />
@@ -125,5 +130,68 @@ describe("订阅批次登记对话框", () => {
     expect((trigger as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(trigger);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it.each([
+    ["pending", emptyProxies, /正在读取代理资产/],
+    ["error", emptyProxies, /代理资产读取失败/],
+    ["success", undefined, /代理资产列表状态未知/],
+  ] as const)("代理页 %s 时 fail closed，不开放 Action", (status, page, message) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <SubscriptionBatchDialog
+            account={account()}
+            proxyPage={page}
+            proxyPageStatus={status}
+            onDone={() => {}}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "登记/续费新增批次" });
+    expect((trigger as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(message)).toBeTruthy();
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("代理页从 pending 转为成功且有 page 后才开放", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <SubscriptionBatchDialog
+            account={account()}
+            proxyPageStatus="pending"
+            onDone={() => {}}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect((screen.getByRole("button", { name: "登记/续费新增批次" }) as HTMLButtonElement).disabled)
+      .toBe(true);
+
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <SubscriptionBatchDialog
+            account={account()}
+            proxyPage={emptyProxies}
+            proxyPageStatus="success"
+            onDone={() => {}}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const trigger = screen.getByRole("button", { name: "登记/续费新增批次" });
+    expect((trigger as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("dialog")).toBeTruthy();
   });
 });

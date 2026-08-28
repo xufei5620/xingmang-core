@@ -40,6 +40,14 @@ function proxy(over: Partial<ProxyAssetFormValues> = {}): ProxyAssetFormValues {
 }
 
 describe("scale-6 人类金额输入", () => {
+  it("在正则与 BigInt 前拒绝超过 40 个字符的输入", () => {
+    expect(parseScale6MajorUnits("9".repeat(41), true)).toEqual({
+      ok: false,
+      error: "金额文本最多 40 个字符",
+    });
+    expect(parseScale6MajorUnits("0".repeat(40), true).ok).toBe(true);
+  });
+
   it("只用字符串 / BigInt 归一化零、前导零、尾随零与 6 位小数", () => {
     expect(parseScale6MajorUnits("0", true)).toEqual({ ok: true, minor: "0" });
     expect(parseScale6MajorUnits("0001.230000", true)).toEqual({
@@ -91,6 +99,8 @@ describe("订阅批次表单", () => {
     }
     expect(validateSubscriptionBatchForm(batch({ accountCount: "2147483647" })).accountCount)
       .toBeUndefined();
+    expect(validateSubscriptionBatchForm(batch({ accountCount: "1".repeat(11) })).accountCount)
+      .toBe("账号数量最多 10 个字符");
   });
 
   it("币种必须是后端已经支持的三位代码，不猜未知币种", () => {
@@ -134,6 +144,10 @@ describe("代理资产表单", () => {
       validateProxyAssetForm(proxy({ sharedAccountCount: "2147483648" }), "create")
         .sharedAccountCount,
     ).toBeTruthy();
+    expect(
+      validateProxyAssetForm(proxy({ sharedAccountCount: "1".repeat(11) }), "create")
+        .sharedAccountCount,
+    ).toBe("共享账号数量最多 10 个字符");
   });
 
   it("CredentialRef 只认 secret://；错误不回显被拒的疑似明文", () => {
