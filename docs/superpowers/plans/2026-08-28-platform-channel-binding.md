@@ -196,7 +196,7 @@ func TestReportedCountUnknownDiffersFromExplicitZero(t *testing.T) {
 
 ```powershell
 go test ./connectors/sub2api/... ./connectors/newapi/... `
-  -run 'ManagedChannel|V2Directory|DirectoryIncomplete|CoveragePartial' -count=1
+  -run 'ManagedChannel|V2Directory|DirectoryIncomplete|CoveragePartial|ReportedCount' -count=1
 ```
 
 Expected: FAIL because the v2 types/decoder do not exist.
