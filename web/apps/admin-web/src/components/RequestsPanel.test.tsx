@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RequestsPanel } from "./RequestsPanel";
@@ -63,15 +63,20 @@ function fakeResponse(body: unknown, status = 200): Response {
   return { ok: status < 400, status, json: () => Promise.resolve(body) } as unknown as Response;
 }
 
-function renderPanel() {
+function renderPanel(initialEntry = "/") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <RequestsPanel platform="sub2api" />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+function lastRequestedURL(fetchMock: ReturnType<typeof vi.fn>): string {
+  const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+  return String(calls.at(-1)?.[0] ?? "");
 }
 
 describe("请求列表", () => {
@@ -179,6 +184,45 @@ describe("请求列表", () => {
     fetchMock.mockImplementation(() => Promise.resolve(fakeResponse(pageBody({ items: [] }))));
     renderPanel();
     expect(await screen.findByText(/这个平台还没有请求记录/)).toBeTruthy();
+  });
+
+  it("只有时间筛选且结果为空时也能清除区间", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(fakeResponse(pageBody({ items: [] }))));
+    renderPanel("/?period=custom&since=2026-08-28T00%3A00%3A00Z");
+    expect(await screen.findByText(/没有符合条件的请求/)).toBeTruthy();
+    expect(screen.getByText(/^自 .+ 起$/)).toBeTruthy();
+
+    const before = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "清除区间" }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before));
+    const url = decodeURIComponent(lastRequestedURL(fetchMock));
+    expect(url).not.toContain("period=");
+    expect(url).not.toContain("since=");
+    expect(url).not.toContain("until=");
+  });
+
+  it("清除区间会同时回到游标第一页", async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(fakeResponse(pageBody({ next_cursor: "reqlog:50" }))),
+    );
+    renderPanel(
+      "/?period=custom&since=2026-08-28T00%3A00%3A00Z&until=2026-08-29T00%3A00%3A00Z",
+    );
+    await screen.findByText("zhang.wei");
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() =>
+      expect(decodeURIComponent(lastRequestedURL(fetchMock))).toContain("cursor=reqlog:50"),
+    );
+
+    const before = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "清除区间" }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before));
+    const url = decodeURIComponent(lastRequestedURL(fetchMock));
+    expect(url).not.toContain("cursor=");
+    expect(url).not.toContain("period=");
+    expect(url).not.toContain("since=");
+    expect(url).not.toContain("until=");
   });
 
   it("没有下一页时不显示翻页按钮", async () => {

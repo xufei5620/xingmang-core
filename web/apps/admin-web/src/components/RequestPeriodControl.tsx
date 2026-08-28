@@ -22,17 +22,28 @@ export function RequestPeriodControl({
   until,
   onModeChange,
   onApply,
+  onClear,
 }: {
   mode: RequestPeriodMode;
   since: string;
   until: string;
   onModeChange: (mode: RequestPeriodMode) => void;
   onApply: (mode: RequestPeriodMode, range: RequestTimeRange) => void;
+  onClear: () => void;
 }) {
   const [anchor, setAnchor] = useState(() => toLocalDateTimeInput(since).slice(0, 10) || localToday());
   const [customSince, setCustomSince] = useState(() => toLocalDateTimeInput(since));
   const [customUntil, setCustomUntil] = useState(() => toLocalDateTimeInput(until));
   const [error, setError] = useState("");
+  const shownSince = toLocalDateTimeInput(since);
+  const shownUntil = toLocalDateTimeInput(until);
+  const rangeDescription = shownSince
+    ? shownUntil
+      ? `${shownSince} → ${shownUntil}`
+      : `自 ${shownSince} 起`
+    : shownUntil
+      ? `截至 ${shownUntil}`
+      : "尚未限定，覆盖保留期内全部记录";
 
   useEffect(() => {
     const nextSince = toLocalDateTimeInput(since);
@@ -69,9 +80,7 @@ export function RequestPeriodControl({
           <h2 id="request-period-title" className="text-sm font-semibold text-fg">
             统计区间
           </h2>
-          <p className="text-xs text-fg-muted">
-            {since && until ? `${toLocalDateTimeInput(since)} → ${toLocalDateTimeInput(until)}` : "尚未限定，覆盖保留期内全部记录"}
-          </p>
+          <p className="text-xs text-fg-muted">{rangeDescription}</p>
         </div>
 
         <div role="group" aria-label="请求统计区间模式" className="flex flex-wrap gap-1">
@@ -138,6 +147,11 @@ export function RequestPeriodControl({
             </Button>
           </>
         )}
+        {since || until ? (
+          <Button type="button" variant="secondary" size="sm" onClick={onClear}>
+            清除区间
+          </Button>
+        ) : null}
       </div>
       {error ? (
         <p role="alert" className="mt-2 text-xs text-danger">

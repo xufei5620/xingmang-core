@@ -104,6 +104,14 @@ export function RequestsPanel({ platform }: { platform: string }) {
     setCursorStack([]);
   };
 
+  const clearPeriod = () => {
+    const next = new URLSearchParams(searchParams);
+    for (const key of ["period", "since", "until"]) next.delete(key);
+    setSearchParams(next, { replace: true });
+    setCursor("");
+    setCursorStack([]);
+  };
+
   const hasRecordFilters = [username, model, status].some((v) => v !== "");
   const hasFilters = hasRecordFilters || since !== "" || until !== "";
   const page = query.data;
@@ -146,6 +154,7 @@ export function RequestsPanel({ platform }: { platform: string }) {
           setCursor("");
           setCursorStack([]);
         }}
+        onClear={clearPeriod}
       />
 
       {page ? <RequestStats stats={page.stats} /> : null}
