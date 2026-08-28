@@ -203,7 +203,6 @@ First enabled keys:
 
 | Key | Page/table | Why eligible |
 |---|---|---|
-| global.alerts | 告警与故障 / 告警表 | Search/filter/sort/columns/density are table-owned |
 | global.audit.events | 审计记录 / 事件表 | Search/filter/sort/columns/density are table-owned |
 | platform.sub2api.channels | Sub2API / 渠道管理 | Current presets and local table state already exist |
 | platform.newapi.channels | NewAPI / 渠道管理 | Same component, separate platform ownership |
@@ -214,6 +213,7 @@ Reserved future keys:
 
 | Key | Enable condition |
 |---|---|
+| global.alerts | Move active/all from component useState into an explicit Router Search Param and include it in the page context contract before SavedView is enabled |
 | server.assets | Real server-assets DataTable exists |
 | global.actions.pending-approvals | Foundation-B pending-approvals table exists |
 
@@ -221,9 +221,11 @@ Not enabled in XM-B003c:
 
 - platform.<p>.users: server-side period and sort controls live outside DataTableV2;
 - platform.<p>.requests: server-side filters and opaque cursor live outside DataTableV2.
+- global.alerts: active/all is still page-local useState, so a saved table view cannot currently
+  reproduce whether the source Query included resolved alerts.
 
-Enabling either now would save only half of the state while presenting it as a complete view.
-They require a later controlled-state adapter that includes their server-side criteria.
+Enabling any of these now would save only part of the state while presenting it as a complete
+view. Each requires a later controlled-context slice before it can join SavedView.
 
 ## 9. State contract v1
 
@@ -304,6 +306,22 @@ If schema_version is not 1, the record remains listable/removable but is not app
 an inline warning and uses the built-in 全部 state. No migration of an unknown future version is
 guessed client-side.
 
+### 10.1 Static column capabilities and schema readiness
+
+Saved sort must not be discarded merely because an asynchronous data source has not finished
+loading the column definition. Approved tables therefore expose a static column-capability schema
+containing every stable column ID, whether it is sortable, primary/defaultHidden status, and filter
+options independently of row data.
+
+In particular, upstream/channel margin columns such as grossProfit remain present and sortable
+while their values are pending or unavailable; pending cells return null sort values rather than
+removing the column capability.
+
+If a future table genuinely cannot construct its capability schema synchronously, its persistence
+adapter must expose schemaReady=false and defer SavedView reconciliation. It must not turn a saved
+sort into null while schemaReady is false. Reconciliation runs once after both the SavedView Query
+and column schema are ready.
+
 ## 11. Database contract
 
 The planned relation is ui.saved_view:
@@ -348,7 +366,41 @@ Database constraints must cover:
 
 Domain validation remains the first line; database constraints are defense in depth.
 
-### 11.1 Migration number gate
+### 11.1 Atomic mutation evidence
+
+The Store, not the Action Handler, owns mutation-time before/after evidence:
+
+~~~text
+SetResult
+  before_hash: nullable SHA-256
+  after: SavedView row returned by the upsert transaction
+
+RemoveResult
+  id: removed SavedView UUID
+  before_hash: SHA-256 returned by DELETE
+~~~
+
+Store.Set starts one transaction, acquires its server-derived owner/Environment advisory lock,
+selects any existing owner-scoped row FOR UPDATE, performs quota decisions and the upsert, and
+returns before_hash plus the upserted after row from that same transaction. It commits before
+returning the result.
+
+Store.Remove starts one transaction, acquires the same owner/Environment advisory lock, performs
+owner/Environment-scoped DELETE ... RETURNING id, state_hash, commits, and returns that hash. It
+does not expose whether a foreign UUID exists.
+
+Action Handlers are forbidden from loading a row before calling Set or Remove. They build
+RecordBefore/RecordAfter only from the Store mutation result:
+
+- set create: no before summary; after summary = returned after.state_hash;
+- set overwrite: before summary = returned before_hash; after summary = returned after.state_hash;
+- remove: before summary = DELETE RETURNING state_hash; no after summary.
+
+This prevents an audit event from pairing a stale pre-read hash with another transaction's write.
+Concurrent set/set and set/remove tests must prove that returned hash pairs form a valid serialized
+mutation chain and never report a hash that was not the row state immediately before that mutation.
+
+### 11.2 Migration number gate
 
 The implementation migration is always allocated as current maximum migration number + 1.
 
@@ -378,10 +430,11 @@ Exact v1 limits:
 | Filters | 16 entries |
 | Filter key | 1–64 ASCII identifier characters |
 | Filter value | 256 Unicode code points |
+| Raw filters_json | 4,096 UTF-8 bytes before decoding |
 | Known columns | 1–64 unique IDs |
 | Visible columns | 1–64 unique IDs, subset of known |
 | Column ID | 1–128 ASCII identifier characters |
-| Serialized state | 16 KiB after canonical JSON encoding |
+| Raw or canonical StateV1 JSON | 16,384 UTF-8 bytes before decoding, hashing, or storage |
 
 Name normalization trims, collapses internal whitespace, and preserves case. 自定义 is reserved
 and rejected. 全部 remains the built-in fallback and is also rejected as a persistent name.
@@ -389,6 +442,22 @@ and rejected. 全部 remains the built-in fallback and is also rejected as a per
 Quota checks happen only for creation; overwriting the same normalized name remains allowed at
 the limit. Store creation must serialize quota checks per owner/Environment so concurrent
 requests cannot bypass the limit.
+
+Every raw JSON decoder follows this order:
+
+1. reject invalid UTF-8;
+2. check len(rawBytes) against the exact byte cap before allocating decoder output;
+3. decode exactly one expected object;
+4. call Decode a second time and require io.EOF;
+5. validate decoded entry counts, code-point limits, and identifier rules;
+6. canonicalize only after all validation passes.
+
+Tests cover over-cap whitespace, invalid UTF-8, a small escaped JSON input whose decoded string
+expands past the 256-code-point value limit, and a valid first object followed by trailing JSON.
+An over-cap raw input is rejected before Decode is called. The current Action accepts raw
+filters_json only; if any implementation helper decodes a full StateV1 JSON document, it must use
+the 16,384-byte rule above. Server-constructed StateV1 is canonically encoded and checked against
+the same cap before hashing and storage.
 
 ## 13. Query contract
 
@@ -459,9 +528,10 @@ Action params use only the existing Action Schema primitive types:
 }
 ~~~
 
-filters_json is parsed with a bounded decoder into map[string]string, rejects trailing JSON and
-unknown shapes, and is then canonicalized server-side. Empty sort_column and sort_direction mean
-no sort and must appear together.
+filters_json must be valid UTF-8 and at most 4,096 raw bytes before decoding. It is decoded once
+into map[string]string; a second Decode must return io.EOF. The decoded map then passes entry,
+identifier, and expanded-value limits before server-side canonicalization. Empty sort_column and
+sort_direction mean no sort and must appear together.
 
 The Action upserts by the complete owner/Environment/table/name unique key and returns the SavedView
 item plus action_run_id from the generic Action envelope.
@@ -544,6 +614,43 @@ The Action envelope already records Action ID/version, Principal, Environment, r
 SavedView resource UUID. The SHA-256 input is canonical JSON of state v1. The hash proves which
 snapshot changed without duplicating potentially sensitive state into the append-only audit chain.
 
+### 16.1 Fixed failure envelope and malicious-marker proof
+
+Invalid set payloads return the existing HTTP error envelope with exactly these public fields:
+
+~~~json
+{
+  "error": {
+    "code": "INVALID_PARAMS",
+    "message": "SavedView 参数无效",
+    "request_id": "<request-id>"
+  }
+}
+~~~
+
+A foreign or missing remove target returns INVALID_PARAMS with fixed message SavedView 不存在;
+the response never distinguishes the two. Unexpected Store failures use INTERNAL and the
+repository's fixed internal-error message. No public message or wrapped server error formats a raw
+name, query, filter, or column value.
+
+The implementation adds no SavedView-specific logger call containing user state. Existing
+WriteError logging keeps its fixed fields: module, request_id, path, method, status, error_code,
+and err. The err value is the stable Action Error() string, never a formatted raw input or wrapped
+cause. Existing Action audit-failure logging keeps its fixed action metadata fields. Neither path
+attaches params, state, query, filters, name, or columns.
+
+An HTTP integration test submits distinct malicious markers in name, query, filter keys/values,
+known columns, and visible columns, then forces a deterministic INVALID_PARAMS failure. The test
+captures:
+
+- the WriteError response body;
+- a bytes.Buffer-backed slog JSON logger;
+- the audit sink event.
+
+It asserts the fixed code/message/field names and proves that none of the marker strings occurs in
+the response, logger buffer, or audit event serialization. A matching INTERNAL-path test uses a
+fixed Store error and repeats the leak assertion.
+
 ## 17. Built-in views and default behavior
 
 - Built-in presets remain compile-time/page-owned data.
@@ -610,6 +717,7 @@ ui-admin remains transport-agnostic. DataTableV2 receives:
 - remote persistent view items and load state;
 - save/remove callbacks supplied by admin-web;
 - optional controlled TableViewState and onViewStateChange for URL ownership.
+- a static column capability schema, or schemaReady=false until that schema is complete.
 
 admin-web owns:
 
@@ -622,6 +730,8 @@ admin-web owns:
 DataTableV2 owns:
 
 - reconciliation against current columns/filter specs;
+- deferring reconciliation while schemaReady is false so a loading-time missing column cannot
+  erase a saved sort;
 - active-view matching;
 - page/selection/preview/expanded clearing;
 - accessible save/remove UI and inline status.
@@ -638,7 +748,9 @@ One backend PR after this design is approved:
 - L0 set/remove Actions and JSON contracts;
 - new scope and role-map changes;
 - permission/auth documentation;
-- unit, HTTP, integration, migration, audit-redaction, and isolation tests.
+- unit, HTTP, integration, migration, concurrency, malicious-marker, audit-redaction, and isolation
+  tests;
+- the full frontend typecheck/test and Storybook gates plus the full Go/governance gates.
 
 ### XM-B003c — DataTableV2 persistence integration
 
@@ -649,7 +761,8 @@ One frontend PR after XM-B003b is merged:
 - state reconciliation and Router Search Params;
 - save/remove UI;
 - first enabled tables from section 8;
-- component/page/API/browser tests.
+- component/page/API/browser tests;
+- the full frontend typecheck/test and Storybook gates plus the full Go/governance gates.
 
 Neither slice is merged by Codex. Each uses an independent branch/worktree and waits for human
 review.
@@ -660,6 +773,8 @@ review.
 
 - Query returns only the authenticated HUMAN subject's views in the current Environment.
 - Set/remove cannot target another subject or Environment.
+- Set/remove return transaction-consistent before/after hashes; Handlers never pre-read mutation
+  evidence.
 - Both Actions are L0, HUMAN-only, and require ui.saved_view.manage.
 - Every success/failure has an Action run; successful mutations emit only the state hash in
   before/after audit summaries.
@@ -673,6 +788,7 @@ review.
 - Sub2API/NewAPI tables never share view rows.
 - Applying a view restores v1 state and clears all excluded transient state.
 - New/removed columns reconcile according to section 10.
+- Saved sort on a static-but-loading margin column survives until schemaReady reconciliation.
 - Explicit URL criteria win and copied URLs work without access to the owner's view.
 - Persistence failure never claims success and never writes browser storage.
 - Built-in 全部 remains usable in every degraded state.

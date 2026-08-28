@@ -153,11 +153,14 @@ func TestStoreRoundTripsSavedViewStateV1(t *testing.T) {
             Density: DensityCompact,
         },
     }
-    got, err := store.Set(ctx, owner, in)
+    result, err := store.Set(ctx, owner, in)
     if err != nil {
         t.Fatal(err)
     }
-    if diff := cmp.Diff(in.State, got.State); diff != "" {
+    if result.BeforeHash != nil {
+        t.Fatalf("create before hash = %q, want nil", *result.BeforeHash)
+    }
+    if diff := cmp.Diff(in.State, result.After.State); diff != "" {
         t.Fatal(diff)
     }
 }
@@ -192,8 +195,25 @@ repair or backup restore.
 
 - [ ] **Step 4: Add sqlc queries**
 
-db/queries/savedviews.sql contains owner-scoped List/Get/Delete, owner+Environment and owner+table
-counts, and an Upsert with this conflict key:
+db/queries/savedviews.sql contains owner-scoped List, owner+Environment and owner+table counts,
+GetSavedViewForUpdate, Upsert, and DeleteSavedViewOwned.
+
+GetSavedViewForUpdate runs inside Store.Set's transaction:
+
+~~~sql
+-- name: GetSavedViewForUpdate :one
+SELECT state_hash
+FROM ui.saved_view
+WHERE owner_issuer = $1
+  AND owner_subject = $2
+  AND identity_zone = $3
+  AND environment = $4
+  AND table_key = $5
+  AND name = $6
+FOR UPDATE;
+~~~
+
+Upsert uses this conflict key:
 
 ~~~sql
 ON CONFLICT (
@@ -212,7 +232,18 @@ ON CONFLICT (
 RETURNING *;
 ~~~
 
-Delete includes id plus the complete owner/Environment key and returns id.
+Delete atomically returns mutation evidence:
+
+~~~sql
+-- name: DeleteSavedViewOwned :one
+DELETE FROM ui.saved_view
+WHERE id = $1
+  AND owner_issuer = $2
+  AND owner_subject = $3
+  AND identity_zone = $4
+  AND environment = $5
+RETURNING id, state_hash;
+~~~
 
 - [ ] **Step 5: Add sqlc block and generate**
 
@@ -258,7 +289,8 @@ git commit -m "feat(savedviews): add personal view storage"
 **Interfaces:**
 
 - Produces Owner, StateV1, SavedView, NormalizeName, ValidateState, OwnerFromPrincipal, and
-  CanonicalStateHash.
+  CanonicalStateHash. The bounded JSON helpers are DecodeFiltersJSON(raw []byte) and
+  DecodeStateV1JSON(raw []byte).
 
 - [ ] **Step 1: Write failing tests**
 
@@ -317,8 +349,9 @@ SortDirection is asc/desc. Density is compact/standard/comfortable.
 - [ ] **Step 3: Implement owner, validation, and hash**
 
 Use Subject for OIDC ownership. Permit ID fallback only for issuer dev://header-resolver outside
-production. Enforce every limit in spec section 12. Canonicalize filter keys before SHA-256 and
-return lowercase hex.
+production. Enforce every limit in spec section 12. Both raw JSON helpers validate UTF-8 and byte
+length before constructing a decoder, decode one object, and require a second Decode to return
+io.EOF. Canonicalize filter keys before SHA-256 and return lowercase hex.
 
 - [ ] **Step 4: Run and commit**
 
@@ -342,8 +375,20 @@ Expected: focused tests pass.
 
 - NewStore(*pgxpool.Pool) *Store
 - List(context.Context, Owner, string) ([]SavedView, error)
-- Set(context.Context, Owner, SavedView) (SavedView, error)
-- Remove(context.Context, Owner, uuid.UUID) (uuid.UUID, error)
+- Set(context.Context, Owner, SavedView) (SetResult, error)
+- Remove(context.Context, Owner, uuid.UUID) (RemoveResult, error)
+
+~~~go
+type SetResult struct {
+    BeforeHash *string
+    After SavedView
+}
+
+type RemoveResult struct {
+    ID uuid.UUID
+    BeforeHash string
+}
+~~~
 
 - [ ] **Step 1: Write failing isolation/quota tests**
 
@@ -357,6 +402,8 @@ func TestStoreEnforcesTwentyViewsPerTable(t *testing.T)
 func TestStoreAllowsOverwriteAtTableLimit(t *testing.T)
 func TestStoreEnforcesTwoHundredViewsPerEnvironment(t *testing.T)
 func TestStoreConcurrentCreatesCannotBypassQuota(t *testing.T)
+func TestConcurrentSetsReturnSerializedHashChain(t *testing.T)
+func TestConcurrentSetAndRemoveReturnTransactionConsistentHashes(t *testing.T)
 ~~~
 
 - [ ] **Step 2: Implement List and row conversion**
@@ -366,13 +413,17 @@ error without raw JSON.
 
 - [ ] **Step 3: Implement transactional Set**
 
-Validate input, compute hash, begin transaction, acquire a server-derived owner/Environment
-advisory transaction lock, detect overwrite versus create, enforce 20/200 only for create, upsert,
-and commit.
+Validate input, compute hash, begin one transaction, acquire a server-derived owner/Environment
+advisory transaction lock, select the existing owner/table/name row FOR UPDATE, retain its
+state_hash as BeforeHash, enforce 20/200 only for create, upsert with RETURNING, commit, and return
+SetResult{BeforeHash, After}. No caller performs a pre-read.
 
 - [ ] **Step 4: Implement owner-scoped Remove**
 
-Delete by UUID plus complete owner key. Foreign and nonexistent UUIDs return the same ErrNotFound.
+Begin one transaction, acquire the same server-derived owner/Environment advisory lock used by
+Set, execute owner/Environment-scoped DELETE RETURNING id, state_hash, commit, and return
+RemoveResult. Foreign and nonexistent UUIDs return the same ErrNotFound. No caller performs a
+pre-read.
 
 - [ ] **Step 5: Run and commit**
 
@@ -382,7 +433,8 @@ git add internal/platform/savedviews db/queries/savedviews.sql internal/platform
 git commit -m "feat(savedviews): enforce owner and environment isolation"
 ~~~
 
-Expected: all Store tests pass, including concurrent quota.
+Expected: all Store tests pass, including concurrent quota and set/set plus set/remove hash-chain
+tests.
 
 ## Task 5: Add L0 set/remove Actions and redacted audit
 
@@ -405,6 +457,21 @@ Environments. Test bounded filters_json, trailing JSON rejection, sort-pair vali
 owner/Environment params, and all domain limits. Use action.CaptureAudit to prove each non-empty
 before/after summary has exactly one key named state_hash.
 
+Add exact decoder tests:
+
+~~~go
+func TestDecodeFiltersRejectsMoreThan4096RawBytesBeforeDecode(t *testing.T)
+func TestDecodeFiltersRejectsOverCapWhitespace(t *testing.T)
+func TestDecodeFiltersRejectsInvalidUTF8(t *testing.T)
+func TestDecodeFiltersRejectsEscapedValueExpansion(t *testing.T)
+func TestDecodeFiltersRejectsTrailingJSONObject(t *testing.T)
+func TestDecodeStateV1RejectsMoreThan16384RawBytesBeforeDecode(t *testing.T)
+func TestCanonicalStateRejectsMoreThan16384BytesBeforeHash(t *testing.T)
+~~~
+
+Instrument the decoder in the over-cap tests and assert Decode was never called. For accepted raw
+length, decode exactly one object and require a second Decode to return io.EOF.
+
 - [ ] **Step 2: Implement set schema and handler**
 
 Exact primitive params:
@@ -422,14 +489,20 @@ visible_columns:string_slice required
 density:string enum(compact, standard, comfortable) required
 ~~~
 
-Derive Owner from Principal, parse exactly one bounded filters JSON object into map[string]string,
-validate StateV1, call Store.Set, use the SavedView UUID as resource ID, and put only state_hash in
-before/after summaries.
+Reject invalid UTF-8 and len([]byte(filters_json)) > 4096 before constructing json.Decoder. Decode
+exactly one map[string]string and require the second Decode to return io.EOF. Validate decoded
+entry/key/expanded-value limits, build StateV1, enforce canonical JSON <= 16384 bytes before hash,
+and call Store.Set.
+
+The Handler must not query the Store before Set. It uses SetResult.BeforeHash and
+SetResult.After.StateHash to build summaries containing only state_hash, with the returned UUID as
+resource ID.
 
 - [ ] **Step 3: Implement remove schema and handler**
 
-The only param is saved_view_id:string required. Derive Owner, parse UUID, load the owned before
-hash, remove, and omit after summary.
+The only param is saved_view_id:string required. Derive Owner, parse UUID, call Store.Remove
+directly, and build the before summary from RemoveResult.BeforeHash. The Handler is forbidden from
+loading the row before Remove and always omits after summary.
 
 - [ ] **Step 4: Write Action JSON contracts**
 
@@ -444,7 +517,8 @@ git add internal/platform/savedviews/actions.go internal/platform/savedviews/act
 git commit -m "feat(savedviews): add governed L0 actions"
 ~~~
 
-Expected: definitions, schema, owner derivation, and redacted audit tests pass.
+Expected: definitions, strict byte-before-decode JSON handling, owner derivation, atomic
+Store-result audit, and redaction tests pass.
 
 ## Task 6: Add owner-scoped Query and API wiring
 
@@ -452,6 +526,7 @@ Expected: definitions, schema, owner derivation, and redacted audit tests pass.
 
 - Create: internal/platform/httpapi/savedviews.go
 - Create: internal/platform/httpapi/savedviews_test.go
+- Create: internal/platform/httpapi/savedviews_security_test.go
 - Modify: internal/platform/httpapi/router.go
 - Modify: internal/platform/httpapi/router_test.go
 - Modify: cmd/platform-api/main.go
@@ -466,6 +541,24 @@ Expected: definitions, schema, owner derivation, and redacted audit tests pass.
 Add tests for the exact response DTO, missing scope 403, machine Principal rejection, required
 table_key, server-derived Owner/Environment, and absence of owner, Environment, and state_hash in
 the response.
+
+Add malicious-marker coverage through the real ExecuteActionHandler + Kernel + captured logger:
+
+~~~go
+func TestSavedViewInvalidParamsDoNotLeakMarkersToHTTPLogOrAudit(t *testing.T)
+func TestSavedViewInternalErrorDoesNotLeakMarkersToHTTPLogOrAudit(t *testing.T)
+~~~
+
+Use distinct markers in name, query, filter key/value, known columns, and visible columns. Capture
+the WriteError body, a bytes.Buffer-backed slog JSON handler, and audit sink events. Assert none of
+the markers occurs in any serialization.
+
+For invalid params, assert the public body has exactly error.code=INVALID_PARAMS,
+error.message=SavedView 参数无效, and error.request_id, with no extra error fields. For a fixed Store
+failure, assert code INTERNAL and the repository's fixed internal-error message. The captured
+WriteError log must retain exactly its existing module/request_id/path/method/status/error_code/err
+field names; err must be the stable Action Error() string. Do not add params, state, query,
+filters, name, columns, or any wrapped cause text.
 
 - [ ] **Step 2: Define explicit DTOs**
 
@@ -513,11 +606,12 @@ passes the same Store to the Query dependency. Registration failure rejects star
 
 ~~~powershell
 go test ./internal/platform/httpapi ./cmd/platform-api -count=1
-git add internal/platform/httpapi/savedviews.go internal/platform/httpapi/savedviews_test.go internal/platform/httpapi/router.go internal/platform/httpapi/router_test.go cmd/platform-api/main.go
+git add internal/platform/httpapi/savedviews.go internal/platform/httpapi/savedviews_test.go internal/platform/httpapi/savedviews_security_test.go internal/platform/httpapi/router.go internal/platform/httpapi/router_test.go cmd/platform-api/main.go
 git commit -m "feat(httpapi): expose principal-scoped saved views"
 ~~~
 
-Expected: Query scope, HUMAN enforcement, DTO, route, and wiring tests pass.
+Expected: Query scope, HUMAN enforcement, DTO, route, fixed error envelope, malicious-marker
+redaction, logger-field, and wiring tests pass.
 
 ## Task 7: Add scope mapping and authorization docs
 
@@ -594,16 +688,20 @@ git diff --exit-code
 
 Expected: sqlc is idempotent and the worktree remains clean.
 
-- [ ] **Step 2: Run backend gates**
+- [ ] **Step 2: Run the full backend and frontend gates**
 
 ~~~powershell
 go vet ./...
 go test -p 1 -count=1 ./...
+pnpm --config.verify-deps-before-run=false -r run typecheck
+pnpm --config.verify-deps-before-run=false -r run test
+pnpm --config.verify-deps-before-run=false --filter ui-storybook run build
 bash scripts/check-governance.sh
 git diff --check origin/release/v0.1-launch...HEAD
 ~~~
 
-Expected: every command exits 0.
+Expected: Go vet/tests, full workspace frontend typecheck/tests, Storybook, governance, and diff
+check all exit 0. A backend-only slice does not waive the project-wide frontend gates.
 
 - [ ] **Step 3: Run secret and audit-redaction checks**
 
@@ -693,6 +791,9 @@ Test:
 - removed columns and invalid sort/filter references are dropped;
 - an unsupported version is not guessed;
 - page, cursor, selection, preview, expanded rows, and request state are absent.
+- a saved grossProfit sort remains pending while schemaReady=false and applies after the static
+  capability schema becomes ready;
+- loading/missing margin row values do not remove the grossProfit sortable capability.
 
 - [ ] **Step 2: Define wire types**
 
@@ -729,9 +830,18 @@ export interface ReconciledSavedView {
   state: TableViewState;
   warnings: readonly string[];
 }
+
+export interface TableColumnCapability {
+  id: string;
+  sortable: boolean;
+  primary: boolean;
+  defaultHidden: boolean;
+}
 ~~~
 
-Never mutate persisted input. Apply every compatibility rule from spec section 10.
+Never mutate persisted input. Apply every compatibility rule from spec section 10. Reconciliation
+requires a complete static capability list; when schemaReady=false, return a deferred result and
+do not null a saved sort.
 
 - [ ] **Step 4: Write failing URL tests**
 
@@ -855,6 +965,8 @@ collision, and removal only for persistent custom views.
 export interface DataTableViewPersistence {
   tableKey: string;
   items: readonly PersistedSavedView[];
+  schemaReady: boolean;
+  columnCapabilities: readonly TableColumnCapability[];
   status: "loading" | "ready" | "denied" | "error";
   message?: string;
   onRetry?: () => void;
@@ -877,13 +989,15 @@ Keep current uncontrolled behavior for tables not opted into persistence.
 - [ ] **Step 3: Implement persistent controls**
 
 For persistence-enabled tables, await callbacks, never add sessionViews, announce run ID only on
-success, and keep current presentation on failure. Denied/error does not remove built-ins.
+success, and keep current presentation on failure. Denied/error does not remove built-ins. Do not
+reconcile remote state until schemaReady=true.
 
 - [ ] **Step 4: Implement atomic apply**
 
 One state transition applies reconciled query/filter/sort/columns/density and clears page,
 selection, preview, expanded rows, and open productivity panels. Avoid intermediate renders with
-stale selection.
+stale selection. Channel/upstream column capabilities are defined independently of async margin
+row values, so grossProfit remains sortable during loading with null cell sort values.
 
 - [ ] **Step 5: Add Storybook states**
 
@@ -907,7 +1021,6 @@ Expected: ui-admin tests and typecheck pass.
 
 - Create: web/apps/admin-web/src/components/PersistentDataTable.tsx
 - Create: web/apps/admin-web/src/components/PersistentDataTable.test.tsx
-- Modify/test: web/apps/admin-web/src/pages/AlertsPage.tsx
 - Modify/test: web/apps/admin-web/src/pages/AuditPage.tsx
 - Modify/test: web/apps/admin-web/src/components/ChannelTable.tsx
 - Modify/test: web/apps/admin-web/src/components/UpstreamAccountsPanel.tsx
@@ -915,7 +1028,7 @@ Expected: ui-admin tests and typecheck pass.
 **Interfaces:**
 
 - Consumes hook, URL codec, and DataTable persistence props.
-- Produces the six approved stable table keys.
+- Produces the five approved stable table keys.
 
 - [ ] **Step 1: Write failing adapter tests**
 
@@ -930,7 +1043,6 @@ concerns out of ui-admin.
 - [ ] **Step 3: Wire exact keys**
 
 ~~~text
-global.alerts
 global.audit.events
 platform.sub2api.channels
 platform.newapi.channels
@@ -942,13 +1054,19 @@ Derive platform keys from an exhaustive map, not arbitrary route string interpol
 
 - [ ] **Step 4: Add built-in 全部**
 
-Derive columns from current definitions rather than copying IDs. Add page-owned presets. Keep users
-and requests excluded and document their external server-state blocker at those call sites.
+Derive columns from the static capability schema rather than copying IDs. Add page-owned presets.
+Keep users and requests excluded and document their external server-state blocker at those call
+sites.
+
+Keep global.alerts excluded from XM-B003c. AlertsPage currently owns active/all in component
+useState, and that value changes the server Query result. A separate prerequisite slice must first
+move it to an explicit Router Search Param such as scope=active|all, make that context restorable,
+and add its tests. Only then may global.alerts be added to SavedView.
 
 - [ ] **Step 5: Run and commit**
 
 ~~~powershell
-pnpm --config.verify-deps-before-run=false --filter admin-web test -- PersistentDataTable.test.tsx AlertsPage.test.tsx AuditPage.test.tsx ChannelTable.test.tsx UpstreamAccountsPanel.test.tsx
+pnpm --config.verify-deps-before-run=false --filter admin-web test -- PersistentDataTable.test.tsx AuditPage.test.tsx ChannelTable.test.tsx UpstreamAccountsPanel.test.tsx
 git add web/apps/admin-web/src
 git commit -m "feat(admin-web): persist views on first data tables"
 ~~~
@@ -967,11 +1085,15 @@ Expected: adapter and first-page tests pass.
 pnpm --config.verify-deps-before-run=false -r run typecheck
 pnpm --config.verify-deps-before-run=false -r run test
 pnpm --config.verify-deps-before-run=false --filter ui-storybook run build
+go vet ./...
+go test -p 1 -count=1 ./...
 bash scripts/check-governance.sh
 git diff --check origin/release/v0.1-launch...HEAD
 ~~~
 
-Expected: all exit 0. Run the CI-equivalent secret scan with no allowlist additions.
+Expected: full workspace frontend typecheck/tests, Storybook, Go vet/tests, governance, and diff
+check all exit 0. A frontend-only slice does not waive the project-wide Go gates. Run the
+CI-equivalent secret scan with no allowlist additions.
 
 - [ ] **Step 2: Browser-verify durability and transient exclusion**
 
@@ -1000,7 +1122,7 @@ gh pr create --base release/v0.1-launch --title "feat(ui): persist personal tabl
 ~~~
 
 Handoff includes exact tests/counts, screenshots, failure/no-storage/URL/isolation evidence, and
-users/requests exclusion rationale. Do not merge.
+alerts/users/requests exclusion rationale. Do not merge.
 
 ---
 
@@ -1012,5 +1134,6 @@ users/requests exclusion rationale. Do not merge.
 - [ ] State v1 names match across Go, HTTP, TypeScript, and tests.
 - [ ] known/visible compatibility is tested before DataTable integration.
 - [ ] users and requests remain excluded until their external server state is controlled.
+- [ ] global.alerts remains excluded until active/all is URL-owned and restorable.
 - [ ] The migration number is revalidated rather than assumed.
 - [ ] Full backend/frontend/governance/secret/browser gates precede success claims.
