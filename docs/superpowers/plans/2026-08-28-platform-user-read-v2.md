@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 本计划只有在产品负责人批准 spec 待审批项 1、2、3 后才能开始实现。
+- CORE_APPROVAL 只授权 Task 1~3；批准 core/Fake 绝不授权任何 real client。
 - 本计划本身不授权 real client、真实实例访问、新 scope、角色映射、迁移、Action、推送或部署。
 - 开始前必须确认 XM-B001 commit d1998e7 与 XM-C002 commit 855557f 已合入目标 release，并从当时 release 新建/重建任务 worktree。
 - 读取走 Query；不得修改 Sub2API、NewAPI、reqlog 或 invoice 原始业务表。
@@ -23,18 +23,44 @@
 - request.read/request.content.read 保持分离；正文成功披露的审计必须 fail closed。
 - CR-0002/CR-0003 未冻结前不接 invoice；M3 未批准前不接 payment/recharge。
 - Sub2API /api/v1/admin/users/:id/usage 是已证实的 mock 路由，任何 real 代码必须机械拒绝。
+- capability 只能在对应 Reader 已实现并通过 contracttest 的同一 PR 中由该 client 声明；禁止预告 capability。
 - 默认不建本地 link 表；需要时另立迁移、Action、证据与回滚设计。
 - 实现代码使用 go fmt，不使用裸 gofmt；不升级依赖。
 
 ---
 
+## Worktree / PR Dependency DAG
+
+每片开始时运行 git fetch origin，并从表中“基线”对应的已合入
+origin/release/v0.1-launch 新建独立 worktree。前序只存在未合并分支时不得开工。
+
+| Task | 分支 / PR | 基线 | 必须存在的独立授权 | 阻断隔离 |
+|---|---|---|---|---|
+| 1 | ai/codex/XM-C-USER1-userref-codec | B001/C002 已合入的 release | CORE_APPROVAL | 可独立于所有 real 门 |
+| 2 | ai/codex/XM-C-USER2-user-v2-fake | Task 1 已合入的 release | CORE_APPROVAL | 可独立于所有 real 门 |
+| 3 | ai/codex/XM-C-USER3-get-user-query | Task 2 已合入的 release | CORE_APPROVAL | 可只交付 Fake/core |
+| 4 | ai/codex/XM-C-USER4-sub2-user-real | Task 3 已合入的 release | SUB2_REAL_APPROVAL + 被引用的 Sub2 证据哈希 | 门未过只阻断 Task 4 |
+| 5 | ai/codex/XM-C-USER5-newapi-user-real | Task 3 已合入的 release | NEWAPI_REAL_APPROVAL + 被引用的 NewAPI 证据哈希 | 门未过只阻断 Task 5 |
+| 6 | ai/codex/XM-C-USER6-daily-usage | Task 3 已合入的 release | DAILY_USAGE_APPROVAL | 只做 Fake/core，不依赖 Task 4/5 文件 |
+| 7 | ai/codex/XM-C-USER7-key-metadata | Task 3 已合入的 release | KEY_SCOPE_APPROVAL | 只做 Fake/core，不依赖 Task 4/5 文件 |
+| 8 | ai/codex/XM-C-USER8-reqlog-userref | Task 3 与 C002 已合入的 release | REQLOG_USERREF_APPROVAL + 被引用的 reqlog 证据哈希 | 门未过只阻断 Task 8 |
+
+Task 4 与 Task 5 彼此无基线依赖；Task 6/7 不等待 Task 4/5。任何 real、Daily、
+Key 或 reqlog 批准事件都必须在对应 Task 的 Issue/PR 中逐字引用，不得用
+CORE_APPROVAL、spec merge 或真实样本存在来推定。
+
 ### Task 1: UserRef、canonical codec 与 v2 核心类型
+
+**Worktree / PR:** ai/codex/XM-C-USER1-userref-codec；基线为包含 B001/C002 的
+最新 release；仅需 CORE_APPROVAL。
 
 **Files:**
 - Create: contracts/connectors/platformusers.read.v2.md
 - Create: contracts/testdata/platform-user-ref-v1.json
 - Create: connectors/platformusers/userref.go
 - Create: connectors/platformusers/userref_test.go
+- Create: connectors/platformusers/exact_lookup.go
+- Create: connectors/platformusers/exact_lookup_test.go
 - Create: connectors/platformusers/contract_v2.go
 - Modify: connectors/platformusers/contract_test.go
 - Modify: web/apps/admin-web/src/api/users.ts
@@ -42,7 +68,7 @@
 
 **Interfaces:**
 - Consumes: platformusers.SourceSub2API / SourceNewAPI、Amount、CountValue、Period、User、registry.Capability。
-- Produces: UserRef、EncodeUserIDSegment、DecodeUserIDSegment、EvidenceSnapshot、GetUserQuery、UserDetail、UserDetailReader、ErrLookupIncomplete、V2 capability constants。
+- Produces: UserRef、EncodeUserIDSegment、DecodeUserIDSegment、EvidenceSnapshot、GetUserQuery、UserDetail、UserDetailReader、ErrLookupIncomplete、ScanExactUser。Task 1 不向任何 client capability 列表加条目。
 
 - [ ] **Step 1: 写 TS/Go 共用 golden fixture**
 
@@ -148,7 +174,97 @@ Run: go test ./connectors/platformusers -run "TestUserIDSegment|TestUserRef" -v
 
 Expected: PASS。
 
-- [ ] **Step 6: 让 TypeScript codec 读取同一份 golden**
+- [ ] **Step 6: 写并实现可执行的 exact scan 边界测试**
+
+~~~go
+type ExactPageFetcher func(
+    context.Context, string,
+) (UserPage, error)
+
+func ScanExactUser(
+    ctx context.Context,
+    userID string,
+    maxPages int,
+    fetch ExactPageFetcher,
+) (User, error)
+
+func scanFixture(
+    t *testing.T,
+    ctx context.Context,
+    userID string,
+    maxPages int,
+    pages []UserPage,
+) (User, error) {
+    t.Helper()
+    index := 0
+    expectedCursor := ""
+    return ScanExactUser(ctx, userID, maxPages,
+        func(_ context.Context, cursor string) (UserPage, error) {
+            if cursor != expectedCursor || index >= len(pages) {
+                t.Fatalf("cursor=%q expected=%q index=%d", cursor, expectedCursor, index)
+            }
+            page := pages[index]
+            index++
+            expectedCursor = page.NextCursor
+            return page, nil
+        })
+}
+
+func TestScanExactUserBoundaries(t *testing.T) {
+    t.Run("later page exact hit", func(t *testing.T) {
+        pages := []UserPage{
+            {Users: []User{{ID: "u_1-copy"}}, NextCursor: "c2"},
+            {Users: []User{{ID: "u_1"}}},
+        }
+        got, err := scanFixture(t, context.Background(), "u_1", 5, pages)
+        if err != nil || got.ID != "u_1" {
+            t.Fatalf("got=%+v err=%v", got, err)
+        }
+    })
+    t.Run("exhausted means not found", func(t *testing.T) {
+        _, err := scanFixture(t, context.Background(), "u_1", 5,
+            []UserPage{{Users: []User{{ID: "u_1-copy"}}}})
+        if !errors.Is(err, ErrNotFound) {
+            t.Fatalf("err=%v", err)
+        }
+    })
+    t.Run("page limit and cursor cycle are incomplete", func(t *testing.T) {
+        for _, pages := range [][]UserPage{
+            {
+                {NextCursor: "c2"}, {NextCursor: "c3"}, {NextCursor: "c4"},
+                {NextCursor: "c5"}, {NextCursor: "c6"},
+            },
+            {{NextCursor: "same"}, {NextCursor: "same"}},
+        } {
+            _, err := scanFixture(t, context.Background(), "u_1", 5, pages)
+            if !errors.Is(err, ErrLookupIncomplete) {
+                t.Fatalf("err=%v", err)
+            }
+        }
+    })
+    t.Run("cancel propagates", func(t *testing.T) {
+        ctx, cancel := context.WithCancel(context.Background())
+        cancel()
+        _, err := ScanExactUser(ctx, "u_1", 5,
+            func(ctx context.Context, _ string) (UserPage, error) {
+                return UserPage{}, ctx.Err()
+            })
+        if !errors.Is(err, context.Canceled) {
+            t.Fatalf("err=%v", err)
+        }
+    })
+}
+~~~
+
+scanFixture 在 exact_lookup_test.go 内按 pages 顺序返回，并断言调用方原样传回
+上一页 NextCursor。ScanExactUser 必须在每页先检查 ID 全等，再判断 exhaustion、
+上限或循环；maxPages<=0 当场返回 ErrLookupIncomplete。
+
+Run: go test ./connectors/platformusers -run TestScanExactUserBoundaries -v
+
+Expected: RED 后实现最小 helper，再运行得到 PASS。
+
+- [ ] **Step 7: 让 TypeScript codec 读取同一份 golden**
 
 ~~~ts
 import goldenText from "../../../../../contracts/testdata/platform-user-ref-v1.json?raw";
@@ -167,31 +283,37 @@ Run: pnpm --config.verify-deps-before-run=false --filter admin-web exec vitest r
 
 Expected: PASS。
 
-- [ ] **Step 7: 同步 v2 contract 文档并格式化**
+- [ ] **Step 8: 同步 v2 contract 文档并格式化**
 
 contracts/connectors/platformusers.read.v2.md 必须逐字冻结 UserRef、codec、
 GetUser 404/incomplete 判据、能力清单、scope 门和跨域非目标。
 
 Run: go fmt ./connectors/platformusers
 
-- [ ] **Step 8: 提交 Task 1**
+- [ ] **Step 9: 提交 Task 1**
 
 ~~~bash
-git add contracts/connectors/platformusers.read.v2.md contracts/testdata/platform-user-ref-v1.json connectors/platformusers/userref.go connectors/platformusers/userref_test.go connectors/platformusers/contract_v2.go connectors/platformusers/contract_test.go web/apps/admin-web/src/api/users.ts web/apps/admin-web/src/api/users.test.ts
+git add contracts/connectors/platformusers.read.v2.md contracts/testdata/platform-user-ref-v1.json connectors/platformusers/userref.go connectors/platformusers/userref_test.go connectors/platformusers/exact_lookup.go connectors/platformusers/exact_lookup_test.go connectors/platformusers/contract_v2.go connectors/platformusers/contract_test.go web/apps/admin-web/src/api/users.ts web/apps/admin-web/src/api/users.test.ts
 git commit -m "feat(platformusers): define v2 user identity contract"
 ~~~
 
 ### Task 2: v2 Fake 与 capability contracttest
 
+**Worktree / PR:** ai/codex/XM-C-USER2-user-v2-fake；基线为 Task 1 已合入的
+release；仅需 CORE_APPROVAL，不等待任何 real 样本。
+
 **Files:**
 - Create: connectors/platformusers/fake_v2.go
 - Create: connectors/platformusers/contracttest/v2_suite.go
 - Create: connectors/platformusers/contract_v2_test.go
+- Modify: connectors/platformusers/contract_v2.go
 - Modify: connectors/platformusers/fake.go
 
 **Interfaces:**
 - Consumes: Task 1 UserRef/GetUserQuery/UserDetail/UserDetailReader 与 capability constants。
-- Produces: FakeClient.GetUser、source-specific V2Capabilities、共享 RunV2 contract suite。
+- Produces: FakeClient.GetUser、CapabilityUserDetailRead、source-specific
+Fake V2Capabilities、共享 RunV2 contract suite。detail capability 与 Fake
+UserDetailReader 在本 PR 同时出现。
 
 - [ ] **Step 1: 写失败的 exact/fuzzy/incomplete capability 测试**
 
@@ -224,8 +346,8 @@ Expected: FAIL because FakeClient does not implement UserDetailReader.
 
 - [ ] **Step 3: 实现 Fake GetUser 与能力差异**
 
-Sub2API Fake 声明 detail_read、daily_usage_read、keys_metadata_read；
-NewAPI Fake 只声明 detail_read。GetUser 必须遍历 Fake 的 source-scoped 数据并仅接受
+Sub2API/NewAPI Fake 在本片都只声明 detail_read。daily/key 标识分别留到
+Task 6/7 与 Reader 同片加入。GetUser 必须遍历 Fake 的 source-scoped 数据并仅接受
 ID 全等；找不到返回 ErrNotFound，不回落第一条。
 
 ~~~go
@@ -271,6 +393,9 @@ git commit -m "test(platformusers): add executable v2 fake contract"
 ~~~
 
 ### Task 3: GetUser Service、HTTP Query 与 B001 前端切换
+
+**Worktree / PR:** ai/codex/XM-C-USER3-get-user-query；基线为 Task 2 已合入的
+release；必须引用 CORE_APPROVAL。该批准只允许 Fake/core，不允许 real。
 
 **Files:**
 - Create: internal/platform/platformusers/detail_service.go
@@ -338,6 +463,27 @@ func TestGetUserIncompleteIsNot404(t *testing.T) {
         t.Fatal("incomplete lookup must not become not found")
     }
 }
+
+func TestGetUserErrorMappingIsFrozen(t *testing.T) {
+    cases := []struct {
+        err      error
+        status   int
+        code     string
+        retryable bool
+    }{
+        {platformusers.ErrNotFound, http.StatusNotFound, "NOT_REGISTERED", false},
+        {platformusers.ErrLookupIncomplete, http.StatusBadGateway, "EXECUTION_FAILED", true},
+    }
+    for _, tc := range cases {
+        q := &fakeUserDetailQuerier{err: tc.err}
+        rec := serveUserDetail(t, q,
+            "/platforms/sub2api/users/u-755f3130323431")
+        assertErrorEnvelope(t, rec, tc.status, tc.code)
+        if (rec.Code >= 500) != tc.retryable {
+            t.Fatalf("status=%d retryable=%v", rec.Code, tc.retryable)
+        }
+    }
+}
 ~~~
 
 - [ ] **Step 3: 运行 RED**
@@ -371,7 +517,19 @@ func (s *Service) Get(ctx context.Context, in DetailInput) (connusers.UserDetail
 ~~~
 
 HTTP DTO 必须逐字段白名单，金额使用十进制字符串，包含 ref/period/snapshot/capabilities，
-不直接 JSON 序列化 Connector 结构体。
+不直接 JSON 序列化 Connector 结构体。Service 错误映射逐字冻结：
+
+~~~go
+case errors.Is(err, connusers.ErrNotFound):
+    return action.NewError(action.CodeNotRegistered, "没有这条用户记录", err)
+case errors.Is(err, connusers.ErrLookupIncomplete):
+    return action.NewError(
+        action.CodeExecutionFailed, "用户精确查找未完成，请重试", err)
+~~~
+
+由现有 HTTP error mapper 得到 NOT_REGISTERED/HTTP 404 与
+EXECUTION_FAILED/HTTP 502；
+context.Canceled/DeadlineExceeded 原样传播，不得进入上述两支。
 
 - [ ] **Step 5: 写前端 RED，证明只调用精确 endpoint**
 
@@ -418,6 +576,9 @@ git commit -m "feat(platformusers): add exact user detail query"
 
 ### Task 4: Sub2API real GetUser（真实样本门控）
 
+**Worktree / PR:** ai/codex/XM-C-USER4-sub2-user-real；基线为 Task 3 已合入的
+release；与 Task 5 无依赖。必须同时满足 SUB2_REAL_APPROVAL 和 Sub2 证据门。
+
 **Files:**
 - Create: docs/evidence/EV-2026-08-28-platformusers-sub2api-v2-shape.md
 - Create: connectors/platformusers/testdata/sub2api/users_page.redacted.json
@@ -434,14 +595,22 @@ git commit -m "feat(platformusers): add exact user detail query"
 
 - [ ] **Step 1: 检查不可跳过的证据门**
 
-必须同时存在：
+必须同时存在两个独立条件：
+
+1. 产品+安全签署的 SUB2_REAL_APPROVAL，文本明确写出 Task 4、实例/版本、
+   允许实现的 Reader、证据文件路径和 SHA-256；CORE_APPROVAL、spec merge 或
+   “允许收集样本”均不算 real 授权。
+2. 对应真实样本证据已经过审并可追溯。
+
+证据必须包含：
 
 - 脱敏的 /api/v1/admin/users 响应形状和实例版本；
 - 分页、ID、状态、余额 scale、created/last-active 的解释；
 - 人工已完成 AdminComplianceGuard 的记录；
 - 证明选用端点不是 mock 的源码/实例证据。
 
-任一缺失即停止。平台不得为完成此任务发 compliance POST。
+批准或任一证据缺失即停止 Task 4；Task 1~3/5~8 不受影响。平台不得为完成此任务
+发 compliance POST。
 
 - [ ] **Step 2: 写 RED fixture contract test**
 
@@ -493,6 +662,9 @@ func sub2V2AllowedPath(path string) bool
 
 - [ ] **Step 5: 运行共享 v2 contracttest 和全包测试**
 
+Sub2 client 只有在 GetUser Reader 实现和共享 contracttest 同时 PASS 的本 PR 中
+才声明 platformusers.user.detail_read；不得预先修改 capability 列表。
+
 Run: go test ./connectors/platformusers/... -run "TestSub2APIV2|TestV2" -v
 
 Expected: PASS。
@@ -505,6 +677,9 @@ git commit -m "feat(platformusers): add evidence-gated Sub2API user reader"
 ~~~
 
 ### Task 5: NewAPI real GetUser（真实样本门控）
+
+**Worktree / PR:** ai/codex/XM-C-USER5-newapi-user-real；基线为 Task 3 已合入的
+release；与 Task 4 无依赖。必须同时满足 NEWAPI_REAL_APPROVAL 和 NewAPI 证据门。
 
 **Files:**
 - Create: docs/evidence/EV-2026-08-28-platformusers-newapi-v2-shape.md
@@ -522,10 +697,14 @@ git commit -m "feat(platformusers): add evidence-gated Sub2API user reader"
 
 - [ ] **Step 1: 检查 NewAPI 证据门**
 
+必须先有产品+安全签署的 NEWAPI_REAL_APPROVAL，明确 Task 5、实例/版本、
+允许实现的 Reader、证据路径与 SHA-256。CORE_APPROVAL、SUB2_REAL_APPROVAL、
+spec merge 或真实样本存在均不授权 NewAPI real。
+
 证据必须冻结 /api/user/ 的尾斜杠、分页 envelope、soft-delete、ID、quota、
 created_at、last_login_at、status、quota_per_unit 和 PII 字段。必须记录管理员 token
 经 CredentialRef 注入，以及 /api/user/token、/api/user/aff、epay notify 等 GET 写端点
-仍在黑名单。缺一项即停止。
+仍在黑名单。批准或任一证据缺失即停止 Task 5；其他 Task 不受影响。
 
 - [ ] **Step 2: 写 RED parser 与 PII 测试**
 
@@ -580,7 +759,8 @@ func newAPIV2AllowedPath(path string) bool
 - [ ] **Step 5: 验证 capability 不继承**
 
 在真实样本尚未证明 DailyUsage/Key 元数据前，NewAPI capabilities 只含
-platformusers.user.detail_read。运行：
+platformusers.user.detail_read。该 capability 只在本 PR 的 NewAPI UserDetailReader
+实现与 contracttest 同时 PASS 后声明。运行：
 
 Run: go test ./connectors/platformusers/... -run "TestNewAPIV2|TestV2" -v
 
@@ -595,13 +775,15 @@ git commit -m "feat(platformusers): add evidence-gated NewAPI user reader"
 
 ### Task 6: DailyUsage capability 与七日趋势
 
+**Worktree / PR:** ai/codex/XM-C-USER6-daily-usage；基线为 Task 3 已合入的
+release；必须引用 DAILY_USAGE_APPROVAL。只实现 contract/Fake/HTTP/UI，不依赖
+Task 4/5，也不修改尚未存在的 real 文件。
+
 **Files:**
 - Create: connectors/platformusers/daily_usage.go
 - Create: connectors/platformusers/daily_usage_test.go
 - Modify: connectors/platformusers/contract_v2.go
 - Modify: connectors/platformusers/fake_v2.go
-- Modify: connectors/platformusers/sub2api_v2.go
-- Modify: connectors/platformusers/newapi_v2.go
 - Modify: connectors/platformusers/contracttest/v2_suite.go
 - Create: internal/platform/httpapi/users_daily_usage.go
 - Create: internal/platform/httpapi/users_daily_usage_test.go
@@ -613,12 +795,15 @@ git commit -m "feat(platformusers): add evidence-gated NewAPI user reader"
 
 **Interfaces:**
 - Consumes: DailyUsageReader/DailyUsageQuery/DailyUsageSeries、Task 3 GetUser route。
-- Produces: GET /api/v1/platforms/{platform}/users/{canonicalUserId}/daily-usage?day=&days=7。
+- Produces: CapabilityUserDailyUsageRead、Fake DailyUsageReader、
+GET /api/v1/platforms/{platform}/users/{canonicalUserId}/daily-usage?day=&days=7。
 
-- [ ] **Step 1: 检查 source capability 证据**
+- [ ] **Step 1: 检查独立审批并锁定 Fake/core 范围**
 
-每个平台分别判断。没有真实、非 mock 的逐日数据与稳定 user ID 时，该平台不实现
-DailyUsageReader；Fake 可继续作为契约说明，但 UI real 模式必须 unavailable。
+必须有 DAILY_USAGE_APPROVAL，明确允许 platform.users.read 扩大到 DailyUsage
+Fake/core。Task 6 不读取真实样本、不实现任何 real Reader；real 模式保持
+unavailable。未来某个平台的 real DailyUsage 只能在新的独立授权 PR 中实现，并在
+该 Reader 与 contracttest 同片通过后声明 capability。
 
 - [ ] **Step 2: 写 RED coverage 测试**
 
@@ -646,6 +831,66 @@ func TestDailyUsageDistinguishesZeroFromMissingDay(t *testing.T) {
     if series.Points[1].Consumed.Known || series.Coverage.Complete {
         t.Fatal("missing day must be unknown and incomplete")
     }
+    if series.Coverage.CoveredDays != 6 {
+        t.Fatalf("coverage=%+v; want exactly one unknown day", series.Coverage)
+    }
+}
+
+func TestDailyUsageWindowAndCoverage(t *testing.T) {
+    // 2026-08-27 16:30 UTC 已是 CST 2026-08-28。
+    clock := func() time.Time {
+        return time.Date(2026, 8, 27, 16, 30, 0, 0, time.UTC)
+    }
+    c := platformusers.NewFakeClient(platformusers.SourceSub2API, clock)
+    reader := any(c).(platformusers.DailyUsageReader)
+
+    for _, days := range []int{-1, 32} {
+        _, err := reader.DailyUsage(context.Background(), platformusers.DailyUsageQuery{
+            Ref: platformusers.UserRef{Platform: "sub2api", ID: "u_10241"},
+            Days: days,
+        })
+        if err == nil {
+            t.Fatalf("days=%d accepted", days)
+        }
+    }
+
+    series, err := reader.DailyUsage(context.Background(), platformusers.DailyUsageQuery{
+        Ref:  platformusers.UserRef{Platform: "sub2api", ID: "u_10241"},
+        Day:  "2026-09-02",
+        Days: 7,
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    if series.From != "2026-08-27" || series.To != "2026-09-02" {
+        t.Fatalf("range=%s..%s", series.From, series.To)
+    }
+    if series.Coverage.CoveredDays > series.Coverage.ExpectedDays {
+        t.Fatalf("coverage=%+v", series.Coverage)
+    }
+    wantComplete := series.Coverage.CoveredDays == series.Coverage.ExpectedDays &&
+        !series.Snapshot.IsPartial
+    if series.Coverage.Complete != wantComplete {
+        t.Fatalf("coverage=%+v partial=%v", series.Coverage, series.Snapshot.IsPartial)
+    }
+}
+
+func TestDailyUsageDefaultsToSevenCSTDays(t *testing.T) {
+    clock := func() time.Time {
+        return time.Date(2026, 8, 27, 16, 30, 0, 0, time.UTC)
+    }
+    c := platformusers.NewFakeClient(platformusers.SourceSub2API, clock)
+    series, err := any(c).(platformusers.DailyUsageReader).DailyUsage(
+        context.Background(),
+        platformusers.DailyUsageQuery{
+            Ref: platformusers.UserRef{Platform: "sub2api", ID: "u_10241"},
+            Days: 0,
+        },
+    )
+    if err != nil || series.To != "2026-08-28" ||
+        series.Coverage.ExpectedDays != 7 || len(series.Points) != 7 {
+        t.Fatalf("series=%+v err=%v", series, err)
+    }
 }
 ~~~
 
@@ -660,6 +905,8 @@ Expected: FAIL because series implementation/handler do not exist.
 days 只接受 1..31，空 day 由服务端按 +08:00 解释；Points 每日一条、升序；
 缺日填 UnknownAmount 并降低 coverage；跨币种或部分日失败不能输出完整合计。
 HTTP DTO 金额用字符串/null，返回 expected_days/covered_days/complete 和 Snapshot。
+CapabilityUserDailyUsageRead 只由本 Task 的 Fake DailyUsageReader 声明；real clients
+不修改、不声明。
 
 - [ ] **Step 5: 写前端 RED/GREEN**
 
@@ -678,19 +925,21 @@ Expected: PASS after minimal implementation。
 - [ ] **Step 6: 提交 Task 6**
 
 ~~~bash
-git add connectors/platformusers/daily_usage.go connectors/platformusers/daily_usage_test.go connectors/platformusers/contract_v2.go connectors/platformusers/fake_v2.go connectors/platformusers/sub2api_v2.go connectors/platformusers/newapi_v2.go connectors/platformusers/contracttest/v2_suite.go internal/platform/httpapi/users_daily_usage.go internal/platform/httpapi/users_daily_usage_test.go internal/platform/httpapi/router.go web/apps/admin-web/src/api/users.ts web/apps/admin-web/src/api/users.test.ts web/apps/admin-web/src/pages/PlatformUserDetailPage.tsx web/apps/admin-web/src/pages/PlatformUserDetailPage.test.tsx
+git add connectors/platformusers/daily_usage.go connectors/platformusers/daily_usage_test.go connectors/platformusers/contract_v2.go connectors/platformusers/fake_v2.go connectors/platformusers/contracttest/v2_suite.go internal/platform/httpapi/users_daily_usage.go internal/platform/httpapi/users_daily_usage_test.go internal/platform/httpapi/router.go web/apps/admin-web/src/api/users.ts web/apps/admin-web/src/api/users.test.ts web/apps/admin-web/src/pages/PlatformUserDetailPage.tsx web/apps/admin-web/src/pages/PlatformUserDetailPage.test.tsx
 git commit -m "feat(platformusers): add capability-gated daily usage series"
 ~~~
 
 ### Task 7: Key metadata 与独立 scope
+
+**Worktree / PR:** ai/codex/XM-C-USER7-key-metadata；基线为 Task 3 已合入的
+release；必须引用 KEY_SCOPE_APPROVAL。只实现 contract/Fake/HTTP/UI，不依赖
+Task 4/5，也不修改尚未存在的 real 文件。
 
 **Files:**
 - Create: connectors/platformusers/key_metadata.go
 - Create: connectors/platformusers/key_metadata_test.go
 - Modify: connectors/platformusers/contract_v2.go
 - Modify: connectors/platformusers/fake_v2.go
-- Modify: connectors/platformusers/sub2api_v2.go
-- Modify: connectors/platformusers/newapi_v2.go
 - Modify: connectors/platformusers/contracttest/v2_suite.go
 - Create: internal/platform/httpapi/users_keys.go
 - Create: internal/platform/httpapi/users_keys_test.go
@@ -705,17 +954,56 @@ git commit -m "feat(platformusers): add capability-gated daily usage series"
 
 **Interfaces:**
 - Consumes: KeyMetadataReader/KeyMetadataQuery/KeyMetadataPage。
-- Produces: ScopeKeyMetadataRead = platform.user_keys.read 和 capability-gated keys Query。
+- Produces: CapabilityUserKeysMetadataRead、Fake KeyMetadataReader、
+ScopeKeyMetadataRead = platform.user_keys.read 和 capability-gated keys Query。
 
 - [ ] **Step 1: 检查双审批与真实样本门**
 
-必须有产品+安全对 platform.user_keys.read 的明确批准、角色映射裁定、Sub2/New
-Key metadata 的脱敏真实样本。任一缺失即停止；不得先把新 scope 放进
-DEFAULT_SCOPES 或默认 admin/staff。
+必须有产品+安全签署的 KEY_SCOPE_APPROVAL，明确 platform.user_keys.read 与角色
+映射。Task 7 不实现 real Reader，不要求 Task 4/5 已存在；真实样本和 real Key
+capability 由以后对应平台的独立授权 PR 处理。审批缺失即停止；不得先把新 scope
+放进 DEFAULT_SCOPES 或默认 admin/staff。
 
 - [ ] **Step 2: 写 RED secret/PII 反射测试**
 
 ~~~go
+func walkJSONKeys(
+    t *testing.T,
+    value any,
+    allowed map[string]bool,
+    forbidden *regexp.Regexp,
+) {
+    t.Helper()
+    switch node := value.(type) {
+    case map[string]any:
+        for key, child := range node {
+            if forbidden.MatchString(key) && !allowed[key] {
+                t.Fatalf("forbidden JSON key: %s", key)
+            }
+            walkJSONKeys(t, child, allowed, forbidden)
+        }
+    case []any:
+        for _, child := range node {
+            walkJSONKeys(t, child, allowed, forbidden)
+        }
+    }
+}
+
+func collectJSONStringValues(value any, out *[]string) {
+    switch node := value.(type) {
+    case string:
+        *out = append(*out, node)
+    case map[string]any:
+        for _, child := range node {
+            collectJSONStringValues(child, out)
+        }
+    case []any:
+        for _, child := range node {
+            collectJSONStringValues(child, out)
+        }
+    }
+}
+
 func TestKeyMetadataContainsNoSecretMaterial(t *testing.T) {
     typ := reflect.TypeOf(platformusers.KeyMetadata{})
     forbidden := regexp.MustCompile("(?i)full.?key|secret|credential|token.?hash|plaintext")
@@ -731,6 +1019,43 @@ func TestKeyPrefixIsAtMostEightCodePoints(t *testing.T) {
         t.Fatal("long prefix accepted")
     }
 }
+
+func TestKeyMetadataJSONHasNoCredentialKeysOrValues(t *testing.T) {
+    dto, err := toKeyMetadataPageBody(platformusers.KeyMetadataPage{
+        Items: []platformusers.KeyMetadata{{
+            ID: "key-meta-1", Prefix: "sk-abcd", Status: "active",
+        }},
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+    body, err := json.Marshal(dto)
+    if err != nil {
+        t.Fatal(err)
+    }
+    var decoded any
+    if err := json.Unmarshal(body, &decoded); err != nil {
+        t.Fatal(err)
+    }
+    allowed := map[string]bool{"prefix": true}
+    walkJSONKeys(t, decoded, allowed, regexp.MustCompile(
+        "(?i)full.?key|secret|credential|token.?hash|plaintext|email|phone|tax|bank"))
+
+    forbiddenValues := []string{
+        strings.Join([]string{"complete", "key", "sentinel"}, "-"),
+        "person@example.test",
+        "secret://test/key-reader",
+    }
+    var values []string
+    collectJSONStringValues(decoded, &values)
+    for _, got := range values {
+        for _, forbidden := range forbiddenValues {
+            if strings.Contains(got, forbidden) {
+                t.Fatalf("forbidden value leaked: %q in %q", forbidden, got)
+            }
+        }
+    }
+}
 ~~~
 
 - [ ] **Step 3: 运行 RED**
@@ -743,7 +1068,9 @@ Expected: FAIL because key types/handler/scope do not exist.
 
 默认 limit=50、最大 200；cursor 绑定 UserRef；Prefix 最大 8 code point；
 ID 不得可逆到完整 Key；status 未知映射 unknown；零时间对外 null；每页 Snapshot
-必须存在。真实来源没证明接口时不声明 keys capability。
+必须存在。CapabilityUserKeysMetadataRead 只由本 Task 的 Fake KeyMetadataReader
+声明；真实来源没实现 Reader 时不声明。共享 v2 contracttest 必须对每个未来 Reader
+返回的实际 JSON 同时运行 key walker 与 value sentinel/模式扫描，不能只做 struct 反射。
 
 - [ ] **Step 5: 注册 scope，保持默认角色保守**
 
@@ -771,11 +1098,15 @@ pnpm --config.verify-deps-before-run=false --filter admin-web exec vitest run sr
 ~~~
 
 ~~~bash
-git add connectors/platformusers/key_metadata.go connectors/platformusers/key_metadata_test.go connectors/platformusers/contract_v2.go connectors/platformusers/fake_v2.go connectors/platformusers/sub2api_v2.go connectors/platformusers/newapi_v2.go connectors/platformusers/contracttest/v2_suite.go internal/platform/httpapi/users_keys.go internal/platform/httpapi/users_keys_test.go internal/platform/platformusers/permissions.go internal/platform/httpapi/router.go internal/platform/oidcauth/resolver_test.go web/apps/admin-web/src/api/config.ts web/apps/admin-web/src/api/users.ts web/apps/admin-web/src/api/users.test.ts web/apps/admin-web/src/pages/PlatformUserDetailPage.tsx web/apps/admin-web/src/pages/PlatformUserDetailPage.test.tsx
+git add connectors/platformusers/key_metadata.go connectors/platformusers/key_metadata_test.go connectors/platformusers/contract_v2.go connectors/platformusers/fake_v2.go connectors/platformusers/contracttest/v2_suite.go internal/platform/httpapi/users_keys.go internal/platform/httpapi/users_keys_test.go internal/platform/platformusers/permissions.go internal/platform/httpapi/router.go internal/platform/oidcauth/resolver_test.go web/apps/admin-web/src/api/config.ts web/apps/admin-web/src/api/users.ts web/apps/admin-web/src/api/users.test.ts web/apps/admin-web/src/pages/PlatformUserDetailPage.tsx web/apps/admin-web/src/pages/PlatformUserDetailPage.test.tsx
 git commit -m "feat(platformusers): add scoped key metadata query"
 ~~~
 
 ### Task 8: reqlog 稳定 UserRef 与用户 usage 面板
+
+**Worktree / PR:** ai/codex/XM-C-USER8-reqlog-userref；基线为 Task 3 与 C002
+均已合入的 release；必须同时满足 REQLOG_USERREF_APPROVAL 和 reqlog 真实证据门。
+不依赖 Task 4/5/6/7。
 
 **Files:**
 - Modify: contracts/connectors/reqlog.read.v1.md
@@ -796,27 +1127,58 @@ git commit -m "feat(platformusers): add scoped key metadata query"
 **Interfaces:**
 - Consumes: platformusers.UserRef semantics、reqlog ScopeRead/ScopeContentRead。
 - Produces: reqlog Summary.UserRef、ListFilter.UserRef、by-user metadata Query 和
-Sub2API/NewAPI capability-gated usage/request panel。
+reqlog.requests.by_user_read capability、Sub2API/NewAPI capability-gated
+usage/request panel。capability 与 stable filter implementation/contracttest 同片声明。
 
 - [ ] **Step 1: 检查 reqlog 真实关联门**
 
-必须有真实 API/源码和脱敏 fixture，证明抄录记录或受信映射能返回 platform +
-source user ID。只有 Username/TokenPrefix 不算通过。若不能证明，停止 Task 8，
-用户详情继续 unavailable。
+必须同时满足：
+
+1. 产品+安全签署的 REQLOG_USERREF_APPROVAL（spec 审批项 6/原审批项 4），明确
+   Task 8、允许变更 reqlog stable link/filter、证据路径与 SHA-256；
+2. 真实 API/源码和脱敏 fixture 证明抄录记录或受信映射能返回 platform +
+   source user ID，并冻结 retention/cursor/watermark/partial 语义。
+
+CORE_APPROVAL、request.read 已存在、真实源码可读或只有 Username/TokenPrefix 都不算
+通过。任一条件缺失即停止 Task 8，用户详情继续 unavailable，Task 1~7 不受影响。
 
 - [ ] **Step 2: 写 RED anti-join 测试**
 
 ~~~go
-func TestReqlogNeverAssociatesByUsernameOrPrefix(t *testing.T) {
+func TestReqlogNeverAssociatesByEmailUsernameOrPrefix(t *testing.T) {
+    users := []struct {
+        ref  platformusers.UserRef
+        user platformusers.User
+    }{
+        {
+            ref: platformusers.UserRef{Platform: "sub2api", ID: "u_1"},
+            user: platformusers.User{
+                Username: "same", EmailMasked: "s***@example.test",
+                TokenPrefix: "sk-abcd",
+            },
+        },
+        {
+            ref: platformusers.UserRef{Platform: "newapi", ID: "u_2"},
+            user: platformusers.User{
+                Username: "same", EmailMasked: "s***@example.test",
+                TokenPrefix: "sk-abcd",
+            },
+        },
+    }
     rows := []reqlog.RequestLogSummary{
         {Source: "sub2api", Username: "same", TokenPrefix: "sk-abcd"},
         {Source: "newapi", Username: "same", TokenPrefix: "sk-abcd"},
     }
-    ref := platformusers.UserRef{Platform: "sub2api", ID: "u_1"}
-    for _, row := range rows {
-        if row.MatchesUser(ref) {
-            t.Fatalf("unlinked row was guessed: %+v", row)
+    for _, candidate := range users {
+        for _, row := range rows {
+            if row.MatchesUser(candidate.ref) {
+                t.Fatalf("display identity guessed a link: user=%+v row=%+v",
+                    candidate.user, row)
+            }
         }
+    }
+    if _, ok := reflect.TypeOf(reqlog.ListFilter{}).FieldByName("Email"); ok {
+        t.Fatal("email filter must not become a user association path")
     }
 }
 
@@ -858,6 +1220,9 @@ func (s RequestLogSummary) MatchesUser(ref platformusers.UserRef) bool {
     return s.User != nil && *s.User == ref
 }
 ~~~
+
+reqlog.requests.by_user_read 只能在上述 Reader/filter、真实 parser 和共享 contracttest
+同片通过后加入该 client 的 capability 列表。
 
 - [ ] **Step 5: 保持权限与正文审计边界**
 

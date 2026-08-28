@@ -10,6 +10,23 @@
 > ADR-004、ADR-006、ADR-018，platformusers v1 DRAFT，XM-B001 brief/report，
 > reqlog v1 DRAFT，invoice v1 DRAFT，CR-0002 与已批准产品方向 CR-0003。
 
+## 0. 独立审批事件
+
+审批不传递、不合并，后序任务必须引用对应审批事件及其证据哈希：
+
+| 事件 | 授权范围 | 明确不授权 |
+|---|---|---|
+| CORE_APPROVAL | Task 1~3：UserRef/codec、v2 Fake、Fake-only GetUser Query/UI；并批准 platform.users.read 扩大到 GetUser 基础事实 | 任何 Sub2/New/reqlog real、DailyUsage、Key scope、外部实例访问 |
+| SUB2_REAL_APPROVAL | Task 4；产品+安全审阅 Sub2 脱敏样本、版本、只读路径和证据文件后单独批准 | NewAPI、reqlog、DailyUsage、Key、invoice/payment |
+| NEWAPI_REAL_APPROVAL | Task 5；产品+安全审阅 NewAPI 脱敏样本、版本、GET 写黑名单和证据文件后单独批准 | Sub2、reqlog、DailyUsage、Key、invoice/payment |
+| DAILY_USAGE_APPROVAL | Task 6 的 Fake/core capability 与 platform.users.read 数据面 | 任一 real DailyUsage；real capability 必须在对应 real Reader 同一 PR 再批 |
+| KEY_SCOPE_APPROVAL | Task 7：新 scope platform.user_keys.read、角色映射与 Fake/core Query | 任一 real Key reader；真实样本批准另随对应 real PR |
+| REQLOG_USERREF_APPROVAL | Task 8；审批项 4 明确批准 reqlog stable UserRef，并引用真实 API/源码、脱敏 fixture 与 retention/cursor 证据 | invoice/payment、本地 link 表 |
+
+CORE_APPROVAL 通过只代表 core/Fake 可以实施，绝不构成 SUB2_REAL_APPROVAL 或
+NEWAPI_REAL_APPROVAL。真实样本存在也不等于批准 real；批准文本必须明确写出事件名、
+目标平台、证据路径/哈希和允许的任务号。CR-0002/3 与 M3 继续是外部独立门。
+
 ## 1. 要解决的问题
 
 XM-B001 已经交付了诚实的用户详情壳，但真实数据仍只有 platformusers v1
@@ -116,7 +133,9 @@ TS 与 Go 必须共享一份 golden fixture。严格要求：
 ## 5. platformusers v2 契约边界
 
 v1 的 ListUsers 保留兼容；v2 在同一 Go 包中新增 capability-specific interface，
-不扩大 v1 ReadClient 的方法集合。
+不扩大 v1 ReadClient 的方法集合。能力标识可以先在契约文档中保留名字，但任何
+client 的实际 capability 列表只能在它实现对应 Reader 的同一 PR 中增加，并由
+contracttest 同时证明；禁止先宣称 capability、以后再补实现。
 
 ### 5.1 核心 GetUser
 
@@ -153,12 +172,17 @@ GetUser 的规则：
 - 原生精确端点优先；
 - 若只能扫描列表，必须完整耗尽才能返回 ErrNotFound；
 - 达到请求/页数/游标循环上限返回 ErrLookupIncomplete；
-- ErrLookupIncomplete 对外是可重试的失败，绝不能映射成 404；
+- ErrNotFound 冻结映射为 Action CodeNotRegistered、HTTP 404、JSON error.code
+  NOT_REGISTERED；
+- ErrLookupIncomplete 冻结映射为 Action CodeExecutionFailed、HTTP 502、JSON
+  error.code EXECUTION_FAILED，安全消息固定为“用户精确查找未完成，请重试”；
+  前端按 5xx 显示可重试错误，绝不能映射成 404；
+- context.Canceled / DeadlineExceeded 必须原样传播到调用链，不能转换成 Not Found；
 - 不认识的平台或无 detail capability 返回 NOT_REGISTERED/501，不返回空用户；
 - 不把 CustomerType 放进最小结构。Sub2API/NewAPI 对“客户类型”的语义尚未冻结，
   在真实样本与产品定义到位前继续 unavailable。
 
-建议能力：
+保留的能力标识：
 
 ~~~text
 platformusers.user.detail_read
@@ -166,7 +190,9 @@ platformusers.user.daily_usage_read
 platformusers.user.keys_metadata_read
 ~~~
 
-每个平台只声明真实支持的子集；NewAPI 不继承 Sub2API 的布局或能力。
+每个平台只声明真实支持的子集；NewAPI 不继承 Sub2API 的布局或能力。detail
+标识在 Fake UserDetailReader 的 PR 中首次声明；Sub2/New real 只有在各自
+UserDetailReader 与 contracttest 同片完成后才声明。daily/key 同理。
 
 ### 5.2 DailyUsageSeries
 
@@ -204,7 +230,12 @@ type DailyUsageSeries struct {
 规则：
 
 - From..To 每个业务日恰好一项并按日期升序；
+- Days=0 使用默认 7；仅接受 1..31，负数或大于 31 当场拒绝；
+- 空 Day 的“今天”按固定 CST +08:00 服务端时钟解释；
+- From 是 To 向前包含当天的 Days 个日历日，允许跨月/跨年；
 - 已证明无消费 = KnownAmount(0)，没有读到 = UnknownAmount；
+- CoveredDays 只计 Consumed/Requests 均有证据的日期；Complete 当且仅当
+  CoveredDays==ExpectedDays 且 Snapshot.IsPartial=false；
 - 缺一天必须 Complete=false，不能画成完整折线；
 - 不跨币种求和，不经 float；
 - 真实来源只给区间合计而不给逐日时，保持 capability 不支持。
@@ -320,6 +351,9 @@ invoice 继续独立。CR-0002 尚未冻结；CR-0003 已批准平台隔离方�
 - 反射/JSON 键扫描必须覆盖 email、phone、tax、bank、address、secret、token、
   credential、full_key 等禁词，并对明确允许的 email_masked/token_prefix 使用
   精确白名单。
+- Key metadata 还必须扫描最终 HTTP JSON 的键和值：禁止 full_key/secret/
+  credential/token_hash 等键；禁止响应值包含 fixture 中的完整 Key sentinel、
+  email、CredentialRef 或其他凭据片段。只做 Go struct 反射不算通过。
 
 ## 9. Scope 与审批
 
@@ -384,16 +418,22 @@ fixture；不得把真实用户、邮箱、token、订单号或对话带入仓�
 
 没有上述批准时，任何本地 join 表都属于越界。
 
-## 12. 八个实施分片
+## 12. 八个 worktree / PR 分片
 
-1. UserRef + TS/Go codec golden + v2 core 类型；
-2. v2 Fake + capability contracttest；
-3. GetUser Service/HTTP/前端切换，仍只跑 Fake；
-4. Sub2API real GetUser，真实样本门控；
-5. NewAPI real GetUser，真实样本门控；
-6. DailyUsage capability；
-7. Key metadata capability 与新 scope 门；
-8. reqlog stable UserRef + by-user Query + 用户详情 usage 接线。
+| Task | 分支 | 基线依赖 | 独立门 | real 阻断时 |
+|---|---|---|---|---|
+| 1 | ai/codex/XM-C-USER1-userref-codec | 含 B001/C002 的最新 release | CORE_APPROVAL | 可实施 |
+| 2 | ai/codex/XM-C-USER2-user-v2-fake | Task 1 已合入 release | CORE_APPROVAL | 可实施 |
+| 3 | ai/codex/XM-C-USER3-get-user-query | Task 2 已合入 release | CORE_APPROVAL | 可实施，保持 Fake/real unavailable |
+| 4 | ai/codex/XM-C-USER4-sub2-user-real | Task 3 已合入 release | SUB2_REAL_APPROVAL + Sub2 证据 | 阻断，不影响 1~3/5~8 |
+| 5 | ai/codex/XM-C-USER5-newapi-user-real | Task 3 已合入 release | NEWAPI_REAL_APPROVAL + NewAPI 证据 | 阻断，不影响 1~4/6~8 |
+| 6 | ai/codex/XM-C-USER6-daily-usage | Task 3 已合入 release | DAILY_USAGE_APPROVAL | Fake/core 可实施；不引用 Task 4/5 文件 |
+| 7 | ai/codex/XM-C-USER7-key-metadata | Task 3 已合入 release | KEY_SCOPE_APPROVAL | Fake/core 可实施；不引用 Task 4/5 文件 |
+| 8 | ai/codex/XM-C-USER8-reqlog-userref | Task 3 与 C002 已合入 release | REQLOG_USERREF_APPROVAL + reqlog 证据 | 阻断，不影响 1~7 |
+
+每个 Task 必须从表中指定的已合入 release 新建独立 worktree/PR，不在未合并前序分支
+上堆叠。Task 4 与 5 彼此独立；Task 6/7 只实现 contract/Fake/HTTP/UI，real
+DailyUsage/Key reader 必须在对应平台后续独立授权 PR 中实现和声明 capability。
 
 payment/recharge 与 invoice 是独立领域，另立后续规格与计划；它们不是第 8 片中
 可以顺手实现的附属功能。
@@ -401,7 +441,9 @@ payment/recharge 与 invoice 是独立领域，另立后续规格与计划；它
 ## 13. TDD 总矩阵
 
 - TS/Go codec 对同一 golden 全量往返和拒绝；
-- GetUser exact/fuzzy 冲突、确定 Not Found、incomplete、游标循环、取消传播；
+- GetUser exact/fuzzy 冲突、第二页命中、分页完整耗尽、页上限仍有 cursor、
+  cursor 循环、context cancel/deadline；并逐字断言 404/NOT_REGISTERED 与
+  502/EXECUTION_FAILED 映射；
 - 同邮箱/username/prefix 跨平台绝不关联；
 - UserRef 在过滤、cursor、统计前生效；
 - DailyUsage 已知零、未知、缺日、跨月、CST、窗口上限；
@@ -433,11 +475,15 @@ payment/recharge 与 invoice 是独立领域，另立后续规格与计划；它
 
 ## 15. 待审批清单
 
-1. 是否允许 platform.users.read 从 v1 用户清单扩大到 GetUser 与 DailyUsage；
-2. 是否批准新 scope platform.user_keys.read，以及哪些粗粒度角色可映射；
-3. 是否批准以本文八分片进入实现计划；
-4. reqlog 是否允许扩展为稳定 UserRef；
-5. invoice 关联字段由 CR-0002/3 单独确认；
-6. payment/recharge 随 M3 单独确认。
+1. CORE_APPROVAL：是否允许 platform.users.read 扩大到 GetUser 基础事实，并批准
+   Task 1~3；该事件明确不授权 real；
+2. SUB2_REAL_APPROVAL：是否在审阅对应 Sub2 真实样本证据后批准 Task 4；
+3. NEWAPI_REAL_APPROVAL：是否在审阅对应 NewAPI 真实样本证据后批准 Task 5；
+4. DAILY_USAGE_APPROVAL：是否允许 platform.users.read 扩大到 DailyUsage Fake/core；
+5. KEY_SCOPE_APPROVAL：是否批准 platform.user_keys.read 及角色映射；
+6. REQLOG_USERREF_APPROVAL：是否批准 reqlog stable UserRef，且真实证据是否过门；
+7. invoice 关联字段由 CR-0002/3 单独确认；
+8. payment/recharge 随 M3 单独确认。
 
-未取得 1、2、3 的明确批准前，只允许继续文档和脱敏证据采集。
+未取得 CORE_APPROVAL 前只允许继续文档和脱敏证据采集；取得 CORE_APPROVAL 后也只能
+实施 Task 1~3。其余 Task 各自等待表中独立事件，任何批准不得被推定或继承。
