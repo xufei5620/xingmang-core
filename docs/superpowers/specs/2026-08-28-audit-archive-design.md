@@ -19,8 +19,10 @@
    隔离、仅含现有 Query 字段的 projection；
 3. 每段由冻结的 `ManifestV1` 绑定 payload/projection 的**精确对象 VersionID**、
    哈希、KMS/Object Lock 状态、`PreviousManifestRefV1`、冻结的 `ChainRootRefV1`
-   与 `canonical_version` 分布；`ManifestV1`、`CheckpointV1`、`RecoveryIndexV1`
-   均使用独立 strict wire 和 literal-byte golden，不嵌入可演进的运行时 struct；
+   与 `canonical_version` 分布；`ChainRootRefV1` 是沿用既有 root signature 的冻结
+   signed leaf，`ManifestV1`、`CheckpointV1`、`RecoveryIndexV1` 才使用统一的
+   `unsigned/unsigned_sha256/signature_*` envelope；四类各有独立 strict wire 与
+   literal-byte golden，均不嵌入可演进运行时 struct；
 4. 现有 Chain Root JSON 中内嵌的 `public_key` 不再是信任来源。Chain Root、
    manifest、ArchiveCheckpoint、RecoveryIndex 与 PLO approval envelope 分别使用
    purpose/protocol 隔离的 trusted key；任何对象自带公钥都必须忽略并拒绝自认证；
@@ -148,6 +150,12 @@ AUD1 的 `export-local` 只允许从 sequence 1/Genesis 开始，不接受 `--fr
 `PreviousManifestRefV1` exact locator，再验证首行 `prev_hash`；调用方提供 hash、root ID
 或本地文件路径本身均不能建立边界信任。
 
+AUD3 continuation 必须从**已验签 RecoveryIndex 指向的 terminal manifest**取得下一段
+`previous_manifest`，要求 `new.from_sequence=previous.to_sequence+1` 且新段首行
+`prev_hash=previous.last_event_hash`。PostgreSQL catalog 只能用于对账，不能提供这个前驱。
+现有 `audit.Store.VerifyChain(from>1,to)` 只验证给定区间内部，不能证明第一行前驱，禁止
+拿它替代此检查；实现必须有独立 red/green 测试钉住 exact terminal locator 与首行边界。
+
 ### 4.2 权威 payload
 
 媒体类型为 `application/x-ndjson; charset=utf-8`：UTF-8、无 BOM、LF 换行、
@@ -230,10 +238,15 @@ audit/v1/checkpoint/seq-<to19>-<checkpoint_sha256>.json
 
 `ChainRootRefV1`、`ManifestV1`、`CheckpointV1`、`RecoveryIndexV1` 是四个独立
 wire type，不得直接 JSON marshal `audit.ChainRoot`、数据库 row、provider SDK type
-或任一可演进运行时 struct。四类 unsigned JSON 与其 signed envelope 都使用：UTF-8、
-无 BOM/空白、末尾恰好一个 LF、下列字段顺序、UTC 固定微秒时间、十进制整数、JSON
-string 的 RFC 8259 转义；禁止 map。所有列表都有固定排序。Decoder 必须拒绝
-unknown、duplicate、missing、显式 null、错误 type、非规范时间/数字与多余字节。
+或任一可演进运行时 struct。四类 wire 都使用 UTF-8、无 BOM/空白、末尾恰好一个 LF、
+下列字段顺序、UTC 固定微秒时间、十进制整数、JSON string 的 RFC 8259 转义；禁止 map，
+所有列表固定排序，Decoder 拒绝 unknown、duplicate、missing、显式 null、错误 type、
+非规范时间/数字与多余字节。
+
+`ChainRootRefV1` 是**唯一 envelope 例外**：它直接携带既有 `audit-chain-root/v1`
+协议的 `signature/key_id`，Verifier 用冻结字段重建现有 root signing payload；不得再包一层
+`unsigned/unsigned_sha256`，也不存在 `SignedChainRootRefV1`。其余三类分别有 unsigned
+wire，并统一包进 §5.1 末尾唯一的 signed envelope。
 
 `ObjectVersionV1` 的字段顺序固定为：
 
@@ -292,25 +305,26 @@ missing_audit_event_count, duplicate_audit_event_count
 `ObjectVersionV1`。Manifest 不声称 Chain Root 的 `from_sequence` 是整条链起点；
 必须从 genesis 或验签 previous exact locator 连续重算。
 
-所有 signed envelope 的字段顺序固定为：
+`ManifestV1`、`CheckpointV1`、`RecoveryIndexV1` 的 signed envelope 字段顺序唯一固定为：
 
 ```text
 unsigned, unsigned_sha256, signature_algorithm="Ed25519",
 signature_key_id, signature
 ```
 
-四类 unsigned/signed wire 必须各有 checked-in literal bytes + 固定 SHA-256、strict
-negative golden 和跨 domain replay golden；expected bytes 不得由待测 encoder 生成。
+`ChainRootRefV1` 的既有签名 leaf，以及其余三类 unsigned/signed envelope，必须各有
+checked-in literal bytes + 固定 SHA-256、strict negative golden 和跨 domain replay
+golden；expected bytes 不得由待测 encoder 生成。
 
 ### 5.2 Manifest 签名
 
 Manifest 使用与 Chain Root **不同的签名 key**，避免协议复用：
 
 1. unsigned manifest 按固定字段顺序、无多余空白编码；
-2. `manifest_sha256 = SHA256(unsigned_manifest_bytes)`；
+2. `unsigned_sha256 = SHA256(unsigned_manifest_bytes)`；
 3. 签名载荷为：
-   `xm-audit-archive-manifest-v1\nsha256=<manifest_sha256>\n`；
-4. 外层 envelope 保存 `unsigned_manifest`、`manifest_sha256`、
+   `xm-audit-archive-manifest-v1\nsha256=<unsigned_sha256>\n`；
+4. 外层 envelope 只保存 `unsigned`、`unsigned_sha256`、
    `signature_algorithm=Ed25519`、`signature_key_id`、`signature`；
 5. verifier 从独立 trusted keyring 按 key ID + purpose + protocol 取公钥。
 
@@ -511,7 +525,8 @@ CatalogReader: Latest, ListRange only
 CatalogWriter: CommitCoveredSegment only
 RecoveryIndexReader: LoadCurrent(fixed locator) only
 RecoveryIndexCASWriter: CompareAndSwap(fixed locator, expected, signed next) only
-ReceiptJournal: BeginIntent, AppendPutResult, AppendTerminalResult, LoadOperation only
+ReceiptJournalReader: LoadOperation only
+ReceiptJournalWriter: BeginIntent, AppendPutResult, AppendTerminalResult only
 ```
 
 这些接口不得由一个“Store”暗中恢复任意 SQL/List/latest/Delete 权限。Service 可以组合
@@ -519,9 +534,52 @@ ReceiptJournal: BeginIntent, AppendPutResult, AppendTerminalResult, LoadOperatio
 `CheckpointSigner`、`RecoverySigner`、PLO/result/scrub signer 逐 purpose 注入并在签名前
 核对 keyring record，不能只依赖字段名暗示用途。
 
+#### ReceiptJournal 的实际 backing 与恢复边界
+
+`ReceiptJournal` 不是内存 fake、容器本地文件或待 provider 决定的抽象名词。AUD2 的
+exact migration 必须在 PostgreSQL `audit` schema 创建三张 append-only 表：
+
+```text
+audit.archive_operation_intent:
+  operation_id PK, approval_envelope_sha256, deterministic_bytes_digest,
+  canonical_intent_bytes, created_at
+
+audit.archive_put_receipt:
+  operation_id + ordinal PK/FK, object_version_bytes,
+  object_version_sha256, recorded_at
+
+audit.archive_terminal_receipt:
+  operation_id PK/FK, signed_result_bytes, terminal_result_digest,
+  optional_artifact_ref_bytes, recorded_at
+```
+
+三表只接收冻结 canonical bytes 与 SHA-256，不保存 payload、凭据、DSN 或 key material；
+provider idempotency token 属 Restricted operation metadata，只存在于
+`canonical_intent_bytes`，不得进入日志/证据。三表均有 no-update/no-delete rule，禁止
+TRUNCATE；同 operation/ordinal 相同 bytes 为幂等成功，不同 bytes/version 为 conflict。
+
+权限拆成两个独立 capability/login identity 与 CredentialRef：
+
+- `xm_audit_archive_receipt_reader`：只允许三表固定列 SELECT；
+- `xm_audit_archive_receipt_writer`：只允许三表 fixed-column INSERT；
+- 两者均非 owner/superuser，不获 UPDATE/DELETE/TRUNCATE/DDL、audit event/catalog 权限；
+- Service 可组合 reader/writer，但实现和连接池不可合并成通用 audit Store。
+
+AUD2 的 migration approval digest 必须同时覆盖三表、约束、rules、queries、sqlc 输出与
+正反向 `SET ROLE` 测试；只批准 `archive_segment` 不足以开工。
+
+恢复语义固定为：进程/容器崩溃但 PostgreSQL 尚在时，从 journal 复用同一 intent bytes、
+idempotency token 与 exact VersionID；PostgreSQL 在 RecoveryIndex CAS **之前**丢失时，
+外部对象仍是未 committed orphan，恢复流程不得猜测或自动继续旧 operation；CAS 之后
+RecoveryIndex/checkpoint 才是 committed root of trust，catalog 可据此重建。若 DB 丢失时
+原 PLO result receipt 尚未发布，必须以新的、另获批准的 archive reconciliation run
+产生其自身结果并引用既有 checkpoint，不得伪造原 operation 的 UUID/时间/签名。
+三表纳入数据库备份，但绝不替代 RecoveryIndex。
+
 ### 6.2 Catalog 原则
 
-未来迁移新增 `audit.archive_segment`，但本文件不预占迁移编号；AUD2 开工时必须
+未来同一 exact-approved migration 新增 `audit.archive_segment` 与 §6.1 三张
+ReceiptJournal 表，但本文件不预占迁移编号；AUD2 开工时必须
 在其最新 base 上动态取得下一个编号。表只保存**已经 committed 的段**，不设置
 `STAGING` 状态，也不 UPDATE 状态：
 
@@ -596,6 +654,10 @@ success 恢复语义：`RecoverPutResult` 只能用 provider 原生、与 intent
 查询或等价原子 receipt，且能返回唯一 exact VersionID；普通 S3 兼容标签不算证明。
 若供应商只能在 412 后做 latest HEAD/ListObjectVersions、或无法区分同 key 的多个版本，
 AUD2 对该 provider 为 **NO-GO**，不得靠重新上传、猜 latest 或放宽 wire 继续。
+批准 provider 的真实 disposable WORM bucket qualification 结果若缺失、SKIP、过期或
+不是 exact approved SDK/protocol，同样是 **AUD2 STOP**；`httptest` 只证明客户端请求形状，
+不能替代 provider ambiguous-success 证据。没有 test CredentialRef 时不得提交 S3 adapter/
+依赖/部署配置，可将 filesystem 与纯协议部分留在更早的非 provider 片审查。
 
 内容寻址 orphan 不删除是刻意代价；RecoveryIndex 未引用它就不是 committed 历史，
 但 scrub 可报 orphan 指标，绝不能自动清理。
@@ -741,6 +803,8 @@ DB role split 的验收不是一句“REVOKE”而是以下精确目标；所有
 | `xm_audit_archive_source_reader` | CONNECT；USAGE `audit`,`action`,`core`；SELECT 指定列于 `audit_event`,`chain_root`,`action_run`,`core.environment` | 任意 INSERT/UPDATE/DELETE/TRUNCATE、DDL、catalog 写、函数/任意 SQL |
 | `xm_audit_anchor_writer` | 仅 fixed-column INSERT `audit.chain_root`；tip/root 读取由 source reader 身份完成；不再 UPDATE `export_target` | SELECT 任意业务表、UPDATE/DELETE root、audit_event 写、catalog 写 |
 | `xm_audit_archive_catalog_writer` | SELECT + INSERT 于 `audit.archive_segment`/catalog materialization；advisory xact lock | audit_event/action_run 读取或写、catalog UPDATE/DELETE/TRUNCATE |
+| `xm_audit_archive_receipt_reader` | 三张 journal 表 fixed-column SELECT | audit_event/action_run/catalog/object 权限及任意写 |
+| `xm_audit_archive_receipt_writer` | 三张 journal 表 fixed-column INSERT | SELECT 业务表、UPDATE/DELETE/TRUNCATE/DDL 与其它 audit 写 |
 | `xm_audit_restore_writer` | 只在 fingerprint 匹配的 isolated target，事务内 fixed-column INSERT `audit_event` + SELECT verify | 非空/非隔离目标、UPDATE/DELETE、source/production DSN、DDL |
 
 对象 IAM 同样拆成 `ObjectWriter` conditional Put 固定 prefix、`ExactObjectReader`
@@ -753,10 +817,34 @@ bucket admin key。grants/IAM evidence 必须列实际 allow 与 explicit deny�
 
 ### 9.1 为什么不是 Action
 
-归档与恢复改变的是平台证据制品、数据库拓扑或恢复状态，属于 ADR-003 指定的
-Platform Lifecycle Operation。首期只提供版本化 CLI；禁止 UI 触发、任意路径、
+归档、full verify、scrub 与恢复会访问 Restricted payload，并改变证据制品、验证 head、
+数据库拓扑或恢复状态，全部属于 ADR-003 指定的 Platform Lifecycle Operation。首期只提供版本化 CLI；禁止 UI 触发、任意路径、
 任意 SQL 或普通 Action contract。`--approval-id anything` 不是批准。执行前输入与执行后
 结果是两个不同的冻结制品，不能把事后结果伪装成事前批准。
+
+`Plan` 只生成不带批准事实的 `PLOCandidateV1`：冻结 source/index/root/range、target policy、
+build/binary 与 `dry_run_digest`。它**不能**填写 approval/change ID、approvers、批准时刻、
+validity、nonce、idempotency key 或 Kill Switch hash，也不能签 approval。独立人类批准系统
+读取 candidate exact bytes/digest、两名适格 HUMAN 的实际批准记录和当时已验签的
+KillSwitch snapshot，构造并以 `plo_approval_signing/v1` 签署下列完整 envelope。
+运行 CLI 只接受 signed envelope 文件；candidate/digest、裸 approval ID 或命令行字段均
+不能升级成执行授权。
+
+`PLOCandidateV1` canonical 字段顺序固定为：
+
+```text
+kind="xingmang-audit-plo-candidate", format_version=1,
+purpose, environment, source_database_fingerprint, isolated_target_fingerprint,
+target_policy, recovery_index_fixed_locator_ref,
+expected_source_tip, expected_root_hash,
+expected_index_generation, expected_index_hash,
+from_sequence, to_sequence, archive_format_version,
+build_commit, binary_sha256, dry_run_digest
+```
+
+candidate 不使用 approval signing key；批准系统把其 exact SHA-256 连同批准事实写入审批
+记录，再构造 envelope。Envelope 必须逐字段复核 candidate 的上述事实，不能只信
+`dry_run_digest` 字符串。
 
 `PLOApprovalEnvelopeV1` unsigned 字段顺序固定为：
 
@@ -770,12 +858,12 @@ expected_index_generation, expected_index_hash,
 from_sequence, to_sequence, archive_format_version,
 build_commit, binary_sha256,
 valid_from, valid_until, nonce, idempotency_key,
-dry_run_digest, kill_switch_snapshot_sha256
+candidate_sha256, dry_run_digest, kill_switch_snapshot_sha256
 ```
 
 `approvers` 按 stable human ID UTF-8 bytes 排序，至少两名不同且满足批准策略的 HUMAN，
 每项固定为 `principal_id,approval_role,approved_at`；`purpose` 仅允许 `archive`、
-`restore`、`scrub`。`target_policy` 精确绑定 bucket/region/prefix、KMS key、Object Lock
+`verify`、`scrub`、`restore`。`target_policy` 精确绑定 bucket/region/prefix、KMS key、Object Lock
 mode/retain-until、residency 与 provider/SDK protocol；不适用的 isolated target
 fingerprint 使用显式空 string。Envelope 用 `plo_approval_signing/v1` trusted key 签名。
 
@@ -788,9 +876,12 @@ valid_from, valid_until, issued_at, issuer
 ```
 
 它用 `kill_switch_signing` / `xm-audit-archive-kill-switch-v1` 单独验签；approval
-envelope 绑定其 signed SHA-256。Run 在签 root、每个 Put、
-Checkpoint、RecoveryIndex CAS 与下一段前重新读取 fixed locator，要求 hash/generation
-不回退、`enabled=true` 且当前时刻位于 `[valid_from,valid_until)`；不可达即 fail closed。
+envelope 绑定其 signed SHA-256。所有 purpose 启动时都重读 fixed locator，要求
+hash/generation 不回退、`enabled=true` 且当前时刻位于 `[valid_from,valid_until)`；
+不可达/变化/禁用/过期即 fail closed。archive 还要在签 root、每个 Put、Checkpoint、
+RecoveryIndex CAS 与下一段前重验；verify/scrub 在每个 Restricted Get 与 ScrubHead CAS
+前重验；restore 在开启写事务前、第一条 INSERT 前和 COMMIT 紧前重验，失败必须
+ROLLBACK，不能用启动时 snapshot 撑完整个长操作。
 
 `PLOResultReceiptV1` 是事后 append-only signed artifact，字段顺序固定为：
 
@@ -803,6 +894,13 @@ verification_report, scrub_receipt,
 exit_code, outcome, result_digest
 ```
 
+`checkpoint` 与 `scrub_receipt` 使用冻结 `OptionalArtifactRefV1`：字段固定为
+`kind,bucket_id,key,version_id,sha256`；`kind="none"` 时其余四项必须空，
+`kind="object"` 时四项必须全非空。这样 envelope 已接受但在对象/checkpoint 前失败的
+operation 仍能产生唯一 strict result，而不是使用 null、伪造 locator 或跳过 result。
+未推进 index 时 `recovery_generation=0`、`recovery_index_sha256` 显式空 string，
+`verification_report` 显式记录 `not_run` 或实际报告。
+
 `object_results` 按 intent ordinal 排序且每项保存 `ObjectVersionV1`；receipt 使用
 `plo_result_receipt_signing/v1` key。Plan 只读产生 approval candidate/dry-run digest；
 `result_digest` 是其前面全部 result facts（排除 `result_digest` 自身）的 canonical
@@ -810,6 +908,12 @@ bytes SHA-256，随后整个 unsigned receipt 再按通用 envelope 签名。
 Run 拒绝任何字段漂移、过期、自签或 key purpose 错误，并在恢复时要求非空、匹配的
 isolated target fingerprint。CLI 只能选择 signed approval envelope，不能覆盖 range/
 bucket/KMS/target。AccessRecorder 只保存 envelope/result digest，不保存敏感值。
+
+archive、verify、scrub、restore 在 signed envelope 被接受后，都必须把 success/failure
+写成独立 `SignedPLOResultReceiptV1`，通过 append-only result journal/PutIfAbsent 持久化；
+任何 API/CLI 返回的普通 report 只是该 signed result 的投影，不能替代它。若原数据库在
+terminal CAS 后、result 发布前丢失，新的人工批准 archive reconciliation run 只能发布
+自己的 operation/result，并引用既有 checkpoint；不得补签或伪造丢失的原 operation。
 
 ### 9.2 自动调度硬依赖
 
