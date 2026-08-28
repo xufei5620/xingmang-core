@@ -308,19 +308,27 @@ guessed client-side.
 
 ### 10.1 Static column capabilities and schema readiness
 
-Saved sort must not be discarded merely because an asynchronous data source has not finished
-loading the column definition. Approved tables therefore expose a static column-capability schema
-containing every stable column ID, whether it is sortable, primary/defaultHidden status, and filter
-options independently of row data.
+Saved sort must not be discarded merely because asynchronous data has not finished loading.
+Approved tables expose a column-capability schema independently of current row values.
 
-In particular, upstream/channel margin columns such as grossProfit remain present and sortable
-while their values are pending or unavailable; pending cells return null sort values rather than
-removing the column capability.
+The two finance tables have different current shapes and must remain distinct in tests:
 
-If a future table genuinely cannot construct its capability schema synchronously, its persistence
-adapter must expose schemaReady=false and defer SavedView reconciliation. It must not turn a saved
-sort into null while schemaReady is false. Reconciliation runs once after both the SavedView Query
-and column schema are ready.
+- ChannelTable uses column ID grossProfit. Its capability is static and sortable from the initial
+  render, even when a row's grossProfit value is null.
+- UpstreamAccountsPanel uses column ID margin. Today its value function is added only when the
+  summary map is non-empty, so its runtime sortability changes while summary data loads. B003c must
+  register margin as a static sortable capability; missing summary values return null rather than
+  removing the capability.
+
+The persistence adapter starts with schemaReady=false until the static capability list has been
+registered. If a SavedView containing sort.column_id=margin arrives while the summary is still
+pending, the adapter keeps that saved state queued and does not sanitize the sort to null. Once
+schemaReady becomes true, it reconciles and activates the margin sort even if summary row values
+are still pending; later summary data reorders rows under that retained sort.
+
+Regression tests separately prove immediate grossProfit reconciliation for ChannelTable and the
+schemaReady transition for UpstreamAccountsPanel.margin. A future genuinely dynamic table follows
+the same defer-until-schemaReady rule.
 
 ## 11. Database contract
 
@@ -614,42 +622,44 @@ The Action envelope already records Action ID/version, Principal, Environment, r
 SavedView resource UUID. The SHA-256 input is canonical JSON of state v1. The hash proves which
 snapshot changed without duplicating potentially sensitive state into the append-only audit chain.
 
-### 16.1 Fixed failure envelope and malicious-marker proof
+### 16.1 Existing Kernel error contract and malicious-marker proof
 
-Invalid set payloads return the existing HTTP error envelope with exactly these public fields:
+XM-B003 does not extend or modify Action Kernel, Action Schema, Action error codes, or WriteError.
+The existing behavior remains authoritative:
 
-~~~json
-{
-  "error": {
-    "code": "INVALID_PARAMS",
-    "message": "SavedView 参数无效",
-    "request_id": "<request-id>"
-  }
-}
-~~~
+| Failure point | Kernel code/message | HTTP |
+|---|---|---|
+| Action Schema unknown field, wrong type, or missing required field | INVALID_PARAMS / 参数不符合 Action Schema | 400 |
+| Handler SavedView JSON validation, domain validation, missing/foreign remove, or Store failure | EXECUTION_FAILED / action ui.saved_view.{set or remove} 执行失败 | 502 |
 
-A foreign or missing remove target returns INVALID_PARAMS with fixed message SavedView 不存在;
-the response never distinguishes the two. Unexpected Store failures use INTERNAL and the
-repository's fixed internal-error message. No public message or wrapped server error formats a raw
-name, query, filter, or column value.
+The Handler returns fixed internal sentinels/categories such as saved_view_json_invalid,
+saved_view_domain_invalid, saved_view_not_found, and saved_view_store_failed. It never formats a
+raw name, query, filter, or column value into an error. Kernel then safely exposes only its existing
+outer EXECUTION_FAILED message. XM-B003 does not require Handler validation to become
+INVALID_PARAMS and does not require Store failures to become INTERNAL.
 
-The implementation adds no SavedView-specific logger call containing user state. Existing
-WriteError logging keeps its fixed fields: module, request_id, path, method, status, error_code,
-and err. The err value is the stable Action Error() string, never a formatted raw input or wrapped
-cause. Existing Action audit-failure logging keeps its fixed action metadata fields. Neither path
-attaches params, state, query, filters, name, or columns.
+Existing WriteError logging keeps its fixed fields: module, request_id, path, method, status,
+error_code, and err. The err value is the outer Action Error() string, not its wrapped cause.
+Existing Action audit-failure logging keeps its fixed action metadata fields. Neither path attaches
+params, state, query, filters, name, or columns.
 
-An HTTP integration test submits distinct malicious markers in name, query, filter keys/values,
-known columns, and visible columns, then forces a deterministic INVALID_PARAMS failure. The test
-captures:
+HTTP integration tests exercise two existing layers:
 
-- the WriteError response body;
-- a bytes.Buffer-backed slog JSON logger;
-- the audit sink event.
+1. unknown/type/required Schema failures assert INVALID_PARAMS and 参数不符合 Action Schema;
+2. JSON/domain/Store failures assert EXECUTION_FAILED and action ui.saved_view.set 执行失败
+   (or the remove Action ID).
 
-It asserts the fixed code/message/field names and proves that none of the marker strings occurs in
-the response, logger buffer, or audit event serialization. A matching INTERNAL-path test uses a
-fixed Store error and repeats the leak assertion.
+Each test submits distinct malicious markers in name, query, filter keys/values, known columns,
+and visible columns where the layer permits them. It captures the WriteError body, a
+bytes.Buffer-backed slog JSON logger, and the audit sink event, then proves no marker occurs in any
+serialization.
+
+Implementation scope explicitly excludes:
+
+- internal/platform/action/kernel.go;
+- internal/platform/action/schema.go and schema_test.go;
+- internal/platform/action/errors.go;
+- internal/platform/httpapi/response.go.
 
 ## 17. Built-in views and default behavior
 
@@ -788,7 +798,9 @@ review.
 - Sub2API/NewAPI tables never share view rows.
 - Applying a view restores v1 state and clears all excluded transient state.
 - New/removed columns reconcile according to section 10.
-- Saved sort on a static-but-loading margin column survives until schemaReady reconciliation.
+- ChannelTable.grossProfit reconciles from static capabilities immediately.
+- UpstreamAccountsPanel.margin is not dropped while summary/schema is pending and is applied after
+  schemaReady without losing the saved sort.
 - Explicit URL criteria win and copied URLs work without access to the owner's view.
 - Persistence failure never claims success and never writes browser storage.
 - Built-in 全部 remains usable in every degraded state.

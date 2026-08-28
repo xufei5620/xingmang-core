@@ -15,6 +15,8 @@
 - This plan is not implementation authorization. Do not begin XM-B003b until the product owner approves every item in the spec's Hard approval gate.
 - XM-B003b and XM-B003c use separate worktrees, branches, commits, and PRs; Codex does not merge either PR.
 - All reads use Query. All durable writes use the existing Action HTTP endpoint and Action Kernel.
+- Do not modify internal/platform/action/kernel.go, schema.go, schema_test.go, errors.go, or
+  internal/platform/httpapi/response.go. XM-B003 uses the existing error contract unchanged.
 - ui.saved_view.set@1 and ui.saved_view.remove@1 are L0, permission ui.saved_view.manage, HUMAN-only, and explicitly allowed in development/staging/production.
 - Owner issuer/subject/identity zone and Environment come only from Principal and never from client parameters.
 - State v1 persists query, filters, sort, known/visible columns, and density. It excludes page, cursor, selection, preview, expanded rows, route tab/sub-tab, Environment, row data, and request state.
@@ -457,6 +459,19 @@ Environments. Test bounded filters_json, trailing JSON rejection, sort-pair vali
 owner/Environment params, and all domain limits. Use action.CaptureAudit to prove each non-empty
 before/after summary has exactly one key named state_hash.
 
+Handler validation errors use fixed sentinel categories only:
+
+~~~go
+var (
+    errSavedViewJSONInvalid = errors.New("saved_view_json_invalid")
+    errSavedViewDomainInvalid = errors.New("saved_view_domain_invalid")
+    errSavedViewNotFound = errors.New("saved_view_not_found")
+    errSavedViewStoreFailed = errors.New("saved_view_store_failed")
+)
+~~~
+
+Never concatenate or wrap a user-supplied name/query/filter/column value into these errors.
+
 Add exact decoder tests:
 
 ~~~go
@@ -542,23 +557,30 @@ Add tests for the exact response DTO, missing scope 403, machine Principal rejec
 table_key, server-derived Owner/Environment, and absence of owner, Environment, and state_hash in
 the response.
 
-Add malicious-marker coverage through the real ExecuteActionHandler + Kernel + captured logger:
+Add malicious-marker coverage through the real ExecuteActionHandler + existing Kernel + captured
+logger:
 
 ~~~go
-func TestSavedViewInvalidParamsDoNotLeakMarkersToHTTPLogOrAudit(t *testing.T)
-func TestSavedViewInternalErrorDoesNotLeakMarkersToHTTPLogOrAudit(t *testing.T)
+func TestSavedViewSchemaErrorsRemainInvalidParamsWithoutMarkerLeak(t *testing.T)
+func TestSavedViewHandlerValidationBecomesExecutionFailedWithoutMarkerLeak(t *testing.T)
+func TestSavedViewStoreFailureBecomesExecutionFailedWithoutMarkerLeak(t *testing.T)
 ~~~
 
-Use distinct markers in name, query, filter key/value, known columns, and visible columns. Capture
-the WriteError body, a bytes.Buffer-backed slog JSON handler, and audit sink events. Assert none of
-the markers occurs in any serialization.
+For unknown/type/required Action Schema failures, assert error.code=INVALID_PARAMS,
+error.message=参数不符合 Action Schema, HTTP 400, and existing error.request_id.
 
-For invalid params, assert the public body has exactly error.code=INVALID_PARAMS,
-error.message=SavedView 参数无效, and error.request_id, with no extra error fields. For a fixed Store
-failure, assert code INTERNAL and the repository's fixed internal-error message. The captured
-WriteError log must retain exactly its existing module/request_id/path/method/status/error_code/err
-field names; err must be the stable Action Error() string. Do not add params, state, query,
-filters, name, columns, or any wrapped cause text.
+For SavedView JSON/domain validation and fixed Store sentinel failures, assert
+error.code=EXECUTION_FAILED, error.message=action ui.saved_view.set 执行失败 (or the remove Action
+ID), HTTP 502, and existing error.request_id. Do not expect INVALID_PARAMS for Handler validation
+and do not expect INTERNAL for a Store error returned by a Handler.
+
+Use distinct markers in name, query, filter key/value, known columns, and visible columns wherever
+the tested layer accepts them. Capture the WriteError body, a bytes.Buffer-backed slog JSON
+handler, and audit sink events. Assert no marker occurs in any serialization.
+
+The captured WriteError log retains exactly its existing
+module/request_id/path/method/status/error_code/err fields; err is the outer Action Error() string.
+Do not add params, state, query, filters, name, columns, or wrapped cause text.
 
 - [ ] **Step 2: Define explicit DTOs**
 
@@ -610,8 +632,9 @@ git add internal/platform/httpapi/savedviews.go internal/platform/httpapi/savedv
 git commit -m "feat(httpapi): expose principal-scoped saved views"
 ~~~
 
-Expected: Query scope, HUMAN enforcement, DTO, route, fixed error envelope, malicious-marker
-redaction, logger-field, and wiring tests pass.
+Expected: Query scope, HUMAN enforcement, DTO, route, existing Schema-versus-Handler error
+contract, malicious-marker redaction, logger-field, and wiring tests pass without any Kernel,
+Schema, error-code, or WriteError file change.
 
 ## Task 7: Add scope mapping and authorization docs
 
@@ -791,9 +814,10 @@ Test:
 - removed columns and invalid sort/filter references are dropped;
 - an unsupported version is not guessed;
 - page, cursor, selection, preview, expanded rows, and request state are absent.
-- a saved grossProfit sort remains pending while schemaReady=false and applies after the static
-  capability schema becomes ready;
-- loading/missing margin row values do not remove the grossProfit sortable capability.
+- ChannelTable column ID grossProfit is a static sortable capability and reconciles immediately;
+- UpstreamAccountsPanel column ID margin remains queued while summary is not ready and
+  schemaReady=false, then reconciles without being sanitized to null after schemaReady=true;
+- loading/missing summary values return null sort values without removing margin capability.
 
 - [ ] **Step 2: Define wire types**
 
@@ -989,15 +1013,20 @@ Keep current uncontrolled behavior for tables not opted into persistence.
 - [ ] **Step 3: Implement persistent controls**
 
 For persistence-enabled tables, await callbacks, never add sessionViews, announce run ID only on
-success, and keep current presentation on failure. Denied/error does not remove built-ins. Do not
-reconcile remote state until schemaReady=true.
+success, and keep current presentation on failure. Denied/error does not remove built-ins. Keep
+remote state queued and unchanged until schemaReady=true; do not run a partial reconciliation.
 
 - [ ] **Step 4: Implement atomic apply**
 
 One state transition applies reconciled query/filter/sort/columns/density and clears page,
 selection, preview, expanded rows, and open productivity panels. Avoid intermediate renders with
-stale selection. Channel/upstream column capabilities are defined independently of async margin
-row values, so grossProfit remains sortable during loading with null cell sort values.
+stale selection.
+
+ChannelTable registers grossProfit as a static sortable capability immediately.
+UpstreamAccountsPanel registers margin as a static sortable capability instead of conditionally
+adding capability when summaries.size > 0. Its value function returns null while summary data is
+missing. The SavedView adapter may transition schemaReady from false to true only after this static
+list is registered.
 
 - [ ] **Step 5: Add Storybook states**
 
@@ -1034,6 +1063,14 @@ Expected: ui-admin tests and typecheck pass.
 
 Assert exact table key, URL overlay, dt_* materialization, unavailable dt_view fallback, and
 underlying-table survival on Query failure.
+
+Add page-level regressions:
+
+~~~typescript
+it("reconciles ChannelTable grossProfit immediately from static capabilities")
+it("does not permanently drop UpstreamAccountsPanel margin while summary is pending")
+it("applies queued margin sort after schemaReady and reorders when summary arrives")
+~~~
 
 - [ ] **Step 2: Implement PersistentDataTable**
 
