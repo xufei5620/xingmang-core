@@ -25,6 +25,11 @@
 - `finance.platform_channel_binding.manage` is absent from every default role.
 - `/api/v1/finance/channels/summary` keeps its account-grain response through MAP4.
 - Binding changes never rewrite historical `finance.profit_daily`.
+- Channel identity gating uses independent directory completeness evidence; coverage/error-rate
+  partial never blocks binding by itself.
+- Historical economics match binding history by complete business-day interval; active binding is
+  never applied retroactively, and an intra-day rebind makes that day fail closed.
+- `external_channel_id` is trimmed before lookup/lock and must equal `btrim(...)` in the database.
 - Money stays integer scale-6; ratios stay Decimal strings; unknown stays null, never zero.
 - MAP2 resolves the migration number dynamically; it never assumes `000013` is free.
 - Every slice runs targeted red/green tests and all repository gates before PR creation.
@@ -46,6 +51,7 @@ approved MAP0
 
 **Files:**
 - Create: `contracts/connectors/sub2api.read.v2.md`
+- Create: `contracts/connectors/newapi.channel-directory.v2.md`
 - Create: `connectors/sub2api/channel_directory.go`
 - Create: `connectors/sub2api/channel_directory_test.go`
 - Create: `connectors/sub2api/contracttest/v2_suite.go`
@@ -53,8 +59,17 @@ approved MAP0
 - Modify: `connectors/sub2api/fake.go`
 - Modify: `connectors/sub2api/contract_test.go`
 - Modify: `connectors/sub2api/client_contract_test.go`
+- Create: `connectors/newapi/channel_directory.go`
+- Create: `connectors/newapi/channel_directory_test.go`
+- Modify: `connectors/newapi/upstream.go`
+- Modify: `connectors/newapi/fake.go`
+- Modify: `connectors/newapi/client_contract_test.go`
 - Modify: `internal/platform/jobs/sub2api_sync.go`
 - Modify: `internal/platform/jobs/sub2api_sync_test.go`
+- Modify: `internal/platform/jobs/newapi_sync.go`
+- Modify: `internal/platform/jobs/newapi_sync_test.go`
+- Modify: `cmd/platform-worker/main.go`
+- Modify: `cmd/platform-worker/main_test.go`
 - Modify: `internal/platform/ops/freshness.go`
 - Modify: `internal/platform/ops/metrickeys_test.go`
 - Modify: `docs/modules/connector/README.md`
@@ -64,7 +79,11 @@ approved MAP0
 - Produces:
 
 ```go
-const MetricChannelsStatus = "sub2api.channels.status"
+const (
+    ContractVersionV1 = "1"
+    ContractVersionV2 = "2"
+    MetricChannelsStatus = "sub2api.channels.status"
+)
 
 type ManagedChannel struct {
     Snapshot
@@ -75,16 +94,34 @@ type ManagedChannel struct {
     Currency          string
 }
 
-type ChannelDirectoryReader interface {
-    Channels(context.Context) ([]ManagedChannel, error)
+type DirectoryCompleteness struct {
+    Complete bool
+    Truncated bool
+    ReportedCount int64
+    FetchedCount int64
+    Evidence string
+}
+
+type ManagedChannelDirectory struct {
+    Snapshot
+    Completeness DirectoryCompleteness
+    CoveragePartial bool
+    Items []ManagedChannel
+}
+
+type ReadClientV2 interface {
+    ReadClient
+    ChannelDirectory(context.Context) (ManagedChannelDirectory, error)
 }
 
 func ToChannelDirectoryObservation(
-    now time.Time, instanceID, environment string, channels []ManagedChannel,
+    now time.Time, instanceID, environment string, directory ManagedChannelDirectory,
 ) ops.Observation
 ```
 
-NewAPI has no connector change here: `newapi.ChannelStatus` v1 already supplies channel identity.
+NewAPI keeps `ChannelStatus` and `ReadClient.Channels()` v1 row semantics. Its own directory-v2 type
+duplicates the completeness fields above and wraps `[]ChannelStatus`; connectors do not import a
+shared contract type. This exposes reported/fetched/truncated independently from v1 `IsPartial`.
 
 - [ ] **Step 1: Create MAP1 only after MAP0 approval**
 
@@ -98,9 +135,11 @@ Verify a clean worktree and that its HEAD is the latest release head.
 
 - [ ] **Step 2: Freeze the v2 contract before code**
 
-The contract states: every `/admin/accounts` item with a nonblank ID yields one row; missing quota
-yields `BalanceMinorUnits=nil`; v1 `ChannelBalances()` and `sub2api.channels.balance` remain; new
-capability is `sub2api.channels.read`; v2 adds no write method or credential-shaped field.
+The contracts state: every Sub2API `/admin/accounts` item with a nonblank ID yields one row; missing
+quota yields `BalanceMinorUnits=nil`; NewAPI reuses v1 `ChannelStatus` rows; both directory envelopes
+carry independent complete/truncated/reported/fetched/evidence; field coverage partial is separate.
+Sub2 v1 `ChannelBalances()` remains, v2 adds `sub2api.channels.read`, and neither v2 adds a write
+method or credential-shaped field.
 
 - [ ] **Step 3: Write failing v2 contract tests**
 
@@ -121,12 +160,20 @@ func TestV2DirectoryKeepsNoQuotaAccount(t *testing.T) {
         t.Fatalf("directory=%+v", rows)
     }
 }
+
+func TestNewAPICoveragePartialDoesNotMeanDirectoryIncomplete(t *testing.T) {
+    got := newAPIDirectoryFixture(t, reported(80), fetched(80), errorRatesMeasured(40))
+    if !got.Completeness.Complete || !got.CoveragePartial {
+        t.Fatalf("directory=%+v", got)
+    }
+}
 ```
 
 - [ ] **Step 4: Run the focused test and confirm red**
 
 ```powershell
-go test ./connectors/sub2api/... -run 'ManagedChannel|V2Directory' -count=1
+go test ./connectors/sub2api/... ./connectors/newapi/... `
+  -run 'ManagedChannel|V2Directory|DirectoryIncomplete|CoveragePartial' -count=1
 ```
 
 Expected: FAIL because the v2 types/decoder do not exist.
@@ -155,17 +202,23 @@ Trim IDs and reject blank IDs; keep status opaque; never decode credentials or a
 
 - [ ] **Step 6: Emit the full metric and retain v1**
 
-`sub2api.channels.status` contains every channel row. Omit `balance_minor_units` when nil. Aggregate
-freshness uses the oldest member and propagates partial/truncated. `sub2api_sync` writes both the new
-metric and the legacy balance metric from the same fetch; exhaustive metric tests include both.
+`sub2api.channels.status` contains every channel row. Omit `balance_minor_units` when nil. Both
+systems emit `inventory_completeness` separately from `coverage_partial`; NewAPI v1 `IsPartial`
+never gates the directory. `sub2api_sync` writes new and legacy metrics from one fetch. The Sub2
+factory returned to the Worker is statically `ReadClientV2`; Fake/real clients implement it and the
+Worker contains no optional type assertion. Legacy v1 still omits nil-quota rows and records skipped
+count + `IsPartial=true` without changing v2 completeness.
 
 - [ ] **Step 7: Run MAP1 verification**
 
 ```powershell
 go test ./connectors/sub2api/... -count=1
-go test ./internal/platform/jobs -run Sub2API -count=1
+go test ./connectors/newapi/... -count=1
+go test ./internal/platform/jobs -run 'Sub2API|NewAPI' -count=1
+go test ./cmd/platform-worker -count=1
 go test ./internal/platform/ops -count=1
-go fmt ./connectors/sub2api/... ./internal/platform/jobs/... ./internal/platform/ops/...
+go fmt ./connectors/sub2api/... ./connectors/newapi/... ./internal/platform/jobs/... `
+  ./internal/platform/ops/... ./cmd/platform-worker/...
 go vet ./...
 go test -p 1 ./...
 bash scripts/check-governance.sh
@@ -176,14 +229,18 @@ Expected: all commands exit 0; v1 output remains compatible and v2 retains no-qu
 - [ ] **Step 8: Commit and open MAP1 without merging**
 
 ```powershell
-git add contracts/connectors/sub2api.read.v2.md connectors/sub2api `
+git add contracts/connectors/sub2api.read.v2.md `
+  contracts/connectors/newapi.channel-directory.v2.md connectors/sub2api connectors/newapi `
   internal/platform/jobs/sub2api_sync.go internal/platform/jobs/sub2api_sync_test.go `
+  internal/platform/jobs/newapi_sync.go internal/platform/jobs/newapi_sync_test.go `
+  cmd/platform-worker/main.go cmd/platform-worker/main_test.go `
   internal/platform/ops/freshness.go internal/platform/ops/metrickeys_test.go `
   docs/modules/connector/README.md
 git commit -m "feat(connectors): add complete Sub2API channel directory"
 ```
 
-The PR Handoff states that MAP2 waits for human merge and NewAPI remains on v1.
+The PR Handoff states that MAP2 waits for human merge; NewAPI row semantics remain v1 while only
+the independent directory-completeness envelope is v2.
 
 ---
 
@@ -205,10 +262,14 @@ The PR Handoff states that MAP2 waits for human merge and NewAPI remains on v1.
 - Modify: `internal/platform/finance/actions_test.go`
 - Modify: `internal/platform/finance/actions_integration_test.go`
 - Modify: `internal/platform/finance/permissions.go`
+- Modify: `internal/platform/action/errors.go`
+- Modify: `internal/platform/action/errors_test.go`
 - Create: `contracts/actions/finance.platform_channel_binding.set.v1.json`
 - Create: `contracts/actions/finance.platform_channel_binding.remove.v1.json`
 - Create: `internal/platform/httpapi/channel_bindings.go`
 - Create: `internal/platform/httpapi/channel_bindings_test.go`
+- Modify: `internal/platform/httpapi/response.go`
+- Modify: `internal/platform/httpapi/response_test.go`
 - Modify: `internal/platform/httpapi/router.go`
 - Modify: `cmd/platform-api/main.go`
 - Modify: `internal/platform/oidcauth/resolver_test.go`
@@ -255,9 +316,10 @@ replace it with a number copied from this plan.
 
 - [ ] **Step 3: Write failing domain and integration tests**
 
-Cover nonblank opaque IDs, four exact candidate states, same-target idempotency, stale expected ID,
-concurrent first create, two active bindings rejected, many channels per upstream accepted, and both
-cross-environment FK violations rejected.
+Cover trimmed canonical IDs (`"1"` and `" 1 "` cannot coexist), four exact candidate states,
+candidate evidence sufficiency, same-target idempotency, the complete expected-ID matrix, concurrent
+first create/rebind, overlapping historical intervals rejected, many channels per upstream accepted,
+and both cross-environment FK violations rejected.
 
 - [ ] **Step 4: Confirm the red state**
 
@@ -269,17 +331,20 @@ Expected: FAIL because the domain/schema are absent.
 
 - [ ] **Step 5: Apply the exact schema from spec §6**
 
-The migration includes the table, interval checks, `provenance` enum check, composite service/account
-environment FKs, active partial unique index, start unique index, upstream history index, and the two
-supporting composite candidate keys. It inserts no confirmed binding.
+The migration includes the table, `external_channel_id = btrim(external_channel_id)`, interval checks,
+`provenance` enum check, composite service/account environment FKs, active partial unique index,
+start unique index, upstream history index, and the two supporting composite candidate keys. It
+inserts no confirmed binding.
 
 - [ ] **Step 6: Add six sqlc queries and regenerate**
 
 ```text
 InsertPlatformChannelBinding :one
 GetActivePlatformChannelBinding :one
+AcquirePlatformChannelBindingLock :exec
 LockActivePlatformChannelBinding :one
 ClosePlatformChannelBinding :one
+ListOverlappingPlatformChannelBindings :many
 ListActivePlatformChannelBindingsByService :many
 ListPlatformChannelBindingHistory :many
 ```
@@ -303,8 +368,11 @@ func (s *ChannelBindingStore) Set(ctx context.Context, in SetBindingInput) (Plat
 func (s *ChannelBindingStore) Remove(ctx context.Context, environment string, ref ChannelRef, expected uuid.UUID, reason, actor string) error
 ```
 
-`bool` means changed. Same target + matching expected ID is an audited no-op; stale/omitted expected
-ID is `ErrBindingConflict`; unique-index races map to the same stable error.
+`bool` means changed. Normalize before acquiring
+`pg_advisory_xact_lock(hashtextextended(service_id::text || chr(31) || external_id,0))`; under that lock,
+reject overlapping `[valid_from,valid_to)` history before close/insert. Same target + matching expected
+ID is an audited no-op; stale/omitted expected ID is `ErrBindingConflict`; unique-index races map to
+the same stable error. No-active + nonempty expected ID is also conflict.
 
 - [ ] **Step 8: Implement the deterministic candidate evaluator**
 
@@ -316,26 +384,33 @@ func EvaluateBindingCandidates(
 ) []ChannelCandidate
 ```
 
-It returns `unmapped/candidate/conflict/orphan` in ChannelRef order. Partial/stale/source-mismatched
-inventory sets `InventoryUnknown` and cannot create orphan. `platform_id=NULL` may yield one candidate
-with `PlatformAssignmentMissing=true`; mismatch or multiple targets is conflict.
+It returns `unmapped/candidate/conflict/orphan` in ChannelRef order plus
+`EvidenceStatus=sufficient|insufficient|conflicting`. Token-map evidence can propose a candidate only
+when that environment has exactly one active service of `ua.system_type` and its service type matches
+the requested ChannelRef. Zero services yields orphan + insufficient `no_active_service`; multiple
+services yields conflict + `ambiguous_service`; type mismatch, platform mismatch, or multiple targets
+is also conflict. Directory incomplete/stale/source mismatch sets
+`InventoryUnknown` and cannot create orphan; coverage partial alone does not.
 
 - [ ] **Step 9: Add L1 HUMAN-only Action contracts and handlers**
 
 Both contracts are version 1, require the new scope, declare `risk_level: L1`, `human_only: true`,
-and `compensation_mode: MANUAL`. Environment comes only from Principal. Handlers verify latest full
-inventory, service/account environment, service state/type, current expected ID, and token evidence;
-they never mutate token maps, `platform_id`, ledger rows, or third-party state.
+and `compensation_mode: MANUAL`. Set makes `expected_binding_id` optional-but-non-null; remove requires
+it. Environment comes only from Principal. Handlers verify latest complete directory, service/account
+environment, service state/type, current expected ID, and token evidence; they never mutate token
+maps, `platform_id`, ledger rows, or third-party state. Set result always includes the current/new
+`binding_id`; rebind also returns `previous_binding_id`; remove returns `removed_binding_id`.
 
 - [ ] **Step 10: Add the binding Query and default-deny proof**
 
 ```http
-GET /api/v1/finance/platform-channel-bindings?service_id=<uuid>&include_history=false
+GET /api/v1/finance/platform-channel-bindings?service_id=<uuid>&include_history=false&limit=50&cursor=...
 ```
 
-Require `finance.read`; return bindings, four-state candidates, orphans, and inventory freshness.
-Extend `TestDefaultRoleScopeMapIsConservative` to assert the new manage scope appears in neither
-default staff nor default admin.
+Require `finance.read`; freeze the spec §10 response, sorting, history order, cursor, and 1..200
+limit. Add `CONFLICT`→409 and `PRECONDITION_FAILED`→412 to Action/HTTP errors and verify every error
+row in spec §10.4. Extend `TestDefaultRoleScopeMapIsConservative` to assert the new manage scope
+appears in neither default staff nor default admin.
 
 - [ ] **Step 11: Run MAP2 verification**
 
@@ -431,7 +506,8 @@ Add parallel assertions for an unmapped inventory row, one revenue with multiple
 upstream mismatch, mixed currencies, missing sides, and a historical rebind.
 
 Fixtures include two channels sharing one upstream, multiple token costs with one account revenue,
-two known revenue rows for one channel/day, mixed currencies, missing sides, and a historical rebind.
+two known revenue rows for one channel/day, mixed currencies, missing sides, a full-day historical
+binding, no historical binding, NULL/wrong platform, timezone disagreement, and an intra-day rebind.
 
 - [ ] **Step 3: Confirm red before implementation**
 
@@ -443,20 +519,31 @@ Expected: FAIL because the projector does not exist.
 
 - [ ] **Step 4: Add the raw ledger Query**
 
-Return ledger rows rather than a revenue SUM so the domain can detect duplication:
+In one `REPEATABLE READ READ ONLY` transaction, return ledger rows and binding history rather than
+using active binding or a revenue SUM:
 
 ```sql
 WHERE ua.environment = sqlc.arg(environment)
-  AND pd.platform_id = sqlc.arg(instance_id)
   AND pd.account_id = sqlc.arg(external_channel_id)
   AND pd.business_day BETWEEN sqlc.arg(from_day) AND sqlc.arg(to_day)
 ORDER BY pd.business_day, pd.upstream_account_id, pd.token_id
 ```
 
 Select upstream account, business day, token ID, nullable revenue/cost, currency, source, and both
-observed timestamps. Regenerate sqlc and inspect the generated nullable types.
+observed timestamps plus `platform_id` and `business_day_tz`. Partition the raw set with all binding
+histories for that external ID: rows fully matching another ChannelRef are excluded from this one;
+NULL stays unattributed; a non-NULL value matching no historical ChannelRef is platform mismatch.
+Regenerate sqlc and inspect nullable types.
 
-- [ ] **Step 5: Implement exact per-day de-duplication**
+- [ ] **Step 5: Select the binding that covered the full business day**
+
+Convert each day through its one frozen `business_day_tz` to `[day_start,next_day_start)`. Exactly
+one history interval must cover the full day and every ledger row must match its target. No interval
+or NULL platform is `unattributed_history`; wrong platform/account, a gap, multiple timezones, or an
+intra-day rebind returns explicit conflict and null economics. Never use current active binding,
+observed timestamps, or updated_at to rewrite/split a daily fact.
+
+- [ ] **Step 6: Implement exact per-day de-duplication**
 
 ```go
 switch knownRevenueRows {
@@ -473,13 +560,15 @@ default:
 Require every ledger row's upstream account to equal the confirmed binding. Sum costs only when
 all cost rows are known and currency is singular. Never use `SUM(DISTINCT revenue_minor)`.
 
-- [ ] **Step 6: Join health/model without inventing data**
+- [ ] **Step 7: Join health/model without inventing data**
 
 Sub2API uses v2 status and nullable balance; success, latency, model names, verified count, and
 assurance remain null. NewAPI uses v1 enabled/error-rate/latency/model-count; model names and
-assurance remain null. Every value keeps source/observed/partial/stale metadata.
+assurance remain null. Inventory completeness and field coverage partial remain separate. A NewAPI
+`bad_response` from illegal balance is a page-level `EXECUTION_FAILED`/502 with no rows; no per-row
+invalid balance state is invented.
 
-- [ ] **Step 7: Attach account-level runway and distinct totals**
+- [ ] **Step 8: Attach account-level runway and distinct totals**
 
 Load upstream summaries once and index by account. Channel rows may repeat a runway reference, but:
 
@@ -491,25 +580,27 @@ coverageTotal := len(distinctMeteredUpstreamAccountIDs)
 Balances, most-urgent runway, and coverage are computed over distinct account IDs. Subscription
 accounts remain `not_applicable` and are excluded from the denominator.
 
-- [ ] **Step 8: Add the two-scope Query and single-instance gate**
+- [ ] **Step 9: Add the two-scope Query and single-instance gate**
 
 ```http
-GET /api/v1/platforms/{platform}/channels?service_id=<uuid>&from=...&to=...
+GET /api/v1/platforms/{platform}/channels?service_id=<uuid>&from=...&to=...&limit=50&cursor=...
 ```
 
 Require both `ops.read` and `finance.read`. If service ID is omitted, resolve only when exactly one
 active service of that type exists; zero is `not_connected`, multiple is `ambiguous_service`.
-Observation source must equal `service.instance_id`.
+Observation source must equal `service.instance_id`. Implement spec §10 sorting, cursor, 1..200
+limit, 92-day window, response objects, and error codes exactly.
 
-- [ ] **Step 9: Protect the legacy endpoint**
+- [ ] **Step 10: Protect the legacy endpoint**
 
 Add a regression test proving `/api/v1/finance/channels/summary` still returns upstream-account UUID
 rows with its existing schema. C001 totals continue using it.
 
-- [ ] **Step 10: Run MAP3 verification**
+- [ ] **Step 11: Run MAP3 verification**
 
 ```powershell
-go test ./internal/platform/finance -run 'Projection|DuplicateRevenue|SharedRunway|HistoricalBinding' -count=1
+go test ./internal/platform/finance `
+  -run 'Projection|DuplicateRevenue|SharedRunway|HistoricalBinding|IntraDayRebind|Unattributed' -count=1
 go test ./internal/platform/httpapi -run 'PlatformChannels|SummaryCompatibility' -count=1
 go fmt ./internal/platform/finance/... ./internal/platform/httpapi/... ./cmd/platform-api/...
 go vet ./...
@@ -519,7 +610,7 @@ bash scripts/check-governance.sh
 
 Expected: all exit 0; duplicate/mismatch fixtures return null finance cells and explicit conflicts.
 
-- [ ] **Step 11: Commit and open MAP3 without merging**
+- [ ] **Step 12: Commit and open MAP3 without merging**
 
 ```powershell
 git add db/queries/finance.sql internal/platform/finance/gen `
@@ -560,12 +651,14 @@ export interface ChannelRef {
 }
 
 export type CandidateState = "unmapped" | "candidate" | "conflict" | "orphan";
+export type CandidateEvidenceStatus = "sufficient" | "insufficient" | "conflicting";
 
 export interface PlatformChannelRow {
   channelRef: ChannelRef;
   name: string;
   binding: { id: string; upstreamAccountId: string } | null;
   candidateState: CandidateState | null;
+  candidateEvidenceStatus: CandidateEvidenceStatus;
   economics: ChannelEconomics | null;
   health: ChannelHealth | null;
   runway: SharedRunway | null;
@@ -579,9 +672,10 @@ Use worktree `K:/星芒统一控制平台/wt-xmC-MAP4` and branch
 
 - [ ] **Step 2: Write failing API mapping tests**
 
-Test snake_case mapping, nullable money, all candidate states, conflicts, shared count, and NewAPI's
-unconfigured/zero/invalid balance states. A fixture with two channels sharing one upstream must
-produce two frontend rows.
+Test the frozen response schema, nullable money, all candidate/evidence states, conflicts, shared
+count, inventory complete versus coverage partial, and NewAPI's unconfigured versus known-zero
+balance. A fixture with two channels sharing one upstream must produce two frontend rows. A 502
+`EXECUTION_FAILED` fixture must produce page error with no stale/per-row fallback.
 
 - [ ] **Step 3: Confirm API tests are red**
 
@@ -593,8 +687,10 @@ Expected: FAIL because the API module is absent.
 
 - [ ] **Step 4: Implement API mapping without financial arithmetic**
 
-Map backend strings/nulls into typed rows. Do not calculate revenue, cost, profit, margin, coverage,
-or runway in TypeScript; only format server results.
+Map backend strings/nulls, pagination cursor, and error codes into typed rows/PageState. Do not
+calculate revenue, cost, profit, margin, coverage, or runway in TypeScript; only format server
+results. Do not invent an invalid-balance row state: NewAPI malformed balance is page-level error
+until a separately approved v2 contract says otherwise.
 
 - [ ] **Step 5: Switch row identity to ChannelRef**
 
@@ -611,7 +707,9 @@ Never key by upstream account ID. Views and filters keep unmapped/conflict rows 
 Assert two shared-account channels remain two rows; unmapped shows `未映射` rather than zero;
 candidate/conflict/orphan are explicit; shared runway says `共享余额 · 共 2 渠道`; Sub2API
 unsupported success/model cells say `未接入 · M1.5`; NewAPI v1 health retains freshness. Also assert
-C001 totals still call the legacy account-grain endpoint and never sum channel rows.
+C001 totals still call the legacy account-grain endpoint and never sum channel rows. Directory
+incomplete disables binding UI; coverage partial only marks affected health fields. A NewAPI
+`EXECUTION_FAILED` response renders the page error state and zero channel rows.
 
 - [ ] **Step 7: Confirm component tests are red**
 
@@ -665,15 +763,22 @@ not-run reason, remaining M1.5 unknowns, and C001 compatibility proof.
 
 Before requesting human merge, prove all of the following with current evidence:
 
-1. No duplicate active ChannelRef exists and cross-environment rows are structurally rejected.
-2. All four candidate states and inventory unknown behavior pass tests.
-3. The new manage scope is absent from both default roles.
-4. Duplicate revenue and upstream mismatch produce null + explicit conflict.
-5. Shared runway totals use distinct upstream accounts.
-6. Sub2API no-quota accounts remain in the v2 directory.
-7. The legacy summary response and C001 totals are unchanged.
-8. No binding Action changed token maps, `platform_id`, historical ledger, or third-party state.
-9. Governance, secret-scan, backend, and frontend CI are all green.
-10. Codex has not merged or deployed the PR.
+1. No duplicate active/canonical ChannelRef exists; cross-environment rows are structurally rejected.
+2. Advisory-lock concurrency and overlap tests preserve non-overlapping history.
+3. All four candidate states, service/type evidence sufficiency, and inventory unknown behavior pass.
+4. Directory completeness and coverage partial are independent; New v1 IsPartial never gates identity.
+5. Sub2 v2 real/fake factory and Worker wiring are static; legacy nil-quota partial remains compatible.
+6. Query/Action schemas, sorting, pagination, include_history, expected-ID matrix, result IDs, and
+   frozen error codes match the spec.
+7. The new manage scope is absent from both default roles.
+8. Full-day historical binding selection passes; intra-day rebind, gaps, NULL/wrong platform,
+   wrong upstream, and timezone conflicts return null + evidence without using active binding.
+9. Duplicate revenue and upstream mismatch produce null + explicit conflict.
+10. Shared runway totals use distinct upstream accounts.
+11. NewAPI invalid balance produces page-level 502/PageState error, not a made-up row state.
+12. The legacy summary response and C001 totals are unchanged.
+13. No binding Action changed token maps, `platform_id`, historical ledger, or third-party state.
+14. Governance, secret-scan, backend, and frontend CI are all green.
+15. Codex has not merged or deployed the PR.
 
 Any failed item leaves the slice in progress; a partial green set does not prove the design complete.
