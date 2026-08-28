@@ -3,4 +3,3 @@ ALTER TABLE finance.upstream_account
     DROP COLUMN IF EXISTS upstream_group,
     DROP COLUMN IF EXISTS upstream_contact,
     DROP COLUMN IF EXISTS upstream_name;
-

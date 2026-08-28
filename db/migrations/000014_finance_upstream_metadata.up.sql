@@ -9,4 +9,3 @@ ALTER TABLE finance.upstream_account
     ADD COLUMN upstream_name text,
     ADD COLUMN upstream_contact text,
     ADD COLUMN upstream_group text;
-
