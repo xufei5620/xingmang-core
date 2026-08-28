@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	connusers "github.com/xufei5620/xingmang-platform/connectors/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
@@ -197,4 +198,67 @@ func indexOf(h, n string) int {
 		}
 	}
 	return -1
+}
+
+// TestListResolvesPeriodServerSide:区间在**服务端**解析,前端只传原始意图。
+//
+// 让前端算「今天」的后果很具体:一个在 UTC-5 的运营,浏览器本地日期比业务日
+// (CST +08:00)早一天,于是他看到的「今天」是账面上的昨天——而两份数都长得
+// 像正常读数,没人会怀疑(宪法 14 条)。
+func TestListResolvesPeriodServerSide(t *testing.T) {
+	c := &stubClient{}
+	svc := newService(t, c).WithClock(func() time.Time {
+		// UTC 16:30 时 CST 已经是次日 00:30
+		return time.Date(2026, 8, 27, 16, 30, 0, 0, time.UTC)
+	})
+
+	if _, err := svc.List(context.Background(), platformusers.ListInput{
+		Platform: "sub2api",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if c.got.Period.Day != "2026-08-28" {
+		t.Fatalf("默认业务日 = %q, want 2026-08-28(CST 已跨日)", c.got.Period.Day)
+	}
+	if c.got.Period.Granularity != connusers.GranularityDay {
+		t.Fatalf("默认粒度 = %q, want day", c.got.Period.Granularity)
+	}
+}
+
+// TestListPassesPeriodThrough:显式指定的日期与粒度原样解析后传下去。
+func TestListPassesPeriodThrough(t *testing.T) {
+	c := &stubClient{}
+	svc := newService(t, c)
+
+	if _, err := svc.List(context.Background(), platformusers.ListInput{
+		Platform:    "newapi",
+		Day:         "2026-08-27",
+		Granularity: "week",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if c.got.Period.From != "2026-08-24" || c.got.Period.To != "2026-08-30" {
+		t.Fatalf("区间 = %s..%s, want 2026-08-24..2026-08-30",
+			c.got.Period.From, c.got.Period.To)
+	}
+}
+
+// TestListRejectsBadPeriodAs400:坏日期/坏粒度是**调用方**的参数错误。
+//
+// 归 400 而不是 500,而且消息里要能看出错在哪一项——否则运营只会看到
+// 「服务内部错误」,而实际上他只是把日期写成了 2026-8-1。
+func TestListRejectsBadPeriodAs400(t *testing.T) {
+	for _, in := range []platformusers.ListInput{
+		{Platform: "sub2api", Day: "2026-8-1"},
+		{Platform: "sub2api", Day: "昨天"},
+		{Platform: "sub2api", Granularity: "weekly"},
+	} {
+		_, err := newService(t, &stubClient{}).List(context.Background(), in)
+		if err == nil {
+			t.Fatalf("%+v 应当被拒绝", in)
+		}
+		if got := codeOf(t, err); got != action.CodeInvalidParams {
+			t.Fatalf("%+v 的错误码 = %v, want INVALID_PARAMS", in, got)
+		}
+	}
 }

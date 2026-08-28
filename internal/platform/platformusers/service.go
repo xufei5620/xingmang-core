@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xufei5620/xingmang-platform/connectors/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
@@ -34,6 +35,24 @@ type Service struct {
 	// clients 按 source 索引。缺一个平台就等于那个平台没接——
 	// 而不是回落到另一个平台的客户端去(那会把 A 平台的用户显示成 B 的)
 	clients map[string]Client
+	// now 供测试注入固定时钟;nil 时用 time.Now。
+	//
+	// 需要时钟是因为「今天」要在**服务端**解释:让前端算「今天」的话,
+	// 一个在 UTC-5 的运营看到的今天会比账面业务日早一天(宪法 14 条)。
+	nowFn func() time.Time
+}
+
+func (s *Service) now() time.Time {
+	if s.nowFn == nil {
+		return time.Now()
+	}
+	return s.nowFn()
+}
+
+// WithClock 注入时钟,只供测试用。
+func (s *Service) WithClock(now func() time.Time) *Service {
+	s.nowFn = now
+	return s
 }
 
 // NewService 构造查询入口。
@@ -75,8 +94,12 @@ type ListInput struct {
 	Query    string
 	Status   string
 	Sort     string
-	Limit    int
-	Cursor   string
+	// Day 是统计区间的锚点业务日(YYYY-MM-DD)。空串 = 今天。
+	Day string
+	// Granularity 是统计粒度(day / week / month)。空串 = day。
+	Granularity string
+	Limit       int
+	Cursor      string
 }
 
 // List 读取一页终端用户。
@@ -99,12 +122,25 @@ func (s *Service) List(ctx context.Context, in ListInput) (platformusers.UserPag
 	if err != nil {
 		return platformusers.UserPage{}, err
 	}
+	// 区间在这里就校验一次,而不是等连接器报 bad_response 再翻译:
+	// 拼错的粒度是**调用方**的参数错误,消息里要能说出错在哪一项
+	// (「未知统计粒度 "weekly"」),而经过 translateError 之后只剩
+	// 一句笼统的「查询条件不合法」。
+	period, err := platformusers.Period{
+		Day:         in.Day,
+		Granularity: platformusers.Granularity(in.Granularity),
+	}.Normalize(s.now(), nil)
+	if err != nil {
+		return platformusers.UserPage{}, action.NewError(action.CodeInvalidParams,
+			"统计区间不合法", err)
+	}
 
 	page, err := client.ListUsers(ctx, platformusers.ListFilter{
 		Source: source,
 		Query:  in.Query,
 		Status: status,
 		Sort:   sort,
+		Period: period,
 		Limit:  in.Limit,
 		Cursor: in.Cursor,
 	})

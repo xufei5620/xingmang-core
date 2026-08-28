@@ -115,7 +115,7 @@ func (c *RealClient) ListUsers(_ context.Context, _ ListFilter) (UserPage, error
 		"真实用户端点的响应形状待核对(XM-0046:见 RealClient 的接入清单)")
 }
 
-// connectorBadSource / connectorBadCursor 是 fake 侧的参数错误。
+// connectorBadSource / connectorBadCursor / connectorBadPeriod 是 fake 侧的参数错误。
 //
 // 归 bad_response 而非 internal:参数是调用方给的,让它去改请求。
 func connectorBadSource(source string) error {
@@ -126,4 +126,13 @@ func connectorBadSource(source string) error {
 func connectorBadCursor(cursor string) error {
 	return connector.NewError(connector.KindBadResponse, "platformusers.list_users",
 		fmt.Errorf("游标 %q 不合法", cursor))
+}
+
+// connectorBadPeriod 包装区间参数错误(业务日写法、未知粒度)。
+//
+// 把原始 err 裹进去而不是换一句自己的话:那条 err 已经说清了是哪一项不合法
+// (「未知统计粒度 "weekly"」比「区间参数不合法」有用得多),而它是我们自己
+// 契约层产生的文本,不是上游正文,不涉及透传风险。
+func connectorBadPeriod(err error) error {
+	return connector.NewError(connector.KindBadResponse, "platformusers.list_users", err)
 }

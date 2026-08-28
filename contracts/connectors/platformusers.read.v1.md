@@ -53,8 +53,9 @@ platformusers.users.read
 | `EmailMasked` | string | **已打码**;空串=上游没记;`invalid-contact`=记了但形状不认识 |
 | `Status` | enum | `active` / `limited` / `disabled` / `unknown` |
 | `Balance` | Amount | 可用余额 |
-| `PeriodRecharge` | Amount | 区间充值;v1 上游多半 `Known=false` |
-| `PeriodConsumed` | Amount | 区间消费(计费口径);同上 |
+| `PeriodRecharge` | Amount | **所选区间**的充值;v1 上游多半 `Known=false` |
+| `PeriodConsumed` | Amount | **所选区间**的消费(计费口径);同上 |
+| `Last30dConsumed` | Amount | 近 30 天消费,**滚动窗口、不随区间变**;同上 |
 | `LastActiveAt` | time | 零值=从未活跃(≠ 很久以前活跃过) |
 | `TokenPrefix` | string | 令牌前缀,**至多 8 字符**,永远不是完整 Key |
 
@@ -97,6 +98,49 @@ Amount 迟早会被某个调用方直接读出来用);`Known=true` 时必须有�
   会被打码成 `姓名***@b.com>`,真实姓名原封不动地留在输出里(有测试钉住)。
 - **打码发生在连接器**,不在 HTTP 层:否则明文会先进平台进程内存、日志缓冲、
   错误包装,再在最后一步被抹掉。
+
+### 3.3b 统计区间 `Period`(XM-0053)
+
+原型顶部的「统计区间」控件:**一个锚点业务日 + 一个粒度**,不是一对起止日。
+存成起止对的话,「周」这个语义在往返之间会丢掉——回显时只能说
+「2026-08-24 到 2026-08-30」,而人选的是「这一周」。
+
+```go
+type Period struct {
+    Day         string      // 锚点业务日 YYYY-MM-DD;空 = 今天
+    Granularity Granularity // day / week / month;空 = day
+    From, To    string      // 解析出的**闭区间**业务日,由 Normalize 填,回显用
+}
+```
+
+- **周 = 周一至周日**(ISO 口径)。Go 的 `time.Weekday` 里 `Sunday==0`,
+  直接拿它当偏移会把周日划进上一周;
+- **月 = 自然月**;
+- **业务日按 CST 固定 +08:00 切**(`DefaultBusinessDayLocation`,与 metering 同源)。
+  不用 `LoadLocation("Asia/Shanghai")`:那依赖容器里有 tzdata,而且会随 tzdata 更新而变。
+
+「今天」由**服务端**解释。前端拿浏览器本地日期去填,在 UTC-5 的机器上会填成
+账面上的昨天,而那一天的数字同样合理,没人会怀疑(宪法 14 条)。
+
+拼错的业务日(`2026-8-1`、`2026-02-30`)与拼错的粒度(`weekly`)**当场报错**,
+不静默回落:回落之后人会拿着一天的数字当一周的看。
+
+### 3.3c 区间合计 `Totals` 带**覆盖率**
+
+```go
+type Totals struct {
+    Recharge, Consumed Amount
+    CoveredUsers       int64 // 流水已知的用户数
+    TotalUsers         int64 // 符合筛选条件的用户数
+}
+```
+
+合计只能把**上游给得出流水的那些用户**加起来,而 v1 契约对一部分用户给不出
+(见 §0 的原型 warnbar)。两个数不等时这个合计是一个**下界**,界面必须说出来——
+一个盖住这件事的合计会被读成全量,那正是宪法 12 条要防的「裸数字冒充完整数据」。
+
+`UserPage` 另有 `ActiveToday CountValue`(今日活跃,按业务日数)与
+`Period`(回显服务端实际用的区间,让「这一周是哪七天」只有一份实现)。
 
 ### 3.4 搜索**不匹配邮箱**
 
@@ -176,7 +220,18 @@ fake 是「用户与模型的完整对话」,有人会以为自己在看真实�
 3. **余额的单位与标度**:分?元?浮点字符串?本契约要 int64 最小货币单位;
    上游若给浮点字符串,转换必须走定点解析而不是 `ParseFloat`(宪法 13 条)。
 4. **逐用户充值/消费到底有没有**:原型的 warnbar 说 v1 没有。没有就让
-   `PeriodRecharge`/`PeriodConsumed` 保持 `Known=false`,**不要填 0**。
+   `PeriodRecharge`/`PeriodConsumed`/`Last30dConsumed` 保持 `Known=false`,
+   **不要填 0**。
+   ⚠️ **fake 现在供得出这三列(XM-0053),real 仍然给不出**——这是有意的落差:
+   前端要能在样本上把「区间切换」「近30天对照」这些交互做完并测到,而真实
+   上游那边的边界一个字没松。界面上的提示条明说了这几列来自样本数据源。
+   接 real 时若上游确实没有,让它们回到 `Known=false`,界面自动退回「—」。
+4b. **区间怎么传给上游**(XM-0053 新增):上游是收「起止时间戳」还是「日期 +
+   粒度」?本契约对外是「锚点日 + 粒度」(§3.3b),对上游发什么由 RealClient
+   翻译。若上游只按自然日聚合,「周/月」要在连接器里按天累加——那时**必须**
+   保证每一天都取到了,取不全就整段 `Known=false`,不能给一个少了两天的合计。
+4c. **今日活跃**:上游给不给「今日活跃用户数」?给不出就 `ActiveToday.Known=false`,
+   第一格的副行显示「上游没给今日活跃数」,**不要拿本页活跃条数顶上**。
 5. **状态枚举**:上游的取值集合,补进 `ParseUserStatus`。
 6. **联系方式字段**:除邮箱外是否还有手机号——有就一并打码,明文不得出连接器。
 7. **总数与总余额**:上游给不给?给不出就 `Known=false`,界面显示「—」,
