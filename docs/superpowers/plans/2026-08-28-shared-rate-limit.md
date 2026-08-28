@@ -134,6 +134,7 @@ type Decision struct {
 }
 
 type ReadyState struct {
+    Environment      string
     PolicyRevision   int64
     Algorithm        string
     ActiveKeyVersion uint32
@@ -316,7 +317,7 @@ staging/production, merge, or deploy. Open RL1 PR and STOP. RL1 approval does no
 
 **Files:**
 - Review: `db/migrations/`
-- Review: `contracts/database/role-policy.v1.json` (from merged DBR1)
+- Dynamically review: `contracts/database/role-policy.v${DBR_CURRENT_POLICY_VERSION}.json` from the approved DBR merge
 - Review: `internal/platform/dbroles/`
 - Create in RL2 approval PR: `docs/evidence/2026-08-28-shared-rate-limit-migration-review.md`
 
@@ -330,8 +331,11 @@ Get-ChildItem db/migrations -File | Sort-Object Name
 go run ./cmd/db-role-verify -h
 ```
 
-Do not connect to any database during this step. Record next migration number, DBR policy version,
-all proposed objects/functions/grants, lock/WAL estimate, rollback path, and exact test-only PG18 digest.
+Do not connect to any database during this step. Read `DBR_APPROVED_MERGE_SHA` and
+`DBR_CURRENT_POLICY_VERSION` from the approved CR/Task；prove the SHA is a target-base ancestor and
+the current policy file declares that exact version. Record next migration/policy versions, all proposed
+objects/functions/grants, lock/WAL estimate, rollback path, and exact test-only PG18 digest. Unknown,
+mismatch, missing current file or pre-existing next version is STOP.
 
 - [ ] **Step 2: Present the exact proposal and STOP**
 
@@ -359,7 +363,7 @@ No SQL file is created until migration and DBR reviewers explicitly approve this
 **Files:**
 - Create: `db/migrations/000014_httpapi_rate_limit.up.sql` (or refreshed next free number)
 - Create: `db/migrations/000014_httpapi_rate_limit.down.sql` (local/disposable only)
-- Modify: `contracts/database/role-policy.v1.json`
+- Dynamically create: `contracts/database/role-policy.v${DBR_NEXT_POLICY_VERSION}.json`
 - Modify/Test: `internal/platform/dbroles/policy_test.go`
 
 **Interfaces:**
@@ -368,8 +372,9 @@ No SQL file is created until migration and DBR reviewers explicitly approve this
 
 - [ ] **Step 1: Write failing DBR policy tests before SQL**
 
-Assert exact owner, PUBLIC denial, SECURITY DEFINER/search_path, API/worker split, table denial, and
-unknown object fail-closed. Run:
+Assert the approved current policy remains byte-unchanged；next=current+1 adds only exact rate-limit
+objects/grants. Also assert exact owner, PUBLIC denial, SECURITY DEFINER/search_path, API/worker split,
+table denial, unknown object/version fail-closed. Run:
 
 ```powershell
 go test -p 1 ./internal/platform/dbroles -run 'Policy.*RateLimit' -count=1
@@ -436,7 +441,7 @@ Remove-Item Env:GOVERNANCE_BASE_REF
 - [ ] **Step 4: Commit migration/DBR policy only**
 
 ```powershell
-git add db/migrations contracts/database/role-policy.v1.json `
+git add db/migrations contracts/database/role-policy.v$env:DBR_NEXT_POLICY_VERSION.json `
   internal/platform/dbroles/policy_test.go
 git commit -m "feat(ratelimit): add atomic postgres policy and buckets"
 ```
@@ -447,12 +452,42 @@ git commit -m "feat(ratelimit): add atomic postgres policy and buckets"
 - Create: `internal/platform/ratelimit/postgres.go`
 - Test: `internal/platform/ratelimit/postgres_test.go`
 - Integration test: `internal/platform/ratelimit/postgres_integration_test.go`
+- Create: `contracts/ops/rate-limit-fleet-manifest.v1.schema.json`
+- Create: `contracts/ops/rate-limit-fleet-keyring.v1.json`
+- Create: `internal/platform/ratelimit/fleet_manifest.go`
+- Test: `internal/platform/ratelimit/fleet_manifest_test.go`
 - Create: `cmd/rate-limit-policy/main.go`
 - Test: `cmd/rate-limit-policy/main_test.go`
 
 **Interfaces:**
 - Consumes: `*pgxpool.Pool`, `BucketKey`, approved DB functions.
 - Produces: `PostgresStore` implementing `Store`; revision-1-only lifecycle bootstrap command.
+
+```go
+type FleetReplica struct {
+    ReplicaID, BuildDigest, Backend, ProcessEnvironment string
+    EffectivePerMinute, EffectiveBurst int32
+}
+type SignedFleetManifest struct {
+    Kind string
+    Version int
+    Environment, FleetGeneration, ChangeRef string
+    Complete bool
+    GeneratedAt, ValidUntil time.Time
+    ExpectedReplicaCount int
+    Replicas []FleetReplica
+    PayloadSHA256, SignatureKeyID, Signature string
+}
+type TrustedFleetKey struct {
+    KeyID, Algorithm, PublicKey, Fingerprint, Purpose string
+    ValidFrom, ValidUntil time.Time
+    RevokedAt *time.Time
+}
+type TrustedFleetKeyring interface {
+    Lookup(string, string, time.Time) (TrustedFleetKey, error)
+}
+func VerifyFleetManifest([]byte, TrustedFleetKeyring, time.Time) (SignedFleetManifest, error)
+```
 
 - [ ] **Step 1: Write failing status/error mapping tests**
 
@@ -461,6 +496,12 @@ func TestPostgresStoreMapsAllowedLimitedAndPolicyMismatch(t *testing.T)
 func TestPostgresStoreRejectsInvalidFunctionResult(t *testing.T)
 func TestPostgresStoreTimeoutIsUnavailableNotLimited(t *testing.T)
 func TestPolicyCommandRequiresExactExpectedRevision(t *testing.T)
+func TestFleetManifestRejectsBadSignatureEmbeddedKeyExpiredOrIncomplete(t *testing.T)
+func TestFleetManifestRejectsWrongPurposeDomainFingerprintAndRevokedKey(t *testing.T)
+func TestFleetManifestCanonicalBytesAndSignatureMatchGolden(t *testing.T)
+func TestFleetManifestRejectsMissingDuplicateUnknownOrStaleReplica(t *testing.T)
+func TestFleetManifestRejectsBuildEnvironmentBackendOrQuotaMismatch(t *testing.T)
+func TestPolicyCommandNeverCallsBootstrapWhenFleetManifestInvalid(t *testing.T)
 ```
 
 Use a narrow query interface/fake rows. Typed error kinds are exact: policy_missing,
@@ -480,12 +521,15 @@ Ready calls only `httpapi.rate_limit_ready`.
 
 - [ ] **Step 3: Implement revision-1 bootstrap as Platform Lifecycle Operation**
 
-The command accepts explicit environment, expected/new revision, per-minute, burst, TTL, interval,
-key version, change ref, and updater, but only accepts expected=0/new=1. It first proves every memory
-replica reports identical effective quota, calls only `httpapi.bootstrap_rate_limit_policy`, verifies the
-inserted row field-for-field plus DB-derived `session_user`, exits nonzero if any policy exists, uses the
-DBR lifecycle identity, and never runs from API startup. Revision 2+ needs a separate Action + append-only
-policy-history design and is not implemented in RL2.
+The command accepts explicit environment, expected/new revision, TTL, interval, key version, updater,
+`--fleet-manifest`, `--fleet-keyring`, and `--expected-manifest-sha256`, but only expected=0/new=1.
+Per-minute/burst/change-ref come from the verified manifest and must equal any separately approved CLI
+assertions. It validates Ed25519 signature against the independent keyring, canonical payload hash,
+kind/version/environment/change-ref, validity window, `complete=true`, exact count/unique IDs, approved
+build digest, memory backend and one equal quota. Missing/unknown/stale/mismatch exits before acquiring a
+write transaction or calling `bootstrap_rate_limit_policy`. On success it verifies the inserted row against
+the manifest plus DB-derived `session_user`, exits nonzero if any policy exists, uses DBR lifecycle identity,
+and never runs from API startup. Revision 2+ still needs separate Action + append-only history.
 
 - [ ] **Step 4: Run focused tests and commit**
 
@@ -514,20 +558,28 @@ git commit -m "feat(ratelimit): add postgres store and policy bootstrap"
 - [ ] **Step 1: Write failing worker/permission behavior tests**
 
 Assert environment arg, batch=2000, unique kind+args+queue+period registration, retry/at-least-once
-idempotency, denied-touch survival, concurrent `SKIP LOCKED`, and no audit/Action reference.
+idempotency, denied-touch survival, concurrent `SKIP LOCKED`, no audit/Action reference, and:
+
+```go
+func TestPruneReturnsHasMoreAndBacklogCappedAtBatchPlusOne(t *testing.T)
+func TestPruneRuntimePathNeverRunsExactCount(t *testing.T)
+func TestExactBacklogCountRequiresSeparateLowFrequencyApprovedDiagnostic(t *testing.T)
+```
 
 - [ ] **Step 2: Implement the minimal job**
 
 The worker executes only:
 
 ```sql
-select deleted_count, backlog_rows, oldest_seconds
+select deleted_count, has_more, backlog_capped, oldest_seconds
 from httpapi.prune_rate_limit_buckets($1, 2000)
 ```
 
-No direct DELETE, no unbounded loop, no API goroutine. Current environment policy TTL explicitly applies
-to old revisions/key versions. A 100k-row disposable fixture plus `EXPLAIN (ANALYZE, BUFFERS)` proves the
-`(environment,last_seen_us)` index and batch-bounded scan. DB policy remains authoritative for TTL.
+No direct DELETE, no unbounded loop, no API goroutine. Candidate selection reads at most batch+1；
+`backlog_capped<=2001` and `has_more` replace exact runtime count. Current environment policy TTL applies
+to old revisions/key versions. Exact `count(*)` is a separately approved low-frequency read-only diagnostic
+under migrator/approved ops evidence identity, never part of routine/job/request. A 1,000,000-row disposable
+fixture plus `EXPLAIN (ANALYZE, BUFFERS)` proves `(environment,last_seen_us)` and bounded scan.
 
 - [ ] **Step 3: Run tests and commit**
 
@@ -631,16 +683,28 @@ a real ref or alter `deploy/compose/launch.yaml` in RL2.
 - [ ] **Step 1: Write fail-closed config/key tests**
 
 Exact cases: missing backend only defaults to memory in development; staging/production missing and every
-unknown/off/auto/open value reject; there is no failure-mode variable. Test a
+unknown/off/auto/open value reject; there is no failure-mode variable. Test
+`principal.Environment == process ENVIRONMENT == ReadyState.Environment == DB policy.environment`
+and HMAC ref scope environment equality. Test a
 keyring of exactly one primary plus at most one staged slot: paired ref/version, positive int32, distinct
 version/ref, DB-selected active version present; strict unpadded base64url decoding to exactly 32 bytes;
 timeout <=0 or >= request timeout; max conns !=1..4; and secret value absent from logs/errors/audit.
 
+```go
+func TestRateLimitPrimaryAndStagedSecretSuccessAndFailureAreAudited(t *testing.T)
+func TestRateLimitSecretAuditHasExactCallerPurposeEnvironmentRefProviderAndCode(t *testing.T)
+func TestRateLimitSecretAuditLogsAndErrorsContainNoMaterialOrDigest(t *testing.T)
+```
+
 - [ ] **Step 2: Build a CredentialRef-backed key source**
 
-Primary and optional staged ref contain only `secret://...`; explicitly mapped EnvProvider entries are wrapped
-in `secrets.Audited` with caller `api:platform` and purpose `platform-api rate-limit bucket HMAC`.
-Resolve/decode both slots at startup, retain only bounded `{version,[32]byte}`, and let DB policy select active.
+Primary and optional staged ref contain only `secret://...` and their scope/name environment must equal
+`cfg.Environment`. Wrap the mapped provider with
+`secrets.NewAudited(inner, recorder, cfg.Environment)`, create resolve context with
+`secrets.WithCaller(ctx,"api:platform")`, then call
+`Resolve(resolveCtx, ref,"platform-api rate-limit bucket HMAC")` for each slot. Tests cover primary/staged
+success and failure and assert AccessRecord caller/purpose/environment/ref/provider/success/error code while
+excluding material. Resolve/decode both slots at startup, retain only bounded `{version,[32]byte}`, and let DB policy select active.
 Never format material/digest in errors; tests prove success/failure audit contains only bounded kind/ref metadata.
 This only prepares the bounded keyring. Rotation itself remains blocked until a separate policy Action plus
 append-only history exists; its runbook must quiesce the full fleet, switch DB revision/version once, verify all
@@ -655,8 +719,9 @@ against DB `max_connections`; unknown defaults STOP. Startup/pool errors are bou
 
 - [ ] **Step 4: Make readiness composite without changing health**
 
-Add a minimal checker interface so `/readyz` runs DB Ping plus active backend `Ready`. In postgres/shadow,
-verify policy/algorithm, DB-selected keyring slot, staged parse state, function/grant. Keep `/healthz`
+Add a minimal checker interface so `/readyz` runs DB Ping plus active backend `Ready`. `ReadyState` returns
+DB environment；require it equal configured process environment before atomically publishing the snapshot.
+In postgres/shadow, verify policy/algorithm, DB-selected keyring slot, staged parse state, function/grant. Keep `/healthz`
 byte-compatible and probes outside `/api/v1`.
 
 - [ ] **Step 5: Run tests and commit**
@@ -690,12 +755,15 @@ git commit -m "feat(ratelimit): assemble private shared backend"
 func TestRateLimitBackendFailureReturns503AndDoesNotCallHandler(t *testing.T)
 func TestRateLimitPolicyMismatchReturns503AndDoesNotCallHandler(t *testing.T)
 func TestRateLimitMissingPrincipalFailsClosed(t *testing.T)
+func TestRateLimitPrincipalProcessAndDBEnvironmentMismatchFailsClosed(t *testing.T)
+func TestRateLimitHMACRefScopeEnvironmentMismatchFailsClosed(t *testing.T)
 func TestRateLimitUnknownRouteNeverUsesRawPath(t *testing.T)
 func TestRateLimitProbesRemainExempt(t *testing.T)
 func TestRateLimitLogsContainNoPrincipalDigestOrRawPath(t *testing.T)
 ```
 
-Preserve existing 429 body and calculated Retry-After. New 503 code is exact
+Environment mismatch tests assert HMAC/Store.Consume/handler call counts all remain zero. Preserve existing
+429 body and calculated Retry-After. New 503 code is exact
 `RATE_LIMIT_BACKEND_UNAVAILABLE`, Retry-After `1`.
 
 - [ ] **Step 2: Wire Store without embedding SQL/algorithm in HTTP**
@@ -862,8 +930,8 @@ rollback evidence, unverified external facts, approvals, risks, and next STOP. H
 | I2 | four routines vs three-function down | four exact signatures; disposable up→down→up and empty-schema assertion |
 | I3 | missing environment constraint | policy FK to `core.environment(id) ON DELETE RESTRICT` |
 | I4 | Go/SQL numeric drift | Go values capped to PG int32; checked ceil/multiply/add/epoch/retry math |
-| I5 | unaudited HMAC read | every slot resolved through `secrets.Audited` with bounded audit tests |
-| I6 | bootstrap parity / stale env authority | all-memory-fleet equality, DB field equality, remove legacy runtime quota vars after activation |
+| I5 | unaudited HMAC read | real `NewAudited` + `WithCaller` + `Resolve(purpose)`；primary/staged success/failure AccessRecord tests |
+| I6 | bootstrap parity / stale env authority | signed complete fleet manifest + principal/process/Ready/DB/ref-scope equality；remove legacy quota vars after activation |
 | I7 | per-replica pool only | full-fleet connection equation and 20%/10-connection reserve gate |
 | I8 | non-decidable performance threshold | paired 60m windows, sample minima, 60s aggregation, five-window sustained definition |
 | I9 | shadow disagreement ambiguity | raw/unclassified separated from controlled algorithm mismatch and expected consolidation |
@@ -872,6 +940,16 @@ rollback evidence, unverified external facts, approvals, risks, and next STOP. H
 | M2 | unbounded/forgeable metadata | 1..256-byte updater/change ref; DB-derived `session_user` |
 | M3 | omitted HMAC residual threat | equality/enumeration/compromised-API/route-shape residuals explicit |
 | M4 | meaningless failure-mode variable | variable removed; fail-closed is non-configurable invariant |
+
+## RL0 Round-2 Review Closure Matrix
+
+| ID | Review item | Document closure / future executable gate |
+|---|---|---|
+| R2-I1 | wrong audited-secret API | exact `NewAudited(inner,recorder,env)` + `WithCaller` + `Resolve(purpose)` API and both-slot success/failure audit tests |
+| R2-I2 | environment equality prose-only | ReadyState.Environment + principal/process/DB/ref-scope four-way equality；mismatch 503 with zero HMAC/consume/handler calls |
+| R2-I3 | DBR v1 in-place mutation | approved current version + ancestor proof；publish next version/exact CR diff；current immutable；unknown/mismatch STOP |
+| R2-I4 | fleet parity had no evidence input | canonical Ed25519 signed complete fleet manifest/keyring with replica/build/env/backend/quota；invalid manifest rejects before INSERT |
+| R2-M1 | prune backlog unbounded | runtime has_more + batch+1 capped backlog；exact count moved to approved low-frequency diagnostic；1M-row EXPLAIN |
 
 ## Approval Summary
 

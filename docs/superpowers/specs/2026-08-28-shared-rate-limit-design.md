@@ -133,9 +133,15 @@ Redis 加进 compose。
 不包含 scope、query string、body、IP、User-Agent 或实际 path parameter。scope 会变化且
 不应重置额度；query/path 实值会产生无界桶；IP 会把代理后的多人错误合桶。
 
-身份必须来自 `RequirePrincipal` 后的 context，且 `principal.Environment` 必须与进程
-`ENVIRONMENT` 相等。缺身份、类型非法或环境不一致是装配/身份不变量失败，返回 503，
-不能使用 `anonymous` 新桶继续处理。
+身份必须来自 `RequirePrincipal` 后的 context，且逐请求机械证明：
+
+```text
+principal.Environment == process ENVIRONMENT == ReadyState.Environment == DB policy.environment
+```
+
+HMAC CredentialRef 的 scope/name 中 environment 也必须等于 process ENVIRONMENT；禁止
+staging 进程解析 production ref。缺身份、类型非法或任一 environment/ref scope 不一致均
+返回 503，且不调用 HMAC、consume 或业务 handler，不能使用 `anonymous` 新桶继续处理。
 
 chi route template 取不到时，route 字段使用固定 ASCII 哨兵：
 
@@ -221,7 +227,10 @@ RL0～RL4 初次上线只要求 v1。Keyring/ready 必须具备 staged slot 契�
 HMAC key/version 轮换仍是独立 CredentialRef + policy Action/history + environment STOP**；
 RL2 的 insert-only bootstrap 不能执行轮换。未来获批轮换顺序固定为：
 
-1. 经 `secrets.Audited` 在所有目标副本预装 `{v1,v2}` 两个 slot；DB policy 仍选 v1；
+1. 经真实 `secrets.NewAudited(inner, recorder, environment)` provider，并用
+   `secrets.WithCaller(ctx,"api:platform")` 标注 Resolve context，在所有目标副本预装
+   `{v1,v2}`；每个 slot 调用 `Resolve(ctx, ref,
+   "platform-api rate-limit bucket HMAC")`，DB policy 仍选 v1；
 2. 每个副本 ready 证明 active v1 可选、staged v2 可严格解析，且日志/审计不含值；
 3. 阻断该 environment 管理 API 入口，**fleet-wide quiesce**，排空全部副本；
 4. 已另批的 policy Action 在同一事务 append history 后提升 revision + key version；
@@ -267,8 +276,32 @@ RL2 migration 与单独 lifecycle 审批后，由版本化 policy lifecycle 命�
 - API 的 `postgres`/`shadow` 模式绝不从环境变量覆盖已有 DB policy；
 - `postgres` 模式缺 policy 时拒绝 ready 并对请求 503。
 
-bootstrap 前必须采集全 fleet 每个 memory 副本的 effective per-minute/burst；任一不一致
-即 STOP。写入后逐字段证明 DB revision 1 与已批准值等价，shadow/enforcement 前不得漂移。
+bootstrap 冻结为**受信 signed fleet manifest 输入**，不允许 CLI 自称“已经看过所有副本”。
+manifest v1 的 canonical payload 至少包含：
+
+```text
+kind=xingmang-rate-limit-fleet-manifest, version=1,
+environment, fleet_generation, complete=true,
+generated_at, valid_until, change_ref,
+expected_replica_count,
+replicas[] sorted by replica_id:
+  replica_id, build_digest, backend=memory, process_environment,
+  effective_per_minute, effective_burst
+```
+
+外层 envelope 保存 payload SHA-256、Ed25519 `signature_key_id/signature`；验签公钥只来自
+独立批准的 fleet-manifest trusted keyring，manifest 不自带受信公钥。CLI 要求 signature/
+kind/version/environment/change_ref/时效/complete/数量/唯一 replica ID 全部有效，并要求所有
+replica build、process environment、backend 与 quota 等值；missing/duplicate/unknown/stale/
+mismatch 任一情况均在调用 DB routine 前退出非零。该签名是授权 operator 对 inventory 完整性的
+证明，不扩大 AI 审批权。
+
+payload 使用固定字段顺序、UTF-8、无多余空白的 canonical JSON；签名 domain 固定为
+`xm-rate-limit-fleet-manifest-v1\nsha256=<payload_sha256>\n`。trusted key purpose 必须是
+`rate_limit_fleet_manifest_signing`，并验证 fingerprint、validity/revocation；跨 purpose/domain
+重放与 embedded public key 自认证都失败。RL2 pin 一组 literal bytes/hash/signature golden。
+
+写入后逐字段证明 DB revision 1 与 manifest/批准值等价，shadow/enforcement 前不得漂移。
 切入 postgres enforcement 后，从 API runtime compose/config 删除旧 quota 变量；它们不得以
 “仍可编辑但已忽略”的假权威残留。受控单副本 memory 回滚需从最后获批 policy 明确回填值。
 
@@ -453,6 +486,12 @@ Action；函数只表达原子 GCRA/清理，不复制业务写实现。
 - RL migration 若先排号，DBR owner/ACL manifest 必须发现这些对象；DBR 若先合入，
   RL migration 必须在同一 PR 更新 DBR policy。
 
+RL2 不得硬编码或原地改 `role-policy.v1.json`。它从批准 CR/Task 读取
+`DBR_APPROVED_MERGE_SHA` 与 `DBR_CURRENT_POLICY_VERSION`，证明 merge SHA 是 target base
+ancestor、文件版本与声明一致，然后发布 `current+1` 的新 policy 文件与 exact diff。current
+未知、文件缺失、version mismatch、next 已存在或 diff 未获独立 DBR CR 批准都 STOP；旧 policy
+保持不可变，verifier 对 unknown object/version fail closed。
+
 ## 8. Go 边界与 Store 契约
 
 ### 8.1 domain package
@@ -475,6 +514,7 @@ type Decision struct {
 }
 
 type ReadyState struct {
+    Environment     string
     PolicyRevision  int64
     Algorithm       string
     ActiveKeyVersion uint32
@@ -567,10 +607,13 @@ kind、request ID、route template、backend、policy revision（若可信）；
 - 旧 policy revision/key version 同样按 last_seen 清理；
 - River args 必含 environment，并以 kind+args+queue+10m period 唯一；至少一次语义下重复执行幂等；
 - 失败让 River 重试并报警，不影响 consume 正确性；
-- backlog/oldest age 超阈值报警；不能用无界 `DELETE`；
+- runtime prune 只返回 `deleted_count, has_more, backlog_capped, oldest_seconds`；候选最多读取
+  `batch_size+1`，`backlog_capped <= batch_size+1`，不能在 10m job 内做全量 COUNT；
+- `has_more`/oldest age 超阈值报警；不能用无界 `DELETE`；精确 backlog count 只允许获批的
+  低频只读诊断，以 migrator/另批 ops 身份在维护证据窗口执行，不进入 prune routine/request path；
 - `audit.audit_event`、审计锚、Action 历史与其它 append-only 表完全不在函数可见范围。
 
-worker 只获 prune EXECUTE，不获 bucket DELETE。RL2 在至少 100k 跨 environment/revision fixture
+worker 只获 prune EXECUTE，不获 bucket DELETE。RL2 在至少 1,000,000 行跨 environment/revision fixture
 上运行 `EXPLAIN (ANALYZE, BUFFERS)`，证明目标索引与 batch-bounded scan，并并发证明 deny-touch
 活跃桶不被删除。
 
@@ -588,8 +631,17 @@ worker 只获 prune EXECUTE，不获 bucket DELETE。RL2 在至少 100k 跨 envi
 | 现有 per-minute/burst | memory 权威；PG 仅 lifecycle bootstrap 输入 | DB policy 切换后不再由 API 读 |
 
 fail-closed 是代码与响应映射的不变量，不提供 failure-mode 变量。真实 secret、DSN 和 role
-password 均由人类配置。两个 slot 都经 `secrets.Audited`（显式 caller/purpose）解析；成功/
-失败只记录 bounded kind/ref metadata，不记录 value。新增 ref 要登记 Provider；缺失/未知拒绝 ready。
+password 均由人类配置。装配层用真实 API：
+
+```go
+audited := secrets.NewAudited(inner, recorder, cfg.Environment)
+resolveCtx := secrets.WithCaller(ctx, "api:platform")
+value, err := audited.Resolve(resolveCtx, ref, "platform-api rate-limit bucket HMAC")
+```
+
+primary/staged 每个 slot 的成功和失败都必须产生 AccessRecord，精确断言 caller、purpose、
+environment、CredentialRef、provider、success/error_code；审计/日志/error 不含 secret value、
+decoded bytes 或 digest。新增 ref 要登记 Provider；ref scope environment mismatch、缺失/未知均拒绝 ready。
 
 ## 12. 可观测性与隐私
 
@@ -610,8 +662,8 @@ bounded `Observer`，以固定延迟 buckets/原子计数聚合，并每 60 秒�
 - `rate_limit_shadow_classified_total{class,route}`，class 仅
   `algorithm_mismatch|expected_consolidation|unclassified`；
 - `rate_limit_clock_rollback_total`；
-- `rate_limit_cleanup_deleted_total`、`rate_limit_cleanup_backlog_rows`、
-  `rate_limit_cleanup_oldest_seconds`。
+- `rate_limit_cleanup_deleted_total`、`rate_limit_cleanup_has_more`、
+  `rate_limit_cleanup_backlog_capped`、`rate_limit_cleanup_oldest_seconds`。
 
 label 只用枚举 backend/decision/kind 和已注册 route template；禁止 principal、digest、
 raw path、query、request ID 或 error string 进入 label。
