@@ -13,6 +13,7 @@ import { routes } from "./router";
 const REVENUE_METRIC = "sub2api.revenue.daily";
 const CHANNEL_BALANCE_METRIC = "sub2api.channels.balance";
 const NEWAPI_CHANNELS_METRIC = "newapi.channels.status";
+const COST_METRIC = "sub2api.cost.daily";
 
 const metricsBody = {
   items: [
@@ -621,11 +622,12 @@ describe("平台概览的迷你趋势图", () => {
     renderRoute("/platforms/sub2api");
 
     // 首屏那一批请求里没有 history：它是挂载之后才发的
-    await screen.findByText("Sub2API 日收入");
+    await screen.findByText("今日充值");
     expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("/metrics/history");
 
+    // XM-0051 起概览的折线看七天（原型的 tile 内嵌 sparkline 是 7 个点）
     expect(
-      await screen.findByRole("img", { name: /Sub2API 日收入 近 24 小时趋势/ }),
+      await screen.findByRole("img", { name: /Sub2API 日收入 近 168 小时趋势/ }),
     ).not.toBeNull();
   });
 
@@ -643,24 +645,56 @@ describe("平台概览的迷你趋势图", () => {
     expect(screen.queryByText("加载失败")).toBeNull();
   });
 
-  it("指标卡显示友好名、金额与新鲜度徽章", async () => {
+  it("统计卡用原型的格名，金额与新鲜度徽章都在", async () => {
+    // 原型这一格叫「今日充值」；契约说这条指标是当天支付订单的累加，
+    // 与指标注册表里那个「日收入」的名字冲突，按契约口径走
     renderRoute("/platforms/sub2api");
-    expect(await screen.findByText("Sub2API 日收入")).not.toBeNull();
+    expect(await screen.findByText("今日充值")).not.toBeNull();
     expect(screen.getByText("¥1,234.56")).not.toBeNull();
-    expect(screen.getByText("数据延迟")).not.toBeNull();
-    expect(screen.getByText(/数据时间 2026-08-26 10:00:00 UTC · 落后 2 小时/)).not.toBeNull();
+    // 原型那一格画的是环比涨跌，平台没有环比这个数——那个位置换成新鲜度，
+    // 但**不能没有**（规格 §9.1）
+    expect(screen.getAllByText("数据延迟").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/数据时间 2026-08-26 10:00:00 UTC · 落后 2 小时/).length,
+    ).toBeGreaterThan(0);
   });
 
   it("未初始化的指标显示「未初始化」而不是 ¥0.00（宪法 12 条）", async () => {
+    // 换成概览页上真的有的那一格：从未成功采集时后端 value 里仍带着 0，
+    // 直接渲染就会变成理直气壮的「今日成本 ¥0.00」
+    stubFetch((url) =>
+      url.startsWith("/api/v1/metrics") && !url.startsWith("/api/v1/metrics/history")
+        ? fakeResponse(200, {
+            items: [
+              {
+                metric_key: COST_METRIC,
+                source: "sub2api-prod",
+                environment: "development",
+                watermark: "",
+                value: { day: "2026-08-26", amount_minor_units: 0, currency: "CNY" },
+                freshness: {
+                  state: "uninitialized",
+                  staleness_seconds: null,
+                  threshold_seconds: 1800,
+                  is_partial: false,
+                  observed_at: null,
+                  last_success: null,
+                  last_error_code: "",
+                },
+              },
+            ],
+          })
+        : okHandler(url),
+    );
     renderRoute("/platforms/sub2api");
-    await screen.findByText("Sub2API 用户余额");
+    await screen.findByText("今日成本");
     expect(screen.getAllByText("未初始化").length).toBeGreaterThan(0);
     expect(screen.queryByText("¥0.00")).toBeNull();
   });
 
   it("头部显示最后刷新时刻（HH:MM:SS）", async () => {
     renderRoute("/platforms/sub2api");
-    await screen.findByText("Sub2API 日收入");
+    await screen.findByText("今日充值");
     expect(screen.getByText(/最后刷新 \d{2}:\d{2}:\d{2}/)).not.toBeNull();
   });
 });
@@ -795,11 +829,13 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     expect(screen.getByText(/异常判据 错误率 ≥ 5\.00%/)).not.toBeNull();
   });
 
-  it("概览页签把 newapi.* 指标渲染成卡片", async () => {
+  it("概览按 NewAPI 自己的原型页排：用户总数 + 渠道健康表", async () => {
+    // 原型给两个平台画的概览**结构不同**，不共用一套模板
     renderRoute("/platforms/newapi");
-    expect(await screen.findByText("NewAPI 渠道状态")).not.toBeNull();
-    expect(screen.getByText("3 个渠道")).not.toBeNull();
-    expect(screen.getByText(/启用 2 · 异常 1/)).not.toBeNull();
+    expect(await screen.findByText("用户总数")).not.toBeNull();
+    expect(screen.getByText("渠道健康")).not.toBeNull();
+    // 渠道逐条进表，不再是一张「3 个渠道」的聚合卡
+    expect(screen.getByRole("table", { name: /NewAPI 渠道启停与错误率/ })).not.toBeNull();
   });
 
   it("演示来源 newapi-staging 会挂出演示横幅（Fake 数据不得冒充真实运营数据）", async () => {
@@ -1451,6 +1487,14 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
     expect(await screen.findByText(/由平台手工登记不同上游/)).not.toBeNull();
   });
 
+  it("`overview` 在服务器上是资产中心蓝图，不是一屏通用指标卡", async () => {
+    // 与 suppliers 同一类错误：概览那个 case 若不判平台就直接接管，
+    // UI 第 6 片给服务器画的概览蓝图会被悄悄换掉
+    renderRoute("/platforms/server?tab=overview");
+    expect(await screen.findByText("折算月成本")).not.toBeNull();
+    expect(screen.queryByText("暂无本平台指标")).toBeNull();
+  });
+
   it("`suppliers` 在服务器上仍是采购蓝图——**同一个 value，两种语义**", async () => {
     // 上游管理那一格若不判平台就直接接管，服务器的「供应商与采购」蓝图
     // 会被悄悄换掉：页面看起来完全正常，只是内容没了
@@ -1487,9 +1531,9 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
   it("默认落在概览，且只显示本平台的指标卡", async () => {
     renderRoute("/platforms/sub2api");
     expect(await screen.findByRole("tab", { name: "概览", selected: true })).not.toBeNull();
-    // 裁定 #3 砍掉「指标趋势」页签后，历史曲线的落点就是概览这些卡片
-    expect(await screen.findByText("Sub2API 日收入")).not.toBeNull();
-    expect(screen.getByText("数据延迟")).not.toBeNull();
+    // 裁定 #3 砍掉「指标趋势」页签后，历史曲线的落点就是概览这些统计卡
+    expect(await screen.findByText("今日充值")).not.toBeNull();
+    expect(screen.getAllByText("数据延迟").length).toBeGreaterThan(0);
   });
 
   it("点「渠道管理」能切过去，渲染的是迁移进来的渠道面板", async () => {

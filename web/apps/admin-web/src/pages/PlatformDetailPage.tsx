@@ -4,25 +4,26 @@ import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router";
 import { platformHasUpstreamRegistry } from "../api/finance";
-import { listMetrics, listServices } from "../api/platform";
+import { listServices } from "../api/platform";
 import { platformHasUsers } from "../api/users";
 import { BlueprintTabView, blueprintTabForPlatform } from "../blueprints";
 import { ApiStateView } from "../components/ApiStateView";
 import { ChannelsPanel } from "../components/ChannelsPanel";
-import { FinanceSummaryCards } from "../components/FinanceSummaryCards";
 import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
-import { MetricCardGrid } from "../components/MetricCardGrid";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { assuranceSubTab } from "../components/PlatformAssurancePanel";
 import { financeSubTab } from "../components/PlatformFinancePanel";
 import { PlatformUsersPanel } from "../components/PlatformUsersPanel";
+import {
+  PlatformOverviewPanel,
+  platformHasPrototypeOverview,
+} from "../components/PlatformOverviewPanel";
 import { RequestsPanel } from "../components/RequestsPanel";
 import { UpstreamAccountsPanel } from "../components/UpstreamAccountsPanel";
 import {
   findPlatform,
   pendingBadge,
   pendingHeadline,
-  platformOfMetricKey,
   platformOpens,
   resolvePlatformTab,
   tabsForPlatform,
@@ -250,7 +251,14 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
   const { spec } = entry;
   switch (tab.value) {
     case "overview":
-      return <PlatformOverview serviceType={spec.serviceType} label={spec.label} />;
+      // 只有 sub2api / newapi 有按原型对齐的概览（两版结构还不一样）。
+      // **不匹配时落回蓝图那条路**：服务器的概览由 UI 第 6 片画了蓝图，
+      // 在这里截胡会把它悄悄换成一屏通用指标卡（与 suppliers 同一类错误）
+      return platformHasPrototypeOverview(spec.serviceType) ? (
+        <PlatformOverviewPanel serviceType={spec.serviceType} label={spec.label} />
+      ) : (
+        fallbackTabContent(entry, tab)
+      );
     case "upstream":
       // 两个平台的渠道表**指标形状不同**(sub2api 是余额+令牌，newapi 是启停+
       // 错误率+延迟)，所以是两个组件而不是一个带参数的通用表：硬凑成一张表
@@ -313,53 +321,4 @@ function fallbackTabContent(entry: PlatformEntry, tab: PlatformTabSpec): ReactNo
   return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
 }
 
-/** 概览页签：本平台的指标卡。
- *
- *  按 metric_key 的平台前缀过滤，所以这一格对任何平台都成立，不是 Sub2API 专用：
- *  下一个平台的指标一开始上报，它的概览就自动有内容。
- *
- *  裁定 #3 砍掉了「指标趋势」页签之后，历史曲线的落点就是这里的卡片
- *  (MetricCard 里的 Sparkline)——功能没丢，只是不再单列一格。 */
-function PlatformOverview({ serviceType, label }: { serviceType: string; label: string }) {
-  const query = useQuery({
-    queryKey: ["metrics"],
-    queryFn: ({ signal }) => listMetrics({ signal }),
-  });
 
-  const items = (query.data ?? []).filter(
-    (item) => platformOfMetricKey(item.metric_key) === serviceType,
-  );
-
-  return (
-    <div className="flex flex-col gap-3">
-      <ApiStateView
-        isPending={query.isPending}
-        error={query.error}
-        onRetry={() => void query.refetch()}
-      >
-        <MetricCardGrid
-          items={items}
-          emptyTitle="暂无本平台指标"
-          emptyDescription={`该环境下还没有 ${serviceType}.* 的指标观测；${label} 的采集任务跑起来后会出现在这里`}
-        />
-      </ApiStateView>
-      {/* 成本三卡只挂在**计量型上游**那两个平台上（XM-0037d）。
-          CPA 与服务器没有上游账号，给它们挂一组恒为「未接入」的成本卡，
-          等于把一句「这里本来就没有这个概念」显示成一处缺口。 */}
-      {FINANCE_CARD_PLATFORMS.has(serviceType) ? (
-        <FinanceSummaryCards systemType={serviceType} label={label} />
-      ) : null}
-      {/* ADMIN-IA 给概览的内容契约是「关键指标卡 + 新鲜度 + 活动告警数」。
-          前两样在卡片里，第三样还没有——缺了就说缺了，不装作契约已经满足 */}
-      <p className="text-xs text-fg-muted">活动告警数随第 3 片（运营工作台）一并补上。</p>
-    </div>
-  );
-}
-
-/** 挂成本三卡的平台。
- *
- *  与 `finance.upstream_account.system_type` 的取值对齐（`sub2api` / `newapi`）：
- *  卡片按 systemType 过滤渠道，platform 的 serviceType 与它同名不是巧合，
- *  是登记簿刻意用了同一套标识。第三个取值 `official` 没有对应的平台页
- *  （官方 API 直连的成本口径 v1 占位后置），所以不在这里。 */
-const FINANCE_CARD_PLATFORMS: ReadonlySet<string> = new Set(["sub2api", "newapi"]);
