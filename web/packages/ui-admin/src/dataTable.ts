@@ -35,6 +35,155 @@ export interface TableViewState {
   density: Density;
 }
 
+/** 服务端持久化的 SavedView v1 wire contract。字段名逐字对齐 XM-B003。 */
+export interface SavedViewStateV1 {
+  schema_version: 1;
+  query: string;
+  filters: Readonly<Record<string, string>>;
+  sort: { column_id: string; direction: SortDirection } | null;
+  columns: {
+    known: readonly string[];
+    visible: readonly string[];
+  };
+  density: Density;
+}
+
+/** Query 返回的个人视图。state_version 故意保留 number：未来版本必须仍可列出与删除，
+ *  但当前客户端不会猜着应用。 */
+export interface PersistedSavedView {
+  id: string;
+  table_key: string;
+  name: string;
+  state_version: number;
+  state: SavedViewStateV1;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 与当前行数据无关的静态列能力。异步摘要尚未返回时也必须完整。 */
+export interface TableColumnCapability {
+  id: string;
+  sortable: boolean;
+  primary: boolean;
+  defaultHidden: boolean;
+}
+
+export interface SavedViewReconcileOptions {
+  schemaReady: boolean;
+  columnCapabilities: readonly TableColumnCapability[];
+  filterOptions: Readonly<Record<string, readonly string[]>>;
+  defaultDensity: Density;
+}
+
+export interface ReconciledSavedView {
+  state: TableViewState | null;
+  warnings: readonly string[];
+  deferred: boolean;
+  unsupported: boolean;
+}
+
+function normalizedViewQuery(raw: string): string {
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+/** 持久状态对当前静态列/筛选契约的兼容折算。
+ *
+ * schemaReady=false 时一处都不折算：这挡住异步表格在首屏“列暂时不存在”时把
+ * 保存的 margin 排序永久清空。 */
+export function reconcileSavedViewState(
+  saved: SavedViewStateV1,
+  options: SavedViewReconcileOptions,
+): ReconciledSavedView {
+  if (!options.schemaReady) {
+    return { state: null, warnings: [], deferred: true, unsupported: false };
+  }
+  if (saved.schema_version !== 1) {
+    return {
+      state: null,
+      warnings: [`SavedView 版本 ${String(saved.schema_version)} 暂不支持，已回到「全部」`],
+      deferred: false,
+      unsupported: true,
+    };
+  }
+
+  const warnings: string[] = [];
+  const capabilities = options.columnCapabilities;
+  const current = new Map(capabilities.map((capability) => [capability.id, capability]));
+  const savedKnown = new Set(saved.columns.known);
+  const savedVisible = new Set(saved.columns.visible);
+  const removed = saved.columns.known.filter((id) => !current.has(id));
+  if (removed.length > 0) warnings.push(`已移除不存在的列：${removed.join("、")}`);
+
+  let visibleColumns = capabilities
+    .filter((capability) => {
+      if (capability.primary) return true;
+      if (savedKnown.has(capability.id)) return savedVisible.has(capability.id);
+      return !capability.defaultHidden;
+    })
+    .map((capability) => capability.id);
+  if (visibleColumns.length === 0) {
+    visibleColumns = capabilities
+      .filter((capability) => capability.primary || !capability.defaultHidden)
+      .map((capability) => capability.id);
+    warnings.push("保存的列集合已失效，已恢复当前默认列");
+  }
+
+  const filters: Record<string, string> = {};
+  for (const [id, value] of Object.entries(saved.filters)) {
+    const choices = options.filterOptions[id];
+    if (!choices || !choices.includes(value)) {
+      warnings.push(`已忽略失效筛选：${id}`);
+      continue;
+    }
+    if (value !== "") filters[id] = value;
+  }
+
+  let sort: TableSort | null = null;
+  if (saved.sort) {
+    const capability = current.get(saved.sort.column_id);
+    if (capability?.sortable) {
+      sort = { columnId: saved.sort.column_id, direction: saved.sort.direction };
+    } else {
+      warnings.push(`已忽略失效排序：${saved.sort.column_id}`);
+    }
+  }
+
+  const validDensity = Object.prototype.hasOwnProperty.call(DENSITY_LABELS, saved.density);
+  if (!validDensity) warnings.push("保存的密度已失效，已恢复当前默认密度");
+  return {
+    state: {
+      query: normalizedViewQuery(saved.query),
+      filters,
+      sort,
+      visibleColumns,
+      density: validDensity ? saved.density : options.defaultDensity,
+    },
+    warnings,
+    deferred: false,
+    unsupported: false,
+  };
+}
+
+/** 当前表格状态 → v1 持久 wire。瞬态（页码/选择/展开/请求状态）在类型上不可表示。 */
+export function toSavedViewStateV1(
+  state: TableViewState,
+  capabilities: readonly TableColumnCapability[],
+): SavedViewStateV1 {
+  return {
+    schema_version: 1,
+    query: normalizedViewQuery(state.query),
+    filters: Object.fromEntries(Object.entries(state.filters).filter(([, value]) => value !== "")),
+    sort: state.sort
+      ? { column_id: state.sort.columnId, direction: state.sort.direction }
+      : null,
+    columns: {
+      known: capabilities.map((capability) => capability.id),
+      visible: [...state.visibleColumns],
+    },
+    density: state.density,
+  };
+}
+
 /** 排序取值。
  *
  *  规则照原型的 `xmSortValue`：先认日期时间、再认时分秒、再认带货币符号的数字,

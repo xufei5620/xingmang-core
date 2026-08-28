@@ -1,6 +1,8 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DataTableV2, type DataTableColumn } from "./DataTableV2";
+import type { DataTableViewPersistence } from "./DataTableV2";
+import type { PersistedSavedView } from "./dataTable";
 
 interface Channel {
   id: string;
@@ -350,6 +352,147 @@ describe("视图（只活在内存里）", () => {
     setup();
     expect(screen.queryByRole("combobox", { name: /视图/ })).toBeNull();
     expect(screen.queryByText("保存视图")).toBeNull();
+  });
+});
+
+describe("服务端个人 SavedView", () => {
+  const builtIns = [
+    {
+      name: "全部",
+      state: {
+        query: "",
+        filters: {},
+        sort: null,
+        visibleColumns: ["name", "state", "balance", "op"],
+        density: "compact" as const,
+      },
+    },
+  ];
+  const personal: PersistedSavedView = {
+    id: "view-1",
+    table_key: "platform.sub2api.channels",
+    name: "需关注",
+    state_version: 1,
+    state: {
+      schema_version: 1,
+      query: "openai",
+      filters: {},
+      sort: { column_id: "balance", direction: "desc" },
+      columns: {
+        known: ["name", "state", "balance", "op"],
+        visible: ["name", "state", "balance", "op"],
+      },
+      density: "standard",
+    },
+    created_at: "2026-08-29T01:00:00Z",
+    updated_at: "2026-08-29T01:00:00Z",
+  };
+
+  function persistence(over: Partial<DataTableViewPersistence> = {}): DataTableViewPersistence {
+    return {
+      tableKey: "platform.sub2api.channels",
+      items: [personal],
+      schemaReady: true,
+      columnCapabilities: [
+        { id: "name", sortable: true, primary: true, defaultHidden: false },
+        { id: "state", sortable: true, primary: false, defaultHidden: false },
+        { id: "balance", sortable: true, primary: false, defaultHidden: false },
+        { id: "op", sortable: false, primary: false, defaultHidden: false },
+      ],
+      status: "ready",
+      onSave: vi.fn().mockResolvedValue({ runId: "run-save-1" }),
+      onRemove: vi.fn().mockResolvedValue({ runId: "run-remove-1" }),
+      ...over,
+    };
+  }
+
+  it("内置与个人视图分组展示，不用同一个平铺列表混淆所有权", () => {
+    setup({ views: builtIns, persistence: persistence() });
+    expect(screen.getByRole("group", { name: "内置视图" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "个人视图" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "需关注" })).toBeTruthy();
+  });
+
+  it("Action 完成前不宣称保存成功，完成后显示 run_id 且不写浏览器存储", async () => {
+    let resolveSave: ((value: { runId: string }) => void) | undefined;
+    const onSave = vi.fn(() => new Promise<{ runId: string }>((resolve) => { resolveSave = resolve; }));
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    setup({ views: builtIns, searchable: true, persistence: persistence({ onSave }) });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索当前表格" }), {
+      target: { value: "openai" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /视图名称/ }), {
+      target: { value: "我的渠道" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存到个人视图" }));
+    expect(screen.queryByText(/run-save-1/)).toBeNull();
+    expect((screen.getByRole("button", { name: "保存中…" }) as HTMLButtonElement).disabled).toBe(true);
+    resolveSave?.({ runId: "run-save-1" });
+    expect(await screen.findByText(/run_id=run-save-1/)).toBeTruthy();
+    expect(storage).not.toHaveBeenCalled();
+    storage.mockRestore();
+  });
+
+  it("保存失败保留当前呈现且不出现成功文案", async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error("服务暂不可用"));
+    setup({ views: builtIns, searchable: true, persistence: persistence({ onSave }) });
+    const search = screen.getByRole("searchbox", { name: "搜索当前表格" });
+    fireEvent.change(search, { target: { value: "openai" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /视图名称/ }), {
+      target: { value: "失败视图" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存到个人视图" }));
+    expect(await screen.findByText(/服务暂不可用/)).toBeTruthy();
+    expect((search as HTMLInputElement).value).toBe("openai");
+    expect(screen.queryByText(/run_id=/)).toBeNull();
+  });
+
+  it("应用个人视图一次性清掉页码、选择与展开行", () => {
+    setup({
+      views: builtIns,
+      persistence: persistence(),
+      pageSize: 2,
+      selectable: true,
+      renderExpanded: (row) => <p>详情 {row.name}</p>,
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 a" }));
+    fireEvent.click(within(bodyRows()[0] as HTMLElement).getByRole("button", { name: "详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    const select = screen.getByRole("combobox", { name: /视图/ });
+    const option = screen.getByRole("option", { name: "需关注" }) as HTMLOptionElement;
+    fireEvent.change(select, { target: { value: option.value } });
+    expect(screen.queryByText(/已选择/)).toBeNull();
+    expect(screen.queryByText(/详情 自建 Ollama/)).toBeNull();
+    expect(screen.getByText(/第 1 页，共/)).toBeTruthy();
+  });
+
+  it("内置名不可覆盖；删除入口只对个人视图出现", async () => {
+    const onSave = vi.fn().mockResolvedValue({ runId: "never" });
+    const onRemove = vi.fn().mockResolvedValue({ runId: "run-remove-1" });
+    setup({ views: builtIns, persistence: persistence({ onSave, onRemove }) });
+    fireEvent.change(screen.getByRole("textbox", { name: /视图名称/ }), {
+      target: { value: "全部" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存到个人视图" }));
+    expect(screen.getByText(/名称已由内置视图占用/)).toBeTruthy();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "删除个人视图" })).toBeNull();
+
+    const select = screen.getByRole("combobox", { name: /视图/ });
+    const option = screen.getByRole("option", { name: "需关注" }) as HTMLOptionElement;
+    fireEvent.change(select, { target: { value: option.value } });
+    fireEvent.click(screen.getByRole("button", { name: "删除个人视图" }));
+    await waitFor(() => expect(onRemove).toHaveBeenCalledWith("view-1"));
+  });
+
+  it("未知版本不应用但保留删除入口并给出警告", () => {
+    const future = { ...personal, state_version: 2, state: { ...personal.state, schema_version: 2 } } as unknown as PersistedSavedView;
+    setup({ views: builtIns, persistence: persistence({ items: [future] }) });
+    const select = screen.getByRole("combobox", { name: /视图/ });
+    const option = screen.getByRole("option", { name: "需关注" }) as HTMLOptionElement;
+    fireEvent.change(select, { target: { value: option.value } });
+    expect(screen.getByText(/版本 2 暂不支持/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "删除个人视图" })).toBeTruthy();
   });
 });
 

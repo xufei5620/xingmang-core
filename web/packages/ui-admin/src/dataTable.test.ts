@@ -8,6 +8,7 @@ import {
   normalizeViewName,
   pageSelection,
   paginate,
+  reconcileSavedViewState,
   rowText,
   sortHint,
   sortRows,
@@ -15,6 +16,8 @@ import {
   toggleKeys,
   type CellValue,
   type SavedView,
+  type SavedViewStateV1,
+  type TableColumnCapability,
   type TableRow,
   type TableViewState,
 } from "./dataTable";
@@ -59,6 +62,106 @@ describe("排序取值", () => {
     expect(sortValue(null)).toBe("");
     expect(sortValue(undefined)).toBe("");
     expect(sortValue("   ")).toBe("");
+  });
+});
+
+describe("持久 SavedView v1 兼容", () => {
+  const capabilities: TableColumnCapability[] = [
+    { id: "name", sortable: true, primary: true, defaultHidden: false },
+    { id: "status", sortable: true, primary: false, defaultHidden: false },
+    { id: "grossProfit", sortable: true, primary: false, defaultHidden: false },
+    { id: "internal", sortable: false, primary: false, defaultHidden: true },
+  ];
+  const base: SavedViewStateV1 = {
+    schema_version: 1,
+    query: "openai",
+    filters: { status: "需关注", removedFilter: "旧值" },
+    sort: { column_id: "grossProfit", direction: "desc" },
+    columns: { known: ["name", "status", "removed"], visible: ["status", "removed"] },
+    density: "compact",
+  };
+
+  it("已知隐藏列保持隐藏，新列按当前默认，主标识列强制可见", () => {
+    const got = reconcileSavedViewState(base, {
+      schemaReady: true,
+      columnCapabilities: capabilities,
+      filterOptions: { status: ["正常", "需关注"] },
+      defaultDensity: "compact",
+    });
+    expect(got.deferred).toBe(false);
+    expect(got.state?.visibleColumns).toEqual(["name", "status", "grossProfit"]);
+    expect(got.state?.visibleColumns).not.toContain("internal");
+    expect(got.warnings).toContain("已移除不存在的列：removed");
+  });
+
+  it("失效筛选、移除或不可排序列会被丢弃", () => {
+    const got = reconcileSavedViewState(
+      { ...base, sort: { column_id: "internal", direction: "asc" } },
+      {
+        schemaReady: true,
+        columnCapabilities: capabilities,
+        filterOptions: { status: ["正常"] },
+        defaultDensity: "standard",
+      },
+    );
+    expect(got.state?.sort).toBeNull();
+    expect(got.state?.filters).toEqual({});
+    expect(got.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("列能力未就绪时保持排队，不把 margin 排序清空", () => {
+    const margin: SavedViewStateV1 = {
+      ...base,
+      sort: { column_id: "margin", direction: "desc" },
+      columns: { known: ["name", "margin"], visible: ["name", "margin"] },
+    };
+    const deferred = reconcileSavedViewState(margin, {
+      schemaReady: false,
+      columnCapabilities: [],
+      filterOptions: {},
+      defaultDensity: "compact",
+    });
+    expect(deferred).toEqual({ state: null, warnings: [], deferred: true, unsupported: false });
+
+    const ready = reconcileSavedViewState(margin, {
+      schemaReady: true,
+      columnCapabilities: [
+        { id: "name", sortable: true, primary: true, defaultHidden: false },
+        { id: "margin", sortable: true, primary: false, defaultHidden: false },
+      ],
+      filterOptions: {},
+      defaultDensity: "compact",
+    });
+    expect(ready.state?.sort).toEqual({ columnId: "margin", direction: "desc" });
+  });
+
+  it("未知版本不猜迁移，仍可由上层保留删除入口", () => {
+    const future = { ...base, schema_version: 2 } as unknown as SavedViewStateV1;
+    const got = reconcileSavedViewState(future, {
+      schemaReady: true,
+      columnCapabilities: capabilities,
+      filterOptions: {},
+      defaultDensity: "compact",
+    });
+    expect(got.unsupported).toBe(true);
+    expect(got.state).toBeNull();
+    expect(got.warnings[0]).toMatch(/版本 2/);
+  });
+
+  it("返回状态不含页码、选择、展开行或请求状态", () => {
+    const got = reconcileSavedViewState(base, {
+      schemaReady: true,
+      columnCapabilities: capabilities,
+      filterOptions: { status: ["需关注"] },
+      defaultDensity: "compact",
+    });
+    expect(Object.keys(got.state ?? {}).sort()).toEqual([
+      "density",
+      "filters",
+      "query",
+      "sort",
+      "visibleColumns",
+    ]);
   });
 });
 

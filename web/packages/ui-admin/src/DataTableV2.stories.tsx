@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { Badge } from "@xingmang/ui-primitives";
 import { DataTableV2, type DataTableColumn } from "./DataTableV2";
+import type { DataTableViewPersistence } from "./DataTableV2";
 import { PageState } from "./PageState";
 
 interface Channel {
@@ -90,6 +91,45 @@ const base = {
 // Storybook 的 Meta 会把 T 推成 unknown，于是 args 里的列定义对不上类型
 const Table = DataTableV2<Channel>;
 
+const savedViewCapabilities = columns.map((column) => ({
+  id: column.id,
+  sortable: column.value !== undefined || column.sortAs !== undefined,
+  primary: column.primary === true,
+  defaultHidden: column.defaultHidden === true,
+}));
+
+const persistedView = {
+  id: "view-channel-active",
+  table_key: "platform.sub2api.channels",
+  name: "在用渠道",
+  state_version: 1,
+  state: {
+    schema_version: 1 as const,
+    query: "",
+    filters: { state: "启用" },
+    sort: { column_id: "balance", direction: "desc" as const },
+    columns: { known: columns.map((column) => column.id), visible: columns.map((column) => column.id) },
+    density: "compact" as const,
+  },
+  created_at: "2026-08-29T01:00:00Z",
+  updated_at: "2026-08-29T01:00:00Z",
+};
+
+function persistence(
+  over: Partial<DataTableViewPersistence> = {},
+): DataTableViewPersistence {
+  return {
+    tableKey: "platform.sub2api.channels",
+    items: [persistedView],
+    schemaReady: true,
+    columnCapabilities: savedViewCapabilities,
+    status: "ready",
+    onSave: async () => ({ runId: "run-story-save" }),
+    onRemove: async () => ({ runId: "run-story-remove" }),
+    ...over,
+  };
+}
+
 const meta = {
   title: "Admin/DataTableV2",
   component: Table,
@@ -127,6 +167,69 @@ export const Default: Story = {
         },
       },
     ],
+  },
+};
+
+export const PersonalViewsReady: Story = {
+  args: { ...Default.args, persistence: persistence() },
+};
+
+export const PersonalViewsLoading: Story = {
+  args: { ...Default.args, persistence: persistence({ status: "loading", items: [] }) },
+};
+
+export const PersonalViewsDenied: Story = {
+  args: {
+    ...Default.args,
+    persistence: persistence({
+      status: "denied",
+      items: [],
+      message: "缺少 ui.saved_view.manage；个人视图不会保存到浏览器。",
+    }),
+  },
+};
+
+export const PersonalViewsQueryError: Story = {
+  args: {
+    ...Default.args,
+    persistence: persistence({
+      status: "error",
+      items: [],
+      message: "个人视图读取失败；内置视图仍可使用。",
+      onRetry: () => {},
+    }),
+  },
+};
+
+export const PersonalViewSaveError: Story = {
+  args: {
+    ...Default.args,
+    persistence: persistence({
+      onSave: async () => { throw new globalThis.Error("Action 执行失败，当前条件没有被保存"); },
+    }),
+  },
+};
+
+export const PersonalViewUnsupportedVersion: Story = {
+  args: {
+    ...Default.args,
+    persistence: persistence({
+      items: [{
+        ...persistedView,
+        state_version: 2,
+        state: { ...persistedView.state, schema_version: 2 as unknown as 1 },
+      }],
+    }),
+  },
+};
+
+export const PersonalViewSaveAndRemoveSuccess: Story = {
+  args: {
+    ...Default.args,
+    persistence: persistence({
+      onSave: async () => ({ runId: "run-story-save-success" }),
+      onRemove: async () => ({ runId: "run-story-remove-success" }),
+    }),
   },
 };
 

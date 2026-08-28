@@ -549,9 +549,12 @@ export const SUBSCRIPTION_MANAGE_PERMISSION = "finance.subscription.manage";
  *  只有 sub2api / newapi。服务器那一格也叫 `suppliers`，标签是「供应商与采购」——
  *  说的是机器与机房，不是上游 API 供应商。按 tab.value 分发时必须先过这道判定,
  *  否则服务器页会渲染出一张 API 成本登记簿，而且看起来完全正常。 */
-const PLATFORMS_WITH_UPSTREAM_REGISTRY = new Set(["sub2api", "newapi"]);
+export type UpstreamRegistryPlatform = "sub2api" | "newapi";
+const PLATFORMS_WITH_UPSTREAM_REGISTRY: ReadonlySet<string> = new Set(["sub2api", "newapi"]);
 
-export function platformHasUpstreamRegistry(serviceType: string): boolean {
+export function platformHasUpstreamRegistry(
+  serviceType: string,
+): serviceType is UpstreamRegistryPlatform {
   return PLATFORMS_WITH_UPSTREAM_REGISTRY.has(serviceType);
 }
 

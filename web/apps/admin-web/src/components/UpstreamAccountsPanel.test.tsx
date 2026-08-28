@@ -92,13 +92,16 @@ function upstreamSummary(over: Record<string, unknown> = {}) {
   };
 }
 
-function stubAccounts(items: unknown[], summaries: unknown[] = []) {
+function stubAccounts(items: unknown[], summaries: unknown[] = [], savedViews: unknown[] = []) {
   const fetchMock = vi.fn((url: string) => {
     if (url.includes("/finance/upstream-accounts")) {
       return Promise.resolve(fakeResponse({ items }));
     }
     if (url.includes("/finance/upstreams/summary")) {
       return Promise.resolve(fakeResponse({ items: summaries, from: "2026-08-28", to: "2026-08-28" }));
+    }
+    if (url.includes("/ui/saved-views")) {
+      return Promise.resolve(fakeResponse({ items: savedViews }));
     }
     // 批次与代理资产：展开订阅型行时才会打，默认给空
     return Promise.resolve(fakeResponse({ items: [] }));
@@ -107,7 +110,7 @@ function stubAccounts(items: unknown[], summaries: unknown[] = []) {
   return fetchMock;
 }
 
-function renderPanel(platform = "sub2api") {
+function renderPanel(platform: "sub2api" | "newapi" = "sub2api") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
@@ -168,6 +171,32 @@ describe("上游管理（成本登记簿的 UI）", () => {
     expect(row.getByText("运营群 @relay-a")).toBeTruthy();
     expect(row.getByText("gpt-main")).toBeTruthy();
     expect(row.getByText(/倍率 1\.25×/)).toBeTruthy();
+  });
+
+  it("margin 汇总尚无值时仍保留 SavedView 排序能力", async () => {
+    const ids = [
+      "upstream", "group", "supply-count", "runway", "access", "ratio",
+      "platform", "contact", "credential", "status", "margin", "actions",
+    ];
+    stubAccounts([account()], [], [{
+      id: "view-margin",
+      table_key: "platform.sub2api.upstreams",
+      name: "成本优先",
+      state_version: 1,
+      state: {
+        schema_version: 1, query: "", filters: {},
+        sort: { column_id: "margin", direction: "desc" },
+        columns: { known: ids, visible: ids }, density: "compact",
+      },
+      created_at: "2026-08-29T01:00:00Z",
+      updated_at: "2026-08-29T01:00:00Z",
+    }]);
+    renderPanel();
+    const option = await screen.findByRole("option", { name: "成本优先" }) as HTMLOptionElement;
+    fireEvent.change(screen.getByRole("combobox", { name: /视图/ }), {
+      target: { value: option.value },
+    });
+    expect(screen.getByRole("columnheader", { name: /本期消耗/ }).getAttribute("aria-sort")).toBe("descending");
   });
 
   it("元数据缺失明确显示未接入，分组倍率缺失显示破折号", async () => {

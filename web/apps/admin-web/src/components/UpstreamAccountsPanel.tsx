@@ -1,6 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  DataTableV2,
   formatUtcTimestamp,
   PageState,
   StatTile,
@@ -18,6 +17,7 @@ import {
   UPSTREAM_SUMMARY_QUERY,
   type UpstreamAccountItem,
   type UpstreamSummary,
+  type UpstreamRegistryPlatform,
 } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
 import { RUNWAY_TONE, runwayReasonText } from "../lib/runway";
@@ -27,6 +27,7 @@ import { ApiStateView } from "./ApiStateView";
 import { RechargeRatioDialog } from "./RechargeRatioDialog";
 import { UpstreamAccountDialog } from "./UpstreamAccountDialog";
 import { UpstreamAccountDetail } from "./UpstreamAccountDetail";
+import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
 
 /** 上游管理(交接文档 §9.6、原型 `V["s2/suppliers"]`)。
  *
@@ -39,7 +40,7 @@ import { UpstreamAccountDetail } from "./UpstreamAccountDetail";
  *  XM-C003 补齐上游名称、联系人、接入分组与 group_rate 的登记簿往返；
  *  KEY 数、余额与 runway 按同源账号 ID 接上 summary。未接入分组发现与订阅
  *  有效期仍没有聚合端点，继续明确显示未接入。 */
-export function UpstreamAccountsPanel({ platform }: { platform: string }) {
+export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistryPlatform }) {
   const queryClient = useQueryClient();
   const [result, setResult] = useState<ActionResult | null>(null);
 
@@ -187,7 +188,8 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
 
           <ScopeNote />
 
-          <DataTableV2
+          <PersistentDataTable
+            tableKey={platformSavedViewTableKey(platform, "upstreams")}
             caption="上游账号登记簿：上游资料、接入分组、KEY 或账号、余额证据与经营汇总"
             columns={upstreamColumns(afterWrite, summaries, summaryState)}
             rows={rows}
@@ -458,11 +460,9 @@ function upstreamColumns(
       id: "margin",
       header: "本期消耗 / 毛利",
       numeric: true,
-      // 排序按供给成本。汇总还没到手时不给 value——按一列全是「—」的东西
-      // 排序只会让人以为排序坏了
-      ...(summaries.size > 0
-        ? { value: (a: UpstreamAccountItem) => moneyValue(summaries.get(a.id)?.supplyCost) }
-        : {}),
+      // 能力必须从首屏起就是静态可排序；汇总尚未返回时 value=null，不能把
+      // SavedView 里的 margin 排序误判成“列已移除”并永久清空。
+      value: (a: UpstreamAccountItem) => moneyValue(summaries.get(a.id)?.supplyCost),
       cell: (a) => <PeriodCell summary={summaries.get(a.id)} state={summaryState} />,
       headerTitle: "本期供给成本 / 毛利，来自 XM-0037d 的上游汇总端点",
     },
