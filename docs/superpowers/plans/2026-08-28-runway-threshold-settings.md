@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- Approval of the spec/plan does not authorize implementation; obtain explicit authorization per C3a–C3d.
+- Approval of the spec/plan does not authorize implementation; obtain explicit authorization per C3a–C3e.
 - Do not push directly to `main` or `release/v0.1-launch`; do not merge any PR.
 - Use one task owner, worktree, branch, and PR per C3 slice.
 - All reads are Query; the only write is Action `finance.runway_threshold.set@1`.
@@ -25,11 +25,12 @@
 - Enforce `0 < critical < warning < serious` in Go, Action validation, Store, and DB CHECK constraints.
 - Classification is inclusive: `<= critical`, `<= warning`, `<= serious`; `Classify` returns `(level,error)` and never converts invalid thresholds to critical; serious never creates an R5 notification.
 - DB missing/unavailable is fail closed: no default fallback and no reconcile from an empty finding set.
-- Add trusted codes `RUNWAY_CONFIG_UNAVAILABLE`→503 and `REVISION_CONFLICT`→409; Kernel only preserves safe `*action.Error`, and arbitrary causes stay opaque.
+- Add trusted codes `RUNWAY_CONFIG_UNAVAILABLE`→503 and `REVISION_CONFLICT`→409; Query handlers may use the former directly, while Kernel Handler passthrough uses an explicit allowlist containing only `REVISION_CONFLICT`; every other typed or untyped cause stays opaque.
 - Bootstrap current/history in one transaction and ship the command inside the versioned migrate lifecycle image/tools service.
 - History rejects UPDATE/DELETE/TRUNCATE; tests use a disposable migrated database and minimum non-superuser roles, never TRUNCATE cleanup.
 - API request and worker evaluation round each use exactly one threshold snapshot.
 - UI uses inline/full-page/dialog only; never a right-side Drawer.
+- C3d-read-cutover is Task 10/11/13 and has no Dialog, no Action client, and no manage-scope constant; C3e-write-ui is Task 12 after C3c and owns the centered Dialog.
 - Do not hardcode a migration prefix. Compute `${MIGRATION_PREFIX}` from the implementation worktree after latest approved dependencies are present.
 - After generating the exact dynamically numbered schema diff, stop for explicit migration approval before DB application, sqlc generation, or Go implementation.
 - Use Action schema type `int`, not JSON Schema `integer`.
@@ -49,6 +50,9 @@
 - Create: `internal/platform/finance/runway_config.go`
 - Create: `internal/platform/finance/runway_config_store_integration_test.go`
 - Create: `scripts/test-runway-threshold-db.ps1`
+- Create: `scripts/test-runway-threshold-db.test.ps1`
+- Create: `cmd/pgdsn-validate/main.go`
+- Create: `cmd/pgdsn-validate/main_test.go`
 - Create: `cmd/runway-threshold-bootstrap/main.go`
 - Create: `cmd/runway-threshold-bootstrap/main_test.go`
 - Modify: `deploy/docker/go.Dockerfile`
@@ -111,9 +115,9 @@
 - Modify: `docs/modules/action/README.md`
 - Modify: `docs/modules/finance/README.md`
 
-### C3d — alerts rules UI and rollout closure
+### C3d-read-cutover — read/preview UI and rollout closure (Task 10/11/13)
 
-- Create: `web/apps/admin-web/src/api/runwayThresholds.ts` (C3a/b read/preview exports first; Action export only after C3c)
+- Create: `web/apps/admin-web/src/api/runwayThresholds.ts` (current/history/preview only)
 - Create: `web/apps/admin-web/src/api/runwayThresholds.test.ts`
 - Create: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.tsx`
 - Create: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.test.tsx`
@@ -121,11 +125,18 @@
 - Create: `web/apps/admin-web/src/pages/AlertRulesPage.test.tsx`
 - Modify: `web/apps/admin-web/src/pages/AlertsPage.tsx`
 - Modify: `web/apps/admin-web/src/pages/SettingsPage.tsx`
-- Modify: `web/apps/admin-web/src/api/config.ts`
 - Modify: `web/apps/admin-web/src/router.test.tsx`
 - Modify: `deploy/compose/launch.yaml`
 - Modify: `deploy/compose/.env.example`
 - Create: `docs/runbooks/SWITCH-RUNWAY-THRESHOLDS-TO-DB.md`
+
+### C3e-write-ui — approved write UI after C3c (Task 12)
+
+- Modify: `web/apps/admin-web/src/api/runwayThresholds.ts`
+- Modify: `web/apps/admin-web/src/api/runwayThresholds.test.ts`
+- Modify: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.tsx`
+- Modify: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.test.tsx`
+- Modify: `web/apps/admin-web/src/api/config.ts`
 
 ---
 
@@ -231,8 +242,8 @@ CREATE TABLE finance.runway_threshold_history (
 );
 ```
 
-Add an index on `(environment, revision DESC)` and two trigger paths backed by a function that raises a
-stable exception: row-level `BEFORE UPDATE OR DELETE`, plus statement-level `BEFORE TRUNCATE`. The down
+Add an index on `(environment, revision DESC)` and two trigger paths backed by a function that raises fixed
+SQLSTATE `55000`: row-level `BEFORE UPDATE OR DELETE`, plus statement-level `BEFORE TRUNCATE`. The down
 migration drops both triggers, trigger function, history table, then current table in that order.
 
 - [ ] **Step 2: Produce the migration approval packet without touching a database**
@@ -267,6 +278,9 @@ waiting, recompute the prefix, regenerate the pair, and request approval again.
 - Regenerate: `internal/platform/finance/gen/finance.sql.go`
 - Create: `internal/platform/finance/runway_config_store_integration_test.go`
 - Create: `scripts/test-runway-threshold-db.ps1`
+- Create: `scripts/test-runway-threshold-db.test.ps1`
+- Create: `cmd/pgdsn-validate/main.go`
+- Create: `cmd/pgdsn-validate/main_test.go`
 - Create: `tests/security/runway-threshold-db-roles.test.sh`
 
 **Interfaces:**
@@ -275,18 +289,40 @@ waiting, recompute the prefix, regenerate the pair, and request approval again.
 
 - [ ] **Step 1: Add the disposable database harness**
 
-`scripts/test-runway-threshold-db.ps1` requires `XM_TEST_DATABASE_ADMIN_URL`, creates a random database
-named `xm_runway_test_<uuid>`, applies all migrations, creates non-superuser test roles for platform-api,
-worker, and lifecycle capabilities, runs the requested Go/security tests, terminates connections, and drops
-the whole database in `finally`. It must refuse an admin URL whose target database is not a known test/admin
-database. It never TRUNCATEs history or disables triggers.
+`scripts/test-runway-threshold-db.ps1` requires `XM_TEST_DATABASE_ADMIN_URL`. Before any `psql`, pgx, or admin
+connection it runs the new read-only guard:
+
+```powershell
+go run ./cmd/pgdsn-validate --dsn-env XM_TEST_DATABASE_ADMIN_URL --require-loopback
+if ($LASTEXITCODE -ne 0) { throw 'test database DSN guard rejected the admin URL' }
+```
+
+`cmd/pgdsn-validate` reads only the named env value, calls `pgdsn.Validate(raw, false)` and
+`pgdsn.RequireLoopback(raw)`, emits no DSN, and exits nonzero on either error. The script generates one UUID
+per run and derives a random database plus random **cluster role** names for API, worker, lifecycle, and
+trigger-probe; no fixed test role may be reused. This guard is test tooling only and is not copied into any
+Docker target or compose service.
+
+The whole lifecycle is one PowerShell `try/finally`. `finally` restores every changed env variable, terminates
+connections to the random DB, drops that DB, and drops every random cluster role in reverse creation order—even
+when migration/tests fail halfway. Cleanup errors are accumulated, printed without DSN/password, and force a
+nonzero exit listing the leftover database/role names. It never TRUNCATEs history or disables triggers.
+
+`scripts/test-runway-threshold-db.test.ps1` injects failures immediately after database creation, after random
+role creation, and after migration. After each run it queries `pg_database`/`pg_roles` through the guarded admin
+connection and asserts no generated database/role remains and the caller's original env values are restored.
 
 - [ ] **Step 2: Write schema/role integration tests**
 
 `TestRunwayThresholdTablesEnforceOrderAndHistoryIsAppendOnly` inserts one valid history row through the
-lifecycle test role, then uses the platform-api role to attempt UPDATE, DELETE, and TRUNCATE. Each must fail; SELECT
-still succeeds. A 10/5/20 current insert must fail the order CHECK. The worker role must SELECT current and
-must fail every DML statement. Teardown is database drop only.
+lifecycle test role, then proves two independent layers:
+
+1. the minimum platform-api role attempts UPDATE, DELETE, and TRUNCATE and each fails with SQLSTATE `42501`;
+2. the random trigger-probe role is explicitly granted those three privileges, so ACL allows the statements,
+   but each fails with trigger SQLSTATE `55000` and the row remains unchanged.
+
+A 10/5/20 current insert must fail the order CHECK. The worker role must SELECT current and fail every DML
+with `42501`. Teardown is database/cluster-role drop only.
 
 ```go
 for name, statement := range map[string]string{
@@ -295,8 +331,13 @@ for name, statement := range map[string]string{
     "truncate": `TRUNCATE finance.runway_threshold_history`,
 } {
     t.Run(name, func(t *testing.T) {
-        if _, err := apiRolePool.Exec(ctx, statement); err == nil {
-            t.Fatalf("%s history must be rejected", name)
+        _, err := apiRolePool.Exec(ctx, statement)
+        if sqlState(err) != "42501" {
+            t.Fatalf("%s ACL SQLSTATE=%q want 42501", name, sqlState(err))
+        }
+        _, err = triggerProbePool.Exec(ctx, statement)
+        if sqlState(err) != "55000" {
+            t.Fatalf("%s trigger SQLSTATE=%q want 55000", name, sqlState(err))
         }
     })
 }
@@ -370,7 +411,7 @@ Bootstrap conflict inspection uses `GetRunwayThresholdConfig` after an `ON CONFL
 Run:
 
 ```powershell
-sqlc generate
+go tool sqlc generate
 ```
 
 Expected: only finance generated files change in addition to the query file.
@@ -381,6 +422,8 @@ Expected: only finance generated files change in addition to the query file.
 pwsh -File scripts/test-runway-threshold-db.ps1 `
   -GoTest './internal/platform/finance' `
   -Run 'TestRunwayThresholdTablesEnforceOrderAndHistoryIsAppendOnly'
+go test -p 1 ./cmd/pgdsn-validate -count=1
+pwsh -File scripts/test-runway-threshold-db.test.ps1
 bash tests/security/runway-threshold-db-roles.test.sh
 ```
 
@@ -393,7 +436,8 @@ git add -- "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.u
   "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.down.sql" `
   db/queries/finance.sql internal/platform/finance/gen `
   internal/platform/finance/runway_config_store_integration_test.go `
-  scripts/test-runway-threshold-db.ps1 `
+  scripts/test-runway-threshold-db.ps1 scripts/test-runway-threshold-db.test.ps1 `
+  cmd/pgdsn-validate `
   tests/security/runway-threshold-db-roles.test.sh
 git commit -m "feat(finance): add versioned runway threshold schema"
 ```
@@ -541,8 +585,20 @@ docker build -f deploy/docker/go.Dockerfile --target migrate `
   -t xingmang/migrate:runway-test .
 docker run --rm --entrypoint /usr/local/bin/runway-threshold-bootstrap `
   xingmang/migrate:runway-test version
-docker compose -p xingmang-runway-plan -f deploy/compose/launch.yaml `
-  --env-file deploy/compose/.env.example --profile tools config --quiet
+$hadDatabasePassword = Test-Path Env:DATABASE_PASSWORD
+$previousDatabasePassword = if ($hadDatabasePassword) { $env:DATABASE_PASSWORD } else { $null }
+try {
+  $env:DATABASE_PASSWORD = 'runway-compose-config-check-not-a-secret'
+  docker compose -p xingmang-runway-plan -f deploy/compose/launch.yaml `
+    --env-file deploy/compose/.env.example --profile tools config --quiet
+  if ($LASTEXITCODE -ne 0) { throw 'compose config failed' }
+} finally {
+  if ($hadDatabasePassword) {
+    $env:DATABASE_PASSWORD = $previousDatabasePassword
+  } else {
+    Remove-Item Env:DATABASE_PASSWORD -ErrorAction SilentlyContinue
+  }
+}
 ```
 
 Expected: PASS.
@@ -991,15 +1047,24 @@ git commit -m "feat(runtime): load runway thresholds per request and evaluation"
 Run:
 
 ```powershell
-gh pr list --state open --search 'XM-0030 in:title' --json number,title,state,url
-rg -n '状态:设计稿,待产品负责人拍板|RequiresAdvancedControls' `
-  docs/superpowers/plans/2026-08-27-xm-0030-action-advanced-controls-design.md `
-  internal/platform/action/risk.go
+if ($env:XM0030_PR_NUMBER -notmatch '^\d+$') { throw 'approved Task Spec must set XM0030_PR_NUMBER' }
+if ($env:XM0030_MERGE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'approved Task Spec must set XM0030_MERGE_SHA' }
+git fetch --prune origin
+$xm0030 = gh pr view ([int]$env:XM0030_PR_NUMBER) `
+  --json number,state,mergedAt,mergeCommit,baseRefName,url | ConvertFrom-Json
+if ($xm0030.state -ne 'MERGED' -or -not $xm0030.mergedAt) { throw 'XM-0030 PR is not merged' }
+if ($xm0030.baseRefName -ne 'release/v0.1-launch') { throw 'XM-0030 merged into the wrong base' }
+if ($xm0030.mergeCommit.oid -ne $env:XM0030_MERGE_SHA) { throw 'approved XM-0030 merge SHA mismatch' }
+git cat-file -e "$($env:XM0030_MERGE_SHA)^{commit}"
+if ($LASTEXITCODE -ne 0) { throw 'XM-0030 merge commit is not present locally' }
+git merge-base --is-ancestor $env:XM0030_MERGE_SHA HEAD
+if ($LASTEXITCODE -ne 0) { throw 'C3c HEAD does not contain the approved XM-0030 merge' }
 ```
 
-Required evidence is explicit human approval, merged Action Advanced Controls on the C3c target base, and green
-tests proving L2 approval/execute/idempotency. If any evidence is absent, stop with **zero C3c file changes**:
-do not create the contract/scope/definition/Handler and do not pre-register a fail-closed Action.
+`XM0030_PR_NUMBER` and `XM0030_MERGE_SHA` must be copied from the approved C3c Task Spec, not discovered by
+title search. Required evidence is the command output above plus green merged L2 approval/execute/idempotency
+tests. If any evidence is absent, stop with **zero C3c file changes**: do not create the
+contract/scope/definition/Handler and do not pre-register a fail-closed Action.
 
 - [ ] **Step 2: Write failing domain, error-model, definition, and Handler tests**
 
@@ -1012,6 +1077,7 @@ Add these exact cases:
 | `TestRunwayThresholdStoreSetRequiresExpectedRevision` | stale revision returns `ErrRevisionConflict`; no history row |
 | `TestRunwayThresholdStoreSetWritesCurrentAndHistoryAtomically` | exact next revision appears in both tables |
 | `TestKernelPreservesTrustedRevisionConflict` | wrapped `*action.Error` keeps code in result/run/audit; safe message only |
+| `TestKernelRejectsNonAllowlistedTypedHandlerError` | Handler returns typed `PERMISSION_DENIED`; Kernel records/returns `EXECUTION_FAILED` |
 | `TestKernelDoesNotTrustRevisionConflictText` | ordinary error containing that text becomes `EXECUTION_FAILED` |
 | `TestStatusForRevisionConflict` | trusted code maps to 409 |
 | `TestRunwayThresholdActionRequiresHumanAndScope` | denied before Store call |
@@ -1032,8 +1098,10 @@ the exact values and `expected+1` revision.
 - [ ] **Step 4: Add trusted revision conflict error handling**
 
 Add `action.CodeRevisionConflict = "REVISION_CONFLICT"`; `StatusForCode` maps it to 409. Update Kernel Handler
-error handling so only `errors.As(err, &actionErr)` where `actionErr` is `*action.Error` preserves trusted code/message in ActionRun/audit and
-the returned error. Every ordinary error remains `EXECUTION_FAILED`; cause text is only logged.
+error handling with a private explicit allowlist containing **only** `CodeRevisionConflict`. A wrapped
+`*action.Error` preserves code/message in ActionRun/audit/returned error only when its code is allowlisted.
+Typed `PERMISSION_DENIED`, `INVALID_PARAMS`, unknown codes, and every ordinary error remain
+`EXECUTION_FAILED`; cause text is only logged.
 
 The Handler maps `finance.ErrRevisionConflict` to:
 
@@ -1077,7 +1145,9 @@ Assert exact ID/version, `action.L2`, HUMAN-only, all explicit environments, per
 Use `action.IntParam` for the four integers, trim `action.StringParam(reason)`, and reject nonpositive revision,
 blank reason, or invalid thresholds before `Store.Current`/`Set`. Take actor/environment from Principal context;
 never accept environment in params. Record resource `finance.runway_threshold_config`, resource ID environment,
-before/after snapshots, and trimmed reason. Return approval/run IDs and verified old/new revisions.
+before/after snapshots, and trimmed reason. Handler business value returns only verified old/new revisions,
+three values, and confirmation status. Approval/ActionRun IDs and HTTP envelope belong to the merged XM-0030
+core contract; do not invent or promise them here.
 
 - [ ] **Step 7: Prove the new scope is not granted by default**
 
@@ -1117,7 +1187,7 @@ git commit -m "feat(finance): add approved runway threshold action"
 
 ---
 
-## C3d — Inline Rules UI and Deployment Closure
+## C3d-read-cutover — Inline Read/Preview UI and Deployment Closure
 
 ### Task 10: Add typed frontend current/history/preview clients
 
@@ -1216,8 +1286,9 @@ git commit -m "feat(admin): add runway threshold api client"
 - Modify: `web/apps/admin-web/src/router.test.tsx`
 
 **Interfaces:**
-- Consumes: frontend clients from Task 10, Action catalog state, and current Principal scopes.
-- Produces: `/alerts?sub=rules` inline editor/preview/history and `/settings` governance link.
+- Consumes: current/history/preview clients from Task 10 and existing `finance.read` handling.
+- Produces: `/alerts?sub=rules` inline read/preview/history, a fixed C3c-unavailable note, and `/settings`
+  governance link; no Action catalog lookup, Dialog, write button, or manage-scope dependency.
 
 - [ ] **Step 1: Write failing UI tests for placement and shape**
 
@@ -1226,12 +1297,12 @@ Tests must cover this exact matrix:
 | Test | Interaction | Required assertion |
 |---|---|---|
 | rules placement | render `/alerts?sub=rules`, then `/settings` | thresholds appear only on rules route; Settings has one link |
-| no Drawer | render rule editor and confirmation | no complementary/right-drawer landmark or Drawer import; confirmation is a dialog |
+| no write surface | render rule panel and preview | no Dialog/complementary/right-drawer landmark, Action import, or submit button |
 | serious copy | load 5/10/20 | text says serious is display-only and creates no R5 notification |
 | client validation | change critical to 10 while warning is 10; click preview | inline strict-order error; preview client not called |
 | evidence order | resolve preview | evaluation time/coverage render before table; each row shows its own observation time |
 | current inconsistency | return missing/unexpected/severity mismatch rows | dedicated warning and consistency reason; not counted as proposed effect |
-| C3c absent gate | Action catalog has no `finance.runway_threshold.set@1` | no execute request/helper; fixed Foundation-B/C3c gate shown |
+| C3c deferred note | render C3d build | no catalog/execute request or manage-scope read; fixed Foundation-B/C3c note shown |
 
 The strict-order test includes a concrete no-request assertion:
 
@@ -1259,7 +1330,7 @@ Expected: FAIL because the page/components do not exist.
 
 `AlertsPage` reads `sub` from the URL. `sub=alerts` retains the existing active/all control inside that subpage. `sub=rules` renders `AlertRulesPage`. Other final-IA subpages remain honest `PageState unavailable` until their own slices; do not fabricate incidents/notifications/silence lists.
 
-- [ ] **Step 4: Implement the inline panel and dialog flow**
+- [ ] **Step 4: Implement the inline panel and preview flow**
 
 The panel always shows current values, revision/source/time, serious explanation, and history. Editing and
 preview are inline. “预览影响” renders all transition counts, a dedicated current-inconsistent warning,
@@ -1269,8 +1340,8 @@ or write button—only the fixed Foundation-B/C3c gate. No right-side Drawer is 
 - [ ] **Step 5: Implement the pre-C3c hard gate**
 
 - `finance.read` controls Query visibility through service responses.
-- Action catalog absence shows “Foundation-B / C3c 尚未开放”.
-- No manage scope is read or assumed, no execute client exists, and no POST is emitted.
+- C3d code itself shows “Foundation-B / C3c 尚未开放”; it does not query the Action catalog.
+- No Dialog/manage scope is read or assumed, no execute client exists, and no POST is emitted.
 
 - [ ] **Step 6: Make Settings a link, not a second editor**
 
@@ -1292,6 +1363,8 @@ git commit -m "feat(admin): add gated runway threshold rules ui"
 ```
 
 Expected: tests/typecheck PASS.
+
+## C3e-write-ui — Approved Write UI After C3c
 
 ### Task 12: Extend the rules UI with approved Action submission after C3c
 
@@ -1329,17 +1402,19 @@ Only now export:
 
 ```ts
 export const RUNWAY_THRESHOLD_MANAGE_PERMISSION = "finance.runway_threshold.manage";
-export async function submitRunwayThresholdAction(input: {
+export interface RunwayThresholdActionInput {
   criticalDays: number;
   warningDays: number;
   seriousDays: number;
   expectedRevision: number;
   reason: string;
-}): Promise<ActionRun>;
+}
 ```
 
-Trim reason and require `expectedRevision > 0` before building params. Do not add the permission to
-`DEFAULT_SCOPES`; add a test that fails if it appears there.
+Implement `submitRunwayThresholdAction(input)` by delegating to the exact merged XM-0030 submission client and
+letting TypeScript infer/retain that client's response type. Do not define a feature-local `ActionRun`,
+approval ID, run ID, or envelope interface. Trim reason and require `expectedRevision > 0` before building
+params. Do not add the permission to `DEFAULT_SCOPES`; add a test that fails if it appears there.
 
 - [ ] **Step 4: Implement the centered approval Dialog and write verification**
 
@@ -1361,6 +1436,8 @@ git add web/apps/admin-web/src/api/runwayThresholds.ts `
   web/apps/admin-web/src/api/config.ts
 git commit -m "feat(admin): submit approved runway threshold changes"
 ```
+
+## C3d-read-cutover continuation
 
 ### Task 13: Cut over deployment and retire runtime env authority
 
@@ -1441,8 +1518,20 @@ the tools-profile bootstrap service wired to them. Do not add a runtime `RUNWAY_
 - [ ] **Step 4: Run compose and docs verification**
 
 ```powershell
-docker compose -p xingmang-launch -f deploy/compose/launch.yaml `
-  --env-file deploy/compose/.env.example --profile tools config --quiet
+$hadDatabasePassword = Test-Path Env:DATABASE_PASSWORD
+$previousDatabasePassword = if ($hadDatabasePassword) { $env:DATABASE_PASSWORD } else { $null }
+try {
+  $env:DATABASE_PASSWORD = 'runway-compose-config-check-not-a-secret'
+  docker compose -p xingmang-launch -f deploy/compose/launch.yaml `
+    --env-file deploy/compose/.env.example --profile tools config --quiet
+  if ($LASTEXITCODE -ne 0) { throw 'compose config failed' }
+} finally {
+  if ($hadDatabasePassword) {
+    $env:DATABASE_PASSWORD = $previousDatabasePassword
+  } else {
+    Remove-Item Env:DATABASE_PASSWORD -ErrorAction SilentlyContinue
+  }
+}
 bash scripts/check-governance.sh
 ```
 
@@ -1477,8 +1566,10 @@ git diff --check
 
 For C3a/C3c, use `scripts/test-runway-threshold-db.ps1` with a disposable database; never add history to shared
 TRUNCATE cleanup. Verify migration up/down, trigger/role denials, bootstrap rollback on history failure, and
-Action atomicity. For C3d, rebuild staging containers and capture desktop/narrow rules pages for read/preview,
-current inconsistency, C3c-absent gate, and—only after C3c—no-scope, 409/503, approval, and verified success.
+Action atomicity. For C3d-read-cutover, rebuild staging containers and capture desktop/narrow rules pages for
+read/history/preview, current inconsistency, fixed C3c-deferred note, and the absence of Dialog/POST/manage-scope
+reads. For C3e-write-ui, separately capture no-scope, centered Dialog, 409/503 retention, approval submission,
+and verified success after C3c.
 Run the old-compose + restored-env rollback rehearsal and attach API/worker equality evidence.
 
 ## PR/Handoff Requirements

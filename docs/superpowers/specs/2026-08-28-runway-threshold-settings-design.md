@@ -3,7 +3,7 @@
 > **状态：审批稿；只含 Plan / Design，不含实现授权。**
 >
 > 本文批准后仍不得自动创建迁移、scope、Action、Query、前端写面或修改默认角色。
-> C3a～C3d 每片必须分别获得明确实施授权、使用独立 worktree / 分支 / PR，并由人类合并。
+> C3a～C3e 每片必须分别获得明确实施授权、使用独立 worktree / 分支 / PR，并由人类合并。
 >
 > 基线：`release/v0.1-launch@543087f`（2026-08-28 本文起草时）。实施前必须重新
 > `git fetch origin` 并以目标 PR 最新基线复核；本文记录的是接口与不变量，不冻结迁移号。
@@ -95,7 +95,7 @@ plan 使用 `${MIGRATION_PREFIX}` 表示上述算法的输出；它是执行期�
 锁影响、回退/前进修复说明、#103/XM-B003 基线证据；随后停止并请求迁移批准。批准前不得：
 
 - 在共享/staging/production 数据库应用迁移；
-- 运行 `sqlc generate` 或继续写 Store/Query/bootstrap 代码；
+- 运行 `go tool sqlc generate` 或继续写 Store/Query/bootstrap 代码；
 - 把“本设计稿已批准”解释成对这份动态编号 SQL 的批准。
 
 允许在审批前做的验证只限静态 SQL 审阅、`git diff --check` 与不会连接数据库的文本门禁。
@@ -147,9 +147,21 @@ history 不能替代 Action 审计，Action 审计当前可能在业务成功后
 plan 审批、创建非 superuser 运行角色，并用权限测试证明上述矩阵。RUNWAY 片不私自创建或
 批准全平台角色；它把所需 grant contract 交给 DB 角色拆分片实现。
 
-测试 history 不可变性必须使用 disposable、全新迁移的数据库和真实最小运行角色，直接尝试
-UPDATE/DELETE/TRUNCATE 并断言失败。测试清理只能 drop 整个 disposable database；禁止把
-history 加进共享 `testPool` 的 TRUNCATE，也禁止以表 owner/superuser 身份把触发器关掉。
+测试 history 不可变性必须使用 disposable、全新迁移的数据库。admin DSN 在任何连接前必须
+同时通过 `pgdsn.Validate(raw, false)` 与 `pgdsn.RequireLoopback(raw)`；数据库名和所有 cluster
+role 名均带本轮随机 UUID，不能复用固定角色。harness 用 `try/finally` 覆盖成功、测试失败、
+建库中断三条路径：终止目标库连接、drop database、逐个 drop 随机 role，并恢复进程环境；
+任一步清理失败都让 harness 非零退出且列出未清理对象名，不打印 DSN/口令。
+
+append-only 测试分两层，不能把“没权限”误当成“trigger 有效”：
+
+1. **ACL 层**：最小 platform-api role 没有 history UPDATE/DELETE/TRUNCATE；三条语句必须返回
+   SQLSTATE `42501`；
+2. **trigger-probe 层**：另建随机、非 superuser/非 owner probe role，显式授予这三项 DML；
+   同样语句必须越过 ACL 后被 append-only trigger 的固定 SQLSTATE `55000` 拒绝，原行不变。
+
+测试清理只能 drop 整个 disposable database/随机 roles；禁止把 history 加进共享 `testPool`
+的 TRUNCATE，也禁止以表 owner/superuser 身份禁用 trigger 后宣称通过。
 
 ### 4.4 env bootstrap 是生命周期操作，不是后门
 
@@ -172,7 +184,7 @@ history 加进共享 `testPool` 的 TRUNCATE，也禁止以表 owner/superuser �
 
 该命令属于宪法第 3 条 Platform Lifecycle Operation：版本化制品、变更单、人工批准、独立
 日志；不暴露 HTTP 路由，不允许被日常 UI 或 AI Tool 调用。升级后 DB 缺行时服务 fail
-closed，绝不再次用 env 悄悄补值。C3d 验证所有环境 revision 后才删除 compose 中两个旧变量。
+closed，绝不再次用 env 悄悄补值。C3d-read-cutover 验证所有环境 revision 后才删除 compose 中两个旧变量。
 
 ## 5. 唯一分类语义
 
@@ -230,9 +242,11 @@ Principal、environment 裁剪、NoStore、请求超时和限流。
 `internal/platform/httpapi/response.go` 的 `StatusForCode` 与测试。Query/Action 边界把领域错误
 显式包装成 `action.NewError`；任意数据库 error 不能直接成为可信 Message。
 
-Kernel 对 Handler error 的规则也要明确：仅当 `var ae *action.Error; errors.As(err, &ae)` 成功
-时，保留该可信 Code/Message 写 ActionRun/audit 并交给 `WriteError`；其它 error 一律仍收敛为
-`EXECUTION_FAILED`，根因只进日志。测试必须覆盖多层 wrap 的可信 error、伪造普通 error、
+Kernel 对 Handler error 的规则必须采用显式 allowlist，而不是信任任意 `*action.Error`：本片
+只允许 `REVISION_CONFLICT` 从 Handler 穿透到 ActionRun/audit/`WriteError`。即使
+`errors.As(err, &ae)` 成功，只要 `ae.Code` 不在 allowlist（例如 Handler 自造
+`PERMISSION_DENIED`），仍收敛为 `EXECUTION_FAILED`；任意普通 error 同样收敛，根因只进日志。
+测试必须覆盖多层 wrap 的 allowlisted conflict、非 allowlisted typed error、伪造普通 error、
 SQL 约束名、DSN/IP 和 current revision 均不进入 HTTP body。
 
 ### 6.1 当前配置
@@ -341,13 +355,19 @@ Action Handler 必须：
 5. 同事务 INSERT history；
 6. `RecordResource`、`RecordBefore`、`RecordAfter`、`RecordReason`；
 7. commit 后重新读取并比较，失败则返回写后确认失败并进入人工核对，不能报成功；
-8. 回执包含 action_run/approval 信息、旧/新 revision、审计入口。
+8. Handler 的业务返回只包含旧/新 revision、三档值与写后确认结果；ActionRun/approval ID 与
+   HTTP envelope 完全由最终获批、已合入的 XM-0030 内核契约拥有，本片不得提前承诺字段名。
 
 **C3c 全片等待 Foundation-B。** Foundation-B / XM-0030 未获批并合入目标基线时，不创建
 Action contract、不新增 scope 常量、不注册 Action、不实现 Handler，也不发送试探执行请求。
 Query/preview 与只读 UI 可先上线；它们根据 Action catalog 中不存在该 Action 显示
 “Foundation-B / C3c 尚未开放”。不得用“先注册但靠 `ADVANCED_CONTROLS_REQUIRED` 拦截”代替
 依赖门，因为那会提前形成一个未获批的写契约与授权面。
+
+“已合入”必须用批准记录里的 XM-0030 PR number + merge SHA 机械证明：远端 PR 状态为 MERGED、
+base 为 `release/v0.1-launch`、返回的 merge commit 等于批准记录，并且
+`git merge-base --is-ancestor <merge_sha> HEAD` 为真。标题搜索、open PR、设计稿存在或本地分支
+存在都不算依赖满足。
 
 ### 7.1 新 scope 不默认授予
 
@@ -400,8 +420,11 @@ threshold_revision=<revision>; critical_days=<n>; warning_days=<n>; serious_days
 最终位置：`/alerts?sub=rules`。页面先落实 IA v3 的外层子页签；现有“活跃告警 / 含已解决”
 成为 `sub=alerts` 内部筛选，不与外层五页签混用。
 
-R5 规则行下方使用**内联完整区块**；影响确认使用居中 `Dialog`，或从规则行进入独立 full-page
-路由。明确禁止右侧 Drawer，避免与现有详情/操作侧栏模式混淆，也避免窄屏双层抽屉。
+R5 规则行下方使用**内联完整区块**。C3d-read-cutover 只交付 current/history/preview、
+Settings 入口与 DB cutover（计划 Task 10/11/13），**没有 Dialog、没有提交按钮、没有 manage
+scope 常量或 Action client**。C3e-write-ui 只有在 C3c 合入后才扩展 Task 12，使用居中
+`Dialog` 确认提交审批。两片都禁止右侧 Drawer，避免与现有详情/操作侧栏混淆，也避免窄屏
+双层抽屉。
 
 ### 9.1 格 → 源 → 状态
 
@@ -450,10 +473,11 @@ Reconciler/Store 两层测试持久化，使当前态可关联到 config history
 | C3a | 动态编号迁移、current/history Store、同镜像 lifecycle bootstrap、current/history Query | 本规格人工批准；动态 schema 生成后再次 STOP 等迁移批准；生产激活还需 DB 角色拆分 |
 | C3b | 唯一 `<=` classifier、R5 边界修正、preview Query、API/worker 每请求/每轮 DB 快照 | 本规格人工批准；契约语义变化单独批准 |
 | C3c | L2 Action contract、新 scope、expected revision、审计、写后确认 | **整片等待 Foundation-B / XM-0030 获批并合入**；此前不创建/注册；scope 映射另批 |
-| C3d | `/alerts?sub=rules` 内联 UI、Settings 入口、同镜像 bootstrap/双向回滚 runbook、移除 env 运行时旋钮 | C3a+b；可先做只读/preview，提交审批客户端与控件等待 C3c |
+| C3d-read-cutover | Task 10/11/13：current/history/preview 内联 UI、Settings 入口、同镜像 bootstrap/双向回滚 runbook、移除 env 运行时旋钮；无 Dialog/写客户端 | C3a+b；不依赖 C3c，不读取 manage scope |
+| C3e-write-ui | Task 12：Action client、manage-scope gate、居中审批 Dialog、写后验证 | C3c 合入且 XM-0030 merge SHA ancestry 通过 |
 
-四片各自 worktree/分支/PR；任一片不能借本设计稿绕过自己的审批点。C3d 可以先交付只读/预览/
-门禁 UI，但不得因为按钮已画出就宣称写能力可用。
+五片各自 worktree/分支/PR；任一片不能借本设计稿绕过自己的审批点。C3d-read-cutover 只能交付只读/预览/
+cutover，不画审批 Dialog；C3e 才能引入写 UI，且不得因按钮已画出就宣称写能力已生效。
 
 ## 12. 失败与恢复语义
 
@@ -506,6 +530,7 @@ Reconciler/Store 两层测试持久化，使当前态可关联到 config history
 13. C3c 全片等待 Foundation-B 合入，不能提前创建/注册契约和 scope；
 14. history 最小 DB 权限的生产激活等待独立 DB 角色拆分批准；
 15. preview 使用完整 transition 表，区分 evaluation_at 与逐对象 observed_at；
-16. C3a～C3d 分 PR，逐片另行授权。
+16. C3d-read-cutover 与 C3e-write-ui 分 PR；C3d-read-cutover 无 Dialog/Action client，C3e 等待 C3c；
+17. C3a～C3e 分 PR，逐片另行授权。
 
 **批准本文仅批准设计进入下一道评审，不等于授权任何一片开始实现。**
