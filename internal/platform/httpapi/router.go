@@ -34,6 +34,8 @@ type Deps struct {
 	MetricHistory  MetricHistoryLister
 	AuditEvents    AuditEventLister
 	Alerts         AlertLister
+	// PlatformChannelBindings 是渠道绑定的候选四态与历史 Query；写入仍走 L1 Action。
+	PlatformChannelBindings PlatformChannelBindingLister
 	// RequestLogs 为 nil 时「请求」两个端点不挂载（504 之外的 404）。
 	//
 	// 允许为 nil 而不是必填：这条链路依赖一个**外挂**系统（reqlog），
@@ -117,6 +119,9 @@ func NewRouter(d Deps) http.Handler {
 		// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 		api.With(RequireScope(alerts.ScopeRead)).
 			Get("/alerts", ListAlertsHandler(d.Alerts))
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/platform-channel-bindings",
+				ListPlatformChannelBindingsHandler(d.PlatformChannelBindings, d.Metrics))
 
 		// 请求详情（XM-0039）。两条端点、两个权限，分级是这条能力的前提：
 		// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。

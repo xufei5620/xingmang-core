@@ -17,6 +17,7 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 | `GET /api/v1/metrics`         | `ops.read`      | `ops.ScopeRead` |
 | `GET /api/v1/metrics/history` | `ops.read`      | `ops.ScopeRead` |
 | `GET /api/v1/audit/events`    | `audit.read`    | `audit.ScopeRead` |
+| `GET /api/v1/finance/platform-channel-bindings` | `finance.read` | `finance.ScopeRead` |
 
 三个 scope **分开授予**，不共用一个「读」权限：指标里将来会有收入、余额这类业务数据
 （XM-0017 接入 Sub2API 之后），比「有哪些服务」敏感一个量级。共用一个 scope 意味着
@@ -29,6 +30,10 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 权限声明写在路由上而不是 handler 里，路由表因此成为「哪个端点要什么权限」的单一清单；
 散在 handler 里的 if 谁也审计不了，还会随手长出第二套授权规则。
 
+渠道绑定 Query 只需要 `finance.read`；确认/解绑是独立的
+`finance.platform_channel_binding.manage` L1 Action 权限，默认 staff/admin 都不授予。
+这样可以让运营查看候选四态而不自动获得改变成本归属的能力；Action 还会校验 HUMAN、
+同环境、目录完整性和 expected binding id。
 ## 环境范围
 
 `resolveEnvironment` 统一决定查询作用于哪个环境：

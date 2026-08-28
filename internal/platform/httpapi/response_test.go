@@ -18,6 +18,8 @@ func TestStatusForCode(t *testing.T) {
 		action.CodePermissionDenied:         http.StatusForbidden,
 		action.CodePrincipalTypeNotAllowed:  http.StatusForbidden,
 		action.CodeEnvironmentMismatch:      http.StatusConflict,
+		action.CodeConflict:                 http.StatusConflict,
+		action.CodePreconditionFailed:       http.StatusPreconditionFailed,
 		action.CodeNotRegistered:            http.StatusNotFound,
 		action.CodeAdvancedControlsRequired: http.StatusNotImplemented,
 		action.CodeExecutionFailed:          http.StatusBadGateway,

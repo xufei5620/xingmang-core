@@ -34,8 +34,10 @@ func StatusForCode(c action.Code) int {
 		return http.StatusBadRequest
 	case action.CodePermissionDenied, action.CodePrincipalTypeNotAllowed:
 		return http.StatusForbidden
-	case action.CodeEnvironmentMismatch:
+	case action.CodeEnvironmentMismatch, action.CodeConflict:
 		return http.StatusConflict
+	case action.CodePreconditionFailed:
+		return http.StatusPreconditionFailed
 	case action.CodeNotRegistered:
 		return http.StatusNotFound
 	case action.CodeAdvancedControlsRequired:
