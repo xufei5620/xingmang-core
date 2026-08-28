@@ -384,7 +384,7 @@ validation; archive missing/zero never takes `Event.Canonical()`'s in-memory v1 
 Run the Step 3 command twice and compare the fixture/output SHA-256 in the test.
 Expected: PASS both times with the same digest.
 
-- [ ] **Step 6: Write verifier/key-policy red tests**
+- [ ] **Step 6: Write verifier/key-policy/export-root red tests**
 
 Add exact mutations and expected codes:
 
@@ -404,6 +404,8 @@ func TestVerifyRejectsRevokedKeyForNewSignature(t *testing.T)
 func TestVerifySeparatesOperationalFailureFromIntegrityReport(t *testing.T)
 func TestVerifierOutdatedIsOnlyTypedCompatibilityError(t *testing.T)
 func TestVerifyRejectsProjectionHiddenFields(t *testing.T)
+func TestExportRootPerformsZeroDatabaseWritesOnSuccessAndFailure(t *testing.T)
+func TestExportRootRetryDoesNotMutateLegacyMarker(t *testing.T)
 ```
 
 Run:
@@ -412,8 +414,9 @@ Run:
 go test ./internal/platform/audit/archive -count=1 -v
 ```
 
-Expected: FAIL, including the listed Verify, Keyring, validity-boundary and cross-domain
-replay tests, until structured verification is implemented.
+Expected: FAIL, including the listed Verify, Keyring, validity-boundary, cross-domain
+replay and ExportRoot zero-write/retry tests, until structured verification and the
+legacy-marker retirement are implemented. Preserve this RED output before Step 7.
 
 - [ ] **Step 7: Retire embedded-key root export and implement full verification**
 
@@ -434,10 +437,10 @@ no encoder/fixture may emit `unsigned_manifest` or `manifest_sha256` as envelope
 Make export a pure filesystem emitter: remove the `MarkChainRootExported` query and
 generated method, and remove every `exported_at/export_target` DB write from `ExportRoot`.
 Keep legacy columns untouched in the forward-only schema but never read them as trust or
-archive state. Add `TestExportRootPerformsZeroDatabaseWritesOnSuccessAndFailure` and
-`TestExportRootRetryDoesNotMutateLegacyMarker`. Historical JSON public keys are ignored
-hints. Unknown versions return only typed `*CompatibilityError`; object/keyring I/O
-returns typed `*OperationalError`, never tamper.
+archive state. Make the already-RED `TestExportRootPerformsZeroDatabaseWritesOnSuccessAndFailure`
+and `TestExportRootRetryDoesNotMutateLegacyMarker` pass. Historical JSON public keys are
+ignored hints. Unknown versions return only typed `*CompatibilityError`; object/keyring
+I/O returns typed `*OperationalError`, never tamper.
 
 - [ ] **Step 8: Add a local-only CLI surface**
 
@@ -628,19 +631,29 @@ distinct CredentialRefs and are neither owner nor members of source/catalog role
 
 - [ ] **Step 1: Resolve the migration number from the fresh base**
 
-Use PowerShell without assuming `000014` remains free:
+Fetch and pin the exact remote release tip, then derive the current maximum and next
+migration number from that commit rather than the mutable working tree. Do not assume
+`000014` remains free:
 
 ```powershell
-$migrationNumbers = Get-ChildItem db/migrations/*.up.sql |
-  ForEach-Object { [int]($_.BaseName.Split('_')[0]) }
-$auditArchiveMigrationId = '{0:D6}' -f (($migrationNumbers | Measure-Object -Maximum).Maximum + 1)
-$env:AUDIT_ARCHIVE_MIGRATION_ID = $auditArchiveMigrationId
-Write-Output $env:AUDIT_ARCHIVE_MIGRATION_ID
+git fetch --no-tags origin 'refs/heads/release/v0.1-launch:refs/remotes/origin/release/v0.1-launch'
+$approvedReleaseTip = git rev-parse origin/release/v0.1-launch
+$freshHead = git rev-parse HEAD
+if ($freshHead -ne $approvedReleaseTip) { throw 'STOP: AUD2 must start from the exact fetched release tip' }
+$baseMigrationPaths = git ls-tree -r --name-only $approvedReleaseTip -- db/migrations
+$baseMigrationNumbers = $baseMigrationPaths | ForEach-Object {
+  if ($_ -match '^db/migrations/(?<number>\d+)_.*\.up\.sql$') { [int]$Matches['number'] }
+}
+$approvedMigrationMax = [int](($baseMigrationNumbers | Measure-Object -Maximum).Maximum)
+$approvedMigrationNumber = '{0:D6}' -f ($approvedMigrationMax + 1)
+$env:AUDIT_ARCHIVE_MIGRATION_ID = $approvedMigrationNumber
+Write-Output "release_tip=$approvedReleaseTip migration_max=$approvedMigrationMax migration_number=$approvedMigrationNumber"
 ```
 
-Record the resulting concrete filename in the AUD2 Task Spec and PR before editing.
-Do not create the migration until Step 2's tests are red. Re-run the number calculation
-immediately before drafting；a changed max migration is STOP and requires a fresh base.
+Record the release-tip SHA, migration max, migration number and resulting concrete filename
+in the AUD2 Task Spec and PR before editing. Do not create the migration until Step 2's
+tests are red. Fetch and re-run this calculation immediately before drafting；any changed
+tip/max/number is STOP, invalidates the pending approval inputs and requires a fresh base.
 
 - [ ] **Step 2: Write migration contract tests first**
 
@@ -674,11 +687,30 @@ Expected: FAIL because schema/catalog/journal and their role contracts do not ex
 Draft the exact numbered up/down files, audit queries, and the catalog/receipt positive and
 negative `SET ROLE` contract-test sources. `archive_segment` contains only rows covered by
 checkpoint/recovery generation；the three receipt tables implement the pre-Put durable
-journal described above. Freeze the exact base SHA and pre-generation inputs without
-pretending that sqlc output already exists:
+journal described above. Freeze the exact base SHA, fetched release-tip SHA, base migration
+max, selected migration number and pre-generation inputs without pretending that sqlc output
+already exists:
 
 ```powershell
+$approvedReleaseTip = '<task-spec-release-tip-sha>'
+$approvedMigrationMax = [int]'<task-spec-migration-max>'
+$approvedMigrationNumber = '<task-spec-migration-number>'
 $approvedBase = git rev-parse HEAD
+git fetch --no-tags origin 'refs/heads/release/v0.1-launch:refs/remotes/origin/release/v0.1-launch'
+$currentReleaseTip = git rev-parse origin/release/v0.1-launch
+$currentBaseMigrationPaths = git ls-tree -r --name-only $currentReleaseTip -- db/migrations
+$currentBaseMigrationNumbers = $currentBaseMigrationPaths | ForEach-Object {
+  if ($_ -match '^db/migrations/(?<number>\d+)_.*\.up\.sql$') { [int]$Matches['number'] }
+}
+$currentMigrationMax = [int](($currentBaseMigrationNumbers | Measure-Object -Maximum).Maximum)
+$currentMigrationNumber = '{0:D6}' -f ($currentMigrationMax + 1)
+if ($approvedBase -ne $approvedReleaseTip -or
+    $currentReleaseTip -ne $approvedReleaseTip -or
+    $currentMigrationMax -ne $approvedMigrationMax -or
+    $currentMigrationNumber -ne $approvedMigrationNumber -or
+    $env:AUDIT_ARCHIVE_MIGRATION_ID -ne $approvedMigrationNumber) {
+  throw 'STOP: release tip or migration number changed; discard approval inputs and restart from a fresh base'
+}
 $migrationInputPaths = @(
   "db/migrations/$($env:AUDIT_ARCHIVE_MIGRATION_ID)_audit_archive_catalog.up.sql",
   "db/migrations/$($env:AUDIT_ARCHIVE_MIGRATION_ID)_audit_archive_catalog.down.sql",
@@ -690,13 +722,15 @@ $migrationInputManifest = $migrationInputPaths | Sort-Object | ForEach-Object {
   "$(git hash-object -- $_)  $_"
 }
 $migrationInputDigest = (($migrationInputManifest -join "`n") + "`n" | git hash-object --stdin)
-Write-Output "base=$approvedBase migration_input_digest=$migrationInputDigest"
+Write-Output "base=$approvedBase release_tip=$approvedReleaseTip migration_max=$approvedMigrationMax migration_number=$approvedMigrationNumber migration_input_digest=$migrationInputDigest"
 ```
 
-Record the manifest and digest in the approval record, then **STOP**. Do not apply the
-migration, run sqlc, edit provider/runtime code, or stage broad paths until the migration
-owner approves that exact base + input manifest/digest. Upstream migration, renumbering,
-or any input byte change invalidates this approval and requires a fresh base/digest.
+Record all four pinned governance facts plus the manifest/digest in the approval record,
+then **STOP**. Do not apply the migration, run sqlc, edit provider/runtime code, or stage
+broad paths until the migration owner approves that exact base + release tip + migration
+max/number + input manifest/digest. Upstream-tip movement, a changed migration max/number,
+renumbering or any input byte change invalidates this approval and requires a fresh base,
+fresh number/digest and new approval.
 
 Only after exact input approval, run the pinned generator and freeze its output separately:
 
@@ -720,6 +754,12 @@ review. The migration owner must approve the exact generated bytes before Step 4
 config, generated-byte, input-digest or base change invalidates the applicable approval.
 
 - [ ] **Step 4: Implement transactional contiguous Commit**
+
+Immediately before implementation, rerun the complete Step 9 governance block against the
+recorded approvals, including the explicit remote fetch, exact release-tip equality,
+migration max/number, input digest, pinned generator version and generated-artifact digest.
+Any mismatch invalidates approval: STOP, recompute the migration number on a fresh base and
+return to both approval gates. Do not begin Step 4 based on a merge-base-only check.
 
 `CatalogWriter.CommitCoveredSegment` takes a dedicated PostgreSQL advisory transaction lock, reads
 the latest committed range, requires `new.from=latest.to+1`, then inserts once.
@@ -761,8 +801,9 @@ filesystem fixture are added.
 
 - [ ] **Step 6: Pin and implement the approved S3-compatible adapter**
 
-Before adding the adapter, write the `TestS3*` protocol and mandatory live-qualification
-tests used by Step 7, set the require flag, and run the Step 7 command. Expected: FAIL
+Before adding the adapter, write the `TestS3*` protocol tests and name every mandatory
+live-qualification test `TestS3LiveQualification*`, set the require flag, and run the
+Step 7 command. Expected: FAIL
 because the approved adapter/ambiguous-success recovery path is not implemented；SKIP is
 also failure while the flag is `1`. Only after this RED evidence may implementation start.
 
@@ -795,7 +836,7 @@ credentials or payload.
 
 ```powershell
 $env:XM_REQUIRE_AUDIT_ARCHIVE_PROVIDER_QUALIFICATION = '1'
-go test ./internal/platform/audit/archive -run 'TestS3' -count=1 -v
+go test ./internal/platform/audit/archive -run '^TestS3' -count=1 -v
 Remove-Item Env:XM_REQUIRE_AUDIT_ARCHIVE_PROVIDER_QUALIFICATION
 ```
 
@@ -860,8 +901,21 @@ $migrationInputPaths = @(
 )
 $actualInputManifest = $migrationInputPaths | Sort-Object | ForEach-Object { "$(git hash-object -- $_)  $_" }
 $actualInputDigest = (($actualInputManifest -join "`n") + "`n" | git hash-object --stdin)
-$currentBase = git merge-base HEAD origin/release/v0.1-launch
-if ($currentBase -ne '<approved-base-sha>' -or $actualInputDigest -ne '<approved-migration-input-digest>') { throw 'STOP: base or migration input changed; approval invalid' }
+git fetch --no-tags origin 'refs/heads/release/v0.1-launch:refs/remotes/origin/release/v0.1-launch'
+$currentReleaseTip = git rev-parse origin/release/v0.1-launch
+$currentFeatureBase = git merge-base HEAD $currentReleaseTip
+$currentBaseMigrationPaths = git ls-tree -r --name-only $currentReleaseTip -- db/migrations
+$currentBaseMigrationNumbers = $currentBaseMigrationPaths | ForEach-Object { if ($_ -match '^db/migrations/(?<number>\d+)_.*\.up\.sql$') { [int]$Matches['number'] } }
+$currentMigrationMax = [int](($currentBaseMigrationNumbers | Measure-Object -Maximum).Maximum)
+$currentMigrationNumber = '{0:D6}' -f ($currentMigrationMax + 1)
+if ($currentReleaseTip -ne '<approved-release-tip-sha>' -or
+    $currentFeatureBase -ne '<approved-base-sha>' -or
+    $currentMigrationMax.ToString() -ne '<approved-migration-max>' -or
+    $currentMigrationNumber -ne '<approved-migration-number>' -or
+    $env:AUDIT_ARCHIVE_MIGRATION_ID -ne '<approved-migration-number>' -or
+    $actualInputDigest -ne '<approved-migration-input-digest>') {
+  throw 'STOP: release tip/base/migration number/input changed; approval invalid; recompute from a fresh base'
+}
 $actualSQLCVersion = go tool sqlc version
 if ($actualSQLCVersion -ne '<approved-sqlc-version>') { throw 'STOP: sqlc version changed; generated-artifact approval invalid' }
 git diff --exit-code -- sqlc.yaml
@@ -872,8 +926,10 @@ if ($actualGeneratedDigest -ne '<approved-generated-artifact-digest>') { throw '
 ```
 
 Expected: no executable destructive path; only catalog no-delete rule and
-negative test/prohibition text may match. Base, migration inputs and generated artifacts
-must equal their separately approved digests；a mismatch is STOP, not post-execution approval.
+negative test/prohibition text may match. The freshly fetched release tip, feature base,
+migration max/number, inputs and generated artifacts must equal their separately approved
+facts/digests；a mismatch is STOP and requires renumbering from a fresh base, not
+post-execution approval. `merge-base` alone is never sufficient release-tip freshness proof.
 
 - [ ] **Step 10: Commit AUD2**
 
@@ -1380,6 +1436,16 @@ func TestCoverageFieldsFollowCheckpointNotCatalogOrConfiguration(t *testing.T)
 func TestCoverageSeparatesChainIntegrityCaptureCompletenessAndV1Caveat(t *testing.T)
 func TestCoverageVerifiedAtOnlyUsesTrustedScrubHeadAndExactReceipt(t *testing.T)
 func TestCoverageNeverInfersVerifiedAtFromCatalogHeadOrAttemptTime(t *testing.T)
+func TestColdProjectionRejectsRestrictedKeys(t *testing.T)
+```
+
+The restricted-key test injects every field in this fixed deny-list and must fail before
+the cold projection allowlist/decoder is implemented:
+
+```text
+reason, approval_id, trace_id, source_ip,
+connector_request_summary, connector_response_summary,
+payload_object_key, manifest_object_key, kms_key_id
 ```
 
 Run:
@@ -1388,7 +1454,8 @@ Run:
 go test ./internal/platform/audit -count=1 -v
 ```
 
-Expected: FAIL on every listed Query and Coverage test before Query/cold reader exist.
+Expected: FAIL on every listed Query, Coverage and restricted-key test before Query/cold
+reader and its projection allowlist exist. Preserve this RED output before Step 2.
 
 - [ ] **Step 2: Implement cold projection verification and streaming**
 
@@ -1438,6 +1505,9 @@ substitutes for capture completeness.
 Before handler implementation, run both the HTTP tests and a literal parse of the spec's
 complete coverage example:
 
+Add `TestHTTPAuditCoverageNeverExposesObjectMetadata` here. It must inject cold projection
+object metadata and fail before the handler response allowlist exists.
+
 ```powershell
 go test ./internal/platform/httpapi -count=1 -v
 $specText = Get-Content docs/superpowers/specs/2026-08-28-audit-archive-design.md -Raw
@@ -1446,8 +1516,10 @@ if ([string]::IsNullOrWhiteSpace($coverageJSON)) { throw 'coverage JSON block no
 $null = $coverageJSON | ConvertFrom-Json -ErrorAction Stop
 ```
 
-Expected: HTTP tests FAIL before the response contract exists；the approved documentation
-example parses successfully. After minimal handler implementation, rerun and require PASS.
+Expected: HTTP tests, including `TestHTTPAuditCoverageNeverExposesObjectMetadata`, FAIL
+before the response contract/allowlist exists；the approved documentation example parses
+successfully. Preserve the HTTP RED output. After minimal handler implementation, rerun
+and require PASS.
 
 - [ ] **Step 5: Implement handler/router/config wiring**
 
@@ -1474,27 +1546,20 @@ pnpm --config.verify-deps-before-run=false --filter admin-web run test
 
 Expected: FAIL before API types/UI are changed; PASS after minimal coverage rendering.
 
-- [ ] **Step 7: Verify PII field exclusion mechanically**
+- [ ] **Step 7: Re-run the already-red-first PII exclusion tests mechanically**
 
-Backend and frontend contract tests must reject these cold projection keys:
-
-```text
-reason, approval_id, trace_id, source_ip,
-connector_request_summary, connector_response_summary,
-payload_object_key, manifest_object_key, kms_key_id
-```
-
-Add backend `TestColdProjectionRejectsRestrictedKeys` and
-`TestHTTPAuditCoverageNeverExposesObjectMetadata` plus the corresponding frontend case,
-then run before exclusion wiring:
+Do not add a duplicate post-implementation case here. Re-run the backend test introduced
+in Step 1 against its fixed deny-list, the HTTP test introduced in Step 4 and the frontend
+object-metadata case introduced in Step 6:
 
 ```powershell
 go test ./internal/platform/audit ./internal/platform/httpapi -count=1 -v
 pnpm --config.verify-deps-before-run=false --filter admin-web run test
 ```
 
-Expected: FAIL on the new restricted-key cases first；after the allowlist is implemented,
-rerun the same commands and require PASS.
+Expected: PASS because each case already produced preserved RED evidence before its
+corresponding implementation. The allowlist and response projection exclude every listed
+field; no newly defined test first appears in this post-implementation step.
 
 - [ ] **Step 8: Run AUD4 full gates and commit**
 
@@ -1813,7 +1878,7 @@ evidence matrix covering:
 | PLO not Action | distinct signed approval/result artifacts + bound Kill Switch + route/action registry search + runbook evidence |
 | R2-10/DB roles | merged refs + Reader/RootWriter/CatalogWriter/AccessRecorder positive/negative grants evidence |
 | restore/RPO/RTO | RecoveryIndex-source catalog rebuild + same-tx verify-before-commit + continuous scrub/lag alert drill |
-| migration governance | fresh number + exact base/input digest approval STOP + pinned sqlc generation + separate generated-artifact digest review STOP + no release down-migration |
+| migration governance | fetched exact release-tip SHA + base migration max/number + exact base/input digest approval STOP + pinned sqlc generation + separate generated-artifact digest review STOP + fresh-tip equality recheck + no release down-migration |
 | no physical slimming | explicit absence of deletion/detach/source-reclaim behavior |
 
 Any missing, stale, indirect or skipped evidence means the program remains incomplete.
