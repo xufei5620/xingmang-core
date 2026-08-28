@@ -192,6 +192,15 @@ describe("aggregateChannelMoney", () => {
     expect(aggregate.oldestObservedAt).toBeNull();
     expect(aggregateFreshness(aggregate, Date.parse("2026-08-28T04:00:00Z"))).toMatchObject({ state: "uninitialized" });
   });
+
+  it("chooses the true oldest UTC instant when valid RFC3339 offsets sort opposite lexically", () => {
+    const aggregate = aggregateChannelMoney([
+      channel({ observed: { costObservedAt: "2026-08-28T10:00:00+08:00", revenueObservedAt: "2026-08-28T10:00:00+08:00", updatedAt: "2026-08-28T10:00:00+08:00", source: "east-eight" } }),
+      channel({ id: "utc-three", observed: { costObservedAt: "2026-08-28T03:00:00Z", revenueObservedAt: "2026-08-28T03:00:00Z", updatedAt: "2026-08-28T03:00:00Z", source: "utc" } }),
+    ], "usageRevenue");
+    // +08:00 entry is 02:00Z, one hour older than the lexically smaller 03:00Z string.
+    expect(aggregate.oldestObservedAt).toBe("2026-08-28T10:00:00+08:00");
+  });
 });
 
 describe("Sub2ApiFinanceOverview", () => {

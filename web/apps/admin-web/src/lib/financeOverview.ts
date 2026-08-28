@@ -94,11 +94,16 @@ export function aggregateChannelMoney(
   const failureReasons = [moneyFailure, observationFailure].filter(
     (value): value is AggregationFailure => value !== null,
   );
-  const observations = rows.map((item) => item.observed.updatedAt).filter((value): value is string => Boolean(value)).sort();
+  const oldestObservation = rows.reduce<{ text: string; instant: number } | null>((oldest, row) => {
+    const text = row.observed.updatedAt;
+    if (!text) return oldest;
+    const instant = Date.parse(text);
+    return oldest === null || instant < oldest.instant ? { text, instant } : oldest;
+  }, null);
   const base = {
     contributingRows: rows.length,
     coverage,
-    oldestObservedAt: observationFailure ? null : observations[0] ?? null,
+    oldestObservedAt: observationFailure ? null : oldestObservation?.text ?? null,
     source,
     failureReasons,
   };
