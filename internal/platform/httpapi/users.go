@@ -58,6 +58,8 @@ type platformUserItem struct {
 	Balance        amountBody `json:"balance"`
 	PeriodRecharge amountBody `json:"period_recharge"`
 	PeriodConsumed amountBody `json:"period_consumed"`
+	// Last30dConsumed 是近 30 天消费(滚动窗口,**不随所选区间变**)。
+	Last30dConsumed amountBody `json:"last_30d_consumed"`
 	// LastActiveAt 为 null 表示从未活跃——与「很久以前活跃过」不是一回事。
 	LastActiveAt *string `json:"last_active_at"`
 	TokenPrefix  string  `json:"token_prefix"`
@@ -78,9 +80,61 @@ type platformUserPage struct {
 	TotalCount countBody `json:"total_count"`
 	// TotalBalance 是**全体**用户的余额合计（不只本页）。
 	TotalBalance amountBody `json:"total_balance"`
-	DataSource   string     `json:"data_source"`
+	// ActiveToday 的 value 为 null 表示上游没给「今日活跃」。
+	ActiveToday countBody `json:"active_today"`
+	// PeriodTotals 是区间合计，**带覆盖率**。
+	PeriodTotals totalsBody `json:"period_totals"`
+	// Period 回显服务端实际用的区间，前端据此显示「2026-08-27 · 按日查看」。
+	Period     periodBody `json:"period"`
+	DataSource string     `json:"data_source"`
 	// Freshness 与 /api/v1/metrics 同一个形状，前端复用同一个徽章组件。
 	Freshness freshnessBody `json:"freshness"`
+}
+
+// totalsBody 是区间合计的对外表示。
+//
+// **带 covered_users / total_users 而不是两个裸金额**：合计只能把上游给得出
+// 流水的那些用户加起来，而 v1 契约对一部分用户给不出。一个盖住这件事的合计
+// 会被读成全量——那正是宪法 12 条要防的「裸数字冒充完整数据」。
+// 两个数不等时，前端必须说出这个合计是**下界**。
+type totalsBody struct {
+	Recharge amountBody `json:"recharge"`
+	Consumed amountBody `json:"consumed"`
+	// CoveredUsers 是流水已知的用户数；TotalUsers 是符合筛选条件的用户数。
+	CoveredUsers int64 `json:"covered_users"`
+	TotalUsers   int64 `json:"total_users"`
+	// Complete 是 covered == total 的便捷判定，避免前端各自比一遍比错。
+	Complete bool `json:"complete"`
+}
+
+func toTotalsBody(t connusers.Totals) totalsBody {
+	return totalsBody{
+		Recharge:     toAmountBody(t.Recharge),
+		Consumed:     toAmountBody(t.Consumed),
+		CoveredUsers: t.CoveredUsers,
+		TotalUsers:   t.TotalUsers,
+		Complete:     t.Complete(),
+	}
+}
+
+// periodBody 回显服务端实际用的统计区间。
+//
+// From / To 是**闭区间**业务日：粒度是「周」时，人要能看见到底是哪七天。
+// 只回一个 granularity 的话，「本周」在跨月那几天最容易被理解错。
+type periodBody struct {
+	Day         string `json:"day"`
+	Granularity string `json:"granularity"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+}
+
+func toPeriodBody(p connusers.Period) periodBody {
+	return periodBody{
+		Day:         p.Day,
+		Granularity: string(p.Granularity),
+		From:        p.From,
+		To:          p.To,
+	}
 }
 
 // platformUsersStalenessThresholdSeconds：与请求详情同一条理由——
@@ -129,9 +183,14 @@ func ListPlatformUsersHandler(q PlatformUsersQuerier) http.HandlerFunc {
 			Query:    strings.TrimSpace(r.URL.Query().Get("q")),
 			Status:   strings.TrimSpace(r.URL.Query().Get("status")),
 			Sort:     strings.TrimSpace(r.URL.Query().Get("sort")),
-			Limit:    limit,
-			Cursor:   strings.TrimSpace(r.URL.Query().Get("cursor")),
+			// 统计区间：day 是锚点业务日，granularity 是日/周/月。
+			// 都不传 = 今天 · 按日（与原型默认态一致）。
+			Day:         strings.TrimSpace(r.URL.Query().Get("day")),
+			Granularity: strings.TrimSpace(r.URL.Query().Get("granularity")),
+			Limit:       limit,
+			Cursor:      strings.TrimSpace(r.URL.Query().Get("cursor")),
 		})
+
 		if err != nil {
 			WriteError(w, r, err)
 			return
@@ -145,6 +204,8 @@ func ListPlatformUsersHandler(q PlatformUsersQuerier) http.HandlerFunc {
 			Items:        items,
 			NextCursor:   page.NextCursor,
 			TotalBalance: toAmountBody(page.TotalBalance),
+			PeriodTotals: toTotalsBody(page.PeriodTotals),
+			Period:       toPeriodBody(page.Period),
 			DataSource:   page.Snapshot.Source,
 			Freshness:    usersFreshness(page.Snapshot, time.Now().UTC()),
 		}
@@ -152,20 +213,25 @@ func ListPlatformUsersHandler(q PlatformUsersQuerier) http.HandlerFunc {
 			v := page.TotalCount.Value
 			out.TotalCount = countBody{Value: &v}
 		}
+		if page.ActiveToday.Known {
+			v := page.ActiveToday.Value
+			out.ActiveToday = countBody{Value: &v}
+		}
 		WriteJSON(w, http.StatusOK, out)
 	}
 }
 
 func toPlatformUserItem(u connusers.User) platformUserItem {
 	item := platformUserItem{
-		ID:             u.ID,
-		Username:       u.Username,
-		EmailMasked:    u.EmailMasked,
-		Status:         string(u.Status),
-		Balance:        toAmountBody(u.Balance),
-		PeriodRecharge: toAmountBody(u.PeriodRecharge),
-		PeriodConsumed: toAmountBody(u.PeriodConsumed),
-		TokenPrefix:    u.TokenPrefix,
+		ID:              u.ID,
+		Username:        u.Username,
+		EmailMasked:     u.EmailMasked,
+		Status:          string(u.Status),
+		Balance:         toAmountBody(u.Balance),
+		PeriodRecharge:  toAmountBody(u.PeriodRecharge),
+		PeriodConsumed:  toAmountBody(u.PeriodConsumed),
+		Last30dConsumed: toAmountBody(u.Last30dConsumed),
+		TokenPrefix:     u.TokenPrefix,
 	}
 	if !u.LastActiveAt.IsZero() {
 		at := u.LastActiveAt.UTC()

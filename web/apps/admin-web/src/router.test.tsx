@@ -290,6 +290,7 @@ const usersBody = {
       balance: { minor_units: "1284500", currency: "CNY" },
       period_recharge: { minor_units: "120000", currency: "CNY" },
       period_consumed: { minor_units: "31200", currency: "CNY" },
+      last_30d_consumed: { minor_units: "812000", currency: "CNY" },
       last_active_at: "2026-08-28T09:00:00Z",
       token_prefix: "sk-a1b2",
     },
@@ -302,6 +303,7 @@ const usersBody = {
       balance: { minor_units: "0", currency: "CNY" },
       period_recharge: { minor_units: null, currency: "" },
       period_consumed: { minor_units: null, currency: "" },
+      last_30d_consumed: { minor_units: null, currency: "" },
       last_active_at: null,
       token_prefix: "",
     },
@@ -309,6 +311,16 @@ const usersBody = {
   next_cursor: "",
   total_count: { value: 2 },
   total_balance: { minor_units: "1284500", currency: "CNY" },
+  active_today: { value: 1 },
+  // 两条里只有一条给得出流水 → 合计是下界（XM-0053）
+  period_totals: {
+    recharge: { minor_units: "120000", currency: "CNY" },
+    consumed: { minor_units: "31200", currency: "CNY" },
+    covered_users: 1,
+    total_users: 2,
+    complete: false,
+  },
+  period: { day: "2026-08-28", granularity: "day", from: "2026-08-28", to: "2026-08-28" },
   data_source: "sub2api-fake",
   freshness: {
     state: "fresh",
@@ -1537,7 +1549,8 @@ describe("用户管理页签（交接文档 §9.3、原型 V[\"s2/users\"]）", 
     expect(await screen.findByText("张伟")).not.toBeNull();
     // 这一页的边界由**上游契约**决定，不是我们没做
     expect(screen.getByText(/仅提供用户总数与总余额/)).not.toBeNull();
-    expect(screen.getByText(/不是这些用户没有充值/)).not.toBeNull();
+    // fake 供出了逐用户流水（XM-0053），提示条必须说明它们不是真实上游数据
+    expect(screen.getByText(/样本数据源/)).not.toBeNull();
   });
 
   it("缺席的逐用户流水显示「—」，而已知的零余额显示 ¥0.00", async () => {
@@ -1563,15 +1576,31 @@ describe("用户管理页签（交接文档 §9.3、原型 V[\"s2/users\"]）", 
     expect(screen.getByText("从未活跃")).not.toBeNull();
   });
 
-  it("顶部两格未接入的显示「—」而不是 0", async () => {
-    // 显示 0 会被读成「这个区间没人充值」
+  it("区间合计覆盖不全时说明它是下界，而不是把下界当全量", async () => {
+    // XM-0053：这两格现在有真数了（fake 供出流水），但样本里有一条给不出——
+    // 一个只覆盖 1/2 的合计，和一个真的合计长得一模一样（宪法 12 条）
     renderRoute("/platforms/sub2api?tab=users");
     await screen.findByText("张伟");
     const recharge = (await screen.findByRole("heading", { name: "区间充值", level: 3 })).closest(
       "article",
     ) as HTMLElement;
-    expect(within(recharge).getByText("—")).not.toBeNull();
-    expect(within(recharge).getByText("未接入")).not.toBeNull();
+    expect(within(recharge).getByText("¥1,200.00")).not.toBeNull();
+    expect(within(recharge).getByText(/只覆盖 1\/2 位用户/)).not.toBeNull();
+    expect(within(recharge).getByText("合计不全")).not.toBeNull();
+  });
+
+  it("统计区间控件在场，日期 + 日/周/月（原型 periodControls）", async () => {
+    renderRoute("/platforms/sub2api?tab=users");
+    await screen.findByText("张伟");
+    expect(screen.getByLabelText("统计区间的日期")).not.toBeNull();
+    const group = screen.getByRole("group", { name: "统计粒度" });
+    expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "日",
+      "周",
+      "月",
+    ]);
+    // 区间描述来自服务端回显，不是本地拼的
+    expect(screen.getByText("2026-08-28 · 按日查看")).not.toBeNull();
   });
 
   it("总余额与新鲜度都在场", async () => {
