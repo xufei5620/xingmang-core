@@ -74,11 +74,14 @@ API 副本上共享一条严格、可解释的配额状态。
   `cmd/platform-api/database.go:24-80` 已要求非开发数据库密码经 CredentialRef。
 - `PROJECT-CONSTITUTION.md:8-35` 要求准确、可回滚、环境显式、CredentialRef、
   append-only 审计、生产可追溯、人类合并和禁止自动生产部署。
-- 数据库角色拆分设计位于独立未合入切片
-  `ai/codex/XM-C-DBR0-role-separation-spec@95ecac3`。它提出
-  `xm_migrator` owner、`xm_api_runtime`/`xm_worker_runtime` capability roles、
-  PUBLIC/default ACL verifier 与 disposable PG18 harness。它在合入前不是本分支权威；
-  RL2 只能把它当依赖，不能复制一套竞争的角色体系。
+- 数据库角色拆分设计位于独立未合入切片。当前复核证据是
+  `ai/codex/XM-C-DBR0-role-separation-spec@7019230`：它提出 `xm_migrator` owner、
+  `xm_api_runtime`/`xm_worker_runtime` capability roles、PUBLIC/default ACL verifier，
+  并把 harness 加固为**自行创建且独占完整 PG18 cluster、不接受外部 admin DSN、固定生产
+  role 名、验证 RepoDigest/labels/fresh fingerprint、按随机 Compose project 整体销毁**。
+  该 branch SHA 在合入前不是权威，也不能被写死成 RL2 依赖。RL2 必须从获批 CR/Task 读取
+  `DBR_APPROVED_MERGE_SHA`，证明它是当时目标 base 的 ancestor，且其 harness 契约至少覆盖
+  `7019230` 的上述不变量；然后直接复用已合入 DBR1 harness，禁止复制第二套角色/容器模型。
 
 ## 3. 三案裁决
 
@@ -110,11 +113,17 @@ Redis 加进 compose。
 
 ## 4. 桶键、隐私与 HMAC
 
-### 4.1 逻辑键 v2
+### 4.1 逻辑键 v2 与版本名
+
+`format_version` 与 HMAC `key_version` 是两个独立版本域：
+
+- canonical wire format 固定为 `format_version = 0x02`，简称 key format v2；
+- HMAC material 初始 `key_version = 1`，后续 version 只标识 secret material；
+- 二者禁止共用一个字段、日志名或配置名。
 
 逻辑键字段固定为：
 
-1. `key_version`（初始 `1`）；
+1. `key_version`（初始 `1`，canonical 中按 `u32be` 编码）；
 2. resolved `environment`；
 3. `principal.Type`；
 4. `principal.ID`；
@@ -128,10 +137,10 @@ Redis 加进 compose。
 `ENVIRONMENT` 相等。缺身份、类型非法或环境不一致是装配/身份不变量失败，返回 503，
 不能使用 `anonymous` 新桶继续处理。
 
-chi route template 取不到时使用固定哨兵：
+chi route template 取不到时，route 字段使用固定 ASCII 哨兵：
 
 ```text
-<METHOD> <unmatched-api-route>
+<unmatched-api-route>
 ```
 
 禁止回落到 `r.URL.Path`。固定哨兵可能把未知端点收紧到同一桶，但不会让攻击者通过
@@ -139,9 +148,44 @@ chi route template 取不到时使用固定哨兵：
 
 ### 4.2 无歧义 canonical bytes
 
-canonicalizer 使用版本字节 + 每段 `uint32 big-endian length` + UTF-8 bytes，拒绝空
-environment/type/id/method/route 和超出上限的段。不得再用 `:`、NUL 或字符串拼接
-充当协议。测试必须证明分隔符、Unicode 和长度前缀不能碰撞。
+canonical wire format 逐字冻结为：
+
+```text
+canonical = 0x02
+          || u32be(hmac_key_version)
+          || segment(environment)
+          || segment(principal_type)
+          || segment(principal_id)
+          || segment(upper_http_method)
+          || segment(route_template_or_sentinel)
+
+segment(s) = u32be(len(utf8(s))) || utf8(s)
+```
+
+`u32be` 是恰好 4 bytes 的无符号大端整数；字符串长度按 UTF-8 **bytes**，不是 rune/字符数。
+不做 Unicode normalization、case folding 或 trim；只有 HTTP method 在校验为 ASCII token 后转
+大写。environment 必须是 registry 精确值，principal type 必须是当前四个精确大写枚举。
+字节上限固定为 environment 64、type 32、principal ID 4096、method 32、route 4096，且
+canonical 总长不得超过 16 KiB；空值、越界、非法 UTF-8/HTTP token 一律 fail closed。
+不得再用 `:`、NUL 或字符串拼接充当协议。
+
+RL1 必须把下列 fixture 固定为跨实现 golden；测试 key 为 bytes `00..1f`，只可用于测试：
+
+```text
+format_version = 0x02
+key_version    = 1
+environment    = staging
+principal_type = HUMAN
+principal_id   = staff:alice
+method         = GET
+route          = /api/v1/audit/events
+
+canonical_hex = 02000000010000000773746167696e670000000548554d414e0000000b73746166663a616c69636500000003474554000000142f6170692f76312f61756469742f6576656e7473
+hmac_sha256    = 6057bcd531c2052132d1c105d3d145a53444843bbdbe1c975e073bb7e8933520
+```
+
+另有分隔符、NUL、Unicode、超长值与 unknown-route goldens，任何 canonical byte 改动都要新
+`format_version`，不得在 v2 下静默漂移。
 
 ### 4.3 数据库只见摘要
 
@@ -154,33 +198,39 @@ digest = HMAC-SHA256(secret key for key_version, canonical bytes)
 数据库只存 32-byte `bytea` digest。普通 SHA-256 不够：principal ID 往往低熵，拿到
 数据库备份即可离线枚举；HMAC key 不随库备份泄漏。
 
-建议 CredentialRef 形状：
+建议 primary/staged CredentialRef 形状：
 
 ```text
 secret://rate-limit-<environment>/bucket-hmac-v1
+secret://rate-limit-<environment>/bucket-hmac-v2
 ```
 
 仓库只存 ref，不存真实 key。ref 通过显式配置提供，不能由字符串拼接偷偷推导，也不能
-在缺失时使用默认 key。`key_version` 是 DB policy 与 API key material 的一致性闸；
-不匹配时 503 fail-closed。
+在缺失时使用默认 key。进程内 `Keyring` 最多容纳两个**版本互异**的 slot：必填 primary
+与可选 staged；slot 名不决定 active，DB policy 的 `key_version` 才是 active selector。
+policy 指向的 version 不在 keyring、存在重复 version/ref 或 slot 超过两个时，ready 失败且
+请求 503 fail-closed。
 
-v1 key material 的编码也固定：CredentialRef 解析结果必须是**无 padding 的严格
+每个 key material 的编码固定：CredentialRef 解析结果必须是**无 padding 的严格
 base64url**，解码后精确 32 bytes；其它长度、普通 base64、宽松忽略非法字符或空值均
 拒绝 ready。错误和日志只能说 `key_material_invalid`，不得回显值或可推断其内容的片段。
 
 ### 4.4 key 轮换边界
 
-RL0～RL4 初次上线只要求 v1。任何 HMAC key/version 轮换都是独立 CredentialRef STOP：
+RL0～RL4 初次上线只要求 v1。Keyring/ready 必须具备 staged slot 契约，但**任何实际
+HMAC key/version 轮换仍是独立 CredentialRef + policy Action/history + environment STOP**；
+RL2 的 insert-only bootstrap 不能执行轮换。未来获批轮换顺序固定为：
 
-1. 所有目标副本先具备 next ref，但 active policy 仍指向旧 version；
-2. readiness 证明 next material 可解析，日志不含值；
-3. 人类批准后原子提升 policy revision + key version；
-4. 旧副本的 consume 得到 `policy_mismatch` 并 503，不得继续写旧 namespace；
-5. 所有副本刷新并通过 ready 后再撤旧 key；
-6. 旧 bucket 只由 TTL job 清理。
+1. 经 `secrets.Audited` 在所有目标副本预装 `{v1,v2}` 两个 slot；DB policy 仍选 v1；
+2. 每个副本 ready 证明 active v1 可选、staged v2 可严格解析，且日志/审计不含值；
+3. 阻断该 environment 管理 API 入口，**fleet-wide quiesce**，排空全部副本；
+4. 已另批的 policy Action 在同一事务 append history 后提升 revision + key version；
+5. 全部副本以 DB policy 选择 v2 并 ready；任一旧副本/缺 v2 副本保持摘除和 503；
+6. inventory 证明全 fleet revision/version 一致后一次恢复流量，不做逐副本混合滚动；
+7. 观察窗后将 v2 变为唯一 primary 并撤 v1；旧 bucket 只由 TTL job 清理。
 
-本文不宣称这条流程已被现有 SecretProvider 支持；RL3 必须先用 staging 演练证明，未证明
-前不得在 production 轮换。
+本文不宣称 Action/history 或现有部署已支持这条轮换。它们完成并在 staging 演练前，
+production rotation 维持 NO-GO。
 
 ## 5. Policy 权威与配置过渡
 
@@ -190,7 +240,7 @@ RL0～RL4 初次上线只要求 v1。任何 HMAC key/version 轮换都是独立 
 
 | 字段 | 约束/语义 |
 |---|---|
-| `environment text` | PK；只接受 registry 已知 environment |
+| `environment text` | PK + FK `core.environment(id) ON DELETE RESTRICT` |
 | `policy_revision bigint` | 正数、单调递增；任何算法/配额/key 变化都递增 |
 | `algorithm_version text` | 初始精确值 `gcra-v1` |
 | `key_version integer` | 正数；与 API 解析的 HMAC material 一致 |
@@ -199,7 +249,8 @@ RL0～RL4 初次上线只要求 v1。任何 HMAC key/version 轮换都是独立 
 | `idle_ttl_seconds integer` | `>= max(60, 2 * full-refill-seconds)` |
 | `cleanup_interval_seconds integer` | `> 0` 且 `< idle_ttl_seconds` |
 | `updated_at timestamptz` | DB 时钟 |
-| `updated_by text` / `change_ref text` | lifecycle 审批/变更单引用；不含秘密 |
+| `updated_by text` / `change_ref text` | 各 1..256 bytes；lifecycle 审批/变更单引用；不含秘密 |
+| `applied_by_db_role text` | 函数从 `session_user` 取得，不接受调用方伪造 |
 
 不提供 `enabled=false`。需要放宽时修改正数 policy；需要紧急停用共享 backend 时走
 §14 的受控回滚，而不是让数据库里存在一个悄悄关闭保护的布尔值。
@@ -208,17 +259,22 @@ RL0～RL4 初次上线只要求 v1。任何 HMAC key/version 轮换都是独立 
 
 现有 `XM_RATE_LIMIT_PER_MINUTE/BURST` 在 memory backend 继续保持当前权威。在经过
 RL2 migration 与单独 lifecycle 审批后，由版本化 policy lifecycle 命令通过
-`apply_rate_limit_policy` 窄函数写入当前 environment 的首条 policy：
+`bootstrap_rate_limit_policy` 窄函数写入当前 environment 的**唯一首条** policy：
 
-- 初始写要求 `expected_revision=0`，policy 已存在时拒绝覆盖；
-- 后续 lifecycle 变更要求精确 expected revision 且 new revision=expected+1；
+- 只接受 `expected_revision=0, new_revision=1`，policy 已存在时拒绝覆盖；
 - 非法值拒绝；
-- 记录 revision、change ref、algorithm/key version；
+- 记录 revision、change ref、algorithm/key version 与不可伪造的 `session_user`；
 - API 的 `postgres`/`shadow` 模式绝不从环境变量覆盖已有 DB policy；
 - `postgres` 模式缺 policy 时拒绝 ready 并对请求 503。
 
-RL0/RL1 不创建该命令。后续可编辑 policy 必须另出 Action/审批设计；不能让 API 启动
-时自行写配置，也不能让 compose 每次启动重置数据库真值。
+bootstrap 前必须采集全 fleet 每个 memory 副本的 effective per-minute/burst；任一不一致
+即 STOP。写入后逐字段证明 DB revision 1 与已批准值等价，shadow/enforcement 前不得漂移。
+切入 postgres enforcement 后，从 API runtime compose/config 删除旧 quota 变量；它们不得以
+“仍可编辑但已忽略”的假权威残留。受控单副本 memory 回滚需从最后获批 policy 明确回填值。
+
+RL0/RL1 不创建该命令。revision 2+（配额、算法、TTL 或 key 的任一变化）必须另出
+Action + append-only policy history + 审批设计；RL2 bootstrap routine/CLI 不能更新现有行，
+API 启动也不能写配置，compose 启动不得重置数据库真值。
 
 ### 5.3 policy 变更的额度语义
 
@@ -239,6 +295,13 @@ bucket 主键包含 `policy_revision`。revision 变化创建新 namespace，旧
 interval_us  = ceil(60_000_000 / per_minute)
 tolerance_us = (burst - 1) * interval_us
 ```
+
+Go 与 SQL 使用同一数值域：`key_version/per_minute/burst/idle_ttl_seconds/
+cleanup_interval_seconds` 均为 `1..2147483647`（TTL/interval 另受下述关系约束），不得让
+Go `uint32` 接受 PostgreSQL `integer` 无法保存的值。revision 为正 `int64`。ceil division、
+`burst * 60`、tolerance、TAT 推进、epoch-us 转换和 Retry-After 全部先做 checked integer
+arithmetic；任何 overflow/underflow、非整秒 TTL 或数据库域外值返回 typed invalid-policy，
+绝不产生 allow。
 
 每次 consume 在一条数据库事务内只取一次 `clock_timestamp()`，转换为整数微秒
 `db_now_us`。读取旧桶后：
@@ -291,9 +354,23 @@ MinConns=0
 decision timeout=100ms
 ```
 
-目的是把热键/数据库抖动限制在最多四条连接，不能耗尽正常 Query pool。100ms 是每次
-decision 的 deadline，不是自动放行门槛；超时返回 503。RL3 shadow 数据若证明该值造成
-误伤，须走配置审查调整，不能在代码里无限等待。
+目的是把热键/数据库抖动限制在每副本最多四条连接，不能耗尽正常 Query pool。100ms 是
+从 pool acquire 开始，覆盖 acquire + function call + row decode 的端到端 decision deadline；
+实际 context deadline 取它与父请求剩余时间的较早者，不是自动放行门槛，超时返回 503。
+
+`4` 是单副本上限，不是 fleet 预算。RL3 前必须读取 DB `max_connections` 与每个 normal API
+pool、rate-limit pool、worker、migration/lifecycle、ops/backup 的实际上限，证明：
+
+```text
+declared_total = api_replicas * (normal_api_max + rate_limit_max)
+               + worker_max + lifecycle_peak + ops_backup_peak
+reserve        = max(10, ceil(max_connections * 20%))
+declared_total + reserve <= max_connections
+```
+
+未知/默认 pool 上限不能按零计算。副本数或任一 pool 上限变化都重跑该门；不满足时停止扩容，
+不得靠连接争抢和 100ms timeout 充当容量控制。RL3 shadow 数据若证明 deadline 造成误伤，须走
+配置审查调整，不能在代码里无限等待。
 
 ### 6.4 热点与容量
 
@@ -312,10 +389,11 @@ decision 的 deadline，不是自动放行门槛；超时返回 503。RL3 shadow
 ```text
 httpapi.rate_limit_policy
 httpapi.rate_limit_bucket
-httpapi.consume_rate_limit(...)
-httpapi.rate_limit_ready(...)
-httpapi.prune_rate_limit_buckets(batch_size)
-httpapi.apply_rate_limit_policy(expected_revision, new policy, change metadata)
+httpapi.consume_rate_limit(text, integer, bytea)
+httpapi.rate_limit_ready(text)
+httpapi.prune_rate_limit_buckets(text, integer)
+httpapi.bootstrap_rate_limit_policy(
+  text, bigint, bigint, text, integer, integer, integer, integer, integer, text, text)
 ```
 
 bucket 建议主键：
@@ -324,20 +402,22 @@ bucket 建议主键：
 (environment, policy_revision, key_version, key_digest)
 ```
 
-并检查 `octet_length(key_digest)=32`、TAT/last_seen 非负。为清理建立
-`(last_seen_us, environment)` 索引。表不保存 raw key、principal、route、IP 或请求内容。
+并检查 `octet_length(key_digest)=32`、TAT/last_seen 非负。为按 environment 清理建立
+`(environment, last_seen_us)` 索引。表不保存 raw key、principal、route、IP 或请求内容。
 
 ### 7.2 SECURITY DEFINER 是受控例外
 
-API 若无表级 DML，只能通过窄函数消费配额，因此三个函数使用由 `xm_migrator` 持有的
-`SECURITY DEFINER`，并同时满足：
+API/worker/lifecycle 若无表级 DML，只能通过窄函数完成获批能力，因此上述**四个 routine**
+均由 `xm_migrator` 持有并使用 `SECURITY DEFINER`，同时满足：
 
-- `SET search_path = pg_catalog, httpapi`，SQL 内仍完整限定对象；
+- `SET search_path = pg_catalog, httpapi, pg_temp`，把默认优先搜索的临时 schema 显式放在
+  最后；SQL 内仍完整限定对象；
 - 不接收 identifier、SQL fragment 或动态 SQL；
 - 严格校验 environment、key version、digest length、batch 上限；
 - `REVOKE ALL ... FROM PUBLIC`；
 - owner 不是 API/worker login 或 capability role；
-- verifier 检查 owner、prosecdef、proconfig、EXECUTE ACL 与 PUBLIC/default routine ACL；
+- verifier 精确检查 owner、`prosecdef=true`、`proconfig` 恰含上述 search_path、httpapi schema
+  仅 migrator 可 CREATE、EXECUTE ACL 与 PUBLIC/default routine ACL；
 - migration 在创建函数的同一事务内完成 revoke/grant，不能留默认 PUBLIC 窗口。
 
 这是 DBR0 一般“避免第二套业务写契约”的窄例外：bucket 是安全控制状态，不是业务
@@ -351,14 +431,14 @@ Action；函数只表达原子 GCRA/清理，不复制业务写实现。
 |---|---|---|
 | `xm_api_runtime` | schema USAGE；EXECUTE consume/ready | policy/bucket 直接 SELECT/INSERT/UPDATE/DELETE；prune；DDL |
 | `xm_worker_runtime` | schema USAGE；EXECUTE prune（必要时只读 ready） | consume；policy/bucket 直接 DML；DDL |
-| `xm_lifecycle_runtime` | EXECUTE apply-policy；必须带 expected/new revision、updated_by、change_ref | 表直接 DML；consume/prune；DDL |
+| `xm_lifecycle_runtime` | EXECUTE bootstrap-policy；只准 expected=0/new=1，带 updated_by/change_ref，DB 记录 session_user | 表直接 DML；更新已有 policy；consume/prune；DDL |
 | `xm_migrator` | owner、migration、函数定义与 ACL | runtime/lifecycle login 使用 |
 | `xm_ops_read` | 经另批只读诊断 view/函数；默认无桶明细 | digest 导出、DML |
 | `PUBLIC` | 无 | schema USAGE、table privileges、routine EXECUTE |
 
 新增对象必须进入 DBR policy/verifier；`ALTER DEFAULT PRIVILEGES FOR ROLE xm_migrator`
 继续撤销 PUBLIC routine EXECUTE/type USAGE。custom schema 不自动授 runtime；本 migration
-对三个函数做显式 grant。
+对四个 routine 逐签名做显式 grant。
 
 ### 7.4 DBR 硬依赖
 
@@ -394,9 +474,15 @@ type Decision struct {
     ObservedAt     time.Time
 }
 
+type ReadyState struct {
+    PolicyRevision  int64
+    Algorithm       string
+    ActiveKeyVersion uint32
+}
+
 type Store interface {
     Consume(ctx context.Context, key BucketKey) (Decision, error)
-    Ready(ctx context.Context, environment string, keyVersion uint32) error
+    Ready(ctx context.Context, environment string) (ReadyState, error)
 }
 ```
 
@@ -409,7 +495,8 @@ type Store interface {
 - `Canonicalizer`：resolved request identity → canonical bytes；
 - `Keyer`：CredentialRef 解析出的 secret + canonical bytes → HMAC digest；
 - `MemoryStore`：整数 GCRA 参考实现，只用于 RL1 parity、测试和受控单副本回滚；
-- `PostgresStore`：独立小 pool + consume/ready 函数；
+- `PostgresStore`：独立小 pool + consume/ready 函数；ready 读取 DB active version，装配层再从
+  最多两-slot keyring 选择对应 key，并原子发布本地 ready snapshot；
 - HTTP middleware：不理解 TAT/SQL，只处理 context、Store decision 和统一错误响应；
 - River cleanup worker：只调用 prune function，不读写 bucket table。
 
@@ -449,8 +536,9 @@ kind、request ID、route template、backend、policy revision（若可信）；
 
 - `/healthz` 保持进程存活语义，不查限流或数据库；
 - `/readyz` 组合现有 DB Ping 与 `RateLimitStore.Ready`；
-- postgres/shadow mode 的 Ready 至少证明：专用 pool 可达、policy 存在、algorithm/key
-  version 匹配、ready 函数可 EXECUTE、返回结构可解析；
+- postgres/shadow mode 的 Ready 至少证明：专用 pool 可达、policy 存在、algorithm 匹配、
+  DB active key version 可从最多两-slot keyring 精确选择、可选 staged material 也已严格解析、
+  ready 函数可 EXECUTE、返回结构可解析；
 - probes 仍在 `/api/v1` 外，因此不消费 bucket；
 - readiness 失败只让负载均衡摘副本，不触发进程因依赖抖动反复重启；
 - shadow 模式 ready 不得伪装成“共享限流已可 enforce”：响应/日志要暴露 mode。
@@ -469,19 +557,22 @@ kind、request ID、route template、backend、policy revision（若可信）；
 
 ## 10. TTL 与清理
 
-默认保持现有语义：idle TTL 15m、cleanup interval 10m。`prune_rate_limit_buckets`
-按 policy TTL 清理，并满足：
+默认保持现有语义：idle TTL 15m、cleanup interval 10m。
+`prune_rate_limit_buckets(environment, batch_size)` 按该 environment **当前 active policy**
+的 TTL 清理；旧 revision/key version 也明确使用当前 TTL，不再假装能读取已被替换的旧 TTL：
 
 - 每批最多 2000 行，参数有硬上限；
-- 以 `last_seen_us` 索引选取，`FOR UPDATE SKIP LOCKED`，短事务；
+- 以 `(environment,last_seen_us)` 索引选取，`FOR UPDATE SKIP LOCKED`，短事务；
 - deny 也更新 last_seen，持续攻击中的桶不会因 TTL 被删后重获 burst；
 - 旧 policy revision/key version 同样按 last_seen 清理；
-- River unique periodic job 每 10m 调用，重复执行幂等；
+- River args 必含 environment，并以 kind+args+queue+10m period 唯一；至少一次语义下重复执行幂等；
 - 失败让 River 重试并报警，不影响 consume 正确性；
 - backlog/oldest age 超阈值报警；不能用无界 `DELETE`；
 - `audit.audit_event`、审计锚、Action 历史与其它 append-only 表完全不在函数可见范围。
 
-worker 只获 prune EXECUTE，不获 bucket DELETE。这样清理权限不能扩散成通用表写权限。
+worker 只获 prune EXECUTE，不获 bucket DELETE。RL2 在至少 100k 跨 environment/revision fixture
+上运行 `EXPLAIN (ANALYZE, BUFFERS)`，证明目标索引与 batch-bounded scan，并并发证明 deny-touch
+活跃桶不被删除。
 
 ## 11. 配置与 CredentialRef
 
@@ -489,16 +580,16 @@ worker 只获 prune EXECUTE，不获 bucket DELETE。这样清理权限不能扩
 
 | 配置 | 默认/约束 | 权威 |
 |---|---|---|
-| `XM_RATE_LIMIT_BACKEND` | 基线 memory；production enforcement 批准后必须 postgres | 部署 |
-| `XM_RATE_LIMIT_HMAC_KEY_REF` | postgres/shadow 必填 CredentialRef | 部署 ref；值在 Provider |
-| `XM_RATE_LIMIT_KEY_VERSION` | 正整数，必须匹配 DB policy | 部署 + DB 一致性闸 |
+| `XM_RATE_LIMIT_BACKEND` | development 缺省 memory；staging/production 必须显式；enforcement 批准后 manifest 必须 postgres | 部署 |
+| `XM_RATE_LIMIT_HMAC_PRIMARY_KEY_REF/VERSION` | postgres/shadow 必填；version 为正 int32 | 部署 keyring slot |
+| `XM_RATE_LIMIT_HMAC_STAGED_KEY_REF/VERSION` | 成对可选；与 primary 版本/ref 不同 | 部署 keyring slot；最多第二把 |
 | `XM_RATE_LIMIT_DECISION_TIMEOUT` | 默认 100ms，必须正且小于 request timeout | 部署 |
 | `XM_RATE_LIMIT_POOL_MAX_CONNS` | 默认/上限均 4；调高需容量审批 | 部署 |
-| `XM_RATE_LIMIT_FAILURE_MODE` | production 只接受 `closed`；不提供 open | 部署 |
 | 现有 per-minute/burst | memory 权威；PG 仅 lifecycle bootstrap 输入 | DB policy 切换后不再由 API 读 |
 
-真实 secret、DSN 和 role password 均由人类配置。代码/文档/测试只使用明显的测试材料或
-CredentialRef 字符串。新增 ref scope/name 要单独登记 Provider；缺失/未知 ref 拒绝 ready。
+fail-closed 是代码与响应映射的不变量，不提供 failure-mode 变量。真实 secret、DSN 和 role
+password 均由人类配置。两个 slot 都经 `secrets.Audited`（显式 caller/purpose）解析；成功/
+失败只记录 bounded kind/ref metadata，不记录 value。新增 ref 要登记 Provider；缺失/未知拒绝 ready。
 
 ## 12. 可观测性与隐私
 
@@ -515,7 +606,9 @@ bounded `Observer`，以固定延迟 buckets/原子计数聚合，并每 60 秒�
 - `rate_limit_retry_after_seconds{route}`；
 - `rate_limit_pool_acquire_duration_seconds`；
 - `rate_limit_row_lock_wait_seconds`（能可靠采集时）；
-- `rate_limit_shadow_disagreement_total{memory_decision,postgres_decision,route}`；
+- `rate_limit_shadow_difference_total{memory_decision,postgres_decision,route}`；
+- `rate_limit_shadow_classified_total{class,route}`，class 仅
+  `algorithm_mismatch|expected_consolidation|unclassified`；
 - `rate_limit_clock_rollback_total`；
 - `rate_limit_cleanup_deleted_total`、`rate_limit_cleanup_backlog_rows`、
   `rate_limit_cleanup_oldest_seconds`。
@@ -531,6 +624,10 @@ raw path、query、request ID 或 error string 进入 label。
 - 测试查询证明 principal ID/route 文本不在表字节中；
 - ops 默认看聚合视图，不给 bucket 明细导出；
 - Handoff 不附 DSN、secret 值或可复用 credential。
+
+残余威胁必须进入 Handoff：同一 key version 的 digest 仍泄漏等值/活跃度关系；同时取得 DB
+备份与 HMAC key 可枚举低熵 ID；被攻陷的 API 可持 key 制造/消耗桶；route 聚合暴露流量
+形状。备份/key 分域、两-slot 限界和禁止 bucket 导出降低风险，但 HMAC 不是匿名化，也不防已控 API。
 
 ## 13. 验证矩阵
 
@@ -571,10 +668,15 @@ raw path、query、request ID 或 error string 进入 label。
 在单独批准的 staging 变更窗：
 
 - 明确启动两个 API 副本并证明二者 `application_name`、build、backend、policy revision；
-- shadow 比较 memory/PG decision，不以 PG 结果影响响应；
+- shadow 比较 memory/PG decision，不以 PG 结果影响响应。live difference 先记
+  `unclassified`，不得从单请求猜原因；单副本有序 parity lane 才可判
+  `algorithm_mismatch`，两副本聚合额度的受控 trace 才可判 `expected_consolidation`；
 - 并发、时钟偏移（两个 app clock 相反偏移）、热键/多键、DB restart、网络延迟、pool
   饱和、cleanup backlog；
-- 观察至少一个代表性 soak 窗口，收集 §16 阈值；
+- 先跑同负载 memory baseline 与 shadow 各 30m warm-up + 60m measurement；每段至少
+  100k decision、top route 各至少 10k，不足就延长但不降低样本门；再跑至少 24h ambient
+  soak。跨 fleet 汇总 60s Observer snapshot，连续 5 个 1m window 才称“持续”；CPU/IO/WAL
+  增幅使用同一 replay、同副本数的配对 baseline；
 - 进入 postgres enforcement 前证明没有 memory/postgres 混合副本；
 - 429、503、ready 摘除、恢复、单副本 memory 回滚均实测；
 - production 仍需独立批准，不能因 staging 通过自动部署。
@@ -592,17 +694,20 @@ raw path、query、request ID 或 error string 进入 label。
 7. staging 切 shadow，两副本 soak；
 8. 单独批准 staging postgres enforcement；
 9. 通过故障/回滚/恢复演练与阈值审查；
-10. 单独 production change 审批后才可逐副本发布。
+10. 单独 production change 审批后，先发布可理解 schema 的 binary；enforcement 激活仍走
+    fleet-wide quiesce，不以 rolling/canary 形成混合 backend。
 
-不得把 migration、secret、shadow、enforcement 合成一个不可回滚的大爆炸发布。
+不得把 migration、secret、shadow、enforcement 合成一个不可回滚的大爆炸发布。staging 与
+production 激活都必须：入口阻断 → 全副本 drain → 全 fleet 切换 → 逐副本离线 ready/inventory
+验证 → 确认零 memory/shadow serving 实例 → 一次恢复流量。不存在“首个 postgres 副本先回流”的 canary。
 
 ### 14.2 应用回滚
 
 优先回滚到仍理解现有 schema/policy 的前一版本，数据库对象保留。若必须回到 memory：
 
-1. 人类确认并把 API 缩为精确 1 个副本；
-2. 排空其它副本，证明无混合 backend；
-3. 将该副本切 memory 并验证 429/probes；
+1. 人类阻断入口并排空全 fleet；
+2. 把 API 缩为精确 1 个副本，证明无 serving/mixed backend；
+3. 从最后获批 DB policy 显式回填 memory quota，将该副本切 memory 并验证 429/probes；
 4. 保留 PG 表/函数和证据，不执行 live down migration；
 5. 记录事故、原因和恢复到 postgres 的新审批。
 
@@ -640,7 +745,11 @@ raw path、query、request ID 或 error string 进入 label。
 
 ## 16. Redis/Valkey 强制重评阈值
 
-RL3 shadow/soak 出现任一项，停止 PG enforcement 扩大并新建 ADR 比较 Redis 与 Valkey：
+阈值只用 §13.3 的配对 60m measurement 与 60s fleet snapshot 计算；“持续”固定为连续 5 个
+完整 1m window，比例分母为该 window 全 fleet decisions，DB 增幅相对同 workload baseline。
+样本/窗口缺失、`unclassified` 未闭合、任一 `algorithm_mismatch` 或连接预算不通过均直接
+BLOCKED，不得解释成未触发阈值。RL3 shadow/soak 出现任一项，停止 PG enforcement 扩大并
+新建 ADR 比较 Redis 与 Valkey：
 
 1. 限流 decision p95 持续 `>20ms` 或 p99 `>50ms`；
 2. timeout、pool acquire failure 或 row-lock wait 比例持续 `>0.1%`；

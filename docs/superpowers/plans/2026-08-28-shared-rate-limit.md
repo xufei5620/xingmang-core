@@ -26,23 +26,29 @@ verification, existing `SecretProvider`/`CredentialRef`.
 
 - Base design evidence is `release/v0.1-launch@543087f`; every new slice refetches and re-audits.
 - PostgreSQL runtime algorithm is exact `gcra-v1`; integer microseconds only, no float tokens.
-- Logical key is exact v2 tuple: key version, environment, principal type/id, HTTP method, chi route template.
+- Canonical format is exact `0x02 || u32be(key_version) ||` five length-prefixed UTF-8 segments;
+  format version and HMAC key version are separate domains and fixed golden bytes are normative.
 - Database receives only a 32-byte HMAC-SHA256 digest; no principal, raw path, query, IP, or secret.
 - PG mode policy is authoritative in `httpapi.rate_limit_policy`; env quota values are bootstrap-only.
 - `429 RATE_LIMITED` means a valid quota decision; all undecidable backend/policy/key failures are
   `503 RATE_LIMIT_BACKEND_UNAVAILABLE`, `Retry-After: 1`, and never call the handler.
-- Production failure mode is always closed. There is no off/auto/fail-open/degraded-local mode.
+- Failure mode is always closed in code. There is no failure-mode variable or off/auto/fail-open/degraded-local mode.
 - `/healthz` remains dependency-free; `/readyz` verifies the active rate-limit backend.
 - Dedicated API pool defaults and caps at 4 connections, min 0, 100ms decision deadline, and
   `application_name=platform-api-rate-limit`.
+- Before replica expansion, fleet connection maxima plus a `max(10,20%)` DB reserve must fit
+  `max_connections`; unknown pgx defaults are measured, never counted as zero.
 - Default quota remains 120/minute, burst 20, idle TTL 15m, cleanup interval 10m, batch 2000.
 - Denied requests update `last_seen`; cleanup must never reset an actively denied bucket.
 - Migration, DBR, CredentialRef, staging database, staging enforcement, and production are separate STOPs.
-- DBR1 verifier must cover schema/table/routine owner, SECURITY DEFINER search_path, PUBLIC/default ACLs,
+- DBR1 verifier must cover schema/table/routine owner, SECURITY DEFINER exact
+  `search_path=pg_catalog,httpapi,pg_temp`, httpapi CREATE denial, PUBLIC/default ACLs,
   API consume-only and worker prune-only permissions before any staging database use.
 - Existing migrations are immutable; live rollback is forward-fix/application rollback, never `down`.
 - RL0/RL1 may be proposed now; RL2-RL4 and all live enforcement remain NO-GO.
 - No task may read or print a real credential, use an external admin DSN, merge, or deploy production.
+- RL2 reads a human-approved `DBR_APPROVED_MERGE_SHA`, proves it is a target-base ancestor, and reuses
+  the hardened self-owned-cluster harness evidenced at DBR `7019230`; it creates no competing harness.
 
 ---
 
@@ -127,9 +133,15 @@ type Decision struct {
     ObservedAt     time.Time
 }
 
+type ReadyState struct {
+    PolicyRevision   int64
+    Algorithm        string
+    ActiveKeyVersion uint32
+}
+
 type Store interface {
     Consume(context.Context, BucketKey) (Decision, error)
-    Ready(context.Context, string, uint32) error
+    Ready(context.Context, string) (ReadyState, error)
 }
 ```
 
@@ -142,8 +154,9 @@ now_us       = max(observed_now_us, last_seen_us)
 allowed      = now_us >= tat_us - tolerance_us
 ```
 
-Use checked integer arithmetic and exact `Algorithm == "gcra-v1"`. Invalid policy/state returns a
-typed error, never an allow decision.
+Use checked integer arithmetic and exact `Algorithm == "gcra-v1"`. Although Go fields are `uint32`,
+validation caps every SQL-backed integer at `math.MaxInt32`, validates whole-second TTL/interval and all
+ceil/multiply/add conversions. Invalid/overflowing policy/state returns a typed error, never an allow decision.
 
 - [ ] **Step 4: Run GREEN and commit Task 1**
 
@@ -179,8 +192,8 @@ func TestHMACDigestDoesNotContainIdentity(t *testing.T)
 ```
 
 Cover colon, NUL, Unicode, empty fields, oversized fields, actual paths with different IDs, and two
-different 32-byte test keys. Assert the unknown route canonical value contains
-`GET <unmatched-api-route>` and never the actual URL path.
+different 32-byte test keys. Assert the unknown route field is exact `<unmatched-api-route>` and never
+contains the actual URL path.
 
 - [ ] **Step 2: Run RED**
 
@@ -201,10 +214,11 @@ type CanonicalIdentity struct {
 }
 ```
 
-Encode a protocol version byte followed by each field as `uint32 big-endian length + UTF-8 bytes`.
-Uppercase method, accept only validated principal types, and substitute only the fixed sentinel for
-an empty route template. `HMACDigest` accepts exactly 32 decoded key bytes for v1 and uses
-`hmac.New(sha256.New, key)`; it never formats the key/digest into an error.
+Implement the spec byte-for-byte: leading `0x02`, then four-byte `u32be(KeyVersion)`, then environment,
+principal type, principal ID, uppercase method and route as `u32be(UTF8 byte length)||UTF8 bytes`.
+Enforce the per-segment/16 KiB aggregate limits, no Unicode normalization, exact principal enums and
+ASCII method token. Pin the spec canonical hex and HMAC digest (`00..1f` test key) as golden vectors.
+`HMACDigest` accepts exactly 32 decoded key bytes and never formats key/digest into an error.
 
 - [ ] **Step 4: Run GREEN and commit Task 2**
 
@@ -326,11 +340,15 @@ The approval artifact must name:
 ```text
 schema: httpapi
 tables: rate_limit_policy, rate_limit_bucket
-routines: consume_rate_limit, rate_limit_ready, prune_rate_limit_buckets, apply_rate_limit_policy
+routines (exact input signatures):
+  consume_rate_limit(text, integer, bytea)
+  rate_limit_ready(text)
+  prune_rate_limit_buckets(text, integer)
+  bootstrap_rate_limit_policy(text, bigint, bigint, text, integer, integer, integer, integer, integer, text, text)
 owner: xm_migrator
 api grant: EXECUTE consume + ready only
 worker grant: EXECUTE prune only
-lifecycle grant: EXECUTE apply-policy only
+lifecycle grant: EXECUTE bootstrap-policy only (expected=0,new=1, insert-only)
 PUBLIC: no schema/table/routine privilege
 ```
 
@@ -365,7 +383,7 @@ The table contract is exact:
 CREATE SCHEMA httpapi AUTHORIZATION xm_migrator;
 
 CREATE TABLE httpapi.rate_limit_policy (
-  environment text PRIMARY KEY,
+  environment text PRIMARY KEY REFERENCES core.environment(id) ON DELETE RESTRICT,
   policy_revision bigint NOT NULL CHECK (policy_revision > 0),
   algorithm_version text NOT NULL CHECK (algorithm_version = 'gcra-v1'),
   key_version integer NOT NULL CHECK (key_version > 0),
@@ -378,8 +396,9 @@ CREATE TABLE httpapi.rate_limit_policy (
   cleanup_interval_seconds integer NOT NULL CHECK (
     cleanup_interval_seconds > 0 AND cleanup_interval_seconds < idle_ttl_seconds),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  updated_by text NOT NULL,
-  change_ref text NOT NULL
+  updated_by text NOT NULL CHECK (octet_length(updated_by) BETWEEN 1 AND 256),
+  change_ref text NOT NULL CHECK (octet_length(change_ref) BETWEEN 1 AND 256),
+  applied_by_db_role text NOT NULL
 );
 
 CREATE TABLE httpapi.rate_limit_bucket (
@@ -393,17 +412,20 @@ CREATE TABLE httpapi.rate_limit_bucket (
 );
 
 CREATE INDEX rate_limit_bucket_last_seen_idx
-  ON httpapi.rate_limit_bucket (last_seen_us, environment);
+  ON httpapi.rate_limit_bucket (environment, last_seen_us);
 ```
 
-Implement routines with schema-qualified SQL, one captured `clock_timestamp()`, checked integer math,
-atomic `ON CONFLICT`, deny-touch, bounded status, and no dynamic SQL. Each function is
-`SECURITY DEFINER SET search_path = pg_catalog, httpapi`; revoke PUBLIC before granting exact EXECUTE.
+Implement four routines with schema-qualified SQL, one captured `clock_timestamp()`, checked integer math,
+atomic `ON CONFLICT`, deny-touch, bounded status, and no dynamic SQL. Each routine is
+`SECURITY DEFINER SET search_path = pg_catalog, httpapi, pg_temp`; verifier also proves exact `proconfig`
+and that only migrator can CREATE in httpapi. Bootstrap derives `applied_by_db_role=session_user`, accepts
+only expected=0/new=1, and cannot update. Revoke PUBLIC before granting exact per-signature EXECUTE.
 
 - [ ] **Step 3: Add local-only down and immutable-migration checks**
 
-Down drops only the three functions, two tables, and `httpapi` schema in dependency order. It is never
-used as live rollback. Run governance against the current merge base:
+Down names and drops all four exact routine signatures, two tables, index and `httpapi` schema in dependency
+order. Disposable proof runs up→down→up and asserts the schema is empty after down and all ACLs return after
+the second up. It is never used as live rollback. Run governance against the current merge base:
 
 ```powershell
 $env:GOVERNANCE_BASE_REF='origin/release/v0.1-launch'
@@ -419,7 +441,7 @@ git add db/migrations contracts/database/role-policy.v1.json `
 git commit -m "feat(ratelimit): add atomic postgres policy and buckets"
 ```
 
-### Task 7: Implement PostgresStore and policy lifecycle command
+### Task 7: Implement PostgresStore and insert-only policy bootstrap command
 
 **Files:**
 - Create: `internal/platform/ratelimit/postgres.go`
@@ -430,7 +452,7 @@ git commit -m "feat(ratelimit): add atomic postgres policy and buckets"
 
 **Interfaces:**
 - Consumes: `*pgxpool.Pool`, `BucketKey`, approved DB functions.
-- Produces: `PostgresStore` implementing `Store`; optimistic-concurrency policy lifecycle command.
+- Produces: `PostgresStore` implementing `Store`; revision-1-only lifecycle bootstrap command.
 
 - [ ] **Step 1: Write failing status/error mapping tests**
 
@@ -456,12 +478,14 @@ row := pool.QueryRow(ctx,
 Never SELECT/update bucket directly. Validate non-negative, bounded values and exact status enum.
 Ready calls only `httpapi.rate_limit_ready`.
 
-- [ ] **Step 3: Implement policy apply as Platform Lifecycle Operation**
+- [ ] **Step 3: Implement revision-1 bootstrap as Platform Lifecycle Operation**
 
 The command accepts explicit environment, expected/new revision, per-minute, burst, TTL, interval,
-key version, change ref, and updater. Initial apply requires expected=0/new=1; later applies require
-new=expected+1. It calls only `httpapi.apply_rate_limit_policy`, exits nonzero on conflict, uses the
-DBR `xm_lifecycle_runtime` identity with a separately approved CredentialRef, and never runs from API startup.
+key version, change ref, and updater, but only accepts expected=0/new=1. It first proves every memory
+replica reports identical effective quota, calls only `httpapi.bootstrap_rate_limit_policy`, verifies the
+inserted row field-for-field plus DB-derived `session_user`, exits nonzero if any policy exists, uses the
+DBR lifecycle identity, and never runs from API startup. Revision 2+ needs a separate Action + append-only
+policy-history design and is not implemented in RL2.
 
 - [ ] **Step 4: Run focused tests and commit**
 
@@ -470,7 +494,7 @@ go fmt ./internal/platform/ratelimit ./cmd/rate-limit-policy
 go test -p 1 ./internal/platform/ratelimit ./cmd/rate-limit-policy -count=1
 git add internal/platform/ratelimit/postgres.go internal/platform/ratelimit/postgres_test.go `
   internal/platform/ratelimit/postgres_integration_test.go cmd/rate-limit-policy
-git commit -m "feat(ratelimit): add postgres store and policy lifecycle"
+git commit -m "feat(ratelimit): add postgres store and policy bootstrap"
 ```
 
 ### Task 8: Add bounded River cleanup
@@ -484,13 +508,13 @@ git commit -m "feat(ratelimit): add postgres store and policy lifecycle"
 - Modify/Test: `cmd/platform-worker/config_test.go`
 
 **Interfaces:**
-- Consumes: `prune_rate_limit_buckets(2000)` via worker role.
+- Consumes: `prune_rate_limit_buckets(environment, 2000)` via worker role.
 - Produces: unique 10-minute River periodic job and bounded cleanup metrics.
 
 - [ ] **Step 1: Write failing worker/permission behavior tests**
 
-Assert batch=2000, unique periodic registration, retry on function failure, denied-touch survival,
-concurrent `SKIP LOCKED`, and no SQL reference to `audit`/Action history.
+Assert environment arg, batch=2000, unique kind+args+queue+period registration, retry/at-least-once
+idempotency, denied-touch survival, concurrent `SKIP LOCKED`, and no audit/Action reference.
 
 - [ ] **Step 2: Implement the minimal job**
 
@@ -498,11 +522,12 @@ The worker executes only:
 
 ```sql
 select deleted_count, backlog_rows, oldest_seconds
-from httpapi.prune_rate_limit_buckets(2000)
+from httpapi.prune_rate_limit_buckets($1, 2000)
 ```
 
-No direct DELETE, no unbounded loop, no API goroutine. Expose cleanup interval only if policy/worker
-registration needs it; DB policy remains authoritative for TTL.
+No direct DELETE, no unbounded loop, no API goroutine. Current environment policy TTL explicitly applies
+to old revisions/key versions. A 100k-row disposable fixture plus `EXPLAIN (ANALYZE, BUFFERS)` proves the
+`(environment,last_seen_us)` index and batch-bounded scan. DB policy remains authoritative for TTL.
 
 - [ ] **Step 3: Run tests and commit**
 
@@ -517,7 +542,8 @@ git commit -m "feat(ratelimit): prune idle buckets with River"
 ### Task 9: Prove two-replica concurrency, faults, privacy, and real ACLs
 
 **Files:**
-- Create: `tests/security/shared-rate-limit.compose.yaml`
+- Extend/reuse after DBR merge: `tests/security/database-role-cluster.compose.yaml`
+- Extend/reuse after DBR merge: `scripts/test-database-roles.ps1`
 - Create: `scripts/test-shared-rate-limit.ps1`
 - Extend: `internal/platform/ratelimit/postgres_integration_test.go`
 - Extend: `internal/platform/jobs/rate_limit_cleanup_integration_test.go`
@@ -526,11 +552,13 @@ git commit -m "feat(ratelimit): prune idle buckets with River"
 - Consumes: locked PG18 digest, DBR1 disposable harness and approved migration.
 - Produces: machine-readable evidence with exact cleanup and no external DB access.
 
-- [ ] **Step 1: Build a self-owned disposable harness**
+- [ ] **Step 1: Reuse the approved self-owned disposable harness**
 
-The PowerShell script generates a random compose project/database suffix, refuses non-loopback or external
-DSNs, starts its own PG18 container, creates test-only roles, applies migrations, and always removes its
-exact containers/volume/roles in `finally`. It never accepts a staging/production DSN.
+Read `DBR_APPROVED_MERGE_SHA` from the approved CR/Task, prove it is an ancestor of the target base and its
+harness contains the hardening evidenced at `7019230`. Reuse that DBR1 harness: it accepts no external admin
+DSN, creates an exclusive random Compose project/container/network/volume/database from the exact PG18
+RepoDigest, uses fixed production role names/exact SQL, verifies labels/version/fresh fingerprint, and tears
+down the whole labeled project in `finally`. Do not create a second harness or random/test-only role namespace.
 
 - [ ] **Step 2: Run two independent pools as two API replicas**
 
@@ -567,7 +595,8 @@ go test -p 1 ./internal/platform/ratelimit ./internal/platform/jobs -run RateLim
 go vet ./...
 go test -p 1 ./...
 bash scripts/check-governance.sh
-git add tests/security/shared-rate-limit.compose.yaml scripts/test-shared-rate-limit.ps1 `
+git add tests/security/database-role-cluster.compose.yaml scripts/test-database-roles.ps1 `
+  scripts/test-shared-rate-limit.ps1 `
   internal/platform/ratelimit/postgres_integration_test.go `
   internal/platform/jobs/rate_limit_cleanup_integration_test.go
 git commit -m "test(ratelimit): prove shared postgres enforcement"
@@ -601,27 +630,34 @@ a real ref or alter `deploy/compose/launch.yaml` in RL2.
 
 - [ ] **Step 1: Write fail-closed config/key tests**
 
-Exact cases: missing/unknown backend, off/auto/open rejected, the RL4 production-wired binary accepting
-only postgres in `ENVIRONMENT=production`, shadow/postgres missing ref/key version rejected, HMAC material not strict unpadded base64url decoding
-to exactly 32 bytes rejected, timeout <=0 or >= request timeout rejected, max conns !=1..4 rejected, secret
-value absent from logs/errors.
+Exact cases: missing backend only defaults to memory in development; staging/production missing and every
+unknown/off/auto/open value reject; there is no failure-mode variable. Test a
+keyring of exactly one primary plus at most one staged slot: paired ref/version, positive int32, distinct
+version/ref, DB-selected active version present; strict unpadded base64url decoding to exactly 32 bytes;
+timeout <=0 or >= request timeout; max conns !=1..4; and secret value absent from logs/errors/audit.
 
 - [ ] **Step 2: Build a CredentialRef-backed key source**
 
-`XM_RATE_LIMIT_HMAC_KEY_REF` contains only `secret://...`; env Provider maps it to
-`XM_RATE_LIMIT_HMAC_KEY`. Resolve with purpose `platform-api rate-limit bucket HMAC`, decode strict
-base64url without padding to 32 bytes, construct Keyer, and never retain/refmt the raw string after init.
+Primary and optional staged ref contain only `secret://...`; explicitly mapped EnvProvider entries are wrapped
+in `secrets.Audited` with caller `api:platform` and purpose `platform-api rate-limit bucket HMAC`.
+Resolve/decode both slots at startup, retain only bounded `{version,[32]byte}`, and let DB policy select active.
+Never format material/digest in errors; tests prove success/failure audit contains only bounded kind/ref metadata.
+This only prepares the bounded keyring. Rotation itself remains blocked until a separate policy Action plus
+append-only history exists; its runbook must quiesce the full fleet, switch DB revision/version once, verify all
+replicas select the staged slot, restore ingress once, then withdraw the old slot after an observation window.
 
 - [ ] **Step 3: Build the dedicated pool**
 
 Clone/parse the already validated API DSN, set runtime `application_name`, MaxConns 4, MinConns 0, and
-use a 100ms per-consume context. Do not mutate or share the normal Query pool config. Startup/pool errors
-are bounded and secret-free.
+use a 100ms context covering acquire+function+decode, capped by the parent deadline. Do not mutate/share the
+normal pool config. Before two replicas, inventory all pool maxima and prove the spec fleet formula plus reserve
+against DB `max_connections`; unknown defaults STOP. Startup/pool errors are bounded and secret-free.
 
 - [ ] **Step 4: Make readiness composite without changing health**
 
 Add a minimal checker interface so `/readyz` runs DB Ping plus active backend `Ready`. In postgres/shadow,
-verify policy/algorithm/key/function/grant. Keep `/healthz` byte-compatible and probes outside `/api/v1`.
+verify policy/algorithm, DB-selected keyring slot, staged parse state, function/grant. Keep `/healthz`
+byte-compatible and probes outside `/api/v1`.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -669,12 +705,15 @@ read TAT, policy values, SQLSTATE strings, or fallback to memory after a Postgre
 
 - [ ] **Step 3: Add shadow comparison**
 
-Shadow evaluates both stores but MemoryStore alone determines response. PG errors/disagreements increment
-bounded metrics and make readiness unavailable; no principal/digest/raw path enters logs or labels.
+Shadow evaluates both stores but MemoryStore alone determines response. Live differences first increment
+`unclassified`; middleware must not infer cause from one request. Only the controlled one-replica ordered parity
+lane may emit `algorithm_mismatch`, and only the controlled two-replica aggregate trace may emit
+`expected_consolidation`. Any algorithm mismatch or unclosed unclassified difference blocks RL4.
 
 - [ ] **Step 4: Add exact bounded signals and cardinality tests**
 
-Cover decisions, duration, backend error kind, retry seconds, pool acquire, shadow disagreement,
+Cover decisions, duration, backend error kind, retry seconds, pool acquire, raw shadow difference and the
+three bounded classifications,
 clock rollback, cleanup. Base has no Prometheus/OpenTelemetry exporter: implement a fixed-bucket,
 atomic `Observer` snapshot and emit one `rate_limit_summary` structured log every 60 seconds. Dimension
 values are enum plus registered route template only; do not add a dependency or per-allow request log.
@@ -702,8 +741,10 @@ git commit -m "feat(ratelimit): enforce fail-closed HTTP decisions"
 - [ ] **Step 1: Write the runbook and exact topology diff, then STOP**
 
 The runbook contains preflight, DBR verifier, migration/bootstrap change ref, secret ref names only,
-two-API topology, current/target backend, per-instance build/application_name/policy evidence, ready checks,
-shadow metrics, enforcement gate, rollback to exact one memory replica, and recovery. It contains no real value.
+two-API topology, fleet connection budget, every replica's effective memory quota, DB revision-1 equality,
+per-instance build/application_name/policy/keyring evidence, removal of legacy quota env vars after postgres
+activation, ready checks, classified shadow metrics, fleet-wide quiesce gate, rollback to exact one memory
+replica with explicit quota, and recovery. It contains no real value.
 
 - [ ] **Step 2: Obtain four independent approvals**
 
@@ -717,9 +758,12 @@ the secret value or runs a production command.
 
 - [ ] **Step 4: Start two staging API replicas in shadow and soak**
 
-Collect: decision p50/p95/p99, timeout/lock/acquire %, DB CPU/IO/WAL deltas, sustained rps, hot-key isolation,
-cleanup backlog, shadow disagreements, app-clock skew, DB restart/latency, ready removal/recovery. Verify
-MemoryStore remains response authority and no replica reports postgres enforcement.
+Run paired memory baseline and shadow with identical replay/replica count: each 30m warm-up + 60m measurement,
+at least 100k decisions and 10k per top route; then at least 24h ambient soak. Aggregate 60s snapshots across
+the fleet; “sustained” means five consecutive complete 1m windows and ratios use fleet decisions as denominator.
+Collect p50/p95/p99, timeout/lock/acquire %, paired DB CPU/IO/WAL deltas, rps, hot/multi-key isolation,
+cleanup, classified differences, clock skew, DB restart/latency and ready recovery. Missing samples,
+algorithm mismatch, unclosed unclassified results or failed connection budget block RL4.
 
 - [ ] **Step 5: Evaluate Redis thresholds and commit artifacts**
 
@@ -732,7 +776,7 @@ runbook/config/topology changes and redacted evidence; open RL3 PR and STOP. Pro
 
 > **Current status: NO-GO.** Staging enforcement and production enforcement are two separate human STOPs.
 
-### Task 13: Switch staging to Postgres enforcement and prove rollback
+### Task 13: Quiesce staging fleet, switch to Postgres enforcement, and prove rollback
 
 - [ ] **Step 1: Review RL3 soak and assert no Redis threshold fired**
 
@@ -743,10 +787,11 @@ Every metric/decision comes from a bounded evidence artifact. Missing data is a 
 Approval names build digest, migration/policy revision, key version/ref name, DB roles, replica count,
 window, success metrics, abort thresholds, and rollback operator.
 
-- [ ] **Step 3: Prevent mixed backend before traffic**
+- [ ] **Step 3: Prevent mixed backend with fleet-wide quiesce**
 
-Drain each instance, set postgres, verify ready/backend/build/policy, and only then return it to service.
-The inventory must show zero memory/shadow instance before enforcement test begins.
+Block ingress, drain **all** API replicas, switch and validate every replica offline, then require one inventory
+showing the same build/backend/revision/key version and zero serving memory/shadow instance. Only after the
+full fleet passes is ingress restored once. No instance returns early; no rolling/canary activation.
 
 - [ ] **Step 4: Run staging behavior/fault/rollback suite**
 
@@ -770,10 +815,12 @@ versions, capacity headroom, monitoring, abort thresholds, rollback steps, opera
 
 Approvals are explicit and current. Codex does not handle real values, merge, SSH, or deploy.
 
-- [ ] **Step 3: Human operator performs canary/rolling cutover**
+- [ ] **Step 3: Human operator performs fleet-wide quiesced activation**
 
-At every instance boundary verify postgres backend, restricted current_user, expected application_name,
-ready, policy/key version, and no mixed memory enforcement. Any mismatch aborts and drains the instance.
+Binary/schema-compatible preparation may be rolling while enforcement stays unchanged. Activation blocks
+ingress and drains the full fleet, switches all replicas, verifies restricted current_user, application_name,
+ready, policy/key version and zero mixed backend, then restores ingress once. Any mismatch keeps ingress
+blocked and executes the approved all-fleet rollback; there is no enforcement canary.
 
 - [ ] **Step 4: Observe and close**
 
@@ -801,6 +848,30 @@ git status --short
 
 Each Handoff lists tests run/not run, exact base/head, schema/role/policy/key versions without secrets,
 rollback evidence, unverified external facts, approvals, risks, and next STOP. Human merge remains mandatory.
+
+## RL0 Round-1 Review Closure Matrix
+
+| ID | Review item | Document closure / future executable gate |
+|---|---|---|
+| C1 | SECURITY DEFINER search path | exact `pg_catalog,httpapi,pg_temp`; proconfig + schema CREATE verifier |
+| C2 | ambiguous canonical bytes | `0x02`, `u32be(key_version)`, byte limits and fixed hex/HMAC goldens |
+| C3 | impossible key rotation | bounded primary+staged keyring; DB-selected active; audited resolve; quiesced future Action/history rotation |
+| C4 | mixed-backend rolling cutover | fleet-wide ingress block/drain/switch/inventory/restore; no enforcement canary |
+| C5 | lifecycle bypass/history loss | RL2 bootstrap insert-only revision 1; revision 2+ Action + append-only history separately approved |
+| I1 | stale DBR/harness | dynamic approved merge SHA; reuse hardened `7019230` self-owned-cluster contract |
+| I2 | four routines vs three-function down | four exact signatures; disposable up→down→up and empty-schema assertion |
+| I3 | missing environment constraint | policy FK to `core.environment(id) ON DELETE RESTRICT` |
+| I4 | Go/SQL numeric drift | Go values capped to PG int32; checked ceil/multiply/add/epoch/retry math |
+| I5 | unaudited HMAC read | every slot resolved through `secrets.Audited` with bounded audit tests |
+| I6 | bootstrap parity / stale env authority | all-memory-fleet equality, DB field equality, remove legacy runtime quota vars after activation |
+| I7 | per-replica pool only | full-fleet connection equation and 20%/10-connection reserve gate |
+| I8 | non-decidable performance threshold | paired 60m windows, sample minima, 60s aggregation, five-window sustained definition |
+| I9 | shadow disagreement ambiguity | raw/unclassified separated from controlled algorithm mismatch and expected consolidation |
+| I10 | old-revision TTL/prune ambiguity | environment argument, current-policy TTL, environment-first index, 100k EXPLAIN/concurrency proof |
+| M1 | function count wording | all prose/grants use four routines and exact signatures |
+| M2 | unbounded/forgeable metadata | 1..256-byte updater/change ref; DB-derived `session_user` |
+| M3 | omitted HMAC residual threat | equality/enumeration/compromised-API/route-shape residuals explicit |
+| M4 | meaningless failure-mode variable | variable removed; fail-closed is non-configurable invariant |
 
 ## Approval Summary
 
