@@ -128,6 +128,75 @@ func TestAccountSetCreatesThenUpdates(t *testing.T) {
 	}
 }
 
+// TestAccountSetMetadataDistinguishesMissingFromExplicitEmpty protects the
+// backward-compatible v1 extension: an older client does not know the new
+// metadata/group_rate keys, so omitting them while updating another field must
+// preserve the existing values. Sending the key with an empty string is the
+// explicit clear operation and must still land as NULL/zero on readback.
+func TestAccountSetMetadataDistinguishesMissingFromExplicitEmpty(t *testing.T) {
+	store := actionStore(t)
+	ctx := humanCtx("production")
+	id := registerAccount(t, store, ctx, nil)
+	created, err := store.GetAccount(ctx, id)
+	if err != nil {
+		t.Fatalf("重读新建账号失败: %v", err)
+	}
+	if created.UpstreamName != "" || created.UpstreamContact != "" ||
+		created.UpstreamGroup != "" || !created.GroupRate.IsZero() {
+		t.Fatalf("创建时缺键必须落空值: %+v", created)
+	}
+
+	baseUpdate := map[string]any{
+		"upstream_account_id": id.String(),
+		"system_type":         string(SystemSub2API),
+		"access_method":       string(AccessUpstreamKey),
+		"credential_ref":      actionCredentialRef,
+		"base_url":            "https://action-updated.example.test",
+		"recharge_ratio":      "1.15",
+		"status":              string(StatusActive),
+	}
+	setUpdate := make(map[string]any, len(baseUpdate)+4)
+	for key, value := range baseUpdate {
+		setUpdate[key] = value
+	}
+	setUpdate["upstream_name"] = "Relay A"
+	setUpdate["upstream_contact"] = "运营群 @relay-a"
+	setUpdate["upstream_group"] = "gpt-main"
+	setUpdate["group_rate"] = "1.25"
+	if _, err := runAction(t, store, ctx, ActionAccountSet, setUpdate); err != nil {
+		t.Fatalf("设置新字段失败: %v", err)
+	}
+
+	out, err := runAction(t, store, ctx, ActionAccountSet, baseUpdate)
+	if err != nil {
+		t.Fatalf("旧客户端省略新字段的更新失败: %v", err)
+	}
+	preserved := out.(UpstreamAccount)
+	if preserved.UpstreamName != "Relay A" ||
+		preserved.UpstreamContact != "运营群 @relay-a" ||
+		preserved.UpstreamGroup != "gpt-main" || preserved.GroupRate.String() != "1.25" {
+		t.Fatalf("缺键更新必须保留新字段: %+v", preserved)
+	}
+
+	clearUpdate := make(map[string]any, len(baseUpdate)+4)
+	for key, value := range baseUpdate {
+		clearUpdate[key] = value
+	}
+	clearUpdate["upstream_name"] = ""
+	clearUpdate["upstream_contact"] = "  "
+	clearUpdate["upstream_group"] = ""
+	clearUpdate["group_rate"] = ""
+	out, err = runAction(t, store, ctx, ActionAccountSet, clearUpdate)
+	if err != nil {
+		t.Fatalf("显式清空新字段失败: %v", err)
+	}
+	cleared := out.(UpstreamAccount)
+	if cleared.UpstreamName != "" || cleared.UpstreamContact != "" ||
+		cleared.UpstreamGroup != "" || !cleared.GroupRate.IsZero() {
+		t.Fatalf("显式空串必须清空新字段: %+v", cleared)
+	}
+}
+
 // TestAccountSetRefusesAccessMethodChange 是 §2.0 的结构性保护。
 //
 // access_method 是成本口径的分叉点：改它会让同一个账号的历史成本前后用

@@ -318,6 +318,22 @@ func accountSetHandler(store *Store) action.Handler {
 				fmt.Sprintf("不允许修改 system_type（%s → %s）：连接器与取数口径都会变，"+
 					"请新登记一条并停用旧的", before.SystemType, systemType), nil)
 		}
+		// XM-C003 给 v1 增加了三个 metadata 字段，并补回原先未完整暴露的
+		// group_rate。旧客户端不知道这些键：**缺键 = 保留 before**；
+		// 新客户端显式传空串才是清除。只对这四个向后兼容字段做合并，
+		// recharge_ratio / base_url 等既有整行替换语义不变。
+		if _, present := params["upstream_name"]; !present {
+			desired.UpstreamName = before.UpstreamName
+		}
+		if _, present := params["upstream_contact"]; !present {
+			desired.UpstreamContact = before.UpstreamContact
+		}
+		if _, present := params["upstream_group"]; !present {
+			desired.UpstreamGroup = before.UpstreamGroup
+		}
+		if _, present := params["group_rate"]; !present {
+			desired.GroupRate = before.GroupRate
+		}
 
 		desired.ID = id
 		action.RecordResource(ctx, resourceUpstreamAccount, id.String())

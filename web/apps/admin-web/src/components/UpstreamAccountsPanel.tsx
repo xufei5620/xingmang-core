@@ -69,9 +69,12 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
   const summaries = new Map<string, UpstreamSummary>();
   for (const s of summaryQuery.data?.items ?? []) summaries.set(s.id, s);
   const mine = rows.map((a) => summaries.get(a.id));
-  const costTotal = sumMoney(mine.map((s) => s?.supplyCost ?? null));
-  const profitTotal = sumMoney(mine.map((s) => s?.grossProfit ?? null));
-  const covered = coveredCount(mine.map((s) => s?.supplyCost ?? null));
+  const costs = mine.map((s) => s?.supplyCost ?? null);
+  const profits = mine.map((s) => s?.grossProfit ?? null);
+  const costTotal = sumMoney(costs);
+  const profitTotal = sumMoney(profits);
+  const costCovered = coveredCount(costs);
+  const profitCovered = coveredCount(profits);
   const subscriptionCount = rows.filter((a) => a.access_method === "subscription_account").length;
   const keyCount = rows.reduce((total, account) => {
     if (account.access_method === "subscription_account") return total;
@@ -85,9 +88,19 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
     : summaryQuery.error
       ? "failed"
       : "ready";
-  // 观测时刻取窗口里最旧的那个：金额可以显示，但不能不说它是什么时候的
-  // （§9.1 数据新鲜度必须可见）
-  const observedAt = oldestObserved(mine);
+  // 两张卡各自只让**参与自己合计的行**提供证据。毛利依赖成本和收入两侧，
+  // 所以还要在参与毛利的行里取两侧实际时刻的最旧值。
+  const costObservedAt = oldestCostObserved(mine);
+  const profitObservedAt = oldestProfitObserved(mine);
+  const costObservationIncomplete = mine.some(
+    (summary) => Boolean(summary?.supplyCost) && !isValidTimestamp(summary?.observed.costObservedAt),
+  );
+  const profitObservationIncomplete = mine.some(
+    (summary) =>
+      Boolean(summary?.grossProfit) &&
+      (!isValidTimestamp(summary?.observed.costObservedAt) ||
+        !isValidTimestamp(summary?.observed.revenueObservedAt)),
+  );
 
   // 写完不做乐观更新，重新查一次：这一页是登记簿的 UI，页面上的数必须是库里的数。
   // 令牌映射内嵌在账号行里，所以改映射同样要刷这一个 key
@@ -151,18 +164,22 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
             <MoneyTile
               label="本期我方消耗"
               total={costTotal}
-              covered={covered}
+              covered={costCovered}
               rowCount={rows.length}
-              observedAt={observedAt}
+              observedAt={costObservedAt}
+              observationLabel="成本观测于"
+              observationIncomplete={costObservationIncomplete}
               pending={summaryQuery.isPending}
               failed={Boolean(summaryQuery.error)}
             />
             <MoneyTile
               label="本期整体毛利"
               total={profitTotal}
-              covered={covered}
+              covered={profitCovered}
               rowCount={rows.length}
-              observedAt={observedAt}
+              observedAt={profitObservedAt}
+              observationLabel="成本/收入最旧观测于"
+              observationIncomplete={profitObservationIncomplete}
               pending={summaryQuery.isPending}
               failed={Boolean(summaryQuery.error)}
             />
@@ -196,19 +213,41 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
   );
 }
 
-/** 窗口里最旧的观测时刻。
+/** 按真实 instant 取最旧时间，并保留原始 RFC3339 作为页面证据。
  *
- *  取**最旧**而不是最新：一格合计里只要有一条是三小时前的，这个数就只有
- *  三小时前那么新。取最新会让整格看起来比实际更可信（§9.1）。 */
-function oldestObserved(summaries: readonly (UpstreamSummary | undefined)[]): string | null {
-  let oldest: string | null = null;
-  for (const s of summaries) {
-    const at = s?.observed.costObservedAt;
-    if (!at) continue;
-    // RFC 3339 UTC 串按字典序比较就是按时间比较，不必解析成 Date
-    if (oldest === null || at < oldest) oldest = at;
+ *  不能直接比较字符串：`01:00-07:00` 实际比 `08:30+02:00` 更新，
+ *  但词典序恰好相反。解析不出的时间不替任何金额背书。 */
+function oldestActualTimestamp(timestamps: readonly (string | null)[]): string | null {
+  let oldest: { raw: string; instant: number } | null = null;
+  for (const raw of timestamps) {
+    if (!raw) continue;
+    const instant = Date.parse(raw);
+    if (!Number.isFinite(instant)) continue;
+    if (oldest === null || instant < oldest.instant) oldest = { raw, instant };
   }
-  return oldest;
+  return oldest?.raw ?? null;
+}
+
+function isValidTimestamp(raw: string | null | undefined): boolean {
+  return Boolean(raw) && Number.isFinite(Date.parse(raw ?? ""));
+}
+
+function oldestCostObserved(summaries: readonly (UpstreamSummary | undefined)[]): string | null {
+  const timestamps: (string | null)[] = [];
+  for (const s of summaries) {
+    if (s?.supplyCost) timestamps.push(s.observed.costObservedAt);
+  }
+  return oldestActualTimestamp(timestamps);
+}
+
+function oldestProfitObserved(summaries: readonly (UpstreamSummary | undefined)[]): string | null {
+  const timestamps: (string | null)[] = [];
+  for (const s of summaries) {
+    // 这一行没进毛利合计，就不能拿自己的时间替那笔部分和背书。
+    if (!s?.grossProfit) continue;
+    timestamps.push(s.observed.costObservedAt, s.observed.revenueObservedAt);
+  }
+  return oldestActualTimestamp(timestamps);
 }
 
 /** 一格金额合计。算得出来就显示，算不出来说清是哪一种「算不出来」。 */
@@ -218,6 +257,8 @@ function MoneyTile({
   covered,
   rowCount,
   observedAt,
+  observationLabel,
+  observationIncomplete,
   pending,
   failed,
 }: {
@@ -226,6 +267,8 @@ function MoneyTile({
   covered: number;
   rowCount: number;
   observedAt: string | null;
+  observationLabel: string;
+  observationIncomplete: boolean;
   pending: boolean;
   failed: boolean;
 }) {
@@ -258,11 +301,16 @@ function MoneyTile({
 
   const coverageNote =
     covered < rowCount ? `只含 ${rowCount} 个账号里有汇总的 ${covered} 个` : `含全部 ${rowCount} 个账号`;
+  const observationNote = observationIncomplete
+    ? ` · 观测不完整${observedAt ? `；已知最旧观测于 ${observedAt}` : ""}`
+    : observedAt
+      ? ` · ${observationLabel} ${observedAt}`
+      : "";
   return (
     <StatTile
       label={label}
       value={formatScaledMinorUnits(total.total.toString(), total.currency, total.scale)}
-      note={`${coverageNote}${observedAt ? ` · 成本观测于 ${observedAt}` : ""}`}
+      note={`${coverageNote}${observationNote}`}
       {...(covered < rowCount ? { status: <Badge tone="warning">覆盖不全</Badge> } : {})}
     />
   );
@@ -508,6 +556,7 @@ function BalanceRunwayCell({
 
   const runway = summary.runway;
   const reason = runwayReasonText(runway);
+  const coverage = `覆盖 ${runway.coveredDays}/${runway.windowDays} 天`;
   const observed = runway.balanceObservedAt
     ? `余额观测 ${formatUtcTimestamp(runway.balanceObservedAt)}`
     : "余额观测时间未接入";
@@ -515,6 +564,7 @@ function BalanceRunwayCell({
     return (
       <span className="text-xs text-fg-muted" title={runway.reason || "汇总未给出原因"}>
         {reason ?? "—"}
+        <span className="block">{coverage}</span>
         <span className="block">{observed}</span>
       </span>
     );
@@ -531,6 +581,7 @@ function BalanceRunwayCell({
       <span className="block text-fg-muted">
         {runway.days === null ? (reason ?? "可用天数未接入") : `约 ${runway.days} 天`}
       </span>
+      <span className="block text-fg-muted">{coverage}</span>
       <span className="block text-fg-muted">{observed}</span>
       {runway.days === null ? null : <Badge tone={tone}>{runway.level || "已计算"}</Badge>}
     </span>
