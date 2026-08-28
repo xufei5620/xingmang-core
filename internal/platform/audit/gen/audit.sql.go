@@ -369,33 +369,3 @@ func (q *Queries) LockAuditChain(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, lockAuditChain)
 	return err
 }
-
-const markChainRootExported = `-- name: MarkChainRootExported :one
-UPDATE audit.chain_root
-SET exported_at = $2, export_target = $3
-WHERE id = $1
-RETURNING id, computed_at, from_sequence, to_sequence, root_hash, signature, key_id, exported_at, export_target
-`
-
-type MarkChainRootExportedParams struct {
-	ID           uuid.UUID
-	ExportedAt   pgtype.Timestamptz
-	ExportTarget string
-}
-
-func (q *Queries) MarkChainRootExported(ctx context.Context, arg MarkChainRootExportedParams) (AuditChainRoot, error) {
-	row := q.db.QueryRow(ctx, markChainRootExported, arg.ID, arg.ExportedAt, arg.ExportTarget)
-	var i AuditChainRoot
-	err := row.Scan(
-		&i.ID,
-		&i.ComputedAt,
-		&i.FromSequence,
-		&i.ToSequence,
-		&i.RootHash,
-		&i.Signature,
-		&i.KeyID,
-		&i.ExportedAt,
-		&i.ExportTarget,
-	)
-	return i, err
-}

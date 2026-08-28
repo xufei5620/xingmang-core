@@ -25,9 +25,11 @@ Schema：`audit`。迁移：`db/migrations/000003_init_audit.up.sql`（forward-o
 | root_hash | 等于 `to_sequence` 那条的 `event_hash` |
 | signature | base64(Ed25519(签名载荷)) |
 | key_id | 签名密钥标识，支持轮换后追溯 |
-| exported_at / export_target | 导出到库外的时间与位置 |
+| exported_at / export_target | **legacy only**；forward-only schema 保留，AUD1 起不再写入、读取或作为信任/归档状态 |
 
-`chain_root` **不加** append-only 规则：需要回写 `exported_at`。
+`chain_root` 仍未改旧 schema/rule，但 AUD1 已退休 `MarkChainRootExported` 可执行路径。
+新的库外 leaf 是不含 embedded public key 与 legacy marker 的 `ChainRootRefV1`；是否已成为
+committed archive 将来只由验签 RecoveryIndex/Checkpoint 决定，不能从这两列推断。
 
 ## append-only 的实现与断言方式
 

@@ -57,11 +57,5 @@ INSERT INTO audit.chain_root (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
--- name: MarkChainRootExported :one
-UPDATE audit.chain_root
-SET exported_at = $2, export_target = $3
-WHERE id = $1
-RETURNING *;
-
 -- name: GetLatestChainRoot :one
 SELECT * FROM audit.chain_root ORDER BY to_sequence DESC LIMIT 1;

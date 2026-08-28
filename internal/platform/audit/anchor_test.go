@@ -6,9 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,67 +194,5 @@ func TestComputeAndSignRootRefusesEmptyChain(t *testing.T) {
 	signer, _ := audit.NewEd25519Signer("k1", testSeed(t))
 	if _, err := s.ComputeAndSignRoot(context.Background(), signer); err == nil {
 		t.Fatal("空链应拒绝签名")
-	}
-}
-
-func TestExportRootWritesVerifiableFileWithoutPrivateKey(t *testing.T) {
-	s := audit.NewStore(testPool(t))
-	ctx := context.Background()
-	if _, err := s.Append(ctx, evt("registry.service.create")); err != nil {
-		t.Fatal(err)
-	}
-	seed := testSeed(t)
-	signer, _ := audit.NewEd25519Signer("k1", seed)
-	root, err := s.ComputeAndSignRoot(ctx, signer)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dir := t.TempDir()
-	path, err := s.ExportRoot(ctx, root, dir, signer.Public())
-	if err != nil {
-		t.Fatalf("ExportRoot: %v", err)
-	}
-	if filepath.Dir(path) != dir {
-		t.Fatalf("导出路径不在指定目录: %s", path)
-	}
-
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(b)
-	// 导出文件绝不能含私钥材料
-	if strings.Contains(content, hex.EncodeToString(seed)) ||
-		strings.Contains(content, base64.StdEncoding.EncodeToString(seed)) {
-		t.Fatal("导出文件泄漏了签名私钥种子")
-	}
-
-	var got map[string]any
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("导出文件不是合法 JSON: %v", err)
-	}
-	for _, k := range []string{"root_hash", "signature", "key_id", "public_key", "signed_payload"} {
-		if got[k] == nil || got[k] == "" {
-			t.Fatalf("导出文件缺字段 %q: %v", k, got)
-		}
-	}
-	// 用文件里的公钥能独立验签——这才叫「可离线核验的锚点」
-	pubB64, _ := got["public_key"].(string)
-	pub, err := base64.StdEncoding.DecodeString(pubB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := audit.VerifyRoot(root, ed25519.PublicKey(pub)); err != nil {
-		t.Fatalf("用导出文件中的公钥应能验通: %v", err)
-	}
-
-	// 导出位置应回写库中
-	latest, err := s.LatestRoot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if latest.ExportedAt == nil || latest.ExportTarget != path {
-		t.Fatalf("导出位置未回写: %+v", latest)
 	}
 }

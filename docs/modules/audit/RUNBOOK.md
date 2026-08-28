@@ -10,16 +10,40 @@ go run ./cmd/audit-verify -database "$XM_DATABASE_URL"
 
 只校验某段：`-from 100 -to 200`。
 
+## AUD1 本地归档格式核验
+
+AUD1 只允许本地/离线格式演练，不是对象存储、备份、恢复或 production 归档：
+
+```bash
+go run ./cmd/audit-archive plan --from 1 --to 108
+go run ./cmd/audit-archive export-local --to 108 --root-id '<trusted-root-uuid>'
+go run ./cmd/audit-archive verify-local --manifest '<path-below-approved-local-root>'
+```
+
+运行配置通过环境和 CredentialRef/SecretProvider 注入；不要把 DSN、seed、私钥或 payload
+写进命令行、日志或证据。`export-local` 拒绝 production、拒绝 `--from`，并要求现有可信
+Chain Root 精确覆盖导出终点。`verify-local` 从 terminal manifest 的 exact previous key/hash
+逆向走到唯一 Genesis，不扫描目录、不猜 latest。
+
+本地 `LOCAL-ONLY/NONE` descriptor 只说明它是开发 fixture；它不满足 versioning、
+SSE-KMS、Object Lock、异故障域或 provider qualification，绝不能作为 AUD2/生产证据。
+
+## 旧流程的信任变更
+
+历史导出 JSON 即使带 `public_key`，该字段也只是 untrusted hint，不能自证。验证必须从独立
+trusted keyring 取得 `chain_root_signing` / `audit-chain-root/v1` 公钥并核对 fingerprint 与
+有效期。AUD1 起不再回写或读取 `export_target/exported_at`，它们不能表示“已归档”。
+
 ## 恢复演练（规格 §4.4 要求）
 
 1. 从备份恢复数据库到演练环境；
 2. 跑 `audit-verify` 全链校验——**必须 exit 0**；
-3. 取最近一次导出的链根 JSON，用其中的 `public_key` 独立验签；
+3. 取最近一次库外 `ChainRootRefV1`，用独立 trusted keyring 的精确 purpose/protocol 公钥验签；
 4. 核对链根的 `root_hash` 与恢复后链尖的 `event_hash` 是否一致；
 5. 把演练结果记入 `docs/evidence/`。
 
-第 3 步用导出文件而非数据库里的记录——如果连根都从同一个库里取，
-那这次演练证明不了任何事。
+第 3 步的 leaf 与 keyring 必须都位于原 PostgreSQL 之外，且 keyring 不能来自 leaf 或
+archive bucket；artifact 自带 key 的自认证不证明任何事。
 
 ## 发现断链时
 
