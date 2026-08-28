@@ -172,13 +172,14 @@ GetUser 的规则：
 - 原生精确端点优先；
 - 若只能扫描列表，必须完整耗尽才能返回 ErrNotFound；
 - 达到请求/页数/游标循环上限返回 ErrLookupIncomplete；
-- ErrNotFound 冻结映射为 Action CodeNotRegistered、HTTP 404、JSON error.code
-  NOT_REGISTERED；
+- ErrNotFound 冻结复用现行稳定映射：Action CodeNotRegistered、HTTP 404、JSON
+  error.code ACTION_NOT_REGISTERED；不新增用户域专用 code，不修改全局 HTTP mapper；
 - ErrLookupIncomplete 冻结映射为 Action CodeExecutionFailed、HTTP 502、JSON
   error.code EXECUTION_FAILED，安全消息固定为“用户精确查找未完成，请重试”；
   前端按 5xx 显示可重试错误，绝不能映射成 404；
 - context.Canceled / DeadlineExceeded 必须原样传播到调用链，不能转换成 Not Found；
-- 不认识的平台或无 detail capability 返回 NOT_REGISTERED/501，不返回空用户；
+- 不认识的平台复用 ACTION_NOT_REGISTERED/404；认识平台但无 detail capability
+  返回 ADVANCED_CONTROLS_REQUIRED/501；两者都不返回空用户；
 - 不把 CustomerType 放进最小结构。Sub2API/NewAPI 对“客户类型”的语义尚未冻结，
   在真实样本与产品定义到位前继续 unavailable。
 
@@ -442,7 +443,7 @@ payment/recharge 与 invoice 是独立领域，另立后续规格与计划；它
 
 - TS/Go codec 对同一 golden 全量往返和拒绝；
 - GetUser exact/fuzzy 冲突、第二页命中、分页完整耗尽、页上限仍有 cursor、
-  cursor 循环、context cancel/deadline；并逐字断言 404/NOT_REGISTERED 与
+  cursor 循环、context cancel/deadline；并逐字断言 404/ACTION_NOT_REGISTERED 与
   502/EXECUTION_FAILED 映射；
 - 同邮箱/username/prefix 跨平台绝不关联；
 - UserRef 在过滤、cursor、统计前生效；

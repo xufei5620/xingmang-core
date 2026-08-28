@@ -310,7 +310,7 @@ release；仅需 CORE_APPROVAL，不等待任何 real 样本。
 - Modify: connectors/platformusers/fake.go
 
 **Interfaces:**
-- Consumes: Task 1 UserRef/GetUserQuery/UserDetail/UserDetailReader 与 capability constants。
+- Consumes: Task 1 UserRef/GetUserQuery/UserDetail/UserDetailReader。
 - Produces: FakeClient.GetUser、CapabilityUserDetailRead、source-specific
 Fake V2Capabilities、共享 RunV2 contract suite。detail capability 与 Fake
 UserDetailReader 在本 PR 同时出现。
@@ -388,7 +388,7 @@ Expected: PASS。
 - [ ] **Step 6: 提交 Task 2**
 
 ~~~bash
-git add connectors/platformusers/fake_v2.go connectors/platformusers/contracttest/v2_suite.go connectors/platformusers/contract_v2_test.go connectors/platformusers/fake.go
+git add connectors/platformusers/fake_v2.go connectors/platformusers/contracttest/v2_suite.go connectors/platformusers/contract_v2_test.go connectors/platformusers/contract_v2.go connectors/platformusers/fake.go
 git commit -m "test(platformusers): add executable v2 fake contract"
 ~~~
 
@@ -471,7 +471,7 @@ func TestGetUserErrorMappingIsFrozen(t *testing.T) {
         code     string
         retryable bool
     }{
-        {platformusers.ErrNotFound, http.StatusNotFound, "NOT_REGISTERED", false},
+        {platformusers.ErrNotFound, http.StatusNotFound, "ACTION_NOT_REGISTERED", false},
         {platformusers.ErrLookupIncomplete, http.StatusBadGateway, "EXECUTION_FAILED", true},
     }
     for _, tc := range cases {
@@ -527,8 +527,9 @@ case errors.Is(err, connusers.ErrLookupIncomplete):
         action.CodeExecutionFailed, "用户精确查找未完成，请重试", err)
 ~~~
 
-由现有 HTTP error mapper 得到 NOT_REGISTERED/HTTP 404 与
-EXECUTION_FAILED/HTTP 502；
+由现有 HTTP error mapper 得到 ACTION_NOT_REGISTERED/HTTP 404 与
+EXECUTION_FAILED/HTTP 502；Task 3 复用稳定 action.CodeNotRegistered，
+不新增用户域 error code，也不修改全局 mapper；
 context.Canceled/DeadlineExceeded 原样传播，不得进入上述两支。
 
 - [ ] **Step 5: 写前端 RED，证明只调用精确 endpoint**
