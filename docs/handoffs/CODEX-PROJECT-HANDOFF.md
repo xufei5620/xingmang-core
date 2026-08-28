@@ -58,6 +58,15 @@ XM-C001 支付与财务·资金概览 → C002 请求详情页 → C003 上游�
 (等 /root/reqlog 源码核对契约 DRAFT);sub2api 余额解析(等 /admin/accounts
 真实响应样本);newapi 余额(等上游开 CHANNEL_UPDATE_FREQUENCY)。
 
+**新增(2026-08-28 追加)**:
+- **开票线 CR-0003**(`docs/change-requests/CR-0003-invoice-platform-scoped-users.md`):
+  开票系统用户按平台隔离(K:/发票 仓库,已批准的产品需求,可与 A 期并行做);
+- **F. 第二轮需求四期闸门**(处置表 `docs/requirements/ROUND2-INTAKE-2026-08-28.md`):
+  P0 闸门期(R2-10/13/14/15,任何自动写/插件/高频采集的前置)→ P1-A 可信运营
+  (R2-05/06/08/16/17)→ P1-B 经营集成(R2-01/02/03/07/11/12)→ P2 体验
+  (R2-04 依赖 F-B/R2-09)。排在 E 期各里程碑启动前逐条消化,10 条否决信号
+  永久有效不得复活。
+
 **E. 里程碑级(每个先出设计稿走审批)**:Foundation-B 写操作体系(审批中心
 XM-0030 设计稿在 docs/superpowers/plans/,**待产品负责人拍板后才可实施**)|
 M1.5 渠道保障(NewAPI 逐渠道健康解析器已保留在渠道代码注释处)| M2 服务器
