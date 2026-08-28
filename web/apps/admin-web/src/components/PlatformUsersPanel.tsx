@@ -9,10 +9,11 @@ import {
   type DataTableColumn,
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import {
   describeMaskedEmail,
   describeUserStatus,
+  encodePlatformUserIdSegment,
   listPlatformUsers,
   type AmountBody,
   type CountBody,
@@ -134,25 +135,32 @@ const COLUMN_LAST_ACTIVE: DataTableColumn<PlatformUserItem> = {
     ),
 };
 
-/** 行尾的详情箭头（原型 `chevtd`）。
+/** 行尾的详情深链（原型 `chevtd`）。
  *
- *  **它不可点，而且必须看得出不可点。** 用户详情页（消费、充值、开票、
- *  API Key 明细）还没做；画一个能点的箭头是一句会落空的承诺，点下去要么
- *  没反应、要么进一个空页面，两种都比没有箭头更糟。
- *
- *  这一列没有 `value`，于是它既不可排序也不进搜索——DataTableV2 里
- *  「没有 value」正是这个意思。 */
-const COLUMN_DETAIL_CHEVRON: DataTableColumn<PlatformUserItem> = {
-  id: "detail",
-  header: "",
-  headerTitle: "用户详情页待上线",
-  cell: () => (
-    <span className="text-fg-muted" title="用户详情页待上线">
-      <span aria-hidden="true">›</span>
-      <span className="sr-only">详情页待上线</span>
-    </span>
-  ),
-};
+ *  只让箭头这一格成为语义 Link，不给 `tr` 加 onClick：键盘与读屏会遇到一个
+ *  有明确名称的导航目标，复制链接也得到可分享的完整详情地址。用户 ID 始终按
+ *  不透明字符串编码成**一个** URL 段，斜杠与查询符号不能改变路由结构。 */
+function detailColumn(platform: string): DataTableColumn<PlatformUserItem> {
+  return {
+    id: "detail",
+    header: "",
+    headerTitle: "打开用户详情",
+    cell: (user) => {
+      const label = user.username || user.id;
+      const to = `/platforms/${encodeURIComponent(platform)}/users/${encodePlatformUserIdSegment(user.id)}`;
+      return (
+        <Link
+          to={to}
+          aria-label={`查看 ${label} 的用户详情`}
+          title="打开完整用户详情页"
+          className="inline-flex size-9 items-center justify-center rounded-md text-lg text-accent hover:bg-accent-soft focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          <span aria-hidden="true">›</span>
+        </Link>
+      );
+    },
+  };
+}
 
 /** 每个平台照自己的原型来。
  *
@@ -217,7 +225,6 @@ const SUB2API_VIEW: PlatformUsersView = {
     COLUMN_LAST_30D,
     COLUMN_STATUS,
     COLUMN_LAST_ACTIVE,
-    COLUMN_DETAIL_CHEVRON,
   ],
   tiles: (page) => (
     <>
@@ -254,7 +261,6 @@ const NEWAPI_VIEW: PlatformUsersView = {
     COLUMN_LAST_30D,
     COLUMN_STATUS,
     COLUMN_LAST_ACTIVE,
-    COLUMN_DETAIL_CHEVRON,
   ],
   tiles: (page) => (
     <>
@@ -392,7 +398,7 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
 
             <DataTableV2
               caption="终端用户：余额、区间充值与消费、状态与最后活跃"
-              columns={view.columns}
+              columns={[...view.columns, detailColumn(platform)]}
               rows={page.items}
               rowKey={(u) => u.id}
               searchable

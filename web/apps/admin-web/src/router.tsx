@@ -22,6 +22,7 @@ import {
 } from "react-router";
 import { appApiConfig } from "./api/config";
 import { listServices } from "./api/platform";
+import { decodePlatformUserIdSegment, platformHasUsers } from "./api/users";
 import { devLogout, isAuthenticated } from "./auth";
 import { DemoDataBanner } from "./components/DemoDataBanner";
 import { GlobalSearch } from "./components/GlobalSearch";
@@ -43,6 +44,7 @@ import { NotFoundPage } from "./pages/NotFoundPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { PlatformDetailPage } from "./pages/PlatformDetailPage";
+import { PlatformUserDetailPage } from "./pages/PlatformUserDetailPage";
 import { RegistryPage } from "./pages/RegistryPage";
 import { RequestDetailPage } from "./pages/RequestDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -234,6 +236,21 @@ function platformTabLoader({ request, params }: LoaderFunctionArgs) {
   }
 }
 
+/** 用户详情只覆盖 platformusers v1 明确支持的两类平台。
+ *
+ * 用统一 RouteErrorBoundary 的 404，而不是在详情组件里画一个看似成功的空页；
+ * 更不能把 CPA/服务器悄悄回落到 Sub2API 的第一条样本。 */
+function platformUserDetailLoader({ params }: LoaderFunctionArgs) {
+  const serviceType = params.serviceType ?? "";
+  if (!platformHasUsers(serviceType)) {
+    throw new Response(`${serviceType || "该平台"} 不支持终端用户详情`, { status: 404 });
+  }
+  if (decodePlatformUserIdSegment(params.userId ?? "") === null) {
+    throw new Response("用户 ID 编码无效", { status: 404 });
+  }
+  return null;
+}
+
 /** 未实装页的路由位，由导航数据生成。
  *
  *  逐条手写的话，「加一页」就变成两处要改（navigation.ts + 这里），而漏改的那一半
@@ -266,6 +283,13 @@ export const routes = [
             path: "platforms/:serviceType",
             loader: platformTabLoader,
             Component: PlatformDetailPage,
+          },
+          {
+            // 用户 ID 是不透明值；列表 Link 统一编码成带前缀的 UTF-8 hex 段，
+            // 详情页严格解码后只把原值作为 platformusers 的 q 参数精确匹配。
+            path: "platforms/:serviceType/users/:userId",
+            loader: platformUserDetailLoader,
+            Component: PlatformUserDetailPage,
           },
           // 请求详情是**完整页**而不是抽屉(§11.4、原型 RECOVERY.md「No right-side
           // detail drawers」)。挂在平台下面而不是全局 /requests/:id：同一个 id 在

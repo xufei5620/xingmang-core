@@ -1707,6 +1707,53 @@ describe("用户管理页签（交接文档 §9.3、原型 V[\"s2/users\"]）", 
   });
 });
 
+describe("平台用户详情完整页（XM-B001）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("Sub2API 深链进入完整详情页，返回用户管理的可分享地址", async () => {
+    renderRoute("/platforms/sub2api/users/u-755f3130323431");
+
+    expect(await screen.findByRole("heading", { name: "张伟", level: 2 })).not.toBeNull();
+    const back = screen.getByRole("link", { name: "返回 Sub2API 用户管理" });
+    expect(back.getAttribute("href")).toBe("/platforms/sub2api?tab=users");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("NewAPI 使用自己的详情布局与返回地址", async () => {
+    renderRoute("/platforms/newapi/users/u-755f3130323431");
+
+    expect(await screen.findByRole("heading", { name: "张伟", level: 2 })).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "区间请求", level: 3 })).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "开票记录", level: 3 })).toBeNull();
+    const back = screen.getByRole("link", { name: "返回 NewAPI 用户管理" });
+    expect(back.getAttribute("href")).toBe("/platforms/newapi?tab=users");
+  });
+
+  it("不支持终端用户的平台走既有 Not Found 边界，且不发送 users Query", async () => {
+    const fetchMock = stubFetch(okHandler);
+    renderRoute("/platforms/cpa/users/agent-1");
+
+    expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+    expect(screen.getByText(/cpa 不支持终端用户详情/)).not.toBeNull();
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/users"))).toBe(false);
+  });
+
+  it.each(["u-", "u-c0af", "raw-id"])(
+    "非法用户 ID segment %s 走 Not Found，且不发送 users Query",
+    async (segment) => {
+      const fetchMock = stubFetch(okHandler);
+      renderRoute(`/platforms/sub2api/users/${segment}`);
+      expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+      expect(screen.getByText(/用户 ID 编码无效/)).not.toBeNull();
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/users"))).toBe(false);
+    },
+  );
+});
+
 describe("渠道保障页签（裁定 #1 的 A 落地，UI 蓝图态）", () => {
   beforeEach(() => {
     devLogin();
