@@ -27,6 +27,8 @@ package reqlog
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
@@ -110,6 +112,30 @@ const FakeInstance = "reqlog-fake"
 // ⚠️ 值取自实现报告的「30 天自动清理」，**未对真实部署核对**。
 const RetentionDays = 30
 
+// BilledAmount 是一次请求向终端用户计费的定点金额。
+//
+// 指针缺席表示 reqlog 没给计费值；AmountMinor=0 则是已知的零，两者不可混同。
+// Scale 明确十进制定点的小数位数，避免调用方把 184 @ scale-3 当成 184 个货币单位。
+type BilledAmount struct {
+	AmountMinor int64
+	Currency    string
+	Scale       int32
+}
+
+// Validate 守住金额进入平台前的最小契约。非法值 fail closed，绝不退成 0。
+func (a BilledAmount) Validate() error {
+	if a.AmountMinor < 0 {
+		return fmt.Errorf("amount_minor 必须非负")
+	}
+	if strings.TrimSpace(a.Currency) == "" {
+		return fmt.Errorf("currency 不能为空")
+	}
+	if a.Scale < 0 || a.Scale > 18 {
+		return fmt.Errorf("scale 必须在 0..18")
+	}
+	return nil
+}
+
 // RequestLogSummary 是一条请求的元数据。
 //
 // **不含正文。** 这不是「暂时没放」，是契约层的隔离：列表页读的是本类型，
@@ -144,6 +170,9 @@ type RequestLogSummary struct {
 	// 即便如此，前端只在详情页显示，列表页优先显示用户名。
 	TokenPrefix string
 	Model       string
+	// Channel / Upstream 是本次实际路由的渠道与上游显示名；空串表示未记录。
+	Channel  string
+	Upstream string
 	// Status 是上游返回的 HTTP 状态码；0 表示 reqlog 没记到（连接中断）。
 	Status int
 	// DurationMS 是整次请求耗时。
@@ -158,6 +187,8 @@ type RequestLogSummary struct {
 	TokensIn    int64
 	TokensOut   int64
 	TokensCache int64
+	// BilledAmount 是向用户计费的金额，不是上游成本。nil 表示未知。
+	BilledAmount *BilledAmount
 	// Stream 表示这是不是一次 SSE 流式请求。
 	Stream bool
 	// UpstreamRequestID 来自 X-Oneapi-Request-Id / X-Request-Id，
@@ -175,6 +206,8 @@ type RequestLogSummary struct {
 type RequestLogPage struct {
 	Snapshot
 	Items []RequestLogSummary
+	// Stats 覆盖完整过滤集，在游标分页前计算；不是当前页小计。
+	Stats RequestLogStats
 	// NextCursor 是下一页的游标；空串表示已经翻到底。
 	//
 	// 不透明字符串而不是 offset/序号：reqlog 的真实分页形态未知，
@@ -182,6 +215,14 @@ type RequestLogPage struct {
 	NextCursor string
 	// RetentionDays 随每页返回，让界面能就地说清「只覆盖最近 N 天」。
 	RetentionDays int
+}
+
+// RequestLogStats 是完整过滤集的区间统计。
+type RequestLogStats struct {
+	RequestCount      int64
+	SuccessCount      int64
+	FailureCount      int64
+	AverageDurationMS *int64
 }
 
 // MessageRole 是一条对话消息的角色。

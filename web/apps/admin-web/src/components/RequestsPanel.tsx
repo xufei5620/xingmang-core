@@ -5,6 +5,7 @@ import {
   formatLocalTimestamp,
   FreshnessNote,
   PageState,
+  StatTile,
   type DataTableColumn,
 } from "@xingmang/ui-admin";
 import { Badge, Button, Input, Select } from "@xingmang/ui-primitives";
@@ -13,14 +14,20 @@ import { Link, useSearchParams } from "react-router";
 import {
   listPlatformRequests,
   REQUEST_PAGE_SIZE,
+  type RequestRangeStats,
   type RequestStatusFilter,
   type RequestSummary,
 } from "../api/requests";
 import { appDemoDataConfig, DEMO_BANNER_TEXT, shouldShowDemoBanner } from "../lib/demoData";
+import { formatCount, formatScaledMinorUnits, toIntegerValue } from "../lib/money";
+import {
+  parseRequestPeriodMode,
+  type RequestPeriodMode,
+  type RequestTimeRange,
+} from "../lib/requestPeriod";
 import {
   describeStatus,
   formatMillis,
-  formatTokens,
   formatTTFB,
   formatUsername,
   isUnmappedUser,
@@ -28,6 +35,7 @@ import {
   retentionNote,
 } from "../lib/requests";
 import { ApiStateView } from "./ApiStateView";
+import { RequestPeriodControl } from "./RequestPeriodControl";
 
 
 /** 状态筛选的选项。空串是「全部」——Radix Select 不接受空串作为 value，
@@ -60,6 +68,7 @@ export function RequestsPanel({ platform }: { platform: string }) {
   const status = (searchParams.get("status") ?? "") as RequestStatusFilter;
   const since = searchParams.get("since") ?? "";
   const until = searchParams.get("until") ?? "";
+  const periodMode = parseRequestPeriodMode(searchParams.get("period"));
 
   const query = useQuery({
     queryKey: ["platform-requests", platform, { username, model, status, since, until, cursor }],
@@ -89,13 +98,14 @@ export function RequestsPanel({ platform }: { platform: string }) {
 
   const clearFilters = () => {
     const next = new URLSearchParams(searchParams);
-    for (const key of ["username", "model", "status", "since", "until"]) next.delete(key);
+    for (const key of ["username", "model", "status"]) next.delete(key);
     setSearchParams(next, { replace: true });
     setCursor("");
     setCursorStack([]);
   };
 
-  const hasFilters = [username, model, status, since, until].some((v) => v !== "");
+  const hasRecordFilters = [username, model, status].some((v) => v !== "");
+  const hasFilters = hasRecordFilters || since !== "" || until !== "";
   const page = query.data;
   const isDemo =
     page !== undefined && shouldShowDemoBanner([page.dataSource], appDemoDataConfig);
@@ -116,13 +126,35 @@ export function RequestsPanel({ platform }: { platform: string }) {
         </div>
       ) : null}
 
+      <RequestPeriodControl
+        mode={periodMode}
+        since={since}
+        until={until}
+        onModeChange={(mode: RequestPeriodMode) => {
+          const next = new URLSearchParams(searchParams);
+          next.set("period", mode);
+          setSearchParams(next, { replace: true });
+          setCursor("");
+          setCursorStack([]);
+        }}
+        onApply={(mode: RequestPeriodMode, range: RequestTimeRange) => {
+          const next = new URLSearchParams(searchParams);
+          next.set("period", mode);
+          next.set("since", range.since);
+          next.set("until", range.until);
+          setSearchParams(next, { replace: true });
+          setCursor("");
+          setCursorStack([]);
+        }}
+      />
+
+      {page ? <RequestStats stats={page.stats} /> : null}
+
       <RequestFilters
         username={username}
         model={model}
         status={status}
-        since={since}
-        until={until}
-        hasFilters={hasFilters}
+        hasFilters={hasRecordFilters}
         onChange={setFilter}
         onClear={clearFilters}
       />
@@ -162,7 +194,7 @@ export function RequestsPanel({ platform }: { platform: string }) {
                       : "请求审计系统还没有抄到这个平台的调用；也可能这条链路尚未接通。"
                   }
                   action={
-                    hasFilters ? (
+                    hasRecordFilters ? (
                       <Button variant="secondary" size="sm" onClick={clearFilters}>
                         清除筛选
                       </Button>
@@ -194,12 +226,43 @@ export function RequestsPanel({ platform }: { platform: string }) {
   );
 }
 
+function RequestStats({ stats }: { stats: RequestRangeStats }) {
+  const averageUnavailable = stats.averageDurationMs === null;
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <StatTile
+        label="请求数"
+        value={formatCount(stats.requestCount)}
+        note="完整筛选结果，不是当前页行数"
+      />
+      <StatTile
+        label="成功"
+        value={formatCount(stats.successCount)}
+        note="完整筛选结果 · HTTP 2xx"
+      />
+      <StatTile
+        label="失败"
+        value={formatCount(stats.failureCount)}
+        note="完整筛选结果 · 非 2xx（含无响应）"
+      />
+      <StatTile
+        label="平均耗时"
+        value={formatMillis(stats.averageDurationMs)}
+        unavailable={averageUnavailable}
+        note={
+          averageUnavailable
+            ? "完整筛选结果为空，平均耗时未知"
+            : "完整筛选结果的整数毫秒平均值"
+        }
+      />
+    </div>
+  );
+}
+
 function RequestFilters({
   username,
   model,
   status,
-  since,
-  until,
   hasFilters,
   onChange,
   onClear,
@@ -207,8 +270,6 @@ function RequestFilters({
   username: string;
   model: string;
   status: RequestStatusFilter;
-  since: string;
-  until: string;
   hasFilters: boolean;
   onChange: (key: string, value: string) => void;
   onClear: () => void;
@@ -238,22 +299,6 @@ function RequestFilters({
           value={status === "" ? STATUS_ALL : status}
           onValueChange={(v) => onChange("status", v === STATUS_ALL ? "" : v)}
           className="w-40"
-        />
-      </FilterField>
-      <FilterField label="起始时间" hint="本地时区，含该时刻">
-        <Input
-          type="datetime-local"
-          value={toLocalInput(since)}
-          onChange={(e) => onChange("since", fromLocalInput(e.target.value))}
-          className="w-52"
-        />
-      </FilterField>
-      <FilterField label="结束时间" hint="本地时区，不含该时刻">
-        <Input
-          type="datetime-local"
-          value={toLocalInput(until)}
-          onChange={(e) => onChange("until", fromLocalInput(e.target.value))}
-          className="w-52"
         />
       </FilterField>
       {/* 无结果时要有明确清除入口（§11.3）。一直显示而不是只在无结果时显示：
@@ -286,32 +331,11 @@ function FilterField({
   );
 }
 
-/** RFC3339（UTC）→ `<input type="datetime-local">` 要的本地时间串。
- *
- *  两边转换都走这一对函数：URL 里存 UTC（可分享、无歧义），输入框显示本地
- *  （人按自己的时区想问题）。混着来的话，同一个链接在两个时区的人手里
- *  会筛出不同的区间。 */
-function toLocalInput(rfc3339: string): string {
-  if (rfc3339 === "") return "";
-  const d = new Date(rfc3339);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function fromLocalInput(local: string): string {
-  if (local === "") return "";
-  const d = new Date(local);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toISOString();
-}
-
 function requestColumns(platform: string): DataTableColumn<RequestSummary>[] {
   return [
     {
       id: "time",
       header: "时间",
-      primary: true,
       value: (row) => row.occurred_at,
       cell: (row) => (
         <span className="tabular-nums whitespace-nowrap">
@@ -319,6 +343,13 @@ function requestColumns(platform: string): DataTableColumn<RequestSummary>[] {
           {row.stream ? <p className="text-xs text-fg-muted">流式</p> : null}
         </span>
       ),
+    },
+    {
+      id: "requestId",
+      header: "请求 ID",
+      primary: true,
+      value: (row) => row.id,
+      cell: (row) => <span className="font-mono text-xs [overflow-wrap:anywhere]">{row.id}</span>,
     },
     {
       id: "username",
@@ -341,6 +372,20 @@ function requestColumns(platform: string): DataTableColumn<RequestSummary>[] {
       header: "模型",
       value: (row) => row.model,
       cell: (row) => row.model || MISSING_VALUE_TEXT,
+    },
+    {
+      id: "routing",
+      header: "渠道 / 上游",
+      value: (row) => `${row.channel} ${row.upstream}`,
+      cell: (row) =>
+        row.channel || row.upstream ? (
+          <span className="min-w-0">
+            <span className="font-medium">{row.channel || MISSING_VALUE_TEXT}</span>
+            {row.upstream ? <p className="text-xs text-fg-muted">{row.upstream}</p> : null}
+          </span>
+        ) : (
+          <span className="text-fg-muted">{MISSING_VALUE_TEXT}</span>
+        ),
     },
     {
       id: "status",
@@ -368,11 +413,34 @@ function requestColumns(platform: string): DataTableColumn<RequestSummary>[] {
     },
     {
       id: "tokens",
-      header: "Token",
+      header: "输入 / 输出",
       numeric: true,
-      headerTitle: "输入 / 输出 / 缓存",
+      headerTitle: "输入 Token / 输出 Token；缓存命中作为次级证据",
       // 三个数拼成的一格没有单一排序键，所以只显示、不排序
-      cell: (row) => formatTokens(row),
+      cell: (row) => (
+        <span>
+          <span>{row.tokens_in} / {row.tokens_out}</span>
+          <p className="text-xs text-fg-muted">缓存 {row.tokens_cache}</p>
+        </span>
+      ),
+    },
+    {
+      id: "billing",
+      header: "计费",
+      numeric: true,
+      headerTitle: "向用户计费金额，不是上游成本；— 表示 reqlog 未记录",
+      value: (row) =>
+        row.billed_amount === null ? null : toIntegerValue(row.billed_amount.amount_minor),
+      cell: (row) =>
+        row.billed_amount === null ? (
+          <span className="text-fg-muted">{MISSING_VALUE_TEXT}</span>
+        ) : (
+          formatScaledMinorUnits(
+            row.billed_amount.amount_minor,
+            row.billed_amount.currency,
+            row.billed_amount.scale,
+          )
+        ),
     },
     {
       id: "clientIp",
@@ -413,7 +481,7 @@ function RequestTable({
 }) {
   return (
     <DataTableV2
-      caption="请求列表：时间、用户、模型、状态、耗时与 Token 用量"
+      caption="请求列表：时间、请求 ID、用户、模型、渠道与上游、状态、耗时、输入输出、计费与详情"
       columns={requestColumns(platform)}
       rows={rows}
       rowKey={(row) => row.id}

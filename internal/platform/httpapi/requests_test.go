@@ -195,6 +195,85 @@ func TestTTFBNullIsDistinctFromZero(t *testing.T) {
 	}
 }
 
+func TestListStatsCoverFullFilteredSetBeforePagination(t *testing.T) {
+	h := requestsRouter(t, &capturingSink{})
+	full := decodeRequestPage(t, doGet(t, h,
+		"/api/v1/platforms/sub2api/requests?limit=200", scopeRequestRead))
+	small := decodeRequestPage(t, doGet(t, h,
+		"/api/v1/platforms/sub2api/requests?limit=3", scopeRequestRead))
+
+	if len(small.Items) != 3 {
+		t.Fatalf("当前页 = %d, want 3", len(small.Items))
+	}
+	if small.Stats.RequestCount != int64(len(full.Items)) || small.Stats.RequestCount <= int64(len(small.Items)) {
+		t.Fatalf("统计必须覆盖分页前完整过滤集: stats=%+v full=%d page=%d",
+			small.Stats, len(full.Items), len(small.Items))
+	}
+	if small.Stats.RequestCount != full.Stats.RequestCount ||
+		small.Stats.SuccessCount != full.Stats.SuccessCount ||
+		small.Stats.FailureCount != full.Stats.FailureCount ||
+		small.Stats.AverageDurationMS == nil || full.Stats.AverageDurationMS == nil ||
+		*small.Stats.AverageDurationMS != *full.Stats.AverageDurationMS {
+		t.Fatalf("相同筛选的统计不应随分页变化: small=%+v full=%+v", small.Stats, full.Stats)
+	}
+}
+
+func TestListMapsRoutingAndBillingWithoutCollapsingUnknownIntoZero(t *testing.T) {
+	h := requestsRouter(t, &capturingSink{})
+	rec := doGet(t, h, "/api/v1/platforms/sub2api/requests?limit=200", scopeRequestRead)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表应 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var raw struct {
+		Items []struct {
+			Channel      string          `json:"channel"`
+			Upstream     string          `json:"upstream"`
+			BilledAmount json.RawMessage `json:"billed_amount"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	sawRouting, sawKnownZero, sawUnknown := false, false, false
+	for _, item := range raw.Items {
+		if item.Channel != "" || item.Upstream != "" {
+			sawRouting = true
+		}
+		if string(item.BilledAmount) == "null" {
+			sawUnknown = true
+			continue
+		}
+		var amount map[string]any
+		if err := json.Unmarshal(item.BilledAmount, &amount); err != nil {
+			t.Fatalf("计费金额不是对象/null: %s", item.BilledAmount)
+		}
+		if _, ok := amount["amount_minor"].(string); !ok {
+			t.Fatalf("amount_minor 必须是十进制字符串: %#v", amount)
+		}
+		if amount["amount_minor"] == "0" {
+			sawKnownZero = true
+		}
+	}
+	if !sawRouting || !sawKnownZero || !sawUnknown {
+		t.Fatalf("样本必须覆盖路由、已知 0 与未知: routing=%v zero=%v unknown=%v",
+			sawRouting, sawKnownZero, sawUnknown)
+	}
+}
+
+func TestSummaryMappingRejectsInvalidBilling(t *testing.T) {
+	for name, amount := range map[string]*reqlog.BilledAmount{
+		"negative": {AmountMinor: -1, Currency: "USD", Scale: 2},
+		"currency": {AmountMinor: 1, Currency: "", Scale: 2},
+		"scale":    {AmountMinor: 1, Currency: "USD", Scale: 19},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := toSummaryItem(reqlog.RequestLogSummary{BilledAmount: amount}); err == nil {
+				t.Fatal("非法计费金额必须 fail closed")
+			}
+		})
+	}
+}
+
 func TestReadingContentWritesAuditEvent(t *testing.T) {
 	sink := &capturingSink{}
 	h := requestsRouter(t, sink)

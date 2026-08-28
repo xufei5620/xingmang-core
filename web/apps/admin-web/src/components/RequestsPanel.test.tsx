@@ -26,12 +26,15 @@ function summary(over: Record<string, unknown> = {}) {
     username: "zhang.wei",
     token_prefix: TOKEN_LEAD + "a1b2",
     model: "claude-sonnet-4-5",
+    channel: "OpenAI 中转·主",
+    upstream: "OpenAI Relay A",
     status: 200,
     duration_ms: 1200,
     ttfb_ms: 300,
     tokens_in: 100,
     tokens_out: 50,
     tokens_cache: 20,
+    billed_amount: { amount_minor: "184", currency: "USD", scale: 3 },
     stream: false,
     upstream_request_id: "req_1",
     client_ip: "203.0.113.x",
@@ -45,6 +48,12 @@ function pageBody(over: Record<string, unknown> = {}) {
     next_cursor: "",
     retention_days: 30,
     data_source: "reqlog-real",
+    stats: {
+      request_count: 9,
+      success_count: 7,
+      failure_count: 2,
+      average_duration_ms: 845,
+    },
     freshness,
     ...over,
   };
@@ -86,6 +95,33 @@ describe("请求列表", () => {
     for (const forbidden of ["摘要", "对话", "内容预览"]) {
       expect(screen.queryByText(forbidden)).toBeNull();
     }
+  });
+
+  it("四张统计卡展示完整过滤集统计，不拿当前页行数冒充", async () => {
+    renderPanel();
+    expect(await screen.findByText("请求数")).toBeTruthy();
+    expect(screen.getByText("成功")).toBeTruthy();
+    expect(screen.getByText("失败")).toBeTruthy();
+    expect(screen.getByText("平均耗时")).toBeTruthy();
+    expect(screen.getByText("9")).toBeTruthy();
+    expect(screen.getByText("7")).toBeTruthy();
+    expect(screen.getByText("2")).toBeTruthy();
+    expect(screen.getByText("845 ms")).toBeTruthy();
+    expect(screen.getAllByText(/完整筛选结果/).length).toBe(4);
+  });
+
+  it("表格按原型补齐请求 ID、渠道上游、输入输出与计费列", async () => {
+    renderPanel();
+    await screen.findByText("zhang.wei");
+    for (const header of ["时间", "请求 ID", "用户", "模型", "渠道 / 上游", "状态", "耗时", "输入 / 输出", "计费", "详情"]) {
+      expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+    }
+    expect(screen.getByText("20260828-000117")).toBeTruthy();
+    expect(screen.getByText("OpenAI 中转·主")).toBeTruthy();
+    expect(screen.getByText("OpenAI Relay A")).toBeTruthy();
+    expect(screen.getByText("100 / 50")).toBeTruthy();
+    expect(screen.getByText("缓存 20")).toBeTruthy();
+    expect(screen.getByText("$0.18")).toBeTruthy();
   });
 
   it("保留期一直显示，不只在空结果时显示", async () => {

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,23 +37,41 @@ type requestSummaryItem struct {
 	Username    string `json:"username"`
 	TokenPrefix string `json:"token_prefix"`
 	Model       string `json:"model"`
+	Channel     string `json:"channel"`
+	Upstream    string `json:"upstream"`
 	Status      int    `json:"status"`
 	DurationMS  int64  `json:"duration_ms"`
 	// TTFBMS 为 null 表示未记录；0 是合法观测值（缓存命中），两者不可混同。
-	TTFBMS            *int64 `json:"ttfb_ms"`
-	TokensIn          int64  `json:"tokens_in"`
-	TokensOut         int64  `json:"tokens_out"`
-	TokensCache       int64  `json:"tokens_cache"`
-	Stream            bool   `json:"stream"`
-	UpstreamRequestID string `json:"upstream_request_id"`
+	TTFBMS      *int64 `json:"ttfb_ms"`
+	TokensIn    int64  `json:"tokens_in"`
+	TokensOut   int64  `json:"tokens_out"`
+	TokensCache int64  `json:"tokens_cache"`
+	// BilledAmount 是向终端用户计费金额；null=未知，对象内的 0=已知零。
+	BilledAmount      *requestBilledAmount `json:"billed_amount"`
+	Stream            bool                 `json:"stream"`
+	UpstreamRequestID string               `json:"upstream_request_id"`
 	// ClientIP 已在连接器侧脱敏（reqlog.MaskIP），这里不做二次处理——
 	// 二次处理会让「脱敏在哪一层做」变成两个答案。
 	ClientIP string `json:"client_ip"`
 }
 
+type requestBilledAmount struct {
+	AmountMinor string `json:"amount_minor"`
+	Currency    string `json:"currency"`
+	Scale       int32  `json:"scale"`
+}
+
+type requestStats struct {
+	RequestCount      int64  `json:"request_count"`
+	SuccessCount      int64  `json:"success_count"`
+	FailureCount      int64  `json:"failure_count"`
+	AverageDurationMS *int64 `json:"average_duration_ms"`
+}
+
 // requestPage 是一页请求元数据。
 type requestPage struct {
 	Items []requestSummaryItem `json:"items"`
+	Stats requestStats         `json:"stats"`
 	// NextCursor 为空串表示已经翻到底。
 	NextCursor string `json:"next_cursor"`
 	// RetentionDays 让界面能就地说清「只覆盖最近 N 天」——
@@ -145,7 +164,18 @@ func freshnessFromSnapshot(snap reqlog.Snapshot, now time.Time) freshnessBody {
 	return body
 }
 
-func toSummaryItem(s reqlog.RequestLogSummary) requestSummaryItem {
+func toSummaryItem(s reqlog.RequestLogSummary) (requestSummaryItem, error) {
+	var billedAmount *requestBilledAmount
+	if s.BilledAmount != nil {
+		if err := s.BilledAmount.Validate(); err != nil {
+			return requestSummaryItem{}, fmt.Errorf("invalid billed amount: %w", err)
+		}
+		billedAmount = &requestBilledAmount{
+			AmountMinor: strconv.FormatInt(s.BilledAmount.AmountMinor, 10),
+			Currency:    s.BilledAmount.Currency,
+			Scale:       s.BilledAmount.Scale,
+		}
+	}
 	return requestSummaryItem{
 		ID:     s.ID,
 		Source: s.Source,
@@ -154,16 +184,19 @@ func toSummaryItem(s reqlog.RequestLogSummary) requestSummaryItem {
 		Username:          s.Username,
 		TokenPrefix:       s.TokenPrefix,
 		Model:             s.Model,
+		Channel:           s.Channel,
+		Upstream:          s.Upstream,
 		Status:            s.Status,
 		DurationMS:        s.DurationMS,
 		TTFBMS:            s.TTFBMS,
 		TokensIn:          s.TokensIn,
 		TokensOut:         s.TokensOut,
 		TokensCache:       s.TokensCache,
+		BilledAmount:      billedAmount,
 		Stream:            s.Stream,
 		UpstreamRequestID: s.UpstreamRequestID,
 		ClientIP:          s.ClientIP,
-	}
+	}, nil
 }
 
 // parseTimeParam 解析 RFC3339 时间参数；缺省返回零值。
@@ -261,10 +294,22 @@ func ListPlatformRequestsHandler(q RequestLogQuerier) http.HandlerFunc {
 
 		items := make([]requestSummaryItem, 0, len(page.Items))
 		for _, s := range page.Items {
-			items = append(items, toSummaryItem(s))
+			item, err := toSummaryItem(s)
+			if err != nil {
+				WriteError(w, r, action.NewError(action.CodeInternal,
+					"请求计费数据格式异常", err))
+				return
+			}
+			items = append(items, item)
 		}
 		WriteJSON(w, http.StatusOK, requestPage{
-			Items:         items,
+			Items: items,
+			Stats: requestStats{
+				RequestCount:      page.Stats.RequestCount,
+				SuccessCount:      page.Stats.SuccessCount,
+				FailureCount:      page.Stats.FailureCount,
+				AverageDurationMS: page.Stats.AverageDurationMS,
+			},
 			NextCursor:    page.NextCursor,
 			RetentionDays: page.RetentionDays,
 			DataSource:    page.Instance,
@@ -315,8 +360,14 @@ func GetPlatformRequestContentHandler(q RequestLogQuerier) http.HandlerFunc {
 				Truncated: m.Truncated, OriginalBytes: m.OriginalBytes,
 			})
 		}
+		summary, err := toSummaryItem(content.Summary)
+		if err != nil {
+			WriteError(w, r, action.NewError(action.CodeInternal,
+				"请求计费数据格式异常", err))
+			return
+		}
 		WriteJSON(w, http.StatusOK, requestContentBody{
-			Summary:             toSummaryItem(content.Summary),
+			Summary:             summary,
 			Messages:            messages,
 			MessagesParsed:      content.MessagesParsed,
 			FinalReply:          content.FinalReply,

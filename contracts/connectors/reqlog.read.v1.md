@@ -6,7 +6,7 @@
 | Connector Key | `reqlog` |
 | Contract Version | `1` |
 | 实现 | 契约与 Fake：`connectors/reqlog`；真实客户端：**只有骨架**（`connectors/reqlog/client.go`，数据方法一律 `not_supported`） |
-| 合规判据 | **必须通过 `connectors/reqlog/contracttest` 套件**（Fake 已通过，18 项） |
+| 合规判据 | **必须通过 `connectors/reqlog/contracttest` 套件**（Fake 已通过，21 项） |
 | 平台侧入口 | `internal/platform/requestlog`（权限 + 审计 + 错误翻译）；HTTP 层 `internal/platform/httpapi/requests.go` |
 | 依据 | 交接文档 §9.4 请求详情 · `docs/superpowers/plans/2026-08-28-reqlog-integration-proposal.md`（已批准） |
 
@@ -62,8 +62,10 @@ reqlog.health.read              运营健康
 | `Username` | 令牌映射出的用户名；映射不到为空串，**不用 token_prefix 顶替** |
 | `TokenPrefix` | 令牌前缀。不是凭据（不足以复原令牌），映射失败时的追查锚点 |
 | `Model` / `Status` / `DurationMS` | 模型、HTTP 状态码（0 = 没记到）、耗时 |
+| `Channel` / `Upstream` | 本次实际路由的渠道与上游显示名；空串 = 未记录，不编名称 |
 | `TTFBMS` | **指针**：`nil` = 未记录，`0` = 合法观测值（缓存命中）。两者不可混同 |
 | `TokensIn/Out/Cache` | 三者分列，缓存命中数**不并进输入**（计费口径不同） |
+| `BilledAmount` | 向终端用户计费金额（不是上游成本）；`nil` = 未知，已知 0 保留为对象内的 0 |
 | `Stream` | 是否 SSE 流式 |
 | `UpstreamRequestID` | 站内日志 ↔ 明文抄录的跨系锚点 |
 | `ClientIP` | **已按 §3.3 脱敏** |
@@ -71,7 +73,14 @@ reqlog.health.read              运营健康
 「不含正文」不是「暂时没放」——列表（`request.read`）与正文
 （`request.content.read`）的权限分级就落在这个类型边界上。
 
-`RequestLogPage` 另带 `NextCursor`（不透明游标）与 `RetentionDays`
+`BilledAmount` 是可空定点对象：Go 内为非负整数 `AmountMinor` + 非空 `Currency` +
+`Scale(0..18)`；HTTP 明确映射为十进制字符串 `amount_minor` + `currency` + `scale`。
+任一字段非法时整次响应 fail closed，不把坏值降级成 0。
+
+`RequestLogPage` 另带 `NextCursor`（不透明游标）、`RetentionDays` 与 `Stats`。
+`Stats` 在连接器侧对**完整过滤集、游标分页前**计算：请求数、2xx 成功数、其余
+（含 status=0）失败数均为整数；平均耗时为整数毫秒，空结果时为 `nil`，不是 0。
+`RetentionDays`
 （保留窗口，让界面说得出「只覆盖最近 N 天」——「那天没有请求」与
 「过了保留期」在屏幕上长得一样，处置却完全不同）。
 
@@ -261,6 +270,9 @@ reqlog 控制台是 `http://127.0.0.1:9300`（回环 + 明文 + Basic Auth，靠
 | 18 | **endpoint 的 TLS 落点** | 必须 https（闸 1） | 见 §5 的未决冲突 |
 | 19 | `ip` 字段的实际形态 | 单个地址（可带端口） | 若是 `X-Forwarded-For` 链，整列会变成 `invalid-ip`（这是有意的信号） |
 | 20 | 是否存在跨 source 的 id 重号 | 假设可能重号，故 `RequestContent(source, id)` 两参 | 无 |
+| 21 | 渠道 / 上游字段名与缺失表达 | 目标形状为空串或显示名 | 需在 real 映射层修正 |
+| 22 | 向用户计费字段、币种与标度 | 可空定点对象；HTTP `amount_minor` 为字符串 | 不核对就不能展示计费 |
+| 23 | 控制台是否能按完整过滤集返回统计 | 由连接器在分页前给 `Stats` | 若上游只给分页结果，real 模式需有可证明完整的统计端点或保持不支持 |
 
 ## 9. 破坏性变更
 

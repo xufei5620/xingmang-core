@@ -25,6 +25,9 @@ export interface RequestSummary {
   username: string;
   token_prefix: string;
   model: string;
+  /** 本次实际路由；空串表示 reqlog 未记录。 */
+  channel: string;
+  upstream: string;
   /** 0 表示 reqlog 没记到状态码（连接中断）。 */
   status: number;
   duration_ms: number;
@@ -33,14 +36,32 @@ export interface RequestSummary {
   tokens_in: number;
   tokens_out: number;
   tokens_cache: number;
+  /** 向用户计费金额；null=未知，对象内的 0=已知零。 */
+  billed_amount: RequestBilledAmount | null;
   stream: boolean;
   upstream_request_id: string;
   /** 已在后端脱敏（形如 203.0.113.x）。前端不做二次处理。 */
   client_ip: string;
 }
 
+export interface RequestBilledAmount {
+  /** 十进制整数字符串，避免 JSON number 精度丢失。 */
+  amount_minor: string;
+  currency: string;
+  scale: number;
+}
+
+export interface RequestRangeStats {
+  requestCount: number;
+  successCount: number;
+  failureCount: number;
+  averageDurationMs: number | null;
+}
+
 export interface RequestListPage {
   items: RequestSummary[];
+  /** 完整过滤集统计，在游标分页前计算。 */
+  stats: RequestRangeStats;
   /** 空串表示已经翻到底。不透明字符串，前端不解析、不构造。 */
   nextCursor: string;
   /** reqlog 的保留窗口。界面靠它说清「只覆盖最近 N 天」。 */
@@ -99,8 +120,20 @@ export interface RequestListOptions extends ListOptions, RequestListFilters {
 /** 列表每页拉多少条。 */
 export const REQUEST_PAGE_SIZE = 50;
 
+type RawRequestSummary = Omit<RequestSummary, "billed_amount"> & {
+  billed_amount?: unknown;
+};
+
+interface RawRequestStats {
+  request_count: number;
+  success_count: number;
+  failure_count: number;
+  average_duration_ms: number | null;
+}
+
 interface RawRequestPage {
-  items: RequestSummary[] | null;
+  items: RawRequestSummary[] | null;
+  stats: RawRequestStats;
   next_cursor?: string;
   retention_days?: number;
   data_source?: string;
@@ -108,7 +141,7 @@ interface RawRequestPage {
 }
 
 interface RawRequestContent {
-  summary: RequestSummary;
+  summary: RawRequestSummary;
   messages: RequestMessage[] | null;
   messages_parsed: boolean;
   final_reply: string;
@@ -124,6 +157,75 @@ interface RawRequestContent {
 function omitEmpty(value: string | undefined): string | undefined {
   const trimmed = (value ?? "").trim();
   return trimmed === "" ? undefined : trimmed;
+}
+
+function parseBilledAmount(raw: unknown): RequestBilledAmount | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object") throw new Error("请求计费数据格式异常");
+  const value = raw as Record<string, unknown>;
+  const amountMinor = value.amount_minor;
+  const currency = value.currency;
+  const scale = value.scale;
+  if (
+    typeof amountMinor !== "string" ||
+    !/^\d+$/.test(amountMinor) ||
+    typeof currency !== "string" ||
+    currency.trim() === "" ||
+    typeof scale !== "number" ||
+    !Number.isInteger(scale) ||
+    scale < 0 ||
+    scale > 18
+  ) {
+    throw new Error("请求计费数据格式异常");
+  }
+  return { amount_minor: amountMinor, currency, scale };
+}
+
+function parseRequestSummary(raw: RawRequestSummary): RequestSummary {
+  return {
+    id: raw.id,
+    source: raw.source,
+    occurred_at: raw.occurred_at,
+    username: raw.username,
+    token_prefix: raw.token_prefix,
+    model: raw.model,
+    channel: raw.channel ?? "",
+    upstream: raw.upstream ?? "",
+    status: raw.status,
+    duration_ms: raw.duration_ms,
+    ttfb_ms: raw.ttfb_ms,
+    tokens_in: raw.tokens_in,
+    tokens_out: raw.tokens_out,
+    tokens_cache: raw.tokens_cache,
+    billed_amount: parseBilledAmount(raw.billed_amount),
+    stream: raw.stream,
+    upstream_request_id: raw.upstream_request_id,
+    client_ip: raw.client_ip,
+  };
+}
+
+function parseCount(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`请求统计 ${label} 格式异常`);
+  }
+  return value;
+}
+
+function parseStats(raw: RawRequestStats): RequestRangeStats {
+  const requestCount = parseCount(raw?.request_count, "请求数");
+  const successCount = parseCount(raw?.success_count, "成功数");
+  const failureCount = parseCount(raw?.failure_count, "失败数");
+  const average = raw?.average_duration_ms;
+  if (average !== null && (typeof average !== "number" || !Number.isSafeInteger(average) || average < 0)) {
+    throw new Error("请求统计平均耗时格式异常");
+  }
+  if (successCount + failureCount !== requestCount) {
+    throw new Error("请求统计计数不一致");
+  }
+  if ((requestCount === 0) !== (average === null)) {
+    throw new Error("请求统计平均耗时与请求数不一致");
+  }
+  return { requestCount, successCount, failureCount, averageDurationMs: average };
 }
 
 /** 列出某平台的请求元数据（需 request.read）。 */
@@ -148,7 +250,8 @@ export async function listPlatformRequests(
     },
   );
   return {
-    items: body.items ?? [],
+    items: (body.items ?? []).map(parseRequestSummary),
+    stats: parseStats(body.stats),
     nextCursor: body.next_cursor ?? "",
     retentionDays: body.retention_days ?? 0,
     dataSource: body.data_source ?? "",
@@ -177,7 +280,7 @@ export async function getPlatformRequestContent(
     },
   );
   return {
-    summary: body.summary,
+    summary: parseRequestSummary(body.summary),
     messages: body.messages ?? [],
     messagesParsed: body.messages_parsed,
     finalReply: body.final_reply,

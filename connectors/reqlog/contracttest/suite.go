@@ -43,6 +43,9 @@ func RunSuite(t *testing.T, newClient Factory) {
 	t.Run("流式请求给出装配后的回复", func(t *testing.T) { testStreamingContentIsAssembled(t, newClient) })
 	t.Run("失败请求可读且不伪造用量", func(t *testing.T) { testFailedRequestIsReadable(t, newClient) })
 	t.Run("过滤器逐项生效", func(t *testing.T) { testFiltersNarrowResults(t, newClient) })
+	t.Run("统计覆盖分页前完整过滤集", func(t *testing.T) { testStatsCoverFullFilteredSet(t, newClient) })
+	t.Run("空结果平均耗时为未知", func(t *testing.T) { testEmptyStatsHaveNoAverage(t, newClient) })
+	t.Run("渠道上游与计费保留未知和已知零", func(t *testing.T) { testRoutingAndBillingMetadata(t, newClient) })
 	t.Run("分页不重不漏", func(t *testing.T) { testPaginationIsExhaustive(t, newClient) })
 	t.Run("跨来源读内容必须落空", func(t *testing.T) { testSourceIsolation(t, newClient) })
 	t.Run("非法过滤条件被拒绝", func(t *testing.T) { testInvalidFilterRejected(t, newClient) })
@@ -53,6 +56,100 @@ func RunSuite(t *testing.T, newClient Factory) {
 	t.Run("上下文取消立即返回", func(t *testing.T) { testContextCancellation(t, newClient) })
 	t.Run("部分数据被标记", func(t *testing.T) { testPartialIsFlagged(t, newClient) })
 	t.Run("能力可少于清单", func(t *testing.T) { testCapabilitiesMayBeSubset(t, newClient) })
+}
+
+func testStatsCoverFullFilteredSet(t *testing.T, newClient Factory) {
+	c := newClient(reqlog.FakeOptions{})
+	ctx := context.Background()
+	full := listAll(t, c, reqlog.SourceSub2API)
+	if len(full) < 4 {
+		t.Fatalf("样本太少（%d 条），无法证明统计不是当前页", len(full))
+	}
+
+	page, err := c.ListRequests(ctx, reqlog.ListFilter{
+		Source: reqlog.SourceSub2API, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("当前页 = %d 条, want 3", len(page.Items))
+	}
+	if page.Stats.RequestCount != int64(len(full)) {
+		t.Fatalf("request_count = %d, want 完整过滤集 %d（不是当前页 %d）",
+			page.Stats.RequestCount, len(full), len(page.Items))
+	}
+
+	var success, failure, duration int64
+	sawStatusZero := false
+	for _, item := range full {
+		if item.Status >= 200 && item.Status <= 299 {
+			success++
+		} else {
+			failure++
+		}
+		if item.Status == 0 {
+			sawStatusZero = true
+		}
+		duration += item.DurationMS
+	}
+	if !sawStatusZero {
+		t.Fatal("样本必须有 status=0，才能证明无响应被统计为失败")
+	}
+	if page.Stats.SuccessCount != success || page.Stats.FailureCount != failure {
+		t.Fatalf("成功/失败 = %d/%d, want %d/%d",
+			page.Stats.SuccessCount, page.Stats.FailureCount, success, failure)
+	}
+	if page.Stats.AverageDurationMS == nil || *page.Stats.AverageDurationMS != duration/int64(len(full)) {
+		t.Fatalf("average_duration_ms = %v, want %d",
+			page.Stats.AverageDurationMS, duration/int64(len(full)))
+	}
+}
+
+func testEmptyStatsHaveNoAverage(t *testing.T, newClient Factory) {
+	page, err := newClient(reqlog.FakeOptions{}).ListRequests(context.Background(), reqlog.ListFilter{
+		Source: reqlog.SourceSub2API, Username: "no-such-user", Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("空过滤结果却返回 %d 行", len(page.Items))
+	}
+	if page.Stats.RequestCount != 0 || page.Stats.SuccessCount != 0 || page.Stats.FailureCount != 0 {
+		t.Fatalf("空结果统计必须全为 0: %+v", page.Stats)
+	}
+	if page.Stats.AverageDurationMS != nil {
+		t.Fatalf("空结果平均耗时必须为 nil，不能伪造成 0 ms: %d", *page.Stats.AverageDurationMS)
+	}
+}
+
+func testRoutingAndBillingMetadata(t *testing.T, newClient Factory) {
+	c := newClient(reqlog.FakeOptions{})
+	items := append(listAll(t, c, reqlog.SourceSub2API), listAll(t, c, reqlog.SourceNewAPI)...)
+	sawKnownZero, sawUnknown, sawRouting := false, false, false
+	for _, item := range items {
+		if item.Channel != "" || item.Upstream != "" {
+			sawRouting = true
+		}
+		if item.BilledAmount == nil {
+			sawUnknown = true
+			continue
+		}
+		if err := item.BilledAmount.Validate(); err != nil {
+			t.Fatalf("记录 %s 的计费金额非法: %v", item.ID, err)
+		}
+		if item.BilledAmount.AmountMinor == 0 {
+			sawKnownZero = true
+		}
+	}
+	if !sawRouting {
+		t.Fatal("样本里没有渠道/上游元数据")
+	}
+	if !sawKnownZero || !sawUnknown {
+		t.Fatalf("计费样本必须同时覆盖已知 0 与未知: knownZero=%v unknown=%v",
+			sawKnownZero, sawUnknown)
+	}
 }
 
 // listAll 把某个来源的全部记录翻完，供多条断言复用。
