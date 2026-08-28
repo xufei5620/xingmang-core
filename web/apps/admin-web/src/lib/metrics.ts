@@ -262,6 +262,10 @@ function readNewApiChannelRow(raw: Record<string, unknown>): NewApiChannelRow {
 
 /** 从 NewAPI 渠道状态指标的 value 里解析出逐渠道明细。
  *  卡片摘要与渠道表共用这一个解析函数，避免两处各解析一遍再解析出分歧。 */
+/** ⚠️ XM-0052 起**暂时没有消费者**：渠道管理页换成按上游账号出行之后,
+ *  这份逐渠道的启停 / 错误率 / 延迟在界面上没有去处了（概览卡片只给聚合数）。
+ *  **刻意不删**——它解析的正是渠道保障（M1.5）要用的那批数据,
+ *  那一片落地时直接接上即可。 */
 export function readNewApiChannelRows(
   value: Record<string, unknown> | null,
 ): NewApiChannelRow[] {

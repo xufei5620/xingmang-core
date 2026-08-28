@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChannelSummary } from "../api/finance";
-import {
-  formatGrossMargin,
-  indexChannelSummaries,
-  isNegativeMargin,
-} from "./channelEconomics";
+import { formatGrossMargin, isNegativeMargin } from "./channelEconomics";
 
 function summary(over: Partial<ChannelSummary> = {}): ChannelSummary {
   return {
@@ -52,18 +48,6 @@ function summary(over: Partial<ChannelSummary> = {}): ChannelSummary {
     ...over,
   };
 }
-
-describe("按渠道 id 建索引", () => {
-  it("传 undefined（还没取到汇总）得到空索引，而不是崩", () => {
-    expect(indexChannelSummaries(undefined).size).toBe(0);
-  });
-
-  it("接上之后按 id 查得到", () => {
-    const index = indexChannelSummaries([summary(), summary({ id: "ch-2" })]);
-    expect(index.get("ch-2")?.id).toBe("ch-2");
-    expect(index.get("ch-nope")).toBeUndefined();
-  });
-});
 
 describe("毛利率的展示", () => {
   it("定点字符串右移两位就是百分数，**不经过一次浮点**", () => {

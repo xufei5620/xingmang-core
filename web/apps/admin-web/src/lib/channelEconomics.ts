@@ -1,18 +1,3 @@
-import type { ChannelSummary } from "../api/finance";
-
-/** 按 id 建索引，供渠道表逐行查。
- *
- *  接受 `undefined` 并返回空索引，而不是让调用方各自判空:
- *  「没取到汇总」与「取到了但这一行不在里面」在**显示上是同一件事**（未接入）,
- *  在代码里也必须只有一条路径——两条路径迟早会有一条忘了标注。 */
-export function indexChannelSummaries(
-  summaries: readonly ChannelSummary[] | undefined,
-): Map<string, ChannelSummary> {
-  const index = new Map<string, ChannelSummary>();
-  for (const s of summaries ?? []) index.set(s.id, s);
-  return index;
-}
-
 /** 毛利率（定点十进制字符串）→ 百分比展示文本。
  *
  *  **后端算好、前端只格式化**（XM-0037d 的 `gross_margin`）。前端不自己
@@ -51,21 +36,6 @@ export function formatGrossMargin(raw: string | null): string | null {
 export function isNegativeMargin(raw: string | null): boolean {
   return raw !== null && raw.trim().startsWith("-");
 }
-
-/** 渠道经营三列在**被管平台的渠道表**上还接不上的原因。
- *
- *  XM-0037d 的端点已经上线（`GET /api/v1/finance/channels/summary`),
- *  但它一行 = 一个**上游账号**（后端 §8.5：两个汇总端点同粒度），
- *  而渠道管理表一行 = 被管平台自己的一条渠道。两边的 id 互不认识:
- *  按 id join 不会报错，只会一条都匹配不上，毛利列全空还看着像「后端没数据」。
- *
- *  缺的是「平台渠道 ↔ 上游账号」的对应关系。登记簿今天只有
- *  「上游令牌 ↔ 我方账号」的令牌映射，那是另一个维度。
- *
- *  写成常量而不是在两个面板里各写一遍：两处文案漂开之后，
- *  Sub2API 说「等端点」而 NewAPI 说「暂无数据」，读的人会以为那是两件事。 */
-export const ECONOMICS_PENDING_NOTE =
-  "汇总端点按上游账号出行，与被管平台自己的渠道 id 对不上；缺「平台渠道 ↔ 上游账号」的对应关系";
 
 /** 上游管理页用得上汇总的那一面：登记簿的行 id 就是汇总的行 id。
  *
