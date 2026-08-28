@@ -92,6 +92,8 @@ ai/codex/XM-C-AUD5-archive-restore
 - Create: `internal/platform/audit/archive/format_test.go`
 - Create: `internal/platform/audit/archive/decode.go`
 - Create: `internal/platform/audit/archive/decode_test.go`
+- Create: `internal/platform/audit/archive/artifact_wire.go`
+- Create: `internal/platform/audit/archive/artifact_wire_test.go`
 - Create: `internal/platform/audit/archive/export.go`
 - Create: `internal/platform/audit/archive/export_test.go`
 - Create: `internal/platform/audit/archive/verify.go`
@@ -103,12 +105,19 @@ ai/codex/XM-C-AUD5-archive-restore
 - Create: `internal/platform/audit/archive/testdata/missing-canonical.ndjson`
 - Create: `internal/platform/audit/archive/testdata/zero-canonical.ndjson`
 - Create: `internal/platform/audit/archive/testdata/truncated-final-line.ndjson`
+- Create: `internal/platform/audit/archive/testdata/chain-root-ref-v1.json`
+- Create: `internal/platform/audit/archive/testdata/manifest-v1.json`
+- Create: `internal/platform/audit/archive/testdata/checkpoint-v1.json`
+- Create: `internal/platform/audit/archive/testdata/recovery-index-v1.json`
+- Create: `internal/platform/audit/archive/testdata/artifact-wire-v1.sha256`
 - Create: `internal/platform/audit/archive/testdata/root-keyring.json`
 - Create: `internal/platform/audit/archive/testdata/manifest-keyring.json`
 - Create: `cmd/audit-archive/main.go`
 - Create: `cmd/audit-archive/main_test.go`
 - Modify: `internal/platform/audit/anchor.go`
 - Modify: `internal/platform/audit/anchor_test.go`
+- Modify: `db/queries/audit.sql`
+- Regenerate: `internal/platform/audit/gen/audit.sql.go`
 - Create: `docs/modules/audit/ARCHIVE-FORMAT-v1.md`
 - Modify: `docs/modules/audit/README.md`
 - Modify: `docs/modules/audit/DATA-MODEL.md`
@@ -134,52 +143,111 @@ type SegmentBoundary struct {
     FirstEventHash string
     LastEventHash string
 }
-
-type ObjectDescriptor struct {
-    BucketID    string
-    Key         string
-    VersionID   string
-    SHA256      string
-    SizeBytes   int64
+type EncodedObjectV1 struct {
+    SHA256 string
+    SizeBytes int64
     ContentType string
-    RowCount    int64
-    ProviderChecksum string
-    ETag        string
-    EncryptionMode string
-    KMSKeyID    string
-    ObjectLockMode string
-    RetainUntil time.Time
+    RowCount int64
 }
 
-type ProjectionDescriptor struct {
-    Environment string
-    ObjectDescriptor
+type WireTime string // ParseWireTime enforces UTC and exactly six fractional digits.
+
+type ObjectVersionV1 struct {
+    BucketID, Key, VersionID, SHA256 string
+    SizeBytes int64
+    ContentType, ProviderChecksum, ETag string
+    EncryptionMode, KMSKeyID, ObjectLockMode string
+    RetainUntil WireTime
+    RowCount int64
 }
 
-type UnsignedManifest struct {
-    Kind                   string
-    FormatVersion          int
-    ExporterVersion        string
-    ExporterCommit         string
-    Boundary               SegmentBoundary
-    PrevManifestSHA256     string
-    CanonicalVersionCounts map[int16]int64
-    OversizedRecordCount   int64
-    Payload                ObjectDescriptor
-    Projections            []ProjectionDescriptor
-    ChainRoot              audit.ChainRoot
-    CreatedAt              time.Time
-    SourceTipObservedAt    time.Time
+type CanonicalCountV1 struct { Version int16; RowCount int64 }
+type PreviousManifestRefV1 struct {
+    Kind, BucketID, Key, VersionID, SHA256 string
+}
+type ArtifactRefV1 struct { BucketID, Key, VersionID, SHA256 string }
+type PreviousCheckpointRefV1 struct {
+    Kind, BucketID, Key, VersionID, SHA256 string
+}
+type ChainRootRefV1 struct {
+    ID string
+    ComputedAt WireTime
+    FromSequence, ToSequence int64
+    RootHash, Signature, KeyID string
+}
+type ProjectionRefV1 struct { Environment string; Object ObjectVersionV1 }
+
+type ManifestV1 struct {
+    Kind string
+    FormatVersion int
+    ExporterVersion, ExporterCommit string
+    FromSequence, ToSequence, RowCount int64
+    FirstPrevHash, FirstEventHash, LastEventHash string
+    PreviousManifest PreviousManifestRefV1
+    CanonicalVersionCounts [2]CanonicalCountV1
+    OversizedRecordCount int64
+    Payload ObjectVersionV1
+    Projections []ProjectionRefV1
+    ChainRoot ChainRootRefV1
+    CreatedAt, SourceTipObservedAt, ActionRunSnapshotAt WireTime
+    EligibleActionRunCount, MatchedActionRunCount int64
+    MissingAuditEventCount, DuplicateAuditEventCount int64
+}
+type SignedManifestV1 struct {
+    Unsigned ManifestV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
 }
 
-type SignedManifest struct {
-    Unsigned          UnsignedManifest
-    ManifestSHA256    string
-    SignatureAlgorithm string
-    SignatureKeyID   string
-    Signature        string
+type CheckpointV1 struct {
+    Kind string
+    FormatVersion int
+    Generation int64
+    PreviousCheckpoint PreviousCheckpointRefV1
+    FirstManifest, TerminalManifest ArtifactRefV1
+    FromSequence, ToSequence, ManifestCount int64
+    CatalogRowsDigest string
+    ChainRoot ChainRootRefV1
+    CanonicalVersionCounts [2]CanonicalCountV1
+    ChainIntegrity, CaptureCompleteness string
+    EligibleActionRunCount, MatchedActionRunCount int64
+    MissingAuditEventCount, DuplicateAuditEventCount int64
+    SourceTipSequence int64
+    SourceTipObservedAt WireTime
+    ApprovalEnvelopeSHA256, OperationIntentDigest string
+    CreatedAt WireTime
+}
+type SignedCheckpointV1 struct {
+    Unsigned CheckpointV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
 }
 
+type RecoveryIndexV1 struct {
+    Kind string
+    FormatVersion int
+    Generation, PreviousGeneration int64
+    PreviousIndexSHA256 string
+    Checkpoint, TerminalManifest ArtifactRefV1
+    TerminalSequence int64
+    TerminalRootHash string
+    UpdatedAt WireTime
+}
+type SignedRecoveryIndexV1 struct {
+    Unsigned RecoveryIndexV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
+}
+
+type KeyPurpose string
+const (
+    PurposeChainRoot KeyPurpose = "chain_root_signing"
+    PurposeManifest KeyPurpose = "archive_manifest_signing"
+    PurposeCheckpoint KeyPurpose = "archive_checkpoint_signing"
+    PurposeRecoveryIndex KeyPurpose = "recovery_index_signing"
+    PurposePLOApproval KeyPurpose = "plo_approval_signing"
+    PurposePLOResult KeyPurpose = "plo_result_receipt_signing"
+    PurposeKillSwitch KeyPurpose = "kill_switch_signing"
+    PurposeScrubReceipt KeyPurpose = "archive_scrub_receipt_signing"
+    PurposeScrubHead KeyPurpose = "archive_scrub_head_signing"
+)
 type TrustedKey struct {
     KeyID       string
     Algorithm   string
@@ -196,12 +264,16 @@ type TrustedKey struct {
 type Keyring interface {
     Lookup(keyID string, purpose KeyPurpose, protocol string, signedAt time.Time) (TrustedKey, error)
 }
+type PurposeSigner interface {
+    audit.Signer
+    Purpose() KeyPurpose
+    Protocol() string
+}
 
-type AuditSource interface {
+type LocalAuditSourceReader interface {
     Tip(context.Context) (int64, string, error)
     List(context.Context, int64, int64) ([]audit.Event, error)
     VerifyChain(context.Context, int64, int64) (*audit.ChainProblem, error)
-    ComputeAndSignRoot(context.Context, audit.Signer) (audit.ChainRoot, error)
     LatestRoot(context.Context) (audit.ChainRoot, error)
 }
 
@@ -216,7 +288,6 @@ const (
     VerificationBrokenLink         VerificationCode = "broken_link"
     VerificationEventHashMismatch  VerificationCode = "event_hash_mismatch"
     VerificationRootSignature      VerificationCode = "root_signature_invalid"
-    VerificationVerifierOutdated   VerificationCode = "verifier_outdated"
 )
 
 type VerificationReport struct {
@@ -227,18 +298,27 @@ type VerificationReport struct {
     VerifiedObjects  int64
     VerifiedRootHash string
 }
+
+type CompatibilityError struct { Code string; FormatVersion, CanonicalVersion int }
+type OperationalError struct { Code string; Cause error }
+type IntegrityError struct { Report VerificationReport }
 ```
 
-- `EncodePayload(io.Writer, []audit.Event) (ObjectDescriptor, error)` writes the
+- `EncodePayload(io.Writer, []audit.Event) (EncodedObjectV1, error)` writes the
   exact NDJSON v1 bytes.
-- `EncodeProjection(io.Writer, environment string, []audit.Event) (ObjectDescriptor, error)`
+- `EncodeProjection(io.Writer, environment string, []audit.Event) (EncodedObjectV1, error)`
   writes only the approved HTTP item fields.
-- `SignManifest(UnsignedManifest, audit.Signer) (SignedManifest, error)` signs the
+- `SignManifest(ManifestV1, PurposeSigner) (SignedManifestV1, error)` signs the
   domain-separated manifest hash.
-- `VerifySegment(ctx context.Context, manifest SignedManifest, payload io.Reader,
+- `VerifySegment(ctx context.Context, manifest SignedManifestV1, payload io.Reader,
   projections map[string]io.Reader, rootKeyring Keyring, manifestKeyring Keyring,
-  previous *SignedManifest) (VerificationReport, error)` returns deterministic
+  previous *SignedManifestV1) (VerificationReport, error)` returns deterministic
   integrity/format results separately from typed operational errors; it never rewrites input.
+
+`VerificationReport` has no verifier-outdated code. Unknown archive/canonical versions
+return `*CompatibilityError`; I/O/KMS/keyring/discovery failures return
+`*OperationalError`; the Query adapter alone turns a failed report into
+`*IntegrityError`. CLI/HTTP mapping uses `errors.As` only.
 
 `ArchiveEventV1` is a frozen wire struct distinct from `audit.Event`. Its strict
 decoder rejects unknown/duplicate/missing/null fields, zero/unknown canonical
@@ -258,7 +338,9 @@ Create a two-event fixture where sequence 1 uses `CanonicalV1`, sequence 2 uses
 `CanonicalV2`, and both hashes are independently precomputed with the frozen
 canonical implementation. Check in literal payload/manifest/signature bytes and
 fixed SHA-256 values; expected bytes must not be generated by the encoder under test.
-Also check in missing/zero canonical, duplicate/unknown field and truncated-line goldens.
+Also check in literal `ChainRootRefV1`、`ManifestV1`、`CheckpointV1`、
+`RecoveryIndexV1` unsigned/signed bytes and their fixed digest list, plus missing/zero
+canonical, duplicate/unknown/null/misordered field and truncated-line goldens.
 The fixture contains no credential-like values or personal data.
 
 - [ ] **Step 3: Write deterministic format/strict decoder failures first**
@@ -271,6 +353,11 @@ func TestPayloadPreservesAllPersistedFieldsAndCanonicalVersion(t *testing.T)
 func TestDecodeRejectsMissingZeroNullUnknownAndDuplicateFields(t *testing.T)
 func TestDecodeRejectsUnknownCanonicalAsVerifierOutdated(t *testing.T)
 func TestDecodeRejectsTruncatedFinalLineAndMissingLF(t *testing.T)
+func TestArtifactWireLiteralBytesAndSHA256AreStable(t *testing.T)
+func TestArtifactWireRejectsUnknownDuplicateMissingNullMisorderedAndBadTime(t *testing.T)
+func TestChainRootRefWireExcludesPublicKeyExportedAtAndExportTarget(t *testing.T)
+func TestFirstManifestRequiresExactGenesisRef(t *testing.T)
+func TestLaterManifestRequiresPreviousBucketKeyVersionAndSHA(t *testing.T)
 func TestProjectionContainsOnlyHTTPAllowlistedFields(t *testing.T)
 func TestProjectionSeparatesEnvironments(t *testing.T)
 func TestSegmentCutsAtRowOrByteBoundaryWithoutPartialRecord(t *testing.T)
@@ -279,7 +366,7 @@ func TestSegmentCutsAtRowOrByteBoundaryWithoutPartialRecord(t *testing.T)
 Run:
 
 ```powershell
-go test ./internal/platform/audit/archive -run 'TestEncode|TestDecode|TestPayload|TestProjection|TestSegment' -count=1 -v
+go test ./internal/platform/audit/archive -run 'TestEncode|TestDecode|TestArtifactWire|TestChainRootRef|TestFirstManifest|TestLaterManifest|TestPayload|TestProjection|TestSegment' -count=1 -v
 ```
 
 Expected: FAIL because the package/functions do not exist.
@@ -308,8 +395,12 @@ func TestVerifyDetectsMissingOverlappingAndReorderedManifest(t *testing.T)
 func TestVerifyRejectsWrongManifestKeyAndWrongRootKey(t *testing.T)
 func TestVerifyRejectsArtifactEmbeddedPublicKeySelfAuthentication(t *testing.T)
 func TestVerifyRejectsWrongPurposeProtocolFingerprintAndExpiredKey(t *testing.T)
+func TestKeyringRejectsSameRawKeyAcrossPurposes(t *testing.T)
+func TestKeyValidityUsesSignedAtHalfOpenBoundary(t *testing.T)
+func TestManifestCheckpointIndexAndPLODomainReplayFails(t *testing.T)
 func TestVerifyRejectsRevokedKeyForNewSignature(t *testing.T)
 func TestVerifySeparatesOperationalFailureFromIntegrityReport(t *testing.T)
+func TestVerifierOutdatedIsOnlyTypedCompatibilityError(t *testing.T)
 func TestVerifyRejectsProjectionHiddenFields(t *testing.T)
 ```
 
@@ -330,11 +421,16 @@ xm-audit-archive-manifest-v1
 sha256=<64hex>
 ```
 
-Remove `public_key` from new exported root JSON and remove the `pub` argument/trust
+Make new exported root JSON the exact `ChainRootRefV1` wire (no `public_key` or
+derived `signed_payload`) and remove the `pub` argument/trust
 path from `ExportRoot`; verification requires `chain_root_signing/v1` Keyring lookup.
-Historical JSON public keys are ignored hints. Update anchor tests and audit runbook
-so no test claims that a file verifies itself. Unknown versions return typed
-`verifier_outdated`; object/keyring I/O returns typed operational error, never tamper.
+Make export a pure filesystem emitter: remove the `MarkChainRootExported` query and
+generated method, and remove every `exported_at/export_target` DB write from `ExportRoot`.
+Keep legacy columns untouched in the forward-only schema but never read them as trust or
+archive state. Add `TestExportRootPerformsZeroDatabaseWritesOnSuccessAndFailure` and
+`TestExportRootRetryDoesNotMutateLegacyMarker`. Historical JSON public keys are ignored
+hints. Unknown versions return only typed `*CompatibilityError`; object/keyring I/O
+returns typed `*OperationalError`, never tamper.
 
 - [ ] **Step 8: Add a local-only CLI surface**
 
@@ -342,12 +438,14 @@ so no test claims that a file verifies itself. Unknown versions return typed
 
 ```text
 audit-archive plan --from <seq> --to <seq>
-audit-archive export-local --from <seq> --to <seq> --root-id <uuid>
+audit-archive export-local --to <seq> --root-id <uuid>
 audit-archive verify-local --manifest <approved-local-path>
 ```
 
-`plan` is read-only and prints range/rows/estimated bytes. `export-local` refuses
-production environment and writes only below the configured local archive root.
+`plan` is read-only and prints range/rows/estimated bytes. `export-local` always starts
+at sequence 1 and emits the exact genesis predecessor; it rejects any `--from` flag.
+Later non-local continuation belongs to AUD3 and requires a trusted exact previous
+manifest locator. `export-local` refuses production environment and writes only below the configured local archive root.
 No command accepts SQL, object key, bucket, arbitrary executable or Delete flag.
 
 - [ ] **Step 9: Test stable CLI exit codes and no-secret output**
@@ -355,6 +453,8 @@ No command accepts SQL, object key, bucket, arbitrary executable or Delete flag.
 ```go
 func TestCLIPlanDoesNotWriteFiles(t *testing.T)
 func TestCLIExportLocalRejectsProduction(t *testing.T)
+func TestCLIExportLocalRejectsPartialFirstSegmentAndFromFlag(t *testing.T)
+func TestCLIVerifyWalksExactPreviousRefsFromTerminalToGenesis(t *testing.T)
 func TestCLIVerifyMapsTamperToExitOneAndConfigToExitTwo(t *testing.T)
 func TestCLIVerifyMapsOutdatedOperationalAndConflictSeparately(t *testing.T)
 func TestCLIOutputNeverContainsKeyMaterial(t *testing.T)
@@ -390,7 +490,7 @@ never an executable deletion capability.
 - [ ] **Step 12: Commit AUD1**
 
 ```powershell
-git add internal/platform/audit/archive internal/platform/audit/anchor.go internal/platform/audit/anchor_test.go cmd/audit-archive docs/modules/audit docs/evidence/EV-<date>-audit-archive-baseline.md
+git add internal/platform/audit/archive internal/platform/audit/anchor.go internal/platform/audit/anchor_test.go db/queries/audit.sql internal/platform/audit/gen/audit.sql.go cmd/audit-archive docs/modules/audit docs/evidence/EV-<date>-audit-archive-baseline.md
 git commit -m "feat(audit): add deterministic archive format and verifier"
 ```
 
@@ -420,6 +520,10 @@ Stop after PR creation and human review; do not start AUD2 from an unmerged AUD1
 - Create: `internal/platform/audit/archive/recovery_index.go`
 - Create: `internal/platform/audit/archive/recovery_index_test.go`
 - Create: `internal/platform/audit/archive/catalog_rebuild_test.go`
+- Create: `internal/platform/audit/archive/receipt_journal.go`
+- Create: `internal/platform/audit/archive/receipt_journal_test.go`
+- Create: `internal/platform/audit/archive/provider_qualification.go`
+- Create: `internal/platform/audit/archive/provider_qualification_test.go`
 - Create: `internal/platform/audit/archive/filesystem_store.go`
 - Create: `internal/platform/audit/archive/filesystem_store_test.go`
 - Create after provider approval: `internal/platform/audit/archive/s3_store.go`
@@ -430,48 +534,71 @@ Stop after PR creation and human review; do not start AUD2 from an unmerged AUD1
 - Modify: `deploy/compose/.env.example`
 - Modify: `docs/modules/audit/DATA-MODEL.md`
 - Modify: `docs/modules/audit/RUNBOOK.md`
+- Create: `docs/evidence/TEMPLATE-audit-archive-provider-qualification.md`
 
 **Interfaces:**
 
 ```go
-type ObjectMeta struct {
-    Key       string
-    VersionID string
-    SHA256    string
+type ObjectWriteIntentV1 struct {
+    OperationID uuid.UUID
+    Ordinal int32
+    BucketID, Key, SHA256 string
     SizeBytes int64
-    ETag      string
-    KMSKeyID  string
-    ObjectLockMode string
-    RetainUntil time.Time
+    ContentType, EncryptionMode, KMSKeyID, ObjectLockMode string
+    RetainUntil WireTime
+    ProviderIdempotencyToken string
+}
+type FixedLocator struct { ApprovedConfigRef string }
+type IndexVersion struct { Generation int64; SHA256, ProviderVersion string }
+type ExpectedIndex struct { Generation int64; SHA256, ProviderVersion string }
+type OperationIntentV1 struct {
+    OperationID uuid.UUID
+    ApprovalEnvelopeSHA256, DeterministicBytesDigest string
+    Objects []ObjectWriteIntentV1
+}
+type OperationReceiptV1 struct {
+    Intent OperationIntentV1
+    PutResults []ObjectVersionV1
+    TerminalResultRef *ArtifactRefV1
+    TerminalResultDigest string
 }
 
 type ObjectWriter interface {
-    PutIfAbsent(context.Context, string, io.Reader, int64, string) (ObjectMeta, error)
+    PutIfAbsent(context.Context, ObjectWriteIntentV1, io.Reader) (ObjectVersionV1, error)
+    RecoverPutResult(context.Context, ObjectWriteIntentV1) (ObjectVersionV1, error)
 }
 type ExactObjectReader interface {
-    HeadVersion(context.Context, string, string) (ObjectMeta, error)
-    GetVersion(context.Context, string, string) (io.ReadCloser, ObjectMeta, error)
+    HeadVersion(context.Context, ObjectVersionV1) (ObjectVersionV1, error)
+    GetVersion(context.Context, ObjectVersionV1) (io.ReadCloser, ObjectVersionV1, error)
 }
-type RecoveryIndexStore interface {
-    LoadCurrent(context.Context, FixedLocator) (SignedRecoveryIndex, IndexVersion, error)
-    CompareAndSwap(context.Context, FixedLocator, ExpectedIndex, SignedRecoveryIndex) (IndexVersion, error)
+type RecoveryIndexReader interface {
+    LoadCurrent(context.Context, FixedLocator) (SignedRecoveryIndexV1, IndexVersion, error)
+}
+type RecoveryIndexCASWriter interface {
+    CompareAndSwap(context.Context, FixedLocator, ExpectedIndex, SignedRecoveryIndexV1) (IndexVersion, error)
+}
+type ReceiptJournal interface {
+    BeginIntent(context.Context, OperationIntentV1) error
+    AppendPutResult(context.Context, uuid.UUID, int32, ObjectVersionV1) error
+    AppendTerminalResult(context.Context, uuid.UUID, ArtifactRefV1, string) error
+    LoadOperation(context.Context, uuid.UUID) (OperationReceiptV1, error)
 }
 
 type CommittedSegment struct {
     ID uuid.UUID
-    Manifest SignedManifest
-    ManifestObject ObjectDescriptor
+    Manifest SignedManifestV1
+    ManifestObject ObjectVersionV1
     CheckpointSHA256 string
     RecoveryGeneration int64
     CommittedAt time.Time
     VerifiedAt time.Time
 }
 
-type Catalog interface {
+type CatalogReader interface {
     Latest(context.Context) (CommittedSegment, error)
-    Commit(context.Context, CommittedSegment) error
     ListBefore(context.Context, int64, int32) ([]CommittedSegment, error)
 }
+type CatalogWriter interface { CommitCoveredSegment(context.Context, CommittedSegment) error }
 ```
 
 There is intentionally no staged catalog type, latest-object read, arbitrary List,
@@ -503,7 +630,7 @@ UPDATE changes zero rows
 DELETE changes zero rows
 duplicate from/to/payload hash/manifest hash is rejected
 invalid range/count/hash is rejected
-catalog cannot skip latest.to+1 through Catalog.Commit
+catalog cannot skip latest.to+1 through CatalogWriter.CommitCoveredSegment
 catalog rejects a row not covered by signed checkpoint/recovery generation
 empty catalog rebuilds deterministically from RecoveryIndex without original DB rows
 ```
@@ -537,7 +664,7 @@ queries to the existing audit query file.
 
 - [ ] **Step 4: Implement transactional contiguous Commit**
 
-`Catalog.Commit` takes a dedicated PostgreSQL advisory transaction lock, reads
+`CatalogWriter.CommitCoveredSegment` takes a dedicated PostgreSQL advisory transaction lock, reads
 the latest committed range, requires `new.from=latest.to+1`, then inserts once.
 It never writes audit events or changes existing catalog rows.
 
@@ -547,6 +674,9 @@ It never writes audit events or changes existing catalog rows.
 func TestObjectStoreInterfaceHasNoDeleteOrOverwrite(t *testing.T)
 func TestPutIfAbsentIsIdempotentForSameContent(t *testing.T)
 func TestPutIfAbsentRejectsSameKeyDifferentContent(t *testing.T)
+func TestPutReturnsCompleteObjectVersionV1FromExactReadback(t *testing.T)
+func TestAmbiguousSuccessfulPutRecoversSameExactVersionWithoutLatestOrList(t *testing.T)
+func TestUnrecoverableAmbiguousPutFailsProviderQualification(t *testing.T)
 func TestObjectKeyRejectsTraversalAndUnknownEnvironment(t *testing.T)
 func TestHeadAndGetReturnRecordedHashAndSize(t *testing.T)
 func TestReaderRequiresExactVersionIDAndNeverUsesLatest(t *testing.T)
@@ -555,6 +685,10 @@ func TestFilesystemStoreNeverWritesOutsideRoot(t *testing.T)
 func TestCheckpointBindsTerminalManifestKeyVersionAndCatalogDigest(t *testing.T)
 func TestRecoveryIndexRequiresIndependentSignatureAndFixedLocatorCAS(t *testing.T)
 func TestRecoveryIndexCanRebuildEmptyCatalogAfterDatabaseLoss(t *testing.T)
+func TestDatabaseLossWalksTerminalManifestExactRefsBackToGenesis(t *testing.T)
+func TestDatabaseLossRecoveryNeverCallsListLatestOrOriginalCatalog(t *testing.T)
+func TestReceiptIntentMustBeDurableBeforeFirstPut(t *testing.T)
+func TestReceiptJournalRejectsSameOperationDifferentBytesOrVersion(t *testing.T)
 ```
 
 Run:
@@ -575,11 +709,22 @@ server-side KMS encryption and exact Object Lock headers. Persist provider Versi
 all readback uses that VersionID and validates KMS key/lock mode/retain-until. Redirects, public
 ACL and endpoint hosts outside the configured allowlist fail closed.
 
+The approval record must also name the provider-native operation/idempotency primitive
+used by `RecoverPutResult`. A generic S3 compatibility claim is insufficient. If an
+ambiguous success can only be recovered with latest Head, arbitrary ListObjectVersions,
+or a second Put, mark the adapter `ProviderQualificationFailed` and STOP AUD2.
+
 - [ ] **Step 7: Test the provider adapter without production credentials**
 
 Use an `httptest` protocol fixture for request signing/headers and a disposable
 WORM-capable integration bucket only when the approved CI secret is present.
 No test logs headers or secret values.
+
+Inject a response drop after the provider has committed Put but before VersionID reaches
+the caller. The adapter must recover the same exact `ObjectVersionV1` through the approved
+intent-token primitive. Record SDK version, request/result digest, recovered VersionID
+hash, KMS/Lock facts and PASS/FAIL in the provider-qualification evidence; never record
+credentials or payload.
 
 ```powershell
 go test ./internal/platform/audit/archive -run 'TestS3' -count=1 -v
@@ -590,7 +735,8 @@ dedicated test CredentialRef is absent.
 
 - [ ] **Step 8: Prove commit happens only after readback verification**
 
-Use fake ObjectWriter/ExactObjectReader/RecoveryIndexStore/Catalog to cover every failure point:
+Use fake ObjectWriter/ExactObjectReader/RecoveryIndexReader/RecoveryIndexCASWriter/
+ReceiptJournal/CatalogReader/CatalogWriter to cover every failure point:
 
 ```go
 func TestCommitProtocolDoesNotCatalogPartialUpload(t *testing.T)
@@ -599,11 +745,14 @@ func TestCommitProtocolDoesNotCatalogHashOrSignatureFailure(t *testing.T)
 func TestCommitProtocolCatalogsExactlyOnceAfterAllObjectsVerify(t *testing.T)
 func TestConcurrentCommitOnlyAcceptsOneContiguousSegment(t *testing.T)
 func TestRetryReusesContentAddressedOrphanObjects(t *testing.T)
+func TestCrashAfterPutBeforeResponseUsesRecoverPutResultAndReceipt(t *testing.T)
+func TestReceiptFailureBeforePutMakesZeroProviderCalls(t *testing.T)
 func TestCatalogNeverLeadsRecoveryIndex(t *testing.T)
 func TestCatalogReconcilesAfterIndexCASBeforeDatabaseWriteCrash(t *testing.T)
 ```
 
-The order is payload/projection exact-version verify -> manifest exact-version verify
+The order is durable intent -> payload/projection exact-version verify + append result
+-> manifest exact-version verify + append result
 -> signed checkpoint exact-version verify -> RecoveryIndex CAS terminal commit ->
 idempotent catalog materialization. Manifest cannot be signed until payload/projection
 VersionIDs and protection metadata are known. Catalog failure after CAS is repaired
@@ -631,7 +780,7 @@ directory/glob, then commit. Application rollback leaves the forward schema and
 immutable objects/index in place; no down migration is executed as release rollback:
 
 ```powershell
-git add db/migrations/$env:AUDIT_ARCHIVE_MIGRATION_ID`_audit_archive_catalog.up.sql db/migrations/$env:AUDIT_ARCHIVE_MIGRATION_ID`_audit_archive_catalog.down.sql db/queries/audit.sql internal/platform/audit/gen internal/platform/audit/archive go.mod go.sum VERSIONS.lock deploy/compose/.env.example docs/modules/audit
+git add db/migrations/$env:AUDIT_ARCHIVE_MIGRATION_ID`_audit_archive_catalog.up.sql db/migrations/$env:AUDIT_ARCHIVE_MIGRATION_ID`_audit_archive_catalog.down.sql db/queries/audit.sql internal/platform/audit/gen internal/platform/audit/archive go.mod go.sum VERSIONS.lock deploy/compose/.env.example docs/modules/audit docs/evidence/TEMPLATE-audit-archive-provider-qualification.md
 git commit -m "feat(audit): add immutable archive store and catalog"
 ```
 
@@ -643,7 +792,8 @@ Stop for migration/object-storage review and human merge.
 
 **Approval gate:** AUD2 merged；PLO/Root/Manifest/Checkpoint/Recovery key purpose、
 CredentialRef、fixed RecoveryIndex locator、Kill Switch、archive identities 与 exact
-DB/IAM role matrix approved；DB role split merged。R2-10 缺失只允许 manual CLI。
+DB/IAM role matrix、AccessRecorder 独立 append-only security sink/retention approved；
+DB role split merged。R2-10 缺失只允许 manual CLI。
 
 **Files:**
 
@@ -654,8 +804,15 @@ DB/IAM role matrix approved；DB role split merged。R2-10 缺失只允许 manua
 - Create: `internal/platform/audit/archive/envelope_test.go`
 - Create: `internal/platform/audit/archive/receipt.go`
 - Create: `internal/platform/audit/archive/receipt_test.go`
+- Create: `internal/platform/audit/archive/kill_switch.go`
+- Create: `internal/platform/audit/archive/kill_switch_test.go`
+- Create: `internal/platform/audit/archive/scrub_receipt.go`
+- Create: `internal/platform/audit/archive/scrub_receipt_test.go`
+- Create: `internal/platform/audit/archive/scrub_head.go`
+- Create: `internal/platform/audit/archive/scrub_head_test.go`
 - Create: `internal/platform/audit/archive/access_recorder.go`
 - Create: `internal/platform/audit/archive/access_recorder_test.go`
+- Create: `internal/platform/audit/archive/access_recorder_integration_test.go`
 - Create: `internal/platform/audit/archive/reconcile.go`
 - Create: `internal/platform/audit/archive/reconcile_test.go`
 - Create: `internal/platform/audit/archive/roles_integration_test.go`
@@ -663,29 +820,146 @@ DB/IAM role matrix approved；DB role split merged。R2-10 缺失只允许 manua
 - Create: `internal/platform/audit/archive/commit_test.go`
 - Modify: `cmd/audit-archive/main.go`
 - Modify: `cmd/audit-archive/main_test.go`
+- Create: `cmd/audit-archive/config.go`
+- Create: `cmd/audit-archive/config_test.go`
 - Modify: `deploy/docker/go.Dockerfile`
 - Create: `deploy/bootstrap/003_audit_archive_grants_evidence.sql`
 - Modify: `docs/modules/audit/RUNBOOK.md`
 - Create: `docs/runbooks/AUDIT-ARCHIVE.md`
 - Create: `docs/evidence/TEMPLATE-audit-archive-run.md`
+- Create: `docs/evidence/TEMPLATE-audit-access-recorder.md`
 
 **Interfaces:**
 
 ```go
-type RetryEnvelope struct {
+type ApproverV1 struct { PrincipalID, ApprovalRole string; ApprovedAt WireTime }
+type TargetPolicyV1 struct {
+    Provider, SDKProtocol, BucketID, Region, Prefix string
+    KMSKeyID, ObjectLockMode string
+    RetainUntil WireTime
+    Residency string
+}
+type PLOApprovalEnvelopeV1 struct {
+    Kind string
+    FormatVersion int
     OperationID uuid.UUID
-    ApprovalDigest, SourceFingerprint, Environment string
-    ExpectedTip int64
+    ChangeID, ApprovalID string
+    Approvers []ApproverV1
+    Purpose, Environment, SourceDatabaseFingerprint string
+    IsolatedTargetFingerprint string
+    TargetPolicy TargetPolicyV1
+    RecoveryIndexFixedLocatorRef string
+    ExpectedSourceTip int64
     ExpectedRootHash string
     ExpectedIndexGeneration int64
     ExpectedIndexHash string
     FromSequence, ToSequence int64
-    FormatVersion int
-    TargetPolicy ApprovedTargetPolicy // bucket/region/prefix/KMS/Lock/discovery
+    ArchiveFormatVersion int
     BuildCommit, BinarySHA256 string
-    ValidUntil time.Time
-    Nonce string
+    ValidFrom, ValidUntil WireTime
+    Nonce, IdempotencyKey, DryRunDigest, KillSwitchSnapshotSHA256 string
 }
+type SignedPLOApprovalEnvelopeV1 struct {
+    Unsigned PLOApprovalEnvelopeV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
+}
+
+type KillSwitchSnapshotV1 struct {
+    Kind string
+    FormatVersion int
+    Environment, Purpose string
+    Generation int64
+    Enabled bool
+    ValidFrom, ValidUntil, IssuedAt WireTime
+    Issuer string
+}
+type SignedKillSwitchSnapshotV1 struct {
+    Unsigned KillSwitchSnapshotV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
+}
+
+type PLOResultReceiptV1 struct {
+    Kind string
+    FormatVersion int
+    OperationID uuid.UUID
+    ApprovalEnvelopeSHA256, Purpose string
+    StartedAt, FinishedAt WireTime
+    ObjectResults []ObjectVersionV1
+    Checkpoint ArtifactRefV1
+    RecoveryGeneration int64
+    RecoveryIndexSHA256 string
+    VerificationReport VerificationReport
+    ScrubReceipt ArtifactRefV1
+    ExitCode int
+    Outcome, ResultDigest string
+}
+type SignedPLOResultReceiptV1 struct {
+    Unsigned PLOResultReceiptV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
+}
+
+type ScrubReceiptV1 struct {
+    Kind string
+    FormatVersion int
+    ReceiptID uuid.UUID
+    Checkpoint ArtifactRefV1
+    RecoveryGeneration int64
+    RecoveryIndexSHA256, Scope, VerifierCommit, VerifierBinarySHA256 string
+    StartedAt, VerifiedAt WireTime
+    ManifestCount, ObjectCount, RowCount int64
+    ChainIntegrity, CaptureCompleteness string
+    EligibleActionRunCount, MatchedActionRunCount int64
+    MissingAuditEventCount, DuplicateAuditEventCount int64
+    Caveats []string
+    ResultDigest string
+}
+type SignedScrubReceiptV1 struct {
+    Unsigned ScrubReceiptV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
+}
+type ScrubHeadV1 struct {
+    Kind string
+    FormatVersion int
+    Generation, PreviousGeneration int64
+    PreviousHeadSHA256 string
+    Receipt ArtifactRefV1
+    CheckpointSHA256 string
+    UpdatedAt WireTime
+}
+type SignedScrubHeadV1 struct {
+    Unsigned ScrubHeadV1
+    UnsignedSHA256, SignatureAlgorithm, SignatureKeyID, Signature string
+}
+
+type SourceTipV1 struct { Sequence int64; Hash string; ObservedAt WireTime }
+type EligibleActionRunV1 struct { ID uuid.UUID; FinishedAt WireTime; Status string }
+type AuditSourceReader interface {
+    BeginRepeatableReadSnapshot(context.Context) (AuditSourceSnapshot, error)
+}
+type AuditSourceSnapshot interface {
+    Tip(context.Context) (SourceTipV1, error)
+    ListRange(context.Context, int64, int64, int32) ([]audit.Event, error)
+    VerifyChain(context.Context, int64, int64) (*audit.ChainProblem, error)
+    LatestRoot(context.Context) (audit.ChainRoot, error)
+    ListEligibleActionRuns(context.Context, WireTime, int32) ([]EligibleActionRunV1, error)
+    Close(context.Context) error
+}
+type RootWriter interface { InsertRoot(context.Context, ChainRootRefV1) error }
+type KillSwitchReader interface { LoadCurrent(context.Context, string) (SignedKillSwitchSnapshotV1, error) }
+type AccessRecordV1 struct {
+    OperationID uuid.UUID
+    Phase, CheckpointSHA256, ObjectSHA256, MachineIdentity string
+    ApprovalEnvelopeSHA256, Outcome string
+    RecordedAt WireTime
+}
+type AppendOnlySecuritySink interface { Append(context.Context, AccessRecordV1) error }
+type AccessRecorder interface {
+    RecordRestrictedReadAttempt(context.Context, AccessRecordV1) error
+    RecordRestrictedReadResult(context.Context, AccessRecordV1) error
+}
+type ScrubReceiptWriter interface { PutIfAbsent(context.Context, SignedScrubReceiptV1) (ArtifactRefV1, error) }
+type ScrubHeadReader interface { LoadCurrent(context.Context, FixedLocator) (SignedScrubHeadV1, IndexVersion, error) }
+type ScrubHeadCASWriter interface { CompareAndSwap(context.Context, FixedLocator, ExpectedIndex, SignedScrubHeadV1) (IndexVersion, error) }
 
 type ArchivePlan struct {
     FromSequence       int64
@@ -696,33 +970,42 @@ type ArchivePlan struct {
 }
 
 type ArchiveResult struct {
-    ChainRoot audit.ChainRoot
+    ChainRoot ChainRootRefV1
     Segments  []CommittedSegment
-    StartedAt time.Time
-    FinishedAt time.Time
+    Receipt SignedPLOResultReceiptV1
 }
 
 type Service struct {
     SourceReader AuditSourceReader
     RootWriter RootWriter
+    CatalogReader CatalogReader
     CatalogWriter CatalogWriter
     ObjectWriter ObjectWriter
     ObjectReader ExactObjectReader
-    RecoveryIndex RecoveryIndexStore
+    RecoveryIndexReader RecoveryIndexReader
+    RecoveryIndexWriter RecoveryIndexCASWriter
     AccessRecorder AccessRecorder
-    Receipts ReceiptStore
-    RootSigner, ManifestSigner, CheckpointSigner audit.Signer
+    ReceiptJournal ReceiptJournal
+    KillSwitchReader KillSwitchReader
+    ScrubReceiptWriter ScrubReceiptWriter
+    ScrubHeadReader ScrubHeadReader
+    ScrubHeadWriter ScrubHeadCASWriter
+    RootSigner, ManifestSigner, CheckpointSigner, RecoverySigner PurposeSigner
+    ResultSigner, ScrubReceiptSigner, ScrubHeadSigner PurposeSigner
     PLOKeyring, RootKeyring, ManifestKeyring, CheckpointKeyring, RecoveryKeyring Keyring
+    ResultKeyring, KillSwitchKeyring, ScrubReceiptKeyring, ScrubHeadKeyring Keyring
 }
 
-func (s *Service) Plan(context.Context, ApprovedTargetPolicy) (ArchivePlan, []byte, error)
-func (s *Service) Archive(context.Context, SignedRetryEnvelope) (ArchiveResult, error)
+func (s *Service) Plan(context.Context, TargetPolicyV1) (ArchivePlan, []byte, error)
+func (s *Service) Archive(context.Context, SignedPLOApprovalEnvelopeV1) (ArchiveResult, error)
 ```
 
 - [ ] **Step 1: Write PLO precondition failures**
 
 ```go
 func TestArchiveRequiresTrustedUnexpiredApprovalEnvelope(t *testing.T)
+func TestApprovalRequiresTwoDistinctEligibleHumanApproversAndAllFrozenFields(t *testing.T)
+func TestApprovalAndResultReceiptAreDifferentSignedDomains(t *testing.T)
 func TestArchiveRejectsWrongPurposeProtocolFingerprintAndChangedEnvelope(t *testing.T)
 func TestArchiveRequiresExactTipRootAndIndexGeneration(t *testing.T)
 func TestArchiveStartsAtLatestCommittedPlusOne(t *testing.T)
@@ -731,7 +1014,10 @@ func TestArchiveRefusesMissingOrUntrustedRootAndManifestKeys(t *testing.T)
 func TestArchiveDryRunWritesNothing(t *testing.T)
 func TestArchiveDoesNotExposeSecretsInErrorsOrLogs(t *testing.T)
 func TestArchiveFailsClosedWhenKillSwitchUnavailableDisabledOrExpired(t *testing.T)
+func TestArchiveRechecksBoundKillSwitchBeforeSignPutCASAndNextSegment(t *testing.T)
+func TestEverySignerMatchesItsPurposeProtocolAndRecoverySignerIsPresent(t *testing.T)
 func TestReaderWriterAccessRecorderCapabilitiesStaySeparated(t *testing.T)
+func TestAccessRecorderAttemptFailurePreventsGetAndResultFailurePreventsCommit(t *testing.T)
 func TestArchiveDBRolesHaveExactPositiveAndNegativeGrants(t *testing.T)
 ```
 
@@ -745,8 +1031,10 @@ Expected: FAIL until orchestration exists.
 
 - [ ] **Step 2: Implement pure Plan -> exact envelope candidate**
 
-Plan reads tip/root/RecoveryIndex/catalog and approved target policy, then emits
-canonical envelope bytes + digest for human approval. It does not sign approval,
+Plan reads tip/root/RecoveryIndex/catalog and approved target policy, then emits exact
+`PLOApprovalEnvelopeV1` canonical bytes + digest for human approval. It includes the
+two sorted HUMAN approvers, purpose, half-open validity, dry-run digest and bound signed
+Kill Switch hash, but no unknowable object result or exit code. It does not sign approval,
 create root, upload, CAS or write DB. Run accepts only a signed envelope artifact;
 bare approval ID and range/bucket/KMS/target CLI overrides are rejected.
 
@@ -755,9 +1043,11 @@ bare approval ID and range/bucket/KMS/target CLI overrides are rejected.
 Use one repeatable-read source snapshot and approved settle window to freeze eligible
 terminal ActionRuns and audit tip. Report eligible/matched/missing/duplicate by
 `action_run_id`; keep `chain_integrity` and `capture_completeness` separate and surface
-the v1 non-injective caveat. Persist a secret-free receipt by envelope digest containing
-object bytes/hashes, IDs, signing times, generation and result digest; retry cannot mint
-new UUID/time/signature for the same operation.
+the v1 non-injective caveat. Before the first Put, persist `OperationIntentV1` with all
+object bytes/hashes, IDs, signing times and idempotency tokens in ReceiptJournal; append
+each exact VersionID result before moving on. After terminal CAS, sign and append a
+separate `PLOResultReceiptV1`. Retry cannot mint new UUID/time/signature or conflate the
+approval input with the result artifact.
 
 - [ ] **Step 4: Select/reuse trusted pending root without `export_target`**
 
@@ -769,21 +1059,25 @@ tip and returns the prior receipt digest.
 
 - [ ] **Step 5: Implement exact-version checkpoint/CAS/catalog protocol**
 
-Follow spec §6.3: exact-version data verify -> manifest built from VersionID/KMS/Lock
-receipts and exact verify -> signed checkpoint exact verify -> RecoveryIndex CAS
-terminal commit -> idempotent catalog materialization. AccessRecorder failure blocks
-Restricted Get. A later segment cannot publish if an earlier one failed.
+Follow spec §6.3: durable intent -> exact-version data verify -> manifest built from
+complete `ObjectVersionV1` receipts and exact verify -> signed checkpoint exact verify ->
+RecoveryIndex CAS terminal commit -> idempotent catalog materialization -> initial full
+signed `ScrubReceiptV1` + signed CAS `ScrubHeadV1` -> signed PLO result receipt.
+AccessRecorder attempt/result failure blocks Restricted Get delivery and commit. A later
+segment cannot publish if an earlier one failed.
 
 - [ ] **Step 6: Fault-inject every crash/CAS boundary**
 
 ```go
 func TestRetryReusesSameEnvelopeBytesIDsTimesAndObjectVersions(t *testing.T)
+func TestAmbiguousSuccessfulPutRecoversExactVersionOrStopsProvider(t *testing.T)
 func TestCrashBeforeCASLeavesOnlyReusableOrphans(t *testing.T)
 func TestAmbiguousCASReadsBackProposedExpectedOrConflict(t *testing.T)
 func TestCrashAfterCASRepairsCatalogWithoutRepublish(t *testing.T)
 func TestCatalogAheadOfIndexIsIntegrityIncident(t *testing.T)
 func TestConcurrentRunsCannotForkManifestCheckpointOrIndex(t *testing.T)
 func TestFailedEarlierSegmentCannotPublishLaterSegment(t *testing.T)
+func TestCrashAfterIndexBeforeScrubHeadAndResultReceiptConvergesWithoutRepublish(t *testing.T)
 ```
 
 - [ ] **Step 7: Constrain CLI and package lifecycle binary**
@@ -801,10 +1095,13 @@ Add a Docker target only; no daemon/compose/worker/cron/restart/default enableme
 
 - [ ] **Step 8: Prove exact DB/IAM roles and non-production round trip**
 
-Run positive/negative `SET ROLE` and provider-policy tests for SourceReader fixed SELECT,
-RootWriter root INSERT, CatalogWriter catalog SELECT/INSERT, ObjectWriter fixed-prefix
-conditional Put, ExactObjectReader signed-version Get/Head, RecoveryIndex fixed CAS and
-AccessRecorder append. Owner/superuser/bucket-admin/latest/list/delete is STOP.
+Run positive/negative `SET ROLE` and provider-policy tests separately for
+AuditSourceReader snapshot fixed SELECT, RootWriter root INSERT, CatalogReader SELECT,
+CatalogWriter INSERT, ObjectWriter fixed-prefix conditional Put/recover-result,
+ExactObjectReader signed-version Get/Head, RecoveryIndexReader fixed load,
+RecoveryIndexCASWriter fixed CAS, ReceiptJournal append, ScrubReceipt/Head writer and
+AccessRecorder's independent append-only security sink. Each uses a distinct CredentialRef;
+owner/superuser/bucket-admin/latest/list/delete or recorder writing `audit_event` is STOP.
 
 Against the approved disposable test bucket and test database:
 
@@ -819,7 +1116,7 @@ Record object hashes and exit codes without recording payload contents or keys.
 
 ```powershell
 git diff --check
-git add internal/platform/audit/archive cmd/audit-archive deploy/docker/go.Dockerfile deploy/bootstrap/003_audit_archive_grants_evidence.sql docs/modules/audit docs/runbooks/AUDIT-ARCHIVE.md docs/evidence/TEMPLATE-audit-archive-run.md
+git add internal/platform/audit/archive cmd/audit-archive deploy/docker/go.Dockerfile deploy/bootstrap/003_audit_archive_grants_evidence.sql docs/modules/audit docs/runbooks/AUDIT-ARCHIVE.md docs/evidence/TEMPLATE-audit-archive-run.md docs/evidence/TEMPLATE-audit-access-recorder.md
 git commit -m "feat(audit): add trusted archive lifecycle operation"
 ```
 
@@ -907,6 +1204,8 @@ Operational object/KMS/keyring/discovery timeout -> unavailable；unknown archiv
 canonical version -> verifier outdated；deterministic budget -> budget exceeded；
 signature/hash/chain/protection mismatch -> integrity failed。Unknown errors remain
 generic 500；no response exposes object key/VersionID/KMS/payload/key material.
+`verifier_outdated` is only `*archive.CompatibilityError`, never a
+`VerificationReport.Code`; one handler adapter owns the `errors.As` mapping and its tests.
 
 - [ ] **Step 1: Write cross-tier Query red tests**
 
@@ -923,6 +1222,8 @@ func TestQueryMapsOperationalErrorsWithoutCallingThemIntegrityFailures(t *testin
 func TestQueryEnforcesObjectByteAndCountBudget(t *testing.T)
 func TestCoverageFieldsFollowCheckpointNotCatalogOrConfiguration(t *testing.T)
 func TestCoverageSeparatesChainIntegrityCaptureCompletenessAndV1Caveat(t *testing.T)
+func TestCoverageVerifiedAtOnlyUsesTrustedScrubHeadAndExactReceipt(t *testing.T)
+func TestCoverageNeverInfersVerifiedAtFromCatalogHeadOrAttemptTime(t *testing.T)
 ```
 
 Run:
@@ -939,13 +1240,16 @@ Cold reader starts from verified RecoveryIndex/checkpoint, selects catalog range
 when catalog generation/digest matches, and reads the signed projection VersionID.
 It checks key purpose/protocol, KMS/Lock/hash before strict decoding, skips zero-count
 environments, enforces 32 objects/64 MiB/deadline and never opens payload objects.
+Coverage separately verifies `ScrubHeadV1` and its exact `ScrubReceiptV1`; it uses scrub
+facts only when their checkpoint hash equals the current RecoveryIndex checkpoint.
 
 - [ ] **Step 3: Implement deterministic hot-first merge**
 
 Read hot first. If fewer than limit and older committed ranges are required,
 continue from the exact oldest hot sequence into cold. Deduplicate by sequence,
 sort descending, enforce environment, compute one `NextBefore`, and produce
-coverage from verified checkpoint/scrub/source facts rather than catalog max or config.
+coverage from verified checkpoint/signed ScrubReceipt/source facts rather than catalog
+max, object Head, last attempt or config.
 Any required-tier failure returns no items；environment sequence gaps stay normal.
 
 - [ ] **Step 4: Change HTTP tests before handler implementation**
@@ -1056,7 +1360,7 @@ keyring 分发、演练窗口与证据保存位置批准。生产自动调度还
 
 ```go
 type RestoreRequest struct {
-    SignedEnvelope   SignedRestoreEnvelope
+    SignedEnvelope   SignedPLOApprovalEnvelopeV1 // purpose="restore"
     DryRun           bool
 }
 
@@ -1072,9 +1376,11 @@ type RestoreReport struct {
 }
 
 type Restorer struct {
-    RecoveryIndex  RecoveryIndexStore
+    RecoveryIndex  RecoveryIndexReader
     Objects        ExactObjectReader
     AccessRecorder AccessRecorder
+    KillSwitchReader KillSwitchReader
+    PLOKeyring      Keyring
     RootKeyring    Keyring
     ManifestKeyring Keyring
     CheckpointKeyring Keyring
@@ -1102,6 +1408,7 @@ func TestRestoreRejectsTargetWithoutIsolationMarker(t *testing.T)
 func TestRestoreRejectsTargetMissingReferencedEnvironment(t *testing.T)
 func TestRestoreRejectsMissingApprovalAndExpectedRoot(t *testing.T)
 func TestRestoreRejectsUnsignedExpiredOrChangedEnvelopeAndWrongTargetFingerprint(t *testing.T)
+func TestRestoreRequiresTrustedPLOKeyringAndBoundEnabledKillSwitch(t *testing.T)
 func TestRestoreNeverUpdatesDeletesOrRehashesArchivedEvents(t *testing.T)
 func TestRestoreStopsBeforeInsertOnAnyManifestObjectOrRootFailure(t *testing.T)
 func TestRestoreDiscoversTerminalManifestAndRebuildsCatalogWithSourceDBGone(t *testing.T)
@@ -1239,6 +1546,23 @@ a physical-tiering slice from this PR.
 
 ---
 
+## XM-C-AUD0 round-2 review closure matrix
+
+| Review item | Normative closure | Red/green evidence location |
+|---|---|---|
+| DB-loss previous locator | `PreviousManifestRefV1` exact bucket/key/VersionID/SHA + unique genesis | AUD1 artifact wire tests；AUD2 terminal-to-genesis/no-DB/no-List tests |
+| legacy root marker | AUD1 removes `MarkChainRootExported` query/generated method and all `export_target` writes | AUD1 zero-DB-write success/failure/retry tests + source search |
+| frozen signed wire | independent `ChainRootRefV1/ManifestV1/CheckpointV1/RecoveryIndexV1` strict wire | AUD1 literal bytes/SHA, missing/null/order/time and cross-domain goldens |
+| exact object proof | full `ObjectVersionV1` signed and compared to exact readback | AUD2 field-by-field KMS/Lock/checksum/VersionID tests |
+| ambiguous Put | durable intent before Put + qualified `RecoverPutResult`; otherwise provider NO-GO | AUD2 response-loss/provider-qualification and receipt fault injection |
+| precise capabilities | split Source snapshot/Root/Catalog/Object/Recovery/Receipt/Scrub/Access interfaces, credentials and `RecoverySigner` | AUD3 method-shape plus DB/IAM positive/negative integration evidence |
+| PLO/Kill Switch | signed approval input, separately signed result receipt, bound/rechecked signed Kill Switch | AUD3 field/domain/validity/approver/recheck tests；restore repeats PLO verification |
+| first boundary | AUD1 local export starts only at sequence 1；continuation requires trusted exact predecessor | AUD1 CLI rejection and terminal-to-genesis verifier tests |
+| truthful verified time | append-only signed `ScrubReceiptV1` + signed CAS `ScrubHeadV1` | AUD3 initial receipt；AUD4 no-catalog/HEAD inference tests；AUD5 continuous receipts |
+| typed compatibility | verifier-outdated exists only as `*CompatibilityError` | AUD1 verifier/CLI and AUD4 single HTTP `errors.As` mapping tests |
+
+Every row is a mandatory acceptance criterion, not optional follow-up work.
+
 ## Final program audit after AUD5
 
 Before anyone calls the audit archive program complete, assemble a requirement-to-
@@ -1248,17 +1572,17 @@ evidence matrix covering:
 |---|---|
 | copy-only/no-delete | source search + DB row-count invariance + no-delete rules/tests |
 | mixed canonical versions | v1/v2 golden + archive/restore round trip |
-| frozen/strict wire | literal byte/SHA goldens + missing/zero/duplicate/unknown/null/partial-line rejection |
+| frozen/strict wire | independent Event/ChainRootRef/Manifest/Checkpoint/RecoveryIndex literal byte/SHA goldens + missing/zero/duplicate/unknown/null/order/time/partial-line rejection |
 | segment continuity | missing/overlap/reorder/broken-link red-green tests |
-| object immutability | PutIfAbsent collision + exact VersionID/KMS/Object Lock readback + provider evidence |
+| object immutability | PutIfAbsent collision + complete ObjectVersionV1 exact readback + ambiguous-success recovery/provider qualification evidence |
 | signature trust | embedded-key rejection + wrong purpose/protocol/fingerprint/expiry/revocation tests + independent keyring |
-| DB-loss discovery | signed RecoveryIndex/checkpoint discovers terminal manifest VersionID and rebuilds empty catalog |
-| terminal commit/retry | CAS ambiguity/crash matrix + same envelope bytes/IDs/times/result digest |
+| DB-loss discovery | signed RecoveryIndex/checkpoint discovers terminal manifest and walks exact PreviousManifestRefV1 to genesis without DB/List/latest |
+| terminal commit/retry | durable intent/put receipts + ambiguous Put/CAS crash matrix + same envelope bytes/IDs/times/VersionIDs/result digest |
 | committed-only catalog | index never behind catalog + fault injection/reconciliation after every boundary |
 | evidence semantics | chain_integrity separate from ActionRun capture_completeness + v1 caveat |
 | environment/PII isolation | projection key allowlist + cross-environment denial tests |
-| Query transparency | hot/cold cursor parity + exact coverage field semantics + typed HTTP errors/no partial items |
-| PLO not Action | trusted signed envelope/Kill Switch + route/action registry search + runbook evidence |
+| Query transparency | hot/cold cursor parity + ScrubReceipt-backed coverage + one typed HTTP error mapping/no partial items |
+| PLO not Action | distinct signed approval/result artifacts + bound Kill Switch + route/action registry search + runbook evidence |
 | R2-10/DB roles | merged refs + Reader/RootWriter/CatalogWriter/AccessRecorder positive/negative grants evidence |
 | restore/RPO/RTO | RecoveryIndex-source catalog rebuild + same-tx verify-before-commit + continuous scrub/lag alert drill |
 | migration governance | fresh number + exact base/diff digest approval STOP + no release down-migration |
