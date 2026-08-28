@@ -369,7 +369,7 @@ Action `CONFLICT`，不把 PostgreSQL 错误原文透传。
 type DirectoryCompleteness struct {
     Complete      bool
     Truncated     bool
-    ReportedCount int64
+    ReportedCount *int64
     FetchedCount  int64
     Evidence      string
 }
@@ -387,8 +387,10 @@ type ChannelDirectory[T any] struct {
 
 判据：
 
+- `ReportedCount=nil` 表示上游**没有报告总数**；`ReportedCount=&0` 表示上游明确
+  报告零条，两者禁止合流。JSON 对应 `reported_count:null` 与 `0`。
 - `Complete=true` 仅当翻页自然结束、`Truncated=false`，且上游给 reported count 时
-  `FetchedCount == ReportedCount`；上游不给 reported count 时，Evidence 必须写明
+  `FetchedCount == *ReportedCount`；上游不给 reported count 时，Evidence 必须写明
   采用了“空末页/短页自然结束”判据。
 - `CoveragePartial=true` 表示余额、错误率、模型等字段未覆盖所有行；它不改变
   `Complete`，也不阻止这些行作为身份目录。
@@ -429,6 +431,11 @@ type ReadClientV2 interface {
 - real `NewClient` 返回的具体 client、Fake 和 jobs factory 都实现 `ReadClientV2`；
   `Sub2APIClientFactory`/worker wiring 显式要求 v2，不能在 Worker 内做类型断言后降级。
 - Worker 每轮只拉一次完整目录，再投影 legacy v1 余额；不为兼容性重复请求上游。
+- `connectors/sub2api.NewClient`、`jobs.Sub2APIClientFactory`、
+  `NewSub2APIClientFactory`、`Sub2APISyncOptions.NewClient` 到 Worker 字段的静态返回类型
+  全部是 v2；`jobs.NewClient` 构造链中间不准退回 v1。
+- v1 adapter 是确定性纯投影 `LegacyChannelBalances(directory)`；旧调用方若只要
+  `ReadClient` 可直接接收 v2（interface 嵌入），不得靠运行时类型断言选择路径。
 - 保留 v1 `ChannelBalances()` 与 `sub2api.channels.balance` 兼容期。v1 继续省略
   nil-quota 行，并因省略行设置 legacy `IsPartial=true`/watermark skipped count；这
   个 partial 只描述 v1 余额覆盖，绝不反向污染 v2 `Completeness`。
@@ -452,6 +459,17 @@ NewAPI v1 `Snapshot.IsPartial` 同时可能表示“错误率只测了 40 条”
 factory 暴露 `ChannelDirectory[ChannelStatus]` v2 envelope，把 fetch 内部已有的
 reported/fetched/truncated 单独带出；v1 `Channels()` 继续兼容。Mapping 不等待
 模型/余额字段的 NewAPI v2，但必须等独立目录完整性证据。
+
+NewAPI 同样声明 `ContractVersionV1="1"` / `ContractVersionV2="2"`，v2 interface
+嵌入 v1；Registry 可登记 v2，但 `newapi.channels.read` capability 与
+`ChannelStatus` 字段保持 v1，v2 的唯一新增语义是目录完整性 envelope。不得把这次
+版本号变化解释成错误率、余额或模型行契约已经升级。
+
+静态构造链与 Sub2API 对称：`connectors/newapi.NewClient`、
+`jobs.NewAPIClientFactory`、`NewNewAPIClientFactory`、`NewAPISyncOptions.NewClient` 和
+Worker 字段都返回/持有 `newapi.ReadClientV2`；`jobs.NewClient` 直接装配 v2。Worker
+调用一次 `ChannelDirectory()`，v1 指标由 `LegacyChannelStatuses(directory)` 纯投影，
+不调用 `client.(ReadClientV2)`、不失败后降级 v1，也不为兼容性重复拉取。
 
 **非法余额首版决策：页面级 fail closed。** 当前 `channelBalance` 解析到非法余额会
 让整个 `Channels()` 返回 `bad_response`，平台没有逐渠道 `invalid_balance` 状态。
@@ -512,7 +530,9 @@ GET /api/v1/finance/platform-channel-bindings
 ```
 
 无 active binding 时 `binding=null`；已确认行仍返回 candidate evidence，以便暴露
-token-map 后续漂移。`history` 缺省而不是 null。
+token-map 后续漂移。`history` 缺省而不是 null。`inventory.reported_count` 的类型是
+`integer|null`：null=上游未报告，0=上游明确报告零条；前端和游标逻辑不得用 `?? 0`
+合流。
 
 ### 10.2 渠道投影 Query
 
@@ -742,6 +762,7 @@ MAP1~MAP4 都不得自行合并。若 MI-1 选择真多实例，依赖图先增�
 
 - `unmapped/candidate/conflict/orphan` 四态均有测试。
 - inventory completeness 与 coverage partial 各有独立测试；New v1 IsPartial 不禁绑定。
+- reported_count 未报告(null)与明确 0 不合流，且各自的 Complete/Evidence 判据有测试。
 - incomplete/truncated/stale/failed 不会自动制造 orphan 或解绑。
 - source 与 service.instance_id 不一致 fail closed。
 - token-map 候选仅在同环境/同 system type 恰一 active service 时成立；零服务为
@@ -776,7 +797,9 @@ MAP1~MAP4 都不得自行合并。若 MI-1 选择真多实例，依赖图先增�
 1. **MI-1**：批准本期“单观测实例 fail-closed”，还是要求现在扩为真多实例？
    本计划推荐前者；选择后者必须退回修订。
 2. 是否批准新增迁移与时间版本化 `finance.platform_channel_binding`？
-3. 是否批准 Sub2API read contract v2 与新完整目录指标？
+3. 是否同时批准 **Sub2API read contract v2** 与 **NewAPI
+   directory-completeness v2 envelope**？NewAPI `ChannelStatus`/`Channels()` 的行语义仍是
+   v1，v2 只新增独立目录完整性证据。任一未批准，MAP1 都不得开工。
 4. 是否批准新增两个 Query、两个 L1 HUMAN Action 及
    `finance.platform_channel_binding.manage`？
 5. 是否同意新 scope 默认不授予任何默认角色？

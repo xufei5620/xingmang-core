@@ -17,6 +17,9 @@
 ## Global Constraints
 
 - Human approval of all seven spec §15 items is required before creating MAP1.
+- In particular, MAP1 requires one explicit approval covering both **Sub2API read v2** and the
+  **NewAPI directory-completeness v2 envelope**; NewAPI row semantics remain v1. Approval of only
+  one half is no approval, and MAP1 must not start.
 - This plan assumes MI-1 approves **single observed instance, fail closed** for MAP1~MAP4.
 - If human review chooses true multi-instance metrics, revise the spec and this plan first.
 - Each MAP slice starts from the then-current `origin/release/v0.1-launch` in its own worktree/branch/PR.
@@ -55,12 +58,16 @@ approved MAP0
 - Create: `connectors/sub2api/channel_directory.go`
 - Create: `connectors/sub2api/channel_directory_test.go`
 - Create: `connectors/sub2api/contracttest/v2_suite.go`
+- Modify: `connectors/sub2api/contract.go`
+- Modify: `connectors/sub2api/client.go`
 - Modify: `connectors/sub2api/upstream.go`
 - Modify: `connectors/sub2api/fake.go`
 - Modify: `connectors/sub2api/contract_test.go`
 - Modify: `connectors/sub2api/client_contract_test.go`
 - Create: `connectors/newapi/channel_directory.go`
 - Create: `connectors/newapi/channel_directory_test.go`
+- Modify: `connectors/newapi/contract.go`
+- Modify: `connectors/newapi/client.go`
 - Modify: `connectors/newapi/upstream.go`
 - Modify: `connectors/newapi/fake.go`
 - Modify: `connectors/newapi/client_contract_test.go`
@@ -68,8 +75,8 @@ approved MAP0
 - Modify: `internal/platform/jobs/sub2api_sync_test.go`
 - Modify: `internal/platform/jobs/newapi_sync.go`
 - Modify: `internal/platform/jobs/newapi_sync_test.go`
-- Modify: `cmd/platform-worker/main.go`
-- Modify: `cmd/platform-worker/main_test.go`
+- Modify: `internal/platform/jobs/client.go`
+- Create: `internal/platform/jobs/channel_directory_factory_test.go`
 - Modify: `internal/platform/ops/freshness.go`
 - Modify: `internal/platform/ops/metrickeys_test.go`
 - Modify: `docs/modules/connector/README.md`
@@ -97,7 +104,7 @@ type ManagedChannel struct {
 type DirectoryCompleteness struct {
     Complete bool
     Truncated bool
-    ReportedCount int64
+    ReportedCount *int64
     FetchedCount int64
     Evidence string
 }
@@ -121,7 +128,12 @@ func ToChannelDirectoryObservation(
 
 NewAPI keeps `ChannelStatus` and `ReadClient.Channels()` v1 row semantics. Its own directory-v2 type
 duplicates the completeness fields above and wraps `[]ChannelStatus`; connectors do not import a
-shared contract type. This exposes reported/fetched/truncated independently from v1 `IsPartial`.
+shared contract type. `newapi/contract.go` adds the same V1/V2 constants and a v2 interface embedding
+v1; existing `newapi.channels.read` capability and row fields do not change. This exposes
+reported/fetched/truncated independently from v1 `IsPartial`.
+Both `connectors/*/NewClient`, both jobs factory types/constructors, both worker option/field types,
+and `jobs.NewClient` are statically v2 end-to-end; legacy arrays are pure adapters from the v2
+directory. Runtime type assertions and “try v2, fall back to v1” are forbidden.
 
 - [ ] **Step 1: Create MAP1 only after MAP0 approval**
 
@@ -167,6 +179,17 @@ func TestNewAPICoveragePartialDoesNotMeanDirectoryIncomplete(t *testing.T) {
         t.Fatalf("directory=%+v", got)
     }
 }
+
+func TestReportedCountUnknownDiffersFromExplicitZero(t *testing.T) {
+    unknown := directoryCompleteness(nil, 0, naturalEnd())
+    zero := directoryCompleteness(ptr(int64(0)), 0, reportedEnd())
+    if unknown.ReportedCount != nil || zero.ReportedCount == nil || *zero.ReportedCount != 0 {
+        t.Fatalf("unknown=%+v zero=%+v", unknown, zero)
+    }
+    if !unknown.Complete || !zero.Complete || unknown.Evidence == zero.Evidence {
+        t.Fatalf("unknown and explicit zero need distinct completeness evidence")
+    }
+}
 ```
 
 - [ ] **Step 4: Run the focused test and confirm red**
@@ -209,13 +232,17 @@ factory returned to the Worker is statically `ReadClientV2`; Fake/real clients i
 Worker contains no optional type assertion. Legacy v1 still omits nil-quota rows and records skipped
 count + `IsPartial=true` without changing v2 completeness.
 
+Change `connectors/sub2api.NewClient` and `connectors/newapi.NewClient` to return their v2 interfaces;
+change `Sub2APIClientFactory`, `NewAPIClientFactory`, both factory constructors, worker option/field
+types, and `jobs.NewClient` wiring to the same static types. `LegacyChannelBalances` and
+`LegacyChannelStatuses` are pure adapters used to preserve v1 outputs from the one directory fetch.
+
 - [ ] **Step 7: Run MAP1 verification**
 
 ```powershell
 go test ./connectors/sub2api/... -count=1
 go test ./connectors/newapi/... -count=1
 go test ./internal/platform/jobs -run 'Sub2API|NewAPI' -count=1
-go test ./cmd/platform-worker -count=1
 go test ./internal/platform/ops -count=1
 go fmt ./connectors/sub2api/... ./connectors/newapi/... ./internal/platform/jobs/... `
   ./internal/platform/ops/... ./cmd/platform-worker/...
@@ -233,7 +260,7 @@ git add contracts/connectors/sub2api.read.v2.md `
   contracts/connectors/newapi.channel-directory.v2.md connectors/sub2api connectors/newapi `
   internal/platform/jobs/sub2api_sync.go internal/platform/jobs/sub2api_sync_test.go `
   internal/platform/jobs/newapi_sync.go internal/platform/jobs/newapi_sync_test.go `
-  cmd/platform-worker/main.go cmd/platform-worker/main_test.go `
+  internal/platform/jobs/client.go internal/platform/jobs/channel_directory_factory_test.go `
   internal/platform/ops/freshness.go internal/platform/ops/metrickeys_test.go `
   docs/modules/connector/README.md
 git commit -m "feat(connectors): add complete Sub2API channel directory"
@@ -675,7 +702,8 @@ Use worktree `K:/星芒统一控制平台/wt-xmC-MAP4` and branch
 Test the frozen response schema, nullable money, all candidate/evidence states, conflicts, shared
 count, inventory complete versus coverage partial, and NewAPI's unconfigured versus known-zero
 balance. A fixture with two channels sharing one upstream must produce two frontend rows. A 502
-`EXECUTION_FAILED` fixture must produce page error with no stale/per-row fallback.
+`EXECUTION_FAILED` fixture must produce page error with no stale/per-row fallback. Separate fixtures
+assert `reported_count:null` remains unknown while `reported_count:0` remains explicit zero.
 
 - [ ] **Step 3: Confirm API tests are red**
 
