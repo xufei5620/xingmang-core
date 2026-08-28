@@ -1366,6 +1366,12 @@ Expected: tests/typecheck PASS.
 
 ## C3e-write-ui — Approved Write UI After C3c
 
+> **Execution-order note:** Task 13 below is the final part of
+> `C3d-read-cutover` and must be implemented/merged after Tasks 10–11 but before
+> this C3e Task 12. Task 12 remains physically adjacent to the UI files it extends
+> only for review readability; task numbering is not authorization to skip the
+> C3d cutover or the C3c/Foundation-B gate.
+
 ### Task 12: Extend the rules UI with approved Action submission after C3c
 
 **Files:**

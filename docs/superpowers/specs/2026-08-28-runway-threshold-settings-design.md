@@ -524,7 +524,8 @@ cutover，不画审批 Dialog；C3e 才能引入写 UI，且不得因按钮已�
 7. UI 位于 `/alerts?sub=rules`，Settings 只留入口，禁止右侧 Drawer；
 8. 迁移前缀按实施时最新目标基线动态 `max+1`；
 9. 动态 schema 生成后再次停止，等待精确迁移 diff 的人工批准；
-10. 新错误码安全映射为 503/409，Kernel 只透传可信 `*action.Error`；
+10. 新错误码安全映射为 503/409；Kernel 的 Handler-error allowlist 本片只包含
+    `REVISION_CONFLICT`，其余 typed/untyped 错误继续折叠为 opaque `EXECUTION_FAILED`；
 11. bootstrap 与 history 双写同事务，且通过同一版本化 lifecycle 镜像部署；
 12. Classify 返回 `(level,error)`，非法配置不得降成 critical；
 13. C3c 全片等待 Foundation-B 合入，不能提前创建/注册契约和 scope；
