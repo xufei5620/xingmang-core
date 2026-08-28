@@ -18,16 +18,20 @@
 - Do not push directly to `main` or `release/v0.1-launch`; do not merge any PR.
 - Use one task owner, worktree, branch, and PR per C3 slice.
 - All reads are Query; the only write is Action `finance.runway_threshold.set@1`.
-- The Action is L2, HUMAN-only, and fail closed with `ADVANCED_CONTROLS_REQUIRED` until Foundation-B is approved and merged.
+- C3c is wholly blocked until Foundation-B is approved and merged: do not create/register its Action contract, scope, Handler, or client before that gate.
 - New scope is exactly `finance.runway_threshold.manage`; do not add it to default roles, Keycloak mappings, AI identities, or frontend `DEFAULT_SCOPES`.
 - Query and preview use existing `finance.read`.
 - Runtime truth is PostgreSQL by environment; env is bootstrap input only and is never a post-cutover fallback.
 - Enforce `0 < critical < warning < serious` in Go, Action validation, Store, and DB CHECK constraints.
-- Classification is inclusive: `<= critical`, `<= warning`, `<= serious`; serious never creates an R5 notification.
+- Classification is inclusive: `<= critical`, `<= warning`, `<= serious`; `Classify` returns `(level,error)` and never converts invalid thresholds to critical; serious never creates an R5 notification.
 - DB missing/unavailable is fail closed: no default fallback and no reconcile from an empty finding set.
+- Add trusted codes `RUNWAY_CONFIG_UNAVAILABLE`→503 and `REVISION_CONFLICT`→409; Kernel only preserves safe `*action.Error`, and arbitrary causes stay opaque.
+- Bootstrap current/history in one transaction and ship the command inside the versioned migrate lifecycle image/tools service.
+- History rejects UPDATE/DELETE/TRUNCATE; tests use a disposable migrated database and minimum non-superuser roles, never TRUNCATE cleanup.
 - API request and worker evaluation round each use exactly one threshold snapshot.
 - UI uses inline/full-page/dialog only; never a right-side Drawer.
 - Do not hardcode a migration prefix. Compute `${MIGRATION_PREFIX}` from the implementation worktree after latest approved dependencies are present.
+- After generating the exact dynamically numbered schema diff, stop for explicit migration approval before DB application, sqlc generation, or Go implementation.
 - Use Action schema type `int`, not JSON Schema `integer`.
 - Use `go fmt`, never bare `gofmt` on this Windows host.
 - Credentials remain CredentialRef-only; this feature introduces no credential fields.
@@ -44,11 +48,19 @@
 - Regenerate: `internal/platform/finance/gen/finance.sql.go`
 - Create: `internal/platform/finance/runway_config.go`
 - Create: `internal/platform/finance/runway_config_store_integration_test.go`
-- Modify: `internal/platform/finance/store_integration_test.go`
+- Create: `scripts/test-runway-threshold-db.ps1`
 - Create: `cmd/runway-threshold-bootstrap/main.go`
 - Create: `cmd/runway-threshold-bootstrap/main_test.go`
+- Modify: `deploy/docker/go.Dockerfile`
+- Modify: `deploy/compose/launch.yaml`
+- Create: `tests/security/runway-bootstrap-lifecycle.test.sh`
+- Create: `tests/security/runway-threshold-db-roles.test.sh`
 - Create: `internal/platform/httpapi/finance_runway_config.go`
 - Create: `internal/platform/httpapi/finance_runway_config_test.go`
+- Modify: `internal/platform/action/errors.go`
+- Modify: `internal/platform/action/errors_test.go`
+- Modify: `internal/platform/httpapi/response.go`
+- Modify: `internal/platform/httpapi/response_test.go`
 - Modify: `internal/platform/httpapi/router.go`
 - Modify: `cmd/platform-api/main.go`
 - Modify: `docs/modules/finance/README.md`
@@ -58,8 +70,11 @@
 - Modify: `internal/platform/finance/runway.go`
 - Modify: `internal/platform/finance/runway_test.go`
 - Modify: `internal/platform/finance/summary_store.go`
+- Modify: `internal/platform/finance/summary_store_integration_test.go`
 - Modify: `internal/platform/alerts/rules.go`
 - Modify: `internal/platform/alerts/runway_rule_test.go`
+- Modify: `internal/platform/alerts/reconcile_test.go`
+- Modify: `internal/platform/alerts/store_integration_test.go`
 - Create: `internal/platform/alerts/runway_preview.go`
 - Create: `internal/platform/alerts/runway_preview_test.go`
 - Modify: `internal/platform/httpapi/finance_summary.go`
@@ -80,9 +95,17 @@
 
 - Create: `contracts/actions/finance.runway_threshold.set.v1.json`
 - Modify: `internal/platform/finance/permissions.go`
+- Modify: `internal/platform/finance/runway_config.go`
+- Modify: `internal/platform/finance/runway_config_store_integration_test.go`
 - Create: `internal/platform/finance/runway_actions.go`
 - Create: `internal/platform/finance/runway_actions_test.go`
 - Create: `internal/platform/finance/runway_actions_integration_test.go`
+- Modify: `internal/platform/action/errors.go`
+- Modify: `internal/platform/action/errors_test.go`
+- Modify: `internal/platform/action/kernel.go`
+- Modify: `internal/platform/action/kernel_test.go`
+- Modify: `internal/platform/httpapi/response.go`
+- Modify: `internal/platform/httpapi/response_test.go`
 - Modify: `cmd/platform-api/main.go`
 - Modify: `internal/platform/httpapi/actions_test.go`
 - Modify: `docs/modules/action/README.md`
@@ -90,7 +113,7 @@
 
 ### C3d — alerts rules UI and rollout closure
 
-- Create: `web/apps/admin-web/src/api/runwayThresholds.ts`
+- Create: `web/apps/admin-web/src/api/runwayThresholds.ts` (C3a/b read/preview exports first; Action export only after C3c)
 - Create: `web/apps/admin-web/src/api/runwayThresholds.test.ts`
 - Create: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.tsx`
 - Create: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.test.tsx`
@@ -162,72 +185,17 @@ Expected: one six-digit value not present in the directory. Record it in the C3a
 
 Expected: the pair remains unique. If another accepted migration has taken the prefix, rename both unmerged C3a files and regenerate evidence.
 
-### Task 2: Add current/history schema with database invariants
+### Task 2: Draft the dynamically numbered schema, then stop for migration approval
 
 **Files:**
 - Create: `db/migrations/${MIGRATION_PREFIX}_finance_runway_threshold_config.up.sql`
 - Create: `db/migrations/${MIGRATION_PREFIX}_finance_runway_threshold_config.down.sql`
-- Modify: `db/queries/finance.sql`
-- Regenerate: `internal/platform/finance/gen/db.go`
-- Regenerate: `internal/platform/finance/gen/models.go`
-- Regenerate: `internal/platform/finance/gen/finance.sql.go`
-- Test: `internal/platform/finance/runway_config_store_integration_test.go`
-- Modify: `internal/platform/finance/store_integration_test.go`
 
 **Interfaces:**
 - Consumes: `${MIGRATION_PREFIX}` from Task 1 and existing `core.environment(id)`.
-- Produces: current row, append-only history, and sqlc methods used by `RunwayThresholdStore`.
+- Produces: an exact migration review artifact only; no DB application or generated Go code before approval.
 
-- [ ] **Step 1: Write the failing integration test for schema constraints and history immutability**
-
-Create `internal/platform/finance/runway_config_store_integration_test.go` in package `finance_test` and use the existing `testPool(t)` helper:
-
-```go
-func TestRunwayThresholdTablesEnforceOrderAndHistoryIsAppendOnly(t *testing.T) {
-    pool := testPool(t)
-    ctx := context.Background()
-
-    _, err := pool.Exec(ctx, `
-        INSERT INTO finance.runway_threshold_config (
-            environment, critical_days, warning_days, serious_days,
-            revision, updated_at, updated_by, reason, request_id
-        ) VALUES ('production', 10, 5, 20, 1, now(), 'itest', 'bad order', 'req-bad')`)
-    if err == nil {
-        t.Fatal("critical >= warning must be rejected by the database")
-    }
-
-    _, err = pool.Exec(ctx, `
-        INSERT INTO finance.runway_threshold_history (
-            environment, revision, critical_days, warning_days, serious_days,
-            changed_at, changed_by, reason, request_id, change_source
-        ) VALUES (
-            'production', 1, 5, 10, 20,
-            now(), 'itest', 'bootstrap', 'req-history', 'bootstrap'
-        )`)
-    if err != nil {
-        t.Fatalf("insert history fixture: %v", err)
-    }
-
-    _, err = pool.Exec(ctx, `
-        UPDATE finance.runway_threshold_history SET reason='rewritten'
-        WHERE environment='production' AND revision=1`)
-    if err == nil {
-        t.Fatal("history UPDATE must be rejected")
-    }
-}
-```
-
-- [ ] **Step 2: Run the test and confirm RED**
-
-Run:
-
-```powershell
-go test -p 1 ./internal/platform/finance -run TestRunwayThresholdTablesEnforceOrderAndHistoryIsAppendOnly -count=1
-```
-
-Expected: FAIL because the tables do not exist.
-
-- [ ] **Step 3: Create the migration pair**
+- [ ] **Step 1: Create the migration pair**
 
 The up migration must implement this exact shape:
 
@@ -263,10 +231,86 @@ CREATE TABLE finance.runway_threshold_history (
 );
 ```
 
-Add a trigger function that raises on UPDATE or DELETE of history, plus an index on
-`(environment, revision DESC)`. The down migration drops the trigger, trigger function, history table, then current table in that order.
+Add an index on `(environment, revision DESC)` and two trigger paths backed by a function that raises a
+stable exception: row-level `BEFORE UPDATE OR DELETE`, plus statement-level `BEFORE TRUNCATE`. The down
+migration drops both triggers, trigger function, history table, then current table in that order.
+
+- [ ] **Step 2: Produce the migration approval packet without touching a database**
+
+Run:
+
+```powershell
+git diff --check -- `
+  "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.up.sql" `
+  "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.down.sql"
+git diff -- `
+  "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.up.sql" `
+  "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.down.sql"
+```
+
+The review packet includes the exact prefix calculation, PR #103/XM-B003 state, table/trigger diff, lock
+assessment (`CREATE TABLE` only; no rewrite of existing finance tables), down order, and production
+forward-fix statement.
+
+- [ ] **Step 3: STOP for explicit migration approval**
+
+Do not apply the migration to any database, run sqlc, or write Store/Query/bootstrap code. The human must
+approve this exact numbered diff; approval of RUNWAY0 does not satisfy this gate. If the base changes while
+waiting, recompute the prefix, regenerate the pair, and request approval again.
+
+### Task 3: Verify the approved schema and generate queries
+
+**Files:**
+- Modify: `db/queries/finance.sql`
+- Regenerate: `internal/platform/finance/gen/db.go`
+- Regenerate: `internal/platform/finance/gen/models.go`
+- Regenerate: `internal/platform/finance/gen/finance.sql.go`
+- Create: `internal/platform/finance/runway_config_store_integration_test.go`
+- Create: `scripts/test-runway-threshold-db.ps1`
+- Create: `tests/security/runway-threshold-db-roles.test.sh`
+
+**Interfaces:**
+- Consumes: human-approved migration pair from Task 2.
+- Produces: verified current/history constraints and sqlc methods used by `RunwayThresholdStore`.
+
+- [ ] **Step 1: Add the disposable database harness**
+
+`scripts/test-runway-threshold-db.ps1` requires `XM_TEST_DATABASE_ADMIN_URL`, creates a random database
+named `xm_runway_test_<uuid>`, applies all migrations, creates non-superuser test roles for platform-api,
+worker, and lifecycle capabilities, runs the requested Go/security tests, terminates connections, and drops
+the whole database in `finally`. It must refuse an admin URL whose target database is not a known test/admin
+database. It never TRUNCATEs history or disables triggers.
+
+- [ ] **Step 2: Write schema/role integration tests**
+
+`TestRunwayThresholdTablesEnforceOrderAndHistoryIsAppendOnly` inserts one valid history row through the
+lifecycle test role, then uses the platform-api role to attempt UPDATE, DELETE, and TRUNCATE. Each must fail; SELECT
+still succeeds. A 10/5/20 current insert must fail the order CHECK. The worker role must SELECT current and
+must fail every DML statement. Teardown is database drop only.
+
+```go
+for name, statement := range map[string]string{
+    "update":   `UPDATE finance.runway_threshold_history SET reason='rewritten'`,
+    "delete":   `DELETE FROM finance.runway_threshold_history`,
+    "truncate": `TRUNCATE finance.runway_threshold_history`,
+} {
+    t.Run(name, func(t *testing.T) {
+        if _, err := apiRolePool.Exec(ctx, statement); err == nil {
+            t.Fatalf("%s history must be rejected", name)
+        }
+    })
+}
+```
+
+- [ ] **Step 3: Apply the approved migration only to the disposable DB and run RED/GREEN schema checks**
+
+First run the schema test against a disposable DB created from the pre-migration base and confirm the table
+missing failure. Then run the harness with the approved migration included and require all CHECK/trigger/role
+assertions to pass.
 
 - [ ] **Step 4: Add sqlc queries**
+
+Add named queries for:
 
 Add named queries for:
 
@@ -321,9 +365,6 @@ LIMIT sqlc.arg(result_limit);
 
 Bootstrap conflict inspection uses `GetRunwayThresholdConfig` after an `ON CONFLICT DO NOTHING`; do not overwrite an existing row.
 
-Extend `testPool(t)` so its single TRUNCATE statement begins with
-`finance.runway_threshold_history, finance.runway_threshold_config, ...`; current/history must not leak between integration tests.
-
 - [ ] **Step 5: Regenerate sqlc output**
 
 Run:
@@ -334,42 +375,46 @@ sqlc generate
 
 Expected: only finance generated files change in addition to the query file.
 
-- [ ] **Step 6: Run the migration/store test GREEN**
-
-Run with the repository integration-test database configured:
+- [ ] **Step 6: Run the approved migration/role tests GREEN**
 
 ```powershell
-go test -p 1 ./internal/platform/finance -run TestRunwayThresholdTablesEnforceOrderAndHistoryIsAppendOnly -count=1
+pwsh -File scripts/test-runway-threshold-db.ps1 `
+  -GoTest './internal/platform/finance' `
+  -Run 'TestRunwayThresholdTablesEnforceOrderAndHistoryIsAppendOnly'
+bash tests/security/runway-threshold-db-roles.test.sh
 ```
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit C3a schema**
+- [ ] **Step 7: Commit the approved C3a schema/query evidence**
 
 ```powershell
 git add -- "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.up.sql" `
   "db/migrations/$($MIGRATION_PREFIX)_finance_runway_threshold_config.down.sql" `
   db/queries/finance.sql internal/platform/finance/gen `
   internal/platform/finance/runway_config_store_integration_test.go `
-  internal/platform/finance/store_integration_test.go
+  scripts/test-runway-threshold-db.ps1 `
+  tests/security/runway-threshold-db-roles.test.sh
 git commit -m "feat(finance): add versioned runway threshold schema"
 ```
 
-### Task 3: Implement the snapshot Store and lifecycle bootstrap
+### Task 4: Implement the snapshot Store and transactional lifecycle bootstrap
 
 **Files:**
 - Create: `internal/platform/finance/runway_config.go`
 - Modify: `internal/platform/finance/runway_config_store_integration_test.go`
 - Create: `cmd/runway-threshold-bootstrap/main.go`
 - Create: `cmd/runway-threshold-bootstrap/main_test.go`
+- Modify: `deploy/docker/go.Dockerfile`
+- Modify: `deploy/compose/launch.yaml`
+- Create: `tests/security/runway-bootstrap-lifecycle.test.sh`
 
 **Interfaces:**
-- Consumes: sqlc methods from Task 2 and `ParseRunwayThresholds`.
+- Consumes: sqlc methods from Task 3 and `ParseRunwayThresholds`.
 - Produces:
   - `RunwayThresholdSnapshot`
   - `RunwayThresholdProvider.Current(ctx, environment)`
   - `RunwayThresholdStore.Bootstrap(ctx, input)`
-  - `RunwayThresholdStore.Set(ctx, input)` for C3c
   - `RunwayThresholdStore.ListHistory(ctx, query)`
 
 - [ ] **Step 1: Write failing Store tests**
@@ -380,9 +425,8 @@ Cover these exact cases:
 |---|---|---|
 | `TestRunwayThresholdStoreBootstrapIsIdempotent` | call Bootstrap twice with 5/10/20 | both return revision 1; history count stays 1 |
 | `TestRunwayThresholdStoreBootstrapRefusesDifferentExistingValues` | bootstrap 5/10/20, retry 4/9/18 | error is `ErrRunwayBootstrapConflict`; current remains 5/10/20 |
-| `TestRunwayThresholdStoreSetRequiresExpectedRevision` | current revision 2, Set expects 1 | error is `ErrRevisionConflict`; no revision 3 history |
-| `TestRunwayThresholdStoreSetWritesCurrentAndHistoryAtomically` | current revision 1, Set 4/9/18 | current and history both contain revision 2 and the exact values |
-| `TestRunwayThresholdStoreCurrentMissingFailsClosed` | truncate current/history | error is `ErrRunwayConfigUnavailable`; no default snapshot is returned |
+| `TestRunwayThresholdStoreBootstrapHistoryFailureRollsBackCurrent` | disposable DB trigger rejects staging history INSERT | Bootstrap errors; staging current/history both have zero rows |
+| `TestRunwayThresholdStoreCurrentMissingFailsClosed` | fresh disposable DB, development row absent | error is `ErrRunwayConfigUnavailable`; no default snapshot is returned |
 
 The first test should contain the concrete idempotency assertion:
 
@@ -436,17 +480,16 @@ type BootstrapRunwayThresholdInput struct {
     RequestID    string
 }
 
-type SetRunwayThresholdInput struct {
-    Environment      string
-    Thresholds       RunwayThresholds
-    ExpectedRevision int64
-    Actor             string
-    Reason            string
-    RequestID         string
-}
 ```
 
-`Current` maps no row and database errors to a wrapped `ErrRunwayConfigUnavailable`; it never returns defaults. `Set` uses one pgx transaction for current update plus history insert and reads back after commit for exact write confirmation.
+`Current` maps no row and database errors to a wrapped `ErrRunwayConfigUnavailable`; it never returns
+defaults. `Bootstrap` opens one pgx transaction, checks/inserts current, inserts history, and commits only
+after both succeed. Do not add the general `Set` method in C3a; that write implementation belongs wholly to
+post-Foundation-B C3c.
+
+The history failure test installs a disposable-DB-only trigger that raises for staging history INSERT, calls
+Bootstrap, then asserts both tables have zero staging rows before dropping the entire database. It must not
+TRUNCATE either table or disable the production append-only triggers.
 
 - [ ] **Step 4: Implement the versioned bootstrap command**
 
@@ -460,36 +503,75 @@ thresholds, err := finance.ParseRunwayThresholds(
 )
 ```
 
-It resolves the database through the repository CredentialRef path, then calls `Bootstrap` with actor `platform-lifecycle:runway-threshold-bootstrap`, reason `import existing runway environment thresholds`, and a generated request ID. Tests inject env lookup and Store interface; they must prove invalid env fails before DB access and conflict never overwrites.
+It resolves the database through the repository CredentialRef path, then calls `Bootstrap` with actor
+`platform-lifecycle:runway-threshold-bootstrap`, reason `import existing runway environment thresholds`, and
+a generated request ID. It also implements `version`, which prints build version/commit without opening the
+database. Tests inject env lookup and Store interface; they prove invalid env fails before DB access,
+history failure rolls back current, and conflict never overwrites.
 
-- [ ] **Step 5: Run Store and command tests GREEN**
+- [ ] **Step 5: Put bootstrap in the versioned lifecycle image and tools service**
+
+Add `./cmd/runway-threshold-bootstrap` to the builder output in `deploy/docker/go.Dockerfile`; copy the
+binary into the existing `migrate` target. Add a compose service named `runway-threshold-bootstrap` with:
+
+```yaml
+profiles: ["tools"]
+image: xingmang/migrate:${BUILD_VERSION:-staging}
+entrypoint: ["/usr/local/bin/runway-threshold-bootstrap"]
+command: ["up"]
+```
+
+It uses the same build target/digest as `migrate`, depends on successful migration, and receives DB
+CredentialRef plus bootstrap-only ENVIRONMENT/WARN/CRIT variables. It is never part of normal `up`.
+
+`tests/security/runway-bootstrap-lifecycle.test.sh` fails unless the Docker builder compiles the binary, the
+migrate target copies it, the service uses the same versioned image and `tools` profile, and runtime API/worker
+services do not invoke it.
+
+- [ ] **Step 6: Run Store, command, image-contract tests GREEN**
 
 ```powershell
-go test -p 1 ./internal/platform/finance ./cmd/runway-threshold-bootstrap -count=1
+pwsh -File scripts/test-runway-threshold-db.ps1 `
+  -GoTest './internal/platform/finance' `
+  -Run 'TestRunwayThresholdStore'
+go test -p 1 ./cmd/runway-threshold-bootstrap -count=1
+bash tests/security/runway-bootstrap-lifecycle.test.sh
+docker build -f deploy/docker/go.Dockerfile --target migrate `
+  --build-arg BUILD_VERSION=runway-test --build-arg BUILD_COMMIT=runway-test `
+  -t xingmang/migrate:runway-test .
+docker run --rm --entrypoint /usr/local/bin/runway-threshold-bootstrap `
+  xingmang/migrate:runway-test version
+docker compose -p xingmang-runway-plan -f deploy/compose/launch.yaml `
+  --env-file deploy/compose/.env.example --profile tools config --quiet
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit C3a Store/bootstrap**
+- [ ] **Step 7: Commit C3a Store/bootstrap lifecycle delivery**
 
 ```powershell
 git add internal/platform/finance/runway_config.go `
   internal/platform/finance/runway_config_store_integration_test.go `
-  cmd/runway-threshold-bootstrap
+  cmd/runway-threshold-bootstrap deploy/docker/go.Dockerfile `
+  deploy/compose/launch.yaml tests/security/runway-bootstrap-lifecycle.test.sh
 git commit -m "feat(finance): add runway threshold store and bootstrap"
 ```
 
-### Task 4: Add current/history Query endpoints
+### Task 5: Add current/history Query endpoints and safe 503 mapping
 
 **Files:**
 - Create: `internal/platform/httpapi/finance_runway_config.go`
 - Create: `internal/platform/httpapi/finance_runway_config_test.go`
+- Modify: `internal/platform/action/errors.go`
+- Modify: `internal/platform/action/errors_test.go`
+- Modify: `internal/platform/httpapi/response.go`
+- Modify: `internal/platform/httpapi/response_test.go`
 - Modify: `internal/platform/httpapi/router.go`
 - Modify: `cmd/platform-api/main.go`
 - Modify: `docs/modules/finance/README.md`
 
 **Interfaces:**
-- Consumes: `RunwayThresholdProvider` and Store history query from Task 3.
+- Consumes: `RunwayThresholdProvider` and Store history query from Task 4.
 - Produces:
   - `GET /api/v1/finance/runway-thresholds`
   - `GET /api/v1/finance/runway-thresholds/history`
@@ -505,6 +587,8 @@ Tests must assert:
 | `TestGetRunwayThresholdsRejectsCrossEnvironment` | staging Principal requests production | 403; no production snapshot is read |
 | `TestGetRunwayThresholdsMissingRowReturnsUnavailableNotDefaults` | provider returns `ErrRunwayConfigUnavailable` | 503 with stable code; body has no synthesized thresholds |
 | `TestListRunwayThresholdHistoryIsBoundedAndDescending` | `limit=2` over revisions 1,2,3 | returns 3,2 with `has_more=true`; invalid/oversized limits rejected or capped per handler contract |
+| `TestWriteErrorMapsRunwayUnavailableToOpaque503` | wrapped cause contains DSN/IP/table/constraint | 503 + safe message; none of the cause fragments appear |
+| `TestWriteErrorUnknownErrorRemainsOpaque500` | ordinary error text says `RUNWAY_CONFIG_UNAVAILABLE` | still INTERNAL 500; string imitation is not trusted |
 
 Use an actual JSON assertion for the current endpoint:
 
@@ -534,7 +618,20 @@ Expected: FAIL because routes and handlers do not exist.
 
 - [ ] **Step 3: Implement DTOs and handlers**
 
-The current response uses flat snake_case fields from the spec. History uses `{items, has_more}` with a maximum page size of 100. Resolve environment through the existing principal helper; never accept a handler-local fallback.
+Add `action.CodeRunwayConfigUnavailable = "RUNWAY_CONFIG_UNAVAILABLE"` and map it to HTTP 503. The
+handler maps `finance.ErrRunwayConfigUnavailable` to:
+
+```go
+action.NewError(
+    action.CodeRunwayConfigUnavailable,
+    "可用天数阈值配置暂不可用",
+    err,
+)
+```
+
+The current response uses flat snake_case fields from the spec. History uses `{items, has_more}` with a
+maximum page size of 100. Resolve environment through the existing principal helper; never accept a
+handler-local fallback. Do not expose `err.Error()` or special-case an arbitrary string.
 
 - [ ] **Step 4: Wire dependencies and routes**
 
@@ -555,6 +652,8 @@ Document DB ownership, bootstrap, error behavior, Query shapes, and the fact tha
 ```powershell
 git add internal/platform/httpapi/finance_runway_config.go `
   internal/platform/httpapi/finance_runway_config_test.go `
+  internal/platform/action/errors.go internal/platform/action/errors_test.go `
+  internal/platform/httpapi/response.go internal/platform/httpapi/response_test.go `
   internal/platform/httpapi/router.go cmd/platform-api/main.go `
   docs/modules/finance/README.md
 git commit -m "feat(api): expose runway threshold queries"
@@ -564,17 +663,20 @@ git commit -m "feat(api): expose runway threshold queries"
 
 ## C3b — One Classifier, R5 Preview, and Runtime Snapshots
 
-### Task 5: Replace split boundary logic with one inclusive classifier
+### Task 6: Replace split boundary logic with one error-returning inclusive classifier
 
 **Files:**
 - Modify: `internal/platform/finance/runway.go`
 - Modify: `internal/platform/finance/runway_test.go`
+- Modify: `internal/platform/finance/summary_store.go`
+- Modify: `internal/platform/finance/summary_store_integration_test.go`
 - Modify: `internal/platform/alerts/rules.go`
 - Modify: `internal/platform/alerts/runway_rule_test.go`
 
 **Interfaces:**
 - Consumes: existing `RunwayThresholds`.
-- Produces: `RunwayThresholds.Classify(days int) RunwayLevel`, used by compute, preview, and R5.
+- Produces: `RunwayThresholds.Classify(days int) (RunwayLevel, error)` and
+  `ComputeRunway(RunwayInput) (Runway, error)`, used by summary, preview, and R5.
 
 - [ ] **Step 1: Rewrite boundary tests to the approved inclusive matrix**
 
@@ -591,9 +693,21 @@ func TestRunwayThresholdsClassifyInclusiveBoundaries(t *testing.T) {
         21: finance.RunwayHealthy,
     }
     for days, want := range cases {
-        if got := thresholds.Classify(days); got != want {
+        got, err := thresholds.Classify(days)
+        if err != nil {
+            t.Fatalf("%d days: %v", days, err)
+        }
+        if got != want {
             t.Fatalf("%d days: got %s want %s", days, got, want)
         }
+    }
+}
+
+func TestRunwayThresholdsClassifyRejectsInvalidConfig(t *testing.T) {
+    bad := finance.RunwayThresholds{CriticalDays: 10, WarningDays: 5, SeriousDays: 20}
+    got, err := bad.Classify(3)
+    if err == nil || got != "" {
+        t.Fatalf("invalid thresholds must return empty level + error, got=%q err=%v", got, err)
     }
 }
 ```
@@ -612,24 +726,27 @@ Expected: FAIL under the current `<` evaluator behavior and missing exported cla
 - [ ] **Step 3: Implement one classifier and consume it everywhere**
 
 ```go
-func (t RunwayThresholds) Classify(days int) RunwayLevel {
+func (t RunwayThresholds) Classify(days int) (RunwayLevel, error) {
     if err := t.Validate(); err != nil {
-        return RunwayCritical
+        return "", err
     }
     switch {
     case days <= t.CriticalDays:
-        return RunwayCritical
+        return RunwayCritical, nil
     case days <= t.WarningDays:
-        return RunwayWarning
+        return RunwayWarning, nil
     case days <= t.SeriousDays:
-        return RunwaySerious
+        return RunwaySerious, nil
     default:
-        return RunwayHealthy
+        return RunwayHealthy, nil
     }
 }
 ```
 
-`ComputeRunway` calls `Classify`. R5 switches on the returned level: critical/warning produce one Finding; serious/healthy produce none. Delete duplicated integer comparisons from alerts.
+Change `ComputeRunway` to return `(Runway, error)` and propagate `Classify` errors. Update every call site found
+by `rg -n 'ComputeRunway\('`; no call may ignore the error or restore default thresholds. R5 switches on a
+successful level: critical/warning produce one Finding; serious/healthy produce none. Delete duplicated
+integer comparisons and `runwayInputs`/RuleConfig invalid→default fallbacks.
 
 - [ ] **Step 4: Run package tests GREEN**
 
@@ -643,11 +760,13 @@ Expected: PASS.
 
 ```powershell
 git add internal/platform/finance/runway.go internal/platform/finance/runway_test.go `
+  internal/platform/finance/summary_store.go `
+  internal/platform/finance/summary_store_integration_test.go `
   internal/platform/alerts/rules.go internal/platform/alerts/runway_rule_test.go
 git commit -m "fix(alerts): unify inclusive runway threshold boundaries"
 ```
 
-### Task 6: Add pure R5 impact preview
+### Task 7: Add complete R5 impact preview
 
 **Files:**
 - Create: `internal/platform/alerts/runway_preview.go`
@@ -671,10 +790,15 @@ const (
     RunwayWouldDeescalate RunwayImpactTransition = "would_deescalate"
     RunwayWouldResolve    RunwayImpactTransition = "would_resolve"
     RunwayUnchanged       RunwayImpactTransition = "unchanged"
+    RunwayCurrentInconsistent RunwayImpactTransition = "current_inconsistent"
 )
 ```
 
-Tests must prove unknown days and subscription accounts only affect coverage, serious never opens an alert, preview does not mutate inputs, and output ordering is stable by transition then account ID.
+Tests must cover every row of the spec transition table: open, warning→critical escalation,
+critical→warning de-escalation, resolve, unchanged actionable, unchanged non-actionable, missing active alert,
+unexpected active alert (including unknown/subscription), severity mismatch, and duplicate active alert.
+Inconsistency takes precedence over proposed impact. Also prove serious never opens an alert, preview does not
+mutate inputs, and output ordering is stable by transition then account ID.
 
 - [ ] **Step 2: Run tests and confirm RED**
 
@@ -686,11 +810,17 @@ Expected: FAIL because preview types do not exist.
 
 - [ ] **Step 3: Implement the pure comparator**
 
-The comparator calls `current.Classify(days)` and `proposed.Classify(days)`. Alert activity is derived from critical/warning only. It never calls Store or Reconciler and never invents days for unknown items.
+The comparator calls error-returning `current.Classify(days)` and `proposed.Classify(days)` and propagates any
+error. Alert activity is derived from critical/warning only. It compares current classifier state with the
+actual active R5 rows before predicting proposed impact. It never calls Store/Reconciler and never invents days
+for unknown items.
 
 - [ ] **Step 4: Write failing HTTP preview tests**
 
-Assert positive/strictly ordered query params, `finance.read`, environment isolation, page cap, `observed_at`, current revision, coverage, transition counts, and zero writes to config/action/audit stores.
+Assert positive/strictly ordered query params, `finance.read`, environment isolation, page cap, top-level
+`evaluation_at`, per-object `observed_at`, current revision, coverage, all six transition counts, consistency
+reasons, and zero writes to config/action/audit stores. Set the two times differently and assert they are not
+mapped into each other's fields.
 
 - [ ] **Step 5: Implement and mount preview Query**
 
@@ -700,7 +830,10 @@ Mount:
 GET /api/v1/finance/runway-thresholds/preview
 ```
 
-The handler reads the current config snapshot once, obtains current runways and active R5 alerts, runs the pure comparator, and returns only changed items plus counts. It does not bind or execute an Action.
+The handler records `evaluation_at` once, reads the current config snapshot once, obtains current runways and
+active R5 alerts, runs the pure comparator, and returns changed or inconsistent items plus counts. Each item
+uses the balance evidence `observed_at`; the top-level time is never copied into it. It does not bind or execute
+an Action.
 
 - [ ] **Step 6: Run focused tests GREEN and commit**
 
@@ -714,7 +847,7 @@ git add internal/platform/alerts/runway_preview.go `
 git commit -m "feat(alerts): preview runway threshold impact"
 ```
 
-### Task 7: Make API and worker consume one DB snapshot per unit of work
+### Task 8: Make API and worker consume one DB snapshot per unit of work and persist revision evidence
 
 **Files:**
 - Modify: `internal/platform/finance/summary_store.go`
@@ -747,6 +880,8 @@ Use a fake provider with an atomic call counter. Tests must assert:
 | `TestEvaluatorReadsOneThresholdSnapshotPerRound` | counter returns revision 8 | one Evaluate increments counter once regardless of account count |
 | `TestEvaluatorConfigFailureDoesNotReconcileOrResolve` | provider errors | worker returns error; Store Upsert/Resolve call counts remain zero |
 | `TestNextEvaluationRoundObservesNewRevision` | first call revision 8, second revision 9 | two Evaluate calls classify with 8 then 9 |
+| `TestRunwayFindingCarriesThresholdRevisionAndValues` | revision 8 / 5/10/20 | Finding.Detail contains all four stable key/value pairs |
+| `TestReconcilerPersistsRunwayThresholdEvidence` | reconcile that Finding | stored alert detail contains exact revision and three values |
 
 The call-count assertion is exact:
 
@@ -777,6 +912,15 @@ Remove `Deps.FinanceRunwayThresholds`; add `Deps.FinanceRunwayThresholds finance
 
 Remove `jobs.Config.AlertRunwayThresholds` and both cmd env parsers. Inject the DB-backed provider into alerts Evaluator. `Evaluate` reads one snapshot before requesting runways; an error aborts the round before Reconciler can treat it as empty findings.
 
+When R5 emits a Finding, append this exact stable fragment to detail:
+
+```text
+threshold_revision=8; critical_days=5; warning_days=10; serious_days=20
+```
+
+Use values from the same per-round snapshot. Evaluator tests assert generation; Reconciler/Store tests assert
+the detail is persisted unchanged on insert and touch. Do not put updated_by/reason or DB errors in detail.
+
 - [ ] **Step 5: Preserve env parsing only in bootstrap**
 
 Search:
@@ -804,6 +948,7 @@ Document inclusive boundaries, serious/no-notification, threshold revision in R5
 git add internal/platform/finance/summary_store.go `
   internal/platform/httpapi/finance_summary.go internal/platform/httpapi/finance_summary_test.go `
   internal/platform/alerts/rules.go internal/platform/alerts/runway_rule_test.go `
+  internal/platform/alerts/reconcile_test.go internal/platform/alerts/store_integration_test.go `
   internal/platform/jobs/client.go internal/platform/jobs/alert_evaluate_test.go `
   cmd/platform-api/config.go cmd/platform-api/config_test.go cmd/platform-api/main.go `
   cmd/platform-worker/config.go cmd/platform-worker/config_test.go `
@@ -815,21 +960,33 @@ git commit -m "feat(runtime): load runway thresholds per request and evaluation"
 
 ## C3c — Foundation-B-Gated L2 Action
 
-### Task 8: Register the L2 Action and prove the pre-F-B gate
+### Task 9: Implement the complete L2 Action only after Foundation-B is merged
 
 **Files:**
 - Create: `contracts/actions/finance.runway_threshold.set.v1.json`
 - Modify: `internal/platform/finance/permissions.go`
+- Modify: `internal/platform/finance/runway_config.go`
+- Modify: `internal/platform/finance/runway_config_store_integration_test.go`
 - Create: `internal/platform/finance/runway_actions.go`
 - Create: `internal/platform/finance/runway_actions_test.go`
+- Create: `internal/platform/finance/runway_actions_integration_test.go`
+- Modify: `internal/platform/action/errors.go`
+- Modify: `internal/platform/action/errors_test.go`
+- Modify: `internal/platform/action/kernel.go`
+- Modify: `internal/platform/action/kernel_test.go`
+- Modify: `internal/platform/httpapi/response.go`
+- Modify: `internal/platform/httpapi/response_test.go`
 - Modify: `cmd/platform-api/main.go`
 - Modify: `internal/platform/httpapi/actions_test.go`
+- Modify: `docs/modules/action/README.md`
+- Modify: `docs/modules/finance/README.md`
 
 **Interfaces:**
-- Consumes: `RunwayThresholdStore.Set` from C3a and existing Action registry/kernel.
-- Produces: registered `finance.runway_threshold.set@1` definition and new scope constant.
+- Consumes: merged XM-0030 approval/execute controls and C3a Store current/history.
+- Produces: `RunwayThresholdStore.Set`, trusted 409 error propagation, registered
+  `finance.runway_threshold.set@1`, and new scope constant.
 
-- [ ] **Step 1: Confirm the external gate before touching code**
+- [ ] **Step 1: STOP unless Foundation-B evidence exists**
 
 Run:
 
@@ -840,15 +997,58 @@ rg -n '状态:设计稿,待产品负责人拍板|RequiresAdvancedControls' `
   internal/platform/action/risk.go
 ```
 
-If Foundation-B is not explicitly approved and merged, this task may only register/test the fail-closed definition; do not make execution succeed.
+Required evidence is explicit human approval, merged Action Advanced Controls on the C3c target base, and green
+tests proving L2 approval/execute/idempotency. If any evidence is absent, stop with **zero C3c file changes**:
+do not create the contract/scope/definition/Handler and do not pre-register a fail-closed Action.
 
-- [ ] **Step 2: Write failing definition tests**
+- [ ] **Step 2: Write failing domain, error-model, definition, and Handler tests**
 
-Assert exact ID/version, `action.L2`, HUMAN-only, all explicit environments, permission `finance.runway_threshold.manage`, and Action schema fields with `FieldInt`/`FieldString`.
+Add these exact cases:
 
-- [ ] **Step 3: Add the scope and contract**
+| Test | Required assertion |
+|---|---|
+| `TestSetRunwayThresholdInputRejectsNonPositiveRevision` | 0/-1 rejected before SQL |
+| `TestSetRunwayThresholdInputRejectsBlankReason` | `""` and whitespace rejected before SQL |
+| `TestRunwayThresholdStoreSetRequiresExpectedRevision` | stale revision returns `ErrRevisionConflict`; no history row |
+| `TestRunwayThresholdStoreSetWritesCurrentAndHistoryAtomically` | exact next revision appears in both tables |
+| `TestKernelPreservesTrustedRevisionConflict` | wrapped `*action.Error` keeps code in result/run/audit; safe message only |
+| `TestKernelDoesNotTrustRevisionConflictText` | ordinary error containing that text becomes `EXECUTION_FAILED` |
+| `TestStatusForRevisionConflict` | trusted code maps to 409 |
+| `TestRunwayThresholdActionRequiresHumanAndScope` | denied before Store call |
+| `TestRunwayThresholdActionRejectsInvalidSemanticParamsBeforeStore` | bad order, revision<=0, blank reason all make zero Store calls |
+| `TestRunwayThresholdActionRecordsEvidenceAndConfirmsWrite` | before/after/reason/resource and readback are exact |
 
-The contract body must contain:
+HTTP tests place a DSN, IP, table name, constraint name, and actual current revision inside the wrapped cause;
+none may appear in the response body.
+
+- [ ] **Step 3: Implement domain Set validation and atomic write**
+
+Add `SetRunwayThresholdInput` in `runway_config.go`. Its `Validate` trims reason and requires
+`ExpectedRevision > 0`, valid environment/actor/request ID, and valid strict thresholds. `Store.Set` validates
+again, then in one pgx transaction performs revision-guarded current UPDATE and history INSERT. A zero-row
+UPDATE returns `ErrRevisionConflict`; history failure rolls back current. After commit, read back and compare
+the exact values and `expected+1` revision.
+
+- [ ] **Step 4: Add trusted revision conflict error handling**
+
+Add `action.CodeRevisionConflict = "REVISION_CONFLICT"`; `StatusForCode` maps it to 409. Update Kernel Handler
+error handling so only `errors.As(err, &actionErr)` where `actionErr` is `*action.Error` preserves trusted code/message in ActionRun/audit and
+the returned error. Every ordinary error remains `EXECUTION_FAILED`; cause text is only logged.
+
+The Handler maps `finance.ErrRevisionConflict` to:
+
+```go
+action.NewError(
+    action.CodeRevisionConflict,
+    "阈值配置已更新，请刷新后重新预览",
+    err,
+)
+```
+
+- [ ] **Step 5: Add the exact scope, Action definition, and contract**
+
+Assert exact ID/version, `action.L2`, HUMAN-only, all explicit environments, permission
+`finance.runway_threshold.manage`, and Action schema fields with `FieldInt`/`FieldString`. The contract body is:
 
 ```json
 {
@@ -872,11 +1072,14 @@ The contract body must contain:
 }
 ```
 
-- [ ] **Step 4: Prove pre-F-B execution is denied**
+- [ ] **Step 6: Implement the Handler with semantic prechecks**
 
-Use the real kernel with a HUMAN Principal holding the new scope. Assert execute returns `ADVANCED_CONTROLS_REQUIRED`, Store `Set` call count remains zero, and a failed ActionRun/audit attempt is recorded.
+Use `action.IntParam` for the four integers, trim `action.StringParam(reason)`, and reject nonpositive revision,
+blank reason, or invalid thresholds before `Store.Current`/`Set`. Take actor/environment from Principal context;
+never accept environment in params. Record resource `finance.runway_threshold_config`, resource ID environment,
+before/after snapshots, and trimmed reason. Return approval/run IDs and verified old/new revisions.
 
-- [ ] **Step 5: Prove the new scope is not granted by default**
+- [ ] **Step 7: Prove the new scope is not granted by default**
 
 Search and test:
 
@@ -887,121 +1090,50 @@ rg -n 'finance\.runway_threshold\.manage' web/apps/admin-web/src/api/config.ts `
 
 Expected: no default role or `DEFAULT_SCOPES` occurrence. The string may exist only in the Action/permission/UI missing-scope copy.
 
-- [ ] **Step 6: Run gate tests GREEN and commit the gated definition**
+- [ ] **Step 8: Add real DB + approved-kernel integration coverage**
+
+Using the disposable DB harness, submit an L2 request, obtain approval under the merged XM-0030 policy, execute
+once, retry to prove one-run idempotency, verify current/history revision increment, and check Action audit
+before/after. Inject history INSERT failure and write-confirmation mismatch; neither may report success.
+
+- [ ] **Step 9: Run C3c tests GREEN and commit**
 
 ```powershell
 go test -p 1 ./internal/platform/finance ./internal/platform/action `
-  ./internal/platform/httpapi ./cmd/platform-api -run 'RunwayThreshold|AdvancedControls' -count=1
+  ./internal/platform/httpapi ./cmd/platform-api -count=1
 git add contracts/actions/finance.runway_threshold.set.v1.json `
-  internal/platform/finance/permissions.go `
+  internal/platform/finance/permissions.go internal/platform/finance/runway_config.go `
+  internal/platform/finance/runway_config_store_integration_test.go `
   internal/platform/finance/runway_actions.go `
   internal/platform/finance/runway_actions_test.go `
-  cmd/platform-api/main.go internal/platform/httpapi/actions_test.go
-git commit -m "feat(finance): register gated runway threshold action"
-```
-
-### Task 9: Enable execution only after Foundation-B is approved and merged
-
-**Files:**
-- Modify: `internal/platform/finance/runway_actions.go`
-- Modify: `internal/platform/finance/runway_actions_test.go`
-- Create: `internal/platform/finance/runway_actions_integration_test.go`
-- Modify: `docs/modules/action/README.md`
-- Modify: `docs/modules/finance/README.md`
-
-**Interfaces:**
-- Consumes: approved XM-0030 approval request/decision/execute API and `RunwayThresholdStore.Set`.
-- Produces: expected-revision L2 execution with domain write confirmation and Action audit metadata.
-
-- [ ] **Step 1: Stop unless Foundation-B evidence exists**
-
-Required evidence is an approved design decision, merged Action Advanced Controls code on the target base, and green tests proving L2 approval/execute. An open design document or registered L2 definition is insufficient.
-
-- [ ] **Step 2: Write failing handler tests**
-
-Assert:
-
-| Test | Input | Required assertion |
-|---|---|---|
-| `TestRunwayThresholdActionRequiresHuman` | MACHINE Principal with manage scope | denied before Store call |
-| `TestRunwayThresholdActionRequiresManageScope` | HUMAN without manage scope | `PERMISSION_DENIED` names exact scope |
-| `TestRunwayThresholdActionRejectsNonIncreasingValues` | 10/5/20 or 5/5/20 | invalid params; Store call count zero |
-| `TestRunwayThresholdActionRejectsStaleExpectedRevision` | expected 3/current 4 | conflict; current/history unchanged |
-| `TestRunwayThresholdActionRecordsReasonBeforeAfterAndResource` | valid 4/9/18 | audit resource is environment and before/after/reason are exact |
-| `TestRunwayThresholdActionReadsBackExactNextRevision` | expected 4 | result/current are revision 5 and exact thresholds |
-| `TestRunwayThresholdActionWriteConfirmationFailureIsNotSuccess` | fake Store returns mismatched readback | Action run is failed; UI-safe error contains no DB details |
-
-At minimum, implement the no-Store-call invariant explicitly:
-
-```go
-_, err := kernel.Execute(machineContext, validThresholdRequest())
-if !action.IsCode(err, action.CodePrincipalTypeNotAllowed) {
-    t.Fatalf("got %v", err)
-}
-if got := store.SetCalls(); got != 0 {
-    t.Fatalf("Store.Set calls=%d want 0", got)
-}
-```
-
-- [ ] **Step 3: Implement the handler**
-
-Use `action.IntParam` for all four integer params and `action.StringParam` for reason. Take actor/environment from Principal context. Call:
-
-```go
-before, err := store.Current(ctx, p.Environment)
-after, err := store.Set(ctx, finance.SetRunwayThresholdInput{
-    Environment:      p.Environment,
-    Thresholds:       proposed,
-    ExpectedRevision: int64(expectedRevision),
-    Actor:             p.ID,
-    Reason:            reason,
-    RequestID:         requestID,
-})
-```
-
-Record resource type `finance.runway_threshold_config`, resource ID environment, before/after snapshots, and trimmed reason. Never accept `environment` in params.
-
-- [ ] **Step 4: Add real DB + approved-kernel integration test**
-
-The test submits an L2 request, obtains approval according to the merged XM-0030 policy, executes once, retries execution to prove one-run idempotency, verifies current revision increment and one history row, and checks Action audit before/after.
-
-- [ ] **Step 5: Run C3c tests GREEN**
-
-```powershell
-go test -p 1 ./internal/platform/action ./internal/platform/finance `
-  ./internal/platform/httpapi ./cmd/platform-api -count=1
-```
-
-Expected: PASS with Foundation-B target base.
-
-- [ ] **Step 6: Update docs and commit**
-
-```powershell
-git add internal/platform/finance/runway_actions.go `
-  internal/platform/finance/runway_actions_test.go `
   internal/platform/finance/runway_actions_integration_test.go `
+  internal/platform/action/errors.go internal/platform/action/errors_test.go `
+  internal/platform/action/kernel.go internal/platform/action/kernel_test.go `
+  internal/platform/httpapi/response.go internal/platform/httpapi/response_test.go `
+  internal/platform/httpapi/actions_test.go cmd/platform-api/main.go `
   docs/modules/action/README.md docs/modules/finance/README.md
-git commit -m "feat(finance): execute approved runway threshold changes"
+git commit -m "feat(finance): add approved runway threshold action"
 ```
 
 ---
 
 ## C3d — Inline Rules UI and Deployment Closure
 
-### Task 10: Add typed frontend Query/preview/Action clients
+### Task 10: Add typed frontend current/history/preview clients
 
 **Files:**
 - Create: `web/apps/admin-web/src/api/runwayThresholds.ts`
 - Create: `web/apps/admin-web/src/api/runwayThresholds.test.ts`
-- Modify: `web/apps/admin-web/src/api/config.ts`
 
 **Interfaces:**
-- Consumes: C3a/b HTTP contracts and C3c generic Action endpoint.
-- Produces: typed query functions, query keys, preview mapping, and submit helper.
+- Consumes: C3a/b Query contracts only.
+- Produces: typed current/history/preview functions and query keys; no Action/scope export before C3c.
 
 - [ ] **Step 1: Write failing client tests**
 
-Assert exact paths, snake_case mapping, environment query behavior, AbortSignal forwarding, Action request body, and request ID header. Also assert `DEFAULT_SCOPES` does not include `finance.runway_threshold.manage`.
+Assert exact paths, snake_case mapping, environment query behavior, AbortSignal forwarding, all six transition
+values, consistency reason, top-level `evaluation_at`, and per-object `observed_at`. Assert the module exports
+no submit helper or manage-permission constant while C3c is absent.
 
 - [ ] **Step 2: Run tests and confirm RED**
 
@@ -1033,13 +1165,34 @@ export interface RunwayThresholdDraft {
   seriousDays: number;
 }
 
-export const RUNWAY_THRESHOLD_MANAGE_PERMISSION = "finance.runway_threshold.manage";
+export type RunwayImpactTransition =
+  | "would_open"
+  | "would_escalate"
+  | "would_deescalate"
+  | "would_resolve"
+  | "unchanged"
+  | "current_inconsistent";
+
+export interface RunwayImpactItem {
+  accountId: string;
+  observedAt: string | null;
+  transition: RunwayImpactTransition;
+  consistencyReason: string | null;
+}
+
+export interface RunwayImpactPreview {
+  evaluationAt: string;
+  items: RunwayImpactItem[];
+}
+
 export const RUNWAY_THRESHOLD_QUERY = "finance-runway-threshold";
 export const RUNWAY_THRESHOLD_HISTORY_QUERY = "finance-runway-threshold-history";
 export const RUNWAY_THRESHOLD_PREVIEW_QUERY = "finance-runway-threshold-preview";
 ```
 
-Expose `getRunwayThresholds`, `listRunwayThresholdHistory`, `previewRunwayThresholds`, and `submitRunwayThresholdAction`. Do not add the permission to `DEFAULT_SCOPES`.
+Expose only `getRunwayThresholds`, `listRunwayThresholdHistory`, and `previewRunwayThresholds`. Preview types
+must model `evaluationAt` separately from each item's `observedAt`, and include
+`current_inconsistent`/`consistencyReason`. Do not introduce the manage scope string yet.
 
 - [ ] **Step 4: Run client tests GREEN and commit**
 
@@ -1047,8 +1200,7 @@ Expose `getRunwayThresholds`, `listRunwayThresholdHistory`, `previewRunwayThresh
 pnpm --config.verify-deps-before-run=false --filter admin-web test -- `
   src/api/runwayThresholds.test.ts
 git add web/apps/admin-web/src/api/runwayThresholds.ts `
-  web/apps/admin-web/src/api/runwayThresholds.test.ts `
-  web/apps/admin-web/src/api/config.ts
+  web/apps/admin-web/src/api/runwayThresholds.test.ts
 git commit -m "feat(admin): add runway threshold api client"
 ```
 
@@ -1077,11 +1229,9 @@ Tests must cover this exact matrix:
 | no Drawer | render rule editor and confirmation | no complementary/right-drawer landmark or Drawer import; confirmation is a dialog |
 | serious copy | load 5/10/20 | text says serious is display-only and creates no R5 notification |
 | client validation | change critical to 10 while warning is 10; click preview | inline strict-order error; preview client not called |
-| evidence order | resolve preview | observed time and coverage render before affected-object table |
-| error retention | return 403, 409, then 503 from submit | draft fields and last preview remain visible after each error |
-| missing scope | omit manage scope | submit disabled and missing scope named |
-| F-B gate | include manage scope but catalog reports L2 unavailable | submit disabled and `ADVANCED_CONTROLS_REQUIRED` explained |
-| verified success | submit approval, then return mismatched current before matching current | no green success until current+summary values/revision match |
+| evidence order | resolve preview | evaluation time/coverage render before table; each row shows its own observation time |
+| current inconsistency | return missing/unexpected/severity mismatch rows | dedicated warning and consistency reason; not counted as proposed effect |
+| C3c absent gate | Action catalog has no `finance.runway_threshold.set@1` | no execute request/helper; fixed Foundation-B/C3c gate shown |
 
 The strict-order test includes a concrete no-request assertion:
 
@@ -1111,15 +1261,16 @@ Expected: FAIL because the page/components do not exist.
 
 - [ ] **Step 4: Implement the inline panel and dialog flow**
 
-The panel always shows current values, revision/source/time, serious explanation, and history. Editing is inline. “预览影响” fetches preview and renders counts/table inline. A centered confirmation Dialog repeats the proposed values, current revision, observation time, and impact counts. The write button says “提交审批”. No right-side Drawer is used.
+The panel always shows current values, revision/source/time, serious explanation, and history. Editing and
+preview are inline. “预览影响” renders all transition counts, a dedicated current-inconsistent warning,
+top-level evaluation time, and each object's observation time. With C3c absent there is no confirmation Dialog
+or write button—only the fixed Foundation-B/C3c gate. No right-side Drawer is used.
 
-- [ ] **Step 5: Implement permission and Foundation-B gates**
+- [ ] **Step 5: Implement the pre-C3c hard gate**
 
 - `finance.read` controls Query visibility through service responses.
-- Missing `finance.runway_threshold.manage` disables submission and names the missing scope.
-- Presence of the scope does not imply F-B availability; Action catalog/risk state controls the second gate.
-- A successful submission displays approval request status, not “配置已生效”.
-- Only a later current+summary refetch with matching revision/values may display “写后验证通过”.
+- Action catalog absence shows “Foundation-B / C3c 尚未开放”.
+- No manage scope is read or assumed, no execute client exists, and no POST is emitted.
 
 - [ ] **Step 6: Make Settings a link, not a second editor**
 
@@ -1142,7 +1293,76 @@ git commit -m "feat(admin): add gated runway threshold rules ui"
 
 Expected: tests/typecheck PASS.
 
-### Task 12: Cut over deployment and retire runtime env authority
+### Task 12: Extend the rules UI with approved Action submission after C3c
+
+**Files:**
+- Modify: `web/apps/admin-web/src/api/runwayThresholds.ts`
+- Modify: `web/apps/admin-web/src/api/runwayThresholds.test.ts`
+- Modify: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.tsx`
+- Modify: `web/apps/admin-web/src/components/RunwayThresholdRulePanel.test.tsx`
+- Modify: `web/apps/admin-web/src/api/config.ts`
+
+**Interfaces:**
+- Consumes: merged C3c Action/catalog and Foundation-B approval API.
+- Produces: submit-approval client/dialog, scope gate, and verified-success state.
+
+- [ ] **Step 1: Stop unless C3c and Foundation-B are merged on the target base**
+
+If the Action catalog does not contain exact ID/version/risk/scope, leave Task 11's fixed gate in place and make
+no Task 12 changes.
+
+- [ ] **Step 2: Write failing client/UI tests**
+
+| Test | Required assertion |
+|---|---|
+| Action request | exact generic Action endpoint, request ID, params include three ints/positive expected revision/trimmed reason |
+| blank reason/revision | whitespace reason and revision 0/-1 produce no POST |
+| missing scope | submit disabled and exact manage scope named |
+| centered confirmation | Dialog repeats proposed values, revision, `evaluation_at`, impact/inconsistency counts; no Drawer |
+| 403/409/503 | safe message displayed; draft and last preview retained; no root-cause fragment rendered |
+| approval response | UI says “已提交审批”, never “已生效” |
+| verified success | green state only after current + summary refetch match expected next revision and all three values |
+
+- [ ] **Step 3: Add the post-C3c client and scope constant**
+
+Only now export:
+
+```ts
+export const RUNWAY_THRESHOLD_MANAGE_PERMISSION = "finance.runway_threshold.manage";
+export async function submitRunwayThresholdAction(input: {
+  criticalDays: number;
+  warningDays: number;
+  seriousDays: number;
+  expectedRevision: number;
+  reason: string;
+}): Promise<ActionRun>;
+```
+
+Trim reason and require `expectedRevision > 0` before building params. Do not add the permission to
+`DEFAULT_SCOPES`; add a test that fails if it appears there.
+
+- [ ] **Step 4: Implement the centered approval Dialog and write verification**
+
+The submit button says “提交审批”. Keep inputs/preview on every error. A 409 forces current refetch and
+re-preview. After approval execution, refetch both current config and upstream summary; only exact next revision
+and exact three values produce “写后验证通过”.
+
+- [ ] **Step 5: Run tests/typecheck and commit**
+
+```powershell
+pnpm --config.verify-deps-before-run=false --filter admin-web test -- `
+  src/api/runwayThresholds.test.ts `
+  src/components/RunwayThresholdRulePanel.test.tsx
+pnpm --config.verify-deps-before-run=false --filter admin-web run typecheck
+git add web/apps/admin-web/src/api/runwayThresholds.ts `
+  web/apps/admin-web/src/api/runwayThresholds.test.ts `
+  web/apps/admin-web/src/components/RunwayThresholdRulePanel.tsx `
+  web/apps/admin-web/src/components/RunwayThresholdRulePanel.test.tsx `
+  web/apps/admin-web/src/api/config.ts
+git commit -m "feat(admin): submit approved runway threshold changes"
+```
+
+### Task 13: Cut over deployment and retire runtime env authority
 
 **Files:**
 - Modify: `deploy/compose/launch.yaml`
@@ -1159,16 +1379,48 @@ Expected: tests/typecheck PASS.
 
 The runbook must contain these ordered gates:
 
-1. back up DB and record current API/worker image digests;
-2. read current WARN/CRIT env without printing secrets (these values are non-secret);
-3. apply the dynamically numbered migration;
-4. run `runway-threshold-bootstrap` once per environment;
-5. Query current config and history; require revision 1 and exact effective values;
-6. start one upgraded API replica, verify summary threshold revision/value;
-7. start one upgraded worker, wait one evaluation interval, verify logs use the same revision;
-8. roll remaining replicas only after equality evidence;
-9. remove runtime env wiring in the final compose revision;
-10. rollback by restoring old images while retaining DB rows; never delete history.
+1. verify the exact migration diff has its separate approval and production DB roles are non-superuser with the
+   approved role-split evidence; otherwise stop;
+2. back up DB and record current API/worker image digests, migrate image digest, and the exact released
+   `launch.yaml`/env-file checksums;
+3. record current WARN/CRIT values in the restricted change record; they are not credentials, but must not be
+   lost because old binaries require them for rollback;
+4. apply the approved dynamically numbered migration through the versioned migrate image;
+5. prove bootstrap binary version/commit matches the migrate image:
+
+   ```powershell
+   docker compose -p xingmang-launch -f deploy/compose/launch.yaml `
+     --env-file deploy/compose/.env --profile tools `
+     run --rm runway-threshold-bootstrap version
+   ```
+
+   Then run once per environment:
+
+   ```powershell
+   docker compose -p xingmang-launch -f deploy/compose/launch.yaml `
+     --env-file deploy/compose/.env --profile tools `
+     run --rm runway-threshold-bootstrap up
+   ```
+6. Query current and history; require revision 1, exact effective values, one history row, and no partial row;
+7. start one upgraded API replica and verify summary revision/three values;
+8. start one upgraded worker, wait one evaluation interval, and verify R5 detail/log uses the same revision/three
+   values;
+9. roll remaining replicas only after equality evidence;
+10. remove runtime env wiring in the final compose revision while retaining bootstrap-only values/service;
+11. execute a staged rollback rehearsal using the procedure below before production approval.
+
+Rollback is one atomic operational decision, not “use old image” alone:
+
+1. stop upgraded API/worker replicas;
+2. restore the previous released `launch.yaml` (or previous signed compose artifact) and previous image digests;
+3. restore the recorded `XM_FINANCE_RUNWAY_WARN_DAYS` and `XM_FINANCE_RUNWAY_CRIT_DAYS` values in the
+   gitignored env file and verify old compose passes them to **both** API and worker;
+4. start one old API replica and assert summary回显 equals the recorded env-derived thresholds;
+5. start one old worker, wait one evaluation interval, and assert its configured R5 warning/critical values equal
+   the same recorded values;
+6. only then roll remaining old replicas and declare rollback complete;
+7. retain current/history tables and rows; old binaries ignore them. Never run production down migration or
+   delete history.
 
 - [ ] **Step 2: Add a deployment contract test/search**
 
@@ -1178,17 +1430,19 @@ After cutover, this command must only find the old variables in the bootstrap co
 rg -n 'XM_FINANCE_RUNWAY_(WARN|CRIT)_DAYS' cmd internal deploy docs
 ```
 
-It must not find the names under `cmd/platform-api`, `cmd/platform-worker`, or runtime service environment blocks in `launch.yaml`.
+It must not find the names under `cmd/platform-api`, `cmd/platform-worker`, or runtime API/worker environment
+blocks in `launch.yaml`; it must still find them under the tools-profile bootstrap service and runbook.
 
 - [ ] **Step 3: Remove the two runtime env entries**
 
-Remove them from API/worker environment blocks and mark them bootstrap-only in `.env.example` until the rollout is complete. Do not add a runtime `RUNWAY_CONFIG_FALLBACK` switch.
+Remove them from API/worker environment blocks and mark them bootstrap/rollback-only in `.env.example`. Keep
+the tools-profile bootstrap service wired to them. Do not add a runtime `RUNWAY_CONFIG_FALLBACK` switch.
 
 - [ ] **Step 4: Run compose and docs verification**
 
 ```powershell
 docker compose -p xingmang-launch -f deploy/compose/launch.yaml `
-  --env-file deploy/compose/.env.example config --quiet
+  --env-file deploy/compose/.env.example --profile tools config --quiet
 bash scripts/check-governance.sh
 ```
 
@@ -1221,7 +1475,11 @@ git status --short
 git diff --check
 ```
 
-For C3a/C3c, also run the PostgreSQL integration tests with `XM_TEST_DATABASE_URL` and verify migration up/down on a disposable database. For C3d, rebuild the relevant staging containers and capture the rules page at desktop and narrow viewport, including no-scope, F-B-gated, preview, 409 conflict, and verified-success states.
+For C3a/C3c, use `scripts/test-runway-threshold-db.ps1` with a disposable database; never add history to shared
+TRUNCATE cleanup. Verify migration up/down, trigger/role denials, bootstrap rollback on history failure, and
+Action atomicity. For C3d, rebuild staging containers and capture desktop/narrow rules pages for read/preview,
+current inconsistency, C3c-absent gate, and—only after C3c—no-scope, 409/503, approval, and verified success.
+Run the old-compose + restored-env rollback rehearsal and attach API/worker equality evidence.
 
 ## PR/Handoff Requirements
 
