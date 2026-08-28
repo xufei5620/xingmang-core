@@ -502,6 +502,26 @@ interface ListResponse<T> {
   items: T[] | null;
 }
 
+interface SubscriptionListResponse<T> extends ListResponse<T> {
+  truncated?: boolean;
+  limit?: number;
+  as_of?: string;
+}
+
+export interface SubscriptionBatchPage {
+  items: SubscriptionBatchItem[];
+  truncated: boolean;
+  limit: number;
+  as_of: string;
+}
+
+export interface ProxyAssetPage {
+  items: ProxyAssetItem[];
+  truncated: boolean;
+  limit: number;
+  as_of: string;
+}
+
 /** 读取成本登记簿需要的权限。
  *
  *  **不复用 ops.read**：登记簿列的是每个上游账号的凭据引用、充值倍率与令牌
@@ -515,6 +535,8 @@ export const FINANCE_READ_PERMISSION = "finance.read";
 export const UPSTREAM_ACCOUNT_MANAGE_PERMISSION = "finance.upstream_account.manage";
 export const RECHARGE_RATIO_MANAGE_PERMISSION = "finance.recharge_ratio.manage";
 export const TOKEN_MAP_MANAGE_PERMISSION = "finance.token_map.manage";
+/** 订阅批次与代理资产共同使用的既有写权限。刻意不进入 DEFAULT_SCOPES。 */
+export const SUBSCRIPTION_MANAGE_PERMISSION = "finance.subscription.manage";
 
 /** 哪些平台有「上游管理」这一格。
  *
@@ -557,25 +579,129 @@ export async function listSubscriptionBatches(
   upstreamAccountId: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<SubscriptionBatchItem[]> {
-  const body = await client.get<ListResponse<SubscriptionBatchItem>>(
+): Promise<SubscriptionBatchPage> {
+  const body = await client.get<SubscriptionListResponse<SubscriptionBatchItem>>(
     "/api/v1/finance/subscription-batches",
     {
       searchParams: { upstream_account_id: upstreamAccountId },
       ...(options.signal ? { signal: options.signal } : {}),
     },
   );
-  return body.items ?? [];
+  return {
+    items: body.items ?? [],
+    truncated: body.truncated ?? false,
+    limit: body.limit ?? 0,
+    as_of: body.as_of ?? "",
+  };
 }
 
 export async function listProxyAssets(
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<ProxyAssetItem[]> {
-  const body = await client.get<ListResponse<ProxyAssetItem>>("/api/v1/finance/proxy-assets", {
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
-  return body.items ?? [];
+): Promise<ProxyAssetPage> {
+  const body = await client.get<SubscriptionListResponse<ProxyAssetItem>>(
+    "/api/v1/finance/proxy-assets",
+    { ...(options.signal ? { signal: options.signal } : {}) },
+  );
+  return {
+    items: body.items ?? [],
+    truncated: body.truncated ?? false,
+    limit: body.limit ?? 0,
+    as_of: body.as_of ?? "",
+  };
+}
+
+export interface RegisterSubscriptionBatchParams {
+  upstream_account_id: string;
+  paid_minor: string;
+  surcharge_minor: string;
+  currency: string;
+  starts_on: string;
+  expires_on: string;
+  account_count: number;
+  proxy_asset_id?: string;
+}
+
+export interface ProxyAssetCreateParams {
+  paid_minor: string;
+  surcharge_minor: string;
+  currency: string;
+  opened_on: string;
+  expires_on: string;
+  shared_account_count: number;
+  buy_platform?: string;
+  buy_address?: string;
+  credential_ref?: string;
+  mounted?: boolean;
+}
+
+export interface ProxyAssetEditParams {
+  proxy_asset_id: string;
+  buy_platform: string;
+  buy_address: string;
+  credential_ref: string;
+  mounted: boolean;
+}
+
+export type SetProxyAssetParams = ProxyAssetCreateParams | ProxyAssetEditParams;
+
+/** 新增一笔不可变订阅批次。参数逐个复制，运行时也不会透传白名单外字段。 */
+export function registerSubscriptionBatch(
+  params: RegisterSubscriptionBatchParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const allowed: Record<string, unknown> = {
+    upstream_account_id: params.upstream_account_id,
+    paid_minor: params.paid_minor,
+    surcharge_minor: params.surcharge_minor,
+    currency: params.currency,
+    starts_on: params.starts_on,
+    expires_on: params.expires_on,
+    account_count: params.account_count,
+    ...(params.proxy_asset_id ? { proxy_asset_id: params.proxy_asset_id } : {}),
+  };
+  return executeAction(
+    { actionId: "finance.subscription_batch.register", version: "1", params: allowed },
+    options,
+    client,
+  );
+}
+
+/** 登记 / 修改代理资产。编辑分支主动排除金额、币种、期间与共享账号数。 */
+export function setProxyAsset(
+  params: SetProxyAssetParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const editing = "proxy_asset_id" in params && Boolean(params.proxy_asset_id);
+  const allowed: Record<string, unknown> = editing
+    ? {
+        proxy_asset_id: (params as ProxyAssetEditParams).proxy_asset_id,
+        buy_platform: params.buy_platform ?? "",
+        buy_address: params.buy_address ?? "",
+        credential_ref: params.credential_ref ?? "",
+        mounted: params.mounted ?? false,
+      }
+    : {
+        paid_minor: (params as ProxyAssetCreateParams).paid_minor,
+        surcharge_minor: (params as ProxyAssetCreateParams).surcharge_minor,
+        currency: (params as ProxyAssetCreateParams).currency,
+        opened_on: (params as ProxyAssetCreateParams).opened_on,
+        expires_on: (params as ProxyAssetCreateParams).expires_on,
+        shared_account_count: (params as ProxyAssetCreateParams).shared_account_count,
+        ...(params.buy_platform !== undefined ? { buy_platform: params.buy_platform } : {}),
+        ...(params.buy_address !== undefined ? { buy_address: params.buy_address } : {}),
+        ...(params.credential_ref !== undefined
+          ? { credential_ref: params.credential_ref }
+          : {}),
+        ...(params.mounted !== undefined ? { mounted: params.mounted } : {}),
+      };
+  return executeAction(
+    { actionId: "finance.proxy_asset.set", version: "1", params: allowed },
+    options,
+    client,
+  );
 }
 
 /** 登记 / 修改上游账号(`finance.upstream_account.set@1`)。
