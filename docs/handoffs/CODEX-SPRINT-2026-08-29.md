@@ -38,3 +38,13 @@
 ## 四、每片交付时回报格式(给验收线)
 一行:`READY <分支名> <commit> <Handoff 文件路径>`,验收线本地审读+门禁复跑后合入部署。
 BLOCKED 时同样一行 + 原因写进 Handoff 置顶。
+
+## 五、2026-08-29 晚间定稿:本地为中心(产品负责人)
+- **开发与部署全部在本机**:分支+Handoff 交付 → 验收线以 `scripts/ci-local.sh`(本机
+  Docker 四门禁)验收 → 合入 release → 重建本机栈(127.0.0.1:8088)。GitHub 不再是
+  交付链任何环节,Actions 停用;GitHub remote 仅镜像备份(`mirror-github.sh`,失败不阻塞)。
+- **服务器角色**:异地备份裸仓库(DEPLOY0-a 安装脚本,负责人择时安装)+ 最终上线时
+  `deploy.sh prod`(DEPLOY0-b);服务器 staging 与 post-receive 门禁**暂不启用**。
+- DEPLOY0-c 的 origin 切换脚本待服务器裸仓库就绪后再用;在此之前 origin 保持 GitHub
+  仅作镜像推送。
+- 队列不变:收尾 39 个 UI 文件(含 C004)→ LOCAL 已批实现拆片 → CR-0003 → 规格实现。
