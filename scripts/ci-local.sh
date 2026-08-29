@@ -153,7 +153,11 @@ run_backend() {
 
   # 只检查格式，不写回工作树；真正格式化统一使用 `go fmt ./...`。
   local formatted
-  formatted="$(gofmt -l .)"
+  # 用 go.mod 钉定的工具链自带的 gofmt(本机 PATH 上的 gofmt 可能是旧版,规则有分歧)
+  gofmt_bin="$(go env GOROOT)/bin/gofmt"
+  [ -x "$gofmt_bin" ] || gofmt_bin="$(go env GOROOT)/bin/gofmt.exe"
+  [ -x "$gofmt_bin" ] || gofmt_bin=gofmt
+  formatted="$("$gofmt_bin" -l .)"
   local format_rc=$?
   [ "$format_rc" -eq 0 ] || return "$format_rc"
   if [ -n "$formatted" ]; then
