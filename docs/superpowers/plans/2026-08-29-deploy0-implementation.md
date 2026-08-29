@@ -37,6 +37,8 @@ Telegram 不在脚本内接收 token，采用可选的受控通知适配器（�
 
 ### DEPLOY0-c
 
-**Files:** origin/mirror helper, hook documentation, `AGENTS.md`, `CLAUDE.md`, handoff updates and Handoff.
+**Files:** `deploy/scripts/configure-remotes.sh`, `deploy/scripts/mirror-github.sh`,
+remote/helper tests, hook/runbook documentation, `AGENTS.md`, `CLAUDE.md`, handoff
+updates and Handoff.
 
-**Acceptance:** 默认 origin 指向服务器裸仓库，GitHub remote 命名为 github；镜像命令显式、可失败不阻塞；旧 PR 流程文档改为分支 Handoff 流程。
+**Acceptance:** 默认 origin 指向服务器裸仓库，GitHub remote 命名为 github；镜像命令显式、可失败不阻塞且不自动重试；旧 PR 流程文档改为分支 Handoff 流程；切换脚本不覆盖未知 remote/pushurl。

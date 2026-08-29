@@ -5,6 +5,12 @@
 > (https://claude.com/blog/the-ai-native-sdlc-playbook):制品驱动、自验证先于人审、
 > 人类只守审批点。配套常驻提示词:`docs/handoffs/CODEX-PROMPT.md`。
 
+> **当前流程增补（2026-08-29，优先于本文早期 PR 描述）**：服务器裸仓库是
+> 默认 `origin`，GitHub remote 命名为 `github` 仅作镜像。GitHub Actions/PR 在
+> 过渡期不再作为门禁；每片以独立分支 + `docs/handoffs/slices/XM-….md` 交付，
+> 验收线本地审读、复跑门禁后合入。远端切换和镜像命令见
+> `docs/runbooks/GIT-WORKFLOW.md`。
+
 ## 一、项目是什么
 
 自研自托管**运营控制平面**,统一管理 Sub2API、NewAPI、CPA、开票、支付等独立系统。
@@ -74,7 +80,7 @@ Agent | M3 支付 | M4 CPA | 开票二期(等 CR-0002 与 Codex 开票线冻结�
 
 ## 五、审批点(人类保留,任何时候不越)
 
-不合并 PR(CI 绿后由 Claude 验收线/用户合并);不直推 `main`;不碰生产系统与
+不在过渡期创建或合并 PR（门禁绿后由验收线/用户合入）;不直推 `main`;不碰生产系统与
 Keycloak;不改上游三方源码(K:/sub2api-src、K:/newapi-src、K:/soloai-src 只读);
 真实凭据由用户自配(.env,gitignored),代码只写 `secret://` 引用;涉及迁移/
 新 scope/契约变更的切片**先提 plan 获批再实施**。
@@ -96,9 +102,9 @@ Keycloak;不改上游三方源码(K:/sub2api-src、K:/newapi-src、K:/soloai-src
   deploy/compose/.env build <svc> && … up -d <svc>`;迁移随 up 自动跑;
 - 集成测试连真库配方与更多坑:上面那份 quirks 文件,开工前通读一遍。
 
-## 七、验收标准(每片 PR 必须满足)
+## 七、验收标准(每片分支 Handoff 必须满足)
 
-CI 四项全绿(governance/secret-scan/backend/frontend);Handoff 完整
+服务器本地门禁全绿(governance/secret-scan/backend/frontend 及适用的 Go/前端门禁);Handoff 完整
 (status/branch/commit/summary/files_changed/tests_run/not_run/risks/follow_ups);
 UI 片附「格→数据源→状态」映射表;**原型样例数字零硬编**,无数据源的格=原型
 布局+「未接入」+归属说明;金额一律 `formatScaledMinorUnits`;合计不全必标
@@ -109,17 +115,16 @@ UI 片附「格→数据源→状态」映射表;**原型样例数字零硬编**
 进度核查结论:**内容全部在路线图内,质量稳定(CI 绿、规格文档严谨)**;以下
 四点是流程纠偏,自本节起生效:
 
-1. **本地整合分支可以有,但审查单位永远是切片 PR**:XM-LOCAL-project-completion
-   作为你的本地集成线没问题(GitHub 抖动期间尤其合理),但其中**未走 PR 的
-   实现提交**(runway 阈值 UI、SavedView 持久化、渠道绑定表、用户读 v2 核心、
-   凭据/告警页签、审计子页等)必须各自拆成 `ai/codex/<slug>` 分支+PR 才能
-   被验收合入;合入永远以 release 分支为准,LOCAL 不会被整体合并。
+1. **本地整合分支可以有,但审查单位永远是切片分支 Handoff**:XM-LOCAL-project-completion
+   作为你的本地集成线没问题(GitHub 抖动期间尤其合理),但其中的实现提交必须
+   各自拆成 `ai/codex/<slug>` 分支并附 Handoff 才能被验收合入;合入永远以
+   release 分支为准,LOCAL 不会被整体合并。历史 PR 编号仅用于追溯。
 2. **规格先批后实现**:规格 PR(docs)被合入 release = 批准。未合入前不写实现
    (#119 在 #113 未合入时就写了 5000 行,这次验收线补批,下不为例)。同时
    **待批规格最多保持 2 份**,批完再提下一份,避免堆积。
 3. **审批评论必须由人类亲自撰写**:任何「APPROVED(relayed from …)」式由代理
-   代写/转述的评论不构成批准证据,验收线不予采信;需要批准就在 PR 描述置顶
-   「待批:…」等人回复。
+   代写/转述的评论不构成批准证据,验收线不予采信;需要批准就在分支 Handoff 或
+   review 文件置顶「待批:…」等人回复。历史 PR 评论仅作追溯。
 4. **A 期未闭环**:XM-C004(NewAPI 各页镜像)尚未交付,优先级高于所有 C/F 期
    规格实现;请在当前整合完成后立即补做。
 
@@ -129,7 +134,7 @@ CI 重跑通过且 #113 合入后再合。
 
 ## 九、分工定稿(2026-08-29,产品负责人)
 
-- **Codex(Windows 本机)= 唯一开发者**:全部实现、自验证、PR 制品;
+- **Codex(Windows 本机)= 唯一开发者**:全部实现、自验证、分支 Handoff 制品;
 - **Claude 验收线 = 规划与设计**:路线图与任务卡、设计稿/规格审读、验收合入与部署、
   跨线协调,不再派实施代理;
 - **产品负责人 = 拍板**:规格批准、里程碑启动、生产/采购/拓扑级决策。
@@ -145,3 +150,11 @@ MinIO(Object Lock/WORM)置于自有服务器独立磁盘,签名密钥离线保�
 **优先级高于 A 期剩余(C004)**——先建通道再继续内容。三片 a/b/c 见设计稿第三节;
 服务器 root 步骤脚本化后交产品负责人执行。落地后 GitHub 降级为镜像备份,
 PR/Handoff 改为分支内文件 `docs/handoffs/slices/`,验收线合并流程不变。
+
+### D0-c 执行约定
+
+`deploy/scripts/configure-remotes.sh` 在显式确认后把服务器裸仓库设为 `origin`、
+把 GitHub 设为 `github`；`deploy/scripts/mirror-github.sh` 只做一次显式镜像推送，
+失败可见但不阻塞本地门禁与发布。服务器 CI status、分支 Handoff 和本地复跑结果
+是当前验收证据；GitHub 只保留镜像副本。早期章节中的 PR 命令仅作历史记录，
+不应在过渡期照做。

@@ -1,0 +1,82 @@
+# XM-C-DEPLOY0-c · origin / GitHub 镜像与流程迁移
+
+## status
+
+IN PROGRESS（待最终门禁与验收线复核后改为 READY）
+
+## branch / commit / base
+
+- branch: `ai/codex/XM-C-DEPLOY0-c`
+- base: `2394730`（XM-C-DEPLOY0-b READY）
+- worktree: `K:/星芒统一控制平台/wt-xmDEPLOY0-c`
+- implementation commits: 待提交
+
+## summary
+
+- `configure-remotes.sh` 提供显式、可回滚的 remote 配置：只在确认后把服务器裸仓库
+  设为 `origin`、把 GitHub 设为 `github`；未知 origin、已有 pushurl、userinfo、
+  符号链接和非受控生产路径均 fail closed；dry-run 不修改 `.git/config`。
+- `mirror-github.sh` 只允许 `github` remote，执行一次 `git push --mirror github`，
+  不自动重试、不改变 origin；镜像失败可见但不阻塞本地门禁/服务器发布。通知与
+  凭据不进入脚本。
+- `deploy/git-hooks/README.md` 说明 hook 安装、green status、main promote 授权锁
+  和服务器迁移步骤；AGENTS/CLAUDE/CODEX 常驻交接改为服务器 Handoff 流程，旧 PR
+  命令仅保留历史追溯。
+- 新增 `docs/runbooks/GIT-WORKFLOW.md`，明确 remote、切片、镜像、审核和恢复边界。
+
+## files_changed
+
+- `deploy/scripts/configure-remotes.sh`
+- `deploy/scripts/mirror-github.sh`
+- `tests/deploy/deploy0-c-remotes.test.sh`
+- `tests/deploy/deploy0-c-mirror.test.sh`
+- `deploy/git-hooks/README.md`
+- `scripts/guard-governance-files.sh`
+- `tests/security/governance-not-hollow.test.sh`
+- `AGENTS.md`
+- `CLAUDE.md`
+- `docs/handoffs/CODEX-PROMPT.md`
+- `docs/handoffs/CODEX-PROJECT-HANDOFF.md`
+- `docs/handoffs/CODEX-UI-ALIGNMENT-BRIEF.md`
+- `docs/runbooks/GIT-WORKFLOW.md`
+- `docs/superpowers/plans/2026-08-29-deploy0-implementation.md`
+- `docs/handoffs/slices/XM-C-DEPLOY0-c.md`
+
+## 格 → 数据源 / 证据映射
+
+| 运行时格 | 来源 | 闸门 |
+|---|---|---|
+| 默认拉取 remote | `origin` → 服务器 bare repo | configure-remotes 显式确认 + 写后核对 |
+| 异地备份 remote | `github` → GitHub URL | mirror 只允许 github、单次 push、失败可见 |
+| 切片交付状态 | 分支内 `docs/handoffs/slices/XM-*.md` | 本地门禁证据 + 人类验收线 |
+| main 保护 | D0-a/b pre-receive + promote | green status、授权锁、非快进拒绝 |
+
+## tests_run
+
+- `D:/Git/bin/bash.exe -n deploy/scripts/configure-remotes.sh deploy/scripts/mirror-github.sh tests/deploy/deploy0-c-remotes.test.sh tests/deploy/deploy0-c-mirror.test.sh` — PASS
+- `D:/Git/bin/bash.exe tests/deploy/deploy0-c-remotes.test.sh` — PASS (`DEPLOY0-C-REMOTES-TEST-OK`)
+- `D:/Git/bin/bash.exe tests/deploy/deploy0-c-mirror.test.sh` — PASS (`DEPLOY0-C-MIRROR-TEST-OK`)
+- `D:/Git/bin/bash.exe tests/security/governance-not-hollow.test.sh` — 待最终提交后复跑
+- `go fmt ./...` / `go vet ./...` / `go test -p 1 -count=1 ./...` — 待最终提交后复跑
+- 前端 typecheck/test/Storybook/admin-web build — 待最终提交后复跑（本片无前端源码改动）
+
+## tests_not_run
+
+- 未执行真实服务器 remote 切换、SSH 推拉、GitHub mirror、Actions 恢复或 production 部署；
+- 未触碰任何 GitHub/服务器凭据；
+- 未改变旧 `.github/workflows` 文件的触发器，恢复 Actions 需单独变更记录。
+
+## risks
+
+- `configure-remotes.sh --confirm` 会修改当前 checkout 的 `.git/config`，因此默认只
+  读/模拟；执行前必须看 dry-run 输出。脚本不自动删除未知 remote。
+- GitHub 镜像是异地备份，不是门禁来源；网络失败不会自动重试，需人工再次发起。
+- 旧设计稿和历史计划仍含 PR 命令，当前活动口径由本文件及
+  `docs/runbooks/GIT-WORKFLOW.md` 覆盖。
+
+## follow_ups
+
+- 验收线审读并复跑完整门禁后合入 release；产品负责人再按 runbook 执行服务器 remote
+  配置和首次镜像。
+- D0-c 后续可补服务器端 mirror 定时任务，但必须另立审批并保持单次、可失败不阻塞。
+- 按队列继续拆分 LOCAL 中已批准规格的实现切片。

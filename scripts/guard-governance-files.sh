@@ -30,6 +30,8 @@ protected_globs=(
   'deploy/scripts/install-git-server.sh'
   'deploy/scripts/deploy.sh'
   'deploy/scripts/promote.sh'
+  'deploy/scripts/configure-remotes.sh'
+  'deploy/scripts/mirror-github.sh'
   'deploy/compose/'
   'deploy/nginx/'
   'tests/security/'
