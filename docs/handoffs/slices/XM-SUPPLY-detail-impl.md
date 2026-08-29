@@ -8,6 +8,7 @@ READY
 
 - branch: `ai/codex/XM-SUPPLY-detail-impl`
 - implementation commit: `0a2463f`
+- Handoff commit: `414c880`
 - base: `release/v0.1-launch` at `e98080d`
 - worktree: `K:/星芒统一控制平台/wt-xmSUPPLY-detail-impl`
 
