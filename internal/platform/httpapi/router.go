@@ -42,9 +42,10 @@ type Deps struct {
 	RequestLogs RequestLogQuerier
 	// PlatformUsers 为 nil 时「用户管理」端点不挂载（XM-0046）。
 	// 与 RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
-	PlatformUsers   PlatformUsersQuerier
-	FinanceAccounts UpstreamAccountLister
-	FinanceProfit   ProfitDailyLister
+	PlatformUsers       PlatformUsersQuerier
+	PlatformUserDetails PlatformUserDetailsQuerier
+	FinanceAccounts     UpstreamAccountLister
+	FinanceProfit       ProfitDailyLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -141,6 +142,12 @@ func NewRouter(d Deps) http.Handler {
 		//
 		// 没有配用户连接器的部署不挂载这条：前端据此分得清「没接」和「坏了」。
 		if d.PlatformUsers != nil {
+			// 精确详情是 v2 的可选 capability；没有 Reader 时保持端点不存在，
+			// 不把“未接入”伪装成空用户或运行时 500。
+			if d.PlatformUserDetails != nil {
+				api.With(RequireScope(platformusers.ScopeRead)).
+					Get("/platforms/{platform}/users/{userID}", GetPlatformUserHandler(d.PlatformUserDetails))
+			}
 			api.With(RequireScope(platformusers.ScopeRead)).
 				Get("/platforms/{platform}/users", ListPlatformUsersHandler(d.PlatformUsers))
 		}

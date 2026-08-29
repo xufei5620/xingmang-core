@@ -1,4 +1,4 @@
-import { apiClient, type ApiClient } from "./client";
+import { ApiError, apiClient, type ApiClient } from "./client";
 import type {
   FreshnessContract,
   PeriodGranularity,
@@ -119,6 +119,7 @@ export function encodePlatformUserIdSegment(userId: string): string {
   if (new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== userId) {
     throw new Error("用户 ID 不是可无损编码的 Unicode 字符串");
   }
+  if (bytes.byteLength > 512) throw new Error("用户 ID 超过 512 字节");
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${USER_ID_SEGMENT_PREFIX}${hex}`;
 }
@@ -131,6 +132,7 @@ export function decodePlatformUserIdSegment(segment: string): string | null {
   if (hex.length === 0 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(hex)) return null;
 
   const bytes = new Uint8Array(hex.length / 2);
+  if (bytes.byteLength > 512) return null;
   for (let index = 0; index < bytes.length; index += 1) {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
@@ -141,6 +143,78 @@ export function decodePlatformUserIdSegment(segment: string): string | null {
     return userId;
   } catch {
     return null;
+  }
+}
+
+interface PlatformUserDetailResponse {
+  ref: { platform: string; id: string };
+  user: PlatformUserItem;
+  registered_at: string | null;
+  period: PeriodBody;
+  snapshot: {
+    observed_at: string;
+    source: string;
+    watermark: string;
+    is_partial: boolean;
+  };
+  capabilities: string[];
+}
+
+/** Read the v2 canonical detail resource. A 404 is a proven not-found result;
+ * all other API errors stay errors so the page can preserve retry semantics. */
+export async function getPlatformUser(
+  platform: string,
+  userId: string,
+  options: LookupPlatformUserOptions = {},
+  client: ApiClient = apiClient,
+): Promise<PlatformUserLookupResult> {
+  const segment = encodePlatformUserIdSegment(userId);
+  try {
+    const body = await client.get<PlatformUserDetailResponse>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}`,
+      {
+        searchParams: {
+          ...(options.day ? { day: options.day } : {}),
+          ...(options.granularity ? { granularity: options.granularity } : {}),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    const observedMs = new Date(body.snapshot.observed_at).getTime();
+    const staleness = Number.isFinite(observedMs)
+      ? Math.max(0, Math.floor((Date.now() - observedMs) / 1000))
+      : null;
+    const page: PlatformUserPage = {
+      items: [body.user],
+      next_cursor: "",
+      total_count: { value: 1 },
+      total_balance: body.user.balance,
+      active_today: { value: null },
+      period_totals: {
+        recharge: body.user.period_recharge,
+        consumed: body.user.period_consumed,
+        covered_users: body.user.period_consumed.minor_units === null ? 0 : 1,
+        total_users: 1,
+        complete: body.user.period_consumed.minor_units !== null,
+      },
+      period: body.period,
+      data_source: body.snapshot.source,
+      freshness: {
+        state: body.snapshot.is_partial ? "partial" : "fresh",
+        staleness_seconds: staleness,
+        threshold_seconds: 60,
+        is_partial: body.snapshot.is_partial,
+        observed_at: body.snapshot.observed_at || null,
+        last_success: body.snapshot.observed_at || null,
+        last_error_code: "",
+      },
+    };
+    return { kind: "found", user: body.user, page, pagesScanned: 1 };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return { kind: "notFound", pagesScanned: 1 };
+    }
+    throw error;
   }
 }
 

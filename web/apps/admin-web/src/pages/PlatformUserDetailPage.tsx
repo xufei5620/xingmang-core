@@ -14,7 +14,7 @@ import {
   decodePlatformUserIdSegment,
   describeMaskedEmail,
   describeUserStatus,
-  lookupPlatformUserExact,
+  getPlatformUser,
   platformHasUsers,
   type AmountBody,
   type PeriodGranularity,
@@ -56,9 +56,8 @@ function tokenPrefixText(raw: string): string {
 
 /** 平台用户完整详情页（XM-B001）。
  *
- * 数据入口只有 `platformusers v1` 列表 Query。页面用 `q=userId` 做最多 5×200
- * 条的有界游标扫描，再执行客户端 ID 全等；不调用 reqlog、request content、
- * invoice 或 finance，也不按用户名跨域拼接。 */
+ * 数据入口是 v2 的 canonical UserDetail Query；服务端负责精确查找与来源隔离。
+ * 不调用 reqlog、request content、invoice 或 finance，也不按用户名跨域拼接。 */
 export function PlatformUserDetailPage() {
   const params = useParams();
   const platform = params.serviceType ?? "";
@@ -83,7 +82,7 @@ export function PlatformUserDetailPage() {
     queryKey: ["platform-user-exact", platform, userIdSegment, { day, granularity }],
     queryFn: ({ signal }) => {
       if (userId === null) throw new Error("用户 ID 编码无效");
-      return lookupPlatformUserExact(platform, userId, {
+      return getPlatformUser(platform, userId, {
         signal,
         ...(day ? { day } : {}),
         granularity,
@@ -218,7 +217,7 @@ function LookupResult({
         kind="empty"
         title="没有这个用户"
         description="按用户 ID 精确搜索的过滤结果已完整耗尽；没有回落到模糊结果或第一条样本。"
-        footnote={`已扫描 ${result.pagesScanned} 页 platformusers v1 结果`}
+        footnote={`已查询 ${result.pagesScanned} 次 platformusers v2 精确资源`}
         action={
           <Link to={backTo} className="text-sm font-medium text-accent hover:underline">
             返回用户管理
@@ -286,11 +285,11 @@ function FoundUserDetail({
       ) : null}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <AmountTile label="可用余额" amount={user.balance} note="platformusers v1 用户可用余额" />
+        <AmountTile label="可用余额" amount={user.balance} note="platformusers v2 用户可用余额" />
         <AmountTile
           label="区间充值"
           amount={user.period_recharge}
-          note="所选业务日区间的充值；真实上游 v1 多半不给"
+          note="所选业务日区间的充值；真实上游可能不提供"
         />
         <AmountTile
           label="区间消费"
@@ -307,7 +306,7 @@ function FoundUserDetail({
       <div className="rounded-lg border border-edge bg-surface p-3">
         <FreshnessNote freshness={page.freshness} />
         <p className="break-words text-xs text-fg-muted">
-          来源 {page.data_source || "—"} · platformusers v1 · 精确 ID 匹配 · 扫描 {result.pagesScanned} 页
+          来源 {page.data_source || "—"} · platformusers v2 · 精确 UserRef 匹配
         </p>
       </div>
 
@@ -424,15 +423,15 @@ function Sub2ApiUnsupported({
       <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-3">
         <UnavailablePanel
           title="客户类型"
-          description="客户类型不在 platformusers v1；归属 platformusers read contract v2。"
+          description="客户类型不在当前用户详情快照；归属 platformusers read contract v2。"
         />
         <UnavailablePanel
           title="注册时间"
-          description="注册时间不在 platformusers v1；归属 platformusers read contract v2。"
+          description="注册时间不在当前用户详情快照；归属 platformusers read contract v2。"
         />
         <UnavailablePanel
           title="近 7 天消费趋势"
-          description="需要逐日消费序列；platformusers v1 只有当前区间与近 30 天汇总，归属用户 read contract v2。"
+          description="需要逐日消费序列；DailyUsage 是独立审批切片，当前保持未接入。"
         />
       </div>
 

@@ -236,7 +236,7 @@ function platformTabLoader({ request, params }: LoaderFunctionArgs) {
   }
 }
 
-/** 用户详情只覆盖 platformusers v1 明确支持的两类平台。
+/** 用户详情只覆盖 platformusers v2 明确支持的两类平台。
  *
  * 用统一 RouteErrorBoundary 的 404，而不是在详情组件里画一个看似成功的空页；
  * 更不能把 CPA/服务器悄悄回落到 Sub2API 的第一条样本。 */
@@ -286,7 +286,7 @@ export const routes = [
           },
           {
             // 用户 ID 是不透明值；列表 Link 统一编码成带前缀的 UTF-8 hex 段，
-            // 详情页严格解码后只把原值作为 platformusers 的 q 参数精确匹配。
+            // 详情页严格解码后请求 v2 canonical UserDetail 资源。
             path: "platforms/:serviceType/users/:userId",
             loader: platformUserDetailLoader,
             Component: PlatformUserDetailPage,
