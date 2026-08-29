@@ -384,7 +384,7 @@ const usersBody = {
 };
 
 function userDetailBody(platform = "sub2api") {
-  const user = usersBody.items[0];
+  const user = usersBody.items[0]!;
   return {
     ref: { platform, id: user.id },
     user,
