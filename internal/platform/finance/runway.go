@@ -139,6 +139,26 @@ func (t RunwayThresholds) Validate() error {
 	return nil
 }
 
+// Classify 使用唯一的、包含边界的分档语义。
+//
+// 这是给看板、预览和告警共同调用的显式 API。非法配置返回错误，调用方必须
+// fail closed，不能把一个无效快照误画成 critical 或继续发出 R5。
+func (t RunwayThresholds) Classify(days int) (RunwayLevel, error) {
+	if err := t.Validate(); err != nil {
+		return "", err
+	}
+	switch {
+	case days <= t.CriticalDays:
+		return RunwayCritical, nil
+	case days <= t.WarningDays:
+		return RunwayWarning, nil
+	case days <= t.SeriousDays:
+		return RunwaySerious, nil
+	default:
+		return RunwayHealthy, nil
+	}
+}
+
 // RunwayLevel 是可用天数的预警档。
 type RunwayLevel string
 
@@ -306,17 +326,11 @@ func ComputeRunway(in RunwayInput) Runway {
 // 给不出档位的结果，会在看板上变成一个没有颜色的数字，
 // 而「没有颜色」看起来就像「没问题」。宁可误报也不漏报。
 func (t RunwayThresholds) levelFor(days int) RunwayLevel {
-	if err := t.Validate(); err != nil {
+	level, err := t.Classify(days)
+	if err != nil {
+		// 保持旧 ComputeRunway 的返回形状；新的 provider/preview 调用
+		// Classify 直接拿 error，因此不会把这条兼容路径当成可信配置。
 		return RunwayCritical
 	}
-	switch {
-	case days <= t.CriticalDays:
-		return RunwayCritical
-	case days <= t.WarningDays:
-		return RunwayWarning
-	case days <= t.SeriousDays:
-		return RunwaySerious
-	default:
-		return RunwayHealthy
-	}
+	return level
 }

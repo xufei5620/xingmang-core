@@ -117,6 +117,7 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	runwayThresholdStore := finance.NewRunwayThresholdStore(pool, nil)
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
 	kernel := action.NewKernel(
@@ -212,9 +213,11 @@ func main() {
 		// 而本进程没有任何写入路径会用到注入时钟。
 		FinanceSummaries: finance.NewSummaryStore(pool, nil),
 		// 阈值从环境变量解析后注入，与 platform-worker 的告警规则同源
-		FinanceRunwayThresholds: cfg.FinanceRunwayThresholds,
-		RequestTimeout:          cfg.RequestTimeout,
-		RateLimit:               cfg.RateLimit,
+		FinanceRunwayThresholds:    cfg.FinanceRunwayThresholds,
+		FinanceRunwayConfig:        runwayThresholdStore,
+		FinanceRunwayConfigHistory: runwayThresholdStore,
+		RequestTimeout:             cfg.RequestTimeout,
+		RateLimit:                  cfg.RateLimit,
 	})
 
 	srv := &http.Server{

@@ -63,7 +63,12 @@ type Deps struct {
 	// 同时出现在一个人面前。两个进程共用 finance.ParseRunwayThresholds。
 	// 零值时端点回落到 finance.DefaultRunwayThresholds()。
 	FinanceRunwayThresholds finance.RunwayThresholds
-	RequestTimeout          time.Duration
+	// FinanceRunwayConfig 是按环境版本化的运行时阈值快照（XM-C-RUNWAY0）。
+	// nil 时不挂载专用 current/history Query；旧的 summary 端点仍使用上面的
+	// 启动期兼容字段，便于分阶段切换而不会让未迁移环境误报成功。
+	FinanceRunwayConfig        RunwayThresholdProvider
+	FinanceRunwayConfigHistory RunwayThresholdHistoryLister
+	RequestTimeout             time.Duration
 	// RateLimit 是 /api/v1 的限流参数（XM-R011）。零值走默认配额。
 	//
 	// **没有「关掉」这个选项**：一个能被关掉的限流在出事那天多半是关着的。
@@ -213,6 +218,14 @@ func NewRouter(d Deps) http.Handler {
 		api.With(RequireScope(finance.ScopeRead)).
 			Get("/finance/upstreams/summary",
 				ListUpstreamSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))
+		if d.FinanceRunwayConfig != nil {
+			api.With(RequireScope(finance.ScopeRead)).
+				Get("/finance/runway-thresholds", GetRunwayThresholdHandler(d.FinanceRunwayConfig))
+		}
+		if d.FinanceRunwayConfigHistory != nil {
+			api.With(RequireScope(finance.ScopeRead)).
+				Get("/finance/runway-thresholds/history", ListRunwayThresholdHistoryHandler(d.FinanceRunwayConfigHistory))
+		}
 	})
 	return r
 }

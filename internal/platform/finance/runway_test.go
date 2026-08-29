@@ -254,6 +254,34 @@ func TestRunwayThresholdsMustStrictlyIncrease(t *testing.T) {
 	}
 }
 
+func TestRunwayThresholdsClassifyUsesInclusiveBoundaries(t *testing.T) {
+	thresholds := finance.DefaultRunwayThresholds()
+	cases := []struct {
+		days int
+		want finance.RunwayLevel
+	}{
+		{days: 0, want: finance.RunwayCritical},
+		{days: 5, want: finance.RunwayCritical},
+		{days: 6, want: finance.RunwayWarning},
+		{days: 10, want: finance.RunwayWarning},
+		{days: 11, want: finance.RunwaySerious},
+		{days: 20, want: finance.RunwaySerious},
+		{days: 21, want: finance.RunwayHealthy},
+	}
+	for _, tc := range cases {
+		got, err := thresholds.Classify(tc.days)
+		if err != nil || got != tc.want {
+			t.Fatalf("Classify(%d) = %q, %v; want %q", tc.days, got, err, tc.want)
+		}
+	}
+}
+
+func TestRunwayThresholdsClassifyRejectsInvalidConfiguration(t *testing.T) {
+	if _, err := (finance.RunwayThresholds{CriticalDays: 10, WarningDays: 5, SeriousDays: 20}).Classify(1); err == nil {
+		t.Fatal("invalid threshold order must return an error")
+	}
+}
+
 // TestInvalidThresholdsFallBackToCritical：阈值非法时一律归 critical。
 //
 // 一个算得出天数却给不出档位的结果，会在看板上变成一个没有颜色的数字，

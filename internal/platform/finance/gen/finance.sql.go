@@ -14,7 +14,6 @@ import (
 
 const acquirePlatformChannelBindingLock = `-- name: AcquirePlatformChannelBindingLock :exec
 
-
 SELECT pg_advisory_xact_lock(
   hashtextextended($1::uuid::text || chr(31) || $2::text, 0)
 )
@@ -25,14 +24,6 @@ type AcquirePlatformChannelBindingLockParams struct {
 	ExternalChannelID string
 }
 
-// XM-0037a 成本登记簿（设计稿 §2.1）。
-//
-// 本文件只有登记簿的读写；利润台账（§2.2）与订阅批次（§2.5）属于
-// XM-0037b / c，各自新增查询。
-//
-// 金额在本层**不出现**：登记簿存的是倍率（NUMERIC，比例用 Decimal）与
-// 凭据引用，成本金额是 037b 台账的事。宪法 13 条在这里体现为
-// 「这张表里没有一个金额列」。
 // ---------------------------------------------------------------------------
 // XM-C-MAP2 managed platform channel temporal bindings.
 // ---------------------------------------------------------------------------
@@ -303,6 +294,41 @@ func (q *Queries) GetProxyAsset(ctx context.Context, id uuid.UUID) (FinanceProxy
 	return i, err
 }
 
+const getRunwayThresholdConfig = `-- name: GetRunwayThresholdConfig :one
+
+
+SELECT environment, critical_days, warning_days, serious_days, revision, updated_at, updated_by, reason, request_id FROM finance.runway_threshold_config
+WHERE environment = $1
+`
+
+// XM-0037a 成本登记簿（设计稿 §2.1）。
+//
+// 本文件只有登记簿的读写；利润台账（§2.2）与订阅批次（§2.5）属于
+// XM-0037b / c，各自新增查询。
+//
+// 金额在本层**不出现**：登记簿存的是倍率（NUMERIC，比例用 Decimal）与
+// 凭据引用，成本金额是 037b 台账的事。宪法 13 条在这里体现为
+// 「这张表里没有一个金额列」。
+// ---------------------------------------------------------------------------
+// XM-C-RUNWAY0 threshold snapshot / history.
+// ---------------------------------------------------------------------------
+func (q *Queries) GetRunwayThresholdConfig(ctx context.Context, environment string) (FinanceRunwayThresholdConfig, error) {
+	row := q.db.QueryRow(ctx, getRunwayThresholdConfig, environment)
+	var i FinanceRunwayThresholdConfig
+	err := row.Scan(
+		&i.Environment,
+		&i.CriticalDays,
+		&i.WarningDays,
+		&i.SeriousDays,
+		&i.Revision,
+		&i.UpdatedAt,
+		&i.UpdatedBy,
+		&i.Reason,
+		&i.RequestID,
+	)
+	return i, err
+}
+
 const getSubscriptionCostBatch = `-- name: GetSubscriptionCostBatch :one
 SELECT id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at FROM finance.subscription_cost_batch WHERE id = $1
 `
@@ -546,6 +572,111 @@ func (q *Queries) InsertProxyAsset(ctx context.Context, arg InsertProxyAssetPara
 		&i.Environment,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertRunwayThresholdBootstrap = `-- name: InsertRunwayThresholdBootstrap :one
+INSERT INTO finance.runway_threshold_config (
+    environment, critical_days, warning_days, serious_days,
+    revision, updated_at, updated_by, reason, request_id
+) VALUES (
+    $1, $2, $3,
+    $4, 1, $5, $6,
+    $7, $8
+)
+ON CONFLICT (environment) DO NOTHING
+RETURNING environment, critical_days, warning_days, serious_days, revision, updated_at, updated_by, reason, request_id
+`
+
+type InsertRunwayThresholdBootstrapParams struct {
+	Environment  string
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	UpdatedAt    pgtype.Timestamptz
+	UpdatedBy    string
+	Reason       string
+	RequestID    string
+}
+
+func (q *Queries) InsertRunwayThresholdBootstrap(ctx context.Context, arg InsertRunwayThresholdBootstrapParams) (FinanceRunwayThresholdConfig, error) {
+	row := q.db.QueryRow(ctx, insertRunwayThresholdBootstrap,
+		arg.Environment,
+		arg.CriticalDays,
+		arg.WarningDays,
+		arg.SeriousDays,
+		arg.UpdatedAt,
+		arg.UpdatedBy,
+		arg.Reason,
+		arg.RequestID,
+	)
+	var i FinanceRunwayThresholdConfig
+	err := row.Scan(
+		&i.Environment,
+		&i.CriticalDays,
+		&i.WarningDays,
+		&i.SeriousDays,
+		&i.Revision,
+		&i.UpdatedAt,
+		&i.UpdatedBy,
+		&i.Reason,
+		&i.RequestID,
+	)
+	return i, err
+}
+
+const insertRunwayThresholdHistory = `-- name: InsertRunwayThresholdHistory :one
+INSERT INTO finance.runway_threshold_history (
+    environment, revision, critical_days, warning_days, serious_days,
+    changed_at, changed_by, reason, request_id, change_source
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10
+)
+RETURNING environment, revision, critical_days, warning_days, serious_days, changed_at, changed_by, reason, request_id, change_source
+`
+
+type InsertRunwayThresholdHistoryParams struct {
+	Environment  string
+	Revision     int64
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	ChangedAt    pgtype.Timestamptz
+	ChangedBy    string
+	Reason       string
+	RequestID    string
+	ChangeSource string
+}
+
+func (q *Queries) InsertRunwayThresholdHistory(ctx context.Context, arg InsertRunwayThresholdHistoryParams) (FinanceRunwayThresholdHistory, error) {
+	row := q.db.QueryRow(ctx, insertRunwayThresholdHistory,
+		arg.Environment,
+		arg.Revision,
+		arg.CriticalDays,
+		arg.WarningDays,
+		arg.SeriousDays,
+		arg.ChangedAt,
+		arg.ChangedBy,
+		arg.Reason,
+		arg.RequestID,
+		arg.ChangeSource,
+	)
+	var i FinanceRunwayThresholdHistory
+	err := row.Scan(
+		&i.Environment,
+		&i.Revision,
+		&i.CriticalDays,
+		&i.WarningDays,
+		&i.SeriousDays,
+		&i.ChangedAt,
+		&i.ChangedBy,
+		&i.Reason,
+		&i.RequestID,
+		&i.ChangeSource,
 	)
 	return i, err
 }
@@ -1181,6 +1312,51 @@ func (q *Queries) ListProxyAssetsByIDs(ctx context.Context, ids []uuid.UUID) ([]
 			&i.Environment,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunwayThresholdHistory = `-- name: ListRunwayThresholdHistory :many
+SELECT environment, revision, critical_days, warning_days, serious_days, changed_at, changed_by, reason, request_id, change_source FROM finance.runway_threshold_history
+WHERE environment = $1
+  AND ($2::bigint = 0 OR revision < $2)
+ORDER BY revision DESC
+LIMIT $3
+`
+
+type ListRunwayThresholdHistoryParams struct {
+	Environment    string
+	BeforeRevision int64
+	ResultLimit    int32
+}
+
+func (q *Queries) ListRunwayThresholdHistory(ctx context.Context, arg ListRunwayThresholdHistoryParams) ([]FinanceRunwayThresholdHistory, error) {
+	rows, err := q.db.Query(ctx, listRunwayThresholdHistory, arg.Environment, arg.BeforeRevision, arg.ResultLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FinanceRunwayThresholdHistory{}
+	for rows.Next() {
+		var i FinanceRunwayThresholdHistory
+		if err := rows.Scan(
+			&i.Environment,
+			&i.Revision,
+			&i.CriticalDays,
+			&i.WarningDays,
+			&i.SeriousDays,
+			&i.ChangedAt,
+			&i.ChangedBy,
+			&i.Reason,
+			&i.RequestID,
+			&i.ChangeSource,
 		); err != nil {
 			return nil, err
 		}
@@ -2309,6 +2485,60 @@ func (q *Queries) UpdateProxyAsset(ctx context.Context, arg UpdateProxyAssetPara
 		&i.Environment,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateRunwayThresholdConfigAtRevision = `-- name: UpdateRunwayThresholdConfigAtRevision :one
+UPDATE finance.runway_threshold_config SET
+    critical_days = $1,
+    warning_days = $2,
+    serious_days = $3,
+    revision = revision + 1,
+    updated_at = $4,
+    updated_by = $5,
+    reason = $6,
+    request_id = $7
+WHERE environment = $8
+  AND revision = $9
+RETURNING environment, critical_days, warning_days, serious_days, revision, updated_at, updated_by, reason, request_id
+`
+
+type UpdateRunwayThresholdConfigAtRevisionParams struct {
+	CriticalDays     int32
+	WarningDays      int32
+	SeriousDays      int32
+	UpdatedAt        pgtype.Timestamptz
+	UpdatedBy        string
+	Reason           string
+	RequestID        string
+	Environment      string
+	ExpectedRevision int64
+}
+
+func (q *Queries) UpdateRunwayThresholdConfigAtRevision(ctx context.Context, arg UpdateRunwayThresholdConfigAtRevisionParams) (FinanceRunwayThresholdConfig, error) {
+	row := q.db.QueryRow(ctx, updateRunwayThresholdConfigAtRevision,
+		arg.CriticalDays,
+		arg.WarningDays,
+		arg.SeriousDays,
+		arg.UpdatedAt,
+		arg.UpdatedBy,
+		arg.Reason,
+		arg.RequestID,
+		arg.Environment,
+		arg.ExpectedRevision,
+	)
+	var i FinanceRunwayThresholdConfig
+	err := row.Scan(
+		&i.Environment,
+		&i.CriticalDays,
+		&i.WarningDays,
+		&i.SeriousDays,
+		&i.Revision,
+		&i.UpdatedAt,
+		&i.UpdatedBy,
+		&i.Reason,
+		&i.RequestID,
 	)
 	return i, err
 }

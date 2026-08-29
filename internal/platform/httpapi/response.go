@@ -44,6 +44,10 @@ func StatusForCode(c action.Code) int {
 		return http.StatusNotImplemented
 	case action.CodeExecutionFailed:
 		return http.StatusBadGateway
+	case action.CodeRunwayConfigUnavailable:
+		return http.StatusServiceUnavailable
+	case action.CodeRevisionConflict:
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}
