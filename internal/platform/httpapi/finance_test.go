@@ -70,29 +70,29 @@ func sampleAccount() (finance.UpstreamAccount, []finance.TokenMapping) {
 	id := uuid.New()
 	now := time.Date(2026, 8, 28, 3, 0, 0, 0, time.UTC)
 	return finance.UpstreamAccount{
-		ID:              id,
-		SystemType:      finance.SystemSub2API,
-		AccessMethod:    finance.AccessUpstreamKey,
-		UpstreamName:    "Relay A",
-		UpstreamContact: "运营群 @relay-a",
-		UpstreamGroup:   "gpt-main",
-		BaseURL:         "https://api.example.test",
-		CredentialRef:   financeCredentialRef,
-		RechargeRatio:   money.MustParseRatio("1.15"),
-		GroupRate:       money.MustParseRatio("1.25"),
-		Currency:        "USD",
-		BusinessDayTZ:   "+08:00",
-		Status:          finance.StatusActive,
-		Environment:     "development",
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}, []finance.TokenMapping{{
-		UpstreamAccountID: id,
-		UpstreamTokenID:   "tok-1",
-		OwnAccountID:      "258",
-		CredentialRef:     financeCredentialRef,
-		UpdatedAt:         now,
-	}}
+			ID:              id,
+			SystemType:      finance.SystemSub2API,
+			AccessMethod:    finance.AccessUpstreamKey,
+			UpstreamName:    "Relay A",
+			UpstreamContact: "运营群 @relay-a",
+			UpstreamGroup:   "gpt-main",
+			BaseURL:         "https://api.example.test",
+			CredentialRef:   financeCredentialRef,
+			RechargeRatio:   money.MustParseRatio("1.15"),
+			GroupRate:       money.MustParseRatio("1.25"),
+			Currency:        "USD",
+			BusinessDayTZ:   "+08:00",
+			Status:          finance.StatusActive,
+			Environment:     "development",
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}, []finance.TokenMapping{{
+			UpstreamAccountID: id,
+			UpstreamTokenID:   "tok-1",
+			OwnAccountID:      "258",
+			CredentialRef:     financeCredentialRef,
+			UpdatedAt:         now,
+		}}
 }
 
 func getAccounts(t *testing.T, lister UpstreamAccountLister, scopes, query string) *httptest.ResponseRecorder {
