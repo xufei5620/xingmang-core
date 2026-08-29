@@ -10,12 +10,17 @@ set -Eeuo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="${CI_LOCAL_ROOT:-$(cd -- "$script_dir/.." && pwd -P)}"
 
+if [[ "$repo_root" =~ ^[A-Za-z]:[\\/].* ]] && command -v cygpath >/dev/null 2>&1; then
+  repo_root="$(cygpath -u "$repo_root")"
+fi
+
 case "$repo_root" in
   /*) ;;
   *) echo "CI LOCAL FAIL: CI_LOCAL_ROOT 必须是绝对路径" >&2; exit 2 ;;
 esac
 [ -d "$repo_root" ] || { echo "CI LOCAL FAIL: 仓库目录不存在: $repo_root" >&2; exit 2; }
 cd -- "$repo_root"
+repo_root="$(pwd -P)"
 
 # 不允许调用方把门禁指向另一份仓库/索引或通过 GOFLAGS、GITLEAKS_CONFIG
 # 改写检查范围。服务器 wrapper 会以干净环境调用本脚本；这里再做一道防线。
@@ -28,6 +33,9 @@ for tool in bash git go gofmt pnpm gitleaks; do
 done
 if [ "${CI_LOCAL_ALLOW_NO_GIT:-0}" != "1" ]; then
   git_repo="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ "$git_repo" =~ ^[A-Za-z]:[\\/].* ]] && command -v cygpath >/dev/null 2>&1; then
+    git_repo="$(cygpath -u "$git_repo")"
+  fi
   [ "$git_repo" = "$repo_root" ] || {
     echo "CI LOCAL FAIL: 必须在目标 Git 工作树根目录运行" >&2
     exit 2
