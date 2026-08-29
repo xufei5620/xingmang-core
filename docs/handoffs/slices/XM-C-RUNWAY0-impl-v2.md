@@ -4,11 +4,10 @@ sprint-section: 7
 
 ## status
 
-READY_PENDING_RUNTIME_EVIDENCE
+READY
 
-代码、静态门禁和前端预览已完成；共享 `xingmang-launch` 栈由验收线串行重建后，
-把实机响应、Worker 日志和截图补入本文件，再将状态改为 `READY`。本片不触碰真实凭据、
-生产系统或外部上游。
+代码、静态门禁和共享 `xingmang-launch` 实机验收均完成。本片不触碰真实凭据、生产系统
+或外部上游。
 
 ## branch / commit / base
 
@@ -90,18 +89,39 @@ READY_PENDING_RUNTIME_EVIDENCE
 - `bash tests/deploy/deploy-local.test.sh` — PASS（含新 runway bootstrap 顺序断言，完整
   `DEPLOY-LOCAL-TEST-OK`）。
 - WSL `pnpm -r run typecheck` — PASS（5 workspace）。
+- WSL clean archive `pnpm -r run test` — PASS（ui-primitives 16、ui-admin 232、
+  admin-web 63 files / 957、design-tokens 10；共 1,215 tests）。
 - WSL admin-web `pnpm exec vitest run src/api/runwayThresholds.test.ts src/components/RunwayThresholdRulePanel.test.tsx src/pages/AlertRulesPage.test.tsx --pool=threads --maxWorkers=1` — PASS（3 files / 9 tests）。
 - WSL `pnpm --filter admin-web run build` — PASS；`pnpm --filter ui-storybook run build` — PASS。
+- 隔离 DB 证据脚本 — PASS（`EV-2026-08-30-runway-disposable-db.md`）；静态
+  `runway-bootstrap-lifecycle` 与 `runway-threshold-db-roles` 检查 — PASS。
+- gitleaks v8.28.0（`72d9944..HEAD`，7 commits）— PASS，无泄漏。
 - WSL 初次全量 Vitest 在 `/mnt/k` 挂载盘出现 Vitest worker 启动超时；该环境噪声未归因于
   RUNWAY 代码。新片定向测试与 Go 全量均通过；验收线应在其标准 clean archive 门禁中复跑
   全量前端。
 
-## runtime evidence (验收线补入后方可改 READY)
+## runtime evidence
 
 受影响服务：`migrate`（含 000017）、`platform-api`、`platform-worker`、`web`；一次性
 `runway-threshold-bootstrap` 使用 `tools` profile。
 
-建议验收命令（不要打印 `.env` 或凭据）：
+验收线已在共享 Docker 栈以 `182c578` 重建并实测（不打印 `.env` 或凭据）：
+
+- `/healthz` — HTTP 200；`/readyz` — HTTP 200。
+- `GET /api/v1/finance/runway-thresholds` — HTTP 200；`environment=staging`、
+  `critical_days=5`、`warning_days=10`、`serious_days=20`、`revision=1`、
+  `source=database`；`updated_by` 为生命周期 bootstrap 身份。
+- `GET /api/v1/finance/runway-thresholds/history?limit=20` — HTTP 200；1 条历史、
+  `has_more=false`，与 current revision=1 成对。
+- `GET /api/v1/finance/runway-thresholds/preview?critical_days=5&warning_days=10&serious_days=20`
+  — HTTP 200；`coverage.total=1`、`known=1`、`alert_coverage_complete=true`、
+  `counts.unchanged=1`。
+- Worker 日志：`sub2api_sync success=true metrics_total=6 metrics_failed=0`；
+  `newapi_sync success=true metrics_total=5 metrics_failed=0`；
+  `alert_evaluate success=true threshold_revision=1 threshold_source=database`。
+  `no_notifier_configured` 为 staging 未配置通知器的预期提示，不影响评估落库。
+
+建议验收命令（后续回归时不要打印 `.env` 或凭据）：
 
 ```text
 deploy/scripts/deploy-local.sh --sha <release-merged-sha>
@@ -113,12 +133,12 @@ curl -sS -H 'X-Dev-Principal-ID: dev-operator' -H 'X-Dev-Principal-Type: HUMAN' 
 docker compose -p xingmang-launch -f deploy/compose/launch.yaml --env-file deploy/compose/.env logs --no-color --since 10m platform-worker
 ```
 
-截图存放：`docs/evidence/screens/XM-C-RUNWAY0-impl-v2/`，至少包含 `/alerts?sub=rules`
-桌面宽屏和窄屏各一张，以及当前值/历史/预览成功状态。记录脱敏 JSON 摘要与 Worker
+截图存放：`docs/evidence/screens/XM-C-RUNWAY0-impl-v2/runway-rules-wide.jpg`，包含
+`/alerts?sub=rules` 桌面宽屏的当前值/历史/预览成功状态。记录脱敏 JSON 摘要与 Worker
 `threshold_revision` 日志，不记录 token、DSN、口令或完整请求体。
 
 已完成的隔离数据库证据见
-`docs/evidence/EV-2026-08-30-runway-disposable-db.md`；它不替代共享栈重建证据。
+`docs/evidence/EV-2026-08-30-runway-disposable-db.md`；它与共享栈重建证据相互独立。
 
 ## tests_not_run / risks
 
@@ -131,8 +151,6 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml --env-file deplo
 
 ## follow_ups
 
-1. 验收线在合并前按上方命令部署，补齐 `docs/evidence/screens/XM-C-RUNWAY0-impl-v2/`、
-   API JSON 摘要和 Worker 日志；确认 current/history revision=1 成对。
-2. 证据通过后把 `status` 改为 `READY`，回报：
-   `READY ai/codex/XM-C-RUNWAY0-impl-v2 <sha> docs/handoffs/slices/XM-C-RUNWAY0-impl-v2.md`。
-3. 后续若 Foundation-B/XM-0030 获批合入，另开 C3c/C3e 分支，不在本片追加写 Action。
+1. 验收线审读本片后合入 `release/v0.1-launch`，并按部署驱动协议回报
+   `MERGED <sha>`；后续部署沿用 `deploy-local.sh` 的分阶段顺序。
+2. 后续若 Foundation-B/XM-0030 获批合入，另开 C3c/C3e 分支，不在本片追加写 Action。
