@@ -114,7 +114,21 @@ run_secret_scan() {
     return
   fi
   require_executable secret-scan gitleaks || return $?
-  gitleaks git --redact --no-banner || return $?
+  # 只扫描本次提交相对于已接收基线的增量。历史仓库里已有的测试占位
+  # 不应阻塞新提交；服务器 post-receive 会把 old..new 通过受控环境传入。
+  secret_log_opts="${CI_LOCAL_SECRET_SCAN_LOG_OPTS:-}"
+  if [ -z "$secret_log_opts" ]; then
+    if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+      secret_log_opts='HEAD^..HEAD'
+    else
+      secret_log_opts='HEAD'
+    fi
+  fi
+  [[ "$secret_log_opts" =~ ^(HEAD|HEAD\^\.\.HEAD|[0-9a-fA-F]{40}(\.\.[0-9a-fA-F]{40})?)$ ]] || {
+    echo "CI LOCAL FAIL: secret-scan 增量范围非法" >&2
+    return 2
+  }
+  gitleaks git --redact --no-banner --log-opts="$secret_log_opts" || return $?
 }
 
 run_backend() {

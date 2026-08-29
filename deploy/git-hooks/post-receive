@@ -135,7 +135,7 @@ release_lock() {
 }
 
 run_ci() {
-  local checkout="$1" sha="$2"
+  local checkout="$1" sha="$2" previous="${3:-0000000000000000000000000000000000000000}"
   if [ -n "$ci_command" ]; then
     [ "${POST_RECEIVE_ALLOW_CUSTOM_EXECUTOR:-0}" = "1" ] || {
       echo "POST-RECEIVE FAIL: 自定义 CI 执行器仅允许在显式测试模式启用" >&2
@@ -216,6 +216,10 @@ run_ci() {
     echo "POST-RECEIVE FAIL: 可信 CI 脚本哈希不匹配" >&2
     return 1
   }
+  secret_log_opts='HEAD'
+  if [ "$previous" != "$zero" ]; then
+    secret_log_opts="$previous..$sha"
+  fi
   "$docker_bin" run --rm --pull=never \
     --network none \
     --cap-drop=ALL \
@@ -227,6 +231,7 @@ run_ci() {
     -e CI_LOCAL_ROOT=/workspace \
     -e CI_LOCAL_REQUIRE_GIT=1 \
     -e CI_LOCAL_ALLOW_OVERRIDES=0 \
+    -e CI_LOCAL_SECRET_SCAN_LOG_OPTS="$secret_log_opts" \
     -e GOVERNANCE_BASE_REF="${configured_base_ref:-origin/main}" \
     -e GOVERNANCE_REQUIRE_BASE="${configured_require_base:-1}" \
     -w /workspace \
@@ -267,7 +272,7 @@ run_release_locked() {
     mkdir -p -- "$checkout/.ci-home"
     chmod 0700 "$checkout/.ci-home"
     ci_rc=0
-    run_ci "$checkout" "$new" || ci_rc=$?
+    run_ci "$checkout" "$new" "$old" || ci_rc=$?
     if [ "$ci_rc" -ne 0 ]; then
       echo "ci_exit=$ci_rc"
       exit "$ci_rc"
