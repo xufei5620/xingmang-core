@@ -88,6 +88,7 @@ describe("NewAPI 资金与订单", () => {
     const tile = await screen.findByRole("heading", { name: "区间到账", level: 3 });
     const card = tile.closest("article") as HTMLElement;
     expect(within(card).getByText("¥8,120.00")).toBeTruthy();
+    expect(within(card).getByText(/已知充值订单 4 笔/)).toBeTruthy();
     expect(within(card).getByText("数据新鲜")).toBeTruthy();
     expect(within(card).getByText(/来源 newapi-prod/)).toBeTruthy();
     expect(screen.getByText("¥1,200.00")).toBeTruthy();
@@ -107,6 +108,7 @@ describe("NewAPI 资金与订单", () => {
                 environment: "development",
                 watermark: "day:2026-08-28 subscription:unavailable_over_http",
                 value: { day: "2026-08-28", amount_minor_units: "0", currency: "CNY" },
+                // 兼容旧生产者：is_partial 为真时即使 state 误留 fresh，界面也要降级为不完整。
                 freshness: { ...fresh, is_partial: true },
               },
             ],
@@ -119,7 +121,101 @@ describe("NewAPI 资金与订单", () => {
     expect(
       await screen.findByText("NewAPI 上游没有订阅订单端点；金额未知，不显示 0"),
     ).toBeTruthy();
+    expect(screen.getByText("数据不完整")).toBeTruthy();
+    expect(screen.getByText(/来源 newapi-prod/)).toBeTruthy();
     expect(screen.queryByText("¥0.00")).toBeNull();
+  });
+
+  it("部分订阅指标有非零金额时保留下界，并显示数据不完整", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(200, {
+            items: [
+              {
+                metric_key: "newapi.subscription.daily",
+                source: "newapi-prod",
+                environment: "development",
+                watermark: "day:2026-08-28 subscription:partial",
+                value: { day: "2026-08-28", amount_minor_units: "120000", currency: "CNY" },
+                freshness: { ...fresh, is_partial: true, state: "partial" },
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderFinance();
+
+    expect(await screen.findByText("¥1,200.00")).toBeTruthy();
+    expect(screen.getByText("数据不完整")).toBeTruthy();
+  });
+
+  it("未初始化的日充值指标即使残留零值也保持未知", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(200, {
+            items: [
+              {
+                metric_key: "newapi.recharge.daily",
+                source: "newapi-prod",
+                environment: "development",
+                watermark: "",
+                value: { day: "2026-08-28", amount_minor_units: "0", currency: "CNY" },
+                freshness: {
+                  ...fresh,
+                  state: "uninitialized",
+                  observed_at: null,
+                  last_success: null,
+                  staleness_seconds: null,
+                },
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderFinance();
+
+    const tile = await screen.findByRole("heading", { name: "区间到账", level: 3 });
+    expect(within(tile.closest("article") as HTMLElement).getByText("—")).toBeTruthy();
+    expect(screen.queryByText("¥0.00")).toBeNull();
+  });
+
+  it("同步失败但有上次成功值时保留金额，并让新鲜度表达失败", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(200, {
+            items: [
+              {
+                metric_key: "newapi.recharge.daily",
+                source: "newapi-prod",
+                environment: "development",
+                watermark: "day:2026-08-28",
+                value: { day: "2026-08-28", amount_minor_units: "125000", currency: "CNY" },
+                freshness: {
+                  ...fresh,
+                  state: "failed",
+                  staleness_seconds: 7200,
+                  last_error_code: "upstream_timeout",
+                },
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderFinance();
+
+    const tile = await screen.findByRole("heading", { name: "区间到账", level: 3 });
+    const card = tile.closest("article") as HTMLElement;
+    expect(within(card).getByText("¥1,250.00")).toBeTruthy();
+    expect(within(card).getByText("同步失败")).toBeTruthy();
   });
 
   it("周/月只显示不可用说明，并把日期与粒度保留在可分享 URL 控件", async () => {
@@ -181,6 +277,8 @@ describe("NewAPI 资金与订单", () => {
     expect(screen.getByText("¥100.00")).toBeTruthy();
     expect(screen.getByText("¥70.00")).toBeTruthy();
     expect(screen.getByText("¥30.00")).toBeTruthy();
+    expect(screen.getByText("30.00%")).toBeTruthy();
+    expect(screen.queryByText("毛利率 30.00%")).toBeNull();
     const toolbar = screen.getByRole("toolbar", { name: "利润核算明细筛选与搜索" });
     const controls = [...toolbar.querySelectorAll("select, input[type=search]")];
     expect(controls.at(-1)?.getAttribute("type")).toBe("search");

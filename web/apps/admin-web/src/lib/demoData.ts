@@ -25,6 +25,9 @@ export const DEFAULT_DEMO_SOURCES = [
   // 逐用户金额会与真实运营事实长得完全一样。
   "sub2api-fake",
   "newapi-fake",
+  // finance collector 的 staging seed 也会产生可见金额；不标记它会让
+  // 成本/毛利卡看起来像真实运营读数。
+  "finance-collect-staging",
 ];
 
 /** 横幅文案。写死在这里而不是散在组件里：它是一句对外承诺的反面，

@@ -68,6 +68,10 @@ describe("NewAPI 的 Fake 来源（XM-0035）", () => {
     expect(isDemoSource("newapi", DEFAULT_DEMO_SOURCES)).toBe(false);
   });
 
+  it("成本采集的 staging 来源也必须标为演示数据", () => {
+    expect(isDemoSource("finance-collect-staging", DEFAULT_DEMO_SOURCES)).toBe(true);
+  });
+
   it("只要有一条演示来源就挂横幅，哪怕同屏还有真实来源", () => {
     expect(
       shouldShowDemoBanner(["sub2api-prod", "newapi-staging"], {

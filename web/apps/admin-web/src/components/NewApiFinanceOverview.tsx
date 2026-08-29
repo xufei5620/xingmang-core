@@ -6,6 +6,7 @@ import {
   PageState,
   PeriodControls,
   StatTile,
+  type FreshnessContract,
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { useMemo, useState, type ReactNode } from "react";
@@ -81,7 +82,19 @@ function sourceText(metric: MetricItem | undefined): string {
 function periodMatchesMetric(metric: MetricItem | undefined, from: string, to: string): boolean {
   // NewAPI 目前只提供单日订单摘要。把单日值直接标成周/月合计会放大金额，
   // 因此只有选中的日期与指标业务日完全一致时才允许显示。
-  return Boolean(metric && from === to && metricDay(metric) === from);
+  return Boolean(
+    metric &&
+      from === to &&
+      metricDay(metric) === from &&
+      metric.freshness.state !== "uninitialized",
+  );
+}
+
+/** `is_partial` is authoritative even if an older producer left state=fresh. */
+function effectiveMetricFreshness(freshness: FreshnessContract): FreshnessContract {
+  return freshness.is_partial && freshness.state === "fresh"
+    ? { ...freshness, state: "partial" }
+    : freshness;
 }
 
 function MissingTile({ label, note }: { label: string; note: string }) {
@@ -118,9 +131,10 @@ function MetricAmountTile({
   const amount = metricAmountText(metric);
   const orderCount = metricOrderCount(metric);
   const day = metricDay(metric);
+  const freshness = effectiveMetricFreshness(metric.freshness);
   const secondary = [
     day ? `业务日 ${day}` : null,
-    orderCount ? `订单 ${orderCount} 笔` : "订单数未提供",
+    orderCount ? `已知充值订单 ${orderCount} 笔` : "已知充值订单数未提供",
     detail,
   ]
     .filter(Boolean)
@@ -133,7 +147,7 @@ function MetricAmountTile({
       value={amount.text}
       unavailable={!amount.available}
       secondary={secondary}
-      freshness={metric.freshness}
+      freshness={freshness}
       source={sourceText(metric)}
       watermark={metric.watermark}
       link={<FreshnessNote freshness={metric.freshness} />}
@@ -170,33 +184,50 @@ function SubscriptionEvidence({
   // NewAPI v1 cannot read subscription orders. The connector deliberately emits
   // zero with `is_partial=true` as a missing-value sentinel; never render that
   // zero as a real amount in the finance UI.
+  const subscriptionRaw = metric
+    ? metricPrimaryValue(metric.metric_key, metric.value).raw
+    : null;
   const subscriptionUnavailable = Boolean(
     metric &&
-      (metric.freshness.is_partial ||
-        metric.freshness.state === "partial" ||
-        metric.watermark.includes("subscription:unavailable_over_http")),
+      (metric.watermark.includes("subscription:unavailable_over_http") ||
+        ((metric.freshness.is_partial || metric.freshness.state === "partial") &&
+          subscriptionRaw === 0n)),
   );
   const usableMetric = metric && usable && !subscriptionUnavailable ? metric : undefined;
   const amount = usableMetric ? metricAmountText(usableMetric) : null;
+  const metricFreshness = metric ? effectiveMetricFreshness(metric.freshness) : null;
+  const evidence = metric ? (
+    <div className="flex flex-wrap items-center justify-end gap-2 text-fg-muted">
+      <span>—</span>
+      <Badge tone="neutral">未接入</Badge>
+      <FreshnessBadge freshness={metricFreshness!} />
+      <span>来源 {sourceText(metric)}</span>
+      {metric.watermark ? <span>水位 {metric.watermark}</span> : null}
+      <FreshnessNote freshness={metricFreshness!} />
+      <span>
+        {subscriptionUnavailable
+          ? "NewAPI 上游没有订阅订单端点；金额未知，不显示 0"
+          : "暂无可匹配的 NewAPI 日订阅指标；不会用 0 代替"}
+      </span>
+    </div>
+  ) : (
+    <div className="flex flex-wrap items-center justify-end gap-2 text-fg-muted">
+      <span>—</span>
+      <Badge tone="neutral">未接入</Badge>
+      <span>暂无可匹配的 NewAPI 日订阅指标；不会用 0 代替</span>
+    </div>
+  );
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs">
       <span className="font-medium text-fg">当日订阅收入</span>
       {amount ? (
         <span className="flex flex-wrap items-center justify-end gap-2 tabular-nums">
           <strong className={amount.available ? "text-fg" : "text-fg-muted"}>{amount.text}</strong>
-          <FreshnessBadge freshness={usableMetric!.freshness} />
+          <FreshnessBadge freshness={effectiveMetricFreshness(usableMetric!.freshness)} />
           <span className="text-fg-muted">来源 {sourceText(usableMetric)}</span>
         </span>
       ) : (
-        <span className="flex flex-wrap items-center justify-end gap-2 text-fg-muted">
-          <span>—</span>
-          <Badge tone="neutral">未接入</Badge>
-          <span>
-            {subscriptionUnavailable
-              ? "NewAPI 上游没有订阅订单端点；金额未知，不显示 0"
-              : "暂无可匹配的 NewAPI 日订阅指标；不会用 0 代替"}
-          </span>
-        </span>
+        evidence
       )}
     </div>
   );
@@ -475,12 +506,7 @@ const PROFIT_COLUMNS: readonly LedgerColumn<ChannelSummary>[] = [
     label: "毛利",
     numeric: true,
     value: (row) => row.grossProfit?.amountMinor ?? "",
-    cell: (row) => (
-      <span>
-        {amountCell(row.grossProfit)}
-        <span className="block text-xs text-fg-muted">{row.grossMargin ? formatMargin(row.grossMargin) : "毛利率未知"}</span>
-      </span>
-    ),
+    cell: (row) => amountCell(row.grossProfit),
   },
   {
     id: "margin",
@@ -524,7 +550,7 @@ function formatMargin(value: string): string {
   const padded = digits.padEnd(Math.max(point + 2, digits.length), "0");
   const integer = padded.slice(0, point).replace(/^0+(?=\d)/, "");
   const decimal = padded.slice(point, point + 2).padEnd(2, "0");
-  return `毛利率 ${sign}${integer}.${decimal}%`;
+  return `${sign}${integer}.${decimal}%`;
 }
 
 function RefreshErrorNotice({ label, error, onRetry }: { label: string; error: unknown; onRetry: () => void }) {
@@ -667,6 +693,7 @@ function ProfitView({ initialDate }: { initialDate: string }) {
   const rows = (summaryQuery.data?.items ?? []).filter((item) => item.systemType === "newapi");
   const upstreamOptions = [...new Set(rows.map((row) => hostOf(row.baseUrl)).filter(Boolean))].sort();
   const accessOptions = [...new Set(rows.map((row) => accessMethodText(row.accessMethod)).filter(Boolean))].sort();
+  const statusOptions = [...new Set(rows.map((row) => statusText(row.status)).filter(Boolean))];
 
   return (
     <div className="flex flex-col gap-4">
@@ -698,7 +725,7 @@ function ProfitView({ initialDate }: { initialDate: string }) {
           filters={[
             { id: "upstream", label: "上游", options: upstreamOptions },
             { id: "group", label: "接入方式", options: accessOptions },
-            { id: "status", label: "状态", options: ["正常", "需关注", "已停用"] },
+            { id: "status", label: "状态", options: statusOptions.length > 0 ? statusOptions : ["正常", "已停用"] },
           ]}
           emptyTitle="暂无 NewAPI 利润明细"
           emptyDescription="finance/channels/summary 已读取，但当前统计区间没有可归属的 NewAPI 渠道；这不等于利润为 0。"

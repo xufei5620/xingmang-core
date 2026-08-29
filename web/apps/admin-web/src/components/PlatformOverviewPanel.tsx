@@ -66,7 +66,17 @@ const UNAVAILABLE_FINANCE_FRESHNESS: FreshnessContract = {
   state: "uninitialized",
   staleness_seconds: null,
   threshold_seconds: 1800,
-  is_partial: true,
+  is_partial: false,
+  observed_at: null,
+  last_success: null,
+  last_error_code: "",
+};
+
+const FAILED_FINANCE_FRESHNESS: FreshnessContract = {
+  state: "failed",
+  staleness_seconds: null,
+  threshold_seconds: 1800,
+  is_partial: false,
   observed_at: null,
   last_success: null,
   last_error_code: "finance-summary-unavailable",
@@ -274,6 +284,10 @@ function NewApiOverview({
   const supplyCost = aggregateChannelMoney(financeChannels, "supplyCost", "newapi");
   const grossProfit = aggregateChannelMoney(financeChannels, "grossProfit", "newapi");
   const financeRange = financeRangeLabel(financeQuery.data?.from, financeQuery.data?.to);
+  const financeDemo = shouldShowDemoBanner(
+    financeChannels.map((item) => item.observed.source),
+    appDemoDataConfig,
+  );
 
   return (
     <>
@@ -307,6 +321,10 @@ function NewApiOverview({
           note="使用收入 − 上游成本；覆盖不全时不显示合计"
         />
       </div>
+
+      {financeDemo && !demo ? (
+        <SampleDataBanner platform="newapi" demo hasMetrics={financeChannels.length > 0} />
+      ) : null}
 
       {financeQuery.error ? (
         <p
@@ -386,21 +404,35 @@ function NewApiFinanceMetricCard({
 }: NewApiFinanceMetricCardProps) {
   const failure = newApiAggregateFailureText(aggregate);
   const coverage = newApiCoverageText(aggregate);
-  const queryUnavailable = queryPending || Boolean(queryError);
-  const aggregateAvailable = !queryUnavailable && aggregate.money !== null && aggregate.failureReasons.length === 0;
+  const hasPreviousSnapshot = aggregate.money !== null && aggregate.failureReasons.length === 0;
+  const queryUnavailable = queryPending || (Boolean(queryError) && !hasPreviousSnapshot);
+  const aggregateAvailable = !queryUnavailable && hasPreviousSnapshot;
+  const aggregateFreshnessValue = aggregateFreshness(aggregate, Date.now());
   const freshness = queryUnavailable
-    ? UNAVAILABLE_FINANCE_FRESHNESS
-    : aggregateFreshness(aggregate, Date.now());
+    ? queryError
+      ? FAILED_FINANCE_FRESHNESS
+      : UNAVAILABLE_FINANCE_FRESHNESS
+    : queryError
+      ? {
+          ...aggregateFreshnessValue,
+          state: "failed",
+          last_error_code: "finance-summary-refresh-failed",
+        }
+      : aggregateFreshnessValue;
   const value = aggregateAvailable && aggregate.money
     ? formatScaledMoney(aggregate.money)
     : "—";
   const secondary = queryPending
     ? "渠道汇总加载中…"
     : queryError
-      ? "渠道汇总读取失败；未接入可信金额"
+      ? hasPreviousSnapshot
+        ? `最近刷新失败，显示上次成功快照 · ${note} · ${coverage}`
+        : "渠道汇总读取失败；未接入可信金额"
       : [note, coverage, failure].filter(Boolean).join(" · ");
   const source = queryError
-    ? "渠道汇总不可用"
+    ? hasPreviousSnapshot
+      ? aggregate.source || "渠道汇总来源未声明"
+      : "渠道汇总不可用"
     : aggregate.source || "渠道汇总来源未声明";
 
   return (
