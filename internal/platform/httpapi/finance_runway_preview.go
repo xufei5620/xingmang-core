@@ -17,6 +17,13 @@ type RunwayPreviewSource interface {
 	UpstreamRunways(context.Context, string, finance.RunwayThresholds) ([]finance.UpstreamRunway, error)
 }
 
+// RunwayPreviewAlertCoverageLister lets the preview distinguish a complete
+// active-R5 set from a capped page. The legacy AlertLister remains accepted
+// for tests/older stores and is treated as complete by default.
+type RunwayPreviewAlertCoverageLister interface {
+	ListByStatusWithTruncation(context.Context, string, []alerts.Status, int32) ([]alerts.Alert, bool, error)
+}
+
 type runwayPreviewThresholdResponse struct {
 	CriticalDays int `json:"critical_days"`
 	WarningDays  int `json:"warning_days"`
@@ -53,14 +60,15 @@ type runwayPreviewItemResponse struct {
 }
 
 type runwayPreviewResponse struct {
-	Current         runwayPreviewThresholdResponse `json:"current"`
-	Proposed        runwayPreviewThresholdResponse `json:"proposed"`
-	CurrentRevision int64                          `json:"current_revision"`
-	EvaluationAt    string                         `json:"evaluation_at"`
-	Coverage        runwayPreviewCoverageResponse  `json:"coverage"`
-	Counts          runwayPreviewCountsResponse    `json:"counts"`
-	Items           []runwayPreviewItemResponse    `json:"items"`
-	HasMore         bool                           `json:"has_more"`
+	Current               runwayPreviewThresholdResponse `json:"current"`
+	Proposed              runwayPreviewThresholdResponse `json:"proposed"`
+	CurrentRevision       int64                          `json:"current_revision"`
+	EvaluationAt          string                         `json:"evaluation_at"`
+	Coverage              runwayPreviewCoverageResponse  `json:"coverage"`
+	Counts                runwayPreviewCountsResponse    `json:"counts"`
+	Items                 []runwayPreviewItemResponse    `json:"items"`
+	HasMore               bool                           `json:"has_more"`
+	AlertCoverageComplete bool                           `json:"alert_coverage_complete"`
 }
 
 func parseRunwayPreviewDays(raw, name string) (int, error) {
@@ -160,9 +168,19 @@ func PreviewRunwayThresholdHandler(
 			WriteError(w, r, action.NewError(action.CodeExecutionFailed, "可用天数预览暂不可用", err))
 			return
 		}
-		active, err := alertStore.ListByStatus(r.Context(), environment, []alerts.Status{
-			alerts.StatusOpen, alerts.StatusAcknowledged, alerts.StatusSilenced, alerts.StatusReopened,
-		}, alerts.MaxListLimit)
+		alertStatuses := []alerts.Status{alerts.StatusOpen, alerts.StatusAcknowledged, alerts.StatusSilenced, alerts.StatusReopened}
+		var active []alerts.Alert
+		// A legacy reader has no way to prove that its capped result is complete;
+		// fail closed in the evidence envelope rather than silently claiming full
+		// consistency. The production alerts.Store implements the bounded method.
+		alertCoverageComplete := false
+		if coverageLister, ok := alertStore.(RunwayPreviewAlertCoverageLister); ok {
+			var truncated bool
+			active, truncated, err = coverageLister.ListByStatusWithTruncation(r.Context(), environment, alertStatuses, alerts.MaxListLimit)
+			alertCoverageComplete = !truncated
+		} else {
+			active, err = alertStore.ListByStatus(r.Context(), environment, alertStatuses, alerts.MaxListLimit)
+		}
 		if err != nil {
 			WriteError(w, r, action.NewError(action.CodeExecutionFailed, "告警一致性预览暂不可用", err))
 			return
@@ -203,7 +221,7 @@ func PreviewRunwayThresholdHandler(
 				WouldDeescalate: preview.Counts.WouldDeescalate, WouldResolve: preview.Counts.WouldResolve,
 				Unchanged: preview.Counts.Unchanged, CurrentInconsistent: preview.Counts.CurrentInconsistent,
 			},
-			Items: items, HasMore: hasMore,
+			Items: items, HasMore: hasMore, AlertCoverageComplete: alertCoverageComplete,
 		})
 	}
 }

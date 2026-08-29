@@ -190,11 +190,12 @@ func TestRunwayAlertUsesConfiguredThresholds(t *testing.T) {
 	}
 }
 
-// TestRunwayThresholdsFallBackWhenInvalid：非法阈值回落默认档。
+// TestRunwayThresholdsFallBackWhenInvalid：静态兼容构造对非法阈值回落默认档。
 //
 // 失效方向与余额阈值相反：那个是「永不触发」，这个是**「永远触发」**——
 // 不递增的三档会让 levelFor 的兜底把每一条上游判成 critical，
-// 一次配置手滑变成满屏红。
+// 一次配置手滑变成满屏红。生产 provider 路径不会走这个 fallback，
+// 而是把无效/不可用的 DB 快照整轮 fail closed。
 func TestRunwayThresholdsFallBackWhenInvalid(t *testing.T) {
 	e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, RuleConfig{
 		RunwayThresholds: finance.RunwayThresholds{CriticalDays: 20, WarningDays: 5, SeriousDays: 1},

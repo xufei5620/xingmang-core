@@ -85,6 +85,7 @@ func TestPreviewRunwayThresholdHandlerReturnsEvaluationAndObservationTimes(t *te
 		Counts struct {
 			CurrentInconsistent int `json:"current_inconsistent"`
 		} `json:"counts"`
+		AlertCoverageComplete bool `json:"alert_coverage_complete"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -100,6 +101,9 @@ func TestPreviewRunwayThresholdHandlerReturnsEvaluationAndObservationTimes(t *te
 	}
 	if body.Items[0].Transition != string(alerts.RunwayWouldEscalate) || body.Counts.CurrentInconsistent != 0 {
 		t.Fatalf("unexpected transition/counts: %+v", body)
+	}
+	if body.AlertCoverageComplete {
+		t.Fatal("legacy alert reader must not claim complete coverage")
 	}
 	if source.calls != 1 || source.thresholds != current {
 		t.Fatalf("source call/threshold mismatch: %+v", source)

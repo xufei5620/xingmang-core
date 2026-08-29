@@ -50,31 +50,32 @@ type RunwayThresholds struct {
 	SeriousDays  int
 }
 
+// runwayThresholdPersistedMax mirrors PostgreSQL/sqlc's int32 storage type.
+// Keeping the bound at the domain boundary prevents a valid Go int from
+// wrapping when Bootstrap/preview hands the value to an int32 query arg.
+const runwayThresholdPersistedMax = int64(1<<31 - 1)
+
 // DefaultRunwayThresholds 是 §12 拍板的默认档位。
 //
-// ⚠️ §12 说它「可在设置调」，而平台目前没有设置面。所以它是常量 + 由 Query
-// 端点**原样回报**：前端不硬编码这三个数，改的时候只改一处。
-// 真正的可配置化（设置表或环境变量）记在 PR 的 follow_ups 里。
+// 它只用于生命周期 bootstrap 的空 env 输入，以及显式使用静态
+// RuleConfig 的兼容/测试构造；运行中的 API 与 worker 必须从
+// finance.runway_threshold_config 读取快照，不能把这个常量当成 DB 缺行时的
+// fallback。这样 DB 缺行会保持可见的 fail-closed，而不是悄悄画出 5/10/20。
 func DefaultRunwayThresholds() RunwayThresholds {
 	return RunwayThresholds{CriticalDays: 5, WarningDays: 10, SeriousDays: 20}
 }
 
 // ParseRunwayThresholds 从两个字符串解析告警阈值（XM-0049）。
 //
-// **这是全平台唯一的一份解析。** 阈值有两个消费者，跑在**两个进程**里：
-// platform-api 的 `/finance/upstreams/summary` 要把它回报给前端，
-// platform-worker 的告警规则要拿它判档。两处各写一遍解析，
-// 「看板说还有 11 天」与「告警说已经低于阈值」就会同时出现在一个人面前——
-// 那时没人知道该信哪个。所以两个 cmd 都调这个函数。
+// 这是版本化 runway-threshold-bootstrap 生命周期命令的唯一 env 解析器；
+// API/worker 运行时不读取这两个环境变量，而是各自在请求/评估轮次从
+// finance.runway_threshold_config 读取同一 revision。换句话说，解析器保证
+// bootstrap 输入的形状，不能也不需要保证两个长驻进程的 env 一致。
 //
-// ⚠️ 两个进程仍然必须被配成**同一组环境变量**：函数保证解析一致，
-// 保证不了部署一致。这一条记在 deploy/compose/.env.example 里。
+// 空串回落到默认值（10 / 5）只发生在 bootstrap 输入阶段；非法值**报错**而不
+// 回落，避免把写错的部署误报成已按意图导入。
 //
-// 空串回落到默认值（10 / 5）；非法值**报错**而不是回落——
-// 一个把 `XM_FINANCE_RUNWAY_WARN_DAYS=ten` 写错的部署，
-// 静默用回默认值会让人以为自己调过了。
-//
-// serious 档不可配（本片只开放 warning / critical 两个环境变量），
+// serious 档不可配（bootstrap 只开放 warning / critical 两个环境变量），
 // 但它必须始终**严格大于 warning**，否则 Validate 会判定三档不递增、
 // levelFor 退回 critical，于是所有渠道都变红。所以它取
 // `max(默认 20, warning + 1)` —— 自动让位而不是报错：serious 是最松的一档，
@@ -98,6 +99,14 @@ func ParseRunwayThresholds(warnDays, critDays string) (RunwayThresholds, error) 
 
 	serious := defaults.SeriousDays
 	if serious <= warning {
+		// warning 来自 strconv.Atoi，仍可能是当前架构的最大 int。
+		// 直接 warning+1 会整数回绕成负数；虽然 Validate 随后也会拒绝，
+		// 这里先给出稳定、可诊断的输入错误，避免把溢出伪装成排序错误。
+		if warning == maxIntValue() {
+			return RunwayThresholds{}, fmt.Errorf(
+				"warning 档 %d 无法派生 serious 档（超过可表示范围）: %w",
+				warning, ErrInvalidFormat)
+		}
 		serious = warning + 1
 	}
 	out := RunwayThresholds{
@@ -108,6 +117,10 @@ func ParseRunwayThresholds(warnDays, critDays string) (RunwayThresholds, error) 
 	}
 	return out, nil
 }
+
+// maxIntValue 返回当前 Go 架构可表示的最大 int。它以函数形式存在，
+// 让 ParseRunwayThresholds 的溢出检查在 32/64 位构建上都不依赖常量窄化。
+func maxIntValue() int { return int(^uint(0) >> 1) }
 
 // parsePositiveDays 解析一个「天数」环境变量；空串用默认值。
 func parsePositiveDays(raw string, fallback int, name string) (int, error) {
@@ -125,12 +138,26 @@ func parsePositiveDays(raw string, fallback int, name string) (int, error) {
 	return value, nil
 }
 
-// Validate 校验三档严格递增。
+// Validate 校验三档严格递增且能安全落入 PostgreSQL/sqlc 的 int32 字段。
 //
-// 不递增的阈值不会报错，只会让某一档永远匹配不上——一个静静失效的告警档。
+// 无效或超范围的阈值直接返回错误；调用方必须 fail closed，不能把它当成
+// 某一档永远匹配不上的正常配置。
 func (t RunwayThresholds) Validate() error {
-	if t.CriticalDays <= 0 {
-		return fmt.Errorf("critical 档 %d 必须为正: %w", t.CriticalDays, ErrInvalidFormat)
+	values := []struct {
+		name  string
+		value int
+	}{
+		{name: "critical", value: t.CriticalDays},
+		{name: "warning", value: t.WarningDays},
+		{name: "serious", value: t.SeriousDays},
+	}
+	for _, entry := range values {
+		if entry.value <= 0 {
+			return fmt.Errorf("%s 档 %d 必须为正: %w", entry.name, entry.value, ErrInvalidFormat)
+		}
+		if int64(entry.value) > runwayThresholdPersistedMax {
+			return fmt.Errorf("%s 档 %d 超过可保存的最大天数 %d: %w", entry.name, entry.value, runwayThresholdPersistedMax, ErrInvalidFormat)
+		}
 	}
 	if !(t.CriticalDays < t.WarningDays && t.WarningDays < t.SeriousDays) {
 		return fmt.Errorf("三档必须严格递增（critical %d < warning %d < serious %d）: %w",
@@ -319,6 +346,10 @@ func ComputeRunway(in RunwayInput) (Runway, error) {
 	// 余额 ≤ 0（已透支）落成 0 天而不是负数：负的可用天数没有意义，
 	// 而 0 天已经是最高档的告警，表达力不缺。
 	out.Days = &days
-	out.Level, _ = in.Thresholds.Classify(days)
+	level, err := in.Thresholds.Classify(days)
+	if err != nil {
+		return Runway{}, err
+	}
+	out.Level = level
 	return out, nil
 }

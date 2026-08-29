@@ -56,16 +56,16 @@ type Deps struct {
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
 	FinanceSummaries FinanceSummaryLister
-	// FinanceRunwayThresholds 是可用天数的告警档（XM-0049）。
+	// FinanceRunwayThresholds 是旧摘要处理器的静态兼容参数（XM-0049）。
 	//
-	// ⚠️ 由装配层从环境变量解析后注入，**必须与 platform-worker 的告警规则
-	// 用同一组值**——两处漂开会让「看板说还有 11 天」与「告警说已经低于阈值」
-	// 同时出现在一个人面前。两个进程共用 finance.ParseRunwayThresholds。
-	// 零值时端点回落到 finance.DefaultRunwayThresholds()。
+	// 生产装配必须提供 FinanceRunwayConfig，让 API 每个请求从
+	// finance.runway_threshold_config 读取 DB 快照；本字段只为旧嵌入者和测试
+	// 保留，不能再理解成从 env 注入的运行时真相，也不能作为 DB 缺行 fallback。
 	FinanceRunwayThresholds finance.RunwayThresholds
 	// FinanceRunwayConfig 是按环境版本化的运行时阈值快照（XM-C-RUNWAY0）。
 	// nil 时不挂载专用 current/history Query；旧的 summary 端点仍使用上面的
-	// 启动期兼容字段，便于分阶段切换而不会让未迁移环境误报成功。
+	// 静态兼容字段，便于分阶段切换。正式进程若未迁移应在装配/健康检查层阻断，
+	// 而不是把默认值呈现为可信 DB 结果。
 	FinanceRunwayConfig        RunwayThresholdProvider
 	FinanceRunwayConfigHistory RunwayThresholdHistoryLister
 	FinanceRunwayPreviewSource RunwayPreviewSource
@@ -221,6 +221,9 @@ func NewRouter(d Deps) http.Handler {
 				Get("/finance/upstreams/summary",
 					ListUpstreamSummaryHandlerWithProvider(d.FinanceSummaries, d.FinanceRunwayConfig))
 		} else {
+			// Legacy compatibility only. The platform-api main path always sets
+			// FinanceRunwayConfig; retaining this branch avoids breaking older
+			// embedders/tests while making the DB cutover explicit above.
 			api.With(RequireScope(finance.ScopeRead)).
 				Get("/finance/channels/summary",
 					ListChannelSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))

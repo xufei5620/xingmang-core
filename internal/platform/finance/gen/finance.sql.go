@@ -329,6 +329,35 @@ func (q *Queries) GetRunwayThresholdConfig(ctx context.Context, environment stri
 	return i, err
 }
 
+const getRunwayThresholdHistory = `-- name: GetRunwayThresholdHistory :one
+SELECT environment, revision, critical_days, warning_days, serious_days, changed_at, changed_by, reason, request_id, change_source FROM finance.runway_threshold_history
+WHERE environment = $1
+  AND revision = $2
+`
+
+type GetRunwayThresholdHistoryParams struct {
+	Environment string
+	Revision    int64
+}
+
+func (q *Queries) GetRunwayThresholdHistory(ctx context.Context, arg GetRunwayThresholdHistoryParams) (FinanceRunwayThresholdHistory, error) {
+	row := q.db.QueryRow(ctx, getRunwayThresholdHistory, arg.Environment, arg.Revision)
+	var i FinanceRunwayThresholdHistory
+	err := row.Scan(
+		&i.Environment,
+		&i.Revision,
+		&i.CriticalDays,
+		&i.WarningDays,
+		&i.SeriousDays,
+		&i.ChangedAt,
+		&i.ChangedBy,
+		&i.Reason,
+		&i.RequestID,
+		&i.ChangeSource,
+	)
+	return i, err
+}
+
 const getSubscriptionCostBatch = `-- name: GetSubscriptionCostBatch :one
 SELECT id, upstream_account_id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency, starts_on, expires_on, terminated_on, account_count, proxy_batch_id, created_at, updated_at FROM finance.subscription_cost_batch WHERE id = $1
 `

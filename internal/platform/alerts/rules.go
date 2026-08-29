@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -112,6 +113,11 @@ type Rule struct {
 }
 
 // RuleConfig 是第一批规则里那几个可由部署调整的阈值。
+//
+// RunwayThresholds 是静态兼容构造的初始值；生产 worker 通过
+// NewEvaluatorWithThresholdProvider 注入 finance.RunwayThresholdProvider，
+// 每轮从 DB 快照取值并覆盖该字段。这样 RuleConfig 的默认值不会成为 DB
+// 缺行时的隐式运行时 fallback。
 type RuleConfig struct {
 	// CollectionInterval 是采集周期，R1b 的「2 采集周期」以它为单位。
 	CollectionInterval time.Duration
@@ -123,16 +129,16 @@ type RuleConfig struct {
 	ChannelBalanceMetricKey string
 	// RunwayThresholds 是可用天数的三档阈值（XM-0049）。
 	//
-	// ⚠️ 它必须与 `/finance/upstreams/summary` 回报给前端的那一份**完全相同**，
-	// 否则「看板说还有 11 天」与「告警说已经低于阈值」会同时出现在一个人面前。
-	// 两个进程各自从环境变量解析，但**共用 finance.ParseRunwayThresholds
-	// 这一个函数**——函数保证解析一致，部署一致由 .env 保证。
+	// 静态构造时它必须与 `/finance/upstreams/summary` 使用的档位完全相同；
+	// 生产 provider 路径会在每轮读取同一个 DB revision，避免两个进程漂移。
 	RunwayThresholds finance.RunwayThresholds
 	// Owner 是这批规则的负责人（§9.3 要求每条规则都有）。
 	Owner string
 }
 
-// DefaultRuleConfig 返回默认阈值。
+// DefaultRuleConfig 返回兼容构造使用的默认阈值。
+// 生产 worker 仍须通过 provider 读取数据库快照，不能把此值当作 DB 缺行
+// 时的运行时 fallback。
 func DefaultRuleConfig() RuleConfig {
 	return RuleConfig{
 		CollectionInterval:          DefaultCollectionInterval,
@@ -145,6 +151,8 @@ func DefaultRuleConfig() RuleConfig {
 }
 
 func (c RuleConfig) normalized() RuleConfig {
+	// 该归一化只作用于静态兼容构造。DB provider 在 Evaluate 开始时先读取
+	// 并校验快照，故不会把这里的默认值用于生产 runway 判档。
 	d := DefaultRuleConfig()
 	if c.CollectionInterval <= 0 {
 		c.CollectionInterval = d.CollectionInterval
@@ -254,7 +262,7 @@ func Rules(cfg RuleConfig) []Rule {
 			Source: "finance.balance_history（余额）÷ finance.profit_daily" +
 				"（近 7 个完整业务日的日均消耗），见设计稿 §10.4",
 			Condition: fmt.Sprintf(
-				"计量型上游的可用天数算得出来且 < %d 天（< %d 天升为 critical）",
+				"计量型上游的可用天数算得出来且 ≤ %d 天（≤ %d 天升为 critical）",
 				cfg.RunwayThresholds.WarningDays, cfg.RunwayThresholds.CriticalDays),
 			For: 0,
 			// 声明的是**进入告警的那一档**；实际严重度逐条按天数算
@@ -357,25 +365,29 @@ type Evaluator struct {
 	thresholds finance.RunwayThresholdProvider
 }
 
-// NewEvaluator 创建评估器。
+// NewEvaluator 创建无 DB provider 的静态兼容评估器。
 //
 // 两个来源都是**必填**：缺哪一个 Evaluate 都会报错，而不是静默少跑几条规则。
-// 一条因为装配漏项而永远不响的告警规则，只会在真出事那天才被发现
-// （同 BalanceThresholdMinorUnits 回落默认值的理由）。
+// 一条因为装配漏项而永远不响的告警规则，只会在真出事那天才被发现；
+// 因此静态兼容构造仍会归一化非 runway 阈值，而 DB provider 错误则直接
+// 让评估轮次失败闭合。
 func NewEvaluator(source MetricSource, runway RunwaySource, cfg RuleConfig) *Evaluator {
 	return &Evaluator{cfg: cfg.normalized(), source: source, runway: runway}
 }
 
 // NewEvaluatorWithThresholdProvider keeps the test-friendly constructor above
 // while allowing production workers to read one DB snapshot per evaluation
-// round. The provider is consulted before any runway findings are generated.
+// round. The provider is consulted before any runway findings are generated;
+// provider errors fail the whole round closed.
 func NewEvaluatorWithThresholdProvider(
 	source MetricSource, runway RunwaySource, provider finance.RunwayThresholdProvider, cfg RuleConfig,
 ) *Evaluator {
 	return &Evaluator{cfg: cfg.normalized(), source: source, runway: runway, thresholds: provider}
 }
 
-// Config 返回归一化后的阈值配置（供日志与文档打印实际生效值）。
+// Config 返回归一化后的静态兼容配置（供日志与测试打印实际生效值）。
+// 当 evaluator 使用 threshold provider 时，Evaluate 返回前会以该轮 DB
+// snapshot 覆盖 runway 档位；调用方应使用 finding detail 中的 revision。
 func (e *Evaluator) Config() RuleConfig { return e.cfg }
 
 // Evaluate 跑一轮评估，返回此刻命中的全部规则。
@@ -726,7 +738,13 @@ func asInt64(v any) (int64, bool) {
 	case int32:
 		return int64(n), true
 	case float64:
-		if n != float64(int64(n)) {
+		// Converting an out-of-range float64 to int64 is implementation
+		// dependent. Check the half-open representable range before converting;
+		// otherwise +Inf/2^63 can turn into MinInt64 and look like a valid
+		// balance. math.Trunc also rejects fractional values without a lossy
+		// round-trip through int64.
+		const maxInt64Exclusive = float64(1 << 63)
+		if n < -maxInt64Exclusive || n >= maxInt64Exclusive || n != math.Trunc(n) {
 			return 0, false
 		}
 		return int64(n), true

@@ -85,7 +85,7 @@ func getSummary(
 	t *testing.T, lister FinanceSummaryLister, path, scopes, query string,
 ) *httptest.ResponseRecorder {
 	t.Helper()
-	// 零值阈值 = 装配层没注入，端点回落默认档（见 runwayThresholdsOrDefault）
+	// 旧版静态处理器的零值兼容行为（生产路由使用 DB provider，不走该 fallback）。
 	return getSummaryWith(t, lister, finance.RunwayThresholds{}, path, scopes, query)
 }
 

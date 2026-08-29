@@ -133,8 +133,25 @@ func PreviewRunwayThresholds(
 		Coverage: RunwayImpactCoverage{UnknownReasons: map[string]int{}},
 	}
 	for _, runway := range runways {
+		alertsForAccount := alertsByAccount[runway.AccountID]
 		if runway.Runway.Reason == finance.RunwayReasonNotApplicable {
 			out.Coverage.UnknownReasons[string(runway.Runway.Reason)]++
+			if len(alertsForAccount) > 0 {
+				item := RunwayImpactItem{
+					AccountID: runway.AccountID, Name: runway.Name,
+					AlertCount:           len(alertsForAccount),
+					CurrentAlertSeverity: alertsForAccount[0].Severity,
+					CurrentAlertStatus:   alertsForAccount[0].Status,
+					Transition:           RunwayCurrentInconsistent,
+					ConsistencyReason:    "unexpected_active_alert",
+					ObservedAt:           runway.Runway.BalanceObservedAt,
+				}
+				if len(alertsForAccount) > 1 {
+					item.ConsistencyReason = "duplicate_active_alert"
+				}
+				out.Items = append(out.Items, item)
+				out.Counts.CurrentInconsistent++
+			}
 			continue
 		}
 		out.Coverage.Total++
@@ -142,7 +159,6 @@ func PreviewRunwayThresholds(
 			AccountID: runway.AccountID, Name: runway.Name,
 			Days: runway.Runway.Days, ObservedAt: runway.Runway.BalanceObservedAt,
 		}
-		alertsForAccount := alertsByAccount[runway.AccountID]
 		item.AlertCount = len(alertsForAccount)
 		if len(alertsForAccount) > 0 {
 			item.CurrentAlertSeverity = alertsForAccount[0].Severity

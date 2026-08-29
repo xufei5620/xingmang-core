@@ -28,12 +28,12 @@ type FinanceSummaryLister interface {
 	UpstreamSummaries(ctx context.Context, q finance.SummaryQuery) ([]finance.UpstreamSummary, error)
 }
 
-// runwayThresholdsOrDefault 补齐未注入的阈值。
+// runwayThresholdsOrDefault 保留旧摘要处理器的静态兼容行为。
 //
-// ⚠️ 阈值**必须由装配层注入**（cmd/platform-api 从环境变量解析），
-// 不能在这里就地取默认：告警那一侧（platform-worker）读的是同一组环境变量，
-// 两处一个用配置一个用默认，「看板说还有 11 天」与「告警说已经低于阈值」
-// 就会同时出现在一个人面前。回落只是为了让没配的部署也起得来。
+// 生产路由由 NewRouter 优先装配 RunwayThresholdProvider，按请求从
+// finance.runway_threshold_config 读取 DB 快照；该路径缺行/读取失败时会
+// fail closed，绝不会调用本函数。这里的默认值只服务于仍直接调用旧版
+// List*SummaryHandler 的测试或外部嵌入者，不能被解释成运行时 DB fallback。
 func runwayThresholdsOrDefault(t finance.RunwayThresholds) finance.RunwayThresholds {
 	if err := t.Validate(); err != nil {
 		return finance.DefaultRunwayThresholds()
@@ -107,8 +107,8 @@ type runwayItem struct {
 
 // runwayThresholdsItem 原样回报本次判档用的三个阈值。
 //
-// 回报而不是让前端硬编码：§12 说它「可在设置调」，而平台目前没有设置面，
-// 所以它今天是后端常量——改的时候只该改一处。
+// 回报而不是让前端硬编码：§12 说它「可在设置调」。DB-provider 路径回报
+// 本次请求实际读取的 revision；静态兼容处理器才会回报内存中传入的档位。
 //
 // ⚠️ 名字的严重程度与数值方向相反（SoloAI 的既有命名，见
 // finance.RunwayThresholds 的注释）：天数越少越严重，
@@ -118,7 +118,7 @@ type runwayThresholdsItem struct {
 	WarningDays  int `json:"warning_days"`
 	SeriousDays  int `json:"serious_days"`
 	// Revision/source/updated_at make the exact classifier snapshot auditable.
-	// They are optional for the legacy env-backed handler during cutover.
+	// 旧版静态兼容处理器没有快照元数据；DB provider 路径会始终回报这些字段。
 	Revision  int64  `json:"revision,omitempty"`
 	Source    string `json:"source,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
@@ -361,6 +361,9 @@ func upstreamToItem(s finance.UpstreamSummary) upstreamSummaryItem {
 //
 // 复用 finance.ScopeRead，不另立 scope：这里的每一个数都是台账的向上聚合，
 // 能看台账的人已经能自己加出来，泄漏面完全相同。
+//
+// Deprecated: 这是保留给旧嵌入者/单元测试的静态阈值兼容处理器。生产装配应
+// 使用 ListChannelSummaryHandlerWithProvider，避免把进程内默认值当成 DB 真相。
 func ListChannelSummaryHandler(
 	store FinanceSummaryLister, thresholds finance.RunwayThresholds,
 ) http.HandlerFunc {
@@ -433,6 +436,9 @@ func ListChannelSummaryHandlerWithProvider(
 }
 
 // ListUpstreamSummaryHandler 返回逐上游的供给侧供数（§13 UpstreamSummary + §10.4）。
+//
+// Deprecated: 这是旧嵌入者/测试的静态阈值兼容处理器。生产装配应使用
+// ListUpstreamSummaryHandlerWithProvider，并从 DB 快照读取阈值。
 func ListUpstreamSummaryHandler(
 	store FinanceSummaryLister, thresholds finance.RunwayThresholds,
 ) http.HandlerFunc {

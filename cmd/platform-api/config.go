@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/oidcauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
@@ -32,14 +31,6 @@ type config struct {
 	// 演示数据一旦落进生产登记簿，采集就会照着它去打一批 .invalid 域名，
 	// 而台账里会多出几条永远算不出成本的渠道。
 	FinanceDemoSeed bool
-
-	// FinanceRunwayThresholds 是可用天数的告警档（XM-0049）。
-	//
-	// ⚠️ platform-worker 的告警规则读的是**同一组环境变量**，且共用
-	// finance.ParseRunwayThresholds 这一个解析函数。函数保证解析一致，
-	// **部署一致要靠 .env**——两个进程配成不同的值，会让「看板说还有 11 天」
-	// 与「告警说已经低于阈值」同时出现在一个人面前。
-	FinanceRunwayThresholds finance.RunwayThresholds
 
 	// RateLimit 是 /api/v1 的限流配额（XM-R011）。
 	// 零值走 httpapi 的默认值；两项都可用环境变量调，但**关不掉**。
@@ -132,15 +123,6 @@ func configFromEnv(getenv func(string) string) (config, error) {
 		}
 		c.FinanceDemoSeed = seed
 	}
-
-	runway, err := finance.ParseRunwayThresholds(
-		getenv("XM_FINANCE_RUNWAY_WARN_DAYS"), getenv("XM_FINANCE_RUNWAY_CRIT_DAYS"))
-	if err != nil {
-		// 非法阈值拒绝启动，不回落默认值：一个把 WARN_DAYS 写成 "ten" 的部署，
-		// 静默用回 10 会让人以为自己调过了。
-		return config{}, fmt.Errorf("可用天数告警档: %w", err)
-	}
-	c.FinanceRunwayThresholds = runway
 
 	auth, err := authConfigFromEnv(getenv, c.Environment)
 	if err != nil {

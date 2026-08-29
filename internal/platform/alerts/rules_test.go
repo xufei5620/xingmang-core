@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -604,7 +605,12 @@ func TestRuleConfigNormalizationRejectsDisablingThresholds(t *testing.T) {
 
 // TestAsInt64RejectsFractional：带小数的余额说明口径错了，不猜。
 func TestAsInt64RejectsFractional(t *testing.T) {
-	for _, v := range []any{json.Number("3.5"), 3.5, "300", nil, true} {
+	for _, v := range []any{
+		json.Number("3.5"), 3.5, "300", nil, true,
+		// Out-of-range float64 conversion to int64 is implementation-defined;
+		// these must stay unknown instead of wrapping into a plausible balance.
+		float64(1 << 63), math.Nextafter(-float64(1<<63), math.Inf(-1)), math.Inf(1), math.Inf(-1), math.NaN(),
+	} {
 		if _, ok := asInt64(v); ok {
 			t.Fatalf("%v (%T) 不该被当成整数金额", v, v)
 		}

@@ -127,6 +127,21 @@ func historyFromRow(row gen.FinanceRunwayThresholdHistory) RunwayThresholdHistor
 	}
 }
 
+// currentHistoryMatches verifies the cross-table invariant that the runtime
+// snapshot and its immutable evidence row describe the same revision and
+// thresholds. The schema constrains each table independently; it cannot add a
+// foreign key from current to history without making the atomic insert/update
+// order impossible. Keep the invariant at the read boundary as a second line
+// of defence so an orphan or manually-corrupted current row never becomes a
+// trusted classifier input.
+func currentHistoryMatches(current gen.FinanceRunwayThresholdConfig, history gen.FinanceRunwayThresholdHistory) bool {
+	return current.Environment == history.Environment &&
+		current.Revision == history.Revision &&
+		current.CriticalDays == history.CriticalDays &&
+		current.WarningDays == history.WarningDays &&
+		current.SeriousDays == history.SeriousDays
+}
+
 func validateRunwayEnvironment(environment string) error {
 	if strings.TrimSpace(environment) == "" {
 		return fmt.Errorf("environment: %w", ErrMissingField)
@@ -145,11 +160,28 @@ func (s *RunwayThresholdStore) Current(ctx context.Context, environment string) 
 		return RunwayThresholdSnapshot{}, ErrRunwayConfigUnavailable
 	}
 	if err != nil {
-		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: read runway threshold snapshot", ErrRunwayConfigUnavailable)
+		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: read runway threshold snapshot: %w", ErrRunwayConfigUnavailable, err)
 	}
 	snapshot := snapshotFromConfig(row)
 	if err := snapshot.Thresholds.Validate(); err != nil {
 		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: invalid stored threshold snapshot", ErrRunwayConfigUnavailable)
+	}
+	// current/history are written in one transaction, but a privileged/manual
+	// SQL change or a failed historical migration could still leave an orphan.
+	// Refuse to serve the current row until its immutable evidence is present
+	// and agrees byte-for-byte on the classifier fields.
+	history, historyErr := s.q.GetRunwayThresholdHistory(ctx, gen.GetRunwayThresholdHistoryParams{
+		Environment: row.Environment,
+		Revision:    row.Revision,
+	})
+	if errors.Is(historyErr, pgx.ErrNoRows) {
+		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: current revision %d has no history row", ErrRunwayConfigUnavailable, row.Revision)
+	}
+	if historyErr != nil {
+		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: read history for revision %d: %w", ErrRunwayConfigUnavailable, row.Revision, historyErr)
+	}
+	if !currentHistoryMatches(row, history) {
+		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: current/history revision %d mismatch", ErrRunwayConfigUnavailable, row.Revision)
 	}
 	return snapshot, nil
 }
@@ -193,10 +225,22 @@ func (s *RunwayThresholdStore) Bootstrap(
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, getErr := q.GetRunwayThresholdConfig(ctx, in.Environment)
 		if getErr != nil {
-			return RunwayThresholdSnapshot{}, fmt.Errorf("%w: inspect existing bootstrap", ErrRunwayConfigUnavailable)
+			return RunwayThresholdSnapshot{}, fmt.Errorf("%w: inspect existing bootstrap: %w", ErrRunwayConfigUnavailable, getErr)
+		}
+		history, historyErr := q.GetRunwayThresholdHistory(ctx, gen.GetRunwayThresholdHistoryParams{
+			Environment: in.Environment, Revision: existing.Revision,
+		})
+		if errors.Is(historyErr, pgx.ErrNoRows) {
+			// current/history 不成对时不能把「已有 current」误报成幂等成功；
+			// 这通常意味着上次 lifecycle 事务被外部破坏，应停下来人工核对。
+			return RunwayThresholdSnapshot{}, fmt.Errorf("%w: existing snapshot has no history row: %w", ErrRunwayConfigUnavailable, historyErr)
+		}
+		if historyErr != nil {
+			return RunwayThresholdSnapshot{}, fmt.Errorf("%w: inspect existing bootstrap history: %w", ErrRunwayConfigUnavailable, historyErr)
 		}
 		got := snapshotFromConfig(existing)
-		if got.Thresholds != in.Thresholds {
+		if got.Thresholds != in.Thresholds || history.CriticalDays != existing.CriticalDays ||
+			history.WarningDays != existing.WarningDays || history.SeriousDays != existing.SeriousDays {
 			return RunwayThresholdSnapshot{}, ErrRunwayBootstrapConflict
 		}
 		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
@@ -241,7 +285,7 @@ func (s *RunwayThresholdStore) ListHistory(
 		Environment: query.Environment, BeforeRevision: query.BeforeRevision, ResultLimit: int32(query.Limit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%w: list runway threshold history", ErrRunwayConfigUnavailable)
+		return nil, fmt.Errorf("%w: list runway threshold history: %w", ErrRunwayConfigUnavailable, err)
 	}
 	out := make([]RunwayThresholdHistoryEntry, 0, len(rows))
 	for _, row := range rows {

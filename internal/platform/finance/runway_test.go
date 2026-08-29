@@ -2,6 +2,7 @@ package finance_test
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -389,11 +390,9 @@ func TestRunwayAlwaysYieldsDaysOrReason(t *testing.T) {
 	}
 }
 
-// TestParseRunwayThresholds 钉住**全平台唯一那份阈值解析**（XM-0049）。
-//
-// 它有两个消费者、跑在两个进程里：platform-api 的 summary 端点要把它回报给
-// 前端，platform-worker 的告警规则要拿它判档。两处各写一遍解析，
-// 「看板说还有 11 天」与「告警说已经低于阈值」就会同时出现在一个人面前。
+// TestParseRunwayThresholds 钉住 bootstrap 生命周期命令使用的唯一 env 解析器
+// （XM-0049）。运行中的 API/worker 不读取这些变量，而是从 DB snapshot provider
+// 取值；本用例只验证一次性导入输入的默认、格式和派生规则。
 func TestParseRunwayThresholds(t *testing.T) {
 	t.Run("空串用默认档", func(t *testing.T) {
 		got, err := finance.ParseRunwayThresholds("", "")
@@ -455,4 +454,14 @@ func TestParseRunwayThresholds(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRunwayThresholdsValidateRejectsValuesThatDoNotFitDatabaseInt32(t *testing.T) {
+	tooLarge := int(1<<31 - 1)
+	if strconv.IntSize > 32 {
+		tooLarge++
+	}
+	if _, err := finance.ParseRunwayThresholds(strconv.Itoa(tooLarge), "1"); err == nil {
+		t.Fatalf("threshold %d should not be accepted when it cannot be persisted as int32", tooLarge)
+	}
 }

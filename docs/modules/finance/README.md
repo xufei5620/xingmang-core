@@ -1115,7 +1115,7 @@ UI 交接 §10.4 的最后一条要求：「低于阈值时进入告警和待处
 而告警说「已经低于 10 天」，那时没人知道该信哪个。瘦查询则省掉两条与判据
 无关的聚合——告警每 60 秒跑一轮，看板只在有人打开页面时跑。
 
-### 阈值可配：一份解析，两个进程
+### 阈值 bootstrap：数据库快照，两个消费者
 
 ```
 XM_FINANCE_RUNWAY_WARN_DAYS   默认 10
@@ -1123,21 +1123,19 @@ XM_FINANCE_RUNWAY_CRIT_DAYS   默认 5
 ```
 
 两个消费者跑在**两个进程**里：platform-api 的 `/finance/upstreams/summary`
-要把阈值回报给前端，platform-worker 的告警规则要拿它判档。所以：
-
-- **解析只有一份**：`finance.ParseRunwayThresholds`，两个 `cmd` 都调它；
-- **部署一致靠 compose**：`launch.yaml` 里两个服务取同一个 `.env` 变量；
-- **非法值拒绝启动**，不回落默认——一个把 `WARN_DAYS` 写成 `ten` 的部署，
-  静默用回 10 会让人以为自己调过了；
-- HTTP 端点**不就地取默认**，阈值由装配层注入（`Deps.FinanceRunwayThresholds`）
-  ——就地取默认的话，worker 按环境变量判档、api 按默认值回报，两者会分叉。
+要把阈值回报给前端，platform-worker 的告警规则要拿它判档。运行时两者都从
+`finance.runway_threshold_config` 读取同一 revision；`finance.ParseRunwayThresholds`
+只在 `runway-threshold-bootstrap` 生命周期命令中解析旧环境变量，不能作为长驻
+进程的 fallback。数据库缺行、current/history 不配对或读取失败时不回落默认，API
+返回可信的 503，worker 整轮 fail closed。
 
 第三档 `serious`（默认 20，最松的一档，只影响颜色）目前不可配。
 若 `WARN_DAYS` 被调到 ≥20，它会**自动让位**到 `WARN+1`：不让位的话三档不递增，
 `levelFor` 的兜底会把**每一条**上游判成 critical——一次配置手滑变成满屏红。
 让位不损失任何告警能力（serious 的作用只是给「还算充裕」一个颜色）。
 
-设置面 UI 后置。
+设置面位于 `/alerts?sub=rules`，当前提供 current/history/preview 只读能力；写入
+仍等待 Foundation-B/C3c 的 L2 Action。
 
 ### Runway revision 快照（XM-C-RUNWAY0）
 

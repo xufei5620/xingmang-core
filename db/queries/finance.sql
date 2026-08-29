@@ -60,6 +60,11 @@ WHERE environment = sqlc.arg(environment)
 ORDER BY revision DESC
 LIMIT sqlc.arg(result_limit);
 
+-- name: GetRunwayThresholdHistory :one
+SELECT * FROM finance.runway_threshold_history
+WHERE environment = sqlc.arg(environment)
+  AND revision = sqlc.arg(revision);
+
 -- ---------------------------------------------------------------------------
 -- XM-C-MAP2 managed platform channel temporal bindings.
 -- ---------------------------------------------------------------------------

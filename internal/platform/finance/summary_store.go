@@ -142,7 +142,8 @@ type SummaryQuery struct {
 	// From / To 是业务日闭区间（含两端）。零值时由调用方补默认窗口。
 	From time.Time
 	To   time.Time
-	// Thresholds 为零值时用 DefaultRunwayThresholds()。
+	// Thresholds 必须是已验证的 DB/provider 快照；零值会 fail closed。
+	// 旧 HTTP 兼容处理器若需要默认值，会在进入 Store 前显式补齐。
 	Thresholds RunwayThresholds
 }
 
@@ -229,17 +230,17 @@ func (s *SummaryStore) UpstreamRunways(
 func (s *SummaryStore) runwayInputs(
 	ctx context.Context, environment string, thresholds RunwayThresholds,
 ) (map[uuid.UUID]BalanceReading, map[uuid.UUID]recentCostRow, RunwayThresholds, time.Time, error) {
+	// Validate before touching the database: a malformed provider snapshot is a
+	// configuration error, not a reason to spend a full balance/cost query round.
+	if err := thresholds.Validate(); err != nil {
+		return nil, nil, thresholds, time.Time{}, err
+	}
 	balances, err := s.latestBalances(ctx, environment)
 	if err != nil {
 		return nil, nil, thresholds, time.Time{}, err
 	}
 	recent, err := s.recentCost(ctx, environment)
 	if err != nil {
-		return nil, nil, thresholds, time.Time{}, err
-	}
-	if err := thresholds.Validate(); err != nil {
-		// 运行时配置错误必须 fail closed；不能把数据库/provider 的错误
-		// 解释成默认档并继续给出看似可信的分类。
 		return nil, nil, thresholds, time.Time{}, err
 	}
 	return balances, recent, thresholds, s.now().UTC(), nil

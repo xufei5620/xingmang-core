@@ -213,8 +213,8 @@ func main() {
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。
 		FinanceSummaries: runwaySummaryStore,
-		// 阈值从环境变量解析后注入，与 platform-worker 的告警规则同源
-		FinanceRunwayThresholds:    cfg.FinanceRunwayThresholds,
+		// 运行时阈值由 DB 快照 provider 提供；与 worker 每轮读取同一
+		// finance.runway_threshold_config revision。env 仅供独立 bootstrap 命令。
 		FinanceRunwayConfig:        runwayThresholdStore,
 		FinanceRunwayConfigHistory: runwayThresholdStore,
 		FinanceRunwayPreviewSource: runwaySummaryStore,

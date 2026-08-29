@@ -132,4 +132,16 @@ func TestPreviewRunwayThresholdsExcludesSubscriptionsFromCoverage(t *testing.T) 
 	}
 }
 
+func TestPreviewRunwayThresholdsFlagsUnexpectedSubscriptionAlert(t *testing.T) {
+	sub := previewRunway(nil, finance.RunwayReasonNotApplicable)
+	sub.AccessMethod = finance.AccessSubscriptionAccount
+	preview, err := alerts.PreviewRunwayThresholds(previewCurrent, previewCurrent, []finance.UpstreamRunway{sub}, []alerts.Alert{activeR5(sub.AccountID, alerts.SeverityWarning)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Items) != 1 || preview.Items[0].ConsistencyReason != "unexpected_active_alert" || preview.Counts.CurrentInconsistent != 1 {
+		t.Fatalf("subscription active alert must be inconsistent: %+v", preview)
+	}
+}
+
 func intPtr(v int) *int { return &v }
