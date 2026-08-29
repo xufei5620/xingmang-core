@@ -130,7 +130,7 @@ github_urls="$(git -C "$repo_path" remote get-url --all github 2>/dev/null || tr
 [ -z "$github_urls" ] || [ "$(printf '%s\n' "$github_urls" | wc -l)" -eq 1 ] || {
   echo "REMOTES FAIL: github 配置了多个 URL，拒绝猜测" >&2; exit 1;
 }
-rewrite_rules="$(git -C "$repo_path" config --local --get-regexp '^url\\..*\\.(insteadOf|pushInsteadOf)$' 2>/dev/null || true)"
+rewrite_rules="$(git -C "$repo_path" config --local --get-regexp '^url\..*' 2>/dev/null | grep -Ei '\.(insteadof|pushinsteadof)( |$)' || true)"
 [ -z "$rewrite_rules" ] || { echo "REMOTES FAIL: 检测到 url.* 重写规则，先人工核对" >&2; exit 1; }
 remote_list="$(git -C "$repo_path" remote 2>/dev/null)" || {
   echo "REMOTES FAIL: 无法读取 remote 列表" >&2; exit 1;
@@ -151,6 +151,12 @@ github_pushurl="$(git -C "$repo_path" config --get-all remote.github.pushurl 2>/
 server_file_url="file://$server_url"
 server_compare="$(normalize_local_url "$server_url")"
 origin_compare="$(normalize_local_url "$origin_url")"
+if [ -n "$origin_url" ] && [ "$origin_compare" != "$server_compare" ]; then
+  case "$origin_url" in
+    git@github.com:xufei5620/xingmang-platform.git|ssh://git@github.com/xufei5620/xingmang-platform.git|https://github.com/xufei5620/xingmang-platform.git) ;;
+    *) echo "REMOTES FAIL: origin 不是已登记的官方 GitHub 镜像，拒绝迁移" >&2; exit 1 ;;
+  esac
+fi
 if [ -n "$github_existing" ] && [ "$github_existing" != "$github_url" ]; then
   echo "REMOTES FAIL: 已有 github remote URL 不匹配，拒绝覆盖" >&2
   exit 1
@@ -187,21 +193,37 @@ fi
   echo "REMOTES FAIL: 实际写入必须提供 --confirm CONFIGURE-REMOTES" >&2; exit 1;
 }
 mkdir -- "$lock_dir" || { echo "REMOTES FAIL: 无法取得 remotes 锁" >&2; exit 75; }
+config_backup=""
+backup_ready=0
+write_committed=0
+cleanup() {
+  rc="$?"
+  rollback_failed=0
+  if [ "$backup_ready" -eq 1 ] && [ "$write_committed" -eq 0 ]; then
+    if ! cp -- "$config_backup" "$config_path" 2>/dev/null; then
+      rollback_failed=1
+      echo "REMOTES CRITICAL: 回滚 .git/config 失败，备份保留在 $config_backup" >&2
+    fi
+  fi
+  if [ "$rollback_failed" -eq 0 ] && [ "$backup_ready" -eq 1 ]; then
+    rm -f -- "$config_backup" 2>/dev/null || true
+  fi
+  if [ "$backup_ready" -eq 0 ] && [ -n "$config_backup" ]; then
+    echo "REMOTES CRITICAL: 无法建立 .git/config 备份，备份文件保留在 $config_backup" >&2
+    [ "$rc" -eq 0 ] && rc=1
+  fi
+  rmdir -- "$lock_dir" 2>/dev/null || true
+  [ "$rollback_failed" -eq 0 ] || [ "$rc" -ne 0 ] || rc=1
+  exit "$rc"
+}
+trap cleanup EXIT
 config_path="$(git -C "$repo_path" rev-parse --git-path config 2>/dev/null || true)"
 case "$config_path" in /*) ;; *) config_path="$repo_path/$config_path" ;; esac
 [ -f "$config_path" ] && [ ! -L "$config_path" ] || { echo "REMOTES FAIL: Git config 不可备份" >&2; exit 1; }
 config_backup="$(mktemp -- "$git_dir/.xm-remotes-config.XXXXXX")" || exit 1
 chmod 0600 "$config_backup"
 cp -- "$config_path" "$config_backup"
-write_committed=0
-cleanup() {
-  rc="$?"
-  if [ "$write_committed" -eq 0 ]; then cp -- "$config_backup" "$config_path" 2>/dev/null || true; fi
-  rm -f -- "$config_backup" 2>/dev/null || true
-  rmdir -- "$lock_dir" 2>/dev/null || true
-  exit "$rc"
-}
-trap cleanup EXIT
+backup_ready=1
 
 if [ -n "$origin_url" ] && [ "$origin_compare" != "$server_compare" ]; then
   # 先复制旧 GitHub URL，再改 origin；不要 `remote rename`，否则 Git 会把

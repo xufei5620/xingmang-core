@@ -157,7 +157,7 @@ pushurl="$("$git_bin" -C "$repo_path" config --get-all remote.github.pushurl 2>/
 [ -z "$pushurl" ] || die "github remote 存在隐藏 pushurl，先人工核对"
 origin_pushurl="$("$git_bin" -C "$repo_path" config --get-all remote.origin.pushurl 2>/dev/null || true)"
 [ -z "$origin_pushurl" ] || die "origin remote 存在隐藏 pushurl，先人工核对"
-rewrite_rules="$("$git_bin" -C "$repo_path" config --local --get-regexp '^url\\..*\\.(insteadOf|pushInsteadOf)$' 2>/dev/null || true)"
+rewrite_rules="$("$git_bin" -C "$repo_path" config --local --get-regexp '^url\..*' 2>/dev/null | grep -Ei '\.(insteadof|pushinsteadof)( |$)' || true)"
 [ -z "$rewrite_rules" ] || die "检测到 url.* 重写规则，拒绝镜像未知目标"
 origin_url="$("$git_bin" -C "$repo_path" remote get-url origin 2>/dev/null || true)"
 [ -n "$origin_url" ] || die "origin remote 不存在，拒绝镜像未知来源"

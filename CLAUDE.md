@@ -43,7 +43,7 @@
 ## Claude 专属规则
 
 - 每任务独立 Worktree + 分支 `ai/claude/XM-xxxx-<slug>`；提交前跑全部本地门禁。
-- 过渡期完成后在分支内写 Handoff（格式：status/branch/commit/summary/
+- 过渡期内在分支内写 Handoff（格式：status/branch/commit/summary/
   files_changed/tests_run/not_run/risks/follow_ups）；不创建 PR 作为本地交付闸门。
 - 与 Codex 线（开票系统）的接口变化必须走 `docs/change-requests/`。
 

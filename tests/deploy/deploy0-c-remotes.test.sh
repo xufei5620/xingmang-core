@@ -34,6 +34,9 @@ git -C "$tmp/repo" remote remove github
 git -C "$tmp/repo" config remote.origin.pushurl git@github.com:example/push-only.git
 expect_failure "remote helper 拒绝隐藏 origin pushurl" env XM_DEPLOY_TEST_MODE=1 "$script" --test-mode --repo "$tmp/repo" --server-url "$tmp/server.git" --github-url git@github.com:xufei5620/xingmang-platform.git --dry-run
 git -C "$tmp/repo" config --unset-all remote.origin.pushurl
+git -C "$tmp/repo" config url."git@github.com:example/".insteadOf mirror:
+expect_failure "remote helper 拒绝 URL 重写规则" env XM_DEPLOY_TEST_MODE=1 "$script" --test-mode --repo "$tmp/repo" --server-url "$tmp/server.git" --github-url git@github.com:xufei5620/xingmang-platform.git --dry-run
+git -C "$tmp/repo" config --unset-all url."git@github.com:example/".insteadOf
 
 expect_failure "remote helper 无确认拒绝写入" env XM_DEPLOY_TEST_MODE=1 "$script" --test-mode --repo "$tmp/repo" --server-url "$tmp/server.git" --github-url git@github.com:xufei5620/xingmang-platform.git
 expect_success "remote helper 确认后切换 origin 并添加 github" env XM_DEPLOY_TEST_MODE=1 "$script" --test-mode --repo "$tmp/repo" --server-url "$tmp/server.git" --github-url git@github.com:xufei5620/xingmang-platform.git --confirm CONFIGURE-REMOTES
