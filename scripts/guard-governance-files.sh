@@ -28,6 +28,10 @@ protected_globs=(
   'scripts/ci-local.sh'
   'deploy/git-hooks/'
   'deploy/scripts/install-git-server.sh'
+  'deploy/scripts/deploy.sh'
+  'deploy/scripts/promote.sh'
+  'deploy/compose/'
+  'deploy/nginx/'
   'tests/security/'
   'tests/deploy/'
 )
@@ -78,6 +82,7 @@ printf '%s' "$touched"
   echo "受保护范围：\`.github/workflows/\`、\`.github/CODEOWNERS\`、"
   echo "\`scripts/check-governance.sh\`、\`scripts/guard-governance-files.sh\`、"
   echo "\`scripts/ci-local.sh\`、\`deploy/git-hooks/\`、\`deploy/scripts/install-git-server.sh\`、"
+  echo "\`deploy/scripts/deploy.sh\`、\`deploy/scripts/promote.sh\`、\`deploy/compose/\`、\`deploy/nginx/\`、"
   echo "\`tests/security/\`、\`tests/deploy/\`"
 } >> "$summary"
 

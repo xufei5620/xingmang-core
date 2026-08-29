@@ -1,17 +1,26 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # 裸仓库 post-receive：只有 release 分支更新才启动受控 CI。
 # 每个 commit 都有独立的 <sha>.log 与 <sha>.status；status 为 green 才允许
 # 后续部署线采纳。CI 失败时 hook 返回非零并保留 red 状态（receive 已完成，
 # 因此部署闸门必须检查该状态，不能只看 push 是否成功）。
 set -Eeuo pipefail
 umask 077
+if [ "${POST_RECEIVE_ALLOW_CUSTOM_EXECUTOR:-0}" != "1" ] && [ -x /usr/bin/git ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+initial_git_dir="$(git rev-parse --git-dir 2>/dev/null || true)"
+[ -n "$initial_git_dir" ] || { echo "POST-RECEIVE FAIL: 只能在 Git 裸仓库 receive 上下文运行" >&2; exit 1; }
 export GIT_NO_REPLACE_OBJECTS=1
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
+  GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_SSH_COMMAND GIT_PROXY_COMMAND GIT_ASKPASS \
+  BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH \
+  NODE_OPTIONS PYTHONPATH RUBYOPT PERL5OPT CDPATH
+export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent
+if [ "${POST_RECEIVE_ALLOW_CUSTOM_EXECUTOR:-0}" != "1" ] && [ -x /usr/bin/git ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
 
-git_dir="$(git rev-parse --git-dir 2>/dev/null)" || {
-  echo "POST-RECEIVE FAIL: 只能在 Git 裸仓库 receive 上下文运行" >&2
-  exit 1
-}
+git_dir="$initial_git_dir"
 case "$git_dir" in
   /*) ;;
   *) git_dir="$(cd -- "$git_dir" && pwd -P)" ;;

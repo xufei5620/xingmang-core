@@ -191,11 +191,14 @@ commit_three="$(git -C "$source_repo" rev-parse HEAD)"
 git -C "$source_repo" push -q "$bare_repo" "$commit_three:refs/heads/candidate-three"
 configured_marker="$bare_repo/configured-promote.marker"
 git --git-dir="$bare_repo" config xm.receive.promoteMarker "$configured_marker"
+# 旧 marker-only 测试显式标注 legacy/test 配置；真实安装器会写 true，
+# 未登记该配置的服务器由 hook 默认拒绝晋级。
+git --git-dir="$bare_repo" config xm.receive.requirePromoteLock false
 printf 'sha=%s\n' "$commit_three" > "$configured_marker"
 run_pre_config() {
   local line="$1"
   (cd "$bare_repo" && printf '%s\n' "$line" | env -u PRE_RECEIVE_PROMOTE_MARKER \
-    PRE_RECEIVE_ALLOW_MARKER_OVERRIDE=0 bash "$pre_hook")
+    PRE_RECEIVE_ALLOW_MARKER_OVERRIDE=1 bash "$pre_hook")
 }
 expect_success "pre-receive 读取安装器写入的 marker 配置" run_pre_config \
   "$commit_one $commit_three refs/heads/main"

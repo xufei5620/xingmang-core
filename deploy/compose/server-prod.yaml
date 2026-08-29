@@ -1,0 +1,53 @@
+# 星芒统一控制平台 —— 服务器 production 覆盖
+#
+# 这是生产配置的显式闸门，不是「把 ENVIRONMENT 改成 production」的快捷方式：
+# 1) OIDC 参数必须由部署环境显式提供；
+# 2) 三条采集链必须显式选择 real 或显式关闭，不能继承 fake 演示默认值；
+# 3) 演示种子固定关闭；
+# 4) web 仍只绑回环，TLS/OIDC 入口由宿主 Nginx 配置承担。
+#
+# Compose 的 :? 插值故意让缺配置在 config 阶段失败，避免 build/up 后才发现。
+services:
+  # 001_staging_seed.sql 只允许在 staging profile 里运行；生产部署不启用
+  # 该 profile，因此不会把 sub2api-staging 或其它演示行写进生产库。
+  bootstrap:
+    profiles: ["staging"]
+
+  migrate:
+    environment:
+      ENVIRONMENT: production
+
+  platform-api:
+    environment:
+      ENVIRONMENT: production
+      XM_AUTH_MODE: oidc
+      XM_OIDC_ISSUER: ${XM_OIDC_ISSUER:?XM_OIDC_ISSUER is required for production}
+      XM_OIDC_AUDIENCE: ${XM_OIDC_AUDIENCE:?XM_OIDC_AUDIENCE is required for production}
+      XM_OIDC_JWKS_URL: ${XM_OIDC_JWKS_URL:-}
+      XM_OIDC_ROLE_SCOPES: ${XM_OIDC_ROLE_SCOPES:-}
+      XM_OIDC_CLOCK_SKEW: ${XM_OIDC_CLOCK_SKEW:-}
+      XM_FINANCE_FAKE_SEED: "false"
+
+  platform-worker:
+    environment:
+      ENVIRONMENT: production
+      # 必须显式写值；worker 自身还会拒绝 production + fake + enabled。
+      XM_SUB2API_MODE: ${XM_SUB2API_MODE:?XM_SUB2API_MODE must be explicitly set (real or fake with sync disabled)}
+      XM_SUB2API_INSTANCE_ID: ${XM_SUB2API_INSTANCE_ID:?XM_SUB2API_INSTANCE_ID is required for production}
+      XM_SUB2API_SYNC_ENABLED: ${XM_SUB2API_SYNC_ENABLED:-true}
+      XM_SUB2API_SYNC_INTERVAL: ${XM_SUB2API_SYNC_INTERVAL:-300s}
+      XM_NEWAPI_MODE: ${XM_NEWAPI_MODE:?XM_NEWAPI_MODE must be explicitly set (real or fake with sync disabled)}
+      XM_NEWAPI_INSTANCE_ID: ${XM_NEWAPI_INSTANCE_ID:?XM_NEWAPI_INSTANCE_ID is required for production}
+      XM_NEWAPI_SYNC_ENABLED: ${XM_NEWAPI_SYNC_ENABLED:-true}
+      XM_NEWAPI_SYNC_INTERVAL: ${XM_NEWAPI_SYNC_INTERVAL:-300s}
+      XM_FINANCE_COLLECT_MODE: ${XM_FINANCE_COLLECT_MODE:?XM_FINANCE_COLLECT_MODE must be explicitly set (real or fake with collection disabled)}
+      XM_FINANCE_COLLECT_ENABLED: ${XM_FINANCE_COLLECT_ENABLED:-true}
+      XM_FINANCE_COLLECT_INTERVAL: ${XM_FINANCE_COLLECT_INTERVAL:-300s}
+      XM_FINANCE_COLLECT_REQUEST_TIMEOUT: ${XM_FINANCE_COLLECT_REQUEST_TIMEOUT:-30s}
+      XM_FINANCE_COLLECT_INSTANCE_ID: ${XM_FINANCE_COLLECT_INSTANCE_ID:?XM_FINANCE_COLLECT_INSTANCE_ID is required for production}
+      HEARTBEAT_RUN_ON_START: ${HEARTBEAT_RUN_ON_START:-true}
+
+  web:
+    ports: !override
+      # 生产入口由 TLS Nginx 反代；不要把管理后台直接绑到公网接口。
+      - "127.0.0.1:18089:80"
