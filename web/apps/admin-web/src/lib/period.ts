@@ -1,10 +1,13 @@
-import type { PeriodBody, PeriodGranularity } from "../api/users";
+import type { PeriodGranularity } from "../api/users";
 
-/** 统计区间的展示口径（原型顶部的「统计区间」控件）。
+/** 统计区间的应用侧 URL 校验与覆盖率文案。
  *
- *  ## 为什么这里只有展示，没有计算
+ *  通用展示与交互已集中到 `@xingmang/ui-admin/PeriodControls`；这里保留
+ *  平台用户页独有的 URL 输入校验和资金覆盖率解释，避免组件库认识业务 API。
  *
- *  「这一周是哪七天」由**服务端**算，前端只负责显示它回显的 `from`/`to`。
+ *  ## 为什么不计算区间
+ *
+ *  「这一周是哪七天」由**服务端**算，前端只显示它回显的 `from`/`to`。
  *  前端自己再算一遍的话，两份实现在跨月那一周对不上的那天，没人说得清哪个
  *  是对的——而它们的产出都是一组合理的数字，界面上分辨不出来。
  *
@@ -14,41 +17,6 @@ import type { PeriodBody, PeriodGranularity } from "../api/users";
  *  `new Date().toISOString().slice(0, 10)` 会给出账面上的**昨天**，
  *  于是运营打开页面看到的「今天」是错的一天，而那一天的数字同样合理。
  *  所以「今天」一律不传，交给服务端解释（见 `listPlatformUsers`）。 */
-
-/** 三个粒度按钮的文案。顺序即原型里的排列顺序。 */
-export const GRANULARITY_OPTIONS: readonly { value: PeriodGranularity; label: string }[] = [
-  { value: "day", label: "日" },
-  { value: "week", label: "周" },
-  { value: "month", label: "月" },
-];
-
-/** 粒度 → 「按日查看」这类后缀。 */
-export function granularityLabel(g: PeriodGranularity): string {
-  switch (g) {
-    case "week":
-      return "按周查看";
-    case "month":
-      return "按月查看";
-    default:
-      return "按日查看";
-  }
-}
-
-/** 区间的一句话描述，对应原型的 `data-period-output`。
- *
- *  「日」只说那一天（`2026-08-27 · 按日查看`，与原型逐字一致）；
- *  「周」「月」把起止两天都说出来（`2026-08-24 ~ 2026-08-30 · 按周查看`）——
- *  原型只有日粒度的静态文案，但一个只写「按周查看」而不说是哪七天的标题，
- *  在跨月那一周会让人读错。 */
-export function describePeriod(period: PeriodBody | undefined): string {
-  if (period === undefined || period.day === "") return "—";
-  const suffix = granularityLabel(period.granularity);
-  if (period.granularity === "day" || period.from === period.to) {
-    return `${period.day} · ${suffix}`;
-  }
-  if (period.from === "" || period.to === "") return `${period.day} · ${suffix}`;
-  return `${period.from} ~ ${period.to} · ${suffix}`;
-}
 
 /** 校验粒度串。认不出的一律回落到 `day`。
  *

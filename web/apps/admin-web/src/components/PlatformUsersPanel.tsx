@@ -4,6 +4,7 @@ import {
   FreshnessBadge,
   FreshnessNote,
   PageState,
+  PeriodControls,
   StatTile,
   formatUtcTimestamp,
   type DataTableColumn,
@@ -24,7 +25,6 @@ import {
 import { formatMinorUnits, toIntegerValue } from "../lib/money";
 import { describeCoverage, parseBusinessDay, parseGranularity } from "../lib/period";
 import { ApiStateView } from "./ApiStateView";
-import { PeriodControls } from "./PeriodControls";
 
 /** 一页拉多少条。与后端 `platformusers.DefaultLimit` 一致。 */
 const PAGE_SIZE = 50;

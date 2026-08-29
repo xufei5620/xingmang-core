@@ -249,7 +249,7 @@ describe("Sub2ApiFinanceOverview", () => {
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([input]) => String(input).includes("from=2024-02-12") && String(input).includes("to=2024-02-18"))).toBe(true);
     });
-    expect(screen.getByText("2024-02-12 至 2024-02-18")).toBeTruthy();
+    expect(screen.getByText("2024-02-12 ~ 2024-02-18 · 按周查看")).toBeTruthy();
   });
 
   it("recovers from clearing the native date input instead of crashing the rendered page", async () => {

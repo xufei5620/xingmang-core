@@ -78,6 +78,15 @@ export {
 } from "./navigation";
 export { PageHeader, type PageHeaderProps } from "./PageHeader";
 export {
+  describePeriod,
+  GRANULARITY_OPTIONS,
+  granularityLabel,
+  PeriodControls,
+  type PeriodControlsProps,
+  type PeriodGranularity,
+  type PeriodRange,
+} from "./PeriodControls";
+export {
   FreshnessBadge,
   FreshnessNote,
   ServiceStatusBadge,

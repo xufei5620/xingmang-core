@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  describeCoverage,
   describePeriod,
   granularityLabel,
+  GRANULARITY_OPTIONS,
+} from "@xingmang/ui-admin";
+import {
+  describeCoverage,
   parseBusinessDay,
   parseGranularity,
-  GRANULARITY_OPTIONS,
 } from "./period";
 
 describe("granularityLabel", () => {
