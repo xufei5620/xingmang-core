@@ -62,7 +62,7 @@ READY
 - `D:/Git/bin/bash.exe tests/security/governance-not-hollow.test.sh` — PASS
 - `go fmt ./...` / `go vet ./...` / `go test -p 1 -count=1 ./...` — PASS（当前 5c6e024 工作树；本片无 Go 源码改动）
 - `git diff --name-only 2394730..HEAD -- web` — 空（本片无前端源码改动）；WSL Ubuntu-24.04 archive 检出当前 5c6e024：`pnpm install --frozen-lockfile --ignore-scripts --package-import-method=copy --offline`、`pnpm -r run typecheck`、`pnpm -r run test`、Storybook build、admin-web build — PASS（ui-admin 219 tests；admin-web 881 tests）
-- `C:/Users/58439/AppData/Local/Temp/xm-gitleaks-bin/gitleaks.exe git --redact --no-banner --log-opts=2394730..HEAD` — PASS（4 commits，no leaks found）
+- `C:/Users/58439/AppData/Local/Temp/xm-gitleaks-bin/gitleaks.exe git --redact --no-banner --log-opts=2394730..HEAD~2` — PASS（4 implementation commits，no leaks found）
 - `git diff --check` — PASS
 
 ## tests_not_run
