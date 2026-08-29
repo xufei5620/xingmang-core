@@ -71,7 +71,7 @@ describe("蓝图渲染：结构在，数字不在", () => {
 
   it("筛选条只展示不实装，且说明了这一点", () => {
     render(<BlueprintTabView tab={tabOf("/finance", "reconciliation")} />);
-    const bar = screen.getAllByLabelText("筛选条（尚未启用）")[0];
+    const bar = screen.getAllByLabelText("筛选条（尚未启用）")[0]!;
     // 控件文案照原型
     expect(within(bar).getByText("平台：全部")).not.toBeNull();
     // 但必须说清它还不能用——一个能点却筛不出东西的下拉比没有筛选更让人困惑

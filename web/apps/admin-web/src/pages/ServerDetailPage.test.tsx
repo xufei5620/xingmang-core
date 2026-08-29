@@ -64,7 +64,7 @@ describe("服务器蓝图详情入口", () => {
       expect(links[0]?.getAttribute("href")).toBe("/platforms/server/detail/srv_sin_01");
       const tables = screen.getAllByRole("table");
       expect(tables.length).toBeGreaterThan(0);
-      expect(within(tables[0]).queryAllByRole("row")).toHaveLength(1);
+      expect(within(tables[0]!).queryAllByRole("row")).toHaveLength(1);
       unmount();
     }
   });
