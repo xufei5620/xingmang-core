@@ -85,4 +85,3 @@ describe("SavedView API", () => {
     expect(call?.[1]).toEqual({ params: { saved_view_id: "view-1" } });
   });
 });
-

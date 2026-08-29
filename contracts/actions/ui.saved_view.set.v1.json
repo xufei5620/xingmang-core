@@ -23,4 +23,3 @@
   },
   "notes": "XM-B003 personal SavedView. owner issuer/subject/identity zone and Environment are derived only from the authenticated HUMAN Principal. Audit before/after summaries contain only canonical state_hash; query, filters, name, and columns never enter audit or logs."
 }
-

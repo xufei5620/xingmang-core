@@ -80,4 +80,3 @@ WHERE id = sqlc.arg(id)
   AND identity_zone = sqlc.arg(identity_zone)
   AND environment = sqlc.arg(environment)
 RETURNING id, state_hash;
-

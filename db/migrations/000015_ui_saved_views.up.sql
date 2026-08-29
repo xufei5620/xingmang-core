@@ -67,4 +67,3 @@ CREATE INDEX saved_view_owner_table_updated_idx
     ON ui.saved_view (
         owner_issuer, owner_subject, identity_zone, environment, table_key, updated_at DESC
     );
-

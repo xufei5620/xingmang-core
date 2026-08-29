@@ -14,4 +14,3 @@
   },
   "notes": "XM-B003 personal SavedView removal. The UUID is deleted only inside the caller-derived owner and Environment boundary; a foreign UUID is indistinguishable from a missing UUID. Audit contains only the removed resource UUID and prior state_hash."
 }
-

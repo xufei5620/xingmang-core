@@ -89,4 +89,3 @@ export function useSavedViews(tableKey: string): UseSavedViewsResult {
     retry: () => void query.refetch(),
   };
 }
-

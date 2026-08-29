@@ -100,4 +100,3 @@ describe("SavedView Router Search Params", () => {
     expect(parsed.viewRef).toBe("private-id");
   });
 });
-

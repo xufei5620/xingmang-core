@@ -150,7 +150,7 @@ export function DataTableV2<T>({
 }: DataTableV2Props<T>) {
   const domId = useId();
   const defaultVisible = useMemo(
-    () => columns.filter((c) => !c.defaultHidden).map((c) => c.id),
+    () => columns.filter((c) => c.primary || !c.defaultHidden).map((c) => c.id),
     [columns],
   );
 
@@ -649,15 +649,21 @@ export function DataTableV2<T>({
                 <th
                   key={column.id}
                   scope="col"
-                  aria-sort={column.value ? ariaSort(sort, column.id) : undefined}
+                  aria-sort={
+                    column.value !== undefined || column.sortAs !== undefined
+                      ? ariaSort(sort, column.id)
+                      : undefined
+                  }
                   title={column.headerTitle}
                   className={cx(
                     "text-xs font-medium text-fg-muted",
                     column.numeric ? "text-right" : "text-left",
-                    column.value ? "p-0" : CELL_PAD[density],
+                    column.value !== undefined || column.sortAs !== undefined
+                      ? "p-0"
+                      : CELL_PAD[density],
                   )}
                 >
-                  {column.value ? (
+                  {column.value !== undefined || column.sortAs !== undefined ? (
                     <button
                       type="button"
                       onClick={() => {

@@ -90,6 +90,10 @@ export function PersistentDataTable<T>(props: PersistentDataTableProps<T>) {
   } = props;
   const [searchParams, setSearchParams] = useSearchParams();
   const saved = useSavedViews(tableKey);
+  // Query is expected to be table-key scoped server-side. Keep the boundary defensive at the
+  // adapter as well so a stale cache or malformed response can never make one table's private
+  // views appear in another table's selector.
+  const scopedItems = saved.items.filter((item) => item.table_key === tableKey);
   const capabilities = suppliedCapabilities ?? defaultCapabilities(props);
   const fallback = defaultViewState(capabilities, defaultDensity);
   const builtIns: readonly SavedView[] = views.some((view) => view.name === "全部")
@@ -104,7 +108,7 @@ export function PersistentDataTable<T>(props: PersistentDataTableProps<T>) {
 
   const requestedRef = searchParams.get("dt_view");
   const requestedPersonal = requestedRef
-    ? saved.items.find((view) => view.id === requestedRef)
+    ? scopedItems.find((view) => view.id === requestedRef)
     : undefined;
   const requestedBuiltIn = requestedRef
     ? builtIns.find((view) => view.name === requestedRef)
@@ -128,13 +132,13 @@ export function PersistentDataTable<T>(props: PersistentDataTableProps<T>) {
     reconcileOptions,
     [
       ...builtIns.map((view) => ({ ref: view.name, name: view.name })),
-      ...saved.items.map((view) => ({ ref: view.id, name: view.name })),
+      ...scopedItems.map((view) => ({ ref: view.id, name: view.name })),
     ],
   );
   const warnings = [...(personalReconciled?.warnings ?? []), ...parsed.warnings];
 
   const referenceForState = (state: TableViewState): string => {
-    for (const item of saved.items) {
+    for (const item of scopedItems) {
       const reconciled = reconcileSavedViewState(
         { ...item.state, schema_version: item.state_version } as typeof item.state,
         reconcileOptions,
@@ -168,7 +172,7 @@ export function PersistentDataTable<T>(props: PersistentDataTableProps<T>) {
         }}
         persistence={{
           tableKey,
-          items: saved.items,
+          items: scopedItems,
           schemaReady,
           columnCapabilities: capabilities,
           status: saved.status,
@@ -181,4 +185,3 @@ export function PersistentDataTable<T>(props: PersistentDataTableProps<T>) {
     </div>
   );
 }
-

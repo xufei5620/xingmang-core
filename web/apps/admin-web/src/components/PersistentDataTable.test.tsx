@@ -100,5 +100,37 @@ describe("PersistentDataTable Router adapter", () => {
     expect(screen.getByRole("option", { name: "全部" })).toBeTruthy();
     expect(screen.getByText("个人视图读取失败")).toBeTruthy();
   });
-});
 
+  it("不会把其他 table_key 的个人视图混入当前表", () => {
+    const foreign = {
+      id: "foreign-view",
+      table_key: "platform.newapi.channels",
+      name: "NewAPI 视图",
+      state_version: 1 as const,
+      state: {
+        schema_version: 1 as const,
+        query: "",
+        filters: {},
+        sort: null,
+        columns: { known: ["name", "state"], visible: ["name", "state"] },
+        density: "compact" as const,
+      },
+      created_at: "2026-08-29T00:00:00Z",
+      updated_at: "2026-08-29T00:00:00Z",
+    };
+    hook.useSavedViews.mockReturnValue(hookValue({ items: [foreign] }));
+    render(
+      <MemoryRouter>
+        <PersistentDataTable
+          tableKey="platform.sub2api.channels"
+          caption="渠道列表"
+          columns={columns}
+          rows={rows}
+          rowKey={(row) => row.id}
+          emptyState={<p>没有渠道</p>}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole("option", { name: "NewAPI 视图" })).toBeNull();
+  });
+});

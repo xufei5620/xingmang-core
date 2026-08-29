@@ -148,4 +148,3 @@ export function parseSavedViewSearchParams(
     (hasExplicitCriteria ? CUSTOM_VIEW_NAME : null);
   return { state, viewRef, activeViewName, warnings, hasExplicitCriteria };
 }
-

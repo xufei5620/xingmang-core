@@ -123,6 +123,24 @@ describe("排序", () => {
     expect(firstCells()).toEqual(["OpenAI 中转", "Gemini 备用", "自建 Ollama"]);
   });
 
+  it("只有 sortAs 的列也提供排序入口", () => {
+    setup({
+      columns: [
+        columns[0] as DataTableColumn<Channel>,
+        {
+          id: "priority",
+          header: "优先级",
+          sortAs: (row) => (row.state === "停用" ? 2 : 1),
+          cell: (row) => row.state,
+        },
+      ],
+    });
+    const header = screen.getByRole("columnheader", { name: /优先级/ });
+    fireEvent.click(within(header).getByRole("button"));
+    expect(header.getAttribute("aria-sort")).toBe("ascending");
+    expect(firstCells()).toEqual(["OpenAI 中转", "Gemini 备用", "自建 Ollama"]);
+  });
+
   it("没有 value 的列不给排序按钮——只有按钮的那一列排序没有意义", () => {
     setup();
     const header = screen.getByRole("columnheader", { name: "操作" });
@@ -201,6 +219,19 @@ describe("列管理", () => {
     expect(screen.queryByRole("columnheader", { name: "备注" })).toBeNull();
     fireEvent.click(screen.getByRole("checkbox", { name: "备注" }));
     expect(screen.getByRole("columnheader", { name: "备注" })).not.toBeNull();
+  });
+
+  it("主标识列即使标记 defaultHidden 也始终可见", () => {
+    setup({
+      columns: [
+        { id: "name", header: "渠道", primary: true, defaultHidden: true, value: (r) => r.name, cell: (r) => r.name },
+        { id: "state", header: "状态", value: (r) => r.state, cell: (r) => r.state },
+      ],
+    });
+    expect(screen.getByRole("columnheader", { name: "渠道" })).not.toBeNull();
+    const checkbox = screen.getByRole("checkbox", { name: /渠道 · 主标识/ }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
   });
 });
 
