@@ -39,6 +39,7 @@ import {
 } from "./lib/platforms";
 import { AlertsPage } from "./pages/AlertsPage";
 import { AuditPage } from "./pages/AuditPage";
+import { ChannelDetailPage, isSupplyPlatform } from "./pages/ChannelDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -50,6 +51,8 @@ import { RequestDetailPage } from "./pages/RequestDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ServerDetailPage } from "./pages/ServerDetailPage";
 import { isServerDetailPreviewId } from "./blueprints/server";
+import { SupplierCreatePage } from "./pages/SupplierCreatePage";
+import { UpstreamDetailPage } from "./pages/UpstreamDetailPage";
 
 function requireAuth() {
   if (!isAuthenticated()) return redirect("/login");
@@ -266,6 +269,40 @@ function serverDetailLoader({ params }: LoaderFunctionArgs) {
   return null;
 }
 
+/** 渠道/上游详情的 UI-only 路由门禁。 */
+function supplyPlatformLoader({ params }: LoaderFunctionArgs) {
+  assertSupplyPlatform(params.serviceType ?? "");
+  return null;
+}
+
+function channelDetailLoader({ params }: LoaderFunctionArgs) {
+  const platform = params.serviceType ?? "";
+  assertSupplyPlatform(platform);
+  if (!(params.channelId ?? "").trim()) {
+    throw new Response("渠道 ID 为空，无法定位详情", { status: 404 });
+  }
+  return null;
+}
+
+function upstreamDetailLoader({ params }: LoaderFunctionArgs) {
+  const platform = params.serviceType ?? "";
+  assertSupplyPlatform(platform);
+  const upstreamId = params.upstreamId ?? "";
+  if (!upstreamId.trim() || upstreamId === "new") {
+    throw new Response(
+      upstreamId === "new" ? "新增上游请使用专用登记页面" : "上游 ID 为空，无法定位详情",
+      { status: 404 },
+    );
+  }
+  return null;
+}
+
+function assertSupplyPlatform(platform: string): asserts platform is "sub2api" | "newapi" {
+  if (!isSupplyPlatform(platform)) {
+    throw new Response(`平台 ${platform || "（空平台）"} 不支持上游/渠道详情`, { status: 404 });
+  }
+}
+
 /** 未实装页的路由位，由导航数据生成。
  *
  *  逐条手写的话，「加一页」就变成两处要改（navigation.ts + 这里），而漏改的那一半
@@ -295,6 +332,26 @@ export const routes = [
           { path: "alerts", Component: AlertsPage },
           { path: "audit", Component: AuditPage },
           {
+            path: "platforms/:serviceType/upstream/detail/:channelId",
+            loader: channelDetailLoader,
+            Component: ChannelDetailPage,
+          },
+          {
+            path: "platforms/:serviceType/suppliers/new",
+            loader: supplyPlatformLoader,
+            Component: SupplierCreatePage,
+          },
+          {
+            path: "platforms/:serviceType/suppliers/:upstreamId",
+            loader: upstreamDetailLoader,
+            Component: UpstreamDetailPage,
+          },
+          {
+            path: "platforms/server/detail/:serverId",
+            loader: serverDetailLoader,
+            Component: ServerDetailPage,
+          },
+          {
             path: "platforms/:serviceType",
             loader: platformTabLoader,
             Component: PlatformDetailPage,
@@ -305,14 +362,6 @@ export const routes = [
             path: "platforms/:serviceType/users/:userId",
             loader: platformUserDetailLoader,
             Component: PlatformUserDetailPage,
-          },
-          {
-            // ADMIN-IA §三/§四：#/server/detail/<serverId> →
-            // /platforms/server/detail/:serverId。静态 `server` 段把这条详情路由
-            // 与通用的平台页签路由分开，详情不会被误解析成 serviceType=server。
-            path: "platforms/server/detail/:serverId",
-            loader: serverDetailLoader,
-            Component: ServerDetailPage,
           },
           // 请求详情是**完整页**而不是抽屉(§11.4、原型 RECOVERY.md「No right-side
           // detail drawers」)。挂在平台下面而不是全局 /requests/:id：同一个 id 在

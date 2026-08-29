@@ -1351,6 +1351,35 @@ describe("平台段：Registry 驱动 + 显式排除名单", () => {
   });
 });
 
+describe("详情深链整合（服务器 / 渠道 / 上游）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("服务器详情使用静态 fixture ID，未知 ID 进入 404", async () => {
+    renderRoute("/platforms/server/detail/srv_sin_01");
+    expect(await screen.findByRole("heading", { name: "服务器资产详情", level: 2 })).not.toBeNull();
+  });
+
+  it("服务器未知 fixture 不回落到详情空壳", async () => {
+    renderRoute("/platforms/server/detail/not-real");
+    expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+  });
+
+  it("平台渠道与上游详情都保留平台上下文", async () => {
+    renderRoute("/platforms/sub2api/upstream/detail/ch_demo_01");
+    expect(await screen.findByRole("heading", { name: "渠道详情", level: 2 })).not.toBeNull();
+    expect(screen.getAllByText("Sub2API").length).toBeGreaterThan(0);
+  });
+
+  it("新增上游路由优先于动态 upstreamId", async () => {
+    renderRoute("/platforms/newapi/suppliers/new");
+    expect(await screen.findByRole("heading", { name: "添加上游", level: 2 })).not.toBeNull();
+  });
+});
+
 describe("旧路径 redirect 全表（ADMIN-IA v3 §4.1，逐条断言）", () => {
   beforeEach(() => {
     devLogin();
