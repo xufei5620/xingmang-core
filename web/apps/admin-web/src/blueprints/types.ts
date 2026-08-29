@@ -41,6 +41,15 @@ export interface BlueprintTable {
   columns: readonly string[];
   /** 这张表将来由什么填。显示在空状态里。 */
   source: string;
+  /** 只读深链入口。 */
+  links?: readonly BlueprintLink[];
+}
+
+/** 蓝图深链入口。 */
+export interface BlueprintLink {
+  href: string;
+  label: string;
+  description?: string;
 }
 
 /** 键值卡（原型的 `kv` 卡片：左键右值）。

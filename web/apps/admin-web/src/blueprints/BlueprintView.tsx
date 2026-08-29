@@ -1,5 +1,6 @@
 import { PageState, StatTile } from "@xingmang/ui-admin";
 import type { BlueprintKeyCard, BlueprintTab, BlueprintTable, BlueprintTile } from "./types";
+import { Link, useInRouterContext } from "react-router";
 
 /** 蓝图页签的统一渲染（UI 第 6 片）。
  *
@@ -47,7 +48,12 @@ export function BlueprintTiles({ tiles }: { tiles: readonly BlueprintTile[] }) {
  *  「这里将来有个筛选」。 */
 function BlueprintFilters({ filters }: { filters: readonly string[] }) {
   return (
-    <div className="flex flex-wrap items-center gap-2" aria-label="筛选条（尚未启用）">
+    <div
+      role="group"
+      aria-label="筛选条（尚未启用）"
+      aria-disabled="true"
+      className="flex flex-wrap items-center gap-2"
+    >
       {filters.map((label) => (
         <span
           key={label}
@@ -98,7 +104,56 @@ function BlueprintTableView({ table }: { table: BlueprintTable }) {
         </table>
       </div>
       <PageState kind="unavailable" description={table.source} compact />
+      {table.links && table.links.length > 0 ? <BlueprintDetailLinks links={table.links} /> : null}
     </section>
+  );
+}
+
+function BlueprintDetailLinks({
+  links,
+}: {
+  links: NonNullable<BlueprintTable["links"]>;
+}) {
+  return (
+    <div
+      className="rounded-md border border-dashed border-edge bg-surface-muted px-3 py-2"
+      aria-label="详情结构预览入口"
+    >
+      <p className="text-xs font-medium text-fg">详情结构预览（只读）</p>
+      <p className="mt-0.5 text-xs text-fg-muted">
+        以下链接只用于查看页面字段与路由，不代表已登记的资产。
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {links.map((link) => (
+          <BlueprintDetailLink key={link.href} link={link} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BlueprintDetailLink({
+  link,
+}: {
+  link: NonNullable<BlueprintTable["links"]>[number];
+}) {
+  const className =
+    "inline-flex min-h-9 items-center rounded-md border border-accent/40 bg-surface px-2.5 py-1.5 text-xs font-medium text-accent hover:bg-accent/10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2";
+  const content = (
+    <>
+      <span>{link.label}</span>
+      {link.description ? <span className="ml-1 text-fg-muted">· {link.description}</span> : null}
+    </>
+  );
+
+  return useInRouterContext() ? (
+    <Link to={link.href} className={className}>
+      {content}
+    </Link>
+  ) : (
+    <a href={link.href} className={className}>
+      {content}
+    </a>
   );
 }
 

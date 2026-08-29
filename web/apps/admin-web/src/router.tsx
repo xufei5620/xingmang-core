@@ -48,6 +48,8 @@ import { PlatformUserDetailPage } from "./pages/PlatformUserDetailPage";
 import { RegistryPage } from "./pages/RegistryPage";
 import { RequestDetailPage } from "./pages/RequestDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { ServerDetailPage } from "./pages/ServerDetailPage";
+import { isServerDetailPreviewId } from "./blueprints/server";
 
 function requireAuth() {
   if (!isAuthenticated()) return redirect("/login");
@@ -251,6 +253,19 @@ function platformUserDetailLoader({ params }: LoaderFunctionArgs) {
   return null;
 }
 
+/** 服务器资产详情的 UI-only 深链。
+ *
+ *  详情蓝图只声明了原型中的稳定 fixture ID；在 Server Agent 契约接入前，
+ *  任何其它 ID 都不能被画成一张「看起来存在」的资产页。loader 先挡住未知
+ *  对象，组件本身仍保留同一校验，便于独立挂载测试。 */
+function serverDetailLoader({ params }: LoaderFunctionArgs) {
+  const serverId = params.serverId ?? "";
+  if (!isServerDetailPreviewId(serverId)) {
+    throw new Response(`没有这个服务器资产：${serverId || "（空 ID）"}`, { status: 404 });
+  }
+  return null;
+}
+
 /** 未实装页的路由位，由导航数据生成。
  *
  *  逐条手写的话，「加一页」就变成两处要改（navigation.ts + 这里），而漏改的那一半
@@ -290,6 +305,14 @@ export const routes = [
             path: "platforms/:serviceType/users/:userId",
             loader: platformUserDetailLoader,
             Component: PlatformUserDetailPage,
+          },
+          {
+            // ADMIN-IA §三/§四：#/server/detail/<serverId> →
+            // /platforms/server/detail/:serverId。静态 `server` 段把这条详情路由
+            // 与通用的平台页签路由分开，详情不会被误解析成 serviceType=server。
+            path: "platforms/server/detail/:serverId",
+            loader: serverDetailLoader,
+            Component: ServerDetailPage,
           },
           // 请求详情是**完整页**而不是抽屉(§11.4、原型 RECOVERY.md「No right-side
           // detail drawers」)。挂在平台下面而不是全局 /requests/:id：同一个 id 在

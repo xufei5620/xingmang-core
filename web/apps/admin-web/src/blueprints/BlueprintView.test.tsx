@@ -1,5 +1,5 @@
-import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { BlueprintTabView } from "./BlueprintView";
 import { blueprintForPath, blueprintForPlatform } from "./index";
 import type { BlueprintTab } from "./types";
@@ -18,6 +18,8 @@ function tabOf(path: string, id: string): BlueprintTab {
   if (!tab) throw new Error(`${path} 没有 ${id}`);
   return tab;
 }
+
+afterEach(() => cleanup());
 
 describe("蓝图渲染：结构在，数字不在", () => {
   it("表格渲染真实列头，表体是未接入而不是假数据", () => {
@@ -69,7 +71,7 @@ describe("蓝图渲染：结构在，数字不在", () => {
 
   it("筛选条只展示不实装，且说明了这一点", () => {
     render(<BlueprintTabView tab={tabOf("/finance", "reconciliation")} />);
-    const bar = screen.getByLabelText("筛选条（尚未启用）");
+    const bar = screen.getAllByLabelText("筛选条（尚未启用）")[0];
     // 控件文案照原型
     expect(within(bar).getByText("平台：全部")).not.toBeNull();
     // 但必须说清它还不能用——一个能点却筛不出东西的下拉比没有筛选更让人困惑
@@ -93,6 +95,18 @@ describe("蓝图渲染：结构在，数字不在", () => {
     // 字段名是设计信息，照抄；值全是样例，一个不抄
     expect(screen.getByText("document_hash")).not.toBeNull();
     expect(screen.queryByText(/sha256:/)).toBeNull();
+  });
+
+  it("服务器蓝图保留只读详情深链", () => {
+    const page = blueprintForPlatform("server");
+    const tab = page?.tabs.find((entry) => entry.id === "assets");
+    expect(tab).toBeDefined();
+
+    render(<BlueprintTabView tab={tab!} />);
+
+    const links = screen.getAllByRole("link", { name: /服务器详情 · srv_/ });
+    expect(links.length).toBeGreaterThan(0);
+    expect(links[0]?.getAttribute("href")).toBe("/platforms/server/detail/srv_sin_01");
   });
 });
 
@@ -118,7 +132,7 @@ describe("页面接线", () => {
     // 选中的子页签是 URL 指定的那一格，不是第一格
     expect(screen.getByRole("tab", { name: "迁移与数据对比", selected: true })).not.toBeNull();
     // 而且渲染的是蓝图内容，不是那句通用的「尚未实现」
-    expect(screen.getByRole("columnheader", { name: "数据同步位置（Watermark）" })).not.toBeNull();
+    expect(screen.getAllByRole("columnheader", { name: "数据同步位置（Watermark）" }).length).toBeGreaterThan(0);
     expect(screen.queryByText(/尚未实现/)).toBeNull();
   });
 

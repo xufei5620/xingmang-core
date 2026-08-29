@@ -14,6 +14,7 @@ export interface TabsProps {
   value?: string;
   defaultValue?: string;
   onValueChange?: (value: string) => void;
+  ariaLabel?: string;
   className?: string;
 }
 
@@ -22,6 +23,7 @@ export function Tabs({
   value,
   defaultValue,
   onValueChange,
+  ariaLabel,
   className,
 }: TabsProps) {
   return (
@@ -31,7 +33,7 @@ export function Tabs({
       onValueChange={onValueChange}
       className={cx("flex flex-col gap-3", className)}
     >
-      <TabsPrimitive.List className="flex gap-1 border-b border-edge">
+      <TabsPrimitive.List className="flex gap-1 border-b border-edge" aria-label={ariaLabel}>
         {items.map((item) => (
           <TabsPrimitive.Trigger
             key={item.value}

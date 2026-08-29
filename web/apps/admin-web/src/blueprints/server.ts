@@ -1,4 +1,35 @@
-import type { BlueprintPage } from "./types";
+import type { BlueprintLink, BlueprintPage } from "./types";
+
+/** 服务器详情蓝图允许演示的稳定路由段。
+ *
+ *  这些值来自原型的对象 ID，只作为 UI 深链 fixture 使用；它们不代表当前环境
+ *  已登记的资产，也不会触发任何 API 查询。详情页会把所有实时字段显示为「未接入」。 */
+export const SERVER_DETAIL_PREVIEW_IDS = [
+  "srv_sin_01",
+  "srv_lax_02",
+  "srv_fsn_01",
+  "srv_hkg_db01",
+  "srv_sjc_proxy01",
+  "srv_nrt_dev01",
+] as const;
+
+export type ServerDetailPreviewId = (typeof SERVER_DETAIL_PREVIEW_IDS)[number];
+
+/** 服务器详情的真实应用路由（ADMIN-IA §三、§四）。 */
+export function serverDetailPath(serverId: string): string {
+  return `/platforms/server/detail/${encodeURIComponent(serverId)}`;
+}
+
+/** 只允许蓝图已声明的对象 ID 进入静态详情壳。 */
+export function isServerDetailPreviewId(value: string): value is ServerDetailPreviewId {
+  return (SERVER_DETAIL_PREVIEW_IDS as readonly string[]).includes(value);
+}
+
+const SERVER_DETAIL_LINKS: readonly BlueprintLink[] = SERVER_DETAIL_PREVIEW_IDS.map((serverId) => ({
+  href: serverDetailPath(serverId),
+  label: `服务器详情 · ${serverId}`,
+  description: "只读蓝图",
+}));
 
 /** 服务器平台页的蓝图规格（UI 第 6 片，ADMIN-IA §2.2 的 7 页签）。
  *
@@ -55,6 +86,7 @@ export const SERVER_BLUEPRINT: BlueprintPage = {
           caption: "服务器资产总览",
           columns: [...ASSET_COLUMNS],
           source: AGENT_SOURCE,
+          links: SERVER_DETAIL_LINKS,
         },
       ],
       cards: [
@@ -86,6 +118,7 @@ export const SERVER_BLUEPRINT: BlueprintPage = {
           caption: "服务器资产明细",
           columns: [...ASSET_COLUMNS],
           source: AGENT_SOURCE,
+          links: SERVER_DETAIL_LINKS,
         },
       ],
       notes: [
