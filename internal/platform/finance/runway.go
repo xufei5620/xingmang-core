@@ -259,7 +259,10 @@ func (r Runway) Known() bool { return r.Days != nil }
 // 判定顺序是刻意的：**先答「这个问题成不成立」，再答「数据够不够」**。
 // 订阅型渠道排在最前，因为对它来说可用天数不是「缺数据」而是「没有这个概念」
 // ——把它和「还没采到余额」混成一个 reason，运营会一直等一个永远不会来的数。
-func ComputeRunway(in RunwayInput) Runway {
+func ComputeRunway(in RunwayInput) (Runway, error) {
+	if err := in.Thresholds.Validate(); err != nil {
+		return Runway{}, err
+	}
 	out := Runway{
 		WindowDays:  RunwayWindowDays,
 		CoveredDays: in.CoveredDays,
@@ -286,25 +289,25 @@ func ComputeRunway(in RunwayInput) Runway {
 	case in.AccessMethod == AccessSubscriptionAccount:
 		// 订阅制上游无边际成本（固定月费），可用天数对其无意义（§7 边界）。
 		out.Reason = RunwayReasonNotApplicable
-		return out
+		return out, nil
 	case in.Balance == nil:
 		out.Reason = RunwayReasonNoBalance
-		return out
+		return out, nil
 	case in.Balance.Age(in.Now) > staleAfter:
 		// 「数据过期不显示伪精确天数」（§10.4）。余额可能已经被充值了，
 		// 也可能已经见底了——两者算出来的天数天差地别。
 		out.Reason = RunwayReasonBalanceStale
-		return out
+		return out, nil
 	case out.DailyAverageMinor == nil || *out.DailyAverageMinor <= 0:
 		// 「无消耗不显示伪精确天数」（§10.4）。除以 0 是无穷大——
 		// 一个「永远用不完」的余额是最糟的那种伪精确。
 		out.Reason = RunwayReasonNoConsumption
-		return out
+		return out, nil
 	case in.Balance.Currency != in.CostCurrency:
 		// §10.4 第一条硬要求。这里**不换算**：没有汇率，
 		// 编一个出来算出的天数是纯粹的错数字。
 		out.Reason = RunwayReasonCurrencyMismatch
-		return out
+		return out, nil
 	}
 
 	days := 0
@@ -316,21 +319,6 @@ func ComputeRunway(in RunwayInput) Runway {
 	// 余额 ≤ 0（已透支）落成 0 天而不是负数：负的可用天数没有意义，
 	// 而 0 天已经是最高档的告警，表达力不缺。
 	out.Days = &days
-	out.Level = in.Thresholds.levelFor(days)
-	return out
-}
-
-// levelFor 把天数映射成预警档。
-//
-// 阈值非法（未初始化 / 不递增）时一律归 critical：一个算得出天数却
-// 给不出档位的结果，会在看板上变成一个没有颜色的数字，
-// 而「没有颜色」看起来就像「没问题」。宁可误报也不漏报。
-func (t RunwayThresholds) levelFor(days int) RunwayLevel {
-	level, err := t.Classify(days)
-	if err != nil {
-		// 保持旧 ComputeRunway 的返回形状；新的 provider/preview 调用
-		// Classify 直接拿 error，因此不会把这条兼容路径当成可信配置。
-		return RunwayCritical
-	}
-	return level
+	out.Level, _ = in.Thresholds.Classify(days)
+	return out, nil
 }

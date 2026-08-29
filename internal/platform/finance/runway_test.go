@@ -42,7 +42,11 @@ func meteredRunway(in finance.RunwayInput) finance.Runway {
 	if in.CostCurrency == "" {
 		in.CostCurrency = "USD"
 	}
-	return finance.ComputeRunway(in)
+	got, err := finance.ComputeRunway(in)
+	if err != nil {
+		panic(err)
+	}
+	return got
 }
 
 // TestRunwayDividesBalanceByDailyAverage 是 §10.4 的公式本身。
@@ -170,7 +174,10 @@ func TestRunwayUnknownReasons(t *testing.T) {
 		in.Now = runwayNow
 		in.Thresholds = finance.DefaultRunwayThresholds()
 		in.CostCurrency = "USD"
-		got := finance.ComputeRunway(in)
+		got, err := finance.ComputeRunway(in)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if got.Known() || got.Reason != finance.RunwayReasonNotApplicable {
 			t.Fatalf("订阅型应为 not_applicable, got days=%v reason=%s", got.Days, got.Reason)
 		}
@@ -282,23 +289,17 @@ func TestRunwayThresholdsClassifyRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-// TestInvalidThresholdsFallBackToCritical：阈值非法时一律归 critical。
-//
-// 一个算得出天数却给不出档位的结果，会在看板上变成一个没有颜色的数字，
-// 而「没有颜色」看起来就像「没问题」。宁可误报也不漏报。
-func TestInvalidThresholdsFallBackToCritical(t *testing.T) {
-	got := finance.ComputeRunway(finance.RunwayInput{
+// TestInvalidThresholdsFailClosed：阈值非法时返回错误，不把它解释成 critical。
+func TestInvalidThresholdsFailClosed(t *testing.T) {
+	_, err := finance.ComputeRunway(finance.RunwayInput{
 		AccessMethod: finance.AccessUpstreamKey,
 		Balance:      balanceAt(999_000_000, "USD", time.Minute),
 		CostMinorSum: 1_000_000, CoveredDays: 1,
 		CostCurrency: "USD", Now: runwayNow,
 		Thresholds: finance.RunwayThresholds{}, // 未初始化
 	})
-	if !got.Known() {
-		t.Fatalf("天数本身仍该算得出, reason=%s", got.Reason)
-	}
-	if got.Level != finance.RunwayCritical {
-		t.Fatalf("阈值非法时应归 critical（宁可误报不漏报）, got %s", got.Level)
+	if err == nil {
+		t.Fatal("阈值非法必须 fail closed")
 	}
 }
 
@@ -362,11 +363,14 @@ func TestRunwayAlwaysYieldsDaysOrReason(t *testing.T) {
 	for _, method := range methods {
 		for _, balance := range balances {
 			for _, c := range consumptions {
-				got := finance.ComputeRunway(finance.RunwayInput{
+				got, err := finance.ComputeRunway(finance.RunwayInput{
 					AccessMethod: method, Balance: balance,
 					CostMinorSum: c.sum, CoveredDays: c.days, CostCurrency: c.currency,
 					Now: runwayNow, Thresholds: finance.DefaultRunwayThresholds(),
 				})
+				if err != nil {
+					t.Fatalf("%s/%v/%+v: unexpected error: %v", method, balance, c, err)
+				}
 				switch {
 				case got.Known() && got.Reason != "":
 					t.Fatalf("%s/%v/%+v: 算出了天数就不该再带原因", method, balance, c)

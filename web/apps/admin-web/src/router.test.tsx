@@ -1954,6 +1954,12 @@ describe("告警规则子页", () => {
     expect(screen.getByRole("button", { name: "预览影响" })).not.toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it("告警其它子页不回落到活跃告警表", async () => {
+    renderRoute("/alerts?sub=incidents");
+    expect(await screen.findByText("「故障事件」尚未接入")).not.toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
+  });
 });
 
 // --- XM-0033 告警中心 --------------------------------------------------------

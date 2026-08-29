@@ -7,6 +7,7 @@
 node_modules/
 dist/
 storybook-static/
+tools/local-progress/progress.json
 .vite/
 *.tsbuildinfo
 # --- 环境与凭据（宪法 7 条：仓库禁明文凭据）---

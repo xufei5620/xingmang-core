@@ -28,6 +28,20 @@ type fakeSummaryLister struct {
 	got   finance.SummaryQuery
 }
 
+type fakeSummaryThresholdProvider struct {
+	snapshot finance.RunwayThresholdSnapshot
+	calls    int
+	err      error
+}
+
+func (f *fakeSummaryThresholdProvider) Current(_ context.Context, _ string) (finance.RunwayThresholdSnapshot, error) {
+	f.calls++
+	if f.err != nil {
+		return finance.RunwayThresholdSnapshot{}, f.err
+	}
+	return f.snapshot, nil
+}
+
 func (f *fakeSummaryLister) UpstreamSummaries(
 	_ context.Context, q finance.SummaryQuery,
 ) ([]finance.UpstreamSummary, error) {
@@ -52,6 +66,18 @@ func summaryRouter(
 		ActionRegistry:          action.NewRegistry(),
 		FinanceSummaries:        lister,
 		FinanceRunwayThresholds: thresholds,
+	})
+}
+
+func summaryProviderRouter(t *testing.T, lister FinanceSummaryLister, provider RunwayThresholdProvider) http.Handler {
+	t.Helper()
+	res, err := NewDevHeaderResolver("development")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewRouter(Deps{
+		Logger: discardLogger(), Service: "platform-api", Environment: "development", DB: fakePinger{}, Resolver: res,
+		ActionRegistry: action.NewRegistry(), FinanceSummaries: lister, FinanceRunwayConfig: provider,
 	})
 }
 
@@ -117,6 +143,44 @@ func TestSummaryEndpointsRequireFinanceRead(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s 带 finance.read 应 200, got %d (%s)", path, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestSummaryProviderIsReadOnceAndEchoed(t *testing.T) {
+	provider := &fakeSummaryThresholdProvider{snapshot: finance.RunwayThresholdSnapshot{
+		Thresholds: finance.RunwayThresholds{CriticalDays: 4, WarningDays: 9, SeriousDays: 18}, Revision: 8, Source: "database", UpdatedAt: time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC),
+	}}
+	lister := &fakeSummaryLister{items: []finance.UpstreamSummary{meteredSummary()}}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/finance/upstreams/summary", nil)
+	devHeaders(req, finance.ScopeRead)
+	rec := httptest.NewRecorder()
+	summaryProviderRouter(t, lister, provider).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls=%d want 1", provider.calls)
+	}
+	if lister.got.Thresholds != provider.snapshot.Thresholds {
+		t.Fatalf("store thresholds=%+v want %+v", lister.got.Thresholds, provider.snapshot.Thresholds)
+	}
+	if !strings.Contains(rec.Body.String(), `"revision":8`) || !strings.Contains(rec.Body.String(), `"critical_days":4`) {
+		t.Fatalf("response missing same snapshot: %s", rec.Body.String())
+	}
+}
+
+func TestSummaryProviderFailureDoesNotSynthesizeDefaults(t *testing.T) {
+	provider := &fakeSummaryThresholdProvider{err: finance.ErrRunwayConfigUnavailable}
+	lister := &fakeSummaryLister{}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/finance/channels/summary", nil)
+	devHeaders(req, finance.ScopeRead)
+	rec := httptest.NewRecorder()
+	summaryProviderRouter(t, lister, provider).ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "critical_days") {
+		t.Fatalf("unexpected unavailable response: %d %s", rec.Code, rec.Body.String())
+	}
+	if lister.got.Environment != "" {
+		t.Fatal("store must not be called when threshold snapshot is unavailable")
 	}
 }
 

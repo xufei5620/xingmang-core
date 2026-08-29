@@ -23,6 +23,8 @@ func TestStatusForCode(t *testing.T) {
 		action.CodeNotRegistered:            http.StatusNotFound,
 		action.CodeAdvancedControlsRequired: http.StatusNotImplemented,
 		action.CodeExecutionFailed:          http.StatusBadGateway,
+		action.CodeRunwayConfigUnavailable:  http.StatusServiceUnavailable,
+		action.CodeRevisionConflict:         http.StatusConflict,
 		action.CodeInternal:                 http.StatusInternalServerError,
 		action.Code("SOMETHING_NEW"):        http.StatusInternalServerError,
 	} {
@@ -80,6 +82,20 @@ func TestWriteErrorNonActionErrorIsInternalAndOpaque(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got.Error.Code != string(action.CodeInternal) {
 		t.Fatalf("code = %q, want INTERNAL", got.Error.Code)
+	}
+}
+
+func TestWriteErrorMapsRunwayUnavailableWithoutLeakingCause(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/finance/runway-thresholds", nil)
+	cause := errors.New("pq: relation finance.runway_threshold_config at 10.0.0.4:5432 constraint secret")
+	WriteError(rec, req, action.NewError(action.CodeRunwayConfigUnavailable, "可用天数阈值配置暂不可用", cause))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "10.0.0.4") || strings.Contains(body, "constraint") || strings.Contains(body, "pq:") {
+		t.Fatalf("response leaked cause: %s", body)
 	}
 }
 

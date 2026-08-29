@@ -285,6 +285,23 @@ Webhook 那边更严：**整个 URL 可能就是凭据**（Slack / 飞书的 inc
 
 ---
 
+## Runway 阈值与影响预览（XM-C-RUNWAY0）
+
+R5 的可用天数分类现在由 `finance.RunwayThresholds.Classify` 统一提供：
+`days <= critical` 为 critical，`days <= warning` 为 warning，
+`days <= serious` 仅为展示关注色，超过 serious 为 healthy。`serious` 不会
+创建或投递 R5 通知；订阅型和余额未知对象也不会被编成告警。
+
+规则页 `/alerts?sub=rules` 读取 `finance.runway_threshold_config` 的 revision，
+并可对 proposed 三档做纯只读影响预览。预览把当前活跃 R5 与当前分类先做一致性
+检查（缺失、意外、严重度不匹配、重复），再报告将打开/升级/降级/恢复的对象；
+`evaluation_at` 与每个余额自己的 `observed_at` 分开显示。页面在 Foundation-B /
+C3c 之前不读取写权限、不展示提交按钮，也不发送 Action。
+
+worker 若注入 `RunwayThresholdProvider`，每轮评估只读取一次快照，并把
+`threshold_revision` 与三档整数写入 R5 detail，便于和 finance history 对账。
+配置缺行或读取失败时整轮 fail closed，不能用空结果把既有告警恢复掉。
+
 ## Foundation-A 边界
 
 规格 §9.3 列了 12 项生命周期能力。本档实现了其中 7 项：

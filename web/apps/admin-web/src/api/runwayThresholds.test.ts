@@ -53,7 +53,7 @@ describe("runway threshold API", () => {
         evaluation_at: "2026-08-29T02:00:00Z",
         coverage: { total: 2, known: 1, unknown_reasons: { no_balance: 1 } },
         counts: { would_open: 1, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 1 },
-        items: [{ account_id: "a", name: "Relay", days: 4, old_level: "warning", new_level: "critical", alert_transition: "would_escalate", consistency_reason: null, observed_at: "2026-08-29T01:00:00Z" }],
+        items: [{ account_id: "a", name: "Relay", days: 0, old_level: "critical", new_level: "critical", alert_transition: "unchanged", consistency_reason: null, observed_at: "2026-08-29T01:00:00Z" }],
         has_more: false,
       });
     });
@@ -65,5 +65,15 @@ describe("runway threshold API", () => {
     expect(url.searchParams.get("serious_days")).toBe("19");
     expect(preview.evaluationAt).not.toBe(preview.items[0]?.observedAt);
     expect(preview.counts.currentInconsistent).toBe(1);
+    expect(preview.items[0]?.days).toBe(0);
+  });
+
+  it("fails closed on malformed successful envelopes instead of inventing zero values", async () => {
+    const fetchImpl: FetchLike = vi.fn(async (input) => {
+      if (String(input).includes("/history")) return response({ has_more: false });
+      return response({ current: { critical_days: 5, warning_days: 10, serious_days: 20 }, proposed: { critical_days: 5, warning_days: 10, serious_days: 20 }, current_revision: 1, evaluation_at: "2026-08-29T00:00:00Z", coverage: { total: 0, known: 0, unknown_reasons: {} }, counts: { would_open: 0, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 0 }, items: [] });
+    });
+    await expect(listRunwayThresholdHistory({}, createApiClient({ config, fetchImpl }), config)).rejects.toThrow("items 数组");
+    await expect(previewRunwayThresholds({ criticalDays: 5, warningDays: 10, seriousDays: 20 }, {}, createApiClient({ config, fetchImpl }), config)).rejects.toThrow("has_more");
   });
 });

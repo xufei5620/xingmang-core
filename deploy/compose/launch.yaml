@@ -72,6 +72,28 @@ services:
       DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required, see deploy/compose/.env.example}
 
+  # --------------------------------------------------------------------------
+  # 一次性：Runway 阈值 bootstrap（仅 tools profile）
+  # --------------------------------------------------------------------------
+  # 把旧版 API/worker 的环境变量导入 finance current/history。它不参与普通
+  # `up`，也不覆盖已有不同配置；需要人工核对时显式运行一次即可。
+  runway-threshold-bootstrap:
+    profiles: ["tools"]
+    image: xingmang/migrate:${BUILD_VERSION:-staging}
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/usr/local/bin/runway-threshold-bootstrap"]
+    command: ["up"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      DATABASE_URL: postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable
+      DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      XM_FINANCE_RUNWAY_WARN_DAYS: ${XM_FINANCE_RUNWAY_WARN_DAYS:-}
+      XM_FINANCE_RUNWAY_CRIT_DAYS: ${XM_FINANCE_RUNWAY_CRIT_DAYS:-}
+
   # ==========================================================================
   # 一次性：Bootstrap 引导数据（Platform Lifecycle Operation，宪法 3 条）
   # ==========================================================================

@@ -7,7 +7,7 @@ export interface RunwayThresholdSnapshot {
   warningDays: number;
   seriousDays: number;
   revision: number;
-  source: "database" | string;
+  source: "database";
   updatedAt: string;
   updatedBy: string;
   reason: string;
@@ -131,23 +131,73 @@ interface RawPreview {
   has_more?: boolean;
 }
 
+function requiredInteger(value: number | undefined, field: string): number {
+  if (value === undefined || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`阈值响应缺少有效的 ${field}`);
+  }
+  return value;
+}
+
+function requiredNonNegativeInteger(value: number | undefined, field: string): number {
+  if (value === undefined || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`阈值响应缺少有效的 ${field}`);
+  }
+  return value;
+}
+
+function requiredString(value: string | undefined, field: string): string {
+  if (typeof value !== "string" || value.trim() === "") throw new Error(`阈值响应缺少有效的 ${field}`);
+  return value;
+}
+
+function requiredBoolean(value: boolean | undefined, field: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`阈值响应缺少有效的 ${field}`);
+  return value;
+}
+
+function requiredRecord(value: Record<string, number> | undefined, field: string): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`阈值响应缺少有效的 ${field}`);
+  for (const [key, count] of Object.entries(value)) {
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error(`阈值响应的 ${field}.${key} 无效`);
+  }
+  return value;
+}
+
+const TRANSITIONS: RunwayImpactTransition[] = [
+  "would_open", "would_escalate", "would_deescalate", "would_resolve", "unchanged", "current_inconsistent",
+];
+
+function requiredTransition(value: RunwayImpactTransition | undefined): RunwayImpactTransition {
+  if (!value || !TRANSITIONS.includes(value)) throw new Error("阈值预览响应包含未知影响类型");
+  return value;
+}
+
 function draft(raw: RawSnapshot | undefined): RunwayThresholdDraft {
-  return {
-    criticalDays: raw?.critical_days ?? 0,
-    warningDays: raw?.warning_days ?? 0,
-    seriousDays: raw?.serious_days ?? 0,
+  if (!raw) throw new Error("阈值响应缺少配置快照");
+  const values = {
+    criticalDays: requiredInteger(raw.critical_days, "critical_days"),
+    warningDays: requiredInteger(raw.warning_days, "warning_days"),
+    seriousDays: requiredInteger(raw.serious_days, "serious_days"),
   };
+  if (!(values.criticalDays < values.warningDays && values.warningDays < values.seriousDays)) {
+    throw new Error("阈值响应违反严格递增约束");
+  }
+  return values;
 }
 
 function snapshot(raw: RawSnapshot): RunwayThresholdSnapshot {
+  const values = draft(raw);
+  if (!raw.environment || raw.source !== "database" || !raw.updated_at || !raw.updated_by || !raw.reason || raw.revision === undefined || !Number.isSafeInteger(raw.revision) || raw.revision <= 0) {
+    throw new Error("阈值响应缺少完整的 revision/source/更新时间/变更证据");
+  }
   return {
     environment: raw.environment ?? "",
-    ...draft(raw),
-    revision: raw.revision ?? 0,
-    source: raw.source ?? "",
-    updatedAt: raw.updated_at ?? "",
-    updatedBy: raw.updated_by ?? "",
-    reason: raw.reason ?? "",
+    ...values,
+    revision: raw.revision,
+    source: raw.source,
+    updatedAt: raw.updated_at,
+    updatedBy: raw.updated_by,
+    reason: raw.reason,
   };
 }
 
@@ -179,20 +229,23 @@ export async function listRunwayThresholdHistory(
       ...(options.signal ? { signal: options.signal } : {}),
     },
   );
+  if (!body || typeof body !== "object") throw new Error("阈值历史响应不是对象");
+  const rawItems = body.items;
+  if (!Array.isArray(rawItems)) throw new Error("阈值历史响应缺少 items 数组");
   return {
-    hasMore: body.has_more ?? false,
-    items: (body.items ?? []).map((item) => ({
-      environment: item.environment ?? "",
-      revision: item.revision ?? 0,
-      criticalDays: item.critical_days ?? 0,
-      warningDays: item.warning_days ?? 0,
-      seriousDays: item.serious_days ?? 0,
-      changedAt: item.changed_at ?? "",
-      changedBy: item.changed_by ?? "",
-      reason: item.reason ?? "",
-      requestId: item.request_id ?? "",
-      changeSource: item.change_source ?? "",
+    items: rawItems.map((item) => ({
+      environment: requiredString(item.environment, "history.environment"),
+      revision: requiredInteger(item.revision, "history.revision"),
+      criticalDays: requiredInteger(item.critical_days, "history.critical_days"),
+      warningDays: requiredInteger(item.warning_days, "history.warning_days"),
+      seriousDays: requiredInteger(item.serious_days, "history.serious_days"),
+      changedAt: requiredString(item.changed_at, "history.changed_at"),
+      changedBy: requiredString(item.changed_by, "history.changed_by"),
+      reason: requiredString(item.reason, "history.reason"),
+      requestId: requiredString(item.request_id, "history.request_id"),
+      changeSource: requiredString(item.change_source, "history.change_source"),
     })),
+    hasMore: requiredBoolean(body.has_more, "history.has_more"),
   };
 }
 
@@ -212,37 +265,41 @@ export async function previewRunwayThresholds(
     },
     ...(options.signal ? { signal: options.signal } : {}),
   });
+  if (!body || typeof body !== "object" || !body.evaluation_at || body.current_revision === undefined || !Number.isSafeInteger(body.current_revision) || body.current_revision <= 0 || !body.coverage || !body.counts || !Array.isArray(body.items)) {
+    throw new Error("阈值预览响应缺少 evaluation_at、revision、coverage 或 counts");
+  }
   return {
     current: draft(body.current),
     proposed: draft(body.proposed),
-    currentRevision: body.current_revision ?? 0,
-    evaluationAt: body.evaluation_at ?? "",
-    coverage: {
-      total: body.coverage?.total ?? 0,
-      known: body.coverage?.known ?? 0,
-      unknownReasons: body.coverage?.unknown_reasons ?? {},
-    },
+    currentRevision: body.current_revision,
+    evaluationAt: body.evaluation_at,
+    coverage: (() => {
+      const total = requiredNonNegativeInteger(body.coverage.total, "coverage.total");
+      const known = requiredNonNegativeInteger(body.coverage.known, "coverage.known");
+      if (known > total) throw new Error("阈值预览响应的 coverage.known 超过 total");
+      return { total, known, unknownReasons: requiredRecord(body.coverage.unknown_reasons, "coverage.unknown_reasons") };
+    })(),
     counts: {
-      wouldOpen: body.counts?.would_open ?? 0,
-      wouldEscalate: body.counts?.would_escalate ?? 0,
-      wouldDeescalate: body.counts?.would_deescalate ?? 0,
-      wouldResolve: body.counts?.would_resolve ?? 0,
-      unchanged: body.counts?.unchanged ?? 0,
-      currentInconsistent: body.counts?.current_inconsistent ?? 0,
+      wouldOpen: requiredNonNegativeInteger(body.counts.would_open, "counts.would_open"),
+      wouldEscalate: requiredNonNegativeInteger(body.counts.would_escalate, "counts.would_escalate"),
+      wouldDeescalate: requiredNonNegativeInteger(body.counts.would_deescalate, "counts.would_deescalate"),
+      wouldResolve: requiredNonNegativeInteger(body.counts.would_resolve, "counts.would_resolve"),
+      unchanged: requiredNonNegativeInteger(body.counts.unchanged, "counts.unchanged"),
+      currentInconsistent: requiredNonNegativeInteger(body.counts.current_inconsistent, "counts.current_inconsistent"),
     },
-    items: (body.items ?? []).map((item) => ({
-      accountId: item.account_id ?? "",
-      name: item.name ?? "",
-      days: item.days ?? null,
+    items: body.items.map((item) => ({
+      accountId: requiredString(item.account_id, "items.account_id"),
+      name: requiredString(item.name, "items.name"),
+      days: item.days === null || item.days === undefined ? null : requiredNonNegativeInteger(item.days, "items.days"),
       oldLevel: item.old_level ?? "",
       newLevel: item.new_level ?? "",
       currentAlertSeverity: item.current_alert_severity ?? "",
       currentAlertStatus: item.current_alert_status ?? "",
-      alertCount: item.alert_count ?? 0,
-      transition: item.alert_transition ?? "unchanged",
+      alertCount: item.alert_count === undefined ? 0 : requiredNonNegativeInteger(item.alert_count, "items.alert_count"),
+      transition: requiredTransition(item.alert_transition),
       consistencyReason: item.consistency_reason ?? null,
       observedAt: item.observed_at ?? null,
     })),
-    hasMore: body.has_more ?? false,
+    hasMore: requiredBoolean(body.has_more, "preview.has_more"),
   };
 }

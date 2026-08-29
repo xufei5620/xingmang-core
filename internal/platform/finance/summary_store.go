@@ -210,12 +210,16 @@ func (s *SummaryStore) UpstreamRunways(
 	out := make([]UpstreamRunway, 0, len(accounts))
 	for _, account := range accounts {
 		balance := balancePtr(balances, account.ID)
+		runway, err := runwayFor(account, balance, recent[account.ID], thresholds, now)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, UpstreamRunway{
 			AccountID:    account.ID,
 			Name:         AccountDisplayName(account),
 			SystemType:   account.SystemType,
 			AccessMethod: account.AccessMethod,
-			Runway:       runwayFor(account, balance, recent[account.ID], thresholds, now),
+			Runway:       runway,
 		})
 	}
 	return out, nil
@@ -234,9 +238,9 @@ func (s *SummaryStore) runwayInputs(
 		return nil, nil, thresholds, time.Time{}, err
 	}
 	if err := thresholds.Validate(); err != nil {
-		// 调用方没给（或给错）阈值时回落到默认档，而不是让 levelFor
-		// 的兜底把所有渠道都判成 critical。
-		thresholds = DefaultRunwayThresholds()
+		// 运行时配置错误必须 fail closed；不能把数据库/provider 的错误
+		// 解释成默认档并继续给出看似可信的分类。
+		return nil, nil, thresholds, time.Time{}, err
 	}
 	return balances, recent, thresholds, s.now().UTC(), nil
 }
@@ -253,7 +257,7 @@ func balancePtr(balances map[uuid.UUID]BalanceReading, id uuid.UUID) *BalanceRea
 func runwayFor(
 	account UpstreamAccount, balance *BalanceReading,
 	cost recentCostRow, thresholds RunwayThresholds, now time.Time,
-) Runway {
+) (Runway, error) {
 	return ComputeRunway(RunwayInput{
 		AccessMethod: account.AccessMethod,
 		Balance:      balance,
@@ -305,7 +309,11 @@ func (s *SummaryStore) UpstreamSummaries(
 		}
 		// 与 UpstreamRunways 走同一段计算——看板上那个天数与告警判据上的
 		// 天数因此出自同一份代码。
-		item.Runway = runwayFor(account, item.Balance, recent[account.ID], thresholds, now)
+		runway, err := runwayFor(account, item.Balance, recent[account.ID], thresholds, now)
+		if err != nil {
+			return nil, err
+		}
+		item.Runway = runway
 		out = append(out, item)
 	}
 	return out, nil

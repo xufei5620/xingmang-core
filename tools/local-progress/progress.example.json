@@ -1,0 +1,16 @@
+{
+  "phase": "本地项目收尾",
+  "status": "working",
+  "statusLabel": "持续推进",
+  "statusTone": "",
+  "progress": 68,
+  "progressLabel": "已完成核心切片，正在回归",
+  "updatedAt": "2026-08-29T08:50:00+08:00",
+  "branch": "ai/codex/XM-LOCAL-project-completion",
+  "head": "d7917a6",
+  "commits": 72,
+  "checks": { "backend": "PASS · proxy-cleared", "frontend": "PASS · 927 tests", "storybook": "待运行", "governance": "待运行" },
+  "next": "运行 Storybook 构建与浏览器窄屏验收，随后继续安全可实现的运营切片。",
+  "timeline": [],
+  "changedFiles": []
+}

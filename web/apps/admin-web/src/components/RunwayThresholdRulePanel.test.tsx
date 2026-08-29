@@ -66,8 +66,33 @@ describe("RunwayThresholdRulePanel", () => {
     const result = await screen.findByText("预览结果");
     expect(result).toBeTruthy();
     const section = result.closest("section") as HTMLElement;
-    expect(within(section).getByText(/评估时间 2026-08-29T02:00:00Z/)).toBeTruthy();
-    expect(within(section).getByText("2026-08-29T01:00:00Z")).toBeTruthy();
+    expect(within(section).getByText(/评估时间 2026-08-29 02:00:00 UTC/)).toBeTruthy();
+    expect(within(section).getByText("2026-08-29 01:00:00 UTC")).toBeTruthy();
     await waitFor(() => expect(fetchImpl.mock.calls.some(([input]) => String(input).includes("/preview"))).toBe(true));
+  });
+
+  it("marks stale observations and gives a dedicated current-inconsistency warning", async () => {
+    const fetchImpl = vi.fn(async (input: string) => {
+      if (input.includes("/history")) return historyResponse();
+      if (input.includes("/preview")) return jsonResponse({
+        current: { critical_days: 5, warning_days: 10, serious_days: 20 },
+        proposed: { critical_days: 4, warning_days: 9, serious_days: 20 },
+        current_revision: 8, evaluation_at: "2026-08-29T04:00:00Z",
+        coverage: { total: 1, known: 1, unknown_reasons: {} },
+        counts: { would_open: 0, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 1 },
+        items: [{ account_id: "up-1", name: "Relay A", days: 0, old_level: "critical", new_level: "critical", alert_transition: "current_inconsistent", consistency_reason: "missing_active_alert", observed_at: "2026-08-29T01:00:00Z" }],
+        has_more: false,
+      });
+      return currentResponse();
+    });
+    renderPanel(fetchImpl as typeof fetch);
+    await screen.findByText("当前阈值快照");
+    fireEvent.change(screen.getByLabelText("Critical 天数"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "预览影响" }));
+    const result = await screen.findByText("预览结果");
+    const section = result.closest("section") as HTMLElement;
+    expect(within(section).getByText(/请先核查 Worker 评估任务/)).toBeTruthy();
+    expect(within(section).getByText("观测偏旧")).toBeTruthy();
+    expect(within(section).getByText(/当前分类已进入告警档/)).toBeTruthy();
   });
 });

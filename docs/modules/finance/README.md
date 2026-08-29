@@ -1139,6 +1139,23 @@ XM_FINANCE_RUNWAY_CRIT_DAYS   默认 5
 
 设置面 UI 后置。
 
+### Runway revision 快照（XM-C-RUNWAY0）
+
+本地收尾增加了 `finance.runway_threshold_config`（当前快照）和
+`finance.runway_threshold_history`（append-only 历史）。API 与 worker 在各自的
+请求/评估轮次读取同一个 `revision`；数据库缺行或读取失败时 fail closed，不再
+偷偷补 5/10/20。一次性导入仍通过 tools profile 的
+`runway-threshold-bootstrap` 生命周期命令完成，重复导入相同值幂等，已有不同值
+拒绝覆盖。只读端点为：
+
+- `GET /api/v1/finance/runway-thresholds`
+- `GET /api/v1/finance/runway-thresholds/history`
+- `GET /api/v1/finance/runway-thresholds/preview`
+
+规则页位于 `/alerts?sub=rules`，展示 current/history/preview，不在 C3c 之前提供
+写按钮或 manage scope。切换与回滚步骤见
+`docs/runbooks/SWITCH-RUNWAY-THRESHOLDS-TO-DB.md`。
+
 ---
 
 ## 相关文件
