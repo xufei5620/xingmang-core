@@ -105,6 +105,45 @@ export interface ListPlatformUsersOptions extends ListOptions {
  *  （internal/platform/platformusers/permissions.go）。 */
 export const USERS_READ_PERMISSION = "platform.users.read";
 
+/** 用户 ID 的 canonical 路径段前缀。
+ *
+ * 不能只靠 `encodeURIComponent`:它会把 `.` / `..` 原样留下，而浏览器会在
+ * React Router 看到前先做 dot-segment 归一化。统一加结构前缀并把 UTF-8 字节
+ * 编成小写 hex 后，任何合法结果都不可能等于 `.` 或 `..`，且与原 ID 双射。 */
+const USER_ID_SEGMENT_PREFIX = "u-";
+
+export function encodePlatformUserIdSegment(userId: string): string {
+  if (userId.length === 0) throw new Error("用户 ID 不能为空");
+  const bytes = new TextEncoder().encode(userId);
+  // TextEncoder 会把未配对代理项替换成 U+FFFD；那不是无损编码，必须拒绝。
+  if (new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== userId) {
+    throw new Error("用户 ID 不是可无损编码的 Unicode 字符串");
+  }
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${USER_ID_SEGMENT_PREFIX}${hex}`;
+}
+
+/** 严格解码 canonical 路径段；任何裸 ID、空 payload、非小写 hex 或非法 UTF-8
+ * 都返回 null，由路由在发起 platformusers Query 前 fail closed。 */
+export function decodePlatformUserIdSegment(segment: string): string | null {
+  if (!segment.startsWith(USER_ID_SEGMENT_PREFIX)) return null;
+  const hex = segment.slice(USER_ID_SEGMENT_PREFIX.length);
+  if (hex.length === 0 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(hex)) return null;
+
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+
+  try {
+    const userId = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (userId.length === 0 || encodePlatformUserIdSegment(userId) !== segment) return null;
+    return userId;
+  } catch {
+    return null;
+  }
+}
+
 /** 哪些平台有终端用户清单。
  *
  *  与后端 `platformusers.SupportsPlatform` 逐字对应。CPA 的「用户」是代理商
@@ -148,6 +187,87 @@ export async function listPlatformUsers(
     ...body,
     items: body.items ?? [],
   };
+}
+
+/** 详情页用的精确查找结果。
+ *
+ * `notFound` 只在服务端过滤结果已经彻底耗尽时出现；`incomplete` 表示搜索结果
+ * 仍可能在未扫描的游标后面，调用方必须显示「无法确认」，不能伪装成 404。 */
+export type PlatformUserLookupResult =
+  | {
+      kind: "found";
+      user: PlatformUserItem;
+      page: PlatformUserPage;
+      pagesScanned: number;
+    }
+  | { kind: "notFound"; pagesScanned: number }
+  | {
+      kind: "incomplete";
+      reason: "pageLimit" | "cursorCycle";
+      pagesScanned: number;
+      lastPage: PlatformUserPage;
+    };
+
+/** 单次按 ID 查找最多披露 5 × 200 条过滤结果。
+ *
+ * `200` 是 platformusers v1 的既有 MaxLimit；`5` 是详情深链的客户端扫描预算。
+ * 达到预算仍有游标时返回 `incomplete`，由页面明确提示并允许重试。这样既不把
+ * 一个模糊搜索结果误当目标，也不因未扫完就给出假的 Not Found。 */
+const USER_LOOKUP_PAGE_SIZE = 200;
+const USER_LOOKUP_MAX_PAGES = 5;
+
+export type LookupPlatformUserOptions = Pick<
+  ListPlatformUsersOptions,
+  "day" | "granularity" | "signal"
+>;
+
+/** 只用 platformusers v1 的列表 Query 按不透明 ID 精确查找一个用户。
+ *
+ * 后端的 `q` 同时匹配用户名 / ID / 令牌前缀，因此任何一页的第一条都不一定
+ * 是目标；唯一可接受的命中是 `item.id === userId`。 */
+export async function lookupPlatformUserExact(
+  platform: string,
+  userId: string,
+  options: LookupPlatformUserOptions = {},
+  client: ApiClient = apiClient,
+): Promise<PlatformUserLookupResult> {
+  let cursor = "";
+  const seenCursors = new Set<string>();
+
+  for (let pagesScanned = 1; pagesScanned <= USER_LOOKUP_MAX_PAGES; pagesScanned += 1) {
+    const page = await listPlatformUsers(
+      platform,
+      {
+        q: userId,
+        limit: USER_LOOKUP_PAGE_SIZE,
+        ...(cursor ? { cursor } : {}),
+        ...(options.day ? { day: options.day } : {}),
+        ...(options.granularity ? { granularity: options.granularity } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+      client,
+    );
+
+    const exact = page.items.find((item) => item.id === userId);
+    if (exact) return { kind: "found", user: exact, page, pagesScanned };
+
+    const nextCursor = page.next_cursor;
+    if (!nextCursor) return { kind: "notFound", pagesScanned };
+
+    if (seenCursors.has(nextCursor)) {
+      return { kind: "incomplete", reason: "cursorCycle", pagesScanned, lastPage: page };
+    }
+    if (pagesScanned === USER_LOOKUP_MAX_PAGES) {
+      return { kind: "incomplete", reason: "pageLimit", pagesScanned, lastPage: page };
+    }
+
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  // 循环上限是常量，运行时不可达；保留 fail-closed 分支，避免未来重构把
+  // `USER_LOOKUP_MAX_PAGES` 改成 0 后悄悄回落为 Not Found。
+  throw new Error("用户精确查找没有执行任何分页请求");
 }
 
 /** 状态的展示口径。

@@ -252,16 +252,51 @@ describe("表格列（原型逐列）", () => {
     expect(within(row as HTMLElement).getAllByText("—").length).toBeGreaterThanOrEqual(3);
   });
 
-  it("行尾详情箭头**不可点**，并说明详情页待上线", async () => {
-    // 画一个能点却点不动的箭头，是一句会落空的承诺
+  it("行尾详情动作是有可访问名称的 Link，整行本身不接管点击", async () => {
     stubFetch();
     renderPanel();
     await screen.findByText("张伟");
 
     const row = screen.getByText("张伟").closest("tr") as HTMLElement;
-    expect(within(row).getByText("详情页待上线")).toBeTruthy();
-    // 这一格里不该有按钮或链接
-    expect(within(row).queryByRole("link")).toBeNull();
+    const link = within(row).getByRole("link", { name: "查看 张伟 的用户详情" });
+    expect(link.getAttribute("href")).toBe("/platforms/sub2api/users/u-755f3130323431");
+    // 不把整行做成隐式点击区：键盘与读屏只遇到真正的 Link
+    expect(row.onclick).toBeNull();
+    expect(row.getAttribute("role")).not.toBe("link");
+  });
+
+  it("不透明用户 ID 在详情链接中只占一个 URL 编码段", async () => {
+    const opaqueId = "tenant/a?slot=#1% ready";
+    stubFetch(pageBody({ items: [userItem({ id: opaqueId, username: "Opaque" })] }));
+    renderPanel("newapi");
+
+    const link = await screen.findByRole("link", { name: "查看 Opaque 的用户详情" });
+    expect(link.getAttribute("href")).toBe(
+      "/platforms/newapi/users/u-74656e616e742f613f736c6f743d233125207265616479",
+    );
+  });
+
+  it("点段 ID 的 canonical link 不会被 URL 解析器折叠", async () => {
+    stubFetch(
+      pageBody({
+        items: [
+          userItem({ id: ".", username: "Dot" }),
+          userItem({ id: "..", username: "DotDot" }),
+        ],
+      }),
+    );
+    renderPanel();
+
+    const dot = (await screen.findByRole("link", {
+      name: "查看 Dot 的用户详情",
+    })) as HTMLAnchorElement;
+    const dotDot = screen.getByRole("link", {
+      name: "查看 DotDot 的用户详情",
+    }) as HTMLAnchorElement;
+    expect(dot.getAttribute("href")).toBe("/platforms/sub2api/users/u-2e");
+    expect(dotDot.getAttribute("href")).toBe("/platforms/sub2api/users/u-2e2e");
+    expect(new URL(dot.href).pathname).toBe("/platforms/sub2api/users/u-2e");
+    expect(new URL(dotDot.href).pathname).toBe("/platforms/sub2api/users/u-2e2e");
   });
 
   it("状态文案是原型的「正常 · 注意 · 停用」", async () => {

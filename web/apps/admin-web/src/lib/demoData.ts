@@ -17,7 +17,15 @@
  *  `reqlog-fake` 的赌注比另外两项高一档（XM-0039）：它挂的不是几个假数字，
  *  而是一整页编造的用户对话。真实 reqlog 实例叫 `reqlog-<环境>`，
  *  永远不会命中这一行。 */
-export const DEFAULT_DEMO_SOURCES = ["sub2api-staging", "newapi-staging", "reqlog-fake"];
+export const DEFAULT_DEMO_SOURCES = [
+  "sub2api-staging",
+  "newapi-staging",
+  "reqlog-fake",
+  // platformusers fake 的 Source 契约就是 `<platform>-fake`；详情页若漏掉这两项，
+  // 逐用户金额会与真实运营事实长得完全一样。
+  "sub2api-fake",
+  "newapi-fake",
+];
 
 /** 横幅文案。写死在这里而不是散在组件里：它是一句对外承诺的反面，
  *  改动应当显眼到能被 review 抓住。 */

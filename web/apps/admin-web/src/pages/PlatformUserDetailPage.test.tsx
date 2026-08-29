@@ -1,0 +1,327 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEMO_BANNER_TEXT } from "../lib/demoData";
+import { PlatformUserDetailPage } from "./PlatformUserDetailPage";
+
+function userItem(over: Record<string, unknown> = {}) {
+  return {
+    id: "u_10241",
+    username: "张伟",
+    email_masked: "zh***@example.com",
+    status: "active",
+    balance: { minor_units: "0", currency: "CNY" },
+    period_recharge: { minor_units: null, currency: "" },
+    period_consumed: { minor_units: "0", currency: "CNY" },
+    last_30d_consumed: { minor_units: "812000", currency: "CNY" },
+    last_active_at: "2026-08-28T09:00:00Z",
+    token_prefix: "tok-a1b2",
+    ...over,
+  };
+}
+
+function pageBody(over: Record<string, unknown> = {}) {
+  return {
+    items: [userItem()],
+    next_cursor: "",
+    total_count: { value: 1 },
+    total_balance: { minor_units: "0", currency: "CNY" },
+    active_today: { value: 1 },
+    period_totals: {
+      recharge: { minor_units: null, currency: "" },
+      consumed: { minor_units: "0", currency: "CNY" },
+      covered_users: 1,
+      total_users: 1,
+      complete: true,
+    },
+    period: { day: "2026-08-28", granularity: "day", from: "2026-08-28", to: "2026-08-28" },
+    data_source: "sub2api-fake",
+    freshness: {
+      state: "fresh",
+      staleness_seconds: 5,
+      threshold_seconds: 60,
+      is_partial: false,
+      observed_at: "2026-08-28T09:00:00Z",
+      last_success: "2026-08-28T09:00:00Z",
+      last_error_code: "",
+    },
+    ...over,
+  };
+}
+
+function fakeResponse(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response;
+}
+
+function stubFetch(handler: (url: string, init?: RequestInit) => Response = () => fakeResponse(pageBody())) {
+  const urls: string[] = [];
+  const fetchMock = vi.fn((input: string, init?: RequestInit) => {
+    const url = String(input);
+    urls.push(url);
+    return Promise.resolve(handler(url, init));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { urls, fetchMock };
+}
+
+function renderPage(path = "/platforms/sub2api/users/u-755f3130323431") {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[path]}>
+        <LocationProbe />
+        <Routes>
+          <Route
+            path="/platforms/:serviceType/users/:userId"
+            element={<PlatformUserDetailPage />}
+          />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
+}
+
+function tile(label: string): HTMLElement {
+  return screen.getByRole("heading", { name: label, level: 3 }).closest("article") as HTMLElement;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("用户详情共享事实（platformusers v1）", () => {
+  it("已知 0 与未知金额分开显示，并把来源、新鲜度与 Fake 横幅放在事实旁边", async () => {
+    stubFetch();
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "张伟", level: 2 })).toBeTruthy();
+    expect(within(tile("可用余额")).getByText("¥0.00")).toBeTruthy();
+    expect(within(tile("区间充值")).getByText("—")).toBeTruthy();
+    expect(within(tile("区间消费")).getByText("¥0.00")).toBeTruthy();
+    expect(within(tile("近 30 天消费")).getByText("¥8,120.00")).toBeTruthy();
+    expect(screen.getByText(DEMO_BANNER_TEXT)).toBeTruthy();
+    expect(screen.getByText(/来源 sub2api-fake/)).toBeTruthy();
+    expect(screen.getByText(/数据时间 2026-08-28 09:00:00 UTC/)).toBeTruthy();
+  });
+
+  it("统计区间沿用 day/granularity 参数，并显示服务端回显而非浏览器重算", async () => {
+    const { urls } = stubFetch(() =>
+      fakeResponse(
+        pageBody({
+          period: { day: "2026-08-27", granularity: "week", from: "2026-08-24", to: "2026-08-30" },
+        }),
+      ),
+    );
+    renderPage("/platforms/sub2api/users/u-755f3130323431?day=2026-08-27&granularity=week");
+
+    expect(await screen.findByText("2026-08-24 ~ 2026-08-30 · 按周查看")).toBeTruthy();
+    const request = new URL(urls[0] ?? "", "http://local.test");
+    expect(request.searchParams.get("day")).toBe("2026-08-27");
+    expect(request.searchParams.get("granularity")).toBe("week");
+    expect(request.searchParams.get("q")).toBe("u_10241");
+    expect(request.searchParams.get("limit")).toBe("200");
+  });
+
+  it("opaque route ID 解码后做精确查询，不产生路径穿越或默认用户回落", async () => {
+    const opaqueId = "tenant/a?slot=#1% ready";
+    const { urls } = stubFetch(() =>
+      fakeResponse(pageBody({ items: [userItem({ id: opaqueId, username: "Opaque" })] })),
+    );
+    renderPage(
+      "/platforms/newapi/users/u-74656e616e742f613f736c6f743d233125207265616479",
+    );
+
+    expect(await screen.findByRole("heading", { name: "Opaque", level: 2 })).toBeTruthy();
+    const request = new URL(urls[0] ?? "", "http://local.test");
+    expect(request.pathname).toBe("/api/v1/platforms/newapi/users");
+    expect(request.searchParams.get("q")).toBe(opaqueId);
+  });
+
+  it.each([
+    [".", "u-2e"],
+    ["..", "u-2e2e"],
+  ])("点段 ID %j 经 canonical segment 解码后精确查询", async (id, segment) => {
+    const { urls } = stubFetch(() =>
+      fakeResponse(pageBody({ items: [userItem({ id, username: "Dot User" })] })),
+    );
+    renderPage(`/platforms/sub2api/users/${segment}`);
+
+    expect(await screen.findByRole("heading", { name: "Dot User", level: 2 })).toBeTruthy();
+    const request = new URL(urls[0] ?? "", "http://local.test");
+    expect(request.searchParams.get("q")).toBe(id);
+  });
+
+  it("缺失/非法邮箱、未知状态与非法时间都显式说明", async () => {
+    stubFetch(() =>
+      fakeResponse(
+        pageBody({
+          items: [
+            userItem({
+              email_masked: "invalid-contact",
+              status: "mystery",
+              last_active_at: "not-a-time",
+            }),
+          ],
+        }),
+      ),
+    );
+    renderPage();
+
+    expect(await screen.findByText("格式不认识")).toBeTruthy();
+    // 页头与基本信息都会重复状态；金额未知徽章也同词，至少有一处状态证据即可
+    expect(screen.getAllByText("未知").length).toBeGreaterThan(0);
+    expect(screen.getByText(/时间格式异常/)).toBeTruthy();
+  });
+});
+
+describe("平台特有布局", () => {
+  it("Sub2API 顶部保留三块独立 unavailable，并用四个可点击子页签承载明细区", async () => {
+    stubFetch();
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "基本信息", level: 3 })).toBeTruthy();
+    expect(screen.getByText("tok-a1b2")).toBeTruthy();
+    for (const heading of ["客户类型", "注册时间", "近 7 天消费趋势"]) {
+      expect(screen.getByRole("heading", { name: heading, level: 3 })).toBeTruthy();
+    }
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "消费明细",
+      "充值记录",
+      "开票记录",
+      "API Key",
+    ]);
+    expect(screen.getByRole("tab", { name: "消费明细", selected: true })).toBeTruthy();
+    expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
+    expect(
+      within(screen.getByRole("tabpanel")).getByRole("heading", {
+        name: "消费明细",
+        level: 3,
+      }),
+    ).toBeTruthy();
+    expect(within(screen.getByRole("tabpanel")).getByText("未接入")).toBeTruthy();
+    expect(screen.getByText(/客户类型.*platformusers read contract v2/)).toBeTruthy();
+    expect(screen.getByText(/注册时间.*platformusers read contract v2/)).toBeTruthy();
+  });
+
+  it("Sub2API 子页签写入 ?sub=，可分享恢复且同一时刻只显示一个 unavailable panel", async () => {
+    stubFetch();
+    renderPage();
+    await screen.findByRole("tab", { name: "消费明细", selected: true });
+
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "开票记录" }), { button: 0 });
+
+    expect(screen.getByRole("tab", { name: "开票记录", selected: true })).toBeTruthy();
+    expect(screen.getByTestId("location").textContent).toBe(
+      "/platforms/sub2api/users/u-755f3130323431?sub=invoices",
+    );
+    const panel = screen.getByRole("tabpanel");
+    expect(within(panel).getByRole("heading", { name: "开票记录", level: 3 })).toBeTruthy();
+    expect(within(panel).getByText(/开票集成契约/)).toBeTruthy();
+    expect(within(panel).queryByRole("heading", { name: "消费明细", level: 3 })).toBeNull();
+  });
+
+  it("Sub2API 可从分享的 ?sub=keys 直接恢复 API Key unavailable panel", async () => {
+    stubFetch();
+    renderPage("/platforms/sub2api/users/u-755f3130323431?sub=keys");
+
+    expect(await screen.findByRole("tab", { name: "API Key", selected: true })).toBeTruthy();
+    expect(within(screen.getByRole("tabpanel")).getByText(/API Key 列表.*凭据边界/)).toBeTruthy();
+  });
+
+  it("NewAPI 只保留自己的区间请求 unavailable 面板，不复制 Sub2API 丰富区域", async () => {
+    stubFetch(() =>
+      fakeResponse(pageBody({ data_source: "newapi-fake" })),
+    );
+    renderPage("/platforms/newapi/users/u-755f3130323431");
+
+    expect(await screen.findByRole("heading", { name: "区间请求", level: 3 })).toBeTruthy();
+    expect(screen.getByText(/没有稳定的 platform-user ID 关联/)).toBeTruthy();
+    expect(screen.queryByRole("tab")).toBeNull();
+    for (const heading of ["消费明细", "充值记录", "开票记录", "API Key"]) {
+      expect(screen.queryByRole("heading", { name: heading, level: 3 })).toBeNull();
+    }
+  });
+});
+
+describe("查找状态与负向边界", () => {
+  it("过滤结果完整耗尽才显示 definite not-found", async () => {
+    stubFetch(() => fakeResponse(pageBody({ items: [userItem({ id: "u_10241-copy" })] })));
+    renderPage();
+
+    expect(await screen.findByText("没有这个用户")).toBeTruthy();
+    expect(screen.queryByText("无法确认用户是否存在")).toBeNull();
+  });
+
+  it("五页仍有游标时显示可重试的 incomplete，不误报没有这个用户", async () => {
+    let pageIndex = 0;
+    stubFetch(() => {
+      pageIndex += 1;
+      return fakeResponse(
+        pageBody({
+          items: [userItem({ id: `u_10241-copy-${pageIndex}` })],
+          next_cursor: `cursor-${pageIndex + 1}`,
+        }),
+      );
+    });
+    renderPage();
+
+    expect(await screen.findByText("无法确认用户是否存在")).toBeTruthy();
+    expect(screen.queryByText("没有这个用户")).toBeNull();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+  });
+
+  it("查询失败与 incomplete 使用不同状态，并允许重试可恢复错误", async () => {
+    stubFetch(() =>
+      fakeResponse({ error: { code: "EXECUTION_FAILED", message: "上游暂不可用" } }, 502),
+    );
+    renderPage();
+
+    expect(await screen.findByText("加载失败")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(screen.queryByText("无法确认用户是否存在")).toBeNull();
+  });
+
+  it("只调用 platformusers 列表 Query，不碰 reqlog/content/invoice/finance", async () => {
+    const { urls } = stubFetch();
+    renderPage("/platforms/newapi/users/u-755f3130323431");
+    await screen.findByRole("heading", { name: "张伟", level: 2 });
+
+    expect(urls.length).toBeGreaterThan(0);
+    for (const raw of urls) {
+      const url = new URL(raw, "http://local.test");
+      expect(url.pathname).toBe("/api/v1/platforms/newapi/users");
+      expect(url.pathname).not.toMatch(/requests|content|invoice|finance|reqlog/);
+    }
+    expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("incomplete 的重试会重新执行有界查找", async () => {
+    let calls = 0;
+    const { fetchMock } = stubFetch(() => {
+      calls += 1;
+      return fakeResponse(
+        pageBody({
+          items: [userItem({ id: `copy-${calls}` })],
+          next_cursor: `cursor-${calls + 1}`,
+        }),
+      );
+    });
+    renderPage();
+    await screen.findByText("无法确认用户是否存在");
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(5);
+  });
+});
