@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# 裸仓库 pre-receive：非快进一律拒绝；main 只能由受控 promote 标记推进。
+#
+# promote.sh（DEPLOY0-b）在服务器本地以受控身份创建 marker 文件，内容至少为
+#   sha=<目标 commit>
+# 然后再执行 git push。远端客户端无法通过 Git 协议设置本地环境变量或创建该
+# 文件，因此不能用一个可伪造的 push option 代替 marker。
+set -Eeuo pipefail
+umask 077
+export GIT_NO_REPLACE_OBJECTS=1
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+
+zero="0000000000000000000000000000000000000000"
+git_dir="$(git rev-parse --git-dir 2>/dev/null)" || {
+  echo "PRE-RECEIVE FAIL: 只能在 Git 裸仓库 receive 上下文运行" >&2
+  exit 1
+}
+case "$git_dir" in
+  /*) ;;
+  *) git_dir="$(cd -- "$git_dir" && pwd -P)" ;;
+esac
+if ! git --git-dir="$git_dir" rev-parse --is-bare-repository 2>/dev/null | grep -qx true; then
+  echo "PRE-RECEIVE FAIL: 目标必须是 Git 裸仓库" >&2
+  exit 1
+fi
+configured_marker="$(git --git-dir="$git_dir" config --get xm.receive.promoteMarker 2>/dev/null || true)"
+if [[ "$configured_marker" =~ ^[A-Za-z]:/ ]] && command -v cygpath >/dev/null 2>&1; then
+  configured_marker="$(cygpath -u "$configured_marker")"
+fi
+marker="${PRE_RECEIVE_PROMOTE_MARKER:-${configured_marker:-$git_dir/xm-promote.marker}}"
+case "$marker" in
+  /*) ;;
+  *) marker="$git_dir/$marker" ;;
+esac
+if [ -n "${PRE_RECEIVE_PROMOTE_MARKER:-}" ] && [ "${PRE_RECEIVE_ALLOW_MARKER_OVERRIDE:-0}" != "1" ]; then
+  echo "PRE-RECEIVE FAIL: promote marker 覆盖仅允许显式测试模式" >&2
+  exit 1
+fi
+case "$marker" in
+  *[!A-Za-z0-9_./-]*) echo "PRE-RECEIVE FAIL: promote marker 含非法字符" >&2; exit 1 ;;
+esac
+case "/$marker/" in
+  */../*|*/./*) echo "PRE-RECEIVE FAIL: promote marker 不得包含 . 或 .. 路径段" >&2; exit 1 ;;
+esac
+[ "$marker" != "/" ] || { echo "PRE-RECEIVE FAIL: promote marker 不能是根目录" >&2; exit 1; }
+[ ! -L "$marker" ] || { echo "PRE-RECEIVE FAIL: promote marker 不能是符号链接" >&2; exit 1; }
+if [ "${PRE_RECEIVE_ALLOW_MARKER_OVERRIDE:-0}" != "1" ]; then
+  git_dir_real="$(readlink -f -- "$git_dir" 2>/dev/null || true)"
+  marker_parent_real="$(readlink -f -- "$(dirname -- "$marker")" 2>/dev/null || true)"
+  [ -n "$git_dir_real" ] && [ "$marker_parent_real" = "$git_dir_real" ] || {
+    echo "PRE-RECEIVE FAIL: promote marker 必须位于裸仓库目录" >&2
+    exit 1
+  }
+fi
+marker_lock="${marker}.lock"
+marker_lock_acquired=0
+release_marker_lock() {
+  if [ "$marker_lock_acquired" -eq 1 ]; then
+    rmdir -- "$marker_lock" 2>/dev/null || true
+    marker_lock_acquired=0
+  fi
+}
+trap release_marker_lock EXIT
+
+errors=()
+main_new=""
+main_seen=0
+
+valid_sha() {
+  [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
+}
+
+while IFS=' ' read -r old new ref extra; do
+  # 空行不属于 receive 协议；额外字段通常意味着恶意/损坏输入。
+  if [ -z "${old:-}" ] && [ -z "${new:-}" ] && [ -z "${ref:-}" ]; then
+    continue
+  fi
+  if [ -n "${extra:-}" ] || [ -z "${old:-}" ] || [ -z "${new:-}" ] || [ -z "${ref:-}" ]; then
+    errors+=("格式非法：每行必须是 <old> <new> <ref>")
+    continue
+  fi
+  if ! valid_sha "$old" || ! valid_sha "$new"; then
+    errors+=("$ref 的对象 SHA 非法")
+    continue
+  fi
+  if ! git check-ref-format "$ref" >/dev/null 2>&1 || [[ "$ref" != refs/heads/* ]]; then
+    errors+=("拒绝非法 ref：$ref")
+    continue
+  fi
+  # 删除 refs 会绕过审计与部署状态，服务器端统一拒绝；需要删除时由产品负责人
+  # 走后续受控运维流程，而不是普通 push。
+  if [ "$new" = "$zero" ]; then
+    errors+=("拒绝删除 ref：$ref")
+    continue
+  fi
+  if [ "$(git cat-file -t "$new" 2>/dev/null || true)" != "commit" ]; then
+    errors+=("$ref 的新对象不是已存在的 commit")
+    continue
+  fi
+  current_ref="$(git --git-dir="$git_dir" rev-parse --verify "$ref" 2>/dev/null || true)"
+  if [ "$old" = "$zero" ]; then
+    [ -z "$current_ref" ] || errors+=("$ref 已存在，拒绝把新建推送当作替换")
+  elif [ "${current_ref,,}" != "${old,,}" ]; then
+    errors+=("$ref 的旧对象已变化，拒绝过期推送")
+  fi
+  if [ "$old" != "$zero" ]; then
+    if [ "$(git cat-file -t "$old" 2>/dev/null || true)" != "commit" ]; then
+      errors+=("$ref 的旧对象不存在：$old")
+      continue
+    fi
+    if ! git merge-base --is-ancestor "$old" "$new" >/dev/null 2>&1; then
+      errors+=("拒绝非快进更新：$ref ($old -> $new)")
+      continue
+    fi
+  fi
+  if [ "$ref" = "refs/heads/main" ]; then
+    if [ "$main_seen" -eq 1 ]; then
+      errors+=("一次 push 不允许包含多个 main 更新")
+    else
+      main_seen=1
+      main_new="$new"
+    fi
+  fi
+done
+
+if [ "$main_seen" -eq 1 ]; then
+  if ! mkdir -- "$marker_lock" 2>/dev/null; then
+    errors+=("main promote 正在由另一个 receive 处理")
+  else
+    marker_lock_acquired=1
+  fi
+  if [ "$marker_lock_acquired" -eq 1 ] && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
+    errors+=("main 只能通过 promote：缺少本地 promote marker")
+  elif [ "$marker_lock_acquired" -eq 1 ]; then
+    mapfile -t marker_lines < "$marker" || marker_lines=()
+    marked_sha=""
+    if [ "${#marker_lines[@]}" -ne 1 ] || [[ "${marker_lines[0]:-}" != sha=* ]]; then
+      errors+=("promote marker 格式必须只有一行 sha=<commit>")
+    else
+      marked_sha="${marker_lines[0]#sha=}"
+    fi
+    if ! valid_sha "$marked_sha" || [ "${marked_sha,,}" != "${main_new,,}" ]; then
+      errors+=("promote marker 与 main 目标 commit 不匹配")
+    fi
+  fi
+fi
+
+if [ "${#errors[@]}" -gt 0 ]; then
+  printf 'PRE-RECEIVE FAIL: %s\n' "${errors[@]}" >&2
+  exit 1
+fi
+
+if [ "$main_seen" -eq 1 ]; then
+  rm -f -- "$marker" || {
+    echo "PRE-RECEIVE FAIL: 无法消费 promote marker，拒绝 main 更新" >&2
+    exit 1
+  }
+  [ ! -e "$marker" ] || { echo "PRE-RECEIVE FAIL: promote marker 未被消费" >&2; exit 1; }
+fi
+
+if [ "$main_seen" -eq 1 ]; then
+  echo "PRE-RECEIVE PASS: fast-forward refs accepted; promote-authorized main"
+else
+  echo "PRE-RECEIVE PASS: fast-forward refs accepted"
+fi
