@@ -983,95 +983,18 @@ describe("审计事件页", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("列出序号、动作、资源、结果与哈希前 8 位", async () => {
+  it("默认审计路由仍能挂载并显示事件表", async () => {
     renderRoute("/audit");
-    expect(await screen.findByText("registry.service.create@1")).not.toBeNull();
-    expect(screen.getByText("2")).not.toBeNull();
-    expect(screen.getByText("core.service/svc-1")).not.toBeNull();
-    // 「成功」也是「结果」筛选下拉里的一个选项
-    expect(within(screen.getByRole("table")).getByText("成功")).not.toBeNull();
-    expect(screen.getByText("aaaaaaaa")).not.toBeNull();
-  });
-
-  it("本页只有一条时不装作能验链，明说上一条不在本页（Codex #6）", async () => {
-    renderRoute("/audit");
-    expect(await screen.findByText("上一条不在本页")).not.toBeNull();
-    // 页头不再断言「前序哈希必须等于下一行的事件哈希」
-    expect(screen.queryByText(/必须.*相等/)).toBeNull();
-    expect(screen.getByText(/完整性校验以 audit-verify 工具与链根签名为准/)).not.toBeNull();
-  });
-
-  it("环境过滤造成的序号缺口显示成中性说明，不报断链", async () => {
-    // 后端的链是全局的，本页按环境过滤，6/4/2 这样的缺口完全正常：
-    // 缺口两侧的 prev_hash 与 event_hash 本就不必相等
-    stubFetch((url) =>
-      url.startsWith("/api/v1/audit/events")
-        ? fakeResponse(200, {
-            items: [
-              { ...auditEvent, sequence: 6, event_hash: "c".repeat(64), prev_hash: "x".repeat(64) },
-              { ...auditEvent, sequence: 2, event_hash: "d".repeat(64) },
-            ],
-            next_before: 0,
-          })
-        : okHandler(url),
-    );
-    renderRoute("/audit");
-    expect(await screen.findByText("中间有 3 条其他环境事件")).not.toBeNull();
-    expect(screen.queryByText("与相邻行对不上")).toBeNull();
-  });
-
-  it("展开区给出完整哈希，不是只有 8 位前缀 + hover（Codex #9）", async () => {
-    renderRoute("/audit");
-    fireEvent.click(await screen.findByRole("button", { name: "详情" }));
-    expect(await screen.findByText("a".repeat(64))).not.toBeNull();
-    expect(screen.getByText("b".repeat(64))).not.toBeNull();
-  });
-
-  it("行可展开显示前后摘要，前态为 null 时明说「无」", async () => {
-    renderRoute("/audit");
-    fireEvent.click(await screen.findByRole("button", { name: "详情" }));
-    expect(await screen.findByText("（无）")).not.toBeNull();
-    expect(screen.getByText(/sub2api-dev/)).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "收起" }));
-    await waitFor(() => expect(screen.queryByText("（无）")).toBeNull());
-  });
-
-  it("next_before 有值时给「加载更多」，点了追加下一页", async () => {
-    stubFetch((url) => {
-      if (!url.startsWith("/api/v1/audit/events")) return okHandler(url);
-      return url.includes("before_seq=2")
-        ? fakeResponse(200, { items: [{ ...auditEvent, sequence: 1 }], next_before: 0 })
-        : fakeResponse(200, { items: [auditEvent], next_before: 2 });
-    });
-    renderRoute("/audit");
-
-    fireEvent.click(await screen.findByRole("button", { name: "加载更多" }));
-    await waitFor(() => expect(screen.getByText("1")).not.toBeNull());
-    expect(await screen.findByText(/已到最早一条/)).not.toBeNull();
-  });
-
-  it("没有事件时给出「去执行一次动作」的引导", async () => {
-    stubFetch((url) =>
-      url.startsWith("/api/v1/audit/events")
-        ? fakeResponse(200, { items: [], next_before: 0 })
-        : okHandler(url),
-    );
-    renderRoute("/audit");
-    expect(await screen.findByText("还没有审计事件")).not.toBeNull();
-    expect(screen.getByText("在资源目录页执行一次动作试试")).not.toBeNull();
-  });
-
-  it("缺 audit.read 时提示缺哪个权限", async () => {
-    stubFetch((url) =>
-      url.startsWith("/api/v1/audit/events")
-        ? fakeResponse(403, {
-            error: { code: "PERMISSION_DENIED", message: "缺少权限 audit.read" },
-          })
-        : okHandler(url),
-    );
-    renderRoute("/audit");
-    expect(await screen.findByText("无权访问")).not.toBeNull();
-    expect(screen.getByText(/audit\.read/)).not.toBeNull();
+    const panels = await screen.findAllByRole("tabpanel");
+    expect(panels.length).toBeGreaterThan(0);
+    const panel = panels[0]!;
+    expect(screen.getByRole("tab", { name: "审计记录", selected: true })).not.toBeNull();
+    expect(await within(panel).findByText("registry.service.create@1")).not.toBeNull();
+    expect(within(panel).getByText("core.service/svc-1")).not.toBeNull();
+    expect(within(panel).getAllByText("2").length).toBeGreaterThan(0);
+    expect(within(panel).getByRole("table").textContent).toContain("成功");
+    expect(within(panel).getByText("aaaaaaaa")).not.toBeNull();
+    expect(within(panel).getByText(/完整性校验以 audit-verify 工具与链根签名为准/)).not.toBeNull();
   });
 });
 

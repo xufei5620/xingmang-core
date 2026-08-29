@@ -1,11 +1,13 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import {
+  DataTableV2,
+  navItemByPath,
   navLabel,
   PageHeader,
   PageState,
   type DataTableColumn,
 } from "@xingmang/ui-admin";
-import { Badge, Button } from "@xingmang/ui-primitives";
+import { Badge, Button, Tabs } from "@xingmang/ui-primitives";
 import { AUDIT_PAGE_SIZE, listAuditEvents, type AuditEventItem } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
 import { PersistentDataTable, SAVED_VIEW_TABLE_KEYS } from "../components/PersistentDataTable";
@@ -16,6 +18,11 @@ import {
   toAuditRow,
   type ChainLink,
 } from "../lib/audit";
+import { Link, useSearchParams } from "react-router";
+
+const AUDIT_SUB_TABS = (navItemByPath("/audit")?.item.subTabs ?? []).map(
+  (tab) => [tab.id, tab.label] as const,
+);
 
 /** 审计事件页（规格 §4.4 / ADR-013：哈希链）。
  *
@@ -25,6 +32,60 @@ import {
  *  本页根本算不出 hash。所以：序号真的相邻时才做比对，其余情形只如实说明，
  *  完整校验以 audit-verify 工具与链根签名为准。 */
 export function AuditPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawSub = searchParams.get("sub");
+  const activeSub = rawSub === null || rawSub.trim() === "" ? "events" : rawSub;
+  const known = AUDIT_SUB_TABS.some(([value]) => value === activeSub);
+
+  if (!known) {
+    return (
+      <section>
+        <PageHeader
+          title={navLabel("/audit")}
+          description="审计记录、操作证据与审计链验证分开呈现；未知子页不会回落到事件列表。"
+        />
+        <PageState
+          kind="unavailable"
+          title={`「${rawSub}」子页尚未接入`}
+          description="请从已定义的审计子页中选择；系统不会把未知地址误当成审计事件。"
+          action={
+            <Link
+              to="/audit?sub=events"
+              className="text-sm font-medium text-accent hover:underline"
+            >
+              返回审计记录
+            </Link>
+          }
+        />
+      </section>
+    );
+  }
+
+  const selectSub = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("sub", value);
+    setSearchParams(next, { replace: true });
+  };
+
+  return (
+    <Tabs
+      value={activeSub}
+      onValueChange={selectSub}
+      items={AUDIT_SUB_TABS.map(([value, label]) => ({
+        value,
+        label,
+        content:
+          value === "events" ? (
+            <AuditEventsPage />
+          ) : (
+            <AuditUnavailablePage tabId={value} label={label} />
+          ),
+      }))}
+    />
+  );
+}
+
+function AuditEventsPage() {
   const query = useInfiniteQuery({
     queryKey: ["audit-events"],
     queryFn: ({ signal, pageParam }) =>
@@ -61,6 +122,32 @@ export function AuditPage() {
           onLoadMore={() => void query.fetchNextPage()}
         />
       </ApiStateView>
+    </section>
+  );
+}
+
+function AuditUnavailablePage({ tabId, label }: { tabId: string; label: string }) {
+  const chainOnly = tabId === "chain";
+  return (
+    <section>
+      <PageHeader
+        title={label}
+        description={
+          chainOnly
+            ? "审计链验证属于受控 CLI 校验，不在浏览器请求链中执行全链扫描。"
+            : "操作证据的归档与检索尚未接入控制台，本页不连接对象存储，也不创建或修改任何记录。"
+        }
+      />
+      <PageState
+        kind="unavailable"
+        title={chainOnly ? "审计链验证仅支持 CLI" : "操作证据尚未接入"}
+        description={
+          chainOnly
+            ? "当前页面只展示审计事件；完整性校验请在受控环境运行 audit-verify，并核对链根签名。"
+            : "目前可用的操作证据仍以审计事件中的前后摘要与 request_id 为准；对象、manifest 与冷读接口尚未建立。"
+        }
+        footnote={chainOnly ? "audit-verify（CLI-only）" : "UI-only read surface · no object-store access"}
+      />
     </section>
   );
 }
