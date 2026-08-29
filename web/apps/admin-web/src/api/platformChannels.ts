@@ -161,4 +161,3 @@ export async function listPlatformChannels(
 export function platformChannelRowKey(row: PlatformChannelRow): string {
   return `${row.channelRef.serviceId}:${row.channelRef.externalChannelId}`;
 }
-

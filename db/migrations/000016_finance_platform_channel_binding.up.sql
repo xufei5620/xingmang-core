@@ -42,4 +42,3 @@ CREATE UNIQUE INDEX platform_channel_binding_start_key
 
 CREATE INDEX platform_channel_binding_upstream_history_idx
   ON finance.platform_channel_binding(upstream_account_id, valid_from, valid_to);
-

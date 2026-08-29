@@ -10,4 +10,3 @@ missing balances never make the identity directory incomplete. The legacy balanc
 metric remain a pure projection that omits null-balance rows and marks that projection partial.
 
 This contract adds no write method and no credential-shaped field.
-

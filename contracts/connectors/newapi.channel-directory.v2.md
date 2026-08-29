@@ -8,4 +8,3 @@ be true when error-rate coverage is incomplete while the identity directory is c
 `reported_count: null` means the upstream did not report a total; `0` means it explicitly reported
 zero. The v2 envelope adds no write method, credential field, model-name guarantee, or assurance
 claim.
-

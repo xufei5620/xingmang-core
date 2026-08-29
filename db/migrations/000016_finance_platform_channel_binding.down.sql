@@ -2,4 +2,3 @@
 DROP TABLE IF EXISTS finance.platform_channel_binding;
 DROP INDEX IF EXISTS finance.upstream_account_id_environment_key;
 DROP INDEX IF EXISTS core.service_id_environment_key;
-
