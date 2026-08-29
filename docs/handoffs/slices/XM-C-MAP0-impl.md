@@ -9,7 +9,7 @@ READY
 - branch: `ai/codex/XM-C-MAP0-impl`
 - worktree: `K:/星芒统一控制平台/wt-xmC-MAP0-impl`
 - base: `e98080d` (`release/v0.1-launch`, 当前 D0-b 合入头)
-- implementation head: `2dbf709`
+- implementation head: `5f3ac1c`（含最终 EOF 空白规范化）
 - spec approval: `c882507`（XM-C-MAP0 docs-only approval）
 - migration: `000016_finance_platform_channel_binding`；`000015` 预留给并行
   B003a SavedView slice，故本片保持连续后的 000016，不假设 000013 空闲。
@@ -96,7 +96,7 @@ READY
 - `GOVERNANCE_BASE_REF=release/v0.1-launch GOVERNANCE_REQUIRE_BASE=1
   bash scripts/check-governance.sh`（Git Bash）— exit 0
 - `gitleaks.exe git --redact --no-banner --log-opts='e98080d..HEAD'` — PASS（no leaks found）
-- `git diff --check` — PASS
+- `git diff --check release/v0.1-launch..HEAD` — PASS（最终 head `5f3ac1c`）
 - `git diff --name-status release/v0.1-launch..HEAD` — 无删除；仅列上述 MAP connector/
   binding/projection/UI/docs 文件，未带 USER0、SavedView 或 D0 资产越界变更。
 
@@ -116,5 +116,5 @@ READY
 - `TokenEvidence` 现在带 active service count 与 system type，仍需真实目录/服务数据
   才能形成 candidate；production 不自动确认。
 - 迁移 000016 只建表/约束/索引，不插入存量 binding；生产回滚遵循 forward-only 纪律。
-- 验收线需审读本 Handoff 与 `e98080d..2dbf709` 差异，复跑门禁后再合入 release；
+- 验收线需审读本 Handoff 与 `e98080d..5f3ac1c` 差异，复跑门禁后再合入 release；
   本片没有 merge 或 deploy 权限。
