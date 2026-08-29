@@ -13,9 +13,9 @@ import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { assuranceSubTab } from "../components/PlatformAssurancePanel";
 import { financeSubTab } from "../components/PlatformFinancePanel";
-import { PlatformUsersPanel } from "../components/PlatformUsersPanel";
 import { PlatformAlertsPanel } from "../components/PlatformAlertsPanel";
 import { PlatformCredentialsPanel } from "../components/PlatformCredentialsPanel";
+import { PlatformUsersPanel } from "../components/PlatformUsersPanel";
 import {
   PlatformOverviewPanel,
   platformHasPrototypeOverview,
@@ -160,6 +160,7 @@ function PlatformBody({
 
   return (
     <Tabs
+      ariaLabel="平台主页签"
       value={activeTab}
       onValueChange={onTabChange}
       items={tabs.map((tab) => ({
@@ -202,6 +203,7 @@ function TabBody({
 
   return (
     <Tabs
+      ariaLabel={`${tab.label}子页签`}
       value={active}
       onValueChange={onSubChange}
       items={tab.subTabs.map((sub) => ({
@@ -342,4 +344,3 @@ function fallbackTabContent(entry: PlatformEntry, tab: PlatformTabSpec): ReactNo
   if (blueprint) return <BlueprintTabView tab={blueprint} />;
   return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
 }
-

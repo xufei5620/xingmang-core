@@ -14,7 +14,7 @@ import {
 import { SERVER_BLUEPRINT } from "./server";
 import type { BlueprintPage, BlueprintTab } from "./types";
 
-export type { BlueprintPage, BlueprintTab } from "./types";
+export type { BlueprintLink, BlueprintPage, BlueprintTab } from "./types";
 export { BlueprintBanner, BlueprintTabView, BlueprintTiles } from "./BlueprintView";
 
 /** 侧栏路径 → 蓝图页。
