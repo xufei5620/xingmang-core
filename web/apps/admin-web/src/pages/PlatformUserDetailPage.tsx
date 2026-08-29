@@ -22,7 +22,7 @@ import {
   type PlatformUserLookupResult,
 } from "../api/users";
 import { ApiStateView } from "../components/ApiStateView";
-import { PeriodControls } from "../components/PeriodControls";
+import { PeriodControls } from "@xingmang/ui-admin";
 import { appDemoDataConfig, DEMO_BANNER_TEXT, shouldShowDemoBanner } from "../lib/demoData";
 import { formatMinorUnits } from "../lib/money";
 import { parseBusinessDay, parseGranularity } from "../lib/period";

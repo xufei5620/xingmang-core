@@ -26,6 +26,10 @@ function account(): UpstreamAccountItem {
     token_mappings: [],
     created_at: "2026-08-01T00:00:00Z",
     updated_at: "2026-08-28T09:00:00Z",
+    upstream_name: "",
+    upstream_contact: "",
+    upstream_group: "",
+    group_rate: "",
   };
 }
 
