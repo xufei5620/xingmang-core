@@ -1,8 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # 安装自托管 Git 裸仓库、receive hooks 与 CI 目录。
 # 只接受显式绝对路径；实际写入必须传 --confirm。脚本不接受任何凭据参数。
 set -Eeuo pipefail
 umask 077
+if [ -x /usr/bin/git ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH \
+  NODE_OPTIONS PYTHONPATH RUBYOPT PERL5OPT CDPATH
 
 usage() {
   cat >&2 <<'USAGE'
@@ -83,7 +88,7 @@ fi
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "INSTALL FAIL: 缺少系统命令 $1" >&2; return 1; }
 }
-for cmd in id getent useradd usermod install git chown chmod mv sha256sum; do
+for cmd in id getent useradd usermod install git chown chmod mv sha256sum stat; do
   need_cmd "$cmd"
 done
 
@@ -145,6 +150,9 @@ git --git-dir="$repo_path" config xm.ci.scriptSha256 "$ci_script_sha256"
 git --git-dir="$repo_path" config xm.ci.baseRef "origin/main"
 git --git-dir="$repo_path" config xm.ci.requireBase true
 git --git-dir="$repo_path" config xm.receive.promoteMarker "$repo_path/xm-promote.marker"
+# main 晋级必须由 promote.sh 持有独立授权锁；pre-receive 会校验锁内 PID
+# 仍是 promote.sh，避免另一个本地推送者抢先消费 marker。
+git --git-dir="$repo_path" config xm.receive.requirePromoteLock true
 # 不对整个 ci-dir 做递归 chown：它可能包含已有日志/状态或管理员文件。
 # 只接管裸仓库与本安装创建的工作目录/可信脚本，避免误伤目录外的资产。
 chown -R "$git_user:$git_group" "$repo_path"

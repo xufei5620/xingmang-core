@@ -1,20 +1,32 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # 裸仓库 pre-receive：非快进一律拒绝；main 只能由受控 promote 标记推进。
 #
-# promote.sh（DEPLOY0-b）在服务器本地以受控身份创建 marker 文件，内容至少为
+# promote.sh（DEPLOY0-b）在服务器本地以受控身份创建 marker 文件，内容为
 #   sha=<目标 commit>
-# 然后再执行 git push。远端客户端无法通过 Git 协议设置本地环境变量或创建该
-# 文件，因此不能用一个可伪造的 push option 代替 marker。
+# 并持有 `${marker}.promote.lock`（PID + SHA），然后再执行 git push。远端客户端
+# 无法通过 Git 协议创建该受控锁，因此不能只靠伪造一个 push 请求绕过晋级闸门。
 set -Eeuo pipefail
 umask 077
-export GIT_NO_REPLACE_OBJECTS=1
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
-
-zero="0000000000000000000000000000000000000000"
-git_dir="$(git rev-parse --git-dir 2>/dev/null)" || {
+if [ "${PRE_RECEIVE_ALLOW_MARKER_OVERRIDE:-0}" != "1" ] && [ -x /usr/bin/git ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+initial_git_dir="$(git rev-parse --git-dir 2>/dev/null || true)"
+[ -n "$initial_git_dir" ] || {
   echo "PRE-RECEIVE FAIL: 只能在 Git 裸仓库 receive 上下文运行" >&2
   exit 1
 }
+export GIT_NO_REPLACE_OBJECTS=1
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
+  GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_SSH_COMMAND GIT_PROXY_COMMAND GIT_ASKPASS
+unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH \
+  NODE_OPTIONS PYTHONPATH RUBYOPT PERL5OPT CDPATH
+export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent
+if [ "${PRE_RECEIVE_ALLOW_MARKER_OVERRIDE:-0}" != "1" ] && [ -x /usr/bin/git ]; then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+
+zero="0000000000000000000000000000000000000000"
+git_dir="$initial_git_dir"
 case "$git_dir" in
   /*) ;;
   *) git_dir="$(cd -- "$git_dir" && pwd -P)" ;;
@@ -24,6 +36,12 @@ if ! git --git-dir="$git_dir" rev-parse --is-bare-repository 2>/dev/null | grep 
   exit 1
 fi
 configured_marker="$(git --git-dir="$git_dir" config --get xm.receive.promoteMarker 2>/dev/null || true)"
+require_promote_lock="$(git --git-dir="$git_dir" config --get xm.receive.requirePromoteLock 2>/dev/null || true)"
+if [ "${PRE_RECEIVE_ALLOW_MARKER_OVERRIDE:-0}" != "1" ]; then
+  # 生产始终要求 promote.sh 授权锁；配置缺失或被改成 false 也不能退回
+  # marker-only 模式。只有显式测试开关才能运行旧 marker-only 夹具。
+  require_promote_lock=true
+fi
 if [[ "$configured_marker" =~ ^[A-Za-z]:/ ]] && command -v cygpath >/dev/null 2>&1; then
   configured_marker="$(cygpath -u "$configured_marker")"
 fi
@@ -83,7 +101,7 @@ while IFS=' ' read -r old new ref extra; do
     errors+=("$ref 的对象 SHA 非法")
     continue
   fi
-  if ! git check-ref-format "$ref" >/dev/null 2>&1 || [[ "$ref" != refs/heads/* ]]; then
+  if ! git --git-dir="$git_dir" check-ref-format "$ref" >/dev/null 2>&1 || [[ "$ref" != refs/heads/* ]]; then
     errors+=("拒绝非法 ref：$ref")
     continue
   fi
@@ -93,7 +111,7 @@ while IFS=' ' read -r old new ref extra; do
     errors+=("拒绝删除 ref：$ref")
     continue
   fi
-  if [ "$(git cat-file -t "$new" 2>/dev/null || true)" != "commit" ]; then
+  if [ "$(git --git-dir="$git_dir" cat-file -t "$new" 2>/dev/null || true)" != "commit" ]; then
     errors+=("$ref 的新对象不是已存在的 commit")
     continue
   fi
@@ -104,11 +122,11 @@ while IFS=' ' read -r old new ref extra; do
     errors+=("$ref 的旧对象已变化，拒绝过期推送")
   fi
   if [ "$old" != "$zero" ]; then
-    if [ "$(git cat-file -t "$old" 2>/dev/null || true)" != "commit" ]; then
+    if [ "$(git --git-dir="$git_dir" cat-file -t "$old" 2>/dev/null || true)" != "commit" ]; then
       errors+=("$ref 的旧对象不存在：$old")
       continue
     fi
-    if ! git merge-base --is-ancestor "$old" "$new" >/dev/null 2>&1; then
+    if ! git --git-dir="$git_dir" merge-base --is-ancestor "$old" "$new" >/dev/null 2>&1; then
       errors+=("拒绝非快进更新：$ref ($old -> $new)")
       continue
     fi
@@ -124,6 +142,31 @@ while IFS=' ' read -r old new ref extra; do
 done
 
 if [ "$main_seen" -eq 1 ]; then
+  if [ "$require_promote_lock" = "true" ]; then
+    promote_lock="${marker}.promote.lock"
+    promote_pid_file="$promote_lock/pid"
+    promote_sha_file="$promote_lock/sha"
+    [ -d "$promote_lock" ] && [ ! -L "$promote_lock" ] || errors+=("main 必须由受控 promote 脚本持有授权锁")
+    [ -f "$promote_pid_file" ] && [ ! -L "$promote_pid_file" ] || errors+=("promote 授权锁缺少 pid")
+    [ -f "$promote_sha_file" ] && [ ! -L "$promote_sha_file" ] || errors+=("promote 授权锁缺少 sha")
+    if [ -f "$promote_pid_file" ] && [ -f "$promote_sha_file" ]; then
+      promote_pid="$(cat "$promote_pid_file" 2>/dev/null || true)"
+      promote_lock_sha="$(cat "$promote_sha_file" 2>/dev/null || true)"
+      if ! [[ "$promote_pid" =~ ^[0-9]+$ ]] || [ ! -r "/proc/$promote_pid/cmdline" ] ||
+        ! tr '\0' ' ' < "/proc/$promote_pid/cmdline" | grep -Fq 'promote.sh'; then
+        errors+=("promote 授权锁 pid 不是仍在运行的 promote.sh")
+      fi
+      if ! valid_sha "$promote_lock_sha" || [ "${promote_lock_sha,,}" != "${main_new,,}" ]; then
+        errors+=("promote 授权锁 SHA 与 main 目标 commit 不匹配")
+      fi
+    fi
+  fi
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    marker_mode="$(stat -c '%a' "$marker" 2>/dev/null || true)"
+    if [[ "$marker_mode" =~ ^[0-7]+$ ]] && (( 8#$marker_mode & 077 )); then
+      errors+=("promote marker 必须是 owner-only")
+    fi
+  fi
   if ! mkdir -- "$marker_lock" 2>/dev/null; then
     errors+=("main promote 正在由另一个 receive 处理")
   else

@@ -72,7 +72,8 @@ restore_guard
 trap - EXIT
 
 # 服务器闭环的 CI/hook/安装脚本同样是治理边界：修改它们不能绕过人工审阅。
-for dep in scripts/ci-local.sh deploy/git-hooks/ deploy/scripts/install-git-server.sh tests/deploy/; do
+for dep in scripts/ci-local.sh deploy/git-hooks/ deploy/scripts/install-git-server.sh \
+  deploy/scripts/deploy.sh deploy/scripts/promote.sh deploy/compose/ deploy/nginx/ tests/deploy/; do
   if ! grep -qF "'$dep'" "$guard"; then
     err "$dep 不在治理守卫名单里——服务器门禁可被静默改写"
   fi

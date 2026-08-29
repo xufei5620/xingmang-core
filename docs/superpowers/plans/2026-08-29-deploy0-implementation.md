@@ -26,9 +26,14 @@
 
 ### DEPLOY0-b
 
-**Files:** `deploy/scripts/deploy.sh`, `promote.sh`, server compose/override and Handoff.
+**Files:** `deploy/scripts/deploy.sh`, `promote.sh`, server compose/override, Nginx
+templates, governance protection, tests and Handoff.
 
-**Acceptance:** staging/release 与 prod/main 分离；构建、健康探针、失败停止和审计记录可验证；无确认不得生产部署。
+**Acceptance:** staging/release 与 prod/main 分离；构建、健康探针、失败停止和
+审计记录可验证；无确认不得生产部署；生产只能使用安装器登记的 repo/status/
+Compose/hook 路径，main 晋级必须经过可信 pre-receive 与 promote 授权锁。
+Telegram 不在脚本内接收 token，采用可选的受控通知适配器（脱敏 stdin），
+凭据解析留在服务器外部 CredentialRef 适配层。
 
 ### DEPLOY0-c
 

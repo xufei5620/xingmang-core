@@ -3,6 +3,11 @@
 任务 XM-0023。本文覆盖 `deploy/compose/launch.yaml` 这一档的部署、验证、
 排障与回滚。
 
+> 服务器共享验收与 production 的发布闸门由 XM-C-DEPLOY0-b 的
+> `deploy/scripts/deploy.sh` / `promote.sh` 负责；本文件中的手工 Compose 命令
+> 仍适用于本地一次性启动栈，不应替代服务器脚本。完整流程见
+> `docs/runbooks/DEPLOY.md`。
+
 > **这一档跑的是什么数据**
 > 当前栈的 Sub2API 连接器是 **Fake 模式**（`XM_SUB2API_MODE=fake`）。
 > 它产生的一切数字都是**演示与联调**用的构造数据，**不是业务真相**，
