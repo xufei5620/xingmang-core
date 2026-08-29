@@ -164,3 +164,26 @@ func TestPlatformChannelDateRangeRejectsPartialReversedAndOverlongWindows(t *tes
 		})
 	}
 }
+
+func TestPlatformChannelsRouteRequiresBothReadScopes(t *testing.T) {
+	serviceID := uuid.NewString()
+	h := testRouterWithMetrics(t, &fakeExecutor{}, nil, nil)
+	for _, tc := range []struct {
+		name    string
+		scopes  string
+		missing string
+	}{
+		{name: "finance only", scopes: "finance.read", missing: "ops.read"},
+		{name: "ops only", scopes: "ops.read", missing: "finance.read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/platforms/newapi/channels?service_id="+serviceID, nil)
+			devHeaders(req, tc.scopes)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), tc.missing) {
+				t.Fatalf("status=%d body=%s, want missing %s", rec.Code, rec.Body.String(), tc.missing)
+			}
+		})
+	}
+}
