@@ -74,3 +74,30 @@ c. NewAPI 余额:核对上游是否开 `CHANNEL_UPDATE_FREQUENCY` 并能读到�
 d. 接入验证清单脚本 `scripts/verify-real-mode.sh`:worker 日志 metrics_failed=0、
    演示横幅消失、来源 instance id、新鲜度、finance 采集 rows_written>0。
 真实数据一到,所有"未接入/覆盖不全"的格会逐个变实,UI 对齐工作在真数据上继续验收。
+
+## 七、持续完成模式 + 审批记录(2026-08-30 凌晨,产品负责人:「持续完成所有」)
+
+### 7.1 持续完成规则(覆盖此前"待批≤2"的节流)
+- **不停机**:队列空了立即按路线图(交接文档第四节 A→E + 第二轮 R2 四期)自拟下一张
+  任务卡,追加进本文件并继续;不等验收、不等 MERGED 才开工。
+- **技术决策自己下**:凡宪法/ADR/已批设计稿能推出结论的(迁移编号、字段形状、scope 名、
+  fake 样本、组件边界等),按最小权限与 fail-closed 原则决定,把决定与依据写进 Handoff
+  的 `decisions` 节即可,**不要为此 BLOCKED**。验收线审读时不同意会在 ACCEPTANCE-LOG 里
+  写 `REJECT <分支> <理由>`,你再改。
+- **只有这五类才 BLOCKED 等人**:①真实凭据/生产系统/上游三方源码;②宪法条款变更;
+  ③采购/付费/外部基础设施(存储商、域名、证书);④删除既有能力或改变已上线口径;
+  ⑤开票线 CR 级契约变更。其余一律自决继续。
+- **验收信号改为文件通道**:验收线把每次合入追加到 `docs/handoffs/ACCEPTANCE-LOG.md`
+  (格式 `<UTC时间> MERGED <sha> <分支列表>` / `REJECT <分支> <理由>`),并提交到 release。
+  你每片开工前与完成后 `git fetch` 读该文件最新几行:有新的 MERGED 就先跑
+  deploy-local.sh 部署并回报 `DEPLOYED`,有 REJECT 就先修。不再依赖人转述。
+
+### 7.2 审批记录(验收线按技术授权裁定,2026-08-30)
+- **RUNWAY0 迁移批准**:B003a(000015)与 MAP0(000016)已合入 release;RUNWAY0 的
+  up/down 对以 release 最新基线重算编号(应为 000017)后**视为已批**,内容以你 Handoff
+  的 migration review packet 为准;门禁绿即可 READY,不需要再等逐字节批准。
+- **DAILY_USAGE_APPROVAL:批准**——DailyUsageReader 只读、按日粒度、复用
+  `platform.users.read`,fake 完整实现,real 留骨架标注证据待补。
+- **KEY_SCOPE_APPROVAL:批准**——新增 scope `platform.user_keys.read`,仅元数据
+  (前缀/创建/最近使用/状态),**永不含完整 key**,admin 默认**不**带该 scope(同
+  request.content.read 的最小权限先例),进 RoleScopeMap 与开发态默认清单。
