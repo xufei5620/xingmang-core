@@ -64,7 +64,7 @@ READY
 - `go vet ./...` — PASS
 - `go test -p 1 -count=1 ./...` — PASS
 - `$env:GOVERNANCE_BASE_REF='origin/main'; $env:GOVERNANCE_REQUIRE_BASE='0'; D:/Git/bin/bash.exe scripts/check-governance.sh` — PASS
-- `gitleaks.exe git --redact --no-banner --log-opts=e98080d..HEAD` — PASS（1 commit scanned, no leaks found）
+- `gitleaks.exe git --redact --no-banner --log-opts=e98080d..HEAD` — PASS（2 commits scanned, no leaks found）
 - `git diff --check e98080d..HEAD` — PASS
 - 平台目标测试（包含路由回归）：`PlatformCredentialsPanel.test.tsx`、`PlatformAlertsPanel.test.tsx`、`router.test.tsx` — PASS（3 files / 148 tests）
 
