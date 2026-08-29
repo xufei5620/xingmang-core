@@ -31,6 +31,7 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		sub2api.MetricRevenueDaily,
 		sub2api.MetricCostDaily,
 		sub2api.MetricChannelBalance,
+		sub2api.MetricChannelsStatus,
 		invoice.MetricRequestsDaily,
 		invoice.MetricAmountDaily,
 		newapi.MetricUsersTotal,

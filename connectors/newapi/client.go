@@ -197,7 +197,7 @@ type client struct {
 // 构造期**不做任何 I/O**：凭据在首次读取时才解析，用的是那次请求的 ctx，
 // 取消与超时才管得住它；quota 换算基数同理。因此本函数返回的错误只可能是
 // 配置错误。
-func NewClient(cfg connector.Config, sp secrets.SecretProvider, opts ...Option) (ReadClient, error) {
+func NewClient(cfg connector.Config, sp secrets.SecretProvider, opts ...Option) (ReadClientV2, error) {
 	options := clientOptions{
 		now:               time.Now,
 		supportedVersions: SupportedUpstreamVersions,
@@ -668,6 +668,10 @@ func (c *client) DailyOrders(ctx context.Context, day string) (OrderSummary, err
 // Channels 读取全部渠道的状态、错误率与延迟。
 func (c *client) Channels(ctx context.Context) ([]ChannelStatus, error) {
 	return c.fetchChannels(ctx)
+}
+
+func (c *client) ChannelDirectory(ctx context.Context) (ChannelDirectorySnapshot, error) {
+	return c.fetchChannelDirectory(ctx)
 }
 
 // ModelUsages 读取某业务日的逐模型使用量。

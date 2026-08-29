@@ -32,7 +32,7 @@ func newapiFakeFactory(opts newapi.FakeOptions) NewAPIClientFactory {
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return fixedNow }
 	}
-	return func(context.Context) (newapi.ReadClient, error) {
+	return func(context.Context) (newapi.ReadClientV2, error) {
 		return newapi.NewFake(opts), nil
 	}
 }
@@ -377,7 +377,7 @@ func TestNewAPISyncFailurePreservesLastSuccess(t *testing.T) {
 
 // newapiPartialFailClient 让指定的某几个读取失败，其余走 Fake。
 type newapiPartialFailClient struct {
-	newapi.ReadClient
+	newapi.ReadClientV2
 	statsErr    error
 	ordersErr   error
 	channelsErr error
@@ -388,28 +388,35 @@ func (c newapiPartialFailClient) UserStats(ctx context.Context) (newapi.UserStat
 	if c.statsErr != nil {
 		return newapi.UserStats{}, c.statsErr
 	}
-	return c.ReadClient.UserStats(ctx)
+	return c.ReadClientV2.UserStats(ctx)
 }
 
 func (c newapiPartialFailClient) DailyOrders(ctx context.Context, day string) (newapi.OrderSummary, error) {
 	if c.ordersErr != nil {
 		return newapi.OrderSummary{}, c.ordersErr
 	}
-	return c.ReadClient.DailyOrders(ctx, day)
+	return c.ReadClientV2.DailyOrders(ctx, day)
 }
 
 func (c newapiPartialFailClient) Channels(ctx context.Context) ([]newapi.ChannelStatus, error) {
 	if c.channelsErr != nil {
 		return nil, c.channelsErr
 	}
-	return c.ReadClient.Channels(ctx)
+	return c.ReadClientV2.Channels(ctx)
+}
+
+func (c newapiPartialFailClient) ChannelDirectory(ctx context.Context) (newapi.ChannelDirectorySnapshot, error) {
+	if c.channelsErr != nil {
+		return newapi.ChannelDirectorySnapshot{}, c.channelsErr
+	}
+	return c.ReadClientV2.ChannelDirectory(ctx)
 }
 
 func (c newapiPartialFailClient) ModelUsages(ctx context.Context, day string) ([]newapi.ModelUsage, error) {
 	if c.usagesErr != nil {
 		return nil, c.usagesErr
 	}
-	return c.ReadClient.ModelUsages(ctx, day)
+	return c.ReadClientV2.ModelUsages(ctx, day)
 }
 
 // TestNewAPISyncPartialFailureKeepsGoodMetrics：模型用量挂了不该把已经读到的
@@ -417,10 +424,10 @@ func (c newapiPartialFailClient) ModelUsages(ctx context.Context, day string) ([
 func TestNewAPISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
-	factory := func(context.Context) (newapi.ReadClient, error) {
+	factory := func(context.Context) (newapi.ReadClientV2, error) {
 		return newapiPartialFailClient{
-			ReadClient: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
-			usagesErr:  connector.NewError(connector.KindRateLimited, "newapi.models.usage_read", nil),
+			ReadClientV2: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
+			usagesErr:    connector.NewError(connector.KindRateLimited, "newapi.models.usage_read", nil),
 		}, nil
 	}
 	worker := newTestNewAPISyncWorker(store, factory, &logs)
@@ -454,10 +461,10 @@ func TestNewAPISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 func TestNewAPISyncOrdersFailureTakesBothMoneyMetrics(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
-	factory := func(context.Context) (newapi.ReadClient, error) {
+	factory := func(context.Context) (newapi.ReadClientV2, error) {
 		return newapiPartialFailClient{
-			ReadClient: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
-			ordersErr:  connector.NewError(connector.KindBadResponse, "newapi.orders.read", nil),
+			ReadClientV2: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
+			ordersErr:    connector.NewError(connector.KindBadResponse, "newapi.orders.read", nil),
 		}, nil
 	}
 	if err := newTestNewAPISyncWorker(store, factory, &logs).

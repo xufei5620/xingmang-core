@@ -21,9 +21,11 @@ import (
 
 const (
 	// ConnectorKey 是本 Connector 在 Registry 中的键。
-	ConnectorKey = "sub2api"
-	// ContractVersion 是本只读契约的版本。破坏性变更必须发新版本。
-	ContractVersion = "1"
+	ConnectorKey      = "sub2api"
+	ContractVersionV1 = "1"
+	ContractVersionV2 = "2"
+	// ContractVersion 指向当前 Registry 版本；v2 嵌入 v1，旧调用仍兼容。
+	ContractVersion = ContractVersionV2
 )
 
 // ReadCapabilities 是 Foundation-A 阶段的只读能力清单（规格 §8.2、§8.3）。
@@ -39,6 +41,7 @@ var ReadCapabilities = []registry.Capability{
 	"sub2api.accounts.read",
 	"sub2api.models.usage_read",
 	"sub2api.channels.balance_read",
+	"sub2api.channels.read",
 	"sub2api.health.read",
 }
 
@@ -120,6 +123,7 @@ const (
 	MetricRevenueDaily   = "sub2api.revenue.daily"
 	MetricCostDaily      = "sub2api.cost.daily"
 	MetricChannelBalance = "sub2api.channels.balance"
+	MetricChannelsStatus = "sub2api.channels.status"
 )
 
 // defaultStalenessThresholdSeconds 是这批指标的默认新鲜度阈值。

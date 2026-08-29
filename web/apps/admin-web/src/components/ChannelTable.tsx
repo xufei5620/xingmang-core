@@ -24,6 +24,7 @@ import { ApiStateView } from "./ApiStateView";
 import { ChannelScopeNote } from "./ChannelScopeNote";
 import { channelTableColumns, type ChannelPlatform } from "./ChannelTableColumns";
 import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
+import { ManagedChannelTable } from "./ManagedChannelTable";
 
 /** 渠道管理表（两个平台共用）。原型 `V["s2/upstream"]` / `V["newapi/upstream"]`。
  *
@@ -47,9 +48,13 @@ import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentData
 export function ChannelTable({
   platform,
   lead,
+  serviceId,
+  serviceStatus,
 }: {
   platform: ChannelPlatform;
   lead: string;
+  serviceId?: string;
+  serviceStatus?: string;
 }) {
   const summaryQuery = useQuery({
     queryKey: ["finance", "channels", "summary"],
@@ -68,6 +73,12 @@ export function ChannelTable({
   // 预置视图要给全 TableViewState 的五个字段。列清单从列定义现取，
   // 而不是手抄一份——手抄的那份会在下次加列时悄悄把新列藏起来
   const allColumnIds = columns.map((c) => c.id);
+
+  // 只有一个已登记且 active 的 service 才切换到 ChannelRef 粒度；
+  // 多实例或降级状态继续使用已验证的上游账号汇总，避免猜测归属。
+  if (serviceId && serviceStatus === "active") {
+    return <ManagedChannelTable platform={platform} serviceId={serviceId} />;
+  }
 
   return (
     <section className="flex flex-col gap-3">

@@ -9,6 +9,8 @@ const (
 	CodeInvalidParams            Code = "INVALID_PARAMS"
 	CodePermissionDenied         Code = "PERMISSION_DENIED"
 	CodeEnvironmentMismatch      Code = "ENVIRONMENT_MISMATCH"
+	CodeConflict                 Code = "CONFLICT"
+	CodePreconditionFailed       Code = "PRECONDITION_FAILED"
 	CodeNotRegistered            Code = "ACTION_NOT_REGISTERED"
 	CodePrincipalTypeNotAllowed  Code = "PRINCIPAL_TYPE_NOT_ALLOWED"
 	CodeAdvancedControlsRequired Code = "ADVANCED_CONTROLS_REQUIRED"

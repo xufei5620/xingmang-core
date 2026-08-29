@@ -12,6 +12,66 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acquirePlatformChannelBindingLock = `-- name: AcquirePlatformChannelBindingLock :exec
+
+
+SELECT pg_advisory_xact_lock(
+  hashtextextended($1::uuid::text || chr(31) || $2::text, 0)
+)
+`
+
+type AcquirePlatformChannelBindingLockParams struct {
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+}
+
+// XM-0037a 成本登记簿（设计稿 §2.1）。
+//
+// 本文件只有登记簿的读写；利润台账（§2.2）与订阅批次（§2.5）属于
+// XM-0037b / c，各自新增查询。
+//
+// 金额在本层**不出现**：登记簿存的是倍率（NUMERIC，比例用 Decimal）与
+// 凭据引用，成本金额是 037b 台账的事。宪法 13 条在这里体现为
+// 「这张表里没有一个金额列」。
+// ---------------------------------------------------------------------------
+// XM-C-MAP2 managed platform channel temporal bindings.
+// ---------------------------------------------------------------------------
+func (q *Queries) AcquirePlatformChannelBindingLock(ctx context.Context, arg AcquirePlatformChannelBindingLockParams) error {
+	_, err := q.db.Exec(ctx, acquirePlatformChannelBindingLock, arg.ServiceID, arg.ExternalChannelID)
+	return err
+}
+
+const closePlatformChannelBinding = `-- name: ClosePlatformChannelBinding :one
+UPDATE finance.platform_channel_binding
+SET valid_to = $1
+WHERE id = $2 AND valid_to IS NULL
+RETURNING id, environment, service_id, external_channel_id, upstream_account_id, valid_from, valid_to, provenance, reason, created_by, created_at
+`
+
+type ClosePlatformChannelBindingParams struct {
+	ValidTo pgtype.Timestamptz
+	ID      uuid.UUID
+}
+
+func (q *Queries) ClosePlatformChannelBinding(ctx context.Context, arg ClosePlatformChannelBindingParams) (FinancePlatformChannelBinding, error) {
+	row := q.db.QueryRow(ctx, closePlatformChannelBinding, arg.ValidTo, arg.ID)
+	var i FinancePlatformChannelBinding
+	err := row.Scan(
+		&i.ID,
+		&i.Environment,
+		&i.ServiceID,
+		&i.ExternalChannelID,
+		&i.UpstreamAccountID,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Provenance,
+		&i.Reason,
+		&i.CreatedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const countProfitDailyInWindow = `-- name: CountProfitDailyInWindow :one
 SELECT COUNT(*)::bigint FROM finance.profit_daily pd
 JOIN finance.upstream_account ua ON ua.id = pd.upstream_account_id
@@ -58,6 +118,91 @@ func (q *Queries) DeleteTokenMapping(ctx context.Context, arg DeleteTokenMapping
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const getActivePlatformChannelBinding = `-- name: GetActivePlatformChannelBinding :one
+SELECT id, environment, service_id, external_channel_id, upstream_account_id, valid_from, valid_to, provenance, reason, created_by, created_at FROM finance.platform_channel_binding
+WHERE service_id = $1
+  AND external_channel_id = $2
+  AND valid_to IS NULL
+`
+
+type GetActivePlatformChannelBindingParams struct {
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+}
+
+func (q *Queries) GetActivePlatformChannelBinding(ctx context.Context, arg GetActivePlatformChannelBindingParams) (FinancePlatformChannelBinding, error) {
+	row := q.db.QueryRow(ctx, getActivePlatformChannelBinding, arg.ServiceID, arg.ExternalChannelID)
+	var i FinancePlatformChannelBinding
+	err := row.Scan(
+		&i.ID,
+		&i.Environment,
+		&i.ServiceID,
+		&i.ExternalChannelID,
+		&i.UpstreamAccountID,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Provenance,
+		&i.Reason,
+		&i.CreatedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getBindingService = `-- name: GetBindingService :one
+SELECT id, service_type, instance_id, environment, status
+FROM core.service
+WHERE id = $1
+`
+
+type GetBindingServiceRow struct {
+	ID          uuid.UUID
+	ServiceType string
+	InstanceID  string
+	Environment string
+	Status      string
+}
+
+func (q *Queries) GetBindingService(ctx context.Context, serviceID uuid.UUID) (GetBindingServiceRow, error) {
+	row := q.db.QueryRow(ctx, getBindingService, serviceID)
+	var i GetBindingServiceRow
+	err := row.Scan(
+		&i.ID,
+		&i.ServiceType,
+		&i.InstanceID,
+		&i.Environment,
+		&i.Status,
+	)
+	return i, err
+}
+
+const getBindingUpstreamAccount = `-- name: GetBindingUpstreamAccount :one
+SELECT id, system_type, access_method, environment, status
+FROM finance.upstream_account
+WHERE id = $1
+`
+
+type GetBindingUpstreamAccountRow struct {
+	ID           uuid.UUID
+	SystemType   string
+	AccessMethod string
+	Environment  string
+	Status       string
+}
+
+func (q *Queries) GetBindingUpstreamAccount(ctx context.Context, upstreamAccountID uuid.UUID) (GetBindingUpstreamAccountRow, error) {
+	row := q.db.QueryRow(ctx, getBindingUpstreamAccount, upstreamAccountID)
+	var i GetBindingUpstreamAccountRow
+	err := row.Scan(
+		&i.ID,
+		&i.SystemType,
+		&i.AccessMethod,
+		&i.Environment,
+		&i.Status,
+	)
+	return i, err
 }
 
 const getLatestBalance = `-- name: GetLatestBalance :one
@@ -277,6 +422,60 @@ func (q *Queries) InsertBalance(ctx context.Context, arg InsertBalanceParams) (F
 	return i, err
 }
 
+const insertPlatformChannelBinding = `-- name: InsertPlatformChannelBinding :one
+INSERT INTO finance.platform_channel_binding (
+  id, environment, service_id, external_channel_id, upstream_account_id,
+  valid_from, valid_to, provenance, reason, created_by, created_at
+) VALUES (
+  $1, $2, $3,
+  $4, $5,
+  $6, NULL, $7, $8,
+  $9, now()
+)
+RETURNING id, environment, service_id, external_channel_id, upstream_account_id, valid_from, valid_to, provenance, reason, created_by, created_at
+`
+
+type InsertPlatformChannelBindingParams struct {
+	ID                uuid.UUID
+	Environment       string
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+	UpstreamAccountID uuid.UUID
+	ValidFrom         pgtype.Timestamptz
+	Provenance        string
+	Reason            string
+	CreatedBy         string
+}
+
+func (q *Queries) InsertPlatformChannelBinding(ctx context.Context, arg InsertPlatformChannelBindingParams) (FinancePlatformChannelBinding, error) {
+	row := q.db.QueryRow(ctx, insertPlatformChannelBinding,
+		arg.ID,
+		arg.Environment,
+		arg.ServiceID,
+		arg.ExternalChannelID,
+		arg.UpstreamAccountID,
+		arg.ValidFrom,
+		arg.Provenance,
+		arg.Reason,
+		arg.CreatedBy,
+	)
+	var i FinancePlatformChannelBinding
+	err := row.Scan(
+		&i.ID,
+		&i.Environment,
+		&i.ServiceID,
+		&i.ExternalChannelID,
+		&i.UpstreamAccountID,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Provenance,
+		&i.Reason,
+		&i.CreatedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertProxyAsset = `-- name: InsertProxyAsset :one
 INSERT INTO finance.proxy_asset (
     id, paid_minor, surcharge_minor, refunded_minor, refunded_on, currency,
@@ -431,7 +630,6 @@ func (q *Queries) InsertSubscriptionCostBatch(ctx context.Context, arg InsertSub
 }
 
 const insertUpstreamAccount = `-- name: InsertUpstreamAccount :one
-
 INSERT INTO finance.upstream_account (
     id, system_type, access_method, base_url, credential_ref,
     recharge_ratio, group_rate, currency, business_day_tz, status, environment,
@@ -467,14 +665,6 @@ type InsertUpstreamAccountParams struct {
 	UpstreamGroup   *string
 }
 
-// XM-0037a 成本登记簿（设计稿 §2.1）。
-//
-// 本文件只有登记簿的读写；利润台账（§2.2）与订阅批次（§2.5）属于
-// XM-0037b / c，各自新增查询。
-//
-// 金额在本层**不出现**：登记簿存的是倍率（NUMERIC，比例用 Decimal）与
-// 凭据引用，成本金额是 037b 台账的事。宪法 13 条在这里体现为
-// 「这张表里没有一个金额列」。
 // 登记一个上游账号。
 //
 // 三类接入方式的倍率约束（计量型必填、订阅型必空）在库层 CHECK 上，
@@ -522,6 +712,44 @@ func (q *Queries) InsertUpstreamAccount(ctx context.Context, arg InsertUpstreamA
 		&i.UpstreamGroup,
 	)
 	return i, err
+}
+
+const listActivePlatformChannelBindingsByService = `-- name: ListActivePlatformChannelBindingsByService :many
+SELECT id, environment, service_id, external_channel_id, upstream_account_id, valid_from, valid_to, provenance, reason, created_by, created_at FROM finance.platform_channel_binding
+WHERE service_id = $1 AND valid_to IS NULL
+ORDER BY external_channel_id COLLATE "C", id
+`
+
+func (q *Queries) ListActivePlatformChannelBindingsByService(ctx context.Context, serviceID uuid.UUID) ([]FinancePlatformChannelBinding, error) {
+	rows, err := q.db.Query(ctx, listActivePlatformChannelBindingsByService, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FinancePlatformChannelBinding{}
+	for rows.Next() {
+		var i FinancePlatformChannelBinding
+		if err := rows.Scan(
+			&i.ID,
+			&i.Environment,
+			&i.ServiceID,
+			&i.ExternalChannelID,
+			&i.UpstreamAccountID,
+			&i.ValidFrom,
+			&i.ValidTo,
+			&i.Provenance,
+			&i.Reason,
+			&i.CreatedBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listActiveUpstreamAccountsByAccessMethod = `-- name: ListActiveUpstreamAccountsByAccessMethod :many
@@ -664,6 +892,103 @@ func (q *Queries) ListLatestBalancesByEnvironment(ctx context.Context, environme
 			&i.CapturedAt,
 			&i.ObservedAt,
 			&i.Source,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOverlappingPlatformChannelBindings = `-- name: ListOverlappingPlatformChannelBindings :many
+SELECT id, environment, service_id, external_channel_id, upstream_account_id, valid_from, valid_to, provenance, reason, created_by, created_at FROM finance.platform_channel_binding
+WHERE service_id = $1
+  AND external_channel_id = $2
+  AND valid_from < $3
+  AND (valid_to IS NULL OR valid_to > $4)
+ORDER BY valid_from, id
+`
+
+type ListOverlappingPlatformChannelBindingsParams struct {
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+	ToTime            pgtype.Timestamptz
+	FromTime          pgtype.Timestamptz
+}
+
+func (q *Queries) ListOverlappingPlatformChannelBindings(ctx context.Context, arg ListOverlappingPlatformChannelBindingsParams) ([]FinancePlatformChannelBinding, error) {
+	rows, err := q.db.Query(ctx, listOverlappingPlatformChannelBindings,
+		arg.ServiceID,
+		arg.ExternalChannelID,
+		arg.ToTime,
+		arg.FromTime,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FinancePlatformChannelBinding{}
+	for rows.Next() {
+		var i FinancePlatformChannelBinding
+		if err := rows.Scan(
+			&i.ID,
+			&i.Environment,
+			&i.ServiceID,
+			&i.ExternalChannelID,
+			&i.UpstreamAccountID,
+			&i.ValidFrom,
+			&i.ValidTo,
+			&i.Provenance,
+			&i.Reason,
+			&i.CreatedBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPlatformChannelBindingHistory = `-- name: ListPlatformChannelBindingHistory :many
+SELECT id, environment, service_id, external_channel_id, upstream_account_id, valid_from, valid_to, provenance, reason, created_by, created_at FROM finance.platform_channel_binding
+WHERE service_id = $1
+  AND external_channel_id = $2
+ORDER BY valid_from DESC, id DESC
+`
+
+type ListPlatformChannelBindingHistoryParams struct {
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+}
+
+func (q *Queries) ListPlatformChannelBindingHistory(ctx context.Context, arg ListPlatformChannelBindingHistoryParams) ([]FinancePlatformChannelBinding, error) {
+	rows, err := q.db.Query(ctx, listPlatformChannelBindingHistory, arg.ServiceID, arg.ExternalChannelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FinancePlatformChannelBinding{}
+	for rows.Next() {
+		var i FinancePlatformChannelBinding
+		if err := rows.Scan(
+			&i.ID,
+			&i.Environment,
+			&i.ServiceID,
+			&i.ExternalChannelID,
+			&i.UpstreamAccountID,
+			&i.ValidFrom,
+			&i.ValidTo,
+			&i.Provenance,
+			&i.Reason,
+			&i.CreatedBy,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -947,6 +1272,56 @@ func (q *Queries) ListSubscriptionCostBatchesByEnvironment(ctx context.Context, 
 	return items, nil
 }
 
+const listTokenMapEvidenceByEnvironment = `-- name: ListTokenMapEvidenceByEnvironment :many
+SELECT tm.own_account_id, tm.upstream_account_id, ua.system_type,
+       ua.platform_id, ua.status AS upstream_status,
+       (SELECT count(*)
+          FROM core.service s
+         WHERE s.environment = ua.environment
+           AND s.service_type = ua.system_type
+           AND s.status = 'active') AS active_service_count
+FROM finance.token_map tm
+JOIN finance.upstream_account ua ON ua.id = tm.upstream_account_id
+WHERE ua.environment = $1
+ORDER BY tm.own_account_id, tm.upstream_account_id
+`
+
+type ListTokenMapEvidenceByEnvironmentRow struct {
+	OwnAccountID       string
+	UpstreamAccountID  uuid.UUID
+	SystemType         string
+	PlatformID         *string
+	UpstreamStatus     string
+	ActiveServiceCount int64
+}
+
+func (q *Queries) ListTokenMapEvidenceByEnvironment(ctx context.Context, environment string) ([]ListTokenMapEvidenceByEnvironmentRow, error) {
+	rows, err := q.db.Query(ctx, listTokenMapEvidenceByEnvironment, environment)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTokenMapEvidenceByEnvironmentRow{}
+	for rows.Next() {
+		var i ListTokenMapEvidenceByEnvironmentRow
+		if err := rows.Scan(
+			&i.OwnAccountID,
+			&i.UpstreamAccountID,
+			&i.SystemType,
+			&i.PlatformID,
+			&i.UpstreamStatus,
+			&i.ActiveServiceCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTokenMappingsByAccount = `-- name: ListTokenMappingsByAccount :many
 SELECT upstream_account_id, upstream_token_id, own_account_id, credential_ref, created_at, updated_at FROM finance.token_map
 WHERE upstream_account_id = $1
@@ -1065,6 +1440,38 @@ func (q *Queries) ListUpstreamAccountsByEnvironment(ctx context.Context, environ
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockActivePlatformChannelBinding = `-- name: LockActivePlatformChannelBinding :one
+SELECT id, environment, service_id, external_channel_id, upstream_account_id, valid_from, valid_to, provenance, reason, created_by, created_at FROM finance.platform_channel_binding
+WHERE service_id = $1
+  AND external_channel_id = $2
+  AND valid_to IS NULL
+FOR UPDATE
+`
+
+type LockActivePlatformChannelBindingParams struct {
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+}
+
+func (q *Queries) LockActivePlatformChannelBinding(ctx context.Context, arg LockActivePlatformChannelBindingParams) (FinancePlatformChannelBinding, error) {
+	row := q.db.QueryRow(ctx, lockActivePlatformChannelBinding, arg.ServiceID, arg.ExternalChannelID)
+	var i FinancePlatformChannelBinding
+	err := row.Scan(
+		&i.ID,
+		&i.Environment,
+		&i.ServiceID,
+		&i.ExternalChannelID,
+		&i.UpstreamAccountID,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Provenance,
+		&i.Reason,
+		&i.CreatedBy,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const setProxyAssetRefund = `-- name: SetProxyAssetRefund :one

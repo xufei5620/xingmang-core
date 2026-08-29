@@ -39,7 +39,7 @@ type fakeClient struct {
 //
 // 它存在的意义有两层：让 XM-0017 之前的上层开发不被真实凭据阻塞；
 // 以及作为 contracttest 套件的第一个被测实现——套件本身要先被验证有效。
-func NewFake(opts FakeOptions) ReadClient {
+func NewFake(opts FakeOptions) ReadClientV2 {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -47,6 +47,35 @@ func NewFake(opts FakeOptions) ReadClient {
 		opts.Version = "0.1.152"
 	}
 	return &fakeClient{opts: opts}
+}
+
+func (f *fakeClient) ChannelDirectory(ctx context.Context) (ManagedChannelDirectory, error) {
+	balances, err := f.ChannelBalances(ctx)
+	if err != nil {
+		return ManagedChannelDirectory{}, err
+	}
+	items := make([]ManagedChannel, 0, len(balances))
+	for _, balance := range balances {
+		value := balance.BalanceMinorUnits
+		status := "disabled"
+		if balance.TokenValid {
+			status = "active"
+		}
+		items = append(items, ManagedChannel{
+			Snapshot: balance.Snapshot, ChannelID: balance.ChannelID, Name: balance.ChannelName,
+			Status: status, BalanceMinorUnits: &value, Currency: balance.Currency,
+		})
+	}
+	reported := int64(len(items))
+	return ManagedChannelDirectory{
+		Snapshot: f.snapshot(),
+		Completeness: DirectoryCompleteness{
+			Complete: true, ReportedCount: &reported, FetchedCount: reported,
+			Evidence: "fake_reported_count",
+		},
+		CoveragePartial: f.opts.Partial,
+		Items:           items,
+	}, nil
 }
 
 func (f *fakeClient) now() time.Time { return f.opts.Now().UTC() }

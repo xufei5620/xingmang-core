@@ -102,7 +102,7 @@ type ObservationStore interface {
 // 用工厂而不是直接持有一个 ReadClient：真实实现（XM-0017）需要在每轮同步
 // 时解析 CredentialRef、按连接配置建传输层，那是有生命周期的东西，不该在
 // 进程启动时构造一次然后一直握着。
-type Sub2APIClientFactory func(ctx context.Context) (sub2api.ReadClient, error)
+type Sub2APIClientFactory func(ctx context.Context) (sub2api.ReadClientV2, error)
 
 // Sub2APIRealConfig 是 real 模式构造真实只读客户端所需的全部输入。
 //
@@ -161,7 +161,7 @@ func (c Sub2APIRealConfig) missing() []string {
 func NewSub2APIClientFactory(mode Sub2APIMode, cfg Sub2APIRealConfig) Sub2APIClientFactory {
 	// 形参是 context.Context 而不是具名 ctx：真实客户端的构造不做任何 I/O，
 	// 凭据在首次读取时才解析——那时用的是**请求的** ctx，取消才管用。
-	return func(context.Context) (sub2api.ReadClient, error) {
+	return func(context.Context) (sub2api.ReadClientV2, error) {
 		switch mode {
 		case Sub2APIModeFake:
 			// 固定值即可：Fake 的意义是让上层不被真实凭据阻塞，不是模拟真实波动。
@@ -319,7 +319,7 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 	// 显式声明为 UTC，而不是跟着进程所在机器的本地时区漂。
 	day := now.Format(sub2apiBusinessDayLayout)
 
-	stats, orders, balances, readErrs := w.read(ctx, day)
+	stats, orders, directory, readErrs := w.read(ctx, day)
 
 	// 上下文被取消说明是本进程在关机，不是上游出问题。把它记成 failed 会让
 	// 看板把一次正常重启显示成同步故障——那是**假的**失败信号，比没有信号更糟。
@@ -330,7 +330,10 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 	// 先按成功路径把五条观测算出来，再把失败分组的那几条替换掉。
 	// 这样指标键、来源、新鲜度阈值只有 sub2api.ToObservations 一个来源，
 	// 失败路径不会长出第二套指标定义。
+	balances := sub2api.LegacyChannelBalances(directory)
 	observations := sub2api.ToObservations(now, w.instanceID, w.environment, stats, orders, balances)
+	observations = append(observations,
+		sub2api.ToChannelDirectoryObservation(now, w.instanceID, w.environment, directory))
 
 	failed := 0
 	for i := range observations {
@@ -393,7 +396,7 @@ func (e sub2apiReadErrors) forMetric(metricKey string) error {
 		return e.stats
 	case sub2api.MetricRevenueDaily, sub2api.MetricCostDaily:
 		return e.orders
-	case sub2api.MetricChannelBalance:
+	case sub2api.MetricChannelBalance, sub2api.MetricChannelsStatus:
 		return e.balances
 	default:
 		// 契约将来加了新指标却漏登记在上面：fail closed，任一读取失败就把它
@@ -415,7 +418,7 @@ func (e sub2apiReadErrors) first() error {
 
 // read 读取三组数据。客户端构造失败时三组一起归到同一个失败分类。
 func (w *Sub2APISyncWorker) read(ctx context.Context, day string) (
-	sub2api.UserStats, sub2api.OrderSummary, []sub2api.ChannelBalance, sub2apiReadErrors,
+	sub2api.UserStats, sub2api.OrderSummary, sub2api.ManagedChannelDirectory, sub2apiReadErrors,
 ) {
 	// 读上游单独限时，留出时间把失败写进库（见 sub2apiReadTimeout 注释）。
 	readCtx, cancel := context.WithTimeout(ctx, sub2apiReadTimeout)
@@ -423,14 +426,14 @@ func (w *Sub2APISyncWorker) read(ctx context.Context, day string) (
 
 	client, err := w.newClient(readCtx)
 	if err != nil {
-		return sub2api.UserStats{}, sub2api.OrderSummary{}, nil,
+		return sub2api.UserStats{}, sub2api.OrderSummary{}, sub2api.ManagedChannelDirectory{},
 			sub2apiReadErrors{stats: err, orders: err, balances: err}
 	}
 
 	stats, statsErr := client.UserStats(readCtx)
 	orders, ordersErr := client.DailyOrders(readCtx, day)
-	balances, balancesErr := client.ChannelBalances(readCtx)
-	return stats, orders, balances, sub2apiReadErrors{
+	directory, balancesErr := client.ChannelDirectory(readCtx)
+	return stats, orders, directory, sub2apiReadErrors{
 		stats:    statsErr,
 		orders:   ordersErr,
 		balances: balancesErr,

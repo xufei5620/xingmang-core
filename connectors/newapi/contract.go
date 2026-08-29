@@ -15,7 +15,9 @@ const (
 	// ConnectorKey 是本 Connector 在 Registry 中的键。
 	ConnectorKey = "newapi"
 	// ContractVersion 是本只读契约的版本。破坏性变更必须发新版本。
-	ContractVersion = "1"
+	ContractVersionV1 = "1"
+	ContractVersionV2 = "2"
+	ContractVersion   = ContractVersionV2
 )
 
 // ReadCapabilities 是 Foundation-A 阶段的只读能力清单（规格 §8.2、§8.4）。

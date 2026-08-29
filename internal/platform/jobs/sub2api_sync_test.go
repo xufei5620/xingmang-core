@@ -116,6 +116,7 @@ func (s *memoryStore) keys() []string {
 // contractMetricKeys 是契约当前产出的全部指标键。
 var contractMetricKeys = []string{
 	sub2api.MetricChannelBalance,
+	sub2api.MetricChannelsStatus,
 	sub2api.MetricCostDaily,
 	sub2api.MetricRevenueDaily,
 	sub2api.MetricUsersBalance,
@@ -126,7 +127,7 @@ func fakeFactory(opts sub2api.FakeOptions) Sub2APIClientFactory {
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return fixedNow }
 	}
-	return func(context.Context) (sub2api.ReadClient, error) {
+	return func(context.Context) (sub2api.ReadClientV2, error) {
 		return sub2api.NewFake(opts), nil
 	}
 }
@@ -285,7 +286,7 @@ func TestSub2APISyncFailureStillWrites(t *testing.T) {
 					t.Fatalf("%s freshness = %q, want failed（首次失败不是未初始化）", key, state)
 				}
 			}
-			for _, want := range []string{`"event":"job_completed"`, `"success":false`, `"metrics_failed":5`, `"error_code":"` + string(kind) + `"`} {
+			for _, want := range []string{`"event":"job_completed"`, `"success":false`, `"metrics_failed":6`, `"error_code":"` + string(kind) + `"`} {
 				if !strings.Contains(logs.String(), want) {
 					t.Fatalf("日志缺少 %s: %s", want, logs.String())
 				}
@@ -461,7 +462,7 @@ func TestSub2APISyncFailurePreservesLastSuccess(t *testing.T) {
 
 // partialFailClient 让指定的读取方法失败，其余仍走 Fake。
 type partialFailClient struct {
-	sub2api.ReadClient
+	sub2api.ReadClientV2
 	statsErr    error
 	ordersErr   error
 	balancesErr error
@@ -471,21 +472,28 @@ func (c partialFailClient) UserStats(ctx context.Context) (sub2api.UserStats, er
 	if c.statsErr != nil {
 		return sub2api.UserStats{}, c.statsErr
 	}
-	return c.ReadClient.UserStats(ctx)
+	return c.ReadClientV2.UserStats(ctx)
 }
 
 func (c partialFailClient) DailyOrders(ctx context.Context, day string) (sub2api.OrderSummary, error) {
 	if c.ordersErr != nil {
 		return sub2api.OrderSummary{}, c.ordersErr
 	}
-	return c.ReadClient.DailyOrders(ctx, day)
+	return c.ReadClientV2.DailyOrders(ctx, day)
 }
 
 func (c partialFailClient) ChannelBalances(ctx context.Context) ([]sub2api.ChannelBalance, error) {
 	if c.balancesErr != nil {
 		return nil, c.balancesErr
 	}
-	return c.ReadClient.ChannelBalances(ctx)
+	return c.ReadClientV2.ChannelBalances(ctx)
+}
+
+func (c partialFailClient) ChannelDirectory(ctx context.Context) (sub2api.ManagedChannelDirectory, error) {
+	if c.balancesErr != nil {
+		return sub2api.ManagedChannelDirectory{}, c.balancesErr
+	}
+	return c.ReadClientV2.ChannelDirectory(ctx)
 }
 
 // TestSub2APISyncPartialFailureKeepsGoodMetrics：渠道余额挂了不该把已经
@@ -493,10 +501,10 @@ func (c partialFailClient) ChannelBalances(ctx context.Context) ([]sub2api.Chann
 func TestSub2APISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
-	factory := func(context.Context) (sub2api.ReadClient, error) {
+	factory := func(context.Context) (sub2api.ReadClientV2, error) {
 		return partialFailClient{
-			ReadClient:  sub2api.NewFake(sub2api.FakeOptions{Now: func() time.Time { return fixedNow }}),
-			balancesErr: connector.NewError(connector.KindRateLimited, "sub2api.channels.balance_read", nil),
+			ReadClientV2: sub2api.NewFake(sub2api.FakeOptions{Now: func() time.Time { return fixedNow }}),
+			balancesErr:  connector.NewError(connector.KindRateLimited, "sub2api.channels.balance_read", nil),
 		}, nil
 	}
 	worker := newTestSyncWorker(store, factory, &logs)
@@ -517,8 +525,8 @@ func TestSub2APISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 			t.Fatalf("%s status = %q, want ok（这一组读成功了）", key, row.Status)
 		}
 	}
-	if !strings.Contains(logs.String(), `"metrics_failed":1`) {
-		t.Fatalf("日志应报告 1 条失败: %s", logs.String())
+	if !strings.Contains(logs.String(), `"metrics_failed":2`) {
+		t.Fatalf("目录读取失败应同时影响 v1 余额与 v2 目录两条指标: %s", logs.String())
 	}
 }
 
@@ -527,6 +535,9 @@ func TestSub2APISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 func TestSub2APISyncMetricMappingIsExhaustive(t *testing.T) {
 	produced := sub2api.ToObservations(fixedNow, "src", "staging",
 		sub2api.UserStats{}, sub2api.OrderSummary{}, nil)
+	produced = append(produced, sub2api.ToChannelDirectoryObservation(
+		fixedNow, "src", "staging", sub2api.ManagedChannelDirectory{},
+	))
 	if len(produced) != len(contractMetricKeys) {
 		t.Fatalf("ToObservations 产出 %d 条指标，映射表登记了 %d 条——请同步更新 forMetric",
 			len(produced), len(contractMetricKeys))
@@ -541,6 +552,7 @@ func TestSub2APISyncMetricMappingIsExhaustive(t *testing.T) {
 		sub2api.MetricRevenueDaily:   ordersErr,
 		sub2api.MetricCostDaily:      ordersErr,
 		sub2api.MetricChannelBalance: balancesErr,
+		sub2api.MetricChannelsStatus: balancesErr,
 	}
 	errs := sub2apiReadErrors{stats: statsErr, orders: ordersErr, balances: balancesErr}
 	for _, observation := range produced {

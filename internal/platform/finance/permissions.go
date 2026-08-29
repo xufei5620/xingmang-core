@@ -41,3 +41,7 @@ const ScopeTokenMapManage = "finance.token_map.manage"
 // 这里决定「为它付了多少钱」。前者是接入配置，后者是财务凭证——
 // 能配一条渠道的人不必然该能改我们为它付过的账。
 const ScopeSubscriptionManage = "finance.subscription.manage"
+
+// ScopePlatformChannelBindingManage 只允许单条人工确认/解绑 managed channel。
+// 它默认不授予 staff/admin；生产必须在 XM_OIDC_ROLE_SCOPES 中单独审定。
+const ScopePlatformChannelBindingManage = "finance.platform_channel_binding.manage"

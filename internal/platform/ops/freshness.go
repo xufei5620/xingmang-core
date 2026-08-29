@@ -198,6 +198,7 @@ var registeredMetrics = struct {
 		"sub2api.revenue.daily":    {},
 		"sub2api.cost.daily":       {},
 		"sub2api.channels.balance": {},
+		"sub2api.channels.status":  {},
 		"invoice.requests.daily":   {},
 		"invoice.amount.daily":     {},
 		// NewAPI（XM-0035，规格 §8.4）。充值与订阅分成两条而不是合并成

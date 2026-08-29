@@ -18,6 +18,17 @@
 （下称「设计稿」，§ 号均指它）。本文只记**实现层的取舍与偏差**，
 不复述口径——口径以设计稿全文为准。
 
+## 平台渠道绑定（XM-C-MAP2）
+
+`finance.platform_channel_binding` 是人工确认的时间版本化归属：完整身份为
+`(service_id, external_channel_id)`，一个上游账号可服务多个渠道；重绑关闭旧区间并
+新建新区间，解绑只关闭当前区间，不改写既有利润台账。候选四态由渠道目录与令牌映射
+只读合并得到，`candidate/conflict/orphan/unmapped` 均保留证据，绝不自动确认。
+
+绑定 Query 复用 `finance.read`；单条确认/解绑是独立的
+`finance.platform_channel_binding.manage` L1 HUMAN Action，默认角色不授予，生产须
+经 `XM_OIDC_ROLE_SCOPES` 显式审定。
+
 **成本线 a~e 五片已齐**（影子对比 §9 见 XM-0037e），
 newapi 的收入 DSN 由 XM-0044 接上，收尾包（分组倍率存储、可用天数告警、
 阈值可配）见 XM-0049。剩余的 follow-up 都要外部输入：sub2api 余额的响应样本、

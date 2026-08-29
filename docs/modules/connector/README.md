@@ -3,6 +3,16 @@
 第三方系统的接入边界（ADR-004、ADR-018）。平台不拥有第三方的业务真相，
 只按契约**读**它，并把读到的东西连同新鲜度一起交给看板。
 
+## 渠道目录 v2（XM-C-MAP1）
+
+Sub2API 与 NewAPI 的当前工厂均静态返回各自的 `ReadClientV2`。Worker 每轮只读取一次
+`ChannelDirectory`，再纯投影兼容 v1 指标；禁止运行时类型断言或“v2 失败就退回 v1”。
+
+目录身份完整性与字段覆盖率是两件事：`inventory_completeness` 说明翻页是否自然结束、
+是否截断以及 reported/fetched 证据；`coverage_partial` 说明余额或错误率等字段是否覆盖
+全部行。绑定确认只使用前者、观测新鲜度和 source，不因某行没有余额而删掉渠道身份。
+`reported_count=null` 与明确的 `0` 始终分开。
+
 ## 代码结构
 
 | 位置 | 职责 |

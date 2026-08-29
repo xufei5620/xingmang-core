@@ -7,6 +7,88 @@
 -- 凭据引用，成本金额是 037b 台账的事。宪法 13 条在这里体现为
 -- 「这张表里没有一个金额列」。
 
+-- ---------------------------------------------------------------------------
+-- XM-C-MAP2 managed platform channel temporal bindings.
+-- ---------------------------------------------------------------------------
+
+-- name: AcquirePlatformChannelBindingLock :exec
+SELECT pg_advisory_xact_lock(
+  hashtextextended(sqlc.arg(service_id)::uuid::text || chr(31) || sqlc.arg(external_channel_id)::text, 0)
+);
+
+-- name: GetBindingService :one
+SELECT id, service_type, instance_id, environment, status
+FROM core.service
+WHERE id = sqlc.arg(service_id);
+
+-- name: GetBindingUpstreamAccount :one
+SELECT id, system_type, access_method, environment, status
+FROM finance.upstream_account
+WHERE id = sqlc.arg(upstream_account_id);
+
+-- name: GetActivePlatformChannelBinding :one
+SELECT * FROM finance.platform_channel_binding
+WHERE service_id = sqlc.arg(service_id)
+  AND external_channel_id = sqlc.arg(external_channel_id)
+  AND valid_to IS NULL;
+
+-- name: LockActivePlatformChannelBinding :one
+SELECT * FROM finance.platform_channel_binding
+WHERE service_id = sqlc.arg(service_id)
+  AND external_channel_id = sqlc.arg(external_channel_id)
+  AND valid_to IS NULL
+FOR UPDATE;
+
+-- name: InsertPlatformChannelBinding :one
+INSERT INTO finance.platform_channel_binding (
+  id, environment, service_id, external_channel_id, upstream_account_id,
+  valid_from, valid_to, provenance, reason, created_by, created_at
+) VALUES (
+  sqlc.arg(id), sqlc.arg(environment), sqlc.arg(service_id),
+  sqlc.arg(external_channel_id), sqlc.arg(upstream_account_id),
+  sqlc.arg(valid_from), NULL, sqlc.arg(provenance), sqlc.arg(reason),
+  sqlc.arg(created_by), now()
+)
+RETURNING *;
+
+-- name: ClosePlatformChannelBinding :one
+UPDATE finance.platform_channel_binding
+SET valid_to = sqlc.arg(valid_to)
+WHERE id = sqlc.arg(id) AND valid_to IS NULL
+RETURNING *;
+
+-- name: ListOverlappingPlatformChannelBindings :many
+SELECT * FROM finance.platform_channel_binding
+WHERE service_id = sqlc.arg(service_id)
+  AND external_channel_id = sqlc.arg(external_channel_id)
+  AND valid_from < sqlc.arg(to_time)
+  AND (valid_to IS NULL OR valid_to > sqlc.arg(from_time))
+ORDER BY valid_from, id;
+
+-- name: ListActivePlatformChannelBindingsByService :many
+SELECT * FROM finance.platform_channel_binding
+WHERE service_id = sqlc.arg(service_id) AND valid_to IS NULL
+ORDER BY external_channel_id COLLATE "C", id;
+
+-- name: ListPlatformChannelBindingHistory :many
+SELECT * FROM finance.platform_channel_binding
+WHERE service_id = sqlc.arg(service_id)
+  AND external_channel_id = sqlc.arg(external_channel_id)
+ORDER BY valid_from DESC, id DESC;
+
+-- name: ListTokenMapEvidenceByEnvironment :many
+SELECT tm.own_account_id, tm.upstream_account_id, ua.system_type,
+       ua.platform_id, ua.status AS upstream_status,
+       (SELECT count(*)
+          FROM core.service s
+         WHERE s.environment = ua.environment
+           AND s.service_type = ua.system_type
+           AND s.status = 'active') AS active_service_count
+FROM finance.token_map tm
+JOIN finance.upstream_account ua ON ua.id = tm.upstream_account_id
+WHERE ua.environment = sqlc.arg(environment)
+ORDER BY tm.own_account_id, tm.upstream_account_id;
+
 -- name: InsertUpstreamAccount :one
 -- 登记一个上游账号。
 --

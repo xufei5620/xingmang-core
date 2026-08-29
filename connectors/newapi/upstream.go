@@ -735,7 +735,7 @@ type channelItem struct {
 // 是 float64 USD），不是 quota，不需要换算基数。少一次 /api/status 请求，也让
 // 「/api/status 挂了」不至于连渠道状态一起读不到——分组失败记录的价值就在
 // 这种地方（见 jobs 的 newapiReadErrors）。
-func (c *client) fetchChannels(ctx context.Context) ([]ChannelStatus, error) {
+func (c *client) fetchChannelDirectory(ctx context.Context) (ChannelDirectorySnapshot, error) {
 	const op = opChannels
 
 	var (
@@ -752,18 +752,18 @@ func (c *client) fetchChannels(ctx context.Context) ([]ChannelStatus, error) {
 		var env upstreamEnvelope
 		meta, err := c.get(ctx, op, routeChannels, pageQuery(page, upstreamPageSize), &env)
 		if err != nil {
-			return nil, err
+			return ChannelDirectorySnapshot{}, err
 		}
 		lastMeta = meta
 
 		var payload upstreamPage[channelItem]
 		if err := env.decode(op, &payload); err != nil {
-			return nil, err
+			return ChannelDirectorySnapshot{}, err
 		}
 		if page == 1 {
 			t, err := payload.Total.count()
 			if err != nil {
-				return nil, connector.NewError(connector.KindBadResponse, op, err)
+				return ChannelDirectorySnapshot{}, connector.NewError(connector.KindBadResponse, op, err)
 			}
 			reported = t
 		}
@@ -771,16 +771,16 @@ func (c *client) fetchChannels(ctx context.Context) ([]ChannelStatus, error) {
 			id, err := item.ID.count()
 			if err != nil || id == 0 {
 				// 没有 ID 的渠道无法被引用，也说明我们对响应形状的理解错了
-				return nil, connector.NewError(connector.KindBadResponse, op,
+				return ChannelDirectorySnapshot{}, connector.NewError(connector.KindBadResponse, op,
 					fmt.Errorf("渠道条目缺少可用的 id 字段"))
 			}
 			status, err := item.Status.count()
 			if err != nil {
-				return nil, connector.NewError(connector.KindBadResponse, op, err)
+				return ChannelDirectorySnapshot{}, connector.NewError(connector.KindBadResponse, op, err)
 			}
 			latency, err := item.ResponseTime.count()
 			if err != nil {
-				return nil, connector.NewError(connector.KindBadResponse, op, err)
+				return ChannelDirectorySnapshot{}, connector.NewError(connector.KindBadResponse, op, err)
 			}
 			if latency < 0 {
 				// 契约要求延迟非负；上游给了负数说明字段含义变了。
@@ -788,7 +788,7 @@ func (c *client) fetchChannels(ctx context.Context) ([]ChannelStatus, error) {
 			}
 			balance, balanceAt, err := channelBalance(item, c.scale)
 			if err != nil {
-				return nil, connector.NewError(connector.KindBadResponse, op, err)
+				return ChannelDirectorySnapshot{}, connector.NewError(connector.KindBadResponse, op, err)
 			}
 			if balance != nil && !balanceAt.IsZero() &&
 				(oldestBal.IsZero() || balanceAt.Before(oldestBal)) {
@@ -821,12 +821,16 @@ func (c *client) fetchChannels(ctx context.Context) ([]ChannelStatus, error) {
 
 	measured, err := c.fetchChannelErrorRates(ctx, op, out, ids)
 	if err != nil {
-		return nil, err
+		return ChannelDirectorySnapshot{}, err
 	}
 
 	observedAt := lastMeta.observedAt(time.Time{})
 	base := watermarkForChannels(observedAt, oldestBal)
+	coveragePartial := false
 	for i := range out {
+		if !measured[i] {
+			coveragePartial = true
+		}
 		out[i].Snapshot = Snapshot{
 			ObservedAt: observedAt,
 			Watermark:  base,
@@ -836,7 +840,27 @@ func (c *client) fetchChannels(ctx context.Context) ([]ChannelStatus, error) {
 			IsPartial: truncated || !measured[i],
 		}
 	}
-	return out, nil
+	reportedCount := reported
+	return ChannelDirectorySnapshot{
+		Snapshot: Snapshot{ObservedAt: observedAt, Watermark: base, IsPartial: truncated || coveragePartial},
+		Completeness: DirectoryCompleteness{
+			Complete:      !truncated && fetched == reported,
+			Truncated:     truncated,
+			ReportedCount: &reportedCount,
+			FetchedCount:  fetched,
+			Evidence:      "reported_count",
+		},
+		CoveragePartial: coveragePartial,
+		Items:           out,
+	}, nil
+}
+
+func (c *client) fetchChannels(ctx context.Context) ([]ChannelStatus, error) {
+	directory, err := c.fetchChannelDirectory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return LegacyChannelStatuses(directory), nil
 }
 
 // channelBalance 按普查报告的判据决定渠道余额是不是「未配置」。

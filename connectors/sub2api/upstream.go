@@ -721,8 +721,8 @@ func daysBack(now, day time.Time, loc *time.Location) int {
 // 渠道（上游账号）余额
 // ---------------------------------------------------------------------------
 
-func (c *client) fetchChannelBalances(ctx context.Context) ([]ChannelBalance, error) {
-	const op = "sub2api.channels.balance_read"
+func (c *client) fetchChannelDirectory(ctx context.Context) (ManagedChannelDirectory, error) {
+	const op = "sub2api.channels.read"
 
 	type accountItem struct {
 		ID     rawAmount `json:"id"`
@@ -740,12 +740,12 @@ func (c *client) fetchChannelBalances(ctx context.Context) ([]ChannelBalance, er
 	}
 
 	var (
-		out       []ChannelBalance
-		fetched   int64
-		total     int64
-		skipped   int
-		truncated bool
-		lastMeta  respMeta
+		out             []ManagedChannel
+		fetched         int64
+		total           int64
+		coveragePartial bool
+		truncated       bool
+		lastMeta        respMeta
 	)
 
 	for page := 1; page <= maxAccountPages; page++ {
@@ -756,18 +756,18 @@ func (c *client) fetchChannelBalances(ctx context.Context) ([]ChannelBalance, er
 		}
 		meta, err := c.get(ctx, op, routeAccounts, query, &env)
 		if err != nil {
-			return nil, err
+			return ManagedChannelDirectory{}, err
 		}
 		lastMeta = meta
 
 		var payload upstreamPage[accountItem]
 		if err := env.decode(op, &payload); err != nil {
-			return nil, err
+			return ManagedChannelDirectory{}, err
 		}
 		if page == 1 {
 			t, err := payload.Total.count()
 			if err != nil {
-				return nil, connector.NewError(connector.KindBadResponse, op, err)
+				return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op, err)
 			}
 			total = t
 		}
@@ -775,31 +775,28 @@ func (c *client) fetchChannelBalances(ctx context.Context) ([]ChannelBalance, er
 			id := strings.TrimSpace(string(item.ID))
 			if id == "" {
 				// 没有 ID 的渠道无法被引用，也说明我们对响应形状的理解错了
-				return nil, connector.NewError(connector.KindBadResponse, op,
+				return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op,
 					fmt.Errorf("账号条目缺少 id 字段"))
 			}
 			remaining, ok, err := accountRemaining(item.QuotaLimit, item.QuotaUsed,
 				item.QuotaDailyLimit, item.QuotaDailyUsed,
 				item.QuotaWeeklyLimit, item.QuotaWeeklyUsed, c.scale)
 			if err != nil {
-				return nil, connector.NewError(connector.KindBadResponse, op, err)
+				return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op, err)
 			}
+			var balance *int64
 			if !ok {
-				// 没配任何额度上限 = 这个账号根本没有"余额"这个概念。
-				// 报成 0 会在看板上变成"这个渠道没钱了"的假警报，
-				// 所以宁可不报，并把"少报了几个"如实标记成部分数据。
-				skipped++
-				continue
+				coveragePartial = true
+			} else {
+				value := remaining
+				balance = &value
 			}
-			out = append(out, ChannelBalance{
+			out = append(out, ManagedChannel{
 				ChannelID:         id,
-				ChannelName:       strings.TrimSpace(item.Name),
-				BalanceMinorUnits: remaining,
+				Name:              strings.TrimSpace(item.Name),
+				Status:            strings.TrimSpace(item.Status),
+				BalanceMinorUnits: balance,
 				Currency:          c.currency,
-				// TokenValid 是**能力证据**：上游认为这个账号当前可用。
-				// 它不是一次实时的凭据验证——那需要发 POST 去打真实上游，
-				// 只读通道上做不到，也不该做（ADR-018 闸 4）。
-				TokenValid: strings.EqualFold(strings.TrimSpace(item.Status), "active"),
 			})
 		}
 		fetched += int64(len(payload.Items))
@@ -818,12 +815,32 @@ func (c *client) fetchChannelBalances(ctx context.Context) ([]ChannelBalance, er
 	snapshot := Snapshot{
 		ObservedAt: observedAt,
 		Watermark:  watermark("", observedAt),
-		IsPartial:  truncated || skipped > 0,
+		IsPartial:  truncated || coveragePartial,
 	}
 	for i := range out {
 		out[i].Snapshot = snapshot
 	}
-	return out, nil
+	reported := total
+	return ManagedChannelDirectory{
+		Snapshot: snapshot,
+		Completeness: DirectoryCompleteness{
+			Complete:      !truncated && fetched == total,
+			Truncated:     truncated,
+			ReportedCount: &reported,
+			FetchedCount:  fetched,
+			Evidence:      "reported_count",
+		},
+		CoveragePartial: coveragePartial,
+		Items:           out,
+	}, nil
+}
+
+func (c *client) fetchChannelBalances(ctx context.Context) ([]ChannelBalance, error) {
+	directory, err := c.fetchChannelDirectory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return LegacyChannelBalances(directory), nil
 }
 
 // accountRemaining 算出一个上游账号的剩余额度。

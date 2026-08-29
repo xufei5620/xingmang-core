@@ -90,7 +90,7 @@ var ErrNewAPIRealClientUnavailable = errors.New(
 // 用工厂而不是直接持有一个 ReadClient：真实实现（XM-0038）需要在每轮同步时
 // 解析 CredentialRef、按连接配置建传输层，那是有生命周期的东西，不该在进程
 // 启动时构造一次然后一直握着——凭据会轮换，握着的连接不会知道。
-type NewAPIClientFactory func(ctx context.Context) (newapi.ReadClient, error)
+type NewAPIClientFactory func(ctx context.Context) (newapi.ReadClientV2, error)
 
 // NewAPIRealConfig 是 real 模式构造真实只读客户端所需的全部输入。
 //
@@ -156,7 +156,7 @@ func (c NewAPIRealConfig) missing() []string {
 func NewNewAPIClientFactory(mode NewAPIMode, cfg NewAPIRealConfig) NewAPIClientFactory {
 	// 形参是 context.Context 而不是具名 ctx：真实客户端的构造不做任何 I/O，
 	// 凭据在首次读取时才解析——那时用的是**请求的** ctx，取消才管用。
-	return func(context.Context) (newapi.ReadClient, error) {
+	return func(context.Context) (newapi.ReadClientV2, error) {
 		switch mode {
 		case NewAPIModeFake:
 			// 固定值即可：Fake 的意义是让上层不被真实凭据阻塞，不是模拟真实波动。
@@ -324,8 +324,15 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 	// 先按成功路径把五条观测算出来，再把失败分组的那几条替换掉。
 	// 这样指标键、来源、新鲜度阈值只有 newapi.ToObservations 一个来源，
 	// 失败路径不会长出第二套指标定义。
+	channels := newapi.LegacyChannelStatuses(reads.directory)
 	observations := newapi.ToObservations(now, w.instanceID, w.environment,
-		reads.stats, reads.orders, reads.channels, reads.usages)
+		reads.stats, reads.orders, channels, reads.usages)
+	for i := range observations {
+		if observations[i].MetricKey == newapi.MetricChannelsStatus {
+			observations[i] = newapi.ToChannelDirectoryObservation(
+				now, w.instanceID, w.environment, reads.directory)
+		}
+	}
 
 	failed := 0
 	for i := range observations {
@@ -368,10 +375,10 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 
 // newapiReads 是一轮同步读到的四组数据。
 type newapiReads struct {
-	stats    newapi.UserStats
-	orders   newapi.OrderSummary
-	channels []newapi.ChannelStatus
-	usages   []newapi.ModelUsage
+	stats     newapi.UserStats
+	orders    newapi.OrderSummary
+	directory newapi.ChannelDirectorySnapshot
+	usages    []newapi.ModelUsage
 }
 
 // newapiReadErrors 记录四组读取各自的结果。
@@ -440,7 +447,7 @@ func (w *NewAPISyncWorker) read(ctx context.Context, day string) (newapiReads, n
 	// 换不到什么——这条链路的瓶颈是上游的 COUNT，不是往返次数。
 	reads.stats, errs.stats = client.UserStats(readCtx)
 	reads.orders, errs.orders = client.DailyOrders(readCtx, day)
-	reads.channels, errs.channels = client.Channels(readCtx)
+	reads.directory, errs.channels = client.ChannelDirectory(readCtx)
 	reads.usages, errs.usages = client.ModelUsages(readCtx, day)
 	return reads, errs
 }

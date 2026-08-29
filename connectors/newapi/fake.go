@@ -66,7 +66,7 @@ type fakeClient struct {
 // 它存在的意义有两层：让 XM-0038 之前的上层开发（平台页、同步任务）不被
 // 真实凭据阻塞；以及作为 contracttest 套件的第一个被测实现——套件本身
 // 要先被验证有效。
-func NewFake(opts FakeOptions) ReadClient {
+func NewFake(opts FakeOptions) ReadClientV2 {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -74,6 +74,27 @@ func NewFake(opts FakeOptions) ReadClient {
 		opts.Version = defaultFakeVersion
 	}
 	return &fakeClient{opts: opts}
+}
+
+func (f *fakeClient) ChannelDirectory(ctx context.Context) (ChannelDirectorySnapshot, error) {
+	items, err := f.Channels(ctx)
+	if err != nil {
+		return ChannelDirectorySnapshot{}, err
+	}
+	reported := int64(len(items))
+	coveragePartial := false
+	for _, item := range items {
+		coveragePartial = coveragePartial || item.IsPartial
+	}
+	return ChannelDirectorySnapshot{
+		Snapshot: f.snapshot(),
+		Completeness: DirectoryCompleteness{
+			Complete: true, ReportedCount: &reported, FetchedCount: reported,
+			Evidence: "fake_reported_count",
+		},
+		CoveragePartial: coveragePartial,
+		Items:           items,
+	}, nil
 }
 
 func (f *fakeClient) now() time.Time { return f.opts.Now().UTC() }

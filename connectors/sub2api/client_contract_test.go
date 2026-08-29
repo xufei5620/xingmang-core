@@ -156,6 +156,7 @@ type fakeUpstream struct {
 	redirectTo string
 	// accountItems / accountTotal 允许单个测试替换渠道数据。
 	accountItems string
+	accountTotal int64
 	// paymentAmount 允许单个测试替换"今天"那条 daily_series 的金额形状
 	// （多币种、缺合约币种、旧版本的标量……）。
 	paymentAmount string
@@ -171,6 +172,7 @@ func startFakeUpstream(t *testing.T, opts sub2api.FakeOptions, tweak ...func(*fa
 	u := &fakeUpstream{
 		t: t, opts: opts,
 		accountItems:  fakeAccountItems,
+		accountTotal:  fakeAccountCount,
 		paymentAmount: fakePaymentAmount,
 	}
 	for _, fn := range tweak {
@@ -394,7 +396,7 @@ func (u *fakeUpstream) handleTrend(w http.ResponseWriter, r *http.Request) {
 
 func (u *fakeUpstream) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	page := queryInt(r, "page", 1)
-	total := fakeAccountCount
+	total := u.accountTotal
 	if u.opts.Partial {
 		total = 99
 	}
@@ -468,7 +470,7 @@ func fakeSecretProvider(t *testing.T, logger *slog.Logger) secrets.SecretProvide
 	return secrets.NewAudited(provider, secrets.NewSlogRecorder(logger), "test")
 }
 
-func (u *fakeUpstream) newClient(t *testing.T, extra ...sub2api.Option) sub2api.ReadClient {
+func (u *fakeUpstream) newClient(t *testing.T, extra ...sub2api.Option) sub2api.ReadClientV2 {
 	t.Helper()
 	opts := append([]sub2api.Option{
 		// 只换"怎么连"：让客户端信任 httptest 的自签证书。
@@ -802,8 +804,20 @@ func TestRealClientMarksPartialWhenChannelsLackQuota(t *testing.T) {
 		  {"id":1,"name":"has-quota","status":"active","quota_limit":100,"quota_used":25},
 		  {"id":2,"name":"no-quota","status":"active","quota_limit":null,"quota_used":null}
 		]`
+		u.accountTotal = 2
 	})
-	balances, err := upstream.newClient(t).ChannelBalances(t.Context())
+	client := upstream.newClient(t)
+	directory, err := client.ChannelDirectory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Items) != 2 || directory.Items[1].BalanceMinorUnits != nil {
+		t.Fatalf("v2 目录必须保留无余额概念账号: %+v", directory)
+	}
+	if !directory.Completeness.Complete || !directory.CoveragePartial {
+		t.Fatalf("目录完整性与余额覆盖率必须分开: %+v", directory)
+	}
+	balances, err := client.ChannelBalances(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -853,7 +867,7 @@ func TestRealClientClassifiesUpstreamStatuses(t *testing.T) {
 // startFakeUpstreamWithHandler 起一个所有路由都走同一个 handler 的假上游。
 func startFakeUpstreamWithHandler(t *testing.T, h http.HandlerFunc) *fakeUpstream {
 	t.Helper()
-	u := &fakeUpstream{t: t, accountItems: fakeAccountItems, paymentAmount: fakePaymentAmount}
+	u := &fakeUpstream{t: t, accountItems: fakeAccountItems, accountTotal: fakeAccountCount, paymentAmount: fakePaymentAmount}
 	u.server = httptest.NewTLSServer(u.record(h))
 	t.Cleanup(u.server.Close)
 	return u

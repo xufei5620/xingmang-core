@@ -269,9 +269,17 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       // 后者见下面的 suppliers 格
       switch (spec.serviceType) {
         case "sub2api":
-          return <ChannelsPanel />;
+          return entry.services.length === 1 ? (
+            <ChannelsPanel serviceId={entry.services[0]?.id} serviceStatus={entry.services[0]?.status} />
+          ) : (
+            <ChannelsPanel />
+          );
         case "newapi":
-          return <NewApiChannelsPanel />;
+          return entry.services.length === 1 ? (
+            <NewApiChannelsPanel serviceId={entry.services[0]?.id} serviceStatus={entry.services[0]?.status} />
+          ) : (
+            <NewApiChannelsPanel />
+          );
         default:
           return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
       }
@@ -320,5 +328,4 @@ function fallbackTabContent(entry: PlatformEntry, tab: PlatformTabSpec): ReactNo
   if (blueprint) return <BlueprintTabView tab={blueprint} />;
   return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
 }
-
 

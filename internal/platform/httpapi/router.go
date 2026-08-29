@@ -38,6 +38,8 @@ type Deps struct {
 	// SavedViews 是 Principal/Environment 自隔离的个人表格视图 Query。
 	// 写入仍只走 ui.saved_view.* Action，不在这里增加第二条写路径。
 	SavedViews SavedViewLister
+	// PlatformChannelBindings 是渠道绑定的候选四态与历史 Query；写入仍走 L1 Action。
+	PlatformChannelBindings PlatformChannelBindingLister
 	// RequestLogs 为 nil 时「请求」两个端点不挂载（504 之外的 404）。
 	//
 	// 允许为 nil 而不是必填：这条链路依赖一个**外挂**系统（reqlog），
@@ -46,9 +48,10 @@ type Deps struct {
 	RequestLogs RequestLogQuerier
 	// PlatformUsers 为 nil 时「用户管理」端点不挂载（XM-0046）。
 	// 与 RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
-	PlatformUsers   PlatformUsersQuerier
-	FinanceAccounts UpstreamAccountLister
-	FinanceProfit   ProfitDailyLister
+	PlatformUsers       PlatformUsersQuerier
+	PlatformUserDetails PlatformUserDetailsQuerier
+	FinanceAccounts     UpstreamAccountLister
+	FinanceProfit       ProfitDailyLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -123,6 +126,15 @@ func NewRouter(d Deps) http.Handler {
 			Get("/alerts", ListAlertsHandler(d.Alerts))
 		api.With(RequireScope(savedviews.ScopeManage)).
 			Get("/ui/saved-views", ListSavedViewsHandler(d.SavedViews))
+		api.With(RequireScope(finance.ScopeRead)).
+			Get("/finance/platform-channel-bindings",
+				ListPlatformChannelBindingsHandler(d.PlatformChannelBindings, d.Metrics))
+		// 渠道级投影同时需要 ops.read（目录/健康）与 finance.read（绑定/经营归属）。
+		// 两个 RequireScope 都保留，让缺哪一项能在响应里明确说出来。
+		api.With(RequireScope(ops.ScopeRead)).
+			With(RequireScope(finance.ScopeRead)).
+			Get("/platforms/{platform}/channels",
+				ListPlatformChannelsHandler(d.PlatformChannelBindings, d.Metrics))
 
 		// 请求详情（XM-0039）。两条端点、两个权限，分级是这条能力的前提：
 		// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。
@@ -147,6 +159,12 @@ func NewRouter(d Deps) http.Handler {
 		//
 		// 没有配用户连接器的部署不挂载这条：前端据此分得清「没接」和「坏了」。
 		if d.PlatformUsers != nil {
+			// 精确详情是 v2 的可选 capability；没有 Reader 时保持端点不存在，
+			// 不把“未接入”伪装成空用户或运行时 500。
+			if d.PlatformUserDetails != nil {
+				api.With(RequireScope(platformusers.ScopeRead)).
+					Get("/platforms/{platform}/users/{userID}", GetPlatformUserHandler(d.PlatformUserDetails))
+			}
 			api.With(RequireScope(platformusers.ScopeRead)).
 				Get("/platforms/{platform}/users", ListPlatformUsersHandler(d.PlatformUsers))
 		}

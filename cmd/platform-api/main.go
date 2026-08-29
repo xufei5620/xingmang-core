@@ -108,6 +108,15 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	// 渠道绑定的确认与解绑是独立的 L1 HUMAN-only Action；注册失败即拒绝启动，
+	// 以免运营看到可用按钮但后端没有审计写路径。
+	channelBindingStore := finance.NewChannelBindingStore(pool, nil)
+	if err := finance.RegisterChannelBindingActions(actionRegistry, channelBindingStore,
+		finance.ChannelInventoryGate{Observations: ops.NewStore(pool)}); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
 	kernel := action.NewKernel(
@@ -180,13 +189,15 @@ func main() {
 		MetricHistory: opsStore,
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
-		AuditEvents: auditStore,
-		Alerts:      alertStore,
-		SavedViews:  savedViewStore,
+		AuditEvents:             auditStore,
+		Alerts:                  alertStore,
+		SavedViews:              savedViewStore,
+		PlatformChannelBindings: channelBindingStore,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
 		// nil 时用户端点不挂载（见 httpapi.Deps.PlatformUsers）
-		PlatformUsers: platformUsersOrNil(platformUserService),
+		PlatformUsers:       platformUsersOrNil(platformUserService),
+		PlatformUserDetails: platformUserDetailsOrNil(platformUserService),
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler
 		// 不各开一条访问路径
 		FinanceAccounts: financeStore,

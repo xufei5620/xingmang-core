@@ -557,6 +557,9 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if !slices.Contains(admin, "ui.saved_view.manage") {
 		t.Fatalf("admin 应含仅限自己的个人 SavedView 权限, got %v", admin)
 	}
+	if slices.Contains(staff, "finance.platform_channel_binding.manage") || slices.Contains(admin, "finance.platform_channel_binding.manage") {
+		t.Fatal("渠道绑定 L1 写权限必须由人工显式授予，不能进入默认角色")
+	}
 	if slices.Contains(admin, "request.content.read") {
 		t.Fatal("admin 默认**不该**含 request.content.read：" +
 			"用户与模型的完整对话要显式授权给客诉/风控岗，" +
