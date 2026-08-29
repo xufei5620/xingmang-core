@@ -117,6 +117,9 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml --env-file deplo
 桌面宽屏和窄屏各一张，以及当前值/历史/预览成功状态。记录脱敏 JSON 摘要与 Worker
 `threshold_revision` 日志，不记录 token、DSN、口令或完整请求体。
 
+已完成的隔离数据库证据见
+`docs/evidence/EV-2026-08-30-runway-disposable-db.md`；它不替代共享栈重建证据。
+
 ## tests_not_run / risks
 
 - 尚未在共享 `xingmang-launch` 栈上重建或重启（由验收线串行执行，避免与 USER0 并发）；
