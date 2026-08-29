@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/money"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
@@ -82,6 +83,53 @@ func TestActionDefinitionsAreValid(t *testing.T) {
 	}
 	if byID[ActionTokenMapSet].Permission == byID[ActionAccountSet].Permission {
 		t.Fatal("维护映射与改登记簿不该共用一个权限")
+	}
+}
+
+// TestAccountSetDeclaresAndAuditsUpstreamMetadata catches either half of the
+// write contract drifting: a field accepted by the Action but omitted from the
+// audit evidence, or evidence code that can never receive the field.
+func TestAccountSetDeclaresAndAuditsUpstreamMetadata(t *testing.T) {
+	reg := action.NewRegistry()
+	if err := RegisterActions(reg, nil); err != nil {
+		t.Fatalf("RegisterActions: %v", err)
+	}
+	def, _, ok := reg.Lookup(ActionAccountSet, actionVersion)
+	if !ok {
+		t.Fatal("finance.upstream_account.set 未注册")
+	}
+	wantFields := map[string]bool{
+		"upstream_name": false, "upstream_contact": false,
+		"upstream_group": false, "group_rate": false,
+	}
+	for _, field := range def.Schema.Fields {
+		if _, wanted := wantFields[field.Name]; wanted {
+			if field.Type != action.FieldString {
+				t.Fatalf("Action schema %s 类型 = %s, want string", field.Name, field.Type)
+			}
+			wantFields[field.Name] = true
+		}
+	}
+	for field, found := range wantFields {
+		if !found {
+			t.Fatalf("Action schema 缺少 %s", field)
+		}
+	}
+
+	a := UpstreamAccount{
+		UpstreamName:    "Relay A",
+		UpstreamContact: "运营群 @relay-a",
+		UpstreamGroup:   "gpt-main",
+		GroupRate:       money.MustParseRatio("1.25"),
+	}
+	summary := accountSummary(a)
+	for field, want := range map[string]string{
+		"upstream_name": "Relay A", "upstream_contact": "运营群 @relay-a",
+		"upstream_group": "gpt-main", "group_rate": "1.25",
+	} {
+		if got := summary[field]; got != want {
+			t.Fatalf("审计摘要 %s = %#v, want %q", field, got, want)
+		}
 	}
 }
 

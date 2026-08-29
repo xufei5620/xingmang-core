@@ -70,18 +70,22 @@ func sampleAccount() (finance.UpstreamAccount, []finance.TokenMapping) {
 	id := uuid.New()
 	now := time.Date(2026, 8, 28, 3, 0, 0, 0, time.UTC)
 	return finance.UpstreamAccount{
-		ID:            id,
-		SystemType:    finance.SystemSub2API,
-		AccessMethod:  finance.AccessUpstreamKey,
-		BaseURL:       "https://api.example.test",
-		CredentialRef: financeCredentialRef,
-		RechargeRatio: money.MustParseRatio("1.15"),
-		Currency:      "USD",
-		BusinessDayTZ: "+08:00",
-		Status:        finance.StatusActive,
-		Environment:   "development",
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:              id,
+		SystemType:      finance.SystemSub2API,
+		AccessMethod:    finance.AccessUpstreamKey,
+		UpstreamName:    "Relay A",
+		UpstreamContact: "运营群 @relay-a",
+		UpstreamGroup:   "gpt-main",
+		BaseURL:         "https://api.example.test",
+		CredentialRef:   financeCredentialRef,
+		RechargeRatio:   money.MustParseRatio("1.15"),
+		GroupRate:       money.MustParseRatio("1.25"),
+		Currency:        "USD",
+		BusinessDayTZ:   "+08:00",
+		Status:          finance.StatusActive,
+		Environment:     "development",
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}, []finance.TokenMapping{{
 		UpstreamAccountID: id,
 		UpstreamTokenID:   "tok-1",
@@ -117,8 +121,12 @@ func TestListUpstreamAccountsReturnsRegistry(t *testing.T) {
 			ID               string `json:"id"`
 			SystemType       string `json:"system_type"`
 			AccessMethod     string `json:"access_method"`
+			UpstreamName     string `json:"upstream_name"`
+			UpstreamContact  string `json:"upstream_contact"`
+			UpstreamGroup    string `json:"upstream_group"`
 			CredentialRef    string `json:"credential_ref"`
 			RechargeRatio    string `json:"recharge_ratio"`
+			GroupRate        string `json:"group_rate"`
 			RechargeCostRate string `json:"recharge_cost_rate"`
 			BusinessDayTZ    string `json:"business_day_tz"`
 			Metered          bool   `json:"metered"`
@@ -140,10 +148,17 @@ func TestListUpstreamAccountsReturnsRegistry(t *testing.T) {
 	if item.CredentialRef != financeCredentialRef {
 		t.Fatalf("credential_ref = %q", item.CredentialRef)
 	}
+	if item.UpstreamName != "Relay A" || item.UpstreamContact != "运营群 @relay-a" ||
+		item.UpstreamGroup != "gpt-main" {
+		t.Fatalf("上游元数据未完整返回: %+v", item)
+	}
 	// 倍率必须是**字符串**：JSON 数字在前端一路解成 double，
 	// 1.15 到了页面上就变成 1.1499999999999999（宪法 13 条）
 	if item.RechargeRatio != "1.15" {
 		t.Fatalf("recharge_ratio = %q, want \"1.15\"", item.RechargeRatio)
+	}
+	if item.GroupRate != "1.25" {
+		t.Fatalf("group_rate = %q, want \"1.25\"", item.GroupRate)
 	}
 	// 充值成本率是**现算的展示投影**（§3.4），1/1.15 = 0.869565…
 	if item.RechargeCostRate != "0.869565" {
@@ -182,6 +197,10 @@ func TestRechargeRatioIsSerializedAsString(t *testing.T) {
 	}
 	if strings.Contains(raw, `"recharge_ratio":1.15`) {
 		t.Fatalf("倍率被序列化成了 JSON 数字——前端会把它解成 double: %s", raw)
+	}
+	if !strings.Contains(raw, `"group_rate":"1.25"`) ||
+		strings.Contains(raw, `"group_rate":1.25`) {
+		t.Fatalf("分组倍率必须是定点字符串，实际响应: %s", raw)
 	}
 }
 

@@ -242,20 +242,23 @@ type FinanceTokenMap struct {
 }
 
 type FinanceUpstreamAccount struct {
-	ID            uuid.UUID
-	SystemType    string
-	AccessMethod  string
-	BaseUrl       *string
-	CredentialRef string
-	RechargeRatio pgtype.Numeric
-	Currency      string
-	BusinessDayTz string
-	Status        string
-	Environment   string
-	CreatedAt     pgtype.Timestamptz
-	UpdatedAt     pgtype.Timestamptz
-	PlatformID    *string
-	GroupRate     pgtype.Numeric
+	ID              uuid.UUID
+	SystemType      string
+	AccessMethod    string
+	BaseUrl         *string
+	CredentialRef   string
+	RechargeRatio   pgtype.Numeric
+	Currency        string
+	BusinessDayTz   string
+	Status          string
+	Environment     string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+	PlatformID      *string
+	GroupRate       pgtype.Numeric
+	UpstreamName    *string
+	UpstreamContact *string
+	UpstreamGroup   *string
 }
 
 type OpsMetricObservation struct {

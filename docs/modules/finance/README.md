@@ -1166,6 +1166,7 @@ XM_FINANCE_RUNWAY_CRIT_DAYS   默认 5
 | `web/apps/admin-web/src/api/finance.ts` | 看板供数的前端客户端 |
 | `web/apps/admin-web/src/components/FinanceSummaryCards.tsx` | 平台概览的成本三卡 + 贡献利润占位 |
 | `db/migrations/000012_finance_group_rate.{up,down}.sql` | 分组倍率存储（一个什么都不做的字段） |
+| `db/migrations/000014_finance_upstream_metadata.{up,down}.sql` | 上游名称 / 联系人 / 已接入分组三项可空当前元数据；不改变供应商归并与金额口径 |
 | `internal/platform/finance/runway.go` | 可用天数计算 + **唯一那份阈值解析** |
 | `internal/platform/alerts/rules.go` | 可用天数告警（R5，本包唯一一条不读 ops 观测的规则） |
 | `contracts/actions/finance.*.json` | Action 契约 |

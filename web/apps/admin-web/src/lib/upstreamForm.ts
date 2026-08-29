@@ -17,9 +17,13 @@ export interface UpstreamFormValues {
   upstream_account_id: string;
   system_type: string;
   access_method: string;
+  upstream_name: string;
+  upstream_contact: string;
+  upstream_group: string;
   base_url: string;
   credential_ref: string;
   recharge_ratio: string;
+  group_rate: string;
   currency: string;
   business_day_tz: string;
   platform_id: string;
@@ -33,9 +37,13 @@ const LABELS: Record<UpstreamFormField, string> = {
   upstream_account_id: "账号 ID",
   system_type: "系统类型",
   access_method: "接入方式",
+  upstream_name: "上游名称",
+  upstream_contact: "上游联系人",
+  upstream_group: "上游分组",
   base_url: "上游网址",
   credential_ref: "凭据引用",
   recharge_ratio: "充值倍率",
+  group_rate: "分组倍率",
   currency: "币种",
   business_day_tz: "业务日切时区",
   platform_id: "接入平台",
@@ -77,9 +85,13 @@ export const EMPTY_UPSTREAM_FORM: UpstreamFormValues = {
   upstream_account_id: "",
   system_type: "",
   access_method: "",
+  upstream_name: "",
+  upstream_contact: "",
+  upstream_group: "",
   base_url: "",
   credential_ref: "",
   recharge_ratio: "",
+  group_rate: "",
   currency: DEFAULT_CURRENCY,
   business_day_tz: DEFAULT_BUSINESS_DAY_TZ,
   platform_id: "",
@@ -191,6 +203,13 @@ export function validateUpstreamForm(values: UpstreamFormValues): UpstreamFormEr
     if (problem) errors.recharge_ratio = problem;
   }
 
+  // 分组倍率对三种接入方式都可选，但填了就必须是正的定点十进制。
+  // 它与 recharge_ratio 的「计量必填 / 订阅禁填」分叉完全无关。
+  if (v.group_rate) {
+    const problem = validateRatioText(v.group_rate);
+    if (problem) errors.group_rate = problem;
+  }
+
   if (v.currency && !CURRENCY.test(v.currency)) {
     errors.currency = "币种须为三位大写 ISO 4217 码，如 USD";
   }
@@ -229,9 +248,13 @@ export function buildUpstreamParams(values: UpstreamFormValues): Record<string, 
   const params: Record<string, string> = {
     system_type: v.system_type,
     access_method: v.access_method,
+    upstream_name: v.upstream_name,
+    upstream_contact: v.upstream_contact,
+    upstream_group: v.upstream_group,
     credential_ref: v.credential_ref,
     base_url: v.base_url,
     recharge_ratio: v.recharge_ratio,
+    group_rate: v.group_rate,
     currency: v.currency,
     business_day_tz: v.business_day_tz,
     platform_id: v.platform_id,

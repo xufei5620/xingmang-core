@@ -20,6 +20,10 @@ function form(over: Partial<UpstreamFormValues> = {}): UpstreamFormValues {
     credential_ref: "secret://sub2api/prod-key",
     base_url: "https://relay.example.com",
     recharge_ratio: "1.15",
+    group_rate: "1.25",
+    upstream_name: "Relay A",
+    upstream_contact: "运营群 @relay-a",
+    upstream_group: "gpt-main",
     platform_id: "sub2api",
     ...over,
   };
@@ -101,6 +105,15 @@ describe("倍率与接入方式的三套要求", () => {
   });
 });
 
+describe("分组倍率", () => {
+  it("沿用定点十进制校验，但不受接入方式的倍率分叉约束", () => {
+    expect(validateUpstreamForm(form({ group_rate: "1.25" })).group_rate).toBeUndefined();
+    expect(validateUpstreamForm(form({ group_rate: "" })).group_rate).toBeUndefined();
+    expect(validateUpstreamForm(form({ group_rate: "0" })).group_rate).toContain("不能是 0");
+    expect(validateUpstreamForm(form({ group_rate: "1e3" })).group_rate).toBeTruthy();
+  });
+});
+
 describe("上游网址校验", () => {
   it("必须 https", () => {
     expect(validateUpstreamForm(form({ base_url: "http://relay.example.com" })).base_url).toContain(
@@ -143,9 +156,20 @@ describe("其余字段", () => {
 describe("组装 upstream_account.set 的参数", () => {
   it("可选字段留空也照传空串：这个 Action 是整行替换", () => {
     // 漏传等于清空，所以「表单里看到什么」必须与「写进去什么」一致
-    const params = buildUpstreamParams(form({ base_url: "", platform_id: "" }));
+    const params = buildUpstreamParams(form({
+      base_url: "",
+      platform_id: "",
+      upstream_name: "",
+      upstream_contact: "",
+      upstream_group: "",
+      group_rate: "",
+    }));
     expect(params.base_url).toBe("");
     expect(params.platform_id).toBe("");
+    expect(params.upstream_name).toBe("");
+    expect(params.upstream_contact).toBe("");
+    expect(params.upstream_group).toBe("");
+    expect(params.group_rate).toBe("");
     expect(Object.keys(params).sort()).toEqual(
       [
         "access_method",
@@ -153,10 +177,14 @@ describe("组装 upstream_account.set 的参数", () => {
         "business_day_tz",
         "credential_ref",
         "currency",
+        "group_rate",
         "platform_id",
         "recharge_ratio",
         "status",
         "system_type",
+        "upstream_contact",
+        "upstream_group",
+        "upstream_name",
       ].sort(),
     );
   });
@@ -169,8 +197,16 @@ describe("组装 upstream_account.set 的参数", () => {
   });
 
   it("值先 trim：末尾一个空格换来一个 400，人还得自己去数空格", () => {
-    const params = buildUpstreamParams(form({ credential_ref: "  secret://a/b  " }));
+    const params = buildUpstreamParams(form({
+      credential_ref: "  secret://a/b  ",
+      upstream_name: "  Relay A  ",
+      upstream_contact: "  运营群 @relay-a  ",
+      upstream_group: "  gpt-main  ",
+    }));
     expect(params.credential_ref).toBe("secret://a/b");
+    expect(params.upstream_name).toBe("Relay A");
+    expect(params.upstream_contact).toBe("运营群 @relay-a");
+    expect(params.upstream_group).toBe("gpt-main");
   });
 });
 

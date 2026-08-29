@@ -191,6 +191,9 @@ export function UpstreamAccountDialog({ platform, account, onDone }: UpstreamAcc
           )}
         </FormField>
 
+        {text("upstream_name", false, "平台手工登记的显示名称；留空会明确显示未接入")}
+        {text("upstream_contact", false, "业务联系人或沟通渠道；不要填写密码、Token 或其他凭据")}
+        {text("upstream_group", false, "这个账号当前接入的上游分组；留空 = 未接入")}
         {text(
           "credential_ref",
           true,
@@ -212,6 +215,20 @@ export function UpstreamAccountDialog({ platform, account, onDone }: UpstreamAcc
             onChange={(e) => set("recharge_ratio")(e.target.value)}
             // inputMode 而不是 type="number"：数字输入框会按浏览器区域设置
             // 解释小数点，并允许 1e3 这样的写法，而后端要的是定点十进制字符串
+            inputMode="decimal"
+          />
+        </FormField>
+
+        <FormField
+          label={upstreamFieldLabel("group_rate")}
+          htmlFor={`${fieldPrefix}-group_rate`}
+          {...(errors.group_rate ? { error: errors.group_rate } : {})}
+          hint="定点十进制，最多 9 位小数，必须为正；仅作分组展示，绝不参与成本计算"
+        >
+          <Input
+            value={values.group_rate}
+            invalid={Boolean(errors.group_rate)}
+            onChange={(e) => set("group_rate")(e.target.value)}
             inputMode="decimal"
           />
         </FormField>
@@ -306,9 +323,13 @@ function initialValues(platform: string, account?: UpstreamAccountItem): Upstrea
     upstream_account_id: account.id,
     system_type: account.system_type,
     access_method: account.access_method,
+    upstream_name: account.upstream_name,
+    upstream_contact: account.upstream_contact,
+    upstream_group: account.upstream_group,
     base_url: account.base_url,
     credential_ref: account.credential_ref,
     recharge_ratio: account.recharge_ratio,
+    group_rate: account.group_rate,
     currency: account.currency,
     business_day_tz: account.business_day_tz,
     platform_id: account.platform_id,

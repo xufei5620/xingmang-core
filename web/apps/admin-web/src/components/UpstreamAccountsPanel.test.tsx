@@ -15,8 +15,12 @@ function account(over: Record<string, unknown> = {}) {
     system_type: "sub2api",
     access_method: "upstream_key",
     base_url: "https://relay-a.example.com",
+    upstream_name: "Relay A",
+    upstream_contact: "运营群 @relay-a",
+    upstream_group: "gpt-main",
     credential_ref: SAMPLE_REF,
     recharge_ratio: "1.15",
+    group_rate: "1.25",
     recharge_cost_rate: "0.869565217",
     currency: "USD",
     business_day_tz: "+08:00",
@@ -47,12 +51,43 @@ function upstreamSummary(over: Record<string, unknown> = {}) {
   return {
     id: "11111111-1111-4111-8111-111111111111",
     name: "relay-a",
+    supplier_key: "sub2api|https://relay-a.example.com",
     system_type: "sub2api",
+    access_method: "upstream_key",
+    base_url: "https://relay-a.example.com",
+    recharge_cost_rate: "0.869565217",
+    group_rate: "1.25",
+    credential_ref: SAMPLE_REF,
+    status: "active",
+    token_count: 3,
     supply_cost: { amount_minor: "70000000", currency: "CNY", scale: 6 },
     gross_profit: { amount_minor: "30000000", currency: "CNY", scale: 6 },
     usage_revenue: { amount_minor: "100000000", currency: "CNY", scale: 6 },
     gross_margin: "0.300000",
-    observed: { cost_observed_at: "2026-08-28T09:00:00Z" },
+    coverage: {
+      row_count: 1,
+      revenue_known_rows: 1,
+      cost_known_rows: 1,
+      account_grain_rows: 0,
+      mixed_currency: false,
+      complete: true,
+    },
+    observed: {
+      cost_observed_at: "2026-08-28T09:00:00Z",
+      revenue_observed_at: "2026-08-28T09:00:00Z",
+      updated_at: "2026-08-28T09:05:00Z",
+      source: "finance.profit_daily",
+    },
+    runway: {
+      days: 12,
+      level: "warning",
+      reason: "",
+      window_days: 7,
+      covered_days: 7,
+      daily_average: { amount_minor: "10000000", currency: "CNY", scale: 6 },
+      balance: { amount_minor: "123450000", currency: "CNY", scale: 6 },
+      balance_observed_at: "2026-08-28T08:30:00Z",
+    },
     ...over,
   };
 }
@@ -106,13 +141,14 @@ describe("上游管理（成本登记簿的 UI）", () => {
       account({
         id: "22222222-2222-4222-8222-222222222222",
         base_url: "https://relay-b.example.com",
+        upstream_name: "Relay B",
         platform_id: "newapi",
       }),
     ]);
     renderPanel("sub2api");
-    expect(await screen.findByText("relay-a.example.com")).toBeTruthy();
+    expect(await screen.findByText("https://relay-a.example.com")).toBeTruthy();
     // 归 newapi 的那条不该出现在 sub2api 页上
-    expect((await findTable()).queryByText("relay-b.example.com")).toBeNull();
+    expect((await findTable()).queryByText("https://relay-b.example.com")).toBeNull();
     expect((await findTable()).queryAllByText("newapi")).toHaveLength(0);
   });
 
@@ -124,10 +160,70 @@ describe("上游管理（成本登记簿的 UI）", () => {
     expect((await findTable()).getByText("未配对")).toBeTruthy();
   });
 
+  it("登记簿元数据按证据展示，不再用网址主机名冒充上游名称", async () => {
+    renderPanel();
+    const table = await findTable();
+    const row = within(table.getByText("Relay A").closest("tr") as HTMLElement);
+    expect(row.getByText("https://relay-a.example.com")).toBeTruthy();
+    expect(row.getByText("运营群 @relay-a")).toBeTruthy();
+    expect(row.getByText("gpt-main")).toBeTruthy();
+    expect(row.getByText(/倍率 1\.25×/)).toBeTruthy();
+  });
+
+  it("元数据缺失明确显示未接入，分组倍率缺失显示破折号", async () => {
+    stubAccounts([account({
+      upstream_name: "",
+      upstream_contact: "",
+      upstream_group: "",
+      group_rate: "",
+    })]);
+    renderPanel();
+    const table = await findTable();
+    const row = within(table.getByText("https://relay-a.example.com").closest("tr") as HTMLElement);
+    expect(row.getAllByText("未接入").length).toBeGreaterThanOrEqual(3);
+    expect(row.getByText("倍率 —")).toBeTruthy();
+  });
+
+  it("按 upstream_account.id 关联 KEY 数、余额、可用天数与观测证据", async () => {
+    stubAccounts([account()], [upstreamSummary()]);
+    renderPanel();
+    const table = await findTable();
+    const row = within(table.getByText("Relay A").closest("tr") as HTMLElement);
+    expect(row.getByText("3 个 KEY")).toBeTruthy();
+    expect(row.getByText("¥123.45")).toBeTruthy();
+    expect(row.getByText("约 12 天")).toBeTruthy();
+    expect(row.getByText(/余额观测.*2026-08-28/)).toBeTruthy();
+  });
+
+  it("订阅账号显示一账号，且有效期因汇总无该字段而诚实标待接入", async () => {
+    stubAccounts(
+      [account({ access_method: "subscription_account", metered: false, recharge_ratio: "" })],
+      [upstreamSummary({
+        access_method: "subscription_account",
+        token_count: 0,
+        runway: {
+          days: null,
+          level: "",
+          reason: "not_applicable",
+          window_days: 0,
+          covered_days: 0,
+          daily_average: null,
+          balance: null,
+          balance_observed_at: null,
+        },
+      })],
+    );
+    renderPanel();
+    const table = await findTable();
+    const row = within(table.getByText("Relay A").closest("tr") as HTMLElement);
+    expect(row.getByText("1 个账号")).toBeTruthy();
+    expect(row.getByText("有效期待接入")).toBeTruthy();
+  });
+
   it("汇总里没有这一条时显示「未接入」，**不显示 0**", async () => {
     // ¥0.00 会被读成「这个上游这期没花钱」，而事实是这个窗口还没有汇总数
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     expect(screen.getByText("本期我方消耗")).toBeTruthy();
     expect(screen.getAllByText("未接入").length).toBeGreaterThan(0);
     expect(screen.queryByText("¥0.00")).toBeNull();
@@ -137,24 +233,171 @@ describe("上游管理（成本登记簿的 UI）", () => {
   it("汇总接上之后两格显示金额，并说清观测时刻（§9.1）", async () => {
     stubAccounts([account()], [upstreamSummary()]);
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     // scale-6 微单位降到币种最小单位：70000000 = ¥70.00。计数格与行内各一处
     expect(screen.getAllByText("¥70.00").length).toBe(2);
     expect(screen.getAllByText("¥30.00").length).toBe(1);
     expect(screen.getAllByText(/成本观测于 2026-08-28T09:00:00Z/).length).toBeGreaterThan(0);
   });
 
+  it("成本全覆盖但毛利只覆盖部分账号时，两张卡各报自己的覆盖率", async () => {
+    const secondID = "55555555-5555-4555-8555-555555555555";
+    stubAccounts(
+      [
+        account(),
+        account({
+          id: secondID,
+          base_url: "https://relay-c.example.com",
+          upstream_name: "Relay C",
+        }),
+      ],
+      [
+        upstreamSummary(),
+        upstreamSummary({
+          id: secondID,
+          supply_cost: { amount_minor: "20000000", currency: "CNY", scale: 6 },
+          usage_revenue: null,
+          gross_profit: null,
+          observed: {
+            cost_observed_at: "1999-01-01T00:00:00Z",
+            revenue_observed_at: "1999-01-01T00:00:00Z",
+            updated_at: "1999-01-01T00:00:00Z",
+            source: "finance.profit_daily",
+          },
+        }),
+      ],
+    );
+    renderPanel();
+    await screen.findByText("https://relay-c.example.com");
+
+    const costTile = within(screen.getByText("本期我方消耗").closest("article") as HTMLElement);
+    expect(costTile.getByText(/含全部 2 个账号/)).toBeTruthy();
+    expect(costTile.queryByText("覆盖不全")).toBeNull();
+
+    const profitTile = within(screen.getByText("本期整体毛利").closest("article") as HTMLElement);
+    expect(profitTile.getByText(/只含 2 个账号里有汇总的 1 个/)).toBeTruthy();
+    expect(profitTile.getByText("覆盖不全")).toBeTruthy();
+    // 没参与毛利合计的行不能用自己的时间替这笔部分和背书。
+    expect(profitTile.queryByText(/1999-01-01/)).toBeNull();
+  });
+
+  it("毛利证据取参与行成本与收入两侧的最旧实际时刻，成本卡仍只看成本侧", async () => {
+    const costObserved = "2026-08-28T01:00:00-07:00"; // 08:00Z
+    const revenueObserved = "2026-08-28T08:30:00+02:00"; // 06:30Z，更旧但词典序更大
+    stubAccounts([account()], [upstreamSummary({
+      observed: {
+        cost_observed_at: costObserved,
+        revenue_observed_at: revenueObserved,
+        updated_at: "2026-08-28T09:00:00Z",
+        source: "finance.profit_daily",
+      },
+    })]);
+    renderPanel();
+    await screen.findByText("https://relay-a.example.com");
+
+    const costTile = within(screen.getByText("本期我方消耗").closest("article") as HTMLElement);
+    expect(costTile.getByText(new RegExp(costObserved))).toBeTruthy();
+    expect(costTile.queryByText((_, element) =>
+      element?.tagName === "P" && Boolean(element.textContent?.includes(revenueObserved)),
+    )).toBeNull();
+
+    const profitTile = within(screen.getByText("本期整体毛利").closest("article") as HTMLElement);
+    expect(profitTile.getByText((_, element) =>
+      element?.tagName === "P" && Boolean(element.textContent?.includes(revenueObserved)),
+    )).toBeTruthy();
+    expect(profitTile.queryByText((_, element) =>
+      element?.tagName === "P" && Boolean(element.textContent?.includes(costObserved)),
+    )).toBeNull();
+  });
+
+  it("参与毛利的行缺任一侧观测时间时明确标记证据不完整", async () => {
+    const costObserved = "2026-08-28T09:00:00Z";
+    stubAccounts([account()], [upstreamSummary({
+      observed: {
+        cost_observed_at: costObserved,
+        revenue_observed_at: null,
+        updated_at: "2026-08-28T09:05:00Z",
+        source: "finance.profit_daily",
+      },
+    })]);
+    renderPanel();
+    await screen.findByText("https://relay-a.example.com");
+
+    const costTile = within(screen.getByText("本期我方消耗").closest("article") as HTMLElement);
+    expect(costTile.getByText(new RegExp(costObserved))).toBeTruthy();
+    expect(costTile.queryByText(/观测不完整/)).toBeNull();
+
+    const profitTile = within(screen.getByText("本期整体毛利").closest("article") as HTMLElement);
+    expect(profitTile.getByText(/观测不完整/)).toBeTruthy();
+    expect(profitTile.queryByText(/成本\/收入最旧观测于/)).toBeNull();
+  });
+
+  it("runway 天数可用与原因分支都显示窗口覆盖证据", async () => {
+    const secondID = "55555555-5555-4555-8555-555555555555";
+    stubAccounts(
+      [
+        account(),
+        account({
+          id: secondID,
+          base_url: "https://relay-c.example.com",
+          upstream_name: "Relay C",
+        }),
+      ],
+      [
+        upstreamSummary({
+          runway: {
+            days: 12,
+            level: "warning",
+            reason: "",
+            window_days: 7,
+            covered_days: 3,
+            daily_average: { amount_minor: "10000000", currency: "CNY", scale: 6 },
+            balance: { amount_minor: "123450000", currency: "CNY", scale: 6 },
+            balance_observed_at: "2026-08-28T08:30:00Z",
+          },
+        }),
+        upstreamSummary({
+          id: secondID,
+          runway: {
+            days: null,
+            level: "",
+            reason: "no_consumption",
+            window_days: 7,
+            covered_days: 2,
+            daily_average: null,
+            balance: null,
+            balance_observed_at: null,
+          },
+        }),
+      ],
+    );
+    renderPanel();
+    const table = await findTable();
+    const first = within(table.getByText("Relay A").closest("tr") as HTMLElement);
+    expect(first.getByText("覆盖 3/7 天")).toBeTruthy();
+    expect(first.getByText(/余额观测.*2026-08-28/)).toBeTruthy();
+
+    const second = within(table.getByText("Relay C").closest("tr") as HTMLElement);
+    expect(second.getByText("覆盖 2/7 天")).toBeTruthy();
+    expect(second.getByText(/窗口内没有已知消耗/)).toBeTruthy();
+  });
+
   it("只有部分账号有汇总时标「覆盖不全」——只算了一半的合计看着和算全的一样", async () => {
     stubAccounts(
       [
         account(),
-        account({ id: "55555555-5555-4555-8555-555555555555", base_url: "https://relay-c.example.com" }),
+        account({
+          id: "55555555-5555-4555-8555-555555555555",
+          base_url: "https://relay-c.example.com",
+          upstream_name: "Relay C",
+        }),
       ],
       [upstreamSummary()],
     );
     renderPanel();
-    await screen.findByText("relay-c.example.com");
-    expect(screen.getAllByText("覆盖不全").length).toBe(2);
+    await screen.findByText("https://relay-c.example.com");
+    // 两个金额格 + 新增 KEY/账号格，各自都必须暴露覆盖不全。
+    expect(screen.getAllByText("覆盖不全").length).toBe(3);
     expect(screen.getAllByText(/只含 2 个账号里有汇总的 1 个/).length).toBe(2);
   });
 
@@ -163,7 +406,11 @@ describe("上游管理（成本登记簿的 UI）", () => {
     stubAccounts(
       [
         account(),
-        account({ id: "55555555-5555-4555-8555-555555555555", base_url: "https://relay-c.example.com" }),
+        account({
+          id: "55555555-5555-4555-8555-555555555555",
+          base_url: "https://relay-c.example.com",
+          upstream_name: "Relay C",
+        }),
       ],
       [
         upstreamSummary(),
@@ -175,7 +422,7 @@ describe("上游管理（成本登记簿的 UI）", () => {
       ],
     );
     renderPanel();
-    await screen.findByText("relay-c.example.com");
+    await screen.findByText("https://relay-c.example.com");
     expect(screen.getAllByText(/币种不一致，合计没有意义/).length).toBe(2);
   });
 
@@ -183,7 +430,11 @@ describe("上游管理（成本登记簿的 UI）", () => {
     stubAccounts(
       [
         account(),
-        account({ id: "55555555-5555-4555-8555-555555555555", base_url: "https://relay-c.example.com" }),
+        account({
+          id: "55555555-5555-4555-8555-555555555555",
+          base_url: "https://relay-c.example.com",
+          upstream_name: "Relay C",
+        }),
       ],
       [upstreamSummary()],
     );
@@ -205,30 +456,30 @@ describe("上游管理（成本登记簿的 UI）", () => {
       ),
     );
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     expect(screen.getAllByText("读取失败").length).toBe(2);
     // 登记簿本身读到了，表照画——两个查询的失败不该互相拖累
-    expect((await findTable()).getByText("relay-a.example.com")).toBeTruthy();
+    expect((await findTable()).getByText("https://relay-a.example.com")).toBeTruthy();
   });
 
-  it("§9.6 要求但后端给不出的五个字段，在页面上说清楚被什么挡着", async () => {
+  it("说明当前账号粒度以及仍未接入的 supplier/group 与订阅有效期边界", async () => {
     renderPanel();
-    await screen.findByText("relay-a.example.com");
-    const note = screen.getByText(/联系人/);
-    expect(note.textContent).toContain("XM-0037d");
-    expect(note.textContent).toContain("XM-0037a");
+    await screen.findByText("https://relay-a.example.com");
+    const note = screen.getByText(/当前一行仍是一个上游账号/);
+    expect(note.textContent).toContain("供应商/分组实体");
+    expect(note.textContent).toContain("订阅有效期");
   });
 
   it("凭据只显示状态，表格里不出现引用值本身", async () => {
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     expect((await findTable()).getAllByText("已配置").length).toBeGreaterThan(0);
     expect((await findTable()).queryByText(SAMPLE_REF)).toBeNull();
   });
 
   it("计量型显示成本率与倍率两行——只给一个数，人不知道它是除数还是乘数", async () => {
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     expect((await findTable()).getByText(/0\.869565217/)).toBeTruthy();
     expect((await findTable()).getByText(/倍率 1\.15/)).toBeTruthy();
   });
@@ -303,7 +554,7 @@ describe("上游管理（成本登记簿的 UI）", () => {
 
   it("计量型给「改倍率」入口，且改倍率必须填理由", async () => {
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     fireEvent.click((await findTable()).getByRole("button", { name: "改倍率" }));
 
     const dialog = within(await screen.findByRole("dialog"));
@@ -314,7 +565,7 @@ describe("上游管理（成本登记簿的 UI）", () => {
 
   it("展开一行能看到令牌映射，凭据仍然只是状态", async () => {
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     fireEvent.click((await findTable()).getByRole("button", { name: "详情" }));
 
     expect(await screen.findByText("tok-1")).toBeTruthy();
@@ -327,7 +578,7 @@ describe("上游管理（成本登记簿的 UI）", () => {
   it("计量型的展开区不画订阅批次与代理资产两张空表", async () => {
     // 给计量型也画两张空表，会让人以为它漏配了
     renderPanel();
-    await screen.findByText("relay-a.example.com");
+    await screen.findByText("https://relay-a.example.com");
     fireEvent.click((await findTable()).getByRole("button", { name: "详情" }));
     expect(await screen.findByText(/这是计量型账号/)).toBeTruthy();
     expect(screen.queryByText("订阅批次")).toBeNull();

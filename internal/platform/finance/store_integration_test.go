@@ -135,6 +135,62 @@ func TestRechargeRatioSurvivesNumericRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpstreamMetadataAndGroupRateRoundTrip catches a full-row edit silently
+// dropping the human-facing upstream metadata or the display-only group rate.
+// The three text fields are nullable current metadata; clearing them must land
+// as SQL NULL rather than a placeholder or a blank business value.
+func TestUpstreamMetadataAndGroupRateRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	s := finance.NewStore(pool)
+	ctx := context.Background()
+
+	in := integrationAccount()
+	in.UpstreamName = "Relay A"
+	in.UpstreamContact = "运营群 @relay-a"
+	in.UpstreamGroup = "gpt-main"
+	in.GroupRate = money.MustParseRatio("1.25")
+
+	created := mustCreate(t, s, in)
+	reloaded, err := s.GetAccount(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("重读账号失败: %v", err)
+	}
+	if reloaded.UpstreamName != "Relay A" ||
+		reloaded.UpstreamContact != "运营群 @relay-a" ||
+		reloaded.UpstreamGroup != "gpt-main" {
+		t.Fatalf("上游元数据往返出错: %+v", reloaded)
+	}
+	if got := reloaded.GroupRate.String(); got != "1.25" {
+		t.Fatalf("group_rate 往返 = %q, want 1.25", got)
+	}
+
+	reloaded.UpstreamName = ""
+	reloaded.UpstreamContact = ""
+	reloaded.UpstreamGroup = ""
+	reloaded.GroupRate = money.Ratio{}
+	cleared, err := s.UpdateAccount(ctx, reloaded)
+	if err != nil {
+		t.Fatalf("清空上游元数据失败: %v", err)
+	}
+	if cleared.UpstreamName != "" || cleared.UpstreamContact != "" ||
+		cleared.UpstreamGroup != "" || !cleared.GroupRate.IsZero() {
+		t.Fatalf("清空后仍有值: %+v", cleared)
+	}
+
+	var nameNull, contactNull, groupNull, rateNull bool
+	if err := pool.QueryRow(ctx, `
+		SELECT upstream_name IS NULL, upstream_contact IS NULL,
+		       upstream_group IS NULL, group_rate IS NULL
+		FROM finance.upstream_account WHERE id = $1`, created.ID).
+		Scan(&nameNull, &contactNull, &groupNull, &rateNull); err != nil {
+		t.Fatalf("核对 SQL NULL 失败: %v", err)
+	}
+	if !nameNull || !contactNull || !groupNull || !rateNull {
+		t.Fatalf("空值必须落 SQL NULL: name=%v contact=%v group=%v rate=%v",
+			nameNull, contactNull, groupNull, rateNull)
+	}
+}
+
 // TestSubscriptionAccountStoresNullRatio 验证「未配置」在库里落成 NULL。
 //
 // 落成 0 的话，读回来会变成「配置成 0」，而那是个非法值——

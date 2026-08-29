@@ -14,8 +14,12 @@ function account(over: Partial<UpstreamAccountItem> = {}): UpstreamAccountItem {
     system_type: "sub2api",
     access_method: "upstream_key",
     base_url: "https://relay-a.example.com",
+    upstream_name: "Relay A",
+    upstream_contact: "运营群 @relay-a",
+    upstream_group: "gpt-main",
     credential_ref: SAMPLE_REF,
     recharge_ratio: "1.15",
+    group_rate: "1.25",
     recharge_cost_rate: "0.869565217",
     currency: "USD",
     business_day_tz: "+08:00",
@@ -98,8 +102,20 @@ describe("登记 / 修改上游账号（走 Action 内核）", () => {
     expect(params.currency).toBe("USD");
     expect(params.business_day_tz).toBe("+08:00");
     expect(params.recharge_ratio).toBe("1.15");
+    expect(params.group_rate).toBe("1.25");
+    expect(params.upstream_name).toBe("Relay A");
+    expect(params.upstream_contact).toBe("运营群 @relay-a");
+    expect(params.upstream_group).toBe("gpt-main");
     // 有 id = 改这一条，不是新建
     expect(params.upstream_account_id).toBe("11111111-1111-4111-8111-111111111111");
+  });
+
+  it("元数据和分组倍率都有显式标签与完整预填", async () => {
+    const dialog = await openDialog({ account: account() });
+    expect((dialog.getByLabelText("上游名称") as HTMLInputElement).value).toBe("Relay A");
+    expect((dialog.getByLabelText("上游联系人") as HTMLInputElement).value).toBe("运营群 @relay-a");
+    expect((dialog.getByLabelText("上游分组") as HTMLInputElement).value).toBe("gpt-main");
+    expect((dialog.getByLabelText("分组倍率") as HTMLInputElement).value).toBe("1.25");
   });
 
   it("前端校验不过就不发请求，就地报错", async () => {
@@ -121,7 +137,8 @@ describe("登记 / 修改上游账号（走 Action 内核）", () => {
     const dialog = await openDialog({ account: account() });
     fireEvent.click(dialog.getByRole("button", { name: "保存" }));
 
-    expect(await dialog.findByText(new RegExp("必须为正"))).toBeTruthy();
+    const alert = await dialog.findByRole("alert");
+    expect(alert.textContent).toContain("必须为正");
     expect(dialog.getByText(/req-9/)).toBeTruthy();
   });
 

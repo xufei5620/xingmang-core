@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DataTableV2,
+  formatUtcTimestamp,
   PageState,
   StatTile,
   type DataTableColumn,
@@ -19,6 +20,7 @@ import {
   type UpstreamSummary,
 } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
+import { RUNWAY_TONE, runwayReasonText } from "../lib/runway";
 import { coveredCount, describeMissingTotal, sumMoney } from "../lib/upstreamTotals";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
@@ -28,16 +30,15 @@ import { UpstreamAccountDetail } from "./UpstreamAccountDetail";
 
 /** 上游管理(交接文档 §9.6、原型 `V["s2/suppliers"]`)。
  *
- *  **按上游供应商/实例汇总，不等同于渠道管理**：渠道管理一行是一个账号/一把 Key,
- *  这里一行是一个**上游账号**（登记簿里的 upstream_account），展开后是它下面的
+ *  **当前行粒度仍是一个上游账号，不是供应商实体**：展开后是它下面的
  *  令牌映射、订阅批次与代理资产。
  *
  *  数据源是 XM-0037a 建的成本登记簿(`GET /api/v1/finance/upstream-accounts`),
  *  写路径全部走 Action(宪法 2 条)——这一页是登记簿的 UI，不是第二份存储。
  *
- *  §9.6 要求的字段里有几样**后端今天给不出**(上游名称、联系人、上游分组、
- *  上游总余额、本期消耗/利润)。它们在页面上显示为「未接入」并写明被什么挡着,
- *  不编：一个填着假联系人的登记簿比没有联系人这一列更糟。 */
+ *  XM-C003 补齐上游名称、联系人、接入分组与 group_rate 的登记簿往返；
+ *  KEY 数、余额与 runway 按同源账号 ID 接上 summary。未接入分组发现与订阅
+ *  有效期仍没有聚合端点，继续明确显示未接入。 */
 export function UpstreamAccountsPanel({ platform }: { platform: string }) {
   const queryClient = useQueryClient();
   const [result, setResult] = useState<ActionResult | null>(null);
@@ -68,12 +69,38 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
   const summaries = new Map<string, UpstreamSummary>();
   for (const s of summaryQuery.data?.items ?? []) summaries.set(s.id, s);
   const mine = rows.map((a) => summaries.get(a.id));
-  const costTotal = sumMoney(mine.map((s) => s?.supplyCost ?? null));
-  const profitTotal = sumMoney(mine.map((s) => s?.grossProfit ?? null));
-  const covered = coveredCount(mine.map((s) => s?.supplyCost ?? null));
-  // 观测时刻取窗口里最旧的那个：金额可以显示，但不能不说它是什么时候的
-  // （§9.1 数据新鲜度必须可见）
-  const observedAt = oldestObserved(mine);
+  const costs = mine.map((s) => s?.supplyCost ?? null);
+  const profits = mine.map((s) => s?.grossProfit ?? null);
+  const costTotal = sumMoney(costs);
+  const profitTotal = sumMoney(profits);
+  const costCovered = coveredCount(costs);
+  const profitCovered = coveredCount(profits);
+  const subscriptionCount = rows.filter((a) => a.access_method === "subscription_account").length;
+  const keyCount = rows.reduce((total, account) => {
+    if (account.access_method === "subscription_account") return total;
+    return total + (summaries.get(account.id)?.tokenCount ?? 0);
+  }, 0);
+  const countCovered = rows.filter(
+    (account) => account.access_method === "subscription_account" || summaries.has(account.id),
+  ).length;
+  const summaryState: SummaryLoadState = summaryQuery.isPending
+    ? "pending"
+    : summaryQuery.error
+      ? "failed"
+      : "ready";
+  // 两张卡各自只让**参与自己合计的行**提供证据。毛利依赖成本和收入两侧，
+  // 所以还要在参与毛利的行里取两侧实际时刻的最旧值。
+  const costObservedAt = oldestCostObserved(mine);
+  const profitObservedAt = oldestProfitObserved(mine);
+  const costObservationIncomplete = mine.some(
+    (summary) => Boolean(summary?.supplyCost) && !isValidTimestamp(summary?.observed.costObservedAt),
+  );
+  const profitObservationIncomplete = mine.some(
+    (summary) =>
+      Boolean(summary?.grossProfit) &&
+      (!isValidTimestamp(summary?.observed.costObservedAt) ||
+        !isValidTimestamp(summary?.observed.revenueObservedAt)),
+  );
 
   // 写完不做乐观更新，重新查一次：这一页是登记簿的 UI，页面上的数必须是库里的数。
   // 令牌映射内嵌在账号行里，所以改映射同样要刷这一个 key
@@ -87,7 +114,7 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="max-w-3xl text-xs text-fg-muted">
           由平台手工登记不同上游，维护网址、凭据状态、接入平台与倍率，并汇总该上游下所有账号/渠道的整体利润。
-          凭据只显示引用与状态，平台永不持有明文。
+          当前仍一行对应一个上游账号；凭据只显示状态，平台永不持有明文。
         </p>
         <UpstreamAccountDialog
           platform={platform}
@@ -110,37 +137,59 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
               note={unpaired > 0 ? `其中 ${unpaired} 个未配对平台` : "已登记并归属本平台"}
             />
             <StatTile
-              label="令牌映射"
-              value={String(rows.reduce((n, a) => n + a.token_mappings.length, 0))}
-              note="成本侧键 ↔ 收入侧键的对账映射"
+              label="KEY / 订阅账号"
+              value={
+                summaryState === "failed"
+                  ? `— / ${subscriptionCount}`
+                  : summaryState === "pending"
+                    ? `… / ${subscriptionCount}`
+                    : `${keyCount} / ${subscriptionCount}`
+              }
+              unavailable={summaryState === "failed"}
+              note={
+                summaryState === "failed"
+                  ? "KEY 数汇总读取失败；订阅账号数来自登记簿"
+                  : summaryState === "pending"
+                    ? "正在读取 KEY 数；订阅账号数来自登记簿"
+                    : countCovered < rows.length
+                      ? `只覆盖 ${rows.length} 个账号中的 ${countCovered} 个`
+                      : "KEY 数来自上游汇总；订阅账号数来自登记簿"
+              }
+              {...(countCovered < rows.length && summaryState === "ready"
+                ? { status: <Badge tone="warning">覆盖不全</Badge> }
+                : {})}
             />
             {/* 合计不出来时显示「—」而不是 ¥0.00：
                 「这个窗口还没有可用的汇总数」与「这期没花钱」是两件事 */}
             <MoneyTile
               label="本期我方消耗"
               total={costTotal}
-              covered={covered}
+              covered={costCovered}
               rowCount={rows.length}
-              observedAt={observedAt}
+              observedAt={costObservedAt}
+              observationLabel="成本观测于"
+              observationIncomplete={costObservationIncomplete}
               pending={summaryQuery.isPending}
               failed={Boolean(summaryQuery.error)}
             />
             <MoneyTile
               label="本期整体毛利"
               total={profitTotal}
-              covered={covered}
+              covered={profitCovered}
               rowCount={rows.length}
-              observedAt={observedAt}
+              observedAt={profitObservedAt}
+              observationLabel="成本/收入最旧观测于"
+              observationIncomplete={profitObservationIncomplete}
               pending={summaryQuery.isPending}
               failed={Boolean(summaryQuery.error)}
             />
           </div>
 
-          <MissingFieldsNote />
+          <ScopeNote />
 
           <DataTableV2
-            caption="上游账号登记簿：接入方式、充值倍率、凭据状态与令牌映射"
-            columns={upstreamColumns(afterWrite, summaries)}
+            caption="上游账号登记簿：上游资料、接入分组、KEY 或账号、余额证据与经营汇总"
+            columns={upstreamColumns(afterWrite, summaries, summaryState)}
             rows={rows}
             rowKey={(a) => a.id}
             searchable
@@ -164,19 +213,41 @@ export function UpstreamAccountsPanel({ platform }: { platform: string }) {
   );
 }
 
-/** 窗口里最旧的观测时刻。
+/** 按真实 instant 取最旧时间，并保留原始 RFC3339 作为页面证据。
  *
- *  取**最旧**而不是最新：一格合计里只要有一条是三小时前的，这个数就只有
- *  三小时前那么新。取最新会让整格看起来比实际更可信（§9.1）。 */
-function oldestObserved(summaries: readonly (UpstreamSummary | undefined)[]): string | null {
-  let oldest: string | null = null;
-  for (const s of summaries) {
-    const at = s?.observed.costObservedAt;
-    if (!at) continue;
-    // RFC 3339 UTC 串按字典序比较就是按时间比较，不必解析成 Date
-    if (oldest === null || at < oldest) oldest = at;
+ *  不能直接比较字符串：`01:00-07:00` 实际比 `08:30+02:00` 更新，
+ *  但词典序恰好相反。解析不出的时间不替任何金额背书。 */
+function oldestActualTimestamp(timestamps: readonly (string | null)[]): string | null {
+  let oldest: { raw: string; instant: number } | null = null;
+  for (const raw of timestamps) {
+    if (!raw) continue;
+    const instant = Date.parse(raw);
+    if (!Number.isFinite(instant)) continue;
+    if (oldest === null || instant < oldest.instant) oldest = { raw, instant };
   }
-  return oldest;
+  return oldest?.raw ?? null;
+}
+
+function isValidTimestamp(raw: string | null | undefined): boolean {
+  return Boolean(raw) && Number.isFinite(Date.parse(raw ?? ""));
+}
+
+function oldestCostObserved(summaries: readonly (UpstreamSummary | undefined)[]): string | null {
+  const timestamps: (string | null)[] = [];
+  for (const s of summaries) {
+    if (s?.supplyCost) timestamps.push(s.observed.costObservedAt);
+  }
+  return oldestActualTimestamp(timestamps);
+}
+
+function oldestProfitObserved(summaries: readonly (UpstreamSummary | undefined)[]): string | null {
+  const timestamps: (string | null)[] = [];
+  for (const s of summaries) {
+    // 这一行没进毛利合计，就不能拿自己的时间替那笔部分和背书。
+    if (!s?.grossProfit) continue;
+    timestamps.push(s.observed.costObservedAt, s.observed.revenueObservedAt);
+  }
+  return oldestActualTimestamp(timestamps);
 }
 
 /** 一格金额合计。算得出来就显示，算不出来说清是哪一种「算不出来」。 */
@@ -186,6 +257,8 @@ function MoneyTile({
   covered,
   rowCount,
   observedAt,
+  observationLabel,
+  observationIncomplete,
   pending,
   failed,
 }: {
@@ -194,6 +267,8 @@ function MoneyTile({
   covered: number;
   rowCount: number;
   observedAt: string | null;
+  observationLabel: string;
+  observationIncomplete: boolean;
   pending: boolean;
   failed: boolean;
 }) {
@@ -226,51 +301,91 @@ function MoneyTile({
 
   const coverageNote =
     covered < rowCount ? `只含 ${rowCount} 个账号里有汇总的 ${covered} 个` : `含全部 ${rowCount} 个账号`;
+  const observationNote = observationIncomplete
+    ? ` · 观测不完整${observedAt ? `；已知最旧观测于 ${observedAt}` : ""}`
+    : observedAt
+      ? ` · ${observationLabel} ${observedAt}`
+      : "";
   return (
     <StatTile
       label={label}
       value={formatScaledMinorUnits(total.total.toString(), total.currency, total.scale)}
-      note={`${coverageNote}${observedAt ? ` · 成本观测于 ${observedAt}` : ""}`}
+      note={`${coverageNote}${observationNote}`}
       {...(covered < rowCount ? { status: <Badge tone="warning">覆盖不全</Badge> } : {})}
     />
   );
 }
 
-/** §9.6 要求、但后端今天给不出的那几样。
- *
- *  单独说出来而不是各列显示「—」：五样都缺的时候，五个「—」看着像数据没加载完;
- *  一句话把它们归到一起，并说明各自被什么挡着。 */
-function MissingFieldsNote() {
+/** 当前边界：补齐已有账号的元数据，但不把账号伪装成供应商实体。 */
+function ScopeNote() {
   return (
     <p className="rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs text-fg-muted">
-      交接文档 §9.6 还要求上游名称、联系人、上游分组（含未接入分组）与上游总余额。
-      登记簿（XM-0037a）今天没有前三个字段，要扩表结构；总余额与可用天数在
-      XM-0037d 的上游汇总里已经有了，但那是**另一格**的内容（余额与可用天数），
-      本片只接了本期消耗与毛利。在其余字段到位之前这一页不编——一个填着假联系人的登记簿，
-      比没有联系人这一列更糟。
+      当前一行仍是一个上游账号，名称、联系人和已接入分组来自登记簿；KEY 数、余额与可用天数按账号
+      ID 对应上游汇总。未接入分组发现需要后续供应商/分组实体，订阅有效期也尚未进入汇总，
+      两者都不会用样例值代替。
     </p>
   );
 }
 
+type SummaryLoadState = "pending" | "failed" | "ready";
+
 function upstreamColumns(
   onDone: (result: ActionResult) => void,
   summaries: Map<string, UpstreamSummary>,
+  summaryState: SummaryLoadState,
 ): DataTableColumn<UpstreamAccountItem>[] {
   return [
     {
       id: "upstream",
-      header: "上游 / 网址",
+      header: "上游名称 / 网址",
       primary: true,
-      value: (a) => `${a.base_url} ${a.system_type} ${a.id}`,
+      value: (a) => `${a.upstream_name} ${a.base_url} ${a.system_type} ${a.id}`,
       cell: (a) => (
         <>
-          <span className="font-medium">{hostOf(a.base_url)}</span>
-          <p className="font-mono text-xs break-all text-fg-muted">
-            {a.base_url}
-            {a.system_type ? ` · ${a.system_type}` : null}
-          </p>
+          {a.upstream_name ? (
+            <span className="font-medium">{a.upstream_name}</span>
+          ) : (
+            <Badge tone="neutral">未接入</Badge>
+          )}
+          <p className="font-mono text-xs break-all text-fg-muted">{a.base_url || "网址未接入"}</p>
+          <p className="text-xs text-fg-muted">{a.system_type || "系统类型未知"}</p>
         </>
       ),
+    },
+    {
+      id: "group",
+      header: "接入分组 / 倍率",
+      value: (a) => `${a.upstream_group} ${a.group_rate}`,
+      cell: (a) => (
+        <span className="text-xs">
+          {a.upstream_group ? a.upstream_group : <Badge tone="neutral">未接入</Badge>}
+          <span className="block tabular-nums text-fg-muted">
+            倍率 {a.group_rate ? `${a.group_rate}×` : "—"}
+          </span>
+        </span>
+      ),
+      headerTitle: "分组与倍率来自登记簿；分组倍率仅展示，不参与金额计算",
+    },
+    {
+      id: "supply-count",
+      header: "KEY / 账号",
+      value: (a) => {
+        if (a.access_method === "subscription_account") return 1;
+        return summaries.get(a.id)?.tokenCount ?? null;
+      },
+      cell: (a) => (
+        <SupplyCountCell account={a} summary={summaries.get(a.id)} state={summaryState} />
+      ),
+      headerTitle: "KEY 数来自上游汇总；订阅账号数来自当前登记簿行",
+    },
+    {
+      id: "runway",
+      header: "总余额 / 可用期",
+      value: (a) => moneyValue(summaries.get(a.id)?.runway.balance),
+      cell: (a) => (
+        <BalanceRunwayCell account={a} summary={summaries.get(a.id)} state={summaryState} />
+      ),
+      headerTitle: "余额、可用天数与观测时刻来自上游汇总；订阅有效期尚未进入该汇总",
     },
     {
       id: "access",
@@ -308,6 +423,17 @@ function upstreamColumns(
         ),
     },
     {
+      id: "contact",
+      header: "联系人",
+      value: (a) => a.upstream_contact,
+      cell: (a) =>
+        a.upstream_contact ? (
+          <span className="text-xs">{a.upstream_contact}</span>
+        ) : (
+          <Badge tone="neutral">未接入</Badge>
+        ),
+    },
+    {
       id: "credential",
       header: "凭据",
       value: (a) => describeCredential(a.credential_ref).label,
@@ -319,13 +445,6 @@ function upstreamColumns(
           </Badge>
         );
       },
-    },
-    {
-      id: "mappings",
-      header: "令牌映射",
-      numeric: true,
-      value: (a) => a.token_mappings.length,
-      cell: (a) => a.token_mappings.length,
     },
     {
       id: "status",
@@ -344,7 +463,7 @@ function upstreamColumns(
       ...(summaries.size > 0
         ? { value: (a: UpstreamAccountItem) => moneyValue(summaries.get(a.id)?.supplyCost) }
         : {}),
-      cell: (a) => <PeriodCell summary={summaries.get(a.id)} />,
+      cell: (a) => <PeriodCell summary={summaries.get(a.id)} state={summaryState} />,
       headerTitle: "本期供给成本 / 毛利，来自 XM-0037d 的上游汇总端点",
     },
     {
@@ -374,12 +493,115 @@ function moneyValue(money: { amountMinor: string } | null | undefined): bigint |
   return BigInt(money.amountMinor);
 }
 
+function SupplyCountCell({
+  account,
+  summary,
+  state,
+}: {
+  account: UpstreamAccountItem;
+  summary: UpstreamSummary | undefined;
+  state: SummaryLoadState;
+}) {
+  if (account.access_method === "subscription_account") {
+    return (
+      <span className="text-xs tabular-nums">
+        1 个账号
+        <span className="block text-fg-muted">来自当前登记簿行</span>
+      </span>
+    );
+  }
+  if (state === "pending") return <span className="text-xs text-fg-muted">汇总读取中</span>;
+  if (state === "failed") return <span className="text-xs text-danger">汇总读取失败</span>;
+  if (!summary) {
+    return (
+      <Badge tone="warning" title="上游汇总没有与这个 upstream_account.id 对应的行">
+        汇总未覆盖
+      </Badge>
+    );
+  }
+  return (
+    <span className="text-xs tabular-nums">
+      {summary.tokenCount} 个 KEY
+      <span className="block text-fg-muted">按账号 ID 对应汇总</span>
+    </span>
+  );
+}
+
+function BalanceRunwayCell({
+  account,
+  summary,
+  state,
+}: {
+  account: UpstreamAccountItem;
+  summary: UpstreamSummary | undefined;
+  state: SummaryLoadState;
+}) {
+  if (account.access_method === "subscription_account") {
+    return (
+      <span className="text-xs">
+        <Badge tone="neutral">有效期待接入</Badge>
+        <span className="block text-fg-muted">上游汇总尚无订阅到期字段</span>
+      </span>
+    );
+  }
+  if (state === "pending") return <span className="text-xs text-fg-muted">汇总读取中</span>;
+  if (state === "failed") return <span className="text-xs text-danger">汇总读取失败</span>;
+  if (!summary) {
+    return (
+      <Badge tone="warning" title="上游汇总没有与这个 upstream_account.id 对应的行">
+        汇总未覆盖
+      </Badge>
+    );
+  }
+
+  const runway = summary.runway;
+  const reason = runwayReasonText(runway);
+  const coverage = `覆盖 ${runway.coveredDays}/${runway.windowDays} 天`;
+  const observed = runway.balanceObservedAt
+    ? `余额观测 ${formatUtcTimestamp(runway.balanceObservedAt)}`
+    : "余额观测时间未接入";
+  if (!runway.balance) {
+    return (
+      <span className="text-xs text-fg-muted" title={runway.reason || "汇总未给出原因"}>
+        {reason ?? "—"}
+        <span className="block">{coverage}</span>
+        <span className="block">{observed}</span>
+      </span>
+    );
+  }
+
+  const tone = RUNWAY_TONE[runway.level] ?? "neutral";
+  return (
+    <span className="text-xs tabular-nums">
+      {formatScaledMinorUnits(
+        runway.balance.amountMinor,
+        runway.balance.currency,
+        runway.balance.scale,
+      )}
+      <span className="block text-fg-muted">
+        {runway.days === null ? (reason ?? "可用天数未接入") : `约 ${runway.days} 天`}
+      </span>
+      <span className="block text-fg-muted">{coverage}</span>
+      <span className="block text-fg-muted">{observed}</span>
+      {runway.days === null ? null : <Badge tone={tone}>{runway.level || "已计算"}</Badge>}
+    </span>
+  );
+}
+
 /** 本期消耗 / 毛利单元格。
  *
  *  金额的 `null` 是**「给不出」不是 0**（覆盖不全或币种混杂，XM-0037d 的纪律）,
  *  所以这里不折成 ¥0.00——那会被读成「这个上游这期没花钱」。 */
-function PeriodCell({ summary }: { summary: UpstreamSummary | undefined }) {
+function PeriodCell({
+  summary,
+  state,
+}: {
+  summary: UpstreamSummary | undefined;
+  state: SummaryLoadState;
+}) {
   if (!summary) {
+    if (state === "pending") return <span className="text-xs text-fg-muted">汇总读取中</span>;
+    if (state === "failed") return <span className="text-xs text-danger">汇总读取失败</span>;
     return (
       <span className="text-xs text-fg-muted" title="上游汇总里没有这一条：它可能刚登记，还没进过窗口">
         未接入
@@ -472,16 +694,4 @@ function rateText(rate: string, currency: string): string {
   const code = (currency || "").toUpperCase();
   const amount = code === "CNY" ? `¥${rate}` : `${code || "?"} ${rate}`;
   return `${amount} / 额度`;
-}
-
-/** 从 base_url 里取主机名当显示名。
- *
- *  登记簿没有「上游名称」字段（§9.6 要求但表里没有），拿主机名当名字是**能从
- *  现有数据推出来**的最接近的东西；编一个好听的中文名会骗人。 */
-function hostOf(baseURL: string): string {
-  try {
-    return new URL(baseURL).host;
-  } catch {
-    return baseURL || "—";
-  }
 }

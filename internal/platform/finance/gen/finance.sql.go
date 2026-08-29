@@ -209,7 +209,7 @@ func (q *Queries) GetTokenMapping(ctx context.Context, arg GetTokenMappingParams
 }
 
 const getUpstreamAccount = `-- name: GetUpstreamAccount :one
-SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate FROM finance.upstream_account WHERE id = $1
+SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate, upstream_name, upstream_contact, upstream_group FROM finance.upstream_account WHERE id = $1
 `
 
 func (q *Queries) GetUpstreamAccount(ctx context.Context, id uuid.UUID) (FinanceUpstreamAccount, error) {
@@ -230,6 +230,9 @@ func (q *Queries) GetUpstreamAccount(ctx context.Context, id uuid.UUID) (Finance
 		&i.UpdatedAt,
 		&i.PlatformID,
 		&i.GroupRate,
+		&i.UpstreamName,
+		&i.UpstreamContact,
+		&i.UpstreamGroup,
 	)
 	return i, err
 }
@@ -432,31 +435,36 @@ const insertUpstreamAccount = `-- name: InsertUpstreamAccount :one
 INSERT INTO finance.upstream_account (
     id, system_type, access_method, base_url, credential_ref,
     recharge_ratio, group_rate, currency, business_day_tz, status, environment,
-    platform_id, created_at, updated_at
+    platform_id, upstream_name, upstream_contact, upstream_group,
+    created_at, updated_at
 ) VALUES (
     $1, $2, $3,
     $4, $5,
     $6, $7,
     $8, $9,
     $10, $11, $12,
+    $13, $14, $15,
     now(), now()
 )
-RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate
+RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate, upstream_name, upstream_contact, upstream_group
 `
 
 type InsertUpstreamAccountParams struct {
-	ID            uuid.UUID
-	SystemType    string
-	AccessMethod  string
-	BaseUrl       *string
-	CredentialRef string
-	RechargeRatio pgtype.Numeric
-	GroupRate     pgtype.Numeric
-	Currency      string
-	BusinessDayTz string
-	Status        string
-	Environment   string
-	PlatformID    *string
+	ID              uuid.UUID
+	SystemType      string
+	AccessMethod    string
+	BaseUrl         *string
+	CredentialRef   string
+	RechargeRatio   pgtype.Numeric
+	GroupRate       pgtype.Numeric
+	Currency        string
+	BusinessDayTz   string
+	Status          string
+	Environment     string
+	PlatformID      *string
+	UpstreamName    *string
+	UpstreamContact *string
+	UpstreamGroup   *string
 }
 
 // XM-0037a 成本登记簿（设计稿 §2.1）。
@@ -489,6 +497,9 @@ func (q *Queries) InsertUpstreamAccount(ctx context.Context, arg InsertUpstreamA
 		arg.Status,
 		arg.Environment,
 		arg.PlatformID,
+		arg.UpstreamName,
+		arg.UpstreamContact,
+		arg.UpstreamGroup,
 	)
 	var i FinanceUpstreamAccount
 	err := row.Scan(
@@ -506,12 +517,15 @@ func (q *Queries) InsertUpstreamAccount(ctx context.Context, arg InsertUpstreamA
 		&i.UpdatedAt,
 		&i.PlatformID,
 		&i.GroupRate,
+		&i.UpstreamName,
+		&i.UpstreamContact,
+		&i.UpstreamGroup,
 	)
 	return i, err
 }
 
 const listActiveUpstreamAccountsByAccessMethod = `-- name: ListActiveUpstreamAccountsByAccessMethod :many
-SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate FROM finance.upstream_account
+SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate, upstream_name, upstream_contact, upstream_group FROM finance.upstream_account
 WHERE environment = $1 AND status = 'active' AND access_method = $2
 ORDER BY system_type, base_url NULLS LAST, id
 `
@@ -549,6 +563,9 @@ func (q *Queries) ListActiveUpstreamAccountsByAccessMethod(ctx context.Context, 
 			&i.UpdatedAt,
 			&i.PlatformID,
 			&i.GroupRate,
+			&i.UpstreamName,
+			&i.UpstreamContact,
+			&i.UpstreamGroup,
 		); err != nil {
 			return nil, err
 		}
@@ -1003,7 +1020,7 @@ func (q *Queries) ListTokenMappingsByEnvironment(ctx context.Context, environmen
 }
 
 const listUpstreamAccountsByEnvironment = `-- name: ListUpstreamAccountsByEnvironment :many
-SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate FROM finance.upstream_account
+SELECT id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate, upstream_name, upstream_contact, upstream_group FROM finance.upstream_account
 WHERE environment = $1
 ORDER BY system_type, base_url NULLS LAST, id
 `
@@ -1036,6 +1053,9 @@ func (q *Queries) ListUpstreamAccountsByEnvironment(ctx context.Context, environ
 			&i.UpdatedAt,
 			&i.PlatformID,
 			&i.GroupRate,
+			&i.UpstreamName,
+			&i.UpstreamContact,
+			&i.UpstreamGroup,
 		); err != nil {
 			return nil, err
 		}
@@ -1175,7 +1195,7 @@ UPDATE finance.upstream_account SET
     recharge_ratio = $1,
     updated_at     = now()
 WHERE id = $2
-RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate
+RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate, upstream_name, upstream_contact, upstream_group
 `
 
 type SetUpstreamAccountRechargeRatioParams struct {
@@ -1209,6 +1229,9 @@ func (q *Queries) SetUpstreamAccountRechargeRatio(ctx context.Context, arg SetUp
 		&i.UpdatedAt,
 		&i.PlatformID,
 		&i.GroupRate,
+		&i.UpstreamName,
+		&i.UpstreamContact,
+		&i.UpstreamGroup,
 	)
 	return i, err
 }
@@ -1893,21 +1916,27 @@ UPDATE finance.upstream_account SET
     business_day_tz = $6,
     status          = $7,
     platform_id     = $8,
+    upstream_name   = $9,
+    upstream_contact = $10,
+    upstream_group  = $11,
     updated_at      = now()
-WHERE id = $9
-RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate
+WHERE id = $12
+RETURNING id, system_type, access_method, base_url, credential_ref, recharge_ratio, currency, business_day_tz, status, environment, created_at, updated_at, platform_id, group_rate, upstream_name, upstream_contact, upstream_group
 `
 
 type UpdateUpstreamAccountParams struct {
-	BaseUrl       *string
-	CredentialRef string
-	RechargeRatio pgtype.Numeric
-	GroupRate     pgtype.Numeric
-	Currency      string
-	BusinessDayTz string
-	Status        string
-	PlatformID    *string
-	ID            uuid.UUID
+	BaseUrl         *string
+	CredentialRef   string
+	RechargeRatio   pgtype.Numeric
+	GroupRate       pgtype.Numeric
+	Currency        string
+	BusinessDayTz   string
+	Status          string
+	PlatformID      *string
+	UpstreamName    *string
+	UpstreamContact *string
+	UpstreamGroup   *string
+	ID              uuid.UUID
 }
 
 // 改登记簿的可编辑字段。
@@ -1934,6 +1963,9 @@ func (q *Queries) UpdateUpstreamAccount(ctx context.Context, arg UpdateUpstreamA
 		arg.BusinessDayTz,
 		arg.Status,
 		arg.PlatformID,
+		arg.UpstreamName,
+		arg.UpstreamContact,
+		arg.UpstreamGroup,
 		arg.ID,
 	)
 	var i FinanceUpstreamAccount
@@ -1952,6 +1984,9 @@ func (q *Queries) UpdateUpstreamAccount(ctx context.Context, arg UpdateUpstreamA
 		&i.UpdatedAt,
 		&i.PlatformID,
 		&i.GroupRate,
+		&i.UpstreamName,
+		&i.UpstreamContact,
+		&i.UpstreamGroup,
 	)
 	return i, err
 }

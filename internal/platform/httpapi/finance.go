@@ -36,7 +36,12 @@ type upstreamAccountItem struct {
 	ID           string `json:"id"`
 	SystemType   string `json:"system_type"`
 	AccessMethod string `json:"access_method"`
-	BaseURL      string `json:"base_url"`
+	UpstreamName string `json:"upstream_name"`
+	// UpstreamContact 是平台手工登记的业务联系人/沟通渠道，不是连接器里
+	// 的用户联系方式，也不包含任何凭据。
+	UpstreamContact string `json:"upstream_contact"`
+	UpstreamGroup   string `json:"upstream_group"`
+	BaseURL         string `json:"base_url"`
 
 	// CredentialRef 同上：只回引用，永不回明文。
 	CredentialRef string `json:"credential_ref"`
@@ -47,6 +52,8 @@ type upstreamAccountItem struct {
 	// 1.15 到了页面上就变成 1.1499999999999999（宪法 13 条：比例用 Decimal）。
 	// 空串表示未配置——订阅型渠道本就没有倍率，不编一个 "1" 冒充。
 	RechargeRatio string `json:"recharge_ratio"`
+	// GroupRate 是仅展示的分组倍率，仍以定点十进制字符串返回。
+	GroupRate string `json:"group_rate"`
 
 	// RechargeCostRate 是 UI 交接 §13 的 `rechargeCostRate`（充值成本率），
 	// = 1 / recharge_ratio，**展示投影，不是存储量**（§3.4）。
@@ -98,9 +105,13 @@ func accountToItem(a finance.UpstreamAccount, mappings []finance.TokenMapping) u
 		ID:               a.ID.String(),
 		SystemType:       string(a.SystemType),
 		AccessMethod:     string(a.AccessMethod),
+		UpstreamName:     a.UpstreamName,
+		UpstreamContact:  a.UpstreamContact,
+		UpstreamGroup:    a.UpstreamGroup,
 		BaseURL:          a.BaseURL,
 		CredentialRef:    a.CredentialRef,
 		RechargeRatio:    a.RechargeRatio.String(),
+		GroupRate:        a.GroupRate.String(),
 		RechargeCostRate: a.RechargeCostRate(),
 		Currency:         a.Currency,
 		BusinessDayTZ:    a.BusinessDayTZ,
