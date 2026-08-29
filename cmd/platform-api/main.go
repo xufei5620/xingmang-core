@@ -117,6 +117,7 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	runwayThresholdStore := finance.NewRunwayThresholdStore(pool, nil)
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
 	kernel := action.NewKernel(
@@ -126,6 +127,7 @@ func main() {
 		action.WithLogger(logger),
 	)
 	opsStore := ops.NewStore(pool)
+	runwaySummaryStore := finance.NewSummaryStore(pool, nil)
 
 	// 演示数据种子（XM-0037d）：只在显式开启时跑，**生产硬拒**。
 	//
@@ -210,11 +212,14 @@ func main() {
 		// 看板供数是**只读**的：余额由采集任务写，这里只查询。
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。
-		FinanceSummaries: finance.NewSummaryStore(pool, nil),
-		// 阈值从环境变量解析后注入，与 platform-worker 的告警规则同源
-		FinanceRunwayThresholds: cfg.FinanceRunwayThresholds,
-		RequestTimeout:          cfg.RequestTimeout,
-		RateLimit:               cfg.RateLimit,
+		FinanceSummaries: runwaySummaryStore,
+		// 运行时阈值由 DB 快照 provider 提供；与 worker 每轮读取同一
+		// finance.runway_threshold_config revision。env 仅供独立 bootstrap 命令。
+		FinanceRunwayConfig:        runwayThresholdStore,
+		FinanceRunwayConfigHistory: runwayThresholdStore,
+		FinanceRunwayPreviewSource: runwaySummaryStore,
+		RequestTimeout:             cfg.RequestTimeout,
+		RateLimit:                  cfg.RateLimit,
 	})
 
 	srv := &http.Server{

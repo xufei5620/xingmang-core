@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
@@ -112,6 +114,11 @@ type Rule struct {
 }
 
 // RuleConfig 是第一批规则里那几个可由部署调整的阈值。
+//
+// RunwayThresholds 是静态兼容构造的初始值；生产 worker 通过
+// NewEvaluatorWithThresholdProvider 注入 finance.RunwayThresholdProvider，
+// 每轮从 DB 快照取值并覆盖该字段。这样 RuleConfig 的默认值不会成为 DB
+// 缺行时的隐式运行时 fallback。
 type RuleConfig struct {
 	// CollectionInterval 是采集周期，R1b 的「2 采集周期」以它为单位。
 	CollectionInterval time.Duration
@@ -123,16 +130,16 @@ type RuleConfig struct {
 	ChannelBalanceMetricKey string
 	// RunwayThresholds 是可用天数的三档阈值（XM-0049）。
 	//
-	// ⚠️ 它必须与 `/finance/upstreams/summary` 回报给前端的那一份**完全相同**，
-	// 否则「看板说还有 11 天」与「告警说已经低于阈值」会同时出现在一个人面前。
-	// 两个进程各自从环境变量解析，但**共用 finance.ParseRunwayThresholds
-	// 这一个函数**——函数保证解析一致，部署一致由 .env 保证。
+	// 静态构造时它必须与 `/finance/upstreams/summary` 使用的档位完全相同；
+	// 生产 provider 路径会在每轮读取同一个 DB revision，避免两个进程漂移。
 	RunwayThresholds finance.RunwayThresholds
 	// Owner 是这批规则的负责人（§9.3 要求每条规则都有）。
 	Owner string
 }
 
-// DefaultRuleConfig 返回默认阈值。
+// DefaultRuleConfig 返回兼容构造使用的默认阈值。
+// 生产 worker 仍须通过 provider 读取数据库快照，不能把此值当作 DB 缺行
+// 时的运行时 fallback。
 func DefaultRuleConfig() RuleConfig {
 	return RuleConfig{
 		CollectionInterval:          DefaultCollectionInterval,
@@ -145,6 +152,8 @@ func DefaultRuleConfig() RuleConfig {
 }
 
 func (c RuleConfig) normalized() RuleConfig {
+	// 该归一化只作用于静态兼容构造。DB provider 在 Evaluate 开始时先读取
+	// 并校验快照，故不会把这里的默认值用于生产 runway 判档。
 	d := DefaultRuleConfig()
 	if c.CollectionInterval <= 0 {
 		c.CollectionInterval = d.CollectionInterval
@@ -254,7 +263,7 @@ func Rules(cfg RuleConfig) []Rule {
 			Source: "finance.balance_history（余额）÷ finance.profit_daily" +
 				"（近 7 个完整业务日的日均消耗），见设计稿 §10.4",
 			Condition: fmt.Sprintf(
-				"计量型上游的可用天数算得出来且 < %d 天（< %d 天升为 critical）",
+				"计量型上游的可用天数算得出来且 ≤ %d 天（≤ %d 天升为 critical）",
 				cfg.RunwayThresholds.WarningDays, cfg.RunwayThresholds.CriticalDays),
 			For: 0,
 			// 声明的是**进入告警的那一档**；实际严重度逐条按天数算
@@ -351,22 +360,55 @@ type RunwaySource interface {
 // Reconciler 负责（见 reconcile.go）。分开是为了让规则本身可以在没有库的
 // 情况下被完整测试——规则是这个模块里最容易写错也最该被密集测试的部分。
 type Evaluator struct {
-	cfg    RuleConfig
-	source MetricSource
-	runway RunwaySource
+	cfg        RuleConfig
+	source     MetricSource
+	runway     RunwaySource
+	thresholds finance.RunwayThresholdProvider
+	// lastThresholdMu protects the non-sensitive snapshot metadata exposed to
+	// the worker log after a completed evaluation. The values are never used as
+	// classifier input; each Evaluate call still holds its own local snapshot.
+	lastThresholdMu       sync.RWMutex
+	lastThresholdRevision int64
+	lastThresholdSource   string
 }
 
-// NewEvaluator 创建评估器。
+// NewEvaluator 创建无 DB provider 的静态兼容评估器。
 //
 // 两个来源都是**必填**：缺哪一个 Evaluate 都会报错，而不是静默少跑几条规则。
-// 一条因为装配漏项而永远不响的告警规则，只会在真出事那天才被发现
-// （同 BalanceThresholdMinorUnits 回落默认值的理由）。
+// 一条因为装配漏项而永远不响的告警规则，只会在真出事那天才被发现；
+// 因此静态兼容构造仍会归一化非 runway 阈值，而 DB provider 错误则直接
+// 让评估轮次失败闭合。
 func NewEvaluator(source MetricSource, runway RunwaySource, cfg RuleConfig) *Evaluator {
 	return &Evaluator{cfg: cfg.normalized(), source: source, runway: runway}
 }
 
-// Config 返回归一化后的阈值配置（供日志与文档打印实际生效值）。
+// NewEvaluatorWithThresholdProvider keeps the test-friendly constructor above
+// while allowing production workers to read one DB snapshot per evaluation
+// round. The provider is consulted before any runway findings are generated;
+// provider errors fail the whole round closed.
+func NewEvaluatorWithThresholdProvider(
+	source MetricSource, runway RunwaySource, provider finance.RunwayThresholdProvider, cfg RuleConfig,
+) *Evaluator {
+	return &Evaluator{cfg: cfg.normalized(), source: source, runway: runway, thresholds: provider}
+}
+
+// Config 返回归一化后的静态兼容配置（供日志与测试打印实际生效值）。
+// 当 evaluator 使用 threshold provider 时，Evaluate 返回前会以该轮 DB
+// snapshot 覆盖 runway 档位；调用方应使用 finding detail 中的 revision。
 func (e *Evaluator) Config() RuleConfig { return e.cfg }
+
+// LastThresholdSnapshot reports the metadata consumed by the most recent
+// successful Evaluate call. It intentionally returns only revision/source,
+// never actor/reason or credentials, so operational logs can prove the DB
+// snapshot was used without widening their disclosure surface.
+func (e *Evaluator) LastThresholdSnapshot() (revision int64, source string, ok bool) {
+	e.lastThresholdMu.RLock()
+	defer e.lastThresholdMu.RUnlock()
+	if e.lastThresholdRevision <= 0 || e.lastThresholdSource == "" {
+		return 0, "", false
+	}
+	return e.lastThresholdRevision, e.lastThresholdSource, true
+}
 
 // Evaluate 跑一轮评估，返回此刻命中的全部规则。
 //
@@ -382,6 +424,24 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		return nil, fmt.Errorf("environment: %w", ErrMissingField)
 	}
 	now = now.UTC()
+	e.lastThresholdMu.Lock()
+	e.lastThresholdRevision = 0
+	e.lastThresholdSource = ""
+	e.lastThresholdMu.Unlock()
+	thresholds := e.cfg.RunwayThresholds
+	var thresholdSnapshot *finance.RunwayThresholdSnapshot
+	if e.thresholds != nil {
+		snapshot, err := e.thresholds.Current(ctx, environment)
+		if err != nil {
+			return nil, fmt.Errorf("读取 runway 阈值快照: %w", err)
+		}
+		thresholds = snapshot.Thresholds
+		thresholdSnapshot = &snapshot
+		e.lastThresholdMu.Lock()
+		e.lastThresholdRevision = snapshot.Revision
+		e.lastThresholdSource = snapshot.Source
+		e.lastThresholdMu.Unlock()
+	}
 
 	observations, err := e.source.ListByEnvironment(ctx, environment)
 	if err != nil {
@@ -454,7 +514,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		}
 	}
 
-	runwayFindings, err := e.runwayFindings(ctx, environment)
+	runwayFindings, err := e.runwayFindings(ctx, environment, thresholds, thresholdSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -477,8 +537,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 //  3. **严重度逐条按天数算**，而不是每档一条规则。两条规则的话，
 //     一个 3 天的上游会同时命中「< 10」与「< 5」两条，
 //     于是一个条件产出两条告警、要静默两次。
-func (e *Evaluator) runwayFindings(ctx context.Context, environment string) ([]Finding, error) {
-	items, err := e.runway.UpstreamRunways(ctx, environment, e.cfg.RunwayThresholds)
+func (e *Evaluator) runwayFindings(ctx context.Context, environment string, thresholds finance.RunwayThresholds, snapshot *finance.RunwayThresholdSnapshot) ([]Finding, error) {
+	items, err := e.runway.UpstreamRunways(ctx, environment, thresholds)
 	if err != nil {
 		return nil, fmt.Errorf("读取可用天数: %w", err)
 	}
@@ -489,12 +549,28 @@ func (e *Evaluator) runwayFindings(ctx context.Context, environment string) ([]F
 			continue
 		}
 		days := item.Runway.Days
-		if days == nil || *days >= e.cfg.RunwayThresholds.WarningDays {
+		if days == nil {
+			continue
+		}
+		level, classifyErr := thresholds.Classify(*days)
+		if classifyErr != nil {
+			return nil, fmt.Errorf("分类 runway 阈值: %w", classifyErr)
+		}
+		if level != finance.RunwayCritical && level != finance.RunwayWarning {
 			continue
 		}
 		severity := SeverityWarning
-		if *days < e.cfg.RunwayThresholds.CriticalDays {
+		if level == finance.RunwayCritical {
 			severity = SeverityCritical
+		}
+		detail := fmt.Sprintf(
+			"按近 %d 个完整业务日的日均消耗估算（实到 %d 天）。告警档 ≤%d 天，critical 档 ≤%d 天。%s请及时充值，或核对上游余额读数是否还在更新。",
+			item.Runway.WindowDays, item.Runway.CoveredDays,
+			thresholds.WarningDays, thresholds.CriticalDays,
+			describeObservedAt(item.Runway.BalanceObservedAt))
+		if snapshot != nil {
+			detail += fmt.Sprintf(" threshold_revision=%d; critical_days=%d; warning_days=%d; serious_days=%d",
+				snapshot.Revision, thresholds.CriticalDays, thresholds.WarningDays, thresholds.SeriousDays)
 		}
 		out = append(out, Finding{
 			RuleKey: RuleUpstreamRunwayLow,
@@ -503,12 +579,7 @@ func (e *Evaluator) runwayFindings(ctx context.Context, environment string) ([]F
 			DedupKey: dedupKey(RuleUpstreamRunwayLow, environment, item.AccountID.String()),
 			Severity: severity,
 			Title:    fmt.Sprintf("上游 %s 可用天数仅剩 %d 天", item.Name, *days),
-			Detail: fmt.Sprintf(
-				"按近 %d 个完整业务日的日均消耗估算（实到 %d 天）。告警档 <%d 天，"+
-					"critical 档 <%d 天。%s请及时充值，或核对上游余额读数是否还在更新。",
-				item.Runway.WindowDays, item.Runway.CoveredDays,
-				e.cfg.RunwayThresholds.WarningDays, e.cfg.RunwayThresholds.CriticalDays,
-				describeObservedAt(item.Runway.BalanceObservedAt)),
+			Detail:   detail,
 			// 可用天数不来自某一条 ops 指标，留空而不是编一个键——
 			// 一个指向不存在指标的告警会让人点进去看到空白页。
 			SourceMetricKey: "",
@@ -695,7 +766,13 @@ func asInt64(v any) (int64, bool) {
 	case int32:
 		return int64(n), true
 	case float64:
-		if n != float64(int64(n)) {
+		// Converting an out-of-range float64 to int64 is implementation
+		// dependent. Check the half-open representable range before converting;
+		// otherwise +Inf/2^63 can turn into MinInt64 and look like a valid
+		// balance. math.Trunc also rejects fractional values without a lossy
+		// round-trip through int64.
+		const maxInt64Exclusive = float64(1 << 63)
+		if n < -maxInt64Exclusive || n >= maxInt64Exclusive || n != math.Trunc(n) {
 			return 0, false
 		}
 		return int64(n), true

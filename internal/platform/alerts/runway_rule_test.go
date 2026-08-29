@@ -56,7 +56,7 @@ func evaluateRunway(t *testing.T, items []finance.UpstreamRunway, cfg RuleConfig
 	return out
 }
 
-// TestRunwayAlertBands 钉住两档的分界：< warning 报 warning，< critical 升 critical。
+// TestRunwayAlertBands 钉住两档的分界：≤ warning 报 warning，≤ critical 升 critical。
 //
 // **一条规则两档**而不是两条规则：两条的话，一个 3 天的上游会同时命中
 // 「< 10」与「< 5」，于是一个条件产出两条告警、要静默两次。
@@ -64,7 +64,7 @@ func TestRunwayAlertBands(t *testing.T) {
 	cfg := RuleConfig{RunwayThresholds: finance.DefaultRunwayThresholds()} // 5 / 10 / 20
 	cases := map[int]Severity{
 		0: SeverityCritical, 4: SeverityCritical,
-		5: SeverityWarning, // 5 不小于 critical 档 5 → 只到 warning
+		5: SeverityCritical, // critical 与 warning 都包含边界值
 		9: SeverityWarning,
 	}
 	for d, want := range cases {
@@ -82,7 +82,7 @@ func TestRunwayAlertBands(t *testing.T) {
 // TestRunwayAlertSilentAboveThreshold：阈值之上一条都不报。
 func TestRunwayAlertSilentAboveThreshold(t *testing.T) {
 	cfg := RuleConfig{RunwayThresholds: finance.DefaultRunwayThresholds()}
-	for _, d := range []int{10, 11, 105, 9999} {
+	for _, d := range []int{11, 20, 21, 105, 9999} {
 		if findings := evaluateRunway(t,
 			[]finance.UpstreamRunway{runwayItem(days(d), finance.AccessUpstreamKey, "a")},
 			cfg); len(findings) != 0 {
@@ -190,11 +190,12 @@ func TestRunwayAlertUsesConfiguredThresholds(t *testing.T) {
 	}
 }
 
-// TestRunwayThresholdsFallBackWhenInvalid：非法阈值回落默认档。
+// TestRunwayThresholdsFallBackWhenInvalid：静态兼容构造对非法阈值回落默认档。
 //
 // 失效方向与余额阈值相反：那个是「永不触发」，这个是**「永远触发」**——
 // 不递增的三档会让 levelFor 的兜底把每一条上游判成 critical，
-// 一次配置手滑变成满屏红。
+// 一次配置手滑变成满屏红。生产 provider 路径不会走这个 fallback，
+// 而是把无效/不可用的 DB 快照整轮 fail closed。
 func TestRunwayThresholdsFallBackWhenInvalid(t *testing.T) {
 	e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, RuleConfig{
 		RunwayThresholds: finance.RunwayThresholds{CriticalDays: 20, WarningDays: 5, SeriousDays: 1},
@@ -206,6 +207,52 @@ func TestRunwayThresholdsFallBackWhenInvalid(t *testing.T) {
 	e = NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, RuleConfig{})
 	if got := e.Config().RunwayThresholds; got != finance.DefaultRunwayThresholds() {
 		t.Fatalf("零值应回落默认档, got %+v", got)
+	}
+}
+
+type fakeThresholdProvider struct {
+	snapshot finance.RunwayThresholdSnapshot
+	calls    int
+	err      error
+}
+
+func (f *fakeThresholdProvider) Current(_ context.Context, _ string) (finance.RunwayThresholdSnapshot, error) {
+	f.calls++
+	if f.err != nil {
+		return finance.RunwayThresholdSnapshot{}, f.err
+	}
+	return f.snapshot, nil
+}
+
+func TestEvaluatorReadsOneThresholdSnapshotPerRoundAndCarriesEvidence(t *testing.T) {
+	provider := &fakeThresholdProvider{snapshot: finance.RunwayThresholdSnapshot{
+		Thresholds: finance.DefaultRunwayThresholds(), Revision: 8, Source: "database",
+	}}
+	items := []finance.UpstreamRunway{
+		runwayItem(days(3), finance.AccessUpstreamKey, "a"),
+		runwayItem(days(4), finance.AccessUpstreamKey, "b"),
+	}
+	evaluator := NewEvaluatorWithThresholdProvider(&fakeMetricSource{}, &fakeRunwaySource{items: items}, provider, RuleConfig{})
+	findings, err := evaluator.Evaluate(context.Background(), testEnv, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("threshold provider calls=%d want 1", provider.calls)
+	}
+	for _, finding := range findings {
+		if finding.RuleKey == RuleUpstreamRunwayLow && !strings.Contains(finding.Detail, "threshold_revision=8; critical_days=5; warning_days=10; serious_days=20") {
+			t.Fatalf("missing threshold evidence: %s", finding.Detail)
+		}
+	}
+}
+
+func TestEvaluatorThresholdProviderFailureAbortsRound(t *testing.T) {
+	provider := &fakeThresholdProvider{err: errors.New("database unavailable")}
+	_, err := NewEvaluatorWithThresholdProvider(&fakeMetricSource{}, &fakeRunwaySource{}, provider, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, time.Now().UTC())
+	if err == nil {
+		t.Fatal("threshold provider failure must abort evaluation")
 	}
 }
 

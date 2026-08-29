@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 )
 
@@ -79,6 +80,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	// 运行时阈值由 finance current 表提供；环境变量仅在独立 lifecycle
+	// bootstrap 命令中读取。若迁移/bootstrap 尚未完成，告警轮次会 fail closed，
+	// 不会拿空 Findings 把既有告警恢复掉。
+	config.RunwayThresholdProvider = finance.NewRunwayThresholdCurrentStore(pool, nil)
 	pingCtx, cancelPing := context.WithTimeout(ctx, 10*time.Second)
 	err = pool.Ping(pingCtx)
 	cancelPing()

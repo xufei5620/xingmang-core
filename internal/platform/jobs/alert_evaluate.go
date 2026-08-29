@@ -127,6 +127,8 @@ func (w *AlertEvaluateWorker) Work(ctx context.Context, job *river.Job[AlertEval
 
 	w.logJob(ctx, job, level, "job_completed", res.NotifyFailed == 0, errorCode,
 		slog.Int("findings", res.Findings),
+		slog.Int64("threshold_revision", res.ThresholdRevision),
+		slog.String("threshold_source", res.ThresholdSource),
 		slog.Int("alerts_opened", res.Opened),
 		slog.Int("alerts_merged", res.Merged),
 		slog.Int("alerts_resolved", res.Resolved),

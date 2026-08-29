@@ -15,6 +15,8 @@ const (
 	CodePrincipalTypeNotAllowed  Code = "PRINCIPAL_TYPE_NOT_ALLOWED"
 	CodeAdvancedControlsRequired Code = "ADVANCED_CONTROLS_REQUIRED"
 	CodeExecutionFailed          Code = "EXECUTION_FAILED"
+	CodeRunwayConfigUnavailable  Code = "RUNWAY_CONFIG_UNAVAILABLE"
+	CodeRevisionConflict         Code = "REVISION_CONFLICT"
 	CodeInternal                 Code = "INTERNAL"
 )
 

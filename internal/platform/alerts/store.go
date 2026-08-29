@@ -374,6 +374,36 @@ func (s *Store) ListByStatus(
 	return alertsFromRows(rows), nil
 }
 
+// ListByStatusWithTruncation is the bounded variant used by read-only impact
+// previews. It fetches one extra row so callers can distinguish a complete
+// active-alert set from a page cap; without that bit a truncated set could be
+// misclassified as a missing R5 alert.
+func (s *Store) ListByStatusWithTruncation(
+	ctx context.Context, environment string, statuses []Status, limit int32,
+) ([]Alert, bool, error) {
+	values := make([]string, 0, len(statuses))
+	for _, st := range statuses {
+		values = append(values, string(st))
+	}
+	if len(values) == 0 {
+		values = ActiveStatusStrings()
+	}
+	if limit <= 0 || limit > MaxListLimit {
+		limit = MaxListLimit
+	}
+	rows, err := s.q.ListAlertsByEnvironmentAndStatus(ctx, gen.ListAlertsByEnvironmentAndStatusParams{
+		Environment: environment, Statuses: values, Limit: limit + 1,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("list alerts by status with truncation: %w", err)
+	}
+	truncated := len(rows) > int(limit)
+	if truncated {
+		rows = rows[:limit]
+	}
+	return alertsFromRows(rows), truncated, nil
+}
+
 // ListRecent 列出某环境下最近的告警（含已解决）。
 func (s *Store) ListRecent(ctx context.Context, environment string, limit int32) ([]Alert, error) {
 	rows, err := s.q.ListRecentAlertsByEnvironment(ctx, gen.ListRecentAlertsByEnvironmentParams{

@@ -2,6 +2,7 @@ package finance_test
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -42,7 +43,11 @@ func meteredRunway(in finance.RunwayInput) finance.Runway {
 	if in.CostCurrency == "" {
 		in.CostCurrency = "USD"
 	}
-	return finance.ComputeRunway(in)
+	got, err := finance.ComputeRunway(in)
+	if err != nil {
+		panic(err)
+	}
+	return got
 }
 
 // TestRunwayDividesBalanceByDailyAverage 是 §10.4 的公式本身。
@@ -170,7 +175,10 @@ func TestRunwayUnknownReasons(t *testing.T) {
 		in.Now = runwayNow
 		in.Thresholds = finance.DefaultRunwayThresholds()
 		in.CostCurrency = "USD"
-		got := finance.ComputeRunway(in)
+		got, err := finance.ComputeRunway(in)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if got.Known() || got.Reason != finance.RunwayReasonNotApplicable {
 			t.Fatalf("订阅型应为 not_applicable, got days=%v reason=%s", got.Days, got.Reason)
 		}
@@ -254,23 +262,62 @@ func TestRunwayThresholdsMustStrictlyIncrease(t *testing.T) {
 	}
 }
 
-// TestInvalidThresholdsFallBackToCritical：阈值非法时一律归 critical。
-//
-// 一个算得出天数却给不出档位的结果，会在看板上变成一个没有颜色的数字，
-// 而「没有颜色」看起来就像「没问题」。宁可误报也不漏报。
-func TestInvalidThresholdsFallBackToCritical(t *testing.T) {
-	got := finance.ComputeRunway(finance.RunwayInput{
+func TestRunwayThresholdsClassifyUsesInclusiveBoundaries(t *testing.T) {
+	thresholds := finance.DefaultRunwayThresholds()
+	cases := []struct {
+		days int
+		want finance.RunwayLevel
+	}{
+		{days: 0, want: finance.RunwayCritical},
+		{days: 5, want: finance.RunwayCritical},
+		{days: 6, want: finance.RunwayWarning},
+		{days: 10, want: finance.RunwayWarning},
+		{days: 11, want: finance.RunwaySerious},
+		{days: 20, want: finance.RunwaySerious},
+		{days: 21, want: finance.RunwayHealthy},
+	}
+	for _, tc := range cases {
+		got, err := thresholds.Classify(tc.days)
+		if err != nil || got != tc.want {
+			t.Fatalf("Classify(%d) = %q, %v; want %q", tc.days, got, err, tc.want)
+		}
+	}
+}
+
+func TestRunwayThresholdsClassifyRejectsInvalidConfiguration(t *testing.T) {
+	if _, err := (finance.RunwayThresholds{CriticalDays: 10, WarningDays: 5, SeriousDays: 20}).Classify(1); err == nil {
+		t.Fatal("invalid threshold order must return an error")
+	}
+}
+
+// TestInvalidThresholdsFailClosed：阈值非法时返回错误，不把它解释成 critical。
+func TestInvalidThresholdsFailClosed(t *testing.T) {
+	_, err := finance.ComputeRunway(finance.RunwayInput{
 		AccessMethod: finance.AccessUpstreamKey,
 		Balance:      balanceAt(999_000_000, "USD", time.Minute),
 		CostMinorSum: 1_000_000, CoveredDays: 1,
 		CostCurrency: "USD", Now: runwayNow,
 		Thresholds: finance.RunwayThresholds{}, // 未初始化
 	})
-	if !got.Known() {
-		t.Fatalf("天数本身仍该算得出, reason=%s", got.Reason)
+	if err == nil {
+		t.Fatal("阈值非法必须 fail closed")
 	}
-	if got.Level != finance.RunwayCritical {
-		t.Fatalf("阈值非法时应归 critical（宁可误报不漏报）, got %s", got.Level)
+}
+
+func TestComputeRunwayMarksEveryNonMeteredMethodNotApplicable(t *testing.T) {
+	for _, method := range []finance.AccessMethod{finance.AccessOfficialAPI, finance.AccessSubscriptionAccount, finance.AccessMethod("future_non_metered")} {
+		got, err := finance.ComputeRunway(finance.RunwayInput{
+			AccessMethod: method,
+			Balance:      balanceAt(999_000_000, "USD", time.Minute),
+			CostMinorSum: 1_000_000, CoveredDays: 1, CostCurrency: "USD", Now: runwayNow,
+			Thresholds: finance.DefaultRunwayThresholds(),
+		})
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", method, err)
+		}
+		if got.Known() || got.Reason != finance.RunwayReasonNotApplicable {
+			t.Fatalf("%s: got %+v, want not_applicable without days", method, got)
+		}
 	}
 }
 
@@ -280,10 +327,10 @@ func TestInvalidThresholdsFallBackToCritical(t *testing.T) {
 // 而那与采集能力毫无关系——一个会自己变差的指标没人会信。
 func TestRunwayCoverageExcludesSubscriptions(t *testing.T) {
 	items := []finance.UpstreamSummary{
-		{Runway: finance.Runway{Days: intPtr(30), Level: finance.RunwayHealthy}},
-		{Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
-		{Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
-		{Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessUpstreamKey}, Runway: finance.Runway{Days: intPtr(30), Level: finance.RunwayHealthy}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessUpstreamKey}, Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessSubscriptionAccount}, Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessSubscriptionAccount}, Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
 	}
 	got := finance.SummarizeRunwayCoverage(items)
 	if got.Total != 2 {
@@ -295,8 +342,20 @@ func TestRunwayCoverageExcludesSubscriptions(t *testing.T) {
 	if got.Reasons[finance.RunwayReasonNoBalance] != 1 {
 		t.Fatalf("原因分布要说得出「为什么是 1/2」: %+v", got.Reasons)
 	}
-	if got.Reasons[finance.RunwayReasonNotApplicable] != 2 {
-		t.Fatalf("订阅型仍要计数（只是不进分母）: %+v", got.Reasons)
+	if got.Reasons[finance.RunwayReasonNotApplicable] != 0 {
+		t.Fatalf("所有非计量型都不应进入覆盖率原因分布: %+v", got.Reasons)
+	}
+}
+
+func TestRunwayCoverageExcludesNonMeteredEvenWhenReasonLooksUnknown(t *testing.T) {
+	items := []finance.UpstreamSummary{
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessOfficialAPI}, Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessMethod("future_non_metered")}, Runway: finance.Runway{Reason: finance.RunwayReasonCurrencyMismatch}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessUpstreamKey}, Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
+	}
+	got := finance.SummarizeRunwayCoverage(items)
+	if got.Total != 1 || got.Known != 0 || got.Reasons[finance.RunwayReasonNoBalance] != 1 {
+		t.Fatalf("只有计量型应进入覆盖率: %+v", got)
 	}
 }
 
@@ -334,11 +393,14 @@ func TestRunwayAlwaysYieldsDaysOrReason(t *testing.T) {
 	for _, method := range methods {
 		for _, balance := range balances {
 			for _, c := range consumptions {
-				got := finance.ComputeRunway(finance.RunwayInput{
+				got, err := finance.ComputeRunway(finance.RunwayInput{
 					AccessMethod: method, Balance: balance,
 					CostMinorSum: c.sum, CoveredDays: c.days, CostCurrency: c.currency,
 					Now: runwayNow, Thresholds: finance.DefaultRunwayThresholds(),
 				})
+				if err != nil {
+					t.Fatalf("%s/%v/%+v: unexpected error: %v", method, balance, c, err)
+				}
 				switch {
 				case got.Known() && got.Reason != "":
 					t.Fatalf("%s/%v/%+v: 算出了天数就不该再带原因", method, balance, c)
@@ -357,11 +419,9 @@ func TestRunwayAlwaysYieldsDaysOrReason(t *testing.T) {
 	}
 }
 
-// TestParseRunwayThresholds 钉住**全平台唯一那份阈值解析**（XM-0049）。
-//
-// 它有两个消费者、跑在两个进程里：platform-api 的 summary 端点要把它回报给
-// 前端，platform-worker 的告警规则要拿它判档。两处各写一遍解析，
-// 「看板说还有 11 天」与「告警说已经低于阈值」就会同时出现在一个人面前。
+// TestParseRunwayThresholds 钉住 bootstrap 生命周期命令使用的唯一 env 解析器
+// （XM-0049）。运行中的 API/worker 不读取这些变量，而是从 DB snapshot provider
+// 取值；本用例只验证一次性导入输入的默认、格式和派生规则。
 func TestParseRunwayThresholds(t *testing.T) {
 	t.Run("空串用默认档", func(t *testing.T) {
 		got, err := finance.ParseRunwayThresholds("", "")
@@ -423,4 +483,14 @@ func TestParseRunwayThresholds(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRunwayThresholdsValidateRejectsValuesThatDoNotFitDatabaseInt32(t *testing.T) {
+	tooLarge := int(1<<31 - 1)
+	if strconv.IntSize > 32 {
+		tooLarge++
+	}
+	if _, err := finance.ParseRunwayThresholds(strconv.Itoa(tooLarge), "1"); err == nil {
+		t.Fatalf("threshold %d should not be accepted when it cannot be persisted as int32", tooLarge)
+	}
 }

@@ -192,10 +192,11 @@ type RunwayCoverage struct {
 func SummarizeRunwayCoverage(items []UpstreamSummary) RunwayCoverage {
 	out := RunwayCoverage{Reasons: map[RunwayUnknownReason]int{}}
 	for _, item := range items {
-		if item.Runway.Reason == RunwayReasonNotApplicable {
-			// 订阅型渠道不进分母：把「没有这个概念」算成「没覆盖到」，
-			// 会让覆盖率随订阅渠道数量下降，而那与采集能力毫无关系。
-			out.Reasons[RunwayReasonNotApplicable]++
+		// 只有计量型（目前为 upstream_key）才有「余额 ÷ 日均消耗」
+		// 的可用天数口径。按 access method 过滤，而不是只看
+		// RunwayReasonNotApplicable：历史行或未来非计量枚举可能带着
+		// no_balance/currency_mismatch 等原因，仍不能进入分母或原因分布。
+		if !item.Account.AccessMethod.IsMetered() {
 			continue
 		}
 		out.Total++

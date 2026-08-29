@@ -8,6 +8,72 @@
 -- 「这张表里没有一个金额列」。
 
 -- ---------------------------------------------------------------------------
+-- XM-C-RUNWAY0 threshold snapshot / history.
+-- ---------------------------------------------------------------------------
+
+-- name: GetRunwayThresholdConfig :one
+SELECT * FROM finance.runway_threshold_config
+WHERE environment = sqlc.arg(environment);
+
+-- name: GetRunwayThresholdConfigVerified :one
+-- The view joins current/history so worker roles never need direct history
+-- SELECT while orphaned current rows still fail closed.
+SELECT environment, critical_days, warning_days, serious_days, revision,
+       updated_at, updated_by, reason, request_id
+FROM finance.runway_threshold_current_verified
+WHERE environment = sqlc.arg(environment);
+
+-- name: InsertRunwayThresholdBootstrap :one
+INSERT INTO finance.runway_threshold_config (
+    environment, critical_days, warning_days, serious_days,
+    revision, updated_at, updated_by, reason, request_id
+) VALUES (
+    sqlc.arg(environment), sqlc.arg(critical_days), sqlc.arg(warning_days),
+    sqlc.arg(serious_days), 1, sqlc.arg(updated_at), sqlc.arg(updated_by),
+    sqlc.arg(reason), sqlc.arg(request_id)
+)
+ON CONFLICT (environment) DO NOTHING
+RETURNING *;
+
+-- name: UpdateRunwayThresholdConfigAtRevision :one
+UPDATE finance.runway_threshold_config SET
+    critical_days = sqlc.arg(critical_days),
+    warning_days = sqlc.arg(warning_days),
+    serious_days = sqlc.arg(serious_days),
+    revision = revision + 1,
+    updated_at = sqlc.arg(updated_at),
+    updated_by = sqlc.arg(updated_by),
+    reason = sqlc.arg(reason),
+    request_id = sqlc.arg(request_id)
+WHERE environment = sqlc.arg(environment)
+  AND revision = sqlc.arg(expected_revision)
+RETURNING *;
+
+-- name: InsertRunwayThresholdHistory :one
+INSERT INTO finance.runway_threshold_history (
+    environment, revision, critical_days, warning_days, serious_days,
+    changed_at, changed_by, reason, request_id, change_source
+) VALUES (
+    sqlc.arg(environment), sqlc.arg(revision), sqlc.arg(critical_days),
+    sqlc.arg(warning_days), sqlc.arg(serious_days), sqlc.arg(changed_at),
+    sqlc.arg(changed_by), sqlc.arg(reason), sqlc.arg(request_id),
+    sqlc.arg(change_source)
+)
+RETURNING *;
+
+-- name: ListRunwayThresholdHistory :many
+SELECT * FROM finance.runway_threshold_history
+WHERE environment = sqlc.arg(environment)
+  AND (sqlc.arg(before_revision)::bigint = 0 OR revision < sqlc.arg(before_revision))
+ORDER BY revision DESC
+LIMIT sqlc.arg(result_limit);
+
+-- name: GetRunwayThresholdHistory :one
+SELECT * FROM finance.runway_threshold_history
+WHERE environment = sqlc.arg(environment)
+  AND revision = sqlc.arg(revision);
+
+-- ---------------------------------------------------------------------------
 -- XM-C-MAP2 managed platform channel temporal bindings.
 -- ---------------------------------------------------------------------------
 

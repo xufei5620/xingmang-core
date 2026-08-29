@@ -30,9 +30,14 @@ export function FormField({
 }: FormFieldProps) {
   const errorId = useId();
   const hintId = useId();
+  const existingDescribedBy =
+    isValidElement(children) && typeof children.props === "object" && children.props !== null
+      ? (children.props as { "aria-describedby"?: string })["aria-describedby"]
+      : undefined;
   const describedBy =
-    [error ? errorId : null, hint && !error ? hintId : null].filter(Boolean).join(" ") ||
-    undefined;
+    [existingDescribedBy, error ? errorId : null, hint && !error ? hintId : null]
+      .filter(Boolean)
+      .join(" ") || undefined;
 
   const control = isValidElement(children)
     ? cloneElement(children as ReactElement<HTMLAttributes<HTMLElement>>, {

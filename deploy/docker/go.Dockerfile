@@ -1,4 +1,5 @@
-# 平台三个 Go 二进制的统一构建（platform-api / platform-worker / migrate）。
+# 平台 Go 二进制的统一构建（platform-api / platform-worker / migrate /
+# runway-threshold-bootstrap）。
 #
 # 为什么放在一个文件里：三者共享同一份 go.mod 与几乎全部 internal/ 代码。
 # 拆成三个 Dockerfile 会让 BuildKit 各自维护一份模块缓存和编译缓存，
@@ -28,7 +29,7 @@ ARG BUILD_COMMIT=unknown
 ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -trimpath -buildvcs=false \
       -ldflags "-s -w -X github.com/xufei5620/xingmang-platform/internal/platform/buildinfo.Version=${BUILD_VERSION} -X github.com/xufei5620/xingmang-platform/internal/platform/buildinfo.Commit=${BUILD_COMMIT}" \
-      -o /out/ ./cmd/platform-api ./cmd/platform-worker ./cmd/migrate
+      -o /out/ ./cmd/platform-api ./cmd/platform-worker ./cmd/migrate ./cmd/runway-threshold-bootstrap
 
 # ---------- 运行阶段的共同底座 ----------
 # alpine 而不是 scratch：出问题时要能 exec 进去 wget/psql 一下。
@@ -59,6 +60,7 @@ ENTRYPOINT ["/usr/local/bin/platform-worker"]
 FROM runtime-base AS migrate
 COPY --from=builder /out/migrate /usr/local/bin/migrate
 COPY --from=builder /out/platform-worker /usr/local/bin/platform-worker
+COPY --from=builder /out/runway-threshold-bootstrap /usr/local/bin/runway-threshold-bootstrap
 COPY --chown=10001:10001 db/migrations /app/db/migrations
 # --chmod 而不是 RUN chmod：Windows 检出的文件没有可执行位，
 # 靠 git 保留 mode 在这条链路上不可靠

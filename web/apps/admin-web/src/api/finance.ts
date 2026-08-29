@@ -140,6 +140,10 @@ export interface RunwayThresholds {
   criticalDays: number;
   warningDays: number;
   seriousDays: number;
+  /** DB-backed snapshot metadata; absent on the legacy env-backed response. */
+  revision?: number;
+  source?: string;
+  updatedAt?: string;
 }
 
 export interface ChannelSummaryPage {
@@ -233,6 +237,9 @@ interface RawUpstreamPage {
     critical_days?: number;
     warning_days?: number;
     serious_days?: number;
+    revision?: number;
+    source?: string;
+    updated_at?: string;
   };
 }
 
@@ -387,6 +394,9 @@ export async function listUpstreamSummaries(
       criticalDays: body.runway_thresholds?.critical_days ?? 0,
       warningDays: body.runway_thresholds?.warning_days ?? 0,
       seriousDays: body.runway_thresholds?.serious_days ?? 0,
+      ...(body.runway_thresholds?.revision === undefined ? {} : { revision: body.runway_thresholds.revision }),
+      ...(body.runway_thresholds?.source === undefined ? {} : { source: body.runway_thresholds.source }),
+      ...(body.runway_thresholds?.updated_at === undefined ? {} : { updatedAt: body.runway_thresholds.updated_at }),
     },
   };
 }

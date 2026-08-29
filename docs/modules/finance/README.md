@@ -873,7 +873,7 @@ SoloAI 正因此不用它算成本。它单独放在 `SummaryStore` 而不是并
 
 | Reason | 含义 |
 |---|---|
-| `not_applicable` | 订阅型渠道**没有余额这个概念**（§7 末段）——不是缺数据 |
+| `not_applicable` | 非计量型渠道（订阅账号、官方 API 直连等）**没有余额 runway 这个概念**（§7 末段）——不是缺数据 |
 | `no_balance` | 从未读到余额。**当前的常态**，见下文覆盖率边界 |
 | `balance_stale` | 最近一次确认已超过 30 分钟（≈ 连着六轮没成功） |
 | `no_consumption` | 窗口内没有已知消耗。除以 0 是无穷大——「永远用不完」是最糟的伪精确 |
@@ -917,7 +917,7 @@ Fake 驱动实现了完整的余额读取（还带一条缓慢下降的序列，
 
 覆盖率因此是响应里的一等字段（`runway_coverage: {total, known, reasons}`）
 并显示在卡上：不显式说出来，看板上就只是一排「—」，看起来像坏了。
-**订阅型渠道不进分母**——把「没有这个概念」算成「没覆盖到」，
+**所有非计量型渠道不进分母**——把「没有这个概念」算成「没覆盖到」，
 会让覆盖率随订阅渠道数量下降，而那与采集能力毫无关系。
 
 ---
@@ -1115,7 +1115,7 @@ UI 交接 §10.4 的最后一条要求：「低于阈值时进入告警和待处
 而告警说「已经低于 10 天」，那时没人知道该信哪个。瘦查询则省掉两条与判据
 无关的聚合——告警每 60 秒跑一轮，看板只在有人打开页面时跑。
 
-### 阈值可配：一份解析，两个进程
+### 阈值 bootstrap：数据库快照，两个消费者
 
 ```
 XM_FINANCE_RUNWAY_WARN_DAYS   默认 10
@@ -1123,21 +1123,36 @@ XM_FINANCE_RUNWAY_CRIT_DAYS   默认 5
 ```
 
 两个消费者跑在**两个进程**里：platform-api 的 `/finance/upstreams/summary`
-要把阈值回报给前端，platform-worker 的告警规则要拿它判档。所以：
-
-- **解析只有一份**：`finance.ParseRunwayThresholds`，两个 `cmd` 都调它；
-- **部署一致靠 compose**：`launch.yaml` 里两个服务取同一个 `.env` 变量；
-- **非法值拒绝启动**，不回落默认——一个把 `WARN_DAYS` 写成 `ten` 的部署，
-  静默用回 10 会让人以为自己调过了；
-- HTTP 端点**不就地取默认**，阈值由装配层注入（`Deps.FinanceRunwayThresholds`）
-  ——就地取默认的话，worker 按环境变量判档、api 按默认值回报，两者会分叉。
+要把阈值回报给前端，platform-worker 的告警规则要拿它判档。运行时两者都从
+`finance.runway_threshold_config` 读取同一 revision；`finance.ParseRunwayThresholds`
+只在 `runway-threshold-bootstrap` 生命周期命令中解析旧环境变量，不能作为长驻
+进程的 fallback。数据库缺行、current/history 不配对或读取失败时不回落默认，API
+返回可信的 503，worker 整轮 fail closed。
 
 第三档 `serious`（默认 20，最松的一档，只影响颜色）目前不可配。
 若 `WARN_DAYS` 被调到 ≥20，它会**自动让位**到 `WARN+1`：不让位的话三档不递增，
 `levelFor` 的兜底会把**每一条**上游判成 critical——一次配置手滑变成满屏红。
 让位不损失任何告警能力（serious 的作用只是给「还算充裕」一个颜色）。
 
-设置面 UI 后置。
+设置面位于 `/alerts?sub=rules`，当前提供 current/history/preview 只读能力；写入
+仍等待 Foundation-B/C3c 的 L2 Action。
+
+### Runway revision 快照（XM-C-RUNWAY0）
+
+本地收尾增加了 `finance.runway_threshold_config`（当前快照）和
+`finance.runway_threshold_history`（append-only 历史）。API 与 worker 在各自的
+请求/评估轮次读取同一个 `revision`；数据库缺行或读取失败时 fail closed，不再
+偷偷补 5/10/20。一次性导入仍通过 tools profile 的
+`runway-threshold-bootstrap` 生命周期命令完成，重复导入相同值幂等，已有不同值
+拒绝覆盖。只读端点为：
+
+- `GET /api/v1/finance/runway-thresholds`
+- `GET /api/v1/finance/runway-thresholds/history`
+- `GET /api/v1/finance/runway-thresholds/preview`
+
+规则页位于 `/alerts?sub=rules`，展示 current/history/preview，不在 C3c 之前提供
+写按钮或 manage scope。切换与回滚步骤见
+`docs/runbooks/SWITCH-RUNWAY-THRESHOLDS-TO-DB.md`。
 
 ---
 

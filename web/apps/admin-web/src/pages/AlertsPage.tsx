@@ -5,10 +5,12 @@ import {
   navLabel,
   PageHeader,
   PageState,
+  navItemByPath,
   type DataTableColumn,
 } from "@xingmang/ui-admin";
 import { Badge, Tabs } from "@xingmang/ui-primitives";
 import { useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
 import { ApiStateView } from "../components/ApiStateView";
@@ -20,9 +22,12 @@ import {
   sortForDisplay,
 } from "../lib/alerts";
 import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
+import { AlertRulesPage } from "./AlertRulesPage";
 
 /** react-query 的缓存键前缀。总览页的告警卡也用它，两处共用一份缓存。 */
 export const ALERTS_QUERY_KEY = "alerts";
+
+const ALERT_SUB_TABS = (navItemByPath("/alerts")?.item.subTabs ?? []).map((tab) => [tab.id, tab.label] as const);
 
 type Scope = "active" | "all";
 
@@ -35,6 +40,47 @@ type Scope = "active" | "all";
  *  第二个问题单独占一列，是因为「OPEN 但没投递出去」是本模块最危险的状态——
  *  运维以为告警会找上门，实际上没有任何人收到（规格 §9.4 的闭环在那时是断的）。 */
 export function AlertsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawSub = searchParams.get("sub");
+  const sub = rawSub && rawSub.trim() !== "" ? rawSub : "alerts";
+
+  if (!ALERT_SUB_TABS.some(([value]) => value === sub)) {
+    return (
+      <section>
+        <PageHeader title={navLabel("/alerts")} description="告警与故障的其它子页仍在规划中，当前没有可断言的数据源。" />
+        <PageState
+          kind="unavailable"
+          title={`「${sub}」子页尚未接入`}
+          description="为避免把活跃告警误当成故障事件、通知或暂停记录，本页不会回落到告警列表。"
+          action={<Link to="/alerts?sub=alerts" className="text-sm font-medium text-accent hover:underline">返回告警</Link>}
+        />
+      </section>
+    );
+  }
+  const setSub = (next: string) => {
+    const params = new URLSearchParams(searchParams);
+    params.set("sub", next);
+    setSearchParams(params, { replace: true });
+  };
+  return (
+    <Tabs
+      value={sub}
+      onValueChange={setSub}
+      items={ALERT_SUB_TABS.map(([value, label]) => ({
+        value,
+        label,
+        content: value === "alerts" ? <AlertsListPage /> : value === "rules" ? <AlertRulesPage /> : (
+          <section>
+            <PageHeader title={label} description="该子页尚未接入稳定的数据源。" />
+            <PageState kind="unavailable" title={`「${label}」尚未接入`} description="当前不会把其它告警数据误归类到这里。" />
+          </section>
+        ),
+      }))}
+    />
+  );
+}
+
+function AlertsListPage() {
   const [scope, setScope] = useState<Scope>("active");
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -69,11 +115,14 @@ export function AlertsPage() {
         refreshing={query.isFetching}
         lastRefreshedAt={query.dataUpdatedAt || undefined}
         actions={
-          <CreateSilenceDialog
-            onCreated={(runId) =>
-              afterWrite(`已创建静默窗口，run_id=${runId}；审计事件通常几秒内出现在审计页`)
-            }
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Link to="/alerts?sub=rules" className="inline-flex h-(--xm-control-h-md) items-center rounded-md border border-edge bg-surface px-3 text-sm font-medium text-fg hover:bg-surface-muted">告警与故障规则</Link>
+            <CreateSilenceDialog
+              onCreated={(runId) =>
+                afterWrite(`已创建静默窗口，run_id=${runId}；审计事件通常几秒内出现在审计页`)
+              }
+            />
+          </div>
         }
       />
 

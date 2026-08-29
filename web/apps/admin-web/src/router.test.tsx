@@ -407,6 +407,12 @@ function okHandler(url: string): Response {
     return fakeResponse(200, financeChannelsBody);
   if (url.startsWith("/api/v1/finance/upstreams/summary"))
     return fakeResponse(200, financeUpstreamsBody);
+  if (url.startsWith("/api/v1/finance/runway-thresholds/history"))
+    return fakeResponse(200, { items: [{ environment: "development", revision: 1, critical_days: 5, warning_days: 10, serious_days: 20, changed_at: "2026-08-28T10:00:00Z", changed_by: "bootstrap", reason: "initial", request_id: "req-1", change_source: "bootstrap" }], has_more: false });
+  if (url.startsWith("/api/v1/finance/runway-thresholds/preview"))
+    return fakeResponse(200, { current: { critical_days: 5, warning_days: 10, serious_days: 20 }, proposed: { critical_days: 5, warning_days: 10, serious_days: 20 }, current_revision: 1, evaluation_at: "2026-08-28T10:00:00Z", coverage: { total: 0, known: 0, unknown_reasons: {} }, counts: { would_open: 0, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 0 }, items: [], has_more: false });
+  if (url.startsWith("/api/v1/finance/runway-thresholds"))
+    return fakeResponse(200, { environment: "development", critical_days: 5, warning_days: 10, serious_days: 20, revision: 1, source: "database", updated_at: "2026-08-28T10:00:00Z", updated_by: "bootstrap", reason: "initial" });
   if (url.startsWith("/api/v1/metrics")) return fakeResponse(200, metricsBody);
   if (url.startsWith("/api/v1/services")) return fakeResponse(200, servicesBody);
   if (/\/api\/v1\/platforms\/[^/]+\/users\/u-/.test(url)) {
@@ -1927,9 +1933,32 @@ describe("设置页", () => {
     expect(await screen.findByText(/服务端为最终裁决者/)).not.toBeNull();
   });
 
-  it("告警规则与静默是占位，注明随 XM-0033 上线", async () => {
+  it("告警规则与静默只保留规则页入口，不复制第二份编辑表单", async () => {
     renderRoute("/settings");
-    expect(await screen.findByText(/随 XM-0033 告警中心上线/)).not.toBeNull();
+    expect(await screen.findByRole("link", { name: /打开告警与故障规则/ })).not.toBeNull();
+    expect(screen.queryByLabelText("Critical 天数")).toBeNull();
+  });
+});
+
+describe("告警规则子页", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("规则页显示阈值、影响预览入口与 Foundation-B 门禁", async () => {
+    renderRoute("/alerts?sub=rules");
+    expect(await screen.findByRole("heading", { name: "告警与故障", level: 2 })).not.toBeNull();
+    expect(await screen.findByText("Foundation-B / C3c 尚未开放")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "预览影响" })).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("告警其它子页不回落到活跃告警表", async () => {
+    renderRoute("/alerts?sub=incidents");
+    expect(await screen.findByText("「故障事件」尚未接入")).not.toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
   });
 });
 

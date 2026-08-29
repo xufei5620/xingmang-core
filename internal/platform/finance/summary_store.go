@@ -142,7 +142,8 @@ type SummaryQuery struct {
 	// From / To 是业务日闭区间（含两端）。零值时由调用方补默认窗口。
 	From time.Time
 	To   time.Time
-	// Thresholds 为零值时用 DefaultRunwayThresholds()。
+	// Thresholds 必须是已验证的 DB/provider 快照；零值会 fail closed。
+	// 旧 HTTP 兼容处理器若需要默认值，会在进入 Store 前显式补齐。
 	Thresholds RunwayThresholds
 }
 
@@ -210,12 +211,16 @@ func (s *SummaryStore) UpstreamRunways(
 	out := make([]UpstreamRunway, 0, len(accounts))
 	for _, account := range accounts {
 		balance := balancePtr(balances, account.ID)
+		runway, err := runwayFor(account, balance, recent[account.ID], thresholds, now)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, UpstreamRunway{
 			AccountID:    account.ID,
 			Name:         AccountDisplayName(account),
 			SystemType:   account.SystemType,
 			AccessMethod: account.AccessMethod,
-			Runway:       runwayFor(account, balance, recent[account.ID], thresholds, now),
+			Runway:       runway,
 		})
 	}
 	return out, nil
@@ -225,6 +230,11 @@ func (s *SummaryStore) UpstreamRunways(
 func (s *SummaryStore) runwayInputs(
 	ctx context.Context, environment string, thresholds RunwayThresholds,
 ) (map[uuid.UUID]BalanceReading, map[uuid.UUID]recentCostRow, RunwayThresholds, time.Time, error) {
+	// Validate before touching the database: a malformed provider snapshot is a
+	// configuration error, not a reason to spend a full balance/cost query round.
+	if err := thresholds.Validate(); err != nil {
+		return nil, nil, thresholds, time.Time{}, err
+	}
 	balances, err := s.latestBalances(ctx, environment)
 	if err != nil {
 		return nil, nil, thresholds, time.Time{}, err
@@ -232,11 +242,6 @@ func (s *SummaryStore) runwayInputs(
 	recent, err := s.recentCost(ctx, environment)
 	if err != nil {
 		return nil, nil, thresholds, time.Time{}, err
-	}
-	if err := thresholds.Validate(); err != nil {
-		// 调用方没给（或给错）阈值时回落到默认档，而不是让 levelFor
-		// 的兜底把所有渠道都判成 critical。
-		thresholds = DefaultRunwayThresholds()
 	}
 	return balances, recent, thresholds, s.now().UTC(), nil
 }
@@ -253,7 +258,7 @@ func balancePtr(balances map[uuid.UUID]BalanceReading, id uuid.UUID) *BalanceRea
 func runwayFor(
 	account UpstreamAccount, balance *BalanceReading,
 	cost recentCostRow, thresholds RunwayThresholds, now time.Time,
-) Runway {
+) (Runway, error) {
 	return ComputeRunway(RunwayInput{
 		AccessMethod: account.AccessMethod,
 		Balance:      balance,
@@ -305,7 +310,11 @@ func (s *SummaryStore) UpstreamSummaries(
 		}
 		// 与 UpstreamRunways 走同一段计算——看板上那个天数与告警判据上的
 		// 天数因此出自同一份代码。
-		item.Runway = runwayFor(account, item.Balance, recent[account.ID], thresholds, now)
+		runway, err := runwayFor(account, item.Balance, recent[account.ID], thresholds, now)
+		if err != nil {
+			return nil, err
+		}
+		item.Runway = runway
 		out = append(out, item)
 	}
 	return out, nil

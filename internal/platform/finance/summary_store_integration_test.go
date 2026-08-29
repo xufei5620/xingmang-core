@@ -198,7 +198,7 @@ func TestSummaryAggregatesWindowAndCoverage(t *testing.T) {
 	f.insertHistoricalProfitRow(t, today, "tok-c", "acct-c", nil, &cost)
 
 	items, err := f.store.ChannelSummaries(ctx, finance.SummaryQuery{
-		Environment: intEnv, From: today, To: today,
+		Environment: intEnv, From: today, To: today, Thresholds: finance.DefaultRunwayThresholds(),
 	})
 	if err != nil {
 		t.Fatalf("渠道摘要: %v", err)
@@ -242,7 +242,7 @@ func TestSummaryListsAccountsWithoutLedgerRows(t *testing.T) {
 	today := summaryToday()
 
 	items, err := f.store.ChannelSummaries(context.Background(), finance.SummaryQuery{
-		Environment: intEnv, From: today, To: today,
+		Environment: intEnv, From: today, To: today, Thresholds: finance.DefaultRunwayThresholds(),
 	})
 	if err != nil {
 		t.Fatalf("渠道摘要: %v", err)
@@ -286,7 +286,7 @@ func TestRunwayUsesCompleteDaysExcludingToday(t *testing.T) {
 	}
 
 	items, err := f.store.UpstreamSummaries(ctx, finance.SummaryQuery{
-		Environment: intEnv, From: today, To: today,
+		Environment: intEnv, From: today, To: today, Thresholds: finance.DefaultRunwayThresholds(),
 	})
 	if err != nil {
 		t.Fatalf("上游摘要: %v", err)
@@ -318,7 +318,7 @@ func TestRunwayUnknownWithoutBalance(t *testing.T) {
 	today := summaryToday()
 
 	items, err := f.store.UpstreamSummaries(context.Background(), finance.SummaryQuery{
-		Environment: intEnv, From: today, To: today,
+		Environment: intEnv, From: today, To: today, Thresholds: finance.DefaultRunwayThresholds(),
 	})
 	if err != nil {
 		t.Fatalf("上游摘要: %v", err)

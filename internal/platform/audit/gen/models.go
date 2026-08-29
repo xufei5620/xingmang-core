@@ -229,6 +229,43 @@ type FinanceProxyAsset struct {
 	UpdatedAt          pgtype.Timestamptz
 }
 
+type FinanceRunwayThresholdConfig struct {
+	Environment  string
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	Revision     int64
+	UpdatedAt    pgtype.Timestamptz
+	UpdatedBy    string
+	Reason       string
+	RequestID    string
+}
+
+type FinanceRunwayThresholdCurrentVerified struct {
+	Environment  string
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	Revision     int64
+	UpdatedAt    pgtype.Timestamptz
+	UpdatedBy    string
+	Reason       string
+	RequestID    string
+}
+
+type FinanceRunwayThresholdHistory struct {
+	Environment  string
+	Revision     int64
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	ChangedAt    pgtype.Timestamptz
+	ChangedBy    string
+	Reason       string
+	RequestID    string
+	ChangeSource string
+}
+
 type FinanceSubscriptionCostBatch struct {
 	ID                uuid.UUID
 	UpstreamAccountID uuid.UUID

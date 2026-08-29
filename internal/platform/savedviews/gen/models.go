@@ -177,6 +177,20 @@ type FinanceBalanceHistory struct {
 	Source            string
 }
 
+type FinancePlatformChannelBinding struct {
+	ID                uuid.UUID
+	Environment       string
+	ServiceID         uuid.UUID
+	ExternalChannelID string
+	UpstreamAccountID uuid.UUID
+	ValidFrom         pgtype.Timestamptz
+	ValidTo           pgtype.Timestamptz
+	Provenance        string
+	Reason            string
+	CreatedBy         string
+	CreatedAt         pgtype.Timestamptz
+}
+
 type FinanceProfitDaily struct {
 	UpstreamAccountID uuid.UUID
 	BusinessDay       pgtype.Date
@@ -213,6 +227,43 @@ type FinanceProxyAsset struct {
 	Environment        string
 	CreatedAt          pgtype.Timestamptz
 	UpdatedAt          pgtype.Timestamptz
+}
+
+type FinanceRunwayThresholdConfig struct {
+	Environment  string
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	Revision     int64
+	UpdatedAt    pgtype.Timestamptz
+	UpdatedBy    string
+	Reason       string
+	RequestID    string
+}
+
+type FinanceRunwayThresholdCurrentVerified struct {
+	Environment  string
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	Revision     int64
+	UpdatedAt    pgtype.Timestamptz
+	UpdatedBy    string
+	Reason       string
+	RequestID    string
+}
+
+type FinanceRunwayThresholdHistory struct {
+	Environment  string
+	Revision     int64
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	ChangedAt    pgtype.Timestamptz
+	ChangedBy    string
+	Reason       string
+	RequestID    string
+	ChangeSource string
 }
 
 type FinanceSubscriptionCostBatch struct {
