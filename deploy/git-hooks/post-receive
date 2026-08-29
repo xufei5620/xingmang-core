@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# 裸仓库 post-receive：只有 release 分支更新才启动受控 CI。
+# 每个 commit 都有独立的 <sha>.log 与 <sha>.status；status 为 green 才允许
+# 后续部署线采纳。CI 失败时 hook 返回非零并保留 red 状态（receive 已完成，
+# 因此部署闸门必须检查该状态，不能只看 push 是否成功）。
+set -Eeuo pipefail
+umask 077
+export GIT_NO_REPLACE_OBJECTS=1
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+
+git_dir="$(git rev-parse --git-dir 2>/dev/null)" || {
+  echo "POST-RECEIVE FAIL: 只能在 Git 裸仓库 receive 上下文运行" >&2
+  exit 1
+}
+case "$git_dir" in
+  /*) ;;
+  *) git_dir="$(cd -- "$git_dir" && pwd -P)" ;;
+esac
+
+if ! git --git-dir="$git_dir" rev-parse --is-bare-repository 2>/dev/null | grep -qx true; then
+  echo "POST-RECEIVE FAIL: 目标必须是 Git 裸仓库" >&2
+  exit 1
+fi
+
+configured_status_dir="$(git --git-dir="$git_dir" config --get xm.ci.statusDir 2>/dev/null || true)"
+configured_work_root="$(git --git-dir="$git_dir" config --get xm.ci.workDir 2>/dev/null || true)"
+configured_ci_script="$(git --git-dir="$git_dir" config --get xm.ci.script 2>/dev/null || true)"
+configured_ci_script_sha256="$(git --git-dir="$git_dir" config --get xm.ci.scriptSha256 2>/dev/null || true)"
+configured_base_ref="$(git --git-dir="$git_dir" config --get xm.ci.baseRef 2>/dev/null || true)"
+configured_require_base="$(git --git-dir="$git_dir" config --get xm.ci.requireBase 2>/dev/null || true)"
+if [[ "$configured_status_dir" =~ ^[A-Za-z]:/ ]] && command -v cygpath >/dev/null 2>&1; then
+  configured_status_dir="$(cygpath -u "$configured_status_dir")"
+fi
+if [[ "$configured_work_root" =~ ^[A-Za-z]:/ ]] && command -v cygpath >/dev/null 2>&1; then
+  configured_work_root="$(cygpath -u "$configured_work_root")"
+fi
+if [[ "$configured_ci_script" =~ ^[A-Za-z]:/ ]] && command -v cygpath >/dev/null 2>&1; then
+  configured_ci_script="$(cygpath -u "$configured_ci_script")"
+fi
+
+status_dir="${POST_RECEIVE_STATUS_DIR:-${configured_status_dir:-/srv/ci}}"
+work_root="${POST_RECEIVE_WORK_DIR:-${configured_work_root:-$status_dir/work}}"
+release_ref="${POST_RECEIVE_RELEASE_REF:-refs/heads/release/v0.1-launch}"
+ci_command="${POST_RECEIVE_CI_COMMAND:-}"
+ci_image="${POST_RECEIVE_CI_IMAGE:-xingmang-ci:ci-local}"
+docker_bin="${POST_RECEIVE_DOCKER_BIN:-docker}"
+zero="0000000000000000000000000000000000000000"
+
+absolute_dir() {
+  local label="$1" value="$2"
+  case "$value" in
+    /*) : ;;
+    *) echo "POST-RECEIVE FAIL: $label 必须是绝对路径: $value" >&2; return 1 ;;
+  esac
+  case "$value" in
+    *[!A-Za-z0-9_./-]*) echo "POST-RECEIVE FAIL: $label 含非法字符" >&2; return 1 ;;
+  esac
+  case "/$value/" in
+    */../*|*/./*) echo "POST-RECEIVE FAIL: $label 不得包含 . 或 .. 路径段" >&2; return 1 ;;
+  esac
+  [ "$value" != "/" ] || { echo "POST-RECEIVE FAIL: $label 不能是根目录" >&2; return 1; }
+  while [[ "$value" == */ && "$value" != "/" ]]; do value="${value%/}"; done
+  printf '%s\n' "$value"
+}
+
+status_dir="$(absolute_dir status_dir "$status_dir")" || exit 1
+work_root="$(absolute_dir work_root "$work_root")" || exit 1
+case "$status_dir/" in
+  "$work_root/"*) echo "POST-RECEIVE FAIL: status/work 目录不能嵌套" >&2; exit 1 ;;
+esac
+# work_root 默认就是 status_dir/work，位于状态目录内部是允许的；反向嵌套
+# 已由上面的检查拒绝，避免清理 checkout 时触碰状态文件。
+
+[[ "$ci_image" =~ ^[A-Za-z0-9][A-Za-z0-9_./:@-]*$ ]] || {
+  echo "POST-RECEIVE FAIL: CI 镜像名称非法" >&2
+  exit 1
+}
+case "$ci_image" in
+  latest|*:latest)
+    echo "POST-RECEIVE FAIL: CI 镜像不得使用 latest" >&2
+    exit 1
+    ;;
+esac
+mkdir -p -- "$status_dir" "$work_root"
+for protected_dir in "$status_dir" "$work_root"; do
+  [ ! -L "$protected_dir" ] || { echo "POST-RECEIVE FAIL: 目录不能是符号链接: $protected_dir" >&2; exit 1; }
+  resolved_dir="$(readlink -f -- "$protected_dir" 2>/dev/null || true)"
+  [ -n "$resolved_dir" ] && [ "$resolved_dir" = "$protected_dir" ] || {
+    echo "POST-RECEIVE FAIL: 目录解析后越界或不可验证: $protected_dir" >&2
+    exit 1
+  }
+done
+
+write_status() {
+  local sha="$1" value="$2" tmp_file
+  tmp_file="$(mktemp -- "$status_dir/.${sha}.status.XXXXXX")" || return $?
+  printf '%s\n' "$value" > "$tmp_file" || return $?
+  mv -f -- "$tmp_file" "$status_dir/$sha.status" || return $?
+}
+
+remove_checkout() {
+  local checkout="$1" root="$2"
+  case "$checkout" in
+    "$root"/*) ;;
+    *) echo "POST-RECEIVE FAIL: 拒绝清理越界临时目录" >&2; return 1 ;;
+  esac
+  [ "$checkout" != "$root" ] || {
+    echo "POST-RECEIVE FAIL: 拒绝清理 CI 根目录" >&2
+    return 1
+  }
+  [ ! -L "$checkout" ] || {
+    echo "POST-RECEIVE FAIL: 拒绝清理符号链接 checkout" >&2
+    return 1
+  }
+  [ -e "$checkout" ] || return 0
+  rm -rf -- "$checkout"
+}
+
+acquire_lock() {
+  local lock_dir="$1"
+  if mkdir -- "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$lock_dir/pid" || {
+      rmdir -- "$lock_dir" 2>/dev/null || true
+      return 1
+    }
+    return 0
+  fi
+  return 1
+}
+
+release_lock() {
+  local lock_dir="$1"
+  rm -f -- "$lock_dir/pid" 2>/dev/null || true
+  rmdir -- "$lock_dir" 2>/dev/null || true
+}
+
+run_ci() {
+  local checkout="$1" sha="$2"
+  if [ -n "$ci_command" ]; then
+    [ "${POST_RECEIVE_ALLOW_CUSTOM_EXECUTOR:-0}" = "1" ] || {
+      echo "POST-RECEIVE FAIL: 自定义 CI 执行器仅允许在显式测试模式启用" >&2
+      return 1
+    }
+    case "$ci_command" in
+      /*) ;;
+      *) echo "POST-RECEIVE FAIL: POST_RECEIVE_CI_COMMAND 必须为绝对路径" >&2; return 1 ;;
+    esac
+    [ -x "$ci_command" ] || {
+      echo "POST-RECEIVE FAIL: CI 执行器不可执行" >&2
+      return 1
+    }
+    # 测试执行器只在显式 opt-in 下可用；默认沿用当前工具链 PATH（Linux
+    # 服务器通常是 /usr/local/bin:/usr/bin:/bin，Git Bash 还需要 mingw64/bin）。
+    executor_path="${POST_RECEIVE_EXECUTOR_PATH:-${PATH:-/usr/local/bin:/usr/bin:/bin}}"
+    case "$executor_path" in
+      ""|*[!A-Za-z0-9_./:-]*)
+        echo "POST-RECEIVE FAIL: 执行器 PATH 含非法字符" >&2
+        return 1
+        ;;
+    esac
+    [ ! -L "$checkout/.ci-home" ] || {
+      echo "POST-RECEIVE FAIL: checkout 内 .ci-home 不能是符号链接" >&2
+      return 1
+    }
+    mkdir -p -- "$checkout/.ci-home" || return $?
+    chmod 0700 "$checkout/.ci-home" || return $?
+    # 自定义执行器不继承 receive 进程环境，避免把服务器凭据、代理或
+    # 调试变量泄露给宿主执行器；它只能依靠两个位置参数工作。
+    env -i PATH="$executor_path" HOME="$checkout/.ci-home" LANG=C LC_ALL=C CI=1 \
+      "$ci_command" "$checkout" "$sha" < /dev/null
+    return "$?"
+  fi
+
+  command -v "$docker_bin" >/dev/null 2>&1 || {
+    echo "POST-RECEIVE FAIL: 未安装 Docker，无法运行受控 CI" >&2
+    return 1
+  }
+  # 镜像由服务器运维预置并固定 digest/tag；本 hook 不联网拉取、不挂载 Docker
+  # socket、不继承宿主凭据。工作树是一次性临时目录，执行后立即清理。
+  ci_script_path="${POST_RECEIVE_CI_SCRIPT:-$configured_ci_script}"
+  if [ -n "${POST_RECEIVE_CI_SCRIPT:-}" ] && [ "${POST_RECEIVE_ALLOW_CI_SCRIPT_OVERRIDE:-0}" != "1" ]; then
+    echo "POST-RECEIVE FAIL: 可信 CI 脚本覆盖仅允许显式测试模式" >&2
+    return 1
+  fi
+  case "$ci_script_path" in
+    /*) ;;
+    *) echo "POST-RECEIVE FAIL: 未配置绝对路径的可信 CI 脚本" >&2; return 1 ;;
+  esac
+  case "$ci_script_path" in
+    *[!A-Za-z0-9_./-]*) echo "POST-RECEIVE FAIL: 可信 CI 脚本路径含非法字符" >&2; return 1 ;;
+  esac
+  case "/$ci_script_path/" in
+    */../*|*/./*) echo "POST-RECEIVE FAIL: 可信 CI 脚本路径不得包含 . 或 .. 路径段" >&2; return 1 ;;
+  esac
+  [ "$ci_script_path" != "/" ] || { echo "POST-RECEIVE FAIL: 可信 CI 脚本不能是根目录" >&2; return 1; }
+  [ -f "$ci_script_path" ] && [ ! -L "$ci_script_path" ] && [ -x "$ci_script_path" ] || {
+    echo "POST-RECEIVE FAIL: 可信 CI 脚本不存在或不可执行" >&2
+    return 1
+  }
+  resolved_ci_script="$(readlink -f -- "$ci_script_path" 2>/dev/null || true)"
+  [ "$resolved_ci_script" = "$ci_script_path" ] || {
+    echo "POST-RECEIVE FAIL: 可信 CI 脚本解析后越界或不可验证" >&2
+    return 1
+  }
+  [ -n "$configured_ci_script_sha256" ] || {
+    echo "POST-RECEIVE FAIL: 未配置可信 CI 脚本 SHA-256" >&2
+    return 1
+  }
+  [[ "$configured_ci_script_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "POST-RECEIVE FAIL: 可信 CI 脚本 SHA-256 配置非法" >&2
+    return 1
+  }
+  command -v sha256sum >/dev/null 2>&1 || { echo "POST-RECEIVE FAIL: 缺少 sha256sum" >&2; return 1; }
+  actual_ci_script_sha256="$(sha256sum -- "$ci_script_path" | awk '{print $1}')"
+  [ "${actual_ci_script_sha256,,}" = "${configured_ci_script_sha256,,}" ] || {
+    echo "POST-RECEIVE FAIL: 可信 CI 脚本哈希不匹配" >&2
+    return 1
+  }
+  "$docker_bin" run --rm --pull=never \
+    --network none \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges \
+    --pids-limit=512 \
+    --tmpfs /tmp:rw,nosuid,nodev,size=1g \
+    -v "$checkout:/workspace" \
+    -v "$ci_script_path:/opt/xm-ci-local.sh:ro" \
+    -e CI_LOCAL_ROOT=/workspace \
+    -e CI_LOCAL_REQUIRE_GIT=1 \
+    -e CI_LOCAL_ALLOW_OVERRIDES=0 \
+    -e GOVERNANCE_BASE_REF="${configured_base_ref:-origin/main}" \
+    -e GOVERNANCE_REQUIRE_BASE="${configured_require_base:-1}" \
+    -w /workspace \
+    "$ci_image" bash /opt/xm-ci-local.sh < /dev/null
+}
+
+run_release_locked() {
+  local old="$1" new="$2" ref="$3"
+  local log_file="$status_dir/$new.log" tmp_log rc
+
+  # 锁取得之后再次检查，避免两个 receive 同时把 pending 当成可重跑。
+  if [ -f "$status_dir/$new.status" ] && [ "$(tr -d '\r\n' < "$status_dir/$new.status")" = "green" ]; then
+    echo "POST-RECEIVE PASS: $new 已有 green status，跳过重复 CI"
+    return 0
+  fi
+  write_status "$new" pending || return $?
+  tmp_log="$(mktemp -- "$status_dir/.${new}.log.XXXXXX")" || {
+    write_status "$new" red || true
+    return 1
+  }
+  (
+    set -Eeuo pipefail
+    checkout=""
+    trap 'if [ -n "${checkout:-}" ]; then remove_checkout "$checkout" "$work_root" || true; fi' EXIT
+    checkout="$(mktemp -d -- "$work_root/.${new}.XXXXXX")"
+    echo "commit=$new"
+    echo "previous=$old"
+    echo "ref=$ref"
+    echo "ci_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # 使用独立 clone 保留 .git、HEAD、index 与历史；archive 只会留下源码，
+    # 会让 governance/gitleaks/sqlc 误判或静默跳过。
+    git -c core.hooksPath=/dev/null clone --no-local --no-checkout "$git_dir" "$checkout"
+    git -C "$checkout" -c core.hooksPath=/dev/null checkout --detach "$new"
+    [ -d "$checkout/.git" ] && [ ! -L "$checkout/.git" ]
+    actual="$(git -C "$checkout" rev-parse HEAD)"
+    [ "${actual,,}" = "${new,,}" ]
+    [ ! -L "$checkout/.ci-home" ]
+    mkdir -p -- "$checkout/.ci-home"
+    chmod 0700 "$checkout/.ci-home"
+    ci_rc=0
+    run_ci "$checkout" "$new" || ci_rc=$?
+    if [ "$ci_rc" -ne 0 ]; then
+      echo "ci_exit=$ci_rc"
+      exit "$ci_rc"
+    fi
+    echo "ci_finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ) >"$tmp_log" 2>&1
+  rc=$?
+  mv -f -- "$tmp_log" "$log_file" || return $?
+  if [ "$rc" -eq 0 ]; then
+    write_status "$new" green || return $?
+    echo "POST-RECEIVE PASS: $new CI green"
+    return 0
+  fi
+  write_status "$new" red || return $?
+  echo "POST-RECEIVE FAIL: $new CI red；详见 $log_file" >&2
+  return "$rc"
+}
+
+run_release() {
+  local old="$1" new="$2" ref="$3" lock_dir rc
+  [[ "$new" =~ ^[0-9a-fA-F]{40}$ ]] || {
+    echo "POST-RECEIVE FAIL: release 新 SHA 非法" >&2
+    return 1
+  }
+  [ "$new" != "$zero" ] || return 0
+  lock_dir="$status_dir/.${new}.lock"
+  if ! acquire_lock "$lock_dir"; then
+    if [ -f "$status_dir/$new.status" ] && [ "$(tr -d '\r\n' < "$status_dir/$new.status")" = "green" ]; then
+      echo "POST-RECEIVE PASS: $new 已有 green status，跳过重复 CI"
+      return 0
+    fi
+    echo "POST-RECEIVE FAIL: $new 正在被另一个 CI 处理（锁未取得）" >&2
+    return 75
+  fi
+  set +e
+  run_release_locked "$old" "$new" "$ref"
+  rc=$?
+  set -e
+  release_lock "$lock_dir"
+  return "$rc"
+}
+
+fail=0
+while IFS=' ' read -r old new ref extra; do
+  if [ -z "${old:-}" ] && [ -z "${new:-}" ] && [ -z "${ref:-}" ]; then
+    continue
+  fi
+  if [ -n "${extra:-}" ] || [ -z "${new:-}" ] || [ -z "${ref:-}" ]; then
+    echo "POST-RECEIVE FAIL: receive 输入格式非法" >&2
+    fail=1
+    continue
+  fi
+  if ! git --git-dir="$git_dir" check-ref-format "$ref" >/dev/null 2>&1 || [[ "$ref" != refs/heads/* ]]; then
+    echo "POST-RECEIVE FAIL: receive ref 非法: $ref" >&2
+    fail=1
+    continue
+  fi
+  if [ "$new" = "$zero" ] || { [ "$old" != "$zero" ] && ! [[ "$old" =~ ^[0-9a-fA-F]{40}$ ]]; }; then
+    echo "POST-RECEIVE FAIL: 不接受删除或非法旧 SHA 的 receive 更新" >&2
+    fail=1
+    continue
+  fi
+  if [ "$ref" != "$release_ref" ]; then
+    echo "POST-RECEIVE: $ref 非 release，忽略 CI"
+    continue
+  fi
+  set +e
+  run_release "$old" "$new" "$ref"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then fail=1; fi
+done
+
+exit "$fail"

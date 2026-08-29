@@ -71,6 +71,13 @@ done
 restore_guard
 trap - EXIT
 
+# 服务器闭环的 CI/hook/安装脚本同样是治理边界：修改它们不能绕过人工审阅。
+for dep in scripts/ci-local.sh deploy/git-hooks/ deploy/scripts/install-git-server.sh tests/deploy/; do
+  if ! grep -qF "'$dep'" "$guard"; then
+    err "$dep 不在治理守卫名单里——服务器门禁可被静默改写"
+  fi
+done
+
 # --- 4. workspace 的 packageExtensions 必须被版本扫描覆盖 ---
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   ws="$(mktemp --suffix=.yaml)"

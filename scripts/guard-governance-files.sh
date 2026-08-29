@@ -25,7 +25,11 @@ protected_globs=(
   'scripts/check-governance.sh'
   'scripts/check-versions.py'
   'scripts/guard-governance-files.sh'
+  'scripts/ci-local.sh'
+  'deploy/git-hooks/'
+  'deploy/scripts/install-git-server.sh'
   'tests/security/'
+  'tests/deploy/'
 )
 
 git fetch --no-tags origin "$BASE_REF" >/dev/null 2>&1 \
@@ -72,7 +76,9 @@ printf '%s' "$touched"
   echo '```'
   echo ""
   echo "受保护范围：\`.github/workflows/\`、\`.github/CODEOWNERS\`、"
-  echo "\`scripts/check-governance.sh\`、\`scripts/guard-governance-files.sh\`、\`tests/security/\`"
+  echo "\`scripts/check-governance.sh\`、\`scripts/guard-governance-files.sh\`、"
+  echo "\`scripts/ci-local.sh\`、\`deploy/git-hooks/\`、\`deploy/scripts/install-git-server.sh\`、"
+  echo "\`tests/security/\`、\`tests/deploy/\`"
 } >> "$summary"
 
 case ",${labels}," in
