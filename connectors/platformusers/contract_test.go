@@ -37,6 +37,12 @@ func TestFakeSatisfiesContract(t *testing.T) {
 	contracttest.Run(t, "fake", platformusers.SourceSub2API, newFake)
 }
 
+func TestFakeNewAPIKeepsOptionalCapabilitiesSourceScoped(t *testing.T) {
+	contracttest.Run(t, "newapi-fake", platformusers.SourceNewAPI, func() platformusers.ReadClient {
+		return platformusers.NewFakeClient(platformusers.SourceNewAPI, fixedNow)
+	})
+}
+
 // TestRealSkeletonSatisfiesContract:real 骨架今天必然 not_supported,
 // 但能力清单与构造期护栏仍要过同一套断言。
 func TestRealSkeletonSatisfiesContract(t *testing.T) {

@@ -519,6 +519,10 @@ func TestRoleScopeMapTranslation(t *testing.T) {
 func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	m := DefaultRoleScopeMap()
 	staff := m["staff"]
+	admin, ok := m["admin"]
+	if !ok {
+		t.Fatal("默认表应保留 admin 位（Realm 里今天还没有这个角色）")
+	}
 	if !slices.Contains(staff, "registry.read") || !slices.Contains(staff, "ops.read") {
 		t.Fatalf("staff 至少应有两个读权限, got %v", staff)
 	}
@@ -530,17 +534,18 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if slices.Contains(staff, "platform.users.read") {
 		t.Fatal("staff 默认不该含 platform.users.read：它是逐用户的资金明细，不是看板数字")
 	}
+	if slices.Contains(staff, "platform.user_keys.read") || slices.Contains(admin, "platform.user_keys.read") {
+		t.Fatal("staff/admin 默认不该含 platform.user_keys.read：凭据库存必须独立授予")
+	}
+	if got := m["key-metadata-reader"]; !slices.Contains(got, "platform.user_keys.read") {
+		t.Fatalf("专门的 key-metadata-reader 角色应显式映射 platform.user_keys.read, got %v", got)
+	}
 	for _, sc := range staff {
 		if strings.Contains(sc, ".manage") && sc != "ui.saved_view.manage" {
 			t.Fatalf("staff 默认不该含写权限: %q", sc)
 		}
 	}
 	// 改这张表意味着改「登录进来的人默认能做什么」——不是重构，是授权决定
-	admin, ok := m["admin"]
-	if !ok {
-		t.Fatal("默认表应保留 admin 位（Realm 里今天还没有这个角色）")
-	}
-
 	// XM-0039：请求元数据与请求正文分两档，**admin 只拿前者**。
 	//
 	// 这条断言钉的是一次产品裁定（2026-08-28 验收）：看全平台用户对话正文的

@@ -262,3 +262,47 @@ func TestListRejectsBadPeriodAs400(t *testing.T) {
 		}
 	}
 }
+
+func TestDailyUsageAndKeyMetadataCapabilitiesAreOptionalAndSourceScoped(t *testing.T) {
+	// A client that only implements the v1 list must not make the new routes
+	// appear usable; Service returns the explicit advanced-controls error.
+	svc := newService(t, &stubClient{})
+	if _, err := svc.DailyUsage(context.Background(), platformusers.DailyUsageInput{Platform: "sub2api", UserID: "u_10241"}); codeOf(t, err) != action.CodeAdvancedControlsRequired {
+		t.Fatalf("daily capability missing should be advanced-controls, err=%v", err)
+	}
+	if _, err := svc.KeyMetadata(context.Background(), platformusers.KeyMetadataInput{Platform: "sub2api", UserID: "u_10241"}); codeOf(t, err) != action.CodeAdvancedControlsRequired {
+		t.Fatalf("key capability missing should be advanced-controls, err=%v", err)
+	}
+
+	// Fake clients implement both capabilities and must preserve the platform
+	// boundary while returning deterministic snapshots.
+	clock := func() time.Time { return time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC) }
+	fake, err := platformusers.NewService(map[string]platformusers.Client{
+		connusers.SourceSub2API: connusers.NewFakeClient(connusers.SourceSub2API, clock),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	series, err := fake.DailyUsage(context.Background(), platformusers.DailyUsageInput{Platform: "sub2api", UserID: "u_10241", Days: 2})
+	if err != nil || len(series.Points) != 2 || series.Snapshot.Source != "sub2api-fake" {
+		t.Fatalf("daily=%+v err=%v", series, err)
+	}
+	keys, err := fake.KeyMetadata(context.Background(), platformusers.KeyMetadataInput{Platform: "sub2api", UserID: "u_10241", Limit: 1})
+	if err != nil || len(keys.Items) != 1 || keys.Snapshot.Source != "sub2api-fake" {
+		t.Fatalf("keys=%+v err=%v", keys, err)
+	}
+	// NewAPI's Fake intentionally exposes only detail; the optional Sub2API
+	// capabilities must not be inherited merely because both use FakeClient.
+	newapiSvc, err := platformusers.NewService(map[string]platformusers.Client{
+		connusers.SourceNewAPI: connusers.NewFakeClient(connusers.SourceNewAPI, clock),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newapiSvc.DailyUsage(context.Background(), platformusers.DailyUsageInput{Platform: "newapi", UserID: "u_10241"}); codeOf(t, err) != action.CodeAdvancedControlsRequired {
+		t.Fatalf("NewAPI daily should remain unavailable, err=%v", err)
+	}
+	if _, err := newapiSvc.KeyMetadata(context.Background(), platformusers.KeyMetadataInput{Platform: "newapi", UserID: "u_10241"}); codeOf(t, err) != action.CodeAdvancedControlsRequired {
+		t.Fatalf("NewAPI key metadata should remain unavailable, err=%v", err)
+	}
+}

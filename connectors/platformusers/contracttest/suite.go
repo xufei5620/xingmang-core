@@ -7,8 +7,12 @@ package contracttest
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xufei5620/xingmang-platform/connectors/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
@@ -23,6 +27,115 @@ func Run(t *testing.T, name string, source string, newClient func() platformuser
 	t.Run(name+"/缺席的金额不被当成 0", func(t *testing.T) { assertUnknownAmounts(t, source, newClient()) })
 	t.Run(name+"/单页条数有上限", func(t *testing.T) { assertLimitClamped(t, source, newClient()) })
 	t.Run(name+"/未知来源被拒绝", func(t *testing.T) { assertUnknownSourceRejected(t, newClient()) })
+	t.Run(name+"/v2 capability 与 metadata 边界", func(t *testing.T) { assertV2Capabilities(t, source, newClient()) })
+}
+
+// assertV2Capabilities exercises optional v2 readers when a client advertises
+// them. Real skeleton clients intentionally do not implement these interfaces
+// until their own evidence/approval slice lands, so they are skipped here.
+func assertV2Capabilities(t *testing.T, source string, client platformusers.ReadClient) {
+	t.Helper()
+	var v2Caps []registry.Capability
+	if c, ok := client.(interface{ V2Capabilities() []registry.Capability }); ok {
+		v2Caps = c.V2Capabilities()
+		for _, cap := range v2Caps {
+			parsed, err := registry.ParseCapability(string(cap))
+			if err != nil || parsed.IsWrite() {
+				t.Fatalf("v2 capability %q 无效或为写能力: %v", cap, err)
+			}
+		}
+	}
+	if containsCapability(v2Caps, platformusers.CapabilityUserDailyUsageRead) {
+		reader, ok := client.(platformusers.DailyUsageReader)
+		if !ok {
+			t.Fatal("声明 daily usage capability 却未实现 reader")
+		}
+		series, err := reader.DailyUsage(context.Background(), platformusers.DailyUsageQuery{Ref: platformusers.UserRef{Platform: source, ID: "u_10241"}, Days: 7})
+		if err != nil {
+			skipIfNotSupported(t, err)
+			return
+		}
+		if len(series.Points) != series.Coverage.ExpectedDays || series.Coverage.ExpectedDays != 7 {
+			t.Fatalf("daily series/window mismatch: %+v", series)
+		}
+		if series.Snapshot.ObservedAt.IsZero() || strings.TrimSpace(series.Snapshot.Source) == "" {
+			t.Fatalf("daily snapshot missing: %+v", series.Snapshot)
+		}
+		for i := 1; i < len(series.Points); i++ {
+			if series.Points[i-1].Day >= series.Points[i].Day {
+				t.Fatalf("daily points not ascending: %+v", series.Points)
+			}
+		}
+	}
+	if c, ok := client.(interface{ V2KeyCapabilities() []registry.Capability }); ok {
+		caps := c.V2KeyCapabilities()
+		if containsCapability(caps, platformusers.CapabilityUserKeysMetadataRead) {
+			for _, cap := range caps {
+				parsed, err := registry.ParseCapability(string(cap))
+				if err != nil || parsed.IsWrite() {
+					t.Fatalf("key capability %q 无效或为写能力: %v", cap, err)
+				}
+			}
+			reader, ok := client.(platformusers.KeyMetadataReader)
+			if !ok {
+				t.Fatal("声明 key metadata capability 却未实现 reader")
+			}
+			page, err := reader.ListKeyMetadata(context.Background(), platformusers.KeyMetadataQuery{Ref: platformusers.UserRef{Platform: source, ID: "u_10241"}, Limit: 50})
+			if err != nil {
+				skipIfNotSupported(t, err)
+				return
+			}
+			assertKeyMetadataSafe(t, page)
+		}
+	}
+}
+
+func containsCapability(caps []registry.Capability, want registry.Capability) bool {
+	for _, cap := range caps {
+		if cap == want {
+			return true
+		}
+	}
+	return false
+}
+
+func assertKeyMetadataSafe(t *testing.T, page platformusers.KeyMetadataPage) {
+	t.Helper()
+	if page.Snapshot.ObservedAt.IsZero() || strings.TrimSpace(page.Snapshot.Source) == "" {
+		t.Fatalf("key metadata snapshot missing: %+v", page.Snapshot)
+	}
+	typ := reflect.TypeOf(platformusers.KeyMetadata{})
+	for i := 0; i < typ.NumField(); i++ {
+		if regexp.MustCompile(`(?i)full.?key|secret|credential|token.?hash|plaintext`).MatchString(typ.Field(i).Name) {
+			t.Fatalf("forbidden metadata field %s", typ.Field(i).Name)
+		}
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if regexp.MustCompile(`(?i)full.?key|secret|credential|token.?hash|plaintext|password`).Match(encoded) {
+		t.Fatalf("forbidden metadata material in JSON: %s", encoded)
+	}
+	for _, forbidden := range []string{"complete-key-sentinel", "person@example.test", "secret://test/key-reader"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("forbidden metadata value leaked: %q", forbidden)
+		}
+	}
+	if err := platformusers.ValidateKeyMetadataCursor(page.NextCursor); err != nil {
+		t.Fatalf("next cursor is not a bounded opaque value: %v", err)
+	}
+	for _, item := range page.Items {
+		if err := platformusers.ValidateKeyMetadataID(item.ID); err != nil {
+			t.Fatalf("non-opaque key metadata ID %q: %v", item.ID, err)
+		}
+		if err := platformusers.ValidateKeyPrefix(item.Prefix); err != nil {
+			t.Fatalf("invalid key prefix %q: %v", item.Prefix, err)
+		}
+		if !item.CreatedAt.IsZero() && item.CreatedAt.After(time.Now().Add(24*time.Hour)) {
+			t.Fatalf("future created_at unexpectedly returned: %v", item.CreatedAt)
+		}
+	}
 }
 
 // assertReadOnlyCapabilities 让「只读」成为可验证属性,而不是口头承诺。

@@ -22,6 +22,8 @@ import {
   type PlatformUserLookupResult,
 } from "../api/users";
 import { ApiStateView } from "../components/ApiStateView";
+import { DailyUsagePanel } from "../components/DailyUsagePanel";
+import { KeyMetadataPanel } from "../components/KeyMetadataPanel";
 import { PeriodControls } from "@xingmang/ui-admin";
 import { appDemoDataConfig, DEMO_BANNER_TEXT, shouldShowDemoBanner } from "../lib/demoData";
 import { formatMinorUnits } from "../lib/money";
@@ -314,7 +316,7 @@ function FoundUserDetail({
       {platform === "newapi" ? (
         <NewApiUnsupported />
       ) : (
-        <Sub2ApiUnsupported activeSub={detailSub} onSubChange={onDetailSubChange} />
+        <Sub2ApiUnsupported userId={user.id} selectedDay={page.period.day} activeSub={detailSub} onSubChange={onDetailSubChange} />
       )}
     </div>
   );
@@ -409,9 +411,13 @@ const SUB2_DETAIL_TABS = [
 ] as const;
 
 function Sub2ApiUnsupported({
+  userId,
+  selectedDay,
   activeSub,
   onSubChange,
 }: {
+  userId: string;
+  selectedDay: string | null;
   activeSub: string | null;
   onSubChange: (next: string) => void;
 }) {
@@ -429,10 +435,7 @@ function Sub2ApiUnsupported({
           title="注册时间"
           description="注册时间不在当前用户详情快照；归属 platformusers read contract v2。"
         />
-        <UnavailablePanel
-          title="近 7 天消费趋势"
-          description="需要逐日消费序列；DailyUsage 是独立审批切片，当前保持未接入。"
-        />
+        <DailyUsagePanel platform="sub2api" userId={userId} day={selectedDay} />
       </div>
 
       {known ? (
@@ -443,7 +446,12 @@ function Sub2ApiUnsupported({
           items={SUB2_DETAIL_TABS.map((item) => ({
             value: item.value,
             label: item.label,
-            content: <UnavailablePanel title={item.label} description={item.description} />,
+            content:
+              item.value === "keys" ? (
+                <KeyMetadataPanel platform="sub2api" userId={userId} />
+              ) : (
+                <UnavailablePanel title={item.label} description={item.description} />
+              ),
           }))}
         />
       ) : (

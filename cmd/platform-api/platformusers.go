@@ -89,3 +89,17 @@ func platformUserDetailsOrNil(s *platformusers.Service) httpapi.PlatformUserDeta
 	}
 	return s
 }
+
+func platformUserDailyUsageOrNil(s *platformusers.Service) httpapi.PlatformUserDailyUsageQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+func platformUserKeysOrNil(s *platformusers.Service) httpapi.PlatformUserKeysQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}

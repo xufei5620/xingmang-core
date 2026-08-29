@@ -78,6 +78,12 @@ func looksLikePlatformScope(role string) bool {
 //     要授予就用 XM_OIDC_ROLE_SCOPES 显式配一个专门的角色。
 //     `resolver_test.go` 的 TestDefaultRoleScopeMapIsConservative 钉住了这个决定。
 //
+//  6. **API Key 元数据使用专门角色**（KEY_SCOPE_APPROVAL，2026-08-30）。
+//     `platform.user_keys.read` 只允许看到前缀、状态与时间元数据；它不进入
+//     staff/admin 默认映射，因为即使没有完整 Key，凭据库存仍是敏感面。开发态
+//     默认清单会显式携带该 scope 以便演示 Fake 能力；生产 OIDC 必须给需要它的
+//     人工审定角色（这里预留 `key-metadata-reader`），不会因 admin 角色自动获得。
+//
 //  5. **staff 不含 platform.users.read**（XM-0046）。与第 3 条同一档：
 //     它是**逐用户**的资金明细（余额、区间充值、区间消费、最后活跃），
 //     即便邮箱已在契约层打码，一份逐用户清单也足以还原一家客户的经营规模。
@@ -108,6 +114,9 @@ func DefaultRoleScopeMap() map[string][]string {
 			"platform.users.read",
 			"ui.saved_view.manage",
 		},
+		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
+		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
+		"key-metadata-reader": {"platform.user_keys.read"},
 	}
 }
 
