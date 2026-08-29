@@ -957,6 +957,23 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     ).not.toBeNull();
   });
 
+  it("连接与凭据页签进入真实结构，未登记时给行动指向而不是通用占位", async () => {
+    renderRoute("/platforms/newapi?tab=creds");
+    expect(await screen.findByText("连接事实与凭据边界")).not.toBeNull();
+    expect(screen.getByText("NewAPI 还没有登记实例")).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "凭据引用", level: 3 })).not.toBeNull();
+    expect(screen.queryByText(/「连接与凭据」尚未实现/)).toBeNull();
+  });
+
+  it("平台告警页签进入只读归属视图，不再落到通用占位", async () => {
+    renderRoute("/platforms/newapi?tab=alerts");
+    expect(await screen.findByRole("heading", { name: "NewAPI 平台告警", level: 2 })).not.toBeNull();
+    // 默认样本只有 sub2api.* 告警，所以 NewAPI 是可归属空态，不是全局零告警。
+    expect(await screen.findByText("没有可归属到 NewAPI 的告警")).not.toBeNull();
+    expect(screen.getByText(/不代表全局没有告警/)).not.toBeNull();
+    expect(screen.queryByText(/「告警」尚未实现/)).toBeNull();
+  });
+
 });
 
 describe("审计事件页", () => {
@@ -1638,8 +1655,8 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
   });
 
   it("未实现的页签给诚实占位：说明现在为什么空、归哪个阶段", async () => {
-    renderRoute("/platforms/sub2api?tab=alerts");
-    expect(await screen.findByText("「告警」尚未实现")).not.toBeNull();
+    renderRoute("/platforms/cpa?tab=finance");
+    expect(await screen.findByText("「支付与财务」尚未实现")).not.toBeNull();
     expect(screen.getByText(/只重构了导航与路由/)).not.toBeNull();
   });
 });
