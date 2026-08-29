@@ -10,7 +10,9 @@ import {
   listUpstreamAccounts,
   listUpstreamSummaries,
   platformHasUpstreamRegistry,
+  registerSubscriptionBatch,
   removeTokenMapping,
+  setProxyAsset,
   setRechargeRatio,
   setTokenMapping,
   setUpstreamAccount,
@@ -217,10 +219,25 @@ function firstPost(client: ApiClient): [string, { params: Record<string, unknown
 describe("登记簿读取", () => {
   it("items 为 null 时按空数组处理，页面不会炸", async () => {
     await expect(listUpstreamAccounts({}, fakeClient({ items: null }))).resolves.toEqual([]);
-    await expect(listProxyAssets({}, fakeClient({ items: null }))).resolves.toEqual([]);
     await expect(
-      listSubscriptionBatches("acc-1", {}, fakeClient({ items: null })),
-    ).resolves.toEqual([]);
+      listProxyAssets(
+        {},
+        fakeClient({ items: null, truncated: false, limit: 200, as_of: "2026-08-28" }),
+      ),
+    ).resolves.toEqual({ items: [], truncated: false, limit: 200, as_of: "2026-08-28" });
+    await expect(
+      listSubscriptionBatches(
+        "acc-1",
+        {},
+        fakeClient({ items: null, truncated: false, limit: 200, as_of: "2026-08-28" }),
+      ),
+    ).resolves.toEqual({ items: [], truncated: false, limit: 200, as_of: "2026-08-28" });
+  });
+
+  it("批次与代理列表保留 truncated / limit / as_of，不把截断页伪装成完整列表", async () => {
+    const page = { items: [{ id: "row-1" }], truncated: true, limit: 1, as_of: "2026-08-28" };
+    await expect(listSubscriptionBatches("acc-1", {}, fakeClient(page))).resolves.toEqual(page);
+    await expect(listProxyAssets({}, fakeClient(page))).resolves.toEqual(page);
   });
 
   it("批次按 upstream_account_id 过滤——登记簿是跨平台的一张表", async () => {
@@ -296,6 +313,110 @@ describe("写路径全部走 Action 内核", () => {
     const client = fakeClient({ action_run_id: "run-1" });
     await setUpstreamAccount({ system_type: "sub2api" }, {}, client);
     expect(Object.keys(firstPost(client)[1])).toEqual(["params"]);
+  });
+
+  it("订阅批次只调用 register@1，并对白名单外字段 fail closed", async () => {
+    const client = fakeClient({});
+    const run = await registerSubscriptionBatch(
+      {
+        upstream_account_id: "acc-1",
+        paid_minor: "29990000",
+        surcharge_minor: "0",
+        currency: "USD",
+        starts_on: "2026-08-01",
+        expires_on: "2026-08-31",
+        account_count: 2,
+        proxy_asset_id: "proxy-1",
+        // 运行时即使有人绕过 TS 塞入这些键，wrapper 也不能把它们送到 Action。
+        environment: "production",
+        refunded_minor: "1",
+        terminated_on: "2026-08-10",
+      } as Parameters<typeof registerSubscriptionBatch>[0] & Record<string, unknown>,
+      {},
+      client,
+    );
+
+    const [path, body] = firstPost(client);
+    expect(path).toBe(
+      "/api/v1/actions/finance.subscription_batch.register/versions/1/execute",
+    );
+    expect(body.params).toEqual({
+      upstream_account_id: "acc-1",
+      paid_minor: "29990000",
+      surcharge_minor: "0",
+      currency: "USD",
+      starts_on: "2026-08-01",
+      expires_on: "2026-08-31",
+      account_count: 2,
+      proxy_asset_id: "proxy-1",
+    });
+    // 响应没给 run id 就诚实保留空串，不编一个成功回执。
+    expect(run.runId).toBe("");
+  });
+
+  it("代理新建只调用 set@1，且不传 environment / 退款 / 终止字段", async () => {
+    const client = fakeClient({ action_run_id: "run-proxy-create" });
+    await setProxyAsset(
+      {
+        paid_minor: "6200000",
+        surcharge_minor: "0",
+        currency: "USD",
+        opened_on: "2026-08-01",
+        expires_on: "2026-08-31",
+        shared_account_count: 2,
+        buy_platform: "Example",
+        buy_address: "https://example.test",
+        credential_ref: "secret://finance/proxy-a",
+        mounted: false,
+        environment: "production",
+        refunded_minor: "1",
+        terminated_on: "2026-08-10",
+      } as Parameters<typeof setProxyAsset>[0] & Record<string, unknown>,
+      {},
+      client,
+    );
+
+    const [path, body] = firstPost(client);
+    expect(path).toBe("/api/v1/actions/finance.proxy_asset.set/versions/1/execute");
+    expect(body.params).toEqual({
+      paid_minor: "6200000",
+      surcharge_minor: "0",
+      currency: "USD",
+      opened_on: "2026-08-01",
+      expires_on: "2026-08-31",
+      shared_account_count: 2,
+      buy_platform: "Example",
+      buy_address: "https://example.test",
+      credential_ref: "secret://finance/proxy-a",
+      mounted: false,
+    });
+  });
+
+  it("代理编辑只提交可编辑购买字段、CredentialRef、mounted 与 id", async () => {
+    const client = fakeClient({ action_run_id: "run-proxy-edit" });
+    await setProxyAsset(
+      {
+        proxy_asset_id: "proxy-1",
+        buy_platform: "Example 2",
+        buy_address: "manual purchase",
+        credential_ref: "secret://finance/proxy-b",
+        mounted: false,
+        paid_minor: "999999999",
+        currency: "CNY",
+        opened_on: "2099-01-01",
+        shared_account_count: 99,
+      } as Parameters<typeof setProxyAsset>[0] & Record<string, unknown>,
+      {},
+      client,
+    );
+
+    expect(firstPost(client)[1].params).toEqual({
+      proxy_asset_id: "proxy-1",
+      buy_platform: "Example 2",
+      buy_address: "manual purchase",
+      credential_ref: "secret://finance/proxy-b",
+      mounted: false,
+    });
   });
 });
 
