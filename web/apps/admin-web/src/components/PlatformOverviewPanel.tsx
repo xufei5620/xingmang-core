@@ -1,10 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
-import { FreshnessBadge, FreshnessNote, PageState, StatTile } from "@xingmang/ui-admin";
+import {
+  FreshnessBadge,
+  FreshnessNote,
+  MetricCard,
+  PageState,
+  StatTile,
+  type FreshnessContract,
+} from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { ACTIVE_ALERT_STATUSES, listAlerts } from "../api/alerts";
-import { listUpstreamAccounts, UPSTREAM_ACCOUNTS_QUERY } from "../api/finance";
+import {
+  listChannelSummaries,
+  listUpstreamAccounts,
+  UPSTREAM_ACCOUNTS_QUERY,
+} from "../api/finance";
 import { listMetrics, type MetricItem } from "../api/platform";
 import { appDemoDataConfig, shouldShowDemoBanner } from "../lib/demoData";
 import {
@@ -19,11 +30,18 @@ import {
 import {
   CHANNEL_BALANCE_METRIC_KEY,
   NEWAPI_CHANNELS_METRIC_KEY,
+  metricPrimaryValue,
   presentMetric,
   readChannelRows,
   readNewApiChannelRows,
 } from "../lib/metrics";
-import { formatErrorRatePPM } from "../lib/money";
+import { formatErrorRatePPM, formatScaledMinorUnits } from "../lib/money";
+import {
+  aggregateChannelMoney,
+  aggregateFailureText,
+  aggregateFreshness,
+  type ChannelMoneyAggregate,
+} from "../lib/financeOverview";
 import { platformOfMetricKey } from "../lib/platforms";
 import { ApiStateView } from "./ApiStateView";
 import { FinanceSummaryCards } from "./FinanceSummaryCards";
@@ -32,9 +50,37 @@ import { MetricSparkline } from "./MetricSparkline";
 /** 概览页的大图窗口：168 小时正好七天，也是后端 `maxHistoryHours` 的上限。 */
 const SEVEN_DAYS_HOURS = 168;
 
+/** NewAPI 概览使用的指标键。集中声明避免各处把平台归属写成相似但不一致的字符串。 */
+const NEWAPI_USERS_TOTAL_METRIC_KEY = "newapi.users.total";
+const NEWAPI_MODELS_USAGE_METRIC_KEY = "newapi.models.usage";
+
 /** 底部大图的画布。与卡片里的迷你图是**同一个组件换个盒子**——
  *  另写一个图表组件的话，两处的失败样本与部分数据画法迟早会漂开。 */
 const BIG_CHART_BOX = { width: 960, height: 180, padding: 8 };
+
+/** 财务汇总尚未给出可信读数时使用的固定新鲜度形状。
+ *
+ *  这不是一条观测：它只是让四张 NewAPI 财务卡在 Query 加载/失败时仍能
+ *  按原型占位，并且让 MetricCard 明确显示「未初始化」而不是裸数字。 */
+const UNAVAILABLE_FINANCE_FRESHNESS: FreshnessContract = {
+  state: "uninitialized",
+  staleness_seconds: null,
+  threshold_seconds: 1800,
+  is_partial: false,
+  observed_at: null,
+  last_success: null,
+  last_error_code: "",
+};
+
+const FAILED_FINANCE_FRESHNESS: FreshnessContract = {
+  state: "failed",
+  staleness_seconds: null,
+  threshold_seconds: 1800,
+  is_partial: false,
+  observed_at: null,
+  last_success: null,
+  last_error_code: "finance-summary-unavailable",
+};
 
 /** 哪些平台有按原型对齐的概览页。
  *
@@ -220,50 +266,219 @@ function NewApiOverview({
   demo: boolean;
   hasMetrics: boolean;
 }) {
-  const users = byKey.get("newapi.users.total");
+  const users = byKey.get(NEWAPI_USERS_TOTAL_METRIC_KEY);
   const channels = byKey.get(NEWAPI_CHANNELS_METRIC_KEY);
+  const requests = byKey.get(NEWAPI_MODELS_USAGE_METRIC_KEY);
+
+  // NewAPI 的「我方计费 / 上游成本 / 毛利」不是充值指标：它们来自同一份
+  // 渠道汇总快照，按 system_type 过滤后再分别聚合。这样页面不会把用户充值
+  // 错当成使用收入，也不会拿 Sub2API 的行混进来。
+  const financeQuery = useQuery({
+    queryKey: ["finance", "channels", "summary"],
+    queryFn: ({ signal }) => listChannelSummaries({ signal }),
+  });
+  const financeChannels = (financeQuery.data?.items ?? []).filter(
+    (item) => item.systemType === "newapi",
+  );
+  const billing = aggregateChannelMoney(financeChannels, "usageRevenue", "newapi");
+  const supplyCost = aggregateChannelMoney(financeChannels, "supplyCost", "newapi");
+  const grossProfit = aggregateChannelMoney(financeChannels, "grossProfit", "newapi");
+  const financeRange = financeRangeLabel(financeQuery.data?.from, financeQuery.data?.to);
+  const financeDemo = shouldShowDemoBanner(
+    financeChannels.map((item) => item.observed.source),
+    appDemoDataConfig,
+  );
 
   return (
     <>
-      {/* 原型这四格是 用户总数 / 今日我方计费 / 今日上游成本 / 今日毛利。
-          后三格是成本线的口径，成本卡那一行给的就是它们——这里不再复制一份
-          数字，避免同一个金额在一页上有两处、两处还可能不同步 */}
+      {/* 原型四格：用户总数 / 今日我方计费 / 今日上游成本 / 今日毛利。
+          财务三格都从同一份 NewAPI 渠道汇总读取；Query 还没成功时保留卡位，
+          显示「— + 未接入」，绝不把空数组渲染成 ¥0。 */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricTile
-          label="用户总数"
-          item={users}
-          note="含今日活跃数"
-          missingNote="没有采到 newapi.users.total"
+        <NewApiUsersMetricCard item={users} />
+        <NewApiFinanceMetricCard
+          label="今日我方计费"
+          aggregate={billing}
+          queryPending={financeQuery.isPending}
+          queryError={financeQuery.error}
+          range={financeRange}
+          note="按 NewAPI 渠道使用计费收入汇总；不含用户充值"
         />
-        <PendingTile
-          label="今日请求量"
-          note="同 Sub2API：请求量属于 reqlog 那条线，没有按日聚合的指标"
+        <NewApiFinanceMetricCard
+          label="今日上游成本"
+          aggregate={supplyCost}
+          queryPending={financeQuery.isPending}
+          queryError={financeQuery.error}
+          range={financeRange}
+          note="按 NewAPI 渠道供给成本汇总；倍率已在成本台账折算"
         />
-        <PendingTile
-          label="成功率（24h）"
-          note="渠道状态里有逐渠道错误率（下方「渠道健康」），但没有平台级的成功率口径"
-        />
-        <PendingTile
-          label="今日订阅"
-          note="newapi.subscription.daily 已在采集范围内，但这个环境还没有观测"
+        <NewApiFinanceMetricCard
+          label="今日毛利"
+          aggregate={grossProfit}
+          queryPending={financeQuery.isPending}
+          queryError={financeQuery.error}
+          range={financeRange}
+          note="使用收入 − 上游成本；覆盖不全时不显示合计"
         />
       </div>
+
+      {financeDemo && !demo ? (
+        <SampleDataBanner platform="newapi" demo hasMetrics={financeChannels.length > 0} />
+      ) : null}
+
+      {financeQuery.error ? (
+        <p
+          role="alert"
+          className="rounded-md border border-danger bg-danger/10 px-3 py-2 text-xs text-danger"
+        >
+          NewAPI 财务汇总读取失败；三张金额卡暂不提供可信读数，页面保留上一次成功数据（如有）。
+        </p>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <NewApiChannelHealthCard item={channels} />
-        <HealthCard platform="newapi" channels={undefined} demo={demo} hasMetrics={hasMetrics} />
+        <TrendCard
+          title="近 7 日请求量"
+          item={usableTrendMetric(requests)}
+          pendingNote="没有采到 newapi.models.usage；请求趋势归 NewAPI 模型用量指标，接入后显示。"
+        />
       </div>
 
-      <TrendCard
-        title="近 7 日请求量"
-        item={undefined}
-        pendingNote="请求量没有按日聚合的指标；用户数与充值的趋势可在各自卡片里看"
-      />
-
-      <CostLineRow systemType="newapi" label={label} />
-      <DispositionNote platform="newapi" />
+      <p className="rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs text-fg-muted">
+        {label} 概览金额均按今日业务日读取；{financeRange}。财务卡的覆盖率、来源与新鲜度
+        分别在卡片底部展示，渠道映射字段尚未接入时不会用空值冒充。
+      </p>
     </>
   );
+}
+
+/** NewAPI 用户总数卡：沿用指标的来源 / 水位 / 新鲜度契约。 */
+function NewApiUsersMetricCard({ item }: { item: MetricItem | undefined }) {
+  if (!item) {
+    return (
+      <PendingTile
+        label="用户总数"
+        note="没有采到 newapi.users.total；NewAPI 用户 Connector 成功观测后才显示。"
+      />
+    );
+  }
+
+  const shown = presentMetric(item);
+  const primary = metricPrimaryValue(item.metric_key, item.value);
+  const unavailable = shown.unavailable || primary.raw === null;
+  return (
+    <MetricCard
+      label="用户总数"
+      metricKey={item.metric_key}
+      value={unavailable ? "—" : shown.primary}
+      unavailable={unavailable}
+      secondary={shown.secondary ?? "活跃用户数未返回"}
+      freshness={item.freshness}
+      source={item.source}
+      watermark={item.watermark}
+    />
+  );
+}
+
+interface NewApiFinanceMetricCardProps {
+  label: string;
+  aggregate: ChannelMoneyAggregate;
+  queryPending: boolean;
+  queryError: unknown;
+  range: string;
+  note: string;
+}
+
+/** NewAPI 三张金额卡的共同渲染。
+ *
+ *  金额由渠道汇总端点按字段分别聚合；任一渠道缺金额、观测不完整、币种/标度
+ *  不一致时，aggregate.money 可能为空（或 freshness 不可信），两者都必须
+ *  触发「— + 原因」。这样用户能区分「今天是 0」与「尚未接入」。 */
+function NewApiFinanceMetricCard({
+  label,
+  aggregate,
+  queryPending,
+  queryError,
+  range,
+  note,
+}: NewApiFinanceMetricCardProps) {
+  const failure = newApiAggregateFailureText(aggregate);
+  const coverage = newApiCoverageText(aggregate);
+  const hasPreviousSnapshot = aggregate.money !== null && aggregate.failureReasons.length === 0;
+  const queryUnavailable = queryPending || (Boolean(queryError) && !hasPreviousSnapshot);
+  const aggregateAvailable = !queryUnavailable && hasPreviousSnapshot;
+  const aggregateFreshnessValue = aggregateFreshness(aggregate, Date.now());
+  const freshness = queryUnavailable
+    ? queryError
+      ? FAILED_FINANCE_FRESHNESS
+      : UNAVAILABLE_FINANCE_FRESHNESS
+    : queryError
+      ? {
+          ...aggregateFreshnessValue,
+          state: "failed",
+          last_error_code: "finance-summary-refresh-failed",
+        }
+      : aggregateFreshnessValue;
+  const value = aggregateAvailable && aggregate.money
+    ? formatScaledMoney(aggregate.money)
+    : "—";
+  const secondary = queryPending
+    ? "渠道汇总加载中…"
+    : queryError
+      ? hasPreviousSnapshot
+        ? `最近刷新失败，显示上次成功快照 · ${note} · ${coverage}`
+        : "渠道汇总读取失败；未接入可信金额"
+      : [note, coverage, failure].filter(Boolean).join(" · ");
+  const source = queryError
+    ? hasPreviousSnapshot
+      ? aggregate.source || "渠道汇总来源未声明"
+      : "渠道汇总不可用"
+    : aggregate.source || "渠道汇总来源未声明";
+
+  return (
+    <MetricCard
+      label={label}
+      value={value}
+      unavailable={!aggregateAvailable}
+      secondary={secondary || undefined}
+      freshness={freshness}
+      source={source}
+      link={
+        <span className="text-xs text-fg-muted">
+          {range} · {coverage}
+        </span>
+      }
+    />
+  );
+}
+
+function formatScaledMoney(value: { amountMinor: string; currency: string; scale: number }): string {
+  // 延迟导入会让金额卡与 Sub2API 卡走同一套整数格式化；这里通过本文件顶部
+  // 的 `formatScaledMinorUnits` 直接调用，绝不把 scale-6 微单位转成 float。
+  return formatScaledMinorUnits(value.amountMinor, value.currency, value.scale);
+}
+
+function newApiCoverageText(aggregate: ChannelMoneyAggregate): string {
+  const { completeRows, totalRows } = aggregate.coverage;
+  if (totalRows === 0) return "覆盖 0/0 条渠道";
+  return completeRows === totalRows
+    ? `覆盖完整 ${completeRows}/${totalRows} 条渠道`
+    : `覆盖不全 ${completeRows}/${totalRows} 条渠道`;
+}
+
+function newApiAggregateFailureText(aggregate: ChannelMoneyAggregate): string | null {
+  const failure = aggregateFailureText(aggregate);
+  return failure ? failure.replace(/Sub2API/g, "NewAPI") : null;
+}
+
+function financeRangeLabel(from: string | undefined, to: string | undefined): string {
+  if (!from || !to) return "业务日范围未返回";
+  return from === to ? `业务日 ${from}` : `业务日 ${from} ~ ${to}`;
+}
+
+function usableTrendMetric(item: MetricItem | undefined): MetricItem | undefined {
+  if (!item || item.freshness.state === "uninitialized") return undefined;
+  return metricPrimaryValue(item.metric_key, item.value).raw === null ? undefined : item;
 }
 
 // --- 通用块 ---
@@ -491,14 +706,34 @@ function NewApiChannelHealthCard({ item }: { item: MetricItem | undefined }) {
   }
 
   const rows = readNewApiChannelRows(item.value);
+  if (rows.length === 0) {
+    return (
+      <Card title="渠道健康">
+        <PageState
+          kind="empty"
+          compact
+          title="渠道状态没有返回逐渠道记录"
+          description="NewAPI 渠道状态指标已观测，但没有可展示的渠道行；不会把空数组解释成全部正常。"
+        />
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+          <FreshnessBadge freshness={item.freshness} />
+          <FreshnessNote freshness={item.freshness} />
+          <span>来源 {item.source || "未声明"}</span>
+        </div>
+      </Card>
+    );
+  }
+
   return (
     <Card title="渠道健康" hint={`${rows.length} 条 NewAPI 渠道`}>
       <div className="relative max-w-full overflow-x-auto rounded-md border border-edge">
         <table className="w-full border-collapse">
-          <caption className="sr-only">NewAPI 渠道启停与错误率</caption>
+          <caption className="sr-only">
+            NewAPI 渠道启停与错误率；原型列为渠道、上游、分组、成功率、状态
+          </caption>
           <thead className="border-b border-edge bg-surface-muted">
             <tr>
-              {["渠道", "类型", "错误率", "状态"].map((h) => (
+              {["渠道", "上游", "分组", "成功率", "状态"].map((h) => (
                 <th
                   key={h}
                   scope="col"
@@ -512,32 +747,56 @@ function NewApiChannelHealthCard({ item }: { item: MetricItem | undefined }) {
           <tbody>
             {rows.map((row) => (
               <tr key={row.channelId} className="border-b border-edge last:border-b-0">
-                <td className="px-2 py-1 text-xs text-fg">{row.name || row.channelId || "—"}</td>
-                <td className="px-2 py-1 text-xs text-fg-muted">{row.type || "—"}</td>
-                <td className="px-2 py-1 text-xs tabular-nums text-fg">
-                  {/* 走 formatErrorRatePPM 而不是 `Number(ppm)/10000`：
-                      契约层用 ppm 整数就是为了不碰浮点，显示层再丢回 float
-                      等于把纪律守到最后一米又松手（lib/money 同一条） */}
-                  {row.errorRatePPM === null ? "—" : formatErrorRatePPM(row.errorRatePPM)}
+                <td className="px-2 py-1 text-xs text-fg">
+                  <span className="block">{row.name || row.channelId || "—"}</span>
+                  <span className="block text-fg-muted">类型 {row.type || "未返回"}</span>
                 </td>
                 <td className="px-2 py-1 text-xs">
-                  <Badge tone={row.enabled === true ? "success" : row.enabled === false ? "neutral" : "warning"}>
-                    {row.enabled === true ? "启用" : row.enabled === false ? "停用" : "未知"}
-                  </Badge>
+                  <HealthUnavailableCell reason="渠道 ↔ 上游映射未接入" />
+                </td>
+                <td className="px-2 py-1 text-xs">
+                  <HealthUnavailableCell reason="上游分组字段未接入" />
+                </td>
+                <td className="px-2 py-1 text-xs">
+                  <HealthUnavailableCell reason="平台成功率口径未接入" />
+                </td>
+                <td className="px-2 py-1 text-xs text-fg">
+                  <div className="flex flex-col items-start gap-1">
+                    <Badge tone={row.enabled === true ? "success" : row.enabled === false ? "neutral" : "warning"}>
+                      {row.enabled === true ? "启用" : row.enabled === false ? "停用" : "未知"}
+                    </Badge>
+                    <span className="text-fg-muted">
+                      错误率 {row.errorRatePPM === null ? "未接入" : formatErrorRatePPM(row.errorRatePPM)}
+                    </span>
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {/* 原型这张表还有「上游」「分组」「成功率」三列。前两列要 XM-0037d 的
-          渠道汇总按平台渠道 id 对得上才填得出（见 lib/channelEconomics），
-          成功率没有数据源——不画空列冒充已接 */}
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+        <FreshnessBadge freshness={item.freshness} />
+        <FreshnessNote freshness={item.freshness} />
+        <span>来源 {item.source || "未声明"}</span>
+        <span>· 覆盖 {rows.length} 条逐渠道状态</span>
+      </div>
+      {/* 原型这张表的上游 / 分组 / 成功率列保留位置，但当前状态指标没有可信
+          映射与平台成功率口径；每个单元格显式写「未接入」，避免空白被误读。 */}
       <p className="text-xs text-fg-muted">
-        原型这张表还有上游、分组与成功率三列：前两列要等「平台渠道 ↔ 上游账号」的对应关系，
-        成功率没有数据源，都不先画空列。
+        上游、分组与成功率三列暂未接入：前两列要等「平台渠道 ↔ 上游账号」的对应关系，
+        成功率需要独立的平台口径；当前可用的是启停与错误率。
       </p>
     </Card>
+  );
+}
+
+function HealthUnavailableCell({ reason }: { reason: string }) {
+  return (
+    <span className="flex flex-col text-fg-muted" title={reason}>
+      <span>—</span>
+      <span className="text-[11px]">未接入</span>
+    </span>
   );
 }
 
@@ -552,9 +811,22 @@ function TrendCard({
   pendingNote: string;
 }) {
   return (
-    <Card title={title}>
+    <Card
+      title={title}
+      hint={item ? `来源 ${item.source || "未声明"} · 水位 ${item.watermark || "—"}` : undefined}
+    >
       {item ? (
-        <MetricSparkline item={item} hours={SEVEN_DAYS_HOURS} box={BIG_CHART_BOX} />
+        <>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+            <FreshnessBadge freshness={item.freshness} />
+            <FreshnessNote freshness={item.freshness} />
+            <span>指标 {item.metric_key}</span>
+          </div>
+          <MetricSparkline item={item} hours={SEVEN_DAYS_HOURS} box={BIG_CHART_BOX} />
+          <p className="mt-2 text-xs text-fg-muted">
+            历史窗口 168 小时（近 7 日）；趋势完整性与来源切换说明随历史接口返回。
+          </p>
+        </>
       ) : (
         <PageState kind="unavailable" compact title="未接入" description={pendingNote} />
       )}

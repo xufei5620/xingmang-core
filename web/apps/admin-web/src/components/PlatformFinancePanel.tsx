@@ -1,10 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
 import { PageState } from "@xingmang/ui-admin";
 import type { ReactNode } from "react";
-import { listMetrics } from "../api/platform";
-import { platformOfMetricKey } from "../lib/platforms";
-import { ApiStateView } from "./ApiStateView";
-import { MetricCardGrid } from "./MetricCardGrid";
+import { NewApiFinanceOverview } from "./NewApiFinanceOverview";
 import { Sub2ApiFinanceOverview } from "./Sub2ApiFinanceOverview";
 
 /** 支付与财务(原型 `V["s2/finance"]` / `V["newapi/finance"]`)。
@@ -18,54 +14,6 @@ import { Sub2ApiFinanceOverview } from "./Sub2ApiFinanceOverview";
  *
  *  这句话不是注解，是这一页最容易被读错的地方——把充值当收入，整条利润线
  *  从第一步就错了。所以它印在「资金概览」上，而不是只写在文档里。 */
-
-/** 资金概览：能接的先接——本平台的收入类指标卡是真实的。 */
-function RevenueRuleNote() {
-  return (
-    <p
-      role="status"
-      className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg"
-    >
-      「用户充值」不是当期收入：用户发生<strong>使用消费</strong>时才确认使用收入。
-      这两个数在这一页上永远分开列，不相加。
-    </p>
-  );
-}
-
-function FinanceOverview({ serviceType }: { serviceType: string }) {
-  const query = useQuery({
-    queryKey: ["metrics"],
-    queryFn: ({ signal }) => listMetrics({ signal }),
-  });
-  const items = (query.data ?? []).filter(
-    (metric) =>
-      platformOfMetricKey(metric.metric_key) === serviceType &&
-      /revenue|cost|balance|recharge/.test(metric.metric_key),
-  );
-
-  return (
-    <div className="flex flex-col gap-3">
-      <RevenueRuleNote />
-      <ApiStateView
-        isPending={query.isPending}
-        error={query.error}
-        onRetry={() => void query.refetch()}
-      >
-        <MetricCardGrid
-          items={items}
-          emptyTitle="暂无本平台的资金类指标"
-          emptyDescription={`该环境下还没有 ${serviceType}.* 的收入/成本/余额观测；采集任务跑起来后会出现在这里`}
-        />
-      </ApiStateView>
-      <PageState
-        kind="unavailable"
-        compact
-        title="区间成功到账 / 待处理 / 失败 / 退款与冲正"
-        description="这四格要逐笔订单才算得出来，随支付 Connector 接入（M3）上线。现在显示的是已有的指标卡，不是订单汇总。"
-      />
-    </div>
-  );
-}
 
 /** 一格纯占位。写清楚放什么、被什么挡着——「敬请期待」什么也没说明。 */
 function pending(title: string, description: string): ReactNode {
@@ -114,15 +62,12 @@ function sub2apiFinanceSubTab(subId: string): ReactNode | undefined {
 }
 
 /** NewAPI 的 2 个子页签。**刻意不补齐成 5 格**——裁定 #2 维持原型。 */
-function newapiFinanceSubTab(subId: string, serviceType: string): ReactNode | undefined {
+function newapiFinanceSubTab(subId: string): ReactNode | undefined {
   switch (subId) {
     case "orders":
-      return <FinanceOverview serviceType={serviceType} />;
+      return <NewApiFinanceOverview subId="orders" />;
     case "profit":
-      return pending(
-        "利润核算",
-        "逐渠道的我方计费、上游成本、毛利与毛利率。数据来自 XM-0037 成本台账，接线随第 5 片一并做。",
-      );
+      return <NewApiFinanceOverview subId="profit" />;
     default:
       return undefined;
   }
@@ -133,6 +78,6 @@ export function financeSubTab(
   serviceType: string,
   subId: string,
 ): ReactNode | undefined {
-  if (serviceType === "newapi") return newapiFinanceSubTab(subId, serviceType);
+  if (serviceType === "newapi") return newapiFinanceSubTab(subId);
   return sub2apiFinanceSubTab(subId);
 }

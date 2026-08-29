@@ -281,4 +281,104 @@ describe("NewAPI 概览按它自己的原型页", () => {
     renderPanel("newapi", "NewAPI");
     expect(await screen.findByText(/上游、分组与成功率三列/)).toBeTruthy();
   });
+
+  it("财务汇总刷新失败但保留上次快照时显示旧值并标记同步失败", async () => {
+    const row = {
+      id: "newapi-channel-1",
+      name: "NewAPI 主渠道",
+      systemType: "newapi",
+      accessMethod: "upstream_key",
+      baseUrl: "https://newapi.example.test",
+      status: "active",
+      usageRevenue: { amountMinor: "100000000", currency: "CNY", scale: 6 },
+      supplyCost: { amountMinor: "70000000", currency: "CNY", scale: 6 },
+      grossProfit: { amountMinor: "30000000", currency: "CNY", scale: 6 },
+      grossMargin: "0.3",
+      coverage: { rowCount: 1, revenueKnownRows: 1, costKnownRows: 1, complete: true },
+      observed: { source: "finance-newapi", updatedAt: "2026-08-28T10:00:00Z" },
+      runway: {},
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/finance/channels/summary")) {
+          return Promise.resolve(fakeResponse({ error: { code: "UPSTREAM_TIMEOUT", message: "暂时不可用" } }, 503));
+        }
+        return Promise.resolve(fakeResponse({ items: [] }));
+      }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["finance", "channels", "summary"], {
+      items: [row],
+      from: "2026-08-28",
+      to: "2026-08-28",
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <PlatformOverviewPanel serviceType="newapi" label="NewAPI" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText(/NewAPI 财务汇总读取失败/)).toBeTruthy();
+    expect(await screen.findByText("¥100.00")).toBeTruthy();
+    expect((await screen.findAllByText("同步失败")).length).toBe(3);
+    expect(screen.getByText(/页面保留上一次成功数据/)).toBeTruthy();
+  });
+
+  it("仅财务汇总来自 staging Fake 时也挂出样例数据提示", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/finance/channels/summary")) {
+          return Promise.resolve(
+            fakeResponse({
+              items: [
+                {
+                  id: "newapi-channel-demo",
+                  name: "NewAPI staging 渠道",
+                  system_type: "newapi",
+                  access_method: "upstream_key",
+                  base_url: "https://newapi.example.test",
+                  status: "active",
+                  usage_revenue: { amount_minor: "100000000", currency: "CNY", scale: 6 },
+                  supply_cost: { amount_minor: "70000000", currency: "CNY", scale: 6 },
+                  gross_profit: { amount_minor: "30000000", currency: "CNY", scale: 6 },
+                  gross_margin: "0.3",
+                  coverage: { row_count: 1, revenue_known_rows: 1, cost_known_rows: 1, complete: true },
+                  observed: { source: "finance-collect-staging", updated_at: "2026-08-28T10:00:00Z" },
+                  runway: {},
+                },
+              ],
+              from: "2026-08-28",
+              to: "2026-08-28",
+            }),
+          );
+        }
+        return Promise.resolve(fakeResponse({ items: [] }));
+      }),
+    );
+    renderPanel("newapi", "NewAPI");
+
+    expect(await screen.findByText(/当前展示为样例数据/)).toBeTruthy();
+  });
+
+  it("财务汇总首次读取失败显示失败态，不把错误写成数据不完整", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/finance/channels/summary")) {
+          return Promise.resolve(fakeResponse({ error: { code: "UPSTREAM_TIMEOUT", message: "暂时不可用" } }, 503));
+        }
+        return Promise.resolve(fakeResponse({ items: [] }));
+      }),
+    );
+    renderPanel("newapi", "NewAPI");
+
+    expect(await screen.findByText(/NewAPI 财务汇总读取失败/)).toBeTruthy();
+    const card = (await screen.findByText("今日我方计费")).closest("article") as HTMLElement;
+    expect(within(card).getByText("同步失败")).toBeTruthy();
+    expect(within(card).queryByText("数据不完整")).toBeNull();
+  });
 });
