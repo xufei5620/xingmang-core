@@ -9,6 +9,7 @@ import {
 } from "@xingmang/ui-admin";
 import { Badge, Tabs } from "@xingmang/ui-primitives";
 import { useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
 import { ApiStateView } from "../components/ApiStateView";
@@ -20,6 +21,7 @@ import {
   sortForDisplay,
 } from "../lib/alerts";
 import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
+import { AlertRulesPage } from "./AlertRulesPage";
 
 /** react-query 的缓存键前缀。总览页的告警卡也用它，两处共用一份缓存。 */
 export const ALERTS_QUERY_KEY = "alerts";
@@ -35,6 +37,8 @@ type Scope = "active" | "all";
  *  第二个问题单独占一列，是因为「OPEN 但没投递出去」是本模块最危险的状态——
  *  运维以为告警会找上门，实际上没有任何人收到（规格 §9.4 的闭环在那时是断的）。 */
 export function AlertsPage() {
+  const [searchParams] = useSearchParams();
+  const sub = searchParams.get("sub") ?? "alerts";
   const [scope, setScope] = useState<Scope>("active");
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -42,12 +46,15 @@ export function AlertsPage() {
     queryKey: [ALERTS_QUERY_KEY, scope],
     queryFn: ({ signal }) =>
       listAlerts({ signal, ...(scope === "all" ? { status: ALERT_STATUS_ALL } : {}) }),
+    enabled: sub !== "rules",
   });
 
   const refresh = () => {
     void query.refetch();
   };
   useAutoRefresh(refresh);
+
+  if (sub === "rules") return <AlertRulesPage />;
 
   const afterWrite = (message: string) => {
     setNotice(message);
@@ -69,11 +76,14 @@ export function AlertsPage() {
         refreshing={query.isFetching}
         lastRefreshedAt={query.dataUpdatedAt || undefined}
         actions={
-          <CreateSilenceDialog
-            onCreated={(runId) =>
-              afterWrite(`已创建静默窗口，run_id=${runId}；审计事件通常几秒内出现在审计页`)
-            }
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Link to="/alerts?sub=rules" className="inline-flex h-(--xm-control-h-md) items-center rounded-md border border-edge bg-surface px-3 text-sm font-medium text-fg hover:bg-surface-muted">告警与故障规则</Link>
+            <CreateSilenceDialog
+              onCreated={(runId) =>
+                afterWrite(`已创建静默窗口，run_id=${runId}；审计事件通常几秒内出现在审计页`)
+              }
+            />
+          </div>
         }
       />
 

@@ -1,6 +1,7 @@
 import { navLabel, PageHeader } from "@xingmang/ui-admin";
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
+import { Link } from "react-router";
 import { appApiConfig } from "../api/config";
 
 /** 设置：平台治理段里「管平台自己」的那一页（ADMIN-IA 一、平台治理）。
@@ -25,10 +26,19 @@ export function SettingsPage() {
           />
         </SettingsSection>
         <SettingsSection title="告警规则与静默">
-          <EmptyState
-            title="告警规则与静默尚未实现"
-            description="将配置告警规则、去重窗口与静默时段，随 XM-0033 告警中心上线。"
-          />
+          <div className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4">
+            <p className="text-sm font-medium text-fg">告警与故障</p>
+            <p className="text-xs leading-5 text-fg-muted">
+              查看可用天数 R5 规则、当前阈值、影响预览与变更历史。规则页只读预览；
+              写入仍需 Foundation-B / C3c 的审批链。
+            </p>
+            <Link
+              to="/alerts?sub=rules"
+              className="self-start text-sm font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              打开告警与故障规则 →
+            </Link>
+          </div>
         </SettingsSection>
         <SettingsSection title="配置中心">
           <EmptyState

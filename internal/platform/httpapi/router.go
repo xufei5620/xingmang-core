@@ -68,6 +68,7 @@ type Deps struct {
 	// 启动期兼容字段，便于分阶段切换而不会让未迁移环境误报成功。
 	FinanceRunwayConfig        RunwayThresholdProvider
 	FinanceRunwayConfigHistory RunwayThresholdHistoryLister
+	FinanceRunwayPreviewSource RunwayPreviewSource
 	RequestTimeout             time.Duration
 	// RateLimit 是 /api/v1 的限流参数（XM-R011）。零值走默认配额。
 	//
@@ -212,12 +213,21 @@ func NewRouter(d Deps) http.Handler {
 		// 两个端点当前是同一个粒度（一个 upstream_account 一行），差别在投影
 		// ——渠道看**钱**，上游看**供给**（余额 / 可用天数 / 充值成本率）。
 		// 理由见 internal/platform/finance/summary.go 顶部。
-		api.With(RequireScope(finance.ScopeRead)).
-			Get("/finance/channels/summary",
-				ListChannelSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))
-		api.With(RequireScope(finance.ScopeRead)).
-			Get("/finance/upstreams/summary",
-				ListUpstreamSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))
+		if d.FinanceRunwayConfig != nil {
+			api.With(RequireScope(finance.ScopeRead)).
+				Get("/finance/channels/summary",
+					ListChannelSummaryHandlerWithProvider(d.FinanceSummaries, d.FinanceRunwayConfig))
+			api.With(RequireScope(finance.ScopeRead)).
+				Get("/finance/upstreams/summary",
+					ListUpstreamSummaryHandlerWithProvider(d.FinanceSummaries, d.FinanceRunwayConfig))
+		} else {
+			api.With(RequireScope(finance.ScopeRead)).
+				Get("/finance/channels/summary",
+					ListChannelSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))
+			api.With(RequireScope(finance.ScopeRead)).
+				Get("/finance/upstreams/summary",
+					ListUpstreamSummaryHandler(d.FinanceSummaries, d.FinanceRunwayThresholds))
+		}
 		if d.FinanceRunwayConfig != nil {
 			api.With(RequireScope(finance.ScopeRead)).
 				Get("/finance/runway-thresholds", GetRunwayThresholdHandler(d.FinanceRunwayConfig))
@@ -225,6 +235,11 @@ func NewRouter(d Deps) http.Handler {
 		if d.FinanceRunwayConfigHistory != nil {
 			api.With(RequireScope(finance.ScopeRead)).
 				Get("/finance/runway-thresholds/history", ListRunwayThresholdHistoryHandler(d.FinanceRunwayConfigHistory))
+		}
+		if d.FinanceRunwayConfig != nil && d.FinanceRunwayPreviewSource != nil && d.Alerts != nil {
+			api.With(RequireScope(finance.ScopeRead)).
+				Get("/finance/runway-thresholds/preview", PreviewRunwayThresholdHandler(
+					d.FinanceRunwayConfig, d.FinanceRunwayPreviewSource, d.Alerts))
 		}
 	})
 	return r

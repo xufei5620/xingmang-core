@@ -351,9 +351,10 @@ type RunwaySource interface {
 // Reconciler 负责（见 reconcile.go）。分开是为了让规则本身可以在没有库的
 // 情况下被完整测试——规则是这个模块里最容易写错也最该被密集测试的部分。
 type Evaluator struct {
-	cfg    RuleConfig
-	source MetricSource
-	runway RunwaySource
+	cfg        RuleConfig
+	source     MetricSource
+	runway     RunwaySource
+	thresholds finance.RunwayThresholdProvider
 }
 
 // NewEvaluator 创建评估器。
@@ -363,6 +364,15 @@ type Evaluator struct {
 // （同 BalanceThresholdMinorUnits 回落默认值的理由）。
 func NewEvaluator(source MetricSource, runway RunwaySource, cfg RuleConfig) *Evaluator {
 	return &Evaluator{cfg: cfg.normalized(), source: source, runway: runway}
+}
+
+// NewEvaluatorWithThresholdProvider keeps the test-friendly constructor above
+// while allowing production workers to read one DB snapshot per evaluation
+// round. The provider is consulted before any runway findings are generated.
+func NewEvaluatorWithThresholdProvider(
+	source MetricSource, runway RunwaySource, provider finance.RunwayThresholdProvider, cfg RuleConfig,
+) *Evaluator {
+	return &Evaluator{cfg: cfg.normalized(), source: source, runway: runway, thresholds: provider}
 }
 
 // Config 返回归一化后的阈值配置（供日志与文档打印实际生效值）。
@@ -382,6 +392,16 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		return nil, fmt.Errorf("environment: %w", ErrMissingField)
 	}
 	now = now.UTC()
+	thresholds := e.cfg.RunwayThresholds
+	var thresholdSnapshot *finance.RunwayThresholdSnapshot
+	if e.thresholds != nil {
+		snapshot, err := e.thresholds.Current(ctx, environment)
+		if err != nil {
+			return nil, fmt.Errorf("读取 runway 阈值快照: %w", err)
+		}
+		thresholds = snapshot.Thresholds
+		thresholdSnapshot = &snapshot
+	}
 
 	observations, err := e.source.ListByEnvironment(ctx, environment)
 	if err != nil {
@@ -454,7 +474,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		}
 	}
 
-	runwayFindings, err := e.runwayFindings(ctx, environment)
+	runwayFindings, err := e.runwayFindings(ctx, environment, thresholds, thresholdSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -477,8 +497,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 //  3. **严重度逐条按天数算**，而不是每档一条规则。两条规则的话，
 //     一个 3 天的上游会同时命中「< 10」与「< 5」两条，
 //     于是一个条件产出两条告警、要静默两次。
-func (e *Evaluator) runwayFindings(ctx context.Context, environment string) ([]Finding, error) {
-	items, err := e.runway.UpstreamRunways(ctx, environment, e.cfg.RunwayThresholds)
+func (e *Evaluator) runwayFindings(ctx context.Context, environment string, thresholds finance.RunwayThresholds, snapshot *finance.RunwayThresholdSnapshot) ([]Finding, error) {
+	items, err := e.runway.UpstreamRunways(ctx, environment, thresholds)
 	if err != nil {
 		return nil, fmt.Errorf("读取可用天数: %w", err)
 	}
@@ -489,12 +509,28 @@ func (e *Evaluator) runwayFindings(ctx context.Context, environment string) ([]F
 			continue
 		}
 		days := item.Runway.Days
-		if days == nil || *days >= e.cfg.RunwayThresholds.WarningDays {
+		if days == nil {
+			continue
+		}
+		level, classifyErr := thresholds.Classify(*days)
+		if classifyErr != nil {
+			return nil, fmt.Errorf("分类 runway 阈值: %w", classifyErr)
+		}
+		if level != finance.RunwayCritical && level != finance.RunwayWarning {
 			continue
 		}
 		severity := SeverityWarning
-		if *days < e.cfg.RunwayThresholds.CriticalDays {
+		if level == finance.RunwayCritical {
 			severity = SeverityCritical
+		}
+		detail := fmt.Sprintf(
+			"按近 %d 个完整业务日的日均消耗估算（实到 %d 天）。告警档 ≤%d 天，critical 档 ≤%d 天。%s请及时充值，或核对上游余额读数是否还在更新。",
+			item.Runway.WindowDays, item.Runway.CoveredDays,
+			thresholds.WarningDays, thresholds.CriticalDays,
+			describeObservedAt(item.Runway.BalanceObservedAt))
+		if snapshot != nil {
+			detail += fmt.Sprintf(" threshold_revision=%d; critical_days=%d; warning_days=%d; serious_days=%d",
+				snapshot.Revision, thresholds.CriticalDays, thresholds.WarningDays, thresholds.SeriousDays)
 		}
 		out = append(out, Finding{
 			RuleKey: RuleUpstreamRunwayLow,
@@ -503,12 +539,7 @@ func (e *Evaluator) runwayFindings(ctx context.Context, environment string) ([]F
 			DedupKey: dedupKey(RuleUpstreamRunwayLow, environment, item.AccountID.String()),
 			Severity: severity,
 			Title:    fmt.Sprintf("上游 %s 可用天数仅剩 %d 天", item.Name, *days),
-			Detail: fmt.Sprintf(
-				"按近 %d 个完整业务日的日均消耗估算（实到 %d 天）。告警档 <%d 天，"+
-					"critical 档 <%d 天。%s请及时充值，或核对上游余额读数是否还在更新。",
-				item.Runway.WindowDays, item.Runway.CoveredDays,
-				e.cfg.RunwayThresholds.WarningDays, e.cfg.RunwayThresholds.CriticalDays,
-				describeObservedAt(item.Runway.BalanceObservedAt)),
+			Detail:   detail,
 			// 可用天数不来自某一条 ops 指标，留空而不是编一个键——
 			// 一个指向不存在指标的告警会让人点进去看到空白页。
 			SourceMetricKey: "",

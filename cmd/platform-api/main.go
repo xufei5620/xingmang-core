@@ -127,6 +127,7 @@ func main() {
 		action.WithLogger(logger),
 	)
 	opsStore := ops.NewStore(pool)
+	runwaySummaryStore := finance.NewSummaryStore(pool, nil)
 
 	// 演示数据种子（XM-0037d）：只在显式开启时跑，**生产硬拒**。
 	//
@@ -211,11 +212,12 @@ func main() {
 		// 看板供数是**只读**的：余额由采集任务写，这里只查询。
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。
-		FinanceSummaries: finance.NewSummaryStore(pool, nil),
+		FinanceSummaries: runwaySummaryStore,
 		// 阈值从环境变量解析后注入，与 platform-worker 的告警规则同源
 		FinanceRunwayThresholds:    cfg.FinanceRunwayThresholds,
 		FinanceRunwayConfig:        runwayThresholdStore,
 		FinanceRunwayConfigHistory: runwayThresholdStore,
+		FinanceRunwayPreviewSource: runwaySummaryStore,
 		RequestTimeout:             cfg.RequestTimeout,
 		RateLimit:                  cfg.RateLimit,
 	})

@@ -117,6 +117,11 @@ type runwayThresholdsItem struct {
 	CriticalDays int `json:"critical_days"`
 	WarningDays  int `json:"warning_days"`
 	SeriousDays  int `json:"serious_days"`
+	// Revision/source/updated_at make the exact classifier snapshot auditable.
+	// They are optional for the legacy env-backed handler during cutover.
+	Revision  int64  `json:"revision,omitempty"`
+	Source    string `json:"source,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 // channelSummaryItem 是 §13 ChannelSummary 的对外形状。
@@ -392,6 +397,41 @@ func ListChannelSummaryHandler(
 	}
 }
 
+// ListChannelSummaryHandlerWithProvider is the DB-snapshot cutover variant.
+// It reads exactly one threshold snapshot per request and reuses that same
+// value for the store query and response envelope.
+func ListChannelSummaryHandlerWithProvider(
+	store FinanceSummaryLister, provider RunwayThresholdProvider,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		items, from, to, snapshot, err := loadSummariesWithProvider(r, store, provider)
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		out := make([]channelSummaryItem, 0, len(items))
+		for _, item := range items {
+			out = append(out, channelToItem(item))
+		}
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].AccessMethod != out[j].AccessMethod {
+				return out[i].AccessMethod < out[j].AccessMethod
+			}
+			if out[i].SystemType != out[j].SystemType {
+				return out[i].SystemType < out[j].SystemType
+			}
+			if out[i].BaseURL != out[j].BaseURL {
+				return out[i].BaseURL < out[j].BaseURL
+			}
+			return out[i].ID < out[j].ID
+		})
+		WriteJSON(w, http.StatusOK, channelSummaryPageWithThresholds{
+			Items: out, From: from.Format(finance.ProfitBusinessDayLayout), To: to.Format(finance.ProfitBusinessDayLayout),
+			Thresholds: thresholdItemFromSnapshot(snapshot),
+		})
+	}
+}
+
 // ListUpstreamSummaryHandler 返回逐上游的供给侧供数（§13 UpstreamSummary + §10.4）。
 func ListUpstreamSummaryHandler(
 	store FinanceSummaryLister, thresholds finance.RunwayThresholds,
@@ -429,6 +469,79 @@ func ListUpstreamSummaryHandler(
 			},
 		})
 	}
+}
+
+// ListUpstreamSummaryHandlerWithProvider is the DB-snapshot cutover variant;
+// see ListChannelSummaryHandlerWithProvider for the one-read invariant.
+func ListUpstreamSummaryHandlerWithProvider(
+	store FinanceSummaryLister, provider RunwayThresholdProvider,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		items, from, to, snapshot, err := loadSummariesWithProvider(r, store, provider)
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		finance.SortUpstreamSummaries(items)
+		out := make([]upstreamSummaryItem, 0, len(items))
+		for _, item := range items {
+			out = append(out, upstreamToItem(item))
+		}
+		coverage := finance.SummarizeRunwayCoverage(items)
+		reasons := make(map[string]int, len(coverage.Reasons))
+		for reason, count := range coverage.Reasons {
+			reasons[string(reason)] = count
+		}
+		WriteJSON(w, http.StatusOK, upstreamSummaryPage{
+			Items: out, From: from.Format(finance.ProfitBusinessDayLayout), To: to.Format(finance.ProfitBusinessDayLayout),
+			Runway:     runwayCoverageItem{Total: coverage.Total, Known: coverage.Known, Reasons: reasons},
+			Thresholds: thresholdItemFromSnapshot(snapshot),
+		})
+	}
+}
+
+type channelSummaryPageWithThresholds struct {
+	Items      []channelSummaryItem `json:"items"`
+	From       string               `json:"from"`
+	To         string               `json:"to"`
+	Thresholds runwayThresholdsItem `json:"runway_thresholds"`
+}
+
+func thresholdItemFromSnapshot(snapshot finance.RunwayThresholdSnapshot) runwayThresholdsItem {
+	return runwayThresholdsItem{
+		CriticalDays: snapshot.Thresholds.CriticalDays,
+		WarningDays:  snapshot.Thresholds.WarningDays,
+		SeriousDays:  snapshot.Thresholds.SeriousDays,
+		Revision:     snapshot.Revision,
+		Source:       snapshot.Source,
+		UpdatedAt:    snapshot.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func loadSummariesWithProvider(
+	r *http.Request, store FinanceSummaryLister, provider RunwayThresholdProvider,
+) ([]finance.UpstreamSummary, time.Time, time.Time, finance.RunwayThresholdSnapshot, error) {
+	p, ok := principal.FromContext(r.Context())
+	if !ok {
+		return nil, time.Time{}, time.Time{}, finance.RunwayThresholdSnapshot{}, action.NewError(action.CodePermissionDenied, "缺少身份", nil)
+	}
+	env, err := resolveEnvironment(r, p)
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, finance.RunwayThresholdSnapshot{}, err
+	}
+	snapshot, err := provider.Current(r.Context(), string(env))
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, finance.RunwayThresholdSnapshot{}, runwayConfigUnavailable(err)
+	}
+	from, to, err := parseSummaryWindow(r.URL.Query().Get("from"), r.URL.Query().Get("to"), time.Now().UTC())
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, finance.RunwayThresholdSnapshot{}, err
+	}
+	items, err := store.UpstreamSummaries(r.Context(), finance.SummaryQuery{Environment: string(env), From: from, To: to, Thresholds: snapshot.Thresholds})
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, finance.RunwayThresholdSnapshot{}, err
+	}
+	return items, from, to, snapshot, nil
 }
 
 // loadSummaries 是两个端点共用的取数：身份 → 环境 → 窗口 → 仓储。

@@ -208,6 +208,9 @@ type Config struct {
 	// 环境变量解析，但共用 finance.ParseRunwayThresholds 这一个函数。
 	// 零值时回落到 finance.DefaultRunwayThresholds()。
 	AlertRunwayThresholds finance.RunwayThresholds
+	// RunwayThresholdProvider 非空时，告警评估每轮从数据库读取一次完整
+	// revision 快照；仅测试/迁移过渡可使用上面的静态字段。
+	RunwayThresholdProvider finance.RunwayThresholdProvider
 }
 
 // DefaultConfig returns the safe local-development baseline.
@@ -709,14 +712,19 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// 可用天数来自 finance 而不是 ops 观测（XM-0049）——它是平台自己算
 		// 出来的数，两侧原料都在自己的库里。时钟传 nil：告警评估要判
 		// 「余额过期没有」，用的就是此刻。
-		evaluator := alerts.NewEvaluator(
-			ops.NewStore(pool),
-			finance.NewSummaryStore(pool, nil),
-			alerts.RuleConfig{
-				CollectionInterval:         cfg.Sub2APISyncInterval,
-				BalanceThresholdMinorUnits: cfg.AlertBalanceThresholdMinorUnits,
-				RunwayThresholds:           cfg.AlertRunwayThresholds,
-			})
+		var evaluator *alerts.Evaluator
+		ruleConfig := alerts.RuleConfig{
+			CollectionInterval:         cfg.Sub2APISyncInterval,
+			BalanceThresholdMinorUnits: cfg.AlertBalanceThresholdMinorUnits,
+			RunwayThresholds:           cfg.AlertRunwayThresholds,
+		}
+		if cfg.RunwayThresholdProvider != nil {
+			evaluator = alerts.NewEvaluatorWithThresholdProvider(
+				ops.NewStore(pool), finance.NewSummaryStore(pool, nil), cfg.RunwayThresholdProvider, ruleConfig)
+		} else {
+			evaluator = alerts.NewEvaluator(
+				ops.NewStore(pool), finance.NewSummaryStore(pool, nil), ruleConfig)
+		}
 		river.AddWorker(workers, NewAlertEvaluateWorker(AlertEvaluateOptions{
 			Logger:      cfg.Logger,
 			Environment: cfg.Environment,
