@@ -9,7 +9,7 @@ READY
 - branch: `ai/codex/XM-C-USER0-impl`
 - base: `e98080d` (`release/v0.1-launch`, D0-b READY)
 - worktree: `K:/星芒统一控制平台/wt-xmC-USER0-impl`
-- implementation commits: `53a81d0`（核心实现）、`abbed2e`（前端 fixture 类型修正）
+- implementation commits: `53a81d0`（核心实现）、`abbed2e`（前端 fixture 类型修正）、`6c9cceb`（契约 EOF 规范化）
 - handoff commit: 本文件所在最新提交（见 READY 行）
 
 ## authorization boundary
@@ -87,7 +87,7 @@ READY
 - WSL 临时 archive：`pnpm --filter ui-storybook run build`、`pnpm --filter admin-web run build` — PASS（保留既有大 chunk warning）
 - `D:/Git/bin/bash.exe tests/security/governance-not-hollow.test.sh` — PASS
 - `D:/Git/bin/bash.exe scripts/check-governance.sh` — PASS
-- `gitleaks git --redact --no-banner --log-opts=e98080d..HEAD` — PASS（3 commits，no leaks found）
+- `gitleaks git --redact --no-banner --log-opts=e98080d..HEAD` — PASS（4 commits，no leaks found）
 - `git diff --check` — PASS
 
 ## tests_not_run
