@@ -2,14 +2,15 @@
 
 ## status
 
-IN PROGRESS（待最终门禁与验收线复核后改为 READY）
+READY
 
 ## branch / commit / base
 
 - branch: `ai/codex/XM-C-DEPLOY0-b`
 - base: `f982256`（XM-C-DEPLOY0-a READY）
 - worktree: `K:/星芒统一控制平台/wt-xmDEPLOY0-b`
-- commit: 待提交
+- implementation commit: `3036437`
+- handoff commit: 待提交
 
 ## summary
 
@@ -71,7 +72,13 @@ IN PROGRESS（待最终门禁与验收线复核后改为 READY）
 - `D:/Git/bin/bash.exe tests/deploy/deploy0-a.test.sh` — PASS (`DEPLOY0-A-TEST-OK`)
 - `D:/Git/bin/bash.exe tests/deploy/deploy0-b.test.sh` — PASS (`DEPLOY0-B-TEST-OK`)
 - `D:/Git/bin/bash.exe tests/security/governance-not-hollow.test.sh` — PASS
+- `go fmt ./...` — PASS
+- 清除代理环境后 `go vet ./...` — PASS
+- 清除代理环境后 `go test -p 1 -count=1 ./...` — PASS（全部 Go 包）
 - Docker Compose staging/prod `config --quiet`（含 profile/生产必填 OIDC 与采集变量）— PASS；production 配置不包含 bootstrap service，staging profile 包含该 service
+- WSL Ubuntu-24.04 临时 archive 检出：`pnpm install --frozen-lockfile --ignore-scripts --package-import-method=copy --offline`、`pnpm -r run typecheck`、`pnpm -r run test`、Storybook build、admin-web build — PASS
+  - ui-admin 16 文件 / 219 tests；admin-web 47 文件 / 881 tests；保留 Node 22 engine warning 与既有大 chunk warning
+- `C:/Users/58439/AppData/Local/Temp/xm-gitleaks-bin/gitleaks.exe git --redact --no-banner --log-opts=HEAD^..HEAD` — PASS（1 commit，no leaks found）
 - `git diff --check` — PASS
 
 ## tests_not_run
