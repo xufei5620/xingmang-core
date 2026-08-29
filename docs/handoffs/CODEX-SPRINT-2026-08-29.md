@@ -20,20 +20,20 @@
 3. 能推 GitHub 就顺手推一下分支(镜像备份,失败不阻塞,不要重试超过一次);
 4. LOCAL 分支继续保留为你的集成线,但**只有拆出的切片分支会被合入**。
 
-## 三、任务队列(严格按序,一片一分支)
-0. **XM-C-DEPLOY0 a→b→c**(服务器为中心工作流:ci-local.sh + 裸仓库钩子 + 安装
-   脚本 → deploy/promote 脚本 + 服务器 staging + Telegram → 切 origin/降级 GitHub/
-   文档更新)。服务器 root 步骤脚本化,由产品负责人执行。**这是最高优先级。**
-1. **把 LOCAL 里已批规格的实现拆成切片**(每片基于最新 release rebase,门禁重跑):
-   RUNWAY0-impl(阈值预览+规则 UI)、B003a-impl(SavedView 持久化)、MAP0-impl
-   (平台渠道↔上游账号绑定,含迁移)、USER0-impl(用户读 v2 核心)、
-   平台「连接与凭据」「告警」页签内容、审计子页状态、dev proxy override。
-   未在已批规格范围内的实现**先补规格再拆**。
-2. **XM-C004 NewAPI 各页镜像**(A 期闭环)。
-3. **CR-0003 开票用户平台隔离**(K:/发票 仓库,`docs/change-requests/CR-0003-…`)。
-4. 已批规格的实现按序:RL0 → DS0 → R210 → R215 → DBR0(需产品负责人排维护窗)→
-   AUD2+(按 MinIO 做 provider qualification)。R213/R214 的实现等 M4 启动,现在不做。
-5. 队列空了:按 CODEX-PROMPT.md 自拟任务卡(追加进交接文档路线图)。
+## 三、任务队列(严格按序,一片一分支;2026-08-29 14:00 按你的汇报调整顺序)
+0. **先收尾当前 39 个未提交的 UI 改动**:按片整理成独立分支(NewAPI 概览卡片与财务
+   两子页=**XM-C004**;详情页壳/筛选与日期范围/蓝图深链/组件 a11y/告警覆盖提示/dev
+   proxy 各自一片或合理归并),每片补 Handoff 文件、**补跑 Go 全量门禁**后标 READY。
+1. **XM-C-DEPLOY0 a→b→c**(服务器为中心工作流,设计稿
+   `docs/superpowers/plans/2026-08-29-server-centric-workflow.md`);服务器 root 步骤
+   脚本化交产品负责人执行。
+2. **把 LOCAL 里已批规格的实现拆成切片**(基于最新 release rebase,门禁重跑):
+   RUNWAY0-impl、B003a-impl(SavedView 持久化)、MAP0-impl(渠道绑定,含迁移)、
+   USER0-impl(用户读 v2)、凭据/告警页签内容、审计子页。未在已批规格范围内的先补规格。
+3. **CR-0003 开票用户平台隔离**(K:/发票 仓库)。
+4. 已批规格实现按序:RL0 → DS0 → R210 → R215 → DBR0(需排维护窗)→ AUD2+(MinIO)。
+   R213/R214 等 M4。
+5. 队列空了按 CODEX-PROMPT.md 自拟任务卡。
 
 ## 四、每片交付时回报格式(给验收线)
 一行:`READY <分支名> <commit> <Handoff 文件路径>`,验收线本地审读+门禁复跑后合入部署。
