@@ -128,6 +128,7 @@ fi
 # 检查自己。手工同步两份名单迟早再漂一次，所以这里让本脚本**声明**它依赖
 # 哪些文件，并断言守卫确实保护它们：新增扫描器忘了加保护，治理直接失败。
 governance_deps=(
+  PROJECT-CONSTITUTION.md
   scripts/check-governance.sh
   scripts/check-versions.py
   scripts/guard-governance-files.sh

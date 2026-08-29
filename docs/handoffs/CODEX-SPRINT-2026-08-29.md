@@ -13,7 +13,7 @@
 ## 二、过渡期规则(DEPLOY0 落地前,立即生效)
 1. **不再需要开 GitHub PR**:验收线与你在同一台机器,直接审你的本地分支。
    每片仍是独立分支 `ai/codex/XM-…`(基于 `release/v0.1-launch`),**Handoff 改为
-   分支内文件** `docs/handoffs/slices/XM-….md`(内容同原 PR 描述:status/branch/commit/
+   分支内文件** `docs/handoffs/slices/XM-….md`(内容同原交接字段:status/branch/commit/
    summary/files_changed/tests_run/not_run/risks/follow_ups + 格→数据源映射表);
 2. **门禁自己跑、结果写进 Handoff**:typecheck / test / storybook build / go fmt+vet+
    `go test -p 1 ./...` / check-governance,全绿才把分支标 READY(在 Handoff 的 status);

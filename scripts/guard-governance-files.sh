@@ -22,6 +22,7 @@ labels="${PR_LABELS:-}"
 protected_globs=(
   '.github/workflows/'
   '.github/CODEOWNERS'
+  'PROJECT-CONSTITUTION.md'
   'scripts/check-governance.sh'
   'scripts/check-versions.py'
   'scripts/guard-governance-files.sh'
@@ -30,6 +31,8 @@ protected_globs=(
   'deploy/scripts/install-git-server.sh'
   'deploy/scripts/deploy.sh'
   'deploy/scripts/promote.sh'
+  'deploy/scripts/configure-remotes.sh'
+  'deploy/scripts/mirror-github.sh'
   'deploy/compose/'
   'deploy/nginx/'
   'tests/security/'
@@ -79,7 +82,7 @@ printf '%s' "$touched"
   printf '%s' "$touched"
   echo '```'
   echo ""
-  echo "受保护范围：\`.github/workflows/\`、\`.github/CODEOWNERS\`、"
+  echo "受保护范围：\`.github/workflows/\`、\`.github/CODEOWNERS\`、\`PROJECT-CONSTITUTION.md\`、"
   echo "\`scripts/check-governance.sh\`、\`scripts/guard-governance-files.sh\`、"
   echo "\`scripts/ci-local.sh\`、\`deploy/git-hooks/\`、\`deploy/scripts/install-git-server.sh\`、"
   echo "\`deploy/scripts/deploy.sh\`、\`deploy/scripts/promote.sh\`、\`deploy/compose/\`、\`deploy/nginx/\`、"

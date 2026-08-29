@@ -4,6 +4,11 @@
 > 骨架(导航/页签/组件库)已按原型落地,现在请你把**每页内部功能分布**逐格补齐。
 > 本简报是你在 xingmang-platform 仓库工作的全部上下文入口。
 
+> **交付通道更新（2026-08-29）**：服务器裸仓库为默认 `origin`，GitHub remote
+> 命名为 `github` 仅作镜像。过渡期不创建 PR；每片使用独立分支并提交
+> `docs/handoffs/slices/XM-….md`，验收线本地审读后合入。详见
+> `docs/runbooks/GIT-WORKFLOW.md`。
+
 ## 0. 你的原型在哪、平台长什么样
 
 - 原型快照(只读):`C:\Users\58439\.codex\visualizations\2026\08\27\01a041e2-0397-71c2-9333-ba805861b187\backups\productivity-layer-final\`
@@ -50,7 +55,7 @@ web/apps/admin-web/src/api/client.ts,前端已封装,直接用现有 api/ 模块
 
 **Claude 线正在做(别碰)**:XM-0051 概览页、XM-0052 渠道管理页、XM-0053 用户管理页。
 
-**你的(按序,一片一 PR)**:
+**你的(按序,一片一分支 Handoff)**:
 1. **XM-C001 支付与财务·资金概览**:八卡(区间成功到账/待处理/失败/退款冲正/
    手续费/净现金流入/使用收入/渠道毛利)+资金对账面板+经营利润桥+最近事件表。
    支付侧七格无数据源(支付系统 M3)→布局照原型+未接入;使用收入/渠道毛利两格
@@ -73,8 +78,9 @@ web/apps/admin-web/src/api/client.ts,前端已封装,直接用现有 api/ 模块
 - worktree 里 pnpm install 会挂(Windows rename 锁),解法看
   `C:\Users\58439\.claude\projects\K----------\memory\windows-toolchain-quirks.md`
   (镜像 node_modules 脚本/跳依赖校验开关);
-- PR base `release/v0.1-launch`,**不要自己合并**,描述附 Handoff
+- 分支 base `release/v0.1-launch`,**不要自己合并或部署生产**,分支内附 Handoff
   (status/branch/commit/summary/files_changed/tests_run/not_run/risks/follow_ups);
-  CI 4/4 绿后由 Claude 线验收合入并部署;
+  服务器门禁全绿后由验收线审读、合入并部署；GitHub 镜像由
+  `deploy/scripts/mirror-github.sh` 显式执行一次;
 - gitleaks 会把指标键字面量误判成密钥:禁加 allowlist,抽常量;
-- 疑义以「原型渲染态字面 > 交接文档 > 本简报」为序,真裁不了写进 PR 的 risks。
+- 疑义以「原型渲染态字面 > 交接文档 > 本简报」为序,真裁不了写进 Handoff 的 risks。
