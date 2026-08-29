@@ -46,7 +46,7 @@ func TestParseRoleScopeMap(t *testing.T) {
 func TestLooksLikePlatformScope(t *testing.T) {
 	for _, s := range []string{
 		"registry.read", "registry.service.manage", "ops.read", "audit.read",
-		"platform.cross_env.read", "action.execute", "connector.x",
+		"platform.cross_env.read", "action.execute", "connector.x", "ui.saved_view.manage",
 		"REGISTRY.READ", " ops.read ",
 	} {
 		if !looksLikePlatformScope(s) {
@@ -61,6 +61,15 @@ func TestLooksLikePlatformScope(t *testing.T) {
 	} {
 		if looksLikePlatformScope(s) {
 			t.Errorf("%q 不该被当成平台细粒度权限", s)
+		}
+	}
+}
+
+func TestDefaultRoleScopeMapGrantsSelfOnlySavedViews(t *testing.T) {
+	m := DefaultRoleScopeMap()
+	for _, role := range []string{"staff", "admin"} {
+		if !slices.Contains(m[role], "ui.saved_view.manage") {
+			t.Fatalf("%s requires self-only personal SavedView scope, got %v", role, m[role])
 		}
 	}
 }

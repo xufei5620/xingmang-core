@@ -58,6 +58,9 @@ export const DEFAULT_SCOPES = [
   "finance.upstream_account.manage",
   "finance.recharge_ratio.manage",
   "finance.token_map.manage",
+  // XM-B003：只读写当前 HUMAN Principal 在当前 Environment 下自己的表格视图。
+  // 业务数据权限没有随它扩大；生产仍由 OIDC RoleScopeMap 最终裁决。
+  "ui.saved_view.manage",
 ];
 
 function parseScopes(raw: string | undefined): string[] {

@@ -1,6 +1,5 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import {
-  DataTableV2,
   navLabel,
   PageHeader,
   PageState,
@@ -9,6 +8,7 @@ import {
 import { Badge, Button } from "@xingmang/ui-primitives";
 import { AUDIT_PAGE_SIZE, listAuditEvents, type AuditEventItem } from "../api/platform";
 import { ApiStateView } from "../components/ApiStateView";
+import { PersistentDataTable, SAVED_VIEW_TABLE_KEYS } from "../components/PersistentDataTable";
 import {
   chainLinkBetween,
   describeChainLink,
@@ -166,7 +166,8 @@ const AUDIT_COLUMNS: DataTableColumn<AuditRowModel>[] = [
 
 function AuditView({ events, hasMore, loadingMore, onLoadMore }: AuditViewProps) {
   return (
-    <DataTableV2
+    <PersistentDataTable
+      tableKey={SAVED_VIEW_TABLE_KEYS.auditEvents}
       caption="审计事件：按序号倒序，每行给出事件哈希与它记录的前序哈希"
       columns={AUDIT_COLUMNS}
       rows={buildAuditRows(events)}

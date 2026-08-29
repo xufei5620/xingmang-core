@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChannelSummary } from "../api/finance";
@@ -64,7 +64,10 @@ function fakeResponse(body: unknown, status = 200) {
 }
 
 /** 两个端点各回各的：渠道汇总给行，上游汇总只给阈值。 */
-function stubApi(channels: unknown[], options: { thresholdStatus?: number } = {}) {
+function stubApi(
+  channels: unknown[],
+  options: { thresholdStatus?: number; savedViews?: unknown[] } = {},
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
@@ -83,6 +86,9 @@ function stubApi(channels: unknown[], options: { thresholdStatus?: number } = {}
           runway_coverage: { total: 1, known: 1, reasons: {} },
           runway_thresholds: { critical_days: 5, warning_days: 10, serious_days: 20 },
         });
+      }
+      if (url.includes("/ui/saved-views")) {
+        return fakeResponse({ items: options.savedViews ?? [] });
       }
       return fakeResponse({ items: [] });
     }),
@@ -307,6 +313,39 @@ describe("阈值取不到不该把整张表拖垮", () => {
     renderPanel(<ChannelsPanel />);
     const table = await screen.findByRole("table");
     expect(within(table).getByText("上游 A")).toBeTruthy();
+  });
+});
+
+describe("渠道 SavedView 静态列能力", () => {
+  it("grossProfit 在首屏即可恢复排序，不依赖某行金额是否为空", async () => {
+    const ids = [
+      "account", "platform", "group", "models", "supplyCost", "revenue",
+      "balance", "grossProfit", "successRate", "status", "detail",
+    ];
+    stubApi(
+      [rawChannel(), rawChannel({ id: "acc-2", gross_profit: null })],
+      {
+        savedViews: [{
+          id: "view-profit",
+          table_key: "platform.sub2api.channels",
+          name: "毛利优先",
+          state_version: 1,
+          state: {
+            schema_version: 1, query: "", filters: {},
+            sort: { column_id: "grossProfit", direction: "desc" },
+            columns: { known: ids, visible: ids }, density: "compact",
+          },
+          created_at: "2026-08-29T01:00:00Z",
+          updated_at: "2026-08-29T01:00:00Z",
+        }],
+      },
+    );
+    renderPanel(<ChannelsPanel />);
+    const option = await screen.findByRole("option", { name: "毛利优先" }) as HTMLOptionElement;
+    fireEvent.change(screen.getByRole("combobox", { name: /视图/ }), {
+      target: { value: option.value },
+    });
+    expect(screen.getByRole("columnheader", { name: /毛利/ }).getAttribute("aria-sort")).toBe("descending");
   });
 });
 

@@ -71,21 +71,21 @@
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `XM_OIDC_JWKS_URL` | 从 issuer 的 `/.well-known/openid-configuration` 发现 | 发现端点不可达但 JWKS 可达的隔离网络才需要显式配。必须与 issuer 同源 |
-| `XM_OIDC_ROLE_SCOPES` | 代码里的默认表 | JSON：`{"staff":["registry.read","ops.read"]}` |
+| `XM_OIDC_ROLE_SCOPES` | 代码里的默认表 | JSON：`{"staff":["registry.read","ops.read","ui.saved_view.manage"]}`；显式配置部署时必须同步新增 scope |
 | `XM_OIDC_CLOCK_SKEW` | `60s` | `exp`/`nbf`/`iat` 的时钟偏移容忍。上限 5 分钟——再大就把 CR-0001 定的 5 分钟令牌寿命架空了 |
 
 ## 四、RoleScopeMap 必须人工审定
 
 ADR-016 与 CR-0001 §5：**平台细粒度权限不进 Keycloak**。Realm 只发 `staff`
 这类粗粒度角色，`registry.read` / `ops.read` / `audit.read` /
-`registry.service.manage` 由平台自己解析。翻译表就是 RoleScopeMap。
+`registry.service.manage` / `ui.saved_view.manage` 由平台自己解析。翻译表就是 RoleScopeMap。
 
 代码里的默认表（`oidcauth.DefaultRoleScopeMap`）：
 
 | Realm 角色 | 翻译成的平台 scope | 状态 |
 |---|---|---|
-| `staff` | `registry.read`、`ops.read` | CR-0001 §5 会创建这个角色 |
-| `admin` | 上面两个 + `audit.read` + `registry.service.manage` + `registry.connector.manage` + `registry.connection.manage` + `request.read` | **Realm 里今天没有这个角色**，预留位 |
+| `staff` | `registry.read`、`ops.read`、`ui.saved_view.manage` | CR-0001 §5 会创建这个角色；个人视图 scope 只读写自己的偏好 |
+| `admin` | 上面三个 + `audit.read` + `registry.service.manage` + `registry.connector.manage` + `registry.connection.manage` + `request.read` | **Realm 里今天没有这个角色**，预留位 |
 
 三处刻意的保守，前两处审定时可以推翻，第三处**已经裁定过**，请先读完理由：
 
@@ -94,6 +94,10 @@ ADR-016 与 CR-0001 §5：**平台细粒度权限不进 Keycloak**。Realm 只�
   「看板角色拿到 ops.read 不应顺带看见全平台的操作明细」。而 CR-0001 里 `staff`
   是**唯一**的 Realm 角色——把 audit.read 塞进去，等于每个员工默认看见全部操作
   明细，和那段论证直接冲突。要给，应当是一次显式的人工决定；
+- **`staff` 默认含 `ui.saved_view.manage`。** 这是一次明确授权：SavedView Query 与
+  L0 set/remove Action 都只能作用于 Principal 派生的 owner + Environment，不能读写
+  其他人，也不增加任何业务数据权限。读写共用一个 scope 是因为再拆 read/write
+  不增加隔离；不要用 `registry.read` / `ops.read` 代替它；
 - **`admin` 今天不会命中。** CR-0001 §5 只创建 `staff`。要加角色需要另开一张
   变更单（ADR-016 的变更单机制）。预留这一行只是为了「加角色时不用改代码」；
 - **`admin` 含 `request.read`，但没有 `request.content.read`**（XM-0039 验收
@@ -107,12 +111,13 @@ ADR-016 与 CR-0001 §5：**平台细粒度权限不进 Keycloak**。Realm 只�
   `XM_OIDC_ROLE_SCOPES='{"request-auditor":["request.read","request.content.read"]}'`。
 
 于是 CR-0001 执行完当天的效果是：员工能登录、能看服务清单与运营指标；
-审计页与所有写操作会 403，直到有人显式授权。**Fail Closed 比「先放开再收」便宜。**
+审计页与业务写操作会 403，直到有人显式授权；仅限自己的 SavedView L0 写操作可用。
+**Fail Closed 比「先放开再收」便宜。**
 
 要改，用环境变量而不是改代码：
 
 ```bash
-XM_OIDC_ROLE_SCOPES='{"staff":["registry.read","ops.read"],"auditor":["audit.read"]}'
+XM_OIDC_ROLE_SCOPES='{"staff":["registry.read","ops.read","ui.saved_view.manage"],"auditor":["audit.read"]}'
 ```
 
 左边是 Keycloak 的粗粒度角色，右边是平台 scope。**方向写反会被拒绝启动**：
@@ -122,7 +127,7 @@ ADR-016 禁止的东西。
 ## 五、配置漂移会被记 warn
 
 令牌里出现平台形态的权限串（`registry.*` / `ops.*` / `audit.*` / `platform.*` /
-`action.*` / `connector.*` / `request.*`），无论在 `realm_access.roles`、`scope` 还是
+`action.*` / `connector.*` / `request.*` / `ui.*`），无论在 `realm_access.roles`、`scope` 还是
 `resource_access` 里，平台都**忽略**并记一条 WARN：
 
 ```json

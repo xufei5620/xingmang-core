@@ -24,6 +24,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
+	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
 )
 
 func main() {
@@ -95,6 +96,14 @@ func main() {
 	financeSubscriptions := finance.NewSubscriptionStore(pool)
 	if err := finance.RegisterSubscriptionActions(
 		actionRegistry, financeSubscriptions, financeStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 个人表格视图同样遵守 Query/Action 分离：读由下方 Deps.SavedViews 暴露，
+	// set/remove 只在这里注册成 HUMAN-only L0 Action。注册失败即拒绝启动。
+	savedViewStore := savedviews.NewStore(pool)
+	if err := savedviews.RegisterActions(actionRegistry, savedViewStore); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
@@ -173,6 +182,7 @@ func main() {
 		// 实现，不另开一条访问审计表的路径
 		AuditEvents: auditStore,
 		Alerts:      alertStore,
+		SavedViews:  savedViewStore,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
 		// nil 时用户端点不挂载（见 httpapi.Deps.PlatformUsers）

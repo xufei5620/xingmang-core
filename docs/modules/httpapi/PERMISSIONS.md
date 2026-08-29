@@ -17,6 +17,7 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 | `GET /api/v1/metrics`         | `ops.read`      | `ops.ScopeRead` |
 | `GET /api/v1/metrics/history` | `ops.read`      | `ops.ScopeRead` |
 | `GET /api/v1/audit/events`    | `audit.read`    | `audit.ScopeRead` |
+| `GET /api/v1/ui/saved-views`  | `ui.saved_view.manage` | `savedviews.ScopeManage` |
 
 三个 scope **分开授予**，不共用一个「读」权限：指标里将来会有收入、余额这类业务数据
 （XM-0017 接入 Sub2API 之后），比「有哪些服务」敏感一个量级。共用一个 scope 意味着
@@ -28,6 +29,12 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 
 权限声明写在路由上而不是 handler 里，路由表因此成为「哪个端点要什么权限」的单一清单；
 散在 handler 里的 if 谁也审计不了，还会随手长出第二套授权规则。
+
+`ui.saved_view.manage` 同时保护个人 SavedView 的 Query 与两个 L0 Action。这里不另拆
+`ui.saved_view.read`：Query 只能返回当前 HUMAN Principal 在当前 Environment 下自己的
+低影响偏好，拆成两份 scope 不增加隔离，只增加授权配置。它也不复用 `registry.read`
+或 `ops.read`，避免把“能看业务数据”与“能保存自己的表格布局”绑成一个决定。owner 与
+Environment 从 Principal 派生，客户端没有对应参数。
 
 ## 环境范围
 
@@ -51,8 +58,9 @@ Principal 的环境。`resolveEnvironment` 的「传了必须一致」已经能�
 ## 细粒度权限不进 Keycloak
 
 ADR-016：Keycloak 只发 `staff` 这类粗粒度角色，`registry.read` / `ops.read` /
-`audit.read` / `registry.service.manage` 由平台自己解析。CR-0001 明确要求 Realm 里
-**不要**创建 `registry.*` / `ops.*` / `audit.*` 角色。
+`audit.read` / `registry.service.manage` / `ui.saved_view.manage` 由平台自己解析。
+CR-0001 明确要求 Realm 里**不要**创建 `registry.*` / `ops.*` / `audit.*` / `ui.*`
+角色。
 
 Foundation-A 期间 Principal 由 `NewDevHeaderResolver` 从 `X-Dev-Scopes` 头注入
 （该 Resolver 在 `environment == "production"` 时构造即失败）。XM-0008 接入 Keycloak
@@ -82,12 +90,13 @@ Keycloak Realm 角色（staff）
 
 - **RoleScopeMap 是授权策略，不是实现细节。** 它决定「登录进来的员工默认能看到
   什么」，因此 `oidcauth.DefaultRoleScopeMap` 只是代码里的默认值，**上生产前
-  必须人工审定**并落到 `XM_OIDC_ROLE_SCOPES`。默认表刻意保守：`staff` 只翻译成
-  `registry.read` + `ops.read`，**不含 `audit.read`**——理由就是本文件上面那段
+  必须人工审定**并落到 `XM_OIDC_ROLE_SCOPES`。默认表刻意保守：`staff` 翻译成
+  `registry.read` + `ops.read` + 仅限自己的 `ui.saved_view.manage`，**不含
+  `audit.read`**——理由就是本文件上面那段
   「audit.read 又比 ops.read 高一档」。CR-0001 里 `staff` 是唯一的 Realm 角色，
   把 audit.read 塞进去等于每个员工默认看见全平台操作明细；
 - **令牌里出现细粒度权限 = 配置漂移。** `registry.*` / `ops.*` / `audit.*` /
-  `platform.*` / `action.*` / `connector.*` 无论出现在 `realm_access.roles`、
+  `platform.*` / `action.*` / `connector.*` / `ui.*` 无论出现在 `realm_access.roles`、
   OAuth 的 `scope` 还是 `resource_access` 里，平台一律**忽略**并记 WARN
   （`error_code=keycloak_scope_drift`）。这是 ADR-016 的探针：平台侧忽略只是
   止血，修复要回到 Realm 那边走变更单；

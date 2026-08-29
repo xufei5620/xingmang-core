@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { cx } from "@xingmang/ui-primitives";
 import {
   ariaSort,
@@ -12,14 +12,20 @@ import {
   sortHint,
   sortRows,
   toggleKeys,
+  reconcileSavedViewState,
+  toSavedViewStateV1,
   CUSTOM_VIEW_NAME,
   DENSITY_LABELS,
   type CellValue,
   type Density,
   type SavedView,
+  type PersistedSavedView,
+  type SavedViewStateV1,
+  type TableColumnCapability,
   type TableFilters,
   type TableRow,
   type TableSort,
+  type TableViewState,
 } from "./dataTable";
 
 export interface DataTableColumn<T> {
@@ -48,6 +54,27 @@ export interface DataTableFilterSpec {
   options: readonly string[];
 }
 
+export type TableViewChangeReason =
+  | "search"
+  | "filter"
+  | "sort"
+  | "columns"
+  | "density"
+  | "reset"
+  | "apply-view";
+
+export interface DataTableViewPersistence {
+  tableKey: string;
+  items: readonly PersistedSavedView[];
+  schemaReady: boolean;
+  columnCapabilities: readonly TableColumnCapability[];
+  status: "loading" | "ready" | "denied" | "error";
+  message?: string;
+  onRetry?: () => void;
+  onSave: (name: string, state: SavedViewStateV1) => Promise<{ runId: string }>;
+  onRemove: (id: string) => Promise<{ runId: string }>;
+}
+
 export interface DataTableV2Props<T> {
   /** 表格用途的一句话。渲染成 `<caption class="sr-only">`——
    *  读屏用户进到一张表时，第一句要听到的是「这是什么表」。 */
@@ -64,6 +91,11 @@ export interface DataTableV2Props<T> {
   filters?: readonly DataTableFilterSpec[];
   /** 预置视图。**只活在内存里**，见 dataTable.ts 的 SavedView。 */
   views?: readonly SavedView[];
+  /** 服务端个人视图；ui-admin 只管交互，不认识 Query/Action 传输。 */
+  persistence?: DataTableViewPersistence;
+  /** 可选受控状态，供 admin-web 把条件放进 Router Search Params。 */
+  viewState?: TableViewState;
+  onViewStateChange?: (state: TableViewState, reason: TableViewChangeReason) => void;
   selectable?: boolean;
   /** 选中若干行之后出现的操作条。本片只有告警场景传它。 */
   bulkActions?: (selectedKeys: readonly string[]) => ReactNode;
@@ -105,6 +137,9 @@ export function DataTableV2<T>({
   searchable = false,
   filters = [],
   views = [],
+  persistence,
+  viewState,
+  onViewStateChange,
   selectable = false,
   bulkActions,
   renderExpanded,
@@ -115,7 +150,7 @@ export function DataTableV2<T>({
 }: DataTableV2Props<T>) {
   const domId = useId();
   const defaultVisible = useMemo(
-    () => columns.filter((c) => !c.defaultHidden).map((c) => c.id),
+    () => columns.filter((c) => c.primary || !c.defaultHidden).map((c) => c.id),
     [columns],
   );
 
@@ -129,6 +164,23 @@ export function DataTableV2<T>({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [sessionViews, setSessionViews] = useState<readonly SavedView[]>([]);
   const [viewDraft, setViewDraft] = useState("");
+  const [selectedPersistentId, setSelectedPersistentId] = useState<string | null>(null);
+  const [viewNotice, setViewNotice] = useState<string | null>(null);
+  const [viewError, setViewError] = useState<string | null>(null);
+  const [savingView, setSavingView] = useState(false);
+  const [removingView, setRemovingView] = useState(false);
+  const [productivityEpoch, setProductivityEpoch] = useState(0);
+
+  // Controlled mode is used by the Router adapter. We still mirror it locally so legacy call
+  // sites and the render pipeline stay identical; incoming URL changes remain authoritative.
+  useEffect(() => {
+    if (!viewState) return;
+    setQuery(viewState.query);
+    setFilterValues(viewState.filters);
+    setSort(viewState.sort);
+    setVisible(viewState.visibleColumns);
+    setDensity(viewState.density);
+  }, [viewState]);
 
   // 业务对象 → 逻辑层认识的行。列的 `value` 决定了什么能被搜到、被排序
   const tableRows: TableRow[] = useMemo(
@@ -160,41 +212,165 @@ export function DataTableV2<T>({
   const shownColumns = columns.filter((c) => visible.includes(c.id));
   const allViews = [...views, ...sessionViews];
 
-  const state = { query, filters: filterValues, sort, visibleColumns: visible, density };
-  const activeView = allViews.find((v) => matchesView(state, v))?.name ?? CUSTOM_VIEW_NAME;
+  const state: TableViewState = {
+    query,
+    filters: filterValues,
+    sort,
+    visibleColumns: visible,
+    density,
+  };
+  const filterOptions = Object.fromEntries(filters.map((filter) => [filter.columnId, filter.options]));
+  const persistentViews = (persistence?.items ?? []).map((item) => ({
+    item,
+    reconciled: reconcileSavedViewState(
+      { ...item.state, schema_version: item.state_version } as SavedViewStateV1,
+      {
+        schemaReady: persistence?.schemaReady ?? false,
+        columnCapabilities: persistence?.columnCapabilities ?? [],
+        filterOptions,
+        defaultDensity,
+      },
+    ),
+  }));
+  const matchedPersistent = persistentViews.find(
+    ({ reconciled }) => reconciled.state !== null && matchesView(state, { name: "", state: reconciled.state }),
+  );
+  const matchedBuiltIn = allViews.find((view) => matchesView(state, view));
+  const selectedPersistent = selectedPersistentId
+    ? persistentViews.find(({ item }) => item.id === selectedPersistentId)
+    : undefined;
+  const activePersistent = selectedPersistent ?? matchedPersistent;
+  const activeView = activePersistent?.item.name ?? matchedBuiltIn?.name ?? CUSTOM_VIEW_NAME;
+  const activeViewValue = persistence
+    ? activePersistent
+      ? `personal:${activePersistent.item.id}`
+      : matchedBuiltIn
+        ? `builtin:${matchedBuiltIn.name}`
+        : CUSTOM_VIEW_NAME
+    : activeView;
   const filterLabels = Object.fromEntries(filters.map((f) => [f.columnId, f.label]));
   // 没有配任何视图时不带视图前缀：「视图：自定义」会让人以为有一套视图机制
   const summary = describeCriteria(
     query,
     filterValues,
     filterLabels,
-    allViews.length > 0 ? activeView : undefined,
+    allViews.length > 0 || persistence ? activeView : undefined,
   );
   const hasCriteria = query.trim() !== "" || Object.values(filterValues).some((v) => v !== "");
 
+  const commitViewState = (
+    next: TableViewState,
+    reason: TableViewChangeReason,
+    clearTransient = false,
+  ) => {
+    setQuery(next.query);
+    setFilterValues(next.filters);
+    setSort(next.sort);
+    setVisible(next.visibleColumns);
+    setDensity(next.density);
+    setPage(1);
+    if (clearTransient) {
+      setSelected(new Set());
+      setExpanded(new Set());
+      setProductivityEpoch((value) => value + 1);
+    }
+    if (reason !== "apply-view") setSelectedPersistentId(null);
+    onViewStateChange?.(next, reason);
+  };
+
   const reset = () => {
-    setQuery("");
-    setFilterValues({});
-    setPage(1);
+    commitViewState({ ...state, query: "", filters: {} }, "reset");
   };
 
-  const applyView = (name: string) => {
-    const view = allViews.find((v) => v.name === name);
+  const applyView = (value: string) => {
+    setViewError(null);
+    setViewNotice(null);
+    if (persistence && value.startsWith("personal:")) {
+      const id = value.slice("personal:".length);
+      const personal = persistentViews.find(({ item }) => item.id === id);
+      if (!personal) return;
+      setSelectedPersistentId(id);
+      if (personal.reconciled.deferred) {
+        setViewNotice("列结构仍在加载，个人视图已排队，暂不改动当前表格。请稍后重试。");
+        return;
+      }
+      if (!personal.reconciled.state) {
+        setViewError(personal.reconciled.warnings.join("；"));
+        return;
+      }
+      commitViewState(personal.reconciled.state, "apply-view", true);
+      if (personal.reconciled.warnings.length > 0) {
+        setViewNotice(personal.reconciled.warnings.join("；"));
+      }
+      return;
+    }
+    const name = persistence && value.startsWith("builtin:")
+      ? value.slice("builtin:".length)
+      : value;
+    const view = allViews.find((candidate) => candidate.name === name);
     if (!view) return;
-    setQuery(view.state.query);
-    setFilterValues(view.state.filters);
-    setSort(view.state.sort);
-    setVisible(view.state.visibleColumns);
-    setDensity(view.state.density);
-    setPage(1);
+    setSelectedPersistentId(null);
+    commitViewState(
+      {
+        query: view.state.query,
+        filters: view.state.filters,
+        sort: view.state.sort,
+        visibleColumns: view.state.visibleColumns,
+        density: view.state.density,
+      },
+      "apply-view",
+      true,
+    );
   };
 
-  const saveView = () => {
+  const saveView = async () => {
     const name = normalizeViewName(viewDraft);
     // 空名的视图在下拉里没法选中，直接不收
     if (!name) return;
+    setViewError(null);
+    setViewNotice(null);
+    if (persistence) {
+      if (name === CUSTOM_VIEW_NAME || name === "全部" || views.some((view) => view.name === name)) {
+        setViewError("该名称已由内置视图占用，请换一个名称。");
+        return;
+      }
+      if (persistence.status !== "ready") {
+        setViewError(persistence.message ?? "个人视图暂不可用，当前条件没有被保存。");
+        return;
+      }
+      setSavingView(true);
+      try {
+        const result = await persistence.onSave(
+          name,
+          toSavedViewStateV1(state, persistence.columnCapabilities),
+        );
+        setViewDraft("");
+        setViewNotice(`个人视图已保存，run_id=${result.runId}`);
+      } catch (error) {
+        setViewError(error instanceof Error ? error.message : "保存失败，当前条件没有被保存。");
+      } finally {
+        setSavingView(false);
+      }
+      return;
+    }
     setSessionViews((prev) => [...prev.filter((v) => v.name !== name), { name, state }]);
     setViewDraft("");
+  };
+
+  const removeActiveView = async () => {
+    if (!persistence || !activePersistent) return;
+    setViewError(null);
+    setViewNotice(null);
+    setRemovingView(true);
+    try {
+      const result = await persistence.onRemove(activePersistent.item.id);
+      setSelectedPersistentId(null);
+      setViewNotice(`个人视图已删除，run_id=${result.runId}`);
+    } catch (error) {
+      setViewError(error instanceof Error ? error.message : "删除失败，个人视图仍然保留。");
+    } finally {
+      setRemovingView(false);
+    }
   };
 
   const changeSelection = (keys: readonly string[], checked: boolean) => {
@@ -223,8 +399,13 @@ export function DataTableV2<T>({
               className={controlClass}
               value={filterValues[filter.columnId] ?? ""}
               onChange={(event) => {
-                setFilterValues((prev) => ({ ...prev, [filter.columnId]: event.target.value }));
-                setPage(1);
+                commitViewState(
+                  {
+                    ...state,
+                    filters: { ...state.filters, [filter.columnId]: event.target.value },
+                  },
+                  "filter",
+                );
               }}
             >
               <option value="">全部</option>
@@ -258,28 +439,46 @@ export function DataTableV2<T>({
                 aria-label="搜索当前表格"
                 placeholder="搜索当前列表"
                 value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setPage(1);
+              onChange={(event) => {
+                  commitViewState({ ...state, query: event.target.value }, "search");
                 }}
                 className={cx(controlClass, "w-40")}
               />
             </label>
           ) : null}
 
-          {allViews.length > 0 ? (
+          {allViews.length > 0 || persistence ? (
             <label className="flex flex-col gap-1 text-xs text-fg-muted">
               <span>视图</span>
               <select
                 className={controlClass}
-                value={activeView}
+                value={activeViewValue}
                 onChange={(event) => applyView(event.target.value)}
               >
-                {allViews.map((view) => (
-                  <option key={view.name} value={view.name}>
-                    {view.name}
-                  </option>
-                ))}
+                {persistence ? (
+                  <>
+                    <optgroup label="内置视图">
+                      {allViews.map((view) => (
+                        <option key={view.name} value={`builtin:${view.name}`}>
+                          {view.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="个人视图">
+                      {persistentViews.map(({ item }) => (
+                        <option key={item.id} value={`personal:${item.id}`}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  </>
+                ) : (
+                  allViews.map((view) => (
+                    <option key={view.name} value={view.name}>
+                      {view.name}
+                    </option>
+                  ))
+                )}
                 {/* 当前条件不匹配任何视图时下拉停在「自定义」——
                     否则它会一直显示上一个视图名，等于在撒谎 */}
                 <option value={CUSTOM_VIEW_NAME}>{CUSTOM_VIEW_NAME}</option>
@@ -287,8 +486,8 @@ export function DataTableV2<T>({
             </label>
           ) : null}
 
-          {allViews.length > 0 ? (
-            <details className="relative">
+          {allViews.length > 0 || persistence ? (
+            <details key={`save-${productivityEpoch}`} className="relative">
               <summary className={cx(controlClass, "cursor-pointer list-none")}>保存视图</summary>
               <div className="absolute right-0 z-10 mt-1 flex w-56 flex-col gap-2 rounded-md border border-edge bg-surface p-3 shadow-md">
                 <label className="flex flex-col gap-1 text-xs text-fg-muted">
@@ -302,17 +501,35 @@ export function DataTableV2<T>({
                     className={controlClass}
                   />
                 </label>
-                <button type="button" onClick={saveView} className={controlClass}>
-                  保存到本次会话
+                <button
+                  type="button"
+                  onClick={() => void saveView()}
+                  disabled={savingView || (persistence !== undefined && persistence.status !== "ready")}
+                  className={cx(controlClass, "disabled:cursor-not-allowed disabled:opacity-45")}
+                >
+                  {persistence ? (savingView ? "保存中…" : "保存到个人视图") : "保存到本次会话"}
                 </button>
-                {/* 必须写出来：一个「保存了、刷新就丢」却不说明的按钮,
-                    比没有这个按钮更糟（持久化排在后面的阶段） */}
-                <p className="text-xs text-fg-muted">不会同步或写入浏览器存储。</p>
+                <p className="text-xs text-fg-muted">
+                  {persistence
+                    ? "保存到当前身份与当前环境；不会写入浏览器存储。"
+                    : "不会同步或写入浏览器存储。"}
+                </p>
               </div>
             </details>
           ) : null}
 
-          <details className="relative">
+          {persistence && activePersistent ? (
+            <button
+              type="button"
+              onClick={() => void removeActiveView()}
+              disabled={removingView || persistence.status !== "ready"}
+              className={cx(controlClass, "disabled:cursor-not-allowed disabled:opacity-45")}
+            >
+              {removingView ? "删除中…" : "删除个人视图"}
+            </button>
+          ) : null}
+
+          <details key={`columns-${productivityEpoch}`} className="relative">
             <summary className={cx(controlClass, "cursor-pointer list-none")}>列管理</summary>
             <div className="absolute right-0 z-10 mt-1 flex w-56 flex-col gap-1 rounded-md border border-edge bg-surface p-3 shadow-md">
               {columns.map((column) => (
@@ -323,10 +540,14 @@ export function DataTableV2<T>({
                     // 主标识列不给关：把「是哪一行」藏掉，剩下的表没法读
                     disabled={column.primary}
                     onChange={(event) =>
-                      setVisible((prev) =>
-                        event.target.checked
-                          ? [...prev, column.id]
-                          : prev.filter((id) => id !== column.id),
+                      commitViewState(
+                        {
+                          ...state,
+                          visibleColumns: event.target.checked
+                            ? [...visible, column.id]
+                            : visible.filter((id) => id !== column.id),
+                        },
+                        "columns",
                       )
                     }
                   />
@@ -338,7 +559,7 @@ export function DataTableV2<T>({
               ))}
               <button
                 type="button"
-                onClick={() => setVisible(defaultVisible)}
+                onClick={() => commitViewState({ ...state, visibleColumns: defaultVisible }, "columns")}
                 className={cx(controlClass, "mt-1")}
               >
                 恢复默认列
@@ -352,7 +573,9 @@ export function DataTableV2<T>({
               aria-label="表格密度"
               className={controlClass}
               value={density}
-              onChange={(event) => setDensity(event.target.value as Density)}
+              onChange={(event) =>
+                commitViewState({ ...state, density: event.target.value as Density }, "density")
+              }
             >
               {(Object.keys(DENSITY_LABELS) as Density[]).map((value) => (
                 <option key={value} value={value}>
@@ -363,6 +586,31 @@ export function DataTableV2<T>({
           </label>
         </div>
       </div>
+
+      {persistence && persistence.status !== "ready" ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-edge bg-surface px-3 py-2 text-xs text-fg-muted">
+          <span>
+            {persistence.status === "loading"
+              ? "个人视图加载中；表格与内置视图仍可使用。"
+              : persistence.message ?? "个人视图暂不可用；当前条件不会写入浏览器。"}
+          </span>
+          {persistence.status === "error" && persistence.onRetry ? (
+            <button type="button" onClick={persistence.onRetry} className="font-medium text-accent hover:underline">
+              重试
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {viewError ? (
+        <p role="alert" className="border-b border-edge bg-danger/10 px-3 py-2 text-xs text-danger">
+          {viewError}
+        </p>
+      ) : null}
+      {viewNotice ? (
+        <p role="status" className="border-b border-edge bg-success/10 px-3 py-2 text-xs text-success">
+          {viewNotice}
+        </p>
+      ) : null}
 
       {selectable && selected.size > 0 ? (
         <div className="flex flex-wrap items-center gap-3 border-b border-edge bg-accent-soft px-3 py-2 text-xs">
@@ -401,20 +649,28 @@ export function DataTableV2<T>({
                 <th
                   key={column.id}
                   scope="col"
-                  aria-sort={column.value ? ariaSort(sort, column.id) : undefined}
+                  aria-sort={
+                    column.value !== undefined || column.sortAs !== undefined
+                      ? ariaSort(sort, column.id)
+                      : undefined
+                  }
                   title={column.headerTitle}
                   className={cx(
                     "text-xs font-medium text-fg-muted",
                     column.numeric ? "text-right" : "text-left",
-                    column.value ? "p-0" : CELL_PAD[density],
+                    column.value !== undefined || column.sortAs !== undefined
+                      ? "p-0"
+                      : CELL_PAD[density],
                   )}
                 >
-                  {column.value ? (
+                  {column.value !== undefined || column.sortAs !== undefined ? (
                     <button
                       type="button"
                       onClick={() => {
-                        setSort(nextSort(sort, column.id));
-                        setPage(1);
+                        commitViewState(
+                          { ...state, sort: nextSort(sort, column.id) },
+                          "sort",
+                        );
                       }}
                       title={sortHint(sort, column.id, column.header)}
                       className={cx(

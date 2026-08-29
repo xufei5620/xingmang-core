@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { DataTableV2, PageState, StatTile } from "@xingmang/ui-admin";
+import { PageState, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import {
   listChannelSummaries,
@@ -23,6 +23,7 @@ import { describeMissingTotal } from "../lib/upstreamTotals";
 import { ApiStateView } from "./ApiStateView";
 import { ChannelScopeNote } from "./ChannelScopeNote";
 import { channelTableColumns, type ChannelPlatform } from "./ChannelTableColumns";
+import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
 
 /** 渠道管理表（两个平台共用）。原型 `V["s2/upstream"]` / `V["newapi/upstream"]`。
  *
@@ -78,7 +79,8 @@ export function ChannelTable({
         onRetry={() => void summaryQuery.refetch()}
       >
         <ChannelTiles platform={platform} rows={rows} />
-        <DataTableV2
+        <PersistentDataTable
+          tableKey={platformSavedViewTableKey(platform, "channels")}
           caption={`${platform === "sub2api" ? "Sub2API" : "NewAPI"} 逐上游账号的成本、我方计费消耗与毛利`}
           columns={columns}
           rows={rows}
