@@ -2,14 +2,15 @@
 
 ## status
 
-IN_PROGRESS
+READY
 
 ## branch / commit / base
 
 - branch: `ai/codex/XM-C-USER0-impl`
 - base: `e98080d` (`release/v0.1-launch`, D0-b READY)
 - worktree: `K:/星芒统一控制平台/wt-xmC-USER0-impl`
-- implementation commit: `53a81d0` (rebase 后 SHA；最终 Handoff 提交会更新)
+- implementation commits: `53a81d0`（核心实现）、`abbed2e`（前端 fixture 类型修正）
+- handoff commit: 本文件所在最新提交（见 READY 行）
 
 ## authorization boundary
 
@@ -79,19 +80,25 @@ IN_PROGRESS
 
 - `go fmt ./connectors/platformusers ./internal/platform/platformusers ./internal/platform/httpapi ./cmd/platform-api` — PASS
 - `go test ./connectors/platformusers ./internal/platform/platformusers ./internal/platform/httpapi ./cmd/platform-api` — PASS
+- `go vet ./...` — PASS
+- `go test -p 1 -count=1 ./...` — PASS（全部 Go 包）
 - `pnpm --config.verify-deps-before-run=false --filter admin-web exec vitest run src/api/users.test.ts src/pages/PlatformUserDetailPage.test.tsx src/router.test.tsx` — PASS（189 tests）
-- `git diff --check` — PASS（实现提交）
+- WSL Ubuntu-24.04 临时 archive：`pnpm install --frozen-lockfile --ignore-scripts --package-import-method=copy --offline`、`pnpm -r run typecheck`、`pnpm -r run test` — PASS（admin-web 47 files / 888 tests；ui-admin 219 tests；Node 22 engine warning）
+- WSL 临时 archive：`pnpm --filter ui-storybook run build`、`pnpm --filter admin-web run build` — PASS（保留既有大 chunk warning）
+- `D:/Git/bin/bash.exe tests/security/governance-not-hollow.test.sh` — PASS
+- `D:/Git/bin/bash.exe scripts/check-governance.sh` — PASS
+- `gitleaks git --redact --no-banner --log-opts=e98080d..HEAD` — PASS（3 commits，no leaks found）
+- `git diff --check` — PASS
 
 ## tests_not_run
 
-- 尚未跑 `go vet ./...`、`go test -p 1 ./...`、全仓 `pnpm -r run typecheck`、全仓前端测试、Storybook build、治理检查和 gitleaks；待 Handoff 提交后执行。
 - 未访问真实 Sub2API/NewAPI、未新增真实凭据/scope、未执行生产部署或外部写操作。
 
 ## risks
 
 - 详情页的 `PlatformUserLookupResult.incomplete` 分支保留用于错误兼容；v2 成功路径不再客户端扫描。
 - Fake 仅用于本地演示，数据源带 `-fake`；real 响应形状和字段仍需脱敏证据与独立审批。
-- 前端完整 typecheck 受当前 worktree 依赖链接/既有 UI Input 类型漂移影响，需在验收线标准依赖环境复跑并区分基线错误。
+- Windows worktree 依赖链接可能触发既有 UI Input 类型漂移；标准 WSL archive 已通过完整 typecheck/build，Node 22 仅有仓库要求 Node >=24 的 warning。
 
 ## follow_ups
 
