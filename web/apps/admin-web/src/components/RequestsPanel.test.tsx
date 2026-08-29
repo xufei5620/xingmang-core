@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RequestsPanel } from "./RequestsPanel";
@@ -26,12 +26,15 @@ function summary(over: Record<string, unknown> = {}) {
     username: "zhang.wei",
     token_prefix: TOKEN_LEAD + "a1b2",
     model: "claude-sonnet-4-5",
+    channel: "OpenAI 中转·主",
+    upstream: "OpenAI Relay A",
     status: 200,
     duration_ms: 1200,
     ttfb_ms: 300,
     tokens_in: 100,
     tokens_out: 50,
     tokens_cache: 20,
+    billed_amount: { amount_minor: "184", currency: "USD", scale: 3 },
     stream: false,
     upstream_request_id: "req_1",
     client_ip: "203.0.113.x",
@@ -45,6 +48,12 @@ function pageBody(over: Record<string, unknown> = {}) {
     next_cursor: "",
     retention_days: 30,
     data_source: "reqlog-real",
+    stats: {
+      request_count: 9,
+      success_count: 7,
+      failure_count: 2,
+      average_duration_ms: 845,
+    },
     freshness,
     ...over,
   };
@@ -54,15 +63,20 @@ function fakeResponse(body: unknown, status = 200): Response {
   return { ok: status < 400, status, json: () => Promise.resolve(body) } as unknown as Response;
 }
 
-function renderPanel() {
+function renderPanel(initialEntry = "/") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <RequestsPanel platform="sub2api" />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+function lastRequestedURL(fetchMock: ReturnType<typeof vi.fn>): string {
+  const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+  return String(calls.at(-1)?.[0] ?? "");
 }
 
 describe("请求列表", () => {
@@ -86,6 +100,33 @@ describe("请求列表", () => {
     for (const forbidden of ["摘要", "对话", "内容预览"]) {
       expect(screen.queryByText(forbidden)).toBeNull();
     }
+  });
+
+  it("四张统计卡展示完整过滤集统计，不拿当前页行数冒充", async () => {
+    renderPanel();
+    expect(await screen.findByText("请求数")).toBeTruthy();
+    expect(screen.getByText("成功")).toBeTruthy();
+    expect(screen.getByText("失败")).toBeTruthy();
+    expect(screen.getByText("平均耗时")).toBeTruthy();
+    expect(screen.getByText("9")).toBeTruthy();
+    expect(screen.getByText("7")).toBeTruthy();
+    expect(screen.getByText("2")).toBeTruthy();
+    expect(screen.getByText("845 ms")).toBeTruthy();
+    expect(screen.getAllByText(/完整筛选结果/).length).toBe(4);
+  });
+
+  it("表格按原型补齐请求 ID、渠道上游、输入输出与计费列", async () => {
+    renderPanel();
+    await screen.findByText("zhang.wei");
+    for (const header of ["时间", "请求 ID", "用户", "模型", "渠道 / 上游", "状态", "耗时", "输入 / 输出", "计费", "详情"]) {
+      expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+    }
+    expect(screen.getByText("20260828-000117")).toBeTruthy();
+    expect(screen.getByText("OpenAI 中转·主")).toBeTruthy();
+    expect(screen.getByText("OpenAI Relay A")).toBeTruthy();
+    expect(screen.getByText("100 / 50")).toBeTruthy();
+    expect(screen.getByText("缓存 20")).toBeTruthy();
+    expect(screen.getByText("$0.18")).toBeTruthy();
   });
 
   it("保留期一直显示，不只在空结果时显示", async () => {
@@ -143,6 +184,45 @@ describe("请求列表", () => {
     fetchMock.mockImplementation(() => Promise.resolve(fakeResponse(pageBody({ items: [] }))));
     renderPanel();
     expect(await screen.findByText(/这个平台还没有请求记录/)).toBeTruthy();
+  });
+
+  it("只有时间筛选且结果为空时也能清除区间", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(fakeResponse(pageBody({ items: [] }))));
+    renderPanel("/?period=custom&since=2026-08-28T00%3A00%3A00Z");
+    expect(await screen.findByText(/没有符合条件的请求/)).toBeTruthy();
+    expect(screen.getByText(/^自 .+ 起$/)).toBeTruthy();
+
+    const before = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "清除区间" }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before));
+    const url = decodeURIComponent(lastRequestedURL(fetchMock));
+    expect(url).not.toContain("period=");
+    expect(url).not.toContain("since=");
+    expect(url).not.toContain("until=");
+  });
+
+  it("清除区间会同时回到游标第一页", async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(fakeResponse(pageBody({ next_cursor: "reqlog:50" }))),
+    );
+    renderPanel(
+      "/?period=custom&since=2026-08-28T00%3A00%3A00Z&until=2026-08-29T00%3A00%3A00Z",
+    );
+    await screen.findByText("zhang.wei");
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() =>
+      expect(decodeURIComponent(lastRequestedURL(fetchMock))).toContain("cursor=reqlog:50"),
+    );
+
+    const before = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "清除区间" }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before));
+    const url = decodeURIComponent(lastRequestedURL(fetchMock));
+    expect(url).not.toContain("cursor=");
+    expect(url).not.toContain("period=");
+    expect(url).not.toContain("since=");
+    expect(url).not.toContain("until=");
   });
 
   it("没有下一页时不显示翻页按钮", async () => {

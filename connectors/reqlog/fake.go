@@ -195,6 +195,7 @@ func (f *fakeClient) ListRequests(ctx context.Context, filter ListFilter) (Reque
 	sort.SliceStable(matched, func(i, j int) bool {
 		return matched[i].OccurredAt.After(matched[j].OccurredAt)
 	})
+	stats := statsFor(matched)
 
 	offset, err := decodeCursor(filter.Cursor)
 	if err != nil {
@@ -212,12 +213,32 @@ func (f *fakeClient) ListRequests(ctx context.Context, filter ListFilter) (Reque
 	page := RequestLogPage{
 		Snapshot:      f.snapshot(),
 		Items:         append([]RequestLogSummary(nil), matched[offset:end]...),
+		Stats:         stats,
 		RetentionDays: RetentionDays,
 	}
 	if end < len(matched) {
 		page.NextCursor = encodeCursor(end)
 	}
 	return page, nil
+}
+
+func statsFor(items []RequestLogSummary) RequestLogStats {
+	stats := RequestLogStats{RequestCount: int64(len(items))}
+	if len(items) == 0 {
+		return stats
+	}
+	var duration int64
+	for _, item := range items {
+		if item.Status >= 200 && item.Status <= 299 {
+			stats.SuccessCount++
+		} else {
+			stats.FailureCount++
+		}
+		duration += item.DurationMS
+	}
+	average := duration / int64(len(items))
+	stats.AverageDurationMS = &average
+	return stats
 }
 
 func (f *fakeClient) RequestContent(ctx context.Context, source, id string) (RequestLogContent, error) {
@@ -363,12 +384,15 @@ type fakeRecord struct {
 	username    string
 	tokenPrefix string
 	model       string
+	channel     string
+	upstream    string
 	status      int
 	durationMS  int64
 	ttfbMS      *int64
 	tokensIn    int64
 	tokensOut   int64
 	tokensCache int64
+	billed      *BilledAmount
 	stream      bool
 	upstreamID  string
 	rawIP       string
@@ -389,12 +413,15 @@ func (r fakeRecord) summary(base time.Time) RequestLogSummary {
 		Username:          r.username,
 		TokenPrefix:       r.tokenPrefix,
 		Model:             r.model,
+		Channel:           r.channel,
+		Upstream:          r.upstream,
 		Status:            r.status,
 		DurationMS:        r.durationMS,
 		TTFBMS:            r.ttfbMS,
 		TokensIn:          r.tokensIn,
 		TokensOut:         r.tokensOut,
 		TokensCache:       r.tokensCache,
+		BilledAmount:      r.billed,
 		Stream:            r.stream,
 		UpstreamRequestID: r.upstreamID,
 		// 脱敏走契约函数，不在样本里预先写成脱敏形态
@@ -441,6 +468,10 @@ func (r fakeRecord) content(base time.Time, snap Snapshot) RequestLogContent {
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+func billed(amount int64, currency string, scale int32) *BilledAmount {
+	return &BilledAmount{AmountMinor: amount, Currency: currency, Scale: scale}
+}
 
 // longUserPrompt 造一段超过 MaxMessageBytes 的用户输入。
 //
@@ -520,8 +551,10 @@ func buildFakeRecords() []fakeRecord {
 	records = append(records, fakeRecord{
 		id: "20260828-000117", source: SourceSub2API, ageMinutes: 6,
 		username: "zhang.wei", tokenPrefix: tokenLead + "a1b2", model: "claude-sonnet-4-5",
+		channel: "Claude 标准渠道", upstream: "Anthropic Direct",
 		status: 200, durationMS: 18420, ttfbMS: ptrInt64(742),
 		tokensIn: 21486, tokensOut: 612, tokensCache: 18240,
+		billed: billed(326, "USD", 3),
 		stream: false, upstreamID: "req_01HZX9K2M4", rawIP: "203.0.113.42",
 		messages: longMessages, messagesSeen: true, finalReply: longReply,
 		rawRequest: jsonRequestBody("claude-sonnet-4-5", false, longMessages),
@@ -542,8 +575,10 @@ func buildFakeRecords() []fakeRecord {
 	records = append(records, fakeRecord{
 		id: "20260828-000118", source: SourceSub2API, ageMinutes: 11,
 		username: "li.na", tokenPrefix: tokenLead + "c3d4", model: "gpt-4o",
+		channel: "OpenAI 中转·主", upstream: "OpenAI Relay A",
 		status: 200, durationMS: 6180, ttfbMS: ptrInt64(315),
 		tokensIn: 48, tokensOut: 284, tokensCache: 0,
+		billed: billed(0, "USD", 3),
 		stream: true, upstreamID: "req_01HZX9M7P1", rawIP: "198.51.100.7",
 		messages: streamMessages, messagesSeen: true,
 		finalReply:  strings.Join(streamChunks, ""),
@@ -559,6 +594,7 @@ func buildFakeRecords() []fakeRecord {
 	records = append(records, fakeRecord{
 		id: "20260828-000119", source: SourceNewAPI, ageMinutes: 3,
 		username: "wang.tao", tokenPrefix: tokenLead + "e5f6", model: "gpt-4o-mini",
+		channel: "OpenAI 低价渠道", upstream: "OpenAI Relay A",
 		status: 429, durationMS: 218, ttfbMS: nil,
 		tokensIn: 0, tokensOut: 0, tokensCache: 0,
 		stream: false, upstreamID: "req_01HZX9Q0R8", rawIP: "192.0.2.181",
@@ -575,8 +611,10 @@ func buildFakeRecords() []fakeRecord {
 	records = append(records, fakeRecord{
 		id: "20260828-000120", source: SourceNewAPI, ageMinutes: 27,
 		username: "", tokenPrefix: tokenLead + "zz99", model: "gpt-4o-mini",
+		channel: "OpenAI 低价渠道", upstream: "OpenAI Relay A",
 		status: 200, durationMS: 431, ttfbMS: ptrInt64(120),
 		tokensIn: 3, tokensOut: 5, tokensCache: 0,
+		billed: billed(12, "USD", 3),
 		stream: false, upstreamID: "req_01HZX8T3V2", rawIP: "2001:db8:1234:5678::1",
 		messages: unmappedMessages, messagesSeen: true, finalReply: "pong",
 		rawRequest: jsonRequestBody("gpt-4o-mini", false, unmappedMessages),
@@ -588,8 +626,10 @@ func buildFakeRecords() []fakeRecord {
 	records = append(records, fakeRecord{
 		id: "20260828-000121", source: SourceSub2API, ageMinutes: 44,
 		username: "zhang.wei", tokenPrefix: tokenLead + "a1b2", model: "text-embedding-3-large",
+		channel: "OpenAI 官方 API", upstream: "OpenAI Direct",
 		status: 200, durationMS: 96, ttfbMS: nil,
 		tokensIn: 512, tokensOut: 0, tokensCache: 0,
+		billed: billed(8, "USD", 4),
 		stream: false, upstreamID: "req_01HZX7W5X9", rawIP: "203.0.113.42",
 		messages: nil, messagesSeen: false, finalReply: "",
 		rawRequest:  `{"model":"text-embedding-3-large","input":["星芒统一控制平台","请求审计系统"]}`,
@@ -604,8 +644,10 @@ func buildFakeRecords() []fakeRecord {
 	records = append(records, fakeRecord{
 		id: "20260828-000122", source: SourceSub2API, ageMinutes: 58,
 		username: "li.na", tokenPrefix: tokenLead + "c3d4", model: "claude-sonnet-4-5",
+		channel: "Claude 标准渠道", upstream: "Anthropic Direct",
 		status: 200, durationMS: 88, ttfbMS: ptrInt64(0),
 		tokensIn: 26, tokensOut: 41, tokensCache: 26,
+		billed: billed(18, "USD", 3),
 		stream: false, upstreamID: "req_01HZX6Y8Z3", rawIP: "198.51.100.7",
 		messages: cacheMessages, messagesSeen: true,
 		finalReply: "原路退回一般 1-3 个工作日到账，具体以支付渠道为准。",
@@ -619,6 +661,7 @@ func buildFakeRecords() []fakeRecord {
 	records = append(records, fakeRecord{
 		id: "20260828-000123", source: SourceNewAPI, ageMinutes: 73,
 		username: "wang.tao", tokenPrefix: tokenLead + "e5f6", model: "gpt-4o",
+		channel: "OpenAI 中转·主", upstream: "OpenAI Relay A",
 		status: 502, durationMS: 30012, ttfbMS: nil,
 		tokensIn: 0, tokensOut: 0, tokensCache: 0,
 		stream: true, upstreamID: "", rawIP: "192.0.2.181",
@@ -650,6 +693,10 @@ func buildFakeRecords() []fakeRecord {
 		if i%8 == 5 {
 			status, tokensOut = 500, 0
 		}
+		if i == 1 {
+			// 无响应样本：状态 0 必须进入失败统计，而不是从成功/失败两边都漏掉。
+			status, tokensOut = 0, 0
+		}
 		stream := i%2 == 0
 		var ttfb *int64
 		if stream {
@@ -665,8 +712,10 @@ func buildFakeRecords() []fakeRecord {
 			id:     fmt.Sprintf("20260828-%06d", 200+i),
 			source: source, ageMinutes: 90 + i*37,
 			username: u.name, tokenPrefix: u.prefix, model: model,
+			channel: "综合路由", upstream: "Relay Pool A",
 			status: status, durationMS: int64(900 + i*211), ttfbMS: ttfb,
 			tokensIn: int64(64 + i*3), tokensOut: tokensOut, tokensCache: int64(i % 5 * 8),
+			billed: billed(int64(84+i*11), "USD", 3),
 			stream: stream, upstreamID: fmt.Sprintf("req_01HZX%05d", i),
 			rawIP: u.ip, messages: msgs, messagesSeen: true, finalReply: reply,
 			rawRequest: jsonRequestBody(model, stream, msgs),
@@ -683,6 +732,9 @@ func buildFakeRecords() []fakeRecord {
 			rec.finalReply = ""
 			rec.rawResponse = `{"error":{"message":"internal error","type":"server_error"}}`
 			rec.respCType = "application/json"
+		}
+		if i%11 == 0 {
+			rec.billed = nil
 		}
 		records = append(records, rec)
 	}

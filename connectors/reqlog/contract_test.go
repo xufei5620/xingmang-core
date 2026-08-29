@@ -115,3 +115,20 @@ func TestNormalizeLimitClamps(t *testing.T) {
 		}
 	}
 }
+
+func TestBilledAmountValidationFailsClosed(t *testing.T) {
+	cases := map[string]reqlog.BilledAmount{
+		"负数":   {AmountMinor: -1, Currency: "USD", Scale: 2},
+		"空币种":  {AmountMinor: 1, Currency: "", Scale: 2},
+		"负标度":  {AmountMinor: 1, Currency: "USD", Scale: -1},
+		"标度过大": {AmountMinor: 1, Currency: "USD", Scale: 19},
+	}
+	for name, amount := range cases {
+		if err := amount.Validate(); err == nil {
+			t.Errorf("%s应被拒绝: %+v", name, amount)
+		}
+	}
+	if err := (reqlog.BilledAmount{AmountMinor: 0, Currency: "USD", Scale: 3}).Validate(); err != nil {
+		t.Fatalf("已知的 0 是合法金额: %v", err)
+	}
+}

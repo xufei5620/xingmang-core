@@ -23,18 +23,25 @@ const freshness = {
   last_error_code: "",
 };
 
+const stats = {
+  request_count: 0,
+  success_count: 0,
+  failure_count: 0,
+  average_duration_ms: null,
+};
+
 describe("listPlatformRequests", () => {
   it("items 为 null 时按空数组处理，页面不会炸", async () => {
     const page = await listPlatformRequests(
       "sub2api",
       {},
-      fakeClient({ items: null, freshness }),
+      fakeClient({ items: null, stats, freshness }),
     );
     expect(page.items).toEqual([]);
   });
 
   it("空筛选项不进 URL——「不传」和「传空串」对后端不是一回事", async () => {
-    const client = fakeClient({ items: [], freshness });
+    const client = fakeClient({ items: [], stats, freshness });
     await listPlatformRequests("sub2api", { username: "  ", model: "", status: "" }, client);
     expect(client.get).toHaveBeenCalledWith("/api/v1/platforms/sub2api/requests", {
       searchParams: {
@@ -50,7 +57,7 @@ describe("listPlatformRequests", () => {
   });
 
   it("填了的筛选项原样传下去", async () => {
-    const client = fakeClient({ items: [], freshness });
+    const client = fakeClient({ items: [], stats, freshness });
     await listPlatformRequests(
       "newapi",
       {
@@ -78,7 +85,7 @@ describe("listPlatformRequests", () => {
   });
 
   it("平台名进路径前先转义", async () => {
-    const client = fakeClient({ items: [], freshness });
+    const client = fakeClient({ items: [], stats, freshness });
     await listPlatformRequests("a/b", {}, client);
     expect(client.get).toHaveBeenCalledWith(
       "/api/v1/platforms/a%2Fb/requests",
@@ -90,11 +97,11 @@ describe("listPlatformRequests", () => {
     const withCursor = await listPlatformRequests(
       "sub2api",
       {},
-      fakeClient({ items: [], next_cursor: "reqlog:50", freshness }),
+      fakeClient({ items: [], next_cursor: "reqlog:50", stats, freshness }),
     );
     expect(withCursor.nextCursor).toBe("reqlog:50");
 
-    const atEnd = await listPlatformRequests("sub2api", {}, fakeClient({ items: [], freshness }));
+    const atEnd = await listPlatformRequests("sub2api", {}, fakeClient({ items: [], stats, freshness }));
     expect(atEnd.nextCursor).toBe("");
   });
 
@@ -102,10 +109,99 @@ describe("listPlatformRequests", () => {
     const page = await listPlatformRequests(
       "sub2api",
       {},
-      fakeClient({ items: [], retention_days: 30, data_source: "reqlog-fake", freshness }),
+      fakeClient({ items: [], stats, retention_days: 30, data_source: "reqlog-fake", freshness }),
     );
     expect(page.retentionDays).toBe(30);
     expect(page.dataSource).toBe("reqlog-fake");
+  });
+
+  it("映射完整过滤集统计与渠道、上游、计费元数据", async () => {
+    const page = await listPlatformRequests(
+      "sub2api",
+      {},
+      fakeClient({
+        items: [
+          {
+            id: "req-1",
+            source: "sub2api",
+            occurred_at: "2026-08-28T09:00:00Z",
+            username: "zhang.wei",
+            token_prefix: "tok-a1b2",
+            model: "gpt-4o",
+            channel: "OpenAI 中转·主",
+            upstream: "OpenAI Relay A",
+            status: 200,
+            duration_ms: 1200,
+            ttfb_ms: 300,
+            tokens_in: 100,
+            tokens_out: 50,
+            tokens_cache: 20,
+            billed_amount: { amount_minor: "0", currency: "USD", scale: 3 },
+            stream: false,
+            upstream_request_id: "up-1",
+            client_ip: "203.0.113.x",
+          },
+        ],
+        stats: {
+          request_count: 9,
+          success_count: 7,
+          failure_count: 2,
+          average_duration_ms: 845,
+        },
+        freshness,
+      }),
+    );
+    expect(page.stats).toEqual({
+      requestCount: 9,
+      successCount: 7,
+      failureCount: 2,
+      averageDurationMs: 845,
+    });
+    expect(page.items[0]).toMatchObject({
+      channel: "OpenAI 中转·主",
+      upstream: "OpenAI Relay A",
+      billed_amount: { amount_minor: "0", currency: "USD", scale: 3 },
+    });
+  });
+
+  it("计费未知保留 null，非法定点金额 fail closed", async () => {
+    const base = {
+      id: "req-1",
+      source: "sub2api",
+      occurred_at: "2026-08-28T09:00:00Z",
+      username: "",
+      token_prefix: "",
+      model: "gpt-4o",
+      channel: "",
+      upstream: "",
+      status: 200,
+      duration_ms: 1,
+      ttfb_ms: null,
+      tokens_in: 0,
+      tokens_out: 0,
+      tokens_cache: 0,
+      stream: false,
+      upstream_request_id: "",
+      client_ip: "",
+    };
+    const unknown = await listPlatformRequests(
+      "sub2api",
+      {},
+      fakeClient({ items: [{ ...base, billed_amount: null }], stats, freshness }),
+    );
+    expect(unknown.items[0]?.billed_amount).toBeNull();
+
+    await expect(
+      listPlatformRequests(
+        "sub2api",
+        {},
+        fakeClient({
+          items: [{ ...base, billed_amount: { amount_minor: "-1", currency: "USD", scale: 2 } }],
+          stats,
+          freshness,
+        }),
+      ),
+    ).rejects.toThrow(/计费/);
   });
 });
 
