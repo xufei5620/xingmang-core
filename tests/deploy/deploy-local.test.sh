@@ -109,6 +109,9 @@ esac
 case " $* " in
   *" version "*) printf "29.7.2\n"; exit 0 ;;
   *" info "*) printf "Server Version: 29.7.2\n"; exit 0 ;;
+  *" run "*" runway-threshold-bootstrap "*)
+    if [ "${FAKE_DOCKER_FAIL_RUNWAY_BOOTSTRAP:-0}" = "1" ]; then exit 18; fi
+    printf "environment=staging revision=1 critical_days=5 warning_days=10 serious_days=20\n"; exit 0 ;;
   *" run "*" bootstrap "*)
     if [ "${FAKE_DOCKER_FAIL_BOOTSTRAP:-0}" = "1" ]; then exit 17; fi
     printf "INSERT 0 0\nCOMMIT\n"; exit 0 ;;
@@ -166,8 +169,16 @@ assert_not_text "Compose 不覆盖项目目录解析" '--project-directory' "$tr
 assert_text "build 被执行" ' build ' "$trace"
 assert_text "up 被执行" ' up ' "$trace"
 assert_not_text "up 不让一次性 bootstrap 触发 wait 假失败" ' up -d --remove-orphans --wait' "$trace"
+assert_text "runway 阈值 bootstrap 在栈上执行" 'runway-threshold-bootstrap' "$trace"
 assert_text "bootstrap 幂等登记被执行" ' bootstrap' "$trace"
 assert_not_text "bootstrap 不绕过迁移依赖" '--no-deps bootstrap' "$trace"
+runway_line="$(grep -n 'runway-threshold-bootstrap' "$trace" | head -n 1 | cut -d: -f1)"
+app_up_line="$(grep -n ' up -d platform-api platform-worker web' "$trace" | head -n 1 | cut -d: -f1)"
+if [ -n "$runway_line" ] && [ -n "$app_up_line" ] && [ "$runway_line" -lt "$app_up_line" ]; then
+  ok "阈值 bootstrap 在 API/worker 全栈启动前"
+else
+  bad "阈值 bootstrap 在 API/worker 全栈启动前"
+fi
 assert_text "healthz 被探测" '/healthz' "$trace"
 assert_text "readyz 被探测" '/readyz' "$trace"
 assert_text "services 烟测被执行" '/api/v1/services' "$trace"
@@ -196,6 +207,16 @@ if grep -Fq '/healthz' "$trace" || grep -Fq '/api/v1/services' "$trace"; then
   bad "bootstrap 失败未继续探针/烟测"
 else
   ok "bootstrap 失败未继续探针/烟测"
+fi
+
+: > "$trace"
+expect_failure "runway 阈值 bootstrap 失败立即停止" env "${common_env[@]}" FAKE_DOCKER_FAIL_RUNWAY_BOOTSTRAP=1 \
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
+  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+if grep -Fq ' up -d platform-api platform-worker web' "$trace" || grep -Fq '/healthz' "$trace"; then
+  bad "runway bootstrap 失败仍启动 API/worker 或探针"
+else
+  ok "runway bootstrap 失败阻止 API/worker 与探针"
 fi
 
 # 过渡期镜像远端可能不可达；指定的 MERGED SHA 已在本地 release HEAD 时，
@@ -279,8 +300,8 @@ fi
 expect_failure "worker 已退出时部署失败" env "${common_env[@]}" FAKE_DOCKER_WORKER_DOWN=1 \
   "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
   --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
-if grep -Fq ' bootstrap' "$trace" || grep -Fq '/healthz' "$trace"; then
-  bad "worker 退出未阻止后续阶段"
+if grep -Fq '/healthz' "$trace" || grep -Fq '/api/v1/services' "$trace"; then
+  bad "worker 退出未阻止后续探针/烟测"
 else
   ok "worker 退出阻止后续阶段"
 fi

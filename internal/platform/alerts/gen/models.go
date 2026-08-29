@@ -241,6 +241,18 @@ type FinanceRunwayThresholdConfig struct {
 	RequestID    string
 }
 
+type FinanceRunwayThresholdCurrentVerified struct {
+	Environment  string
+	CriticalDays int32
+	WarningDays  int32
+	SeriousDays  int32
+	Revision     int64
+	UpdatedAt    pgtype.Timestamptz
+	UpdatedBy    string
+	Reason       string
+	RequestID    string
+}
+
 type FinanceRunwayThresholdHistory struct {
 	Environment  string
 	Revision     int64

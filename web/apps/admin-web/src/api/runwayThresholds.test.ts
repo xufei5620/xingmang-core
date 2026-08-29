@@ -55,6 +55,7 @@ describe("runway threshold API", () => {
         counts: { would_open: 1, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 1 },
         items: [{ account_id: "a", name: "Relay", days: 0, old_level: "critical", new_level: "critical", alert_transition: "unchanged", consistency_reason: null, observed_at: "2026-08-29T01:00:00Z" }],
         has_more: false,
+        alert_coverage_complete: true,
       });
     });
     const preview = await previewRunwayThresholds({ criticalDays: 4, warningDays: 9, seriousDays: 19 }, { limit: 20, signal }, createApiClient({ config, fetchImpl }), config);
@@ -65,13 +66,30 @@ describe("runway threshold API", () => {
     expect(url.searchParams.get("serious_days")).toBe("19");
     expect(preview.evaluationAt).not.toBe(preview.items[0]?.observedAt);
     expect(preview.counts.currentInconsistent).toBe(1);
+    expect(preview.alertCoverageComplete).toBe(true);
     expect(preview.items[0]?.days).toBe(0);
+  });
+
+  it("maps incomplete active-alert coverage as an explicit untrusted result", async () => {
+    const fetchImpl: FetchLike = vi.fn(async () => response({
+      current: { critical_days: 5, warning_days: 10, serious_days: 20 },
+      proposed: { critical_days: 4, warning_days: 9, serious_days: 20 },
+      current_revision: 8,
+      evaluation_at: "2026-08-29T02:00:00Z",
+      coverage: { total: 1, known: 1, unknown_reasons: {} },
+      counts: { would_open: 1, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 0 },
+      items: [],
+      has_more: false,
+      alert_coverage_complete: false,
+    }));
+    const preview = await previewRunwayThresholds({ criticalDays: 4, warningDays: 9, seriousDays: 20 }, {}, createApiClient({ config, fetchImpl }), config);
+    expect(preview.alertCoverageComplete).toBe(false);
   });
 
   it("fails closed on malformed successful envelopes instead of inventing zero values", async () => {
     const fetchImpl: FetchLike = vi.fn(async (input) => {
       if (String(input).includes("/history")) return response({ has_more: false });
-      return response({ current: { critical_days: 5, warning_days: 10, serious_days: 20 }, proposed: { critical_days: 5, warning_days: 10, serious_days: 20 }, current_revision: 1, evaluation_at: "2026-08-29T00:00:00Z", coverage: { total: 0, known: 0, unknown_reasons: {} }, counts: { would_open: 0, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 0 }, items: [] });
+      return response({ current: { critical_days: 5, warning_days: 10, serious_days: 20 }, proposed: { critical_days: 5, warning_days: 10, serious_days: 20 }, current_revision: 1, evaluation_at: "2026-08-29T00:00:00Z", coverage: { total: 0, known: 0, unknown_reasons: {} }, counts: { would_open: 0, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 0 }, items: [], alert_coverage_complete: true });
     });
     await expect(listRunwayThresholdHistory({}, createApiClient({ config, fetchImpl }), config)).rejects.toThrow("items 数组");
     await expect(previewRunwayThresholds({ criticalDays: 5, warningDays: 10, seriousDays: 20 }, {}, createApiClient({ config, fetchImpl }), config)).rejects.toThrow("has_more");

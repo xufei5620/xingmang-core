@@ -7,7 +7,10 @@
 
 `finance.runway_threshold_config` 是 API 看板与 worker R5 评估共同读取的
 环境级快照；`finance.runway_threshold_history` 保存每次 bootstrap/Action
-revision。环境变量只作为一次性 bootstrap 输入，不能在运行时偷偷覆盖数据库。
+revision。两者通过 `finance.runway_threshold_current_verified` 只读 JOIN view
+提供成对校验的当前行：worker 不需直接读取 history，若 current/history 不匹配则
+view 返回零行并 fail closed。环境变量只作为一次性 bootstrap 输入，不能在运行时
+偷偷覆盖数据库。
 
 ## 切换前置门
 
@@ -34,7 +37,8 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml `
 `revision=1`，并且 current/history 各有一行；重复运行相同值必须幂等。若已有
 不同值，命令失败并要求人工核对，不能覆盖。
 
-随后查询：
+本地部署脚本必须按 `postgres+migrate → threshold bootstrap → 演示 bootstrap →
+API/worker/web` 顺序运行；不要先启动 API/worker 再补阈值。随后查询：
 
 ```text
 GET /api/v1/finance/runway-thresholds

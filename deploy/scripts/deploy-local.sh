@@ -2,7 +2,8 @@
 # 星芒统一控制平台本地 staging 部署入口。
 #
 # 本脚本只管理本机的 xingmang-launch Compose 项目：
-#   fetch/校验 release → config → build → up/wait → 幂等 bootstrap
+#   fetch/校验 release → config → build → postgres+migrate
+#   → runway threshold bootstrap → 演示 bootstrap → API/worker/web
 #   → /healthz /readyz → services / metrics / alerts 烟测
 #
 # 它与服务器上的 deploy.sh 有意分开：本地没有生产晋级、服务器 bare repo
@@ -472,15 +473,30 @@ fi
 phase="build"
 run_compose build --pull=false "${build_services[@]}" >/dev/null 2>&1 || die "$phase: 构建失败"
 
-phase="up"
-# launch.yaml 含 migrate/bootstrap 这类一次性服务；Compose v5 会在它们
-# 正常退出(0)时让 `up --wait` 返回失败。因此这里只负责启动，真正的就绪
-# 判断交给下面的 HTTP 探针（并且不会把一次性服务误判成故障）。
-run_compose up -d --remove-orphans >/dev/null 2>&1 || die "$phase: 栈启动失败"
+phase="up-infra"
+# 先只启动 PostgreSQL 与 migrate。阈值 current/history 必须在 API/worker
+# 启动前由同一版本化 lifecycle 镜像导入，否则新进程会在切换窗口内读取
+# 空配置并把告警评估置于不可用状态。一次性服务不使用 `up --wait`，
+# 由后续显式命令和 HTTP 探针判断结果。
+run_compose up -d --remove-orphans postgres migrate >/dev/null 2>&1 || die "$phase: postgres/migrate 启动失败"
 
-phase="worker"
-worker_container_id="$(run_compose ps -q --status running platform-worker 2>/dev/null || true)"
-[ -n "$worker_container_id" ] || die "$phase: platform-worker 未处于 running 状态"
+phase="runway-bootstrap"
+runway_bootstrap_log="$tmp_dir/runway-threshold-bootstrap.log"
+runway_bootstrap_ok=0
+for runway_bootstrap_attempt in $(seq 1 "$probe_attempts"); do
+  # 000017 的运行时阈值必须由同一版本化 lifecycle 镜像导入；显式启用
+  # tools profile，禁止退回宿主 go run 或旧版 psql 种子。服务自身依赖
+  # migrate 成功完成，重复执行由 current/history 事务保证幂等。
+  if run_compose --profile tools run --rm runway-threshold-bootstrap up >"$runway_bootstrap_log" 2>&1; then
+    runway_bootstrap_ok=1
+    break
+  fi
+  [ "$runway_bootstrap_attempt" -lt "$probe_attempts" ] && sleep 1
+done
+[ "$runway_bootstrap_ok" -eq 1 ] || die "$phase: 阈值 bootstrap 失败（容器与数据卷已保留）"
+runway_bootstrap_summary="$(grep -E '^environment=.*revision=.*critical_days=.*warning_days=.*serious_days=' "$runway_bootstrap_log" | tail -n 1 || true)"
+[ -n "$runway_bootstrap_summary" ] || runway_bootstrap_summary="completed"
+echo "runway-bootstrap=ok summary=$runway_bootstrap_summary"
 
 phase="bootstrap"
 bootstrap_log="$tmp_dir/bootstrap.log"
@@ -499,6 +515,16 @@ done
 bootstrap_summary="$(grep -E '^(INSERT|UPDATE|DELETE|COMMIT)' "$bootstrap_log" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | sed 's/[[:space:]]*$//' || true)"
 [ -n "$bootstrap_summary" ] || bootstrap_summary="completed"
 echo "bootstrap=ok summary=$bootstrap_summary"
+
+phase="up-app"
+# 只有阈值与演示数据都完成后才启动 API/worker/web，确保运行时切换
+# 从第一轮请求起就是 DB-backed。这里不使用 --remove-orphans，避免
+# 按服务启动时误删仍需保留的 migrate/bootstrap 容器证据。
+run_compose up -d platform-api platform-worker web >/dev/null 2>&1 || die "$phase: API/worker/web 启动失败"
+
+phase="worker"
+worker_container_id="$(run_compose ps -q --status running platform-worker 2>/dev/null || true)"
+[ -n "$worker_container_id" ] || die "$phase: platform-worker 未处于 running 状态"
 
 phase="probes"
 request_json healthz "$web_url/healthz" '"status"[[:space:]]*:[[:space:]]*"ok"' || die "$phase: /healthz 失败"

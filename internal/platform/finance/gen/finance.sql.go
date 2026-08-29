@@ -329,6 +329,32 @@ func (q *Queries) GetRunwayThresholdConfig(ctx context.Context, environment stri
 	return i, err
 }
 
+const getRunwayThresholdConfigVerified = `-- name: GetRunwayThresholdConfigVerified :one
+SELECT environment, critical_days, warning_days, serious_days, revision,
+       updated_at, updated_by, reason, request_id
+FROM finance.runway_threshold_current_verified
+WHERE environment = $1
+`
+
+// The view joins current/history so worker roles never need direct history
+// SELECT while orphaned current rows still fail closed.
+func (q *Queries) GetRunwayThresholdConfigVerified(ctx context.Context, environment string) (FinanceRunwayThresholdCurrentVerified, error) {
+	row := q.db.QueryRow(ctx, getRunwayThresholdConfigVerified, environment)
+	var i FinanceRunwayThresholdCurrentVerified
+	err := row.Scan(
+		&i.Environment,
+		&i.CriticalDays,
+		&i.WarningDays,
+		&i.SeriousDays,
+		&i.Revision,
+		&i.UpdatedAt,
+		&i.UpdatedBy,
+		&i.Reason,
+		&i.RequestID,
+	)
+	return i, err
+}
+
 const getRunwayThresholdHistory = `-- name: GetRunwayThresholdHistory :one
 SELECT environment, revision, critical_days, warning_days, serious_days, changed_at, changed_by, reason, request_id, change_source FROM finance.runway_threshold_history
 WHERE environment = $1

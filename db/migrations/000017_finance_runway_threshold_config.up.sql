@@ -35,6 +35,30 @@ CREATE TABLE finance.runway_threshold_history (
 CREATE INDEX runway_threshold_history_revision_idx
     ON finance.runway_threshold_history (environment, revision DESC);
 
+-- Worker 只应拥有一个「当前快照」读取权限，但仍必须拒绝孤立或被手工
+-- 篡改的 current 行。这个只读 view 在数据库侧完成 current/history 的
+-- revision 与三档值匹配；不匹配时返回零行，应用 provider 因而 fail closed，
+-- 而 worker 不需要直接 SELECT history 表。DB 角色拆分片负责向 worker
+-- 运行身份授予该 view 的 SELECT 权限。
+CREATE VIEW finance.runway_threshold_current_verified AS
+SELECT
+    c.environment,
+    c.critical_days,
+    c.warning_days,
+    c.serious_days,
+    c.revision,
+    c.updated_at,
+    c.updated_by,
+    c.reason,
+    c.request_id
+FROM finance.runway_threshold_config AS c
+JOIN finance.runway_threshold_history AS h
+  ON h.environment = c.environment
+ AND h.revision = c.revision
+ AND h.critical_days = c.critical_days
+ AND h.warning_days = c.warning_days
+ AND h.serious_days = c.serious_days;
+
 CREATE OR REPLACE FUNCTION finance.reject_runway_threshold_history_mutation()
 RETURNS trigger
 LANGUAGE plpgsql

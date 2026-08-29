@@ -124,7 +124,7 @@ func TestPreviewRunwayThresholdsExcludesSubscriptionsFromCoverage(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Coverage.Total != 0 || preview.Coverage.Known != 0 || preview.Coverage.UnknownReasons[string(finance.RunwayReasonNotApplicable)] != 1 {
+	if preview.Coverage.Total != 0 || preview.Coverage.Known != 0 || len(preview.Coverage.UnknownReasons) != 0 {
 		t.Fatalf("subscription coverage should be excluded: %+v", preview.Coverage)
 	}
 	if len(preview.Items) != 0 {
@@ -141,6 +141,20 @@ func TestPreviewRunwayThresholdsFlagsUnexpectedSubscriptionAlert(t *testing.T) {
 	}
 	if len(preview.Items) != 1 || preview.Items[0].ConsistencyReason != "unexpected_active_alert" || preview.Counts.CurrentInconsistent != 1 {
 		t.Fatalf("subscription active alert must be inconsistent: %+v", preview)
+	}
+}
+
+func TestPreviewRunwayThresholdsExcludesAllNonMeteredMethods(t *testing.T) {
+	official := previewRunway(nil, finance.RunwayReasonNoBalance)
+	official.AccessMethod = finance.AccessOfficialAPI
+	future := previewRunway(nil, finance.RunwayReasonCurrencyMismatch)
+	future.AccessMethod = finance.AccessMethod("future_non_metered")
+	preview, err := alerts.PreviewRunwayThresholds(previewCurrent, previewCurrent, []finance.UpstreamRunway{official, future}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Coverage.Total != 0 || len(preview.Coverage.UnknownReasons) != 0 || len(preview.Items) != 0 {
+		t.Fatalf("所有非计量型都不应进入 runway 影响或覆盖率: %+v", preview)
 	}
 }
 

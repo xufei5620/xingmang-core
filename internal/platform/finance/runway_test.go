@@ -304,16 +304,33 @@ func TestInvalidThresholdsFailClosed(t *testing.T) {
 	}
 }
 
+func TestComputeRunwayMarksEveryNonMeteredMethodNotApplicable(t *testing.T) {
+	for _, method := range []finance.AccessMethod{finance.AccessOfficialAPI, finance.AccessSubscriptionAccount, finance.AccessMethod("future_non_metered")} {
+		got, err := finance.ComputeRunway(finance.RunwayInput{
+			AccessMethod: method,
+			Balance:      balanceAt(999_000_000, "USD", time.Minute),
+			CostMinorSum: 1_000_000, CoveredDays: 1, CostCurrency: "USD", Now: runwayNow,
+			Thresholds: finance.DefaultRunwayThresholds(),
+		})
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", method, err)
+		}
+		if got.Known() || got.Reason != finance.RunwayReasonNotApplicable {
+			t.Fatalf("%s: got %+v, want not_applicable without days", method, got)
+		}
+	}
+}
+
 // TestRunwayCoverageExcludesSubscriptions：订阅型不进覆盖率的分母。
 //
 // 把「没有这个概念」算成「没覆盖到」，会让覆盖率随订阅渠道数量下降，
 // 而那与采集能力毫无关系——一个会自己变差的指标没人会信。
 func TestRunwayCoverageExcludesSubscriptions(t *testing.T) {
 	items := []finance.UpstreamSummary{
-		{Runway: finance.Runway{Days: intPtr(30), Level: finance.RunwayHealthy}},
-		{Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
-		{Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
-		{Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessUpstreamKey}, Runway: finance.Runway{Days: intPtr(30), Level: finance.RunwayHealthy}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessUpstreamKey}, Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessSubscriptionAccount}, Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessSubscriptionAccount}, Runway: finance.Runway{Reason: finance.RunwayReasonNotApplicable}},
 	}
 	got := finance.SummarizeRunwayCoverage(items)
 	if got.Total != 2 {
@@ -325,8 +342,20 @@ func TestRunwayCoverageExcludesSubscriptions(t *testing.T) {
 	if got.Reasons[finance.RunwayReasonNoBalance] != 1 {
 		t.Fatalf("原因分布要说得出「为什么是 1/2」: %+v", got.Reasons)
 	}
-	if got.Reasons[finance.RunwayReasonNotApplicable] != 2 {
-		t.Fatalf("订阅型仍要计数（只是不进分母）: %+v", got.Reasons)
+	if got.Reasons[finance.RunwayReasonNotApplicable] != 0 {
+		t.Fatalf("所有非计量型都不应进入覆盖率原因分布: %+v", got.Reasons)
+	}
+}
+
+func TestRunwayCoverageExcludesNonMeteredEvenWhenReasonLooksUnknown(t *testing.T) {
+	items := []finance.UpstreamSummary{
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessOfficialAPI}, Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessMethod("future_non_metered")}, Runway: finance.Runway{Reason: finance.RunwayReasonCurrencyMismatch}},
+		{Account: finance.UpstreamAccount{AccessMethod: finance.AccessUpstreamKey}, Runway: finance.Runway{Reason: finance.RunwayReasonNoBalance}},
+	}
+	got := finance.SummarizeRunwayCoverage(items)
+	if got.Total != 1 || got.Known != 0 || got.Reasons[finance.RunwayReasonNoBalance] != 1 {
+		t.Fatalf("只有计量型应进入覆盖率: %+v", got)
 	}
 }
 

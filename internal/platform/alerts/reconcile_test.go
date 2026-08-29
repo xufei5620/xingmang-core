@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
@@ -103,6 +104,23 @@ func newTestReconciler(store AlertStore, src MetricSource, notifier Notifier, no
 		Logger:    discardLogger(),
 		Now:       func() time.Time { return now },
 	})
+}
+
+func TestReconcileCarriesThresholdSnapshotMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	provider := &fakeThresholdProvider{snapshot: finance.RunwayThresholdSnapshot{
+		Thresholds: finance.DefaultRunwayThresholds(), Revision: 11, Source: "database",
+	}}
+	evaluator := NewEvaluatorWithThresholdProvider(&fakeMetricSource{}, &fakeRunwaySource{}, provider, RuleConfig{})
+	res, err := NewReconciler(ReconcilerOptions{
+		Store: newRecordingStore(), Evaluator: evaluator, Logger: discardLogger(), Now: func() time.Time { return now },
+	}).Reconcile(context.Background(), testEnv)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.ThresholdRevision != 11 || res.ThresholdSource != "database" {
+		t.Fatalf("应携带本轮 DB 阈值快照元数据: %+v", res)
+	}
 }
 
 // TestReconcileOpensAlertAndDelivers：一条真实告警从命中到投递的完整链路。

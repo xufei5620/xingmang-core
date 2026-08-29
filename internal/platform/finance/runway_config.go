@@ -87,27 +87,48 @@ type RunwayThresholdStore struct {
 }
 
 func NewRunwayThresholdStore(pool *pgxpool.Pool, now func() time.Time) *RunwayThresholdStore {
+	return newRunwayThresholdStore(pool, now)
+}
+
+// NewRunwayThresholdCurrentStore builds the worker-safe provider. Worker DB
+// roles are intentionally granted SELECT only on the verified current view;
+// the view performs the current/history match inside PostgreSQL, so a worker
+// evaluation never needs direct history SELECT while orphan rows still fail
+// closed.
+func NewRunwayThresholdCurrentStore(pool *pgxpool.Pool, now func() time.Time) *RunwayThresholdStore {
+	return newRunwayThresholdStore(pool, now)
+}
+
+func newRunwayThresholdStore(pool *pgxpool.Pool, now func() time.Time) *RunwayThresholdStore {
 	if now == nil {
 		now = time.Now
 	}
 	return &RunwayThresholdStore{pool: pool, q: gen.New(pool), now: now}
 }
 
-func snapshotFromConfig(row gen.FinanceRunwayThresholdConfig) RunwayThresholdSnapshot {
+func snapshotFromValues(environment string, criticalDays, warningDays, seriousDays int32, revision int64, updatedAt pgtype.Timestamptz, updatedBy, reason, requestID string) RunwayThresholdSnapshot {
 	return RunwayThresholdSnapshot{
-		Environment: row.Environment,
+		Environment: environment,
 		Thresholds: RunwayThresholds{
-			CriticalDays: int(row.CriticalDays),
-			WarningDays:  int(row.WarningDays),
-			SeriousDays:  int(row.SeriousDays),
+			CriticalDays: int(criticalDays),
+			WarningDays:  int(warningDays),
+			SeriousDays:  int(seriousDays),
 		},
-		Revision:  row.Revision,
+		Revision:  revision,
 		Source:    "database",
-		UpdatedAt: fromTS(row.UpdatedAt),
-		UpdatedBy: row.UpdatedBy,
-		Reason:    row.Reason,
-		RequestID: row.RequestID,
+		UpdatedAt: fromTS(updatedAt),
+		UpdatedBy: updatedBy,
+		Reason:    reason,
+		RequestID: requestID,
 	}
+}
+
+func snapshotFromConfig(row gen.FinanceRunwayThresholdConfig) RunwayThresholdSnapshot {
+	return snapshotFromValues(row.Environment, row.CriticalDays, row.WarningDays, row.SeriousDays, row.Revision, row.UpdatedAt, row.UpdatedBy, row.Reason, row.RequestID)
+}
+
+func snapshotFromVerified(row gen.FinanceRunwayThresholdCurrentVerified) RunwayThresholdSnapshot {
+	return snapshotFromValues(row.Environment, row.CriticalDays, row.WarningDays, row.SeriousDays, row.Revision, row.UpdatedAt, row.UpdatedBy, row.Reason, row.RequestID)
 }
 
 func historyFromRow(row gen.FinanceRunwayThresholdHistory) RunwayThresholdHistoryEntry {
@@ -155,33 +176,16 @@ func (s *RunwayThresholdStore) Current(ctx context.Context, environment string) 
 	if err := validateRunwayEnvironment(environment); err != nil {
 		return RunwayThresholdSnapshot{}, err
 	}
-	row, err := s.q.GetRunwayThresholdConfig(ctx, strings.TrimSpace(environment))
+	row, err := s.q.GetRunwayThresholdConfigVerified(ctx, strings.TrimSpace(environment))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunwayThresholdSnapshot{}, ErrRunwayConfigUnavailable
 	}
 	if err != nil {
 		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: read runway threshold snapshot: %w", ErrRunwayConfigUnavailable, err)
 	}
-	snapshot := snapshotFromConfig(row)
+	snapshot := snapshotFromVerified(row)
 	if err := snapshot.Thresholds.Validate(); err != nil {
 		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: invalid stored threshold snapshot", ErrRunwayConfigUnavailable)
-	}
-	// current/history are written in one transaction, but a privileged/manual
-	// SQL change or a failed historical migration could still leave an orphan.
-	// Refuse to serve the current row until its immutable evidence is present
-	// and agrees byte-for-byte on the classifier fields.
-	history, historyErr := s.q.GetRunwayThresholdHistory(ctx, gen.GetRunwayThresholdHistoryParams{
-		Environment: row.Environment,
-		Revision:    row.Revision,
-	})
-	if errors.Is(historyErr, pgx.ErrNoRows) {
-		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: current revision %d has no history row", ErrRunwayConfigUnavailable, row.Revision)
-	}
-	if historyErr != nil {
-		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: read history for revision %d: %w", ErrRunwayConfigUnavailable, row.Revision, historyErr)
-	}
-	if !currentHistoryMatches(row, history) {
-		return RunwayThresholdSnapshot{}, fmt.Errorf("%w: current/history revision %d mismatch", ErrRunwayConfigUnavailable, row.Revision)
 	}
 	return snapshot, nil
 }

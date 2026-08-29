@@ -15,6 +15,14 @@
 SELECT * FROM finance.runway_threshold_config
 WHERE environment = sqlc.arg(environment);
 
+-- name: GetRunwayThresholdConfigVerified :one
+-- The view joins current/history so worker roles never need direct history
+-- SELECT while orphaned current rows still fail closed.
+SELECT environment, critical_days, warning_days, serious_days, revision,
+       updated_at, updated_by, reason, request_id
+FROM finance.runway_threshold_current_verified
+WHERE environment = sqlc.arg(environment);
+
 -- name: InsertRunwayThresholdBootstrap :one
 INSERT INTO finance.runway_threshold_config (
     environment, critical_days, warning_days, serious_days,

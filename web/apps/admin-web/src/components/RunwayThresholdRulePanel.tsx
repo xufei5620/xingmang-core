@@ -305,12 +305,12 @@ function PreviewSection({ preview, isPending, error, onRetry, stale }: { preview
         </div>
         {stale ? <p role="status" className="mt-3 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-fg">草稿已变化，当前结果是旧预览；请重新预览后再作判断。</p> : null}
         {preview.counts.currentInconsistent > 0 ? <p role="alert" className="mt-3 rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-fg">发现 {preview.counts.currentInconsistent} 个当前不一致对象。请先核查 Worker 评估任务与活跃 R5 告警，不要把它们当成阈值变化效果。</p> : null}
-        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+        {!preview.alertCoverageComplete ? <p role="alert" className="mt-3 rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-xs text-fg">活跃告警集不完整（服务端结果被截断），以下影响计数和对象列表不具备完整性，暂不展示为可信影响；请先缩小范围或检查告警读取任务。</p> : <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
           {counts.map((item) => <div key={item.label} className="rounded-md border border-edge bg-surface-muted/40 p-2"><p className="text-xs text-fg-muted">{item.label}</p><p className="mt-1 text-lg font-semibold tabular-nums text-fg">{item.value}</p></div>)}
-        </div>
+        </div>}
         {Object.keys(preview.coverage.unknownReasons).length > 0 ? <p className="mt-3 text-xs text-fg-muted">未知原因：{Object.entries(preview.coverage.unknownReasons).map(([key, value]) => `${unknownReasonLabel(key)} ×${value}`).join(" · ")}</p> : null}
       </div>
-      <ImpactTable items={preview.items} hasMore={preview.hasMore} evaluationAt={preview.evaluationAt} />
+      {preview.alertCoverageComplete ? <ImpactTable items={preview.items} hasMore={preview.hasMore} evaluationAt={preview.evaluationAt} /> : null}
     </section>
   );
 }

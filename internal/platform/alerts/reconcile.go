@@ -48,6 +48,11 @@ type Result struct {
 	// NotifySkipped 是「有待投递的告警，但一个渠道都没配」的条数。
 	// 它不是失败，但必须可见——见 Reconcile 里那条 warn。
 	NotifySkipped int
+	// ThresholdRevision/Source prove which DB-backed runway snapshot this
+	// evaluation consumed. They are zero/empty for legacy evaluators without a
+	// threshold provider and are safe to emit in worker logs.
+	ThresholdRevision int64
+	ThresholdSource   string
 }
 
 // Reconciler 把一轮评估结果落成库里的告警状态，然后投递。
@@ -111,6 +116,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, environment string) (Result,
 		return res, err
 	}
 	res.Findings = len(findings)
+	res.ThresholdRevision, res.ThresholdSource, _ = r.evaluator.LastThresholdSnapshot()
 
 	silences, err := r.store.ListActiveSilences(ctx, environment, now)
 	if err != nil {

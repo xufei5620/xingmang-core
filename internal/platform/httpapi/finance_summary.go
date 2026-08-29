@@ -87,7 +87,7 @@ type runwayItem struct {
 	Days  *int   `json:"days"`
 	Level string `json:"level"`
 	// Reason 只在 Days 为 null 时非空：
-	// not_applicable（订阅型渠道没有余额这个概念）/ no_balance / balance_stale
+	// not_applicable（非计量型渠道没有余额 runway 这个概念）/ no_balance / balance_stale
 	// / no_consumption / currency_mismatch。
 	Reason string `json:"reason"`
 

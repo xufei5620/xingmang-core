@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
@@ -363,6 +364,12 @@ type Evaluator struct {
 	source     MetricSource
 	runway     RunwaySource
 	thresholds finance.RunwayThresholdProvider
+	// lastThresholdMu protects the non-sensitive snapshot metadata exposed to
+	// the worker log after a completed evaluation. The values are never used as
+	// classifier input; each Evaluate call still holds its own local snapshot.
+	lastThresholdMu       sync.RWMutex
+	lastThresholdRevision int64
+	lastThresholdSource   string
 }
 
 // NewEvaluator 创建无 DB provider 的静态兼容评估器。
@@ -390,6 +397,19 @@ func NewEvaluatorWithThresholdProvider(
 // snapshot 覆盖 runway 档位；调用方应使用 finding detail 中的 revision。
 func (e *Evaluator) Config() RuleConfig { return e.cfg }
 
+// LastThresholdSnapshot reports the metadata consumed by the most recent
+// successful Evaluate call. It intentionally returns only revision/source,
+// never actor/reason or credentials, so operational logs can prove the DB
+// snapshot was used without widening their disclosure surface.
+func (e *Evaluator) LastThresholdSnapshot() (revision int64, source string, ok bool) {
+	e.lastThresholdMu.RLock()
+	defer e.lastThresholdMu.RUnlock()
+	if e.lastThresholdRevision <= 0 || e.lastThresholdSource == "" {
+		return 0, "", false
+	}
+	return e.lastThresholdRevision, e.lastThresholdSource, true
+}
+
 // Evaluate 跑一轮评估，返回此刻命中的全部规则。
 //
 // 返回顺序稳定（按 dedup_key 升序）：让日志、测试与 Handoff 里的清单可比对。
@@ -404,6 +424,10 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		return nil, fmt.Errorf("environment: %w", ErrMissingField)
 	}
 	now = now.UTC()
+	e.lastThresholdMu.Lock()
+	e.lastThresholdRevision = 0
+	e.lastThresholdSource = ""
+	e.lastThresholdMu.Unlock()
 	thresholds := e.cfg.RunwayThresholds
 	var thresholdSnapshot *finance.RunwayThresholdSnapshot
 	if e.thresholds != nil {
@@ -413,6 +437,10 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		}
 		thresholds = snapshot.Thresholds
 		thresholdSnapshot = &snapshot
+		e.lastThresholdMu.Lock()
+		e.lastThresholdRevision = snapshot.Revision
+		e.lastThresholdSource = snapshot.Source
+		e.lastThresholdMu.Unlock()
 	}
 
 	observations, err := e.source.ListByEnvironment(ctx, environment)

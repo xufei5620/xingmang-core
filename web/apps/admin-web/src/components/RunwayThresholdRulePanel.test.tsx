@@ -23,7 +23,7 @@ function historyResponse() {
 }
 
 function previewResponse() {
-  return jsonResponse({ current: { critical_days: 5, warning_days: 10, serious_days: 20 }, proposed: { critical_days: 4, warning_days: 9, serious_days: 20 }, current_revision: 8, evaluation_at: "2026-08-29T02:00:00Z", coverage: { total: 2, known: 2, unknown_reasons: {} }, counts: { would_open: 0, would_escalate: 1, would_deescalate: 0, would_resolve: 0, unchanged: 1, current_inconsistent: 0 }, items: [{ account_id: "up-1", name: "Relay A", days: 5, old_level: "critical", new_level: "warning", alert_transition: "unchanged", consistency_reason: null, observed_at: "2026-08-29T01:00:00Z" }], has_more: false });
+  return jsonResponse({ current: { critical_days: 5, warning_days: 10, serious_days: 20 }, proposed: { critical_days: 4, warning_days: 9, serious_days: 20 }, current_revision: 8, evaluation_at: "2026-08-29T02:00:00Z", coverage: { total: 2, known: 2, unknown_reasons: {} }, counts: { would_open: 0, would_escalate: 1, would_deescalate: 0, would_resolve: 0, unchanged: 1, current_inconsistent: 0 }, items: [{ account_id: "up-1", name: "Relay A", days: 5, old_level: "critical", new_level: "warning", alert_transition: "unchanged", consistency_reason: null, observed_at: "2026-08-29T01:00:00Z" }], has_more: false, alert_coverage_complete: true });
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -82,6 +82,7 @@ describe("RunwayThresholdRulePanel", () => {
         counts: { would_open: 0, would_escalate: 0, would_deescalate: 0, would_resolve: 0, unchanged: 0, current_inconsistent: 1 },
         items: [{ account_id: "up-1", name: "Relay A", days: 0, old_level: "critical", new_level: "critical", alert_transition: "current_inconsistent", consistency_reason: "missing_active_alert", observed_at: "2026-08-29T01:00:00Z" }],
         has_more: false,
+        alert_coverage_complete: true,
       });
       return currentResponse();
     });
@@ -94,5 +95,31 @@ describe("RunwayThresholdRulePanel", () => {
     expect(within(section).getByText(/请先核查 Worker 评估任务/)).toBeTruthy();
     expect(within(section).getByText("观测偏旧")).toBeTruthy();
     expect(within(section).getByText(/当前分类已进入告警档/)).toBeTruthy();
+  });
+
+  it("does not present truncated active-alert results as a trusted impact", async () => {
+    const fetchImpl = vi.fn(async (input: string) => {
+      if (input.includes("/history")) return historyResponse();
+      if (input.includes("/preview")) return jsonResponse({
+        current: { critical_days: 5, warning_days: 10, serious_days: 20 },
+        proposed: { critical_days: 4, warning_days: 9, serious_days: 20 },
+        current_revision: 8, evaluation_at: "2026-08-29T02:00:00Z",
+        coverage: { total: 10, known: 10, unknown_reasons: {} },
+        counts: { would_open: 4, would_escalate: 2, would_deescalate: 1, would_resolve: 1, unchanged: 2, current_inconsistent: 0 },
+        items: [{ account_id: "up-1", name: "Relay A", days: 5, old_level: "critical", new_level: "warning", alert_transition: "would_deescalate", consistency_reason: null, observed_at: "2026-08-29T02:00:00Z" }],
+        has_more: true,
+        alert_coverage_complete: false,
+      });
+      return currentResponse();
+    });
+    renderPanel(fetchImpl as typeof fetch);
+    await screen.findByText("当前阈值快照");
+    fireEvent.change(screen.getByLabelText("Critical 天数"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "预览影响" }));
+    const result = await screen.findByText("预览结果");
+    const section = result.closest("section") as HTMLElement;
+    expect(within(section).getByText(/活跃告警集不完整/)).toBeTruthy();
+    expect(within(section).queryByText("将升级")).toBeNull();
+    expect(within(section).queryByText("Relay A")).toBeNull();
   });
 });

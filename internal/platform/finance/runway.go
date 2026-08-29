@@ -208,8 +208,9 @@ const (
 type RunwayUnknownReason string
 
 const (
-	// RunwayReasonNotApplicable：订阅型渠道**没有余额这个概念**（§7 末段）。
-	// 它的成本是固定摊销，可用天数对它无意义——这不是缺数据。
+	// RunwayReasonNotApplicable：非计量型渠道（订阅账号、官方 API 直连及
+	// 未来非计量枚举）**没有余额 runway 这个概念**（§7 末段）。
+	// 它们的成本按各自账单/摊销口径处理，可用天数对它无意义——这不是缺数据。
 	RunwayReasonNotApplicable RunwayUnknownReason = "not_applicable"
 	// RunwayReasonNoBalance：从未读到过余额。
 	//
@@ -284,7 +285,7 @@ func (r Runway) Known() bool { return r.Days != nil }
 // ComputeRunway 算一次可用天数（§10.4 的公式 + 五条硬要求）。
 //
 // 判定顺序是刻意的：**先答「这个问题成不成立」，再答「数据够不够」**。
-// 订阅型渠道排在最前，因为对它来说可用天数不是「缺数据」而是「没有这个概念」
+// 非计量型渠道排在最前，因为对它来说可用天数不是「缺数据」而是「没有这个概念」
 // ——把它和「还没采到余额」混成一个 reason，运营会一直等一个永远不会来的数。
 func ComputeRunway(in RunwayInput) (Runway, error) {
 	if err := in.Thresholds.Validate(); err != nil {
@@ -313,8 +314,10 @@ func ComputeRunway(in RunwayInput) (Runway, error) {
 	}
 
 	switch {
-	case in.AccessMethod == AccessSubscriptionAccount:
-		// 订阅制上游无边际成本（固定月费），可用天数对其无意义（§7 边界）。
+	case !in.AccessMethod.IsMetered():
+		// 非计量型接入（订阅账号、官方 API 直连以及未来新增的非计量方式）
+		// 没有可由本平台余额快照推导的「可用天数」口径。统一标记为
+		// not_applicable，避免新枚举意外进入余额/消耗除法后产生伪精确值。
 		out.Reason = RunwayReasonNotApplicable
 		return out, nil
 	case in.Balance == nil:

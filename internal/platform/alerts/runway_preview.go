@@ -134,8 +134,11 @@ func PreviewRunwayThresholds(
 	}
 	for _, runway := range runways {
 		alertsForAccount := alertsByAccount[runway.AccountID]
-		if runway.Runway.Reason == finance.RunwayReasonNotApplicable {
-			out.Coverage.UnknownReasons[string(runway.Runway.Reason)]++
+		if !runway.AccessMethod.IsMetered() {
+			// 非计量型账号没有余额 runway 口径，完全排除出覆盖率和
+			// proposed 影响计算。若历史上错误地产生了 R5，仍保留一条
+			// current_inconsistent 证据，便于清理错误告警，而不把它当作
+			// 阈值变化影响。
 			if len(alertsForAccount) > 0 {
 				item := RunwayImpactItem{
 					AccountID: runway.AccountID, Name: runway.Name,

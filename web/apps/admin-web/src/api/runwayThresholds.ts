@@ -70,6 +70,8 @@ export interface RunwayImpactPreview {
   };
   items: RunwayImpactItem[];
   hasMore: boolean;
+  /** 活跃 R5 是否完整；false 时 transition/counts 只能作不完整提示。 */
+  alertCoverageComplete: boolean;
 }
 
 export const RUNWAY_THRESHOLD_QUERY = "finance-runway-threshold";
@@ -129,6 +131,7 @@ interface RawPreview {
     observed_at?: string | null;
   }>;
   has_more?: boolean;
+  alert_coverage_complete?: boolean;
 }
 
 function requiredInteger(value: number | undefined, field: string): number {
@@ -265,7 +268,7 @@ export async function previewRunwayThresholds(
     },
     ...(options.signal ? { signal: options.signal } : {}),
   });
-  if (!body || typeof body !== "object" || !body.evaluation_at || body.current_revision === undefined || !Number.isSafeInteger(body.current_revision) || body.current_revision <= 0 || !body.coverage || !body.counts || !Array.isArray(body.items)) {
+  if (!body || typeof body !== "object" || !body.evaluation_at || body.current_revision === undefined || !Number.isSafeInteger(body.current_revision) || body.current_revision <= 0 || !body.coverage || !body.counts || !Array.isArray(body.items) || typeof body.alert_coverage_complete !== "boolean") {
     throw new Error("阈值预览响应缺少 evaluation_at、revision、coverage 或 counts");
   }
   return {
@@ -301,5 +304,6 @@ export async function previewRunwayThresholds(
       observedAt: item.observed_at ?? null,
     })),
     hasMore: requiredBoolean(body.has_more, "preview.has_more"),
+    alertCoverageComplete: body.alert_coverage_complete,
   };
 }
