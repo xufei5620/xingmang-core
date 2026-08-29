@@ -180,16 +180,13 @@ func main() {
 		MetricHistory: opsStore,
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
-		AuditEvents: auditStore,
-		Alerts:      alertStore,
+		AuditEvents:             auditStore,
+		Alerts:                  alertStore,
 		PlatformChannelBindings: channelBindingStore,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
 		// nil 时用户端点不挂载（见 httpapi.Deps.PlatformUsers）
-		PlatformUsers:          platformUsersOrNil(platformUserService),
-		PlatformUserDetails:    platformUserDetailsOrNil(platformUserService),
-		PlatformUserDailyUsage: platformUserDailyUsageOrNil(platformUserService),
-		PlatformUserKeys:       platformUserKeysOrNil(platformUserService),
+		PlatformUsers: platformUsersOrNil(platformUserService),
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler
 		// 不各开一条访问路径
 		FinanceAccounts: financeStore,

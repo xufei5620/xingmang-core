@@ -14,8 +14,6 @@ import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { assuranceSubTab } from "../components/PlatformAssurancePanel";
 import { financeSubTab } from "../components/PlatformFinancePanel";
 import { PlatformUsersPanel } from "../components/PlatformUsersPanel";
-import { PlatformAlertsPanel } from "../components/PlatformAlertsPanel";
-import { PlatformCredentialsPanel } from "../components/PlatformCredentialsPanel";
 import {
   PlatformOverviewPanel,
   platformHasPrototypeOverview,
@@ -312,18 +310,6 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       // 只读网关——正文永不落平台库。脱敏、`request.content.read` 与查看审计
       // 属于第 8 片
       return <RequestsPanel platform={spec.serviceType} />;
-    case "creds":
-      return spec.serviceType === "sub2api" || spec.serviceType === "newapi" ? (
-        <PlatformCredentialsPanel platform={spec.serviceType} />
-      ) : (
-        fallbackTabContent(entry, tab)
-      );
-    case "alerts":
-      return spec.serviceType === "sub2api" || spec.serviceType === "newapi" ? (
-        <PlatformAlertsPanel platform={spec.serviceType} />
-      ) : (
-        fallbackTabContent(entry, tab)
-      );
     default:
       return fallbackTabContent(entry, tab);
   }
@@ -342,3 +328,4 @@ function fallbackTabContent(entry: PlatformEntry, tab: PlatformTabSpec): ReactNo
   if (blueprint) return <BlueprintTabView tab={blueprint} />;
   return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
 }
+

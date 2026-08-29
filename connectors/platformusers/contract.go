@@ -82,8 +82,6 @@ func ParseSource(raw string) (string, error) {
 // contracttest 会断言这一点,让「只读」成为可验证属性而非口头承诺。
 var ReadCapabilities = []registry.Capability{
 	"platformusers.users.read",
-	"platformusers.user.detail_read",
-	"platformusers.user.daily_usage_read",
 }
 
 // ErrNotFound 表示上游确实答了,但没有这条记录。

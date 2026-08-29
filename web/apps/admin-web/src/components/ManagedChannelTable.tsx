@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  DataTableV2,
   FreshnessBadge,
   PageState,
   StatTile,
@@ -7,7 +8,6 @@ import {
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { listPlatformChannels, type PlatformChannelRow } from "../api/platformChannels";
-import { platformSavedViewTableKey, PersistentDataTable } from "./PersistentDataTable";
 import { ApiStateView } from "./ApiStateView";
 
 const CANDIDATE_LABELS: Record<string, { label: string; tone: "success" | "warning" | "danger" | "neutral" }> = {
@@ -22,7 +22,11 @@ function platformLabel(platform: "sub2api" | "newapi") {
 }
 
 function candidateText(row: PlatformChannelRow): string {
-  return [row.candidate.state, row.candidate.evidenceStatus, ...row.candidate.reasonCodes].join(" ");
+  return [candidateLabel(row.candidate.state), row.candidate.evidenceStatus, ...row.candidate.reasonCodes].join(" ");
+}
+
+function candidateLabel(state: string): string {
+  return CANDIDATE_LABELS[state]?.label ?? state;
 }
 
 function bindingCell(row: PlatformChannelRow) {
@@ -169,8 +173,7 @@ export function ManagedChannelTable({
               <StatTile label="目录完整性" value={page.inventory.complete ? "完整" : "未知"} note={`已取 ${page.inventory.fetchedCount} 条 · ${page.inventory.coveragePartial ? "字段覆盖不全" : "字段覆盖完整"}`} status={<FreshnessBadge freshness={{ state: page.inventory.complete ? "fresh" : "stale", staleness_seconds: null, threshold_seconds: 1800, is_partial: page.inventory.coveragePartial, observed_at: page.inventory.observedAt, last_success: page.inventory.observedAt, last_error_code: "" }} />} />
             </div>
 
-            <PersistentDataTable
-              tableKey={platformSavedViewTableKey(platform, "channels")}
+            <DataTableV2
               caption={`${label} 渠道目录：映射、健康、模型能力、经营核算与共享余额引用`}
               columns={columns(platform)}
               rows={rows}

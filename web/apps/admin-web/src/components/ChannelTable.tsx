@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { PageState, StatTile } from "@xingmang/ui-admin";
+import { DataTableV2, PageState, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import {
   listChannelSummaries,
@@ -23,7 +23,6 @@ import { describeMissingTotal } from "../lib/upstreamTotals";
 import { ApiStateView } from "./ApiStateView";
 import { ChannelScopeNote } from "./ChannelScopeNote";
 import { channelTableColumns, type ChannelPlatform } from "./ChannelTableColumns";
-import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
 import { ManagedChannelTable } from "./ManagedChannelTable";
 
 /** 渠道管理表（两个平台共用）。原型 `V["s2/upstream"]` / `V["newapi/upstream"]`。
@@ -74,8 +73,8 @@ export function ChannelTable({
   // 而不是手抄一份——手抄的那份会在下次加列时悄悄把新列藏起来
   const allColumnIds = columns.map((c) => c.id);
 
-  // MAP4 只在有且仅有一个 active managed service 时切到 ChannelRef 粒度。
-  // 未登记、已降级或多实例先保留已验证的账号粒度，不猜“第一条服务”。
+  // 只有一个已登记且 active 的 service 才切换到 ChannelRef 粒度；
+  // 多实例或降级状态继续使用已验证的上游账号汇总，避免猜测归属。
   if (serviceId && serviceStatus === "active") {
     return <ManagedChannelTable platform={platform} serviceId={serviceId} />;
   }
@@ -90,8 +89,7 @@ export function ChannelTable({
         onRetry={() => void summaryQuery.refetch()}
       >
         <ChannelTiles platform={platform} rows={rows} />
-        <PersistentDataTable
-          tableKey={platformSavedViewTableKey(platform, "channels")}
+        <DataTableV2
           caption={`${platform === "sub2api" ? "Sub2API" : "NewAPI"} 逐上游账号的成本、我方计费消耗与毛利`}
           columns={columns}
           rows={rows}

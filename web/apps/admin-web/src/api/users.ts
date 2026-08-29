@@ -1,4 +1,4 @@
-import { ApiError, apiClient, type ApiClient } from "./client";
+import { apiClient, type ApiClient } from "./client";
 import type {
   FreshnessContract,
   PeriodGranularity,
@@ -80,20 +80,6 @@ export interface PlatformUserPage {
   freshness: FreshnessContract;
 }
 
-export interface DailyUsagePointBody {
-  day: string;
-  consumed: AmountBody;
-  requests: CountBody;
-}
-
-export interface DailyUsageSeriesBody {
-  from: string;
-  to: string;
-  points: DailyUsagePointBody[];
-  coverage: { expected_days: number; covered_days: number; complete: boolean };
-  snapshot: { observed_at: string; source: string; watermark: string; is_partial: boolean };
-}
-
 /** 列表排序键。与后端 `platformusers.SortKey` 逐字对应。 */
 export type PlatformUserSort =
   | "balance_desc"
@@ -111,30 +97,6 @@ export interface ListPlatformUsersOptions extends ListOptions {
   granularity?: PeriodGranularity;
   limit?: number;
   cursor?: string;
-}
-
-export interface DailyUsageOptions extends ListOptions {
-  day?: string;
-  days?: number;
-}
-
-export async function listPlatformUserDailyUsage(
-  platform: string,
-  userId: string,
-  options: DailyUsageOptions = {},
-  client: ApiClient = apiClient,
-): Promise<DailyUsageSeriesBody> {
-  const segment = encodePlatformUserIdSegment(userId);
-  return client.get<DailyUsageSeriesBody>(
-    `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}/daily-usage`,
-    {
-      searchParams: {
-        ...(options.day ? { day: options.day } : {}),
-        ...(options.days === undefined ? {} : { days: String(options.days) }),
-      },
-      ...(options.signal ? { signal: options.signal } : {}),
-    },
-  );
 }
 
 /** `platform.users.read` —— 读取用户清单需要的权限。
@@ -157,7 +119,6 @@ export function encodePlatformUserIdSegment(userId: string): string {
   if (new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== userId) {
     throw new Error("用户 ID 不是可无损编码的 Unicode 字符串");
   }
-  if (bytes.byteLength > 512) throw new Error("用户 ID 超过 512 字节");
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${USER_ID_SEGMENT_PREFIX}${hex}`;
 }
@@ -170,7 +131,6 @@ export function decodePlatformUserIdSegment(segment: string): string | null {
   if (hex.length === 0 || hex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(hex)) return null;
 
   const bytes = new Uint8Array(hex.length / 2);
-  if (bytes.byteLength > 512) return null;
   for (let index = 0; index < bytes.length; index += 1) {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
@@ -260,78 +220,6 @@ export type LookupPlatformUserOptions = Pick<
   ListPlatformUsersOptions,
   "day" | "granularity" | "signal"
 >;
-
-interface PlatformUserDetailResponse {
-  ref: { platform: string; id: string };
-  user: PlatformUserItem;
-  registered_at: string | null;
-  period: PeriodBody;
-  snapshot: {
-    observed_at: string;
-    source: string;
-    watermark: string;
-    is_partial: boolean;
-  };
-  capabilities: string[];
-}
-
-/** 通过 v2 canonical 精确端点读取用户；不会扫描列表，也不会按展示身份猜关联。 */
-export async function getPlatformUser(
-  platform: string,
-  userId: string,
-  options: LookupPlatformUserOptions = {},
-  client: ApiClient = apiClient,
-): Promise<PlatformUserLookupResult> {
-  const segment = encodePlatformUserIdSegment(userId);
-  try {
-    const body = await client.get<PlatformUserDetailResponse>(
-      `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}`,
-      {
-        searchParams: {
-          ...(options.day ? { day: options.day } : {}),
-          ...(options.granularity ? { granularity: options.granularity } : {}),
-        },
-        ...(options.signal ? { signal: options.signal } : {}),
-      },
-    );
-    const observed = body.snapshot.observed_at;
-    const observedMs = new Date(observed).getTime();
-    const staleness = Number.isFinite(observedMs)
-      ? Math.max(0, Math.floor((Date.now() - observedMs) / 1000))
-      : null;
-    const page: PlatformUserPage = {
-      items: [body.user],
-      next_cursor: "",
-      total_count: { value: 1 },
-      total_balance: body.user.balance,
-      active_today: { value: null },
-      period_totals: {
-        recharge: body.user.period_recharge,
-        consumed: body.user.period_consumed,
-        covered_users: body.user.period_consumed.minor_units === null ? 0 : 1,
-        total_users: 1,
-        complete: body.user.period_consumed.minor_units !== null,
-      },
-      period: body.period,
-      data_source: body.snapshot.source,
-      freshness: {
-        state: body.snapshot.is_partial ? "partial" : "fresh",
-        staleness_seconds: staleness,
-        threshold_seconds: 60,
-        is_partial: body.snapshot.is_partial,
-        observed_at: observed || null,
-        last_success: observed || null,
-        last_error_code: "",
-      },
-    };
-    return { kind: "found", user: body.user, page, pagesScanned: 1 };
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
-      return { kind: "notFound", pagesScanned: 1 };
-    }
-    throw error;
-  }
-}
 
 /** 只用 platformusers v1 的列表 Query 按不透明 ID 精确查找一个用户。
  *

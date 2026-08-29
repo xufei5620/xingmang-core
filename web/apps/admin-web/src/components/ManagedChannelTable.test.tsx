@@ -32,7 +32,6 @@ describe("ChannelRef 粒度渠道表", () => {
   it("同一上游的两个渠道仍是两行，且共享的模型/余额事实不合计", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/platforms/newapi/channels")) return Promise.resolve(response(page()));
-      if (url.includes("/ui/saved-views")) return Promise.resolve(response({ items: [] }));
       return Promise.resolve(response({ items: [] }));
     }));
     renderPanel();
@@ -46,7 +45,6 @@ describe("ChannelRef 粒度渠道表", () => {
   it("502/读取失败显示页级错误，不保留旧渠道行", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/platforms/newapi/channels")) return Promise.resolve(response({ error: { code: "EXECUTION_FAILED", message: "目录读取失败" } }, 502));
-      if (url.includes("/ui/saved-views")) return Promise.resolve(response({ items: [] }));
       return Promise.resolve(response({ items: [] }));
     }));
     renderPanel();
@@ -54,4 +52,3 @@ describe("ChannelRef 粒度渠道表", () => {
     expect(screen.queryByText("OpenAI A")).toBeNull();
   });
 });
-

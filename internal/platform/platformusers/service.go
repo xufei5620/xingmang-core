@@ -34,10 +34,7 @@ type Client interface {
 type Service struct {
 	// clients 按 source 索引。缺一个平台就等于那个平台没接——
 	// 而不是回落到另一个平台的客户端去(那会把 A 平台的用户显示成 B 的)
-	clients       map[string]Client
-	detailReaders map[string]platformusers.UserDetailReader
-	dailyReaders  map[string]platformusers.DailyUsageReader
-	keyReaders    map[string]platformusers.KeyMetadataReader
+	clients map[string]Client
 	// now 供测试注入固定时钟;nil 时用 time.Now。
 	//
 	// 需要时钟是因为「今天」要在**服务端**解释:让前端算「今天」的话,
@@ -68,9 +65,6 @@ func NewService(clients map[string]Client) (*Service, error) {
 		return nil, errors.New("platformusers: 没有配置任何平台的用户客户端")
 	}
 	cp := make(map[string]Client, len(clients))
-	details := make(map[string]platformusers.UserDetailReader)
-	daily := make(map[string]platformusers.DailyUsageReader)
-	keys := make(map[string]platformusers.KeyMetadataReader)
 	for source, c := range clients {
 		known, err := platformusers.ParseSource(source)
 		if err != nil {
@@ -80,17 +74,8 @@ func NewService(clients map[string]Client) (*Service, error) {
 			return nil, fmt.Errorf("platformusers: 平台 %q 的客户端为空", source)
 		}
 		cp[known] = c
-		if reader, ok := c.(platformusers.UserDetailReader); ok {
-			details[known] = reader
-		}
-		if reader, ok := c.(platformusers.DailyUsageReader); ok {
-			daily[known] = reader
-		}
-		if reader, ok := c.(platformusers.KeyMetadataReader); ok {
-			keys[known] = reader
-		}
 	}
-	return &Service{clients: cp, detailReaders: details, dailyReaders: daily, keyReaders: keys}, nil
+	return &Service{clients: cp}, nil
 }
 
 // SupportsPlatform 判断某个平台有没有终端用户清单。
@@ -165,94 +150,6 @@ func (s *Service) List(ctx context.Context, in ListInput) (platformusers.UserPag
 	return page, nil
 }
 
-type DetailInput struct {
-	Platform    string
-	UserID      string
-	Day         string
-	Granularity string
-}
-
-// Get 读取一个平台用户的精确详情。它不扫描列表，也不跨用户名/邮箱/令牌前缀关联。
-func (s *Service) Get(ctx context.Context, in DetailInput) (platformusers.UserDetail, error) {
-	source, _, err := s.resolve(in.Platform)
-	if err != nil {
-		return platformusers.UserDetail{}, err
-	}
-	reader, ok := s.detailReaders[source]
-	if !ok {
-		// 客户端存在但没有 detail capability：这是未接入，不是“没有这个用户”。
-		return platformusers.UserDetail{}, action.NewError(
-			action.CodeAdvancedControlsRequired, "用户详情真实读取尚未接入", nil)
-	}
-	ref := platformusers.UserRef{Platform: source, ID: in.UserID}
-	if err := ref.Validate(); err != nil {
-		return platformusers.UserDetail{}, action.NewError(action.CodeInvalidParams, "用户引用不合法", err)
-	}
-	period, err := platformusers.Period{Day: in.Day, Granularity: platformusers.Granularity(in.Granularity)}.Normalize(s.now(), nil)
-	if err != nil {
-		return platformusers.UserDetail{}, action.NewError(action.CodeInvalidParams, "统计区间不合法", err)
-	}
-	detail, err := reader.GetUser(ctx, platformusers.GetUserQuery{Ref: ref, Day: period.Day, Granularity: period.Granularity})
-	if err != nil {
-		return platformusers.UserDetail{}, translateError("users.detail", err)
-	}
-	return detail, nil
-}
-
-type DailyUsageInput struct {
-	Platform string
-	UserID   string
-	Day      string
-	Days     int
-}
-
-func (s *Service) DailyUsage(ctx context.Context, in DailyUsageInput) (platformusers.DailyUsageSeries, error) {
-	source, _, err := s.resolve(in.Platform)
-	if err != nil {
-		return platformusers.DailyUsageSeries{}, err
-	}
-	reader, ok := s.dailyReaders[source]
-	if !ok {
-		return platformusers.DailyUsageSeries{}, action.NewError(action.CodeAdvancedControlsRequired, "每日消费趋势真实读取尚未接入", nil)
-	}
-	ref := platformusers.UserRef{Platform: source, ID: in.UserID}
-	if err := ref.Validate(); err != nil {
-		return platformusers.DailyUsageSeries{}, action.NewError(action.CodeInvalidParams, "用户引用不合法", err)
-	}
-	series, err := reader.DailyUsage(ctx, platformusers.DailyUsageQuery{Ref: ref, Day: in.Day, Days: in.Days})
-	if err != nil {
-		return platformusers.DailyUsageSeries{}, translateError("users.daily_usage", err)
-	}
-	return series, nil
-}
-
-type KeyMetadataInput struct {
-	Platform string
-	UserID   string
-	Limit    int
-	Cursor   string
-}
-
-func (s *Service) KeyMetadata(ctx context.Context, in KeyMetadataInput) (platformusers.KeyMetadataPage, error) {
-	source, _, err := s.resolve(in.Platform)
-	if err != nil {
-		return platformusers.KeyMetadataPage{}, err
-	}
-	reader, ok := s.keyReaders[source]
-	if !ok {
-		return platformusers.KeyMetadataPage{}, action.NewError(action.CodeAdvancedControlsRequired, "API Key 元数据真实读取尚未接入", nil)
-	}
-	ref := platformusers.UserRef{Platform: source, ID: in.UserID}
-	if err := ref.Validate(); err != nil {
-		return platformusers.KeyMetadataPage{}, action.NewError(action.CodeInvalidParams, "用户引用不合法", err)
-	}
-	page, err := reader.ListKeyMetadata(ctx, platformusers.KeyMetadataQuery{Ref: ref, Limit: in.Limit, Cursor: in.Cursor})
-	if err != nil {
-		return platformusers.KeyMetadataPage{}, translateError("users.keys", err)
-	}
-	return page, nil
-}
-
 // parseStatusFilter 把查询参数翻译成契约里的状态。
 //
 // 空串是「不筛」。**拼错的状态当场 400**,不静默忽略:一个 `status=Active`
@@ -303,12 +200,6 @@ func (s *Service) resolve(platform string) (string, Client, error) {
 func translateError(op string, err error) error {
 	if err == nil {
 		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	if errors.Is(err, platformusers.ErrLookupIncomplete) {
-		return action.NewError(action.CodeExecutionFailed, "用户精确查找未完成，请重试", err)
 	}
 	if errors.Is(err, platformusers.ErrNotFound) {
 		return action.NewError(action.CodeNotRegistered, "没有这条用户记录", err)

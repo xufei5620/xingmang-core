@@ -13,32 +13,14 @@ import (
 )
 
 type stubClient struct {
-	page         connusers.UserPage
-	err          error
-	got          connusers.ListFilter
-	detail       connusers.UserDetail
-	detailErr    error
-	detailCalled bool
+	page connusers.UserPage
+	err  error
+	got  connusers.ListFilter
 }
 
 func (s *stubClient) ListUsers(_ context.Context, f connusers.ListFilter) (connusers.UserPage, error) {
 	s.got = f
 	return s.page, s.err
-}
-
-func (s *stubClient) GetUser(_ context.Context, q connusers.GetUserQuery) (connusers.UserDetail, error) {
-	s.detailCalled = true
-	if s.detailErr != nil {
-		return connusers.UserDetail{}, s.detailErr
-	}
-	s.detail.Ref = q.Ref
-	return s.detail, nil
-}
-
-type listOnlyClient struct{}
-
-func (listOnlyClient) ListUsers(context.Context, connusers.ListFilter) (connusers.UserPage, error) {
-	return connusers.UserPage{}, nil
 }
 
 func newService(t *testing.T, c platformusers.Client) *platformusers.Service {
@@ -174,31 +156,6 @@ func TestTranslateErrorKinds(t *testing.T) {
 		if got := codeOf(t, err); got != want {
 			t.Errorf("%s 应归 %q，得到 %q", kind, want, got)
 		}
-	}
-}
-
-func TestGetUsesExactDetailReaderAndPreservesErrorBoundary(t *testing.T) {
-	c := &stubClient{detail: connusers.UserDetail{User: connusers.User{ID: "u_1"}, Snapshot: connusers.EvidenceSnapshot{Source: "fake"}}}
-	svc := newService(t, c).WithClock(func() time.Time { return time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC) })
-	detail, err := svc.Get(context.Background(), platformusers.DetailInput{Platform: "sub2api", UserID: "u_1"})
-	if err != nil || !c.detailCalled || detail.Ref.ID != "u_1" {
-		t.Fatalf("detail=%+v called=%v err=%v", detail, c.detailCalled, err)
-	}
-	c.detailErr = connusers.ErrLookupIncomplete
-	_, err = svc.Get(context.Background(), platformusers.DetailInput{Platform: "sub2api", UserID: "u_1"})
-	if got := codeOf(t, err); got != action.CodeExecutionFailed {
-		t.Fatalf("incomplete code=%q", got)
-	}
-}
-
-func TestGetWithoutDetailReaderIsUnavailableNotEmptyUser(t *testing.T) {
-	svc, err := platformusers.NewService(map[string]platformusers.Client{connusers.SourceSub2API: listOnlyClient{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = svc.Get(context.Background(), platformusers.DetailInput{Platform: "sub2api", UserID: "u_1"})
-	if got := codeOf(t, err); got != action.CodeAdvancedControlsRequired {
-		t.Fatalf("code=%q err=%v", got, err)
 	}
 }
 
