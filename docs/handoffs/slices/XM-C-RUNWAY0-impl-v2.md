@@ -56,6 +56,8 @@ READY
 - lifecycle/tests/docs: `deploy/scripts/deploy-local.sh` 及其回归测试（infra→threshold
   bootstrap→app 顺序/失败闸）、DB harness guards、
   `cmd/pgdsn-validate`、`docs/runbooks/SWITCH-RUNWAY-THRESHOLDS-TO-DB.md`、模块说明。
+- evidence: `docs/evidence/EV-2026-08-30-runway-disposable-db.md`、
+  `docs/evidence/screens/XM-C-RUNWAY0-impl-v2/runway-rules-wide.jpg`。
 
 ## decisions
 
