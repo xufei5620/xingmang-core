@@ -2,13 +2,13 @@
 
 ## status
 
-BLOCKED
+READY
 
 ## branch / commit / base
 
 - branch: `ai/codex/XM-LOCAL-detail-impl`
 - base: `release/v0.1-launch`（`e98080d`）
-- implementation commit: `2036956`
+- implementation commits: `2036956`, `f78da8a`
 - worktree: `K:/星芒统一控制平台/wt-xmLOCAL-detail-impl`
 
 ## summary
@@ -43,15 +43,16 @@ BLOCKED
 - `D:/Git/bin/bash.exe -lc '... tests/security/governance-not-hollow.test.sh'` — PASS
 - `git diff --check` — PASS
 - `gitleaks git --redact --no-banner --log-opts=HEAD~1..HEAD` — PASS
-- `node ...vitest.mjs run --environment jsdom web/packages/design-tokens/src web/packages/ui-primitives/src web/packages/ui-admin/src web/apps/admin-web/src` — FAIL
-  - 多个 workspace 既有测试在 `CommandPalette`、`DataTableV2`、`RequestsPanel`、`PlatformUsersPanel`、`ChannelsPanel`、`ProxyAssetDialog`、`AlertRules`、`Nav`、`PageState`、`Sparkline`、`ContextStrip`、`OverviewPage` 等处失败；这些失败覆盖本片之外的大量组件/页面，导致无法完成 sprint 要求的 full-gate 复核。
+- WSL clean archive（Node 22.22.0 / pnpm 11.24.0）`pnpm install --frozen-lockfile --ignore-scripts --package-import-method=copy --offline` — PASS；`pnpm -r run typecheck` — PASS（5 个 workspace）；`pnpm -r run test` — PASS（design-tokens 10、ui-primitives 16、ui-admin 219、admin-web 886）；Storybook build — PASS；admin-web production build — PASS（仅既有大 chunk warning）。
+- WSL 临时 git snapshot `GOVERNANCE_REQUIRE_BASE=1 bash scripts/check-governance.sh` — PASS；Go `go fmt ./...`、`go vet ./...`、`go test -p 1 -count=1 ./...` — PASS。
+- gitleaks v8.28.0 `e98080d..HEAD` — PASS；`git diff --check e98080d..HEAD` — PASS。
 
 ## risks
 
-- full-gate 复核当前被 workspace 里一批既有失败挡住；需要先清理这些既有回归，才能把本片重新标成 READY。
+- WSL 门禁使用 Node 22.22.0，仓库声明 Node >=24；出现 engine warning，验收线可在 Node 24 再复跑。
+- 本片只验证服务器详情蓝图，不接真实 Server Agent 或凭据。
 - `Tabs` 的可访问名称依赖 `ariaLabel` 透传到 Radix `List`，后续如果改 Tabs 实现需要保住这条语义。
 
 ## follow_ups
 
 - 下一片再拆 `ChannelDetailPage` / `UpstreamDetailPage` / `SupplierCreatePage`，避免和本片重叠。
-- 先修复 full workspace test 的既有失败，再补本片的最终 READY 复核。
