@@ -9,8 +9,7 @@ READY
 - branch: `ai/codex/XM-C-DEPLOY0-c`
 - base: `2394730`（XM-C-DEPLOY0-b READY）
 - worktree: `K:/星芒统一控制平台/wt-xmDEPLOY0-c`
-- implementation commits: `c9e2bca`, `117a922`, `dc45cac`
-- handoff commit: 见最终 READY 行
+- implementation commits: `c9e2bca`, `117a922`, `dc45cac`, `5c6e024`
 
 ## summary
 
@@ -61,9 +60,9 @@ READY
 - `D:/Git/bin/bash.exe tests/deploy/deploy0-c-remotes.test.sh` — PASS (`DEPLOY0-C-REMOTES-TEST-OK`；含未知 remote、错误 github、pushurl 和 branch tracking 回归)
 - `D:/Git/bin/bash.exe tests/deploy/deploy0-c-mirror.test.sh` — PASS (`DEPLOY0-C-MIRROR-TEST-OK`；含单次 push、失败摘要、origin 校验)
 - `D:/Git/bin/bash.exe tests/security/governance-not-hollow.test.sh` — PASS
-- `go fmt ./...` / `go vet ./...` / `go test -p 1 -count=1 ./...` — PASS（当前 dc45cac 工作树；本片无 Go 源码改动）
-- `git diff --name-only 2394730..HEAD -- web` — 空（本片无前端源码改动）；沿用 D0-b 的 WSL Ubuntu-24.04 archive 门禁证据：`pnpm install --frozen-lockfile --ignore-scripts --package-import-method=copy --offline`、`pnpm -r run typecheck`、`pnpm -r run test`、Storybook build、admin-web build — PASS
-- `C:/Users/58439/AppData/Local/Temp/xm-gitleaks-bin/gitleaks.exe git --redact --no-banner --log-opts=2394730..HEAD` — PASS（3 commits，no leaks found）
+- `go fmt ./...` / `go vet ./...` / `go test -p 1 -count=1 ./...` — PASS（当前 5c6e024 工作树；本片无 Go 源码改动）
+- `git diff --name-only 2394730..HEAD -- web` — 空（本片无前端源码改动）；WSL Ubuntu-24.04 archive 检出当前 5c6e024：`pnpm install --frozen-lockfile --ignore-scripts --package-import-method=copy --offline`、`pnpm -r run typecheck`、`pnpm -r run test`、Storybook build、admin-web build — PASS（ui-admin 219 tests；admin-web 881 tests）
+- `C:/Users/58439/AppData/Local/Temp/xm-gitleaks-bin/gitleaks.exe git --redact --no-banner --log-opts=2394730..HEAD` — PASS（4 commits，no leaks found）
 - `git diff --check` — PASS
 
 ## tests_not_run
