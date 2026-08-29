@@ -6,4 +6,3 @@ UTF-8 bytes; username, email, and token prefixes are never association keys. `Er
 the source was completely exhausted, while `ErrLookupIncomplete` means the lookup could not prove
 absence. Daily usage, key metadata, reqlog, payment, and invoice remain separate capability and
 approval slices; no real platform reader is implied by this core contract.
-
