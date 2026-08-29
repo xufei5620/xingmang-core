@@ -12,9 +12,11 @@ unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY
   GIT_ASKPASS DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG COMPOSE_PROJECT_NAME COMPOSE_FILE \
   COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_PATH_SEPARATOR
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 HOME=/nonexistent \
-  XDG_CONFIG_HOME=/nonexistent
+  XDG_CONFIG_HOME=/nonexistent TMPDIR=/tmp
 if [ -x /usr/bin/git ]; then
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+else
+  export PATH=/mingw64/bin:/usr/bin:/bin
 fi
 
 usage() {
@@ -101,7 +103,10 @@ git -C "$repo_path" rev-parse --show-toplevel >/dev/null 2>&1 || {
 }
 validate_remote_url server-url "$server_url" || exit 1
 validate_remote_url github-url "$github_url" || exit 1
-case "$github_url" in git@github.com:*|https://github.com/*) ;; *) echo "REMOTES FAIL: github-url 必须指向 github.com" >&2; exit 1 ;; esac
+case "$github_url" in
+  git@github.com:xufei5620/xingmang-platform.git|ssh://git@github.com/xufei5620/xingmang-platform.git|https://github.com/xufei5620/xingmang-platform.git) ;;
+  *) echo "REMOTES FAIL: github-url 必须是官方仓库 xufei5620/xingmang-platform.git" >&2; exit 1 ;;
+esac
 
 if [ "$test_mode" -eq 1 ]; then
   test_mode_env="$(printenv XM_DEPLOY_TEST_MODE 2>/dev/null || true)"
@@ -117,6 +122,25 @@ fi
 
 origin_url="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
 github_existing="$(git -C "$repo_path" remote get-url github 2>/dev/null || true)"
+origin_urls="$(git -C "$repo_path" remote get-url --all origin 2>/dev/null || true)"
+github_urls="$(git -C "$repo_path" remote get-url --all github 2>/dev/null || true)"
+[ -z "$origin_urls" ] || [ "$(printf '%s\n' "$origin_urls" | wc -l)" -eq 1 ] || {
+  echo "REMOTES FAIL: origin 配置了多个 URL，拒绝猜测" >&2; exit 1;
+}
+[ -z "$github_urls" ] || [ "$(printf '%s\n' "$github_urls" | wc -l)" -eq 1 ] || {
+  echo "REMOTES FAIL: github 配置了多个 URL，拒绝猜测" >&2; exit 1;
+}
+rewrite_rules="$(git -C "$repo_path" config --local --get-regexp '^url\\..*\\.(insteadOf|pushInsteadOf)$' 2>/dev/null || true)"
+[ -z "$rewrite_rules" ] || { echo "REMOTES FAIL: 检测到 url.* 重写规则，先人工核对" >&2; exit 1; }
+remote_list="$(git -C "$repo_path" remote 2>/dev/null)" || {
+  echo "REMOTES FAIL: 无法读取 remote 列表" >&2; exit 1;
+}
+while IFS= read -r remote_name; do
+  case "$remote_name" in
+    ""|origin|github) ;;
+    *) echo "REMOTES FAIL: 发现未登记 remote $remote_name，拒绝静默保留/覆盖" >&2; exit 1 ;;
+  esac
+done <<< "$remote_list"
 origin_pushurl="$(git -C "$repo_path" config --get-all remote.origin.pushurl 2>/dev/null || true)"
 github_pushurl="$(git -C "$repo_path" config --get-all remote.github.pushurl 2>/dev/null || true)"
 [ -z "$origin_pushurl" ] || { echo "REMOTES FAIL: origin pushurl 已存在，先人工核对" >&2; exit 1; }
@@ -163,11 +187,28 @@ fi
   echo "REMOTES FAIL: 实际写入必须提供 --confirm CONFIGURE-REMOTES" >&2; exit 1;
 }
 mkdir -- "$lock_dir" || { echo "REMOTES FAIL: 无法取得 remotes 锁" >&2; exit 75; }
-cleanup() { rmdir -- "$lock_dir" 2>/dev/null || true; }
+config_path="$(git -C "$repo_path" rev-parse --git-path config 2>/dev/null || true)"
+case "$config_path" in /*) ;; *) config_path="$repo_path/$config_path" ;; esac
+[ -f "$config_path" ] && [ ! -L "$config_path" ] || { echo "REMOTES FAIL: Git config 不可备份" >&2; exit 1; }
+config_backup="$(mktemp -- "$git_dir/.xm-remotes-config.XXXXXX")" || exit 1
+chmod 0600 "$config_backup"
+cp -- "$config_path" "$config_backup"
+write_committed=0
+cleanup() {
+  rc="$?"
+  if [ "$write_committed" -eq 0 ]; then cp -- "$config_backup" "$config_path" 2>/dev/null || true; fi
+  rm -f -- "$config_backup" 2>/dev/null || true
+  rmdir -- "$lock_dir" 2>/dev/null || true
+  exit "$rc"
+}
 trap cleanup EXIT
 
 if [ -n "$origin_url" ] && [ "$origin_compare" != "$server_compare" ]; then
-  git -C "$repo_path" remote rename origin github
+  # 先复制旧 GitHub URL，再改 origin；不要 `remote rename`，否则 Git 会把
+  # branch.*.remote=origin 一并改成 github，后续 fetch 会继续读镜像而非服务器。
+  if ! git -C "$repo_path" remote get-url github >/dev/null 2>&1; then
+    git -C "$repo_path" remote add github "$origin_url"
+  fi
 fi
 if git -C "$repo_path" remote get-url origin >/dev/null 2>&1; then
   git -C "$repo_path" remote set-url origin "$server_url"
@@ -186,4 +227,5 @@ fi
 [ "$(git -C "$repo_path" remote get-url github)" = "$github_url" ] || {
   echo "REMOTES FAIL: github 写后核对失败" >&2; exit 1;
 }
+write_committed=1
 echo "REMOTES PASS: origin=$server_url github=$github_url"

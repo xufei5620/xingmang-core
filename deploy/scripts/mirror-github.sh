@@ -13,9 +13,12 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
 unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH \
   NODE_OPTIONS PYTHONPATH RUBYOPT PERL5OPT CDPATH
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 HOME=/nonexistent \
-  XDG_CONFIG_HOME=/nonexistent DOCKER_CONFIG=/nonexistent
+  XDG_CONFIG_HOME=/nonexistent DOCKER_CONFIG=/nonexistent TMPDIR=/tmp
 if [ -x /usr/bin/git ]; then
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+else
+  # Git Bash 的 git 位于 mingw64；仍覆盖而不是继承调用者 PATH。
+  export PATH=/mingw64/bin:/usr/bin:/bin
 fi
 
 usage() {
@@ -25,6 +28,7 @@ usage() {
 
 选项:
   --repo PATH               受控 Git checkout（默认 /srv/deploy/xingmang-platform）
+  --server-url URL          服务器 origin（默认 /srv/git/xingmang-platform.git）
   --remote NAME             GitHub remote（只能是 github）
   --git-bin PATH            git 可执行文件（默认 PATH 中的 git）
   --reason TEXT             镜像原因（非 dry-run 必填）
@@ -35,6 +39,7 @@ USAGE
 }
 
 repo_path="/srv/deploy/xingmang-platform"
+server_url="/srv/git/xingmang-platform.git"
 remote_name="github"
 git_bin="git"
 reason=""
@@ -81,6 +86,8 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) [ "$#" -ge 2 ] || { usage; exit 2; }; repo_path="$2"; shift 2 ;;
     --repo=*) repo_path="${1#--repo=}"; shift ;;
+    --server-url) [ "$#" -ge 2 ] || { usage; exit 2; }; server_url="$2"; shift 2 ;;
+    --server-url=*) server_url="${1#--server-url=}"; shift ;;
     --remote) [ "$#" -ge 2 ] || { usage; exit 2; }; remote_name="$2"; shift 2 ;;
     --remote=*) remote_name="${1#--remote=}"; shift ;;
     --git-bin) [ "$#" -ge 2 ] || { usage; exit 2; }; git_bin="$2"; shift 2 ;;
@@ -95,10 +102,18 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$test_mode" -eq 1 ]; then
-  [ "${XM_DEPLOY_TEST_MODE:-0}" = "1" ] || die "--test-mode 需要 XM_DEPLOY_TEST_MODE=1"
+  test_mode_env="$(printenv XM_DEPLOY_TEST_MODE 2>/dev/null || true)"
+  [ "$test_mode_env" = "1" ] || die "--test-mode 需要 XM_DEPLOY_TEST_MODE=1"
 else
   [ "$repo_path" = "/srv/deploy/xingmang-platform" ] || die "repo 不在受控服务器路径（测试请显式 --test-mode）"
+  [ "$server_url" = "/srv/git/xingmang-platform.git" ] || die "server-url 必须是安装器路径"
 fi
+case "$server_url" in
+  /srv/git/*.git|/tmp/*.git|file:///srv/git/*.git|file:///tmp/*.git|git@fiberstate:/srv/git/*.git|ssh://gitci@fiberstate/srv/git/*.git) ;;
+  [A-Za-z]:/*.git|file://[A-Za-z]:/*.git)
+    [ "$test_mode" -eq 1 ] || die "生产 server-url 不得使用 Windows 路径" ;;
+  *) die "server-url 不是受控服务器仓库形态" ;;
+esac
 if [ "$dry_run" -eq 0 ]; then
   [ -n "$reason" ] || die "非 dry-run 必须提供 --reason"
   printf '%s\n' "$reason" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9 ._:/,@+_-]{0,199}$' || die "reason 含非法字符"
@@ -129,12 +144,39 @@ resolved_repo="$(readlink -f -- "$repo_path" 2>/dev/null || true)"
 
 remote_url="$("$git_bin" -C "$repo_path" remote get-url "$remote_name" 2>/dev/null || true)"
 [ -n "$remote_url" ] || die "github remote 不存在或没有 URL"
+remote_urls="$("$git_bin" -C "$repo_path" remote get-url --all "$remote_name" 2>/dev/null || true)"
+[ "$(printf '%s\n' "$remote_urls" | wc -l)" -eq 1 ] || die "github remote 配置了多个 URL"
 validate_remote_url "$remote_url"
+case "$remote_url" in
+  git@github.com:xufei5620/xingmang-platform.git|ssh://git@github.com/xufei5620/xingmang-platform.git|https://github.com/xufei5620/xingmang-platform.git) ;;
+  /tmp/*.git|file:///tmp/*.git|[A-Za-z]:/*.git|file://[A-Za-z]:/*.git)
+    [ "$test_mode" -eq 1 ] || die "生产 github remote 必须是官方仓库" ;;
+  *) die "github remote 必须是官方仓库 xufei5620/xingmang-platform.git" ;;
+esac
 pushurl="$("$git_bin" -C "$repo_path" config --get-all remote.github.pushurl 2>/dev/null || true)"
 [ -z "$pushurl" ] || die "github remote 存在隐藏 pushurl，先人工核对"
+origin_pushurl="$("$git_bin" -C "$repo_path" config --get-all remote.origin.pushurl 2>/dev/null || true)"
+[ -z "$origin_pushurl" ] || die "origin remote 存在隐藏 pushurl，先人工核对"
+rewrite_rules="$("$git_bin" -C "$repo_path" config --local --get-regexp '^url\\..*\\.(insteadOf|pushInsteadOf)$' 2>/dev/null || true)"
+[ -z "$rewrite_rules" ] || die "检测到 url.* 重写规则，拒绝镜像未知目标"
+origin_url="$("$git_bin" -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+[ -n "$origin_url" ] || die "origin remote 不存在，拒绝镜像未知来源"
+normalize_local_url() {
+  local value="$1"
+  case "$value" in
+    file://*) value="${value#file://}" ;;
+    [A-Za-z]:/*)
+      if command -v cygpath >/dev/null 2>&1; then value="$(cygpath -u "$value")"; fi
+      ;;
+  esac
+  printf '%s' "$value"
+}
+server_compare="$(normalize_local_url "$server_url")"
+origin_compare="$(normalize_local_url "$origin_url")"
+[ "$origin_compare" = "$server_compare" ] || die "origin 未指向安装器登记的服务器 bare repo"
 
 if [ "$dry_run" -eq 1 ]; then
-  echo "MIRROR OK: dry-run, 未执行 git push --mirror github"
+  echo "MIRROR OK: dry-run, 未执行 git push --mirror github reason=$reason"
   exit 0
 fi
 
@@ -145,10 +187,12 @@ cleanup() {
 trap cleanup EXIT
 
 if "$git_bin" -C "$repo_path" push --mirror "$remote_name" >"$push_log" 2>&1; then
-  echo "MIRROR OK: 已执行 git push --mirror github"
+  echo "MIRROR OK: 已执行 git push --mirror github reason=$reason"
   exit 0
 else
   status=$?
-  echo "MIRROR FAIL: git push --mirror github 失败（exit=$status）" >&2
+  log_digest="$(sha256sum -- "$push_log" | awk '{print $1}')"
+  log_lines="$(wc -l < "$push_log")"
+  echo "MIRROR FAIL: git push --mirror github 失败（exit=$status） reason=$reason evidence_sha256=$log_digest evidence_lines=$log_lines" >&2
   exit "$status"
 fi

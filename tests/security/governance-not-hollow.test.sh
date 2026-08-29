@@ -60,7 +60,7 @@ cp "$guard" "$backup"
 restore_guard() { cp "$backup" "$guard"; rm -f "$backup"; }
 trap restore_guard EXIT
 
-for dep in scripts/check-versions.py scripts/check-governance.sh; do
+for dep in scripts/check-versions.py scripts/check-governance.sh PROJECT-CONSTITUTION.md; do
   cp "$backup" "$guard"
   # 从名单里摘掉这一项，模拟「新增/改名治理脚本但忘了加保护」
   grep -vF "'$dep'" "$backup" > "$guard"
