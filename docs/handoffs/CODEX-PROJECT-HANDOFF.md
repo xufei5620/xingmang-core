@@ -138,3 +138,10 @@ CI 重跑通过且 #113 合入后再合。
 批准设计,实施按路线图期别;**#113 审计归档架构批准,存储采用零付费方案**:自托管
 MinIO(Object Lock/WORM)置于自有服务器独立磁盘,签名密钥离线保管替代 KMS,
 异地副本可选 Backblaze B2 免费层;#119(AUD1)已本地门禁验收合入。
+
+## 十、新增任务卡 XM-C-DEPLOY0:服务器为中心的开发与部署工作流(2026-08-29)
+
+设计稿:`docs/superpowers/plans/2026-08-29-server-centric-workflow.md`。
+**优先级高于 A 期剩余(C004)**——先建通道再继续内容。三片 a/b/c 见设计稿第三节;
+服务器 root 步骤脚本化后交产品负责人执行。落地后 GitHub 降级为镜像备份,
+PR/Handoff 改为分支内文件 `docs/handoffs/slices/`,验收线合并流程不变。
