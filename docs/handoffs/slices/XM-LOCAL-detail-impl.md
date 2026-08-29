@@ -2,7 +2,7 @@
 
 ## status
 
-READY
+BLOCKED
 
 ## branch / commit / base
 
@@ -43,13 +43,15 @@ READY
 - `D:/Git/bin/bash.exe -lc '... tests/security/governance-not-hollow.test.sh'` — PASS
 - `git diff --check` — PASS
 - `gitleaks git --redact --no-banner --log-opts=HEAD~1..HEAD` — PASS
+- `node ...vitest.mjs run --environment jsdom web/packages/design-tokens/src web/packages/ui-primitives/src web/packages/ui-admin/src web/apps/admin-web/src` — FAIL
+  - 多个 workspace 既有测试在 `CommandPalette`、`DataTableV2`、`RequestsPanel`、`PlatformUsersPanel`、`ChannelsPanel`、`ProxyAssetDialog`、`AlertRules`、`Nav`、`PageState`、`Sparkline`、`ContextStrip`、`OverviewPage` 等处失败；这些失败覆盖本片之外的大量组件/页面，导致无法完成 sprint 要求的 full-gate 复核。
 
 ## risks
 
-- 这片的 UI 测试在新 worktree 里需要手工补依赖链接后才能跑；功能本身已通过测试验证。
+- full-gate 复核当前被 workspace 里一批既有失败挡住；需要先清理这些既有回归，才能把本片重新标成 READY。
 - `Tabs` 的可访问名称依赖 `ariaLabel` 透传到 Radix `List`，后续如果改 Tabs 实现需要保住这条语义。
 
 ## follow_ups
 
 - 下一片再拆 `ChannelDetailPage` / `UpstreamDetailPage` / `SupplierCreatePage`，避免和本片重叠。
-- 如要继续补详情结构，再单独接 `日期范围 / 筛选 / dev proxy`。
+- 先修复 full workspace test 的既有失败，再补本片的最终 READY 复核。
