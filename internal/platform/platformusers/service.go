@@ -34,7 +34,8 @@ type Client interface {
 type Service struct {
 	// clients 按 source 索引。缺一个平台就等于那个平台没接——
 	// 而不是回落到另一个平台的客户端去(那会把 A 平台的用户显示成 B 的)
-	clients map[string]Client
+	clients       map[string]Client
+	detailReaders map[string]platformusers.UserDetailReader
 	// now 供测试注入固定时钟;nil 时用 time.Now。
 	//
 	// 需要时钟是因为「今天」要在**服务端**解释:让前端算「今天」的话,
@@ -65,6 +66,7 @@ func NewService(clients map[string]Client) (*Service, error) {
 		return nil, errors.New("platformusers: 没有配置任何平台的用户客户端")
 	}
 	cp := make(map[string]Client, len(clients))
+	details := make(map[string]platformusers.UserDetailReader)
 	for source, c := range clients {
 		known, err := platformusers.ParseSource(source)
 		if err != nil {
@@ -74,8 +76,11 @@ func NewService(clients map[string]Client) (*Service, error) {
 			return nil, fmt.Errorf("platformusers: 平台 %q 的客户端为空", source)
 		}
 		cp[known] = c
+		if reader, ok := c.(platformusers.UserDetailReader); ok {
+			details[known] = reader
+		}
 	}
-	return &Service{clients: cp}, nil
+	return &Service{clients: cp, detailReaders: details}, nil
 }
 
 // SupportsPlatform 判断某个平台有没有终端用户清单。
@@ -150,6 +155,47 @@ func (s *Service) List(ctx context.Context, in ListInput) (platformusers.UserPag
 	return page, nil
 }
 
+// DetailInput identifies one platform user without permitting fuzzy joins.
+// UserID is the opaque source identifier recovered from the canonical URL segment.
+type DetailInput struct {
+	Platform    string
+	UserID      string
+	Day         string
+	Granularity string
+}
+
+// Get reads one exact user detail snapshot. It deliberately uses the optional
+// UserDetailReader capability instead of scanning the list or joining on names,
+// email addresses, or token prefixes.
+func (s *Service) Get(ctx context.Context, in DetailInput) (platformusers.UserDetail, error) {
+	source, _, err := s.resolve(in.Platform)
+	if err != nil {
+		return platformusers.UserDetail{}, err
+	}
+	reader, ok := s.detailReaders[source]
+	if !ok {
+		return platformusers.UserDetail{}, action.NewError(
+			action.CodeAdvancedControlsRequired, "用户详情真实读取尚未接入", nil)
+	}
+	ref := platformusers.UserRef{Platform: source, ID: in.UserID}
+	if err := ref.Validate(); err != nil {
+		return platformusers.UserDetail{}, action.NewError(action.CodeInvalidParams, "用户引用不合法", err)
+	}
+	period, err := (platformusers.Period{
+		Day: in.Day, Granularity: platformusers.Granularity(in.Granularity),
+	}).Normalize(s.now(), nil)
+	if err != nil {
+		return platformusers.UserDetail{}, action.NewError(action.CodeInvalidParams, "统计区间不合法", err)
+	}
+	detail, err := reader.GetUser(ctx, platformusers.GetUserQuery{
+		Ref: ref, Day: period.Day, Granularity: period.Granularity,
+	})
+	if err != nil {
+		return platformusers.UserDetail{}, translateError("users.detail", err)
+	}
+	return detail, nil
+}
+
 // parseStatusFilter 把查询参数翻译成契约里的状态。
 //
 // 空串是「不筛」。**拼错的状态当场 400**,不静默忽略:一个 `status=Active`
@@ -200,6 +246,12 @@ func (s *Service) resolve(platform string) (string, Client, error) {
 func translateError(op string, err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, platformusers.ErrLookupIncomplete) {
+		return action.NewError(action.CodeExecutionFailed, "用户精确查找未完成，请重试", err)
 	}
 	if errors.Is(err, platformusers.ErrNotFound) {
 		return action.NewError(action.CodeNotRegistered, "没有这条用户记录", err)

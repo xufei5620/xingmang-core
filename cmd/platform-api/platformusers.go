@@ -80,3 +80,12 @@ func platformUsersOrNil(s *platformusers.Service) httpapi.PlatformUsersQuerier {
 	}
 	return s
 }
+
+// Keep optional capability interfaces nil-safe. A typed nil stored in an
+// interface would otherwise make the router expose a handler that panics.
+func platformUserDetailsOrNil(s *platformusers.Service) httpapi.PlatformUserDetailsQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}
