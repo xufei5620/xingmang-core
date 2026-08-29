@@ -37,7 +37,7 @@ describe("AuditPage 子页", () => {
     expect(screen.getByRole("tab", { name: "审计链验证" })).toBeTruthy();
     expect(await screen.findByText("还没有审计事件")).toBeTruthy();
     await waitFor(() => expect(fetchImpl).toHaveBeenCalled());
-    expect(fetchImpl.mock.calls.some(([input]) => String(input).includes("/api/v1/audit/events"))).toBe(true);
+    expect(JSON.stringify(fetchImpl.mock.calls).includes("/api/v1/audit/events")).toBe(true);
   });
 
   it("操作证据子页诚实显示未接入，且不读取事件或对象存储", async () => {

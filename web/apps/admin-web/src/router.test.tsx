@@ -948,7 +948,9 @@ describe("审计事件页", () => {
 
   it("默认审计路由仍能挂载并显示事件表", async () => {
     renderRoute("/audit");
-    const [panel] = await screen.findAllByRole("tabpanel");
+    const panels = await screen.findAllByRole("tabpanel");
+    expect(panels.length).toBeGreaterThan(0);
+    const panel = panels[0]!;
     expect(screen.getByRole("tab", { name: "审计记录", selected: true })).not.toBeNull();
     expect(await within(panel).findByText("registry.service.create@1")).not.toBeNull();
     expect(within(panel).getByText("core.service/svc-1")).not.toBeNull();
