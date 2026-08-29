@@ -44,7 +44,7 @@ READY
 | 用户、渠道、SavedView、详情页控件 | LOCAL 对应 USER/MAP/B003a/detail slices | 不带入 |
 | 本地 API 代理目标 | LOCAL `ee5ddf1`，release 未包含 | 本片实现 |
 | `/api` 代理默认目标 | `http://127.0.0.1:8080` | 保持原默认 |
-| `/api` 代理本地覆盖 | `process.env.XM_DEV_API_TARGET` | 开发时可覆盖；空值回退默认 |
+| `/api` 代理本地覆盖 | `process.env.XM_DEV_API_TARGET` | 开发时可覆盖；未设置时回退默认 |
 
 ## tests_run
 
