@@ -5,10 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -194,62 +191,4 @@ func (s *Store) LatestRoot(ctx context.Context) (ChainRoot, error) {
 		return ChainRoot{}, fmt.Errorf("get latest chain root: %w", err)
 	}
 	return rootFromRow(row), nil
-}
-
-// exportedRoot 是导出文件的结构。**只含公开可验证的信息，不含任何密钥材料。**
-type exportedRoot struct {
-	Kind         string `json:"kind"`
-	ID           string `json:"id"`
-	ComputedAt   string `json:"computed_at"`
-	FromSequence int64  `json:"from_sequence"`
-	ToSequence   int64  `json:"to_sequence"`
-	RootHash     string `json:"root_hash"`
-	Signature    string `json:"signature"`
-	KeyID        string `json:"key_id"`
-	PublicKey    string `json:"public_key"`
-	Payload      string `json:"signed_payload"`
-}
-
-// ExportRoot 把链根写成 JSON 文件并回写导出位置。
-//
-// 规格 §4.4 要求根摘要存放于平台数据库之外的异故障域：本方法负责生成文件，
-// 把它同步到另一台主机或对象存储是部署侧的事（见 RUNBOOK）。
-func (s *Store) ExportRoot(ctx context.Context, root ChainRoot, dir string, pub ed25519.PublicKey) (string, error) {
-	if strings.TrimSpace(dir) == "" {
-		return "", fmt.Errorf("导出目录为空")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("创建导出目录: %w", err)
-	}
-	name := fmt.Sprintf("audit-root-%019d-%s.json", root.ToSequence, root.ID)
-	path := filepath.Join(dir, name)
-
-	payload := exportedRoot{
-		Kind:         "xingmang-audit-chain-root",
-		ID:           root.ID.String(),
-		ComputedAt:   root.ComputedAt.UTC().Format(time.RFC3339Nano),
-		FromSequence: root.FromSequence,
-		ToSequence:   root.ToSequence,
-		RootHash:     root.RootHash,
-		Signature:    root.Signature,
-		KeyID:        root.KeyID,
-		PublicKey:    base64.StdEncoding.EncodeToString(pub),
-		Payload:      string(root.SigningPayload()),
-	}
-	b, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("序列化链根: %w", err)
-	}
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		return "", fmt.Errorf("写出链根文件: %w", err)
-	}
-
-	if _, err := gen.New(s.pool).MarkChainRootExported(ctx, gen.MarkChainRootExportedParams{
-		ID:           root.ID,
-		ExportedAt:   ts(time.Now().UTC()),
-		ExportTarget: path,
-	}); err != nil {
-		return path, fmt.Errorf("回写导出位置（文件已生成于 %s）: %w", path, err)
-	}
-	return path, nil
 }

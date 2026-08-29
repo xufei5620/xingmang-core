@@ -1,5 +1,21 @@
 # 审计模块
 
+## AUD1 确定性归档格式
+
+`internal/platform/audit/archive` 提供本地/离线的 v1 冻结 wire、严格 decoder、
+purpose/protocol 隔离 keyring、签名 manifest 与 verifier。完整字节契约见
+[`ARCHIVE-FORMAT-v1.md`](ARCHIVE-FORMAT-v1.md)。它目前只建立 copy-only 格式和本地
+核验能力；没有对象存储、catalog、RecoveryIndex CAS、worker、HTTP cold read、恢复或生产
+激活。
+
+新的 Chain Root 导出只写 `ChainRootRefV1`：不再把 artifact 自带 `public_key` 当作信任，
+也不再回写 `chain_root.exported_at/export_target`。验证方必须从数据库和归档 bucket 之外的
+独立 trusted keyring 按 key ID + purpose + protocol + validity + fingerprint 取得公钥。
+
+`cmd/audit-archive` 仅暴露 `plan`、非 production 的 `export-local` 与 `verify-local`；
+路径必须位于配置的本地 archive root，首个本地 export 必须从 sequence 1/Genesis 开始。
+`local-fixture` 保护元数据不代表 WORM/KMS/生产资格。
+
 规格 §4.4 的审计模型：完整字段事件、**防篡改哈希链**、Chain Root 签名与库外锚点。
 
 ## 为什么是哈希链
