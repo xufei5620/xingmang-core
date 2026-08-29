@@ -67,3 +67,10 @@ threshold_revision=<revision>; critical_days=<n>; warning_days=<n>; serious_days
 
 本地分支已经包含迁移、Store、Query、预览与规则 UI，但尚未对 staging/production
 应用迁移或执行 bootstrap；C3c 写 Action 仍由 Foundation-B 门禁保护。
+
+`scripts/test-runway-threshold-db.ps1` 当前是**外部 disposable DSN 的安全脚手架**：
+它要求 admin/test 两个 loopback DSN 和 `XM_RUNWAY_TEST_ISOLATED=1`，并在检测到
+测试被 skip 时失败。它不会自动创建或清理 PostgreSQL，也不证明 DB 角色 ACL、
+迁移回滚或触发器 SQLSTATE；`tests/security/runway-*.test.sh` 只做静态 wiring
+检查。完整随机数据库/角色生命周期仍是后续获批切片，不能把脚手架输出当成真实
+数据库门禁通过。

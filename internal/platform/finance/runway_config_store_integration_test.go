@@ -22,7 +22,7 @@ func runwayIsolatedPool(t *testing.T) *pgxpool.Pool {
 	}
 	dsn := getenvForTest("XM_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("未设置 XM_TEST_DATABASE_URL")
+		t.Fatal("XM_RUNWAY_TEST_ISOLATED=1 requires XM_TEST_DATABASE_URL; refusing a skipped database gate")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
