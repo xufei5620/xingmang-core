@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   governance:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       # fetch-depth: 0 是迁移不可变检查（v5）的前提。默认的浅检出里没有
       # origin/main，那段检查会整段跳过并 exit 0——在唯一会拦住人的路径上
@@ -43,7 +43,7 @@ jobs:
           done
 
   secret-scan:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -53,7 +53,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   backend:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     services:
       postgres:
         image: postgres:18
@@ -62,14 +62,14 @@ jobs:
           POSTGRES_PASSWORD: xingmang-ci
           POSTGRES_DB: xingmang
         ports:
-          - 5432:5432
+          - 55432:5432
         options: >-
           --health-cmd "pg_isready -U xingmang -d xingmang"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 20
     env:
-      XM_TEST_DATABASE_URL: postgres://xingmang:xingmang-ci@127.0.0.1:5432/xingmang?sslmode=disable
+      XM_TEST_DATABASE_URL: postgres://xingmang:xingmang-ci@127.0.0.1:55432/xingmang?sslmode=disable
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - id: has
@@ -103,7 +103,7 @@ jobs:
         run: go test -p 1 ./...
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - id: has
