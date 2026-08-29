@@ -1,6 +1,7 @@
 package finance
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -67,5 +68,38 @@ func TestTokenEvidenceNeedsExactlyOneMatchingActiveService(t *testing.T) {
 		if len(got) != 1 || got[0].EvidenceStatus == EvidenceSufficient {
 			t.Fatalf("evidence=%+v candidate=%+v", evidence, got)
 		}
+	}
+}
+
+func TestTokenEvidenceWithoutActiveServiceIsOrphanWithInsufficientEvidence(t *testing.T) {
+	serviceID := uuid.New()
+	got := EvaluateBindingCandidates(
+		InventorySnapshot{ServiceID: serviceID, Known: true, Complete: true},
+		nil,
+		[]TokenMapEvidence{{ExternalChannelID: "legacy-1", UpstreamAccountID: uuid.New(), ActiveServiceCount: 0, SystemTypeMatches: true}},
+	)
+	if len(got) != 1 {
+		t.Fatalf("candidates=%+v", got)
+	}
+	if got[0].State != CandidateOrphan || got[0].EvidenceStatus != EvidenceInsufficient {
+		t.Fatalf("zero active services must remain an insufficient orphan: %+v", got[0])
+	}
+	if !slices.Contains(got[0].ReasonCodes, "no_active_service") {
+		t.Fatalf("missing no_active_service reason: %+v", got[0].ReasonCodes)
+	}
+}
+
+func TestTokenEvidenceSystemTypeMismatchIsConflict(t *testing.T) {
+	serviceID := uuid.New()
+	got := EvaluateBindingCandidates(
+		InventorySnapshot{ServiceID: serviceID, ServiceType: "newapi", Known: true, Complete: true},
+		nil,
+		[]TokenMapEvidence{{ExternalChannelID: "legacy-1", UpstreamAccountID: uuid.New(), ActiveServiceCount: 1, SystemType: "sub2api", SystemTypeMatches: true}},
+	)
+	if len(got) != 1 || got[0].State != CandidateConflict || got[0].EvidenceStatus != EvidenceConflicting {
+		t.Fatalf("system type mismatch must conflict: %+v", got)
+	}
+	if !slices.Contains(got[0].ReasonCodes, "system_type_mismatch") {
+		t.Fatalf("missing system_type_mismatch reason: %+v", got[0].ReasonCodes)
 	}
 }

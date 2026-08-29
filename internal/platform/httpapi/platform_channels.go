@@ -54,11 +54,42 @@ type platformChannelsResponse struct {
 	NextCursor     *string                               `json:"next_cursor"`
 }
 
+const platformChannelDateLayout = "2006-01-02"
+
+// parseBusinessDayRange applies the frozen channel-query window contract. Both
+// dates omitted means the current UTC business day; providing only one date is
+// ambiguous and must be rejected. The inclusive window is capped at 92 days so
+// a single read cannot turn the channel page into an unbounded ledger export.
+func parseBusinessDayRange(rawFrom, rawTo string) (string, string, error) {
+	if (rawFrom == "") != (rawTo == "") {
+		return "", "", action.NewError(action.CodeInvalidParams, "from/to 必须同时提供", nil)
+	}
+	if rawFrom == "" {
+		today := time.Now().UTC().Format(platformChannelDateLayout)
+		return today, today, nil
+	}
+	from, err := time.Parse(platformChannelDateLayout, rawFrom)
+	if err != nil {
+		return "", "", action.NewError(action.CodeInvalidParams, "from 日期必须是 YYYY-MM-DD", err)
+	}
+	to, err := time.Parse(platformChannelDateLayout, rawTo)
+	if err != nil {
+		return "", "", action.NewError(action.CodeInvalidParams, "to 日期必须是 YYYY-MM-DD", err)
+	}
+	if to.Before(from) {
+		return "", "", action.NewError(action.CodeInvalidParams, "to 不能早于 from", nil)
+	}
+	if to.Sub(from)/(24*time.Hour)+1 > 92 {
+		return "", "", action.NewError(action.CodeInvalidParams, "日期窗口不能超过 92 天", nil)
+	}
+	return rawFrom, rawTo, nil
+}
+
 func parseBusinessDayParam(raw string) (string, error) {
 	if raw == "" {
-		return time.Now().UTC().Format("2006-01-02"), nil
+		return time.Now().UTC().Format(platformChannelDateLayout), nil
 	}
-	if _, err := time.Parse("2006-01-02", raw); err != nil {
+	if _, err := time.Parse(platformChannelDateLayout, raw); err != nil {
 		return "", action.NewError(action.CodeInvalidParams, "日期必须是 YYYY-MM-DD", err)
 	}
 	return raw, nil
@@ -100,23 +131,10 @@ func ListPlatformChannelsHandler(
 			WriteError(w, r, action.NewError(action.CodeInvalidParams, "service_id 无效", err))
 			return
 		}
-		rawFrom, rawTo := r.URL.Query().Get("from"), r.URL.Query().Get("to")
-		if (rawFrom == "") != (rawTo == "") {
-			WriteError(w, r, action.NewError(action.CodeInvalidParams, "from/to 必须同时提供", nil))
-			return
-		}
-		from, err := parseBusinessDayParam(rawFrom)
+		from, to, err := parseBusinessDayRange(r.URL.Query().Get("from"), r.URL.Query().Get("to"))
 		if err != nil {
 			WriteError(w, r, err)
 			return
-		}
-		to := from
-		if rawTo != "" {
-			to, err = parseBusinessDayParam(rawTo)
-			if err != nil {
-				WriteError(w, r, err)
-				return
-			}
 		}
 		limit, err := parseBindingLimit(r.URL.Query().Get("limit"))
 		if err != nil {
@@ -153,7 +171,7 @@ func ListPlatformChannelsHandler(
 			WriteError(w, r, err)
 			return
 		}
-		candidates := finance.EvaluateBindingCandidates(finance.InventorySnapshot{ServiceID: serviceID, Known: inventory.state != "not_initialized" && inventory.state != "failed", Complete: inventory.complete && !inventory.truncated, Channels: inventory.channels}, active, evidence)
+		candidates := finance.EvaluateBindingCandidates(finance.InventorySnapshot{ServiceID: serviceID, ServiceType: service.ServiceType, Known: inventory.state != "not_initialized" && inventory.state != "failed", Complete: inventory.complete && !inventory.truncated, Channels: inventory.channels}, active, evidence)
 		if cursor != "" {
 			filtered := candidates[:0]
 			for _, candidate := range candidates {

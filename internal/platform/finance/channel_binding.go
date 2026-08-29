@@ -70,14 +70,22 @@ type InventoryChannel struct {
 
 type InventorySnapshot struct {
 	ServiceID uuid.UUID
-	Known     bool
-	Complete  bool
-	Channels  []InventoryChannel
+	// ServiceType identifies the managed connector whose directory is being
+	// evaluated. It is kept alongside ServiceID so token-map evidence cannot be
+	// proposed merely because an external channel id happens to match.
+	ServiceType string
+	Known       bool
+	Complete    bool
+	Channels    []InventoryChannel
 }
 
 type TokenMapEvidence struct {
-	ExternalChannelID         string
-	UpstreamAccountID         uuid.UUID
+	ExternalChannelID string
+	UpstreamAccountID uuid.UUID
+	// SystemType is the type recorded on the upstream account. An empty value is
+	// accepted for legacy callers, while a non-empty mismatch is explicit
+	// conflict evidence.
+	SystemType                string
 	ActiveServiceCount        int
 	SystemTypeMatches         bool
 	PlatformAssignmentMissing bool
@@ -143,7 +151,7 @@ func EvaluateBindingCandidates(
 			acc.reasons["no_active_service"] = struct{}{}
 		case item.ActiveServiceCount > 1:
 			acc.reasons["ambiguous_service"] = struct{}{}
-		case !item.SystemTypeMatches:
+		case !item.SystemTypeMatches || (item.SystemType != "" && inventory.ServiceType != "" && item.SystemType != inventory.ServiceType):
 			acc.reasons["system_type_mismatch"] = struct{}{}
 		case item.UpstreamAccountID != uuid.Nil:
 			acc.targets[item.UpstreamAccountID] = struct{}{}
@@ -176,10 +184,36 @@ func EvaluateBindingCandidates(
 			Name:    acc.name, UpstreamAccountIDs: targets, ReasonCodes: reasons,
 			PlatformAssignmentMissing: acc.platformMissing,
 		}
+		hardConflict := len(targets) > 1
+		for _, reason := range reasons {
+			if reason == "ambiguous_service" || reason == "system_type_mismatch" {
+				hardConflict = true
+				break
+			}
+		}
+		hasNoService := false
+		for _, reason := range reasons {
+			if reason == "no_active_service" {
+				hasNoService = true
+				break
+			}
+		}
 		switch {
-		case len(reasons) > 0 || len(targets) > 1:
+		case hardConflict:
 			candidate.State = CandidateConflict
 			candidate.EvidenceStatus = EvidenceConflicting
+		case hasNoService:
+			// A token-map row without a matching active service is retained as
+			// an orphan for investigation, but its evidence is insufficient.
+			// Incomplete inventory still wins: absence cannot prove orphanage.
+			if !acc.inInventory && (!inventory.Known || !inventory.Complete) {
+				candidate.State = CandidateUnmapped
+				candidate.EvidenceStatus = EvidenceInsufficient
+				candidate.InventoryUnknown = true
+			} else {
+				candidate.State = CandidateOrphan
+				candidate.EvidenceStatus = EvidenceInsufficient
+			}
 		case !acc.inInventory && (!inventory.Known || !inventory.Complete):
 			candidate.State = CandidateUnmapped
 			candidate.EvidenceStatus = EvidenceInsufficient

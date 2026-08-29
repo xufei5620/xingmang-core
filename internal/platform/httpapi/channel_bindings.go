@@ -267,7 +267,7 @@ func ListPlatformChannelBindingsHandler(
 			return
 		}
 		confirmed := append([]finance.PlatformChannelBinding(nil), active...)
-		candidates := finance.EvaluateBindingCandidates(finance.InventorySnapshot{ServiceID: serviceID, Known: inventory.state != "not_initialized" && inventory.state != "failed", Complete: inventory.complete && !inventory.truncated, Channels: inventory.channels}, confirmed, evidence)
+		candidates := finance.EvaluateBindingCandidates(finance.InventorySnapshot{ServiceID: serviceID, ServiceType: service.ServiceType, Known: inventory.state != "not_initialized" && inventory.state != "failed", Complete: inventory.complete && !inventory.truncated, Channels: inventory.channels}, confirmed, evidence)
 		if cursor != "" {
 			filtered := candidates[:0]
 			for _, candidate := range candidates {

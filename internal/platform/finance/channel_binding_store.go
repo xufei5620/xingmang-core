@@ -306,6 +306,8 @@ func (s *ChannelBindingStore) TokenEvidence(ctx context.Context, environment str
 	for _, row := range rows {
 		out = append(out, TokenMapEvidence{
 			ExternalChannelID: row.OwnAccountID, UpstreamAccountID: row.UpstreamAccountID,
+			SystemType:                row.SystemType,
+			ActiveServiceCount:        int(row.ActiveServiceCount),
 			SystemTypeMatches:         true,
 			PlatformAssignmentMissing: row.PlatformID == nil,
 		})

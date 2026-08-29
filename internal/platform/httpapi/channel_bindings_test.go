@@ -142,3 +142,25 @@ func TestPlatformChannelsQueryKeepsChannelRefRowsAndRequiresBothScopesAtRouter(t
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestPlatformChannelDateRangeRejectsPartialReversedAndOverlongWindows(t *testing.T) {
+	cases := []struct {
+		name    string
+		from    string
+		to      string
+		wantErr bool
+	}{
+		{name: "partial from", from: "2026-08-01", wantErr: true},
+		{name: "reversed", from: "2026-08-20", to: "2026-08-01", wantErr: true},
+		{name: "over ninety two days", from: "2026-01-01", to: "2026-04-10", wantErr: true},
+		{name: "inclusive ninety two days", from: "2026-08-01", to: "2026-10-31", wantErr: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := parseBusinessDayRange(tc.from, tc.to)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("range %q..%q error=%v, wantErr=%v", tc.from, tc.to, err, tc.wantErr)
+			}
+		})
+	}
+}

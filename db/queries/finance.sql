@@ -78,7 +78,12 @@ ORDER BY valid_from DESC, id DESC;
 
 -- name: ListTokenMapEvidenceByEnvironment :many
 SELECT tm.own_account_id, tm.upstream_account_id, ua.system_type,
-       ua.platform_id, ua.status AS upstream_status
+       ua.platform_id, ua.status AS upstream_status,
+       (SELECT count(*)
+          FROM core.service s
+         WHERE s.environment = ua.environment
+           AND s.service_type = ua.system_type
+           AND s.status = 'active') AS active_service_count
 FROM finance.token_map tm
 JOIN finance.upstream_account ua ON ua.id = tm.upstream_account_id
 WHERE ua.environment = sqlc.arg(environment)
