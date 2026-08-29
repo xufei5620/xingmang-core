@@ -167,7 +167,16 @@ function SubscriptionEvidence({
   to: string;
 }) {
   const usable = periodMatchesMetric(metric, from, to);
-  const usableMetric = metric && usable ? metric : undefined;
+  // NewAPI v1 cannot read subscription orders. The connector deliberately emits
+  // zero with `is_partial=true` as a missing-value sentinel; never render that
+  // zero as a real amount in the finance UI.
+  const subscriptionUnavailable = Boolean(
+    metric &&
+      (metric.freshness.is_partial ||
+        metric.freshness.state === "partial" ||
+        metric.watermark.includes("subscription:unavailable_over_http")),
+  );
+  const usableMetric = metric && usable && !subscriptionUnavailable ? metric : undefined;
   const amount = usableMetric ? metricAmountText(usableMetric) : null;
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs">
@@ -182,7 +191,11 @@ function SubscriptionEvidence({
         <span className="flex flex-wrap items-center justify-end gap-2 text-fg-muted">
           <span>—</span>
           <Badge tone="neutral">未接入</Badge>
-          <span>暂无可匹配的 NewAPI 日订阅指标；不会用 0 代替</span>
+          <span>
+            {subscriptionUnavailable
+              ? "NewAPI 上游没有订阅订单端点；金额未知，不显示 0"
+              : "暂无可匹配的 NewAPI 日订阅指标；不会用 0 代替"}
+          </span>
         </span>
       )}
     </div>
@@ -435,7 +448,7 @@ const PROFIT_COLUMNS: readonly LedgerColumn<ChannelSummary>[] = [
   {
     id: "group",
     label: "分组 / 倍率",
-    value: (row) => row.groupRate ?? accessMethodText(row.accessMethod),
+    value: (row) => `${row.groupRate ?? ""} ${accessMethodText(row.accessMethod)}`,
     cell: (row) => (
       <span>
         <span className="font-medium">{row.groupRate ? `${row.groupRate}×` : "未配置倍率"}</span>
@@ -468,6 +481,13 @@ const PROFIT_COLUMNS: readonly LedgerColumn<ChannelSummary>[] = [
         <span className="block text-xs text-fg-muted">{row.grossMargin ? formatMargin(row.grossMargin) : "毛利率未知"}</span>
       </span>
     ),
+  },
+  {
+    id: "margin",
+    label: "毛利率",
+    numeric: true,
+    value: (row) => row.grossMargin ?? "",
+    cell: (row) => (row.grossMargin ? formatMargin(row.grossMargin) : <span className="text-fg-muted">—</span>),
   },
   {
     id: "status",

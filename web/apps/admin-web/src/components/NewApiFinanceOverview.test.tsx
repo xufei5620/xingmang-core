@@ -94,6 +94,34 @@ describe("NewAPI 资金与订单", () => {
     expect(screen.getByText(/充值是资金流入/)).toBeTruthy();
   });
 
+  it("订阅指标部分可用且金额为零时保持未知，不显示 ¥0.00", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(200, {
+            items: [
+              {
+                metric_key: "newapi.subscription.daily",
+                source: "newapi-prod",
+                environment: "development",
+                watermark: "day:2026-08-28 subscription:unavailable_over_http",
+                value: { day: "2026-08-28", amount_minor_units: "0", currency: "CNY" },
+                freshness: { ...fresh, is_partial: true },
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderFinance();
+
+    expect(
+      await screen.findByText("NewAPI 上游没有订阅订单端点；金额未知，不显示 0"),
+    ).toBeTruthy();
+    expect(screen.queryByText("¥0.00")).toBeNull();
+  });
+
   it("周/月只显示不可用说明，并把日期与粒度保留在可分享 URL 控件", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [] }))));
     renderFinance("orders", "/platforms/newapi?tab=finance&day=2026-08-28&granularity=week");
@@ -158,6 +186,11 @@ describe("NewAPI 资金与订单", () => {
     expect(controls.at(-1)?.getAttribute("type")).toBe("search");
     expect(screen.getByRole("columnheader", { name: "渠道" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "上游成本" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "毛利率" })).toBeTruthy();
+    fireEvent.change(screen.getByRole("combobox", { name: "接入方式筛选" }), {
+      target: { value: "上游 Key" },
+    });
+    expect(await screen.findByText("Gemini 主渠道")).toBeTruthy();
   });
 
   it("首次读取失败显示可重试错误，重试成功后恢复利润空态", async () => {
