@@ -383,6 +383,37 @@ const usersBody = {
   },
 };
 
+function userDetailBody(platform = "sub2api", body = usersBody) {
+  const user = body.items[0];
+  if (!user) throw new Error("detail fixture needs one user");
+  return {
+    ref: { platform, id: user.id },
+    user,
+    registered_at: null,
+    period: body.period,
+    snapshot: {
+      observed_at: body.freshness.observed_at,
+      source: body.data_source,
+      watermark: "wm-detail",
+      is_partial: body.freshness.is_partial,
+    },
+    capabilities: ["platformusers.user.detail_read"],
+  };
+}
+
+function userDailyBody() {
+  return {
+    from: "2026-08-22", to: "2026-08-28",
+    points: Array.from({ length: 7 }, (_, index) => ({
+      day: `2026-08-${String(22 + index).padStart(2, "0")}`,
+      consumed: index === 1 ? { minor_units: null, currency: "" } : { minor_units: index === 0 ? "0" : "1200", currency: "CNY" },
+      requests: { value: index === 1 ? null : index * 3 },
+    })),
+    coverage: { expected_days: 7, covered_days: 6, complete: false },
+    snapshot: { observed_at: "2026-08-28T09:00:00Z", source: "sub2api-fake", watermark: "wm-daily", is_partial: true },
+  };
+}
+
 function okHandler(url: string): Response {
   // history 必须排在 metrics 前面：两者的前缀是包含关系
   if (url.startsWith("/api/v1/metrics/history")) return fakeResponse(200, historyBody);
@@ -392,6 +423,12 @@ function okHandler(url: string): Response {
     return fakeResponse(200, financeUpstreamsBody);
   if (url.startsWith("/api/v1/metrics")) return fakeResponse(200, metricsBody);
   if (url.startsWith("/api/v1/services")) return fakeResponse(200, servicesBody);
+  if (url.startsWith("/api/v1/ui/saved-views")) return fakeResponse(200, { items: [] });
+  if (url.includes("/daily-usage")) return fakeResponse(200, userDailyBody());
+  if (/\/api\/v1\/platforms\/[^/]+\/users\/u-/.test(url)) {
+    const platform = url.includes("/platforms/newapi/") ? "newapi" : "sub2api";
+    return fakeResponse(200, userDetailBody(platform));
+  }
   if (url.includes("/users")) return fakeResponse(200, usersBody);
   if (url.startsWith("/api/v1/alerts")) return fakeResponse(200, alertsBody);
   if (url.startsWith("/api/v1/audit/events"))

@@ -58,12 +58,53 @@ function fakeResponse(body: unknown, status = 200): Response {
   } as unknown as Response;
 }
 
+function detailFromPage(body: ReturnType<typeof pageBody>) {
+  const user = body.items[0];
+  return {
+    ref: { platform: "sub2api", id: user?.id ?? "u_10241" },
+    user,
+    registered_at: null,
+    period: body.period,
+    snapshot: {
+      observed_at: body.freshness.observed_at,
+      source: body.data_source,
+      watermark: "wm-detail",
+      is_partial: body.freshness.is_partial,
+    },
+    capabilities: ["platformusers.user.detail_read", "platformusers.user.daily_usage_read"],
+  };
+}
+
+function dailyBody() {
+  return {
+    from: "2026-08-22", to: "2026-08-28",
+    points: Array.from({ length: 7 }, (_, index) => ({
+      day: `2026-08-${String(22 + index).padStart(2, "0")}`,
+      consumed: index === 1 ? { minor_units: null, currency: "" } : { minor_units: index === 0 ? "0" : "1200", currency: "CNY" },
+      requests: { value: index === 1 ? null : index * 3 },
+    })),
+    coverage: { expected_days: 7, covered_days: 6, complete: false },
+    snapshot: { observed_at: "2026-08-28T09:00:00Z", source: "sub2api-fake", watermark: "wm-daily", is_partial: true },
+  };
+}
+
 function stubFetch(handler: (url: string, init?: RequestInit) => Response = () => fakeResponse(pageBody())) {
   const urls: string[] = [];
   const fetchMock = vi.fn((input: string, init?: RequestInit) => {
     const url = String(input);
     urls.push(url);
-    return Promise.resolve(handler(url, init));
+    const response = handler(url, init);
+    // Keep fixture authoring compact while the page moves from v1 list to v2 detail:
+    // successful old-shaped fixtures are projected into the explicit detail envelope.
+    if (url.includes("/daily-usage") && response.ok) {
+      return Promise.resolve(fakeResponse(dailyBody(), response.status));
+    }
+    if (/\/users\/u-[^/]+$/.test(new URL(url, "http://local.test").pathname) && response.ok) {
+      return Promise.resolve(response.json()).then((body) =>
+        fakeResponse(body && "items" in body ? detailFromPage(body as ReturnType<typeof pageBody>) : body),
+      );
+    }
+    return Promise.resolve(response);
   });
   vi.stubGlobal("fetch", fetchMock);
   return { urls, fetchMock };
@@ -99,7 +140,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("用户详情共享事实（platformusers v1）", () => {
+describe("用户详情共享事实（platformusers v2）", () => {
   it("已知 0 与未知金额分开显示，并把来源、新鲜度与 Fake 横幅放在事实旁边", async () => {
     stubFetch();
     renderPage();
@@ -128,8 +169,9 @@ describe("用户详情共享事实（platformusers v1）", () => {
     const request = new URL(urls[0] ?? "", "http://local.test");
     expect(request.searchParams.get("day")).toBe("2026-08-27");
     expect(request.searchParams.get("granularity")).toBe("week");
-    expect(request.searchParams.get("q")).toBe("u_10241");
-    expect(request.searchParams.get("limit")).toBe("200");
+    expect(request.pathname).toBe("/api/v1/platforms/sub2api/users/u-755f3130323431");
+    expect(request.searchParams.get("q")).toBeNull();
+    expect(request.searchParams.get("limit")).toBeNull();
   });
 
   it("opaque route ID 解码后做精确查询，不产生路径穿越或默认用户回落", async () => {
@@ -143,8 +185,8 @@ describe("用户详情共享事实（platformusers v1）", () => {
 
     expect(await screen.findByRole("heading", { name: "Opaque", level: 2 })).toBeTruthy();
     const request = new URL(urls[0] ?? "", "http://local.test");
-    expect(request.pathname).toBe("/api/v1/platforms/newapi/users");
-    expect(request.searchParams.get("q")).toBe(opaqueId);
+    expect(request.pathname).toBe("/api/v1/platforms/newapi/users/u-74656e616e742f613f736c6f743d233125207265616479");
+    expect(request.searchParams.get("q")).toBeNull();
   });
 
   it.each([
@@ -158,7 +200,7 @@ describe("用户详情共享事实（platformusers v1）", () => {
 
     expect(await screen.findByRole("heading", { name: "Dot User", level: 2 })).toBeTruthy();
     const request = new URL(urls[0] ?? "", "http://local.test");
-    expect(request.searchParams.get("q")).toBe(id);
+    expect(request.pathname).toContain("/users/u-2e");
   });
 
   it("缺失/非法邮箱、未知状态与非法时间都显式说明", async () => {
@@ -194,6 +236,9 @@ describe("平台特有布局", () => {
     for (const heading of ["客户类型", "注册时间", "近 7 天消费趋势"]) {
       expect(screen.getByRole("heading", { name: heading, level: 3 })).toBeTruthy();
     }
+    expect(await screen.findByText("覆盖 6 / 7 天")).toBeTruthy();
+    expect(screen.getAllByText("未知").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("¥0.00").length).toBeGreaterThan(1);
     const tabs = screen.getAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "消费明细",
@@ -255,28 +300,20 @@ describe("平台特有布局", () => {
 });
 
 describe("查找状态与负向边界", () => {
-  it("过滤结果完整耗尽才显示 definite not-found", async () => {
-    stubFetch(() => fakeResponse(pageBody({ items: [userItem({ id: "u_10241-copy" })] })));
+  it("v2 404 才显示 definite not-found，不回落到列表样本", async () => {
+    stubFetch(() => fakeResponse({ error: { code: "ACTION_NOT_REGISTERED", message: "没有这条用户记录" } }, 404));
     renderPage();
 
     expect(await screen.findByText("没有这个用户")).toBeTruthy();
     expect(screen.queryByText("无法确认用户是否存在")).toBeNull();
   });
 
-  it("五页仍有游标时显示可重试的 incomplete，不误报没有这个用户", async () => {
-    let pageIndex = 0;
-    stubFetch(() => {
-      pageIndex += 1;
-      return fakeResponse(
-        pageBody({
-          items: [userItem({ id: `u_10241-copy-${pageIndex}` })],
-          next_cursor: `cursor-${pageIndex + 1}`,
-        }),
-      );
-    });
+  it("v2 精确查找未完成时显示可重试错误，不误报没有这个用户", async () => {
+    stubFetch(() => fakeResponse({ error: { code: "EXECUTION_FAILED", message: "用户精确查找未完成，请重试" } }, 502));
     renderPage();
 
-    expect(await screen.findByText("无法确认用户是否存在")).toBeTruthy();
+    expect(await screen.findByText("加载失败")).toBeTruthy();
+    expect(screen.getByText(/用户精确查找未完成/)).toBeTruthy();
     expect(screen.queryByText("没有这个用户")).toBeNull();
     expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
   });
@@ -292,7 +329,7 @@ describe("查找状态与负向边界", () => {
     expect(screen.queryByText("无法确认用户是否存在")).toBeNull();
   });
 
-  it("只调用 platformusers 列表 Query，不碰 reqlog/content/invoice/finance", async () => {
+  it("只调用 platformusers 精确 Query，不碰 reqlog/content/invoice/finance", async () => {
     const { urls } = stubFetch();
     renderPage("/platforms/newapi/users/u-755f3130323431");
     await screen.findByRole("heading", { name: "张伟", level: 2 });
@@ -300,28 +337,21 @@ describe("查找状态与负向边界", () => {
     expect(urls.length).toBeGreaterThan(0);
     for (const raw of urls) {
       const url = new URL(raw, "http://local.test");
-      expect(url.pathname).toBe("/api/v1/platforms/newapi/users");
+      expect(url.pathname).toBe("/api/v1/platforms/newapi/users/u-755f3130323431");
       expect(url.pathname).not.toMatch(/requests|content|invoice|finance|reqlog/);
     }
     expect(screen.queryByRole("table")).toBeNull();
   });
 
-  it("incomplete 的重试会重新执行有界查找", async () => {
-    let calls = 0;
-    const { fetchMock } = stubFetch(() => {
-      calls += 1;
-      return fakeResponse(
-        pageBody({
-          items: [userItem({ id: `copy-${calls}` })],
-          next_cursor: `cursor-${calls + 1}`,
-        }),
-      );
-    });
+  it("精确查找错误的重试只重新执行一次 detail Query", async () => {
+    const { fetchMock } = stubFetch(() =>
+      fakeResponse({ error: { code: "EXECUTION_FAILED", message: "用户精确查找未完成，请重试" } }, 502),
+    );
     renderPage();
-    await screen.findByText("无法确认用户是否存在");
+    await screen.findByText("加载失败");
 
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
 
-    expect(fetchMock.mock.calls.length).toBeGreaterThan(5);
+    expect(fetchMock.mock.calls.length).toBe(2);
   });
 });

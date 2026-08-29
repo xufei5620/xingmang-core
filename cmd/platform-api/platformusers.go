@@ -80,3 +80,24 @@ func platformUsersOrNil(s *platformusers.Service) httpapi.PlatformUsersQuerier {
 	}
 	return s
 }
+
+func platformUserDetailsOrNil(s *platformusers.Service) httpapi.PlatformUserDetailsQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+func platformUserDailyUsageOrNil(s *platformusers.Service) httpapi.PlatformUserDailyUsageQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+func platformUserKeysOrNil(s *platformusers.Service) httpapi.PlatformUserKeysQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}

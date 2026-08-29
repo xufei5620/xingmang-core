@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
@@ -124,5 +125,20 @@ func TestPlatformChannelBindingsQueryCursorIsOpaqueAndStable(t *testing.T) {
 	second := callBindingQuery(t, source, fakeMetricListerForBinding{items: []ops.Observation{bindingObservation(serviceID.String())}}, "service_id="+serviceID.String()+"&limit=2&cursor="+*page.Next)
 	if second.Code != http.StatusOK || strings.Contains(second.Body.String(), `"external_channel_id":"1"`) {
 		t.Fatalf("cursor response=%d %s", second.Code, second.Body.String())
+	}
+}
+
+func TestPlatformChannelsQueryKeepsChannelRefRowsAndRequiresBothScopesAtRouter(t *testing.T) {
+	serviceID := uuid.New()
+	source := fakeBindingLister{service: finance.BindingService{ID: serviceID, ServiceType: "newapi", InstanceID: "newapi-prod", Environment: "production", Status: "active"}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/platforms/newapi/channels?service_id="+serviceID.String(), nil)
+	routeContext := chi.NewRouteContext()
+	routeContext.URLParams.Add("platform", "newapi")
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+	request = request.WithContext(principal.WithPrincipal(request.Context(), principal.Principal{ID: "staff", Type: principal.TypeHuman, IdentityZone: "staff", Issuer: "issuer", Subject: "subject", Environment: "production"}))
+	recorder := httptest.NewRecorder()
+	ListPlatformChannelsHandler(source, fakeMetricListerForBinding{items: []ops.Observation{bindingObservation(serviceID.String())}}).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"channel_ref"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

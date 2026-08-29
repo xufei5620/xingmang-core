@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import { ApiError } from "./client";
+import goldenText from "../../../../../contracts/testdata/platform-user-ref-v1.json?raw";
 import type { ApiClient } from "./client";
 import {
   decodePlatformUserIdSegment,
   describeMaskedEmail,
   describeUserStatus,
   encodePlatformUserIdSegment,
+  getPlatformUser,
+  listPlatformUserDailyUsage,
   lookupPlatformUserExact,
   platformHasUsers,
   UNPARSED_CONTACT,
@@ -13,6 +17,12 @@ import {
 } from "./users";
 
 describe("不透明用户 ID 的 URL 路径段 codec", () => {
+  const golden = JSON.parse(goldenText) as Array<{ id: string; segment: string }>;
+
+  it.each(golden)("与 Go 共用 golden：%j", ({ id, segment }) => {
+    expect(encodePlatformUserIdSegment(id)).toBe(segment);
+    expect(decodePlatformUserIdSegment(segment)).toBe(id);
+  });
   it.each([
     ".",
     "..",
@@ -44,6 +54,62 @@ describe("不透明用户 ID 的 URL 路径段 codec", () => {
     for (const segment of ["", "u-", "raw-id", "u-0", "u-gg", "u-C2A0", "u-c0af"]) {
       expect(decodePlatformUserIdSegment(segment)).toBeNull();
     }
+  });
+});
+
+describe("v2 精确用户详情 Query", () => {
+  it("只调用 canonical detail endpoint，不扫描用户列表", async () => {
+    const user: PlatformUserItem = {
+      id: "u_10241", username: "张伟", email_masked: "张***@example.com", status: "active",
+      balance: { minor_units: "1284500", currency: "CNY" },
+      period_recharge: { minor_units: "120000", currency: "CNY" },
+      period_consumed: { minor_units: "31200", currency: "CNY" },
+      last_30d_consumed: { minor_units: "812000", currency: "CNY" },
+      last_active_at: "2026-08-28T08:00:00Z", token_prefix: "sk-a1b2",
+    };
+    const client: ApiClient = {
+      get: vi.fn().mockResolvedValue({
+        ref: { platform: "sub2api", id: "u_10241" }, user, registered_at: null,
+        period: { day: "2026-08-28", granularity: "day", from: "2026-08-28", to: "2026-08-28" },
+        snapshot: { observed_at: "2026-08-28T09:00:00Z", source: "sub2api-fake", watermark: "wm", is_partial: false },
+        capabilities: ["platformusers.user.detail_read"],
+      }),
+      post: vi.fn(),
+    };
+    const result = await getPlatformUser("sub2api", "u_10241", {}, client);
+    expect(result.kind).toBe("found");
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(String((client.get as ReturnType<typeof vi.fn>).mock.calls[0]?.[0])).toBe(
+      "/api/v1/platforms/sub2api/users/u-755f3130323431",
+    );
+    expect(String((client.get as ReturnType<typeof vi.fn>).mock.calls[0]?.[0])).not.toContain("?q=");
+  });
+
+  it("404 转成确定的 notFound，502 保留给页面错误态", async () => {
+    const notFound: ApiClient = { get: vi.fn().mockRejectedValue(new ApiError(404, "ACTION_NOT_REGISTERED", "没有这条用户记录")), post: vi.fn() };
+    expect((await getPlatformUser("newapi", "20031", {}, notFound)).kind).toBe("notFound");
+    const failed: ApiClient = { get: vi.fn().mockRejectedValue(new ApiError(502, "EXECUTION_FAILED", "用户精确查找未完成，请重试")), post: vi.fn() };
+    await expect(getPlatformUser("newapi", "20031", {}, failed)).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("每日消费趋势 Query", () => {
+  it("按 canonical UserRef 读取每日序列，不调用其它领域端点", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockResolvedValue({
+        from: "2026-08-27", to: "2026-08-29", points: [],
+        coverage: { expected_days: 3, covered_days: 0, complete: false },
+        snapshot: { observed_at: "2026-08-29T09:00:00Z", source: "sub2api-fake", watermark: "wm", is_partial: true },
+      }),
+      post: vi.fn(),
+    };
+    await listPlatformUserDailyUsage("sub2api", "u_10241", { day: "2026-08-29", days: 3 }, client);
+    expect(String((client.get as ReturnType<typeof vi.fn>).mock.calls[0]?.[0])).toBe(
+      "/api/v1/platforms/sub2api/users/u-755f3130323431/daily-usage",
+    );
+    expect((client.get as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]).toEqual({
+      searchParams: { day: "2026-08-29", days: "3" },
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { DataTableV2, PageState, StatTile } from "@xingmang/ui-admin";
+import { PageState, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import {
   listChannelSummaries,
@@ -23,6 +23,8 @@ import { describeMissingTotal } from "../lib/upstreamTotals";
 import { ApiStateView } from "./ApiStateView";
 import { ChannelScopeNote } from "./ChannelScopeNote";
 import { channelTableColumns, type ChannelPlatform } from "./ChannelTableColumns";
+import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
+import { ManagedChannelTable } from "./ManagedChannelTable";
 
 /** 渠道管理表（两个平台共用）。原型 `V["s2/upstream"]` / `V["newapi/upstream"]`。
  *
@@ -46,9 +48,13 @@ import { channelTableColumns, type ChannelPlatform } from "./ChannelTableColumns
 export function ChannelTable({
   platform,
   lead,
+  serviceId,
+  serviceStatus,
 }: {
   platform: ChannelPlatform;
   lead: string;
+  serviceId?: string;
+  serviceStatus?: string;
 }) {
   const summaryQuery = useQuery({
     queryKey: ["finance", "channels", "summary"],
@@ -68,6 +74,12 @@ export function ChannelTable({
   // 而不是手抄一份——手抄的那份会在下次加列时悄悄把新列藏起来
   const allColumnIds = columns.map((c) => c.id);
 
+  // MAP4 只在有且仅有一个 active managed service 时切到 ChannelRef 粒度。
+  // 未登记、已降级或多实例先保留已验证的账号粒度，不猜“第一条服务”。
+  if (serviceId && serviceStatus === "active") {
+    return <ManagedChannelTable platform={platform} serviceId={serviceId} />;
+  }
+
   return (
     <section className="flex flex-col gap-3">
       <p className="text-xs text-fg-muted">{lead}</p>
@@ -78,7 +90,8 @@ export function ChannelTable({
         onRetry={() => void summaryQuery.refetch()}
       >
         <ChannelTiles platform={platform} rows={rows} />
-        <DataTableV2
+        <PersistentDataTable
+          tableKey={platformSavedViewTableKey(platform, "channels")}
           caption={`${platform === "sub2api" ? "Sub2API" : "NewAPI"} 逐上游账号的成本、我方计费消耗与毛利`}
           columns={columns}
           rows={rows}

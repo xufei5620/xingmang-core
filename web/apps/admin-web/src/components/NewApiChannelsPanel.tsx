@@ -10,10 +10,12 @@ import { ChannelTable } from "./ChannelTable";
  *  那条指标一行 = NewAPI 自己的一条渠道，与上游账号对不上号
  *  （见 `ChannelTable` 顶部的说明）。原型的 NewAPI 渠道表也没有这三列，
  *  它们的去处是渠道保障（M1.5）。 */
-export function NewApiChannelsPanel() {
+export function NewApiChannelsPanel({ serviceId, serviceStatus }: { serviceId?: string; serviceStatus?: string } = {}) {
   return (
     <ChannelTable
       platform="newapi"
+      serviceId={serviceId}
+      serviceStatus={serviceStatus}
       lead="一行对应一个上游账号，并映射到分组倍率与 Key；成本与利润按这一行独立核算。"
     />
   );
