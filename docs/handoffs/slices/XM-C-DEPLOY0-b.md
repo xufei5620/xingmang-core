@@ -10,7 +10,7 @@ READY
 - base: `f982256`（XM-C-DEPLOY0-a READY）
 - worktree: `K:/星芒统一控制平台/wt-xmDEPLOY0-b`
 - implementation commit: `3036437`
-- handoff commit: 待提交
+- handoff commit: 见最终 READY 行（该行引用包含本文件的最终提交）
 
 ## summary
 
