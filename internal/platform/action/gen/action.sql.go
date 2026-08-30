@@ -102,3 +102,98 @@ func (q *Queries) ListActionRunsByAction(ctx context.Context, arg ListActionRuns
 	}
 	return items, nil
 }
+
+const listActionRuns = `-- name: ListActionRuns :many
+SELECT id, action_id, action_version, principal_id, principal_type, environment, request_id, risk_level, status, error_code, duration_ms, started_at, finished_at FROM action.action_run
+WHERE environment = $1::text
+  AND ($2::text = '' OR action_id = $2::text)
+  AND ($3::text = '' OR status = $3::text)
+  AND ($4::text = '' OR principal_id = $4::text)
+  AND (
+    $5::boolean = false
+    OR started_at < $6::timestamptz
+    OR (started_at = $6::timestamptz AND id < $7::uuid)
+  )
+ORDER BY started_at DESC, id DESC
+LIMIT $8::int
+`
+
+type ListActionRunsParams struct {
+	Environment     string
+	ActionID        string
+	Status          string
+	PrincipalID     string
+	HasCursor       bool
+	BeforeStartedAt pgtype.Timestamptz
+	BeforeID        uuid.UUID
+	RowLimit        int32
+}
+
+func (q *Queries) ListActionRuns(ctx context.Context, arg ListActionRunsParams) ([]ActionActionRun, error) {
+	rows, err := q.db.Query(ctx, listActionRuns,
+		arg.Environment,
+		arg.ActionID,
+		arg.Status,
+		arg.PrincipalID,
+		arg.HasCursor,
+		arg.BeforeStartedAt,
+		arg.BeforeID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ActionActionRun{}
+	for rows.Next() {
+		var i ActionActionRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.ActionID,
+			&i.ActionVersion,
+			&i.PrincipalID,
+			&i.PrincipalType,
+			&i.Environment,
+			&i.RequestID,
+			&i.RiskLevel,
+			&i.Status,
+			&i.ErrorCode,
+			&i.DurationMs,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getActionRunByID = `-- name: GetActionRunByID :one
+SELECT id, action_id, action_version, principal_id, principal_type, environment, request_id, risk_level, status, error_code, duration_ms, started_at, finished_at FROM action.action_run
+WHERE id = $1
+`
+
+func (q *Queries) GetActionRunByID(ctx context.Context, id uuid.UUID) (ActionActionRun, error) {
+	row := q.db.QueryRow(ctx, getActionRunByID, id)
+	var i ActionActionRun
+	err := row.Scan(
+		&i.ID,
+		&i.ActionID,
+		&i.ActionVersion,
+		&i.PrincipalID,
+		&i.PrincipalType,
+		&i.Environment,
+		&i.RequestID,
+		&i.RiskLevel,
+		&i.Status,
+		&i.ErrorCode,
+		&i.DurationMs,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}

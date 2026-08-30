@@ -258,6 +258,41 @@ func TestAppendSerializesConcurrentWriters(t *testing.T) {
 	}
 }
 
+func TestGetByActionRunID(t *testing.T) {
+	// XM-ACTIONS0：操作与审批页「执行记录」详情用它关联 before/after 摘要
+	s := audit.NewStore(testPool(t))
+	ctx := context.Background()
+
+	e := evt("finance.upstream_account.set")
+	e.BeforeSummary = map[string]any{"status": "disabled"}
+	written, err := s.Append(ctx, e)
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	got, ok, err := s.GetByActionRunID(ctx, written.ActionRunID)
+	if err != nil {
+		t.Fatalf("GetByActionRunID: %v", err)
+	}
+	if !ok {
+		t.Fatal("应能读到刚写入的关联事件")
+	}
+	if got.ID != written.ID || got.ActionID != written.ActionID {
+		t.Fatalf("读回的事件与写入不符: %+v vs %+v", got, written)
+	}
+	if got.BeforeSummary["status"] != "disabled" || got.AfterSummary["status"] != "active" {
+		t.Fatalf("前后摘要不符: before=%v after=%v", got.BeforeSummary, got.AfterSummary)
+	}
+
+	_, ok, err = s.GetByActionRunID(ctx, uuid.New())
+	if err != nil {
+		t.Fatalf("GetByActionRunID(不存在): %v", err)
+	}
+	if ok {
+		t.Fatal("不存在的 action_run_id 应返回 ok=false")
+	}
+}
+
 func countEvents(t *testing.T, pool *pgxpool.Pool) int {
 	t.Helper()
 	var n int

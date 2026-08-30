@@ -400,7 +400,61 @@ function userDetailBody(platform = "sub2api") {
   };
 }
 
+/** Action 目录（XM-ACTIONS0，GET /api/v1/actions）。一条 L1 可执行、一条
+ *  L2 不可执行——覆盖「操作目录」与「风险与启用条件」两个子页签都要用到的
+ *  executable/blocked_reason 分支。 */
+const actionsDirectoryBody = {
+  items: [
+    {
+      id: "registry.service.create",
+      version: "1",
+      risk_level: "L1",
+      permission: "registry.service.manage",
+      environments: ["development"],
+      principal_types: ["HUMAN"],
+      executable: true,
+    },
+    {
+      id: "finance.upstream_account.bulk_disable",
+      version: "1",
+      risk_level: "L2",
+      permission: "finance.upstream_account.manage",
+      environments: ["development"],
+      principal_types: ["HUMAN"],
+      executable: false,
+      blocked_reason: "需要 Action Advanced Controls（Foundation-B）",
+    },
+  ],
+};
+
+/** 跨 Action 执行记录一页（XM-ACTIONS0，GET /api/v1/actions/runs）。 */
+const actionRunsBody = {
+  items: [
+    {
+      id: "22222222-2222-2222-2222-222222222222",
+      action_id: "registry.service.create",
+      action_version: "1",
+      principal_id: "staff_alice",
+      principal_type: "HUMAN",
+      environment: "development",
+      request_id: "req-1",
+      risk_level: "L1",
+      status: "succeeded",
+      error_code: "",
+      duration_ms: 12,
+      started_at: "2026-08-29T10:00:00.000000Z",
+      finished_at: "2026-08-29T10:00:00.012000Z",
+    },
+  ],
+  next_cursor: "",
+};
+
 function okHandler(url: string): Response {
+  // 精确匹配在前：/api/v1/actions/runs 与 /api/v1/actions/{id}/versions/{v}/execute
+  // 都以 /api/v1/actions 开头，必须先分流，不能让下面任何一条 startsWith
+  // 意外吞掉另一条
+  if (url === "/api/v1/actions") return fakeResponse(200, actionsDirectoryBody);
+  if (url.startsWith("/api/v1/actions/runs")) return fakeResponse(200, actionRunsBody);
   // history 必须排在 metrics 前面：两者的前缀是包含关系
   if (url.startsWith("/api/v1/metrics/history")) return fakeResponse(200, historyBody);
   if (url.startsWith("/api/v1/finance/channels/summary"))
@@ -1220,11 +1274,15 @@ describe("四分组侧栏：分组与条目逐字对齐 ADMIN-IA v3 §一", () =
     // 而后者才是这几页现在的状态（§12 惯例要的是别把没接的说成接了）
     renderRoute("/dashboard");
     const nav = await screen.findByRole("navigation", { name: "主导航" });
+    const changes = within(nav).getByRole("link", { name: /版本与发布/ });
+    expect(changes.getAttribute("href")).toBe("/changes");
+    // F-B 现在只剩「版本与发布」一条：操作与审批在 XM-ACTIONS0 接了操作目录/
+    // 执行记录的真实数据，已从「未实装」名单里毕业，不再挂这个标签
+    expect(within(nav).getAllByText("未建·F-B").length).toBe(1);
     const actions = within(nav).getByRole("link", { name: /操作与审批/ });
     expect(actions.getAttribute("href")).toBe("/actions");
-    // F-B 有两条（操作与审批、版本与发布），所以是 getAllByText
-    expect(within(nav).getAllByText("未建·F-B").length).toBe(2);
-    // 已实装的页不挂标签：一个写着「F-A」的标签贴在正常工作的页面旁边什么也没说
+    // 已实装的页不挂标签：一个写着「未建」的标签贴在正常工作的页面旁边什么也没说
+    expect(actions.textContent).not.toMatch(/未建/);
     expect(within(nav).getByRole("link", { name: "运营工作台" })).not.toBeNull();
   });
 
@@ -1859,12 +1917,9 @@ describe("未实装页的诚实占位与门禁", () => {
     }
   });
 
-  it("操作与审批页显示 F-B 门禁，不提供任何执行入口", async () => {
-    // ADMIN-IA §七：F-B 未完成前必须显示门禁，不可伪造执行
-    renderRoute("/actions");
-    expect(await screen.findByText(/审批链（Foundation-B）尚未上线/)).not.toBeNull();
-    expect(screen.getByText(/不提供任何执行入口/)).not.toBeNull();
-  });
+  // 「操作与审批页显示 F-B 门禁」原来在这里断言，作为占位页的一个特例。
+  // XM-ACTIONS0 把操作目录/执行记录接上真实数据后，/actions 不再是占位页，
+  // 断言挪到下面的「操作与审批」独立 describe 块（门禁本身仍然存在并被断言）。
 
   it("扩展能力四页标注「仅预览、不保存、不发布、不执行」", async () => {
     renderRoute("/ext/publishing");
@@ -1884,6 +1939,54 @@ describe("未实装页的诚实占位与门禁", () => {
 });
 
 
+
+describe("操作与审批（XM-ACTIONS0：操作目录 + 执行记录接真实数据，待审批仍受 F-B 门禁）", () => {
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("默认落在操作目录子页签，显示真实的 Action 声明", async () => {
+    renderRoute("/actions");
+    expect(await screen.findByRole("heading", { name: "操作与审批", level: 2 })).not.toBeNull();
+    expect(await screen.findByRole("tab", { name: "操作目录", selected: true })).not.toBeNull();
+    expect(await screen.findByText("registry.service.create")).not.toBeNull();
+    // 不可执行的动作说明原因，不是单纯灰掉了事
+    expect(screen.getByText(/需要 Action Advanced Controls/)).not.toBeNull();
+  });
+
+  it("页面级 F-B 门禁始终可见，不提供任何执行入口（ADMIN-IA §七）", async () => {
+    renderRoute("/actions");
+    expect(await screen.findByText(/审批链（Foundation-B）尚未上线/)).not.toBeNull();
+    expect(screen.getByText(/不提供任何执行入口/)).not.toBeNull();
+  });
+
+  it("待审批子页签说明审批模块尚未接入，不假装有队列", async () => {
+    renderRoute("/actions?sub=pending");
+    expect(await screen.findByRole("tab", { name: "待审批", selected: true })).not.toBeNull();
+    expect(await screen.findByText(/审批队列尚未接入/)).not.toBeNull();
+    expect(screen.getByText(/approval 模块目前只有目录占位/)).not.toBeNull();
+  });
+
+  it("执行记录子页签接真实分页数据", async () => {
+    renderRoute("/actions?sub=runs");
+    expect(await screen.findByRole("tab", { name: "执行记录", selected: true })).not.toBeNull();
+    expect(await screen.findByText("staff_alice")).not.toBeNull();
+    expect(await screen.findByText("registry.service.create")).not.toBeNull();
+  });
+
+  it("风险与启用条件子页签展示 ADR-003 的风险等级表", async () => {
+    renderRoute("/actions?sub=risk");
+    expect(await screen.findByRole("tab", { name: "风险与启用条件", selected: true })).not.toBeNull();
+    expect(await screen.findByText("退款、生产基础设施高影响动作、开票关键动作")).not.toBeNull();
+  });
+
+  it("未知子页签给 Not Found，不回落操作目录", async () => {
+    renderRoute("/actions?sub=拼错了");
+    expect(await screen.findByText(/「拼错了」子页尚未接入/)).not.toBeNull();
+  });
+});
 
 describe("横切行为在迁移后仍然在场", () => {
   beforeEach(() => devLogin());

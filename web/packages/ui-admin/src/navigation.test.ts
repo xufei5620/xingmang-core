@@ -233,16 +233,20 @@ describe("查表与状态标签", () => {
 
   it("已实装的页不挂阶段标签，未实装的挂「未建·<阶段>」", () => {
     const dashboard = navItemByPath("/dashboard")?.item;
+    // 操作与审批在 XM-ACTIONS0 接了操作目录/执行记录的真实数据，已实装，
+    // 不再挂阶段标签——「版本与发布」是现在仍未实装的 F-B 条目
     const actions = navItemByPath("/actions")?.item;
+    const changes = navItemByPath("/changes")?.item;
     expect(dashboard && navStageHint(dashboard)).toBeUndefined();
-    expect(actions && navStageHint(actions)).toBe("未建·F-B");
+    expect(actions && navStageHint(actions)).toBeUndefined();
+    expect(changes && navStageHint(changes)).toBe("未建·F-B");
   });
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 2 + 治理段 4（资源目录、人员与权限、设置已实装）+ 扩展能力 4
+    // 全局段 1（操作与审批已实装，XM-ACTIONS0）+ 治理段 4（资源目录、人员与
+    // 权限、设置已实装）+ 扩展能力 4
     expect(paths).toEqual([
-      "/actions",
       "/jobs",
       "/finance",
       "/ops",
@@ -256,10 +260,11 @@ describe("查表与状态标签", () => {
     expect(placeholderNavItems().every((item) => navStageHint(item) !== undefined)).toBe(true);
   });
 
-  it("已实装的五页正是现在真有内容的那五页", () => {
+  it("已实装的七页正是现在真有内容的那七页", () => {
     expect(allNavItems().filter((item) => item.built).map((item) => item.path)).toEqual([
       "/dashboard",
       "/alerts",
+      "/actions",
       "/audit",
       "/registry",
       "/identity",

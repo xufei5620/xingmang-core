@@ -159,9 +159,12 @@ func main() {
 		}
 		localAuthHandlers = localauth.NewHandlers(localAuthStore, cfg.Environment, auditStore, logger)
 	}
+	// 具名保留：Kernel 用它写执行记录，httpapi 用它读——操作与审批页
+	// 「执行记录」子页签（XM-ACTIONS0）不另开一条写路径，只加只读查询。
+	actionRunStore := action.NewPgRunStore(pool, logger)
 	kernel := action.NewKernel(
 		actionRegistry,
-		action.NewPgRunStore(pool, logger),
+		actionRunStore,
 		action.WithAuditSink(audit.NewActionSink(auditStore)),
 		action.WithLogger(logger),
 	)
@@ -240,7 +243,13 @@ func main() {
 		MetricHistory: opsStore,
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
-		AuditEvents:             auditStore,
+		AuditEvents: auditStore,
+		// 操作与审批页「执行记录」子页签（XM-ACTIONS0）：复用 Kernel 已经在
+		// 写的同一个 RunStore，读写同一份实现，不另开访问 action_run 表的路径。
+		ActionRuns: actionRunStore,
+		// 详情端点关联的审计前后摘要同样复用 auditStore：新增的只是一条查询
+		// 方法（GetByActionRunID），不是第二条访问审计表的路径。
+		ActionRunAudit:          auditStore,
 		Alerts:                  alertStore,
 		SavedViews:              savedViewStore,
 		PlatformChannelBindings: channelBindingStore,

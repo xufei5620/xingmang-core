@@ -366,6 +366,61 @@ func (s *Store) ListRecent(ctx context.Context, environment string, beforeSeq in
 	return out, nil
 }
 
+// GetByActionRunID 读取某次 Action 执行关联的审计事件（供操作与审批页
+// 「执行记录」详情的 before/after 摘要关联展示，XM-ACTIONS0）。不存在返回
+// (zero, false, nil)——调用方据此回「无关联审计事件」而不是当成错误。
+//
+// 一次 Execute 只产生一条审计事件，成功失败都写（kernel.go Execute）；库层
+// 没有唯一约束强制这一点，取 sequence 最小的一条给出确定结果（见
+// GetAuditEventByActionRunID 的查询注释）。
+//
+// 与 ListRecent 同一条纪律：不取两个 connector 摘要（无界 jsonb，这一屏用不到）。
+func (s *Store) GetByActionRunID(ctx context.Context, runID uuid.UUID) (Event, bool, error) {
+	row, err := gen.New(s.pool).GetAuditEventByActionRunID(ctx, runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Event{}, false, nil
+	}
+	if err != nil {
+		return Event{}, false, fmt.Errorf("get audit event by action_run_id: %w", err)
+	}
+	before, err := jsonToMap(row.BeforeSummary)
+	if err != nil {
+		return Event{}, false, fmt.Errorf("before_summary: %w", err)
+	}
+	after, err := jsonToMap(row.AfterSummary)
+	if err != nil {
+		return Event{}, false, fmt.Errorf("after_summary: %w", err)
+	}
+	return Event{
+		ID:                       row.ID,
+		Sequence:                 row.Sequence,
+		OccurredAt:               fromTS(row.OccurredAt),
+		RecordedAt:               fromTS(row.RecordedAt),
+		PrincipalID:              row.PrincipalID,
+		PrincipalType:            principal.Type(row.PrincipalType),
+		ActionID:                 row.ActionID,
+		ActionVersion:            row.ActionVersion,
+		ActionRunID:              row.ActionRunID,
+		ResourceType:             row.ResourceType,
+		ResourceID:               row.ResourceID,
+		Environment:              row.Environment,
+		Reason:                   row.Reason,
+		ApprovalID:               row.ApprovalID,
+		RequestID:                row.RequestID,
+		TraceID:                  row.TraceID,
+		SourceIP:                 row.SourceIp,
+		BeforeSummary:            before,
+		AfterSummary:             after,
+		ConnectorRequestSummary:  map[string]any{},
+		ConnectorResponseSummary: map[string]any{},
+		Result:                   Result(row.Result),
+		CompensationResult:       row.CompensationResult,
+		PrevHash:                 row.PrevHash,
+		EventHash:                row.EventHash,
+		CanonicalVersion:         row.CanonicalVersion,
+	}, true, nil
+}
+
 // ChainProblem 描述链校验发现的第一个问题。
 type ChainProblem struct {
 	Sequence int64

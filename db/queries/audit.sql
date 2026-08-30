@@ -51,6 +51,26 @@ WHERE environment = @environment
 ORDER BY sequence DESC
 LIMIT @row_limit::int;
 
+-- name: GetAuditEventByActionRunID :one
+-- 按 action_run_id 取回关联的审计事件（供操作与审批页「执行记录」详情的
+-- before/after 摘要关联展示，XM-ACTIONS0）。一次 Execute 只产生一条审计事件
+-- （kernel.go Execute，成功失败都写），库层没有唯一约束强制这一点——
+-- ORDER BY sequence ASC LIMIT 1 在这个假设被打破时仍给出一个确定的结果，
+-- 而不是让哪一行胜出取决于查询计划。走既有索引 audit_event_action_run_idx
+-- （迁移 000003）。
+--
+-- 不取两个 connector 摘要：与 ListRecentAuditEvents 同一条纪律（无界 jsonb，
+-- 这一屏用不到，见该查询的说明）。
+SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type,
+       action_id, action_version, action_run_id, resource_type, resource_id,
+       environment, reason, approval_id, request_id, trace_id, source_ip,
+       before_summary, after_summary, result, compensation_result,
+       prev_hash, event_hash, canonical_version
+FROM audit.audit_event
+WHERE action_run_id = $1
+ORDER BY sequence ASC
+LIMIT 1;
+
 -- name: InsertChainRoot :one
 INSERT INTO audit.chain_root (
     id, computed_at, from_sequence, to_sequence, root_hash, signature, key_id
