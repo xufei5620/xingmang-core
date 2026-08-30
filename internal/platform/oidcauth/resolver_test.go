@@ -588,6 +588,20 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if slices.Contains(staff, "finance.platform_channel_binding.manage") || slices.Contains(admin, "finance.platform_channel_binding.manage") {
 		t.Fatal("渠道绑定 L1 写权限必须由人工显式授予，不能进入默认角色")
 	}
+	// XM-SERVER0：服务器登记簿的写权限**不属于**渠道绑定那一类必须人工显式
+	// 授予的高风险面——它写的是主机名/规格/供应商/到期日这类纯记录字段
+	// （拍板「服务器只做记录」），不触碰第三方系统、不影响成本或收入归属，
+	// 与已经默认给 admin 的 finance.upstream_account.manage 同一档（登记簿，
+	// 不是执行）。所以这里断言的方向与上面渠道绑定那条**相反**：admin 应该
+	// 含它，staff 不该含它。
+	if !slices.Contains(admin, "server.manage") {
+		t.Fatal("admin 应含 server.manage：服务器登记簿是纯记录字段，" +
+			"不触碰第三方系统，与 finance.upstream_account.manage 同一档，" +
+			"不属于渠道绑定那类必须人工显式授予的高风险面")
+	}
+	if slices.Contains(staff, "server.manage") {
+		t.Fatal("staff 默认不该含 server.manage：写权限只给 admin 与显式授权角色")
+	}
 	if slices.Contains(admin, "request.content.read") {
 		t.Fatal("admin 默认**不该**含 request.content.read：" +
 			"用户与模型的完整对话要显式授权给客诉/风控岗，" +

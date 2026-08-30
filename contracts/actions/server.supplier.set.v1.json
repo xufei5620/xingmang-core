@@ -1,0 +1,51 @@
+{
+  "id": "server.supplier.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "server.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "supplier_id": {
+      "type": "string",
+      "required": false
+    },
+    "name": {
+      "type": "string",
+      "required": true
+    },
+    "website": {
+      "type": "string",
+      "required": false
+    },
+    "console_url": {
+      "type": "string",
+      "required": false
+    },
+    "contact_name": {
+      "type": "string",
+      "required": false
+    },
+    "contact_info": {
+      "type": "string",
+      "required": false
+    },
+    "notes": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-SERVER0：服务器供应商与购买账号登记簿（ADMIN-IA §2.1「供应商与采购」）。只存联系方式，不存密码——购买账号密码走 CredentialRef 才是安全的做法（宪法 7 条），但本片尚未把凭据字段接进这张表，供应商门户账号今天还是一句备注（见 XM-SERVER0 handoff 的 follow_ups）。supplier_id 留空=新登记，填了=改这一条（整行替换）。website/console_url 必须是 https 且不含 user:pass@ 段（ADR-018 闸 1：只读通道不接受明文凭证藏在 URL 里）。"
+}

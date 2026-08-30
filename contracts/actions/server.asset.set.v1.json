@@ -1,0 +1,93 @@
+{
+  "id": "server.asset.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "server.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "asset_id": {
+      "type": "string",
+      "required": false
+    },
+    "hostname": {
+      "type": "string",
+      "required": true
+    },
+    "ip_addresses": {
+      "type": "string_slice",
+      "required": false
+    },
+    "datacenter": {
+      "type": "string",
+      "required": false
+    },
+    "supplier_id": {
+      "type": "string",
+      "required": false
+    },
+    "vcpu": {
+      "type": "int",
+      "required": false
+    },
+    "memory_gb": {
+      "type": "int",
+      "required": false
+    },
+    "disk_gb": {
+      "type": "int",
+      "required": false
+    },
+    "purpose": {
+      "type": "string",
+      "required": false
+    },
+    "status": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "active",
+        "retired",
+        "planned"
+      ]
+    },
+    "monthly_cost_minor_units": {
+      "type": "string",
+      "required": false
+    },
+    "currency": {
+      "type": "string",
+      "required": false
+    },
+    "billing_cycle": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "monthly",
+        "quarterly",
+        "yearly"
+      ]
+    },
+    "expires_at": {
+      "type": "string",
+      "required": false
+    },
+    "notes": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-SERVER0（2026-08-31）：服务器资产登记簿。拍板原话「服务器只做记录好了」——本 Action 不装 Server Agent、不做任何 SSH/docker/端口探测，只落库。L1 = 修改低风险平台配置：不触碰任何第三方系统，写错了改回即可。asset_id 留空=新登记，填了=改这一条（整行替换语义，同 finance.upstream_account.set：前端总是先把当前值预填进表单再提交，缺键的字段会被清空）。无 environment 参数——环境取自调用者身份（宪法 15 条）。monthly_cost_minor_units 是**纯整数**的最小单位金额字符串，按币种自身的最小单位（USD/CNY 是分，JPY 是元本身），不是财务登记簿的 scale-6 微单位口径——它与 currency 必须成对出现，要么都填要么都留空；带小数点或科学计数法的写法会被拒绝，静默接受会让金额差一到两个数量级且不报错（宪法 13 条：金额禁止 Float）。currency 必须是已登记最小单位小数位的 ISO 4217 三位码（USD/CNY/EUR/GBP/HKD/AUD/CAD/SGD 两位小数，JPY/KRW/VND 零位小数）。expires_at 是续费/合同到期日，形如 2006-01-02（自然日，不是时间点）。ip_addresses 允许一台服务器登记多个地址；vcpu/memory_gb/disk_gb 缺省表示未登记规格，不是 0。supplier_id 关联 server.supplier.set 登记的供应商，留空 = 未配对。"
+}

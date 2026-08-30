@@ -28,6 +28,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
+	"github.com/xufei5620/xingmang-platform/internal/platform/server"
 )
 
 func main() {
@@ -114,6 +115,17 @@ func main() {
 	financeSubscriptions := finance.NewSubscriptionStore(pool)
 	if err := finance.RegisterSubscriptionActions(
 		actionRegistry, financeSubscriptions, financeStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 服务器登记簿的写操作（登记/修改/退役资产、登记供应商、登记域名、
+	// 登记/删除服务备注）同样必须经 Action 内核（宪法 2 条 / ADR-003）。
+	// 拍板「服务器只做记录」：这批 Action 不触碰任何第三方系统，只落库。
+	// 注册失败即拒绝启动——一个「服务器资产页有按钮但后端没注册动作」的
+	// 进程，会让运维在真要登记一台新机器的时候才发现保存键点不动。
+	serverStore := server.NewStore(pool)
+	if err := server.RegisterActions(actionRegistry, serverStore); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
@@ -311,6 +323,11 @@ func main() {
 		FinanceProfit: finance.NewProfitStore(pool, nil),
 		// 订阅付款的读与写同样共用一个仓储（同登记簿）
 		FinanceSubscriptions: financeSubscriptions,
+		// 服务器登记簿的读与写共用同一个仓储（同财务登记簿的理由）
+		ServerAssets:       serverStore,
+		ServerSuppliers:    serverStore,
+		ServerDomains:      serverStore,
+		ServerServiceNotes: serverStore,
 		// 看板供数是**只读**的：余额由采集任务写，这里只查询。
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。

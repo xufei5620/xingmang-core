@@ -170,3 +170,26 @@ sql:
               import: "github.com/google/uuid"
               type: "UUID"
               pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/server.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/server/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # server_asset.supplier_id 是本迁移唯一的可空 uuid 列——一台服务器
+          # 可以先登记、后补供应商。必须映射成指针，否则 uuid.Nil 会被当成
+          # 一个合法的全零 UUID 写进库（而不是 NULL），外键立刻炸。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
