@@ -28,6 +28,14 @@ Chain Root 精确覆盖导出终点。`verify-local` 从 terminal manifest 的 e
 本地 `LOCAL-ONLY/NONE` descriptor 只说明它是开发 fixture；它不满足 versioning、
 SSE-KMS、Object Lock、异故障域或 provider qualification，绝不能作为 AUD2/生产证据。
 
+## AUD2 运行时接线（manual-only）
+
+当前只允许显式手工 seam，详见 [`docs/runbooks/AUDIT-ARCHIVE.md`](../../runbooks/AUDIT-ARCHIVE.md)。
+`platform-worker` 默认不注册归档 worker/periodic；R2-10 与 DB 角色拆分未同时证明前，
+任何 `scheduled` 或 production 配置都会 fail closed。MinIO fixture 必须使用独立
+`xingmang-archive` Compose 项目、锁定 `VERSIONS.lock` digest、loopback 临时端口和
+仓库外 CredentialRef 装配文件；不与 `xingmang-launch` 共用网络、卷或凭据。
+
 ## 旧流程的信任变更
 
 历史导出 JSON 即使带 `public_key`，该字段也只是 untrusted hint，不能自证。验证必须从独立

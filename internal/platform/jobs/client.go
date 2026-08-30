@@ -30,6 +30,10 @@ const (
 type Config struct {
 	Logger      *slog.Logger
 	Environment string
+	// AuditArchive is deliberately not consumed by NewClient's periodic
+	// registration path.  Until R2-10 and the DB role split are proven, archive
+	// execution is an explicit manual-only seam (see audit_archive_manual.go).
+	AuditArchive AuditArchiveConfig
 	// WorkerClusterID and RiverSchema are non-secret identity inputs used by
 	// the R210 effective job manifest. They are intentionally not inferred or
 	// defaulted here: a deployment must name its ownership domain explicitly.
@@ -232,6 +236,7 @@ func DefaultConfig() Config {
 		// Environment is intentionally empty: callers must declare it rather
 		// than inheriting a production-capable default.
 		Environment:         "",
+		AuditArchive:        DefaultAuditArchiveConfig(),
 		HeartbeatInterval:   DefaultHeartbeatInterval,
 		HeartbeatRunOnStart: true,
 		HeartbeatFailures:   DefaultHeartbeatAttempts,
@@ -360,6 +365,9 @@ func (c Config) normalized() Config {
 	if c.Logger == nil {
 		c.Logger = structuredDefaultLogger()
 	}
+	// Do not infer an enabled archive mode from a partially populated literal.
+	// The archive config has its own fail-closed defaults and validation.
+	c.AuditArchive = c.AuditArchive.normalized()
 	return c
 }
 
@@ -378,6 +386,10 @@ func (c Config) validate() error {
 	}
 	if strings.TrimSpace(c.Environment) == "" {
 		return fmt.Errorf("environment must not be empty")
+	}
+	c.AuditArchive.Environment = c.Environment
+	if err := c.AuditArchive.Validate(); err != nil {
+		return err
 	}
 	if c.HeartbeatFailures > 0 && c.Environment != "development" && c.Environment != "test" {
 		return fmt.Errorf("heartbeat failure injection is only allowed in development/test")

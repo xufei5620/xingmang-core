@@ -1,0 +1,50 @@
+{
+  "contract_version": 1,
+  "kind": "audit_archive_manual",
+  "mode": "manual",
+  "default_enabled": false,
+  "scheduler_registered": false,
+  "scheduler_gate": ["R2-10", "db-role-split"],
+  "allowed_environments": ["development", "staging", "test"],
+  "provider": {
+    "name": "minio",
+    "region": "local",
+    "transport": "https-or-loopback-http-fixture",
+    "encryption": "SSE-S3",
+    "object_lock_mode": "COMPLIANCE",
+    "retention_days": 3650,
+    "versioning": true,
+    "lifecycle_delete": false
+  },
+  "trigger": {
+    "input": "approval_envelope_sha256",
+    "requires_signed_envelope": true,
+    "runner_injected": true,
+    "raw_payload_in_args": false,
+    "cli_overrides": false
+  },
+  "credential_refs": [
+    {
+      "purpose": "minio_object_writer",
+      "ref": "secret://archive/minio-runtime"
+    },
+    {
+      "purpose": "minio_kms",
+      "ref": "secret://archive/minio-kms"
+    },
+    {
+      "purpose": "minio_qualification",
+      "ref": "secret://archive/minio-qualification"
+    },
+    {
+      "purpose": "security_sink_reserved_for_aud3",
+      "ref": "secret://archive/security-sink"
+    }
+  ],
+  "safety": {
+    "production_activation": "forbidden-until-lifecycle-approval",
+    "audit_event_mutation": false,
+    "object_delete": false,
+    "latest_object_reads": false
+  }
+}
