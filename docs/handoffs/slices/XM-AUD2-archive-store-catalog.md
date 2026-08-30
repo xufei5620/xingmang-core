@@ -97,8 +97,8 @@ release-tip movement invalidates it and requires a fresh recomputation.
 
 - `objectstore.go`: exact capability interfaces, intent/version validation, canonical
   digest helpers and bounded object-size guard. The approved MinIO SSE-S3 exception is
-  accepted alongside the historical SSE-KMS wire fixture; both remain explicitly bound
-  to an opaque key identifier and Object Lock metadata.
+  accepted through a local validation shim alongside the historical SSE-KMS wire fixture;
+  both remain explicitly bound to an opaque key identifier and Object Lock metadata.
 - `filesystem_store.go`: disposable local fixture implementing only PutIfAbsent,
   RecoverPutResult, HeadVersion and GetVersion. Writes are content-addressed, atomic,
   loopback/local-root constrained, symlink checked, and readback verifies exact bytes,
@@ -109,8 +109,6 @@ release-tip movement invalidates it and requires a fresh recomputation.
   doubles only; no PostgreSQL calls or runtime wiring are present.
 - `provider_qualification.go`: approved MinIO qualification config validator and
   sanitized result shape; no endpoint/credential is opened.
-- `artifact_wire.go`: accepts the approved non-fixture `SSE-S3` encryption mode while
-  retaining strict object-lock/key-id checks.
 
 ### Verification evidence
 
