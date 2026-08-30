@@ -7,9 +7,10 @@ sprint-section: 7
 READY（待验收线本地审读、复跑并由人工合入；本分支没有合并、部署或实时数据库变更）
 
 - Branch: `ai/codex/XM-DBR1-harness`
-- Base: `release/v0.1-launch` at `c657a02`（开工前/完成后已读取 `ACCEPTANCE-LOG.md`）
-- Commits: `4fb12ab`（harness/fixture）、`8a52cd2`（probe hardening）、`2ef2439`
-  （libpq override guards）；本 Handoff 随后的交付 commit 见分支 `HEAD`。
+- Base: `release/v0.1-launch` at `e64298e`（本轮 rebase 前/后已读取最新
+  `ACCEPTANCE-LOG.md`；GitHub fetch 暂不可达，origin 本地镜像已核对）
+- Commits（rebase 后）：`cd69943`（harness/fixture）、`511a31d`（probe hardening）、
+  `7aa5db0`（libpq override guards）；本 Handoff 交付 commit 见分支 `HEAD`。
 - Slice: DBR1 Task 3（仅 disposable PG18 harness / role checks；DBR2+ 迁移和 live cutover 不在范围）
 - Plan: `docs/superpowers/plans/2026-08-28-database-role-separation.md` §DBR1 Task 3
 - Spec: `docs/superpowers/specs/2026-08-28-database-role-separation-design.md` §12
@@ -58,7 +59,7 @@ READY（待验收线本地审读、复跑并由人工合入；本分支没有合
 - `go vet ./...` — **PASS**。
 - `go test -p 1 ./... -count=1` — **PASS**。
 - `git diff --check` — **PASS**。
-- `gitleaks git --redact --no-banner --log-opts=c657a02..HEAD` — **PASS**（0 leaks）。
+- `gitleaks git --redact --no-banner --log-opts=e64298e..HEAD` — **PASS**（0 leaks）。
 - `scripts/check-governance.sh` — **PASS**；linked worktree 使用显式 WSL
   `GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE` 调用，Windows 直接 bash 的已知 `.git` 解析提示不计门禁。
 
