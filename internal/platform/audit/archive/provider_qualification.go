@@ -1,7 +1,10 @@
 package archive
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -32,6 +35,7 @@ type ProviderQualificationResult struct {
 }
 
 var ErrProviderQualificationMissing = fmt.Errorf("provider qualification missing")
+var ErrAmbiguousPut = errors.New("archive_ambiguous_put")
 
 func ValidateProviderQualificationConfig(value ProviderQualificationConfig) error {
 	if strings.ToLower(strings.TrimSpace(value.Provider)) != "minio" ||
@@ -79,4 +83,77 @@ func QualificationResultFor(config ProviderQualificationConfig, status string) (
 		EncryptionMode: config.EncryptionMode, SDKModule: config.SDKModule,
 		SDKVersion: config.SDKVersion, Status: status,
 	}, nil
+}
+
+// QualificationEvidence is a sanitized, provider-neutral result. It contains
+// digests and protocol facts only; credentials, endpoint hosts and payload bytes
+// are intentionally absent.
+type QualificationEvidence struct {
+	Provider              string
+	Region                string
+	SDKModule             string
+	SDKVersion            string
+	ObjectLockMode        string
+	EncryptionMode        string
+	IntentDigest          string
+	RecoveredObjectDigest string
+	RecoveryPath          string
+	Status                string
+}
+
+// RunQualificationProbe exercises the approved ambiguous-Put contract against a
+// supplied writer. A writer may return ErrAmbiguousPut after committing a body;
+// recovery must return the exact object version without a second Put/List/latest
+// operation. The caller can inject a disposable MinIO/HTTP fixture or the local
+// filesystem fixture; this helper never opens an endpoint itself.
+func RunQualificationProbe(ctx context.Context, config ProviderQualificationConfig, writer ObjectWriter,
+	intent ObjectWriteIntentV1, body io.Reader) (QualificationEvidence, error) {
+	if err := ValidateProviderQualificationConfig(config); err != nil {
+		return QualificationEvidence{}, err
+	}
+	if writer == nil || body == nil {
+		return QualificationEvidence{}, fmt.Errorf("%w: qualification writer/body", ErrArchiveValidation)
+	}
+	if err := ValidateObjectWriteIntent(intent); err != nil {
+		return QualificationEvidence{}, err
+	}
+	intentDigest, err := OperationIntentObjectDigest(intent)
+	if err != nil {
+		return QualificationEvidence{}, err
+	}
+	object, putErr := writer.PutIfAbsent(ctx, intent, body)
+	recoveryPath := "put"
+	if putErr != nil {
+		if !errors.Is(putErr, ErrAmbiguousPut) {
+			return QualificationEvidence{}, putErr
+		}
+		recoveryPath = "recover_put_result"
+		object, err = writer.RecoverPutResult(ctx, intent)
+		if err != nil {
+			return QualificationEvidence{}, fmt.Errorf("%w: ambiguous put recovery: %v", ErrProviderQualificationMissing, err)
+		}
+	}
+	if !objectMatchesIntent(object, intent) {
+		return QualificationEvidence{}, fmt.Errorf("%w: recovered object does not match intent", ErrProviderQualificationMissing)
+	}
+	objectDigest, err := ObjectVersionDigest(object)
+	if err != nil {
+		return QualificationEvidence{}, err
+	}
+	return QualificationEvidence{
+		Provider: config.Provider, Region: config.Region, SDKModule: config.SDKModule,
+		SDKVersion: config.SDKVersion, ObjectLockMode: config.ObjectLockMode,
+		EncryptionMode: config.EncryptionMode, IntentDigest: intentDigest,
+		RecoveredObjectDigest: objectDigest, RecoveryPath: recoveryPath, Status: "PASS",
+	}, nil
+}
+
+// OperationIntentObjectDigest hashes the object intent itself, excluding the
+// approval envelope and provider credentials. It is suitable for sanitized
+// qualification evidence, not as a replacement for the signed operation digest.
+func OperationIntentObjectDigest(value ObjectWriteIntentV1) (string, error) {
+	if err := ValidateObjectWriteIntent(value); err != nil {
+		return "", err
+	}
+	return sha256Hex([]byte(value.OperationID.String() + "\x00" + value.Key + "\x00" + value.SHA256)), nil
 }
