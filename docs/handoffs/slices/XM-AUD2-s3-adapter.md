@@ -14,8 +14,11 @@ MinIO qualification run are not available in this environment.
 
 - branch: `ai/codex/XM-AUD2-s3-adapter`
 - worktree: `K:/星芒统一控制平台/wt-xmAUD2-s3`
-- base at slice start: `e579b9e` (AUD2 input + generated approvals already present)
-- commit: to be recorded in the delivery line after the final local gates
+- initial development base: `e579b9e` (AUD2 input + generated approvals already present)
+- final release base: `6242ffd` (`origin/release/v0.1-launch`, including the merged
+  AUD2 catalog and the approved independent security-sink decision)
+- implementation commit after rebase: `d83b2b7` (the final Handoff update is committed
+  separately and its SHA is reported in the delivery line)
 
 ## approved boundary and decisions
 
