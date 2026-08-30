@@ -9,7 +9,7 @@ READY（详情见下方 not_run / risks——部分校对项本次未接触真�
 
 - branch: `ai/claude/XM-REQLOG-MERGE`
 - base: `c00c853`（`release/v0.1-launch` 当前 tip）
-- implementation commit: `b766697`
+- implementation commit: `b766697`；能力降级修复提交: `f17c0d9`
 - worktree: `K:/星芒统一控制平台/acceptance/wt-reqlog-merge`
 
 ## scope
