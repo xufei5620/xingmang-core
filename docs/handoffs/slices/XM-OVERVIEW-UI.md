@@ -7,7 +7,9 @@ READY（待验收线审读、复跑并人工合入）
 ## branch / commit / base
 
 - branch: `ai/claude/XM-OVERVIEW-UI`
-- implementation commit: `63d98c2`（本分支 HEAD，单提交）
+- implementation commit: `63d98c2`（feat，本文档描述的全部代码改动都在这一个提交里）
+- HEAD: `3894116`（`63d98c2` 之上另加了 `5d3f987` 本交接文档、`3894116`
+  一处测试注释里两个半角逗号改全角的小修，均不改动任何逻辑/断言）
 - base: `release/v0.1-launch`
 - worktree: `K:/星芒统一控制平台/acceptance/wt-overview-ui`
 
