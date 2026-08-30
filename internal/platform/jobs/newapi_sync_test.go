@@ -23,6 +23,7 @@ import (
 var newapiMetricKeys = []string{
 	newapi.MetricChannelsStatus,
 	newapi.MetricModelsUsage,
+	newapi.MetricPaymentsDaily,
 	newapi.MetricRechargeDaily,
 	newapi.MetricSubscriptionDaily,
 	newapi.MetricUsersTotal,
@@ -183,7 +184,7 @@ func TestNewAPISyncFailureStillWrites(t *testing.T) {
 			}
 			for _, want := range []string{
 				`"event":"job_completed"`, `"success":false`,
-				`"metrics_failed":5`, `"error_code":"` + string(kind) + `"`,
+				fmt.Sprintf(`"metrics_failed":%d`, len(newapiMetricKeys)), `"error_code":"` + string(kind) + `"`,
 			} {
 				if !strings.Contains(logs.String(), want) {
 					t.Fatalf("日志缺少 %s: %s", want, logs.String())
@@ -376,8 +377,14 @@ func TestNewAPISyncFailurePreservesLastSuccess(t *testing.T) {
 }
 
 // newapiPartialFailClient 让指定的某几个读取失败，其余走 Fake。
+//
+// 嵌入 PaymentsReadClient 而不是 ReadClientV2：本类型的用途是"部分读取失败,
+// 其余走真实 Fake 行为",不是"这个客户端不支持 payments.read.v1"——嵌入窄
+// 接口会让 XM-PAY0 的 DailyPaymentSummary 读取意外落进
+// errNewAPIPaymentsCapabilityUnavailable 分支,把一个本不该失败的指标也算成
+// 失败,污染这些测试真正要验证的"某一组读失败不影响其余"这件事。
 type newapiPartialFailClient struct {
-	newapi.ReadClientV2
+	newapi.PaymentsReadClient
 	statsErr    error
 	ordersErr   error
 	channelsErr error
@@ -388,35 +395,35 @@ func (c newapiPartialFailClient) UserStats(ctx context.Context) (newapi.UserStat
 	if c.statsErr != nil {
 		return newapi.UserStats{}, c.statsErr
 	}
-	return c.ReadClientV2.UserStats(ctx)
+	return c.PaymentsReadClient.UserStats(ctx)
 }
 
 func (c newapiPartialFailClient) DailyOrders(ctx context.Context, day string) (newapi.OrderSummary, error) {
 	if c.ordersErr != nil {
 		return newapi.OrderSummary{}, c.ordersErr
 	}
-	return c.ReadClientV2.DailyOrders(ctx, day)
+	return c.PaymentsReadClient.DailyOrders(ctx, day)
 }
 
 func (c newapiPartialFailClient) Channels(ctx context.Context) ([]newapi.ChannelStatus, error) {
 	if c.channelsErr != nil {
 		return nil, c.channelsErr
 	}
-	return c.ReadClientV2.Channels(ctx)
+	return c.PaymentsReadClient.Channels(ctx)
 }
 
 func (c newapiPartialFailClient) ChannelDirectory(ctx context.Context) (newapi.ChannelDirectorySnapshot, error) {
 	if c.channelsErr != nil {
 		return newapi.ChannelDirectorySnapshot{}, c.channelsErr
 	}
-	return c.ReadClientV2.ChannelDirectory(ctx)
+	return c.PaymentsReadClient.ChannelDirectory(ctx)
 }
 
 func (c newapiPartialFailClient) ModelUsages(ctx context.Context, day string) ([]newapi.ModelUsage, error) {
 	if c.usagesErr != nil {
 		return nil, c.usagesErr
 	}
-	return c.ReadClientV2.ModelUsages(ctx, day)
+	return c.PaymentsReadClient.ModelUsages(ctx, day)
 }
 
 // TestNewAPISyncPartialFailureKeepsGoodMetrics：模型用量挂了不该把已经读到的
@@ -426,8 +433,8 @@ func TestNewAPISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 	var logs bytes.Buffer
 	factory := func(context.Context) (newapi.ReadClientV2, error) {
 		return newapiPartialFailClient{
-			ReadClientV2: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
-			usagesErr:    connector.NewError(connector.KindRateLimited, "newapi.models.usage_read", nil),
+			PaymentsReadClient: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
+			usagesErr:          connector.NewError(connector.KindRateLimited, "newapi.models.usage_read", nil),
 		}, nil
 	}
 	worker := newTestNewAPISyncWorker(store, factory, &logs)
@@ -463,8 +470,8 @@ func TestNewAPISyncOrdersFailureTakesBothMoneyMetrics(t *testing.T) {
 	var logs bytes.Buffer
 	factory := func(context.Context) (newapi.ReadClientV2, error) {
 		return newapiPartialFailClient{
-			ReadClientV2: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
-			ordersErr:    connector.NewError(connector.KindBadResponse, "newapi.orders.read", nil),
+			PaymentsReadClient: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
+			ordersErr:          connector.NewError(connector.KindBadResponse, "newapi.orders.read", nil),
 		}, nil
 	}
 	if err := newTestNewAPISyncWorker(store, factory, &logs).
@@ -487,6 +494,8 @@ func TestNewAPISyncOrdersFailureTakesBothMoneyMetrics(t *testing.T) {
 func TestNewAPISyncMetricMappingIsExhaustive(t *testing.T) {
 	produced := newapi.ToObservations(fixedNow, "src", "staging",
 		newapi.UserStats{}, newapi.OrderSummary{}, nil, nil)
+	produced = append(produced, newapi.ToPaymentsDailyObservation(
+		fixedNow, "src", "staging", newapi.DailyPaymentSummary{}))
 	if len(produced) != len(newapiMetricKeys) {
 		t.Fatalf("ToObservations 产出 %d 条指标，映射表登记了 %d 条——请同步更新 forMetric",
 			len(produced), len(newapiMetricKeys))
@@ -496,15 +505,18 @@ func TestNewAPISyncMetricMappingIsExhaustive(t *testing.T) {
 	ordersErr := errors.New("orders")
 	channelsErr := errors.New("channels")
 	usagesErr := errors.New("usages")
+	paymentsErr := errors.New("payments")
 	want := map[string]error{
 		newapi.MetricUsersTotal:        statsErr,
 		newapi.MetricRechargeDaily:     ordersErr,
 		newapi.MetricSubscriptionDaily: ordersErr,
 		newapi.MetricChannelsStatus:    channelsErr,
 		newapi.MetricModelsUsage:       usagesErr,
+		newapi.MetricPaymentsDaily:     paymentsErr,
 	}
 	errs := newapiReadErrors{
 		stats: statsErr, orders: ordersErr, channels: channelsErr, usages: usagesErr,
+		payments: paymentsErr,
 	}
 	for _, observation := range produced {
 		expected, ok := want[observation.MetricKey]

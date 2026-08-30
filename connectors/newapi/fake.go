@@ -2,7 +2,9 @@ package newapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
@@ -66,7 +68,7 @@ type fakeClient struct {
 // 它存在的意义有两层：让 XM-0038 之前的上层开发（平台页、同步任务）不被
 // 真实凭据阻塞；以及作为 contracttest 套件的第一个被测实现——套件本身
 // 要先被验证有效。
-func NewFake(opts FakeOptions) ReadClientV2 {
+func NewFake(opts FakeOptions) PaymentsReadClient {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -281,5 +283,107 @@ func (f *fakeClient) ModelUsages(ctx context.Context, day string) ([]ModelUsage,
 			ConsumedMinorUnits: 980_00, Currency: fakeCurrency},
 		{Snapshot: snap, ModelName: "llama-3.3-70b", RequestCount: 2_740,
 			ConsumedMinorUnits: 0, Currency: fakeCurrency},
+	}, nil
+}
+
+// fakeOrderMethods 循环用于 fakeOrders 生成的支付提供方，取值取自
+// K:/newapi-src common/constants.go 的 PaymentProvider* 常量。
+var fakeOrderMethods = []string{"stripe", "creem", "waffo", "epay"}
+
+// fakeOrders 生成 [from,to] 窗口内均匀分布的确定性订单，逐个状态循环
+// （KnownOrderStatuses 只有 4 个，重复几轮凑出更多笔数），供
+// ListOrders/DailyPaymentSummary 的假实现共用——理由与 sub2api 的同名函数
+// 相同：时间戳锚定在调用方给的窗口内，联调时查询任何区间都有数据可看。
+func fakeOrders(from, to time.Time) []Order {
+	const n = 8
+	span := to.Sub(from)
+	items := make([]Order, 0, n)
+	for i := 0; i < n; i++ {
+		offset := time.Duration(int64(span) * int64(i) / int64(n))
+		items = append(items, Order{
+			OrderID:          fmt.Sprintf("9%03d", i),
+			CreatedAt:        from.Add(offset),
+			Status:           KnownOrderStatuses[i%len(KnownOrderStatuses)],
+			AmountMinorUnits: int64(500 * (i + 1)),
+			Currency:         fakeCurrency,
+			Method:           fakeOrderMethods[i%len(fakeOrderMethods)],
+			UserRef:          userRef(int64(20000 + i)),
+			UpstreamOrderRef: fmt.Sprintf("FAKE-NEWAPI-%04d", 9000+i),
+		})
+	}
+	return items
+}
+
+// ListOrders 见 PaymentsReadClient；假实现在 [filter.From, filter.To] 内
+// 生成确定性订单并按 filter.Status 过滤。
+func (f *fakeClient) ListOrders(ctx context.Context, filter OrderFilter) (OrderPage, error) {
+	if err := f.wait(ctx); err != nil {
+		return OrderPage{}, connector.NewError(connector.KindUnavailable, opOrders, err)
+	}
+	if filter.From.IsZero() || filter.To.IsZero() {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, opOrders, errors.New("from/to 必须非零"))
+	}
+	if filter.To.Before(filter.From) {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, opOrders, errors.New("to 不能早于 from"))
+	}
+	status := strings.ToLower(strings.TrimSpace(filter.Status))
+	if status != "" && !KnownOrderStatus(status) {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, opOrders,
+			fmt.Errorf("status %q 不是已知的上游状态", filter.Status))
+	}
+	if err := f.fail(opOrders); err != nil {
+		return OrderPage{}, err
+	}
+
+	items := make([]Order, 0)
+	stats := make(map[string]OrderStats)
+	for _, o := range fakeOrders(filter.From, filter.To) {
+		if status != "" && o.Status != status {
+			continue
+		}
+		items = append(items, o)
+		s := stats[o.Status]
+		s.Count++
+		s.AmountMinorUnits += o.AmountMinorUnits
+		stats[o.Status] = s
+	}
+	return OrderPage{Snapshot: f.snapshot(), Items: items, StatsByStatus: stats}, nil
+}
+
+// DailyPaymentSummary 见 PaymentsReadClient；假实现按业务日窗口生成确定性
+// 订单并归一化分桶。FeeMinorUnits/NetMinorUnits 恒为 nil，与真实客户端一致
+// （NewAPI 的 TopUp 模型没有手续费/净现金流字段）。
+func (f *fakeClient) DailyPaymentSummary(ctx context.Context, day string) (DailyPaymentSummary, error) {
+	if err := f.wait(ctx); err != nil {
+		return DailyPaymentSummary{}, connector.NewError(connector.KindUnavailable, opOrders, err)
+	}
+	if err := ValidateBusinessDay(day); err != nil {
+		return DailyPaymentSummary{}, connector.NewError(connector.KindBadResponse, opOrders, err)
+	}
+	if err := f.fail(opOrders); err != nil {
+		return DailyPaymentSummary{}, err
+	}
+
+	parsed, _ := time.Parse(BusinessDayLayout, day)
+	from := parsed
+	to := parsed.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	byStatus := make(map[string]StatusAmount)
+	for _, o := range fakeOrders(from, to) {
+		bucket, ok := paymentStatusBucket(o.Status)
+		if !ok {
+			continue
+		}
+		s := byStatus[bucket]
+		s.Count++
+		s.AmountMinorUnits += o.AmountMinorUnits
+		byStatus[bucket] = s
+	}
+	return DailyPaymentSummary{
+		Snapshot:      f.snapshot(),
+		Day:           day,
+		Currency:      fakeCurrency,
+		ByStatus:      byStatus,
+		FeeMinorUnits: nil,
+		NetMinorUnits: nil,
 	}, nil
 }

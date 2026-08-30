@@ -14,6 +14,7 @@ func RegisteredRouteSpecs() []connector.RouteSpec {
 		{ConnectorType: ConnectorKey, Capability: "sub2api.users.balance_read", RouteID: "sub2api.users", Method: "GET", PathTemplate: "/api/v1/admin/users"},
 		{ConnectorType: ConnectorKey, Capability: "sub2api.orders.read", RouteID: "sub2api.payment.dashboard", Method: "GET", PathTemplate: "/api/v1/admin/payment/dashboard"},
 		{ConnectorType: ConnectorKey, Capability: "sub2api.orders.read", RouteID: "sub2api.dashboard.trend", Method: "GET", PathTemplate: "/api/v1/admin/dashboard/trend"},
+		{ConnectorType: ConnectorKey, Capability: "sub2api.orders.read", RouteID: "sub2api.payment.orders", Method: "GET", PathTemplate: "/api/v1/admin/payment/orders"},
 		{ConnectorType: ConnectorKey, Capability: "sub2api.accounts.read", RouteID: "sub2api.accounts", Method: "GET", PathTemplate: "/api/v1/admin/accounts"},
 		{ConnectorType: ConnectorKey, Capability: "sub2api.channels.balance_read", RouteID: "sub2api.channels.balance", Method: "GET", PathTemplate: "/api/v1/admin/accounts"},
 	}

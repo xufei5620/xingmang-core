@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,13 +46,14 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	upstreamHealth   = "/health"
-	upstreamVersion  = "/api/v1/admin/system/version"
-	upstreamStats    = "/api/v1/admin/dashboard/stats"
-	upstreamUsers    = "/api/v1/admin/users"
-	upstreamPayment  = "/api/v1/admin/payment/dashboard"
-	upstreamTrend    = "/api/v1/admin/dashboard/trend"
-	upstreamAccounts = "/api/v1/admin/accounts"
+	upstreamHealth        = "/health"
+	upstreamVersion       = "/api/v1/admin/system/version"
+	upstreamStats         = "/api/v1/admin/dashboard/stats"
+	upstreamUsers         = "/api/v1/admin/users"
+	upstreamPayment       = "/api/v1/admin/payment/dashboard"
+	upstreamPaymentOrders = "/api/v1/admin/payment/orders"
+	upstreamTrend         = "/api/v1/admin/dashboard/trend"
+	upstreamAccounts      = "/api/v1/admin/accounts"
 
 	// upstreamAuthHeader 是上游的程序化访问头。
 	upstreamAuthHeader = "X-Api-Key"
@@ -160,6 +162,9 @@ type fakeUpstream struct {
 	// paymentAmount 允许单个测试替换"今天"那条 daily_series 的金额形状
 	// （多币种、缺合约币种、旧版本的标量……）。
 	paymentAmount string
+	// paymentOrders 允许单个测试替换 /admin/payment/orders 的逐笔订单固定数据
+	// （XM-PAY0）；nil 时用 fakePaymentOrders。
+	paymentOrders []fakePaymentOrder
 
 	server *httptest.Server
 
@@ -194,6 +199,7 @@ func startFakeUpstream(t *testing.T, opts sub2api.FakeOptions, tweak ...func(*fa
 	register(upstreamStats, u.dataRoute(u.handleStats))
 	register(upstreamUsers, u.dataRoute(u.handleUsers))
 	register(upstreamPayment, u.dataRoute(u.handlePayment))
+	register(upstreamPaymentOrders, u.dataRoute(u.handlePaymentOrders))
 	register(upstreamTrend, u.dataRoute(u.handleTrend))
 	register(upstreamAccounts, u.dataRoute(u.handleAccounts))
 
@@ -383,6 +389,92 @@ func (u *fakeUpstream) handlePayment(w http.ResponseWriter, r *http.Request) {
 		  "daily_series":[%s]}`, strings.Join(series, ","))))
 }
 
+// fakePaymentOrder 是 /admin/payment/orders 固定数据的一行（XM-PAY0）。
+type fakePaymentOrder struct {
+	ID           int64
+	UserID       int64
+	UserEmail    string
+	Amount       string // 十进制文本，与真实上游一致地不经过 float
+	PayAmount    string
+	Currency     string
+	Status       string
+	PaymentType  string
+	OutTradeNo   string
+	RefundAmount string
+	CreatedAt    time.Time
+}
+
+// fakePaymentOrders 是逐笔订单的默认固定数据，覆盖：多个状态（含退款生命周期
+// 里的 REFUNDED）、一笔非合约币种（9005，用于验证 currency gap 处理）、
+// 一笔明显更早的订单（9006，用于验证翻页早停在 from 边界生效）。
+//
+// 时刻都早于 fakeClockNow（2026-08-27T12:00:00Z），与其余测试的固定时钟一致。
+var fakePaymentOrders = []fakePaymentOrder{
+	{ID: 9001, UserID: 1, UserEmail: "a@example.test", Amount: "100.00", PayAmount: "101.00",
+		Currency: "USD", Status: "PAID", PaymentType: "alipay", OutTradeNo: "OUT-9001",
+		RefundAmount: "0.00", CreatedAt: time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)},
+	{ID: 9002, UserID: 2, UserEmail: "b@example.test", Amount: "50.00", PayAmount: "50.50",
+		Currency: "USD", Status: "PENDING", PaymentType: "wxpay", OutTradeNo: "OUT-9002",
+		RefundAmount: "0.00", CreatedAt: time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)},
+	{ID: 9003, UserID: 3, UserEmail: "c@example.test", Amount: "200.00", PayAmount: "202.00",
+		Currency: "USD", Status: "REFUNDED", PaymentType: "stripe", OutTradeNo: "OUT-9003",
+		RefundAmount: "202.00", CreatedAt: time.Date(2026, 8, 26, 23, 0, 0, 0, time.UTC)},
+	{ID: 9004, UserID: 4, UserEmail: "d@example.test", Amount: "30.00", PayAmount: "30.30",
+		Currency: "USD", Status: "FAILED", PaymentType: "card", OutTradeNo: "OUT-9004",
+		RefundAmount: "0.00", CreatedAt: time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)},
+	{ID: 9005, UserID: 5, UserEmail: "e@example.test", Amount: "75.00", PayAmount: "75.75",
+		Currency: "CNY", Status: "PAID", PaymentType: "alipay", OutTradeNo: "OUT-9005",
+		RefundAmount: "0.00", CreatedAt: time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)},
+	{ID: 9006, UserID: 6, UserEmail: "f@example.test", Amount: "10.00", PayAmount: "10.10",
+		Currency: "USD", Status: "COMPLETED", PaymentType: "easypay", OutTradeNo: "OUT-9006",
+		RefundAmount: "0.00", CreatedAt: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)},
+}
+
+// handlePaymentOrders 模拟 GET /api/v1/admin/payment/orders：按 created_at
+// DESC 排序、可选 status 服务端过滤、page/page_size 分页——与上游
+// response.ParsePagination + PaginatedData 同一个外壳（见 upstream.go
+// routePaymentOrders 的注释）。
+func (u *fakeUpstream) handlePaymentOrders(w http.ResponseWriter, r *http.Request) {
+	page := queryInt(r, "page", 1)
+	pageSize := queryInt(r, "page_size", 20)
+	status := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("status")))
+
+	source := u.paymentOrders
+	if source == nil {
+		source = fakePaymentOrders
+	}
+	filtered := make([]fakePaymentOrder, 0, len(source))
+	for _, o := range source {
+		if status != "" && o.Status != status {
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].CreatedAt.After(filtered[j].CreatedAt) })
+
+	start := (page - 1) * pageSize
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := start + pageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	pageItems := filtered[start:end]
+
+	rows := make([]string, 0, len(pageItems))
+	for _, o := range pageItems {
+		rows = append(rows, fmt.Sprintf(
+			`{"id":%d,"user_id":%d,"user_email":%q,"amount":%s,"pay_amount":%s,"currency":%q,`+
+				`"status":%q,"payment_type":%q,"out_trade_no":%q,"refund_amount":%s,"created_at":%q}`,
+			o.ID, o.UserID, o.UserEmail, o.Amount, o.PayAmount, o.Currency,
+			o.Status, o.PaymentType, o.OutTradeNo, o.RefundAmount, o.CreatedAt.Format(time.RFC3339)))
+	}
+	writeRaw(w, http.StatusOK, envelope(fmt.Sprintf(
+		`{"items":[%s],"total":%d,"page":%d,"page_size":%d,"pages":1}`,
+		strings.Join(rows, ","), len(filtered), page, pageSize)))
+}
+
 func (u *fakeUpstream) handleTrend(w http.ResponseWriter, r *http.Request) {
 	day := strings.TrimSpace(r.URL.Query().Get("start_date"))
 	if day == "" {
@@ -470,7 +562,7 @@ func fakeSecretProvider(t *testing.T, logger *slog.Logger) secrets.SecretProvide
 	return secrets.NewAudited(provider, secrets.NewSlogRecorder(logger), "test")
 }
 
-func (u *fakeUpstream) newClient(t *testing.T, extra ...sub2api.Option) sub2api.ReadClientV2 {
+func (u *fakeUpstream) newClient(t *testing.T, extra ...sub2api.Option) sub2api.PaymentsReadClient {
 	t.Helper()
 	opts := append([]sub2api.Option{
 		// 只换"怎么连"：让客户端信任 httptest 的自签证书。

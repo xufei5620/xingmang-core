@@ -207,8 +207,13 @@ var registeredMetrics = struct {
 		"sub2api.cost.daily":       {},
 		"sub2api.channels.balance": {},
 		"sub2api.channels.status":  {},
-		"invoice.requests.daily":   {},
-		"invoice.amount.daily":     {},
+		// 逐笔订单按日按状态资金汇总（XM-PAY0）。与上面的 sub2api.revenue.daily
+		// 不是同一个口径——那条来自支付看板的按日聚合序列（无法拆到状态），
+		// 这条来自逐笔订单翻页归日，见 connectors/sub2api/payments.go 顶部
+		// 的口径差异说明。
+		"sub2api.payments.daily": {},
+		"invoice.requests.daily": {},
+		"invoice.amount.daily":   {},
 		// NewAPI（XM-0035，规格 §8.4）。充值与订阅分成两条而不是合并成
 		// 「收入」：两笔钱的业务含义不同，合成一个数之后就再也拆不开了。
 		"newapi.users.total":        {},
@@ -216,6 +221,9 @@ var registeredMetrics = struct {
 		"newapi.subscription.daily": {},
 		"newapi.channels.status":    {},
 		"newapi.models.usage":       {},
+		// 逐笔订单按日按状态资金汇总（XM-PAY0）。与 newapi.recharge.daily
+		// 不是同一个口径，理由同 sub2api.payments.daily。
+		"newapi.payments.daily": {},
 		// 计量型渠道成本核算（XM-0037a，connectors/metering）。
 		//
 		// ⚠️ 与上面的 `sub2api.cost.daily` **不是同一个口径**，也绝不能合并：

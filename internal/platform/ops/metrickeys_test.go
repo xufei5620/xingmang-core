@@ -32,6 +32,8 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		sub2api.MetricCostDaily,
 		sub2api.MetricChannelBalance,
 		sub2api.MetricChannelsStatus,
+		// 逐笔订单按日按状态资金汇总（XM-PAY0）。
+		sub2api.MetricPaymentsDaily,
 		invoice.MetricRequestsDaily,
 		invoice.MetricAmountDaily,
 		newapi.MetricUsersTotal,
@@ -39,6 +41,7 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		newapi.MetricSubscriptionDaily,
 		newapi.MetricChannelsStatus,
 		newapi.MetricModelsUsage,
+		newapi.MetricPaymentsDaily,
 		// 计量型成本核算（XM-0037a）。与 sub2api.MetricCostDaily 同时列在
 		// 这份清单里正是重点：两者**必须**是两个不同的键（口径不同，§3.1），
 		// 下面的长度断言会在有人把它们合并时当场失败。

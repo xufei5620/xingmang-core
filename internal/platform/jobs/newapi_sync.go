@@ -340,6 +340,8 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 				now, w.instanceID, w.environment, reads.directory)
 		}
 	}
+	observations = append(observations,
+		newapi.ToPaymentsDailyObservation(now, w.instanceID, w.environment, reads.payments))
 
 	failed := 0
 	for i := range observations {
@@ -381,27 +383,31 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 	return nil
 }
 
-// newapiReads 是一轮同步读到的四组数据。
+// newapiReads 是一轮同步读到的五组数据。
 type newapiReads struct {
 	stats     newapi.UserStats
 	orders    newapi.OrderSummary
 	directory newapi.ChannelDirectorySnapshot
 	usages    []newapi.ModelUsage
+	// payments 是 XM-PAY0 的 DailyPaymentSummary 读取结果，独立成组的理由
+	// 见 newapiReadErrors.payments。
+	payments newapi.DailyPaymentSummary
 }
 
-// newapiReadErrors 记录四组读取各自的结果。
+// newapiReadErrors 记录五组读取各自的结果。
 //
 // 分组保留而不是「有一个错就整轮算失败」：模型用量超时不该把已经读到的
 // 渠道状态一并抹成失败——那会让看板丢掉本来拿得到的真话。
 //
-// 是四组而不是照抄 sub2api 的三组：分组数跟着**读取次数**走，不跟着别的
-// Connector 走。NewAPI 有四个数据读取方法，合并任意两组都会让其中一组的
+// 是五组而不是照抄 sub2api 的四组：分组数跟着**读取次数**走，不跟着别的
+// Connector 走。NewAPI 现在有五个数据读取方法，合并任意两组都会让其中一组的
 // 失败去污染另一组本来成功的指标。
 type newapiReadErrors struct {
 	stats    error
 	orders   error
 	channels error
 	usages   error
+	payments error
 }
 
 // forMetric 把指标键映射回它依赖的那次读取。
@@ -415,6 +421,8 @@ func (e newapiReadErrors) forMetric(metricKey string) error {
 		return e.channels
 	case newapi.MetricModelsUsage:
 		return e.usages
+	case newapi.MetricPaymentsDaily:
+		return e.payments
 	default:
 		// 契约将来加了新指标却漏登记在上面：fail closed，任一读取失败就把它
 		// 也判为失败，绝不让一条来源不明的指标以「成功」姿态进看板。
@@ -425,7 +433,7 @@ func (e newapiReadErrors) forMetric(metricKey string) error {
 
 // first 返回第一个非空错误，用于给整轮同步一个代表性的错误分类。
 func (e newapiReadErrors) first() error {
-	for _, err := range []error{e.stats, e.orders, e.channels, e.usages} {
+	for _, err := range []error{e.stats, e.orders, e.channels, e.usages, e.payments} {
 		if err != nil {
 			return err
 		}
@@ -433,7 +441,13 @@ func (e newapiReadErrors) first() error {
 	return nil
 }
 
-// read 读取四组数据。客户端构造失败时四组一起归到同一个失败分类。
+// errPaymentsCapabilityUnavailable 是本轮的客户端不满足
+// newapi.PaymentsReadClient 时的确定性失败（例如测试用的部分故障客户端只
+// 嵌入了 ReadClientV2）。归 not_supported：这不是一次读取失败，是"这个
+// 客户端实现在这一轮里就没有这项能力"。
+var errNewAPIPaymentsCapabilityUnavailable = errors.New("newapi: client does not implement PaymentsReadClient")
+
+// read 读取五组数据。客户端构造失败时五组一起归到同一个失败分类。
 func (w *NewAPISyncWorker) read(ctx context.Context, day string) (newapiReads, newapiReadErrors) {
 	// 读上游单独限时，留出时间把失败写进库（见 newapiReadTimeout 注释）。
 	readCtx, cancel := context.WithTimeout(ctx, newapiReadTimeout)
@@ -441,22 +455,32 @@ func (w *NewAPISyncWorker) read(ctx context.Context, day string) (newapiReads, n
 
 	client, err := w.newClient(readCtx)
 	if err != nil {
-		// 配置未就绪的 real 模式走这一支：五条指标全部写成 not_supported
+		// 配置未就绪的 real 模式走这一支：全部指标写成 not_supported
 		// 的失败观测，而不是静静地什么都不采。
 		return newapiReads{}, newapiReadErrors{
-			stats: err, orders: err, channels: err, usages: err,
+			stats: err, orders: err, channels: err, usages: err, payments: err,
 		}
 	}
 
 	var reads newapiReads
 	var errs newapiReadErrors
-	// 四次读取串行：真实客户端在一轮里共用同一个 quota_per_unit 缓存与
+	// 读取串行：真实客户端在一轮里共用同一个 quota_per_unit 缓存与
 	// 同一次凭据解析，并发跑只会让第一轮多打几次 /api/status 与 Provider，
 	// 换不到什么——这条链路的瓶颈是上游的 COUNT，不是往返次数。
 	reads.stats, errs.stats = client.UserStats(readCtx)
 	reads.orders, errs.orders = client.DailyOrders(readCtx, day)
 	reads.directory, errs.channels = client.ChannelDirectory(readCtx)
 	reads.usages, errs.usages = client.ModelUsages(readCtx, day)
+
+	// PaymentsReadClient 是叠加在 ReadClientV2 之上的独立切片（XM-PAY0）；
+	// 生产装配（NewNewAPIClientFactory）返回的客户端始终满足它，断言只在
+	// 测试用的窄接口客户端上才会落空，见 errNewAPIPaymentsCapabilityUnavailable。
+	if pc, ok := client.(newapi.PaymentsReadClient); ok {
+		reads.payments, errs.payments = pc.DailyPaymentSummary(readCtx, day)
+	} else {
+		errs.payments = connector.NewError(connector.KindNotSupported,
+			"newapi.payments.daily_read", errNewAPIPaymentsCapabilityUnavailable)
+	}
 	return reads, errs
 }
 

@@ -1470,3 +1470,314 @@ func (c *client) fetchModelUsages(ctx context.Context, day time.Time) ([]ModelUs
 	}
 	return out, nil
 }
+
+// ---------------------------------------------------------------------------
+// 逐笔订单与按日资金汇总（XM-PAY0）
+// ---------------------------------------------------------------------------
+
+// maxPaymentOrderPages 给逐笔订单翻页一个硬上限（100×20=2000 笔/次查询）。
+// 与 maxTopupPages 用同一个上游端点，取同样的上限——这条链路同样在 HTTP
+// 请求超时预算（router.go 30 秒）内被调用，不是后台协程。
+const maxPaymentOrderPages = 20
+
+// adminTopupItem 是 /api/user/topup 列表元素里 XM-PAY0 用得到的字段，
+// 比既有的 topupItem 多了 id/user_id/trade_no。
+//
+// 不复用 topupItem 加字段：那个类型只服务于 fetchRechargeDay 的聚合，
+// 顶部明写"不解 trade_no：订单号是业务标识，聚合金额用不上它"——给它加上
+// 这三个字段会让那句注释失真，也会让那条调用路径多解出用不上的字段。
+// 两个类型的 Amount/Money/PaymentProvider/Status/CreateTime/CompleteTime
+// 字段名与语义完全一致，转换只是逐字段拷贝，见 decodePaymentOrderRow。
+type adminTopupItem struct {
+	ID              rawAmount `json:"id"`
+	UserID          rawAmount `json:"user_id"`
+	Amount          rawAmount `json:"amount"`
+	Money           rawAmount `json:"money"`
+	TradeNo         string    `json:"trade_no"`
+	PaymentProvider string    `json:"payment_provider"`
+	Status          string    `json:"status"`
+	CreateTime      rawAmount `json:"create_time"`
+	CompleteTime    rawAmount `json:"complete_time"`
+}
+
+// paymentOrderRow 是 fetchOrders 的内部产出：公开的 Order 之外多带 Quota——
+// **未换算成钱的原始 quota**，topupRevenue 之外的订单（内部划转/provider
+// 未识别）恒为 0。
+//
+// 为什么不直接把每行的 AmountMinorUnits 加总当桶合计：quotaToMinorUnits 的
+// 调用纪律是"先 SUM quota 再换算一次"（amount.go 的注释——每条明细各自换算
+// 再相加，误差按条数累积）。桶合计因此必须走 Quota 求和 + 换算一次，
+// 不能直接累加各行已经换算过的 AmountMinorUnits；后者只用于单行展示。
+type paymentOrderRow struct {
+	Order
+	Quota int64
+}
+
+// fetchOrders 翻页读取 [from, to] 闭区间（按 create_time）内、可选按 status
+// 过滤的全部充值订单。
+//
+// 上游按 id desc 排序且**没有日期过滤参数**（routeTopups），所以从第一页往后
+// 翻，一旦遇到 create_time < from 的订单就可以停手——不需要
+// fetchRechargeDay 的回溯余量（topupScanMarginDays）：那个余量是为了补偿
+// "排序键 id 与窗口键 complete_time 不同步"，这里窗口键统一换成了
+// create_time，而 id 与 create_time 都在插入那一刻确定，天然同步
+// （见 payments.go 顶部关于窗口口径的说明）。
+//
+// status 在这里**恒为客户端过滤**：上游列表端点原生只支持 keyword，
+// 不支持 status（与 sub2api 的 /admin/payment/orders 不同，那条原生支持
+// status，本函数因此没有把 status 塞进 pageQuery）。
+//
+// unclassified 返回值：窗口内是否出现过 provider 未识别的订单（topupUnknown）
+// ——出现了就该整体标记为部分数据，理由见 payments.go 里 Order.AmountMinorUnits
+// 的注释。
+func (c *client) fetchOrders(
+	ctx context.Context, op string, quotaPerUnit int64, from, to time.Time, status string,
+) (rows []paymentOrderRow, meta respMeta, truncated, unclassified bool, err error) {
+	var (
+		fetched, reported int64
+	)
+	fromUnix, toUnix := from.Unix(), to.Unix()
+
+	for page := 1; page <= maxPaymentOrderPages; page++ {
+		var env upstreamEnvelope
+		pageMeta, perr := c.get(ctx, op, routeTopups, pageQuery(page, upstreamPageSize), &env)
+		if perr != nil {
+			return nil, pageMeta, false, false, perr
+		}
+		meta = pageMeta
+
+		var payload upstreamPage[adminTopupItem]
+		if derr := env.decode(op, &payload); derr != nil {
+			return nil, meta, false, false, derr
+		}
+		if page == 1 {
+			t, terr := payload.Total.count()
+			if terr != nil {
+				return nil, meta, false, false, connector.NewError(connector.KindBadResponse, op, terr)
+			}
+			reported = t
+		}
+
+		reachedFloor := false
+		for _, item := range payload.Items {
+			createdAtSecs, cerr := item.CreateTime.count()
+			if cerr != nil {
+				return nil, meta, false, false, connector.NewError(connector.KindBadResponse, op, cerr)
+			}
+			if createdAtSecs <= 0 {
+				// 没有可用的下单时刻，无法归入任何窗口——跳过，不触发早停
+				// （既不是"更早"也不是"更晚"，是"不知道"）。
+				continue
+			}
+			if createdAtSecs < fromUnix {
+				// 按 id desc 排序，走到这里说明后面只会更早。
+				reachedFloor = true
+				continue
+			}
+			if createdAtSecs > toUnix {
+				continue
+			}
+			if status != "" && strings.ToLower(strings.TrimSpace(item.Status)) != status {
+				continue
+			}
+
+			row, kind, derr := decodePaymentOrderRow(item, createdAtSecs, quotaPerUnit, c.scale, c.currency)
+			if derr != nil {
+				return nil, meta, false, false, connector.NewError(connector.KindBadResponse, op, derr)
+			}
+			if kind == topupUnknown {
+				unclassified = true
+			}
+			rows = append(rows, row)
+		}
+
+		fetched += int64(len(payload.Items))
+		if reachedFloor || len(payload.Items) == 0 || (reported > 0 && fetched >= reported) {
+			break
+		}
+		if page == maxPaymentOrderPages {
+			truncated = true
+		}
+	}
+	return rows, meta, truncated, unclassified, nil
+}
+
+// decodePaymentOrderRow 把上游的原始充值 JSON 换算成 paymentOrderRow，
+// 复用既有的 topupUSDQuota 做 provider 分桶（与 fetchRechargeDay 同一套
+// 判据，不重新实现）。
+func decodePaymentOrderRow(
+	item adminTopupItem, createdAtSecs, quotaPerUnit int64, scale int, currency string,
+) (paymentOrderRow, topupKind, error) {
+	id, err := item.ID.count()
+	if err != nil {
+		return paymentOrderRow{}, topupUnknown, err
+	}
+	userID, err := item.UserID.count()
+	if err != nil {
+		return paymentOrderRow{}, topupUnknown, err
+	}
+
+	quota, kind, err := topupUSDQuota(topupItem{
+		Amount: item.Amount, Money: item.Money, PaymentProvider: item.PaymentProvider,
+		Status: item.Status, CreateTime: item.CreateTime, CompleteTime: item.CompleteTime,
+	}, quotaPerUnit)
+	if err != nil {
+		return paymentOrderRow{}, topupUnknown, err
+	}
+
+	rowQuota := int64(0)
+	amountMinor := int64(0)
+	if kind == topupRevenue {
+		rowQuota = quota
+		amountMinor, err = quotaToMinorUnits(quota, quotaPerUnit, scale)
+		if err != nil {
+			return paymentOrderRow{}, kind, err
+		}
+	}
+	// topupInternal（provider=balance）与 topupUnknown 都报 0，理由见
+	// payments.go 的 Order.AmountMinorUnits 注释——不重新解释 Amount/Money
+	// 语义，沿用 topupUSDQuota 对这两种情形的既有处理。
+
+	return paymentOrderRow{
+		Order: Order{
+			OrderID:          strconv.FormatInt(id, 10),
+			CreatedAt:        time.Unix(createdAtSecs, 0).UTC(),
+			Status:           strings.ToLower(strings.TrimSpace(item.Status)),
+			AmountMinorUnits: amountMinor,
+			Currency:         currency,
+			Method:           strings.ToLower(strings.TrimSpace(item.PaymentProvider)),
+			UserRef:          userRef(userID),
+			UpstreamOrderRef: strings.TrimSpace(item.TradeNo),
+		},
+		Quota: rowQuota,
+	}, kind, nil
+}
+
+// fetchOrderPage 读取 filter 窗口内的全部订单及其按原始状态的统计。
+// filter 已由调用方（client.go 的 ListOrders）校验过。
+func (c *client) fetchOrderPage(ctx context.Context, op string, filter OrderFilter) (OrderPage, error) {
+	quotaPerUnit, err := c.quotaPerUnit(ctx, op)
+	if err != nil {
+		return OrderPage{}, err
+	}
+	status := strings.ToLower(strings.TrimSpace(filter.Status))
+	rows, meta, truncated, unclassified, err := c.fetchOrders(ctx, op, quotaPerUnit, filter.From, filter.To, status)
+	if err != nil {
+		return OrderPage{}, err
+	}
+
+	items := make([]Order, 0, len(rows))
+	quotaByStatus := make(map[string]int64)
+	countByStatus := make(map[string]int64)
+	for _, row := range rows {
+		items = append(items, row.Order)
+		countByStatus[row.Status]++
+		quotaByStatus[row.Status] += row.Quota
+	}
+	stats := make(map[string]OrderStats, len(countByStatus))
+	for st, quota := range quotaByStatus {
+		// SUM quota 完再换算一次（amount.go 的调用纪律），不是累加各行已经
+		// 换算过的 AmountMinorUnits。
+		amount, err := quotaToMinorUnits(quota, quotaPerUnit, c.scale)
+		if err != nil {
+			return OrderPage{}, connector.NewError(connector.KindBadResponse, op, err)
+		}
+		stats[st] = OrderStats{Count: countByStatus[st], AmountMinorUnits: amount}
+	}
+
+	observedAt := meta.observedAt(time.Time{})
+	return OrderPage{
+		Snapshot: Snapshot{
+			ObservedAt: observedAt,
+			Watermark:  orderWindowWatermark(filter.From, filter.To, observedAt, truncated, unclassified),
+			IsPartial:  truncated || unclassified,
+		},
+		Items:         items,
+		StatsByStatus: stats,
+	}, nil
+}
+
+// orderWindowWatermark 把窗口边界与"为什么可能不完整"一起编码进水位——只给
+// IsPartial 布尔值，运维分不清是翻页到顶（maxPaymentOrderPages）还是撞见了
+// provider 未识别的订单（unclassified），两者的处置完全不同。做法与既有
+// rechargeWatermark 的水位纪律一致：恒定信息（窗口边界）总在，只在真的发生
+// 时才出现的信号（缺口原因）才出现。
+func orderWindowWatermark(from, to, observedAt time.Time, truncated, unclassified bool) string {
+	mark := fmt.Sprintf("window:%s..%s@%d", from.Format(time.RFC3339), to.Format(time.RFC3339), observedAt.Unix())
+	if unclassified {
+		mark += "/unclassified"
+	}
+	if truncated {
+		mark += "/truncated"
+	}
+	return mark
+}
+
+// fetchDailyPaymentSummary 读取某业务日按归一化状态分桶的资金汇总。
+// parsed 已由调用方（client.go 的 DailyPaymentSummary）按业务日时区解析过。
+func (c *client) fetchDailyPaymentSummary(ctx context.Context, op string, parsed time.Time) (DailyPaymentSummary, error) {
+	quotaPerUnit, err := c.quotaPerUnit(ctx, op)
+	if err != nil {
+		return DailyPaymentSummary{}, err
+	}
+	startUnix, endUnix := dayWindow(parsed, c.businessDay)
+	from, to := time.Unix(startUnix, 0).UTC(), time.Unix(endUnix, 0).UTC()
+
+	rows, meta, truncated, unclassified, err := c.fetchOrders(ctx, op, quotaPerUnit, from, to, "")
+	if err != nil {
+		return DailyPaymentSummary{}, err
+	}
+
+	quotaByBucket := make(map[string]int64)
+	countByBucket := make(map[string]int64)
+	unrecognizedStatus := false
+	for _, row := range rows {
+		bucket, ok := paymentStatusBucket(row.Status)
+		if !ok {
+			unrecognizedStatus = true
+			continue
+		}
+		countByBucket[bucket]++
+		quotaByBucket[bucket] += row.Quota
+	}
+
+	byStatus := make(map[string]StatusAmount, len(countByBucket))
+	for bucket, quota := range quotaByBucket {
+		amount, err := quotaToMinorUnits(quota, quotaPerUnit, c.scale)
+		if err != nil {
+			return DailyPaymentSummary{}, connector.NewError(connector.KindBadResponse, op, err)
+		}
+		byStatus[bucket] = StatusAmount{Count: countByBucket[bucket], AmountMinorUnits: amount}
+	}
+
+	observedAt := meta.observedAt(time.Time{})
+	dayText := parsed.Format(newapiBusinessDayLayout)
+	return DailyPaymentSummary{
+		Snapshot: Snapshot{
+			ObservedAt: observedAt,
+			Watermark:  dailyPaymentWatermark(dayText, observedAt, truncated, unclassified, unrecognizedStatus),
+			IsPartial:  truncated || unclassified || unrecognizedStatus,
+		},
+		Day:           dayText,
+		Currency:      c.currency,
+		ByStatus:      byStatus,
+		FeeMinorUnits: nil,
+		NetMinorUnits: nil,
+	}, nil
+}
+
+// dailyPaymentWatermark 把业务日与"为什么可能不完整"一起编码进水位，
+// 理由与 orderWindowWatermark 相同——见该函数的注释。
+func dailyPaymentWatermark(dayText string, observedAt time.Time, truncated, unclassified, unrecognizedStatus bool) string {
+	mark := fmt.Sprintf("day:%s@%d", dayText, observedAt.Unix())
+	if unclassified {
+		mark += "/unclassified"
+	}
+	if unrecognizedStatus {
+		mark += "/unrecognized_status"
+	}
+	if truncated {
+		mark += "/truncated"
+	}
+	return mark
+}

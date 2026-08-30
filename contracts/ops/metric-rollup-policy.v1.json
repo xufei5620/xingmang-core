@@ -10,6 +10,16 @@
       "metric_key": "invoice.requests.daily",
       "gate": "CR-0002",
       "reason": "invoice contract is not frozen"
+    },
+    {
+      "metric_key": "sub2api.payments.daily",
+      "gate": "ROLLUP-MULTI-BUCKET",
+      "reason": "by_status has multiple money buckets; v1 policy schema supports only one primary_json_pointer per metric"
+    },
+    {
+      "metric_key": "newapi.payments.daily",
+      "gate": "ROLLUP-MULTI-BUCKET",
+      "reason": "by_status has multiple money buckets; v1 policy schema supports only one primary_json_pointer per metric"
     }
   ],
   "policies": [

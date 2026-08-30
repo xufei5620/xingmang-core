@@ -2,7 +2,9 @@ package sub2api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
@@ -39,7 +41,7 @@ type fakeClient struct {
 //
 // 它存在的意义有两层：让 XM-0017 之前的上层开发不被真实凭据阻塞；
 // 以及作为 contracttest 套件的第一个被测实现——套件本身要先被验证有效。
-func NewFake(opts FakeOptions) ReadClientV2 {
+func NewFake(opts FakeOptions) PaymentsReadClient {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -216,5 +218,116 @@ func (f *fakeClient) ChannelBalances(ctx context.Context) ([]ChannelBalance, err
 			BalanceMinorUnits: 1_200_00, Currency: "CNY", TokenValid: true},
 		{Snapshot: snap, ChannelID: "ch-3", ChannelName: "upstream-c",
 			BalanceMinorUnits: 0, Currency: "CNY", TokenValid: false},
+	}, nil
+}
+
+// fakeOrderMethods 循环用于 fakeOrders 生成的支付方式，取值取自
+// K:/sub2api-src internal/payment/types.go 的 PaymentType 常量。
+var fakeOrderMethods = []string{"alipay", "wxpay", "stripe", "card", "link", "easypay", "airwallex"}
+
+// fakeOrders 生成 [from,to] 窗口内均匀分布的确定性订单，逐个状态各一笔
+// （KnownOrderStatuses 全覆盖），供 ListOrders/DailyPaymentSummary 的假实现
+// 共用——真实客户端里两者也共用同一个 fetchOrders，这里保持同一个形状。
+//
+// 时间戳锚定在调用方给的窗口内而不是某个固定的"现在"：这样无论前端联调时
+// 查询哪一天/哪个区间，假数据都会落进窗口里，而不是只在"最近几天"内可见。
+func fakeOrders(from, to time.Time) []Order {
+	span := to.Sub(from)
+	n := len(KnownOrderStatuses)
+	items := make([]Order, 0, n)
+	for i, status := range KnownOrderStatuses {
+		offset := time.Duration(int64(span) * int64(i) / int64(n))
+		items = append(items, Order{
+			OrderID:          fmt.Sprintf("9%03d", i),
+			CreatedAt:        from.Add(offset),
+			Status:           status,
+			AmountMinorUnits: int64(1_000 * (i + 1)),
+			Currency:         "CNY",
+			Method:           fakeOrderMethods[i%len(fakeOrderMethods)],
+			UserRef:          fmt.Sprintf("fa***@example.com"),
+			UpstreamOrderRef: fmt.Sprintf("FAKE-SUB2API-%04d", 9000+i),
+		})
+	}
+	return items
+}
+
+// ListOrders 见 PaymentsReadClient；假实现在 [filter.From, filter.To] 内
+// 生成确定性订单并按 filter.Status 过滤。
+func (f *fakeClient) ListOrders(ctx context.Context, filter OrderFilter) (OrderPage, error) {
+	const op = "sub2api.orders.read"
+	if err := f.wait(ctx); err != nil {
+		return OrderPage{}, connector.NewError(connector.KindUnavailable, op, err)
+	}
+	if filter.From.IsZero() || filter.To.IsZero() {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, op, errors.New("from/to 必须非零"))
+	}
+	if filter.To.Before(filter.From) {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, op, errors.New("to 不能早于 from"))
+	}
+	status := strings.ToUpper(strings.TrimSpace(filter.Status))
+	if status != "" && !KnownOrderStatus(status) {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, op,
+			fmt.Errorf("status %q 不是已知的上游状态", filter.Status))
+	}
+	if err := f.fail(op); err != nil {
+		return OrderPage{}, err
+	}
+
+	items := make([]Order, 0)
+	stats := make(map[string]OrderStats)
+	for _, o := range fakeOrders(filter.From, filter.To) {
+		if status != "" && o.Status != status {
+			continue
+		}
+		items = append(items, o)
+		s := stats[o.Status]
+		s.Count++
+		s.AmountMinorUnits += o.AmountMinorUnits
+		stats[o.Status] = s
+	}
+	return OrderPage{Snapshot: f.snapshot(), Items: items, StatsByStatus: stats}, nil
+}
+
+// DailyPaymentSummary 见 PaymentsReadClient；假实现按业务日窗口生成确定性
+// 订单并归一化分桶（与 paymentStatusBucket 同一套判据，见 payments.go）。
+func (f *fakeClient) DailyPaymentSummary(ctx context.Context, day string) (DailyPaymentSummary, error) {
+	const op = "sub2api.orders.read"
+	if err := f.wait(ctx); err != nil {
+		return DailyPaymentSummary{}, connector.NewError(connector.KindUnavailable, op, err)
+	}
+	parsed, err := time.Parse(sub2apiBusinessDayLayout, day)
+	if err != nil {
+		return DailyPaymentSummary{}, connector.NewError(connector.KindBadResponse, op, err)
+	}
+	if err := f.fail(op); err != nil {
+		return DailyPaymentSummary{}, err
+	}
+
+	from := parsed
+	to := parsed.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	byStatus := make(map[string]StatusAmount)
+	var fee int64
+	for _, o := range fakeOrders(from, to) {
+		bucket, ok := paymentStatusBucket(o.Status)
+		if !ok {
+			continue
+		}
+		s := byStatus[bucket]
+		s.Count++
+		s.AmountMinorUnits += o.AmountMinorUnits
+		byStatus[bucket] = s
+		if bucket == PaymentStatusSucceeded || bucket == PaymentStatusRefunded {
+			// 假数据里没有真实的 pay_amount/amount 差值，用一个明显是虚构的
+			// 固定比例（1%）撑出一个非零手续费，让消费方看得到这个字段非空。
+			fee += o.AmountMinorUnits / 100
+		}
+	}
+	return DailyPaymentSummary{
+		Snapshot:      f.snapshot(),
+		Day:           parsed.Format(sub2apiBusinessDayLayout),
+		Currency:      "CNY",
+		ByStatus:      byStatus,
+		FeeMinorUnits: &fee,
+		NetMinorUnits: nil,
 	}, nil
 }

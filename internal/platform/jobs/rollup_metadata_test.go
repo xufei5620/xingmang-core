@@ -56,8 +56,8 @@ func TestSub2APIWriterPersistsEffectiveCadence(t *testing.T) {
 	if err := worker.Work(context.Background(), syncJob()); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.writes) != 6 {
-		t.Fatalf("writes = %d, want 6", len(store.writes))
+	if len(store.writes) != len(contractMetricKeys) {
+		t.Fatalf("writes = %d, want %d", len(store.writes), len(contractMetricKeys))
 	}
 	for _, row := range store.writes {
 		if row.RollupPolicyVersion != ops.RollupPolicyVersion || row.ExpectedIntervalSeconds == nil || *row.ExpectedIntervalSeconds != 420 {

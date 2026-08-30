@@ -226,6 +226,25 @@ func main() {
 		os.Exit(2)
 	}
 
+	// 支付与财务：逐笔订单查询（XM-PAY0）。同一条纪律：配错了就拒绝启动，
+	// 默认 fake。real 模式的凭据同样只经 CredentialRef，装配一个能解析
+	// 任意引用的文件优先 SecretProvider，具体连哪个端点、用哪个引用留给
+	// dynamicPaymentsQuerier 每次请求时现查 core.connector_config——见
+	// buildPlatformPayments 的注释。
+	paymentsMode, err := parsePaymentsMode(os.Getenv("XM_PLATFORM_PAYMENTS_MODE"))
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "platform_payments_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	platformPaymentsQuerier := buildPlatformPayments(paymentsMode, platformPaymentsDeps{
+		Pool:            pool,
+		Secrets:         platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger),
+		Logger:          logger,
+		Sub2APIDefaults: loadSub2APIPaymentsDefaults(),
+		NewAPIDefaults:  loadNewAPIPaymentsDefaults(),
+	})
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:         logger,
 		Service:        "platform-api",
@@ -251,6 +270,8 @@ func main() {
 		PlatformUserDetails:    platformUserDetailsOrNil(platformUserService),
 		PlatformUserDailyUsage: platformUserDailyUsageOrNil(platformUserService),
 		PlatformUserKeys:       platformUserKeysOrNil(platformUserService),
+		// nil 时"支付与财务"逐笔订单端点不挂载（见 httpapi.Deps.PlatformOrders）
+		PlatformOrders: platformPaymentsOrNil(platformPaymentsQuerier),
 		// 凭据登记的读与写共用同一个仓储：清单里只有指纹与可用性，没有值
 		Credentials: credentialStore,
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler

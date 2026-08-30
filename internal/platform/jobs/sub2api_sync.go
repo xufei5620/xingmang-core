@@ -326,7 +326,7 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 	// 显式声明为 UTC，而不是跟着进程所在机器的本地时区漂。
 	day := now.Format(sub2apiBusinessDayLayout)
 
-	stats, orders, directory, readErrs := w.read(ctx, day)
+	stats, orders, directory, payments, readErrs := w.read(ctx, day)
 
 	// 上下文被取消说明是本进程在关机，不是上游出问题。把它记成 failed 会让
 	// 看板把一次正常重启显示成同步故障——那是**假的**失败信号，比没有信号更糟。
@@ -334,13 +334,15 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 		return err
 	}
 
-	// 先按成功路径把五条观测算出来，再把失败分组的那几条替换掉。
+	// 先按成功路径把六条观测算出来，再把失败分组的那几条替换掉。
 	// 这样指标键、来源、新鲜度阈值只有 sub2api.ToObservations 一个来源，
 	// 失败路径不会长出第二套指标定义。
 	balances := sub2api.LegacyChannelBalances(directory)
 	observations := sub2api.ToObservations(now, w.instanceID, w.environment, stats, orders, balances)
 	observations = append(observations,
 		sub2api.ToChannelDirectoryObservation(now, w.instanceID, w.environment, directory))
+	observations = append(observations,
+		sub2api.ToPaymentsDailyObservation(now, w.instanceID, w.environment, payments))
 
 	failed := 0
 	for i := range observations {
@@ -395,6 +397,10 @@ type sub2apiReadErrors struct {
 	stats    error
 	orders   error
 	balances error
+	// payments 是 XM-PAY0 的 DailyPaymentSummary 读取结果，独立于上面三组：
+	// 它是一次单独的上游调用，不该和收入/成本共用同一个错误（那会让一条
+	// 请求超时把两条本来独立的指标一起标记失败，掩盖"到底是哪条读取挂了"）。
+	payments error
 }
 
 // forMetric 把指标键映射回它依赖的那次读取。
@@ -406,6 +412,8 @@ func (e sub2apiReadErrors) forMetric(metricKey string) error {
 		return e.orders
 	case sub2api.MetricChannelBalance, sub2api.MetricChannelsStatus:
 		return e.balances
+	case sub2api.MetricPaymentsDaily:
+		return e.payments
 	default:
 		// 契约将来加了新指标却漏登记在上面：fail closed，任一读取失败就把它
 		// 也判为失败，绝不让一条来源不明的指标以「成功」姿态进看板。
@@ -416,7 +424,7 @@ func (e sub2apiReadErrors) forMetric(metricKey string) error {
 
 // first 返回第一个非空错误，用于给整轮同步一个代表性的错误分类。
 func (e sub2apiReadErrors) first() error {
-	for _, err := range []error{e.stats, e.orders, e.balances} {
+	for _, err := range []error{e.stats, e.orders, e.balances, e.payments} {
 		if err != nil {
 			return err
 		}
@@ -424,9 +432,16 @@ func (e sub2apiReadErrors) first() error {
 	return nil
 }
 
-// read 读取三组数据。客户端构造失败时三组一起归到同一个失败分类。
+// errPaymentsCapabilityUnavailable 是本轮的客户端不满足
+// sub2api.PaymentsReadClient 时的确定性失败（例如测试用的部分故障客户端只
+// 嵌入了 ReadClientV2）。归 not_supported：这不是一次读取失败，是"这个
+// 客户端实现在这一轮里就没有这项能力"。
+var errPaymentsCapabilityUnavailable = errors.New("sub2api: client does not implement PaymentsReadClient")
+
+// read 读取四组数据。客户端构造失败时四组一起归到同一个失败分类。
 func (w *Sub2APISyncWorker) read(ctx context.Context, day string) (
-	sub2api.UserStats, sub2api.OrderSummary, sub2api.ManagedChannelDirectory, sub2apiReadErrors,
+	sub2api.UserStats, sub2api.OrderSummary, sub2api.ManagedChannelDirectory, sub2api.DailyPaymentSummary,
+	sub2apiReadErrors,
 ) {
 	// 读上游单独限时，留出时间把失败写进库（见 sub2apiReadTimeout 注释）。
 	readCtx, cancel := context.WithTimeout(ctx, sub2apiReadTimeout)
@@ -434,17 +449,33 @@ func (w *Sub2APISyncWorker) read(ctx context.Context, day string) (
 
 	client, err := w.newClient(readCtx)
 	if err != nil {
-		return sub2api.UserStats{}, sub2api.OrderSummary{}, sub2api.ManagedChannelDirectory{},
-			sub2apiReadErrors{stats: err, orders: err, balances: err}
+		return sub2api.UserStats{}, sub2api.OrderSummary{}, sub2api.ManagedChannelDirectory{}, sub2api.DailyPaymentSummary{},
+			sub2apiReadErrors{stats: err, orders: err, balances: err, payments: err}
 	}
 
 	stats, statsErr := client.UserStats(readCtx)
 	orders, ordersErr := client.DailyOrders(readCtx, day)
 	directory, balancesErr := client.ChannelDirectory(readCtx)
-	return stats, orders, directory, sub2apiReadErrors{
+
+	// PaymentsReadClient 是叠加在 ReadClientV2 之上的独立切片（XM-PAY0）；
+	// 生产装配（NewSub2APIClientFactory）返回的客户端始终满足它，断言只在
+	// 测试用的窄接口客户端上才会落空，见 errPaymentsCapabilityUnavailable。
+	var (
+		payments    sub2api.DailyPaymentSummary
+		paymentsErr error
+	)
+	if pc, ok := client.(sub2api.PaymentsReadClient); ok {
+		payments, paymentsErr = pc.DailyPaymentSummary(readCtx, day)
+	} else {
+		paymentsErr = connector.NewError(connector.KindNotSupported,
+			"sub2api.payments.daily_read", errPaymentsCapabilityUnavailable)
+	}
+
+	return stats, orders, directory, payments, sub2apiReadErrors{
 		stats:    statsErr,
 		orders:   ordersErr,
 		balances: balancesErr,
+		payments: paymentsErr,
 	}
 }
 
