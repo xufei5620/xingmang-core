@@ -47,6 +47,7 @@ import { ChannelDetailPage, isSupplyPlatform } from "./pages/ChannelDetailPage";
 import { IdentityPage } from "./pages/IdentityPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { OpsPage } from "./pages/OpsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { PlatformDetailPage } from "./pages/PlatformDetailPage";
@@ -343,6 +344,7 @@ export const routes = [
               { path: "alerts", Component: AlertsPage },
               { path: "audit", Component: AuditPage },
               { path: "actions", Component: ActionsPage },
+              { path: "ops", Component: OpsPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,

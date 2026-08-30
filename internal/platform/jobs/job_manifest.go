@@ -118,6 +118,14 @@ func RegisteredPeriodicJobSpecs() []JobSpec {
 			Execution: jobManifestExecution, SideEffectClass: "local_read_then_db_transaction",
 			IdempotencyEvidence: "latest+sample atomic transaction; retry remains a local-disk read attempt",
 		},
+		{
+			ID: ConnectorProbeJobKind, Kind: ConnectorProbeJobKind, Queue: QueueMaintenance,
+			OwnerProcess: jobManifestOwnerProcess, Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CONNECTOR_PROBE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.ConnectorProbeRunOnStart",
+			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
+			Execution: jobManifestExecution, SideEffectClass: "upstream_read_then_db_transaction",
+			IdempotencyEvidence: "latest+sample atomic transaction; retry remains upstream-read attempt",
+		},
 	}
 	return cloneJobSpecs(rows)
 }

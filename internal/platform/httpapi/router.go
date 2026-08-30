@@ -105,6 +105,15 @@ type Deps struct {
 	// 与 RequestLogs/PlatformUsers 同一条纪律：端点不存在（404）比端点存在
 	// 却拿一个 nil 依赖硬跑更诚实。
 	LocalAuth LocalAuthHandlers
+	// OpsConnectorConfigs 供运行保障页的「控制平面健康」子页展示每条同步
+	// 任务的生效模式（XM-OPS0）。为 nil 时该字段在响应里如实报告
+	// config_available=false，而不是猜一个模式——与 Credentials 为 nil 时
+	// 三个凭据端点整体不挂载是同一条纪律的另一种表达：这里端点仍然存在
+	// （心跳/连接器健康/数据库探针不依赖凭据模块），只是缺一列数据。
+	OpsConnectorConfigs ConnectorConfigLister
+	// OpsAlertDelivery 是运行保障页展示的告警投递配置状态（只回布尔值，
+	// 不回引用或地址；见 AlertDeliveryStatus 的注释）。
+	OpsAlertDelivery AlertDeliveryStatus
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -172,6 +181,16 @@ func NewRouter(d Deps) http.Handler {
 				Get("/jobs/overview", JobsOverviewHandler(d.Jobs))
 			api.With(RequireScope(ops.ScopeRead)).
 				Get("/jobs/runs", ListJobRunsHandler(d.Jobs))
+			// 运行保障页「控制平面健康」子页（XM-OPS0），同样复用 ops.read：
+			// 心跳/连接器健康/保留期清理都是 ops 观测的另一种投影，泄漏面
+			// 与 /metrics 相同。
+			api.With(RequireScope(ops.ScopeRead)).
+				Get("/ops/overview", OpsOverviewHandler(OpsOverviewDeps{
+					Observations:     d.Metrics,
+					ConnectorConfigs: d.OpsConnectorConfigs,
+					DB:               d.DB,
+					AlertDelivery:    d.OpsAlertDelivery,
+				}))
 			// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
 			api.With(RequireScope(audit.ScopeRead)).
 				Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))

@@ -105,7 +105,7 @@ export const GLOBAL_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "后台任务",
     path: "/jobs",
     stage: "F-A",
-    built: false,
+    built: true,
     subTabs: sub(
       ["running", "运行中"],
       ["scheduled", "定时任务"],
@@ -178,7 +178,9 @@ export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "运行保障",
     path: "/ops",
     stage: "M1+",
-    built: false,
+    // XM-OPS0：控制平面健康子页已接真实数据（GET /api/v1/ops/overview）。
+    // 其余五个子页（稳定性、备份恢复、故障手册、迁移对比、模型质量）仍是诚实占位。
+    built: true,
     subTabs: sub(
       ["health", "控制平面健康"],
       ["stability", "稳定性与外部监控"],

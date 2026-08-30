@@ -23,7 +23,7 @@ func readJobManifestContract(t *testing.T) []byte {
 	return raw
 }
 
-func TestManifestCoversExactlySevenRegisteredPeriodicJobs(t *testing.T) {
+func TestManifestCoversExactlyEightRegisteredPeriodicJobs(t *testing.T) {
 	manifest, hash, err := LoadJobManifest(readJobManifestContract(t))
 	if err != nil {
 		t.Fatalf("load frozen manifest: %v", err)
@@ -32,8 +32,8 @@ func TestManifestCoversExactlySevenRegisteredPeriodicJobs(t *testing.T) {
 		t.Fatal("manifest hash must not be empty")
 	}
 	registered := RegisteredPeriodicJobSpecs()
-	if len(registered) != 7 {
-		t.Fatalf("registered periodic jobs = %d, want 7", len(registered))
+	if len(registered) != 8 {
+		t.Fatalf("registered periodic jobs = %d, want 8", len(registered))
 	}
 	if len(manifest.Jobs) != len(registered) {
 		t.Fatalf("manifest jobs = %d, registered = %d", len(manifest.Jobs), len(registered))
@@ -100,6 +100,12 @@ func TestManifestPinsStableIDsKindsQueuesScheduleSourcesAndCatchup(t *testing.T)
 			ScheduleConfig: "XM_REQLOG_METRICS_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.ReqlogMetricsRunOnStart",
 			CatchUp: "at_most_one_immediate",
 		},
+		ConnectorProbeJobKind: {
+			ID: ConnectorProbeJobKind, Kind: ConnectorProbeJobKind, Queue: QueueMaintenance,
+			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CONNECTOR_PROBE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.ConnectorProbeRunOnStart",
+			CatchUp: "at_most_one_immediate",
+		},
 	}
 	if manifest.Version != 1 || manifest.Scheduler != "river-oss-postgres-leader-v0.45" ||
 		manifest.ClusterModel != "one-environment-per-database-schema" {
@@ -155,6 +161,7 @@ func TestEveryArgsUsesArgsQueueEffectivePeriodAndExplicitDefaultStates(t *testin
 		{name: "retention", kind: RetentionJobKind, queue: QueueMaintenance, period: DefaultRetentionInterval, opts: func() river.InsertOpts { return RetentionArgs{}.InsertOpts() }},
 		{name: "alerts", kind: AlertEvaluateJobKind, queue: QueueMaintenance, period: DefaultAlertEvaluateInterval, opts: func() river.InsertOpts { return AlertEvaluateArgs{}.InsertOpts() }},
 		{name: "reqlog_metrics", kind: ReqlogMetricsJobKind, queue: QueueMaintenance, period: DefaultReqlogMetricsInterval, opts: func() river.InsertOpts { return ReqlogMetricsArgs{}.InsertOpts() }},
+		{name: "connector_probe", kind: ConnectorProbeJobKind, queue: QueueMaintenance, period: DefaultConnectorProbeInterval, opts: func() river.InsertOpts { return ConnectorProbeArgs{}.InsertOpts() }},
 	}
 	for _, tt := range checks {
 		t.Run(tt.name, func(t *testing.T) {
@@ -176,7 +183,7 @@ func TestEveryArgsUsesArgsQueueEffectivePeriodAndExplicitDefaultStates(t *testin
 }
 
 func TestProductionArgsContainNoReplicaRunID(t *testing.T) {
-	for _, args := range []any{HeartbeatArgs{}, Sub2APISyncArgs{}, NewAPISyncArgs{}, FinanceCollectArgs{}, RetentionArgs{}, AlertEvaluateArgs{}, ReqlogMetricsArgs{}} {
+	for _, args := range []any{HeartbeatArgs{}, Sub2APISyncArgs{}, NewAPISyncArgs{}, FinanceCollectArgs{}, RetentionArgs{}, AlertEvaluateArgs{}, ReqlogMetricsArgs{}, ConnectorProbeArgs{}} {
 		raw, err := json.Marshal(args)
 		if err != nil {
 			t.Fatal(err)
@@ -304,7 +311,7 @@ func TestEffectiveManifestDisabledJobAndConfigChangesChangeHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Jobs) != 7 {
+	if len(base.Jobs) != 8 {
 		t.Fatalf("jobs = %d", len(base.Jobs))
 	}
 	cfg.RetentionEnabled = false
@@ -374,6 +381,8 @@ func intervalForJob(id string) time.Duration {
 		return DefaultAlertEvaluateInterval
 	case ReqlogMetricsJobKind:
 		return DefaultReqlogMetricsInterval
+	case ConnectorProbeJobKind:
+		return DefaultConnectorProbeInterval
 	default:
 		return 0
 	}

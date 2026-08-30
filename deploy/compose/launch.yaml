@@ -239,6 +239,15 @@ services:
       # 运营在后台粘贴的上游凭据落在这个目录（<root>/<scope>/<name>），
       # DB 只存指纹与版本。API 是唯一的写方；worker 以只读方式挂同一个卷。
       XM_SECRET_ROOT: ${XM_SECRET_ROOT:-/run/xm/secrets}
+      # --- 运行保障总览（XM-OPS0）------------------------------------------
+      # 告警投递配置状态只回布尔值（是否配置了 Telegram/Webhook），从不回
+      # 引用或地址；三个变量与下面 platform-worker 读的是**同一份值**——
+      # 两个进程按同一个 .env 部署时天然一致。⚠️ 有意不透传
+      # XM_ALERT_TELEGRAM_TOKEN（Bot Token 明文）：platform-api 只需要判断
+      # 「配没配」，没有任何合法理由持有这把凭据的明文。
+      XM_ALERT_TELEGRAM_BOT_REF: ${XM_ALERT_TELEGRAM_BOT_REF:-}
+      XM_ALERT_TELEGRAM_CHAT_ID: ${XM_ALERT_TELEGRAM_CHAT_ID:-}
+      XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
     volumes:
       # 命名卷而不是 bind：凭据文件只该存在于这个栈里，宿主目录一不小心就
       # 被 rsync / 备份脚本带走。镜像里已把挂载点交给运行用户（go.Dockerfile）。
@@ -334,6 +343,14 @@ services:
       XM_NEWAPI_REVENUE_DSN: ${XM_NEWAPI_REVENUE_DSN:-}
       XM_NEWAPI_REVENUE_PASSWORD_REF: ${XM_NEWAPI_REVENUE_PASSWORD_REF:-}
       XM_NEWAPI_REVENUE_PASSWORD: ${XM_NEWAPI_REVENUE_PASSWORD:-}
+      # --- 连接器健康探测（XM-OPS0）-----------------------------------------
+      # 对当前生效的 sub2api / newapi 连接器调用 Version() 与 Health()，
+      # 写观测供运行保障页的「控制平面健康」子页展示。与 Sub2API/NewAPI
+      # 同步同一条纪律：_ENABLED 是停用开关（宪法 26 条），_INTERVAL 是节奏，
+      # 两者都可选，不配就用 5 分钟默认值。生产环境下探测 fake 模式的连接器
+      # 会被启动闸拦下（详见 internal/platform/jobs/connector_probe.go）。
+      XM_CONNECTOR_PROBE_ENABLED: ${XM_CONNECTOR_PROBE_ENABLED:-true}
+      XM_CONNECTOR_PROBE_INTERVAL: ${XM_CONNECTOR_PROBE_INTERVAL:-5m}
       # --- 成本采集（XM-0037b / XM-REAL0-a）-------------------------------
       # 账号与令牌 CredentialRef 来自登记簿，SecretProvider 在每次读取时按
       # 引用解析；不在 Compose 中预声明动态 secret。provider 留空时 real

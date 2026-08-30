@@ -111,13 +111,15 @@ func effectiveJobConfig(cfg Config, id string) (enabled, runOnStart bool, interv
 		return cfg.AlertEvaluateEnabled, cfg.AlertEvaluateRunOnStart, cfg.AlertEvaluateInterval, "XM_ALERT_EVALUATE_INTERVAL", nil
 	case ReqlogMetricsJobKind:
 		return cfg.ReqlogMetricsMode == ReqlogMetricsModeFile, cfg.ReqlogMetricsRunOnStart, cfg.ReqlogMetricsInterval, "XM_REQLOG_METRICS_INTERVAL", nil
+	case ConnectorProbeJobKind:
+		return cfg.ConnectorProbeEnabled, cfg.ConnectorProbeRunOnStart, cfg.ConnectorProbeInterval, "XM_CONNECTOR_PROBE_INTERVAL", nil
 	default:
 		return false, false, 0, "", fmt.Errorf("effective job manifest: unknown job %q", id)
 	}
 }
 
 func productionRunID(cfg Config) string {
-	for _, value := range []string{cfg.HeartbeatRunID, cfg.Sub2APISyncRunID, cfg.NewAPISyncRunID, cfg.FinanceCollectRunID, cfg.RetentionRunID, cfg.AlertEvaluateRunID, cfg.ReqlogMetricsRunID} {
+	for _, value := range []string{cfg.HeartbeatRunID, cfg.Sub2APISyncRunID, cfg.NewAPISyncRunID, cfg.FinanceCollectRunID, cfg.RetentionRunID, cfg.AlertEvaluateRunID, cfg.ReqlogMetricsRunID, cfg.ConnectorProbeRunID} {
 		if strings.TrimSpace(value) != "" {
 			return value
 		}

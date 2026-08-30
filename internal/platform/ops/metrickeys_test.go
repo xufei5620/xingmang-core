@@ -10,6 +10,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/reqlog"
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
@@ -63,6 +64,15 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		reqlog.MetricNewAPIRequestsDaily,
 		reqlog.MetricNewAPIRequestsSuccessRate24h,
 		reqlog.MetricNewAPIRequestsTrend7d,
+		// Operations assurance (XM-OPS0). Not connector contracts either --
+		// same rationale as finance.MetricProfitDaily above: the invariant
+		// this test really guards is "the whitelist has exactly one source
+		// of truth per key", regardless of which package defines the
+		// constant.
+		jobs.MetricSub2APIConnectorHealth,
+		jobs.MetricNewAPIConnectorHealth,
+		jobs.MetricPlatformHeartbeat,
+		jobs.MetricRetentionLastRun,
 	}
 
 	for _, key := range fromContracts {

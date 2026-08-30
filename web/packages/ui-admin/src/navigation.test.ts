@@ -244,12 +244,10 @@ describe("查表与状态标签", () => {
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 1（操作与审批已实装，XM-ACTIONS0）+ 治理段 4（资源目录、人员与
-    // 权限、设置已实装）+ 扩展能力 4
+    // 全局段 0（操作与审批、后台任务已实装）+ 治理段 3（资源目录、人员与
+    // 权限、运行保障、设置已实装）+ 扩展能力 4
     expect(paths).toEqual([
-      "/jobs",
       "/finance",
-      "/ops",
       "/changes",
       "/design",
       "/ext/app",
@@ -268,6 +266,7 @@ describe("查表与状态标签", () => {
       "/audit",
       "/registry",
       "/identity",
+      "/ops",
       "/settings",
     ]);
   });

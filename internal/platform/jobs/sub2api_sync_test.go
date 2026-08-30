@@ -878,6 +878,7 @@ func TestSub2APIFakeModeRejectedInProduction(t *testing.T) {
 	off.Sub2APIMode = Sub2APIModeFake
 	off.Sub2APISyncEnabled = false
 	off.NewAPISyncEnabled = false
+	off.ConnectorProbeEnabled = false // XM-OPS0: same gate, isolated the same way as the others above
 	off.FinanceCollectEnabled = false // 成本采集（XM-0037b）同款闸，同样隔离掉
 	if err := off.normalized().validate(); err != nil {
 		t.Fatalf("production 下关闭同步应通过: %v", err)
@@ -890,6 +891,7 @@ func TestSub2APIFakeModeRejectedInProduction(t *testing.T) {
 	realMode := DefaultConfig()
 	realMode.Environment = "production"
 	realMode.Sub2APIMode = Sub2APIModeReal
+	realMode.ConnectorProbeEnabled = false // XM-OPS0: same gate, isolated the same way as the others above
 	realMode.NewAPISyncEnabled = false     // 同上：隔离出 Sub2API 这一条闸
 	realMode.FinanceCollectEnabled = false // 成本采集（XM-0037b）同款闸，同样隔离掉
 	if err := realMode.normalized().validate(); err != nil {

@@ -356,6 +356,7 @@ func TestParseFinanceCollectMode(t *testing.T) {
 // 没有任何后续采集会去覆盖它——只能靠人工数据修复挖出来。
 func TestFinanceCollectFakeIsRefusedInProduction(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.ConnectorProbeEnabled = false // XM-OPS0: same gate; NewAPIMode stays fake-by-default in this test
 	cfg.Environment = "production"
 	cfg.Sub2APIMode = Sub2APIModeReal
 	cfg.NewAPISyncEnabled = false
@@ -393,6 +394,7 @@ func TestFinanceCollectConfigGuards(t *testing.T) {
 	cfg.NewAPISyncEnabled = false
 	cfg.FinanceCollectMode = FinanceCollectModeReal
 	cfg.FinanceCollectRunID = "isolated"
+	cfg.ConnectorProbeEnabled = false // XM-OPS0: keep this case isolated to the RunID rule only
 	if err := cfg.validate(); err == nil {
 		t.Fatal("生产环境不该允许 RunID —— 每个副本各跑各的会互相覆盖今日行")
 	}

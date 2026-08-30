@@ -37,8 +37,8 @@ func TestPolicyCoversExactlyRegisteredMetrics(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("policy + explicit exclusions = %v, registry = %v", got, want)
 	}
-	if len(policies) != 14 || len(excluded) != 10 {
-		t.Fatalf("active policy/exclusion counts = %d/%d, want 14/10", len(policies), len(excluded))
+	if len(policies) != 18 || len(excluded) != 10 {
+		t.Fatalf("active policy/exclusion counts = %d/%d, want 18/10", len(policies), len(excluded))
 	}
 }
 
