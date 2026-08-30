@@ -240,11 +240,10 @@ describe("查表与状态标签", () => {
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 2 + 治理段 5（资源目录与设置已实装）+ 扩展能力 4
+    // 全局段 2 + 治理段 4（资源目录、人员与权限、设置已实装）+ 扩展能力 4
     expect(paths).toEqual([
       "/actions",
       "/jobs",
-      "/identity",
       "/finance",
       "/ops",
       "/changes",
@@ -257,12 +256,13 @@ describe("查表与状态标签", () => {
     expect(placeholderNavItems().every((item) => navStageHint(item) !== undefined)).toBe(true);
   });
 
-  it("已实装的四页正是现在真有内容的那四页", () => {
+  it("已实装的五页正是现在真有内容的那五页", () => {
     expect(allNavItems().filter((item) => item.built).map((item) => item.path)).toEqual([
       "/dashboard",
       "/alerts",
       "/audit",
       "/registry",
+      "/identity",
       "/settings",
     ]);
   });

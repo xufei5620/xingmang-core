@@ -73,6 +73,9 @@ export const DEFAULT_SCOPES = [
   // XM-CRED0 接入模式：connector.config.set@1 与 GET /connectors/config。
   // 同为开发态默认；服务端独立裁决，生产 admin/staff 映射不含它。
   "connector.manage",
+  // XM-LOGIN 人员与权限（账号管理）。仅 dev-header 开发态默认携带；
+  // local/oidc 生产模式下由服务端按角色映射裁决，不读这份前端清单。
+  "staff.manage",
 ];
 
 function parseScopes(raw: string | undefined): string[] {

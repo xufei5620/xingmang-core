@@ -144,7 +144,9 @@ export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "人员与权限",
     path: "/identity",
     stage: "F-A",
-    built: false,
+    // XM-LOGIN：账号与身份子页已接真实数据（员工账号的建立/改角色/禁用/重置密码）。
+    // 其余四个子页（权限规则、权限范围、密钥引用、会话）仍是诚实占位。
+    built: true,
     subTabs: sub(
       ["accounts", "账号与身份"],
       ["rules", "权限规则"],

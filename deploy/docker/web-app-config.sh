@@ -10,7 +10,9 @@
 # （dev-header）与生产（oidc）；鉴权方式烧进构建产物就得每个环境各构建一份。
 #
 # 输入（环境变量）：
-#   XM_WEB_AUTH_MODE        dev-header（默认）| oidc
+#   XM_WEB_AUTH_MODE        dev-header（默认）| oidc | local
+#                           local＝管理台自带账号密码登录（XM-LOGIN），会话是
+#                           HttpOnly Cookie，不需要下面两个 oidc 专属变量
 #   XM_WEB_OIDC_ISSUER      oidc 时必填，例 https://auth.solov.cc/realms/solov-staff
 #                           必须与 platform-api 的 XM_OIDC_ISSUER 逐字相同
 #   XM_WEB_OIDC_CLIENT_ID   oidc 时必填，例 xingmang-admin-web
@@ -29,9 +31,9 @@ scopes="${XM_WEB_OIDC_SCOPES:-}"
 out="${XM_WEB_APP_CONFIG_PATH:-/usr/share/nginx/html/app-config.js}"
 
 case "$mode" in
-  dev-header|oidc) ;;
+  dev-header|oidc|local) ;;
   *)
-    echo "[web-app-config] XM_WEB_AUTH_MODE 只能是 dev-header 或 oidc（当前：$mode）" >&2
+    echo "[web-app-config] XM_WEB_AUTH_MODE 只能是 dev-header、oidc 或 local（当前：$mode）" >&2
     exit 1
     ;;
 esac

@@ -41,7 +41,9 @@ import {
 import { AlertsPage } from "./pages/AlertsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { AuthCallbackPage } from "./pages/AuthCallbackPage";
+import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChannelDetailPage, isSupplyPlatform } from "./pages/ChannelDetailPage";
+import { IdentityPage } from "./pages/IdentityPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -319,6 +321,10 @@ export const routes = [
     // 无路径的门禁布局路由：没登录就 <Navigate> 去 /login，登录了渲染 <Outlet />
     Component: RequireAuth,
     children: [
+      // local 模式的强制改密页（XM-LOGIN）：必须登录才能进，但**不**套壳
+      // （没有侧栏/顶栏）——must_change_password 为真时 RequireAuth 会把人
+      // 无论要去哪都先带到这里，套壳只会让人多一条「先去点别的」的岔路
+      { path: "account/password", Component: ChangePasswordPage },
       {
         Component: ShellLayout,
         children: [
@@ -372,6 +378,7 @@ export const routes = [
               // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
               { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
               { path: "registry", Component: RegistryPage },
+              { path: "identity", Component: IdentityPage },
               { path: "settings", Component: SettingsPage },
               ...placeholderRoutes,
 

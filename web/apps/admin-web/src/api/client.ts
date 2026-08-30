@@ -1,5 +1,5 @@
 import { getRuntimeConfig } from "../auth/runtimeConfig";
-import { oidcBearerProvider } from "../auth/session";
+import { oidcBearerProvider, onLocalSessionLoss } from "../auth/session";
 import { appApiConfig, type PlatformApiConfig } from "./config";
 
 /** 网络层根本没通（DNS/连接/CORS/离线）时用的伪状态码。
@@ -10,6 +10,10 @@ const NETWORK_CODE = "NETWORK_UNAVAILABLE";
 const BAD_RESPONSE_CODE = "BAD_RESPONSE";
 const UNKNOWN_CODE = "UNKNOWN";
 const UNAUTHENTICATED_CODE = "UNAUTHENTICATED";
+
+/** local 模式的 CSRF 头（后端契约：非 GET 请求必须带；GET 上带着也无害，
+ *  所以统一发出，不必按 method 分支）。 */
+const LOCAL_CSRF_HEADER: Readonly<Record<string, string>> = { "X-Requested-With": "xingmang" };
 
 /** oidc 模式下服务端拒绝令牌时的两句**固定**文案（oidcauth/resolver.go）。
  *
@@ -100,6 +104,14 @@ export interface ApiClientOptions {
   /** 传入即走 oidc：`Authorization: Bearer` 取代三个开发头。
    *  不传＝dev-header 模式，请求形状与 XM-AUTH1 之前逐字一致。 */
   auth?: BearerTokenProvider;
+  /** local 模式（XM-LOGIN）：会话是 HttpOnly Cookie，不发开发头也不发 Bearer。
+   *  true 时每个请求都带 `credentials:"same-origin"` 与 `X-Requested-With: xingmang`
+   *  （CSRF 防护，GET 上带着也无害）。与 `auth` 互斥，调用方保证不会同传两个。 */
+  localCredentials?: boolean;
+  /** local 模式下收到 401（会话缺失/失效）时触发；不传＝只抛错误、不跳转——
+   *  auth/localSession.ts 的登录页探测请求用这个「只抛不跳」的形态，
+   *  避免刚提交错误密码就被这层再跳一次登录页。 */
+  onLocalSessionLoss?: () => void;
 }
 
 /** 开发期身份头。
@@ -144,7 +156,13 @@ function isSessionRejection(err: ApiError): boolean {
 }
 
 /** 创建 API 客户端。所有请求都从这里出去，身份头只在这里注入一次。 */
-export function createApiClient({ config, fetchImpl, auth }: ApiClientOptions): ApiClient {
+export function createApiClient({
+  config,
+  fetchImpl,
+  auth,
+  localCredentials,
+  onLocalSessionLoss,
+}: ApiClientOptions): ApiClient {
   /** oidc 模式的身份头。取令牌可能要先续期，所以是异步的。 */
   async function bearerHeaders(provider: BearerTokenProvider): Promise<Record<string, string>> {
     const token = await provider.getAccessToken();
@@ -166,9 +184,13 @@ export function createApiClient({ config, fetchImpl, auth }: ApiClientOptions): 
     // 测试可以在 import 之后再替换 fetch
     const doFetch: FetchLike = fetchImpl ?? ((input, i) => globalThis.fetch(input, i));
     const url = buildUrl(config, path, options.searchParams);
-    // dev-header 分支刻意**不 await**：开发头是同步拼出来的，fetch 要像以前一样
-    // 在调用的同一个 tick 发出（有页面测试按这个时序数请求次数）
-    const identity = auth ? await bearerHeaders(auth) : devPrincipalHeaders(config);
+    // dev-header／local 分支刻意**不 await**：两者的身份头都是同步拼出来的，
+    // fetch 要像以前一样在调用的同一个 tick 发出（有页面测试按这个时序数请求次数）
+    const identity = auth
+      ? await bearerHeaders(auth)
+      : localCredentials
+        ? LOCAL_CSRF_HEADER
+        : devPrincipalHeaders(config);
     const headers = { ...init.headers, ...identity };
 
     let response: Response;
@@ -176,6 +198,10 @@ export function createApiClient({ config, fetchImpl, auth }: ApiClientOptions): 
       response = await doFetch(url, {
         ...init,
         headers,
+        // local 模式的会话是 HttpOnly Cookie：必须显式带 credentials，
+        // 否则同源请求默认也不带 Cookie（fetch 的 credentials 默认值是
+        // "same-origin"，但显式写出来不依赖这个默认值，其它两种模式不需要它）
+        ...(localCredentials ? { credentials: "same-origin" as RequestCredentials } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
       });
     } catch (cause) {
@@ -195,6 +221,13 @@ export function createApiClient({ config, fetchImpl, auth }: ApiClientOptions): 
       // dev-header 模式没有这一步——那套头被拒说明后端配成了别的模式，
       // 跳登录页解决不了，让 403 原样显示出来才看得见问题
       if (auth && isSessionRejection(err)) auth.onUnauthenticated("rejected");
+      // local 模式只认 401：403 是「登录了但没这个权限」（缺少权限 xxx），
+      // 再跳一次登录页解决不了，应该照常显示「无权访问」。而且这里**不带**
+      // 「传了 onLocalSessionLoss 才跳」之外的例外——登录页自己的 login()/me()
+      // 探测用的是没接 onLocalSessionLoss 的另一个客户端实例（见
+      // auth/localSession.ts），所以这里始终可以无条件按 401 判断，不用再
+      // 额外区分「是不是登录请求本身」
+      if (localCredentials && err.status === 401) onLocalSessionLoss?.();
       throw err;
     }
 
@@ -237,8 +270,16 @@ export function createApiClient({ config, fetchImpl, auth }: ApiClientOptions): 
 }
 
 /** 应用默认客户端。模式在模块加载时定一次：/app-config.js 在业务包之前同步执行，
- *  此刻 window.__XM_CONFIG__ 已经就位；页面生命周期内不会再变。 */
+ *  此刻 window.__XM_CONFIG__ 已经就位；页面生命周期内不会再变。
+ *
+ *  local 模式下这里接了 onLocalSessionLoss（会跳登录页）：所有业务只读/写路径
+ *  （员工账号列表、Action 执行……）都经过这个单例，会话过期就该被带回登录页。
+ *  auth/localSession.ts 的 login()/me() 探测用的是另一个**不接**这个回调的客户端
+ *  实例，理由见该文件顶部注释。 */
 export const apiClient: ApiClient = createApiClient({
   config: appApiConfig,
   ...(getRuntimeConfig().authMode === "oidc" ? { auth: oidcBearerProvider } : {}),
+  ...(getRuntimeConfig().authMode === "local"
+    ? { localCredentials: true, onLocalSessionLoss }
+    : {}),
 });

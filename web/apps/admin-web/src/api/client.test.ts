@@ -352,3 +352,82 @@ describe("createApiClient：oidc 模式注入 Bearer", () => {
     });
   });
 });
+
+describe("local 模式（XM-LOGIN）：Cookie 会话 + CSRF 头", () => {
+  it("GET 请求带 X-Requested-With 与 credentials:same-origin，不带开发头", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ items: [] }));
+    await createApiClient({ config, fetchImpl, localCredentials: true }).get(
+      "/api/v1/staff/accounts",
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const call = fetchImpl.mock.calls[0];
+    expect(call?.[1]?.headers).toEqual({
+      Accept: "application/json",
+      "X-Requested-With": "xingmang",
+    });
+    expect(call?.[1]?.credentials).toBe("same-origin");
+  });
+
+  it("POST 请求同样带 X-Requested-With 与 credentials，不带开发头也不带 Bearer", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ username: "alice" }));
+    await createApiClient({ config, fetchImpl, localCredentials: true }).post(
+      "/api/v1/auth/login",
+      { username: "alice", password: "hunter2000" },
+    );
+
+    const call = fetchImpl.mock.calls[0];
+    const headers = call?.[1]?.headers as Record<string, string>;
+    expect(headers["X-Requested-With"]).toBe("xingmang");
+    expect(call?.[1]?.credentials).toBe("same-origin");
+    expect(headers["X-Dev-Principal-ID"]).toBeUndefined();
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("dev-header 分支不受影响：不传 localCredentials 时请求形状逐字照旧（不带 credentials 字段）", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ items: [] }));
+    await createApiClient({ config, fetchImpl }).get("/api/v1/services");
+    const call = fetchImpl.mock.calls[0];
+    expect(call?.[1]?.credentials).toBeUndefined();
+    expect((call?.[1]?.headers as Record<string, string>)["X-Requested-With"]).toBeUndefined();
+  });
+
+  it("401（会话缺失/失效）触发 onLocalSessionLoss", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse({ error: { code: "UNAUTHENTICATED" } }, 401),
+    );
+    const onLocalSessionLoss = vi.fn();
+    const err = await expectApiError(
+      createApiClient({ config, fetchImpl, localCredentials: true, onLocalSessionLoss }).get(
+        "/api/v1/staff/accounts",
+      ),
+    );
+    expect(err.status).toBe(401);
+    expect(onLocalSessionLoss).toHaveBeenCalledOnce();
+  });
+
+  it("403（登录了但没这个权限）不触发 onLocalSessionLoss——跳登录页解决不了", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse({ error: { code: "PERMISSION_DENIED", message: "缺少权限 staff.manage" } }, 403),
+    );
+    const onLocalSessionLoss = vi.fn();
+    const err = await expectApiError(
+      createApiClient({ config, fetchImpl, localCredentials: true, onLocalSessionLoss }).get(
+        "/api/v1/staff/accounts",
+      ),
+    );
+    expect(err.missingScope).toBe("staff.manage");
+    expect(onLocalSessionLoss).not.toHaveBeenCalled();
+  });
+
+  it("不传 onLocalSessionLoss 时 401 只抛错误、不报错——登录页自己的 login()/me() 探测用这个形态", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ error: { code: "INVALID_CREDENTIALS" } }, 401));
+    const err = await expectApiError(
+      createApiClient({ config, fetchImpl, localCredentials: true }).post("/api/v1/auth/login", {
+        username: "alice",
+        password: "wrong-password",
+      }),
+    );
+    expect(err.code).toBe("INVALID_CREDENTIALS");
+  });
+});
