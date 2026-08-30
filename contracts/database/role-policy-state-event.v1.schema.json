@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xingmang.local/contracts/database/role-policy-state-event.v1.schema.json",
+  "title": "Database role policy state event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version","sequence","event_id","kind","previous_event_sha256","previous_policy_sha256","current_policy_sha256","capability","from_state","to_state","approved_change_request","change_request_state_sha256","cr_status","recorded_at","closure_evidence_sha256"],
+  "properties": {
+    "version": {"const": 1}, "sequence": {"type":"integer","minimum":1},
+    "event_id": {"type":"string","pattern":"^[a-z][a-z0-9_.-]{0,127}$"},
+    "kind": {"enum":["genesis","policy-update","rotation-start","rotation-close"]},
+    "previous_event_sha256": {"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
+    "previous_policy_sha256": {"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
+    "current_policy_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "capability": {"type":["string","null"],"pattern":"^[a-z][a-z0-9_]{0,62}$"},
+    "from_state": {"type":["string","null"],"enum":["steady-a","rotating-a-b","steady-b",null]},
+    "to_state": {"type":["string","null"],"enum":["steady-a","rotating-a-b","steady-b",null]},
+    "approved_change_request": {"type":["string","null"],"pattern":"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$"},
+    "change_request_state_sha256": {"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
+    "cr_status": {"type":["string","null"],"enum":["approved","closed",null]},
+    "recorded_at": {"type":"string","format":"date-time"},
+    "closure_evidence_sha256": {"type":["string","null"],"pattern":"^[0-9a-f]{64}$"}
+  }
+}
