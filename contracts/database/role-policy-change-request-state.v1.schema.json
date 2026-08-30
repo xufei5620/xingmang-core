@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xingmang.local/contracts/database/role-policy-change-request-state.v1.schema.json",
+  "title": "Database role policy change request state v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["version","change_request_id","capability","status","old_identity","new_identity","previous_policy_sha256","current_policy_sha256","valid_from","valid_until","deadline","closure_evidence_sha256","closed_at"],
+  "properties": {
+    "version":{"const":1}, "change_request_id":{"type":"string","minLength":1,"maxLength":128},
+    "capability":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,62}$"},
+    "status":{"enum":["approved","closed"]},
+    "old_identity":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,62}$"}, "new_identity":{"type":"string","pattern":"^[a-z][a-z0-9_]{0,62}$"},
+    "previous_policy_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}, "current_policy_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "valid_from":{"type":"string","format":"date-time"}, "valid_until":{"type":"string","format":"date-time"}, "deadline":{"type":"string","format":"date-time"},
+    "closure_evidence_sha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"}, "closed_at":{"type":["string","null"],"format":"date-time"}
+  }
+}

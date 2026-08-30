@@ -1,0 +1,2223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xingmang.local/contracts/database/role-policy.v1",
+  "version": 1,
+  "database_selector": "current_database",
+  "production_database_name": "xingmang",
+  "owner": "xm_migrator",
+  "capability_roles": [
+    "xm_api_runtime",
+    "xm_worker_runtime",
+    "xm_lifecycle_runtime",
+    "xm_ops_read",
+    "xm_backup_read"
+  ],
+  "roles": {
+    "xm_api_a": {
+      "kind": "login",
+      "capability": "xm_api_runtime",
+      "login": true,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_api_b": {
+      "kind": "login",
+      "capability": "xm_api_runtime",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_api_runtime": {
+      "kind": "capability",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_backup_a": {
+      "kind": "login",
+      "capability": "xm_backup_read",
+      "login": true,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": true
+    },
+    "xm_backup_b": {
+      "kind": "login",
+      "capability": "xm_backup_read",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": true
+    },
+    "xm_backup_read": {
+      "kind": "capability",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_lifecycle_a": {
+      "kind": "login",
+      "capability": "xm_lifecycle_runtime",
+      "login": true,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_lifecycle_b": {
+      "kind": "login",
+      "capability": "xm_lifecycle_runtime",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_lifecycle_runtime": {
+      "kind": "capability",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_migrator": {
+      "kind": "owner",
+      "login": true,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_ops_a": {
+      "kind": "login",
+      "capability": "xm_ops_read",
+      "login": true,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": true
+    },
+    "xm_ops_b": {
+      "kind": "login",
+      "capability": "xm_ops_read",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": true
+    },
+    "xm_ops_read": {
+      "kind": "capability",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_worker_a": {
+      "kind": "login",
+      "capability": "xm_worker_runtime",
+      "login": true,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_worker_b": {
+      "kind": "login",
+      "capability": "xm_worker_runtime",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    },
+    "xm_worker_runtime": {
+      "kind": "capability",
+      "login": false,
+      "inherit": true,
+      "superuser": false,
+      "createdb": false,
+      "createrole": false,
+      "replication": false,
+      "bypassrls": false,
+      "default_transaction_read_only": false
+    }
+  },
+  "memberships": [
+    {
+      "role": "xm_api_runtime",
+      "member": "xm_api_a",
+      "inherit": true,
+      "set": false,
+      "admin": false
+    },
+    {
+      "role": "xm_backup_read",
+      "member": "xm_backup_a",
+      "inherit": true,
+      "set": false,
+      "admin": false
+    },
+    {
+      "role": "xm_lifecycle_runtime",
+      "member": "xm_lifecycle_a",
+      "inherit": true,
+      "set": false,
+      "admin": false
+    },
+    {
+      "role": "xm_ops_read",
+      "member": "xm_ops_a",
+      "inherit": true,
+      "set": false,
+      "admin": false
+    },
+    {
+      "role": "xm_worker_runtime",
+      "member": "xm_worker_a",
+      "inherit": true,
+      "set": false,
+      "admin": false
+    }
+  ],
+  "objects": [
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "action",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "action",
+      "name": "action_run",
+      "owner": "xm_migrator",
+      "columns": [
+        "action_id",
+        "action_version",
+        "duration_ms",
+        "environment",
+        "error_code",
+        "finished_at",
+        "id",
+        "principal_id",
+        "principal_type",
+        "request_id",
+        "risk_level",
+        "started_at",
+        "status"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "alerts",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "alerts",
+      "name": "alert",
+      "owner": "xm_migrator",
+      "columns": [
+        "acknowledged_at",
+        "created_at",
+        "dedup_key",
+        "detail",
+        "environment",
+        "fire_count",
+        "id",
+        "last_seen_at",
+        "notified_at",
+        "notify_error",
+        "notify_status",
+        "opened_at",
+        "resolved_at",
+        "rule_key",
+        "severity",
+        "source_metric_key",
+        "status",
+        "title",
+        "updated_at"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "alerts",
+      "name": "alert_silence",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "created_by",
+        "ends_at",
+        "environment",
+        "id",
+        "reason",
+        "rule_key",
+        "starts_at"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "audit",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "audit",
+      "name": "archive_operation_intent",
+      "owner": "xm_migrator",
+      "columns": [
+        "approval_envelope_sha256",
+        "canonical_intent_bytes",
+        "created_at",
+        "deterministic_bytes_digest",
+        "operation_id"
+      ],
+      "no_runtime_access": true
+    },
+    {
+      "kind": "table",
+      "schema": "audit",
+      "name": "archive_put_receipt",
+      "owner": "xm_migrator",
+      "columns": [
+        "object_version_bytes",
+        "object_version_sha256",
+        "operation_id",
+        "ordinal",
+        "recorded_at"
+      ],
+      "no_runtime_access": true
+    },
+    {
+      "kind": "table",
+      "schema": "audit",
+      "name": "archive_segment",
+      "owner": "xm_migrator",
+      "columns": [
+        "canonical_version_counts",
+        "chain_root_hash",
+        "chain_root_id",
+        "checkpoint_sha256",
+        "committed_at",
+        "environment_counts",
+        "first_prev_hash",
+        "format_version",
+        "from_sequence",
+        "id",
+        "last_event_hash",
+        "manifest_key_id",
+        "manifest_object_key",
+        "manifest_sha256",
+        "manifest_signature",
+        "manifest_version_id",
+        "payload_object_key",
+        "payload_sha256",
+        "payload_size_bytes",
+        "payload_version_id",
+        "projections",
+        "recovery_generation",
+        "row_count",
+        "to_sequence",
+        "verified_at"
+      ],
+      "no_runtime_access": true
+    },
+    {
+      "kind": "table",
+      "schema": "audit",
+      "name": "archive_terminal_receipt",
+      "owner": "xm_migrator",
+      "columns": [
+        "operation_id",
+        "optional_artifact_ref_bytes",
+        "recorded_at",
+        "signed_result_bytes",
+        "terminal_result_digest"
+      ],
+      "no_runtime_access": true
+    },
+    {
+      "kind": "table",
+      "schema": "audit",
+      "name": "audit_event",
+      "owner": "xm_migrator",
+      "columns": [
+        "action_id",
+        "action_run_id",
+        "action_version",
+        "after_summary",
+        "approval_id",
+        "before_summary",
+        "canonical_version",
+        "compensation_result",
+        "connector_request_summary",
+        "connector_response_summary",
+        "environment",
+        "event_hash",
+        "id",
+        "occurred_at",
+        "prev_hash",
+        "principal_id",
+        "principal_type",
+        "reason",
+        "recorded_at",
+        "request_id",
+        "resource_id",
+        "resource_type",
+        "result",
+        "sequence",
+        "source_ip",
+        "trace_id"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "audit",
+      "name": "chain_root",
+      "owner": "xm_migrator",
+      "columns": [
+        "computed_at",
+        "export_target",
+        "exported_at",
+        "from_sequence",
+        "id",
+        "key_id",
+        "root_hash",
+        "signature",
+        "to_sequence"
+      ],
+      "table_privileges": {
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      },
+      "column_privileges": {
+        "xm_lifecycle_runtime": {
+          "export_target": [
+            "UPDATE"
+          ],
+          "exported_at": [
+            "UPDATE"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "routine",
+      "schema": "audit",
+      "name": "reject_archive_catalog_mutation()",
+      "owner": "xm_migrator"
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "core",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "core",
+      "name": "connection",
+      "owner": "xm_migrator",
+      "columns": [
+        "connector_id",
+        "created_at",
+        "credential_ref",
+        "detected_upstream_version",
+        "environment",
+        "granted_capabilities",
+        "id",
+        "kill_switch",
+        "last_verified_at",
+        "service_id",
+        "status",
+        "target_allowlist",
+        "updated_at",
+        "version_fingerprint"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "core",
+      "name": "connector",
+      "owner": "xm_migrator",
+      "columns": [
+        "compatibility_test_path",
+        "connection_schema_path",
+        "contract_version",
+        "created_at",
+        "id",
+        "key",
+        "read_capabilities",
+        "supported_upstream_versions",
+        "target_allowlist",
+        "updated_at",
+        "version",
+        "write_capabilities"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "core",
+      "name": "environment",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "description",
+        "id"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "core",
+      "name": "service",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "endpoint",
+        "environment",
+        "health_check_path",
+        "id",
+        "instance_id",
+        "internal_endpoint",
+        "native_console_url",
+        "observed_at",
+        "owner",
+        "runbook_path",
+        "service_type",
+        "source_watermark",
+        "status",
+        "updated_at"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "database",
+      "schema": "",
+      "name": "current_database",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "CONNECT"
+        ],
+        "xm_backup_read": [
+          "CONNECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "CONNECT"
+        ],
+        "xm_migrator": [
+          "CONNECT",
+          "CREATE",
+          "TEMPORARY"
+        ],
+        "xm_ops_read": [
+          "CONNECT"
+        ],
+        "xm_worker_runtime": [
+          "CONNECT"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "finance",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "amortization_loss",
+      "owner": "xm_migrator",
+      "columns": [
+        "batch_id",
+        "booked_on",
+        "created_at",
+        "currency",
+        "id",
+        "loss_minor",
+        "proxy_asset_id",
+        "updated_at"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "balance_history",
+      "owner": "xm_migrator",
+      "columns": [
+        "balance_minor",
+        "captured_at",
+        "currency",
+        "id",
+        "observed_at",
+        "source",
+        "upstream_account_id"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "sequence",
+      "schema": "finance",
+      "name": "balance_history_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "platform_channel_binding",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "created_by",
+        "environment",
+        "external_channel_id",
+        "id",
+        "provenance",
+        "reason",
+        "service_id",
+        "upstream_account_id",
+        "valid_from",
+        "valid_to"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "profit_daily",
+      "owner": "xm_migrator",
+      "columns": [
+        "account_id",
+        "business_day",
+        "business_day_tz",
+        "cost_minor",
+        "cost_observed_at",
+        "currency",
+        "platform_id",
+        "profit_minor",
+        "ratio_snapshot",
+        "revenue_minor",
+        "revenue_observed_at",
+        "source",
+        "token_id",
+        "updated_at",
+        "upstream_account_id"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "proxy_asset",
+      "owner": "xm_migrator",
+      "columns": [
+        "buy_address",
+        "buy_platform",
+        "created_at",
+        "credential_ref",
+        "currency",
+        "environment",
+        "expires_on",
+        "id",
+        "mounted",
+        "opened_on",
+        "paid_minor",
+        "refunded_minor",
+        "refunded_on",
+        "shared_account_count",
+        "surcharge_minor",
+        "terminated_on",
+        "updated_at"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "routine",
+      "schema": "finance",
+      "name": "reject_runway_threshold_history_mutation()",
+      "owner": "xm_migrator"
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "runway_threshold_config",
+      "owner": "xm_migrator",
+      "columns": [
+        "critical_days",
+        "environment",
+        "reason",
+        "request_id",
+        "revision",
+        "serious_days",
+        "updated_at",
+        "updated_by",
+        "warning_days"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "view",
+      "schema": "finance",
+      "name": "runway_threshold_current_verified",
+      "owner": "xm_migrator",
+      "columns": [
+        "critical_days",
+        "environment",
+        "reason",
+        "request_id",
+        "revision",
+        "serious_days",
+        "updated_at",
+        "updated_by",
+        "warning_days"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "runway_threshold_history",
+      "owner": "xm_migrator",
+      "columns": [
+        "change_source",
+        "changed_at",
+        "changed_by",
+        "critical_days",
+        "environment",
+        "reason",
+        "request_id",
+        "revision",
+        "serious_days",
+        "warning_days"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "INSERT",
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "subscription_cost_batch",
+      "owner": "xm_migrator",
+      "columns": [
+        "account_count",
+        "created_at",
+        "currency",
+        "expires_on",
+        "id",
+        "paid_minor",
+        "proxy_batch_id",
+        "refunded_minor",
+        "refunded_on",
+        "starts_on",
+        "surcharge_minor",
+        "terminated_on",
+        "updated_at",
+        "upstream_account_id"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "token_map",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "credential_ref",
+        "own_account_id",
+        "updated_at",
+        "upstream_account_id",
+        "upstream_token_id"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "finance",
+      "name": "upstream_account",
+      "owner": "xm_migrator",
+      "columns": [
+        "access_method",
+        "base_url",
+        "business_day_tz",
+        "created_at",
+        "credential_ref",
+        "currency",
+        "environment",
+        "group_rate",
+        "id",
+        "platform_id",
+        "recharge_ratio",
+        "status",
+        "system_type",
+        "updated_at",
+        "upstream_contact",
+        "upstream_group",
+        "upstream_name"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "ops",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "ops",
+      "name": "metric_observation",
+      "owner": "xm_migrator",
+      "columns": [
+        "environment",
+        "id",
+        "is_partial",
+        "last_error_code",
+        "last_success",
+        "metric_key",
+        "observed_at",
+        "source",
+        "staleness_threshold_seconds",
+        "status",
+        "synced_at",
+        "updated_at",
+        "value_json",
+        "watermark"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "ops",
+      "name": "metric_observation_sample",
+      "owner": "xm_migrator",
+      "columns": [
+        "environment",
+        "id",
+        "is_partial",
+        "last_error_code",
+        "metric_key",
+        "observed_at",
+        "source",
+        "status",
+        "synced_at",
+        "value_json",
+        "watermark"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "sequence",
+      "schema": "ops",
+      "name": "metric_observation_sample_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "public",
+      "owner": "pg_database_owner",
+      "privileges": {
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "public",
+      "name": "river_job",
+      "owner": "xm_migrator",
+      "columns": [
+        "args",
+        "attempt",
+        "attempted_at",
+        "attempted_by",
+        "created_at",
+        "errors",
+        "finalized_at",
+        "id",
+        "kind",
+        "max_attempts",
+        "metadata",
+        "priority",
+        "queue",
+        "scheduled_at",
+        "state",
+        "tags",
+        "unique_key",
+        "unique_states"
+      ],
+      "table_privileges": {
+        "xm_worker_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "sequence",
+      "schema": "public",
+      "name": "river_job_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "type",
+      "schema": "public",
+      "name": "river_job_state",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "routine",
+      "schema": "public",
+      "name": "river_job_state_in_bitmask(bit, river_job_state)",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "EXECUTE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "public",
+      "name": "river_leader",
+      "owner": "xm_migrator",
+      "columns": [
+        "elected_at",
+        "expires_at",
+        "leader_id",
+        "name"
+      ],
+      "table_privileges": {
+        "xm_worker_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "public",
+      "name": "river_migration",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "line",
+        "version"
+      ],
+      "table_privileges": {
+        "xm_worker_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "public",
+      "name": "river_notification",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "id",
+        "payload",
+        "topic"
+      ],
+      "table_privileges": {
+        "xm_worker_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "sequence",
+      "schema": "public",
+      "name": "river_notification_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "public",
+      "name": "river_queue",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "metadata",
+        "name",
+        "paused_at",
+        "updated_at"
+      ],
+      "table_privileges": {
+        "xm_worker_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "public",
+      "name": "schema_migrations",
+      "owner": "xm_migrator",
+      "columns": [
+        "dirty",
+        "version"
+      ],
+      "no_runtime_access": true
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "ui",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "ui",
+      "name": "saved_view",
+      "owner": "xm_migrator",
+      "columns": [
+        "created_at",
+        "density",
+        "environment",
+        "filters",
+        "id",
+        "identity_zone",
+        "known_columns",
+        "name",
+        "owner_issuer",
+        "owner_subject",
+        "query",
+        "sort_column",
+        "sort_direction",
+        "state_hash",
+        "state_version",
+        "table_key",
+        "updated_at",
+        "visible_columns"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      }
+    }
+  ],
+  "default_acls": [
+    {
+      "owner": "xm_migrator",
+      "schema": "action",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "action",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "action",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "action",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "action",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "alerts",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "alerts",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "alerts",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "alerts",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "alerts",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "audit",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "audit",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "audit",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "audit",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "audit",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "core",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "core",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "core",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "core",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "core",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "finance",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "finance",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "finance",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "finance",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "finance",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ops",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ops",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ops",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ops",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ops",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "public",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "public",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_worker_runtime": [
+          "EXECUTE"
+        ]
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "public",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "public",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_worker_runtime": [
+          "SELECT",
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ]
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "public",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ui",
+      "object_kind": "domain",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ui",
+      "object_kind": "routine",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ui",
+      "object_kind": "sequence",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ui",
+      "object_kind": "table",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    },
+    {
+      "owner": "xm_migrator",
+      "schema": "ui",
+      "object_kind": "type",
+      "privileges": {
+        "PUBLIC": [],
+        "xm_api_runtime": [],
+        "xm_backup_read": [],
+        "xm_lifecycle_runtime": [],
+        "xm_ops_read": [],
+        "xm_worker_runtime": []
+      }
+    }
+  ],
+  "public_database_privileges": [],
+  "public_schema_privileges": [],
+  "public_type_privileges": [],
+  "public_routine_privileges": [],
+  "public_schema_owner": "pg_database_owner",
+  "custom_schema_default": "deny",
+  "public_schema_contract": "river-only",
+  "runway_approved_merge_sha": "809eec2df487abb53ab99c7a1295bd20750cc324",
+  "runway_objects": [
+    "finance.runway_threshold_config",
+    "finance.runway_threshold_current_verified",
+    "finance.runway_threshold_history"
+  ],
+  "rotations": {
+    "xm_api_runtime": {
+      "state": "steady-a",
+      "steady_identity": "xm_api_a",
+      "old_identity": null,
+      "new_identity": null,
+      "approved_change_request": null,
+      "started_at": null,
+      "deadline": null,
+      "closure_evidence": null,
+      "closed_at": null
+    },
+    "xm_backup_read": {
+      "state": "steady-a",
+      "steady_identity": "xm_backup_a",
+      "old_identity": null,
+      "new_identity": null,
+      "approved_change_request": null,
+      "started_at": null,
+      "deadline": null,
+      "closure_evidence": null,
+      "closed_at": null
+    },
+    "xm_lifecycle_runtime": {
+      "state": "steady-a",
+      "steady_identity": "xm_lifecycle_a",
+      "old_identity": null,
+      "new_identity": null,
+      "approved_change_request": null,
+      "started_at": null,
+      "deadline": null,
+      "closure_evidence": null,
+      "closed_at": null
+    },
+    "xm_ops_read": {
+      "state": "steady-a",
+      "steady_identity": "xm_ops_a",
+      "old_identity": null,
+      "new_identity": null,
+      "approved_change_request": null,
+      "started_at": null,
+      "deadline": null,
+      "closure_evidence": null,
+      "closed_at": null
+    },
+    "xm_worker_runtime": {
+      "state": "steady-a",
+      "steady_identity": "xm_worker_a",
+      "old_identity": null,
+      "new_identity": null,
+      "approved_change_request": null,
+      "started_at": null,
+      "deadline": null,
+      "closure_evidence": null,
+      "closed_at": null
+    }
+  }
+}
