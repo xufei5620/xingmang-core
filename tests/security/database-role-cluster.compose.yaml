@@ -1,0 +1,41 @@
+# DBR1 disposable PostgreSQL 18 cluster.
+#
+# The harness supplies DBR_RUN_ID, DBR_DATABASE, DBR_VOLUME_NAME and
+# DBR_PASSWORD_FILE in a generated, short-lived Compose environment.  Keep the
+# role names and SQL in the fixture stable; only infrastructure identifiers are
+# per-run random.  Do not add an external network or a host data bind here.
+services:
+  postgres:
+    image: docker.io/library/postgres:18@sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: ${DBR_DATABASE:?DBR_DATABASE is required}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/dbr1_postgres_password
+    secrets:
+      - source: dbr1_postgres_password
+        target: dbr1_postgres_password
+    volumes:
+      - dbr1_data:/var/lib/postgresql
+    ports:
+      - "127.0.0.1::5432"
+    labels:
+      com.xingmang.dbr1.run-id: ${DBR_RUN_ID:?DBR_RUN_ID is required}
+      com.xingmang.dbr1.managed: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+volumes:
+  dbr1_data:
+    name: ${DBR_VOLUME_NAME:?DBR_VOLUME_NAME is required}
+    labels:
+      com.xingmang.dbr1.run-id: ${DBR_RUN_ID:?DBR_RUN_ID is required}
+      com.xingmang.dbr1.managed: "true"
+
+secrets:
+  dbr1_postgres_password:
+    file: ${DBR_PASSWORD_FILE:?DBR_PASSWORD_FILE is required}
