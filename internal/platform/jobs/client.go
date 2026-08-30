@@ -146,6 +146,14 @@ type Config struct {
 	// 装配在进程入口（cmd/），而不是在这里现造：Provider 的选择
 	// （env/SOPS/Vault）是部署决定，不是任务决定（ADR-014）。fake 模式用不到它。
 	FinanceCollectSecrets secrets.SecretProvider
+	// FinanceCollectSecretProvider 选择动态凭据来源（env 或 file）。空值表示
+	// 未装配，real 模式会按既有契约把成本观测记为 not_supported，而不拖垮 worker。
+	FinanceCollectSecretProvider string
+	// FinanceCollectSecretRoot 是 file provider 的固定绝对根目录；不保存明文。
+	FinanceCollectSecretRoot string
+	// FinanceCollectSecretScopes 是动态 provider 的精确 scope 白名单，防止登记簿
+	// 中的未知 scope 变成任意环境变量/文件读取。
+	FinanceCollectSecretScopes []string
 	// FinanceNewAPIRevenue 是 newapi 收入侧的只读数据库通道（XM-0044，§3.2）。
 	//
 	// **nil 是合法且是默认**：没配 XM_NEWAPI_REVENUE_DSN 时收入继续
@@ -449,6 +457,14 @@ func (c Config) validate() error {
 	}
 	if _, err := ParseFinanceCollectMode(string(c.FinanceCollectMode)); err != nil {
 		return err
+	}
+	if provider := strings.TrimSpace(c.FinanceCollectSecretProvider); provider != "" {
+		if provider != "env" && provider != "file" {
+			return fmt.Errorf("finance secret provider %q 只接受 env 或 file", provider)
+		}
+		if len(c.FinanceCollectSecretScopes) == 0 {
+			return fmt.Errorf("finance secret provider 已启用但 scope allowlist 为空")
+		}
 	}
 	if c.FinanceCollectRunID != "" && c.Environment == "production" {
 		// 与 Sub2APISyncRunID 同一条理由，外加一条本任务独有的：多个副本

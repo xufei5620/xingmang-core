@@ -133,6 +133,16 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 	if value := strings.TrimSpace(getenv("XM_FINANCE_COLLECT_INSTANCE_ID")); value != "" {
 		config.FinanceCollectInstanceID = value
 	}
+	// XM-REAL0-a：成本侧登记簿的账号/令牌 CredentialRef 在运行时才知道，
+	// 由显式 env 或 file convention provider 按引用即时解析；这里仅读取
+	// provider 选择与 scope 白名单，不读取任何秘密值。
+	config.FinanceCollectSecretProvider = strings.TrimSpace(getenv(financeSecretProviderEnvVar))
+	config.FinanceCollectSecretRoot = strings.TrimSpace(getenv(financeSecretRootEnvVar))
+	config.FinanceCollectSecretScopes, err = parseFinanceSecretScopes(
+		getenv(financeSecretScopesEnvVar))
+	if err != nil {
+		return jobs.Config{}, err
+	}
 	config.FinanceCollectTargetAllowlist = parseHostAllowlist(
 		getenv("XM_FINANCE_COLLECT_TARGET_ALLOWLIST"))
 	if value := getenv("XM_FINANCE_COLLECT_ENABLED"); value != "" {
