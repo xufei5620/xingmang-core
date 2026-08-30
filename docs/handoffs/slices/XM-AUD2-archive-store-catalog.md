@@ -4,7 +4,7 @@ sprint-section: 7
 
 ## status
 
-IN_PROGRESS · PREP / WAITING-INPUT-APPROVAL
+BLOCKED (WAITING exact AUD2 INPUT approval) · pure prep delivered
 
 This branch starts from the exact accepted release tip and currently limits itself to
 AUD2 contract preparation plus provider-independent code. The migration/input digest is
