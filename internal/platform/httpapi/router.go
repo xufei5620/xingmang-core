@@ -34,7 +34,12 @@ type Deps struct {
 	Services       ServiceLister
 	Metrics        MetricLister
 	MetricHistory  MetricHistoryLister
-	AuditEvents    AuditEventLister
+	// Jobs 供「后台任务」页的两个只读端点（XM-JOBS0）：周期任务目录 + 队列
+	// 积压 + worker 心跳的快照，以及分页的运行记录。与 Metrics/Alerts 同样
+	// 是核心能力，不做 nil 门禁——platform-api 进程总是持有数据库连接池,
+	// river_job 是本平台自己数据库里的表，没有「这个环境没接」的情形。
+	Jobs        JobsQuerier
+	AuditEvents AuditEventLister
 	// ActionRuns 供操作与审批页「执行记录」子页签的跨 Action 查询
 	// （XM-ACTIONS0）。为 nil 时 /actions/runs* 两个端点不挂载——与
 	// RequestLogs/PlatformUsers 同一条纪律：端点不存在（404）比端点存在却
@@ -156,6 +161,13 @@ func NewRouter(d Deps) http.Handler {
 			// 历史样本与最新态同属运营指标，共用 ops.read
 			api.With(RequireScope(ops.ScopeRead)).
 				Get("/metrics/history", ListMetricHistoryHandler(d.MetricHistory))
+			// 后台任务（XM-JOBS0）同样复用 ops.read：周期任务目录、队列积压、
+			// worker 心跳与运行记录本质上是运营可观测性数据，泄漏面与
+			// /metrics 相同——都是「系统跑得怎么样」，不是业务数据。
+			api.With(RequireScope(ops.ScopeRead)).
+				Get("/jobs/overview", JobsOverviewHandler(d.Jobs))
+			api.With(RequireScope(ops.ScopeRead)).
+				Get("/jobs/runs", ListJobRunsHandler(d.Jobs))
 			// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
 			api.With(RequireScope(audit.ScopeRead)).
 				Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))

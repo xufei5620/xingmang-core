@@ -23,6 +23,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
+	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
@@ -170,6 +171,9 @@ func main() {
 	)
 	opsStore := ops.NewStore(pool)
 	runwaySummaryStore := finance.NewSummaryStore(pool, nil)
+	// 后台任务页（XM-JOBS0）：只读 river_job / river_queue，不依赖 River
+	// 客户端本身，也不需要额外配置——river_job 是本平台自己数据库里的表。
+	jobsQueryStore := jobs.NewQueryStore(pool)
 
 	// 演示数据种子（XM-0037d）：只在显式开启时跑，**生产硬拒**。
 	//
@@ -241,6 +245,8 @@ func main() {
 		Metrics:        opsStore,
 		// 历史样本复用同一个 Store：最新态与样本是同一个仓储的两张表
 		MetricHistory: opsStore,
+		// 后台任务概览与运行记录（XM-JOBS0）
+		Jobs: jobsQueryStore,
 		// 只读审计视图复用同一个 Store：写入（ActionSink）与读取共用一份
 		// 实现，不另开一条访问审计表的路径
 		AuditEvents: auditStore,

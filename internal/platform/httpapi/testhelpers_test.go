@@ -50,3 +50,23 @@ func testRouterWithMetrics(
 		Metrics:        metrics,
 	})
 }
+
+// testRouterWithJobs 只装配「后台任务」端点测得到的依赖，其余留空——
+// 与 testRouterWithMetrics 同一条纪律（够用就好，不为了齐全而齐全）。
+func testRouterWithJobs(t *testing.T, jobs JobsQuerier) http.Handler {
+	t.Helper()
+	res, err := NewDevHeaderResolver("development")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewRouter(Deps{
+		Logger:         discardLogger(),
+		Service:        "platform-api",
+		Environment:    "development",
+		DB:             fakePinger{},
+		Resolver:       res,
+		Kernel:         &fakeExecutor{},
+		ActionRegistry: action.NewRegistry(),
+		Jobs:           jobs,
+	})
+}
