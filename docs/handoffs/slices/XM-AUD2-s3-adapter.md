@@ -17,9 +17,9 @@ the parent AUD2 implementation.
 - initial development base: `e579b9e` (AUD2 input + generated approvals already present)
 - final release base: `db0e499` (`origin/release/v0.1-launch`, including the merged
   AUD2 catalog follow-up, DBR1 approvals, and qualification/recovery approval)
-- implementation commits: `d83b2b7` (adapter baseline), followed by the exact-key
-  recovery, policy guards, qualification harness, and lock updates; final delivery SHA
-  is reported after the release rebase.
+- implementation commits after the final release rebase: `966ac7f` (adapter baseline),
+  `73910ab` (initial Handoff), and `27f075f` (exact-key recovery, policy guards,
+  qualification harness, and lock updates). `27f075f` is the final delivery commit.
 
 ## approved boundary and decisions
 
