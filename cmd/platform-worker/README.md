@@ -34,6 +34,40 @@ DATABASE_URL="postgres://xingmang:${POSTGRES_DEV_PASSWORD}@localhost:5433/xingma
 `HEARTBEAT_FAILURES` are optional development settings. The normal process
 uses River's default retry policy and the `default` plus `maintenance` queues.
 
+## 审计归档手工接线（AUD2）
+
+归档不是普通周期任务。当前 release 尚未同时具备 R2-10 集群租约与 DB 角色拆分
+证据，因此 `platform-worker` **不会注册或消费** `audit_archive_manual` 的周期任务；
+`JobManifest` 仍只有既有六个周期任务。归档配置默认关闭，任何 `scheduled` 模式或
+生产环境启用请求都会 fail closed。后续 AUD3/AUD5 只能在独立审批后注入签名 envelope
+runner，并沿用同一份手工 seam。
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `XM_AUDIT_ARCHIVE_ENABLED` | `false` | 必须显式置 `true` 才能使用手工 seam；不代表 scheduler 已启用 |
+| `XM_AUDIT_ARCHIVE_MODE` | `disabled` | 当前唯一可接受的启用值是 `manual`；`scheduled` 永远拒绝 |
+| `XM_AUDIT_ARCHIVE_ENDPOINT` | 空 | 手工 fixture 的 MinIO 地址；只允许 HTTPS，或 development/staging/test 的 loopback HTTP |
+| `XM_AUDIT_ARCHIVE_ENDPOINT_ALLOWLIST` | 空 | 精确 `host[:port]` 清单，禁止通配符 |
+| `XM_AUDIT_ARCHIVE_BUCKET` | 空 | 显式 bucket 标识；不从 endpoint 推断 |
+| `XM_AUDIT_ARCHIVE_CREDENTIAL_REF` | 空 | MinIO object-writer CredentialRef；只校验引用形状，不解析明文 |
+| `XM_AUDIT_ARCHIVE_KMS_CREDENTIAL_REF` | 空 | 必须是 `secret://archive/minio-kms` |
+| `XM_AUDIT_ARCHIVE_QUALIFICATION_CREDENTIAL_REF` | 空 | 手工 fixture 必须是 `secret://archive/minio-qualification` |
+| `XM_AUDIT_ARCHIVE_SECURITY_SINK_CREDENTIAL_REF` | 空 | 预留给 AUD3，必须是 `secret://archive/security-sink`（不在本片读取） |
+
+手工触发只接受已批准 signed envelope 的 SHA-256 摘要，由调用方注入的 runner 负责
+验签、Kill Switch、精确 VersionID 与 catalog/CAS 协议；River 参数不携带 envelope
+原文、路径、DSN 或任何凭据。MinIO fixture 使用独立项目：
+
+```bash
+XM_ARCHIVE_CREDENTIAL_ENV_FILE=/path/to/operator-managed.env \
+  docker compose -p xingmang-archive -f deploy/compose/archive.yaml \
+  --profile archive-fixture up -d --wait
+```
+
+该命令只启动回环、非生产 fixture；`operator-managed.env` 不得提交到仓库，且其中的
+root/KMS 值应由 `secret://archive/minio-kms` / 一次性 qualification CredentialRef
+在受控环境中装配。完整生产激活、受限读取与 security sink 属后续 AUD3/AUD5，不在本片。
+
 ## Sub2API 周期同步（XM-0022）
 
 每 300 秒读一次 Sub2API 只读契约（用户概览 + 当日订单 + 渠道余额），

@@ -163,7 +163,13 @@ func main() {
 		"alert_evaluate_interval", config.AlertEvaluateInterval.String(),
 		"alert_telegram_configured", config.AlertTelegramBotRef != "" && config.AlertTelegramChatID != "",
 		"alert_webhook_configured", config.AlertWebhookURL != "",
-		"alert_balance_threshold_minor_units", config.AlertBalanceThresholdMinorUnits)
+		"alert_balance_threshold_minor_units", config.AlertBalanceThresholdMinorUnits,
+		// AUD2 is intentionally manual-only until R2-10 and DB-role gates are
+		// merged. Log policy state without emitting endpoint or credential refs.
+		"audit_archive_enabled", config.AuditArchive.Enabled,
+		"audit_archive_mode", string(config.AuditArchive.Mode),
+		"audit_archive_scheduler_enabled", config.AuditArchive.SchedulerEnabled,
+		"audit_archive_periodic_registered", jobs.AuditArchivePeriodicRegistrationAllowed())
 
 	<-ctx.Done()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

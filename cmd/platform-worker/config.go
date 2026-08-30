@@ -16,6 +16,11 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 	if config.Environment == "" {
 		return jobs.Config{}, fmt.Errorf("environment is required")
 	}
+	archiveConfig, err := auditArchiveConfigFromEnv(getenv, config.Environment)
+	if err != nil {
+		return jobs.Config{}, err
+	}
+	config.AuditArchive = archiveConfig
 	if value := getenv("HEARTBEAT_INTERVAL"); value != "" {
 		interval, err := time.ParseDuration(value)
 		if err != nil {
