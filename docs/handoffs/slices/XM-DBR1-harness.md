@@ -8,7 +8,8 @@ READY（待验收线本地审读、复跑并由人工合入；本分支没有合
 
 - Branch: `ai/codex/XM-DBR1-harness`
 - Base: `release/v0.1-launch` at `c657a02`（开工前/完成后已读取 `ACCEPTANCE-LOG.md`）
-- Commit: `8a52cd2`（`test(database): harden disposable role probes`）
+- Commits: `4fb12ab`（harness/fixture）、`8a52cd2`（probe hardening）、`2ef2439`
+  （libpq override guards）；本 Handoff 随后的交付 commit 见分支 `HEAD`。
 - Slice: DBR1 Task 3（仅 disposable PG18 harness / role checks；DBR2+ 迁移和 live cutover 不在范围）
 - Plan: `docs/superpowers/plans/2026-08-28-database-role-separation.md` §DBR1 Task 3
 - Spec: `docs/superpowers/specs/2026-08-28-database-role-separation-design.md` §12
