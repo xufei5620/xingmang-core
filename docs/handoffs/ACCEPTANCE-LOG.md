@@ -39,3 +39,4 @@
 ⑤ 并行车道:若同时有多个 Codex 会话,每个会话只认领一条车道,分支名 ai/codex/XM-<车道任务>,不跨车道改文件;共享文件(router.go、main.go、launch.yaml、go.mod)只在自己车道的最终接线片改,并 rebase 到最新 release 后再标 READY。
 ⑥ 验收线复扫间隔缩短到 10 分钟。
 2026-08-30T10:47Z MERGED 1aafabc XM-DBR1-task1-policy(角色策略 v1 契约 + 轮换状态机;离线纯函数,无 SQL/迁移;dbroles -race 测试、治理、gitleaks 全过;无需部署)。车道 A 继续 Task2 verifier → DBR2。
+2026-08-30T11:12Z MERGED a58b8c0 XM-DBR1-task1-policy follow-up(Task2 只读 catalog verifier + cmd/db-role-verify,exit 0/1/2、pgdsn.Validate、仅 SELECT/has_*_privilege;-race 测试、治理、gitleaks 全过;无需部署)。DBR1 Task1/2/3 齐,车道 A 进入 DBR2(预批)。
