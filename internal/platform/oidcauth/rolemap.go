@@ -136,6 +136,19 @@ func DefaultRoleScopeMap() map[string][]string {
 			"staff.manage",
 			"credential.manage",
 			"connector.manage",
+			// 生产上线（2026-08-31）：bootstrap 管理员就是运营负责人，成本看板、
+			// 登记簿与告警处理不能再要求第二个角色——否则平台详情页的成本面板
+			// 对唯一的管理员也是 403。finance.read 与各 manage 仍不给 staff：
+			// 金额与凭据来源是高敏信息，普通运营按需单独授予。
+			// finance.platform_channel_binding.manage **刻意不在**：渠道绑定的
+			// L1 写权限按既有裁定必须人工显式授予（resolver_test 钉住）。
+			"finance.read",
+			"finance.upstream_account.manage",
+			"finance.recharge_ratio.manage",
+			"finance.token_map.manage",
+			"finance.subscription.manage",
+			"alerts.alert.manage",
+			"alerts.silence.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
