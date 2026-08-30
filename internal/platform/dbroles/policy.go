@@ -1244,7 +1244,9 @@ func normalizePolicy(p *Policy) {
 		p.Objects[i].TablePrivileges = normalizeGrantMap(p.Objects[i].TablePrivileges)
 		p.Objects[i].ColumnPrivileges = normalizeColumnMap(p.Objects[i].ColumnPrivileges)
 	}
-	sort.Slice(p.Objects, func(i, j int) bool { return p.Objects[i].Key() < p.Objects[j].Key() })
+	sort.Slice(p.Objects, func(i, j int) bool {
+		return p.Objects[i].Kind+"\x00"+p.Objects[i].Schema+"\x00"+p.Objects[i].Name < p.Objects[j].Kind+"\x00"+p.Objects[j].Schema+"\x00"+p.Objects[j].Name
+	})
 	sort.Slice(p.DefaultACLs, func(i, j int) bool {
 		a, b := p.DefaultACLs[i], p.DefaultACLs[j]
 		return a.Schema+"\x00"+a.ObjectKind < b.Schema+"\x00"+b.ObjectKind
