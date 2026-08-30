@@ -63,3 +63,15 @@ cd /srv/deploy/xingmang-platform && nice -n 10 deploy/scripts/deploy-local.sh
 - 凭据只在服务器 `.env`(0600);仓库与 bundle 不含任何凭据。
 - staging 使用 dev-header 身份,**不要把 8088 直接暴露公网**;对外前先加 nginx Basic Auth 或切 Keycloak。
 - 服务器 root 操作由负责人执行;AI 只提供脚本与命令。
+
+## 域名访问(2026-08-30 已生效)
+
+- `https://console.solov.cc` → Cloudflare(橙云)→ fiberstate nginx vhost
+  `/www/server/panel/vhost/nginx/console.solov.cc.conf` → `127.0.0.1:8088`。
+- 证书:acme.sh DNS-01(`~/.acme.sh/console.solov.cc_ecc`,`--install-cert` 到
+  `/www/server/panel/vhost/cert/console.solov.cc/`,自动续期并 reload)。
+- 访问控制:HTTP Basic Auth,用户 `xingmang`,口令文件 `/www/server/nginx/conf/auth/xingmang.htpasswd`
+  (root:www 640;不要放在 `/www/server/panel/vhost/nginx/` 下,nginx worker 读不到会 500)。
+  改口令:`printf "xingmang:%s
+" "$(openssl passwd -apr1 '<新口令>')" > /www/server/nginx/conf/auth/xingmang.htpasswd`。
+- 这是临时门禁;切 Keycloak(XM_AUTH_MODE=oidc)后删除 `auth_basic` 两行即可。
