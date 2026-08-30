@@ -35,8 +35,8 @@ func TestAUD2OperationIntentIsAppendOnlyAndByteBound(t *testing.T) {
 		INSERT INTO audit.archive_operation_intent
 		  (operation_id, approval_envelope_sha256, deterministic_bytes_digest, canonical_intent_bytes, created_at)
 		VALUES ($1, $2, $3, $4, $5)`, operationID, strings.Repeat("a", 64), hex.EncodeToString(digest[:]), canonical, time.Now().UTC())
-	_ = tx.Exec(context.Background(), `ROLLBACK TO SAVEPOINT duplicate_intent`)
-	_ = tx.Exec(context.Background(), `RELEASE SAVEPOINT duplicate_intent`)
+	_, _ = tx.Exec(context.Background(), `ROLLBACK TO SAVEPOINT duplicate_intent`)
+	_, _ = tx.Exec(context.Background(), `RELEASE SAVEPOINT duplicate_intent`)
 	if duplicateErr == nil {
 		t.Fatal("duplicate intent unexpectedly accepted")
 	}
@@ -85,8 +85,8 @@ func TestAUD2PutReceiptUniqueByOrdinalAndTerminalAppendOnly(t *testing.T) {
 		INSERT INTO audit.archive_put_receipt
 		  (operation_id, ordinal, object_version_bytes, object_version_sha256, recorded_at)
 		VALUES ($1, 0, $2, $3, $4)`, operationID, []byte("different"), strings.Repeat("e", 64), time.Now().UTC())
-	_ = tx.Exec(context.Background(), `ROLLBACK TO SAVEPOINT duplicate_put`)
-	_ = tx.Exec(context.Background(), `RELEASE SAVEPOINT duplicate_put`)
+	_, _ = tx.Exec(context.Background(), `ROLLBACK TO SAVEPOINT duplicate_put`)
+	_, _ = tx.Exec(context.Background(), `RELEASE SAVEPOINT duplicate_put`)
 	if duplicatePutErr == nil {
 		t.Fatal("same operation/ordinal with different bytes unexpectedly accepted")
 	}
