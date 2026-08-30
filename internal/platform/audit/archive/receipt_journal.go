@@ -104,7 +104,7 @@ func (j *MemoryReceiptJournal) AppendTerminalResult(ctx context.Context, operati
 		return fmt.Errorf("%w: terminal receipt fields", ErrArchiveValidation)
 	}
 	if ref != nil {
-		if err := validateArtifactRef(*ref); err != nil {
+		if err := ValidateArtifactRef(*ref); err != nil {
 			return err
 		}
 	}
