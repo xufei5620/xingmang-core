@@ -139,3 +139,10 @@ d. 接入验证清单脚本 `scripts/verify-real-mode.sh`:worker 日志 metrics_
 - **新增车道 F：XM-CRED0 凭据管理 UI**：管理后台可输入/添加/修改/保存凭据；平台库仍只存 CredentialRef 名，
   值写入仓库外文件 SecretProvider 目录，经 `credential.upsert/rotate/revoke` Action + 审计事件；连接器 token 解析改为
   SecretProvider 优先、env 兜底；不做 KMS/审批中心。完整边界见 ACCEPTANCE-LOG `PRIORITY 新增车道 F`。
+
+### 7.7 最高优先级：XM-CRED0 端到端（2026-08-30 晚，用户再次拍板）
+凭据只在管理后台填写、不用服务器 .env。车道 F 立刻做 **XM-CRED0-backend**：文件 SecretProvider（命名卷，API rw / worker ro）+
+core.credential_ref 元数据表 + credential.secret.upsert/rotate/revoke Action + GET /api/v1/credentials(+/expected) +
+连接器 token 文件优先/env 兜底、每轮重新 Resolve + core.connector_config 接入模式开关 + 设置→凭据页表单。
+验收：服务器上在 UI 粘贴 Sub2API 凭据并切 real，5 分钟内 sub2api_sync 真实成功、verify-real-mode.sh PASS，不改 .env 不重启。
+完整边界见 ACCEPTANCE-LOG `PRIORITY 最高优先级 = XM-CRED0 端到端`。
