@@ -40,3 +40,4 @@
 ⑥ 验收线复扫间隔缩短到 10 分钟。
 2026-08-30T10:47Z MERGED 1aafabc XM-DBR1-task1-policy(角色策略 v1 契约 + 轮换状态机;离线纯函数,无 SQL/迁移;dbroles -race 测试、治理、gitleaks 全过;无需部署)。车道 A 继续 Task2 verifier → DBR2。
 2026-08-30T11:12Z MERGED a58b8c0 XM-DBR1-task1-policy follow-up(Task2 只读 catalog verifier + cmd/db-role-verify,exit 0/1/2、pgdsn.Validate、仅 SELECT/has_*_privilege;-race 测试、治理、gitleaks 全过;无需部署)。DBR1 Task1/2/3 齐,车道 A 进入 DBR2(预批)。
+2026-08-30T11:14:20Z REJECT/ROLLBACK REQUIRED a58b8c0 XM-DBR1-task1-policy follow-up: state-events genesis current_policy_sha256 was rewritten from 43c54c51b79b26684e2a874ddfc904bb8f208ec897731481c1db3ee49e02aed0 to c9c79c95699eda6f5641bbc1d558605b933d8f54d7bc14f20fa30f7e21895504 without the required sequence=2 policy-update. Pause DBR2 and deployment; restore the approved genesis and append a canonical policy-update event on a correction branch before re-acceptance.
