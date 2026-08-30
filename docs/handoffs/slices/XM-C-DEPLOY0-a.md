@@ -96,3 +96,15 @@ receive hooks、一次性安装脚本，以及无服务器回归测试。没有�
   受控数据库/缓存编排；不得绕过本片的可信脚本与 status gate。
 - DEPLOY0-c 再处理 origin/服务器镜像和文档迁移；GitHub Actions 暂停期间不创建 PR。
 - 单独安全切片处理 gitleaks 历史占位的替换/基线方案，并由人工审阅后再改扫描口径。
+
+## READY-FOLLOWUP（2026-08-30）
+
+- 修复本片脚本的 Git 可执行位：`deploy/git-hooks/{pre-receive,post-receive}`、
+  `deploy/scripts/install-git-server.sh`、`scripts/ci-local.sh` 与
+  `tests/deploy/deploy0-a.test.sh` 均登记为 `100755`；仅索引 mode 变更，文件内容未改。
+- `D:/Git/bin/bash.exe -n scripts/ci-local.sh deploy/git-hooks/pre-receive
+  deploy/git-hooks/post-receive deploy/scripts/install-git-server.sh
+  tests/deploy/deploy0-a.test.sh`：PASS。
+- 完整 `tests/deploy/deploy0-a.test.sh` 未重跑：该测试会在临时目录内部执行
+  `git init`/`git checkout`/`rm -rf`，本次审计明确禁止这些操作；请验收线在允许的
+  Linux/隔离环境复跑。未触碰 `release/v0.1-launch` 或任何远端。
