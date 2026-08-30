@@ -199,7 +199,16 @@ type AlertNotifierConfig struct {
 	WebhookURL string
 	// Secrets 解析 TelegramBotRef。缺它则 Telegram 渠道立不起来。
 	Secrets secrets.SecretProvider
-	Logger  *slog.Logger
+	// WeComWebhookRef 是企业微信群机器人 Webhook 地址（含 key）的引用，
+	// 形如 secret://alerts/wecom-webhook（XM-ALERT-WECOM）。与 Telegram /
+	// 自建 Webhook 都不同：这里**整个地址就是凭据**，因此不像 WebhookURL
+	// 那样直接接受静态值，必须经 CredentialRef（PROJECT-CONSTITUTION 第 7 条）。
+	WeComWebhookRef string
+	// WeComSecrets 解析 WeComWebhookRef。与 Secrets 是两个独立 Provider——
+	// 装配在 cmd/platform-worker 走文件优先链（XM-CRED0），使企微地址能从
+	// 「设置→凭据」页粘贴，而不是照抄 Telegram 现在还在用的纯 env 装配。
+	WeComSecrets secrets.SecretProvider
+	Logger       *slog.Logger
 }
 
 // newAlertNotifier 按配置组装投递渠道。
@@ -213,9 +222,12 @@ type AlertNotifierConfig struct {
 // 而运维会以为自己配好了。等到真出事那天才发现没人被通知——那正是这个
 // 模块存在的意义被完全抵消的时刻。
 //
-// 所以：ref 拼错、URL 不是 https、配了 chat_id 却没配 ref —— 一律返回错误，
-// 进程起不来。三个变量一个都没配 —— 返回一个空的 MultiNotifier，
-// 由 Reconciler 每轮打 warn「仅落库未投递」。
+// 所以：ref 拼错、URL 不是 https、配了 chat_id 却没配 ref、配了企微 ref
+// 却没有对应 SecretProvider —— 一律返回错误，进程起不来。三个渠道的变量
+// 全部留空 —— 返回一个空的 MultiNotifier，由 Reconciler 每轮打 warn
+// 「仅落库未投递」。企微地址本身是否真解析得出合法凭据，要等发送那一刻
+// 才知道（同 Telegram 的 Bot Token，见各自 Notify 的注释）——这里只校验
+// 引用形状与装配完整性，不是「配了就一定能发」。
 func newAlertNotifier(cfg AlertNotifierConfig) (*alerts.MultiNotifier, error) {
 	logger := cfg.Logger
 	if logger == nil {
@@ -258,6 +270,29 @@ func newAlertNotifier(cfg AlertNotifierConfig) (*alerts.MultiNotifier, error) {
 		notifier, err := alerts.NewWebhookNotifier(url, nil)
 		if err != nil {
 			return nil, fmt.Errorf("XM_ALERT_WEBHOOK_URL: %w", err)
+		}
+		notifiers = append(notifiers, notifier)
+	}
+
+	// 企业微信：与 Telegram/Webhook 同一条纪律——ref 拼错、或配了 ref 却
+	// 没有 SecretProvider，都是启动错误；ref 为空则该渠道不参与本轮装配
+	// （不是错误）。地址是否真的能解析出合法凭据要等发送那一刻才知道
+	// （见 WeComNotifier.Notify），这里只校验引用的**形状**与装配完整性。
+	if ref := strings.TrimSpace(cfg.WeComWebhookRef); ref != "" {
+		parsed, err := secrets.ParseCredentialRef(ref)
+		if err != nil {
+			return nil, fmt.Errorf("XM_ALERT_WECOM_WEBHOOK_REF: %w", err)
+		}
+		if cfg.WeComSecrets == nil {
+			return nil, errors.New(
+				"配了 XM_ALERT_WECOM_WEBHOOK_REF 却没有 SecretProvider：装配缺失，企业微信渠道立不起来")
+		}
+		notifier, err := alerts.NewWeComNotifier(alerts.WeComOptions{
+			WebhookRef: parsed,
+			Secrets:    cfg.WeComSecrets,
+		})
+		if err != nil {
+			return nil, err
 		}
 		notifiers = append(notifiers, notifier)
 	}

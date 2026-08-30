@@ -255,8 +255,8 @@ func TestValidateConnectorConfig(t *testing.T) {
 
 func TestExpectedRefsAreValidAndStable(t *testing.T) {
 	refs := ExpectedRefs()
-	if len(refs) != 5 {
-		t.Fatalf("预期清单应有 5 条, got %d", len(refs))
+	if len(refs) != 6 {
+		t.Fatalf("预期清单应有 6 条, got %d", len(refs))
 	}
 	seen := map[string]bool{}
 	for _, e := range refs {

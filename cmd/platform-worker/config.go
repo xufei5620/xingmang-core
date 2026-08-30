@@ -235,6 +235,9 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 	config.AlertTelegramBotRef = strings.TrimSpace(getenv("XM_ALERT_TELEGRAM_BOT_REF"))
 	config.AlertTelegramChatID = strings.TrimSpace(getenv("XM_ALERT_TELEGRAM_CHAT_ID"))
 	config.AlertWebhookURL = strings.TrimSpace(getenv("XM_ALERT_WEBHOOK_URL"))
+	// XM-ALERT-WECOM：企业微信群机器人 Webhook 地址的引用。同样只读进配置、
+	// 不解析——地址经 SecretProvider 在发送那一瞬才现场给出（宪法 7 条）。
+	config.AlertWeComWebhookRef = strings.TrimSpace(getenv("XM_ALERT_WECOM_WEBHOOK_REF"))
 	if value := getenv("XM_ALERT_EVALUATE_ENABLED"); value != "" {
 		// 告警链路的停用开关（宪法 26 条）。关掉之后告警页不会假装正常：
 		// 已有告警的 last_seen_at 停止前进，新问题不会被发现——这是一个

@@ -19,5 +19,6 @@ func ExpectedRefs() []ExpectedRef {
 		{Ref: "secret://newapi/revenue-db", Platform: "newapi", Purpose: "NewAPI 收入库只读口令"},
 		{Ref: "secret://archive/minio-runtime", Platform: "archive", Purpose: "归档 MinIO 运行时凭据"},
 		{Ref: "secret://archive/minio-kms", Platform: "archive", Purpose: "归档 MinIO SSE-S3 密钥"},
+		{Ref: "secret://alerts/wecom-webhook", Platform: "alerts", Purpose: "企业微信群机器人 Webhook 地址（含 key，视为凭据）"},
 	}
 }

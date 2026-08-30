@@ -217,6 +217,15 @@ type Config struct {
 	AlertWebhookURL string
 	// AlertSecrets 解析 AlertTelegramBotRef。装配在进程入口（cmd/）。
 	AlertSecrets secrets.SecretProvider
+	// AlertWeComWebhookRef 是企业微信群机器人 Webhook 地址（含 key）的引用
+	// （secret://<scope>/<name>，XM-ALERT-WECOM）。与 AlertWebhookURL 不同：
+	// 这里**整个地址就是凭据**（key 作为查询参数嵌在地址里），不接受静态
+	// 值，只能经 CredentialRef（PROJECT-CONSTITUTION 第 7 条）。
+	AlertWeComWebhookRef string
+	// AlertWeComSecrets 解析 AlertWeComWebhookRef。装配走文件优先链
+	// （XM-CRED0，见 cmd/platform-worker 的 connectorSecretsChain），
+	// 与 AlertSecrets（Telegram 专用、纯 env）是两个独立 Provider。
+	AlertWeComSecrets secrets.SecretProvider
 	// AlertBalanceThresholdMinorUnits 是渠道余额告警阈值（最小货币单位，
 	// 宪法 13 条：金额禁止 float）。零值回落到 alerts 包的默认值。
 	AlertBalanceThresholdMinorUnits int64
@@ -725,11 +734,13 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// 会让进程起不来——理由见 newAlertNotifier 的注释：一个没建起来的
 		// 告警渠道不会有任何后续痕迹，只会在真出事那天才被发现。
 		notifier, err := newAlertNotifier(AlertNotifierConfig{
-			TelegramBotRef: cfg.AlertTelegramBotRef,
-			TelegramChatID: cfg.AlertTelegramChatID,
-			WebhookURL:     cfg.AlertWebhookURL,
-			Secrets:        cfg.AlertSecrets,
-			Logger:         cfg.Logger,
+			TelegramBotRef:  cfg.AlertTelegramBotRef,
+			TelegramChatID:  cfg.AlertTelegramChatID,
+			WebhookURL:      cfg.AlertWebhookURL,
+			Secrets:         cfg.AlertSecrets,
+			WeComWebhookRef: cfg.AlertWeComWebhookRef,
+			WeComSecrets:    cfg.AlertWeComSecrets,
+			Logger:          cfg.Logger,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("告警投递渠道: %w", err)
@@ -742,7 +753,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 				slog.String("module", "platform.jobs"),
 				slog.String("environment", cfg.Environment),
 				slog.String("error_code", "no_notifier_configured"),
-				slog.String("hint", "告警只会落库，不会通知任何人；配置 XM_ALERT_TELEGRAM_BOT_REF + XM_ALERT_TELEGRAM_CHAT_ID 或 XM_ALERT_WEBHOOK_URL"))
+				slog.String("hint", "告警只会落库，不会通知任何人；配置 XM_ALERT_TELEGRAM_BOT_REF + XM_ALERT_TELEGRAM_CHAT_ID、XM_ALERT_WEBHOOK_URL 或 XM_ALERT_WECOM_WEBHOOK_REF"))
 		}
 
 		// 「采集周期」直接取 Sub2API 的同步周期，而不是再开一个可配项：

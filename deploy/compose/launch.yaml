@@ -378,6 +378,13 @@ services:
       #    （规格 §9.4 红线，见 deploy/watchdog/README.md）。
       XM_ALERT_TELEGRAM_TOKEN: ${XM_ALERT_TELEGRAM_TOKEN:-}
       XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
+      # 企业微信群机器人（XM-ALERT-WECOM）。与上面两条不同：**整个地址就是
+      # 凭据**，经 CredentialRef 解析、走文件优先链（XM-CRED0）——运营可以
+      # 在后台「设置→凭据」页直接粘贴，不需要经过这份 .env。
+      # XM_ALERT_WECOM_WEBHOOK 是该引用在 env Provider 下的落点，仅在还没
+      # 在后台填过时兜底；只填在不入库的 .env 里。
+      XM_ALERT_WECOM_WEBHOOK_REF: ${XM_ALERT_WECOM_WEBHOOK_REF:-}
+      XM_ALERT_WECOM_WEBHOOK: ${XM_ALERT_WECOM_WEBHOOK:-}
       XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS: ${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}
       # --- 凭据登记（XM-CRED0）--------------------------------------------
       # 与 platform-api 同一个卷、同一个根目录；worker 只读——它经

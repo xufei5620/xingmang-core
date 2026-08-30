@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
@@ -38,6 +39,10 @@ const (
 	defaultNotifyTimeout = 10 * time.Second
 	// telegramDefaultBaseURL 是 Bot API 的官方地址。测试注入 httptest 地址。
 	telegramDefaultBaseURL = "https://api.telegram.org"
+	// weComMaxContentBytes 是企业微信群机器人 markdown 消息 content 字段的
+	// 官方长度上限。单位是**字节**，不是字符——UTF-8 下一个汉字占 3 字节，
+	// 按 rune 数截断仍可能越过这个上限，上游会直接拒收整条消息。
+	weComMaxContentBytes = 4096
 )
 
 // Notifier 把一条告警投递到一个外部渠道（规格 §9.4 平台内部告警）。
@@ -76,6 +81,35 @@ func FormatMessage(a Alert) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// FormatWeComMarkdown 把一条告警渲染成企业微信群机器人 markdown 消息的
+// content 字段（XM-ALERT-WECOM）。
+//
+// 与 FormatMessage 同一条顾虑，措辞照抄：Title / Detail / RuleKey /
+// SourceMetricKey 由上游数据决定，可能含 `*` `#` 反引号等 markdown 特殊
+// 字符。这里不使用加粗、颜色或标题级别语法——那些语法只在输入完全可控时
+// 才安全，而告警标题里恰恰会出现指标键、渠道名这类不可控字符串，带标记
+// 就得转义，漏转义的后果是消息排版错乱甚至截断。唯一用到的语法是每行前的
+// `> `（引用块），它不会被内容中任何字符提前闭合，纯装饰、零转义负担。
+// msgtype 固定是 "markdown"（企微群机器人 API 的字段要求），内容本身写得
+// 保守。
+func FormatWeComMarkdown(a Alert) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "> [%s] %s\n", strings.ToUpper(string(a.Severity)), a.Title)
+	fmt.Fprintf(&b, "> 环境：%s\n", a.Environment)
+	fmt.Fprintf(&b, "> 规则：%s\n", a.RuleKey)
+	fmt.Fprintf(&b, "> 状态：%s\n", a.Status)
+	fmt.Fprintf(&b, "> 首次发现：%s\n", a.OpenedAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "> 最近发现：%s（累计 %d 次）\n",
+		a.LastSeenAt.UTC().Format(time.RFC3339), a.FireCount)
+	if a.SourceMetricKey != "" {
+		fmt.Fprintf(&b, "> 指标：%s\n", a.SourceMetricKey)
+	}
+	if a.Detail != "" {
+		fmt.Fprintf(&b, "> 详情：%s", a.Detail)
+	}
+	return truncateBytes(strings.TrimRight(b.String(), "\n"), weComMaxContentBytes)
+}
+
 // redact 把给定的敏感串从文本里抹掉。
 //
 // 它是**最后一道**防线而不是第一道：正确的做法始终是不把凭据放进错误里。
@@ -103,6 +137,34 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "…（已截断）"
+}
+
+// truncateBytes 把 s 截到最多 max 字节，不切断 UTF-8 多字节字符，并如实
+// 标注被截断。与 truncate 的区别：那个函数按 rune 数截断，服务的是落库的
+// notify_error（数据库列没有字节上限顾虑）；这个函数服务的是企微 markdown
+// 内容——上游按**字节**计数，按 rune 截断仍可能越界导致整条消息被拒收。
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	const marker = "…（已截断）"
+	budget := max - len(marker)
+	if budget < 0 {
+		budget = 0
+	}
+	cut := s
+	if len(cut) > budget {
+		cut = cut[:budget]
+	}
+	// 按字节截可能落在一个多字节字符中间；回退到上一个合法的 rune 边界。
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
+		cut = cut[:len(cut)-1]
+	}
+	return cut + marker
 }
 
 // SanitizeNotifyError 把一个投递错误整理成可以落库、可以回前端的文本。
@@ -433,6 +495,152 @@ func (w *WebhookNotifier) Notify(ctx context.Context, a Alert) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// 只报状态码，不报响应体：自建端点的错误页可能回显请求 URL。
 		return fmt.Errorf("webhook: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// WeComNotifier 经企业微信群机器人 Webhook 投递告警（XM-ALERT-WECOM，
+// 规格 §9.4 投递渠道的扩展）。
+//
+// 与 TelegramNotifier 同一条纪律、不同的理由：Telegram 是 token 长在 URL
+// 路径里，这边是**整个 Webhook 地址就是凭据**（企微把鉴权 key 放在查询
+// 参数里：.../webhook/send?key=xxx）。因此地址经 CredentialRef 解析、由
+// SecretProvider 在发送那一瞬现场给出，绝不作为静态配置值出现在 .env 以外
+// 的任何地方（PROJECT-CONSTITUTION 第 7 条）。这一点与本包已有的
+// WebhookNotifier 不同：那边的自建端点地址允许直接来自环境变量。
+type WeComNotifier struct {
+	webhookRef secrets.CredentialRef
+	secrets    secrets.SecretProvider
+	client     *http.Client
+}
+
+// WeComOptions 是构造参数。
+type WeComOptions struct {
+	// WebhookRef 是群机器人 Webhook 地址（含 key）的引用，
+	// 形如 secret://alerts/wecom-webhook（ADR-014）。
+	WebhookRef secrets.CredentialRef
+	// Secrets 解析 WebhookRef。缺它等于没有凭据。
+	Secrets secrets.SecretProvider
+	// Client 可注入；零值用带超时的默认客户端。
+	Client *http.Client
+}
+
+// NewWeComNotifier 构造投递器。
+//
+// 与 NewTelegramNotifier 同一条理由：配置不全时返回错误而不是一个
+// 「什么都不做」的实例——一个静默不投递的告警渠道，比没有渠道危险得多。
+func NewWeComNotifier(opts WeComOptions) (*WeComNotifier, error) {
+	if opts.WebhookRef.IsZero() {
+		return nil, fmt.Errorf("wecom: 缺少 Webhook 地址的 CredentialRef")
+	}
+	if opts.Secrets == nil {
+		return nil, fmt.Errorf("wecom: 缺少 SecretProvider")
+	}
+	client := opts.Client
+	if client == nil {
+		client = &http.Client{Timeout: defaultNotifyTimeout}
+	}
+	return &WeComNotifier{webhookRef: opts.WebhookRef, secrets: opts.Secrets, client: client}, nil
+}
+
+func (w *WeComNotifier) Name() string { return "wecom" }
+
+// weComMarkdownPayload 是发给群机器人 Webhook 的请求体形状
+// （企微开放文档：msgtype=markdown）。
+type weComMarkdownPayload struct {
+	MsgType  string           `json:"msgtype"`
+	Markdown weComMarkdownDoc `json:"markdown"`
+}
+
+type weComMarkdownDoc struct {
+	Content string `json:"content"`
+}
+
+// weComResponse 是群机器人 Webhook 的响应形状。errcode=0 才算成功；
+// 非 0 时 errmsg 是上游给的原因（可能夹带上游自己的诊断信息，仍需脱敏）。
+type weComResponse struct {
+	ErrCode int    `json:"errcode"`
+	ErrMsg  string `json:"errmsg"`
+}
+
+// Notify 投递一条告警。
+//
+// **地址只在解析到发出这一小段里以明文存在**（宪法 7 条）：每次投递现解析
+// （凭据会轮换，握着的字符串不会知道），从不存进结构体字段，之后每一条
+// 要冒泡出去的文本都过一遍 redact——原因与 Telegram 一致：net/http 造的
+// 错误会带上完整请求 URL，而这里的 URL 本身就是秘密。
+func (w *WeComNotifier) Notify(ctx context.Context, a Alert) error {
+	value, err := w.secrets.Resolve(ctx, w.webhookRef, "alert wecom delivery")
+	if err != nil {
+		// 只报引用与分类，不报值——与 Telegram 同一条纪律。
+		return fmt.Errorf("wecom: 解析凭据 %s 失败: %w", w.webhookRef, err)
+	}
+	endpoint := strings.TrimSpace(value.Reveal())
+	if endpoint == "" {
+		return fmt.Errorf("wecom: 凭据 %s 解析出空值", w.webhookRef)
+	}
+	wecomURL, err := url.Parse(endpoint)
+	if err != nil || wecomURL.Scheme != "https" || wecomURL.Host == "" {
+		// 不回显 endpoint：它就是凭据。只报「不是合法 https 地址」这个事实，
+		// 与 Connector 的 endpoint 校验同一条规则（ADR-004）。
+		return fmt.Errorf("wecom: 凭据 %s 解析出的地址不是合法的 https URL", w.webhookRef)
+	}
+
+	// redact 只按「完整 endpoint 整串出现」匹配是不够的：一个把请求信息
+	// 回显进错误页的网关，常见做法是只回显 r.URL.RequestURI()（路径 + 查询
+	// 串，不含 scheme/host），这时 endpoint 整串根本不会出现在文本里，
+	// 但企微鉴权用的 key 就长在查询串里，同样是泄漏。所以把「完整地址」与
+	// 「查询串」都当作敏感片段——两者任一出现都要被抹掉。
+	// TestWeComNotifierNeverLeaksWebhookURL 的「上游把请求 URL 回显进错误
+	// 描述」用例专门盯这一条，之前只传 endpoint 时在这里漏过。
+	sensitive := []string{endpoint}
+	if wecomURL.RawQuery != "" {
+		sensitive = append(sensitive, wecomURL.RawQuery)
+	}
+
+	payload, err := json.Marshal(weComMarkdownPayload{
+		MsgType:  "markdown",
+		Markdown: weComMarkdownDoc{Content: FormatWeComMarkdown(a)},
+	})
+	if err != nil {
+		return fmt.Errorf("wecom: 编码请求体失败: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		// NewRequestWithContext 的错误会带上 URL。
+		return errors.New(redact(fmt.Sprintf("wecom: 构造请求失败: %v", err), sensitive...))
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := w.client.Do(req)
+	if err != nil {
+		// 这里是最危险的一处：err 里几乎必然带着完整 URL，也就带着 key。
+		return errors.New(redact(fmt.Sprintf("wecom: 请求失败: %v", err), sensitive...))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// 限流读：一个失控的上游不该把 worker 的内存吃光（规格 §18.1-4）。
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	// 响应体理论上不含地址，但它是上游控制的内容，照样过一遍脱敏——一个把
+	// 请求 URL 回显进错误描述的网关就足以让这条纪律破功（Telegram 踩过同一
+	// 类坑，见 TestTelegramNotifierNeverLeaksToken）。
+	safeBody := redact(string(body), sensitive...)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("wecom: HTTP %d: %s", resp.StatusCode, truncate(safeBody, 200))
+	}
+
+	var result weComResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("wecom: 响应不是合法 JSON: %s", truncate(safeBody, 200))
+	}
+	if result.ErrCode != 0 {
+		// HTTP 200 + errcode!=0 是企微会给的组合（例如 93000 地址不合法、
+		// 45009 内容超限），必须当失败处理——否则一条根本没发出去的告警
+		// 会被记成 delivered。errmsg 是上游文案，同样过一遍脱敏。
+		return fmt.Errorf("wecom: 上游拒绝，errcode=%d errmsg=%s",
+			result.ErrCode, redact(result.ErrMsg, sensitive...))
 	}
 	return nil
 }

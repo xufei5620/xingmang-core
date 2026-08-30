@@ -56,3 +56,27 @@ func alertSecretsFromEnv(
 	// 「这个 Bot Token 什么时候被用过」才查得出来（规格 §4.5）。
 	return secrets.NewAudited(provider, secrets.NewSlogRecorder(logger), environment), nil
 }
+
+// alertWeComWebhookEnvVar 是企业微信群机器人 Webhook 地址在 env Provider
+// 下的落点——与 alertTelegramTokenEnvVar 同一条约定（XM-ALERT-WECOM）。
+const alertWeComWebhookEnvVar = "XM_ALERT_WECOM_WEBHOOK"
+
+// alertWeComSecretsFromEnv 装配企业微信 Webhook 地址的 Provider：审计过的
+// 文件 Provider（XM_SECRET_ROOT，后台写入）在前，显式登记的 EnvProvider
+// 兜底——与 sub2api/newapi 同一套装配（XM-CRED0，见 connectorSecretsChain），
+// **不是**照抄 Telegram 现在还在用的纯 env 装配（alertSecretsFromEnv）。
+//
+// 之所以不一样：企微 Webhook 地址要能从后台「设置→凭据」页粘贴、worker
+// 不重启就生效，就必须挂上文件 Provider 那一环；而 Telegram 的装配是
+// XM-CRED0 之前的旧路径，尚未迁移（见 alertSecretsFromEnv 的注释），
+// 本次改动不动它，避免打乱一条已经在跑且有完整测试覆盖的链路。
+//
+// refText 为空时仍返回只有文件一环的链——同 sub2apiSecretsFromEnv 的注释：
+// 引用可以来自登记簿，凭据可以来自后台写的文件，两者都不经过 .env。
+// refText 配了但拼错仍是启动错误。
+func alertWeComSecretsFromEnv(
+	getenv func(string) string, logger *slog.Logger, environment, refText, secretRoot string,
+) (secrets.SecretProvider, error) {
+	return connectorSecretsChain(getenv, logger, environment, secretRoot,
+		refText, "XM_ALERT_WECOM_WEBHOOK_REF", alertWeComWebhookEnvVar)
+}
