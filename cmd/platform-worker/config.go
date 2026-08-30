@@ -265,6 +265,25 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		}
 		config.AlertBalanceThresholdMinorUnits = threshold
 	}
+
+	// XM-REQLOG-METRICS：请求量/成功率聚合。与 cmd/platform-api 共享同一个
+	// 环境变量名 XM_REQLOG_MODE/XM_REQLOG_DATA_DIR（该服务的「请求详情」
+	// 链路也读它），但 worker 只认得出 off/file 两档——遇到 fake/real（服务
+	// 另一条链路）不报错，退化成 off，由 jobs.NewClient 在装配时 warn
+	// （ParseReqlogMetricsMode 的 recognized 返回值不在这里处理，是因为
+	// configFromEnv 此刻还没有 logger：main.go 先构造 logger 再调用
+	// configFromEnv，颠倒过来会牵动全部调用点）。
+	reqlogMode, reqlogModeRecognized := jobs.ParseReqlogMetricsMode(getenv("XM_REQLOG_MODE"))
+	config.ReqlogMetricsMode = reqlogMode
+	config.ReqlogMetricsModeRecognized = reqlogModeRecognized
+	config.ReqlogMetricsDataDir = strings.TrimSpace(getenv("XM_REQLOG_DATA_DIR"))
+	if value := getenv("XM_REQLOG_METRICS_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("reqlog metrics interval: %w", err)
+		}
+		config.ReqlogMetricsInterval = interval
+	}
 	return config, nil
 }
 

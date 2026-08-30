@@ -73,6 +73,20 @@ services:
       XM_FINANCE_COLLECT_REQUEST_TIMEOUT: ${XM_FINANCE_COLLECT_REQUEST_TIMEOUT:-30s}
       XM_FINANCE_COLLECT_INSTANCE_ID: ${XM_FINANCE_COLLECT_INSTANCE_ID:?XM_FINANCE_COLLECT_INSTANCE_ID is required for production}
       HEARTBEAT_RUN_ON_START: ${HEARTBEAT_RUN_ON_START:-true}
+      # --- 请求量/成功率聚合 file 模式（XM-REQLOG-METRICS）--------------------
+      # 容器内路径固定为下面的默认值，与下方 volumes 的挂载目标一一对应；
+      # 是否读 file 模式仍由 .env 的 XM_REQLOG_MODE 决定（与 platform-api 共享
+      # 同一个变量，见该服务同名注释），这里不强制生产必须打开——没有部署
+      # 记录代理的环境本来就该让这三张卡片如实缺席，而不是被这份 prod 覆盖
+      # 强行要求配置一个不存在的目录。
+      XM_REQLOG_DATA_DIR: ${XM_REQLOG_DATA_DIR:-/var/lib/xm/reqlog}
+    volumes:
+      # 只读绑定挂载记录代理落盘的数据目录——与 platform-api 挂载的是同一份
+      # 宿主机路径（XM_REQLOG_HOST_DATA_DIR，默认 /root/reqlog/data），但
+      # **不挂 tokenmap.json**：worker 只聚合计数（status/dur_ms/ts_ms），
+      # 不解析 token_prefix 到用户名，没有理由让这个只读凭据映射文件的访问面
+      # 多一个容器。挂载语义与权限边界见 platform-api 服务块的同款注释。
+      - ${XM_REQLOG_HOST_DATA_DIR:-/root/reqlog/data}:/var/lib/xm/reqlog:ro
 
   web:
     environment:

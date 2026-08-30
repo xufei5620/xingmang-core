@@ -241,6 +241,28 @@ type Config struct {
 	// 管理后台写入的凭据文件按 <root>/<scope>/<name> 落在这里。
 	// 本层只把路径带进启动日志，不读取任何文件内容。
 	SecretRoot string
+
+	// ReqlogMetricsMode 决定「请求量/成功率」聚合任务是否启用
+	// （XM-REQLOG-METRICS）。off 不注册周期任务（不写观测，也不写
+	// not_supported）；file 时从 ReqlogMetricsDataDir 聚合 index.jsonl。
+	// 与 platform-api 共享同一个环境变量名 XM_REQLOG_MODE，但 worker 只认
+	// 得出这两档，其余值（fake/real，服务另一条链路）在 configFromEnv
+	// 阶段就已经被 ParseReqlogMetricsMode 折成 off。
+	ReqlogMetricsMode ReqlogMetricsMode
+	// ReqlogMetricsModeRecognized 记录原始配置值是否被 ParseReqlogMetricsMode
+	// 认识；false 时 NewClient 会 warn 一次，而不是让一个只服务于请求详情
+	// 链路的合法值（fake/real）悄悄退化成 off 却没有任何痕迹。
+	ReqlogMetricsModeRecognized bool
+	// ReqlogMetricsDataDir 是记录代理数据目录在 worker 容器内的挂载路径，
+	// 与 platform-api 的 XM_REQLOG_DATA_DIR 同一份路径、同一个默认值。
+	ReqlogMetricsDataDir string
+	// ReqlogMetricsInterval 是采集周期，默认 DefaultReqlogMetricsInterval。
+	ReqlogMetricsInterval time.Duration
+	// ReqlogMetricsRunOnStart 让进程起来就先聚合一次，而不是干等一个周期。
+	ReqlogMetricsRunOnStart bool
+	// ReqlogMetricsRunID 仅供集成测试隔离，生产必须留空——留空才让所有副本
+	// 共享同一条唯一性记录，同一个周期只聚合一次。
+	ReqlogMetricsRunID string
 }
 
 // DefaultConfig returns the safe local-development baseline.
@@ -298,6 +320,17 @@ func DefaultConfig() Config {
 		AlertEvaluateRunOnStart:         true,
 		AlertBalanceThresholdMinorUnits: alerts.DefaultBalanceThresholdMinorUnits,
 		AlertRunwayThresholds:           finance.DefaultRunwayThresholds(),
+
+		// 请求量/成功率聚合（XM-REQLOG-METRICS）：默认 off——与请求详情链路
+		// 的默认值同一条纪律（cmd/platform-api 的 parseReqlogMode 默认
+		// off，不是 fake）：这批指标的原料是记录代理落盘的真实数据，没有
+		// "safe fake" 可以顶替；没有部署记录代理的环境本来就不该有这三条
+		// 指标，off 让它们如实缺席，而不是编三个假数字出来。
+		ReqlogMetricsMode:           ReqlogMetricsModeOff,
+		ReqlogMetricsModeRecognized: true,
+		ReqlogMetricsDataDir:        defaultReqlogMetricsDataDir,
+		ReqlogMetricsInterval:       DefaultReqlogMetricsInterval,
+		ReqlogMetricsRunOnStart:     true,
 	}
 }
 
@@ -375,6 +408,16 @@ func (c Config) normalized() Config {
 		source = defaults.Sub2APIInstanceID
 	}
 	c.Sub2APIInstanceID = source
+	if strings.TrimSpace(string(c.ReqlogMetricsMode)) == "" {
+		c.ReqlogMetricsMode = defaults.ReqlogMetricsMode
+		c.ReqlogMetricsModeRecognized = defaults.ReqlogMetricsModeRecognized
+	}
+	if strings.TrimSpace(c.ReqlogMetricsDataDir) == "" {
+		c.ReqlogMetricsDataDir = defaults.ReqlogMetricsDataDir
+	}
+	if c.ReqlogMetricsInterval == 0 {
+		c.ReqlogMetricsInterval = defaults.ReqlogMetricsInterval
+	}
 	if c.Logger == nil {
 		c.Logger = structuredDefaultLogger()
 	}
@@ -536,6 +579,19 @@ func (c Config) validate() error {
 		// 与 Sub2APISyncRunID 同一条理由：RunID 只服务于集成测试隔离。
 		// 生产配上它等于给每个副本发一张免签，同一条告警会被投递 N 次。
 		return fmt.Errorf("alert evaluate run ID must not be set in production")
+	}
+	switch c.ReqlogMetricsMode {
+	case ReqlogMetricsModeOff, ReqlogMetricsModeFile:
+	default:
+		return fmt.Errorf("reqlog metrics mode %q: 只接受 off 或 file", c.ReqlogMetricsMode)
+	}
+	if c.ReqlogMetricsMode == ReqlogMetricsModeFile && c.ReqlogMetricsInterval < time.Second {
+		return fmt.Errorf("reqlog metrics interval %s is below River's one-second minimum", c.ReqlogMetricsInterval)
+	}
+	if c.ReqlogMetricsRunID != "" && c.Environment == "production" {
+		// 与 Sub2APISyncRunID 同一条理由：RunID 只服务于集成测试隔离。
+		// 生产配上它等于给每个副本发一张免签，同一个周期会被聚合 N 次。
+		return fmt.Errorf("reqlog metrics run ID must not be set in production")
 	}
 	return nil
 }
@@ -787,6 +843,43 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			return nil, err
 		}
 		periodic = append(periodic, alertPeriodic)
+	}
+
+	if cfg.ReqlogMetricsMode == ReqlogMetricsModeFile {
+		// 仓储在这里从既有连接池构造：任务只依赖 ObservationStore 接口，
+		// 与 sub2api_sync/newapi_sync 同一条装配纪律。
+		river.AddWorker(workers, NewReqlogMetricsWorker(ReqlogMetricsOptions{
+			Logger:           cfg.Logger,
+			Environment:      cfg.Environment,
+			DataDir:          cfg.ReqlogMetricsDataDir,
+			Sub2APISource:    cfg.Sub2APIInstanceID,
+			NewAPISource:     cfg.NewAPIInstanceID,
+			Store:            ops.NewStore(pool),
+			ExpectedInterval: cfg.ReqlogMetricsInterval,
+		}))
+		reqlogMetricsPeriodic, err := newManifestPeriodicJob(
+			ReqlogMetricsJobKind, cfg.ReqlogMetricsInterval, cfg.ReqlogMetricsRunOnStart,
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := ReqlogMetricsArgs{RunID: cfg.ReqlogMetricsRunID}
+				opts := args.InsertOpts()
+				return args, &opts
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, reqlogMetricsPeriodic)
+	} else if !cfg.ReqlogMetricsModeRecognized {
+		// 原始配置值不是 off/file/空串（多半是 fake/real，服务的是请求详情
+		// 那条完全不同的链路）：已经退化成 off 处理，但这里必须留一条 warn，
+		// 不然「聚合链路为什么没有指标」会变成一次排查两个进程配置的事故。
+		cfg.Logger.Warn("reqlog_metrics_mode_unrecognized",
+			slog.String("event", "reqlog_metrics_mode_unrecognized"),
+			slog.String("module", reqlogMetricsModule),
+			slog.String("environment", cfg.Environment),
+			slog.String("detail", "XM_REQLOG_MODE 的值 worker 侧无法识别（只认 off/file），"+
+				"已按 off 处理；如果这是 fake/real，那是请求详情链路（platform-api）的合法值，"+
+				"与本任务无关"))
 	}
 
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{

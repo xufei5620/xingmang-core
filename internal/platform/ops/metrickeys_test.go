@@ -7,6 +7,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/invoice"
 	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/connectors/newapi"
+	"github.com/xufei5620/xingmang-platform/connectors/reqlog"
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
@@ -49,6 +50,16 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		// 守的是「白名单与指标常量的唯一来源」这条不变量，指标常量定义在
 		// 哪个包不改变这一点。
 		finance.MetricProfitDaily,
+		// 请求量/成功率（XM-REQLOG-METRICS）。字符串值用 sub2api./newapi.
+		// 前缀而不是 reqlog.——常量定义在哪个包不决定指标归哪个业务域，
+		// 与 metering.MetricCostDaily 实际是 "finance.cost.daily" 同一条先例
+		// （见 connectors/reqlog/metrics.go 顶部常量的注释）。
+		reqlog.MetricSub2APIRequestsDaily,
+		reqlog.MetricSub2APIRequestsSuccessRate24h,
+		reqlog.MetricSub2APIRequestsTrend7d,
+		reqlog.MetricNewAPIRequestsDaily,
+		reqlog.MetricNewAPIRequestsSuccessRate24h,
+		reqlog.MetricNewAPIRequestsTrend7d,
 	}
 
 	for _, key := range fromContracts {

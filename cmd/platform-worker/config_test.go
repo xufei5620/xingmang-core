@@ -586,3 +586,76 @@ func TestConfigFromEnvHasNoAuditRetentionKnob(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigFromEnvDefaultsReqlogMetricsToOff：默认 off，没有部署记录代理
+// 的环境不该凭空产出三张卡片的假数据（与 sub2api/newapi 默认 fake 不同——
+// 这批指标没有「安全的假数据」可以顶替，只有「不存在」)。
+func TestConfigFromEnvDefaultsReqlogMetricsToOff(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReqlogMetricsMode != jobs.ReqlogMetricsModeOff {
+		t.Fatalf("默认模式 = %q, want off", cfg.ReqlogMetricsMode)
+	}
+	if !cfg.ReqlogMetricsModeRecognized {
+		t.Fatal("空值应该被识别为合法的 off，不该触发 unrecognized")
+	}
+	if cfg.ReqlogMetricsInterval != jobs.DefaultReqlogMetricsInterval {
+		t.Fatalf("默认周期 = %s, want %s", cfg.ReqlogMetricsInterval, jobs.DefaultReqlogMetricsInterval)
+	}
+}
+
+// TestConfigFromEnvReadsReqlogMetricsFileMode 覆盖与 platform-api 共享同一个
+// 环境变量名这条契约：XM_REQLOG_MODE=file 时 worker 侧必须认出 file。
+func TestConfigFromEnvReadsReqlogMetricsFileMode(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                "staging",
+		"XM_REQLOG_MODE":             "file",
+		"XM_REQLOG_DATA_DIR":         "/custom/reqlog/data",
+		"XM_REQLOG_METRICS_INTERVAL": "2m",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReqlogMetricsMode != jobs.ReqlogMetricsModeFile {
+		t.Fatalf("模式 = %q, want file", cfg.ReqlogMetricsMode)
+	}
+	if !cfg.ReqlogMetricsModeRecognized {
+		t.Fatal("file 是合法值，不该被判成 unrecognized")
+	}
+	if cfg.ReqlogMetricsDataDir != "/custom/reqlog/data" {
+		t.Fatalf("data dir = %q, want /custom/reqlog/data", cfg.ReqlogMetricsDataDir)
+	}
+	if cfg.ReqlogMetricsInterval != 2*time.Minute {
+		t.Fatalf("interval = %s, want 2m", cfg.ReqlogMetricsInterval)
+	}
+}
+
+// TestConfigFromEnvReqlogMetricsUnrecognizedValueDegradesToOff 覆盖「worker
+// 只认 off/file，其余值退化成 off 但不报错」这条契约——platform-api 那边的
+// fake/real 是合法配置，不该把 worker 启动打断。
+func TestConfigFromEnvReqlogMetricsUnrecognizedValueDegradesToOff(t *testing.T) {
+	for _, raw := range []string{"fake", "real", "typo"} {
+		values := map[string]string{"ENVIRONMENT": "staging", "XM_REQLOG_MODE": raw}
+		cfg, err := configFromEnv(func(key string) string { return values[key] })
+		if err != nil {
+			t.Fatalf("XM_REQLOG_MODE=%q 不该让 worker 启动失败: %v", raw, err)
+		}
+		if cfg.ReqlogMetricsMode != jobs.ReqlogMetricsModeOff {
+			t.Fatalf("XM_REQLOG_MODE=%q: 模式 = %q, want off", raw, cfg.ReqlogMetricsMode)
+		}
+		if cfg.ReqlogMetricsModeRecognized {
+			t.Fatalf("XM_REQLOG_MODE=%q 应该被标记为 unrecognized，好让 NewClient 记一条 warn", raw)
+		}
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidReqlogMetricsInterval(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging", "XM_REQLOG_METRICS_INTERVAL": "soon"}
+	if _, err := configFromEnv(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("非法的 XM_REQLOG_METRICS_INTERVAL 应该报错")
+	}
+}
