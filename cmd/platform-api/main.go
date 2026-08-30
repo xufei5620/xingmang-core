@@ -23,6 +23,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
+	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
@@ -56,13 +57,28 @@ func main() {
 	}
 	defer pool.Close()
 
-	// 身份解析器由 XM_AUTH_MODE 决定（dev-header / oidc）。
-	// 生产只允许 oidc，且缺 issuer/audience 直接拒绝启动——见 authConfigFromEnv
-	resolver, err := newPrincipalResolver(cfg, logger)
-	if err != nil {
-		logger.Error("api_start_failed", slog.String("module", "platform.api"),
-			slog.String("error_code", "no_principal_resolver"), slog.Any("err", err))
-		os.Exit(2)
+	// 身份解析器由 XM_AUTH_MODE 决定（dev-header / oidc / local）。
+	// 生产只允许 oidc 或 local；dev-header 与 oidc 缺 issuer/audience 都在
+	// authConfigFromEnv 里直接拒绝启动。
+	//
+	// local（XM-LOGIN）单独装配，不经 newPrincipalResolver（auth.go）：
+	// 那个函数只处理不依赖数据库连接的两种模式，local 的账号与会话都落库，
+	// 需要 pool——而 pool 在这里已经建好了。localAuthStore 非 nil 时后面还
+	// 要用它注册 staff.manage Action 与装配 /api/v1/auth/* 的 HTTP 处理器。
+	var resolver httpapi.PrincipalResolver
+	var localAuthStore *localauth.Store
+	if cfg.Auth.Mode == authModeLocal {
+		localAuthStore = localauth.NewStore(pool)
+		resolver = localauth.NewResolver(localAuthStore, cfg.Environment,
+			localauth.RoleScopesFrom(localAuthRoleMap(cfg)))
+	} else {
+		r, err := newPrincipalResolver(cfg, logger)
+		if err != nil {
+			logger.Error("api_start_failed", slog.String("module", "platform.api"),
+				slog.String("error_code", "no_principal_resolver"), slog.Any("err", err))
+			os.Exit(2)
+		}
+		resolver = r
 	}
 
 	actionRegistry := action.NewRegistry()
@@ -130,6 +146,19 @@ func main() {
 	runwayThresholdStore := finance.NewRunwayThresholdStore(pool, nil)
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
+	// 本地登录账号管理（XM-LOGIN）：只在 local 模式下注册这四个 Action。
+	// 其余模式 localAuthStore 为 nil，staff.account.* 在 /api/v1/actions 的
+	// 清单里不存在——前端应据此隐藏账号管理入口，而不是显示一个一调就 403
+	// 的按钮。注册失败即拒绝启动，同其它模块的纪律。
+	var localAuthHandlers *localauth.Handlers
+	if localAuthStore != nil {
+		if err := registerLocalAuthActions(actionRegistry, cfg, localAuthStore); err != nil {
+			logger.Error("api_start_failed", slog.String("module", "platform.api"),
+				slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+			os.Exit(1)
+		}
+		localAuthHandlers = localauth.NewHandlers(localAuthStore, cfg.Environment, auditStore, logger)
+	}
 	kernel := action.NewKernel(
 		actionRegistry,
 		action.NewPgRunStore(pool, logger),
@@ -234,6 +263,8 @@ func main() {
 		FinanceRunwayPreviewSource: runwaySummaryStore,
 		RequestTimeout:             cfg.RequestTimeout,
 		RateLimit:                  cfg.RateLimit,
+		// nil 时本地登录端点不挂载（XM-LOGIN，只有 XM_AUTH_MODE=local 才有值）
+		LocalAuth: localAuthHandlersOrNil(localAuthHandlers),
 	})
 
 	srv := &http.Server{

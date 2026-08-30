@@ -33,6 +33,9 @@ var platformScopePrefixes = []string{
 	// 它以 Realm 角色的形式出现，等于把「谁能换掉平台的上游凭据」这个决定
 	// 挪出了平台数据库的管辖（ADR-016 / CR-0001 §5）。
 	"credential.",
+	// XM-LOGIN：staff.manage 管理本地登录账号（创建、改角色、启停、重置
+	// 密码）。同上一条理由——它不该以 Realm 角色的形式出现。
+	"staff.",
 }
 
 // looksLikePlatformScope 判断一个角色名是否长成平台细粒度权限的样子。
@@ -82,7 +85,18 @@ func looksLikePlatformScope(role string) bool {
 //     要授予就用 XM_OIDC_ROLE_SCOPES 显式配一个专门的角色。
 //     `resolver_test.go` 的 TestDefaultRoleScopeMapIsConservative 钉住了这个决定。
 //
-//  6. **API Key 元数据使用专门角色**（KEY_SCOPE_APPROVAL，2026-08-30）。
+//  6. **admin 额外含 staff.manage / credential.manage / connector.manage**
+//     （XM-LOGIN，2026-08-30）。这是对上面 XM-CRED0 那条"不进 staff/admin"
+//     原则的一次显式收窄，理由与那条本身一样刻意：本地登录（XM-LOGIN）的
+//     bootstrap 管理员（cmd/staff-bootstrap）必须一上线就能管账号、配凭据、
+//     切连接器，而不必先登录一次再手动申请第二个角色——冷启动阶段压根没有
+//     "已登录的人"能去审批那次申请。三个 scope 只加进 admin，不加进 staff：
+//     staff 依然不该有任何 .manage 能力（见 TestDefaultRoleScopeMapIsConservative
+//     对 staff 的断言）。专门角色 credential-admin 的语义不受影响——它仍然
+//     是"只给凭据/连接器写权限、不给别的"的最小面，两条路径并存。
+//     要撤销就用 XM_OIDC_ROLE_SCOPES 显式覆盖 admin 的映射。
+//
+//  7. **API Key 元数据使用专门角色**（KEY_SCOPE_APPROVAL，2026-08-30）。
 //     `platform.user_keys.read` 只允许看到前缀、状态与时间元数据；它不进入
 //     staff/admin 默认映射，因为即使没有完整 Key，凭据库存仍是敏感面。开发态
 //     默认清单会显式携带该 scope 以便演示 Fake 能力；生产 OIDC 必须给需要它的
@@ -117,6 +131,11 @@ func DefaultRoleScopeMap() map[string][]string {
 			// XM-0046：逐用户资金清单，与 request.read 同一档（见上面第 5 条）
 			"platform.users.read",
 			"ui.saved_view.manage",
+			// XM-LOGIN：见上面第 6 条——bootstrap 管理员需要一上线就能管
+			// 账号、凭据与连接器，不必先登录再手动申请第二个角色。
+			"staff.manage",
+			"credential.manage",
+			"connector.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。

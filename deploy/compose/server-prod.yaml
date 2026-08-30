@@ -20,9 +20,17 @@ services:
   platform-api:
     environment:
       ENVIRONMENT: production
-      XM_AUTH_MODE: oidc
-      XM_OIDC_ISSUER: ${XM_OIDC_ISSUER:?XM_OIDC_ISSUER is required for production}
-      XM_OIDC_AUDIENCE: ${XM_OIDC_AUDIENCE:?XM_OIDC_AUDIENCE is required for production}
+      # XM-LOGIN：默认改为 local（平台自带登录，见 docs/modules/httpapi/
+      # AUTH-SWITCH.md「local 模式」一节）。仍可显式设成 oidc 切回 CR-0001
+      # 的 Keycloak 登录——两者都是生产允许的模式，dev-header 仍被 Go 侧的
+      # authConfigFromEnv 硬拒绝。
+      XM_AUTH_MODE: ${XM_AUTH_MODE:-local}
+      # issuer/audience 不再是 compose 级的必填闸（`:?`）：local 模式下根本
+      # 用不到它们。生产的合法性改由 Go 侧强制——XM_AUTH_MODE=oidc 时
+      # authConfigFromEnv 仍然会在缺 issuer/audience 时拒绝启动（Fail Closed
+      # 没有削弱，只是校验点从「compose 展开」挪到了「进程启动」）。
+      XM_OIDC_ISSUER: ${XM_OIDC_ISSUER:-}
+      XM_OIDC_AUDIENCE: ${XM_OIDC_AUDIENCE:-}
       XM_OIDC_JWKS_URL: ${XM_OIDC_JWKS_URL:-}
       XM_OIDC_ROLE_SCOPES: ${XM_OIDC_ROLE_SCOPES:-}
       XM_OIDC_CLOCK_SKEW: ${XM_OIDC_CLOCK_SKEW:-}
@@ -49,6 +57,12 @@ services:
 
   web:
     environment:
+      # ⚠️ XM-LOGIN（2026-08-30）：本文件已把 platform-api 的默认
+      # XM_AUTH_MODE 改成 local，但这里**仍然固定 oidc**——admin-web 目前只有
+      # OIDC 登录页/回调页（XM-AUTH1），没有本地用户名密码登录页与
+      # xm_session Cookie 处理，这是后端交付、前端待补的已知缺口。默认组合
+      # 因此是「后端 local + 前端仍发 Bearer」，会立即 403 缺少身份，直到前端
+      # 补上本地登录 UI（或显式把 XM_AUTH_MODE 覆盖回 oidc 并配好 CR-0001）。
       # 前端鉴权固定 oidc（XM-AUTH1），与上面 platform-api 的 XM_AUTH_MODE 成对。
       # issuer / client id 默认取后端同名配置（XM_OIDC_ISSUER / XM_OIDC_AUDIENCE），
       # 两边必须相同：issuer 逐字比对，client id 就是后端校验的 aud/azp。
