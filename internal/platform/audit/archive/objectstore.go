@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -119,6 +120,7 @@ var (
 	ErrObjectNotFound    = errors.New("archive_object_not_found")
 	ErrObjectConflict    = errors.New("archive_object_conflict")
 	ErrJournalConflict   = errors.New("archive_journal_conflict")
+	ErrJournalIncomplete = errors.New("archive_journal_incomplete")
 	ErrCatalogConflict   = errors.New("archive_catalog_conflict")
 	ErrRecoveryConflict  = errors.New("archive_recovery_index_conflict")
 )
@@ -203,7 +205,7 @@ func ValidateObjectWriteIntent(value ObjectWriteIntentV1) error {
 // ValidateObjectVersion exposes the frozen wire validator to adapters without
 // widening the object-store capability surface.
 func ValidateObjectVersion(value ObjectVersionV1) error {
-	if value.SizeBytes < 0 || value.SizeBytes > MaxObjectWriteBytes {
+	if !validBucketID(value.BucketID) || value.SizeBytes < 0 || value.SizeBytes > MaxObjectWriteBytes {
 		return fmt.Errorf("%w: object size", ErrArchiveValidation)
 	}
 	if !objectKeyDigestMatches(value.Key, value.SHA256) {
@@ -226,11 +228,38 @@ func ValidateObjectVersion(value ObjectVersionV1) error {
 	return nil
 }
 
+func ValidateArtifactRef(value ArtifactRefV1) error {
+	if !validBucketID(value.BucketID) {
+		return fmt.Errorf("%w: artifact bucket", ErrArchiveValidation)
+	}
+	return validateArtifactRef(value)
+}
+
 func CanonicalObjectVersionBytes(value ObjectVersionV1) ([]byte, error) {
 	if err := ValidateObjectVersion(value); err != nil {
 		return nil, err
 	}
 	return json.Marshal(value)
+}
+
+func decodeCanonicalJSON[T any](raw []byte, target *T) error {
+	if len(raw) == 0 || target == nil {
+		return fmt.Errorf("%w: empty canonical bytes", ErrArchiveValidation)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("%w: canonical JSON decode", ErrArchiveValidation)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("%w: trailing canonical JSON", ErrArchiveValidation)
+	}
+	canonical, err := json.Marshal(*target)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return fmt.Errorf("%w: non-canonical JSON bytes", ErrArchiveValidation)
+	}
+	return nil
 }
 
 func ObjectVersionDigest(value ObjectVersionV1) (string, error) {
