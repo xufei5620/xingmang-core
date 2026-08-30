@@ -51,12 +51,18 @@ The manifest covers the five plan-mandated pre-generation inputs:
 | `db/migrations/000018_audit_archive_catalog.down.sql` | `0cf6a623f4ed3765496e173248319ec7dfdeff14` |
 | `db/queries/audit.sql` | `db8f953e1a174c506731460e6d4b0922ef26e7fa` |
 | `internal/platform/audit/archive/catalog_integration_test.go` | `1145d666422da7677eb500eee6c644fd56ca1631` |
-| `internal/platform/audit/archive/receipt_journal_integration_test.go` | `16c39b4ab597de9858606f6050c770f8e46be43c` |
+| `internal/platform/audit/archive/receipt_journal_integration_test.go` | `a6b093dd3688c905715dcd95d07db9d2c50e901a` |
 
 `migration_input_digest` is computed as the SHA-256 of the sorted `hash-object + two
 spaces + path` lines plus one final LF, exactly as the implementation plan specifies.
-Approved input digest: `e3ba2f84812a56a9a454aa73204298b9b8214f0e` (UTF-8 bytes of the
-sorted `hash  path` lines plus one LF, matching the `2026-08-30T07:41Z` acceptance record).
+Previously approved input digest: `e3ba2f84812a56a9a454aa73204298b9b8214f0e` (the
+`2026-08-30T07:41Z` record, based on the prior receipt-test bytes). The receipt integration
+test now uses savepoints around expected duplicate-key errors so the same disposable
+transaction can continue probing append-only behavior. Its new hash is
+`a6b093dd3688c905715dcd95d07db9d2c50e901a`; the recomputed UTF-8 digest is
+`fa97f759b8f9cb10a9c8d75d4dc26bd0d776858f`, therefore the prior approval is superseded and
+the updated five-file input set needs a fresh exact approval before migration/sqlc results
+can be treated as final.
 The earlier PowerShell pipeline digest `6113a7453907148508697458b8be2ce2ffedeaba` was
 an encoding artifact and is superseded. Any input byte edit or release-tip migration
 movement invalidates approval and requires a fresh recomputation.
@@ -86,7 +92,8 @@ movement invalidates approval and requires a fresh recomputation.
 - A separate disposable PostgreSQL review probe (random container, removed after the run)
   applied the draft only for syntax/valid-row checking and reported
   `migration=PASS insert_exit=0 output=INSERT 0 1 1`; this is review evidence, not shared
-  stack or production evidence. The current branch itself has not applied `000018`.
+  stack or production evidence. The current branch has not applied `000018` after the
+  receipt-test edit; the earlier probe predates the superseded digest.
 
 ## files / non-goals for this stage
 
