@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   currencyExponent,
+  formatBasisPointsPercent,
   formatCount,
   formatMinorUnits,
   formatScaledMinorUnits,
@@ -125,6 +126,33 @@ describe("错误率（ppm → 百分比）", () => {
 
   it("负值不被吞掉：它是上游给错了，该看得出来", () => {
     expect(formatErrorRatePPM(-1_200)).toBe("-0.12%");
+  });
+});
+
+describe("成功率（bp → 百分比，XM-OVERVIEW-UI）", () => {
+  it("按两位小数展示，1% = 100 bp——与 ppm 的除数不同", () => {
+    expect(formatBasisPointsPercent(0)).toBe("0.00%");
+    expect(formatBasisPointsPercent(9_950)).toBe("99.50%");
+    expect(formatBasisPointsPercent(10_000)).toBe("100.00%");
+    expect(formatBasisPointsPercent(1)).toBe("0.01%");
+  });
+
+  it("与 formatErrorRatePPM 不能互换：同一个整数按两种单位换算出完全不同的百分比", () => {
+    // 9950 当 bp 是 99.50%（接近全部成功），当 ppm 却只有 0.995%——
+    // 差了整整两个数量级，混用会把「几乎全部成功」显示成「几乎全部失败」
+    expect(formatBasisPointsPercent(9_950)).toBe("99.50%");
+    expect(formatErrorRatePPM(9_950)).toBe("0.99%");
+  });
+
+  it("非整数与非法值给「数值异常」，不悄悄显示一个算错的比率", () => {
+    expect(formatBasisPointsPercent(1.5)).toBe(INVALID_VALUE_TEXT);
+    expect(formatBasisPointsPercent("abc")).toBe(INVALID_VALUE_TEXT);
+    expect(formatBasisPointsPercent(null)).toBe(INVALID_VALUE_TEXT);
+    expect(formatBasisPointsPercent(undefined)).toBe(INVALID_VALUE_TEXT);
+  });
+
+  it("负值不被吞掉", () => {
+    expect(formatBasisPointsPercent(-9_950)).toBe("-99.50%");
   });
 });
 

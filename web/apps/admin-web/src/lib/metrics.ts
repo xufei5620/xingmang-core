@@ -1,6 +1,6 @@
 import type { SparkSample } from "@xingmang/ui-admin";
 import type { MetricHistoryItem, MetricItem } from "../api/platform";
-import { formatCount, formatMinorUnits, toIntegerValue } from "./money";
+import { formatBasisPointsPercent, formatCount, formatMinorUnits, toIntegerValue } from "./money";
 
 /** 指标在卡片上的呈现结果。 */
 export interface MetricPresentation {
@@ -27,6 +27,15 @@ const METRIC_LABELS: Record<string, string> = {
   "newapi.subscription.daily": "NewAPI 日订阅",
   "newapi.channels.status": "NewAPI 渠道状态",
   "newapi.models.usage": "NewAPI 模型用量",
+  // XM-OVERVIEW-UI：请求审计线（reqlog）按业务日/滚动窗口聚合出的调用量三件套，
+  // 以及 Sub2API 的逐渠道状态（订阅型上游没有余额，渠道健康改看这一条）。
+  "sub2api.channels.status": "Sub2API 渠道状态",
+  "sub2api.requests.daily": "Sub2API 调用量（日）",
+  "sub2api.requests.success_rate_24h": "Sub2API 成功率（24h）",
+  "sub2api.requests.trend_7d": "Sub2API 调用量趋势（7 日）",
+  "newapi.requests.daily": "NewAPI 调用量（日）",
+  "newapi.requests.success_rate_24h": "NewAPI 成功率（24h）",
+  "newapi.requests.trend_7d": "NewAPI 调用量趋势（7 日）",
 };
 
 /** 没有可信数值时主位显示的占位符。 */
@@ -95,6 +104,18 @@ const PRIMARY_READERS: Record<string, PrimaryReader> = {
     raw: toIntegerValue(v["total_request_count"]),
     kind: "count",
   }),
+  // XM-OVERVIEW-UI：调用量的主数值取 request_count，与卡片主位显示的数一致。
+  // success_rate_24h 不在这里——它的主数值是个万分比（bp），既不是金额也不是
+  // 单纯计数，套 kind: "money" | "count" 的哪一种都会让 formatPrimary 给出
+  // 一个看着正常、实际单位错了的数字；那条指标的卡片文案完全由下面的自定义
+  // RENDERERS 给出，并且不挂迷你趋势图（见 PlatformOverviewPanel 的
+  // MetricTile sparkline={false}），所以没有 metricPrimaryValue/
+  // metricSeriesValue 会被调用到它头上的路径。trend_7d 同理不登记：
+  // 它的 value 是一个内嵌逐日数组，根本不是「单个主数值」这个形状，
+  // 走的是 readRequestsTrendDays / toTrendSparkSamples 另一条解析管线。
+  "sub2api.channels.status": (v) => ({ raw: channelCountOf(v), kind: "count" }),
+  "sub2api.requests.daily": (v) => ({ raw: toIntegerValue(v["request_count"]), kind: "count" }),
+  "newapi.requests.daily": (v) => ({ raw: toIntegerValue(v["request_count"]), kind: "count" }),
 };
 
 /** 未登记指标的主数值：认得出金额就按金额，认得出整数就按计数，都认不出给 null。 */
@@ -130,6 +151,13 @@ export function metricSeriesValue(
   value: Record<string, unknown> | null,
 ): number | null {
   const { raw } = metricPrimaryValue(metricKey, value);
+  return bigintToSafeNumber(raw);
+}
+
+/** bigint → 安全 number；超出 Number.MAX_SAFE_INTEGER 范围时返回 null。
+ *  换算成 number 已经不准的值，不该被当作任何图表纵轴或数值计算的输入
+ *  （见下方 metricSeriesValue 与请求量趋势 toTrendSparkSamples 共用同一条纪律）。 */
+function bigintToSafeNumber(raw: bigint | null): number | null {
   if (raw === null) return null;
   if (raw > BigInt(Number.MAX_SAFE_INTEGER) || raw < BigInt(Number.MIN_SAFE_INTEGER)) return null;
   return Number(raw);
@@ -279,6 +307,112 @@ export function readNewApiChannelRows(
 /** NewAPI 渠道状态指标的键。渠道表要从指标列表里挑出这一条。 */
 export const NEWAPI_CHANNELS_METRIC_KEY = "newapi.channels.status";
 
+// --- Sub2API 渠道状态（XM-OVERVIEW-UI）---
+
+/** Sub2API 渠道状态指标里的一行（写入形状见 XM-OVERVIEW-UI 交接文档）。
+ *
+ *  与 ChannelRow（sub2api.channels.balance）**不是同一个形状**：Sub2API 的
+ *  上游账号是订阅型，没有钱包余额，channels.balance 永远是空数组——渠道
+ *  健康要看的是这条 status 指标。字段也完全不同：没有 token_valid，
+ *  多了一个 status 字符串（active / error / …），且键名是 `name` 不是
+ *  `channel_name`。两个类型分开定义，不要试图合并成一个可选字段的超集：
+ *  合并后调用方要自己猜「这次是哪个平台写的」，猜错了字段就会静默取到
+ *  undefined。 */
+export interface Sub2ApiChannelStatusRow {
+  channelId: string;
+  name: string;
+  /** 上游原样状态字符串。不在解析这一层把它归类成「可用/不可用」——
+   *  那是业务判断（active 才算可用），交给 lib/overview 的健康行计算去做，
+   *  解析函数只管把契约里给的字段原样搬过来。 */
+  status: string;
+  currency: string;
+}
+
+function readSub2ApiChannelStatusRow(raw: Record<string, unknown>): Sub2ApiChannelStatusRow {
+  return {
+    channelId: readString(raw, "channel_id") ?? "",
+    name: readString(raw, "name") ?? "",
+    status: readString(raw, "status") ?? "",
+    currency: currencyOf(raw),
+  };
+}
+
+/** 从 Sub2API 渠道状态指标的 value 里解析出逐渠道明细。
+ *  上游健康卡与（将来若需要的）渠道表共用这一个解析函数。 */
+export function readSub2ApiChannelStatusRows(
+  value: Record<string, unknown> | null,
+): Sub2ApiChannelStatusRow[] {
+  const raw = value?.["channels"];
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[])
+    .filter((c): c is Record<string, unknown> => typeof c === "object" && c !== null)
+    .map(readSub2ApiChannelStatusRow);
+}
+
+/** Sub2API 渠道状态指标的键。上游健康卡要从指标列表里挑出这一条。 */
+export const SUB2API_CHANNEL_STATUS_METRIC_KEY = "sub2api.channels.status";
+
+// --- 请求量：日调用量 / 24h 成功率 / 7 日趋势（XM-OVERVIEW-UI）---
+
+/** 「近 7 日调用量」趋势指标（`*.requests.trend_7d`）里的一天。 */
+export interface RequestsTrendDay {
+  day: string;
+  requestCount: bigint | null;
+  successCount: bigint | null;
+  /** true 表示这一天没有可信数据。即便 request_count 字段仍带着数字
+   *  （后端约定不给可空整数），也不能当成真实读数画进折线——
+   *  与「同步失败样本不进折线」是同一条纪律（宪法 12 条）。 */
+  missing: boolean;
+}
+
+function readRequestsTrendDay(raw: Record<string, unknown>): RequestsTrendDay {
+  return {
+    day: readString(raw, "day") ?? "",
+    requestCount: toIntegerValue(raw["request_count"]),
+    successCount: toIntegerValue(raw["success_count"]),
+    missing: raw["missing"] === true,
+  };
+}
+
+/** 从「近 7 日调用量」趋势指标的 value 里解析出逐日明细。
+ *
+ *  契约保证按天升序给 7 个元素，这里仍按 day 字符串（YYYY-MM-DD，字典序
+ *  与时间序一致）再排一次防御——契约一旦哪天漂了乱序，页面画出来的至少
+ *  不是一条随机跳动的锯齿线。 */
+export function readRequestsTrendDays(value: Record<string, unknown> | null): RequestsTrendDay[] {
+  const raw = value?.["days"];
+  if (!Array.isArray(raw)) return [];
+  const days = (raw as unknown[])
+    .filter((d): d is Record<string, unknown> => typeof d === "object" && d !== null)
+    .map(readRequestsTrendDay);
+  return [...days].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+}
+
+/** 逐日明细 → 折线样本，喂给 ui-admin 的 Sparkline（与卡片迷你趋势图、
+ *  底部大图同一个绘制组件——另写一套画法，断点/失败的视觉语义迟早会漂开）。
+ *
+ *  这条管线与 toSparkSamples**不是同一回事**：toSparkSamples 的输入是分次
+ *  采集的历史观测序列（GET /metrics/history），这里的输入是**同一条观测**
+ *  内嵌的 7 天数组，横轴直接用日历日（UTC 当天零点），没有 synced_at 可用。
+ *
+ *  missing 映射到 failed：那一天没有可信数据，把 request_count 当正常读数
+ *  连进折线就是伪造（宪法 12 条）。day 解析不出合法日期的样本直接丢弃——
+ *  NaN 进了路径字符串会让整条折线消失。 */
+export function toTrendSparkSamples(days: readonly RequestsTrendDay[]): SparkSample[] {
+  const samples: SparkSample[] = [];
+  for (const d of days) {
+    const at = Date.parse(`${d.day}T00:00:00Z`);
+    if (!Number.isFinite(at)) continue;
+    samples.push({
+      at,
+      value: bigintToSafeNumber(d.requestCount),
+      failed: d.missing,
+      observedAt: at,
+    });
+  }
+  return samples;
+}
+
 // --- 卡片渲染 ---
 
 interface ValueRender {
@@ -338,6 +472,90 @@ function renderNewApiChannelStatus(value: Record<string, unknown>): ValueRender 
   };
 }
 
+/** Sub2API 渠道状态是个聚合指标，值里是一个数组，单独处理（与
+ *  renderNewApiChannelStatus 同一个理由，字段名不同：这条只有 active 与否，
+ *  没有 enabled/error_rate_ppm）。 */
+function renderSub2ApiChannelStatus(value: Record<string, unknown>): ValueRender {
+  const rows = readSub2ApiChannelStatusRows(value);
+  const active = rows.filter((r) => r.status === "active").length;
+  return {
+    primary: `${formatPrimary(metricPrimaryValue(SUB2API_CHANNEL_STATUS_METRIC_KEY, value), "")} 个渠道`,
+    secondary:
+      rows.length > 0
+        ? joinParts([`可用 ${formatCount(active)}`, `不可用 ${formatCount(rows.length - active)}`])
+        : undefined,
+  };
+}
+
+/** avg_duration_ms 是 `int | null`：null 表示这天没有可信的平均耗时，
+ *  **不是 0**——0 毫秒是个会骗人的默认值（宪法 12 条同一条纪律）。 */
+function formatAvgDurationMs(value: unknown): string {
+  if (value === null) return "平均耗时未知";
+  const n = toIntegerValue(value);
+  return n === null ? "平均耗时未知" : `平均耗时 ${formatCount(n)}ms`;
+}
+
+/** 日调用量（`*.requests.daily`）的渲染，sub2api / newapi 共用同一套逻辑，
+ *  按 key 参数化只是为了让 metricPrimaryValue 取到与自己对应的主数值口径。 */
+function renderRequestsDaily(key: string): Renderer {
+  return (v) => ({
+    primary: `${formatPrimary(metricPrimaryValue(key, v), "")} 次`,
+    secondary: joinParts([
+      readString(v, "day") ? `业务日 ${readString(v, "day")}` : undefined,
+      `成功 ${formatCount(v["success_count"])}`,
+      `失败 ${formatCount(v["failure_count"])}`,
+      formatAvgDurationMs(v["avg_duration_ms"]),
+    ]),
+  });
+}
+
+/** 24h 成功率（`*.requests.success_rate_24h`）的渲染。
+ *
+ *  success_rate_bp 为 null 时**不是 0%**——契约明说 null 表示这个滚动窗口
+ *  内压根没有请求，成功率无意义（除以零）。显示「0.00%」会被读成「全部失败」，
+ *  是比「未初始化显示 0」更隐蔽的一种编数据，因为它是一个看起来完全合理的
+ *  百分比。这里必须把「没有请求」与「有请求但全失败」分开说清楚。 */
+function renderSuccessRate24h(v: Record<string, unknown>): ValueRender {
+  const bp = toIntegerValue(v["success_rate_bp"]);
+  if (bp === null) {
+    return {
+      primary: NO_VALUE,
+      secondary: joinParts(["24h 内无请求，成功率无意义", `请求 ${formatCount(v["request_count"])} 次`]),
+      unavailable: true,
+    };
+  }
+  return {
+    primary: formatBasisPointsPercent(bp),
+    secondary: joinParts([
+      `请求 ${formatCount(v["request_count"])} 次`,
+      `成功 ${formatCount(v["success_count"])} 次`,
+    ]),
+  };
+}
+
+/** 「近 7 日调用量」趋势指标（`*.requests.trend_7d`）的兜底文字渲染。
+ *
+ *  这条指标在概览页走的是专门的折线组件（readRequestsTrendDays +
+ *  toTrendSparkSamples），不经过 presentMetric；这里仍然登记一个 RENDERERS
+ *  条目，只是为了防御：如果它将来出现在某个通用指标表格里，好歹显示一句
+ *  「7 天里有几天缺数据」，而不是 renderUnknown 那句「值形状未知：days」——
+ *  那句话对认识这个指标的人没有意义，还会让人怀疑是不是解析坏了。 */
+function renderRequestsTrend7d(value: Record<string, unknown>): ValueRender {
+  const days = readRequestsTrendDays(value);
+  if (days.length === 0) {
+    return { primary: NO_VALUE, secondary: "值形状未知：days", unavailable: true };
+  }
+  const missingCount = days.filter((d) => d.missing).length;
+  const total = days.reduce((sum, d) => (d.missing ? sum : sum + (d.requestCount ?? 0n)), 0n);
+  return {
+    primary: `${formatCount(total)} 次`,
+    secondary: joinParts([
+      `近 ${days.length} 天合计`,
+      missingCount > 0 ? `${missingCount} 天缺数据` : undefined,
+    ]),
+  };
+}
+
 const RENDERERS: Record<string, Renderer> = {
   "sub2api.users.total": (v) => ({
     primary: formatPrimary(metricPrimaryValue("sub2api.users.total", v), ""),
@@ -386,6 +604,14 @@ const RENDERERS: Record<string, Renderer> = {
       v["model_count"] === undefined ? undefined : `${formatCount(v["model_count"])} 个模型`,
     ]),
   }),
+  // XM-OVERVIEW-UI
+  "sub2api.channels.status": renderSub2ApiChannelStatus,
+  "sub2api.requests.daily": renderRequestsDaily("sub2api.requests.daily"),
+  "newapi.requests.daily": renderRequestsDaily("newapi.requests.daily"),
+  "sub2api.requests.success_rate_24h": renderSuccessRate24h,
+  "newapi.requests.success_rate_24h": renderSuccessRate24h,
+  "sub2api.requests.trend_7d": renderRequestsTrend7d,
+  "newapi.requests.trend_7d": renderRequestsTrend7d,
 };
 
 /** 未登记指标的兜底渲染：认得出金额就按金额显示，认得出整数就按计数显示，
