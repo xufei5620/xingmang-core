@@ -16,8 +16,9 @@
    「删掉」或「标记已解决」等于让平台替人撒谎（宪法 12 条）。
 3. **投递状态与告警状态正交。** 一条 `OPEN` 的告警完全可能还没投递出去，
    而那正是最危险的组合：有人以为「告警会通知我」。两个事实分开存、分开显示。
-4. **凭据只在发请求那一瞬存在。** Telegram Bot Token 经 SecretProvider 解析，
-   绝不进日志、错误串、`notify_error` 或任何 API 响应（宪法 7 条）。
+4. **凭据只在发请求那一瞬存在。** Telegram Bot Token、企业微信群机器人
+   Webhook 地址均经 SecretProvider 解析，绝不进日志、错误串、`notify_error`
+   或任何 API 响应（宪法 7 条）。
 
 ---
 
@@ -172,12 +173,12 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 ## 投递（规格 §9.4）
 
 ```text
-平台告警中心 → Telegram Bot API / 自建 Webhook
+平台告警中心 → Telegram Bot API / 自建 Webhook / 企业微信群机器人
 ```
 
-零新增依赖：Bot API 就是一个 POST JSON 的 HTTP 端点，标准库够用。
-引一个 Telegram SDK 只为发一条消息，换来的是一整棵传递依赖树和一条需要
-跟着升级的供应链（宪法 25 条）。
+零新增依赖：三个渠道都是一个 POST JSON 的 HTTP 端点，标准库够用。
+引一个 SDK 只为发一条消息，换来的是一整棵传递依赖树和一条需要跟着升级的
+供应链（宪法 25 条）。
 
 ### 环境变量
 
@@ -189,6 +190,8 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 | `XM_ALERT_TELEGRAM_CHAT_ID` | 目标会话。不是秘密，但也不进日志 |
 | `XM_ALERT_TELEGRAM_TOKEN` | 上面那个引用在 env Provider 下的落点（明文，**只填在不入库的 `.env` 里**） |
 | `XM_ALERT_WEBHOOK_URL` | 自建端点，**必须 https** |
+| `XM_ALERT_WECOM_WEBHOOK_REF` | 企业微信群机器人 Webhook 地址（含 key）的 CredentialRef，形如 `secret://alerts/wecom-webhook`（XM-ALERT-WECOM）。与上面两个不同：**整个地址就是凭据**，走文件优先的 SecretProvider 链（XM-CRED0），可在后台「设置→凭据」页直接粘贴 |
+| `XM_ALERT_WECOM_WEBHOOK` | 上面那个引用在 env Provider 下的落点（明文，**只填在不入库的 `.env` 里**，仅在还没在后台填过时兜底） |
 | `XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS` | 渠道余额阈值，最小货币单位的整数，默认 `500000` |
 
 ### 配错就拒绝启动，没配则只是警告
@@ -202,10 +205,13 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
   启动时一行日志，之后每一条告警都会静静地不投递，而运维会以为自己配好了。
   等到真出事那天才发现没人被通知——那正是这个模块存在的意义被完全抵消的时刻。
 
-所以：**ref 拼错 / URL 不是 https / 只配了一半 → 进程起不来。**
-三个变量一个都没配 → 告警照常评估落库，每轮打一条
-`alert_notify_skipped` warn（「仅落库未投递」），`notify_status` 停在 `pending`。
-那是真话，不粉饰成「排队中」。
+所以：**ref 拼错 / URL 不是 https / 只配了一半 / 配了企微 ref 却没有对应
+SecretProvider → 进程起不来。**三个渠道的变量全部留空 → 告警照常评估落库，
+每轮打一条 `alert_notify_skipped` warn（「仅落库未投递」），`notify_status`
+停在 `pending`。那是真话，不粉饰成「排队中」。企微渠道的地址是否真的解析
+得出合法凭据要等发送那一刻才知道（同 Telegram 的 Bot Token）——启动时只
+校验引用形状与装配完整性，ref 配了但后台还没粘贴凭据不会让进程起不来，
+会在每条告警的 `notify_error` 上如实显示解析失败。
 
 ### 投递语义
 
@@ -238,6 +244,16 @@ Post "https://api.telegram.org/bot123456:AAH.../sendMessage": dial tcp ...
 Webhook 那边更严：**整个 URL 可能就是凭据**（Slack / 飞书的 incoming webhook
 地址里带 token），所以那边连脱敏都不做——直接不把原始错误往外冒，只报分类
 与状态码。
+
+企业微信群机器人（XM-ALERT-WECOM）与 Webhook 同一个前提——**整个地址就是
+凭据**（鉴权 key 直接嵌在查询参数里）——但走的是 Telegram 那条路线：地址
+经 CredentialRef 解析、由 SecretProvider 在发送那一瞬现场给出，因此
+`WeComNotifier` 手上有确切的敏感字符串，可以像 Telegram 那样显式 `redact`，
+不必像 Webhook 那样完全放弃细节。脱敏对象不止「完整地址整串出现」这一种：
+一个把请求路径回显进错误页的网关只会带出路径 + 查询串，不含 scheme/host，
+这种情况下按整串匹配会漏判，所以查询串本身也单独作为一个敏感片段。
+`TestWeComNotifierNeverLeaksWebhookURL` 覆盖这两种匹配方式，外加「上游返回
+非 0 errcode」「响应不是合法 JSON」「连不上」等路径。
 
 ---
 
@@ -337,7 +353,7 @@ worker 若注入 `RunwayThresholdProvider`，每轮评估只读取一次快照�
 |---|---|
 | `internal/platform/alerts/rules.go` | 规则声明与评估器 |
 | `internal/platform/alerts/reconcile.go` | 评估 → 落库 → 自动恢复 → 投递的编排 |
-| `internal/platform/alerts/notify.go` | Telegram / Webhook / 扇出 |
+| `internal/platform/alerts/notify.go` | Telegram / Webhook / 企业微信 / 扇出 |
 | `internal/platform/alerts/store.go` | 去重 Upsert 与状态转换 |
 | `internal/platform/alerts/actions.go` | 两个 Action 的声明与 Handler |
 | `internal/platform/jobs/alert_evaluate.go` | River 周期任务与渠道装配 |

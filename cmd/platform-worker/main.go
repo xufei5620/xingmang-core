@@ -90,6 +90,14 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "alert_credential_ref_invalid")
 		os.Exit(2)
 	}
+	// 企业微信告警渠道的 Provider（XM-ALERT-WECOM）。与上面 Telegram 那条
+	// 不同：走文件优先链（XM-CRED0），使 Webhook 地址能从「设置→凭据」页
+	// 粘贴——见 alertWeComSecretsFromEnv 的注释。
+	config.AlertWeComSecrets, err = alertWeComSecretsFromEnv(os.Getenv, logger, config.Environment, config.AlertWeComWebhookRef, config.SecretRoot)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "alert_wecom_credential_ref_invalid")
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -173,6 +181,7 @@ func main() {
 		"alert_evaluate_interval", config.AlertEvaluateInterval.String(),
 		"alert_telegram_configured", config.AlertTelegramBotRef != "" && config.AlertTelegramChatID != "",
 		"alert_webhook_configured", config.AlertWebhookURL != "",
+		"alert_wecom_configured", config.AlertWeComWebhookRef != "",
 		"alert_balance_threshold_minor_units", config.AlertBalanceThresholdMinorUnits,
 		// AUD2 is intentionally manual-only until R2-10 and DB-role gates are
 		// merged. Log policy state without emitting endpoint or credential refs.

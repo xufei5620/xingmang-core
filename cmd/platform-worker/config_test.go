@@ -659,3 +659,92 @@ func TestConfigFromEnvRejectsInvalidReqlogMetricsInterval(t *testing.T) {
 		t.Fatal("非法的 XM_REQLOG_METRICS_INTERVAL 应该报错")
 	}
 }
+
+// TestConfigFromEnvReadsAlertWeComWebhookRef：只读进配置、不解析
+// （XM-ALERT-WECOM）——明文由 AlertWeComSecrets 在发送那一瞬才现场给出。
+func TestConfigFromEnvReadsAlertWeComWebhookRef(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                "staging",
+		"XM_ALERT_WECOM_WEBHOOK_REF": " secret://alerts/wecom-webhook ",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AlertWeComWebhookRef != "secret://alerts/wecom-webhook" {
+		t.Fatalf("AlertWeComWebhookRef = %q（应去空白）", cfg.AlertWeComWebhookRef)
+	}
+
+	// 没配也不报错：三个投递渠道都允许全空（告警照常评估落库）。
+	bare := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err = configFromEnv(func(key string) string { return bare[key] })
+	if err != nil {
+		t.Fatalf("没配企微渠道不该让 worker 起不来: %v", err)
+	}
+	if cfg.AlertWeComWebhookRef != "" {
+		t.Fatalf("没配的东西不该被凭空造出来: %q", cfg.AlertWeComWebhookRef)
+	}
+}
+
+// TestAlertWeComSecretsFromEnv 照 TestSub2APISecretsFromEnv 的模式：
+// 文件优先、env 兜底，且文件一出现即压过 env（XM-CRED0）。与 Telegram 现在
+// 还在用的纯 env 装配（alertSecretsFromEnv）不是同一条链路，需要单独覆盖。
+func TestAlertWeComSecretsFromEnv(t *testing.T) {
+	values := map[string]string{alertWeComWebhookEnvVar: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only"}
+	getenv := func(key string) string { return values[key] }
+	root := t.TempDir()
+
+	// 没配 env 引用也有 Provider：引用可以来自登记簿，凭据可以来自后台
+	// 写进 XM_SECRET_ROOT 的文件。
+	provider, err := alertWeComSecretsFromEnv(getenv, nil, "staging", "", root)
+	if err != nil || provider == nil {
+		t.Fatalf("没配引用时应返回只有文件一环的链, got %v %v", provider, err)
+	}
+	fileRef := secrets.MustCredentialRef("secret://alerts/wecom-webhook")
+	if _, err := provider.Resolve(t.Context(), fileRef, "test"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("文件还没写时应 not_found（不回退去读任何变量）, got %v", err)
+	}
+	writeSecretFileAt(t, root, "alerts/wecom-webhook",
+		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-file\n")
+	value, err := provider.Resolve(t.Context(), fileRef, "test")
+	if err != nil || value.Reveal() != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-file" {
+		t.Fatalf("文件出现后无需重建 Provider 即可解析: %q, %v", value.Reveal(), err)
+	}
+
+	// 引用拼错了要在启动时就炸：配置错误，等到真出事那天才发现更贵。
+	if _, err := alertWeComSecretsFromEnv(getenv, nil, "staging", "not-a-ref", root); err == nil {
+		t.Fatal("非法 CredentialRef 必须被拒")
+	}
+	// 根目录不是绝对路径同样启动即拒。
+	if _, err := alertWeComSecretsFromEnv(getenv, nil, "staging", "", "relative/dir"); err == nil {
+		t.Fatal("相对路径的 secret root 必须被拒")
+	}
+
+	ref := secrets.MustCredentialRef("secret://alerts/wecom-webhook")
+	// 尚未写文件的全新 root：应落到 env 登记表。
+	freshRoot := t.TempDir()
+	provider, err = alertWeComSecretsFromEnv(getenv, nil, "staging", "secret://alerts/wecom-webhook", freshRoot)
+	if err != nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if value.Reveal() != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only" {
+		t.Fatal("文件缺失时应落到 env 登记表")
+	}
+	// 同一个引用文件一出现即优先于 env：后台填的凭据压过 .env 里的旧值。
+	writeSecretFileAt(t, freshRoot, "alerts/wecom-webhook",
+		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-2")
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil || value.Reveal() != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-2" {
+		t.Fatalf("文件应优先于 env: %q, %v", value.Reveal(), err)
+	}
+
+	// 登记表之外的引用解析不出来：禁止静默回退到别的数据源（规格 §18.1-5）。
+	other := secrets.MustCredentialRef("secret://alerts/another-webhook")
+	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
+		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}

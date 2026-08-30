@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -359,6 +360,309 @@ func TestWebhookNotifierPostsAlertPayload(t *testing.T) {
 	}
 	if got.FireCount != 4 || got.Environment != "production" {
 		t.Fatalf("投递体字段不对: %+v", got)
+	}
+}
+
+const weComTestRef = "secret://alerts/wecom-webhook"
+
+// weComWebhookProvider 返回一个只认识测试引用的 SecretProvider，解析结果是
+// 给定的 webhook 地址；地址为空模拟「凭据还没在后台填」。
+func weComWebhookProvider(t *testing.T, webhookURL string) secrets.SecretProvider {
+	t.Helper()
+	provider, err := secrets.NewEnvProvider(
+		map[string]string{weComTestRef: "XM_TEST_ALERT_WECOM_WEBHOOK"},
+		secrets.WithLookup(func(name string) (string, bool) {
+			if name == "XM_TEST_ALERT_WECOM_WEBHOOK" && webhookURL != "" {
+				return webhookURL, true
+			}
+			return "", false
+		}),
+	)
+	if err != nil {
+		t.Fatalf("构造 Provider: %v", err)
+	}
+	return provider
+}
+
+// newWeCom 构造指向 httptest 假企微端点的投递器。client 为 nil 时用一个
+// 带超时的默认客户端（解析凭据失败等不需要真实发请求的用例够用）。
+func newWeCom(t *testing.T, webhookURL string, client *http.Client) *WeComNotifier {
+	t.Helper()
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	n, err := NewWeComNotifier(WeComOptions{
+		WebhookRef: secrets.MustCredentialRef(weComTestRef),
+		Secrets:    weComWebhookProvider(t, webhookURL),
+		Client:     client,
+	})
+	if err != nil {
+		t.Fatalf("NewWeComNotifier: %v", err)
+	}
+	return n
+}
+
+// TestWeComNotifierSendsMessage：正常路径——msgtype 固定为 markdown，
+// content 里带齐环境、严重度、规则、指标键与时间。
+func TestWeComNotifierSendsMessage(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"errcode":0,"errmsg":"ok"}`)
+	}))
+	defer srv.Close()
+
+	webhookURL := srv.URL + "/cgi-bin/webhook/send?key=test-only"
+	if err := newWeCom(t, webhookURL, srv.Client()).Notify(context.Background(), testAlert()); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if gotBody["msgtype"] != "markdown" {
+		t.Fatalf("msgtype = %v, want markdown", gotBody["msgtype"])
+	}
+	markdown, _ := gotBody["markdown"].(map[string]any)
+	content, _ := markdown["content"].(string)
+	for _, want := range []string{"CRITICAL", revenueMetric, "production", RuleMetricSyncFailed, "累计 4 次"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("markdown content 缺少 %q:\n%s", want, content)
+		}
+	}
+}
+
+// TestWeComNotifierNeverLeaksWebhookURL 是本渠道最重要的一条测试
+// （宪法 7 条）。与 Telegram 不同的是泄漏对象：那边是 token 长在 URL 路径
+// 里，这边是**整个 Webhook 地址就是凭据**——地址里的 key 查询参数一旦
+// 出现在 notify_error 或日志里，效果等同于泄漏完整凭据。
+func TestWeComNotifierNeverLeaksWebhookURL(t *testing.T) {
+	const secretQuery = "key=leak-canary-0000000000"
+	cases := []struct {
+		name        string
+		handler     http.HandlerFunc
+		closeServer bool
+	}{
+		{
+			name: "errcode 非 0",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"errcode":93000,"errmsg":"invalid webhook url"}`)
+			},
+		},
+		{
+			name: "HTTP 500",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, "internal error")
+			},
+		},
+		{
+			name: "响应不是合法 JSON",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `<html>gateway error</html>`)
+			},
+		},
+		{
+			name: "上游把请求 URL 回显进错误描述",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				// 一个把完整请求 URL（含 key 查询参数）写回错误页的网关，
+				// 足以让「不把 err 往外冒」这条纪律破功——响应体也必须脱敏。
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = io.WriteString(w, `{"errcode":-1,"errmsg":"upstream failed for `+r.URL.RequestURI()+`"}`)
+			},
+		},
+		{
+			name:        "连不上（错误由 net/http 生成，含完整 URL）",
+			closeServer: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := tc.handler
+			if handler == nil {
+				handler = func(http.ResponseWriter, *http.Request) {}
+			}
+			srv := httptest.NewTLSServer(handler)
+			webhookURL := srv.URL + "/cgi-bin/webhook/send?" + secretQuery
+			client := srv.Client()
+			if tc.closeServer {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+
+			err := newWeCom(t, webhookURL, client).Notify(context.Background(), testAlert())
+			if err == nil {
+				t.Fatal("期望投递失败")
+			}
+			if strings.Contains(err.Error(), secretQuery) {
+				t.Fatalf("错误泄漏了 Webhook 地址: %v", err)
+			}
+			if sanitized := SanitizeNotifyError(err); strings.Contains(sanitized, secretQuery) {
+				t.Fatalf("落库文本泄漏了 Webhook 地址: %q", sanitized)
+			}
+		})
+	}
+}
+
+// TestWeComNotifierHandlesTimeout：请求超时是团队要求覆盖的四类响应之一
+// （errcode 0 / 非 0 / 超时 / 非 JSON），且与「连不上」是不同的运行时路径
+// ——这里 TCP 连接能建立，只是上游一直不回包。用一个挂住的 handler +
+// 很短的 context 超时模拟，不真的等 defaultNotifyTimeout 的 10 秒。
+func TestWeComNotifierHandlesTimeout(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-block // 挂住到测试收尾——defer 顺序保证先放行 handler，再关服务器。
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := newWeCom(t, srv.URL+"/cgi-bin/webhook/send?key=test-only", srv.Client()).
+		Notify(ctx, testAlert())
+	if err == nil {
+		t.Fatal("超时应算投递失败")
+	}
+	if !strings.HasPrefix(err.Error(), "wecom:") {
+		t.Fatalf("错误应带 wecom 前缀: %v", err)
+	}
+}
+
+// TestWeComNotifierReportsErrCodeOnFailure：非 0 的 errcode 必须原样出现在
+// 错误里——运维要能不翻代码就知道是企微侧拒收了什么（规格 §9.4 扩展）。
+func TestWeComNotifierReportsErrCodeOnFailure(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"errcode":45009,"errmsg":"content too long"}`)
+	}))
+	defer srv.Close()
+
+	err := newWeCom(t, srv.URL+"/cgi-bin/webhook/send?key=test-only", srv.Client()).
+		Notify(context.Background(), testAlert())
+	if err == nil {
+		t.Fatal("errcode 非 0 应算投递失败")
+	}
+	if !strings.Contains(err.Error(), "45009") {
+		t.Fatalf("错误应带上游 errcode: %v", err)
+	}
+}
+
+// TestWeComNotifierResolvesWebhookPerCall：每次投递现解析凭据，不缓存——
+// 凭据会轮换，握着的字符串不会知道（与 Telegram 同一条纪律）。
+func TestWeComNotifierResolvesWebhookPerCall(t *testing.T) {
+	resolved := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"errcode":0}`)
+	}))
+	defer srv.Close()
+
+	n, err := NewWeComNotifier(WeComOptions{
+		WebhookRef: secrets.MustCredentialRef(weComTestRef),
+		Secrets: countingProvider{
+			inner: weComWebhookProvider(t, srv.URL+"/cgi-bin/webhook/send?key=test-only"),
+			calls: &resolved,
+		},
+		Client: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewWeComNotifier: %v", err)
+	}
+	for range 3 {
+		if err := n.Notify(context.Background(), testAlert()); err != nil {
+			t.Fatalf("Notify: %v", err)
+		}
+	}
+	if resolved != 3 {
+		t.Fatalf("凭据解析次数 = %d, want 3（每次投递现解析）", resolved)
+	}
+}
+
+// TestWeComNotifierRejectsIncompleteConfig：配不全就报错，不返回一个
+// 「什么都不做」的实例——静默不投递的渠道最危险。
+func TestWeComNotifierRejectsIncompleteConfig(t *testing.T) {
+	full := WeComOptions{
+		WebhookRef: secrets.MustCredentialRef(weComTestRef),
+		Secrets:    weComWebhookProvider(t, "https://example.com/webhook?key=test-only"),
+	}
+	cases := map[string]func(o *WeComOptions){
+		"缺 WebhookRef":     func(o *WeComOptions) { o.WebhookRef = secrets.CredentialRef{} },
+		"缺 SecretProvider": func(o *WeComOptions) { o.Secrets = nil },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			opts := full
+			mutate(&opts)
+			if _, err := NewWeComNotifier(opts); err == nil {
+				t.Fatal("配置不全应当场报错")
+			}
+		})
+	}
+}
+
+// TestWeComNotifierFailsWhenSecretMissing：解析不出凭据时报错，且错误里
+// 只有引用（引用不是秘密），没有任何值——覆盖「ref 配了但还没在后台粘贴
+// 凭据」这个预期中的过渡态。
+func TestWeComNotifierFailsWhenSecretMissing(t *testing.T) {
+	err := newWeCom(t, "", nil).Notify(context.Background(), testAlert())
+	if err == nil {
+		t.Fatal("解析不出凭据应报错")
+	}
+	if !strings.Contains(err.Error(), weComTestRef) {
+		t.Fatalf("错误应指名是哪个引用（引用本身不是秘密）: %v", err)
+	}
+}
+
+// TestWeComNotifierRejectsNonHTTPSResolvedURL：解析出的地址不是合法 https
+// URL 时拒绝发送，且错误不回显该地址——地址本身就是凭据。这项校验只能在
+// 发送时做（构造阶段还不知道解析结果是什么），与 WebhookNotifier 在构造时
+// 校验静态配置值不同。
+func TestWeComNotifierRejectsNonHTTPSResolvedURL(t *testing.T) {
+	for _, raw := range []string{
+		"http://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only",
+		"ftp://example.com",
+		"   ",
+		"://broken",
+	} {
+		err := newWeCom(t, raw, nil).Notify(context.Background(), testAlert())
+		if err == nil {
+			t.Fatalf("解析出的地址 %q 应被拒绝", raw)
+		}
+		if strings.TrimSpace(raw) != "" && strings.Contains(err.Error(), strings.TrimSpace(raw)) {
+			t.Fatalf("错误不该回显解析出的地址: %v", err)
+		}
+	}
+}
+
+// TestFormatWeComMarkdownTruncatesTo4096Bytes：企微群机器人 markdown 消息
+// content 的官方上限是**字节**，UTF-8 下中文截断更容易越界，必须按字节量。
+func TestFormatWeComMarkdownTruncatesTo4096Bytes(t *testing.T) {
+	a := testAlert()
+	a.Detail = strings.Repeat("详情文本很长很长很长。", 1000)
+	content := FormatWeComMarkdown(a)
+	if n := len(content); n > weComMaxContentBytes {
+		t.Fatalf("content 字节数 = %d，超过企微上限 %d", n, weComMaxContentBytes)
+	}
+	if !strings.Contains(content, "已截断") {
+		t.Fatalf("超限应如实标注截断（宪法 12 条）: %q", content[:80])
+	}
+	if !utf8.ValidString(content) {
+		t.Fatal("截断结果必须是合法 UTF-8（不能切断多字节字符）")
+	}
+}
+
+// TestFormatWeComMarkdownIncludesAllRequiredFields：内容须含环境、严重度、
+// 规则、指标键、详情（当前值落在这里）与两个时间戳。
+func TestFormatWeComMarkdownIncludesAllRequiredFields(t *testing.T) {
+	content := FormatWeComMarkdown(testAlert())
+	for _, want := range []string{
+		"CRITICAL", "production", RuleMetricSyncFailed, revenueMetric,
+		"2026-08-27T05:00:00Z", "2026-08-27T05:03:00Z", "累计 4 次",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("content 缺少 %q:\n%s", want, content)
+		}
+	}
+	if !strings.HasPrefix(content, "> ") {
+		t.Fatalf("每行应以引用块 `> ` 开头: %q", content)
 	}
 }
 

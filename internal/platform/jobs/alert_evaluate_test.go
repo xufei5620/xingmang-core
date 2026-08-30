@@ -29,6 +29,23 @@ func alertTestSecrets(t *testing.T) secrets.SecretProvider {
 	return p
 }
 
+// alertWeComTestSecrets 是企微渠道专用的 SecretProvider——与 alertTestSecrets
+// 是两个独立实例，照 AlertNotifierConfig 里 Secrets / WeComSecrets 分开装配
+// 的设计（cmd/platform-worker 里两者分别走 env-only 与文件优先链）。
+func alertWeComTestSecrets(t *testing.T) secrets.SecretProvider {
+	t.Helper()
+	p, err := secrets.NewEnvProvider(
+		map[string]string{"secret://alerts/wecom-webhook": "XM_TEST_WECOM_WEBHOOK"},
+		secrets.WithLookup(func(string) (string, bool) {
+			return "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only", true
+		}),
+	)
+	if err != nil {
+		t.Fatalf("构造 Provider: %v", err)
+	}
+	return p
+}
+
 // TestNewAlertNotifierFailsClosedOnMisconfiguration 是本文件的重点。
 //
 // 与 XM-0022 的 sub2api 配置刻意相反：那条链路配错时每轮都会往看板写一条
@@ -60,6 +77,13 @@ func TestNewAlertNotifierFailsClosedOnMisconfiguration(t *testing.T) {
 		"Webhook 地址不合法": {
 			WebhookURL: "://broken",
 		},
+		"企微 Webhook 引用拼错": {
+			WeComWebhookRef: "not-a-credential-ref",
+			WeComSecrets:    alertWeComTestSecrets(t),
+		},
+		"配了企微 ref 却没有 SecretProvider": {
+			WeComWebhookRef: "secret://alerts/wecom-webhook",
+		},
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -90,21 +114,44 @@ func TestNewAlertNotifierWithNothingConfiguredIsAllowed(t *testing.T) {
 // TestNewAlertNotifierBuildsConfiguredChannels：配齐了就真的建出来。
 func TestNewAlertNotifierBuildsConfiguredChannels(t *testing.T) {
 	n, err := newAlertNotifier(AlertNotifierConfig{
-		TelegramBotRef: "secret://alerts/telegram-bot",
-		TelegramChatID: "-1001234567890",
-		WebhookURL:     "https://ops.example.com/hooks/alerts",
-		Secrets:        alertTestSecrets(t),
-		Logger:         alertTestLogger(),
+		TelegramBotRef:  "secret://alerts/telegram-bot",
+		TelegramChatID:  "-1001234567890",
+		WebhookURL:      "https://ops.example.com/hooks/alerts",
+		Secrets:         alertTestSecrets(t),
+		WeComWebhookRef: "secret://alerts/wecom-webhook",
+		WeComSecrets:    alertWeComTestSecrets(t),
+		Logger:          alertTestLogger(),
 	})
 	if err != nil {
 		t.Fatalf("newAlertNotifier: %v", err)
 	}
-	if n.Len() != 2 {
-		t.Fatalf("渠道数 = %d, want 2", n.Len())
+	if n.Len() != 3 {
+		t.Fatalf("渠道数 = %d, want 3", n.Len())
 	}
 	names := strings.Join(n.Names(), ",")
-	if !strings.Contains(names, "telegram") || !strings.Contains(names, "webhook") {
-		t.Fatalf("渠道名 = %q", names)
+	for _, want := range []string{"telegram", "webhook", "wecom"} {
+		if !strings.Contains(names, want) {
+			t.Fatalf("渠道名 = %q，缺 %q", names, want)
+		}
+	}
+}
+
+// TestNewAlertNotifierBuildsWeComChannelAlone：企微渠道可以独立于
+// Telegram/Webhook 单独配置——三个渠道互不依赖。
+func TestNewAlertNotifierBuildsWeComChannelAlone(t *testing.T) {
+	n, err := newAlertNotifier(AlertNotifierConfig{
+		WeComWebhookRef: "secret://alerts/wecom-webhook",
+		WeComSecrets:    alertWeComTestSecrets(t),
+		Logger:          alertTestLogger(),
+	})
+	if err != nil {
+		t.Fatalf("newAlertNotifier: %v", err)
+	}
+	if n.Len() != 1 {
+		t.Fatalf("渠道数 = %d, want 1", n.Len())
+	}
+	if names := strings.Join(n.Names(), ","); names != "wecom" {
+		t.Fatalf("渠道名 = %q, want wecom", names)
 	}
 }
 

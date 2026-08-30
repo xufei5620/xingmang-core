@@ -254,7 +254,7 @@ func (r *Reconciler) logNotifySkipped(ctx context.Context, environment string, c
 		slog.String("environment", environment),
 		slog.Int("pending", count),
 		slog.String("error_code", "no_notifier_configured"),
-		slog.String("hint", "仅落库未投递：未配置 XM_ALERT_TELEGRAM_BOT_REF / XM_ALERT_WEBHOOK_URL"),
+		slog.String("hint", "仅落库未投递：未配置 XM_ALERT_TELEGRAM_BOT_REF / XM_ALERT_WEBHOOK_URL / XM_ALERT_WECOM_WEBHOOK_REF"),
 	)
 }
 
