@@ -9,10 +9,8 @@ READY（详情见下方 not_run / risks——部分校对项本次未接触真�
 
 - branch: `ai/claude/XM-REQLOG-MERGE`
 - base: `c00c853`（`release/v0.1-launch` 当前 tip）
+- implementation commit: `b766697`
 - worktree: `K:/星芒统一控制平台/acceptance/wt-reqlog-merge`
-- 本片尚未创建 commit——见文末「提交」一节，验收线合入前需要先跑一次
-  `git add` + `git commit`（本 Handoff 写作时门禁已跑完，提交只是把已验证的
-  工作区状态落成一次提交，不改变任何已验证过的内容）。
 
 ## scope
 
