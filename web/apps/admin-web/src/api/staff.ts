@@ -194,6 +194,7 @@ export const STAFF_ROLE_CATALOG: readonly { value: string; label: string }[] = [
   { value: "auditor", label: "审计" },
   { value: "credential-admin", label: "凭据管理员" },
   { value: "key-metadata-reader", label: "Key 元数据只读" },
+  { value: "request-content-reader", label: "请求正文查看" },
 ];
 
 const ROLE_LABELS: ReadonlyMap<string, string> = new Map(

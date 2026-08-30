@@ -153,6 +153,11 @@ func DefaultRoleScopeMap() map[string][]string {
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
 		"key-metadata-reader": {"platform.user_keys.read"},
+		// XM-0039 / 2026-08-28 裁定：用户与模型的完整对话正文由专门角色显式授予
+		// （客诉 / 风控岗），admin 刻意不带。生产上线后请求详情已接真实数据
+		// （XM-REQLOG-MERGE），运营负责人要看正文就给自己加这个角色——授予动作
+		// 本身走 staff.account.set_roles 进审计链，而不是把 scope 悄悄塞进 admin。
+		"request-content-reader": {"request.content.read"},
 		// XM-CRED0：粘贴 / 轮换 / 吊销上游凭据与把连接器切到真实上游，由专门角色
 		// 授予。**不进 staff/admin**：credential.manage 会把明文写进 SecretProvider
 		// 目录，connector.manage 决定 worker 下一轮连哪台上游——两者都不是
