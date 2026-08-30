@@ -57,4 +57,3 @@ export function credentialFieldLabel(field: CredentialFormField): string {
 export function validateRevokeReason(reason: string): string | undefined {
   return reason.trim() ? undefined : "请填写吊销原因，便于审计回溯";
 }
-

@@ -145,4 +145,3 @@ export function fingerprintPrefix(value: string): string {
   }
   return fingerprint.length <= 8 ? fingerprint : `${fingerprint.slice(0, 8)}…`;
 }
-
