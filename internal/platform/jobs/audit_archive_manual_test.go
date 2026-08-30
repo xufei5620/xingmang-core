@@ -93,6 +93,16 @@ func TestAuditArchiveConfigRejectsScheduledModeBeforeGates(t *testing.T) {
 	}
 }
 
+func TestWorkerConfigValidationRejectsArchiveSchedulerAttempt(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Environment = "staging"
+	cfg.AuditArchive.Mode = AuditArchiveModeScheduled
+	cfg.AuditArchive.Enabled = true
+	if err := cfg.normalized().validate(); !errors.Is(err, ErrAuditArchiveSchedulerGated) {
+		t.Fatalf("worker config scheduler error = %v, want gate", err)
+	}
+}
+
 func TestAuditArchiveConfigRequiresExplicitManualPolicy(t *testing.T) {
 	cfg := validManualArchiveConfig()
 	cfg.Enabled = false

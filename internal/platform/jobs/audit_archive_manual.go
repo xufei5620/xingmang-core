@@ -47,10 +47,10 @@ const (
 	AuditArchiveQualificationCredentialRefEnv = "XM_AUDIT_ARCHIVE_QUALIFICATION_CREDENTIAL_REF"
 	AuditArchiveSecuritySinkCredentialRefEnv  = "XM_AUDIT_ARCHIVE_SECURITY_SINK_CREDENTIAL_REF"
 
-	DefaultAuditArchiveRegion       = "local"
-	DefaultAuditArchiveProvider     = "minio"
-	DefaultAuditArchiveEncryption   = "SSE-S3"
-	DefaultAuditArchiveObjectLock   = "COMPLIANCE"
+	DefaultAuditArchiveRegion        = "local"
+	DefaultAuditArchiveProvider      = "minio"
+	DefaultAuditArchiveEncryption    = "SSE-S3"
+	DefaultAuditArchiveObjectLock    = "COMPLIANCE"
 	DefaultAuditArchiveRetentionDays = 3650
 	// Deprecated singular alias kept for callers that mirror the old plan prose.
 	DefaultAuditArchiveRetentionDay = DefaultAuditArchiveRetentionDays
