@@ -149,6 +149,25 @@ func TestCatalogQueriesAreSelectOnlyAndPinned(t *testing.T) {
 	}
 }
 
+func TestRoutineCatalogQueryNormalizesEmptyACLPrivilegeRows(t *testing.T) {
+	for name, query := range map[string]string{
+		"relation": catalogRelationsSQL,
+		"routine":  catalogRoutinesSQL,
+		"type":     catalogTypesSQL,
+	} {
+		lower := strings.ToLower(query)
+		if !strings.Contains(lower, "coalesce(ax.privilege_type, '')") {
+			t.Fatalf("%s catalog query must normalize NULL privilege_type from an empty ACL: %s", name, query)
+		}
+	}
+}
+
+func TestRelationCatalogQueryIncludesAuditSchema(t *testing.T) {
+	if !strings.Contains(strings.ToLower(catalogRelationsSQL), "n.nspname in ('public','core','action','audit'") {
+		t.Fatalf("relation catalog query must include audit objects in its allowlisted schema set: %s", catalogRelationsSQL)
+	}
+}
+
 func TestDefaultACLProjectionExpandsPG18TypeFamilyAndEmptyRows(t *testing.T) {
 	aclMap := map[string]*CatalogDefaultACL{}
 	// A LEFT JOIN over an empty ACL emits one row with an empty privilege;
