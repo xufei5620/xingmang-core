@@ -553,7 +553,7 @@ func fakeSecretProvider(t *testing.T, logger *slog.Logger) secrets.SecretProvide
 	return secrets.NewAudited(provider, secrets.NewSlogRecorder(logger), "test")
 }
 
-func (u *fakeUpstream) newClient(t *testing.T, extra ...newapi.Option) newapi.ReadClient {
+func (u *fakeUpstream) newClient(t *testing.T, extra ...newapi.Option) newapi.PaymentsReadClient {
 	t.Helper()
 	opts := append([]newapi.Option{
 		// 只换「怎么连」：让客户端信任 httptest 的自签证书。

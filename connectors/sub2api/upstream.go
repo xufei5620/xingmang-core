@@ -80,6 +80,15 @@ const (
 	// `Account`（上游供应商账号）。契约里的 ChannelBalance 对应的是后者。
 	routeAccounts = "/api/v1/admin/accounts"
 
+	// routePaymentOrders 是逐笔订单的来源（XM-PAY0，规格 §8.3 收入订单摘要的
+	// 明细展开）。
+	//
+	// ⚠️ 它**没有任何日期过滤参数**（只有 status/order_type/payment_type/
+	// keyword/user_id），排序固定 created_at DESC——与 routePaymentDashboard
+	// 完全不同：那条按 days-back 取，这条只能翻页自己按 created_at 判断窗口，
+	// 见 fetchOrders。
+	routePaymentOrders = "/api/v1/admin/payment/orders"
+
 	// authHeader 是上游为**程序化访问**准备的专用头，值形如 "admin-"+64 位十六进制。
 	//
 	// 不用 Authorization: Bearer <JWT>：那条路走的是登录令牌，会过期，
@@ -122,6 +131,16 @@ const (
 	// 所以查一个很旧的业务日等于让它把中间所有天都算一遍。
 	// 超过上限归 not_supported：这是上游的能力边界，不是一次失败的读取。
 	maxPaymentLookbackDays = 90
+
+	// paymentOrderPageSize 是拉逐笔订单的页大小（上游硬上限 1000，见
+	// response.ParsePagination；这里不取上限，避免单次响应过大拖慢单次请求）。
+	paymentOrderPageSize = 200
+	// maxPaymentOrderPages 给逐笔订单翻页一个硬上限（200×20=4000 笔/次查询）。
+	//
+	// 到顶还没翻出窗口起点就**标记为部分数据**：少报一部分订单是可以被看见的，
+	// 把一次交互式查询拖成几十次上游请求不是——这条端点在 HTTP 请求超时预算
+	// （router.go 的 30 秒）内被调用，不是后台 worker 的独立协程。
+	maxPaymentOrderPages = 20
 )
 
 // currencyScale 返回币种的最小单位小数位。
@@ -874,4 +893,312 @@ func accountRemaining(limit, used, dailyLimit, dailyUsed, weeklyLimit, weeklyUse
 		return limitMinor - usedMinor, true, nil
 	}
 	return 0, false, nil
+}
+
+// ---------------------------------------------------------------------------
+// 逐笔订单与按日资金汇总（XM-PAY0）
+// ---------------------------------------------------------------------------
+
+// adminPaymentOrderItem 是 /api/v1/admin/payment/orders 列表元素里本包用得到
+// 的字段（K:/sub2api-src backend/internal/handler/admin/payment_handler.go
+// 的 AdminPaymentOrderResult，只读核对，未修改上游）。
+//
+// 不解 user_name/payment_trade_no：user_name 是姓名，展示用只需要打码邮箱；
+// payment_trade_no 是网关自己的对账号，本片的 UpstreamOrderRef 用
+// out_trade_no（上游自己生成、后台可查的业务单号），见 payments.go 的
+// Order.UpstreamOrderRef 注释。
+type adminPaymentOrderItem struct {
+	ID           rawAmount `json:"id"`
+	UserID       rawAmount `json:"user_id"`
+	UserEmail    string    `json:"user_email"`
+	Amount       rawAmount `json:"amount"`
+	PayAmount    rawAmount `json:"pay_amount"`
+	Currency     string    `json:"currency"`
+	OutTradeNo   string    `json:"out_trade_no"`
+	PaymentType  string    `json:"payment_type"`
+	Status       string    `json:"status"`
+	RefundAmount rawAmount `json:"refund_amount"`
+	CreatedAt    string    `json:"created_at"`
+}
+
+// orderRow 是 fetchOrders 的内部产出：公开的 Order 字段之外，多带
+// RefundAmountMinorUnits 与 FeeMinorUnits——公开的 Order 类型故意不含这两个
+// 字段（见 payments.go 的 DailyPaymentSummary 注释：逐笔明细不展开退款金额，
+// 只在按日汇总里用到），但 DailyPaymentSummary 的"refunded"桶与手续费合计
+// 需要它们，所以内部多带一份，不为了传两个数就去解两遍上游响应。
+type orderRow struct {
+	Order
+	RefundAmountMinorUnits int64
+	FeeMinorUnits          int64
+}
+
+// fetchOrders 翻页读取 [from, to] 闭区间（按 created_at）内、可选按 status
+// 过滤的全部订单。
+//
+// 上游按 created_at DESC 排序且**没有日期过滤参数**（见 routePaymentOrders），
+// 所以从第一页往后翻，一旦遇到 created_at < from 的订单就可以停手——不需要
+// 像 newapi 的 fetchRechargeDay 那样留回溯余量：那边的排序键（id）与窗口键
+// （complete_time）是两个不同的字段，可能不同步；这里排序键与窗口键都是
+// created_at，天然同步。
+//
+// status 非空时把它交给上游做服务端过滤（该端点原生支持 status 参数），
+// 而不是拉全量自己筛——按状态查是本端点最常见的用法，服务端过滤能把翻页量
+// 降到最低。
+func (c *client) fetchOrders(
+	ctx context.Context, op string, from, to time.Time, status string,
+) ([]orderRow, respMeta, bool, error) {
+	var (
+		rows      []orderRow
+		lastMeta  respMeta
+		fetched   int64
+		reported  int64
+		truncated bool
+	)
+
+	query := url.Values{"page_size": {strconv.Itoa(paymentOrderPageSize)}}
+	if status != "" {
+		query.Set("status", status)
+	}
+
+	for page := 1; page <= maxPaymentOrderPages; page++ {
+		pageQuery := url.Values{}
+		for k, v := range query {
+			pageQuery[k] = v
+		}
+		pageQuery.Set("page", strconv.Itoa(page))
+
+		var env upstreamEnvelope
+		meta, err := c.get(ctx, op, routePaymentOrders, pageQuery, &env)
+		if err != nil {
+			return nil, meta, false, err
+		}
+		lastMeta = meta
+
+		var payload upstreamPage[adminPaymentOrderItem]
+		if err := env.decode(op, &payload); err != nil {
+			return nil, meta, false, err
+		}
+		if page == 1 {
+			t, err := payload.Total.count()
+			if err != nil {
+				return nil, meta, false, connector.NewError(connector.KindBadResponse, op, err)
+			}
+			reported = t
+		}
+
+		reachedFloor := false
+		for _, item := range payload.Items {
+			createdAt := parseUpstreamTime(item.CreatedAt)
+			if !createdAt.IsZero() && createdAt.Before(from) {
+				// 按 created_at DESC 排序，走到这里说明后面只会更早。
+				reachedFloor = true
+				continue
+			}
+			if !createdAt.IsZero() && createdAt.After(to) {
+				// 窗口终点之后的订单（例如 to 早于"现在"时，第一页可能
+				// 全部落在窗口之后）：跳过但继续翻页，直到进入窗口或触底。
+				continue
+			}
+
+			row, err := decodeOrderRow(item, createdAt, c.scale)
+			if err != nil {
+				return nil, meta, false, connector.NewError(connector.KindBadResponse, op, err)
+			}
+			rows = append(rows, row)
+		}
+
+		fetched += int64(len(payload.Items))
+		if reachedFloor || len(payload.Items) == 0 || (reported > 0 && fetched >= reported) {
+			break
+		}
+		if page == maxPaymentOrderPages {
+			truncated = true
+		}
+	}
+	return rows, lastMeta, truncated, nil
+}
+
+// decodeOrderRow 把上游的原始订单 JSON 换算成 orderRow：金额一律走
+// rawAmount.minorUnits，全程不经过 float（宪法 13 条）。
+func decodeOrderRow(item adminPaymentOrderItem, createdAt time.Time, scale int) (orderRow, error) {
+	id, err := item.ID.count()
+	if err != nil {
+		return orderRow{}, err
+	}
+	userID, err := item.UserID.count()
+	if err != nil {
+		return orderRow{}, err
+	}
+	amount, err := item.Amount.minorUnits(scale)
+	if err != nil {
+		return orderRow{}, err
+	}
+	payAmount, err := item.PayAmount.minorUnits(scale)
+	if err != nil {
+		return orderRow{}, err
+	}
+	refundAmount, err := item.RefundAmount.minorUnits(scale)
+	if err != nil {
+		return orderRow{}, err
+	}
+
+	currency := strings.ToUpper(strings.TrimSpace(item.Currency))
+	fee := payAmount - amount
+	if fee < 0 {
+		// pay_amount 理论上恒 >= amount（手续费不会是负的）。上游若出现
+		// 反常数据，宁可把手续费钉在 0 也不要报出一个负手续费——负数会让
+		// FeeMinorUnits 的求和悄悄把别的订单的手续费抵消掉。
+		fee = 0
+	}
+
+	return orderRow{
+		Order: Order{
+			OrderID:          strconv.FormatInt(id, 10),
+			CreatedAt:        createdAt,
+			Status:           strings.ToUpper(strings.TrimSpace(item.Status)),
+			AmountMinorUnits: amount,
+			Currency:         currency,
+			Method:           strings.TrimSpace(item.PaymentType),
+			UserRef:          maskUserRef(item.UserEmail, userID),
+			UpstreamOrderRef: strings.TrimSpace(item.OutTradeNo),
+		},
+		RefundAmountMinorUnits: refundAmount,
+		FeeMinorUnits:          fee,
+	}, nil
+}
+
+// fetchOrderPage 读取 filter 窗口内的全部订单及其按原始状态的统计。
+// filter 已由调用方（client.go 的 ListOrders）校验过。
+func (c *client) fetchOrderPage(ctx context.Context, op string, filter OrderFilter) (OrderPage, error) {
+	status := strings.ToUpper(strings.TrimSpace(filter.Status))
+	rows, meta, truncated, err := c.fetchOrders(ctx, op, filter.From, filter.To, status)
+	if err != nil {
+		return OrderPage{}, err
+	}
+
+	items := make([]Order, 0, len(rows))
+	stats := make(map[string]OrderStats)
+	currencyGap := false
+	for _, row := range rows {
+		items = append(items, row.Order)
+		s := stats[row.Status]
+		s.Count++
+		if row.Currency == c.currency {
+			s.AmountMinorUnits += row.AmountMinorUnits
+		} else {
+			currencyGap = true
+		}
+		stats[row.Status] = s
+	}
+
+	observedAt := meta.observedAt(time.Time{})
+	return OrderPage{
+		Snapshot: Snapshot{
+			ObservedAt: observedAt,
+			Watermark:  orderWindowWatermark(filter.From, filter.To, observedAt, truncated, currencyGap),
+			IsPartial:  truncated || currencyGap,
+		},
+		Items:         items,
+		StatsByStatus: stats,
+	}, nil
+}
+
+// orderWindowWatermark 把窗口边界与"为什么可能不完整"一起编码进水位。
+//
+// 只给 IsPartial 布尔值，运维看到"部分数据"却不知道是翻页到顶还是撞见了
+// 非合约币种——两种情况的处置完全不同（前者可能要放宽 maxPaymentOrderPages，
+// 后者要去核对 WithCurrency 的假设）。做法与既有 rechargeWatermark/
+// paymentDay 的水位纪律一致：恒定信息（窗口边界）总在，只在真的发生时才
+// 出现的信号（缺口原因）才出现——见 upstream.go 顶部 fetchPaymentDay 的
+// rechargeWatermark 同款注释。
+func orderWindowWatermark(from, to, observedAt time.Time, truncated, currencyGap bool) string {
+	mark := fmt.Sprintf("window:%s..%s@%d", from.Format(time.RFC3339), to.Format(time.RFC3339), observedAt.Unix())
+	if currencyGap {
+		mark += "/currency_gap"
+	}
+	if truncated {
+		mark += "/truncated"
+	}
+	return mark
+}
+
+// fetchDailyPaymentSummary 读取某业务日按归一化状态分桶的资金汇总。
+// parsed 已由调用方（client.go 的 DailyPaymentSummary）按业务日时区解析过。
+func (c *client) fetchDailyPaymentSummary(ctx context.Context, op string, parsed time.Time) (DailyPaymentSummary, error) {
+	from := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, c.businessDay)
+	to := from.AddDate(0, 0, 1).Add(-time.Nanosecond)
+
+	rows, meta, truncated, err := c.fetchOrders(ctx, op, from, to, "")
+	if err != nil {
+		return DailyPaymentSummary{}, err
+	}
+
+	byStatus := make(map[string]StatusAmount)
+	// currencyGap 与 unknownStatus 分开计：两者都会把 IsPartial 置真，但
+	// 运维要判断"这天的数字能不能用"，得先知道是哪一种——前者意味着某些
+	// 订单的金额被排除在合约币种之外（笔数仍计入），后者意味着上游给了
+	// KnownOrderStatuses 之外的新状态、这一批订单**连桶都进不了**（笔数也不计）。
+	// 混成一个标志位（早期版本的写法）会让水位说不清到底缺了什么。
+	currencyGap := false
+	unknownStatus := false
+	var feeTotal int64
+	for _, row := range rows {
+		bucket, ok := paymentStatusBucket(row.Status)
+		if !ok {
+			// 上游出现了 KnownOrderStatuses 之外的新状态：不猜它属于哪个桶，
+			// 整体标记为部分数据，让人去核实（见 payments.go 的"不猜字段"约束）。
+			unknownStatus = true
+			continue
+		}
+		amount := row.AmountMinorUnits
+		if bucket == PaymentStatusRefunded {
+			// 退款桶统计的是**实际退还金额**，不是原订单面值——两者对
+			// PARTIALLY_REFUNDED 从定义上就不同，见 payments.go 顶部的
+			// DailyPaymentSummary 注释。
+			amount = row.RefundAmountMinorUnits
+		}
+		s := byStatus[bucket]
+		s.Count++
+		if row.Currency == c.currency {
+			s.AmountMinorUnits += amount
+			if bucket == PaymentStatusSucceeded || bucket == PaymentStatusRefunded {
+				feeTotal += row.FeeMinorUnits
+			}
+		} else {
+			currencyGap = true
+		}
+		byStatus[bucket] = s
+	}
+
+	observedAt := meta.observedAt(time.Time{})
+	dayText := parsed.Format(sub2apiBusinessDayLayout)
+	fee := feeTotal
+	return DailyPaymentSummary{
+		Snapshot: Snapshot{
+			ObservedAt: observedAt,
+			Watermark:  dailyPaymentWatermark(dayText, observedAt, truncated, currencyGap, unknownStatus),
+			IsPartial:  truncated || currencyGap || unknownStatus,
+		},
+		Day:           dayText,
+		Currency:      c.currency,
+		ByStatus:      byStatus,
+		FeeMinorUnits: &fee,
+		NetMinorUnits: nil,
+	}, nil
+}
+
+// dailyPaymentWatermark 把业务日与"为什么可能不完整"一起编码进水位，
+// 理由与 orderWindowWatermark 相同——见该函数的注释。
+func dailyPaymentWatermark(dayText string, observedAt time.Time, truncated, currencyGap, unknownStatus bool) string {
+	mark := fmt.Sprintf("day:%s@%d", dayText, observedAt.Unix())
+	if currencyGap {
+		mark += "/currency_gap"
+	}
+	if unknownStatus {
+		mark += "/unknown_status"
+	}
+	if truncated {
+		mark += "/truncated"
+	}
+	return mark
 }

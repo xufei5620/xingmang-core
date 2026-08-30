@@ -83,6 +83,16 @@ var excludedRollupMetrics = []ExcludedRollupMetric{
 	{MetricKey: "newapi.requests.daily", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
 	{MetricKey: "newapi.requests.success_rate_24h", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
 	{MetricKey: "newapi.requests.trend_7d", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
+	// XM-PAY0: value_json carries a by_status map keyed by a variable set of
+	// normalized buckets (succeeded/pending/failed/refunded, each with its
+	// own count and amount_minor_units) instead of one scalar. The v1 policy
+	// schema only supports a single primary_json_pointer per metric, so this
+	// metric cannot get an active policy until the schema grows a per-bucket
+	// (or repeated-pointer) shape. Raw observations still flow through
+	// /metrics and /metrics/history normally; only downsampled rollups are
+	// gated.
+	{MetricKey: "sub2api.payments.daily", Gate: "ROLLUP-MULTI-BUCKET", Reason: "by_status has multiple money buckets; v1 policy schema supports only one primary_json_pointer per metric"},
+	{MetricKey: "newapi.payments.daily", Gate: "ROLLUP-MULTI-BUCKET", Reason: "by_status has multiple money buckets; v1 policy schema supports only one primary_json_pointer per metric"},
 }
 
 // ExcludedRollupMetricKeys returns the deterministic list of gated keys.

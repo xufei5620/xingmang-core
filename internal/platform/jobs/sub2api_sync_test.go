@@ -118,6 +118,7 @@ var contractMetricKeys = []string{
 	sub2api.MetricChannelBalance,
 	sub2api.MetricChannelsStatus,
 	sub2api.MetricCostDaily,
+	sub2api.MetricPaymentsDaily,
 	sub2api.MetricRevenueDaily,
 	sub2api.MetricUsersBalance,
 	sub2api.MetricUsersTotal,
@@ -286,7 +287,8 @@ func TestSub2APISyncFailureStillWrites(t *testing.T) {
 					t.Fatalf("%s freshness = %q, want failed（首次失败不是未初始化）", key, state)
 				}
 			}
-			for _, want := range []string{`"event":"job_completed"`, `"success":false`, `"metrics_failed":6`, `"error_code":"` + string(kind) + `"`} {
+			for _, want := range []string{`"event":"job_completed"`, `"success":false`,
+				fmt.Sprintf(`"metrics_failed":%d`, len(contractMetricKeys)), `"error_code":"` + string(kind) + `"`} {
 				if !strings.Contains(logs.String(), want) {
 					t.Fatalf("日志缺少 %s: %s", want, logs.String())
 				}
@@ -461,8 +463,14 @@ func TestSub2APISyncFailurePreservesLastSuccess(t *testing.T) {
 }
 
 // partialFailClient 让指定的读取方法失败，其余仍走 Fake。
+//
+// 嵌入 PaymentsReadClient 而不是 ReadClientV2：本类型的用途是"部分读取失败,
+// 其余走真实 Fake 行为",不是"这个客户端不支持 payments.read.v1"——嵌入窄
+// 接口会让 XM-PAY0 的 DailyPaymentSummary 读取在这里意外落进
+// errPaymentsCapabilityUnavailable 分支,把一个本不该失败的指标也算成失败,
+// 污染这个测试真正要验证的"渠道余额挂了不影响收入"这件事。
 type partialFailClient struct {
-	sub2api.ReadClientV2
+	sub2api.PaymentsReadClient
 	statsErr    error
 	ordersErr   error
 	balancesErr error
@@ -472,28 +480,28 @@ func (c partialFailClient) UserStats(ctx context.Context) (sub2api.UserStats, er
 	if c.statsErr != nil {
 		return sub2api.UserStats{}, c.statsErr
 	}
-	return c.ReadClientV2.UserStats(ctx)
+	return c.PaymentsReadClient.UserStats(ctx)
 }
 
 func (c partialFailClient) DailyOrders(ctx context.Context, day string) (sub2api.OrderSummary, error) {
 	if c.ordersErr != nil {
 		return sub2api.OrderSummary{}, c.ordersErr
 	}
-	return c.ReadClientV2.DailyOrders(ctx, day)
+	return c.PaymentsReadClient.DailyOrders(ctx, day)
 }
 
 func (c partialFailClient) ChannelBalances(ctx context.Context) ([]sub2api.ChannelBalance, error) {
 	if c.balancesErr != nil {
 		return nil, c.balancesErr
 	}
-	return c.ReadClientV2.ChannelBalances(ctx)
+	return c.PaymentsReadClient.ChannelBalances(ctx)
 }
 
 func (c partialFailClient) ChannelDirectory(ctx context.Context) (sub2api.ManagedChannelDirectory, error) {
 	if c.balancesErr != nil {
 		return sub2api.ManagedChannelDirectory{}, c.balancesErr
 	}
-	return c.ReadClientV2.ChannelDirectory(ctx)
+	return c.PaymentsReadClient.ChannelDirectory(ctx)
 }
 
 // TestSub2APISyncPartialFailureKeepsGoodMetrics：渠道余额挂了不该把已经
@@ -503,8 +511,8 @@ func TestSub2APISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 	var logs bytes.Buffer
 	factory := func(context.Context) (sub2api.ReadClientV2, error) {
 		return partialFailClient{
-			ReadClientV2: sub2api.NewFake(sub2api.FakeOptions{Now: func() time.Time { return fixedNow }}),
-			balancesErr:  connector.NewError(connector.KindRateLimited, "sub2api.channels.balance_read", nil),
+			PaymentsReadClient: sub2api.NewFake(sub2api.FakeOptions{Now: func() time.Time { return fixedNow }}),
+			balancesErr:        connector.NewError(connector.KindRateLimited, "sub2api.channels.balance_read", nil),
 		}, nil
 	}
 	worker := newTestSyncWorker(store, factory, &logs)
@@ -538,6 +546,9 @@ func TestSub2APISyncMetricMappingIsExhaustive(t *testing.T) {
 	produced = append(produced, sub2api.ToChannelDirectoryObservation(
 		fixedNow, "src", "staging", sub2api.ManagedChannelDirectory{},
 	))
+	produced = append(produced, sub2api.ToPaymentsDailyObservation(
+		fixedNow, "src", "staging", sub2api.DailyPaymentSummary{},
+	))
 	if len(produced) != len(contractMetricKeys) {
 		t.Fatalf("ToObservations 产出 %d 条指标，映射表登记了 %d 条——请同步更新 forMetric",
 			len(produced), len(contractMetricKeys))
@@ -546,6 +557,7 @@ func TestSub2APISyncMetricMappingIsExhaustive(t *testing.T) {
 	statsErr := errors.New("stats")
 	ordersErr := errors.New("orders")
 	balancesErr := errors.New("balances")
+	paymentsErr := errors.New("payments")
 	want := map[string]error{
 		sub2api.MetricUsersTotal:     statsErr,
 		sub2api.MetricUsersBalance:   statsErr,
@@ -553,8 +565,9 @@ func TestSub2APISyncMetricMappingIsExhaustive(t *testing.T) {
 		sub2api.MetricCostDaily:      ordersErr,
 		sub2api.MetricChannelBalance: balancesErr,
 		sub2api.MetricChannelsStatus: balancesErr,
+		sub2api.MetricPaymentsDaily:  paymentsErr,
 	}
-	errs := sub2apiReadErrors{stats: statsErr, orders: ordersErr, balances: balancesErr}
+	errs := sub2apiReadErrors{stats: statsErr, orders: ordersErr, balances: balancesErr, payments: paymentsErr}
 	for _, observation := range produced {
 		expected, ok := want[observation.MetricKey]
 		if !ok {

@@ -40,6 +40,16 @@
       "metric_key": "newapi.requests.trend_7d",
       "gate": "XM-REQLOG-METRICS",
       "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
+    },
+    {
+      "metric_key": "sub2api.payments.daily",
+      "gate": "ROLLUP-MULTI-BUCKET",
+      "reason": "by_status has multiple money buckets; v1 policy schema supports only one primary_json_pointer per metric"
+    },
+    {
+      "metric_key": "newapi.payments.daily",
+      "gate": "ROLLUP-MULTI-BUCKET",
+      "reason": "by_status has multiple money buckets; v1 policy schema supports only one primary_json_pointer per metric"
     }
   ],
   "policies": [

@@ -73,6 +73,10 @@ type Deps struct {
 	Credentials     CredentialQuerier
 	FinanceAccounts UpstreamAccountLister
 	FinanceProfit   ProfitDailyLister
+	// PlatformOrders 为 nil 时"支付与财务"逐笔订单端点不挂载（XM-PAY0）。
+	// 与 PlatformUsers 同一条纪律：端点不存在（404）比端点存在却一调就 500
+	// 诚实。写路径（无——本片只读）不在这里。
+	PlatformOrders PlatformOrdersQuerier
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -241,6 +245,17 @@ func NewRouter(d Deps) http.Handler {
 				}
 				api.With(RequireScope(platformusers.ScopeRead)).
 					Get("/platforms/{platform}/users", ListPlatformUsersHandler(d.PlatformUsers))
+			}
+
+			// 支付与财务：逐笔订单查询（XM-PAY0）。复用 finance.read——这里的
+			// 每一笔订单就是财务台账、渠道摘要那些聚合数字的**来源**，能看
+			// 聚合数的人已经知道量级，逐笔明细的泄漏面与既有 finance.read
+			// 端点相同（见 finance.ScopeRead 在本文件其余用法的同款理由）。
+			//
+			// 没有配支付连接器的部署不挂载这条：前端据此分得清「没接」和「坏了」。
+			if d.PlatformOrders != nil {
+				api.With(RequireScope(finance.ScopeRead)).
+					Get("/platforms/{platform}/orders", ListPlatformOrdersHandler(d.PlatformOrders))
 			}
 
 			// 凭据登记与连接器配置（XM-CRED0）。两个 scope **都不复用 finance.read**：

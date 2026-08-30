@@ -163,7 +163,7 @@ type client struct {
 //
 // 构造期**不做任何 I/O**：凭据在首次读取时才解析，用的是那次请求的 ctx，
 // 取消与超时才管得住它；连接也不预热。因此本函数返回的错误只可能是配置错误。
-func NewClient(cfg connector.Config, sp secrets.SecretProvider, opts ...Option) (ReadClientV2, error) {
+func NewClient(cfg connector.Config, sp secrets.SecretProvider, opts ...Option) (PaymentsReadClient, error) {
 	options := clientOptions{
 		now:               time.Now,
 		supportedVersions: SupportedUpstreamVersions,
@@ -642,4 +642,41 @@ func (c *client) ChannelBalances(ctx context.Context) ([]ChannelBalance, error) 
 
 func (c *client) ChannelDirectory(ctx context.Context) (ManagedChannelDirectory, error) {
 	return c.fetchChannelDirectory(ctx)
+}
+
+// ListOrders 读取 filter 窗口内的全部订单及其按原始状态的统计（XM-PAY0）。
+//
+// 校验在这里做，与 DailyOrders 同一条纪律：非法输入是**调用方**的错，
+// 不该变成一次上游读取；Fake 对同一个非法输入必须给出同一个分类
+// （见 fake.go），换实现不该换错误处理。
+func (c *client) ListOrders(ctx context.Context, filter OrderFilter) (OrderPage, error) {
+	const op = "sub2api.orders.read"
+	if filter.From.IsZero() || filter.To.IsZero() {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, op,
+			errors.New("from/to 必须非零"))
+	}
+	if filter.To.Before(filter.From) {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, op,
+			errors.New("to 不能早于 from"))
+	}
+	if status := strings.ToUpper(strings.TrimSpace(filter.Status)); status != "" && !KnownOrderStatus(status) {
+		return OrderPage{}, connector.NewError(connector.KindBadResponse, op,
+			fmt.Errorf("status %q 不是已知的上游状态", filter.Status))
+	}
+	return c.fetchOrderPage(ctx, op, filter)
+}
+
+// DailyPaymentSummary 读取某业务日按归一化状态分桶的资金汇总（XM-PAY0）。
+func (c *client) DailyPaymentSummary(ctx context.Context, day string) (DailyPaymentSummary, error) {
+	const op = "sub2api.orders.read"
+	trimmed := strings.TrimSpace(day)
+	parsed, err := time.ParseInLocation(sub2apiBusinessDayLayout, trimmed, c.businessDay)
+	if err != nil {
+		return DailyPaymentSummary{}, connector.NewError(connector.KindBadResponse, op, err)
+	}
+	if parsed.Format(sub2apiBusinessDayLayout) != trimmed {
+		return DailyPaymentSummary{}, connector.NewError(connector.KindBadResponse, op,
+			fmt.Errorf("业务日必须严格为 %s", sub2apiBusinessDayLayout))
+	}
+	return c.fetchDailyPaymentSummary(ctx, op, parsed)
 }
