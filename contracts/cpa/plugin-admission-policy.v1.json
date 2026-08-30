@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xingmang.local/contracts/cpa/plugin-admission-policy.v1",
+  "title": "CPA Plugin Admission Policy v1",
+  "description": "Deny-by-default offline admission records. This contract authorizes no download, install, enable, or execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["policy_version", "deny_by_default", "admissions"],
+  "properties": {
+    "policy_version": {"const": 1},
+    "deny_by_default": {"const": true},
+    "admissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plugin_id", "source_id", "repository", "exact_tag", "artifact_name",
+          "artifact_sha256", "artifact_size", "source_commit", "source_archive_sha256",
+          "provenance_type", "provenance_digest", "sbom_digest", "license_spdx",
+          "license_text_sha256", "notice_sha256", "license_approval_ref",
+          "cpa_exact_build_digest", "cpa_version", "goos", "goarch", "variant",
+          "file_extension", "abi_schema_version", "declared_capabilities",
+          "allowed_capabilities", "forbidden_capabilities", "config_schema_sha256",
+          "management_routes_sha256", "resource_routes_sha256", "canary_profile",
+          "rollback_artifact_sha256", "change_ref"
+        ],
+        "properties": {
+          "plugin_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+          "source_id": {"type": "string", "minLength": 1},
+          "repository": {"type": "string", "format": "uri", "pattern": "^https://[^?#]+$"},
+          "author": {"type": "string"},
+          "exact_tag": {"type": "string", "minLength": 1, "pattern": "^(?!latest$|main$|master$|HEAD$)(?!.*(?:^|\\.)[xX](?:\\.|$))[^*^~<>=|,\\s]+$"},
+          "artifact_name": {"type": "string", "minLength": 1},
+          "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "artifact_size": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+          "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40,128}$"},
+          "source_archive_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "provenance_type": {"enum": ["signed", "source_pinned_rebuild"]},
+          "provenance_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "sbom_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "license_spdx": {"type": "string", "minLength": 1},
+          "license_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "notice_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "license_approval_ref": {"type": "string", "minLength": 1},
+          "cpa_exact_build_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "cpa_version": {"type": "string", "minLength": 1},
+          "goos": {"enum": ["linux", "darwin", "windows"]},
+          "goarch": {"enum": ["386", "amd64", "arm", "arm64"]},
+          "variant": {"type": "string", "minLength": 1},
+          "file_extension": {"enum": [".so", ".dylib", ".dll"]},
+          "abi_schema_version": {"type": "integer", "minimum": 1},
+          "declared_capabilities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+          "allowed_capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "forbidden_capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "config_schema_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "management_routes_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "resource_routes_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "canary_profile": {"type": "string", "minLength": 1},
+          "rollback_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "change_ref": {"type": "string", "minLength": 1},
+          "prerelease": {"const": false},
+          "auto_update": {"const": false},
+          "latest": {"const": false},
+          "manual_unverified": {"const": false}
+        }
+      }
+    }
+  }
+}
