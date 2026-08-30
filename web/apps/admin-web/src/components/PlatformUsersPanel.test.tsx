@@ -336,3 +336,49 @@ describe("契约缺口提示条", () => {
     expect(text).toContain("样本数据源");
   });
 });
+
+describe("XM_PLATFORM_USERS_MODE=off（端点未挂载）", () => {
+  /** chi 对没挂载的路由回纯文本 404：json() 会像浏览器解析 HTML/纯文本一样抛出，
+   *  不是 pageBody 那种带 error.code 的 JSON 错误包。 */
+  function stubNotMounted() {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+      } as unknown as Response),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("显示未接入而不是失败态，也不给重试按钮", async () => {
+    stubNotMounted();
+    renderPanel();
+
+    expect(await screen.findByText("未接入")).toBeTruthy();
+    expect(screen.getByText(/XM_PLATFORM_USERS_MODE=off/)).toBeTruthy();
+    expect(screen.queryByText(/失败|错误/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    // 之前的 bug：404 解析不出 code 时会显示「请求失败（HTTP 404）（错误码 UNKNOWN）」
+    expect(screen.queryByText(/UNKNOWN/)).toBeNull();
+  });
+
+  it("不显示样本数据或「样本数据源」提示条——那条 warnbar 说的是「下面有假数据」，未接入场景下没有下面", async () => {
+    stubNotMounted();
+    renderPanel();
+
+    expect(await screen.findByText("未接入")).toBeTruthy();
+    expect(screen.queryByText("张伟")).toBeNull();
+    expect(screen.queryByText(/样本数据源/)).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("NewAPI 平台同样适用（两个平台共用同一个查询函数与判据）", async () => {
+    stubNotMounted();
+    renderPanel("newapi");
+
+    expect(await screen.findByText("未接入")).toBeTruthy();
+    expect(screen.getByText(/XM_PLATFORM_USERS_MODE=off/)).toBeTruthy();
+  });
+});

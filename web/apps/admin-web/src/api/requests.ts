@@ -1,5 +1,10 @@
 import type { FreshnessContract } from "@xingmang/ui-admin";
-import { apiClient, type ApiClient } from "./client";
+import {
+  apiClient,
+  FeatureNotMountedError,
+  looksLikeUnmountedRoute,
+  type ApiClient,
+} from "./client";
 import type { ListOptions } from "./platform";
 
 /** 请求详情（XM-0039）。数据源是生产上已在运行的外挂「请求审计系统」(reqlog)，
@@ -228,27 +233,46 @@ function parseStats(raw: RawRequestStats): RequestRangeStats {
   return { requestCount, successCount, failureCount, averageDurationMs: average };
 }
 
+/** 请求详情「未接入」的说明文案（列表、正文共用同一句话——它们是同一条链路
+ *  的一体两面，理由不该分叉）。
+ *
+ *  `XM_REQLOG_MODE=off` 时后端整组不挂载 `/platforms/{platform}/requests*`
+ *  （cmd/platform-api/reqlog.go newRequestLogService），前端据此分辨
+ *  「没接」与「坏了」，不能显示成加载失败。 */
+const REQUESTS_NOT_MOUNTED_DESCRIPTION =
+  "请求详情在当前环境未启用（XM_REQLOG_MODE=off）。接入真实 reqlog 数据源后会自动出现，无需手动开启。";
+
 /** 列出某平台的请求元数据（需 request.read）。 */
 export async function listPlatformRequests(
   platform: string,
   options: RequestListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<RequestListPage> {
-  const body = await client.get<RawRequestPage>(
-    `/api/v1/platforms/${encodeURIComponent(platform)}/requests`,
-    {
-      searchParams: {
-        limit: String(options.limit ?? REQUEST_PAGE_SIZE),
-        cursor: omitEmpty(options.cursor),
-        username: omitEmpty(options.username),
-        model: omitEmpty(options.model),
-        status: omitEmpty(options.status),
-        since: omitEmpty(options.since),
-        until: omitEmpty(options.until),
+  let body: RawRequestPage;
+  try {
+    body = await client.get<RawRequestPage>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/requests`,
+      {
+        searchParams: {
+          limit: String(options.limit ?? REQUEST_PAGE_SIZE),
+          cursor: omitEmpty(options.cursor),
+          username: omitEmpty(options.username),
+          model: omitEmpty(options.model),
+          status: omitEmpty(options.status),
+          since: omitEmpty(options.since),
+          until: omitEmpty(options.until),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
       },
-      ...(options.signal ? { signal: options.signal } : {}),
-    },
-  );
+    );
+  } catch (error) {
+    // XM_REQLOG_MODE=off 时这条端点整组不挂载：chi 的默认 404 没有可解析的
+    // error.code，用它区分「没接」与「这次请求恰好失败了」
+    if (looksLikeUnmountedRoute(error)) {
+      throw new FeatureNotMountedError(error, REQUESTS_NOT_MOUNTED_DESCRIPTION);
+    }
+    throw error;
+  }
   return {
     items: (body.items ?? []).map(parseRequestSummary),
     stats: parseStats(body.stats),
@@ -272,13 +296,23 @@ export async function getPlatformRequestContent(
   options: ListOptions & { reason?: string } = {},
   client: ApiClient = apiClient,
 ): Promise<RequestContent> {
-  const body = await client.get<RawRequestContent>(
-    `/api/v1/platforms/${encodeURIComponent(platform)}/requests/${encodeURIComponent(requestId)}`,
-    {
-      searchParams: { reason: omitEmpty(options.reason) },
-      ...(options.signal ? { signal: options.signal } : {}),
-    },
-  );
+  let body: RawRequestContent;
+  try {
+    body = await client.get<RawRequestContent>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/requests/${encodeURIComponent(requestId)}`,
+      {
+        searchParams: { reason: omitEmpty(options.reason) },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+  } catch (error) {
+    // 具体请求 id 不存在时后端仍会挂载路由、走 WriteError 回一个带 code 的
+    // 404（见 requests_test.go）；只有整组端点没挂载才会落进这一支
+    if (looksLikeUnmountedRoute(error)) {
+      throw new FeatureNotMountedError(error, REQUESTS_NOT_MOUNTED_DESCRIPTION);
+    }
+    throw error;
+  }
   return {
     summary: parseRequestSummary(body.summary),
     messages: body.messages ?? [],

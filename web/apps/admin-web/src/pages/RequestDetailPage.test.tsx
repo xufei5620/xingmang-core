@@ -179,6 +179,27 @@ describe("请求详情完整页", () => {
     expect(await screen.findByText(/已过保留期/)).toBeTruthy();
   });
 
+  it("端点未挂载（无 error.code 的 404）显示未接入，不是失败态（XM-UX-OFFSTATE）", async () => {
+    // chi 对没挂载的路由回纯文本 404，不是 JSON——与上一条「记录不存在」用例
+    // 的带 code JSON 404 结构不同，两者不能显示成同一种状态
+    fetchMock.mockImplementation(() =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+      } as unknown as Response),
+    );
+    renderPage();
+
+    expect(await screen.findByText("未接入")).toBeTruthy();
+    expect(screen.getByText(/XM_REQLOG_MODE=off/)).toBeTruthy();
+    expect(screen.queryByText(/失败|错误/)).toBeNull();
+    // 之前的 bug：显示「请求失败（HTTP 404）（错误码 UNKNOWN）」
+    expect(screen.queryByText(/UNKNOWN/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    expect(screen.queryByText("你是一位严谨的中文法律助理。")).toBeNull();
+  });
+
   it("没有请求数据的平台连请求都不发，直接说清原因", async () => {
     // 后端会 404，但那个 404 说的是「没有这条记录」，
     // 而真正的原因是「这个平台不在抄录范围内」

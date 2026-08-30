@@ -3,6 +3,8 @@ import {
   ApiError,
   createApiClient,
   devPrincipalHeaders,
+  FeatureNotMountedError,
+  looksLikeUnmountedRoute,
   NETWORK_STATUS,
   type FetchLike,
   type UnauthenticatedReason,
@@ -429,5 +431,59 @@ describe("local 模式（XM-LOGIN）：Cookie 会话 + CSRF 头", () => {
       }),
     );
     expect(err.code).toBe("INVALID_CREDENTIALS");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// XM-UX-OFFSTATE：区分「整组端点没挂载」与「这个具体资源不存在/请求失败」
+// ---------------------------------------------------------------------------
+
+describe("looksLikeUnmountedRoute：未挂载路由的结构判据", () => {
+  it("chi 对未挂载路由回的纯文本 404（JSON 解析失败）判定为真", async () => {
+    // 真实场景：XM_PLATFORM_USERS_MODE=off / XM_REQLOG_MODE=off 时整组端点
+    // 不挂载，chi 的默认 NotFoundHandler 写纯文本，不是 JSON
+    const fetchImpl = mockFetch(nonJsonResponse(404));
+    const err = await expectApiError(createApiClient({ config, fetchImpl }).get("/api/v1/x"));
+    expect(err.code).toBe("UNKNOWN");
+    expect(looksLikeUnmountedRoute(err)).toBe(true);
+  });
+
+  it("JSON 响应体但没有 error.code 时同样判定为真（不是标准错误包）", () => {
+    const err = new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）");
+    expect(looksLikeUnmountedRoute(err)).toBe(true);
+  });
+
+  it("已挂载路由主动写出的带 code 的 404（比如具体用户/请求不存在）判定为假", () => {
+    const err = new ApiError(404, "ACTION_NOT_REGISTERED", "没有这条用户记录", "req-1");
+    expect(looksLikeUnmountedRoute(err)).toBe(false);
+  });
+
+  it("非 404 状态码判定为假，即便响应体同样不是 JSON", async () => {
+    const fetchImpl = mockFetch(nonJsonResponse(502));
+    const err = await expectApiError(createApiClient({ config, fetchImpl }).get("/api/v1/x"));
+    expect(looksLikeUnmountedRoute(err)).toBe(false);
+  });
+
+  it("非 ApiError 输入判定为假", () => {
+    expect(looksLikeUnmountedRoute(new Error("boom"))).toBe(false);
+    expect(looksLikeUnmountedRoute(null)).toBe(false);
+    expect(looksLikeUnmountedRoute(undefined)).toBe(false);
+  });
+});
+
+describe("FeatureNotMountedError：把结构信号翻译成调用方能渲染的类型", () => {
+  it("保留原始 ApiError 的 status/code/message/requestId，并附上人话说明", () => {
+    const cause = new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）", "req-9");
+    const err = new FeatureNotMountedError(cause, "用户管理在当前环境未启用（XM_PLATFORM_USERS_MODE=off）。");
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(404);
+    expect(err.code).toBe("UNKNOWN");
+    expect(err.requestId).toBe("req-9");
+    expect(err.description).toContain("XM_PLATFORM_USERS_MODE=off");
+    // retryable/isAuthFailure 等 getter 沿用 ApiError 的实现，不必重新声明；
+    // 404 既不是网络不通也不是 5xx，重试没有意义
+    expect(err.retryable).toBe(false);
+    expect(err.isAuthFailure).toBe(false);
   });
 });

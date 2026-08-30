@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiError } from "./client";
+import { ApiError, FeatureNotMountedError } from "./client";
 import goldenText from "../../../../../contracts/testdata/platform-user-ref-v1.json?raw";
 import type { ApiClient } from "./client";
 import {
@@ -11,6 +11,7 @@ import {
   lookupPlatformUserExact,
   listPlatformUserDailyUsage,
   listPlatformUserKeys,
+  listPlatformUsers,
   platformHasUsers,
   UNPARSED_CONTACT,
   type PlatformUserItem,
@@ -115,6 +116,59 @@ describe("v2 精确用户详情 Query", () => {
     expect((await getPlatformUser("newapi", "20031", {}, notFound)).kind).toBe("notFound");
     const failed: ApiClient = { get: vi.fn().mockRejectedValue(new ApiError(502, "EXECUTION_FAILED", "用户精确查找未完成，请重试")), post: vi.fn() };
     await expect(getPlatformUser("newapi", "20031", {}, failed)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("XM_PLATFORM_USERS_MODE=off 时的 404（没有 error.code）转成 FeatureNotMountedError，不是 notFound", async () => {
+    // chi 对没挂载的路由回纯文本 404，客户端解析不出 JSON，code 落回 UNKNOWN——
+    // 这与「具体这个用户不存在」的 ACTION_NOT_REGISTERED 404 结构不同
+    // （见上一个用例），不能把两者都判成「没有这个用户」
+    const notMounted: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await getPlatformUser("newapi", "20031", {}, notMounted).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+    expect((error as FeatureNotMountedError).description).toContain("XM_PLATFORM_USERS_MODE=off");
+  });
+});
+
+describe("listPlatformUsers", () => {
+  it("XM_PLATFORM_USERS_MODE=off 时的 404（没有 error.code）转成 FeatureNotMountedError", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformUsers("sub2api", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+    expect((error as FeatureNotMountedError).description).toContain("XM_PLATFORM_USERS_MODE=off");
+  });
+
+  it("其它错误原样抛出，不被误判成未接入", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(403, "PERMISSION_DENIED", "缺少权限 platform.users.read")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformUsers("sub2api", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(FeatureNotMountedError);
+  });
+
+  it("items 为 null 时按空数组处理，页面不会炸", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockResolvedValue({ items: null, next_cursor: "" }),
+      post: vi.fn(),
+    };
+    const page = (await listPlatformUsers("sub2api", {}, client)) as PlatformUserPage;
+    expect(page.items).toEqual([]);
   });
 });
 

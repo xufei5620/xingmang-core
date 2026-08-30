@@ -11,6 +11,7 @@ import {
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { Link, useSearchParams } from "react-router";
+import { FeatureNotMountedError } from "../api/client";
 import {
   describeMaskedEmail,
   describeUserStatus,
@@ -345,20 +346,26 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
       }),
   });
   const page = query.data;
+  // 未挂载时下面渲染的是「未接入」空状态，不是样本表格：这句 warnbar 明说
+  // 「下面的逐用户流水来自样本数据源」，在未接入场景下继续显示等于把「没接」
+  // 说成「接了但是假的」——两者对运营是完全不同的下一步
+  const notMounted = query.error instanceof FeatureNotMountedError;
 
   return (
     <section className="flex flex-col gap-3">
       {/* 原型逐字的那句 warnbar。它说的是**真实上游契约**的边界：
           当前 fake 样本能供出逐用户流水，真实 v1 端点还不能 */}
-      <p
-        role="status"
-        className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg"
-      >
-        当前只读契约 v1 仅提供用户总数与总余额；逐用户今日充值、今日消费和消费明细是目标界面，
-        接真实数据前需扩展 read contract v2。
-        <strong> 下面的逐用户流水来自样本数据源</strong>
-        ，接上真实上游后这几列会退回「—」，直到 v2 契约落地。
-      </p>
+      {notMounted ? null : (
+        <p
+          role="status"
+          className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg"
+        >
+          当前只读契约 v1 仅提供用户总数与总余额；逐用户今日充值、今日消费和消费明细是目标界面，
+          接真实数据前需扩展 read contract v2。
+          <strong> 下面的逐用户流水来自样本数据源</strong>
+          ，接上真实上游后这几列会退回「—」，直到 v2 契约落地。
+        </p>
+      )}
 
       <div className="flex items-start justify-between gap-3">
         <p className="text-xs text-fg-muted">

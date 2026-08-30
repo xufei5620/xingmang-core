@@ -1,6 +1,6 @@
 import { PageState } from "@xingmang/ui-admin";
 import type { ReactElement, ReactNode } from "react";
-import { ApiError } from "../api/client";
+import { ApiError, FeatureNotMountedError } from "../api/client";
 
 export interface ApiStateViewProps {
   isPending: boolean;
@@ -44,6 +44,14 @@ function ApiErrorView({
   onRetry: () => void;
   compact: boolean;
 }): ReactElement {
+  // 整组端点没挂载（连接器/模式=off），不是这一次请求失败了。**不给重试
+  // 按钮**：off 不会因为再点一次就变成 on；也不带错误码/request_id——
+  // 那两样是给「报障」用的，这里没有障要报。kind="unavailable" 的默认标题
+  // 就是「未接入」（ui-admin/PageState），不必再传一遍
+  if (error instanceof FeatureNotMountedError) {
+    return <PageState kind="unavailable" description={error.description} compact={compact} />;
+  }
+
   if (!(error instanceof ApiError)) {
     const message = error instanceof Error ? error.message : "未知错误";
     return <PageState kind="error" message={message} onRetry={onRetry} compact={compact} />;

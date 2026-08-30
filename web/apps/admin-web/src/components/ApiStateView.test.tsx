@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { ApiError } from "../api/client";
+import { ApiError, FeatureNotMountedError } from "../api/client";
 import { ApiStateView } from "./ApiStateView";
 
 const noop = () => {};
@@ -100,5 +100,29 @@ describe("ApiStateView", () => {
       </ApiStateView>,
     );
     expect(screen.getByText("boom")).not.toBeNull();
+  });
+
+  it("FeatureNotMountedError 显示「未接入」而不是失败/错误，且不给重试按钮（XM-UX-OFFSTATE）", () => {
+    const cause = new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）");
+    render(
+      <ApiStateView
+        isPending={false}
+        error={
+          new FeatureNotMountedError(
+            cause,
+            "用户管理在当前环境未启用（XM_PLATFORM_USERS_MODE=off）。接入真实用户数据源后会自动出现，无需手动开启。",
+          )
+        }
+        onRetry={noop}
+      >
+        {CHILD}
+      </ApiStateView>,
+    );
+    expect(screen.getByText("未接入")).not.toBeNull();
+    expect(screen.getByText(/XM_PLATFORM_USERS_MODE=off/)).not.toBeNull();
+    // 不该出现「失败/错误」字样，也不该给一个点了也没用的重试按钮
+    expect(screen.queryByText(/失败|错误/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    expect(screen.queryByText("真实数据")).toBeNull();
   });
 });

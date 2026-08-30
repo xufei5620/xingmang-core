@@ -60,6 +60,41 @@ export class ApiError extends Error {
   }
 }
 
+/** 「这条链路在当前环境未启用」：一整组端点因为对应的连接器/模式=off 没有被
+ *  挂载进路由（router.go 的 `if d.PlatformUsers != nil` / `if d.RequestLogs
+ *  != nil`），不是「这一次请求失败了」。
+ *
+ *  调用方只应在明知某个端点组按环境变量可选挂载时才把 404 包装成这个类型
+ *  ——具体资源 id 的 404（比如某个用户不存在）不会经过这条路径：那条路由
+ *  本来就已经挂载，只是这一个 id 没有记录，与「整组端点都不存在」不是同一件
+ *  事。见 api/users.ts、api/requests.ts 里 `looksLikeUnmountedRoute` 的调用点。
+ *
+ *  `description` 是给人看的完整说明（含哪个环境变量、接入后会怎样），由
+ *  调用方按自己的链路填，这一层不猜。 */
+export class FeatureNotMountedError extends ApiError {
+  readonly description: string;
+
+  constructor(cause: ApiError, description: string) {
+    super(cause.status, cause.code, cause.message, cause.requestId);
+    this.name = "FeatureNotMountedError";
+    this.description = description;
+  }
+}
+
+/** 404 的响应体不是平台标准错误包（解析不出 `error.code`）。
+ *
+ *  chi 对没有挂载的路由返回纯文本 404（`"404 page not found"`），这与业务
+ *  handler 主动写出的 `{error:{code,message}}` 结构不同（见 WriteError，
+ *  internal/platform/httpapi/response.go）——用这层**结构**差异，而不是猜测
+ *  响应文案，去分辨「这条链路根本没挂载」与「这个具体资源不存在」。
+ *
+ *  **只是一个结构信号，不是判定本身**：只有明知按环境变量可选挂载的端点组
+ *  （platformusers、requests）的调用方才该把它读成「未接入」；其它端点的 404
+ *  没有这层歧义，不要在别处套用这条判据。 */
+export function looksLikeUnmountedRoute(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 404 && error.code === UNKNOWN_CODE;
+}
+
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export interface RequestOptions {
