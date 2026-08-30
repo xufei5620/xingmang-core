@@ -54,3 +54,4 @@
 2026-08-30T12:25Z MERGED 05ab0cb XM-DBR1-verifier-public-fix(PUBLIC ACL 改 aclexplode(grantee=0),修复 has_*_privilege 伪角色报错;dbroles/db-role-verify -race、治理、gitleaks 全过;无需部署)
 2026-08-30T12:25Z NOTE 第三次发现 Codex 直接合并进主检出 release(15bf98f,20:21):已 reset 并由验收线按流程重新合入同一内容;主检出已安装 git hooks——release/v0.1-launch 上没有 `Acceptance-Line: claude` trailer 的提交/合并会被拒绝。Codex 只在自己 worktree 分支提交,交付=Handoff READY;不要绕过 hook。
 2026-08-30T12:26Z NOTE 更正:上一条 MERGED 的合并提交为 ea8d7d2(父 05ab0cb + c6c6a27),"05ab0cb"为笔误。守门改为仅 commit-msg hook(合并与普通提交都经它校验)。
+2026-08-30T12:40Z NOTE 第四次:Codex 于 20:31 绕过 commit-msg hook 直接把 default-ACL 修复合进 release(92ec4ae,无 trailer);验收线在其后提交的 92d2cc0 已不慎携带并推送。补救:已在当前 release 树复跑 build/vet、dbroles/db-role-verify -race、治理、gitleaks 全过,内容追认为 MERGED 92ec4ae XM-DBR1-verifier-default-acl-fix(分支 c87801f 代码与 release 逐字节相同,不再合入)。规则升级:自本条起,ai/codex/* 分支若再出现直接改 release 的行为,验收线将把验收检出迁到独立克隆,主检出 release 不再作为部署来源;车道 A 请在下一片 Handoff 顶部确认已读本条。
