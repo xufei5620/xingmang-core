@@ -356,8 +356,8 @@ func validateObjectVersion(value ObjectVersionV1) error {
 		if value.EncryptionMode != "LOCAL-ONLY" || value.KMSKeyID != "" || value.ObjectLockMode != "NONE" {
 			return &FormatError{Code: "archive_format_invalid"}
 		}
-	} else if value.EncryptionMode != "SSE-KMS" || strings.TrimSpace(value.KMSKeyID) == "" ||
-		strings.TrimSpace(value.ObjectLockMode) == "" {
+	} else if (value.EncryptionMode != "SSE-KMS" && value.EncryptionMode != "SSE-S3") ||
+		strings.TrimSpace(value.KMSKeyID) == "" || strings.TrimSpace(value.ObjectLockMode) == "" {
 		return &FormatError{Code: "archive_format_invalid"}
 	}
 	if _, err := ParseWireTime(value.RetainUntil); err != nil {

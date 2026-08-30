@@ -59,3 +59,83 @@ RETURNING *;
 
 -- name: GetLatestChainRoot :one
 SELECT * FROM audit.chain_root ORDER BY to_sequence DESC LIMIT 1;
+
+-- AUD2 archive catalog/journal queries deliberately use fixed columns.  They do not
+-- expose payload bytes, credentials, arbitrary object lists, or latest-object reads.
+
+-- name: InsertArchiveSegment :one
+INSERT INTO audit.archive_segment (
+    id, format_version, from_sequence, to_sequence, row_count,
+    first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+    payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+    projections, manifest_object_key, manifest_version_id, manifest_sha256,
+    manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+    checkpoint_sha256, recovery_generation, committed_at, verified_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+)
+RETURNING id, format_version, from_sequence, to_sequence, row_count,
+          first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+          payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+          projections, manifest_object_key, manifest_version_id, manifest_sha256,
+          manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+          checkpoint_sha256, recovery_generation, committed_at, verified_at;
+
+-- name: GetLatestArchiveSegment :one
+SELECT id, format_version, from_sequence, to_sequence, row_count,
+       first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+       payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+       projections, manifest_object_key, manifest_version_id, manifest_sha256,
+       manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+       checkpoint_sha256, recovery_generation, committed_at, verified_at
+FROM audit.archive_segment
+ORDER BY to_sequence DESC
+LIMIT 1;
+
+-- name: ListArchiveSegmentsBefore :many
+SELECT id, format_version, from_sequence, to_sequence, row_count,
+       first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+       payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+       projections, manifest_object_key, manifest_version_id, manifest_sha256,
+       manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+       checkpoint_sha256, recovery_generation, committed_at, verified_at
+FROM audit.archive_segment
+WHERE to_sequence < $1
+ORDER BY to_sequence DESC
+LIMIT $2;
+
+-- name: InsertArchiveOperationIntent :exec
+INSERT INTO audit.archive_operation_intent (
+    operation_id, approval_envelope_sha256, deterministic_bytes_digest,
+    canonical_intent_bytes, created_at
+) VALUES ($1, $2, $3, $4, $5);
+
+-- name: GetArchiveOperationIntent :one
+SELECT operation_id, approval_envelope_sha256, deterministic_bytes_digest,
+       canonical_intent_bytes, created_at
+FROM audit.archive_operation_intent
+WHERE operation_id = $1;
+
+-- name: InsertArchivePutReceipt :exec
+INSERT INTO audit.archive_put_receipt (
+    operation_id, ordinal, object_version_bytes, object_version_sha256, recorded_at
+) VALUES ($1, $2, $3, $4, $5);
+
+-- name: ListArchivePutReceipts :many
+SELECT operation_id, ordinal, object_version_bytes, object_version_sha256, recorded_at
+FROM audit.archive_put_receipt
+WHERE operation_id = $1
+ORDER BY ordinal;
+
+-- name: InsertArchiveTerminalReceipt :exec
+INSERT INTO audit.archive_terminal_receipt (
+    operation_id, signed_result_bytes, terminal_result_digest,
+    optional_artifact_ref_bytes, recorded_at
+) VALUES ($1, $2, $3, $4, $5);
+
+-- name: GetArchiveTerminalReceipt :one
+SELECT operation_id, signed_result_bytes, terminal_result_digest,
+       optional_artifact_ref_bytes, recorded_at
+FROM audit.archive_terminal_receipt
+WHERE operation_id = $1;
