@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
@@ -50,6 +51,7 @@ func (AlertEvaluateArgs) InsertOpts() river.InsertOpts {
 			ByArgs:   true,
 			ByPeriod: DefaultAlertEvaluateInterval,
 			ByQueue:  true,
+			ByState:  rivertype.UniqueOptsByStateDefault(),
 		},
 	}
 }
