@@ -101,3 +101,14 @@ d. 接入验证清单脚本 `scripts/verify-real-mode.sh`:worker 日志 metrics_
 - **KEY_SCOPE_APPROVAL:批准**——新增 scope `platform.user_keys.read`,仅元数据
   (前缀/创建/最近使用/状态),**永不含完整 key**,admin 默认**不**带该 scope(同
   request.content.read 的最小权限先例),进 RoleScopeMap 与开发态默认清单。
+
+### 7.3 自拟任务卡（XM-R210-2a，2026-08-30）
+- **目标**：冻结 JobFleetManifestV1 / JobFleetInventoryV1 的严格离线校验与签名契约，
+  为后续多副本证据提供可复验的纯函数基础。
+- **涉及面**：仅 `contracts/jobs` 与 `internal/platform/jobs` 的 canonical JSON、哈希、
+  Ed25519 公钥 keyring、epoch/nonce/replica/build/effective-hash 校验及测试；不接 DB、
+  River worker、Compose、凭据或外部网络。
+- **验收标准**：unknown/duplicate/non-canonical/过期/重放/错误 purpose-protocol-key/
+  digest/build/effective/inventory 等输入 fail-closed；golden 与 Go/governance/
+  gitleaks/diff 门禁全绿。该卡是**自拟、contract-only、待确认**，不解锁 R210-2 full、
+  DB binding、两副本 failover、R210-3 或 R210-4。
