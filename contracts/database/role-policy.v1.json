@@ -239,57 +239,6 @@
   ],
   "objects": [
     {
-      "kind": "database",
-      "schema": "",
-      "name": "current_database",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_api_runtime": [
-          "CONNECT"
-        ],
-        "xm_backup_read": [
-          "CONNECT"
-        ],
-        "xm_lifecycle_runtime": [
-          "CONNECT"
-        ],
-        "xm_migrator": [
-          "CONNECT",
-          "CREATE",
-          "TEMPORARY"
-        ],
-        "xm_ops_read": [
-          "CONNECT"
-        ],
-        "xm_worker_runtime": [
-          "CONNECT"
-        ]
-      }
-    },
-    {
-      "kind": "routine",
-      "schema": "audit",
-      "name": "reject_archive_catalog_mutation()",
-      "owner": "xm_migrator"
-    },
-    {
-      "kind": "routine",
-      "schema": "finance",
-      "name": "reject_runway_threshold_history_mutation()",
-      "owner": "xm_migrator"
-    },
-    {
-      "kind": "routine",
-      "schema": "public",
-      "name": "river_job_state_in_bitmask(bit, river_job_state)",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_worker_runtime": [
-          "EXECUTE"
-        ]
-      }
-    },
-    {
       "kind": "schema",
       "schema": "",
       "name": "action",
@@ -311,239 +260,6 @@
         "xm_ops_read": [
           "USAGE"
         ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "schema",
-      "schema": "",
-      "name": "alerts",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_api_runtime": [
-          "USAGE"
-        ],
-        "xm_backup_read": [
-          "USAGE"
-        ],
-        "xm_lifecycle_runtime": [
-          "USAGE"
-        ],
-        "xm_migrator": [
-          "CREATE",
-          "USAGE"
-        ],
-        "xm_ops_read": [
-          "USAGE"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "schema",
-      "schema": "",
-      "name": "audit",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_api_runtime": [
-          "USAGE"
-        ],
-        "xm_backup_read": [
-          "USAGE"
-        ],
-        "xm_lifecycle_runtime": [
-          "USAGE"
-        ],
-        "xm_migrator": [
-          "CREATE",
-          "USAGE"
-        ],
-        "xm_ops_read": [
-          "USAGE"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "schema",
-      "schema": "",
-      "name": "core",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_api_runtime": [
-          "USAGE"
-        ],
-        "xm_backup_read": [
-          "USAGE"
-        ],
-        "xm_lifecycle_runtime": [
-          "USAGE"
-        ],
-        "xm_migrator": [
-          "CREATE",
-          "USAGE"
-        ],
-        "xm_ops_read": [
-          "USAGE"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "schema",
-      "schema": "",
-      "name": "finance",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_api_runtime": [
-          "USAGE"
-        ],
-        "xm_backup_read": [
-          "USAGE"
-        ],
-        "xm_lifecycle_runtime": [
-          "USAGE"
-        ],
-        "xm_migrator": [
-          "CREATE",
-          "USAGE"
-        ],
-        "xm_ops_read": [
-          "USAGE"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "schema",
-      "schema": "",
-      "name": "ops",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_api_runtime": [
-          "USAGE"
-        ],
-        "xm_backup_read": [
-          "USAGE"
-        ],
-        "xm_lifecycle_runtime": [
-          "USAGE"
-        ],
-        "xm_migrator": [
-          "CREATE",
-          "USAGE"
-        ],
-        "xm_ops_read": [
-          "USAGE"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "schema",
-      "schema": "",
-      "name": "public",
-      "owner": "pg_database_owner",
-      "privileges": {
-        "xm_migrator": [
-          "CREATE",
-          "USAGE"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "schema",
-      "schema": "",
-      "name": "ui",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_api_runtime": [
-          "USAGE"
-        ],
-        "xm_backup_read": [
-          "USAGE"
-        ],
-        "xm_lifecycle_runtime": [
-          "USAGE"
-        ],
-        "xm_migrator": [
-          "CREATE",
-          "USAGE"
-        ],
-        "xm_ops_read": [
-          "USAGE"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "sequence",
-      "schema": "finance",
-      "name": "balance_history_id_seq",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_backup_read": [
-          "SELECT"
-        ],
-        "xm_ops_read": [
-          "SELECT"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "sequence",
-      "schema": "ops",
-      "name": "metric_observation_sample_id_seq",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_backup_read": [
-          "SELECT"
-        ],
-        "xm_ops_read": [
-          "SELECT"
-        ],
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "sequence",
-      "schema": "public",
-      "name": "river_job_id_seq",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "sequence",
-      "schema": "public",
-      "name": "river_notification_id_seq",
-      "owner": "xm_migrator",
-      "privileges": {
         "xm_worker_runtime": [
           "USAGE"
         ]
@@ -578,6 +294,33 @@
         ],
         "xm_ops_read": [
           "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "alerts",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
         ]
       }
     },
@@ -660,6 +403,33 @@
         ],
         "xm_worker_runtime": [
           "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "audit",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
         ]
       }
     },
@@ -828,6 +598,39 @@
       }
     },
     {
+      "kind": "routine",
+      "schema": "audit",
+      "name": "reject_archive_catalog_mutation()",
+      "owner": "xm_migrator"
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "core",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
       "kind": "table",
       "schema": "core",
       "name": "connection",
@@ -964,6 +767,61 @@
       }
     },
     {
+      "kind": "database",
+      "schema": "",
+      "name": "current_database",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "CONNECT"
+        ],
+        "xm_backup_read": [
+          "CONNECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "CONNECT"
+        ],
+        "xm_migrator": [
+          "CONNECT",
+          "CREATE",
+          "TEMPORARY"
+        ],
+        "xm_ops_read": [
+          "CONNECT"
+        ],
+        "xm_worker_runtime": [
+          "CONNECT"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "finance",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
       "kind": "table",
       "schema": "finance",
       "name": "amortization_loss",
@@ -1029,6 +887,23 @@
           "INSERT",
           "SELECT",
           "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "sequence",
+      "schema": "finance",
+      "name": "balance_history_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
         ]
       }
     },
@@ -1158,6 +1033,12 @@
       }
     },
     {
+      "kind": "routine",
+      "schema": "finance",
+      "name": "reject_runway_threshold_history_mutation()",
+      "owner": "xm_migrator"
+    },
+    {
       "kind": "table",
       "schema": "finance",
       "name": "runway_threshold_config",
@@ -1183,6 +1064,40 @@
         ],
         "xm_lifecycle_runtime": [
           "INSERT",
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "view",
+      "schema": "finance",
+      "name": "runway_threshold_current_verified",
+      "owner": "xm_migrator",
+      "columns": [
+        "critical_days",
+        "environment",
+        "reason",
+        "request_id",
+        "revision",
+        "serious_days",
+        "updated_at",
+        "updated_by",
+        "warning_days"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
           "SELECT"
         ],
         "xm_ops_read": [
@@ -1350,6 +1265,33 @@
       }
     },
     {
+      "kind": "schema",
+      "schema": "",
+      "name": "ops",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
       "kind": "table",
       "schema": "ops",
       "name": "metric_observation",
@@ -1429,6 +1371,38 @@
       }
     },
     {
+      "kind": "sequence",
+      "schema": "ops",
+      "name": "metric_observation_sample_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "public",
+      "owner": "pg_database_owner",
+      "privileges": {
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
       "kind": "table",
       "schema": "public",
       "name": "river_job",
@@ -1459,6 +1433,39 @@
           "INSERT",
           "SELECT",
           "UPDATE"
+        ]
+      }
+    },
+    {
+      "kind": "sequence",
+      "schema": "public",
+      "name": "river_job_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "type",
+      "schema": "public",
+      "name": "river_job_state",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "routine",
+      "schema": "public",
+      "name": "river_job_state_in_bitmask(bit, river_job_state)",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "EXECUTE"
         ]
       }
     },
@@ -1522,6 +1529,17 @@
       }
     },
     {
+      "kind": "sequence",
+      "schema": "public",
+      "name": "river_notification_id_seq",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
+    },
+    {
       "kind": "table",
       "schema": "public",
       "name": "river_queue",
@@ -1552,6 +1570,33 @@
         "version"
       ],
       "no_runtime_access": true
+    },
+    {
+      "kind": "schema",
+      "schema": "",
+      "name": "ui",
+      "owner": "xm_migrator",
+      "privileges": {
+        "xm_api_runtime": [
+          "USAGE"
+        ],
+        "xm_backup_read": [
+          "USAGE"
+        ],
+        "xm_lifecycle_runtime": [
+          "USAGE"
+        ],
+        "xm_migrator": [
+          "CREATE",
+          "USAGE"
+        ],
+        "xm_ops_read": [
+          "USAGE"
+        ],
+        "xm_worker_runtime": [
+          "USAGE"
+        ]
+      }
     },
     {
       "kind": "table",
@@ -1589,51 +1634,6 @@
           "SELECT"
         ],
         "xm_ops_read": [
-          "SELECT"
-        ]
-      }
-    },
-    {
-      "kind": "type",
-      "schema": "public",
-      "name": "river_job_state",
-      "owner": "xm_migrator",
-      "privileges": {
-        "xm_worker_runtime": [
-          "USAGE"
-        ]
-      }
-    },
-    {
-      "kind": "view",
-      "schema": "finance",
-      "name": "runway_threshold_current_verified",
-      "owner": "xm_migrator",
-      "columns": [
-        "critical_days",
-        "environment",
-        "reason",
-        "request_id",
-        "revision",
-        "serious_days",
-        "updated_at",
-        "updated_by",
-        "warning_days"
-      ],
-      "table_privileges": {
-        "xm_api_runtime": [
-          "SELECT"
-        ],
-        "xm_backup_read": [
-          "SELECT"
-        ],
-        "xm_lifecycle_runtime": [
-          "SELECT"
-        ],
-        "xm_ops_read": [
-          "SELECT"
-        ],
-        "xm_worker_runtime": [
           "SELECT"
         ]
       }
