@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xingmang.local/contracts/cpa/management-boundary.v1",
+  "version": 1,
+  "cpa_min_version": "1.0.0",
+  "cpa_max_version": "1.0.0",
+  "route_inventory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "route_inventory_placeholder": true,
+  "inference": [
+    {
+      "plane": "inference",
+      "method": "GET",
+      "path": "/v1/models",
+      "capability_id": "inference.models",
+      "risk_class": "inference",
+      "max_body_bytes": 1048576,
+      "timeout_millis": 5000,
+      "rate_per_minute": 60,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": true,
+      "response_projection": "status,model,usage"
+    },
+    {
+      "plane": "inference",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "capability_id": "inference.chat",
+      "risk_class": "inference",
+      "max_body_bytes": 1048576,
+      "timeout_millis": 5000,
+      "rate_per_minute": 60,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": true,
+      "response_projection": "status,model,usage"
+    }
+  ],
+  "callback": [
+    {
+      "plane": "callback",
+      "method": "GET",
+      "path": "/v0/management/oauth-callback",
+      "capability_id": "callback.oauth",
+      "risk_class": "callback",
+      "max_body_bytes": 1048576,
+      "timeout_millis": 5000,
+      "rate_per_minute": 60,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": true,
+      "response_projection": "status,model,usage"
+    },
+    {
+      "plane": "callback",
+      "method": "POST",
+      "path": "/v0/management/oauth-callback",
+      "capability_id": "callback.oauth",
+      "risk_class": "callback",
+      "max_body_bytes": 1048576,
+      "timeout_millis": 5000,
+      "rate_per_minute": 60,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": true,
+      "response_projection": "status,model,usage"
+    }
+  ],
+  "private_capabilities": [
+    {
+      "plane": "private",
+      "method": "GET",
+      "path": "/v0/management/health",
+      "capability_id": "management.health",
+      "risk_class": "private",
+      "max_body_bytes": 1048576,
+      "timeout_millis": 5000,
+      "rate_per_minute": 60,
+      "injects_management_key": true,
+      "requires_mtls": true,
+      "public": false,
+      "response_projection": "status,model,usage"
+    }
+  ],
+  "denied": [
+    {
+      "plane": "denied",
+      "method": "ANY",
+      "path": "/v0/management",
+      "capability_id": "management.wildcard",
+      "risk_class": "deny",
+      "max_body_bytes": 1,
+      "timeout_millis": 1,
+      "rate_per_minute": 1,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": false
+    },
+    {
+      "plane": "denied",
+      "method": "ANY",
+      "path": "/v0/management/api-call",
+      "capability_id": "management.api-call",
+      "risk_class": "api-call",
+      "max_body_bytes": 1,
+      "timeout_millis": 1,
+      "rate_per_minute": 1,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": false
+    },
+    {
+      "plane": "denied",
+      "method": "ANY",
+      "path": "/v0/management/auth",
+      "capability_id": "management.auth",
+      "risk_class": "auth",
+      "max_body_bytes": 1,
+      "timeout_millis": 1,
+      "rate_per_minute": 1,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": false
+    },
+    {
+      "plane": "denied",
+      "method": "ANY",
+      "path": "/v0/management/config",
+      "capability_id": "management.config",
+      "risk_class": "config",
+      "max_body_bytes": 1,
+      "timeout_millis": 1,
+      "rate_per_minute": 1,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": false
+    },
+    {
+      "plane": "denied",
+      "method": "ANY",
+      "path": "/v0/management/plugins",
+      "capability_id": "management.plugin",
+      "risk_class": "plugin",
+      "max_body_bytes": 1,
+      "timeout_millis": 1,
+      "rate_per_minute": 1,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": false
+    },
+    {
+      "plane": "denied",
+      "method": "ANY",
+      "path": "/v0/management/usage-queue",
+      "capability_id": "management.usage",
+      "risk_class": "usage",
+      "max_body_bytes": 1,
+      "timeout_millis": 1,
+      "rate_per_minute": 1,
+      "injects_management_key": false,
+      "requires_mtls": false,
+      "public": false
+    }
+  ],
+  "required_facts": {
+    "allow_remote": "false",
+    "management_password": "absent",
+    "raw_port_bind": "loopback",
+    "management_key_location": "adapter_local",
+    "inference_version_evidence": "required",
+    "route_inventory": "exact",
+    "public_callback_hostname": "per_instance",
+    "private_management_transport": "mtls"
+  }
+}

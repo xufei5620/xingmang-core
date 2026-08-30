@@ -112,3 +112,14 @@ d. 接入验证清单脚本 `scripts/verify-real-mode.sh`:worker 日志 metrics_
   digest/build/effective/inventory 等输入 fail-closed；golden 与 Go/governance/
   gitleaks/diff 门禁全绿。该卡是**自拟、contract-only、待确认**，不解锁 R210-2 full、
   DB binding、两副本 failover、R210-3 或 R210-4。
+
+### 7.4 自拟任务卡（XM-R213-1a，2026-08-30；原 7.3，R210-2a 先行合入后顺延）
+- **目标**：冻结 CPA 管理面/推理面/回调面的 deny-by-default 边界契约，并提供只读离线
+  配置与路由审计器，提前暴露通配管理路由、错误回调例外和凭据泄漏风险。
+- **涉及面**：仅 `contracts/cpa`、`internal/platform/cpaboundary`、离线本地 evidence
+  CLI、模板与 runbook；不连接 CPA、不读取管理 key/证书、不改网络/Compose/防火墙，目标
+  版本与 route inventory 缺失时必须显示 incomplete。
+- **验收标准**：严格 JSON/canonical hash、exact callback GET/POST、inference 与 management
+  deny-list、mTLS/allow-remote/MANAGEMENT_PASSWORD 事实、capability 依赖与 response
+  projection 全部 fail-closed；Go/governance/gitleaks/diff 全绿。该卡为**自拟、offline-only、
+  待确认**，不解锁 R213-2/3/4 或任何真实 CPA 能力。
