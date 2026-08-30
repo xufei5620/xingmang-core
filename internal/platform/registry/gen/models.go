@@ -58,6 +58,58 @@ type AlertsAlertSilence struct {
 	CreatedAt   pgtype.Timestamptz
 }
 
+type AuditArchiveOperationIntent struct {
+	OperationID              uuid.UUID
+	ApprovalEnvelopeSha256   string
+	DeterministicBytesDigest string
+	CanonicalIntentBytes     []byte
+	CreatedAt                pgtype.Timestamptz
+}
+
+type AuditArchivePutReceipt struct {
+	OperationID         uuid.UUID
+	Ordinal             int32
+	ObjectVersionBytes  []byte
+	ObjectVersionSha256 string
+	RecordedAt          pgtype.Timestamptz
+}
+
+type AuditArchiveSegment struct {
+	ID                     uuid.UUID
+	FormatVersion          int16
+	FromSequence           int64
+	ToSequence             int64
+	RowCount               int64
+	FirstPrevHash          string
+	LastEventHash          string
+	CanonicalVersionCounts []byte
+	EnvironmentCounts      []byte
+	PayloadObjectKey       string
+	PayloadVersionID       string
+	PayloadSha256          string
+	PayloadSizeBytes       int64
+	Projections            []byte
+	ManifestObjectKey      string
+	ManifestVersionID      string
+	ManifestSha256         string
+	ManifestSignature      string
+	ManifestKeyID          string
+	ChainRootID            uuid.UUID
+	ChainRootHash          string
+	CheckpointSha256       string
+	RecoveryGeneration     int64
+	CommittedAt            pgtype.Timestamptz
+	VerifiedAt             pgtype.Timestamptz
+}
+
+type AuditArchiveTerminalReceipt struct {
+	OperationID              uuid.UUID
+	SignedResultBytes        []byte
+	TerminalResultDigest     string
+	OptionalArtifactRefBytes []byte
+	RecordedAt               pgtype.Timestamptz
+}
+
 type AuditAuditEvent struct {
 	ID                       uuid.UUID
 	Sequence                 int64
