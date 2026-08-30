@@ -225,6 +225,16 @@ services:
       # 这个变量只是 env Provider 的落点，Connector 并不认识它）。
       XM_REQLOG_TOKEN: ${XM_REQLOG_TOKEN:-}
       XM_REQLOG_TIMEOUT: ${XM_REQLOG_TIMEOUT:-30s}
+      # --- file 模式（XM-REQLOG-MERGE）：直读记录代理落盘的数据，不经 HTTP --
+      # 只在 XM_REQLOG_MODE=file 时用到。DataDir 是**容器内**路径，默认值与
+      # server-prod.yaml 的只读绑定挂载目标一致；本文件（staging 默认栈）
+      # 不挂载对应的宿主机目录，留空/默认值在这里不会指向真实数据——staging
+      # 若要联调 file 模式，需要另外提供挂载（见
+      # docs/runbooks/REQLOG-RECORDER.md）。
+      XM_REQLOG_DATA_DIR: ${XM_REQLOG_DATA_DIR:-}
+      # 令牌映射路径可留空——留空即没有用户名映射能力（Username 恒为空串，
+      # 契约允许的合法状态），不是错误。
+      XM_REQLOG_TOKENMAP: ${XM_REQLOG_TOKENMAP:-}
       # --- 凭据登记（XM-CRED0）--------------------------------------------
       # 运营在后台粘贴的上游凭据落在这个目录（<root>/<scope>/<name>），
       # DB 只存指纹与版本。API 是唯一的写方；worker 以只读方式挂同一个卷。
