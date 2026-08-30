@@ -93,6 +93,36 @@ release-tip movement invalidates it and requires a fresh recomputation.
   changing the worker/API, or deploying to `xingmang-launch`.
 - No `audit.audit_event` UPDATE/DELETE/TRUNCATE/DROP path is introduced.
 
+### files_changed
+
+- `db/migrations/000018_audit_archive_catalog.up.sql` (draft only)
+- `db/migrations/000018_audit_archive_catalog.down.sql` (disposable teardown only)
+- `db/queries/audit.sql` (fixed-column query drafts; sqlc not run)
+- `internal/platform/audit/archive/{objectstore,filesystem_store,catalog,receipt_journal,recovery_index,checkpoint,provider_qualification}.go`
+- corresponding pure/integration contract tests under `internal/platform/audit/archive/*_test.go`
+- this Handoff
+
+### tests_not_run
+
+- No PostgreSQL migration, sqlc generation, generated artifact review, MinIO process,
+  provider SDK call, shared Docker stack, worker/API restart, staging, production or
+  external credential qualification was run in this branch.
+- The live MinIO qualification test remains pending the one-time disposable credential
+  and exact-input approval evidence; no secret value is recorded here.
+
+### risks / follow_ups
+
+- DB owner/ACL provisioning for `xm_audit_archive_catalog_writer`,
+  `xm_audit_archive_receipt_reader` and `xm_audit_archive_receipt_writer` is intentionally
+  deferred to the separately approved DBR2 policy; this migration does not create roles.
+- PostgreSQL `archive_segment` cross-row contiguity and RecoveryIndex coverage remain
+  application/transaction invariants until the exact generated SQL and catalog writer are
+  approved and implemented.
+- Before any green migration/runtime claim, re-fetch the release tip, recompute max/000018
+  and all five input hashes/digest, obtain the exact `APPROVED AUD2 INPUT` log line, then
+  run sqlc and its separate generated-artifact review. Any changed byte invalidates this
+  Handoff's digest.
+
 ### Pure contract implementation delivered in this stage
 
 - `objectstore.go`: exact capability interfaces, intent/version validation, canonical
