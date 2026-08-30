@@ -1,18 +1,19 @@
-sprint-section: 7
+sprint-section: 7.5
 
-# XM-DBR1 Task1 · machine-readable role policy and rotation transition
+# XM-DBR1 Task1/Task2 · role policy, rotation transition, and read-only verifier
 
 ## status
 
-READY（Task1 policy/transition contract；仅离线纯函数，无数据库、SQL、凭据或部署）
+READY（Task1 policy/transition + Task2 read-only catalog verifier/CLI；无写 SQL、凭据或部署）
 
 - branch: `ai/codex/XM-DBR1-task1-policy`
 - worktree: `K:/星芒统一控制平台/wt-xmDBR1-task1`
-- base release: `release/v0.1-launch` at `5f15db5c5702679f9dbf17c5cb6efdd8d915186a`
+- base release: `release/v0.1-launch` at `2bfd623ec80ca08bb6cbf3b14a8f2e82a4eea524`
 - approval: `2026-08-30T09:40Z APPROVED DBR1 Task1/Task2 ... base 00fe49b`
   from `docs/handoffs/ACCEPTANCE-LOG.md`; approved `00fe49b` is an ancestor of the
-  current base. This slice implements Task1 only; Task2 verifier and Task3
-  harness are not modified.
+  current base. Task1 was already accepted as merge `1aafabc`; this follow-up
+  carries the read-only Task2 verifier/CLI and the final Task1 inventory fixes.
+  Task3 harness remains the separately accepted slice.
 - delivery commit: branch tip (the exact SHA is reported in the READY line;
   acceptance should use `git rev-parse HEAD` after any review fix).
 
@@ -36,6 +37,14 @@ exact policy bytes, predecessor event/policy digests, the approved/closed CR
 artifact, UTC windows, and closure evidence, and returns stable violation
 codes for replay, skipped transitions, expiry, and digest mismatches.
 
+Task2 adds a pure `CatalogSnapshot` verifier plus a pgx/pgxpool read path. It
+compares roles, memberships, owners, relation/column/sequence/routine/type ACLs,
+default ACL families, PUBLIC privileges, RUNWAY provenance, and
+`pg_stat_activity` session evidence with deterministic violation ordering. The
+`db-role-verify` CLI validates `DATABASE_URL` through `pgdsn.Validate`, opens a
+forced-read-only pool, and returns exit `0` (match), `1` (policy violation), or
+`2` (configuration/connection error) without echoing DSNs or passwords.
+
 ## files_changed
 
 - `contracts/database/role-policy.v1.json`
@@ -46,10 +55,16 @@ codes for replay, skipped transitions, expiry, and digest mismatches.
 - `internal/platform/dbroles/policy_test.go`
 - `internal/platform/dbroles/transition.go`
 - `internal/platform/dbroles/transition_test.go`
+- `internal/platform/dbroles/verifier.go`
+- `internal/platform/dbroles/verifier_test.go`
+- `internal/platform/dbroles/verifier_integration_test.go`
+- `cmd/db-role-verify/main.go`
+- `cmd/db-role-verify/main_test.go`
 - this Handoff
 
-No SQL, migration, GRANT/REVOKE/ALTER, verifier CLI, compose, worker/API
-connection, credential, or release file was changed.
+No SQL, migration, GRANT/REVOKE/ALTER, compose identity change, worker/API
+runtime wiring, credential, or release file was changed; the verifier CLI is a
+read-only inspection tool only.
 
 ## contract and data-source mapping
 
@@ -63,6 +78,7 @@ connection, credential, or release file was changed.
 | AUD2 archive | approved AUD2 merge/input/generated records in ACCEPTANCE-LOG | four archive tables are explicit `no_runtime_access`; dedicated future AUD roles remain unknown/fail-closed in policy v1 |
 | rotation state | design §11 | nine-field state object, A/B identity and membership topology, UTC windows, optional active-session evidence |
 | state history | design §11 and plan Task1 | exact-byte policy/CR digests, genesis JSONL, sequence/hash/CR/closure validation; no signing key or external history lookup |
+| catalog verifier | DBR1 plan Task2 / PostgreSQL catalog allowlist | read-only pgx queries only; pure snapshot comparison and CLI exit contract |
 
 ## decisions
 
@@ -93,7 +109,8 @@ connection, credential, or release file was changed.
 
 ## verification
 
-Executed from this linked worktree after rebasing to `5f15db5`:
+Executed from this linked worktree after rebasing to `2bfd623` (if release moves
+again, rebase and rerun before acceptance):
 
 - TDD RED: `go test -p 1 ./internal/platform/dbroles -count=1` before
   implementation failed at compile time with undefined `Policy`,
@@ -103,6 +120,14 @@ Executed from this linked worktree after rebasing to `5f15db5`:
 - `go test -p 1 ./internal/platform/dbroles -count=1` — PASS.
 - `go test -race -p 1 ./internal/platform/dbroles -count=1` — PASS.
 - `go vet ./internal/platform/dbroles` — PASS.
+- `go test -p 1 ./internal/platform/dbroles ./cmd/db-role-verify -count=1` — PASS.
+- `go test -race -p 1 ./internal/platform/dbroles ./cmd/db-role-verify -count=1` — PASS.
+- `go vet ./internal/platform/dbroles ./cmd/db-role-verify` — PASS.
+- Task2 RED: `go test -p 1 ./internal/platform/dbroles -run TestVerifySnapshot`
+  initially failed with undefined `CatalogSnapshot`/`VerifySnapshot` before
+  verifier implementation; subsequent GREEN covers role, membership, owner,
+  object/column, sequence, default-ACL, PUBLIC, rotation-session, and
+  application-name drift cases.
 - `go test -p 1 ./... -count=1` — PASS (all repository packages).
 - `go vet ./...` — PASS.
 - `python` JSON parse of all `contracts/database/*.json` — PASS; policy has
@@ -114,15 +139,14 @@ Executed from this linked worktree after rebasing to `5f15db5`:
 - `git diff --check release/v0.1-launch` — PASS before commit.
 - `gitleaks git --redact --no-banner --staged` — PASS (0 leaks; 0 commits in
   staged snapshot before commit).
-- `gitleaks git --redact --no-banner --log-opts=5f15db5c5702679f9dbf17c5cb6efdd8d915186a..HEAD` — PASS (0 leaks).
+- `gitleaks git --redact --no-banner --log-opts=2bfd623ec80ca08bb6cbf3b14a8f2e82a4eea524..HEAD` — rerun after final commit.
 
 ## not_run / intentionally out of scope
 
-- `internal/platform/dbroles/verifier.go`, verifier integration tests,
-  `cmd/db-role-verify`, and all Task2 catalog/CLI behavior (separate slice).
 - DBR1 disposable PostgreSQL harness execution (Task3 is already a separate
-  accepted slice); no PostgreSQL connection, shared stack, staging, or
-  production access.
+  accepted slice); the Task2 live query path is implemented but no PostgreSQL
+  connection was opened in this worktree, and no shared stack, staging, or
+  production access occurred.
 - No SQL or role operation of any kind: no CREATE/ALTER, GRANT, REVOKE, SET
   ROLE, owner transfer, migration, compose change, or runtime wiring.
 - No real credentials, secret refs/values, network calls, MinIO/AUD2 access,
@@ -131,9 +155,9 @@ Executed from this linked worktree after rebasing to `5f15db5`:
 
 ## risks and follow_ups
 
-1. This is the Task1 policy/transition foundation only. The Task2 verifier must
-   consume the exact object/column inventory and independently query the
-   read-only catalog allowlist; it must not infer live state from this artifact.
+1. The verifier remains a read-only Task2 foundation. It must consume the exact
+   object/column inventory and independently query the catalog allowlist; it
+   must not infer live state from policy bytes alone.
 2. The policy's RUNWAY merge SHA is a provenance gate, not proof of a deployed
    database. DBR2 exact owner/ACL SQL and DBR3 runtime identity cutover remain
    separately approved work.
@@ -150,4 +174,4 @@ Executed from this linked worktree after rebasing to `5f15db5`:
 ## explicit boundary
 
 `NO LIVE DB CHANGE` · `NO STAGING/PRODUCTION` · `NO REAL CREDENTIALS` ·
-`NO SQL/GRANT/REVOKE/ALTER` · `NO VERIFIER/CLI` · `NO MERGE` · `NO DEPLOY`
+`NO SQL/GRANT/REVOKE/ALTER` · `READ-ONLY VERIFIER/CLI ONLY` · `NO MERGE` · `NO DEPLOY`
