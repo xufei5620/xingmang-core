@@ -76,3 +76,4 @@
   ④ 生产切换(①②③齐后,用户确认执行):服务器改用 launch.yaml + server-prod.yaml(ENVIRONMENT=production、XM_AUTH_MODE=oidc、FAKE_SEED=false、各平台 mode 由 core.connector_config 决定),数据库新建卷(演示数据不带入),nginx 去掉 Basic Auth;之后每次合入仍走 deploy-local/deploy.sh。
   在此之前 console.solov.cc 保持 staging(dev-header + Basic Auth),这是有意的诚实标注,不是未完成。
 2026-08-30T13:10:56Z SUPERSEDED f170f8a XM-CRED0-ui-only:前端占位片不再单独接纳，已被 13:07Z XM-CRED0 端到端优先级取代；不得合入，须与 XM-CRED0-backend（SecretProvider/Actions/查询/连接器接线/接入模式）及实机证据一体交付。
+2026-08-30T13:12Z HOLD 全部 Codex 车道立即停止(用户 2026-08-30 21:2x 拍板):不要再开新片、不要再提交;已在途分支保持原状不合入。上线路线①–④(CRED0-backend、AUTH1、CR-0001 realm、生产切换)改由验收线(Claude)直接实现。HOLD 解除以本日志新的 PRIORITY 行为准。
