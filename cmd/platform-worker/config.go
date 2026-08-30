@@ -265,6 +265,47 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		}
 		config.AlertBalanceThresholdMinorUnits = threshold
 	}
+
+	// XM-CPA0：CPA（CLI Proxy API + cpa-manager-plus）只读文件后端周期同步。
+	// 默认 off——没有凭据要处理，也没有 fake 模式垫底，一个没配 XM_CPA_MODE
+	// 的环境应当保持关闭，而不是每轮同步都对着一个不存在的挂载路径报错
+	// （见 jobs.DefaultConfig 同一条理由）。
+	cpaMode, err := jobs.ParseCPAMode(getenv("XM_CPA_MODE"))
+	if err != nil {
+		return jobs.Config{}, err
+	}
+	config.CPAMode = cpaMode
+	// 只读挂载目录，不经 CredentialRef：这是一条路径，不是向第三方系统认证
+	// 的凭据（与 XM_REQLOG_DATA_DIR 同一条纪律，见 platform-api 那边的注释）。
+	config.CPADataDir = strings.TrimSpace(getenv("XM_CPA_DATA_DIR"))
+	config.CPAFileName = strings.TrimSpace(getenv("XM_CPA_FILE_NAME"))
+	if value := strings.TrimSpace(getenv("XM_CPA_INSTANCE_ID")); value != "" {
+		config.CPAInstanceID = value
+	}
+	if value := getenv("XM_CPA_SYNC_ENABLED"); value != "" {
+		// 采集链路的停用开关（宪法 26 条）：file 模式下可以临时按下暂停键，
+		// 而不必改代码重发版。**不能**用它在 off 模式下把同步打开——
+		// jobs.Config.validate() 会拒绝那种矛盾配置（enabled 但 mode=off）。
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("cpa sync enabled: %w", err)
+		}
+		config.CPASyncEnabled = enabled
+	} else {
+		// 没有显式覆盖：跟随模式——这是 XM_CPA_MODE 唯一决定「要不要同步」
+		// 的地方。file 就打开，off（含拼写错误按 ParseCPAMode 早已拦下）
+		// 就保持关闭。
+		config.CPASyncEnabled = cpaMode == jobs.CPAModeFile
+	}
+	if value := getenv("XM_CPA_SYNC_INTERVAL"); value != "" {
+		// 默认 5 分钟（jobs.DefaultCPASyncInterval），此处可覆盖。
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("cpa sync interval: %w", err)
+		}
+		config.CPASyncInterval = interval
+	}
+
 	return config, nil
 }
 

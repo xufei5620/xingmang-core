@@ -37,8 +37,8 @@ func TestPolicyCoversExactlyRegisteredMetrics(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("policy + explicit exclusions = %v, registry = %v", got, want)
 	}
-	if len(policies) != 14 || len(excluded) != 2 {
-		t.Fatalf("active policy/exclusion counts = %d/%d, want 14/2", len(policies), len(excluded))
+	if len(policies) != 18 || len(excluded) != 2 {
+		t.Fatalf("active policy/exclusion counts = %d/%d, want 18/2", len(policies), len(excluded))
 	}
 }
 
@@ -67,6 +67,10 @@ func TestPolicyFreezesFifteenMetricKindsAndPointers(t *testing.T) {
 		"finance.cost.daily":        {ValueDailySnapshot, PrimaryMoneyMinor, "/total_cost_minor_units", "/currency"},
 		"finance.revenue.daily":     {ValueDailySnapshot, PrimaryMoneyMinor, "/total_revenue_minor_units", "/currency"},
 		"finance.profit.daily":      {ValueDocumentStatus, PrimaryMoneyMinor, "/profit_minor_units", "/currency"},
+		"cpa.requests.daily":        {ValueDailySnapshot, PrimaryCount, "/total_request_count", ""},
+		"cpa.cost.daily":            {ValueDailySnapshot, PrimaryMoneyMinor, "/total_cost_minor_units", "/currency"},
+		"cpa.keys.usage":            {ValueDocumentStatus, PrimaryCount, "/key_count", ""},
+		"cpa.accounts.health":       {ValueDocumentStatus, PrimaryCount, "/account_count", ""},
 	}
 	for key, want := range cases {
 		got, ok := policies[key]

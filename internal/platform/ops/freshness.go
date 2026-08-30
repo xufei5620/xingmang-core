@@ -233,6 +233,20 @@ var registeredMetrics = struct {
 		// 让一部分读数不入账（两侧未知跳过、只有一侧不建行），所以两个数
 		// **本就该不同**——合并成一条会让那个差异永远看不见。
 		"finance.profit.daily": {},
+		// CPA（XM-CPA0，connectors/cpa）。CPA = CLI Proxy API + cpa-manager-plus，
+		// 只读文件后端直读宿主机 usage.sqlite（只读绑定挂载，从不挂载凭据文件）。
+		// 四条键字面量与 connectors/cpa/contract.go 的 Metric* 常量逐字对应，
+		// 由 TestRegisteredMetricsMatchConnectorContracts 钉住一致。
+		"cpa.requests.daily": {},
+		"cpa.cost.daily":     {},
+		// cpa.keys.usage 只是一条小型「key 数 + 前 N 采样」的周期观测——完整逐
+		// key 明细走 GET /api/v1/platforms/cpa/keys 现读，不经这条观测（见该常量
+		// 在 contract.go 里的说明）。
+		"cpa.keys.usage": {},
+		// cpa.accounts.health 读 codex_inspection_runs/results 的最近一轮结果，
+		// 落在"渠道保障"页签位置（ADMIN-IA CPA 第 4 格，M1.5 徽标）——语义其实是
+		// 账号巡检而非模型路由验证，裁定见 contracts/connectors/cpa.read.v1.md §9。
+		"cpa.accounts.health": {},
 	},
 }
 

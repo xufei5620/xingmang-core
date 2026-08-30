@@ -1612,10 +1612,12 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
     expect(screen.queryByRole("tab", { name: "开票" })).toBeNull();
   });
 
-  it("未实现的页签给诚实占位：说明现在为什么空、归哪个阶段", async () => {
+  it("CPA 的支付与财务保持未接入，但写明具体缺什么（XM-CPA0）", async () => {
+    // 从通用的「只重构了导航与路由」占位换成了写明缺口的说明——
+    // usage.sqlite 没有支付/充值数据，这件事必须说清楚，不能只说「阶段未到」
     renderRoute("/platforms/cpa?tab=finance");
-    expect(await screen.findByText("「支付与财务」尚未实现")).not.toBeNull();
-    expect(screen.getByText(/只重构了导航与路由/)).not.toBeNull();
+    expect(await screen.findByText("支付与财务尚未接入")).not.toBeNull();
+    expect(screen.getByText(/usage\.sqlite 只记录用量与折算成本/)).not.toBeNull();
   });
 });
 
@@ -1695,10 +1697,13 @@ describe("用户管理页签（交接文档 §9.3、原型 V[\"s2/users\"]）", 
     expect(screen.getAllByText("数据新鲜").length).toBeGreaterThan(0);
   });
 
-  it("CPA 没有用户清单——不挂一个永远空的页签", async () => {
-    // CPA 的「用户」是代理商，语义不同；挂空页签等于说「这个平台没有用户」
+  it("CPA 的「用户管理」读的是 API Key 用量，不是终端用户清单（XM-CPA0）", async () => {
+    // CPA 的「用户」其实是 API Key，不是终端用户身份——platformusers 域依旧
+    // 不认 "cpa"（platformHasUsers 恒为 false），但这一格不再是永远空的占位，
+    // 而是走 connectors/cpa 的逐 key 用量（CPAKeysPanel），与 Sub2API/NewAPI
+    // 那套终端用户清单完全是两条数据源
     renderRoute("/platforms/cpa?tab=users");
-    expect(await screen.findByText(/「用户管理」尚未实现/)).not.toBeNull();
+    expect(await screen.findByText(/按 API Key 哈希聚合的当日用量/)).not.toBeNull();
   });
 });
 

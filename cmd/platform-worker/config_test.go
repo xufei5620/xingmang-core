@@ -586,3 +586,98 @@ func TestConfigFromEnvHasNoAuditRetentionKnob(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigFromEnvDefaultsCPAToOff：一个没配 XM_CPA_MODE 的环境必须保持
+// 关闭——CPA 没有 fake 模式垫底，默认打开只会让每轮同步都对着一个不存在的
+// 挂载路径报错（同 jobs.DefaultConfig 的理由）。
+func TestConfigFromEnvDefaultsCPAToOff(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = true, want false when XM_CPA_MODE is unset")
+	}
+	if cfg.CPAMode != jobs.CPAModeOff {
+		t.Fatalf("CPAMode = %q, want off", cfg.CPAMode)
+	}
+}
+
+// TestConfigFromEnvFileModeEnablesSyncByDefault：设置 XM_CPA_MODE=file 且
+// 未显式给 XM_CPA_SYNC_ENABLED 时，同步应跟随模式自动打开——这是
+// XM_CPA_MODE 唯一决定"要不要同步"的地方（cmd/platform-worker/config.go 的
+// 那条注释）。
+func TestConfigFromEnvFileModeEnablesSyncByDefault(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":     "staging",
+		"XM_CPA_MODE":     "file",
+		"XM_CPA_DATA_DIR": "/var/lib/xm/cpa",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = false, want true when XM_CPA_MODE=file")
+	}
+	if cfg.CPADataDir != "/var/lib/xm/cpa" {
+		t.Fatalf("CPADataDir = %q, want /var/lib/xm/cpa", cfg.CPADataDir)
+	}
+}
+
+// TestConfigFromEnvCPASyncEnabledOverrideCanOnlyDisable：显式
+// XM_CPA_SYNC_ENABLED=false must be able to pause a file-mode deployment
+// (constitution §26 kill switch), but the same variable must never be able
+// to turn syncing on while the mode is off — that combination is rejected by
+// jobs.Config.validate(), not silently accepted here.
+func TestConfigFromEnvCPASyncEnabledOverrideCanOnlyDisable(t *testing.T) {
+	pauseValues := map[string]string{
+		"ENVIRONMENT":         "staging",
+		"XM_CPA_MODE":         "file",
+		"XM_CPA_DATA_DIR":     "/var/lib/xm/cpa",
+		"XM_CPA_SYNC_ENABLED": "false",
+	}
+	cfg, err := configFromEnv(func(key string) string { return pauseValues[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = true, want false (explicit override must be able to pause file mode)")
+	}
+
+	// configFromEnv itself does not resolve the (off, enabled=true)
+	// contradiction — it just parses what was asked for. Rejecting that
+	// combination is jobs.Config.validate()'s job (unexported, covered by
+	// internal/platform/jobs.TestCPAConfigValidation), reached from
+	// cmd/platform-worker/main.go's jobs.NewClient(pool, config) call.
+	// This test only proves configFromEnv does not silently "fix" the
+	// contradiction into a false sense of safety by forcing Enabled back to
+	// false on its own — that would hide a real operator mistake instead of
+	// letting the actual gate catch it.
+	forceOnValues := map[string]string{
+		"ENVIRONMENT":         "staging",
+		"XM_CPA_MODE":         "off",
+		"XM_CPA_SYNC_ENABLED": "true",
+	}
+	cfg, err = configFromEnv(func(key string) string { return forceOnValues[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPAMode != jobs.CPAModeOff || !cfg.CPASyncEnabled {
+		t.Fatalf("configFromEnv should surface the requested (off, enabled) combination as-is: %+v", cfg)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidCPAValues(t *testing.T) {
+	for key, value := range map[string]string{
+		"XM_CPA_MODE":          "bogus",
+		"XM_CPA_SYNC_ENABLED":  "maybe",
+		"XM_CPA_SYNC_INTERVAL": "not-a-duration",
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", key: value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q should fail", key, value)
+		}
+	}
+}

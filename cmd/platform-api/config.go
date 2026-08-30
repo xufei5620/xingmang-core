@@ -24,6 +24,9 @@ type config struct {
 	// Reqlog 是「请求详情」这条链路的配置（XM-0039）。
 	// 同样不含机密：凭据只有 CredentialRef 形态的引用（宪法 7 条）。
 	Reqlog reqlogConfig
+	// CPA 是「CPA 用户管理」逐 key 用量端点的配置（XM-CPA0）。
+	// 不含任何机密：只是一条只读挂载路径。
+	CPA cpaConfig
 
 	// FinanceDemoSeed 决定启动时是否种一批**演示**登记簿记录（XM-0037d）。
 	//
@@ -158,6 +161,12 @@ func configFromEnv(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	c.Reqlog = reqlogCfg
+
+	cpaCfg, err := cpaConfigFromEnv(getenv)
+	if err != nil {
+		return config{}, err
+	}
+	c.CPA = cpaCfg
 	return c, nil
 }
 

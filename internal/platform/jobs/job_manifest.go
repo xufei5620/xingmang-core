@@ -57,7 +57,7 @@ type JobManifest struct {
 	Jobs         []JobSpec `json:"jobs"`
 }
 
-// RegisteredPeriodicJobSpecs returns a defensive copy of the six periodic
+// RegisteredPeriodicJobSpecs returns a defensive copy of the seven periodic
 // jobs currently registered by NewClient. Callers cannot mutate the package's
 // registry through the returned slices.
 func RegisteredPeriodicJobSpecs() []JobSpec {
@@ -109,6 +109,14 @@ func RegisteredPeriodicJobSpecs() []JobSpec {
 			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
 			Execution: jobManifestExecution, SideEffectClass: "reconcile_then_notification",
 			IdempotencyEvidence: "alert fingerprint reconciliation is persisted before notification; retry reuses the same finding identity",
+		},
+		{
+			ID: CPASyncJobKind, Kind: CPASyncJobKind, Queue: QueueMaintenance,
+			OwnerProcess: jobManifestOwnerProcess, Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CPA_SYNC_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.CPASyncRunOnStart",
+			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
+			Execution: jobManifestExecution, SideEffectClass: "upstream_read_then_db_transaction",
+			IdempotencyEvidence: "latest+sample atomic transaction; retry remains upstream-read attempt",
 		},
 	}
 	return cloneJobSpecs(rows)

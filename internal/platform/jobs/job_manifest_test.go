@@ -23,7 +23,7 @@ func readJobManifestContract(t *testing.T) []byte {
 	return raw
 }
 
-func TestManifestCoversExactlySixRegisteredPeriodicJobs(t *testing.T) {
+func TestManifestCoversExactlySevenRegisteredPeriodicJobs(t *testing.T) {
 	manifest, hash, err := LoadJobManifest(readJobManifestContract(t))
 	if err != nil {
 		t.Fatalf("load frozen manifest: %v", err)
@@ -32,8 +32,8 @@ func TestManifestCoversExactlySixRegisteredPeriodicJobs(t *testing.T) {
 		t.Fatal("manifest hash must not be empty")
 	}
 	registered := RegisteredPeriodicJobSpecs()
-	if len(registered) != 6 {
-		t.Fatalf("registered periodic jobs = %d, want 6", len(registered))
+	if len(registered) != 7 {
+		t.Fatalf("registered periodic jobs = %d, want 7", len(registered))
 	}
 	if len(manifest.Jobs) != len(registered) {
 		t.Fatalf("manifest jobs = %d, registered = %d", len(manifest.Jobs), len(registered))
@@ -94,6 +94,12 @@ func TestManifestPinsStableIDsKindsQueuesScheduleSourcesAndCatchup(t *testing.T)
 			ScheduleConfig: "XM_ALERT_EVALUATE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.AlertEvaluateRunOnStart",
 			CatchUp: "at_most_one_immediate",
 		},
+		CPASyncJobKind: {
+			ID: CPASyncJobKind, Kind: CPASyncJobKind, Queue: QueueMaintenance,
+			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CPA_SYNC_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.CPASyncRunOnStart",
+			CatchUp: "at_most_one_immediate",
+		},
 	}
 	if manifest.Version != 1 || manifest.Scheduler != "river-oss-postgres-leader-v0.45" ||
 		manifest.ClusterModel != "one-environment-per-database-schema" {
@@ -148,6 +154,7 @@ func TestEveryArgsUsesArgsQueueEffectivePeriodAndExplicitDefaultStates(t *testin
 		{name: "finance", kind: FinanceCollectJobKind, queue: QueueMaintenance, period: DefaultFinanceCollectInterval, opts: func() river.InsertOpts { return FinanceCollectArgs{}.InsertOpts() }},
 		{name: "retention", kind: RetentionJobKind, queue: QueueMaintenance, period: DefaultRetentionInterval, opts: func() river.InsertOpts { return RetentionArgs{}.InsertOpts() }},
 		{name: "alerts", kind: AlertEvaluateJobKind, queue: QueueMaintenance, period: DefaultAlertEvaluateInterval, opts: func() river.InsertOpts { return AlertEvaluateArgs{}.InsertOpts() }},
+		{name: "cpa", kind: CPASyncJobKind, queue: QueueMaintenance, period: DefaultCPASyncInterval, opts: func() river.InsertOpts { return CPASyncArgs{}.InsertOpts() }},
 	}
 	for _, tt := range checks {
 		t.Run(tt.name, func(t *testing.T) {
@@ -169,7 +176,7 @@ func TestEveryArgsUsesArgsQueueEffectivePeriodAndExplicitDefaultStates(t *testin
 }
 
 func TestProductionArgsContainNoReplicaRunID(t *testing.T) {
-	for _, args := range []any{HeartbeatArgs{}, Sub2APISyncArgs{}, NewAPISyncArgs{}, FinanceCollectArgs{}, RetentionArgs{}, AlertEvaluateArgs{}} {
+	for _, args := range []any{HeartbeatArgs{}, Sub2APISyncArgs{}, NewAPISyncArgs{}, FinanceCollectArgs{}, RetentionArgs{}, AlertEvaluateArgs{}, CPASyncArgs{}} {
 		raw, err := json.Marshal(args)
 		if err != nil {
 			t.Fatal(err)
@@ -297,7 +304,7 @@ func TestEffectiveManifestDisabledJobAndConfigChangesChangeHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Jobs) != 6 {
+	if len(base.Jobs) != 7 {
 		t.Fatalf("jobs = %d", len(base.Jobs))
 	}
 	cfg.RetentionEnabled = false
@@ -365,6 +372,8 @@ func intervalForJob(id string) time.Duration {
 		return DefaultRetentionInterval
 	case AlertEvaluateJobKind:
 		return DefaultAlertEvaluateInterval
+	case CPASyncJobKind:
+		return DefaultCPASyncInterval
 	default:
 		return 0
 	}

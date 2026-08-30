@@ -109,13 +109,15 @@ func effectiveJobConfig(cfg Config, id string) (enabled, runOnStart bool, interv
 		return cfg.RetentionEnabled, cfg.RetentionRunOnStart, cfg.RetentionInterval, "XM_RETENTION_INTERVAL", nil
 	case AlertEvaluateJobKind:
 		return cfg.AlertEvaluateEnabled, cfg.AlertEvaluateRunOnStart, cfg.AlertEvaluateInterval, "XM_ALERT_EVALUATE_INTERVAL", nil
+	case CPASyncJobKind:
+		return cfg.CPASyncEnabled, cfg.CPASyncRunOnStart, cfg.CPASyncInterval, "XM_CPA_SYNC_INTERVAL", nil
 	default:
 		return false, false, 0, "", fmt.Errorf("effective job manifest: unknown job %q", id)
 	}
 }
 
 func productionRunID(cfg Config) string {
-	for _, value := range []string{cfg.HeartbeatRunID, cfg.Sub2APISyncRunID, cfg.NewAPISyncRunID, cfg.FinanceCollectRunID, cfg.RetentionRunID, cfg.AlertEvaluateRunID} {
+	for _, value := range []string{cfg.HeartbeatRunID, cfg.Sub2APISyncRunID, cfg.NewAPISyncRunID, cfg.FinanceCollectRunID, cfg.RetentionRunID, cfg.AlertEvaluateRunID, cfg.CPASyncRunID} {
 		if strings.TrimSpace(value) != "" {
 			return value
 		}

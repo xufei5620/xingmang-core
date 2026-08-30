@@ -235,6 +235,14 @@ services:
       # 令牌映射路径可留空——留空即没有用户名映射能力（Username 恒为空串，
       # 契约允许的合法状态），不是错误。
       XM_REQLOG_TOKENMAP: ${XM_REQLOG_TOKENMAP:-}
+      # --- CPA 逐 key 用量（XM-CPA0）：只读文件后端，与 reqlog file 模式同一
+      # 条纪律（直读只读挂载的本机文件，不经 HTTP，没有凭据）--------------
+      # 默认 off：两个 platforms/cpa/keys 端点不挂载。本文件（staging 默认栈）
+      # 不挂载对应的宿主机目录，留空/off 在这里不会指向真实数据——staging 若要
+      # 联调 file 模式，需要另外提供挂载（见 server-prod.yaml 的对应变量）。
+      XM_CPA_MODE: ${XM_CPA_MODE:-off}
+      XM_CPA_DATA_DIR: ${XM_CPA_DATA_DIR:-}
+      XM_CPA_FILE_NAME: ${XM_CPA_FILE_NAME:-}
       # --- 凭据登记（XM-CRED0）--------------------------------------------
       # 运营在后台粘贴的上游凭据落在这个目录（<root>/<scope>/<name>），
       # DB 只存指纹与版本。API 是唯一的写方；worker 以只读方式挂同一个卷。
@@ -379,6 +387,22 @@ services:
       XM_ALERT_TELEGRAM_TOKEN: ${XM_ALERT_TELEGRAM_TOKEN:-}
       XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
       XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS: ${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}
+      # --- CPA 周期同步（cpa_sync，XM-CPA0）---------------------------------
+      # CPA = CLI Proxy API + cpa-manager-plus，只读文件后端直读宿主机
+      # usage.sqlite（只读绑定挂载，从不挂载 auths/config.yaml 等含凭据文件）。
+      # 没有 fake 模式：off 是唯一安全的默认——一个没配 XM_CPA_MODE 的环境
+      # 应当保持关闭，而不是每轮同步都对着不存在的挂载路径报错。
+      # 切 file 需要 XM_CPA_DATA_DIR 指向容器内的只读挂载目录；本文件（staging
+      # 默认栈）不挂载对应卷，切 file 前需要另外提供挂载。
+      XM_CPA_MODE: ${XM_CPA_MODE:-off}
+      XM_CPA_DATA_DIR: ${XM_CPA_DATA_DIR:-}
+      XM_CPA_FILE_NAME: ${XM_CPA_FILE_NAME:-}
+      # XM_CPA_SYNC_ENABLED 留空时跟随 XM_CPA_MODE（file 打开、off 关闭）；
+      # 显式 false 可以在 file 模式下临时按下暂停键（宪法 26 条），但不能用
+      # 它在 off 模式下把同步打开——那种矛盾配置会被 worker 拒绝启动。
+      XM_CPA_SYNC_ENABLED: ${XM_CPA_SYNC_ENABLED:-}
+      XM_CPA_SYNC_INTERVAL: ${XM_CPA_SYNC_INTERVAL:-300s}
+      XM_CPA_INSTANCE_ID: ${XM_CPA_INSTANCE_ID:-cpa-cli-proxy-api}
       # --- 凭据登记（XM-CRED0）--------------------------------------------
       # 与 platform-api 同一个卷、同一个根目录；worker 只读——它经
       # secrets.NewFileProvider 按 core.connector_config 里的引用读值，
