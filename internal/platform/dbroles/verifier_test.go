@@ -149,6 +149,18 @@ func TestCatalogQueriesAreSelectOnlyAndPinned(t *testing.T) {
 	}
 }
 
+func TestRoutineCatalogQueryUsesTypeOnlyIdentityArguments(t *testing.T) {
+	lower := strings.ToLower(catalogRoutinesSQL)
+	if strings.Contains(lower, "pg_get_function_identity_arguments") {
+		t.Fatalf("routine identity projection must not include PostgreSQL parameter names: %s", catalogRoutinesSQL)
+	}
+	for _, fragment := range []string{"p.proargtypes", "format_type", "string_agg", "with ordinality"} {
+		if !strings.Contains(lower, fragment) {
+			t.Fatalf("routine identity projection missing type-only fragment %q: %s", fragment, catalogRoutinesSQL)
+		}
+	}
+}
+
 func TestRoutineCatalogQueryNormalizesEmptyACLPrivilegeRows(t *testing.T) {
 	for name, query := range map[string]string{
 		"relation": catalogRelationsSQL,
