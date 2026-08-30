@@ -35,6 +35,25 @@ services:
       XM_OIDC_ROLE_SCOPES: ${XM_OIDC_ROLE_SCOPES:-}
       XM_OIDC_CLOCK_SKEW: ${XM_OIDC_CLOCK_SKEW:-}
       XM_FINANCE_FAKE_SEED: "false"
+      # --- 请求详情 file 模式（XM-REQLOG-MERGE）------------------------------
+      # 容器内路径固定为下面两个默认值，与下方 volumes 的挂载目标一一对应；
+      # 真正切换要不要读 file 模式由 .env 的 XM_REQLOG_MODE 决定（默认继承
+      # launch.yaml 的 off，不随这份 prod 覆盖自动开启——见
+      # docs/runbooks/REQLOG-RECORDER.md 的切换步骤）。
+      XM_REQLOG_DATA_DIR: ${XM_REQLOG_DATA_DIR:-/var/lib/xm/reqlog}
+      XM_REQLOG_TOKENMAP: ${XM_REQLOG_TOKENMAP:-/var/lib/xm/reqlog-tokenmap.json}
+    volumes:
+      # 只读绑定挂载记录代理（cmd/reqlog-recorder，宿主机 systemd 服务）落盘
+      # 的数据目录与令牌映射文件。`:ro` 是这条链路唯一的权限边界——容器内
+      # 是只读文件系统视角，即便应用代码有 bug 也写不了宿主机上的原始数据
+      # （ADR-011：控制面不直写数据面的原始存储）。宿主机路径可由 .env 的
+      # XM_REQLOG_HOST_DATA_DIR / XM_REQLOG_HOST_TOKENMAP 覆盖；默认值对应
+      # 记录代理自己的默认落盘位置（cmd/reqlog-recorder 的 DefaultDataDir /
+      # DefaultTokenMapPath）。这两个宿主机路径在部署这份覆盖的机器上必须
+      # 已经存在，否则 Docker 会把它们当成空目录创建——那样容器能起来，但
+      # 读到的是空的请求列表，不是报错，排查时先看这里。
+      - ${XM_REQLOG_HOST_DATA_DIR:-/root/reqlog/data}:/var/lib/xm/reqlog:ro
+      - ${XM_REQLOG_HOST_TOKENMAP:-/root/reqlog/tokenmap.json}:/var/lib/xm/reqlog-tokenmap.json:ro
 
   platform-worker:
     environment:

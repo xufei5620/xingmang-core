@@ -5,8 +5,8 @@
 | 状态 | **DRAFT（XM-0039）**。字段集合按《请求审计系统实现报告》推导，**未对真实控制台 API 核对** |
 | Connector Key | `reqlog` |
 | Contract Version | `1` |
-| 实现 | 契约与 Fake：`connectors/reqlog`；真实客户端：**只有骨架**（`connectors/reqlog/client.go`，数据方法一律 `not_supported`） |
-| 合规判据 | **必须通过 `connectors/reqlog/contracttest` 套件**（Fake 已通过，21 项） |
+| 实现 | 契约与 Fake：`connectors/reqlog`；HTTP 真实客户端：**只有骨架**（`connectors/reqlog/client.go`，数据方法一律 `not_supported`，见 §5 未决冲突）；**文件后端（XM-REQLOG-MERGE，已完整实现）**：`connectors/reqlog/file_client.go` 的 `NewFileClient`，直读记录代理 `cmd/reqlog-recorder` 落盘的数据，不经 HTTP，见 §10 |
+| 合规判据 | **必须通过 `connectors/reqlog/contracttest` 套件**（Fake 与文件后端均 21/21 项全部通过，渠道/上游/计费经可选能力声明降级，见 §10） |
 | 平台侧入口 | `internal/platform/requestlog`（权限 + 审计 + 错误翻译）；HTTP 层 `internal/platform/httpapi/requests.go` |
 | 依据 | 交接文档 §9.4 请求详情 · `docs/superpowers/plans/2026-08-28-reqlog-integration-proposal.md`（已批准） |
 
@@ -44,6 +44,18 @@ reqlog.health.read              运营健康
 
 每一项都必须 `registry.ParseCapability` 可解析且 `IsWrite() == false`。
 真实客户端在形状核实前返回**空清单**——声明一项没有代码可以兑现的能力就是说谎。
+
+两项**可选**能力（XM-REQLOG-MERGE，见 §10.2）：
+
+```
+reqlog.requests.routing_read    渠道/上游元数据（Channel/Upstream）
+reqlog.requests.billing_read    向用户计费金额（BilledAmount）
+```
+
+磁盘格式本身不采集这两个维度的后端（当前是文件后端）可以不声明；声明了
+就必须给出真实数据（已知零与未知都要覆盖），没声明就必须让对应字段恒为
+未知（空串/`nil`）——两者都由 `contracttest` 的
+`testRoutingAndBillingMetadata` 校验。
 
 ## 3. 数据形状
 
@@ -248,6 +260,13 @@ reqlog 控制台是 `http://127.0.0.1:9300`（回环 + 明文 + Basic Auth，靠
 拿到 `/root/reqlog` 源码或端点清单后，**逐条**核对并把结论写回本表。
 这是本契约与真实实现之间唯一的差异台账。
 
+⚠️ **本表核对的是 HTTP 控制台 API（`connectors/reqlog/client.go` 的 `real`
+模式）**，那条路径仍未打通（§5 的未决冲突未解）。XM-REQLOG-MERGE 拿到了
+桌面端原型的完整源码，但走的是另一条路径——**直读磁盘**（§10 的文件
+后端），不发 HTTP 请求，因此下表里凡是"HTTP 路由/参数名/TLS 落点"相关的项
+（#1、#2、#17、#18）对文件后端**不适用**，仍然是未知数；其余与磁盘格式、
+字段语义相关的项已经从源码逐条核对，结论见 §10，本表相应行同步更新。
+
 | # | 待核对项 | 平台当前假设 | 核对不上的后果 |
 |---|---|---|---|
 | 1 | **列表端点路由与查询参数名** | 未定（real 模式路由留空） | real 模式无法实现 |
@@ -278,3 +297,68 @@ reqlog 控制台是 `http://127.0.0.1:9300`（回环 + 明文 + Basic Auth，靠
 
 本契约**尚未冻结**。真实 API 到位后按 §8 逐条核对、修正 v1 内容、
 把状态改为「冻结」并注明依据。冻结之后再变形状必须发 v2 并保留 v1 兼容期。
+
+## 10. File 后端（XM-REQLOG-MERGE，2026-08-31）
+
+用户在桌面端做的记录代理原型（`reqlogger.go` + `viewer.go`）连同它的部署
+事实一并并入本仓库：代理+存储+清理+令牌映射收编为 `cmd/reqlog-recorder`
+（继续以 systemd 服务跑在宿主机，见 `docs/runbooks/REQLOG-RECORDER.md`），
+落盘格式与解析逻辑抽成共享包 `internal/platform/reqlogformat`（写侧/读侧
+共用同一份 `Record`/`FullRecord` 定义与 SSE/用量解析，避免两处实现各写
+一份、迟早漂开）。`connectors/reqlog` 新增 `NewFileClient` 直读这份数据，
+**不发 HTTP 请求**，从根上绕开了 §5 那条"控制台是回环明文、只读闸要求
+https"的未决冲突——这条路径压根不经过 `connector.Config`/HTTP 通道。
+
+### 10.1 与 §8 清单的对照（已从源码逐条核对，非猜测）
+
+| §8 # | 结论 | 依据 |
+|---|---|---|
+| 1、2 | **不适用**：不发 HTTP，没有路由 | 架构差异，非核对结果 |
+| 3 | `id` = `HHMMSS-NNNNNN`（六位时间+六位序号），落在按天目录内 | `reqlogger.go` 的 `fmt.Sprintf("%s-%06d", ...)`；两个来源共享同一个原子计数器，同日内不重号 |
+| 4 | 不透明游标，offset 语义（文件后端自己实现，见 `encodeCursor`/`decodeCursor`） | 与真实控制台分页无关，不依赖上游 |
+| 5 | `source` 取值确认为小写 `newapi`/`sub2api` | `makeProxy("newapi", ...)` / `makeProxy("sub2api", ...)` 调用点 |
+| 6 | 令牌前缀→用户名**不**由控制台/API 返回，而是记录代理定时 `docker exec ... psql` 从两个上游库只读导出到 `tokenmap.json`，文件后端直接读这份文件 | `reqlogger.go` 的 `refreshTokenMap` |
+| 7 | `ttfb` 缺失表达：磁盘格式本身不区分"未测量"与"测量值恰好 0"——用 `RespSize>0` 反推是否真被测量过（`RespSize==0` 时 `TtfbMs` 必然是未写过的 Go 零值） | 见 `internal/platform/reqlogformat/record.go` 的 `Record.MeasuredTTFB()` 及其单元测试 |
+| 8 | in/out/cache token 恒存在（非指针），确认 | `Record` 结构体的 `InTok`/`OutTok`/`CacheTok` 是 `int`，非指针 |
+| 9 | `status=0` 确认为"没记到"；但发现一个更根本的缺口：若上游连接在**响应头之前**失败，`ErrorHandler` 直接回 502，整条请求完全不落盘（不是记一条 `status=0`）——`status=0` 只出现在响应头已收到、读响应体中途中断的场景 | `makeProxy` 的 `rp.ErrorHandler` 与 `ModifyResponse` 分支 |
+| 12、13 | 装配（`FinalReply`）由**连接器自己做**，不依赖上游；`resp_body` 对流式请求确认是完整原始 SSE 事件流 | `internal/platform/reqlogformat` 的 `ExtractFinalText`；`teeBody` 抄录的是转发前的原始字节 |
+| 14 | 保留期默认 30 天、**现已可配**（`cmd/reqlog-recorder --retention-days`），但连接器侧的 `FileConfig.RetentionDays` 与记录代理的配置是两个独立进程各自的配置，没有自动同步通道——运维需要保持一致 | `config.go`；已写入本次 handoff 的风险清单 |
+| 15 | 确认磁盘记录代理**没有版本号概念**；`NewFileClient.Version()` 返回的是文件后端自定义的格式版本标识 `"file/1"`，不是 reqlog 的版本 | 源码通篇未见版本相关字段/常量 |
+| 16 | 文件后端的 `Health()` 检查数据目录可读 + 最新一天索引可打开（见 `file_client.go`），不是探测端点 | 架构差异 |
+| 17、18 | **不适用**（同 #1、#2） | — |
+| 19 | 确认：单个地址，`X-Real-IP` 优先，否则 `RemoteAddr`（可能带端口） | `clientIP := r.Header.Get("X-Real-IP"); if clientIP == "" { clientIP = r.RemoteAddr }` |
+| 20 | 确认不会重号（见 #3），但文件后端仍按契约要求做 source 匹配校验，跨来源读取明确失败 | `file_client.go` 的 `RequestContent` |
+| 21 | **磁盘 `Record` 结构体没有 channel/upstream 字段**——不是"暂时没接"，是这条数据源根本不采集这个维度。文件后端对 `Channel`/`Upstream` 恒返回空串，且不在 `Capabilities()` 里声明 `reqlog.CapabilityRoutingRead`（见 §2 与 10.2） | 逐字段核对 `reqlogger.go` 的 `Record`/`FullRecord` 定义 |
+| 22 | **磁盘格式同样没有计费字段**。文件后端对 `BilledAmount` 恒返回 `nil`，且不声明 `reqlog.CapabilityBillingRead`（同上） | 同上 |
+| 23 | 由连接器在分页前对完整过滤集合算 `Stats`（见 `file_client.go` 的 `matchedSummaries`），不依赖上游给统计端点 | 架构差异 |
+
+### 10.2 渠道/上游/计费降级为可选能力
+
+`connectors/reqlog/contracttest` 原有的「渠道上游与计费保留未知和已知零」
+（`testRoutingAndBillingMetadata`）断言任何合规实现的样本集里都能找到
+非空的 `Channel`/`Upstream` 与已知零/未知两种 `BilledAmount`——这个假设
+与文件后端读到的真实磁盘格式不符（见 10.1 第 21、22 项：磁盘记录代理
+从不采集这两个维度，逐字段核对 `reqlogger.go` 的结构体定义确认）。
+
+解法不是编数据让子测试变绿，而是把这两个维度升级为**可选能力**
+（XM-REQLOG-MERGE 二轮修订）：
+
+- `ReadCapabilities` 新增 `reqlog.requests.routing_read`（渠道/上游）与
+  `reqlog.requests.billing_read`（计费）两项，`registry.Capability` §2
+  能力清单同步补齐；
+- Fake 仍然声明全部能力（它的样本本来就覆盖这两个维度）；
+- 文件后端的 `Capabilities()` **不**声明这两项——声明一项没有数据能兑现
+  的能力就是说谎，与 `client.go`（HTTP 骨架，形状未核实时给空清单）同一条
+  纪律；
+- `testRoutingAndBillingMetadata` 先读 `Capabilities()`：声明了才要求样本
+  覆盖已知/未知两态，没声明则改为断言该维度**恒为未知**（`Channel`/
+  `Upstream` 恒空、`BilledAmount` 恒 `nil`）——声明了却给不出数据、或没
+  声明却偷偷给出非空值，两种情况都判失败。
+
+`connectors/reqlog/contracttest` 全部 21 项子测试对文件后端现在**全部
+通过**（20 项覆盖恒定能力，第 21 项在"未声明可选能力"分支下验证降级
+行为本身）。
+
+若未来渠道/计费信息确实需要在请求详情页展示，需要另开一条独立的数据源
+（比如从渠道路由日志或计费流水关联查询）并让文件后端声明对应能力——
+不是这条磁盘通道现在就能补的，它能给的只有"记录代理写了什么"。

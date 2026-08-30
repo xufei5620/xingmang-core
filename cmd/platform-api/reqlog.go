@@ -31,6 +31,13 @@ const (
 	reqlogModeFake reqlogMode = "fake"
 	// reqlogModeReal 走真实只读客户端骨架；数据方法目前一律 not_supported。
 	reqlogModeReal reqlogMode = "real"
+	// reqlogModeFile 读记录代理（cmd/reqlog-recorder）落盘的数据（XM-REQLOG-
+	// MERGE）：不经 HTTP，直接只读挂载记录代理的数据目录与 tokenmap.json。
+	// 这条路径不依赖 reqlog 控制台的 HTTP API 形状（那正是 real 模式卡住的
+	// 地方，见 ErrConsoleAPIShapeUnverified 与 contracts/connectors/
+	// reqlog.read.v1.md §5 的未决冲突），因此**在生产可用**——与 fake 不同，
+	// file 模式读的是记录代理写下的真实用户对话，不是编出来的样本。
+	reqlogModeFile reqlogMode = "file"
 	// reqlogModeOff 完全不挂载「请求」两个端点。
 	//
 	// 比 fake 多出来的这一档是必要的：一个没部署 reqlog 的环境，
@@ -51,23 +58,29 @@ func parseReqlogMode(s string) (reqlogMode, error) {
 	switch mode := reqlogMode(strings.ToLower(strings.TrimSpace(s))); mode {
 	case "":
 		return reqlogModeOff, nil
-	case reqlogModeFake, reqlogModeReal, reqlogModeOff:
+	case reqlogModeFake, reqlogModeReal, reqlogModeFile, reqlogModeOff:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("XM_REQLOG_MODE %q: 只接受 off / fake / real", s)
+		return "", fmt.Errorf("XM_REQLOG_MODE %q: 只接受 off / fake / real / file", s)
 	}
 }
 
 // reqlogConfig 是「请求详情」这条链路的配置。
 type reqlogConfig struct {
 	Mode reqlogMode
-	// 以下三项只在 real 模式用到。**只读进配置、不解析**：
+	// 以下四项只在 real 模式用到。**只读进配置、不解析**：
 	// 凭据只经 CredentialRef，明文由 SecretProvider 在拼 Authorization 头的
 	// 那一瞬才出现（ADR-014、宪法 7 条）。
 	Endpoint        string
 	TargetAllowlist []string
 	CredentialRef   string
 	Timeout         time.Duration
+	// 以下两项只在 file 模式用到。都是**路径**，不是凭据——不经
+	// CredentialRef（见 reqlog.FileConfig 的文档：DataDir/TokenMapPath 与
+	// XM_SECRET_ROOT 是同一类基础设施路径，权限边界由只读挂载本身承担，
+	// 不是"向第三方系统认证用的凭据"）。
+	DataDir      string
+	TokenMapPath string
 }
 
 // defaultReqlogTimeout 是单次控制台读取的超时。
@@ -75,6 +88,14 @@ type reqlogConfig struct {
 // 比 sub2api 的 15s 宽一点：这条通道要取回完整 SSE 流，单条记录可以到几十 MB，
 // 而它又不在任何热路径上——一次由人点击触发的详情读取，多等几秒好过读不回来。
 const defaultReqlogTimeout = 30 * time.Second
+
+// defaultReqlogDataDir 是 file 模式下记录代理数据目录在**容器内**的挂载点。
+//
+// 与宿主机路径（记录代理落盘用的 /root/reqlog/data）不是一回事：容器内
+// 路径由 deploy/compose/server-prod.yaml 的只读绑定挂载决定，宿主机那侧
+// 路径可由 .env 的 XM_REQLOG_HOST_DATA_DIR 覆盖，两者故意分成两层——改
+// 宿主机目录位置不需要碰这个默认值。
+const defaultReqlogDataDir = "/var/lib/xm/reqlog"
 
 func reqlogConfigFromEnv(getenv func(string) string) (reqlogConfig, error) {
 	mode, err := parseReqlogMode(getenv("XM_REQLOG_MODE"))
@@ -87,6 +108,14 @@ func reqlogConfigFromEnv(getenv func(string) string) (reqlogConfig, error) {
 		TargetAllowlist: parseHostAllowlist(getenv("XM_REQLOG_TARGET_ALLOWLIST")),
 		CredentialRef:   strings.TrimSpace(getenv("XM_REQLOG_CREDENTIAL_REF")),
 		Timeout:         defaultReqlogTimeout,
+		DataDir:         defaultReqlogDataDir,
+		// TokenMapPath 默认留空而不是猜一个路径：没配就是没有用户名映射
+		// 能力（Username 恒为空串，契约允许的合法状态），不是"用一个大概率
+		// 不存在的路径去连"。
+		TokenMapPath: strings.TrimSpace(getenv("XM_REQLOG_TOKENMAP")),
+	}
+	if v := strings.TrimSpace(getenv("XM_REQLOG_DATA_DIR")); v != "" {
+		c.DataDir = v
 	}
 	if v := strings.TrimSpace(getenv("XM_REQLOG_TIMEOUT")); v != "" {
 		d, err := time.ParseDuration(v)
@@ -138,6 +167,10 @@ func requestLogsOrNil(s *requestlog.Service) httpapi.RequestLogQuerier {
 // 生产禁 fake：与 worker 那边对 Sub2API 的处理同一条纪律，但理由更硬一档。
 // 那边的 fake 会让看板上几个数字是假的；这里的 fake 会让一个标着真实用户名的
 // 详情页显示一段编出来的对话——有人会拿它去回复客诉、去做风控判断。
+//
+// **file 不在这条"生产禁"名单里**：它读的是记录代理落盘的真实数据，
+// 与 real（目前读不出数据，见 newReqlogClient 的注释）和 fake（编造数据）
+// 都不一样，是当前唯一能在生产提供真实请求详情的模式。
 func newRequestLogService(
 	cfg reqlogConfig, environment string, sink *audit.Store, logger *slog.Logger,
 ) (*requestlog.Service, error) {
@@ -152,7 +185,7 @@ func newRequestLogService(
 		if environment == "production" {
 			return nil, fmt.Errorf(
 				"XM_REQLOG_MODE=fake 不允许在生产环境使用：请求详情页会把编造的对话" +
-					"显示成真实用户的问答。生产请配 real，或显式设为 off")
+					"显示成真实用户的问答。生产请配 real 或 file，或显式设为 off")
 		}
 		logger.Warn("reqlog_fake_mode",
 			slog.String("module", "platform.api"),
@@ -166,9 +199,41 @@ func newRequestLogService(
 		}
 		return requestlog.NewService(client, sink)
 
+	case reqlogModeFile:
+		client, err := newReqlogFileClient(cfg, logger)
+		if err != nil {
+			return nil, err
+		}
+		return requestlog.NewService(client, sink)
+
 	default:
 		return nil, fmt.Errorf("未知的 reqlog 模式 %q", cfg.Mode)
 	}
+}
+
+// newReqlogFileClient 构造只读文件后端客户端（XM-REQLOG-MERGE）。
+//
+// 配置不全时**启动即拒**，与 real 模式同一条纪律（见 newReqlogClient 的
+// 注释）：这是一个由人点击触发的只读端点，半套配置起来的症状是"点进去
+// 报错，查半天发现挂载路径是空的"，不如启动时就说清楚。
+func newReqlogFileClient(cfg reqlogConfig, logger *slog.Logger) (requestlog.Client, error) {
+	if strings.TrimSpace(cfg.DataDir) == "" {
+		return nil, fmt.Errorf("XM_REQLOG_MODE=file 需要 XM_REQLOG_DATA_DIR 非空")
+	}
+	client, err := reqlog.NewFileClient(reqlog.FileConfig{
+		DataDir:      cfg.DataDir,
+		TokenMapPath: cfg.TokenMapPath,
+		Logger:       logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if cfg.TokenMapPath == "" {
+		logger.Warn("reqlog_file_mode_no_tokenmap",
+			slog.String("module", "platform.api"),
+			slog.String("detail", "XM_REQLOG_TOKENMAP 未配置：请求详情里的用户名将恒为空串"))
+	}
+	return client, nil
 }
 
 // newReqlogClient 构造真实只读客户端。

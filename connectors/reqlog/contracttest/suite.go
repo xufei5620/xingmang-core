@@ -124,8 +124,23 @@ func testEmptyStatsHaveNoAverage(t *testing.T, newClient Factory) {
 	}
 }
 
+// testRoutingAndBillingMetadata 校验渠道/上游元数据与计费金额，但只在
+// 客户端**声明了**对应能力（reqlog.CapabilityRoutingRead /
+// reqlog.CapabilityBillingRead）时才要求样本覆盖——这两项是可选能力，
+// 磁盘格式本身不采集这个维度的后端（文件后端，见
+// contracts/connectors/reqlog.read.v1.md §10）可以不声明，此时改为断言
+// 该维度**恒为未知**（Channel/Upstream 恒空、BilledAmount 恒 nil），
+// 而不是要求它凭空生产磁盘上从未有过的数据。声明了却给不出、或没声明却
+// 偷偷给出，两者都判失败——"能力清单"因此仍然是可验证的事实。
 func testRoutingAndBillingMetadata(t *testing.T, newClient Factory) {
 	c := newClient(reqlog.FakeOptions{})
+	caps, err := c.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	hasRouting := hasCapability(caps, reqlog.CapabilityRoutingRead)
+	hasBilling := hasCapability(caps, reqlog.CapabilityBillingRead)
+
 	items := append(listAll(t, c, reqlog.SourceSub2API), listAll(t, c, reqlog.SourceNewAPI)...)
 	sawKnownZero, sawUnknown, sawRouting := false, false, false
 	for _, item := range items {
@@ -136,6 +151,11 @@ func testRoutingAndBillingMetadata(t *testing.T, newClient Factory) {
 			sawUnknown = true
 			continue
 		}
+		if !hasBilling {
+			t.Fatalf("记录 %s 未声明 %s 能力，却返回了非 nil 的 BilledAmount："+
+				"不采集这个维度的后端必须让金额恒为未知，不能声明不支持又偷偷给出数据",
+				item.ID, reqlog.CapabilityBillingRead)
+		}
 		if err := item.BilledAmount.Validate(); err != nil {
 			t.Fatalf("记录 %s 的计费金额非法: %v", item.ID, err)
 		}
@@ -143,13 +163,34 @@ func testRoutingAndBillingMetadata(t *testing.T, newClient Factory) {
 			sawKnownZero = true
 		}
 	}
-	if !sawRouting {
-		t.Fatal("样本里没有渠道/上游元数据")
+
+	if hasRouting {
+		if !sawRouting {
+			t.Fatal("声明了 routing_read 能力，样本里却没有渠道/上游元数据")
+		}
+	} else {
+		t.Logf("未声明 %s：跳过渠道/上游元数据断言（磁盘格式本身不采集这个维度）",
+			reqlog.CapabilityRoutingRead)
 	}
-	if !sawKnownZero || !sawUnknown {
-		t.Fatalf("计费样本必须同时覆盖已知 0 与未知: knownZero=%v unknown=%v",
-			sawKnownZero, sawUnknown)
+
+	if hasBilling {
+		if !sawKnownZero || !sawUnknown {
+			t.Fatalf("声明了 billing_read 能力，计费样本必须同时覆盖已知 0 与未知: knownZero=%v unknown=%v",
+				sawKnownZero, sawUnknown)
+		}
+	} else {
+		t.Logf("未声明 %s：已确认全部样本 BilledAmount 为 nil（未知，不冒充已知 0）",
+			reqlog.CapabilityBillingRead)
 	}
+}
+
+func hasCapability(caps []registry.Capability, want registry.Capability) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 // listAll 把某个来源的全部记录翻完，供多条断言复用。

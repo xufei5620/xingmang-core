@@ -63,15 +63,41 @@ const (
 // 我们压根没抄它。
 var Sources = []string{SourceNewAPI, SourceSub2API}
 
+// CapabilityRoutingRead / CapabilityBillingRead 是两项**可选**能力
+// （XM-REQLOG-MERGE）：渠道/上游元数据（RequestLogSummary.Channel/Upstream）
+// 与向用户计费金额（RequestLogSummary.BilledAmount）。
+//
+// 单独拆出来而不是并进 ReadCapabilities 恒定声明的那四项，理由是文件后端
+// （connectors/reqlog/file_client.go 的 NewFileClient）逐字段核对过磁盘记录
+// 代理的 Record/FullRecord 结构体后确认：**这两个维度磁盘格式本身完全不
+// 采集**——不是"暂时没接"，是这条数据源从不产出这两类数据（见
+// contracts/connectors/reqlog.read.v1.md §10.1 第 21、22 项）。
+//
+// 不采集这个维度的后端**可以不声明**对应能力，contracttest 据此把断言收窄
+// 成"声明了才要求样本覆盖"，而不是让每个未来的只读后端都被绑定一份
+// Fake 碰巧具备、磁盘数据源却给不出的能力。声明了却给不出数据（或没声明
+// 却偷偷给出非 nil 值）都会被 contracttest 判失败——"能力清单"因此仍然是
+// 可验证的事实，不是口头承诺。
+const (
+	CapabilityRoutingRead registry.Capability = "reqlog.requests.routing_read"
+	CapabilityBillingRead registry.Capability = "reqlog.requests.billing_read"
+)
+
 // ReadCapabilities 是本连接器的只读能力清单。
 //
 // 每一项都必须能被 registry.ParseCapability 解析且 IsWrite() 为 false——
 // contracttest 会断言这一点，让「只读」成为可验证属性而非口头承诺。
+//
+// 最后两项（CapabilityRoutingRead / CapabilityBillingRead）是可选能力：
+// 磁盘格式不采集这个维度的后端（当前是文件后端）可以从自己的 Capabilities()
+// 返回值里去掉它们，不算"能力少于清单"之外的额外违例——见两个常量的说明。
 var ReadCapabilities = []registry.Capability{
 	"reqlog.service.version_read",
 	"reqlog.requests.read",
 	"reqlog.request.content_read",
 	"reqlog.health.read",
+	CapabilityRoutingRead,
+	CapabilityBillingRead,
 }
 
 // Snapshot 是每个读取结果都必须携带的新鲜度元数据（规格 §9.1）。
