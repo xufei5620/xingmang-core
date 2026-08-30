@@ -12,6 +12,9 @@ import { ChannelsPanel } from "../components/ChannelsPanel";
 import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
 import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
 import { assuranceSubTab } from "../components/PlatformAssurancePanel";
+import { cpaAssuranceSubTab } from "../components/CPAAssurancePanel";
+import { CPAKeysPanel } from "../components/CPAKeysPanel";
+import { CPAOverviewPanel } from "../components/CPAOverviewPanel";
 import { financeSubTab } from "../components/PlatformFinancePanel";
 import { PlatformAlertsPanel } from "../components/PlatformAlertsPanel";
 import { PlatformCredentialsPanel } from "../components/PlatformCredentialsPanel";
@@ -231,9 +234,16 @@ function subTabContent(
 ): ReactNode | undefined {
   switch (tab.value) {
     case "model":
-      // 渠道保障：UI 蓝图态。布局与文案照原型，数据一行都没有——
+      // CPA 的"渠道保障"读的是 codex_inspection 账号巡检（真实数据，
+      // XM-CPA0），与 Sub2API/NewAPI 那套仍是纯 UI 蓝图的模型路由验证
+      // 完全是两回事，只是落在同一个页签位置——只判平台，先问 CPA 有没有
+      // 接管这个子页签，没有（probes/history）才落回共享蓝图。
+      // 其余平台：UI 蓝图态。布局与文案照原型，数据一行都没有——
       // 交接文档 §9.7 明写「真实探针不能提前冒充已上线」
-      return assuranceSubTab(subId);
+      return (
+        (entry.spec.serviceType === "cpa" ? cpaAssuranceSubTab(subId) : undefined) ??
+        assuranceSubTab(subId)
+      );
     case "finance":
       return financeSubTab(entry.spec.serviceType, subId);
     default:
@@ -255,6 +265,10 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
   const { spec } = entry;
   switch (tab.value) {
     case "overview":
+      // CPA 没有原型可对齐（它在原型里是占位平台）——XM-CPA0 从观测形状
+      // 直接搭了一版真实概览，判在 platformHasPrototypeOverview 之前，
+      // 不然会落进"没有原型"的蓝图/占位分支
+      if (spec.serviceType === "cpa") return <CPAOverviewPanel />;
       // 只有 sub2api / newapi 有按原型对齐的概览（两版结构还不一样）。
       // **不匹配时落回蓝图那条路**：服务器的概览由 UI 第 6 片画了蓝图，
       // 在这里截胡会把它悄悄换成一屏通用指标卡（与 suppliers 同一类错误）
@@ -284,6 +298,16 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
           ) : (
             <NewApiChannelsPanel />
           );
+        case "cpa":
+          // 渠道管理保持"未接入"，但写明具体缺什么：usage.sqlite 只有用量与
+          // 账号巡检，没有渠道 ↔ 模型映射或供给侧配置的只读接口
+          // （contracts/connectors/cpa.read.v1.md，XM-CPA0 第一片范围之外）。
+          return (
+            <EmptyState
+              title="渠道管理尚未接入"
+              description="CPA 只读到 usage.sqlite 的用量与账号巡检结果，没有渠道 ↔ 模型映射或供给侧配置的只读接口；需要 CLI Proxy API / cpa-manager-plus 提供这部分配置的只读通道才能接入这一格。"
+            />
+          );
         default:
           return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
       }
@@ -302,6 +326,11 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
         fallbackTabContent(entry, tab)
       );
     case "users":
+      // CPA 原型字面保留"用户管理"这个名字（ADMIN-IA §8.6 裁定 #5），但它的
+      // "用户"其实是 API Key，不是终端用户身份——platformusers 域明确不认
+      // "cpa"（platformHasUsers 恒为 false），所以判在它之前，走完全不同的
+      // 组件 / 数据源（connectors/cpa 逐 key 用量，XM-CPA0）。
+      if (spec.serviceType === "cpa") return <CPAKeysPanel />;
       // 逐用户资金明细。邮箱在**连接器**层就打了码，平台不持有明文;
       // 逐用户充值/消费在 v1 上游契约里给不出，面板里逐格说明（原型 warnbar）
       return platformHasUsers(spec.serviceType) ? (
@@ -326,6 +355,20 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       ) : (
         fallbackTabContent(entry, tab)
       );
+    case "finance":
+      // CPA 的"支付与财务"保持"未接入"，但写明缺什么：usage.sqlite 只记
+      // 用量与折算成本，没有支付订单、充值或对账数据（XM-CPA0 范围之外）。
+      // 其余平台没有专属面板也没有蓝图，落回既有的 fallbackTabContent
+      // （目前只有服务器有 finance 蓝图，行为与改动前逐字一致）。
+      if (spec.serviceType === "cpa") {
+        return (
+          <EmptyState
+            title="支付与财务尚未接入"
+            description="usage.sqlite 只记录用量与折算成本，没有支付订单、充值或对账数据；CPA 目前没有可用的支付/财务数据源。"
+          />
+        );
+      }
+      return fallbackTabContent(entry, tab);
     default:
       return fallbackTabContent(entry, tab);
   }

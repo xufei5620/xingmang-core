@@ -239,6 +239,33 @@ type Config struct {
 	// revision 快照；仅测试/迁移过渡可使用上面的静态字段。
 	RunwayThresholdProvider finance.RunwayThresholdProvider
 
+	// CPASyncEnabled 决定是否注册 CPA 周期同步任务（XM-CPA0）。
+	//
+	// 与其他采集开关不同，它的零值 false 就是 DefaultConfig 的默认值——
+	// CPA 没有 fake 模式，file 模式需要一个宿主机只读挂载才有意义，所以
+	// 「默认就采」在这里不成立：一个没配 XM_CPA_MODE 的环境应当保持关闭，
+	// 而不是每轮同步都失败。cmd/platform-worker/config.go 按 XM_CPA_MODE
+	// 是否为 file 来决定要不要打开它。它同时是这条链路的停用开关（宪法 26 条）。
+	CPASyncEnabled bool
+	// CPASyncInterval 是同步周期，默认 DefaultCPASyncInterval。
+	CPASyncInterval time.Duration
+	// CPASyncRunOnStart 让进程起来就先采一次，而不是干等一个周期。
+	CPASyncRunOnStart bool
+	// CPASyncRunID 仅供集成测试隔离，生产必须留空。
+	CPASyncRunID string
+	// CPAMode 选择 off / file；空值按 off 处理（见 ParseCPAMode）。
+	CPAMode CPAMode
+	// CPAInstanceID 是观测的 Source，默认 DefaultCPAInstanceID。
+	CPAInstanceID string
+	// CPADataDir 是只读挂载目录（含 usage.sqlite 及其 -wal/-shm），
+	// file 模式必填。不经 CredentialRef：这是一条挂载路径，不是向第三方
+	// 系统认证的凭据（与 connectors/reqlog.FileConfig.DataDir 同一条纪律，
+	// 见该类型的注释）。
+	CPADataDir string
+	// CPAFileName 覆盖 DataDir 内的数据库文件名；空值回落到连接器自己的默认值
+	// （"usage.sqlite"）。
+	CPAFileName string
+
 	// ConnectorConfigs 是接入配置（模式 / 端点 / allowlist / 凭据引用）的
 	// 运行时来源：core.connector_config（XM-CRED0）。
 	//
@@ -366,6 +393,14 @@ func DefaultConfig() Config {
 		ConnectorProbeEnabled:    true,
 		ConnectorProbeInterval:   DefaultConnectorProbeInterval,
 		ConnectorProbeRunOnStart: true,
+		// CPA 默认关闭（XM-CPA0）：off 是唯一不需要任何配置就安全的状态——
+		// 没有 fake 模式可以垫底，打开却没配 CPADataDir 只会让每轮同步都写一条
+		// SyncFailed。cmd/platform-worker/config.go 按 XM_CPA_MODE=file 显式打开。
+		CPASyncEnabled:    false,
+		CPASyncInterval:   DefaultCPASyncInterval,
+		CPASyncRunOnStart: true,
+		CPAMode:           CPAModeOff,
+		CPAInstanceID:     DefaultCPAInstanceID,
 	}
 }
 
@@ -458,6 +493,15 @@ func (c Config) normalized() Config {
 	}
 	if c.Logger == nil {
 		c.Logger = structuredDefaultLogger()
+	}
+	if c.CPASyncInterval == 0 {
+		c.CPASyncInterval = defaults.CPASyncInterval
+	}
+	if strings.TrimSpace(string(c.CPAMode)) == "" {
+		c.CPAMode = defaults.CPAMode
+	}
+	if strings.TrimSpace(c.CPAInstanceID) == "" {
+		c.CPAInstanceID = defaults.CPAInstanceID
 	}
 	// Do not infer an enabled archive mode from a partially populated literal.
 	// The archive config has its own fail-closed defaults and validation.
@@ -662,6 +706,26 @@ func (c Config) validate() error {
 		// all replicas share one unique probe record and each round only
 		// probes once.
 		return fmt.Errorf("connector probe run ID must not be set in production")
+	}
+	if _, err := ParseCPAMode(string(c.CPAMode)); err != nil {
+		return err
+	}
+	if c.CPASyncRunID != "" && c.Environment == "production" {
+		// 与 Sub2APISyncRunID 同一条理由：RunID 只服务于集成测试隔离。
+		return fmt.Errorf("cpa sync run ID must not be set in production")
+	}
+	if c.CPASyncEnabled && c.CPAMode != CPAModeFile {
+		// off 是硬性的停用状态，不是「暂时没配」：即便有人误把 Enabled 设成
+		// true（比如手写 Config 字面量做集成测试），也不能在 mode=off 时
+		// 注册一个每轮都必然失败的任务——那会把 cpa.* 四条指标的新鲜度看板
+		// 从「未接入」变成「持续报错」，对运维是噪音而不是信号。
+		return fmt.Errorf("cpa sync 已启用但模式不是 file（当前 %q）：off 模式下必须保持同步关闭", c.CPAMode)
+	}
+	if c.CPASyncEnabled && c.CPASyncInterval < time.Second {
+		return fmt.Errorf("cpa sync interval %s is below River's one-second minimum", c.CPASyncInterval)
+	}
+	if c.CPASyncEnabled && strings.TrimSpace(c.CPADataDir) == "" {
+		return fmt.Errorf("cpa sync 已启用（file 模式）但 CPADataDir 为空")
 	}
 	return nil
 }
@@ -1009,6 +1073,33 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			return nil, err
 		}
 		periodic = append(periodic, connectorProbePeriodic)
+	}
+
+	if cfg.CPASyncEnabled {
+		// 仓储在这里从既有连接池构造，同 Sub2API/NewAPI 的理由：任务只依赖
+		// ObservationStore 接口。客户端工厂只在 mode=file 时才真的打开
+		// usage.sqlite——validate() 已经保证 Enabled 时 mode 只能是 file。
+		river.AddWorker(workers, NewCPASyncWorker(CPASyncOptions{
+			Logger:           cfg.Logger,
+			Environment:      cfg.Environment,
+			InstanceID:       cfg.CPAInstanceID,
+			Mode:             cfg.CPAMode,
+			ExpectedInterval: cfg.CPASyncInterval,
+			Store:            ops.NewStore(pool),
+			NewClient:        NewCPAClientFactory(cfg.CPAMode, cfg.CPADataDir, cfg.CPAFileName),
+		}))
+		cpaPeriodic, err := newManifestPeriodicJob(
+			CPASyncJobKind, cfg.CPASyncInterval, cfg.CPASyncRunOnStart,
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := CPASyncArgs{RunID: cfg.CPASyncRunID}
+				opts := args.InsertOpts()
+				return args, &opts
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, cpaPeriodic)
 	}
 
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{

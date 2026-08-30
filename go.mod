@@ -8,6 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/minio/minio-go/v7 v7.3.0
+	github.com/ncruces/go-sqlite3 v0.32.0
 	github.com/riverqueue/river v0.45.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.45.0
 	github.com/riverqueue/river/rivertype v0.45.0
@@ -37,7 +38,6 @@ require (
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/ncruces/go-sqlite3 v0.32.0 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/pganalyze/pg_query_go/v6 v6.2.2 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect

@@ -657,6 +657,83 @@ func TestConfigFromEnvDefaultsReqlogMetricsToOff(t *testing.T) {
 	}
 }
 
+// TestConfigFromEnvDefaultsCPAToOff：一个没配 XM_CPA_MODE 的环境必须保持
+// 关闭——CPA 没有 fake 模式垫底，默认打开只会让每轮同步都对着一个不存在的
+// 挂载路径报错（同 jobs.DefaultConfig 的理由）。
+func TestConfigFromEnvDefaultsCPAToOff(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = true, want false when XM_CPA_MODE is unset")
+	}
+	if cfg.CPAMode != jobs.CPAModeOff {
+		t.Fatalf("CPAMode = %q, want off", cfg.CPAMode)
+	}
+}
+
+func TestConfigFromEnvFileModeEnablesSyncByDefault(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":     "staging",
+		"XM_CPA_MODE":     "file",
+		"XM_CPA_DATA_DIR": "/var/lib/xm/cpa",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = false, want true when XM_CPA_MODE=file")
+	}
+	if cfg.CPADataDir != "/var/lib/xm/cpa" {
+		t.Fatalf("CPADataDir = %q, want /var/lib/xm/cpa", cfg.CPADataDir)
+	}
+}
+
+func TestConfigFromEnvCPASyncEnabledOverrideCanOnlyDisable(t *testing.T) {
+	pauseValues := map[string]string{
+		"ENVIRONMENT":         "staging",
+		"XM_CPA_MODE":         "file",
+		"XM_CPA_DATA_DIR":     "/var/lib/xm/cpa",
+		"XM_CPA_SYNC_ENABLED": "false",
+	}
+	cfg, err := configFromEnv(func(key string) string { return pauseValues[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = true, want false (explicit override must be able to pause file mode)")
+	}
+
+	forceOnValues := map[string]string{
+		"ENVIRONMENT":         "staging",
+		"XM_CPA_MODE":         "off",
+		"XM_CPA_SYNC_ENABLED": "true",
+	}
+	cfg, err = configFromEnv(func(key string) string { return forceOnValues[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPAMode != jobs.CPAModeOff || !cfg.CPASyncEnabled {
+		t.Fatalf("configFromEnv should surface the requested (off, enabled) combination as-is: %+v", cfg)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidCPAValues(t *testing.T) {
+	for key, value := range map[string]string{
+		"XM_CPA_MODE":          "bogus",
+		"XM_CPA_SYNC_ENABLED":  "maybe",
+		"XM_CPA_SYNC_INTERVAL": "not-a-duration",
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", key: value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q should fail", key, value)
+		}
+	}
+}
+
 // TestConfigFromEnvReadsReqlogMetricsFileMode 覆盖与 platform-api 共享同一个
 // 环境变量名这条契约：XM_REQLOG_MODE=file 时 worker 侧必须认出 file。
 func TestConfigFromEnvReadsReqlogMetricsFileMode(t *testing.T) {

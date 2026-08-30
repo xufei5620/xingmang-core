@@ -114,6 +114,12 @@ type Deps struct {
 	// OpsAlertDelivery 是运行保障页展示的告警投递配置状态（只回布尔值，
 	// 不回引用或地址；见 AlertDeliveryStatus 的注释）。
 	OpsAlertDelivery AlertDeliveryStatus
+	// CPAKeys 为 nil 时 /platforms/cpa/keys 不挂载（XM-CPA0，
+	// XM_CPA_MODE!=file）。与 PlatformUsers 同一条纪律：端点不存在（404）
+	// 比端点存在却一调就 500 诚实。CPA 不复用 PlatformUsers/PlatformUserKeys
+	// 那组依赖——它的"用户"是 API key 而不是终端用户身份，走的是完全不同的
+	// 只读连接器（connectors/cpa），不是 platformusers 域。
+	CPAKeys CPAKeysQuerier
 }
 
 // NewRouter 装配 Platform API 路由。
@@ -275,6 +281,19 @@ func NewRouter(d Deps) http.Handler {
 			if d.PlatformOrders != nil {
 				api.With(RequireScope(finance.ScopeRead)).
 					Get("/platforms/{platform}/orders", ListPlatformOrdersHandler(d.PlatformOrders))
+			}
+
+			// CPA 逐 key 用量（XM-CPA0）。路径写死 "cpa" 而不是 {platform}：
+			// 这不是给全体被管平台复用的通用族——数据源是 connectors/cpa
+			// 直读的 usage.sqlite，不经 platformusers 那套 Service/Client
+			// 装配（CPA 没有终端用户身份，只有 API key，platformusers.
+			// ParseSource 明确不认它，见 ScopeCPAKeysRead 的注释）。
+			//
+			// 没有配 CPA 文件后端的部署不挂载：端点不存在（404）比端点存在
+			// 却一调就 500 诚实。
+			if d.CPAKeys != nil {
+				api.With(RequireScope(ScopeCPAKeysRead)).
+					Get("/platforms/cpa/keys", ListCPAKeysHandler(d.CPAKeys))
 			}
 
 			// 凭据登记与连接器配置（XM-CRED0）。两个 scope **都不复用 finance.read**：

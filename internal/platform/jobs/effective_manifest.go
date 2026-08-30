@@ -54,7 +54,7 @@ func BuildEffectiveManifest(cfg Config, manifest JobManifest) (EffectiveJobManif
 		return EffectiveJobManifest{}, "", fmt.Errorf("effective job manifest: production RunID must be empty")
 	}
 
-	// Resolve only the schedule/enable fields needed by the six registered jobs.
+	// Resolve only the schedule/enable fields needed by the nine registered jobs.
 	// Calling normalized preserves the existing zero-value defaults without
 	// changing any runtime registration behavior.
 	cfg = cfg.normalized()
@@ -113,13 +113,15 @@ func effectiveJobConfig(cfg Config, id string) (enabled, runOnStart bool, interv
 		return cfg.ReqlogMetricsMode == ReqlogMetricsModeFile, cfg.ReqlogMetricsRunOnStart, cfg.ReqlogMetricsInterval, "XM_REQLOG_METRICS_INTERVAL", nil
 	case ConnectorProbeJobKind:
 		return cfg.ConnectorProbeEnabled, cfg.ConnectorProbeRunOnStart, cfg.ConnectorProbeInterval, "XM_CONNECTOR_PROBE_INTERVAL", nil
+	case CPASyncJobKind:
+		return cfg.CPASyncEnabled, cfg.CPASyncRunOnStart, cfg.CPASyncInterval, "XM_CPA_SYNC_INTERVAL", nil
 	default:
 		return false, false, 0, "", fmt.Errorf("effective job manifest: unknown job %q", id)
 	}
 }
 
 func productionRunID(cfg Config) string {
-	for _, value := range []string{cfg.HeartbeatRunID, cfg.Sub2APISyncRunID, cfg.NewAPISyncRunID, cfg.FinanceCollectRunID, cfg.RetentionRunID, cfg.AlertEvaluateRunID, cfg.ReqlogMetricsRunID, cfg.ConnectorProbeRunID} {
+	for _, value := range []string{cfg.HeartbeatRunID, cfg.Sub2APISyncRunID, cfg.NewAPISyncRunID, cfg.FinanceCollectRunID, cfg.RetentionRunID, cfg.AlertEvaluateRunID, cfg.ReqlogMetricsRunID, cfg.ConnectorProbeRunID, cfg.CPASyncRunID} {
 		if strings.TrimSpace(value) != "" {
 			return value
 		}

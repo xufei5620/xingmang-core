@@ -42,6 +42,12 @@ services:
       # docs/runbooks/REQLOG-RECORDER.md 的切换步骤）。
       XM_REQLOG_DATA_DIR: ${XM_REQLOG_DATA_DIR:-/var/lib/xm/reqlog}
       XM_REQLOG_TOKENMAP: ${XM_REQLOG_TOKENMAP:-/var/lib/xm/reqlog-tokenmap.json}
+      # --- CPA 逐 key 用量 file 模式（XM-CPA0）--------------------------------
+      # 容器内路径固定为下面的默认值，与下方 volumes 的挂载目标一一对应；
+      # 真正切换要不要读 file 模式由 .env 的 XM_CPA_MODE 决定（默认继承
+      # launch.yaml 的 off，不随这份 prod 覆盖自动开启——与 XM_REQLOG_MODE
+      # 同一条纪律）。
+      XM_CPA_DATA_DIR: ${XM_CPA_DATA_DIR:-/var/lib/xm/cpa}
     volumes:
       # 只读绑定挂载记录代理（cmd/reqlog-recorder，宿主机 systemd 服务）落盘
       # 的数据目录与令牌映射文件。`:ro` 是这条链路唯一的权限边界——容器内
@@ -54,6 +60,14 @@ services:
       # 读到的是空的请求列表，不是报错，排查时先看这里。
       - ${XM_REQLOG_HOST_DATA_DIR:-/root/reqlog/data}:/var/lib/xm/reqlog:ro
       - ${XM_REQLOG_HOST_TOKENMAP:-/root/reqlog/tokenmap.json}:/var/lib/xm/reqlog-tokenmap.json:ro
+      # 只读绑定挂载 cpa-manager-plus 自己的 usage.sqlite 所在**整个目录**
+      # （不是单个文件）：WAL 模式的 SQLite 读者需要同目录下 -wal/-shm 兄弟
+      # 文件的读权限，只挂 .sqlite 本身会让读取在 checkpoint 前后不稳定
+      # （见 connectors/cpa 包文档 §2）。**绝不**与 /root/cpa-stack/cpa/auths
+      # 或 config.yaml 混在一起挂——那两个含上游 OAuth 令牌与 API key，凭据
+      # 不进平台容器（宪法 7 条）。宿主机路径可由 XM_CPA_HOST_DATA_DIR 覆盖；
+      # 默认值对应 cpa-manager-plus 自己的落盘位置。
+      - ${XM_CPA_HOST_DATA_DIR:-/root/cpa-stack/cpam-data}:/var/lib/xm/cpa:ro
 
   platform-worker:
     environment:
@@ -80,6 +94,12 @@ services:
       # 记录代理的环境本来就该让这三张卡片如实缺席，而不是被这份 prod 覆盖
       # 强行要求配置一个不存在的目录。
       XM_REQLOG_DATA_DIR: ${XM_REQLOG_DATA_DIR:-/var/lib/xm/reqlog}
+      # --- CPA 周期同步（cpa_sync，XM-CPA0）----------------------------------
+      # 没有 fake 模式可选，因此不像上面几条那样用 `:?` 强制显式选择——
+      # off 本身就是生产的合法状态（还没接入这条数据源）。真正切换到 file
+      # 由 .env 的 XM_CPA_MODE 决定，默认继承 launch.yaml 的 off。
+      XM_CPA_DATA_DIR: ${XM_CPA_DATA_DIR:-/var/lib/xm/cpa}
+      XM_CPA_INSTANCE_ID: ${XM_CPA_INSTANCE_ID:-cpa-cli-proxy-api}
     volumes:
       # 只读绑定挂载记录代理落盘的数据目录——与 platform-api 挂载的是同一份
       # 宿主机路径（XM_REQLOG_HOST_DATA_DIR，默认 /root/reqlog/data），但
@@ -87,6 +107,10 @@ services:
       # 不解析 token_prefix 到用户名，没有理由让这个只读凭据映射文件的访问面
       # 多一个容器。挂载语义与权限边界见 platform-api 服务块的同款注释。
       - ${XM_REQLOG_HOST_DATA_DIR:-/root/reqlog/data}:/var/lib/xm/reqlog:ro
+      # 与 platform-api 同一个宿主机目录、同一条只读纪律（见上方 platform-api
+      # 的挂载注释）——worker 需要自己独立的只读句柄来跑周期同步，两个容器
+      # 各挂各的，互不影响。
+      - ${XM_CPA_HOST_DATA_DIR:-/root/cpa-stack/cpam-data}:/var/lib/xm/cpa:ro
 
   web:
     environment:

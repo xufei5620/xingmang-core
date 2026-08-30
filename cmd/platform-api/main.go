@@ -252,6 +252,17 @@ func main() {
 		NewAPIDefaults:  loadNewAPIPaymentsDefaults(),
 	})
 
+	// CPA 逐 key 用量（XM-CPA0）。与 reqlog file 模式同一条纪律：配错了就
+	// 拒绝启动；没启用（off）不算错误，路由据此不挂载
+	// /platforms/cpa/keys。这条链路只读一份只读挂载的本机 SQLite 文件，
+	// 没有凭据要处理。
+	cpaKeys, err := newCPAKeysQuerier(cfg.CPA, logger)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "cpa_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:         logger,
 		Service:        "platform-api",
@@ -287,6 +298,8 @@ func main() {
 		PlatformUserKeys:       platformUserKeysOrNil(platformUserService),
 		// nil 时"支付与财务"逐笔订单端点不挂载（见 httpapi.Deps.PlatformOrders）
 		PlatformOrders: platformPaymentsOrNil(platformPaymentsQuerier),
+		// nil 时 /platforms/cpa/keys 不挂载（见 httpapi.Deps.CPAKeys）
+		CPAKeys: cpaKeys,
 		// 凭据登记的读与写共用同一个仓储：清单里只有指纹与可用性，没有值
 		Credentials: credentialStore,
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler

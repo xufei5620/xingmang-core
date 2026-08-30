@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xufei5620/xingmang-platform/connectors/cpa"
 	"github.com/xufei5620/xingmang-platform/connectors/invoice"
 	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/connectors/newapi"
@@ -73,6 +74,11 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		jobs.MetricNewAPIConnectorHealth,
 		jobs.MetricPlatformHeartbeat,
 		jobs.MetricRetentionLastRun,
+		// CPA 只读文件后端（XM-CPA0，connectors/cpa）。
+		cpa.MetricRequestsDaily,
+		cpa.MetricCostDaily,
+		cpa.MetricKeysUsage,
+		cpa.MetricAccountsHealth,
 	}
 
 	for _, key := range fromContracts {

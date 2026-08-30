@@ -23,7 +23,7 @@ func readJobManifestContract(t *testing.T) []byte {
 	return raw
 }
 
-func TestManifestCoversExactlyEightRegisteredPeriodicJobs(t *testing.T) {
+func TestManifestCoversExactlyNineRegisteredPeriodicJobs(t *testing.T) {
 	manifest, hash, err := LoadJobManifest(readJobManifestContract(t))
 	if err != nil {
 		t.Fatalf("load frozen manifest: %v", err)
@@ -32,8 +32,8 @@ func TestManifestCoversExactlyEightRegisteredPeriodicJobs(t *testing.T) {
 		t.Fatal("manifest hash must not be empty")
 	}
 	registered := RegisteredPeriodicJobSpecs()
-	if len(registered) != 8 {
-		t.Fatalf("registered periodic jobs = %d, want 8", len(registered))
+	if len(registered) != 9 {
+		t.Fatalf("registered periodic jobs = %d, want 9", len(registered))
 	}
 	if len(manifest.Jobs) != len(registered) {
 		t.Fatalf("manifest jobs = %d, registered = %d", len(manifest.Jobs), len(registered))
@@ -106,6 +106,12 @@ func TestManifestPinsStableIDsKindsQueuesScheduleSourcesAndCatchup(t *testing.T)
 			ScheduleConfig: "XM_CONNECTOR_PROBE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.ConnectorProbeRunOnStart",
 			CatchUp: "at_most_one_immediate",
 		},
+		CPASyncJobKind: {
+			ID: CPASyncJobKind, Kind: CPASyncJobKind, Queue: QueueMaintenance,
+			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CPA_SYNC_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.CPASyncRunOnStart",
+			CatchUp: "at_most_one_immediate",
+		},
 	}
 	if manifest.Version != 1 || manifest.Scheduler != "river-oss-postgres-leader-v0.45" ||
 		manifest.ClusterModel != "one-environment-per-database-schema" {
@@ -162,6 +168,7 @@ func TestEveryArgsUsesArgsQueueEffectivePeriodAndExplicitDefaultStates(t *testin
 		{name: "alerts", kind: AlertEvaluateJobKind, queue: QueueMaintenance, period: DefaultAlertEvaluateInterval, opts: func() river.InsertOpts { return AlertEvaluateArgs{}.InsertOpts() }},
 		{name: "reqlog_metrics", kind: ReqlogMetricsJobKind, queue: QueueMaintenance, period: DefaultReqlogMetricsInterval, opts: func() river.InsertOpts { return ReqlogMetricsArgs{}.InsertOpts() }},
 		{name: "connector_probe", kind: ConnectorProbeJobKind, queue: QueueMaintenance, period: DefaultConnectorProbeInterval, opts: func() river.InsertOpts { return ConnectorProbeArgs{}.InsertOpts() }},
+		{name: "cpa", kind: CPASyncJobKind, queue: QueueMaintenance, period: DefaultCPASyncInterval, opts: func() river.InsertOpts { return CPASyncArgs{}.InsertOpts() }},
 	}
 	for _, tt := range checks {
 		t.Run(tt.name, func(t *testing.T) {
@@ -183,7 +190,7 @@ func TestEveryArgsUsesArgsQueueEffectivePeriodAndExplicitDefaultStates(t *testin
 }
 
 func TestProductionArgsContainNoReplicaRunID(t *testing.T) {
-	for _, args := range []any{HeartbeatArgs{}, Sub2APISyncArgs{}, NewAPISyncArgs{}, FinanceCollectArgs{}, RetentionArgs{}, AlertEvaluateArgs{}, ReqlogMetricsArgs{}, ConnectorProbeArgs{}} {
+	for _, args := range []any{HeartbeatArgs{}, Sub2APISyncArgs{}, NewAPISyncArgs{}, FinanceCollectArgs{}, RetentionArgs{}, AlertEvaluateArgs{}, ReqlogMetricsArgs{}, ConnectorProbeArgs{}, CPASyncArgs{}} {
 		raw, err := json.Marshal(args)
 		if err != nil {
 			t.Fatal(err)
@@ -311,8 +318,8 @@ func TestEffectiveManifestDisabledJobAndConfigChangesChangeHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Jobs) != 8 {
-		t.Fatalf("jobs = %d", len(base.Jobs))
+	if len(base.Jobs) != 9 {
+		t.Fatalf("jobs = %d, want 9", len(base.Jobs))
 	}
 	cfg.RetentionEnabled = false
 	disabled, disabledHash, err := BuildEffectiveManifest(cfg, manifest)
@@ -383,6 +390,8 @@ func intervalForJob(id string) time.Duration {
 		return DefaultReqlogMetricsInterval
 	case ConnectorProbeJobKind:
 		return DefaultConnectorProbeInterval
+	case CPASyncJobKind:
+		return DefaultCPASyncInterval
 	default:
 		return 0
 	}
