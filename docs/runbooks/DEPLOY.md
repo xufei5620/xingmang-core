@@ -57,8 +57,9 @@ deploy/scripts/deploy.sh prod --confirm DEPLOY-PRODUCTION \
 
 production Compose 叠加 `server-prod.yaml`，项目名为 `xingmang-prod`，并且：
 
-- API 强制 `ENVIRONMENT=production`、`XM_AUTH_MODE=oidc`，OIDC issuer/audience
-  缺一不可；
+- API 强制 `ENVIRONMENT=production`；按 CR-0004 当前默认
+  `XM_AUTH_MODE=local` / `XM_WEB_AUTH_MODE=local`，两侧必须成对。仍可显式
+  同时切回 `oidc`，此时 issuer/audience 缺一不可；`dev-header` 永远拒绝；
 - Sub2API、NewAPI、财务采集必须显式选择 `real`，或显式关闭相应同步；不能
   继承 fake 默认值；
 - `XM_FINANCE_FAKE_SEED=false`；staging bootstrap profile 不启用，绝不写入

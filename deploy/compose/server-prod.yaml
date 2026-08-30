@@ -114,15 +114,10 @@ services:
 
   web:
     environment:
-      # ⚠️ XM-LOGIN（2026-08-30）：本文件已把 platform-api 的默认
-      # XM_AUTH_MODE 改成 local，但这里**仍然固定 oidc**——admin-web 目前只有
-      # OIDC 登录页/回调页（XM-AUTH1），没有本地用户名密码登录页与
-      # xm_session Cookie 处理，这是后端交付、前端待补的已知缺口。默认组合
-      # 因此是「后端 local + 前端仍发 Bearer」，会立即 403 缺少身份，直到前端
-      # 补上本地登录 UI（或显式把 XM_AUTH_MODE 覆盖回 oidc 并配好 CR-0001）。
-      # 前端鉴权固定 oidc（XM-AUTH1），与上面 platform-api 的 XM_AUTH_MODE 成对。
-      # issuer / client id 默认取后端同名配置（XM_OIDC_ISSUER / XM_OIDC_AUDIENCE），
-      # 两边必须相同：issuer 逐字比对，client id 就是后端校验的 aud/azp。
+      # XM-LOGIN / CR-0004：生产默认使用平台自带 local 登录；admin-web 已支持
+      # xm_session Cookie。仍可显式把 API/Web 两侧同时切回 oidc（CR-0001），
+      # issuer / client id 默认取后端同名配置，两侧必须成对，禁止一侧 local、
+      # 一侧 oidc。dev-header 在生产由后端配置校验硬拒绝。
       XM_WEB_AUTH_MODE: ${XM_WEB_AUTH_MODE:-local}
       XM_WEB_OIDC_ISSUER: ${XM_WEB_OIDC_ISSUER:-${XM_OIDC_ISSUER:-}}
       XM_WEB_OIDC_CLIENT_ID: ${XM_WEB_OIDC_CLIENT_ID:-${XM_OIDC_AUDIENCE:-}}

@@ -159,7 +159,9 @@ fi
 staging_yaml="$repo_root/deploy/compose/server-staging.yaml"
 prod_yaml="$repo_root/deploy/compose/server-prod.yaml"
 if [ -f "$staging_yaml" ] && [ -f "$prod_yaml" ]; then ok "服务器 Compose 覆盖存在"; else bad "服务器 Compose 覆盖存在"; fi
-assert_text "production 强制 OIDC" 'XM_AUTH_MODE: oidc' "$prod_yaml"
+assert_text "production 默认 local 后端鉴权（CR-0004）" 'XM_AUTH_MODE: ${XM_AUTH_MODE:-local}' "$prod_yaml"
+assert_text "production 默认 local 前端鉴权（CR-0004）" 'XM_WEB_AUTH_MODE: ${XM_WEB_AUTH_MODE:-local}' "$prod_yaml"
+assert_not_text "production 不得默认 dev-header" 'XM_AUTH_MODE: dev-header' "$prod_yaml"
 assert_text "production 关闭演示种子" 'XM_FINANCE_FAKE_SEED: "false"' "$prod_yaml"
 assert_text "production 隔离 staging bootstrap" 'profiles: ["staging"]' "$prod_yaml"
 
