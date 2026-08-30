@@ -102,9 +102,10 @@ DS0 固化的目标是：原始指标样本至少保留 90 天，同时为后续
 
 - `git diff --check` — PASS。
 - Markdown structural check（UTF-8 可读、无行尾空白、标题层级与 fenced code 成对）— PASS。
-- `bash scripts/check-governance.sh` — PASS。
-- `gitleaks git --redact --no-banner --log-opts=<base>..HEAD` — 待本片提交后运行并记录实际范围；
-  不添加 allowlist、不扫描或输出任何凭据。
+- `GOVERNANCE_BASE_REF=release/v0.1-launch GOVERNANCE_REQUIRE_BASE=1 bash
+  scripts/check-governance.sh` — PASS（完整基线可解析，迁移不可变检查通过）。
+- `gitleaks git --redact --no-banner --log-opts=c657a02f336fe6ea0c971bcd9b9b8ab3daa83bd3..7827def`
+  — PASS（1 commit scanned, no leaks found）；不添加 allowlist、不扫描或输出任何凭据。
 - 本片无源码变更；Go、前端、Docker 与运行时门禁不适用，未触碰共享栈。
 
 ## tests_not_run / risks
