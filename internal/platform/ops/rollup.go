@@ -93,8 +93,11 @@ type DailyAccumulator struct {
 	FirstWatermark      string
 	LastWatermark       string
 
-	MinSampleID  int64
-	MaxSampleID  int64
+	MinSampleID int64
+	MaxSampleID int64
+	// AggregatedAt is populated by the persistence layer when a bucket is
+	// committed.  The pure accumulator leaves it zero so equal inputs produce
+	// equal results and tests never depend on wall-clock timing.
 	AggregatedAt time.Time
 
 	coverageInterval    *int32
@@ -147,7 +150,6 @@ func (a DailyAccumulator) Merge(policy RollupPolicy, samples []RawRollupSample) 
 			return DailyAccumulator{}, err
 		}
 	}
-	out.AggregatedAt = time.Now().UTC()
 	if err := out.Validate(); err != nil {
 		return DailyAccumulator{}, err
 	}
@@ -392,7 +394,6 @@ func (a *DailyAccumulator) mergeSample(policy RollupPolicy, sample RawRollupSamp
 	}
 	a.mergeCoverage(sample, synced)
 	a.mergeRepresentativeTimes(sample, synced)
-	a.AggregatedAt = time.Now().UTC()
 	return nil
 }
 
