@@ -64,6 +64,12 @@ export const DEFAULT_SCOPES = [
   // XM-B003：只读写当前 HUMAN Principal 在当前 Environment 下自己的表格视图。
   // 业务数据权限没有随它扩大；生产仍由 OIDC RoleScopeMap 最终裁决。
   "ui.saved_view.manage",
+  // XM-CRED0：开发态只为预览凭据 Action 边界携带该 scope；服务端仍需独立
+  // 授权，staff/admin 默认映射刻意不包含它。
+  "credential.manage",
+  // XM-CRED0 接入模式：connector.config.set@1 与 GET /connectors/config。
+  // 同为开发态默认；服务端独立裁决，生产 admin/staff 映射不含它。
+  "connector.manage",
 ];
 
 function parseScopes(raw: string | undefined): string[] {
