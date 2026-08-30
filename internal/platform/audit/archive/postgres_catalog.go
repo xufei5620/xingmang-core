@@ -46,11 +46,12 @@ type CatalogCoverageProofProvider func(context.Context, CommittedSegment) (Catal
 type ManifestResolver func(context.Context, ObjectVersionV1) (SignedManifestV1, ObjectVersionV1, error)
 
 type PostgresCatalog struct {
-	pool     *pgxpool.Pool
-	coverage CatalogCoverageChecker
-	proof    CatalogCoverageProofProvider
-	resolve  ManifestResolver
-	bucketID string
+	pool            *pgxpool.Pool
+	coverage        CatalogCoverageChecker
+	proof           CatalogCoverageProofProvider
+	resolve         ManifestResolver
+	bucketID        string
+	productionProof bool
 }
 
 func NewPostgresCatalog(pool *pgxpool.Pool, coverage CatalogCoverageChecker, resolve ManifestResolver) (*PostgresCatalog, error) {
@@ -71,13 +72,27 @@ func NewPostgresCatalogWithBucket(pool *pgxpool.Pool, coverage CatalogCoverageCh
 }
 
 func NewPostgresCatalogWithProof(pool *pgxpool.Pool, proof CatalogCoverageProofProvider, resolve ManifestResolver, bucketID string) (*PostgresCatalog, error) {
+	// Fixture-only convenience. Production callers must use
+	// NewPostgresCatalogWithProofAndChecker so the signed checkpoint/range
+	// membership checker is also required.
+	return newPostgresCatalogWithProof(pool, proof, nil, resolve, bucketID, false)
+}
+
+func NewPostgresCatalogWithProofAndChecker(pool *pgxpool.Pool, proof CatalogCoverageProofProvider, coverage CatalogCoverageChecker, resolve ManifestResolver, bucketID string) (*PostgresCatalog, error) {
+	if coverage == nil {
+		return nil, fmt.Errorf("%w: production coverage checker required", ErrCatalogConflict)
+	}
+	return newPostgresCatalogWithProof(pool, proof, coverage, resolve, bucketID, true)
+}
+
+func newPostgresCatalogWithProof(pool *pgxpool.Pool, proof CatalogCoverageProofProvider, coverage CatalogCoverageChecker, resolve ManifestResolver, bucketID string, production bool) (*PostgresCatalog, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("%w: nil PostgreSQL pool", ErrCatalogConflict)
 	}
 	if proof == nil || !validBucketID(bucketID) {
 		return nil, fmt.Errorf("%w: proof provider/bucket required", ErrCatalogConflict)
 	}
-	return &PostgresCatalog{pool: pool, proof: proof, resolve: resolve, bucketID: bucketID}, nil
+	return &PostgresCatalog{pool: pool, proof: proof, coverage: coverage, resolve: resolve, bucketID: bucketID, productionProof: production}, nil
 }
 
 func archiveTimestamp(value time.Time) pgtype.Timestamptz {
@@ -222,6 +237,9 @@ func (c *PostgresCatalog) CommitCoveredSegment(ctx context.Context, value Commit
 	}
 	if c.coverage == nil && c.proof == nil {
 		return fmt.Errorf("%w: RecoveryIndex coverage checker is required", ErrCatalogConflict)
+	}
+	if c.productionProof && c.coverage == nil {
+		return fmt.Errorf("%w: production catalog requires signed range coverage checker", ErrCatalogConflict)
 	}
 	if value.ManifestObject.BucketID != c.bucketID {
 		return fmt.Errorf("%w: manifest bucket does not match configured archive bucket", ErrCatalogConflict)

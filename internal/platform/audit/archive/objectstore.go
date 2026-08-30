@@ -232,6 +232,9 @@ func ValidateArtifactRef(value ArtifactRefV1) error {
 	if !validBucketID(value.BucketID) {
 		return fmt.Errorf("%w: artifact bucket", ErrArchiveValidation)
 	}
+	if !objectKeyDigestMatches(value.Key, value.SHA256) {
+		return fmt.Errorf("%w: artifact locator digest", ErrArchiveValidation)
+	}
 	return validateArtifactRef(value)
 }
 

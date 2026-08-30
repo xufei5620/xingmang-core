@@ -221,7 +221,7 @@ func (j *PostgresReceiptJournal) AppendTerminalResult(ctx context.Context, opera
 	if string(row.SignedResultBytes) != string(resultBytes) || row.TerminalResultDigest != digest {
 		return fmt.Errorf("%w: terminal receipt bytes changed", ErrJournalConflict)
 	}
-	if !bytes.Equal(row.OptionalArtifactRefBytes, refBytes) {
+	if !nullableBytesEqual(row.OptionalArtifactRefBytes, refBytes) {
 		return fmt.Errorf("%w: terminal artifact ref changed", ErrJournalConflict)
 	}
 	return nil
@@ -266,7 +266,10 @@ func (j *PostgresReceiptJournal) LoadOperation(ctx context.Context, operationID 
 	}
 	result.TerminalResultBytes = append([]byte(nil), terminal.SignedResultBytes...)
 	result.TerminalResultDigest = terminal.TerminalResultDigest
-	if len(terminal.OptionalArtifactRefBytes) > 0 {
+	if terminal.OptionalArtifactRefBytes != nil && len(terminal.OptionalArtifactRefBytes) == 0 {
+		return OperationReceiptV1{}, fmt.Errorf("%w: empty optional artifact ref bytes", ErrJournalConflict)
+	}
+	if terminal.OptionalArtifactRefBytes != nil {
 		var ref ArtifactRefV1
 		if err := decodeCanonicalJSON(terminal.OptionalArtifactRefBytes, &ref); err != nil {
 			return OperationReceiptV1{}, fmt.Errorf("%w: terminal artifact ref", ErrJournalConflict)
@@ -277,4 +280,11 @@ func (j *PostgresReceiptJournal) LoadOperation(ctx context.Context, operationID 
 		result.TerminalResultRef = &ref
 	}
 	return cloneReceipt(result), nil
+}
+
+func nullableBytesEqual(left, right []byte) bool {
+	if (left == nil) != (right == nil) {
+		return false
+	}
+	return bytes.Equal(left, right)
 }
