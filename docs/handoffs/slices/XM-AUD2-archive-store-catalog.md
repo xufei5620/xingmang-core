@@ -4,7 +4,7 @@ sprint-section: 7
 
 ## status
 
-IN_PROGRESS · exact AUD2 INPUT approved; waiting generated-artifact approval
+BLOCKED · WAITING fresh APPROVED AUD2 INPUT for corrected receipt probe bytes
 
 This branch starts from the exact accepted release tip and currently limits itself to
 AUD2 contract preparation plus provider-independent code. The migration/input digest is
@@ -33,13 +33,14 @@ recovery. It also requires a disposable random MinIO qualification project using
 `secret://archive/minio-qualification`.
 
 The provider approval did not itself approve migration bytes; the acceptance log now
-contains `2026-08-30T07:41Z APPROVED AUD2 INPUT 000018` for the exact five-file candidate
-based on `db9d4ca`. The branch has been rebased to the newer release `fb4a774` without
-changing those five files; the migration max remains 17 and the approved digest remains
-valid. Migration application is limited to a disposable PG18 probe. `go tool sqlc generate`,
-generated artifacts, shared `xingmang-launch`, production endpoints, servers, real
-credentials and shared MinIO remain prohibited until the separate generated-artifact
-approval signal appears.
+contains `2026-08-30T07:41Z APPROVED AUD2 INPUT 000018` for the prior five-file candidate
+based on `db9d4ca`; that approval is superseded because the receipt probe needed a
+savepoint/transaction-safety correction. The branch is rebased to `fb4a774`, migration max
+remains 17, and the corrected candidate is awaiting a fresh exact approval. Migration
+application is limited to a disposable PG18 probe. `go tool sqlc generate`, generated
+artifacts, shared `xingmang-launch`, production endpoints, servers, real credentials and
+shared MinIO remain prohibited until the corrected input approval and then the separate
+generated-artifact approval signal appear.
 
 ## migration input pin (pre-generation)
 
