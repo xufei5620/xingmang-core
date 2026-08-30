@@ -160,6 +160,16 @@ func validBucketID(value string) bool {
 	return true
 }
 
+func objectKeyDigestMatches(key, digest string) bool {
+	if strings.HasSuffix(key, ".ndjson") {
+		return len(key) >= 71 && key[len(key)-71:] == digest+".ndjson"
+	}
+	if strings.HasSuffix(key, ".json") {
+		return len(key) >= 69 && key[len(key)-69:] == digest+".json"
+	}
+	return false
+}
+
 // ValidateObjectWriteIntent is the shared fail-closed guard used by filesystem and
 // provider adapters before any external write is attempted.
 func ValidateObjectWriteIntent(value ObjectWriteIntentV1) error {
@@ -167,7 +177,8 @@ func ValidateObjectWriteIntent(value ObjectWriteIntentV1) error {
 		!validObjectKey(value.Key) || !isLowerHex64(value.SHA256) || value.SizeBytes < 0 ||
 		value.SizeBytes > MaxObjectWriteBytes ||
 		!validArchiveText(value.ContentType, 256) || !validArchiveText(value.ProviderIdempotencyToken, 512) ||
-		strings.EqualFold(value.ProviderIdempotencyToken, "latest") {
+		strings.EqualFold(value.ProviderIdempotencyToken, "latest") ||
+		!objectKeyDigestMatches(value.Key, value.SHA256) {
 		return fmt.Errorf("%w: object write intent fields", ErrArchiveValidation)
 	}
 	if value.BucketID == "local-fixture" {
@@ -194,6 +205,9 @@ func ValidateObjectWriteIntent(value ObjectWriteIntentV1) error {
 func ValidateObjectVersion(value ObjectVersionV1) error {
 	if value.SizeBytes < 0 || value.SizeBytes > MaxObjectWriteBytes {
 		return fmt.Errorf("%w: object size", ErrArchiveValidation)
+	}
+	if !objectKeyDigestMatches(value.Key, value.SHA256) {
+		return fmt.Errorf("%w: object locator digest", ErrArchiveValidation)
 	}
 	if err := validateObjectVersion(value); err != nil {
 		return err

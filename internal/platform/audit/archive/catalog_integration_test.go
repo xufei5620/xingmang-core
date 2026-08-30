@@ -181,7 +181,12 @@ func TestAUD2ArchiveSegmentIsAppendOnly(t *testing.T) {
 		`DELETE FROM audit.archive_segment WHERE id = $1`,
 		`TRUNCATE audit.archive_segment`,
 	} {
-		_, err := tx.Exec(context.Background(), statement, segmentID)
+		var err error
+		if strings.HasPrefix(statement, "TRUNCATE") {
+			_, err = tx.Exec(context.Background(), statement)
+		} else {
+			_, err = tx.Exec(context.Background(), statement, segmentID)
+		}
 		if err == nil {
 			// A no-op rule is also acceptable, but the row must remain unchanged.
 			var count int

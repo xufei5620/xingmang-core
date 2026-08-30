@@ -104,30 +104,26 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER archive_segment_no_row_mutation
-    BEFORE UPDATE OR DELETE ON audit.archive_segment
-    FOR EACH ROW EXECUTE FUNCTION audit.reject_archive_catalog_mutation();
+CREATE RULE archive_segment_no_update AS ON UPDATE TO audit.archive_segment DO INSTEAD NOTHING;
+CREATE RULE archive_segment_no_delete AS ON DELETE TO audit.archive_segment DO INSTEAD NOTHING;
 CREATE TRIGGER archive_segment_no_truncate
     BEFORE TRUNCATE ON audit.archive_segment
     FOR EACH STATEMENT EXECUTE FUNCTION audit.reject_archive_catalog_mutation();
 
-CREATE TRIGGER archive_operation_intent_no_row_mutation
-    BEFORE UPDATE OR DELETE ON audit.archive_operation_intent
-    FOR EACH ROW EXECUTE FUNCTION audit.reject_archive_catalog_mutation();
+CREATE RULE archive_operation_intent_no_update AS ON UPDATE TO audit.archive_operation_intent DO INSTEAD NOTHING;
+CREATE RULE archive_operation_intent_no_delete AS ON DELETE TO audit.archive_operation_intent DO INSTEAD NOTHING;
 CREATE TRIGGER archive_operation_intent_no_truncate
     BEFORE TRUNCATE ON audit.archive_operation_intent
     FOR EACH STATEMENT EXECUTE FUNCTION audit.reject_archive_catalog_mutation();
 
-CREATE TRIGGER archive_put_receipt_no_row_mutation
-    BEFORE UPDATE OR DELETE ON audit.archive_put_receipt
-    FOR EACH ROW EXECUTE FUNCTION audit.reject_archive_catalog_mutation();
+CREATE RULE archive_put_receipt_no_update AS ON UPDATE TO audit.archive_put_receipt DO INSTEAD NOTHING;
+CREATE RULE archive_put_receipt_no_delete AS ON DELETE TO audit.archive_put_receipt DO INSTEAD NOTHING;
 CREATE TRIGGER archive_put_receipt_no_truncate
     BEFORE TRUNCATE ON audit.archive_put_receipt
     FOR EACH STATEMENT EXECUTE FUNCTION audit.reject_archive_catalog_mutation();
 
-CREATE TRIGGER archive_terminal_receipt_no_row_mutation
-    BEFORE UPDATE OR DELETE ON audit.archive_terminal_receipt
-    FOR EACH ROW EXECUTE FUNCTION audit.reject_archive_catalog_mutation();
+CREATE RULE archive_terminal_receipt_no_update AS ON UPDATE TO audit.archive_terminal_receipt DO INSTEAD NOTHING;
+CREATE RULE archive_terminal_receipt_no_delete AS ON DELETE TO audit.archive_terminal_receipt DO INSTEAD NOTHING;
 CREATE TRIGGER archive_terminal_receipt_no_truncate
     BEFORE TRUNCATE ON audit.archive_terminal_receipt
     FOR EACH STATEMENT EXECUTE FUNCTION audit.reject_archive_catalog_mutation();

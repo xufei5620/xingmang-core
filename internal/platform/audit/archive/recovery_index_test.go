@@ -47,6 +47,26 @@ func TestAUD2RecoveryIndexCASUsesFixedLocatorAndExpectedGeneration(t *testing.T)
 	}
 }
 
+func TestAUD2RecoveryIndexAcceptsSignedInitialCASAndRoundTrips(t *testing.T) {
+	locator := FixedLocator{ApprovedConfigRef: "secret://archive/index"}
+	index := NewMemoryRecoveryIndex(locator)
+	first := goldenRecoveryIndex(t)
+	version, err := index.CompareAndSwap(context.Background(), locator, ExpectedIndex{}, first)
+	if err != nil {
+		t.Fatalf("initial signed index CAS rejected: %v", err)
+	}
+	if version.Generation != 1 || version.SHA256 == "" || version.ProviderVersion == "" {
+		t.Fatalf("unexpected index version: %+v", version)
+	}
+	got, gotVersion, err := index.LoadCurrent(context.Background(), locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != first || gotVersion != version {
+		t.Fatalf("round-trip mismatch: got=%+v/%+v want=%+v/%+v", got, gotVersion, first, version)
+	}
+}
+
 func TestAUD2RecoveryIndexRejectsStaleCAS(t *testing.T) {
 	index := NewMemoryRecoveryIndex(FixedLocator{ApprovedConfigRef: "secret://archive/index"})
 	if _, err := index.CompareAndSwap(context.Background(), FixedLocator{ApprovedConfigRef: "secret://archive/index"}, ExpectedIndex{Generation: 99}, testRecoveryIndex(t, 1)); err == nil {

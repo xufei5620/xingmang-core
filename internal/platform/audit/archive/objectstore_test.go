@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,22 @@ func TestAUD2ValidateObjectWriteIntentRejectsUnsafeValues(t *testing.T) {
 				t.Fatal("unsafe intent unexpectedly accepted")
 			}
 		})
+	}
+}
+
+func TestAUD2ApprovedMinIOObjectVersionAllowsSSES3(t *testing.T) {
+	value := goldenManifest(t).Unsigned.Payload
+	value.EncryptionMode = "SSE-S3"
+	if err := ValidateObjectVersion(value); err != nil {
+		t.Fatalf("approved SSE-S3 object version rejected: %v", err)
+	}
+}
+
+func TestAUD2ObjectWriteIntentRejectsOversizedBodyDeclaration(t *testing.T) {
+	value := aud2LocalIntent([]byte("fixture"))
+	value.SizeBytes = MaxObjectWriteBytes + 1
+	if err := ValidateObjectWriteIntent(value); err == nil {
+		t.Fatal("oversized object intent unexpectedly accepted")
 	}
 }
 
@@ -117,6 +135,33 @@ func TestAUD2FilesystemRecoverPutResultUsesExactIntent(t *testing.T) {
 	}
 }
 
+func TestAUD2FilesystemReadbackDetectsTamperedBody(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFilesystemStore(root, "local-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("tamper target")
+	intent := aud2LocalIntent(body)
+	object, err := store.PutIfAbsent(context.Background(), intent, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataPath, err := store.objectPath(intent.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataPath, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecoverPutResult(context.Background(), intent); err == nil {
+		t.Fatal("tampered body unexpectedly recovered")
+	}
+	if _, err := store.HeadVersion(context.Background(), object); err != nil {
+		t.Fatalf("metadata HEAD should remain exact despite body corruption: %v", err)
+	}
+}
+
 func TestAUD2FilesystemNeverWritesOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewFilesystemStore(root, "local-fixture")
@@ -127,5 +172,24 @@ func TestAUD2FilesystemNeverWritesOutsideRoot(t *testing.T) {
 	intent.Key = "audit/v1/../../outside"
 	if _, err := store.PutIfAbsent(context.Background(), intent, strings.NewReader("outside")); err == nil {
 		t.Fatal("traversal key unexpectedly accepted")
+	}
+}
+
+func TestAUD2FilesystemRejectsSymlinkedObjectPrefix(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	store, err := NewFilesystemStore(root, "local-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "local-fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "local-fixture", "audit")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	intent := aud2LocalIntent([]byte("symlink"))
+	if _, err := store.PutIfAbsent(context.Background(), intent, strings.NewReader("symlink")); err == nil {
+		t.Fatal("symlinked object prefix unexpectedly accepted")
 	}
 }

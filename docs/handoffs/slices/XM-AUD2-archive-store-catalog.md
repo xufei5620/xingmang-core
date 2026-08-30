@@ -44,15 +44,15 @@ The manifest covers the five plan-mandated pre-generation inputs:
 
 | path | SHA-256 |
 |---|---|
-| `db/migrations/000018_audit_archive_catalog.up.sql` | `fe45f867aff22177a90caf4bd667e19c5fc8cb2d` (draft; recompute after edits) |
-| `db/migrations/000018_audit_archive_catalog.down.sql` | `1de886281efc1cbaafc9ec0ffc2b35e91461ead8` (draft; recompute after edits) |
+| `db/migrations/000018_audit_archive_catalog.up.sql` | `559dbf9346df300cb65482e0c2af0bdc060c629d` |
+| `db/migrations/000018_audit_archive_catalog.down.sql` | `0cf6a623f4ed3765496e173248319ec7dfdeff14` |
 | `db/queries/audit.sql` | `db8f953e1a174c506731460e6d4b0922ef26e7fa` (draft; recompute after edits) |
-| `internal/platform/audit/archive/catalog_integration_test.go` | `ada4dbbffe63f0c0b65cb70005eb586ba5e22527` (draft; recompute after edits) |
-| `internal/platform/audit/archive/receipt_journal_integration_test.go` | `a3e2adc2a92a161686b8f9c36b8f37225ede1ef1` (draft; recompute after edits) |
+| `internal/platform/audit/archive/catalog_integration_test.go` | `1145d666422da7677eb500eee6c644fd56ca1631` |
+| `internal/platform/audit/archive/receipt_journal_integration_test.go` | `16c39b4ab597de9858606f6050c770f8e46be43c` |
 
 `migration_input_digest` is computed as the SHA-256 of the sorted `hash-object + two
 spaces + path` lines plus one final LF, exactly as the implementation plan specifies.
-Current draft digest: `b88dcf67a3864a70da69bd9207f2832194f42427`. It is a review artifact only
+Current draft digest: `6113a7453907148508697458b8be2ce2ffedeaba`. It is a review artifact only
 until an exact `APPROVED AUD2 INPUT` line appears in the acceptance log; any byte edit or
 release-tip movement invalidates it and requires a fresh recomputation.
 

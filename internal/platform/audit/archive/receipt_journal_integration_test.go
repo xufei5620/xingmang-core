@@ -34,8 +34,17 @@ func TestAUD2OperationIntentIsAppendOnlyAndByteBound(t *testing.T) {
 		VALUES ($1, $2, $3, $4, $5)`, operationID, strings.Repeat("a", 64), hex.EncodeToString(digest[:]), canonical, time.Now().UTC()); err == nil {
 		t.Fatal("duplicate intent unexpectedly accepted")
 	}
-	if _, err := tx.Exec(context.Background(), `UPDATE audit.archive_operation_intent SET canonical_intent_bytes = $2 WHERE operation_id = $1`, operationID, []byte("changed")); err == nil {
-		t.Fatal("intent UPDATE unexpectedly accepted")
+	if _, err := tx.Exec(context.Background(), `UPDATE audit.archive_operation_intent SET canonical_intent_bytes = $2 WHERE operation_id = $1`, operationID, []byte("changed")); err != nil {
+		// Either a no-op rule or a protecting trigger is acceptable; a failure is
+		// still safe because no mutation can reach the row.
+		return
+	}
+	var persisted []byte
+	if err := tx.QueryRow(context.Background(), `SELECT canonical_intent_bytes FROM audit.archive_operation_intent WHERE operation_id = $1`, operationID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if string(persisted) != string(canonical) {
+		t.Fatal("append-only intent was mutated")
 	}
 }
 
@@ -76,8 +85,15 @@ func TestAUD2PutReceiptUniqueByOrdinalAndTerminalAppendOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(context.Background(), `DELETE FROM audit.archive_terminal_receipt WHERE operation_id = $1`, operationID); err == nil {
-		t.Fatal("terminal receipt DELETE unexpectedly accepted")
+	if _, err := tx.Exec(context.Background(), `DELETE FROM audit.archive_terminal_receipt WHERE operation_id = $1`, operationID); err != nil {
+		return
+	}
+	var terminalCount int
+	if err := tx.QueryRow(context.Background(), `SELECT count(*) FROM audit.archive_terminal_receipt WHERE operation_id = $1`, operationID).Scan(&terminalCount); err != nil {
+		t.Fatal(err)
+	}
+	if terminalCount != 1 {
+		t.Fatal("append-only terminal receipt was deleted")
 	}
 }
 
