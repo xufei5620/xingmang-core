@@ -233,6 +233,19 @@ var registeredMetrics = struct {
 		// 让一部分读数不入账（两侧未知跳过、只有一侧不建行），所以两个数
 		// **本就该不同**——合并成一条会让那个差异永远看不见。
 		"finance.profit.daily": {},
+		// 运行保障（XM-OPS0，internal/platform/jobs）。
+		//
+		// 这四条不来自任何 Connector 契约，而是控制平面自己的运维信号
+		// （worker 是否还活着、连接器是否可达、清理任务上一轮跑得怎样），
+		// 因此常量定义在 internal/platform/jobs（heartbeat.go / connector_probe.go /
+		// retention.go），不在某个 connectors/* 包里——这里仍按字面量重复的老规矩登记
+		// （ops 不能反向 import jobs），一致性由 ops_test 外部测试包里的
+		// TestRegisteredMetricsMatchConnectorContracts 兜住（它可以同时 import ops 与
+		// jobs，不构成生产代码的环）。
+		"platform.heartbeat":          {},
+		"platform.retention.last_run": {},
+		"sub2api.connector.health":    {},
+		"newapi.connector.health":     {},
 	},
 }
 

@@ -748,6 +748,7 @@ func TestNewAPIFakeModeRejectedInProduction(t *testing.T) {
 	// 让本用例只隔离出 NewAPI 那一条。
 	c.FinanceCollectEnabled = false
 	c.NewAPIMode = NewAPIModeReal
+	c.ConnectorProbeEnabled = false // XM-OPS0: same gate, isolated the same way as the others above
 	if err := c.normalized().validate(); err != nil {
 		t.Fatalf("生产 + real 应通过: %v", err)
 	}
@@ -756,6 +757,7 @@ func TestNewAPIFakeModeRejectedInProduction(t *testing.T) {
 	c = DefaultConfig()
 	c.Environment = "production"
 	c.NewAPISyncEnabled = false
+	c.ConnectorProbeEnabled = false // XM-OPS0: same gate, isolated the same way as the others above
 	c.Sub2APISyncEnabled = false    // 隔离出 NewAPI 这一条，不被 sub2api 的同款闸拦下
 	c.FinanceCollectEnabled = false // 成本采集（XM-0037b）同款闸，同样隔离掉
 	if err := c.normalized().validate(); err != nil {

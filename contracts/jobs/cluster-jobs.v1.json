@@ -92,6 +92,21 @@
       "execution": "at_least_once",
       "side_effect_class": "reconcile_then_notification",
       "idempotency_evidence": "alert fingerprint reconciliation is persisted before notification; retry reuses the same finding identity"
+    },
+    {
+      "id": "connector_probe",
+      "kind": "connector_probe",
+      "queue": "maintenance",
+      "owner_process": "platform-worker",
+      "ownership": "cluster_singleton",
+      "schedule_config": "XM_CONNECTOR_PROBE_INTERVAL",
+      "run_on_start_source": "jobs.DefaultConfig.ConnectorProbeRunOnStart",
+      "catch_up": "at_most_one_immediate",
+      "enqueue_fences": ["river_leader/default", "args+queue+period"],
+      "unique_states": ["available", "completed", "pending", "running", "retryable", "scheduled"],
+      "execution": "at_least_once",
+      "side_effect_class": "upstream_read_then_db_transaction",
+      "idempotency_evidence": "latest+sample atomic transaction; retry remains upstream-read attempt"
     }
   ]
 }

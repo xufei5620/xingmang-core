@@ -10,6 +10,8 @@ import (
 
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
 // XM-R012 保留期清理（Codex 冷审 #48 第 8 条，Issue #75）。
@@ -79,6 +81,18 @@ const (
 	retentionPrincipalID = "worker:platform"
 	retentionModule      = "platform.jobs"
 	retentionMaxAttempts = 3
+
+	// MetricRetentionLastRun is the ops metric key recording the outcome
+	// of each retention run (XM-OPS0), so the ops overview query can show
+	// "when did cleanup last run and what did it delete" without tailing
+	// structured logs.
+	MetricRetentionLastRun = "platform.retention.last_run"
+
+	// RetentionObservationStalenessThresholdSeconds is roughly 2x the
+	// default 24h cleanup interval: a run more than two days overdue is
+	// worth flagging as stale rather than assuming "still within today's
+	// window".
+	RetentionObservationStalenessThresholdSeconds int32 = 2 * 24 * 60 * 60
 )
 
 // SamplePruner 是指标样本清理所需的最小仓储能力（*ops.Store 天然满足）。
@@ -131,19 +145,30 @@ type RetentionOptions struct {
 	AlertRetentionDays  int
 	// Now 可注入固定时钟；默认 time.Now。
 	Now func() time.Time
+	// Observations, when set, records a summary of each run as an ops
+	// observation (MetricRetentionLastRun), so the ops overview query can
+	// show "last cleanup result" without tailing worker logs (XM-OPS0).
+	// Optional: nil preserves pre-XM-OPS0 behavior exactly (log-only).
+	Observations ObservationStore
+	// ExpectedInterval documents the configured cleanup cadence for the
+	// observation's rollup metadata (see annotateRollupMetadata); zero
+	// omits that metadata.
+	ExpectedInterval time.Duration
 }
 
 // RetentionWorker 周期性清理过期的运营遥测。
 type RetentionWorker struct {
 	river.WorkerDefaults[RetentionArgs]
 
-	logger      *slog.Logger
-	environment string
-	samples     SamplePruner
-	alerts      AlertPruner
-	sampleDays  int
-	alertDays   int
-	now         func() time.Time
+	logger           *slog.Logger
+	environment      string
+	samples          SamplePruner
+	alerts           AlertPruner
+	sampleDays       int
+	alertDays        int
+	now              func() time.Time
+	observations     ObservationStore
+	expectedInterval time.Duration
 }
 
 // NewRetentionWorker 构造 Worker 并补齐安全默认值。
@@ -164,13 +189,15 @@ func NewRetentionWorker(opts RetentionOptions) *RetentionWorker {
 		opts.Now = time.Now
 	}
 	return &RetentionWorker{
-		logger:      opts.Logger,
-		environment: opts.Environment,
-		samples:     opts.Samples,
-		alerts:      opts.Alerts,
-		sampleDays:  opts.SampleRetentionDays,
-		alertDays:   opts.AlertRetentionDays,
-		now:         opts.Now,
+		logger:           opts.Logger,
+		environment:      opts.Environment,
+		samples:          opts.Samples,
+		alerts:           opts.Alerts,
+		sampleDays:       opts.SampleRetentionDays,
+		alertDays:        opts.AlertRetentionDays,
+		now:              opts.Now,
+		observations:     opts.Observations,
+		expectedInterval: opts.ExpectedInterval,
 	}
 }
 
@@ -204,6 +231,41 @@ func (w *RetentionWorker) Work(ctx context.Context, job *river.Job[RetentionArgs
 		// 承诺，半年后没人记得它是有意为之还是漏了（理由见文件头）。
 		slog.String("audit_events", "never_pruned"),
 	)
+
+	// XM-OPS0: record this run's outcome as an observation, if a sink was
+	// attached. A write failure here folds into the returned error (via
+	// errors.Join) rather than being swallowed -- River will retry the
+	// whole job, which is safe: deletes are idempotent, so a retry after a
+	// successful prune-but-failed-observation just re-runs prune() against
+	// an already-clean window (each batch call returns 0 rows and the loop
+	// exits on the first short batch).
+	if w.observations != nil {
+		obs := ops.Observation{
+			MetricKey:                 MetricRetentionLastRun,
+			Source:                    retentionPrincipalID,
+			Environment:               w.environment,
+			SyncedAt:                  now,
+			StalenessThresholdSeconds: RetentionObservationStalenessThresholdSeconds,
+			Value: map[string]any{
+				"metric_samples_deleted":       sampleDeleted,
+				"resolved_alerts_deleted":      alertDeleted,
+				"metric_sample_retention_days": w.sampleDays,
+				"alert_retention_days":         w.alertDays,
+			},
+		}
+		if err == nil {
+			obs.Status = ops.SyncOK
+			obs.ObservedAt = &now
+			obs.LastSuccess = &now
+		} else {
+			obs.Status = ops.SyncFailed
+			obs.LastErrorCode = errorCode
+		}
+		annotateRollupMetadata(&obs, w.expectedInterval)
+		if _, obsErr := w.observations.UpsertWithSample(ctx, obs); obsErr != nil {
+			err = errors.Join(err, fmt.Errorf("write retention observation: %w", obsErr))
+		}
+	}
 	return err
 }
 

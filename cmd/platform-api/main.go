@@ -275,6 +275,11 @@ func main() {
 		RateLimit:                  cfg.RateLimit,
 		// nil 时本地登录端点不挂载（XM-LOGIN，只有 XM_AUTH_MODE=local 才有值）
 		LocalAuth: localAuthHandlersOrNil(localAuthHandlers),
+		// 运行保障页「控制平面健康」子页（XM-OPS0）。复用凭据登记的同一个
+		// 仓储——它已经在读 core.connector_config，不必再开一条访问路径。
+		OpsConnectorConfigs: credentialStore,
+		// 只回布尔值，不回引用或地址；见 alertDeliveryStatusFromEnv 的注释。
+		OpsAlertDelivery: alertDeliveryStatusFromEnv(os.Getenv),
 	})
 
 	srv := &http.Server{

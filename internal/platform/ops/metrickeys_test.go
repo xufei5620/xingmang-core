@@ -9,6 +9,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/newapi"
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
@@ -49,6 +50,15 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		// 守的是「白名单与指标常量的唯一来源」这条不变量，指标常量定义在
 		// 哪个包不改变这一点。
 		finance.MetricProfitDaily,
+		// Operations assurance (XM-OPS0). Not connector contracts either --
+		// same rationale as finance.MetricProfitDaily above: the invariant
+		// this test really guards is "the whitelist has exactly one source
+		// of truth per key", regardless of which package defines the
+		// constant.
+		jobs.MetricSub2APIConnectorHealth,
+		jobs.MetricNewAPIConnectorHealth,
+		jobs.MetricPlatformHeartbeat,
+		jobs.MetricRetentionLastRun,
 	}
 
 	for _, key := range fromContracts {

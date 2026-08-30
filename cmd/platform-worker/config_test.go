@@ -524,6 +524,56 @@ func TestNewAPIRevenueDegradedNeverLeaksPassword(t *testing.T) {
 }
 
 // TestConfigFromEnvReadsRetentionSettings：XM-R012 保留期可配。
+// TestConfigFromEnvReadsConnectorProbeSettings：XM-OPS0 的连接器健康探测
+// 与其它周期任务同一套读法——_ENABLED / _INTERVAL 两个旋钮，都可选。
+func TestConfigFromEnvReadsConnectorProbeSettings(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                 "staging",
+		"XM_CONNECTOR_PROBE_ENABLED":  "false",
+		"XM_CONNECTOR_PROBE_INTERVAL": "10m",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConnectorProbeEnabled {
+		t.Fatal("XM_CONNECTOR_PROBE_ENABLED=false 应当关闭探测")
+	}
+	if cfg.ConnectorProbeInterval != 10*time.Minute {
+		t.Fatalf("探测周期 = %s, want 10m", cfg.ConnectorProbeInterval)
+	}
+}
+
+// TestConfigFromEnvDefaultsConnectorProbeToEnabled：不配这两个变量时，
+// 探测走 jobs.DefaultConfig 的默认值（开、5 分钟）——与 Sub2API/NewAPI
+// 同步默认打开是同一条理由：一个默认关闭的探测会让运行保障页的连接器
+// 健康区一直空着，空着与「探测坏了」在页面上长得一模一样。
+func TestConfigFromEnvDefaultsConnectorProbeToEnabled(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ConnectorProbeEnabled {
+		t.Fatal("未配置时探测应当默认开启")
+	}
+	if cfg.ConnectorProbeInterval != jobs.DefaultConnectorProbeInterval {
+		t.Fatalf("探测周期 = %s, want 默认值 %s", cfg.ConnectorProbeInterval, jobs.DefaultConnectorProbeInterval)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidConnectorProbeValues(t *testing.T) {
+	for _, bad := range []struct{ key, value string }{
+		{"XM_CONNECTOR_PROBE_ENABLED", "maybe"},
+		{"XM_CONNECTOR_PROBE_INTERVAL", "not-a-duration"},
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", bad.key: bad.value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q 应当被拒绝", bad.key, bad.value)
+		}
+	}
+}
+
 func TestConfigFromEnvReadsRetentionSettings(t *testing.T) {
 	values := map[string]string{
 		"ENVIRONMENT":                     "staging",

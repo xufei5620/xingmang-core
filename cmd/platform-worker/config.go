@@ -265,6 +265,23 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		}
 		config.AlertBalanceThresholdMinorUnits = threshold
 	}
+	// XM-OPS0：连接器健康探测。与其它周期任务同一条纪律：_ENABLED 是停用
+	// 开关（宪法 26 条），_INTERVAL 是节奏，都是可选的——不配就用
+	// jobs.DefaultConfig 的默认值（开、5 分钟）。
+	if value := getenv("XM_CONNECTOR_PROBE_ENABLED"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("connector probe enabled: %w", err)
+		}
+		config.ConnectorProbeEnabled = enabled
+	}
+	if value := getenv("XM_CONNECTOR_PROBE_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("connector probe interval: %w", err)
+		}
+		config.ConnectorProbeInterval = interval
+	}
 	return config, nil
 }
 

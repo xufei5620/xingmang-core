@@ -1873,12 +1873,15 @@ describe("未实装页的诚实占位与门禁", () => {
   });
 
   it("子页签进 ?sub=，可分享可恢复", async () => {
-    renderRoute("/ops?sub=model-quality");
-    expect(await screen.findByRole("tab", { name: "模型质量保障", selected: true })).not.toBeNull();
+    // 用 /finance 而不是 /ops：XM-OPS0 之后 /ops 的「控制平面健康」子页已经
+    // 接了真实数据、不再走这条通用占位路径，这里改测另一个仍是占位页的路径,
+    // 覆盖的仍是 PlaceholderPage 本身「?sub= 可分享可恢复」的通用行为
+    renderRoute("/finance?sub=invoicing");
+    expect(await screen.findByRole("tab", { name: "开票集成", selected: true })).not.toBeNull();
   });
 
   it("占位页拼错的 ?sub= 给 Not Found，不回落第一格", async () => {
-    renderRoute("/ops?sub=拼错了");
+    renderRoute("/finance?sub=拼错了");
     expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
   });
 });

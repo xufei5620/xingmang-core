@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -241,6 +242,24 @@ type Config struct {
 	// 管理后台写入的凭据文件按 <root>/<scope>/<name> 落在这里。
 	// 本层只把路径带进启动日志，不读取任何文件内容。
 	SecretRoot string
+
+	// ConnectorProbeEnabled controls whether the connector health probe
+	// (XM-OPS0) is registered. Same zero-value discipline as the other
+	// periodic jobs: literal-constructed callers must opt in explicitly;
+	// DefaultConfig turns it on. It doubles as this job's off switch
+	// (constitution clause 26).
+	ConnectorProbeEnabled bool
+	// ConnectorProbeInterval is the probe cadence, default
+	// DefaultConnectorProbeInterval (5m).
+	ConnectorProbeInterval time.Duration
+	// ConnectorProbeRunOnStart makes the process probe once on boot instead
+	// of waiting a full cycle, so the ops overview page has data
+	// immediately.
+	ConnectorProbeRunOnStart bool
+	// ConnectorProbeRunID is reserved for integration-test isolation;
+	// production must leave it empty (same rule as every other *RunID
+	// field on this Config).
+	ConnectorProbeRunID string
 }
 
 // DefaultConfig returns the safe local-development baseline.
@@ -298,6 +317,15 @@ func DefaultConfig() Config {
 		AlertEvaluateRunOnStart:         true,
 		AlertBalanceThresholdMinorUnits: alerts.DefaultBalanceThresholdMinorUnits,
 		AlertRunwayThresholds:           finance.DefaultRunwayThresholds(),
+
+		// Connector health probing defaults on for the same reason the
+		// sync jobs do: an ops page that never gets connector health data
+		// looks identical to "the probe is broken", so a default-off probe
+		// would just move the confusion from "no data" to "no data, but
+		// now silently by design".
+		ConnectorProbeEnabled:    true,
+		ConnectorProbeInterval:   DefaultConnectorProbeInterval,
+		ConnectorProbeRunOnStart: true,
 	}
 }
 
@@ -356,6 +384,9 @@ func (c Config) normalized() Config {
 	}
 	if c.AlertEvaluateInterval == 0 {
 		c.AlertEvaluateInterval = defaults.AlertEvaluateInterval
+	}
+	if c.ConnectorProbeInterval == 0 {
+		c.ConnectorProbeInterval = defaults.ConnectorProbeInterval
 	}
 	if c.AlertBalanceThresholdMinorUnits <= 0 {
 		// 零或负阈值等于「永不触发」，但看起来像是配了一个阈值。
@@ -537,6 +568,38 @@ func (c Config) validate() error {
 		// 生产配上它等于给每个副本发一张免签，同一条告警会被投递 N 次。
 		return fmt.Errorf("alert evaluate run ID must not be set in production")
 	}
+	if c.ConnectorProbeEnabled && c.ConnectorProbeInterval < time.Second {
+		return fmt.Errorf("connector probe interval %s is below River's one-second minimum", c.ConnectorProbeInterval)
+	}
+	if c.ConnectorProbeEnabled && c.Environment == "production" && c.ConnectorConfigs == nil &&
+		(c.Sub2APIMode == Sub2APIModeFake || c.NewAPIMode == NewAPIModeFake) {
+		// Fail closed at startup, same discipline as the Sub2API/NewAPI
+		// sync gates above -- kept as its own independent block (not OR'd
+		// into either of those) because the probe can legitimately run with
+		// both sync jobs disabled (e.g. "just watch connectivity, skip
+		// collecting business data"), so it needs to be both triggerable
+		// and disable-able on its own.
+		//
+		// With ConnectorConfigs set (every real deployment: cmd/platform-
+		// worker/main.go wires it unconditionally), this static fallback
+		// path is never reached in the first place -- the dynamic factory's
+		// own per-round check already turns a fake-in-production round into
+		// a KindNotSupported observation. This guard only closes the
+		// narrower gap of an embedder/test that runs the probe against the
+		// static factory (ConnectorConfigs == nil) without having set a
+		// real mode explicitly.
+		return fmt.Errorf(
+			"environment production does not allow connector probe to probe a fake-mode connector: " +
+				"configure real mode for sub2api/newapi (XM_SUB2API_MODE=real / XM_NEWAPI_MODE=real), " +
+				"or explicitly disable probing (XM_CONNECTOR_PROBE_ENABLED=false)")
+	}
+	if c.ConnectorProbeRunID != "" && c.Environment == "production" {
+		// Same reason as every other *RunID field: it exists only for
+		// integration-test isolation. Production must leave it empty so
+		// all replicas share one unique probe record and each round only
+		// probes once.
+		return fmt.Errorf("connector probe run ID must not be set in production")
+	}
 	return nil
 }
 
@@ -563,7 +626,11 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	}
 
 	workers := river.NewWorkers()
-	river.AddWorker(workers, NewHeartbeatWorker(cfg.Logger, cfg.Environment))
+	// XM-OPS0: WithObservations lets the ops overview query answer "is the
+	// worker alive" from the same freshness model as everything else,
+	// instead of a bespoke liveness probe.
+	river.AddWorker(workers, NewHeartbeatWorker(cfg.Logger, cfg.Environment).
+		WithObservations(ops.NewStore(pool), cfg.HeartbeatInterval))
 
 	heartbeat, err := newManifestPeriodicJob(
 		HeartbeatJobKind, cfg.HeartbeatInterval, cfg.HeartbeatRunOnStart,
@@ -705,6 +772,10 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			Alerts:              alerts.NewStore(pool),
 			SampleRetentionDays: cfg.MetricSampleRetentionDays,
 			AlertRetentionDays:  cfg.AlertRetentionDays,
+			// XM-OPS0: records "last cleanup result" as an observation so
+			// the ops overview query can show it without tailing logs.
+			Observations:     ops.NewStore(pool),
+			ExpectedInterval: cfg.RetentionInterval,
 		}))
 		retentionPeriodic, err := newManifestPeriodicJob(
 			RetentionJobKind, cfg.RetentionInterval, cfg.RetentionRunOnStart,
@@ -787,6 +858,56 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			return nil, err
 		}
 		periodic = append(periodic, alertPeriodic)
+	}
+
+	if cfg.ConnectorProbeEnabled {
+		// XM-OPS0: the probe reuses the exact same effective-mode
+		// resolution the sync workers use (cfg.sub2apiClientFactory() /
+		// cfg.newapiClientFactory()) -- same XM-CRED0 dynamic lookup, same
+		// production+fake guard, same env-var defaults when
+		// ConnectorConfigs is nil. This is deliberate: "which connector am
+		// I talking to" must never be a second decision that can drift
+		// from what the sync jobs are already doing.
+		sub2apiFactory := cfg.sub2apiClientFactory()
+		newapiFactory := cfg.newapiClientFactory()
+		river.AddWorker(workers, NewConnectorProbeWorker(ConnectorProbeOptions{
+			Logger:        cfg.Logger,
+			Environment:   cfg.Environment,
+			Store:         ops.NewStore(pool),
+			Sub2APISource: cfg.Sub2APIInstanceID,
+			// Adapts the full Sub2APIClientFactory down to probeClientFactory
+			// (see its doc comment): sub2api.ReadClientV2 already satisfies
+			// probeReadClient structurally, so this is a pure narrowing, not
+			// a behavior change.
+			Sub2APINewClient: func(ctx context.Context) (probeReadClient, error) {
+				client, err := sub2apiFactory(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return client, nil
+			},
+			NewAPISource: cfg.NewAPIInstanceID,
+			NewAPINewClient: func(ctx context.Context) (probeReadClient, error) {
+				client, err := newapiFactory(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return client, nil
+			},
+			ExpectedInterval: cfg.ConnectorProbeInterval,
+		}))
+		connectorProbePeriodic, err := newManifestPeriodicJob(
+			ConnectorProbeJobKind, cfg.ConnectorProbeInterval, cfg.ConnectorProbeRunOnStart,
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := ConnectorProbeArgs{RunID: cfg.ConnectorProbeRunID}
+				opts := args.InsertOpts()
+				return args, &opts
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, connectorProbePeriodic)
 	}
 
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{

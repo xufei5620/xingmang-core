@@ -9,6 +9,8 @@ import (
 
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 )
 
 const (
@@ -23,6 +25,19 @@ const (
 	heartbeatErrorCode    = "heartbeat_retry"
 	heartbeatUniquePeriod = time.Minute
 	heartbeatMaxAttempts  = 3
+
+	// MetricPlatformHeartbeat is the ops metric key recording each
+	// successful heartbeat (XM-OPS0). It lets the ops overview query answer
+	// "is the worker process alive" using the same freshness model as every
+	// other observation, instead of a bespoke liveness probe: once the
+	// heartbeat stops writing, staleness grows on its own.
+	MetricPlatformHeartbeat = "platform.heartbeat"
+
+	// HeartbeatStalenessThresholdSeconds is 3x the default heartbeat
+	// interval (60s), giving a couple of missed cycles of slack before the
+	// ops page flags the worker as stale rather than flapping on one slow
+	// beat.
+	HeartbeatStalenessThresholdSeconds int32 = 180
 )
 
 // ErrHeartbeatRetry is returned only by the demonstration failure switch. It
@@ -64,6 +79,12 @@ type HeartbeatWorker struct {
 
 	logger      *slog.Logger
 	environment string
+
+	// observations and expectedInterval are set together via
+	// WithObservations; see its comment for why this is a fluent setter
+	// instead of a constructor parameter.
+	observations     ObservationStore
+	expectedInterval time.Duration
 }
 
 // NewHeartbeatWorker constructs a worker with safe defaults for logger and
@@ -76,6 +97,24 @@ func NewHeartbeatWorker(logger *slog.Logger, environment string) *HeartbeatWorke
 		environment = "unknown"
 	}
 	return &HeartbeatWorker{logger: logger, environment: environment}
+}
+
+// WithObservations attaches an optional observation sink (XM-OPS0). When
+// set, every successful heartbeat also writes an ops.Observation (metric key
+// MetricPlatformHeartbeat) so the ops overview query can show worker
+// liveness without tailing structured logs or reaching into River's own job
+// table.
+//
+// This is a fluent setter rather than a third constructor parameter: the two
+// existing call sites (client.go's production wiring, this file's own tests)
+// already call NewHeartbeatWorker positionally, and changing that signature
+// would be a breaking change for both. The zero value (never calling this
+// method) preserves the exact pre-XM-OPS0 behavior: log-only, no store
+// dependency.
+func (w *HeartbeatWorker) WithObservations(store ObservationStore, expectedInterval time.Duration) *HeartbeatWorker {
+	w.observations = store
+	w.expectedInterval = expectedInterval
+	return w
 }
 
 func (w *HeartbeatWorker) Work(ctx context.Context, job *river.Job[HeartbeatArgs]) error {
@@ -127,6 +166,38 @@ func (w *HeartbeatWorker) Work(ctx context.Context, job *river.Job[HeartbeatArgs
 		slog.String("error_code", ""),
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "job_completed", completedAttrs...)
+
+	// XM-OPS0: record this heartbeat as an observation, if a sink was
+	// attached. A write failure here does not fail the job — the heartbeat's
+	// own purpose (proving the worker loop runs) is already satisfied by
+	// reaching this line, and losing one sample is recoverable next round.
+	if w.observations != nil {
+		now := time.Now().UTC()
+		obs := ops.Observation{
+			MetricKey:                 MetricPlatformHeartbeat,
+			Source:                    heartbeatPrincipalID,
+			Environment:               environment,
+			SyncedAt:                  now,
+			Status:                    ops.SyncOK,
+			ObservedAt:                &now,
+			LastSuccess:               &now,
+			StalenessThresholdSeconds: HeartbeatStalenessThresholdSeconds,
+			Value: map[string]any{
+				"job_id":  jobID,
+				"attempt": attempt,
+			},
+		}
+		annotateRollupMetadata(&obs, w.expectedInterval)
+		if _, err := w.observations.UpsertWithSample(ctx, obs); err != nil {
+			logger.LogAttrs(ctx, slog.LevelWarn, "heartbeat_observation_write_failed",
+				slog.String("event", "heartbeat_observation_write_failed"),
+				slog.String("module", "platform.jobs"),
+				slog.String("environment", environment),
+				slog.String("principal_id", heartbeatPrincipalID),
+				slog.String("error_code", "observation_write_failed"),
+				slog.Any("err", err))
+		}
+	}
 	return nil
 }
 

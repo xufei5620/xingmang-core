@@ -110,6 +110,14 @@ func RegisteredPeriodicJobSpecs() []JobSpec {
 			Execution: jobManifestExecution, SideEffectClass: "reconcile_then_notification",
 			IdempotencyEvidence: "alert fingerprint reconciliation is persisted before notification; retry reuses the same finding identity",
 		},
+		{
+			ID: ConnectorProbeJobKind, Kind: ConnectorProbeJobKind, Queue: QueueMaintenance,
+			OwnerProcess: jobManifestOwnerProcess, Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CONNECTOR_PROBE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.ConnectorProbeRunOnStart",
+			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
+			Execution: jobManifestExecution, SideEffectClass: "upstream_read_then_db_transaction",
+			IdempotencyEvidence: "latest+sample atomic transaction; retry remains upstream-read attempt",
+		},
 	}
 	return cloneJobSpecs(rows)
 }
