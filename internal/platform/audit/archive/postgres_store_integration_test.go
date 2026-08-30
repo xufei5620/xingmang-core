@@ -22,7 +22,7 @@ func TestAUD2PostgresStoresRoundTrip(t *testing.T) {
 		}
 		return segment.Manifest, segment.ManifestObject, nil
 	}
-	catalog, err := NewPostgresCatalog(pool, func(context.Context, CommittedSegment) error { return nil }, resolver)
+	catalog, err := NewPostgresCatalogWithBucket(pool, func(context.Context, CommittedSegment) error { return nil }, resolver, "archive-fixture")
 	if err != nil {
 		t.Fatal(err)
 	}

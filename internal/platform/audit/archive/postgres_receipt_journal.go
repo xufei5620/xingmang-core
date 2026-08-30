@@ -256,10 +256,12 @@ func (j *PostgresReceiptJournal) LoadOperation(ctx context.Context, operationID 
 	}
 	result := OperationReceiptV1{Intent: intent}
 	putResults, err := j.loadValidatedPutRows(ctx, operationID, intent)
+	partialPuts := false
 	if err != nil {
 		if !errors.Is(err, ErrJournalIncomplete) {
 			return OperationReceiptV1{}, err
 		}
+		partialPuts = true
 	}
 	result.PutResults = append(result.PutResults, putResults...)
 	terminal, err := gen.New(j.pool).GetArchiveTerminalReceipt(ctx, operationID)
@@ -268,6 +270,9 @@ func (j *PostgresReceiptJournal) LoadOperation(ctx context.Context, operationID 
 	}
 	if err != nil {
 		return OperationReceiptV1{}, err
+	}
+	if partialPuts {
+		return OperationReceiptV1{}, fmt.Errorf("%w: terminal receipt exists with incomplete put set", ErrJournalConflict)
 	}
 	if terminal.TerminalResultDigest != sha256Hex(terminal.SignedResultBytes) {
 		return OperationReceiptV1{}, fmt.Errorf("%w: terminal digest", ErrJournalConflict)

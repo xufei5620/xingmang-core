@@ -120,7 +120,7 @@ evidence; runtime wiring remains disposable-only until READY merge.
   expected (DBR2 provisioning remains separate), applied the disposable down file, and
   observed all four archive relations as `NULL`. This is disposable evidence only; no
   shared stack, server, MinIO endpoint or production database was touched.
-- A second disposable PG18 run (`xm-aud2-pg-312002df54da`, removed immediately) exercised
+- A final disposable PG18 run (`xm-aud2-pg-2852fc142e92`, removed immediately) exercised
   `TestAUD2PostgresStoresRoundTrip` after the runtime hardening: generated catalog writer
   commit/replay, strict receipt journal intent/put/terminal round-trip, role absence and
   down migration all passed. The run was isolated from the shared stack.
@@ -162,8 +162,14 @@ evidence; runtime wiring remains disposable-only until READY merge.
   `xm_audit_archive_receipt_reader` and `xm_audit_archive_receipt_writer` is intentionally
   deferred to the separately approved DBR2 policy; this migration does not create roles.
 - PostgreSQL `archive_segment` cross-row contiguity and RecoveryIndex coverage remain
-  application/transaction invariants until the exact generated SQL and catalog writer are
-  approved and implemented.
+  application/transaction invariants enforced by the advisory-lock/proof path; disposable
+  evidence does not authorize shared-stack deployment.
+- **AccessRecorder approval conflict:** the latest acceptance notes say to record restricted
+  reads in `audit.audit_event`, while the normative archive design requires an independent
+  append-only/WORM security sink outside both the audit schema and archive bucket and forbids
+  recursive writes to `audit.audit_event`. AUD2 does not implement AccessRecorder; this
+  contradiction is explicitly unresolved and blocks any AUD3 restricted-read claim until a
+  new CR/acceptance decision reconciles it.
 - Before any runtime claim, re-fetch the release tip, recompute max/000018 and all five
   input hashes/digest, verify the `2026-08-30T08:04Z APPROVED AUD2 INPUT` line, and
   re-check the nine generated hashes/digest against the exact `APPROVED AUD2 GENERATED`

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,6 +54,9 @@ type PostgresCatalog struct {
 }
 
 func NewPostgresCatalog(pool *pgxpool.Pool, coverage CatalogCoverageChecker, resolve ManifestResolver) (*PostgresCatalog, error) {
+	// Legacy/test constructor. Production callers must use NewPostgresCatalogWithProof
+	// so the immutable RecoveryIndex facts are captured and rechecked around the
+	// catalog transaction; a callback alone cannot establish that snapshot boundary.
 	return NewPostgresCatalogWithBucket(pool, coverage, resolve, "archive")
 }
 
@@ -221,6 +223,9 @@ func (c *PostgresCatalog) CommitCoveredSegment(ctx context.Context, value Commit
 	if c.coverage == nil && c.proof == nil {
 		return fmt.Errorf("%w: RecoveryIndex coverage checker is required", ErrCatalogConflict)
 	}
+	if value.ManifestObject.BucketID != c.bucketID {
+		return fmt.Errorf("%w: manifest bucket does not match configured archive bucket", ErrCatalogConflict)
+	}
 	var coverageProof *CatalogCoverageProof
 	if c.proof != nil {
 		proof, err := c.proof(ctx, value)
@@ -255,11 +260,7 @@ func (c *PostgresCatalog) CommitCoveredSegment(ctx context.Context, value Commit
 		// Validate the persisted tip before using it to derive the next range. The
 		// DB constraints are a second line; this application check also binds all
 		// fixed columns to the hydrated manifest rather than trusting `to_sequence`.
-		if latest.ID == uuid.Nil || latest.FromSequence < 1 || latest.ToSequence < latest.FromSequence ||
-			latest.RowCount != latest.ToSequence-latest.FromSequence+1 || !isLowerHex64(latest.FirstPrevHash) ||
-			!isLowerHex64(latest.LastEventHash) || !isLowerHex64(latest.PayloadSha256) ||
-			!isLowerHex64(latest.ManifestSha256) || !isLowerHex64(latest.CheckpointSha256) ||
-			latest.RecoveryGeneration < 1 {
+		if err := validatePersistedCatalogRow(latest); err != nil {
 			return fmt.Errorf("%w: persisted catalog tip failed validation", ErrCatalogConflict)
 		}
 		wantFrom := latest.ToSequence + 1
@@ -299,6 +300,29 @@ func (c *PostgresCatalog) CommitCoveredSegment(ctx context.Context, value Commit
 	return nil
 }
 
+func validatePersistedCatalogRow(row gen.AuditArchiveSegment) error {
+	if row.ID == uuid.Nil || row.FormatVersion != 1 || row.FromSequence < 1 || row.ToSequence < row.FromSequence ||
+		row.RowCount != row.ToSequence-row.FromSequence+1 || row.RowCount <= 0 || !isLowerHex64(row.FirstPrevHash) ||
+		!isLowerHex64(row.LastEventHash) || !isLowerHex64(row.PayloadSha256) || !isLowerHex64(row.ManifestSha256) ||
+		!isLowerHex64(row.CheckpointSha256) || row.PayloadSizeBytes < 0 || row.RecoveryGeneration < 1 ||
+		row.ManifestObjectKey == "" || row.ManifestVersionID == "" || row.PayloadObjectKey == "" || row.PayloadVersionID == "" ||
+		row.ManifestSignature == "" || row.ManifestKeyID == "" || row.ChainRootID == uuid.Nil || !row.CommittedAt.Valid || !row.VerifiedAt.Valid {
+		return fmt.Errorf("%w: fixed catalog fields", ErrCatalogValidation)
+	}
+	if !objectKeyDigestMatches(row.PayloadObjectKey, row.PayloadSha256) || !objectKeyDigestMatches(row.ManifestObjectKey, row.ManifestSha256) {
+		return fmt.Errorf("%w: catalog object locator digest", ErrCatalogValidation)
+	}
+	var counts []json.RawMessage
+	var environments map[string]json.RawMessage
+	var projections []json.RawMessage
+	if json.Unmarshal(row.CanonicalVersionCounts, &counts) != nil || len(counts) != 2 ||
+		json.Unmarshal(row.EnvironmentCounts, &environments) != nil || len(environments) == 0 ||
+		json.Unmarshal(row.Projections, &projections) != nil || len(projections) == 0 {
+		return fmt.Errorf("%w: catalog projections", ErrCatalogValidation)
+	}
+	return nil
+}
+
 func (c *PostgresCatalog) Latest(ctx context.Context) (CommittedSegment, error) {
 	if c == nil || c.pool == nil || c.resolve == nil {
 		return CommittedSegment{}, fmt.Errorf("%w: PostgreSQL catalog requires manifest resolver", ErrCatalogConflict)
@@ -315,7 +339,7 @@ func (c *PostgresCatalog) Latest(ctx context.Context) (CommittedSegment, error) 
 	if err != nil {
 		return CommittedSegment{}, err
 	}
-	return committedSegmentFromRow(row, manifest, manifestObject)
+	return committedSegmentFromRow(row, manifest, manifestObject, c.bucketID)
 }
 
 func (c *PostgresCatalog) ListBefore(ctx context.Context, before int64, limit int32) ([]CommittedSegment, error) {
@@ -341,7 +365,7 @@ func (c *PostgresCatalog) ListBefore(ctx context.Context, before int64, limit in
 		if err != nil {
 			return nil, err
 		}
-		segment, err := committedSegmentFromRow(row, manifest, object)
+		segment, err := committedSegmentFromRow(row, manifest, object, c.bucketID)
 		if err != nil {
 			return nil, err
 		}
@@ -350,11 +374,11 @@ func (c *PostgresCatalog) ListBefore(ctx context.Context, before int64, limit in
 	return result, nil
 }
 
-func committedSegmentFromRow(row gen.AuditArchiveSegment, manifest SignedManifestV1, object ObjectVersionV1) (CommittedSegment, error) {
-	if row.ID == uuid.Nil || row.RecoveryGeneration < 1 || strings.TrimSpace(row.CheckpointSha256) == "" {
-		return CommittedSegment{}, fmt.Errorf("%w: invalid catalog row", ErrCatalogValidation)
+func committedSegmentFromRow(row gen.AuditArchiveSegment, manifest SignedManifestV1, object ObjectVersionV1, expectedBucket string) (CommittedSegment, error) {
+	if err := validatePersistedCatalogRow(row); err != nil {
+		return CommittedSegment{}, err
 	}
-	if object.BucketID == "" || object.Key != row.ManifestObjectKey || object.VersionID != row.ManifestVersionID ||
+	if object.BucketID == "" || object.BucketID != expectedBucket || object.Key != row.ManifestObjectKey || object.VersionID != row.ManifestVersionID ||
 		object.SHA256 != row.ManifestSha256 {
 		return CommittedSegment{}, fmt.Errorf("%w: resolver locator differs from catalog row", ErrCatalogValidation)
 	}
