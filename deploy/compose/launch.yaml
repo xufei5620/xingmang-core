@@ -141,9 +141,8 @@ services:
       # 改成 production 而**不**同时切到 OIDC，本进程会拒绝启动——这是有意的闸，
       # 上生产必须先完成 CR-0001（Keycloak/OIDC）。
       #
-      # ⚠️ XM-0008 的 XM_AUTH_MODE / XM_OIDC_* 目前**没有**在这里透传：
-      #    切换到真实登录那天需要先在本段加三行 environment。步骤与审定要求见
-      #    docs/modules/httpapi/AUTH-SWITCH.md。
+      # XM_AUTH_MODE / XM_OIDC_* 已在下方透传（默认留空=按 ENVIRONMENT 取默认）；
+      #    切换真实登录的步骤与审定要求见 docs/modules/httpapi/AUTH-SWITCH.md。
       ENVIRONMENT: ${ENVIRONMENT:-staging}
       # 容器内必须绑 0.0.0.0：默认的 127.0.0.1 是给「宿主直跑 + 宿主 Nginx
       # 反代」形态用的，在容器里会让 web 反代连不上
@@ -172,6 +171,13 @@ services:
       #    而只读连接配置要求 https（同文档 §5）。
       # --- 成本线演示种子(XM-0037d):非生产演示用,生产模式进程内硬拒 ---
       XM_FINANCE_FAKE_SEED: ${XM_FINANCE_FAKE_SEED:-false}
+      # --- 鉴权模式(XM-0008/XM-AUTH1):默认 dev-header;切 Keycloak 时在 .env 设 oidc 三件套 ---
+      XM_AUTH_MODE: ${XM_AUTH_MODE:-}
+      XM_OIDC_ISSUER: ${XM_OIDC_ISSUER:-}
+      XM_OIDC_AUDIENCE: ${XM_OIDC_AUDIENCE:-}
+      XM_OIDC_JWKS_URL: ${XM_OIDC_JWKS_URL:-}
+      XM_OIDC_ROLE_SCOPES: ${XM_OIDC_ROLE_SCOPES:-}
+      XM_OIDC_CLOCK_SKEW: ${XM_OIDC_CLOCK_SKEW:-}
       XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
       XM_REQLOG_ENDPOINT: ${XM_REQLOG_ENDPOINT:-}
       XM_REQLOG_TARGET_ALLOWLIST: ${XM_REQLOG_TARGET_ALLOWLIST:-}
