@@ -139,3 +139,16 @@ func TestAUD2MemoryCatalogLatestAndBeforeAreBounded(t *testing.T) {
 		t.Fatal("zero limit unexpectedly accepted")
 	}
 }
+
+func TestAUD2CatalogCoverageFailsClosedOnGenerationOrCheckpointMismatch(t *testing.T) {
+	segment := testCommittedSegment(t, 1, 2)
+	index := goldenRecoveryIndex(t)
+	if err := ValidateCatalogCoverage(segment, index); err == nil {
+		t.Fatal("unbound recovery index unexpectedly covered catalog segment")
+	}
+	segment.RecoveryGeneration = index.Unsigned.Generation
+	segment.CheckpointSHA256 = index.Unsigned.Checkpoint.SHA256
+	if err := ValidateCatalogCoverage(segment, index); err == nil {
+		t.Fatal("terminal manifest mismatch unexpectedly covered catalog segment")
+	}
+}

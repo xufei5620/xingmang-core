@@ -48,7 +48,43 @@ func ValidateCommittedSegment(value CommittedSegment) error {
 	return nil
 }
 
+// ValidateCatalogCoverage proves that a candidate catalog row is covered by the
+// exact RecoveryIndex generation. It is intentionally separate from the catalog
+// interface because the PostgreSQL writer obtains the index snapshot in the same
+// transaction; callers must not infer coverage from catalog rows alone.
+func ValidateCatalogCoverage(segment CommittedSegment, index SignedRecoveryIndexV1) error {
+	if err := ValidateCommittedSegment(segment); err != nil {
+		return err
+	}
+	if err := ValidateRecoveryIndexBinding(index); err != nil {
+		return err
+	}
+	if segment.RecoveryGeneration != index.Unsigned.Generation {
+		return fmt.Errorf("%w: recovery generation mismatch", ErrCatalogConflict)
+	}
+	if segment.Manifest.Unsigned.ToSequence > index.Unsigned.TerminalSequence {
+		return fmt.Errorf("%w: segment exceeds recovery terminal", ErrCatalogConflict)
+	}
+	if !isLowerHex64(segment.CheckpointSHA256) || segment.CheckpointSHA256 != index.Unsigned.Checkpoint.SHA256 {
+		return fmt.Errorf("%w: checkpoint locator mismatch", ErrCatalogConflict)
+	}
+	if segment.Manifest.Unsigned.ToSequence == index.Unsigned.TerminalSequence {
+		terminal := index.Unsigned.TerminalManifest
+		if segment.ManifestObject.BucketID != terminal.BucketID || segment.ManifestObject.Key != terminal.Key ||
+			segment.ManifestObject.VersionID != terminal.VersionID || segment.ManifestObject.SHA256 != terminal.SHA256 ||
+			segment.Manifest.Unsigned.ChainRoot.RootHash != index.Unsigned.TerminalRootHash {
+			return fmt.Errorf("%w: terminal manifest/root mismatch", ErrCatalogConflict)
+		}
+	}
+	return nil
+}
+
 func segmentEquivalent(left, right CommittedSegment) bool {
+	leftManifest, leftErr := EncodeSignedManifestV1(left.Manifest)
+	rightManifest, rightErr := EncodeSignedManifestV1(right.Manifest)
+	if leftErr != nil || rightErr != nil || sha256Hex(leftManifest) != sha256Hex(rightManifest) {
+		return false
+	}
 	return left.Manifest.Unsigned.FromSequence == right.Manifest.Unsigned.FromSequence &&
 		left.Manifest.Unsigned.ToSequence == right.Manifest.Unsigned.ToSequence &&
 		left.ManifestObject.BucketID == right.ManifestObject.BucketID &&
@@ -105,6 +141,13 @@ func (c *MemoryCatalog) CommitCoveredSegment(ctx context.Context, value Committe
 	}
 	c.segments = append(c.segments, cloneCommittedSegment(value))
 	return nil
+}
+
+func (c *MemoryCatalog) CommitCoveredSegmentWithIndex(ctx context.Context, value CommittedSegment, index SignedRecoveryIndexV1) error {
+	if err := ValidateCatalogCoverage(value, index); err != nil {
+		return err
+	}
+	return c.CommitCoveredSegment(ctx, value)
 }
 
 func (c *MemoryCatalog) Latest(ctx context.Context) (CommittedSegment, error) {
