@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 
 	"github.com/xufei5620/xingmang-platform/connectors/sub2api"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
@@ -231,6 +232,7 @@ func (Sub2APISyncArgs) InsertOpts() river.InsertOpts {
 			ByArgs:   true,
 			ByPeriod: DefaultSub2APISyncInterval,
 			ByQueue:  true,
+			ByState:  rivertype.UniqueOptsByStateDefault(),
 		},
 	}
 }

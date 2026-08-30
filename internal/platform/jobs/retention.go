@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // XM-R012 保留期清理（Codex 冷审 #48 第 8 条，Issue #75）。
@@ -111,6 +112,7 @@ func (RetentionArgs) InsertOpts() river.InsertOpts {
 			ByArgs:   true,
 			ByPeriod: DefaultRetentionInterval,
 			ByQueue:  true,
+			ByState:  rivertype.UniqueOptsByStateDefault(),
 		},
 	}
 }

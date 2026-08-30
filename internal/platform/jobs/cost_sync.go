@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
@@ -118,6 +119,7 @@ func (FinanceCollectArgs) InsertOpts() river.InsertOpts {
 			ByArgs:   true,
 			ByPeriod: DefaultFinanceCollectInterval,
 			ByQueue:  true,
+			ByState:  rivertype.UniqueOptsByStateDefault(),
 		},
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 
 	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
@@ -27,8 +28,13 @@ const (
 // Config controls the worker process without exposing River's whole config
 // surface to callers. It keeps the baseline intentionally small and explicit.
 type Config struct {
-	Logger              *slog.Logger
-	Environment         string
+	Logger      *slog.Logger
+	Environment string
+	// WorkerClusterID and RiverSchema are non-secret identity inputs used by
+	// the R210 effective job manifest. They are intentionally not inferred or
+	// defaulted here: a deployment must name its ownership domain explicitly.
+	WorkerClusterID     string
+	RiverSchema         string
 	HeartbeatInterval   time.Duration
 	HeartbeatRunOnStart bool
 	// HeartbeatRunID is reserved for isolated integration tests. Production
@@ -515,24 +521,20 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, NewHeartbeatWorker(cfg.Logger, cfg.Environment))
 
-	heartbeat := river.NewPeriodicJob(
-		river.PeriodicInterval(cfg.HeartbeatInterval),
+	heartbeat, err := newManifestPeriodicJob(
+		HeartbeatJobKind, cfg.HeartbeatInterval, cfg.HeartbeatRunOnStart,
 		func() (river.JobArgs, *river.InsertOpts) {
 			args := HeartbeatArgs{
 				RunID:                 cfg.HeartbeatRunID,
 				FailuresBeforeSuccess: cfg.HeartbeatFailures,
 			}
 			opts := args.InsertOpts()
-			// Keep periodic uniqueness aligned with a configured cadence. The
-			// args-level default remains one minute for ad-hoc inserts.
-			opts.UniqueOpts.ByPeriod = cfg.HeartbeatInterval
 			return args, &opts
 		},
-		&river.PeriodicJobOpts{
-			ID:         HeartbeatJobKind,
-			RunOnStart: cfg.HeartbeatRunOnStart,
-		},
 	)
+	if err != nil {
+		return nil, err
+	}
 	periodic := []*river.PeriodicJob{heartbeat}
 
 	if cfg.Sub2APISyncEnabled {
@@ -554,20 +556,18 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 				Secrets:         cfg.Sub2APISecrets,
 			}),
 		}))
-		periodic = append(periodic, river.NewPeriodicJob(
-			river.PeriodicInterval(cfg.Sub2APISyncInterval),
+		sub2apiPeriodic, err := newManifestPeriodicJob(
+			Sub2APISyncJobKind, cfg.Sub2APISyncInterval, cfg.Sub2APISyncRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {
 				args := Sub2APISyncArgs{RunID: cfg.Sub2APISyncRunID}
 				opts := args.InsertOpts()
-				// 唯一性周期跟随配置的节奏；参数层的默认值只服务于临时插入。
-				opts.UniqueOpts.ByPeriod = cfg.Sub2APISyncInterval
 				return args, &opts
 			},
-			&river.PeriodicJobOpts{
-				ID:         Sub2APISyncJobKind,
-				RunOnStart: cfg.Sub2APISyncRunOnStart,
-			},
-		))
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, sub2apiPeriodic)
 	}
 
 	if cfg.NewAPISyncEnabled {
@@ -591,20 +591,18 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 				Secrets:         cfg.NewAPISecrets,
 			}),
 		}))
-		periodic = append(periodic, river.NewPeriodicJob(
-			river.PeriodicInterval(cfg.NewAPISyncInterval),
+		newapiPeriodic, err := newManifestPeriodicJob(
+			NewAPISyncJobKind, cfg.NewAPISyncInterval, cfg.NewAPISyncRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {
 				args := NewAPISyncArgs{RunID: cfg.NewAPISyncRunID}
 				opts := args.InsertOpts()
-				// 唯一性周期跟随配置的节奏；参数层的默认值只服务于临时插入。
-				opts.UniqueOpts.ByPeriod = cfg.NewAPISyncInterval
 				return args, &opts
 			},
-			&river.PeriodicJobOpts{
-				ID:         NewAPISyncJobKind,
-				RunOnStart: cfg.NewAPISyncRunOnStart,
-			},
-		))
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, newapiPeriodic)
 	}
 
 	if cfg.FinanceCollectEnabled {
@@ -648,20 +646,18 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			// 编一个归属出来会让四桶里的有效平台桶凭空多出金额（宪法 12 条）。
 			// 037c/d 接上归属配置时只注入一个函数，写入路径不动。
 		}))
-		periodic = append(periodic, river.NewPeriodicJob(
-			river.PeriodicInterval(cfg.FinanceCollectInterval),
+		financePeriodic, err := newManifestPeriodicJob(
+			FinanceCollectJobKind, cfg.FinanceCollectInterval, cfg.FinanceCollectRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {
 				args := FinanceCollectArgs{RunID: cfg.FinanceCollectRunID}
 				opts := args.InsertOpts()
-				// 唯一性周期跟随配置的节奏；参数层的默认值只服务于临时插入。
-				opts.UniqueOpts.ByPeriod = cfg.FinanceCollectInterval
 				return args, &opts
 			},
-			&river.PeriodicJobOpts{
-				ID:         FinanceCollectJobKind,
-				RunOnStart: cfg.FinanceCollectRunOnStart,
-			},
-		))
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, financePeriodic)
 	}
 
 	if cfg.RetentionEnabled {
@@ -680,19 +676,18 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			SampleRetentionDays: cfg.MetricSampleRetentionDays,
 			AlertRetentionDays:  cfg.AlertRetentionDays,
 		}))
-		periodic = append(periodic, river.NewPeriodicJob(
-			river.PeriodicInterval(cfg.RetentionInterval),
+		retentionPeriodic, err := newManifestPeriodicJob(
+			RetentionJobKind, cfg.RetentionInterval, cfg.RetentionRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {
 				args := RetentionArgs{RunID: cfg.RetentionRunID}
 				opts := args.InsertOpts()
-				opts.UniqueOpts.ByPeriod = cfg.RetentionInterval
 				return args, &opts
 			},
-			&river.PeriodicJobOpts{
-				ID:         RetentionJobKind,
-				RunOnStart: cfg.RetentionRunOnStart,
-			},
-		))
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, retentionPeriodic)
 	}
 
 	if cfg.AlertEvaluateEnabled {
@@ -750,20 +745,18 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 				Logger:    cfg.Logger,
 			}),
 		}))
-		periodic = append(periodic, river.NewPeriodicJob(
-			river.PeriodicInterval(cfg.AlertEvaluateInterval),
+		alertPeriodic, err := newManifestPeriodicJob(
+			AlertEvaluateJobKind, cfg.AlertEvaluateInterval, cfg.AlertEvaluateRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {
 				args := AlertEvaluateArgs{RunID: cfg.AlertEvaluateRunID}
 				opts := args.InsertOpts()
-				// 唯一性周期跟随配置的节奏；参数层的默认值只服务于临时插入。
-				opts.UniqueOpts.ByPeriod = cfg.AlertEvaluateInterval
 				return args, &opts
 			},
-			&river.PeriodicJobOpts{
-				ID:         AlertEvaluateJobKind,
-				RunOnStart: cfg.AlertEvaluateRunOnStart,
-			},
-		))
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, alertPeriodic)
 	}
 
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{
@@ -775,4 +768,46 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		Workers:      workers,
 		PeriodicJobs: periodic,
 	})
+}
+
+// newManifestPeriodicJob is the single construction path for periodic River
+// jobs. The static JobManifest supplies the stable ID/queue contract while the
+// caller supplies only deployment-resolved cadence and enablement. Keeping the
+// wrapper here prevents a future job from silently omitting the manifest's
+// uniqueness state set when it is wired into NewClient.
+func newManifestPeriodicJob(
+	id string,
+	interval time.Duration,
+	runOnStart bool,
+	factory func() (river.JobArgs, *river.InsertOpts),
+) (*river.PeriodicJob, error) {
+	spec, ok := registeredPeriodicJobSpec(id)
+	if !ok {
+		return nil, fmt.Errorf("periodic job %q is not present in the JobManifest registry", id)
+	}
+	if interval < time.Second || interval%time.Second != 0 {
+		return nil, fmt.Errorf("periodic job %q interval %s must be whole seconds and at least one second", id, interval)
+	}
+	if factory == nil {
+		return nil, fmt.Errorf("periodic job %q has no args factory", id)
+	}
+	return river.NewPeriodicJob(
+		river.PeriodicInterval(interval),
+		func() (river.JobArgs, *river.InsertOpts) {
+			args, opts := factory()
+			if opts == nil {
+				opts = &river.InsertOpts{}
+			}
+			// The schedule value is deployment-specific, while the uniqueness
+			// dimensions are frozen by the Args contract and must follow the
+			// effective cadence here as well.
+			opts.Queue = spec.Queue
+			opts.UniqueOpts.ByPeriod = interval
+			if len(opts.UniqueOpts.ByState) == 0 {
+				opts.UniqueOpts.ByState = rivertype.UniqueOptsByStateDefault()
+			}
+			return args, opts
+		},
+		&river.PeriodicJobOpts{ID: spec.ID, RunOnStart: runOnStart},
+	), nil
 }

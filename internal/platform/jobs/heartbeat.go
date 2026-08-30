@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 const (
@@ -50,6 +51,7 @@ func (HeartbeatArgs) InsertOpts() river.InsertOpts {
 			ByArgs:   true,
 			ByPeriod: heartbeatUniquePeriod,
 			ByQueue:  true,
+			ByState:  rivertype.UniqueOptsByStateDefault(),
 		},
 	}
 }
