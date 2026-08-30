@@ -214,6 +214,9 @@ func TestResponseProjectionRejectsCredentialConfigAuthAndHeaderKeys(t *testing.T
 	if _, err := b.ProjectResponse("management.health", []byte(`{"status":"ok","authorization":"blocked"}`)); err == nil {
 		t.Fatal("sensitive response key was projected")
 	}
+	if _, err := b.ProjectResponse("management.health", []byte(`{"status":"ok","data":{"token":"blocked"}}`)); err == nil {
+		t.Fatal("nested sensitive response key was projected")
+	}
 }
 
 func TestBoundaryRejectsDestructiveAndQueueFlagsEvenWithDependencyFacts(t *testing.T) {
@@ -292,5 +295,23 @@ func TestBoundaryZeroInventoryDigestRequiresExplicitPlaceholder(t *testing.T) {
 	loaded, _, err := LoadBoundary(boundaryJSON(t, b))
 	if err != nil || !loaded.RouteInventoryPlaceholder {
 		t.Fatalf("explicit placeholder rejected: %+v %v", loaded, err)
+	}
+}
+
+func TestBoundaryRejectsTrailingDotAndControlPathVariants(t *testing.T) {
+	for _, path := range []string{"/v1/models/.", "/v1/models/..", "/v1/models;param", "/v1/models\x00"} {
+		b := validBoundary()
+		b.Inference[0].Path = path
+		if _, _, err := LoadBoundary(boundaryJSON(t, b)); err == nil {
+			t.Fatalf("unsafe path accepted: %q", path)
+		}
+	}
+}
+
+func TestBoundaryRejectsDenyANYOverlapWithAllowedPath(t *testing.T) {
+	b := validBoundary()
+	b.Denied = append(b.Denied, validRoute("denied", "ANY", "/v1/models", "deny.models", "deny", false, false, false))
+	if _, _, err := LoadBoundary(boundaryJSON(t, b)); err == nil {
+		t.Fatal("deny ANY overlapping inference route accepted")
 	}
 }

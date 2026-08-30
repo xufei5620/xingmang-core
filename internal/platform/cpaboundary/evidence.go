@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +32,9 @@ type EvidenceBundle struct {
 	Firewall             FirewallProjection `json:"firewall"`
 	Adapter              AdapterProjection  `json:"adapter"`
 	Digests              DigestProjection   `json:"digests"`
+	// RawFields is accepted only as a redaction sentinel for local tooling. It
+	// is never echoed or included in EvidenceSHA256.
+	RawFields map[string]string `json:"raw_fields,omitempty"`
 }
 
 // EvidenceBundleV1 is a descriptive alias retained for callers that use
@@ -128,7 +133,10 @@ func LoadEvidenceBundle(data []byte) (EvidenceBundle, error) {
 	if err := rejectDuplicateJSONKeys(data); err != nil {
 		return EvidenceBundle{}, fmt.Errorf("cpa evidence: %w", err)
 	}
-	for _, field := range []string{"version", "observed_at", "target_version", "cpa_image_digest", "route_inventory_sha256", "config", "process", "routes", "firewall", "adapter", "digests"} {
+	// Only the wire version is structurally required here.  Target/version,
+	// route and projection omissions are intentionally represented as an
+	// incomplete AuditOffline report rather than hidden behind a decode error.
+	for _, field := range []string{"version"} {
 		if !topLevelFieldPresent(data, field) {
 			return EvidenceBundle{}, fmt.Errorf("cpa evidence: missing %s", field)
 		}
@@ -159,8 +167,8 @@ func (e EvidenceBundle) Validate() error {
 	if e.Version != EvidenceVersionV1 {
 		return fmt.Errorf("cpa evidence: unsupported version %d", e.Version)
 	}
-	if strings.TrimSpace(e.TargetVersion) == "" || !exactVersion(e.TargetVersion) {
-		return errors.New("cpa evidence: target_version must be one exact version")
+	if strings.TrimSpace(e.TargetVersion) != "" && !exactVersion(e.TargetVersion) {
+		return errors.New("cpa evidence: target_version must be one exact version when supplied")
 	}
 	if e.ObservedAt.IsZero() {
 		return errors.New("cpa evidence: observed_at is required")
@@ -171,8 +179,8 @@ func (e EvidenceBundle) Validate() error {
 	if _, offset := e.ObservedAt.Zone(); offset != 0 {
 		return errors.New("cpa evidence: observed_at must be UTC")
 	}
-	if !digestPattern.MatchString(e.CPAImageDigest) || !digestPattern.MatchString(e.RouteInventorySHA256) {
-		return errors.New("cpa evidence: image and route inventory digests must be lowercase SHA-256")
+	if (e.CPAImageDigest != "" && !digestPattern.MatchString(e.CPAImageDigest)) || (e.RouteInventorySHA256 != "" && !digestPattern.MatchString(e.RouteInventorySHA256)) {
+		return errors.New("cpa evidence: supplied image and route inventory digests must be lowercase SHA-256")
 	}
 	if e.Config.RawPort < 0 || e.Config.RawPort > 65535 {
 		return errors.New("cpa evidence: raw_port is out of range")
@@ -199,6 +207,11 @@ func (e EvidenceBundle) Validate() error {
 	}
 	if e.Digests.RouteInventorySHA256 != "" && !digestPattern.MatchString(e.Digests.RouteInventorySHA256) {
 		return errors.New("cpa evidence: digest projection route hash is invalid")
+	}
+	for key, value := range e.RawFields {
+		if secretWord(key) || secretValue(value) {
+			return errors.New("cpa evidence: raw_fields contains secret-looking material")
+		}
 	}
 	for _, route := range e.Routes.Routes {
 		if route.Plane == "" || route.Method == "" || route.Path == "" {
@@ -228,16 +241,24 @@ func AuditOffline(boundary ManagementBoundary, evidence EvidenceBundle) (Isolati
 		report.Findings = append(report.Findings, IsolationFinding{Code: code, Severity: severity, Resource: resource, EvidenceDigest: evidenceHash, Remediation: remediation})
 	}
 
-	if strings.TrimSpace(evidence.TargetVersion) == "" || !exactVersion(evidence.TargetVersion) {
+	if strings.TrimSpace(evidence.TargetVersion) == "" {
 		add("version_evidence_missing", "error", "target.version", "capture one exact target CPA version/build fact")
+		report.Complete = false
 	}
-	if evidence.TargetVersion != boundary.CPAMinVersion || evidence.TargetVersion != boundary.CPAMaxVersion {
+	if evidence.TargetVersion != "" && (evidence.TargetVersion != boundary.CPAMinVersion || evidence.TargetVersion != boundary.CPAMaxVersion) {
 		add("version_drift", "error", "target.version", "refresh the boundary contract for the exact target version")
 	}
-	if evidence.RouteInventorySHA256 != boundary.RouteInventorySHA256 || (evidence.Digests.RouteInventorySHA256 != "" && evidence.Digests.RouteInventorySHA256 != boundary.RouteInventorySHA256) {
+	if evidence.RouteInventorySHA256 == "" {
+		add("route_inventory_missing", "error", "route.inventory", "capture the exact approved route inventory digest")
+		report.Complete = false
+	} else if evidence.RouteInventorySHA256 != boundary.RouteInventorySHA256 || (evidence.Digests.RouteInventorySHA256 != "" && evidence.Digests.RouteInventorySHA256 != boundary.RouteInventorySHA256) {
 		add("route_inventory_mismatch", "error", "route.inventory", "supply the exact approved route inventory digest")
 	}
-	if strings.Trim(evidence.RouteInventorySHA256, "0") == "" {
+	if evidence.CPAImageDigest == "" {
+		add("image_evidence_missing", "error", "image.digest", "capture the exact approved image digest")
+		report.Complete = false
+	}
+	if evidence.RouteInventorySHA256 != "" && strings.Trim(evidence.RouteInventorySHA256, "0") == "" {
 		add("route_inventory_unverified", "error", "route.inventory", "replace the placeholder digest with exact target-version evidence")
 		report.Complete = false
 	}
@@ -254,6 +275,10 @@ func AuditOffline(boundary ManagementBoundary, evidence EvidenceBundle) (Isolati
 	if evidence.Config.ManagementPasswordPresent {
 		add("management_password_present", "error", "cpa.config", "remove MANAGEMENT_PASSWORD and capture an absent fact")
 	}
+	if evidence.Config.RawBind == "" {
+		add("raw_bind_missing", "error", "cpa.raw_bind", "capture the exact loopback bind fact")
+		report.Complete = false
+	}
 	if evidence.Config.RawBind != "" && !isLoopbackBind(evidence.Config.RawBind) {
 		add("raw_port_public", "error", "cpa.raw_bind", "bind raw CPA port to loopback only")
 	}
@@ -267,10 +292,10 @@ func AuditOffline(boundary ManagementBoundary, evidence EvidenceBundle) (Isolati
 	if evidence.Adapter.Public {
 		add("adapter_public", "error", "adapter.listen", "bind management adapter to private or loopback address")
 	}
-	if evidence.Adapter.RequiresMTLS && !evidence.Adapter.HasMTLS {
+	if !evidence.Adapter.RequiresMTLS || !evidence.Adapter.HasMTLS {
 		add("adapter_mtls_missing", "error", "adapter.mtls", "require a valid private mTLS identity")
 	}
-	if evidence.Adapter.SecretInConfig || evidence.Adapter.SecretInArgs || evidence.Config.SecretInConfig || evidence.Process.SecretInArgs || evidence.Process.SecretInEnv || processContainsSecret(evidence.Process) {
+	if evidence.Adapter.SecretInConfig || evidence.Adapter.SecretInArgs || evidence.Config.SecretInConfig || evidence.Process.SecretInArgs || evidence.Process.SecretInEnv || processContainsSecret(evidence.Process) || len(evidence.RawFields) > 0 {
 		add("secret_exposure", "error", "runtime.projection", "remove secret material and provide a redacted fact only")
 	}
 	if evidence.Routes.AllowRedirect || evidence.Adapter.RedirectAllowed {
@@ -278,6 +303,9 @@ func AuditOffline(boundary ManagementBoundary, evidence EvidenceBundle) (Isolati
 	}
 	for _, route := range evidence.Routes.Routes {
 		method := strings.ToUpper(route.Method)
+		if route.Method != "GET" && route.Method != "POST" && route.Method != "HEAD" {
+			add("route_method_invalid", "error", "route.corpus", "use canonical GET/POST/HEAD methods only")
+		}
 		if route.Redirect {
 			add("redirect_allowed", "error", "route.redirect", "reject redirects and absolute destinations")
 		}
@@ -285,6 +313,14 @@ func AuditOffline(boundary ManagementBoundary, evidence EvidenceBundle) (Isolati
 			add("encoded_or_wildcard_route", "error", "route.corpus", "use exact normalized paths only")
 		}
 		management := route.Management || strings.HasPrefix(route.Path, ManagementPrefix)
+		if route.Public {
+			if route.Plane == "callback" && route.Hostname != evidence.Routes.CallbackHostname {
+				add("callback_host_mismatch", "error", "route.callback", "bind callback routes to the exact per-instance callback hostname")
+			}
+			if route.Plane == "inference" && route.Hostname != evidence.Routes.InferenceHostname {
+				add("inference_host_mismatch", "error", "route.inference", "bind inference routes to the exact inference hostname")
+			}
+		}
 		if management && route.Public {
 			exactCallback := route.Hostname == evidence.Routes.CallbackHostname && route.Path == CallbackPath && (method == "GET" || method == "POST")
 			if route.Plane == "inference" || route.Hostname == evidence.Routes.InferenceHostname || !exactCallback {
@@ -352,7 +388,18 @@ func validateEvidenceHostname(host string) error {
 
 func isLoopbackBind(bind string) bool {
 	bind = strings.ToLower(strings.TrimSpace(bind))
-	return bind == "127.0.0.1" || bind == "::1" || bind == "localhost" || strings.HasPrefix(bind, "127.0.0.1:") || strings.HasPrefix(bind, "[::1]:")
+	if bind == "127.0.0.1" || bind == "::1" || bind == "localhost" {
+		return true
+	}
+	host, port, err := net.SplitHostPort(bind)
+	if err != nil {
+		return false
+	}
+	if host != "127.0.0.1" && host != "::1" && host != "localhost" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n > 0 && n <= 65535
 }
 
 func processContainsSecret(process ProcessProjection) bool {
@@ -395,6 +442,7 @@ func safeEvidenceDigest(evidence EvidenceBundle) string {
 	// oracle; findings still carry a stable digest of the redacted shape.
 	evidence.Process.Args = nil
 	evidence.Process.Environment = nil
+	evidence.RawFields = nil
 	canonical, err := json.Marshal(evidence)
 	if err != nil {
 		return ""

@@ -181,3 +181,38 @@ func TestAuditOfflineRejectsQueryAbsoluteAndRedirectRouteVariants(t *testing.T) 
 		t.Fatal("query/absolute route variants passed")
 	}
 }
+
+func TestLoadEvidenceMissingTargetIsReportedPartialByAudit(t *testing.T) {
+	e := validEvidence()
+	e.TargetVersion = ""
+	e.CPAImageDigest = ""
+	e.RouteInventorySHA256 = ""
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadEvidenceBundle(data)
+	if err != nil {
+		t.Fatalf("missing target facts should parse for partial audit: %v", err)
+	}
+	report, err := AuditOffline(validBoundary(), loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision != "partial" || report.Complete {
+		t.Fatalf("missing target facts must be partial: %+v", report)
+	}
+}
+
+func TestAuditOfflineRequiresExplicitMTLS(t *testing.T) {
+	e := validEvidence()
+	e.Adapter.RequiresMTLS = false
+	e.Adapter.HasMTLS = false
+	report, err := AuditOffline(validBoundary(), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Decision == "pass" {
+		t.Fatal("adapter without explicit mTLS passed")
+	}
+}
