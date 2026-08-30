@@ -85,7 +85,8 @@ ADR-016 与 CR-0001 §5：**平台细粒度权限不进 Keycloak**。Realm 只�
 | Realm 角色 | 翻译成的平台 scope | 状态 |
 |---|---|---|
 | `staff` | `registry.read`、`ops.read`、`ui.saved_view.manage` | CR-0001 §5 会创建这个角色；个人视图 scope 只读写自己的偏好 |
-| `admin` | 上面三个 + `audit.read` + `registry.service.manage` + `registry.connector.manage` + `registry.connection.manage` + `request.read` | **Realm 里今天没有这个角色**，预留位 |
+| `admin` | 上面三个 + `audit.read` + `registry.service.manage` + `registry.connector.manage` + `registry.connection.manage` + `request.read` | **Realm 里今天没有这个角色**，预留位；不含 `platform.user_keys.read` |
+| `key-metadata-reader` | `platform.user_keys.read` | KEY_SCOPE_APPROVAL 专门角色；只读元数据，不含完整凭据 |
 
 三处刻意的保守，前两处审定时可以推翻，第三处**已经裁定过**，请先读完理由：
 

@@ -21,6 +21,10 @@ func (c *FakeClient) GetUser(ctx context.Context, query GetUserQuery) (UserDetai
 	now := c.now().UTC()
 	for _, raw := range fakeUsers {
 		if raw.id == query.Ref.ID {
+			caps := []registry.Capability{CapabilityUserDetailRead}
+			if c.source == SourceSub2API {
+				caps = append(caps, CapabilityUserDailyUsageRead, CapabilityUserKeysMetadataRead)
+			}
 			return UserDetail{
 				Ref:    query.Ref,
 				User:   c.toUser(raw, now, period),
@@ -29,7 +33,7 @@ func (c *FakeClient) GetUser(ctx context.Context, query GetUserQuery) (UserDetai
 					ObservedAt: now, Source: c.source + "-fake",
 					Watermark: "wm-fake-detail-" + now.Format("20060102T150405Z"),
 				},
-				Capabilities: []registry.Capability{CapabilityUserDetailRead},
+				Capabilities: caps,
 			}, nil
 		}
 	}
@@ -37,5 +41,17 @@ func (c *FakeClient) GetUser(ctx context.Context, query GetUserQuery) (UserDetai
 }
 
 func (c *FakeClient) V2Capabilities() []registry.Capability {
+	if c.source == SourceSub2API {
+		return []registry.Capability{CapabilityUserDetailRead, CapabilityUserDailyUsageRead, CapabilityUserKeysMetadataRead}
+	}
 	return []registry.Capability{CapabilityUserDetailRead}
+}
+
+// V2KeyCapabilities 返回本 Fake 客户端可提供的 Key 元数据能力。
+// 这里只声明元数据能力；完整 Key、复制和导出永远不属于本契约。
+func (c *FakeClient) V2KeyCapabilities() []registry.Capability {
+	if c.source != SourceSub2API {
+		return nil
+	}
+	return []registry.Capability{CapabilityUserKeysMetadataRead}
 }

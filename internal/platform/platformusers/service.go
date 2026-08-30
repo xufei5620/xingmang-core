@@ -23,6 +23,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
+	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
 
 // Client 是本包需要的连接器能力(platformusers.ReadClient 满足)。
@@ -36,6 +37,8 @@ type Service struct {
 	// 而不是回落到另一个平台的客户端去(那会把 A 平台的用户显示成 B 的)
 	clients       map[string]Client
 	detailReaders map[string]platformusers.UserDetailReader
+	dailyReaders  map[string]platformusers.DailyUsageReader
+	keyReaders    map[string]platformusers.KeyMetadataReader
 	// now 供测试注入固定时钟;nil 时用 time.Now。
 	//
 	// 需要时钟是因为「今天」要在**服务端**解释:让前端算「今天」的话,
@@ -67,6 +70,8 @@ func NewService(clients map[string]Client) (*Service, error) {
 	}
 	cp := make(map[string]Client, len(clients))
 	details := make(map[string]platformusers.UserDetailReader)
+	daily := make(map[string]platformusers.DailyUsageReader)
+	keys := make(map[string]platformusers.KeyMetadataReader)
 	for source, c := range clients {
 		known, err := platformusers.ParseSource(source)
 		if err != nil {
@@ -79,8 +84,27 @@ func NewService(clients map[string]Client) (*Service, error) {
 		if reader, ok := c.(platformusers.UserDetailReader); ok {
 			details[known] = reader
 		}
+		if reader, ok := c.(platformusers.DailyUsageReader); ok {
+			if provider, declared := c.(interface{ V2Capabilities() []registry.Capability }); declared && hasCapability(provider.V2Capabilities(), platformusers.CapabilityUserDailyUsageRead) {
+				daily[known] = reader
+			}
+		}
+		if reader, ok := c.(platformusers.KeyMetadataReader); ok {
+			if provider, declared := c.(interface{ V2KeyCapabilities() []registry.Capability }); declared && hasCapability(provider.V2KeyCapabilities(), platformusers.CapabilityUserKeysMetadataRead) {
+				keys[known] = reader
+			}
+		}
 	}
-	return &Service{clients: cp, detailReaders: details}, nil
+	return &Service{clients: cp, detailReaders: details, dailyReaders: daily, keyReaders: keys}, nil
+}
+
+func hasCapability(caps []registry.Capability, want registry.Capability) bool {
+	for _, cap := range caps {
+		if cap == want {
+			return true
+		}
+	}
+	return false
 }
 
 // SupportsPlatform 判断某个平台有没有终端用户清单。
@@ -196,6 +220,65 @@ func (s *Service) Get(ctx context.Context, in DetailInput) (platformusers.UserDe
 	return detail, nil
 }
 
+// DailyUsageInput 是一个用户在某平台的按业务日消费查询。
+// DailyUsage 与用户详情使用独立 capability，但复用 platform.users.read scope。
+type DailyUsageInput struct {
+	Platform string
+	UserID   string
+	Day      string
+	Days     int
+}
+
+// DailyUsage 返回按日粒度的用户消费序列。真实 reader 尚未接入时 fail closed。
+func (s *Service) DailyUsage(ctx context.Context, in DailyUsageInput) (platformusers.DailyUsageSeries, error) {
+	source, _, err := s.resolve(in.Platform)
+	if err != nil {
+		return platformusers.DailyUsageSeries{}, err
+	}
+	reader, ok := s.dailyReaders[source]
+	if !ok {
+		return platformusers.DailyUsageSeries{}, action.NewError(action.CodeAdvancedControlsRequired, "每日消费趋势真实读取尚未接入", nil)
+	}
+	ref := platformusers.UserRef{Platform: source, ID: in.UserID}
+	if err := ref.Validate(); err != nil {
+		return platformusers.DailyUsageSeries{}, action.NewError(action.CodeInvalidParams, "用户引用不合法", err)
+	}
+	series, err := reader.DailyUsage(ctx, platformusers.DailyUsageQuery{Ref: ref, Day: in.Day, Days: in.Days})
+	if err != nil {
+		return platformusers.DailyUsageSeries{}, translateError("users.daily_usage", err)
+	}
+	return series, nil
+}
+
+// KeyMetadataInput 是一个用户的 Key 元数据分页查询。只返回前缀、状态、时间等
+// 不可逆元数据，不携带完整 Key 或任何凭据。
+type KeyMetadataInput struct {
+	Platform string
+	UserID   string
+	Limit    int
+	Cursor   string
+}
+
+func (s *Service) KeyMetadata(ctx context.Context, in KeyMetadataInput) (platformusers.KeyMetadataPage, error) {
+	source, _, err := s.resolve(in.Platform)
+	if err != nil {
+		return platformusers.KeyMetadataPage{}, err
+	}
+	reader, ok := s.keyReaders[source]
+	if !ok {
+		return platformusers.KeyMetadataPage{}, action.NewError(action.CodeAdvancedControlsRequired, "API Key 元数据真实读取尚未接入", nil)
+	}
+	ref := platformusers.UserRef{Platform: source, ID: in.UserID}
+	if err := ref.Validate(); err != nil {
+		return platformusers.KeyMetadataPage{}, action.NewError(action.CodeInvalidParams, "用户引用不合法", err)
+	}
+	page, err := reader.ListKeyMetadata(ctx, platformusers.KeyMetadataQuery{Ref: ref, Limit: in.Limit, Cursor: in.Cursor})
+	if err != nil {
+		return platformusers.KeyMetadataPage{}, translateError("users.keys", err)
+	}
+	return page, nil
+}
+
 // parseStatusFilter 把查询参数翻译成契约里的状态。
 //
 // 空串是「不筛」。**拼错的状态当场 400**,不静默忽略:一个 `status=Active`
@@ -270,8 +353,15 @@ func translateError(op string, err error) error {
 	case connector.KindNotSupported:
 		// 501 而不是 502:这不是上游坏了,是平台这条链路还没接通——
 		// 前端据此显示「功能待上线」而不是「上游故障」
+		message := "用户清单尚未接通真实数据源(XM-0046:上游响应形状待核对)"
+		switch op {
+		case "users.daily_usage":
+			message = "每日消费趋势尚未接通真实数据源(仅 Fake/core 可用)"
+		case "users.keys":
+			message = "API Key 元数据尚未接通真实数据源(仅 Fake/core 可用)"
+		}
 		return action.NewError(action.CodeAdvancedControlsRequired,
-			"用户清单尚未接通真实数据源(XM-0046:上游响应形状待核对)", err)
+			message, err)
 	case connector.KindForbiddenTarget, connector.KindWriteAttempt:
 		// 护栏拒绝 = 配置错了或代码里出现了写路径,都是平台自己的问题
 		return action.NewError(action.CodeInternal, "服务内部错误", err)

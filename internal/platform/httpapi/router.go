@@ -48,8 +48,10 @@ type Deps struct {
 	RequestLogs RequestLogQuerier
 	// PlatformUsers 为 nil 时「用户管理」端点不挂载（XM-0046）。
 	// 与 RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
-	PlatformUsers       PlatformUsersQuerier
-	PlatformUserDetails PlatformUserDetailsQuerier
+	PlatformUsers          PlatformUsersQuerier
+	PlatformUserDetails    PlatformUserDetailsQuerier
+	PlatformUserDailyUsage PlatformUserDailyUsageQuerier
+	PlatformUserKeys       PlatformUserKeysQuerier
 	FinanceAccounts     UpstreamAccountLister
 	FinanceProfit       ProfitDailyLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
@@ -170,6 +172,14 @@ func NewRouter(d Deps) http.Handler {
 			if d.PlatformUserDetails != nil {
 				api.With(RequireScope(platformusers.ScopeRead)).
 					Get("/platforms/{platform}/users/{userID}", GetPlatformUserHandler(d.PlatformUserDetails))
+			}
+			if d.PlatformUserDailyUsage != nil {
+				api.With(RequireScope(platformusers.ScopeRead)).
+					Get("/platforms/{platform}/users/{userID}/daily-usage", GetPlatformUserDailyUsageHandler(d.PlatformUserDailyUsage))
+			}
+			if d.PlatformUserKeys != nil {
+				api.With(RequireScope(platformusers.ScopeKeyMetadataRead)).
+					Get("/platforms/{platform}/users/{userID}/keys", ListPlatformUserKeysHandler(d.PlatformUserKeys))
 			}
 			api.With(RequireScope(platformusers.ScopeRead)).
 				Get("/platforms/{platform}/users", ListPlatformUsersHandler(d.PlatformUsers))

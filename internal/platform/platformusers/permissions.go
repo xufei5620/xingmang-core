@@ -16,3 +16,8 @@ package platformusers
 // 平台自己解析成这些 scope。`platform.` 前缀已经在 oidcauth 的
 // platformScopePrefixes 里,令牌里冒出这个串会被当成配置漂移而拒绝。
 const ScopeRead = "platform.users.read"
+
+// ScopeKeyMetadataRead gates the metadata-only API key inventory. It is separate
+// from ScopeRead because even prefixes and usage timestamps expand the credential
+// exposure surface. Full keys, copy and export are never part of this scope.
+const ScopeKeyMetadataRead = "platform.user_keys.read"

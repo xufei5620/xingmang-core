@@ -9,11 +9,34 @@ import {
   encodePlatformUserIdSegment,
   getPlatformUser,
   lookupPlatformUserExact,
+  listPlatformUserDailyUsage,
+  listPlatformUserKeys,
   platformHasUsers,
   UNPARSED_CONTACT,
   type PlatformUserItem,
   type PlatformUserPage,
 } from "./users";
+
+describe("用户详情扩展只读查询", () => {
+  it("每日消费使用 canonical 用户路径与 day/days 参数", async () => {
+    const client: ApiClient = { get: vi.fn().mockResolvedValue({}), post: vi.fn() };
+    await listPlatformUserDailyUsage("sub2api", "u_10241", { day: "2026-08-29", days: 7 }, client);
+    expect(client.get).toHaveBeenCalledWith(
+      "/api/v1/platforms/sub2api/users/u-755f3130323431/daily-usage",
+      expect.objectContaining({ searchParams: { day: "2026-08-29", days: "7" } }),
+    );
+  });
+
+  it("Key 查询只发送 limit/cursor，不构造或返回完整 Key", async () => {
+    const client: ApiClient = { get: vi.fn().mockResolvedValue({ items: [] }), post: vi.fn() };
+    await listPlatformUserKeys("sub2api", "u_10241", { limit: 50, cursor: "next-1" }, client);
+    expect(client.get).toHaveBeenCalledWith(
+      "/api/v1/platforms/sub2api/users/u-755f3130323431/keys",
+      expect.objectContaining({ searchParams: { limit: "50", cursor: "next-1" } }),
+    );
+    expect(JSON.stringify((client.get as ReturnType<typeof vi.fn>).mock.calls[0])).not.toMatch(/secret|plaintext|complete.?key/i);
+  });
+});
 
 describe("不透明用户 ID 的 URL 路径段 codec", () => {
   const golden = JSON.parse(goldenText) as Array<{ id: string; segment: string }>;

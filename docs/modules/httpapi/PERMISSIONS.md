@@ -19,6 +19,7 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 | `GET /api/v1/audit/events`    | `audit.read`    | `audit.ScopeRead` |
 | `GET /api/v1/ui/saved-views`  | `ui.saved_view.manage` | `savedviews.ScopeManage` |
 | `GET /api/v1/finance/platform-channel-bindings` | `finance.read` | `finance.ScopeRead` |
+| `GET /api/v1/platforms/{platform}/users/{userID}/keys` | `platform.user_keys.read` | `platformusers.ScopeKeyMetadataRead` |
 
 三个 scope **分开授予**，不共用一个「读」权限：指标里将来会有收入、余额这类业务数据
 （XM-0017 接入 Sub2API 之后），比「有哪些服务」敏感一个量级。共用一个 scope 意味着
@@ -36,6 +37,10 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 低影响偏好，拆成两份 scope 不增加隔离，只增加授权配置。它也不复用 `registry.read`
 或 `ops.read`，避免把“能看业务数据”与“能保存自己的表格布局”绑成一个决定。owner 与
 Environment 从 Principal 派生，客户端没有对应参数。
+
+`platform.user_keys.read` 是凭据库存的独立元数据权限：响应只允许前缀、状态、创建/最近
+使用时间和今日峰值请求，永不包含完整 Key、Token、secret 或 credentialRef。staff/admin
+默认角色不含该 scope；需要查看时使用经人工审定的专门角色。
 
 渠道绑定 Query 只需要 `finance.read`；确认/解绑是独立的
 `finance.platform_channel_binding.manage` L1 Action 权限，默认 staff/admin 都不授予。

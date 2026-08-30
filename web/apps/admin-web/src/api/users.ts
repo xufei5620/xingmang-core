@@ -80,6 +80,26 @@ export interface PlatformUserPage {
   freshness: FreshnessContract;
 }
 
+/** 每日消费序列的只读 DTO。金额与计数都允许未知，不能把缺失日当作 0。 */
+export interface DailyUsagePointBody {
+  day: string;
+  consumed: AmountBody;
+  requests: CountBody;
+}
+
+export interface DailyUsageSeriesBody {
+  from: string;
+  to: string;
+  points: DailyUsagePointBody[];
+  coverage: { expected_days: number; covered_days: number; complete: boolean };
+  snapshot: {
+    observed_at: string;
+    source: string;
+    watermark: string;
+    is_partial: boolean;
+  };
+}
+
 /** 列表排序键。与后端 `platformusers.SortKey` 逐字对应。 */
 export type PlatformUserSort =
   | "balance_desc"
@@ -97,6 +117,76 @@ export interface ListPlatformUsersOptions extends ListOptions {
   granularity?: PeriodGranularity;
   limit?: number;
   cursor?: string;
+}
+
+export interface DailyUsageOptions extends ListOptions {
+  day?: string;
+  days?: number;
+}
+
+/** 读取指定用户按业务日排列的消费序列；服务端负责 CST 日期解释。 */
+export async function listPlatformUserDailyUsage(
+  platform: string,
+  userId: string,
+  options: DailyUsageOptions = {},
+  client: ApiClient = apiClient,
+): Promise<DailyUsageSeriesBody> {
+  const segment = encodePlatformUserIdSegment(userId);
+  return client.get<DailyUsageSeriesBody>(
+    `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}/daily-usage`,
+    {
+      searchParams: {
+        ...(options.day ? { day: options.day } : {}),
+        ...(options.days === undefined ? {} : { days: String(options.days) }),
+      },
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
+}
+
+export interface KeyMetadataBody {
+  id: string;
+  prefix: string;
+  status: string;
+  created_at: string | null;
+  last_used_at: string | null;
+  today_peak_rpm: CountBody;
+}
+
+export interface KeyMetadataPageBody {
+  items: KeyMetadataBody[];
+  next_cursor: string;
+  snapshot: {
+    observed_at: string;
+    source: string;
+    watermark: string;
+    is_partial: boolean;
+  };
+}
+
+export interface KeyMetadataOptions extends ListOptions {
+  limit?: number;
+  cursor?: string;
+}
+
+/** 读取元数据-only API Key 列表。响应永远没有完整 Key、secret 或 credential 字段。 */
+export async function listPlatformUserKeys(
+  platform: string,
+  userId: string,
+  options: KeyMetadataOptions = {},
+  client: ApiClient = apiClient,
+): Promise<KeyMetadataPageBody> {
+  const segment = encodePlatformUserIdSegment(userId);
+  return client.get<KeyMetadataPageBody>(
+    `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}/keys`,
+    {
+      searchParams: {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+      },
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
 }
 
 /** `platform.users.read` —— 读取用户清单需要的权限。

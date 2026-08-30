@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 )
 
 func TestFakeV2GetUserIsExactAndSourceScoped(t *testing.T) {
@@ -24,5 +26,28 @@ func TestFakeV2GetUserIsExactAndSourceScoped(t *testing.T) {
 	_, err = c.GetUser(context.Background(), GetUserQuery{Ref: UserRef{Platform: SourceNewAPI, ID: "u_10241"}})
 	if err == nil {
 		t.Fatal("cross-platform ref must be rejected")
+	}
+}
+
+func TestFakeV2OptionalCapabilitiesAreSourceScoped(t *testing.T) {
+	sub := NewFakeClient(SourceSub2API, nil)
+	if got := sub.V2Capabilities(); len(got) != 3 || got[1] != CapabilityUserDailyUsageRead || got[2] != CapabilityUserKeysMetadataRead {
+		t.Fatalf("Sub2API capabilities=%v, want detail+daily+keys", got)
+	}
+	if got := sub.V2KeyCapabilities(); len(got) != 1 || got[0] != CapabilityUserKeysMetadataRead {
+		t.Fatalf("Sub2API key capabilities=%v", got)
+	}
+	newapi := NewFakeClient(SourceNewAPI, nil)
+	if got := newapi.V2Capabilities(); len(got) != 1 || got[0] != CapabilityUserDetailRead {
+		t.Fatalf("NewAPI capabilities=%v, must not inherit Sub2API daily", got)
+	}
+	if got := newapi.V2KeyCapabilities(); len(got) != 0 {
+		t.Fatalf("NewAPI key capabilities=%v, must remain unavailable", got)
+	}
+	if _, err := newapi.DailyUsage(context.Background(), DailyUsageQuery{Ref: UserRef{Platform: SourceNewAPI, ID: "u_10241"}}); connector.KindOf(err) != connector.KindNotSupported {
+		t.Fatalf("NewAPI DailyUsage should be not_supported, err=%v", err)
+	}
+	if _, err := newapi.ListKeyMetadata(context.Background(), KeyMetadataQuery{Ref: UserRef{Platform: SourceNewAPI, ID: "u_10241"}}); connector.KindOf(err) != connector.KindNotSupported {
+		t.Fatalf("NewAPI key metadata should be not_supported, err=%v", err)
 	}
 }

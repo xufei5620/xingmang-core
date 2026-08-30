@@ -198,8 +198,10 @@ func main() {
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
 		// nil 时用户端点不挂载（见 httpapi.Deps.PlatformUsers）
-		PlatformUsers:       platformUsersOrNil(platformUserService),
-		PlatformUserDetails: platformUserDetailsOrNil(platformUserService),
+		PlatformUsers:          platformUsersOrNil(platformUserService),
+		PlatformUserDetails:    platformUserDetailsOrNil(platformUserService),
+		PlatformUserDailyUsage: platformUserDailyUsageOrNil(platformUserService),
+		PlatformUserKeys:       platformUserKeysOrNil(platformUserService),
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler
 		// 不各开一条访问路径
 		FinanceAccounts: financeStore,

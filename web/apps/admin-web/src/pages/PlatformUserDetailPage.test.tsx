@@ -75,6 +75,34 @@ function detailFromPage(body: ReturnType<typeof pageBody>) {
   };
 }
 
+function dailyBody() {
+  return {
+    from: "2026-08-22",
+    to: "2026-08-28",
+    points: Array.from({ length: 7 }, (_, index) => ({
+      day: `2026-08-${String(22 + index).padStart(2, "0")}`,
+      consumed: index === 1
+        ? { minor_units: null, currency: "" }
+        : { minor_units: index === 0 ? "0" : "1200", currency: "CNY" },
+      requests: { value: index === 1 ? null : index * 3 },
+    })),
+    coverage: { expected_days: 7, covered_days: 6, complete: false },
+    snapshot: { observed_at: "2026-08-28T09:00:00Z", source: "sub2api-fake", watermark: "wm-daily", is_partial: true },
+  };
+}
+
+function keysBody() {
+  return {
+    items: [
+      { id: "km-1", prefix: "sk-a1b2", status: "active", created_at: "2026-08-01T00:00:00Z", last_used_at: "2026-08-28T08:00:00Z", today_peak_rpm: { value: 42 } },
+      { id: "km-2", prefix: "sk-old1", status: "revoked", created_at: null, last_used_at: null, today_peak_rpm: { value: null } },
+      { id: "km-3", prefix: "sk-off1", status: "disabled", created_at: null, last_used_at: null, today_peak_rpm: { value: null } },
+    ],
+    next_cursor: "",
+    snapshot: { observed_at: "2026-08-28T09:00:00Z", source: "sub2api-fake", watermark: "wm-keys", is_partial: false },
+  };
+}
+
 function stubFetch(handler: (url: string, init?: RequestInit) => Response = () => fakeResponse(pageBody())) {
   const urls: string[] = [];
   const fetchMock = vi.fn((input: string, init?: RequestInit) => {
@@ -86,6 +114,17 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response = () =
     if (/\/users\/u-[^/]+$/.test(new URL(url, "http://local.test").pathname) && response.ok) {
       return Promise.resolve(response.json()).then((body) =>
         fakeResponse(body && "items" in body ? detailFromPage(body as ReturnType<typeof pageBody>) : body),
+      );
+    }
+    const pathname = new URL(url, "http://local.test").pathname;
+    if (pathname.endsWith("/daily-usage") && response.ok) {
+      return Promise.resolve(response.json()).then((body) =>
+        fakeResponse(body && "points" in body ? body : dailyBody()),
+      );
+    }
+    if (pathname.endsWith("/keys") && response.ok) {
+      return Promise.resolve(response.json()).then((body) =>
+        fakeResponse(body && "snapshot" in body && "items" in body ? body : keysBody()),
       );
     }
     return Promise.resolve(response);
@@ -156,6 +195,10 @@ describe("用户详情共享事实（platformusers v2）", () => {
     expect(request.pathname).toBe("/api/v1/platforms/sub2api/users/u-755f3130323431");
     expect(request.searchParams.get("q")).toBeNull();
     expect(request.searchParams.get("limit")).toBeNull();
+    const dailyRequest = urls.find((raw) => new URL(raw, "http://local.test").pathname.endsWith("/daily-usage"));
+    expect(dailyRequest).toBeTruthy();
+    expect(new URL(dailyRequest ?? "", "http://local.test").searchParams.get("day")).toBe("2026-08-27");
+    expect(new URL(dailyRequest ?? "", "http://local.test").searchParams.get("days")).toBe("7");
   });
 
   it("opaque route ID 解码后做精确查询，不产生路径穿越或默认用户回落", async () => {
@@ -211,7 +254,7 @@ describe("用户详情共享事实（platformusers v2）", () => {
 });
 
 describe("平台特有布局", () => {
-  it("Sub2API 顶部保留三块独立 unavailable，并用四个可点击子页签承载明细区", async () => {
+  it("Sub2API 顶部展示按日趋势覆盖率，并用四个可点击子页签承载明细区", async () => {
     stubFetch();
     renderPage();
 
@@ -220,7 +263,8 @@ describe("平台特有布局", () => {
     for (const heading of ["客户类型", "注册时间", "近 7 天消费趋势"]) {
       expect(screen.getByRole("heading", { name: heading, level: 3 })).toBeTruthy();
     }
-    expect(screen.getByText(/需要逐日消费序列/)).toBeTruthy();
+    expect(await screen.findByText(/覆盖 6 \/ 7 天/)).toBeTruthy();
+    expect(screen.getByText(/缺失日保持未知/)).toBeTruthy();
     expect(screen.getAllByText("¥0.00").length).toBeGreaterThan(1);
     const tabs = screen.getAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent)).toEqual([
@@ -259,12 +303,50 @@ describe("平台特有布局", () => {
     expect(within(panel).queryByRole("heading", { name: "消费明细", level: 3 })).toBeNull();
   });
 
-  it("Sub2API 可从分享的 ?sub=keys 直接恢复 API Key unavailable panel", async () => {
+  it("Sub2API 可从分享的 ?sub=keys 直接恢复 API Key 元数据面板", async () => {
     stubFetch();
     renderPage("/platforms/sub2api/users/u-755f3130323431?sub=keys");
 
     expect(await screen.findByRole("tab", { name: "API Key", selected: true })).toBeTruthy();
-    expect(within(screen.getByRole("tabpanel")).getByText(/API Key 列表.*凭据边界/)).toBeTruthy();
+    const panel = within(screen.getByRole("tabpanel"));
+    expect(panel.getByRole("heading", { name: "API Key 元数据", level: 3 })).toBeTruthy();
+    expect(await panel.findByText("sk-a1b2")).toBeTruthy();
+    expect(panel.getByText("已撤销")).toBeTruthy();
+    expect(panel.getByText("已禁用")).toBeTruthy();
+    expect(panel.queryByRole("button", { name: /复制|导出/ })).toBeNull();
+  });
+
+  it("Key 元数据缺少独立 scope 时显示拒绝，不回落到用户令牌前缀", async () => {
+    stubFetch((url) => new URL(url, "http://local.test").pathname.endsWith("/keys")
+      ? fakeResponse({ error: { code: "PERMISSION_DENIED", message: "缺少权限 platform.user_keys.read" } }, 403)
+      : fakeResponse(pageBody()));
+    renderPage("/platforms/sub2api/users/u-755f3130323431?sub=keys");
+    const panel = within(await screen.findByRole("tabpanel"));
+    expect(await panel.findByText("无权访问")).toBeTruthy();
+    expect(panel.getByText(/platform\.user_keys\.read/)).toBeTruthy();
+    expect(panel.queryByText("sk-a1b2")).toBeNull();
+  });
+
+  it("Key 元数据支持按不透明游标加载下一页", async () => {
+    const { urls } = stubFetch((url) => {
+      const parsed = new URL(url, "http://local.test");
+      if (!parsed.pathname.endsWith("/keys")) return fakeResponse(pageBody());
+      if (parsed.searchParams.get("cursor")) {
+        return fakeResponse({
+          items: [{ id: "km-2", prefix: "sk-c3d4", status: "active", created_at: null, last_used_at: null, today_peak_rpm: { value: 3 } }],
+          next_cursor: "",
+          snapshot: { observed_at: "2026-08-28T09:00:00Z", source: "sub2api-fake", watermark: "wm-keys-2", is_partial: false },
+        });
+      }
+      return fakeResponse({ ...keysBody(), items: [keysBody().items[0]], next_cursor: "cursor-next" });
+    });
+    renderPage("/platforms/sub2api/users/u-755f3130323431?sub=keys");
+    const panel = within(await screen.findByRole("tabpanel"));
+    expect(await panel.findByText("sk-a1b2")).toBeTruthy();
+    fireEvent.click(await panel.findByRole("button", { name: "加载更多" }));
+    expect(await panel.findByText("sk-c3d4")).toBeTruthy();
+    const keyRequests = urls.filter((url) => new URL(url, "http://local.test").pathname.endsWith("/keys"));
+    expect(new URL(keyRequests[1] ?? "", "http://local.test").searchParams.get("cursor")).toBe("cursor-next");
   });
 
   it("NewAPI 只保留自己的区间请求 unavailable 面板，不复制 Sub2API 丰富区域", async () => {

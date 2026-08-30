@@ -49,6 +49,9 @@ export const DEFAULT_SCOPES = [
   // XM-0046 用户管理。**不复用 ops.read**：那看到的是聚合数字，
   // 这是逐用户的资金明细（internal/platform/platformusers/permissions.go）。
   "platform.users.read",
+  // KEY_SCOPE_APPROVAL（2026-08-30）：开发态演示允许读取元数据-only Key
+  // 列表；服务端仍按独立 scope 裁决，生产 admin/staff 默认映射不包含它。
+  "platform.user_keys.read",
   // XM-0048 上游管理（成本登记簿）的写路径。读路径复用上面 XM-0037d 已加的
   // finance.read —— 登记簿与看板供数是同一个 ScopeRead。
   //
