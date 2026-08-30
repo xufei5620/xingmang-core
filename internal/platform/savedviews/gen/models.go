@@ -184,10 +184,93 @@ type CoreConnector struct {
 	UpdatedAt                 pgtype.Timestamptz
 }
 
+type CoreConnectorConfig struct {
+	Platform        string
+	Environment     string
+	Mode            string
+	Endpoint        string
+	TargetAllowlist []string
+	CredentialRef   string
+	Version         int32
+	UpdatedAt       pgtype.Timestamptz
+	UpdatedBy       string
+}
+
+type CoreCredentialRef struct {
+	Ref         string
+	Scope       string
+	Name        string
+	Environment string
+	Fingerprint string
+	Version     int32
+	RevokedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+	UpdatedBy   string
+}
+
 type CoreEnvironment struct {
 	ID          string
 	Description string
 	CreatedAt   pgtype.Timestamptz
+}
+
+type CoreServerAsset struct {
+	ID                    uuid.UUID
+	Hostname              string
+	IpAddresses           []byte
+	Datacenter            *string
+	SupplierID            *uuid.UUID
+	Vcpu                  *int32
+	MemoryGb              *int32
+	DiskGb                *int32
+	Purpose               *string
+	Status                string
+	MonthlyCostMinorUnits *int64
+	Currency              *string
+	BillingCycle          *string
+	ExpiresAt             pgtype.Date
+	Notes                 *string
+	Environment           string
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
+}
+
+type CoreServerDomain struct {
+	ID               uuid.UUID
+	DomainName       string
+	Registrar        *string
+	DnsProvider      *string
+	ExpiresAt        pgtype.Date
+	CertSource       *string
+	CertExpiresAt    pgtype.Date
+	BoundServiceNote *string
+	Environment      string
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+}
+
+type CoreServerServiceNote struct {
+	ID          uuid.UUID
+	ServerID    uuid.UUID
+	ServiceName string
+	ServiceKind string
+	Port        *int32
+	Notes       *string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+type CoreServerSupplier struct {
+	ID          uuid.UUID
+	Name        string
+	Website     *string
+	ConsoleUrl  *string
+	ContactName *string
+	ContactInfo *string
+	Notes       *string
+	Environment string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
 }
 
 type CoreService struct {
@@ -206,6 +289,34 @@ type CoreService struct {
 	ObservedAt       pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
+}
+
+type CoreStaffAccount struct {
+	ID                 uuid.UUID
+	Username           string
+	DisplayName        string
+	PasswordHash       string
+	Roles              []string
+	Disabled           bool
+	MustChangePassword bool
+	FailedAttempts     int32
+	LockedUntil        pgtype.Timestamptz
+	LastLoginAt        pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+	UpdatedBy          string
+}
+
+type CoreStaffSession struct {
+	ID          string
+	AccountID   uuid.UUID
+	Environment string
+	CreatedAt   pgtype.Timestamptz
+	ExpiresAt   pgtype.Timestamptz
+	LastSeenAt  pgtype.Timestamptz
+	RevokedAt   pgtype.Timestamptz
+	UserAgent   string
+	Ip          string
 }
 
 type FinanceAmortizationLoss struct {
@@ -381,18 +492,97 @@ type OpsMetricObservation struct {
 	UpdatedAt                 pgtype.Timestamptz
 }
 
+type OpsMetricObservationDaily struct {
+	Environment           string
+	MetricKey             string
+	Source                string
+	BucketDay             pgtype.Date
+	BucketTimezone        string
+	BucketStartAt         pgtype.Timestamptz
+	BucketEndAt           pgtype.Timestamptz
+	PolicyVersion         int16
+	PolicyHash            string
+	ValueKind             string
+	PrimaryKind           string
+	SumMode               string
+	Unit                  string
+	Scale                 int64
+	Currency              *string
+	CurrencySet           []byte
+	FirstNumeric          pgtype.Numeric
+	LastNumeric           pgtype.Numeric
+	MinNumeric            pgtype.Numeric
+	MaxNumeric            pgtype.Numeric
+	SumNumeric            pgtype.Numeric
+	NumericCount          int64
+	FirstFullValueJson    []byte
+	LastFullValueJson     []byte
+	LastPartialValueJson  []byte
+	FirstFullSampleID     *int64
+	LastFullSampleID      *int64
+	LastPartialSampleID   *int64
+	FirstSyncedAt         pgtype.Timestamptz
+	LastSyncedAt          pgtype.Timestamptz
+	FirstObservedAt       pgtype.Timestamptz
+	LastObservedAt        pgtype.Timestamptz
+	FirstWatermark        *string
+	LastWatermark         *string
+	SampleCount           int64
+	FullSuccessCount      int64
+	PartialSuccessCount   int64
+	FailedCount           int64
+	ExpectedSlotCount     *int64
+	CoveredSlotCount      *int64
+	DuplicateCount        int64
+	CoveragePpm           *int32
+	CoverageUnknownReason *string
+	ErrorCounts           []byte
+	MinSampleID           int64
+	MaxSampleID           int64
+	AggregatedAt          pgtype.Timestamptz
+}
+
 type OpsMetricObservationSample struct {
-	ID            int64
+	ID                      int64
+	MetricKey               string
+	Source                  string
+	Environment             string
+	ObservedAt              pgtype.Timestamptz
+	SyncedAt                pgtype.Timestamptz
+	Status                  string
+	IsPartial               bool
+	Watermark               string
+	LastErrorCode           string
+	ValueJson               []byte
+	RollupPolicyVersion     int16
+	ExpectedIntervalSeconds *int32
+}
+
+type OpsMetricRollupReceipt struct {
+	RollupName    string
+	SampleID      int64
+	Environment   string
 	MetricKey     string
 	Source        string
-	Environment   string
-	ObservedAt    pgtype.Timestamptz
-	SyncedAt      pgtype.Timestamptz
-	Status        string
-	IsPartial     bool
-	Watermark     string
-	LastErrorCode string
-	ValueJson     []byte
+	BucketDay     pgtype.Date
+	PolicyVersion int16
+	PolicyHash    string
+	ProcessedAt   pgtype.Timestamptz
+}
+
+type OpsMetricRollupState struct {
+	RollupName             string
+	Environment            string
+	MetricKey              string
+	PolicyHash             string
+	HighestReceiptSampleID int64
+	ProcessedSampleCount   int64
+	LastAttemptStartedAt   pgtype.Timestamptz
+	LastSuccessAt          pgtype.Timestamptz
+	LastFailureAt          pgtype.Timestamptz
+	Status                 string
+	LastErrorCode          string
+	UpdatedAt              pgtype.Timestamptz
 }
 
 type UiSavedView struct {

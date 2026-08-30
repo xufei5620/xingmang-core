@@ -297,15 +297,13 @@ pnpm 依赖校验，node_modules 已由团队预先镜像好）：
   如果未来需要"上个月我们花了多少钱在服务器上"这类回溯问题，现在的
   设计答不出来（这与拍板"只做记录"的范围一致，只是标注出来避免
   被误用成财务口径）。
-- **`sqlc generate` 顺带发现了三个更早迁移（000019~21）的既有生成
-  漂移**（`OpsMetricObservationSample` 新增列、`CoreStaffAccount`/
-  `CoreCredentialRef`/`CoreConnectorConfig` 等表此前从未在
-  `internal/platform/{action,alerts,audit,finance,ops,registry,
-  savedviews}/gen/models.go` 里出现过）。**已用
-  `git checkout --` 撤销了那部分不属于本片范围的漂移**，只保留本片
-  自己新增的 `internal/platform/server/gen/`；那七个包目前仍然是
-  漂移前的状态，不是本片引入也不是本片修复，留给对应迁移的验收方
-  另行处理（跑一次 `go tool sqlc generate` 就能看到同样的漂移）。
+- **`sqlc generate` 曾顺带发现更早迁移（000019~21）的既有生成漂移**
+  （`OpsMetricObservationSample` 新增列、`CoreStaffAccount`/
+  `CoreCredentialRef`/`CoreConnectorConfig` 等类型）。作者原始分支为了不
+  扩片曾撤销这些生成结果；验收整合的最终全门禁要求生成零漂移，因此已用
+  钉定的 sqlc v1.31.1 全量重生成 9 个既有 `gen/*.go` 文件，同时纳入
+  000023 的 `CoreServer*` 模型。连续第二次 `go tool sqlc generate` 退出码 0
+  且 9 文件 SHA256 均未变化；这项 08:15 待办已关闭，不再作为 follow-up。
 
 ## follow_ups
 

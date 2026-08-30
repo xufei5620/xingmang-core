@@ -12,6 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getActionRunByID = `-- name: GetActionRunByID :one
+SELECT id, action_id, action_version, principal_id, principal_type, environment, request_id, risk_level, status, error_code, duration_ms, started_at, finished_at FROM action.action_run
+WHERE id = $1
+`
+
+// 单条执行记录（供操作与审批页「执行记录」详情，XM-ACTIONS0）。
+func (q *Queries) GetActionRunByID(ctx context.Context, id uuid.UUID) (ActionActionRun, error) {
+	row := q.db.QueryRow(ctx, getActionRunByID, id)
+	var i ActionActionRun
+	err := row.Scan(
+		&i.ID,
+		&i.ActionID,
+		&i.ActionVersion,
+		&i.PrincipalID,
+		&i.PrincipalType,
+		&i.Environment,
+		&i.RequestID,
+		&i.RiskLevel,
+		&i.Status,
+		&i.ErrorCode,
+		&i.DurationMs,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const insertActionRun = `-- name: InsertActionRun :exec
 INSERT INTO action.action_run (
     id, action_id, action_version, principal_id, principal_type,
@@ -55,6 +82,88 @@ func (q *Queries) InsertActionRun(ctx context.Context, arg InsertActionRunParams
 		arg.FinishedAt,
 	)
 	return err
+}
+
+const listActionRuns = `-- name: ListActionRuns :many
+SELECT id, action_id, action_version, principal_id, principal_type, environment, request_id, risk_level, status, error_code, duration_ms, started_at, finished_at FROM action.action_run
+WHERE environment = $1::text
+  AND ($2::text = '' OR action_id = $2::text)
+  AND ($3::text = '' OR status = $3::text)
+  AND ($4::text = '' OR principal_id = $4::text)
+  AND (
+    $5::boolean = false
+    OR started_at < $6::timestamptz
+    OR (started_at = $6::timestamptz AND id < $7::uuid)
+  )
+ORDER BY started_at DESC, id DESC
+LIMIT $8::int
+`
+
+type ListActionRunsParams struct {
+	Environment     string
+	ActionID        string
+	Status          string
+	PrincipalID     string
+	HasCursor       bool
+	BeforeStartedAt pgtype.Timestamptz
+	BeforeID        uuid.UUID
+	RowLimit        int32
+}
+
+// 跨 Action 的执行记录分页读取（XM-ACTIONS0：操作与审批页「执行记录」子页签）。
+// 按 environment 过滤（必填，调用方填 Principal 的环境，规格 §20.5）；
+// action_id / status / principal_id 传空串表示不过滤。
+//
+// 游标是 (started_at, id) 复合 keyset：单独用 started_at 会在同一微秒内的
+// 多条记录上翻页重复或漏读（同 ListRecentAuditEvents 曾经修的那个问题，见
+// audit.sql）；action_run 没有 audit_event 那种全局递增 sequence，但 id 是
+// UUID 主键，(started_at DESC, id DESC) 仍是严格全序。has_cursor=false 表示
+// 首页，此时 before_started_at / before_id 的值不参与判定。
+//
+// 走 (environment, started_at DESC, id DESC) 复合索引（迁移 000022），理由
+// 与 audit_event_environment_sequence_idx（迁移 000006）相同：没有它时稀疏
+// 环境的一页要沿全局索引倒扫直到凑够 limit 行。
+func (q *Queries) ListActionRuns(ctx context.Context, arg ListActionRunsParams) ([]ActionActionRun, error) {
+	rows, err := q.db.Query(ctx, listActionRuns,
+		arg.Environment,
+		arg.ActionID,
+		arg.Status,
+		arg.PrincipalID,
+		arg.HasCursor,
+		arg.BeforeStartedAt,
+		arg.BeforeID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ActionActionRun{}
+	for rows.Next() {
+		var i ActionActionRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.ActionID,
+			&i.ActionVersion,
+			&i.PrincipalID,
+			&i.PrincipalType,
+			&i.Environment,
+			&i.RequestID,
+			&i.RiskLevel,
+			&i.Status,
+			&i.ErrorCode,
+			&i.DurationMs,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listActionRunsByAction = `-- name: ListActionRunsByAction :many
@@ -101,99 +210,4 @@ func (q *Queries) ListActionRunsByAction(ctx context.Context, arg ListActionRuns
 		return nil, err
 	}
 	return items, nil
-}
-
-const listActionRuns = `-- name: ListActionRuns :many
-SELECT id, action_id, action_version, principal_id, principal_type, environment, request_id, risk_level, status, error_code, duration_ms, started_at, finished_at FROM action.action_run
-WHERE environment = $1::text
-  AND ($2::text = '' OR action_id = $2::text)
-  AND ($3::text = '' OR status = $3::text)
-  AND ($4::text = '' OR principal_id = $4::text)
-  AND (
-    $5::boolean = false
-    OR started_at < $6::timestamptz
-    OR (started_at = $6::timestamptz AND id < $7::uuid)
-  )
-ORDER BY started_at DESC, id DESC
-LIMIT $8::int
-`
-
-type ListActionRunsParams struct {
-	Environment     string
-	ActionID        string
-	Status          string
-	PrincipalID     string
-	HasCursor       bool
-	BeforeStartedAt pgtype.Timestamptz
-	BeforeID        uuid.UUID
-	RowLimit        int32
-}
-
-func (q *Queries) ListActionRuns(ctx context.Context, arg ListActionRunsParams) ([]ActionActionRun, error) {
-	rows, err := q.db.Query(ctx, listActionRuns,
-		arg.Environment,
-		arg.ActionID,
-		arg.Status,
-		arg.PrincipalID,
-		arg.HasCursor,
-		arg.BeforeStartedAt,
-		arg.BeforeID,
-		arg.RowLimit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ActionActionRun{}
-	for rows.Next() {
-		var i ActionActionRun
-		if err := rows.Scan(
-			&i.ID,
-			&i.ActionID,
-			&i.ActionVersion,
-			&i.PrincipalID,
-			&i.PrincipalType,
-			&i.Environment,
-			&i.RequestID,
-			&i.RiskLevel,
-			&i.Status,
-			&i.ErrorCode,
-			&i.DurationMs,
-			&i.StartedAt,
-			&i.FinishedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getActionRunByID = `-- name: GetActionRunByID :one
-SELECT id, action_id, action_version, principal_id, principal_type, environment, request_id, risk_level, status, error_code, duration_ms, started_at, finished_at FROM action.action_run
-WHERE id = $1
-`
-
-func (q *Queries) GetActionRunByID(ctx context.Context, id uuid.UUID) (ActionActionRun, error) {
-	row := q.db.QueryRow(ctx, getActionRunByID, id)
-	var i ActionActionRun
-	err := row.Scan(
-		&i.ID,
-		&i.ActionID,
-		&i.ActionVersion,
-		&i.PrincipalID,
-		&i.PrincipalType,
-		&i.Environment,
-		&i.RequestID,
-		&i.RiskLevel,
-		&i.Status,
-		&i.ErrorCode,
-		&i.DurationMs,
-		&i.StartedAt,
-		&i.FinishedAt,
-	)
-	return i, err
 }

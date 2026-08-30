@@ -91,9 +91,15 @@ type GetAuditEventByActionRunIDRow struct {
 	CanonicalVersion   int16
 }
 
-// GetAuditEventByActionRunID 按 action_run_id 取回关联的审计事件（XM-ACTIONS0）。
+// 按 action_run_id 取回关联的审计事件（供操作与审批页「执行记录」详情的
+// before/after 摘要关联展示，XM-ACTIONS0）。一次 Execute 只产生一条审计事件
+// （kernel.go Execute，成功失败都写），库层没有唯一约束强制这一点——
+// ORDER BY sequence ASC LIMIT 1 在这个假设被打破时仍给出一个确定的结果，
+// 而不是让哪一行胜出取决于查询计划。走既有索引 audit_event_action_run_idx
+// （迁移 000003）。
+//
 // 不取两个 connector 摘要：与 ListRecentAuditEvents 同一条纪律（无界 jsonb，
-// 调用方用不到）。
+// 这一屏用不到，见该查询的说明）。
 func (q *Queries) GetAuditEventByActionRunID(ctx context.Context, actionRunID uuid.UUID) (GetAuditEventByActionRunIDRow, error) {
 	row := q.db.QueryRow(ctx, getAuditEventByActionRunID, actionRunID)
 	var i GetAuditEventByActionRunIDRow
