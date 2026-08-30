@@ -1,7 +1,8 @@
-/** 前端**运行时**配置（XM-AUTH1）。
+/** 前端**运行时**配置（XM-AUTH1，XM-LOGIN 加入 local 模式）。
  *
  *  鉴权方式不能烧进构建产物：同一个 web 镜像要同时服务 staging（dev-header）
- *  与生产（oidc），构建期的 `VITE_*` 变量做不到「一个镜像、两种环境」。
+ *  与生产（如今是 local：管理台自带账号密码登录；oidc 分支保留但不再是生产默认），
+ *  构建期的 `VITE_*` 变量做不到「一个镜像、两种环境」。
  *  于是容器启动时由 deploy/docker/web-app-config.sh 按环境变量生成
  *  `/app-config.js`，index.html 在业务包之前用普通 `<script>` 同步加载它，
  *  文件里只做一件事：`window.__XM_CONFIG__ = {…}`。
@@ -14,9 +15,12 @@
  *  文件缺失或不合法**不能**弄垮应用：这里只做纯解析，任何异常形状都回落到
  *  默认值并把问题记进 `problems`，由登录页如实展示。前端选错模式不构成安全
  *  问题——服务端才是最终裁决者（宪法：前端隐藏不构成安全控制；生产后端
- *  硬拒开发头）——但它会让人对着一屏 403 干瞪眼，所以要把原因说出来。 */
+ *  硬拒开发头）——但它会让人对着一屏 403 干瞪眼，所以要把原因说出来。
+ *
+ *  `local`：管理台自带账号密码登录（POST /api/v1/auth/login 等），会话是
+ *  HttpOnly Cookie（xm_session），不需要 oidcIssuer / oidcClientId。 */
 
-export type AuthMode = "dev-header" | "oidc";
+export type AuthMode = "dev-header" | "oidc" | "local";
 
 /** `window.__XM_CONFIG__` 的契约。所有字段可省略；未知字段忽略。 */
 export interface RuntimeConfigInput {
@@ -67,7 +71,7 @@ function nonEmptyString(value: unknown): string | undefined {
 
 function parseAuthMode(raw: unknown): AuthMode | undefined {
   const value = nonEmptyString(raw);
-  if (value === "oidc" || value === "dev-header") return value;
+  if (value === "oidc" || value === "dev-header" || value === "local") return value;
   return undefined;
 }
 
@@ -94,7 +98,7 @@ export function resolveRuntimeConfig(raw: unknown, env: RuntimeEnv): RuntimeConf
     // 空串/空白当作没配（生成脚本默认就写空值）；填了却不认识才算问题
     if (nonEmptyString(input.authMode) !== undefined || (input.authMode !== undefined && typeof input.authMode !== "string")) {
       problems.push(
-        `app-config.js 的 authMode 只能是 dev-header 或 oidc（当前：${String(input.authMode)}），已回落`,
+        `app-config.js 的 authMode 只能是 dev-header、oidc 或 local（当前：${String(input.authMode)}），已回落`,
       );
     }
     if (envMode) {
@@ -102,7 +106,7 @@ export function resolveRuntimeConfig(raw: unknown, env: RuntimeEnv): RuntimeConf
       source = "vite-env";
     } else if (nonEmptyString(env.VITE_XM_AUTH_MODE)) {
       problems.push(
-        `VITE_XM_AUTH_MODE 只能是 dev-header 或 oidc（当前：${env.VITE_XM_AUTH_MODE}），已回落`,
+        `VITE_XM_AUTH_MODE 只能是 dev-header、oidc 或 local（当前：${env.VITE_XM_AUTH_MODE}），已回落`,
       );
     }
   }

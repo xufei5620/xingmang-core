@@ -1,7 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import { RouterProvider, createMemoryRouter, useLocation } from "react-router";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { devLogin, devLogout } from "./devSession";
+import { setCachedLocalUser, type LocalUser } from "./localSession";
 import { SESSION_KEY } from "./oidc";
 import { RequireAuth } from "./RequireAuth";
 
@@ -79,5 +80,74 @@ describe("RequireAuth：路由门禁", () => {
       renderGate("/dashboard");
       expect(await screen.findByText("受保护内容")).not.toBeNull();
     });
+  });
+});
+
+function renderLocalGate(path: string, fetchLocalUser: () => Promise<LocalUser>) {
+  const router = createMemoryRouter(
+    [
+      { path: "/login", Component: LoginStub },
+      {
+        path: "/",
+        Component: () => <RequireAuth fetchLocalUser={fetchLocalUser} />,
+        children: [
+          { path: "dashboard", element: <div>受保护内容</div> },
+          { path: "account/password", element: <div>改密页</div> },
+        ],
+      },
+    ],
+    { initialEntries: [path] },
+  );
+  render(<RouterProvider router={router} />);
+  return router;
+}
+
+describe("RequireAuth：local 模式（XM-LOGIN）", () => {
+  const user: LocalUser = {
+    username: "alice",
+    display_name: "Alice",
+    roles: ["staff"],
+    must_change_password: false,
+  };
+
+  beforeEach(() => {
+    window.__XM_CONFIG__ = { authMode: "local" };
+    setCachedLocalUser(null);
+  });
+  afterEach(() => {
+    delete window.__XM_CONFIG__;
+    setCachedLocalUser(null);
+  });
+
+  it("me() 成功且不需要强制改密：放行子路由", async () => {
+    renderLocalGate("/dashboard", () => Promise.resolve(user));
+    expect(await screen.findByText("受保护内容")).not.toBeNull();
+  });
+
+  it("me() 失败（没有有效会话）：去登录页，next 带上原地址", async () => {
+    renderLocalGate("/dashboard?work=alerts", () => Promise.reject(new Error("no session")));
+    const login = await screen.findByText(/登录页/);
+    expect(login.textContent).toContain(`?next=${encodeURIComponent("/dashboard?work=alerts")}`);
+  });
+
+  it("must_change_password 为真：无论访问哪个页面都先拦到强制改密页", async () => {
+    renderLocalGate("/dashboard", () => Promise.resolve({ ...user, must_change_password: true }));
+    expect(await screen.findByText("改密页")).not.toBeNull();
+    expect(screen.queryByText("受保护内容")).toBeNull();
+  });
+
+  it("must_change_password 为真时改密页本身照常放行，不会把自己重定向到自己", async () => {
+    renderLocalGate("/account/password", () =>
+      Promise.resolve({ ...user, must_change_password: true }),
+    );
+    expect(await screen.findByText("改密页")).not.toBeNull();
+  });
+
+  it("命中内存缓存（比如刚登录成功跳转过来）时不再重复请求 me()", async () => {
+    setCachedLocalUser(user);
+    const fetchLocalUser = vi.fn(() => Promise.resolve(user));
+    renderLocalGate("/dashboard", fetchLocalUser);
+    expect(await screen.findByText("受保护内容")).not.toBeNull();
+    expect(fetchLocalUser).not.toHaveBeenCalled();
   });
 });
