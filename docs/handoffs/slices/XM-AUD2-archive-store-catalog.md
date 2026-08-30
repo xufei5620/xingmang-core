@@ -4,7 +4,7 @@ sprint-section: 7
 
 ## status
 
-BLOCKED · WAITING APPROVED AUD2 GENERATED (sqlc output prepared)
+IN_PROGRESS · AUD2 INPUT + GENERATED approvals present; implementing catalog/journal/provider
 
 This branch starts from the exact accepted release tip and records the approved AUD2
 input digest below. The corrected input is approved; generated-artifact review remains the
@@ -16,7 +16,7 @@ slice.
 - branch: `ai/codex/XM-AUD2-archive-store-catalog`
 - worktree: `K:/星芒统一控制平台/wt-xmAUD2-impl`
 - fresh release tip at implementation start: `db9d4cabe4092defc3f07b11d511a825491f56ae`
-- current rebased release/base: `9dd9e8bcd7c34a11b1c1f1ed998ad8e7721feefb`
+- current rebased release/base: `c619d6edb906c172d54068753b8fe3b89f7a8714`
 - top-level migration max at fresh tip: `17`
 - allocated migration number: `000018` (`000018_audit_archive_catalog`)
 - commit: see final delivery line / branch HEAD
@@ -35,11 +35,13 @@ recovery. It also requires a disposable random MinIO qualification project using
 The provider approval did not itself approve migration bytes; the acceptance log contains
 `2026-08-30T08:04Z APPROVED AUD2 INPUT 000018` for the corrected five-file candidate
 (`digest=caaa33624b93c5d5fc2ee02688bf0d1207d8799f`). The branch has since been rebased to
-the newer release `9dd9e8b` (migration max remains 17); the approved five input bytes are
+the newer release `c619d6e` (migration max remains 17); the approved five input bytes are
 unchanged. Migration application is limited to disposable PG18 probes. `go tool sqlc
-generate` has run with the pinned tool; generated artifacts require a separate
-approval. Shared `xingmang-launch`, production endpoints, servers, real
-credentials and shared MinIO remain prohibited until that generated-artifact signal.
+generate` has run with the pinned tool, and the acceptance log now contains
+`2026-08-30T08:26Z APPROVED AUD2 GENERATED` for the generated files below. Catalog/journal
+and provider implementation may proceed only on disposable fixtures; shared
+`xingmang-launch`, production endpoints, servers and real credentials remain prohibited
+until the final implementation slice is READY and merged.
 
 ## migration input pin (pre-generation)
 
@@ -97,9 +99,9 @@ the provider SDK or runtime wiring.
    shared stack.
 2. GREEN now: provider-independent validation, fixed locator/recovery-index models and
    filesystem fixture may be implemented and tested without the migration.
-3. WAITING gate: PostgreSQL catalog/journal runtime wiring and shared/disposable MinIO
-   qualification remain paused until the separate generated-artifact approval. A disposable
-   PG18 migration/probe and sqlc generation are allowed now; neither is staging deployment.
+3. Final implementation gate: PostgreSQL catalog/journal runtime wiring and disposable
+   MinIO qualification may proceed under the approved boundaries. Shared-stack deploy,
+   staging/production access and any real credential remain out of scope until READY merge.
 
 ### RED evidence
 
