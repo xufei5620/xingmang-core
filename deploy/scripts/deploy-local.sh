@@ -283,6 +283,12 @@ if [ -n "$override_file" ]; then
   esac
   [ "$(dirname -- "$override_file")" = "$(dirname -- "$compose_file")" ] || die "override-file 必须与 compose-file 同目录"
 fi
+# 目标环境由覆盖文件决定：只有 server-prod.yaml 才允许（且要求）production。
+# 这是唯一的生产闸门——没有覆盖文件的运行永远是 staging，.env 写了 production 也过不去。
+expected_environment=staging
+if [ -n "$override_file" ] && [ "$(basename -- "$override_file")" = "server-prod.yaml" ]; then
+  expected_environment=production
+fi
 if [ "$test_mode" -eq 0 ]; then
   [ "$compose_file" = "$repo_path/deploy/compose/launch.yaml" ] || die "compose-file 必须使用仓库内 launch.yaml"
   [ "$env_file" = "$repo_path/deploy/compose/.env" ] || die "env-file 必须使用仓库内 .env"
@@ -295,7 +301,11 @@ fi
 
 environment_value="$(read_env_value ENVIRONMENT 2>/dev/null || true)"
 environment_value="$(trim "$environment_value")"
-[ -z "$environment_value" ] || [ "$environment_value" = "staging" ] || die "本地脚本只允许 ENVIRONMENT=staging"
+if [ "$expected_environment" = "production" ]; then
+  [ "$environment_value" = "production" ] || die "server-prod.yaml 覆盖要求 env-file 显式 ENVIRONMENT=production"
+else
+  [ -z "$environment_value" ] || [ "$environment_value" = "staging" ] || die "本地脚本只允许 ENVIRONMENT=staging（生产请带 --override-file <绝对路径>/server-prod.yaml）"
+fi
 web_bind_value="$(read_env_value WEB_BIND 2>/dev/null || true)"
 web_bind_value="$(trim "$web_bind_value")"
 [ -z "$web_bind_value" ] || [ "$web_bind_value" = "127.0.0.1" ] || die "本地 Web 只允许绑定 127.0.0.1"
@@ -406,9 +416,9 @@ target_sha="$current_sha"
 
 # Compose 只允许使用本机 staging 的受控插值；这些值覆盖 .env/调用者可能
 # 留下的同名变量，数据库口令本身仍只由 --env-file 提供，绝不在 shell 中回显。
-export ENVIRONMENT=staging WEB_BIND=127.0.0.1 WEB_PORT=8088
+export ENVIRONMENT="$expected_environment" WEB_BIND=127.0.0.1 WEB_PORT=8088
 export POSTGRES_DB=xingmang POSTGRES_USER=xingmang
-export BUILD_VERSION=staging BUILD_COMMIT="$target_sha"
+export BUILD_VERSION="$expected_environment" BUILD_COMMIT="$target_sha"
 
 tmp_dir="$(mktemp -d)" || die "无法创建部署临时目录"
 cleanup() { rm -rf -- "$tmp_dir"; }

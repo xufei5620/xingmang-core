@@ -311,6 +311,21 @@ assert_not_text "脚本不含 reset --hard" 'reset --hard' "$deploy_script"
 
 expect_failure "override-file 只允许 server-staging/server-prod" env PATH="$fake_bin:$PATH" DEPLOY_LOCAL_TRACE="$trace"   "$deploy_script" --repo "$fixture" --env-file "$fixture/deploy/compose/.env"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/launch.yaml"   --sha "$fixture_sha" --probe-attempts 1
 grep -q -- '--override-file' "$deploy_script" && ok "脚本提供 --override-file" || bad "脚本缺少 --override-file"
+
+# 生产闸门：只有 server-prod.yaml 覆盖才允许（且要求）ENVIRONMENT=production。
+cp "$repo_root/deploy/compose/server-prod.yaml" "$fixture/deploy/compose/server-prod.yaml"
+printf 'ENVIRONMENT=production
+POSTGRES_DB=xingmang
+POSTGRES_USER=xingmang
+DATABASE_PASSWORD=test-only.invalid
+' > "$tmp/env.prod"
+git -C "$fixture" add deploy/compose/server-prod.yaml
+git -C "$fixture" commit -qm prod-override
+fixture_sha="$(git -C "$fixture" rev-parse HEAD)"
+expect_success "server-prod 覆盖接受 ENVIRONMENT=production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$tmp/env.prod"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/server-prod.yaml" --sha "$fixture_sha"
+expect_failure "不带 server-prod 覆盖时拒绝 ENVIRONMENT=production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$tmp/env.prod"   --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha"
+expect_failure "server-prod 覆盖要求 env-file 显式 production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$fixture/deploy/compose/.env"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/server-prod.yaml" --sha "$fixture_sha"
+grep -q 'export ENVIRONMENT="$expected_environment"' "$deploy_script" && ok "Compose 插值环境随覆盖文件" || bad "Compose 插值环境仍钉死 staging"
 grep -q 'bootstrap=skipped reason=service-not-in-profile' "$deploy_script" && ok "bootstrap 按 profile 存在性跳过" || bad "bootstrap 未按 profile 跳过"
 
 [ "$fail" -eq 0 ] && echo "DEPLOY-LOCAL-TEST-OK"
