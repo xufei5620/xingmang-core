@@ -129,6 +129,31 @@ export function formatErrorRatePPM(value: unknown): string {
   return negative ? `-${body}` : body;
 }
 
+/** 万分比（bp，basis points）整数 → 百分比展示字符串，两位小数。
+ *
+ *  例：`9950` → `"99.50%"`，`0` → `"0.00%"`，`10000` → `"100.00%"`。
+ *
+ *  与 formatErrorRatePPM **不是同一个换算**：那个是百万分比（ppm），这个是
+ *  万分比（1 bp = 0.01%）。共用一个函数的话，bp 值会被当成 ppm 除，
+ *  结果整体缩小 100 倍还不报错——这正是成功率这类指标要求「用整数运算
+ *  格式化，不用浮点算比率」的同一条纪律，只是除数不同，所以另起一个函数
+ *  而不是共用参数化除数：调用方看函数名就知道自己传的是哪种单位，
+ *  不必再去翻一遍调用点确认。
+ *
+ *  全程整数运算：bp 本身就是两位小数百分比的整数表示（whole = bp / 100，
+ *  两位小数 = bp % 100），天然精确，不需要再截断或四舍五入。 */
+export function formatBasisPointsPercent(value: unknown): string {
+  const bp = toIntegerValue(value);
+  if (bp === null) return INVALID_VALUE_TEXT;
+
+  const negative = bp < 0n;
+  const abs = negative ? -bp : bp;
+  const whole = abs / 100n;
+  const fraction = abs % 100n;
+  const body = `${groupDigits(whole.toString())}.${fraction.toString().padStart(2, "0")}%`;
+  return negative ? `-${body}` : body;
+}
+
 /** 整数计数 → 带千分位的展示字符串（人数、单数、渠道数）。 */
 export function formatCount(value: unknown): string {
   const n = toIntegerValue(value);

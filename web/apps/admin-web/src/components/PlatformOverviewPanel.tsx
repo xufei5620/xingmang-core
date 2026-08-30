@@ -4,8 +4,10 @@ import {
   FreshnessNote,
   MetricCard,
   PageState,
+  Sparkline,
   StatTile,
   type FreshnessContract,
+  type SparkSample,
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
@@ -19,10 +21,10 @@ import {
 import { listMetrics, type MetricItem } from "../api/platform";
 import { appDemoDataConfig, shouldShowDemoBanner } from "../lib/demoData";
 import {
-  channelHealth,
   connectionHealth,
   subscriptionHealth,
   limitWorkItems,
+  sub2ApiChannelHealth,
   toWorkItems,
   workItemLabel,
   type HealthRow,
@@ -30,10 +32,14 @@ import {
 import {
   CHANNEL_BALANCE_METRIC_KEY,
   NEWAPI_CHANNELS_METRIC_KEY,
+  SUB2API_CHANNEL_STATUS_METRIC_KEY,
   metricPrimaryValue,
   presentMetric,
   readChannelRows,
   readNewApiChannelRows,
+  readRequestsTrendDays,
+  readSub2ApiChannelStatusRows,
+  toTrendSparkSamples,
 } from "../lib/metrics";
 import { formatErrorRatePPM, formatScaledMinorUnits } from "../lib/money";
 import {
@@ -53,6 +59,12 @@ const SEVEN_DAYS_HOURS = 168;
 /** NewAPI 概览使用的指标键。集中声明避免各处把平台归属写成相似但不一致的字符串。 */
 const NEWAPI_USERS_TOTAL_METRIC_KEY = "newapi.users.total";
 const NEWAPI_MODELS_USAGE_METRIC_KEY = "newapi.models.usage";
+
+/** Sub2API 概览新增的请求量三件套（XM-OVERVIEW-UI）：今日调用量、24h 成功率、
+ *  近 7 日调用量趋势，均来自请求审计线（reqlog）按业务日/滚动窗口聚合而来。 */
+const SUB2API_REQUESTS_DAILY_METRIC_KEY = "sub2api.requests.daily";
+const SUB2API_SUCCESS_RATE_24H_METRIC_KEY = "sub2api.requests.success_rate_24h";
+const SUB2API_REQUESTS_TREND_7D_METRIC_KEY = "sub2api.requests.trend_7d";
 
 /** 底部大图的画布。与卡片里的迷你图是**同一个组件换个盒子**——
  *  另写一个图表组件的话，两处的失败样本与部分数据画法迟早会漂开。 */
@@ -198,19 +210,32 @@ function Sub2ApiOverview({
 }) {
   const revenue = byKey.get("sub2api.revenue.daily");
   const cost = byKey.get("sub2api.cost.daily");
-  const channels = byKey.get(CHANNEL_BALANCE_METRIC_KEY);
+  const channelBalance = byKey.get(CHANNEL_BALANCE_METRIC_KEY);
+  const channelStatus = byKey.get(SUB2API_CHANNEL_STATUS_METRIC_KEY);
+  const requestsDaily = byKey.get(SUB2API_REQUESTS_DAILY_METRIC_KEY);
+  const successRate24h = byKey.get(SUB2API_SUCCESS_RATE_24H_METRIC_KEY);
+  const requestsTrend = usableTrendDaysMetric(byKey.get(SUB2API_REQUESTS_TREND_7D_METRIC_KEY));
+  const trendDays = requestsTrend ? readRequestsTrendDays(requestsTrend.value) : [];
 
   return (
     <>
       {/* 四张统计卡，顺序逐字照原型 */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <PendingTile
+        <MetricTile
           label="今日调用量"
-          note="调用量属于请求审计那条线（XM-0039 reqlog 只读网关）：今天只有逐条请求记录，没有按业务日聚合的指标"
+          item={requestsDaily}
+          note="按业务日聚合的请求量（XM-0039 reqlog 只读网关）"
+          missingNote="调用量属于请求审计那条线（XM-0039 reqlog 只读网关）：今天只有逐条请求记录，没有按业务日聚合的指标"
+          // 下方已经有一张专门的「近 7 日调用量」大图；卡片自己再叠一条基于
+          // 历史接口的迷你折线只会是同一件事的第二个、口径还不一样的版本
+          sparkline={false}
         />
-        <PendingTile
+        <MetricTile
           label="成功率（24h）"
-          note="Sub2API 侧还没有成功率指标。NewAPI 的渠道状态里有逐渠道错误率，但那是另一个平台、另一个口径，不能顶替"
+          item={successRate24h}
+          note="滚动 24 小时窗口统计，不是自然日"
+          missingNote="Sub2API 侧还没有成功率指标。NewAPI 的渠道状态里有逐渠道错误率，但那是另一个平台、另一个口径，不能顶替"
+          sparkline={false}
         />
         <MetricTile
           label="今日充值"
@@ -234,7 +259,8 @@ function Sub2ApiOverview({
         <WorkCard platform="sub2api" />
         <HealthCard
           platform="sub2api"
-          channels={channels}
+          channelBalance={channelBalance}
+          channelStatus={channelStatus}
           demo={demo}
           hasMetrics={hasMetrics}
         />
@@ -243,8 +269,9 @@ function Sub2ApiOverview({
       {/* 底部大图 */}
       <TrendCard
         title="近 7 日调用量"
-        item={undefined}
+        item={requestsTrend}
         pendingNote="同上：调用量还没有按日聚合的指标。已接的充值与成本趋势在上面两张卡的迷你折线里"
+        samples={requestsTrend ? toTrendSparkSamples(trendDays) : undefined}
       />
 
       <CostLineRow systemType="sub2api" label={label} />
@@ -481,6 +508,18 @@ function usableTrendMetric(item: MetricItem | undefined): MetricItem | undefined
   return metricPrimaryValue(item.metric_key, item.value).raw === null ? undefined : item;
 }
 
+/** trend_7d 的可用性判断与 usableTrendMetric **不是同一回事**：那个函数假设
+ *  「主数值」是个扁平字段（走 metricPrimaryValue，未登记时 raw 会是 null），
+ *  trend_7d 的 value 是内嵌的逐日数组，根本没有这个意义上的主数值——
+ *  用 usableTrendMetric 判它会永远判成「不可用」（metricPrimaryValue 的兜底
+ *  口径找不到能当主数值的标量字段）。存在且初始化过就交给 Sparkline 自己
+ *  判断样本够不够画线：不足两个可画点时它会显示「暂无趋势」，不需要在这里
+ *  重复判断一遍。 */
+function usableTrendDaysMetric(item: MetricItem | undefined): MetricItem | undefined {
+  if (!item || item.freshness.state === "uninitialized") return undefined;
+  return item;
+}
+
 // --- 通用块 ---
 
 /** 已接指标的统计卡：数值走 `presentMetric`，与指标卡口径逐字一致。
@@ -494,11 +533,20 @@ function MetricTile({
   item,
   note,
   missingNote,
+  sparkline = true,
 }: {
   label: string;
   item: MetricItem | undefined;
   note: string;
   missingNote: string;
+  /** false 时不挂迷你趋势图（默认 true，与原有卡片行为一致）。
+   *
+   *  「今日调用量」「成功率（24h）」两张卡传 false：下面已经有一张专门的
+   *  「近 7 日调用量」大图消费 trend_7d，卡片自己再叠一条基于历史接口
+   *  （metric-history）的迷你折线，只会是同一件事的第二个、口径还不一样
+   *  的版本——两条线时间粒度、数据来源都不同，放在一起只会让人怀疑
+   *  是不是哪条画错了。 */
+  sparkline?: boolean;
 }) {
   if (!item) return <PendingTile label={label} note={missingNote} />;
   const shown = presentMetric(item);
@@ -512,7 +560,7 @@ function MetricTile({
       link={
         <div className="flex flex-col gap-1">
           <FreshnessNote freshness={item.freshness} />
-          <MetricSparkline item={item} hours={SEVEN_DAYS_HOURS} />
+          {sparkline ? <MetricSparkline item={item} hours={SEVEN_DAYS_HOURS} /> : null}
         </div>
       }
     />
@@ -620,12 +668,17 @@ function WorkCard({ platform }: { platform: string }) {
 /** 「上游健康」——原型的右栏：上游渠道 / 订阅账号 / 连接状态三行。 */
 function HealthCard({
   platform,
-  channels,
+  channelBalance,
+  channelStatus,
   demo,
   hasMetrics,
 }: {
   platform: string;
-  channels: MetricItem | undefined;
+  /** 渠道余额指标（sub2api.channels.balance）——订阅型上游账号下这条永远
+   *  是空数组，仅在 channelStatus 也缺时兜底，或作为补充信息。 */
+  channelBalance: MetricItem | undefined;
+  /** 渠道状态指标（sub2api.channels.status）——「上游渠道」行的首选数据源。 */
+  channelStatus: MetricItem | undefined;
   demo: boolean;
   hasMetrics: boolean;
 }) {
@@ -634,14 +687,19 @@ function HealthCard({
     queryFn: ({ signal }) => listUpstreamAccounts({ signal }),
   });
 
-  const channelRows =
-    channels && channels.freshness.state !== "uninitialized"
-      ? readChannelRows(channels.value)
+  const balanceRows =
+    channelBalance && channelBalance.freshness.state !== "uninitialized"
+      ? readChannelRows(channelBalance.value)
+      : [];
+  const statusRows =
+    channelStatus && channelStatus.freshness.state !== "uninitialized"
+      ? readSub2ApiChannelStatusRows(channelStatus.value)
       : [];
   const rows: HealthRow[] = [
-    // 渠道余额指标只有 Sub2API 有；NewAPI 的渠道健康在左栏那张表里，
-    // 这里不给它一行永远「未接入」的重复信息
-    ...(platform === "sub2api" ? [channelHealth(channelRows)] : []),
+    // 渠道状态/余额指标只有 Sub2API 有；NewAPI 的渠道健康在左栏那张表里，
+    // 这里不给它一行永远「未接入」的重复信息。优先用状态、缺了才落到余额，
+    // 两者都没有才是「未接入」——见 sub2ApiChannelHealth 的判据说明
+    ...(platform === "sub2api" ? [sub2ApiChannelHealth(statusRows, balanceRows)] : []),
     subscriptionHealth(accounts.data ?? [], platform),
     connectionHealth(demo, hasMetrics),
   ];
@@ -800,15 +858,24 @@ function HealthUnavailableCell({ reason }: { reason: string }) {
   );
 }
 
-/** 底部大图。有指标就画七天，没有就把位置留着并说清缺什么。 */
+/** 底部大图。有指标就画七天，没有就把位置留着并说清缺什么。
+ *
+ *  两条数据管线共用这一张卡：NewAPI 的「近 7 日请求量」走 MetricSparkline
+ *  （按 metric-history 接口分次采集的历史快照，一路复用至今）；Sub2API 的
+ *  「近 7 日调用量」走 trend_7d——**同一条指标观测里内嵌的逐日数组**，没有
+ *  历史快照可拉。`samples` 传了就用它直接画（不再渲染 MetricSparkline，
+ *  避免同一张卡对同一个指标发起两份不必要的历史请求）；不传则维持
+ *  MetricSparkline 的旧路径，NewAPI 那张卡因此零改动。 */
 function TrendCard({
   title,
   item,
   pendingNote,
+  samples,
 }: {
   title: string;
   item: MetricItem | undefined;
   pendingNote: string;
+  samples?: SparkSample[];
 }) {
   return (
     <Card
@@ -822,9 +889,15 @@ function TrendCard({
             <FreshnessNote freshness={item.freshness} />
             <span>指标 {item.metric_key}</span>
           </div>
-          <MetricSparkline item={item} hours={SEVEN_DAYS_HOURS} box={BIG_CHART_BOX} />
+          {samples ? (
+            <Sparkline samples={samples} label={`${title}（近 7 个自然日）`} box={BIG_CHART_BOX} />
+          ) : (
+            <MetricSparkline item={item} hours={SEVEN_DAYS_HOURS} box={BIG_CHART_BOX} />
+          )}
           <p className="mt-2 text-xs text-fg-muted">
-            历史窗口 168 小时（近 7 日）；趋势完整性与来源切换说明随历史接口返回。
+            {samples
+              ? "近 7 个自然日（UTC）；缺数据的日子折线在此断开，不拿上一天的读数顶替。"
+              : "历史窗口 168 小时（近 7 日）；趋势完整性与来源切换说明随历史接口返回。"}
           </p>
         </>
       ) : (
@@ -864,11 +937,11 @@ function DispositionNote({ platform }: { platform: string }) {
       <Link to={`/platforms/${platform}?tab=users`} className="mx-1 underline underline-offset-2">
         用户管理
       </Link>
-      的顶部（同一份指标，口径不变）；渠道余额明细在
+      的顶部（同一份指标，口径不变）；渠道状态与余额明细在
       <Link to={`/platforms/${platform}?tab=upstream`} className="mx-1 underline underline-offset-2">
         渠道管理
       </Link>
-      ，本页只用它算「上游渠道 x / y 可用」。
+      ，本页「上游渠道 x / y 可用」优先按渠道状态统计，只有状态观测也缺时才落回余额口径。
     </p>
   );
 }

@@ -13,6 +13,10 @@ const BALANCE_LOW_RULE = "channel.balance.low";
 const REVENUE_METRIC = "sub2api.revenue.daily";
 const COST_METRIC = "sub2api.cost.daily";
 const USERS_TOTAL_METRIC = "newapi.users.total";
+const REQUESTS_DAILY_METRIC = "sub2api.requests.daily";
+const SUCCESS_RATE_METRIC = "sub2api.requests.success_rate_24h";
+const TREND_METRIC = "sub2api.requests.trend_7d";
+const SUB2API_CHANNEL_STATUS_METRIC = "sub2api.channels.status";
 
 const freshness = {
   state: "fresh",
@@ -241,6 +245,94 @@ describe("Sub2API 概览逐格对齐原型", () => {
     stub({ metrics: SUB2API_METRICS.map((m) => ({ ...m, source: "sub2api-staging" })) });
     renderPanel();
     expect(await screen.findByText(/当前展示为样例数据/)).toBeTruthy();
+  });
+
+  it("调用量三卡接上真实指标后显示真实数值，不再是未接入（XM-OVERVIEW-UI）", async () => {
+    stub({
+      metrics: [
+        ...SUB2API_METRICS,
+        metric(REQUESTS_DAILY_METRIC, {
+          day: "2026-08-31",
+          request_count: 12345,
+          success_count: 12000,
+          failure_count: 345,
+          avg_duration_ms: 420,
+        }),
+        metric(SUCCESS_RATE_METRIC, {
+          window_hours: 24,
+          request_count: 1000,
+          success_count: 995,
+          success_rate_bp: 9950,
+        }),
+      ],
+    });
+    renderPanel();
+
+    const callTile = (await screen.findByText("今日调用量")).closest("article") as HTMLElement;
+    expect(within(callTile).getByText("12,345 次")).toBeTruthy();
+    expect(within(callTile).queryByText("未接入")).toBeNull();
+    expect(within(callTile).getByText(/平均耗时 420ms/)).toBeTruthy();
+    expect(within(callTile).getByText("数据新鲜")).toBeTruthy();
+
+    const rateTile = (await screen.findByText("成功率（24h）")).closest("article") as HTMLElement;
+    expect(within(rateTile).getByText("99.50%")).toBeTruthy();
+    expect(within(rateTile).queryByText("未接入")).toBeNull();
+  });
+
+  it("成功率为 null 时显示「—」并说明 24h 内无请求，不是 0%", async () => {
+    stub({
+      metrics: [
+        ...SUB2API_METRICS,
+        metric(SUCCESS_RATE_METRIC, {
+          window_hours: 24,
+          request_count: 0,
+          success_count: 0,
+          success_rate_bp: null,
+        }),
+      ],
+    });
+    renderPanel();
+
+    const tile = (await screen.findByText("成功率（24h）")).closest("article") as HTMLElement;
+    expect(within(tile).getByText("—")).toBeTruthy();
+    expect(within(tile).getByText(/24h 内无请求/)).toBeTruthy();
+    expect(within(tile).queryByText(/0\.00%/)).toBeNull();
+  });
+
+  it("近 7 日调用量趋势接上后不再显示未接入，缺数据的日子仍然入图", async () => {
+    const days = Array.from({ length: 7 }, (_, i) => ({
+      day: `2026-08-2${i}`,
+      request_count: i === 3 ? 0 : 1000 + i * 10,
+      success_count: i === 3 ? 0 : 950 + i * 10,
+      missing: i === 3,
+    }));
+    stub({ metrics: [...SUB2API_METRICS, metric(TREND_METRIC, { days })] });
+    renderPanel();
+
+    const card = (await screen.findByText("近 7 日调用量")).closest("section") as HTMLElement;
+    expect(within(card).queryByText("未接入")).toBeNull();
+    // Sparkline 的 svg 带 role="img"；能找到它就说明真的在画折线，
+    // 不是 PageState 的占位文案
+    expect(within(card).getByRole("img")).toBeTruthy();
+  });
+
+  it("上游渠道行改用渠道状态指标（真实契约形状：name/status/channel_id）", async () => {
+    stub({
+      metrics: [
+        ...SUB2API_METRICS.filter((m) => m.metric_key !== CHANNEL_BALANCE_METRIC),
+        metric(SUB2API_CHANNEL_STATUS_METRIC, {
+          channels: [
+            { name: "上游甲", status: "active", currency: "USD", channel_id: "245" },
+            { name: "上游乙", status: "error", currency: "USD", channel_id: "246" },
+          ],
+        }),
+      ],
+    });
+    renderPanel();
+
+    const card = (await screen.findByText("上游健康")).closest("section") as HTMLElement;
+    expect(within(card).getByText("1 / 2 可用")).toBeTruthy();
+    expect(within(card).getByText(/上游乙/)).toBeTruthy();
   });
 });
 

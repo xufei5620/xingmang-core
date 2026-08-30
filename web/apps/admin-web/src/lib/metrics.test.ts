@@ -8,7 +8,10 @@ import {
   presentMetric,
   readChannelRows,
   readNewApiChannelRows,
+  readRequestsTrendDays,
+  readSub2ApiChannelStatusRows,
   toSparkSamples,
+  toTrendSparkSamples,
 } from "./metrics";
 
 function metric(over: Partial<MetricItem> = {}): MetricItem {
@@ -369,6 +372,10 @@ describe("readChannelRows / channelTotal", () => {
 const NEWAPI_CHANNELS_METRIC = "newapi.channels.status";
 const NEWAPI_RECHARGE_METRIC = "newapi.recharge.daily";
 const NEWAPI_SUBSCRIPTION_METRIC = "newapi.subscription.daily";
+const SUB2API_REQUESTS_DAILY_METRIC = "sub2api.requests.daily";
+const NEWAPI_REQUESTS_DAILY_METRIC = "newapi.requests.daily";
+const SUB2API_SUCCESS_RATE_24H_METRIC = "sub2api.requests.success_rate_24h";
+const SUB2API_CHANNEL_STATUS_METRIC = "sub2api.channels.status";
 
 describe("NewAPI 渠道状态（XM-0035）", () => {
   const rows = () =>
@@ -476,5 +483,189 @@ describe("NewAPI 渠道状态（XM-0035）", () => {
     );
     expect(shown.primary).toBe("未初始化");
     expect(shown.unavailable).toBe(true);
+  });
+});
+
+describe("请求量三件套（XM-OVERVIEW-UI）：今日调用量 / 成功率（24h）", () => {
+  it("今日调用量：主数值 = request_count，副文案含业务日/成功/失败/平均耗时", () => {
+    const shown = presentMetric(
+      metric({
+        metric_key: SUB2API_REQUESTS_DAILY_METRIC,
+        value: {
+          day: "2026-08-31",
+          request_count: 12345,
+          success_count: 12000,
+          failure_count: 345,
+          avg_duration_ms: 420,
+        },
+      }),
+    );
+    expect(shown.label).toBe("Sub2API 调用量（日）");
+    expect(shown.primary).toBe("12,345 次");
+    expect(shown.secondary).toBe("业务日 2026-08-31 · 成功 12,000 · 失败 345 · 平均耗时 420ms");
+  });
+
+  it("今日调用量：avg_duration_ms 为 null 时明说「未知」，不是 0ms", () => {
+    // 0ms 是个会骗人的默认值——null 表示这天压根没有可信的平均耗时
+    const shown = presentMetric(
+      metric({
+        metric_key: SUB2API_REQUESTS_DAILY_METRIC,
+        value: {
+          day: "2026-08-31",
+          request_count: 0,
+          success_count: 0,
+          failure_count: 0,
+          avg_duration_ms: null,
+        },
+      }),
+    );
+    expect(shown.secondary).toContain("平均耗时未知");
+    expect(shown.secondary).not.toContain("0ms");
+  });
+
+  it("newapi 侧同样登记：友好名与格式化都跟着 metric_key 的平台前缀走", () => {
+    const shown = presentMetric(
+      metric({
+        metric_key: NEWAPI_REQUESTS_DAILY_METRIC,
+        source: "newapi-prod",
+        value: {
+          day: "2026-08-31",
+          request_count: 500,
+          success_count: 480,
+          failure_count: 20,
+          avg_duration_ms: 100,
+        },
+      }),
+    );
+    expect(shown.label).toBe("NewAPI 调用量（日）");
+    expect(shown.primary).toBe("500 次");
+  });
+
+  it("成功率（24h）：success_rate_bp 用整数运算格式化成两位小数百分比（不经过浮点）", () => {
+    const shown = presentMetric(
+      metric({
+        metric_key: SUB2API_SUCCESS_RATE_24H_METRIC,
+        value: { window_hours: 24, request_count: 1000, success_count: 995, success_rate_bp: 9950 },
+      }),
+    );
+    expect(shown.primary).toBe("99.50%");
+    expect(shown.secondary).toBe("请求 1,000 次 · 成功 995 次");
+    expect(shown.unavailable).toBe(false);
+  });
+
+  it("成功率（24h）：success_rate_bp 为 null 时显示「—」并说明 24h 内无请求，不是 0%", () => {
+    // 0.00% 会被读成「全部失败」，而 null 的真实含义是「压根没有请求，比率无意义」
+    const shown = presentMetric(
+      metric({
+        metric_key: SUB2API_SUCCESS_RATE_24H_METRIC,
+        value: { window_hours: 24, request_count: 0, success_count: 0, success_rate_bp: null },
+      }),
+    );
+    expect(shown.primary).toBe("—");
+    expect(shown.primary).not.toContain("0");
+    expect(shown.secondary).toContain("24h 内无请求");
+    expect(shown.unavailable).toBe(true);
+  });
+});
+
+describe("readRequestsTrendDays / toTrendSparkSamples：近 7 日调用量（XM-OVERVIEW-UI）", () => {
+  function day(
+    over: Partial<{ day: string; request_count: number; success_count: number; missing: boolean }> = {},
+  ) {
+    return { day: "2026-08-25", request_count: 100, success_count: 95, ...over };
+  }
+
+  it("解析出逐日字段", () => {
+    const days = readRequestsTrendDays({ days: [day()] });
+    expect(days[0]).toEqual({
+      day: "2026-08-25",
+      requestCount: 100n,
+      successCount: 95n,
+      missing: false,
+    });
+  });
+
+  it("契约保证升序给 7 个元素，这里仍按 day 再排一次防御", () => {
+    const days = readRequestsTrendDays({
+      days: [day({ day: "2026-08-27" }), day({ day: "2026-08-25" }), day({ day: "2026-08-26" })],
+    });
+    expect(days.map((d) => d.day)).toEqual(["2026-08-25", "2026-08-26", "2026-08-27"]);
+  });
+
+  it("missing 的日子标出来；request_count 仍原样解析，供折线在原位置标断点", () => {
+    const days = readRequestsTrendDays({ days: [day({ day: "2026-08-26", missing: true })] });
+    expect(days[0]?.missing).toBe(true);
+    expect(days[0]?.requestCount).toBe(100n);
+  });
+
+  it("days 不是数组（或 value 为 null）时给空数组，不抛错也不编数据", () => {
+    expect(readRequestsTrendDays(null)).toEqual([]);
+    expect(readRequestsTrendDays({})).toEqual([]);
+    expect(readRequestsTrendDays({ days: "nope" })).toEqual([]);
+  });
+
+  it("toTrendSparkSamples：横轴用日历日的 UTC 零点", () => {
+    const samples = toTrendSparkSamples(readRequestsTrendDays({ days: [day({ day: "2026-08-25" })] }));
+    expect(samples[0]?.at).toBe(Date.parse("2026-08-25T00:00:00Z"));
+    expect(samples[0]?.value).toBe(100);
+    expect(samples[0]?.failed).toBe(false);
+  });
+
+  it("toTrendSparkSamples：missing 映射到 failed，折线在此断开（不当正常读数画）", () => {
+    const days = readRequestsTrendDays({
+      days: [
+        day({ day: "2026-08-25" }),
+        day({ day: "2026-08-26", missing: true, request_count: 0, success_count: 0 }),
+        day({ day: "2026-08-27" }),
+      ],
+    });
+    const samples = toTrendSparkSamples(days);
+    expect(samples.map((s) => s.failed)).toEqual([false, true, false]);
+  });
+
+  it("toTrendSparkSamples：day 解析不出合法日期的样本被丢弃（NaN 会让整条路径消失）", () => {
+    const samples = toTrendSparkSamples(
+      readRequestsTrendDays({ days: [day({ day: "不是日期" }), day()] }),
+    );
+    expect(samples).toHaveLength(1);
+  });
+});
+
+describe("Sub2API 渠道状态（XM-OVERVIEW-UI）", () => {
+  it("按真实契约形状解析：name / status / channel_id / currency", () => {
+    const rows = readSub2ApiChannelStatusRows({
+      channels: [
+        { name: "上游甲", status: "active", currency: "USD", channel_id: "245" },
+        { name: "上游乙", status: "error", currency: "USD", channel_id: "246" },
+      ],
+    });
+    expect(rows).toEqual([
+      { channelId: "245", name: "上游甲", status: "active", currency: "USD" },
+      { channelId: "246", name: "上游乙", status: "error", currency: "USD" },
+    ]);
+  });
+
+  it("channels 不是数组（或 value 为 null）时给空数组", () => {
+    expect(readSub2ApiChannelStatusRows(null)).toEqual([]);
+    expect(readSub2ApiChannelStatusRows({})).toEqual([]);
+    expect(readSub2ApiChannelStatusRows({ channels: "nope" })).toEqual([]);
+  });
+
+  it("渠道状态卡片：主数值渠道数，副文案给可用/不可用两个数", () => {
+    const shown = presentMetric(
+      metric({
+        metric_key: SUB2API_CHANNEL_STATUS_METRIC,
+        value: {
+          channels: [
+            { name: "a", status: "active", currency: "USD", channel_id: "1" },
+            { name: "b", status: "error", currency: "USD", channel_id: "2" },
+            { name: "c", status: "active", currency: "USD", channel_id: "3" },
+          ],
+        },
+      }),
+    );
+    expect(shown.label).toBe("Sub2API 渠道状态");
+    expect(shown.primary).toBe("3 个渠道");
+    expect(shown.secondary).toBe("可用 2 · 不可用 1");
   });
 });

@@ -3,14 +3,16 @@ import type { AlertItem } from "../api/alerts";
 import type { UpstreamAccountItem } from "../api/finance";
 import {
   channelHealth,
+  channelStatusHealth,
   connectionHealth,
   limitWorkItems,
   WORK_ITEM_LIMIT,
+  sub2ApiChannelHealth,
   subscriptionHealth,
   toWorkItems,
   workItemLabel,
 } from "./overview";
-import type { ChannelRow } from "./metrics";
+import type { ChannelRow, Sub2ApiChannelStatusRow } from "./metrics";
 import { platformOfMetricKey } from "./platforms";
 
 /** 键名抽成常量而不是就地写字面量：`xxx_key: "点分串"` 这个形状会被 gitleaks 的
@@ -50,6 +52,19 @@ function channel(over: Partial<ChannelRow> = {}): ChannelRow {
     balanceMinorUnits: 100n,
     currency: "CNY",
     tokenValid: true,
+    ...over,
+  };
+}
+
+// 真实契约形状（XM-OVERVIEW-UI）：{"channels":[{"name":"…","status":"active|error|…",
+// "currency":"USD","channel_id":"245"},…]}——没有 token_valid，键名是 name 不是
+// channel_name，与 ChannelRow（余额指标）完全不同。
+function statusRow(over: Partial<Sub2ApiChannelStatusRow> = {}): Sub2ApiChannelStatusRow {
+  return {
+    channelId: "245",
+    name: "上游甲",
+    status: "active",
+    currency: "USD",
     ...over,
   };
 }
@@ -179,6 +194,78 @@ describe("上游渠道 x / y 可用", () => {
     // 「0 / 0 可用」看着像算出来的结论，而事实是这次观测里根本没有渠道
     const row = channelHealth([]);
     expect(row.text).toBeNull();
+  });
+});
+
+describe("上游渠道 x / y 可用——按渠道状态统计（XM-OVERVIEW-UI）", () => {
+  it("active 计可用，其余状态一律计不可用", () => {
+    const row = channelStatusHealth([
+      statusRow({ channelId: "1", status: "active" }),
+      statusRow({ channelId: "2", status: "error" }),
+      statusRow({ channelId: "3", status: "active" }),
+    ]);
+    expect(row.text).toBe("2 / 3 可用");
+    expect(row.tone).toBe("warn");
+  });
+
+  it("hint 列出不可用数量与前几个名字", () => {
+    const row = channelStatusHealth([
+      statusRow({ channelId: "1", name: "渠道甲", status: "active" }),
+      statusRow({ channelId: "2", name: "渠道乙", status: "error" }),
+      statusRow({ channelId: "3", name: "渠道丙", status: "disabled" }),
+    ]);
+    expect(row.hint).toContain("2 个渠道不可用");
+    expect(row.hint).toContain("渠道乙");
+    expect(row.hint).toContain("渠道丙");
+  });
+
+  it("不可用渠道超过展示上限时用「等」收尾，不把 hint 撑爆", () => {
+    const rows = Array.from({ length: 6 }, (_, i) =>
+      statusRow({ channelId: `c${i}`, name: `渠道${i}`, status: "error" }),
+    );
+    const row = channelStatusHealth(rows);
+    expect(row.hint).toContain("6 个渠道不可用");
+    expect(row.hint).toContain("等");
+  });
+
+  it("全可用是 ok，全不可用是 bad", () => {
+    expect(channelStatusHealth([statusRow()]).tone).toBe("ok");
+    expect(channelStatusHealth([statusRow({ status: "error" })]).tone).toBe("bad");
+  });
+
+  it("一条渠道都没有时给 null 而不是 0 / 0", () => {
+    expect(channelStatusHealth([]).text).toBeNull();
+  });
+});
+
+describe("sub2ApiChannelHealth：状态优先、余额兜底（XM-OVERVIEW-UI）", () => {
+  it("状态观测有渠道时优先用它计算", () => {
+    const row = sub2ApiChannelHealth(
+      [statusRow({ channelId: "1", status: "active" }), statusRow({ channelId: "2", status: "error" })],
+      [],
+    );
+    expect(row.text).toBe("1 / 2 可用");
+  });
+
+  it("状态与余额都有渠道时，状态仍是主口径，余额作为补充信息挂在 hint 里", () => {
+    // 订阅型账号本不该有余额；如果余额观测还是给出来了，不能悄悄吞掉这条信息
+    const row = sub2ApiChannelHealth([statusRow({ channelId: "1", status: "active" })], [channel()]);
+    expect(row.text).toBe("1 / 1 可用");
+    expect(row.hint).toContain("渠道余额观测另有 1 条记录");
+  });
+
+  it("状态观测缺失但余额观测有渠道时，落回旧的 token_valid 口径", () => {
+    // 这是 PlatformOverviewPanel 既有测试固定下来的行为：只有余额指标的环境里，
+    // 「上游健康」仍要显示按 token_valid 算出的 x / y——不能因为新加了状态口径，
+    // 就让这种环境从「有数字」退化成「未接入」
+    const row = sub2ApiChannelHealth([], [channel(), channel({ channelId: "c2", tokenValid: false })]);
+    expect(row.text).toBe("1 / 2 可用");
+  });
+
+  it("状态与余额都没有渠道时才是「未接入」", () => {
+    const row = sub2ApiChannelHealth([], []);
+    expect(row.text).toBeNull();
+    expect(row.tone).toBe("neutral");
   });
 });
 

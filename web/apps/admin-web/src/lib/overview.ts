@@ -1,6 +1,6 @@
 import type { AlertItem } from "../api/alerts";
 import type { UpstreamAccountItem } from "../api/finance";
-import type { ChannelRow } from "./metrics";
+import type { ChannelRow, Sub2ApiChannelStatusRow } from "./metrics";
 
 /** 「需要处理的事」里的一条。
  *
@@ -116,6 +116,77 @@ export function channelHealth(rows: readonly ChannelRow[]): HealthRow {
       unknown > 0
         ? `其中 ${unknown} 条上游没给 token_valid，按不可用计——状态未知不等于可用`
         : "按渠道余额指标里的 token_valid 统计",
+    href: "?tab=upstream",
+  };
+}
+
+/** 「上游渠道」这一行的名字里最多列出的不可用渠道名个数。
+ *  hint 是一行文字，列全了会把这一行撑爆；列出前几个足够运营认出是哪条。 */
+const UNAVAILABLE_NAMES_SHOWN = 3;
+
+/** 上游渠道 x / y 可用——按 Sub2API 渠道状态指标（sub2api.channels.status）
+ *  统计，取代按渠道余额 token_valid 统计的旧口径（XM-OVERVIEW-UI）。
+ *
+ *  Sub2API 的上游账号是订阅型，没有钱包余额，channels.balance 永远是空
+ *  数组——那条口径对这个平台早就不成立了，渠道健康要看的是这条 status
+ *  指标。active 计入可用，**其余状态一律计入不可用**：不认识的状态不能
+ *  默认当成可用，这一栏存在的意义正是发现不可用（与 channelHealth 对
+ *  token_valid 未知的处理同一条纪律）。 */
+export function channelStatusHealth(rows: readonly Sub2ApiChannelStatusRow[]): HealthRow {
+  if (rows.length === 0) {
+    return {
+      label: "上游渠道",
+      tone: "neutral",
+      text: null,
+      hint: "这次观测里没有渠道；采集任务跑起来后才有内容",
+      href: "?tab=upstream",
+    };
+  }
+  const usable = rows.filter((r) => r.status === "active").length;
+  const unusable = rows.filter((r) => r.status !== "active");
+  const tone: HealthRow["tone"] = usable === rows.length ? "ok" : usable === 0 ? "bad" : "warn";
+  const names = unusable.slice(0, UNAVAILABLE_NAMES_SHOWN).map((r) => r.name || r.channelId || "未命名渠道");
+  const namesText = unusable.length > UNAVAILABLE_NAMES_SHOWN ? `${names.join("、")} 等` : names.join("、");
+  return {
+    label: "上游渠道",
+    tone,
+    text: `${usable} / ${rows.length} 可用`,
+    hint:
+      unusable.length > 0
+        ? `${unusable.length} 个渠道不可用：${namesText}`
+        : "按渠道状态指标统计，全部渠道可用",
+    href: "?tab=upstream",
+  };
+}
+
+/** 「上游渠道」这一行的完整判据（XM-OVERVIEW-UI）：
+ *  1. 优先用渠道状态指标计算 x / y——它是真实、逐渠道更新的数据源；
+ *  2. 只有状态观测也缺（不存在、从未初始化，或没有逐渠道记录）时，才落回
+ *     旧的渠道余额口径（channelHealth，按 token_valid 统计）；
+ *  3. 两者都没有渠道时才是「未接入」；
+ *  4. 状态可用、但余额观测**恰好也**返回了渠道时，不丢掉那条信息——
+ *     订阅型账号本不该有余额，如果它还是给出来了，值得在 hint 里提一句，
+ *     而不是悄悄吞掉。
+ *
+ *  这个顺序不是巧合：Sub2API 的余额指标已知永远为空，如果状态缺失就直接判
+ *  「未接入」，会让一个仍然可以从余额口径拿到（哪怕是旧口径）信息的环境
+ *  显示得比实际更差。 */
+export function sub2ApiChannelHealth(
+  statusRows: readonly Sub2ApiChannelStatusRow[],
+  balanceRows: readonly ChannelRow[],
+): HealthRow {
+  if (statusRows.length > 0) {
+    const row = channelStatusHealth(statusRows);
+    return balanceRows.length > 0
+      ? { ...row, hint: `${row.hint}（渠道余额观测另有 ${balanceRows.length} 条记录，供参考）` }
+      : row;
+  }
+  if (balanceRows.length > 0) return channelHealth(balanceRows);
+  return {
+    label: "上游渠道",
+    tone: "neutral",
+    text: null,
+    hint: "上游渠道状态与余额均未观测到；采集任务跑起来后才有内容",
     href: "?tab=upstream",
   };
 }
