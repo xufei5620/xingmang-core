@@ -247,7 +247,7 @@ function ConnectorForm({
           htmlFor={`${fieldPrefix}-endpoint`}
           required={real}
           error={errors.endpoint}
-          hint="形如 https://api.example.com；real 模式必须是 https"
+          hint="形如 https://api.example.com；必须是 https，fake 模式可留空"
         >
           <Input
             id={`${fieldPrefix}-endpoint`}

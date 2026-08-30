@@ -55,8 +55,10 @@ export function parseHttpUrl(value: string): URL | null {
   }
 }
 
-/** real 模式照抄后端 connector.Config.Validate 的规则，让人在提交前就看到
- *  会被拒绝的原因；fake 模式只查格式——演示数据不需要上游地址与凭据。
+/** 照抄后端 connector.config.set@1 的规则，让人在提交前就看到会被拒绝的原因：
+ *  - fake 模式三个字段都可留空——演示数据不需要上游地址与凭据；但**给了值就
+ *    必须合法**（后端同样以 INVALID_PARAMS 拒绝 http、带 user:pw@ 的地址）；
+ *  - real 模式再加 connector.Config.Validate 那几条：必填、允许清单含上游主机。
  *  服务端仍是最终裁决者，这里通过不代表一定能保存。 */
 export function validateConnectorForm(values: ConnectorFormValues): ConnectorFormErrors {
   const errors: ConnectorFormErrors = {};
@@ -69,9 +71,12 @@ export function validateConnectorForm(values: ConnectorFormValues): ConnectorFor
   } else {
     const url = parseHttpUrl(endpoint);
     if (!url) {
-      errors.endpoint = "上游地址必须是完整的 http(s):// URL";
-    } else if (real && url.protocol !== "https:") {
-      errors.endpoint = "real 模式的上游地址必须是 https://，后端会拒绝明文 http";
+      errors.endpoint = "上游地址必须是完整的 https:// URL（含主机）";
+    } else if (url.protocol !== "https:") {
+      errors.endpoint = "上游地址必须是 https://，后端会拒绝明文 http";
+    } else if (url.username || url.password) {
+      // 地址里内嵌 user:pw@ 就是内联凭据——这一页存在的意义就是不让它出现
+      errors.endpoint = "上游地址里不能带 user:password@；凭据只能通过 CredentialRef 引用";
     } else {
       endpointHost = url.hostname.toLowerCase();
     }

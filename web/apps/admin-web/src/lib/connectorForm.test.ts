@@ -8,14 +8,39 @@ import {
 } from "./connectorForm";
 
 describe("connector form contract", () => {
-  it("fake mode only checks formats: empty endpoint/allowlist/ref are allowed", () => {
+  it("fake mode allows empty endpoint/allowlist/ref, but a given value must be well-formed", () => {
     expect(
       validateConnectorForm({ mode: "fake", endpoint: "", targetAllowlist: "", credentialRef: "" }),
     ).toEqual({});
     expect(
       validateConnectorForm({ mode: "fake", endpoint: "ftp://x", targetAllowlist: "", credentialRef: "" })
         .endpoint,
-    ).toMatch(/http\(s\)/);
+    ).toMatch(/https/);
+    // 后端在 fake 模式下同样拒绝明文 http 与内嵌 user:pw@ 的地址（INVALID_PARAMS）
+    expect(
+      validateConnectorForm({
+        mode: "fake",
+        endpoint: "http://api.example.com",
+        targetAllowlist: "",
+        credentialRef: "",
+      }).endpoint,
+    ).toMatch(/https/);
+    expect(
+      validateConnectorForm({
+        mode: "fake",
+        endpoint: "https://user:pw@api.example.com",
+        targetAllowlist: "",
+        credentialRef: "",
+      }).endpoint,
+    ).toMatch(/user:password@/);
+    expect(
+      validateConnectorForm({
+        mode: "fake",
+        endpoint: "https://api.example.com",
+        targetAllowlist: "",
+        credentialRef: "",
+      }),
+    ).toEqual({});
     expect(
       validateConnectorForm({ mode: "fake", endpoint: "", targetAllowlist: "", credentialRef: "api-key" })
         .credentialRef,
