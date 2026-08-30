@@ -29,6 +29,10 @@ var platformScopePrefixes = []string{
 	// XM-B003：个人表格视图的细粒度 scope 同样只存在于平台授权层。
 	// Realm 里出现 ui.saved_view.manage 是配置漂移，不是一次合法授权。
 	"ui.",
+	// XM-CRED0：credential.manage 会把明文写进 SecretProvider 目录。
+	// 它以 Realm 角色的形式出现，等于把「谁能换掉平台的上游凭据」这个决定
+	// 挪出了平台数据库的管辖（ADR-016 / CR-0001 §5）。
+	"credential.",
 }
 
 // looksLikePlatformScope 判断一个角色名是否长成平台细粒度权限的样子。
@@ -117,6 +121,11 @@ func DefaultRoleScopeMap() map[string][]string {
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
 		"key-metadata-reader": {"platform.user_keys.read"},
+		// XM-CRED0：粘贴 / 轮换 / 吊销上游凭据与把连接器切到真实上游，由专门角色
+		// 授予。**不进 staff/admin**：credential.manage 会把明文写进 SecretProvider
+		// 目录，connector.manage 决定 worker 下一轮连哪台上游——两者都不是
+		// 「管理员顺带获得」的能力，要给就在 Realm 里建这个角色并人工审定。
+		"credential-admin": {"credential.manage", "connector.manage"},
 	}
 }
 

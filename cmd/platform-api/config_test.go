@@ -66,3 +66,18 @@ func TestConfigFromEnvParsesTimeout(t *testing.T) {
 		}
 	}
 }
+
+// 凭据文件根目录（XM-CRED0）：默认与 compose 的 xm-secrets 挂载点一致，可覆盖。
+func TestConfigFromEnvSecretRoot(t *testing.T) {
+	c, err := configFromEnv(env(map[string]string{"ENVIRONMENT": "development"}))
+	if err != nil || c.SecretRoot != "/run/xm/secrets" {
+		t.Fatalf("默认 SecretRoot = %q, err = %v", c.SecretRoot, err)
+	}
+	c, err = configFromEnv(env(map[string]string{
+		"ENVIRONMENT":    "development",
+		"XM_SECRET_ROOT": " /var/lib/xm/secrets ",
+	}))
+	if err != nil || c.SecretRoot != "/var/lib/xm/secrets" {
+		t.Fatalf("覆盖后 SecretRoot = %q, err = %v", c.SecretRoot, err)
+	}
+}

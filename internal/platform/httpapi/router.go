@@ -10,6 +10,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
+	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/platformusers"
@@ -52,8 +53,12 @@ type Deps struct {
 	PlatformUserDetails    PlatformUserDetailsQuerier
 	PlatformUserDailyUsage PlatformUserDailyUsageQuerier
 	PlatformUserKeys       PlatformUserKeysQuerier
-	FinanceAccounts     UpstreamAccountLister
-	FinanceProfit       ProfitDailyLister
+	// Credentials 为 nil 时凭据登记与连接器配置的三个只读端点不挂载（XM-CRED0）。
+	// 与 PlatformUsers 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
+	// 写路径（登记 / 轮换 / 吊销 / 切模式）只走 credential.* / connector.* Action。
+	Credentials     CredentialQuerier
+	FinanceAccounts UpstreamAccountLister
+	FinanceProfit   ProfitDailyLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -183,6 +188,20 @@ func NewRouter(d Deps) http.Handler {
 			}
 			api.With(RequireScope(platformusers.ScopeRead)).
 				Get("/platforms/{platform}/users", ListPlatformUsersHandler(d.PlatformUsers))
+		}
+
+		// 凭据登记与连接器配置（XM-CRED0）。两个 scope **都不复用 finance.read**：
+		// 清单里只有引用、指纹与可用性，但能看到「哪把 token 缺、哪条通道还是
+		// fake」的人已经知道平台的接入盲区在哪；而对应的写 Action 会把明文写进
+		// SecretProvider 目录、把 worker 切到真实上游——授权面必须独立。
+		// 值本身永远不经过任何端点：只有 SecretProvider 碰得到它（宪法 7 条）。
+		if d.Credentials != nil {
+			api.With(RequireScope(credentials.ScopeManage)).
+				Get("/credentials", ListCredentialsHandler(d.Credentials))
+			api.With(RequireScope(credentials.ScopeManage)).
+				Get("/credentials/expected", ListExpectedCredentialsHandler(d.Credentials))
+			api.With(RequireScope(credentials.ScopeConnectorManage)).
+				Get("/connectors/config", ListConnectorConfigsHandler(d.Credentials))
 		}
 
 		// 成本登记簿**不复用 ops.read**：它列的是每个上游账号的凭据引用、

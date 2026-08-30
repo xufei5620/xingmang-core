@@ -540,6 +540,15 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if got := m["key-metadata-reader"]; !slices.Contains(got, "platform.user_keys.read") {
 		t.Fatalf("专门的 key-metadata-reader 角色应显式映射 platform.user_keys.read, got %v", got)
 	}
+	// XM-CRED0：写明文凭据与切换真实上游由专门角色授予，staff/admin 默认都不含。
+	for _, sc := range []string{"credential.manage", "connector.manage"} {
+		if slices.Contains(staff, sc) || slices.Contains(admin, sc) {
+			t.Fatalf("staff/admin 默认不该含 %s：凭据写入与连接器切换必须独立授予", sc)
+		}
+		if got := m["credential-admin"]; !slices.Contains(got, sc) {
+			t.Fatalf("专门的 credential-admin 角色应显式映射 %s, got %v", sc, got)
+		}
+	}
 	for _, sc := range staff {
 		if strings.Contains(sc, ".manage") && sc != "ui.saved_view.manage" {
 			t.Fatalf("staff 默认不该含写权限: %q", sc)

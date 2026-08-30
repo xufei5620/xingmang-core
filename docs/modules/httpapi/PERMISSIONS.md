@@ -20,6 +20,9 @@ HTTP 层不复述、不加码——写路径只有一套授权规则。
 | `GET /api/v1/ui/saved-views`  | `ui.saved_view.manage` | `savedviews.ScopeManage` |
 | `GET /api/v1/finance/platform-channel-bindings` | `finance.read` | `finance.ScopeRead` |
 | `GET /api/v1/platforms/{platform}/users/{userID}/keys` | `platform.user_keys.read` | `platformusers.ScopeKeyMetadataRead` |
+| `GET /api/v1/credentials` | `credential.manage` | `credentials.ScopeManage` |
+| `GET /api/v1/credentials/expected` | `credential.manage` | `credentials.ScopeManage` |
+| `GET /api/v1/connectors/config` | `connector.manage` | `credentials.ScopeConnectorManage` |
 
 三个 scope **分开授予**，不共用一个「读」权限：指标里将来会有收入、余额这类业务数据
 （XM-0017 接入 Sub2API 之后），比「有哪些服务」敏感一个量级。共用一个 scope 意味着
@@ -46,6 +49,22 @@ Environment 从 Principal 派生，客户端没有对应参数。
 `finance.platform_channel_binding.manage` L1 Action 权限，默认 staff/admin 都不授予。
 这样可以让运营查看候选四态而不自动获得改变成本归属的能力；Action 还会校验 HUMAN、
 同环境、目录完整性和 expected binding id。
+
+`credential.manage` 与 `connector.manage`（XM-CRED0）是两个独立的授权面，**都不复用
+`finance.read`**，也**默认不在 staff/admin 里**（`oidcauth.DefaultRoleScopeMap` 预留了
+专门的 `credential-admin` 角色）：
+
+- `credential.manage` 同时保护凭据清单的两个 Query 与 `credential.secret.upsert` /
+  `rotate` / `revoke` 三个 L1 HUMAN-only Action。清单里只有引用、`sha256` 指纹前 16 位、
+  版本与可用性——**值永远不经过任何端点**，它只以文件形式落在 `XM_SECRET_ROOT`
+  （`<root>/<scope>/<name>`），由 worker 经 `secrets.NewFileProvider` 读取（宪法 7 条）。
+  读写不拆两个 scope：能看到「哪把 token 缺」的人已经知道接入盲区在哪，拆开不增加隔离；
+- `connector.manage` 保护 `GET /api/v1/connectors/config` 与 `connector.config.set`
+  L1 Action。它决定 worker 下一轮连哪台上游（fake/real、端点、主机白名单、凭据引用），
+  与「粘贴哪把凭据」是两个爆炸半径不同的决定。
+
+两组 Action 的 Environment 与操作者只来自 Principal；参数里没有对应字段，Schema 的
+白名单语义会把偷渡进来的 `environment` / `actor` 直接拒掉。
 ## 环境范围
 
 `resolveEnvironment` 统一决定查询作用于哪个环境：
@@ -106,7 +125,7 @@ Keycloak Realm 角色（staff）
   「audit.read 又比 ops.read 高一档」。CR-0001 里 `staff` 是唯一的 Realm 角色，
   把 audit.read 塞进去等于每个员工默认看见全平台操作明细；
 - **令牌里出现细粒度权限 = 配置漂移。** `registry.*` / `ops.*` / `audit.*` /
-  `platform.*` / `action.*` / `connector.*` / `ui.*` 无论出现在 `realm_access.roles`、
+  `platform.*` / `action.*` / `connector.*` / `ui.*` / `credential.*` 无论出现在 `realm_access.roles`、
   OAuth 的 `scope` 还是 `resource_access` 里，平台一律**忽略**并记 WARN
   （`error_code=keycloak_scope_drift`）。这是 ADR-016 的探针：平台侧忽略只是
   止血，修复要回到 Realm 那边走变更单；

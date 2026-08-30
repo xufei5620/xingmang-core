@@ -20,6 +20,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
+	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
@@ -117,6 +118,15 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	// 凭据登记与连接器配置（XM-CRED0）：粘贴 / 轮换 / 吊销凭据与切换 fake/real
+	// 都是 L1 HUMAN-only Action。明文只落 XM_SECRET_ROOT 下的文件，DB 只存
+	// 指纹与版本；worker 经 SecretProvider 从同一个目录读值。注册失败即拒绝启动。
+	credentialStore := credentials.NewStore(pool, cfg.SecretRoot)
+	if err := credentials.RegisterActions(actionRegistry, credentialStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
 	runwayThresholdStore := finance.NewRunwayThresholdStore(pool, nil)
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
@@ -202,6 +212,8 @@ func main() {
 		PlatformUserDetails:    platformUserDetailsOrNil(platformUserService),
 		PlatformUserDailyUsage: platformUserDailyUsageOrNil(platformUserService),
 		PlatformUserKeys:       platformUserKeysOrNil(platformUserService),
+		// 凭据登记的读与写共用同一个仓储：清单里只有指纹与可用性，没有值
+		Credentials: credentialStore,
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler
 		// 不各开一条访问路径
 		FinanceAccounts: financeStore,
