@@ -1,0 +1,14 @@
+DROP INDEX IF EXISTS ops.metric_rollup_state_policy_idx;
+DROP TABLE IF EXISTS ops.metric_rollup_state;
+DROP INDEX IF EXISTS ops.metric_rollup_receipt_stream_idx;
+DROP TABLE IF EXISTS ops.metric_rollup_receipt;
+DROP INDEX IF EXISTS ops.metric_observation_daily_availability_idx;
+DROP INDEX IF EXISTS ops.metric_observation_daily_lookup_idx;
+DROP TABLE IF EXISTS ops.metric_observation_daily;
+DROP INDEX IF EXISTS ops.metric_observation_sample_synced_id_idx;
+DROP INDEX IF EXISTS ops.metric_observation_sample_environment_metric_id_idx;
+ALTER TABLE IF EXISTS ops.metric_observation_sample
+    DROP CONSTRAINT IF EXISTS metric_observation_sample_expected_interval_positive,
+    DROP CONSTRAINT IF EXISTS metric_observation_sample_policy_version_positive,
+    DROP COLUMN IF EXISTS expected_interval_seconds,
+    DROP COLUMN IF EXISTS rollup_policy_version;

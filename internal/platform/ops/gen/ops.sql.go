@@ -47,23 +47,26 @@ func (q *Queries) GetMetricObservation(ctx context.Context, arg GetMetricObserva
 const insertMetricObservationSample = `-- name: InsertMetricObservationSample :exec
 INSERT INTO ops.metric_observation_sample (
     metric_key, source, environment, observed_at, synced_at,
-    status, is_partial, watermark, last_error_code, value_json
+    status, is_partial, watermark, last_error_code, value_json,
+    rollup_policy_version, expected_interval_seconds
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 )
 `
 
 type InsertMetricObservationSampleParams struct {
-	MetricKey     string
-	Source        string
-	Environment   string
-	ObservedAt    pgtype.Timestamptz
-	SyncedAt      pgtype.Timestamptz
-	Status        string
-	IsPartial     bool
-	Watermark     string
-	LastErrorCode string
-	ValueJson     []byte
+	MetricKey               string
+	Source                  string
+	Environment             string
+	ObservedAt              pgtype.Timestamptz
+	SyncedAt                pgtype.Timestamptz
+	Status                  string
+	IsPartial               bool
+	Watermark               string
+	LastErrorCode           string
+	ValueJson               []byte
+	RollupPolicyVersion     int16
+	ExpectedIntervalSeconds *int32
 }
 
 func (q *Queries) InsertMetricObservationSample(ctx context.Context, arg InsertMetricObservationSampleParams) error {
@@ -78,16 +81,20 @@ func (q *Queries) InsertMetricObservationSample(ctx context.Context, arg InsertM
 		arg.Watermark,
 		arg.LastErrorCode,
 		arg.ValueJson,
+		arg.RollupPolicyVersion,
+		arg.ExpectedIntervalSeconds,
 	)
 	return err
 }
 
 const listMetricObservationSamples = `-- name: ListMetricObservationSamples :many
 SELECT id, metric_key, source, environment, observed_at, synced_at,
-       status, is_partial, watermark, last_error_code, value_json
+       status, is_partial, watermark, last_error_code, value_json,
+       rollup_policy_version, expected_interval_seconds
 FROM (
     SELECT id, metric_key, source, environment, observed_at, synced_at,
-           status, is_partial, watermark, last_error_code, value_json
+           status, is_partial, watermark, last_error_code, value_json,
+           rollup_policy_version, expected_interval_seconds
     FROM ops.metric_observation_sample
     WHERE environment = $1 AND metric_key = $2 AND synced_at >= $3
     ORDER BY synced_at DESC, id DESC
@@ -145,6 +152,8 @@ func (q *Queries) ListMetricObservationSamples(ctx context.Context, arg ListMetr
 			&i.Watermark,
 			&i.LastErrorCode,
 			&i.ValueJson,
+			&i.RollupPolicyVersion,
+			&i.ExpectedIntervalSeconds,
 		); err != nil {
 			return nil, err
 		}

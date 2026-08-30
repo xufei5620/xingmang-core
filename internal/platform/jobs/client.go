@@ -553,11 +553,12 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// 仓储在这里从既有的连接池构造：任务只依赖 ObservationStore 接口，
 		// 换成内存实现就能在没有库的机器上跑完整条失败路径的单元测试。
 		river.AddWorker(workers, NewSub2APISyncWorker(Sub2APISyncOptions{
-			Logger:      cfg.Logger,
-			Environment: cfg.Environment,
-			InstanceID:  cfg.Sub2APIInstanceID,
-			Mode:        cfg.Sub2APIMode,
-			Store:       ops.NewStore(pool),
+			Logger:           cfg.Logger,
+			Environment:      cfg.Environment,
+			InstanceID:       cfg.Sub2APIInstanceID,
+			Mode:             cfg.Sub2APIMode,
+			ExpectedInterval: cfg.Sub2APISyncInterval,
+			Store:            ops.NewStore(pool),
 			NewClient: NewSub2APIClientFactory(cfg.Sub2APIMode, Sub2APIRealConfig{
 				Endpoint:        cfg.Sub2APIEndpoint,
 				TargetAllowlist: cfg.Sub2APITargetAllowlist,
@@ -587,11 +588,12 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// ObservationStore 接口，换成内存实现就能在没有库的机器上跑完整条
 		// 失败路径的单元测试。
 		river.AddWorker(workers, NewNewAPISyncWorker(NewAPISyncOptions{
-			Logger:      cfg.Logger,
-			Environment: cfg.Environment,
-			InstanceID:  cfg.NewAPIInstanceID,
-			Mode:        cfg.NewAPIMode,
-			Store:       ops.NewStore(pool),
+			Logger:           cfg.Logger,
+			Environment:      cfg.Environment,
+			InstanceID:       cfg.NewAPIInstanceID,
+			Mode:             cfg.NewAPIMode,
+			ExpectedInterval: cfg.NewAPISyncInterval,
+			Store:            ops.NewStore(pool),
 			NewClient: NewNewAPIClientFactory(cfg.NewAPIMode, NewAPIRealConfig{
 				Endpoint:        cfg.NewAPIEndpoint,
 				TargetAllowlist: cfg.NewAPITargetAllowlist,
@@ -626,12 +628,13 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// 判据与业务日切分必须来自同一个 now，否则跨零点那一瞬会出现
 		// 「按 A 时钟算是今天、按 B 时钟算是昨天」的写入，然后被冻结纪律拒掉。
 		river.AddWorker(workers, NewFinanceCollectWorker(FinanceCollectOptions{
-			Logger:      cfg.Logger,
-			Environment: cfg.Environment,
-			InstanceID:  cfg.FinanceCollectInstanceID,
-			Mode:        cfg.FinanceCollectMode,
-			Store:       ops.NewStore(pool),
-			Registry:    finance.NewStore(pool),
+			Logger:           cfg.Logger,
+			Environment:      cfg.Environment,
+			InstanceID:       cfg.FinanceCollectInstanceID,
+			Mode:             cfg.FinanceCollectMode,
+			ExpectedInterval: cfg.FinanceCollectInterval,
+			Store:            ops.NewStore(pool),
+			Registry:         finance.NewStore(pool),
 			// 订阅摊销的取数端（XM-0037c）。与登记簿分成两个仓储：
 			// 登记簿是「怎么算」，批次与代理是「付了多少钱」。
 			Subscriptions: finance.NewSubscriptionStore(pool),

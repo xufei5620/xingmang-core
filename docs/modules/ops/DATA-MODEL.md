@@ -1,6 +1,8 @@
 # 运营指标数据模型
 
-Schema：`ops`。迁移：`db/migrations/000004_init_ops.up.sql`（forward-only）。
+Schema：`ops`。基础迁移：`db/migrations/000004_init_ops.up.sql`；历史样本：
+`db/migrations/000005_ops_history.up.sql`；DS1 降采样结构：
+`db/migrations/000019_metric_downsampling.up.sql`（部署 forward-only）。
 
 ## ops.metric_observation
 
@@ -35,6 +37,27 @@ CHECK ((status = 'failed') = (last_error_code <> ''))
 
 让「静默失败」在库层不可表示：失败必须有错误码，成功必须没有。
 领域层 `Validate()` 有同一条规则——两层都拦，纵深防御。
+
+## DS1 降采样元数据与日桶
+
+`ops.metric_observation_sample` 继续一行代表一次采集尝试，并新增：
+
+| 列 | 说明 |
+|---|---|
+| rollup_policy_version | 写入时冻结的 policy 版本；迁移只为旧行回填 `1`，周期 writer 必须显式传入 |
+| expected_interval_seconds | 该 writer 本轮实际 cadence；旧行可为 `NULL`，不能从当前配置倒推 |
+
+日粒度结果写入 `ops.metric_observation_daily`，唯一键是
+`(environment, metric_key, source, bucket_day, policy_version)`，桶固定为 UTC
+半开区间 `[00:00Z, next 00:00Z)`。金额/计数使用整数（numeric(39,0)），质量桶
+`full_success_count + partial_success_count + failed_count = sample_count`；snapshot
+的 `sum_numeric` 在 v1 始终为空，混币时所有 numeric 字段为空并保留排序后的
+`currency_set`。`ops.metric_rollup_receipt` 与 `ops.metric_rollup_state` 只提供
+DS1 schema 基座，逐样本 exactly-once/受限 ACL 属后续 DS2/DBR 片。
+
+策略文件是 `contracts/ops/metric-rollup-policy.v1.json`。当前 registry 实测 16
+项：14 项 active policy；`invoice.requests.daily` 与 `invoice.amount.daily` 以
+CR-0002 的显式 exclusion 保留，未冻结前不会生成或聚合 invoice policy。
 
 ## 边界处理
 
