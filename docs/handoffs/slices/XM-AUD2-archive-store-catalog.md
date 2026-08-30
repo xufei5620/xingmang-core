@@ -88,7 +88,7 @@ movement invalidates approval and requires a fresh recomputation.
   failed as intended: `AUD2 migration RED: audit.archive_segment is absent` (exit 1).
 - The default archive package run compiles the new tests and skips database cases unless
   the explicit `XM_AUD2_CONTRACT_DATABASE_URL` is set; it does not target the shared stack.
-- A fresh disposable PostgreSQL 18 probe (`xm-aud2-pg-d0e21edba29c`, random loopback
+- A fresh disposable PostgreSQL 18 probe (`xm-aud2-pg-51a19baf423c`, random loopback
   port; removed immediately) applied all 18 top-level migrations and ran the complete
   archive package with `XM_AUD2_CONTRACT_DATABASE_URL`:
   `go test ./internal/platform/audit/archive -count=1` — **PASS**. It then verified all
