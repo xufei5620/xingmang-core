@@ -27,4 +27,3 @@ Missing target/version/route facts, placeholder inventory digests, or omitted
 IPv6/config/process projections are `partial`/fail-closed. A clean offline
 report is not network isolation evidence; R213-2 disposable lab and R213-3
 staging attestation remain `not_run`.
-

@@ -40,4 +40,3 @@ No adapter, callback forwarder, network lab, CPA request, management key or
 certificate resolution, route scan, SSH command, firewall change, Compose
 change, deployment, or production/staging attestation. Those require the
 separately approved R213-2/R213-3 slices and evidence.
-
