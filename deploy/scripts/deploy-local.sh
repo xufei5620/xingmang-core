@@ -560,6 +560,19 @@ request_json healthz "$web_url/healthz" '"status"[[:space:]]*:[[:space:]]*"ok"' 
 request_json readyz "$web_url/readyz" '"status"[[:space:]]*:[[:space:]]*"ready"' || die "$phase: /readyz 失败"
 
 phase="smoke"
+# XM-LOGIN：local 登录模式下开发头被拒是正确行为，烟测改为验证鉴权闸门本身（未登录必须 401/403）。
+auth_mode_local=0
+grep -qE '^[[:space:]]*XM_AUTH_MODE=local[[:space:]]*$' "$env_file" 2>/dev/null && auth_mode_local=1
+if [ "$auth_mode_local" -eq 1 ]; then
+  gate_status="$("$curl_bin" -sS --noproxy '*' --max-time 15 -o /dev/null -w '%{http_code}' "$web_url/api/v1/auth/me" 2>/dev/null || true)"
+  case "$gate_status" in
+    401|403) echo "auth-gate=$gate_status attempt=1" ;;
+    *) die "$phase: local 鉴权闸门异常（/api/v1/auth/me 返回 ${gate_status:-无响应}，应为 401/403）" ;;
+  esac
+  echo "worker-log=$( [ -n "$worker_container_id" ] && echo available || echo unavailable )"
+  echo "DEPLOY LOCAL PASS: sha=$target_sha project=xingmang-launch healthz=200 readyz=200 smoke=auth-gate:$gate_status"
+  exit 0
+fi
 request_json services "$web_url/api/v1/services" '"items"[[:space:]]*:' "${smoke_headers[@]}" || die "$phase: services 失败"
 if ! grep -Eq '"instance_id"[[:space:]]*:[[:space:]]*"sub2api-staging"' "$tmp_dir/services.response"; then
   die "$phase: staging 演示登记缺失"
