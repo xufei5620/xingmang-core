@@ -46,7 +46,7 @@ The manifest covers the five plan-mandated pre-generation inputs:
 |---|---|
 | `db/migrations/000018_audit_archive_catalog.up.sql` | `559dbf9346df300cb65482e0c2af0bdc060c629d` |
 | `db/migrations/000018_audit_archive_catalog.down.sql` | `0cf6a623f4ed3765496e173248319ec7dfdeff14` |
-| `db/queries/audit.sql` | `db8f953e1a174c506731460e6d4b0922ef26e7fa` (draft; recompute after edits) |
+| `db/queries/audit.sql` | `db8f953e1a174c506731460e6d4b0922ef26e7fa` |
 | `internal/platform/audit/archive/catalog_integration_test.go` | `1145d666422da7677eb500eee6c644fd56ca1631` |
 | `internal/platform/audit/archive/receipt_journal_integration_test.go` | `16c39b4ab597de9858606f6050c770f8e46be43c` |
 
