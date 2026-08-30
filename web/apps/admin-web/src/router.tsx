@@ -374,7 +374,7 @@ export const routes = [
               { path: "registry", Component: RegistryPage },
               { path: "settings", Component: SettingsPage },
               ...placeholderRoutes,
-    
+
               // --- 旧路径 redirect(ADMIN-IA v3 §4.1 全表)---
               // 只重定向、不再渲染页面。静态段在 react-router 里排在动态段之前，
               // 所以这三条一定压过 platforms/:serviceType，与书写顺序无关
@@ -385,7 +385,7 @@ export const routes = [
               // v1 旧路径。运行手册与 Issue 里贴过这两个地址，导航重构不该让它们变成 404
               { path: "services", loader: () => redirect("/registry") },
               { path: "channels", loader: () => redirect(CHANNELS_REDIRECT) },
-    
+
               // 兜底 404。没有它，任何没匹配上的旧书签会落到 react-router 的默认
               // 错误页——一屏英文堆栈，既不说这是 404，也回不去
               { path: "*", Component: NotFoundPage },
