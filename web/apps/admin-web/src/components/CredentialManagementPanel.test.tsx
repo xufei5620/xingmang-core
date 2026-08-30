@@ -220,6 +220,7 @@ describe("设置 · 凭据管理", () => {
     expect(screen.queryByText(transientValue)).toBeNull();
     expect(valueInput.value).toBe("");
     expect(screen.getByText(/request_id: req-cred-error/)).toBeTruthy();
+    expect(screen.getByRole("alert", { name: /请检查凭据表单/ })).toBeTruthy();
   });
 
   it("提交空表单时显示可聚焦的错误摘要并保留逐字段提示", async () => {

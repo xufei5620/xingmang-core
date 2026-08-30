@@ -342,7 +342,7 @@ function CredentialForm({
   const failedFields = (Object.keys(errors) as Array<keyof CredentialFormValues>).filter(
     (field) => Boolean(errors[field]),
   );
-  const showSummary = attempts > 0 && failedFields.length > 0;
+  const showSummary = attempts > 0 && (failedFields.length > 0 || Boolean(actionError));
   useEffect(() => {
     if (showSummary) summaryRef.current?.focus();
   }, [showSummary, attempts]);
@@ -388,7 +388,17 @@ function CredentialForm({
             tabIndex={-1}
             className="rounded-md border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger outline-none focus-visible:outline-2 focus-visible:outline-danger"
           >
-            请检查凭据表单：{failedFields.map((field) => credentialFieldLabel(field)).join("、")}
+            <span>
+              请检查凭据表单
+              {failedFields.length > 0
+                ? `：${failedFields.map((field) => credentialFieldLabel(field)).join("、")}`
+                : "：Action 未完成"}
+            </span>
+            {actionError ? (
+              <span className="mt-1 block">
+                <ActionErrorNote error={actionError} permission={CREDENTIAL_MANAGE_PERMISSION} />
+              </span>
+            ) : null}
           </div>
         ) : null}
 
@@ -429,8 +439,6 @@ function CredentialForm({
             spellCheck={false}
           />
         </FormField>
-
-        <ActionErrorNote error={actionError} permission={CREDENTIAL_MANAGE_PERMISSION} />
 
         <div className="flex flex-wrap justify-end gap-2">
           {editing ? (
@@ -543,7 +551,7 @@ function RevokeDialog({
 
 function isCredentialQueryUnavailable(error: unknown): boolean {
   if (error instanceof ApiError) {
-    return error.status === 404 || error.code === "ACTION_NOT_REGISTERED" || error.code === "NOT_IMPLEMENTED";
+    return error.code === "ACTION_NOT_REGISTERED" || error.code === "NOT_IMPLEMENTED";
   }
   return error instanceof Error && /尚未接入|未实现/.test(error.message);
 }
