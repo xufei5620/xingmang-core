@@ -298,11 +298,11 @@ func TestCheckedInPolicyContractLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, err := LoadStateEvents(eventData)
-	if err != nil || len(events) != 1 {
+	if err != nil || len(events) != 2 {
 		t.Fatalf("checked-in event log rejected: %v (%d events)", err, len(events))
 	}
-	if events[0].CurrentPolicySHA256 != RawDigest(data) {
-		t.Fatalf("genesis does not bind exact policy bytes: %s != %s", events[0].CurrentPolicySHA256, RawDigest(data))
+	if events[0].CurrentPolicySHA256 != "43c54c51b79b26684e2a874ddfc904bb8f208ec897731481c1db3ee49e02aed0" || events[1].CurrentPolicySHA256 != RawDigest(data) {
+		t.Fatalf("event chain policy digests drifted: %+v", events)
 	}
 }
 
