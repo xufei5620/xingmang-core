@@ -87,11 +87,14 @@ movement invalidates approval and requires a fresh recomputation.
   failed as intended: `AUD2 migration RED: audit.archive_segment is absent` (exit 1).
 - The default archive package run compiles the new tests and skips database cases unless
   the explicit `XM_AUD2_CONTRACT_DATABASE_URL` is set; it does not target the shared stack.
-- A separate disposable PostgreSQL review probe (random container, removed after the run)
-  applied the draft only for syntax/valid-row checking and reported
-  `migration=PASS insert_exit=0 output=INSERT 0 1 1`; this is review evidence, not shared
-  stack or production evidence. The current branch has not applied `000018` after the
-  receipt-test edit; the earlier probe predates the superseded digest.
+- A fresh disposable PostgreSQL 18 probe (`xm-aud2-pg-d0e21edba29c`, random loopback
+  port; removed immediately) applied all 18 top-level migrations and ran the complete
+  archive package with `XM_AUD2_CONTRACT_DATABASE_URL`:
+  `go test ./internal/platform/audit/archive -count=1` — **PASS**. It then verified all
+  four archive tables existed, confirmed the three AUD2 capability roles were absent as
+  expected (DBR2 provisioning remains separate), applied the disposable down file, and
+  observed all four archive relations as `NULL`. This is disposable evidence only; no
+  shared stack, server, MinIO endpoint or production database was touched.
 
 ## files / non-goals for this stage
 
