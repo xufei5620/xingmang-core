@@ -271,7 +271,7 @@ func (b ManagementBoundary) Validate() error {
 		if r.Public || !r.RequiresMTLS || !r.InjectsManagementKey {
 			return fmt.Errorf("cpa boundary: private[%d] must be private mTLS with adapter key injection", i)
 		}
-		if r.Destructive || r.ConsumesQueue {
+		if r.Destructive || r.ConsumesQueue || r.RiskClass == "destructive" || r.RiskClass == "write" || r.RiskClass == "usage" || r.RiskClass == "plugin" || r.RiskClass == "config" || r.RiskClass == "auth" || r.RiskClass == "api-call" {
 			return fmt.Errorf("cpa boundary: private capability %q is destructive or consumes a queue", r.CapabilityID)
 		}
 		if dangerousCapability(r.CapabilityID) || dangerousPath(r.Path) {
@@ -318,6 +318,9 @@ func validateRequiredFacts(facts map[string]string) error {
 		if _, ok := known[key]; !ok {
 			return fmt.Errorf("cpa boundary: unknown required fact %q", key)
 		}
+		if containsControl(key) || containsControl(facts[key]) {
+			return fmt.Errorf("cpa boundary: required fact %q contains control characters", key)
+		}
 	}
 	required := map[string]string{
 		"allow_remote":                 "false",
@@ -347,7 +350,7 @@ func validateRoute(r RouteRule, expectedPlane string, index int) error {
 	if expectedPlane != "denied" && r.Method == "ANY" {
 		return fmt.Errorf("cpa boundary: %s[%d] cannot use ANY method", expectedPlane, index)
 	}
-	if r.Path == "" || !strings.HasPrefix(r.Path, "/") || strings.ContainsAny(r.Path, "?#:\\\r\n\t") {
+	if r.Path == "" || !strings.HasPrefix(r.Path, "/") || strings.ContainsAny(r.Path, "?#;:\\\r\n\t") || containsControl(r.Path) {
 		return fmt.Errorf("cpa boundary: %s[%d] path must be an exact local path", expectedPlane, index)
 	}
 	if strings.Contains(r.Path, "%") || strings.Contains(r.Path, "//") || strings.Contains(r.Path, "/./") || strings.Contains(r.Path, "/../") || strings.HasSuffix(r.Path, "/.") || strings.HasSuffix(r.Path, "/..") {
@@ -404,13 +407,20 @@ func addUniqueRoute(seen map[string]string, r RouteRule, source string) error {
 }
 
 func containsDenyCapabilities(routes []RouteRule) bool {
-	want := map[string]bool{"management.wildcard": false, "management.config": false, "management.auth": false, "management.api-call": false, "management.plugin": false, "management.usage": false}
+	covered := map[string]bool{"prefix": false, "config": false, "auth": false, "api-call": false, "plugin": false, "usage": false}
 	for _, r := range routes {
-		if _, ok := want[r.CapabilityID]; ok {
-			want[r.CapabilityID] = true
+		path := strings.ToLower(r.Path)
+		capability := strings.ToLower(r.CapabilityID)
+		if r.Path == ManagementPrefix || r.CapabilityID == "management.wildcard" {
+			covered["prefix"] = true
+		}
+		for _, category := range []string{"config", "auth", "api-call", "plugin", "usage"} {
+			if strings.Contains(path, "/"+category) || strings.Contains(capability, category) {
+				covered[category] = true
+			}
 		}
 	}
-	for _, ok := range want {
+	for _, ok := range covered {
 		if !ok {
 			return false
 		}
@@ -609,6 +619,13 @@ func (b ManagementBoundary) ProjectResponse(capabilityID string, payload []byte)
 	if object == nil {
 		return nil, errors.New("response must be a non-null JSON object")
 	}
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return nil, fmt.Errorf("response JSON: %w", err)
+	}
+	if err := rejectSensitivePayload(decoded); err != nil {
+		return nil, err
+	}
 	allowed := map[string]bool{}
 	for _, key := range strings.Split(route.ResponseProjection, ",") {
 		key = strings.TrimSpace(key)
@@ -631,11 +648,47 @@ func (b ManagementBoundary) ProjectResponse(capabilityID string, payload []byte)
 	return canonical, nil
 }
 
+// RedactResponse is the functional form of ProjectResponse for adapters that
+// keep the boundary and capability lookup outside a method receiver.
+func RedactResponse(boundary ManagementBoundary, capabilityID string, payload []byte) ([]byte, error) {
+	return boundary.ProjectResponse(capabilityID, payload)
+}
+
+func rejectSensitivePayload(value any) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if err := validateProjection(key); err != nil {
+				return fmt.Errorf("response contains sensitive key: %w", err)
+			}
+			if err := rejectSensitivePayload(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if err := rejectSensitivePayload(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func normalizeExactPath(value string) (string, error) {
-	if value == "" || !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "?#%\\\r\n\t") || strings.Contains(value, "//") || strings.Contains(value, "/./") || strings.Contains(value, "/../") || wildcardPath(value) {
+	if value == "" || !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "?#%;:\\\r\n\t") || containsControl(value) || strings.Contains(value, "//") || strings.Contains(value, "/./") || strings.Contains(value, "/../") || strings.HasSuffix(value, "/.") || strings.HasSuffix(value, "/..") || wildcardPath(value) {
 		return "", errors.New("path is not an exact unencoded path")
 	}
 	return value, nil
+}
+
+func containsControl(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizePath exposes the same fail-closed path check used by Allows.
