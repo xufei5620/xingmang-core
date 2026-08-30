@@ -12,6 +12,34 @@ import (
 	"invoice-system/backend/internal/domain"
 )
 
+// GetEnabledSourceInstanceID resolves the one enabled source instance for a
+// source type (sub2api/newapi). Platform-password login (see
+// backend/internal/auth/platform_login.go) uses this to bind a fresh identity
+// to the deployment's actual bootstrapped source instance instead of a
+// second, independently-configured ID that could drift out of sync with it.
+func (s *Store) GetEnabledSourceInstanceID(ctx context.Context, sourceType string) (string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id FROM source_instances WHERE source_type=$1 AND enabled LIMIT 2`, sourceType)
+	if err != nil {
+		return "", fmt.Errorf("resolve enabled source instance for %s: %w", sourceType, err)
+	}
+	defer rows.Close()
+	var id string
+	count := 0
+	for rows.Next() {
+		if err = rows.Scan(&id); err != nil {
+			return "", err
+		}
+		count++
+	}
+	if err = rows.Err(); err != nil {
+		return "", err
+	}
+	if count != 1 {
+		return "", fmt.Errorf("expected exactly one enabled %s source instance, found %d", sourceType, count)
+	}
+	return id, nil
+}
+
 func (s *Store) UpsertSourceInstance(ctx context.Context, in SourceInstanceRecord) (SourceInstanceRecord, error) {
 	if in.ID == "" {
 		in.ID = randomUUID()

@@ -15,6 +15,9 @@ import type {
   InvoiceRuleSettingsInput,
   InvoiceSystemSettings,
   PaymentCandidatePage,
+  PlatformLoginInput,
+  PlatformLoginOutcome,
+  PlatformLoginTwoFAInput,
   RefundCase,
   RefundCasePage,
   RefundCaseStatus,
@@ -86,6 +89,10 @@ export interface InvoiceApiClient {
   logout(): Promise<string | null>;
   loginURL(returnTo: string): string;
   adminStepUpURL(returnTo: string): string;
+  platformLogin(input: PlatformLoginInput): Promise<PlatformLoginOutcome>;
+  verifyPlatformLoginTwoFA(
+    input: PlatformLoginTwoFAInput,
+  ): Promise<PlatformLoginOutcome>;
   getSourceAccounts(): Promise<SourceAccount[]>;
   getOrders(): Promise<FundingOrder[]>;
   getUserEligibilitySummary(): Promise<UserEligibilitySummary[]>;

@@ -230,6 +230,17 @@ services:
       OIDC_TOKEN_AUTH_METHOD: client_secret_basic
       OIDC_LOGOUT_TOKEN_MAX_AGE: ${OIDC_LOGOUT_TOKEN_MAX_AGE:-10m}
       OIDC_MAX_HTTP_RESPONSE_BYTES: ${OIDC_MAX_HTTP_RESPONSE_BYTES:-1048576}
+      # User-facing login (CR-0004/XM-INV-LOGIN): the invoice-system backend
+      # forwards submitted credentials to the platform's own login endpoint
+      # over HTTPS and never stores or logs the password. These base URLs are
+      # exact host-pinned HTTPS origins; Turnstile must stay disabled on both
+      # platforms or every platform-password login attempt fails (see the
+      # XM-INV-LOGIN handoff doc for the operational dependency).
+      SUB2API_LOGIN_BASE_URL: ${SUB2API_LOGIN_BASE_URL:-https://api.solov.cc}
+      NEWAPI_LOGIN_BASE_URL: ${NEWAPI_LOGIN_BASE_URL:-https://xm.solov.cc}
+      PLATFORM_LOGIN_TIMEOUT: ${PLATFORM_LOGIN_TIMEOUT:-10s}
+      PLATFORM_LOGIN_MAX_ATTEMPTS: ${PLATFORM_LOGIN_MAX_ATTEMPTS:-8}
+      PLATFORM_LOGIN_LOCKOUT_WINDOW: ${PLATFORM_LOGIN_LOCKOUT_WINDOW:-15m}
       DOCUMENT_ROOT: /data/documents
       DOCUMENT_QUARANTINE_ROOT: /quarantine
       TMPDIR: /quarantine

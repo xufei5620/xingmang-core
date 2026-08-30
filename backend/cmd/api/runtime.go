@@ -252,6 +252,10 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
+	platformSourceInstanceIDs, err := loadPlatformSourceInstanceIDs(ctx, store)
+	if err != nil {
+		return appRuntime{}, err
+	}
 	productionAuth := &httpapi.ProductionAuth{
 		OIDC: oidcClient, Sessions: sessions, BindingHasher: bindingHasher,
 		CSRF: csrf, Admin: adminPolicy, Logout: oidcClient, BackchannelLogout: backchannelLogout,
@@ -260,19 +264,47 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			if resolveErr != nil {
 				return httpapi.SessionUser{}, resolveErr
 			}
-			auditCtx := application.WithAuditActor(callbackCtx, postgresstore.AuditActor{Type: "oidc", ID: principal.IdentityHash(), RequestID: requestID, Reason: "OIDC login synchronized"})
+			actorType := "oidc"
+			reason := "OIDC login synchronized"
+			if principal.Platform != "" {
+				actorType = "platform"
+				reason = "platform password login synchronized"
+			}
+			auditCtx := application.WithAuditActor(callbackCtx, postgresstore.AuditActor{Type: actorType, ID: principal.IdentityHash(), RequestID: requestID, Reason: reason})
 			record, ensureErr := appService.EnsureUser(auditCtx, application.OIDCIdentity{Issuer: principal.Issuer, Subject: principal.Subject, Email: principal.Email, EmailVerified: principal.EmailVerified, Status: "active"})
 			if ensureErr != nil || record.ID != identity.UserID {
 				if ensureErr == nil {
-					ensureErr = errors.New("OIDC identity persistence mismatch")
+					ensureErr = errors.New("identity persistence mismatch")
 				}
 				return httpapi.SessionUser{}, ensureErr
+			}
+			if principal.Platform != "" {
+				// Platform password login IS the account-ownership proof (the
+				// platform's own login endpoint just verified it): bind the
+				// matching external account immediately instead of requiring
+				// the separate out-of-band challenge flow in binding.go, so
+				// the user's funding lots resolve on first login.
+				sourceInstanceID := platformSourceInstanceIDs[principal.Platform]
+				if sourceInstanceID == "" {
+					return httpapi.SessionUser{}, fmt.Errorf("no enabled source instance configured for platform %q", principal.Platform)
+				}
+				if _, bindErr := appService.BindExternalAccount(auditCtx, postgresstore.ExternalAccountRecord{
+					PrincipalID: record.ID, SourceInstanceID: sourceInstanceID,
+					ExternalUserID: principal.PlatformUserID, BindingMethod: "platform_password_login",
+					BindingStatus: "verified",
+				}); bindErr != nil {
+					return httpapi.SessionUser{}, fmt.Errorf("bind platform external account: %w", bindErr)
+				}
 			}
 			return loadSessionUser(auditCtx, appService, record.ID)
 		},
 		LoadUser: func(loadCtx context.Context, userID string) (httpapi.SessionUser, error) {
 			return loadSessionUser(loadCtx, appService, userID)
 		},
+	}
+	platformLogin, err := buildPlatformLogin(productionAuth)
+	if err != nil {
+		return appRuntime{}, err
 	}
 	documentRoot := strings.TrimSpace(os.Getenv("DOCUMENT_ROOT"))
 	quarantineRoot := strings.TrimSpace(os.Getenv("DOCUMENT_QUARANTINE_ROOT"))
@@ -314,7 +346,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	api, err := httpapi.NewWithConfig(appService, httpapi.Config{
 		AuthMode: "oidc", SourceMode: "agent", AdminIPAllowlist: settings.AdminCIDRs,
 		BreakGlassCIDRs: breakGlass, TrustedProxies: trustedProxies,
-		DocumentStore: documentStore, AdminSettings: settingsService, ProductionAuth: productionAuth,
+		DocumentStore: documentStore, AdminSettings: settingsService, ProductionAuth: productionAuth, PlatformLogin: platformLogin,
 		SMTPTestSender: mailer.SettingsSender{Source: settingsService}, SMTPTestRecipient: smtpTestRecipient, PublicOrigin: publicOrigin,
 		SourceIngest: receiver,
 		Readiness: func(readyCtx context.Context) error {
@@ -575,6 +607,63 @@ func loadSessionUser(ctx context.Context, service *application.Service, userID s
 		return httpapi.SessionUser{}, err
 	}
 	return httpapi.SessionUser{ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified}, nil
+}
+
+// loadPlatformSourceInstanceIDs resolves the one enabled source_instances row
+// per platform. Platform-password login auto-binds a fresh identity to this
+// exact ID (see the ProvisionUser closure above) instead of introducing a
+// second, independently-configured ID that could drift out of sync with it.
+func loadPlatformSourceInstanceIDs(ctx context.Context, store *postgresstore.Store) (map[auth.Platform]string, error) {
+	sub2apiID, err := store.GetEnabledSourceInstanceID(ctx, "sub2api")
+	if err != nil {
+		return nil, fmt.Errorf("resolve Sub2API source instance: %w", err)
+	}
+	newapiID, err := store.GetEnabledSourceInstanceID(ctx, "newapi")
+	if err != nil {
+		return nil, fmt.Errorf("resolve New API source instance: %w", err)
+	}
+	return map[auth.Platform]string{auth.PlatformSub2API: sub2apiID, auth.PlatformNewAPI: newapiID}, nil
+}
+
+// buildPlatformLogin wires the Sub2API/New API password-login verifiers used
+// by the user-facing login page (CR-0004). It shares session issuance with
+// OIDC through productionAuth; it does not replace the administrator OIDC
+// login, which remains unchanged.
+func buildPlatformLogin(productionAuth *httpapi.ProductionAuth) (*httpapi.PlatformLogin, error) {
+	sub2apiBaseURL := strings.TrimRight(env("SUB2API_LOGIN_BASE_URL", "https://api.solov.cc"), "/")
+	newapiBaseURL := strings.TrimRight(env("NEWAPI_LOGIN_BASE_URL", "https://xm.solov.cc"), "/")
+	timeout, err := boundedDurationEnv("PLATFORM_LOGIN_TIMEOUT", "10s", time.Second, time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	maxAttempts, err := boundedInt64Env("PLATFORM_LOGIN_MAX_ATTEMPTS", 8, 3, 50)
+	if err != nil {
+		return nil, err
+	}
+	lockoutWindow, err := boundedDurationEnv("PLATFORM_LOGIN_LOCKOUT_WINDOW", "15m", time.Minute, 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	sub2apiAuth, err := auth.NewSub2APIAuthenticator(auth.PlatformEndpointConfig{BaseURL: sub2apiBaseURL, Timeout: timeout})
+	if err != nil {
+		return nil, fmt.Errorf("Sub2API login authenticator: %w", err)
+	}
+	newapiAuth, err := auth.NewNewAPIAuthenticator(auth.PlatformEndpointConfig{BaseURL: newapiBaseURL, Timeout: timeout})
+	if err != nil {
+		return nil, fmt.Errorf("New API login authenticator: %w", err)
+	}
+	return &httpapi.PlatformLogin{
+		Authenticators: map[auth.Platform]auth.PlatformAuthenticator{
+			auth.PlatformSub2API: sub2apiAuth,
+			auth.PlatformNewAPI:  newapiAuth,
+		},
+		Origins: map[auth.Platform]string{
+			auth.PlatformSub2API: sub2apiBaseURL,
+			auth.PlatformNewAPI:  newapiBaseURL,
+		},
+		RateLimiter: auth.NewLoginRateLimiter(int(maxAttempts), lockoutWindow),
+		Auth:        productionAuth,
+	}, nil
 }
 
 func exactHTTPSOrigin(value string) (string, error) {

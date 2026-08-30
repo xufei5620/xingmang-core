@@ -49,6 +49,7 @@ type Server struct {
 	adminNetworkMu     sync.RWMutex
 	adminSettings      *adminsettings.Service
 	productionAuth     *ProductionAuth
+	platformLogin      *PlatformLogin
 	operations         OperationsService
 	sourceMode         string
 	readiness          func(context.Context) error
@@ -70,6 +71,7 @@ type Config struct {
 	DocumentStore     document.Store
 	AdminSettings     *adminsettings.Service
 	ProductionAuth    *ProductionAuth
+	PlatformLogin     *PlatformLogin
 	SourceMode        string
 	Readiness         func(context.Context) error
 	SMTPTestSender    mailer.Sender
@@ -117,7 +119,7 @@ func NewWithConfig(service InvoiceService, cfg Config, logger *slog.Logger) (*Se
 	}
 	switch cfg.AuthMode {
 	case "mock":
-		if cfg.ProductionAuth != nil {
+		if cfg.ProductionAuth != nil || cfg.PlatformLogin != nil {
 			return nil, errors.New("production authentication cannot be enabled in mock mode")
 		}
 	case "oidc":
@@ -126,6 +128,14 @@ func NewWithConfig(service InvoiceService, cfg Config, logger *slog.Logger) (*Se
 		}
 		if err := cfg.ProductionAuth.Validate(); err != nil {
 			return nil, fmt.Errorf("OIDC authentication runtime: %w", err)
+		}
+		if cfg.PlatformLogin != nil {
+			if cfg.PlatformLogin.Auth != cfg.ProductionAuth {
+				return nil, errors.New("platform login must share the production authentication runtime")
+			}
+			if err := cfg.PlatformLogin.Validate(); err != nil {
+				return nil, fmt.Errorf("platform login runtime: %w", err)
+			}
 		}
 	default:
 		return nil, fmt.Errorf("unsupported authentication mode %q", cfg.AuthMode)
@@ -138,7 +148,7 @@ func NewWithConfig(service InvoiceService, cfg Config, logger *slog.Logger) (*Se
 	if sourceMode == "agent" && cfg.SourceIngest == nil {
 		return nil, errors.New("source ingestion handler is required in agent mode")
 	}
-	s := &Server{ledger: service, authMode: cfg.AuthMode, logger: logger, mux: http.NewServeMux(), adminNetworks: adminNetworks, breakGlassNetworks: breakGlassNetworks, trustedProxies: trustedProxies, documentStore: cfg.DocumentStore, adminSettings: cfg.AdminSettings, productionAuth: cfg.ProductionAuth, operations: operations, sourceMode: sourceMode, readiness: cfg.Readiness, smtpTestSender: cfg.SMTPTestSender, smtpTestRecipient: smtpTestRecipient, publicOrigin: strings.TrimRight(cfg.PublicOrigin, "/"), lastSMTPTest: make(map[string]time.Time), sourceIngest: cfg.SourceIngest}
+	s := &Server{ledger: service, authMode: cfg.AuthMode, logger: logger, mux: http.NewServeMux(), adminNetworks: adminNetworks, breakGlassNetworks: breakGlassNetworks, trustedProxies: trustedProxies, documentStore: cfg.DocumentStore, adminSettings: cfg.AdminSettings, productionAuth: cfg.ProductionAuth, platformLogin: cfg.PlatformLogin, operations: operations, sourceMode: sourceMode, readiness: cfg.Readiness, smtpTestSender: cfg.SMTPTestSender, smtpTestRecipient: smtpTestRecipient, publicOrigin: strings.TrimRight(cfg.PublicOrigin, "/"), lastSMTPTest: make(map[string]time.Time), sourceIngest: cfg.SourceIngest}
 	s.routes()
 	return s, nil
 }
@@ -151,6 +161,9 @@ func (s *Server) routes() {
 	}
 	if s.productionAuth != nil {
 		s.productionAuth.Register(s)
+	}
+	if s.platformLogin != nil {
+		s.platformLogin.Register(s)
 	}
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "source_mode": s.sourceMode, "auth_mode": s.authMode})

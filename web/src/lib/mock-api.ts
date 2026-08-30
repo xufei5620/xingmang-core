@@ -29,6 +29,7 @@ const mockSession: AuthSession = {
     email: "admin@example.test",
     emailVerified: true,
     role: "admin",
+    platform: null,
   },
   csrfToken: "mock-csrf-token",
   adminStepUpRequired: false,
@@ -458,6 +459,14 @@ export const mockInvoiceApi: InvoiceApiClient = {
   },
   adminStepUpURL(returnTo) {
     return returnTo;
+  },
+  async platformLogin() {
+    await delay(80);
+    return { ok: true };
+  },
+  async verifyPlatformLoginTwoFA() {
+    await delay(80);
+    return { ok: true };
   },
   async getSourceAccounts() {
     await delay(100);

@@ -22,21 +22,27 @@ type ClientBinding struct {
 }
 
 type Session struct {
-	ID                string
-	FamilyID          string
-	UserID            string
-	Issuer            string     `json:"-"`
-	Subject           string     `json:"-"`
-	TokenHash         string     `json:"-"`
-	CSRFHash          string     `json:"-"`
-	ProviderSIDHash   string     `json:"-"`
-	Roles             []string   `json:"-"`
-	ACR               string     `json:"-"`
-	AMR               []string   `json:"-"`
-	AuthTime          time.Time  `json:"-"`
-	MFAAt             *time.Time `json:"-"`
-	ClientIPHash      string     `json:"-"`
-	UserAgentHash     string     `json:"-"`
+	ID              string
+	FamilyID        string
+	UserID          string
+	Issuer          string     `json:"-"`
+	Subject         string     `json:"-"`
+	TokenHash       string     `json:"-"`
+	CSRFHash        string     `json:"-"`
+	ProviderSIDHash string     `json:"-"`
+	Roles           []string   `json:"-"`
+	ACR             string     `json:"-"`
+	AMR             []string   `json:"-"`
+	AuthTime        time.Time  `json:"-"`
+	MFAAt           *time.Time `json:"-"`
+	ClientIPHash    string     `json:"-"`
+	UserAgentHash   string     `json:"-"`
+	// Platform and PlatformUserID are non-empty only for a platform-password
+	// login (see platform_login.go). They are always re-derived from the
+	// joined invoice_users row, never trusted from a caller-supplied value --
+	// see PostgresSessionStore in postgres.go.
+	Platform          Platform `json:"-"`
+	PlatformUserID    string   `json:"-"`
 	CreatedAt         time.Time
 	LastSeenAt        time.Time
 	IdleExpiresAt     time.Time
@@ -157,6 +163,7 @@ func (m *SessionManager) Issue(ctx context.Context, input IssueSessionInput) (Se
 		Roles:           append([]string(nil), input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string(nil), input.Principal.AMR...),
 		AuthTime: input.Principal.AuthTime, MFAAt: copyTime(input.MFAAt),
 		ClientIPHash: input.Binding.IPHash, UserAgentHash: input.Binding.UserAgentHash,
+		Platform: input.Principal.Platform, PlatformUserID: input.Principal.PlatformUserID,
 		CreatedAt: now, LastSeenAt: now, IdleExpiresAt: now.Add(m.config.IdleTTL), AbsoluteExpiresAt: now.Add(m.config.AbsoluteTTL),
 	}
 	if err = validateSessionRecord(session); err != nil {
@@ -202,6 +209,7 @@ func (m *SessionManager) Rotate(ctx context.Context, input RotateSessionInput) (
 		Roles:           append([]string(nil), input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string(nil), input.Principal.AMR...),
 		AuthTime: input.Principal.AuthTime, MFAAt: copyTime(input.MFAAt),
 		ClientIPHash: input.Binding.IPHash, UserAgentHash: input.Binding.UserAgentHash,
+		Platform: input.Principal.Platform, PlatformUserID: input.Principal.PlatformUserID,
 		CreatedAt: now, LastSeenAt: now, IdleExpiresAt: now.Add(m.config.IdleTTL),
 	}
 	next, err = m.store.Rotate(ctx, sha256Hex(input.Token), input.ExpectedSessionID, next, now)
@@ -287,6 +295,15 @@ func validateSessionRecord(session Session) error {
 	}
 	if session.ProviderSIDHash != "" && len(session.ProviderSIDHash) != 64 || session.ClientIPHash != "" && len(session.ClientIPHash) != 64 || session.UserAgentHash != "" && len(session.UserAgentHash) != 64 {
 		return errors.New("session optional secret hashes are invalid")
+	}
+	if (session.Platform == "") != (session.PlatformUserID == "") {
+		return errors.New("session platform and platform user ID must be set together")
+	}
+	if session.Platform != "" && !session.Platform.Valid() {
+		return errors.New("session platform is invalid")
+	}
+	if len(session.PlatformUserID) > 512 || hasControl(session.PlatformUserID) || strings.TrimSpace(session.PlatformUserID) != session.PlatformUserID {
+		return errors.New("session platform user ID is invalid")
 	}
 	if err := validateSessionClaimSet(session.Roles, 100); err != nil {
 		return err
@@ -409,7 +426,7 @@ func (m *MemorySessionStore) Rotate(_ context.Context, oldTokenHash, expectedSes
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	old, ok := m.byToken[oldTokenHash]
-	if !ok || old.ID != expectedSessionID || old.RevokedAt != nil || !old.IdleExpiresAt.After(now) || !old.AbsoluteExpiresAt.After(now) || old.Issuer != next.Issuer || old.Subject != next.Subject {
+	if !ok || old.ID != expectedSessionID || old.RevokedAt != nil || !old.IdleExpiresAt.After(now) || !old.AbsoluteExpiresAt.After(now) || old.Issuer != next.Issuer || old.Subject != next.Subject || old.Platform != next.Platform || old.PlatformUserID != next.PlatformUserID {
 		return Session{}, ErrSessionInvalid
 	}
 	if _, exists := m.byToken[next.TokenHash]; exists {

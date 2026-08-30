@@ -4,6 +4,7 @@ import {
   mapAdminSettings,
   mapInvoicePolicy,
   mapLot,
+  mapPlatformLoginOutcome,
   invoiceDocumentPath,
   mapProfile,
   profileMutationBody,
@@ -200,5 +201,36 @@ describe("immutable invoice eligibility policy contract", () => {
     expect(() => mapLot({ ...lot, reason_code: "UNKNOWN" } as unknown as BackendFundingLot)).toThrow(
       "充值记录包含无效的资金账本状态",
     );
+  });
+});
+
+describe("platform login outcome mapping", () => {
+  const tempTokenFixture = ["01234567", "89abcdef"].join("");
+
+  it("maps a direct success with no two-factor step", () => {
+    expect(mapPlatformLoginOutcome({ ok: true })).toEqual({ ok: true });
+  });
+
+  it("maps a two-factor-required response and preserves the temp token", () => {
+    expect(
+      mapPlatformLoginOutcome({
+        ok: true,
+        requires_two_fa: true,
+        temp_token: tempTokenFixture,
+      }),
+    ).toEqual({ ok: true, requiresTwoFA: true, tempToken: tempTokenFixture });
+  });
+
+  it("rejects a two-factor response with a missing or malformed temp token", () => {
+    expect(() =>
+      mapPlatformLoginOutcome({ ok: true, requires_two_fa: true }),
+    ).toThrow("登录服务返回了无法识别的验证状态");
+    expect(() =>
+      mapPlatformLoginOutcome({
+        ok: true,
+        requires_two_fa: true,
+        temp_token: "short",
+      }),
+    ).toThrow("登录服务返回了无法识别的验证状态");
   });
 });

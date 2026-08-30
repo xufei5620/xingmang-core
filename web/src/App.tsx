@@ -4281,7 +4281,75 @@ function EmptyState({
 }
 
 function LoginPage() {
-  const { login, error } = useAuth();
+  const { login, error, refresh } = useAuth();
+  const [platform, setPlatform] = useState<SourceType>("sub2api");
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [tempToken, setTempToken] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+
+  const platformLabel = platform === "sub2api" ? "SoloV API" : "SoloV 模型平台";
+  const identifierLabel = platform === "sub2api" ? "邮箱" : "用户名";
+
+  function selectPlatform(next: SourceType) {
+    setPlatform(next);
+    setFormError(null);
+    setTempToken(null);
+    setCode("");
+  }
+
+  async function handleCredentialsSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (submitting || !identifier.trim() || !password) return;
+    setSubmitting(true);
+    setFormError(null);
+    try {
+      const outcome = await invoiceApi.platformLogin({
+        platform,
+        identifier: identifier.trim(),
+        password,
+      });
+      if (outcome.requiresTwoFA) {
+        setTempToken(outcome.tempToken);
+        setPassword("");
+      } else {
+        setPassword("");
+        await refresh();
+      }
+    } catch (cause) {
+      setFormError(
+        cause instanceof InvoiceApiError ? cause.message : "登录失败，请重试。",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleTwoFASubmit(event: FormEvent) {
+    event.preventDefault();
+    if (submitting || !tempToken || !code.trim()) return;
+    setSubmitting(true);
+    setFormError(null);
+    try {
+      await invoiceApi.verifyPlatformLoginTwoFA({
+        platform,
+        tempToken,
+        code: code.trim(),
+      });
+      setCode("");
+      await refresh();
+    } catch (cause) {
+      setFormError(
+        cause instanceof InvoiceApiError ? cause.message : "验证码校验失败，请重试。",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <main className="auth-shell">
       <section className="auth-card">
@@ -4291,21 +4359,123 @@ function LoginPage() {
         <span className="eyebrow">SOLOV INVOICE</span>
         <h1>登录开票中心</h1>
         <p>
-          使用统一身份账号登录。Sub2API、New API 与桌面端账号必须由服务端显式关联，系统不会按邮箱自动合并。
+          使用你在 Sub2API 或 New API 的账号密码登录：登录后看到的即为该账号在
+          {platformLabel}的开票信息。
         </p>
-        {error && (
+        {(formError || error) && (
           <div className="auth-error" role="alert">
             <CircleAlert size={17} />
-            {error}
+            {formError || error}
           </div>
         )}
-        <button className="button button-primary button-wide" onClick={login}>
-          <KeyRound size={17} />
-          使用统一账号登录
-        </button>
-        <small>
-          登录将在顶层页面完成，不会在嵌入式 iframe 内打开身份提供商。
-        </small>
+        {tempToken ? (
+          <form onSubmit={handleTwoFASubmit}>
+            <label className="form-field">
+              <span>验证码</span>
+              <input
+                value={code}
+                onChange={(event) => setCode(event.target.value)}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                autoFocus
+                maxLength={32}
+                placeholder="请输入两步验证码"
+              />
+            </label>
+            <button
+              type="submit"
+              className="button button-primary button-wide"
+              disabled={submitting || !code.trim()}
+            >
+              {submitting ? (
+                <Loader2 className="spin" size={17} />
+              ) : (
+                <KeyRound size={17} />
+              )}
+              验证并登录
+            </button>
+            <button
+              type="button"
+              className="button button-dark button-wide"
+              disabled={submitting}
+              onClick={() => {
+                setTempToken(null);
+                setCode("");
+              }}
+            >
+              返回重新输入密码
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleCredentialsSubmit}>
+            <div className="segmented">
+              {(
+                [
+                  ["sub2api", "SoloV API"],
+                  ["newapi", "SoloV 模型平台"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={platform === value ? "active" : ""}
+                  onClick={() => selectPlatform(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <label className="form-field">
+              <span>{identifierLabel}</span>
+              <input
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                type={platform === "sub2api" ? "email" : "text"}
+                autoComplete="username"
+                maxLength={320}
+                placeholder={
+                  platform === "sub2api" ? "you@example.com" : "your-username"
+                }
+              />
+            </label>
+            <label className="form-field">
+              <span>密码</span>
+              <input
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                type="password"
+                autoComplete="current-password"
+                maxLength={1024}
+              />
+            </label>
+            <button
+              type="submit"
+              className="button button-primary button-wide"
+              disabled={submitting || !identifier.trim() || !password}
+            >
+              {submitting ? (
+                <Loader2 className="spin" size={17} />
+              ) : (
+                <KeyRound size={17} />
+              )}
+              登录
+            </button>
+          </form>
+        )}
+        {showAdminLogin ? (
+          <button className="button button-dark button-wide" onClick={login}>
+            <ShieldCheck size={17} />
+            使用统一身份账号登录
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="button button-ghost button-wide"
+            onClick={() => setShowAdminLogin(true)}
+          >
+            管理员登录
+          </button>
+        )}
       </section>
     </main>
   );

@@ -42,18 +42,25 @@ var (
 // Principal is the verified projection of an ID token. Issuer and Subject are
 // the stable identity key. Email is display/delivery metadata, never an account
 // binding key.
+// Platform and PlatformUserID are set only for a platform-password login (see
+// platform_login.go): Issuer then holds the platform's exact configured login
+// origin and Subject holds PlatformUserID, so the two fields are an explicit,
+// redundant-by-design projection of the same (issuer, subject) pair used
+// everywhere else -- never an independent identity key.
 type Principal struct {
-	Issuer        string    `json:"-"`
-	Subject       string    `json:"-"`
-	Email         string    `json:"-"`
-	EmailVerified bool      `json:"-"`
-	Roles         []string  `json:"-"`
-	ACR           string    `json:"-"`
-	AMR           []string  `json:"-"`
-	AuthTime      time.Time `json:"-"`
-	IssuedAt      time.Time `json:"-"`
-	ExpiresAt     time.Time `json:"-"`
-	ProviderSID   string    `json:"-"`
+	Issuer         string    `json:"-"`
+	Subject        string    `json:"-"`
+	Email          string    `json:"-"`
+	EmailVerified  bool      `json:"-"`
+	Roles          []string  `json:"-"`
+	ACR            string    `json:"-"`
+	AMR            []string  `json:"-"`
+	AuthTime       time.Time `json:"-"`
+	IssuedAt       time.Time `json:"-"`
+	ExpiresAt      time.Time `json:"-"`
+	ProviderSID    string    `json:"-"`
+	Platform       Platform  `json:"-"`
+	PlatformUserID string    `json:"-"`
 }
 
 func (p Principal) IdentityHash() string {

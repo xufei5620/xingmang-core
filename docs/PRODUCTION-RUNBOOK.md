@@ -1487,22 +1487,31 @@ rejected by the production capacity review.
 
 Use one finance admin, one Sub2API user and one New API user.
 
-1. Login, logout and login again; confirm cookie flags and CSRF rejection.
-   Logout must first revoke the local opaque session, then navigate the top
-   window through Keycloak's discovered end-session endpoint and return only
-   to `https://invoice.solov.cc/`. Because the service deliberately does not
-   persist an ID token, Keycloak may show one explicit logout-confirmation
-   page; zero-click IdP logout is not a V1 requirement. Terminate a canary
-   session in Keycloak and
-   prove the signed back-channel callback immediately invalidates its invoice
-   session; replay the same logout token and confirm one immutable replay row
-   and one audit event only.
-2. Perform administrator LoA2/OTP step-up from an allowed IP. Confirm denial
+1. For the Sub2API user, select Sub2API and log in with the platform email and
+   password; exercise the two-step 2FA response when the account requires it.
+   For the New API user, select New API and log in with the platform username
+   and password. For both platforms, prove wrong-password and unknown-account
+   responses are indistinguishable, the password is absent from logs/storage,
+   cookie flags and CSRF rejection hold, idle/absolute session limits are
+   8h/24h, logout revokes only the local opaque session, and login again works.
+   On first success, prove exactly one enabled source instance is selected,
+   the verified `platform_password_login` binding is created, and a session
+   for one platform/account cannot read the other platform/account (404).
+2. For the finance administrator, retain the central OIDC flow unchanged:
+   login, logout and login again. Logout must first revoke the local opaque
+   session, then navigate the top window through Keycloak's discovered
+   end-session endpoint and return only to `https://invoice.solov.cc/`.
+   Terminate a canary session in Keycloak and prove the signed back-channel
+   callback immediately invalidates its invoice session; replay the same
+   logout token and confirm one immutable replay row and one audit event only.
+   Perform administrator LoA2/OTP step-up from an allowed IP. Confirm denial
    from another IP and successful break-glass only through the approved VPN.
    Also confirm public `/admin` is 404 for every source, the admin hostname is
    403 outside the exact allowlist, the allowed Admin Console completes its
    `master`-realm login, and public `solov` discovery/login remains available.
-3. Bind both upstream accounts explicitly through the central IdP.
+3. Confirm OIDC administrators still use the explicit challenge-based upstream
+   binding flow; only a successful platform-password user login may auto-bind,
+   and it must never merge identities by email alone.
 4. Confirm source agent identity events produce the two connected-source rows.
 5. Confirm completed Sub2API balance orders use exact CNY `pay_amount`; test a
    recharge multiplier and subscription conversion. For refunds, confirm the

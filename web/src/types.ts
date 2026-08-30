@@ -54,7 +54,24 @@ export interface AuthUser {
   email: string;
   emailVerified: boolean;
   role: UserRole;
+  platform: SourceType | null;
 }
+
+export interface PlatformLoginInput {
+  platform: SourceType;
+  identifier: string;
+  password: string;
+}
+
+export interface PlatformLoginTwoFAInput {
+  platform: SourceType;
+  tempToken: string;
+  code: string;
+}
+
+export type PlatformLoginOutcome =
+  | { ok: true; requiresTwoFA?: false; tempToken?: never }
+  | { ok: true; requiresTwoFA: true; tempToken: string };
 
 export type AuthSession =
   | { authenticated: false; user?: never; csrfToken?: never }

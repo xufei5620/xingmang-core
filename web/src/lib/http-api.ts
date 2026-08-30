@@ -12,6 +12,7 @@ import type {
   InvoiceRequest,
   InvoiceStatus,
   PaymentCandidate,
+  PlatformLoginOutcome,
   RefundCase,
   RefundCaseStatus,
   SourceAccount,
@@ -39,9 +40,32 @@ type BackendSession = {
     email: string;
     email_verified: boolean;
     role: "user" | "admin";
+    platform?: "sub2api" | "newapi" | "";
   };
   csrf_token?: string;
 };
+
+type BackendPlatformLoginOutcome = {
+  ok: boolean;
+  requires_two_fa?: boolean;
+  temp_token?: string;
+};
+
+export function mapPlatformLoginOutcome(
+  value: BackendPlatformLoginOutcome,
+): PlatformLoginOutcome {
+  if (!value.requires_two_fa) return { ok: true };
+  if (
+    !value.temp_token ||
+    value.temp_token.length < 16 ||
+    /[\r\n\0]/.test(value.temp_token)
+  ) {
+    throw new InvoiceApiError("登录服务返回了无法识别的验证状态。", {
+      code: "INVALID_PLATFORM_LOGIN_RESPONSE",
+    });
+  }
+  return { ok: true, requiresTwoFA: true, tempToken: value.temp_token };
+}
 
 type BackendSourceAccount = {
   id: string;
@@ -660,6 +684,9 @@ async function requestJSON<T>(
     role?: RequestRole;
     body?: unknown;
     headers?: Record<string, string>;
+    // Only for the pre-session platform-login endpoints, which by
+    // definition cannot hold a synchronizer CSRF token yet.
+    skipCSRF?: boolean;
   } = {},
 ): Promise<T> {
   const headers = new Headers(options.headers);
@@ -668,7 +695,7 @@ async function requestJSON<T>(
   if (options.body !== undefined)
     headers.set("Content-Type", "application/json");
 
-  if (isMutation(method)) {
+  if (isMutation(method) && !options.skipCSRF) {
     headers.set("X-CSRF-Token", csrfTokenForMutation());
   }
   const controller = new AbortController();
@@ -1116,7 +1143,6 @@ function mapSession(value: BackendSession): AuthSession {
   if (
     !["user", "admin"].includes(value.user.role) ||
     !value.user.id.trim() ||
-    !value.user.email.trim() ||
     value.csrf_token.length < 32 ||
     /[\r\n\0]/.test(value.csrf_token)
   ) {
@@ -1124,6 +1150,10 @@ function mapSession(value: BackendSession): AuthSession {
       code: "INVALID_SESSION_RESPONSE",
     });
   }
+  // Unlike an OIDC identity, a platform account is not guaranteed to carry an
+  // email (e.g. a username-only New API account): display_name always has a
+  // server-side fallback (see maskedEmailName in production_auth.go), so an
+  // empty email here is not itself an invalid session.
   sessionCSRFToken = value.csrf_token;
   return {
     authenticated: true,
@@ -1133,6 +1163,7 @@ function mapSession(value: BackendSession): AuthSession {
       email: value.user.email,
       emailVerified: value.user.email_verified,
       role: value.user.role,
+      platform: value.user.platform || null,
     },
     csrfToken: value.csrf_token,
     adminStepUpRequired: value.admin_step_up_required === true,
@@ -1434,14 +1465,22 @@ export const httpInvoiceApi: InvoiceApiClient = {
   },
 
   async logout() {
-    const result = await requestJSON<{ ok: boolean; logout_url: string }>(
+    const result = await requestJSON<{ ok: boolean; logout_url?: string }>(
       "/api/v1/auth/logout",
       { method: "POST" },
     );
-    if (result.ok !== true || typeof result.logout_url !== "string") {
+    if (result.ok !== true) {
       throw new InvoiceApiError("退出登录响应无效。", {
         code: "INVALID_LOGOUT_RESPONSE",
       });
+    }
+    // A platform-password session (see AuthUser.platform) never went through
+    // the identity provider, so logout omits logout_url entirely: there is
+    // nowhere else to send the browser.
+    if (result.logout_url === undefined) {
+      sessionCSRFToken = "";
+      documentUploadCheckpoints.clear();
+      return null;
     }
     let logoutURL: URL;
     try {
@@ -1477,6 +1516,40 @@ export const httpInvoiceApi: InvoiceApiClient = {
   adminStepUpURL(returnTo) {
     return endpointURL(
       `/api/v1/auth/admin/step-up?return_to=${encodeURIComponent(returnTo)}`,
+    );
+  },
+
+  async platformLogin(input) {
+    return mapPlatformLoginOutcome(
+      await requestJSON<BackendPlatformLoginOutcome>(
+        "/api/v1/auth/platform-login",
+        {
+          method: "POST",
+          skipCSRF: true,
+          body: {
+            platform: input.platform,
+            identifier: input.identifier,
+            password: input.password,
+          },
+        },
+      ),
+    );
+  },
+
+  async verifyPlatformLoginTwoFA(input) {
+    return mapPlatformLoginOutcome(
+      await requestJSON<BackendPlatformLoginOutcome>(
+        "/api/v1/auth/platform-login/2fa",
+        {
+          method: "POST",
+          skipCSRF: true,
+          body: {
+            platform: input.platform,
+            temp_token: input.tempToken,
+            code: input.code,
+          },
+        },
+      ),
     );
   },
 

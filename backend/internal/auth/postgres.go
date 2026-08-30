@@ -125,6 +125,7 @@ func (s *PostgresSessionStore) AuthenticateAndTouch(ctx context.Context, tokenHa
 		  AND (s.client_ip_hmac IS NULL OR s.client_ip_hmac=$2)
 		  AND (s.user_agent_hmac IS NULL OR s.user_agent_hmac=$3)
 		RETURNING s.id,s.family_id,s.invoice_user_id,u.oidc_issuer,u.oidc_subject,
+		          COALESCE(u.platform,''),COALESCE(u.platform_user_id,''),
 		          s.token_hash,s.csrf_hash,COALESCE(s.provider_sid_hash,''),s.roles,s.acr,s.amr,
 		          s.auth_time,s.mfa_at,COALESCE(s.client_ip_hmac,''),COALESCE(s.user_agent_hmac,''),
 		          s.created_at,s.last_seen_at,s.idle_expires_at,s.absolute_expires_at,
@@ -147,6 +148,7 @@ func (s *PostgresSessionStore) Rotate(ctx context.Context, oldTokenHash, expecte
 	defer tx.Rollback(context.Background())
 	old, err := scanSession(tx.QueryRow(ctx, `
 		SELECT s.id,s.family_id,s.invoice_user_id,u.oidc_issuer,u.oidc_subject,
+		       COALESCE(u.platform,''),COALESCE(u.platform_user_id,''),
 		       s.token_hash,s.csrf_hash,COALESCE(s.provider_sid_hash,''),s.roles,s.acr,s.amr,
 		       s.auth_time,s.mfa_at,COALESCE(s.client_ip_hmac,''),COALESCE(s.user_agent_hmac,''),
 		       s.created_at,s.last_seen_at,s.idle_expires_at,s.absolute_expires_at,
@@ -161,7 +163,7 @@ func (s *PostgresSessionStore) Rotate(ctx context.Context, oldTokenHash, expecte
 	if err != nil {
 		return Session{}, err
 	}
-	if old.Issuer != next.Issuer || old.Subject != next.Subject {
+	if old.Issuer != next.Issuer || old.Subject != next.Subject || old.Platform != next.Platform || old.PlatformUserID != next.PlatformUserID {
 		return Session{}, ErrIdentityMismatch
 	}
 	if _, err = tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=$2,revoked_reason='rotated' WHERE id=$1 AND revoked_at IS NULL`, old.ID, now); err != nil {
@@ -204,6 +206,7 @@ func (s *PostgresSessionStore) RevokeToken(ctx context.Context, tokenHash string
 		FROM invoice_users u
 		WHERE s.token_hash=$1 AND s.invoice_user_id=u.id AND s.revoked_at IS NULL
 		RETURNING s.id,s.family_id,s.invoice_user_id,u.oidc_issuer,u.oidc_subject,
+		          COALESCE(u.platform,''),COALESCE(u.platform_user_id,''),
 		          s.token_hash,s.csrf_hash,COALESCE(s.provider_sid_hash,''),s.roles,s.acr,s.amr,
 		          s.auth_time,s.mfa_at,COALESCE(s.client_ip_hmac,''),COALESCE(s.user_agent_hmac,''),
 		          s.created_at,s.last_seen_at,s.idle_expires_at,s.absolute_expires_at,
@@ -256,14 +259,17 @@ func (s *PostgresSessionStore) DeleteExpired(ctx context.Context, before time.Ti
 func scanSession(row pgx.Row) (Session, error) {
 	var session Session
 	var authTime *time.Time
+	var platform string
 	err := row.Scan(
 		&session.ID, &session.FamilyID, &session.UserID, &session.Issuer, &session.Subject,
+		&platform, &session.PlatformUserID,
 		&session.TokenHash, &session.CSRFHash, &session.ProviderSIDHash, &session.Roles,
 		&session.ACR, &session.AMR, &authTime, &session.MFAAt,
 		&session.ClientIPHash, &session.UserAgentHash, &session.CreatedAt,
 		&session.LastSeenAt, &session.IdleExpiresAt, &session.AbsoluteExpiresAt,
 		&session.RotatedFrom, &session.RevokedAt, &session.RevokedReason,
 	)
+	session.Platform = Platform(platform)
 	if authTime != nil {
 		session.AuthTime = authTime.UTC()
 	}

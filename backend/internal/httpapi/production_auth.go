@@ -286,6 +286,7 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 			Issuer: current.Session.Issuer, Subject: current.Session.Subject,
 			Roles: current.Session.Roles, ACR: current.Session.ACR, AMR: current.Session.AMR,
 			AuthTime: current.Session.AuthTime,
+			Platform: current.Session.Platform, PlatformUserID: current.Session.PlatformUserID,
 		}
 		credentials, rotateErr := a.Sessions.Rotate(r.Context(), auth.RotateSessionInput{
 			Token: current.SessionToken, ExpectedSessionID: current.Session.ID,
@@ -327,7 +328,7 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 		"csrf_token":    csrf,
 		"user": map[string]any{
 			"id": user.ID, "display_name": displayName, "email": user.Email,
-			"email_verified": user.EmailVerified, "role": role,
+			"email_verified": user.EmailVerified, "role": role, "platform": current.Session.Platform,
 		},
 		"admin_step_up_required": stepUpRequired,
 	})
@@ -335,21 +336,32 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 
 func (a *ProductionAuth) logout(w http.ResponseWriter, r *http.Request) {
 	current := principal(r)
-	logoutURL, err := a.Logout.RPInitiatedLogoutURL()
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "OIDC_LOGOUT_UNAVAILABLE", "identity-provider logout is unavailable")
-		return
-	}
 	if current.SessionToken == "" {
 		writeError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "authentication is required")
 		return
 	}
-	if err = a.Sessions.RevokeToken(r.Context(), current.SessionToken, "user logout", requestID(r)); err != nil {
+	// A platform-password session (current.Session.Platform != "") never went
+	// through the OIDC provider, so there is no RP-initiated logout URL to
+	// send the browser to -- only the local session is revoked.
+	logoutURL := ""
+	if current.Session == nil || current.Session.Platform == "" {
+		var err error
+		logoutURL, err = a.Logout.RPInitiatedLogoutURL()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "OIDC_LOGOUT_UNAVAILABLE", "identity-provider logout is unavailable")
+			return
+		}
+	}
+	if err := a.Sessions.RevokeToken(r.Context(), current.SessionToken, "user logout", requestID(r)); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "SESSION_REVOKE_FAILED", "logout could not revoke the local session")
 		return
 	}
 	a.clearAuthCookies(w)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "logout_url": logoutURL})
+	response := map[string]any{"ok": true}
+	if logoutURL != "" {
+		response["logout_url"] = logoutURL
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (a *ProductionAuth) backchannelLogout(server *Server, w http.ResponseWriter, r *http.Request) {

@@ -176,6 +176,45 @@ the audit log.
 The production API follows this contract. Local mock mode remains isolated and
 does not accept production OIDC credentials.
 
+### Platform-password login (CR-0004)
+
+Ordinary users do not go through OIDC at all. The user-facing login page lets
+them pick Sub2API or New API and sign in with that platform's own account
+password; the backend forwards the credentials to the platform's real login
+endpoint over HTTPS (`internal/auth/sub2api_login.go`,
+`internal/auth/newapi_login.go`), never persists or logs the password, and
+resolves the verified `(platform, platform_user_id)` pair to a local identity
+exactly like an OIDC `(issuer, subject)` pair. Administrator login is
+unaffected and still uses the OIDC block above. This mode requires no Keycloak
+configuration to run.
+
+```
+SUB2API_LOGIN_BASE_URL=https://api.solov.cc   # exact HTTPS origin, host-pinned
+NEWAPI_LOGIN_BASE_URL=https://xm.solov.cc     # exact HTTPS origin, host-pinned
+PLATFORM_LOGIN_TIMEOUT=10s                    # 1s..1m
+PLATFORM_LOGIN_MAX_ATTEMPTS=8                 # consecutive-failure lockout threshold, per IP+account
+PLATFORM_LOGIN_LOCKOUT_WINDOW=15m             # 1m..24h
+```
+
+All five have production-matching defaults, so they only need to be set to
+override them (a staging platform origin, a shorter lockout window, etc.).
+
+**Operational dependency:** both upstream platforms must keep their Turnstile
+challenge disabled (`GET /api/v1/settings/public` on Sub2API, `GET
+/api/status` on New API) for this server-to-server forwarder to authenticate
+at all — there is no browser to solve a challenge in. If either platform
+enables Turnstile, every login attempt on that platform fails; on Sub2API it
+is misreported as "wrong password" (a 400 from Sub2API's Turnstile check is
+indistinguishable, at the HTTP layer, from a bad-credentials 400). This is not
+monitored automatically yet — see the XM-INV-LOGIN handoff doc for the
+suggested preflight/health-check follow-up.
+
+Both platforms fold "wrong password" and "unknown account" into one
+indistinguishable response by design (verified against
+`K:/sub2api-src`/`K:/newapi-src` as of 2026-08-31); the invoice-system side
+preserves that and never surfaces which case occurred, matching CR-0004's
+"failure must not leak whether the account exists" requirement.
+
 ## 3. SMTP
 
 Local development uses Mailpit without credentials. Production requires TLS,
