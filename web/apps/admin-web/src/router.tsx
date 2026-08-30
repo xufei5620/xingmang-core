@@ -23,7 +23,8 @@ import {
 import { appApiConfig } from "./api/config";
 import { listServices } from "./api/platform";
 import { decodePlatformUserIdSegment, platformHasUsers } from "./api/users";
-import { devLogout, isAuthenticated } from "./auth";
+import { RequireAuth } from "./auth/RequireAuth";
+import { currentUserLabel, signOut } from "./auth/session";
 import { DemoDataBanner } from "./components/DemoDataBanner";
 import { GlobalSearch } from "./components/GlobalSearch";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
@@ -39,6 +40,7 @@ import {
 } from "./lib/platforms";
 import { AlertsPage } from "./pages/AlertsPage";
 import { AuditPage } from "./pages/AuditPage";
+import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { ChannelDetailPage, isSupplyPlatform } from "./pages/ChannelDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
@@ -54,10 +56,8 @@ import { isServerDetailPreviewId } from "./blueprints/server";
 import { SupplierCreatePage } from "./pages/SupplierCreatePage";
 import { UpstreamDetailPage } from "./pages/UpstreamDetailPage";
 
-function requireAuth() {
-  if (!isAuthenticated()) return redirect("/login");
-  return null;
-}
+// 登录门禁见 ./auth/RequireAuth.tsx（XM-AUTH1）：dev-header 模式看 localStorage 的
+// 开发开关，oidc 模式看 sessionStorage 里有没有会话；没有就带着 next 去 /login。
 
 // 导航项的样式由 ui-admin 给（navItemClass）：左栏在深色轨道上，用的是不随主题
 // 翻转的 nav-* 令牌，应用侧照着内容区的 surface/fg 再拼一份就会一半亮一半暗。
@@ -196,11 +196,10 @@ export function ShellLayout() {
       contextStrip={
         <ContextStrip crumbs={breadcrumbsFor(pathname)} environment={{ ...env, tone: "info" }} />
       }
-      user={{ name: "开发模式" }}
-      onLogout={() => {
-        devLogout();
-        void navigate("/login");
-      }}
+      // oidc 模式显示 id_token 里的用户名，退出走 Keycloak 的 end_session；
+      // dev-header 模式保留「开发模式」四个字与本地开关（auth/session.ts）
+      user={{ name: currentUserLabel() }}
+      onLogout={() => signOut((to) => void navigate(to))}
     >
       <Outlet />
     </AdminShell>
@@ -313,78 +312,85 @@ const placeholderRoutes = NAV_GROUPS.flatMap((group) => group.items)
 
 export const routes = [
   { path: "/login", Component: LoginPage },
+  // Keycloak 授权码回调（XM-AUTH1）。在门禁**之外**：这一步正是为了拿到会话
+  { path: "/auth/callback", Component: AuthCallbackPage },
   {
     path: "/",
-    loader: requireAuth,
-    Component: ShellLayout,
+    // 无路径的门禁布局路由：没登录就 <Navigate> 去 /login，登录了渲染 <Outlet />
+    Component: RequireAuth,
     children: [
       {
-        // 无路径的布局路由，只为把 ErrorBoundary 挂在壳**内部**:404 与页面级异常
-        // 渲染在主内容区，导航、面包屑、演示横幅都还在。挂到上面那层的话，
-        // 一次 404 会连左栏一起换掉，人连「回哪去」都没得选
-        ErrorBoundary: RouteErrorBoundary,
+        Component: ShellLayout,
         children: [
-          { index: true, loader: () => redirect("/dashboard") },
-          // 路径保持 /dashboard 与 /audit 不变：XM-0006 起就是这两个地址，
-          // 改了会打断已有书签。页面**改名**(运营总览→运营工作台、
-          // 审计事件→审计记录)不改地址，这正是交接文档 §8 要的那种迁移
-          { path: "dashboard", Component: OverviewPage },
-          { path: "alerts", Component: AlertsPage },
-          { path: "audit", Component: AuditPage },
           {
-            path: "platforms/:serviceType/upstream/detail/:channelId",
-            loader: channelDetailLoader,
-            Component: ChannelDetailPage,
+            // 无路径的布局路由，只为把 ErrorBoundary 挂在壳**内部**:404 与页面级异常
+            // 渲染在主内容区，导航、面包屑、演示横幅都还在。挂到上面那层的话，
+            // 一次 404 会连左栏一起换掉，人连「回哪去」都没得选
+            ErrorBoundary: RouteErrorBoundary,
+            children: [
+              { index: true, loader: () => redirect("/dashboard") },
+              // 路径保持 /dashboard 与 /audit 不变：XM-0006 起就是这两个地址，
+              // 改了会打断已有书签。页面**改名**(运营总览→运营工作台、
+              // 审计事件→审计记录)不改地址，这正是交接文档 §8 要的那种迁移
+              { path: "dashboard", Component: OverviewPage },
+              { path: "alerts", Component: AlertsPage },
+              { path: "audit", Component: AuditPage },
+              {
+                path: "platforms/:serviceType/upstream/detail/:channelId",
+                loader: channelDetailLoader,
+                Component: ChannelDetailPage,
+              },
+              {
+                path: "platforms/:serviceType/suppliers/new",
+                loader: supplyPlatformLoader,
+                Component: SupplierCreatePage,
+              },
+              {
+                path: "platforms/:serviceType/suppliers/:upstreamId",
+                loader: upstreamDetailLoader,
+                Component: UpstreamDetailPage,
+              },
+              {
+                path: "platforms/server/detail/:serverId",
+                loader: serverDetailLoader,
+                Component: ServerDetailPage,
+              },
+              {
+                path: "platforms/:serviceType",
+                loader: platformTabLoader,
+                Component: PlatformDetailPage,
+              },
+              {
+                // 用户 ID 是不透明值；列表 Link 统一编码成带前缀的 UTF-8 hex 段，
+                // 详情页严格解码后请求 v2 canonical UserDetail 资源。
+                path: "platforms/:serviceType/users/:userId",
+                loader: platformUserDetailLoader,
+                Component: PlatformUserDetailPage,
+              },
+              // 请求详情是**完整页**而不是抽屉(§11.4、原型 RECOVERY.md「No right-side
+              // detail drawers」)。挂在平台下面而不是全局 /requests/:id：同一个 id 在
+              // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
+              { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
+              { path: "registry", Component: RegistryPage },
+              { path: "settings", Component: SettingsPage },
+              ...placeholderRoutes,
+    
+              // --- 旧路径 redirect(ADMIN-IA v3 §4.1 全表)---
+              // 只重定向、不再渲染页面。静态段在 react-router 里排在动态段之前，
+              // 所以这三条一定压过 platforms/:serviceType，与书写顺序无关
+              ...Object.entries(LEGACY_PLATFORM_ROUTES).map(([serviceType, to]) => ({
+                path: `platforms/${serviceType}`,
+                loader: () => redirect(to),
+              })),
+              // v1 旧路径。运行手册与 Issue 里贴过这两个地址，导航重构不该让它们变成 404
+              { path: "services", loader: () => redirect("/registry") },
+              { path: "channels", loader: () => redirect(CHANNELS_REDIRECT) },
+    
+              // 兜底 404。没有它，任何没匹配上的旧书签会落到 react-router 的默认
+              // 错误页——一屏英文堆栈，既不说这是 404，也回不去
+              { path: "*", Component: NotFoundPage },
+            ],
           },
-          {
-            path: "platforms/:serviceType/suppliers/new",
-            loader: supplyPlatformLoader,
-            Component: SupplierCreatePage,
-          },
-          {
-            path: "platforms/:serviceType/suppliers/:upstreamId",
-            loader: upstreamDetailLoader,
-            Component: UpstreamDetailPage,
-          },
-          {
-            path: "platforms/server/detail/:serverId",
-            loader: serverDetailLoader,
-            Component: ServerDetailPage,
-          },
-          {
-            path: "platforms/:serviceType",
-            loader: platformTabLoader,
-            Component: PlatformDetailPage,
-          },
-          {
-            // 用户 ID 是不透明值；列表 Link 统一编码成带前缀的 UTF-8 hex 段，
-            // 详情页严格解码后请求 v2 canonical UserDetail 资源。
-            path: "platforms/:serviceType/users/:userId",
-            loader: platformUserDetailLoader,
-            Component: PlatformUserDetailPage,
-          },
-          // 请求详情是**完整页**而不是抽屉(§11.4、原型 RECOVERY.md「No right-side
-          // detail drawers」)。挂在平台下面而不是全局 /requests/:id：同一个 id 在
-          // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
-          { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
-          { path: "registry", Component: RegistryPage },
-          { path: "settings", Component: SettingsPage },
-          ...placeholderRoutes,
-
-          // --- 旧路径 redirect(ADMIN-IA v3 §4.1 全表)---
-          // 只重定向、不再渲染页面。静态段在 react-router 里排在动态段之前，
-          // 所以这三条一定压过 platforms/:serviceType，与书写顺序无关
-          ...Object.entries(LEGACY_PLATFORM_ROUTES).map(([serviceType, to]) => ({
-            path: `platforms/${serviceType}`,
-            loader: () => redirect(to),
-          })),
-          // v1 旧路径。运行手册与 Issue 里贴过这两个地址，导航重构不该让它们变成 404
-          { path: "services", loader: () => redirect("/registry") },
-          { path: "channels", loader: () => redirect(CHANNELS_REDIRECT) },
-
-          // 兜底 404。没有它，任何没匹配上的旧书签会落到 react-router 的默认
-          // 错误页——一屏英文堆栈，既不说这是 404，也回不去
-          { path: "*", Component: NotFoundPage },
         ],
       },
     ],

@@ -7,6 +7,11 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- 运行时配置（XM-AUTH1）：普通脚本、同步执行，保证 window.__XM_CONFIG__ 在
+         业务包（module 脚本天然 defer）之前就位。容器里由 web-app-config.sh
+         按环境变量生成；本地是 public/ 下的空壳。文件缺失或不合法只会让
+         src/auth/runtimeConfig.ts 回落到默认值，不会弄垮应用。 -->
+    <script src="/app-config.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

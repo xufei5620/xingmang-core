@@ -48,6 +48,13 @@ services:
       HEARTBEAT_RUN_ON_START: ${HEARTBEAT_RUN_ON_START:-true}
 
   web:
+    environment:
+      # 前端鉴权固定 oidc（XM-AUTH1），与上面 platform-api 的 XM_AUTH_MODE 成对。
+      # issuer / client id 默认取后端同名配置（XM_OIDC_ISSUER / XM_OIDC_AUDIENCE），
+      # 两边必须相同：issuer 逐字比对，client id 就是后端校验的 aud/azp。
+      XM_WEB_AUTH_MODE: oidc
+      XM_WEB_OIDC_ISSUER: ${XM_WEB_OIDC_ISSUER:-${XM_OIDC_ISSUER:?XM_OIDC_ISSUER is required for production}}
+      XM_WEB_OIDC_CLIENT_ID: ${XM_WEB_OIDC_CLIENT_ID:-${XM_OIDC_AUDIENCE:?XM_OIDC_AUDIENCE is required for production}}
     ports: !override
       # 生产入口由 TLS Nginx 反代；不要把管理后台直接绑到公网接口。
       - "127.0.0.1:18089:80"

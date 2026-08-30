@@ -11,6 +11,14 @@ interface ImportMetaEnv {
   readonly VITE_XM_SCOPES?: string;
   /** 显式查询环境。默认不传，理由见 src/api/config.ts。 */
   readonly VITE_XM_ENVIRONMENT?: string;
+  /** 鉴权方式的**构建期**回落值（XM-AUTH1）：dev-header | oidc。
+   *  运行时的 /app-config.js（window.__XM_CONFIG__）优先于这几项，
+   *  见 src/auth/runtimeConfig.ts。 */
+  readonly VITE_XM_AUTH_MODE?: string;
+  readonly VITE_XM_OIDC_ISSUER?: string;
+  readonly VITE_XM_OIDC_CLIENT_ID?: string;
+  /** 授权请求的 scope（空格分隔），默认 "openid profile email"。 */
+  readonly VITE_XM_OIDC_SCOPES?: string;
   /** 演示数据横幅模式："demo" 强制显示 / "real" 强制关闭 / 其余按 source 自动判定。 */
   readonly VITE_XM_DATA_BADGE?: string;
   /** 已知演示实例的 source 列表（逗号分隔）；不配用 lib/demoData 里的默认值。 */

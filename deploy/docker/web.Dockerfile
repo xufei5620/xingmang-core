@@ -40,4 +40,11 @@ RUN pnpm --filter admin-web run build
 FROM nginx:1.28-alpine AS web
 COPY deploy/nginx/launch.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /src/web/apps/admin-web/dist /usr/share/nginx/html
+# 前端运行时配置（XM-AUTH1）：官方镜像的 /docker-entrypoint.sh 在起 nginx 之前
+# 会按序执行 /docker-entrypoint.d/*.sh（必须可执行）。这一步按 XM_WEB_AUTH_MODE /
+# XM_WEB_OIDC_ISSUER / XM_WEB_OIDC_CLIENT_ID 生成 /usr/share/nginx/html/app-config.js，
+# 覆盖构建产物里的空壳；缺配置时脚本非零退出，容器起不来（fail closed）。
+# chmod 放在镜像里做：宿主是 Windows，git 的可执行位靠不住。
+COPY deploy/docker/web-app-config.sh /docker-entrypoint.d/40-xm-app-config.sh
+RUN chmod +x /docker-entrypoint.d/40-xm-app-config.sh
 EXPOSE 80
