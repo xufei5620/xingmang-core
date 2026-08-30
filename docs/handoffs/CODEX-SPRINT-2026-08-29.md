@@ -133,3 +133,9 @@ d. 接入验证清单脚本 `scripts/verify-real-mode.sh`:worker 日志 metrics_
 - **并行车道**：多个 Codex 会话时每会话只认领一条车道（A 数据库角色 / B 审计归档 / C R2 韧性 / D 指标降采样），
   共享文件只在本车道最终接线片改并 rebase 到最新 release 后再标 READY。
 - 完整文本见 `docs/handoffs/ACCEPTANCE-LOG.md` 的 `PRIORITY 加速指令` 行。
+
+### 7.6 用户拍板追加（2026-08-30 晚）
+- **CR-0003 身份模型=方案一已批准**：车道 E（开票，K:/发票 仓库）可开实现分支；契约原文见 ACCEPTANCE-LOG `APPROVED CR-0003`。
+- **新增车道 F：XM-CRED0 凭据管理 UI**：管理后台可输入/添加/修改/保存凭据；平台库仍只存 CredentialRef 名，
+  值写入仓库外文件 SecretProvider 目录，经 `credential.upsert/rotate/revoke` Action + 审计事件；连接器 token 解析改为
+  SecretProvider 优先、env 兜底；不做 KMS/审批中心。完整边界见 ACCEPTANCE-LOG `PRIORITY 新增车道 F`。
