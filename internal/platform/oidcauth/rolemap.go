@@ -121,6 +121,9 @@ func DefaultRoleScopeMap() map[string][]string {
 			"registry.read",
 			"ops.read",
 			"audit.read",
+			// XM-ACTIONS0：跨 Action 执行记录列表。比 audit.read 低一档（不含
+			// before/after 正文），管理员默认可读；staff 仍不给。
+			"action.read",
 			"registry.service.manage",
 			"registry.connector.manage",
 			"registry.connection.manage",
