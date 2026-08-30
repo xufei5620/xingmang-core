@@ -132,3 +132,24 @@ go test ./connectors/... ./internal/platform/connector/
 - 重试与退避没有做在 Connector 里：周期任务本身就是 5 分钟一轮，
   失败会诚实落库并在下一轮自然重试，客户端内再加一层重试只会把
   「一次失败」变成「一次更慢的失败」。
+
+## R2-15 静态预算护栏（R215-1）
+
+`internal/platform/connector` 现在提供无副作用的 v1 静态预算与纯运行护栏：
+
+- `RegisteredRouteSpecs()` 暴露稳定 route id、capability、方法和路径模板；不含
+  endpoint 主机、查询参数或凭据；Sub2API、NewAPI、metering 也分别暴露同名清单。
+- `contracts/connectors/budgets.v1.json` 是严格（拒绝未知字段）的冻结策略，
+  为每项能力列出请求/页/行/字节/成本/墙钟/并发上限；未知路由、版本、scope、
+  cursor/coverage 模式以及 write/destructive capability 都 fail closed。
+- `NewBudgetGuard`/`BudgetRun` 在请求创建前检查上下文、route、retry/成本上限，
+  统一累计页、行、字节和 cursor 证据；`Finish` 产生可排序、无敏感内容的证据。
+- `NewLimitedBody`/`WrapResponseBody` 在 JSON 解码前限制响应字节，Content-Length
+  超限或 chunked 读取越界都会关闭 body 并返回稳定错误；可对解压后的 reader
+  再包一层以限制解码增长。
+- `ParseRetryAfter`、`NextPollState` 和 `DeterministicJitter` 是纯参考模型；它们
+  不睡眠、不访问 DB/网络，也不会把超出 policy 上限的 Retry-After 静默截断。
+
+这片**不**接入 worker、数据库、迁移、真实凭据或请求执行。跨副本 source budget
+authority 属于 R215-2，Connector shadow/enforcement 属于 R215-3/R215-4。盘点证据
+请按 `docs/evidence/TEMPLATE-connector-budget-inventory.md` 填写。
