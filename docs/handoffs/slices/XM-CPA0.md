@@ -9,7 +9,7 @@ READY（详情见下方 not_run / risks——真实 usage.sqlite 与生产部署
 
 - branch: `ai/claude/XM-CPA0`
 - base: `ef0a85f`（`release/v0.1-launch` 当前 tip）
-- implementation commit: 见本次提交（本文件与代码同一个提交）
+- implementation commit: `0b5a356`
 - worktree: `K:/星芒统一控制平台/acceptance/wt-cpa0`
 
 ## scope
