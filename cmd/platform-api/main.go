@@ -200,16 +200,26 @@ func main() {
 		os.Exit(2)
 	}
 
-	// 用户清单（XM-0046）。与 reqlog 同一条纪律：配错了就拒绝启动。
-	// 默认 fake（理由见 parseUsersMode）——样本客户一眼可辨，且 data_source
-	// 带 -fake，前端据此挂演示横幅。
+	// 用户清单（XM-0046 / XM-USERS-REAL）。与 reqlog 同一条纪律：配错了就拒绝
+	// 启动。默认 fake（理由见 parseUsersMode）——样本客户一眼可辨，且
+	// data_source 带 -fake，前端据此挂演示横幅。
+	//
+	// real 模式的凭据只经 CredentialRef（宪法 7 条）：这里只装配一个**能解析
+	// 任意引用**的文件优先 SecretProvider（与 worker 读同一个 XM_SECRET_ROOT
+	// 目录），具体连哪个端点、用哪个引用留给 dynamicUsersClient 每次请求时
+	// 现查 core.connector_config——见 buildPlatformUsers 的注释。
 	usersMode, err := parseUsersMode(os.Getenv("XM_PLATFORM_USERS_MODE"))
 	if err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "platform_users_config_invalid"), slog.Any("err", err))
 		os.Exit(2)
 	}
-	platformUserService, err := buildPlatformUsers(usersMode)
+	platformUserService, err := buildPlatformUsers(usersMode, platformUsersDeps{
+		Pool:        pool,
+		Secrets:     platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger),
+		Environment: cfg.Environment,
+		Logger:      logger,
+	})
 	if err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "platform_users_config_invalid"), slog.Any("err", err))

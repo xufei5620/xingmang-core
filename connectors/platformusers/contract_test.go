@@ -43,23 +43,11 @@ func TestFakeNewAPIKeepsOptionalCapabilitiesSourceScoped(t *testing.T) {
 	})
 }
 
-// TestRealSkeletonSatisfiesContract:real 骨架今天必然 not_supported,
-// 但能力清单与构造期护栏仍要过同一套断言。
-func TestRealSkeletonSatisfiesContract(t *testing.T) {
-	contracttest.Run(t, "real", platformusers.SourceSub2API, func() platformusers.ReadClient {
-		c, err := platformusers.NewRealClient(platformusers.RealConfig{
-			Source:          platformusers.SourceSub2API,
-			Endpoint:        "https://sub2api.example.com",
-			CredentialRef:   "secret://sub2api/readonly",
-			TargetAllowlist: []string{"sub2api.example.com"},
-			Secrets:         testSecrets(t),
-		})
-		if err != nil {
-			t.Fatalf("构造 real 客户端失败: %v", err)
-		}
-		return c
-	})
-}
+// real 客户端现已实装(XM-USERS-REAL):它对着真实上游发 HTTP 请求,不能再用
+// 一个不存在的主机名(https://sub2api.example.com)跑契约套件——那会变成一次
+// 真实的网络 I/O 而不是构造期护栏测试。真实客户端的契约合规测试搬去了
+// realclient_test.go,用 httptest.NewTLSServer 起本地假上游(与
+// connectors/sub2api、connectors/newapi 的真实客户端测试同一套做法)。
 
 func TestParseSource(t *testing.T) {
 	for _, ok := range []string{"sub2api", "NewAPI", "  newapi  "} {
@@ -353,23 +341,9 @@ func TestRealClientGuards(t *testing.T) {
 	}
 }
 
-func TestRealClientNotSupported(t *testing.T) {
-	c, err := platformusers.NewRealClient(platformusers.RealConfig{
-		Source:          platformusers.SourceNewAPI,
-		Endpoint:        "https://newapi.example.com",
-		CredentialRef:   "secret://newapi/readonly",
-		TargetAllowlist: []string{"newapi.example.com"},
-		Secrets:         testSecrets(t),
-	})
-	if err != nil {
-		t.Fatalf("构造失败: %v", err)
-	}
-	_, err = c.ListUsers(context.Background(), platformusers.ListFilter{Source: platformusers.SourceNewAPI})
-	// 不是 bad_response:这不是上游坏了,是平台这条链路还没接通
-	if connector.KindOf(err) != connector.KindNotSupported {
-		t.Fatalf("real 骨架应返回 not_supported,得到 %q(%v)", connector.KindOf(err), err)
-	}
-}
+// real 客户端对两个来源都已实装(XM-USERS-REAL),not_supported 骨架行为的
+// 回归测试已被 realclient_test.go 里对着 httptest 假上游的真实映射/错误分类
+// 测试取代——那些测试断言的是「real 现在真的能读」,而不是「real 还没接通」。
 
 // listFake 是下面几条用例的取数捷径,固定时钟保证可重放。
 func listFake(t *testing.T, p platformusers.Period) platformusers.UserPage {

@@ -6,12 +6,13 @@
 // 本包读的是**逐用户明细**——两者的敏感度、分页形态与端点都不同。汇总数字进
 // 指标表、逐用户明细不进(它是 PII,平台只做带权限的只读网关)。
 //
-// ⚠️ **本契约为 DRAFT。** 端点普查已确认上游有 `sub2api /admin/users` 与
-// `newapi /api/user`,但响应形状尚未对着实现核对过。因此:
-//
-//   - `fake` 是当前唯一走得通的模式,样本形状即本契约的可执行说明;
-//   - `real` 只搭骨架,调用即返回 not_supported——编一组字段名再标 DRAFT,
-//     只会让接入那天的人拿到一串 bad_response,误以为是自己配错了。
+// ⚠️ **real 已实装(XM-USERS-REAL),但仍未对着真实实例验证过。**
+// 响应形状是对着上游**源码**逐字段核对出来的(K:/sub2api-src、K:/newapi-src,
+// 依据见 connectors/platformusers/upstream.go 顶部注释),不是对着一次真实
+// 观测——与 connectors/sub2api、connectors/newapi 两个真实客户端上线时的
+// 同一条免责声明。凭据到位后第一次真实读取要核对的重点是余额单位/标度
+// (分/元/quota 换算)与状态枚举取值,那两样错了之后数字看起来完全正常。
+// `fake` 仍然是没有真实凭据时唯一能跑的模式,样本形状即本契约的可执行说明。
 //
 // **原型自己也说了这件事**(运营工作台之外唯一一处 warnbar 逐字):
 //
@@ -138,13 +139,21 @@ const (
 )
 
 // ParseUserStatus 把上游的状态串翻译成本契约的四态。
+//
+// 取值集合按接入清单第 5 项逐个核对过:
+//   - Sub2API 只有两个值(K:/sub2api-src backend/internal/domain/constants.go
+//     的 StatusActive="active" / StatusDisabled="disabled");
+//   - NewAPI 是整数(K:/newapi-src common/constants.go 的
+//     UserStatusEnabled=1 / UserStatusDisabled=2,注释写着"别用 0,那是默认值")。
+//     RealClient 把整数转成十进制串再喂进来,所以这里认的是 "1"/"2" 而不是
+//     "0"/"1"——**不要把 "2" 误改回 "0"**,NewAPI 从来不会真的发出状态 0。
 func ParseUserStatus(raw string) UserStatus {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "active", "enabled", "normal", "ok", "1":
 		return StatusActive
 	case "limited", "restricted", "warn", "frozen":
 		return StatusLimited
-	case "disabled", "banned", "deleted", "0":
+	case "disabled", "banned", "deleted", "0", "2":
 		return StatusDisabled
 	default:
 		return StatusUnknown
