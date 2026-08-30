@@ -235,6 +235,46 @@ func TestOIDCOptionalConfigRejectsBadValues(t *testing.T) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// local（XM-LOGIN）：生产允许，不像 dev-header 那样被硬性禁止
+// ---------------------------------------------------------------------------
+
+func TestProductionAllowsLocalAuthMode(t *testing.T) {
+	c, err := configFromEnv(env(map[string]string{
+		"ENVIRONMENT":  "production",
+		"XM_AUTH_MODE": "local",
+	}))
+	if err != nil {
+		t.Fatalf("生产 + local 应允许启动（账号与口令哈希都在平台自己的库里）: %v", err)
+	}
+	if c.Auth.Mode != authModeLocal {
+		t.Fatalf("Mode = %q", c.Auth.Mode)
+	}
+}
+
+func TestLocalAuthModeWorksInNonProduction(t *testing.T) {
+	for _, envName := range []string{"development", "staging"} {
+		c, err := configFromEnv(env(map[string]string{
+			"ENVIRONMENT":  envName,
+			"XM_AUTH_MODE": "local",
+		}))
+		if err != nil || c.Auth.Mode != authModeLocal {
+			t.Fatalf("%s: c = %+v, err = %v", envName, c, err)
+		}
+	}
+}
+
+// newPrincipalResolver（auth.go）刻意不处理 local——它只装配不依赖数据库连接
+// 的两种模式；local 需要 pool，main.go 单独装配（见 cmd/platform-api/localauth.go
+// 与 main.go 里 `if cfg.Auth.Mode == authModeLocal` 分支）。这条测试提醒读到
+// 这个函数的人：新增一种模式不代表它自动被这里接管。
+func TestNewPrincipalResolverDoesNotHandleLocalMode(t *testing.T) {
+	cfg := config{Environment: "staging", Auth: authConfig{Mode: authModeLocal}}
+	if _, err := newPrincipalResolver(cfg, quietLogger()); err == nil {
+		t.Fatal("newPrincipalResolver 不处理 local 模式，main.go 需要单独装配")
+	}
+}
+
 // dev-header 模式在非生产照常可用，且必须留下「现在没有真鉴权」的痕迹。
 func TestDevHeaderModeStillWorksInNonProduction(t *testing.T) {
 	c, err := configFromEnv(env(map[string]string{"ENVIRONMENT": "development"}))

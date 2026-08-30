@@ -540,14 +540,28 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if got := m["key-metadata-reader"]; !slices.Contains(got, "platform.user_keys.read") {
 		t.Fatalf("专门的 key-metadata-reader 角色应显式映射 platform.user_keys.read, got %v", got)
 	}
-	// XM-CRED0：写明文凭据与切换真实上游由专门角色授予，staff/admin 默认都不含。
+	// XM-CRED0：写明文凭据与切换真实上游默认仍不进 staff（credential-admin
+	// 角色继续独立授予）。XM-LOGIN（2026-08-30）把这两项加进了 admin——
+	// 见 DefaultRoleScopeMap 第 6 条：本地登录的 bootstrap 管理员需要一上线
+	// 就能管凭据/连接器，不必先登录再手动申请第二个角色。credential-admin
+	// 的最小面语义不受影响，两条路径并存。
 	for _, sc := range []string{"credential.manage", "connector.manage"} {
-		if slices.Contains(staff, sc) || slices.Contains(admin, sc) {
-			t.Fatalf("staff/admin 默认不该含 %s：凭据写入与连接器切换必须独立授予", sc)
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 默认不该含 %s：凭据写入与连接器切换必须独立授予", sc)
 		}
 		if got := m["credential-admin"]; !slices.Contains(got, sc) {
 			t.Fatalf("专门的 credential-admin 角色应显式映射 %s, got %v", sc, got)
 		}
+		if !slices.Contains(admin, sc) {
+			t.Fatalf("admin 应含 %s（XM-LOGIN：bootstrap 管理员需要一上线就能用）, got %v", sc, admin)
+		}
+	}
+	// XM-LOGIN：admin 管理本地登录账号，staff 不该有这个能力。
+	if !slices.Contains(admin, "staff.manage") {
+		t.Fatalf("admin 应含 staff.manage（XM-LOGIN 账号管理）, got %v", admin)
+	}
+	if slices.Contains(staff, "staff.manage") {
+		t.Fatal("staff 默认不该含 staff.manage：账号管理是管理员能力")
 	}
 	for _, sc := range staff {
 		if strings.Contains(sc, ".manage") && sc != "ui.saved_view.manage" {

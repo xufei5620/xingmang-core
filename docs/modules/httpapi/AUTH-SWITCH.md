@@ -301,3 +301,101 @@ CR-0001 §3 的表大部分已经对上，下面几项是前端流**硬依赖**�
 - `web/apps/admin-web/src/pages/LoginPage.tsx`、`AuthCallbackPage.tsx`
 - `web/apps/admin-web/src/api/client.ts` —— `auth` 注入点（不传＝dev-header，行为不变）
 - `deploy/docker/web-app-config.sh`、`deploy/docker/web.Dockerfile`、`deploy/nginx/launch.conf`
+
+## 十一、local 模式（XM-LOGIN）
+
+第三种 `PrincipalResolver`：`XM_AUTH_MODE=local` 时身份来自平台自带的账号库
+（`core.staff_account`），不依赖任何外部身份提供方，也不像 `dev-header` 那样
+是「请求头自称身份」——账号需要显式创建、口令走 argon2id 校验，因此**允许
+在生产使用**（`server-prod.yaml` 已把生产默认改成它；仍可显式覆盖回
+`oidc`）。实现在 `internal/platform/localauth/`。
+
+### 11.1 端点
+
+| 方法 | 路径 | 要求 Principal？ | 说明 |
+|---|---|---|---|
+| POST | `/api/v1/auth/login` | 否 | `{username,password}` → 成功 200 + `Set-Cookie: xm_session`；失败见 11.3 |
+| POST | `/api/v1/auth/logout` | 否（有 Cookie 就吊销，没有也 200） | 清 Cookie、吊销会话 |
+| GET | `/api/v1/auth/me` | 是 | 与登录成功同形状 |
+| POST | `/api/v1/auth/password` | 是 | `{current_password,new_password}`，自助改密，成功后重签会话 |
+| GET | `/api/v1/staff/accounts` | 是 + `staff.manage` | 账号清单（不含密码哈希） |
+
+登录/登出**不**挂 `RequirePrincipal`（在建立/终止身份，不可能先要求一个还
+不存在的身份），其余三条与 `/api/v1` 下所有其它端点一样必须先过
+`RequirePrincipal`（这里即 `localauth.Resolver.Resolve`）。
+
+### 11.2 Cookie 与 CSRF
+
+`xm_session`：`HttpOnly`、`SameSite=Lax`、`Path=/`、`Max-Age=43200`（12h）；
+请求经 TLS（直连或 `X-Forwarded-Proto: https`）时加 `Secure`。库里只存原始
+token 的 sha256 摘要，token 本身只在登录成功那一次的 `Set-Cookie` 里出现。
+
+Cookie 鉴权天然带 CSRF 风险（浏览器会在跨站请求上自动附带 Cookie，OIDC 的
+Bearer 头不会）：`Resolver.Resolve` 对非 `GET/HEAD/OPTIONS` 的请求强制要求
+`X-Requested-With: xingmang`，缺失或值不对一律 `403 PERMISSION_DENIED`。
+这条闸覆盖 `/api/v1` 下所有走 Cookie 鉴权的写请求，包括
+`POST /api/v1/actions/{id}/versions/{v}/execute`——前端的 fetch/XHR 封装必须
+在 local 模式下给非只读请求加这个头。
+
+### 11.3 登录失败
+
+| 情形 | 状态码 | code |
+|---|---|---|
+| 用户名不存在 / 密码错误 | 401 | `INVALID_CREDENTIALS` |
+| 账号已锁定（连续 5 次失败） | 423 | `ACCOUNT_LOCKED` |
+| 账号已停用 | 403 | `ACCOUNT_DISABLED` |
+
+「用户名不存在」与「密码错误」返回**逐字相同**的状态码、`code`、`message`，
+且服务端总会跑一次 argon2id 校验（用户名不存在时对着一个固定的哑哈希跑），
+避免响应内容或响应时延变成一个用户名枚举接口。登录端点另有一个按客户端
+IP 分桶的限流（默认 20/分钟、瞬时 10），与全局 XM-R011 限流分开配置。
+
+### 11.4 账号管理（Action）
+
+四个 L1、仅 HUMAN、要求 `staff.manage` 的 Action（`internal/platform/localauth/actions.go`）：
+
+| Action ID | 参数 | 说明 |
+|---|---|---|
+| `staff.account.create@1` | `username`、`display_name`、`roles`（逗号分隔）、`initial_password`（可选） | 留空密码时生成一个随机初始密码，**只在本次结果里返回一次** |
+| `staff.account.set_roles@1` | `username`、`roles` | 覆盖角色集合 |
+| `staff.account.set_disabled@1` | `username`、`disabled` | 停用会连带吊销该账号全部会话 |
+| `staff.account.reset_password@1` | `username`、`new_password`（可选） | 强制 `must_change_password=true` 并吊销全部会话；留空密码同样只回显一次 |
+
+`roles` 必须是 `XM_OIDC_ROLE_SCOPES`（留空则 `oidcauth.DefaultRoleScopeMap`）
+里已有的角色名——两种登录模式共用同一张「角色 → scope」翻译表，不需要为
+本地账号单独维护一份，也不会出现「能分配一个谁也翻译不出 scope 的角色」。
+
+`admin` 角色额外含 `staff.manage`、`credential.manage`、`connector.manage`
+（见 `oidcauth.DefaultRoleScopeMap` 第 6 条）：这是对 XM-CRED0 原「不进
+staff/admin」原则的一次显式收窄，理由是 local 模式的 bootstrap 管理员必须
+一上线就能管账号/凭据/连接器，冷启动阶段没有「已登录的人」可以审批第二次
+授权申请。
+
+### 11.5 Bootstrap（第一个账号）
+
+库里没有任何本地账号时，`staff.account.create` 会陷入「先有蛋还是先有鸡」
+——它要求调用者已经持有 `staff.manage`。第一个账号只能用一条 Platform
+Lifecycle Operation 建出来：`cmd/staff-bootstrap`（幂等；已存在则打印
+`exists` 并 0 退出）：
+
+```bash
+docker compose -p xingmang-launch -f deploy/compose/launch.yaml \
+  --profile tools run --rm staff-bootstrap
+```
+
+环境变量 `XM_STAFF_BOOTSTRAP_USERNAME`（必填）、`XM_STAFF_BOOTSTRAP_PASSWORD`
+（留空则生成随机密码并打印到 stdout，仅此一次），角色固定
+`admin,credential-admin,staff`。数据库连接复用 `DATABASE_URL` /
+`DATABASE_PASSWORD_REF` 的 CredentialRef 纪律，与 `runway-threshold-bootstrap`
+同构。
+
+### 11.6 已知缺口
+
+- **前端还没有本地登录页**：`server-prod.yaml` 已把 `platform-api` 的默认
+  `XM_AUTH_MODE` 改成 `local`，但 `web` 容器的 `XM_WEB_AUTH_MODE` 仍固定
+  `oidc`（XM-AUTH1 的产物），没有用户名/密码表单，也不处理 `xm_session`
+  Cookie 或 `X-Requested-With` 头。默认组合会立即 403 缺少身份，直到前端
+  补上本地登录 UI——这是本次（XM-LOGIN 后端切片）刻意留给下一个切片的
+  工作，见交接文档的 follow-up。
+- `GET /api/v1/staff/accounts` 之外没有单账号详情端点；清单已足够管理页
+  渲染一张表，需要时可以再加。

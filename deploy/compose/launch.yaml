@@ -94,6 +94,41 @@ services:
       XM_FINANCE_RUNWAY_WARN_DAYS: ${XM_FINANCE_RUNWAY_WARN_DAYS:-}
       XM_FINANCE_RUNWAY_CRIT_DAYS: ${XM_FINANCE_RUNWAY_CRIT_DAYS:-}
 
+  # --------------------------------------------------------------------------
+  # 一次性：本地登录第一个员工账号 bootstrap（仅 tools profile，XM-LOGIN）
+  # --------------------------------------------------------------------------
+  # 只在 XM_AUTH_MODE=local 时需要：staff.account.create Action 要求一个已经
+  # 持有 staff.manage 的身份才能创建账号，而冷启动时压根没有任何本地账号
+  # 存在——这是"先有蛋还是先有鸡"的缺口，只能用一条 Platform Lifecycle
+  # Operation 补上（同 runway-threshold-bootstrap 的理由）。幂等：账号已
+  # 存在就打印 exists 并原样退出，不覆盖角色或密码。
+  # ⚠️ XM_STAFF_BOOTSTRAP_PASSWORD 留空会生成一个随机初始密码并打印到 stdout
+  #    ——这是它唯一出现的地方，运行后请立即转交本人并清理终端历史/CI 日志。
+  staff-bootstrap:
+    profiles: ["tools"]
+    image: xingmang/migrate:${BUILD_VERSION:-staging}
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/usr/local/bin/staff-bootstrap"]
+    command: ["up"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      DATABASE_URL: postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable
+      DATABASE_PASSWORD_REF: ${DATABASE_PASSWORD_REF:-secret://database/postgres-password}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      # 两个 bootstrap 变量透传自宿主环境。**不用 `:?` 必填闸**——compose 在
+      # `config` 阶段会对全部 service 展开插值，不论 tools profile 有没有被
+      # 启用；给它一个必填闸会让任何人跑一次普通的 `docker compose config`
+      # 校验（这条门禁本身就是）都得先设一个只有跑 bootstrap 才用得到的
+      # 变量。必填改由 Go 侧强制（缺 XM_STAFF_BOOTSTRAP_USERNAME 直接
+      # os.Exit(2)），与 runway-threshold-bootstrap 同一处理方式。
+      # 密码变量同样留空默认——不给它任何默认值，是为了不让一个
+      # "大家都知道"的初始密码比命令自己生成的更危险。
+      XM_STAFF_BOOTSTRAP_USERNAME: ${XM_STAFF_BOOTSTRAP_USERNAME:-}
+      XM_STAFF_BOOTSTRAP_PASSWORD: ${XM_STAFF_BOOTSTRAP_PASSWORD:-}
+
   # ==========================================================================
   # 一次性：Bootstrap 引导数据（Platform Lifecycle Operation，宪法 3 条）
   # ==========================================================================

@@ -55,6 +55,12 @@ const (
 	authModeDevHeader authMode = "dev-header"
 	// authModeOIDC：身份来自 Keycloak 的 Access Token（XM-0008）。
 	authModeOIDC authMode = "oidc"
+	// authModeLocal：身份来自平台自带的账号库（XM-LOGIN），账号与口令哈希
+	// 落在 core.staff_account，会话是服务端持有状态的 Cookie。与 dev-header
+	// 不同，它不是"请求头自称身份"——账号需要 cmd/staff-bootstrap 或
+	// staff.manage Action 显式创建，口令走 argon2id 校验，因此**允许在生产
+	// 使用**（不像 dev-header 那样被硬性禁止）。
+	authModeLocal authMode = "local"
 )
 
 // authConfig 是身份解析的配置。**不含任何机密**：OIDC 校验只用公钥（JWKS），
@@ -154,16 +160,19 @@ func configFromEnv(getenv func(string) string) (config, error) {
 
 // authConfigFromEnv 解析身份相关配置，全程 Fail Closed。
 //
-// 三条不可协商的规则：
+// 四条不可协商的规则：
 //
-//  1. **生产只允许 oidc**。dev-header 让调用方用请求头自称身份，在生产等于没有
-//     鉴权。httpapi.NewDevHeaderResolver 里已经有一道硬拒绝，这里再挡一次——
-//     那道闸在「构造解析器」时才触发，这道在「读配置」时就触发，报错信息也能
-//     直接说清楚该怎么改；
+//  1. **生产只允许 oidc 或 local**。dev-header 让调用方用请求头自称身份，在
+//     生产等于没有鉴权。httpapi.NewDevHeaderResolver 里已经有一道硬拒绝，
+//     这里再挡一次——那道闸在「构造解析器」时才触发，这道在「读配置」时就
+//     触发，报错信息也能直接说清楚该怎么改；local（XM-LOGIN）不在此列——
+//     账号与口令哈希都在平台自己的库里，有真实的鉴权语义；
 //  2. **oidc 缺 issuer 或 audience 拒绝启动**。少了 issuer 就没有信任根，少了
 //     audience 就等于接受任何 Client 拿到的令牌。两者都不能有默认值；
 //  3. **非生产默认 dev-header**。XM-0008 不改现状：development / staging 的栈
-//     照常跑，切换是显式动作（把 XM_AUTH_MODE 设成 oidc）。
+//     照常跑，切换是显式动作（把 XM_AUTH_MODE 设成 oidc 或 local）；
+//  4. **XM_AUTH_MODE 是 dev-header / oidc / local 之外的任何值一律拒绝启动**，
+//     不静默回落——回落等于让一次拼写错误变成一次静默的鉴权降级。
 func authConfigFromEnv(getenv func(string) string, environment string) (authConfig, error) {
 	a := authConfig{}
 
@@ -184,11 +193,16 @@ func authConfigFromEnv(getenv func(string) string, environment string) (authConf
 			return authConfig{}, fmt.Errorf(
 				"XM_AUTH_MODE=dev-header 不允许在生产环境使用：" +
 					"请求头自称身份等于没有鉴权。生产请设 XM_AUTH_MODE=oidc " +
-					"并配置 XM_OIDC_ISSUER / XM_OIDC_AUDIENCE（前置条件：CR-0001 已执行）")
+					"并配置 XM_OIDC_ISSUER / XM_OIDC_AUDIENCE（前置条件：CR-0001 已执行），" +
+					"或设 XM_AUTH_MODE=local 使用平台自带登录（XM-LOGIN）")
 		}
 	case authModeOIDC:
+	case authModeLocal:
+		// 生产允许：账号与口令哈希落在平台自己的库里，不是「请求头自称身份」。
+		// 需要先用 cmd/staff-bootstrap 建出第一个管理员账号，见
+		// docs/modules/httpapi/AUTH-SWITCH.md「local 模式」一节。
 	default:
-		return authConfig{}, fmt.Errorf("XM_AUTH_MODE 必须是 dev-header 或 oidc，got %q", mode)
+		return authConfig{}, fmt.Errorf("XM_AUTH_MODE 必须是 dev-header / oidc / local 之一，got %q", mode)
 	}
 
 	a.OIDCIssuer = strings.TrimSpace(getenv("XM_OIDC_ISSUER"))
