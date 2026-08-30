@@ -309,5 +309,9 @@ fi
 assert_not_text "脚本不含 down -v" 'down -v' "$deploy_script"
 assert_not_text "脚本不含 reset --hard" 'reset --hard' "$deploy_script"
 
+expect_failure "override-file 只允许 server-staging/server-prod" env PATH="$fake_bin:$PATH" DEPLOY_LOCAL_TRACE="$trace"   "$deploy_script" --repo "$fixture" --env-file "$fixture/deploy/compose/.env"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/launch.yaml"   --sha "$fixture_sha" --probe-attempts 1
+grep -q -- '--override-file' "$deploy_script" && ok "脚本提供 --override-file" || bad "脚本缺少 --override-file"
+grep -q 'bootstrap=skipped reason=service-not-in-profile' "$deploy_script" && ok "bootstrap 按 profile 存在性跳过" || bad "bootstrap 未按 profile 跳过"
+
 [ "$fail" -eq 0 ] && echo "DEPLOY-LOCAL-TEST-OK"
 exit "$fail"

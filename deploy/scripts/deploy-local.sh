@@ -61,6 +61,7 @@ usage() {
   --repo PATH               本地 Git checkout（默认脚本所在仓库）
   --env-file PATH           Compose .env（默认 <repo>/deploy/compose/.env）
   --compose-file PATH       Compose 定义（默认 <repo>/deploy/compose/launch.yaml）
+  --override-file PATH      叠加的环境覆盖文件（仅允许仓库内 server-staging.yaml / server-prod.yaml）
   --web-url URL             Web loopback 地址（默认 http://127.0.0.1:8088）
   --no-fetch                仅允许显式 test-mode，用于离线契约测试
   --test-mode               仅允许 XM_DEPLOY_LOCAL_TEST_MODE=1
@@ -172,6 +173,7 @@ probe_attempts=12
 repo_path="$default_repo"
 env_file=""
 compose_file=""
+override_file=""
 web_url="http://127.0.0.1:8088"
 dry_run=0
 test_mode=0
@@ -213,6 +215,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { usage >&2; exit 2; }
       compose_file="$2"; shift 2 ;;
     --compose-file=*) compose_file="${1#*=}"; shift ;;
+    --override-file)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      override_file="$2"; shift 2 ;;
+    --override-file=*) override_file="${1#*=}"; shift ;;
     --web-url)
       [ "$#" -ge 2 ] || { usage >&2; exit 2; }
       web_url="$2"; shift 2 ;;
@@ -267,6 +273,16 @@ if ! duplicate_env_keys="$(awk -F= '/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space
 fi
 [ -z "$duplicate_env_keys" ] || die "env-file 含重复配置键"
 
+if [ -n "$override_file" ]; then
+  override_file="$(normalize_path "$override_file")"
+  validate_abs_path override-file "$override_file"
+  [ -f "$override_file" ] && [ ! -L "$override_file" ] || die "override-file 不存在或是符号链接"
+  case "$(basename -- "$override_file")" in
+    server-staging.yaml|server-prod.yaml) ;;
+    *) die "override-file 只允许 server-staging.yaml 或 server-prod.yaml" ;;
+  esac
+  [ "$(dirname -- "$override_file")" = "$(dirname -- "$compose_file")" ] || die "override-file 必须与 compose-file 同目录"
+fi
 if [ "$test_mode" -eq 0 ]; then
   [ "$compose_file" = "$repo_path/deploy/compose/launch.yaml" ] || die "compose-file 必须使用仓库内 launch.yaml"
   [ "$env_file" = "$repo_path/deploy/compose/.env" ] || die "env-file 必须使用仓库内 .env"
@@ -404,7 +420,9 @@ export DOCKER_CONFIG="$docker_config"
 # 不传 --project-directory：Compose 应以 launch.yaml 所在的
 # deploy/compose 目录解析 build.context=../..。显式把项目目录设成仓库根会在
 # Windows Docker Desktop 上把上下文错误解析成盘符根目录（例如 K:\deploy）。
-compose_args=(compose --project-name xingmang-launch --file "$compose_file" --env-file "$env_file")
+compose_args=(compose --project-name xingmang-launch --file "$compose_file")
+[ -n "$override_file" ] && compose_args+=(--file "$override_file")
+compose_args+=(--env-file "$env_file")
 run_compose() { "$docker_bin" "${compose_args[@]}" "$@"; }
 
 request_json() {
@@ -501,7 +519,14 @@ echo "runway-bootstrap=ok summary=$runway_bootstrap_summary"
 phase="bootstrap"
 bootstrap_log="$tmp_dir/bootstrap.log"
 bootstrap_ok=0
-for bootstrap_attempt in $(seq 1 "$probe_attempts"); do
+# 生产覆盖文件把演示登记放在 staging profile 下：服务清单里确实没有 bootstrap 时跳过，
+# 不伪造演示数据；清单读不到时按原行为执行（失败仍会 die）。
+compose_services="$(run_compose config --services 2>/dev/null || true)"
+if [ -n "$compose_services" ] && ! printf '%s
+' "$compose_services" | grep -qx bootstrap; then
+  bootstrap_ok=2
+fi
+[ "$bootstrap_ok" -eq 2 ] || for bootstrap_attempt in $(seq 1 "$probe_attempts"); do
   # 保留 Compose 的 depends_on 链，让 migrate 成功后才会运行 bootstrap；
   # 不用 --no-deps 绕过迁移闸门。该命令本身仍由 bootstrap SQL 的
   # ON CONFLICT DO NOTHING 保证可重跑。
@@ -511,10 +536,14 @@ for bootstrap_attempt in $(seq 1 "$probe_attempts"); do
   fi
   [ "$bootstrap_attempt" -lt "$probe_attempts" ] && sleep 1
 done
-[ "$bootstrap_ok" -eq 1 ] || die "$phase: 幂等演示登记失败（容器与数据卷已保留）"
-bootstrap_summary="$(grep -E '^(INSERT|UPDATE|DELETE|COMMIT)' "$bootstrap_log" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | sed 's/[[:space:]]*$//' || true)"
-[ -n "$bootstrap_summary" ] || bootstrap_summary="completed"
-echo "bootstrap=ok summary=$bootstrap_summary"
+if [ "$bootstrap_ok" -eq 2 ]; then
+  echo "bootstrap=skipped reason=service-not-in-profile"
+else
+  [ "$bootstrap_ok" -eq 1 ] || die "$phase: 幂等演示登记失败（容器与数据卷已保留）"
+  bootstrap_summary="$(grep -E '^(INSERT|UPDATE|DELETE|COMMIT)' "$bootstrap_log" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | sed 's/[[:space:]]*$//' || true)"
+  [ -n "$bootstrap_summary" ] || bootstrap_summary="completed"
+  echo "bootstrap=ok summary=$bootstrap_summary"
+fi
 
 phase="up-app"
 # 只有阈值与演示数据都完成后才启动 API/worker/web，确保运行时切换
