@@ -1,16 +1,43 @@
-import { navLabel, PageHeader } from "@xingmang/ui-admin";
+import { navLabel, PageHeader, PageState } from "@xingmang/ui-admin";
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { appApiConfig } from "../api/config";
+import { CredentialsPage } from "./CredentialsPage";
 
 /** 设置：平台治理段里「管平台自己」的那一页（ADMIN-IA 一、平台治理）。
  *
  *  文档给它的职责有四块：身份权限（只读）、密钥引用（永不明文）、
- *  告警规则与静默（随 XM-0033）、配置中心（后置）。眼下只有第一块能做，
- *  其余三块**列出来但写明还没有**——一个只剩一块内容的设置页，
- *  会让人以为平台就只有这点可配的（§12 惯例）。 */
+ *  告警规则与静默（随 XM-0033）、配置中心（后置）。凭据管理已作为
+ *  XM-CRED0 子页接入；其余后置能力仍明确标注状态，不拿占位数据冒充事实。 */
 export function SettingsPage() {
+  const [searchParams] = useSearchParams();
+  const sub = searchParams.get("sub");
+  if (sub === "credentials") return <CredentialsPage />;
+  if (sub) {
+    return (
+      <section>
+        <PageHeader
+          title={navLabel("/settings")}
+          description="设置子页地址无法识别；系统不会回落到另一块设置内容。"
+        />
+        <PageState
+          kind="unavailable"
+          title={`「${sub}」设置子页尚未接入`}
+          description="当前只有「凭据管理」子页可用。"
+          action={
+            <Link
+              to="/settings"
+              className="text-sm font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              返回设置
+            </Link>
+          }
+        />
+      </section>
+    );
+  }
+
   return (
     <section>
       <PageHeader
@@ -20,10 +47,18 @@ export function SettingsPage() {
       <div className="flex flex-col gap-4">
         <IdentitySection />
         <SettingsSection title="密钥引用">
-          <EmptyState
-            title="密钥引用尚未实现"
-            description="将列出各连接使用的 CredentialRef（只显示引用名与状态，永不显示明文值）。ADMIN-IA 未给该块指派任务号。"
-          />
+          <div className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4">
+            <p className="text-sm font-medium text-fg">凭据管理</p>
+            <p className="text-xs leading-5 text-fg-muted">
+              列表只显示 CredentialRef、scope、更新时间与指纹前缀；粘贴值后通过 Action 保存，页面不会回读。
+            </p>
+            <Link
+              to="/settings?sub=credentials"
+              className="self-start text-sm font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              打开凭据管理 →
+            </Link>
+          </div>
         </SettingsSection>
         <SettingsSection title="告警规则与静默">
           <div className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4">
