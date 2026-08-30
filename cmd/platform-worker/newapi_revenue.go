@@ -67,7 +67,7 @@ func (s degradedRevenueSource) AccountRevenue(
 // 第三种刻意**同时**返回 source 与 err：调用方要把 err 打进启动日志（运维得
 // 知道哪里配错了），又要把 degraded 挂上去（免得配错伪装成没配）。
 func newapiRevenueFromEnv(
-	ctx context.Context, getenv func(string) string, logger *slog.Logger, environment string,
+	ctx context.Context, getenv func(string) string, logger *slog.Logger, environment, secretRoot string,
 ) (metering.RevenueSource, func(), error) {
 	if getenv == nil {
 		return nil, nil, fmt.Errorf("environment reader is required")
@@ -90,22 +90,15 @@ func newapiRevenueFromEnv(
 		wrapped := fmt.Errorf("%s: %w", newapiRevenuePasswordRefEnvVar, err)
 		return degradedRevenueSource{cause: wrapped}, nil, wrapped
 	}
-	if logger == nil {
-		logger = slog.Default()
-	}
-	provider, err := secrets.NewEnvProvider(
-		map[string]string{ref.String(): newapiRevenuePasswordEnvVar},
-		secrets.WithLookup(func(name string) (string, bool) {
-			value := getenv(name)
-			return value, value != ""
-		}),
-	)
+	// 口令走「文件优先、env 兜底」的链（XM-CRED0）：后台填的
+	// secret://newapi/revenue-db 落成文件即可用；每一环都带审计。
+	// 与 HTTP 采集不同，DSN 通道在**打开时**就解析口令并建池，所以后台
+	// 填完口令后这条通道仍需重启进程才接得上（DSN 本身也仍在 env）。
+	audited, err := connectorSecretsChain(getenv, logger, environment, secretRoot,
+		ref.String(), newapiRevenuePasswordRefEnvVar, newapiRevenuePasswordEnvVar)
 	if err != nil {
 		return degradedRevenueSource{cause: err}, nil, err
 	}
-	// 审计装饰器包在外面：每次解析（无论成败）都留一条不含明文的记录，
-	// 「这个只读库账号什么时候被谁用过」才查得出来（规格 §4.5）。
-	audited := secrets.NewAudited(provider, secrets.NewSlogRecorder(logger), environment)
 
 	// 打开通道。失败时**要把根因展开**再往启动日志送，见 describeRevenueError。
 	db, err := metering.OpenNewAPIRevenueDB(ctx, metering.RevenueDBConfig{

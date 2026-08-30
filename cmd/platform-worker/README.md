@@ -169,6 +169,36 @@ then hands the same string to pgx is no check at all. Only `sslmode`,
 rejected in every environment. The loopback guard on the integration test asks
 pgx which hosts it will actually dial rather than reading the URL.
 
+## 接入配置与凭据来源（XM-CRED0）
+
+用户拍板：凭据只在管理后台填，不再用服务器 `.env`。worker 侧因此有两条变化，
+都**不需要重启**：
+
+1. **凭据文件优先、env 兜底。** Sub2API / NewAPI 的只读 token 与 NewAPI 收入库
+   口令都经一条 `secrets.NewChain(file, env)` 解析：先读 `XM_SECRET_ROOT`
+   下的 `<scope>/<name>` 文件（由 platform-api 写入、worker 只读挂载），
+   文件不存在才落到旧的 `XM_*_TOKEN` 登记表；文件存在但为空、或读取出 IO
+   错误则**原地失败**，不拿 env 的值盖过去（fail closed）。每一环各自留审计，
+   日志里看得出这次是文件命中的还是 env 兜底的。没配 `XM_*_CREDENTIAL_REF`
+   时链里只有文件一环——引用可以来自下面那张表。
+2. **接入配置每轮从 `core.connector_config` 读。** 客户端工厂每轮同步都查
+   `(platform, environment)` 这一行（30s 缓存）：行存在即以行里**非空**的
+   `mode` / `endpoint` / `target_allowlist` / `credential_ref` 为准，
+   `XM_SUB2API_*` / `XM_NEWAPI_*` 只作缺省；行里留空的字段仍用 env 缺省。
+   库读不到（表还没建、库瞬时不可用）则本轮完全按 env，进入故障时记一条
+   `connector_config_unavailable`，恢复时记 `connector_config_recovered`；
+   生效配置变化时记 `connector_config_applied`（只打端点主机与凭据引用）。
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `XM_SECRET_ROOT` | `/run/xm/secrets` | 凭据文件根目录，必须是绝对路径且不是根目录。只打路径进日志，不读内容 |
+
+`production` 的 fake 闸随之分两层：启动时因为模式可能随时被后台切成 real 而
+放行；但**每一轮**生效模式仍为 fake 时工厂返回 `not_supported`
+（`ErrConnectorProductionFake`），五条指标写成 `status=failed`，演示数据一条
+都写不进生产。`worker_started` 日志里的 `*_mode` 从此只是缺省值，看生效模式
+请看 `connector_config_applied`。
+
 ## 保留期清理（XM-R012）
 
 River 周期任务 `retention_prune`，默认每 24 小时一轮，跑在 `maintenance` 队列。

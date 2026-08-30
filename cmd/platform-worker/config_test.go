@@ -163,40 +163,99 @@ func TestConfigFromEnvReadsSub2APIConnection(t *testing.T) {
 func TestSub2APISecretsFromEnv(t *testing.T) {
 	values := map[string]string{"XM_SUB2API_TOKEN": "placeholder-placeholder"}
 	getenv := func(key string) string { return values[key] }
+	root := t.TempDir()
 
-	// 没配引用 = 没有 Provider，但**不是错误**：fake 模式根本用不到它。
-	provider, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "")
-	if provider != nil || err != nil {
-		t.Fatalf("没配引用时应返回 (nil, nil), got %v %v", provider, err)
+	// 没配 env 引用**也有** Provider（XM-CRED0）：引用可以来自
+	// core.connector_config，凭据可以来自后台写进 XM_SECRET_ROOT 的文件。
+	provider, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "", root)
+	if err != nil || provider == nil {
+		t.Fatalf("没配引用时应返回只有文件一环的链, got %v %v", provider, err)
+	}
+	fileRef := secrets.MustCredentialRef("secret://sub2api-prod/read-token")
+	if _, err := provider.Resolve(t.Context(), fileRef, "test"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("文件还没写时应 not_found（不回退去读任何变量）, got %v", err)
+	}
+	writeSecretFileAt(t, root, "sub2api-prod/read-token", "test-value-file\n")
+	value, err := provider.Resolve(t.Context(), fileRef, "test")
+	if err != nil || value.Reveal() != "test-value-file" {
+		t.Fatalf("文件出现后无需重建 Provider 即可解析: %q, %v", value.Reveal(), err)
 	}
 
 	// 引用拼错了要在启动时就炸：这是配置错误，等到采集那天才发现更贵
-	if _, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "not-a-ref"); err == nil {
+	if _, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "not-a-ref", root); err == nil {
 		t.Fatal("非法 CredentialRef 必须被拒")
 	}
+	// 根目录不是绝对路径同样启动即拒。
+	if _, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "", "relative/dir"); err == nil {
+		t.Fatal("相对路径的 secret root 必须被拒")
+	}
 
-	provider, err = sub2apiSecretsFromEnv(getenv, nil, "staging", "secret://sub2api/readonly-token")
+	provider, err = sub2apiSecretsFromEnv(getenv, nil, "staging", "secret://sub2api/readonly-token", root)
 	if err != nil || provider == nil {
 		t.Fatalf("装配失败: %v", err)
 	}
 	ref := secrets.MustCredentialRef("secret://sub2api/readonly-token")
-	value, err := provider.Resolve(t.Context(), ref, "test")
+	value, err = provider.Resolve(t.Context(), ref, "test")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if value.Reveal() != "placeholder-placeholder" {
-		t.Fatal("解析出的值不对")
+		t.Fatal("文件缺失时应落到 env 登记表")
 	}
 	// 打印/日志一律脱敏（宪法 7 条）——这条纪律由 SecretValue 的类型保证，
 	// 这里再钉一次是因为装配处最容易有人顺手把它 fmt 出来。
 	if got := fmt.Sprintf("%v/%s", value, value); strings.Contains(got, "placeholder") {
 		t.Fatalf("SecretValue 不该被打印出明文: %s", got)
 	}
+	// 同一个引用文件一出现即优先于 env：后台填的凭据压过 .env 里的旧值。
+	writeSecretFileAt(t, root, "sub2api/readonly-token", "test-value-file-2")
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil || value.Reveal() != "test-value-file-2" {
+		t.Fatalf("文件应优先于 env: %q, %v", value.Reveal(), err)
+	}
 
 	// 登记表之外的引用解析不出来：禁止静默回退到别的数据源（规格 §18.1-5）
 	other := secrets.MustCredentialRef("secret://sub2api/another-token")
 	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
 		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}
+
+// writeSecretFileAt 按文件 Provider 的嵌套布局写一份测试凭据文件。
+func writeSecretFileAt(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConfigFromEnvReadsSecretRoot：XM_SECRET_ROOT 的默认值与形状校验。
+func TestConfigFromEnvReadsSecretRoot(t *testing.T) {
+	cfg, err := configFromEnv(func(key string) string {
+		return map[string]string{"ENVIRONMENT": "staging"}[key]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SecretRoot != "/run/xm/secrets" {
+		t.Fatalf("默认 secret root = %q, want /run/xm/secrets", cfg.SecretRoot)
+	}
+	cfg, err = configFromEnv(func(key string) string {
+		return map[string]string{"ENVIRONMENT": "staging", "XM_SECRET_ROOT": " /srv/xm/secrets "}[key]
+	})
+	if err != nil || cfg.SecretRoot != "/srv/xm/secrets" {
+		t.Fatalf("显式 secret root = %q, %v", cfg.SecretRoot, err)
+	}
+	for _, bad := range []string{"relative/secrets", "/"} {
+		if _, err := configFromEnv(func(key string) string {
+			return map[string]string{"ENVIRONMENT": "staging", "XM_SECRET_ROOT": bad}[key]
+		}); err == nil {
+			t.Fatalf("XM_SECRET_ROOT=%q 应被拒", bad)
+		}
 	}
 }
 
@@ -257,29 +316,35 @@ func TestConfigFromEnvReadsNewAPIConnection(t *testing.T) {
 func TestNewAPISecretsFromEnv(t *testing.T) {
 	values := map[string]string{"XM_NEWAPI_TOKEN": "placeholder-placeholder"}
 	getenv := func(key string) string { return values[key] }
+	root := t.TempDir()
 
-	// 没配引用 = 没有 Provider，但**不是错误**：fake 模式根本用不到它。
-	provider, err := newapiSecretsFromEnv(getenv, nil, "staging", "")
-	if provider != nil || err != nil {
-		t.Fatalf("没配引用时应返回 (nil, nil), got %v %v", provider, err)
+	// 没配 env 引用也有 Provider（只有文件一环），见 TestSub2APISecretsFromEnv。
+	provider, err := newapiSecretsFromEnv(getenv, nil, "staging", "", root)
+	if err != nil || provider == nil {
+		t.Fatalf("没配引用时应返回只有文件一环的链, got %v %v", provider, err)
+	}
+	writeSecretFileAt(t, root, "newapi/readonly-token", "test-value-file")
+	value, err := provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://newapi/readonly-token"), "test")
+	if err != nil || value.Reveal() != "test-value-file" {
+		t.Fatalf("文件解析失败: %q, %v", value.Reveal(), err)
 	}
 
 	// 引用拼错了要在启动时就炸：这是配置错误，等到采集那天才发现更贵
-	if _, err := newapiSecretsFromEnv(getenv, nil, "staging", "not-a-ref"); err == nil {
+	if _, err := newapiSecretsFromEnv(getenv, nil, "staging", "not-a-ref", root); err == nil {
 		t.Fatal("非法 CredentialRef 必须被拒")
 	}
 
-	provider, err = newapiSecretsFromEnv(getenv, nil, "staging", "secret://newapi/readonly-token")
+	provider, err = newapiSecretsFromEnv(getenv, nil, "staging", "secret://newapi/readonly-token", t.TempDir())
 	if err != nil || provider == nil {
 		t.Fatalf("装配失败: %v", err)
 	}
 	ref := secrets.MustCredentialRef("secret://newapi/readonly-token")
-	value, err := provider.Resolve(t.Context(), ref, "test")
+	value, err = provider.Resolve(t.Context(), ref, "test")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if value.Reveal() != "placeholder-placeholder" {
-		t.Fatal("解析出的值不对")
+		t.Fatal("文件缺失时应落到 env 登记表")
 	}
 	// 打印/日志一律脱敏（宪法 7 条）
 	if got := fmt.Sprintf("%v/%s", value, value); strings.Contains(got, "placeholder") {
@@ -365,7 +430,7 @@ func TestNewAPIRevenueFromEnvNotConfigured(t *testing.T) {
 	for _, dsn := range []string{"", "   "} {
 		values := map[string]string{"XM_NEWAPI_REVENUE_DSN": dsn}
 		src, closer, err := newapiRevenueFromEnv(
-			t.Context(), func(k string) string { return values[k] }, nil, "staging")
+			t.Context(), func(k string) string { return values[k] }, nil, "staging", t.TempDir())
 		if src != nil || closer != nil || err != nil {
 			t.Fatalf("没配 DSN 应返回 (nil, nil, nil), got (src=%v, closer!=nil=%v, err=%v)",
 				src, closer != nil, err)
@@ -414,7 +479,7 @@ func TestNewAPIRevenueFromEnvDegradesLoudly(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			src, closer, err := newapiRevenueFromEnv(
-				t.Context(), func(k string) string { return tc.values[k] }, nil, "staging")
+				t.Context(), func(k string) string { return tc.values[k] }, nil, "staging", t.TempDir())
 			if err == nil {
 				t.Fatal("配错了必须回一个错误供启动日志用")
 			}
@@ -443,7 +508,7 @@ func TestNewAPIRevenueDegradedNeverLeaksPassword(t *testing.T) {
 		"XM_NEWAPI_REVENUE_PASSWORD_REF": "secret://newapi/revenue-db",
 	}
 	src, _, err := newapiRevenueFromEnv(
-		t.Context(), func(k string) string { return values[k] }, nil, "staging")
+		t.Context(), func(k string) string { return values[k] }, nil, "staging", t.TempDir())
 	if err == nil {
 		t.Fatal("内联口令必须被拒")
 	}

@@ -34,14 +34,15 @@ func main() {
 	}
 	// Sub2API 只读凭据的 Provider（XM-0017）。装配在进程入口，任务层只拿接口。
 	// 引用没配时返回 nil，不是错误——见 sub2apiSecretsFromEnv 的注释。
-	config.Sub2APISecrets, err = sub2apiSecretsFromEnv(os.Getenv, logger, config.Environment, config.Sub2APICredentialRef)
+	// XM-CRED0：文件优先（XM_SECRET_ROOT，后台写入）、env 兜底，每轮同步现解析。
+	config.Sub2APISecrets, err = sub2apiSecretsFromEnv(os.Getenv, logger, config.Environment, config.Sub2APICredentialRef, config.SecretRoot)
 	if err != nil {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "sub2api_credential_ref_invalid")
 		os.Exit(2)
 	}
 	// NewAPI 只读凭据的 Provider（XM-0038）。与 Sub2API 同一套装配、
 	// 两份实例：两条采集链路各用各的凭据与登记表。
-	config.NewAPISecrets, err = newapiSecretsFromEnv(os.Getenv, logger, config.Environment, config.NewAPICredentialRef)
+	config.NewAPISecrets, err = newapiSecretsFromEnv(os.Getenv, logger, config.Environment, config.NewAPICredentialRef, config.SecretRoot)
 	if err != nil {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "newapi_credential_ref_invalid")
 		os.Exit(2)
@@ -52,7 +53,7 @@ func main() {
 	// 配错**不让 worker 起不来**（一个采集通道不该拖垮心跳与别的任务），
 	// 但也绝不静默降级成「没配」：那时挂上去的是一个如实报 unavailable 的
 	// 降级通道，采集日志里看得见（见 degradedRevenueSource）。
-	revenueSource, closeRevenue, err := newapiRevenueFromEnv(ctx, os.Getenv, logger, config.Environment)
+	revenueSource, closeRevenue, err := newapiRevenueFromEnv(ctx, os.Getenv, logger, config.Environment, config.SecretRoot)
 	if err != nil {
 		logger.ErrorContext(ctx, "newapi_revenue_dsn_unavailable",
 			"event", "newapi_revenue_dsn_unavailable", "module", "platform.worker",
@@ -107,6 +108,10 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "database_unreachable")
 		os.Exit(1)
 	}
+	// XM-CRED0：接入模式 / 端点 / allowlist / 凭据引用由 core.connector_config
+	// 每轮决定，上面从环境变量读到的 XM_SUB2API_* / XM_NEWAPI_* 只作缺省。
+	// 装在这里而不是 configFromEnv：它需要连接池。
+	config.ConnectorConfigs = jobs.NewPgConnectorConfigSource(pool)
 
 	if *migrate {
 		if err := jobs.Migrate(ctx, pool, logger); err != nil {
@@ -130,6 +135,11 @@ func main() {
 	// 是 Fake 产的还是真实上游来的，而不是等发现数字不对再回来翻配置。
 	logger.InfoContext(ctx, "worker_started", "event", "worker_started", "module", "platform.worker",
 		"environment", config.Environment, "principal_id", "worker:platform",
+		// XM-CRED0：下面的 *_mode / endpoint 等只是环境变量给的**缺省**；
+		// 生效配置每轮从 core.connector_config 读，变化时另有
+		// connector_config_applied 日志。secret_root 只打路径，不打内容。
+		"connector_config_source", "database",
+		"secret_root", config.SecretRoot,
 		"sub2api_sync_enabled", config.Sub2APISyncEnabled,
 		"sub2api_mode", string(config.Sub2APIMode),
 		"sub2api_source", config.Sub2APIInstanceID,
