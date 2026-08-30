@@ -255,8 +255,8 @@ describe("sub2ApiChannelHealth：状态优先、余额兜底（XM-OVERVIEW-UI）
   });
 
   it("状态观测缺失但余额观测有渠道时，落回旧的 token_valid 口径", () => {
-    // 这是 PlatformOverviewPanel 既有测试固定下来的行为：只有余额指标的环境里,
-    // 「上游健康」仍要显示按 token_valid 算出的 x / y——不能因为新加了状态口径,
+    // 这是 PlatformOverviewPanel 既有测试固定下来的行为：只有余额指标的环境里，
+    // 「上游健康」仍要显示按 token_valid 算出的 x / y——不能因为新加了状态口径，
     // 就让这种环境从「有数字」退化成「未接入」
     const row = sub2ApiChannelHealth([], [channel(), channel({ channelId: "c2", tokenValid: false })]);
     expect(row.text).toBe("1 / 2 可用");
