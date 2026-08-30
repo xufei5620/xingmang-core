@@ -195,7 +195,9 @@ func canonicalPolicyDigest(policy map[string]PluginAdmission) string {
 	admissions := make([]PluginAdmission, 0, len(ids))
 	for _, id := range ids {
 		admission := policy[id]
-		admission.UnsandboxedResidualRisk = true
+		// Residual risk is derived display metadata and is not part of the
+		// signed policy bytes or their digest.
+		admission.UnsandboxedResidualRisk = false
 		admissions = append(admissions, admission)
 	}
 	canonical, err := json.Marshal(AdmissionPolicyV1{PolicyVersion: PolicyVersionV1, DenyByDefault: true, Admissions: admissions})

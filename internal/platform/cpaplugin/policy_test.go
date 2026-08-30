@@ -244,3 +244,20 @@ func TestPolicyDigestIsIndependentOfAdmissionOrder(t *testing.T) {
 		t.Fatal("policy digest must cover all admission fields")
 	}
 }
+
+func TestPolicyDigestExcludesDerivedResidualRisk(t *testing.T) {
+	p := validAdmission()
+	input := policyJSON(t, []PluginAdmission{p})
+	_, digest, err := LoadAdmissionPolicy(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := json.Marshal(AdmissionPolicyV1{PolicyVersion: PolicyVersionV1, DenyByDefault: true, Admissions: []PluginAdmission{p}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canonical)
+	if digest != hex.EncodeToString(sum[:]) {
+		t.Fatalf("digest includes derived fields: got %s want %s", digest, hex.EncodeToString(sum[:]))
+	}
+}

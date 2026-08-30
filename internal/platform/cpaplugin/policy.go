@@ -132,8 +132,9 @@ func LoadAdmissionPolicy(data []byte) (map[string]PluginAdmission, string, error
 	if err := policy.Validate(); err != nil {
 		return nil, "", err
 	}
-	// The canonical representation intentionally derives residual risk and
-	// keeps map iteration out of the digest calculation.
+	// The canonical policy digest covers only signed/approved input fields. The
+	// derived residual-risk bit is deliberately excluded, so adding a display
+	// annotation never invalidates a policy signature.
 	for i := range policy.Admissions {
 		policy.Admissions[i].UnsandboxedResidualRisk = true
 		policy.Admissions[i].DeclaredCapabilities = sortedCopy(policy.Admissions[i].DeclaredCapabilities)
@@ -141,7 +142,12 @@ func LoadAdmissionPolicy(data []byte) (map[string]PluginAdmission, string, error
 		policy.Admissions[i].ForbiddenCapabilities = sortedCopy(policy.Admissions[i].ForbiddenCapabilities)
 	}
 	sort.Slice(policy.Admissions, func(i, j int) bool { return policy.Admissions[i].PluginID < policy.Admissions[j].PluginID })
-	canonical, err := json.Marshal(policy)
+	canonicalPolicy := policy
+	canonicalPolicy.Admissions = append([]PluginAdmission(nil), policy.Admissions...)
+	for i := range canonicalPolicy.Admissions {
+		canonicalPolicy.Admissions[i].UnsandboxedResidualRisk = false
+	}
+	canonical, err := json.Marshal(canonicalPolicy)
 	if err != nil {
 		return nil, "", fmt.Errorf("canonicalize plugin admission policy: %w", err)
 	}
