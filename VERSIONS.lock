@@ -39,6 +39,11 @@ radix-tooltip = 1.2.16
 postgres.image     = docker.io/library/postgres:18
 postgres.digest    = sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7
 postgres.verified_at = 2026-08-26
+# AUD2 disposable qualification image. The tag is retained for human
+# provenance; harnesses must pull the immutable index digest below.
+minio.image     = docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+minio.digest    = sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+minio.verified_at = 2026-08-30
 # keycloak 本批不部署；digest 于 XM-0007 部署时锁定（quay 现行最新 patch 26.7.2）
 keycloak.image     = quay.io/keycloak/keycloak:26.7.2
 keycloak.digest    = 待XM-0007部署时锁定

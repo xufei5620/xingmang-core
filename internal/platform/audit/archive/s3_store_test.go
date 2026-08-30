@@ -52,18 +52,22 @@ type s3ProtocolObject struct {
 }
 
 type s3ProtocolFixture struct {
-	t            *testing.T
-	server       *httptest.Server
-	mu           sync.Mutex
-	objects      map[string]s3ProtocolObject
-	putCount     int
-	headCount    int
-	getCount     int
-	putHeaders   []http.Header
-	lastHeadPath string
-	omitVersion  bool
-	redirect     bool
-	wrongMeta    bool
+	t             *testing.T
+	server        *httptest.Server
+	mu            sync.Mutex
+	objects       map[string]s3ProtocolObject
+	putCount      int
+	headCount     int
+	getCount      int
+	listCount     int
+	listMode      int
+	lastListPath  string
+	putHeaders    []http.Header
+	lastHeadPath  string
+	omitVersion   bool
+	redirect      bool
+	wrongMeta     bool
+	wrongHeadMeta bool
 }
 
 func newS3ProtocolFixture(t *testing.T) *s3ProtocolFixture {
@@ -119,6 +123,12 @@ func (f *s3ProtocolFixture) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Query().Has("versions") {
+		f.listCount++
+		f.lastListPath = r.URL.RequestURI()
+		f.writeVersions(w)
+		return
+	}
 	key := strings.TrimPrefix(r.URL.Path, "/archive-test/")
 	obj, ok := f.objects[key]
 	if !ok {
@@ -149,6 +159,61 @@ func (f *s3ProtocolFixture) handle(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusMethodNotAllowed)
 }
 
+func (f *s3ProtocolFixture) writeVersions(w http.ResponseWriter) {
+	key := ""
+	var obj s3ProtocolObject
+	for candidate, value := range f.objects {
+		key, obj = candidate, value
+		break
+	}
+	if f.listMode == 0 {
+		f.listMode = 1
+	}
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>archive-test</Name><Prefix>`)
+	b.WriteString(key)
+	b.WriteString(`</Prefix><KeyMarker></KeyMarker><VersionIdMarker></VersionIdMarker><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>`)
+	if f.listMode == 1 || f.listMode == 3 || f.listMode == 4 {
+		listedKey := key
+		if f.listMode == 4 {
+			listedKey += "-other"
+		}
+		b.WriteString(`<Version><Key>`)
+		b.WriteString(listedKey)
+		b.WriteString(`</Key><VersionId>`)
+		b.WriteString(obj.versionID)
+		b.WriteString(`</VersionId><IsLatest>true</IsLatest><ETag>&quot;`)
+		b.WriteString(obj.etag)
+		b.WriteString(`&quot;</ETag><Size>`)
+		b.WriteString(itoa(len(obj.body)))
+		b.WriteString(`</Size><StorageClass>STANDARD</StorageClass><LastModified>2036-08-30T00:00:00.000Z</LastModified></Version>`)
+	}
+	if f.listMode == 2 {
+		for _, version := range []string{obj.versionID, obj.versionID + "-second"} {
+			b.WriteString(`<Version><Key>`)
+			b.WriteString(key)
+			b.WriteString(`</Key><VersionId>`)
+			b.WriteString(version)
+			b.WriteString(`</VersionId><IsLatest>true</IsLatest><ETag>&quot;`)
+			b.WriteString(obj.etag)
+			b.WriteString(`&quot;</ETag><Size>`)
+			b.WriteString(itoa(len(obj.body)))
+			b.WriteString(`</Size><StorageClass>STANDARD</StorageClass><LastModified>2036-08-30T00:00:00.000Z</LastModified></Version>`)
+		}
+	}
+	if f.listMode == 5 {
+		b.WriteString(`<DeleteMarker><Key>`)
+		b.WriteString(key)
+		b.WriteString(`</Key><VersionId>`)
+		b.WriteString(obj.versionID)
+		b.WriteString(`</VersionId><IsLatest>true</IsLatest><LastModified>2036-08-30T00:00:00.000Z</LastModified></DeleteMarker>`)
+	}
+	b.WriteString(`</ListVersionsResult>`)
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(b.String()))
+}
+
 func (f *s3ProtocolFixture) writeMetadata(w http.ResponseWriter, obj s3ProtocolObject) {
 	w.Header().Set("ETag", `"`+obj.etag+`"`)
 	w.Header().Set("Content-Length", ""+itoa(len(obj.body)))
@@ -157,6 +222,9 @@ func (f *s3ProtocolFixture) writeMetadata(w http.ResponseWriter, obj s3ProtocolO
 	w.Header().Set("x-amz-version-id", obj.versionID)
 	w.Header().Set("X-Amz-Server-Side-Encryption", "AES256")
 	w.Header().Set("X-Amz-Object-Lock-Mode", obj.lockMode)
+	if f.wrongHeadMeta {
+		w.Header().Set("X-Amz-Object-Lock-Mode", "GOVERNANCE")
+	}
 	w.Header().Set("X-Amz-Object-Lock-Retain-Until-Date", obj.retainDate)
 	w.Header().Set("X-Amz-Meta-Xm-Sha256", obj.sha256)
 	w.Header().Set("X-Amz-Meta-Xm-Provider-Checksum", obj.checksum)
@@ -226,6 +294,9 @@ func s3TestConfig(t *testing.T, f *s3ProtocolFixture) S3StoreConfig {
 		CredentialRef:     secrets.MustCredentialRef("secret://archive/test"),
 		Secrets:           s3TestCredentials(t),
 		Region:            "local",
+		EncryptionMode:    S3ArchiveEncryptionMode,
+		ObjectLockMode:    S3ArchiveObjectLockMode,
+		RetentionDays:     S3ArchiveRetentionDays,
 	}
 }
 
@@ -375,24 +446,85 @@ func TestS3HeadAndGetRejectUnboundBucket(t *testing.T) {
 	}
 }
 
-func TestS3RecoverPutResultFailsClosedWithoutProviderNativePrimitive(t *testing.T) {
+func TestS3RecoverPutResultUsesExactKeyVersionList(t *testing.T) {
 	f := newS3ProtocolFixture(t)
 	store, err := NewS3Store(context.Background(), s3TestConfig(t, f))
 	if err != nil {
 		t.Fatal(err)
 	}
-	intent := s3TestIntent([]byte("ambiguous-response"))
+	body := []byte("ambiguous-response")
+	intent := s3TestIntent(body)
+	if _, err := store.PutIfAbsent(context.Background(), intent, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
 	f.mu.Lock()
 	beforeHead, beforePut := f.headCount, f.putCount
 	f.mu.Unlock()
-	_, err = store.RecoverPutResult(context.Background(), intent)
-	if !errors.Is(err, ErrProviderQualificationMissing) || !errors.Is(err, ErrS3RecoveryUnsupported) {
-		t.Fatalf("error = %v, want ProviderQualificationMissing/S3RecoveryUnsupported", err)
+	recovered, err := store.RecoverPutResult(context.Background(), intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.VersionID == "" || recovered.SHA256 != intent.SHA256 {
+		t.Fatalf("recovered = %+v", recovered)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.putCount != beforePut || f.headCount != beforeHead {
-		t.Fatalf("recovery made network calls: puts=%d heads=%d", f.putCount, f.headCount)
+	if f.putCount != beforePut || f.headCount != beforeHead+1 || f.listCount != 1 {
+		t.Fatalf("recovery calls: puts=%d heads=%d lists=%d", f.putCount, f.headCount, f.listCount)
+	}
+	if !strings.Contains(f.lastHeadPath, "versionId=") {
+		t.Fatalf("recovery did not follow list with exact version: %q", f.lastHeadPath)
+	}
+	if !strings.Contains(f.lastListPath, "prefix="+url.QueryEscape(intent.Key)) {
+		t.Fatalf("recovery list prefix was not exact key: %q", f.lastListPath)
+	}
+}
+
+func TestS3RecoverPutResultRejectsZeroOrMultipleVersions(t *testing.T) {
+	for name, mode := range map[string]int{"zero": 6, "multiple": 2, "delete-marker": 5, "wrong-key": 4} {
+		t.Run(name, func(t *testing.T) {
+			f := newS3ProtocolFixture(t)
+			store, err := NewS3Store(context.Background(), s3TestConfig(t, f))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := []byte("recovery-" + name)
+			intent := s3TestIntent(body)
+			if _, err := store.PutIfAbsent(context.Background(), intent, bytes.NewReader(body)); err != nil {
+				t.Fatal(err)
+			}
+			f.mu.Lock()
+			f.listMode = mode
+			f.mu.Unlock()
+			if _, err := store.RecoverPutResult(context.Background(), intent); !errors.Is(err, ErrProviderQualificationFailed) {
+				t.Fatalf("error = %v, want ProviderQualificationFailed", err)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.putCount != 1 {
+				t.Fatalf("recovery republished object, put count=%d", f.putCount)
+			}
+		})
+	}
+}
+
+func TestS3RecoverPutResultRejectsReadbackMetadataMismatchAsQualificationFailure(t *testing.T) {
+	f := newS3ProtocolFixture(t)
+	store, err := NewS3Store(context.Background(), s3TestConfig(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("recovery-wrong-metadata")
+	intent := s3TestIntent(body)
+	if _, err := store.PutIfAbsent(context.Background(), intent, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the listed version but make the exact HEAD protection metadata invalid.
+	f.mu.Lock()
+	f.wrongHeadMeta = true
+	f.mu.Unlock()
+	if _, err := store.RecoverPutResult(context.Background(), intent); !errors.Is(err, ErrProviderQualificationFailed) {
+		t.Fatalf("error = %v, want ProviderQualificationFailed", err)
 	}
 }
 
@@ -428,6 +560,31 @@ func TestS3ConstructorRejectsEndpointAndCredentialFailures(t *testing.T) {
 	}
 }
 
+func TestS3ConstructorEnforcesApprovedPolicyAndLoopbackHTTP(t *testing.T) {
+	f := newS3ProtocolFixture(t)
+	cfg := s3TestConfig(t, f)
+	cfg.Region = "us-east-1"
+	if _, err := NewS3Store(context.Background(), cfg); !errors.Is(err, ErrS3Config) {
+		t.Fatalf("region error = %v", err)
+	}
+	cfg = s3TestConfig(t, f)
+	cfg.RetentionDays = 30
+	if _, err := NewS3Store(context.Background(), cfg); !errors.Is(err, ErrS3Config) {
+		t.Fatalf("retention error = %v", err)
+	}
+	cfg = s3TestConfig(t, f)
+	cfg.EncryptionMode = "SSE-KMS"
+	if _, err := NewS3Store(context.Background(), cfg); !errors.Is(err, ErrS3Config) {
+		t.Fatalf("encryption policy error = %v", err)
+	}
+	cfg = s3TestConfig(t, f)
+	cfg.Endpoint = "http://example.invalid"
+	cfg.EndpointAllowlist = []string{"example.invalid"}
+	if _, err := NewS3Store(context.Background(), cfg); !errors.Is(err, ErrS3EndpointNotAllowed) {
+		t.Fatalf("non-loopback HTTP error = %v", err)
+	}
+}
+
 func TestS3RejectsRedirectResponses(t *testing.T) {
 	f := newS3ProtocolFixture(t)
 	f.redirect = true
@@ -442,8 +599,8 @@ func TestS3RejectsRedirectResponses(t *testing.T) {
 }
 
 func TestS3LiveQualificationProviderQualificationMissing(t *testing.T) {
-	if os.Getenv("XM_REQUIRE_AUDIT_ARCHIVE_PROVIDER_QUALIFICATION") == "1" {
-		t.Fatalf("%v: disposable MinIO credential ref is not configured", ErrProviderQualificationMissing)
+	if os.Getenv("XM_RUN_AUDIT_ARCHIVE_MINIO_QUALIFICATION") == "1" || os.Getenv("XM_REQUIRE_AUDIT_ARCHIVE_PROVIDER_QUALIFICATION") == "1" {
+		t.Skip("live qualification is exercised by TestS3LiveQualificationDisposableMinIO")
 	}
 	t.Skip("ProviderQualificationMissing: live MinIO qualification requires one-time approved credential")
 }

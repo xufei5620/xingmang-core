@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,18 +25,20 @@ import (
 const (
 	S3ArchiveEncryptionMode = "SSE-S3"
 	S3ArchiveObjectLockMode = "COMPLIANCE"
+	S3ArchiveRetentionDays  = 3650
 
 	s3CredentialPurpose = "audit archive object store"
 )
 
 var (
-	ErrS3Config              = errors.New("s3 archive configuration invalid")
-	ErrS3Credentials         = errors.New("s3 archive credentials unavailable")
-	ErrS3EndpointNotAllowed  = errors.New("s3 archive endpoint not allowlisted")
-	ErrS3Redirect            = errors.New("s3 archive redirect rejected")
-	ErrS3VersionIDMissing    = errors.New("s3 archive version id missing")
-	ErrS3MetadataMismatch    = errors.New("s3 archive object metadata mismatch")
-	ErrS3RecoveryUnsupported = errors.New("s3 archive provider-native recovery unavailable")
+	ErrS3Config                    = errors.New("s3 archive configuration invalid")
+	ErrS3Credentials               = errors.New("s3 archive credentials unavailable")
+	ErrS3EndpointNotAllowed        = errors.New("s3 archive endpoint not allowlisted")
+	ErrS3Redirect                  = errors.New("s3 archive redirect rejected")
+	ErrS3VersionIDMissing          = errors.New("s3 archive version id missing")
+	ErrS3MetadataMismatch          = errors.New("s3 archive object metadata mismatch")
+	ErrS3RecoveryUnsupported       = errors.New("s3 archive provider-native recovery unavailable")
+	ErrProviderQualificationFailed = errors.New("provider qualification failed")
 )
 
 // S3Credentials is the redacted-secret payload resolved through a
@@ -60,6 +63,9 @@ type S3StoreConfig struct {
 	AllowInsecureHTTP bool
 	BucketID          string
 	Region            string
+	EncryptionMode    string
+	ObjectLockMode    string
+	RetentionDays     int
 	CredentialRef     secrets.CredentialRef
 	Secrets           secrets.SecretProvider
 	HTTPClient        *http.Client
@@ -69,8 +75,9 @@ type S3StoreConfig struct {
 // versioned MinIO/S3 endpoint. It always uses path-style bucket addressing so
 // the endpoint host remains the one explicitly allowlisted by configuration.
 type S3Store struct {
-	client   *minio.Client
-	bucketID string
+	client        *minio.Client
+	bucketID      string
+	retentionDays int
 }
 
 var _ ObjectWriter = (*S3Store)(nil)
@@ -89,6 +96,24 @@ func NewS3Store(ctx context.Context, cfg S3StoreConfig) (*S3Store, error) {
 	}
 	if !validBucketID(cfg.BucketID) || cfg.BucketID == "local-fixture" {
 		return nil, fmt.Errorf("%w: bucket", ErrS3Config)
+	}
+	if cfg.Region == "" {
+		cfg.Region = "local"
+	}
+	if cfg.Region != "local" {
+		return nil, fmt.Errorf("%w: approved region must be local", ErrS3Config)
+	}
+	if cfg.EncryptionMode == "" {
+		cfg.EncryptionMode = S3ArchiveEncryptionMode
+	}
+	if cfg.ObjectLockMode == "" {
+		cfg.ObjectLockMode = S3ArchiveObjectLockMode
+	}
+	if cfg.RetentionDays == 0 {
+		cfg.RetentionDays = S3ArchiveRetentionDays
+	}
+	if cfg.EncryptionMode != S3ArchiveEncryptionMode || cfg.ObjectLockMode != S3ArchiveObjectLockMode || cfg.RetentionDays != S3ArchiveRetentionDays {
+		return nil, fmt.Errorf("%w: approved protection policy", ErrS3Config)
 	}
 	if cfg.Secrets == nil || cfg.CredentialRef.IsZero() {
 		return nil, ErrS3Credentials
@@ -119,16 +144,17 @@ func NewS3Store(ctx context.Context, cfg S3StoreConfig) (*S3Store, error) {
 		Region:       cfg.Region,
 		BucketLookup: minio.BucketLookupPath,
 		Transport:    transport,
-		// A retry can create a second ambiguous Put. Recovery is an explicit
-		// content-addressed HEAD path, so disable SDK retries here.
+		// A retry can create a second ambiguous Put. Recovery is the explicit
+		// exact-key ListObjectVersions path, so disable SDK retries here.
 		MaxRetries: 1,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: client", ErrS3Config)
 	}
 	return &S3Store{
-		client:   client,
-		bucketID: cfg.BucketID,
+		client:        client,
+		bucketID:      cfg.BucketID,
+		retentionDays: cfg.RetentionDays,
 	}, nil
 }
 
@@ -267,10 +293,24 @@ func parseS3Endpoint(raw string, allowHTTP bool, allowlist []string) (*url.URL, 
 	if u.Scheme == "http" && !allowHTTP {
 		return nil, ErrS3EndpointNotAllowed
 	}
+	if u.Scheme == "http" && !isLoopbackS3Host(u.Hostname()) {
+		return nil, ErrS3EndpointNotAllowed
+	}
 	if !s3HostAllowed(u.Host, u.Hostname(), normalizeS3Allowlist(allowlist)) {
 		return nil, ErrS3EndpointNotAllowed
 	}
 	return u, nil
+}
+
+func isLoopbackS3Host(host string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func normalizeS3Allowlist(raw []string) map[string]struct{} {
@@ -400,13 +440,12 @@ func (s *S3Store) PutIfAbsent(ctx context.Context, intent ObjectWriteIntentV1, b
 	return s.headVersion(ctx, candidate, intent.ProviderIdempotencyToken)
 }
 
-// RecoverPutResult is intentionally fail-closed until the approved MinIO
-// qualification names a provider-native intent-token result lookup. A plain
-// S3 HEAD without VersionID is a latest-object discovery operation and cannot
-// prove which version was created after an ambiguous PUT; using it here would
-// violate the ExactObjectReader contract. The method therefore performs no
-// network call and reports ProviderQualificationMissing until that primitive is
-// supplied in a separately approved follow-up.
+// RecoverPutResult uses the approved exact-key ListObjectVersions primitive. The
+// request is constrained to a content-addressed key (not a broad prefix), must
+// yield exactly one non-delete-marker version, and is followed by an exact
+// VersionID HEAD for immutable metadata/hash checks. Zero/multiple versions are
+// provider-qualification failures; the adapter never falls back to a latest
+// HEAD or a second PUT.
 func (s *S3Store) RecoverPutResult(ctx context.Context, intent ObjectWriteIntentV1) (ObjectVersionV1, error) {
 	if err := s.validateIntent(intent); err != nil {
 		return ObjectVersionV1{}, err
@@ -414,7 +453,45 @@ func (s *S3Store) RecoverPutResult(ctx context.Context, intent ObjectWriteIntent
 	if err := contextErr(ctx); err != nil {
 		return ObjectVersionV1{}, err
 	}
-	return ObjectVersionV1{}, fmt.Errorf("%w: %w", ErrProviderQualificationMissing, ErrS3RecoveryUnsupported)
+	objects := s.client.ListObjects(ctx, s.bucketID, minio.ListObjectsOptions{
+		Prefix: intent.Key, Recursive: true, WithVersions: true, WithMetadata: true,
+	})
+	var found *minio.ObjectInfo
+	count := 0
+	var listErr error
+	for object := range objects {
+		if object.Err != nil {
+			listErr = object.Err
+			continue
+		}
+		count++
+		if found == nil {
+			copy := object
+			found = &copy
+		}
+	}
+	if listErr != nil {
+		return ObjectVersionV1{}, mapS3Error(listErr)
+	}
+	if count != 1 || found == nil || found.IsDeleteMarker || found.Key != intent.Key ||
+		strings.TrimSpace(found.VersionID) == "" || strings.EqualFold(found.VersionID, "null") || strings.EqualFold(found.VersionID, "latest") {
+		return ObjectVersionV1{}, fmt.Errorf("%w: exact-key version count/identity", ErrProviderQualificationFailed)
+	}
+	candidate := ObjectVersionV1{
+		BucketID: intent.BucketID, Key: intent.Key, VersionID: found.VersionID,
+		SHA256: intent.SHA256, SizeBytes: intent.SizeBytes, ContentType: intent.ContentType,
+		ProviderChecksum: "sha256:" + intent.SHA256, ETag: strings.Trim(found.ETag, `"`),
+		EncryptionMode: S3ArchiveEncryptionMode, KMSKeyID: intent.KMSKeyID,
+		ObjectLockMode: S3ArchiveObjectLockMode, RetainUntil: intent.RetainUntil,
+	}
+	if candidate.ETag == "" || found.Size != intent.SizeBytes {
+		return ObjectVersionV1{}, fmt.Errorf("%w: exact-key version metadata", ErrProviderQualificationFailed)
+	}
+	recovered, err := s.headVersion(ctx, candidate, intent.ProviderIdempotencyToken)
+	if err != nil {
+		return ObjectVersionV1{}, fmt.Errorf("%w: readback: %w", ErrProviderQualificationFailed, err)
+	}
+	return recovered, nil
 }
 
 func (s *S3Store) HeadVersion(ctx context.Context, expected ObjectVersionV1) (ObjectVersionV1, error) {
