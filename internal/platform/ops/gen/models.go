@@ -381,18 +381,97 @@ type OpsMetricObservation struct {
 	UpdatedAt                 pgtype.Timestamptz
 }
 
+type OpsMetricObservationDaily struct {
+	Environment           string
+	MetricKey             string
+	Source                string
+	BucketDay             pgtype.Date
+	BucketTimezone        string
+	BucketStartAt         pgtype.Timestamptz
+	BucketEndAt           pgtype.Timestamptz
+	PolicyVersion         int16
+	PolicyHash            string
+	ValueKind             string
+	PrimaryKind           string
+	SumMode               string
+	Unit                  string
+	Scale                 int64
+	Currency              *string
+	CurrencySet           []byte
+	FirstNumeric          pgtype.Numeric
+	LastNumeric           pgtype.Numeric
+	MinNumeric            pgtype.Numeric
+	MaxNumeric            pgtype.Numeric
+	SumNumeric            pgtype.Numeric
+	NumericCount          int64
+	FirstFullValueJson    []byte
+	LastFullValueJson     []byte
+	LastPartialValueJson  []byte
+	FirstFullSampleID     *int64
+	LastFullSampleID      *int64
+	LastPartialSampleID   *int64
+	FirstSyncedAt         pgtype.Timestamptz
+	LastSyncedAt          pgtype.Timestamptz
+	FirstObservedAt       pgtype.Timestamptz
+	LastObservedAt        pgtype.Timestamptz
+	FirstWatermark        *string
+	LastWatermark         *string
+	SampleCount           int64
+	FullSuccessCount      int64
+	PartialSuccessCount   int64
+	FailedCount           int64
+	ExpectedSlotCount     *int64
+	CoveredSlotCount      *int64
+	DuplicateCount        int64
+	CoveragePpm           *int32
+	CoverageUnknownReason *string
+	ErrorCounts           []byte
+	MinSampleID           int64
+	MaxSampleID           int64
+	AggregatedAt          pgtype.Timestamptz
+}
+
 type OpsMetricObservationSample struct {
-	ID            int64
+	ID                      int64
+	MetricKey               string
+	Source                  string
+	Environment             string
+	ObservedAt              pgtype.Timestamptz
+	SyncedAt                pgtype.Timestamptz
+	Status                  string
+	IsPartial               bool
+	Watermark               string
+	LastErrorCode           string
+	ValueJson               []byte
+	RollupPolicyVersion     int16
+	ExpectedIntervalSeconds *int32
+}
+
+type OpsMetricRollupReceipt struct {
+	RollupName    string
+	SampleID      int64
+	Environment   string
 	MetricKey     string
 	Source        string
-	Environment   string
-	ObservedAt    pgtype.Timestamptz
-	SyncedAt      pgtype.Timestamptz
-	Status        string
-	IsPartial     bool
-	Watermark     string
-	LastErrorCode string
-	ValueJson     []byte
+	BucketDay     pgtype.Date
+	PolicyVersion int16
+	PolicyHash    string
+	ProcessedAt   pgtype.Timestamptz
+}
+
+type OpsMetricRollupState struct {
+	RollupName             string
+	Environment            string
+	MetricKey              string
+	PolicyHash             string
+	HighestReceiptSampleID int64
+	ProcessedSampleCount   int64
+	LastAttemptStartedAt   pgtype.Timestamptz
+	LastSuccessAt          pgtype.Timestamptz
+	LastFailureAt          pgtype.Timestamptz
+	Status                 string
+	LastErrorCode          string
+	UpdatedAt              pgtype.Timestamptz
 }
 
 type UiSavedView struct {

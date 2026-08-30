@@ -32,9 +32,10 @@ WHERE metric_key = $1 AND environment = $2;
 -- name: InsertMetricObservationSample :exec
 INSERT INTO ops.metric_observation_sample (
     metric_key, source, environment, observed_at, synced_at,
-    status, is_partial, watermark, last_error_code, value_json
+    status, is_partial, watermark, last_error_code, value_json,
+    rollup_policy_version, expected_interval_seconds
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 );
 
 -- name: ListMetricObservationSamples :many
@@ -55,10 +56,12 @@ INSERT INTO ops.metric_observation_sample (
 -- 一条只用来判断窗口内还有没有更旧的样本被丢掉，不进响应。截断是必须如实告知
 -- 的事实，不能让前端把不完整的窗口当成完整趋势（宪法 12 条）。
 SELECT id, metric_key, source, environment, observed_at, synced_at,
-       status, is_partial, watermark, last_error_code, value_json
+       status, is_partial, watermark, last_error_code, value_json,
+       rollup_policy_version, expected_interval_seconds
 FROM (
     SELECT id, metric_key, source, environment, observed_at, synced_at,
-           status, is_partial, watermark, last_error_code, value_json
+           status, is_partial, watermark, last_error_code, value_json,
+           rollup_policy_version, expected_interval_seconds
     FROM ops.metric_observation_sample
     WHERE environment = $1 AND metric_key = $2 AND synced_at >= $3
     ORDER BY synced_at DESC, id DESC

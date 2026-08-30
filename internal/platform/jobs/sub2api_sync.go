@@ -251,6 +251,9 @@ type Sub2APISyncOptions struct {
 	NewClient Sub2APIClientFactory
 	// Now 可注入固定时钟；默认 time.Now。
 	Now func() time.Time
+	// ExpectedInterval is the effective cadence of this writer.  It is copied
+	// into every raw sample; zero keeps legacy/manual coverage unknown.
+	ExpectedInterval time.Duration
 }
 
 // Sub2APISyncWorker 周期性读取 Sub2API 只读契约并把结果写进运营指标表。
@@ -260,13 +263,14 @@ type Sub2APISyncOptions struct {
 type Sub2APISyncWorker struct {
 	river.WorkerDefaults[Sub2APISyncArgs]
 
-	logger      *slog.Logger
-	environment string
-	instanceID  string
-	mode        Sub2APIMode
-	store       ObservationStore
-	newClient   Sub2APIClientFactory
-	now         func() time.Time
+	logger           *slog.Logger
+	environment      string
+	instanceID       string
+	mode             Sub2APIMode
+	store            ObservationStore
+	newClient        Sub2APIClientFactory
+	now              func() time.Time
+	expectedInterval time.Duration
 }
 
 // NewSub2APISyncWorker 构造 Worker 并补齐安全默认值。
@@ -284,13 +288,14 @@ func NewSub2APISyncWorker(opts Sub2APISyncOptions) *Sub2APISyncWorker {
 		opts.Now = time.Now
 	}
 	return &Sub2APISyncWorker{
-		logger:      opts.Logger,
-		environment: opts.Environment,
-		instanceID:  opts.InstanceID,
-		mode:        opts.Mode,
-		store:       opts.Store,
-		newClient:   opts.NewClient,
-		now:         opts.Now,
+		logger:           opts.Logger,
+		environment:      opts.Environment,
+		instanceID:       opts.InstanceID,
+		mode:             opts.Mode,
+		store:            opts.Store,
+		newClient:        opts.NewClient,
+		now:              opts.Now,
+		expectedInterval: opts.ExpectedInterval,
 	}
 }
 
@@ -344,6 +349,7 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 			observation = w.failureObservation(ctx, observation, now, connector.KindOf(err))
 			failed++
 		}
+		annotateRollupMetadata(&observation, w.expectedInterval)
 		// 最新态与历史样本一次写完，同一个事务（XM-R010）。
 		//
 		// **成功与失败的观测都留样。** 失败样本正是趋势图上那段红的数据来源；

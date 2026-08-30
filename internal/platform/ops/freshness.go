@@ -79,6 +79,14 @@ type Observation struct {
 	Value                     map[string]any
 
 	UpdatedAt time.Time
+
+	// RollupPolicyVersion and ExpectedIntervalSeconds are immutable metadata
+	// copied into each raw sample at write time.  A zero policy version is kept
+	// as a backwards-compatible signal for callers predating DS1; Store fills
+	// the v1 migration default while every periodic writer supplies it
+	// explicitly.
+	RollupPolicyVersion     int16
+	ExpectedIntervalSeconds *int32
 }
 
 // Freshness 是给前端的新鲜度信息：一个主状态 + 完整原始字段。

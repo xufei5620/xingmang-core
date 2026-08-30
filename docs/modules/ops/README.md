@@ -60,6 +60,20 @@
 
 「这段时间是怎么变的」由**另一张表**回答，见下一节。
 
+## DS1：UTC 日粒度 policy/schema 基座
+
+DS1 将每条 raw sample 的 `rollup_policy_version` 与实际
+`expected_interval_seconds` 一起落库，并提供 `metric_observation_daily`、
+`metric_rollup_receipt`、`metric_rollup_state` 三张前进式 schema。纯整数
+accumulator 位于 `internal/platform/ops/rollup.go`，策略 loader 位于
+`internal/platform/ops/rollup_policy.go`；它们在写入前拒绝浮点、失败旧值进入
+numeric、partial 冒充 full、混币求和与非 UTC 桶。
+
+当前 registry 有 16 个 key，DS1 active policy 精确覆盖 14 个；两个 invoice key
+保留为 CR-0002 gated exclusion，不会因为缺少冻结契约而静默生成 v1 policy。receipt
+的 exactly-once、late/backfill、worker 与 raw 删除仍分别属于 DS2/DS4，DS1 不开启
+任何删除或生产运行时行为。
+
 ## 历史样本（XM-0024）
 
 `ops.metric_observation_sample` 是追加型样本表：同步任务每写一次最新态，

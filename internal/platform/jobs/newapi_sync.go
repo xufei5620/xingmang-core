@@ -250,6 +250,9 @@ type NewAPISyncOptions struct {
 	NewClient NewAPIClientFactory
 	// Now 可注入固定时钟；默认 time.Now。
 	Now func() time.Time
+	// ExpectedInterval is the effective cadence of this writer.  It is copied
+	// into every raw sample; zero keeps legacy/manual coverage unknown.
+	ExpectedInterval time.Duration
 }
 
 // NewAPISyncWorker 周期性读取 NewAPI 只读契约并把结果写进运营指标表。
@@ -259,13 +262,14 @@ type NewAPISyncOptions struct {
 type NewAPISyncWorker struct {
 	river.WorkerDefaults[NewAPISyncArgs]
 
-	logger      *slog.Logger
-	environment string
-	instanceID  string
-	mode        NewAPIMode
-	store       ObservationStore
-	newClient   NewAPIClientFactory
-	now         func() time.Time
+	logger           *slog.Logger
+	environment      string
+	instanceID       string
+	mode             NewAPIMode
+	store            ObservationStore
+	newClient        NewAPIClientFactory
+	now              func() time.Time
+	expectedInterval time.Duration
 }
 
 // NewNewAPISyncWorker 构造 Worker 并补齐安全默认值。
@@ -283,13 +287,14 @@ func NewNewAPISyncWorker(opts NewAPISyncOptions) *NewAPISyncWorker {
 		opts.Now = time.Now
 	}
 	return &NewAPISyncWorker{
-		logger:      opts.Logger,
-		environment: opts.Environment,
-		instanceID:  opts.InstanceID,
-		mode:        opts.Mode,
-		store:       opts.Store,
-		newClient:   opts.NewClient,
-		now:         opts.Now,
+		logger:           opts.Logger,
+		environment:      opts.Environment,
+		instanceID:       opts.InstanceID,
+		mode:             opts.Mode,
+		store:            opts.Store,
+		newClient:        opts.NewClient,
+		now:              opts.Now,
+		expectedInterval: opts.ExpectedInterval,
 	}
 }
 
@@ -343,6 +348,7 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 			observation = w.failureObservation(ctx, observation, now, connector.KindOf(err))
 			failed++
 		}
+		annotateRollupMetadata(&observation, w.expectedInterval)
 		// 最新态与历史样本同一事务写入（XM-R010）：要么都生效,要么两张表
 		// 都没动——事务失败即 River 干净重放,不存在半截状态与历史缺口。
 		// 本任务基于修复前基线开发,合并时由集成方改为事务写法,与

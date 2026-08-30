@@ -174,17 +174,31 @@ func sampleParams(o Observation) (gen.InsertMetricObservationSampleParams, error
 	if err != nil {
 		return gen.InsertMetricObservationSampleParams{}, err
 	}
+	policyVersion := o.RollupPolicyVersion
+	if policyVersion == 0 {
+		// Existing one-off callers predate DS1.  Preserve their ability to
+		// append a legacy row; periodic writers set this metadata explicitly.
+		policyVersion = RollupPolicyVersion
+	}
+	if policyVersion <= 0 {
+		return gen.InsertMetricObservationSampleParams{}, fmt.Errorf("rollup_policy_version must be positive")
+	}
+	if o.ExpectedIntervalSeconds != nil && *o.ExpectedIntervalSeconds <= 0 {
+		return gen.InsertMetricObservationSampleParams{}, fmt.Errorf("expected_interval_seconds must be positive")
+	}
 	return gen.InsertMetricObservationSampleParams{
-		MetricKey:     o.MetricKey,
-		Source:        o.Source,
-		Environment:   o.Environment,
-		ObservedAt:    tsPtr(o.ObservedAt),
-		SyncedAt:      ts(o.SyncedAt),
-		Status:        string(o.Status),
-		IsPartial:     o.IsPartial,
-		Watermark:     o.Watermark,
-		LastErrorCode: o.LastErrorCode,
-		ValueJson:     valueJSON,
+		MetricKey:               o.MetricKey,
+		Source:                  o.Source,
+		Environment:             o.Environment,
+		ObservedAt:              tsPtr(o.ObservedAt),
+		SyncedAt:                ts(o.SyncedAt),
+		Status:                  string(o.Status),
+		IsPartial:               o.IsPartial,
+		Watermark:               o.Watermark,
+		LastErrorCode:           o.LastErrorCode,
+		ValueJson:               valueJSON,
+		RollupPolicyVersion:     policyVersion,
+		ExpectedIntervalSeconds: o.ExpectedIntervalSeconds,
 	}, nil
 }
 
@@ -382,16 +396,18 @@ func (s *Store) ListSamples(
 			return nil, false, err
 		}
 		out = append(out, Observation{
-			MetricKey:     r.MetricKey,
-			Source:        r.Source,
-			Environment:   r.Environment,
-			ObservedAt:    fromTSPtr(r.ObservedAt),
-			SyncedAt:      fromTS(r.SyncedAt),
-			Watermark:     r.Watermark,
-			Status:        SyncStatus(r.Status),
-			IsPartial:     r.IsPartial,
-			LastErrorCode: r.LastErrorCode,
-			Value:         value,
+			MetricKey:               r.MetricKey,
+			Source:                  r.Source,
+			Environment:             r.Environment,
+			ObservedAt:              fromTSPtr(r.ObservedAt),
+			SyncedAt:                fromTS(r.SyncedAt),
+			Watermark:               r.Watermark,
+			Status:                  SyncStatus(r.Status),
+			IsPartial:               r.IsPartial,
+			LastErrorCode:           r.LastErrorCode,
+			Value:                   value,
+			RollupPolicyVersion:     r.RollupPolicyVersion,
+			ExpectedIntervalSeconds: r.ExpectedIntervalSeconds,
 		})
 	}
 	return out, truncated, nil

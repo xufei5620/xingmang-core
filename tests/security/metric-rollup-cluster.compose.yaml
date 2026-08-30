@@ -1,0 +1,37 @@
+# DS1 disposable PostgreSQL 18 harness.  The caller supplies random names and
+# a generated password file; no shared xingmang-launch resource is referenced.
+services:
+  postgres:
+    image: docker.io/library/postgres:18@sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: ${DS1_DATABASE:?DS1_DATABASE is required}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/ds1_postgres_password
+    secrets:
+      - source: ds1_postgres_password
+        target: ds1_postgres_password
+    volumes:
+      - ds1_data:/var/lib/postgresql
+    ports:
+      - "127.0.0.1::5432"
+    labels:
+      com.xingmang.ds1.run-id: ${DS1_RUN_ID:?DS1_RUN_ID is required}
+      com.xingmang.ds1.managed: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+volumes:
+  ds1_data:
+    name: ${DS1_VOLUME_NAME:?DS1_VOLUME_NAME is required}
+    labels:
+      com.xingmang.ds1.run-id: ${DS1_RUN_ID:?DS1_RUN_ID is required}
+      com.xingmang.ds1.managed: "true"
+
+secrets:
+  ds1_postgres_password:
+    file: ${DS1_PASSWORD_FILE:?DS1_PASSWORD_FILE is required}

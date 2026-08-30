@@ -149,6 +149,9 @@ type FinanceCollectOptions struct {
 	// Now 可注入固定时钟；默认 time.Now。业务日切分与「今日可覆盖、过去冻结」
 	// 都靠它。
 	Now func() time.Time
+	// ExpectedInterval is the effective cadence of this writer.  It is copied
+	// into every raw sample; zero keeps legacy/manual coverage unknown.
+	ExpectedInterval time.Duration
 }
 
 // FinanceCollectWorker 周期性采集计量型渠道的成本与收入并写进利润台账。
@@ -160,14 +163,15 @@ type FinanceCollectWorker struct {
 	instanceID  string
 	mode        FinanceCollectMode
 
-	store           ObservationStore
-	registry        finance.AccountRegistry
-	subscriptions   finance.SubscriptionRegistry
-	balances        finance.BalanceRecorder
-	ledger          finance.LedgerWriter
-	newClient       finance.MeteringClientFactory
-	resolvePlatform finance.PlatformResolver
-	now             func() time.Time
+	store            ObservationStore
+	registry         finance.AccountRegistry
+	subscriptions    finance.SubscriptionRegistry
+	balances         finance.BalanceRecorder
+	ledger           finance.LedgerWriter
+	newClient        finance.MeteringClientFactory
+	resolvePlatform  finance.PlatformResolver
+	now              func() time.Time
+	expectedInterval time.Duration
 }
 
 // NewFinanceCollectWorker 构造 Worker 并补齐安全默认值。
@@ -185,18 +189,19 @@ func NewFinanceCollectWorker(opts FinanceCollectOptions) *FinanceCollectWorker {
 		opts.Now = time.Now
 	}
 	return &FinanceCollectWorker{
-		logger:          opts.Logger,
-		environment:     opts.Environment,
-		instanceID:      opts.InstanceID,
-		mode:            opts.Mode,
-		store:           opts.Store,
-		registry:        opts.Registry,
-		subscriptions:   opts.Subscriptions,
-		balances:        opts.Balances,
-		ledger:          opts.Ledger,
-		newClient:       opts.NewClient,
-		resolvePlatform: opts.ResolvePlatform,
-		now:             opts.Now,
+		logger:           opts.Logger,
+		environment:      opts.Environment,
+		instanceID:       opts.InstanceID,
+		mode:             opts.Mode,
+		store:            opts.Store,
+		registry:         opts.Registry,
+		subscriptions:    opts.Subscriptions,
+		balances:         opts.Balances,
+		ledger:           opts.Ledger,
+		newClient:        opts.NewClient,
+		resolvePlatform:  opts.ResolvePlatform,
+		now:              opts.Now,
+		expectedInterval: opts.ExpectedInterval,
 	}
 }
 
@@ -267,6 +272,7 @@ func (w *FinanceCollectWorker) Work(
 	}
 
 	for i := range observations {
+		annotateRollupMetadata(&observations[i], w.expectedInterval)
 		// 最新态与历史样本一次写完，同一个事务（XM-R010）。
 		// **成功与失败的观测都留样**：失败样本正是趋势图上那段红的数据来源。
 		if _, err := w.store.UpsertWithSample(ctx, observations[i]); err != nil {
