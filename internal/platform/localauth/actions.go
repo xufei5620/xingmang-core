@@ -166,8 +166,8 @@ func parseRoles(raw string, known []string) ([]string, error) {
 // generatedAlphabet 去掉容易混淆的字符（l/I/1/O/0），照着念给人听
 // 或抄到另一个地方时不容易出错。
 const (
-	generatedPasswordLen      = 16
-	generatedAlphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	generatedPasswordLen = 16
+	generatedAlphabet    = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 )
 
 // generatePassword 生成一个随机初始/重置密码。16 个字符、57 个符号的字母表
