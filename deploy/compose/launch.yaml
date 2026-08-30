@@ -379,6 +379,18 @@ services:
       XM_ALERT_TELEGRAM_TOKEN: ${XM_ALERT_TELEGRAM_TOKEN:-}
       XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
       XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS: ${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}
+      # --- 请求量/成功率聚合（XM-REQLOG-METRICS）----------------------------
+      # 与 platform-api 共享同一个环境变量名 XM_REQLOG_MODE/XM_REQLOG_DATA_DIR
+      # （见该服务的「请求详情 / reqlog 只读网关」小节）：两个进程只读同一份
+      # 记录代理落盘数据，但 worker 侧只认得出 off/file 两档——fake/real 是
+      # platform-api「请求详情」链路独有的模式，worker 遇到会退化成 off 并
+      # warn，不影响启动。off（默认）不注册这条聚合任务，看板对应三张卡片
+      # 按缺观测显示「未接入」；file 时从下面的目录聚合，只读，不解压正文。
+      XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
+      # 容器内路径，与下方 platform-api 的默认值一致；只在 XM_REQLOG_MODE=file
+      # 时用到。宿主机路径挂载见 deploy/compose/server-prod.yaml。
+      XM_REQLOG_DATA_DIR: ${XM_REQLOG_DATA_DIR:-}
+      XM_REQLOG_METRICS_INTERVAL: ${XM_REQLOG_METRICS_INTERVAL:-5m}
       # --- 凭据登记（XM-CRED0）--------------------------------------------
       # 与 platform-api 同一个卷、同一个根目录；worker 只读——它经
       # secrets.NewFileProvider 按 core.connector_config 里的引用读值，

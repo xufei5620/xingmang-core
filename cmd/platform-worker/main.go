@@ -179,7 +179,13 @@ func main() {
 		"audit_archive_enabled", config.AuditArchive.Enabled,
 		"audit_archive_mode", string(config.AuditArchive.Mode),
 		"audit_archive_scheduler_enabled", config.AuditArchive.SchedulerEnabled,
-		"audit_archive_periodic_registered", jobs.AuditArchivePeriodicRegistrationAllowed())
+		"audit_archive_periodic_registered", jobs.AuditArchivePeriodicRegistrationAllowed(),
+		// 请求量/成功率聚合（XM-REQLOG-METRICS）。mode=off 时这条任务根本不
+		// 注册（见 jobs.NewClient），运维要能从这一行看出是不是这个原因。
+		"reqlog_metrics_mode", string(config.ReqlogMetricsMode),
+		"reqlog_metrics_mode_recognized", config.ReqlogMetricsModeRecognized,
+		"reqlog_metrics_data_dir", config.ReqlogMetricsDataDir,
+		"reqlog_metrics_interval", config.ReqlogMetricsInterval.String())
 
 	<-ctx.Done()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

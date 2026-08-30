@@ -233,6 +233,18 @@ var registeredMetrics = struct {
 		// 让一部分读数不入账（两侧未知跳过、只有一侧不建行），所以两个数
 		// **本就该不同**——合并成一条会让那个差异永远看不见。
 		"finance.profit.daily": {},
+		// 请求量/成功率（XM-REQLOG-METRICS，connectors/reqlog 的
+		// MetricSub2APIRequests*/MetricNewAPIRequests* 常量）。命名空间是
+		// **平台**（sub2api/newapi），不是连接器（reqlog）：原料来自 reqlog
+		// 落盘的请求审计索引，但回答的问题与 sub2api.revenue.daily 等既有
+		// 指标同属平台维度——与 finance.cost.daily 定义在 connectors/metering
+		// 而不是 connectors/finance 是同一条先例（见该常量注释）。
+		"sub2api.requests.daily":            {},
+		"sub2api.requests.success_rate_24h": {},
+		"sub2api.requests.trend_7d":         {},
+		"newapi.requests.daily":             {},
+		"newapi.requests.success_rate_24h":  {},
+		"newapi.requests.trend_7d":          {},
 	},
 }
 

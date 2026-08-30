@@ -69,6 +69,20 @@ type ExcludedRollupMetric struct {
 var excludedRollupMetrics = []ExcludedRollupMetric{
 	{MetricKey: "invoice.amount.daily", Gate: "CR-0002", Reason: "invoice contract is not frozen"},
 	{MetricKey: "invoice.requests.daily", Gate: "CR-0002", Reason: "invoice contract is not frozen"},
+	// XM-REQLOG-METRICS: success_rate_24h is a rolling 24h window (not a
+	// calendar business day) and trend_7d bundles seven day-buckets into one
+	// observation (an array, not a single scalar) — neither fits the
+	// single-point-in-time/single-JSON-pointer shape every active ValueKind
+	// assumes. *.requests.daily is a plain daily_snapshot and is a reasonable
+	// future candidate, but is excluded alongside its siblings for now rather
+	// than half-designing the family under time pressure; see the handoff for
+	// this slice.
+	{MetricKey: "sub2api.requests.daily", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
+	{MetricKey: "sub2api.requests.success_rate_24h", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
+	{MetricKey: "sub2api.requests.trend_7d", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
+	{MetricKey: "newapi.requests.daily", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
+	{MetricKey: "newapi.requests.success_rate_24h", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
+	{MetricKey: "newapi.requests.trend_7d", Gate: "XM-REQLOG-METRICS", Reason: "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"},
 }
 
 // ExcludedRollupMetricKeys returns the deterministic list of gated keys.

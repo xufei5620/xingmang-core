@@ -10,6 +10,36 @@
       "metric_key": "invoice.requests.daily",
       "gate": "CR-0002",
       "reason": "invoice contract is not frozen"
+    },
+    {
+      "metric_key": "sub2api.requests.daily",
+      "gate": "XM-REQLOG-METRICS",
+      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
+    },
+    {
+      "metric_key": "sub2api.requests.success_rate_24h",
+      "gate": "XM-REQLOG-METRICS",
+      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
+    },
+    {
+      "metric_key": "sub2api.requests.trend_7d",
+      "gate": "XM-REQLOG-METRICS",
+      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
+    },
+    {
+      "metric_key": "newapi.requests.daily",
+      "gate": "XM-REQLOG-METRICS",
+      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
+    },
+    {
+      "metric_key": "newapi.requests.success_rate_24h",
+      "gate": "XM-REQLOG-METRICS",
+      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
+    },
+    {
+      "metric_key": "newapi.requests.trend_7d",
+      "gate": "XM-REQLOG-METRICS",
+      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
     }
   ],
   "policies": [

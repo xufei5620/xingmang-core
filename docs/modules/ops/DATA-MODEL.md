@@ -55,9 +55,35 @@ CHECK ((status = 'failed') = (last_error_code <> ''))
 `currency_set`。`ops.metric_rollup_receipt` 与 `ops.metric_rollup_state` 只提供
 DS1 schema 基座，逐样本 exactly-once/受限 ACL 属后续 DS2/DBR 片。
 
-策略文件是 `contracts/ops/metric-rollup-policy.v1.json`。当前 registry 实测 16
-项：14 项 active policy；`invoice.requests.daily` 与 `invoice.amount.daily` 以
-CR-0002 的显式 exclusion 保留，未冻结前不会生成或聚合 invoice policy。
+策略文件是 `contracts/ops/metric-rollup-policy.v1.json`。当前 registry 实测 22
+项：14 项 active policy，8 项显式 exclusion（`invoice.requests.daily` 与
+`invoice.amount.daily` 以 CR-0002 gate 保留，未冻结前不会生成或聚合 invoice
+policy；`sub2api.requests.*` 与 `newapi.requests.*` 六项以 XM-REQLOG-METRICS
+gate 保留——`success_rate_24h` 是滚动 24h 窗口而非按业务日切分的快照，
+`trend_7d` 把 7 个日桶打包进一条观测的数组里，两者都不符合现有 ValueKind
+「一条样本对应一个标量、可选一个业务日」的形状假设；`*.requests.daily`
+本身是标准的 daily_snapshot，是未来激活 policy 的候选，但为免在时间盒内
+仓促设计半成品语义，本次随同族其余两项一并 exclusion，见
+`docs/handoffs/slices/XM-REQLOG-METRICS.md`）。
+
+## 请求量/成功率指标（XM-REQLOG-METRICS）
+
+原料是记录代理落盘的 `index.jsonl`（只读、不解压 gz 明细），由
+`connectors/reqlog.MetricsReader` 按 CST 日历日聚合，`platform-worker` 的
+周期任务 `reqlog_metrics`（`XM_REQLOG_MODE=file` 时注册）写入。指标键
+命名空间是**平台**（sub2api/newapi）而不是连接器（reqlog）——与
+`metering.MetricCostDaily` 实际是 `"finance.cost.daily"` 同一条先例。
+每个平台三条：
+
+| metric_key | value_json 形状 |
+|---|---|
+| `sub2api.requests.daily` / `newapi.requests.daily` | `{day, request_count, success_count, failure_count, avg_duration_ms:int\|null}`，只统计当天目录，success=HTTP 2xx |
+| `sub2api.requests.success_rate_24h` / `newapi.requests.success_rate_24h` | `{window_hours:24, request_count, success_count, success_rate_bp:int\|null}`，`[now-24h, now]` 闭区间，rate 是**基点整数**（万分之几），0 条为 null |
+| `sub2api.requests.trend_7d` / `newapi.requests.trend_7d` | `{days:[{day, request_count, success_count, missing?:true}, …]}`，固定 7 个元素、按日升序、以今天结尾；没有目录的日子 `missing:true` |
+
+新鲜度阈值 900s（`reqlog.MetricsStalenessThresholdSeconds`），采集周期默认
+5 分钟（`XM_REQLOG_METRICS_INTERVAL`）。`XM_REQLOG_MODE` 非 file 时任务不
+注册——不写观测也不写 not_supported，前端按缺观测显示「未接入」。
 
 ## 边界处理
 
