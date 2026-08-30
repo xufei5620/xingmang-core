@@ -73,6 +73,6 @@
   ① XM-CRED0-backend(车道 F,已排最高)→ 凭据在 UI 填、切 real → "演示数据"横幅随真实数据消失(横幅本身按宪法数据新鲜度条款保留,只在 fake 时显示)。
   ② XM-AUTH1 前端 OIDC 登录(新车道 G,可与①并行):admin-web 实现 Authorization Code + PKCE(不引入新主版本依赖,优先手写或 oidc-client-ts 钉版本入 VERSIONS.lock)、登录页/登出/静默续期、Bearer 注入替代 X-Dev-* 头(dev-header 只在 ENVIRONMENT!=production 保留为开发便利)、401 时回登录页;后端按 AUTH-SWITCH.md 现有 oidc resolver,不改;XM_OIDC_ROLE_SCOPES 由验收线给出默认映射。验收:staging 上用 Keycloak 测试 realm 登录成功、scope 生效、Basic Auth 可去除。
   ③ CR-0001 solov-staff realm:验收线生成 realm 导入 JSON(realm、client xingmang-admin-web(public+PKCE, redirect https://console.solov.cc/*)、角色 staff/admin/auditor/finance/key-metadata-reader、MFA 策略),由用户在 auth-admin.solov.cc 导入(Keycloak 变更红线保留给用户);验收线不持有 Keycloak 凭据。
-④ 生产切换(①②③齐后,用户确认执行):服务器改用 launch.yaml + server-prod.yaml(ENVIRONMENT=production、XM_AUTH_MODE=oidc、FAKE_SEED=false、各平台 mode 由 core.connector_config 决定),数据库新建卷(演示数据不带入),nginx 去掉 Basic Auth;之后每次合入仍走 deploy-local/deploy.sh。
- 在此之前 console.solov.cc 保持 staging(dev-header + Basic Auth),这是有意的诚实标注,不是未完成。
+  ④ 生产切换(①②③齐后,用户确认执行):服务器改用 launch.yaml + server-prod.yaml(ENVIRONMENT=production、XM_AUTH_MODE=oidc、FAKE_SEED=false、各平台 mode 由 core.connector_config 决定),数据库新建卷(演示数据不带入),nginx 去掉 Basic Auth;之后每次合入仍走 deploy-local/deploy.sh。
+  在此之前 console.solov.cc 保持 staging(dev-header + Basic Auth),这是有意的诚实标注,不是未完成。
 2026-08-30T13:10:56Z SUPERSEDED f170f8a XM-CRED0-ui-only:前端占位片不再单独接纳，已被 13:07Z XM-CRED0 端到端优先级取代；不得合入，须与 XM-CRED0-backend（SecretProvider/Actions/查询/连接器接线/接入模式）及实机证据一体交付。
