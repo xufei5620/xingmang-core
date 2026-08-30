@@ -149,6 +149,51 @@ func TestCatalogQueriesAreSelectOnlyAndPinned(t *testing.T) {
 	}
 }
 
+func TestPublicPrivilegeQueriesDoNotPassPublicPseudoRoleToPrivilegeFunctions(t *testing.T) {
+	for _, query := range CatalogQueryAllowlist() {
+		lower := strings.ToLower(query)
+		if strings.Contains(lower, "has_database_privilege('public'") || strings.Contains(lower, "has_schema_privilege('public'") {
+			t.Fatalf("catalog query passes the PUBLIC pseudo-role as a privilege-function argument: %s", query)
+		}
+	}
+	for name, query := range map[string]string{
+		"database": catalogPublicDatabasePrivilegesSQL,
+		"schema":   catalogPublicSchemaPrivilegesSQL,
+	} {
+		lower := strings.ToLower(query)
+		if !strings.Contains(lower, "aclexplode") || !strings.Contains(lower, "grantee = 0") {
+			t.Fatalf("%s PUBLIC privilege query must inspect ACL grantee oid 0: %s", name, query)
+		}
+	}
+	for name, query := range map[string]string{
+		"schema object":   catalogSchemasSQL,
+		"database object": catalogDatabaseACLsSQL,
+	} {
+		lower := strings.ToLower(query)
+		if !strings.Contains(lower, "union all") || !strings.Contains(lower, "ax.grantee = 0") {
+			t.Fatalf("%s query must retain a PUBLIC ACL-OID branch without passing the pseudo-role to has_*_privilege: %s", name, query)
+		}
+	}
+}
+
+func TestVerifySnapshotDetectsInjectedPublicObjectGrant(t *testing.T) {
+	policy := DefaultPolicyV1()
+	for _, objectName := range []string{"public", "current_database"} {
+		snapshot := snapshotFromPolicy(policy)
+		found := false
+		for i := range snapshot.Objects {
+			if (objectName == "public" && snapshot.Objects[i].Kind == "schema" && snapshot.Objects[i].Name == objectName) || (objectName == "current_database" && snapshot.Objects[i].Kind == "database" && snapshot.Objects[i].Name == objectName) {
+				snapshot.Objects[i].Privileges["PUBLIC"] = []string{"USAGE"}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("policy fixture is missing %s object", objectName)
+		}
+		assertViolationCode(t, VerifySnapshot(policy, snapshot, time.Date(2026, 8, 30, 10, 30, 0, 0, time.UTC)), "CATALOG_OBJECT_PRIVILEGE_DRIFT")
+	}
+}
+
 func snapshotFromPolicy(policy Policy) CatalogSnapshot {
 	snapshot := CatalogSnapshot{DatabaseName: policy.ProductionDatabaseName, PublicDatabasePrivileges: append([]string(nil), policy.PublicDatabasePrivileges...), PublicSchemaPrivileges: append([]string(nil), policy.PublicSchemaPrivileges...), PublicTypePrivileges: append([]string(nil), policy.PublicTypePrivileges...), PublicRoutinePrivileges: append([]string(nil), policy.PublicRoutinePrivileges...), RunwayApprovedMergeSHA: policy.RunwayApprovedMergeSHA}
 	for name, role := range policy.Roles {

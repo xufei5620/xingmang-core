@@ -478,7 +478,11 @@ func ValidateTransition(previous TrustedPolicyState, current ProposedPolicyState
 
 func validateRotationTransition(previous TrustedPolicyState, current Policy, currentRawDigest string, event RolePolicyStateEvent, cr ChangeRequestState, now time.Time, add func(string, string, string, string, string)) {
 	capability := *event.Capability
-	previousPolicy, _, err := LoadPolicy(previous.PolicyBytes)
+	// ValidateTransition already validates both policy documents against its
+	// explicit `now` argument. Do not call LoadPolicy here: LoadPolicy uses the
+	// wall clock and would make an otherwise deterministic transition check
+	// silently return when a fixture's rotation deadline has elapsed.
+	previousPolicy, err := loadPolicyUnchecked(previous.PolicyBytes)
 	if err != nil {
 		return
 	}

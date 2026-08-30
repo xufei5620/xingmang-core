@@ -178,6 +178,9 @@ func TestValidateTransitionRejectsCRStateDigestMismatch(t *testing.T) {
 }
 
 func TestValidateTransitionRejectsClosureDigestMismatch(t *testing.T) {
+	// Keep the fixture deadline in the past relative to the machine clock used
+	// by CI. The transition must nevertheless use the explicit validation time
+	// supplied by the caller, not LoadPolicy's wall clock.
 	base := DefaultPolicyV1()
 	_, digest0 := canonicalPolicy(t, base)
 	genesis := genesisEvent(digest0, testNow().Add(-2*time.Hour))
@@ -211,8 +214,13 @@ func TestValidateTransitionRejectsClosureDigestMismatch(t *testing.T) {
 	closedCRBytes := mustJSON(t, closedCR)
 	closedDigest := digestBytes(closedCRBytes)
 	close := rotationEvent(start, "rotation-close", "xm_api_runtime", "rotating-a-b", "steady-b", digest1, digest2, "cr-close", closedDigest, "closed", testNow(), strings.Repeat("f", 64))
-	violations := ValidateTransition(TrustedPolicyState{PolicyBytes: bytes1, PolicySHA256: digest1, TerminalEvent: start, Events: []RolePolicyStateEvent{genesis, start}}, ProposedPolicyState{PolicyBytes: bytes2, PolicySHA256: digest2, CandidateEvent: close, ChangeRequestState: closedCR, ChangeRequestStateBytes: closedCRBytes, ChangeRequestStateSHA256: closedDigest}, testNow())
+	trusted := TrustedPolicyState{PolicyBytes: bytes1, PolicySHA256: digest1, TerminalEvent: start, Events: []RolePolicyStateEvent{genesis, start}}
+	proposed := ProposedPolicyState{PolicyBytes: bytes2, PolicySHA256: digest2, CandidateEvent: close, ChangeRequestState: closedCR, ChangeRequestStateBytes: closedCRBytes, ChangeRequestStateSHA256: closedDigest}
+	violations := ValidateTransition(trusted, proposed, testNow())
 	assertViolationCode(t, violations, "ROTATION_CLOSURE_DIGEST_MISMATCH")
+	// A later explicit time is still before the fixture deadline; this second
+	// assertion guards against accidentally consulting time.Now() internally.
+	assertViolationCode(t, ValidateTransition(trusted, proposed, testNow().Add(15*time.Minute)), "ROTATION_CLOSURE_DIGEST_MISMATCH")
 }
 
 func TestLoadStateEventsRejectsNonCanonicalDuplicateAndBrokenChain(t *testing.T) {
