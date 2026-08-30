@@ -258,11 +258,12 @@ describe("查表与状态标签", () => {
     expect(placeholderNavItems().every((item) => navStageHint(item) !== undefined)).toBe(true);
   });
 
-  it("已实装的七页正是现在真有内容的那七页", () => {
+  it("已实装页清单与真有内容的页面一致", () => {
     expect(allNavItems().filter((item) => item.built).map((item) => item.path)).toEqual([
       "/dashboard",
       "/alerts",
       "/actions",
+      "/jobs",
       "/audit",
       "/registry",
       "/identity",

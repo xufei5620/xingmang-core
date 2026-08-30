@@ -1907,14 +1907,11 @@ describe("未实装页的诚实占位与门禁", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("占位页有页头、「未建」徽章与子页签条", async () => {
-    renderRoute("/jobs");
-    expect(await screen.findByRole("heading", { name: "后台任务", level: 2 })).not.toBeNull();
-    // 只看正文：侧栏上「未建·F-A」不止一条（后台任务、人员与权限都是 F-A）
-    expect(within(screen.getByRole("main")).getByText("未建·F-A")).not.toBeNull();
-    for (const label of ["运行中", "定时任务", "同步批次", "失败与重试", "多次失败任务"]) {
-      expect(screen.getByRole("tab", { name: label })).not.toBeNull();
-    }
+  it("占位页有页头与「未建」徽章", async () => {
+    // XM-JOBS0 把 /jobs 接上真实数据后，用仍是占位页的「跨平台财务」当样本。
+    renderRoute("/finance");
+    expect(await screen.findByRole("heading", { name: "跨平台财务", level: 2 })).not.toBeNull();
+    expect(within(screen.getByRole("main")).getByText("未建·M3+")).not.toBeNull();
   });
 
   // 「操作与审批页显示 F-B 门禁」原来在这里断言，作为占位页的一个特例。
