@@ -35,8 +35,14 @@ RUN go build -trimpath -buildvcs=false \
 # alpine 而不是 scratch：出问题时要能 exec 进去 wget/psql 一下。
 # 生产收紧到 distroless 时另开 ADR。
 FROM alpine:3.22 AS runtime-base
+# /run/xm/secrets 是凭据文件目录的挂载点（XM-CRED0）。先在镜像里建好并交给
+# 运行用户：命名卷首次创建时会继承镜像里这个目录的属主，否则 root:root 的
+# 挂载点会让以 10001 运行的 platform-api 一个文件都写不进去。
 RUN apk add --no-cache ca-certificates tzdata \
- && adduser -D -u 10001 -h /app xingmang
+ && adduser -D -u 10001 -h /app xingmang \
+ && mkdir -p /run/xm/secrets \
+ && chown 10001:10001 /run/xm/secrets \
+ && chmod 0700 /run/xm/secrets
 WORKDIR /app
 USER 10001:10001
 ENV TZ=UTC

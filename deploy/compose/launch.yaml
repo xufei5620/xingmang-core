@@ -181,6 +181,14 @@ services:
       # 这个变量只是 env Provider 的落点，Connector 并不认识它）。
       XM_REQLOG_TOKEN: ${XM_REQLOG_TOKEN:-}
       XM_REQLOG_TIMEOUT: ${XM_REQLOG_TIMEOUT:-30s}
+      # --- 凭据登记（XM-CRED0）--------------------------------------------
+      # 运营在后台粘贴的上游凭据落在这个目录（<root>/<scope>/<name>），
+      # DB 只存指纹与版本。API 是唯一的写方；worker 以只读方式挂同一个卷。
+      XM_SECRET_ROOT: ${XM_SECRET_ROOT:-/run/xm/secrets}
+    volumes:
+      # 命名卷而不是 bind：凭据文件只该存在于这个栈里，宿主目录一不小心就
+      # 被 rsync / 备份脚本带走。镜像里已把挂载点交给运行用户（go.Dockerfile）。
+      - xm-secrets:/run/xm/secrets
     # 不发布端口：admin-web 与 API 同源，一切经 web 服务进来（免 CORS）。
     # 需要直连调试时用 docker compose exec / 或同网络的一次性容器。
     healthcheck:
@@ -313,6 +321,13 @@ services:
       XM_ALERT_TELEGRAM_TOKEN: ${XM_ALERT_TELEGRAM_TOKEN:-}
       XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
       XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS: ${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}
+      # --- 凭据登记（XM-CRED0）--------------------------------------------
+      # 与 platform-api 同一个卷、同一个根目录；worker 只读——它经
+      # secrets.NewFileProvider 按 core.connector_config 里的引用读值，
+      # 没有任何写路径。
+      XM_SECRET_ROOT: ${XM_SECRET_ROOT:-/run/xm/secrets}
+    volumes:
+      - xm-secrets:/run/xm/secrets:ro
 
   # ==========================================================================
   # Web（admin-web 静态产物 + /api/ 反代）
@@ -343,6 +358,9 @@ services:
 
 volumes:
   postgres18-data:
+  # 运营粘贴的上游凭据文件（XM-CRED0）。api 读写、worker 只读。
+  # 换机器时它和 postgres18-data 一样要一起迁：DB 里只有指纹，没有值。
+  xm-secrets:
 
 secrets:
   # 从 deploy/compose/.env 的 DATABASE_PASSWORD 读取。

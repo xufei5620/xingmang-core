@@ -35,7 +35,17 @@ type config struct {
 	// RateLimit 是 /api/v1 的限流配额（XM-R011）。
 	// 零值走 httpapi 的默认值；两项都可用环境变量调，但**关不掉**。
 	RateLimit httpapi.RateLimitConfig
+
+	// SecretRoot 是凭据文件的根目录（XM-CRED0，XM_SECRET_ROOT）。
+	//
+	// 运营粘贴的凭据以 <root>/<scope>/<name> 落盘，worker 用同一个目录构造
+	// secrets.NewFileProvider 读值。本进程只写不读——它没有任何解析明文的路径。
+	// 目录本身不是机密，路径可以进日志；目录里的文件永远不能。
+	SecretRoot string
 }
+
+// defaultSecretRoot 与 deploy/compose/launch.yaml 里 xm-secrets 卷的挂载点一致。
+const defaultSecretRoot = "/run/xm/secrets"
 
 // authMode 是身份解析器的选择开关（XM_AUTH_MODE）。
 type authMode string
@@ -64,6 +74,10 @@ func configFromEnv(getenv func(string) string) (config, error) {
 	c := config{
 		ListenAddr:     "127.0.0.1:8080", // 规格 §21.2：绑回环，由宿主 Nginx 反代
 		RequestTimeout: 30 * time.Second,
+		SecretRoot:     defaultSecretRoot,
+	}
+	if v := strings.TrimSpace(getenv("XM_SECRET_ROOT")); v != "" {
+		c.SecretRoot = v
 	}
 
 	c.Environment = strings.TrimSpace(getenv("ENVIRONMENT"))
