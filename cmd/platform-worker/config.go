@@ -43,6 +43,12 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.HeartbeatFailures = failures
 	}
 
+	// XM-CRED0：后台写入的凭据文件根目录。只读路径形状，不读任何文件。
+	config.SecretRoot, err = parseSecretRoot(getenv(secretRootEnvVar))
+	if err != nil {
+		return jobs.Config{}, err
+	}
+
 	// XM-0022：Sub2API 周期同步。默认 fake——真实只读账号还没就绪（XM-0017），
 	// 把默认设成 real 只会让每个新环境一上来就满屏同步失败。
 	mode, err := jobs.ParseSub2APIMode(getenv("XM_SUB2API_MODE"))

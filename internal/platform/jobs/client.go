@@ -228,6 +228,19 @@ type Config struct {
 	// RunwayThresholdProvider 非空时，告警评估每轮从数据库读取一次完整
 	// revision 快照；仅测试/迁移过渡可使用上面的静态字段。
 	RunwayThresholdProvider finance.RunwayThresholdProvider
+
+	// ConnectorConfigs 是接入配置（模式 / 端点 / allowlist / 凭据引用）的
+	// 运行时来源：core.connector_config（XM-CRED0）。
+	//
+	// nil = 只按环境变量（与本片之前逐字相同）。非 nil 时 Sub2API / NewAPI
+	// 的客户端工厂**每轮同步**都重新读取：行存在即以行里非空的字段为准，
+	// 上面那些 Sub2API* / NewAPI* 字段只作缺省；库读不到则本轮回落到缺省。
+	// 装配在进程入口（cmd/），因为它需要连接池。
+	ConnectorConfigs ConnectorConfigSource
+	// SecretRoot 是文件 SecretProvider 的根目录（XM_SECRET_ROOT），
+	// 管理后台写入的凭据文件按 <root>/<scope>/<name> 落在这里。
+	// 本层只把路径带进启动日志，不读取任何文件内容。
+	SecretRoot string
 }
 
 // DefaultConfig returns the safe local-development baseline.
@@ -409,8 +422,13 @@ func (c Config) validate() error {
 	if c.Sub2APISyncEnabled && c.Sub2APISyncInterval < time.Second {
 		return fmt.Errorf("sub2api sync interval %s is below River's one-second minimum", c.Sub2APISyncInterval)
 	}
-	if c.Sub2APISyncEnabled && c.Sub2APIMode == Sub2APIModeFake && c.Environment == "production" {
+	if c.Sub2APISyncEnabled && c.Sub2APIMode == Sub2APIModeFake && c.Environment == "production" && c.ConnectorConfigs == nil {
 		// 生产环境启动即拒（fail closed）。
+		//
+		// 有 ConnectorConfigs 时放行：模式由 core.connector_config 每轮决定，
+		// 环境变量里的 fake 只是缺省，而生效模式仍为 fake 的每一轮会由动态
+		// 工厂记成 not_supported（见 ErrConnectorProductionFake），演示数据
+		// 同样一条都写不进生产。
 		//
 		// Fake 客户端返回的是**构造出来的**用户数、收入、余额，而同步任务会把
 		// 它们原样写进 ops.metric_observation / _sample。一旦落库，看板就以正常
@@ -445,8 +463,9 @@ func (c Config) validate() error {
 	if c.NewAPISyncEnabled && c.NewAPISyncInterval < time.Second {
 		return fmt.Errorf("newapi sync interval %s is below River's one-second minimum", c.NewAPISyncInterval)
 	}
-	if c.NewAPISyncEnabled && c.NewAPIMode == NewAPIModeFake && c.Environment == "production" {
-		// 生产环境启动即拒（fail closed）——与 Sub2API 完全同一条纪律。
+	if c.NewAPISyncEnabled && c.NewAPIMode == NewAPIModeFake && c.Environment == "production" && c.ConnectorConfigs == nil {
+		// 生产环境启动即拒（fail closed）——与 Sub2API 完全同一条纪律，
+		// 包括「有 ConnectorConfigs 时放行、每轮再 fail closed」那一条。
 		//
 		// Fake 客户端返回的是**构造出来的**用户数、充值额、渠道错误率，
 		// 而同步任务会把它们原样写进 ops.metric_observation / _sample。
@@ -529,6 +548,19 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	if cfg.ConnectorConfigs != nil {
+		// 运维必须能一眼看出：这个进程的接入模式**不是**环境变量说了算，
+		// 而是 core.connector_config 每轮决定，环境变量只是缺省。
+		cfg.Logger.Info("connector_config_source",
+			slog.String("event", "connector_config_source"),
+			slog.String("module", "platform.jobs"),
+			slog.String("environment", cfg.Environment),
+			slog.String("principal_id", "worker:platform"),
+			slog.String("connector_config_source", "database"),
+			slog.String("sub2api_default_mode", string(cfg.Sub2APIMode)),
+			slog.String("newapi_default_mode", string(cfg.NewAPIMode)),
+			slog.String("secret_root", cfg.SecretRoot))
+	}
 
 	workers := river.NewWorkers()
 	river.AddWorker(workers, NewHeartbeatWorker(cfg.Logger, cfg.Environment))
@@ -559,15 +591,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			Mode:             cfg.Sub2APIMode,
 			ExpectedInterval: cfg.Sub2APISyncInterval,
 			Store:            ops.NewStore(pool),
-			NewClient: NewSub2APIClientFactory(cfg.Sub2APIMode, Sub2APIRealConfig{
-				Endpoint:        cfg.Sub2APIEndpoint,
-				TargetAllowlist: cfg.Sub2APITargetAllowlist,
-				CredentialRef:   cfg.Sub2APICredentialRef,
-				Environment:     cfg.Environment,
-				InstanceID:      cfg.Sub2APIInstanceID,
-				Timeout:         cfg.Sub2APIRequestTimeout,
-				Secrets:         cfg.Sub2APISecrets,
-			}),
+			NewClient:        cfg.sub2apiClientFactory(),
 		}))
 		sub2apiPeriodic, err := newManifestPeriodicJob(
 			Sub2APISyncJobKind, cfg.Sub2APISyncInterval, cfg.Sub2APISyncRunOnStart,
@@ -594,16 +618,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			Mode:             cfg.NewAPIMode,
 			ExpectedInterval: cfg.NewAPISyncInterval,
 			Store:            ops.NewStore(pool),
-			NewClient: NewNewAPIClientFactory(cfg.NewAPIMode, NewAPIRealConfig{
-				Endpoint:        cfg.NewAPIEndpoint,
-				TargetAllowlist: cfg.NewAPITargetAllowlist,
-				CredentialRef:   cfg.NewAPICredentialRef,
-				UserID:          cfg.NewAPIUserID,
-				Environment:     cfg.Environment,
-				InstanceID:      cfg.NewAPIInstanceID,
-				Timeout:         cfg.NewAPIRequestTimeout,
-				Secrets:         cfg.NewAPISecrets,
-			}),
+			NewClient:        cfg.newapiClientFactory(),
 		}))
 		newapiPeriodic, err := newManifestPeriodicJob(
 			NewAPISyncJobKind, cfg.NewAPISyncInterval, cfg.NewAPISyncRunOnStart,
@@ -825,4 +840,52 @@ func newManifestPeriodicJob(
 		},
 		&river.PeriodicJobOpts{ID: spec.ID, RunOnStart: runOnStart},
 	), nil
+}
+
+// sub2apiClientFactory 按是否有动态配置来源选择工厂。
+//
+// 两条路的缺省完全相同：没有 ConnectorConfigs 的部署行为与 XM-CRED0
+// 之前逐字一致；有的话，同一份缺省成为行缺字段时的兜底。
+func (c Config) sub2apiClientFactory() Sub2APIClientFactory {
+	defaults := Sub2APIRealConfig{
+		Endpoint:        c.Sub2APIEndpoint,
+		TargetAllowlist: c.Sub2APITargetAllowlist,
+		CredentialRef:   c.Sub2APICredentialRef,
+		Environment:     c.Environment,
+		InstanceID:      c.Sub2APIInstanceID,
+		Timeout:         c.Sub2APIRequestTimeout,
+		Secrets:         c.Sub2APISecrets,
+	}
+	if c.ConnectorConfigs == nil {
+		return NewSub2APIClientFactory(c.Sub2APIMode, defaults)
+	}
+	return NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
+		Source:      c.ConnectorConfigs,
+		Logger:      c.Logger,
+		DefaultMode: c.Sub2APIMode,
+		Defaults:    defaults,
+	})
+}
+
+// newapiClientFactory 是 NewAPI 侧的同款选择，见 sub2apiClientFactory。
+func (c Config) newapiClientFactory() NewAPIClientFactory {
+	defaults := NewAPIRealConfig{
+		Endpoint:        c.NewAPIEndpoint,
+		TargetAllowlist: c.NewAPITargetAllowlist,
+		CredentialRef:   c.NewAPICredentialRef,
+		UserID:          c.NewAPIUserID,
+		Environment:     c.Environment,
+		InstanceID:      c.NewAPIInstanceID,
+		Timeout:         c.NewAPIRequestTimeout,
+		Secrets:         c.NewAPISecrets,
+	}
+	if c.ConnectorConfigs == nil {
+		return NewNewAPIClientFactory(c.NewAPIMode, defaults)
+	}
+	return NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
+		Source:      c.ConnectorConfigs,
+		Logger:      c.Logger,
+		DefaultMode: c.NewAPIMode,
+		Defaults:    defaults,
+	})
 }
