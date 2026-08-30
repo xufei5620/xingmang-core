@@ -71,4 +71,5 @@ services:
       XM_WEB_OIDC_CLIENT_ID: ${XM_WEB_OIDC_CLIENT_ID:-${XM_OIDC_AUDIENCE:-}}
     ports: !override
       # 生产入口由 TLS Nginx 反代；不要把管理后台直接绑到公网接口。
-      - "127.0.0.1:18089:80"
+      # 端口跟 .env 的 WEB_PORT（宿主 Nginx 反代的上游）一致，只把绑定地址钉死在回环。
+      - "127.0.0.1:${WEB_PORT:-8088}:80"

@@ -214,6 +214,9 @@ services:
       XM_OIDC_ROLE_SCOPES: ${XM_OIDC_ROLE_SCOPES:-}
       XM_OIDC_CLOCK_SKEW: ${XM_OIDC_CLOCK_SKEW:-}
       XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
+      # 用户清单模式（XM-0046）：off / fake / real。留空沿用进程默认 fake；
+      # 生产应显式 off——real 客户端未交付前，fake 客户不得出现在生产页面。
+      XM_PLATFORM_USERS_MODE: ${XM_PLATFORM_USERS_MODE:-}
       XM_REQLOG_ENDPOINT: ${XM_REQLOG_ENDPOINT:-}
       XM_REQLOG_TARGET_ALLOWLIST: ${XM_REQLOG_TARGET_ALLOWLIST:-}
       XM_REQLOG_CREDENTIAL_REF: ${XM_REQLOG_CREDENTIAL_REF:-}
