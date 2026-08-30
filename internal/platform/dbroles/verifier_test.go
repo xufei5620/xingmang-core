@@ -149,6 +149,33 @@ func TestCatalogQueriesAreSelectOnlyAndPinned(t *testing.T) {
 	}
 }
 
+func TestDefaultACLProjectionExpandsPG18TypeFamilyAndEmptyRows(t *testing.T) {
+	aclMap := map[string]*CatalogDefaultACL{}
+	// A LEFT JOIN over an empty ACL emits one row with an empty privilege;
+	// both logical families must still be represented for verifier completeness.
+	projectDefaultACLRow(aclMap, "xm_migrator", "core", "T", "PUBLIC", "")
+	if len(aclMap) != 2 {
+		t.Fatalf("PG18 T default ACL must project type and domain, got %d entries", len(aclMap))
+	}
+	for _, kind := range []string{"type", "domain"} {
+		key := "xm_migrator\x00core\x00" + kind
+		acl, ok := aclMap[key]
+		if !ok {
+			t.Fatalf("missing projected %s default ACL", kind)
+		}
+		if len(acl.Privileges) != 0 {
+			t.Fatalf("empty ACL sentinel must not create a privilege grant for %s: %#v", kind, acl.Privileges)
+		}
+	}
+	projectDefaultACLRow(aclMap, "xm_migrator", "core", "T", "xm_worker_runtime", "USAGE")
+	for _, kind := range []string{"type", "domain"} {
+		acl := aclMap["xm_migrator\x00core\x00"+kind]
+		if got := acl.Privileges["xm_worker_runtime"]; len(got) != 1 || got[0] != "USAGE" {
+			t.Fatalf("T ACL privilege not mirrored to %s: %#v", kind, acl.Privileges)
+		}
+	}
+}
+
 func TestPublicPrivilegeQueriesDoNotPassPublicPseudoRoleToPrivilegeFunctions(t *testing.T) {
 	for _, query := range CatalogQueryAllowlist() {
 		lower := strings.ToLower(query)
