@@ -630,7 +630,7 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
       // 唯一现场，多带一个 scope 要在 diff 里看得见——本地随手加一个用完忘了删,
       // 正是「在我机器上好好的」那类问题的来源
       "X-Dev-Scopes":
-        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read,platform.users.read,platform.user_keys.read,finance.upstream_account.manage,finance.recharge_ratio.manage,finance.token_map.manage,ui.saved_view.manage",
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read,platform.users.read,platform.user_keys.read,finance.upstream_account.manage,finance.recharge_ratio.manage,finance.token_map.manage,ui.saved_view.manage,credential.manage",
     });
   });
 
@@ -1937,6 +1937,20 @@ describe("设置页", () => {
     renderRoute("/settings");
     expect(await screen.findByRole("link", { name: /打开告警与故障规则/ })).not.toBeNull();
     expect(screen.queryByLabelText("Critical 天数")).toBeNull();
+  });
+
+  it("设置里的凭据子页显示安全管理边界，并提供返回设置入口", async () => {
+    renderRoute("/settings?sub=credentials");
+    expect(await screen.findByRole("heading", { name: "凭据管理", level: 2 })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "返回设置" }).getAttribute("href")).toBe("/settings");
+    expect(screen.getByText(/值不会回读到页面/)).not.toBeNull();
+  });
+
+  it("设置拼错子页时不回落到身份设置", async () => {
+    renderRoute("/settings?sub=typo");
+    expect(await screen.findByText("「typo」设置子页尚未接入")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "返回设置" }).getAttribute("href")).toBe("/settings");
+    expect(screen.queryByText("身份与权限（只读）")).toBeNull();
   });
 });
 
