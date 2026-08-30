@@ -630,7 +630,7 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
       // 唯一现场，多带一个 scope 要在 diff 里看得见——本地随手加一个用完忘了删,
       // 正是「在我机器上好好的」那类问题的来源
       "X-Dev-Scopes":
-        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read,platform.users.read,platform.user_keys.read,finance.upstream_account.manage,finance.recharge_ratio.manage,finance.token_map.manage,ui.saved_view.manage,credential.manage",
+        "registry.read,ops.read,audit.read,registry.service.manage,alerts.alert.manage,alerts.silence.manage,finance.read,request.read,request.content.read,platform.users.read,platform.user_keys.read,finance.upstream_account.manage,finance.recharge_ratio.manage,finance.token_map.manage,ui.saved_view.manage,credential.manage,connector.manage",
     });
   });
 

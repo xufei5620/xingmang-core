@@ -17,6 +17,19 @@ const row = {
   scope: "sub2api",
   updated_at: "2026-08-30T09:00:00Z",
   fingerprint: "sha256:abcdef0123456789",
+  version: 3,
+  available: true,
+  revoked: false,
+};
+
+const revokedRow = {
+  credential_ref: "secret://newapi/legacy",
+  scope: "newapi",
+  updated_at: "2026-08-29T09:00:00Z",
+  fingerprint: "sha256:0123456789abcdef",
+  version: 1,
+  available: false,
+  revoked: true,
 };
 
 function renderPanel() {
@@ -32,44 +45,55 @@ function renderPanel() {
 
 function listAndActionHandler(
   actionResponse: Record<string, unknown> = { action_run_id: "run-cred-1" },
+  rows: unknown[] = [row],
 ) {
   return vi.fn((url: string, init?: RequestInit) => {
     if (init?.method === "POST") return Promise.resolve(response(actionResponse));
-    if (url.startsWith("/api/v1/credentials")) return Promise.resolve(response({ items: [row] }));
+    if (url.startsWith("/api/v1/credentials")) return Promise.resolve(response({ items: rows }));
     return Promise.resolve(response({ items: [] }));
   });
 }
 
-describe("设置 · 凭据管理", () => {
+function postCall(fetchMock: ReturnType<typeof vi.fn>): [string, RequestInit] {
+  return fetchMock.mock.calls.find(
+    (call) => (call[1] as RequestInit | undefined)?.method === "POST",
+  ) as unknown as [string, RequestInit];
+}
+
+describe("设置 · 全部凭据元数据", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("只展示 CredentialRef、scope、更新时间和指纹前缀，不展示响应里的秘密字段", async () => {
+  it("只展示元数据列（引用、scope、指纹、版本、更新时间、状态），不展示响应里的秘密字段", async () => {
     const hiddenValue = ["never", "render", "this"].join("-");
     vi.stubGlobal(
       "fetch",
-      vi.fn(() =>
-        Promise.resolve(
-          response({ items: [{ ...row, secret_value: hiddenValue }] }),
-        ),
-      ),
+      listAndActionHandler({}, [{ ...row, secret_value: hiddenValue }, revokedRow]),
     );
 
     renderPanel();
 
     const table = within(await screen.findByRole("table"));
-    expect(table.getByRole("columnheader", { name: "CredentialRef" })).toBeTruthy();
-    expect(table.getByRole("columnheader", { name: "scope" })).toBeTruthy();
-    expect(table.getByRole("columnheader", { name: "更新时间" })).toBeTruthy();
-    expect(table.getByRole("columnheader", { name: "指纹" })).toBeTruthy();
+    for (const header of ["CredentialRef", "scope", "指纹", "版本", "更新时间", "状态"]) {
+      expect(table.getByRole("columnheader", { name: header })).toBeTruthy();
+    }
     expect(table.getByText(row.credential_ref)).toBeTruthy();
     expect(table.getByText("sub2api")).toBeTruthy();
     expect(table.getByText(/2026-08-30 09:00:00 UTC/)).toBeTruthy();
     expect(table.getByText("sha256:abcdef01…")).toBeTruthy();
+    expect(table.getByText("v3")).toBeTruthy();
+    expect(table.getByText("可用")).toBeTruthy();
+    expect(table.getByText("已撤销")).toBeTruthy();
     expect(screen.queryByText(hiddenValue)).toBeNull();
     expect(screen.getByText(/保存后不会再次显示/)).toBeTruthy();
+
+    // 已撤销的引用不再提供吊销按钮；轮换仍开放，由服务端决定
+    const revokeLegacy = table.getByRole("button", { name: "吊销 secret://newapi/legacy" }) as HTMLButtonElement;
+    expect(revokeLegacy.disabled).toBe(true);
+    const revokeActive = table.getByRole("button", { name: "吊销 secret://sub2api/readonly" }) as HTMLButtonElement;
+    expect(revokeActive.disabled).toBe(false);
   });
 
-  it("没有凭据列表时明确显示未接入/空态，不凭空填充样例行", async () => {
+  it("没有凭据列表时明确显示空态，不凭空填充样例行", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response({ items: [] }))));
 
     renderPanel();
@@ -99,21 +123,19 @@ describe("设置 · 凭据管理", () => {
     expect((valueInput as HTMLInputElement).value).toBe("");
     expect(screen.queryByText(transientValue)).toBeNull();
 
-    const post = fetchMock.mock.calls.find(
-      (call) => (call[1] as RequestInit | undefined)?.method === "POST",
-    ) as unknown as [string, RequestInit];
+    const post = postCall(fetchMock);
     expect(post[0]).toBe("/api/v1/actions/credential.secret.upsert/versions/1/execute");
     expect(JSON.parse(String(post[1].body))).toEqual({
       params: { credential_ref: "secret://newapi/session", secret_value: transientValue },
     });
   });
 
-  it("编辑已有引用时使用 rotate，引用只读且不会把旧值预填回表单", async () => {
+  it("轮换已有引用时使用 rotate，引用只读且不会把旧值预填回表单", async () => {
     const fetchMock = listAndActionHandler({ action_run_id: "run-rotate-1" });
     vi.stubGlobal("fetch", fetchMock);
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: "修改凭据" }));
+    fireEvent.click(await screen.findByRole("button", { name: "轮换 secret://sub2api/readonly" }));
     const form = screen.getByRole("heading", { name: "轮换凭据" }).closest("section") as HTMLElement;
     const refInput = within(form).getByRole("textbox", { name: /CredentialRef/ }) as HTMLInputElement;
     const valueInput = within(form).getByLabelText(/凭据值/) as HTMLInputElement;
@@ -129,9 +151,7 @@ describe("设置 · 凭据管理", () => {
       expect(screen.getByText("run_id run-rotate-1")).toBeTruthy();
     });
 
-    const post = fetchMock.mock.calls.find(
-      (call) => (call[1] as RequestInit | undefined)?.method === "POST",
-    ) as unknown as [string, RequestInit];
+    const post = postCall(fetchMock);
     expect(post[0]).toBe("/api/v1/actions/credential.secret.rotate/versions/1/execute");
     expect(JSON.parse(String(post[1].body))).toEqual({
       params: { credential_ref: row.credential_ref, secret_value: nextValue },
@@ -143,7 +163,7 @@ describe("设置 · 凭据管理", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: "吊销凭据" }));
+    fireEvent.click(await screen.findByRole("button", { name: "吊销 secret://sub2api/readonly" }));
     const dialog = within(await screen.findByRole("dialog"));
     fireEvent.click(dialog.getByRole("button", { name: "确认吊销" }));
     expect(await screen.findByText(/请填写吊销原因/)).toBeTruthy();
@@ -156,22 +176,20 @@ describe("设置 · 凭据管理", () => {
       expect(screen.getByText("run_id run-revoke-1")).toBeTruthy();
     });
 
-    const post = fetchMock.mock.calls.find(
-      (call) => (call[1] as RequestInit | undefined)?.method === "POST",
-    ) as unknown as [string, RequestInit];
+    const post = postCall(fetchMock);
     expect(post[0]).toBe("/api/v1/actions/credential.secret.revoke/versions/1/execute");
     expect(JSON.parse(String(post[1].body))).toEqual({
       params: { credential_ref: row.credential_ref, reason: "planned-retirement" },
     });
   });
 
-  it("Query 尚未接入时显示明确的未接入状态，但保留粘贴表单作为预览边界", async () => {
+  it("列表读取失败时显示带错误码的错误态，不伪装成空表，也不藏起粘贴表单", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
         Promise.resolve(
           response(
-            { error: { code: "ACTION_NOT_REGISTERED", message: "凭据列表尚未接入" } },
+            { error: { code: "ACTION_NOT_REGISTERED", message: "凭据列表尚未接入", request_id: "req-list-1" } },
             404,
           ),
         ),
@@ -180,7 +198,10 @@ describe("设置 · 凭据管理", () => {
 
     renderPanel();
 
-    expect(await screen.findByText("凭据登记簿尚未接入")).toBeTruthy();
+    expect(await screen.findByText("加载失败")).toBeTruthy();
+    expect(screen.getByText(/凭据列表尚未接入（错误码 ACTION_NOT_REGISTERED）/)).toBeTruthy();
+    expect(screen.getByText(/request_id: req-list-1/)).toBeTruthy();
+    expect(screen.queryByText("暂无凭据引用")).toBeNull();
     const form = screen.getByRole("heading", { name: "添加凭据" }).closest("section") as HTMLElement;
     expect(within(form).getByRole("textbox", { name: /CredentialRef/ })).toBeTruthy();
     expect(within(form).getByLabelText(/凭据值/)).toBeTruthy();

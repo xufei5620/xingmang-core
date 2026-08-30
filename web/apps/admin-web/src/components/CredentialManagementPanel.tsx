@@ -1,15 +1,16 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DataTableV2,
   PageState,
   formatUtcTimestamp,
   type DataTableColumn,
 } from "@xingmang/ui-admin";
-import { Button, Dialog, FormField, Input } from "@xingmang/ui-primitives";
+import { Badge, Button, Dialog, FormField, Input, type BadgeTone } from "@xingmang/ui-primitives";
 import { useEffect, useId, useRef, useState } from "react";
-import { ApiError, type ApiClient } from "../api/client";
+import type { ApiClient } from "../api/client";
 import {
   CREDENTIAL_MANAGE_PERMISSION,
+  CREDENTIAL_QUERY_KEYS,
   fingerprintPrefix,
   listCredentials,
   revokeCredential,
@@ -23,6 +24,7 @@ import { appApiConfig, type PlatformApiConfig } from "../api/config";
 import { ActionErrorNote } from "./ActionErrorNote";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
+import { redactActionError } from "../lib/credentialErrors";
 import {
   EMPTY_CREDENTIAL_FORM,
   buildCredentialParams,
@@ -46,17 +48,18 @@ interface WriteVariables {
   values: CredentialFormValues;
 }
 
-/** 设置页的凭据登记簿 + 粘贴即保存表单。
+/** 全部凭据元数据表 + 添加/轮换表单。
  *
- *  这个组件只认识两类东西：Query 返回的四个安全元数据字段，以及 Action 的
- *  action_run_id。SecretProvider、文件权限和连接器现场解析属于后端片，留在
- * 这里的 client/config 注入点只为预览与契约测试服务。 */
+ *  这个组件只认识两类东西：Query 返回的安全元数据字段（引用、scope、指纹、
+ *  版本、更新时间、可用/撤销），以及 Action 的 action_run_id。凭据值只在
+ *  请求期间存在，成功或失败后都从表单里清掉。 */
 export function CredentialManagementPanel({
   client = undefined,
   config = appApiConfig,
 }: CredentialManagementPanelProps) {
+  const queryClient = useQueryClient();
   const query = useQuery({
-    queryKey: ["credentials", config.environment],
+    queryKey: CREDENTIAL_QUERY_KEYS.metadata(config.environment),
     queryFn: ({ signal }) => listCredentials({ signal }, client, config),
   });
   const [mode, setMode] = useState<WriteMode>("upsert");
@@ -66,6 +69,10 @@ export function CredentialManagementPanel({
   const [actionError, setActionError] = useState<unknown>(null);
   const lastSubmittedSecret = useRef("");
   const fieldPrefix = useId();
+
+  // 元数据表与上方「平台需要的凭据」共用 ["credentials"] 前缀，一次作废两边一起刷新
+  const refreshCredentials = () =>
+    void queryClient.invalidateQueries({ queryKey: CREDENTIAL_QUERY_KEYS.all });
 
   const writeMutation = useMutation<
     { runId: string; result: unknown },
@@ -90,7 +97,7 @@ export function CredentialManagementPanel({
         title: variables.mode === "rotate" ? "已轮换凭据" : "已保存凭据",
         runId: run.runId,
       });
-      void query.refetch();
+      refreshCredentials();
       // TanStack Query 会暂存 mutation variables；清掉它，避免 secret_value
       // 在前端 mutation 状态里比请求生命周期更久。
       writeMutation.reset();
@@ -141,45 +148,12 @@ export function CredentialManagementPanel({
     writeMutation.mutate({ mode, values: form });
   };
 
-  const list = query.error
-    ? isCredentialQueryUnavailable(query.error)
-      ? (
-          <PageState
-            kind="unavailable"
-            title="凭据登记簿尚未接入"
-            description="后端 Credential Query 尚未接线；此处不填充样例引用，粘贴表单仅作为 Action 预览边界。"
-          />
-        )
-      : (
-          <ApiStateView
-            isPending={query.isPending}
-            error={query.error}
-            onRetry={() => void query.refetch()}
-          >
-            <></>
-          </ApiStateView>
-        )
-    : (
-        <ApiStateView
-          isPending={query.isPending}
-          error={query.error}
-          onRetry={() => void query.refetch()}
-        >
-          <CredentialTable rows={query.data ?? []} onEdit={edit} onRevoked={(run, credentialRef) => {
-            // 正在轮换的同一引用被吊销后，退出编辑态，避免表单继续指向已撤销对象。
-            if (form.credentialRef.trim() === credentialRef) resetForm();
-            setNotice({ title: "已吊销凭据", runId: run.runId });
-            void query.refetch();
-          }} client={client} editingDisabled={writeMutation.isPending} />
-        </ApiStateView>
-      );
-
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="rounded-lg border border-edge bg-surface px-4 py-3 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold text-fg">凭据引用与轮换</h2>
+            <h2 className="text-base font-semibold text-fg">全部凭据元数据</h2>
             <p className="mt-1 max-w-4xl text-xs leading-5 text-fg-muted">
               平台只保存 CredentialRef；值经 Action 写入仓库外 SecretProvider。保存、轮换或吊销后，值不会回读到页面、响应或审计摘要。
             </p>
@@ -194,9 +168,26 @@ export function CredentialManagementPanel({
         <section className="min-w-0" aria-labelledby={`${fieldPrefix}-list-title`}>
           <div className="mb-2 flex items-baseline justify-between gap-3">
             <h3 id={`${fieldPrefix}-list-title`} className="text-sm font-semibold text-fg">已登记引用</h3>
-            <span className="text-xs text-fg-muted">仅显示四项安全元数据</span>
+            <span className="text-xs text-fg-muted">只显示元数据，不含值</span>
           </div>
-          {list}
+          <ApiStateView
+            isPending={query.isPending}
+            error={query.error}
+            onRetry={() => void query.refetch()}
+          >
+            <CredentialTable
+              rows={query.data ?? []}
+              onEdit={edit}
+              onRevoked={(run, credentialRef) => {
+                // 正在轮换的同一引用被吊销后，退出编辑态，避免表单继续指向已撤销对象。
+                if (form.credentialRef.trim() === credentialRef) resetForm();
+                setNotice({ title: "已吊销凭据", runId: run.runId });
+                refreshCredentials();
+              }}
+              client={client}
+              editingDisabled={writeMutation.isPending}
+            />
+          </ApiStateView>
         </section>
 
         <CredentialForm
@@ -213,6 +204,13 @@ export function CredentialManagementPanel({
       </div>
     </div>
   );
+}
+
+/** 三种状态说三句不同的话：撤销是人做的决定，不可用是 SecretProvider 读不到。 */
+function credentialStatus(row: CredentialMetadata): { label: string; tone: BadgeTone; title: string } {
+  if (row.revoked) return { label: "已撤销", tone: "danger", title: "已吊销；连接器不再使用该引用" };
+  if (row.available) return { label: "可用", tone: "success", title: "SecretProvider 能读到该引用的值" };
+  return { label: "不可用", tone: "warning", title: "未撤销，但 SecretProvider 当前读不到值" };
 }
 
 function CredentialTable({
@@ -233,7 +231,7 @@ function CredentialTable({
       <PageState
         kind="empty"
         title="暂无凭据引用"
-        description="当前环境没有已登记的 CredentialRef；后端 Query/SecretProvider 接线完成后，保存成功的引用会出现在这里。"
+        description="当前环境没有已登记的 CredentialRef；在上方「平台需要的凭据」里粘贴保存后会出现在这里。"
       />
     );
   }
@@ -253,16 +251,6 @@ function CredentialTable({
       cell: (row) => <span className="font-mono text-xs text-fg">{row.scope || "—"}</span>,
     },
     {
-      id: "updated_at",
-      header: "更新时间",
-      value: (row) => row.updated_at,
-      cell: (row) => (
-        <span className="text-xs text-fg-muted">
-          {row.updated_at ? formatUtcTimestamp(row.updated_at) : "—"}
-        </span>
-      ),
-    },
-    {
       id: "fingerprint",
       header: "指纹",
       value: (row) => row.fingerprint,
@@ -273,6 +261,38 @@ function CredentialTable({
       ),
     },
     {
+      id: "version",
+      header: "版本",
+      numeric: true,
+      value: (row) => row.version,
+      cell: (row) => (
+        <span className="font-mono text-xs text-fg">{row.version > 0 ? `v${row.version}` : "—"}</span>
+      ),
+    },
+    {
+      id: "updated_at",
+      header: "更新时间",
+      value: (row) => row.updated_at,
+      cell: (row) => (
+        <span className="text-xs text-fg-muted">
+          {row.updated_at ? formatUtcTimestamp(row.updated_at) : "—"}
+        </span>
+      ),
+    },
+    {
+      id: "status",
+      header: "状态",
+      value: (row) => credentialStatus(row).label,
+      cell: (row) => {
+        const status = credentialStatus(row);
+        return (
+          <Badge tone={status.tone} title={status.title}>
+            {status.label}
+          </Badge>
+        );
+      },
+    },
+    {
       id: "actions",
       header: "操作",
       cell: (row) => (
@@ -280,17 +300,18 @@ function CredentialTable({
           <Button
             size="sm"
             variant="secondary"
-            aria-label="修改凭据"
+            aria-label={`轮换 ${row.credential_ref}`}
             disabled={editingDisabled}
             onClick={() => onEdit(row)}
           >
-            修改
+            轮换
           </Button>
           <RevokeDialog
             credentialRef={row.credential_ref}
             client={client}
             onRevoked={onRevoked}
-            disabled={editingDisabled}
+            // 已撤销的再点一次吊销没有意义；轮换仍开放，由服务端决定能否复活
+            disabled={editingDisabled || row.revoked}
           />
         </div>
       ),
@@ -299,7 +320,7 @@ function CredentialTable({
 
   return (
     <DataTableV2
-      caption="凭据引用列表：CredentialRef、scope、更新时间与指纹前缀"
+      caption="凭据元数据列表：CredentialRef、scope、指纹前缀、版本、更新时间与状态"
       columns={columns}
       rows={rows}
       rowKey={(row) => row.credential_ref}
@@ -362,7 +383,7 @@ function CredentialForm({
           <p className="mt-1 text-xs leading-5 text-fg-muted">
             {editing
               ? "只填写新值；现有值不可读取。提交会调用 credential.rotate。"
-              : "粘贴一次即保存；提交会调用 credential.upsert。"}
+              : "登记清单之外的引用：粘贴一次即保存，提交会调用 credential.upsert。"}
           </p>
         </div>
         {editing ? (
@@ -499,7 +520,7 @@ function RevokeDialog({
         }
       }}
       trigger={
-        <Button size="sm" variant="danger" aria-label="吊销凭据" disabled={disabled}>
+        <Button size="sm" variant="danger" aria-label={`吊销 ${credentialRef}`} disabled={disabled}>
           吊销
         </Button>
       }
@@ -547,27 +568,4 @@ function RevokeDialog({
       </form>
     </Dialog>
   );
-}
-
-function isCredentialQueryUnavailable(error: unknown): boolean {
-  if (error instanceof ApiError) {
-    return error.code === "ACTION_NOT_REGISTERED" || error.code === "NOT_IMPLEMENTED";
-  }
-  return error instanceof Error && /尚未接入|未实现/.test(error.message);
-}
-
-function redactActionError(error: unknown, secret: string): unknown {
-  if (!secret) return error;
-  if (error instanceof ApiError && error.message.includes(secret)) {
-    return new ApiError(
-      error.status,
-      error.code,
-      "凭据 Action 失败；请检查 CredentialRef、权限与 SecretProvider 状态",
-      error.requestId,
-    );
-  }
-  if (error instanceof Error && error.message.includes(secret)) {
-    return new Error("凭据 Action 失败；请检查 CredentialRef、权限与 SecretProvider 状态");
-  }
-  return error;
 }

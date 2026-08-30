@@ -67,6 +67,9 @@ export const DEFAULT_SCOPES = [
   // XM-CRED0：开发态只为预览凭据 Action 边界携带该 scope；服务端仍需独立
   // 授权，staff/admin 默认映射刻意不包含它。
   "credential.manage",
+  // XM-CRED0 接入模式：connector.config.set@1 与 GET /connectors/config。
+  // 同为开发态默认；服务端独立裁决，生产 admin/staff 映射不含它。
+  "connector.manage",
 ];
 
 function parseScopes(raw: string | undefined): string[] {

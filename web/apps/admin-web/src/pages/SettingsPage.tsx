@@ -50,7 +50,7 @@ export function SettingsPage() {
           <div className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4">
             <p className="text-sm font-medium text-fg">凭据管理</p>
             <p className="text-xs leading-5 text-fg-muted">
-              列表只显示 CredentialRef、scope、更新时间与指纹前缀；粘贴值后通过 Action 保存，页面不会回读。
+              平台需要的凭据清单（缺失/已配置）、各平台接入模式（fake/real）与全部凭据元数据；粘贴值后通过 Action 保存，页面不会回读。
             </p>
             <Link
               to="/settings?sub=credentials"
