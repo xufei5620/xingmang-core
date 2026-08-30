@@ -1,0 +1,3 @@
+{"time":"2026-08-30T00:00:00Z","event":"worker_started","environment":"staging","sub2api_sync_enabled":true,"sub2api_mode":"real","sub2api_source":"sub2api-prod","newapi_sync_enabled":true,"newapi_mode":"real","newapi_source":"newapi-prod","credential_ref":"fixture-token-SHOULD-NOT-ECHO"}
+{"time":"2026-08-30T00:00:01Z","event":"job_completed","environment":"staging","job_kind":"sub2api_sync","success":true,"metrics_failed":0,"source":"sub2api-prod"}
+{"time":"2026-08-30T00:00:01Z","event":"job_completed","environment":"staging","job_kind":"newapi_sync","success":true,"metrics_failed":0,"source":"newapi-prod"}
