@@ -1,0 +1,1018 @@
+{
+  "policy_version": 1,
+  "capabilities": [
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.health.read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "probe",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "sub2api.health",
+          "method": "GET",
+          "path_template": "/health",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 262144,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.service.version_read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "probe",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "sub2api.version",
+          "method": "GET",
+          "path_template": "/api/v1/admin/system/version",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 262144,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.users.read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "light",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "sub2api.dashboard.stats",
+          "method": "GET",
+          "path_template": "/api/v1/admin/dashboard/stats",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 8388608,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.users.balance_read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "sub2api.users",
+          "method": "GET",
+          "path_template": "/api/v1/admin/users",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 1000
+        }
+      ],
+      "max_requests": 20,
+      "max_pages": 20,
+      "max_rows": 20000,
+      "max_bytes": 67108864,
+      "max_cost_units": 20,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.orders.read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "sub2api.payment.dashboard",
+          "method": "GET",
+          "path_template": "/api/v1/admin/payment/dashboard",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 1000
+        },
+        {
+          "route_id": "sub2api.dashboard.trend",
+          "method": "GET",
+          "path_template": "/api/v1/admin/dashboard/trend",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 1000
+        }
+      ],
+      "max_requests": 180,
+      "max_pages": 90,
+      "max_rows": 9000,
+      "max_bytes": 67108864,
+      "max_cost_units": 180,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.accounts.read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "sub2api.accounts",
+          "method": "GET",
+          "path_template": "/api/v1/admin/accounts",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 200
+        }
+      ],
+      "max_requests": 10,
+      "max_pages": 10,
+      "max_rows": 2000,
+      "max_bytes": 67108864,
+      "max_cost_units": 10,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.channels.balance_read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "sub2api.channels.balance",
+          "method": "GET",
+          "path_template": "/api/v1/admin/accounts",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 200
+        }
+      ],
+      "max_requests": 10,
+      "max_pages": 10,
+      "max_rows": 2000,
+      "max_bytes": 67108864,
+      "max_cost_units": 10,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "newapi",
+      "capability": "newapi.service.version_read",
+      "provider_scope_rule": "newapi",
+      "cost_class": "probe",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "newapi.status.version",
+          "method": "GET",
+          "path_template": "/api/status",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 262144,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "newapi",
+      "capability": "newapi.health.read",
+      "provider_scope_rule": "newapi",
+      "cost_class": "probe",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "newapi.status.health",
+          "method": "GET",
+          "path_template": "/api/status",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 262144,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "newapi",
+      "capability": "newapi.users.read",
+      "provider_scope_rule": "newapi",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "newapi.users",
+          "method": "GET",
+          "path_template": "/api/user/",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 100
+        }
+      ],
+      "max_requests": 50,
+      "max_pages": 50,
+      "max_rows": 5000,
+      "max_bytes": 67108864,
+      "max_cost_units": 50,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "newapi",
+      "capability": "newapi.orders.read",
+      "provider_scope_rule": "newapi",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "newapi.topups",
+          "method": "GET",
+          "path_template": "/api/user/topup",
+          "cost_units": 2,
+          "max_response_bytes": 8388608,
+          "max_rows": 100
+        }
+      ],
+      "max_requests": 20,
+      "max_pages": 20,
+      "max_rows": 2000,
+      "max_bytes": 67108864,
+      "max_cost_units": 40,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "newapi",
+      "capability": "newapi.channels.read",
+      "provider_scope_rule": "newapi",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "newapi.channels",
+          "method": "GET",
+          "path_template": "/api/channel/",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 100
+        }
+      ],
+      "max_requests": 10,
+      "max_pages": 10,
+      "max_rows": 1000,
+      "max_bytes": 67108864,
+      "max_cost_units": 10,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "newapi",
+      "capability": "newapi.errors.read",
+      "provider_scope_rule": "newapi",
+      "cost_class": "count-heavy",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "newapi.logs",
+          "method": "GET",
+          "path_template": "/api/log/",
+          "cost_units": 2,
+          "max_response_bytes": 8388608,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 80,
+      "max_pages": 40,
+      "max_rows": 80,
+      "max_bytes": 67108864,
+      "max_cost_units": 160,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "newapi",
+      "capability": "newapi.models.usage_read",
+      "provider_scope_rule": "newapi",
+      "cost_class": "page",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "newapi.data",
+          "method": "GET",
+          "path_template": "/api/data/",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 100
+        }
+      ],
+      "max_requests": 10,
+      "max_pages": 10,
+      "max_rows": 1000,
+      "max_bytes": 67108864,
+      "max_cost_units": 10,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "page",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "metering",
+      "capability": "metering.health.read",
+      "provider_scope_rule": "metering",
+      "cost_class": "probe",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "metering.sub2api.health",
+          "method": "GET",
+          "path_template": "/health",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        },
+        {
+          "route_id": "metering.newapi.status.health",
+          "method": "GET",
+          "path_template": "/api/status",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 2,
+      "max_pages": 2,
+      "max_rows": 2,
+      "max_bytes": 262144,
+      "max_cost_units": 2,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 2,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "metering",
+      "capability": "metering.service.version_read",
+      "provider_scope_rule": "metering",
+      "cost_class": "probe",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "metering.sub2api.version",
+          "method": "GET",
+          "path_template": "/api/v1/admin/system/version",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        },
+        {
+          "route_id": "metering.newapi.status.version",
+          "method": "GET",
+          "path_template": "/api/status",
+          "cost_units": 1,
+          "max_response_bytes": 262144,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 2,
+      "max_pages": 2,
+      "max_rows": 2,
+      "max_bytes": 262144,
+      "max_cost_units": 2,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 2,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "metering",
+      "capability": "metering.token.usage_read",
+      "provider_scope_rule": "metering",
+      "cost_class": "light",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "metering.sub2api.token.usage",
+          "method": "GET",
+          "path_template": "/v1/usage",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 1
+        },
+        {
+          "route_id": "metering.newapi.token.usage",
+          "method": "GET",
+          "path_template": "/api/log/self/stat",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 2,
+      "max_pages": 2,
+      "max_rows": 2,
+      "max_bytes": 8388608,
+      "max_cost_units": 2,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 2,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "metering",
+      "capability": "metering.account.revenue_read",
+      "provider_scope_rule": "metering",
+      "cost_class": "light",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": [
+        {
+          "route_id": "metering.sub2api.account.revenue",
+          "method": "GET",
+          "path_template": "/api/v1/admin/accounts/{account_id}/stats",
+          "cost_units": 1,
+          "max_response_bytes": 8388608,
+          "max_rows": 1
+        }
+      ],
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 8388608,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "complete",
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable",
+          "rate_limited"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.groups.read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "light",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": null,
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 262144,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "disabled": true,
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "sub2api",
+      "capability": "sub2api.models.usage_read",
+      "provider_scope_rule": "sub2api",
+      "cost_class": "light",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": null,
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 262144,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "disabled": true,
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    },
+    {
+      "connector_type": "metering",
+      "capability": "metering.upstream.balance_read",
+      "provider_scope_rule": "metering",
+      "cost_class": "light",
+      "min_connector_version": "1",
+      "max_connector_version": "1",
+      "routes": null,
+      "max_requests": 1,
+      "max_pages": 1,
+      "max_rows": 1,
+      "max_bytes": 262144,
+      "max_cost_units": 1,
+      "max_run_millis": 20000,
+      "max_concurrent_source": 1,
+      "cursor_mode": "none",
+      "single_flight_key": "environment/service_instance/capability/policy",
+      "coverage_policy": "partial",
+      "disabled": true,
+      "retry": {
+        "max_attempts": 1,
+        "initial_backoff_ms": 250,
+        "max_backoff_ms": 30000,
+        "max_retry_after_ms": 120000,
+        "jitter_ppm": 10000,
+        "retry_kinds": [
+          "unavailable"
+        ]
+      },
+      "poll": {
+        "scheduler_tick_seconds": 300,
+        "base_interval_seconds": 300,
+        "min_interval_seconds": 300,
+        "max_interval_seconds": 3600,
+        "unchanged_steps_before_slowdown": 3,
+        "success_steps_before_recovery": 2,
+        "jitter_ppm": 10000
+      }
+    }
+  ]
+}
