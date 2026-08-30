@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ApiClient } from "./client";
+import { ApiError, FeatureNotMountedError, type ApiClient } from "./client";
 import {
   getPlatformRequestContent,
   listPlatformRequests,
@@ -203,6 +203,33 @@ describe("listPlatformRequests", () => {
       ),
     ).rejects.toThrow(/计费/);
   });
+
+  it("XM_REQLOG_MODE=off 时的 404（没有 error.code）转成 FeatureNotMountedError", async () => {
+    // chi 对没挂载的路由回纯文本 404，客户端解析不出 JSON，code 落回 UNKNOWN
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformRequests("sub2api", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+    expect((error as FeatureNotMountedError).description).toContain("XM_REQLOG_MODE=off");
+  });
+
+  it("其它错误原样抛出，不被误判成未接入", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(403, "PERMISSION_DENIED", "缺少权限 request.read")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformRequests("sub2api", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(FeatureNotMountedError);
+  });
 });
 
 describe("getPlatformRequestContent", () => {
@@ -252,5 +279,33 @@ describe("getPlatformRequestContent", () => {
       fakeClient({ ...content, messages: null }),
     );
     expect(body.messages).toEqual([]);
+  });
+
+  it("XM_REQLOG_MODE=off 时的 404（没有 error.code）转成 FeatureNotMountedError", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await getPlatformRequestContent("sub2api", "x", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+    expect((error as FeatureNotMountedError).description).toContain("XM_REQLOG_MODE=off");
+  });
+
+  it("具体记录不存在的 404（带 error.code）原样抛出，不是未接入——路由本来就已经挂载", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(
+        new ApiError(404, "ACTION_NOT_REGISTERED", "没有这条请求记录：可能已过保留期，或平台选错了"),
+      ),
+      post: vi.fn(),
+    };
+    const error = await getPlatformRequestContent("sub2api", "x", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(FeatureNotMountedError);
   });
 });

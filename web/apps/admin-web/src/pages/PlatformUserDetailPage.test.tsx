@@ -373,6 +373,28 @@ describe("查找状态与负向边界", () => {
     expect(screen.queryByText("无法确认用户是否存在")).toBeNull();
   });
 
+  it("端点未挂载（无 error.code 的 404）显示未接入，不是没有这个用户（XM-UX-OFFSTATE）", async () => {
+    // chi 对没挂载的路由回纯文本 404，不是 JSON——与上一条「具体用户不存在」
+    // 用例的带 code JSON 404 结构不同，两者不能显示成同一种状态
+    stubFetch(
+      () =>
+        ({
+          ok: false,
+          status: 404,
+          json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+        }) as unknown as Response,
+    );
+    renderPage();
+
+    expect(await screen.findByText("未接入")).toBeTruthy();
+    expect(screen.getByText(/XM_PLATFORM_USERS_MODE=off/)).toBeTruthy();
+    expect(screen.queryByText("没有这个用户")).toBeNull();
+    expect(screen.queryByText(/失败|错误/)).toBeNull();
+    // 之前的 bug：显示「请求失败（HTTP 404）（错误码 UNKNOWN）」
+    expect(screen.queryByText(/UNKNOWN/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  });
+
   it("v2 精确查找未完成时显示可重试错误，不误报没有这个用户", async () => {
     stubFetch(() => fakeResponse({ error: { code: "EXECUTION_FAILED", message: "用户精确查找未完成，请重试" } }, 502));
     renderPage();

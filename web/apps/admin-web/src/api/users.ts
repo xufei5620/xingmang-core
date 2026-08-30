@@ -1,4 +1,10 @@
-import { ApiError, apiClient, type ApiClient } from "./client";
+import {
+  ApiError,
+  apiClient,
+  FeatureNotMountedError,
+  looksLikeUnmountedRoute,
+  type ApiClient,
+} from "./client";
 import type {
   FreshnessContract,
   PeriodGranularity,
@@ -250,7 +256,18 @@ interface PlatformUserDetailResponse {
   capabilities: string[];
 }
 
-/** Read the v2 canonical detail resource. A 404 is a proven not-found result;
+/** 用户管理「未接入」的说明文案（用户清单、用户详情共用同一句话——它们是
+ *  同一条链路的一体两面，理由不该分叉）。
+ *
+ *  `XM_PLATFORM_USERS_MODE=off` 时后端整组不挂载 `/platforms/{platform}/users*`
+ *  （cmd/platform-api/platformusers.go buildPlatformUsers），前端据此分辨
+ *  「没接」与「坏了」，不能显示成加载失败。 */
+const USERS_NOT_MOUNTED_DESCRIPTION =
+  "用户管理在当前环境未启用（XM_PLATFORM_USERS_MODE=off）。接入真实用户数据源后会自动出现，无需手动开启。";
+
+/** Read the v2 canonical detail resource. A 404 with a parseable error
+ * envelope is a proven not-found result; a 404 without one means the whole
+ * endpoint group isn't mounted (see USERS_NOT_MOUNTED_DESCRIPTION above), and
  * all other API errors stay errors so the page can preserve retry semantics. */
 export async function getPlatformUser(
   platform: string,
@@ -302,6 +319,12 @@ export async function getPlatformUser(
     return { kind: "found", user: body.user, page, pagesScanned: 1 };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
+      // 未挂载路由的 404 没有可解析的 error.code；具体用户 id 不存在的 404
+      // 一定带着后端 WriteError 写出的 code（比如 ACTION_NOT_REGISTERED）。
+      // 只有前者是「这条链路没接」，后者仍然是「这个用户没有这条记录」。
+      if (looksLikeUnmountedRoute(error)) {
+        throw new FeatureNotMountedError(error, USERS_NOT_MOUNTED_DESCRIPTION);
+      }
       return { kind: "notFound", pagesScanned: 1 };
     }
     throw error;
@@ -329,24 +352,34 @@ export async function listPlatformUsers(
   options: ListPlatformUsersOptions = {},
   client: ApiClient = apiClient,
 ): Promise<PlatformUserPage> {
-  const body = await client.get<PlatformUserPage>(
-    `/api/v1/platforms/${encodeURIComponent(platform)}/users`,
-    {
-      searchParams: {
-        ...(options.q ? { q: options.q } : {}),
-        ...(options.status ? { status: options.status } : {}),
-        ...(options.sort ? { sort: options.sort } : {}),
-        // 区间**不传默认值**：「今天」必须由服务端按 CST +08:00 解释。
-        // 前端拿浏览器本地日期去填的话，一个在 UTC-5 的运营看到的「今天」
-        // 会比账面业务日早一天（宪法 14 条）。
-        ...(options.day ? { day: options.day } : {}),
-        ...(options.granularity ? { granularity: options.granularity } : {}),
-        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
-        ...(options.cursor ? { cursor: options.cursor } : {}),
+  let body: PlatformUserPage;
+  try {
+    body = await client.get<PlatformUserPage>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/users`,
+      {
+        searchParams: {
+          ...(options.q ? { q: options.q } : {}),
+          ...(options.status ? { status: options.status } : {}),
+          ...(options.sort ? { sort: options.sort } : {}),
+          // 区间**不传默认值**：「今天」必须由服务端按 CST +08:00 解释。
+          // 前端拿浏览器本地日期去填的话，一个在 UTC-5 的运营看到的「今天」
+          // 会比账面业务日早一天（宪法 14 条）。
+          ...(options.day ? { day: options.day } : {}),
+          ...(options.granularity ? { granularity: options.granularity } : {}),
+          ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+          ...(options.cursor ? { cursor: options.cursor } : {}),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
       },
-      ...(options.signal ? { signal: options.signal } : {}),
-    },
-  );
+    );
+  } catch (error) {
+    // XM_PLATFORM_USERS_MODE=off 时这条端点整组不挂载：chi 的默认 404 没有
+    // 可解析的 error.code，用它区分「没接」与「这次请求恰好失败了」
+    if (looksLikeUnmountedRoute(error)) {
+      throw new FeatureNotMountedError(error, USERS_NOT_MOUNTED_DESCRIPTION);
+    }
+    throw error;
+  }
   return {
     ...body,
     items: body.items ?? [],

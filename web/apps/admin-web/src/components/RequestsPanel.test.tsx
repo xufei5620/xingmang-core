@@ -230,4 +230,26 @@ describe("请求列表", () => {
     expect(await screen.findByText("zhang.wei")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "下一页" })).toBeNull();
   });
+
+  it("XM_REQLOG_MODE=off（无 error.code 的 404）显示未接入，不是失败态，也不带样本数据（XM-UX-OFFSTATE）", async () => {
+    // chi 对没挂载的路由回纯文本 404：json() 会像浏览器解析 HTML/纯文本一样抛出
+    fetchMock.mockImplementation(() =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+      } as unknown as Response),
+    );
+    renderPanel();
+
+    expect(await screen.findByText("未接入")).toBeTruthy();
+    expect(screen.getByText(/XM_REQLOG_MODE=off/)).toBeTruthy();
+    expect(screen.queryByText(/失败|错误/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+    // 之前的 bug：404 解析不出 code 时会显示「请求失败（HTTP 404）（错误码 UNKNOWN）」
+    expect(screen.queryByText(/UNKNOWN/)).toBeNull();
+    // 不该有任何一行样本请求渲染出来
+    expect(screen.queryByText("zhang.wei")).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
+  });
 });
