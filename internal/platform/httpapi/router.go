@@ -35,6 +35,15 @@ type Deps struct {
 	Metrics        MetricLister
 	MetricHistory  MetricHistoryLister
 	AuditEvents    AuditEventLister
+	// ActionRuns 供操作与审批页「执行记录」子页签的跨 Action 查询
+	// （XM-ACTIONS0）。为 nil 时 /actions/runs* 两个端点不挂载——与
+	// RequestLogs/PlatformUsers 同一条纪律：端点不存在（404）比端点存在却
+	// 一调就 500 诚实。生产装配应始终提供（kernel 本就依赖同一个 RunStore）。
+	ActionRuns ActionRunQuerier
+	// ActionRunAudit 供执行记录详情端点关联的审计前后摘要（XM-ACTIONS0）。
+	// 与 ActionRuns 分开传入是因为二者的读权限不同（见 ActionRunAuditLookup
+	// 的注释）；为 nil 时详情端点不挂载，即便 ActionRuns 非 nil。
+	ActionRunAudit ActionRunAuditLookup
 	Alerts         AlertLister
 	// SavedViews 是 Principal/Environment 自隔离的个人表格视图 Query。
 	// 写入仍只走 ui.saved_view.* Action，不在这里增加第二条写路径。
@@ -150,6 +159,19 @@ func NewRouter(d Deps) http.Handler {
 			// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
 			api.With(RequireScope(audit.ScopeRead)).
 				Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))
+			// 跨 Action 执行记录（操作与审批页「执行记录」子页签，XM-ACTIONS0）。
+			// 列表只需 action.ScopeRead；详情再叠加 audit.ScopeRead，因为它
+			// 附带审计事件里的 before/after 摘要（见 action.ScopeRead 的注释）。
+			// 两个字段任一为 nil 时不挂载：详情端点还依赖 ActionRunAudit。
+			if d.ActionRuns != nil {
+				api.With(RequireScope(action.ScopeRead)).
+					Get("/actions/runs", ListActionRunsHandler(d.ActionRuns))
+				if d.ActionRunAudit != nil {
+					api.With(RequireScope(action.ScopeRead)).
+						With(RequireScope(audit.ScopeRead)).
+						Get("/actions/runs/{runID}", GetActionRunHandler(d.ActionRuns, d.ActionRunAudit))
+				}
+			}
 			// 告警与指标共用 ops.read：告警内容就是指标的判读结果，
 			// 泄漏面完全相同（见 alerts.ScopeRead 的注释）。
 			// 写路径（确认、静默）不在这里——它们是 Action，走

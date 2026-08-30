@@ -38,6 +38,7 @@ import {
   type PlatformEntry,
   type RegistryState,
 } from "./lib/platforms";
+import { ActionsPage } from "./pages/ActionsPage";
 import { AlertsPage } from "./pages/AlertsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { AuthCallbackPage } from "./pages/AuthCallbackPage";
@@ -341,6 +342,7 @@ export const routes = [
               { path: "dashboard", Component: OverviewPage },
               { path: "alerts", Component: AlertsPage },
               { path: "audit", Component: AuditPage },
+              { path: "actions", Component: ActionsPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,

@@ -52,6 +52,80 @@ func (q *Queries) GetArchiveTerminalReceipt(ctx context.Context, operationID uui
 	return i, err
 }
 
+const getAuditEventByActionRunID = `-- name: GetAuditEventByActionRunID :one
+SELECT id, sequence, occurred_at, recorded_at, principal_id, principal_type,
+       action_id, action_version, action_run_id, resource_type, resource_id,
+       environment, reason, approval_id, request_id, trace_id, source_ip,
+       before_summary, after_summary, result, compensation_result,
+       prev_hash, event_hash, canonical_version
+FROM audit.audit_event
+WHERE action_run_id = $1
+ORDER BY sequence ASC
+LIMIT 1
+`
+
+type GetAuditEventByActionRunIDRow struct {
+	ID                 uuid.UUID
+	Sequence           int64
+	OccurredAt         pgtype.Timestamptz
+	RecordedAt         pgtype.Timestamptz
+	PrincipalID        string
+	PrincipalType      string
+	ActionID           string
+	ActionVersion      string
+	ActionRunID        uuid.UUID
+	ResourceType       string
+	ResourceID         string
+	Environment        string
+	Reason             string
+	ApprovalID         string
+	RequestID          string
+	TraceID            string
+	SourceIp           string
+	BeforeSummary      []byte
+	AfterSummary       []byte
+	Result             string
+	CompensationResult string
+	PrevHash           string
+	EventHash          string
+	CanonicalVersion   int16
+}
+
+// GetAuditEventByActionRunID 按 action_run_id 取回关联的审计事件（XM-ACTIONS0）。
+// 不取两个 connector 摘要：与 ListRecentAuditEvents 同一条纪律（无界 jsonb，
+// 调用方用不到）。
+func (q *Queries) GetAuditEventByActionRunID(ctx context.Context, actionRunID uuid.UUID) (GetAuditEventByActionRunIDRow, error) {
+	row := q.db.QueryRow(ctx, getAuditEventByActionRunID, actionRunID)
+	var i GetAuditEventByActionRunIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.Sequence,
+		&i.OccurredAt,
+		&i.RecordedAt,
+		&i.PrincipalID,
+		&i.PrincipalType,
+		&i.ActionID,
+		&i.ActionVersion,
+		&i.ActionRunID,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.Environment,
+		&i.Reason,
+		&i.ApprovalID,
+		&i.RequestID,
+		&i.TraceID,
+		&i.SourceIp,
+		&i.BeforeSummary,
+		&i.AfterSummary,
+		&i.Result,
+		&i.CompensationResult,
+		&i.PrevHash,
+		&i.EventHash,
+		&i.CanonicalVersion,
+	)
+	return i, err
+}
+
 const getAuditTip = `-- name: GetAuditTip :one
 SELECT sequence, event_hash FROM audit.audit_event
 ORDER BY sequence DESC LIMIT 1
