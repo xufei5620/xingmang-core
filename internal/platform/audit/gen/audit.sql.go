@@ -12,6 +12,46 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getArchiveOperationIntent = `-- name: GetArchiveOperationIntent :one
+SELECT operation_id, approval_envelope_sha256, deterministic_bytes_digest,
+       canonical_intent_bytes, created_at
+FROM audit.archive_operation_intent
+WHERE operation_id = $1
+`
+
+func (q *Queries) GetArchiveOperationIntent(ctx context.Context, operationID uuid.UUID) (AuditArchiveOperationIntent, error) {
+	row := q.db.QueryRow(ctx, getArchiveOperationIntent, operationID)
+	var i AuditArchiveOperationIntent
+	err := row.Scan(
+		&i.OperationID,
+		&i.ApprovalEnvelopeSha256,
+		&i.DeterministicBytesDigest,
+		&i.CanonicalIntentBytes,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getArchiveTerminalReceipt = `-- name: GetArchiveTerminalReceipt :one
+SELECT operation_id, signed_result_bytes, terminal_result_digest,
+       optional_artifact_ref_bytes, recorded_at
+FROM audit.archive_terminal_receipt
+WHERE operation_id = $1
+`
+
+func (q *Queries) GetArchiveTerminalReceipt(ctx context.Context, operationID uuid.UUID) (AuditArchiveTerminalReceipt, error) {
+	row := q.db.QueryRow(ctx, getArchiveTerminalReceipt, operationID)
+	var i AuditArchiveTerminalReceipt
+	err := row.Scan(
+		&i.OperationID,
+		&i.SignedResultBytes,
+		&i.TerminalResultDigest,
+		&i.OptionalArtifactRefBytes,
+		&i.RecordedAt,
+	)
+	return i, err
+}
+
 const getAuditTip = `-- name: GetAuditTip :one
 SELECT sequence, event_hash FROM audit.audit_event
 ORDER BY sequence DESC LIMIT 1
@@ -26,6 +66,51 @@ func (q *Queries) GetAuditTip(ctx context.Context) (GetAuditTipRow, error) {
 	row := q.db.QueryRow(ctx, getAuditTip)
 	var i GetAuditTipRow
 	err := row.Scan(&i.Sequence, &i.EventHash)
+	return i, err
+}
+
+const getLatestArchiveSegment = `-- name: GetLatestArchiveSegment :one
+SELECT id, format_version, from_sequence, to_sequence, row_count,
+       first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+       payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+       projections, manifest_object_key, manifest_version_id, manifest_sha256,
+       manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+       checkpoint_sha256, recovery_generation, committed_at, verified_at
+FROM audit.archive_segment
+ORDER BY to_sequence DESC
+LIMIT 1
+`
+
+func (q *Queries) GetLatestArchiveSegment(ctx context.Context) (AuditArchiveSegment, error) {
+	row := q.db.QueryRow(ctx, getLatestArchiveSegment)
+	var i AuditArchiveSegment
+	err := row.Scan(
+		&i.ID,
+		&i.FormatVersion,
+		&i.FromSequence,
+		&i.ToSequence,
+		&i.RowCount,
+		&i.FirstPrevHash,
+		&i.LastEventHash,
+		&i.CanonicalVersionCounts,
+		&i.EnvironmentCounts,
+		&i.PayloadObjectKey,
+		&i.PayloadVersionID,
+		&i.PayloadSha256,
+		&i.PayloadSizeBytes,
+		&i.Projections,
+		&i.ManifestObjectKey,
+		&i.ManifestVersionID,
+		&i.ManifestSha256,
+		&i.ManifestSignature,
+		&i.ManifestKeyID,
+		&i.ChainRootID,
+		&i.ChainRootHash,
+		&i.CheckpointSha256,
+		&i.RecoveryGeneration,
+		&i.CommittedAt,
+		&i.VerifiedAt,
+	)
 	return i, err
 }
 
@@ -48,6 +133,193 @@ func (q *Queries) GetLatestChainRoot(ctx context.Context) (AuditChainRoot, error
 		&i.ExportTarget,
 	)
 	return i, err
+}
+
+const insertArchiveOperationIntent = `-- name: InsertArchiveOperationIntent :exec
+INSERT INTO audit.archive_operation_intent (
+    operation_id, approval_envelope_sha256, deterministic_bytes_digest,
+    canonical_intent_bytes, created_at
+) VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertArchiveOperationIntentParams struct {
+	OperationID              uuid.UUID
+	ApprovalEnvelopeSha256   string
+	DeterministicBytesDigest string
+	CanonicalIntentBytes     []byte
+	CreatedAt                pgtype.Timestamptz
+}
+
+func (q *Queries) InsertArchiveOperationIntent(ctx context.Context, arg InsertArchiveOperationIntentParams) error {
+	_, err := q.db.Exec(ctx, insertArchiveOperationIntent,
+		arg.OperationID,
+		arg.ApprovalEnvelopeSha256,
+		arg.DeterministicBytesDigest,
+		arg.CanonicalIntentBytes,
+		arg.CreatedAt,
+	)
+	return err
+}
+
+const insertArchivePutReceipt = `-- name: InsertArchivePutReceipt :exec
+INSERT INTO audit.archive_put_receipt (
+    operation_id, ordinal, object_version_bytes, object_version_sha256, recorded_at
+) VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertArchivePutReceiptParams struct {
+	OperationID         uuid.UUID
+	Ordinal             int32
+	ObjectVersionBytes  []byte
+	ObjectVersionSha256 string
+	RecordedAt          pgtype.Timestamptz
+}
+
+func (q *Queries) InsertArchivePutReceipt(ctx context.Context, arg InsertArchivePutReceiptParams) error {
+	_, err := q.db.Exec(ctx, insertArchivePutReceipt,
+		arg.OperationID,
+		arg.Ordinal,
+		arg.ObjectVersionBytes,
+		arg.ObjectVersionSha256,
+		arg.RecordedAt,
+	)
+	return err
+}
+
+const insertArchiveSegment = `-- name: InsertArchiveSegment :one
+
+INSERT INTO audit.archive_segment (
+    id, format_version, from_sequence, to_sequence, row_count,
+    first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+    payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+    projections, manifest_object_key, manifest_version_id, manifest_sha256,
+    manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+    checkpoint_sha256, recovery_generation, committed_at, verified_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+    $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+)
+RETURNING id, format_version, from_sequence, to_sequence, row_count,
+          first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+          payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+          projections, manifest_object_key, manifest_version_id, manifest_sha256,
+          manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+          checkpoint_sha256, recovery_generation, committed_at, verified_at
+`
+
+type InsertArchiveSegmentParams struct {
+	ID                     uuid.UUID
+	FormatVersion          int16
+	FromSequence           int64
+	ToSequence             int64
+	RowCount               int64
+	FirstPrevHash          string
+	LastEventHash          string
+	CanonicalVersionCounts []byte
+	EnvironmentCounts      []byte
+	PayloadObjectKey       string
+	PayloadVersionID       string
+	PayloadSha256          string
+	PayloadSizeBytes       int64
+	Projections            []byte
+	ManifestObjectKey      string
+	ManifestVersionID      string
+	ManifestSha256         string
+	ManifestSignature      string
+	ManifestKeyID          string
+	ChainRootID            uuid.UUID
+	ChainRootHash          string
+	CheckpointSha256       string
+	RecoveryGeneration     int64
+	CommittedAt            pgtype.Timestamptz
+	VerifiedAt             pgtype.Timestamptz
+}
+
+// AUD2 archive catalog/journal queries deliberately use fixed columns.  They do not
+// expose payload bytes, credentials, arbitrary object lists, or latest-object reads.
+func (q *Queries) InsertArchiveSegment(ctx context.Context, arg InsertArchiveSegmentParams) (AuditArchiveSegment, error) {
+	row := q.db.QueryRow(ctx, insertArchiveSegment,
+		arg.ID,
+		arg.FormatVersion,
+		arg.FromSequence,
+		arg.ToSequence,
+		arg.RowCount,
+		arg.FirstPrevHash,
+		arg.LastEventHash,
+		arg.CanonicalVersionCounts,
+		arg.EnvironmentCounts,
+		arg.PayloadObjectKey,
+		arg.PayloadVersionID,
+		arg.PayloadSha256,
+		arg.PayloadSizeBytes,
+		arg.Projections,
+		arg.ManifestObjectKey,
+		arg.ManifestVersionID,
+		arg.ManifestSha256,
+		arg.ManifestSignature,
+		arg.ManifestKeyID,
+		arg.ChainRootID,
+		arg.ChainRootHash,
+		arg.CheckpointSha256,
+		arg.RecoveryGeneration,
+		arg.CommittedAt,
+		arg.VerifiedAt,
+	)
+	var i AuditArchiveSegment
+	err := row.Scan(
+		&i.ID,
+		&i.FormatVersion,
+		&i.FromSequence,
+		&i.ToSequence,
+		&i.RowCount,
+		&i.FirstPrevHash,
+		&i.LastEventHash,
+		&i.CanonicalVersionCounts,
+		&i.EnvironmentCounts,
+		&i.PayloadObjectKey,
+		&i.PayloadVersionID,
+		&i.PayloadSha256,
+		&i.PayloadSizeBytes,
+		&i.Projections,
+		&i.ManifestObjectKey,
+		&i.ManifestVersionID,
+		&i.ManifestSha256,
+		&i.ManifestSignature,
+		&i.ManifestKeyID,
+		&i.ChainRootID,
+		&i.ChainRootHash,
+		&i.CheckpointSha256,
+		&i.RecoveryGeneration,
+		&i.CommittedAt,
+		&i.VerifiedAt,
+	)
+	return i, err
+}
+
+const insertArchiveTerminalReceipt = `-- name: InsertArchiveTerminalReceipt :exec
+INSERT INTO audit.archive_terminal_receipt (
+    operation_id, signed_result_bytes, terminal_result_digest,
+    optional_artifact_ref_bytes, recorded_at
+) VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertArchiveTerminalReceiptParams struct {
+	OperationID              uuid.UUID
+	SignedResultBytes        []byte
+	TerminalResultDigest     string
+	OptionalArtifactRefBytes []byte
+	RecordedAt               pgtype.Timestamptz
+}
+
+func (q *Queries) InsertArchiveTerminalReceipt(ctx context.Context, arg InsertArchiveTerminalReceiptParams) error {
+	_, err := q.db.Exec(ctx, insertArchiveTerminalReceipt,
+		arg.OperationID,
+		arg.SignedResultBytes,
+		arg.TerminalResultDigest,
+		arg.OptionalArtifactRefBytes,
+		arg.RecordedAt,
+	)
+	return err
 }
 
 const insertAuditEvent = `-- name: InsertAuditEvent :one
@@ -195,6 +467,103 @@ func (q *Queries) InsertChainRoot(ctx context.Context, arg InsertChainRootParams
 		&i.ExportTarget,
 	)
 	return i, err
+}
+
+const listArchivePutReceipts = `-- name: ListArchivePutReceipts :many
+SELECT operation_id, ordinal, object_version_bytes, object_version_sha256, recorded_at
+FROM audit.archive_put_receipt
+WHERE operation_id = $1
+ORDER BY ordinal
+`
+
+func (q *Queries) ListArchivePutReceipts(ctx context.Context, operationID uuid.UUID) ([]AuditArchivePutReceipt, error) {
+	rows, err := q.db.Query(ctx, listArchivePutReceipts, operationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuditArchivePutReceipt{}
+	for rows.Next() {
+		var i AuditArchivePutReceipt
+		if err := rows.Scan(
+			&i.OperationID,
+			&i.Ordinal,
+			&i.ObjectVersionBytes,
+			&i.ObjectVersionSha256,
+			&i.RecordedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listArchiveSegmentsBefore = `-- name: ListArchiveSegmentsBefore :many
+SELECT id, format_version, from_sequence, to_sequence, row_count,
+       first_prev_hash, last_event_hash, canonical_version_counts, environment_counts,
+       payload_object_key, payload_version_id, payload_sha256, payload_size_bytes,
+       projections, manifest_object_key, manifest_version_id, manifest_sha256,
+       manifest_signature, manifest_key_id, chain_root_id, chain_root_hash,
+       checkpoint_sha256, recovery_generation, committed_at, verified_at
+FROM audit.archive_segment
+WHERE to_sequence < $1
+ORDER BY to_sequence DESC
+LIMIT $2
+`
+
+type ListArchiveSegmentsBeforeParams struct {
+	ToSequence int64
+	Limit      int32
+}
+
+func (q *Queries) ListArchiveSegmentsBefore(ctx context.Context, arg ListArchiveSegmentsBeforeParams) ([]AuditArchiveSegment, error) {
+	rows, err := q.db.Query(ctx, listArchiveSegmentsBefore, arg.ToSequence, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuditArchiveSegment{}
+	for rows.Next() {
+		var i AuditArchiveSegment
+		if err := rows.Scan(
+			&i.ID,
+			&i.FormatVersion,
+			&i.FromSequence,
+			&i.ToSequence,
+			&i.RowCount,
+			&i.FirstPrevHash,
+			&i.LastEventHash,
+			&i.CanonicalVersionCounts,
+			&i.EnvironmentCounts,
+			&i.PayloadObjectKey,
+			&i.PayloadVersionID,
+			&i.PayloadSha256,
+			&i.PayloadSizeBytes,
+			&i.Projections,
+			&i.ManifestObjectKey,
+			&i.ManifestVersionID,
+			&i.ManifestSha256,
+			&i.ManifestSignature,
+			&i.ManifestKeyID,
+			&i.ChainRootID,
+			&i.ChainRootHash,
+			&i.CheckpointSha256,
+			&i.RecoveryGeneration,
+			&i.CommittedAt,
+			&i.VerifiedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listAuditEvents = `-- name: ListAuditEvents :many
