@@ -251,6 +251,10 @@ services:
       # ⚠️ 生产环境不接受 fake（会把演示数据写成运营读数）：要么配 real，
       #    要么显式 XM_NEWAPI_SYNC_ENABLED=false。配错了 worker 会**拒绝启动**。
       XM_NEWAPI_MODE: ${XM_NEWAPI_MODE:-fake}
+      # --- Sub2API 同步(与 NewAPI 对称;真实模式由 core.connector_config 决定,此处为兜底默认) ---
+      XM_SUB2API_SYNC_ENABLED: ${XM_SUB2API_SYNC_ENABLED:-true}
+      XM_SUB2API_SYNC_INTERVAL: ${XM_SUB2API_SYNC_INTERVAL:-300s}
+      XM_SUB2API_INSTANCE_ID: ${XM_SUB2API_INSTANCE_ID:-sub2api-staging}
       XM_NEWAPI_SYNC_ENABLED: ${XM_NEWAPI_SYNC_ENABLED:-true}
       XM_NEWAPI_SYNC_INTERVAL: ${XM_NEWAPI_SYNC_INTERVAL:-300s}
       # 观测的 Source，会原样显示在看板上。默认带 -staging 后缀：
