@@ -75,6 +75,18 @@ func TestAUD2ObjectWriteIntentRejectsOversizedBodyDeclaration(t *testing.T) {
 	}
 }
 
+func TestAUD2ArtifactRefBindsKeyToDigest(t *testing.T) {
+	value := goldenManifest(t).Unsigned.Payload
+	ref := ArtifactRefV1{BucketID: value.BucketID, Key: value.Key, VersionID: value.VersionID, SHA256: value.SHA256}
+	if err := ValidateArtifactRef(ref); err != nil {
+		t.Fatal(err)
+	}
+	ref.SHA256 = strings.Repeat("0", 64)
+	if err := ValidateArtifactRef(ref); err == nil {
+		t.Fatal("artifact ref with mismatched key digest unexpectedly accepted")
+	}
+}
+
 func TestAUD2FilesystemPutIfAbsentIsIdempotentAndExact(t *testing.T) {
 	store, err := NewFilesystemStore(t.TempDir(), "local-fixture")
 	if err != nil {

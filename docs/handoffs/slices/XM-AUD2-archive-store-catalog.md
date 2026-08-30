@@ -121,7 +121,7 @@ evidence; runtime wiring remains disposable-only until READY merge.
   expected (DBR2 provisioning remains separate), applied the disposable down file, and
   observed all four archive relations as `NULL`. This is disposable evidence only; no
   shared stack, server, MinIO endpoint or production database was touched.
-- A final disposable PG18 run (`xm-aud2-pg-71c361e6aada`, removed immediately) exercised
+- A final disposable PG18 run (`xm-aud2-pg-8cfbe961a23f`, removed immediately) exercised
   `TestAUD2PostgresStoresRoundTrip` after the runtime hardening: generated catalog writer
   commit/replay, strict receipt journal intent/put/terminal round-trip, role absence and
   down migration all passed. The run was isolated from the shared stack.
@@ -196,7 +196,10 @@ evidence; runtime wiring remains disposable-only until READY merge.
   `postgres_catalog.go` and `postgres_receipt_journal.go`.
 - `postgres_catalog.go`: generated-query catalog writer/reader with advisory-lock
   contiguous commit, full row-vs-manifest reconciliation, immutable RecoveryIndex proof
-  binding and resolver-based exact manifest metadata (no synthetic object refs).
+  binding and resolver-based exact manifest metadata (no synthetic object refs). The
+  production constructor is `NewPostgresCatalogWithProofAndChecker`; the callback-only
+  constructor remains compatibility/test-only because it cannot carry a transaction-bound
+  signed range proof.
 - `postgres_receipt_journal.go`: generated-query append-only intent/put/terminal journal;
   strict canonical JSON decoding, digest/ordinal validation, idempotent replay and
   optional artifact-ref equality checks. No role provisioning or live cutover is included.
@@ -216,6 +219,9 @@ evidence; runtime wiring remains disposable-only until READY merge.
   -- sqlc.yaml` — PASS; generated artifacts approved at `2026-08-30T08:26Z`.
 - `go test ./internal/platform/audit/archive -run 'TestAUD2' -count=1` — PASS (pure
   MemoryCatalog/ReceiptJournal/RecoveryIndex/Filesystem and provider checks).
+- Disposable PG18 runtime proof `TestAUD2PostgresStoresRoundTrip` plus
+  `TestAUD2PostgresReceiptRejectsCompressedIncompleteOrdinals` — PASS after the strict
+  row/ordinal hardening; `up=PASS migrations=18`, `down=PASS`, all resources cleaned.
 - Partial receipt-gap safety is fail-closed: `LoadOperation` returns
   `ErrJournalIncomplete` rather than exposing compressed/misindexed `PutResults`.
 - `go vet ./internal/platform/audit/archive` — PASS; `gofmt -l internal/platform/audit/archive`
