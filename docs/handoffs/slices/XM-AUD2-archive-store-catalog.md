@@ -4,7 +4,7 @@ sprint-section: 7
 
 ## status
 
-BLOCKED (WAITING exact AUD2 INPUT approval) · pure prep delivered
+IN_PROGRESS · exact AUD2 INPUT approved; waiting generated-artifact approval
 
 This branch starts from the exact accepted release tip and currently limits itself to
 AUD2 contract preparation plus provider-independent code. The migration/input digest is
@@ -15,8 +15,8 @@ sqlc and shared-stack execution remain prohibited.
 
 - branch: `ai/codex/XM-AUD2-archive-store-catalog`
 - worktree: `K:/星芒统一控制平台/wt-xmAUD2-impl`
-- fresh release tip: `db9d4cabe4092defc3f07b11d511a825491f56ae`
-- fresh base: `db9d4cabe4092defc3f07b11d511a825491f56ae`
+- fresh release tip at implementation start: `db9d4cabe4092defc3f07b11d511a825491f56ae`
+- current rebased release/base: `fb4a774066bf88db53312425f96babf52c92fb88`
 - top-level migration max at fresh tip: `17`
 - allocated migration number: `000018` (`000018_audit_archive_catalog`)
 - commit: see final delivery line / branch HEAD
@@ -32,11 +32,14 @@ current stable version pinned by Codex, and content-addressed conditional Put/HE
 recovery. It also requires a disposable random MinIO qualification project using
 `secret://archive/minio-qualification`.
 
-That approval does **not** yet approve this branch's exact migration/input bytes. Per the
-AUD2 plan, the migration input manifest/digest must be reviewed and appended to
-`docs/handoffs/ACCEPTANCE-LOG.md` before applying the migration, running sqlc, changing
-the shared `xingmang-launch` stack, or claiming catalog/journal deployment. No production
-endpoint, server, real credential or shared MinIO is used here.
+The provider approval did not itself approve migration bytes; the acceptance log now
+contains `2026-08-30T07:41Z APPROVED AUD2 INPUT 000018` for the exact five-file candidate
+based on `db9d4ca`. The branch has been rebased to the newer release `fb4a774` without
+changing those five files; the migration max remains 17 and the approved digest remains
+valid. Migration application is limited to a disposable PG18 probe. `go tool sqlc generate`,
+generated artifacts, shared `xingmang-launch`, production endpoints, servers, real
+credentials and shared MinIO remain prohibited until the separate generated-artifact
+approval signal appears.
 
 ## migration input pin (pre-generation)
 
@@ -52,9 +55,11 @@ The manifest covers the five plan-mandated pre-generation inputs:
 
 `migration_input_digest` is computed as the SHA-256 of the sorted `hash-object + two
 spaces + path` lines plus one final LF, exactly as the implementation plan specifies.
-Current draft digest: `6113a7453907148508697458b8be2ce2ffedeaba`. It is a review artifact only
-until an exact `APPROVED AUD2 INPUT` line appears in the acceptance log; any byte edit or
-release-tip movement invalidates it and requires a fresh recomputation.
+Approved input digest: `e3ba2f84812a56a9a454aa73204298b9b8214f0e` (UTF-8 bytes of the
+sorted `hash  path` lines plus one LF, matching the `2026-08-30T07:41Z` acceptance record).
+The earlier PowerShell pipeline digest `6113a7453907148508697458b8be2ce2ffedeaba` was
+an encoding artifact and is superseded. Any input byte edit or release-tip migration
+movement invalidates approval and requires a fresh recomputation.
 
 ## TDD stage
 
@@ -64,10 +69,10 @@ release-tip movement invalidates it and requires a fresh recomputation.
    shared stack.
 2. GREEN now: provider-independent validation, fixed locator/recovery-index models and
    filesystem fixture may be implemented and tested without the migration.
-3. WAITING gate: migration application, sqlc generation, PostgreSQL catalog/journal
-   implementation, and shared/disposable MinIO qualification run only after the exact
-   input approval is recorded. At that point re-fetch release, recompute max/000018 and
-   digest before continuing.
+3. WAITING gate: sqlc generation, generated artifacts, PostgreSQL catalog/journal runtime
+   wiring, and shared/disposable MinIO qualification remain paused until the separate
+   generated-artifact approval. A disposable PG18 migration/probe is allowed now; it must
+   not be mistaken for staging deployment.
 
 ### RED evidence
 
