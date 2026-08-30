@@ -1,0 +1,31 @@
+{
+  "id": "server.service_note.remove",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "server.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "service_note_id": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-SERVER0：删除一条服务/容器备注。必须存在：一条写错的服务登记会一直显示在资产详情里，没有删除路径时唯一的补救是直接改库——那正是宪法 2 条要挡的绕过（同 finance.token_map.remove 的理由）。reason 必填，供审计追溯「当时为什么删」。"
+}

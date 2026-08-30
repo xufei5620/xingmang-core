@@ -422,6 +422,9 @@ function okHandler(url: string): Response {
   if (url.startsWith("/api/v1/alerts")) return fakeResponse(200, alertsBody);
   if (url.startsWith("/api/v1/audit/events"))
     return fakeResponse(200, { items: [auditEvent], next_before: 0 });
+  // XM-SERVER0：服务器登记簿四个只读查询，默认空列表——各测试用例需要
+  // 具体数据时自己覆盖 stubFetch，不在这个共用兜底里编样例行。
+  if (url.startsWith("/api/v1/servers/")) return fakeResponse(200, { items: [] });
   return fakeResponse(404, { error: { code: "NOT_REGISTERED", message: "未知路径" } });
 }
 
@@ -1537,21 +1540,22 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
     expect(await screen.findByText(/由平台手工登记不同上游/)).not.toBeNull();
   });
 
-  it("`overview` 在服务器上是资产中心蓝图，不是一屏通用指标卡", async () => {
+  it("`overview` 在服务器上是登记簿汇总（XM-SERVER0），不是一屏通用指标卡或蓝图", async () => {
     // 与 suppliers 同一类错误：概览那个 case 若不判平台就直接接管，
-    // UI 第 6 片给服务器画的概览蓝图会被悄悄换掉
+    // 服务器的登记簿汇总（XM-SERVER0）会被悄悄换掉。这里同时确认三件事都
+    // 没发生：没落到 sub2api/newapi 的「暂无本平台指标」，也没落到旧蓝图
+    // （蓝图数字全是「—」，真汇总即使空表也会给出「0」）
     renderRoute("/platforms/server?tab=overview");
-    expect(await screen.findByText("折算月成本")).not.toBeNull();
+    expect(await screen.findByText("月成本合计")).not.toBeNull();
     expect(screen.queryByText("暂无本平台指标")).toBeNull();
   });
 
-  it("`suppliers` 在服务器上仍是采购蓝图——**同一个 value，两种语义**", async () => {
-    // 上游管理那一格若不判平台就直接接管，服务器的「供应商与采购」蓝图
-    // 会被悄悄换掉：页面看起来完全正常，只是内容没了
+  it("`suppliers` 在服务器上是 XM-SERVER0 供应商登记簿——**同一个 value，两种语义**", async () => {
+    // 上游管理那一格若不判平台就直接接管，服务器的「供应商与采购」登记簿
+    // 会被悄悄换掉：页面看起来完全正常，只是内容变成了别的平台的东西
     renderRoute("/platforms/server?tab=suppliers");
-    // 断言蓝图的**内容**而不是页签按钮：按钮无论如何都在，被换掉的是面板里的东西
-    expect(await screen.findByText(/供应商、购买账号与采购记录由平台自己登记/)).not.toBeNull();
-    expect(screen.getAllByText("购买账号").length).toBeGreaterThan(0);
+    // 断言真实面板的内容，而不是旧蓝图占位（XM-SERVER0 已把这一格接成登记簿）
+    expect(await screen.findByRole("button", { name: "登记供应商" })).not.toBeNull();
     expect(screen.queryByText(/由平台手工登记不同上游/)).toBeNull();
     expect(screen.queryByText("「供应商与采购」尚未实现")).toBeNull();
   });

@@ -1,0 +1,52 @@
+{
+  "id": "server.service_note.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "server.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "service_note_id": {
+      "type": "string",
+      "required": false
+    },
+    "server_id": {
+      "type": "string",
+      "required": false
+    },
+    "service_name": {
+      "type": "string",
+      "required": true
+    },
+    "service_kind": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "container",
+        "systemd",
+        "process"
+      ]
+    },
+    "port": {
+      "type": "int",
+      "required": false
+    },
+    "notes": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-SERVER0：服务器上手工登记的一条服务/容器（ADMIN-IA §2.1「服务与容器」）。**不扫描 Docker、不探测端口**——这只是运营手写的「这台服务器上有什么」。server_id 在 Schema 层不标 required：它只在新登记时需要（Handler 内显式校验，缺了直接拒绝），修改时这张表不允许换归属（换服务器等于把审计事件变成另一件事，要改归属只能删了重登，用 server.service_note.remove 配合重新 set）。service_note_id 留空=新登记，填了=改这一条。新登记分支会先按 server_id 读一次父资产（校验存在且与调用者同环境），字段级校验（端口范围 1~65535、服务名非空）在那之后才轮到，因此依赖真实数据库；port 缺省表示这条服务没有单一端口，不是 0。"
+}

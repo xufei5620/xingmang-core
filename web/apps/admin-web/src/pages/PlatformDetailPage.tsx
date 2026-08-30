@@ -21,6 +21,11 @@ import {
   platformHasPrototypeOverview,
 } from "../components/PlatformOverviewPanel";
 import { RequestsPanel } from "../components/RequestsPanel";
+import { ServerAssetsPanel } from "../components/ServerAssetsPanel";
+import { ServerDomainsPanel } from "../components/ServerDomainsPanel";
+import { ServerOverviewPanel } from "../components/ServerOverviewPanel";
+import { ServerServiceNotesPanel } from "../components/ServerServiceNotesPanel";
+import { ServerSuppliersPanel } from "../components/ServerSuppliersPanel";
 import { UpstreamAccountsPanel } from "../components/UpstreamAccountsPanel";
 import {
   findPlatform,
@@ -255,6 +260,14 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
   const { spec } = entry;
   switch (tab.value) {
     case "overview":
+      // 服务器的概览走登记簿汇总（XM-SERVER0，拍板「服务器只做记录」），
+      // 是 sub2api/newapi 的 PlatformOverviewPanel 与蓝图两条路之外的第三条：
+      // 前者读的是采集来的 `sub2api.*`/`newapi.*` 指标，与服务器无关；
+      // 蓝图路数字全是「—」，而服务器的台数/月成本/到期风险现在是真数据，
+      // 落回蓝图会把已经接好的东西显示成未接入。必须放在
+      // platformHasPrototypeOverview 判断之前——那个判断对 server 是 false，
+      // 顺序反了就会先落到蓝图分支。
+      if (spec.serviceType === "server") return <ServerOverviewPanel />;
       // 只有 sub2api / newapi 有按原型对齐的概览（两版结构还不一样）。
       // **不匹配时落回蓝图那条路**：服务器的概览由 UI 第 6 片画了蓝图，
       // 在这里截胡会把它悄悄换成一屏通用指标卡（与 suppliers 同一类错误）
@@ -293,14 +306,26 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       // 必须过 platformHasUpstreamRegistry：服务器那一格的 value 也是
       // `suppliers`，但它是「供应商与采购」（机器与机房）。不判一下就渲染
       // 成本登记簿，会得到一个看起来完全正常、内容却完全错位的页面。
-      //
-      // 不匹配时**落回蓝图那条路**而不是直接给占位：服务器的这一格由
-      // UI 第 6 片画了蓝图，在这里截胡会把它悄悄下线（`default` 分支才认蓝图）
-      return platformHasUpstreamRegistry(spec.serviceType) ? (
-        <UpstreamAccountsPanel platform={spec.serviceType} />
-      ) : (
-        fallbackTabContent(entry, tab)
-      );
+      if (platformHasUpstreamRegistry(spec.serviceType)) {
+        return <UpstreamAccountsPanel platform={spec.serviceType} />;
+      }
+      // 服务器「供应商与采购」= XM-SERVER0 登记簿（供应商、购买账号联系方式）。
+      // 同样必须在 fallback 之前判：不判就会落到下面的蓝图分支，把已经接好
+      // 的登记簿悄悄换成一屏「—」。
+      if (spec.serviceType === "server") return <ServerSuppliersPanel />;
+      // 两者都不匹配时**落回蓝图那条路**而不是直接给占位：没在这两条分支里
+      // 认领的平台如果画了蓝图，在这里截胡会把它悄悄下线（`default` 分支才认蓝图）
+      return fallbackTabContent(entry, tab);
+    case "assets":
+      // 服务器专属页签，标签「服务器资产」——其它平台没有这一格，值本身
+      // 唯一，理论上不需要再判 serviceType，但仍显式判一遍：与
+      // suppliers/overview 同一个规矩，避免以后哪个平台复用了这个 value
+      // 时无声地渲染出登记簿。
+      return spec.serviceType === "server" ? <ServerAssetsPanel /> : fallbackTabContent(entry, tab);
+    case "domains":
+      return spec.serviceType === "server" ? <ServerDomainsPanel /> : fallbackTabContent(entry, tab);
+    case "services":
+      return spec.serviceType === "server" ? <ServerServiceNotesPanel /> : fallbackTabContent(entry, tab);
     case "users":
       // 逐用户资金明细。邮箱在**连接器**层就打了码，平台不持有明文;
       // 逐用户充值/消费在 v1 上游契约里给不出，面板里逐格说明（原型 warnbar）

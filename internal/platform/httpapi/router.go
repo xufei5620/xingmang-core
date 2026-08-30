@@ -59,6 +59,14 @@ type Deps struct {
 	Credentials     CredentialQuerier
 	FinanceAccounts UpstreamAccountLister
 	FinanceProfit   ProfitDailyLister
+	// ServerAssets/Suppliers/Domains/ServiceNotes 是服务器登记簿的四个只读
+	// 查询（XM-SERVER0，拍板「服务器只做记录」——不装 Agent，全部手工登记）。
+	// 权限复用 registry.ScopeRead，不新建读侧 scope（见
+	// internal/platform/server.ScopeManage 的注释）。
+	ServerAssets       ServerAssetLister
+	ServerSuppliers    ServerSupplierLister
+	ServerDomains      ServerDomainLister
+	ServerServiceNotes ServerServiceNoteLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -231,6 +239,20 @@ func NewRouter(d Deps) http.Handler {
 			// 走 POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 			api.With(RequireScope(finance.ScopeRead)).
 				Get("/finance/upstream-accounts", ListUpstreamAccountsHandler(d.FinanceAccounts))
+
+			// 服务器登记簿（XM-SERVER0）。四张纯登记表，复用 registry.ScopeRead：
+			// 能看服务清单的人本就该能看服务器登记簿——两者都是「平台管着哪些
+			// 基础设施」这同一类知识面，泄漏面相当。写路径（登记/修改/退役/
+			// 删除）不在这里——它们是 L1 Action，走
+			// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/servers/assets", ListServerAssetsHandler(d.ServerAssets))
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/servers/suppliers", ListServerSuppliersHandler(d.ServerSuppliers))
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/servers/domains", ListServerDomainsHandler(d.ServerDomains))
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/servers/service-notes", ListServerServiceNotesHandler(d.ServerServiceNotes))
 
 			// 利润台账（XM-0037b）**复用 finance.read**，不另立一个 scope：
 			// 台账里的毛利就是「倍率 × 用量」的结果，能看登记簿里那个倍率的人

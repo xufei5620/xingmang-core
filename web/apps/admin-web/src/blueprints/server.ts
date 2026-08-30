@@ -238,7 +238,10 @@ export const SERVER_BLUEPRINT: BlueprintPage = {
     {
       id: "monitoring",
       label: "监控与告警",
-      source: `主机指标、Agent 新鲜度、告警与日志入口统一按服务器检索。${AGENT_SOURCE}`,
+      source:
+        "拍板结论（2026-08-31，XM-SERVER0）：服务器只做记录，不装 Agent、不做任何 SSH/docker/" +
+        "端口探测。资产、供应商、域名与服务与容器四格已经是真实登记簿；本格保持「未接入」，" +
+        `是刻意的产品边界，不是遗漏。${AGENT_SOURCE}`,
       tiles: [
         { label: "已接入 Agent", note: "已接入 / 应接入台数" },
         { label: "在线 / 降级", note: "按最近心跳判定" },
@@ -250,12 +253,13 @@ export const SERVER_BLUEPRINT: BlueprintPage = {
         {
           caption: "服务器告警",
           columns: ["告警号", "级别", "规则 / 详情", "服务器", "开始", "状态", "详情"],
-          source: "服务器告警随 M2 的 Agent 接入上线；控制平面自身的告警见「告警与故障」。",
+          source:
+            "服务器告警按拍板结论保持未接入（不装 Agent）；控制平面自身的告警见「告警与故障」。",
         },
         {
           caption: "最近日志与事件",
           columns: ["时间", "服务器", "来源", "级别", "摘要", "详情"],
-          source: "日志只提供限定字段查询、保留 30 天，不提供任意 Shell。",
+          source: "按拍板结论保持未接入；不提供任意 Shell 与日志采集。",
         },
       ],
       cards: [
@@ -275,7 +279,9 @@ export const SERVER_BLUEPRINT: BlueprintPage = {
       id: "creds",
       label: "连接与凭据",
       source:
-        "供应商门户、SSH、sudo 与只读 Agent 的密钥引用与轮换状态，随 M2 的服务器登记簿上线。",
+        "供应商门户、SSH、sudo 与只读 Agent 的密钥引用与轮换状态本格仍未接入——" +
+        "XM-SERVER0（2026-08-31）已经把资产/供应商/域名/服务与容器四格接成登记簿，" +
+        "但连接验证依赖 M2 的 Server Agent，本格暂不提供只读 CredentialRef 展示。",
       tiles: [
         { label: "密钥引用", note: "已登记的 CredentialRef 数" },
         { label: "验证正常", note: "最近一次连通性验证通过" },

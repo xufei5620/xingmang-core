@@ -1,0 +1,60 @@
+{
+  "id": "server.domain.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "server.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "domain_id": {
+      "type": "string",
+      "required": false
+    },
+    "domain_name": {
+      "type": "string",
+      "required": true
+    },
+    "registrar": {
+      "type": "string",
+      "required": false
+    },
+    "dns_provider": {
+      "type": "string",
+      "required": false
+    },
+    "expires_at": {
+      "type": "string",
+      "required": false
+    },
+    "cert_source": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "acme",
+        "managed",
+        "manual"
+      ]
+    },
+    "cert_expires_at": {
+      "type": "string",
+      "required": false
+    },
+    "bound_service_note": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-SERVER0：域名与证书登记簿（ADMIN-IA §2.1「域名与证书」）。只做记录：证书健康度不探测，来源与到期日全部手工登记。domain_id 留空=新登记，填了=改这一条（整行替换）。expires_at/cert_expires_at 形如 2006-01-02（自然日）。cert_source 三选一：acme 自动续期、managed 由供应商/CDN 托管、manual 手工上传。bound_service_note 只是一句备注（哪个服务在用这个域名），不是外键——服务与容器目前也是手工登记表，两边都没有稳定到能互相引用的主键。"
+}

@@ -149,6 +149,18 @@ func DefaultRoleScopeMap() map[string][]string {
 			"finance.subscription.manage",
 			"alerts.alert.manage",
 			"alerts.silence.manage",
+			// XM-SERVER0（2026-08-31）：服务器登记簿的写权限。**与
+			// finance.platform_channel_binding.manage 不是同一类**，所以进
+			// admin 而不是像那条一样刻意排除：渠道绑定写的是「哪个上游账号
+			// 在给哪个平台供给」，绑错会让成本记到错误渠道且不报错，属于
+			// 设计稿裁定必须人工显式授予的高风险面；服务器登记簿写的是
+			// 主机名/规格/供应商/到期日这类纯记录字段（拍板「服务器只做
+			// 记录」），不触碰任何第三方系统、不影响任何成本或收入归属，
+			// 改错了改回来即可——与已经在这张表里的
+			// finance.upstream_account.manage 等同一档（登记簿，不是执行）。
+			// resolver_test 的 TestDefaultRoleScopeMapIsConservative 断言
+			// admin 含它、staff 不含它。
+			"server.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
