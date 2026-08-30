@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -288,6 +291,69 @@ func TestNewAPISecretsFromEnv(t *testing.T) {
 	other := secrets.MustCredentialRef("secret://sub2api/readonly-token")
 	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
 		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}
+
+func TestFinanceSecretProviderConfigFromEnv(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                        "staging",
+		"XM_FINANCE_COLLECT_SECRET_PROVIDER": "env",
+		"XM_FINANCE_COLLECT_SECRET_SCOPES":   "sub2api, newapi, sub2api",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FinanceCollectSecretProvider != "env" {
+		t.Fatalf("provider = %q", cfg.FinanceCollectSecretProvider)
+	}
+	if got, want := strings.Join(cfg.FinanceCollectSecretScopes, ","), "sub2api,newapi"; got != want {
+		t.Fatalf("scopes = %q, want %q", got, want)
+	}
+}
+
+func TestFinanceSecretsFromEnvConventionAndFile(t *testing.T) {
+	values := map[string]string{
+		"XM_FINANCE_SECRET_SUB2API__TOKEN_A": "env-token",
+	}
+	getenv := func(key string) string { return values[key] }
+	provider, err := financeSecretsFromEnv(getenv, nil, "staging", jobs.FinanceCollectModeReal, "env", "", []string{"sub2api"})
+	if err != nil || provider == nil {
+		t.Fatalf("env provider = %v, %v", provider, err)
+	}
+	value, err := provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://sub2api/token-a"), "test")
+	if err != nil || value.Reveal() != "env-token" {
+		t.Fatalf("env resolve = %q, %v", value.Reveal(), err)
+	}
+	if _, err := financeSecretsFromEnv(getenv, nil, "staging", jobs.FinanceCollectModeReal, "wat", "", []string{"sub2api"}); err == nil {
+		t.Fatal("非法 provider 必须拒绝")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sub2api"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub2api", "token-a"), []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err = financeSecretsFromEnv(getenv, nil, "staging", jobs.FinanceCollectModeReal, "file", root, []string{"sub2api"})
+	if err != nil || provider == nil {
+		t.Fatalf("file provider = %v, %v", provider, err)
+	}
+	value, err = provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://sub2api/token-a"), "test")
+	if err != nil || value.Reveal() != "file-token" {
+		t.Fatalf("file resolve = %q, %v", value.Reveal(), err)
+	}
+	provider, err = financeSecretsFromLookup(func(name string) (string, bool) {
+		if name == "XM_FINANCE_SECRET_SUB2API__EMPTY" {
+			return "", true
+		}
+		return "", false
+	}, nil, "staging", jobs.FinanceCollectModeReal, "env", "", []string{"sub2api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://sub2api/empty"), "test"); !errors.Is(err, secrets.ErrEmptySecret) {
+		t.Fatalf("显式空值应 ErrEmptySecret, got %v", err)
 	}
 }
 

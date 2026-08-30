@@ -65,6 +65,22 @@ func main() {
 		defer closeRevenue()
 	}
 	config.FinanceNewAPIRevenue = revenueSource
+	// 成本采集的账号/令牌引用来自登记簿，不能在 configFromEnv 阶段预枚举。
+	// Provider 只按 Resolve 即时查 env/file；缺少 provider 保留为 nil，让
+	// real 采集器按 not_supported 记录可见降级，而不是阻断心跳。
+	config.FinanceCollectSecrets, err = financeSecretsFromLookup(
+		os.LookupEnv,
+		logger,
+		config.Environment,
+		config.FinanceCollectMode,
+		config.FinanceCollectSecretProvider,
+		config.FinanceCollectSecretRoot,
+		config.FinanceCollectSecretScopes,
+	)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "finance_secret_provider_invalid")
+		os.Exit(2)
+	}
 
 	// 告警投递凭据的 Provider（XM-0033）。同样装配在进程入口，
 	// 告警模块只拿接口。引用没配时返回 nil，不是错误——见 alertSecretsFromEnv。
@@ -135,6 +151,8 @@ func main() {
 		"finance_collect_interval", config.FinanceCollectInterval.String(),
 		"finance_collect_allowlist_size", len(config.FinanceCollectTargetAllowlist),
 		"finance_collect_secrets_configured", config.FinanceCollectSecrets != nil,
+		"finance_collect_secret_provider", config.FinanceCollectSecretProvider,
+		"finance_collect_secret_scopes", len(config.FinanceCollectSecretScopes),
 		// newapi 收入侧走的是只读 DSN（§3.2），与上面那条 HTTP 采集是两条通道。
 		// 打出来才看得出台账里 newapi 那几行的收入是「真读了」还是「写 NULL」。
 		"newapi_revenue_dsn_configured", config.FinanceNewAPIRevenue != nil,

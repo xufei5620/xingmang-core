@@ -268,6 +268,19 @@ services:
       XM_NEWAPI_REVENUE_DSN: ${XM_NEWAPI_REVENUE_DSN:-}
       XM_NEWAPI_REVENUE_PASSWORD_REF: ${XM_NEWAPI_REVENUE_PASSWORD_REF:-}
       XM_NEWAPI_REVENUE_PASSWORD: ${XM_NEWAPI_REVENUE_PASSWORD:-}
+      # --- 成本采集（XM-0037b / XM-REAL0-a）-------------------------------
+      # 账号与令牌 CredentialRef 来自登记簿，SecretProvider 在每次读取时按
+      # 引用解析；不在 Compose 中预声明动态 secret。provider 留空时 real
+      # 成本链路如实记 not_supported，不影响 worker 心跳。
+      XM_FINANCE_COLLECT_MODE: ${XM_FINANCE_COLLECT_MODE:-fake}
+      XM_FINANCE_COLLECT_ENABLED: ${XM_FINANCE_COLLECT_ENABLED:-true}
+      XM_FINANCE_COLLECT_INTERVAL: ${XM_FINANCE_COLLECT_INTERVAL:-300s}
+      XM_FINANCE_COLLECT_INSTANCE_ID: ${XM_FINANCE_COLLECT_INSTANCE_ID:-finance-collect-staging}
+      XM_FINANCE_COLLECT_TARGET_ALLOWLIST: ${XM_FINANCE_COLLECT_TARGET_ALLOWLIST:-}
+      XM_FINANCE_COLLECT_REQUEST_TIMEOUT: ${XM_FINANCE_COLLECT_REQUEST_TIMEOUT:-10s}
+      XM_FINANCE_COLLECT_SECRET_PROVIDER: ${XM_FINANCE_COLLECT_SECRET_PROVIDER:-}
+      XM_FINANCE_COLLECT_SECRET_ROOT: ${XM_FINANCE_COLLECT_SECRET_ROOT:-/run/xm/finance-secrets}
+      XM_FINANCE_COLLECT_SECRET_SCOPES: ${XM_FINANCE_COLLECT_SECRET_SCOPES:-}
       # --- 保留期清理（XM-R012）---------------------------------------------
       # ops.metric_observation_sample 以 5 分钟粒度追加（约 288 条/日/指标），
       # 在此之前没有任何清理路径。默认开启：一张没有清理路径的追加表迟早会
