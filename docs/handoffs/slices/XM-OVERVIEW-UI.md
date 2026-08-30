@@ -7,9 +7,12 @@ READY（待验收线审读、复跑并人工合入）
 ## branch / commit / base
 
 - branch: `ai/claude/XM-OVERVIEW-UI`
-- implementation commit: `63d98c2`（feat，本文档描述的全部代码改动都在这一个提交里）
-- HEAD: `3894116`（`63d98c2` 之上另加了 `5d3f987` 本交接文档、`3894116`
-  一处测试注释里两个半角逗号改全角的小修，均不改动任何逻辑/断言）
+- implementation commit: `63d98c2`（feat，本文档描述的全部代码改动都在这一个
+  提交里，是唯一需要审读的功能改动）
+- 之后的提交都是文档/风格类，不改动任何逻辑或断言：本文档自身的提交、以及
+  一处测试注释里两个半角逗号改全角的小修——含本次这条「补全 HEAD」提交在
+  内，这类提交会持续追加、其哈希在本文档写成的当下即失真，因此不在这里
+  逐条钉死；`git log --oneline ai/claude/XM-OVERVIEW-UI` 可查全貌
 - base: `release/v0.1-launch`
 - worktree: `K:/星芒统一控制平台/acceptance/wt-overview-ui`
 
