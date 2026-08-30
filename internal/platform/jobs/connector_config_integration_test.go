@@ -2,7 +2,6 @@ package jobs
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -53,7 +52,7 @@ CREATE TABLE IF NOT EXISTS core.connector_config (
 		t.Fatal(err)
 	}
 
-	environment := fmt.Sprintf("itest-connector-config-%d", time.Now().UnixNano())
+	environment := "staging" // 迁移后 environment 有 FK 到 core.environment,只能用已登记环境
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
