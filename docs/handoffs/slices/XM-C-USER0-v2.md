@@ -4,7 +4,7 @@ sprint-section: 7
 
 ## status
 
-IN_REVIEW (acceptance evidence pending)
+READY
 
 ## branch / commit / base
 
@@ -109,10 +109,37 @@ IN_REVIEW (acceptance evidence pending)
   missing reader/type/handler symbols; after implementation the same tests pass.
 - `git diff --check` — PASS (after final commit)
 
+## runtime evidence
+
+验收线在共享 `xingmang-launch` staging 栈上以本片提交 `18b136c7210b30a7af5c641af2aa2dfa1405549e` 串行重建
+`platform-api`、`platform-worker` 与 `web`（不接触真实凭据）。`deploy-local.sh --test-mode --no-fetch`
+通过：`healthz=200`、`readyz=200`、`services=200`、`metrics=200`、`alerts=200`，Worker 日志可读。
+
+脱敏接口证据（请求均使用 canonical 用户段 `u-755f3130323431`，未记录 token/DSN/口令）：
+
+- `GET /api/v1/platforms/sub2api/users/u-755f3130323431/daily-usage?days=7` → `200`；
+  `expected_days=7`、`covered_days=6`、`complete=false`，缺失业务日保持 `null`（2026-08-25），
+  `snapshot.source=sub2api-fake`。
+- `GET /api/v1/platforms/sub2api/users/u-755f3130323431/keys?limit=2`（含
+  `platform.user_keys.read`）→ `200`；返回 2 条，仅包含 prefix/status/时间/peak RPM，
+  `snapshot.source=sub2api-fake`，无完整 Key 或 secret。
+- 同一 Key 请求移除 `platform.user_keys.read` → `403 PERMISSION_DENIED`。
+- NewAPI 同路径的 daily/key 请求 → `501 ADVANCED_CONTROLS_REQUIRED`，证明未继承
+  Sub2API capability。
+
+平台 API 日志记录上述 detail/daily-usage/keys 请求最终 `status=200`，缺 scope 请求为 `403`；
+Worker `worker_started` 为 staging fake，最近 `sub2api_sync`/`newapi_sync` 均
+`success=true` 且 `metrics_failed=0`。`finance_cost_sync` 的 staging `partial` 为既有
+演示数据的 no-owner 行，不属于本片能力。
+
+截图证据：
+
+- `docs/evidence/screens/XM-C-USER0-v2/sub2api-user-daily-wide.jpg`
+- `docs/evidence/screens/XM-C-USER0-v2/sub2api-user-keys-wide.jpg`
+
 ## tests_not_run
 
-- Shared `xingmang-launch` Docker stack was intentionally not restarted by this slice;
-  acceptance line must rebuild the affected API/web service on the running stack.
+- Shared `xingmang-launch` stack was rebuilt above; the evidence is staging/Fake only.
 - No real Sub2API/NewAPI endpoint, credential, production system, or external write was
   accessed.
 
