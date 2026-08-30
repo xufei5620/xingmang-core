@@ -69,3 +69,9 @@
   ⑤ 接入模式开关:非秘密配置表 core.connector_config(platform, mode fake|real, endpoint, target_allowlist, updated_at/by),Action connector.config.set@1(scope connector.manage,同样不进默认映射),worker 每轮读取;env XM_*_MODE/ENDPOINT/ALLOWLIST 只作兜底默认。UI:设置→凭据页增加各平台"接入模式/端点/允许主机"表单。
   ⑥ 验收标准(服务器实机):部署后在 https://console.solov.cc 设置→凭据 粘贴 Sub2API 凭据并把模式切为 real → 5 分钟内 worker 日志 sub2api_sync source=sub2api-real success=true,scripts/verify-real-mode.sh --platform sub2api PASS;全程不改 .env、不重启容器。
   ⑦ 不做:KMS/远端 vault、审批中心、读回明文、Keycloak。共享文件(router.go/main.go/launch.yaml/config.ts)在本片最终接线 commit 改并 rebase 到最新 release 后 READY。
+2026-08-30T13:09Z PRIORITY 上线路线(用户 2026-08-30 拍板:直接上线、逐步完善,不要开发模式/演示态)。事实核对:auth.solov.cc 上 solov-staff realm 不存在(CR-0001 仍待执行),admin-web 没有任何 OIDC 登录流(只发 dev-header),生产模式(ENVIRONMENT=production)会拒绝 dev-header 启动——所以"去掉开发模式"需要前端登录 + realm 两件事。排序如下,均预批:
+  ① XM-CRED0-backend(车道 F,已排最高)→ 凭据在 UI 填、切 real → "演示数据"横幅随真实数据消失(横幅本身按宪法数据新鲜度条款保留,只在 fake 时显示)。
+  ② XM-AUTH1 前端 OIDC 登录(新车道 G,可与①并行):admin-web 实现 Authorization Code + PKCE(不引入新主版本依赖,优先手写或 oidc-client-ts 钉版本入 VERSIONS.lock)、登录页/登出/静默续期、Bearer 注入替代 X-Dev-* 头(dev-header 只在 ENVIRONMENT!=production 保留为开发便利)、401 时回登录页;后端按 AUTH-SWITCH.md 现有 oidc resolver,不改;XM_OIDC_ROLE_SCOPES 由验收线给出默认映射。验收:staging 上用 Keycloak 测试 realm 登录成功、scope 生效、Basic Auth 可去除。
+  ③ CR-0001 solov-staff realm:验收线生成 realm 导入 JSON(realm、client xingmang-admin-web(public+PKCE, redirect https://console.solov.cc/*)、角色 staff/admin/auditor/finance/key-metadata-reader、MFA 策略),由用户在 auth-admin.solov.cc 导入(Keycloak 变更红线保留给用户);验收线不持有 Keycloak 凭据。
+  ④ 生产切换(①②③齐后,用户确认执行):服务器改用 launch.yaml + server-prod.yaml(ENVIRONMENT=production、XM_AUTH_MODE=oidc、FAKE_SEED=false、各平台 mode 由 core.connector_config 决定),数据库新建卷(演示数据不带入),nginx 去掉 Basic Auth;之后每次合入仍走 deploy-local/deploy.sh。
+  在此之前 console.solov.cc 保持 staging(dev-header + Basic Auth),这是有意的诚实标注,不是未完成。

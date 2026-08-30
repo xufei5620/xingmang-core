@@ -146,3 +146,8 @@ core.credential_ref 元数据表 + credential.secret.upsert/rotate/revoke Action
 连接器 token 文件优先/env 兜底、每轮重新 Resolve + core.connector_config 接入模式开关 + 设置→凭据页表单。
 验收：服务器上在 UI 粘贴 Sub2API 凭据并切 real，5 分钟内 sub2api_sync 真实成功、verify-real-mode.sh PASS，不改 .env 不重启。
 完整边界见 ACCEPTANCE-LOG `PRIORITY 最高优先级 = XM-CRED0 端到端`。
+
+### 7.8 上线路线（2026-08-30 晚，用户拍板：直接上线、逐步完善）
+① XM-CRED0-backend（车道 F，最高）→ ② XM-AUTH1 前端 OIDC 登录（新车道 G，Authorization Code+PKCE、登录页/登出/续期、
+Bearer 替代 X-Dev-* 头，后端 oidc resolver 不改）→ ③ CR-0001 solov-staff realm 由验收线出导入 JSON、用户导入 →
+④ 生产切换（server-prod.yaml、新库卷、去 Basic Auth，用户确认）。完整边界见 ACCEPTANCE-LOG `PRIORITY 上线路线`。
