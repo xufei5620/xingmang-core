@@ -145,7 +145,7 @@ function Validate-ComposeStatic([string]$Path, $Pin) {
       Where-Object { $_.Value -notmatch '@sha256:[0-9a-f]{64}' }
     if (@($tagOnly).Count -gt 0) { Fail 'compose 含未钉 digest 的 postgres 镜像' }
   }
-  foreach ($required in @('DBR_RUN_ID', 'DBR_DATABASE', 'DBR_VOLUME_NAME', 'DBR_PASSWORD_FILE',
+  foreach ($required in @('DBR_RUN_ID', 'DBR_DATABASE', 'DBR_VOLUME_NAME', 'DBR_PASSWORD_FILE', 'DBR_FIXTURE_FILE',
                            'com.docker.compose.project', 'com.xingmang.dbr1.run-id')) {
     # com.docker.compose.project is injected by Compose; the other markers are
     # explicit in the file or script and checked below.
@@ -231,7 +231,8 @@ $envLines = @(
   "DBR_RUN_ID=$runId",
   "DBR_DATABASE=$database",
   "DBR_VOLUME_NAME=$volumeName",
-  "DBR_PASSWORD_FILE=$secretPath"
+  "DBR_PASSWORD_FILE=$secretPath",
+  "DBR_FIXTURE_FILE=$fixturePath"
 )
 [IO.File]::WriteAllText($composeEnvPath, (($envLines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
 
@@ -239,6 +240,7 @@ $composeBase = @('--project-name', $project, '--file', $composePath, '--env-file
 $started = $false
 $discoveredPort = 0
 $teardownError = $null
+$runStartedAt = [DateTimeOffset]::UtcNow
 
 function Invoke-Compose([string[]]$Arguments, [string]$Label, [switch]$AllowFailure) {
   $result = Invoke-NativeResult 'docker' (@('compose') + $composeBase + $Arguments)
@@ -264,15 +266,13 @@ function Invoke-Psql([string]$Role, [string]$Sql, [switch]$AllowFailure) {
 function Invoke-PsqlFixture {
   $args = @('exec', '--no-TTY', '--env', "PGPASSWORD=$password", 'postgres',
             'psql', '--no-psqlrc', '-X', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1',
-            '-U', 'postgres', '-d', $database, '-f', '-')
-  $fixtureText = Get-Content -LiteralPath $fixturePath -Raw -Encoding UTF8
-  $output = @($fixtureText | & docker @(@('compose') + $composeBase + $args) 2>&1)
-  $code = $LASTEXITCODE
-  if ($code -ne 0) {
-    $details = Sanitize (Join-NativeOutput $output) $password
+            '-U', 'postgres', '-d', $database, '-f', '/run/dbr1/fixture.sql')
+  $result = Invoke-NativeResult 'docker' (@('compose') + $composeBase + $args)
+  if ($result.ExitCode -ne 0) {
+    $details = Sanitize (Join-NativeOutput $result.Output) $password
     if ($details.Length -gt 1200) { $details = $details.Substring(0, 1200) }
-    if ($details) { Fail "fixture 执行失败(exit=$code): $details" }
-    Fail "fixture 执行失败(exit=$code)"
+    if ($details) { Fail "fixture 执行失败(exit=$($result.ExitCode)): $details" }
+    Fail "fixture 执行失败(exit=$($result.ExitCode))"
   }
 }
 
@@ -284,12 +284,34 @@ function Assert-Query([string]$Role, [string]$Sql, [string]$Expected, [string]$L
 
 function Assert-Denied([string]$Role, [string]$Sql, [string]$Label, [string[]]$Codes = @('42501', '55000')) {
   $result = Invoke-Psql $Role $Sql -AllowFailure
-  if ($result.ExitCode -eq 0) { Fail "$Label 未被拒绝 (role=$Role)" }
+  if ($result.ExitCode -eq 0) {
+    # PostgreSQL reports a GRANT without grant option as a successful command
+    # plus warning 01007 (no privileges were granted).  Treat that as an ACL
+    # denial only after checking the warning; a silent privilege change is not
+    # accepted.
+    if ((Join-NativeOutput $result.Output) -match '(?i)no privileges were granted') { return }
+    $diagResult = Invoke-Psql $Role "SELECT current_user || ':' || session_user;" -AllowFailure
+    $diagnostic = (Join-NativeOutput $diagResult.Output).Trim()
+    $notice = (Join-NativeOutput $result.Output).Trim()
+    if ($notice.Length -gt 300) { $notice = $notice.Substring(0, 300) }
+    Fail "${Label} 未被拒绝 (role=$Role, current=$diagnostic, output=$notice)"
+  }
   $text = Join-NativeOutput $result.Output
   $matched = $false
   foreach ($code in $Codes) { if ($text -match [regex]::Escape($code)) { $matched = $true } }
-  if (-not $matched -and $text -notmatch '(?i)permission denied|must be owner|not permitted|immutable') {
-    Fail "$Label 返回了非预期错误"
+  if (-not $matched -and $text -notmatch '(?i)permission denied|must be owner|not permitted|immutable|read-only transaction') {
+    $safe = Sanitize $text $password
+    if ($safe.Length -gt 600) { $safe = $safe.Substring(0, 600) }
+    Fail "${Label} 返回了非预期错误: $safe"
+  }
+}
+
+function Assert-NoMutation([string]$Role, [string]$MutationSql, [string]$BeforeSql, [string]$Expected, [string]$Label) {
+  $before = (Join-NativeOutput (Invoke-Psql 'postgres' $BeforeSql).Output).Trim()
+  Invoke-Psql $Role $MutationSql -AllowFailure | Out-Null
+  $after = (Join-NativeOutput (Invoke-Psql 'postgres' $BeforeSql).Output).Trim()
+  if ($before -ne $Expected -or $after -ne $Expected) {
+    Fail "${Label}: append-only row changed (before=$before after=$after)"
   }
 }
 
@@ -312,9 +334,11 @@ try {
     if ((Join-NativeOutput $result).Trim()) { Fail "随机 project/run-id 已有资源，拒绝复用" }
   }
 
+  # Mark the project as owned before invoking Docker.  Even a partially
+  # created service must be torn down if `up` exits non-zero.
+  $started = $true
   $up = Invoke-Compose @('up', '-d', '--wait', 'postgres') 'start disposable postgres'
   $null = $up
-  $started = $true
 
   $portOutput = Invoke-Compose @('port', 'postgres', '5432') 'discover assigned postgres port'
   $portText = (Join-NativeOutput $portOutput.Output).Trim()
@@ -345,7 +369,8 @@ try {
   $imageId = (Invoke-NativeChecked 'docker' @('inspect', '--format', '{{.Image}}', $containerId) 'container image id').Trim()
   $digestJson = Join-NativeOutput (Invoke-NativeChecked 'docker' @('image', 'inspect', '--format', '{{json .RepoDigests}}', $imageId) 'postgres RepoDigest')
   $repoDigests = $digestJson | ConvertFrom-Json
-  $digestMatched = @($repoDigests | Where-Object { [string]$_ -match "@${([regex]::Escape($pin.Digest))}$" }).Count -gt 0
+  $digestRegex = '@' + [regex]::Escape($pin.Digest) + '$'
+  $digestMatched = @($repoDigests | Where-Object { [string]$_ -match $digestRegex }).Count -gt 0
   if (-not $digestMatched) { Fail "postgres RepoDigest 与 VERSIONS.lock 不一致" }
 
   # Inspect mounts: exactly one Compose-managed volume at the PG18 parent
@@ -361,16 +386,29 @@ try {
   if ($volume.Labels.'com.xingmang.dbr1.run-id' -ne $runId -or $volume.Labels.'com.xingmang.dbr1.managed' -ne 'true') {
     Fail 'volume run-id/managed label 不匹配'
   }
+  try {
+    $volumeCreatedAt = [DateTimeOffset]::Parse([string]$volume.CreatedAt)
+    # Docker Desktop may report its daemon clock in the host's local offset
+    # while PowerShell uses UTC.  The random volume name + preflight label
+    # check is the authoritative freshness proof; retain a generous clock
+    # sanity bound so a stale/reused volume still fails closed.
+    $ageHours = [math]::Abs(($volumeCreatedAt.UtcDateTime - $runStartedAt.UtcDateTime).TotalHours)
+    if ($ageHours -gt 24) {
+      Fail "volume 创建时间明显早于本次 harness 运行，拒绝复用旧 cluster (created=$volumeCreatedAt run=$runStartedAt)"
+    }
+  } catch [FormatException] {
+    Fail '无法解析 volume 创建时间，拒绝继续'
+  }
 
   # Construct the DSN only after the port is discovered.  It deliberately has
   # no password and no host/query override.  pgdsn-validate calls the platform
   # pgdsn.Validate and pgdsn.RequireLoopback guards; PGPASSWORD is not present
   # in this parent process while validation runs.
-  $dsn = "postgres://postgres@127.0.0.1:$discoveredPort/$database?sslmode=disable&application_name=dbr1-harness"
+  $dsn = "postgres://postgres@127.0.0.1:${discoveredPort}/${database}?sslmode=disable&application_name=dbr1-harness"
   $oldDsn = [Environment]::GetEnvironmentVariable('DBR_INTERNAL_DSN', 'Process')
   try {
     $env:DBR_INTERNAL_DSN = $dsn
-    $validation = Invoke-NativeChecked 'go' @('run', './cmd/pgdsn-validate', '--dsn-env', 'DBR_INTERNAL_DSN', '--require-loopback') 'internal DSN loopback validation'
+    $validation = Invoke-NativeChecked 'go' @('run', './cmd/pgdsn-validate', '--dsn-env', 'DBR_INTERNAL_DSN', '--require-loopback', '--require-managed-password') 'internal DSN loopback/managed-password validation'
     $null = $validation
   } finally {
     if ($null -eq $oldDsn) { Remove-Item Env:DBR_INTERNAL_DSN -ErrorAction SilentlyContinue }
@@ -378,7 +416,7 @@ try {
   }
   if ($dsn -match '(?i)password=|@[^/]+:[^@]+@') { Fail '内部 DSN 含密码或 query host override' }
 
-  Assert-Query 'postgres' 'SHOW server_version_num;' '180000' 'PostgreSQL server_version_num'
+  Assert-Query 'postgres' "SELECT (current_setting('server_version_num')::int / 10000)::text;" '18' 'PostgreSQL server_version_num major'
   Assert-Query 'postgres' 'SELECT current_database();' $database 'current database fingerprint'
   Assert-Query 'postgres' "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'xm_%';" '0' 'fresh role catalog'
   Assert-Query 'postgres' "SELECT count(*) FROM pg_namespace WHERE nspname IN ('core','action','audit','ops','alerts','finance');" '0' 'fresh platform schemas'
@@ -413,20 +451,29 @@ try {
   Assert-Query 'xm_backup_a' 'SELECT count(*) FROM finance.profit_daily;' '0' 'backup finance SELECT'
   Assert-Query 'xm_backup_a' 'SELECT count(*) FROM ops.metric_observation_sample;' '1' 'backup sample SELECT'
   Assert-Query 'xm_backup_a' "SELECT has_sequence_privilege('xm_backup_a', 'ops.metric_observation_sample_id_seq', 'SELECT');" 't' 'backup sequence SELECT'
+  Assert-Query 'postgres' "SELECT has_table_privilege('xm_api_a', 'core.environment', 'SELECT WITH GRANT OPTION');" 'f' 'API grant option absent'
+  Assert-Query 'postgres' "SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='core' AND c.relname='environment';" 'xm_migrator' 'fixture table owner'
 
   # ACL-layer negative probes (SQLSTATE 42501) and role escalation denial.
   foreach ($role in @('xm_api_a', 'xm_worker_a', 'xm_lifecycle_a', 'xm_ops_a', 'xm_backup_a')) {
     Assert-Denied $role 'CREATE TABLE public.dbr1_forbidden (id integer);' "$role CREATE"
     Assert-Denied $role 'CREATE ROLE dbr1_forbidden;' "$role CREATEROLE"
-    Assert-Denied $role 'GRANT SELECT ON core.environment TO PUBLIC;' "$role GRANT"
+    # Plain GRANT may legally return 0 with a warning when no grant option is
+    # held.  WITH GRANT OPTION forces PostgreSQL's ACL denial (42501), making
+    # this probe fail closed instead of treating a warning/no-op as success.
+    Assert-Denied $role 'GRANT SELECT ON core.environment TO xm_worker_a WITH GRANT OPTION;' "$role GRANT"
   }
-  Assert-Denied 'xm_api_a' "UPDATE action.action_run SET status='failed';" 'API action_run UPDATE'
-  Assert-Denied 'xm_api_a' 'DELETE FROM audit.audit_event;' 'API audit_event DELETE'
-  Assert-Denied 'xm_worker_a' "UPDATE audit.audit_event SET result='failed';" 'worker audit_event UPDATE'
+  # Rewrite rules intentionally turn append-only UPDATE/DELETE into a no-op;
+  # prove the second defense by checking the row remains byte-for-byte stable.
+  Assert-NoMutation 'xm_api_a' "UPDATE action.action_run SET status='failed';" "SELECT status FROM action.action_run WHERE id='00000000-0000-0000-0000-000000000010';" 'succeeded' 'API action_run append-only UPDATE'
+  Assert-NoMutation 'xm_api_a' 'DELETE FROM audit.audit_event;' 'SELECT count(*) FROM audit.audit_event;' '1' 'API audit_event append-only DELETE'
+  Assert-NoMutation 'xm_worker_a' "UPDATE audit.audit_event SET result='failed';" "SELECT result FROM audit.audit_event WHERE id='00000000-0000-0000-0000-000000000011';" 'succeeded' 'worker audit_event append-only UPDATE'
+  Assert-Denied 'xm_api_a' "UPDATE core.environment SET description='forbidden';" 'API core UPDATE ACL'
+  Assert-Denied 'xm_api_a' 'DELETE FROM core.environment;' 'API core DELETE ACL'
   Assert-Denied 'xm_worker_a' 'TRUNCATE ops.metric_observation_sample;' 'worker sample TRUNCATE'
   Assert-Denied 'xm_worker_a' "SELECT setval('ops.metric_observation_sample_id_seq', 99);" 'worker sequence setval'
   Assert-Denied 'xm_api_a' 'SELECT * FROM public.river_job;' 'API River SELECT'
-  Assert-Denied 'xm_worker_a' 'INSERT INTO action.action_run (id, action_id, principal_id, environment, status) VALUES (\'00000000-0000-0000-0000-000000000012\', \'platform.dbr1.probe\', \'dbr1\', \'staging\', \'succeeded\');' 'worker action_run INSERT'
+  Assert-Denied 'xm_worker_a' "INSERT INTO action.action_run (id, action_id, principal_id, environment, status) VALUES ('00000000-0000-0000-0000-000000000012', 'platform.dbr1.probe', 'dbr1', 'staging', 'succeeded');" 'worker action_run INSERT'
   Assert-Denied 'xm_api_a' 'SET ROLE xm_migrator;' 'API SET ROLE migrator'
   Assert-Denied 'xm_api_a' "UPDATE audit.chain_root SET root_hash=repeat('d',64) WHERE id='00000000-0000-0000-0000-000000000001';" 'chain_root protected column' @('42501')
   Assert-Denied 'xm_api_a' 'TRUNCATE audit.chain_root;' 'API chain_root TRUNCATE'

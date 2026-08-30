@@ -54,9 +54,9 @@ CREATE SCHEMA finance;
 -- roles get no public schema usage; worker receives it only for River objects.
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO xm_worker_runtime;
-GRANT USAGE ON SCHEMA core, ops, alerts, finance TO xm_api_runtime;
-GRANT USAGE ON SCHEMA core, ops, alerts, finance, public TO xm_worker_runtime;
-GRANT USAGE ON SCHEMA core, ops, alerts, finance TO xm_lifecycle_runtime, xm_ops_read, xm_backup_read;
+GRANT USAGE ON SCHEMA core, action, audit, ops, alerts, finance TO xm_api_runtime;
+GRANT USAGE ON SCHEMA core, audit, ops, alerts, finance, public TO xm_worker_runtime;
+GRANT USAGE ON SCHEMA core, audit, ops, alerts, finance TO xm_lifecycle_runtime, xm_ops_read, xm_backup_read;
 
 CREATE TABLE core.environment (
     id text PRIMARY KEY,
@@ -204,11 +204,19 @@ ALTER SCHEMA audit OWNER TO xm_migrator;
 ALTER SCHEMA ops OWNER TO xm_migrator;
 ALTER SCHEMA alerts OWNER TO xm_migrator;
 ALTER SCHEMA finance OWNER TO xm_migrator;
-ALTER TABLE core.environment, core.service, core.connector, core.connection OWNER TO xm_migrator;
-ALTER TABLE action.action_run, audit.audit_event, audit.chain_root OWNER TO xm_migrator;
-ALTER TABLE ops.metric_observation, ops.metric_observation_sample OWNER TO xm_migrator;
-ALTER TABLE alerts.alert, alerts.alert_silence OWNER TO xm_migrator;
-ALTER TABLE finance.upstream_account, finance.profit_daily OWNER TO xm_migrator;
+ALTER TABLE core.environment OWNER TO xm_migrator;
+ALTER TABLE core.service OWNER TO xm_migrator;
+ALTER TABLE core.connector OWNER TO xm_migrator;
+ALTER TABLE core.connection OWNER TO xm_migrator;
+ALTER TABLE action.action_run OWNER TO xm_migrator;
+ALTER TABLE audit.audit_event OWNER TO xm_migrator;
+ALTER TABLE audit.chain_root OWNER TO xm_migrator;
+ALTER TABLE ops.metric_observation OWNER TO xm_migrator;
+ALTER TABLE ops.metric_observation_sample OWNER TO xm_migrator;
+ALTER TABLE alerts.alert OWNER TO xm_migrator;
+ALTER TABLE alerts.alert_silence OWNER TO xm_migrator;
+ALTER TABLE finance.upstream_account OWNER TO xm_migrator;
+ALTER TABLE finance.profit_daily OWNER TO xm_migrator;
 ALTER TABLE public.river_job OWNER TO xm_migrator;
 ALTER SEQUENCE ops.metric_observation_sample_id_seq OWNER TO xm_migrator;
 ALTER SEQUENCE finance.upstream_account_id_seq OWNER TO xm_migrator;

@@ -17,6 +17,9 @@ services:
         target: dbr1_postgres_password
     volumes:
       - dbr1_data:/var/lib/postgresql
+      # Fixture is mounted read-only so psql executes the committed bytes
+      # directly; this is not a data-directory bind mount.
+      - ${DBR_FIXTURE_FILE:?DBR_FIXTURE_FILE is required}:/run/dbr1/fixture.sql:ro
     ports:
       - "127.0.0.1::5432"
     labels:

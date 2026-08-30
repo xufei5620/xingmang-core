@@ -15,6 +15,7 @@ var lookupEnv = os.LookupEnv
 func main() {
 	name := flag.String("dsn-env", "", "environment variable containing the DSN")
 	requireLoopback := flag.Bool("require-loopback", false, "require a loopback host")
+	requireManagedPassword := flag.Bool("require-managed-password", false, "reject passwords from DSN/environment/passfile")
 	flag.Parse()
 	if *name == "" {
 		fmt.Fprintln(os.Stderr, "--dsn-env is required")
@@ -25,15 +26,21 @@ func main() {
 		fmt.Fprintln(os.Stderr, "DSN environment variable is empty")
 		os.Exit(2)
 	}
-	if err := pgdsn.Validate(raw, false); err != nil {
-		fmt.Fprintln(os.Stderr, "DSN rejected")
+	if err := validateDSN(raw, *requireManagedPassword, *requireLoopback); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if *requireLoopback {
+	fmt.Println("ok")
+}
+
+func validateDSN(raw string, requireManagedPassword, requireLoopback bool) error {
+	if err := pgdsn.Validate(raw, requireManagedPassword); err != nil {
+		return fmt.Errorf("DSN rejected")
+	}
+	if requireLoopback {
 		if err := pgdsn.RequireLoopback(raw); err != nil {
-			fmt.Fprintln(os.Stderr, "DSN host is not loopback")
-			os.Exit(1)
+			return fmt.Errorf("DSN host is not loopback")
 		}
 	}
-	fmt.Println("ok")
+	return nil
 }
