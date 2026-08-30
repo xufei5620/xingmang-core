@@ -38,8 +38,11 @@ type config struct {
 
 	// SecretRoot 是凭据文件的根目录（XM-CRED0，XM_SECRET_ROOT）。
 	//
-	// 运营粘贴的凭据以 <root>/<scope>/<name> 落盘，worker 用同一个目录构造
-	// secrets.NewFileProvider 读值。本进程只写不读——它没有任何解析明文的路径。
+	// 运营粘贴的凭据以 <root>/<scope>/<name> 落盘；worker 与本进程都用同一个
+	// 目录构造 secrets.NewFileProvider 读值。本进程绝大部分路径仍是只写：
+	// 唯一的读路径是 XM-USERS-REAL 的 real 模式（platformUsersSecretProvider，
+	// 见 cmd/platform-api/platformusers.go），用来把 core.connector_config 里
+	// 的 CredentialRef 解析成请求头。
 	// 目录本身不是机密，路径可以进日志；目录里的文件永远不能。
 	SecretRoot string
 }
