@@ -6,6 +6,7 @@ import {
   shouldShowDemoBanner,
   type DemoDataConfig,
 } from "./demoData";
+import { demoBannerText, DEMO_BANNER_TEXT as BANNER_TEXT } from "./demoData";
 
 function env(over: Record<string, string | undefined> = {}): ImportMetaEnv {
   return over as unknown as ImportMetaEnv;
@@ -79,5 +80,17 @@ describe("NewAPI 的 Fake 来源（XM-0035）", () => {
         demoSources: DEFAULT_DEMO_SOURCES,
       }),
     ).toBe(true);
+  });
+});
+
+
+describe("demoBannerText", () => {
+  const config = { mode: "auto" as const, demoSources: ["sub2api-staging", "finance-collect-staging"] };
+  it("全部演示时用原文案", () => {
+    expect(demoBannerText(["sub2api-staging"], config)).toBe(BANNER_TEXT);
+  });
+  it("部分真实时点名演示来源", () => {
+    expect(demoBannerText(["sub2api-prod", "finance-collect-staging"], config)).toContain("finance-collect-staging");
+    expect(demoBannerText(["sub2api-prod", "finance-collect-staging"], config)).toContain("部分数据仍为演示");
   });
 });

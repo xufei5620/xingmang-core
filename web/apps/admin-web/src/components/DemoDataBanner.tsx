@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { listMetrics } from "../api/platform";
-import { appDemoDataConfig, DEMO_BANNER_TEXT, shouldShowDemoBanner } from "../lib/demoData";
+import { appDemoDataConfig, demoBannerText, shouldShowDemoBanner } from "../lib/demoData";
 
 /** 演示数据全局横幅（Codex #8）。
  *
@@ -33,7 +33,7 @@ export function DemoDataBanner() {
     >
       {/* 图形与文字同时给：只靠一条黄色横条的人，和只读文字的人，都要接得住 */}
       <span aria-hidden="true">⚠</span>
-      <span>{DEMO_BANNER_TEXT}</span>
+      <span>{demoBannerText(sources, appDemoDataConfig)}</span>
     </div>
   );
 }

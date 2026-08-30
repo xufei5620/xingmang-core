@@ -88,3 +88,29 @@ export function shouldShowDemoBanner(sources: string[], config: DemoDataConfig):
   if (config.mode === "real") return false;
   return sources.some((s) => isDemoSource(s, config.demoSources));
 }
+
+/** 命中演示实例的来源名（去重、保持出现顺序），用于「部分数据仍为演示」的诚实标注。 */
+export function demoSourcesIn(sources: string[], config: DemoDataConfig): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of sources) {
+    const value = s.trim().toLowerCase();
+    if (isDemoSource(value, config.demoSources) && !seen.has(value)) {
+      seen.add(value);
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+/** 横幅文案：全部来源都是演示 → 原文案；只有一部分是演示 → 点名哪些来源仍是演示。
+ *  真实数据一旦接入，不能再用「全部是演示数据」这句误导人。 */
+export function demoBannerText(sources: string[], config: DemoDataConfig): string {
+  if (config.mode === "demo") return DEMO_BANNER_TEXT;
+  const known = sources.map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0);
+  const demo = demoSourcesIn(known, config);
+  if (demo.length === 0) return DEMO_BANNER_TEXT;
+  const real = known.filter((s) => !demo.includes(s));
+  if (real.length === 0) return DEMO_BANNER_TEXT;
+  return `部分数据仍为演示（来源：${demo.join("、")}），其余已接真实上游`;
+}
