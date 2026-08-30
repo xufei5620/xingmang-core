@@ -406,16 +406,7 @@ func ReadCatalogSnapshot(ctx context.Context, conn CatalogQueryer, policy Policy
 			acls.Close()
 			return CatalogSnapshot{}, err
 		}
-		kind := defaultACLKind(objkind)
-		key := owner + "\x00" + schema + "\x00" + kind
-		a := aclMap[key]
-		if a == nil {
-			a = &CatalogDefaultACL{Owner: owner, Schema: schema, ObjectKind: kind, Privileges: map[string][]string{}}
-			aclMap[key] = a
-		}
-		if grantee != "" && privilege != "" {
-			a.Privileges[grantee] = append(a.Privileges[grantee], privilege)
-		}
+		projectDefaultACLRow(aclMap, owner, schema, objkind, grantee, privilege)
 	}
 	if err := acls.Err(); err != nil {
 		acls.Close()
@@ -561,6 +552,30 @@ func defaultACLKind(kind string) string {
 		return "domain"
 	default:
 		return kind
+	}
+}
+
+// PostgreSQL uses defaclobjtype='T' for both types and domains. Keep the
+// policy's logical families distinct by projecting one catalog row into both
+// entries; this also preserves an empty ACL sentinel for each family.
+func defaultACLKinds(kind string) []string {
+	if kind == "T" {
+		return []string{"type", "domain"}
+	}
+	return []string{defaultACLKind(kind)}
+}
+
+func projectDefaultACLRow(aclMap map[string]*CatalogDefaultACL, owner, schema, objkind, grantee, privilege string) {
+	for _, kind := range defaultACLKinds(objkind) {
+		key := owner + "\x00" + schema + "\x00" + kind
+		a := aclMap[key]
+		if a == nil {
+			a = &CatalogDefaultACL{Owner: owner, Schema: schema, ObjectKind: kind, Privileges: map[string][]string{}}
+			aclMap[key] = a
+		}
+		if grantee != "" && privilege != "" {
+			a.Privileges[grantee] = append(a.Privileges[grantee], privilege)
+		}
 	}
 }
 
