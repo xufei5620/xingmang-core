@@ -8,7 +8,7 @@ READY
 
 - branch: `ai/codex/XM-C-DEPLOY0-a`
 - implementation commits: `5630fbd`, `dfdb3d0`, `abd23b9`
-- base: `release/v0.1-launch` at `75bc7b9`
+- base: `release/v0.1-launch` at `4daad46`（2026-08-30 重放后基线）
 - worktree: `K:/星芒统一控制平台/wt-xmDEPLOY0-a`
 
 ## summary
@@ -99,6 +99,8 @@ receive hooks、一次性安装脚本，以及无服务器回归测试。没有�
 
 ## READY-FOLLOWUP（2026-08-30）
 
+- 当前 executable-bit follow-up commit：`81e2b03`；该分支已 rebase 到
+  `release/v0.1-launch@4daad46`，未改动 release 或任何远端。
 - 修复本片脚本的 Git 可执行位：`deploy/git-hooks/{pre-receive,post-receive}`、
   `deploy/scripts/install-git-server.sh`、`scripts/ci-local.sh` 与
   `tests/deploy/deploy0-a.test.sh` 均登记为 `100755`；仅索引 mode 变更，文件内容未改。
