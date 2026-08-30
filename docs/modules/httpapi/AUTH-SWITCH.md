@@ -63,8 +63,9 @@
 5. 回滚：把 `XM_AUTH_MODE` 改回 `dev-header`（仅非生产）并重启。平台侧无状态，
    不涉及数据迁移。
 
-> 前端的 OIDC 流（PKCE、跳转、令牌刷新）是**后续任务**，XM-0008 不含。
-> 在那之前，用 `Authorization: Bearer <token>` 手工验证后端。
+> 前端的 OIDC 流（PKCE、跳转、令牌刷新）由 XM-AUTH1 补上，见第十节。
+> 后端可以先单独用 `Authorization: Bearer <token>` 手工验证；但**对用户开放**
+> 之前，web 容器的 `XM_WEB_AUTH_MODE` 必须与这里的 `XM_AUTH_MODE` 同时切换。
 
 ## 三、可选配置
 
@@ -204,3 +205,99 @@ ADR-016 禁止的东西。
 - `cmd/platform-api/auth.go` —— 装配开关
 - `cmd/platform-api/config.go` —— `authConfigFromEnv`
 - `docs/modules/httpapi/PERMISSIONS.md` —— 权限表（XM-0008 不改它）
+- `web/apps/admin-web/src/auth/` —— 前端 OIDC（XM-AUTH1，见下）
+- `deploy/docker/web-app-config.sh` —— web 容器启动时生成 `/app-config.js`
+
+## 十、前端（admin-web，XM-AUTH1）
+
+授权码 + PKCE（S256），public client，不引入依赖（Web Crypto + fetch）。
+令牌只放 `sessionStorage`（关标签页即失效，不跨标签共享），任何日志与错误
+信息都不含令牌片段。
+
+### 10.1 运行时配置 `/app-config.js`
+
+鉴权方式**不烧进构建产物**：同一个 `xingmang/web` 镜像同时服务 staging
+（dev-header）与生产（oidc）。web 容器启动时 `deploy/docker/web-app-config.sh`
+（挂在官方 nginx 镜像的 `/docker-entrypoint.d/`）按环境变量生成
+`/usr/share/nginx/html/app-config.js`，`index.html` 在业务包之前用普通
+`<script>` 同步加载它，文件里只有一句：
+
+```js
+window.__XM_CONFIG__ = {
+  "authMode": "oidc",                                         // dev-header | oidc
+  "oidcIssuer": "https://auth.solov.cc/realms/solov-staff",   // = 后端 XM_OIDC_ISSUER，逐字
+  "oidcClientId": "xingmang-admin-web",                       // = 后端 XM_OIDC_AUDIENCE
+  "oidcScopes": "openid profile email"                        // 可选，默认就是这个
+};
+```
+
+| web 容器环境变量 | 字段 | 说明 |
+|---|---|---|
+| `XM_WEB_AUTH_MODE` | `authMode` | 默认 `dev-header`；其它值容器**拒绝启动** |
+| `XM_WEB_OIDC_ISSUER` | `oidcIssuer` | oidc 时必填，缺了拒绝启动；必须与 `XM_OIDC_ISSUER` 逐字相同 |
+| `XM_WEB_OIDC_CLIENT_ID` | `oidcClientId` | oidc 时必填；必须与 `XM_OIDC_AUDIENCE` 相同 |
+| `XM_WEB_OIDC_SCOPES` | `oidcScopes` | 可选 |
+
+浏览器端读取顺序（`src/auth/runtimeConfig.ts`，逐字段回落）：
+`window.__XM_CONFIG__` → 构建期 `VITE_XM_AUTH_MODE` / `VITE_XM_OIDC_ISSUER` /
+`VITE_XM_OIDC_CLIENT_ID` → `dev-header`。文件缺失或写坏**不会弄垮应用**，
+只回落并把问题写在登录页上；Nginx 对 `/app-config.js` 发 `Cache-Control: no-store`，
+切换后重启容器即生效，浏览器不会拿着旧模式发请求。
+
+compose：`launch.yaml` 的 `web` 透传三项（默认 dev-header；issuer / client id
+留空时回落到后端的 `XM_OIDC_ISSUER` / `XM_OIDC_AUDIENCE`）；`server-prod.yaml`
+固定 `oidc` 且必填。**前后端必须同时切**：只切前端，后端不认 Bearer（403
+缺少身份）；只切后端，前端还在发开发头。
+
+本地 `vite dev` 联调真 Keycloak：`web/apps/admin-web/.env.local` 写
+`VITE_XM_AUTH_MODE=oidc` + issuer + client id，后端同时 `XM_AUTH_MODE=oidc`；
+回调地址是 `http://localhost:5173/auth/callback`。
+
+### 10.2 登录 / 请求 / 登出
+
+1. `/login`「使用 solov 账号登录」→ 拉 `<issuer>/.well-known/openid-configuration`
+   （内存缓存；文档里的 `issuer` 必须与配置逐字相等，否则登录前就报错）→
+   生成 `code_verifier` + `state` 存 `sessionStorage` → 跳 `authorization_endpoint`
+   （`response_type=code`、`code_challenge_method=S256`、`scope=openid profile email`）；
+2. `/auth/callback`：`state` 不匹配 / 带 `error` / 事务缺失 **一律拒绝**并把原因
+   写在屏幕上，不回落到工作台；匹配则用 `code_verifier` 到 `token_endpoint` 换令牌
+   （无 client secret），存 `{access_token, refresh_token?, id_token?, expires_at}`，
+   回到发起登录时的 `next`（只接受站内路径，防开放重定向）；
+3. 每个 API 请求 `Authorization: Bearer <access_token>`，三个 `X-Dev-*` 头不再发送。
+   距过期不足 60s 先用 `refresh_token` 续期（并发请求单飞，只发一次）；续期失败
+   清会话 → `/login?next=…&reason=session_expired`；
+4. 服务端拒绝：HTTP 401，或 403 且文案**逐字**是第六节的「缺少身份」/「身份令牌无效」
+   → 清会话 → `/login?reason=token_rejected`。「缺少权限 xxx」**不**跳登录——那是
+   登录了但没权限，照常显示无权访问；
+5. 退出：清会话 → `end_session_endpoint?post_logout_redirect_uri=https://<host>/login&client_id=…&id_token_hint=…`；
+   发现文档拉不到时只回 `/login`。顶栏显示 `id_token` 的 `preferred_username`
+   （与审计里的 `principal_id` 同源），其次 `name`。
+
+### 10.3 Keycloak Client 必须满足的设置
+
+CR-0001 §3 的表大部分已经对上，下面几项是前端流**硬依赖**的：
+
+| 设置 | 值 | 为什么 |
+|---|---|---|
+| Client ID | `xingmang-admin-web` | = 后端 `XM_OIDC_AUDIENCE` = 前端 `oidcClientId` |
+| Client authentication | **OFF**（public client） | 浏览器里没有地方放 secret |
+| Standard flow | ON | 授权码流 |
+| Direct access grants / Implicit / Service accounts | OFF | 不走密码直传，不走 implicit |
+| PKCE Code Challenge Method | **S256** | 前端只发 S256；Keycloak 设了这一项就会拒绝没带 challenge 的请求 |
+| Valid redirect URIs | `https://<host>/auth/callback`（每个部署一条；本地 `http://localhost:5173/auth/callback`） | CR-0001 的 `https://admin.solov.cc/*` 通配也覆盖它，但建议收紧到精确路径 |
+| Valid post logout redirect URIs | `https://<host>/login` | 登出后的落点，精确匹配 |
+| Web origins | `https://<host>` | 令牌端点是浏览器发起的**跨域 POST**，靠这一项放 CORS；不填就是换令牌时 CORS 失败 |
+| Client scopes | `openid`、`profile`（`email` 可选） | `profile` 才有 `preferred_username` / `name` 进 `id_token` |
+| Use refresh tokens | ON（默认） | 访问令牌只有 5 分钟，没有 refresh 就每 5 分钟跳一次登录 |
+
+`<host>` 按部署替换：staging `admin-staging.solov.cc`、生产 `admin.solov.cc`。
+
+### 10.4 相关文件
+
+- `web/apps/admin-web/src/auth/runtimeConfig.ts` —— 运行时配置解析
+- `web/apps/admin-web/src/auth/oidc.ts` —— 发现 / PKCE / 回调 / 续期 / 登出
+- `web/apps/admin-web/src/auth/session.ts` —— 模式门面、Bearer 提供者、跳登录
+- `web/apps/admin-web/src/auth/RequireAuth.tsx` —— 路由门禁
+- `web/apps/admin-web/src/pages/LoginPage.tsx`、`AuthCallbackPage.tsx`
+- `web/apps/admin-web/src/api/client.ts` —— `auth` 注入点（不传＝dev-header，行为不变）
+- `deploy/docker/web-app-config.sh`、`deploy/docker/web.Dockerfile`、`deploy/nginx/launch.conf`

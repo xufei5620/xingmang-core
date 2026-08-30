@@ -5,6 +5,7 @@ import {
   devPrincipalHeaders,
   NETWORK_STATUS,
   type FetchLike,
+  type UnauthenticatedReason,
 } from "./client";
 import type { PlatformApiConfig } from "./config";
 
@@ -245,5 +246,109 @@ describe("createApiClient：错误映射", () => {
     const fetchImpl = mockFetch(nonJsonResponse(200));
     const api = await expectApiError(createApiClient({ config, fetchImpl }).get("/api/v1/metrics"));
     expect(api.code).toBe("BAD_RESPONSE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// XM-AUTH1：oidc 模式（Authorization: Bearer 取代三个开发头）
+// ---------------------------------------------------------------------------
+
+function bearerAuth(token: string | null = "tok-1") {
+  return {
+    getAccessToken: vi.fn(() => Promise.resolve(token)),
+    onUnauthenticated: vi.fn<(reason: UnauthenticatedReason) => void>(),
+  };
+}
+
+describe("createApiClient：oidc 模式注入 Bearer", () => {
+  it("GET 只带 Accept + Authorization，没有任何 X-Dev-* 头", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ items: [] }));
+    const auth = bearerAuth();
+    await createApiClient({ config, fetchImpl, auth }).get("/api/v1/metrics");
+
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toEqual({
+      Accept: "application/json",
+      Authorization: "Bearer tok-1",
+    });
+    expect(auth.getAccessToken).toHaveBeenCalledOnce();
+    expect(auth.onUnauthenticated).not.toHaveBeenCalled();
+  });
+
+  it("POST 同样换成 Bearer，X-Request-ID 照旧", async () => {
+    const fetchImpl = mockFetch(jsonResponse({ action_run_id: "run-1" }));
+    await createApiClient({ config, fetchImpl, auth: bearerAuth() }).post(
+      "/x",
+      { params: {} },
+      { requestId: "req-7" },
+    );
+    const headers = fetchImpl.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer tok-1");
+    expect(headers["X-Request-ID"]).toBe("req-7");
+    expect(Object.keys(headers).some((k) => k.startsWith("X-Dev-"))).toBe(false);
+  });
+
+  it("每次请求都重新取令牌：续期后的新令牌能用上", async () => {
+    const fetchImpl = mockFetch(jsonResponse({}), jsonResponse({}));
+    const auth = bearerAuth();
+    auth.getAccessToken.mockResolvedValueOnce("tok-1").mockResolvedValueOnce("tok-2");
+    const client = createApiClient({ config, fetchImpl, auth });
+    await client.get("/a");
+    await client.get("/b");
+    expect((fetchImpl.mock.calls[1]?.[1]?.headers as Record<string, string>).Authorization).toBe(
+      "Bearer tok-2",
+    );
+  });
+
+  it("没有可用令牌：不发请求，通知会话失效（no_token），抛 401 ApiError", async () => {
+    const fetchImpl = mockFetch(jsonResponse({}));
+    const auth = bearerAuth(null);
+    const api = await expectApiError(createApiClient({ config, fetchImpl, auth }).get("/a"));
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(auth.onUnauthenticated).toHaveBeenCalledWith("no_token");
+    expect(api.status).toBe(401);
+    expect(api.code).toBe("UNAUTHENTICATED");
+    expect(api.isAuthFailure).toBe(true);
+  });
+
+  it("服务端 401：通知会话失效（rejected），错误照常抛出", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse({ error: { code: "UNAUTHENTICATED", message: "缺少身份" } }, 401),
+    );
+    const auth = bearerAuth();
+    const api = await expectApiError(createApiClient({ config, fetchImpl, auth }).get("/a"));
+    expect(auth.onUnauthenticated).toHaveBeenCalledWith("rejected");
+    expect(api.status).toBe(401);
+  });
+
+  it("后端对 OIDC 失败回的是 403「身份令牌无效」/「缺少身份」：同样按会话失效处理", async () => {
+    for (const message of ["身份令牌无效", "缺少身份"]) {
+      const fetchImpl = mockFetch(
+        jsonResponse({ error: { code: "PERMISSION_DENIED", message } }, 403),
+      );
+      const auth = bearerAuth();
+      await expectApiError(createApiClient({ config, fetchImpl, auth }).get("/a"));
+      expect(auth.onUnauthenticated).toHaveBeenCalledWith("rejected");
+    }
+  });
+
+  it("真正的授权失败（缺少权限 xxx）不跳登录：登录了也没用，该显示无权访问", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse({ error: { code: "PERMISSION_DENIED", message: "缺少权限 audit.read" } }, 403),
+    );
+    const auth = bearerAuth();
+    const api = await expectApiError(createApiClient({ config, fetchImpl, auth }).get("/a"));
+    expect(auth.onUnauthenticated).not.toHaveBeenCalled();
+    expect(api.missingScope).toBe("audit.read");
+  });
+
+  it("dev-header 模式（不传 auth）收到 401/403 不做任何跳转，与以前一致", async () => {
+    const fetchImpl = mockFetch(
+      jsonResponse({ error: { code: "PERMISSION_DENIED", message: "缺少身份" } }, 403),
+    );
+    const api = await expectApiError(createApiClient({ config, fetchImpl }).get("/a"));
+    expect(api.status).toBe(403);
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-Dev-Principal-ID": "dev-operator",
+    });
   });
 });

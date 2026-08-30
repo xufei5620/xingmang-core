@@ -1,3 +1,5 @@
+import { getRuntimeConfig } from "../auth/runtimeConfig";
+import { oidcBearerProvider } from "../auth/session";
 import { appApiConfig, type PlatformApiConfig } from "./config";
 
 /** 网络层根本没通（DNS/连接/CORS/离线）时用的伪状态码。
@@ -7,6 +9,15 @@ export const NETWORK_STATUS = 0;
 const NETWORK_CODE = "NETWORK_UNAVAILABLE";
 const BAD_RESPONSE_CODE = "BAD_RESPONSE";
 const UNKNOWN_CODE = "UNKNOWN";
+const UNAUTHENTICATED_CODE = "UNAUTHENTICATED";
+
+/** oidc 模式下服务端拒绝令牌时的两句**固定**文案（oidcauth/resolver.go）。
+ *
+ *  后端对 OIDC 失败一律回 403 而不是 401（AUTH-SWITCH.md 第八节：仓库的错误
+ *  模型里没有 401），所以只盯 401 抓不到「令牌被拒」。文案是服务端常量，
+ *  **逐字相等**才算；「缺少权限 xxx」那种真正的授权失败不在此列——那是登录
+ *  了但没权限，跳登录页解决不了，该照常显示无权访问。 */
+const OIDC_REJECTED_MESSAGES: ReadonlySet<string> = new Set(["缺少身份", "身份令牌无效"]);
 
 /** 后端 403 文案形如「缺少权限 registry.read」（httpapi/authz.go）。
  *  从里面把 scope 名抠出来，才能在界面上告诉人「缺哪个权限」而不是干瞪眼。 */
@@ -67,10 +78,28 @@ export interface ApiClient {
   post<T>(path: string, body: unknown, options?: PostOptions): Promise<T>;
 }
 
+export type UnauthenticatedReason =
+  /** 手头没有可用令牌（没登录、或续期失败会话已被清空）。 */
+  | "no_token"
+  /** 带着令牌去了，服务端说不认（401，或 oidc 的固定拒绝文案）。 */
+  | "rejected";
+
+/** oidc 模式的令牌来源。客户端只管「拿令牌、贴到 Authorization 头、失败时通知」，
+ *  会话怎么存、怎么续、往哪跳登录都是 auth/ 目录的事。 */
+export interface BearerTokenProvider {
+  /** 取可用的访问令牌；没有返回 null（不抛：「没登录」不是异常，是一种状态）。 */
+  getAccessToken(): Promise<string | null>;
+  /** 会话失效。实现方负责清会话并跳登录页；客户端随后照常抛 ApiError。 */
+  onUnauthenticated(reason: UnauthenticatedReason): void;
+}
+
 export interface ApiClientOptions {
   config: PlatformApiConfig;
   /** 注入点：测试传 mock fetch，不需要真后端。 */
   fetchImpl?: FetchLike;
+  /** 传入即走 oidc：`Authorization: Bearer` 取代三个开发头。
+   *  不传＝dev-header 模式，请求形状与 XM-AUTH1 之前逐字一致。 */
+  auth?: BearerTokenProvider;
 }
 
 /** 开发期身份头。
@@ -110,18 +139,43 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, code, message, body?.error?.request_id ?? "");
 }
 
+function isSessionRejection(err: ApiError): boolean {
+  return err.status === 401 || (err.status === 403 && OIDC_REJECTED_MESSAGES.has(err.message));
+}
+
 /** 创建 API 客户端。所有请求都从这里出去，身份头只在这里注入一次。 */
-export function createApiClient({ config, fetchImpl }: ApiClientOptions): ApiClient {
-  async function request<T>(path: string, init: RequestInit, options: RequestOptions): Promise<T> {
+export function createApiClient({ config, fetchImpl, auth }: ApiClientOptions): ApiClient {
+  /** oidc 模式的身份头。取令牌可能要先续期，所以是异步的。 */
+  async function bearerHeaders(provider: BearerTokenProvider): Promise<Record<string, string>> {
+    const token = await provider.getAccessToken();
+    if (!token) {
+      // 不发请求：没有令牌的请求在 oidc 后端只会换来一句「缺少身份」，
+      // 而调用方真正需要的是被带去登录页
+      provider.onUnauthenticated("no_token");
+      throw new ApiError(401, UNAUTHENTICATED_CODE, "登录已过期，请重新登录");
+    }
+    return { Authorization: `Bearer ${token}` };
+  }
+
+  async function request<T>(
+    path: string,
+    init: RequestInit & { headers: Record<string, string> },
+    options: RequestOptions,
+  ): Promise<T> {
     // 默认实现取调用时刻的 globalThis.fetch 而不是模块加载时刻：
     // 测试可以在 import 之后再替换 fetch
     const doFetch: FetchLike = fetchImpl ?? ((input, i) => globalThis.fetch(input, i));
     const url = buildUrl(config, path, options.searchParams);
+    // dev-header 分支刻意**不 await**：开发头是同步拼出来的，fetch 要像以前一样
+    // 在调用的同一个 tick 发出（有页面测试按这个时序数请求次数）
+    const identity = auth ? await bearerHeaders(auth) : devPrincipalHeaders(config);
+    const headers = { ...init.headers, ...identity };
 
     let response: Response;
     try {
       response = await doFetch(url, {
         ...init,
+        headers,
         ...(options.signal ? { signal: options.signal } : {}),
       });
     } catch (cause) {
@@ -135,7 +189,14 @@ export function createApiClient({ config, fetchImpl }: ApiClientOptions): ApiCli
       );
     }
 
-    if (!response.ok) throw await toApiError(response);
+    if (!response.ok) {
+      const err = await toApiError(response);
+      // oidc 模式下令牌被拒＝会话没了：清掉并去登录页（带上 next 回来）。
+      // dev-header 模式没有这一步——那套头被拒说明后端配成了别的模式，
+      // 跳登录页解决不了，让 403 原样显示出来才看得见问题
+      if (auth && isSessionRejection(err)) auth.onUnauthenticated("rejected");
+      throw err;
+    }
 
     try {
       return (await response.json()) as T;
@@ -150,7 +211,7 @@ export function createApiClient({ config, fetchImpl }: ApiClientOptions): ApiCli
         path,
         {
           method: "GET",
-          headers: { Accept: "application/json", ...devPrincipalHeaders(config) },
+          headers: { Accept: "application/json" },
         },
         options,
       );
@@ -165,7 +226,6 @@ export function createApiClient({ config, fetchImpl }: ApiClientOptions): ApiCli
           headers: {
             Accept: "application/json",
             "Content-Type": "application/json",
-            ...devPrincipalHeaders(config),
             ...(options.requestId ? { "X-Request-ID": options.requestId } : {}),
           },
           body: JSON.stringify(body),
@@ -176,5 +236,9 @@ export function createApiClient({ config, fetchImpl }: ApiClientOptions): ApiCli
   };
 }
 
-/** 应用默认客户端。 */
-export const apiClient: ApiClient = createApiClient({ config: appApiConfig });
+/** 应用默认客户端。模式在模块加载时定一次：/app-config.js 在业务包之前同步执行，
+ *  此刻 window.__XM_CONFIG__ 已经就位；页面生命周期内不会再变。 */
+export const apiClient: ApiClient = createApiClient({
+  config: appApiConfig,
+  ...(getRuntimeConfig().authMode === "oidc" ? { auth: oidcBearerProvider } : {}),
+});

@@ -1,8 +1,11 @@
+import { getRuntimeConfig } from "../auth/runtimeConfig";
+
 /** 平台 API 客户端配置。
  *
  *  身份三件套集中在这里，不散落到各个请求点：换鉴权方式时只改这一处。
- *  TODO(XM-0008): 换成 OIDC —— principalId/principalType/scopes 由 Keycloak
- *  下发的 Access Token 取代，devPrincipalHeaders() 换成 Authorization: Bearer。 */
+ *  XM-AUTH1 起它们只在 authMode=dev-header 时使用；oidc 模式下
+ *  principalId/principalType/scopes 由 Keycloak 下发的 Access Token 取代，
+ *  客户端改发 Authorization: Bearer（见 client.ts 的 BearerTokenProvider）。 */
 export interface PlatformApiConfig {
   /** 基地址。空串表示同源（开发时由 Vite 代理转发到 127.0.0.1:8080）。 */
   baseUrl: string;
@@ -90,15 +93,19 @@ function parsePrincipalType(raw: string | undefined): PrincipalType {
  *  environment 默认**不传**：后端 resolveEnvironment 的规则是「不传用调用者
  *  自己的环境，传了必须一致」，而前端并不知道服务端把自己配成了哪个环境。
  *  猜一个值只会换来 403，不传反而总是对的（跨环境读取本来就不允许）。 */
-export function configFromEnv(env: ImportMetaEnv): PlatformApiConfig {
+export function configFromEnv(
+  env: ImportMetaEnv,
+  /** 运行时配置（/app-config.js）里的 environment 优先于构建期变量。 */
+  runtime: { environment?: string | undefined } = {},
+): PlatformApiConfig {
   return {
     baseUrl: env.VITE_XM_API_BASE_URL ?? "",
     principalId: env.VITE_XM_PRINCIPAL_ID ?? "dev-operator",
     principalType: parsePrincipalType(env.VITE_XM_PRINCIPAL_TYPE),
     scopes: parseScopes(env.VITE_XM_SCOPES),
-    environment: env.VITE_XM_ENVIRONMENT,
+    environment: runtime.environment ?? env.VITE_XM_ENVIRONMENT,
   };
 }
 
 /** 应用默认配置。测试里请自己造 PlatformApiConfig，不要依赖它。 */
-export const appApiConfig: PlatformApiConfig = configFromEnv(import.meta.env);
+export const appApiConfig: PlatformApiConfig = configFromEnv(import.meta.env, getRuntimeConfig());

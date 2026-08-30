@@ -342,6 +342,16 @@ services:
     depends_on:
       platform-api:
         condition: service_healthy
+    environment:
+      # 前端鉴权方式（XM-AUTH1）。容器启动时 deploy/docker/web-app-config.sh 把这
+      # 三项写进 /app-config.js，浏览器端按它决定发开发头还是 Bearer 令牌。
+      # 默认 dev-header 与上面 platform-api 的默认一致。两边要**同时**切：
+      # 只切前端 → 后端不认 Bearer（403 缺少身份）；只切后端 → 前端还在发开发头。
+      # issuer / client id 留空时回落到后端的 XM_OIDC_ISSUER / XM_OIDC_AUDIENCE，
+      # 因为它们本来就必须相同（issuer 逐字比对，client id 就是后端校验的 aud/azp）。
+      XM_WEB_AUTH_MODE: ${XM_WEB_AUTH_MODE:-dev-header}
+      XM_WEB_OIDC_ISSUER: ${XM_WEB_OIDC_ISSUER:-${XM_OIDC_ISSUER:-}}
+      XM_WEB_OIDC_CLIENT_ID: ${XM_WEB_OIDC_CLIENT_ID:-${XM_OIDC_AUDIENCE:-}}
     ports:
       # 这个发布口是给**服务器部署**用的。本开发机的宿主→容器端口转发被
       # 代理 TUN 劫持（SYN 停滞），从宿主浏览器访问多半不通——不是栈的问题，
