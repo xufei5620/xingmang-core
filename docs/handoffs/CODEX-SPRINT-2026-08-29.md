@@ -123,3 +123,13 @@ d. 接入验证清单脚本 `scripts/verify-real-mode.sh`:worker 日志 metrics_
   deny-list、mTLS/allow-remote/MANAGEMENT_PASSWORD 事实、capability 依赖与 response
   projection 全部 fail-closed；Go/governance/gitleaks/diff 全绿。该卡为**自拟、offline-only、
   待确认**，不解锁 R213-2/3/4 或任何真实 CPA 能力。
+
+### 7.5 加速指令（2026-08-30，用户拍板：队列不变、提速）
+- **预批**：DBR2/DBR3、AUD2 接线/AUD3/AUD4、RL2/RL3/R210-2/R215-2-3、DS1/DS2 无需再等 `APPROVED` 行，
+  直接从最新 release 开工，验收线在合入时审读迁移/生成物/scope；五类用户门控与 M4 门不变。
+- **不再出 docs-only 交接片/审批包**；Handoff 随实现片一起交。
+- **部署节流**：只有含迁移或运行时行为变化的合入才跑 `deploy-local.sh`。
+- **切片放大**：一个 slice = 计划中的一个完整 Task 组；迁移仍单独列文件哈希。
+- **并行车道**：多个 Codex 会话时每会话只认领一条车道（A 数据库角色 / B 审计归档 / C R2 韧性 / D 指标降采样），
+  共享文件只在本车道最终接线片改并 rebase 到最新 release 后再标 READY。
+- 完整文本见 `docs/handoffs/ACCEPTANCE-LOG.md` 的 `PRIORITY 加速指令` 行。

@@ -26,3 +26,15 @@
 2026-08-30T09:40Z APPROVED AUD2 QUALIFICATION+RECOVERY:① qualification 不需要用户提供凭据——照 DBR1 模式起随机 compose project 的一次性 MinIO(钉 RepoDigest、仅回环随机端口、按 label 清理),harness 自生成随机 root 凭据经 env/file SecretProvider 映射到 `secret://archive/minio-qualification`,证据只记状态/计数;必须证明 versioning+Object Lock COMPLIANCE(3650 天)+`If-None-Match:*` 条件写+SSE-S3;② ambiguous-Put 恢复原语批准为:内容寻址键 + `ListObjectVersions(prefix=exact key)` 必须恰好返回 1 个版本且其 x-amz-meta sha256/size 与 intent 一致,则接受该 VersionID;0 或 ≥2 个版本一律 ProviderQualificationFailed 保持 NO-GO;不允许 latest HEAD/re-Put。③ 验收线已在本机用 GOPROXY 拉到 minio-go v7.3.0:XM-AUD2-s3-adapter 分支 go build/vet/archive 测试全过,Codex 环境的 DNS 阻塞不构成阻塞;s3-adapter 按①②补齐 qualification 后标 READY。
 2026-08-30T10:03Z NOTE XM-AUD2-catalog-followup-clean 的五个文件与 release 尖端逐字节相同(该补强已以 00fe49b 合入),无需再合;分支可删。READY-FOLLOWUP 形式可用,后续沿用。s3-adapter 提醒:分支 go.sum 缺传递依赖条目(验收线本机 go build -mod=mod 后 go.sum 有改动),标 READY 前请在能拉到模块的环境跑 `go mod tidy` 并提交完整 go.sum。
 2026-08-30T10:31Z MERGED 2765e02 XM-AUD2-s3-adapter(minio-go v7.3.0 + 传递依赖钉入 go.mod/go.sum/VERSIONS.lock,x/net 0.49→0.58、x/sys 0.43→0.47 为间接小版本;验收线在临时 worktree 以 -mod=readonly 构建/测试、go mod verify 全过;一次性 MinIO qualification 证据按批准协议;无运行时接线、无 compose 变化)。AUD2 剩余:运行时 wiring(worker 归档任务)+ 部署 xingmang-archive 项目 compose(生产 MinIO)——下一片请出 Handoff,含 compose 服务与 CredentialRef 清单,不含真实凭据。
+2026-08-30T10:35Z PRIORITY 加速指令(用户 2026-08-30 拍板:队列不变、提速)。自本行起生效,与 Sprint §7.5 同文:
+① 预批(把"开工前审批"改为"合入时审读"):以下实现片无需再等 APPROVED 行,直接从最新 release 开工、按已合入规格与计划实现、READY 即可,验收线在合入时审读迁移/生成物/scope:
+  - 车道 A 数据库角色:DBR1 Task1/2(已批)→ DBR2(xm_migrator owner/ACL/default-ACL SQL、CredentialRef 装配;迁移编号开工时按 release 重算;仅在 DBR1 一次性 PG18 harness 验证)→ DBR3(API/worker 独立 DSN+受限角色,在本地 xingmang-launch 栈演练)。生产 cutover 仍另批。
+  - 车道 B 审计归档:AUD2 运行时接线(worker 归档任务、xingmang-archive compose 项目、CredentialRef 清单)→ AUD3(受限读取 + xm-security-sink)→ AUD4(恢复演练,一次性 MinIO/PG)。
+  - 车道 C R2 韧性:RL2(PostgreSQL GCRA store + policy bootstrap 迁移)→ RL3(HTTP adapter shadow 模式,默认关)→ R210-2 Task4/5 → R215-2/3(PG 预算权威、fake/shadow 集成)。
+  - 车道 D 指标降采样:DS1 → DS2(一次性 PG;invoice 两指标保持 CR-0002 门控排除)。
+  五类用户门控(真实凭据/生产/上游源码、宪法、采购付费、删既有能力/改上线口径、开票 CR 契约)不变;R213-2+/R214-2+ 继续等 M4。
+② 取消 docs-only 交接片与审批包:设计/计划已合入即视为可开工,Handoff 随实现片一起交。
+③ 部署节流:只有含迁移或运行时行为变化的合入才跑 deploy-local.sh;纯模型/契约/测试基座/文档合入不重建栈,验收线在 MERGED 行注明"无需部署"。
+④ 切片粒度放大:一个 slice = 计划中的一个完整 Task 组(如 DBR2 全部、AUD3 全部),不再按子任务拆片;但迁移仍单独列文件哈希。
+⑤ 并行车道:若同时有多个 Codex 会话,每个会话只认领一条车道,分支名 ai/codex/XM-<车道任务>,不跨车道改文件;共享文件(router.go、main.go、launch.yaml、go.mod)只在自己车道的最终接线片改,并 rebase 到最新 release 后再标 READY。
+⑥ 验收线复扫间隔缩短到 10 分钟。
