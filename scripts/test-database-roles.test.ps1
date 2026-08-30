@@ -48,6 +48,10 @@ try {
   Expect-Rejected { & $script -ValidateOnly -RepoRoot $repo } 'remote Docker host'
   Remove-Item Env:DOCKER_HOST -ErrorAction SilentlyContinue
 
+  $env:PGHOST = 'production.example.invalid'
+  Expect-Rejected { & $script -ValidateOnly -RepoRoot $repo } 'libpq PGHOST override'
+  Remove-Item Env:PGHOST -ErrorAction SilentlyContinue
+
   Write-Output 'database role harness guard tests passed'
 } finally {
   Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue

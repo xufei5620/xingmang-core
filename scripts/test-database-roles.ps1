@@ -80,7 +80,12 @@ function Assert-ExternalInputsAbsent {
   $forbidden = @(
     'DATABASE_URL', 'XM_TEST_DATABASE_URL', 'XM_TEST_DATABASE_ADMIN_URL',
     'DBR_DATABASE_URL', 'DBR_ADMIN_DSN', 'XM_DATABASE_DSN',
-    'PGSERVICE', 'PGSERVICEFILE', 'PGPASSFILE', 'PGPASSWORD',
+    # libpq connection settings can redirect a seemingly-safe DSN or inject
+    # credentials/options; all are forbidden in the parent process.
+    'PGHOST', 'PGHOSTADDR', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGAPPNAME',
+    'PGOPTIONS', 'PGSERVICE', 'PGSERVICEFILE', 'PGPASSFILE', 'PGPASSWORD',
+    'PGSSLMODE', 'PGCHANNELBINDING', 'PGTARGETSESSIONATTRS', 'PGCONNECT_TIMEOUT',
+    'PGREQUIRESSL', 'PGSSLCERT', 'PGSSLKEY', 'PGSSLROOTCERT', 'PGSSLCRL', 'PGSSLCRLDIR',
     'DOCKER_HOST'
   )
   foreach ($name in $forbidden) {
