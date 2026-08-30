@@ -243,7 +243,11 @@ const PinnedJobFleetKeyringSHA256 = "1d3938b7120de032342564cc54a13b045e33f28674c
 
 // LoadPinnedJobFleetKeyring loads only the build-pinned public keyring.
 func LoadPinnedJobFleetKeyring() (*JobFleetKeyring, error) {
-	return LoadJobFleetKeyringJSON(PinnedJobFleetKeyringJSON())
+	raw := PinnedJobFleetKeyringJSON()
+	if fleetSHA256Hex(raw) != PinnedJobFleetKeyringSHA256 {
+		return nil, errors.New("job fleet keyring: pinned bytes digest mismatch")
+	}
+	return LoadJobFleetKeyringJSON(raw)
 }
 
 func decodeFleetPublicKey(encoded string) (ed25519.PublicKey, error) {
