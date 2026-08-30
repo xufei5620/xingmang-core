@@ -6,7 +6,7 @@
 | Connector Key | `reqlog` |
 | Contract Version | `1` |
 | 实现 | 契约与 Fake：`connectors/reqlog`；HTTP 真实客户端：**只有骨架**（`connectors/reqlog/client.go`，数据方法一律 `not_supported`，见 §5 未决冲突）；**文件后端（XM-REQLOG-MERGE，已完整实现）**：`connectors/reqlog/file_client.go` 的 `NewFileClient`，直读记录代理 `cmd/reqlog-recorder` 落盘的数据，不经 HTTP，见 §10 |
-| 合规判据 | **必须通过 `connectors/reqlog/contracttest` 套件**（Fake 已通过，21 项；文件后端通过 20 项，1 项结构性预期失败，见 §10） |
+| 合规判据 | **必须通过 `connectors/reqlog/contracttest` 套件**（Fake 与文件后端均 21/21 项全部通过，渠道/上游/计费经可选能力声明降级，见 §10） |
 | 平台侧入口 | `internal/platform/requestlog`（权限 + 审计 + 错误翻译）；HTTP 层 `internal/platform/httpapi/requests.go` |
 | 依据 | 交接文档 §9.4 请求详情 · `docs/superpowers/plans/2026-08-28-reqlog-integration-proposal.md`（已批准） |
 
@@ -44,6 +44,18 @@ reqlog.health.read              运营健康
 
 每一项都必须 `registry.ParseCapability` 可解析且 `IsWrite() == false`。
 真实客户端在形状核实前返回**空清单**——声明一项没有代码可以兑现的能力就是说谎。
+
+两项**可选**能力（XM-REQLOG-MERGE，见 §10.2）：
+
+```
+reqlog.requests.routing_read    渠道/上游元数据（Channel/Upstream）
+reqlog.requests.billing_read    向用户计费金额（BilledAmount）
+```
+
+磁盘格式本身不采集这两个维度的后端（当前是文件后端）可以不声明；声明了
+就必须给出真实数据（已知零与未知都要覆盖），没声明就必须让对应字段恒为
+未知（空串/`nil`）——两者都由 `contracttest` 的
+`testRoutingAndBillingMetadata` 校验。
 
 ## 3. 数据形状
 
@@ -316,20 +328,37 @@ https"的未决冲突——这条路径压根不经过 `connector.Config`/HTTP �
 | 17、18 | **不适用**（同 #1、#2） | — |
 | 19 | 确认：单个地址，`X-Real-IP` 优先，否则 `RemoteAddr`（可能带端口） | `clientIP := r.Header.Get("X-Real-IP"); if clientIP == "" { clientIP = r.RemoteAddr }` |
 | 20 | 确认不会重号（见 #3），但文件后端仍按契约要求做 source 匹配校验，跨来源读取明确失败 | `file_client.go` 的 `RequestContent` |
-| 21 | **磁盘 `Record` 结构体没有 channel/upstream 字段**——不是"暂时没接"，是这条数据源根本不采集这个维度。文件后端对 `Channel`/`Upstream` 恒返回空串 | 逐字段核对 `reqlogger.go` 的 `Record`/`FullRecord` 定义 |
-| 22 | **磁盘格式同样没有计费字段**。文件后端对 `BilledAmount` 恒返回 `nil` | 同上 |
+| 21 | **磁盘 `Record` 结构体没有 channel/upstream 字段**——不是"暂时没接"，是这条数据源根本不采集这个维度。文件后端对 `Channel`/`Upstream` 恒返回空串，且不在 `Capabilities()` 里声明 `reqlog.CapabilityRoutingRead`（见 §2 与 10.2） | 逐字段核对 `reqlogger.go` 的 `Record`/`FullRecord` 定义 |
+| 22 | **磁盘格式同样没有计费字段**。文件后端对 `BilledAmount` 恒返回 `nil`，且不声明 `reqlog.CapabilityBillingRead`（同上） | 同上 |
 | 23 | 由连接器在分页前对完整过滤集合算 `Stats`（见 `file_client.go` 的 `matchedSummaries`），不依赖上游给统计端点 | 架构差异 |
 
-### 10.2 已知的契约测试套件缺口
+### 10.2 渠道/上游/计费降级为可选能力
 
-`connectors/reqlog/contracttest` 的「渠道上游与计费保留未知和已知零」
+`connectors/reqlog/contracttest` 原有的「渠道上游与计费保留未知和已知零」
 （`testRoutingAndBillingMetadata`）断言任何合规实现的样本集里都能找到
-非空的 `Channel`/`Upstream` 与已知零/未知两种 `BilledAmount`。**文件后端
-必然不满足这一条**——见 10.1 第 21、22 项，磁盘格式本身不产出这两类数据，
-不是实现遗漏。这是套件对"reqlog 会提供渠道与计费信息"这条假设与真实
-磁盘格式不符的直接证据，不通过编造数据解决（那样会让 `RequestLogSummary`
-出现磁盘上从未有过的字段值）。其余 20 项子测试文件后端全部通过。
+非空的 `Channel`/`Upstream` 与已知零/未知两种 `BilledAmount`——这个假设
+与文件后端读到的真实磁盘格式不符（见 10.1 第 21、22 项：磁盘记录代理
+从不采集这两个维度，逐字段核对 `reqlogger.go` 的结构体定义确认）。
+
+解法不是编数据让子测试变绿，而是把这两个维度升级为**可选能力**
+（XM-REQLOG-MERGE 二轮修订）：
+
+- `ReadCapabilities` 新增 `reqlog.requests.routing_read`（渠道/上游）与
+  `reqlog.requests.billing_read`（计费）两项，`registry.Capability` §2
+  能力清单同步补齐；
+- Fake 仍然声明全部能力（它的样本本来就覆盖这两个维度）；
+- 文件后端的 `Capabilities()` **不**声明这两项——声明一项没有数据能兑现
+  的能力就是说谎，与 `client.go`（HTTP 骨架，形状未核实时给空清单）同一条
+  纪律；
+- `testRoutingAndBillingMetadata` 先读 `Capabilities()`：声明了才要求样本
+  覆盖已知/未知两态，没声明则改为断言该维度**恒为未知**（`Channel`/
+  `Upstream` 恒空、`BilledAmount` 恒 `nil`）——声明了却给不出数据、或没
+  声明却偷偷给出非空值，两种情况都判失败。
+
+`connectors/reqlog/contracttest` 全部 21 项子测试对文件后端现在**全部
+通过**（20 项覆盖恒定能力，第 21 项在"未声明可选能力"分支下验证降级
+行为本身）。
 
 若未来渠道/计费信息确实需要在请求详情页展示，需要另开一条独立的数据源
-（比如从渠道路由日志或计费流水关联查询），不是这条通道能补的——这条能
-补的只有"记录代理写了什么"。
+（比如从渠道路由日志或计费流水关联查询）并让文件后端声明对应能力——
+不是这条磁盘通道现在就能补的，它能给的只有"记录代理写了什么"。

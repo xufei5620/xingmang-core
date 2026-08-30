@@ -156,18 +156,20 @@ func newFileClientFactory(t *testing.T, dataDir, tokenMapPath string) contractte
 }
 
 // TestFileClientSatisfiesContract 跑 connectors/reqlog/contracttest 套件
-// （XM-REQLOG-MERGE 第 2 步的合规判据）。
+// （XM-REQLOG-MERGE 第 2 步的合规判据），全部子测试必须通过。
 //
-// ⚠️ 预期恰好一项失败："渠道上游与计费保留未知和已知零"
-// （testRoutingAndBillingMetadata）。这不是 bug：reqlog 磁盘记录格式本身
-// 不含 channel/upstream/billed_amount 字段——逐字段核对自桌面端原型
-// reqlogger.go 的 Record/FullRecord 结构体，两者都没有这三个字段
-// （核对结论已写回 contracts/connectors/reqlog.read.v1.md §8 第 21/22
-// 项）。文件后端如实返回空串/nil，contracttest 对"任何合规实现都能产出这
-// 三个字段"的假设与 reqlog 的真实磁盘格式不符，不是编几条假数据能解决的
-// 问题——这正是"宁可如实报告、不要猜"要求下应该做的事。其余全部子测试
-// 必须通过；本测试文件之外的 TestFileClientXxx 覆盖这条子测试没有覆盖到的
-// 文件后端专属行为（跨天分页、令牌邮箱打码、坏索引行容错等）。
+// "渠道上游与计费保留未知和已知零"（testRoutingAndBillingMetadata）这一项
+// 不是靠编数据过关：reqlog 磁盘记录格式本身不含 channel/upstream/
+// billed_amount 字段——逐字段核对自桌面端原型 reqlogger.go 的
+// Record/FullRecord 结构体，两者都没有这三个字段（核对结论见
+// contracts/connectors/reqlog.read.v1.md §10.1 第 21、22 项）。文件后端
+// 如实反映这一点的方式是**不声明** reqlog.CapabilityRoutingRead /
+// reqlog.CapabilityBillingRead 这两项可选能力（见 file_client.go 的
+// Capabilities()），contracttest 的这条子测试据此改为断言"没声明就该恒为
+// 未知"，而不是要求每个后端都能凑出磁盘上从未有过的数据——细节见
+// contracttest/suite.go 里 testRoutingAndBillingMetadata 的文档注释。
+// 本测试文件之外的 TestFileClientXxx 覆盖这条子测试没有覆盖到的文件后端
+// 专属行为（跨天分页、令牌邮箱打码、坏索引行容错等）。
 func TestFileClientSatisfiesContract(t *testing.T) {
 	dataDir, tokenMapPath := buildFixtureDataDir(t)
 	contracttest.RunSuite(t, newFileClientFactory(t, dataDir, tokenMapPath))

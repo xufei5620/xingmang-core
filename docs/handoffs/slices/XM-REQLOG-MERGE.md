@@ -37,8 +37,9 @@ READY（详情见下方 not_run / risks——部分校对项本次未接触真�
    `ReadClient` 契约（`ListRequests`/`RequestContent`/`Version`/`Health`/
    `Capabilities`），直读记录代理落盘的数据与 `tokenmap.json`，不发 HTTP
    请求——从根上绕开了 DRAFT 契约 §5 记录的"控制台是回环明文、只读闸要求
-   https"未决冲突。跑通了 `connectors/reqlog/contracttest` 套件（20/21 项
-   通过，1 项结构性预期失败，见下方 tests_run 与 risks）。
+   https"未决冲突。跑通了 `connectors/reqlog/contracttest` 套件（21/21 项
+   全部通过；渠道/上游/计费三个磁盘格式不采集的字段经两项新增的可选能力
+   声明降级处理，见下方 tests_run）。
 4. **装配 + 部署物**：`cmd/platform-api/reqlog.go` 新增 `XM_REQLOG_MODE=file`
    （与 `off`/`fake`/`real` 并列，**允许在生产使用**——它读的是记录代理落盘
    的真实数据，不是 fake 那样编造的样本）；`deploy/compose/launch.yaml` /
@@ -72,8 +73,12 @@ DRAFT 状态首次拿到真实源码后的实质性核对，不是猜测。
 
 - `cmd/platform-api/reqlog.go`（新增 `reqlogModeFile`、`reqlogConfig.DataDir`/
   `TokenMapPath`、`newReqlogFileClient`）
-- `contracts/connectors/reqlog.read.v1.md`（新增 §10，更新 §8 引言与头部
-  「实现」「合规判据」两行）
+- `connectors/reqlog/contract.go`（新增可选能力 `CapabilityRoutingRead`/
+  `CapabilityBillingRead`，验收线二轮审读后追加）
+- `connectors/reqlog/contracttest/suite.go`（`testRoutingAndBillingMetadata`
+  改为按能力声明收窄断言，新增 `hasCapability` 辅助函数，同上）
+- `contracts/connectors/reqlog.read.v1.md`（新增 §10，更新 §2/§8 引言/头部
+  「实现」「合规判据」；§10.1/§10.2 二轮更新为能力声明框架）
 - `deploy/compose/launch.yaml`（透传 `XM_REQLOG_DATA_DIR`/`XM_REQLOG_TOKENMAP`，
   默认空——staging 一键栈不挂载对应目录）
 - `deploy/compose/server-prod.yaml`（`platform-api` 加两个只读绑定挂载 +
@@ -90,11 +95,15 @@ DRAFT 状态首次拿到真实源码后的实质性核对，不是猜测。
 ```
 go build ./...                          — PASS（全仓库，61 个包）
 go vet ./...                            — PASS（无输出）
-gofmt -l <本片改动的全部 .go 文件>       — PASS（改动前发现 4 个文件未格式化，已 gofmt -w 修好并复核）
-go test ./...                           — 60/61 包 PASS，唯一失败见下
+gofmt -l <本片改动/新增的全部 .go 文件>  — PASS
+go test ./...                           — PASS：43 个包 ok + 18 个包 no test files，
+                                            0 个 FAIL（61/61，见下方"能力降级"说明）
 bash scripts/check-governance.sh        — PASS（exit 0）
 gitleaks detect --no-git -s . -v        — 4 处历史误报（sub2api.revenue.daily 等指标键字面量，
-                                            均在本片未触碰的既有文件里），本片新增文件 0 处命中
+                                            均在本片未触碰的既有文件里），本片新增/改动文件 0 处命中
+GOOS=linux GOARCH=amd64 go build
+  -o /dev/null ./cmd/reqlog-recorder    — PASS，验证 REQLOG-RECORDER.md 第 1 步的交叉编译命令；
+                                            验证后 `go env GOOS GOARCH` 确认未残留（原生 windows/amd64）
 docker compose -f launch.yaml -f server-prod.yaml
   --env-file <scratch> config           — PASS，人工核对生成的 platform-api 配置：
                                             volumes 含 xm-secrets + 两个新只读绑定挂载（三项都在，
@@ -103,24 +112,30 @@ docker compose -f launch.yaml -f server-prod.yaml
                                             均按预期解析（含 XM_REQLOG_HOST_* 覆盖宿主机路径的验证）
 ```
 
-**唯一的测试失败**（预期内、已在代码与契约文档里说明，不是本次要修的
-bug）：
+**contracttest 套件对 `TestFileClientSatisfiesContract` 现在 21/21 项全绿**
+（第一轮交付时"渠道上游与计费保留未知和已知零"这一项失败，验收线审读后
+要求按能力声明收窄断言，而不是让这条红灯带进 release，已按要求修复）：
 
-```
---- FAIL: TestFileClientSatisfiesContract
-    --- FAIL: TestFileClientSatisfiesContract/渠道上游与计费保留未知和已知零
-        suite.go:147: 样本里没有渠道/上游元数据
-```
-
-`connectors/reqlog/contracttest` 的这一项断言任何合规实现的样本集里都能
-凑出非空 `Channel`/`Upstream` 与已知零/未知两种 `BilledAmount`。逐字段核对
-桌面端原型 `reqlogger.go` 的 `Record`/`FullRecord` 结构体后确认：**磁盘记录
-格式本身完全没有渠道/上游/计费这三个字段**——不是文件后端漏接，是这条
-数据源从不采集这个维度。文件后端如实对这三个字段返回空串/`nil`，没有
-为了让这条子测试变绿而编造数据。详见
-`contracts/connectors/reqlog.read.v1.md` §10.2 与
-`connectors/reqlog/file_client_test.go` 里 `TestFileClientSatisfiesContract`
-的文档注释。其余 20 项子测试全部通过。
+- `connectors/reqlog/contract.go` 的 `ReadCapabilities` 新增两项**可选**
+  能力 `reqlog.CapabilityRoutingRead`（`reqlog.requests.routing_read`）与
+  `reqlog.CapabilityBillingRead`（`reqlog.requests.billing_read`），注释
+  说明"磁盘格式不采集这个维度的后端可不声明"；Fake 仍声明全部；
+  `connectors/reqlog/file_client.go` 的 `Capabilities()` 不声明这两项
+  （逐字段核对过 `reqlogger.go` 的 `Record`/`FullRecord`，确认磁盘格式
+  确实不含这三个字段）。
+- `connectors/reqlog/contracttest/suite.go` 的 `testRoutingAndBillingMetadata`
+  改为先取 `Capabilities()`：声明了 routing 能力才要求样本覆盖渠道/上游
+  （没声明则 `t.Log` 说明并跳过）；声明了 billing 能力才要求样本同时覆盖
+  已知 0 与未知（没声明则改为逐条断言 `BilledAmount` 必须是 `nil`，声明了
+  却给出非 nil 值会立即 `t.Fatalf`）；两者都声明时保持原断言不变。
+  "能力可少于清单"（`testCapabilitiesMayBeSubset`）未改动。
+- 用 `-v` 跑过一遍确认两条 `t.Log` 分支确实被文件后端触发（不是巧合通过）：
+  `未声明 reqlog.requests.routing_read：跳过渠道/上游元数据断言…`、
+  `未声明 reqlog.requests.billing_read：已确认全部样本 BilledAmount 为 nil…`；
+  Fake 那次运行没有出现这两条日志，走的是原有的完整断言路径。
+- `contracts/connectors/reqlog.read.v1.md` §2、§10.1（第 21/22 项）、§10.2
+  同步更新为"能力声明"框架，不再是"已知测试缺口"框架；`file_client_test.go`
+  的文档注释同步更新。
 
 新增测试覆盖清单（对照任务要求逐项核对）：
 
@@ -133,9 +148,9 @@ bug）：
   非日期形态目录名忽略——三态都覆盖）
 - 权限位：`TestWriteOnePermissionBits`（Linux/macOS 断言 0750/0640 精确落地；
   Windows 因权限模型不映射 Unix rwx 位而 `t.Skip`，生产部署目标是 Linux）
-- 文件后端合规：`TestFileClientSatisfiesContract`（见上）+ 7 个文件后端
-  专属测试（跨天分页、令牌邮箱打码、坏索引行容错、tokenmap 缺失降级、
-  非法 ID 拒绝等）
+- 文件后端合规：`TestFileClientSatisfiesContract`（21/21 项全部通过，
+  见上方能力降级说明）+ 7 个文件后端专属测试（跨天分页、令牌邮箱打码、
+  坏索引行容错、tokenmap 缺失降级、非法 ID 拒绝等）
 - 平台装配：`cmd/platform-api/reqlog_file_test.go`（6 个用例，含"file 模式
   在生产环境应该被允许"这条与 fake 相反的钉子测试）
 
@@ -178,11 +193,7 @@ bug）：
    截断打码；契约的 `RawPayload` 类型本身不包含头部字段，因此读侧没有
    "再脱敏一次"的对象——不透出头部本身就是比再脱敏更强的一层，细节见
    `file_client.go` 的 `RequestContent` 注释。
-3. **`connectors/reqlog/contracttest` 有一项对文件后端结构性不适用**：
-   见上方 tests_run 的详细说明与 `contracts/connectors/reqlog.read.v1.md`
-   §10.2。不是本次的 bug，但验收线审读契约测试结果时需要知道这一点，
-   不要误判成"文件后端没做完"。
-4. **ADR-011（控制平面与数据平面边界）的适用性边界**：`reqlog-recorder`
+3. **ADR-011（控制平面与数据平面边界）的适用性边界**：`reqlog-recorder`
    是一个站在用户实时请求路径上做透明转发的反向代理——这与 ADR-011「控制
    平台不参与用户实时请求路径」字面上冲突。但 `reqlog-recorder` 不是"星芒
    平台控制面"的一部分：它是收编前就已经独立运行在生产的宿主机数据面
@@ -192,17 +203,17 @@ bug）：
    与 `cmd/reqlog-recorder` 的包文档都写了这条边界说明，供后续审阅时
    核对；如果这个边界判断不成立，需要另开 ADR 讨论，不是本片能自行拍板的
    事。
-5. **文件后端的目录扫描未按时间过滤剪枝**：`ListRequests` 在给定
+4. **文件后端的目录扫描未按时间过滤剪枝**：`ListRequests` 在给定
    `Since`/`Until` 时仍会扫描全部保留期内的按天目录（出于时区正确性考虑
    ——磁盘目录名按 CST 分天，过滤条件是 UTC，剪枝算错一格会静默漏数据，
    见 `file_client.go` 的注释），当前量级（约 13k 请求/日 × 30 天）下
    测得可接受，量级明显增长时可能需要补一版安全的按目录名剪枝。
-6. **两个独立进程的保留期配置没有自动同步**：`cmd/reqlog-recorder` 的
+5. **两个独立进程的保留期配置没有自动同步**：`cmd/reqlog-recorder` 的
    `--retention-days` 与 `connectors/reqlog` 文件后端的
    `FileConfig.RetentionDays`（当前平台侧未暴露对应环境变量，默认落到
    契约常量 30）是两处独立配置，运维如果只改了记录代理一侧，界面上显示
    的"只覆盖最近 N 天"会与实际保留期不一致。
-7. **发现一个磁盘格式本身的缺口（非本次引入，收编时读源码发现）**：
+6. **发现一个磁盘格式本身的缺口（非本次引入，收编时读源码发现）**：
    如果上游连接在响应头返回**之前**就失败，`ErrorHandler` 直接给客户端
    回 502，不经过 `ModifyResponse`/`teeBody`，这次请求**完全不会被记录**
    ——不是记一条 `status=0` 的记录。已写进
@@ -218,14 +229,16 @@ bug）：
 - 评估是否需要为 `refreshTokenMap` 的 `docker exec` 依赖单开一个 ADR，
   把它纳入 ADR-014/ADR-018 的正式豁免范围或规划一条走 Connector 的替代
   路径（见 risks #1）。
-- 若请求量级增长到需要按时间剪枝目录扫描，回来实现 risks #5 提到的安全
+- 若请求量级增长到需要按时间剪枝目录扫描，回来实现 risks #4 提到的安全
   剪枝（口径：目录名按 CST，过滤条件按 UTC，剪枝范围需要在两端各放宽
   一天才安全）。
 - 考虑给 `cmd/platform-api` 加一个 `XM_REQLOG_RETENTION_DAYS`（或类似）
   环境变量，让文件后端上报的保留期天数可以显式对齐记录代理实际配置的
-  `--retention-days`（见 risks #6），本次为保持改动面精简、严格对齐任务
+  `--retention-days`（见 risks #5），本次为保持改动面精简、严格对齐任务
   列出的环境变量清单而未添加。
-- 前端未改动；若产品侧希望在请求详情页显式说明"渠道/上游/计费信息在这条
-  数据源里不可用"（而不是显示空白），需要一次独立的前端小改动
-  （contracts §10.2 已经记录了这条限制，前端目前的空值渲染方式未知，
-  需要产品/前端确认是否需要专门的空态文案）。
+- 前端未改动；`Capabilities()` 现在能准确回答"这个后端有没有渠道/上游/
+  计费数据"（`reqlog.CapabilityRoutingRead`/`CapabilityBillingRead`，见
+  `contracts/connectors/reqlog.read.v1.md` §2/§10.2），若产品侧希望在
+  请求详情页显式区分"这条数据源不提供这个字段"与"这条记录恰好没有渠道/
+  计费信息"，前端可以消费这两项能力来决定是否显示专门的空态文案，而不是
+  一律显示空白——这是一次独立的前端小改动，本片未做。

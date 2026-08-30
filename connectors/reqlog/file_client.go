@@ -169,13 +169,25 @@ func (c *fileClient) Health(ctx context.Context) (connector.HealthResult, error)
 	}, nil
 }
 
-// Capabilities 返回全部四项能力——文件后端对四者都有真实实现，
-// 不是 HTTP 骨架（client.go）那种"形状未核实、只能给空清单"的状态。
+// Capabilities 返回四项恒定能力——文件后端对它们都有真实实现，不是 HTTP
+// 骨架（client.go）那种"形状未核实、只能给空清单"的状态——外加**不**声明
+// CapabilityRoutingRead / CapabilityBillingRead：逐字段核对过磁盘记录代理
+// 的 Record/FullRecord 结构体，确认渠道/上游/计费这三个字段磁盘格式里
+// 根本不存在（summaryFromRecord 里 Channel/Upstream 恒为空串、BilledAmount
+// 恒为 nil），声明一项没有数据能兑现的能力就是说谎（与 client.go 形状未核实
+// 时给空清单是同一条纪律）。
 func (c *fileClient) Capabilities(ctx context.Context) ([]registry.Capability, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, connector.NewError(connector.KindUnavailable, "reqlog.capabilities", err)
 	}
-	return append([]registry.Capability(nil), ReadCapabilities...), nil
+	out := make([]registry.Capability, 0, len(ReadCapabilities))
+	for _, capability := range ReadCapabilities {
+		if capability == CapabilityRoutingRead || capability == CapabilityBillingRead {
+			continue
+		}
+		out = append(out, capability)
+	}
+	return out, nil
 }
 
 // ListRequests 扫描 DataDir 下全部按天目录、按契约过滤条件收窄、按发生时刻
