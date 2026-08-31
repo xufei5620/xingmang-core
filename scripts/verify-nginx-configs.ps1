@@ -1,9 +1,19 @@
 param(
-    [string]$Image = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+    [string]$Image = '',
+    [ValidatePattern('^(?:|sha256:[0-9a-f]{64})$')]
+    [string]$ExpectedImageID = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$nginxCompatibilityFixtureImage = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+if ([string]::IsNullOrWhiteSpace($Image)) { $Image = $nginxCompatibilityFixtureImage }
+if (-not [string]::IsNullOrWhiteSpace($ExpectedImageID)) {
+    $observedImageID = (& docker image inspect $Image --format '{{.Id}}' 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $observedImageID -cne $ExpectedImageID) {
+        throw "Nginx configuration verifier image is unavailable or stale: $Image"
+    }
+}
 $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $tempRoot = Join-Path $tempParent ('invoice-nginx-verify-' + [Guid]::NewGuid().ToString('N'))
 $pki = Join-Path $tempRoot 'pki'

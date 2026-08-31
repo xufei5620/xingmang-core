@@ -311,6 +311,9 @@ function Get-CommonReleaseImageTag {
         tools = 'invoice-system-tools'
         web = 'invoice-system-web'
         'source-agent' = 'invoice-source-agent'
+        'postgres-runtime' = 'invoice-postgres'
+        'clamav-runtime' = 'invoice-clamav'
+        'ingest-proxy' = 'invoice-ingest-proxy'
     }
     if ($IdPMode -ceq 'keycloak') { $releaseRepositories.keycloak = 'invoice-keycloak' }
 
@@ -329,6 +332,15 @@ function Get-CommonReleaseImageTag {
         throw 'all locally built release images do not share one exact release image tag'
     }
     return [string]$releaseTags[0]
+}
+
+function Assert-LinuxAmd64Platform {
+    param([Parameter(Mandatory)][string]$Platform)
+
+    if ($Platform -cne 'linux/amd64') {
+        throw "release image platform must be exactly linux/amd64, got $Platform"
+    }
+    return $true
 }
 
 function Test-OrdinalStringEqual {

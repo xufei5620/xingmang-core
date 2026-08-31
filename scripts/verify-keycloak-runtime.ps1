@@ -1,8 +1,19 @@
 param(
     [Parameter(Mandatory)]
     [string]$Image,
-    [string]$PostgresImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2',
-    [string]$ProbeImage = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+    [Parameter(Mandatory)]
+    [ValidatePattern('^sha256:[0-9a-f]{64}$')]
+    [string]$ExpectedImageID,
+    [Parameter(Mandatory)]
+    [string]$PostgresImage,
+    [Parameter(Mandatory)]
+    [ValidatePattern('^sha256:[0-9a-f]{64}$')]
+    [string]$ExpectedPostgresImageID,
+    [Parameter(Mandatory)]
+    [string]$ProbeImage,
+    [Parameter(Mandatory)]
+    [ValidatePattern('^sha256:[0-9a-f]{64}$')]
+    [string]$ExpectedProbeImageID
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,9 +25,22 @@ $networkCreated = $false
 $databaseCreated = $false
 $keycloakCreated = $false
 
+function Assert-ImageID {
+    param(
+        [Parameter(Mandatory)][string]$Reference,
+        [Parameter(Mandatory)][string]$ExpectedID
+    )
+
+    $observedID = (& docker image inspect $Reference --format '{{.Id}}' 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $observedID -cne $ExpectedID) {
+        throw "runtime image $Reference does not equal expected image ID $ExpectedID"
+    }
+}
+
 try {
-    docker image inspect $Image *> $null
-    if ($LASTEXITCODE -ne 0) { throw "Keycloak image is unavailable: $Image" }
+    Assert-ImageID -Reference $Image -ExpectedID $ExpectedImageID
+    Assert-ImageID -Reference $PostgresImage -ExpectedID $ExpectedPostgresImageID
+    Assert-ImageID -Reference $ProbeImage -ExpectedID $ExpectedProbeImageID
 
     # These artifacts are not used by the server and must stay outside its
     # runtime/SBOM. This is also a negative test for Docker COPY overlay drift.

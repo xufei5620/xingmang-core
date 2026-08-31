@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$postgresCompatibilityFixtureImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
 
 function Test-OrdinalStringEqual {
     param(
@@ -242,7 +243,7 @@ try {
             throw "$($network.Name) does not use its exact reviewed subnet/internal mode"
         }
     }
-    if ($renderedProduction.services.clamav.image -ne 'clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8' -or
+    if ($renderedProduction.services.clamav.image -ne 'invoice-clamav:verification-build' -or
         [int]$renderedProduction.services.clamav.networks.clamav_egress.gw_priority -ne 1 -or
         $renderedProduction.networks.invoice_app.internal -ne $true -or
         $renderedProduction.networks.clamav_egress.internal -eq $true -or
@@ -266,6 +267,10 @@ try {
         api = 'invoice-system-api:verification-build'
         web = 'invoice-system-web:verification-build'
         'pdf-scanner' = 'invoice-system-pdf-scanner:verification-build'
+        postgres = 'invoice-postgres:verification-build'
+        permissions = 'invoice-postgres:verification-build'
+        clamav = 'invoice-clamav:verification-build'
+        'ingest-proxy' = 'invoice-ingest-proxy:verification-build'
     }
     foreach ($serviceName in $expectedReleaseImages.Keys) {
         $releaseService = $renderedProduction.services.$serviceName
@@ -370,7 +375,7 @@ try {
         throw 'base Keycloak compose permanently mounts bootstrap administration credentials'
     }
     $idpBaseObject = $renderedIDPBase | ConvertFrom-Json
-    $expectedPostgresImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+    $expectedPostgresImage = 'invoice-postgres:verification-build'
     if ($renderedProduction.services.postgres.image -ne $expectedPostgresImage -or
         $renderedProductionTools.services.permissions.image -ne $expectedPostgresImage -or
         $idpBaseObject.services.'keycloak-postgres'.image -ne $expectedPostgresImage) {
@@ -389,7 +394,7 @@ try {
         $idpBaseObject.services.'keycloak-postgres'.environment.POSTGRES_USER -ne 'keycloak_owner') {
         throw 'Keycloak runtime database role is not isolated from the PostgreSQL owner'
     }
-    $expectedKeycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec'
+    $expectedKeycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
     $keycloakDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\keycloak\Dockerfile')
     if (-not $keycloakDockerfile.Contains("ARG KEYCLOAK_BASE_IMAGE=$expectedKeycloakBase") -or
         [regex]::Matches($keycloakDockerfile, '(?m)^FROM \$\{KEYCLOAK_BASE_IMAGE\}(?: AS builder)?$').Count -ne 2 -or
@@ -545,13 +550,13 @@ if ($v3Example.schema_version -ne '3.0' -or $v3Example.stream_id -ne 'usage' -or
 
 if (-not $SkipPostgres) {
     & (Join-Path $PSScriptRoot 'test-upstream-projection-maintenance.ps1') `
-        -PostgresImage 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+        -PostgresImage $postgresCompatibilityFixtureImage
     if ($LASTEXITCODE -ne 0) { throw 'upstream projection maintenance adversarial tests failed' }
 
     & (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15/18 source Bridge V4 matrix failed' }
 
-    & (Join-Path $PSScriptRoot 'verify-postgres.ps1')
+    & (Join-Path $PSScriptRoot 'verify-postgres.ps1') -PostgresImage $postgresCompatibilityFixtureImage
     if ($LASTEXITCODE -ne 0) { throw 'isolated PostgreSQL verification failed' }
 }
 

@@ -3,14 +3,18 @@ param(
     [string]$KeycloakImage,
     [Parameter(Mandatory)]
     [ValidatePattern('^sha256:[0-9a-f]{64}$')]
-    [string]$ExpectedKeycloakImageID
+    [string]$ExpectedKeycloakImageID,
+    [Parameter(Mandatory)]
+    [string]$PostgresImage,
+    [Parameter(Mandatory)]
+    [ValidatePattern('^sha256:[0-9a-f]{64}$')]
+    [string]$ExpectedPostgresImageID
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $provisioner = Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh'
-$postgresImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
-$toolsImage = 'alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b'
+$provisioningToolsCompatibilityFixtureImage = 'alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b'
 $expectedOutput = '{"status":"ok","realm":"solov","clients":4,"desktop_enabled":false}'
 $suffix = [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $network = "invoice-kc-provision-net-$suffix"
@@ -150,11 +154,14 @@ try {
     if ($observedKeycloakImageID -cne $ExpectedKeycloakImageID) {
         throw 'Keycloak provisioning test image does not equal the release manifest image ID'
     }
-    Invoke-Docker image inspect $postgresImage | Out-Null
-    Invoke-Docker image inspect $toolsImage | Out-Null
+    $observedPostgresImageID = (Invoke-Docker image inspect $PostgresImage --format '{{.Id}}' | Select-Object -First 1).ToString().Trim()
+    if ($observedPostgresImageID -cne $ExpectedPostgresImageID) {
+        throw 'Keycloak provisioning PostgreSQL image does not equal the release manifest image ID'
+    }
+    Invoke-Docker image inspect $provisioningToolsCompatibilityFixtureImage | Out-Null
 
     $toolsDockerfile = @"
-FROM $toolsImage
+FROM $provisioningToolsCompatibilityFixtureImage
 RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl jq openssl coreutils; then ok=1; break; fi; sleep 2; done; test "`$ok" = 1
 "@
     $savedErrorActionPreference = $ErrorActionPreference
@@ -178,7 +185,7 @@ RUN ok=0; for attempt in 1 2 3; do if timeout 120 apk add --no-cache bash curl j
 
     Invoke-Docker run --detach --name $database --network $network --network-alias postgres `
         --env POSTGRES_DB=keycloak --env POSTGRES_USER=keycloak_app `
-        --env POSTGRES_HOST_AUTH_METHOD=trust $postgresImage | Out-Null
+        --env POSTGRES_HOST_AUTH_METHOD=trust $PostgresImage | Out-Null
     $databaseCreated = $true
     Wait-Until -Seconds 60 -Failure 'disposable Keycloak PostgreSQL did not become ready' -Condition {
         & docker exec $database pg_isready -U keycloak_app -d keycloak 2>&1 | Out-Null

@@ -25,11 +25,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
 
 $trivyImage = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969'
-$postgresReference = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
-$postgresImageID = 'sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
-$postgresGosuSha256 = '52c8749d0142edd234e9d6bd5237dff2d81e71f43537e2f4f66f75dd4b243dd0'
-$clamavReference = 'clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8'
-$nginxReference = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+$postgresBaseReference = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+$clamavBaseReference = 'clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8'
+$nginxBaseReference = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
 $keycloakBaseReference = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
 $keycloakExceptionRationale = 'Red Hat officially rejected the CVE; AWS records that it affects Oracle proprietary bundled libpng while OpenJDK distributions using system libpng are not affected.'
 $keycloakExceptionReviewedAt = '2026-08-31T00:00:00Z'
@@ -86,22 +84,6 @@ function Invoke-DockerTextCapture {
     )
     Write-Host "==> $Description"
     $text = (& docker @Arguments 2> $ErrorLogPath | Out-String)
-    $exitCode = $LASTEXITCODE
-    Write-Utf8NoBom -Path $OutputPath -Text $text
-    if ($exitCode -ne 0) {
-        throw "$Description failed; see $(Get-ReleaseRelativePath -BasePath $releaseRoot -Path $ErrorLogPath)"
-    }
-}
-
-function Invoke-GoTextCapture {
-    param(
-        [Parameter(Mandatory)][string[]]$Arguments,
-        [Parameter(Mandatory)][string]$OutputPath,
-        [Parameter(Mandatory)][string]$ErrorLogPath,
-        [Parameter(Mandatory)][string]$Description
-    )
-    Write-Host "==> $Description"
-    $text = (& go @Arguments 2> $ErrorLogPath | Out-String)
     $exitCode = $LASTEXITCODE
     Write-Utf8NoBom -Path $OutputPath -Text $text
     if ($exitCode -ne 0) {
@@ -230,6 +212,9 @@ try {
             web = Get-ContextFingerprint -Root (Join-Path $projectRoot 'web') -ExcludedDirectoryNames @('node_modules', 'dist', 'coverage', '.playwright-cli')
             agents = Get-ContextFingerprint -Root (Join-Path $projectRoot 'agents') -ExcludedDirectoryNames @('bin', 'coverage')
             keycloak = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\keycloak')
+            postgres = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\postgres')
+            clamav = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\clamav')
+            ingestProxy = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\ingest-proxy')
             deployment = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy')
         }
 
@@ -258,11 +243,11 @@ try {
         $definitions.Add((New-ImageDefinition -Name 'tools' -ArtifactName 'invoice-system-tools' -Reference "invoice-system-tools:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'backend' -Dockerfile 'backend/Dockerfile' -Target 'tools'))
         $definitions.Add((New-ImageDefinition -Name 'web' -ArtifactName 'invoice-system-web' -Reference "invoice-system-web:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'web' -Dockerfile 'web/Dockerfile'))
         $definitions.Add((New-ImageDefinition -Name 'source-agent' -ArtifactName 'invoice-source-agent' -Reference "invoice-source-agent:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'agents' -Dockerfile 'agents/Dockerfile.production' -Target 'production' -BuildArguments @('SOURCE_AGENT_VERSION=' + $SourceAgentVersion)))
-        $definitions.Add((New-ImageDefinition -Name 'postgres-runtime' -ArtifactName 'postgres-runtime' -Reference $postgresReference -Kind 'pinned-external' -Policy 'exact-postgres-gosu-exception'))
-        $definitions.Add((New-ImageDefinition -Name 'clamav-runtime' -ArtifactName 'clamav-runtime' -Reference $clamavReference -Kind 'pinned-external' -Policy 'zero-findings'))
-        $definitions.Add((New-ImageDefinition -Name 'ingest-proxy' -ArtifactName 'nginx-ingest-proxy' -Reference $nginxReference -Kind 'pinned-external' -Policy 'zero-findings'))
+        $definitions.Add((New-ImageDefinition -Name 'postgres-runtime' -ArtifactName 'invoice-postgres' -Reference "invoice-postgres:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'postgres' -Dockerfile 'deploy/postgres/Dockerfile' -BuildArguments @('POSTGRES_BASE_IMAGE=' + $postgresBaseReference) -BaseReference $postgresBaseReference))
+        $definitions.Add((New-ImageDefinition -Name 'clamav-runtime' -ArtifactName 'invoice-clamav' -Reference "invoice-clamav:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'clamav' -Dockerfile 'deploy/clamav/Dockerfile' -BuildArguments @('CLAMAV_BASE_IMAGE=' + $clamavBaseReference) -BaseReference $clamavBaseReference))
+        $definitions.Add((New-ImageDefinition -Name 'ingest-proxy' -ArtifactName 'invoice-ingest-proxy' -Reference "invoice-ingest-proxy:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'ingest-proxy' -Dockerfile 'deploy/ingest-proxy/Dockerfile' -BuildArguments @('NGINX_BASE_IMAGE=' + $nginxBaseReference) -BaseReference $nginxBaseReference))
         if ($IdPMode -ceq 'keycloak') {
-            $definitions.Add((New-ImageDefinition -Name 'keycloak' -ArtifactName 'invoice-keycloak' -Reference "invoice-keycloak:$ImageTag" -Kind 'built-idp' -Policy 'keycloak-26.7.2-exact-vendor-rejection' -Context 'keycloak' -Dockerfile 'deploy/keycloak/Dockerfile' -BuildArguments @('KEYCLOAK_BASE_IMAGE=' + $keycloakBaseReference) -BaseReference $keycloakBaseReference))
+            $definitions.Add((New-ImageDefinition -Name 'keycloak' -ArtifactName 'invoice-keycloak' -Reference "invoice-keycloak:$ImageTag" -Kind 'built' -Policy 'keycloak-26.7.2-exact-vendor-rejection' -Context 'keycloak' -Dockerfile 'deploy/keycloak/Dockerfile' -BuildArguments @('KEYCLOAK_BASE_IMAGE=' + $keycloakBaseReference) -BaseReference $keycloakBaseReference))
         }
 
         $imageAcquisition = @{}
@@ -272,7 +257,7 @@ try {
                 # manifest-list ID on every local build. The release gate emits
                 # its own manifest/SBOM evidence, so disable that nondeterministic
                 # wrapper and bind the tag directly to the reproducible image.
-                $arguments = @('build', '--pull', '--provenance=false', '--file', (Join-Path $projectRoot $definition.Dockerfile), '--tag', $definition.Reference)
+                $arguments = @('build', '--pull', '--platform', 'linux/amd64', '--provenance=false', '--file', (Join-Path $projectRoot $definition.Dockerfile), '--tag', $definition.Reference)
                 if (-not [string]::IsNullOrWhiteSpace($definition.Target)) { $arguments += @('--target', $definition.Target) }
                 foreach ($buildArgument in $definition.BuildArguments) { $arguments += @('--build-arg', $buildArgument) }
                 $contextPath = switch ($definition.Context) {
@@ -280,6 +265,9 @@ try {
                     'web' { Join-Path $projectRoot 'web' }
                     'agents' { Join-Path $projectRoot 'agents' }
                     'keycloak' { Join-Path $projectRoot 'deploy\keycloak' }
+                    'postgres' { Join-Path $projectRoot 'deploy\postgres' }
+                    'clamav' { Join-Path $projectRoot 'deploy\clamav' }
+                    'ingest-proxy' { Join-Path $projectRoot 'deploy\ingest-proxy' }
                     default { throw "unknown build context $($definition.Context)" }
                 }
                 $arguments += $contextPath
@@ -292,13 +280,9 @@ try {
         $imageMetadata = @{}
         foreach ($definition in $definitions) {
             $metadata = Get-ImageMetadata -Reference $definition.Reference
+            Assert-LinuxAmd64Platform -Platform "$($metadata.Os)/$($metadata.Architecture)" | Out-Null
             $imageMetadata[$definition.Name] = $metadata
             Write-Host "    $($definition.Name): $($metadata.Id)"
-        }
-        if ($imageMetadata['postgres-runtime'].Id -cne $postgresImageID -or
-            $imageMetadata['postgres-runtime'].Os -cne 'linux' -or
-            $imageMetadata['postgres-runtime'].Architecture -cne 'amd64') {
-            throw 'PostgreSQL exception image ID/platform does not match the reviewed linux/amd64 image'
         }
 
         $imageRecords = [Collections.Generic.List[object]]::new()
@@ -379,85 +363,6 @@ try {
                     $policyStatus = 'failed'
                     $policyReason = 'keycloak_exact_exception_or_pruning_proof_failed: ' + $_.Exception.Message
                 }
-            } elseif ($definition.Policy -ceq 'exact-postgres-gosu-exception') {
-                if ($summary.Total -eq 0) {
-                    $policyReason = 'zero_high_or_critical_findings_exception_unused'
-                } else {
-                    try {
-                        Assert-PostgresGosuFindingScope -ImageReference $definition.Reference -ImageId $metadata.Id -Summary $summary -ExpectedReference $postgresReference -ExpectedImageId $postgresImageID | Out-Null
-                        $gosuPath = Join-Path $releaseRoot 'proof\postgres-gosu-linux-amd64'
-                        $containerName = 'invoice-release-gosu-' + [guid]::NewGuid().ToString('N')
-                        try {
-                            & docker create --name $containerName $postgresReference | Out-Null
-                            if ($LASTEXITCODE -ne 0) { throw 'cannot create exact PostgreSQL proof container' }
-                            & docker cp "${containerName}:/usr/local/bin/gosu" $gosuPath | Out-Null
-                            if ($LASTEXITCODE -ne 0) { throw 'cannot extract exact gosu binary' }
-                        } finally {
-                            & docker rm -f $containerName 2>$null | Out-Null
-                        }
-                        $gosuHash = Get-FileSha256Lower -Path $gosuPath
-                        if ($gosuHash -cne $postgresGosuSha256) { throw 'exact PostgreSQL image produced an unexpected gosu binary hash' }
-                        $gosuVersionPath = Join-Path $releaseRoot 'proof\postgres-gosu-version.txt'
-                        Invoke-DockerTextCapture -Arguments @('run', '--rm', '--entrypoint', '/usr/local/bin/gosu', $postgresReference, '--version') -OutputPath $gosuVersionPath -ErrorLogPath (Join-Path $releaseRoot 'logs\postgres-gosu-version.log') -Description 'Recording exact gosu binary version'
-                        $gosuVersionText = (Get-Content -Raw -LiteralPath $gosuVersionPath).Trim()
-                        if ($gosuVersionText -cne '1.19 (go1.24.6 on linux/amd64; gc)') { throw 'gosu binary version/platform is outside the reviewed exception' }
-
-                        $govulnVersionPath = Join-Path $releaseRoot 'proof\postgres-gosu.govulncheck-version.txt'
-                        $govulnProofPath = Join-Path $releaseRoot 'proof\postgres-gosu.govulncheck.txt'
-                        $moduleCache = (& go env GOMODCACHE | Out-String).Trim()
-                        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($moduleCache)) { throw 'cannot resolve Go module cache for pinned govulncheck tool' }
-                        $moduleVersionRoot = Join-Path $moduleCache 'cache\download\golang.org\x\vuln\@v'
-                        $moduleArtifacts = [ordered]@{
-                            'v1.7.0.zip' = 'a14bf913551ac09f00ae0e903c1b358713f71af911d7ddacc3fab8ce5c149a26'
-                            'v1.7.0.mod' = '11910998cc62879ae98db88cdeb9c1c1180a50c62a86e76af37b0685a237fb2a'
-                            'v1.7.0.info' = 'a26cff1a3b2b4b2b2c2266fb5de651bce912ff61388f4cc54be585a472233037'
-                        }
-                        $moduleEvidenceLines = [Collections.Generic.List[string]]::new()
-                        foreach ($artifactName in $moduleArtifacts.Keys) {
-                            $artifactPath = Join-Path $moduleVersionRoot $artifactName
-                            $artifactHash = Get-FileSha256Lower -Path $artifactPath
-                            if ($artifactHash -cne $moduleArtifacts[$artifactName]) { throw "pinned govulncheck module cache hash mismatch: $artifactName" }
-                            $moduleEvidenceLines.Add("$artifactHash  $artifactName")
-                        }
-                        $zipHash = (Get-Content -Raw -LiteralPath (Join-Path $moduleVersionRoot 'v1.7.0.ziphash')).Trim()
-                        if ($zipHash -cne 'h1:4MQBuhmXbz2uepNJrf3v+aaZLGDqw1JluwYboegA1qg=') { throw 'pinned govulncheck Go module sum mismatch' }
-                        $moduleEvidenceLines.Add("$zipHash  v1.7.0.ziphash")
-                        $moduleEvidencePath = Join-Path $releaseRoot 'proof\govulncheck-module-cache.txt'
-                        Write-Utf8NoBom -Path $moduleEvidencePath -Text (($moduleEvidenceLines -join "`n") + "`n")
-
-                        $previousGoProxy = $env:GOPROXY
-                        $previousGoSumDB = $env:GOSUMDB
-                        try {
-                            $localProxy = (Join-Path $moduleCache 'cache\download').Replace('\', '/')
-                            $env:GOPROXY = 'file:///' + $localProxy
-                            $env:GOSUMDB = 'sum.golang.org'
-                            Invoke-GoTextCapture -Arguments @('run', 'golang.org/x/vuln/cmd/govulncheck@v1.7.0', '-version') -OutputPath $govulnVersionPath -ErrorLogPath (Join-Path $releaseRoot 'logs\govulncheck-version.log') -Description 'Recording exact govulncheck version and database from verified local module cache'
-                            Invoke-GoTextCapture -Arguments @('run', 'golang.org/x/vuln/cmd/govulncheck@v1.7.0', '-mode=binary', $gosuPath) -OutputPath $govulnProofPath -ErrorLogPath (Join-Path $releaseRoot 'logs\postgres-gosu.govulncheck.log') -Description 'Checking called vulnerabilities in exact gosu binary'
-                        } finally {
-                            $env:GOPROXY = $previousGoProxy
-                            $env:GOSUMDB = $previousGoSumDB
-                        }
-                        Assert-GovulncheckBinaryProof -ProofText (Get-Content -Raw -LiteralPath $govulnProofPath) -VersionText (Get-Content -Raw -LiteralPath $govulnVersionPath) | Out-Null
-                        $policyStatus = 'approved-by-exact-binary-exception'
-                        $policyReason = 'exact_digest_gosu_only_zero_called_vulnerabilities'
-                        $exception = [ordered]@{
-                            scope = 'exact-postgres-gosu-linux-amd64-only'
-                            imageReference = $postgresReference
-                            imageId = $postgresImageID
-                            binaryPath = 'usr/local/bin/gosu'
-                            binarySha256 = $gosuHash
-                            binaryVersion = $gosuVersionText
-                            govulncheckVersion = 'v1.7.0'
-                            govulncheckProof = 'proof/postgres-gosu.govulncheck.txt'
-                            govulncheckVersionEvidence = 'proof/postgres-gosu.govulncheck-version.txt'
-                            govulncheckModuleEvidence = 'proof/govulncheck-module-cache.txt'
-                            govulncheckModuleZipSha256 = $moduleArtifacts['v1.7.0.zip']
-                        }
-                    } catch {
-                        $policyStatus = 'failed'
-                        $policyReason = 'postgres_exception_proof_failed: ' + $_.Exception.Message
-                    }
-                }
             }
 
             if ($policyStatus -in @('failed', 'rejected') -and $definition.Name -ne 'keycloak') {
@@ -495,18 +400,74 @@ try {
                 runtimeProof = $runtimeProof
                 runtimeSmoke = $null
                 realmProvisioning = $null
+                nginxConfiguration = $null
+                webSecurityHeaders = $null
             })
+        }
+
+        $postgresRuntimeRecords = @($imageRecords | Where-Object { $_.name -ceq 'postgres-runtime' })
+        $ingestRuntimeRecords = @($imageRecords | Where-Object { $_.name -ceq 'ingest-proxy' })
+        $webRuntimeRecords = @($imageRecords | Where-Object { $_.name -ceq 'web' })
+        if ($postgresRuntimeRecords.Count -ne 1 -or $ingestRuntimeRecords.Count -ne 1 -or $webRuntimeRecords.Count -ne 1) {
+            throw 'release gate did not produce exact PostgreSQL, ingest-proxy, and web image records'
+        }
+        $postgresRuntimeRecord = $postgresRuntimeRecords[0]
+        $ingestRuntimeRecord = $ingestRuntimeRecords[0]
+        $webRuntimeRecord = $webRuntimeRecords[0]
+
+        $nginxConfigurationPath = Join-Path $releaseRoot 'proof\ingest-nginx-configuration.txt'
+        $nginxConfigurationErrorPath = Join-Path $releaseRoot 'logs\ingest-nginx-configuration.log'
+        Write-Host '==> Verifying edge/ingest Nginx configuration with the exact derived ingest image'
+        $nginxConfigurationText = (& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-nginx-configs.ps1') -Image ([string]$ingestRuntimeRecord.reference) -ExpectedImageID ([string]$ingestRuntimeRecord.imageId) 2> $nginxConfigurationErrorPath | Out-String)
+        $nginxConfigurationExit = $LASTEXITCODE
+        Write-Utf8NoBom -Path $nginxConfigurationPath -Text $nginxConfigurationText
+        $ingestRuntimeRecord['nginxConfiguration'] = [ordered]@{
+            status = if ($nginxConfigurationExit -eq 0 -and $nginxConfigurationText -match '(?m)^Public, split-admin OIDC and mTLS Nginx configurations passed syntax and security gates\.\s*$') { 'passed' } else { 'failed' }
+            path = 'proof/ingest-nginx-configuration.txt'
+            sha256 = Get-FileSha256Lower -Path $nginxConfigurationPath
+            script = 'scripts/verify-nginx-configs.ps1'
+            scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-nginx-configs.ps1')
+            reference = [string]$ingestRuntimeRecord.reference
+            imageId = [string]$ingestRuntimeRecord.imageId
+        }
+        if ([string]$ingestRuntimeRecord.nginxConfiguration.status -cne 'passed') {
+            $ingestRuntimeRecord['policyStatus'] = 'failed'
+            $ingestRuntimeRecord['policyReason'] = 'derived_ingest_nginx_configuration_failed'
+            $applicationFailures.Add('ingest-proxy:derived_ingest_nginx_configuration_failed')
+        }
+
+        $webHeadersPath = Join-Path $releaseRoot 'proof\web-security-headers.txt'
+        $webHeadersErrorPath = Join-Path $releaseRoot 'logs\web-security-headers.log'
+        Write-Host '==> Verifying security headers with the exact derived web image'
+        $webHeadersText = (& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-web-security-headers.ps1') -Image ([string]$webRuntimeRecord.reference) -ExpectedImageID ([string]$webRuntimeRecord.imageId) 2> $webHeadersErrorPath | Out-String)
+        $webHeadersExit = $LASTEXITCODE
+        Write-Utf8NoBom -Path $webHeadersPath -Text $webHeadersText
+        $webRuntimeRecord['webSecurityHeaders'] = [ordered]@{
+            status = if ($webHeadersExit -eq 0 -and $webHeadersText -match '(?m)^Web root and immutable asset security headers verified with Nginx\.\s*$') { 'passed' } else { 'failed' }
+            path = 'proof/web-security-headers.txt'
+            sha256 = Get-FileSha256Lower -Path $webHeadersPath
+            script = 'scripts/verify-web-security-headers.ps1'
+            scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-web-security-headers.ps1')
+            reference = [string]$webRuntimeRecord.reference
+            imageId = [string]$webRuntimeRecord.imageId
+        }
+        if ([string]$webRuntimeRecord.webSecurityHeaders.status -cne 'passed') {
+            $webRuntimeRecord['policyStatus'] = 'failed'
+            $webRuntimeRecord['policyReason'] = 'derived_web_security_headers_failed'
+            $applicationFailures.Add('web:derived_web_security_headers_failed')
         }
 
         if ($IdPMode -ceq 'keycloak') {
             $keycloakRuntimeRecords = @($imageRecords | Where-Object { $_.name -ceq 'keycloak' })
             if ($keycloakRuntimeRecords.Count -ne 1) { throw 'Keycloak mode did not produce exactly one image record' }
             $keycloakRuntimeRecord = $keycloakRuntimeRecords[0]
-            if ($keycloakRuntimeRecord.policyStatus -in @('approved', 'approved-by-exact-vendor-rejection')) {
+            if ($keycloakRuntimeRecord.policyStatus -in @('approved', 'approved-by-exact-vendor-rejection') -and
+                [string]$postgresRuntimeRecord.policyStatus -ceq 'approved' -and
+                [string]$ingestRuntimeRecord.policyStatus -ceq 'approved') {
                 $runtimeSmokePath = Join-Path $releaseRoot 'proof\keycloak-runtime-smoke.txt'
                 $runtimeSmokeErrorPath = Join-Path $releaseRoot 'logs\keycloak-runtime-smoke.log'
                 Write-Host '==> Running isolated Keycloak/PostgreSQL health and OIDC discovery smoke'
-                $runtimeSmokeText = (& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1') -Image ([string]$keycloakRuntimeRecord.reference) 2> $runtimeSmokeErrorPath | Out-String)
+                $runtimeSmokeText = (& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1') -Image ([string]$keycloakRuntimeRecord.reference) -ExpectedImageID ([string]$keycloakRuntimeRecord.imageId) -PostgresImage ([string]$postgresRuntimeRecord.reference) -ExpectedPostgresImageID ([string]$postgresRuntimeRecord.imageId) -ProbeImage ([string]$ingestRuntimeRecord.reference) -ExpectedProbeImageID ([string]$ingestRuntimeRecord.imageId) 2> $runtimeSmokeErrorPath | Out-String)
                 $runtimeSmokeExit = $LASTEXITCODE
                 Write-Utf8NoBom -Path $runtimeSmokePath -Text $runtimeSmokeText
                 if ($runtimeSmokeExit -eq 0 -and $runtimeSmokeText -match '(?m)^Hardened Keycloak runtime, PostgreSQL schema, health and OIDC discovery smoke passed\.\s*$') {
@@ -517,6 +478,10 @@ try {
                         script = 'scripts/verify-keycloak-runtime.ps1'
                         scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
                         imageId = [string]$keycloakRuntimeRecord.imageId
+                        postgresReference = [string]$postgresRuntimeRecord.reference
+                        postgresImageId = [string]$postgresRuntimeRecord.imageId
+                        probeReference = [string]$ingestRuntimeRecord.reference
+                        probeImageId = [string]$ingestRuntimeRecord.imageId
                         assertions = @('postgresql18-schema', 'keycloak26.7.2-startup', 'health-ready', 'oidc-discovery', 'rp-logout', 'backchannel-logout', 'session-logout', 'RS256', 'no-linkage-errors')
                     }
                 } else {
@@ -529,13 +494,17 @@ try {
                         script = 'scripts/verify-keycloak-runtime.ps1'
                         scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
                         imageId = [string]$keycloakRuntimeRecord.imageId
+                        postgresReference = [string]$postgresRuntimeRecord.reference
+                        postgresImageId = [string]$postgresRuntimeRecord.imageId
+                        probeReference = [string]$ingestRuntimeRecord.reference
+                        probeImageId = [string]$ingestRuntimeRecord.imageId
                     }
                 }
                 if ([string]$keycloakRuntimeRecord.runtimeSmoke.status -ceq 'passed') {
                     $provisioningPath = Join-Path $releaseRoot 'proof\keycloak-realm-provisioning.txt'
                     $provisioningErrorPath = Join-Path $releaseRoot 'logs\keycloak-realm-provisioning.log'
                     Write-Host '==> Running isolated Keycloak realm/client/LoA2 provisioning contract'
-                    $provisioningText = (& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1') -KeycloakImage ([string]$keycloakRuntimeRecord.reference) -ExpectedKeycloakImageID ([string]$keycloakRuntimeRecord.imageId) 2> $provisioningErrorPath | Out-String)
+                    $provisioningText = (& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1') -KeycloakImage ([string]$keycloakRuntimeRecord.reference) -ExpectedKeycloakImageID ([string]$keycloakRuntimeRecord.imageId) -PostgresImage ([string]$postgresRuntimeRecord.reference) -ExpectedPostgresImageID ([string]$postgresRuntimeRecord.imageId) 2> $provisioningErrorPath | Out-String)
                     $provisioningExit = $LASTEXITCODE
                     Write-Utf8NoBom -Path $provisioningPath -Text $provisioningText
                     if ($provisioningExit -eq 0 -and $provisioningText -match '(?m)^Disposable Keycloak 26\.7\.2 realm provisioning, output allowlist and one-secret publication passed\.\s*$') {
@@ -547,6 +516,8 @@ try {
                             scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
                             provisionerSha256 = Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')
                             imageId = [string]$keycloakRuntimeRecord.imageId
+                            postgresReference = [string]$postgresRuntimeRecord.reference
+                            postgresImageId = [string]$postgresRuntimeRecord.imageId
                             assertions = @('realm-policy', 'default-user-role', 'loa1-loa2', 'roles-acr-amr-mappers', 'invoice-auth-time-scope', 'four-clients', 'no-offline-scope', 'disabled-desktop', 'single-secret-0400', 'fixed-output', 'existing-realm-refusal', 'log-redaction')
                         }
                     } else {
@@ -560,9 +531,14 @@ try {
                             scriptSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
                             provisionerSha256 = Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')
                             imageId = [string]$keycloakRuntimeRecord.imageId
+                            postgresReference = [string]$postgresRuntimeRecord.reference
+                            postgresImageId = [string]$postgresRuntimeRecord.imageId
                         }
                     }
                 }
+            } elseif ($keycloakRuntimeRecord.policyStatus -in @('approved', 'approved-by-exact-vendor-rejection')) {
+                $keycloakRuntimeRecord['policyStatus'] = 'failed'
+                $keycloakRuntimeRecord['policyReason'] = 'keycloak_runtime_dependency_image_failed'
             }
         }
 
@@ -577,6 +553,9 @@ try {
             web = Get-ContextFingerprint -Root (Join-Path $projectRoot 'web') -ExcludedDirectoryNames @('node_modules', 'dist', 'coverage', '.playwright-cli')
             agents = Get-ContextFingerprint -Root (Join-Path $projectRoot 'agents') -ExcludedDirectoryNames @('bin', 'coverage')
             keycloak = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\keycloak')
+            postgres = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\postgres')
+            clamav = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\clamav')
+            ingestProxy = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy\ingest-proxy')
             deployment = Get-ContextFingerprint -Root (Join-Path $projectRoot 'deploy')
         }
         foreach ($name in $sourceFingerprints.Keys) {
@@ -614,7 +593,7 @@ try {
                 ignoredVulnerabilities = @()
                 trivyExecution = 'serial'
                 staleImageArtifacts = 'fail'
-                postgresException = 'exact digest plus exact gosu sha256 plus govulncheck v1.7.0 binary proof only'
+                postgresException = $null
                 keycloakException = 'exact 26.7.2 base plus derived image ID plus exact single Red Hat rejected CVE tuple plus runtime pruning proof only'
             }
             tools = [ordered]@{
@@ -629,6 +608,8 @@ try {
                 keycloakRuntimeVerifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
                 keycloakProvisioningVerifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
                 keycloakProvisionerSha256 = Get-FileSha256Lower -Path (Join-Path $projectRoot 'deploy\keycloak\provision-solov-realm.sh')
+                nginxVerifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-nginx-configs.ps1')
+                webSecurityHeadersVerifierSha256 = Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-web-security-headers.ps1')
                 trivyReference = $trivyImage
                 trivyImageId = $trivyToolID
                 trivyAcquisition = $trivyAcquisition.Status
@@ -669,9 +650,8 @@ IdP mode: `$IdPMode`
 Application image gate: `$applicationStatus`
 Production launch: `$productionStatus`
 
-The PostgreSQL exception, when present, applies only to the exact pinned
-linux/amd64 image, exact gosu SHA-256 and its retained govulncheck v1.7.0
-binary proof. It cannot be reused for another image, binary or finding target.
+PostgreSQL has no RC49 exception path. Its locally built linux/amd64 release
+image must have zero HIGH/CRITICAL findings and retain a null exception record.
 The Keycloak exception, when present, retains the Trivy finding and is bound to
 the exact 26.7.2 base digest, current derived image ID, one CVE/package/version
 tuple and proof that the admin CLI and unused MSSQL driver are absent.

@@ -18,6 +18,7 @@ umask 077
 : "${NEWAPI_RUNTIME_VERSION:?set the exact restored New API runtime}"
 : "${SUB2API_BALANCES_SIGNING_KEY_ID:?set the cutover manifest signing key id}"
 : "${NEWAPI_BALANCES_SIGNING_KEY_ID:?set the cutover manifest signing key id}"
+: "${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}"
 
 eligibility_start_at='2026-09-01T00:00:00+08:00'
 eligibility_start_utc='2026-08-31T16:00:00Z'
@@ -46,6 +47,8 @@ if [[ "$restore_balance_history_rehearsal" == YES ]]; then
 fi
 
 for command in age awk docker sha256sum tar find cmp grep ssh-keygen stat; do command -v "$command" >/dev/null; done
+restore_postgres_image="invoice-postgres:$INVOICE_IMAGE_TAG"
+docker image inspect "$restore_postgres_image" >/dev/null
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 capacity_validator="$script_dir/validate-restore-postgres-capacity.sh"
 test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator"
@@ -189,7 +192,7 @@ validate_tar() {
   local archive="$1"
   local max_total="$2"
   local max_file="$3"
-  docker run --rm --read-only --network none --user "$(id -u):$(id -g)" \
+  docker run --pull never --rm --read-only --network none --user "$(id -u):$(id -g)" \
     --cap-drop ALL --security-opt no-new-privileges:true \
     --pids-limit 16 --memory 128m --cpus 0.25 \
     --mount "type=bind,src=$archive,dst=/archive.tar,readonly" \
@@ -243,7 +246,7 @@ for directory in "${source_directories[@]}"; do
   chown -R 65532:65532 "$state_dir" "$key_copy"
   find "$state_dir" -type d -exec chmod 0700 {} +
   find "$state_dir" -type f -exec chmod 0600 {} +
-  docker_args=(docker run --rm --read-only --network none --user 65532:65532
+  docker_args=(docker run --pull never --rm --read-only --network none --user 65532:65532
     --cap-drop ALL --security-opt no-new-privileges:true \
     --mount "type=bind,src=$state_dir,dst=/state,readonly" \
     --mount "type=bind,src=$key_copy,dst=/run/secrets/spool-key,readonly" \
@@ -295,11 +298,11 @@ fi
 network_created=true
 docker network create "$network" >/dev/null
 started=true
-docker run --detach --rm --name "$container" --network "$network" --network-alias postgres \
+docker run --pull never --detach --rm --name "$container" --network "$network" --network-alias postgres \
   --env POSTGRES_PASSWORD=restore-drill-only \
   --env POSTGRES_DB=invoice \
   --tmpfs "/var/lib/postgresql:rw,nosuid,nodev,size=$restore_postgres_tmpfs_size" \
-  postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2 >/dev/null
+  "$restore_postgres_image" >/dev/null
 
 deadline=$((SECONDS+60))
 until docker exec "$container" pg_isready -U postgres -d invoice >/dev/null 2>&1; do
@@ -370,7 +373,7 @@ install -m 0400 "$FIELD_KEYRING_FILE" "$temporary/field-keyring.json"
 printf '%s\n' 'postgres://postgres:restore-drill-only@postgres:5432/invoice?sslmode=disable' >"$temporary/database-url"
 chmod 0400 "$temporary/database-url"
 chown -R 10001:10001 "$temporary/documents" "$temporary/field-keyring.json" "$temporary/database-url"
-docker run --rm --read-only --network "$network" --user 10001:10001 \
+docker run --pull never --rm --read-only --network "$network" --user 10001:10001 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --mount "type=bind,src=$temporary/documents,dst=/restore/documents,readonly" \
   --mount "type=bind,src=$temporary/field-keyring.json,dst=/run/secrets/field-keyring.json,readonly" \

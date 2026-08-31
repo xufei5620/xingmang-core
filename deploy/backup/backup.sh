@@ -8,6 +8,7 @@ umask 077
 : "${SOURCE_CUTOVER_ROOT:?set SOURCE_CUTOVER_ROOT to SOURCE_STATE_ROOT/cutover}"
 : "${BACKUP_SIGNING_KEY_FILE:?temporarily mount the offline Ed25519 backup signing private key}"
 : "${BACKUP_ALLOWED_SIGNERS_FILE:?set the offline-reviewed OpenSSH allowed_signers file}"
+: "${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}"
 [[ "${BACKUP_QUIESCE_CONFIRMED:-}" == "YES" ]] || {
   echo 'set BACKUP_QUIESCE_CONFIRMED=YES after scheduling the write-freeze window' >&2
   exit 2
@@ -64,6 +65,9 @@ signing_directory=$(cd "$(dirname "$BACKUP_SIGNING_KEY_FILE")" && pwd -P)
 }
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+invoice_postgres_image="invoice-postgres:$INVOICE_IMAGE_TAG"
+invoice_ingest_proxy_image="invoice-ingest-proxy:$INVOICE_IMAGE_TAG"
+docker image inspect "$invoice_ingest_proxy_image" "$invoice_postgres_image" >/dev/null
 prod_compose_file="$project_root/deploy/docker-compose.prod.yml"
 source_compose_file="$project_root/deploy/docker-compose.sources.yml"
 compose_env=()
@@ -226,16 +230,16 @@ verify_services_running() {
 
 resume_services() {
   if (( ${#resume_source_services[@]} > 0 )); then
-    "${source_compose[@]}" up -d --no-deps "${resume_source_services[@]}" || return 1
+    "${source_compose[@]}" up -d --pull never --no-deps "${resume_source_services[@]}" || return 1
   fi
   if (( ${#resume_prod_services[@]} > 0 )); then
-    "${prod_compose[@]}" up -d --no-deps "${resume_prod_services[@]}" || return 1
+    "${prod_compose[@]}" up -d --pull never --no-deps "${resume_prod_services[@]}" || return 1
   fi
   if (( ${#resume_source_wait_services[@]} > 0 )); then
-    "${source_compose[@]}" up -d --no-deps --wait --wait-timeout 180 "${resume_source_wait_services[@]}" || return 1
+    "${source_compose[@]}" up -d --pull never --no-deps --wait --wait-timeout 180 "${resume_source_wait_services[@]}" || return 1
   fi
   if (( ${#resume_prod_wait_services[@]} > 0 )); then
-    "${prod_compose[@]}" up -d --no-deps --wait --wait-timeout 180 "${resume_prod_wait_services[@]}" || return 1
+    "${prod_compose[@]}" up -d --pull never --no-deps --wait --wait-timeout 180 "${resume_prod_wait_services[@]}" || return 1
   fi
   verify_services_running source "${resume_source_running_only_services[@]}" || return 1
   verify_services_running prod "${resume_prod_running_only_services[@]}" || return 1
@@ -330,17 +334,17 @@ capture_migration_state "$migration_state_before"
 test -s "$database_tmp"
 mv -- "$database_tmp" "$database_final"
 
-docker run --rm --read-only --network none \
+docker run --pull never --rm --read-only --network none \
   --mount "type=volume,src=$document_volume,dst=/data,readonly" \
-  nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46 \
+  "$invoice_ingest_proxy_image" \
   tar -C /data -cf - . \
   | age -R "$AGE_RECIPIENT_FILE" -o "$documents_tmp"
 test -s "$documents_tmp"
 mv -- "$documents_tmp" "$documents_final"
 
-docker run --rm --read-only --network none \
+docker run --pull never --rm --read-only --network none \
   --mount "type=bind,src=$SOURCE_STATE_ROOT,dst=/state,readonly" \
-  nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46 \
+  "$invoice_ingest_proxy_image" \
   tar -C /state -cf - "${source_archive_entries[@]}" \
   | age -R "$AGE_RECIPIENT_FILE" -o "$source_state_tmp"
 test -s "$source_state_tmp"

@@ -1,9 +1,19 @@
 param(
-    [string]$Image = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+    [string]$Image = '',
+    [ValidatePattern('^(?:|sha256:[0-9a-f]{64})$')]
+    [string]$ExpectedImageID = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$webNginxCompatibilityFixtureImage = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+if ([string]::IsNullOrWhiteSpace($Image)) { $Image = $webNginxCompatibilityFixtureImage }
+if (-not [string]::IsNullOrWhiteSpace($ExpectedImageID)) {
+    $observedImageID = (& docker image inspect $Image --format '{{.Id}}' 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $observedImageID -cne $ExpectedImageID) {
+        throw "web security-header verifier image is unavailable or stale: $Image"
+    }
+}
 $configPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'web\nginx.conf')).Path
 $distPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'web\dist')).Path
 $asset = Get-ChildItem -LiteralPath (Join-Path $distPath 'assets') -File |

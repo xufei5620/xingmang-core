@@ -156,11 +156,19 @@ $matchingTagRecords = @(
     [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:fixture' }
     [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:fixture' }
     [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:fixture' }
+    [pscustomobject]@{ name = 'postgres-runtime'; reference = 'invoice-postgres:fixture' }
+    [pscustomobject]@{ name = 'clamav-runtime'; reference = 'invoice-clamav:fixture' }
+    [pscustomobject]@{ name = 'ingest-proxy'; reference = 'invoice-ingest-proxy:fixture' }
 )
 if ((Get-CommonReleaseImageTag -ImageRecords $matchingTagRecords -IdPMode external-managed) -cne 'fixture' -or
     (Get-CommonReleaseImageTag -ImageRecords $matchingTagRecords -IdPMode none) -cne 'fixture') {
-    throw 'non-Keycloak IdP modes no longer accept the five common application release images'
+    throw 'non-Keycloak IdP modes no longer accept the eight common locally built release images'
 }
+$matchingTagRecords[-1].reference = 'invoice-ingest-proxy:different'
+$rejected = $false
+try { Get-CommonReleaseImageTag -ImageRecords $matchingTagRecords -IdPMode none | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'mismatched derived ingest-proxy release image tag was accepted' }
+$matchingTagRecords[-1].reference = 'invoice-ingest-proxy:fixture'
 $keycloakRecords = @($matchingTagRecords) + [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:fixture' }
 if ((Get-CommonReleaseImageTag -ImageRecords $keycloakRecords -IdPMode keycloak) -cne 'fixture') {
     throw 'matching Keycloak release image tag was rejected'
@@ -536,8 +544,8 @@ if ($gateSource -notmatch '(?s)\[string\]\s*\$IdPMode\s*=\s*''keycloak''' -or
 if ($gateSource -match '(?m)verify\.ps1.*-SkipPostgres') {
     throw 'release image gate bypasses the full PostgreSQL verification gate'
 }
-if ($gateSource -notmatch "@\('build', '--pull', '--provenance=false'") {
-    throw 'release image builds no longer disable nondeterministic BuildKit provenance wrappers'
+if ($gateSource -notmatch "@\('build', '--pull', '--platform', 'linux/amd64', '--provenance=false'") {
+    throw 'release image builds no longer pin linux/amd64 or disable nondeterministic BuildKit provenance wrappers'
 }
 if ($artifactVerifierSource -match 'approved-by-exact-binary-exception' -or
     $artifactVerifierSource -notmatch '\[int\]\$postgres\[0\]\.vulnerabilities\.total\s*-ne\s*0' -or
@@ -545,6 +553,135 @@ if ($artifactVerifierSource -match 'approved-by-exact-binary-exception' -or
     $artifactVerifierSource -notmatch '\$null\s*-ne\s*\$postgres\[0\]\.exception') {
     throw 'RC49 artifact verification still permits a PostgreSQL vulnerability exception'
 }
+
+function Assert-RC49DerivedImageGateSource {
+    param(
+        [Parameter(Mandatory)][string]$Gate,
+        [Parameter(Mandatory)][string]$Library,
+        [Parameter(Mandatory)][string]$ArtifactVerifier
+    )
+
+    foreach ($requiredDefinition in @(
+        'New-ImageDefinition -Name ''postgres-runtime'' -ArtifactName ''invoice-postgres'' -Reference "invoice-postgres:$ImageTag" -Kind ''built'' -Policy ''zero-findings'' -Context ''postgres'' -Dockerfile ''deploy/postgres/Dockerfile''',
+        'New-ImageDefinition -Name ''clamav-runtime'' -ArtifactName ''invoice-clamav'' -Reference "invoice-clamav:$ImageTag" -Kind ''built'' -Policy ''zero-findings'' -Context ''clamav'' -Dockerfile ''deploy/clamav/Dockerfile''',
+        'New-ImageDefinition -Name ''ingest-proxy'' -ArtifactName ''invoice-ingest-proxy'' -Reference "invoice-ingest-proxy:$ImageTag" -Kind ''built'' -Policy ''zero-findings'' -Context ''ingest-proxy'' -Dockerfile ''deploy/ingest-proxy/Dockerfile'''
+    )) {
+        if (-not $Gate.Contains($requiredDefinition, [StringComparison]::Ordinal)) {
+            throw "RC49 release gate is missing locally built derived image definition: $requiredDefinition"
+        }
+    }
+    foreach ($baseBinding in @(
+        '-BaseReference $postgresBaseReference',
+        '-BaseReference $clamavBaseReference',
+        '-BaseReference $nginxBaseReference'
+    )) {
+        if (-not $Gate.Contains($baseBinding, [StringComparison]::Ordinal)) {
+            throw "RC49 derived image definition is missing exact base binding: $baseBinding"
+        }
+    }
+    foreach ($contextBinding in @(
+        @{ Context = 'postgres'; Fingerprint = 'postgres' },
+        @{ Context = 'clamav'; Fingerprint = 'clamav' },
+        @{ Context = 'ingest-proxy'; Fingerprint = 'ingestProxy' }
+    )) {
+        if ($Gate -notmatch "(?m)^\s+$([regex]::Escape($contextBinding.Fingerprint)) = Get-ContextFingerprint" -or
+            [regex]::Matches($Gate, "(?m)^\s+'?$([regex]::Escape($contextBinding.Context))'?\s*\{ Join-Path \`$projectRoot").Count -ne 1) {
+            throw "RC49 release gate does not fingerprint and build exact context $($contextBinding.Context)"
+        }
+    }
+    if ($Gate -notmatch "@\('build', '--pull', '--platform', 'linux/amd64', '--provenance=false'" -or
+        -not $Gate.Contains('Assert-LinuxAmd64Platform -Platform "$($metadata.Os)/$($metadata.Architecture)"', [StringComparison]::Ordinal) -or
+        -not $Library.Contains("function Assert-LinuxAmd64Platform", [StringComparison]::Ordinal)) {
+        throw 'RC49 locally built images are not build-time and post-build gated to linux/amd64'
+    }
+    if ($Gate -match "exact-postgres-gosu-exception|approved-by-exact-binary-exception|postgres_exception_proof_failed" -or
+        -not $Gate.Contains('postgresException = $null', [StringComparison]::Ordinal)) {
+        throw 'RC49 release gate retains an active PostgreSQL exception/proof path'
+    }
+    foreach ($fingerprint in @('postgres', 'clamav', 'ingestProxy')) {
+        if (-not $ArtifactVerifier.Contains("$fingerprint = Get-ContextFingerprint", [StringComparison]::Ordinal)) {
+            throw "independent artifact verifier does not bind derived source fingerprint $fingerprint"
+        }
+    }
+    if (-not $ArtifactVerifier.Contains("Assert-LinuxAmd64Platform -Platform ([string]`$record.platform)", [StringComparison]::Ordinal) -or
+        -not $ArtifactVerifier.Contains("docker image inspect ([string]`$record.reference) --format '{{.Os}}/{{.Architecture}}'", [StringComparison]::Ordinal) -or
+        -not $ArtifactVerifier.Contains('current image platform does not match the manifest-bound linux/amd64 platform', [StringComparison]::Ordinal) -or
+        -not $ArtifactVerifier.Contains("[string]`$record.kind -cne 'built'", [StringComparison]::Ordinal) -or
+        -not $ArtifactVerifier.Contains("[string]`$record.acquisition -cne 'built-from-source'", [StringComparison]::Ordinal)) {
+        throw 'independent artifact verifier does not reject non-built or non-linux/amd64 RC49 image records'
+    }
+}
+
+$gateLibrarySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
+Assert-RC49DerivedImageGateSource -Gate $gateSource -Library $gateLibrarySource -ArtifactVerifier $artifactVerifierSource
+
+$platformRejected = $false
+try { Assert-LinuxAmd64Platform -Platform 'linux/arm64' | Out-Null } catch { $platformRejected = $true }
+if (-not $platformRejected) { throw 'linux/arm64 release image fixture was accepted' }
+Assert-LinuxAmd64Platform -Platform 'linux/amd64' | Out-Null
+
+function Assert-RC49RuntimeAndBackupBindings {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+
+    $runtimeVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
+    $provisioningVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-keycloak-provisioning.ps1')
+    $nginxVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-nginx-configs.ps1')
+    $headerVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-web-security-headers.ps1')
+    $backup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'deploy\backup\backup.sh')
+    $restore = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'deploy\backup\restore-drill.sh')
+
+    foreach ($binding in @(
+        @{ Source = $runtimeVerifier; Required = '[string]$ExpectedPostgresImageID'; Label = 'Keycloak runtime PostgreSQL image ID' },
+        @{ Source = $runtimeVerifier; Required = '[string]$ExpectedProbeImageID'; Label = 'Keycloak runtime probe image ID' },
+        @{ Source = $provisioningVerifier; Required = '[string]$ExpectedPostgresImageID'; Label = 'Keycloak provisioning PostgreSQL image ID' },
+        @{ Source = $nginxVerifier; Required = '[string]$ExpectedImageID'; Label = 'Nginx configuration image ID' },
+        @{ Source = $headerVerifier; Required = '[string]$ExpectedImageID'; Label = 'web header image ID' }
+    )) {
+        if (-not $binding.Source.Contains($binding.Required, [StringComparison]::Ordinal)) {
+            throw "RC49 verifier is missing expected ID binding: $($binding.Label)"
+        }
+    }
+    foreach ($requiredGateArgument in @(
+        '-PostgresImage ([string]$postgresRuntimeRecord.reference)',
+        '-ExpectedPostgresImageID ([string]$postgresRuntimeRecord.imageId)',
+        '-ProbeImage ([string]$ingestRuntimeRecord.reference)',
+        '-ExpectedProbeImageID ([string]$ingestRuntimeRecord.imageId)',
+        '-Image ([string]$ingestRuntimeRecord.reference) -ExpectedImageID ([string]$ingestRuntimeRecord.imageId)',
+        '-Image ([string]$webRuntimeRecord.reference) -ExpectedImageID ([string]$webRuntimeRecord.imageId)'
+    )) {
+        if (-not $gateSource.Contains($requiredGateArgument, [StringComparison]::Ordinal)) {
+            throw "post-build verifier is not passed an exact derived reference/ID: $requiredGateArgument"
+        }
+    }
+    foreach ($proofBinding in @(
+        'postgresReference = [string]$postgresRuntimeRecord.reference',
+        'postgresImageId = [string]$postgresRuntimeRecord.imageId',
+        'probeReference = [string]$ingestRuntimeRecord.reference',
+        'probeImageId = [string]$ingestRuntimeRecord.imageId'
+    )) {
+        if (-not $gateSource.Contains($proofBinding, [StringComparison]::Ordinal) -or
+            -not $artifactVerifierSource.Contains(".$($proofBinding.Split(' = ')[0])", [StringComparison]::Ordinal)) {
+            throw "retained runtime proof is not independently bound to dependency: $proofBinding"
+        }
+    }
+    if ($runtimeVerifier -match 'postgres:18(?:\.6)?-alpine@sha256' -or
+        $provisioningVerifier -match 'postgres:18(?:\.6)?-alpine@sha256') {
+        throw 'Keycloak runtime/provisioning verifier retains a direct external PostgreSQL runtime reference'
+    }
+    if ($backup -match 'nginx:1\.30-alpine@sha256' -or $restore -match 'postgres:18(?:\.6)?-alpine@sha256' -or
+        -not $backup.Contains(': "${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}"', [StringComparison]::Ordinal) -or
+        -not $backup.Contains('invoice_ingest_proxy_image="invoice-ingest-proxy:$INVOICE_IMAGE_TAG"', [StringComparison]::Ordinal) -or
+        -not $backup.Contains('invoice_postgres_image="invoice-postgres:$INVOICE_IMAGE_TAG"', [StringComparison]::Ordinal) -or
+        -not $restore.Contains('restore_postgres_image="invoice-postgres:$INVOICE_IMAGE_TAG"', [StringComparison]::Ordinal) -or
+        -not $backup.Contains('docker image inspect "$invoice_ingest_proxy_image" "$invoice_postgres_image"', [StringComparison]::Ordinal) -or
+        -not $restore.Contains('docker image inspect "$restore_postgres_image"', [StringComparison]::Ordinal) -or
+        -not $backup.Contains('docker run --pull never', [StringComparison]::Ordinal) -or
+        -not $restore.Contains('docker run --pull never', [StringComparison]::Ordinal)) {
+        throw 'current backup/restore drill is not bound to existing no-pull RC49 derived images'
+    }
+}
+
+Assert-RC49RuntimeAndBackupBindings -ProjectRoot $projectRoot
 
 Write-Host 'Release image gate offline/static fixtures passed.'
 $global:LASTEXITCODE = 0
