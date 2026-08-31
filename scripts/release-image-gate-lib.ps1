@@ -1,5 +1,21 @@
 Set-StrictMode -Version Latest
 
+function Get-ComposeOptionalBoolean {
+    param(
+        [Parameter(Mandatory)]$ComposeObject,
+        [Parameter(Mandatory)][string]$PropertyName
+    )
+
+    $property = $ComposeObject.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) {
+        return $false
+    }
+    if ($property.Value -isnot [bool]) {
+        throw "Compose property $PropertyName must be a Boolean when present"
+    }
+    return $property.Value
+}
+
 function Get-RequiredImageId {
     param([Parameter(Mandatory)][string]$Reference)
 

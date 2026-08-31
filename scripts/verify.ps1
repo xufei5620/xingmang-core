@@ -240,14 +240,14 @@ try {
     )) {
         $renderedNetwork = $renderedProduction.networks.($network.Name)
         $ipam = @($renderedNetwork.ipam.config)[0]
-        if ($ipam.subnet -ne $productionEnv[$network.Env] -or [bool]$renderedNetwork.internal -ne $network.Internal) {
+        if ($ipam.subnet -ne $productionEnv[$network.Env] -or (Get-ComposeOptionalBoolean -ComposeObject $renderedNetwork -PropertyName 'internal') -ne $network.Internal) {
             throw "$($network.Name) does not use its exact reviewed subnet/internal mode"
         }
     }
     if ($renderedProduction.services.clamav.image -ne 'invoice-clamav:verification-build' -or
         [int]$renderedProduction.services.clamav.networks.clamav_egress.gw_priority -ne 1 -or
-        $renderedProduction.networks.invoice_app.internal -ne $true -or
-        $renderedProduction.networks.clamav_egress.internal -eq $true -or
+        (Get-ComposeOptionalBoolean -ComposeObject $renderedProduction.networks.invoice_app -PropertyName 'internal') -ne $true -or
+        (Get-ComposeOptionalBoolean -ComposeObject $renderedProduction.networks.clamav_egress -PropertyName 'internal') -eq $true -or
         [int64]$renderedProduction.services.clamav.mem_limit -ne 4294967296 -or
         [int]$renderedProduction.services.clamav.pids_limit -ne 256) {
         throw 'ClamAV digest, resources, default egress route or internal application boundary drifted'
@@ -348,7 +348,7 @@ try {
         $oidcPreflight.PSObject.Properties.Name -contains 'ports' -or
         $oidcPreflightNetworks.Count -ne 1 -or $oidcPreflightNetworks[0] -ne 'oidc_preflight_egress' -or
         $oidcPreflightIPAM.subnet -ne $productionEnv.OIDC_PREFLIGHT_EGRESS_SUBNET -or
-        [bool]$oidcPreflightNetwork.internal -ne $false -or
+        (Get-ComposeOptionalBoolean -ComposeObject $oidcPreflightNetwork -PropertyName 'internal') -ne $false -or
         @($oidcPreflight.entrypoint) -notcontains '/usr/local/bin/invoice-oidc-preflight' -or
         $oidcPreflight.read_only -ne $true -or
         @($oidcPreflight.cap_drop) -notcontains 'ALL' -or
@@ -430,7 +430,7 @@ try {
     if ($keycloakEdgeIPAM.subnet -ne $productionEnv.KEYCLOAK_EDGE_SUBNET -or
         $keycloakEdgeIPAM.gateway -ne $productionEnv.KEYCLOAK_EDGE_GATEWAY -or
         $keycloakDBIPAM.subnet -ne $productionEnv.KEYCLOAK_DB_SUBNET -or
-        $idpBaseObject.networks.keycloak_db.internal -ne $true -or
+        (Get-ComposeOptionalBoolean -ComposeObject $idpBaseObject.networks.keycloak_db -PropertyName 'internal') -ne $true -or
         [int]$idpBaseObject.services.keycloak.networks.keycloak_edge.gw_priority -ne 1 -or
         $productionEnv.KC_PROXY_TRUSTED_ADDRESSES -ne "$($keycloakEdgeIPAM.gateway)/32") {
         throw 'Keycloak proxy trust/default gateway does not equal the exact configured edge gateway /32'

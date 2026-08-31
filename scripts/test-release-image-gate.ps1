@@ -9,6 +9,34 @@ Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
 
+$composeInternalFixtures = @(
+    [pscustomobject]@{ Label = 'absent internal defaults false'; Network = [pscustomobject]@{}; Expected = $false },
+    [pscustomobject]@{ Label = 'true internal is preserved'; Network = [pscustomobject]@{ internal = $true }; Expected = $true },
+    [pscustomobject]@{ Label = 'false internal is preserved'; Network = [pscustomobject]@{ internal = $false }; Expected = $false }
+)
+foreach ($fixture in $composeInternalFixtures) {
+    $actual = Get-ComposeOptionalBoolean -ComposeObject $fixture.Network -PropertyName 'internal'
+    if ($actual -ne $fixture.Expected) {
+        throw "Compose internal fixture failed: $($fixture.Label)"
+    }
+}
+foreach ($invalidValue in @($null, 'false', [long]0, [pscustomobject]@{})) {
+    $rejected = $false
+    try {
+        Get-ComposeOptionalBoolean -ComposeObject ([pscustomobject]@{ internal = $invalidValue }) -PropertyName 'internal' | Out-Null
+    } catch {
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw "Compose internal fixture accepted invalid $($invalidValue.GetType().FullName) value"
+    }
+}
+$verifySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
+if ([regex]::Matches($verifySource, 'Get-ComposeOptionalBoolean\s+-ComposeObject').Count -ne 5 -or
+    $verifySource -cmatch '(?m)\$[A-Za-z_][A-Za-z0-9_.]*\.internal\b') {
+    throw 'verify.ps1 does not use the optional Compose Boolean helper for every network internal check'
+}
+
 $task5AMutationFailures = [Collections.Generic.List[string]]::new()
 
 function Test-Task5ARequirement {
