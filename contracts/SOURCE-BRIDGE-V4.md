@@ -105,7 +105,9 @@ runtime families before release:
 - PostgreSQL 15 (New API production family)
 - PostgreSQL 18 (Sub2API production family; currently 18.4)
 
-Run `agents/scripts/verify-bridge-postgres-matrix.ps1`. The integration suite
+Run `scripts/verify-postgres.ps1`. It starts PostgreSQL 15 and PostgreSQL 18
+without publishing database ports and runs the digest-pinned Go build-stage
+runners in each database container network namespace. The integration suite
 proves financial semantics, exact caller access, encrypted cutover capture,
 configuration drift blocking, install idempotency, `pg_depend=0`, compatible
 `ALTER TYPE`, incompatible drop fail-closed behavior, and complete rollback.

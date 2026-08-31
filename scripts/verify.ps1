@@ -28,6 +28,9 @@ if ($LASTEXITCODE -ne 0) { throw 'balance history cleanup operator/rehearsal gat
 & (Join-Path $PSScriptRoot 'test-release-image-gate.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'release image gate static fixtures failed' }
 
+& (Join-Path $PSScriptRoot 'test-verify-postgres.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15 container-network static fixtures failed' }
+
 if (-not (Get-Command bash -ErrorAction SilentlyContinue)) {
     throw 'bash is required to run the ClamAV deployment healthcheck tests'
 }
@@ -552,9 +555,6 @@ if (-not $SkipPostgres) {
     & (Join-Path $PSScriptRoot 'test-upstream-projection-maintenance.ps1') `
         -PostgresImage $postgresCompatibilityFixtureImage
     if ($LASTEXITCODE -ne 0) { throw 'upstream projection maintenance adversarial tests failed' }
-
-    & (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15/18 source Bridge V4 matrix failed' }
 
     & (Join-Path $PSScriptRoot 'verify-postgres.ps1') -PostgresImage $postgresCompatibilityFixtureImage
     if ($LASTEXITCODE -ne 0) { throw 'isolated PostgreSQL verification failed' }
