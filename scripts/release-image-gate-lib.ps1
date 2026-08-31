@@ -217,6 +217,9 @@ function Assert-ExceptionReviewContract {
     if ($due -le $reviewed) {
         throw 'exception review due timestamp must be after reviewedAt'
     }
+    if ($current -lt $reviewed) {
+        throw 'exception review current timestamp is before reviewedAt'
+    }
     if ($current -gt $due) {
         throw 'exception review has expired'
     }

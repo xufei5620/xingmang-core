@@ -126,33 +126,10 @@ foreach ($record in $records) {
 
 $postgres = @($records | Where-Object name -eq 'postgres-runtime')
 if ($postgres.Count -ne 1) { throw 'release manifest must have exactly one PostgreSQL record' }
-$expectedPostgresReference = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
-$expectedPostgresID = 'sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
-if ([int]$postgres[0].vulnerabilities.total -gt 0) {
-    if ([string]$postgres[0].policyStatus -cne 'approved-by-exact-binary-exception' -or
-        [string]$postgres[0].reference -cne $expectedPostgresReference -or
-        [string]$postgres[0].imageId -cne $expectedPostgresID -or
-        [string]$postgres[0].exception.imageReference -cne $expectedPostgresReference -or
-        [string]$postgres[0].exception.imageId -cne $expectedPostgresID -or
-        [string]$postgres[0].exception.binarySha256 -cne '52c8749d0142edd234e9d6bd5237dff2d81e71f43537e2f4f66f75dd4b243dd0' -or
-        [string]$postgres[0].exception.govulncheckModuleZipSha256 -cne 'a14bf913551ac09f00ae0e903c1b358713f71af911d7ddacc3fab8ce5c149a26') {
-        throw 'PostgreSQL exception escaped its exact digest/binary scope'
-    }
-    $binaryPath = Join-Path $releaseRoot 'proof\postgres-gosu-linux-amd64'
-    if ((Get-FileSha256Lower -Path $binaryPath) -cne [string]$postgres[0].exception.binarySha256) {
-        throw 'retained gosu binary does not match the exact exception proof'
-    }
-    Assert-GovulncheckBinaryProof `
-        -ProofText (Get-Content -Raw -LiteralPath (Join-Path $releaseRoot 'proof\postgres-gosu.govulncheck.txt')) `
-        -VersionText (Get-Content -Raw -LiteralPath (Join-Path $releaseRoot 'proof\postgres-gosu.govulncheck-version.txt')) | Out-Null
-    $moduleEvidencePath = Resolve-ReleaseArtifactPath -ReleaseDirectory $releaseRoot -RelativePath ([string]$postgres[0].exception.govulncheckModuleEvidence)
-    $moduleEvidence = Get-Content -Raw -LiteralPath $moduleEvidencePath
-    if ($moduleEvidence -notmatch '(?m)^a14bf913551ac09f00ae0e903c1b358713f71af911d7ddacc3fab8ce5c149a26  v1\.7\.0\.zip$' -or
-        $moduleEvidence -notmatch '(?m)^h1:4MQBuhmXbz2uepNJrf3v\+aaZLGDqw1JluwYboegA1qg=  v1\.7\.0\.ziphash$') {
-        throw 'govulncheck module-cache supply-chain evidence is missing or stale'
-    }
-} elseif ([string]$postgres[0].policyStatus -cne 'approved') {
-    throw 'zero-finding PostgreSQL image was not approved normally'
+if ([int]$postgres[0].vulnerabilities.total -ne 0 -or
+    [string]$postgres[0].policyStatus -cne 'approved' -or
+    $null -ne $postgres[0].exception) {
+    throw 'RC49 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
 }
 
 $keycloak = @($records | Where-Object name -eq 'keycloak')

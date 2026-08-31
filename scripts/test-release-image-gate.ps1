@@ -261,6 +261,7 @@ Assert-ExceptionReviewRejected -ReviewedAt '2026/08/31 00:00:00' -Message 'excep
 Assert-ExceptionReviewRejected -ReviewDueAt 'not-a-timestamp' -Message 'exception review accepted invalid reviewDueAt timestamp'
 Assert-ExceptionReviewRejected -ReviewDueAt $reviewedAt -Message 'exception review accepted due-at equal to reviewed-at'
 Assert-ExceptionReviewRejected -ReviewDueAt '2026-08-31T00:00:01Z' -CurrentTime $reviewNow -Message 'exception review accepted an expired due date'
+Assert-ExceptionReviewRejected -CurrentTime '2026-08-30T23:59:59Z' -Message 'exception review accepted a current time before the review window'
 
 $fixtureDBTime = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss +0000') + ' UTC'
 $versionProof = "Go: go1.25.7`nScanner: govulncheck@v1.7.0`nDB: https://vuln.go.dev`nDB updated: $fixtureDBTime`n"
@@ -299,6 +300,7 @@ if ($keycloakRejectedDecision.Status -cne 'image_rejected' -or
     throw 'IdP fail-closed decision fixture drifted'
 }
 $gateSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'release-image-gate.ps1')
+$artifactVerifierSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
 if ($gateSource -notmatch '(?s)\[string\]\s*\$IdPMode\s*=\s*''keycloak''' -or
     $gateSource -notmatch "Policy\s+'keycloak-26\.7\.2-exact-vendor-rejection'" -or
     $gateSource -notmatch [regex]::Escape('quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067')) {
@@ -309,6 +311,12 @@ if ($gateSource -match '(?m)verify\.ps1.*-SkipPostgres') {
 }
 if ($gateSource -notmatch "@\('build', '--pull', '--provenance=false'") {
     throw 'release image builds no longer disable nondeterministic BuildKit provenance wrappers'
+}
+if ($artifactVerifierSource -match 'approved-by-exact-binary-exception' -or
+    $artifactVerifierSource -notmatch '\[int\]\$postgres\[0\]\.vulnerabilities\.total\s*-ne\s*0' -or
+    $artifactVerifierSource -notmatch '\[string\]\$postgres\[0\]\.policyStatus\s*-cne\s*''approved''' -or
+    $artifactVerifierSource -notmatch '\$null\s*-ne\s*\$postgres\[0\]\.exception') {
+    throw 'RC49 artifact verification still permits a PostgreSQL vulnerability exception'
 }
 
 Write-Host 'Release image gate offline/static fixtures passed.'
