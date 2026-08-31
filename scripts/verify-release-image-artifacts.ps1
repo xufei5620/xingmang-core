@@ -13,6 +13,7 @@ Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
+Assert-ReleasePowerShellRuntime | Out-Null
 
 if (-not $RequireTransferReady -and -not [string]::IsNullOrWhiteSpace($SignedReleaseTag)) {
     throw 'SignedReleaseTag is valid only with RequireTransferReady'
@@ -23,19 +24,19 @@ if ($RequireTransferReady) {
     $peeledSignedTagRef = "$signedTagRef^{}"
     $tagObjectType = (& git -C $projectRoot cat-file -t $signedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $tagObjectType -cne 'tag') {
-        throw 'strict transfer requires the supplied RC51 name to resolve to an annotated tag object'
+        throw 'strict transfer requires the supplied RC52 name to resolve to an annotated tag object'
     }
     & git -C $projectRoot verify-tag $signedTagRef *> $null
     if ($LASTEXITCODE -ne 0) {
-        throw 'strict transfer requires a valid signature on the supplied RC51 tag'
+        throw 'strict transfer requires a valid signature on the supplied RC52 tag'
     }
     $signedTagCommit = (& git -C $projectRoot rev-parse --verify $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $signedTagCommit -notmatch '^[0-9a-f]{40}$') {
-        throw 'strict transfer could not peel the supplied signed RC51 tag to a commit'
+        throw 'strict transfer could not peel the supplied signed RC52 tag to a commit'
     }
     $peeledObjectType = (& git -C $projectRoot cat-file -t $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $peeledObjectType -cne 'commit') {
-        throw 'strict transfer signed RC51 tag did not peel to a commit object'
+        throw 'strict transfer signed RC52 tag did not peel to a commit object'
     }
 }
 
@@ -52,15 +53,14 @@ if (((Get-Item -LiteralPath $releaseRoot -Force).Attributes -band [IO.FileAttrib
     throw 'release artifact directory cannot be a symlink/reparse point'
 }
 if ($RequireTransferReady) {
-    Assert-StrictReleaseDirectoryName -ReleaseDirectory $releaseRoot -ExpectedReleaseName '0.1.0-rc51' | Out-Null
+    Assert-StrictReleaseDirectoryName -ReleaseDirectory $releaseRoot -ExpectedReleaseName '0.1.0-rc52' | Out-Null
 }
 
 Assert-Sha256Sums -ReleaseDirectory $releaseRoot | Out-Null
 $manifestPath = Join-Path $releaseRoot 'release-manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'release-manifest.json is missing' }
 $manifestJson = Get-Content -Raw -LiteralPath $manifestPath
-Assert-JsonHasNoDuplicateProperties -JsonText $manifestJson | Out-Null
-$manifest = $manifestJson | ConvertFrom-Json
+$manifest = ConvertFrom-ReleaseJson -JsonText $manifestJson
 if ([string]$manifest.schemaVersion -cne 'solov.invoice.release-image-gate/v1') {
     throw 'unsupported release image gate manifest schema'
 }
@@ -112,7 +112,7 @@ if ($idpMode -ceq 'keycloak') { $requiredNames += 'keycloak' }
 $records = @($manifest.images)
 $names = @($records | ForEach-Object { [string]$_.name })
 if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw 'release manifest has duplicate image names' }
-if ($names.Count -ne $requiredNames.Count) { throw 'release manifest does not contain the exact RC51 image inventory' }
+if ($names.Count -ne $requiredNames.Count) { throw 'release manifest does not contain the exact RC52 image inventory' }
 foreach ($name in $requiredNames) {
     if ($name -notin $names) { throw "release manifest is missing required image $name" }
 }
@@ -147,7 +147,7 @@ if ($idpMode -ceq 'keycloak') {
             --env-file (Join-Path $projectRoot 'deploy\.env.production.example') `
             -f (Join-Path $projectRoot 'deploy\docker-compose.idp.yml') config --format json | Out-String
         if ($LASTEXITCODE -ne 0) { throw 'cannot render production Keycloak Compose for release binding verification' }
-        $renderedIDP = $renderedIDPText | ConvertFrom-Json
+        $renderedIDP = ConvertFrom-ReleaseJson -JsonText $renderedIDPText
     } finally {
         if ($null -eq $previousImageTag) {
             Remove-Item Env:INVOICE_IMAGE_TAG -ErrorAction SilentlyContinue
@@ -177,11 +177,11 @@ foreach ($record in $records) {
         [string]$record.reference -cne "${expectedRepository}:$releaseImageTag" -or
         [string]$record.kind -cne 'built' -or
         [string]$record.acquisition -cne 'built-from-source') {
-        throw "RC51 image is not an exact locally built common-tag record: $($record.name)"
+        throw "RC52 image is not an exact locally built common-tag record: $($record.name)"
     }
     if ($expectedDerivedBases.Contains([string]$record.name) -and
         [string]$record.baseReference -cne [string]$expectedDerivedBases[[string]$record.name]) {
-        throw "RC51 derived image base reference drifted: $($record.name)"
+        throw "RC52 derived image base reference drifted: $($record.name)"
     }
     if ([string]$record.name -notin @('postgres-runtime', 'keycloak')) {
         if ($record.vulnerabilities.total -ne 0 -or [string]$record.policyStatus -cne 'approved') {
@@ -195,7 +195,7 @@ if ($postgres.Count -ne 1) { throw 'release manifest must have exactly one Postg
 if ($postgres[0].vulnerabilities.total -ne 0 -or
     [string]$postgres[0].policyStatus -cne 'approved' -or
     $null -ne $postgres[0].exception) {
-    throw 'RC51 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
+    throw 'RC52 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
 }
 
 $ingest = @($records | Where-Object name -eq 'ingest-proxy')
@@ -273,7 +273,7 @@ switch ($idpMode) {
             }
         } elseif ($keycloak[0].vulnerabilities.total -eq 1) {
             $keycloakReportPath = Resolve-ReleaseArtifactPath -ReleaseDirectory $releaseRoot -RelativePath ([string]$keycloak[0].vulnerabilityReport.path)
-            $keycloakReport = Get-Content -Raw -LiteralPath $keycloakReportPath | ConvertFrom-Json
+            $keycloakReport = ConvertFrom-ReleaseJson -JsonText (Get-Content -Raw -LiteralPath $keycloakReportPath)
             $keycloakSummary = Assert-TrivyReportBinding -Report $keycloakReport -ExpectedImageId ([string]$keycloak[0].imageId)
             Assert-KeycloakVendorRejectedCveScope -ImageReference ([string]$keycloak[0].reference) -ImageId ([string]$keycloak[0].imageId) -BaseReference ([string]$keycloak[0].baseReference) -Summary $keycloakSummary -ExpectedBaseReference $expectedKeycloakBase | Out-Null
             $expectedKeycloakTarget = "$([string]$keycloak[0].reference) (redhat 9.8)"

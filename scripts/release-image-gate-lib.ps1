@@ -208,7 +208,7 @@ function Assert-PostgresGosuFindingScope {
             [string]$_.Status -ceq [string]$finding.Status
         })
         if ($matchingTuple.Count -ne 1) {
-            throw "PostgreSQL exception has no approved RC51 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
+            throw "PostgreSQL exception has no approved RC52 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
         }
     }
     return $true
@@ -394,6 +394,28 @@ function Assert-JsonHasNoDuplicateProperties {
     return $true
 }
 
+function Assert-ReleasePowerShellVersion {
+    param([Parameter(Mandatory)][version]$Version)
+
+    if ($Version -lt [version]'7.5.0') {
+        throw "release tooling requires PowerShell 7.5 or newer for ConvertFrom-Json -DateKind String; got $Version"
+    }
+    return $true
+}
+
+function Assert-ReleasePowerShellRuntime {
+    Assert-ReleasePowerShellVersion -Version $PSVersionTable.PSVersion | Out-Null
+    return $true
+}
+
+function ConvertFrom-ReleaseJson {
+    param([Parameter(Mandatory)][string]$JsonText)
+
+    Assert-ReleasePowerShellRuntime | Out-Null
+    Assert-JsonHasNoDuplicateProperties -JsonText $JsonText | Out-Null
+    return $JsonText | ConvertFrom-Json -DateKind String -ErrorAction Stop
+}
+
 function Assert-FailedReleaseEvidenceAnchor {
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
@@ -491,6 +513,19 @@ function Assert-RC50FailureEvidenceAnchor {
         -CandidateLabel 'RC50'
 }
 
+function Assert-RC51FailureEvidenceAnchor {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$AnchorText
+    )
+    return Assert-FailedReleaseEvidenceAnchor `
+        -ProjectRoot $ProjectRoot `
+        -AnchorText $AnchorText `
+        -ReleaseName '0.1.0-rc51' `
+        -AllowedExactNumbers @(1) `
+        -CandidateLabel 'RC51'
+}
+
 function Get-ReleaseGitProvenance {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
 
@@ -551,10 +586,10 @@ function Assert-StrictReleaseDirectoryName {
 function Get-StrictSignedReleaseTagRef {
     param([Parameter(Mandatory)][string]$SignedReleaseTag)
 
-    if ($SignedReleaseTag -cne 'v0.1.0-rc51-signed') {
-        throw 'strict transfer requires the exact signed RC51 tag v0.1.0-rc51-signed'
+    if ($SignedReleaseTag -cne 'v0.1.0-rc52-signed') {
+        throw 'strict transfer requires the exact signed RC52 tag v0.1.0-rc52-signed'
     }
-    return 'refs/tags/v0.1.0-rc51-signed'
+    return 'refs/tags/v0.1.0-rc52-signed'
 }
 
 function Assert-TransferReadyManifest {
@@ -569,28 +604,28 @@ function Assert-TransferReadyManifest {
     try {
         $releaseNameProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'releaseName' -Context 'manifest'
     } catch {
-        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc51 is mandatory'
+        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc52 is mandatory'
     }
     if ($releaseNameProperty.Value -isnot [string] -or
-        [string]$releaseNameProperty.Value -cne '0.1.0-rc51') {
-        throw 'strict transfer requires manifest releaseName=0.1.0-rc51'
+        [string]$releaseNameProperty.Value -cne '0.1.0-rc52') {
+        throw 'strict transfer requires manifest releaseName=0.1.0-rc52'
     }
 
     $expectedImageReferences = [ordered]@{
-        api = 'invoice-system-api:0.1.0-rc51'
-        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc51'
-        tools = 'invoice-system-tools:0.1.0-rc51'
-        web = 'invoice-system-web:0.1.0-rc51'
-        'source-agent' = 'invoice-source-agent:0.1.0-rc51'
-        'postgres-runtime' = 'invoice-postgres:0.1.0-rc51'
-        'clamav-runtime' = 'invoice-clamav:0.1.0-rc51'
-        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc51'
-        keycloak = 'invoice-keycloak:0.1.0-rc51'
+        api = 'invoice-system-api:0.1.0-rc52'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc52'
+        tools = 'invoice-system-tools:0.1.0-rc52'
+        web = 'invoice-system-web:0.1.0-rc52'
+        'source-agent' = 'invoice-source-agent:0.1.0-rc52'
+        'postgres-runtime' = 'invoice-postgres:0.1.0-rc52'
+        'clamav-runtime' = 'invoice-clamav:0.1.0-rc52'
+        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc52'
+        keycloak = 'invoice-keycloak:0.1.0-rc52'
     }
     $imagesProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'images' -Context 'manifest'
     if ($imagesProperty.Value -isnot [System.Array] -or
         $imagesProperty.Value.Count -ne $expectedImageReferences.Count) {
-        throw 'strict transfer requires the exact RC51 image inventory'
+        throw 'strict transfer requires the exact RC52 image inventory'
     }
     foreach ($expectedImage in $expectedImageReferences.GetEnumerator()) {
         $matchingRecords = @()
@@ -602,12 +637,12 @@ function Assert-TransferReadyManifest {
             }
         }
         if ($matchingRecords.Count -ne 1) {
-            throw 'strict transfer requires the exact RC51 image inventory'
+            throw 'strict transfer requires the exact RC52 image inventory'
         }
         $referenceProperty = Get-RequiredExactProperty -InputObject $matchingRecords[0] -PropertyName 'reference' -Context "manifest image $($expectedImage.Key)"
         if ($referenceProperty.Value -isnot [string] -or
             [string]$referenceProperty.Value -cne [string]$expectedImage.Value) {
-            throw 'strict transfer requires the exact RC51 image inventory'
+            throw 'strict transfer requires the exact RC52 image inventory'
         }
     }
 
@@ -948,8 +983,8 @@ function Assert-GeneratedArtifactBinding {
     if ((Get-FileSha256Lower -Path $sbomPath) -cne [string]$ImageRecord.sbom.sha256) {
         throw "manifest SBOM hash is stale for $($ImageRecord.name)"
     }
-    $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
-    $bom = Get-Content -Raw -LiteralPath $sbomPath | ConvertFrom-Json
+    $report = ConvertFrom-ReleaseJson -JsonText (Get-Content -Raw -LiteralPath $reportPath)
+    $bom = ConvertFrom-ReleaseJson -JsonText (Get-Content -Raw -LiteralPath $sbomPath)
     $summary = Assert-TrivyReportBinding -Report $report -ExpectedImageId ([string]$ImageRecord.imageId)
     Assert-CycloneDxBinding -Bom $bom -ExpectedImageId ([string]$ImageRecord.imageId) | Out-Null
     $vulnerabilitiesProperty = $ImageRecord.PSObject.Properties['vulnerabilities']

@@ -23,6 +23,7 @@ Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
+Assert-ReleasePowerShellRuntime | Out-Null
 
 $trivyImage = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969'
 $postgresBaseReference = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
@@ -98,7 +99,7 @@ function Get-ImageMetadata {
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
         throw "cannot inspect image $Reference"
     }
-    $data = $raw | ConvertFrom-Json
+    $data = ConvertFrom-ReleaseJson -JsonText $raw
     if ([string]$data.Id -notmatch '^sha256:[0-9a-f]{64}$') {
         throw "image $Reference has no immutable image ID"
     }
@@ -298,12 +299,12 @@ try {
 
             $scanCommand = @('image', '--timeout', '15m', '--skip-db-update', '--skip-java-db-update', '--no-progress', '--scanners', 'vuln', '--severity', 'HIGH,CRITICAL', '--format', 'json', $definition.Reference)
             Invoke-DockerTextCapture -Arguments (Get-TrivyArguments -Command $scanCommand) -OutputPath $reportPath -ErrorLogPath $reportLog -Description "Scanning $($definition.Reference) (serial HIGH/CRITICAL policy)"
-            $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
+            $report = ConvertFrom-ReleaseJson -JsonText (Get-Content -Raw -LiteralPath $reportPath)
             $summary = Assert-TrivyReportBinding -Report $report -ExpectedImageId $metadata.Id
 
             $sbomCommand = @('image', '--timeout', '15m', '--skip-db-update', '--skip-java-db-update', '--no-progress', '--scanners', 'vuln', '--format', 'cyclonedx', $definition.Reference)
             Invoke-DockerTextCapture -Arguments (Get-TrivyArguments -Command $sbomCommand) -OutputPath $sbomPath -ErrorLogPath $sbomLog -Description "Generating CycloneDX SBOM for $($definition.Reference)"
-            $bom = Get-Content -Raw -LiteralPath $sbomPath | ConvertFrom-Json
+            $bom = ConvertFrom-ReleaseJson -JsonText (Get-Content -Raw -LiteralPath $sbomPath)
             Assert-CycloneDxBinding -Bom $bom -ExpectedImageId $metadata.Id | Out-Null
 
             $policyStatus = 'approved'
@@ -649,7 +650,7 @@ IdP mode: `$IdPMode`
 Application image gate: `$applicationStatus`
 Production launch: `$productionStatus`
 
-PostgreSQL has no RC51 exception path. Its locally built linux/amd64 release
+PostgreSQL has no RC52 exception path. Its locally built linux/amd64 release
 image must have zero HIGH/CRITICAL findings and retain a null exception record.
 The Keycloak exception, when present, retains the Trivy finding and is bound to
 the exact 26.7.2 base digest, current derived image ID, one CVE/package/version
@@ -659,7 +660,7 @@ LoA2, mapper, output-redaction and one-secret-publication contract.
 "@
         Write-Utf8NoBom -Path (Join-Path $releaseRoot 'README.md') -Text ($readme + "`n")
 
-        $generatedManifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+        $generatedManifest = ConvertFrom-ReleaseJson -JsonText (Get-Content -Raw -LiteralPath $manifestPath)
         foreach ($record in @($generatedManifest.images)) {
             Assert-GeneratedArtifactBinding -ReleaseDirectory $releaseRoot -ImageRecord $record | Out-Null
         }

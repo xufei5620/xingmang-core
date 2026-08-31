@@ -4,7 +4,7 @@
   24/24 integration tests, real migration 0015 execution, web typecheck, and
   15 web tests. It is not deployed and has not been exercised against the real
   Sub2API/New API login endpoints or manually clicked through in a browser.
-  Production remains **NO-GO** under the RC51 release gate.
+  Production remains **NO-GO** under the RC52 release gate.
 - **branch:** `ai/claude/XM-INV-LOGIN` (based on `main`), worktree
   `K:/发票/wt-XM-INV-LOGIN`.
 - **commit:** `dffb94135915628c3cdb005de24e86e3002533b9` (the main change
@@ -278,7 +278,7 @@ npm test -- --run    # vitest: 2 files, 15 tests, all pass
   平台密码/Sub2API 2FA、首次自动绑定、8h/24h 会话与跨平台 404；管理员仍验
   OIDC/MFA/RP logout/back-channel logout，OIDC 管理员的显式绑定挑战不变。
 
-### RC51 release-candidate follow-up (2026-08-31)
+### RC52 release-candidate follow-up (2026-08-31)
 
 - RC49 已失败，后续必须按只读历史对待：`v0.1.0-rc49-signed` 固定在
   `eb7b4365d3af30241debe7b1a054b7eed8b94dcd`；
@@ -292,12 +292,18 @@ npm test -- --run    # vitest: 2 files, 15 tests, all pass
   `release-manifest.json`，其文件集与 SHA-256 由
   `docs/RC50-FAILURE-EVIDENCE-SHA256SUMS.txt` 固定。禁止移动标签、恢复该次
   gate、改写或复用 exact1。
-- 后续修复候选顺延为 RC51。严格传输仅接受精确签名标签
-  `v0.1.0-rc51-signed`，Git 查询只使用由其映射出的完整
-  `refs/tags/v0.1.0-rc51-signed`；manifest 必须精确绑定
-  `releaseName=0.1.0-rc51` 与九个 `:0.1.0-rc51` 镜像引用。
+- RC51 也已失败：`v0.1.0-rc51-signed` 固定在
+  `229ca5bea04e9fa8384fa308e342fcf5f6b6332f`；exact1 已完成九镜像构建、
+  扫描、SBOM 与 manifest，但最终 verifier 因 PowerShell 将两个 ISO 日期字符串
+  转为 `DateTime` 而失败。完整 65 文件集由
+  `docs/RC51-FAILURE-EVIDENCE-SHA256SUMS.txt` 固定，禁止移动标签、恢复或改写
+  exact1。
+- 后续修复候选顺延为 RC52。严格传输仅接受精确签名标签
+  `v0.1.0-rc52-signed`，Git 查询只使用由其映射出的完整
+  `refs/tags/v0.1.0-rc52-signed`；manifest 必须精确绑定
+  `releaseName=0.1.0-rc52` 与九个 `:0.1.0-rc52` 镜像引用。
 - Keycloak 精确 tuple、基础 digest、HIGH/CRITICAL 阈值与
-  `ignoreUnfixed=false` 均未放宽。RC51 标签、全镜像门禁、签名、canary 与生产
+  `ignoreUnfixed=false` 均未放宽。RC52 标签、全镜像门禁、签名、canary 与生产
   部署尚未执行，因此本 handoff 仍是 **NO-GO**。
 
 ## Original handoff baseline: not run at initial delivery
