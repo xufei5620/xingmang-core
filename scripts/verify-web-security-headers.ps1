@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $webNginxCompatibilityFixtureImage = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+$approvedContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors https://api.solov.cc https://api2.solov.cc https://xm.solov.cc https://xm2.solov.cc"
 if ([string]::IsNullOrWhiteSpace($Image)) { $Image = $webNginxCompatibilityFixtureImage }
 $releaseBound = -not [string]::IsNullOrWhiteSpace($ExpectedImageID)
 if ($releaseBound) {
@@ -16,10 +17,105 @@ if ($releaseBound) {
     }
 }
 
+function Get-ContainerDiagnostics {
+    param([Parameter(Mandatory)][string]$Container)
+
+    $inspectLines = @(& docker inspect $Container --format '{{json .State}}' 2>&1)
+    $inspectExit = $LASTEXITCODE
+    $inspectState = ($inspectLines | Out-String).Trim()
+    if ($inspectExit -ne 0 -or [string]::IsNullOrWhiteSpace($inspectState)) {
+        $inspectState = "unavailable (docker inspect exit $inspectExit): $inspectState"
+    }
+
+    $logLines = @(& docker logs $Container 2>&1)
+    $logsExit = $LASTEXITCODE
+    $logs = ($logLines | Out-String).TrimEnd()
+    if ($logsExit -ne 0 -or [string]::IsNullOrWhiteSpace($logs)) {
+        $logs = "unavailable (docker logs exit $logsExit): $logs"
+    }
+
+    return [pscustomobject]@{
+        InspectState = $inspectState
+        Logs = $logs
+    }
+}
+
+function Assert-ExactWebHeaderResponse {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$RawResponse
+    )
+
+    $statusMatches = [regex]::Matches(
+        $RawResponse,
+        '(?m)^[ \t]*HTTP/\d+(?:\.\d+)?[ \t]+(?<status>\d{3})(?:[ \t]+[^\r\n]*)?[ \t]*\r?$'
+    )
+    if ($statusMatches.Count -ne 1 -or
+        $statusMatches[0].Groups['status'].Value -cne '200') {
+        $observedStatuses = @($statusMatches | ForEach-Object { $_.Groups['status'].Value }) -join ','
+        throw "expected exactly one HTTP 200 status for $Path; observed: $observedStatuses"
+    }
+
+    foreach ($requiredHeaderLine in @(
+        "Content-Security-Policy: $approvedContentSecurityPolicy",
+        'X-Content-Type-Options: nosniff',
+        'Referrer-Policy: no-referrer'
+    )) {
+        $headerParts = $requiredHeaderLine.Split(':', 2)
+        $headerMatches = [regex]::Matches(
+            $RawResponse,
+            '(?im)^[ \t]*' + [regex]::Escape($headerParts[0]) + ':[ \t]*(?<value>[^\r\n]*?)[ \t]*\r?$'
+        )
+        if ($headerMatches.Count -ne 1) {
+            throw "expected exactly one $($headerParts[0]) header for $Path; observed: $($headerMatches.Count)"
+        }
+        $observedValue = $headerMatches[0].Groups['value'].Value.Trim()
+        if (-not [string]::Equals($observedValue, $headerParts[1].Trim(), [StringComparison]::Ordinal)) {
+            throw "unexpected $($headerParts[0]) header for $Path; observed: $observedValue"
+        }
+    }
+}
+
+function Invoke-ContainerWebHeaderProbe {
+    param(
+        [Parameter(Mandatory)][string]$Container,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $uri = "http://127.0.0.1:8080$Path"
+    $deadline = (Get-Date).AddSeconds(20)
+    $lastError = 'probe was not attempted'
+    do {
+        $probeLines = @(& docker exec $Container wget --spider -S -T 2 $uri 2>&1)
+        $probeExit = $LASTEXITCODE
+        $rawResponse = ($probeLines | Out-String).TrimEnd()
+        if ($probeExit -eq 0) {
+            try {
+                Assert-ExactWebHeaderResponse -Path $Path -RawResponse $rawResponse
+                return
+            } catch {
+                $lastError = "$($_.Exception.Message); raw response: $rawResponse"
+            }
+        } else {
+            $lastError = "docker exec exit $probeExit; output: $rawResponse"
+        }
+        if ((Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+    } while ((Get-Date) -lt $deadline)
+
+    $diagnostics = Get-ContainerDiagnostics -Container $Container
+    throw @"
+web verifier could not load $Path within 20 seconds
+last HTTP/exec error: $lastError
+docker inspect state: $($diagnostics.InspectState)
+docker logs:
+$($diagnostics.Logs)
+"@
+}
+
 function Get-ReleaseBoundAssetRequestPath {
     param([Parameter(Mandatory)][string]$Container)
 
-    $assetPath = (& docker exec $Container sh -ec "find /usr/share/nginx/html/assets -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' \) -print -quit" 2>$null | Out-String).Trim()
+    $assetPath = (& docker exec $Container sh -ec "find /usr/share/nginx/html/assets -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' \) -print -quit" 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or
         $assetPath -notmatch '^/usr/share/nginx/html/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)$') {
         throw 'release-bound web image has no safely addressable built JS/CSS asset'
@@ -46,49 +142,18 @@ if (-not $releaseBound) {
 $container = 'invoice-web-headers-' + ([Guid]::NewGuid().ToString('N').Substring(0, 12))
 $started = $false
 try {
-    $dockerRunArguments = @('run', '--detach', '--rm', '--name', $container, '--publish', '127.0.0.1::8080')
+    $dockerRunArguments = @('run', '--detach', '--name', $container)
     $dockerRunArguments += $mountArguments
     $dockerRunArguments += $Image
     & docker @dockerRunArguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'failed to start web header verifier' }
     $started = $true
-    $binding = (docker port $container '8080/tcp').Trim()
-    if ($LASTEXITCODE -ne 0 -or $binding -notmatch ':(\d+)$') {
-        throw "unable to resolve web verifier port: $binding"
-    }
-    $port = [int]$Matches[1]
+
+    Invoke-ContainerWebHeaderProbe -Container $container -Path '/'
     if ($releaseBound) {
         $assetRequestPath = Get-ReleaseBoundAssetRequestPath -Container $container
     }
-    $responses = @()
-    foreach ($path in @('/', $assetRequestPath)) {
-        $response = $null
-        $deadline = (Get-Date).AddSeconds(20)
-        do {
-            try {
-                $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port$path" -Method Head -TimeoutSec 2
-            } catch {
-                Start-Sleep -Milliseconds 250
-            }
-        } while ($null -eq $response -and (Get-Date) -lt $deadline)
-        if ($null -eq $response -or $response.StatusCode -ne 200) {
-            throw "web verifier could not load $path"
-        }
-        $responses += $response
-    }
-    foreach ($response in $responses) {
-        $csp = [string]$response.Headers['Content-Security-Policy']
-        if ($csp -notmatch "default-src 'self'" -or
-            $csp -notmatch "object-src 'none'" -or
-            $csp -notmatch 'https://api\.solov\.cc' -or
-            $csp -notmatch 'https://xm\.solov\.cc') {
-            throw 'web response is missing the approved CSP'
-        }
-        if ([string]$response.Headers['X-Content-Type-Options'] -ne 'nosniff' -or
-            [string]$response.Headers['Referrer-Policy'] -ne 'no-referrer') {
-            throw 'web response is missing mandatory security headers'
-        }
-    }
+    Invoke-ContainerWebHeaderProbe -Container $container -Path $assetRequestPath
 } finally {
     if ($started) { docker rm --force $container *> $null }
 }

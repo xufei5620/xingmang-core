@@ -1624,6 +1624,34 @@ function Assert-RC51RuntimeAndBackupBindings {
             $Source -match '(?s)docker run --detach --rm.*--mount') {
             throw 'release-bound web header mode can still include an unconditional host bind mount'
         }
+        if ($Source -match "'--publish'" -or
+            $Source.Contains('Invoke-WebRequest', [StringComparison]::Ordinal) -or
+            $Source -match '(?m)^\s*\$binding\s*=\s*\(docker port ') {
+            throw 'web header verification still depends on Docker Desktop host port publishing'
+        }
+        if ($Source -notmatch '(?s)function Invoke-ContainerWebHeaderProbe.*docker exec \$Container wget --spider -S -T 2 \$uri' -or
+            $Source -notmatch '\$statusMatches\.Count -ne 1' -or
+            -not $Source.Contains("`$statusMatches[0].Groups['status'].Value -cne '200'", [StringComparison]::Ordinal)) {
+            throw 'web header verification does not require one container-local HTTP 200 response'
+        }
+        foreach ($exactHeaderContract in @(
+            "Content-Security-Policy: `$approvedContentSecurityPolicy",
+            'X-Content-Type-Options: nosniff',
+            'Referrer-Policy: no-referrer'
+        )) {
+            if (-not $Source.Contains($exactHeaderContract, [StringComparison]::Ordinal)) {
+                throw "web header verification does not bind the exact response header: $exactHeaderContract"
+            }
+        }
+        foreach ($diagnosticContract in @(
+            'last HTTP/exec error:',
+            'docker inspect state:',
+            'docker logs:'
+        )) {
+            if (-not $Source.Contains($diagnosticContract, [StringComparison]::Ordinal)) {
+                throw "web header verification timeout omits required diagnostics: $diagnosticContract"
+            }
+        }
     }
 
     Assert-WebSecurityHeaderVerifierModeContract -Source $headerVerifier
