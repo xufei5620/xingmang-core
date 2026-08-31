@@ -129,11 +129,27 @@ function Assert-PostgresGosuFindingScope {
     if ($Summary.Total -lt 1) {
         throw 'PostgreSQL exception cannot be used when there are no findings to review'
     }
+    $reviewedNoFixTuples = @()
     foreach ($finding in @($Summary.Findings)) {
-        if ([string]$finding.Target -cne 'usr/local/bin/gosu' -or
-            [string]$finding.PackageName -cne 'stdlib' -or
-            [string]$finding.InstalledVersion -cne 'v1.24.6') {
-            throw "PostgreSQL exception cannot cover $($finding.Target):$($finding.PackageName)@$($finding.InstalledVersion)"
+        if (-not [string]::IsNullOrEmpty([string]$finding.FixedVersion)) {
+            throw "PostgreSQL exception cannot cover fixable finding $($finding.VulnerabilityID)@$($finding.FixedVersion)"
+        }
+        if ([string]$finding.Status -cne 'affected') {
+            throw "PostgreSQL exception cannot cover finding with unreviewed no-fix status '$($finding.Status)'"
+        }
+        $matchingTuple = @($reviewedNoFixTuples | Where-Object {
+            [string]$_.Target -ceq [string]$finding.Target -and
+            [string]$_.Class -ceq [string]$finding.Class -and
+            [string]$_.Type -ceq [string]$finding.Type -and
+            [string]$_.VulnerabilityID -ceq [string]$finding.VulnerabilityID -and
+            [string]$_.PackageName -ceq [string]$finding.PackageName -and
+            [string]$_.InstalledVersion -ceq [string]$finding.InstalledVersion -and
+            [string]$_.FixedVersion -ceq [string]$finding.FixedVersion -and
+            [string]$_.Severity -ceq [string]$finding.Severity -and
+            [string]$_.Status -ceq [string]$finding.Status
+        })
+        if ($matchingTuple.Count -ne 1) {
+            throw "PostgreSQL exception has no approved RC49 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
         }
     }
     return $true
@@ -163,11 +179,46 @@ function Assert-KeycloakVendorRejectedCveScope {
         [string]$finding.Type -cne 'redhat' -or
         [string]$finding.VulnerabilityID -cne 'CVE-2026-22020' -or
         [string]$finding.PackageName -cne 'java-21-openjdk-headless' -or
-        [string]$finding.InstalledVersion -cne '1:21.0.12.0.8-1.2.el9' -or
+        [string]$finding.InstalledVersion -cne '1:21.0.12.1.1-1.2.el9' -or
         -not [string]::IsNullOrEmpty([string]$finding.FixedVersion) -or
         [string]$finding.Severity -cne 'HIGH' -or
         [string]$finding.Status -cne 'affected') {
         throw 'Keycloak finding is outside the exact CVE/package/version/status vendor-rejection scope'
+    }
+    return $true
+}
+
+function Assert-ExceptionReviewContract {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Rationale,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ReviewedAt,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ReviewDueAt,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$CurrentTime
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Rationale)) {
+        throw 'exception review requires a non-empty rationale'
+    }
+
+    $format = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    $reviewed = [DateTimeOffset]::MinValue
+    $due = [DateTimeOffset]::MinValue
+    $current = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParseExact($ReviewedAt, $format, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$reviewed)) {
+        throw 'exception review has an invalid reviewedAt timestamp'
+    }
+    if (-not [DateTimeOffset]::TryParseExact($ReviewDueAt, $format, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$due)) {
+        throw 'exception review has an invalid reviewDueAt timestamp'
+    }
+    if (-not [DateTimeOffset]::TryParseExact($CurrentTime, $format, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$current)) {
+        throw 'exception review has an invalid current timestamp'
+    }
+    if ($due -le $reviewed) {
+        throw 'exception review due timestamp must be after reviewedAt'
+    }
+    if ($current -gt $due) {
+        throw 'exception review has expired'
     }
     return $true
 }

@@ -170,34 +170,97 @@ $postgresReference = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb8998
 $postgresID = 'sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
 $postgresReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
 $postgresSummary = Assert-TrivyReportBinding -Report $postgresReport -ExpectedImageId $postgresID
-Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null
-
-$badPostgresReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
-$badPostgresReport.Results[0].Target = 'usr/local/bin/other'
-$badPostgresSummary = Get-TrivyFindingSummary -Report $badPostgresReport
 $rejected = $false
-try { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $badPostgresSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } catch { $rejected = $true }
-if (-not $rejected) { throw 'PostgreSQL exception generalized beyond exact gosu target'
+try { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'PostgreSQL exception accepted the RC48 gosu finding with a fixed version' }
+
+function Assert-PostgresFixtureRejected {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Mutate,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    $report = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
+    & $Mutate $report
+    $summary = Get-TrivyFindingSummary -Report $report
+    $rejected = $false
+    try { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $summary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw $Message }
 }
+
+Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].VulnerabilityID = 'CVE-DRIFT' } -Message 'PostgreSQL exception generalized beyond exact CVE'
+Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Class = 'os-pkgs' } -Message 'PostgreSQL exception generalized beyond exact class'
+Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Type = 'library' } -Message 'PostgreSQL exception generalized beyond exact type'
+Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].InstalledVersion = 'v1.24.5' } -Message 'PostgreSQL exception generalized beyond exact installed version'
+Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0] | Add-Member -NotePropertyName Status -NotePropertyValue 'not_affected' } -Message 'PostgreSQL exception generalized beyond explicitly reviewed no-fix status'
+Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].FixedVersion = 'v1.24.8' } -Message 'PostgreSQL exception generalized beyond fixed-version drift'
 
 $rejected = $false
 try { Assert-PostgresGosuFindingScope -ImageReference 'postgres:latest' -ImageId $postgresID -Summary $postgresSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } catch { $rejected = $true }
 if (-not $rejected) { throw 'PostgreSQL exception generalized beyond exact digest' }
 
-$keycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec'
+$keycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
 $keycloakID = 'sha256:' + ('c' * 64)
 $keycloakReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'keycloak-vendor-rejected-cve-report.json') | ConvertFrom-Json
 $keycloakSummary = Assert-TrivyReportBinding -Report $keycloakReport -ExpectedImageId $keycloakID
 Assert-KeycloakVendorRejectedCveScope -ImageReference 'invoice-keycloak:fixture' -ImageId $keycloakID -BaseReference $keycloakBase -Summary $keycloakSummary -ExpectedBaseReference $keycloakBase | Out-Null
-$badKeycloakReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'keycloak-vendor-rejected-cve-report.json') | ConvertFrom-Json
-$badKeycloakReport.Results[0].Vulnerabilities[0].PkgName = 'different-package'
-$badKeycloakSummary = Get-TrivyFindingSummary -Report $badKeycloakReport
+
+function Assert-KeycloakFixtureRejected {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Mutate,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    $report = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'keycloak-vendor-rejected-cve-report.json') | ConvertFrom-Json
+    & $Mutate $report
+    $summary = Get-TrivyFindingSummary -Report $report
+    $rejected = $false
+    try { Assert-KeycloakVendorRejectedCveScope -ImageReference 'invoice-keycloak:fixture' -ImageId $keycloakID -BaseReference $keycloakBase -Summary $summary -ExpectedBaseReference $keycloakBase | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw $Message }
+}
+
 $rejected = $false
-try { Assert-KeycloakVendorRejectedCveScope -ImageReference 'invoice-keycloak:fixture' -ImageId $keycloakID -BaseReference $keycloakBase -Summary $badKeycloakSummary -ExpectedBaseReference $keycloakBase | Out-Null } catch { $rejected = $true }
-if (-not $rejected) { throw 'Keycloak vendor-rejection exception generalized beyond exact package' }
+try { Assert-KeycloakVendorRejectedCveScope -ImageReference 'invoice-keycloak:fixture' -ImageId ('sha256:' + ('d' * 64)) -BaseReference $keycloakBase -Summary $keycloakSummary -ExpectedBaseReference $keycloakBase | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'Keycloak vendor-rejection exception generalized beyond the derived image ID' }
 $rejected = $false
 try { Assert-KeycloakVendorRejectedCveScope -ImageReference 'invoice-keycloak:fixture' -ImageId $keycloakID -BaseReference 'quay.io/keycloak/keycloak:latest' -Summary $keycloakSummary -ExpectedBaseReference $keycloakBase | Out-Null } catch { $rejected = $true }
 if (-not $rejected) { throw 'Keycloak vendor-rejection exception generalized beyond exact base digest' }
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].VulnerabilityID = 'CVE-DRIFT' } -Message 'Keycloak vendor-rejection exception generalized beyond exact CVE'
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].PkgName = 'different-package' } -Message 'Keycloak vendor-rejection exception generalized beyond exact package'
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].InstalledVersion = '1:21.0.12.0.8-1.2.el9' } -Message 'Keycloak vendor-rejection exception generalized beyond exact installed version'
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].FixedVersion = '1:21.0.12.2.1-1.2.el9' } -Message 'Keycloak vendor-rejection exception generalized beyond fixed-version drift'
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].Severity = 'CRITICAL' } -Message 'Keycloak vendor-rejection exception generalized beyond exact severity'
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].Status = 'not_affected' } -Message 'Keycloak vendor-rejection exception generalized beyond exact status'
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Class = 'lang-pkgs' } -Message 'Keycloak vendor-rejection exception generalized beyond exact class'
+Assert-KeycloakFixtureRejected -Mutate { param($report) $report.Results[0].Type = 'library' } -Message 'Keycloak vendor-rejection exception generalized beyond exact type'
+
+$reviewedAt = '2026-08-31T00:00:00Z'
+$reviewDueAt = '2026-09-30T00:00:00Z'
+$reviewNow = '2026-08-31T12:00:00Z'
+$reviewRationale = 'Red Hat rejected the CVE for the retained OpenJDK system-libpng runtime.'
+Assert-ExceptionReviewContract -Rationale $reviewRationale -ReviewedAt $reviewedAt -ReviewDueAt $reviewDueAt -CurrentTime $reviewNow | Out-Null
+
+function Assert-ExceptionReviewRejected {
+    param(
+        [string]$Rationale = $reviewRationale,
+        [string]$ReviewedAt = $reviewedAt,
+        [string]$ReviewDueAt = $reviewDueAt,
+        [string]$CurrentTime = $reviewNow,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    $rejected = $false
+    try { Assert-ExceptionReviewContract -Rationale $Rationale -ReviewedAt $ReviewedAt -ReviewDueAt $ReviewDueAt -CurrentTime $CurrentTime | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw $Message }
+}
+
+Assert-ExceptionReviewRejected -Rationale '' -Message 'exception review accepted missing rationale'
+Assert-ExceptionReviewRejected -ReviewedAt '' -Message 'exception review accepted missing reviewedAt'
+Assert-ExceptionReviewRejected -ReviewDueAt '' -Message 'exception review accepted missing reviewDueAt'
+Assert-ExceptionReviewRejected -ReviewedAt '2026/08/31 00:00:00' -Message 'exception review accepted invalid reviewedAt timestamp'
+Assert-ExceptionReviewRejected -ReviewDueAt 'not-a-timestamp' -Message 'exception review accepted invalid reviewDueAt timestamp'
+Assert-ExceptionReviewRejected -ReviewDueAt $reviewedAt -Message 'exception review accepted due-at equal to reviewed-at'
+Assert-ExceptionReviewRejected -ReviewDueAt '2026-08-31T00:00:01Z' -CurrentTime $reviewNow -Message 'exception review accepted an expired due date'
 
 $fixtureDBTime = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss +0000') + ' UTC'
 $versionProof = "Go: go1.25.7`nScanner: govulncheck@v1.7.0`nDB: https://vuln.go.dev`nDB updated: $fixtureDBTime`n"
@@ -238,7 +301,7 @@ if ($keycloakRejectedDecision.Status -cne 'image_rejected' -or
 $gateSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'release-image-gate.ps1')
 if ($gateSource -notmatch '(?s)\[string\]\s*\$IdPMode\s*=\s*''keycloak''' -or
     $gateSource -notmatch "Policy\s+'keycloak-26\.7\.2-exact-vendor-rejection'" -or
-    $gateSource -notmatch [regex]::Escape('quay.io/keycloak/keycloak:26.7.2@sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec')) {
+    $gateSource -notmatch [regex]::Escape('quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067')) {
     throw 'release image gate no longer defaults to exact Keycloak 26.7.2 scan mode'
 }
 if ($gateSource -match '(?m)verify\.ps1.*-SkipPostgres') {

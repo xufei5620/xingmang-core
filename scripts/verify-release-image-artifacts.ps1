@@ -158,7 +158,7 @@ if ([int]$postgres[0].vulnerabilities.total -gt 0) {
 $keycloak = @($records | Where-Object name -eq 'keycloak')
 switch ($idpMode) {
     'keycloak' {
-        $expectedKeycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec'
+        $expectedKeycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
         if ($keycloak.Count -ne 1 -or [string]$keycloak[0].policy -cne 'keycloak-26.7.2-exact-vendor-rejection' -or
             [string]$keycloak[0].baseReference -cne $expectedKeycloakBase -or
             [string]$manifest.decisions.productionLaunch -cne 'blocked') {
@@ -205,18 +205,38 @@ switch ($idpMode) {
             $keycloakReport = Get-Content -Raw -LiteralPath $keycloakReportPath | ConvertFrom-Json
             $keycloakSummary = Assert-TrivyReportBinding -Report $keycloakReport -ExpectedImageId ([string]$keycloak[0].imageId)
             Assert-KeycloakVendorRejectedCveScope -ImageReference ([string]$keycloak[0].reference) -ImageId ([string]$keycloak[0].imageId) -BaseReference ([string]$keycloak[0].baseReference) -Summary $keycloakSummary -ExpectedBaseReference $expectedKeycloakBase | Out-Null
+            $expectedKeycloakTarget = "$([string]$keycloak[0].reference) (redhat 9.8)"
+            $expectedRationale = 'Red Hat officially rejected the CVE; AWS records that it affects Oracle proprietary bundled libpng while OpenJDK distributions using system libpng are not affected.'
+            $expectedReviewedAt = '2026-08-31T00:00:00Z'
+            $expectedReviewDueAt = '2026-09-30T00:00:00Z'
             if ([string]$keycloak[0].policyStatus -ceq 'failed') {
                 if ([string]$manifest.idp.status -cne 'image_rejected') { throw 'failed Keycloak runtime smoke was not fail-closed' }
             } elseif ([string]$keycloak[0].policyStatus -cne 'approved-by-exact-vendor-rejection' -or -not $runtimeSmokePassed -or -not $realmProvisioningPassed -or
+                [string]$keycloak[0].exception.scope -cne 'exact-keycloak-26.7.2-base-derived-image-and-single-finding-only' -or
+                [string]$keycloak[0].exception.baseReference -cne $expectedKeycloakBase -or
                 [string]$keycloak[0].exception.derivedImageId -cne [string]$keycloak[0].imageId -or
+                [string]$keycloak[0].exception.target -cne $expectedKeycloakTarget -or
                 [string]$keycloak[0].exception.vulnerabilityId -cne 'CVE-2026-22020' -or
                 [string]$keycloak[0].exception.package -cne 'java-21-openjdk-headless' -or
-                [string]$keycloak[0].exception.installedVersion -cne '1:21.0.12.0.8-1.2.el9' -or
+                [string]$keycloak[0].exception.installedVersion -cne '1:21.0.12.1.1-1.2.el9' -or
+                [string]$keycloak[0].exception.fixedVersion -cne '' -or
+                [string]$keycloak[0].exception.trivyClass -cne 'os-pkgs' -or
+                [string]$keycloak[0].exception.trivyType -cne 'redhat' -or
+                [string]$keycloak[0].exception.severity -cne 'HIGH' -or
+                [string]$keycloak[0].exception.trivyStatus -cne 'affected' -or
+                [string]$keycloak[0].exception.disposition -cne 'vendor_rejected_not_affected' -or
                 [string]$keycloak[0].exception.redHatEvidence -cne 'https://bugzilla.redhat.com/show_bug.cgi?id=2460045#c11' -or
                 [string]$keycloak[0].exception.awsEvidence -cne 'https://explore.alas.aws.amazon.com/CVE-2026-22020.html' -or
+                [string]$keycloak[0].exception.rationale -cne $expectedRationale -or
+                [string]$keycloak[0].exception.reviewedAt -cne $expectedReviewedAt -or
+                [string]$keycloak[0].exception.reviewDueAt -cne $expectedReviewDueAt -or
+                [string]$keycloak[0].exception.runtimePruningProof -cne [string]$keycloak[0].runtimeProof.path -or
                 [string]$manifest.idp.status -cne 'image_approved_pending_canary' -or
                 [string]$manifest.idp.productionCanary -cne 'pending') {
                 throw 'Keycloak vendor-rejection exception or pending canary binding is stale'
+            }
+            else {
+                Assert-ExceptionReviewContract -Rationale ([string]$keycloak[0].exception.rationale) -ReviewedAt ([string]$keycloak[0].exception.reviewedAt) -ReviewDueAt ([string]$keycloak[0].exception.reviewDueAt) -CurrentTime ([DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)) | Out-Null
             }
         } elseif ([string]$keycloak[0].policyStatus -cne 'failed' -or [string]$manifest.idp.status -cne 'image_rejected') {
             throw 'Keycloak findings outside the single exact vendor-rejection scope were incorrectly approved'

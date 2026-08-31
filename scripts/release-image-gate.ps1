@@ -30,7 +30,10 @@ $postgresImageID = 'sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5
 $postgresGosuSha256 = '52c8749d0142edd234e9d6bd5237dff2d81e71f43537e2f4f66f75dd4b243dd0'
 $clamavReference = 'clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8'
 $nginxReference = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
-$keycloakBaseReference = 'quay.io/keycloak/keycloak:26.7.2@sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec'
+$keycloakBaseReference = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
+$keycloakExceptionRationale = 'Red Hat officially rejected the CVE; AWS records that it affects Oracle proprietary bundled libpng while OpenJDK distributions using system libpng are not affected.'
+$keycloakExceptionReviewedAt = '2026-08-31T00:00:00Z'
+$keycloakExceptionReviewDueAt = '2026-09-30T00:00:00Z'
 
 function Write-Utf8NoBom {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyString()][string]$Text)
@@ -347,6 +350,7 @@ try {
                         $policyReason = 'zero_high_or_critical_findings'
                     } else {
                         Assert-KeycloakVendorRejectedCveScope -ImageReference $definition.Reference -ImageId $metadata.Id -BaseReference $definition.BaseReference -Summary $summary -ExpectedBaseReference $keycloakBaseReference | Out-Null
+                        Assert-ExceptionReviewContract -Rationale $keycloakExceptionRationale -ReviewedAt $keycloakExceptionReviewedAt -ReviewDueAt $keycloakExceptionReviewDueAt -CurrentTime ([DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)) | Out-Null
                         $policyStatus = 'approved-by-exact-vendor-rejection'
                         $policyReason = 'exact_redhat_openjdk_libpng_false_positive_only'
                         $exception = [ordered]@{
@@ -356,14 +360,18 @@ try {
                             target = "$($definition.Reference) (redhat 9.8)"
                             vulnerabilityId = 'CVE-2026-22020'
                             package = 'java-21-openjdk-headless'
-                            installedVersion = '1:21.0.12.0.8-1.2.el9'
+                            installedVersion = '1:21.0.12.1.1-1.2.el9'
                             fixedVersion = ''
+                            trivyClass = 'os-pkgs'
+                            trivyType = 'redhat'
                             trivyStatus = 'affected'
                             severity = 'HIGH'
                             disposition = 'vendor_rejected_not_affected'
                             redHatEvidence = 'https://bugzilla.redhat.com/show_bug.cgi?id=2460045#c11'
                             awsEvidence = 'https://explore.alas.aws.amazon.com/CVE-2026-22020.html'
-                            rationale = 'Red Hat officially rejected the CVE; AWS records that it affects Oracle proprietary bundled libpng while OpenJDK distributions using system libpng are not affected.'
+                            rationale = $keycloakExceptionRationale
+                            reviewedAt = $keycloakExceptionReviewedAt
+                            reviewDueAt = $keycloakExceptionReviewDueAt
                             runtimePruningProof = 'proof/keycloak-runtime-pruning.txt'
                         }
                     }
