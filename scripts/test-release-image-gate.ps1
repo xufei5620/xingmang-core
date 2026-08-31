@@ -52,7 +52,7 @@ function ConvertTo-NormalizedLfText {
     return $Text.Replace("`r`n", "`n").Replace("`r", "`n")
 }
 
-function Assert-ExactNormalizedContent {
+function Assert-ExactNormalizedText {
     param(
         [Parameter(Mandatory)][string]$Actual,
         [Parameter(Mandatory)][string]$Expected,
@@ -78,7 +78,7 @@ function Get-ComposeServiceBlock {
     return $match.Value
 }
 
-function Assert-ComposeServiceImageAndPullPolicy {
+function Assert-ComposeServiceImage {
     param(
         [Parameter(Mandatory)][string]$ComposeText,
         [Parameter(Mandatory)][string]$Service,
@@ -235,8 +235,8 @@ function Assert-Task2MutationRejected {
 
 foreach ($requiredTask2Helper in @(
     'Assert-BackendRuntimeOpenSslPins',
-    'Assert-ExactNormalizedContent',
-    'Assert-ComposeServiceImageAndPullPolicy'
+    'Assert-ExactNormalizedText',
+    'Assert-ComposeServiceImage'
 )) {
     if (-not (Get-Command -Name $requiredTask2Helper -ErrorAction SilentlyContinue)) {
         throw "RC49 Task 2 focused static checker is missing: $requiredTask2Helper"
@@ -276,10 +276,10 @@ golang.org/x/sys v0.1.0 h1:kunALQeHf1/185U1i0GOB/fy1IPRDDpuoOOqRReG57U=
 golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 '@ + "`n"
 Assert-Task2MutationRejected -Action {
-    Assert-ExactNormalizedContent -Actual ($postgresGoMod + "`nreplace github.com/tianon/gosu => ./unexpected") -Expected $expectedGosuGoMod -Label 'gosu go.mod'
+    Assert-ExactNormalizedText -Actual ($postgresGoMod + "`nreplace github.com/tianon/gosu => ./unexpected") -Expected $expectedGosuGoMod -Label 'gosu go.mod'
 } -Message 'gosu go.mod accepted an extra replace directive'
 Assert-Task2MutationRejected -Action {
-    Assert-ExactNormalizedContent -Actual ($postgresGoSum + "`nexample.invalid/extra v0.0.0 h1:unexpected=") -Expected $expectedGosuGoSum -Label 'gosu go.sum'
+    Assert-ExactNormalizedText -Actual ($postgresGoSum + "`nexample.invalid/extra v0.0.0 h1:unexpected=") -Expected $expectedGosuGoSum -Label 'gosu go.sum'
 } -Message 'gosu go.sum accepted an extra checksum'
 
 $productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.prod.yml')
@@ -289,7 +289,7 @@ $localIngestImage = 'invoice-ingest-proxy:${INVOICE_IMAGE_TAG:?set the exact rev
 $swappedProductionCompose = $productionCompose -replace '(?m)(^  postgres:\r?\n    image: )invoice-postgres:\$\{INVOICE_IMAGE_TAG:\?set the exact reviewed invoice release tag\}', ('${1}' + $localClamavImage)
 $swappedProductionCompose = $swappedProductionCompose -replace '(?m)(^  clamav:\r?\n    image: )invoice-clamav:\$\{INVOICE_IMAGE_TAG:\?set the exact reviewed invoice release tag\}', ('${1}' + $localPostgresImage)
 Assert-Task2MutationRejected -Action {
-    Assert-ComposeServiceImageAndPullPolicy -ComposeText $swappedProductionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
+    Assert-ComposeServiceImage -ComposeText $swappedProductionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
 } -Message 'Compose image-count checker accepted a postgres/clamav service-image swap'
 
 Assert-BackendRuntimeOpenSslPins -DockerfileText $backendDockerfile -FixedPackages $fixedAlpinePackages
@@ -311,8 +311,8 @@ if (-not $postgresDockerfile.Contains($goBuilderReference) -or
     $postgresDockerfile.Contains('go mod download -mod=readonly')) {
     throw 'RC49 PostgreSQL gosu rebuild is not pinned, platform-gated, and read-only at build time'
 }
-Assert-ExactNormalizedContent -Actual $postgresGoMod -Expected $expectedGosuGoMod -Label 'RC49 PostgreSQL gosu go.mod'
-Assert-ExactNormalizedContent -Actual $postgresGoSum -Expected $expectedGosuGoSum -Label 'RC49 PostgreSQL gosu go.sum'
+Assert-ExactNormalizedText -Actual $postgresGoMod -Expected $expectedGosuGoMod -Label 'RC49 PostgreSQL gosu go.mod'
+Assert-ExactNormalizedText -Actual $postgresGoSum -Expected $expectedGosuGoSum -Label 'RC49 PostgreSQL gosu go.sum'
 if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
     -not $clamavDockerfile.Contains('ClamAV 1.4.5') -or
     -not $ingestDockerfile.Contains($nginxBaseReference) -or
@@ -328,11 +328,11 @@ if ($productionComposeText -match '(?m)^\s+image:\s+postgres:18-alpine@sha256:d3
     $productionComposeText -match '(?m)^\s+image:\s+nginx:1\.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46\s*$') {
     throw 'RC49 production Compose retains external PostgreSQL, ClamAV, or ingest runtime image references'
 }
-Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
-Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'permissions' -ExpectedImage $localPostgresImage
-Assert-ComposeServiceImageAndPullPolicy -ComposeText $idpCompose -Service 'keycloak-postgres' -ExpectedImage $localPostgresImage
-Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'clamav' -ExpectedImage $localClamavImage
-Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'ingest-proxy' -ExpectedImage $localIngestImage
+Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
+Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'permissions' -ExpectedImage $localPostgresImage
+Assert-ComposeServiceImage -ComposeText $idpCompose -Service 'keycloak-postgres' -ExpectedImage $localPostgresImage
+Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'clamav' -ExpectedImage $localClamavImage
+Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'ingest-proxy' -ExpectedImage $localIngestImage
 
 $bridgeMatrixVerifier = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
 if ($bridgeMatrixVerifier -notmatch '\$maxAttempts = 5' -or
