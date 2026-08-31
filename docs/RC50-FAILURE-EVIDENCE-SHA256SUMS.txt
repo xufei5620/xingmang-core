@@ -1,0 +1,6 @@
+# RC50 failed-candidate local evidence integrity anchor
+# Captured 2026-08-31 after v0.1.0-rc50-signed was fixed at d08b3a2.
+# The ignored exact1 directory is not made physically read-only by this file.
+# It must be treated as read-only historical evidence. Any file-set or hash
+# drift fails the dedicated RC51 recovery evidence verifier.
+4fba2acb93a2a8fc3cdf431e8f9cdd4c191f0d73a49930e8ec3e5109b5a432a7  release/0.1.0-rc50-exact1/logs/source-verification.log

@@ -1,9 +1,10 @@
 # XM-INV-LOGIN: platform-password login for the invoice-system user app
 
-- **status:** implemented, self-reviewed, and passing every gate that can run
-  without a live Sub2API/New API endpoint or a real PostgreSQL instance. Not
-  yet deployed or exercised against real upstream endpoints or a real
-  database. Not yet manually clicked through in a browser.
+- **status:** implemented and accepted locally, including PostgreSQL 18,
+  24/24 integration tests, real migration 0015 execution, web typecheck, and
+  15 web tests. It is not deployed and has not been exercised against the real
+  Sub2API/New API login endpoints or manually clicked through in a browser.
+  Production remains **NO-GO** under the RC51 release gate.
 - **branch:** `ai/claude/XM-INV-LOGIN` (based on `main`), worktree
   `K:/发票/wt-XM-INV-LOGIN`.
 - **commit:** `dffb94135915628c3cdb005de24e86e3002533b9` (the main change
@@ -277,7 +278,7 @@ npm test -- --run    # vitest: 2 files, 15 tests, all pass
   平台密码/Sub2API 2FA、首次自动绑定、8h/24h 会话与跨平台 404；管理员仍验
   OIDC/MFA/RP logout/back-channel logout，OIDC 管理员的显式绑定挑战不变。
 
-### RC50 release-candidate follow-up (2026-08-31)
+### RC51 release-candidate follow-up (2026-08-31)
 
 - RC49 已失败，后续必须按只读历史对待：`v0.1.0-rc49-signed` 固定在
   `eb7b4365d3af30241debe7b1a054b7eed8b94dcd`；
@@ -285,12 +286,18 @@ npm test -- --run    # vitest: 2 files, 15 tests, all pass
   `release/0.1.0-rc49-exact3` 均为没有 `release-manifest.json` 的不完整失败目录，
   不具备传输或部署授权，禁止改写、复用、改名或冒充新候选证据；文件集与
   SHA-256 由 `docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt` 固定。
-- 后续修复候选顺延为 RC50。严格传输仅接受精确签名标签
-  `v0.1.0-rc50-signed`，Git 查询只使用由其映射出的完整
-  `refs/tags/v0.1.0-rc50-signed`；manifest 必须精确绑定
-  `releaseName=0.1.0-rc50` 与九个 `:0.1.0-rc50` 镜像引用。
+- RC50 也已失败：`v0.1.0-rc50-signed` 固定在
+  `d08b3a2e40e55f7f600759c250f45b16b82bd0e1`；
+  `release/0.1.0-rc50-exact1` 在 source verification 期间中断且没有
+  `release-manifest.json`，其文件集与 SHA-256 由
+  `docs/RC50-FAILURE-EVIDENCE-SHA256SUMS.txt` 固定。禁止移动标签、恢复该次
+  gate、改写或复用 exact1。
+- 后续修复候选顺延为 RC51。严格传输仅接受精确签名标签
+  `v0.1.0-rc51-signed`，Git 查询只使用由其映射出的完整
+  `refs/tags/v0.1.0-rc51-signed`；manifest 必须精确绑定
+  `releaseName=0.1.0-rc51` 与九个 `:0.1.0-rc51` 镜像引用。
 - Keycloak 精确 tuple、基础 digest、HIGH/CRITICAL 阈值与
-  `ignoreUnfixed=false` 均未放宽。RC50 标签、全镜像门禁、签名、canary 与生产
+  `ignoreUnfixed=false` 均未放宽。RC51 标签、全镜像门禁、签名、canary 与生产
   部署尚未执行，因此本 handoff 仍是 **NO-GO**。
 
 ## Original handoff baseline: not run at initial delivery

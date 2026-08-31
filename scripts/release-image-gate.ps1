@@ -571,10 +571,9 @@ try {
         }
         $idpDecision = Get-IdpGateDecision -Mode $IdPMode -KeycloakImageApproved $keycloakImageApproved
 
-        $gitHead = $null
-        $headOutput = (& git rev-parse --verify HEAD 2>$null | Out-String).Trim()
-        if ($LASTEXITCODE -eq 0 -and $headOutput -match '^[0-9a-f]{40}$') { $gitHead = $headOutput }
-        $gitDirty = @(& git status --porcelain=v1).Count -ne 0
+        $gitProvenance = Get-ReleaseGitProvenance -RepositoryRoot $projectRoot
+        $gitHead = $gitProvenance.GitHead
+        $gitDirty = $gitProvenance.GitDirty
         $productionReasons = [Collections.Generic.List[string]]::new()
         foreach ($failure in $applicationFailures) { $productionReasons.Add($failure) }
         $productionReasons.Add($idpDecision.BlockReason)
@@ -650,7 +649,7 @@ IdP mode: `$IdPMode`
 Application image gate: `$applicationStatus`
 Production launch: `$productionStatus`
 
-PostgreSQL has no RC50 exception path. Its locally built linux/amd64 release
+PostgreSQL has no RC51 exception path. Its locally built linux/amd64 release
 image must have zero HIGH/CRITICAL findings and retain a null exception record.
 The Keycloak exception, when present, retains the Trivy finding and is bound to
 the exact 26.7.2 base digest, current derived image ID, one CVE/package/version
@@ -673,6 +672,14 @@ LoA2, mapper, output-redaction and one-secret-publication contract.
         Write-Host "Application image gate: $applicationStatus"
         Write-Host "Production launch: $productionStatus"
         if ($productionStatus -ne 'approved') {
+            $blockedExitCode = Get-ReleaseGateBlockedExitCode `
+                -ApplicationStatus $applicationStatus `
+                -ProductionStatus $productionStatus `
+                -Reasons @($productionReasons)
+            if ($blockedExitCode -eq 42) {
+                Write-Host 'Release image gate passed image policy and remains blocked only for the production canary.'
+                exit 42
+            }
             throw "release remains blocked: $($productionReasons -join '; ')"
         }
         Write-Host 'Release image gate passed.'

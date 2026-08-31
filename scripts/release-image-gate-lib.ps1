@@ -208,7 +208,7 @@ function Assert-PostgresGosuFindingScope {
             [string]$_.Status -ceq [string]$finding.Status
         })
         if ($matchingTuple.Count -ne 1) {
-            throw "PostgreSQL exception has no approved RC50 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
+            throw "PostgreSQL exception has no approved RC51 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
         }
     }
     return $true
@@ -394,43 +394,156 @@ function Assert-JsonHasNoDuplicateProperties {
     return $true
 }
 
+function Assert-FailedReleaseEvidenceAnchor {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$AnchorText,
+        [Parameter(Mandatory)][string]$ReleaseName,
+        [Parameter(Mandatory)][int[]]$AllowedExactNumbers,
+        [Parameter(Mandatory)][string]$CandidateLabel
+    )
+
+    $allowedNumbers = [Collections.Generic.HashSet[int]]::new()
+    foreach ($number in $AllowedExactNumbers) {
+        if ($number -lt 1 -or -not $allowedNumbers.Add($number)) {
+            throw "$CandidateLabel failure evidence has an invalid exact directory contract"
+        }
+    }
+    $expectedDirectoryNames = @($AllowedExactNumbers | Sort-Object | ForEach-Object { "$ReleaseName-exact$_" })
+    $releaseRoot = Join-Path $ProjectRoot 'release'
+    if (-not (Test-Path -LiteralPath $releaseRoot -PathType Container)) {
+        throw "$CandidateLabel failure evidence release root is missing"
+    }
+    $actualCandidateDirectories = @(Get-ChildItem -LiteralPath $releaseRoot -Directory -Force | Where-Object {
+        $_.Name.StartsWith("$ReleaseName-exact", [StringComparison]::Ordinal)
+    })
+    if ($actualCandidateDirectories.Count -ne $expectedDirectoryNames.Count) {
+        throw "$CandidateLabel failure evidence exact directory namespace drifted"
+    }
+    foreach ($directoryName in $expectedDirectoryNames) {
+        $matches = @($actualCandidateDirectories | Where-Object { $_.Name -ceq $directoryName })
+        if ($matches.Count -ne 1) {
+            throw "$CandidateLabel failure evidence exact directory namespace drifted"
+        }
+        if (($matches[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$CandidateLabel failure evidence exact root cannot be a reparse point: $directoryName"
+        }
+        Assert-NoReleaseReparsePoints -ReleaseDirectory $matches[0].FullName | Out-Null
+    }
+
+    $anchoredFiles = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    $escapedReleaseName = [regex]::Escape($ReleaseName)
+    $allowedExactPattern = ($AllowedExactNumbers | Sort-Object | ForEach-Object { [string]$_ }) -join '|'
+    foreach ($line in @($AnchorText -split '\r?\n')) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#', [StringComparison]::Ordinal)) { continue }
+        $match = [regex]::Match($line, "^(?<hash>[0-9a-f]{64})  (?<path>release/$escapedReleaseName-exact(?:$allowedExactPattern)/[^\r\n]+)$")
+        if (-not $match.Success -or
+            -not $anchoredFiles.TryAdd($match.Groups['path'].Value, $match.Groups['hash'].Value)) {
+            throw "$CandidateLabel failure evidence anchor has an invalid or duplicate entry: $line"
+        }
+    }
+    if ($anchoredFiles.Count -eq 0) { throw "$CandidateLabel failure evidence anchor is empty" }
+
+    $actualFiles = @()
+    foreach ($directoryName in $expectedDirectoryNames) {
+        $directory = Join-Path $ProjectRoot "release\$directoryName"
+        $actualFiles += Get-ChildItem -LiteralPath $directory -File -Recurse -Force
+    }
+    if ($actualFiles.Count -ne $anchoredFiles.Count) {
+        throw "$CandidateLabel failure evidence file set drifted from the tracked anchor"
+    }
+    foreach ($file in $actualFiles) {
+        $relativePath = [IO.Path]::GetRelativePath($ProjectRoot, $file.FullName).Replace('\', '/')
+        if (-not $anchoredFiles.ContainsKey($relativePath)) {
+            throw "$CandidateLabel failure evidence contains an unanchored file: $relativePath"
+        }
+        $actualHash = Get-FileSha256Lower -Path $file.FullName
+        if ($actualHash -cne $anchoredFiles[$relativePath]) {
+            throw "$CandidateLabel failure evidence hash drifted: $relativePath"
+        }
+    }
+    return $true
+}
+
 function Assert-RC49FailureEvidenceAnchor {
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
         [Parameter(Mandatory)][string]$AnchorText
     )
+    return Assert-FailedReleaseEvidenceAnchor `
+        -ProjectRoot $ProjectRoot `
+        -AnchorText $AnchorText `
+        -ReleaseName '0.1.0-rc49' `
+        -AllowedExactNumbers @(1, 2, 3) `
+        -CandidateLabel 'RC49'
+}
 
-    $anchoredFiles = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
-    foreach ($line in @($AnchorText -split '\r?\n')) {
-        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#', [StringComparison]::Ordinal)) { continue }
-        $match = [regex]::Match($line, '^(?<hash>[0-9a-f]{64})  (?<path>release/0\.1\.0-rc49-exact[123]/[^\r\n]+)$')
-        if (-not $match.Success -or
-            -not $anchoredFiles.TryAdd($match.Groups['path'].Value, $match.Groups['hash'].Value)) {
-            throw "RC49 failure evidence anchor has an invalid or duplicate entry: $line"
-        }
-    }
-    if ($anchoredFiles.Count -eq 0) { throw 'RC49 failure evidence anchor is empty' }
+function Assert-RC50FailureEvidenceAnchor {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$AnchorText
+    )
+    return Assert-FailedReleaseEvidenceAnchor `
+        -ProjectRoot $ProjectRoot `
+        -AnchorText $AnchorText `
+        -ReleaseName '0.1.0-rc50' `
+        -AllowedExactNumbers @(1) `
+        -CandidateLabel 'RC50'
+}
 
-    $actualFiles = @()
-    foreach ($directoryName in @('0.1.0-rc49-exact1', '0.1.0-rc49-exact2', '0.1.0-rc49-exact3')) {
-        $directory = Join-Path $ProjectRoot "release\$directoryName"
-        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
-            throw "RC49 failure evidence directory is missing: $directoryName"
-        }
-        $actualFiles += Get-ChildItem -LiteralPath $directory -File -Recurse -Force
+function Get-ReleaseGitProvenance {
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    $headLines = @(& git -C $RepositoryRoot rev-parse --verify HEAD 2>$null)
+    $headExitCode = $LASTEXITCODE
+    $headOutput = ($headLines | Out-String).Trim()
+
+    $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 2>$null)
+    $statusExitCode = $LASTEXITCODE
+    if ($statusExitCode -ne 0) {
+        throw "git status failed with exit $statusExitCode while capturing release provenance"
     }
-    if ($actualFiles.Count -ne $anchoredFiles.Count) {
-        throw 'RC49 failure evidence file set drifted from the tracked anchor'
+
+    $gitHead = $null
+    if ($headExitCode -eq 0 -and $headOutput -match '^[0-9a-f]{40}$') {
+        $gitHead = $headOutput
     }
-    foreach ($file in $actualFiles) {
-        $relativePath = [IO.Path]::GetRelativePath($ProjectRoot, $file.FullName).Replace('\', '/')
-        if (-not $anchoredFiles.ContainsKey($relativePath)) {
-            throw "RC49 failure evidence contains an unanchored file: $relativePath"
-        }
-        $actualHash = Get-FileSha256Lower -Path $file.FullName
-        if ($actualHash -cne $anchoredFiles[$relativePath]) {
-            throw "RC49 failure evidence hash drifted: $relativePath"
-        }
+    return [pscustomobject]@{
+        GitHead = $gitHead
+        GitDirty = [bool]($statusLines.Count -ne 0)
+    }
+}
+
+function Get-ReleaseGateBlockedExitCode {
+    param(
+        [Parameter(Mandatory)]$ApplicationStatus,
+        [Parameter(Mandatory)]$ProductionStatus,
+        [Parameter(Mandatory)]$Reasons
+    )
+
+    if ($ApplicationStatus -is [string] -and
+        [string]$ApplicationStatus -ceq 'passed' -and
+        $ProductionStatus -is [string] -and
+        [string]$ProductionStatus -ceq 'blocked' -and
+        $Reasons -is [System.Array] -and
+        $Reasons.Count -eq 1 -and
+        $Reasons[0] -is [string] -and
+        [string]$Reasons[0] -ceq 'idp_self_hosted_pending_canary') {
+        return 42
+    }
+    return 1
+}
+
+function Assert-StrictReleaseDirectoryName {
+    param(
+        [Parameter(Mandatory)][string]$ReleaseDirectory,
+        [Parameter(Mandatory)][string]$ExpectedReleaseName
+    )
+
+    $leafName = [IO.Path]::GetFileName([IO.Path]::TrimEndingDirectorySeparator($ReleaseDirectory))
+    $expectedPattern = '^' + [regex]::Escape($ExpectedReleaseName) + '-exact(?:[1-9]|[1-9][0-9])$'
+    if ($leafName -cnotmatch $expectedPattern) {
+        throw "strict transfer release directory must be an exact $ExpectedReleaseName exactN leaf"
     }
     return $true
 }
@@ -438,10 +551,10 @@ function Assert-RC49FailureEvidenceAnchor {
 function Get-StrictSignedReleaseTagRef {
     param([Parameter(Mandatory)][string]$SignedReleaseTag)
 
-    if ($SignedReleaseTag -cne 'v0.1.0-rc50-signed') {
-        throw 'strict transfer requires the exact signed RC50 tag v0.1.0-rc50-signed'
+    if ($SignedReleaseTag -cne 'v0.1.0-rc51-signed') {
+        throw 'strict transfer requires the exact signed RC51 tag v0.1.0-rc51-signed'
     }
-    return 'refs/tags/v0.1.0-rc50-signed'
+    return 'refs/tags/v0.1.0-rc51-signed'
 }
 
 function Assert-TransferReadyManifest {
@@ -456,28 +569,28 @@ function Assert-TransferReadyManifest {
     try {
         $releaseNameProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'releaseName' -Context 'manifest'
     } catch {
-        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc50 is mandatory'
+        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc51 is mandatory'
     }
     if ($releaseNameProperty.Value -isnot [string] -or
-        [string]$releaseNameProperty.Value -cne '0.1.0-rc50') {
-        throw 'strict transfer requires manifest releaseName=0.1.0-rc50'
+        [string]$releaseNameProperty.Value -cne '0.1.0-rc51') {
+        throw 'strict transfer requires manifest releaseName=0.1.0-rc51'
     }
 
     $expectedImageReferences = [ordered]@{
-        api = 'invoice-system-api:0.1.0-rc50'
-        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc50'
-        tools = 'invoice-system-tools:0.1.0-rc50'
-        web = 'invoice-system-web:0.1.0-rc50'
-        'source-agent' = 'invoice-source-agent:0.1.0-rc50'
-        'postgres-runtime' = 'invoice-postgres:0.1.0-rc50'
-        'clamav-runtime' = 'invoice-clamav:0.1.0-rc50'
-        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc50'
-        keycloak = 'invoice-keycloak:0.1.0-rc50'
+        api = 'invoice-system-api:0.1.0-rc51'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc51'
+        tools = 'invoice-system-tools:0.1.0-rc51'
+        web = 'invoice-system-web:0.1.0-rc51'
+        'source-agent' = 'invoice-source-agent:0.1.0-rc51'
+        'postgres-runtime' = 'invoice-postgres:0.1.0-rc51'
+        'clamav-runtime' = 'invoice-clamav:0.1.0-rc51'
+        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc51'
+        keycloak = 'invoice-keycloak:0.1.0-rc51'
     }
     $imagesProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'images' -Context 'manifest'
     if ($imagesProperty.Value -isnot [System.Array] -or
         $imagesProperty.Value.Count -ne $expectedImageReferences.Count) {
-        throw 'strict transfer requires the exact RC50 image inventory'
+        throw 'strict transfer requires the exact RC51 image inventory'
     }
     foreach ($expectedImage in $expectedImageReferences.GetEnumerator()) {
         $matchingRecords = @()
@@ -489,12 +602,12 @@ function Assert-TransferReadyManifest {
             }
         }
         if ($matchingRecords.Count -ne 1) {
-            throw 'strict transfer requires the exact RC50 image inventory'
+            throw 'strict transfer requires the exact RC51 image inventory'
         }
         $referenceProperty = Get-RequiredExactProperty -InputObject $matchingRecords[0] -PropertyName 'reference' -Context "manifest image $($expectedImage.Key)"
         if ($referenceProperty.Value -isnot [string] -or
             [string]$referenceProperty.Value -cne [string]$expectedImage.Value) {
-            throw 'strict transfer requires the exact RC50 image inventory'
+            throw 'strict transfer requires the exact RC51 image inventory'
         }
     }
 
@@ -706,12 +819,22 @@ function Resolve-ReleaseArtifactPath {
 function Assert-NoReleaseReparsePoints {
     param([Parameter(Mandatory)][string]$ReleaseDirectory)
 
-    $reparsePoints = @(
-        Get-ChildItem -LiteralPath $ReleaseDirectory -Recurse -Force |
-            Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }
-    )
-    if ($reparsePoints.Count -ne 0) {
-        throw "release directory contains a symlink/reparse point: $($reparsePoints[0].FullName)"
+    $rootItem = Get-Item -LiteralPath $ReleaseDirectory -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "release directory contains a symlink/reparse point: $($rootItem.FullName)"
+    }
+    $pendingDirectories = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
+    $pendingDirectories.Push([IO.DirectoryInfo]$rootItem)
+    while ($pendingDirectories.Count -gt 0) {
+        $directory = $pendingDirectories.Pop()
+        foreach ($child in Get-ChildItem -LiteralPath $directory.FullName -Force) {
+            if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "release directory contains a symlink/reparse point: $($child.FullName)"
+            }
+            if ($child.PSIsContainer) {
+                $pendingDirectories.Push([IO.DirectoryInfo]$child)
+            }
+        }
     }
     return $true
 }
