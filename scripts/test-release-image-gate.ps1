@@ -630,6 +630,37 @@ function Assert-RC49RuntimeAndBackupBindings {
     $backup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'deploy\backup\backup.sh')
     $restore = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'deploy\backup\restore-drill.sh')
 
+    function Assert-WebSecurityHeaderVerifierModeContract {
+        param([Parameter(Mandatory)][string]$Source)
+
+        if (-not $Source.Contains('$releaseBound = -not [string]::IsNullOrWhiteSpace($ExpectedImageID)', [StringComparison]::Ordinal) -or
+            -not $Source.Contains('$mountArguments = @()', [StringComparison]::Ordinal)) {
+            throw 'web header verifier does not distinguish release-bound and compatibility modes'
+        }
+        $compatibilityBranch = [regex]::Match(
+            $Source,
+            '(?ms)^if \(-not \$releaseBound\) \{\r?\n(?<body>.*?)^\}'
+        )
+        if (-not $compatibilityBranch.Success -or
+            $compatibilityBranch.Groups['body'].Value -notmatch 'Resolve-Path.*web\\nginx\.conf' -or
+            $compatibilityBranch.Groups['body'].Value -notmatch 'Resolve-Path.*web\\dist' -or
+            $compatibilityBranch.Groups['body'].Value -notmatch 'type=bind,source=\$configPath,target=/etc/nginx/conf\.d/default\.conf,readonly' -or
+            $compatibilityBranch.Groups['body'].Value -notmatch 'type=bind,source=\$distPath,target=/usr/share/nginx/html,readonly' -or
+            [regex]::Matches($Source, 'type=bind,source=').Count -ne 2) {
+            throw 'pre-build web header compatibility mode no longer owns exactly both host bind mounts'
+        }
+        if ($Source -notmatch '(?s)function Get-ReleaseBoundAssetRequestPath.*docker exec \$Container.*find /usr/share/nginx/html/assets.*return \$assetPath\.Substring' -or
+            -not $Source.Contains('$assetRequestPath = Get-ReleaseBoundAssetRequestPath -Container $container', [StringComparison]::Ordinal)) {
+            throw 'release-bound web header mode does not discover an asset from the running immutable image'
+        }
+        if (-not $Source.Contains("`$dockerRunArguments += `$mountArguments", [StringComparison]::Ordinal) -or
+            $Source -match '(?s)docker run --detach --rm.*--mount') {
+            throw 'release-bound web header mode can still include an unconditional host bind mount'
+        }
+    }
+
+    Assert-WebSecurityHeaderVerifierModeContract -Source $headerVerifier
+
     foreach ($binding in @(
         @{ Source = $runtimeVerifier; Required = '[string]$ExpectedPostgresImageID'; Label = 'Keycloak runtime PostgreSQL image ID' },
         @{ Source = $runtimeVerifier; Required = '[string]$ExpectedProbeImageID'; Label = 'Keycloak runtime probe image ID' },

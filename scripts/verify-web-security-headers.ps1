@@ -8,28 +8,48 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $webNginxCompatibilityFixtureImage = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
 if ([string]::IsNullOrWhiteSpace($Image)) { $Image = $webNginxCompatibilityFixtureImage }
-if (-not [string]::IsNullOrWhiteSpace($ExpectedImageID)) {
+$releaseBound = -not [string]::IsNullOrWhiteSpace($ExpectedImageID)
+if ($releaseBound) {
     $observedImageID = (& docker image inspect $Image --format '{{.Id}}' 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $observedImageID -cne $ExpectedImageID) {
         throw "web security-header verifier image is unavailable or stale: $Image"
     }
 }
-$configPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'web\nginx.conf')).Path
-$distPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'web\dist')).Path
-$asset = Get-ChildItem -LiteralPath (Join-Path $distPath 'assets') -File |
-    Where-Object { $_.Extension -in @('.js', '.css') } |
-    Select-Object -First 1
-if ($null -eq $asset) { throw 'frontend build has no testable static asset' }
+
+function Get-ReleaseBoundAssetRequestPath {
+    param([Parameter(Mandatory)][string]$Container)
+
+    $assetPath = (& docker exec $Container sh -ec "find /usr/share/nginx/html/assets -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' \) -print -quit" 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or
+        $assetPath -notmatch '^/usr/share/nginx/html/assets/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|css)$') {
+        throw 'release-bound web image has no safely addressable built JS/CSS asset'
+    }
+    return $assetPath.Substring('/usr/share/nginx/html'.Length)
+}
+
+$mountArguments = @()
+$assetRequestPath = ''
+if (-not $releaseBound) {
+    $configPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'web\nginx.conf')).Path
+    $distPath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'web\dist')).Path
+    $asset = Get-ChildItem -LiteralPath (Join-Path $distPath 'assets') -File |
+        Where-Object { $_.Extension -in @('.js', '.css') } |
+        Select-Object -First 1
+    if ($null -eq $asset) { throw 'frontend build has no testable static asset' }
+    $mountArguments = @(
+        '--mount', "type=bind,source=$configPath,target=/etc/nginx/conf.d/default.conf,readonly",
+        '--mount', "type=bind,source=$distPath,target=/usr/share/nginx/html,readonly"
+    )
+    $assetRequestPath = "/assets/$($asset.Name)"
+}
 
 $container = 'invoice-web-headers-' + ([Guid]::NewGuid().ToString('N').Substring(0, 12))
 $started = $false
 try {
-    docker run --detach --rm `
-        --name $container `
-        --publish '127.0.0.1::8080' `
-        --mount "type=bind,source=$configPath,target=/etc/nginx/conf.d/default.conf,readonly" `
-        --mount "type=bind,source=$distPath,target=/usr/share/nginx/html,readonly" `
-        $Image | Out-Null
+    $dockerRunArguments = @('run', '--detach', '--rm', '--name', $container, '--publish', '127.0.0.1::8080')
+    $dockerRunArguments += $mountArguments
+    $dockerRunArguments += $Image
+    & docker @dockerRunArguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'failed to start web header verifier' }
     $started = $true
     $binding = (docker port $container '8080/tcp').Trim()
@@ -37,8 +57,11 @@ try {
         throw "unable to resolve web verifier port: $binding"
     }
     $port = [int]$Matches[1]
+    if ($releaseBound) {
+        $assetRequestPath = Get-ReleaseBoundAssetRequestPath -Container $container
+    }
     $responses = @()
-    foreach ($path in @('/', "/assets/$($asset.Name)")) {
+    foreach ($path in @('/', $assetRequestPath)) {
         $response = $null
         $deadline = (Get-Date).AddSeconds(20)
         do {
