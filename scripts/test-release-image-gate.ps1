@@ -9,6 +9,34 @@ Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
 
+$task5AMutationFailures = [Collections.Generic.List[string]]::new()
+
+function Test-Task5ARequirement {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    try {
+        & $Action
+    } catch {
+        $task5AMutationFailures.Add("${Label}: $($_.Exception.Message)")
+    }
+}
+
+function Test-Task5AMutationRejected {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $rejected = $false
+    try { & $Action } catch { $rejected = $true }
+    if (-not $rejected) {
+        $task5AMutationFailures.Add("${Label}: mutation was accepted")
+    }
+}
+
 function Assert-ThrowsLike {
     param(
         [Parameter(Mandatory)][scriptblock]$Action,
@@ -344,6 +372,30 @@ if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
 }
 Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $keycloakBaseReference | Out-Null
 
+$keycloakLiteralPinFixture = "FROM $keycloakBaseReference AS builder`nFROM $keycloakBaseReference`n"
+Test-Task5ARequirement -Label 'literal Keycloak FROM pins with permitted leading whitespace' -Action {
+    $leadingWhitespaceFixture = "  FROM $keycloakBaseReference AS builder`n`tFROM $keycloakBaseReference`n"
+    Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $leadingWhitespaceFixture -ExpectedBaseReference $keycloakBaseReference | Out-Null
+}
+foreach ($dockerfileMutation in @(
+    [pscustomobject]@{
+        Label = 'indented mixed-case third FROM'
+        Text = $keycloakLiteralPinFixture + "  fRoM scratch AS bypass`n"
+    },
+    [pscustomobject]@{
+        Label = 'indented lowercase Keycloak base ARG'
+        Text = "  arg KEYCLOAK_BASE_IMAGE=$keycloakBaseReference`n" + $keycloakLiteralPinFixture
+    },
+    [pscustomobject]@{
+        Label = 'indented variable FROM'
+        Text = $keycloakLiteralPinFixture + '  FROM ${KEYCLOAK_BASE_IMAGE} AS bypass' + "`n"
+    }
+)) {
+    Test-Task5AMutationRejected -Label $dockerfileMutation.Label -Action {
+        Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $dockerfileMutation.Text -ExpectedBaseReference $keycloakBaseReference | Out-Null
+    }
+}
+
 $verifySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
 if (-not $verifySource.Contains('Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $expectedKeycloakBase', [StringComparison]::Ordinal) -or
     $verifySource -match 'KEYCLOAK_BASE_IMAGE') {
@@ -566,11 +618,22 @@ if ($gateSource -match '(?m)verify\.ps1.*-SkipPostgres') {
 if ($gateSource -notmatch "@\('build', '--pull', '--platform', 'linux/amd64', '--provenance=false'") {
     throw 'release image builds no longer pin linux/amd64 or disable nondeterministic BuildKit provenance wrappers'
 }
+Test-Task5ARequirement -Label 'generator re-parses manifest JSON before exact counter-type binding' -Action {
+    if (-not $gateSource.Contains('$generatedManifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json', [StringComparison]::Ordinal) -or
+        -not $gateSource.Contains('foreach ($record in @($generatedManifest.images)) {', [StringComparison]::Ordinal)) {
+        throw 'release generator still validates pre-JSON PowerShell counter types'
+    }
+}
 if ($artifactVerifierSource -match 'approved-by-exact-binary-exception' -or
-    $artifactVerifierSource -notmatch '\[int\]\$postgres\[0\]\.vulnerabilities\.total\s*-ne\s*0' -or
     $artifactVerifierSource -notmatch '\[string\]\$postgres\[0\]\.policyStatus\s*-cne\s*''approved''' -or
     $artifactVerifierSource -notmatch '\$null\s*-ne\s*\$postgres\[0\]\.exception') {
     throw 'RC49 artifact verification still permits a PostgreSQL vulnerability exception'
+}
+Test-Task5ARequirement -Label 'artifact verifier avoids vulnerability counter coercion after exact JSON validation' -Action {
+    if ($artifactVerifierSource -match '\[int\][^\r\n]*\.vulnerabilities\.(?:high|critical|total)' -or
+        $artifactVerifierSource -notmatch '\$postgres\[0\]\.vulnerabilities\.total\s*-ne\s*0') {
+        throw 'artifact verifier still casts/coerces a manifest vulnerability counter'
+    }
 }
 
 $keycloakDefinitionLine = [regex]::Match($gateSource, '(?m)^\s*\$definitions\.Add\(\(New-ImageDefinition -Name ''keycloak''[^\r\n]+$')
@@ -582,10 +645,40 @@ if (-not $keycloakDefinitionLine.Success -or
 
 if ($artifactVerifierSource -notmatch '\[switch\]\$RequireTransferReady' -or
     $artifactVerifierSource -notmatch '\[string\]\$SignedReleaseTag' -or
-    $artifactVerifierSource -notmatch '(?ms)if \(\$RequireTransferReady\) \{\s*Assert-TransferReadyManifest -Manifest \$manifest -ExpectedGitHead \$signedTagCommit\s*\| Out-Null\s*\}' -or
-    -not $artifactVerifierSource.Contains('git -C $projectRoot verify-tag $SignedReleaseTag', [StringComparison]::Ordinal) -or
-    -not $artifactVerifierSource.Contains('$SignedReleaseTag^{}', [StringComparison]::Ordinal)) {
+    $artifactVerifierSource -notmatch '(?ms)if \(\$RequireTransferReady\) \{\s*Assert-TransferReadyManifest -Manifest \$manifest -ExpectedGitHead \$signedTagCommit\s*\| Out-Null\s*\}') {
     throw 'independent artifact verifier is missing the strict signed-tag transfer-ready source contract'
+}
+Test-Task5ARequirement -Label 'fully qualified signed tag ref is used for every strict Git lookup' -Action {
+    foreach ($requiredTagContract in @(
+        '$signedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag $SignedReleaseTag',
+        'git -C $projectRoot cat-file -t $signedTagRef',
+        'git -C $projectRoot verify-tag $signedTagRef',
+        '$peeledSignedTagRef = "$signedTagRef^{}"',
+        'git -C $projectRoot rev-parse --verify $peeledSignedTagRef',
+        'git -C $projectRoot cat-file -t $peeledSignedTagRef'
+    )) {
+        if (-not $artifactVerifierSource.Contains($requiredTagContract, [StringComparison]::Ordinal)) {
+            throw "missing strict tag-ref contract: $requiredTagContract"
+        }
+    }
+    if ($artifactVerifierSource -match 'git -C \$projectRoot (?:cat-file -t|verify-tag|rev-parse --verify) [^\r\n]*\$SignedReleaseTag') {
+        throw 'strict Git lookup still accepts the unqualified SignedReleaseTag value'
+    }
+}
+Test-Task5ARequirement -Label 'exact RC49 tag name maps to the fully qualified tag ref' -Action {
+    $resolvedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag 'v0.1.0-rc49-signed'
+    if ($resolvedTagRef -cne 'refs/tags/v0.1.0-rc49-signed') {
+        throw "unexpected resolved tag ref: $resolvedTagRef"
+    }
+}
+foreach ($invalidTagName in @(
+    'v0.1.0-rc49-signed-sibling',
+    'refs/heads/v0.1.0-rc49-signed',
+    'refs/tags/v0.1.0-rc49-signed'
+)) {
+    Test-Task5AMutationRejected -Label "non-exact signed tag input $invalidTagName" -Action {
+        Get-StrictSignedReleaseTagRef -SignedReleaseTag $invalidTagName | Out-Null
+    }
 }
 $productionRunbook = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
 if (-not $productionRunbook.Contains('-RequireTransferReady', [StringComparison]::Ordinal) -or
@@ -672,8 +765,37 @@ try {
         vulnerabilities = [pscustomobject]@{ high = 0; critical = 0; total = 0 }
         vulnerabilityReport = [pscustomobject]@{ path = 'report.json'; sha256 = Get-FileSha256Lower -Path $bindingReportPath }
         sbom = [pscustomobject]@{ path = 'sbom.json'; sha256 = Get-FileSha256Lower -Path $bindingSbomPath }
-    }
+    } | ConvertTo-Json -Depth 10 | ConvertFrom-Json
     Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $bindingRecord | Out-Null
+
+    foreach ($counterName in @('high', 'critical', 'total')) {
+        foreach ($counterMutation in @(
+            [pscustomobject]@{ Label = 'null'; Value = $null },
+            [pscustomobject]@{ Label = 'Boolean'; Value = $false },
+            [pscustomobject]@{ Label = 'string'; Value = '0' },
+            [pscustomobject]@{ Label = 'Decimal'; Value = [decimal]0 },
+            [pscustomobject]@{ Label = 'Double'; Value = [double]0 },
+            [pscustomobject]@{ Label = 'negative'; Value = [long]-1 }
+        )) {
+            $mutatedCounterRecord = $bindingRecord | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            $mutatedCounterRecord.vulnerabilities.$counterName = $counterMutation.Value
+            Test-Task5AMutationRejected -Label "vulnerabilities.$counterName $($counterMutation.Label) value" -Action {
+                Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $mutatedCounterRecord | Out-Null
+            }
+        }
+
+        $missingCounterRecord = $bindingRecord | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        $missingCounterRecord.vulnerabilities.PSObject.Properties.Remove($counterName)
+        Test-Task5AMutationRejected -Label "missing vulnerabilities.$counterName" -Action {
+            Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $missingCounterRecord | Out-Null
+        }
+
+        $mismatchedCounterRecord = $bindingRecord | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        $mismatchedCounterRecord.vulnerabilities.$counterName = [long]1
+        Test-Task5AMutationRejected -Label "mismatched vulnerabilities.$counterName" -Action {
+            Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $mismatchedCounterRecord | Out-Null
+        }
+    }
 
     $missingTotalRecord = $bindingRecord | ConvertTo-Json -Depth 10 | ConvertFrom-Json
     $missingTotalRecord.vulnerabilities.PSObject.Properties.Remove('total')
@@ -683,7 +805,7 @@ try {
         -FailureMessage 'generated artifact binding did not explicitly reject a missing vulnerabilities.total property'
 
     $mismatchedTotalRecord = $bindingRecord | ConvertTo-Json -Depth 10 | ConvertFrom-Json
-    $mismatchedTotalRecord.vulnerabilities.total = 1
+    $mismatchedTotalRecord.vulnerabilities.total = [long]1
     Assert-ThrowsLike `
         -Action { Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $mismatchedTotalRecord | Out-Null } `
         -ExpectedMessagePattern 'manifest vulnerability counts are stale' `
@@ -724,6 +846,51 @@ Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.dec
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.productionLaunch = 'approved' } -ExpectedMessagePattern 'productionLaunch=blocked' -FailureMessage 'strict transfer mode accepted a non-blocked production launch decision'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.reasons = @() } -ExpectedMessagePattern 'exact pending-canary reason' -FailureMessage 'strict transfer mode accepted a missing pending-canary reason'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.reasons = @('idp_self_hosted_pending_canary', 'source_worktree_dirty') } -ExpectedMessagePattern 'exact pending-canary reason' -FailureMessage 'strict transfer mode accepted an extra production block reason'
+
+foreach ($transferMutation in @(
+    [pscustomobject]@{
+        Label = 'scalar string reasons'
+        Mutate = { param($manifest) $manifest.decisions.reasons = 'idp_self_hosted_pending_canary' }
+    },
+    [pscustomobject]@{
+        Label = 'null reasons'
+        Mutate = { param($manifest) $manifest.decisions.reasons = $null }
+    },
+    [pscustomobject]@{
+        Label = 'Boolean reasons'
+        Mutate = { param($manifest) $manifest.decisions.reasons = $false }
+    },
+    [pscustomobject]@{
+        Label = 'object reasons'
+        Mutate = { param($manifest) $manifest.decisions.reasons = [pscustomobject]@{ reason = 'idp_self_hosted_pending_canary' } }
+    },
+    [pscustomobject]@{
+        Label = 'empty reasons array'
+        Mutate = { param($manifest) $manifest.decisions.reasons = @() }
+    },
+    [pscustomobject]@{
+        Label = 'extra reasons array element'
+        Mutate = { param($manifest) $manifest.decisions.reasons = @('idp_self_hosted_pending_canary', 'extra') }
+    },
+    [pscustomobject]@{
+        Label = 'string source.gitDirty'
+        Mutate = { param($manifest) $manifest.source.gitDirty = 'false' }
+    },
+    [pscustomobject]@{
+        Label = 'numeric source.gitDirty'
+        Mutate = { param($manifest) $manifest.source.gitDirty = [long]0 }
+    },
+    [pscustomobject]@{
+        Label = 'null source.gitDirty'
+        Mutate = { param($manifest) $manifest.source.gitDirty = $null }
+    }
+)) {
+    $manifestFixture = $transferReadyManifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    & $transferMutation.Mutate $manifestFixture
+    Test-Task5AMutationRejected -Label $transferMutation.Label -Action {
+        Assert-TransferReadyManifest -Manifest $manifestFixture -ExpectedGitHead '0123456789abcdef0123456789abcdef01234567' | Out-Null
+    }
+}
 
 function Assert-RC49RuntimeAndBackupBindings {
     param([Parameter(Mandatory)][string]$ProjectRoot)
@@ -818,6 +985,10 @@ function Assert-RC49RuntimeAndBackupBindings {
 }
 
 Assert-RC49RuntimeAndBackupBindings -ProjectRoot $projectRoot
+
+if ($task5AMutationFailures.Count -gt 0) {
+    throw "Task 5A focused mutation failures:`n- $($task5AMutationFailures -join "`n- ")"
+}
 
 Write-Host 'Release image gate offline/static fixtures passed.'
 $global:LASTEXITCODE = 0

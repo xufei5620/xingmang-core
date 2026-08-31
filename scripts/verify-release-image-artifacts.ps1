@@ -19,22 +19,21 @@ if (-not $RequireTransferReady -and -not [string]::IsNullOrWhiteSpace($SignedRel
 }
 $signedTagCommit = ''
 if ($RequireTransferReady) {
-    if ([string]$SignedReleaseTag -cne 'v0.1.0-rc49-signed') {
-        throw 'strict transfer requires the exact signed RC49 tag v0.1.0-rc49-signed'
-    }
-    $tagObjectType = (& git -C $projectRoot cat-file -t $SignedReleaseTag 2>$null | Out-String).Trim()
+    $signedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag $SignedReleaseTag
+    $peeledSignedTagRef = "$signedTagRef^{}"
+    $tagObjectType = (& git -C $projectRoot cat-file -t $signedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $tagObjectType -cne 'tag') {
         throw 'strict transfer requires the supplied RC49 name to resolve to an annotated tag object'
     }
-    & git -C $projectRoot verify-tag $SignedReleaseTag *> $null
+    & git -C $projectRoot verify-tag $signedTagRef *> $null
     if ($LASTEXITCODE -ne 0) {
         throw 'strict transfer requires a valid signature on the supplied RC49 tag'
     }
-    $signedTagCommit = (& git -C $projectRoot rev-parse --verify "$SignedReleaseTag^{}" 2>$null | Out-String).Trim()
+    $signedTagCommit = (& git -C $projectRoot rev-parse --verify $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $signedTagCommit -notmatch '^[0-9a-f]{40}$') {
         throw 'strict transfer could not peel the supplied signed RC49 tag to a commit'
     }
-    $peeledObjectType = (& git -C $projectRoot cat-file -t $signedTagCommit 2>$null | Out-String).Trim()
+    $peeledObjectType = (& git -C $projectRoot cat-file -t $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $peeledObjectType -cne 'commit') {
         throw 'strict transfer signed RC49 tag did not peel to a commit object'
     }
@@ -187,7 +186,7 @@ foreach ($record in $records) {
         throw "RC49 derived image base reference drifted: $($record.name)"
     }
     if ([string]$record.name -notin @('postgres-runtime', 'keycloak')) {
-        if ([int]$record.vulnerabilities.total -ne 0 -or [string]$record.policyStatus -cne 'approved') {
+        if ($record.vulnerabilities.total -ne 0 -or [string]$record.policyStatus -cne 'approved') {
             throw "required zero-finding image is not approved: $($record.name)"
         }
     }
@@ -195,7 +194,7 @@ foreach ($record in $records) {
 
 $postgres = @($records | Where-Object name -eq 'postgres-runtime')
 if ($postgres.Count -ne 1) { throw 'release manifest must have exactly one PostgreSQL record' }
-if ([int]$postgres[0].vulnerabilities.total -ne 0 -or
+if ($postgres[0].vulnerabilities.total -ne 0 -or
     [string]$postgres[0].policyStatus -cne 'approved' -or
     $null -ne $postgres[0].exception) {
     throw 'RC49 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
@@ -266,7 +265,7 @@ switch ($idpMode) {
                 throw 'Keycloak realm provisioning proof is missing or stale'
             }
         }
-        if ([int]$keycloak[0].vulnerabilities.total -eq 0) {
+        if ($keycloak[0].vulnerabilities.total -eq 0) {
             if ([string]$keycloak[0].policyStatus -ceq 'failed') {
                 if ([string]$manifest.idp.status -cne 'image_rejected') { throw 'failed Keycloak runtime smoke was not fail-closed' }
             } elseif ([string]$keycloak[0].policyStatus -cne 'approved' -or -not $runtimeSmokePassed -or -not $realmProvisioningPassed -or
@@ -274,7 +273,7 @@ switch ($idpMode) {
                 [string]$manifest.idp.productionCanary -cne 'pending') {
                 throw 'zero-finding Keycloak image did not remain pending the production canary'
             }
-        } elseif ([int]$keycloak[0].vulnerabilities.total -eq 1) {
+        } elseif ($keycloak[0].vulnerabilities.total -eq 1) {
             $keycloakReportPath = Resolve-ReleaseArtifactPath -ReleaseDirectory $releaseRoot -RelativePath ([string]$keycloak[0].vulnerabilityReport.path)
             $keycloakReport = Get-Content -Raw -LiteralPath $keycloakReportPath | ConvertFrom-Json
             $keycloakSummary = Assert-TrivyReportBinding -Report $keycloakReport -ExpectedImageId ([string]$keycloak[0].imageId)

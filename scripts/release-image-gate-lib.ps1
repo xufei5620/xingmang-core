@@ -31,14 +31,18 @@ function Assert-KeycloakDockerfileLiteralBasePins {
         throw 'expected Keycloak base reference is not the reviewed literal digest pin'
     }
     $normalized = $DockerfileText.Replace("`r`n", "`n").Replace("`r", "`n")
-    $fromLines = @($normalized -split "`n" | Where-Object { $_ -match '^FROM\s+' })
+    $instructionLines = @(
+        $normalized -split "`n" |
+            ForEach-Object { [regex]::Replace($_, '^[ \t]+', '') }
+    )
+    $fromLines = @($instructionLines | Where-Object { $_ -match '(?i)^FROM[ \t]+' })
     if ($fromLines.Count -ne 2 -or
         $fromLines[0] -cne "FROM $ExpectedBaseReference AS builder" -or
         $fromLines[1] -cne "FROM $ExpectedBaseReference") {
         throw 'Keycloak Dockerfile must contain exactly two literal reviewed FROM digest lines'
     }
-    if ($normalized -match '(?m)^ARG\s+[^\r\n]*(?:KEYCLOAK|BASE_IMAGE)' -or
-        $normalized -match '(?m)^FROM\s+[^\r\n]*\$') {
+    if (@($instructionLines | Where-Object { $_ -match '(?i)^ARG[ \t]+[^\r\n]*(?:KEYCLOAK|BASE_IMAGE)' }).Count -gt 0 -or
+        @($fromLines | Where-Object { $_ -match '\$' }).Count -gt 0) {
         throw 'Keycloak Dockerfile cannot expose an ARG or variable FROM base override'
     }
     return $true
@@ -249,6 +253,15 @@ function Assert-ExceptionReviewContract {
     return $true
 }
 
+function Get-StrictSignedReleaseTagRef {
+    param([Parameter(Mandatory)][string]$SignedReleaseTag)
+
+    if ($SignedReleaseTag -cne 'v0.1.0-rc49-signed') {
+        throw 'strict transfer requires the exact signed RC49 tag v0.1.0-rc49-signed'
+    }
+    return 'refs/tags/v0.1.0-rc49-signed'
+}
+
 function Assert-TransferReadyManifest {
     param(
         [Parameter(Mandatory)]$Manifest,
@@ -288,8 +301,11 @@ function Assert-TransferReadyManifest {
         throw 'strict transfer requires productionLaunch=blocked pending the real canary'
     }
     $reasonsProperty = $decisions.PSObject.Properties['reasons']
-    $reasons = @(if ($null -ne $reasonsProperty) { $reasonsProperty.Value })
-    if ($reasons.Count -ne 1 -or [string]$reasons[0] -cne 'idp_self_hosted_pending_canary') {
+    if ($null -eq $reasonsProperty -or
+        $reasonsProperty.Value -isnot [System.Array] -or
+        $reasonsProperty.Value.Count -ne 1 -or
+        $reasonsProperty.Value[0] -isnot [string] -or
+        $reasonsProperty.Value[0] -cne 'idp_self_hosted_pending_canary') {
         throw 'strict transfer requires the exact pending-canary reason idp_self_hosted_pending_canary and no others'
     }
     return $true
@@ -544,6 +560,26 @@ function Assert-Sha256Sums {
     return $true
 }
 
+function Get-RequiredNonNegativeIntegralJsonNumber {
+    param(
+        [Parameter(Mandatory)]$JsonObject,
+        [Parameter(Mandatory)][string]$PropertyName,
+        [Parameter(Mandatory)][string]$RecordName
+    )
+
+    $property = $JsonObject.PSObject.Properties[$PropertyName]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        throw "manifest vulnerability $PropertyName is missing or null for $RecordName"
+    }
+    if ($property.Value -isnot [long]) {
+        throw "manifest vulnerability $PropertyName must be an integral JSON number for $RecordName"
+    }
+    if ($property.Value -lt 0) {
+        throw "manifest vulnerability $PropertyName cannot be negative for $RecordName"
+    }
+    return $property.Value
+}
+
 function Assert-GeneratedArtifactBinding {
     param(
         [Parameter(Mandatory)][string]$ReleaseDirectory,
@@ -563,19 +599,18 @@ function Assert-GeneratedArtifactBinding {
     $summary = Assert-TrivyReportBinding -Report $report -ExpectedImageId ([string]$ImageRecord.imageId)
     Assert-CycloneDxBinding -Bom $bom -ExpectedImageId ([string]$ImageRecord.imageId) | Out-Null
     $vulnerabilitiesProperty = $ImageRecord.PSObject.Properties['vulnerabilities']
-    if ($null -eq $vulnerabilitiesProperty -or $null -eq $vulnerabilitiesProperty.Value -or
-        $null -eq $vulnerabilitiesProperty.Value.PSObject.Properties['total']) {
-        throw "manifest vulnerability total is missing for $($ImageRecord.name)"
+    if ($null -eq $vulnerabilitiesProperty -or $null -eq $vulnerabilitiesProperty.Value) {
+        throw "manifest vulnerability counters are missing for $($ImageRecord.name)"
     }
     $vulnerabilities = $vulnerabilitiesProperty.Value
-    if ($null -eq $vulnerabilities.PSObject.Properties['high'] -or
-        $null -eq $vulnerabilities.PSObject.Properties['critical']) {
-        throw "manifest vulnerability high/critical counts are missing for $($ImageRecord.name)"
-    }
+    $high = Get-RequiredNonNegativeIntegralJsonNumber -JsonObject $vulnerabilities -PropertyName 'high' -RecordName ([string]$ImageRecord.name)
+    $critical = Get-RequiredNonNegativeIntegralJsonNumber -JsonObject $vulnerabilities -PropertyName 'critical' -RecordName ([string]$ImageRecord.name)
+    $total = Get-RequiredNonNegativeIntegralJsonNumber -JsonObject $vulnerabilities -PropertyName 'total' -RecordName ([string]$ImageRecord.name)
     if ($summary.Total -ne ($summary.High + $summary.Critical) -or
-        $summary.Total -ne [int]$vulnerabilities.total -or
-        $summary.High -ne [int]$vulnerabilities.high -or
-        $summary.Critical -ne [int]$vulnerabilities.critical) {
+        $total -ne ($high + $critical) -or
+        $summary.Total -ne $total -or
+        $summary.High -ne $high -or
+        $summary.Critical -ne $critical) {
         throw "manifest vulnerability counts are stale for $($ImageRecord.name)"
     }
     return $true

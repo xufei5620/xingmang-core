@@ -660,7 +660,8 @@ LoA2, mapper, output-redaction and one-secret-publication contract.
 "@
         Write-Utf8NoBom -Path (Join-Path $releaseRoot 'README.md') -Text ($readme + "`n")
 
-        foreach ($record in $imageRecords) {
+        $generatedManifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+        foreach ($record in @($generatedManifest.images)) {
             Assert-GeneratedArtifactBinding -ReleaseDirectory $releaseRoot -ImageRecord $record | Out-Null
         }
         Write-Sha256Sums -ReleaseDirectory $releaseRoot | Out-Null
