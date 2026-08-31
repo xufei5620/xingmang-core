@@ -28,10 +28,10 @@ $resumeHealthContract = @(
     'resume_prod_wait_services+=("$service")',
     'resume_source_running_only_services+=("$service")',
     'resume_prod_running_only_services+=("$service")',
-    '"${source_compose[@]}" up -d --no-deps "${resume_source_services[@]}" || return 1',
-    '"${prod_compose[@]}" up -d --no-deps "${resume_prod_services[@]}" || return 1',
-    '"${source_compose[@]}" up -d --no-deps --wait --wait-timeout 180 "${resume_source_wait_services[@]}" || return 1',
-    '"${prod_compose[@]}" up -d --no-deps --wait --wait-timeout 180 "${resume_prod_wait_services[@]}" || return 1',
+    '"${source_compose[@]}" up -d --pull never --no-deps "${resume_source_services[@]}" || return 1',
+    '"${prod_compose[@]}" up -d --pull never --no-deps "${resume_prod_services[@]}" || return 1',
+    '"${source_compose[@]}" up -d --pull never --no-deps --wait --wait-timeout 180 "${resume_source_wait_services[@]}" || return 1',
+    '"${prod_compose[@]}" up -d --pull never --no-deps --wait --wait-timeout 180 "${resume_prod_wait_services[@]}" || return 1',
     'verify_services_running source "${resume_source_running_only_services[@]}" || return 1',
     'verify_services_running prod "${resume_prod_running_only_services[@]}" || return 1',
     'set +e',
@@ -87,9 +87,10 @@ $resumeComposeUpLines = @($resumeFunction -split "`r?`n" | Where-Object {
 })
 if ($resumeComposeUpLines.Count -ne 4 -or
     @($resumeComposeUpLines | Where-Object {
+        -not $_.Contains('--pull never', [StringComparison]::Ordinal) -or
         -not $_.Contains('--no-deps', [StringComparison]::Ordinal)
     }).Count -ne 0) {
-    throw 'backup resume contains a Compose up path that may start an originally stopped dependency'
+    throw 'backup resume contains a Compose up path that may pull or start an originally stopped dependency'
 }
 
 $sshKeygen = Get-Command ssh-keygen -ErrorAction Stop
