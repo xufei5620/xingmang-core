@@ -1,5 +1,9 @@
 # RC49 Image Security Remediation Design
 
+> **SUPERSEDED — DO NOT EXECUTE.** This design is retained as historical RC49
+> evidence. Current execution is governed only by
+> `docs/superpowers/plans/2026-08-31-invoice-rc50-release-recovery.md`.
+
 ## Approval and goal
 
 The user approved the independent security patch slice on 2026-08-31. The goal is to remediate the image findings that blocked RC48, retain only a genuinely no-fix vendor-rejected finding under an exact evidence-bound exception, generate a new RC49 candidate without changing RC48 evidence, and deploy RC49 through the existing production runbook.

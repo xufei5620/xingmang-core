@@ -1,35 +1,48 @@
-# Release readiness: RC32 historical issuer lifecycle and RC49 image-security candidate
+# Release readiness: RC32 historical issuer lifecycle and RC50 image-security candidate
 
-Status as of 2026-08-25:
+Status as of 2026-08-31:
 
-- application code and local non-image gates: **GO** (`scripts/verify.ps1` passed);
-- isolated staging deployment: **GO after the fresh RC32 image/SBOM gate**;
+- prior application/full non-image baseline at `75fac62522a823ce8854f11f6bd4fa8ff82b526e`:
+  **GO** (`scripts/verify.ps1` passed); the current RC50 script/document delta
+  has only targeted verification and must rerun the full gate before signing;
+- isolated staging deployment: **GO only after the fresh RC50 image/SBOM gate
+  and strict artifact verification**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
-## RC49 source/static security stage (current)
+## RC50 source/static security stage (current)
 
-**Production: NO-GO.**  RC49 has source/static changes only.  The complete
-Task 5 evidence is still absent: no RC49 Docker build, zero-finding scan, SBOM,
+**Production: NO-GO.**  RC50 has source/static changes only.  The complete
+release evidence is still absent: no RC50 Docker build, zero-finding scan, SBOM,
 signature/tag, artifact verifier, runtime/provisioning proof, transfer,
 deployment, canary, or rollback point has occurred.  The passing
 `scripts/test-release-image-gate.ps1` fixture suite validates source contracts;
 it does not create release evidence.
 
+RC49 is failed historical evidence. `v0.1.0-rc49-signed` remains fixed at
+`eb7b4365d3af30241debe7b1a054b7eed8b94dcd`, while
+`release/0.1.0-rc49-exact1`, `release/0.1.0-rc49-exact2`, and
+`release/0.1.0-rc49-exact3` are retained partial failure directories with no
+release manifest and must be treated as read-only. Their file set and hashes
+are anchored by `docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt`. They are not
+transfer authority and must not be reused, renamed, amended, or represented as
+RC50 evidence.
+
 The pending release must build and bind one common tag for nine images: API,
 PDF scanner, tools, web, source agent, derived PostgreSQL, derived ClamAV,
-derived ingest proxy, and Keycloak.  PostgreSQL is zero-finding with no RC49
+derived ingest proxy, and Keycloak.  PostgreSQL is zero-finding with no RC50
 exception.  The only permitted residual tuple is the exact time-bounded
 Keycloak vendor-rejected finding recorded in `docs/IMAGE-SCAN-REVIEW.md`;
 tuple/digest drift or expiry on `2026-09-30T00:00:00Z` blocks the gate.
 
-RC49 keeps the two-stage hard gate: first create and verify the signed source
+RC50 keeps the two-stage hard gate: first create and verify the signed source
 commit/tag, then produce, independently verify, and separately sign the
 manifest-bound image evidence; transfer only those images and then complete
 backup, isolated startup, migration and real production canaries.
-`image_approved_pending_canary` remains a blocking result.  RC48 remains
-blocked historical evidence; its block did not reduce the like-for-like
-production exposure, so the fixes are urgent rather than an approval to ship.
+`image_approved_pending_canary` remains a blocking result.  RC48 and RC49 remain
+blocked historical evidence. The recorded RC48 block did not reduce the
+like-for-like production exposure, so the fixes are urgent rather than an
+approval to ship.
 
 This is an independent service. No Sub2API or New API source file, container,
 database schema or reverse-proxy configuration was modified while producing
@@ -139,7 +152,7 @@ saved; orchestration must not route user invoice traffic before readiness.
 
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC32 image/SBOM/vulnerability
+- generate and independently verify a fresh RC50 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -155,7 +168,7 @@ saved; orchestration must not route user invoice traffic before readiness.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC32 tag and pass real production
+- deploy all Invoice images under the same RC50 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -170,7 +183,7 @@ saved; orchestration must not route user invoice traffic before readiness.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC32 commit and signed release tag; no GitHub
+- create and locally verify the RC50 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement

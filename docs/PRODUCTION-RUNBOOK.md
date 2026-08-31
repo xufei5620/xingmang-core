@@ -76,35 +76,56 @@ dependency audit, agent tests, isolated PostgreSQL migrations and concurrency
 tests, runtime-role immutability checks, Compose validation and upstream
 integrity.
 
-Before copying images to the server, create and verify the clean signed RC49
+RC49 is a failed historical candidate. The signed tag
+`v0.1.0-rc49-signed` remains fixed at
+`eb7b4365d3af30241debe7b1a054b7eed8b94dcd`; its
+`release/0.1.0-rc49-exact1`, `release/0.1.0-rc49-exact2`, and
+`release/0.1.0-rc49-exact3` are retained failure evidence and must be treated
+as read-only. Their exact file set and hashes are anchored by
+`docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt`; never reuse, rename, edit, or
+transfer them as RC50 evidence.
+
+Before copying images to the server, create and verify the clean signed RC50
 source commit and annotated tag.  The tag must peel to the signed source commit
 used by the gate; do not create or move it after image evidence exists:
 
 ```powershell
+pwsh -NoProfile -File .\scripts\verify-rc49-failure-evidence.ps1
+if ($LASTEXITCODE -ne 0) { throw 'RC49 failure evidence anchor verification failed' }
 git diff --check
-git commit -S -m 'release: RC49 image-security candidate'
+if ($LASTEXITCODE -ne 0) { throw 'RC50 source diff check failed' }
+git commit -S -m 'release: RC50 image-security candidate'
+if ($LASTEXITCODE -ne 0) { throw 'RC50 signed source commit failed' }
 git status --short                    # required: no output
 git verify-commit HEAD
-git tag -s -a v0.1.0-rc49-signed -m 'RC49 image-security release candidate'
-git verify-tag v0.1.0-rc49-signed
-if ((git rev-parse 'v0.1.0-rc49-signed^{commit}') -ne (git rev-parse HEAD)) {
-  throw 'RC49 signed tag does not peel to the gate source commit'
+if ($LASTEXITCODE -ne 0) { throw 'RC50 source commit signature verification failed' }
+git tag -s -a v0.1.0-rc50-signed -m 'RC50 image-security release candidate'
+if ($LASTEXITCODE -ne 0) { throw 'RC50 signed tag creation failed' }
+git verify-tag v0.1.0-rc50-signed
+if ($LASTEXITCODE -ne 0) { throw 'RC50 tag signature verification failed' }
+if ((git rev-parse 'refs/tags/v0.1.0-rc50-signed^{}') -ne (git rev-parse HEAD)) {
+  throw 'RC50 signed tag does not peel to the gate source commit'
 }
 ```
 
-Then complete the RC49 image gate from that exact signed source.  It builds all
+Then complete the RC50 image gate from that exact signed source.  It builds all
 nine manifest-bound images: API, PDF scanner, tools, web, source agent, derived
 PostgreSQL, derived ClamAV, derived ingest proxy, and Keycloak.  It updates the
 exact Trivy 0.74.0 databases, scans serially, generates CycloneDX 1.7 SBOMs,
 and binds every report to the immutable local image ID:
 
 ```powershell
-# Task 5 only: creates new RC49 evidence; do not reuse or overwrite RC48.
+# Creates new RC50 evidence; do not reuse or overwrite RC48/RC49 evidence.
+$rc50ReleaseDirectory = 1..99 |
+  ForEach-Object { "release\0.1.0-rc50-exact$_" } |
+  Where-Object { -not (Test-Path -LiteralPath $_) } |
+  Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace($rc50ReleaseDirectory)) { throw 'no unused RC50 exact directory remains' }
 pwsh -NoProfile -File .\scripts\release-image-gate.ps1 `
-  -ReleaseName 0.1.0-rc49 `
-  -ImageTag 0.1.0-rc49 `
+  -ReleaseName 0.1.0-rc50 `
+  -ImageTag 0.1.0-rc50 `
   -SourceAgentVersion 0.3.0 `
-  -ReleaseDirectory release\0.1.0-rc49-exact1 `
+  -ReleaseDirectory $rc50ReleaseDirectory `
   -IdPMode keycloak
 ```
 
@@ -144,36 +165,39 @@ gate never invents an author identity or commits files itself.
 
 ```powershell
 pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 `
-  -ReleaseDirectory release\0.1.0-rc49-exact1
+  -ReleaseDirectory $rc50ReleaseDirectory
+if ($LASTEXITCODE -ne 0) { throw 'ordinary RC50 artifact verification failed' }
 ```
 
 The verifier rejects a report/SBOM whose embedded Trivy ImageID, manifest
 hash, checksum or current local image ID has drifted. Trivy runs under an
 exclusive release-cache lock and every scan is serial, avoiding shared-cache
-lock races. No vulnerability is ignored. RC49 PostgreSQL has no exception and
+lock races. No vulnerability is ignored. RC50 PostgreSQL has no exception and
 must report zero HIGH/CRITICAL findings; the former fixed-version `gosu`
 finding is not exception-eligible.
 
 The command above is the ordinary internal-consistency mode, so operators can
 retain and diagnose failed or validation-only bundles. It is not transfer
 authority. Immediately before signing `SHA256SUMS`, rerun the independent
-verifier in strict transfer-ready mode against the signed RC49 tag:
+verifier in strict transfer-ready mode against the signed RC50 tag:
 
 ```powershell
 pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 `
-  -ReleaseDirectory release\0.1.0-rc49-exact1 `
+  -ReleaseDirectory $rc50ReleaseDirectory `
   -RequireTransferReady `
-  -SignedReleaseTag v0.1.0-rc49-signed
+  -SignedReleaseTag v0.1.0-rc50-signed
+if ($LASTEXITCODE -ne 0) { throw 'strict RC50 transfer-ready verification failed' }
 ```
 
 Strict mode verifies the annotated tag signature and peels it to a commit. It
 then requires `source.gitDirty=false`, a 40-hex `source.gitHead` equal to that
-commit, `applicationImageGate=passed`, and exactly one production block reason:
+commit, `releaseName=0.1.0-rc50`, all nine exact `:0.1.0-rc50` image
+references, `applicationImageGate=passed`, and exactly one production block reason:
 `idp_self_hosted_pending_canary`. Missing or additional reasons fail closed.
 `productionLaunch` must remain `blocked`; transfer is preparation for the real
 production canary, never approval to cut over traffic.
 
-RC49 permits only the exact Keycloak vendor-rejected tuple documented in
+RC50 permits only the exact Keycloak vendor-rejected tuple documented in
 `docs/IMAGE-SCAN-REVIEW.md`: `CVE-2026-22020`, `os-pkgs`/`redhat`,
 `java-21-openjdk-headless@1:21.0.12.1.1-1.2.el9`, empty fixed version,
 `HIGH`/`affected`, with the exact refreshed base digest and review deadline.
@@ -188,20 +212,20 @@ both files with the bundle.  Use only the reviewed offline release key and the
 independent allowed-signers file:
 
 ```powershell
-$releaseRoot = (Resolve-Path 'release\0.1.0-rc49-exact1').Path
+$releaseRoot = (Resolve-Path $rc50ReleaseDirectory).Path
 $checksumManifest = Join-Path $releaseRoot 'SHA256SUMS'
 $releaseSignature = "$checksumManifest.sig"
-$releaseSigningKey = '<offline RC49 release Ed25519 private key>'
+$releaseSigningKey = '<offline RC50 release Ed25519 private key>'
 $releaseAllowedSigners = '<reviewed release-tree allowed_signers file>'
 
 & ssh-keygen -Y sign -q -f "$releaseSigningKey" -n solov-invoice-release-v1 "$checksumManifest"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $releaseSignature -PathType Leaf)) {
-  throw 'RC49 artifact SHA256SUMS signature was not created'
+  throw 'RC50 artifact SHA256SUMS signature was not created'
 }
 Get-Content -Raw -LiteralPath $checksumManifest | & ssh-keygen -Y verify `
   -f "$releaseAllowedSigners" -I invoice-release@solov.cc `
   -n solov-invoice-release-v1 -s "$releaseSignature"
-if ($LASTEXITCODE -ne 0) { throw 'RC49 artifact SHA256SUMS signature verification failed' }
+if ($LASTEXITCODE -ne 0) { throw 'RC50 artifact SHA256SUMS signature verification failed' }
 ```
 
 Only after this signature and its verification pass may the exact signed source
@@ -210,14 +234,14 @@ and the nine manifest-bound images be transferred.  A non-zero image-gate exit
 is a release block, not an artifact-generation failure when its manifest says
 `productionLaunch: blocked`.
 
-The RC49 source baselines are Go 1.25.13, pgx 5.9.2, x/text 0.39.0,
+The RC50 source baselines are Go 1.25.13, pgx 5.9.2, x/text 0.39.0,
 PostgreSQL 18.6, Keycloak 26.7.2 and ClamAV 1.4.5 LTS.  PostgreSQL, ClamAV and
 ingest Nginx are locally built derivatives with fixed Alpine OpenSSL
 `3.5.8-r0`; Keycloak is derived from
 `sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067`.
 Refresh any base only through the full image scan/SBOM/review flow.
 
-Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC49
+Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC50
 manifest, signature and artifact verifier have passed. Production Compose has
 no image-tag fallback: all nine images (`invoice-system-api`,
 `invoice-system-pdf-scanner`, `invoice-system-tools`, `invoice-system-web`,
@@ -579,8 +603,10 @@ DSN files. Use URL-safe/hex passwords so a DSN is not ambiguously encoded.
 Generate the application field keyring without printing key material:
 
 ```bash
-export INVOICE_IMAGE_TAG='<exact tag from the verified RC49 release manifest>'
-RELEASE_MANIFEST=/root/invoice-system/release/0.1.0-rc49-exact1/release-manifest.json
+export INVOICE_IMAGE_TAG='<exact tag from the verified RC50 release manifest>'
+: "${RC50_RELEASE_DIRECTORY:?set the exact strict-verified and signed RC50 exactN directory name from the release ticket}"
+case "$RC50_RELEASE_DIRECTORY" in 0.1.0-rc50-exact[1-9]|0.1.0-rc50-exact[1-9][0-9]) ;; *) echo 'invalid RC50 release directory' >&2; exit 1 ;; esac
+RELEASE_MANIFEST="/root/invoice-system/release/$RC50_RELEASE_DIRECTORY/release-manifest.json"
 # The transferred manifest-bound images must already exist; production never builds or pulls them.
 test "$(jq '[.images[] | .name] | length' "$RELEASE_MANIFEST")" -eq 9
 for image_name in api pdf-scanner tools web source-agent postgres-runtime clamav-runtime ingest-proxy keycloak; do
@@ -810,7 +836,7 @@ KEYCLOAK_BOOTSTRAP_PASSWORD_FILE=/root/invoice-system/secrets/keycloak_bootstrap
 The fixed `/root/invoice-system/keycloak-backups` directory must already be
 `root:root 0700` on a non-ephemeral filesystem. The age identity and
 Ed25519 signing key are temporarily mounted offline material and must not live
-under the backup directory. RC38 installation must create root-only
+under the backup directory. The RC50 installation must create root-only
 `SOURCE_COMMIT`, `SOURCE_TAG`, `KEYCLOAK_IMAGE`, `SMTP_TRANSPORT` and an exact
 six-entry `RELEASE-TREE.sha256`, then sign it with the release key under the
 dedicated release-tree namespace. The production operator re-verifies this
@@ -818,7 +844,7 @@ attestation using the independent root-only release-tree trust file. This is a
 signed installed-tree attestation; the deployment wrapper must separately
 verify the Git tag signature and peeled tag commit before generating it.
 
-Before the mail window, rebuild/recreate the exact RC38 Keycloak container and
+Before the mail window, rebuild/recreate the exact RC50 Keycloak container and
 prove its immutable image ID plus the explicit default TLS hostname verifier
 and disabled Kubernetes truststore environment. Run the negative wrong-hostname
 SMTP canary when available; do not use this operator to send from an older
@@ -1072,20 +1098,20 @@ snapshot columns. Before applying it:
 
 1. verify signed tag `v0.1.0-rc17-signed` peels to commit
    `b17dbe4ba2d1a2c4926d0156abf80c9207a74a54` and retain the RC17 release
-   manifest's exact rollback image IDs; verify the exact RC32 candidate images,
+   manifest's exact rollback image IDs; verify the exact RC50 candidate images,
    then resolve the existing-pair/first-install path below without starting
    invoice ingestion;
 2. stop the old `api`, `ingest-proxy`, and all source-agent containers and prove
    there are no invoice writer sessions;
 3. while they remain stopped, run
-   the reviewed RC32 `deploy/backup/backup.sh` with
+   the reviewed RC50 `deploy/backup/backup.sh` with
    `BACKUP_SCHEMA_MODE=pre-0011`; it records initial service state and must not
-   start a service that was stopped. Restore it with the RC32 drill and
+   start a service that was stopped. Restore it with the RC50 drill and
    `RESTORE_SCHEMA_MODE=pre-0011` plus the exact RC17
    `PRE_0011_TOOLS_IMAGE`, which proves migration 0011/policy table are absent
    while the source-agent image bound to the archived state generation validates
    its cutover/state contracts. An old V3 pair requires the exact RC24 source
-   agent; the RC32 V4 agent must not be used to reinterpret it. Do not use the
+   agent; the RC50 V4 agent must not be used to reinterpret it. Do not use the
    older RC17 backup script here because it resumes every service unconditionally;
 4. verify `funding_lots`, `source_usage_events`, `source_credit_events`,
    `consumption_allocations`, `invoice_requests`, and
@@ -1103,13 +1129,13 @@ create-only cutover pairs, so resolve one of these paths during item 1:
   `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`; require the exact source
   V3 contract, both clocks strictly before the boundary, and record the
   encrypted file hashes in the pre-0011 backup ticket. This proves the rollback
-  generation only; it is not authorization to start the RC32 receiver.
+  generation only; it is not authorization to start the RC50 receiver.
 - First installation with no pair: before applying 0011, stop one upstream
   application, pass the explicit-container quiescence gate, and use the exact
-  RC32 source-agent image to capture that source once and immediately run
+  RC50 source-agent image to capture that source once and immediately run
   `check-cutover`; restart it, repeat for the other source, then initialize the
   ten empty durable state directories without starting ingestion. Now create
-  and restore-test the full backup in explicit RC32 pre-0011 mode while the
+  and restore-test the full backup in explicit RC50 pre-0011 mode while the
   services remain stopped. These same
   encrypted pairs are registered after migration; they are never captured
   again.
@@ -1127,8 +1153,8 @@ locks and rechecks these conditions.
 1. Keep the verified pre-0011 package. Create, sign and restore-test a separate
    post-0011 recovery point containing the unused RC24 state generation and
    both old pairs. Its source-state check must use the exact RC24 source-agent
-   image recorded for that recovery generation, never RC32.
-2. Stop all source agents. Install the RC32 v4 semantic-fingerprint functions
+   image recorded for that recovery generation, never RC50.
+2. Stop all source agents. Install the RC50 v4 semantic-fingerprint functions
    through the reviewed wrapper and re-prove exact function hashes, roles,
    ACLs and `pg_depend=0`. Run all ten `check-db-static` commands; full
    `check-db` cannot pass against the old V3 pair and is forbidden at this step.
@@ -1170,7 +1196,7 @@ BACKUP_SCHEMA_MODE=pre-0011 BACKUP_QUIESCE_CONFIRMED=YES \
 RESTORE_SCHEMA_MODE=pre-0011 \
 RESTORE_POSTGRES_TMPFS_SIZE=16g \
 PRE_0011_TOOLS_IMAGE='<exact RC17 tools image from its release manifest>' \
-INVOICE_TOOLS_IMAGE='<exact RC32 tools image>' \
+INVOICE_TOOLS_IMAGE='<exact RC50 tools image>' \
 SOURCE_AGENT_IMAGE='<exact RC24 source-agent image bound to this old V3 backup>' \
   bash deploy/backup/restore-drill.sh
 ```
@@ -1466,7 +1492,7 @@ the receiver's five-minute maximum clock skew plus two poll intervals. A missed
 non-identity heartbeat still fails after five minutes independently of the
 watermark budget. After startup, an idle Sub2API payment stream must continue
 publishing a watermark near source time minus five minutes; a watermark pinned
-to the timestamp of the last payment is an RC32 rollback condition.
+to the timestamp of the last payment is an RC50 rollback condition.
 
 ```bash
 docker compose --env-file deploy/.env.production \

@@ -2,7 +2,7 @@
 
 > The RC1/RC17/RC24/RC32/RC34/RC38/RC48 entries retained later in this document
 > are historical evidence.
-> They are not renamed or rewritten as RC49 evidence.  The current RC49 section
+> They are not renamed or rewritten as RC50 evidence.  The current RC50 section
 > records source/static remediation design and review policy only; it is **not**
 > an image build, Trivy result, SBOM, signature, artifact-verifier, runtime,
 > provisioning, transfer, deployment, canary, or rollback record.
@@ -12,12 +12,22 @@ vulnerability and Java databases downloaded immediately before the scan.
 The policy fails on every HIGH or CRITICAL finding unless this file contains a
 specific reachability review.
 
-## Current RC49 remediation and review status (source/static only)
+## Current RC50 remediation and review status (source/static only)
 
-RC49 is an urgent remediation slice, not an approved release.  The RC48
+RC50 is an urgent remediation slice, not an approved release.  The RC48
 failure evidence at `release/0.1.0-rc48-exact1` remains byte-for-byte
 historical evidence and RC48 remains blocked.  No current image result is
 claimed here.
+
+RC49 also remains failed historical evidence: signed tag
+`v0.1.0-rc49-signed` is fixed at
+`eb7b4365d3af30241debe7b1a054b7eed8b94dcd`, and the partial
+`release/0.1.0-rc49-exact1`, `release/0.1.0-rc49-exact2`, and
+`release/0.1.0-rc49-exact3` directories contain no release manifest. They are
+retained and must be treated as read-only; their file set and hashes are
+anchored by `docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt`. They cannot be renamed,
+amended, or used as RC50 evidence. RC50 requires a new exact tag, nine newly
+tagged images, and a new artifact directory.
 
 ### Production versus RC48 fact
 
@@ -36,7 +46,7 @@ non-runtime tools image with the same OpenSSL finding.  Thus blocking RC48 was
 correct, but it did not reduce the exposure already present in production;
 remediation is urgent.
 
-### Actual RC49 source changes awaiting evidence
+### Actual RC50 source changes awaiting evidence
 
 - Alpine runtime stages install `libcrypto3=3.5.8-r0` and
   `libssl3=3.5.8-r0`.
@@ -50,26 +60,29 @@ remediation is urgent.
   and thereby remediates the RC48 `sqlite-libs` family
   `CVE-2026-11822` and `CVE-2026-11824`.  Final-image removal of the unused
   MSSQL JDBC driver and `/opt/keycloak/bin/client` is retained pruning proof
-  from the existing hardening; it is required evidence, not an RC49 source
+  from the existing hardening; it is required evidence, not an RC50 source
   remediation.
 
-The intended RC49 inventory is nine manifest-bound images under one exact,
+The intended RC50 inventory is nine manifest-bound images under one exact,
 immutable release tag: `invoice-system-api`, `invoice-system-pdf-scanner`,
 `invoice-system-tools`, `invoice-system-web`, `invoice-source-agent`,
 `invoice-postgres`, `invoice-clamav`, `invoice-ingest-proxy`, and
 `invoice-keycloak`.  Production Compose has no `build:` directives and every
 locally built service uses `pull_policy: never`; a missing transferred image
-must fail closed.  This inventory is a source contract until Task 5 produces
-and independently verifies the manifest and its IDs.
+must fail closed.  This inventory is a source contract until the RC50 release
+gate produces and independently verifies the manifest and its IDs.
 
-### RC49 exception policy
+### RC50 exception policy
 
-PostgreSQL has **no RC49 exception**.  Its policy is zero findings: every old
+PostgreSQL has **no RC50 exception**.  Its policy is zero findings: every old
 `gosu` finding has an upstream fixed version and the legacy fixed-version
 fixture is deliberately rejected as exception-eligible.
 
-The sole permitted RC49 exception is the retained raw Keycloak finding with
+The sole permitted RC50 exception is the retained raw Keycloak finding with
 this exact tuple:
+
+The scanner policy remains `HIGH,CRITICAL` with `ignoreUnfixed=false`; there is
+no severity reduction, hidden finding, or generic allowlist.
 
 | Field | Required value |
 |---|---|
@@ -97,7 +110,11 @@ pruning proof, runtime/provisioning proofs, rationale and review window.  Any
 tuple or digest drift, missing proof, or review expiry fails closed and requires
 a new committed review.
 
-## Approved candidate images
+## Historical RC1 approved-candidate snapshot (retired)
+
+This table is retained only as the 2026-08-21 RC1 snapshot. Its generic
+`release-candidate` tags are not RC50 references and do not authorize current
+build, transfer, canary, or deployment work.
 
 | Image | Local immutable image ID | HIGH | CRITICAL |
 |---|---|---:|---:|
@@ -164,14 +181,14 @@ with no fixed version. The exception is deliberately non-generalizable:
 Any additional finding, target/package/version/status change, base digest
 change, missing pruning proof or failed runtime smoke makes Keycloak fail.
 
-## PostgreSQL reachability exception
+## Historical RC1 PostgreSQL reachability exception (retired)
 
 The reviewed PostgreSQL image is
 `postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2`.
 Its Alpine packages have 0 HIGH/CRITICAL findings. Trivy reports 21 HIGH and
 one CRITICAL against the Go 1.24.6 standard library embedded in `gosu 1.19`.
 
-This is an accepted, narrow binary-reachability exception:
+At RC1 review time this was accepted as a narrow binary-reachability exception:
 
 - `gosu` is invoked only by the fixed upstream entrypoint to change from root
   to the local `postgres` UID and `exec` the database process;
@@ -181,7 +198,9 @@ This is an accepted, narrow binary-reachability exception:
   zero called vulnerabilities. It found vulnerable standard-library packages
   in the binary but no call path to their vulnerable symbols.
 
-The exception must be reevaluated whenever the PostgreSQL digest changes.
+That retired exception required reevaluation whenever the PostgreSQL digest
+changed. It is not permitted for RC50, whose PostgreSQL policy is zero findings
+with a null exception record.
 
 ## Historical rejected 26.7.1 reference image
 
@@ -225,7 +244,9 @@ invoice verifier's reviewed 10-minute maximum (plus bounded clock skew); a
 future approved ZITADEL deployment would have to set that lifetime to 10
 minutes and pass a real token canary.
 
-The alternative was therefore not added to the deployment tree. The current
-self-hosted path is the exact Keycloak 26.7.2 derived image above; it must keep
-passing the immutable-image gate and must still pass the real production
-OIDC/MFA/logout canary before traffic is enabled.
+The alternative was therefore not added to the deployment tree. In that
+historical review, the self-hosted path was the then-reviewed Keycloak 26.7.2
+derived image above and still required the immutable-image gate plus real
+production OIDC/MFA/logout canary. The current RC50 path is defined only by the
+exact tuple and refreshed base digest in the bounded RC50 section at the top of
+this document.

@@ -650,7 +650,7 @@ IdP mode: `$IdPMode`
 Application image gate: `$applicationStatus`
 Production launch: `$productionStatus`
 
-PostgreSQL has no RC49 exception path. Its locally built linux/amd64 release
+PostgreSQL has no RC50 exception path. Its locally built linux/amd64 release
 image must have zero HIGH/CRITICAL findings and retain a null exception record.
 The Keycloak exception, when present, retains the Trivy finding and is bound to
 the exact 26.7.2 base digest, current derived image ID, one CVE/package/version

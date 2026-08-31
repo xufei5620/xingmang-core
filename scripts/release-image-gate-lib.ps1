@@ -208,7 +208,7 @@ function Assert-PostgresGosuFindingScope {
             [string]$_.Status -ceq [string]$finding.Status
         })
         if ($matchingTuple.Count -ne 1) {
-            throw "PostgreSQL exception has no approved RC49 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
+            throw "PostgreSQL exception has no approved RC50 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
         }
     }
     return $true
@@ -285,13 +285,163 @@ function Assert-ExceptionReviewContract {
     return $true
 }
 
+function Get-RequiredExactProperty {
+    param(
+        [Parameter(Mandatory)]$InputObject,
+        [Parameter(Mandatory)][string]$PropertyName,
+        [Parameter(Mandatory)][string]$Context
+    )
+
+    if ($null -eq $InputObject) {
+        throw "strict transfer requires exact property $PropertyName on $Context"
+    }
+    $matchingProperties = @($InputObject.PSObject.Properties | Where-Object {
+        [string]$_.Name -ceq $PropertyName
+    })
+    if ($matchingProperties.Count -ne 1) {
+        throw "strict transfer requires exact property $PropertyName on $Context"
+    }
+    return $matchingProperties[0]
+}
+
+function Assert-ExactReleaseVulnerabilityPolicy {
+    param([Parameter(Mandatory)]$Policy)
+
+    $severitiesProperty = Get-RequiredExactProperty -InputObject $Policy -PropertyName 'trivySeverities' -Context 'manifest policy'
+    if ($severitiesProperty.Value -isnot [System.Array] -or
+        $severitiesProperty.Value.Count -ne 2 -or
+        $severitiesProperty.Value[0] -isnot [string] -or
+        $severitiesProperty.Value[1] -isnot [string] -or
+        [string]$severitiesProperty.Value[0] -cne 'HIGH' -or
+        [string]$severitiesProperty.Value[1] -cne 'CRITICAL') {
+        throw 'release manifest policy.trivySeverities must be the exact string array HIGH,CRITICAL'
+    }
+    $ignoreUnfixedProperty = Get-RequiredExactProperty -InputObject $Policy -PropertyName 'ignoreUnfixed' -Context 'manifest policy'
+    if ($ignoreUnfixedProperty.Value -isnot [bool] -or $ignoreUnfixedProperty.Value) {
+        throw 'release manifest policy.ignoreUnfixed=false must be a Boolean'
+    }
+    $ignoredVulnerabilitiesProperty = Get-RequiredExactProperty -InputObject $Policy -PropertyName 'ignoredVulnerabilities' -Context 'manifest policy'
+    if ($ignoredVulnerabilitiesProperty.Value -isnot [System.Array] -or
+        $ignoredVulnerabilitiesProperty.Value.Count -ne 0) {
+        throw 'release manifest policy.ignoredVulnerabilities must be an empty array'
+    }
+    $trivyExecutionProperty = Get-RequiredExactProperty -InputObject $Policy -PropertyName 'trivyExecution' -Context 'manifest policy'
+    if ($trivyExecutionProperty.Value -isnot [string] -or
+        [string]$trivyExecutionProperty.Value -cne 'serial') {
+        throw 'release manifest policy.trivyExecution must be the exact string serial'
+    }
+    $staleImageArtifactsProperty = Get-RequiredExactProperty -InputObject $Policy -PropertyName 'staleImageArtifacts' -Context 'manifest policy'
+    if ($staleImageArtifactsProperty.Value -isnot [string] -or
+        [string]$staleImageArtifactsProperty.Value -cne 'fail') {
+        throw 'release manifest policy.staleImageArtifacts must be the exact string fail'
+    }
+    $postgresExceptionProperty = Get-RequiredExactProperty -InputObject $Policy -PropertyName 'postgresException' -Context 'manifest policy'
+    if ($null -ne $postgresExceptionProperty.Value) {
+        throw 'release manifest policy.postgresException must be null'
+    }
+    return $true
+}
+
+function Assert-ExactReleaseManifestPolicy {
+    param([Parameter(Mandatory)]$Manifest)
+
+    $policyProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'policy' -Context 'manifest'
+    Assert-ExactReleaseVulnerabilityPolicy -Policy $policyProperty.Value | Out-Null
+    return $true
+}
+
+function Assert-JsonHasNoDuplicateProperties {
+    param([Parameter(Mandatory)][string]$JsonText)
+
+    $document = $null
+    try {
+        $document = [System.Text.Json.JsonDocument]::Parse($JsonText)
+
+        function Assert-JsonElementHasNoDuplicateProperties {
+            param(
+                [Parameter(Mandatory)][System.Text.Json.JsonElement]$Element,
+                [Parameter(Mandatory)][string]$Path
+            )
+
+            switch ($Element.ValueKind) {
+                ([System.Text.Json.JsonValueKind]::Object) {
+                    $exactNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                    $caseFoldedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                    foreach ($property in $Element.EnumerateObject()) {
+                        if (-not $exactNames.Add($property.Name) -or
+                            -not $caseFoldedNames.Add($property.Name)) {
+                            throw "duplicate JSON property at ${Path}: $($property.Name)"
+                        }
+                        Assert-JsonElementHasNoDuplicateProperties -Element $property.Value -Path "${Path}.$($property.Name)"
+                    }
+                }
+                ([System.Text.Json.JsonValueKind]::Array) {
+                    $index = 0
+                    foreach ($item in $Element.EnumerateArray()) {
+                        Assert-JsonElementHasNoDuplicateProperties -Element $item -Path "${Path}[$index]"
+                        $index++
+                    }
+                }
+            }
+        }
+
+        Assert-JsonElementHasNoDuplicateProperties -Element $document.RootElement -Path '$'
+    } catch [System.Text.Json.JsonException] {
+        throw "release manifest is not valid strict JSON: $($_.Exception.Message)"
+    } finally {
+        if ($null -ne $document) { $document.Dispose() }
+    }
+    return $true
+}
+
+function Assert-RC49FailureEvidenceAnchor {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$AnchorText
+    )
+
+    $anchoredFiles = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($line in @($AnchorText -split '\r?\n')) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#', [StringComparison]::Ordinal)) { continue }
+        $match = [regex]::Match($line, '^(?<hash>[0-9a-f]{64})  (?<path>release/0\.1\.0-rc49-exact[123]/[^\r\n]+)$')
+        if (-not $match.Success -or
+            -not $anchoredFiles.TryAdd($match.Groups['path'].Value, $match.Groups['hash'].Value)) {
+            throw "RC49 failure evidence anchor has an invalid or duplicate entry: $line"
+        }
+    }
+    if ($anchoredFiles.Count -eq 0) { throw 'RC49 failure evidence anchor is empty' }
+
+    $actualFiles = @()
+    foreach ($directoryName in @('0.1.0-rc49-exact1', '0.1.0-rc49-exact2', '0.1.0-rc49-exact3')) {
+        $directory = Join-Path $ProjectRoot "release\$directoryName"
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            throw "RC49 failure evidence directory is missing: $directoryName"
+        }
+        $actualFiles += Get-ChildItem -LiteralPath $directory -File -Recurse -Force
+    }
+    if ($actualFiles.Count -ne $anchoredFiles.Count) {
+        throw 'RC49 failure evidence file set drifted from the tracked anchor'
+    }
+    foreach ($file in $actualFiles) {
+        $relativePath = [IO.Path]::GetRelativePath($ProjectRoot, $file.FullName).Replace('\', '/')
+        if (-not $anchoredFiles.ContainsKey($relativePath)) {
+            throw "RC49 failure evidence contains an unanchored file: $relativePath"
+        }
+        $actualHash = Get-FileSha256Lower -Path $file.FullName
+        if ($actualHash -cne $anchoredFiles[$relativePath]) {
+            throw "RC49 failure evidence hash drifted: $relativePath"
+        }
+    }
+    return $true
+}
+
 function Get-StrictSignedReleaseTagRef {
     param([Parameter(Mandatory)][string]$SignedReleaseTag)
 
-    if ($SignedReleaseTag -cne 'v0.1.0-rc49-signed') {
-        throw 'strict transfer requires the exact signed RC49 tag v0.1.0-rc49-signed'
+    if ($SignedReleaseTag -cne 'v0.1.0-rc50-signed') {
+        throw 'strict transfer requires the exact signed RC50 tag v0.1.0-rc50-signed'
     }
-    return 'refs/tags/v0.1.0-rc49-signed'
+    return 'refs/tags/v0.1.0-rc50-signed'
 }
 
 function Assert-TransferReadyManifest {
@@ -303,38 +453,87 @@ function Assert-TransferReadyManifest {
     if ($ExpectedGitHead -notmatch '^[0-9a-fA-F]{40}$') {
         throw 'signed tag commit is not a 40-hex Git commit'
     }
-    $sourceProperty = $Manifest.PSObject.Properties['source']
-    if ($null -eq $sourceProperty -or $null -eq $sourceProperty.Value) {
+    try {
+        $releaseNameProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'releaseName' -Context 'manifest'
+    } catch {
+        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc50 is mandatory'
+    }
+    if ($releaseNameProperty.Value -isnot [string] -or
+        [string]$releaseNameProperty.Value -cne '0.1.0-rc50') {
+        throw 'strict transfer requires manifest releaseName=0.1.0-rc50'
+    }
+
+    $expectedImageReferences = [ordered]@{
+        api = 'invoice-system-api:0.1.0-rc50'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc50'
+        tools = 'invoice-system-tools:0.1.0-rc50'
+        web = 'invoice-system-web:0.1.0-rc50'
+        'source-agent' = 'invoice-source-agent:0.1.0-rc50'
+        'postgres-runtime' = 'invoice-postgres:0.1.0-rc50'
+        'clamav-runtime' = 'invoice-clamav:0.1.0-rc50'
+        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc50'
+        keycloak = 'invoice-keycloak:0.1.0-rc50'
+    }
+    $imagesProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'images' -Context 'manifest'
+    if ($imagesProperty.Value -isnot [System.Array] -or
+        $imagesProperty.Value.Count -ne $expectedImageReferences.Count) {
+        throw 'strict transfer requires the exact RC50 image inventory'
+    }
+    foreach ($expectedImage in $expectedImageReferences.GetEnumerator()) {
+        $matchingRecords = @()
+        foreach ($imageRecord in $imagesProperty.Value) {
+            $nameProperty = Get-RequiredExactProperty -InputObject $imageRecord -PropertyName 'name' -Context 'manifest image record'
+            if ($nameProperty.Value -is [string] -and
+                [string]$nameProperty.Value -ceq [string]$expectedImage.Key) {
+                $matchingRecords += $imageRecord
+            }
+        }
+        if ($matchingRecords.Count -ne 1) {
+            throw 'strict transfer requires the exact RC50 image inventory'
+        }
+        $referenceProperty = Get-RequiredExactProperty -InputObject $matchingRecords[0] -PropertyName 'reference' -Context "manifest image $($expectedImage.Key)"
+        if ($referenceProperty.Value -isnot [string] -or
+            [string]$referenceProperty.Value -cne [string]$expectedImage.Value) {
+            throw 'strict transfer requires the exact RC50 image inventory'
+        }
+    }
+
+    $sourceProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'source' -Context 'manifest'
+    if ($null -eq $sourceProperty.Value) {
         throw 'strict transfer requires manifest source provenance'
     }
     $source = $sourceProperty.Value
-    $gitDirtyProperty = $source.PSObject.Properties['gitDirty']
-    if ($null -eq $gitDirtyProperty -or $gitDirtyProperty.Value -isnot [bool] -or $gitDirtyProperty.Value) {
+    $gitDirtyProperty = Get-RequiredExactProperty -InputObject $source -PropertyName 'gitDirty' -Context 'manifest source'
+    if ($gitDirtyProperty.Value -isnot [bool] -or $gitDirtyProperty.Value) {
         throw 'strict transfer requires source.gitDirty=false as a Boolean'
     }
-    $gitHeadProperty = $source.PSObject.Properties['gitHead']
-    $gitHead = if ($null -eq $gitHeadProperty) { '' } else { [string]$gitHeadProperty.Value }
-    if ($gitHead -notmatch '^[0-9a-fA-F]{40}$') {
-        throw 'strict transfer requires source.gitHead to be a 40-hex commit'
+    $gitHeadProperty = Get-RequiredExactProperty -InputObject $source -PropertyName 'gitHead' -Context 'manifest source'
+    if ($gitHeadProperty.Value -isnot [string] -or
+        [string]$gitHeadProperty.Value -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'strict transfer requires source.gitHead to be a 40-hex string commit'
     }
+    $gitHead = [string]$gitHeadProperty.Value
     if (-not [string]::Equals($gitHead, $ExpectedGitHead, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'strict transfer source.gitHead does not equal the supplied signed tag commit'
     }
 
-    $decisionsProperty = $Manifest.PSObject.Properties['decisions']
-    if ($null -eq $decisionsProperty -or $null -eq $decisionsProperty.Value) {
+    $decisionsProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'decisions' -Context 'manifest'
+    if ($null -eq $decisionsProperty.Value) {
         throw 'strict transfer requires manifest release decisions'
     }
     $decisions = $decisionsProperty.Value
-    if ([string]$decisions.applicationImageGate -cne 'passed') {
-        throw 'strict transfer requires applicationImageGate=passed'
+    $applicationImageGateProperty = Get-RequiredExactProperty -InputObject $decisions -PropertyName 'applicationImageGate' -Context 'manifest decisions'
+    if ($applicationImageGateProperty.Value -isnot [string] -or
+        [string]$applicationImageGateProperty.Value -cne 'passed') {
+        throw 'strict transfer requires applicationImageGate=passed as a string'
     }
-    if ([string]$decisions.productionLaunch -cne 'blocked') {
-        throw 'strict transfer requires productionLaunch=blocked pending the real canary'
+    $productionLaunchProperty = Get-RequiredExactProperty -InputObject $decisions -PropertyName 'productionLaunch' -Context 'manifest decisions'
+    if ($productionLaunchProperty.Value -isnot [string] -or
+        [string]$productionLaunchProperty.Value -cne 'blocked') {
+        throw 'strict transfer requires productionLaunch=blocked as a string pending the real canary'
     }
-    $reasonsProperty = $decisions.PSObject.Properties['reasons']
-    if ($null -eq $reasonsProperty -or
-        $reasonsProperty.Value -isnot [System.Array] -or
+    $reasonsProperty = Get-RequiredExactProperty -InputObject $decisions -PropertyName 'reasons' -Context 'manifest decisions'
+    if ($reasonsProperty.Value -isnot [System.Array] -or
         $reasonsProperty.Value.Count -ne 1 -or
         $reasonsProperty.Value[0] -isnot [string] -or
         $reasonsProperty.Value[0] -cne 'idp_self_hosted_pending_canary') {

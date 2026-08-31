@@ -23,19 +23,19 @@ if ($RequireTransferReady) {
     $peeledSignedTagRef = "$signedTagRef^{}"
     $tagObjectType = (& git -C $projectRoot cat-file -t $signedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $tagObjectType -cne 'tag') {
-        throw 'strict transfer requires the supplied RC49 name to resolve to an annotated tag object'
+        throw 'strict transfer requires the supplied RC50 name to resolve to an annotated tag object'
     }
     & git -C $projectRoot verify-tag $signedTagRef *> $null
     if ($LASTEXITCODE -ne 0) {
-        throw 'strict transfer requires a valid signature on the supplied RC49 tag'
+        throw 'strict transfer requires a valid signature on the supplied RC50 tag'
     }
     $signedTagCommit = (& git -C $projectRoot rev-parse --verify $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $signedTagCommit -notmatch '^[0-9a-f]{40}$') {
-        throw 'strict transfer could not peel the supplied signed RC49 tag to a commit'
+        throw 'strict transfer could not peel the supplied signed RC50 tag to a commit'
     }
     $peeledObjectType = (& git -C $projectRoot cat-file -t $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $peeledObjectType -cne 'commit') {
-        throw 'strict transfer signed RC49 tag did not peel to a commit object'
+        throw 'strict transfer signed RC50 tag did not peel to a commit object'
     }
 }
 
@@ -55,7 +55,9 @@ if (((Get-Item -LiteralPath $releaseRoot -Force).Attributes -band [IO.FileAttrib
 Assert-Sha256Sums -ReleaseDirectory $releaseRoot | Out-Null
 $manifestPath = Join-Path $releaseRoot 'release-manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'release-manifest.json is missing' }
-$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$manifestJson = Get-Content -Raw -LiteralPath $manifestPath
+Assert-JsonHasNoDuplicateProperties -JsonText $manifestJson | Out-Null
+$manifest = $manifestJson | ConvertFrom-Json
 if ([string]$manifest.schemaVersion -cne 'solov.invoice.release-image-gate/v1') {
     throw 'unsupported release image gate manifest schema'
 }
@@ -82,14 +84,7 @@ if ([string]$manifest.tools.scriptSha256 -cne (Get-FileSha256Lower -Path (Join-P
     [string]$manifest.tools.webSecurityHeadersVerifierSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-web-security-headers.ps1'))) {
     throw 'release gate/verifier source changed after artifact generation'
 }
-if ((@($manifest.policy.trivySeverities) -join ',') -cne 'HIGH,CRITICAL' -or
-    $manifest.policy.ignoreUnfixed -ne $false -or
-    @($manifest.policy.ignoredVulnerabilities).Count -ne 0 -or
-    [string]$manifest.policy.trivyExecution -cne 'serial' -or
-    [string]$manifest.policy.staleImageArtifacts -cne 'fail' -or
-    $null -ne $manifest.policy.postgresException) {
-    throw 'release manifest weakens the reviewed vulnerability/staleness policy'
-}
+Assert-ExactReleaseManifestPolicy -Manifest $manifest | Out-Null
 
 $currentFingerprints = [ordered]@{
     backend = Get-ContextFingerprint -Root (Join-Path $projectRoot 'backend') -ExcludedDirectoryNames @('bin', 'coverage')
@@ -114,7 +109,7 @@ if ($idpMode -ceq 'keycloak') { $requiredNames += 'keycloak' }
 $records = @($manifest.images)
 $names = @($records | ForEach-Object { [string]$_.name })
 if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw 'release manifest has duplicate image names' }
-if ($names.Count -ne $requiredNames.Count) { throw 'release manifest does not contain the exact RC49 image inventory' }
+if ($names.Count -ne $requiredNames.Count) { throw 'release manifest does not contain the exact RC50 image inventory' }
 foreach ($name in $requiredNames) {
     if ($name -notin $names) { throw "release manifest is missing required image $name" }
 }
@@ -179,11 +174,11 @@ foreach ($record in $records) {
         [string]$record.reference -cne "${expectedRepository}:$releaseImageTag" -or
         [string]$record.kind -cne 'built' -or
         [string]$record.acquisition -cne 'built-from-source') {
-        throw "RC49 image is not an exact locally built common-tag record: $($record.name)"
+        throw "RC50 image is not an exact locally built common-tag record: $($record.name)"
     }
     if ($expectedDerivedBases.Contains([string]$record.name) -and
         [string]$record.baseReference -cne [string]$expectedDerivedBases[[string]$record.name]) {
-        throw "RC49 derived image base reference drifted: $($record.name)"
+        throw "RC50 derived image base reference drifted: $($record.name)"
     }
     if ([string]$record.name -notin @('postgres-runtime', 'keycloak')) {
         if ($record.vulnerabilities.total -ne 0 -or [string]$record.policyStatus -cne 'approved') {
@@ -197,7 +192,7 @@ if ($postgres.Count -ne 1) { throw 'release manifest must have exactly one Postg
 if ($postgres[0].vulnerabilities.total -ne 0 -or
     [string]$postgres[0].policyStatus -cne 'approved' -or
     $null -ne $postgres[0].exception) {
-    throw 'RC49 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
+    throw 'RC50 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
 }
 
 $ingest = @($records | Where-Object name -eq 'ingest-proxy')

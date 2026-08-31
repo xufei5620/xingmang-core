@@ -1,5 +1,9 @@
 # RC49 Image Security Remediation Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC49 failed and is retained as historical
+> evidence. Continue only with
+> `docs/superpowers/plans/2026-08-31-invoice-rc50-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Produce and deploy a new RC49 whose fixable HIGH/CRITICAL image findings are removed and whose only residual finding is the exact, time-bounded Keycloak vendor-rejected tuple.

@@ -277,17 +277,37 @@ npm test -- --run    # vitest: 2 files, 15 tests, all pass
   平台密码/Sub2API 2FA、首次自动绑定、8h/24h 会话与跨平台 404；管理员仍验
   OIDC/MFA/RP logout/back-channel logout，OIDC 管理员的显式绑定挑战不变。
 
-## Not run (and why)
+### RC50 release-candidate follow-up (2026-08-31)
+
+- RC49 已失败，后续必须按只读历史对待：`v0.1.0-rc49-signed` 固定在
+  `eb7b4365d3af30241debe7b1a054b7eed8b94dcd`；
+  `release/0.1.0-rc49-exact1`、`release/0.1.0-rc49-exact2`、
+  `release/0.1.0-rc49-exact3` 均为没有 `release-manifest.json` 的不完整失败目录，
+  不具备传输或部署授权，禁止改写、复用、改名或冒充新候选证据；文件集与
+  SHA-256 由 `docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt` 固定。
+- 后续修复候选顺延为 RC50。严格传输仅接受精确签名标签
+  `v0.1.0-rc50-signed`，Git 查询只使用由其映射出的完整
+  `refs/tags/v0.1.0-rc50-signed`；manifest 必须精确绑定
+  `releaseName=0.1.0-rc50` 与九个 `:0.1.0-rc50` 镜像引用。
+- Keycloak 精确 tuple、基础 digest、HIGH/CRITICAL 阈值与
+  `ignoreUnfixed=false` 均未放宽。RC50 标签、全镜像门禁、签名、canary 与生产
+  部署尚未执行，因此本 handoff 仍是 **NO-GO**。
+
+## Original handoff baseline: not run at initial delivery
+
+The bullets below preserve the initial delivery state. The acceptance follow-up
+above supersedes the PostgreSQL item with later, real PostgreSQL 18 evidence.
 
 - **PostgreSQL integration tests** (`internal/auth/postgres_integration_test.go`
-  and others) — skip cleanly with `t.Skip("INVOICE_TEST_DATABASE_URL is not
-  set")`; no real Postgres was available in this environment. This means the
+  and others) — at initial delivery they skipped cleanly with
+  `t.Skip("INVOICE_TEST_DATABASE_URL is not set")`; no real PostgreSQL was
+  available in that environment. At that time the
   new platform-identity branches in `ResolveOrCreate` (the
   platform/issuer/subject consistency checks, the stored-vs-verified
-  mismatch check) and migration `0015` itself have **not** been exercised
-  against a real database. **Recommend running these, and applying +
-  rehearsing migration 0015 (up, and ideally a round-trip), against a
-  staging Postgres before this ships.**
+  mismatch check) and migration `0015` had **not** been exercised against a
+  real database. The later acceptance run recorded above closed this gap with
+  PostgreSQL 18, 24/24 integration tests, and a real migration 0015 execution;
+  this retained historical bullet is not a current missing gate.
 - **Real Sub2API/New API connectivity.** Nothing in this change ever
   contacted the real `https://api.solov.cc` or `https://xm.solov.cc`. All
   backend coverage uses `httptest` fakes shaped to match the wire contracts
