@@ -107,6 +107,106 @@ if ($productionComposeText -match '(?m)^\s+build:\s*$') {
     throw 'production Compose retains a local build directive outside the release gate'
 }
 
+$backendDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'backend\Dockerfile')
+$webDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'web\Dockerfile')
+$keycloakDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\keycloak\Dockerfile')
+$postgresDockerfilePath = Join-Path $projectRoot 'deploy\postgres\Dockerfile'
+$postgresGoModPath = Join-Path $projectRoot 'deploy\postgres\gosu-build\go.mod'
+$postgresGoSumPath = Join-Path $projectRoot 'deploy\postgres\gosu-build\go.sum'
+$clamavDockerfilePath = Join-Path $projectRoot 'deploy\clamav\Dockerfile'
+$ingestDockerfilePath = Join-Path $projectRoot 'deploy\ingest-proxy\Dockerfile'
+if (-not (Test-Path -LiteralPath $postgresDockerfilePath) -or
+    -not (Test-Path -LiteralPath $postgresGoModPath) -or
+    -not (Test-Path -LiteralPath $postgresGoSumPath) -or
+    -not (Test-Path -LiteralPath $clamavDockerfilePath) -or
+    -not (Test-Path -LiteralPath $ingestDockerfilePath)) {
+    throw 'RC49 derived PostgreSQL, ClamAV, and ingest runtime image sources are missing'
+}
+
+$postgresDockerfile = Get-Content -Raw -LiteralPath $postgresDockerfilePath
+$postgresGoMod = Get-Content -Raw -LiteralPath $postgresGoModPath
+$postgresGoSum = Get-Content -Raw -LiteralPath $postgresGoSumPath
+$clamavDockerfile = Get-Content -Raw -LiteralPath $clamavDockerfilePath
+$ingestDockerfile = Get-Content -Raw -LiteralPath $ingestDockerfilePath
+$fixedAlpinePackages = 'libcrypto3=3.5.8-r0 libssl3=3.5.8-r0'
+$goBuilderReference = 'golang:1.25.13-alpine@sha256:1e0126852075c9c60731c8ba49088448b91f63e2aed97ca9d1a9791622a05946'
+$postgresBaseReference = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+$clamavBaseReference = 'clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8'
+$nginxBaseReference = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
+$keycloakBaseReference = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
+$gosuModuleVersion = 'v0.0.0-20250923190938-6456aaa0f3c8'
+$gosuExpectedVersion = '1.19 (go1.25.13 on linux/amd64; gc)'
+if (-not $backendDockerfile.Contains($fixedAlpinePackages) -or
+    -not $webDockerfile.Contains($fixedAlpinePackages) -or
+    -not $postgresDockerfile.Contains($fixedAlpinePackages) -or
+    -not $clamavDockerfile.Contains($fixedAlpinePackages) -or
+    -not $ingestDockerfile.Contains($fixedAlpinePackages)) {
+    throw 'RC49 runtime Alpine stages do not pin both fixed OpenSSL packages'
+}
+if (-not $postgresDockerfile.Contains($goBuilderReference) -or
+    -not $postgresDockerfile.Contains($postgresBaseReference) -or
+    -not $postgresGoMod.Contains($gosuModuleVersion) -or
+    -not $postgresDockerfile.Contains('CGO_ENABLED=0') -or
+    -not $postgresDockerfile.Contains('-mod=readonly') -or
+    -not $postgresDockerfile.Contains('-trimpath') -or
+    -not $postgresDockerfile.Contains('-buildvcs=false') -or
+    -not $postgresDockerfile.Contains($gosuExpectedVersion) -or
+    -not $postgresDockerfile.Contains('test "$TARGETOS" = "linux"') -or
+    -not $postgresDockerfile.Contains('test "$TARGETARCH" = "amd64"') -or
+    $postgresDockerfile.Contains('go mod download -mod=readonly')) {
+    throw 'RC49 PostgreSQL gosu rebuild is not pinned, platform-gated, and read-only at build time'
+}
+if (-not $postgresGoMod.Contains('module invoice.local/gosu-build') -or
+    -not $postgresGoMod.Contains('go 1.25.0') -or
+    -not $postgresGoMod.Contains("github.com/tianon/gosu $gosuModuleVersion") -or
+    -not $postgresGoMod.Contains('github.com/moby/sys/user v0.1.0 // indirect') -or
+    -not $postgresGoMod.Contains('golang.org/x/sys v0.1.0 // indirect')) {
+    throw 'RC49 PostgreSQL gosu module contract drifted'
+}
+foreach ($moduleSum in @(
+    'github.com/moby/sys/user v0.1.0 h1:WmZ93f5Ux6het5iituh9x2zAG7NFY9Aqi49jjE1PaQg=',
+    'github.com/moby/sys/user v0.1.0/go.mod h1:fKJhFOnsCN6xZ5gSfbM6zaHGgDJMrqt9/reuj4T7MmU=',
+    'github.com/tianon/gosu v0.0.0-20250923190938-6456aaa0f3c8 h1:HIpXk5mGBQGfOqcaBbRT4Vnss8NPICnMGlD5xTlPBdQ=',
+    'github.com/tianon/gosu v0.0.0-20250923190938-6456aaa0f3c8/go.mod h1:SwhRwWsO6iqXZN9CpIaU9CnOrUqpWDINW16KaaSqnrU=',
+    'golang.org/x/sys v0.1.0 h1:kunALQeHf1/185U1i0GOB/fy1IPRDDpuoOOqRReG57U=',
+    'golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg='
+)) {
+    if (-not $postgresGoSum.Contains($moduleSum)) {
+        throw "RC49 PostgreSQL gosu module sum is missing: $moduleSum"
+    }
+}
+if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
+    -not $clamavDockerfile.Contains('ClamAV 1.4.5') -or
+    -not $ingestDockerfile.Contains($nginxBaseReference) -or
+    -not $ingestDockerfile.Contains('nginx/1.30.4') -or
+    -not $keycloakDockerfile.Contains($keycloakBaseReference) -or
+    [regex]::Matches($keycloakDockerfile, [regex]::Escape($keycloakBaseReference)).Count -ne 2) {
+    throw 'RC49 derived runtime or both Keycloak stages are not pinned to reviewed bases'
+}
+
+$localPostgresImage = 'invoice-postgres:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
+$localClamavImage = 'invoice-clamav:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
+$localIngestImage = 'invoice-ingest-proxy:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
+if ([regex]::Matches($productionComposeText, [regex]::Escape($localPostgresImage)).Count -ne 3 -or
+    [regex]::Matches($productionComposeText, [regex]::Escape($localClamavImage)).Count -ne 1 -or
+    [regex]::Matches($productionComposeText, [regex]::Escape($localIngestImage)).Count -ne 1 -or
+    $productionComposeText -match '(?m)^\s+image:\s+postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2\s*$' -or
+    $productionComposeText -match '(?m)^\s+image:\s+clamav/clamav:1\.4\.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8\s*$' -or
+    $productionComposeText -match '(?m)^\s+image:\s+nginx:1\.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46\s*$') {
+    throw 'RC49 production Compose retains external PostgreSQL, ClamAV, or ingest runtime image references'
+}
+foreach ($composeService in @(
+    @{ Text = $productionComposeText; Service = 'postgres' },
+    @{ Text = $productionComposeText; Service = 'permissions' },
+    @{ Text = $idpCompose; Service = 'keycloak-postgres' },
+    @{ Text = $productionComposeText; Service = 'clamav' },
+    @{ Text = $productionComposeText; Service = 'ingest-proxy' }
+)) {
+    if ($composeService.Text -notmatch "(?ms)^  $([regex]::Escape($composeService.Service)):\r?\n(?:(?!^  [A-Za-z0-9_-]+:).)*^    pull_policy: never\r?$") {
+        throw "RC49 $($composeService.Service) Compose service can pull outside the reviewed release image set"
+    }
+}
+
 $bridgeMatrixVerifier = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
 if ($bridgeMatrixVerifier -notmatch '\$maxAttempts = 5' -or
     $bridgeMatrixVerifier -notmatch 'for \(\$attempt = 1; \$attempt -le \$maxAttempts; \$attempt\+\+\)' -or

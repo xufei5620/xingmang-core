@@ -1,5 +1,4 @@
-ARG KEYCLOAK_BASE_IMAGE=quay.io/keycloak/keycloak:26.7.2@sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec
-FROM ${KEYCLOAK_BASE_IMAGE} AS builder
+FROM quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067 AS builder
 
 ENV KC_DB=postgres \
     KC_HEALTH_ENABLED=true \
@@ -15,7 +14,7 @@ RUN /opt/keycloak/bin/kc.sh build \
     && test ! -e /opt/keycloak/bin/client \
     && ! find /opt/keycloak -type f -name 'com.microsoft.sqlserver.mssql-jdbc-*.jar' -print -quit | grep -q .
 
-FROM ${KEYCLOAK_BASE_IMAGE}
+FROM quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
 # COPY overlays the original base filesystem and does not delete files removed
 # in the builder. Repeat the least-privilege pruning in the final stage.

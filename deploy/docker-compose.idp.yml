@@ -2,7 +2,8 @@ name: invoice-keycloak-prod
 
 services:
   keycloak-postgres:
-    image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    image: invoice-postgres:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
+    pull_policy: never
     restart: unless-stopped
     environment:
       POSTGRES_DB: keycloak

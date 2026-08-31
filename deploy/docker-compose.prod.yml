@@ -15,7 +15,8 @@ x-tools-common: &tools-common
 
 services:
   postgres:
-    image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    image: invoice-postgres:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
+    pull_policy: never
     restart: unless-stopped
     environment:
       POSTGRES_DB: invoice
@@ -58,7 +59,8 @@ services:
     networks: [invoice_db]
 
   permissions:
-    image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+    image: invoice-postgres:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
+    pull_policy: never
     profiles: ["tools"]
     restart: "no"
     # The owner DSN is deliberately host-owned by the same unprivileged UID
@@ -317,9 +319,8 @@ services:
     networks: [invoice_edge]
 
   clamav:
-    # Official amd64 1.4.5 image, frozen after release scanning. The upstream
-    # non-base tag can otherwise move when its bundled signatures are refreshed.
-    image: clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8
+    image: invoice-clamav:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
+    pull_policy: never
     restart: unless-stopped
     mem_limit: 4g
     cpus: 2.0
@@ -346,7 +347,8 @@ services:
       - no-new-privileges:true
 
   ingest-proxy:
-    image: nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46
+    image: invoice-ingest-proxy:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}
+    pull_policy: never
     restart: unless-stopped
     read_only: true
     volumes:
