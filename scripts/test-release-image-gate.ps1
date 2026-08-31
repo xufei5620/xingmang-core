@@ -141,6 +141,28 @@ function Get-DockerfileStageBody {
     return $match.Groups['body'].Value
 }
 
+function Assert-DockerfileGlobalArgBeforeFirstFrom {
+    param(
+        [Parameter(Mandatory)][string]$DockerfileText,
+        [Parameter(Mandatory)][string]$ArgumentName,
+        [Parameter(Mandatory)][string]$ExpectedValue
+    )
+
+    $normalized = ConvertTo-NormalizedLfText -Text $DockerfileText
+    $firstFrom = [regex]::Match($normalized, '(?im)^[ \t]*FROM(?:[ \t]|$)')
+    if (-not $firstFrom.Success) {
+        throw 'Dockerfile does not contain a FROM instruction'
+    }
+
+    $argumentPattern = '(?im)^[ \t]*ARG[ \t]+' + [regex]::Escape($ArgumentName) + '=(?<value>[^\n]*?)[ \t]*$'
+    $argumentMatches = [regex]::Matches($normalized, $argumentPattern)
+    if ($argumentMatches.Count -ne 1 -or
+        $argumentMatches[0].Index -ge $firstFrom.Index -or
+        $argumentMatches[0].Groups['value'].Value -cne $ExpectedValue) {
+        throw "Dockerfile ARG $ArgumentName must be declared exactly once with the reviewed value before the first FROM"
+    }
+}
+
 function Assert-BackendRuntimeOpenSslPins {
     param(
         [Parameter(Mandatory)][string]$DockerfileText,
@@ -361,6 +383,7 @@ function Assert-Task2MutationRejected {
 
 foreach ($requiredTask2Helper in @(
     'Assert-BackendRuntimeOpenSslPins',
+    'Assert-DockerfileGlobalArgBeforeFirstFrom',
     'Assert-ExactNormalizedText',
     'Assert-ComposeServiceImage'
 )) {
@@ -380,6 +403,30 @@ $backendWithoutApiBaseOpenSslPins = $backendDockerfile.Substring(0, $apiBaseStar
 Assert-Task2MutationRejected -Action {
     Assert-BackendRuntimeOpenSslPins -DockerfileText $backendWithoutApiBaseOpenSslPins -FixedPackages $fixedAlpinePackages
 } -Message 'backend api-base OpenSSL pin removal was accepted because scanner-base still contained the pins'
+
+$postgresGlobalArgFixture = "ARG POSTGRES_BASE_IMAGE=$postgresBaseReference`nFROM scratch AS gosu-build`nFROM " + '${POSTGRES_BASE_IMAGE}' + "`n"
+Assert-DockerfileGlobalArgBeforeFirstFrom `
+    -DockerfileText $postgresGlobalArgFixture `
+    -ArgumentName 'POSTGRES_BASE_IMAGE' `
+    -ExpectedValue $postgresBaseReference
+$postgresStageScopedArgFixture = "FROM scratch AS gosu-build`nARG POSTGRES_BASE_IMAGE=$postgresBaseReference`nFROM " + '${POSTGRES_BASE_IMAGE}' + "`n"
+Assert-Task2MutationRejected -Action {
+    Assert-DockerfileGlobalArgBeforeFirstFrom `
+        -DockerfileText $postgresStageScopedArgFixture `
+        -ArgumentName 'POSTGRES_BASE_IMAGE' `
+        -ExpectedValue $postgresBaseReference
+} -Message 'PostgreSQL base image ARG declared after the first FROM was accepted as globally scoped'
+$postgresLowercaseFromStageArgFixture = "from scratch AS gosu-build`nARG POSTGRES_BASE_IMAGE=$postgresBaseReference`nFROM " + '${POSTGRES_BASE_IMAGE}' + "`n"
+Assert-Task2MutationRejected -Action {
+    Assert-DockerfileGlobalArgBeforeFirstFrom `
+        -DockerfileText $postgresLowercaseFromStageArgFixture `
+        -ArgumentName 'POSTGRES_BASE_IMAGE' `
+        -ExpectedValue $postgresBaseReference
+} -Message 'PostgreSQL base image ARG after a lowercase first FROM was accepted as globally scoped'
+Assert-DockerfileGlobalArgBeforeFirstFrom `
+    -DockerfileText $postgresDockerfile `
+    -ArgumentName 'POSTGRES_BASE_IMAGE' `
+    -ExpectedValue $postgresBaseReference
 
 $expectedGosuGoMod = @'
 module invoice.local/gosu-build
