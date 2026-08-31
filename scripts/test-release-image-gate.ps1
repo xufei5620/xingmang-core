@@ -9,6 +9,91 @@ Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
 
+function Get-DockerfileStageBody {
+    param(
+        [Parameter(Mandatory)][string]$DockerfileText,
+        [Parameter(Mandatory)][string]$StageName
+    )
+
+    $stagePattern = [regex]::Escape($StageName)
+    $match = [regex]::Match($DockerfileText, "(?ms)^FROM\b[^\r\n]*\s+AS\s+$stagePattern\s*\r?\n(?<body>.*?)(?=^FROM\b|\z)")
+    if (-not $match.Success) {
+        throw "Dockerfile is missing named stage $StageName"
+    }
+    return $match.Groups['body'].Value
+}
+
+function Assert-BackendRuntimeOpenSslPins {
+    param(
+        [Parameter(Mandatory)][string]$DockerfileText,
+        [Parameter(Mandatory)][string]$FixedPackages
+    )
+
+    foreach ($stageName in @('api-base', 'scanner-base')) {
+        if (-not (Get-DockerfileStageBody -DockerfileText $DockerfileText -StageName $stageName).Contains($FixedPackages)) {
+            throw "backend Dockerfile stage $stageName does not pin both fixed OpenSSL packages"
+        }
+    }
+    foreach ($inheritedStage in @(
+        'FROM api-base AS tools',
+        'FROM api-base AS api',
+        'FROM scanner-base AS pdf-policy-gate',
+        'FROM scanner-base AS scanner'
+    )) {
+        if (-not $DockerfileText.Contains($inheritedStage)) {
+            throw "backend Dockerfile no longer preserves the intended inherited runtime stage: $inheritedStage"
+        }
+    }
+}
+
+function ConvertTo-NormalizedLfText {
+    param([Parameter(Mandatory)][string]$Text)
+
+    return $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
+function Assert-ExactNormalizedContent {
+    param(
+        [Parameter(Mandatory)][string]$Actual,
+        [Parameter(Mandatory)][string]$Expected,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    if ((ConvertTo-NormalizedLfText -Text $Actual) -cne (ConvertTo-NormalizedLfText -Text $Expected)) {
+        throw "$Label must match the exact reviewed contents without extra lines, requirements, sums, or replace directives"
+    }
+}
+
+function Get-ComposeServiceBlock {
+    param(
+        [Parameter(Mandatory)][string]$ComposeText,
+        [Parameter(Mandatory)][string]$Service
+    )
+
+    $servicePattern = [regex]::Escape($Service)
+    $match = [regex]::Match($ComposeText, "(?ms)^  ${servicePattern}:\r?\n.*?(?=^  [A-Za-z0-9_-]+:\s*$|^\S|\z)")
+    if (-not $match.Success) {
+        throw "Compose service $Service is missing"
+    }
+    return $match.Value
+}
+
+function Assert-ComposeServiceImageAndPullPolicy {
+    param(
+        [Parameter(Mandatory)][string]$ComposeText,
+        [Parameter(Mandatory)][string]$Service,
+        [Parameter(Mandatory)][string]$ExpectedImage
+    )
+
+    $serviceBlock = Get-ComposeServiceBlock -ComposeText $ComposeText -Service $Service
+    $imageMatches = [regex]::Matches($serviceBlock, '(?m)^    image:\s*(?<image>[^\r\n]+)\s*$')
+    $pullPolicyMatches = [regex]::Matches($serviceBlock, '(?m)^    pull_policy:\s*(?<policy>[^\s#]+)\s*$')
+    if ($imageMatches.Count -ne 1 -or $imageMatches[0].Groups['image'].Value -cne $ExpectedImage -or
+        $pullPolicyMatches.Count -ne 1 -or $pullPolicyMatches[0].Groups['policy'].Value -cne 'never') {
+        throw "Compose service $Service must use exactly $ExpectedImage with pull_policy: never"
+    }
+}
+
 $idpCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
 $artifactVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
 $sourceVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
@@ -136,8 +221,79 @@ $nginxBaseReference = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed32
 $keycloakBaseReference = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
 $gosuModuleVersion = 'v0.0.0-20250923190938-6456aaa0f3c8'
 $gosuExpectedVersion = '1.19 (go1.25.13 on linux/amd64; gc)'
-if (-not $backendDockerfile.Contains($fixedAlpinePackages) -or
-    -not $webDockerfile.Contains($fixedAlpinePackages) -or
+
+function Assert-Task2MutationRejected {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    $rejected = $false
+    try { & $Action } catch { $rejected = $true }
+    if (-not $rejected) { throw $Message }
+}
+
+foreach ($requiredTask2Helper in @(
+    'Assert-BackendRuntimeOpenSslPins',
+    'Assert-ExactNormalizedContent',
+    'Assert-ComposeServiceImageAndPullPolicy'
+)) {
+    if (-not (Get-Command -Name $requiredTask2Helper -ErrorAction SilentlyContinue)) {
+        throw "RC49 Task 2 focused static checker is missing: $requiredTask2Helper"
+    }
+}
+
+$apiBaseStart = $backendDockerfile.IndexOf('FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS api-base', [StringComparison]::Ordinal)
+$scannerBaseStart = $backendDockerfile.IndexOf('FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS scanner-base', [StringComparison]::Ordinal)
+if ($apiBaseStart -lt 0 -or $scannerBaseStart -le $apiBaseStart) {
+    throw 'RC49 backend fixture does not contain the named runtime stages'
+}
+$backendWithoutApiBaseOpenSslPins = $backendDockerfile.Substring(0, $apiBaseStart) +
+    $backendDockerfile.Substring($apiBaseStart, $scannerBaseStart - $apiBaseStart).Replace($fixedAlpinePackages, '') +
+    $backendDockerfile.Substring($scannerBaseStart)
+Assert-Task2MutationRejected -Action {
+    Assert-BackendRuntimeOpenSslPins -DockerfileText $backendWithoutApiBaseOpenSslPins -FixedPackages $fixedAlpinePackages
+} -Message 'backend api-base OpenSSL pin removal was accepted because scanner-base still contained the pins'
+
+$expectedGosuGoMod = @'
+module invoice.local/gosu-build
+
+go 1.25.0
+
+require github.com/tianon/gosu v0.0.0-20250923190938-6456aaa0f3c8
+
+require (
+	github.com/moby/sys/user v0.1.0 // indirect
+	golang.org/x/sys v0.1.0 // indirect
+)
+'@ + "`n"
+$expectedGosuGoSum = @'
+github.com/moby/sys/user v0.1.0 h1:WmZ93f5Ux6het5iituh9x2zAG7NFY9Aqi49jjE1PaQg=
+github.com/moby/sys/user v0.1.0/go.mod h1:fKJhFOnsCN6xZ5gSfbM6zaHGgDJMrqt9/reuj4T7MmU=
+github.com/tianon/gosu v0.0.0-20250923190938-6456aaa0f3c8 h1:HIpXk5mGBQGfOqcaBbRT4Vnss8NPICnMGlD5xTlPBdQ=
+github.com/tianon/gosu v0.0.0-20250923190938-6456aaa0f3c8/go.mod h1:SwhRwWsO6iqXZN9CpIaU9CnOrUqpWDINW16KaaSqnrU=
+golang.org/x/sys v0.1.0 h1:kunALQeHf1/185U1i0GOB/fy1IPRDDpuoOOqRReG57U=
+golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+'@ + "`n"
+Assert-Task2MutationRejected -Action {
+    Assert-ExactNormalizedContent -Actual ($postgresGoMod + "`nreplace github.com/tianon/gosu => ./unexpected") -Expected $expectedGosuGoMod -Label 'gosu go.mod'
+} -Message 'gosu go.mod accepted an extra replace directive'
+Assert-Task2MutationRejected -Action {
+    Assert-ExactNormalizedContent -Actual ($postgresGoSum + "`nexample.invalid/extra v0.0.0 h1:unexpected=") -Expected $expectedGosuGoSum -Label 'gosu go.sum'
+} -Message 'gosu go.sum accepted an extra checksum'
+
+$productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.prod.yml')
+$localPostgresImage = 'invoice-postgres:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
+$localClamavImage = 'invoice-clamav:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
+$localIngestImage = 'invoice-ingest-proxy:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
+$swappedProductionCompose = $productionCompose -replace '(?m)(^  postgres:\r?\n    image: )invoice-postgres:\$\{INVOICE_IMAGE_TAG:\?set the exact reviewed invoice release tag\}', ('${1}' + $localClamavImage)
+$swappedProductionCompose = $swappedProductionCompose -replace '(?m)(^  clamav:\r?\n    image: )invoice-clamav:\$\{INVOICE_IMAGE_TAG:\?set the exact reviewed invoice release tag\}', ('${1}' + $localPostgresImage)
+Assert-Task2MutationRejected -Action {
+    Assert-ComposeServiceImageAndPullPolicy -ComposeText $swappedProductionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
+} -Message 'Compose image-count checker accepted a postgres/clamav service-image swap'
+
+Assert-BackendRuntimeOpenSslPins -DockerfileText $backendDockerfile -FixedPackages $fixedAlpinePackages
+if (-not $webDockerfile.Contains($fixedAlpinePackages) -or
     -not $postgresDockerfile.Contains($fixedAlpinePackages) -or
     -not $clamavDockerfile.Contains($fixedAlpinePackages) -or
     -not $ingestDockerfile.Contains($fixedAlpinePackages)) {
@@ -145,7 +301,6 @@ if (-not $backendDockerfile.Contains($fixedAlpinePackages) -or
 }
 if (-not $postgresDockerfile.Contains($goBuilderReference) -or
     -not $postgresDockerfile.Contains($postgresBaseReference) -or
-    -not $postgresGoMod.Contains($gosuModuleVersion) -or
     -not $postgresDockerfile.Contains('CGO_ENABLED=0') -or
     -not $postgresDockerfile.Contains('-mod=readonly') -or
     -not $postgresDockerfile.Contains('-trimpath') -or
@@ -156,25 +311,8 @@ if (-not $postgresDockerfile.Contains($goBuilderReference) -or
     $postgresDockerfile.Contains('go mod download -mod=readonly')) {
     throw 'RC49 PostgreSQL gosu rebuild is not pinned, platform-gated, and read-only at build time'
 }
-if (-not $postgresGoMod.Contains('module invoice.local/gosu-build') -or
-    -not $postgresGoMod.Contains('go 1.25.0') -or
-    -not $postgresGoMod.Contains("github.com/tianon/gosu $gosuModuleVersion") -or
-    -not $postgresGoMod.Contains('github.com/moby/sys/user v0.1.0 // indirect') -or
-    -not $postgresGoMod.Contains('golang.org/x/sys v0.1.0 // indirect')) {
-    throw 'RC49 PostgreSQL gosu module contract drifted'
-}
-foreach ($moduleSum in @(
-    'github.com/moby/sys/user v0.1.0 h1:WmZ93f5Ux6het5iituh9x2zAG7NFY9Aqi49jjE1PaQg=',
-    'github.com/moby/sys/user v0.1.0/go.mod h1:fKJhFOnsCN6xZ5gSfbM6zaHGgDJMrqt9/reuj4T7MmU=',
-    'github.com/tianon/gosu v0.0.0-20250923190938-6456aaa0f3c8 h1:HIpXk5mGBQGfOqcaBbRT4Vnss8NPICnMGlD5xTlPBdQ=',
-    'github.com/tianon/gosu v0.0.0-20250923190938-6456aaa0f3c8/go.mod h1:SwhRwWsO6iqXZN9CpIaU9CnOrUqpWDINW16KaaSqnrU=',
-    'golang.org/x/sys v0.1.0 h1:kunALQeHf1/185U1i0GOB/fy1IPRDDpuoOOqRReG57U=',
-    'golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg='
-)) {
-    if (-not $postgresGoSum.Contains($moduleSum)) {
-        throw "RC49 PostgreSQL gosu module sum is missing: $moduleSum"
-    }
-}
+Assert-ExactNormalizedContent -Actual $postgresGoMod -Expected $expectedGosuGoMod -Label 'RC49 PostgreSQL gosu go.mod'
+Assert-ExactNormalizedContent -Actual $postgresGoSum -Expected $expectedGosuGoSum -Label 'RC49 PostgreSQL gosu go.sum'
 if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
     -not $clamavDockerfile.Contains('ClamAV 1.4.5') -or
     -not $ingestDockerfile.Contains($nginxBaseReference) -or
@@ -184,28 +322,17 @@ if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
     throw 'RC49 derived runtime or both Keycloak stages are not pinned to reviewed bases'
 }
 
-$localPostgresImage = 'invoice-postgres:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
-$localClamavImage = 'invoice-clamav:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
-$localIngestImage = 'invoice-ingest-proxy:${INVOICE_IMAGE_TAG:?set the exact reviewed invoice release tag}'
-if ([regex]::Matches($productionComposeText, [regex]::Escape($localPostgresImage)).Count -ne 3 -or
-    [regex]::Matches($productionComposeText, [regex]::Escape($localClamavImage)).Count -ne 1 -or
-    [regex]::Matches($productionComposeText, [regex]::Escape($localIngestImage)).Count -ne 1 -or
-    $productionComposeText -match '(?m)^\s+image:\s+postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2\s*$' -or
+$productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.prod.yml')
+if ($productionComposeText -match '(?m)^\s+image:\s+postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2\s*$' -or
     $productionComposeText -match '(?m)^\s+image:\s+clamav/clamav:1\.4\.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8\s*$' -or
     $productionComposeText -match '(?m)^\s+image:\s+nginx:1\.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46\s*$') {
     throw 'RC49 production Compose retains external PostgreSQL, ClamAV, or ingest runtime image references'
 }
-foreach ($composeService in @(
-    @{ Text = $productionComposeText; Service = 'postgres' },
-    @{ Text = $productionComposeText; Service = 'permissions' },
-    @{ Text = $idpCompose; Service = 'keycloak-postgres' },
-    @{ Text = $productionComposeText; Service = 'clamav' },
-    @{ Text = $productionComposeText; Service = 'ingest-proxy' }
-)) {
-    if ($composeService.Text -notmatch "(?ms)^  $([regex]::Escape($composeService.Service)):\r?\n(?:(?!^  [A-Za-z0-9_-]+:).)*^    pull_policy: never\r?$") {
-        throw "RC49 $($composeService.Service) Compose service can pull outside the reviewed release image set"
-    }
-}
+Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
+Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'permissions' -ExpectedImage $localPostgresImage
+Assert-ComposeServiceImageAndPullPolicy -ComposeText $idpCompose -Service 'keycloak-postgres' -ExpectedImage $localPostgresImage
+Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'clamav' -ExpectedImage $localClamavImage
+Assert-ComposeServiceImageAndPullPolicy -ComposeText $productionCompose -Service 'ingest-proxy' -ExpectedImage $localIngestImage
 
 $bridgeMatrixVerifier = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'agents\scripts\verify-bridge-postgres-matrix.ps1')
 if ($bridgeMatrixVerifier -notmatch '\$maxAttempts = 5' -or
