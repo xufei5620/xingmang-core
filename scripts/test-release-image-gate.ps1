@@ -37,6 +37,34 @@ if ([regex]::Matches($verifySource, 'Get-ComposeOptionalBoolean\s+-ComposeObject
     throw 'verify.ps1 does not use the optional Compose Boolean helper for every network internal check'
 }
 
+$composeOptionalStringFixtures = @(
+    [pscustomobject]@{ Label = 'absent string defaults null'; Environment = [pscustomobject]@{}; Expected = $null },
+    [pscustomobject]@{ Label = 'string is preserved'; Environment = [pscustomobject]@{ SOURCE_RECONCILE_FILE = '/state/reconcile.json' }; Expected = '/state/reconcile.json' },
+    [pscustomobject]@{ Label = 'empty string is preserved for caller validation'; Environment = [pscustomobject]@{ SOURCE_RECONCILE_FILE = '' }; Expected = '' }
+)
+foreach ($fixture in $composeOptionalStringFixtures) {
+    $actual = Get-ComposeOptionalString -ComposeObject $fixture.Environment -PropertyName 'SOURCE_RECONCILE_FILE'
+    if (($null -eq $fixture.Expected -and $null -ne $actual) -or
+        ($null -ne $fixture.Expected -and $actual -cne $fixture.Expected)) {
+        throw "Compose optional string fixture failed: $($fixture.Label)"
+    }
+}
+foreach ($invalidValue in @($null, $true, [long]0, [pscustomobject]@{})) {
+    $rejected = $false
+    try {
+        Get-ComposeOptionalString -ComposeObject ([pscustomobject]@{ SOURCE_RECONCILE_FILE = $invalidValue }) -PropertyName 'SOURCE_RECONCILE_FILE' | Out-Null
+    } catch {
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw 'Compose optional string fixture accepted an invalid value'
+    }
+}
+if ([regex]::Matches($verifySource, 'Get-ComposeOptionalString\s+-ComposeObject[^\r\n]+-PropertyName ''SOURCE_RECONCILE_FILE''').Count -ne 2 -or
+    $verifySource -cmatch '(?m)\$[A-Za-z_][A-Za-z0-9_.]*\.environment\.SOURCE_RECONCILE_FILE\b') {
+    throw 'verify.ps1 does not use the optional Compose string helper for both SOURCE_RECONCILE_FILE checks'
+}
+
 $task5AMutationFailures = [Collections.Generic.List[string]]::new()
 
 function Test-Task5ARequirement {

@@ -16,6 +16,22 @@ function Get-ComposeOptionalBoolean {
     return $property.Value
 }
 
+function Get-ComposeOptionalString {
+    param(
+        [Parameter(Mandatory)]$ComposeObject,
+        [Parameter(Mandatory)][string]$PropertyName
+    )
+
+    $property = $ComposeObject.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) {
+        return $null
+    }
+    if ($null -eq $property.Value -or $property.Value -isnot [string]) {
+        throw "Compose property $PropertyName must be a non-null String when present"
+    }
+    return $property.Value
+}
+
 function Get-RequiredImageId {
     param([Parameter(Mandatory)][string]$Reference)
 
