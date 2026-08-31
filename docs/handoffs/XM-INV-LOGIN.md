@@ -4,7 +4,7 @@
   24/24 integration tests, real migration 0015 execution, web typecheck, and
   15 web tests. It is not deployed and has not been exercised against the real
   Sub2API/New API login endpoints or manually clicked through in a browser.
-  Production remains **NO-GO** under the RC52 release gate.
+  Production remains **NO-GO** under the RC53 release gate.
 - **branch:** `ai/claude/XM-INV-LOGIN` (based on `main`), worktree
   `K:/发票/wt-XM-INV-LOGIN`.
 - **commit:** `dffb94135915628c3cdb005de24e86e3002533b9` (the main change
@@ -278,7 +278,7 @@ npm test -- --run    # vitest: 2 files, 15 tests, all pass
   平台密码/Sub2API 2FA、首次自动绑定、8h/24h 会话与跨平台 404；管理员仍验
   OIDC/MFA/RP logout/back-channel logout，OIDC 管理员的显式绑定挑战不变。
 
-### RC52 release-candidate follow-up (2026-08-31)
+### RC53 release-candidate follow-up (2026-09-01)
 
 - RC49 已失败，后续必须按只读历史对待：`v0.1.0-rc49-signed` 固定在
   `eb7b4365d3af30241debe7b1a054b7eed8b94dcd`；
@@ -298,12 +298,17 @@ npm test -- --run    # vitest: 2 files, 15 tests, all pass
   转为 `DateTime` 而失败。完整 65 文件集由
   `docs/RC51-FAILURE-EVIDENCE-SHA256SUMS.txt` 固定，禁止移动标签、恢复或改写
   exact1。
-- 后续修复候选顺延为 RC52。严格传输仅接受精确签名标签
-  `v0.1.0-rc52-signed`，Git 查询只使用由其映射出的完整
-  `refs/tags/v0.1.0-rc52-signed`；manifest 必须精确绑定
-  `releaseName=0.1.0-rc52` 与九个 `:0.1.0-rc52` 镜像引用。
+- RC52 也已失败：`v0.1.0-rc52-signed` 固定在
+  `adf152771e779e6a1bd7a95b3e628d5fa85c3b3f`；exact1 在 source gate 的
+  PostgreSQL 15 host-port readiness 阶段因本机 NAT 不可达而停止。唯一日志文件由
+  `docs/RC52-FAILURE-EVIDENCE-SHA256SUMS.txt` 固定，禁止移动标签、恢复或改写
+  exact1。
+- 后续修复候选顺延为 RC53。严格传输仅接受精确签名标签
+  `v0.1.0-rc53-signed`，Git 查询只使用由其映射出的完整
+  `refs/tags/v0.1.0-rc53-signed`；manifest 必须精确绑定
+  `releaseName=0.1.0-rc53` 与九个 `:0.1.0-rc53` 镜像引用。
 - Keycloak 精确 tuple、基础 digest、HIGH/CRITICAL 阈值与
-  `ignoreUnfixed=false` 均未放宽。RC52 标签、全镜像门禁、签名、canary 与生产
+  `ignoreUnfixed=false` 均未放宽。RC53 标签、全镜像门禁、签名、canary 与生产
   部署尚未执行，因此本 handoff 仍是 **NO-GO**。
 
 ## Original handoff baseline: not run at initial delivery

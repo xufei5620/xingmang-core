@@ -208,7 +208,7 @@ function Assert-PostgresGosuFindingScope {
             [string]$_.Status -ceq [string]$finding.Status
         })
         if ($matchingTuple.Count -ne 1) {
-            throw "PostgreSQL exception has no approved RC52 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
+            throw "PostgreSQL exception has no approved RC53 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
         }
     }
     return $true
@@ -526,6 +526,19 @@ function Assert-RC51FailureEvidenceAnchor {
         -CandidateLabel 'RC51'
 }
 
+function Assert-RC52FailureEvidenceAnchor {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$AnchorText
+    )
+    return Assert-FailedReleaseEvidenceAnchor `
+        -ProjectRoot $ProjectRoot `
+        -AnchorText $AnchorText `
+        -ReleaseName '0.1.0-rc52' `
+        -AllowedExactNumbers @(1) `
+        -CandidateLabel 'RC52'
+}
+
 function Get-ReleaseGitProvenance {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
 
@@ -586,10 +599,10 @@ function Assert-StrictReleaseDirectoryName {
 function Get-StrictSignedReleaseTagRef {
     param([Parameter(Mandatory)][string]$SignedReleaseTag)
 
-    if ($SignedReleaseTag -cne 'v0.1.0-rc52-signed') {
-        throw 'strict transfer requires the exact signed RC52 tag v0.1.0-rc52-signed'
+    if ($SignedReleaseTag -cne 'v0.1.0-rc53-signed') {
+        throw 'strict transfer requires the exact signed RC53 tag v0.1.0-rc53-signed'
     }
-    return 'refs/tags/v0.1.0-rc52-signed'
+    return 'refs/tags/v0.1.0-rc53-signed'
 }
 
 function Assert-TransferReadyManifest {
@@ -604,28 +617,28 @@ function Assert-TransferReadyManifest {
     try {
         $releaseNameProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'releaseName' -Context 'manifest'
     } catch {
-        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc52 is mandatory'
+        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc53 is mandatory'
     }
     if ($releaseNameProperty.Value -isnot [string] -or
-        [string]$releaseNameProperty.Value -cne '0.1.0-rc52') {
-        throw 'strict transfer requires manifest releaseName=0.1.0-rc52'
+        [string]$releaseNameProperty.Value -cne '0.1.0-rc53') {
+        throw 'strict transfer requires manifest releaseName=0.1.0-rc53'
     }
 
     $expectedImageReferences = [ordered]@{
-        api = 'invoice-system-api:0.1.0-rc52'
-        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc52'
-        tools = 'invoice-system-tools:0.1.0-rc52'
-        web = 'invoice-system-web:0.1.0-rc52'
-        'source-agent' = 'invoice-source-agent:0.1.0-rc52'
-        'postgres-runtime' = 'invoice-postgres:0.1.0-rc52'
-        'clamav-runtime' = 'invoice-clamav:0.1.0-rc52'
-        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc52'
-        keycloak = 'invoice-keycloak:0.1.0-rc52'
+        api = 'invoice-system-api:0.1.0-rc53'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc53'
+        tools = 'invoice-system-tools:0.1.0-rc53'
+        web = 'invoice-system-web:0.1.0-rc53'
+        'source-agent' = 'invoice-source-agent:0.1.0-rc53'
+        'postgres-runtime' = 'invoice-postgres:0.1.0-rc53'
+        'clamav-runtime' = 'invoice-clamav:0.1.0-rc53'
+        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc53'
+        keycloak = 'invoice-keycloak:0.1.0-rc53'
     }
     $imagesProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'images' -Context 'manifest'
     if ($imagesProperty.Value -isnot [System.Array] -or
         $imagesProperty.Value.Count -ne $expectedImageReferences.Count) {
-        throw 'strict transfer requires the exact RC52 image inventory'
+        throw 'strict transfer requires the exact RC53 image inventory'
     }
     foreach ($expectedImage in $expectedImageReferences.GetEnumerator()) {
         $matchingRecords = @()
@@ -637,12 +650,12 @@ function Assert-TransferReadyManifest {
             }
         }
         if ($matchingRecords.Count -ne 1) {
-            throw 'strict transfer requires the exact RC52 image inventory'
+            throw 'strict transfer requires the exact RC53 image inventory'
         }
         $referenceProperty = Get-RequiredExactProperty -InputObject $matchingRecords[0] -PropertyName 'reference' -Context "manifest image $($expectedImage.Key)"
         if ($referenceProperty.Value -isnot [string] -or
             [string]$referenceProperty.Value -cne [string]$expectedImage.Value) {
-            throw 'strict transfer requires the exact RC52 image inventory'
+            throw 'strict transfer requires the exact RC53 image inventory'
         }
     }
 

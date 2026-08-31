@@ -1,5 +1,9 @@
 # RC52 Release Recovery Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC52 is fixed at signed tag
+> `v0.1.0-rc52-signed`; exact1 is retained host-NAT failure evidence. Continue
+> only with `docs/superpowers/plans/2026-09-01-invoice-rc53-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC52 without moving or reusing failed RC51 identity or evidence.

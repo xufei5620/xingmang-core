@@ -182,29 +182,29 @@ if (-not $gateSource.Contains('Get-ReleaseGateBlockedExitCode', [StringCompariso
     throw 'release image gate does not reserve exit 42 for the sole pending-canary state'
 }
 
-foreach ($validStrictDirectory in @('release\0.1.0-rc52-exact1', 'release\0.1.0-rc52-exact99')) {
-    Assert-StrictReleaseDirectoryName -ReleaseDirectory $validStrictDirectory -ExpectedReleaseName '0.1.0-rc52' | Out-Null
+foreach ($validStrictDirectory in @('release\0.1.0-rc53-exact1', 'release\0.1.0-rc53-exact99')) {
+    Assert-StrictReleaseDirectoryName -ReleaseDirectory $validStrictDirectory -ExpectedReleaseName '0.1.0-rc53' | Out-Null
 }
 foreach ($invalidStrictDirectory in @(
-    'release\0.1.0-rc51-exact1',
-    'release\0.1.0-RC52-exact1',
-    'release\0.1.0-rc52-exact0',
-    'release\0.1.0-rc52-exact100',
-    'release\rc52-exact1'
+    'release\0.1.0-rc52-exact1',
+    'release\0.1.0-RC53-exact1',
+    'release\0.1.0-rc53-exact0',
+    'release\0.1.0-rc53-exact100',
+    'release\rc53-exact1'
 )) {
     Assert-ThrowsLike `
-        -Action { Assert-StrictReleaseDirectoryName -ReleaseDirectory $invalidStrictDirectory -ExpectedReleaseName '0.1.0-rc52' | Out-Null } `
+        -Action { Assert-StrictReleaseDirectoryName -ReleaseDirectory $invalidStrictDirectory -ExpectedReleaseName '0.1.0-rc53' | Out-Null } `
         -ExpectedMessagePattern 'strict transfer release directory' `
         -FailureMessage "strict transfer accepted invalid release directory $invalidStrictDirectory"
 }
 
-$validStrictManifestJson = '{"releaseName":"0.1.0-rc52","images":[{"name":"api","reference":"invoice-system-api:0.1.0-rc52"}]}'
+$validStrictManifestJson = '{"releaseName":"0.1.0-rc53","images":[{"name":"api","reference":"invoice-system-api:0.1.0-rc53"}]}'
 Assert-JsonHasNoDuplicateProperties -JsonText $validStrictManifestJson | Out-Null
 foreach ($duplicateJsonFixture in @(
-    [pscustomobject]@{ Label = 'same-case top-level releaseName'; Json = '{"releaseName":"0.1.0-rc51","releaseName":"0.1.0-rc52"}' },
-    [pscustomobject]@{ Label = 'case-drifted top-level releaseName'; Json = '{"releaseName":"0.1.0-rc51","ReleaseName":"0.1.0-rc52"}' },
-    [pscustomobject]@{ Label = 'same-case nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc51","reference":"invoice-system-api:0.1.0-rc52"}]}' },
-    [pscustomobject]@{ Label = 'case-drifted nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc51","Reference":"invoice-system-api:0.1.0-rc52"}]}' }
+    [pscustomobject]@{ Label = 'same-case top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","releaseName":"0.1.0-rc53"}' },
+    [pscustomobject]@{ Label = 'case-drifted top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","ReleaseName":"0.1.0-rc53"}' },
+    [pscustomobject]@{ Label = 'same-case nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","reference":"invoice-system-api:0.1.0-rc53"}]}' },
+    [pscustomobject]@{ Label = 'case-drifted nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","Reference":"invoice-system-api:0.1.0-rc53"}]}' }
 )) {
     Assert-ThrowsLike `
         -Action { Assert-JsonHasNoDuplicateProperties -JsonText $duplicateJsonFixture.Json | Out-Null } `
@@ -489,7 +489,7 @@ if (-not (Test-Path -LiteralPath $postgresDockerfilePath) -or
     -not (Test-Path -LiteralPath $postgresGoSumPath) -or
     -not (Test-Path -LiteralPath $clamavDockerfilePath) -or
     -not (Test-Path -LiteralPath $ingestDockerfilePath)) {
-    throw 'RC52 derived PostgreSQL, ClamAV, and ingest runtime image sources are missing'
+    throw 'RC53 derived PostgreSQL, ClamAV, and ingest runtime image sources are missing'
 }
 
 $postgresDockerfile = Get-Content -Raw -LiteralPath $postgresDockerfilePath
@@ -524,14 +524,14 @@ foreach ($requiredTask2Helper in @(
     'Assert-ComposeServiceImage'
 )) {
     if (-not (Get-Command -Name $requiredTask2Helper -ErrorAction SilentlyContinue)) {
-        throw "RC52 focused static checker is missing: $requiredTask2Helper"
+        throw "RC53 focused static checker is missing: $requiredTask2Helper"
     }
 }
 
 $apiBaseStart = $backendDockerfile.IndexOf('FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS api-base', [StringComparison]::Ordinal)
 $scannerBaseStart = $backendDockerfile.IndexOf('FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS scanner-base', [StringComparison]::Ordinal)
 if ($apiBaseStart -lt 0 -or $scannerBaseStart -le $apiBaseStart) {
-    throw 'RC52 backend fixture does not contain the named runtime stages'
+    throw 'RC53 backend fixture does not contain the named runtime stages'
 }
 $backendWithoutApiBaseOpenSslPins = $backendDockerfile.Substring(0, $apiBaseStart) +
     $backendDockerfile.Substring($apiBaseStart, $scannerBaseStart - $apiBaseStart).Replace($fixedAlpinePackages, '') +
@@ -606,7 +606,7 @@ if (-not $webDockerfile.Contains($fixedAlpinePackages) -or
     -not $postgresDockerfile.Contains($fixedAlpinePackages) -or
     -not $clamavDockerfile.Contains($fixedAlpinePackages) -or
     -not $ingestDockerfile.Contains($fixedAlpinePackages)) {
-    throw 'RC52 runtime Alpine stages do not pin both fixed OpenSSL packages'
+    throw 'RC53 runtime Alpine stages do not pin both fixed OpenSSL packages'
 }
 if (-not $postgresDockerfile.Contains($goBuilderReference) -or
     -not $postgresDockerfile.Contains($postgresBaseReference) -or
@@ -618,15 +618,15 @@ if (-not $postgresDockerfile.Contains($goBuilderReference) -or
     -not $postgresDockerfile.Contains('test "$TARGETOS" = "linux"') -or
     -not $postgresDockerfile.Contains('test "$TARGETARCH" = "amd64"') -or
     $postgresDockerfile.Contains('go mod download -mod=readonly')) {
-    throw 'RC52 PostgreSQL gosu rebuild is not pinned, platform-gated, and read-only at build time'
+    throw 'RC53 PostgreSQL gosu rebuild is not pinned, platform-gated, and read-only at build time'
 }
-Assert-ExactNormalizedText -Actual $postgresGoMod -Expected $expectedGosuGoMod -Label 'RC52 PostgreSQL gosu go.mod'
-Assert-ExactNormalizedText -Actual $postgresGoSum -Expected $expectedGosuGoSum -Label 'RC52 PostgreSQL gosu go.sum'
+Assert-ExactNormalizedText -Actual $postgresGoMod -Expected $expectedGosuGoMod -Label 'RC53 PostgreSQL gosu go.mod'
+Assert-ExactNormalizedText -Actual $postgresGoSum -Expected $expectedGosuGoSum -Label 'RC53 PostgreSQL gosu go.sum'
 if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
     -not $clamavDockerfile.Contains('ClamAV 1.4.5') -or
     -not $ingestDockerfile.Contains($nginxBaseReference) -or
     -not $ingestDockerfile.Contains('nginx/1.30.4')) {
-    throw 'RC52 PostgreSQL, ClamAV, or ingest runtime is not pinned to the reviewed base'
+    throw 'RC53 PostgreSQL, ClamAV, or ingest runtime is not pinned to the reviewed base'
 }
 Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $keycloakBaseReference | Out-Null
 
@@ -696,7 +696,7 @@ $productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'depl
 if ($productionComposeText -match '(?m)^\s+image:\s+postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2\s*$' -or
     $productionComposeText -match '(?m)^\s+image:\s+clamav/clamav:1\.4\.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8\s*$' -or
     $productionComposeText -match '(?m)^\s+image:\s+nginx:1\.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46\s*$') {
-    throw 'RC52 production Compose retains external PostgreSQL, ClamAV, or ingest runtime image references'
+    throw 'RC53 production Compose retains external PostgreSQL, ClamAV, or ingest runtime image references'
 }
 Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
 Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'permissions' -ExpectedImage $localPostgresImage
@@ -746,7 +746,7 @@ $postgresUnapprovedNoFixReport.Results[0].Vulnerabilities[0] | Add-Member -NoteP
 $postgresUnapprovedNoFixSummary = Get-TrivyFindingSummary -Report $postgresUnapprovedNoFixReport
 Assert-ThrowsLike `
     -Action { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresUnapprovedNoFixSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } `
-    -ExpectedMessagePattern 'no approved RC52 no-fix tuple' `
+    -ExpectedMessagePattern 'no approved RC53 no-fix tuple' `
     -FailureMessage 'PostgreSQL exception did not fail closed with an empty approved no-fix tuple set'
 
 $postgresUnreviewedStatusReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
@@ -885,7 +885,7 @@ Test-Task5ARequirement -Label 'generator re-parses manifest JSON before exact co
 if ($artifactVerifierSource -match 'approved-by-exact-binary-exception' -or
     $artifactVerifierSource -notmatch '\[string\]\$postgres\[0\]\.policyStatus\s*-cne\s*''approved''' -or
     $artifactVerifierSource -notmatch '\$null\s*-ne\s*\$postgres\[0\]\.exception') {
-    throw 'RC52 artifact verification still permits a PostgreSQL vulnerability exception'
+    throw 'RC53 artifact verification still permits a PostgreSQL vulnerability exception'
 }
 Test-Task5ARequirement -Label 'artifact verifier avoids vulnerability counter coercion after exact JSON validation' -Action {
     if ($artifactVerifierSource -match '\[int\][^\r\n]*\.vulnerabilities\.(?:high|critical|total)' -or
@@ -906,8 +906,8 @@ if ($artifactVerifierSource -notmatch '\[switch\]\$RequireTransferReady' -or
     $artifactVerifierSource -notmatch '(?ms)if \(\$RequireTransferReady\) \{\s*Assert-TransferReadyManifest -Manifest \$manifest -ExpectedGitHead \$signedTagCommit\s*\| Out-Null\s*\}') {
     throw 'independent artifact verifier is missing the strict signed-tag transfer-ready source contract'
 }
-if (-not $artifactVerifierSource.Contains("Assert-StrictReleaseDirectoryName -ReleaseDirectory `$releaseRoot -ExpectedReleaseName '0.1.0-rc52'", [StringComparison]::Ordinal)) {
-    throw 'independent artifact verifier does not bind strict transfer to an RC52 exactN directory leaf'
+if (-not $artifactVerifierSource.Contains("Assert-StrictReleaseDirectoryName -ReleaseDirectory `$releaseRoot -ExpectedReleaseName '0.1.0-rc53'", [StringComparison]::Ordinal)) {
+    throw 'independent artifact verifier does not bind strict transfer to an RC53 exactN directory leaf'
 }
 Test-Task5ARequirement -Label 'artifact verifier rejects raw duplicate JSON properties before object conversion' -Action {
     $rawManifestOffset = $artifactVerifierSource.IndexOf('$manifestJson = Get-Content -Raw -LiteralPath $manifestPath', [StringComparison]::Ordinal)
@@ -937,9 +937,9 @@ Test-Task5ARequirement -Label 'fully qualified signed tag ref is used for every 
         throw 'strict Git lookup still accepts the unqualified SignedReleaseTag value'
     }
 }
-Test-Task5ARequirement -Label 'exact RC52 tag name maps to the fully qualified tag ref' -Action {
-    $resolvedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag 'v0.1.0-rc52-signed'
-    if ($resolvedTagRef -cne 'refs/tags/v0.1.0-rc52-signed') {
+Test-Task5ARequirement -Label 'exact RC53 tag name maps to the fully qualified tag ref' -Action {
+    $resolvedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag 'v0.1.0-rc53-signed'
+    if ($resolvedTagRef -cne 'refs/tags/v0.1.0-rc53-signed') {
         throw "unexpected resolved tag ref: $resolvedTagRef"
     }
 }
@@ -947,24 +947,25 @@ foreach ($invalidTagName in @(
     'v0.1.0-rc49-signed',
     'v0.1.0-rc50-signed',
     'v0.1.0-rc51-signed',
-    'v0.1.0-rc52-signed-sibling',
-    'refs/heads/v0.1.0-rc52-signed',
-    'refs/tags/v0.1.0-rc52-signed'
+    'v0.1.0-rc52-signed',
+    'v0.1.0-rc53-signed-sibling',
+    'refs/heads/v0.1.0-rc53-signed',
+    'refs/tags/v0.1.0-rc53-signed'
 )) {
     Test-Task5AMutationRejected -Label "non-exact signed tag input $invalidTagName" -Action {
         Get-StrictSignedReleaseTagRef -SignedReleaseTag $invalidTagName | Out-Null
     }
 }
 $productionRunbook = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
-Test-Task5ARequirement -Label 'production runbook invokes the exact RC52 strict transfer-ready verifier parameters' -Action {
+Test-Task5ARequirement -Label 'production runbook invokes the exact RC53 strict transfer-ready verifier parameters' -Action {
     if (-not $productionRunbook.Contains('-RequireTransferReady', [StringComparison]::Ordinal) -or
-        -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc52-signed', [StringComparison]::Ordinal) -or
+        -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc53-signed', [StringComparison]::Ordinal) -or
         $productionRunbook -match '\bRC(?:32|38)\b') {
         throw 'production runbook does not invoke the exact strict transfer-ready verifier parameters'
     }
 }
 
-function Assert-RC52ProductionPrerequisites {
+function Assert-RC53ProductionPrerequisites {
     param([Parameter(Mandatory)][string]$ReadinessText)
 
     $sectionStart = $ReadinessText.IndexOf('## Production prerequisites not yet performed', [StringComparison]::Ordinal)
@@ -973,13 +974,13 @@ function Assert-RC52ProductionPrerequisites {
         throw 'release readiness does not contain the bounded production prerequisites section'
     }
     $prerequisites = $ReadinessText.Substring($sectionStart, $sectionEnd - $sectionStart)
-    foreach ($requiredRC52Instruction in @(
-        'fresh RC52 image/SBOM/vulnerability',
-        'same RC52 tag',
-        'RC52 commit and signed release tag'
+    foreach ($requiredRC53Instruction in @(
+        'fresh RC53 image/SBOM/vulnerability',
+        'same RC53 tag',
+        'RC53 commit and signed release tag'
     )) {
-        if (-not $prerequisites.Contains($requiredRC52Instruction, [StringComparison]::Ordinal)) {
-            throw "release readiness production prerequisites are missing RC52 instruction: $requiredRC52Instruction"
+        if (-not $prerequisites.Contains($requiredRC53Instruction, [StringComparison]::Ordinal)) {
+            throw "release readiness production prerequisites are missing RC53 instruction: $requiredRC53Instruction"
         }
     }
     if ($prerequisites.Contains('RC32', [StringComparison]::Ordinal)) {
@@ -988,40 +989,40 @@ function Assert-RC52ProductionPrerequisites {
 }
 
 $releaseReadiness = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'RELEASE-READINESS.md')
-Assert-RC52ProductionPrerequisites -ReadinessText $releaseReadiness
+Assert-RC53ProductionPrerequisites -ReadinessText $releaseReadiness
 foreach ($staleInstructionMutation in @(
-    [pscustomobject]@{ Current = 'fresh RC52 image/SBOM/vulnerability'; Stale = 'fresh RC51 image/SBOM/vulnerability' },
-    [pscustomobject]@{ Current = 'same RC52 tag'; Stale = 'same RC51 tag' },
-    [pscustomobject]@{ Current = 'RC52 commit and signed release tag'; Stale = 'RC51 commit and signed release tag' }
+    [pscustomobject]@{ Current = 'fresh RC53 image/SBOM/vulnerability'; Stale = 'fresh RC52 image/SBOM/vulnerability' },
+    [pscustomobject]@{ Current = 'same RC53 tag'; Stale = 'same RC52 tag' },
+    [pscustomobject]@{ Current = 'RC53 commit and signed release tag'; Stale = 'RC52 commit and signed release tag' }
 )) {
     Test-Task5AMutationRejected -Label "stale readiness instruction $($staleInstructionMutation.Stale)" -Action {
-        Assert-RC52ProductionPrerequisites -ReadinessText ($releaseReadiness.Replace(
+        Assert-RC53ProductionPrerequisites -ReadinessText ($releaseReadiness.Replace(
             [string]$staleInstructionMutation.Current,
             [string]$staleInstructionMutation.Stale
         ))
     }
 }
 
-function Assert-RC52ImageScanReviewCurrentSection {
+function Assert-RC53ImageScanReviewCurrentSection {
     param([Parameter(Mandatory)][string]$ReviewText)
 
-    $sectionStart = $ReviewText.IndexOf('## Current RC52 remediation and review status (source/static only)', [StringComparison]::Ordinal)
+    $sectionStart = $ReviewText.IndexOf('## Current RC53 remediation and review status (source/static only)', [StringComparison]::Ordinal)
     $sectionEnd = $ReviewText.IndexOf('## Historical RC1 approved-candidate snapshot (retired)', [StringComparison]::Ordinal)
     if ($sectionStart -lt 0 -or $sectionEnd -le $sectionStart) {
-        throw 'image scan review does not contain a bounded current RC52 section'
+        throw 'image scan review does not contain a bounded current RC53 section'
     }
     $currentReview = $ReviewText.Substring($sectionStart, $sectionEnd - $sectionStart)
-    foreach ($requiredRC52SecurityContract in @(
-        'PostgreSQL has **no RC52 exception**',
-        'The sole permitted RC52 exception',
+    foreach ($requiredRC53SecurityContract in @(
+        'PostgreSQL has **no RC53 exception**',
+        'The sole permitted RC53 exception',
         'sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067',
         'CVE-2026-22020',
         'java-21-openjdk-headless` / `1:21.0.12.1.1-1.2.el9',
         '`HIGH` / `affected`',
         '`HIGH,CRITICAL` with `ignoreUnfixed=false`'
     )) {
-        if (-not $currentReview.Contains($requiredRC52SecurityContract, [StringComparison]::Ordinal)) {
-            throw "current RC52 image scan review is missing exact security contract: $requiredRC52SecurityContract"
+        if (-not $currentReview.Contains($requiredRC53SecurityContract, [StringComparison]::Ordinal)) {
+            throw "current RC53 image scan review is missing exact security contract: $requiredRC53SecurityContract"
         }
     }
     foreach ($retiredSecurityContract in @(
@@ -1031,15 +1032,15 @@ function Assert-RC52ImageScanReviewCurrentSection {
         'accepted, narrow binary-reachability exception'
     )) {
         if ($currentReview.Contains($retiredSecurityContract, [StringComparison]::Ordinal)) {
-            throw "current RC52 image scan review includes retired security contract: $retiredSecurityContract"
+            throw "current RC53 image scan review includes retired security contract: $retiredSecurityContract"
         }
     }
 }
 
 $imageScanReview = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\IMAGE-SCAN-REVIEW.md')
-Assert-RC52ImageScanReviewCurrentSection -ReviewText $imageScanReview
-Test-Task5AMutationRejected -Label 'retired Keycloak base injected into current RC52 scan section' -Action {
-    Assert-RC52ImageScanReviewCurrentSection -ReviewText ($imageScanReview.Replace(
+Assert-RC53ImageScanReviewCurrentSection -ReviewText $imageScanReview
+Test-Task5AMutationRejected -Label 'retired Keycloak base injected into current RC53 scan section' -Action {
+    Assert-RC53ImageScanReviewCurrentSection -ReviewText ($imageScanReview.Replace(
         'sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067',
         'sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec'
     ))
@@ -1049,11 +1050,12 @@ foreach ($supersededRC49Document in @(
     'docs\superpowers\plans\2026-08-31-invoice-rc49-image-security.md',
     'docs\superpowers\specs\2026-08-31-invoice-rc49-image-security-design.md',
     'docs\superpowers\plans\2026-08-31-invoice-rc50-release-recovery.md',
-    'docs\superpowers\plans\2026-08-31-invoice-rc51-release-recovery.md'
+    'docs\superpowers\plans\2026-08-31-invoice-rc51-release-recovery.md',
+    'docs\superpowers\plans\2026-08-31-invoice-rc52-release-recovery.md'
 )) {
     $documentPrefix = @(Get-Content -LiteralPath (Join-Path $projectRoot $supersededRC49Document) -TotalCount 8) -join "`n"
     if (-not $documentPrefix.Contains('**SUPERSEDED — DO NOT EXECUTE.**', [StringComparison]::Ordinal) -or
-        -not $documentPrefix.Contains('docs/superpowers/plans/2026-08-31-invoice-rc52-release-recovery.md', [StringComparison]::Ordinal)) {
+        -not $documentPrefix.Contains('docs/superpowers/plans/2026-09-01-invoice-rc53-release-recovery.md', [StringComparison]::Ordinal)) {
         throw "historical release document is still executable: $supersededRC49Document"
     }
 }
@@ -1061,32 +1063,32 @@ foreach ($supersededRC49Document in @(
 $failureEvidenceVerifierSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-rc49-failure-evidence.ps1')
 $failureEvidenceVerifier50Source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-rc50-failure-evidence.ps1')
 $failureEvidenceVerifier51Source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-rc51-failure-evidence.ps1')
-$rc52RecoveryPlan = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\superpowers\plans\2026-08-31-invoice-rc52-release-recovery.md')
+$failureEvidenceVerifier52Source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-rc52-failure-evidence.ps1')
+$rc53RecoveryPlan = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\superpowers\plans\2026-09-01-invoice-rc53-release-recovery.md')
 if (-not $failureEvidenceVerifierSource.Contains('Assert-RC49FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
     -not $failureEvidenceVerifier50Source.Contains('Assert-RC50FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
     -not $failureEvidenceVerifier51Source.Contains('Assert-RC51FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
-    -not $rc52RecoveryPlan.Contains('verify-rc49-failure-evidence.ps1', [StringComparison]::Ordinal) -or
-    -not $rc52RecoveryPlan.Contains('verify-rc50-failure-evidence.ps1', [StringComparison]::Ordinal) -or
-    -not $rc52RecoveryPlan.Contains('verify-rc51-failure-evidence.ps1', [StringComparison]::Ordinal) -or
+    -not $failureEvidenceVerifier52Source.Contains('Assert-RC52FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
+    -not $rc53RecoveryPlan.Contains('all four failure-evidence scripts', [StringComparison]::Ordinal) -or
     -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc49-failure-evidence.ps1', [StringComparison]::Ordinal) -or
     -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc50-failure-evidence.ps1', [StringComparison]::Ordinal) -or
-    -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc51-failure-evidence.ps1', [StringComparison]::Ordinal)) {
-    throw 'RC52 recovery flow does not invoke all three dedicated failure evidence anchor verifiers'
+    -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc51-failure-evidence.ps1', [StringComparison]::Ordinal) -or
+    -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc52-failure-evidence.ps1', [StringComparison]::Ordinal)) {
+    throw 'RC53 recovery flow does not invoke all four dedicated failure evidence anchor verifiers'
 }
-foreach ($requiredRC52RecoveryContract in @(
+foreach ($requiredRC53RecoveryContract in @(
     'PowerShell 7.5+',
     'exit `42`',
-    'ordinary artifact verification',
-    'strict verification',
-    'v0.1.0-rc52-signed',
-    'Do not parse or coerce manifest decisions'
+    'ordinary and strict verifier exits `0` and `0`',
+    'v0.1.0-rc53-signed',
+    'without manually parsing manifest decisions'
 )) {
-    if (-not $rc52RecoveryPlan.Contains($requiredRC52RecoveryContract, [StringComparison]::Ordinal)) {
-        throw "RC52 recovery plan is missing fail-closed contract: $requiredRC52RecoveryContract"
+    if (-not $rc53RecoveryPlan.Contains($requiredRC53RecoveryContract, [StringComparison]::Ordinal)) {
+        throw "RC53 recovery plan is missing fail-closed contract: $requiredRC53RecoveryContract"
     }
 }
-if ($rc52RecoveryPlan -match '\[string\]\$rc52Manifest') {
-    throw 'RC52 recovery plan manually coerces manifest decisions instead of trusting the verifiers'
+if ($rc53RecoveryPlan -match '\[string\]\$rc53Manifest') {
+    throw 'RC53 recovery plan manually coerces manifest decisions instead of trusting the verifiers'
 }
 
 $trackedFailureEvidenceAnchor = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\RC49-FAILURE-EVIDENCE-SHA256SUMS.txt')
@@ -1143,6 +1145,12 @@ foreach ($entry in $rc51AnchorEntries) {
 if ($rc51AnchorEntries.Count -ne 65 -or
     @($rc51AnchoredPaths | Sort-Object -Unique).Count -ne 65) {
     throw 'tracked RC51 failure evidence anchor does not contain the exact 65-file inventory'
+}
+$trackedRC52Anchor = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\RC52-FAILURE-EVIDENCE-SHA256SUMS.txt')
+$rc52AnchorEntries = @($trackedRC52Anchor -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $_.StartsWith('#', [StringComparison]::Ordinal) })
+if ($rc52AnchorEntries.Count -ne 1 -or
+    $rc52AnchorEntries[0] -notmatch '^[0-9a-f]{64}  release/0\.1\.0-rc52-exact1/logs/source-verification\.log$') {
+    throw 'tracked RC52 failure evidence anchor does not contain the exact one-file inventory'
 }
 
 $failureEvidenceFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('invoice-rc49-failure-anchor-' + [guid]::NewGuid().ToString('N'))
@@ -1234,13 +1242,19 @@ try {
         -Action { Assert-RC51FailureEvidenceAnchor -ProjectRoot $failureEvidenceFixtureRoot -AnchorText $rc51FixtureAnchor | Out-Null } `
         -ExpectedMessagePattern 'exact directory namespace' `
         -FailureMessage 'RC51 failure evidence accepted an unexpected exact2 namespace'
+
+    $rc52FixturePath = Join-Path $failureEvidenceFixtureRoot 'release\0.1.0-rc52-exact1\logs\source-verification.log'
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $rc52FixturePath) -Force
+    [IO.File]::WriteAllText($rc52FixturePath, "rc52-host-nat-failed`n", [Text.UTF8Encoding]::new($false))
+    $rc52FixtureAnchor = "$(Get-FileSha256Lower -Path $rc52FixturePath)  release/0.1.0-rc52-exact1/logs/source-verification.log`n"
+    Assert-RC52FailureEvidenceAnchor -ProjectRoot $failureEvidenceFixtureRoot -AnchorText $rc52FixtureAnchor | Out-Null
 } finally {
     if (Test-Path -LiteralPath $failureEvidenceFixtureRoot) {
         Remove-Item -LiteralPath $failureEvidenceFixtureRoot -Recurse -Force
     }
 }
 
-function Assert-RC52DerivedImageGateSource {
+function Assert-RC53DerivedImageGateSource {
     param(
         [Parameter(Mandatory)][string]$Gate,
         [Parameter(Mandatory)][string]$Library,
@@ -1253,7 +1267,7 @@ function Assert-RC52DerivedImageGateSource {
         'New-ImageDefinition -Name ''ingest-proxy'' -ArtifactName ''invoice-ingest-proxy'' -Reference "invoice-ingest-proxy:$ImageTag" -Kind ''built'' -Policy ''zero-findings'' -Context ''ingest-proxy'' -Dockerfile ''deploy/ingest-proxy/Dockerfile'''
     )) {
         if (-not $Gate.Contains($requiredDefinition, [StringComparison]::Ordinal)) {
-            throw "RC52 release gate is missing locally built derived image definition: $requiredDefinition"
+            throw "RC53 release gate is missing locally built derived image definition: $requiredDefinition"
         }
     }
     foreach ($baseBinding in @(
@@ -1262,7 +1276,7 @@ function Assert-RC52DerivedImageGateSource {
         '-BaseReference $nginxBaseReference'
     )) {
         if (-not $Gate.Contains($baseBinding, [StringComparison]::Ordinal)) {
-            throw "RC52 derived image definition is missing exact base binding: $baseBinding"
+            throw "RC53 derived image definition is missing exact base binding: $baseBinding"
         }
     }
     foreach ($contextBinding in @(
@@ -1272,17 +1286,17 @@ function Assert-RC52DerivedImageGateSource {
     )) {
         if ($Gate -notmatch "(?m)^\s+$([regex]::Escape($contextBinding.Fingerprint)) = Get-ContextFingerprint" -or
             [regex]::Matches($Gate, "(?m)^\s+'?$([regex]::Escape($contextBinding.Context))'?\s*\{ Join-Path \`$projectRoot").Count -ne 1) {
-            throw "RC52 release gate does not fingerprint and build exact context $($contextBinding.Context)"
+            throw "RC53 release gate does not fingerprint and build exact context $($contextBinding.Context)"
         }
     }
     if ($Gate -notmatch "@\('build', '--pull', '--platform', 'linux/amd64', '--provenance=false'" -or
         -not $Gate.Contains('Assert-LinuxAmd64Platform -Platform "$($metadata.Os)/$($metadata.Architecture)"', [StringComparison]::Ordinal) -or
         -not $Library.Contains("function Assert-LinuxAmd64Platform", [StringComparison]::Ordinal)) {
-        throw 'RC52 locally built images are not build-time and post-build gated to linux/amd64'
+        throw 'RC53 locally built images are not build-time and post-build gated to linux/amd64'
     }
     if ($Gate -match "exact-postgres-gosu-exception|approved-by-exact-binary-exception|postgres_exception_proof_failed" -or
         -not $Gate.Contains('postgresException = $null', [StringComparison]::Ordinal)) {
-        throw 'RC52 release gate retains an active PostgreSQL exception/proof path'
+        throw 'RC53 release gate retains an active PostgreSQL exception/proof path'
     }
     foreach ($fingerprint in @('postgres', 'clamav', 'ingestProxy')) {
         if (-not $ArtifactVerifier.Contains("$fingerprint = Get-ContextFingerprint", [StringComparison]::Ordinal)) {
@@ -1294,7 +1308,7 @@ function Assert-RC52DerivedImageGateSource {
         -not $ArtifactVerifier.Contains('current image platform does not match the manifest-bound linux/amd64 platform', [StringComparison]::Ordinal) -or
         -not $ArtifactVerifier.Contains("[string]`$record.kind -cne 'built'", [StringComparison]::Ordinal) -or
         -not $ArtifactVerifier.Contains("[string]`$record.acquisition -cne 'built-from-source'", [StringComparison]::Ordinal)) {
-        throw 'independent artifact verifier does not reject non-built or non-linux/amd64 RC52 image records'
+        throw 'independent artifact verifier does not reject non-built or non-linux/amd64 RC53 image records'
     }
 }
 
@@ -1307,14 +1321,14 @@ if ($gateSource -match '\bConvertFrom-Json\b' -or
     -not $artifactVerifierSource.Contains('Assert-ReleasePowerShellRuntime | Out-Null', [StringComparison]::Ordinal)) {
     throw 'production release JSON parsing bypasses the centralized DateKind String parser or PowerShell 7.5 boundary'
 }
-Assert-RC52DerivedImageGateSource -Gate $gateSource -Library $gateLibrarySource -ArtifactVerifier $artifactVerifierSource
+Assert-RC53DerivedImageGateSource -Gate $gateSource -Library $gateLibrarySource -ArtifactVerifier $artifactVerifierSource
 
 $platformRejected = $false
 try { Assert-LinuxAmd64Platform -Platform 'linux/arm64' | Out-Null } catch { $platformRejected = $true }
 if (-not $platformRejected) { throw 'linux/arm64 release image fixture was accepted' }
 Assert-LinuxAmd64Platform -Platform 'linux/amd64' | Out-Null
 
-$bindingFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('invoice-rc52-artifact-binding-' + [guid]::NewGuid().ToString('N'))
+$bindingFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('invoice-rc53-artifact-binding-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $bindingFixtureRoot | Out-Null
 try {
     $bindingReportPath = Join-Path $bindingFixtureRoot 'report.json'
@@ -1377,18 +1391,18 @@ try {
 }
 
 $transferReadyManifest = [pscustomobject]@{
-    releaseName = '0.1.0-rc52'
+    releaseName = '0.1.0-rc53'
     source = [pscustomobject]@{ gitDirty = $false; gitHead = '0123456789abcdef0123456789abcdef01234567' }
     images = @(
-        [pscustomobject]@{ name = 'api'; reference = 'invoice-system-api:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'pdf-scanner'; reference = 'invoice-system-pdf-scanner:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'postgres-runtime'; reference = 'invoice-postgres:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'clamav-runtime'; reference = 'invoice-clamav:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'ingest-proxy'; reference = 'invoice-ingest-proxy:0.1.0-rc52' },
-        [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:0.1.0-rc52' }
+        [pscustomobject]@{ name = 'api'; reference = 'invoice-system-api:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'pdf-scanner'; reference = 'invoice-system-pdf-scanner:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'postgres-runtime'; reference = 'invoice-postgres:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'clamav-runtime'; reference = 'invoice-clamav:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'ingest-proxy'; reference = 'invoice-ingest-proxy:0.1.0-rc53' },
+        [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:0.1.0-rc53' }
     )
     decisions = [pscustomobject]@{
         applicationImageGate = 'passed'
@@ -1418,17 +1432,17 @@ Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.sou
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.source.gitHead = '1123456789abcdef0123456789abcdef01234567' } -ExpectedMessagePattern 'signed tag commit' -FailureMessage 'strict transfer mode accepted a source commit different from the signed tag'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.applicationImageGate = 'failed' } -ExpectedMessagePattern 'applicationImageGate=passed' -FailureMessage 'strict transfer mode accepted a failed application image gate'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.productionLaunch = 'approved' } -ExpectedMessagePattern 'productionLaunch=blocked' -FailureMessage 'strict transfer mode accepted a non-blocked production launch decision'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc51' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc52' -FailureMessage 'strict transfer mode accepted the failed RC51 release name'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc52-sibling' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc52' -FailureMessage 'strict transfer mode accepted a sibling RC52 release name'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-RC52' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc52' -FailureMessage 'strict transfer mode accepted a case-drifted RC52 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc52' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc53' -FailureMessage 'strict transfer mode accepted the failed RC52 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc53-sibling' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc53' -FailureMessage 'strict transfer mode accepted a sibling RC53 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-RC53' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc53' -FailureMessage 'strict transfer mode accepted a case-drifted RC53 release name'
 foreach ($invalidReleaseNameFixture in @(
     [pscustomobject]@{ Label = 'null'; Value = $null },
     [pscustomobject]@{ Label = 'Boolean'; Value = $false },
-    [pscustomobject]@{ Label = 'singleton array'; Value = [string[]]@('0.1.0-rc52') }
+    [pscustomobject]@{ Label = 'singleton array'; Value = [string[]]@('0.1.0-rc53') }
 )) {
     Assert-TransferManifestMutationRejected `
         -Mutate { param($manifest) $manifest.releaseName = $invalidReleaseNameFixture.Value } `
-        -ExpectedMessagePattern 'releaseName=0\.1\.0-rc52' `
+        -ExpectedMessagePattern 'releaseName=0\.1\.0-rc53' `
         -FailureMessage "strict transfer mode accepted $($invalidReleaseNameFixture.Label) releaseName"
 }
 
@@ -1436,7 +1450,7 @@ Assert-TransferManifestMutationRejected `
     -Mutate {
         param($manifest)
         $manifest.PSObject.Properties.Remove('releaseName')
-        $manifest | Add-Member -NotePropertyName 'ReleaseName' -NotePropertyValue '0.1.0-rc52'
+        $manifest | Add-Member -NotePropertyName 'ReleaseName' -NotePropertyValue '0.1.0-rc53'
     } `
     -ExpectedMessagePattern 'exact property releaseName' `
     -FailureMessage 'strict transfer mode accepted case-drifted ReleaseName'
@@ -1452,7 +1466,7 @@ Assert-TransferManifestMutationRejected `
     -Mutate {
         param($manifest)
         $manifest.images[0].PSObject.Properties.Remove('reference')
-        $manifest.images[0] | Add-Member -NotePropertyName 'Reference' -NotePropertyValue 'invoice-system-api:0.1.0-rc52'
+        $manifest.images[0] | Add-Member -NotePropertyName 'Reference' -NotePropertyValue 'invoice-system-api:0.1.0-rc53'
     } `
     -ExpectedMessagePattern 'exact property reference' `
     -FailureMessage 'strict transfer mode accepted case-drifted image Reference'
@@ -1464,7 +1478,7 @@ $missingReleaseNameManifest = $transferReadyManifest | ConvertTo-Json -Depth 10 
 $missingReleaseNameManifest.PSObject.Properties.Remove('releaseName')
 Assert-ThrowsLike `
     -Action { Assert-TransferReadyManifest -Manifest $missingReleaseNameManifest -ExpectedGitHead '0123456789abcdef0123456789abcdef01234567' | Out-Null } `
-    -ExpectedMessagePattern 'releaseName=0\.1\.0-rc52' `
+    -ExpectedMessagePattern 'releaseName=0\.1\.0-rc53' `
     -FailureMessage 'strict transfer mode accepted a missing releaseName'
 
 foreach ($inventoryMutation in @(
@@ -1485,28 +1499,28 @@ foreach ($inventoryMutation in @(
     },
     [pscustomobject]@{
         Label = 'non-array images value'
-        Expected = 'exact RC52 image inventory'
-        Mutate = { param($manifest) $manifest.images = 'invoice-system-api:0.1.0-rc52' }
+        Expected = 'exact RC53 image inventory'
+        Mutate = { param($manifest) $manifest.images = 'invoice-system-api:0.1.0-rc53' }
     },
     [pscustomobject]@{
         Label = 'eight-image inventory'
-        Expected = 'exact RC52 image inventory'
+        Expected = 'exact RC53 image inventory'
         Mutate = { param($manifest) $manifest.images = @($manifest.images | Select-Object -First 8) }
     },
     [pscustomobject]@{
         Label = 'ten-image inventory'
-        Expected = 'exact RC52 image inventory'
+        Expected = 'exact RC53 image inventory'
         Mutate = {
             param($manifest)
             $manifest.images = @($manifest.images) + [pscustomobject]@{
                 name = 'unexpected'
-                reference = 'invoice-unexpected:0.1.0-rc52'
+                reference = 'invoice-unexpected:0.1.0-rc53'
             }
         }
     },
     [pscustomobject]@{
         Label = 'duplicate image name'
-        Expected = 'exact RC52 image inventory'
+        Expected = 'exact RC53 image inventory'
         Mutate = { param($manifest) $manifest.images[8].name = 'api' }
     },
     [pscustomobject]@{
@@ -1521,13 +1535,13 @@ foreach ($inventoryMutation in @(
     },
     [pscustomobject]@{
         Label = 'case-drifted image name value'
-        Expected = 'exact RC52 image inventory'
+        Expected = 'exact RC53 image inventory'
         Mutate = { param($manifest) $manifest.images[0].name = 'API' }
     },
     [pscustomobject]@{
         Label = 'case-drifted image reference value'
-        Expected = 'exact RC52 image inventory'
-        Mutate = { param($manifest) $manifest.images[0].reference = 'Invoice-system-api:0.1.0-rc52' }
+        Expected = 'exact RC53 image inventory'
+        Mutate = { param($manifest) $manifest.images[0].reference = 'Invoice-system-api:0.1.0-rc53' }
     }
 )) {
     Assert-TransferManifestMutationRejected `
@@ -1537,7 +1551,7 @@ foreach ($inventoryMutation in @(
 }
 
 foreach ($imageStringField in @('name', 'reference')) {
-    $validSingletonValue = if ($imageStringField -ceq 'name') { 'api' } else { 'invoice-system-api:0.1.0-rc52' }
+    $validSingletonValue = if ($imageStringField -ceq 'name') { 'api' } else { 'invoice-system-api:0.1.0-rc53' }
     foreach ($invalidImageStringFixture in @(
         [pscustomobject]@{ Label = 'null'; Value = $null },
         [pscustomobject]@{ Label = 'Boolean'; Value = $false },
@@ -1545,20 +1559,20 @@ foreach ($imageStringField in @('name', 'reference')) {
     )) {
         Assert-TransferManifestMutationRejected `
             -Mutate { param($manifest) $manifest.images[0].$imageStringField = $invalidImageStringFixture.Value } `
-            -ExpectedMessagePattern 'exact RC52 image inventory' `
+            -ExpectedMessagePattern 'exact RC53 image inventory' `
             -FailureMessage "strict transfer mode accepted $($invalidImageStringFixture.Label) image $imageStringField"
     }
 }
 
 foreach ($expectedImage in @($transferReadyManifest.images)) {
-    foreach ($wrongTag in @('0.1.0-rc51', '0.1.0-rc52-sibling')) {
+    foreach ($wrongTag in @('0.1.0-rc52', '0.1.0-rc53-sibling')) {
         Assert-TransferManifestMutationRejected `
             -Mutate {
                 param($manifest)
                 $record = @($manifest.images | Where-Object { [string]$_.name -ceq [string]$expectedImage.name })
-                $record[0].reference = ([string]$record[0].reference) -replace ':0\.1\.0-rc52$', ":$wrongTag"
+                $record[0].reference = ([string]$record[0].reference) -replace ':0\.1\.0-rc53$', ":$wrongTag"
             } `
-            -ExpectedMessagePattern 'exact RC52 image inventory' `
+            -ExpectedMessagePattern 'exact RC53 image inventory' `
             -FailureMessage "strict transfer mode accepted $($expectedImage.name) image tag $wrongTag"
     }
 }
@@ -1608,7 +1622,7 @@ foreach ($transferMutation in @(
     }
 }
 
-function Assert-RC52RuntimeAndBackupBindings {
+function Assert-RC53RuntimeAndBackupBindings {
     param([Parameter(Mandatory)][string]$ProjectRoot)
 
     $runtimeVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
@@ -1685,7 +1699,7 @@ function Assert-RC52RuntimeAndBackupBindings {
         @{ Source = $headerVerifier; Required = '[string]$ExpectedImageID'; Label = 'web header image ID' }
     )) {
         if (-not $binding.Source.Contains($binding.Required, [StringComparison]::Ordinal)) {
-            throw "RC52 verifier is missing expected ID binding: $($binding.Label)"
+            throw "RC53 verifier is missing expected ID binding: $($binding.Label)"
         }
     }
     foreach ($requiredGateArgument in @(
@@ -1724,11 +1738,11 @@ function Assert-RC52RuntimeAndBackupBindings {
         -not $restore.Contains('docker image inspect "$restore_postgres_image"', [StringComparison]::Ordinal) -or
         -not $backup.Contains('docker run --pull never', [StringComparison]::Ordinal) -or
         -not $restore.Contains('docker run --pull never', [StringComparison]::Ordinal)) {
-        throw 'current backup/restore drill is not bound to existing no-pull RC52 derived images'
+        throw 'current backup/restore drill is not bound to existing no-pull RC53 derived images'
     }
 }
 
-Assert-RC52RuntimeAndBackupBindings -ProjectRoot $projectRoot
+Assert-RC53RuntimeAndBackupBindings -ProjectRoot $projectRoot
 
 if ($task5AMutationFailures.Count -gt 0) {
     throw "Task 5A focused mutation failures:`n- $($task5AMutationFailures -join "`n- ")"
