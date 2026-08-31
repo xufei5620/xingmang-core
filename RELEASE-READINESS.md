@@ -23,9 +23,10 @@ exception.  The only permitted residual tuple is the exact time-bounded
 Keycloak vendor-rejected finding recorded in `docs/IMAGE-SCAN-REVIEW.md`;
 tuple/digest drift or expiry on `2026-09-30T00:00:00Z` blocks the gate.
 
-RC49 keeps the two-stage hard gate: first produce and independently verify the
-signed, manifest-bound image evidence; then transfer only those images and
-complete backup, isolated startup, migration and real production canaries.
+RC49 keeps the two-stage hard gate: first create and verify the signed source
+commit/tag, then produce, independently verify, and separately sign the
+manifest-bound image evidence; transfer only those images and then complete
+backup, isolated startup, migration and real production canaries.
 `image_approved_pending_canary` remains a blocking result.  RC48 remains
 blocked historical evidence; its block did not reduce the like-for-like
 production exposure, so the fixes are urgent rather than an approval to ship.

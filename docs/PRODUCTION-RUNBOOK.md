@@ -76,12 +76,27 @@ dependency audit, agent tests, isolated PostgreSQL migrations and concurrency
 tests, runtime-role immutability checks, Compose validation and upstream
 integrity.
 
-Before copying images to the server, complete the RC49 image gate from a clean,
-signed source commit.  It builds all nine manifest-bound images: API, PDF
-scanner, tools, web, source agent, derived PostgreSQL, derived ClamAV, derived
-ingest proxy, and Keycloak.  It updates the exact Trivy 0.74.0 databases,
-scans serially, generates CycloneDX 1.7 SBOMs, and binds every report to the
-immutable local image ID:
+Before copying images to the server, create and verify the clean signed RC49
+source commit and annotated tag.  The tag must peel to the signed source commit
+used by the gate; do not create or move it after image evidence exists:
+
+```powershell
+git diff --check
+git commit -S -m 'release: RC49 image-security candidate'
+git status --short                    # required: no output
+git verify-commit HEAD
+git tag -s -a v0.1.0-rc49-signed -m 'RC49 image-security release candidate'
+git verify-tag v0.1.0-rc49-signed
+if ((git rev-parse 'v0.1.0-rc49-signed^{commit}') -ne (git rev-parse HEAD)) {
+  throw 'RC49 signed tag does not peel to the gate source commit'
+}
+```
+
+Then complete the RC49 image gate from that exact signed source.  It builds all
+nine manifest-bound images: API, PDF scanner, tools, web, source agent, derived
+PostgreSQL, derived ClamAV, derived ingest proxy, and Keycloak.  It updates the
+exact Trivy 0.74.0 databases, scans serially, generates CycloneDX 1.7 SBOMs,
+and binds every report to the immutable local image ID:
 
 ```powershell
 # Task 5 only: creates new RC49 evidence; do not reuse or overwrite RC48.
@@ -112,8 +127,9 @@ all pass. A result from a different local Keycloak tag or image ID is rejected.
 
 The output includes raw HIGH/CRITICAL Trivy JSON, CycloneDX 1.7 SBOMs, build
 logs, exact tool/database evidence, `release-manifest.json`, and a complete
-`SHA256SUMS`. Recheck an artifact directory and its current local image tags
-without rebuilding:
+`SHA256SUMS`. `release-image-gate.ps1` creates and verifies hashes; it does
+**not** sign the artifact bundle. Recheck an artifact directory and its current
+local image tags without rebuilding:
 
 BuildKit provenance wrappers are disabled for the local candidate images so
 an otherwise identical cached build is not assigned a fresh attestation
@@ -146,12 +162,34 @@ The raw finding remains visible.  The gate binds base and derived image IDs,
 the tuple, pruning proof, isolated runtime/provisioning proofs, rationale and
 review window; any drift or expiry fails closed.
 
-After the artifact gate is internally consistent, run `govulncheck v1.7.0
-./...` for both Go modules, create a Git commit/tag only after the working tree
-has no unexpected file or secret, and retain the generated manifest and
-checksums with the release. A non-zero image-gate exit is a release block, not
-an artifact-generation failure when its manifest says `productionLaunch:
-blocked`.
+After the artifact verifier passes, create and verify the detached artifact
+signature before any transfer.  It signs the gate-produced `SHA256SUMS`, which
+binds the manifest, reports, SBOMs and logs listed by that checksum file; retain
+both files with the bundle.  Use only the reviewed offline release key and the
+independent allowed-signers file:
+
+```powershell
+$releaseRoot = (Resolve-Path 'release\0.1.0-rc49-exact1').Path
+$checksumManifest = Join-Path $releaseRoot 'SHA256SUMS'
+$releaseSignature = "$checksumManifest.sig"
+$releaseSigningKey = '<offline RC49 release Ed25519 private key>'
+$releaseAllowedSigners = '<reviewed release-tree allowed_signers file>'
+
+& ssh-keygen -Y sign -q -f "$releaseSigningKey" -n solov-invoice-release-v1 "$checksumManifest"
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $releaseSignature -PathType Leaf)) {
+  throw 'RC49 artifact SHA256SUMS signature was not created'
+}
+Get-Content -Raw -LiteralPath $checksumManifest | & ssh-keygen -Y verify `
+  -f "$releaseAllowedSigners" -I invoice-release@solov.cc `
+  -n solov-invoice-release-v1 -s "$releaseSignature"
+if ($LASTEXITCODE -ne 0) { throw 'RC49 artifact SHA256SUMS signature verification failed' }
+```
+
+Only after this signature and its verification pass may the exact signed source
+tag, `release-manifest.json`, `SHA256SUMS`, `SHA256SUMS.sig`, reports, SBOMs,
+and the nine manifest-bound images be transferred.  A non-zero image-gate exit
+is a release block, not an artifact-generation failure when its manifest says
+`productionLaunch: blocked`.
 
 The RC49 source baselines are Go 1.25.13, pgx 5.9.2, x/text 0.39.0,
 PostgreSQL 18.6, Keycloak 26.7.2 and ClamAV 1.4.5 LTS.  PostgreSQL, ClamAV and
@@ -174,8 +212,9 @@ image tag. The production Compose files contain no `build:` directives and set
 and `--pull never` for one-shot `run` commands as second guards; a missing
 transferred, reviewed image must fail closed.
 
-This remains a two-stage hard gate.  Stage 1 is the clean signed-source build,
-serial scan, SBOM, manifest/signature and independent artifact verification.
+This remains a two-stage hard gate.  Stage 1 is signed-source commit/tag
+verification, then the serial build, scan, SBOM, manifest, independent artifact
+verification, and detached artifact signature.
 Stage 2 transfers only those manifest-bound images, then performs the backup,
 isolated start, migration and real production canaries.  An
 `image_approved_pending_canary` result is still blocked; it is never authority
@@ -522,14 +561,17 @@ Generate the application field keyring without printing key material:
 
 ```bash
 export INVOICE_IMAGE_TAG='<exact tag from the verified RC49 release manifest>'
-# The transferred manifest-bound images must already exist; production never builds them.
-docker image inspect "invoice-system-api:$INVOICE_IMAGE_TAG" \
-  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
-  "invoice-postgres:$INVOICE_IMAGE_TAG" \
-  "invoice-clamav:$INVOICE_IMAGE_TAG" \
-  "invoice-ingest-proxy:$INVOICE_IMAGE_TAG" \
-  "invoice-keycloak:$INVOICE_IMAGE_TAG" >/dev/null
-docker run --rm --user "$(id -u):$(id -g)" \
+RELEASE_MANIFEST=/root/invoice-system/release/0.1.0-rc49-exact1/release-manifest.json
+# The transferred manifest-bound images must already exist; production never builds or pulls them.
+test "$(jq '[.images[] | .name] | length' "$RELEASE_MANIFEST")" -eq 9
+for image_name in api pdf-scanner tools web source-agent postgres-runtime clamav-runtime ingest-proxy keycloak; do
+  image_reference="$(jq -er --arg name "$image_name" '.images[] | select(.name == $name) | .reference' "$RELEASE_MANIFEST")"
+  expected_image_id="$(jq -er --arg name "$image_name" '.images[] | select(.name == $name) | .imageId' "$RELEASE_MANIFEST")"
+  actual_image_id="$(docker image inspect --format '{{.Id}}' "$image_reference")"
+  test "$actual_image_id" = "$expected_image_id" || { echo "image ID mismatch: $image_name" >&2; exit 1; }
+  printf '%s %s %s\n' "$image_name" "$image_reference" "$actual_image_id"
+done
+docker run --rm --pull=never --user "$(id -u):$(id -g)" \
   -v /root/invoice-system/secrets:/secrets \
   --entrypoint /usr/local/bin/invoice-keygen "invoice-system-tools:$INVOICE_IMAGE_TAG" \
   --out /secrets/invoice_field_keyring.json --key-id 2026-08
@@ -542,7 +584,7 @@ startup; it is encrypted by the field keyring and never returned.
 Generate the private source-agent PKI in a temporary 0700 directory:
 
 ```bash
-docker run --rm --user "$(id -u):$(id -g)" \
+docker run --rm --pull=never --user "$(id -u):$(id -g)" \
   -v /root/invoice-system/secrets:/secrets \
   --entrypoint /usr/local/bin/invoice-mtlsgen "invoice-system-tools:$INVOICE_IMAGE_TAG" \
   --out-dir /secrets/source-pki --server-name invoice-ingest.internal \
@@ -578,7 +620,7 @@ files explicitly before any container starts:
 First verify the pinned PostgreSQL UID instead of assuming it:
 
 ```bash
-docker run --rm --entrypoint id \
+docker run --rm --pull=never --entrypoint id \
   "invoice-postgres:$INVOICE_IMAGE_TAG" postgres
 stat -c '%u:%g %a %n' /root/invoice-system/secrets/*
 SECRETS_DIR=/root/invoice-system/secrets POSTGRES_UID=70 \

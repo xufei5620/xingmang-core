@@ -45,9 +45,13 @@ remediation is urgent.
 - The locally built runtime derivatives are `invoice-postgres`,
   `invoice-clamav`, and `invoice-ingest-proxy`; the two PostgreSQL services
   use the same `invoice-postgres` image.
-- Keycloak uses
+- Keycloak refreshes its base to
   `quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067`
-  and removes the unused MSSQL JDBC driver from the final image.
+  and thereby remediates the RC48 `sqlite-libs` family
+  `CVE-2026-11822` and `CVE-2026-11824`.  Final-image removal of the unused
+  MSSQL JDBC driver and `/opt/keycloak/bin/client` is retained pruning proof
+  from the existing hardening; it is required evidence, not an RC49 source
+  remediation.
 
 The intended RC49 inventory is nine manifest-bound images under one exact,
 immutable release tag: `invoice-system-api`, `invoice-system-pdf-scanner`,
@@ -69,21 +73,29 @@ this exact tuple:
 
 | Field | Required value |
 |---|---|
+| Scope | `exact-keycloak-26.7.2-base-derived-image-and-single-finding-only` |
+| Base reference | `quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067` |
+| Derived image ID | exactly the generated `invoice-keycloak:<tag>` manifest image ID |
 | CVE | `CVE-2026-22020` |
+| Target | `invoice-keycloak:<tag> (redhat 9.8)` |
 | Trivy class/type | `os-pkgs` / `redhat` |
 | Package / installed version | `java-21-openjdk-headless` / `1:21.0.12.1.1-1.2.el9` |
 | Fixed version | empty |
 | Severity / status | `HIGH` / `affected` |
 | Disposition | `vendor_rejected_not_affected` |
 | Review window | reviewed `2026-08-31T00:00:00Z`; due `2026-09-30T00:00:00Z` |
+| Pruning proof | `proof/keycloak-runtime-pruning.txt` bound to that derived image ID |
 
-The rationale is evidence-bound: Red Hat rejected the CVE and AWS records the
-affected libpng path as Oracle's proprietary bundled JDK path, not this
-OpenJDK/system-libpng runtime.  The raw Trivy finding remains in the report;
-there is no Trivy ignore.  The release gate and independent verifier must bind
-the exact base/derived image IDs, tuple, pruning proof, runtime/provisioning
-proofs, rationale and review window.  Any tuple or digest drift, missing proof,
-or review expiry fails closed and requires a new committed review.
+The exact generator/verifier rationale is: `Red Hat officially rejected the
+CVE; AWS records that it affects Oracle proprietary bundled libpng while
+OpenJDK distributions using system libpng are not affected.`  Its retained
+evidence URLs are <https://bugzilla.redhat.com/show_bug.cgi?id=2460045#c11>
+and <https://explore.alas.aws.amazon.com/CVE-2026-22020.html>.  The raw Trivy
+finding remains in the report; there is no Trivy ignore.  The release gate and
+independent verifier must bind the exact base/derived image IDs, target, tuple,
+pruning proof, runtime/provisioning proofs, rationale and review window.  Any
+tuple or digest drift, missing proof, or review expiry fails closed and requires
+a new committed review.
 
 ## Approved candidate images
 
