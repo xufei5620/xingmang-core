@@ -76,18 +76,20 @@ dependency audit, agent tests, isolated PostgreSQL migrations and concurrency
 tests, runtime-role immutability checks, Compose validation and upstream
 integrity.
 
-Before copying images to the server:
-
-Run the fail-closed image gate. It builds API, PDF scanner, tools, web and
-source-agent images, pulls every pinned runtime dependency, updates exact
-Trivy 0.74.0 databases, scans images serially, generates CycloneDX 1.7 SBOMs,
-and binds every report to the immutable local image ID:
+Before copying images to the server, complete the RC49 image gate from a clean,
+signed source commit.  It builds all nine manifest-bound images: API, PDF
+scanner, tools, web, source agent, derived PostgreSQL, derived ClamAV, derived
+ingest proxy, and Keycloak.  It updates the exact Trivy 0.74.0 databases,
+scans serially, generates CycloneDX 1.7 SBOMs, and binds every report to the
+immutable local image ID:
 
 ```powershell
-# Default: builds and scans the exact Keycloak 26.7.2 candidate.
+# Task 5 only: creates new RC49 evidence; do not reuse or overwrite RC48.
 pwsh -NoProfile -File .\scripts\release-image-gate.ps1 `
-  -ReleaseName 0.1.0-rc2 `
-  -ReleaseDirectory release\0.1.0-rc2 `
+  -ReleaseName 0.1.0-rc49 `
+  -ImageTag 0.1.0-rc49 `
+  -SourceAgentVersion 0.3.0 `
+  -ReleaseDirectory release\0.1.0-rc49-exact1 `
   -IdPMode keycloak
 ```
 
@@ -126,24 +128,23 @@ gate never invents an author identity or commits files itself.
 
 ```powershell
 pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 `
-  -ReleaseDirectory release\0.1.0-rc2
+  -ReleaseDirectory release\0.1.0-rc49-exact1
 ```
 
 The verifier rejects a report/SBOM whose embedded Trivy ImageID, manifest
 hash, checksum or current local image ID has drifted. Trivy runs under an
 exclusive release-cache lock and every scan is serial, avoiding shared-cache
-lock races. No vulnerability is ignored. PostgreSQL findings may pass only
-when every finding remains confined to `usr/local/bin/gosu`/Go stdlib in the
-exact reviewed digest, the extracted linux/amd64 binary has the exact reviewed
-SHA-256, and pinned `govulncheck v1.7.0 -mode=binary` still proves zero called
-vulnerabilities. This exception cannot be inherited by another digest, binary,
-package or target.
+lock races. No vulnerability is ignored. RC49 PostgreSQL has no exception and
+must report zero HIGH/CRITICAL findings; the former fixed-version `gosu`
+finding is not exception-eligible.
 
-The current Keycloak 26.7.2 image retains one visible Trivy HIGH finding only
-under the exact vendor-rejection policy documented in
-`docs/IMAGE-SCAN-REVIEW.md`. The gate binds the exception to the base digest,
-derived image ID, CVE/package/version/status tuple, final-image pruning proof,
-and isolated runtime OIDC smoke. It uses no Trivy ignore. Any drift fails.
+RC49 permits only the exact Keycloak vendor-rejected tuple documented in
+`docs/IMAGE-SCAN-REVIEW.md`: `CVE-2026-22020`, `os-pkgs`/`redhat`,
+`java-21-openjdk-headless@1:21.0.12.1.1-1.2.el9`, empty fixed version,
+`HIGH`/`affected`, with the exact refreshed base digest and review deadline.
+The raw finding remains visible.  The gate binds base and derived image IDs,
+the tuple, pruning proof, isolated runtime/provisioning proofs, rationale and
+review window; any drift or expiry fails closed.
 
 After the artifact gate is internally consistent, run `govulncheck v1.7.0
 ./...` for both Go modules, create a Git commit/tag only after the working tree
@@ -152,25 +153,33 @@ checksums with the release. A non-zero image-gate exit is a release block, not
 an artifact-generation failure when its manifest says `productionLaunch:
 blocked`.
 
-The current pinned runtime baselines are Go 1.25.13, pgx 5.9.2, x/text 0.39.0,
-PostgreSQL 18.4, Keycloak 26.7.2 and ClamAV 1.4.5 LTS. The production Compose
-pins the reviewed amd64 ClamAV image digest and reserves 4 GiB because engine
-load and signature reload can temporarily require several GiB; refresh that
-digest only through the image scan/SBOM gate above. The Keycloak Dockerfile
-pins both stages to multi-arch digest
-`sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec`;
-an override of `KEYCLOAK_BASE_IMAGE` is a release change and requires the same
-scan/review/recording gates.
+The RC49 source baselines are Go 1.25.13, pgx 5.9.2, x/text 0.39.0,
+PostgreSQL 18.6, Keycloak 26.7.2 and ClamAV 1.4.5 LTS.  PostgreSQL, ClamAV and
+ingest Nginx are locally built derivatives with fixed Alpine OpenSSL
+`3.5.8-r0`; Keycloak is derived from
+`sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067`.
+Refresh any base only through the full image scan/SBOM/review flow.
 
-Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` to the exact tag named by
-the newly verified release manifest. Production Compose has no image-tag
-fallback: API, tools, PDF scanner, web, source-agent and the locally built
-Keycloak image must resolve from that one value. `SOURCE_AGENT_VERSION` remains
-the independent binary/protocol version recorded inside the agent; it is not an
+Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC49
+manifest, signature and artifact verifier have passed. Production Compose has
+no image-tag fallback: all nine images (`invoice-system-api`,
+`invoice-system-pdf-scanner`, `invoice-system-tools`, `invoice-system-web`,
+`invoice-source-agent`, `invoice-postgres`, `invoice-clamav`,
+`invoice-ingest-proxy`, and `invoice-keycloak`) must resolve from that one
+value. `invoice-postgres` is required for both the application and Keycloak
+databases and for the `permissions` job. `SOURCE_AGENT_VERSION` remains the
+independent binary/protocol version recorded inside the agent; it is not an
 image tag. The production Compose files contain no `build:` directives and set
 `pull_policy: never` for every locally built image. Use `--no-build` for `up`
 and `--pull never` for one-shot `run` commands as second guards; a missing
-reviewed image must fail closed.
+transferred, reviewed image must fail closed.
+
+This remains a two-stage hard gate.  Stage 1 is the clean signed-source build,
+serial scan, SBOM, manifest/signature and independent artifact verification.
+Stage 2 transfers only those manifest-bound images, then performs the backup,
+isolated start, migration and real production canaries.  An
+`image_approved_pending_canary` result is still blocked; it is never authority
+to cut over traffic.
 After any code or deployment change, the prior RC evidence is historical and a
 new image gate must be generated before containers are recreated. Never mix an
 older API container with a newer web/scanner container under one release.
@@ -512,9 +521,14 @@ DSN files. Use URL-safe/hex passwords so a DSN is not ambiguously encoded.
 Generate the application field keyring without printing key material:
 
 ```bash
-export INVOICE_IMAGE_TAG='<exact tag from the verified release manifest>'
-docker build --target api -t "invoice-system-api:$INVOICE_IMAGE_TAG" /root/invoice-system/app/backend
-docker build --target tools -t "invoice-system-tools:$INVOICE_IMAGE_TAG" /root/invoice-system/app/backend
+export INVOICE_IMAGE_TAG='<exact tag from the verified RC49 release manifest>'
+# The transferred manifest-bound images must already exist; production never builds them.
+docker image inspect "invoice-system-api:$INVOICE_IMAGE_TAG" \
+  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
+  "invoice-postgres:$INVOICE_IMAGE_TAG" \
+  "invoice-clamav:$INVOICE_IMAGE_TAG" \
+  "invoice-ingest-proxy:$INVOICE_IMAGE_TAG" \
+  "invoice-keycloak:$INVOICE_IMAGE_TAG" >/dev/null
 docker run --rm --user "$(id -u):$(id -g)" \
   -v /root/invoice-system/secrets:/secrets \
   --entrypoint /usr/local/bin/invoice-keygen "invoice-system-tools:$INVOICE_IMAGE_TAG" \
@@ -565,7 +579,7 @@ First verify the pinned PostgreSQL UID instead of assuming it:
 
 ```bash
 docker run --rm --entrypoint id \
-  postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2 postgres
+  "invoice-postgres:$INVOICE_IMAGE_TAG" postgres
 stat -c '%u:%g %a %n' /root/invoice-system/secrets/*
 SECRETS_DIR=/root/invoice-system/secrets POSTGRES_UID=70 \
   bash deploy/preflight-secret-permissions.sh

@@ -1,16 +1,89 @@
 # Release-candidate image security review
 
-> Historical review snapshot. The image IDs below describe the 2026-08-21
-> manual candidate only. A production release must be regenerated with
-> `scripts/release-image-gate.ps1`; `scripts/verify-release-image-artifacts.ps1`
-> must then prove the manifest, Trivy JSON, CycloneDX ImageID, SHA256SUMS and
-> current local image IDs still agree. The gate defaults to Keycloak mode and
-> therefore fails closed while the rejection in this document remains active.
+> The RC1/RC17/RC24/RC32/RC34/RC38/RC48 entries retained later in this document
+> are historical evidence.
+> They are not renamed or rewritten as RC49 evidence.  The current RC49 section
+> records source/static remediation design and review policy only; it is **not**
+> an image build, Trivy result, SBOM, signature, artifact-verifier, runtime,
+> provisioning, transfer, deployment, canary, or rollback record.
 
-Review time: 2026-08-21 (Asia/Shanghai). Scanner: Trivy 0.74.0 with the
+Historical RC1 review time: 2026-08-21 (Asia/Shanghai). Scanner: Trivy 0.74.0 with the
 vulnerability and Java databases downloaded immediately before the scan.
 The policy fails on every HIGH or CRITICAL finding unless this file contains a
 specific reachability review.
+
+## Current RC49 remediation and review status (source/static only)
+
+RC49 is an urgent remediation slice, not an approved release.  The RC48
+failure evidence at `release/0.1.0-rc48-exact1` remains byte-for-byte
+historical evidence and RC48 remains blocked.  No current image result is
+claimed here.
+
+### Production versus RC48 fact
+
+The comparison retained outside Git at
+`release/0.1.0-rc48-production-comparison-20260831-exact1` used the exact
+RC48 Trivy image `0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`,
+the recorded vulnerability and Java-cache database timestamps, serial scans,
+`--scanners vuln --severity HIGH,CRITICAL`, and `ignoreUnfixed=false`.  It did
+not reduce severity or use an ignore list.
+
+Every like-for-like production runtime finding tuple equalled its RC48 tuple.
+API and Web image IDs differed but their finding tuples were equal.  PDF
+scanner, Keycloak, PostgreSQL, ClamAV, and ingest Nginx had the same image IDs;
+the source agent had zero findings in both sets.  RC48 also included a
+non-runtime tools image with the same OpenSSL finding.  Thus blocking RC48 was
+correct, but it did not reduce the exposure already present in production;
+remediation is urgent.
+
+### Actual RC49 source changes awaiting evidence
+
+- Alpine runtime stages install `libcrypto3=3.5.8-r0` and
+  `libssl3=3.5.8-r0`.
+- `gosu` 1.19 is rebuilt from commit
+  `6456aaa0f3c854d199d0f037f068eb97515b7513` with Go 1.25.13.
+- The locally built runtime derivatives are `invoice-postgres`,
+  `invoice-clamav`, and `invoice-ingest-proxy`; the two PostgreSQL services
+  use the same `invoice-postgres` image.
+- Keycloak uses
+  `quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067`
+  and removes the unused MSSQL JDBC driver from the final image.
+
+The intended RC49 inventory is nine manifest-bound images under one exact,
+immutable release tag: `invoice-system-api`, `invoice-system-pdf-scanner`,
+`invoice-system-tools`, `invoice-system-web`, `invoice-source-agent`,
+`invoice-postgres`, `invoice-clamav`, `invoice-ingest-proxy`, and
+`invoice-keycloak`.  Production Compose has no `build:` directives and every
+locally built service uses `pull_policy: never`; a missing transferred image
+must fail closed.  This inventory is a source contract until Task 5 produces
+and independently verifies the manifest and its IDs.
+
+### RC49 exception policy
+
+PostgreSQL has **no RC49 exception**.  Its policy is zero findings: every old
+`gosu` finding has an upstream fixed version and the legacy fixed-version
+fixture is deliberately rejected as exception-eligible.
+
+The sole permitted RC49 exception is the retained raw Keycloak finding with
+this exact tuple:
+
+| Field | Required value |
+|---|---|
+| CVE | `CVE-2026-22020` |
+| Trivy class/type | `os-pkgs` / `redhat` |
+| Package / installed version | `java-21-openjdk-headless` / `1:21.0.12.1.1-1.2.el9` |
+| Fixed version | empty |
+| Severity / status | `HIGH` / `affected` |
+| Disposition | `vendor_rejected_not_affected` |
+| Review window | reviewed `2026-08-31T00:00:00Z`; due `2026-09-30T00:00:00Z` |
+
+The rationale is evidence-bound: Red Hat rejected the CVE and AWS records the
+affected libpng path as Oracle's proprietary bundled JDK path, not this
+OpenJDK/system-libpng runtime.  The raw Trivy finding remains in the report;
+there is no Trivy ignore.  The release gate and independent verifier must bind
+the exact base/derived image IDs, tuple, pruning proof, runtime/provisioning
+proofs, rationale and review window.  Any tuple or digest drift, missing proof,
+or review expiry fails closed and requires a new committed review.
 
 ## Approved candidate images
 

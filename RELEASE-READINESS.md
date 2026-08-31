@@ -1,4 +1,4 @@
-# Release readiness: 0.1.0-rc32 issuer-configuration lifecycle candidate
+# Release readiness: RC32 historical issuer lifecycle and RC49 image-security candidate
 
 Status as of 2026-08-25:
 
@@ -6,6 +6,29 @@ Status as of 2026-08-25:
 - isolated staging deployment: **GO after the fresh RC32 image/SBOM gate**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
+
+## RC49 source/static security stage (current)
+
+**Production: NO-GO.**  RC49 has source/static changes only.  The complete
+Task 5 evidence is still absent: no RC49 Docker build, zero-finding scan, SBOM,
+signature/tag, artifact verifier, runtime/provisioning proof, transfer,
+deployment, canary, or rollback point has occurred.  The passing
+`scripts/test-release-image-gate.ps1` fixture suite validates source contracts;
+it does not create release evidence.
+
+The pending release must build and bind one common tag for nine images: API,
+PDF scanner, tools, web, source agent, derived PostgreSQL, derived ClamAV,
+derived ingest proxy, and Keycloak.  PostgreSQL is zero-finding with no RC49
+exception.  The only permitted residual tuple is the exact time-bounded
+Keycloak vendor-rejected finding recorded in `docs/IMAGE-SCAN-REVIEW.md`;
+tuple/digest drift or expiry on `2026-09-30T00:00:00Z` blocks the gate.
+
+RC49 keeps the two-stage hard gate: first produce and independently verify the
+signed, manifest-bound image evidence; then transfer only those images and
+complete backup, isolated startup, migration and real production canaries.
+`image_approved_pending_canary` remains a blocking result.  RC48 remains
+blocked historical evidence; its block did not reduce the like-for-like
+production exposure, so the fixes are urgent rather than an approval to ship.
 
 This is an independent service. No Sub2API or New API source file, container,
 database schema or reverse-proxy configuration was modified while producing
