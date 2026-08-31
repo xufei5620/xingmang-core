@@ -33,15 +33,15 @@ function Assert-KeycloakDockerfileLiteralBasePins {
     $normalized = $DockerfileText.Replace("`r`n", "`n").Replace("`r", "`n")
     $instructionLines = @(
         $normalized -split "`n" |
-            ForEach-Object { [regex]::Replace($_, '^[ \t]+', '') }
+            ForEach-Object { $_.TrimStart() }
     )
-    $fromLines = @($instructionLines | Where-Object { $_ -match '(?i)^FROM[ \t]+' })
+    $fromLines = @($instructionLines | Where-Object { $_ -match '(?i)^FROM[\t\v\f\r ]+' })
     if ($fromLines.Count -ne 2 -or
         $fromLines[0] -cne "FROM $ExpectedBaseReference AS builder" -or
         $fromLines[1] -cne "FROM $ExpectedBaseReference") {
         throw 'Keycloak Dockerfile must contain exactly two literal reviewed FROM digest lines'
     }
-    if (@($instructionLines | Where-Object { $_ -match '(?i)^ARG[ \t]+[^\r\n]*(?:KEYCLOAK|BASE_IMAGE)' }).Count -gt 0 -or
+    if (@($instructionLines | Where-Object { $_ -match '(?i)^ARG[\t\v\f\r ]+[^\r\n]*(?:KEYCLOAK|BASE_IMAGE)' }).Count -gt 0 -or
         @($fromLines | Where-Object { $_ -match '\$' }).Count -gt 0) {
         throw 'Keycloak Dockerfile cannot expose an ARG or variable FROM base override'
     }

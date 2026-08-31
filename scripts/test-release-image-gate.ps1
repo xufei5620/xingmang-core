@@ -377,6 +377,18 @@ Test-Task5ARequirement -Label 'literal Keycloak FROM pins with permitted leading
     $leadingWhitespaceFixture = "  FROM $keycloakBaseReference AS builder`n`tFROM $keycloakBaseReference`n"
     Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $leadingWhitespaceFixture -ExpectedBaseReference $keycloakBaseReference | Out-Null
 }
+foreach ($unicodeWhitespaceFixture in @(
+    [pscustomobject]@{ Label = 'vertical tab'; Prefix = [string][char]0x000B },
+    [pscustomobject]@{ Label = 'form feed'; Prefix = [string][char]0x000C },
+    [pscustomobject]@{ Label = 'non-breaking space'; Prefix = [string][char]0x00A0 }
+)) {
+    Test-Task5ARequirement -Label "literal Keycloak FROM pins with $($unicodeWhitespaceFixture.Label) leading whitespace" -Action {
+        $unicodeLeadingWhitespaceFixture =
+            $unicodeWhitespaceFixture.Prefix + "FROM $keycloakBaseReference AS builder`n" +
+            $unicodeWhitespaceFixture.Prefix + "FROM $keycloakBaseReference`n"
+        Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $unicodeLeadingWhitespaceFixture -ExpectedBaseReference $keycloakBaseReference | Out-Null
+    }
+}
 foreach ($dockerfileMutation in @(
     [pscustomobject]@{
         Label = 'indented mixed-case third FROM'
@@ -389,6 +401,26 @@ foreach ($dockerfileMutation in @(
     [pscustomobject]@{
         Label = 'indented variable FROM'
         Text = $keycloakLiteralPinFixture + '  FROM ${KEYCLOAK_BASE_IMAGE} AS bypass' + "`n"
+    },
+    [pscustomobject]@{
+        Label = 'vertical-tab-prefixed mixed-case third FROM'
+        Text = $keycloakLiteralPinFixture + [string][char]0x000B + "fRoM scratch AS bypass`n"
+    },
+    [pscustomobject]@{
+        Label = 'form-feed-prefixed mixed-case third FROM'
+        Text = $keycloakLiteralPinFixture + [string][char]0x000C + "fRoM scratch AS bypass`n"
+    },
+    [pscustomobject]@{
+        Label = 'NBSP-prefixed mixed-case third FROM'
+        Text = $keycloakLiteralPinFixture + [string][char]0x00A0 + "fRoM scratch AS bypass`n"
+    },
+    [pscustomobject]@{
+        Label = 'vertical-tab-separated mixed-case third FROM'
+        Text = $keycloakLiteralPinFixture + 'fRoM' + [string][char]0x000B + "scratch AS bypass`n"
+    },
+    [pscustomobject]@{
+        Label = 'form-feed-separated lowercase Keycloak base ARG'
+        Text = 'arg' + [string][char]0x000C + "KEYCLOAK_BASE_IMAGE=$keycloakBaseReference`n" + $keycloakLiteralPinFixture
     }
 )) {
     Test-Task5AMutationRejected -Label $dockerfileMutation.Label -Action {
