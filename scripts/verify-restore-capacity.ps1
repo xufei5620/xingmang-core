@@ -13,7 +13,7 @@ $requiredRestoreContracts = @(
     'network_created=true',
     'started=true',
     'restore drill Docker resource name collision',
-    'docker run --detach --rm --name "$container"',
+    'docker run --pull never --detach --rm --name "$container"',
     '--tmpfs "/var/lib/postgresql:rw,nosuid,nodev,size=$restore_postgres_tmpfs_size"',
     'remove_docker_resource_strict container "$container"',
     'remove_docker_resource_strict network "$network"',
@@ -41,9 +41,12 @@ if ($restore.Contains('size=1g', [StringComparison]::Ordinal) -or
     $restore.Contains('type=volume', [StringComparison]::Ordinal)) {
     throw 'restore PostgreSQL still uses the undersized tmpfs or a persistent volume'
 }
+if ($restore.Contains('docker run --detach --rm --name "$container"', [StringComparison]::Ordinal)) {
+    throw 'restore PostgreSQL container can still pull outside the release gate'
+}
 $capacityIndex = $restore.IndexOf('restore_postgres_tmpfs_bytes=$(bash', [StringComparison]::Ordinal)
 $networkIndex = $restore.IndexOf('docker network create "$network"', [StringComparison]::Ordinal)
-$containerIndex = $restore.IndexOf('docker run --detach --rm --name "$container"', [StringComparison]::Ordinal)
+$containerIndex = $restore.IndexOf('docker run --pull never --detach --rm --name "$container"', [StringComparison]::Ordinal)
 if ($capacityIndex -lt 0 -or $networkIndex -lt 0 -or $containerIndex -lt 0 -or
     $capacityIndex -ge $networkIndex -or $networkIndex -ge $containerIndex) {
     throw 'restore capacity validation does not fail before creating Docker resources'
