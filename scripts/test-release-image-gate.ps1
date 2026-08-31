@@ -64,6 +64,25 @@ if ([regex]::Matches($verifySource, 'Get-ComposeOptionalString\s+-ComposeObject[
     $verifySource -cmatch '(?m)\$[A-Za-z_][A-Za-z0-9_.]*\.environment\.SOURCE_RECONCILE_FILE\b') {
     throw 'verify.ps1 does not use the optional Compose string helper for both SOURCE_RECONCILE_FILE checks'
 }
+$verifyTokens = $null
+$verifyParseErrors = $null
+$verifyAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'verify.ps1'), [ref]$verifyTokens, [ref]$verifyParseErrors)
+$ordinalComparisonFunction = $verifyAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Test-OrdinalStringEqual'
+}, $true)
+if ($null -eq $ordinalComparisonFunction) {
+    throw 'verify.ps1 no longer defines the reviewed ordinal string comparison helper'
+}
+. ([scriptblock]::Create($ordinalComparisonFunction.Extent.Text))
+$caseMismatchedReconcileFile = Get-ComposeOptionalString -ComposeObject ([pscustomobject]@{ SOURCE_RECONCILE_FILE = '/STATE/reconcile.json' }) -PropertyName 'SOURCE_RECONCILE_FILE'
+if (Test-OrdinalStringEqual -Actual $caseMismatchedReconcileFile -Expected '/state/reconcile.json') {
+    throw 'identity SOURCE_RECONCILE_FILE case-mismatch fixture was accepted'
+}
+$requiredIdentityReconcileComparison = '-not (Test-OrdinalStringEqual -Actual (Get-ComposeOptionalString -ComposeObject $renderedSources.services.$service.environment -PropertyName ''SOURCE_RECONCILE_FILE'') -Expected ''/state/reconcile.json'')'
+if (-not $verifySource.Contains($requiredIdentityReconcileComparison, [StringComparison]::Ordinal)) {
+    throw 'identity SOURCE_RECONCILE_FILE check does not use ordinal equality'
+}
 
 $task5AMutationFailures = [Collections.Generic.List[string]]::new()
 

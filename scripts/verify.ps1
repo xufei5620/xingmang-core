@@ -466,7 +466,7 @@ try {
             throw "$service source horizon/poll contract differs from the API freshness budget"
         }
         if ($null -eq $renderedSources.services.$service.healthcheck) { throw "$service is missing its local healthcheck" }
-        if ($service -in $identityServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '2.0' -or (Get-ComposeOptionalString -ComposeObject $renderedSources.services.$service.environment -PropertyName 'SOURCE_RECONCILE_FILE') -ne '/state/reconcile.json')) { throw "$service is missing V2 durable reconciliation" }
+        if ($service -in $identityServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '2.0' -or -not (Test-OrdinalStringEqual -Actual (Get-ComposeOptionalString -ComposeObject $renderedSources.services.$service.environment -PropertyName 'SOURCE_RECONCILE_FILE') -Expected '/state/reconcile.json'))) { throw "$service is missing V2 durable reconciliation" }
         if ($service -in $economicServices -and ($renderedSources.services.$service.environment.SOURCE_SCHEMA_VERSION -ne '3.0' -or $null -ne (Get-ComposeOptionalString -ComposeObject $renderedSources.services.$service.environment -PropertyName 'SOURCE_RECONCILE_FILE') -or $renderedSources.services.$service.environment.SOURCE_CUTOVER_MANIFEST_FILE -ne '/cutover/manifest.enc')) { throw "$service V3 cutover/state contract drifted" }
     }
     $renderedSourceCutover = docker compose --profile cutover -f (Join-Path $projectRoot 'deploy\docker-compose.sources.yml') config --format json | ConvertFrom-Json
