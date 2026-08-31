@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $postgresCompatibilityFixtureImage = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+. (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
 
 function Test-OrdinalStringEqual {
     param(
@@ -396,9 +397,8 @@ try {
     }
     $expectedKeycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
     $keycloakDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\keycloak\Dockerfile')
-    if (-not $keycloakDockerfile.Contains("ARG KEYCLOAK_BASE_IMAGE=$expectedKeycloakBase") -or
-        [regex]::Matches($keycloakDockerfile, '(?m)^FROM \$\{KEYCLOAK_BASE_IMAGE\}(?: AS builder)?$').Count -ne 2 -or
-        -not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build') -or
+    Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $expectedKeycloakBase | Out-Null
+    if (-not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build') -or
         -not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.pull_policy -Expected 'never') -or
         $idpBaseObject.services.keycloak.PSObject.Properties.Name -contains 'build' -or
         [regex]::Matches($keycloakDockerfile, '(?m)^(?:RUN|\s*&&) rm -rf /opt/keycloak/bin/client \\$').Count -ne 2 -or

@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [string]$ReleaseDirectory
+    [string]$ReleaseDirectory,
+
+    [switch]$RequireTransferReady,
+
+    [string]$SignedReleaseTag = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,6 +13,32 @@ Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
+
+if (-not $RequireTransferReady -and -not [string]::IsNullOrWhiteSpace($SignedReleaseTag)) {
+    throw 'SignedReleaseTag is valid only with RequireTransferReady'
+}
+$signedTagCommit = ''
+if ($RequireTransferReady) {
+    if ([string]$SignedReleaseTag -cne 'v0.1.0-rc49-signed') {
+        throw 'strict transfer requires the exact signed RC49 tag v0.1.0-rc49-signed'
+    }
+    $tagObjectType = (& git -C $projectRoot cat-file -t $SignedReleaseTag 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $tagObjectType -cne 'tag') {
+        throw 'strict transfer requires the supplied RC49 name to resolve to an annotated tag object'
+    }
+    & git -C $projectRoot verify-tag $SignedReleaseTag *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'strict transfer requires a valid signature on the supplied RC49 tag'
+    }
+    $signedTagCommit = (& git -C $projectRoot rev-parse --verify "$SignedReleaseTag^{}" 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $signedTagCommit -notmatch '^[0-9a-f]{40}$') {
+        throw 'strict transfer could not peel the supplied signed RC49 tag to a commit'
+    }
+    $peeledObjectType = (& git -C $projectRoot cat-file -t $signedTagCommit 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $peeledObjectType -cne 'commit') {
+        throw 'strict transfer signed RC49 tag did not peel to a commit object'
+    }
+}
 
 if (-not [IO.Path]::IsPathFullyQualified($ReleaseDirectory)) {
     $ReleaseDirectory = Join-Path $projectRoot $ReleaseDirectory
@@ -29,6 +59,9 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'release
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 if ([string]$manifest.schemaVersion -cne 'solov.invoice.release-image-gate/v1') {
     throw 'unsupported release image gate manifest schema'
+}
+if ($RequireTransferReady) {
+    Assert-TransferReadyManifest -Manifest $manifest -ExpectedGitHead $signedTagCommit | Out-Null
 }
 if ([string]$manifest.tools.trivyReference -cne 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969') {
     throw 'release manifest was not generated with the reviewed Trivy tool digest'

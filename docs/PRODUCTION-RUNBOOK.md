@@ -154,6 +154,25 @@ lock races. No vulnerability is ignored. RC49 PostgreSQL has no exception and
 must report zero HIGH/CRITICAL findings; the former fixed-version `gosu`
 finding is not exception-eligible.
 
+The command above is the ordinary internal-consistency mode, so operators can
+retain and diagnose failed or validation-only bundles. It is not transfer
+authority. Immediately before signing `SHA256SUMS`, rerun the independent
+verifier in strict transfer-ready mode against the signed RC49 tag:
+
+```powershell
+pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 `
+  -ReleaseDirectory release\0.1.0-rc49-exact1 `
+  -RequireTransferReady `
+  -SignedReleaseTag v0.1.0-rc49-signed
+```
+
+Strict mode verifies the annotated tag signature and peels it to a commit. It
+then requires `source.gitDirty=false`, a 40-hex `source.gitHead` equal to that
+commit, `applicationImageGate=passed`, and exactly one production block reason:
+`idp_self_hosted_pending_canary`. Missing or additional reasons fail closed.
+`productionLaunch` must remain `blocked`; transfer is preparation for the real
+production canary, never approval to cut over traffic.
+
 RC49 permits only the exact Keycloak vendor-rejected tuple documented in
 `docs/IMAGE-SCAN-REVIEW.md`: `CVE-2026-22020`, `os-pkgs`/`redhat`,
 `java-21-openjdk-headless@1:21.0.12.1.1-1.2.el9`, empty fixed version,

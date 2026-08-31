@@ -21,6 +21,29 @@ function ConvertFrom-TrivyDatabaseTimestamp {
     return [DateTimeOffset]::ParseExact($normalized, 'yyyy-MM-dd HH:mm:ss.fffffff zzz', [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Assert-KeycloakDockerfileLiteralBasePins {
+    param(
+        [Parameter(Mandatory)][string]$DockerfileText,
+        [Parameter(Mandatory)][string]$ExpectedBaseReference
+    )
+
+    if ($ExpectedBaseReference -notmatch '^quay\.io/keycloak/keycloak:26\.7\.2@sha256:[0-9a-f]{64}$') {
+        throw 'expected Keycloak base reference is not the reviewed literal digest pin'
+    }
+    $normalized = $DockerfileText.Replace("`r`n", "`n").Replace("`r", "`n")
+    $fromLines = @($normalized -split "`n" | Where-Object { $_ -match '^FROM\s+' })
+    if ($fromLines.Count -ne 2 -or
+        $fromLines[0] -cne "FROM $ExpectedBaseReference AS builder" -or
+        $fromLines[1] -cne "FROM $ExpectedBaseReference") {
+        throw 'Keycloak Dockerfile must contain exactly two literal reviewed FROM digest lines'
+    }
+    if ($normalized -match '(?m)^ARG\s+[^\r\n]*(?:KEYCLOAK|BASE_IMAGE)' -or
+        $normalized -match '(?m)^FROM\s+[^\r\n]*\$') {
+        throw 'Keycloak Dockerfile cannot expose an ARG or variable FROM base override'
+    }
+    return $true
+}
+
 function Get-TrivyFindingSummary {
     param([Parameter(Mandatory)]$Report)
 
@@ -220,8 +243,54 @@ function Assert-ExceptionReviewContract {
     if ($current -lt $reviewed) {
         throw 'exception review current timestamp is before reviewedAt'
     }
-    if ($current -gt $due) {
+    if ($current -ge $due) {
         throw 'exception review has expired'
+    }
+    return $true
+}
+
+function Assert-TransferReadyManifest {
+    param(
+        [Parameter(Mandatory)]$Manifest,
+        [Parameter(Mandatory)][string]$ExpectedGitHead
+    )
+
+    if ($ExpectedGitHead -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'signed tag commit is not a 40-hex Git commit'
+    }
+    $sourceProperty = $Manifest.PSObject.Properties['source']
+    if ($null -eq $sourceProperty -or $null -eq $sourceProperty.Value) {
+        throw 'strict transfer requires manifest source provenance'
+    }
+    $source = $sourceProperty.Value
+    $gitDirtyProperty = $source.PSObject.Properties['gitDirty']
+    if ($null -eq $gitDirtyProperty -or $gitDirtyProperty.Value -isnot [bool] -or $gitDirtyProperty.Value) {
+        throw 'strict transfer requires source.gitDirty=false as a Boolean'
+    }
+    $gitHeadProperty = $source.PSObject.Properties['gitHead']
+    $gitHead = if ($null -eq $gitHeadProperty) { '' } else { [string]$gitHeadProperty.Value }
+    if ($gitHead -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'strict transfer requires source.gitHead to be a 40-hex commit'
+    }
+    if (-not [string]::Equals($gitHead, $ExpectedGitHead, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'strict transfer source.gitHead does not equal the supplied signed tag commit'
+    }
+
+    $decisionsProperty = $Manifest.PSObject.Properties['decisions']
+    if ($null -eq $decisionsProperty -or $null -eq $decisionsProperty.Value) {
+        throw 'strict transfer requires manifest release decisions'
+    }
+    $decisions = $decisionsProperty.Value
+    if ([string]$decisions.applicationImageGate -cne 'passed') {
+        throw 'strict transfer requires applicationImageGate=passed'
+    }
+    if ([string]$decisions.productionLaunch -cne 'blocked') {
+        throw 'strict transfer requires productionLaunch=blocked pending the real canary'
+    }
+    $reasonsProperty = $decisions.PSObject.Properties['reasons']
+    $reasons = @(if ($null -ne $reasonsProperty) { $reasonsProperty.Value })
+    if ($reasons.Count -ne 1 -or [string]$reasons[0] -cne 'idp_self_hosted_pending_canary') {
+        throw 'strict transfer requires the exact pending-canary reason idp_self_hosted_pending_canary and no others'
     }
     return $true
 }
@@ -493,8 +562,20 @@ function Assert-GeneratedArtifactBinding {
     $bom = Get-Content -Raw -LiteralPath $sbomPath | ConvertFrom-Json
     $summary = Assert-TrivyReportBinding -Report $report -ExpectedImageId ([string]$ImageRecord.imageId)
     Assert-CycloneDxBinding -Bom $bom -ExpectedImageId ([string]$ImageRecord.imageId) | Out-Null
-    if ($summary.High -ne [int]$ImageRecord.vulnerabilities.high -or
-        $summary.Critical -ne [int]$ImageRecord.vulnerabilities.critical) {
+    $vulnerabilitiesProperty = $ImageRecord.PSObject.Properties['vulnerabilities']
+    if ($null -eq $vulnerabilitiesProperty -or $null -eq $vulnerabilitiesProperty.Value -or
+        $null -eq $vulnerabilitiesProperty.Value.PSObject.Properties['total']) {
+        throw "manifest vulnerability total is missing for $($ImageRecord.name)"
+    }
+    $vulnerabilities = $vulnerabilitiesProperty.Value
+    if ($null -eq $vulnerabilities.PSObject.Properties['high'] -or
+        $null -eq $vulnerabilities.PSObject.Properties['critical']) {
+        throw "manifest vulnerability high/critical counts are missing for $($ImageRecord.name)"
+    }
+    if ($summary.Total -ne ($summary.High + $summary.Critical) -or
+        $summary.Total -ne [int]$vulnerabilities.total -or
+        $summary.High -ne [int]$vulnerabilities.high -or
+        $summary.Critical -ne [int]$vulnerabilities.critical) {
         throw "manifest vulnerability counts are stale for $($ImageRecord.name)"
     }
     return $true

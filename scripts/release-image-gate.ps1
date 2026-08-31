@@ -247,7 +247,7 @@ try {
         $definitions.Add((New-ImageDefinition -Name 'clamav-runtime' -ArtifactName 'invoice-clamav' -Reference "invoice-clamav:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'clamav' -Dockerfile 'deploy/clamav/Dockerfile' -BuildArguments @('CLAMAV_BASE_IMAGE=' + $clamavBaseReference) -BaseReference $clamavBaseReference))
         $definitions.Add((New-ImageDefinition -Name 'ingest-proxy' -ArtifactName 'invoice-ingest-proxy' -Reference "invoice-ingest-proxy:$ImageTag" -Kind 'built' -Policy 'zero-findings' -Context 'ingest-proxy' -Dockerfile 'deploy/ingest-proxy/Dockerfile' -BuildArguments @('NGINX_BASE_IMAGE=' + $nginxBaseReference) -BaseReference $nginxBaseReference))
         if ($IdPMode -ceq 'keycloak') {
-            $definitions.Add((New-ImageDefinition -Name 'keycloak' -ArtifactName 'invoice-keycloak' -Reference "invoice-keycloak:$ImageTag" -Kind 'built' -Policy 'keycloak-26.7.2-exact-vendor-rejection' -Context 'keycloak' -Dockerfile 'deploy/keycloak/Dockerfile' -BuildArguments @('KEYCLOAK_BASE_IMAGE=' + $keycloakBaseReference) -BaseReference $keycloakBaseReference))
+            $definitions.Add((New-ImageDefinition -Name 'keycloak' -ArtifactName 'invoice-keycloak' -Reference "invoice-keycloak:$ImageTag" -Kind 'built' -Policy 'keycloak-26.7.2-exact-vendor-rejection' -Context 'keycloak' -Dockerfile 'deploy/keycloak/Dockerfile' -BaseReference $keycloakBaseReference))
         }
 
         $imageAcquisition = @{}

@@ -9,6 +9,21 @@ Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
 
+function Assert-ThrowsLike {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [Parameter(Mandatory)][string]$ExpectedMessagePattern,
+        [Parameter(Mandatory)][string]$FailureMessage
+    )
+
+    $caught = $null
+    try { & $Action } catch { $caught = $_ }
+    if ($null -eq $caught -or $caught.Exception.Message -notmatch $ExpectedMessagePattern) {
+        $actual = if ($null -eq $caught) { '<no exception>' } else { $caught.Exception.Message }
+        throw "$FailureMessage (actual: $actual)"
+    }
+}
+
 function Get-DockerfileStageBody {
     param(
         [Parameter(Mandatory)][string]$DockerfileText,
@@ -324,10 +339,15 @@ Assert-ExactNormalizedText -Actual $postgresGoSum -Expected $expectedGosuGoSum -
 if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
     -not $clamavDockerfile.Contains('ClamAV 1.4.5') -or
     -not $ingestDockerfile.Contains($nginxBaseReference) -or
-    -not $ingestDockerfile.Contains('nginx/1.30.4') -or
-    -not $keycloakDockerfile.Contains($keycloakBaseReference) -or
-    [regex]::Matches($keycloakDockerfile, [regex]::Escape($keycloakBaseReference)).Count -ne 2) {
-    throw 'RC49 derived runtime or both Keycloak stages are not pinned to reviewed bases'
+    -not $ingestDockerfile.Contains('nginx/1.30.4')) {
+    throw 'RC49 PostgreSQL, ClamAV, or ingest runtime is not pinned to the reviewed base'
+}
+Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $keycloakBaseReference | Out-Null
+
+$verifySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
+if (-not $verifySource.Contains('Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $expectedKeycloakBase', [StringComparison]::Ordinal) -or
+    $verifySource -match 'KEYCLOAK_BASE_IMAGE') {
+    throw 'verify.ps1 does not enforce the literal-only two-stage Keycloak base pin contract'
 }
 
 $productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.prod.yml')
@@ -405,30 +425,28 @@ $postgresReference = 'postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb8998
 $postgresID = 'sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
 $postgresReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
 $postgresSummary = Assert-TrivyReportBinding -Report $postgresReport -ExpectedImageId $postgresID
-$rejected = $false
-try { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } catch { $rejected = $true }
-if (-not $rejected) { throw 'PostgreSQL exception accepted the RC48 gosu finding with a fixed version' }
+Assert-ThrowsLike `
+    -Action { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } `
+    -ExpectedMessagePattern 'cannot cover fixable finding' `
+    -FailureMessage 'PostgreSQL exception did not reject the RC48 gosu finding because it has a fixed version'
 
-function Assert-PostgresFixtureRejected {
-    param(
-        [Parameter(Mandatory)][scriptblock]$Mutate,
-        [Parameter(Mandatory)][string]$Message
-    )
+$postgresUnapprovedNoFixReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
+$postgresUnapprovedNoFixReport.Results[0].Vulnerabilities[0].FixedVersion = ''
+$postgresUnapprovedNoFixReport.Results[0].Vulnerabilities[0] | Add-Member -NotePropertyName Status -NotePropertyValue 'affected'
+$postgresUnapprovedNoFixSummary = Get-TrivyFindingSummary -Report $postgresUnapprovedNoFixReport
+Assert-ThrowsLike `
+    -Action { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresUnapprovedNoFixSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } `
+    -ExpectedMessagePattern 'no approved RC49 no-fix tuple' `
+    -FailureMessage 'PostgreSQL exception did not fail closed with an empty approved no-fix tuple set'
 
-    $report = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
-    & $Mutate $report
-    $summary = Get-TrivyFindingSummary -Report $report
-    $rejected = $false
-    try { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $summary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } catch { $rejected = $true }
-    if (-not $rejected) { throw $Message }
-}
-
-Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].VulnerabilityID = 'CVE-DRIFT' } -Message 'PostgreSQL exception generalized beyond exact CVE'
-Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Class = 'os-pkgs' } -Message 'PostgreSQL exception generalized beyond exact class'
-Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Type = 'library' } -Message 'PostgreSQL exception generalized beyond exact type'
-Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].InstalledVersion = 'v1.24.5' } -Message 'PostgreSQL exception generalized beyond exact installed version'
-Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0] | Add-Member -NotePropertyName Status -NotePropertyValue 'not_affected' } -Message 'PostgreSQL exception generalized beyond explicitly reviewed no-fix status'
-Assert-PostgresFixtureRejected -Mutate { param($report) $report.Results[0].Vulnerabilities[0].FixedVersion = 'v1.24.8' } -Message 'PostgreSQL exception generalized beyond fixed-version drift'
+$postgresUnreviewedStatusReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
+$postgresUnreviewedStatusReport.Results[0].Vulnerabilities[0].FixedVersion = ''
+$postgresUnreviewedStatusReport.Results[0].Vulnerabilities[0] | Add-Member -NotePropertyName Status -NotePropertyValue 'not_affected'
+$postgresUnreviewedStatusSummary = Get-TrivyFindingSummary -Report $postgresUnreviewedStatusReport
+Assert-ThrowsLike `
+    -Action { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresUnreviewedStatusSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } `
+    -ExpectedMessagePattern 'unreviewed no-fix status' `
+    -FailureMessage 'PostgreSQL exception accepted an unreviewed no-fix status'
 
 $rejected = $false
 try { Assert-PostgresGosuFindingScope -ImageReference 'postgres:latest' -ImageId $postgresID -Summary $postgresSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } catch { $rejected = $true }
@@ -496,6 +514,7 @@ Assert-ExceptionReviewRejected -ReviewedAt '2026/08/31 00:00:00' -Message 'excep
 Assert-ExceptionReviewRejected -ReviewDueAt 'not-a-timestamp' -Message 'exception review accepted invalid reviewDueAt timestamp'
 Assert-ExceptionReviewRejected -ReviewDueAt $reviewedAt -Message 'exception review accepted due-at equal to reviewed-at'
 Assert-ExceptionReviewRejected -ReviewDueAt '2026-08-31T00:00:01Z' -CurrentTime $reviewNow -Message 'exception review accepted an expired due date'
+Assert-ExceptionReviewRejected -CurrentTime $reviewDueAt -Message 'exception review remained valid at the exact due timestamp'
 Assert-ExceptionReviewRejected -CurrentTime '2026-08-30T23:59:59Z' -Message 'exception review accepted a current time before the review window'
 
 $fixtureDBTime = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss +0000') + ' UTC'
@@ -552,6 +571,26 @@ if ($artifactVerifierSource -match 'approved-by-exact-binary-exception' -or
     $artifactVerifierSource -notmatch '\[string\]\$postgres\[0\]\.policyStatus\s*-cne\s*''approved''' -or
     $artifactVerifierSource -notmatch '\$null\s*-ne\s*\$postgres\[0\]\.exception') {
     throw 'RC49 artifact verification still permits a PostgreSQL vulnerability exception'
+}
+
+$keycloakDefinitionLine = [regex]::Match($gateSource, '(?m)^\s*\$definitions\.Add\(\(New-ImageDefinition -Name ''keycloak''[^\r\n]+$')
+if (-not $keycloakDefinitionLine.Success -or
+    $keycloakDefinitionLine.Value -match 'BuildArguments|KEYCLOAK_BASE_IMAGE' -or
+    $gateSource -match 'KEYCLOAK_BASE_IMAGE') {
+    throw 'release image gate retains an override path for the literal-pinned Keycloak base image'
+}
+
+if ($artifactVerifierSource -notmatch '\[switch\]\$RequireTransferReady' -or
+    $artifactVerifierSource -notmatch '\[string\]\$SignedReleaseTag' -or
+    $artifactVerifierSource -notmatch '(?ms)if \(\$RequireTransferReady\) \{\s*Assert-TransferReadyManifest -Manifest \$manifest -ExpectedGitHead \$signedTagCommit\s*\| Out-Null\s*\}' -or
+    -not $artifactVerifierSource.Contains('git -C $projectRoot verify-tag $SignedReleaseTag', [StringComparison]::Ordinal) -or
+    -not $artifactVerifierSource.Contains('$SignedReleaseTag^{}', [StringComparison]::Ordinal)) {
+    throw 'independent artifact verifier is missing the strict signed-tag transfer-ready source contract'
+}
+$productionRunbook = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
+if (-not $productionRunbook.Contains('-RequireTransferReady', [StringComparison]::Ordinal) -or
+    -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc49-signed', [StringComparison]::Ordinal)) {
+    throw 'production runbook does not invoke the exact strict transfer-ready verifier parameters'
 }
 
 function Assert-RC49DerivedImageGateSource {
@@ -619,6 +658,72 @@ $platformRejected = $false
 try { Assert-LinuxAmd64Platform -Platform 'linux/arm64' | Out-Null } catch { $platformRejected = $true }
 if (-not $platformRejected) { throw 'linux/arm64 release image fixture was accepted' }
 Assert-LinuxAmd64Platform -Platform 'linux/amd64' | Out-Null
+
+$bindingFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('invoice-rc49-artifact-binding-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $bindingFixtureRoot | Out-Null
+try {
+    $bindingReportPath = Join-Path $bindingFixtureRoot 'report.json'
+    $bindingSbomPath = Join-Path $bindingFixtureRoot 'sbom.json'
+    Copy-Item -LiteralPath (Join-Path $fixtureRoot 'good-vulnerability-report.json') -Destination $bindingReportPath
+    Copy-Item -LiteralPath (Join-Path $fixtureRoot 'good-sbom.json') -Destination $bindingSbomPath
+    $bindingRecord = [pscustomobject]@{
+        name = 'fixture'
+        imageId = $imageID
+        vulnerabilities = [pscustomobject]@{ high = 0; critical = 0; total = 0 }
+        vulnerabilityReport = [pscustomobject]@{ path = 'report.json'; sha256 = Get-FileSha256Lower -Path $bindingReportPath }
+        sbom = [pscustomobject]@{ path = 'sbom.json'; sha256 = Get-FileSha256Lower -Path $bindingSbomPath }
+    }
+    Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $bindingRecord | Out-Null
+
+    $missingTotalRecord = $bindingRecord | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $missingTotalRecord.vulnerabilities.PSObject.Properties.Remove('total')
+    Assert-ThrowsLike `
+        -Action { Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $missingTotalRecord | Out-Null } `
+        -ExpectedMessagePattern 'manifest vulnerability total is missing' `
+        -FailureMessage 'generated artifact binding did not explicitly reject a missing vulnerabilities.total property'
+
+    $mismatchedTotalRecord = $bindingRecord | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $mismatchedTotalRecord.vulnerabilities.total = 1
+    Assert-ThrowsLike `
+        -Action { Assert-GeneratedArtifactBinding -ReleaseDirectory $bindingFixtureRoot -ImageRecord $mismatchedTotalRecord | Out-Null } `
+        -ExpectedMessagePattern 'manifest vulnerability counts are stale' `
+        -FailureMessage 'generated artifact binding accepted vulnerabilities.total that disagrees with the Trivy summary'
+} finally {
+    Remove-Item -LiteralPath $bindingFixtureRoot -Recurse -Force
+}
+
+$transferReadyManifest = [pscustomobject]@{
+    source = [pscustomobject]@{ gitDirty = $false; gitHead = '0123456789abcdef0123456789abcdef01234567' }
+    decisions = [pscustomobject]@{
+        applicationImageGate = 'passed'
+        productionLaunch = 'blocked'
+        reasons = @('idp_self_hosted_pending_canary')
+    }
+}
+Assert-TransferReadyManifest -Manifest $transferReadyManifest -ExpectedGitHead '0123456789abcdef0123456789abcdef01234567' | Out-Null
+
+function Assert-TransferManifestMutationRejected {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Mutate,
+        [Parameter(Mandatory)][string]$ExpectedMessagePattern,
+        [Parameter(Mandatory)][string]$FailureMessage
+    )
+
+    $manifestFixture = $transferReadyManifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    & $Mutate $manifestFixture
+    Assert-ThrowsLike `
+        -Action { Assert-TransferReadyManifest -Manifest $manifestFixture -ExpectedGitHead '0123456789abcdef0123456789abcdef01234567' | Out-Null } `
+        -ExpectedMessagePattern $ExpectedMessagePattern `
+        -FailureMessage $FailureMessage
+}
+
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.source.gitDirty = $true } -ExpectedMessagePattern 'source\.gitDirty=false' -FailureMessage 'strict transfer mode accepted a dirty source manifest'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.source.gitHead = 'not-a-commit' } -ExpectedMessagePattern '40-hex' -FailureMessage 'strict transfer mode accepted a malformed source commit'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.source.gitHead = '1123456789abcdef0123456789abcdef01234567' } -ExpectedMessagePattern 'signed tag commit' -FailureMessage 'strict transfer mode accepted a source commit different from the signed tag'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.applicationImageGate = 'failed' } -ExpectedMessagePattern 'applicationImageGate=passed' -FailureMessage 'strict transfer mode accepted a failed application image gate'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.productionLaunch = 'approved' } -ExpectedMessagePattern 'productionLaunch=blocked' -FailureMessage 'strict transfer mode accepted a non-blocked production launch decision'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.reasons = @() } -ExpectedMessagePattern 'exact pending-canary reason' -FailureMessage 'strict transfer mode accepted a missing pending-canary reason'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.reasons = @('idp_self_hosted_pending_canary', 'source_worktree_dirty') } -ExpectedMessagePattern 'exact pending-canary reason' -FailureMessage 'strict transfer mode accepted an extra production block reason'
 
 function Assert-RC49RuntimeAndBackupBindings {
     param([Parameter(Mandatory)][string]$ProjectRoot)
