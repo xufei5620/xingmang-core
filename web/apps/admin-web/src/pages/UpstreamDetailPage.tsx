@@ -42,7 +42,9 @@ export function UpstreamDetailPage() {
 
 function UpstreamDetailShell({ platform, upstreamId }: { platform: SupplyPlatform; upstreamId: string }) {
   const label = supplyPlatformLabel(platform);
-  const backTo = `/platforms/${platform}?tab=suppliers`;
+  // 2026-09-02 起「上游管理」是渠道管理页内区块（`id="upstream-management"`），
+  // 不再是独立页签——返回目标跟着从 ?tab=suppliers 改成 ?tab=upstream 加锚点
+  const backTo = `/platforms/${platform}?tab=upstream#upstream-management`;
 
   return (
     <section className="min-w-0">
