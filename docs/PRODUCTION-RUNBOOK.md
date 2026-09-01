@@ -310,6 +310,15 @@ ingest Nginx are locally built derivatives with fixed Alpine OpenSSL
 `sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067`.
 Refresh any base only through the full image scan/SBOM/review flow.
 
+> **Cutover ordering (learned 2026-09-01/02):** after the three Compose projects
+> are rolled forward, restart `api` (its in-process workers can die on a
+> transient DNS failure during container churn and do not self-heal), and
+> **then** restart `ingest-proxy` — its Nginx resolves the `api` upstream at
+> start, so an `api` restart afterwards leaves it pointing at a dead IP and
+> every source agent sees HTTP 502 (a 3-hour balances-stream gap on 2026-09-01
+> came from exactly this order mistake). The public path via the host Nginx to
+> the published port is unaffected.
+
 Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC67
 manifest, signature and artifact verifier have passed. Production Compose has
 no image-tag fallback: all nine images (`invoice-system-api`,
