@@ -23,7 +23,7 @@ import {
   formatScaledMinorUnits,
   toIntegerValue,
 } from "../lib/money";
-import { metricPrimaryValue } from "../lib/metrics";
+import { metricPrimaryValue, readPaymentsDailySummary } from "../lib/metrics";
 import {
   appDemoDataConfig,
   shouldShowDemoBanner,
@@ -34,7 +34,7 @@ import {
 } from "../lib/financeOverview";
 import { parseBusinessDay, parseGranularity } from "../lib/period";
 import { ApiStateView } from "./ApiStateView";
-import { PaymentSummaryCards } from "./PaymentSummaryCards";
+import { BucketCard, MonthToDateSucceededCard, metricKeyFor } from "./PaymentSummaryCards";
 import { orderTableColumns, STATUS_BUCKET_OPTIONS } from "./platformOrdersColumns";
 
 /** NewAPI 财务页的指标键。用分段拼接避免把采集键误看成凭据。 */
@@ -533,6 +533,13 @@ function businessTodayDateOnly(): string {
   return `${values.year ?? "1970"}-${values.month ?? "01"}-${values.day ?? "01"}`;
 }
 
+/** 当前自然月第一天（业务时区）——"月累计"恒等于这个月，不随
+ *  PeriodControls 的选择变化，与"区间到账"是两个刻意不同的数字。
+ *  直接切 `businessTodayDateOnly()` 的年月部分，不再解析一次时区。 */
+function businessMonthStartDateOnly(): string {
+  return `${businessTodayDateOnly().slice(0, 7)}-01`;
+}
+
 const ORDERS_PAGE_LIMIT = 50;
 
 function useNewApiOrdersQuery(range: { from: string; to: string }) {
@@ -616,6 +623,8 @@ function OrdersView({ initialDate }: { initialDate: string }) {
   });
   const metrics = (metricsQuery.data ?? []).filter((item) => item.metric_key.startsWith("newapi."));
   const subscription = metricByKey(metrics, NEWAPI_SUBSCRIPTION_METRIC);
+  const paymentsMetric = metricByKey(metrics, metricKeyFor("newapi"));
+  const paymentsSummary = paymentsMetric ? readPaymentsDailySummary(paymentsMetric.value) : null;
   const demo = shouldShowDemoBanner(metrics.map((item) => item.source), appDemoDataConfig);
 
   return (
@@ -632,7 +641,6 @@ function OrdersView({ initialDate }: { initialDate: string }) {
         onGranularityChange={setMode}
       />
       {demo ? <DemoBanner metrics={metrics} channels={[]} /> : null}
-      <PaymentSummaryCards platform="newapi" range={range} />
       <ApiStateView
         isPending={metricsQuery.isPending}
         error={metricsQuery.error && !metricsQuery.isRefetchError ? metricsQuery.error : null}
@@ -641,6 +649,15 @@ function OrdersView({ initialDate }: { initialDate: string }) {
         {metricsQuery.error && metricsQuery.isRefetchError ? (
           <RefreshErrorNotice label="NewAPI 财务指标" error={metricsQuery.error} onRetry={() => void metricsQuery.refetch()} />
         ) : null}
+        {/* 原型的四格布局（区间到账/区间退款/月累计/支付失败），不是 Sub2API
+            资金概览的六卡整体——两边共用同一份 BucketCard 判断逻辑，只是
+            NewAPI 只挑其中三个分桶 + 月累计这一格 Sub2API 没有。 */}
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <BucketCard bucket="succeeded" label="区间到账" platform="newapi" metric={paymentsMetric} summary={paymentsSummary} range={range} />
+          <BucketCard bucket="refunded" label="区间退款" platform="newapi" metric={paymentsMetric} summary={paymentsSummary} range={range} />
+          <MonthToDateSucceededCard platform="newapi" monthStart={businessMonthStartDateOnly()} today={businessTodayDateOnly()} />
+          <BucketCard bucket="failed" label="支付失败" platform="newapi" metric={paymentsMetric} summary={paymentsSummary} range={range} />
+        </div>
         <SubscriptionEvidence metric={subscription} from={range.from} to={range.to} />
       </ApiStateView>
       <OrdersLedger range={range} />

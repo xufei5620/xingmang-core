@@ -7,10 +7,12 @@ import {
   type FreshnessContract,
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
+import type { ReactNode } from "react";
 
-import { listMetrics, type MetricItem } from "../api/platform";
+import { listMetricHistory, listMetrics, type MetricItem } from "../api/platform";
 import { formatCount, formatMinorUnits } from "../lib/money";
 import {
+  monthToDateSucceeded,
   readPaymentsDailySummary,
   type PaymentBucketAmount,
   type PaymentsDailySummary,
@@ -34,11 +36,11 @@ export interface PaymentSummaryCardsRange {
   to: string;
 }
 
-function metricKeyFor(platform: PaymentsPlatform): string {
+export function metricKeyFor(platform: PaymentsPlatform): string {
   return platform === "sub2api" ? "sub2api.payments.daily" : "newapi.payments.daily";
 }
 
-function metricByKey(items: readonly MetricItem[], key: string): MetricItem | undefined {
+export function metricByKey(items: readonly MetricItem[], key: string): MetricItem | undefined {
   return items.find((item) => item.metric_key === key);
 }
 
@@ -106,8 +108,15 @@ function NotApplicableCard({ label, note }: { label: string; note: string }) {
  *  见 payments.read.v1.md），不是「未知」——这里据此展示真实的 0，
  *  而不是显示一张「未接入」的卡去掩盖一个已经查明的事实。只有
  *  `is_partial=true` 时，键缺席才说明不清「真的是零」还是「翻页/币种缺口
- *  漏掉了」，这时才退回「覆盖不全」而不是断言 0。 */
-function BucketCard({
+ *  漏掉了」，这时才退回「覆盖不全」而不是断言 0。
+ *
+ *  导出供 NewApiFinanceOverview 复用：NewAPI「资金与订单」按团队负责人
+ *  裁定改回原型的四格布局（区间到账/区间退款/月累计/支付失败），不再用
+ *  下面的 `PaymentSummaryCards` 六卡整体——但"区间到账"就是
+ *  `bucket="succeeded"`、"区间退款"就是 `bucket="refunded"`（对 NewAPI 会
+ *  自动落到"不适用"分支）、"支付失败"就是 `bucket="failed"`，与 Sub2API
+ *  六卡里的同名卡片必须是同一份逻辑，不能另起一套判断。 */
+export function BucketCard({
   bucket,
   label,
   platform,
@@ -236,6 +245,64 @@ function NetCashFlowCard() {
       note="净现金流公式尚未确定（需先确认手续费承担方与是否有未建模成本），本片刻意留白，不猜"
     />
   );
+}
+
+/** 「月累计」（NewAPI「资金与订单」四格之一，Sub2API 六卡没有这一格）：
+ *  自然日历月至今的 succeeded 桶累计，与"区间到账"是两个刻意不同的数字——
+ *  前者恒等于当前自然月，不随 PeriodControls 的选择变化；后者跟着所选区间走。
+ *
+ *  自己发起 `/api/v1/metrics/history` 查询（与 `PaymentSummaryCards`/
+ *  `BucketCard` 共用的 `/api/v1/metrics` 是两条独立的 Query），服务端硬顶
+ *  7 天（见 `monthToDateSucceeded` 的注释），月初超过 7 天前的部分天然覆盖
+ *  不到，`覆盖不全` 必须在这张卡自己说清楚，不能显示一个看起来完整的月合计。 */
+export function MonthToDateSucceededCard({
+  platform,
+  monthStart,
+  today,
+}: {
+  platform: PaymentsPlatform;
+  /** 自然月第一天，YYYY-MM-DD（业务时区，调用方按 Asia/Shanghai 算好再传）。 */
+  monthStart: string;
+  /** 目标日（通常是"今天"），YYYY-MM-DD。 */
+  today: string;
+}) {
+  const query = useQuery({
+    queryKey: ["metrics-history", metricKeyFor(platform), 168],
+    queryFn: ({ signal }) => listMetricHistory(metricKeyFor(platform), { hours: 168, signal }),
+  });
+
+  // 全程只返回 <StatTile>（不经由 UnavailableCard 这层包装组件）：这张卡
+  // 自己管理异步状态，加载中→已加载会在同一个位置切换 JSX——如果两支分别
+  // 委托给不同的包装组件（UnavailableCard vs 这里直接调 StatTile），
+  // React 按元素类型做协调，会把整个子树卸载重挂，而不是原地更新同一个
+  // <article> DOM 节点。多数卡片没有这个问题是因为它们的加载态由外层
+  // ApiStateView 统一兜底、组件本身只在数据就绪后才渲染一次；这张卡是
+  // 唯一一个自己发起独立 Query 的卡片，必须自己保证类型稳定。
+  let value = "—";
+  let note: string;
+  let unavailable = true;
+  let status: ReactNode = <Badge tone="neutral">未接入</Badge>;
+
+  if (query.isPending) {
+    note = "加载中…";
+  } else if (query.error) {
+    const message = query.error instanceof Error ? query.error.message : "读取历史观测失败";
+    note = `月累计读取失败：${message}`;
+  } else {
+    const summary = monthToDateSucceeded(query.data ?? [], monthStart, today);
+    if (summary.amountMinor === null) {
+      note = "历史观测里没有落在本月的可用样本；月度订单聚合需要按天累加，暂无法确认";
+    } else {
+      value = formatMinorUnits(summary.amountMinor, summary.currency);
+      unavailable = false;
+      status = summary.complete ? undefined : <Badge tone="warning">覆盖不全</Badge>;
+      note = summary.complete
+        ? `覆盖 ${summary.coveredDays}/${summary.totalDays} 天 · 本月至今`
+        : `覆盖不全：${summary.coveredDays}/${summary.totalDays} 天（历史查询最多回看 7 天，或个别日观测缺失/不完整）`;
+    }
+  }
+
+  return <StatTile label="月累计" value={value} unavailable={unavailable} note={note} status={status} />;
 }
 
 export function PaymentSummaryCards({

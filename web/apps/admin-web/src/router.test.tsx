@@ -190,6 +190,7 @@ const historyBody = {
   items: [0, 1, 2, 3].map((i) => ({
     observed_at: `2026-08-26T0${i}:00:00Z`,
     synced_at: `2026-08-26T0${i}:05:00Z`,
+    source: "sub2api-prod",
     status: i === 2 ? "failed" : "ok",
     is_partial: false,
     watermark: `wm-${i}`,
@@ -1908,12 +1909,16 @@ describe("支付与财务页签（框架）", () => {
     expect(screen.getByRole("tab", { name: "开票" })).not.toBeNull();
   });
 
-  it("NewAPI 资金与订单也接了 XM-PAY1 的六卡（与 Sub2API 同一套数据口径），退款与冲正固定不适用", async () => {
+  it("NewAPI 资金与订单保留原型的四格布局（区间到账/区间退款/月累计/支付失败），不是 Sub2API 的六卡", async () => {
     renderRoute("/platforms/newapi?tab=finance&sub=orders");
-    for (const label of ["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费", "净现金流入"]) {
+    for (const label of ["区间到账", "区间退款", "月累计", "支付失败"]) {
       expect(await screen.findByRole("heading", { name: label, level: 3 })).not.toBeNull();
     }
-    const refundHeading = screen.getByRole("heading", { name: "退款与冲正", level: 3 });
+    // Sub2API 六卡独有的标签不该出现在 NewAPI 上
+    for (const label of ["区间成功到账", "退款与冲正", "支付手续费", "净现金流入"]) {
+      expect(screen.queryByRole("heading", { name: label, level: 3 })).toBeNull();
+    }
+    const refundHeading = screen.getByRole("heading", { name: "区间退款", level: 3 });
     expect(within(refundHeading.closest("article") as HTMLElement).getByText("不适用")).not.toBeNull();
     // Sub2API 独有的「充值订单/退款与冲正」两个独立页签不该出现在 NewAPI 上——
     // NewAPI 的等价内容都在这一个「资金与订单」页签里。
