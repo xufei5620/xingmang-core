@@ -216,7 +216,7 @@ if ([string]$web[0].webSecurityHeaders.status -cne 'passed' -or
     [string]$web[0].webSecurityHeaders.imageId -cne [string]$web[0].imageId -or
     [string]$web[0].webSecurityHeaders.scriptSha256 -cne (Get-FileSha256Lower -Path (Join-Path $PSScriptRoot 'verify-web-security-headers.ps1')) -or
     (Get-FileSha256Lower -Path $webHeadersPath) -cne [string]$web[0].webSecurityHeaders.sha256 -or
-    (Get-Content -Raw -LiteralPath $webHeadersPath) -notmatch '(?m)^Web root and immutable asset security headers verified with Nginx\.\s*$') {
+    (Get-Content -Raw -LiteralPath $webHeadersPath) -notmatch '(?m)^Web root, immutable asset and admin security headers verified with Nginx\.\s*$') {
     throw 'derived web security-header proof is missing or stale'
 }
 

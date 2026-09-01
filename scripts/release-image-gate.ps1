@@ -444,7 +444,7 @@ try {
         $webHeadersExit = $LASTEXITCODE
         Write-Utf8NoBom -Path $webHeadersPath -Text $webHeadersText
         $webRuntimeRecord['webSecurityHeaders'] = [ordered]@{
-            status = if ($webHeadersExit -eq 0 -and $webHeadersText -match '(?m)^Web root and immutable asset security headers verified with Nginx\.\s*$') { 'passed' } else { 'failed' }
+            status = if ($webHeadersExit -eq 0 -and $webHeadersText -match '(?m)^Web root, immutable asset and admin security headers verified with Nginx\.\s*$') { 'passed' } else { 'failed' }
             path = 'proof/web-security-headers.txt'
             sha256 = Get-FileSha256Lower -Path $webHeadersPath
             script = 'scripts/verify-web-security-headers.ps1'
