@@ -727,6 +727,57 @@ type channelItem struct {
 	Models string `json:"models"`
 	// ResponseTime 是上次测试的响应耗时，单位已经是毫秒。
 	ResponseTime rawAmount `json:"response_time"`
+
+	// XM-CHAN-FIELDS0 新增：
+	// Priority 是调度优先级（*int64，数值越大越优先——DB-fallback 选择路径
+	// 取最高优先级的那一档，见 model/ability.go getPriority）。
+	Priority rawAmount `json:"priority"`
+	// CreatedTime 是渠道创建时刻（unix 秒，model/channel.go:32）。
+	CreatedTime rawAmount `json:"created_time"`
+	// Setting 是渠道额外设置的 JSON 字符串（model/channel.go:49，字段名
+	// "setting"）。列表/详情端点从不主动过滤它，本包只从中取 proxy 一项
+	// （见 channelSettingProxy），其余键一律不解析、不转发。
+	Setting *string `json:"setting"`
+}
+
+// channelSettingProxy 只解 Channel.Setting JSON 里的 proxy 一个键
+// （relaykit/dto.ChannelSettings.Proxy，K:/newapi-src
+// relaykit/dto/channel_settings.go:16，json tag "proxy"）。其余 ~7 个键
+// （force_format/thinking_to_content/system_prompt/http_protocol/...）
+// 与本包无关，不解析。
+type channelSettingProxy struct {
+	Proxy string `json:"proxy"`
+}
+
+// parseChannelProxyLabel 从 Channel.Setting 里取出脱敏后的代理展示名。
+//
+// ⚠️ 上游把这个字段当**完整代理 URL**存，且从不校验/剥离嵌入的凭据
+// （common.ParseProxyURLStrict 只查 scheme/host/port，`user:pass@host` 会被
+// 原样接受、存储、返回——已核对 K:/newapi-src common/proxy_url.go）。
+// 这里只保留 scheme://host[:port]，userinfo（用户名/密码）一律丢弃——
+// 绝不把凭据形状的东西带出连接器（宪法 7 条 + 任务硬约束：proxy 只能是
+// 展示标签，不能是带凭据的完整 URL）。
+//
+// 解析失败（不是合法 URL、缺 host）时返回 nil 而不是把原始文本当标签抛出：
+// 一个解析失败的值最可能本身就不干净，宁可什么都不给。
+func parseChannelProxyLabel(setting *string) *string {
+	if setting == nil || strings.TrimSpace(*setting) == "" {
+		return nil
+	}
+	var parsed channelSettingProxy
+	if err := json.Unmarshal([]byte(*setting), &parsed); err != nil {
+		return nil
+	}
+	raw := strings.TrimSpace(parsed.Proxy)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	label := u.Scheme + "://" + u.Host
+	return &label
 }
 
 // fetchChannels 读取全部渠道。
@@ -795,6 +846,29 @@ func (c *client) fetchChannelDirectory(ctx context.Context) (ChannelDirectorySna
 				oldestBal = balanceAt
 			}
 
+			// XM-CHAN-FIELDS0：vendor/status 标签都是从已知取值表查出来的，
+			// 查不到就是 nil，不猜。
+			typeInt, typeErr := item.Type.count()
+			var vendor *string
+			if typeErr == nil {
+				if name, ok := vendorNameForType(int(typeInt)); ok {
+					vendor = &name
+				}
+			}
+			var statusLabel *string
+			if name, ok := channelStatusEnumNames[int(status)]; ok {
+				statusLabel = &name
+			}
+			var priority *int64
+			if p, err := item.Priority.count(); err == nil && !item.Priority.empty() {
+				priority = &p
+			}
+			var createdAt *time.Time
+			if secs, err := item.CreatedTime.count(); err == nil && secs > 0 {
+				v := time.Unix(secs, 0).UTC()
+				createdAt = &v
+			}
+
 			out = append(out, ChannelStatus{
 				ChannelID:         strconv.FormatInt(id, 10),
 				Name:              strings.TrimSpace(item.Name),
@@ -804,6 +878,12 @@ func (c *client) fetchChannelDirectory(ctx context.Context) (ChannelDirectorySna
 				Currency:          c.currency,
 				ModelCount:        countModels(item.Models),
 				LatencyMS:         latency,
+
+				Vendor:             vendor,
+				StatusLabel:        statusLabel,
+				SchedulingPriority: priority,
+				ProxyLabel:         parseChannelProxyLabel(item.Setting),
+				CreatedAt:          createdAt,
 			})
 			ids = append(ids, id)
 		}
@@ -823,10 +903,17 @@ func (c *client) fetchChannelDirectory(ctx context.Context) (ChannelDirectorySna
 	if err != nil {
 		return ChannelDirectorySnapshot{}, err
 	}
+	// XM-CHAN-FIELDS0：今日统计是独立的预算内探测，见 fetchChannelTodayStats
+	// 的注释——quotaPerUnit 单独失败时降级为整体 nil + partial，不让基础
+	// 渠道字段陪着一起失败；单次 /api/log/stat 调用失败仍然整体报错。
+	todayPartial, err := c.fetchChannelTodayStats(ctx, op, out, ids)
+	if err != nil {
+		return ChannelDirectorySnapshot{}, err
+	}
 
 	observedAt := lastMeta.observedAt(time.Time{})
 	base := watermarkForChannels(observedAt, oldestBal)
-	coveragePartial := false
+	coveragePartial := todayPartial
 	for i := range out {
 		if !measured[i] {
 			coveragePartial = true
@@ -1023,6 +1110,155 @@ func (c *client) countLogs(ctx context.Context, op string, channelID int64, logT
 			fmt.Errorf("日志条数为负: %d", total))
 	}
 	return total, nil
+}
+
+// ---------------------------------------------------------------------------
+// 今日统计（XM-CHAN-FIELDS0）
+// ---------------------------------------------------------------------------
+
+// maxTodayStatsChannels 给「今日统计」一个独立预算，与 maxErrorRateChannels
+// 同一个值——同一类「逐渠道打两次 /api/log/* 请求」的量级，理由同该常量
+// 的注释：渠道多的实例上这会把一轮请求数放大，20 秒预算撑不住。
+const maxTodayStatsChannels = 40
+
+// routeLogsStat 是按渠道/时间窗口聚合 quota 与请求数的来源
+// （K:/newapi-src controller/log.go GetLogsStat → model.SumUsedQuota，
+// SQL 层 `COALESCE(sum(quota),0)` 与 `count(*)`）。它注册在与 routeLogs
+// 同一个 "/api/log" 分组下的具体子路径 "/stat"——不在 routeMustEndWithSlash
+// 名单里，因为那份名单只列 gin 里注册成 "/" 的路由，这条不是。
+const routeLogsStat = "/api/log/stat"
+
+// fetchChannelTodayStats 在预算内为渠道（enabled 优先，复用
+// errorRatePriority 同一条顺序判据）读取业务日统计，就地写回 channels 的
+// Today* 字段。
+//
+// 每个渠道两次 GET（type=2 消费日志、type=5 错误日志），与既有
+// fetchChannelErrorRates 同一套「/api/log/* 聚合查询」纪律，只是窗口换成
+// **业务日**（今天零点到现在，按连接器配置的业务日时区，规格 §5.9）而不是
+// 滚动 24 小时——错误率回答的是"最近状态"，今日统计回答的是"今天累计"，
+// 两个问题不同，不能共用同一次调用。
+//
+// quotaPerUnit 单独失败时（/api/status 不可达）**不让整次目录读取失败**：
+// 与本文件 fetchChannels 刻意不读 quota_per_unit 的既有设计同一条理由——
+// 渠道状态不该被一个可选维度拖累。但单次 /api/log/stat 调用本身失败仍然
+// 整体报错，与 fetchChannelErrorRates 同一条纪律：预算耗尽是可预期的降级，
+// 请求失败不是。
+func (c *client) fetchChannelTodayStats(
+	ctx context.Context, op string, channels []ChannelStatus, ids []int64,
+) (bool, error) {
+	if len(channels) == 0 {
+		return false, nil
+	}
+	unit, err := c.quotaPerUnit(ctx, op)
+	if err != nil {
+		return true, nil
+	}
+
+	start, end := c.businessDayTodayWindow()
+	partial := len(channels) > maxTodayStatsChannels
+	budget := maxTodayStatsChannels
+
+	for _, idx := range errorRatePriority(channels) {
+		if budget <= 0 {
+			break
+		}
+		budget--
+
+		consumeCount, consumeQuota, err := c.logStat(ctx, op, ids[idx], logTypeConsume, start, end)
+		if err != nil {
+			if connector.KindOf(err) == connector.KindNotSupported {
+				// 这个上游版本没有 /api/log/stat：不是这一个渠道的问题，
+				// 后面的渠道也不会有——停止探测但不报错，整体标记部分数据。
+				// 与 sub2api 侧 fetchAccountTodayStats 同一条纪律。
+				return true, nil
+			}
+			return false, err
+		}
+		errorCount, _, err := c.logStat(ctx, op, ids[idx], logTypeError, start, end)
+		if err != nil {
+			if connector.KindOf(err) == connector.KindNotSupported {
+				return true, nil
+			}
+			return false, err
+		}
+
+		requests := consumeCount
+		cost, err := quotaToMinorUnits(consumeQuota, unit, c.scale)
+		if err != nil {
+			return false, connector.NewError(connector.KindBadResponse, op, err)
+		}
+		currency, scale := c.currency, c.scale
+		channels[idx].TodayRequests = &requests
+		channels[idx].TodayCostMinorUnits = &cost
+		channels[idx].TodayCurrency = &currency
+		channels[idx].TodayScale = &scale
+		// SuccessRatePPM 只在分母非零时给出：0/0 没有意义的答案，留 nil 比
+		// 编一个 100% 或 0% 诚实（与本包其余"不猜"纪律一致）。复用既有
+		// ratePPM——它本来就是给 ErrorRatePPM 用的同一个"计数比例转 ppm"
+		// 工具，分子(成功数) <= 分母(成功数+错误数) 恒成立，不会命中它的
+		// "分子大于分母"报错分支。
+		if total := consumeCount + errorCount; total > 0 {
+			rate, err := ratePPM(consumeCount, total)
+			if err != nil {
+				return false, connector.NewError(connector.KindBadResponse, op, err)
+			}
+			channels[idx].TodaySuccessRatePPM = &rate
+		}
+	}
+	return partial, nil
+}
+
+// businessDayTodayWindow 算出「今天」业务日的 [今天零点, 现在] unix 秒窗口，
+// 按连接器配置的业务日时区（规格 §5.9：业务日结时区必须显式声明）。
+func (c *client) businessDayTodayWindow() (start, end int64) {
+	now := c.clock()
+	local := now.In(c.businessDay)
+	dayStart := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, c.businessDay)
+	return dayStart.Unix(), now.Unix()
+}
+
+// logStat 调用 /api/log/stat，返回 (count, quota)。
+//
+// count 取响应的 rpm 键——SQL 层是 `count(*)`（见 model/log.go
+// SumUsedQuota 的 rpmTpmQuery），字段名 "rpm" 是上游历史命名，不代表真的是
+// "每分钟"，本函数按它在给定窗口内的真实语义使用：窗口内的日志条数。
+// quota 取响应的 quota 键——`COALESCE(sum(quota),0)`。
+func (c *client) logStat(
+	ctx context.Context, op string, channelID int64, logType int, start, end int64,
+) (count, quota int64, err error) {
+	if logType == 0 {
+		return 0, 0, connector.NewError(connector.KindInternal, op,
+			fmt.Errorf("logType=0 在上游表示不过滤，today-stats 口径会静默变成全量"))
+	}
+	query := url.Values{}
+	query.Set("type", strconv.Itoa(logType))
+	query.Set("channel", strconv.FormatInt(channelID, 10))
+	query.Set("start_timestamp", strconv.FormatInt(start, 10))
+	query.Set("end_timestamp", strconv.FormatInt(end, 10))
+
+	var env upstreamEnvelope
+	if _, err := c.get(ctx, op, routeLogsStat, query, &env); err != nil {
+		return 0, 0, err
+	}
+	var payload struct {
+		Quota rawAmount `json:"quota"`
+		Rpm   rawAmount `json:"rpm"`
+	}
+	if err := env.decode(op, &payload); err != nil {
+		return 0, 0, err
+	}
+	n, err := payload.Rpm.count()
+	if err != nil {
+		return 0, 0, connector.NewError(connector.KindBadResponse, op, err)
+	}
+	if n < 0 {
+		return 0, 0, connector.NewError(connector.KindBadResponse, op, fmt.Errorf("日志条数为负: %d", n))
+	}
+	q, err := payload.Quota.count()
+	if err != nil {
+		return 0, 0, connector.NewError(connector.KindBadResponse, op, err)
+	}
+	return n, q, nil
 }
 
 // ---------------------------------------------------------------------------

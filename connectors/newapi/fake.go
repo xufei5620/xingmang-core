@@ -241,7 +241,7 @@ func (f *fakeClient) Channels(ctx context.Context) ([]ChannelStatus, error) {
 	//   ch-5  余额 nil      —— 「未配置余额」而不是「余额为 0」
 	// 数据固定不随机：Fake 的意义是让上层不被真实凭据阻塞，不是模拟真实波动。
 	// 随机化只会让「这条数据是假的」更难被看出来。
-	return []ChannelStatus{
+	items := []ChannelStatus{
 		{Snapshot: snap, ChannelID: "ch-1", Name: "openai-main", Type: "openai",
 			Enabled: true, BalanceMinorUnits: fakeBalance(31_500_00), Currency: fakeCurrency,
 			ModelCount: 12, ErrorRatePPM: 1_200, LatencyMS: 480},
@@ -260,7 +260,91 @@ func (f *fakeClient) Channels(ctx context.Context) ([]ChannelStatus, error) {
 		{Snapshot: snap, ChannelID: "ch-6", Name: "azure-east", Type: "azure",
 			Enabled: true, BalanceMinorUnits: fakeBalance(12_040_00), Currency: fakeCurrency,
 			ModelCount: 9, ErrorRatePPM: 8_900, LatencyMS: 710},
-	}, nil
+	}
+	for i := range items {
+		applyFakeCatalogFields(&items[i])
+	}
+	return items, nil
+}
+
+// fakeVendorNames/fakeSchedulingPriority/fakeTodayStats 是 applyFakeCatalogFields
+// 的按 ChannelID 查表数据（XM-CHAN-FIELDS0）。
+var fakeVendorNames = map[string]string{
+	"ch-1": "OpenAI", "ch-2": "Anthropic", "ch-3": "Gemini",
+	"ch-4": "Custom", "ch-5": "Ollama", "ch-6": "Azure",
+}
+
+// applyFakeCatalogFields 给固定的六条假渠道附上 XM-CHAN-FIELDS0 目录字段。
+//
+// Kind/CapacityUsed/CapacityLimit/UsageWindow*/RateMultiplierPPM/
+// UpstreamMultiplierPPM/LastUsedAt/ExpiresAt 恒为 nil——与真实客户端一致：
+// NewAPI 没有可达的上游字段支撑这些维度（见 ChannelStatus 各字段注释），
+// Fake 不该在真实客户端给不出的地方凭空造数据。
+//
+// 数值固定不随机，理由同 Channels() 顶部注释。
+func applyFakeCatalogFields(item *ChannelStatus) {
+	if name, ok := fakeVendorNames[item.ChannelID]; ok {
+		item.Vendor = &name
+	}
+	statusLabel := "enabled"
+	if !item.Enabled {
+		statusLabel = "manually_disabled"
+	}
+	item.StatusLabel = &statusLabel
+
+	createdAt := item.Snapshot.ObservedAt.Add(-90 * 24 * time.Hour)
+	item.CreatedAt = &createdAt
+
+	switch item.ChannelID {
+	case "ch-1":
+		priority := int64(100)
+		item.SchedulingPriority = &priority
+		setFakeToday(item, 1_200, 950_000, 45_00)
+	case "ch-2":
+		priority := int64(90)
+		item.SchedulingPriority = &priority
+		label := "us-west-proxy-01"
+		item.ProxyLabel = &label
+		setFakeToday(item, 800, 990_000, 62_00)
+	case "ch-3":
+		priority := int64(10)
+		item.SchedulingPriority = &priority
+		// 停用渠道今天没有请求：0 是真实的零，success_rate 因分母为零留 nil。
+		setFakeTodayZero(item)
+	case "ch-4":
+		priority := int64(50)
+		item.SchedulingPriority = &priority
+		setFakeToday(item, 300, 400_000, 8_00) // 错误率高，success_rate 相应偏低
+	case "ch-5":
+		priority := int64(20)
+		item.SchedulingPriority = &priority
+		setFakeToday(item, 150, 980_000, 0) // 自托管，没有上游费用
+	case "ch-6":
+		priority := int64(70)
+		item.SchedulingPriority = &priority
+		setFakeToday(item, 500, 970_000, 30_00)
+	}
+}
+
+// setFakeToday 填充 Today* 字段，costMinorUnits=0 时仍然给出（区别于
+// setFakeTodayZero 的"完全没有活动"）。
+func setFakeToday(item *ChannelStatus, requests, successRatePPM, costMinorUnits int64) {
+	item.TodayRequests = &requests
+	item.TodaySuccessRatePPM = &successRatePPM
+	item.TodayCostMinorUnits = &costMinorUnits
+	currency, scale := fakeCurrency, 2
+	item.TodayCurrency = &currency
+	item.TodayScale = &scale
+}
+
+func setFakeTodayZero(item *ChannelStatus) {
+	requests, cost := int64(0), int64(0)
+	item.TodayRequests = &requests
+	item.TodayCostMinorUnits = &cost
+	currency, scale := fakeCurrency, 2
+	item.TodayCurrency = &currency
+	item.TodayScale = &scale
+	// TodaySuccessRatePPM 留 nil：0 个请求时分母为零，没有意义的比率。
 }
 
 func (f *fakeClient) ModelUsages(ctx context.Context, day string) ([]ModelUsage, error) {

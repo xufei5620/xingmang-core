@@ -159,6 +159,200 @@ type ChannelStatus struct {
 
 	// LatencyMS 是该渠道最近一次探测的响应延迟（毫秒，规格 §8.4「性能指标」）。
 	LatencyMS int64
+
+	// 以下字段为 XM-CHAN-FIELDS0 新增，全部可空；契约文档
+	// contracts/connectors/newapi.channel-catalog.v3.md 逐项列出来源，
+	// 无上游字段支撑的维度恒为 nil 并写明原因——不做近似。
+	// 与 sub2api.ManagedChannel 的同名字段是**独立定义**，不是共享类型
+	// （两个连接器包之间零耦合，见本包 Snapshot 类型的同款设计理由）。
+
+	// Kind 恒为 nil：K:/newapi-src 没有可达的字段区分 OAuth/订阅型渠道与
+	// API Key 渠道——唯一线索（Codex 渠道的 OAuth 凭据）编码在被
+	// /api/channel/、/api/channel/:id 两个列表/详情端点一律排除的 Key
+	// 字符串列里，读不到。
+	Kind *string
+	// Vendor 派生自 Type，经 newapiVendorNames（本包按
+	// K:/newapi-src constant/channel.go 的 ChannelTypeNames 原样抄录的映射表）
+	// 查表得到。**不是**上游自己的字符串字段——上游只给类型整数。查不到的
+	// Type 值（未来上游新增类型）为 nil，不猜一个名字。
+	Vendor *string
+	// CapacityUsed/CapacityLimit 恒为 nil：上游没有任何渠道级并发上限字段
+	// （已排查 Channel 结构体、Setting、OtherSettings 的全部 JSON 键）。
+	CapacityUsed  *int64
+	CapacityLimit *int64
+	// StatusLabel 是 Status 的字符串枚举名（unknown/enabled/
+	// manually_disabled/auto_disabled），供合并表统一展示；Enabled 字段
+	// 保留原语义不变。
+	StatusLabel *string
+	// SchedulingPriority 来自渠道的 Priority（*int64，数值越大越优先——
+	// 与 sub2api 账号级 Priority「数值越小优先级越高」方向相反，见契约文档
+	// 的平台差异说明）。scheduling.enabled 复用既有 Enabled 字段，不重复。
+	SchedulingPriority *int64
+
+	// Today* 来自 /api/log/stat 的预算内探测（见 upstream.go
+	// fetchChannelTodayStats），窗口是**业务日**（与既有 24h 滚动错误率窗口
+	// 不同），预算独立计数（maxTodayStatsChannels）。
+	//
+	// TodaySuccessRatePPM 与 ErrorRatePPM 同一条纪律（ppm 整数，不用
+	// float64——比率一旦落进浮点，两次采集算出来的同一个比率可能不相等，
+	// 阈值比较会在边界上抖动，见 ErrorRatePPM 字段注释、宪法 13 条）。
+	TodayRequests       *int64
+	TodaySuccessRatePPM *int64
+	TodayCostMinorUnits *int64
+	TodayCurrency       *string
+	TodayScale          *int
+
+	// UsageWindow* 恒为 nil：NewAPI 渠道没有订阅/配额窗口概念（已排查
+	// Channel/Setting/OtherSettings 的全部 JSON 键，唯一近似物是 Codex 渠道
+	// 实时代理 OpenAI 官方用量接口的三个端点，纯透传不落库，见契约文档）。
+	// 类型仍按 ppm 整数声明（与 TodaySuccessRatePPM 同一条纪律），保持字段
+	// 形状即便在恒为 nil 时也不给将来的实现开一道浮点后门。
+	UsageWindowUsedRatioPPM *int64
+	UsageWindowResetsAt     *time.Time
+
+	// ProxyLabel 来自 Channel.Setting JSON 里的 proxy 字段，**必须脱敏**：
+	// 上游把它当完整代理 URL 存（可能内嵌 user:pass@），见
+	// safeProxyLabel——只保留 scheme://host:port，绝不透出凭据。
+	ProxyLabel *string
+
+	// RateMultiplierPPM/UpstreamMultiplierPPM 恒为 nil：NewAPI 的计费倍率
+	// （model_ratio/completion_ratio/分组倍率）按模型名/分组名配置，不存在
+	// 任何渠道级覆盖字段（已排查 Channel/Setting/OtherSettings 全部键）。
+	// ppm 整数命名同上，理由一致。
+	RateMultiplierPPM     *int64
+	UpstreamMultiplierPPM *int64
+
+	// LastUsedAt 恒为 nil：上游没有「渠道最近一次服务请求」的时间字段
+	// （TestTime 是连通性测试时刻，不是服务请求时刻，两者不能混用）。
+	LastUsedAt *time.Time
+	// CreatedAt 来自 Channel.CreatedTime（unix 秒）。
+	CreatedAt *time.Time
+	// ExpiresAt 恒为 nil：渠道级没有通用到期字段；唯一的到期概念
+	// （Codex 渠道 OAuth token 的 expired 时刻）编码在被列表/详情端点排除的
+	// Key 字符串列里，读不到。
+	ExpiresAt *time.Time
+}
+
+// newapiVendorNames 原样抄录 K:/newapi-src constant/channel.go:129-187 的
+// ChannelTypeNames 映射表（GetChannelTypeName 的数据源）。
+//
+// 这是「已知取值的查表」而不是「猜一个名字」：每一项都能追到上游那份常量表
+// 的同一行；上游新增渠道类型时，这里查不到的 Type 值会让 Vendor 变成 nil
+// （而不是显示一个错误的名字），需要人工同步更新——见契约文档的维护说明。
+var newapiVendorNames = map[int]string{
+	0: "Unknown", 1: "OpenAI", 2: "Midjourney", 3: "Azure", 4: "Ollama",
+	5: "MidjourneyPlus", 6: "OpenAIMax", 7: "OhMyGPT", 8: "Custom", 9: "AILS",
+	10: "AIProxy", 11: "PaLM", 12: "API2GPT", 13: "AIGC2D", 14: "Anthropic",
+	15: "Baidu", 16: "Zhipu", 17: "Ali", 18: "Xunfei", 19: "360",
+	20: "OpenRouter", 21: "AIProxyLibrary", 22: "FastGPT", 23: "Tencent",
+	24: "Gemini", 25: "Moonshot", 26: "ZhipuV4", 27: "Perplexity",
+	31: "LingYiWanWu", 33: "AWS", 34: "Cohere", 35: "MiniMax", 36: "SunoAPI",
+	37: "Dify", 38: "Jina", 39: "Cloudflare", 40: "SiliconFlow",
+	41: "VertexAI", 42: "Mistral", 43: "DeepSeek", 44: "MokaAI",
+	45: "VolcEngine", 46: "BaiduV2", 47: "Xinference", 48: "xAI", 49: "Coze",
+	50: "Kling", 51: "Jimeng", 52: "Vidu", 53: "Submodel", 54: "DoubaoVideo",
+	55: "Sora", 56: "Replicate", 57: "ChatGPT Subscription (Codex)",
+	58: "Advanced Custom", 59: "Sub2API", 60: "New API",
+}
+
+// vendorNameForType 查 newapiVendorNames；未登记的 Type 返回 (\"\", false)——
+// 调用方据此把 Vendor 置 nil，不猜一个名字。
+func vendorNameForType(channelType int) (string, bool) {
+	name, ok := newapiVendorNames[channelType]
+	return name, ok
+}
+
+// channelStatusEnumNames 是 Status 到字符串标签的映射
+// （common/constants.go:244-247 的 ChannelStatus* 常量，逐个核对）。
+var channelStatusEnumNames = map[int]string{
+	0: "unknown", 1: "enabled", 2: "manually_disabled", 3: "auto_disabled",
+}
+
+// ppmToFraction 把 ppm（百万分之一）整数换算成 JSON 数值型的小数——只在
+// 对外呈现这一步、只做一次除法；内部的解析、换算、比较全部停留在整数 ppm
+// 上，与 ErrorRatePPM 同一条纪律（宪法 13 条"比例使用 Decimal"），单次终值
+// 换算不会引入那条纪律真正想避免的累积误差。
+func ppmToFraction(ppm int64) float64 {
+	return float64(ppm) / 1_000_000
+}
+
+// catalogFields 把 ChannelStatus 的 v3 目录字段编码成观测值的一个嵌套
+// map，形状与 httpapi 最终暴露的 JSON 一一对应——与 sub2api 的同名方法
+// 同一条纪律：某个维度完全没有数据时不写这个键，而不是写 null。
+func (c ChannelStatus) catalogFields() map[string]any {
+	row := map[string]any{}
+	if c.Kind != nil {
+		row["kind"] = *c.Kind
+	}
+	if c.Vendor != nil {
+		row["vendor"] = *c.Vendor
+	}
+	if c.CapacityUsed != nil || c.CapacityLimit != nil {
+		capacity := map[string]any{}
+		if c.CapacityUsed != nil {
+			capacity["used"] = *c.CapacityUsed
+		}
+		if c.CapacityLimit != nil {
+			capacity["limit"] = *c.CapacityLimit
+		}
+		row["capacity"] = capacity
+	}
+	if c.StatusLabel != nil {
+		row["status"] = *c.StatusLabel
+	}
+	scheduling := map[string]any{"enabled": c.Enabled}
+	if c.SchedulingPriority != nil {
+		scheduling["priority"] = *c.SchedulingPriority
+	}
+	row["scheduling"] = scheduling
+	if c.TodayRequests != nil || c.TodaySuccessRatePPM != nil || c.TodayCostMinorUnits != nil {
+		today := map[string]any{}
+		if c.TodayRequests != nil {
+			today["requests"] = *c.TodayRequests
+		}
+		if c.TodaySuccessRatePPM != nil {
+			today["success_rate"] = ppmToFraction(*c.TodaySuccessRatePPM)
+		}
+		if c.TodayCostMinorUnits != nil {
+			today["cost_minor_units"] = *c.TodayCostMinorUnits
+			if c.TodayCurrency != nil {
+				today["currency"] = *c.TodayCurrency
+			}
+			if c.TodayScale != nil {
+				today["scale"] = *c.TodayScale
+			}
+		}
+		row["today"] = today
+	}
+	if c.UsageWindowUsedRatioPPM != nil || c.UsageWindowResetsAt != nil {
+		window := map[string]any{}
+		if c.UsageWindowUsedRatioPPM != nil {
+			window["used_ratio"] = ppmToFraction(*c.UsageWindowUsedRatioPPM)
+		}
+		if c.UsageWindowResetsAt != nil {
+			window["resets_at"] = c.UsageWindowResetsAt.UTC().Format(time.RFC3339Nano)
+		}
+		row["usage_window"] = window
+	}
+	if c.ProxyLabel != nil {
+		row["proxy"] = *c.ProxyLabel
+	}
+	if c.RateMultiplierPPM != nil {
+		row["rate_multiplier"] = ppmToFraction(*c.RateMultiplierPPM)
+	}
+	if c.UpstreamMultiplierPPM != nil {
+		row["upstream_multiplier"] = ppmToFraction(*c.UpstreamMultiplierPPM)
+	}
+	if c.LastUsedAt != nil {
+		row["last_used_at"] = c.LastUsedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if c.CreatedAt != nil {
+		row["created_at"] = c.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if c.ExpiresAt != nil {
+		row["expires_at"] = c.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	return row
 }
 
 // Unhealthy 报告该渠道是否算「异常」（判据见 ErrorRateUnhealthyPPM）。
@@ -357,6 +551,9 @@ func channelsObservation(
 		// 全程保住 null 语义——多一个环节就多一处会把它变回 0 的地方。
 		if c.BalanceMinorUnits != nil {
 			row["balance_minor_units"] = *c.BalanceMinorUnits
+		}
+		for k, v := range c.catalogFields() {
+			row[k] = v
 		}
 		rows = append(rows, row)
 	}
