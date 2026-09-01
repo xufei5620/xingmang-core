@@ -1040,3 +1040,61 @@ func TestClaimPlatformIdentityUnknownUserFailsClosed(t *testing.T) {
 		t.Fatalf("expected domain.ErrNotFound for an unknown user id, got %v", err)
 	}
 }
+
+// TestClaimPlatformIdentityRejectsNonActiveUser: platform password login must
+// not resurrect a disabled invoice_user. ResolveOrCreate already rejects
+// non-active identities on the OIDC/create path; the claim path is the only
+// other way a login lands on an existing invoice_user, so it enforces the
+// same rule -- both before the first claim and on re-login after an
+// already-claimed account is disabled.
+func TestClaimPlatformIdentityRejectsNonActiveUser(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+
+	user, err := service.EnsureUser(ctx, OIDCIdentity{
+		Issuer: "https://source-projection.example", Subject: "projected-subject-disabled", Status: "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Pool().Exec(ctx, `UPDATE invoice_users SET status='disabled' WHERE id=$1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unclaimed but disabled: the claim must fail closed, leave the platform
+	// columns NULL and write no claim audit event.
+	if _, _, err = service.ClaimPlatformIdentity(ctx, user.ID, "sub2api", "2224"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("expected domain.ErrForbidden claiming a disabled user, got %v", err)
+	}
+	var platform, platformUserID *string
+	if err = store.Pool().QueryRow(ctx, `SELECT platform,platform_user_id FROM invoice_users WHERE id=$1`, user.ID).
+		Scan(&platform, &platformUserID); err != nil {
+		t.Fatal(err)
+	}
+	if platform != nil || platformUserID != nil {
+		t.Fatalf("rejected claim must not backfill: platform=%v platform_user_id=%v", platform, platformUserID)
+	}
+	var claimAudits int
+	if err = store.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE action='invoice_user.platform_identity_claimed' AND object_id=$1`, user.ID).Scan(&claimAudits); err != nil {
+		t.Fatal(err)
+	}
+	if claimAudits != 0 {
+		t.Fatalf("rejected claim must not write a claim audit event, got %d", claimAudits)
+	}
+
+	// Already claimed, then disabled: re-login must fail too (the status
+	// check runs before the already-claimed short-circuit).
+	if _, err = store.Pool().Exec(ctx, `UPDATE invoice_users SET status='active' WHERE id=$1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = service.ClaimPlatformIdentity(ctx, user.ID, "sub2api", "2224"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Pool().Exec(ctx, `UPDATE invoice_users SET status='disabled' WHERE id=$1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = service.ClaimPlatformIdentity(ctx, user.ID, "sub2api", "2224"); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("expected domain.ErrForbidden re-claiming a since-disabled user, got %v", err)
+	}
+}

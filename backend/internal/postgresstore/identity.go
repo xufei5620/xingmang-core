@@ -701,15 +701,23 @@ func (s *Store) ClaimPlatformIdentity(ctx context.Context, userID, platform, pla
 		return "", "", err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	var beforePlatform, beforePlatformUserID string
+	var beforePlatform, beforePlatformUserID, beforeStatus string
 	lookupErr := tx.QueryRow(ctx, `
-		SELECT COALESCE(platform,''),COALESCE(platform_user_id,'')
-		FROM invoice_users WHERE id=$1 FOR UPDATE`, userID).Scan(&beforePlatform, &beforePlatformUserID)
+		SELECT COALESCE(platform,''),COALESCE(platform_user_id,''),status
+		FROM invoice_users WHERE id=$1 FOR UPDATE`, userID).Scan(&beforePlatform, &beforePlatformUserID, &beforeStatus)
 	if errors.Is(lookupErr, pgx.ErrNoRows) {
 		return "", "", domain.ErrNotFound
 	}
 	if lookupErr != nil {
 		return "", "", fmt.Errorf("lock invoice user for platform claim: %w", lookupErr)
+	}
+	if beforeStatus != "active" {
+		// Mirror auth.(*PostgresIdentityStore).ResolveOrCreate, which rejects
+		// non-active identities: a disabled invoice_user must not become
+		// reachable again just because its platform password is still valid.
+		// Checked before the already-claimed short-circuit so repeat logins on
+		// a disabled account fail too, not only the first claim.
+		return "", "", domain.ErrForbidden
 	}
 	if beforePlatform != "" || beforePlatformUserID != "" {
 		// Already claimed (by this login's own platform identity on a prior
