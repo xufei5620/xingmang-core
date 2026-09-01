@@ -47,7 +47,7 @@ entirely.
 
 - **Explicit `platform` in the request body** (non-empty): unchanged from
   before this task — tries exactly that platform, no fallback. This is the
-  only path the 21 pre-existing `platform_login_test.go` tests exercise, and
+  only path the 11 pre-existing `platform_login_test.go` tests exercise, and
   all of them pass unmodified, which is the regression proof for this path.
 - **Omitted `platform`**: `autoDetectPlatformOrder(identifier)` picks
   candidates — `[sub2api, newapi]` if the identifier contains `@`, `[newapi]`
@@ -171,7 +171,7 @@ go test  -buildvcs=false -p 1 -count=1 ./...       # all 27 packages: ok
                                                              # with \r stripped)
 ```
 
-`internal/httpapi` now has 21 `TestPlatformLogin*` tests (11 pre-existing,
+`internal/httpapi` now has 22 `TestPlatformLogin*` tests (11 pre-existing,
 unmodified, still passing — the explicit-`platform` regression proof; 11
 new): `TestPlatformLoginRuntimeRequiresPendingTwoFAStore`,
 `TestPlatformLoginAutoDetectEmailIdentifierTriesSub2APIFirst`,
