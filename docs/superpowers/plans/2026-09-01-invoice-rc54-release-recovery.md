@@ -1,5 +1,11 @@
 # RC54 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC54 shipped at signed tag
+> `v0.1.0-rc54-signed` (`854f3ff`) and is deployed, but its credentialed
+> canary failed at session issuance (auth_sessions.roles NOT NULL vs nil
+> platform-principal roles); its evidence is immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc55-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC54 — the platform auto-detect login plus the projected-identity claim fix (production 403) and the non-active-user claim rejection — on top of the deployed RC53 baseline.
