@@ -9,8 +9,11 @@
   production per the RC53 release gate — this change does not alter that.
 - **branch:** `ai/claude/XM-INV-AUTOLOGIN` (based on the production release
   candidate `9bbae4a` / RC53), worktree `K:/发票/wt-XM-INV-AUTOLOGIN`.
-- **commit:** `ae9e4d5` (all code/test/doc changes described below, one
-  commit).
+- **commit:** `ae9e4d5` is the code/test/config-doc change described below.
+  `a5007ca` added this handoff file on top of it, and `25c8a0f` (current
+  branch HEAD) is a two-line fix to a test-count arithmetic error in this
+  file's own first draft (11+11 was written as 21) — no code changed after
+  `ae9e4d5`.
 
 ## Summary
 
