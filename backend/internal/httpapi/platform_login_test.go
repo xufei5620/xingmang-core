@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -92,7 +94,12 @@ func platformLoginServer(t *testing.T, sub2api, newapi auth.PlatformAuthenticato
 		OIDC: oidc, Logout: oidc, BackchannelLogout: &fakeBackchannelLogoutProcessor{}, Sessions: sessions, BindingHasher: hasher, CSRF: csrf,
 		Admin: auth.AdminPolicy{Role: "invoice-admin", RequiredACR: "urn:test:mfa", RequiredAMR: []string{"otp"}, StepUpMaxAge: 10 * time.Minute},
 		ProvisionUser: func(_ context.Context, principal auth.Principal, _ string) (SessionUser, error) {
-			return SessionUser{ID: string(principal.Platform) + ":" + principal.PlatformUserID, Email: principal.Email, EmailVerified: principal.EmailVerified}, nil
+			return SessionUser{
+				ID: string(principal.Platform) + ":" + principal.PlatformUserID,
+				// Mirrors provisionPlatformOrOIDCUser (cmd/api/runtime.go): a fresh
+				// login always carries its principal's captured username through.
+				DisplayName: principal.DisplayName, Email: principal.Email, EmailVerified: principal.EmailVerified,
+			}, nil
 		},
 		LoadUser: func(_ context.Context, userID string) (SessionUser, error) {
 			return SessionUser{ID: userID}, nil
@@ -186,9 +193,70 @@ func TestPlatformLoginSuccessIssuesSessionWithPlatformIdentity(t *testing.T) {
 	if user["platform_user_id"] != "555" {
 		t.Fatalf("expected the session's platform_user_id to surface the authenticator's PlatformUserID: %+v", user)
 	}
+	// XM-INV-OBS-BUNDLE: the captured username rides the *login response's*
+	// provisioning call (see TestPlatformLoginSuccessLogsStructuredInfo and
+	// runtime_test.go's provisionPlatformOrOIDCUser tests for that half), but
+	// this GET /session call is a separate, later request that resolves the
+	// user via ProductionAuth.LoadUser(userID) alone -- no principal, so no
+	// captured name to attach. invoice_users has no column to persist it
+	// across that boundary, so the session response still falls back to the
+	// generic maskedEmailName placeholder here, same as before this change.
+	// See docs/handoffs/XM-INV-OBS-BUNDLE.md for the full explanation.
+	if user["username"] != "" || user["display_name"] != "用户" {
+		t.Fatalf("a plain session reload has no principal to source a captured username from: %+v", user)
+	}
 
 	if login, twoFA := sub2api.counts(); login != 1 || twoFA != 0 {
 		t.Fatalf("unexpected authenticator calls: login=%d twoFA=%d", login, twoFA)
+	}
+}
+
+func TestPlatformLoginSuccessLogsStructuredInfo(t *testing.T) {
+	// XM-INV-OBS-BUNDLE: a successful platform login previously logged
+	// nothing at all (only failures were logged), leaving operators with no
+	// positive signal that logins were working. The log must carry enough to
+	// correlate a login with its session (request_id, platform, a claimed-vs-
+	// created marker, and a short user id prefix) and must never carry the
+	// submitted password.
+	const password = "correct horse battery staple sentinel"
+	sub2api := &fakePlatformAuthenticator{onLogin: func(identifier, gotPassword string) (auth.PlatformLoginResult, error) {
+		if gotPassword != password {
+			t.Fatalf("unexpected forwarded password: %q", gotPassword)
+		}
+		return auth.PlatformLoginResult{PlatformUserID: "777", Username: "loguser", Email: "log@example.com", EmailVerified: true}, nil
+	}}
+	server := platformLoginServer(t, sub2api, rejectingAuthenticator(), 8, time.Minute)
+	// Override ProvisionUser with a fixed ID and Claimed:true so the log
+	// assertions below are deterministic and exercise the claim-path branch
+	// of the new "claimed" field (the create path is already covered by
+	// TestPlatformLoginSuccessIssuesSessionWithPlatformIdentity's default).
+	const provisionedUserID = "10000000-0000-4000-8000-000000000001"
+	server.productionAuth.ProvisionUser = func(_ context.Context, principal auth.Principal, _ string) (SessionUser, error) {
+		return SessionUser{ID: provisionedUserID, DisplayName: principal.DisplayName, Claimed: true, Email: principal.Email, EmailVerified: principal.EmailVerified}, nil
+	}
+	var logs bytes.Buffer
+	server.logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	request := newPlatformLoginHTTPRequest(t, `{"platform":"sub2api","identifier":"log@example.com","password":"`+password+`"}`)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	logText := logs.String()
+	for _, want := range []string{
+		"platform login succeeded", "platform=sub2api", "claimed=true", "user_id=10000000", "request_id=",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("log missing %q: %s", want, logText)
+		}
+	}
+	if strings.Contains(logText, password) {
+		t.Fatalf("log must never contain the submitted password: %s", logText)
+	}
+	if strings.Contains(logText, provisionedUserID) {
+		t.Fatalf("log must only carry the 8-char user id prefix, not the full id: %s", logText)
 	}
 }
 

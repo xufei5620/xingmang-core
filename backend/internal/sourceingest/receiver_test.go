@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,10 +32,16 @@ type signatureFixture struct {
 
 type captureAcceptor struct {
 	batch application.VerifiedSourceBatch
+	// err, when set, makes AcceptSourceBatch fail instead of succeeding --
+	// exercises the commit-rejected logging path in ServeHTTP.
+	err error
 }
 
 func (a *captureAcceptor) AcceptSourceBatch(_ context.Context, sourceID string, batch application.VerifiedSourceBatch) (application.SourceBatchAck, error) {
 	a.batch = batch
+	if a.err != nil {
+		return application.SourceBatchAck{}, a.err
+	}
 	return application.SourceBatchAck{Accepted: true, SourceInstanceID: sourceID, StreamID: batch.StreamID, BatchID: batch.BatchID, Sequence: batch.Sequence, AcceptedRecords: len(batch.Events)}, nil
 }
 
@@ -109,6 +117,41 @@ func TestReceiverAcceptsCrossModuleSignatureVector(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"stream_id":"payments"`) {
 		t.Fatalf("ack does not bind stream: %s", recorder.Body.String())
+	}
+}
+
+func TestReceiverLogsCommitRejectionWithoutLeakingPayload(t *testing.T) {
+	// XM-INV-OBS-BUNDLE: a commit rejection used to be entirely silent
+	// (409/503 with no server-side log), so diagnosing it required going
+	// straight to the database. AcceptSourceBatch's error must now be logged
+	// with enough context to correlate against the batch, without echoing the
+	// batch's own payload bytes.
+	receiver, fixture, batch, acceptor := testReceiver(t)
+	acceptor.err = errors.New("ledger unique constraint violated")
+	var logs bytes.Buffer
+	receiver.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	recorder := httptest.NewRecorder()
+	receiver.ServeHTTP(recorder, signedRequest(fixture, batch))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	logText := logs.String()
+	for _, want := range []string{
+		"source batch commit rejected",
+		"source_instance_id=" + fixture.SourceID,
+		"stream_id=" + fixture.StreamID,
+		"batch_id=" + fixture.BatchID,
+		"sequence=1",
+		"status=409",
+		"ledger unique constraint violated",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("log missing %q: %s", want, logText)
+		}
+	}
+	if strings.Contains(logText, string(batch)) {
+		t.Fatalf("log must not leak the raw batch payload: %s", logText)
 	}
 }
 

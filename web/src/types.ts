@@ -58,6 +58,13 @@ export interface AuthUser {
   // Non-null only alongside `platform` (a platform-password session): the
   // account's ID on that source platform, e.g. New API's numeric user ID.
   platformUserId: string | null;
+  // The raw account name captured from the platform's own login response
+  // (Sub2API/New API), unlike `displayName` above which the backend always
+  // backfills with a generic placeholder when there is nothing better to
+  // show. Null whenever there is no captured name to show -- including on
+  // every session reload today, since the backend has nowhere to persist it
+  // across requests (see docs/handoffs/XM-INV-OBS-BUNDLE.md).
+  username: string | null;
 }
 
 export interface PlatformLoginInput {

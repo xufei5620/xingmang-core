@@ -47,11 +47,16 @@ var (
 // origin and Subject holds PlatformUserID, so the two fields are an explicit,
 // redundant-by-design projection of the same (issuer, subject) pair used
 // everywhere else -- never an independent identity key.
+// DisplayName carries the platform's own account username (PlatformLoginResult.Username)
+// through to session provisioning so it can be shown back to the user; it is
+// never persisted (invoice_users has no display-name column) and is empty for
+// an OIDC principal.
 type Principal struct {
 	Issuer         string    `json:"-"`
 	Subject        string    `json:"-"`
 	Email          string    `json:"-"`
 	EmailVerified  bool      `json:"-"`
+	DisplayName    string    `json:"-"`
 	Roles          []string  `json:"-"`
 	ACR            string    `json:"-"`
 	AMR            []string  `json:"-"`

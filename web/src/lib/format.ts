@@ -15,6 +15,14 @@ export const dateTime = (value: string) =>
     hour12: false,
   }).format(new Date(value))
 
+// The backend sends a "never observed yet" source account timestamp as a
+// real (non-omitted) time value rather than leaving the field absent: Go's
+// zero time.Time marshals as 0001-01-01, and some queries instead coalesce a
+// missing value to the Unix epoch before it's normalized server-side. Either
+// shape must render as "no sync yet", not as a formatted 0001/1970 date.
+export const isUnobservedTimestamp = (value: string) =>
+  value.startsWith('0001-01-01') || value.startsWith('1970-01-01')
+
 export const maskTaxId = (value: string) => {
   if (!value) return '个人抬头'
   if (value.length < 8) return value

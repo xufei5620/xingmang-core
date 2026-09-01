@@ -40,8 +40,14 @@ type BackchannelLogoutProcessor interface {
 }
 
 type SessionUser struct {
-	ID            string
-	DisplayName   string
+	ID          string
+	DisplayName string
+	// Claimed is true when provisioning landed on a pre-existing invoice_user
+	// via the external-account claim path (see provisionPlatformOrOIDCUser in
+	// cmd/api/runtime.go) instead of creating a fresh one. It is
+	// request-scoped observability only -- never serialized to the session
+	// response.
+	Claimed       bool
 	Email         string
 	EmailVerified bool
 	// CanonicalIssuer/CanonicalSubject carry the invoice_user's stored
@@ -330,7 +336,8 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 			stepUpRequired = true
 		}
 	}
-	displayName := strings.TrimSpace(user.DisplayName)
+	rawDisplayName := strings.TrimSpace(user.DisplayName)
+	displayName := rawDisplayName
 	if displayName == "" {
 		displayName = maskedEmailName(user.Email)
 	}
@@ -346,6 +353,14 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 			// name nor an email (e.g. a username-only New API account) instead of
 			// showing every such account as the same generic fallback name.
 			"platform_user_id": current.Session.PlatformUserID,
+			// username is the raw captured platform account name -- unlike
+			// display_name above it is never backfilled with maskedEmailName's
+			// generic "用户" placeholder, so a caller can tell "we truly have a
+			// name" apart from "there was nothing better to show" without
+			// pattern-matching the fallback string. Empty until the user's next
+			// platform-password login re-populates it (see completeLogin);
+			// invoice_users has no column to persist it across sessions.
+			"username": rawDisplayName,
 		},
 		"admin_step_up_required": stepUpRequired,
 	})

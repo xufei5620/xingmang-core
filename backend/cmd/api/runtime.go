@@ -64,7 +64,7 @@ func runWorker(ctx context.Context, spec workerSpec) {
 	for {
 		processed, err := spec.Worker.RunOnce(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("background worker failed", "worker", spec.Name, "error", err)
+			slog.Error("background worker failed", "worker", spec.Name, "processed", processed, "error", err)
 		}
 		if ctx.Err() != nil {
 			return
@@ -263,7 +263,10 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			return provisionPlatformOrOIDCUser(callbackCtx, appService, identityStore, principal, requestID, platformSourceInstanceIDs)
 		},
 		LoadUser: func(loadCtx context.Context, userID string) (httpapi.SessionUser, error) {
-			return loadSessionUser(loadCtx, appService, userID)
+			// No principal is available on a plain session reload (only the
+			// stored userID), so DisplayName/Claimed cannot be recovered here --
+			// only a fresh login (see provisionPlatformOrOIDCUser) carries them.
+			return loadSessionUser(loadCtx, appService, userID, "", false)
 		},
 	}
 	platformLogin, err := buildPlatformLogin(productionAuth)
@@ -298,7 +301,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
-	receiver := &sourceingest.Receiver{Trust: trust, Acceptor: appService, ProxyCIDRs: ingestProxyNetworks}
+	receiver := &sourceingest.Receiver{Trust: trust, Acceptor: appService, ProxyCIDRs: ingestProxyNetworks, Logger: slog.Default()}
 	breakGlass, err := loadBreakGlassCIDRs(authMode)
 	if err != nil {
 		return appRuntime{}, err
@@ -650,7 +653,7 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			if wakeErr := deps.WakeSourceAccountFacts(auditCtx, sourceInstanceID, principal.PlatformUserID); wakeErr != nil {
 				return httpapi.SessionUser{}, fmt.Errorf("wake parked source facts for claimed binding: %w", wakeErr)
 			}
-			return loadSessionUser(auditCtx, deps, existing.PrincipalID)
+			return loadSessionUser(auditCtx, deps, existing.PrincipalID, principal.DisplayName, true)
 		}
 		// Not found: fall through to the create-or-find path below exactly
 		// like a first-ever login (OIDC or platform) always has.
@@ -684,16 +687,21 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			return httpapi.SessionUser{}, fmt.Errorf("bind platform external account: %w", bindErr)
 		}
 	}
-	return loadSessionUser(auditCtx, deps, record.ID)
+	return loadSessionUser(auditCtx, deps, record.ID, principal.DisplayName, false)
 }
 
-func loadSessionUser(ctx context.Context, service currentUserLoader, userID string) (httpapi.SessionUser, error) {
+// loadSessionUser loads the invoice_user row and layers the request-scoped
+// displayName/claimed onto it. displayName/claimed are only ever non-empty
+// on a fresh login (see provisionPlatformOrOIDCUser): invoice_users has no
+// column to persist a captured platform username, so a later session reload
+// (ProductionAuth.LoadUser, keyed only by userID) always passes "false".
+func loadSessionUser(ctx context.Context, service currentUserLoader, userID, displayName string, claimed bool) (httpapi.SessionUser, error) {
 	user, err := service.GetCurrentUser(ctx, userID)
 	if err != nil {
 		return httpapi.SessionUser{}, err
 	}
 	return httpapi.SessionUser{
-		ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified,
+		ID: user.ID, DisplayName: displayName, Claimed: claimed, Email: user.Email, EmailVerified: user.EmailVerified,
 		CanonicalIssuer: user.OIDCIssuer, CanonicalSubject: user.OIDCSubject,
 	}, nil
 }

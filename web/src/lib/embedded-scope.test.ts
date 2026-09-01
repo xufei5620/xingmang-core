@@ -83,12 +83,13 @@ describe("scopeBySource", () => {
 describe("accountIdentityLabel", () => {
   const baseUser: Pick<
     AuthUser,
-    "displayName" | "email" | "platform" | "platformUserId"
+    "displayName" | "email" | "platform" | "platformUserId" | "username"
   > = {
     displayName: "用户",
     email: "",
     platform: null,
     platformUserId: null,
+    username: null,
   };
 
   const boundAccounts: Pick<
@@ -117,19 +118,32 @@ describe("accountIdentityLabel", () => {
     ).toBe("person@example.com");
   });
 
-  it("prefers a real display name over the platform+ID fallback", () => {
+  it("prefers a real captured username over the platform+ID fallback", () => {
     expect(
       accountIdentityLabel({
         user: {
           ...baseUser,
           platform: "newapi",
           platformUserId: "48",
-          displayName: "张三",
+          username: "张三",
         },
         embeddedPlatform: null,
         sourceAccounts: [],
       }),
     ).toBe("张三");
+  });
+
+  it("ignores the backend's generic display-name placeholder on a platform session (no email, no captured username)", () => {
+    // Regression guard for the old literal-"用户"-matching approach this
+    // replaced: display_name being the generic placeholder must not be
+    // mistaken for a real name just because it is a non-empty string.
+    expect(
+      accountIdentityLabel({
+        user: { ...baseUser, platform: "sub2api", platformUserId: "48" },
+        embeddedPlatform: null,
+        sourceAccounts: [],
+      }),
+    ).toBe("SoloV API · 用户 48");
   });
 
   it("falls back to '<platform> · 用户 <id>' when there is no email and no real name", () => {
