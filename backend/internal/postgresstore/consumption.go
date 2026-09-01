@@ -1013,74 +1013,24 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			}
 			return tx.Commit(ctx)
 		}
-		if in.BaselineMember {
-			// XM-INV-POLICY-ANCHOR 2.1: this reconciliation checkpoint is
-			// at/after the policy start, so bootstrap directly from it
-			// instead of waiting for the (possibly indefinitely parked)
-			// signed cutover row. The checkpoint's entire balance becomes the
-			// account's opening, non-invoiceable balance -- the same
-			// treatment a SIGNED_CUTOVER baseline gets, just anchored to a
-			// later point the invoice policy actually cares about. The state
-			// row must be inserted *before* the checkpoint row: the
-			// checkpoint table's own (unchanged, immediate)
-			// balance_reconciliation_checkpoints_contract_guard trigger
-			// requires a trusted state row to already exist, while this
-			// state row's own new POLICY_ANCHOR validation (migration 0016)
-			// is deferred to COMMIT specifically so it can, in turn, require
-			// this same checkpoint row to already exist by then.
-			eligibilityStatus := "active"
-			if in.CatchupKeyHMAC != "" {
-				if !dependencyHMACPattern.MatchString(in.CatchupKeyHMAC) {
-					return errors.New("invalid catch-up dependency key")
-				}
-				eligibilityStatus = "syncing"
-			}
-			_, err = tx.Exec(ctx, `
-				INSERT INTO source_account_eligibility_state(
-					external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
-					cutover_manifest_hash,bootstrap_kind,finalized_through,finalization_delay_seconds,
-					catchup_key_hmac,eligibility_status)
-				VALUES($1,$2,$3,$4,$5::numeric,$6,'POLICY_ANCHOR',$3,$7,NULLIF($8,''),$9)`,
-				accountID, in.SourceInstanceID, in.AsOf.UTC(), in.UnitCode, balance.String(),
-				in.CutoverManifestHash, int(defaultEligibilityFinalizationDelay/time.Second),
-				in.CatchupKeyHMAC, eligibilityStatus)
-			if err != nil {
-				return err
-			}
-			checkpointID := randomUUID()
-			_, err = tx.Exec(ctx, `
-				INSERT INTO balance_reconciliation_checkpoints(
-					id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
-					checkpoint_kind,baseline_member,source_snapshot_id,snapshot_row_count,
-					as_of,balance_service_units,balance_negative,unit_code,
-					cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
-					source_cursor,stream_watermark_at,source_revision_hash,observed_at)
-				VALUES($1,$2,$3,$4,$5,'reconciliation',TRUE,$6,$7,$8,$9::numeric,$10,$11,$12,$13,
-					'cutover_baseline',$14,$15,$16,$17,$18)`, checkpointID, in.SourceInstanceID,
-				accountID, in.ExternalEventID, in.CheckpointID, in.SourceSnapshotID,
-				snapshotRows.Int64(), in.AsOf.UTC(), balance.String(),
-				in.BalanceNegative, in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash,
-				in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt.UTC(), in.SourceRevision,
-				in.ObservedAt.UTC())
-			if err != nil {
-				return err
-			}
-			if in.BalanceNegative {
-				if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-					"balance_checkpoint", in.CheckpointID, in.SourceRevision, actor); err != nil {
-					return err
-				}
-			}
-			if err = writeAudit(ctx, tx, actor, "eligibility.policy_anchor.bootstrapped", "external_account", accountID,
-				nil, map[string]any{"cutover_at": in.AsOf, "opening_units": balance.String(),
-					"status": eligibilityStatus}); err != nil {
-				return err
-			}
-			return tx.Commit(ctx)
-		}
-		if !in.AsOf.After(manifest.CutoverAt) {
-			return domain.ErrConflict
-		}
+		// XM-INV-POLICY-ANCHOR 2.1 (superseding the original POST_CUTOVER_REPLAY
+		// non-baseline path -- per the team lead's follow-up decision, after
+		// this slice no code path creates a new SIGNED_CUTOVER or
+		// POST_CUTOVER_REPLAY row, baseline member or not; a signed cutover
+		// row for a no-state account is just a pre-policy checkpoint like any
+		// other and is skipped above). This reconciliation checkpoint is
+		// at/after the policy start, so bootstrap directly from it instead of
+		// waiting for the (possibly indefinitely parked) signed cutover row.
+		// The checkpoint's entire balance becomes the account's opening,
+		// non-invoiceable balance -- the same treatment a SIGNED_CUTOVER
+		// baseline gets, just anchored to a later point the invoice policy
+		// actually cares about. The state row must be inserted *before* the
+		// checkpoint row: the checkpoint table's own (unchanged, immediate)
+		// balance_reconciliation_checkpoints_contract_guard trigger requires
+		// a trusted state row to already exist, while this state row's own
+		// new POLICY_ANCHOR validation (migration 0016) is deferred to
+		// COMMIT specifically so it can, in turn, require this same
+		// checkpoint row to already exist by then.
 		eligibilityStatus := "active"
 		if in.CatchupKeyHMAC != "" {
 			if !dependencyHMACPattern.MatchString(in.CatchupKeyHMAC) {
@@ -1093,8 +1043,8 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
 				cutover_manifest_hash,bootstrap_kind,finalized_through,finalization_delay_seconds,
 				catchup_key_hmac,eligibility_status)
-			VALUES($1,$2,$3,$4,0,$5,'POST_CUTOVER_REPLAY',$3,$6,NULLIF($7,''),$8)`,
-			accountID, in.SourceInstanceID, manifest.CutoverAt.UTC(), in.UnitCode,
+			VALUES($1,$2,$3,$4,$5::numeric,$6,'POLICY_ANCHOR',$3,$7,NULLIF($8,''),$9)`,
+			accountID, in.SourceInstanceID, in.AsOf.UTC(), in.UnitCode, balance.String(),
 			in.CutoverManifestHash, int(defaultEligibilityFinalizationDelay/time.Second),
 			in.CatchupKeyHMAC, eligibilityStatus)
 		if err != nil {
@@ -1108,9 +1058,9 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				as_of,balance_service_units,balance_negative,unit_code,
 				cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
 				source_cursor,stream_watermark_at,source_revision_hash,observed_at)
-			VALUES($1,$2,$3,$4,$5,'reconciliation',FALSE,$6,$7,$8,$9::numeric,$10,$11,$12,$13,
-				'pending_finalization',$14,$15,$16,$17,$18)`, checkpointID, in.SourceInstanceID,
-			accountID, in.ExternalEventID, in.CheckpointID, in.SourceSnapshotID,
+			VALUES($1,$2,$3,$4,$5,'reconciliation',$6,$7,$8,$9,$10::numeric,$11,$12,$13,
+				$14,'cutover_baseline',$15,$16,$17,$18,$19)`, checkpointID, in.SourceInstanceID,
+			accountID, in.ExternalEventID, in.CheckpointID, in.BaselineMember, in.SourceSnapshotID,
 			snapshotRows.Int64(), in.AsOf.UTC(), balance.String(),
 			in.BalanceNegative, in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash,
 			in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt.UTC(), in.SourceRevision,
@@ -1124,9 +1074,9 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				return err
 			}
 		}
-		if err = writeAudit(ctx, tx, actor, "eligibility.post_cutover_account_replay_bootstrapped",
-			"external_account", accountID, nil, map[string]any{"cutover_at": manifest.CutoverAt,
-				"reconcile_at": in.AsOf, "opening_units": "0", "status": eligibilityStatus}); err != nil {
+		if err = writeAudit(ctx, tx, actor, "eligibility.policy_anchor.bootstrapped", "external_account", accountID,
+			nil, map[string]any{"cutover_at": in.AsOf, "opening_units": balance.String(),
+				"baseline_member": in.BaselineMember, "status": eligibilityStatus}); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -2294,36 +2244,73 @@ func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID,
 	return nil
 }
 
-// flagPolicyAnchorMigrationBlockedTx implements design XM-INV-POLICY-ANCHOR
-// 2.4's fallback, not its primary mechanism. The design calls for rewriting
-// an already-bootstrapped account's trust boundary in place (DELETE the old
-// source_account_eligibility_state row, INSERT a new one with
-// bootstrap_kind='POLICY_ANCHOR') the next time its eligibility projection
-// job runs. That DELETE is not actually possible: two tables hold a
-// non-deferrable ON DELETE RESTRICT foreign key on
-// source_account_eligibility_state(external_account_id) --
-// source_account_stream_watermarks, and eligibility_projection_jobs itself
-// (whose own row for this account, locked by the caller via
-// status='processing', necessarily still exists for the entire duration of
-// the job attempting the DELETE). Forcing it through would mean restructuring
-// this shared job's row-lifecycle contract (used by every account's ordinary
-// reprojection, not just this rare case) to delete-then-recreate its own
-// governing row mid-transaction -- a correctness-sensitive change to a
-// financial job queue's concurrency contract that is not this fallback's call
-// to make. Per instruction, this freezes the account for manual review
-// instead of forcing the migration through. Freezing does not skip the
-// normal reprojection that follows (still against the account's existing,
-// unchanged cutover boundary) -- the ledger math is unaffected either way;
-// freezing only blocks *new* invoice activity until a human resolves it,
-// which is the conservative choice once the account's boundary is known to
-// need re-anchoring.
-func flagPolicyAnchorMigrationBlockedTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, actor AuditActor) error {
+// reanchorLegacyEligibilityAccountTx implements design XM-INV-POLICY-ANCHOR
+// 2.4: an account still carrying a legacy bootstrap (SIGNED_CUTOVER or
+// POST_CUTOVER_REPLAY -- after this slice, no code path creates a new row of
+// either kind, so this set only ever shrinks and a re-anchored account never
+// matches it again, making the whole flow naturally idempotent) is
+// re-anchored to POLICY_ANCHOR in place the next time its projection job
+// runs, before projecting. bootstrap_kind is the trigger condition, not
+// cutover_at < policy start: that was tried first and reverted after it
+// started firing on every legacy account regardless of genuine staleness
+// (every real manifest's cutover necessarily precedes the policy start by
+// construction) -- see the handoff doc for that history.
+//
+// The trust-boundary trigger stays immutable by default; migration 0016
+// carves out exactly one exception (transaction-local
+// invoice.policy_anchor_reanchor='on', legacy OLD kind, POLICY_ANCHOR NEW
+// kind, and the same checkpoint/policy-start/manifest/finalized_through
+// validation an INSERT gets), which is what makes an UPDATE-based re-anchor
+// possible at all -- the original design called for DELETE-and-reinsert,
+// blocked by non-deferrable ON DELETE RESTRICT foreign keys on
+// source_account_eligibility_state(external_account_id)
+// (source_account_stream_watermarks, and eligibility_projection_jobs' own
+// row for the account being processed); see the handoff doc for that
+// history too.
+//
+// Returns true when it performed a re-anchor UPDATE, so the caller knows to
+// re-read the account before continuing to project with it.
+func reanchorLegacyEligibilityAccountTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, actor AuditActor) (bool, error) {
 	if account.BootstrapKind != "SIGNED_CUTOVER" && account.BootstrapKind != "POST_CUTOVER_REPLAY" {
-		return nil
+		return false, nil
 	}
-	if !account.CutoverAt.Before(account.PolicyStartAt) {
-		return nil
+	// An active invoice reservation or issuance on any of the account's
+	// funding lots means real invoice accounting already depends on the
+	// current (pre-anchor) consumption state -- resetting it would corrupt
+	// that, and for an issued lot the funding_lots_consumed_cash_allocation_bound
+	// CHECK constraint would refuse the reset outright regardless. Includes
+	// refund_attention (an issued lot already under refund review) alongside
+	// reserved/issued -- everything except released, which no longer
+	// represents a live claim.
+	var hasExposure bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM invoice_allocations ia
+			JOIN funding_lots fl ON fl.id=ia.funding_lot_id
+			WHERE fl.external_account_id=$1 AND ia.allocation_state IN ('reserved','issued','refund_attention')
+		)`, account.ExternalAccountID).Scan(&hasExposure); err != nil {
+		return false, err
 	}
+	if hasExposure {
+		var alreadyBlocked bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM eligibility_freezes
+			WHERE external_account_id=$1 AND freeze_reason='POLICY_ANCHOR_BLOCKED' AND status='open')`,
+			account.ExternalAccountID).Scan(&alreadyBlocked); err != nil {
+			return false, err
+		}
+		if alreadyBlocked {
+			return false, nil
+		}
+		if err := freezeEligibilityTx(ctx, tx, account.ExternalAccountID, "", "POLICY_ANCHOR_BLOCKED",
+			"source_account_eligibility_state", account.ExternalAccountID, "", actor); err != nil {
+			return false, err
+		}
+		return false, writeAudit(ctx, tx, actor, "eligibility.policy_anchor.blocked", "external_account",
+			account.ExternalAccountID, map[string]any{"bootstrap_kind": account.BootstrapKind,
+				"cutover_at": account.CutoverAt}, nil)
+	}
+
 	var candidateAsOf time.Time
 	var candidateBalance string
 	err := tx.QueryRow(ctx, `
@@ -2332,21 +2319,68 @@ func flagPolicyAnchorMigrationBlockedTx(ctx context.Context, tx pgx.Tx, account 
 		ORDER BY as_of,id LIMIT 1`, account.ExternalAccountID, account.PolicyStartAt).Scan(
 		&candidateAsOf, &candidateBalance)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// No post-policy checkpoint has arrived yet to anchor to -- nothing
-		// to flag until one does.
-		return nil
+		// No post-policy checkpoint has arrived yet to anchor to. Continue
+		// projecting under the existing anchor -- do not block settlement;
+		// the next job retries this check.
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err = freezeEligibilityTx(ctx, tx, account.ExternalAccountID, "", "POLICY_ANCHOR_BLOCKED",
-		"source_account_eligibility_state", account.ExternalAccountID, "", actor); err != nil {
-		return err
+
+	var oldBalance string
+	if err = tx.QueryRow(ctx, `SELECT cutover_balance_units::text FROM source_account_eligibility_state
+		WHERE external_account_id=$1`, account.ExternalAccountID).Scan(&oldBalance); err != nil {
+		return false, err
 	}
-	return writeAudit(ctx, tx, actor, "eligibility.policy_anchor.migration_blocked", "external_account",
-		account.ExternalAccountID, map[string]any{"bootstrap_kind": account.BootstrapKind,
-			"cutover_at": account.CutoverAt}, map[string]any{"candidate_bootstrap_kind": "POLICY_ANCHOR",
-			"candidate_cutover_at": candidateAsOf, "candidate_cutover_balance_units": candidateBalance})
+	deleted, err := tx.Exec(ctx, `
+		DELETE FROM consumption_allocations
+		WHERE usage_event_id IN (SELECT id FROM source_usage_events WHERE external_account_id=$1)`,
+		account.ExternalAccountID)
+	if err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE funding_lot_consumption_state flcs SET
+			consumed_service_units=0,cumulative_cash_numerator=0,
+			rounded_consumed_cash_minor=0,rounding_remainder_numerator=0,
+			state_version=state_version+1,updated_at=now()
+		FROM funding_lots fl
+		WHERE fl.id=flcs.funding_lot_id AND fl.external_account_id=$1
+			AND fl.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')`,
+		account.ExternalAccountID); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE funding_lots SET consumed_cash_minor=0,eligibility_revision=eligibility_revision+1,updated_at=now()
+		WHERE external_account_id=$1 AND eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')`,
+		account.ExternalAccountID); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT set_config('invoice.policy_anchor_reanchor','on',true)`); err != nil {
+		return false, err
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE source_account_eligibility_state SET
+			cutover_at=$2,cutover_balance_units=$3::numeric,bootstrap_kind='POLICY_ANCHOR',
+			finalized_through=$2,projection_version=projection_version+1,updated_at=now()
+		WHERE external_account_id=$1`, account.ExternalAccountID, candidateAsOf, candidateBalance)
+	if err != nil {
+		return false, err
+	}
+	if command.RowsAffected() != 1 {
+		return false, domain.ErrConflict
+	}
+	if err = writeAudit(ctx, tx, actor, "eligibility.policy_anchor.migrated", "external_account",
+		account.ExternalAccountID,
+		map[string]any{"bootstrap_kind": account.BootstrapKind, "cutover_at": account.CutoverAt,
+			"cutover_balance_units": oldBalance},
+		map[string]any{"bootstrap_kind": "POLICY_ANCHOR", "cutover_at": candidateAsOf,
+			"cutover_balance_units": candidateBalance, "consumption_allocations_deleted": deleted.RowsAffected()},
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, lease string, actor AuditActor) error {
@@ -2386,6 +2420,13 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {
 		return err
+	}
+	if reanchored, err := reanchorLegacyEligibilityAccountTx(ctx, tx, account, actor); err != nil {
+		return err
+	} else if reanchored {
+		if account, err = getEligibilityAccountTx(ctx, tx, accountID, true); err != nil {
+			return err
+		}
 	}
 	if requested.Before(account.FinalizedThrough) {
 		requested = account.FinalizedThrough

@@ -311,13 +311,17 @@ func TestBalanceDeltaCarryForwardUsesLatestLowerSequenceActualAtSameAsOf(t *test
 		testHash("same-asof-prior-revision")); err != nil {
 		t.Fatal(err)
 	}
-	processed, err := fixture.store.ProcessEligibilityProjectionJobs(fixture.ctx, 10, time.Now().UTC().Add(time.Minute),
+	// seedCarryForwardFixture's account defaults to a legacy bootstrap kind,
+	// and this same-as_of reconciliation checkpoint is dated at/after policy
+	// start -- through the job queue, reanchorLegacyEligibilityAccountTx's
+	// candidate lookup would mistake it for a design-2.4 re-anchor candidate
+	// and re-anchor instead of ever reaching the carry-forward proof logic
+	// this test (predating that slice) actually exercises. See
+	// processEligibilityWithoutReanchor's doc comment.
+	processEligibilityWithoutReanchor(t, fixture.store, fixture.ctx, fixture.accountID, fixture.requested,
 		AuditActor{Type: "system", ID: "carry-forward-worker"})
-	if err != nil || processed != 1 {
-		t.Fatalf("same-asof carry projection processed=%d err=%v", processed, err)
-	}
 	var storedPrior string
-	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT prior_checkpoint_id::text
+	if err := fixture.store.pool.QueryRow(fixture.ctx, `SELECT prior_checkpoint_id::text
 		FROM balance_carry_forward_proofs WHERE external_account_id=$1`, fixture.accountID).Scan(&storedPrior); err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +329,7 @@ func TestBalanceDeltaCarryForwardUsesLatestLowerSequenceActualAtSameAsOf(t *test
 		t.Fatalf("same-asof proof prior=%s want=%s", storedPrior, priorID)
 	}
 	var realStatus, carryStatus, carryDifference string
-	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT
+	if err := fixture.store.pool.QueryRow(fixture.ctx, `SELECT
 		(SELECT evaluation_status FROM balance_checkpoint_evaluations
 		 WHERE checkpoint_id=$1),
 		(SELECT evaluation.evaluation_status FROM balance_carry_forward_evaluations evaluation
@@ -505,11 +509,11 @@ func TestBalanceEvidenceEvaluatesCarryBeforeLaterRealCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	markV3CycleProcessed(t, fixture.store, fixture.ctx, fixture.sourceID, "balances", realCycle)
-	processed, err := fixture.store.ProcessEligibilityProjectionJobs(fixture.ctx, 10, time.Now().UTC().Add(time.Minute),
+	// realEvent's checkpoint is also dated at/after policy start; see
+	// processEligibilityWithoutReanchor's doc comment for why the job queue
+	// is bypassed here, same as the carry-forward-proof call above.
+	processEligibilityWithoutReanchor(t, fixture.store, fixture.ctx, fixture.accountID, fixture.requested,
 		AuditActor{Type: "system", ID: "carry-forward-worker"})
-	if err != nil || processed != 1 {
-		t.Fatalf("interleaved balance evidence processed=%d err=%v", processed, err)
-	}
 	var carryStatus, realStatus string
 	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT
 		(SELECT evaluation.evaluation_status FROM balance_carry_forward_evaluations evaluation

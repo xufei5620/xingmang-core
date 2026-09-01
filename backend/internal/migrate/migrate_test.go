@@ -616,6 +616,114 @@ func TestPolicyAnchorMigrationValidatesBootstrapKindAndTriggerBoundary(t *testin
 	if unanchoredErr == nil || !strings.Contains(unanchoredErr.Error(), "policy anchor boundary is invalid") {
 		t.Fatalf("unanchored POLICY_ANCHOR bootstrap error=%v", unanchoredErr)
 	}
+
+	// (4)-(8): the guarded re-anchor UPDATE exception (design 2.4, migration
+	// 0016 part 3). accountID3 starts SIGNED_CUTOVER with a real, matching
+	// post-policy checkpoint available to re-anchor to.
+	accountID3 := "30000000-0000-4000-8000-0000000000a3"
+	if _, err = pool.Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+		VALUES($1,$2,$3,'a3',$4,'test','verified')`, accountID3, userID, sourceID,
+		"h1:"+strings.Repeat("c", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO source_account_eligibility_state(
+		external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
+		cutover_manifest_hash,bootstrap_kind,finalized_through,finalization_delay_seconds,
+		eligibility_status)
+		VALUES($1,$2,$3,'SUB2_BALANCE_1E8',0,$4,'SIGNED_CUTOVER',$3,900,'active')`,
+		accountID3, sourceID, cutoverAt, manifestHash); err != nil {
+		t.Fatal(err)
+	}
+	reanchorAsOf := policyStart.Add(2 * time.Hour)
+	reanchorUnits := "250"
+	if _, err = pool.Exec(ctx, `INSERT INTO balance_reconciliation_checkpoints(
+		id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
+		checkpoint_kind,baseline_member,source_snapshot_id,snapshot_row_count,
+		as_of,balance_service_units,balance_negative,unit_code,
+		cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
+		source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+		VALUES('40000000-0000-4000-8000-0000000000a3',$1,$2,'evt-a3','chk-a3',
+		'reconciliation',FALSE,$3,1,$4,$5::numeric,FALSE,'SUB2_BALANCE_1E8',
+		$6,$7,'pending_finalization',1,'cur-a3',$4,$8,$4)`,
+		sourceID, accountID3, snapHash, reanchorAsOf, reanchorUnits, manifestHash, configHash, manifestHash); err != nil {
+		t.Fatal(err)
+	}
+
+	guardedReanchorUpdate := func(setGUC bool, newCutoverAt time.Time, newUnits, newBootstrapKind string) error {
+		tx, beginErr := pool.Begin(ctx)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		defer func() { _ = tx.Rollback(context.Background()) }()
+		if setGUC {
+			if _, execErr := tx.Exec(ctx, `SELECT set_config('invoice.policy_anchor_reanchor','on',true)`); execErr != nil {
+				return execErr
+			}
+		}
+		if _, execErr := tx.Exec(ctx, `UPDATE source_account_eligibility_state SET
+			cutover_at=$2,cutover_balance_units=$3::numeric,bootstrap_kind=$4,finalized_through=$2
+			WHERE external_account_id=$1`, accountID3, newCutoverAt, newUnits, newBootstrapKind); execErr != nil {
+			return execErr
+		}
+		return tx.Commit(ctx)
+	}
+
+	// (4) No transaction-local GUC set: rejected as an immutable-boundary
+	// violation -- the guard only lifts for this one transition, never as a
+	// blanket allowance.
+	if noGUCErr := guardedReanchorUpdate(false, reanchorAsOf, reanchorUnits, "POLICY_ANCHOR"); noGUCErr == nil ||
+		!strings.Contains(noGUCErr.Error(), "trust boundary is immutable") {
+		t.Fatalf("guarded UPDATE without GUC error=%v", noGUCErr)
+	}
+
+	// (5) GUC set but OLD.bootstrap_kind is already POLICY_ANCHOR (accountID,
+	// bootstrapped in test 2 above), not one of the two legacy kinds:
+	// rejected the same way -- the exception is one-shot, legacy-to-anchor
+	// only, never anchor-to-anchor.
+	reanchorAccountTx, beginErr := pool.Begin(ctx)
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	if _, execErr := reanchorAccountTx.Exec(ctx, `SELECT set_config('invoice.policy_anchor_reanchor','on',true)`); execErr != nil {
+		t.Fatal(execErr)
+	}
+	if _, execErr := reanchorAccountTx.Exec(ctx, `UPDATE source_account_eligibility_state SET
+		cutover_at=$2,cutover_balance_units=$3::numeric,bootstrap_kind='POLICY_ANCHOR',finalized_through=$2
+		WHERE external_account_id=$1`, accountID, reanchorAsOf, reanchorUnits); execErr != nil {
+		t.Fatal(execErr)
+	}
+	nonLegacyOldErr := reanchorAccountTx.Commit(ctx)
+	if nonLegacyOldErr == nil || !strings.Contains(nonLegacyOldErr.Error(), "trust boundary is immutable") {
+		t.Fatalf("guarded UPDATE with non-legacy OLD kind error=%v", nonLegacyOldErr)
+	}
+
+	// (6) GUC set, OLD is legacy, but NEW.bootstrap_kind stays legacy (not
+	// POLICY_ANCHOR): rejected the same way.
+	if wrongNewKindErr := guardedReanchorUpdate(true, reanchorAsOf, reanchorUnits, "SIGNED_CUTOVER"); wrongNewKindErr == nil ||
+		!strings.Contains(wrongNewKindErr.Error(), "trust boundary is immutable") {
+		t.Fatalf("guarded UPDATE with non-POLICY_ANCHOR NEW kind error=%v", wrongNewKindErr)
+	}
+
+	// (7) GUC set, OLD legacy, NEW POLICY_ANCHOR, but the claimed values
+	// match no checkpoint at all: rejected as an invalid policy anchor
+	// boundary -- the GUC lifts the immutability rejection only, it never
+	// weakens the POLICY_ANCHOR validation itself.
+	if noMatchErr := guardedReanchorUpdate(true, reanchorAsOf, "999", "POLICY_ANCHOR"); noMatchErr == nil ||
+		!strings.Contains(noMatchErr.Error(), "policy anchor boundary is invalid") {
+		t.Fatalf("guarded UPDATE with unmatched values error=%v", noMatchErr)
+	}
+
+	// (8) GUC set, OLD legacy, NEW POLICY_ANCHOR, values matching the real
+	// checkpoint above: accepted.
+	if validErr := guardedReanchorUpdate(true, reanchorAsOf, reanchorUnits, "POLICY_ANCHOR"); validErr != nil {
+		t.Fatalf("valid guarded re-anchor UPDATE rejected: %v", validErr)
+	}
+	var reanchoredKind string
+	if err = pool.QueryRow(ctx, `SELECT bootstrap_kind FROM source_account_eligibility_state
+		WHERE external_account_id=$1`, accountID3).Scan(&reanchoredKind); err != nil || reanchoredKind != "POLICY_ANCHOR" {
+		t.Fatalf("re-anchored bootstrap_kind=%q err=%v", reanchoredKind, err)
+	}
 }
 
 func TestSourceReadinessActiveIndexMigrationCatalogContract(t *testing.T) {
