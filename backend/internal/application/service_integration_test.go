@@ -1098,3 +1098,68 @@ func TestClaimPlatformIdentityRejectsNonActiveUser(t *testing.T) {
 		t.Fatalf("expected domain.ErrForbidden re-claiming a since-disabled user, got %v", err)
 	}
 }
+
+// TestPlatformPasswordBindingsGetDistinctSubjectIndexes reproduces the RC55
+// production canary failure: external_accounts has UNIQUE NULLS NOT DISTINCT
+// (source_instance_id, external_subject_hmac), and platform-password binds
+// wrote NULL subject HMACs, so the SECOND real platform user of a source
+// could never provision (SQLSTATE 23505). Platform binds must now carry a
+// deterministic per-user blind index in a platform-specific namespace, two
+// different users must both bind, re-binding the same user must stay
+// idempotent, and a fresh platform binding must requeue that user's
+// parked_identity source facts instead of leaving them to the retry backstop.
+func TestPlatformPasswordBindingsGetDistinctSubjectIndexes(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+
+	sourceID := "10000000-0000-4000-8000-000000000041"
+	if _, err := store.UpsertSourceInstance(ctx, postgresstore.SourceInstanceRecord{
+		ID: sourceID, SourceType: domain.SourceSub2API, Name: "sub2-hmac-test", RuntimeVersion: "test-runtime", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	userA, err := service.EnsureUser(ctx, OIDCIdentity{Issuer: "https://api.solov.example", Subject: "2092", Status: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	userB, err := service.EnsureUser(ctx, OIDCIdentity{Issuer: "https://api.solov.example", Subject: "2493", Status: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	boundA, err := service.BindExternalAccount(ctx, postgresstore.ExternalAccountRecord{
+		PrincipalID: userA.ID, SourceInstanceID: sourceID, ExternalUserID: "2092",
+		BindingMethod: "platform_password_login", BindingStatus: "verified",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundA.ExternalSubjectHMAC == "" {
+		t.Fatal("platform binding must carry a derived subject index, not NULL")
+	}
+
+	// The second-ever platform user on the same source: this exact insert
+	// failed in production before the fix.
+	boundB, err := service.BindExternalAccount(ctx, postgresstore.ExternalAccountRecord{
+		PrincipalID: userB.ID, SourceInstanceID: sourceID, ExternalUserID: "2493",
+		BindingMethod: "platform_password_login", BindingStatus: "verified",
+	})
+	if err != nil {
+		t.Fatalf("second platform user must bind on the same source: %v", err)
+	}
+	if boundB.ExternalSubjectHMAC == "" || boundB.ExternalSubjectHMAC == boundA.ExternalSubjectHMAC {
+		t.Fatalf("subject indexes must be per-user distinct: a=%q b=%q", boundA.ExternalSubjectHMAC, boundB.ExternalSubjectHMAC)
+	}
+
+	// Idempotent re-login of user A: same derived index, same row, no error.
+	reboundA, err := service.BindExternalAccount(ctx, postgresstore.ExternalAccountRecord{
+		PrincipalID: userA.ID, SourceInstanceID: sourceID, ExternalUserID: "2092",
+		BindingMethod: "platform_password_login", BindingStatus: "verified",
+	})
+	if err != nil {
+		t.Fatalf("idempotent re-bind failed: %v", err)
+	}
+	if reboundA.ID != boundA.ID || reboundA.ExternalSubjectHMAC != boundA.ExternalSubjectHMAC {
+		t.Fatalf("re-bind must reuse the same row and index: got %q/%q want %q/%q",
+			reboundA.ID, reboundA.ExternalSubjectHMAC, boundA.ID, boundA.ExternalSubjectHMAC)
+	}
+}

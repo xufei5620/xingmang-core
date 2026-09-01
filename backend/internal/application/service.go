@@ -296,8 +296,40 @@ func (s *Service) RevokeVerifiedEmail(ctx context.Context, principalID, email st
 }
 
 func (s *Service) BindExternalAccount(ctx context.Context, record postgresstore.ExternalAccountRecord) (postgresstore.ExternalAccountRecord, error) {
-	return s.store.BindExternalAccount(ctx, record,
+	if record.ExternalSubjectHMAC == "" && record.BindingMethod == "platform_password_login" {
+		// external_accounts carries UNIQUE NULLS NOT DISTINCT
+		// (source_instance_id, external_subject_hmac): at most ONE row per
+		// source may hold a NULL subject HMAC. Platform-password bindings
+		// have no OIDC provider subject, so the first such binding used up
+		// that slot and the second real user's first login failed with
+		// SQLSTATE 23505 (found by the RC55 production canary). Give each
+		// platform binding a deterministic blind index in its own
+		// namespace -- distinct from the projection's
+		// "external-oidc/<source>" namespace so a password binding can
+		// never collide with an OIDC-subject binding.
+		subjectHMAC, err := s.keys.BlindIndex("external-platform/"+record.SourceInstanceID, record.ExternalUserID)
+		if err != nil {
+			return postgresstore.ExternalAccountRecord{}, fmt.Errorf("derive platform binding subject index: %w", err)
+		}
+		record.ExternalSubjectHMAC = subjectHMAC
+	}
+	saved, err := s.store.BindExternalAccount(ctx, record,
 		auditActor(ctx, "user", record.PrincipalID, "external account binding verified"))
+	if err != nil {
+		return saved, err
+	}
+	if record.BindingMethod == "platform_password_login" {
+		// Source facts for a never-bound platform user park as
+		// parked_identity waiting on this account binding, with only a slow
+		// time-based retry backstop. The projection pipeline fires this wake
+		// when IT creates a binding (source_processor); a platform-password
+		// login that creates the binding must fire the same wake, or the
+		// user's parked usage/credit facts stay invisible until the backstop.
+		if wakeErr := s.wakeDependency(ctx, "source_external_account", record.SourceInstanceID, record.ExternalUserID); wakeErr != nil {
+			return saved, fmt.Errorf("wake parked source facts for new platform binding: %w", wakeErr)
+		}
+	}
+	return saved, nil
 }
 
 // ClaimPlatformIdentity backfills a pre-existing invoice_user's platform/
