@@ -41,6 +41,38 @@ func (e *sourceDependencyWait) Error() string {
 	return "source projection dependency is not available yet"
 }
 
+// deadEventAccountHint carries the resolved external_account_id alongside a
+// processing error, for the three entity types (usage_event, credit_event,
+// balance_checkpoint) whose store-layer EVENT_DEAD correlation
+// (source_sync.go's MarkSourceEventFailed) can only find the triggering
+// account by joining the claim's payload_hash against an already-persisted
+// domain fact. A repeated failure that never got as far as writing that fact
+// -- every attempt rejected by the same deterministic, non-retryable check --
+// leaves nothing to correlate even though this layer decrypted the payload
+// and already resolved its account. Wrapping the error here, once the
+// account is known, closes that gap without threading a second return value
+// through every ProcessSourceEvent case; RunOnce unwraps it with errors.As
+// only on the path that would otherwise mark the event dead.
+type deadEventAccountHint struct {
+	accountID string
+	err       error
+}
+
+func (e *deadEventAccountHint) Error() string { return e.err.Error() }
+func (e *deadEventAccountHint) Unwrap() error { return e.err }
+
+// wrapWithAccountHint attaches accountID to a non-nil err so RunOnce can pass
+// it to MarkSourceEventFailed if the event ends up dead. A nil err (success)
+// or an empty accountID (not yet resolved) pass through unchanged; wrapping
+// preserves the original error for errors.Is/errors.As (including the
+// existing *sourceDependencyWait check in RunOnce), since Unwrap returns it.
+func wrapWithAccountHint(accountID string, err error) error {
+	if err == nil || accountID == "" {
+		return err
+	}
+	return &deadEventAccountHint{accountID: accountID, err: err}
+}
+
 func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 	if p.Service == nil {
 		return 0, errors.New("source event processor is not configured")
@@ -66,7 +98,13 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 				processed++
 				continue
 			}
-			if err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute)); err != nil {
+			var hint *deadEventAccountHint
+			_ = errors.As(processErr, &hint)
+			hintAccountID := ""
+			if hint != nil {
+				hintAccountID = hint.accountID
+			}
+			if err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute), hintAccountID); err != nil {
 				return processed, fmt.Errorf("mark source event failed: %w", err)
 			}
 			processed++
@@ -445,7 +483,8 @@ func (s *Service) processUsageEvent(ctx context.Context, claim postgresstore.Sou
 	if err := strictJSON(body, &payload); err != nil {
 		return err
 	}
-	if _, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID); err != nil {
+	account, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID)
+	if err != nil {
 		return err
 	}
 	occurredAt, err := time.Parse(time.RFC3339Nano, payload.OccurredAt)
@@ -465,7 +504,7 @@ func (s *Service) processUsageEvent(ctx context.Context, claim postgresstore.Sou
 	if errors.Is(err, domain.ErrSourceUnavailable) {
 		return s.waitForDependency("source_eligibility_cutover", claim.SourceInstanceID, payload.ExternalUserID)
 	}
-	return err
+	return wrapWithAccountHint(account.ID, err)
 }
 
 func (s *Service) processCreditEvent(ctx context.Context, claim postgresstore.SourceEventClaim, body []byte) error {
@@ -476,7 +515,8 @@ func (s *Service) processCreditEvent(ctx context.Context, claim postgresstore.So
 	if err := strictJSON(body, &payload); err != nil {
 		return err
 	}
-	if _, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID); err != nil {
+	account, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID)
+	if err != nil {
 		return err
 	}
 	occurredAt, err := time.Parse(time.RFC3339Nano, payload.OccurredAt)
@@ -496,7 +536,7 @@ func (s *Service) processCreditEvent(ctx context.Context, claim postgresstore.So
 	if errors.Is(err, domain.ErrSourceUnavailable) {
 		return s.waitForDependency("source_eligibility_cutover", claim.SourceInstanceID, payload.ExternalUserID)
 	}
-	return err
+	return wrapWithAccountHint(account.ID, err)
 }
 
 func (s *Service) processBalanceCheckpoint(ctx context.Context, claim postgresstore.SourceEventClaim, body []byte) error {
@@ -517,7 +557,8 @@ func (s *Service) processBalanceCheckpoint(ctx context.Context, claim postgresst
 	if !manifestReady {
 		return s.waitForDependency("source_cutover_manifest", claim.SourceInstanceID, claim.SourceInstanceID)
 	}
-	if _, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID); err != nil {
+	account, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID)
+	if err != nil {
 		return err
 	}
 	asOf, err := time.Parse(time.RFC3339Nano, payload.AsOf)
@@ -542,7 +583,7 @@ func (s *Service) processBalanceCheckpoint(ctx context.Context, claim postgresst
 		CatchupKeyHMAC: claim.CatchupKeyHMAC, BatchID: claim.BatchID, ScanCycleID: claim.ScanCycleID,
 	}, auditActor(ctx, "source_connector", claim.SourceInstanceID, "verified v3 balance checkpoint"))
 	if err != nil {
-		return s.balanceCheckpointDependencyError(err, claim, payload)
+		return wrapWithAccountHint(account.ID, s.balanceCheckpointDependencyError(err, claim, payload))
 	}
 	return s.wakeDependency(ctx, "source_eligibility_cutover", claim.SourceInstanceID, payload.ExternalUserID)
 }

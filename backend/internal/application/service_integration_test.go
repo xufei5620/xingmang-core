@@ -159,6 +159,152 @@ func TestBaselineMemberPrePolicyCheckpointIgnoredWithoutConsumingRetryBudget(t *
 	}
 }
 
+// TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccountHint
+// covers XM-INV-PROOF-CONTENTION requirement 5, the design 2.5 gap the
+// XM-INV-POLICY-ANCHOR handoff left open: MarkSourceEventFailed's EVENT_DEAD
+// correlation (source_sync.go) can only find the triggering account by
+// joining the claim's payload_hash against an already-persisted domain fact
+// (source_usage_events/source_credit_events/balance_reconciliation_checkpoints).
+// A usage fact whose unit_code never matches the source's expected unit is
+// rejected by observeEligibilityFact's domain.ErrConflict check on every
+// attempt, before ever reaching the INSERT that would make it correlatable --
+// yet processUsageEvent already resolved the account (verifiedExternalAccount)
+// before that failure. This proves the resulting dead event is still frozen,
+// using the account the application layer had already resolved, and that
+// this unblocks the stream's scan cycle publish exactly as an
+// already-correlatable dead event would (XM-INV-POLICY-ANCHOR 2.5's
+// completeness query).
+func TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccountHint(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+	sourceID := "10000000-0000-4000-8000-000000000079"
+	userID := "20000000-0000-4000-8000-000000000079"
+	accountID := "30000000-0000-4000-8000-000000000079"
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','dead-event-hint','hint-v3')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+		VALUES($1,'https://id.example','dead-event-hint')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+		VALUES($1,$2,$3,'79',$4,'test','verified')`, accountID, userID, sourceID,
+		"h1:"+strings.Repeat("9", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProvisionSourceStream(ctx, sourceID, "usage",
+		postgresstore.AuditActor{Type: "system", ID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	// tryPublishEconomicScanCyclesTx silently skips publishing forever
+	// without a manifest on file for the source (its own pgx.ErrNoRows
+	// short-circuit) -- needed here so the final assertion (the dead event's
+	// freeze unblocking the cycle) can actually observe a publish.
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO source_cutover_manifests(
+		source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+		baseline_row_count,signing_key_id)
+		VALUES($1,$2,$3,$3,'hint-v3','sub2api-economic-v4',$4,'SUB2_BALANCE_1E8',
+		'p0','u0','c0','b0',$5,$5,1,'hint-key')`, sourceID, strings.Repeat("e", 64),
+		now.Add(-48*time.Hour), strings.Repeat("f", 64), strings.Repeat("1", 64)); err != nil {
+		t.Fatal(err)
+	}
+	causalOrder := "1"
+	payload, err := json.Marshal(usageEventPayload{
+		ExternalUserID: "79", ExternalUsageID: "usage-dead-79", OccurredAt: now.Format(time.RFC3339Nano),
+		ServiceUnits: "10", UnitCode: "WRONG_UNIT_CODE", BillingScope: "wallet",
+		SourceCursor: "usage:1", CausalDomain: "usage_event", CausalOrder: &causalOrder,
+		CutoverManifestHash: strings.Repeat("a", 64), ConfigurationHash: strings.Repeat("b", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadSum := sha256.Sum256(payload)
+	payloadHash := hex.EncodeToString(payloadSum[:])
+	eventID := "79000000-0000-4000-8000-000000000001"
+	batchID := "79000000-0000-4000-8000-000000000002"
+	cycleID := "79000000-0000-4000-8000-000000000003"
+	ciphertext, err := service.keys.Encrypt(payload, ingestEventAAD(sourceID, "usage", eventID, payloadHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CommitSourceBatch(ctx, postgresstore.SourceBatchInput{
+		SchemaVersion: "3.0", SourceInstanceID: sourceID, StreamID: "usage",
+		BatchID: batchID, Sequence: 1, BodyHash: strings.Repeat("d", 64), SigningKeyID: "hint-key",
+		SourceRuntimeVersion: "hint-v3", SourceAgentVersion: "hint-agent", SourceCapturedAt: now,
+		ProjectionStatus: "healthy", StreamWatermarkAt: now, SourceCursor: "usage:1",
+		ScanCeilingAt: now, ScanCeilingCursor: "usage-ceiling:79", ScanCycleID: cycleID,
+		ScanComplete: true,
+		Events: []postgresstore.SourceBatchEvent{{EventID: eventID, EntityType: "usage_event",
+			Operation: "upsert", PayloadHash: payloadHash, PayloadCiphertext: ciphertext, ObservedAt: now}},
+		Actor: postgresstore.AuditActor{Type: "source_connector", ID: sourceID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	processor := SourceEventProcessor{Service: service, BatchSize: 10, Now: func() time.Time { return now.Add(time.Minute) }}
+	processed, err := processor.RunOnce(ctx)
+	if err != nil || processed != 1 {
+		t.Fatalf("first attempt processed=%d err=%v", processed, err)
+	}
+	var status string
+	var attempts int
+	if err = store.Pool().QueryRow(ctx, `SELECT processing_status,attempt_count FROM source_ingest_events
+		WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`,
+		sourceID, eventID).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || attempts != 1 {
+		t.Fatalf("first attempt status=%s attempts=%d, want failed/1 (deterministic unit_code mismatch, not retried out yet)", status, attempts)
+	}
+	// The unit_code mismatch is deterministic -- it never persists a
+	// source_usage_events row on any attempt, so MarkSourceEventFailed's
+	// source_revision_hash correlation alone would never find this account.
+	var usageFacts int
+	if err = store.Pool().QueryRow(ctx, `SELECT count(*) FROM source_usage_events WHERE source_instance_id=$1`,
+		sourceID).Scan(&usageFacts); err != nil || usageFacts != 0 {
+		t.Fatalf("usage fact was persisted despite the unit_code mismatch: count=%d err=%v", usageFacts, err)
+	}
+	// Fast-forward to the 8th attempt without repeating 6 identical RunOnce
+	// cycles: the failure is deterministic, so only the 8th attempt's
+	// transition to 'dead' is interesting to exercise here.
+	if _, err = store.Pool().Exec(ctx, `UPDATE source_ingest_events SET attempt_count=7,next_attempt_at=now()-interval '1 second'
+		WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`, sourceID, eventID); err != nil {
+		t.Fatal(err)
+	}
+	if processed, err = processor.RunOnce(ctx); err != nil || processed != 1 {
+		t.Fatalf("eighth attempt processed=%d err=%v", processed, err)
+	}
+	if err = store.Pool().QueryRow(ctx, `SELECT processing_status,attempt_count FROM source_ingest_events
+		WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`,
+		sourceID, eventID).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "dead" || attempts != 8 {
+		t.Fatalf("eighth attempt status=%s attempts=%d, want dead/8", status, attempts)
+	}
+	var freezeReason, triggerType, triggerID string
+	if err = store.Pool().QueryRow(ctx, `SELECT freeze_reason,trigger_object_type,trigger_object_id
+		FROM eligibility_freezes WHERE external_account_id=$1 AND status='open'`,
+		accountID).Scan(&freezeReason, &triggerType, &triggerID); err != nil {
+		t.Fatalf("no EVENT_DEAD freeze was created for the account the application layer had already resolved: %v", err)
+	}
+	if freezeReason != "EVENT_DEAD" || triggerType != "usage_event" || triggerID != eventID {
+		t.Fatalf("freeze reason=%s type=%s id=%s, want EVENT_DEAD/usage_event/%s", freezeReason, triggerType, triggerID, eventID)
+	}
+	// The dead event now has a matching open freeze, so it must no longer
+	// hold the stream's scan cycle open (tryPublishEconomicScanCyclesTx's
+	// completeness query, XM-INV-POLICY-ANCHOR 2.5).
+	var cycleStatus string
+	if err = store.Pool().QueryRow(ctx, `SELECT cycle_status FROM source_economic_scan_cycles
+		WHERE source_instance_id=$1 AND stream_id='usage' AND scan_cycle_id=$2::uuid`,
+		sourceID, cycleID).Scan(&cycleStatus); err != nil || cycleStatus != "published" {
+		t.Fatalf("cycle did not publish after the dead event was frozen: status=%s err=%v", cycleStatus, err)
+	}
+}
+
 func waitForTestPool(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
