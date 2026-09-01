@@ -40,6 +40,16 @@ type fakeProvisionDeps struct {
 	bind                    func(postgresstore.ExternalAccountRecord) (postgresstore.ExternalAccountRecord, error)
 	getCurrentUserCalls     int
 	getCurrentUser          func(userID string) (application.CurrentUser, error)
+	wakeCalls               int
+	wakeSourceInstanceID    string
+	wakeExternalUserID      string
+}
+
+func (f *fakeProvisionDeps) WakeSourceAccountFacts(_ context.Context, sourceInstanceID, externalUserID string) error {
+	f.wakeCalls++
+	f.wakeSourceInstanceID = sourceInstanceID
+	f.wakeExternalUserID = externalUserID
+	return nil
 }
 
 func (f *fakeProvisionDeps) GetExternalAccountBySourceUser(_ context.Context, sourceInstanceID, externalUserID string) (postgresstore.ExternalAccountRecord, error) {
@@ -207,6 +217,10 @@ func TestProvisionPlatformOrOIDCUserAcceptsMultiPlatformIdentity(t *testing.T) {
 	}
 	if deps.ensureUserCalls != 0 || deps.bindCalls != 0 {
 		t.Fatalf("EnsureUser/BindExternalAccount must not run on the claim path: ensure=%d bind=%d", deps.ensureUserCalls, deps.bindCalls)
+	}
+	if deps.wakeCalls != 1 || deps.wakeSourceInstanceID != "newapi-main" || deps.wakeExternalUserID != "48" {
+		t.Fatalf("claim login must fire the binding wake for its own account: calls=%d source=%q user=%q",
+			deps.wakeCalls, deps.wakeSourceInstanceID, deps.wakeExternalUserID)
 	}
 }
 

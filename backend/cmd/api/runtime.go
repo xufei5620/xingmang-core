@@ -584,6 +584,7 @@ type provisionUserDeps interface {
 	ClaimPlatformIdentity(ctx context.Context, userID, platform, platformUserID string) (storedPlatform, storedPlatformUserID string, err error)
 	EnsureUser(ctx context.Context, identity application.OIDCIdentity) (postgresstore.UserRecord, error)
 	BindExternalAccount(ctx context.Context, record postgresstore.ExternalAccountRecord) (postgresstore.ExternalAccountRecord, error)
+	WakeSourceAccountFacts(ctx context.Context, sourceInstanceID, externalUserID string) error
 }
 
 // provisionPlatformOrOIDCUser resolves the local invoice_user for a verified
@@ -641,6 +642,13 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			// only; per-login platform identity lives on the session row.
 			if _, _, claimErr := deps.ClaimPlatformIdentity(auditCtx, existing.PrincipalID, string(principal.Platform), principal.PlatformUserID); claimErr != nil {
 				return httpapi.SessionUser{}, fmt.Errorf("claim existing platform identity: %w", claimErr)
+			}
+			// The claim path never re-binds, so it must fire the binding wake
+			// itself: an account bound before the wake existed (or whose bind
+			// predates RC56) still has its signed cutover row and usage facts
+			// parked on this dependency, and parked events are never swept.
+			if wakeErr := deps.WakeSourceAccountFacts(auditCtx, sourceInstanceID, principal.PlatformUserID); wakeErr != nil {
+				return httpapi.SessionUser{}, fmt.Errorf("wake parked source facts for claimed binding: %w", wakeErr)
 			}
 			return loadSessionUser(auditCtx, deps, existing.PrincipalID)
 		}

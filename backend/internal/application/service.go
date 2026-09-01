@@ -340,6 +340,18 @@ func (s *Service) BindExternalAccount(ctx context.Context, record postgresstore.
 	return saved, nil
 }
 
+// WakeSourceAccountFacts requeues source facts parked on this external
+// account's binding (dependency kind source_external_account). The
+// projection pipeline and a first-ever password bind fire this wake when
+// they CREATE the binding, but an account bound before the wake existed --
+// or whose login lands on the claim path, which never re-binds -- would
+// otherwise leave its parked cutover/usage facts frozen forever, because
+// parked_identity events are excluded from the periodic sweep by design.
+// Firing it on every claim login is an idempotent single UPDATE.
+func (s *Service) WakeSourceAccountFacts(ctx context.Context, sourceInstanceID, externalUserID string) error {
+	return s.wakeDependency(ctx, "source_external_account", sourceInstanceID, externalUserID)
+}
+
 // ClaimPlatformIdentity backfills a pre-existing invoice_user's platform/
 // platform_user_id columns for a platform-password login that landed on an
 // identity a source-projection pipeline already created and bound (see
