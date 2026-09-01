@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"invoice-system/backend/internal/application"
+	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/postgresstore"
 )
 
@@ -188,6 +190,18 @@ func (receiver *Receiver) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		ScanSnapshotID: batch.ScanSnapshotID, ScanSnapshotRowCount: snapshotRowCount(batch.ScanSnapshotRowCount),
 	})
 	if err != nil {
+		if errors.Is(err, domain.ErrScanCycleBusy) {
+			// Legitimate, temporary: this stream's scan cycle is still processing
+			// (can take up to ~30 minutes). Distinct from SOURCE_BATCH_COMMIT_REJECTED
+			// so operators and the agent's own backoff can tell it apart from a real
+			// commit conflict. Never log batch/record payloads here.
+			slog.Warn("source batch commit deferred: active scan cycle busy",
+				"status", http.StatusServiceUnavailable, "stream_id", batch.StreamID,
+				"batch_id", batch.BatchID, "sequence", batch.Sequence, "error", err)
+			writer.Header().Set("Retry-After", "30")
+			writeReceiverError(writer, http.StatusServiceUnavailable, "SOURCE_SCAN_CYCLE_BUSY")
+			return
+		}
 		status := http.StatusConflict
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusServiceUnavailable
