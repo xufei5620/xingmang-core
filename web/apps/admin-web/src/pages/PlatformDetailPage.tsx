@@ -3,7 +3,6 @@ import { PageHeader, type PlatformTabSpec } from "@xingmang/ui-admin";
 import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router";
-import { platformHasUpstreamRegistry } from "../api/finance";
 import { listServices } from "../api/platform";
 import { platformHasUsers } from "../api/users";
 import { BlueprintTabView, blueprintTabForPlatform } from "../blueprints";
@@ -29,7 +28,6 @@ import { ServerDomainsPanel } from "../components/ServerDomainsPanel";
 import { ServerOverviewPanel } from "../components/ServerOverviewPanel";
 import { ServerServiceNotesPanel } from "../components/ServerServiceNotesPanel";
 import { ServerSuppliersPanel } from "../components/ServerSuppliersPanel";
-import { UpstreamAccountsPanel } from "../components/UpstreamAccountsPanel";
 import {
   findPlatform,
   pendingBadge,
@@ -325,20 +323,16 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
           return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
       }
     case "suppliers":
-      // 上游管理 = XM-0037a 成本登记簿的 UI（交接文档 §9.6）。
-      //
-      // 必须过 platformHasUpstreamRegistry：服务器那一格的 value 也是
-      // `suppliers`，但它是「供应商与采购」（机器与机房）。不判一下就渲染
-      // 成本登记簿，会得到一个看起来完全正常、内容却完全错位的页面。
-      if (platformHasUpstreamRegistry(spec.serviceType)) {
-        return <UpstreamAccountsPanel platform={spec.serviceType} />;
-      }
       // 服务器「供应商与采购」= XM-SERVER0 登记簿（供应商、购买账号联系方式）。
-      // 同样必须在 fallback 之前判：不判就会落到下面的蓝图分支，把已经接好
-      // 的登记簿悄悄换成一屏「—」。
+      // 唯一还会走到这个 value 的平台：Sub2API/NewAPI 的「上游管理」
+      // 2026-09-02 起并入了渠道管理页内区块（`ManagedChannelTable`/`ChannelTable`
+      // 挂载 `UpstreamAccountsPanel`），不再是一个独立页签，`suppliers` 这个
+      // tab 值在它们的页签集合里已经不存在——`?tab=suppliers` 在
+      // `resolvePlatformTab` 里会被 `LEGACY_TAB_ALIASES` 改跳到 `upstream`,
+      // 走不到这条 case（见 router.tsx 的 platformTabLoader）。
       if (spec.serviceType === "server") return <ServerSuppliersPanel />;
-      // 两者都不匹配时**落回蓝图那条路**而不是直接给占位：没在这两条分支里
-      // 认领的平台如果画了蓝图，在这里截胡会把它悄悄下线（`default` 分支才认蓝图）
+      // 不匹配时落回蓝图那条路：没在这条分支里认领的平台如果画了蓝图,
+      // 在这里截胡会把它悄悄下线（`default` 分支才认蓝图）
       return fallbackTabContent(entry, tab);
     case "assets":
       // 服务器专属页签，标签「服务器资产」——其它平台没有这一格，值本身

@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  DataTableV2,
   formatUtcTimestamp,
   PageState,
   StatTile,
@@ -7,6 +8,7 @@ import {
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { useState } from "react";
+import { Link } from "react-router";
 import {
   describeAccessMethod,
   describeCredential,
@@ -21,25 +23,33 @@ import {
 } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
 import { RUNWAY_TONE, runwayReasonText } from "../lib/runway";
-import { coveredCount, describeMissingTotal, sumMoney } from "../lib/upstreamTotals";
+import { coveredCount, describeMissingTotal, oldestActualTimestamp, sumMoney } from "../lib/upstreamTotals";
+import { groupUpstreamAccounts, type UpstreamSupplierGroup } from "../lib/upstreamGrouping";
+import { upstreamDetailPath } from "../pages/ChannelDetailPage";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
 import { RechargeRatioDialog } from "./RechargeRatioDialog";
 import { UpstreamAccountDialog } from "./UpstreamAccountDialog";
 import { UpstreamAccountDetail } from "./UpstreamAccountDetail";
-import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
 
-/** 上游管理(交接文档 §9.6、原型 `V["s2/suppliers"]`)。
+/** 上游管理（原型 `V["s2/suppliers"]`，2026-09-02 起是渠道管理页内区块,
+ *  不再是独立页签——见 `ChannelTable.tsx` 挂载它的那个 `id="upstream-management"`
+ *  区块，以及 ADMIN-IA §8.8）。
  *
- *  **当前行粒度仍是一个上游账号，不是供应商实体**：展开后是它下面的
- *  令牌映射、订阅批次与代理资产。
+ *  ## 行粒度：供应商，不是账号（ADMIN-IA §8.6 #1 的纠正）
  *
- *  数据源是 XM-0037a 建的成本登记簿(`GET /api/v1/finance/upstream-accounts`),
- *  写路径全部走 Action(宪法 2 条)——这一页是登记簿的 UI，不是第二份存储。
+ *  之前这张表一行是一个 `finance.upstream_account`；原型一行是一个上游
+ *  **供应商**，账号/Key 是供应商下面的明细。登记簿今天没有独立的供应商表,
+ *  所以这里在展示层按 `upstream_name`（缺省退回 `base_url` 的 host）把
+ *  账号归并成组——见 `lib/upstreamGrouping.ts`。归并只影响这张表怎么画,
+ *  不改写登记簿本身；同一个供应商下的账号仍然各自是独立的写入单元。
  *
- *  XM-C003 补齐上游名称、联系人、接入分组与 group_rate 的登记簿往返；
- *  KEY 数、余额与 runway 按同源账号 ID 接上 summary。未接入分组发现与订阅
- *  有效期仍没有聚合端点，继续明确显示未接入。 */
+ *  展开一个供应商组，看到的是它名下每个账号——原来那张表的列、单元格与
+ *  写操作（改上游账号、改倍率、令牌映射、订阅批次）原样搬进这一层，
+ *  不重新实现一遍。
+ *
+ *  数据源仍是 XM-0037a 的成本登记簿(`GET /api/v1/finance/upstream-accounts`),
+ *  写路径全部走 Action（宪法 2 条）——这一页是登记簿的 UI，不是第二份存储。 */
 export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistryPlatform }) {
   const queryClient = useQueryClient();
   const [result, setResult] = useState<ActionResult | null>(null);
@@ -48,27 +58,21 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
     queryKey: [UPSTREAM_ACCOUNTS_QUERY],
     queryFn: ({ signal }) => listUpstreamAccounts({ signal }),
   });
-
-  // 本期的钱来自 XM-0037d 的上游汇总。**这一侧可以直接 join**：两个端点的
-  // 行 id 都是 finance.upstream_account 的主键（与渠道表的情形正好相反,
-  // 那边一行是被管平台自己的渠道，对不上，见 lib/channelEconomics）。
-  //
-  // 单独一个 query 而不是并进上面那个：登记簿读不到时表还能画（结构是它自己的),
-  // 汇总读不到时只是钱那几格显示不出来——两者的失败不该互相拖累
   const summaryQuery = useQuery({
     queryKey: [UPSTREAM_SUMMARY_QUERY],
     queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
   });
 
   // 登记簿是**跨平台**的一张表，这一页只看归属本平台的那些。
-  // platform_id 为空 = 未配对——它们同样要显示出来（§12 惯例：未接入不许隐藏）,
-  // 否则一个漏配 platform_id 的账号会从两个平台的页面上同时消失
+  // platform_id 为空 = 未配对——它们同样要显示出来（§12 惯例：未接入不许隐藏）
   const all = query.data ?? [];
   const rows = all.filter((a) => a.platform_id === platform || a.platform_id === "");
   const unpaired = rows.filter((a) => a.platform_id === "").length;
 
   const summaries = new Map<string, UpstreamSummary>();
   for (const s of summaryQuery.data?.items ?? []) summaries.set(s.id, s);
+  const groups = groupUpstreamAccounts(rows, summaries);
+
   const mine = rows.map((a) => summaries.get(a.id));
   const costs = mine.map((s) => s?.supplyCost ?? null);
   const profits = mine.map((s) => s?.grossProfit ?? null);
@@ -76,21 +80,11 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
   const profitTotal = sumMoney(profits);
   const costCovered = coveredCount(costs);
   const profitCovered = coveredCount(profits);
-  const subscriptionCount = rows.filter((a) => a.access_method === "subscription_account").length;
-  const keyCount = rows.reduce((total, account) => {
-    if (account.access_method === "subscription_account") return total;
-    return total + (summaries.get(account.id)?.tokenCount ?? 0);
-  }, 0);
-  const countCovered = rows.filter(
-    (account) => account.access_method === "subscription_account" || summaries.has(account.id),
-  ).length;
   const summaryState: SummaryLoadState = summaryQuery.isPending
     ? "pending"
     : summaryQuery.error
       ? "failed"
       : "ready";
-  // 两张卡各自只让**参与自己合计的行**提供证据。毛利依赖成本和收入两侧，
-  // 所以还要在参与毛利的行里取两侧实际时刻的最旧值。
   const costObservedAt = oldestCostObserved(mine);
   const profitObservedAt = oldestProfitObserved(mine);
   const costObservationIncomplete = mine.some(
@@ -103,8 +97,7 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
         !isValidTimestamp(summary?.observed.revenueObservedAt)),
   );
 
-  // 写完不做乐观更新，重新查一次：这一页是登记簿的 UI，页面上的数必须是库里的数。
-  // 令牌映射内嵌在账号行里，所以改映射同样要刷这一个 key
+  // 写完不做乐观更新，重新查一次：这一页是登记簿的 UI，页面上的数必须是库里的数
   const afterWrite = (written: ActionResult) => {
     setResult(written);
     void queryClient.invalidateQueries({ queryKey: [UPSTREAM_ACCOUNTS_QUERY] });
@@ -114,8 +107,8 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
     <section className="flex flex-col gap-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="max-w-3xl text-xs text-fg-muted">
-          由平台手工登记不同上游，维护网址、凭据状态、接入平台与倍率，并汇总该上游下所有账号/渠道的整体利润。
-          当前仍一行对应一个上游账号；凭据只显示状态，平台永不持有明文。
+          由平台手工登记不同上游，维护网址、凭据状态、接入平台与联系人，并汇总该上游下所有账号/渠道的整体利润。
+          同名（或同域名）的账号在这张表上按供应商归并展示；凭据只显示状态，平台永不持有明文。
         </p>
         <UpstreamAccountDialog
           platform={platform}
@@ -125,45 +118,25 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
 
       {result ? <ActionResultNote result={result} onDismiss={() => setResult(null)} /> : null}
 
-      <ApiStateView
-        isPending={query.isPending}
-        error={query.error}
-        onRetry={() => void query.refetch()}
-      >
+      <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
         <div className="flex flex-col gap-3">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
-              label="上游账号"
-              value={String(rows.length)}
-              note={unpaired > 0 ? `其中 ${unpaired} 个未配对平台` : "已登记并归属本平台"}
+              label="上游实例"
+              value={String(groups.length)}
+              note={
+                groups.length === rows.length
+                  ? `共 ${rows.length} 个账号，逐个成组`
+                  : `归并自 ${rows.length} 个账号${unpaired > 0 ? `，其中 ${unpaired} 个未配对` : ""}`
+              }
             />
             <StatTile
-              label="KEY / 订阅账号"
-              value={
-                summaryState === "failed"
-                  ? `— / ${subscriptionCount}`
-                  : summaryState === "pending"
-                    ? `… / ${subscriptionCount}`
-                    : `${keyCount} / ${subscriptionCount}`
-              }
-              unavailable={summaryState === "failed"}
-              note={
-                summaryState === "failed"
-                  ? "KEY 数汇总读取失败；订阅账号数来自登记簿"
-                  : summaryState === "pending"
-                    ? "正在读取 KEY 数；订阅账号数来自登记簿"
-                    : countCovered < rows.length
-                      ? `只覆盖 ${rows.length} 个账号中的 ${countCovered} 个`
-                      : "KEY 数来自上游汇总；订阅账号数来自登记簿"
-              }
-              {...(countCovered < rows.length && summaryState === "ready"
-                ? { status: <Badge tone="warning">覆盖不全</Badge> }
-                : {})}
+              label="接入账号 / 渠道"
+              value={String(rows.length)}
+              note="已登记并归属本平台（或未配对）的账号数；平台侧实际渠道数以「渠道管理」表为准"
             />
-            {/* 合计不出来时显示「—」而不是 ¥0.00：
-                「这个窗口还没有可用的汇总数」与「这期没花钱」是两件事 */}
             <MoneyTile
-              label="本期我方消耗"
+              label="本期我方计费消耗"
               total={costTotal}
               covered={costCovered}
               rowCount={rows.length}
@@ -188,24 +161,26 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
 
           <ScopeNote />
 
-          <PersistentDataTable
-            tableKey={platformSavedViewTableKey(platform, "upstreams")}
-            caption="上游账号登记簿：上游资料、接入分组、KEY 或账号、余额证据与经营汇总"
-            columns={upstreamColumns(afterWrite, summaries, summaryState)}
-            rows={rows}
-            rowKey={(a) => a.id}
+          <DataTableV2
+            caption="上游供应商：网址、接入平台、账号/凭据、总余额与本期整体利润，展开看逐账号明细"
+            columns={supplierColumns()}
+            rows={groups}
+            rowKey={(g) => g.key}
             searchable
-            pageSize={20}
-            filters={[
-              { columnId: "access", label: "接入方式", options: ["上游中转", "官方 API", "订阅账号"] },
-              { columnId: "status", label: "状态", options: ["active", "disabled"] },
-            ]}
-            renderExpanded={(account) => <UpstreamAccountDetail account={account} onDone={afterWrite} />}
+            defaultDensity="compact"
+            renderExpanded={(group) => (
+              <SupplierAccountsTable
+                group={group}
+                summaries={summaries}
+                summaryState={summaryState}
+                onDone={afterWrite}
+              />
+            )}
             emptyState={
               <PageState
                 kind="empty"
                 title="还没有登记任何上游账号"
-                description={`用右上角的「登记上游账号」登记第一个。需要 ${FINANCE_READ_PERMISSION} 才能看到这张表。`}
+                description={`用右上角的「＋ 添加上游」登记第一个。需要 ${FINANCE_READ_PERMISSION} 才能看到这张表。`}
               />
             }
           />
@@ -215,21 +190,303 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
   );
 }
 
+/** 供应商组表的列。原型 12 列 `上游名称 / 网址 | 接入平台 | 上游账号 / 凭据 |
+ *  Key / 账号 | 接入分组 | 总余额 / 有效期 | 充值成本率 | 本期我方消耗 |
+ *  本期总利润 | 联系人 | 状态 | 详情`——逐格对齐，内容按我们真有的字段填,
+ *  给不出的（比如原型那种"全部分组 / 已接入分组"目录，我们只有账号自带
+ *  的分组名，没有供应商级分组目录）显式说明缺什么，不编数字。 */
+function supplierColumns(): DataTableColumn<UpstreamSupplierGroup>[] {
+  return [
+    {
+      id: "supplier",
+      header: "上游名称 / 网址",
+      primary: true,
+      value: (g) => `${g.name} ${g.baseUrls.join(" ")}`,
+      cell: (g) => (
+        <div className="min-w-40">
+          <span className="font-medium">{g.name}</span>
+          <p className="font-mono text-xs break-all text-fg-muted">
+            {g.baseUrls[0] ?? "网址未接入"}
+            {g.baseUrls.length > 1 ? ` 等 ${g.baseUrls.length} 个网址` : ""}
+          </p>
+          {g.groupedBy !== "name" ? (
+            <p className="text-xs text-fg-muted" title="这个供应商没有登记 upstream_name，按网址域名归并">
+              {g.groupedBy === "host" ? "按网址归并" : "未登记名称，独立成组"}
+            </p>
+          ) : null}
+        </div>
+      ),
+      headerTitle: "供应商归并键：优先用登记的上游名称，没有名称退回网址 host（展示层归并，不是独立的供应商实体）",
+    },
+    {
+      id: "platforms",
+      header: "接入平台",
+      value: (g) => g.platforms.join(" "),
+      cell: (g) => (
+        <div>
+          {g.platforms.length > 0 ? (
+            g.platforms.map((p) => (
+              <Badge key={p} tone="neutral" className="mr-1">
+                {p}
+              </Badge>
+            ))
+          ) : (
+            <span className="text-xs text-fg-muted">—</span>
+          )}
+          {g.unpairedCount > 0 ? (
+            <p className="mt-1 text-xs text-warning" title="这些账号没有配 platform_id，成本归不到任何平台">
+              {g.unpairedCount} 个未配对
+            </p>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      id: "credential",
+      header: "上游账号 / 凭据",
+      value: (g) => g.configuredCredentialCount,
+      cell: (g) => (
+        <span className="text-xs">
+          {g.accounts.length} 个账号
+          <span className="block text-fg-muted">
+            {g.configuredCredentialCount}/{g.accounts.length} 已配置凭据
+          </span>
+        </span>
+      ),
+      headerTitle: "凭据只显示状态；完整密钥永不进入页面响应",
+    },
+    {
+      id: "keyCount",
+      header: "Key / 账号",
+      value: (g) => g.keyAccountCount,
+      cell: (g) => (
+        <span className="text-xs tabular-nums">
+          {g.keyAccountCount} Key · {g.subscriptionAccountCount} 账号
+          {g.officialAccountCount > 0 ? ` · 官方直连 ${g.officialAccountCount}` : ""}
+          {g.otherAccountCount > 0 ? ` · 未知 ${g.otherAccountCount}` : ""}
+        </span>
+      ),
+    },
+    {
+      id: "groups",
+      header: "接入分组",
+      value: (g) => g.groupNames.join(" "),
+      cell: (g) =>
+        g.groupNames.length > 0 ? (
+          <span className="text-xs">{g.groupNames.join("、")}</span>
+        ) : (
+          <span className="text-xs text-fg-muted" title="供应商级分组目录尚未接入（ADMIN-IA §8.6 #1）：这里只出账号自带的分组名">
+            未接入
+          </span>
+        ),
+    },
+    {
+      id: "balance",
+      header: "总余额 / 有效期",
+      value: (g) => moneyValue(g.balanceTotal),
+      cell: (g) => <SupplierBalanceCell group={g} />,
+      headerTitle: "组内账号余额合计；币种或标度不一致时不给合计",
+    },
+    {
+      id: "ratio",
+      header: "充值成本率",
+      cell: (g) => <SupplierRateCell group={g} />,
+    },
+    {
+      id: "cost",
+      header: "本期我方消耗",
+      numeric: true,
+      value: (g) => moneyValue(g.costTotal),
+      cell: (g) => <SupplierMoneyValueCell total={g.costTotal} covered={g.costCovered} rowCount={g.accounts.length} />,
+    },
+    {
+      id: "profit",
+      header: "本期总利润",
+      numeric: true,
+      value: (g) => moneyValue(g.profitTotal),
+      cell: (g) => <SupplierMoneyValueCell total={g.profitTotal} covered={g.profitCovered} rowCount={g.accounts.length} />,
+    },
+    {
+      id: "contact",
+      header: "联系人",
+      value: (g) => g.contacts.join(" "),
+      cell: (g) =>
+        g.contacts.length > 0 ? (
+          <span className="text-xs">
+            {g.contacts[0]}
+            {g.contacts.length > 1 ? ` 等 ${g.contacts.length} 人` : ""}
+          </span>
+        ) : (
+          <Badge tone="neutral">未接入</Badge>
+        ),
+    },
+    {
+      id: "status",
+      header: "状态",
+      value: (g) => supplierStatusText(g),
+      cell: (g) => <SupplierStatusCell group={g} />,
+    },
+    {
+      id: "detail",
+      header: "详情",
+      cell: (g) => {
+        const primary = g.accounts[0];
+        if (!primary) return <span className="text-xs text-fg-muted">—</span>;
+        return (
+          <Link
+            to={upstreamDetailPath(primary.platform_id || "", primary.id)}
+            className="text-xs underline underline-offset-2"
+            title={g.accounts.length > 1 ? "打开该供应商下第一个账号的详情" : "打开这个账号的详情"}
+          >
+            详情
+          </Link>
+        );
+      },
+      headerTitle: "打开供应商下第一个账号的既有详情页；供应商级汇总详情页是后续切片的工作（ADMIN-IA §8.6 #1）",
+    },
+  ];
+}
+
+function supplierStatusText(g: UpstreamSupplierGroup): string {
+  if (g.disabledCount === g.accounts.length) return "已停用";
+  if (g.disabledCount > 0 || g.attentionCount > 0) return "需关注";
+  if (g.uncoveredSummaryCount === g.accounts.length) return "未知";
+  return "健康";
+}
+
+function SupplierStatusCell({ group }: { group: UpstreamSupplierGroup }) {
+  const text = supplierStatusText(group);
+  if (text === "已停用") {
+    return <Badge tone="neutral">已停用</Badge>;
+  }
+  if (text === "需关注") {
+    return (
+      <Badge
+        tone="warning"
+        title={`${group.disabledCount > 0 ? `${group.disabledCount} 个账号已停用` : ""}${
+          group.attentionCount > 0 ? ` ${group.attentionCount} 个账号可用天数进入告警档` : ""
+        }`}
+      >
+        需关注
+      </Badge>
+    );
+  }
+  if (text === "未知") {
+    return (
+      <Badge tone="neutral" title="上游汇总还没有覆盖这个供应商下的任何账号">
+        未知
+      </Badge>
+    );
+  }
+  return <Badge tone="success">健康</Badge>;
+}
+
+function SupplierRateCell({ group }: { group: UpstreamSupplierGroup }) {
+  const spread = group.rechargeRate;
+  if (spread.kind === "none") {
+    return (
+      <span className="text-xs text-fg-muted" title="这个供应商下没有计量型账号（订阅型不适用充值成本率）">
+        不适用
+      </span>
+    );
+  }
+  if (spread.kind === "single") {
+    const code = (spread.currency || "").toUpperCase();
+    const amount = code === "CNY" ? `¥${spread.rate}` : `${code || "?"} ${spread.rate}`;
+    return <span className="text-xs tabular-nums">{amount} / 额度</span>;
+  }
+  return (
+    <span className="text-xs text-fg-muted" title={spread.distinct.join("、")}>
+      {spread.distinct.length} 种费率，见展开
+    </span>
+  );
+}
+
+function SupplierBalanceCell({ group }: { group: UpstreamSupplierGroup }) {
+  if (group.balanceTotal.kind !== "ok") {
+    return (
+      <span className="text-xs text-fg-muted" title={describeMissingTotal(group.balanceTotal.kind)}>
+        —
+      </span>
+    );
+  }
+  return (
+    <div className="text-xs">
+      <span className="font-medium tabular-nums">
+        {formatScaledMinorUnits(group.balanceTotal.total.toString(), group.balanceTotal.currency, group.balanceTotal.scale)}
+      </span>
+      {group.balanceCovered < group.accounts.length ? (
+        <Badge tone="warning" className="ml-1">
+          覆盖不全
+        </Badge>
+      ) : null}
+      <p className="text-fg-muted">
+        {group.oldestBalanceObservedAt ? `余额观测于 ${formatUtcTimestamp(group.oldestBalanceObservedAt)}` : "余额观测时间未接入"}
+      </p>
+    </div>
+  );
+}
+
+function SupplierMoneyValueCell({
+  total,
+  covered,
+  rowCount,
+}: {
+  total: ReturnType<typeof sumMoney>;
+  covered: number;
+  rowCount: number;
+}) {
+  if (total.kind !== "ok") {
+    return (
+      <span className="text-xs text-fg-muted" title={describeMissingTotal(total.kind)}>
+        未接入
+      </span>
+    );
+  }
+  return (
+    <span className="text-xs tabular-nums">
+      {formatScaledMinorUnits(total.total.toString(), total.currency, total.scale)}
+      {covered < rowCount ? (
+        <span className="block text-fg-muted">覆盖 {covered}/{rowCount}</span>
+      ) : null}
+    </span>
+  );
+}
+
+function moneyValue(total: ReturnType<typeof sumMoney>): bigint | null {
+  return total.kind === "ok" ? total.total : null;
+}
+
+/** 展开一个供应商组：逐账号的既有登记簿表（列、写操作与展开区跟今天完全
+ *  一样，只是现在嵌在供应商这一层下面）。 */
+function SupplierAccountsTable({
+  group,
+  summaries,
+  summaryState,
+  onDone,
+}: {
+  group: UpstreamSupplierGroup;
+  summaries: Map<string, UpstreamSummary>;
+  summaryState: SummaryLoadState;
+  onDone: (result: ActionResult) => void;
+}) {
+  return (
+    <DataTableV2
+      caption={`${group.name} 名下的上游账号：登记资料、KEY/账号、余额与经营汇总`}
+      columns={upstreamColumns(onDone, summaries, summaryState)}
+      rows={group.accounts}
+      rowKey={(a) => a.id}
+      defaultDensity="compact"
+      renderExpanded={(account) => <UpstreamAccountDetail account={account} onDone={onDone} />}
+      emptyState={<PageState kind="empty" compact title="这个供应商下没有账号" />}
+    />
+  );
+}
+
 /** 按真实 instant 取最旧时间，并保留原始 RFC3339 作为页面证据。
  *
  *  不能直接比较字符串：`01:00-07:00` 实际比 `08:30+02:00` 更新，
  *  但词典序恰好相反。解析不出的时间不替任何金额背书。 */
-function oldestActualTimestamp(timestamps: readonly (string | null)[]): string | null {
-  let oldest: { raw: string; instant: number } | null = null;
-  for (const raw of timestamps) {
-    if (!raw) continue;
-    const instant = Date.parse(raw);
-    if (!Number.isFinite(instant)) continue;
-    if (oldest === null || instant < oldest.instant) oldest = { raw, instant };
-  }
-  return oldest?.raw ?? null;
-}
-
 function isValidTimestamp(raw: string | null | undefined): boolean {
   return Boolean(raw) && Number.isFinite(Date.parse(raw ?? ""));
 }
@@ -245,7 +502,6 @@ function oldestCostObserved(summaries: readonly (UpstreamSummary | undefined)[])
 function oldestProfitObserved(summaries: readonly (UpstreamSummary | undefined)[]): string | null {
   const timestamps: (string | null)[] = [];
   for (const s of summaries) {
-    // 这一行没进毛利合计，就不能拿自己的时间替那笔部分和背书。
     if (!s?.grossProfit) continue;
     timestamps.push(s.observed.costObservedAt, s.observed.revenueObservedAt);
   }
@@ -278,7 +534,6 @@ function MoneyTile({
     return <StatTile label={label} value="…" unavailable note="正在读取上游汇总" />;
   }
   if (failed) {
-    // 读失败与「没有数据」分开说：前者要重试或报障，后者要去看采集
     return (
       <StatTile
         label={label}
@@ -322,15 +577,17 @@ function MoneyTile({
 function ScopeNote() {
   return (
     <p className="rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs text-fg-muted">
-      当前一行仍是一个上游账号，名称、联系人和已接入分组来自登记簿；KEY 数、余额与可用天数按账号
-      ID 对应上游汇总。未接入分组发现需要后续供应商/分组实体，订阅有效期也尚未进入汇总，
-      两者都不会用样例值代替。
+      供应商归并按上游名称（缺省退回网址域名）在展示层完成，登记簿本身仍以账号为写入单元；
+      展开一个供应商能看到它名下每个账号的登记资料、KEY 数、余额与经营汇总。未接入分组目录、
+      供应商级凭据与订阅有效期仍未进入这套汇总，两者都不会用样例值代替。
     </p>
   );
 }
 
 type SummaryLoadState = "pending" | "failed" | "ready";
 
+/** 单个上游账号的列——从原来的旗舰版原样保留（供应商归并只改了外面那层怎么
+ *  分组，账号自己的字段、写操作与展开内容一个都没变）。 */
 function upstreamColumns(
   onDone: (result: ActionResult) => void,
   summaries: Map<string, UpstreamSummary>,
@@ -383,7 +640,7 @@ function upstreamColumns(
     {
       id: "runway",
       header: "总余额 / 可用期",
-      value: (a) => moneyValue(summaries.get(a.id)?.runway.balance),
+      value: (a) => accountMoneyValue(summaries.get(a.id)?.runway.balance),
       cell: (a) => (
         <BalanceRunwayCell account={a} summary={summaries.get(a.id)} state={summaryState} />
       ),
@@ -405,8 +662,6 @@ function upstreamColumns(
     {
       id: "ratio",
       header: "充值成本率",
-      // 排序用**投影值**而不是倍率本身：界面显示的是成本率，按倍率排会得到
-      // 一个和眼睛看到的相反的顺序（倍率越大成本率越小）
       value: (a) => (a.recharge_cost_rate ? Number(a.recharge_cost_rate) : null),
       cell: (a) => <RatioCell account={a} />,
     },
@@ -418,7 +673,6 @@ function upstreamColumns(
         a.platform_id ? (
           <span className="text-xs">{a.platform_id}</span>
         ) : (
-          // 未配对不许隐藏：台账的「未归属」那一桶，对应的就是这一列为空的账号
           <Badge tone="warning" title="没有配 platform_id，这个账号的成本归不到任何平台">
             未配对
           </Badge>
@@ -460,9 +714,7 @@ function upstreamColumns(
       id: "margin",
       header: "本期消耗 / 毛利",
       numeric: true,
-      // 能力必须从首屏起就是静态可排序；汇总尚未返回时 value=null，不能把
-      // SavedView 里的 margin 排序误判成“列已移除”并永久清空。
-      value: (a: UpstreamAccountItem) => moneyValue(summaries.get(a.id)?.supplyCost),
+      value: (a: UpstreamAccountItem) => accountMoneyValue(summaries.get(a.id)?.supplyCost),
       cell: (a) => <PeriodCell summary={summaries.get(a.id)} state={summaryState} />,
       headerTitle: "本期供给成本 / 毛利，来自 XM-0037d 的上游汇总端点",
     },
@@ -486,9 +738,7 @@ function upstreamColumns(
   ];
 }
 
-/** 排序值取最小单位整数。用 bigint：成本线是 scale-6 微单位，
- *  一笔上万元的成本就已经是十位数，几笔加起来很快越过 2^53。 */
-function moneyValue(money: { amountMinor: string } | null | undefined): bigint | null {
+function accountMoneyValue(money: { amountMinor: string } | null | undefined): bigint | null {
   if (!money || !/^-?\d+$/.test(money.amountMinor)) return null;
   return BigInt(money.amountMinor);
 }
@@ -627,15 +877,10 @@ function PeriodCell({
   );
 }
 
-/** 充值成本率单元格。
+/** 充值成本率单元格（账号级）。
  *
- *  **三个分支，不是两个**。`metered` 是布尔，而成本口径有三套（§2.0）：
- *  计量型按实扣 ÷ 倍率、订阅型按批次摊销、官方 API 的 v1 口径待定。
- *  照着 `metered` 二分会让官方 API 显示成「订阅摊销」——那是在告诉运营
- *  「这条的成本从订阅批次摊出来」，而它根本没有批次。
- *
- *  这也正是「让后端算好 metered、前端不再按 access_method 判一次」的边界：
- *  **要不要按倍率算**问后端（metered），**这一格该说什么**看 access_method。 */
+ *  三个分支，不是两个。`metered` 是布尔，而成本口径有三套（§2.0）：
+ *  计量型按实扣 ÷ 倍率、订阅型按批次摊销、官方 API 的 v1 口径待定。 */
 function RatioCell({ account }: { account: UpstreamAccountItem }) {
   if (account.metered) {
     if (!account.recharge_cost_rate) {
@@ -664,7 +909,6 @@ function RatioCell({ account }: { account: UpstreamAccountItem }) {
     );
   }
 
-  // 官方 API（或将来新增的非计量口径）：倍率可填可不填，填了就照实显示
   if (account.recharge_cost_rate) {
     return (
       <span

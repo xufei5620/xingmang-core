@@ -57,7 +57,7 @@ async function openDialog(props: { account?: UpstreamAccountItem } = {}) {
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  fireEvent.click(screen.getByRole("button", { name: props.account ? "修改" : "登记上游账号" }));
+  fireEvent.click(screen.getByRole("button", { name: props.account ? "修改" : "＋ 添加上游" }));
   return within(await screen.findByRole("dialog"));
 }
 
