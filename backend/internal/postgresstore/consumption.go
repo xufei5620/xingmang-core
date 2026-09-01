@@ -17,6 +17,45 @@ import (
 
 const defaultEligibilityFinalizationDelay = 15 * time.Minute
 
+// XM-INV-PROOF-CONTENTION 1: BALANCE_PROOF_PENDING retry schedule.
+//
+// ProcessEligibilityProjectionJobs's BALANCE_PROOF_PENDING requeue backs off
+// exponentially per attempt (the job's own attempt_count, already
+// incremented by the claim step above it): 30s, 60s, 120s, 240s, 480s, then
+// capped at balanceProofPendingBackoffCapSeconds (10 minutes) from the 6th
+// attempt on. Before this, every attempt retried at a flat 30s regardless of
+// how many times it had already found the proof unprovable -- on the
+// production account that motivated this slice, that meant 500+ retries
+// each re-running the (now also fixed, see ensureBalanceCarryForwardProofTx)
+// per-visibility proof loop under the per-account advisory lock every 30s
+// for hours.
+//
+// A newly observed fact for the account (the two ON CONFLICT(external_account_id)
+// DO UPDATE requeue upserts, in finalizeSourceAccountsTx and
+// ObserveBalanceCheckpoint) still may mean the proof has become provable
+// sooner than the backoff schedule would otherwise retry it -- a new
+// balances cycle publishing is exactly the kind of fact that can unblock a
+// pending proof. But unconditionally resetting next_attempt_at=now() on
+// every such upsert (the pre-existing behavior) is what let the retry
+// cadence collapse back to sub-second in practice: every fact for a
+// contended account -- including ones unrelated to the proof itself, since
+// facts keep streaming in while the proof stays pending -- re-armed the job
+// immediately, defeating the backoff entirely and re-creating the same lock
+// contention the backoff exists to bound. The requeue upserts below instead
+// pull a deep backoff forward to "now" only when the job is currently
+// BALANCE_PROOF_PENDING *and* still more than balanceProofPendingRequeueResetWindow
+// away from its next attempt; once pulled forward, the job's own next
+// failure re-derives next_attempt_at from its (unchanged, honestly
+// incrementing) attempt_count, so a burst of facts within that window cannot
+// keep re-arming it faster than once per window. A job that is not
+// currently in a BALANCE_PROOF_PENDING backoff (queued for an unrelated
+// reason, mid-lease, or freshly failed) is unaffected -- it keeps the
+// pre-existing immediate-requeue behavior.
+const (
+	balanceProofPendingBackoffCapSeconds = 600
+	balanceProofPendingRequeueResetWindow = 5 * time.Minute
+)
+
 var (
 	serviceUnitsPattern                = regexp.MustCompile(`^(0|[1-9][0-9]{0,77})$`)
 	unitCodePattern                    = regexp.MustCompile(`^[A-Z0-9_:-]{1,32}$`)
@@ -402,8 +441,16 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 		SELECT external_account_id,requested_through,'queued',now() FROM changed
 		ON CONFLICT(external_account_id) DO UPDATE SET
 			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
-			status='queued',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now(),updated_at=now()`,
-		sourceID, minWatermark)
+			status='queued',lease_token=NULL,lease_expires_at=NULL,
+			next_attempt_at=CASE
+				WHEN eligibility_projection_jobs.status='queued'
+					AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
+					AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
+				THEN eligibility_projection_jobs.next_attempt_at
+				ELSE now()
+			END,
+			updated_at=now()`,
+		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds())
 	if err != nil {
 		return err
 	}
@@ -1127,8 +1174,16 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			VALUES($1,$2,'queued',now())
 			ON CONFLICT(external_account_id) DO UPDATE SET
 				requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
-				status='queued',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now(),updated_at=now()`,
-			accountID, account.FinalizedThrough)
+				status='queued',lease_token=NULL,lease_expires_at=NULL,
+				next_attempt_at=CASE
+					WHEN eligibility_projection_jobs.status='queued'
+						AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
+						AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
+					THEN eligibility_projection_jobs.next_attempt_at
+					ELSE now()
+				END,
+				updated_at=now()`,
+			accountID, account.FinalizedThrough, balanceProofPendingRequeueResetWindow.Seconds())
 		if err != nil {
 			return err
 		}
@@ -2083,11 +2138,18 @@ func (s *Store) ProcessEligibilityProjectionJobs(ctx context.Context, limit int,
 	for _, accountID := range ids {
 		if processErr := s.processEligibilityProjectionJob(ctx, accountID, lease, actor); processErr != nil {
 			if errors.Is(processErr, errBalanceCarryForwardProofPending) {
-				_, markErr := s.pool.Exec(ctx, `
+				// Exponential backoff keyed off the job's own attempt_count
+				// (already incremented by the claim step's UPDATE above):
+				// 30s,60s,120s,240s,480s, capped at balanceProofPendingBackoffCapSeconds
+				// from the 6th attempt on. See the doc comment on that
+				// constant for the full rationale.
+				_, markErr := s.pool.Exec(ctx, fmt.Sprintf(`
 					UPDATE eligibility_projection_jobs SET status='queued',lease_token=NULL,lease_expires_at=NULL,
 						last_error_code='BALANCE_PROOF_PENDING',
-						next_attempt_at=$3::timestamptz+interval '30 seconds',updated_at=$3::timestamptz
-					WHERE external_account_id=$1 AND lease_token=$2`, accountID, lease, now.UTC())
+						next_attempt_at=$3::timestamptz+(LEAST(%d,30*power(2,LEAST(attempt_count,11)-1)))::int*interval '1 second',
+						updated_at=$3::timestamptz
+					WHERE external_account_id=$1 AND lease_token=$2`, balanceProofPendingBackoffCapSeconds),
+					accountID, lease, now.UTC())
 				if markErr != nil {
 					return processed, markErr
 				}
