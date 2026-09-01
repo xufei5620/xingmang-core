@@ -31,6 +31,12 @@ export interface RuntimeConfigInput {
   oidcScopes?: string;
   /** 显式查询环境；省略＝不传 environment 参数（理由见 api/config.ts）。 */
   environment?: string;
+  /** 开票控制台嵌入来源（CR-0005 平台线 i），例 "https://invoice.solov.cc"。
+   *  静态直传模式（同 reqlog/CPA 先例）：没有 authMode 那种多字段联动校验,
+   *  只有一条形状要求——必须是不带路径/查询/片段的 https 来源。省略或形状
+   *  不对都不弹窗、不拦渲染，三处开票页签按未配置处理（PageState
+   *  kind="unavailable"），问题写进 `problems` 供登录页/设置页如实展示。 */
+  invoiceConsoleOrigin?: string;
 }
 
 export interface RuntimeConfig {
@@ -39,6 +45,9 @@ export interface RuntimeConfig {
   oidcClientId: string;
   oidcScopes: string;
   environment: string | undefined;
+  /** 开票控制台嵌入来源，已归一化（无末尾斜杠）。未配置或形状不对时是
+   *  undefined——调用方据此判断要不要渲染 iframe，不必再自己校验一遍。 */
+  invoiceConsoleOrigin: string | undefined;
   /** authMode 这个决定性字段来自哪一层，登录页用来如实说明。 */
   source: "app-config" | "vite-env" | "default";
   /** 解析时发现的问题（原样给人看，不做安全判定）。 */
@@ -73,6 +82,36 @@ function parseAuthMode(raw: unknown): AuthMode | undefined {
   const value = nonEmptyString(raw);
   if (value === "oidc" || value === "dev-header" || value === "local") return value;
   return undefined;
+}
+
+/** 校验 `invoiceConsoleOrigin`：必须是不带路径 / 查询 / 片段的 https 来源。
+ *  没配（`undefined`）不算问题——三处开票页签本来就允许「还没接」；配了但
+ *  形状不对才记问题，且**仍然**当作没配处理（fail closed：宁可显示未接入,
+ *  也不能把一个连不上的地址塞进 iframe src 让人对着白屏发呆）。 */
+function parseInvoiceConsoleOrigin(raw: unknown): { value: string | undefined; problem?: string } {
+  const text = nonEmptyString(raw);
+  if (text === undefined) return { value: undefined };
+
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return {
+      value: undefined,
+      problem: `app-config.js 的 invoiceConsoleOrigin 不是合法的 URL（当前：${text}），已按未配置处理`,
+    };
+  }
+
+  const isBareOrigin = url.pathname === "/" || url.pathname === "";
+  if (url.protocol !== "https:" || !isBareOrigin || url.search !== "" || url.hash !== "") {
+    return {
+      value: undefined,
+      problem: `app-config.js 的 invoiceConsoleOrigin 必须是不带路径/查询的 https 来源（当前：${text}），已按未配置处理`,
+    };
+  }
+
+  // url.origin 是浏览器归一化后的结果，天然不带末尾斜杠，与 oidcIssuer 的处理口径一致
+  return { value: url.origin };
 }
 
 /** 纯函数：把 `window.__XM_CONFIG__` 的原始值与 Vite 变量合成一份配置。 */
@@ -128,12 +167,18 @@ export function resolveRuntimeConfig(raw: unknown, env: RuntimeEnv): RuntimeConf
       problems.push("authMode 是 oidc 但没有配置 oidcClientId（XM_WEB_OIDC_CLIENT_ID）");
   }
 
+  // 没有 Vite 构建期变量这一层回落：CR-0005 平台线 i 明确这是「静态环境变量
+  // 模式，同 reqlog/CPA 先例」——单一来源，不是 authMode 那种多层回落
+  const invoiceConsole = parseInvoiceConsoleOrigin(input.invoiceConsoleOrigin);
+  if (invoiceConsole.problem) problems.push(invoiceConsole.problem);
+
   return {
     authMode,
     oidcIssuer: oidcIssuer.replace(/\/+$/, ""),
     oidcClientId,
     oidcScopes,
     environment,
+    invoiceConsoleOrigin: invoiceConsole.value,
     source,
     problems,
   };
