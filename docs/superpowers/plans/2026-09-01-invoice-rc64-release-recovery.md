@@ -1,5 +1,10 @@
 # RC64 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC64 shipped at signed tag
+> `v0.1.0-rc64-signed` (`0ad5b7c`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc65-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC64 — the embedded tab row reserves the iframe's top-right corner outright so both the logout button and the identity badge clear the platform pages' floating overlay.
