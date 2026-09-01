@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import { InvoiceConsolePanel } from "./InvoiceConsolePanel";
 import { NewApiFinanceOverview } from "./NewApiFinanceOverview";
 import { Sub2ApiFinanceOverview } from "./Sub2ApiFinanceOverview";
+import { Sub2ApiOrdersPanel } from "./Sub2ApiOrdersPanel";
+import { Sub2ApiRefundsPanel } from "./Sub2ApiRefundsPanel";
 
 /** 支付与财务(原型 `V["s2/finance"]` / `V["newapi/finance"]`)。
  *
@@ -28,15 +30,9 @@ function sub2apiFinanceSubTab(subId: string): ReactNode | undefined {
     case "overview":
       return <Sub2ApiFinanceOverview />;
     case "orders":
-      return pending(
-        "充值订单",
-        "订单号、用户、类型、支付方式、订单金额、手续费、净入账、支付流水。随支付 Connector 接入（M3）上线；平台侧只展示与发起 Action，不实现支付逻辑。",
-      );
+      return <Sub2ApiOrdersPanel />;
     case "refunds":
-      return pending(
-        "退款与冲正",
-        "退款号、原订单、原金额、退款金额、原因、处理人。退款是写操作，必须走 Action 且 L2 以上需审批（Foundation-B），这一格上线之后也不会有「直接退款」的按钮。",
-      );
+      return <Sub2ApiRefundsPanel />;
     case "profit":
       return pending(
         "利润核算",

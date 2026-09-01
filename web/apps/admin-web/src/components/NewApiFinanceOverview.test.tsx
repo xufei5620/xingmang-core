@@ -37,84 +37,139 @@ const fresh = {
   last_error_code: "",
 };
 
+/** 空的（但形状合法的）订单页——`/api/v1/platforms/newapi/orders` 的响应
+ *  永远带 freshness（后端字段无 omitempty），mock 必须一样，否则
+ *  FreshnessBadge 会因为 freshness 是 undefined 而抛错，那是 mock 形状不对，
+ *  不是被测组件的 bug。 */
+function emptyOrdersPage(overrides: Record<string, unknown> = {}) {
+  return {
+    items: [],
+    next_cursor: "",
+    stats_by_status: {},
+    from: "2026-08-28",
+    to: "2026-08-28",
+    data_source: "newapi-fake",
+    freshness: fresh,
+    ...overrides,
+  };
+}
+
+/** 按 URL 路由到 /metrics 或 /orders 两条通道各自的响应——两条通道现在
+ *  会在同一次渲染里都被发起请求（资金概览卡走 /metrics，订单台账走
+ *  /orders），共用一个不分辨 URL 的假 fetch 会让其中一条拿到另一条的形状,
+ *  这不是被测代码的问题。 */
+function mockFetch({
+  metrics = { items: [] },
+  orders = emptyOrdersPage(),
+}: { metrics?: unknown; orders?: unknown } = {}) {
+  return vi.fn((input: string) => {
+    if (input.includes("/orders")) return Promise.resolve(response(200, orders));
+    if (input.includes("/metrics")) return Promise.resolve(response(200, metrics));
+    return Promise.resolve(response(404, { error: { code: "NOT_REGISTERED", message: "unknown" } }));
+  });
+}
+
+function paymentsDailyMetric(overrides: Record<string, unknown> = {}, valueOverrides: Record<string, unknown> = {}) {
+  return {
+    metric_key: "newapi.payments.daily",
+    source: "newapi-prod",
+    environment: "development",
+    watermark: "day:2026-08-28",
+    value: {
+      day: "2026-08-28",
+      currency: "CNY",
+      by_status: { succeeded: { count: 4, amount_minor_units: 812000 } },
+      fee_minor_units: null,
+      net_minor_units: null,
+      ...valueOverrides,
+    },
+    freshness: fresh,
+    ...overrides,
+  };
+}
+
 describe("NewAPI 资金与订单", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("无指标时保留原型四卡、订单表头与空态，不编金额", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [] }))));
+  it("无指标与无订单时六卡与订单表都显示未接入/不适用，不编金额", async () => {
+    vi.stubGlobal("fetch", mockFetch());
     renderFinance();
 
-    expect(await screen.findByText("暂无本平台的资金类指标")).toBeTruthy();
-    for (const label of ["区间到账", "区间退款", "月累计", "支付失败"]) {
+    for (const label of ["区间成功到账", "区间待处理", "区间失败", "支付手续费", "净现金流入"]) {
       const heading = await screen.findByRole("heading", { name: label, level: 3 });
-      expect(within(heading.closest("article") as HTMLElement).getByText("—")).toBeTruthy();
+      expect(within(heading.closest("article") as HTMLElement).getByText("未接入")).toBeTruthy();
     }
-    const table = screen.getByRole("table", { name: "NewAPI 支付订单" });
-    expect(within(table).getByRole("columnheader", { name: "订单号" })).toBeTruthy();
-    expect(within(table).getByRole("columnheader", { name: "支付方式" })).toBeTruthy();
-    expect(screen.getByText("充值订单尚未接入")).toBeTruthy();
+    // NewAPI 的退款与冲正恒为「不适用」——不是因为这次没数据，是这个上游
+    // 结构上就没有退款概念（XM-PAY0 交接文档）。
+    const refundHeading = await screen.findByRole("heading", { name: "退款与冲正", level: 3 });
+    expect(within(refundHeading.closest("article") as HTMLElement).getByText("不适用")).toBeTruthy();
+    expect(screen.queryByText("¥0.00")).toBeNull();
+
+    // 没有订单时 DataTableV2 展示空态而不是一张空表格（rows.length === 0 分支），
+    // 所以这里断言空态文案，不去找一张不存在的 table。
+    expect(await screen.findByText("这个窗口没有充值订单")).toBeTruthy();
+    expect(screen.getByText(/已读取 payments.read.v1/)).toBeTruthy();
   });
 
-  it("单日充值指标按币种最小单位显示，并带新鲜度与来源", async () => {
+  it("单日 newapi.payments.daily 指标按最小单位显示，并带新鲜度与来源", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(() =>
-        Promise.resolve(
-          response(200, {
-            items: [
-              {
-                metric_key: "newapi.recharge.daily",
-                source: "newapi-prod",
-                environment: "development",
-                watermark: "wm-recharge",
-                value: { day: "2026-08-28", amount_minor_units: "812000", currency: "CNY", order_count: "4" },
-                freshness: fresh,
-              },
-              {
-                metric_key: "newapi.subscription.daily",
-                source: "newapi-prod",
-                environment: "development",
-                watermark: "wm-subscription",
-                value: { day: "2026-08-28", amount_minor_units: "120000", currency: "CNY" },
-                freshness: fresh,
-              },
-            ],
-          }),
-        ),
-      ),
+      mockFetch({
+        metrics: {
+          items: [
+            paymentsDailyMetric(),
+            {
+              metric_key: "newapi.subscription.daily",
+              source: "newapi-prod",
+              environment: "development",
+              watermark: "wm-subscription",
+              value: { day: "2026-08-28", amount_minor_units: "120000", currency: "CNY" },
+              freshness: fresh,
+            },
+          ],
+        },
+      }),
     );
     renderFinance();
 
-    const tile = await screen.findByRole("heading", { name: "区间到账", level: 3 });
+    const tile = await screen.findByRole("heading", { name: "区间成功到账", level: 3 });
     const card = tile.closest("article") as HTMLElement;
     expect(within(card).getByText("¥8,120.00")).toBeTruthy();
-    expect(within(card).getByText(/已知充值订单 4 笔/)).toBeTruthy();
+    expect(within(card).getByText(/4 笔/)).toBeTruthy();
     expect(within(card).getByText("数据新鲜")).toBeTruthy();
     expect(within(card).getByText(/来源 newapi-prod/)).toBeTruthy();
+    // 订阅证据不受本片影响，仍旧正常显示。
     expect(screen.getByText("¥1,200.00")).toBeTruthy();
-    expect(screen.getByText(/充值是资金流入/)).toBeTruthy();
+  });
+
+  it("支付手续费恒为未知（NewAPI 没有第二个金额字段），净现金流入恒为未接入", async () => {
+    vi.stubGlobal("fetch", mockFetch({ metrics: { items: [paymentsDailyMetric()] } }));
+    renderFinance();
+
+    const feeHeading = await screen.findByRole("heading", { name: "支付手续费", level: 3 });
+    expect(within(feeHeading.closest("article") as HTMLElement).getByText("未接入")).toBeTruthy();
+    const netHeading = screen.getByRole("heading", { name: "净现金流入", level: 3 });
+    expect(within(netHeading.closest("article") as HTMLElement).getByText(/净现金流公式尚未确定/)).toBeTruthy();
   });
 
   it("订阅指标部分可用且金额为零时保持未知，不显示 ¥0.00", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(() =>
-        Promise.resolve(
-          response(200, {
-            items: [
-              {
-                metric_key: "newapi.subscription.daily",
-                source: "newapi-prod",
-                environment: "development",
-                watermark: "day:2026-08-28 subscription:unavailable_over_http",
-                value: { day: "2026-08-28", amount_minor_units: "0", currency: "CNY" },
-                // 兼容旧生产者：is_partial 为真时即使 state 误留 fresh，界面也要降级为不完整。
-                freshness: { ...fresh, is_partial: true },
-              },
-            ],
-          }),
-        ),
-      ),
+      mockFetch({
+        metrics: {
+          items: [
+            {
+              metric_key: "newapi.subscription.daily",
+              source: "newapi-prod",
+              environment: "development",
+              watermark: "day:2026-08-28 subscription:unavailable_over_http",
+              value: { day: "2026-08-28", amount_minor_units: "0", currency: "CNY" },
+              // 兼容旧生产者：is_partial 为真时即使 state 误留 fresh，界面也要降级为不完整。
+              freshness: { ...fresh, is_partial: true },
+            },
+          ],
+        },
+      }),
     );
     renderFinance();
 
@@ -129,22 +184,20 @@ describe("NewAPI 资金与订单", () => {
   it("部分订阅指标有非零金额时保留下界，并显示数据不完整", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(() =>
-        Promise.resolve(
-          response(200, {
-            items: [
-              {
-                metric_key: "newapi.subscription.daily",
-                source: "newapi-prod",
-                environment: "development",
-                watermark: "day:2026-08-28 subscription:partial",
-                value: { day: "2026-08-28", amount_minor_units: "120000", currency: "CNY" },
-                freshness: { ...fresh, is_partial: true, state: "partial" },
-              },
-            ],
-          }),
-        ),
-      ),
+      mockFetch({
+        metrics: {
+          items: [
+            {
+              metric_key: "newapi.subscription.daily",
+              source: "newapi-prod",
+              environment: "development",
+              watermark: "day:2026-08-28 subscription:partial",
+              value: { day: "2026-08-28", amount_minor_units: "120000", currency: "CNY" },
+              freshness: { ...fresh, is_partial: true, state: "partial" },
+            },
+          ],
+        },
+      }),
     );
     renderFinance();
 
@@ -152,19 +205,15 @@ describe("NewAPI 资金与订单", () => {
     expect(screen.getByText("数据不完整")).toBeTruthy();
   });
 
-  it("未初始化的日充值指标即使残留零值也保持未知", async () => {
+  it("未初始化的 payments.daily 指标即使残留零值也保持未知", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(() =>
-        Promise.resolve(
-          response(200, {
-            items: [
+      mockFetch({
+        metrics: {
+          items: [
+            paymentsDailyMetric(
               {
-                metric_key: "newapi.recharge.daily",
-                source: "newapi-prod",
-                environment: "development",
                 watermark: "",
-                value: { day: "2026-08-28", amount_minor_units: "0", currency: "CNY" },
                 freshness: {
                   ...fresh,
                   state: "uninitialized",
@@ -173,58 +222,48 @@ describe("NewAPI 资金与订单", () => {
                   staleness_seconds: null,
                 },
               },
-            ],
-          }),
-        ),
-      ),
+              { by_status: {} },
+            ),
+          ],
+        },
+      }),
     );
     renderFinance();
 
-    const tile = await screen.findByRole("heading", { name: "区间到账", level: 3 });
-    expect(within(tile.closest("article") as HTMLElement).getByText("—")).toBeTruthy();
+    const tile = await screen.findByRole("heading", { name: "区间成功到账", level: 3 });
+    expect(within(tile.closest("article") as HTMLElement).getByText("未接入")).toBeTruthy();
     expect(screen.queryByText("¥0.00")).toBeNull();
   });
 
   it("同步失败但有上次成功值时保留金额，并让新鲜度表达失败", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(() =>
-        Promise.resolve(
-          response(200, {
-            items: [
-              {
-                metric_key: "newapi.recharge.daily",
-                source: "newapi-prod",
-                environment: "development",
-                watermark: "day:2026-08-28",
-                value: { day: "2026-08-28", amount_minor_units: "125000", currency: "CNY" },
-                freshness: {
-                  ...fresh,
-                  state: "failed",
-                  staleness_seconds: 7200,
-                  last_error_code: "upstream_timeout",
-                },
-              },
-            ],
-          }),
-        ),
-      ),
+      mockFetch({
+        metrics: {
+          items: [
+            paymentsDailyMetric({
+              watermark: "day:2026-08-28",
+              freshness: { ...fresh, state: "failed", staleness_seconds: 7200, last_error_code: "upstream_timeout" },
+            }),
+          ],
+        },
+      }),
     );
     renderFinance();
 
-    const tile = await screen.findByRole("heading", { name: "区间到账", level: 3 });
+    const tile = await screen.findByRole("heading", { name: "区间成功到账", level: 3 });
     const card = tile.closest("article") as HTMLElement;
-    expect(within(card).getByText("¥1,250.00")).toBeTruthy();
+    expect(within(card).getByText("¥8,120.00")).toBeTruthy();
     expect(within(card).getByText("同步失败")).toBeTruthy();
   });
 
   it("周/月只显示不可用说明，并把日期与粒度保留在可分享 URL 控件", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [] }))));
+    vi.stubGlobal("fetch", mockFetch());
     renderFinance("orders", "/platforms/newapi?tab=finance&day=2026-08-28&granularity=week");
 
     expect(await screen.findByText("2026-08-24 ~ 2026-08-30 · 按周查看")).toBeTruthy();
-    const heading = await screen.findByRole("heading", { name: "区间到账", level: 3 });
-    expect(within(heading.closest("article") as HTMLElement).getByText(/周\/月需要订单聚合端点/)).toBeTruthy();
+    const heading = await screen.findByRole("heading", { name: "区间成功到账", level: 3 });
+    expect(within(heading.closest("article") as HTMLElement).getByText(/周\/月需要按天聚合/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "月" }));
     expect(await screen.findByText("2026-08-01 ~ 2026-08-31 · 按月查看")).toBeTruthy();
   });
