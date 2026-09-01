@@ -10,7 +10,7 @@
 - **branch:** `ai/claude/XM-INV-ADMIN-EMBED`, based on
   `ai/claude/XM-INV-AUTOLOGIN` at `8802e08` (production RC67 line), worktree
   `K:/发票/wt-XM-INV-ADMIN-EMBED`.
-- **commit:** six commits on top of the base, see `git log --oneline
+- **commit:** eight commits on top of the base, see `git log --oneline
   8802e08..HEAD`:
   - `e8f5fb3` feat(backend): filter payment-candidate and refund-case admin
     lists by source_instance_id
@@ -24,6 +24,9 @@
     framing to the console origin
   - `a38e344` docs(security): document admin embed framing and the popup
     auth handshake
+  - `f388556` docs(handoff): add XM-INV-ADMIN-EMBED handoff
+  - `e1a7ed0` test(web): prove admin list requests carry source_instance_id
+    only when scoped
 
 ## Summary
 
@@ -184,6 +187,8 @@ Frontend:
 - `web/src/lib/embedded-admin-scope.ts` — **new**. Scope parsing/nav
   visibility/source-instance resolution/popup-handshake helpers.
 - `web/src/lib/embedded-admin-scope.test.ts` — **new**, 22 tests.
+- `web/src/lib/http-api.source-instance-filter.test.ts` — **new**, 4 tests
+  (see Tests run).
 - `web/src/App.tsx` — `embeddedAdminMode`/`embeddedAdminScope` constants,
   `adminRoute()`, `useEmbeddedAdminPlatformSourceInstanceId` hook; `adminNav`
   scope-key tagging; `PortalLayout` filtering/chrome/class; `DataProvider`,
@@ -264,11 +269,12 @@ byte-identical after normalizing line endings, before linking):
 
 ```
 npm run typecheck    # tsc --noEmit x2, clean
-npm test              # vitest: 4 files, 57 tests, all pass
-                       #   invoice-contract.test.ts     16 (pre-existing, untouched)
-                       #   portal-navigation.test.ts     2 (pre-existing, untouched)
-                       #   embedded-scope.test.ts       17 (pre-existing, untouched)
-                       #   embedded-admin-scope.test.ts 22 (new, this task)
+npm test              # vitest: 5 files, 61 tests, all pass
+                       #   invoice-contract.test.ts                16 (pre-existing, untouched)
+                       #   portal-navigation.test.ts                2 (pre-existing, untouched)
+                       #   embedded-scope.test.ts                  17 (pre-existing, untouched)
+                       #   embedded-admin-scope.test.ts            22 (new, this task)
+                       #   http-api.source-instance-filter.test.ts  4 (new, this task)
 npm run build         # tsc --noEmit x2 + vite build, clean
 ```
 
@@ -281,6 +287,18 @@ Sub2API-has-no-payment-candidates and global-shows-only-settings-and-health
 rules); `resolvePlatformSourceInstanceId` (match, and null on no match);
 the popup handshake's message-shape validation (exact match required on
 every field) and return-marker round-trip.
+
+`http-api.source-instance-filter.test.ts` stubs global `fetch` (and just
+enough of `window` for `requestJSON`'s abort-timer use of
+`setTimeout`/`clearTimeout`, since this project's vitest config runs plain
+Node with no jsdom/happy-dom dependency available to switch to — no other
+test anywhere in this codebase exercises the fetch layer of any admin list
+endpoint, including the pre-existing `source_instance_id` filter on
+eligibility-freezes, so there was no fetch-mock precedent to extend) to
+directly prove `getAdminRequestPage`/`getPaymentCandidates`/
+`getRefundCases` put `source_instance_id` on the request URL when given one
+and omit it otherwise, plus the malformed-value rejection short-circuiting
+before `fetch` is ever called.
 
 PowerShell (from the repo root):
 
