@@ -305,6 +305,178 @@ func TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccoun
 	}
 }
 
+// TestSourceProjectionWorkerSkipsAccountLockedByProjectionJobWithoutAbortingBatch
+// reproduces the 2026-09-01/02 production incident (docs/handoffs/
+// XM-INV-PROOF-CONTENTION.md): a long-running processEligibilityProjectionJob
+// write phase holds account A's per-account advisory lock
+// (hashtextextended(...,43)) while the source-projection worker's RunOnce
+// processes a batch containing both account A's event and account B's
+// (uncontended) event.
+//
+// Before XM-INV-PROOF-CONTENTION this deadlocked the two workers against
+// each other under the runtime role's lock_timeout, surfaced as
+// "canceling statement due to lock timeout (SQLSTATE 55P03)", and RunOnce's
+// early return on that single claim's failure aborted the whole batch --
+// account B's claim (and everything after account A's in the batch) was
+// left in processing_status='processing' holding its lease for the full
+// 10-minute sourceEventLease, starving the stream's scan cycle of
+// completeness. This test proves both fixes together: (2) ObserveUsageEvent's
+// pg_try_advisory_xact_lock returns immediately instead of blocking, so
+// RunOnce reschedules account A's claim (MarkSourceEventBusy, attempt budget
+// credited back, not spent) instead of erroring; (3) account B's claim in
+// the same batch is not starved by account A's outcome -- it reaches its own
+// terminal state (here, a dependency wait, since it has no bootstrapped
+// eligibility state) in the same RunOnce call, and the call returns with no
+// error at all, proving nothing resembling a 55P03 ever surfaced.
+func TestSourceProjectionWorkerSkipsAccountLockedByProjectionJobWithoutAbortingBatch(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+	const sourceID = "10000000-0000-4000-8000-000000000080"
+	const userA = "20000000-0000-4000-8000-000000000080"
+	const userB = "20000000-0000-4000-8000-000000000081"
+	const accountA = "30000000-0000-4000-8000-000000000080"
+	const accountB = "30000000-0000-4000-8000-000000000081"
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','lock-contention','contention-v3')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject) VALUES
+		($1,'https://id.example','lock-contention-a'),($2,'https://id.example','lock-contention-b')`,
+		userA, userB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status) VALUES
+		($1,$3,$5,'80',$6,'test','verified'),($2,$4,$5,'81',$7,'test','verified')`,
+		accountA, accountB, userA, userB, sourceID,
+		"h1:"+strings.Repeat("a", 64), "h1:"+strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProvisionSourceStream(ctx, sourceID, "usage",
+		postgresstore.AuditActor{Type: "system", ID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	causalOrder := "1"
+	buildPayload := func(externalUserID, usageID string) []byte {
+		body, err := json.Marshal(usageEventPayload{
+			ExternalUserID: externalUserID, ExternalUsageID: usageID, OccurredAt: now.Format(time.RFC3339Nano),
+			ServiceUnits: "10", UnitCode: "SUB2_BALANCE_1E8", BillingScope: "wallet",
+			SourceCursor: "usage:" + usageID, CausalDomain: "usage_event", CausalOrder: &causalOrder,
+			CutoverManifestHash: strings.Repeat("a", 64), ConfigurationHash: strings.Repeat("b", 64),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	payloadA := buildPayload("80", "usage-A")
+	payloadB := buildPayload("81", "usage-B")
+	sumA := sha256.Sum256(payloadA)
+	sumB := sha256.Sum256(payloadB)
+	hashA, hashB := hex.EncodeToString(sumA[:]), hex.EncodeToString(sumB[:])
+	eventA := "80000000-0000-4000-8000-000000000001"
+	eventB := "80000000-0000-4000-8000-000000000002"
+	cycleID := "80000000-0000-4000-8000-000000000003"
+	ciphertextA, err := service.keys.Encrypt(payloadA, ingestEventAAD(sourceID, "usage", eventA, hashA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertextB, err := service.keys.Encrypt(payloadB, ingestEventAAD(sourceID, "usage", eventB, hashB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CommitSourceBatch(ctx, postgresstore.SourceBatchInput{
+		SchemaVersion: "3.0", SourceInstanceID: sourceID, StreamID: "usage",
+		BatchID: "80000000-0000-4000-8000-000000000004", Sequence: 1, BodyHash: strings.Repeat("d", 64),
+		SigningKeyID: "contention-key", SourceRuntimeVersion: "contention-v3", SourceAgentVersion: "contention-agent",
+		SourceCapturedAt: now, ProjectionStatus: "healthy", StreamWatermarkAt: now, SourceCursor: "usage:batch",
+		ScanCeilingAt: now, ScanCeilingCursor: "usage-ceiling:contention", ScanCycleID: cycleID, ScanComplete: true,
+		Events: []postgresstore.SourceBatchEvent{
+			{EventID: eventA, EntityType: "usage_event", Operation: "upsert", PayloadHash: hashA,
+				PayloadCiphertext: ciphertextA, ObservedAt: now},
+			{EventID: eventB, EntityType: "usage_event", Operation: "upsert", PayloadHash: hashB,
+				PayloadCiphertext: ciphertextB, ObservedAt: now},
+		},
+		Actor: postgresstore.AuditActor{Type: "source_connector", ID: sourceID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate processEligibilityProjectionJob's write phase holding account
+	// A's advisory lock for a long time. A raw, never-committed transaction
+	// held open for the rest of the test stands in for it; it is rolled
+	// back in cleanup, matching how a real job's transaction eventually
+	// releases the lock at commit/rollback.
+	lockTx, err := store.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err = lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountA); err != nil {
+		t.Fatal(err)
+	}
+
+	processor := SourceEventProcessor{Service: service, BatchSize: 10, Now: func() time.Time { return now.Add(time.Minute) }}
+	runDone := make(chan struct {
+		processed int
+		err       error
+	}, 1)
+	go func() {
+		processed, err := processor.RunOnce(ctx)
+		runDone <- struct {
+			processed int
+			err       error
+		}{processed, err}
+	}()
+	select {
+	case result := <-runDone:
+		if result.err != nil {
+			t.Fatalf("RunOnce returned an error while account A's lock was held by a concurrent transaction (want a clean busy-reschedule, no 55P03, no aborted batch): %v", result.err)
+		}
+		if result.processed != 2 {
+			t.Fatalf("processed=%d, want 2 (both account A's busy-rescheduled claim and account B's claim in the same batch)", result.processed)
+		}
+	case <-time.After(10 * time.Second):
+		// pg_try_advisory_xact_lock never blocks, so a correct
+		// implementation returns in well under a second; 10s is a generous
+		// bound that only a genuine hang (the pre-fix blocking lock
+		// acquisition) would ever reach.
+		t.Fatal("RunOnce did not return within 10s -- the worker is blocked on account A's held advisory lock instead of using pg_try_advisory_xact_lock")
+	}
+
+	var statusA, errorCodeA string
+	var attemptsA int
+	var nextAttemptA time.Time
+	if err = store.Pool().QueryRow(ctx, `SELECT processing_status,attempt_count,processing_error,next_attempt_at
+		FROM source_ingest_events WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`,
+		sourceID, eventA).Scan(&statusA, &attemptsA, &errorCodeA, &nextAttemptA); err != nil {
+		t.Fatal(err)
+	}
+	if statusA != "queued" || attemptsA != 0 || errorCodeA != "ACCOUNT_LOCK_BUSY" {
+		t.Fatalf("account A claim status=%s attempts=%d error=%s, want queued/0/ACCOUNT_LOCK_BUSY (busy reschedule must not spend retry budget)",
+			statusA, attemptsA, errorCodeA)
+	}
+	wantNext := now.Add(time.Minute).Add(15 * time.Second)
+	if nextAttemptA.Before(wantNext.Add(-2*time.Second)) || nextAttemptA.After(wantNext.Add(2*time.Second)) {
+		t.Fatalf("account A next_attempt_at=%s, want ~%s (+15s busy reschedule)", nextAttemptA, wantNext)
+	}
+
+	var statusB string
+	if err = store.Pool().QueryRow(ctx, `SELECT processing_status FROM source_ingest_events
+		WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`,
+		sourceID, eventB).Scan(&statusB); err != nil {
+		t.Fatal(err)
+	}
+	// Account B has no bootstrapped eligibility state, so its own,
+	// unrelated outcome is a dependency wait -- what matters here is that
+	// it reached this terminal state at all in the same RunOnce call that
+	// handled account A's busy lock, instead of being left in
+	// 'processing' by an aborted batch.
+	if statusB != "waiting_dependency" && statusB != "parked_identity" {
+		t.Fatalf("account B claim status=%s, want waiting_dependency or parked_identity (must not be starved by account A's outcome)", statusB)
+	}
+}
+
 func waitForTestPool(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

@@ -823,8 +823,19 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 	if in.UnitCode != expectedUnitForSource(sourceType) {
 		return domain.ErrConflict
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
+	// XM-INV-PROOF-CONTENTION 2: try, don't block. processEligibilityProjectionJob
+	// holds this same per-account lock for its write phase; a source-projection
+	// worker call that instead waited here risked a lock-timeout error deep
+	// inside its own transaction, and one such failure used to abort the
+	// worker's whole batch (see RunOnce, application/source_processor.go).
+	// A busy account is routine, expected contention -- the caller reschedules
+	// this claim shortly (MarkSourceEventBusy) without spending its retry budget.
+	var locked bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,43))`, accountID).Scan(&locked); err != nil {
 		return err
+	}
+	if !locked {
+		return domain.ErrAccountLockBusy
 	}
 	if _, err = verifyFactBatchContextTx(ctx, tx, in.SourceInstanceID, "balances", in.ExternalEventID,
 		in.BatchID, in.ScanCycleID, in.SourceRevision, in.StreamWatermarkAt); err != nil {
@@ -1219,8 +1230,14 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 	if in.UnitCode != expectedUnitForSource(sourceType) {
 		return domain.ErrConflict
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
+	// XM-INV-PROOF-CONTENTION 2: try, don't block -- see the identical
+	// comment in ObserveBalanceCheckpoint above.
+	var locked bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,43))`, accountID).Scan(&locked); err != nil {
 		return err
+	}
+	if !locked {
+		return domain.ErrAccountLockBusy
 	}
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {

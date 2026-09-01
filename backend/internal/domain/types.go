@@ -341,4 +341,11 @@ var (
 	ErrSourceUnavailable  = errors.New("source synchronization is unavailable or stale")
 	ErrInvalidState       = errors.New("invalid request state transition")
 	ErrVersionConflict    = errors.New("request version conflict")
+	// ErrAccountLockBusy signals that an account-scoped advisory lock
+	// (hashtextextended(...,43)) was not immediately available. Callers on
+	// the source-projection worker path (XM-INV-PROOF-CONTENTION 2) treat
+	// this as routine contention with a concurrent eligibility projection
+	// job, not a processing failure: reschedule shortly, do not spend
+	// retry/attempt budget on it.
+	ErrAccountLockBusy = errors.New("account is locked by a concurrent projection job")
 )

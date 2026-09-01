@@ -667,6 +667,41 @@ func (s *Store) MarkSourceEventWaitingDependency(ctx context.Context, claim Sour
 	return tx.Commit(ctx)
 }
 
+// MarkSourceEventBusy reschedules a claim shortly without spending any of
+// its attempt/retry budget. XM-INV-PROOF-CONTENTION 2: ObserveUsageEvent/
+// ObserveCreditEvent/ObserveBalanceCheckpoint's per-account
+// pg_try_advisory_xact_lock found the account's advisory lock
+// (hashtextextended(...,43)) held by a concurrent eligibility projection
+// job. That is routine, expected contention -- not a processing failure --
+// so unlike MarkSourceEventFailed this credits the attempt back (mirrors
+// MarkSourceEventWaitingDependency's attempt_count-1) instead of spending
+// it, and reuses the existing 'queued' status rather than adding a new one.
+func (s *Store) MarkSourceEventBusy(ctx context.Context, claim SourceEventClaim, next time.Time) error {
+	if next.IsZero() {
+		return errors.New("invalid source event busy reschedule")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	command, err := tx.Exec(ctx, `
+		UPDATE source_ingest_events SET processing_status='queued',
+			attempt_count=greatest(attempt_count-1,0),processing_error='ACCOUNT_LOCK_BUSY',
+			dependency_kind=NULL,dependency_key_hmac=NULL,next_attempt_at=$1,
+			lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+		WHERE source_instance_id=$2 AND stream_id=$3 AND event_id=$4
+			AND processing_status='processing' AND lease_token=$5`,
+		next, claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return domain.ErrConflict
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) RequeueSourceDependency(ctx context.Context, kind, keyHMAC string) (int64, error) {
 	if (kind != "invoice_oidc_user" && kind != "source_external_account" && kind != "source_funding_lot" && kind != "source_eligibility_cutover" && kind != "source_cutover_manifest") ||
 		!dependencyHMACPattern.MatchString(keyHMAC) {

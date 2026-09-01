@@ -85,15 +85,54 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("claim source events: %w", err)
 	}
+	// XM-INV-PROOF-CONTENTION 3: a single claim's bookkeeping call
+	// (MarkSourceEvent{WaitingDependency,Failed,Processed}) failing --
+	// notably a lock timeout contending with a long-running
+	// processEligibilityProjectionJob for the same account, see requirement
+	// 2 below -- used to return immediately, aborting the rest of the
+	// batch. Every remaining claim in it then sat in processing_status=
+	// 'processing' holding its lease for the full 10-minute
+	// sourceEventLease with no worker able to touch it, which starved that
+	// stream's scan cycle of completeness and kept its watermark from
+	// advancing. Each claim now follows its own outcome; one isolated
+	// failure is recorded and the loop proceeds to the rest of the batch.
+	// The isolated count and a sample error are folded into the returned
+	// summary error (if any) rather than logged here directly, matching
+	// this package's convention of leaving logging to cmd/api's runtime
+	// harness, which already logs whatever RunOnce returns.
 	processed := 0
+	isolated := 0
+	var lastIsolatedErr error
 	for _, claim := range claims {
+		claimSourceInstanceID, claimStreamID, claimEventID := claim.SourceInstanceID, claim.StreamID, claim.EventID
+		recordIsolated := func(context string, err error) {
+			isolated++
+			lastIsolatedErr = fmt.Errorf("%s (source=%s stream=%s event=%s): %w",
+				context, claimSourceInstanceID, claimStreamID, claimEventID, err)
+		}
 		processErr := p.Service.ProcessSourceEvent(ctx, claim)
 		if processErr != nil {
+			if errors.Is(processErr, domain.ErrAccountLockBusy) {
+				// XM-INV-PROOF-CONTENTION 2: this account's per-account
+				// advisory lock (hashtextextended(...,43)) is held by a
+				// concurrent processEligibilityProjectionJob run. That is
+				// expected, routine contention, not a processing failure --
+				// reschedule shortly without spending any of the event's
+				// real attempt/retry budget (mirrors the existing
+				// waiting_dependency attempt_count credit-back below).
+				if err = p.Service.store.MarkSourceEventBusy(ctx, claim, now().Add(15*time.Second)); err != nil {
+					recordIsolated("mark source event busy", err)
+				} else {
+					processed++
+				}
+				continue
+			}
 			var dependency *sourceDependencyWait
 			if errors.As(processErr, &dependency) {
 				if err = p.Service.store.MarkSourceEventWaitingDependency(ctx, claim,
 					dependency.Kind, dependency.KeyHMAC, now().Add(sourceDependencyFallbackRetry)); err != nil {
-					return processed, fmt.Errorf("mark source dependency wait: %w", err)
+					recordIsolated("mark source dependency wait", err)
+					continue
 				}
 				processed++
 				continue
@@ -105,15 +144,21 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 				hintAccountID = hint.accountID
 			}
 			if err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute), hintAccountID); err != nil {
-				return processed, fmt.Errorf("mark source event failed: %w", err)
+				recordIsolated("mark source event failed", err)
+				continue
 			}
 			processed++
 			continue
 		}
 		if err = p.Service.store.MarkSourceEventProcessed(ctx, claim, now()); err != nil {
-			return processed, fmt.Errorf("mark source event processed: %w", err)
+			recordIsolated("mark source event processed", err)
+			continue
 		}
 		processed++
+	}
+	if isolated > 0 {
+		return processed, fmt.Errorf("source-projection run summary: claimed=%d processed=%d isolated_failures=%d; last isolated error: %w",
+			len(claims), processed, isolated, lastIsolatedErr)
 	}
 	return processed, nil
 }
