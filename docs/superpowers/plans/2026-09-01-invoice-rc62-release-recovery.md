@@ -1,5 +1,11 @@
 # RC62 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC62 shipped at signed tag
+> `v0.1.0-rc62-signed` (`2ceade0`) and is deployed; the stream wedge
+> fully recovered behind it (public readyz 200); its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc63-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC62 — eligibility-cutover dependency waits now park as parked_identity instead of holding the active scan cycle: one customer's half-provisioned login must never freeze a whole stream behind the one-active-cycle constraint.
