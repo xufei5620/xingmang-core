@@ -518,20 +518,69 @@ func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClai
 	if errorCode == "" || len(errorCode) > 512 || strings.ContainsAny(errorCode, "\r\n\x00") {
 		return errors.New("invalid source event processing error code")
 	}
-	command, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var newStatus string
+	err = tx.QueryRow(ctx, `
 		UPDATE source_ingest_events SET
 			processing_status=CASE WHEN attempt_count>=8 THEN 'dead' ELSE 'failed' END,
 			processing_error=$1,next_attempt_at=$2,lease_token=NULL,lease_expires_at=NULL,updated_at=now()
 		WHERE source_instance_id=$3 AND stream_id=$4 AND event_id=$5
-			AND processing_status='processing' AND lease_token=$6`, errorCode, next,
-		claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken)
+			AND processing_status='processing' AND lease_token=$6
+		RETURNING processing_status`, errorCode, next,
+		claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken).Scan(&newStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrConflict
+	}
 	if err != nil {
 		return err
 	}
-	if command.RowsAffected() != 1 {
-		return domain.ErrConflict
+	if newStatus == "dead" {
+		// XM-INV-POLICY-ANCHOR 2.5: a dead event with no freeze yet would
+		// otherwise hold its scan cycle open indefinitely (see the freeze
+		// correlation in tryPublishEconomicScanCyclesTx). There is no
+		// ingest-layer column identifying which account an encrypted,
+		// unprocessed event belongs to; correlate via source_revision_hash,
+		// the same content-hash link every domain fact table already carries
+		// (and the exact one the cycle-completeness query matches an
+		// *existing* freeze against). This only finds a match when the fact
+		// was actually persisted on some earlier attempt -- a pure repeated
+		// transient failure that never wrote anything leaves nothing to
+		// correlate, and stays un-frozen (still holds the cycle, unchanged;
+		// see the handoff doc for why this is a structural gap, not an
+		// oversight).
+		var accountID, objectType, objectID string
+		lookupErr := tx.QueryRow(ctx, `
+			SELECT external_account_id,'balance_checkpoint',checkpoint_id
+				FROM balance_reconciliation_checkpoints WHERE source_revision_hash=$1
+			UNION ALL
+			SELECT external_account_id,'usage',external_usage_id
+				FROM source_usage_events WHERE source_revision_hash=$1
+			UNION ALL
+			SELECT external_account_id,'credit',external_credit_id
+				FROM source_credit_events WHERE source_revision_hash=$1
+			LIMIT 1`, claim.PayloadHash).Scan(&accountID, &objectType, &objectID)
+		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return lookupErr
+		}
+		if lookupErr == nil {
+			if err = freezeEligibilityTx(ctx, tx, accountID, "", "EVENT_DEAD", objectType, objectID,
+				claim.PayloadHash, AuditActor{Type: "source_connector", ID: claim.SourceInstanceID,
+					Reason: "dead event correlated to a persisted fact"}); err != nil {
+				return err
+			}
+		}
 	}
-	return nil
+	if claim.SchemaVersion == "3.0" {
+		if err = tryPublishEconomicScanCyclesTx(ctx, tx, claim.SourceInstanceID, claim.StreamID,
+			AuditActor{Type: "source_connector", ID: claim.SourceInstanceID, Reason: "source event marked failed/dead"}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) MarkSourceEventWaitingDependency(ctx context.Context, claim SourceEventClaim, kind, keyHMAC string, next time.Time) error {

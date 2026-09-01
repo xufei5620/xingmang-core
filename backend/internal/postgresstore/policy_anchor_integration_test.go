@@ -3,26 +3,24 @@ package postgresstore
 import (
 	"bytes"
 	"context"
-	"errors"
 	"math/big"
 	"strings"
 	"testing"
 	"time"
-
-	"invoice-system/backend/internal/domain"
 )
 
-// TestPrePolicyReconciliationCheckpointIsIgnoredForAccountWithoutState covers
-// design XM-INV-POLICY-ANCHOR 2.1's implementable half: a reconciliation
-// checkpoint dated before the invoice policy start, for an account with no
-// eligibility state yet, is ignored (acknowledged, audited) instead of
-// parking on the signed cutover row. The design's other half -- bootstrapping
-// such an account directly from a post-policy-start checkpoint with
-// bootstrap_kind='POLICY_ANCHOR' -- cannot be implemented without a schema
-// migration (source_account_eligibility_state_bootstrap_kind_check only
-// allows SIGNED_CUTOVER/POST_CUTOVER_REPLAY; see the handoff doc), so this
-// test also locks in that the post-policy-start boundary is unchanged.
-func TestPrePolicyReconciliationCheckpointIsIgnoredForAccountWithoutState(t *testing.T) {
+// TestReconciliationCheckpointIgnoredPrePolicyAndBootstrapsPolicyAnchorPostPolicy
+// covers design XM-INV-POLICY-ANCHOR 2.1 in full for a baseline member with
+// no eligibility state: a reconciliation checkpoint dated before the invoice
+// policy start is ignored (acknowledged, audited) instead of parking on the
+// signed cutover row -- it carries no eligibility-relevant information for
+// an account that cannot become invoice-eligible before the policy start
+// regardless of which row eventually establishes its cutover boundary. A
+// later checkpoint at/after the policy start bootstraps the account directly
+// (bootstrap_kind='POLICY_ANCHOR', migration 0016's trigger validates the
+// cutover_at/cutover_balance_units/unit_code match against the anchoring
+// checkpoint row), and the account functions normally afterward.
+func TestReconciliationCheckpointIgnoredPrePolicyAndBootstrapsPolicyAnchorPostPolicy(t *testing.T) {
 	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
 	policyStart := fixtureNow
 	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
@@ -128,12 +126,82 @@ func TestPrePolicyReconciliationCheckpointIsIgnoredForAccountWithoutState(t *tes
 		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 1,
 		BatchID: postCycle.batchID, ScanCycleID: postCycle.cycleID,
 	}, AuditActor{Type: "source_connector", ID: sourceID})
-	if !errors.Is(err, domain.ErrSourceUnavailable) {
-		t.Fatalf("post-policy baseline checkpoint should still wait for the signed cutover row: %v", err)
+	if err != nil {
+		t.Fatalf("post-policy baseline checkpoint should bootstrap POLICY_ANCHOR directly: %v", err)
 	}
-	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state
-		WHERE external_account_id=$1`, accountID).Scan(&stateCount); err != nil || stateCount != 0 {
-		t.Fatalf("post-policy wait must not create eligibility state: count=%d err=%v", stateCount, err)
+	var bootstrapKind string
+	var storedCutoverAt time.Time
+	var cutoverBalance string
+	if err = store.pool.QueryRow(ctx, `SELECT bootstrap_kind,cutover_at,cutover_balance_units::text
+		FROM source_account_eligibility_state WHERE external_account_id=$1`, accountID).Scan(
+		&bootstrapKind, &storedCutoverAt, &cutoverBalance); err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapKind != "POLICY_ANCHOR" || !storedCutoverAt.Equal(postAsOf.UTC()) || cutoverBalance != "500" {
+		t.Fatalf("policy anchor bootstrap kind=%s cutover_at=%s balance=%s", bootstrapKind, storedCutoverAt, cutoverBalance)
+	}
+	var checkpointKind, reconciliationStatus string
+	var baselineMemberFlag bool
+	if err = store.pool.QueryRow(ctx, `SELECT checkpoint_kind,baseline_member,reconciliation_status
+		FROM balance_reconciliation_checkpoints WHERE external_account_id=$1 AND checkpoint_id='reconcile-post-210'`,
+		accountID).Scan(&checkpointKind, &baselineMemberFlag, &reconciliationStatus); err != nil {
+		t.Fatal(err)
+	}
+	if checkpointKind != "reconciliation" || !baselineMemberFlag || reconciliationStatus != "cutover_baseline" {
+		t.Fatalf("policy anchor checkpoint kind=%s baseline_member=%t status=%s", checkpointKind, baselineMemberFlag, reconciliationStatus)
+	}
+	var bootstrapAudits int
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='eligibility.policy_anchor.bootstrapped' AND object_id=$1`,
+		accountID).Scan(&bootstrapAudits); err != nil || bootstrapAudits != 1 {
+		t.Fatalf("policy anchor bootstrap audit missing: count=%d err=%v", bootstrapAudits, err)
+	}
+
+	// Design 2.1 bullet 4: the account must function normally afterward with
+	// only post-anchor facts -- exercise a normal usage/credit projection
+	// through this new POLICY_ANCHOR account.
+	markV3CycleProcessed(t, store, ctx, sourceID, "balances", postCycle)
+	if err := store.ProvisionSourceStream(ctx, sourceID, "credits", AuditActor{Type: "system", ID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	creditAt := postAsOf.Add(1 * time.Hour)
+	creditEvent := SourceBatchEvent{EventID: "82000000-0000-4000-8000-000000000213",
+		EntityType: "credit_event", Operation: "upsert", PayloadHash: testHash("policy-anchor-ignore-credit-event"),
+		PayloadCiphertext: bytes.Repeat([]byte{4}, 32), ObservedAt: creditAt}
+	creditCycle := chain.commit(t, store, ctx, sourceID, "credits",
+		"84000000-0000-4000-8000-000000000007", creditAt, []SourceBatchEvent{creditEvent})
+	if err := store.ObserveCreditEvent(ctx, CreditObservation{
+		SourceInstanceID: sourceID, ExternalUserID: "210", ExternalEventID: creditEvent.EventID,
+		ExternalCreditID: "policy-anchor-post-credit", EventTime: creditAt, ObservedAt: creditAt,
+		StreamWatermarkAt: creditAt, ServiceUnits: "80", UnitCode: "SUB2_BALANCE_1E8", CreditKind: "BONUS",
+		SourceCursor: "credit:210:post", SourceRevision: creditEvent.PayloadHash,
+		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 1,
+		BatchID: creditCycle.batchID, ScanCycleID: creditCycle.cycleID,
+	}, AuditActor{Type: "source_connector", ID: sourceID}); err != nil {
+		t.Fatalf("post-anchor credit fact was rejected: %v", err)
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.BootstrapKind != "POLICY_ANCHOR" {
+		t.Fatalf("re-read account bootstrap_kind=%s", account.BootstrapKind)
+	}
+	projection, err := buildEligibilityProjectionTx(ctx, tx, account, creditAt.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("post-anchor projection failed: %v", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if projection.ExpectedBalance.Cmp(big.NewInt(80)) != 0 {
+		t.Fatalf("post-anchor projection expected balance=%s want 80 (the anchor's own 500 is opening, non-invoiceable)",
+			projection.ExpectedBalance)
 	}
 }
 
@@ -516,5 +584,171 @@ func TestScanCycleFrozenDeadEventPublishesWhilePureTransientDeadEventHoldsCycle(
 	}
 	if status := killCycle("credits", "freeze-cycle-frozen", true); status != "published" {
 		t.Fatalf("dead event tied to an already-frozen account must not hold the cycle: status=%s", status)
+	}
+}
+
+// TestFlagPolicyAnchorMigrationBlockedFreezesWithCandidateAndIsNoOpWithoutOne
+// exercises flagPolicyAnchorMigrationBlockedTx directly. This is design
+// 2.4's fallback, not its primary mechanism -- the DELETE-and-reinsert
+// re-anchor migration itself is not wired into processEligibilityProjectionJob:
+// two non-deferrable ON DELETE RESTRICT foreign keys block the DELETE, and
+// the design's own trigger condition (cutover_at < PolicyStartAt) turns out
+// to be true for essentially every bootstrapped account by construction, not
+// a genuine staleness signal -- wiring it in as specified started freezing
+// healthy, unrelated accounts (see the handoff doc). This test proves the
+// helper's own freeze+audit behavior is correct in isolation, pending a real
+// distinguishing condition to gate when it should run: a candidate
+// post-policy reconciliation checkpoint present freezes the account
+// (idempotently, reason POLICY_ANCHOR_BLOCKED) with an audit trail recording
+// the would-be migration's before/after values; no candidate is a no-op.
+func TestFlagPolicyAnchorMigrationBlockedFreezesWithCandidateAndIsNoOpWithoutOne(t *testing.T) {
+	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
+	policyStart := fixtureNow.Add(-24 * time.Hour)
+	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
+	sourceID := "10000000-0000-4000-8000-000000000250"
+	userID := "20000000-0000-4000-8000-000000000250"
+	if _, err := store.pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','policy-anchor-flag-test','v3-test')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+		VALUES($1,'test','policy-anchor-flag-user')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProvisionSourceStream(ctx, sourceID, "balances", AuditActor{Type: "system", ID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	anchor := policyStart.Add(-1 * time.Hour)
+	chain := newV3TestChain()
+	manifestEvent := SourceBatchEvent{EventID: "82000000-0000-4000-8000-000000000250",
+		EntityType: "cutover_manifest", Operation: "upsert", PayloadHash: testHash("policy-anchor-flag-manifest-event"),
+		PayloadCiphertext: bytes.Repeat([]byte{1}, 32), ObservedAt: anchor}
+	manifestCycle := chain.commit(t, store, ctx, sourceID, "balances",
+		"84000000-0000-4000-8000-000000000008", anchor, []SourceBatchEvent{manifestEvent})
+	manifestHash := testHash("policy-anchor-flag-manifest")
+	configHash := testHash("policy-anchor-flag-config")
+	snapshotHash := testHash("policy-anchor-flag-snapshot")
+	if err := store.RegisterCutoverManifest(ctx, CutoverManifest{
+		SourceInstanceID: sourceID, ManifestHash: manifestHash, SourceRuntimeVersion: "v3-test",
+		ProjectionContract: "sub2api-economic-v4", ConfigurationHash: configHash,
+		UnitCode: "SUB2_BALANCE_1E8", PaymentsCeiling: "p0", UsageCeiling: "u0",
+		CreditsCeiling: "c0", BalancesCeiling: "b0", BaselineSnapshotID: snapshotHash,
+		BaselineSnapshotHash: snapshotHash, BaselineRowCount: 0, SigningKeyID: "ignored-payload-key",
+		CutoverAt: anchor, DatabaseClock: anchor, StreamWatermarkAt: anchor,
+		ExternalEventID: manifestEvent.EventID, BatchID: manifestCycle.batchID,
+		ScanCycleID: manifestCycle.cycleID, SourceRevision: manifestEvent.PayloadHash,
+	}, AuditActor{Type: "source_connector", ID: sourceID}); err != nil {
+		t.Fatal(err)
+	}
+	markV3CycleProcessed(t, store, ctx, sourceID, "balances", manifestCycle)
+
+	// flagPolicyAnchorMigrationBlockedTx is tested directly, so its setup
+	// only needs the rows it actually reads -- constructed straight via SQL
+	// (same technique as TestEligibilityProjectionNeverAllocatesPreAnchorUsageFact)
+	// rather than the full batch/cycle/snapshot ceremony ObserveBalanceCheckpoint
+	// needs, which is irrelevant here. A SIGNED_CUTOVER state row anchors
+	// directly at the manifest's own (pre-policy) cutover with no
+	// reconciliation checkpoint requirement -- unlike a non-baseline
+	// POST_CUTOVER_REPLAY bootstrap, whose own bootstrapping checkpoint must
+	// itself be post-policy (design 2.1's ignore rule applies otherwise) and
+	// so always self-satisfies the candidate lookup below. Using
+	// SIGNED_CUTOVER here is what actually lets "no candidate yet" exist.
+	bootstrapSignedCutover := func(label, externalUserID, accountID string) {
+		t.Helper()
+		if _, err := store.pool.Exec(ctx, `INSERT INTO external_accounts(
+			id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+			VALUES($1,$2,$3,$4,$5,'test','verified')`, accountID, userID, sourceID, externalUserID,
+			"h1:"+testHash(label)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.pool.Exec(ctx, `INSERT INTO source_account_eligibility_state(
+			external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
+			cutover_manifest_hash,finalized_through,finalization_delay_seconds,eligibility_status)
+			VALUES($1,$2,$3,'SUB2_BALANCE_1E8',0,$4,$3,900,'active')`,
+			accountID, sourceID, anchor, manifestHash); err != nil {
+			t.Fatalf("bootstrap %s: %v", label, err)
+		}
+	}
+
+	// Account A: bootstrapped SIGNED_CUTOVER at the (pre-policy) global
+	// cutover, then a later post-policy reconciliation checkpoint arrives --
+	// the candidate anchor.
+	accountA := "30000000-0000-4000-8000-000000000251"
+	bootstrapSignedCutover("flag-a-bootstrap", "251", accountA)
+	candidateAsOf := policyStart.Add(1 * time.Hour)
+	if _, err := store.pool.Exec(ctx, `INSERT INTO balance_reconciliation_checkpoints(
+		id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
+		checkpoint_kind,baseline_member,as_of,balance_service_units,balance_negative,unit_code,
+		cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
+		source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+		VALUES($1,$2,$3,'evt-flag-a-candidate','chk-flag-a-candidate','reconciliation',FALSE,
+		$4,300,FALSE,'SUB2_BALANCE_1E8',$5,$6,'pending_finalization',1,'cur-flag-a-candidate',
+		$4,$7,$4)`, "40000000-0000-4000-8000-000000000251", sourceID, accountA, candidateAsOf,
+		manifestHash, configHash, testHash("flag-a-candidate-revision")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Account B: bootstrapped the same way, but no post-policy checkpoint has
+	// arrived yet -- nothing to flag.
+	accountB := "30000000-0000-4000-8000-000000000253"
+	bootstrapSignedCutover("flag-b-bootstrap", "253", accountB)
+
+	run := func(accountID string) {
+		t.Helper()
+		tx, err := store.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(context.Background()) }()
+		account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = flagPolicyAnchorMigrationBlockedTx(ctx, tx, account,
+			AuditActor{Type: "system", ID: "test", Reason: "policy anchor flag test"}); err != nil {
+			t.Fatal(err)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run(accountA)
+	var freezeCount int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes
+		WHERE external_account_id=$1 AND freeze_reason='POLICY_ANCHOR_BLOCKED' AND status='open'`,
+		accountA).Scan(&freezeCount); err != nil || freezeCount != 1 {
+		t.Fatalf("account A freeze count=%d err=%v", freezeCount, err)
+	}
+	var eligibilityStatus string
+	if err := store.pool.QueryRow(ctx, `SELECT eligibility_status FROM source_account_eligibility_state
+		WHERE external_account_id=$1`, accountA).Scan(&eligibilityStatus); err != nil || eligibilityStatus != "frozen" {
+		t.Fatalf("account A eligibility_status=%q err=%v", eligibilityStatus, err)
+	}
+	var blockedAudits int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='eligibility.policy_anchor.migration_blocked' AND object_id=$1`,
+		accountA).Scan(&blockedAudits); err != nil || blockedAudits != 1 {
+		t.Fatalf("account A migration_blocked audit count=%d err=%v", blockedAudits, err)
+	}
+
+	// Idempotent: running it again does not create a second open freeze.
+	run(accountA)
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes
+		WHERE external_account_id=$1 AND freeze_reason='POLICY_ANCHOR_BLOCKED' AND status='open'`,
+		accountA).Scan(&freezeCount); err != nil || freezeCount != 1 {
+		t.Fatalf("account A freeze count after re-run=%d err=%v", freezeCount, err)
+	}
+
+	run(accountB)
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes
+		WHERE external_account_id=$1 AND freeze_reason='POLICY_ANCHOR_BLOCKED'`,
+		accountB).Scan(&freezeCount); err != nil || freezeCount != 0 {
+		t.Fatalf("account B freeze count=%d err=%v (should be a no-op without a candidate checkpoint)", freezeCount, err)
+	}
+	if err := store.pool.QueryRow(ctx, `SELECT eligibility_status FROM source_account_eligibility_state
+		WHERE external_account_id=$1`, accountB).Scan(&eligibilityStatus); err != nil || eligibilityStatus != "active" {
+		t.Fatalf("account B eligibility_status=%q err=%v", eligibilityStatus, err)
 	}
 }

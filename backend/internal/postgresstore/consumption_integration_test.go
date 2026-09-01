@@ -1233,33 +1233,17 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 	}
 	accountCutover := globalCutover.Add(2 * time.Hour)
 	chain := newV3TestChain()
-	memberEvent := SourceBatchEvent{EventID: "8c000000-0000-4000-8000-000000000000",
-		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: strings.Repeat("0", 64),
-		PayloadCiphertext: bytes.Repeat([]byte{0}, 32), ObservedAt: accountCutover.Add(-time.Minute)}
-	memberCycle := chain.commit(t, store, ctx, sourceID, "balances",
-		"8d000000-0000-4000-8000-000000000000", accountCutover.Add(-time.Minute), []SourceBatchEvent{memberEvent})
-	memberErr := store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
-		SourceInstanceID: sourceID, ExternalUserID: "77", ExternalEventID: memberEvent.EventID,
-		CheckpointID: strings.Repeat("1", 64) + ":77", CheckpointKind: "reconciliation",
-		BalanceServiceUnits: "100", UnitCode: unitCode, SourceSnapshotID: testHash(memberCycle.cycleID),
-		SnapshotRowCount: "1", BaselineMember: true, AsOf: accountCutover.Add(-time.Minute),
-		ObservedAt: accountCutover.Add(-time.Minute), StreamWatermarkAt: accountCutover.Add(-time.Minute),
-		SourceCursor: "baseline-member:77", SourceRevision: memberEvent.PayloadHash,
-		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 1,
-		BatchID: memberCycle.batchID, ScanCycleID: memberCycle.cycleID,
-	}, AuditActor{Type: "source_connector", ID: sourceID})
-	if !errors.Is(memberErr, domain.ErrSourceUnavailable) {
-		t.Fatalf("baseline member was allowed to replace its signed cutover: %v", memberErr)
-	}
-	var prematureStates int
-	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state
-		WHERE external_account_id=$1`, accountID).Scan(&prematureStates); err != nil || prematureStates != 0 {
-		t.Fatalf("baseline member created conservative state count=%d err=%v", prematureStates, err)
-	}
-	if _, err := store.pool.Exec(ctx, `UPDATE source_economic_scan_cycles SET cycle_status='blocked'
-		WHERE source_instance_id=$1 AND stream_id='balances' AND scan_cycle_id=$2::uuid`, sourceID, memberCycle.cycleID); err != nil {
-		t.Fatal(err)
-	}
+	// A baseline-member checkpoint for this (in truth, brand-new) account is
+	// deliberately not exercised here: since XM-INV-POLICY-ANCHOR 2.1, a
+	// baseline member's post-policy checkpoint bootstraps directly
+	// (bootstrap_kind='POLICY_ANCHOR') instead of waiting for the signed
+	// cutover row -- the old "must wait forever" guard this block used to
+	// assert is exactly the behavior that design eliminates. That bootstrap
+	// path (including its migration-0016 trigger validation) is covered by
+	// TestPrePolicyReconciliationCheckpointIsIgnoredForAccountWithoutState;
+	// this test's own focus (a genuinely new, non-baseline account's
+	// POST_CUTOVER_REPLAY bootstrap and downstream subscription/wallet/usage
+	// ordering) is unrelated to that and starts directly below.
 	baselineEvent := SourceBatchEvent{EventID: "8c000000-0000-4000-8000-000000000001",
 		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: strings.Repeat("1", 64),
 		PayloadCiphertext: bytes.Repeat([]byte{1}, 32), ObservedAt: accountCutover}

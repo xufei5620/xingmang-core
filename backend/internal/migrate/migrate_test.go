@@ -206,6 +206,9 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	delete(all, "0010_eligibility_freeze_operations.sql")
 	delete(all, "0011_invoice_eligibility_policy.sql")
 	delete(all, "0012_economic_projection_contract_v4.sql")
+	// 0016 alters source_account_eligibility_state/eligibility_freezes, both
+	// created by the excluded 0009 -- same reason 0010-0012 are excluded here.
+	delete(all, "0016_policy_anchor.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
@@ -453,6 +456,165 @@ func TestEligibilityPolicyMigrationFailsClosedAndIsAtomic(t *testing.T) {
 		SET policy_version=policy_version+1,updated_by='forbidden-after-ingestion'
 		WHERE singleton_id=1`); err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("post-ingestion policy update error=%v", err)
+	}
+}
+
+// TestPolicyAnchorMigrationValidatesBootstrapKindAndTriggerBoundary covers
+// migration 0016: bootstrap_kind='POLICY_ANCHOR' is rejected before the
+// migration (not a recognized value yet), and after it, the deferred
+// cutover-boundary trigger enforces both of the new conditions -- a matching
+// anchor checkpoint must exist (condition b), and the claimed cutover_at
+// must be at/after the policy start (condition a).
+func TestPolicyAnchorMigrationValidatesBootstrapKindAndTriggerBoundary(t *testing.T) {
+	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	schema := fmt.Sprintf("migrate_policy_anchor_%d", time.Now().UnixNano())
+	identifier := pgx.Identifier{schema}.Sanitize()
+	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+identifier); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+identifier+" CASCADE") })
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	beforeAnchor := migrationMapBeforeReadinessIndex(t)
+	delete(beforeAnchor, "0016_policy_anchor.sql")
+	if err = UpFS(ctx, pool, beforeAnchor); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceID := "10000000-0000-4000-8000-0000000000a1"
+	userID := "20000000-0000-4000-8000-0000000000a1"
+	accountID := "30000000-0000-4000-8000-0000000000a1"
+	if _, err = pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','policy-anchor-migration-test','v3-test')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+		VALUES($1,'test','policy-anchor-migration-user')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+		VALUES($1,$2,$3,'a1',$4,'test','verified')`, accountID, userID, sourceID,
+		"h1:"+strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	var policyStart time.Time
+	if err = pool.QueryRow(ctx, `SELECT eligibility_start_at FROM invoice_eligibility_policy
+		WHERE singleton_id=1`).Scan(&policyStart); err != nil {
+		t.Fatal(err)
+	}
+	manifestHash := testChecksum("policy-anchor-migration-manifest")
+	configHash := testChecksum("policy-anchor-migration-config")
+	snapHash := testChecksum("policy-anchor-migration-snapshot")
+	cutoverAt := policyStart.Add(-10 * time.Hour)
+	if _, err = pool.Exec(ctx, `INSERT INTO source_cutover_manifests(
+		source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+		baseline_row_count,signing_key_id)
+		VALUES($1,$2,$3,$3,'v3-test','sub2api-economic-v4',$4,'SUB2_BALANCE_1E8',
+		'p0','u0','c0','b0',$5,$5,0,'test-key')`, sourceID, manifestHash, cutoverAt, configHash, snapHash); err != nil {
+		t.Fatal(err)
+	}
+
+	anchorAsOf := policyStart.Add(1 * time.Hour)
+	balanceUnits := "500"
+	insertPolicyAnchorState := func(tx pgx.Tx, id string, at time.Time, units string) error {
+		_, execErr := tx.Exec(ctx, `INSERT INTO source_account_eligibility_state(
+			external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
+			cutover_manifest_hash,bootstrap_kind,finalized_through,finalization_delay_seconds,
+			eligibility_status)
+			VALUES($1,$2,$3,'SUB2_BALANCE_1E8',$4::numeric,$5,'POLICY_ANCHOR',$3,900,'active')`,
+			id, sourceID, at, units, manifestHash)
+		return execErr
+	}
+
+	// (1) Pre-0016, POLICY_ANCHOR is not a recognized bootstrap_kind value at
+	// all -- rejected by the (unchanged) CHECK constraint immediately.
+	tx, beginErr := pool.Begin(ctx)
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	preErr := insertPolicyAnchorState(tx, accountID, anchorAsOf, balanceUnits)
+	_ = tx.Rollback(ctx)
+	if preErr == nil || !strings.Contains(preErr.Error(), "bootstrap_kind_check") {
+		t.Fatalf("pre-0016 POLICY_ANCHOR insert error=%v", preErr)
+	}
+
+	all := migrationMapBeforeReadinessIndex(t)
+	if err = UpFS(ctx, pool, all); err != nil {
+		t.Fatal(err)
+	}
+
+	// (2) Post-0016, a state row inserted before its matching reconciliation
+	// checkpoint (same transaction) succeeds: the trigger's own check is
+	// deferred to COMMIT, by which point the checkpoint (inserted second,
+	// required order -- see the migration file's own comment) exists too.
+	tx2, beginErr := pool.Begin(ctx)
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	if err = insertPolicyAnchorState(tx2, accountID, anchorAsOf, balanceUnits); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx2.Exec(ctx, `INSERT INTO balance_reconciliation_checkpoints(
+		id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
+		checkpoint_kind,baseline_member,source_snapshot_id,snapshot_row_count,
+		as_of,balance_service_units,balance_negative,unit_code,
+		cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
+		source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+		VALUES('40000000-0000-4000-8000-0000000000a1',$1,$2,'evt-a1','chk-a1',
+		'reconciliation',TRUE,$3,1,$4,$5::numeric,FALSE,'SUB2_BALANCE_1E8',
+		$6,$7,'cutover_baseline',1,'cur-a1',$4,$8,$4)`,
+		sourceID, accountID, snapHash, anchorAsOf, balanceUnits, manifestHash, configHash, manifestHash); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx2.Commit(ctx); err != nil {
+		t.Fatalf("valid POLICY_ANCHOR bootstrap rejected: %v", err)
+	}
+	var storedKind string
+	if err = pool.QueryRow(ctx, `SELECT bootstrap_kind FROM source_account_eligibility_state
+		WHERE external_account_id=$1`, accountID).Scan(&storedKind); err != nil || storedKind != "POLICY_ANCHOR" {
+		t.Fatalf("stored bootstrap_kind=%q err=%v", storedKind, err)
+	}
+
+	// (3) A claimed cutover_balance_units with no matching checkpoint at all
+	// (condition b unmet) fails at commit.
+	accountID2 := "30000000-0000-4000-8000-0000000000a2"
+	if _, err = pool.Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+		VALUES($1,$2,$3,'a2',$4,'test','verified')`, accountID2, userID, sourceID,
+		"h1:"+strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
+	tx3, beginErr := pool.Begin(ctx)
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	if err = insertPolicyAnchorState(tx3, accountID2, anchorAsOf, "999"); err != nil {
+		t.Fatal(err)
+	}
+	unanchoredErr := tx3.Commit(ctx)
+	if unanchoredErr == nil || !strings.Contains(unanchoredErr.Error(), "policy anchor boundary is invalid") {
+		t.Fatalf("unanchored POLICY_ANCHOR bootstrap error=%v", unanchoredErr)
 	}
 }
 

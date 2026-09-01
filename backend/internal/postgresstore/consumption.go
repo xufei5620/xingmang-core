@@ -1014,10 +1014,69 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			return tx.Commit(ctx)
 		}
 		if in.BaselineMember {
-			// This account existed in the signed global baseline. Its original
-			// cutover row may still be parked on identity binding and is the only
-			// row allowed to establish the earlier boundary.
-			return domain.ErrSourceUnavailable
+			// XM-INV-POLICY-ANCHOR 2.1: this reconciliation checkpoint is
+			// at/after the policy start, so bootstrap directly from it
+			// instead of waiting for the (possibly indefinitely parked)
+			// signed cutover row. The checkpoint's entire balance becomes the
+			// account's opening, non-invoiceable balance -- the same
+			// treatment a SIGNED_CUTOVER baseline gets, just anchored to a
+			// later point the invoice policy actually cares about. The state
+			// row must be inserted *before* the checkpoint row: the
+			// checkpoint table's own (unchanged, immediate)
+			// balance_reconciliation_checkpoints_contract_guard trigger
+			// requires a trusted state row to already exist, while this
+			// state row's own new POLICY_ANCHOR validation (migration 0016)
+			// is deferred to COMMIT specifically so it can, in turn, require
+			// this same checkpoint row to already exist by then.
+			eligibilityStatus := "active"
+			if in.CatchupKeyHMAC != "" {
+				if !dependencyHMACPattern.MatchString(in.CatchupKeyHMAC) {
+					return errors.New("invalid catch-up dependency key")
+				}
+				eligibilityStatus = "syncing"
+			}
+			_, err = tx.Exec(ctx, `
+				INSERT INTO source_account_eligibility_state(
+					external_account_id,source_instance_id,cutover_at,unit_code,cutover_balance_units,
+					cutover_manifest_hash,bootstrap_kind,finalized_through,finalization_delay_seconds,
+					catchup_key_hmac,eligibility_status)
+				VALUES($1,$2,$3,$4,$5::numeric,$6,'POLICY_ANCHOR',$3,$7,NULLIF($8,''),$9)`,
+				accountID, in.SourceInstanceID, in.AsOf.UTC(), in.UnitCode, balance.String(),
+				in.CutoverManifestHash, int(defaultEligibilityFinalizationDelay/time.Second),
+				in.CatchupKeyHMAC, eligibilityStatus)
+			if err != nil {
+				return err
+			}
+			checkpointID := randomUUID()
+			_, err = tx.Exec(ctx, `
+				INSERT INTO balance_reconciliation_checkpoints(
+					id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
+					checkpoint_kind,baseline_member,source_snapshot_id,snapshot_row_count,
+					as_of,balance_service_units,balance_negative,unit_code,
+					cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
+					source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+				VALUES($1,$2,$3,$4,$5,'reconciliation',TRUE,$6,$7,$8,$9::numeric,$10,$11,$12,$13,
+					'cutover_baseline',$14,$15,$16,$17,$18)`, checkpointID, in.SourceInstanceID,
+				accountID, in.ExternalEventID, in.CheckpointID, in.SourceSnapshotID,
+				snapshotRows.Int64(), in.AsOf.UTC(), balance.String(),
+				in.BalanceNegative, in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash,
+				in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt.UTC(), in.SourceRevision,
+				in.ObservedAt.UTC())
+			if err != nil {
+				return err
+			}
+			if in.BalanceNegative {
+				if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
+					"balance_checkpoint", in.CheckpointID, in.SourceRevision, actor); err != nil {
+					return err
+				}
+			}
+			if err = writeAudit(ctx, tx, actor, "eligibility.policy_anchor.bootstrapped", "external_account", accountID,
+				nil, map[string]any{"cutover_at": in.AsOf, "opening_units": balance.String(),
+					"status": eligibilityStatus}); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
 		}
 		if !in.AsOf.After(manifest.CutoverAt) {
 			return domain.ErrConflict
@@ -2233,6 +2292,61 @@ func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID,
 		}
 	}
 	return nil
+}
+
+// flagPolicyAnchorMigrationBlockedTx implements design XM-INV-POLICY-ANCHOR
+// 2.4's fallback, not its primary mechanism. The design calls for rewriting
+// an already-bootstrapped account's trust boundary in place (DELETE the old
+// source_account_eligibility_state row, INSERT a new one with
+// bootstrap_kind='POLICY_ANCHOR') the next time its eligibility projection
+// job runs. That DELETE is not actually possible: two tables hold a
+// non-deferrable ON DELETE RESTRICT foreign key on
+// source_account_eligibility_state(external_account_id) --
+// source_account_stream_watermarks, and eligibility_projection_jobs itself
+// (whose own row for this account, locked by the caller via
+// status='processing', necessarily still exists for the entire duration of
+// the job attempting the DELETE). Forcing it through would mean restructuring
+// this shared job's row-lifecycle contract (used by every account's ordinary
+// reprojection, not just this rare case) to delete-then-recreate its own
+// governing row mid-transaction -- a correctness-sensitive change to a
+// financial job queue's concurrency contract that is not this fallback's call
+// to make. Per instruction, this freezes the account for manual review
+// instead of forcing the migration through. Freezing does not skip the
+// normal reprojection that follows (still against the account's existing,
+// unchanged cutover boundary) -- the ledger math is unaffected either way;
+// freezing only blocks *new* invoice activity until a human resolves it,
+// which is the conservative choice once the account's boundary is known to
+// need re-anchoring.
+func flagPolicyAnchorMigrationBlockedTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, actor AuditActor) error {
+	if account.BootstrapKind != "SIGNED_CUTOVER" && account.BootstrapKind != "POST_CUTOVER_REPLAY" {
+		return nil
+	}
+	if !account.CutoverAt.Before(account.PolicyStartAt) {
+		return nil
+	}
+	var candidateAsOf time.Time
+	var candidateBalance string
+	err := tx.QueryRow(ctx, `
+		SELECT as_of,balance_service_units::text FROM balance_reconciliation_checkpoints
+		WHERE external_account_id=$1 AND checkpoint_kind='reconciliation' AND as_of>=$2
+		ORDER BY as_of,id LIMIT 1`, account.ExternalAccountID, account.PolicyStartAt).Scan(
+		&candidateAsOf, &candidateBalance)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No post-policy checkpoint has arrived yet to anchor to -- nothing
+		// to flag until one does.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err = freezeEligibilityTx(ctx, tx, account.ExternalAccountID, "", "POLICY_ANCHOR_BLOCKED",
+		"source_account_eligibility_state", account.ExternalAccountID, "", actor); err != nil {
+		return err
+	}
+	return writeAudit(ctx, tx, actor, "eligibility.policy_anchor.migration_blocked", "external_account",
+		account.ExternalAccountID, map[string]any{"bootstrap_kind": account.BootstrapKind,
+			"cutover_at": account.CutoverAt}, map[string]any{"candidate_bootstrap_kind": "POLICY_ANCHOR",
+			"candidate_cutover_at": candidateAsOf, "candidate_cutover_balance_units": candidateBalance})
 }
 
 func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, lease string, actor AuditActor) error {
