@@ -624,21 +624,23 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			return httpapi.SessionUser{}, fmt.Errorf("look up existing external account binding: %w", lookupErr)
 		}
 		if lookupErr == nil {
-			// Found: claim it. ClaimPlatformIdentity backfills
-			// invoice_users.platform/platform_user_id only if they are still
-			// NULL; the caller must still compare its return against what
-			// was asked, since it never overwrites an already-set value.
-			storedPlatform, storedPlatformUserID, claimErr := deps.ClaimPlatformIdentity(auditCtx, existing.PrincipalID, string(principal.Platform), principal.PlatformUserID)
-			if claimErr != nil {
+			// Found: this external_accounts row IS the ownership proof -- it
+			// was written either by the signed source projection or by an
+			// earlier verified password bind, and the platform just verified
+			// this login's password. Land the session on its invoice_user.
+			//
+			// ClaimPlatformIdentity backfills invoice_users.platform/
+			// platform_user_id only while both are still NULL and never
+			// overwrites. A user whose accounts on BOTH platforms are bound
+			// to one SSO invoice_user (the identity projection does exactly
+			// that) claims first with one platform; the other platform's
+			// stored pair then legitimately differs from this login's --
+			// that is a multi-platform identity, not a conflict, so it is
+			// NOT a rejection (the RC57 production canary rejected exactly
+			// this). The columns record the first password-login platform
+			// only; per-login platform identity lives on the session row.
+			if _, _, claimErr := deps.ClaimPlatformIdentity(auditCtx, existing.PrincipalID, string(principal.Platform), principal.PlatformUserID); claimErr != nil {
 				return httpapi.SessionUser{}, fmt.Errorf("claim existing platform identity: %w", claimErr)
-			}
-			if storedPlatform != string(principal.Platform) || storedPlatformUserID != principal.PlatformUserID {
-				// This invoice_user already carries a *different* platform
-				// identity: claiming it here would silently collapse two
-				// distinct platform accounts onto one invoice_user. Reject
-				// instead -- httpapi.completeLogin logs this with the full
-				// error chain before mapping it to USER_PROVISION_FAILED.
-				return httpapi.SessionUser{}, errors.New("external account is already bound to a different platform identity")
 			}
 			return loadSessionUser(auditCtx, deps, existing.PrincipalID)
 		}

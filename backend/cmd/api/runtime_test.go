@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"invoice-system/backend/internal/application"
@@ -162,35 +163,50 @@ func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *t
 	}
 }
 
-func TestProvisionPlatformOrOIDCUserRejectsWhenExistingIdentityBelongsToADifferentPlatformAccount(t *testing.T) {
-	// ClaimPlatformIdentity never overwrites an already-set platform/
-	// platform_user_id: if it reports back something other than what this
-	// login asked to claim, the invoice_user already carries a different
-	// platform identity and must not be silently taken over.
-	const otherUserID = "other-user-0003"
+func TestProvisionPlatformOrOIDCUserAcceptsMultiPlatformIdentity(t *testing.T) {
+	// The external_accounts binding row is the ownership proof. A user whose
+	// accounts on BOTH platforms are bound to one SSO invoice_user claims
+	// first with one platform; the stored platform columns then differ from
+	// the other platform's login. That is a multi-platform identity, not a
+	// takeover -- the login must land on the bound invoice_user (the RC57
+	// production canary was rejected here; RC58 accepts it).
+	const sharedUserID = "sso-user-0003"
 	deps := &fakeProvisionDeps{
 		getExternalAccount: func(string, string) (postgresstore.ExternalAccountRecord, error) {
-			return postgresstore.ExternalAccountRecord{PrincipalID: otherUserID}, nil
+			return postgresstore.ExternalAccountRecord{PrincipalID: sharedUserID}, nil
 		},
 		claim: func(string, string, string) (string, string, error) {
-			return "sub2api", "999-different-user", nil
+			// Stored pair belongs to the OTHER platform: never overwritten,
+			// and no longer a rejection.
+			return "sub2api", "1113", nil
+		},
+		getCurrentUser: func(userID string) (application.CurrentUser, error) {
+			if userID != sharedUserID {
+				return application.CurrentUser{}, errors.New("unexpected user id")
+			}
+			return application.CurrentUser{ID: sharedUserID, Status: "active",
+				OIDCIssuer: "https://auth.solov.example/realms/solov", OIDCSubject: "sso-subject"}, nil
 		},
 	}
 	identity := &fakeIdentityStore{}
-	principal := auth.Principal{Issuer: "https://api.solov.cc", Subject: "1113", Platform: auth.PlatformSub2API, PlatformUserID: "1113"}
-	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformSub2API: "sub2api-main"}
+	principal := auth.Principal{Issuer: "https://xm.solov.cc", Subject: "48", Platform: auth.PlatformNewAPI, PlatformUserID: "48"}
+	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformNewAPI: "newapi-main"}
 
-	if _, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-3", sourceInstanceIDs); err == nil {
-		t.Fatal("expected an error when the existing identity belongs to a different platform account")
+	user, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-3", sourceInstanceIDs)
+	if err != nil {
+		t.Fatalf("multi-platform identity login must succeed: %v", err)
+	}
+	if user.ID != sharedUserID {
+		t.Fatalf("session must land on the bound invoice_user: got %q want %q", user.ID, sharedUserID)
+	}
+	if user.CanonicalIssuer != "https://auth.solov.example/realms/solov" || user.CanonicalSubject != "sso-subject" {
+		t.Fatalf("canonical pair must be exposed for session issuance, got %q/%q", user.CanonicalIssuer, user.CanonicalSubject)
 	}
 	if identity.calls != 0 {
-		t.Fatalf("ResolveOrCreate must not run when the claim is rejected: calls=%d", identity.calls)
+		t.Fatalf("ResolveOrCreate must not run on the claim path: calls=%d", identity.calls)
 	}
 	if deps.ensureUserCalls != 0 || deps.bindCalls != 0 {
-		t.Fatalf("EnsureUser/BindExternalAccount must not run when the claim is rejected: ensure=%d bind=%d", deps.ensureUserCalls, deps.bindCalls)
-	}
-	if deps.getCurrentUserCalls != 0 {
-		t.Fatalf("no session should be loaded for a rejected claim: calls=%d", deps.getCurrentUserCalls)
+		t.Fatalf("EnsureUser/BindExternalAccount must not run on the claim path: ensure=%d bind=%d", deps.ensureUserCalls, deps.bindCalls)
 	}
 }
 
