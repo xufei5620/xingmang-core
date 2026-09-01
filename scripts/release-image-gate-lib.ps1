@@ -208,7 +208,7 @@ function Assert-PostgresGosuFindingScope {
             [string]$_.Status -ceq [string]$finding.Status
         })
         if ($matchingTuple.Count -ne 1) {
-            throw "PostgreSQL exception has no approved RC55 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
+            throw "PostgreSQL exception has no approved RC56 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
         }
     }
     return $true
@@ -599,10 +599,10 @@ function Assert-StrictReleaseDirectoryName {
 function Get-StrictSignedReleaseTagRef {
     param([Parameter(Mandatory)][string]$SignedReleaseTag)
 
-    if ($SignedReleaseTag -cne 'v0.1.0-rc55-signed') {
-        throw 'strict transfer requires the exact signed RC55 tag v0.1.0-rc55-signed'
+    if ($SignedReleaseTag -cne 'v0.1.0-rc56-signed') {
+        throw 'strict transfer requires the exact signed RC56 tag v0.1.0-rc56-signed'
     }
-    return 'refs/tags/v0.1.0-rc55-signed'
+    return 'refs/tags/v0.1.0-rc56-signed'
 }
 
 function Assert-TransferReadyManifest {
@@ -617,28 +617,28 @@ function Assert-TransferReadyManifest {
     try {
         $releaseNameProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'releaseName' -Context 'manifest'
     } catch {
-        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc55 is mandatory'
+        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc56 is mandatory'
     }
     if ($releaseNameProperty.Value -isnot [string] -or
-        [string]$releaseNameProperty.Value -cne '0.1.0-rc55') {
-        throw 'strict transfer requires manifest releaseName=0.1.0-rc55'
+        [string]$releaseNameProperty.Value -cne '0.1.0-rc56') {
+        throw 'strict transfer requires manifest releaseName=0.1.0-rc56'
     }
 
     $expectedImageReferences = [ordered]@{
-        api = 'invoice-system-api:0.1.0-rc55'
-        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc55'
-        tools = 'invoice-system-tools:0.1.0-rc55'
-        web = 'invoice-system-web:0.1.0-rc55'
-        'source-agent' = 'invoice-source-agent:0.1.0-rc55'
-        'postgres-runtime' = 'invoice-postgres:0.1.0-rc55'
-        'clamav-runtime' = 'invoice-clamav:0.1.0-rc55'
-        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc55'
-        keycloak = 'invoice-keycloak:0.1.0-rc55'
+        api = 'invoice-system-api:0.1.0-rc56'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc56'
+        tools = 'invoice-system-tools:0.1.0-rc56'
+        web = 'invoice-system-web:0.1.0-rc56'
+        'source-agent' = 'invoice-source-agent:0.1.0-rc56'
+        'postgres-runtime' = 'invoice-postgres:0.1.0-rc56'
+        'clamav-runtime' = 'invoice-clamav:0.1.0-rc56'
+        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc56'
+        keycloak = 'invoice-keycloak:0.1.0-rc56'
     }
     $imagesProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'images' -Context 'manifest'
     if ($imagesProperty.Value -isnot [System.Array] -or
         $imagesProperty.Value.Count -ne $expectedImageReferences.Count) {
-        throw 'strict transfer requires the exact RC55 image inventory'
+        throw 'strict transfer requires the exact RC56 image inventory'
     }
     foreach ($expectedImage in $expectedImageReferences.GetEnumerator()) {
         $matchingRecords = @()
@@ -650,12 +650,12 @@ function Assert-TransferReadyManifest {
             }
         }
         if ($matchingRecords.Count -ne 1) {
-            throw 'strict transfer requires the exact RC55 image inventory'
+            throw 'strict transfer requires the exact RC56 image inventory'
         }
         $referenceProperty = Get-RequiredExactProperty -InputObject $matchingRecords[0] -PropertyName 'reference' -Context "manifest image $($expectedImage.Key)"
         if ($referenceProperty.Value -isnot [string] -or
             [string]$referenceProperty.Value -cne [string]$expectedImage.Value) {
-            throw 'strict transfer requires the exact RC55 image inventory'
+            throw 'strict transfer requires the exact RC56 image inventory'
         }
     }
 

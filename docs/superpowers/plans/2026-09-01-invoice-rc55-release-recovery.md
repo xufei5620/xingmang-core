@@ -1,5 +1,11 @@
 # RC55 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC55 shipped at signed tag
+> `v0.1.0-rc55-signed` (`f36ed2b`) and is deployed, but its credentialed
+> canary failed at second-user platform binding (UNIQUE NULLS NOT DISTINCT
+> subject HMAC, SQLSTATE 23505); its evidence is immutable. Continue only
+> with `docs/superpowers/plans/2026-09-01-invoice-rc56-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC55 — the platform-password session fix (auth_sessions.roles/amr NOT NULL vs nil slices, SQLSTATE 23502) found by the first real RC54 production canary login.
