@@ -1,5 +1,11 @@
 # RC56 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC56 shipped at signed tag
+> `v0.1.0-rc56-signed` (`74a726b`) and is deployed, but its credentialed
+> canary failed at claim-session issuance (auth_sessions canonical-pair
+> guard, ErrIdentityMismatch); its evidence is immutable. Continue only
+> with `docs/superpowers/plans/2026-09-01-invoice-rc57-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC56 — platform-password bindings now carry deterministic per-user subject blind indexes (the UNIQUE NULLS NOT DISTINCT constraint blocked every second platform user, SQLSTATE 23505) and wake the user's parked source facts on first binding; both found by the RC55 production canary.
