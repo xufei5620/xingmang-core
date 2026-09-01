@@ -124,6 +124,60 @@ func setFixtureConsumedCash(t *testing.T, store *Store, ctx context.Context, lot
 	}
 }
 
+// processEligibilityWithoutReanchor drives the same projection sequence
+// processEligibilityProjectionJob does (ensureBalanceCarryForwardProofTx,
+// reprojectEligibilityTx twice, evaluatePendingBalanceEvidenceTx, then
+// advancing finalized_through), called directly rather than through
+// ProcessEligibilityProjectionJobs/the job queue, skipping only
+// reanchorLegacyEligibilityAccountTx. Fixtures predating design 2.4 --
+// a SIGNED_CUTOVER/POST_CUTOVER_REPLAY account with a later reconciliation
+// checkpoint dated at/after the current policy start -- have that checkpoint
+// mistaken for a re-anchor candidate by ProcessEligibilityProjectionJobs's
+// normal path even though the test itself is checking something entirely
+// unrelated; this reproduces every other step of production job processing
+// faithfully while sidestepping only that one check.
+func processEligibilityWithoutReanchor(t *testing.T, store *Store, ctx context.Context, accountID string, through time.Time, actor AuditActor) {
+	t.Helper()
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBalanceCarryForwardProofTx(ctx, tx, account, through, actor); err != nil {
+		t.Fatal(err)
+	}
+	if err := reprojectEligibilityTx(ctx, tx, accountID, through, actor); err != nil {
+		t.Fatal(err)
+	}
+	if err := evaluatePendingBalanceEvidenceTx(ctx, tx, accountID, through, actor); err != nil {
+		t.Fatal(err)
+	}
+	if err := reprojectEligibilityTx(ctx, tx, accountID, through, actor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE source_account_eligibility_state
+		SET finalized_through=GREATEST(finalized_through,$1),projection_version=projection_version+1,updated_at=now()
+		WHERE external_account_id=$2`, through, accountID); err != nil {
+		t.Fatal(err)
+	}
+	// processEligibilityProjectionJob deletes its own leased job row once
+	// done; this bypass never claimed one via a lease, but any job queued
+	// for this account (e.g. by finalizeSourceAccountsTx's auto-queue on
+	// cycle publish) must still be cleared here, or Submit's projectionPending
+	// check would see it as perpetually pending.
+	if _, err := tx.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSubmitTransactionIdempotencyAndConcurrency(t *testing.T) {
 	store, ctx := integrationStore(t)
 	base := SubmitInput{PrincipalID: "20000000-0000-4000-8000-000000000001", ProfileID: "40000000-0000-4000-8000-000000000001", SourceInstanceID: "10000000-0000-4000-8000-000000000001", ProfileSnapshotCiphertext: []byte("encrypted-snapshot"), Allocations: []AllocationInput{{FundingLotID: "50000000-0000-4000-8000-000000000001", AmountMinor: 20_000}}}

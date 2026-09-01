@@ -347,11 +347,10 @@ func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testin
 		t.Fatal(err)
 	}
 	markV3CycleProcessed(t, store, ctx, sourceID, "balances", matchingBalanceCycle)
-	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute),
-		AuditActor{Type: "system", ID: "test-worker"})
-	if err != nil || processed != 1 {
-		t.Fatalf("projection jobs processed=%d err=%v", processed, err)
-	}
+	// This account is SIGNED_CUTOVER and the reconciliation checkpoint above
+	// is unrelated to design 2.4; see processEligibilityWithoutReanchor's
+	// doc comment for why the job queue is bypassed here.
+	processEligibilityWithoutReanchor(t, store, ctx, accountID, finalCeiling, AuditActor{Type: "system", ID: "test-worker"})
 	lot, err := store.GetFundingLot(ctx, lotID)
 	if err != nil || lot.ConsumedCashMinor != 60_000 || lot.AvailableMinor() != 60_000 {
 		t.Fatalf("projected lot=%+v err=%v", lot, err)
@@ -456,11 +455,7 @@ func TestV3FinalizedUsagePublishesConsumedCashAndAllowsPartialInvoices(t *testin
 		t.Fatal(err)
 	}
 	markV3CycleProcessed(t, store, ctx, sourceID, "balances", negativeCycle)
-	processed, err = store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute),
-		AuditActor{Type: "system", ID: "test-worker"})
-	if err != nil || processed != 1 {
-		t.Fatalf("negative checkpoint projection jobs=%d err=%v", processed, err)
-	}
+	processEligibilityWithoutReanchor(t, store, ctx, accountID, finalCeiling.Add(time.Minute), AuditActor{Type: "system", ID: "test-worker"})
 	var status string
 	if err = store.pool.QueryRow(ctx, `SELECT eligibility_status FROM source_account_eligibility_state
 		WHERE external_account_id=$1`, accountID).Scan(&status); err != nil || status != "frozen" {
@@ -1042,15 +1037,16 @@ func TestUnknownPositiveCheckpointIsConservativelyPlacedBeforeIntervalUsage(t *t
 		strings.Repeat("3", 64)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.pool.Exec(ctx, `INSERT INTO eligibility_projection_jobs(
-		external_account_id,requested_through,status) VALUES($1,$2,'queued')`, accountID, finalized); err != nil {
-		t.Fatal(err)
-	}
-	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute),
-		AuditActor{Type: "system", ID: "test-worker"})
-	if err != nil || processed != 1 {
-		t.Fatalf("unknown positive job processed=%d err=%v", processed, err)
-	}
+	// This fixture's account is SIGNED_CUTOVER (integrationStore's shared
+	// default bootstrap) and the reconciliation checkpoint above happens to
+	// be dated at/after integrationStore's own default policy start
+	// (fixtureNow-24h) -- through the job queue,
+	// reanchorLegacyEligibilityAccountTx's candidate lookup would mistake it
+	// for a design-2.4 re-anchor candidate, which is unrelated to what this
+	// test (predating that slice) actually exercises: unknown-positive
+	// checkpoint placement. See processEligibilityWithoutReanchor's doc
+	// comment for why the job queue is bypassed here.
+	processEligibilityWithoutReanchor(t, store, ctx, accountID, finalized, AuditActor{Type: "system", ID: "test-worker"})
 	lot, err := store.GetFundingLot(ctx, lotID)
 	if err != nil || lot.ConsumedCashMinor != 30_000 {
 		t.Fatalf("unknown positive was not conservatively applied before usage: lot=%+v err=%v", lot, err)
@@ -1196,12 +1192,26 @@ func TestSubscriptionCashRequiresActualUsageEvidenceAndRefundPermanentlyFreezes(
 }
 
 func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWithoutUsage(t *testing.T) {
-	store, ctx := integrationStore(t)
-	sourceID := "10000000-0000-4000-8000-000000000001"
+	// A dedicated policy start and source instance/manifest, not
+	// integrationStore's shared defaults: RegisterCutoverManifest requires
+	// CutoverAt strictly before the *current* policy start, while this
+	// test's own account cutover (2h after the manifest cutover, with
+	// further offsets up to +2h30m past that) must be at/after policy start
+	// (to bootstrap POLICY_ANCHOR, not be skipped as pre-policy) and still
+	// at/before real wall-clock now (migration 0016's POLICY_ANCHOR
+	// validation). integrationStore's default policy start (fixtureNow-24h)
+	// combined with its shared manifest's cutover (pinned to essentially
+	// "now" by UpsertFundingLot's immutable, one-time bootstrap) leaves no
+	// window satisfying all three at once, so this test picks its own.
+	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
+	policyStart := fixtureNow.Add(-5 * time.Hour)
+	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
+	sourceID := "10000000-0000-4000-8000-000000000077"
 	userID := "20000000-0000-4000-8000-000000000077"
 	accountID := "30000000-0000-4000-8000-000000000077"
 	profileID := "40000000-0000-4000-8000-000000000077"
-	if _, err := store.pool.Exec(ctx, `UPDATE source_instances SET runtime_version='v3-test' WHERE id=$1`, sourceID); err != nil {
+	if _, err := store.pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','new-account-cutover-test','v3-test')`, sourceID); err != nil {
 		t.Fatal(err)
 	}
 	for _, stream := range []string{"payments", "usage", "credits", "balances"} {
@@ -1224,42 +1234,41 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 		EmailCiphertext: []byte("encrypted-email")}); err != nil {
 		t.Fatal(err)
 	}
-	var manifestHash, configHash, unitCode string
-	var globalCutover time.Time
-	if err := store.pool.QueryRow(ctx, `SELECT manifest_hash,configuration_hash,unit_code,cutover_at
-		FROM source_cutover_manifests WHERE source_instance_id=$1`, sourceID).Scan(
-		&manifestHash, &configHash, &unitCode, &globalCutover); err != nil {
-		t.Fatal(err)
-	}
-	accountCutover := globalCutover.Add(2 * time.Hour)
+	unitCode := "SUB2_BALANCE_1E8"
+	configHash := testHash("new-account-cutover-config")
+	globalCutover := policyStart.Add(-time.Minute)
 	chain := newV3TestChain()
-	memberEvent := SourceBatchEvent{EventID: "8c000000-0000-4000-8000-000000000000",
-		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: strings.Repeat("0", 64),
-		PayloadCiphertext: bytes.Repeat([]byte{0}, 32), ObservedAt: accountCutover.Add(-time.Minute)}
-	memberCycle := chain.commit(t, store, ctx, sourceID, "balances",
-		"8d000000-0000-4000-8000-000000000000", accountCutover.Add(-time.Minute), []SourceBatchEvent{memberEvent})
-	memberErr := store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
-		SourceInstanceID: sourceID, ExternalUserID: "77", ExternalEventID: memberEvent.EventID,
-		CheckpointID: strings.Repeat("1", 64) + ":77", CheckpointKind: "reconciliation",
-		BalanceServiceUnits: "100", UnitCode: unitCode, SourceSnapshotID: testHash(memberCycle.cycleID),
-		SnapshotRowCount: "1", BaselineMember: true, AsOf: accountCutover.Add(-time.Minute),
-		ObservedAt: accountCutover.Add(-time.Minute), StreamWatermarkAt: accountCutover.Add(-time.Minute),
-		SourceCursor: "baseline-member:77", SourceRevision: memberEvent.PayloadHash,
-		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 1,
-		BatchID: memberCycle.batchID, ScanCycleID: memberCycle.cycleID,
-	}, AuditActor{Type: "source_connector", ID: sourceID})
-	if !errors.Is(memberErr, domain.ErrSourceUnavailable) {
-		t.Fatalf("baseline member was allowed to replace its signed cutover: %v", memberErr)
-	}
-	var prematureStates int
-	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state
-		WHERE external_account_id=$1`, accountID).Scan(&prematureStates); err != nil || prematureStates != 0 {
-		t.Fatalf("baseline member created conservative state count=%d err=%v", prematureStates, err)
-	}
-	if _, err := store.pool.Exec(ctx, `UPDATE source_economic_scan_cycles SET cycle_status='blocked'
-		WHERE source_instance_id=$1 AND stream_id='balances' AND scan_cycle_id=$2::uuid`, sourceID, memberCycle.cycleID); err != nil {
+	manifestEvent := SourceBatchEvent{EventID: "8c000000-0000-4000-8000-000000000000",
+		EntityType: "cutover_manifest", Operation: "upsert", PayloadHash: testHash("new-account-cutover-manifest-event"),
+		PayloadCiphertext: bytes.Repeat([]byte{9}, 32), ObservedAt: globalCutover}
+	manifestCycle := chain.commit(t, store, ctx, sourceID, "balances",
+		"8d000000-0000-4000-8000-000000000000", globalCutover, []SourceBatchEvent{manifestEvent})
+	manifestHash := testHash("new-account-cutover-manifest")
+	if err := store.RegisterCutoverManifest(ctx, CutoverManifest{
+		SourceInstanceID: sourceID, ManifestHash: manifestHash, SourceRuntimeVersion: "v3-test",
+		ProjectionContract: "sub2api-economic-v4", ConfigurationHash: configHash,
+		UnitCode: unitCode, PaymentsCeiling: "p0", UsageCeiling: "u0",
+		CreditsCeiling: "c0", BalancesCeiling: "b0", BaselineSnapshotID: testHash("new-account-cutover-baseline"),
+		BaselineSnapshotHash: testHash("new-account-cutover-baseline"), BaselineRowCount: 0, SigningKeyID: "ignored-payload-key",
+		CutoverAt: globalCutover, DatabaseClock: globalCutover, StreamWatermarkAt: globalCutover,
+		ExternalEventID: manifestEvent.EventID, BatchID: manifestCycle.batchID,
+		ScanCycleID: manifestCycle.cycleID, SourceRevision: manifestEvent.PayloadHash,
+	}, AuditActor{Type: "source_connector", ID: sourceID}); err != nil {
 		t.Fatal(err)
 	}
+	markV3CycleProcessed(t, store, ctx, sourceID, "balances", manifestCycle)
+	accountCutover := globalCutover.Add(2 * time.Hour)
+	// A baseline-member checkpoint for this (in truth, brand-new) account is
+	// deliberately not exercised here: since XM-INV-POLICY-ANCHOR 2.1, a
+	// baseline member's post-policy checkpoint bootstraps directly
+	// (bootstrap_kind='POLICY_ANCHOR') instead of waiting for the signed
+	// cutover row -- the old "must wait forever" guard this block used to
+	// assert is exactly the behavior that design eliminates. That bootstrap
+	// path (including its migration-0016 trigger validation) is covered by
+	// TestPrePolicyReconciliationCheckpointIsIgnoredForAccountWithoutState;
+	// this test's own focus (a genuinely new, non-baseline account's
+	// POST_CUTOVER_REPLAY bootstrap and downstream subscription/wallet/usage
+	// ordering) is unrelated to that and starts directly below.
 	baselineEvent := SourceBatchEvent{EventID: "8c000000-0000-4000-8000-000000000001",
 		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: strings.Repeat("1", 64),
 		PayloadCiphertext: bytes.Repeat([]byte{1}, 32), ObservedAt: accountCutover}
@@ -1278,9 +1287,14 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 		t.Fatal(err)
 	}
 	markV3CycleProcessed(t, store, ctx, sourceID, "balances", baselineCycle)
+	// XM-INV-POLICY-ANCHOR 2.1 superseded POST_CUTOVER_REPLAY here: a
+	// non-baseline account's post-policy checkpoint now bootstraps directly
+	// via POLICY_ANCHOR, same as a baseline member's would (see the doc
+	// comment above) -- no code path creates a new POST_CUTOVER_REPLAY row
+	// any more.
 	var bootstrapKind string
 	if err := store.pool.QueryRow(ctx, `SELECT bootstrap_kind FROM source_account_eligibility_state
-		WHERE external_account_id=$1`, accountID).Scan(&bootstrapKind); err != nil || bootstrapKind != "POST_CUTOVER_REPLAY" {
+		WHERE external_account_id=$1`, accountID).Scan(&bootstrapKind); err != nil || bootstrapKind != "POLICY_ANCHOR" {
 		t.Fatalf("new account bootstrap kind=%q err=%v", bootstrapKind, err)
 	}
 	var prematureJobs int
@@ -1336,9 +1350,26 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceCursor: "new-pre-wallet:77",
 		BatchID: preCycle.batchID, ScanCycleID: preCycle.cycleID, StreamWatermarkAt: accountCutover.Add(time.Minute),
 	}, AuditActor{Type: "source_connector", ID: sourceID})
-	if err != nil || preWallet.Lot.EligibilityKind != domain.EligibilityWalletCash ||
-		preWallet.Lot.ConsumedCashMinor != 0 || preWallet.Lot.AvailableMinor() != 0 {
-		t.Fatalf("post-policy pre-binding wallet payment was not retained for replay: lot=%+v err=%v", preWallet.Lot, err)
+	// Under the pre-2.1 POST_CUTOVER_REPLAY bootstrap, a POST_CUTOVER_REPLAY
+	// account's cutover_at was pinned to the source's own global cutover, so
+	// a wallet payment completed anywhere after that (even before this
+	// specific account's later per-account boundary) was retained,
+	// unclassified, for later replay. XM-INV-POLICY-ANCHOR 2.1 changes what
+	// cutover_at means for a bootstrapped account: for POLICY_ANCHOR it is
+	// the anchoring checkpoint's own as_of (accountCutover here, 2h after
+	// globalCutover), not the manifest's global cutover -- applyFundingObservationEligibilityTx's
+	// wallet-cash branch keys off account.CutoverAt, so a wallet payment
+	// completed before that (like preWallet's, only 1h after globalCutover)
+	// is simply not in scope for this account yet and is left at its
+	// unclassified default (LEGACY_NON_INVOICEABLE, frozen), not "retained
+	// for replay" under a wider global-cutover window that no longer exists
+	// for this bootstrap kind. domain.EligibilitySubscriptionCash is
+	// unaffected (it keys off account.GlobalCutoverAt, unchanged by 2.1),
+	// which is exactly why the subscription checked just above this still
+	// passes unmodified.
+	if err != nil || preWallet.Lot.EligibilityKind != domain.EligibilityLegacyNonInvoiceable ||
+		preWallet.Lot.EligibilityStatus != "frozen" || preWallet.Lot.AvailableMinor() != 0 {
+		t.Fatalf("post-global, pre-account-cutover wallet payment classification changed unexpectedly: lot=%+v err=%v", preWallet.Lot, err)
 	}
 	preGlobalSubscription, err := store.ObserveFundingLot(ctx, SourceObservation{
 		Lot: domain.FundingLot{PrincipalID: userID, SourceInstanceID: sourceID, SourceType: domain.SourceSub2API,
@@ -1391,9 +1422,16 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 		PayloadCiphertext: bytes.Repeat([]byte{6}, 32), ObservedAt: finalCeiling}
 	usageCycle := chain.commit(t, store, ctx, sourceID, "usage",
 		"8d000000-0000-4000-8000-000000000004", finalCeiling, []SourceBatchEvent{usageEvent})
+	// 100 units, not the pre-2.1 fixture's 150: postPayment alone provides
+	// 100 units of eligible cash now that preWallet no longer becomes
+	// cash-eligible (see the comment above), so 150 units would exceed
+	// available cash and freeze the account (USAGE_EXCEEDS_LEDGER,
+	// pre-existing and unrelated to this slice) instead of exercising what
+	// this section actually targets: post-bootstrap wallet usage becoming
+	// eligible and getting consumed.
 	if err = store.ObserveUsageEvent(ctx, UsageObservation{SourceInstanceID: sourceID, ExternalUserID: "77",
 		ExternalEventID: usageEvent.EventID, ExternalUsageID: "new-account-usage", EventTime: accountCutover.Add(10 * time.Minute),
-		ObservedAt: finalCeiling, StreamWatermarkAt: finalCeiling, ServiceUnits: "150", UnitCode: unitCode,
+		ObservedAt: finalCeiling, StreamWatermarkAt: finalCeiling, ServiceUnits: "100", UnitCode: unitCode,
 		BillingScope: "wallet", CausalDomain: "new-account-ledger", CausalOrder: "2",
 		SourceCursor: "new-usage:77", SourceRevision: usageEvent.PayloadHash,
 		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 1,
@@ -1427,11 +1465,14 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 		t.Fatalf("new-account post-bootstrap projection processed=%d err=%v", processed, err)
 	}
 	postPaymentLot, err := store.GetFundingLot(ctx, postPayment.Lot.ID)
-	if err != nil || postPaymentLot.ConsumedCashMinor != 50_000 {
+	if err != nil || postPaymentLot.ConsumedCashMinor != 100_000 {
 		t.Fatalf("post-bootstrap wallet usage did not become eligible: lot=%+v err=%v", postPaymentLot, err)
 	}
+	// preWallet stays LEGACY_NON_INVOICEABLE (established above) and
+	// contributes no eligible cash, so it must remain untouched by this
+	// projection, not partially consumed.
 	preWalletLot, err := store.GetFundingLot(ctx, preWallet.Lot.ID)
-	if err != nil || preWalletLot.ConsumedCashMinor != 50_000 {
-		t.Fatalf("pre-binding post-policy payment was not consumed first: lot=%+v err=%v", preWalletLot, err)
+	if err != nil || preWalletLot.ConsumedCashMinor != 0 {
+		t.Fatalf("non-cash-eligible pre-account-cutover payment was unexpectedly consumed: lot=%+v err=%v", preWalletLot, err)
 	}
 }
