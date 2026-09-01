@@ -32,7 +32,7 @@ type fakeSourceFilterOperations struct {
 func (f *fakeSourceFilterOperations) SourceHealth(context.Context) (postgresstore.SourceHealthReport, error) {
 	panic("unused in this test")
 }
-func (f *fakeSourceFilterOperations) ListExternalAccounts(context.Context, string) ([]postgresstore.ConnectedSourceAccount, error) {
+func (f *fakeSourceFilterOperations) ListExternalAccounts(context.Context, string, domain.SourceType) ([]postgresstore.ConnectedSourceAccount, error) {
 	panic("unused in this test")
 }
 func (f *fakeSourceFilterOperations) ListPaymentCandidatesPage(_ context.Context, in postgresstore.PaymentCandidatePageQuery) (postgresstore.PaymentCandidatePage, error) {
@@ -58,13 +58,13 @@ func (f *fakeSourceFilterOperations) ListEligibilityFreezesPage(context.Context,
 func (f *fakeSourceFilterOperations) ResolveEligibilityFreeze(context.Context, string, string, int64, string, string) (postgresstore.EligibilityFreeze, error) {
 	panic("unused in this test")
 }
-func (f *fakeSourceFilterOperations) ListUserEligibilitySummaries(context.Context, string) ([]application.UserEligibilitySummary, error) {
+func (f *fakeSourceFilterOperations) ListUserEligibilitySummaries(context.Context, string, domain.SourceType) ([]application.UserEligibilitySummary, error) {
 	panic("unused in this test")
 }
 func (f *fakeSourceFilterOperations) ResolveRefundCase(context.Context, string, string, string, string, string) (postgresstore.RefundCase, error) {
 	panic("unused in this test")
 }
-func (f *fakeSourceFilterOperations) GetInvoiceDeliveryState(context.Context, string, string, bool) (postgresstore.InvoiceDeliveryState, error) {
+func (f *fakeSourceFilterOperations) GetInvoiceDeliveryState(context.Context, string, string, bool, domain.SourceType) (postgresstore.InvoiceDeliveryState, error) {
 	panic("unused in this test")
 }
 func (f *fakeSourceFilterOperations) RequeueEmail(context.Context, string, string, string) (domain.EmailOutbox, error) {
