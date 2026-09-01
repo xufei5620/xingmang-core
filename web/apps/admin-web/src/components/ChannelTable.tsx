@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PageState, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
@@ -25,6 +26,21 @@ import { ChannelScopeNote } from "./ChannelScopeNote";
 import { channelTableColumns, type ChannelPlatform } from "./ChannelTableColumns";
 import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
 import { ManagedChannelTable } from "./ManagedChannelTable";
+import { UpstreamAccountsPanel } from "./UpstreamAccountsPanel";
+
+/** 旧 `?tab=suppliers` 书签改跳 `?tab=upstream` 之后带的锚点
+ *  （`lib/platforms.ts` 的 `LEGACY_TAB_ALIAS_ANCHORS`）。挂载时如果地址栏
+ *  正好是这个锚点，滚到「上游管理」区块——单纯改 `?tab=` 只把人带到渠道管理
+ *  页顶部，看不出「上游管理去哪了」。 */
+const UPSTREAM_MANAGEMENT_ANCHOR = "upstream-management";
+
+function useScrollToUpstreamAnchor() {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.location.hash !== `#${UPSTREAM_MANAGEMENT_ANCHOR}`) return;
+    document.getElementById(UPSTREAM_MANAGEMENT_ANCHOR)?.scrollIntoView({ block: "start" });
+  }, []);
+}
 
 /** 渠道管理表（两个平台共用）。原型 `V["s2/upstream"]` / `V["newapi/upstream"]`。
  *
@@ -56,6 +72,8 @@ export function ChannelTable({
   serviceId?: string;
   serviceStatus?: string;
 }) {
+  useScrollToUpstreamAnchor();
+
   const summaryQuery = useQuery({
     queryKey: ["finance", "channels", "summary"],
     queryFn: ({ signal }) => listChannelSummaries({ signal }),
@@ -76,65 +94,81 @@ export function ChannelTable({
 
   // 只有一个已登记且 active 的 service 才切换到 ChannelRef 粒度；
   // 多实例或降级状态继续使用已验证的上游账号汇总，避免猜测归属。
-  if (serviceId && serviceStatus === "active") {
-    return <ManagedChannelTable platform={platform} serviceId={serviceId} />;
-  }
+  //
+  // 2026-09-02 起：无论走哪条粒度，口径声明 / 顶部四格 / 「上游管理」
+  // 区块都不再因为分支而缺席——之前 ChannelRef 分支整段提前 return,
+  // 生产环境（单实例 active，恰好走这条分支）因此看不到这三样东西,
+  // 这正是 ACCEPTANCE-LOG 记录的"现状渠道管理页偏离原型"的一部分。
+  const mainTable =
+    serviceId && serviceStatus === "active" ? (
+      <ManagedChannelTable platform={platform} serviceId={serviceId} />
+    ) : (
+      <PersistentDataTable
+        tableKey={platformSavedViewTableKey(platform, "channels")}
+        caption={`${platform === "sub2api" ? "Sub2API" : "NewAPI"} 逐上游账号的成本、我方计费消耗与毛利`}
+        columns={columns}
+        rows={rows}
+        rowKey={(row) => row.id}
+        pageSize={10}
+        searchable
+        stickyFirstColumn
+        defaultDensity="compact"
+        filters={[
+          { columnId: "platform", label: "平台 / 来源", options: PLATFORM_FILTERS },
+          { columnId: "status", label: "状态", options: STATUS_FILTERS },
+        ]}
+        views={[
+          {
+            name: "需关注",
+            state: {
+              query: "",
+              filters: { status: "需关注" },
+              sort: null,
+              visibleColumns: allColumnIds,
+              density: "compact",
+            },
+          },
+          {
+            name: "未归属",
+            state: {
+              query: "",
+              filters: { platform: "未归属" },
+              sort: null,
+              visibleColumns: allColumnIds,
+              density: "compact",
+            },
+          },
+        ]}
+        emptyState={
+          <PageState
+            kind="empty"
+            title="还没有上游账号"
+            description="登记簿里这个环境下还没有归属本平台（或未配对）的上游账号；到下方「上游管理」区块登记之后会出现在这里"
+          />
+        }
+      />
+    );
 
   return (
-    <section className="flex flex-col gap-3">
-      <p className="text-xs text-fg-muted">{lead}</p>
-      <ChannelScopeNote platform={platform} />
-      <ApiStateView
-        isPending={summaryQuery.isPending}
-        error={summaryQuery.error}
-        onRetry={() => void summaryQuery.refetch()}
-      >
-        <ChannelTiles platform={platform} rows={rows} />
-        <PersistentDataTable
-          tableKey={platformSavedViewTableKey(platform, "channels")}
-          caption={`${platform === "sub2api" ? "Sub2API" : "NewAPI"} 逐上游账号的成本、我方计费消耗与毛利`}
-          columns={columns}
-          rows={rows}
-          rowKey={(row) => row.id}
-          pageSize={10}
-          searchable
-          stickyFirstColumn
-          defaultDensity="compact"
-          filters={[
-            { columnId: "platform", label: "平台 / 来源", options: PLATFORM_FILTERS },
-            { columnId: "status", label: "状态", options: STATUS_FILTERS },
-          ]}
-          views={[
-            {
-              name: "需关注",
-              state: {
-                query: "",
-                filters: { status: "需关注" },
-                sort: null,
-                visibleColumns: allColumnIds,
-                density: "compact",
-              },
-            },
-            {
-              name: "未归属",
-              state: {
-                query: "",
-                filters: { platform: "未归属" },
-                sort: null,
-                visibleColumns: allColumnIds,
-                density: "compact",
-              },
-            },
-          ]}
-          emptyState={
-            <PageState
-              kind="empty"
-              title="还没有上游账号"
-              description="登记簿里这个环境下还没有归属本平台（或未配对）的上游账号；到「上游管理」登记之后会出现在这里"
-            />
-          }
-        />
-      </ApiStateView>
+    <section className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
+        <p className="text-xs text-fg-muted">{lead}</p>
+        <ChannelScopeNote platform={platform} />
+        <ApiStateView
+          isPending={summaryQuery.isPending}
+          error={summaryQuery.error}
+          onRetry={() => void summaryQuery.refetch()}
+        >
+          <div className="flex flex-col gap-3">
+            <ChannelTiles platform={platform} rows={rows} />
+            {mainTable}
+          </div>
+        </ApiStateView>
+      </div>
+
+      <section id={UPSTREAM_MANAGEMENT_ANCHOR} className="scroll-mt-4">
+        <UpstreamAccountsPanel platform={platform} />
+      </section>
     </section>
   );
 }
@@ -142,8 +176,10 @@ export function ChannelTable({
 const PLATFORM_FILTERS = ["sub2api", "newapi", "未归属"] as const;
 const STATUS_FILTERS = ["正常", "需关注", "余额未知", "已停用"] as const;
 
-/** 顶部四格。 */
-function ChannelTiles({
+/** 顶部四格。原型逐格对齐；两个粒度的渠道表共用同一份（都是同一份
+ *  `finance.upstream_account` 汇总数据算出来的，跟表本身画的是哪个粒度
+ *  无关——渠道详情、映射确认这类**逐渠道**的事才分粒度）。 */
+export function ChannelTiles({
   platform,
   rows,
 }: {
