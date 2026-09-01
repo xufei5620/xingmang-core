@@ -2204,6 +2204,20 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	// The runtime role's defensive statement_timeout (15s) is sized for
+	// request-path queries. A first-login reprojection of a heavy account
+	// replays its full post-cutover history (thousands of usage facts) in
+	// this one SERIALIZABLE transaction and legitimately exceeds it -- the
+	// first such whale account in production wedged at PROJECTION_FAILED /
+	// SQLSTATE 57014 across 36 retries. Grant this job a bounded,
+	// transaction-local budget instead (same pattern the OIDC retention
+	// worker already uses); the advisory lock below serializes per account,
+	// so a long replay never blocks another account's job.
+	if _, err = tx.Exec(ctx, `
+		SELECT set_config('statement_timeout','300s',true),
+		       set_config('idle_in_transaction_session_timeout','300s',true)`); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
 		return err
 	}
