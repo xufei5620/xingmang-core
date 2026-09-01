@@ -175,6 +175,20 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     expect(withinSection.queryByText("不适用")).toBeNull();
   });
 
+  it("未接入字段的说明是逐字段的真实原因，不是笼统的「等 XM-CHAN-FIELDS0」（详情页与行内共用同一份原因）", async () => {
+    stubDetailApi({});
+    renderQueryPage(
+      "/platforms/sub2api/upstream/detail/channel-a",
+      <ChannelDetailPage />,
+      "/platforms/:serviceType/upstream/detail/:channelId",
+    );
+    await screen.findByText("OpenAI A");
+    const section = screen.getByRole("heading", { name: "容量与调度" }).closest("section") as HTMLElement;
+    const capacityTerm = within(section).getByText("容量 / 并发", { selector: "dt" });
+    expect(capacityTerm.getAttribute("title")).toMatch(/并发数据还没采集到/);
+    expect(capacityTerm.getAttribute("title")).not.toMatch(/XM-CHAN-FIELDS0/);
+  });
+
   it("XM-CHAN-FIELDS0 字段一旦非 null，「容量与调度」不用改代码就显示真值", async () => {
     stubDetailApi({
       channels: [

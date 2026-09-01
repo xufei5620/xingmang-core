@@ -10,6 +10,7 @@ import {
   type UpstreamAccountItem,
   type UpstreamSummary,
 } from "../api/finance";
+import { channelFieldNullReason, SCHEDULING_WRITE_HINT, USAGE_WINDOW_SUB2API_HINT } from "../lib/channelFieldReasons";
 import { formatScaledMinorUnits } from "../lib/money";
 import { RUNWAY_TONE, runwayReasonText } from "../lib/runway";
 import { channelDetailPath } from "../pages/ChannelDetailPage";
@@ -20,7 +21,20 @@ import { UpstreamAccountDialog } from "./UpstreamAccountDialog";
  *  `V["s2/upstream"]` / `V["newapi/upstream"]`），只在**恰好一个已登记且
  *  active 的 service** 时启用（见 `ChannelTable.tsx`）。
  *
- *  ## 三轮裁定叠加
+ *  ## XM-CHAN-WIRE0：8 个占位字段已经接上真实契约
+ *
+ *  下面「三轮裁定叠加」一节写于 XM-CHAN-FIELDS0（chanfields）交付渠道目录
+ *  契约扩展**之前**，当时 8 个字段恒为 null，只能显式标未接入。chanfields
+ *  已经交付（`0502e60`，两份契约文档 `contracts/connectors/{sub2api,newapi}.
+ *  channel-catalog.v3.md`），XM-CHAN-WIRE0（这一轮改动）把"未接入的原因"从
+ *  笼统的"等 chanfields"换成了逐字段、逐平台的真实原因（`FIELD_NULL_REASONS`
+ *  常量）——同一个字段在 Sub2API 上可能是"这次没采集到"，在 NewAPI 上可能是
+ *  "这个平台从设计上就没有这个概念"（恒为 null），两者的处理方式相同（都显式
+ *  标未接入），但 tooltip 里的原因不同，照抄自 chanfields 的契约文档，不是
+ *  猜的。`用量窗口` 额外说明：Sub2API 的真实值是费用上限占用率，不是
+ *  Anthropic 原生的 5 小时用量百分比，两者容易混淆，cell 的 title 里点明。
+ *
+ *  ## 三轮裁定叠加（历史记录，字段接入之前的状态）
  *
  *  04:40 裁定把这张表从 XM-C-MAP0 的映射工作台改回原型渠道表；同日 07:20/
  *  07:25 两条口径一致的补充裁定（先在 ACCEPTANCE-LOG 里发现、随后 team-lead
@@ -37,12 +51,13 @@ import { UpstreamAccountDialog } from "./UpstreamAccountDialog";
  *    不是从头到尾的未接入——与下面 8 个纯新增字段的诚实策略不同，这里是
  *    "有真数据就先用，新契约来了自动切换到更权威的来源"，不是无中生有
  *  - `容量/并发`、`调度`、`今日统计`、`用量窗口`、`最近使用`（必需列）与
- *    `代理`、`创建时间`、`过期时间`（可选列）这 8 个字段今天在
+ *    `代理`、`创建时间`、`过期时间`（可选列）这 8 个字段当时在
  *    `GET /api/v1/platforms/{p}/channels` 里恒为 null——已经把类型定好、
- *    按 XM-CHAN-FIELDS0 裁定给定的 JSON 名解析（`api/platformChannels.ts` 的
- *    `PlatformChannelFieldsExtension`），这里只管渲染：字段非 null 就显示
- *    真值，null 就显式未接入并说明原因。等 chanfields 交付，这张表**不需要
- *    再改代码**，后端一开始下发真值格子就自动"亮起来"
+ *    按裁定给定的 JSON 名解析（`api/platformChannels.ts` 的
+ *    `PlatformChannelFieldsExtension`），渲染逻辑早就写好了：字段非 null
+ *    显示真值，null 显式未接入并说明原因。chanfields 交付之后**真的没有再
+ *    改这部分渲染代码**，只在 XM-CHAN-WIRE0 这一轮把"未接入的原因"从笼统的
+ *    占位说明换成了上面提到的逐字段真实原因
  *  - `调度` 列即使字段到位也保持只读：渲染一个禁用态的开关控件 + 优先级,
  *    tooltip 固定文案「调度开关待 XM-SCHED0 Action」——写操作是另一个切片
  *  - `状态` 列**没有**接 `row.status`：那是 chanfields 还没定形的枚举，
@@ -179,14 +194,9 @@ function channelRefFilters(
 
 const MODELS_PENDING = "可用模型清单要渠道保障（M1.5）上线后才有：今天没有任何一个数据源在回答「这条渠道支持哪些模型、验证过几个」";
 
-/** XM-CHAN-FIELDS0 扩展渠道目录契约之前，8 个新增字段（容量/并发、调度、
- *  今日统计、用量窗口、最近使用、代理、创建时间、过期时间）在
- *  `GET /api/v1/platforms/{p}/channels` 里都不存在——不是"查出来是空"，
- *  是这个字段今天压根没有。统一给一段可复用的未接入说明，避免 8 处各写各的。 */
-function fieldsPendingHint(label: string, extra?: string): string {
-  const base = `${label}要并行切片 XM-CHAN-FIELDS0 扩展渠道目录契约（GET /api/v1/platforms/{p}/channels）之后才有；今天这个字段不存在，不是查出来是空`;
-  return extra ? `${base}。${extra}` : base;
-}
+/** 逐字段、逐平台的未接入原因——共享定义在 `lib/channelFieldReasons.ts`,
+ *  行列与渠道详情页共用同一份，改一处两边都同步。 */
+const nullReason = channelFieldNullReason;
 
 function pendingBadge(hint: string) {
   return (
@@ -258,9 +268,9 @@ function channelRefColumns({
             {row.capacity.used} / {row.capacity.limit}
           </span>
         ) : (
-          pendingBadge(fieldsPendingHint("容量 / 并发"))
+          pendingBadge(nullReason("capacity", platform))
         ),
-      headerTitle: fieldsPendingHint("容量 / 并发"),
+      headerTitle: nullReason("capacity", platform),
     },
     {
       id: "status",
@@ -272,27 +282,34 @@ function channelRefColumns({
     {
       id: "scheduling",
       header: "调度",
-      cell: (row) => <SchedulingCell row={row} />,
-      headerTitle: fieldsPendingHint("调度", "即使字段到位，开关 / 优先级这类写操作也另立 XM-SCHED0；本轮任何时候都只做只读展示"),
+      cell: (row) => <SchedulingCell row={row} platform={platform} />,
+      headerTitle: `${nullReason("scheduling", platform)}。开关 / 优先级这类写操作另立 XM-SCHED0；本轮任何时候都只做只读展示`,
     },
     {
       id: "todayStats",
       header: "今日统计",
-      cell: (row) => <TodayStatsCell row={row} />,
-      headerTitle: fieldsPendingHint("今日统计（请求数 · 成功率 · 消耗）"),
+      cell: (row) => <TodayStatsCell row={row} platform={platform} />,
+      headerTitle: `请求数 · 成功率 · 消耗。${nullReason("today", platform)}`,
     },
     {
       id: "usageWindow",
       header: "用量窗口",
-      cell: (row) => <UsageWindowCell row={row} account={boundAccount(row)} />,
-      headerTitle: "订阅账号显示用量窗口占比与重置时间；上游渠道没有这个概念，显示不适用；" + fieldsPendingHint("用量窗口"),
+      cell: (row) => <UsageWindowCell row={row} account={boundAccount(row)} platform={platform} />,
+      headerTitle:
+        platform === "sub2api"
+          ? "订阅账号显示费用上限占用率（不是 Anthropic 原生 5 小时用量百分比）与重置时间；上游渠道没有用量窗口这个概念，显示不适用。" +
+            nullReason("usageWindow", "sub2api")
+          : `上游渠道没有用量窗口这个概念，显示不适用。${nullReason("usageWindow", "newapi")}`,
     },
     {
       id: "rate",
       header: "倍率 / 上游倍率",
       value: (row) => row.rateMultiplier ?? boundAccount(row)?.group_rate ?? "",
       cell: (row) => <RateCell row={row} account={boundAccount(row)} />,
-      headerTitle: "倍率只展示，不并入成本折算（§10.2）。新契约字段（rate_multiplier/upstream_multiplier）到位前，先用登记簿 join 的 group_rate/recharge_ratio",
+      headerTitle:
+        platform === "sub2api"
+          ? "倍率只展示，不并入成本折算（§10.2）。rate_multiplier 是登记簿的 RateMultiplier；upstream_multiplier 只有开启过\"上游计费探测\"功能的账号才有值，多数账号本来就是 null，不是漏采；查不到时退回登记簿 join 的 group_rate/recharge_ratio"
+          : "倍率只展示，不并入成本折算（§10.2）。NewAPI 的计费倍率按模型 / 分组配置，没有渠道级的 rate_multiplier/upstream_multiplier 字段，恒为 null；这一格退回登记簿 join 的 group_rate/recharge_ratio",
     },
     {
       id: "balance",
@@ -316,8 +333,8 @@ function channelRefColumns({
       id: "lastUsed",
       header: "最近使用",
       value: (row) => row.lastUsedAt ?? "",
-      cell: (row) => (row.lastUsedAt ? <span className="text-xs">{row.lastUsedAt}</span> : pendingBadge(fieldsPendingHint("最近使用"))),
-      headerTitle: fieldsPendingHint("最近使用"),
+      cell: (row) => (row.lastUsedAt ? <span className="text-xs">{row.lastUsedAt}</span> : pendingBadge(nullReason("lastUsed", platform))),
+      headerTitle: nullReason("lastUsed", platform),
     },
     {
       id: "detail",
@@ -336,8 +353,8 @@ function channelRefColumns({
       id: "proxy",
       header: "代理",
       defaultHidden: true,
-      cell: (row) => (row.proxy ? <span className="text-xs">{row.proxy}</span> : pendingBadge(fieldsPendingHint("代理"))),
-      headerTitle: fieldsPendingHint("代理"),
+      cell: (row) => (row.proxy ? <span className="text-xs">{row.proxy}</span> : pendingBadge(nullReason("proxy", platform))),
+      headerTitle: nullReason("proxy", platform),
     },
     {
       id: "upstreamGroup",
@@ -389,16 +406,16 @@ function channelRefColumns({
       header: "创建时间",
       defaultHidden: true,
       value: (row) => row.createdAt ?? "",
-      cell: (row) => (row.createdAt ? <span className="text-xs">{row.createdAt}</span> : pendingBadge(fieldsPendingHint("创建时间"))),
-      headerTitle: fieldsPendingHint("创建时间"),
+      cell: (row) => (row.createdAt ? <span className="text-xs">{row.createdAt}</span> : pendingBadge(nullReason("createdAt", platform))),
+      headerTitle: nullReason("createdAt", platform),
     },
     {
       id: "expiresAt",
       header: "过期时间",
       defaultHidden: true,
       value: (row) => row.expiresAt ?? "",
-      cell: (row) => (row.expiresAt ? <span className="text-xs">{row.expiresAt}</span> : pendingBadge(fieldsPendingHint("过期时间"))),
-      headerTitle: fieldsPendingHint("过期时间"),
+      cell: (row) => (row.expiresAt ? <span className="text-xs">{row.expiresAt}</span> : pendingBadge(nullReason("expiresAt", platform))),
+      headerTitle: nullReason("expiresAt", platform),
     },
     {
       id: "upstreamContact",
@@ -458,8 +475,6 @@ function PlatformTypeCell({ row, account }: { row: PlatformChannelRow; account: 
   );
 }
 
-const SCHEDULING_WRITE_HINT = "调度开关待 XM-SCHED0 Action";
-
 /** 禁用态的开关外观——ui-primitives 今天没有现成的 Toggle/Switch 组件，这里
  *  用既有的 token 化工具类（边框/背景/圆角都取自设计令牌，没有硬编码颜色）
  *  画一个纯展示用的假开关，不是新增一个可复用组件（只在这一格用，不值得
@@ -486,10 +501,10 @@ function DisabledToggle({ checked }: { checked: boolean }) {
   );
 }
 
-function SchedulingCell({ row }: { row: PlatformChannelRow }) {
+function SchedulingCell({ row, platform }: { row: PlatformChannelRow; platform: "sub2api" | "newapi" }) {
   if (!row.scheduling) {
     return (
-      <div className="flex items-center gap-1.5" title={fieldsPendingHint("调度") + "；" + SCHEDULING_WRITE_HINT}>
+      <div className="flex items-center gap-1.5" title={`${nullReason("scheduling", platform)}；${SCHEDULING_WRITE_HINT}`}>
         <DisabledToggle checked={false} />
         <span className="text-xs text-fg-muted">未接入</span>
       </div>
@@ -503,8 +518,8 @@ function SchedulingCell({ row }: { row: PlatformChannelRow }) {
   );
 }
 
-function TodayStatsCell({ row }: { row: PlatformChannelRow }) {
-  if (!row.today) return pendingBadge(fieldsPendingHint("今日统计（请求数 · 成功率 · 消耗）"));
+function TodayStatsCell({ row, platform }: { row: PlatformChannelRow; platform: "sub2api" | "newapi" }) {
+  if (!row.today) return pendingBadge(nullReason("today", platform));
   const cost = formatScaledMinorUnits(row.today.costMinor, row.today.currency, row.today.scale);
   // successRate 是 0-1 的小数（契约的 ppm→小数换算），显示前要乘 100；
   // Sub2API 端这个子字段恒为 null（没有数据源），即使 requests/cost 是真的
@@ -516,7 +531,15 @@ function TodayStatsCell({ row }: { row: PlatformChannelRow }) {
   );
 }
 
-function UsageWindowCell({ row, account }: { row: PlatformChannelRow; account: UpstreamAccountItem | undefined }) {
+function UsageWindowCell({
+  row,
+  account,
+  platform,
+}: {
+  row: PlatformChannelRow;
+  account: UpstreamAccountItem | undefined;
+  platform: "sub2api" | "newapi";
+}) {
   const type = typeLabelFor(row, account);
   if (type === "上游渠道") {
     return (
@@ -525,10 +548,13 @@ function UsageWindowCell({ row, account }: { row: PlatformChannelRow; account: U
       </span>
     );
   }
-  if (!row.usageWindow) return pendingBadge(fieldsPendingHint("用量窗口"));
+  if (!row.usageWindow) return pendingBadge(nullReason("usageWindow", platform));
   const pct = Math.round(row.usageWindow.usedRatio * 100);
+  // Sub2API 的 used_ratio 是费用上限占用率，不是 Anthropic 原生 5 小时用量
+  // 百分比——两者容易被读混，标题里明说是哪一个
+  const hint = platform === "sub2api" ? USAGE_WINDOW_SUB2API_HINT : undefined;
   return (
-    <span className="text-xs">
+    <span className="text-xs" title={hint}>
       {pct}%{row.usageWindow.resetsAt ? ` · 重置于 ${row.usageWindow.resetsAt}` : ""}
     </span>
   );

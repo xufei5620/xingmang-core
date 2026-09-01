@@ -266,13 +266,37 @@ describe("8 个 XM-CHAN-FIELDS0 占位列", () => {
     expect(header.getAttribute("title")).toMatch(/XM-SCHED0/);
   });
 
-  it("占位列的说明统一指向 XM-CHAN-FIELDS0，且说明字段不存在（不是查出来是空）", async () => {
+  it("占位列的说明按平台各给真实原因，不是笼统的「等 XM-CHAN-FIELDS0」——NewAPI 这一格是永久没有这个概念", async () => {
     stub({});
-    renderPanel();
+    renderPanel("newapi");
     const table = within(await screen.findByRole("table"));
     const header = await table.findByRole("columnheader", { name: "容量 / 并发" });
-    expect(header.getAttribute("title")).toMatch(/XM-CHAN-FIELDS0/);
-    expect(header.getAttribute("title")).toMatch(/不存在/);
+    expect(header.getAttribute("title")).toMatch(/NewAPI 没有渠道级并发上限这个概念/);
+    expect(header.getAttribute("title")).not.toMatch(/XM-CHAN-FIELDS0/);
+  });
+
+  it("同一个占位列在 Sub2API 上说明的是不同的原因（这次没采集到，不是永久没有）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/platforms/sub2api/channels")) return Promise.resolve(response(channelPage([channelRow()])));
+        if (url.includes("/finance/upstream-accounts")) return Promise.resolve(response({ items: [upstreamAccount({ platform_id: "sub2api" })] }));
+        if (url.includes("/finance/upstreams/summary")) return Promise.resolve(response({ items: [upstreamSummary()], from: "", to: "", runway_coverage: {}, runway_thresholds: {} }));
+        return Promise.resolve(response({ items: [] }));
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <ManagedChannelTable platform="sub2api" serviceId="svc-1" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const table = within(await screen.findByRole("table"));
+    const header = await table.findByRole("columnheader", { name: "容量 / 并发" });
+    expect(header.getAttribute("title")).toMatch(/并发数据还没采集到/);
+    expect(header.getAttribute("title")).not.toMatch(/没有.*这个概念/);
   });
 
   it("3 个可选占位列（代理、创建时间、过期时间）在全部视图里可见，同样未接入", async () => {
