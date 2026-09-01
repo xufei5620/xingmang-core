@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -88,6 +90,25 @@ const (
 	// 完全不同：那条按 days-back 取，这条只能翻页自己按 created_at 判断窗口，
 	// 见 fetchOrders。
 	routePaymentOrders = "/api/v1/admin/payment/orders"
+
+	// routeAccountTodayStatsPrefix/Suffix 拼出单账号今日统计路由
+	// GET /api/v1/admin/accounts/:id/today-stats（XM-CHAN-FIELDS0）。
+	//
+	// ⚠️ 只有这一条 GET 路由，**没有**用上游真正的批量端点
+	// POST /api/v1/admin/accounts/today-stats/batch：只读通道的传输层
+	// （internal/platform/connector.ReadOnlyTransport）只放行 GET/HEAD，
+	// 任何 POST 在请求发出前就会被拒（ADR-018 闸 2/4），这条路线在
+	// 只读连接器架构下天然走不通，不是漏接——见 fetchAccountTodayStats
+	// 的预算与逐账号调用。
+	routeAccountTodayStatsPrefix = "/api/v1/admin/accounts/"
+	routeAccountTodayStatsSuffix = "/today-stats"
+
+	// maxTodayStatsAccounts 给「今日统计」逐账号探测一个硬预算（GET-only
+	// 约束下只能逐个账号打，见上）。超预算的账号 Today* 留 nil 并标记
+	// CoveragePartial，与 accountPageSize/maxAccountPages 同一条纪律：
+	// 预算耗尽是可以被看见的降级，不是把一次目录读取拖成几百次上游请求。
+	// 数值与 newapi 侧 maxErrorRateChannels 对齐（同一类"逐项探测预算"）。
+	maxTodayStatsAccounts = 40
 
 	// authHeader 是上游为**程序化访问**准备的专用头，值形如 "admin-"+64 位十六进制。
 	//
@@ -756,6 +777,36 @@ func (c *client) fetchChannelDirectory(ctx context.Context) (ManagedChannelDirec
 		QuotaDailyUsed   rawAmount `json:"quota_daily_used"`
 		QuotaWeeklyLimit rawAmount `json:"quota_weekly_limit"`
 		QuotaWeeklyUsed  rawAmount `json:"quota_weekly_used"`
+
+		// XM-CHAN-FIELDS0：以下字段全部来自同一次 /api/v1/admin/accounts
+		// 列表响应（AccountWithConcurrency 内嵌 *dto.Account 后展平的同一层
+		// JSON 对象），不需要额外请求。字段名与类型逐个对照
+		// K:/sub2api-src backend/internal/handler/dto/types.go:196-342 与
+		// backend/internal/handler/admin/account_handler.go:191-200。
+		Type               string     `json:"type"`
+		Platform           string     `json:"platform"`
+		Concurrency        int        `json:"concurrency"`
+		LoadFactor         *int       `json:"load_factor"`
+		Priority           int        `json:"priority"`
+		RateMultiplier     rawAmount  `json:"rate_multiplier"`
+		Schedulable        bool       `json:"schedulable"`
+		LastUsedAt         *time.Time `json:"last_used_at"`
+		CreatedAt          time.Time  `json:"created_at"`
+		ExpiresAt          *int64     `json:"expires_at"` // 上游是 unix 秒，不是 RFC3339（与其余时间字段不同）
+		SessionWindowEnd   *time.Time `json:"session_window_end"`
+		WindowCostLimit    rawAmount  `json:"window_cost_limit"`
+		CurrentConcurrency int        `json:"current_concurrency"`
+		CurrentWindowCost  rawAmount  `json:"current_window_cost"`
+		Proxy              *struct {
+			// Name 是人工填写的展示名；ent schema 明确不含凭据内容，
+			// 上游的 mapper 也从不把 Password 拷进这个响应（见契约文档的
+			// proxy 字段来源说明）。绝不解 Host/Username/Password。
+			Name string `json:"name"`
+		} `json:"proxy"`
+		// Extra 只用来找 upstream_billing_probe 这一个键；不整体转发、
+		// 不落库、不进日志——它是上游「未来响应字段」的沙箱字段，
+		// 内容未经审查，仅按已知子键读取（见 upstreamMultiplierFromExtra）。
+		Extra map[string]any `json:"extra"`
 	}
 
 	var (
@@ -810,12 +861,105 @@ func (c *client) fetchChannelDirectory(ctx context.Context) (ManagedChannelDirec
 				value := remaining
 				balance = &value
 			}
+
+			// XM-CHAN-FIELDS0：capacity——used 是实时并发（同一次响应自带，
+			// 无需二次请求），limit 与上游 EffectiveLoadFactor() 同一条判据：
+			// load_factor 已配置且 >0 时取它，否则取 concurrency
+			// （K:/sub2api-src backend/internal/service/account.go:168-179）。
+			used := item.CurrentConcurrency
+			limit := item.Concurrency
+			if item.LoadFactor != nil && *item.LoadFactor > 0 {
+				limit = *item.LoadFactor
+			}
+			usedI64, limitI64 := int64(used), int64(limit)
+
+			priority := int64(item.Priority)
+			schedulable := item.Schedulable
+
+			// RateMultiplier 的上游列类型是 decimal(10,4)（ent account.go:110-114），
+			// 按 4 位小数精确解析后再换算到 ppm 精度（scale 6），全程不经
+			// float64——比例属于宪法 13 条"比例使用 Decimal"的范围。
+			var rateMultiplierPPM *int64
+			if scaled4, err := parseScaledAmount(item.RateMultiplier, 4); err != nil {
+				return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op, err)
+			} else if scaled4 != nil {
+				ppm, err := rescaleMinorUnits(*scaled4, 4, 6)
+				if err != nil {
+					return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op, err)
+				}
+				rateMultiplierPPM = &ppm
+			}
+
+			var expiresAt *time.Time
+			if item.ExpiresAt != nil {
+				v := time.Unix(*item.ExpiresAt, 0).UTC()
+				expiresAt = &v
+			}
+			createdAt := item.CreatedAt.UTC()
+
+			var proxyLabel *string
+			if item.Proxy != nil && strings.TrimSpace(item.Proxy.Name) != "" {
+				v := strings.TrimSpace(item.Proxy.Name)
+				proxyLabel = &v
+			}
+
+			kind := classifyAccountKind(strings.TrimSpace(item.Type))
+
+			// usage_window 只对 kind=="subscription" 的账号计算，且只用
+			// 同一次响应里已有的字段（current_window_cost / window_cost_limit /
+			// session_window_end），不对每个订阅账号再打一次
+			// /api/v1/admin/accounts/:id/usage——那条会代理到 Anthropic 自己的
+			// 实时用量接口，对目录读取做未设预算的按账号扇出不合适，
+			// 见 contracts/connectors/sub2api.channel-catalog.v3.md 的取舍说明。
+			var usedRatioPPM *int64
+			var resetsAt *time.Time
+			if kind != nil && *kind == channelKindSubscription {
+				// window_cost_limit / current_window_cost 都是账号计费币种下的
+				// 美元金额，按连接器配置的币种小数位精确解析成整数分（与本文件
+				// 其余金额字段同一条路径），比例再从两个整数分值算出——全程不经
+				// float64，包括比例本身（宪法 13 条）。
+				windowCostLimit, err := parseScaledAmount(item.WindowCostLimit, c.scale)
+				if err != nil {
+					return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op, err)
+				}
+				currentWindowCost, err := parseScaledAmount(item.CurrentWindowCost, c.scale)
+				if err != nil {
+					return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op, err)
+				}
+				if windowCostLimit != nil && *windowCostLimit > 0 && currentWindowCost != nil {
+					ppm, err := costRatioPPM(*currentWindowCost, *windowCostLimit)
+					if err != nil {
+						return ManagedChannelDirectory{}, connector.NewError(connector.KindBadResponse, op, err)
+					}
+					usedRatioPPM = &ppm
+				}
+				if item.SessionWindowEnd != nil {
+					v := item.SessionWindowEnd.UTC()
+					resetsAt = &v
+				}
+			}
+
 			out = append(out, ManagedChannel{
 				ChannelID:         id,
 				Name:              strings.TrimSpace(item.Name),
 				Status:            strings.TrimSpace(item.Status),
 				BalanceMinorUnits: balance,
 				Currency:          c.currency,
+
+				Kind:                    kind,
+				Vendor:                  optionalString(item.Platform),
+				CapacityUsed:            &usedI64,
+				CapacityLimit:           &limitI64,
+				SchedulingEnabled:       &schedulable,
+				SchedulingPriority:      &priority,
+				UsageWindowUsedRatioPPM: usedRatioPPM,
+				UsageWindowResetsAt:     resetsAt,
+				ProxyLabel:              proxyLabel,
+				RateMultiplierPPM:       rateMultiplierPPM,
+				UpstreamMultiplierPPM:   upstreamMultiplierPPMFromExtra(item.Extra),
+				LastUsedAt:              item.LastUsedAt,
+				CreatedAt:               &createdAt,
+				ExpiresAt:               expiresAt,
 			})
 		}
 		fetched += int64(len(payload.Items))
@@ -839,6 +983,22 @@ func (c *client) fetchChannelDirectory(ctx context.Context) (ManagedChannelDirec
 	for i := range out {
 		out[i].Snapshot = snapshot
 	}
+
+	// XM-CHAN-FIELDS0：今日统计逐账号预算探测，见 maxTodayStatsAccounts 的
+	// 注释——只读通道走不通批量端点，只能预算内逐个打 GET。预算耗尽是
+	// 已预期的降级，标进 coveragePartial；真正的请求失败（非
+	// KindNotSupported）仍然让整次目录读取失败，与本文件其余字段
+	// （aggregateUserBalances 等）同一条「预算内降级、请求失败即报错」纪律。
+	if todayPartial, err := c.fetchAccountTodayStats(ctx, op, out); err != nil {
+		return ManagedChannelDirectory{}, err
+	} else if todayPartial {
+		coveragePartial = true
+		snapshot.IsPartial = true
+		for i := range out {
+			out[i].Snapshot = snapshot
+		}
+	}
+
 	reported := total
 	return ManagedChannelDirectory{
 		Snapshot: snapshot,
@@ -860,6 +1020,174 @@ func (c *client) fetchChannelBalances(ctx context.Context) ([]ChannelBalance, er
 		return nil, err
 	}
 	return LegacyChannelBalances(directory), nil
+}
+
+// todayStatsPriority 给出探测「今日统计」的账号顺序：可调度（schedulable）的
+// 账号优先——预算有限时，先给运维正在实际服务的账号一个今日数字，比先测一个
+// 早就被停用的账号更有用。同组内保持读到的顺序，结果稳定可复现（与 newapi
+// errorRatePriority 同一条设计理由）。
+func todayStatsPriority(items []ManagedChannel) []int {
+	order := make([]int, len(items))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		as := items[order[a]].SchedulingEnabled != nil && *items[order[a]].SchedulingEnabled
+		bs := items[order[b]].SchedulingEnabled != nil && *items[order[b]].SchedulingEnabled
+		return as && !bs
+	})
+	return order
+}
+
+// fetchAccountTodayStats 在预算内逐账号读取今日统计并就地写回 items 的
+// Today* 字段。返回值表示是否因预算或「上游没有这个能力」而只覆盖了部分账号
+// ——那种情况下调用方把它并入 CoveragePartial，而不是让整次目录读取失败。
+//
+// 真正的请求失败（网络、鉴权、非法响应……）仍然整体报错返回：与
+// aggregateUserBalances/fetchOrders 同一条纪律——预算耗尽是可预期的降级，
+// 请求本身失败不是。
+func (c *client) fetchAccountTodayStats(ctx context.Context, op string, items []ManagedChannel) (bool, error) {
+	if len(items) == 0 {
+		return false, nil
+	}
+	partial := len(items) > maxTodayStatsAccounts
+	budget := maxTodayStatsAccounts
+
+	for _, idx := range todayStatsPriority(items) {
+		if budget <= 0 {
+			break
+		}
+		budget--
+
+		stats, err := c.fetchOneAccountTodayStats(ctx, op, items[idx].ChannelID)
+		if err != nil {
+			if connector.KindOf(err) == connector.KindNotSupported {
+				// 这个上游版本没有 today-stats 端点：不是这一个账号的问题，
+				// 后面的账号也不会有——停止探测但不报错，整体标记部分数据。
+				return true, nil
+			}
+			return false, err
+		}
+		items[idx].TodayRequests = &stats.requests
+		items[idx].TodayCostMinorUnits = &stats.costMinorUnits
+		currency := c.currency
+		scale := c.scale
+		items[idx].TodayCurrency = &currency
+		items[idx].TodayScale = &scale
+		// TodaySuccessRate 恒为 nil：WindowStats 不带成功率或失败数
+		// （K:/sub2api-src backend/internal/service/account_usage_service.go:
+		// 139-145，逐字段核对过，无该字段），不是本次采集遗漏。
+	}
+	return partial, nil
+}
+
+type accountTodayStats struct {
+	requests       int64
+	costMinorUnits int64
+}
+
+// fetchOneAccountTodayStats 读取单个账号的今日统计
+// （GET /api/v1/admin/accounts/:id/today-stats）。Cost 走 rawAmount 精确解析，
+// 不经 strconv.ParseFloat（本文件金额字段统一纪律）。
+func (c *client) fetchOneAccountTodayStats(ctx context.Context, op, accountID string) (accountTodayStats, error) {
+	var env upstreamEnvelope
+	route := routeAccountTodayStatsPrefix + url.PathEscape(accountID) + routeAccountTodayStatsSuffix
+	if _, err := c.get(ctx, op, route, nil, &env); err != nil {
+		return accountTodayStats{}, err
+	}
+	var payload struct {
+		Requests rawAmount `json:"requests"`
+		Cost     rawAmount `json:"cost"`
+	}
+	if err := env.decode(op, &payload); err != nil {
+		return accountTodayStats{}, err
+	}
+	requests, err := payload.Requests.count()
+	if err != nil {
+		return accountTodayStats{}, connector.NewError(connector.KindBadResponse, op, err)
+	}
+	cost, err := payload.Cost.minorUnits(c.scale)
+	if err != nil {
+		return accountTodayStats{}, connector.NewError(connector.KindBadResponse, op, err)
+	}
+	return accountTodayStats{requests: requests, costMinorUnits: cost}, nil
+}
+
+// optionalString 把可能为空的字符串字段转成 *string：空串按「上游没给」处理，
+// 返回 nil 而不是一个空字符串指针——与本文件其余可空字段同一条纪律。
+func optionalString(s string) *string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+// parseScaledAmount 把十进制文本按 scale 位小数精确转成整数（scale 位小数
+// 的定点表示），复用 decimalToMinorUnits 的整数换算路径而不经
+// strconv.ParseFloat 直接解析十进制文本——避免十进制转二进制浮点在解析这
+// 一步就引入误差。是 rawAmount.minorUnits 的可空版本：区分「上游没给」
+// （nil）与「上游给的恰好是 0」（指向 0 的指针），minorUnits 本身两者都
+// 收成 0，分不开。
+func parseScaledAmount(a rawAmount, scale int) (*int64, error) {
+	if a.empty() {
+		return nil, nil
+	}
+	scaled, err := decimalToMinorUnits(string(a), scale)
+	if err != nil {
+		return nil, err
+	}
+	return &scaled, nil
+}
+
+// costRatioPPM 把两个整数分值的比例换算成 ppm（百万分之一）整数，
+// 全程整数运算，不经 float64（宪法 13 条：比例使用 Decimal）。
+//
+// 与 newapi 的 ratePPM 不同之处：这里**允许分子大于分母**（当前窗口费用
+// 超出费用上限是真实场景——那正是上游 window_cost_limit 这个字段存在的
+// 意义之一，超限之后才会触发自动暂停），返回值可以合法地超过
+// 1_000_000，调用方不该把它当成百分比封顶在 100% 的信号。
+func costRatioPPM(numeratorMinorUnits, denominatorMinorUnits int64) (int64, error) {
+	if numeratorMinorUnits < 0 || denominatorMinorUnits <= 0 {
+		return 0, fmt.Errorf("窗口费用比例的分子分母非法(%d/%d): %w",
+			numeratorMinorUnits, denominatorMinorUnits, errAmountFormat)
+	}
+	const ppmScale = 1_000_000
+	if numeratorMinorUnits > maxInt64/ppmScale {
+		return 0, fmt.Errorf("窗口费用比例分子 %d 放大 %d 倍后溢出 int64: %w",
+			numeratorMinorUnits, ppmScale, errAmountFormat)
+	}
+	// 四舍五入而不是截断，理由与本包金额换算的一贯纪律相同。
+	return (numeratorMinorUnits*ppmScale + denominatorMinorUnits/2) / denominatorMinorUnits, nil
+}
+
+// upstreamMultiplierPPMFromExtra 从账号的 extra 字段里找上游计费探测写入的
+// resolved_rate_multiplier（K:/sub2api-src backend/internal/service/
+// upstream_billing_probe.go:104-146 的 UpstreamBillingProbeSnapshot.Data），
+// 换算成 ppm 整数。extra 是「已知子键」而非整体转发的沙箱字段（同文件注释：
+// "Data is kept as a sanitized map so future response fields do not require
+// a database change"），只在账号开启过上游计费探测时才会有值，多数账号会是
+// nil——这不是缺陷，是这项能力本身的覆盖范围，契约文档里有专门说明。
+//
+// ⚠️ 精度上限：这里读到的是 extra 整体解码成 map[string]any 之后的原生
+// float64（encoding/json 把任意数值字面量解进 any 都会变成 float64，无法
+// 绕开），换算到 ppm 时四舍五入——这是 extra 这个「上游沙箱字段」本身的精度
+// 上限，不是本函数新引入的误差，也不参与本包任何货币汇总，仅用于展示。
+func upstreamMultiplierPPMFromExtra(extra map[string]any) *int64 {
+	probe, ok := extra["upstream_billing_probe"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	data, ok := probe["data"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	v, ok := data["resolved_rate_multiplier"].(float64)
+	if !ok {
+		return nil
+	}
+	ppm := int64(math.Round(v * 1_000_000))
+	return &ppm
 }
 
 // accountRemaining 算出一个上游账号的剩余额度。

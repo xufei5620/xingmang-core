@@ -419,7 +419,16 @@ func assertNoFloatFields(t *testing.T, typ reflect.Type) {
 	t.Helper()
 	for i := range typ.NumField() {
 		field := typ.Field(i)
-		switch field.Type.Kind() {
+		kind := field.Type.Kind()
+		// XM-CHAN-FIELDS0：可空数值字段一律是 *int64/*bool/*string/*time.Time
+		// 之类的指针类型（区分"上游没给"与"上游给了 0"），检查必须透过指针看
+		// 指向的类型，否则 `*float64` 会因为 Kind()==Ptr 而不是 Float64
+		// 悄悄漏网——这正是本函数存在的理由要防的那类"改动本身编译得过、
+		// 测试全绿"的疏漏。
+		if kind == reflect.Ptr {
+			kind = field.Type.Elem().Kind()
+		}
+		switch kind {
 		case reflect.Float32, reflect.Float64:
 			t.Fatalf("%s.%s 是浮点类型——金额与比率一律用整数表达"+
 				"（金额：最小货币单位；比率：ppm）。规格 §5.9",
@@ -431,5 +440,28 @@ func assertNoFloatFields(t *testing.T, typ reflect.Type) {
 			}
 		default:
 		}
+	}
+}
+
+// AssertChannelStatusCatalogInvariants 检查一条 v3 目录行（XM-CHAN-FIELDS0）
+// 的跨字段一致性，与 RunSuite 的其余检查同一等级——**任何**实现（Fake 或
+// 真实客户端）产出的 ChannelStatus 都必须满足。不接进 RunSuite 本身，理由
+// 与 sub2api 的同名函数一致：RunSuite 的 Factory 只返回 newapi.ReadClient
+// （v1 接口），不认识 ChannelDirectory；调用方（Fake 侧与真实客户端侧的
+// client_contract_test.go）各自对着 Channels()/ChannelDirectory() 的结果
+// 逐条调用本函数。
+func AssertChannelStatusCatalogInvariants(t *testing.T, item newapi.ChannelStatus) {
+	t.Helper()
+	if item.TodayCostMinorUnits != nil && (item.TodayCurrency == nil || item.TodayScale == nil) {
+		t.Fatalf("渠道 %s 给了 TodayCostMinorUnits 却缺 Currency/Scale：金额没有单位就是无意义的数字（规格 §5.9）",
+			item.ChannelID)
+	}
+	if item.TodaySuccessRatePPM != nil && (*item.TodaySuccessRatePPM < 0 || *item.TodaySuccessRatePPM > 1_000_000) {
+		t.Fatalf("渠道 %s 的 TodaySuccessRatePPM = %d，超出 ppm 定义域 [0, 1000000]",
+			item.ChannelID, *item.TodaySuccessRatePPM)
+	}
+	if item.CapacityUsed != nil && item.CapacityLimit != nil && *item.CapacityUsed > *item.CapacityLimit {
+		t.Logf("提醒：渠道 %s 的 CapacityUsed(%d) > CapacityLimit(%d)，确认不是字段对调",
+			item.ChannelID, *item.CapacityUsed, *item.CapacityLimit)
 	}
 }

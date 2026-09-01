@@ -243,6 +243,38 @@ func testPartialIsFlagged(t *testing.T, newClient Factory) {
 	}
 }
 
+// AssertManagedChannelCatalogInvariants 检查一条 v3 目录行（XM-CHAN-FIELDS0）
+// 的跨字段一致性，与 RunSuite 的其余检查同一等级——**任何**实现（Fake 或
+// 真实客户端）产出的 ManagedChannel 都必须满足，不管数据来自哪条代码路径。
+//
+// 不接进 RunSuite 本身：RunSuite 的 Factory 类型只返回 sub2api.ReadClient
+// （v1 接口），不认识 ChannelDirectory；调用方（Fake 侧的
+// channel_directory_test.go、真实客户端侧的 client_contract_test.go）各自
+// 对着 ChannelDirectory() 的结果逐条调用本函数，理由与 v2 目录已有的
+// 测试拆分方式一致（同一份契约、两条独立的调用点）。
+func AssertManagedChannelCatalogInvariants(t *testing.T, item sub2api.ManagedChannel) {
+	t.Helper()
+	if item.Kind != nil && *item.Kind != "subscription" && *item.Kind != "upstream" {
+		t.Fatalf("渠道 %s 的 Kind = %q，只能是 subscription/upstream 或 nil",
+			item.ChannelID, *item.Kind)
+	}
+	subscription := item.Kind != nil && *item.Kind == "subscription"
+	if !subscription && (item.UsageWindowUsedRatioPPM != nil || item.UsageWindowResetsAt != nil) {
+		t.Fatalf("渠道 %s 不是 subscription 但带了 usage_window（ratio_ppm=%v resets=%v）：任务要求 key 账号恒为 null",
+			item.ChannelID, item.UsageWindowUsedRatioPPM, item.UsageWindowResetsAt)
+	}
+	if item.TodayCostMinorUnits != nil && (item.TodayCurrency == nil || item.TodayScale == nil) {
+		t.Fatalf("渠道 %s 给了 TodayCostMinorUnits 却缺 Currency/Scale：金额没有单位就是无意义的数字（规格 §5.9）",
+			item.ChannelID)
+	}
+	if item.CapacityUsed != nil && item.CapacityLimit != nil && *item.CapacityUsed > *item.CapacityLimit {
+		// 只是一个探测性检查，不是硬性业务规则（上游允许瞬时超额），
+		// 但两个实现如果长期给出 used > limit，多半是字段对调了。
+		t.Logf("提醒：渠道 %s 的 CapacityUsed(%d) > CapacityLimit(%d)，确认不是字段对调",
+			item.ChannelID, *item.CapacityUsed, *item.CapacityLimit)
+	}
+}
+
 func testCapabilitiesMayBeSubset(t *testing.T, newClient Factory) {
 	// 旧版本上游可能少支持几项能力；契约允许返回子集，
 	// 但不允许返回清单之外的能力

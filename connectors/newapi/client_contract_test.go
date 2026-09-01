@@ -51,6 +51,7 @@ const (
 	upstreamUsers    = "/api/user/"
 	upstreamTopups   = "/api/user/topup"
 	upstreamLogs     = "/api/log/"
+	upstreamLogsStat = "/api/log/stat"
 	upstreamData     = "/api/data/"
 
 	// upstreamAuthHeader 是管理员 access token 的携带方式。
@@ -149,19 +150,27 @@ const fakeUserTotal = 4
 // models 里塞了空段与纯空白段：上游的 GetModels() 不做 TrimSpace，脏数据是
 // 真会出现的。key 字段照发空串——上游把它 Omit 出了 SQL，但字段是非指针
 // string，JSON 里仍然会有；本包**不解它**。
+//
+// XM-CHAN-FIELDS0 追加：created_time 三条各给一个固定值（不走 %d 占位，
+// 免得动到既有 Sprintf 调用点的参数个数）；setting 覆盖三种形状——
+// id=1 内嵌完整代理 URL（含用户名密码，必须脱敏成 scheme://host:port）、
+// id=2 完全没有 setting 字段（ProxyLabel 必须是 nil）、
+// id=3 有 setting 但 proxy 是空串（同样必须是 nil，不是空字符串标签）。
 const fakeChannelItems = `[
   {"id":1,"name":"openai-main","type":1,"status":1,"key":"",
    "balance":31.50,"balance_updated_time":%d,"used_quota":123456,
    "models":"gpt-4o,gpt-4o-mini, ,o3","group":"default","response_time":480,
-   "priority":10,"test_time":%d},
+   "priority":10,"test_time":%d,"created_time":1735689600,
+   "setting":"{\"proxy\":\"socks5://proxyuser:proxypass@10.0.0.5:1080\"}"},
   {"id":2,"name":"gemini-backup","type":24,"status":2,"key":"",
    "balance":0,"balance_updated_time":0,"used_quota":0,
    "models":"gemini-2.5-pro","group":"default","response_time":0,
-   "priority":5,"test_time":0},
+   "priority":5,"test_time":0,"created_time":1738368000},
   {"id":3,"name":"relay-cheap","type":8,"status":1,"key":"",
    "balance":0,"balance_updated_time":%d,"used_quota":9999,
    "models":"","group":"default","response_time":2340,
-   "priority":1,"test_time":%d}
+   "priority":1,"test_time":%d,"created_time":1740787200,
+   "setting":"{\"proxy\":\"\"}"}
 ]`
 
 const fakeChannelTotal = 3
@@ -258,6 +267,13 @@ type fakeUpstream struct {
 	redirectTo string
 	// quotaPerUnit 允许单个测试改换算基数（包括改成 0 那种病态值）。
 	quotaPerUnit string
+	// todayLogStats 是「渠道/日志类型」到 /api/log/stat 响应的映射
+	// （XM-CHAN-FIELDS0）；未登记的组合返回真实的空统计（quota=0,rpm=0），
+	// 与"今天没有这类日志"是同一种形状。
+	todayLogStats map[string]fakeLogStat
+	// todayLogStatUnsupported 让 /api/log/stat 整体不注册（= 404 =
+	// not_supported），模拟旧版本上游。
+	todayLogStatUnsupported bool
 
 	server *httptest.Server
 
@@ -291,6 +307,17 @@ func startFakeUpstream(t *testing.T, opts newapi.FakeOptions, tweak ...func(*fak
 	register(upstreamTopups, u.dataRoute(u.handleTopups))
 	register(upstreamLogs, u.dataRoute(u.handleLogs))
 	register(upstreamData, u.dataRoute(u.handleQuotaData))
+	// /api/log/stat 必须**显式**注册成 404，不能只是不注册：它是 /api/log/
+	// 这个已注册子树模式的子路径，Go 1.22+ ServeMux 在没有更具体匹配时会把
+	// 请求落回子树父模式（handleLogs），那会让"路由缺失"误测成"路由命中但
+	// 形状不对"——两者对客户端来说是完全不同的错误分类。
+	if u.todayLogStatUnsupported {
+		mux.HandleFunc("GET "+upstreamLogsStat, func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+	} else {
+		register(upstreamLogsStat, u.dataRoute(u.handleLogStat))
+	}
 
 	var handler http.Handler = mux
 	if u.redirectTo != "" {
@@ -474,6 +501,24 @@ func (u *fakeUpstream) handleLogs(w http.ResponseWriter, r *http.Request) {
 		u.t.Errorf("客户端不该用 type=%q 查日志：0 在上游表示不过滤", logType)
 	}
 	u.writePage(w, "[]", int(fakeLogCounts[channel+"/"+logType]), queryInt(r, "p", 1))
+}
+
+// fakeLogStat 是 /api/log/stat 固定响应的一行（XM-CHAN-FIELDS0）。
+type fakeLogStat struct{ quota, rpm int64 }
+
+// handleLogStat 模拟 GET /api/log/stat（K:/newapi-src controller/log.go
+// GetLogsStat）。未登记的「渠道/类型」组合返回真实的空统计，与"今天没有
+// 这类日志"是同一种形状，不是缺数据。
+func (u *fakeUpstream) handleLogStat(w http.ResponseWriter, r *http.Request) {
+	channel := strings.TrimSpace(r.URL.Query().Get("channel"))
+	logType := strings.TrimSpace(r.URL.Query().Get("type"))
+	if logType == "0" || logType == "" {
+		u.t.Errorf("客户端不该用 type=%q 查 /api/log/stat：0 在上游表示不过滤", logType)
+	}
+	stat := u.todayLogStats[channel+"/"+logType]
+	u.writeRaw(w, http.StatusOK, fmt.Sprintf(
+		`{"success":true,"message":"","data":{"quota":%d,"rpm":%d,"tpm":0}}`,
+		stat.quota, stat.rpm))
 }
 
 func (u *fakeUpstream) handleQuotaData(w http.ResponseWriter, r *http.Request) {
@@ -802,6 +847,223 @@ func TestRealClientMapsUpstreamShapes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// XM-CHAN-FIELDS0：渠道目录 v3 字段映射
+// ---------------------------------------------------------------------------
+
+// TestRealClientMapsChannelCatalogFields 逐字段核对三个渠道的 v3 目录字段：
+// vendor 查表、status 字符串枚举、scheduling.priority、proxy 脱敏（含"给了
+// 但是空串"与"完全没给"两种 nil 路径）、created_at 换算、以及 today 统计
+// （业务日窗口、cost/requests/success_rate 全部来自 /api/log/stat 的预算内
+// 探测）。kind/capacity/usage_window/rate_multiplier/upstream_multiplier/
+// last_used_at/expires_at 在本包恒为 nil，由
+// TestFakeChannelCatalogFieldsSatisfyInvariants 与本测试的隐式断言
+// （ChannelDirectory 走同一条 catalogFields 编码路径）间接覆盖。
+func TestRealClientMapsChannelCatalogFields(t *testing.T) {
+	upstream := startFakeUpstream(t, newapi.FakeOptions{}, func(u *fakeUpstream) {
+		u.todayLogStats = map[string]fakeLogStat{
+			"1/2": {quota: 6_000_000, rpm: 842}, // consume：842 笔，$12.00
+			"1/5": {quota: 0, rpm: 8},           // error：8 笔 → success = 842/850
+			// "2/*" 故意不登记：走默认的真实零统计（渠道 2 已停用，今天没有活动）。
+			"3/2": {quota: 500_000, rpm: 5}, // consume：5 笔，$1.00
+			"3/5": {quota: 0, rpm: 0},       // error：0 笔 → success = 5/5 = 100%
+		}
+	})
+	directory, err := upstream.newClient(t).ChannelDirectory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Items) != 3 {
+		t.Fatalf("目录条数 = %d, want 3: %+v", len(directory.Items), directory.Items)
+	}
+	byID := make(map[string]newapi.ChannelStatus, 3)
+	for _, item := range directory.Items {
+		byID[item.ChannelID] = item
+		contracttest.AssertChannelStatusCatalogInvariants(t, item)
+	}
+
+	// 三个渠道都该打过 /api/log/stat，且窗口是业务日（今天零点到 fakeClockNow），
+	// 不是既有错误率那条滚动 24 小时窗口——两者窗口不同，混用会读错的今日数字。
+	sawStat := false
+	for _, req := range upstream.recorded() {
+		if req.path != upstreamLogsStat {
+			continue
+		}
+		sawStat = true
+		q := mustParseQuery(t, req.query)
+		if q.Get("start_timestamp") != strconv.FormatInt(fakeDayStart, 10) {
+			t.Fatalf("/api/log/stat start_timestamp = %s, want 业务日零点 %d", q.Get("start_timestamp"), fakeDayStart)
+		}
+		if q.Get("end_timestamp") != strconv.FormatInt(fakeClockNow.Unix(), 10) {
+			t.Fatalf("/api/log/stat end_timestamp = %s, want 现在 %d", q.Get("end_timestamp"), fakeClockNow.Unix())
+		}
+	}
+	if !sawStat {
+		t.Fatal("一次 /api/log/stat 请求都没发出去，today 统计测试就没有意义了")
+	}
+
+	t.Run("渠道1：openai/启用/有代理", func(t *testing.T) {
+		got := byID["1"]
+		if got.Vendor == nil || *got.Vendor != "OpenAI" {
+			t.Fatalf("Vendor = %v, want OpenAI（type=1 查表）", got.Vendor)
+		}
+		if got.StatusLabel == nil || *got.StatusLabel != "enabled" {
+			t.Fatalf("StatusLabel = %v, want enabled", got.StatusLabel)
+		}
+		if got.SchedulingPriority == nil || *got.SchedulingPriority != 10 {
+			t.Fatalf("SchedulingPriority = %v, want 10", got.SchedulingPriority)
+		}
+		if got.ProxyLabel == nil || *got.ProxyLabel != "socks5://10.0.0.5:1080" {
+			t.Fatalf("ProxyLabel = %v, want socks5://10.0.0.5:1080（脱敏掉 proxyuser:proxypass@）", got.ProxyLabel)
+		}
+		wantCreated := time.Unix(1735689600, 0).UTC()
+		if got.CreatedAt == nil || !got.CreatedAt.Equal(wantCreated) {
+			t.Fatalf("CreatedAt = %v, want %v", got.CreatedAt, wantCreated)
+		}
+		if got.TodayRequests == nil || *got.TodayRequests != 842 {
+			t.Fatalf("TodayRequests = %v, want 842", got.TodayRequests)
+		}
+		if got.TodayCostMinorUnits == nil || *got.TodayCostMinorUnits != 1200 {
+			t.Fatalf("TodayCostMinorUnits = %v, want 1200（600 万 quota / 50 万 quota_per_unit = $12.00）",
+				got.TodayCostMinorUnits)
+		}
+		if got.TodayCurrency == nil || *got.TodayCurrency != "USD" || got.TodayScale == nil || *got.TodayScale != 2 {
+			t.Fatalf("TodayCurrency/Scale = %v/%v, want USD/2", got.TodayCurrency, got.TodayScale)
+		}
+		if got.TodaySuccessRatePPM == nil || *got.TodaySuccessRatePPM != 990_588 {
+			t.Fatalf("TodaySuccessRatePPM = %v, want 990588（842/850）", got.TodaySuccessRatePPM)
+		}
+		// 本包恒为 nil 的维度：确认真的是 nil，不是漏填了别的值。
+		if got.Kind != nil || got.CapacityUsed != nil || got.CapacityLimit != nil {
+			t.Fatalf("kind/capacity 在本包应恒为 nil: kind=%v used=%v limit=%v", got.Kind, got.CapacityUsed, got.CapacityLimit)
+		}
+		if got.UsageWindowUsedRatioPPM != nil || got.UsageWindowResetsAt != nil {
+			t.Fatalf("usage_window 在本包应恒为 nil: ratio_ppm=%v resets=%v",
+				got.UsageWindowUsedRatioPPM, got.UsageWindowResetsAt)
+		}
+		if got.RateMultiplierPPM != nil || got.UpstreamMultiplierPPM != nil {
+			t.Fatalf("rate_multiplier/upstream_multiplier 在本包应恒为 nil: %v/%v",
+				got.RateMultiplierPPM, got.UpstreamMultiplierPPM)
+		}
+		if got.LastUsedAt != nil || got.ExpiresAt != nil {
+			t.Fatalf("last_used_at/expires_at 在本包应恒为 nil: %v/%v", got.LastUsedAt, got.ExpiresAt)
+		}
+	})
+
+	t.Run("渠道2：gemini/停用/无代理/今日真实的零", func(t *testing.T) {
+		got := byID["2"]
+		if got.Vendor == nil || *got.Vendor != "Gemini" {
+			t.Fatalf("Vendor = %v, want Gemini（type=24 查表）", got.Vendor)
+		}
+		if got.StatusLabel == nil || *got.StatusLabel != "manually_disabled" {
+			t.Fatalf("StatusLabel = %v, want manually_disabled（status=2）", got.StatusLabel)
+		}
+		if got.ProxyLabel != nil {
+			t.Fatalf("ProxyLabel = %v, want nil（完全没有 setting 字段）", got.ProxyLabel)
+		}
+		if got.TodayRequests == nil || *got.TodayRequests != 0 {
+			t.Fatalf("TodayRequests = %v, want 0（查过，真实的零，不是没查）", got.TodayRequests)
+		}
+		if got.TodayCostMinorUnits == nil || *got.TodayCostMinorUnits != 0 {
+			t.Fatalf("TodayCostMinorUnits = %v, want 0", got.TodayCostMinorUnits)
+		}
+		if got.TodaySuccessRatePPM != nil {
+			t.Fatalf("TodaySuccessRatePPM = %v, want nil（0/0 没有意义的答案）", got.TodaySuccessRatePPM)
+		}
+	})
+
+	t.Run("渠道3：custom/空proxy字符串同样是nil/success=100%", func(t *testing.T) {
+		got := byID["3"]
+		if got.Vendor == nil || *got.Vendor != "Custom" {
+			t.Fatalf("Vendor = %v, want Custom（type=8 查表）", got.Vendor)
+		}
+		if got.ProxyLabel != nil {
+			t.Fatalf("ProxyLabel = %v, want nil（setting.proxy 是空字符串）", got.ProxyLabel)
+		}
+		wantCreated := time.Unix(1740787200, 0).UTC()
+		if got.CreatedAt == nil || !got.CreatedAt.Equal(wantCreated) {
+			t.Fatalf("CreatedAt = %v, want %v", got.CreatedAt, wantCreated)
+		}
+		if got.TodayCostMinorUnits == nil || *got.TodayCostMinorUnits != 100 {
+			t.Fatalf("TodayCostMinorUnits = %v, want 100（50 万 quota = $1.00）", got.TodayCostMinorUnits)
+		}
+		if got.TodaySuccessRatePPM == nil || *got.TodaySuccessRatePPM != 1_000_000 {
+			t.Fatalf("TodaySuccessRatePPM = %v, want 1000000（5/5=100%%，没有错误日志）", got.TodaySuccessRatePPM)
+		}
+	})
+}
+
+func mustParseQuery(t *testing.T, raw string) url.Values {
+	t.Helper()
+	q, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatalf("解析查询参数 %q: %v", raw, err)
+	}
+	return q
+}
+
+// TestFakeChannelCatalogFieldsSatisfyInvariants：Fake 的目录行同样要满足
+// contracttest.AssertChannelStatusCatalogInvariants，且必须覆盖"启用+停用"
+// 两种 StatusLabel，便于前端联调两种展示形态。
+func TestFakeChannelCatalogFieldsSatisfyInvariants(t *testing.T) {
+	fake := newapi.NewFake(newapi.FakeOptions{})
+	directory, err := fake.ChannelDirectory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Items) == 0 {
+		t.Fatal("Fake 目录不应为空")
+	}
+	sawEnabled, sawDisabled := false, false
+	for _, item := range directory.Items {
+		contracttest.AssertChannelStatusCatalogInvariants(t, item)
+		if item.StatusLabel == nil {
+			t.Fatalf("渠道 %s 缺少 StatusLabel", item.ChannelID)
+		}
+		if *item.StatusLabel == "enabled" {
+			sawEnabled = true
+		}
+		if *item.StatusLabel == "manually_disabled" {
+			sawDisabled = true
+		}
+		// 本包恒为 nil 的维度，Fake 不该在真实客户端给不出的地方造数据。
+		if item.Kind != nil || item.RateMultiplierPPM != nil || item.UpstreamMultiplierPPM != nil {
+			t.Fatalf("Fake 渠道 %s 在恒为 nil 的维度上给了值: kind=%v rate=%v upstream=%v",
+				item.ChannelID, item.Kind, item.RateMultiplierPPM, item.UpstreamMultiplierPPM)
+		}
+	}
+	if !sawEnabled || !sawDisabled {
+		t.Fatalf("Fake 应同时覆盖 enabled/manually_disabled 两种 StatusLabel (enabled=%v disabled=%v)",
+			sawEnabled, sawDisabled)
+	}
+}
+
+// TestRealClientDegradesTodayStatsWhenLogStatUnsupported：上游还没升级到
+// /api/log/stat 端点时（404 = not_supported），今日统计整体降级为 nil 并
+// 标记 CoveragePartial，但**不能**让整次目录读取失败——渠道的
+// id/name/vendor/status 等基础字段与今日统计完全无关，不该被这一个可选维度
+// 拖累。
+func TestRealClientDegradesTodayStatsWhenLogStatUnsupported(t *testing.T) {
+	upstream := startFakeUpstream(t, newapi.FakeOptions{}, func(u *fakeUpstream) {
+		u.todayLogStatUnsupported = true
+	})
+	directory, err := upstream.newClient(t).ChannelDirectory(t.Context())
+	if err != nil {
+		t.Fatalf("/api/log/stat 缺失不该让整次目录读取失败: %v", err)
+	}
+	if !directory.CoveragePartial {
+		t.Fatal("/api/log/stat 缺失必须标记 CoveragePartial")
+	}
+	for _, item := range directory.Items {
+		if item.TodayRequests != nil || item.TodayCostMinorUnits != nil {
+			t.Fatalf("/api/log/stat 缺失时 Today* 必须是 nil: %+v", item)
+		}
+		if item.ChannelID == "" || item.Name == "" || item.Vendor == nil {
+			t.Fatalf("基础字段（含 vendor）被今日统计的降级拖累了: %+v", item)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

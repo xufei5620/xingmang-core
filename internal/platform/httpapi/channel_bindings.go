@@ -128,15 +128,23 @@ func encodeBindingCursor(value string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(value))
 }
 
-func inventoryForService(observations []ops.Observation, service finance.BindingService) bindingInventory {
+// findChannelsObservation locates the single "<service_type>.channels.status"
+// observation for this service instance. Shared by inventoryForService (binding
+// candidate evaluation) and platform_channels.go's catalogRowsForService
+// (XM-CHAN-FIELDS0 display fields) — both read the exact same worker-written
+// observation, they just extract different subsets of its "channels" array.
+func findChannelsObservation(observations []ops.Observation, service finance.BindingService) *ops.Observation {
 	key := service.ServiceType + ".channels.status"
-	var found *ops.Observation
 	for i := range observations {
 		if observations[i].MetricKey == key && observations[i].Source == service.InstanceID {
-			found = &observations[i]
-			break
+			return &observations[i]
 		}
 	}
+	return nil
+}
+
+func inventoryForService(observations []ops.Observation, service finance.BindingService) bindingInventory {
+	found := findChannelsObservation(observations, service)
 	if found == nil {
 		return bindingInventory{state: "not_initialized", source: service.InstanceID, evidence: "no_observation"}
 	}

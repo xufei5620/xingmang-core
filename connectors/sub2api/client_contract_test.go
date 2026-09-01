@@ -54,6 +54,12 @@ const (
 	upstreamPaymentOrders = "/api/v1/admin/payment/orders"
 	upstreamTrend         = "/api/v1/admin/dashboard/trend"
 	upstreamAccounts      = "/api/v1/admin/accounts"
+	// upstreamAccountTodayStatsPattern 是单账号今日统计的 mux 注册形态
+	// （Go 1.22+ ServeMux 路径参数）；upstreamAccountTodayStatsPrefix/Suffix
+	// 供测试自己拼具体账号的请求路径断言用。
+	upstreamAccountTodayStatsPattern = "/api/v1/admin/accounts/{id}/today-stats"
+	upstreamAccountTodayStatsPrefix  = "/api/v1/admin/accounts/"
+	upstreamAccountTodayStatsSuffix  = "/today-stats"
 
 	// upstreamAuthHeader 是上游的程序化访问头。
 	upstreamAuthHeader = "X-Api-Key"
@@ -106,13 +112,43 @@ const fakeUserItems = `[
 const fakeUserCount = 4
 
 // fakeAccountItems 是上游账号（= 契约里的"渠道"）固定数据。
+//
+// XM-CHAN-FIELDS0：三个账号刻意覆盖三种组合——
+//
+//	id 1（订阅型 oauth）：load_factor 未配置（回落到 concurrency）、
+//	  有 session_window/window_cost_limit（可以算出 usage_window）、
+//	  有 proxy、extra 里有上游计费探测结果（upstream_multiplier 有值）。
+//	id 2（密钥型 apikey）：load_factor 配置了且 >0（覆盖 concurrency）、
+//	  schedulable=false（调度关闭）、没有 proxy/session_window/extra
+//	  （usage_window 因 kind!=subscription 恒为 nil，与是否配置无关）。
+//	id 3（未登记的 type 取值）：kind 必须解成 nil，不是猜一个桶；
+//	  没有 last_used_at（*time.Time 的 null 分支）。
+//
+// 既有断言（渠道余额小节）只读 quota_*/platform/status/name，新增字段不影响它们。
 const fakeAccountItems = `[
   {"id":1,"name":"upstream-a","platform":"anthropic","status":"active",
-   "quota_limit":500.00,"quota_used":44.00},
+   "quota_limit":500.00,"quota_used":44.00,
+   "type":"oauth","concurrency":5,"load_factor":null,"priority":10,
+   "rate_multiplier":1.5,"schedulable":true,
+   "last_used_at":"2026-08-27T11:55:00Z","created_at":"2026-01-01T00:00:00Z",
+   "expires_at":1798761600,"session_window_end":"2026-08-27T15:00:00Z",
+   "window_cost_limit":50.00,"current_concurrency":2,"current_window_cost":21.00,
+   "proxy":{"name":"hk-01","host":"should-not-be-read.example","username":"should-not-be-read"},
+   "extra":{"upstream_billing_probe":{"status":"ok","data":{"resolved_rate_multiplier":1.1}}}},
   {"id":2,"name":"upstream-b","platform":"openai","status":"error",
-   "error_message":"upstream said no","quota_limit":20,"quota_used":8},
+   "error_message":"upstream said no","quota_limit":20,"quota_used":8,
+   "type":"apikey","concurrency":10,"load_factor":3,"priority":20,
+   "rate_multiplier":1.0,"schedulable":false,
+   "last_used_at":null,"created_at":"2026-02-01T00:00:00Z",
+   "expires_at":null,"session_window_end":null,
+   "window_cost_limit":null,"current_concurrency":1,"current_window_cost":null,
+   "proxy":null,"extra":{}},
   {"id":3,"name":"upstream-c","platform":"gemini","status":"active",
-   "quota_limit":null,"quota_used":null,"quota_daily_limit":10,"quota_daily_used":10}
+   "quota_limit":null,"quota_used":null,"quota_daily_limit":10,"quota_daily_used":10,
+   "type":"future-unknown-type","concurrency":2,"priority":30,
+   "rate_multiplier":0.8,"schedulable":true,
+   "last_used_at":null,"created_at":"2026-03-01T00:00:00Z",
+   "current_concurrency":0}
 ]`
 
 const fakeAccountCount = 3
@@ -165,6 +201,13 @@ type fakeUpstream struct {
 	// paymentOrders 允许单个测试替换 /admin/payment/orders 的逐笔订单固定数据
 	// （XM-PAY0）；nil 时用 fakePaymentOrders。
 	paymentOrders []fakePaymentOrder
+	// todayStats 是账号 ID（字符串）到 today-stats 响应 data 的映射
+	// （XM-CHAN-FIELDS0）；未登记的 ID 返回一个空统计（requests=0,cost=0），
+	// 与"今天没有请求"是真实的同一种形状，不是缺数据。
+	todayStats map[string]string
+	// todayStatsUnsupported 让 today-stats 路由整体不注册（= 404 = 客户端
+	// 归类为 not_supported），模拟一个还没升级到这个端点的旧版本上游。
+	todayStatsUnsupported bool
 
 	server *httptest.Server
 
@@ -202,6 +245,9 @@ func startFakeUpstream(t *testing.T, opts sub2api.FakeOptions, tweak ...func(*fa
 	register(upstreamPaymentOrders, u.dataRoute(u.handlePaymentOrders))
 	register(upstreamTrend, u.dataRoute(u.handleTrend))
 	register(upstreamAccounts, u.dataRoute(u.handleAccounts))
+	if !u.todayStatsUnsupported {
+		mux.HandleFunc("GET "+upstreamAccountTodayStatsPattern, u.dataRoute(u.handleAccountTodayStats))
+	}
 
 	var handler http.Handler = mux
 	if u.redirectTo != "" {
@@ -498,6 +544,18 @@ func (u *fakeUpstream) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	writeRaw(w, http.StatusOK, envelope(fmt.Sprintf(
 		`{"items":%s,"total":%d,"page":%d,"page_size":200,"pages":1}`, items, total, page)))
+}
+
+// handleAccountTodayStats 模拟 GET /api/v1/admin/accounts/:id/today-stats
+// （XM-CHAN-FIELDS0）。未登记的账号 ID 返回一个真实的空统计（requests=0），
+// 与"今天没有请求"是同一种形状，不是缺数据。
+func (u *fakeUpstream) handleAccountTodayStats(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	data, ok := u.todayStats[id]
+	if !ok {
+		data = `{"requests":0,"tokens":0,"cost":0,"standard_cost":0,"user_cost":0}`
+	}
+	writeRaw(w, http.StatusOK, envelope(data))
 }
 
 func envelope(data string) string {
@@ -921,6 +979,216 @@ func TestRealClientMarksPartialWhenChannelsLackQuota(t *testing.T) {
 	}
 	if !balances[0].IsPartial {
 		t.Fatal("少报了渠道就必须标记为部分数据，否则看板会把不全的清单当全的")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XM-CHAN-FIELDS0：渠道目录 v3 字段映射
+// ---------------------------------------------------------------------------
+
+// TestRealClientMapsChannelCatalogFields 逐字段核对三个账号的 v3 目录字段，
+// 覆盖：kind 分桶（含未登记 type → nil）、capacity 的 load_factor 覆盖判据、
+// scheduling、usage_window 只对订阅账号计算、proxy 只暴露 name（host/username
+// 即使上游给了也不会进 ManagedChannel，因为解码结构体里根本没有那两个字段）、
+// rate_multiplier 精确解析、upstream_multiplier 从 extra 里按已知子键读取、
+// 以及 today 统计（逐账号预算探测，见 fetchAccountTodayStats）。
+func TestRealClientMapsChannelCatalogFields(t *testing.T) {
+	upstream := startFakeUpstream(t, sub2api.FakeOptions{}, func(u *fakeUpstream) {
+		u.todayStats = map[string]string{
+			"1": `{"requests":842,"tokens":9000,"cost":15.60,"standard_cost":14.00,"user_cost":18.00}`,
+			"3": `{"requests":5,"tokens":100,"cost":0.10,"standard_cost":0.10,"user_cost":0.12}`,
+			// "2" 故意不登记：走默认的真实零统计，验证「查过但是 0」而不是
+			// 「没查」。
+		}
+	})
+	directory, err := upstream.newClient(t).ChannelDirectory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Items) != 3 {
+		t.Fatalf("目录条数 = %d, want 3: %+v", len(directory.Items), directory.Items)
+	}
+	byID := make(map[string]sub2api.ManagedChannel, 3)
+	for _, item := range directory.Items {
+		byID[item.ChannelID] = item
+		contracttest.AssertManagedChannelCatalogInvariants(t, item)
+	}
+
+	t.Run("订阅型账号(id 1)", func(t *testing.T) {
+		got := byID["1"]
+		if got.Kind == nil || *got.Kind != "subscription" {
+			t.Fatalf("Kind = %v, want subscription（type=oauth）", got.Kind)
+		}
+		if got.Vendor == nil || *got.Vendor != "anthropic" {
+			t.Fatalf("Vendor = %v, want anthropic", got.Vendor)
+		}
+		if got.CapacityUsed == nil || *got.CapacityUsed != 2 {
+			t.Fatalf("CapacityUsed = %v, want 2（current_concurrency）", got.CapacityUsed)
+		}
+		if got.CapacityLimit == nil || *got.CapacityLimit != 5 {
+			t.Fatalf("CapacityLimit = %v, want 5（load_factor 未配置，回落到 concurrency）", got.CapacityLimit)
+		}
+		if got.SchedulingEnabled == nil || !*got.SchedulingEnabled {
+			t.Fatalf("SchedulingEnabled = %v, want true", got.SchedulingEnabled)
+		}
+		if got.SchedulingPriority == nil || *got.SchedulingPriority != 10 {
+			t.Fatalf("SchedulingPriority = %v, want 10", got.SchedulingPriority)
+		}
+		if got.TodayRequests == nil || *got.TodayRequests != 842 {
+			t.Fatalf("TodayRequests = %v, want 842", got.TodayRequests)
+		}
+		if got.TodaySuccessRatePPM != nil {
+			t.Fatalf("TodaySuccessRatePPM = %v, want nil（WindowStats 无此字段）", got.TodaySuccessRatePPM)
+		}
+		if got.TodayCostMinorUnits == nil || *got.TodayCostMinorUnits != 1560 {
+			t.Fatalf("TodayCostMinorUnits = %v, want 1560（15.60 美元，取 cost 不取 standard_cost/user_cost）",
+				got.TodayCostMinorUnits)
+		}
+		if got.TodayCurrency == nil || *got.TodayCurrency != "USD" || got.TodayScale == nil || *got.TodayScale != 2 {
+			t.Fatalf("TodayCurrency/Scale = %v/%v, want USD/2", got.TodayCurrency, got.TodayScale)
+		}
+		if got.UsageWindowUsedRatioPPM == nil || *got.UsageWindowUsedRatioPPM != 420_000 {
+			t.Fatalf("UsageWindowUsedRatioPPM = %v, want 420000（21.00/50.00 = 0.42）", got.UsageWindowUsedRatioPPM)
+		}
+		wantResets := time.Date(2026, 8, 27, 15, 0, 0, 0, time.UTC)
+		if got.UsageWindowResetsAt == nil || !got.UsageWindowResetsAt.Equal(wantResets) {
+			t.Fatalf("UsageWindowResetsAt = %v, want %v", got.UsageWindowResetsAt, wantResets)
+		}
+		if got.ProxyLabel == nil || *got.ProxyLabel != "hk-01" {
+			t.Fatalf("ProxyLabel = %v, want hk-01（只取 name，即便上游给了 host/username 也不解）", got.ProxyLabel)
+		}
+		if got.RateMultiplierPPM == nil || *got.RateMultiplierPPM != 1_500_000 {
+			t.Fatalf("RateMultiplierPPM = %v, want 1500000（1.5x）", got.RateMultiplierPPM)
+		}
+		if got.UpstreamMultiplierPPM == nil || *got.UpstreamMultiplierPPM != 1_100_000 {
+			t.Fatalf("UpstreamMultiplierPPM = %v, want 1100000（1.1x，extra.upstream_billing_probe.data.resolved_rate_multiplier）",
+				got.UpstreamMultiplierPPM)
+		}
+		wantLastUsed := time.Date(2026, 8, 27, 11, 55, 0, 0, time.UTC)
+		if got.LastUsedAt == nil || !got.LastUsedAt.Equal(wantLastUsed) {
+			t.Fatalf("LastUsedAt = %v, want %v", got.LastUsedAt, wantLastUsed)
+		}
+		wantCreated := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		if got.CreatedAt == nil || !got.CreatedAt.Equal(wantCreated) {
+			t.Fatalf("CreatedAt = %v, want %v", got.CreatedAt, wantCreated)
+		}
+		wantExpires := time.Unix(1798761600, 0).UTC()
+		if got.ExpiresAt == nil || !got.ExpiresAt.Equal(wantExpires) {
+			t.Fatalf("ExpiresAt = %v, want %v（unix 秒换算）", got.ExpiresAt, wantExpires)
+		}
+	})
+
+	t.Run("密钥型账号(id 2)：load_factor覆盖+调度关闭+usage_window恒null", func(t *testing.T) {
+		got := byID["2"]
+		if got.Kind == nil || *got.Kind != "upstream" {
+			t.Fatalf("Kind = %v, want upstream（type=apikey）", got.Kind)
+		}
+		if got.CapacityLimit == nil || *got.CapacityLimit != 3 {
+			t.Fatalf("CapacityLimit = %v, want 3（load_factor=3 已配置且 >0，覆盖 concurrency=10）", got.CapacityLimit)
+		}
+		if got.SchedulingEnabled == nil || *got.SchedulingEnabled {
+			t.Fatalf("SchedulingEnabled = %v, want false", got.SchedulingEnabled)
+		}
+		if got.TodayRequests == nil || *got.TodayRequests != 0 {
+			t.Fatalf("TodayRequests = %v, want 0（查过，真实的零，不是没查）", got.TodayRequests)
+		}
+		if got.TodayCostMinorUnits == nil || *got.TodayCostMinorUnits != 0 {
+			t.Fatalf("TodayCostMinorUnits = %v, want 0", got.TodayCostMinorUnits)
+		}
+		if got.UsageWindowUsedRatioPPM != nil || got.UsageWindowResetsAt != nil {
+			t.Fatalf("usage_window 必须对密钥账号恒为 nil, got ratio_ppm=%v resets=%v",
+				got.UsageWindowUsedRatioPPM, got.UsageWindowResetsAt)
+		}
+		if got.ProxyLabel != nil {
+			t.Fatalf("ProxyLabel = %v, want nil（未配置代理）", got.ProxyLabel)
+		}
+		if got.UpstreamMultiplierPPM != nil {
+			t.Fatalf("UpstreamMultiplierPPM = %v, want nil（extra 为空对象）", got.UpstreamMultiplierPPM)
+		}
+		if got.LastUsedAt != nil || got.ExpiresAt != nil {
+			t.Fatalf("LastUsedAt/ExpiresAt 应为 nil, got %v/%v", got.LastUsedAt, got.ExpiresAt)
+		}
+	})
+
+	t.Run("未登记的type取值(id 3)：kind必须是nil不是猜一个桶", func(t *testing.T) {
+		got := byID["3"]
+		if got.Kind != nil {
+			t.Fatalf("Kind = %v, want nil（future-unknown-type 不在任何一桶里）", got.Kind)
+		}
+		if got.Vendor == nil || *got.Vendor != "gemini" {
+			t.Fatalf("Vendor = %v, want gemini", got.Vendor)
+		}
+		if got.CapacityLimit == nil || *got.CapacityLimit != 2 {
+			t.Fatalf("CapacityLimit = %v, want 2（没有 load_factor 字段，回落到 concurrency）", got.CapacityLimit)
+		}
+		if got.TodayRequests == nil || *got.TodayRequests != 5 {
+			t.Fatalf("TodayRequests = %v, want 5", got.TodayRequests)
+		}
+		if got.TodayCostMinorUnits == nil || *got.TodayCostMinorUnits != 10 {
+			t.Fatalf("TodayCostMinorUnits = %v, want 10（0.10 美元）", got.TodayCostMinorUnits)
+		}
+		if got.UsageWindowUsedRatioPPM != nil || got.UsageWindowResetsAt != nil {
+			t.Fatalf("Kind 为 nil 时 usage_window 也必须是 nil, got ratio_ppm=%v resets=%v",
+				got.UsageWindowUsedRatioPPM, got.UsageWindowResetsAt)
+		}
+		if got.ProxyLabel != nil || got.UpstreamMultiplierPPM != nil {
+			t.Fatalf("没有 proxy/extra 字段时应为 nil, got proxy=%v upstream_multiplier_ppm=%v",
+				got.ProxyLabel, got.UpstreamMultiplierPPM)
+		}
+	})
+}
+
+// TestFakeChannelCatalogFieldsSatisfyInvariants：Fake 的目录行同样要满足
+// contracttest.AssertManagedChannelCatalogInvariants——两个实现共享同一套
+// 跨字段一致性检查，不是只测真实客户端那一条路径。
+func TestFakeChannelCatalogFieldsSatisfyInvariants(t *testing.T) {
+	fake := sub2api.NewFake(sub2api.FakeOptions{})
+	directory, err := fake.ChannelDirectory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directory.Items) == 0 {
+		t.Fatal("Fake 目录不应为空")
+	}
+	sawSubscription, sawUpstream := false, false
+	for _, item := range directory.Items {
+		contracttest.AssertManagedChannelCatalogInvariants(t, item)
+		if item.Kind != nil && *item.Kind == "subscription" {
+			sawSubscription = true
+		}
+		if item.Kind != nil && *item.Kind == "upstream" {
+			sawUpstream = true
+		}
+	}
+	if !sawSubscription || !sawUpstream {
+		t.Fatalf("Fake 应同时覆盖 subscription 与 upstream 两种 kind，便于前端联调两种展示形态"+
+			" (subscription=%v upstream=%v)", sawSubscription, sawUpstream)
+	}
+}
+
+// TestRealClientDegradesTodayStatsWhenUnsupported：上游还没升级到
+// today-stats 端点时（404 = not_supported），今日统计整体降级为 nil 并标记
+// CoveragePartial，但**不能**让整次目录读取失败——id/name/status/balance
+// 等基础字段与 today-stats 完全无关，不该被这一个可选维度拖累。
+func TestRealClientDegradesTodayStatsWhenUnsupported(t *testing.T) {
+	upstream := startFakeUpstream(t, sub2api.FakeOptions{}, func(u *fakeUpstream) {
+		u.todayStatsUnsupported = true
+	})
+	directory, err := upstream.newClient(t).ChannelDirectory(t.Context())
+	if err != nil {
+		t.Fatalf("today-stats 端点缺失不该让整次目录读取失败: %v", err)
+	}
+	if !directory.CoveragePartial {
+		t.Fatal("today-stats 端点缺失必须标记 CoveragePartial")
+	}
+	for _, item := range directory.Items {
+		if item.TodayRequests != nil || item.TodayCostMinorUnits != nil {
+			t.Fatalf("today-stats 端点缺失时 Today* 必须是 nil: %+v", item)
+		}
+		// 基础字段不该受影响
+		if item.ChannelID == "" || item.Name == "" {
+			t.Fatalf("基础字段被今日统计的降级拖累了: %+v", item)
+		}
 	}
 }
 

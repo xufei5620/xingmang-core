@@ -11,15 +11,71 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
+
+// platformChannelCapacityResponse/…UsageWindowResponse are the nested v3
+// catalog objects (XM-CHAN-FIELDS0). Every field is individually nullable:
+// the connectors already omit a whole dimension from the observation when
+// nothing backs it (see sub2api/newapi catalogFields), and this layer stays
+// honest about that rather than inventing a zero or an empty string.
+type platformChannelCapacityResponse struct {
+	Used  *int64 `json:"used"`
+	Limit *int64 `json:"limit"`
+}
+
+type platformChannelSchedulingResponse struct {
+	Enabled  *bool  `json:"enabled"`
+	Priority *int64 `json:"priority"`
+}
+
+type platformChannelTodayResponse struct {
+	Requests    *int64   `json:"requests"`
+	SuccessRate *float64 `json:"success_rate"`
+	// CostMinor follows the established money-as-decimal-string convention
+	// (see amountString/amountBody in payments.go/users.go): JS numbers are
+	// float64 and silently lose precision past 2^53, so money never rides a
+	// bare JSON number in this API.
+	CostMinor *string `json:"cost_minor"`
+	Currency  *string `json:"currency"`
+	Scale     *int    `json:"scale"`
+}
+
+type platformChannelUsageWindowResponse struct {
+	UsedRatio *float64 `json:"used_ratio"`
+	ResetsAt  *string  `json:"resets_at"`
+}
 
 type platformChannelRow struct {
 	ChannelRef struct {
 		ServiceID         string `json:"service_id"`
 		ExternalChannelID string `json:"external_channel_id"`
 	} `json:"channel_ref"`
-	Name           string                   `json:"name"`
+	// ID is the upstream's own account/channel id — identical value to
+	// ChannelRef.ExternalChannelID, exposed as a top-level field because
+	// XM-CHAN-FIELDS0 chanmerge codes against exactly this JSON name.
+	ID   string `json:"id"`
+	Name string `json:"name"`
+
+	// XM-CHAN-FIELDS0 catalog fields. See contracts/connectors/
+	// sub2api.channel-catalog.v3.md and newapi.channel-catalog.v3.md for the
+	// field-by-field upstream source of each; anything not traceable to a
+	// real upstream field stays nil here, never approximated.
+	Kind               *string                             `json:"kind"`
+	Vendor             *string                             `json:"vendor"`
+	Capacity           *platformChannelCapacityResponse    `json:"capacity"`
+	Status             *string                             `json:"status"`
+	Scheduling         *platformChannelSchedulingResponse  `json:"scheduling"`
+	Today              *platformChannelTodayResponse       `json:"today"`
+	UsageWindow        *platformChannelUsageWindowResponse `json:"usage_window"`
+	Proxy              *string                             `json:"proxy"`
+	RateMultiplier     *float64                            `json:"rate_multiplier"`
+	UpstreamMultiplier *float64                            `json:"upstream_multiplier"`
+	LastUsedAt         *string                             `json:"last_used_at"`
+	CreatedAt          *string                             `json:"created_at"`
+	ExpiresAt          *string                             `json:"expires_at"`
+
 	Binding        *channelBindingResponse  `json:"binding"`
 	Candidate      channelCandidateResponse `json:"candidate"`
 	Economics      any                      `json:"economics"`
@@ -30,6 +86,196 @@ type platformChannelRow struct {
 	Assurance      any                      `json:"assurance"`
 	Runway         any                      `json:"runway"`
 	Observed       map[string]any           `json:"observed"`
+}
+
+// platformChannelCatalog is the httpapi-internal decode of one connector's
+// v3 catalog row (the map[string]any nested inside the "channels" array of
+// the "<service_type>.channels.status" observation — see
+// sub2api/newapi ToChannelDirectoryObservation). It exists only to carry
+// values from catalogRowsForService to the row-building loop below; the
+// JSON-facing shape is platformChannelRow and its nested Response types.
+type platformChannelCatalog struct {
+	kind                 *string
+	vendor               *string
+	capacityUsed         *int64
+	capacityLimit        *int64
+	status               *string
+	schedulingEnabled    *bool
+	schedulingPriority   *int64
+	todayRequests        *int64
+	todaySuccessRate     *float64
+	todayCostMinorUnits  *int64
+	todayCurrency        *string
+	todayScale           *int
+	usageWindowUsedRatio *float64
+	usageWindowResetsAt  *string
+	proxy                *string
+	rateMultiplier       *float64
+	upstreamMultiplier   *float64
+	lastUsedAt           *string
+	createdAt            *string
+	expiresAt            *string
+}
+
+// toInt64FromAny coerces a decoded observation value into *int64. Values
+// arrive as native Go int64 (Fake path, kept in memory) or as float64 (any
+// path that round-trips the observation through real JSON, e.g. Postgres
+// JSONB) — the same dual-type defensiveness already used by
+// inventoryForService for reported_count/fetched_count.
+func toInt64FromAny(v any) *int64 {
+	switch n := v.(type) {
+	case int64:
+		return &n
+	case float64:
+		i := int64(n)
+		return &i
+	case int:
+		i := int64(n)
+		return &i
+	default:
+		return nil
+	}
+}
+
+func toIntFromAny(v any) *int {
+	switch n := v.(type) {
+	case int:
+		return &n
+	case int64:
+		i := int(n)
+		return &i
+	case float64:
+		i := int(n)
+		return &i
+	default:
+		return nil
+	}
+}
+
+func toFloat64FromAny(v any) *float64 {
+	switch n := v.(type) {
+	case float64:
+		return &n
+	case int64:
+		f := float64(n)
+		return &f
+	case int:
+		f := float64(n)
+		return &f
+	default:
+		return nil
+	}
+}
+
+func toBoolFromAny(v any) *bool {
+	if b, ok := v.(bool); ok {
+		return &b
+	}
+	return nil
+}
+
+func toStringFromAny(v any) *string {
+	if s, ok := v.(string); ok && s != "" {
+		return &s
+	}
+	return nil
+}
+
+// catalogRowsForService decodes the v3 catalog fields (XM-CHAN-FIELDS0) for
+// every channel in the service's latest directory observation, keyed by
+// external channel id. It reads the exact same observation as
+// inventoryForService (via the shared findChannelsObservation) but keeps a
+// richer per-row decode — bindingInventory intentionally stays narrow
+// (identity fields only) because finance.EvaluateBindingCandidates doesn't
+// need or want the display-only catalog fields, and channel_bindings.go's
+// own handler has no reason to carry them either.
+func catalogRowsForService(observations []ops.Observation, service finance.BindingService) map[string]platformChannelCatalog {
+	out := map[string]platformChannelCatalog{}
+	found := findChannelsObservation(observations, service)
+	if found == nil {
+		return out
+	}
+	rawItems, ok := found.Value["channels"].([]any)
+	if !ok {
+		return out
+	}
+	for _, raw := range rawItems {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := strings.TrimSpace(toString(row["channel_id"]))
+		if id == "" {
+			continue
+		}
+		var c platformChannelCatalog
+		c.status = toStringFromAny(row["status"])
+		c.kind = toStringFromAny(row["kind"])
+		c.vendor = toStringFromAny(row["vendor"])
+		if capacity, ok := row["capacity"].(map[string]any); ok {
+			c.capacityUsed = toInt64FromAny(capacity["used"])
+			c.capacityLimit = toInt64FromAny(capacity["limit"])
+		}
+		if scheduling, ok := row["scheduling"].(map[string]any); ok {
+			c.schedulingEnabled = toBoolFromAny(scheduling["enabled"])
+			c.schedulingPriority = toInt64FromAny(scheduling["priority"])
+		}
+		if today, ok := row["today"].(map[string]any); ok {
+			c.todayRequests = toInt64FromAny(today["requests"])
+			c.todaySuccessRate = toFloat64FromAny(today["success_rate"])
+			c.todayCostMinorUnits = toInt64FromAny(today["cost_minor_units"])
+			c.todayCurrency = toStringFromAny(today["currency"])
+			c.todayScale = toIntFromAny(today["scale"])
+		}
+		if window, ok := row["usage_window"].(map[string]any); ok {
+			c.usageWindowUsedRatio = toFloat64FromAny(window["used_ratio"])
+			c.usageWindowResetsAt = toStringFromAny(window["resets_at"])
+		}
+		c.proxy = toStringFromAny(row["proxy"])
+		c.rateMultiplier = toFloat64FromAny(row["rate_multiplier"])
+		c.upstreamMultiplier = toFloat64FromAny(row["upstream_multiplier"])
+		c.lastUsedAt = toStringFromAny(row["last_used_at"])
+		c.createdAt = toStringFromAny(row["created_at"])
+		c.expiresAt = toStringFromAny(row["expires_at"])
+		out[id] = c
+	}
+	return out
+}
+
+// applyCatalog fills the v3 catalog fields (XM-CHAN-FIELDS0) on a
+// platformChannelRow from the decoded observation row. Absent in the
+// observation stays nil in the response — never a fabricated zero or "".
+func applyCatalog(row *platformChannelRow, c platformChannelCatalog) {
+	row.Kind = c.kind
+	row.Vendor = c.vendor
+	row.Status = c.status
+	row.Proxy = c.proxy
+	row.RateMultiplier = c.rateMultiplier
+	row.UpstreamMultiplier = c.upstreamMultiplier
+	row.LastUsedAt = c.lastUsedAt
+	row.CreatedAt = c.createdAt
+	row.ExpiresAt = c.expiresAt
+	if c.capacityUsed != nil || c.capacityLimit != nil {
+		row.Capacity = &platformChannelCapacityResponse{Used: c.capacityUsed, Limit: c.capacityLimit}
+	}
+	if c.schedulingEnabled != nil || c.schedulingPriority != nil {
+		row.Scheduling = &platformChannelSchedulingResponse{Enabled: c.schedulingEnabled, Priority: c.schedulingPriority}
+	}
+	if c.todayRequests != nil || c.todaySuccessRate != nil || c.todayCostMinorUnits != nil {
+		today := &platformChannelTodayResponse{
+			Requests: c.todayRequests, SuccessRate: c.todaySuccessRate,
+			Currency: c.todayCurrency, Scale: c.todayScale,
+		}
+		if c.todayCostMinorUnits != nil {
+			today.CostMinor = amountString(*c.todayCostMinorUnits)
+		}
+		row.Today = today
+	}
+	if c.usageWindowUsedRatio != nil || c.usageWindowResetsAt != nil {
+		row.UsageWindow = &platformChannelUsageWindowResponse{
+			UsedRatio: c.usageWindowUsedRatio, ResetsAt: c.usageWindowResetsAt,
+		}
+	}
 }
 
 type platformChannelInventoryResponse struct {
@@ -166,6 +412,7 @@ func ListPlatformChannelsHandler(
 			return
 		}
 		inventory := inventoryForService(observations, service)
+		catalog := catalogRowsForService(observations, service)
 		evidence, err := bindings.TokenEvidence(r.Context(), string(env))
 		if err != nil {
 			WriteError(w, r, err)
@@ -191,6 +438,8 @@ func ListPlatformChannelsHandler(
 		for _, candidate := range candidates {
 			row := platformChannelRow{Name: candidate.Name, Candidate: channelCandidateResponse{State: string(candidate.State), EvidenceStatus: string(candidate.EvidenceStatus), ReasonCodes: append([]string(nil), candidate.ReasonCodes...), PlatformAssignmentMissing: candidate.PlatformAssignmentMissing, InventoryUnknown: candidate.InventoryUnknown}, EconomicsState: string(candidate.State), Conflicts: append([]string(nil), candidate.ReasonCodes...), Health: platformChannelHealth(inventory, candidate.Channel.ExternalChannelID, platform)}
 			row.ChannelRef.ServiceID, row.ChannelRef.ExternalChannelID = serviceID.String(), candidate.Channel.ExternalChannelID
+			row.ID = candidate.Channel.ExternalChannelID
+			applyCatalog(&row, catalog[candidate.Channel.ExternalChannelID])
 			for _, id := range candidate.UpstreamAccountIDs {
 				row.Candidate.UpstreamAccountIDs = append(row.Candidate.UpstreamAccountIDs, id.String())
 			}
