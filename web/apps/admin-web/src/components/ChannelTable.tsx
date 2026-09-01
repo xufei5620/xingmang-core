@@ -1,5 +1,4 @@
-import { useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageState, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import {
@@ -26,35 +25,29 @@ import { ChannelScopeNote } from "./ChannelScopeNote";
 import { channelTableColumns, type ChannelPlatform } from "./ChannelTableColumns";
 import { PersistentDataTable, platformSavedViewTableKey } from "./PersistentDataTable";
 import { ManagedChannelTable } from "./ManagedChannelTable";
-import { UpstreamAccountsPanel } from "./UpstreamAccountsPanel";
-
-/** 旧 `?tab=suppliers` 书签改跳 `?tab=upstream` 之后带的锚点
- *  （`lib/platforms.ts` 的 `LEGACY_TAB_ALIAS_ANCHORS`）。挂载时如果地址栏
- *  正好是这个锚点，滚到「上游管理」区块——单纯改 `?tab=` 只把人带到渠道管理
- *  页顶部，看不出「上游管理去哪了」。 */
-const UPSTREAM_MANAGEMENT_ANCHOR = "upstream-management";
-
-function useScrollToUpstreamAnchor() {
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.location.hash !== `#${UPSTREAM_MANAGEMENT_ANCHOR}`) return;
-    document.getElementById(UPSTREAM_MANAGEMENT_ANCHOR)?.scrollIntoView({ block: "start" });
-  }, []);
-}
+import { UpstreamAccountDialog } from "./UpstreamAccountDialog";
 
 /** 渠道管理表（两个平台共用）。原型 `V["s2/upstream"]` / `V["newapi/upstream"]`。
  *
- *  ## 行粒度：一行 = 一个上游账号
+ *  ## 行粒度：两条分支，各自的行代表不同的东西
  *
- *  原型的一行是**被管平台自己的一条渠道**（Sub2API 账号 / NewAPI 渠道）。
- *  我们今天做不到那个粒度：`GET /api/v1/finance/channels/summary` 一行是一个
- *  `finance.upstream_account`，而登记簿里没有「平台渠道 ↔ 上游账号」的对应关系
- *  （只有「上游令牌 ↔ 我方账号」的令牌映射，那是另一个维度）。
- *  XM-0048 试过按 id join，结果是一条都对不上、经营列全空——
- *  看起来像「后端没数据」，实际是两套 id 互不认识。
+ *  **恰好一个已登记且 active 的 service** 时（生产环境的实际状态）走
+ *  `ManagedChannelTable`：一行 = 被管平台自己的一条渠道（Sub2API 账号 /
+ *  NewAPI 渠道），这正是原型的粒度。2026-09-02 07:20 产品负责人裁定补充
+ *  （ACCEPTANCE-LOG）在此基础上把登记簿字段（上游分组、余额、充值成本率、
+ *  联系人……）并入这张表的行与渠道详情页，不再单独有一张"上游管理"表或
+ *  页内区块——旧版本（04:40 裁定）曾经把登记簿降级成这张表下方的页内区块,
+ *  07:20 的补充裁定推翻了这个做法，本文件因此不再挂载任何登记簿相关的
+ *  独立组件。
  *
- *  所以 XM-0052 把行粒度定成上游账号。**换来的是这张表上的钱是真的**，
- *  代价是同一上游下的多条平台渠道在这里合成一行；这句话写在 `ChannelScopeNote` 上。
+ *  多实例或未登记时回落到账号粒度分支（`channelTable.ts` 驱动）：一行 = 一个
+ *  `finance.upstream_account`，因为登记簿里没有「平台渠道 ↔ 上游账号」的对应
+ *  关系（只有「上游令牌 ↔ 我方账号」的令牌映射，那是另一个维度）。XM-0048
+ *  试过按 id join，结果是一条都对不上、经营列全空——看起来像「后端没数据」,
+ *  实际是两套 id 互不认识。这条分支的行粒度**不受** 07:20 裁定影响：那条
+ *  裁定明确说的是"一个 Sub2API 账号 / 一条 NewAPI 渠道"，即 ChannelRef 粒度,
+ *  这个回落分支从来就不是那个粒度。`ChannelScopeNote` 的文案按哪条分支在渲染
+ *  分别措辞，不会说错自己是哪个粒度。
  *
  *  ## 顶部四格
  *
@@ -72,7 +65,7 @@ export function ChannelTable({
   serviceId?: string;
   serviceStatus?: string;
 }) {
-  useScrollToUpstreamAnchor();
+  const usesChannelRefGrain = Boolean(serviceId && serviceStatus === "active");
 
   const summaryQuery = useQuery({
     queryKey: ["finance", "channels", "summary"],
@@ -92,68 +85,87 @@ export function ChannelTable({
   // 而不是手抄一份——手抄的那份会在下次加列时悄悄把新列藏起来
   const allColumnIds = columns.map((c) => c.id);
 
+  const queryClient = useQueryClient();
+  // 回落分支（账号粒度）自己的「＋ 添加上游」入口——ManagedChannelTable 分支
+  // 已经在自己的工具条上放了一份，这里只补回落分支缺的那一份，不是重复挂载
+  // 同一个组件两次
+  const addUpstreamButton = (
+    <UpstreamAccountDialog
+      platform={platform}
+      onDone={() => {
+        void queryClient.invalidateQueries({ queryKey: ["finance", "channels", "summary"] });
+        void queryClient.invalidateQueries({ queryKey: ["finance-upstream-accounts"] });
+        void queryClient.invalidateQueries({ queryKey: ["finance", "upstreams", "summary"] });
+      }}
+    />
+  );
+
   // 只有一个已登记且 active 的 service 才切换到 ChannelRef 粒度；
   // 多实例或降级状态继续使用已验证的上游账号汇总，避免猜测归属。
   //
-  // 2026-09-02 起：无论走哪条粒度，口径声明 / 顶部四格 / 「上游管理」
-  // 区块都不再因为分支而缺席——之前 ChannelRef 分支整段提前 return,
-  // 生产环境（单实例 active，恰好走这条分支）因此看不到这三样东西,
-  // 这正是 ACCEPTANCE-LOG 记录的"现状渠道管理页偏离原型"的一部分。
-  const mainTable =
-    serviceId && serviceStatus === "active" ? (
-      <ManagedChannelTable platform={platform} serviceId={serviceId} />
-    ) : (
-      <PersistentDataTable
-        tableKey={platformSavedViewTableKey(platform, "channels")}
-        caption={`${platform === "sub2api" ? "Sub2API" : "NewAPI"} 逐上游账号的成本、我方计费消耗与毛利`}
-        columns={columns}
-        rows={rows}
-        rowKey={(row) => row.id}
-        pageSize={10}
-        searchable
-        stickyFirstColumn
-        defaultDensity="compact"
-        filters={[
-          { columnId: "platform", label: "平台 / 来源", options: PLATFORM_FILTERS },
-          { columnId: "status", label: "状态", options: STATUS_FILTERS },
-        ]}
-        views={[
-          {
-            name: "需关注",
-            state: {
-              query: "",
-              filters: { status: "需关注" },
-              sort: null,
-              visibleColumns: allColumnIds,
-              density: "compact",
-            },
+  // 口径声明 / 顶部四格不再因为分支而缺席——之前 ChannelRef 分支整段提前
+  // return，生产环境（单实例 active，恰好走这条分支）因此看不到这两样东西,
+  // 这是 ACCEPTANCE-LOG 04:40 裁定记录的"现状渠道管理页偏离原型"的一部分。
+  // 07:20 的补充裁定进一步把登记簿（原「上游管理」）并入了行与详情页，
+  // 不再有独立区块可挂，因此这里不再有第三样"缺席"的东西要补。
+  const mainTable = usesChannelRefGrain ? (
+    <ManagedChannelTable platform={platform} serviceId={serviceId!} />
+  ) : (
+    <PersistentDataTable
+      tableKey={platformSavedViewTableKey(platform, "channels")}
+      caption={`${platform === "sub2api" ? "Sub2API" : "NewAPI"} 逐上游账号的成本、我方计费消耗与毛利`}
+      columns={columns}
+      rows={rows}
+      rowKey={(row) => row.id}
+      pageSize={10}
+      searchable
+      stickyFirstColumn
+      defaultDensity="compact"
+      toolbarExtra={addUpstreamButton}
+      filters={[
+        { columnId: "platform", label: "平台 / 来源", options: PLATFORM_FILTERS },
+        { columnId: "status", label: "状态", options: STATUS_FILTERS },
+      ]}
+      views={[
+        {
+          name: "需关注",
+          state: {
+            query: "",
+            filters: { status: "需关注" },
+            sort: null,
+            visibleColumns: allColumnIds,
+            density: "compact",
           },
-          {
-            name: "未归属",
-            state: {
-              query: "",
-              filters: { platform: "未归属" },
-              sort: null,
-              visibleColumns: allColumnIds,
-              density: "compact",
-            },
+        },
+        {
+          name: "未归属",
+          state: {
+            query: "",
+            filters: { platform: "未归属" },
+            sort: null,
+            visibleColumns: allColumnIds,
+            density: "compact",
           },
-        ]}
-        emptyState={
+        },
+      ]}
+      emptyState={
+        <div className="flex flex-col items-start gap-3">
           <PageState
             kind="empty"
             title="还没有上游账号"
-            description="登记簿里这个环境下还没有归属本平台（或未配对）的上游账号；到下方「上游管理」区块登记之后会出现在这里"
+            description="登记簿里这个环境下还没有归属本平台（或未配对）的上游账号；用下面的入口登记之后会出现在这里"
           />
-        }
-      />
-    );
+          {addUpstreamButton}
+        </div>
+      }
+    />
+  );
 
   return (
     <section className="flex flex-col gap-4">
       <div className="flex flex-col gap-3">
         <p className="text-xs text-fg-muted">{lead}</p>
-        <ChannelScopeNote platform={platform} />
+        <ChannelScopeNote platform={platform} grain={usesChannelRefGrain ? "channel" : "account"} />
         <ApiStateView
           isPending={summaryQuery.isPending}
           error={summaryQuery.error}
@@ -165,10 +177,6 @@ export function ChannelTable({
           </div>
         </ApiStateView>
       </div>
-
-      <section id={UPSTREAM_MANAGEMENT_ANCHOR} className="scroll-mt-4">
-        <UpstreamAccountsPanel platform={platform} />
-      </section>
     </section>
   );
 }

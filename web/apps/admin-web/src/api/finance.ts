@@ -804,6 +804,20 @@ export function describeAccessMethod(raw: string): { label: string; hint: string
   }
 }
 
+/** 渠道管理合并表要求的行内粗分类："订阅账号" / "上游渠道"
+ *  （2026-09-02 产品负责人裁定补充，ACCEPTANCE-LOG 07:20：「一行 = 一个 Sub2API
+ *  账号 / 一条 NewAPI 渠道，行内区分订阅账号与上游渠道」）。
+ *
+ *  这是比三态 access_method 粗一档的二分：官方直连（official_api）与上游中转
+ *  （upstream_key）在这张表的行分类语义上都算"上游渠道"——两者都是"这一行接的
+ *  是一个渠道式的上游"，与"接的是一个订阅账号池"相对。三态的精确区分仍然
+ *  保留在 `describeAccessMethod`（详情页「接入方式」字段用那个）。 */
+export function accountRowType(accessMethod: string): { value: "subscription" | "upstream"; label: string } {
+  return accessMethod === "subscription_account"
+    ? { value: "subscription", label: "订阅账号" }
+    : { value: "upstream", label: "上游渠道" };
+}
+
 /** 凭据的展示口径。**永远只说状态，不显示值**（ADR-014、宪法 7 条）。 */
 export function describeCredential(ref: string): { label: string; configured: boolean; hint: string } {
   if (!ref) {

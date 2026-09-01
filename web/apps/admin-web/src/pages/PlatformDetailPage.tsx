@@ -325,11 +325,11 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
     case "suppliers":
       // 服务器「供应商与采购」= XM-SERVER0 登记簿（供应商、购买账号联系方式）。
       // 唯一还会走到这个 value 的平台：Sub2API/NewAPI 的「上游管理」
-      // 2026-09-02 起并入了渠道管理页内区块（`ManagedChannelTable`/`ChannelTable`
-      // 挂载 `UpstreamAccountsPanel`），不再是一个独立页签，`suppliers` 这个
-      // tab 值在它们的页签集合里已经不存在——`?tab=suppliers` 在
-      // `resolvePlatformTab` 里会被 `LEGACY_TAB_ALIASES` 改跳到 `upstream`,
-      // 走不到这条 case（见 router.tsx 的 platformTabLoader）。
+      // 2026-09-02 起并入了渠道管理页（登记簿字段直接并进 `ManagedChannelTable`
+      // 的行与渠道详情页，07:20 补充裁定连页内独立区块也一并推翻了），不再是
+      // 一个独立页签，`suppliers` 这个 tab 值在它们的页签集合里已经不存在——
+      // `?tab=suppliers` 在 `resolvePlatformTab` 里会被 `LEGACY_TAB_ALIASES`
+      // 改跳到 `upstream`，走不到这条 case（见 router.tsx 的 platformTabLoader）。
       if (spec.serviceType === "server") return <ServerSuppliersPanel />;
       // 不匹配时落回蓝图那条路：没在这条分支里认领的平台如果画了蓝图,
       // 在这里截胡会把它悄悄下线（`default` 分支才认蓝图）

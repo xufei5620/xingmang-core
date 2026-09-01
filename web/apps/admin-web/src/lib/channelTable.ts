@@ -13,9 +13,7 @@ import { sumMoney, type MoneyTotal } from "./upstreamTotals";
  *  所以这一片按「渠道 = 上游账号」落地：这样表上的钱是真的，
  *  代价是同一上游下的多条平台渠道**在这里合成一行**。 */
 
-/** 本页只看归属本平台的账号，外加未配对的那些。
- *
- *  与上游管理页同一条规则（`UpstreamAccountsPanel`）：**未配对的照样显示**。
+/** 本页只看归属本平台的账号，外加未配对的那些：**未配对的照样显示**。
  *  藏起来的话，一个忘了配 platform_id 的账号会同时从两个平台的页面上消失,
  *  而它的钱一直在花。 */
 export function summariesForPlatform(
