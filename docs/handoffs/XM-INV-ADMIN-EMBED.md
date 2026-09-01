@@ -2,7 +2,7 @@
 
 - **status:** implemented and self-tested locally (backend `go build`/`go
   vet`/full `go test -p 1 -count=1 ./...` against real PostgreSQL, 27/27
-  packages; frontend `npm run typecheck`, `npm test` 57/57 tests, `npm run
+  packages; frontend `npm run typecheck`, `npm test` 67/67 tests, `npm run
   build`; `scripts/verify-web-security-headers.ps1` passing against a live
   Docker container in its local dev-build mode). Not deployed, no production
   or server contact of any kind, no release ceremony run, no RC advanced.
@@ -10,7 +10,7 @@
 - **branch:** `ai/claude/XM-INV-ADMIN-EMBED`, based on
   `ai/claude/XM-INV-AUTOLOGIN` at `8802e08` (production RC67 line), worktree
   `K:/发票/wt-XM-INV-ADMIN-EMBED`.
-- **commit:** eight commits on top of the base, see `git log --oneline
+- **commit:** eleven commits on top of the base, see `git log --oneline
   8802e08..HEAD`:
   - `e8f5fb3` feat(backend): filter payment-candidate and refund-case admin
     lists by source_instance_id
@@ -27,6 +27,12 @@
   - `f388556` docs(handoff): add XM-INV-ADMIN-EMBED handoff
   - `e1a7ed0` test(web): prove admin list requests carry source_instance_id
     only when scoped
+  - `b5fbe59` docs(handoff): reflect the added fetch-mock test in
+    XM-INV-ADMIN-EMBED
+  - `d38ea8a` feat(web): post document height to the hosting console in
+    embedded-admin mode -- resolves risk 1's open half (see below)
+  - *(this commit)* docs(handoff): record the height-sync follow-up in
+    XM-INV-ADMIN-EMBED
 
 ## Summary
 
@@ -166,6 +172,25 @@ via `ui_mode=embedded_admin` — absent that, `adminNav`/`PortalLayout`/every
 list page/`StepUpPage`/`AuthProvider` behave exactly as before. The backend's
 new filter parameters are optional and unfiltered when absent.
 
+### Follow-up: height sync to the console
+
+Requested on review after the rest of this handoff was written (XM-INVCON0
+had merged in the meantime and its `EmbeddedConsoleFrame` already listens
+for this): `useEmbeddedAdminHeightSync` (`App.tsx`, mounted once at the
+`App` root so it covers the whole session including the pre-login screen)
+posts `{type:"xm-embed", version:1, kind:"height", height:<number>}` — the
+console's own contract — to `window.parent` after initial render and again,
+debounced ~100ms, on every subsequent `ResizeObserver` change on
+`document.documentElement`. Gated by the new
+`shouldSyncEmbeddedAdminHeight(embeddedAdminMode, window.parent !== window)`
+in `embedded-admin-scope.ts`: never fires standalone, never in the user
+embed, never when not actually framed. Target origin is the module-level
+`XM_EMBED_CONSOLE_ORIGIN` constant (`https://console.solov.cc`, never `"*"`,
+must match the `/admin` `frame-ancestors` value from (e)) — this is a
+**different, cross-origin** channel from (d)'s same-origin popup-auth
+handshake; see the module doc comment for how the two relate. This resolves
+risk 1's open half below.
+
 ## Files changed
 
 Backend:
@@ -185,8 +210,13 @@ Backend:
 
 Frontend:
 - `web/src/lib/embedded-admin-scope.ts` — **new**. Scope parsing/nav
-  visibility/source-instance resolution/popup-handshake helpers.
-- `web/src/lib/embedded-admin-scope.test.ts` — **new**, 22 tests.
+  visibility/source-instance resolution/popup-handshake helpers; plus, from
+  the review follow-up, the height-sync message builder
+  (`buildXmEmbedHeightMessage`), its target-origin constant
+  (`XM_EMBED_CONSOLE_ORIGIN`) and mode gating
+  (`shouldSyncEmbeddedAdminHeight`).
+- `web/src/lib/embedded-admin-scope.test.ts` — **new**, 28 tests (22 +6 from
+  the height-sync follow-up).
 - `web/src/lib/http-api.source-instance-filter.test.ts` — **new**, 4 tests
   (see Tests run).
 - `web/src/App.tsx` — `embeddedAdminMode`/`embeddedAdminScope` constants,
@@ -194,7 +224,9 @@ Frontend:
   scope-key tagging; `PortalLayout` filtering/chrome/class; `DataProvider`,
   `AdminPage`, `AdminDrawer`, `EligibilityFreezesPage`,
   `PaymentCandidatesPage`, `RefundCasesPage`, `SourceHealthPage`,
-  `StepUpPage` all touched for their piece of (b)/(c)/(d) above.
+  `StepUpPage` all touched for their piece of (b)/(c)/(d) above; plus, from
+  the review follow-up, `useEmbeddedAdminHeightSync` (mounted once in
+  `App()`).
 - `web/src/AuthProvider.tsx` — popup open/notify/listen handshake for
   `login`/`stepUp` in embedded-admin mode.
 - `web/src/lib/api-contract.ts` — optional `sourceInstanceId` on
@@ -269,11 +301,12 @@ byte-identical after normalizing line endings, before linking):
 
 ```
 npm run typecheck    # tsc --noEmit x2, clean
-npm test              # vitest: 5 files, 61 tests, all pass
+npm test              # vitest: 5 files, 67 tests, all pass
                        #   invoice-contract.test.ts                16 (pre-existing, untouched)
                        #   portal-navigation.test.ts                2 (pre-existing, untouched)
                        #   embedded-scope.test.ts                  17 (pre-existing, untouched)
-                       #   embedded-admin-scope.test.ts            22 (new, this task)
+                       #   embedded-admin-scope.test.ts            28 (new, this task; 6 from the
+                       #                                              height-sync review follow-up)
                        #   http-api.source-instance-filter.test.ts  4 (new, this task)
 npm run build         # tsc --noEmit x2 + vite build, clean
 ```
@@ -286,7 +319,13 @@ precedence, unrecognized/missing -> null); `appendEmbeddedAdminParams`
 Sub2API-has-no-payment-candidates and global-shows-only-settings-and-health
 rules); `resolvePlatformSourceInstanceId` (match, and null on no match);
 the popup handshake's message-shape validation (exact match required on
-every field) and return-marker round-trip.
+every field) and return-marker round-trip; and, from the height-sync
+follow-up, `buildXmEmbedHeightMessage`'s exact contract shape,
+`XM_EMBED_CONSOLE_ORIGIN` being the real origin and never `"*"`, and
+`shouldSyncEmbeddedAdminHeight`'s four-quadrant gating (embedded-admin x
+framed). The `ResizeObserver`/`window.parent.postMessage`/debounce glue
+itself is DOM-dependent browser wiring, not exercised directly — see Not
+run.
 
 `http-api.source-instance-filter.test.ts` stubs global `fetch` (and just
 enough of `window` for `requestJSON`'s abort-timer use of
@@ -342,33 +381,45 @@ config alone.
   `navigateTopLevel` also has no direct test coverage today, for the same
   reason; my new `openAdminAuthPopup` and the effects wiring the handshake
   follow that same existing boundary.
-- **A real or staged console embed.** No platform-side counterpart
-  (`EmbeddedConsoleFrame`, XM-INVCON0) exists yet to actually iframe this
-  against.
+- **A real or staged console embed.** `EmbeddedConsoleFrame` (XM-INVCON0) is
+  now merged on the platform side and is what prompted the height-sync
+  follow-up below, but no live/staged instance was available here to
+  actually load this build inside it and watch the height messages land.
+  `useEmbeddedAdminHeightSync`'s `ResizeObserver`/`window.parent.postMessage`
+  wiring itself is therefore unverified beyond typecheck/build succeeding
+  and its pure message-shape/gating logic being unit tested — same DOM-glue
+  boundary as `AuthProvider.tsx`'s pre-existing `window.open` code, and this
+  task's own `openAdminAuthPopup`, per the point above.
 - **PostgreSQL integration tests were not skipped** — a disposable
   PostgreSQL 18 container was available and used for the full suite,
   including the two new store tests.
 
 ## Risks / things to sign off on
 
-1. **The popup-auth `postMessage` handshake is a new mechanism, not an
-   extension of an existing one**, despite CR-0005's text assuming one
-   ("沿用用户嵌入的版本化消息规范" / "extend the existing allowed parent
-   origin configuration"). I searched thoroughly — no `postMessage`/
-   `onmessage`/`MessageEvent` usage exists anywhere in `web/src` before this
-   task, and `EMBED_ALLOWED_PARENT_ORIGINS` exists only in
+1. **RESOLVED (height-sync half) by review follow-up.** The popup-auth
+   `postMessage` handshake in (d) is a new mechanism, not an extension of an
+   existing one, despite CR-0005's text assuming one ("沿用用户嵌入的版本化
+   消息规范" / "extend the existing allowed parent origin configuration"). I
+   searched thoroughly — no `postMessage`/`onmessage`/`MessageEvent` usage
+   existed anywhere in `web/src` before this task, and
+   `EMBED_ALLOWED_PARENT_ORIGINS` exists only in
    `deploy/.env.example`/`docs/CONFIGURATION.md`, never read by any Go or
-   TypeScript code. What I built is a new, narrow, **same-origin**
-   (`invoice.solov.cc` popup <-> `invoice.solov.cc` opener) channel scoped
-   to exactly this login/step-up handshake; it does not touch or need
+   TypeScript code. What I built for (d) is a narrow, **same-origin**
+   (`invoice.solov.cc` popup <-> `invoice.solov.cc` opener) channel scoped to
+   exactly the login/step-up handshake; it does not touch or need
    `EMBED_ALLOWED_PARENT_ORIGINS`, since that pair is same-origin regardless
-   of what frames the iframe. I deliberately did **not** build the
-   cross-origin iframe<->console `postMessage` channel (height sync,
-   navigation) CR-0005 point (h) describes — that's explicitly the
-   platform-side `XM-INVCON0` slice's `EmbeddedConsoleFrame` component, not
-   this one. I'm confident the functional need for (d) is fully met, but
-   this is a real deviation from the CR's literal wording and worth a second
-   opinion.
+   of what frames the iframe. I deliberately did not build the cross-origin
+   iframe<->console `postMessage` channel (height sync, navigation) CR-0005
+   point (h) describes, on the grounds that it was explicitly the
+   platform-side `XM-INVCON0` slice's `EmbeddedConsoleFrame` component to
+   build, not this one. **On review, XM-INVCON0 had since merged and its
+   `EmbeddedConsoleFrame` already listens for a height-sync message this
+   side never sent** — the "Follow-up: height sync to the console" section
+   above (`useEmbeddedAdminHeightSync`) closes that gap: this page now posts
+   its height to `window.parent` at the console's documented contract and
+   origin. Navigation messages (the other half of CR-0005 (h)'s parenthetical)
+   were not requested and were not added — flag if the console side expects
+   those too.
 2. **The nginx internal-redirect bug** (see Tests run and the nginx commit)
    was genuinely non-obvious — `nginx -T` shows the config as "correct" even
    when the bug is present, since the problem is about which location
@@ -410,12 +461,14 @@ config alone.
    config and `web-app-config.sh` wiring, and the `ADMIN-IA.md` §8.2 #2
    amendment recording this CR's reversal — all in the `xingmang-platform`
    repo, out of this slice's scope.
-2. If the invoice app itself ever needs to actively cooperate with a
-   console-side height-sync/navigation `postMessage` channel (rather than
-   the console wrapper handling sizing unilaterally on its own side),
-   that's its own reviewed design task. `EMBED_ALLOWED_PARENT_ORIGINS` looks
-   like the natural place to finally wire up a real parent-origin allowlist
-   for it, extended with `console.solov.cc` — it is unused today (risk 1).
+2. **Done, this update**: height sync from the invoice iframe to the console
+   (see "Follow-up: height sync to the console" above). Used a static
+   `XM_EMBED_CONSOLE_ORIGIN` constant per the reviewer's explicit direction,
+   not `EMBED_ALLOWED_PARENT_ORIGINS` — that env var is still unused in any
+   Go or TypeScript code. If a *navigation* message (the other half of
+   CR-0005 (h)'s "高度同步、导航" parenthetical) or a real configurable
+   allowlist is ever wanted instead of the hardcoded origin, that's its own
+   follow-up; not requested here.
 3. Browser/Playwright pass over the embedded admin console at real
    iframe/popup widths once a real or staged embed exists — mirrors the
    `XM-INV-EMBED-SCOPE` handoff's identical follow-up for the user embed.
