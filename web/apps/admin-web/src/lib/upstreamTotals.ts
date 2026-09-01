@@ -68,3 +68,21 @@ export function describeMissingTotal(kind: Exclude<MoneyTotal["kind"], "ok">): s
 export function coveredCount(amounts: readonly (Money | null | undefined)[]): number {
   return amounts.filter((m) => Boolean(m)).length;
 }
+
+/** 按真实 instant 取一组 RFC3339 时间里最旧的那个，并保留原始字符串作为页面证据。
+ *
+ *  不能直接比较字符串：`01:00-07:00` 实际比 `08:30+02:00` 更新，
+ *  但词典序恰好相反。解析不出的时间不替任何金额背书。
+ *
+ *  上游管理页（账号粒度与供应商分组粒度）和渠道管理页的余额观测时刻
+ *  共用这一条规则，抽成一份避免三处各写一遍、各自在边界上漂开。 */
+export function oldestActualTimestamp(timestamps: readonly (string | null | undefined)[]): string | null {
+  let oldest: { raw: string; instant: number } | null = null;
+  for (const raw of timestamps) {
+    if (!raw) continue;
+    const instant = Date.parse(raw);
+    if (!Number.isFinite(instant)) continue;
+    if (oldest === null || instant < oldest.instant) oldest = { raw, instant };
+  }
+  return oldest?.raw ?? null;
+}
