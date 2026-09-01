@@ -183,15 +183,25 @@ function channelRefColumns({
       header: "上游分组",
       value: (row) => boundAccount(row)?.upstream_group ?? "",
       cell: (row) => {
-        const group = boundAccount(row)?.upstream_group;
-        return group ? (
-          <span className="text-xs">{group}</span>
-        ) : (
-          <span className="text-xs text-fg-muted" title={row.binding ? "这个上游账号没有登记接入分组" : "渠道还没有绑定上游账号"}>
-            未接入
+        const account = boundAccount(row);
+        const group = account?.upstream_group;
+        if (!group) {
+          return (
+            <span className="text-xs text-fg-muted" title={row.binding ? "这个上游账号没有登记接入分组" : "渠道还没有绑定上游账号"}>
+              未接入
+            </span>
+          );
+        }
+        // 原型这一格是「分组名 · 倍率」（如 gpt-main · 0.85×）；倍率只展示,
+        // 不参与任何金额计算（§10.2，与 ChannelTableColumns 的同名字段同一条纪律）
+        return (
+          <span className="text-xs">
+            {group}
+            {account?.group_rate ? <span className="text-fg-muted"> · {account.group_rate}×</span> : null}
           </span>
         );
       },
+      headerTitle: "分组倍率只展示，不并入成本折算（§10.2）",
     },
     {
       id: "models",

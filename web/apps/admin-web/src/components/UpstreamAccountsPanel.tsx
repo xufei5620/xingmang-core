@@ -163,7 +163,7 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
 
           <DataTableV2
             caption="上游供应商：网址、接入平台、账号/凭据、总余额与本期整体利润，展开看逐账号明细"
-            columns={supplierColumns()}
+            columns={supplierColumns(platform)}
             rows={groups}
             rowKey={(g) => g.key}
             searchable
@@ -195,7 +195,7 @@ export function UpstreamAccountsPanel({ platform }: { platform: UpstreamRegistry
  *  本期总利润 | 联系人 | 状态 | 详情`——逐格对齐，内容按我们真有的字段填,
  *  给不出的（比如原型那种"全部分组 / 已接入分组"目录，我们只有账号自带
  *  的分组名，没有供应商级分组目录）显式说明缺什么，不编数字。 */
-function supplierColumns(): DataTableColumn<UpstreamSupplierGroup>[] {
+function supplierColumns(platform: UpstreamRegistryPlatform): DataTableColumn<UpstreamSupplierGroup>[] {
   return [
     {
       id: "supplier",
@@ -332,9 +332,12 @@ function supplierColumns(): DataTableColumn<UpstreamSupplierGroup>[] {
       cell: (g) => {
         const primary = g.accounts[0];
         if (!primary) return <span className="text-xs text-fg-muted">—</span>;
+        // 未配对账号（platform_id 为空）也要能打开详情：退回当前页面所在的平台,
+        // 不能把空串拼进路径——那会漏掉 URL 里的平台段，变成一条 404 的死链
+        // （/platforms/suppliers/<id>，认不出 suppliers 是哪个平台）
         return (
           <Link
-            to={upstreamDetailPath(primary.platform_id || "", primary.id)}
+            to={upstreamDetailPath(primary.platform_id || platform, primary.id)}
             className="text-xs underline underline-offset-2"
             title={g.accounts.length > 1 ? "打开该供应商下第一个账号的详情" : "打开这个账号的详情"}
           >

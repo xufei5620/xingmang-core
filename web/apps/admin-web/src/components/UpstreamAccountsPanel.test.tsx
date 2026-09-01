@@ -278,6 +278,16 @@ describe("供应商级列（外层表）", () => {
     expect(link.getAttribute("href")).toBe("/platforms/sub2api/suppliers/a1");
   });
 
+  it("未配对账号（platform_id 为空）的详情链接退回当前页面的平台，不留一条 404 死链", async () => {
+    // 浏览器实测抓到的真实缺陷：之前 `primary.platform_id || ""` 在未配对时
+    // 拼出 /platforms/suppliers/<id>，URL 里少了平台段，路由会判成"未知平台"
+    stubAccounts([account({ id: "a1", platform_id: "" })]);
+    renderPanel("newapi");
+    const table = await findOuterTable();
+    const link = await table.findByRole("link", { name: "详情" });
+    expect(link.getAttribute("href")).toBe("/platforms/newapi/suppliers/a1");
+  });
+
   it("搜索按供应商名 / 网址匹配", async () => {
     stubAccounts([
       account({ id: "a1", upstream_name: "Relay A" }),
