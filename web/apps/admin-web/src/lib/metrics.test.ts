@@ -8,6 +8,7 @@ import {
   presentMetric,
   readChannelRows,
   readNewApiChannelRows,
+  readPaymentsDailySummary,
   readRequestsTrendDays,
   readSub2ApiChannelStatusRows,
   toSparkSamples,
@@ -667,5 +668,70 @@ describe("Sub2API 渠道状态（XM-OVERVIEW-UI）", () => {
     expect(shown.label).toBe("Sub2API 渠道状态");
     expect(shown.primary).toBe("3 个渠道");
     expect(shown.secondary).toBe("可用 2 · 不可用 1");
+  });
+});
+
+describe("readPaymentsDailySummary（XM-PAY1）：sub2api.payments.daily / newapi.payments.daily", () => {
+  it("解析完整形状：四个桶、手续费、净现金流", () => {
+    const summary = readPaymentsDailySummary({
+      day: "2026-08-29",
+      currency: "USD",
+      by_status: {
+        succeeded: { count: 42, amount_minor_units: 418000 },
+        pending: { count: 3, amount_minor_units: 9900 },
+        failed: { count: 1, amount_minor_units: 3000 },
+        refunded: { count: 1, amount_minor_units: 20200 },
+      },
+      fee_minor_units: 20000,
+      net_minor_units: null,
+    });
+    expect(summary.day).toBe("2026-08-29");
+    expect(summary.currency).toBe("USD");
+    expect(summary.byStatus.succeeded).toEqual({ count: 42n, amountMinor: 418000n });
+    expect(summary.byStatus.refunded).toEqual({ count: 1n, amountMinor: 20200n });
+    expect(summary.feeMinorUnits).toBe(20000n);
+    expect(summary.netMinorUnits).toBeNull();
+  });
+
+  it("上游这天没有落进某个桶时，那个桶的键就不出现——不是 count:0 的对象", () => {
+    // 契约原话："上游这一天没有落进某个桶的订单，那个桶的键就不出现"
+    // （payments.read.v1.md）。NewAPI 的 refunded 桶恒不出现是这条规则的
+    // 一个特例，不是单独的逻辑分支。
+    const summary = readPaymentsDailySummary({
+      day: "2026-08-29",
+      currency: "USD",
+      by_status: { succeeded: { count: 5, amount_minor_units: 1000 } },
+      fee_minor_units: null,
+      net_minor_units: null,
+    });
+    expect(summary.byStatus.refunded).toBeUndefined();
+    expect(summary.byStatus.pending).toBeUndefined();
+    expect(summary.byStatus.failed).toBeUndefined();
+  });
+
+  it("fee_minor_units/net_minor_units 为 null 时保持 null，不折成 0", () => {
+    const summary = readPaymentsDailySummary({
+      day: "2026-08-29",
+      currency: "USD",
+      by_status: {},
+      fee_minor_units: null,
+      net_minor_units: null,
+    });
+    expect(summary.feeMinorUnits).toBeNull();
+    expect(summary.netMinorUnits).toBeNull();
+  });
+
+  it("value 为 null（从未采集）时给出全空但不抛错的形状", () => {
+    const summary = readPaymentsDailySummary(null);
+    expect(summary.day).toBeNull();
+    expect(summary.currency).toBe("");
+    expect(summary.byStatus).toEqual({});
+    expect(summary.feeMinorUnits).toBeNull();
+    expect(summary.netMinorUnits).toBeNull();
+  });
+
+  it("by_status 形状不对（不是对象）时不抛错，退回空", () => {
+    const summary = readPaymentsDailySummary({ day: "2026-08-29", by_status: "not-an-object" });
+    expect(summary.byStatus).toEqual({});
   });
 });
