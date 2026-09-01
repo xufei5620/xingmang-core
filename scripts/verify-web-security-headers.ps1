@@ -8,6 +8,10 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $webNginxCompatibilityFixtureImage = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
 $approvedContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors https://api.solov.cc https://api2.solov.cc https://xm.solov.cc https://xm2.solov.cc"
+# XM-INV-ADMIN-EMBED (CR-0005): /admin is framed only by the sole approved
+# first-party console origin, not by the Sub2API/New API user-embed origins
+# above -- every other directive is identical to the rest of the SPA.
+$approvedAdminContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors https://console.solov.cc"
 if ([string]::IsNullOrWhiteSpace($Image)) { $Image = $webNginxCompatibilityFixtureImage }
 $releaseBound = -not [string]::IsNullOrWhiteSpace($ExpectedImageID)
 if ($releaseBound) {
@@ -43,7 +47,8 @@ function Get-ContainerDiagnostics {
 function Assert-ExactWebHeaderResponse {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$RawResponse
+        [Parameter(Mandatory)][string]$RawResponse,
+        [string]$ExpectedContentSecurityPolicy = $approvedContentSecurityPolicy
     )
 
     $statusMatches = [regex]::Matches(
@@ -57,7 +62,7 @@ function Assert-ExactWebHeaderResponse {
     }
 
     foreach ($requiredHeaderLine in @(
-        "Content-Security-Policy: $approvedContentSecurityPolicy",
+        "Content-Security-Policy: $ExpectedContentSecurityPolicy",
         'X-Content-Type-Options: nosniff',
         'Referrer-Policy: no-referrer'
     )) {
@@ -79,7 +84,8 @@ function Assert-ExactWebHeaderResponse {
 function Invoke-ContainerWebHeaderProbe {
     param(
         [Parameter(Mandatory)][string]$Container,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [string]$ExpectedContentSecurityPolicy = $approvedContentSecurityPolicy
     )
 
     $uri = "http://127.0.0.1:8080$Path"
@@ -91,7 +97,7 @@ function Invoke-ContainerWebHeaderProbe {
         $rawResponse = ($probeLines | Out-String).TrimEnd()
         if ($probeExit -eq 0) {
             try {
-                Assert-ExactWebHeaderResponse -Path $Path -RawResponse $rawResponse
+                Assert-ExactWebHeaderResponse -Path $Path -RawResponse $rawResponse -ExpectedContentSecurityPolicy $ExpectedContentSecurityPolicy
                 return
             } catch {
                 $lastError = "$($_.Exception.Message); raw response: $rawResponse"
@@ -154,8 +160,14 @@ try {
         $assetRequestPath = Get-ReleaseBoundAssetRequestPath -Container $container
     }
     Invoke-ContainerWebHeaderProbe -Container $container -Path $assetRequestPath
+    # XM-INV-ADMIN-EMBED: /admin must carry the console-only frame-ancestors,
+    # not the user-embed one every other path (including the asset above)
+    # carries -- verified against this image's actual nginx.conf (mounted
+    # locally, or baked into the release-bound image) rather than only
+    # against the deploy/ template, since the two must not disagree either.
+    Invoke-ContainerWebHeaderProbe -Container $container -Path '/admin' -ExpectedContentSecurityPolicy $approvedAdminContentSecurityPolicy
 } finally {
     if ($started) { docker rm --force $container *> $null }
 }
 
-Write-Host 'Web root and immutable asset security headers verified with Nginx.'
+Write-Host 'Web root, immutable asset and admin security headers verified with Nginx.'

@@ -45,6 +45,34 @@ server {
         return 303 https://invoice.solov.cc/?ui_mode=embedded&source=newapi;
     }
 
+    # CR-0005 (XM-INV-ADMIN-EMBED): the xingmang platform console embeds the
+    # *administrator* console per platform (Sub2API/New API) and once for the
+    # cross-platform governance tab, mirroring the two user-embed entries
+    # above. Unlike those, the target carries no bearer token -- admin
+    # authentication is the existing invoice-side OIDC/MFA session, opened in
+    # a top-level popup from inside the embed -- but query strings are still
+    # excluded from logs here on the same principle.
+    location = /embed/admin/sub2api {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/admin?ui_mode=embedded_admin&platform=sub2api;
+    }
+
+    location = /embed/admin/newapi {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/admin?ui_mode=embedded_admin&platform=newapi;
+    }
+
+    location = /embed/admin/global {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/admin?ui_mode=embedded_admin&scope=global;
+    }
+
     # Source ingestion is private mTLS traffic and must never be reachable
     # through the public virtual host.
     location ^~ /internal/ {
@@ -134,11 +162,18 @@ server {
         return 404;
     }
 
-    # Administrator pages are top-level only. Authentication, MFA, RBAC and
-    # source-IP policy are still enforced by the API.
+    # Administrator authentication (OIDC login, MFA step-up) is top-level
+    # only -- Keycloak refuses to be framed, and sensitive authentication
+    # must complete outside any iframe regardless. The administrator page
+    # itself may now be framed by the sole approved first-party console
+    # origin (CR-0005, XM-INV-ADMIN-EMBED); menu visibility is not
+    # authorization, and RBAC/MFA/source-IP policy are still enforced by the
+    # API unchanged. Rolling back to 'none' here (and in web/nginx.conf,
+    # which must not disagree -- see the comment there) is the rollback path
+    # if the console embed is ever withdrawn.
     location = /admin {
         include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
-        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+        add_header Content-Security-Policy "frame-ancestors https://console.solov.cc" always;
         proxy_pass http://127.0.0.1:58090;
         include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
         proxy_buffering on;
@@ -147,7 +182,7 @@ server {
 
     location ^~ /admin/ {
         include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
-        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+        add_header Content-Security-Policy "frame-ancestors https://console.solov.cc" always;
         proxy_pass http://127.0.0.1:58090;
         include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
         proxy_buffering on;
