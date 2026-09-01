@@ -43,6 +43,7 @@ type BackendSession = {
     email_verified: boolean;
     role: "user" | "admin";
     platform?: "sub2api" | "newapi" | "";
+    platform_user_id?: string;
   };
   csrf_token?: string;
 };
@@ -1188,6 +1189,7 @@ function mapSession(value: BackendSession): AuthSession {
       emailVerified: value.user.email_verified,
       role: value.user.role,
       platform: value.user.platform || null,
+      platformUserId: value.user.platform_user_id || null,
     },
     csrfToken: value.csrf_token,
     adminStepUpRequired: value.admin_step_up_required === true,

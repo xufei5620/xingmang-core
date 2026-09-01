@@ -340,6 +340,12 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 		"user": map[string]any{
 			"id": user.ID, "display_name": displayName, "email": user.Email,
 			"email_verified": user.EmailVerified, "role": role, "platform": current.Session.Platform,
+			// Additive: exposes the already-computed Session.PlatformUserID (empty
+			// for OIDC sessions) so an embedded, platform-scoped frontend view can
+			// label a platform-password account that has neither a real display
+			// name nor an email (e.g. a username-only New API account) instead of
+			// showing every such account as the same generic fallback name.
+			"platform_user_id": current.Session.PlatformUserID,
 		},
 		"admin_step_up_required": stepUpRequired,
 	})

@@ -62,6 +62,13 @@ import {
 
 import { dateTime, maskTaxId, money } from "./lib/format";
 import { shouldShowAdminReturn } from "./lib/portal-navigation";
+import { sourceName } from "./lib/source-labels";
+import {
+  accountIdentityLabel,
+  appendEmbeddedParams,
+  parseEmbeddedPlatform,
+  scopeBySource,
+} from "./lib/embedded-scope";
 import { apiCapabilities, apiMode, invoiceApi } from "./lib/api";
 import { InvoiceApiError } from "./lib/api-contract";
 import {
@@ -100,11 +107,16 @@ const initialApplicationURL = new URL(window.location.href);
 const embeddedUserMode =
   !initialApplicationURL.pathname.startsWith("/admin") &&
   initialApplicationURL.searchParams.get("ui_mode") === "embedded";
+// XM-INV-EMBED-SCOPE: narrows the embedded view to one platform's data; see
+// lib/embedded-scope.ts. Parsed once from the initial URL, same as
+// embeddedUserMode above.
+const embeddedPlatform = parseEmbeddedPlatform(
+  initialApplicationURL.searchParams,
+  embeddedUserMode,
+);
 
 function userRoute(path: string) {
-  if (!embeddedUserMode) return path;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}ui_mode=embedded`;
+  return appendEmbeddedParams(path, embeddedUserMode, embeddedPlatform);
 }
 
 type AppData = {
@@ -352,12 +364,19 @@ function PortalLayout({
   admin?: boolean;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { loadError, refresh } = useData();
+  const { loadError, refresh, sourceAccounts } = useData();
   const { user, logout, stepUpRequired } = useAuth();
   const toast = useContext(ToastContext);
   const location = useLocation();
   const nav = admin ? adminNav : userNav;
   const embedded = embeddedUserMode && !admin;
+  // The regular sidebar/topbar chrome that would otherwise show who is
+  // logged in is hidden in embedded mode (see .portal-embedded in
+  // styles.css) -- without this, the embedded view has no account identity
+  // at all.
+  const accountLabel = user
+    ? accountIdentityLabel({ user, embeddedPlatform, sourceAccounts })
+    : null;
 
   useEffect(() => setMobileOpen(false), [location.pathname, location.search]);
 
@@ -434,6 +453,13 @@ function PortalLayout({
             </NavLink>
           )}
         </nav>
+
+        {embedded && accountLabel && (
+          <div className="embedded-account-badge" title="当前登录账号">
+            <UserRound size={14} />
+            <span>{accountLabel}</span>
+          </div>
+        )}
 
         <div className="sidebar-spacer" />
         <div className="sidebar-security">
@@ -587,11 +613,6 @@ function SummaryCards() {
   );
 }
 
-const sourceName: Record<SourceType, string> = {
-  sub2api: "SoloV API",
-  newapi: "SoloV 模型平台",
-};
-
 const statusMeta: Record<InvoiceStatus, { label: string; className: string }> =
   {
     submitted: { label: "已提交", className: "badge-blue" },
@@ -629,8 +650,11 @@ function SourceBadge({ source }: { source: SourceType }) {
 }
 
 function SourceAccountStatus() {
-  const { sourceAccounts, loading, refresh } = useData();
+  const { sourceAccounts: allSourceAccounts, loading, refresh } = useData();
+  const sourceAccounts = scopeBySource(allSourceAccounts, embeddedPlatform);
   if (loading) return null;
+  const showSub2APILink = !embeddedPlatform || embeddedPlatform === "sub2api";
+  const showNewAPILink = !embeddedPlatform || embeddedPlatform === "newapi";
   return (
     <section className="card source-account-card" aria-label="源平台账号连接">
       <div className="card-heading compact">
@@ -678,22 +702,30 @@ function SourceAccountStatus() {
               <span>1</span>
               <div>
                 <strong>打开原平台并使用原账号登录</strong>
-                <p>分别进入你实际使用的 Sub2API 或 New API 站点。</p>
+                <p>
+                  {embeddedPlatform
+                    ? `进入你在${sourceName[embeddedPlatform]}实际使用的站点。`
+                    : "分别进入你实际使用的 Sub2API 或 New API 站点。"}
+                </p>
                 <div className="binding-site-links">
-                  <a
-                    href="https://api.solov.cc/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    打开 Sub2API
-                  </a>
-                  <a
-                    href="https://xm.solov.cc/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    打开 New API
-                  </a>
+                  {showSub2APILink && (
+                    <a
+                      href="https://api.solov.cc/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      打开 Sub2API
+                    </a>
+                  )}
+                  {showNewAPILink && (
+                    <a
+                      href="https://xm.solov.cc/"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      打开 New API
+                    </a>
+                  )}
                 </div>
               </div>
             </div>
@@ -852,7 +884,9 @@ function OrdersPage() {
   const { loading, orders, profiles, eligibilitySummaries, refresh } = useData();
   const toast = useContext(ToastContext);
   const navigate = useNavigate();
-  const [source, setSource] = useState<"all" | SourceType>("all");
+  const [source, setSource] = useState<"all" | SourceType>(
+    embeddedPlatform ?? "all",
+  );
   const [selected, setSelected] = useState<Record<string, number>>({});
   const [profileId, setProfileId] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -928,7 +962,10 @@ function OrdersPage() {
         : next;
     });
   }, [orders, eligibilitySummaries]);
-  const filteredOrders = orders.filter(
+  // scopeBySource is a no-op when the embedded view is unscoped; when scoped
+  // it is the authority (the source tabs below are hidden in that case, but
+  // this keeps filteredOrders correct even if `source` state ever drifted).
+  const filteredOrders = scopeBySource(orders, embeddedPlatform).filter(
     (order) => source === "all" || order.source === source,
   );
   const selectedTotal = Object.values(selected).reduce(
@@ -1036,7 +1073,10 @@ function OrdersPage() {
       />
       <SummaryCards />
       <SourceAccountStatus />
-      <EligibilitySummaryPanel items={eligibilitySummaries} loading={loading} />
+      <EligibilitySummaryPanel
+        items={scopeBySource(eligibilitySummaries, embeddedPlatform)}
+        loading={loading}
+      />
       {policyError && (
         <div className="policy-error" role="alert">
           <CircleAlert size={17} />
@@ -1059,23 +1099,25 @@ function OrdersPage() {
               刷新
             </button>
           </div>
-          <div className="segmented">
-            {(
-              [
-                ["all", "全部平台"],
-                ["sub2api", "SoloV API"],
-                ["newapi", "模型平台"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                className={source === value ? "active" : ""}
-                onClick={() => setSource(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          {!embeddedPlatform && (
+            <div className="segmented">
+              {(
+                [
+                  ["all", "全部平台"],
+                  ["sub2api", "SoloV API"],
+                  ["newapi", "模型平台"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  className={source === value ? "active" : ""}
+                  onClick={() => setSource(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           {loading ? (
             <LoadingBlock />
           ) : (

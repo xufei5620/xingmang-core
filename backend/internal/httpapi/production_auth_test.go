@@ -156,8 +156,10 @@ func TestProductionOIDCLoginSessionAndCSRF(t *testing.T) {
 		Authenticated bool   `json:"authenticated"`
 		CSRFToken     string `json:"csrf_token"`
 		User          struct {
-			ID   string `json:"id"`
-			Role string `json:"role"`
+			ID             string `json:"id"`
+			Role           string `json:"role"`
+			Platform       string `json:"platform"`
+			PlatformUserID string `json:"platform_user_id"`
 		} `json:"user"`
 	}
 	if err := json.Unmarshal(statusRecorder.Body.Bytes(), &response); err != nil {
@@ -165,6 +167,9 @@ func TestProductionOIDCLoginSessionAndCSRF(t *testing.T) {
 	}
 	if !response.Authenticated || response.CSRFToken != csrfCookie.Value || response.User.Role != "user" {
 		t.Fatalf("unexpected session bootstrap: %+v", response)
+	}
+	if response.User.Platform != "" || response.User.PlatformUserID != "" {
+		t.Fatalf("an OIDC session must never carry a platform-login identity: %+v", response.User)
 	}
 
 	mutation := httptest.NewRequest(http.MethodPost, "https://invoice.example/api/v1/user/profiles", strings.NewReader(`{}`))
