@@ -104,7 +104,12 @@ export interface InvoiceApiClient {
   getUserRequests(): Promise<InvoiceRequest[]>;
   getAdminRequests(): Promise<InvoiceRequest[]>;
   getUserRequestPage(cursor?: string): Promise<InvoiceRequestPage>;
-  getAdminRequestPage(cursor?: string): Promise<InvoiceRequestPage>;
+  // sourceInstanceId: embedded-admin platform scoping only (XM-INV-ADMIN-
+  // EMBED); undefined is unscoped, unchanged behavior.
+  getAdminRequestPage(
+    cursor?: string,
+    sourceInstanceId?: string,
+  ): Promise<InvoiceRequestPage>;
   getInvoiceRequestDetail(
     requestId: string,
     admin?: boolean,
@@ -113,7 +118,10 @@ export interface InvoiceApiClient {
   getSummary(admin?: boolean): Promise<DashboardSummary>;
   submitInvoice(payload: SubmitInvoicePayload): Promise<InvoiceRequest>;
   cancelInvoice(request: InvoiceRequest): Promise<InvoiceRequest>;
-  getPaymentCandidates(cursor?: string): Promise<PaymentCandidatePage>;
+  getPaymentCandidates(
+    cursor?: string,
+    sourceInstanceId?: string,
+  ): Promise<PaymentCandidatePage>;
 	verifyPayment(
 		candidateId: string,
 		input: VerifyPaymentInput,
@@ -123,6 +131,7 @@ export interface InvoiceApiClient {
   getRefundCases(
     status: RefundCaseStatus,
     cursor?: string,
+    sourceInstanceId?: string,
   ): Promise<RefundCasePage>;
   resolveRefundCase(
     caseId: string,

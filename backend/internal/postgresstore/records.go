@@ -200,6 +200,10 @@ type PaymentCandidatePageQuery struct {
 	BeforeObservedAt time.Time
 	BeforeID         string
 	States           []domain.VerificationState
+	// SourceInstanceID narrows the queue to one source instance. It is a view
+	// filter only (staff may otherwise see every platform): empty means
+	// unfiltered, matching RequestPageQuery/EligibilityFreezePageQuery.
+	SourceInstanceID string
 }
 
 type PaymentCandidatePage struct {
@@ -310,6 +314,10 @@ type RefundCasePageQuery struct {
 	Status         string
 	BeforeOpenedAt time.Time
 	BeforeID       string
+	// SourceInstanceID narrows the queue to one source instance, joined
+	// through the case's funding lot (refund_cases carries no source column
+	// of its own). A view filter only, same as PaymentCandidatePageQuery.
+	SourceInstanceID string
 }
 
 type RefundCasePage struct {

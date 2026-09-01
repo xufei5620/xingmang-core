@@ -704,6 +704,9 @@ func (s *Store) ListPaymentCandidatesPage(ctx context.Context, in PaymentCandida
 	if in.BeforeObservedAt.IsZero() != (strings.TrimSpace(in.BeforeID) == "") {
 		return PaymentCandidatePage{}, errors.New("both payment candidate cursor fields are required")
 	}
+	if in.SourceInstanceID != "" && !eligibilityUUIDPattern.MatchString(in.SourceInstanceID) {
+		return PaymentCandidatePage{}, errors.New("invalid source instance filter")
+	}
 	states := in.States
 	if len(states) == 0 {
 		states = []domain.VerificationState{domain.VerificationPending, domain.VerificationFrozen}
@@ -732,9 +735,13 @@ func (s *Store) ListPaymentCandidatesPage(ctx context.Context, in PaymentCandida
 		LEFT JOIN source_account_eligibility_state eas ON eas.external_account_id=fl.external_account_id
 		WHERE si.source_type='newapi' AND fl.verification_state=ANY($1::text[])`
 	args := []any{stateStrings}
+	if in.SourceInstanceID != "" {
+		args = append(args, in.SourceInstanceID)
+		query += fmt.Sprintf(` AND fl.source_instance_id=$%d::uuid`, len(args))
+	}
 	if !in.BeforeObservedAt.IsZero() {
-		query += ` AND (fl.observed_at,fl.id)<($2,$3::uuid)`
 		args = append(args, in.BeforeObservedAt, in.BeforeID)
+		query += fmt.Sprintf(` AND (fl.observed_at,fl.id)<($%d,$%d::uuid)`, len(args)-1, len(args))
 	}
 	args = append(args, in.Limit+1)
 	query += fmt.Sprintf(` ORDER BY fl.observed_at DESC,fl.id DESC LIMIT $%d`, len(args))

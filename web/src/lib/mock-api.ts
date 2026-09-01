@@ -565,13 +565,16 @@ export const mockInvoiceApi: InvoiceApiClient = {
     };
   },
 
-  async getAdminRequestPage(cursor) {
+  async getAdminRequestPage(cursor, sourceInstanceId) {
     await delay();
+    const scoped = sourceInstanceId
+      ? requests.filter((request) => request.sourceInstanceId === sourceInstanceId)
+      : requests;
     const start = cursor ? Number(cursor) : 0;
-    const items = requests.slice(start, start + 2);
+    const items = scoped.slice(start, start + 2);
     return {
       items: structuredClone(items),
-      nextCursor: start + 2 < requests.length ? String(start + 2) : undefined,
+      nextCursor: start + 2 < scoped.length ? String(start + 2) : undefined,
     };
   },
 
@@ -735,10 +738,13 @@ export const mockInvoiceApi: InvoiceApiClient = {
     return structuredClone(cancelled);
   },
 
-  async getPaymentCandidates(cursor) {
+  async getPaymentCandidates(cursor, sourceInstanceId) {
     await delay(180);
     if (cursor) return { items: [] };
-    return { items: structuredClone(paymentCandidates) };
+    const scoped = sourceInstanceId
+      ? paymentCandidates.filter((candidate) => candidate.sourceInstanceId === sourceInstanceId)
+      : paymentCandidates;
+    return { items: structuredClone(scoped) };
   },
 
   async verifyPayment(candidateId, input) {
@@ -800,7 +806,16 @@ export const mockInvoiceApi: InvoiceApiClient = {
 		);
 	},
 
-  async getRefundCases(status: RefundCaseStatus, cursor?: string) {
+  async getRefundCases(
+    status: RefundCaseStatus,
+    cursor?: string,
+    // The mock RefundCase fixture carries no source/sourceInstanceId field
+    // (mirroring the real DTO, which likewise omits it -- refund_cases has
+    // no source column of its own; the backend filter reaches the source
+    // instance through the case's funding lot instead). Accepted for
+    // interface conformance; the demo dataset has nothing to scope by.
+    _sourceInstanceId?: string,
+  ) {
     await delay(180);
     if (cursor) return { items: [] };
     return {

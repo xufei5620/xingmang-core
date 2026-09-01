@@ -1085,8 +1085,21 @@ async function getBackendLots() {
   return response.items;
 }
 
-async function getRequestPage(admin: boolean, cursor?: string) {
+async function getRequestPage(
+  admin: boolean,
+  cursor?: string,
+  sourceInstanceId?: string,
+) {
   const query = new URLSearchParams({ limit: "100" });
+  // sourceInstanceId is embedded-admin platform scoping only; the server
+  // rejects it outright for a non-admin caller (server.go's
+  // listRequestsPage), so it is only ever set here when admin is true.
+  if (admin && sourceInstanceId) {
+    if (!uuidPattern.test(sourceInstanceId)) {
+      throw new InvoiceApiError("平台来源筛选无效。", { code: "INVALID_FILTER" });
+    }
+    query.set("source_instance_id", sourceInstanceId);
+  }
   if (cursor) {
     try {
       const decoded = JSON.parse(cursor) as {
@@ -1641,8 +1654,8 @@ export const httpInvoiceApi: InvoiceApiClient = {
     return getRequestPage(false, cursor);
   },
 
-  getAdminRequestPage(cursor) {
-    return getRequestPage(true, cursor);
+  getAdminRequestPage(cursor, sourceInstanceId) {
+    return getRequestPage(true, cursor, sourceInstanceId);
   },
 
   getInvoiceRequestDetail(requestId, admin = false) {
@@ -1727,8 +1740,14 @@ export const httpInvoiceApi: InvoiceApiClient = {
     );
   },
 
-  async getPaymentCandidates(cursor) {
+  async getPaymentCandidates(cursor, sourceInstanceId) {
 		const query = new URLSearchParams({ limit: "50", include_verified: "true" });
+    if (sourceInstanceId) {
+      if (!uuidPattern.test(sourceInstanceId)) {
+        throw new InvoiceApiError("平台来源筛选无效。", { code: "INVALID_FILTER" });
+      }
+      query.set("source_instance_id", sourceInstanceId);
+    }
     if (cursor) {
       try {
         const decoded = JSON.parse(cursor) as {
@@ -1817,8 +1836,18 @@ export const httpInvoiceApi: InvoiceApiClient = {
 		);
 	},
 
-  async getRefundCases(status: RefundCaseStatus, cursor?: string) {
+  async getRefundCases(
+    status: RefundCaseStatus,
+    cursor?: string,
+    sourceInstanceId?: string,
+  ) {
     const query = new URLSearchParams({ limit: "50", status });
+    if (sourceInstanceId) {
+      if (!uuidPattern.test(sourceInstanceId)) {
+        throw new InvoiceApiError("平台来源筛选无效。", { code: "INVALID_FILTER" });
+      }
+      query.set("source_instance_id", sourceInstanceId);
+    }
     if (cursor) {
       try {
         const decoded = JSON.parse(cursor) as {
