@@ -288,10 +288,12 @@ function ChannelDetailBody({
               hint="独立展示，不并入充值比例，也不在前端重复乘算；row.rateMultiplier/upstreamMultiplier（XM-CHAN-FIELDS0）优先，没有则退回登记簿"
             >
               {(() => {
-                const rate = row.rateMultiplier ?? account?.group_rate;
-                const upstreamRate = row.upstreamMultiplier ?? account?.recharge_ratio;
-                if (!rate && !upstreamRate) return "未接入";
-                return `${rate ? `${rate}×` : "—"}${upstreamRate ? ` / ${upstreamRate}×` : ""}`;
+                // rateMultiplier/upstreamMultiplier 是数字，group_rate/recharge_ratio
+                // 是十进制字符串——显式判 null，不判假值（数字倍率理论上可以是 0）
+                const rate = row.rateMultiplier ?? account?.group_rate ?? null;
+                const upstreamRate = row.upstreamMultiplier ?? account?.recharge_ratio ?? null;
+                if (rate === null && upstreamRate === null) return "未接入";
+                return `${rate !== null ? `${rate}×` : "—"}${upstreamRate !== null ? ` / ${upstreamRate}×` : ""}`;
               })()}
             </Fact>
             {access ? (
@@ -336,7 +338,10 @@ function ChannelDetailBody({
             </Fact>
             {row.today ? (
               <Fact label="今日统计">
-                {row.today.requests} 次 · {row.today.successRate.toFixed(1)}% ·{" "}
+                {/* successRate 是 0-1 小数，显示前乘 100；Sub2API 端这个子字段
+                    恒为 null，即使 requests/cost 是真的，不能默认成 0 */}
+                {row.today.requests} 次 ·{" "}
+                {row.today.successRate === null ? "成功率未接入" : `${(row.today.successRate * 100).toFixed(1)}%`} ·{" "}
                 {formatScaledMinorUnits(row.today.costMinor, row.today.currency, row.today.scale)}
               </Fact>
             ) : (

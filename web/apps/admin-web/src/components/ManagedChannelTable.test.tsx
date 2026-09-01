@@ -315,7 +315,8 @@ describe("8 个 XM-CHAN-FIELDS0 占位列", () => {
       channels: [
         channelRow({
           capacity: { used: 4, limit: 8 },
-          today: { requests: 50, success_rate: 96, cost_minor: "1200000", currency: "CNY", scale: 6 },
+          // success_rate 契约是 0-1 小数（0.96 = 96.0%），不是 0-100 的百分数
+          today: { requests: 50, success_rate: 0.96, cost_minor: "1200000", currency: "CNY", scale: 6 },
           usage_window: { used_ratio: 0.3, resets_at: "2026-09-03T00:00:00Z" },
           last_used_at: "2026-09-02T04:00:00Z",
         }),
@@ -378,11 +379,30 @@ describe("登记簿字段并入行（6 个原本必需列，现在是默认收�
   });
 
   it("row.rateMultiplier / upstreamMultiplier（XM-CHAN-FIELDS0）优先于登记簿 join", async () => {
-    stub({ channels: [channelRow({ rate_multiplier: "0.70", upstream_multiplier: "1.30" })] });
+    // 契约里这两个字段是数字，不是十进制字符串（与登记簿的 group_rate/
+    // recharge_ratio 不同）——数字字面量不保留末尾的 0，0.70 就是 0.7
+    stub({ channels: [channelRow({ rate_multiplier: 0.7, upstream_multiplier: 1.3 })] });
     renderPanel();
     const table = within(await screen.findByRole("table"));
-    expect(await table.findByText("0.70× / 1.30×")).toBeTruthy();
+    expect(await table.findByText("0.7× / 1.3×")).toBeTruthy();
     expect(table.queryByText("0.85× / 1.15×")).toBeNull();
+  });
+
+  it("row.rateMultiplier 为数字 0 时仍显示 0×，不误判成未接入（0 是假值但不是缺失值）", async () => {
+    // upstream_multiplier 不给：既有账号 fixture 自带 recharge_ratio,
+    // 这一格会退回 join——这里只关心 rateMultiplier=0 这一侧的显示是否正确
+    stub({ channels: [channelRow({ rate_multiplier: 0 })] });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    expect(await table.findByText(/^0× \//)).toBeTruthy();
+  });
+
+  it("今日统计：Sub2API 的常态——requests/cost 有真数据，success_rate 单独为 null 时显式说明，不默认成 0%", async () => {
+    stub({ channels: [channelRow({ today: { requests: 30, success_rate: null, cost_minor: "900000", currency: "CNY", scale: 6 } })] });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    expect(await table.findByText(/30 次 · 成功率未接入 · ¥0\.90/)).toBeTruthy();
+    expect(table.queryByText(/0\.0%/)).toBeNull();
   });
 
   it("可用模型有数就显示数量，没有就未接入 · M1.5，不显示 0", async () => {

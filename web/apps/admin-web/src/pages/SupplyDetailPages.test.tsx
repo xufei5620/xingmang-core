@@ -181,7 +181,8 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
         boundChannelRow({
           capacity: { used: 3, limit: 10 },
           scheduling: { enabled: true, priority: 2 },
-          today: { requests: 120, success_rate: 98.5, cost_minor: "5000000", currency: "CNY", scale: 6 },
+          // success_rate 契约是 0-1 小数（0.985 = 98.5%），不是 0-100 的百分数
+          today: { requests: 120, success_rate: 0.985, cost_minor: "5000000", currency: "CNY", scale: 6 },
           usage_window: { used_ratio: 0.42, resets_at: "2026-09-03T00:00:00Z" },
           proxy: "socks5://10.0.0.1:1080",
           last_used_at: "2026-09-02T05:00:00Z",

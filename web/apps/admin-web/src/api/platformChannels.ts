@@ -40,11 +40,25 @@ export interface PlatformChannelFieldsExtension {
   status: string | null;
   capacity: { used: number; limit: number } | null;
   scheduling: { enabled: boolean; priority: number } | null;
-  today: { requests: number; successRate: number; costMinor: string; currency: string; scale: number } | null;
+  /** `successRate` 是 0-1 的小数（0.992 = 99.2%），不是 0-100 的百分数——
+   *  contracts/connectors/{sub2api,newapi}.channel-catalog.v3.md 的"数值编码"
+   *  一节：内部按 ppm 整数算、序列化前才转成小数，与 `usageWindow.usedRatio`
+   *  同一个约定。渲染时乘 100，不要直接拼百分号。
+   *
+   *  `successRate` 单独可空，`requests`/`costMinor` 不空但 `successRate` 仍是
+   *  null 是 Sub2API 的**常态**，不是异常：契约文档明确写了 Sub2API 端
+   *  `today.success_rate` 恒为 null（这个连接器没有账号级成功/失败计数的
+   *  数据源），`requests`/`cost_minor` 却是另一个真实端点给的。渲染时两者
+   *  必须分开判断——`today` 整体非空不代表 `successRate` 也非空，默认成 0
+   *  会把"这个字段没有数据源"显示成"成功率是 0%"，是宪法 12 条禁止的裸 0。 */
+  today: { requests: number; successRate: number | null; costMinor: string; currency: string; scale: number } | null;
   usageWindow: { usedRatio: number; resetsAt: string | null } | null;
   proxy: string | null;
-  rateMultiplier: string | null;
-  upstreamMultiplier: string | null;
+  /** 纯数字（如 0.8、1.5），不是十进制字符串——与登记簿的 `group_rate`/
+   *  `recharge_ratio`（都是字符串）不同表示法，两者做"新字段优先、退回登记簿"
+   *  兜底时注意这一点：不能直接假设两者是同一 JS 类型。 */
+  rateMultiplier: number | null;
+  upstreamMultiplier: number | null;
   lastUsedAt: string | null;
   createdAt: string | null;
   expiresAt: string | null;
@@ -109,8 +123,8 @@ interface RawPage {
     today?: { requests?: number; success_rate?: number; cost_minor?: string; currency?: string; scale?: number } | null;
     usage_window?: { used_ratio?: number; resets_at?: string | null } | null;
     proxy?: string | null;
-    rate_multiplier?: string | null;
-    upstream_multiplier?: string | null;
+    rate_multiplier?: number | null;
+    upstream_multiplier?: number | null;
     last_used_at?: string | null;
     created_at?: string | null;
     expires_at?: string | null;
@@ -131,8 +145,8 @@ function parseFieldsExtension(item: {
   today?: { requests?: number; success_rate?: number; cost_minor?: string; currency?: string; scale?: number } | null;
   usage_window?: { used_ratio?: number; resets_at?: string | null } | null;
   proxy?: string | null;
-  rate_multiplier?: string | null;
-  upstream_multiplier?: string | null;
+  rate_multiplier?: number | null;
+  upstream_multiplier?: number | null;
   last_used_at?: string | null;
   created_at?: string | null;
   expires_at?: string | null;
@@ -153,7 +167,9 @@ function parseFieldsExtension(item: {
       item.today && typeof item.today.requests === "number"
         ? {
             requests: item.today.requests,
-            successRate: item.today.success_rate ?? 0,
+            // 不能 `?? 0`：Sub2API 端这个字段恒为 null（没有数据源），默认成 0
+            // 会显示成"成功率是 0%"，是宪法 12 条禁止的裸 0
+            successRate: item.today.success_rate ?? null,
             costMinor: item.today.cost_minor ?? "0",
             currency: item.today.currency ?? "",
             scale: item.today.scale ?? 0,

@@ -506,9 +506,12 @@ function SchedulingCell({ row }: { row: PlatformChannelRow }) {
 function TodayStatsCell({ row }: { row: PlatformChannelRow }) {
   if (!row.today) return pendingBadge(fieldsPendingHint("今日统计（请求数 · 成功率 · 消耗）"));
   const cost = formatScaledMinorUnits(row.today.costMinor, row.today.currency, row.today.scale);
+  // successRate 是 0-1 的小数（契约的 ppm→小数换算），显示前要乘 100；
+  // Sub2API 端这个子字段恒为 null（没有数据源），即使 requests/cost 是真的
+  const successRate = row.today.successRate === null ? "成功率未接入" : `${(row.today.successRate * 100).toFixed(1)}%`;
   return (
     <span className="text-xs">
-      {row.today.requests} 次 · {row.today.successRate.toFixed(1)}% · {cost}
+      {row.today.requests} 次 · {successRate} · {cost}
     </span>
   );
 }
@@ -532,9 +535,13 @@ function UsageWindowCell({ row, account }: { row: PlatformChannelRow; account: U
 }
 
 function RateCell({ row, account }: { row: PlatformChannelRow; account: UpstreamAccountItem | undefined }) {
-  const rate = row.rateMultiplier ?? account?.group_rate;
-  const upstreamRate = row.upstreamMultiplier ?? account?.recharge_ratio;
-  if (!rate && !upstreamRate) {
+  // row.rateMultiplier/upstreamMultiplier 是数字（契约的数值编码），登记簿
+  // join 的 group_rate/recharge_ratio 是十进制字符串——两种表示法混在一个
+  // 兜底表达式里，显式判 null/undefined 而不是判假值：数字倍率理论上可以是
+  // 0（虽然实践中不太可能），用 `!rate` 会把真的 0 误判成"没有这个字段"
+  const rate = row.rateMultiplier ?? account?.group_rate ?? null;
+  const upstreamRate = row.upstreamMultiplier ?? account?.recharge_ratio ?? null;
+  if (rate === null && upstreamRate === null) {
     return (
       <span className="text-xs text-fg-muted" title={row.binding ? "这个上游账号没有登记倍率" : "渠道还没有绑定上游账号"}>
         未接入
@@ -543,8 +550,8 @@ function RateCell({ row, account }: { row: PlatformChannelRow; account: Upstream
   }
   return (
     <span className="text-xs">
-      {rate ? `${rate}×` : "—"}
-      {upstreamRate ? ` / ${upstreamRate}×` : ""}
+      {rate !== null ? `${rate}×` : "—"}
+      {upstreamRate !== null ? ` / ${upstreamRate}×` : ""}
     </span>
   );
 }
