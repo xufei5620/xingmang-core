@@ -574,7 +574,16 @@ function PageHeader({
 }
 
 function SummaryCards() {
-  const { summary } = useData();
+  const { summary, sourceAccounts: allSourceAccounts } = useData();
+  // Embedded views collapse the big "已关联的平台账号" panel into this
+  // compact card once every (scoped) account is connected -- the panel's
+  // remaining job there is binding guidance, which only matters while an
+  // account is NOT connected yet (see SourceAccountStatus).
+  const connectedAccounts = embeddedUserMode
+    ? scopeBySource(allSourceAccounts, embeddedPlatform).filter(
+        (account) => account.status === "verified",
+      )
+    : [];
   const cards = [
     {
       label: "当前可开票",
@@ -598,6 +607,26 @@ function SummaryCards() {
       tone: "green",
     },
   ];
+  if (connectedAccounts.length === 1) {
+    const account = connectedAccounts[0];
+    cards.push({
+      label: "关联账号",
+      value: account.sourceLabel,
+      hint: account.lastObservedAt
+        ? `已连接 · 最近同步 ${dateTime(account.lastObservedAt)}`
+        : "已连接 · 等待首次同步",
+      icon: Network,
+      tone: "blue",
+    });
+  } else if (connectedAccounts.length > 1) {
+    cards.push({
+      label: "关联账号",
+      value: `${connectedAccounts.length} 个平台账号`,
+      hint: connectedAccounts.map((account) => account.sourceLabel).join("、"),
+      icon: Network,
+      tone: "blue",
+    });
+  }
   return (
     <div className="summary-grid">
       {cards.map(({ icon: Icon, ...card }) => (
@@ -656,6 +685,15 @@ function SourceAccountStatus() {
   const { sourceAccounts: allSourceAccounts, loading, refresh } = useData();
   const sourceAccounts = scopeBySource(allSourceAccounts, embeddedPlatform);
   if (loading) return null;
+  if (
+    embeddedUserMode &&
+    sourceAccounts.length > 0 &&
+    sourceAccounts.every((account) => account.status === "verified")
+  ) {
+    // The connected state lives in SummaryCards' compact "关联账号" card;
+    // this panel stays only while binding guidance is still needed.
+    return null;
+  }
   const showSub2APILink = !embeddedPlatform || embeddedPlatform === "sub2api";
   const showNewAPILink = !embeddedPlatform || embeddedPlatform === "newapi";
   return (

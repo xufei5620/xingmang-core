@@ -413,7 +413,9 @@ a {
 .summary-grid {
   margin-bottom: 22px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 3 cards normally; the embedded view may append a compact 关联账号
+     card as a fourth -- auto-fit keeps both layouts balanced. */
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 14px;
 }
 .summary-card {
