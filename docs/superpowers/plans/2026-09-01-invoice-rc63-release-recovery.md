@@ -1,5 +1,10 @@
 # RC63 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC63 shipped at signed tag
+> `v0.1.0-rc63-signed` (`b011ef2`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc64-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC63 — the embedded tab row keeps the logout button clear of the platform pages' floating “新窗口打开” overlay by placing the display-only identity badge rightmost.
