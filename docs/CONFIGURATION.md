@@ -178,13 +178,27 @@ does not accept production OIDC credentials.
 
 ### Platform-password login (CR-0004)
 
-Ordinary users do not go through OIDC at all. The user-facing login page lets
-them pick Sub2API or New API and sign in with that platform's own account
-password; the backend forwards the credentials to the platform's real login
-endpoint over HTTPS (`internal/auth/sub2api_login.go`,
+Ordinary users do not go through OIDC at all. The user-facing login page asks
+for one account + password with no platform picker (XM-INV-AUTOLOGIN); the
+backend auto-detects which platform the account belongs to instead: an
+email-shaped identifier tries Sub2API first, then falls back to New API only
+on a definitive invalid-credentials result (a New API username can itself
+happen to look like an email address); a non-email identifier tries New API
+only, since Sub2API accounts are always keyed by email. An upstream outage on
+either platform never triggers a fallback attempt -- it fails closed as
+"login service unavailable" immediately, so one platform's downtime can never
+be misreported as a wrong password for a working one. The two upstream
+attempts an auto-detected login can make still share a single rate-limit
+bucket (keyed by client IP + identifier), not one bucket per platform tried.
+The backend forwards whichever credentials it tries to the platform's real
+login endpoint over HTTPS (`internal/auth/sub2api_login.go`,
 `internal/auth/newapi_login.go`), never persists or logs the password, and
 resolves the verified `(platform, platform_user_id)` pair to a local identity
-exactly like an OIDC `(issuer, subject)` pair. Administrator login is
+exactly like an OIDC `(issuer, subject)` pair. An explicit `platform` field is
+still accepted on both `platform-login` endpoints and skips auto-detection
+entirely (kept for ops/test callers; the login page itself never sends one
+anymore, and a 2FA follow-up call does not need to either -- the backend
+remembers which platform issued the temp_token). Administrator login is
 unaffected and still uses the OIDC block above. This mode requires no Keycloak
 configuration to run.
 

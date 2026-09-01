@@ -662,7 +662,12 @@ func buildPlatformLogin(productionAuth *httpapi.ProductionAuth) (*httpapi.Platfo
 			auth.PlatformNewAPI:  newapiBaseURL,
 		},
 		RateLimiter: auth.NewLoginRateLimiter(int(maxAttempts), lockoutWindow),
-		Auth:        productionAuth,
+		// Fixed, not env-configured: this is internal bookkeeping (which
+		// platform issued a temp_token during auto-detect), not an operator
+		// tuning knob, and its lifetime only needs to comfortably outlast a
+		// real 2FA round-trip.
+		PendingTwoFA: auth.NewPendingTwoFAPlatforms(10 * time.Minute),
+		Auth:         productionAuth,
 	}, nil
 }
 

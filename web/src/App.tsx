@@ -4282,7 +4282,6 @@ function EmptyState({
 
 function LoginPage() {
   const { login, error, refresh } = useAuth();
-  const [platform, setPlatform] = useState<SourceType>("sub2api");
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -4291,16 +4290,6 @@ function LoginPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
 
-  const platformLabel = platform === "sub2api" ? "SoloV API" : "SoloV 模型平台";
-  const identifierLabel = platform === "sub2api" ? "邮箱" : "用户名";
-
-  function selectPlatform(next: SourceType) {
-    setPlatform(next);
-    setFormError(null);
-    setTempToken(null);
-    setCode("");
-  }
-
   async function handleCredentialsSubmit(event: FormEvent) {
     event.preventDefault();
     if (submitting || !identifier.trim() || !password) return;
@@ -4308,7 +4297,6 @@ function LoginPage() {
     setFormError(null);
     try {
       const outcome = await invoiceApi.platformLogin({
-        platform,
         identifier: identifier.trim(),
         password,
       });
@@ -4335,7 +4323,6 @@ function LoginPage() {
     setFormError(null);
     try {
       await invoiceApi.verifyPlatformLoginTwoFA({
-        platform,
         tempToken,
         code: code.trim(),
       });
@@ -4358,10 +4345,7 @@ function LoginPage() {
         </div>
         <span className="eyebrow">SOLOV INVOICE</span>
         <h1>登录开票中心</h1>
-        <p>
-          使用你在 Sub2API 或 New API 的账号密码登录：登录后看到的即为该账号在
-          {platformLabel}的开票信息。
-        </p>
+        <p>使用你已有的账号密码登录，系统自动识别所属平台。</p>
         {(formError || error) && (
           <div className="auth-error" role="alert">
             <CircleAlert size={17} />
@@ -4408,35 +4392,17 @@ function LoginPage() {
           </form>
         ) : (
           <form onSubmit={handleCredentialsSubmit}>
-            <div className="segmented">
-              {(
-                [
-                  ["sub2api", "SoloV API"],
-                  ["newapi", "SoloV 模型平台"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={platform === value ? "active" : ""}
-                  onClick={() => selectPlatform(value)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
             <label className="form-field">
-              <span>{identifierLabel}</span>
+              <span>账号</span>
               <input
                 value={identifier}
                 onChange={(event) => setIdentifier(event.target.value)}
-                type={platform === "sub2api" ? "email" : "text"}
+                type="text"
                 autoComplete="username"
                 maxLength={320}
-                placeholder={
-                  platform === "sub2api" ? "you@example.com" : "your-username"
-                }
+                placeholder="邮箱或用户名"
               />
+              <small>填写你在 SoloV API 的邮箱，或 SoloV 模型平台的用户名</small>
             </label>
             <label className="form-field">
               <span>密码</span>

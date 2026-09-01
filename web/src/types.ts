@@ -58,13 +58,20 @@ export interface AuthUser {
 }
 
 export interface PlatformLoginInput {
-  platform: SourceType;
+  // Omitted in the normal user-facing flow: the backend auto-detects which
+  // platform an identifier belongs to (email-shaped -> try Sub2API, then New
+  // API; otherwise New API only). An explicit value is still accepted for
+  // ops/test callers that want the old single-platform-only behavior.
+  platform?: SourceType;
   identifier: string;
   password: string;
 }
 
 export interface PlatformLoginTwoFAInput {
-  platform: SourceType;
+  // Omitted for the same reason as PlatformLoginInput.platform: the backend
+  // already remembers which platform issued `tempToken` from the initial
+  // login call.
+  platform?: SourceType;
   tempToken: string;
   code: string;
 }

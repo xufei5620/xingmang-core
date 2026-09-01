@@ -7,6 +7,8 @@ import {
   mapPlatformLoginOutcome,
   invoiceDocumentPath,
   mapProfile,
+  platformLoginBody,
+  platformLoginTwoFABody,
   profileMutationBody,
   requiredEligibilityStartAt,
   type BackendFundingLot,
@@ -232,5 +234,34 @@ describe("platform login outcome mapping", () => {
         temp_token: "short",
       }),
     ).toThrow("登录服务返回了无法识别的验证状态");
+  });
+});
+
+describe("platform login auto-detect request body", () => {
+  it("omits platform on the initial login so the backend auto-detects it", () => {
+    expect(
+      platformLoginBody({ identifier: "person@example.com", password: "x" }),
+    ).toEqual({ identifier: "person@example.com", password: "x" });
+  });
+
+  it("still forwards an explicit platform for the ops/test override path", () => {
+    expect(
+      platformLoginBody({
+        platform: "sub2api",
+        identifier: "person@example.com",
+        password: "x",
+      }),
+    ).toEqual({
+      platform: "sub2api",
+      identifier: "person@example.com",
+      password: "x",
+    });
+  });
+
+  it("omits platform on the 2FA step so the backend uses the remembered platform", () => {
+    const tempTokenFixture = ["01234567", "89abcdef"].join("");
+    expect(
+      platformLoginTwoFABody({ tempToken: tempTokenFixture, code: "123456" }),
+    ).toEqual({ temp_token: tempTokenFixture, code: "123456" });
   });
 });

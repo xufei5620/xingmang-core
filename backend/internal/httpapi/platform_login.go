@@ -17,15 +17,30 @@ import (
 // (CR-0004). It shares session issuance, CSRF cookies and identity resolution
 // with ProductionAuth (the OIDC/administrator login surface, which this does
 // not replace or remove) by calling straight through to it.
+//
+// The login page no longer asks the user which platform they belong to
+// (XM-INV-AUTOLOGIN, on top of CR-0004): platformLoginRequest.Platform is
+// optional, and when empty, login() auto-detects the platform from the
+// identifier's shape (see autoDetectPlatformOrder) and tries candidates in
+// order via attemptLogin, stopping at the first definitive
+// success/requires-2FA/invalid-credentials result -- an upstream outage never
+// falls through to the next candidate. An explicit Platform still selects
+// exactly that platform with no auto-detection, unchanged from before this
+// follow-up (kept for ops/test callers).
 type PlatformLogin struct {
 	Authenticators map[auth.Platform]auth.PlatformAuthenticator
 	Origins        map[auth.Platform]string // exact configured login origin per platform; doubles as Principal.Issuer
 	RateLimiter    *auth.LoginRateLimiter
-	Auth           *ProductionAuth
+	// PendingTwoFA remembers which platform issued a login's temp_token when
+	// the platform was auto-detected rather than named explicitly by the
+	// caller, so POST .../2fa does not need Platform resent. See
+	// auth.PendingTwoFAPlatforms.
+	PendingTwoFA *auth.PendingTwoFAPlatforms
+	Auth         *ProductionAuth
 }
 
 func (p *PlatformLogin) Validate() error {
-	if p == nil || p.Auth == nil || p.RateLimiter == nil {
+	if p == nil || p.Auth == nil || p.RateLimiter == nil || p.PendingTwoFA == nil {
 		return errors.New("platform login runtime is incomplete")
 	}
 	for _, platform := range []auth.Platform{auth.PlatformSub2API, auth.PlatformNewAPI} {
@@ -45,12 +60,19 @@ func (p *PlatformLogin) Register(server *Server) {
 }
 
 type platformLoginRequest struct {
+	// Platform is optional: when empty the backend auto-detects it from
+	// Identifier (see autoDetectPlatformOrder). An explicit value still
+	// selects exactly that platform with no fallback, matching the
+	// pre-auto-detect behavior (ops/test callers).
 	Platform   string `json:"platform"`
 	Identifier string `json:"identifier"`
 	Password   string `json:"password"`
 }
 
 type platformLoginTwoFARequest struct {
+	// Platform is optional here too: the backend already remembers which
+	// platform issued TempToken (see PlatformLogin.PendingTwoFA). An explicit
+	// value is still honored, matching login()'s ops/test override path.
 	Platform  string `json:"platform"`
 	TempToken string `json:"temp_token"`
 	Code      string `json:"code"`
@@ -65,11 +87,21 @@ func (p *PlatformLogin) login(server *Server, w http.ResponseWriter, r *http.Req
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	platform := auth.Platform(strings.ToLower(strings.TrimSpace(body.Platform)))
-	authenticator, ok := p.Authenticators[platform]
-	if !platform.Valid() || !ok {
-		writeError(w, http.StatusUnprocessableEntity, "INVALID_PLATFORM", "platform must be sub2api or newapi")
-		return
+	explicit := strings.TrimSpace(body.Platform) != ""
+	var candidates []auth.Platform
+	rateLimitTag := platformAutoDetectTag
+	if explicit {
+		platform := auth.Platform(strings.ToLower(strings.TrimSpace(body.Platform)))
+		if !platform.Valid() || p.Authenticators[platform] == nil {
+			writeError(w, http.StatusUnprocessableEntity, "INVALID_PLATFORM", "platform must be sub2api or newapi")
+			return
+		}
+		candidates = []auth.Platform{platform}
+		rateLimitTag = platform
+	} else {
+		// No platform named: auto-detect from the identifier's shape. This is
+		// the only path the current login page's form actually exercises.
+		candidates = autoDetectPlatformOrder(body.Identifier)
 	}
 	if !validPlatformIdentifier(body.Identifier) || !validPlatformPassword(body.Password) {
 		writeError(w, http.StatusUnprocessableEntity, "PLATFORM_CREDENTIALS_REQUIRED", "account and password are required")
@@ -80,12 +112,17 @@ func (p *PlatformLogin) login(server *Server, w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusServiceUnavailable, "CLIENT_IP_UNAVAILABLE", "client network identity is unavailable")
 		return
 	}
-	key := platformRateLimitKey("login", platform, clientIP.String(), body.Identifier)
+	// Auto-detect mode may try up to two upstream platforms for this one
+	// submission (see attemptLogin), but rateLimitTag is a single fixed value
+	// regardless of which candidates end up being tried, so both attempts
+	// share one IP+identifier bucket rather than doubling the caller's
+	// effective attempt budget.
+	key := platformRateLimitKey("login", rateLimitTag, clientIP.String(), body.Identifier)
 	if !p.RateLimiter.Allow(key) {
 		writeError(w, http.StatusTooManyRequests, "PLATFORM_LOGIN_RATE_LIMITED", "登录尝试过于频繁，请稍后重试")
 		return
 	}
-	result, err := authenticator.Login(r.Context(), body.Identifier, body.Password)
+	result, matchedPlatform, err := p.attemptLogin(r, candidates, body.Identifier, body.Password)
 	if err != nil {
 		p.handleAuthenticatorError(w, key, err)
 		return
@@ -95,11 +132,12 @@ func (p *PlatformLogin) login(server *Server, w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusServiceUnavailable, "PLATFORM_LOGIN_UNAVAILABLE", "登录服务暂时不可用，请稍后重试")
 			return
 		}
+		p.PendingTwoFA.Remember(result.TempToken, matchedPlatform)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "requires_two_fa": true, "temp_token": result.TempToken})
 		return
 	}
 	p.RateLimiter.Reset(key)
-	p.completeLogin(server, w, r, platform, result)
+	p.completeLogin(server, w, r, matchedPlatform, result)
 }
 
 func (p *PlatformLogin) verifyTwoFA(server *Server, w http.ResponseWriter, r *http.Request) {
@@ -111,12 +149,6 @@ func (p *PlatformLogin) verifyTwoFA(server *Server, w http.ResponseWriter, r *ht
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	platform := auth.Platform(strings.ToLower(strings.TrimSpace(body.Platform)))
-	authenticator, ok := p.Authenticators[platform]
-	if !platform.Valid() || !ok {
-		writeError(w, http.StatusUnprocessableEntity, "INVALID_PLATFORM", "platform must be sub2api or newapi")
-		return
-	}
 	if !validOpaqueToken(body.TempToken) || strings.TrimSpace(body.Code) == "" || len(body.Code) > 32 || hasControlByte(body.Code) {
 		writeError(w, http.StatusUnprocessableEntity, "PLATFORM_TWO_FA_CODE_REQUIRED", "verification code is required")
 		return
@@ -126,6 +158,27 @@ func (p *PlatformLogin) verifyTwoFA(server *Server, w http.ResponseWriter, r *ht
 		writeError(w, http.StatusServiceUnavailable, "CLIENT_IP_UNAVAILABLE", "client network identity is unavailable")
 		return
 	}
+
+	var platform auth.Platform
+	if explicit := strings.TrimSpace(body.Platform); explicit != "" {
+		platform = auth.Platform(strings.ToLower(explicit))
+		if !platform.Valid() || p.Authenticators[platform] == nil {
+			writeError(w, http.StatusUnprocessableEntity, "INVALID_PLATFORM", "platform must be sub2api or newapi")
+			return
+		}
+	} else if remembered, ok := p.PendingTwoFA.Lookup(body.TempToken); ok {
+		platform = remembered
+	} else {
+		// No platform was supplied and none is remembered for this temp_token
+		// (unknown, or its bookkeeping entry expired): treated exactly like a
+		// wrong verification code so the response and rate-limit accounting
+		// stay indistinguishable from a real wrong-code attempt, and never
+		// leak which case occurred.
+		key := platformRateLimitKey("2fa", platformAutoDetectTag, clientIP.String(), body.TempToken)
+		p.handleAuthenticatorError(w, key, auth.ErrPlatformTwoFAInvalid)
+		return
+	}
+
 	// Keyed by IP + temp_token (not the account identifier, which the client
 	// no longer sends): this bounds brute-forcing the verification code for
 	// one in-flight login attempt without a second identifier lookup.
@@ -134,13 +187,61 @@ func (p *PlatformLogin) verifyTwoFA(server *Server, w http.ResponseWriter, r *ht
 		writeError(w, http.StatusTooManyRequests, "PLATFORM_LOGIN_RATE_LIMITED", "登录尝试过于频繁，请稍后重试")
 		return
 	}
-	result, err := authenticator.VerifyTwoFA(r.Context(), body.TempToken, body.Code)
+	result, err := p.Authenticators[platform].VerifyTwoFA(r.Context(), body.TempToken, body.Code)
 	if err != nil {
 		p.handleAuthenticatorError(w, key, err)
 		return
 	}
 	p.RateLimiter.Reset(key)
+	p.PendingTwoFA.Forget(body.TempToken)
 	p.completeLogin(server, w, r, platform, result)
+}
+
+// platformAutoDetectTag is the fixed rate-limit key discriminator used when
+// the caller omits `platform` (auto-detect mode): every candidate platform
+// tried for one auto-detected login attempt shares this single tag, so
+// trying up to two upstream platforms for one submitted form never consumes
+// more than one slot of the caller's IP+identifier attempt budget. An
+// explicit-platform request keeps using its real platform as the tag
+// (unchanged from before this follow-up), so it is never rate-limited
+// together with auto-detect traffic for the same identifier.
+const platformAutoDetectTag auth.Platform = "auto"
+
+// autoDetectPlatformOrder picks which platform(s) to try, and in what
+// order, when the login request does not name one explicitly. An
+// email-shaped identifier is plausible on both platforms (a New API
+// username may itself happen to look like an email address), so Sub2API is
+// tried first and New API is the fallback; a bare (non-email) identifier
+// can only ever be a New API username, since Sub2API accounts are always
+// keyed by email -- trying Sub2API for it would just waste an upstream call
+// that is guaranteed to fail.
+func autoDetectPlatformOrder(identifier string) []auth.Platform {
+	if strings.Contains(identifier, "@") {
+		return []auth.Platform{auth.PlatformSub2API, auth.PlatformNewAPI}
+	}
+	return []auth.Platform{auth.PlatformNewAPI}
+}
+
+// attemptLogin tries each candidate platform's authenticator in order and
+// returns the first one that accepts the credentials (including a
+// requires-2FA result). It only advances to the next candidate on a
+// definitive ErrPlatformCredentialsInvalid: any other error (upstream
+// outage, timeout, malformed response) is returned immediately without
+// trying the remaining candidates, so one platform's downtime is never
+// misreported as a wrong password for a different, available platform.
+func (p *PlatformLogin) attemptLogin(r *http.Request, candidates []auth.Platform, identifier, password string) (auth.PlatformLoginResult, auth.Platform, error) {
+	var lastErr error
+	for _, platform := range candidates {
+		result, err := p.Authenticators[platform].Login(r.Context(), identifier, password)
+		if err == nil {
+			return result, platform, nil
+		}
+		lastErr = err
+		if !errors.Is(err, auth.ErrPlatformCredentialsInvalid) {
+			break
+		}
+	}
+	return auth.PlatformLoginResult{}, "", lastErr
 }
 
 func (p *PlatformLogin) handleAuthenticatorError(w http.ResponseWriter, rateLimitKey string, err error) {

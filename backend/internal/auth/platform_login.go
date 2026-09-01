@@ -229,3 +229,81 @@ func (l *LoginRateLimiter) prune(key string) {
 	}
 	l.failures[key] = kept
 }
+
+// PendingTwoFAPlatforms remembers which platform issued a given login's
+// upstream temp_token/flow_token (CR-0004 auto-detected login): once the
+// login page stops asking the user to pick a platform up front, the browser
+// can no longer be trusted to say which platform a follow-up
+// POST /platform-login/2fa belongs to, so the backend records it itself at
+// the moment the platform accepted the password and asked for a second
+// factor. Bounded and TTL-pruned, same shape as LoginRateLimiter; matches
+// this service's single-replica V1 topology.
+type PendingTwoFAPlatforms struct {
+	mu      sync.Mutex
+	entries map[string]pendingTwoFAEntry
+	ttl     time.Duration
+	now     func() time.Time
+}
+
+type pendingTwoFAEntry struct {
+	platform  Platform
+	expiresAt time.Time
+}
+
+func NewPendingTwoFAPlatforms(ttl time.Duration) *PendingTwoFAPlatforms {
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	return &PendingTwoFAPlatforms{entries: make(map[string]pendingTwoFAEntry), ttl: ttl, now: time.Now}
+}
+
+// Remember records which platform issued tempToken. Safe to call for every
+// RequiresTwoFA login result, including one produced by an explicit,
+// non-auto-detected platform choice (harmless: Lookup is only consulted when
+// the caller omits platform).
+func (s *PendingTwoFAPlatforms) Remember(tempToken string, platform Platform) {
+	if s == nil || tempToken == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	s.entries[tempToken] = pendingTwoFAEntry{platform: platform, expiresAt: s.now().UTC().Add(s.ttl)}
+}
+
+// Lookup reports the platform remembered for tempToken, if any and not yet
+// expired. It does not consume the entry: a wrong verification code must
+// leave it in place so the browser can retry with the same temp_token.
+func (s *PendingTwoFAPlatforms) Lookup(tempToken string) (Platform, bool) {
+	if s == nil || tempToken == "" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	entry, ok := s.entries[tempToken]
+	if !ok {
+		return "", false
+	}
+	return entry.platform, true
+}
+
+// Forget discards a completed (successfully verified) temp_token's entry.
+func (s *PendingTwoFAPlatforms) Forget(tempToken string) {
+	if s == nil || tempToken == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, tempToken)
+}
+
+// pruneLocked must be called with mu held.
+func (s *PendingTwoFAPlatforms) pruneLocked() {
+	now := s.now().UTC()
+	for token, entry := range s.entries {
+		if !entry.expiresAt.After(now) {
+			delete(s.entries, token)
+		}
+	}
+}

@@ -102,6 +102,7 @@ func platformLoginServer(t *testing.T, sub2api, newapi auth.PlatformAuthenticato
 		Authenticators: map[auth.Platform]auth.PlatformAuthenticator{auth.PlatformSub2API: sub2api, auth.PlatformNewAPI: newapi},
 		Origins:        map[auth.Platform]string{auth.PlatformSub2API: "https://sub2api.example", auth.PlatformNewAPI: "https://newapi.example"},
 		RateLimiter:    auth.NewLoginRateLimiter(maxAttempts, window),
+		PendingTwoFA:   auth.NewPendingTwoFAPlatforms(10 * time.Minute),
 		Auth:           runtime,
 	}
 	server, err := NewWithConfig(ledger.NewService(), Config{
@@ -443,5 +444,267 @@ func TestPlatformLoginRuntimeRequiresBothAuthenticators(t *testing.T) {
 	}
 	if err := incomplete.Validate(); err == nil {
 		t.Fatal("expected an error when the New API authenticator is missing")
+	}
+}
+
+func TestPlatformLoginRuntimeRequiresPendingTwoFAStore(t *testing.T) {
+	incomplete := &PlatformLogin{
+		Authenticators: map[auth.Platform]auth.PlatformAuthenticator{auth.PlatformSub2API: rejectingAuthenticator(), auth.PlatformNewAPI: rejectingAuthenticator()},
+		Origins:        map[auth.Platform]string{auth.PlatformSub2API: "https://sub2api.example", auth.PlatformNewAPI: "https://newapi.example"},
+		RateLimiter:    auth.NewLoginRateLimiter(8, time.Minute),
+		Auth:           &ProductionAuth{},
+		// PendingTwoFA deliberately left nil.
+	}
+	if err := incomplete.Validate(); err == nil {
+		t.Fatal("expected an error when the pending-2FA-platform store is missing")
+	}
+}
+
+// --- XM-INV-AUTOLOGIN: auto-detect (no `platform` field) coverage below.
+// The explicit-`platform` tests above are unmodified and continue to pass
+// unchanged, proving the pre-auto-detect behavior is preserved as an
+// ops/test-only override path.
+
+func TestPlatformLoginAutoDetectEmailIdentifierTriesSub2APIFirst(t *testing.T) {
+	sub2api := &fakePlatformAuthenticator{onLogin: func(identifier, password string) (auth.PlatformLoginResult, error) {
+		if identifier != "person@example.com" || password != "x" {
+			t.Fatalf("unexpected forwarded credentials: %q/%q", identifier, password)
+		}
+		return auth.PlatformLoginResult{PlatformUserID: "1", Email: identifier}, nil
+	}}
+	newapi := &fakePlatformAuthenticator{onLogin: func(string, string) (auth.PlatformLoginResult, error) {
+		t.Fatal("New API must not be consulted when Sub2API already accepted the credentials")
+		return auth.PlatformLoginResult{}, nil
+	}}
+	server := platformLoginServer(t, sub2api, newapi, 8, time.Minute)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, `{"identifier":"person@example.com","password":"x"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if login, _ := sub2api.counts(); login != 1 {
+		t.Fatalf("expected exactly one Sub2API attempt, got %d", login)
+	}
+
+	status := sessionStatusOf(t, server, recorder.Result().Cookies())
+	user, _ := status["user"].(map[string]any)
+	if user["platform"] != "sub2api" {
+		t.Fatalf("expected the session to be attributed to sub2api, got: %+v", user)
+	}
+}
+
+func TestPlatformLoginAutoDetectFallsBackToNewAPIWhenSub2APIRejectsEmailShapedIdentifier(t *testing.T) {
+	// A New API account's own username can itself happen to look like an
+	// email address; auto-detect must still find it once Sub2API has
+	// definitively said the credentials are invalid there.
+	sub2api := rejectingAuthenticator()
+	newapi := &fakePlatformAuthenticator{onLogin: func(identifier, password string) (auth.PlatformLoginResult, error) {
+		if identifier != "person@example.com" {
+			t.Fatalf("unexpected identifier forwarded to New API: %q", identifier)
+		}
+		return auth.PlatformLoginResult{PlatformUserID: "88", Username: identifier}, nil
+	}}
+	server := platformLoginServer(t, sub2api, newapi, 8, time.Minute)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, `{"identifier":"person@example.com","password":"x"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if login, _ := sub2api.counts(); login != 1 {
+		t.Fatalf("expected exactly one Sub2API attempt before falling back, got %d", login)
+	}
+	if login, _ := newapi.counts(); login != 1 {
+		t.Fatalf("expected exactly one New API attempt, got %d", login)
+	}
+
+	status := sessionStatusOf(t, server, recorder.Result().Cookies())
+	user, _ := status["user"].(map[string]any)
+	if user["platform"] != "newapi" {
+		t.Fatalf("expected the session to be attributed to newapi, got: %+v", user)
+	}
+}
+
+func TestPlatformLoginAutoDetectUsernameIdentifierOnlyTriesNewAPI(t *testing.T) {
+	sub2api := &fakePlatformAuthenticator{onLogin: func(string, string) (auth.PlatformLoginResult, error) {
+		t.Fatal("Sub2API only accepts email-shaped identifiers; a bare username must never be forwarded to it")
+		return auth.PlatformLoginResult{}, nil
+	}}
+	newapi := &fakePlatformAuthenticator{onLogin: func(identifier, password string) (auth.PlatformLoginResult, error) {
+		return auth.PlatformLoginResult{PlatformUserID: "2", Username: identifier}, nil
+	}}
+	server := platformLoginServer(t, sub2api, newapi, 8, time.Minute)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, `{"identifier":"plainusername","password":"x"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if login, _ := newapi.counts(); login != 1 {
+		t.Fatalf("expected exactly one New API attempt, got %d", login)
+	}
+}
+
+func TestPlatformLoginAutoDetectBothPlatformsInvalidIsGeneric(t *testing.T) {
+	server := platformLoginServer(t, rejectingAuthenticator(), rejectingAuthenticator(), 8, time.Minute)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, `{"identifier":"nobody@example.com","password":"wrong"}`))
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "PLATFORM_CREDENTIALS_INVALID") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "账号或密码不正确") {
+		t.Fatalf("expected the generic Chinese message: %s", recorder.Body.String())
+	}
+}
+
+func TestPlatformLoginAutoDetectUpstreamUnavailableDoesNotFallBack(t *testing.T) {
+	sub2api := &fakePlatformAuthenticator{onLogin: func(string, string) (auth.PlatformLoginResult, error) {
+		return auth.PlatformLoginResult{}, auth.ErrPlatformUnavailable
+	}}
+	newapi := &fakePlatformAuthenticator{onLogin: func(string, string) (auth.PlatformLoginResult, error) {
+		t.Fatal("an upstream outage must not trigger platform-switching fallback")
+		return auth.PlatformLoginResult{}, nil
+	}}
+	server := platformLoginServer(t, sub2api, newapi, 8, time.Minute)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, `{"identifier":"person@example.com","password":"x"}`))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "PLATFORM_LOGIN_UNAVAILABLE") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if login, _ := sub2api.counts(); login != 1 {
+		t.Fatalf("expected exactly one Sub2API attempt, got %d", login)
+	}
+}
+
+func TestPlatformLoginAutoDetectMissingCredentialsStillRejected(t *testing.T) {
+	server := platformLoginServer(t, rejectingAuthenticator(), rejectingAuthenticator(), 8, time.Minute)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, `{"identifier":"","password":"x"}`))
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "PLATFORM_CREDENTIALS_REQUIRED") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPlatformLoginExplicitPlatformBypassesAutoDetectOrder(t *testing.T) {
+	// A bare-username identifier would normally auto-route to New API only;
+	// explicitly requesting sub2api must still go straight to Sub2API with no
+	// auto-detection at all.
+	sub2api := &fakePlatformAuthenticator{onLogin: func(identifier, password string) (auth.PlatformLoginResult, error) {
+		return auth.PlatformLoginResult{PlatformUserID: "3", Email: identifier}, nil
+	}}
+	newapi := &fakePlatformAuthenticator{onLogin: func(string, string) (auth.PlatformLoginResult, error) {
+		t.Fatal("an explicit platform selection must never consult the other platform")
+		return auth.PlatformLoginResult{}, nil
+	}}
+	server := platformLoginServer(t, sub2api, newapi, 8, time.Minute)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, `{"platform":"sub2api","identifier":"plainusername","password":"x"}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if login, _ := sub2api.counts(); login != 1 {
+		t.Fatalf("expected exactly one Sub2API attempt, got %d", login)
+	}
+}
+
+func TestPlatformLoginAutoDetectRateLimitSharesOneBucketPerRequest(t *testing.T) {
+	sub2api := rejectingAuthenticator()
+	newapi := rejectingAuthenticator()
+	server := platformLoginServer(t, sub2api, newapi, 2, time.Minute)
+	body := `{"identifier":"shared@example.com","password":"wrong"}`
+
+	for i := 0; i < 2; i++ {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, newPlatformLoginHTTPRequest(t, body))
+		if recorder.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("attempt %d status=%d body=%s", i, recorder.Code, recorder.Body.String())
+		}
+	}
+	// If one auto-detect request incorrectly charged the rate limiter once per
+	// upstream platform tried (instead of once per request), maxAttempts=2
+	// would already have been exhausted after the FIRST request above, and
+	// the second would already be 429.
+	if login, _ := sub2api.counts(); login != 2 {
+		t.Fatalf("expected 2 Sub2API attempts, got %d", login)
+	}
+	if login, _ := newapi.counts(); login != 2 {
+		t.Fatalf("expected 2 New API attempts, got %d", login)
+	}
+
+	third := httptest.NewRecorder()
+	server.Handler().ServeHTTP(third, newPlatformLoginHTTPRequest(t, body))
+	if third.Code != http.StatusTooManyRequests {
+		t.Fatalf("third attempt status=%d body=%s", third.Code, third.Body.String())
+	}
+	if login, _ := sub2api.counts(); login != 2 {
+		t.Fatalf("rate-limited attempt must not reach the authenticator: sub2api login calls=%d", login)
+	}
+}
+
+func TestPlatformLoginAutoDetectTwoFARemembersPlatformWithoutClientResend(t *testing.T) {
+	sub2api := &fakePlatformAuthenticator{
+		onLogin: func(identifier, password string) (auth.PlatformLoginResult, error) {
+			return auth.PlatformLoginResult{RequiresTwoFA: true, TempToken: "auto-temp-token-0123456789"}, nil
+		},
+		onTwoFA: func(tempToken, code string) (auth.PlatformLoginResult, error) {
+			if tempToken != "auto-temp-token-0123456789" || code != "123456" {
+				return auth.PlatformLoginResult{}, auth.ErrPlatformTwoFAInvalid
+			}
+			return auth.PlatformLoginResult{PlatformUserID: "42", Email: "auto2fa@example.com"}, nil
+		},
+	}
+	newapi := &fakePlatformAuthenticator{onLogin: func(string, string) (auth.PlatformLoginResult, error) {
+		t.Fatal("New API must not be consulted once Sub2API accepts the credentials and requests 2FA")
+		return auth.PlatformLoginResult{}, nil
+	}}
+	server := platformLoginServer(t, sub2api, newapi, 8, time.Minute)
+
+	first := httptest.NewRecorder()
+	server.Handler().ServeHTTP(first, newPlatformLoginHTTPRequest(t, `{"identifier":"auto2fa@example.com","password":"correct"}`))
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"requires_two_fa":true`) {
+		t.Fatalf("first step status=%d body=%s", first.Code, first.Body.String())
+	}
+	for _, cookie := range first.Result().Cookies() {
+		if cookie.Name == defaultSessionCookieName && cookie.Value != "" {
+			t.Fatalf("a login requiring 2FA must not issue a session cookie before verification")
+		}
+	}
+
+	// The follow-up 2FA request carries no `platform` field at all: the
+	// browser never displayed a platform choice in auto-detect mode.
+	verify := httptest.NewRequest(http.MethodPost, "https://invoice.example/api/v1/auth/platform-login/2fa", strings.NewReader(`{"temp_token":"auto-temp-token-0123456789","code":"123456"}`))
+	verify.RemoteAddr = "127.0.0.1:443"
+	verify.Header.Set("Content-Type", "application/json")
+	verify.Header.Set("Sec-Fetch-Site", "same-origin")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, verify)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("2fa verify status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var sessionCookie *http.Cookie
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == defaultSessionCookieName {
+			sessionCookie = cookie
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("verified auto-detected 2FA login must issue a session cookie")
+	}
+	if login, twoFA := sub2api.counts(); login != 1 || twoFA != 1 {
+		t.Fatalf("unexpected sub2api calls: login=%d twoFA=%d", login, twoFA)
+	}
+	if login, _ := newapi.counts(); login != 0 {
+		t.Fatalf("New API must never be called: login calls=%d", login)
+	}
+}
+
+func TestPlatformLoginTwoFAWithoutPlatformAndUnknownTempTokenIsRejectedGenerically(t *testing.T) {
+	server := platformLoginServer(t, rejectingAuthenticator(), rejectingAuthenticator(), 8, time.Minute)
+	request := httptest.NewRequest(http.MethodPost, "https://invoice.example/api/v1/auth/platform-login/2fa", strings.NewReader(`{"temp_token":"totally-unknown-token-000000","code":"123456"}`))
+	request.RemoteAddr = "127.0.0.1:443"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "PLATFORM_CREDENTIALS_INVALID") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

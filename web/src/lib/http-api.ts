@@ -12,7 +12,9 @@ import type {
   InvoiceRequest,
   InvoiceStatus,
   PaymentCandidate,
+  PlatformLoginInput,
   PlatformLoginOutcome,
+  PlatformLoginTwoFAInput,
   RefundCase,
   RefundCaseStatus,
   SourceAccount,
@@ -65,6 +67,28 @@ export function mapPlatformLoginOutcome(
     });
   }
   return { ok: true, requiresTwoFA: true, tempToken: value.temp_token };
+}
+
+// `platform` is undefined in the normal auto-detect flow: JSON.stringify
+// drops an undefined-valued property, so the wire body simply omits
+// "platform" and the backend auto-detects it from the identifier. An
+// explicit platform (ops/test override) is forwarded as-is.
+export function platformLoginBody(input: PlatformLoginInput) {
+  return {
+    platform: input.platform,
+    identifier: input.identifier,
+    password: input.password,
+  };
+}
+
+// Same reasoning as platformLoginBody: omitting `platform` here lets the
+// backend use the platform it already remembered for this temp_token.
+export function platformLoginTwoFABody(input: PlatformLoginTwoFAInput) {
+  return {
+    platform: input.platform,
+    temp_token: input.tempToken,
+    code: input.code,
+  };
 }
 
 type BackendSourceAccount = {
@@ -1526,11 +1550,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
         {
           method: "POST",
           skipCSRF: true,
-          body: {
-            platform: input.platform,
-            identifier: input.identifier,
-            password: input.password,
-          },
+          body: platformLoginBody(input),
         },
       ),
     );
@@ -1543,11 +1563,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
         {
           method: "POST",
           skipCSRF: true,
-          body: {
-            platform: input.platform,
-            temp_token: input.tempToken,
-            code: input.code,
-          },
+          body: platformLoginTwoFABody(input),
         },
       ),
     );
