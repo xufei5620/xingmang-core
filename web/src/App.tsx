@@ -69,6 +69,14 @@ import {
   parseEmbeddedPlatform,
   scopeBySource,
 } from "./lib/embedded-scope";
+import {
+  appendEmbeddedAdminParams,
+  isAdminNavItemVisible,
+  parseEmbeddedAdminMode,
+  parseEmbeddedAdminScope,
+  resolvePlatformSourceInstanceId,
+  type AdminNavItemKey,
+} from "./lib/embedded-admin-scope";
 import { apiCapabilities, apiMode, invoiceApi } from "./lib/api";
 import { InvoiceApiError } from "./lib/api-contract";
 import {
@@ -117,6 +125,60 @@ const embeddedPlatform = parseEmbeddedPlatform(
 
 function userRoute(path: string) {
   return appendEmbeddedParams(path, embeddedUserMode, embeddedPlatform);
+}
+
+// XM-INV-ADMIN-EMBED: the xingmang platform console embeds the *admin*
+// console (a separate embed from the user embed above) via
+// `?ui_mode=embedded_admin`; see lib/embedded-admin-scope.ts for why this is
+// a parallel module/constant pair rather than an extension of
+// embeddedUserMode/embeddedPlatform above.
+const embeddedAdminMode = parseEmbeddedAdminMode(
+  initialApplicationURL.searchParams,
+);
+const embeddedAdminScope = parseEmbeddedAdminScope(
+  initialApplicationURL.searchParams,
+  embeddedAdminMode,
+);
+
+function adminRoute(path: string) {
+  return appendEmbeddedAdminParams(path, embeddedAdminMode, embeddedAdminScope);
+}
+
+// The one platform a platform-scoped embedded admin session is allowed to
+// see, or null for global/standalone (nothing to resolve) and while a
+// platform scope's source_instance_id has not resolved yet.
+function embeddedAdminPlatform(): SourceType | null {
+  return embeddedAdminScope?.kind === "platform" ? embeddedAdminScope.platform : null;
+}
+
+// Resolves the current embedded-admin platform's source_instance_id from the
+// admin source-health report -- see resolvePlatformSourceInstanceId's doc
+// comment for why that endpoint and not a hardcoded UUID. null both before
+// it has loaded and when this isn't platform-scoped; callers in platform
+// scope must wait for a non-null value before issuing scoped list requests
+// rather than briefly requesting an unscoped (all-platform) page.
+function useEmbeddedAdminPlatformSourceInstanceId(): string | null {
+  const platform = embeddedAdminPlatform();
+  const [sourceInstanceId, setSourceInstanceId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!platform) {
+      setSourceInstanceId(null);
+      return;
+    }
+    let active = true;
+    void invoiceApi
+      .getSourceHealth()
+      .then((report) => {
+        if (active) setSourceInstanceId(resolvePlatformSourceInstanceId(platform, report.items));
+      })
+      .catch(() => {
+        if (active) setSourceInstanceId(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [platform]);
+  return sourceInstanceId;
 }
 
 type AppData = {
@@ -188,6 +250,7 @@ function DataProvider({ children }: { children: ReactNode }) {
   >();
   const [loadingMoreRequests, setLoadingMoreRequests] = useState(false);
   const refreshVersion = useRef(0);
+  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
 
   const refresh = async () => {
     const version = ++refreshVersion.current;
@@ -216,7 +279,14 @@ function DataProvider({ children }: { children: ReactNode }) {
           setLoadError(null);
           return;
         }
-        const requestPage = await invoiceApi.getAdminRequestPage();
+        // Platform-scoped embedded admin: wait for the platform's
+        // source_instance_id to resolve rather than briefly requesting an
+        // unscoped (all-platform) page and re-requesting a moment later.
+        if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
+        const requestPage = await invoiceApi.getAdminRequestPage(
+          undefined,
+          platformSourceInstanceId ?? undefined,
+        );
         const nextRequests = requestPage.items;
         if (version !== refreshVersion.current) return;
         setOrders([]);
@@ -280,7 +350,7 @@ function DataProvider({ children }: { children: ReactNode }) {
     setLoadingMoreRequests(true);
     try {
       const page = adminRoute
-        ? await invoiceApi.getAdminRequestPage(cursor)
+        ? await invoiceApi.getAdminRequestPage(cursor, platformSourceInstanceId ?? undefined)
         : await invoiceApi.getUserRequestPage(cursor);
       if (version !== refreshVersion.current) return;
       const merged = [
@@ -315,7 +385,7 @@ function DataProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void refresh();
-  }, [adminRoute, location.pathname, user?.id, user?.role]);
+  }, [adminRoute, location.pathname, user?.id, user?.role, platformSourceInstanceId]);
 
   return (
     <DataContext.Provider
@@ -346,15 +416,20 @@ const userNav = [
 ];
 
 const adminNav = [
-  { to: "/admin", label: "审核工作台", icon: LayoutDashboard },
-  { to: "/admin/payment-candidates", label: "支付核验", icon: ShieldCheck },
-  { to: "/admin/eligibility-freezes", label: "资格冻结", icon: EyeOff },
-  { to: "/admin/refund-cases", label: "退款与红冲", icon: CircleAlert },
-  { to: "/admin/source-health", label: "同步状态", icon: Network },
-  { to: "/admin?view=issued", label: "发票档案", icon: FileCheck2 },
-  { to: "/admin/settings", label: "系统设置", icon: Settings2 },
-  { to: "/orders", label: "返回用户端", icon: UserRound },
-];
+  { to: "/admin", label: "审核工作台", icon: LayoutDashboard, scopeKey: "review" },
+  { to: "/admin/payment-candidates", label: "支付核验", icon: ShieldCheck, scopeKey: "payment-candidates" },
+  { to: "/admin/eligibility-freezes", label: "资格冻结", icon: EyeOff, scopeKey: "eligibility-freezes" },
+  { to: "/admin/refund-cases", label: "退款与红冲", icon: CircleAlert, scopeKey: "refund-cases" },
+  { to: "/admin/source-health", label: "同步状态", icon: Network, scopeKey: "source-health" },
+  { to: "/admin?view=issued", label: "发票档案", icon: FileCheck2, scopeKey: "review" },
+  { to: "/admin/settings", label: "系统设置", icon: Settings2, scopeKey: "settings" },
+  { to: "/orders", label: "返回用户端", icon: UserRound, scopeKey: "return-to-user" },
+] as const satisfies ReadonlyArray<{
+  to: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  scopeKey: AdminNavItemKey;
+}>;
 
 function PortalLayout({
   children,
@@ -368,8 +443,16 @@ function PortalLayout({
   const { user, logout, stepUpRequired } = useAuth();
   const toast = useContext(ToastContext);
   const location = useLocation();
-  const nav = admin ? adminNav : userNav;
+  const nav = admin
+    ? adminNav.filter((item) => isAdminNavItemVisible(item.scopeKey, embeddedAdminScope))
+    : userNav;
   const embedded = embeddedUserMode && !admin;
+  // Separate from `embedded` above (which is the user embed, and explicitly
+  // excludes admin): the admin console has its own embed, hosted by the
+  // platform console rather than a per-account iframe, so it gets its own
+  // chrome-hiding class (.portal-embedded-admin, styles.css) instead of
+  // reusing .portal-embedded's.
+  const embeddedAdmin = admin && embeddedAdminMode;
   // The regular sidebar/topbar chrome that would otherwise show who is
   // logged in is hidden in embedded mode (see .portal-embedded in
   // styles.css) -- without this, the embedded view has no account identity
@@ -382,7 +465,7 @@ function PortalLayout({
 
   return (
     <div
-      className={`portal ${admin ? "portal-admin" : ""} ${embedded ? "portal-embedded" : ""}`}
+      className={`portal ${admin ? "portal-admin" : ""} ${embedded ? "portal-embedded" : ""} ${embeddedAdmin ? "portal-embedded-admin" : ""}`}
     >
       <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
         <div className="brand">
@@ -422,7 +505,7 @@ function PortalLayout({
             return (
               <NavLink
                 key={item.to}
-                to={admin ? item.to : userRoute(item.to)}
+                to={admin ? adminRoute(item.to) : userRoute(item.to)}
                 end={item.to === "/admin"}
                 className={({ isActive }) => {
                   const active = admin
@@ -1960,7 +2043,13 @@ function AdminPage() {
   } = useData();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | InvoiceStatus>("all");
-  const [source, setSource] = useState<"all" | SourceType>("all");
+  // Platform-scoped embedded admin: the list is already server-filtered
+  // (DataProvider passes source_instance_id); this client-side filter is
+  // initialized to match and its control is hidden below (CR-0005 (c)), same
+  // defense-in-depth pattern as the user embed's OrdersPage source scoping.
+  const [source, setSource] = useState<"all" | SourceType>(
+    embeddedAdminPlatform() ?? "all",
+  );
   const [selected, setSelected] = useState<InvoiceRequest | null>(null);
   const query = new URLSearchParams(useLocation().search);
   const viewIssued = query.get("view") === "issued";
@@ -2051,14 +2140,16 @@ function AdminPage() {
             <option value="returned">已退回</option>
             <option value="issued">已开具</option>
           </select>
-          <select
-            value={source}
-            onChange={(event) => setSource(event.target.value as typeof source)}
-          >
-            <option value="all">全部来源</option>
-            <option value="sub2api">SoloV API</option>
-            <option value="newapi">模型平台</option>
-          </select>
+          {!embeddedAdminPlatform() && (
+            <select
+              value={source}
+              onChange={(event) => setSource(event.target.value as typeof source)}
+            >
+              <option value="all">全部来源</option>
+              <option value="sub2api">SoloV API</option>
+              <option value="newapi">模型平台</option>
+            </select>
+          )}
         </div>
         {loading ? (
           <LoadingBlock />
@@ -2243,6 +2334,36 @@ function AdminDrawer({
     setIssuedAt(currentLocalDateTimeValue());
   }, [requestId]);
   if (!request) return null;
+  // View constraint, not a security boundary (CR-0005 (c)): the admin
+  // request list is already server-filtered to this platform in embedded
+  // platform mode, so this is unreachable through normal navigation -- kept
+  // as defense in depth against any future path that could select an id
+  // from outside the currently-loaded (and filtered) list.
+  if (embeddedAdminPlatform() && request.source !== embeddedAdminPlatform()) {
+    return (
+      <div className="drawer-layer">
+        <button className="drawer-backdrop" onClick={onClose} aria-label="关闭" />
+        <aside className="drawer">
+          <div className="drawer-head">
+            <div>
+              <span>开票申请详情</span>
+              <h2>{request.requestNo}</h2>
+            </div>
+            <button className="icon-button" onClick={onClose}>
+              <X size={20} />
+            </button>
+          </div>
+          <div className="drawer-body">
+            <EmptyState
+              icon={<CircleAlert />}
+              title="不在当前平台"
+              description="该申请属于另一平台，当前嵌入视图仅展示所选平台的数据。"
+            />
+          </div>
+        </aside>
+      </div>
+    );
+  }
   const effectiveWorkflow =
     request.workflowStatus ??
     (request.status === "submitted"
@@ -2680,8 +2801,25 @@ function EligibilityFreezesPage() {
     Array<{ id: string; source: SourceType }>
   >([]);
   const loadVersion = useRef(0);
+  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
+
+  // Platform-scoped embedded admin forces the filter to the resolved
+  // platform and hides the control below (CR-0005 (c)); it cannot be
+  // overridden by a click on a control that no longer exists, only by a
+  // filters.sourceInstanceId set from elsewhere -- there is none.
+  useEffect(() => {
+    if (!embeddedAdminPlatform() || !platformSourceInstanceId) return;
+    setFilters((current) =>
+      current.sourceInstanceId === platformSourceInstanceId
+        ? current
+        : { ...current, sourceInstanceId: platformSourceInstanceId },
+    );
+  }, [platformSourceInstanceId]);
 
   const load = async (cursor?: string) => {
+    // Wait for the platform's source_instance_id rather than briefly
+    // requesting an unscoped page.
+    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
     const version = cursor ? loadVersion.current : ++loadVersion.current;
     cursor ? setLoadingMore(true) : setLoading(true);
     try {
@@ -2802,23 +2940,25 @@ function EligibilityFreezesPage() {
               </option>
             ))}
           </select>
-          <select
-            aria-label="来源平台实例"
-            value={filters.sourceInstanceId ?? ""}
-            onChange={(event) =>
-              setFilters((current) => ({
-                ...current,
-                sourceInstanceId: event.target.value || undefined,
-              }))
-            }
-          >
-            <option value="">全部来源实例</option>
-            {sourceOptionLabels.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
+          {!embeddedAdminPlatform() && (
+            <select
+              aria-label="来源平台实例"
+              value={filters.sourceInstanceId ?? ""}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  sourceInstanceId: event.target.value || undefined,
+                }))
+              }
+            >
+              <option value="">全部来源实例</option>
+              {sourceOptionLabels.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          )}
           <Badge tone={filters.status === "open" ? "amber" : "blue"}>
             本页 {items.length} 条
           </Badge>
@@ -3100,11 +3240,23 @@ function PaymentCandidatesPage() {
   const [evidenceReference, setEvidenceReference] = useState("");
   const [reason, setReason] = useState("");
   const [working, setWorking] = useState(false);
+  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
 
   const load = async (cursor?: string) => {
+    // Wait for the platform's source_instance_id rather than briefly
+    // requesting an unscoped page (CR-0005 (c)). This page only ever renders
+    // in NewAPI platform mode (see isAdminNavItemVisible), but the guard is
+    // unconditional so it also holds for a direct/hostile navigation to this
+    // route under Sub2API scope -- that resolves to a real (sub2api)
+    // source_instance_id, which the newapi-only queue then correctly (not
+    // an error) returns zero rows for.
+    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
     cursor ? setLoadingMore(true) : setLoading(true);
     try {
-      const page = await invoiceApi.getPaymentCandidates(cursor);
+      const page = await invoiceApi.getPaymentCandidates(
+        cursor,
+        platformSourceInstanceId ?? undefined,
+      );
       setItems((current) =>
         cursor
           ? [
@@ -3130,7 +3282,7 @@ function PaymentCandidatesPage() {
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [platformSourceInstanceId]);
 
   const openCandidate = (
     candidate: PaymentCandidate,
@@ -3499,12 +3651,20 @@ function RefundCasesPage() {
   const [note, setNote] = useState("");
   const [working, setWorking] = useState(false);
   const loadVersion = useRef(0);
+  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
 
   const load = async (cursor?: string) => {
+    // Wait for the platform's source_instance_id rather than briefly
+    // requesting an unscoped page (CR-0005 (c)).
+    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
     const version = cursor ? loadVersion.current : ++loadVersion.current;
     cursor ? setLoadingMore(true) : setLoading(true);
     try {
-      const page = await invoiceApi.getRefundCases(status, cursor);
+      const page = await invoiceApi.getRefundCases(
+        status,
+        cursor,
+        platformSourceInstanceId ?? undefined,
+      );
       if (version !== loadVersion.current) return;
       setItems((current) =>
         cursor
@@ -3536,7 +3696,7 @@ function RefundCasesPage() {
     setItems([]);
     setNextCursor(undefined);
     void load();
-  }, [status]);
+  }, [status, platformSourceInstanceId]);
 
   const openResolution = (refundCase: RefundCase) => {
     setSelected(refundCase);
@@ -4544,7 +4704,11 @@ function SessionLoadingPage() {
 function StepUpPage() {
   const { stepUp } = useAuth();
   useEffect(() => {
-    stepUp();
+    // Embedded admin mode opens step-up in a popup (see AuthProvider),
+    // which browsers block unless it is triggered by a direct user gesture
+    // -- auto-firing here would silently fail. Standalone/non-embedded keeps
+    // the existing auto-trigger: `_top` navigation is never popup-blocked.
+    if (!embeddedAdminMode) stepUp();
   }, [stepUp]);
   return (
     <main className="auth-shell">
@@ -4552,10 +4716,14 @@ function StepUpPage() {
         <ShieldCheck className="auth-shield" size={34} />
         <span className="eyebrow">ADMIN STEP-UP</span>
         <h1>需要管理员二次验证</h1>
-        <p>此操作涉及支付证据或开票设置，请在顶层页面完成强化认证后返回。</p>
+        <p>
+          {embeddedAdminMode
+            ? "此操作涉及支付证据或开票设置，请点击下方按钮在弹出窗口中完成强化认证。"
+            : "此操作涉及支付证据或开票设置，请在顶层页面完成强化认证后返回。"}
+        </p>
         <button className="button button-dark button-wide" onClick={stepUp}>
           <KeyRound size={17} />
-          继续管理员验证
+          {embeddedAdminMode ? "重新验证" : "继续管理员验证"}
         </button>
       </section>
     </main>
@@ -4590,6 +4758,19 @@ function SourceHealthPage() {
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const loadVersion = useRef(0);
+  // Platform-scoped embedded admin: CR-0005 (b) shows only the current
+  // platform's 5 streams, vs. the full 10-stream overview everywhere else
+  // (standalone, and the global embedded-admin scope). This is a purely
+  // client-side view filter -- the report already carries both platforms'
+  // rows in one cheap, already-fetched response; there is no server-side
+  // filter to add for this endpoint.
+  const platform = embeddedAdminPlatform();
+  const visibleItems = platform
+    ? (report?.items ?? []).filter((item) => item.sourceType === platform)
+    : (report?.items ?? []);
+  const visibleReady = platform
+    ? visibleItems.length > 0 && visibleItems.every((item) => item.ready)
+    : report?.ready;
 
   const load = async () => {
     const version = ++loadVersion.current;
@@ -4666,19 +4847,25 @@ function SourceHealthPage() {
             <p className="eyebrow">上线门禁</p>
             <h2>
               {!report
-                ? "正在核验十条数据流"
-                : report.ready
-                  ? "十条数据流均可用"
+                ? platform
+                  ? "正在核验该平台数据流"
+                  : "正在核验十条数据流"
+                : visibleReady
+                  ? platform
+                    ? "该平台数据流均可用"
+                    : "十条数据流均可用"
                   : "开票已安全停止"}
             </h2>
             {report && (
               <small>
-                已返回 {report.items.length} 条流；预期为 Sub2API/New API 各 5 条，共 10 条
+                {platform
+                  ? `已返回 ${visibleItems.length} 条流；预期该平台 5 条`
+                  : `已返回 ${report.items.length} 条流；预期为 Sub2API/New API 各 5 条，共 10 条`}
               </small>
             )}
           </div>
-          <span className={`badge ${report?.ready ? "badge-green" : "badge-red"}`}>
-            {report?.ready ? "READY" : "NOT READY"}
+          <span className={`badge ${visibleReady ? "badge-green" : "badge-red"}`}>
+            {visibleReady ? "READY" : "NOT READY"}
           </span>
         </div>
         {loading && !report ? (
@@ -4696,7 +4883,7 @@ function SourceHealthPage() {
                 </tr>
               </thead>
               <tbody>
-                {(report?.items ?? []).map((item) => (
+                {visibleItems.map((item) => (
                   <tr key={`${item.sourceInstanceId}:${item.streamId}`}>
                     <td>
                       <strong>{item.sourceName}</strong>
@@ -4754,7 +4941,7 @@ function SourceHealthPage() {
                 ))}
               </tbody>
             </table>
-            {!report?.items.length && !loading && (
+            {!visibleItems.length && !loading && (
               <EmptyState
                 icon={<Network />}
                 title="尚无可安全展示的同步流"

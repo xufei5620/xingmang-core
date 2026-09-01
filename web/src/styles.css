@@ -2873,3 +2873,109 @@ td small {
     padding: 9px;
   }
 }
+
+/* XM-INV-ADMIN-EMBED: the xingmang platform console embeds the admin
+   console (separately from .portal-embedded above, which is the per-account
+   user embed and explicitly excludes admin -- see PortalLayout's `embedded`
+   vs `embeddedAdmin`). Written as its own block, mirroring rather than
+   extending .portal-embedded's rules, to keep this change isolated from that
+   one (owned by a concurrent branch) rather than interleaving edits to the
+   same selectors. */
+.portal-embedded-admin {
+  display: block;
+  min-height: 100vh;
+}
+.portal-embedded-admin .sidebar {
+  position: sticky;
+  inset: 0 0 auto;
+  transform: none;
+  width: 100%;
+  height: auto;
+  min-height: 48px;
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+}
+.portal-embedded-admin .brand,
+.portal-embedded-admin .workspace-chip,
+.portal-embedded-admin .sidebar-security,
+.portal-embedded-admin .sidebar-spacer,
+.portal-embedded-admin .side-nav > p,
+.portal-embedded-admin .topbar,
+.portal-embedded-admin .sidebar-close,
+.portal-embedded-admin .sidebar-backdrop {
+  display: none !important;
+}
+.portal-embedded-admin .side-nav {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.portal-embedded-admin .side-nav .nav-item,
+.portal-embedded-admin .nav-item-muted {
+  width: auto;
+  min-height: 34px;
+  margin: 0;
+  padding: 0 10px;
+  flex: 0 0 auto;
+  color: #657188;
+  border-radius: 8px;
+  font-size: 11px;
+}
+.portal-embedded-admin .side-nav .nav-item:hover,
+.portal-embedded-admin .nav-item-muted:hover {
+  color: #204fba;
+  background: #eef4ff;
+}
+.portal-embedded-admin .side-nav .nav-item-active {
+  color: #245bc5;
+  background: #eaf1ff;
+  box-shadow: none;
+}
+.portal-embedded-admin .portal-main {
+  min-width: 0;
+}
+.portal-embedded-admin .content {
+  width: 100%;
+  padding: 16px 14px 42px;
+}
+.portal-embedded-admin .page-header {
+  margin-bottom: 15px;
+  gap: 12px;
+}
+.portal-embedded-admin .page-header h1 {
+  font-size: 22px;
+}
+.portal-embedded-admin .page-header p {
+  margin-top: 5px;
+  font-size: 11px;
+}
+.portal-embedded-admin .eyebrow {
+  margin-bottom: 4px;
+  font-size: 8px;
+}
+
+@media (max-width: 480px) {
+  .portal-embedded-admin .sidebar {
+    padding-inline: 7px;
+  }
+  .portal-embedded-admin .side-nav .nav-item,
+  .portal-embedded-admin .nav-item-muted {
+    padding-inline: 8px;
+  }
+  .portal-embedded-admin .nav-item-muted span {
+    display: none;
+  }
+  .portal-embedded-admin .content {
+    padding: 13px 9px 34px;
+  }
+  .portal-embedded-admin .page-header h1 {
+    font-size: 19px;
+  }
+}
