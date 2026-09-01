@@ -1,5 +1,10 @@
 # RC59 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC59 shipped at signed tag
+> `v0.1.0-rc59-signed` (`7975339`) and is deployed; it restored the
+> funding-lot list rendering; its evidence is immutable. Continue only
+> with `docs/superpowers/plans/2026-09-01-invoice-rc60-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC59 — the funding-lot DTO now lets source_unavailable outrank every derived reason code, restoring the web client's status/reason invariant so a stale source renders as an honest not-ready list instead of blanking the page; found by the RC58 production canary's embedded invoice-center view.
