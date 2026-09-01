@@ -285,7 +285,8 @@ func (p *PlatformLogin) completeLogin(server *Server, w http.ResponseWriter, r *
 	principal := auth.Principal{
 		Issuer: p.Origins[platform], Subject: result.PlatformUserID,
 		Email: result.Email, EmailVerified: emailVerified,
-		Platform: platform, PlatformUserID: result.PlatformUserID,
+		DisplayName: strings.TrimSpace(result.Username),
+		Platform:    platform, PlatformUserID: result.PlatformUserID,
 		AuthTime: time.Now().UTC(),
 	}
 	user, err := p.Auth.ProvisionUser(r.Context(), principal, loginRequestID)
@@ -317,7 +318,19 @@ func (p *PlatformLogin) completeLogin(server *Server, w http.ResponseWriter, r *
 		return
 	}
 	p.Auth.setSessionCookies(w, credentials)
+	server.logger.Info("platform login succeeded", "request_id", loginRequestID,
+		"platform", string(platform), "claimed", user.Claimed, "user_id", idPrefix(user.ID))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// idPrefix returns the first 8 characters of an ID for logging -- enough to
+// correlate log lines with a database row without writing a full user ID
+// (personal-ish identifier) to the log stream. Safe on any length input.
+func idPrefix(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 // sameOriginBrowserRequest rejects a request only when the browser positively

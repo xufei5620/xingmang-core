@@ -5,6 +5,7 @@ import {
   mapInvoicePolicy,
   mapLot,
   mapPlatformLoginOutcome,
+  mapSourceAccount,
   invoiceDocumentPath,
   mapProfile,
   platformLoginBody,
@@ -13,6 +14,7 @@ import {
   requiredEligibilityStartAt,
   type BackendFundingLot,
   type BackendInvoicePolicy,
+  type BackendSourceAccount,
   type BackendSystemSettings,
 } from "./http-api";
 import {
@@ -53,6 +55,47 @@ describe("invoice profile HTTP contract", () => {
     expect(() => mapProfile({ ...backendProfile, revision: 0 })).toThrow(
       "开票资料版本无效",
     );
+  });
+});
+
+describe("source account HTTP contract", () => {
+  const backendAccount: BackendSourceAccount = {
+    id: "50000000-0000-4000-8000-000000000001",
+    source_type: "newapi",
+    source_instance_id: "60000000-0000-4000-8000-000000000001",
+    source_name: "SoloV 模型平台",
+    external_user_id_masked: "n***8",
+    binding_status: "verified",
+  };
+
+  it("passes through a real last_observed_at timestamp unchanged", () => {
+    expect(
+      mapSourceAccount({
+        ...backendAccount,
+        last_observed_at: "2026-08-15T09:30:00Z",
+      }).lastObservedAt,
+    ).toBe("2026-08-15T09:30:00Z");
+  });
+
+  // Regression: a source account that has never synced arrives on the wire
+  // as a real-looking sentinel timestamp (Go's zero time.Time, or a
+  // COALESCE-to-epoch fallback) rather than an absent field. Rendering it
+  // literally produced "最近同步 1/01/01 08:05" in production.
+  it.each([
+    ["Go's zero time.Time", "0001-01-01T00:00:00Z"],
+    ["a COALESCE-to-epoch fallback", "1970-01-01T00:00:00Z"],
+  ])("normalizes %s to undefined", (_label, sentinel) => {
+    expect(
+      mapSourceAccount({ ...backendAccount, last_observed_at: sentinel })
+        .lastObservedAt,
+    ).toBeUndefined();
+  });
+
+  it("normalizes a missing last_observed_at to undefined", () => {
+    expect(
+      mapSourceAccount({ ...backendAccount, last_observed_at: undefined })
+        .lastObservedAt,
+    ).toBeUndefined();
   });
 });
 

@@ -64,7 +64,7 @@ func runWorker(ctx context.Context, spec workerSpec) {
 	for {
 		processed, err := spec.Worker.RunOnce(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("background worker failed", "worker", spec.Name, "error", err)
+			slog.Error("background worker failed", "worker", spec.Name, "processed", processed, "error", err)
 		}
 		if ctx.Err() != nil {
 			return
@@ -232,7 +232,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
-	sessionStore := auth.NewPostgresSessionStore(store.Pool())
+	sessionStore := auth.NewPostgresSessionStore(store.Pool(), keyring)
 	auditSink := auth.NewPostgresSecurityAuditSink(store.Pool())
 	sessions, err := auth.NewSessionManager(sessionStore, auth.SessionConfig{}, auditSink)
 	if err != nil {
@@ -263,7 +263,13 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			return provisionPlatformOrOIDCUser(callbackCtx, appService, identityStore, principal, requestID, platformSourceInstanceIDs)
 		},
 		LoadUser: func(loadCtx context.Context, userID string) (httpapi.SessionUser, error) {
-			return loadSessionUser(loadCtx, appService, userID)
+			// No principal is available on a plain session reload (only the
+			// stored userID), so Claimed can't be recovered here -- only a fresh
+			// login (see provisionPlatformOrOIDCUser) sets it. The platform
+			// display name lives on the session row now (encrypted,
+			// migration 0017), not here -- sessionStatus reads it straight off
+			// current.Session.DisplayName instead of going through LoadUser.
+			return loadSessionUser(loadCtx, appService, userID, false)
 		},
 	}
 	platformLogin, err := buildPlatformLogin(productionAuth)
@@ -298,7 +304,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
-	receiver := &sourceingest.Receiver{Trust: trust, Acceptor: appService, ProxyCIDRs: ingestProxyNetworks}
+	receiver := &sourceingest.Receiver{Trust: trust, Acceptor: appService, ProxyCIDRs: ingestProxyNetworks, Logger: slog.Default()}
 	breakGlass, err := loadBreakGlassCIDRs(authMode)
 	if err != nil {
 		return appRuntime{}, err
@@ -650,7 +656,7 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			if wakeErr := deps.WakeSourceAccountFacts(auditCtx, sourceInstanceID, principal.PlatformUserID); wakeErr != nil {
 				return httpapi.SessionUser{}, fmt.Errorf("wake parked source facts for claimed binding: %w", wakeErr)
 			}
-			return loadSessionUser(auditCtx, deps, existing.PrincipalID)
+			return loadSessionUser(auditCtx, deps, existing.PrincipalID, true)
 		}
 		// Not found: fall through to the create-or-find path below exactly
 		// like a first-ever login (OIDC or platform) always has.
@@ -684,16 +690,21 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			return httpapi.SessionUser{}, fmt.Errorf("bind platform external account: %w", bindErr)
 		}
 	}
-	return loadSessionUser(auditCtx, deps, record.ID)
+	return loadSessionUser(auditCtx, deps, record.ID, false)
 }
 
-func loadSessionUser(ctx context.Context, service currentUserLoader, userID string) (httpapi.SessionUser, error) {
+// loadSessionUser loads the invoice_user row and layers the request-scoped
+// claimed marker onto it (see SessionUser.Claimed's doc comment -- log-line
+// observability only, never serialized to a response). claimed is only ever
+// true on the claim-path return above; the captured platform display name
+// lives on the session row instead (migration 0017), not here.
+func loadSessionUser(ctx context.Context, service currentUserLoader, userID string, claimed bool) (httpapi.SessionUser, error) {
 	user, err := service.GetCurrentUser(ctx, userID)
 	if err != nil {
 		return httpapi.SessionUser{}, err
 	}
 	return httpapi.SessionUser{
-		ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified,
+		ID: user.ID, Claimed: claimed, Email: user.Email, EmailVerified: user.EmailVerified,
 		CanonicalIssuer: user.OIDCIssuer, CanonicalSubject: user.OIDCSubject,
 	}, nil
 }

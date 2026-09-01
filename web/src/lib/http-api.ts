@@ -27,6 +27,7 @@ import {
   publishAuthFailure,
   type InvoiceApiClient,
 } from "./api-contract";
+import { isUnobservedTimestamp } from "./format";
 
 type RequestRole = "user" | "admin";
 
@@ -44,6 +45,7 @@ type BackendSession = {
     role: "user" | "admin";
     platform?: "sub2api" | "newapi" | "";
     platform_user_id?: string;
+    username?: string;
   };
   csrf_token?: string;
 };
@@ -92,7 +94,7 @@ export function platformLoginTwoFABody(input: PlatformLoginTwoFAInput) {
   };
 }
 
-type BackendSourceAccount = {
+export type BackendSourceAccount = {
   id: string;
   source_type: "sub2api" | "newapi";
   source_instance_id: string;
@@ -1190,13 +1192,14 @@ function mapSession(value: BackendSession): AuthSession {
       role: value.user.role,
       platform: value.user.platform || null,
       platformUserId: value.user.platform_user_id || null,
+      username: value.user.username || null,
     },
     csrfToken: value.csrf_token,
     adminStepUpRequired: value.admin_step_up_required === true,
   };
 }
 
-function mapSourceAccount(value: BackendSourceAccount): SourceAccount {
+export function mapSourceAccount(value: BackendSourceAccount): SourceAccount {
   if (!(["sub2api", "newapi"] as string[]).includes(value.source_type)) {
     throw new InvoiceApiError("源账号包含无法识别的平台类型。", {
       code: "INVALID_SOURCE_ACCOUNT",
@@ -1212,7 +1215,14 @@ function mapSourceAccount(value: BackendSourceAccount): SourceAccount {
     externalUserIdMasked: value.external_user_id_masked,
     status: value.binding_status,
     verifiedAt: value.verified_at,
-    lastObservedAt: value.last_observed_at,
+    // "Never synced yet" arrives on the wire as a real-looking sentinel
+    // timestamp rather than an absent field -- normalize it to undefined here
+    // so every renderer's existing `lastObservedAt ? ... : "等待首次同步"`
+    // check (App.tsx) works without each call site re-deriving this.
+    lastObservedAt:
+      value.last_observed_at && !isUnobservedTimestamp(value.last_observed_at)
+        ? value.last_observed_at
+        : undefined,
   };
 }
 

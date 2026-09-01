@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"invoice-system/backend/internal/application"
@@ -122,6 +125,13 @@ func TestProvisionPlatformOrOIDCUserClaimsExistingProjectedIdentity(t *testing.T
 	if deps.getCurrentUserCalls != 1 {
 		t.Fatalf("expected exactly one GetCurrentUser call, got %d", deps.getCurrentUserCalls)
 	}
+	// XM-INV-OBS-BUNDLE: the claim-path marker rides the returned SessionUser
+	// purely for completeLogin's observability log line (the captured
+	// platform username itself now lives on the session row -- see
+	// auth/postgres_integration_test.go -- not on SessionUser).
+	if !user.Claimed {
+		t.Fatal("Claimed must be true on the claim path")
+	}
 }
 
 func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *testing.T) {
@@ -170,6 +180,9 @@ func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *t
 	}
 	if deps.claimCalls != 0 {
 		t.Fatalf("ClaimPlatformIdentity must not run when there is no existing binding: calls=%d", deps.claimCalls)
+	}
+	if user.Claimed {
+		t.Fatal("Claimed must be false on the create path")
 	}
 }
 
@@ -295,5 +308,43 @@ func TestProvisionPlatformOrOIDCUserPropagatesExternalAccountLookupFailure(t *te
 	}
 	if identity.calls != 0 {
 		t.Fatalf("must not fall through to ResolveOrCreate after an unexplained lookup failure: calls=%d", identity.calls)
+	}
+}
+
+type onceWorkerFunc func(context.Context) (int, error)
+
+func (f onceWorkerFunc) RunOnce(ctx context.Context) (int, error) { return f(ctx) }
+
+func TestRunWorkerLogsProcessedCountAlongsideError(t *testing.T) {
+	// XM-INV-OBS-BUNDLE: runWorker's failure log previously named the worker
+	// but not how much work it completed before failing. That count matters
+	// most for eligibility-projection: ProcessEligibilityProjectionJobs
+	// (postgresstore/consumption.go) keeps processing the rest of its batch
+	// after the first failure and only ever returns that first error, so
+	// "processed" is the only place the log can show whether the batch was
+	// mostly fine (a handful of failures) or largely stuck.
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	worker := onceWorkerFunc(func(context.Context) (int, error) {
+		calls++
+		cancel() // let runWorker return after exactly one RunOnce call
+		return 3, errors.New("eligibility projection job failed: boom")
+	})
+
+	runWorker(ctx, workerSpec{Name: "eligibility-projection", Worker: worker})
+
+	if calls != 1 {
+		t.Fatalf("expected exactly one RunOnce call, got %d", calls)
+	}
+	logText := logs.String()
+	for _, want := range []string{"background worker failed", "worker=eligibility-projection", "processed=3", "boom"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("log missing %q: %s", want, logText)
+		}
 	}
 }

@@ -58,6 +58,13 @@ export interface AuthUser {
   // Non-null only alongside `platform` (a platform-password session): the
   // account's ID on that source platform, e.g. New API's numeric user ID.
   platformUserId: string | null;
+  // The raw account name captured from the platform's own login response
+  // (Sub2API/New API), unlike `displayName` above which the backend always
+  // backfills with a generic placeholder when there is nothing better to
+  // show. Persisted encrypted on the session row (backend migration 0017),
+  // so it survives a reload; null only for an OIDC session, or a
+  // platform-password session issued before that migration.
+  username: string | null;
 }
 
 export interface PlatformLoginInput {

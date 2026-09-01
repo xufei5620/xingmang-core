@@ -40,6 +40,16 @@ type Receiver struct {
 	ProxyCIDRs  []*net.IPNet
 	MaximumSkew time.Duration
 	Now         func() time.Time
+	// Logger receives structured failure logs (e.g. a rejected commit). Nil
+	// falls back to slog.Default(), matching httpapi.Server's NewWithConfig.
+	Logger *slog.Logger
+}
+
+func (receiver *Receiver) logger() *slog.Logger {
+	if receiver.Logger != nil {
+		return receiver.Logger
+	}
+	return slog.Default()
 }
 
 type batchV2 struct {
@@ -206,6 +216,9 @@ func (receiver *Receiver) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusServiceUnavailable
 		}
+		receiver.logger().Error("source batch commit rejected",
+			"source_instance_id", batch.SourceInstanceID, "stream_id", batch.StreamID,
+			"batch_id", batch.BatchID, "sequence", batch.Sequence, "status", status, "error", err)
 		writeReceiverError(writer, status, "SOURCE_BATCH_COMMIT_REJECTED")
 		return
 	}

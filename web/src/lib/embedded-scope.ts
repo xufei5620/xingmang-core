@@ -47,16 +47,11 @@ export function scopeBySource<T extends { source: SourceType }>(
     : items;
 }
 
-// The exact literal production_auth.go's maskedEmailName returns for a
-// platform-password account with no email on file -- the only case where
-// the backend truly has nothing more specific to show. Comparing against it
-// (rather than always preferring the platform+ID form whenever a session
-// carries a platform) keeps this forward-compatible with a real captured
-// username ever landing in displayName without also having an email.
-const GENERIC_DISPLAY_NAME_FALLBACK = "用户";
-
 export interface AccountIdentityInput {
-  user: Pick<AuthUser, "displayName" | "email" | "platform" | "platformUserId">;
+  user: Pick<
+    AuthUser,
+    "displayName" | "email" | "platform" | "platformUserId" | "username"
+  >;
   // The `platform` URL param scoping the embedded view (see
   // parseEmbeddedPlatform), independent of the session's own platform.
   embeddedPlatform: SourceType | null;
@@ -69,8 +64,12 @@ export interface AccountIdentityInput {
 // Builds the "which account am I looking at" label for the embedded view's
 // header. Priority:
 //  1. A platform-password session (user.platform set) identifies exactly
-//     one account: prefer its email, then a real display name, then fall
-//     back to "<platform label> · 用户 <platform user id>".
+//     one account: prefer its email, then the raw captured username, then
+//     fall back to "<platform label> · 用户 <platform user id>". Unlike
+//     `displayName` (which the backend always backfills with a generic "用户"
+//     placeholder when it has nothing better), `username` is only ever the
+//     real captured account name -- present means show it, absent means
+//     fall through, with no string-literal guessing needed.
 //  2. An OIDC session scoped by the embedded `platform` param: show that
 //     platform's bound source account, if any.
 //  3. Otherwise the existing display name / email, same as the rest of the
@@ -82,8 +81,7 @@ export function accountIdentityLabel({
 }: AccountIdentityInput): string {
   if (user.platform) {
     if (user.email) return user.email;
-    if (user.displayName && user.displayName !== GENERIC_DISPLAY_NAME_FALLBACK)
-      return user.displayName;
+    if (user.username) return user.username;
     return `${sourceName[user.platform]} · 用户 ${user.platformUserId ?? "?"}`;
   }
   if (embeddedPlatform) {
