@@ -2,20 +2,21 @@
 
 ## status
 
-**BLOCKED（等 team-lead 决定提交 16-20 怎么合入，见下方「⚠️ 分支状态」）**
+READY（这份 handoff 本身覆盖的提交 1-15 已经合入，见下方「⚠️ 分支状态」；
+分支上更晚的提交属于另一个切片 XM-CHAN-WIRE0，见其独立 handoff）
 
 ## branch
 
 `ai/claude/XM-CHAN-MERGE0-channel-upstream-merge`（base `release/v0.1-launch` @ `b47af3d`）
 
-**⚠️ 分支状态（2026-09-02 07:25 发现）**：这条分支的提交 1-15 已经被验收线合入
-`release/v0.1-launch`（`5cc7b25`/`06536df`，ACCEPTANCE-LOG "MERGED XM-CHAN-MERGE0
-渠道管理单表"）——本片当时不知道，继续在本地按 team-lead 更精确的规格做提交
-16-20。随后并行切片 XM-CHAN-FIELDS0 也已合入（`0502e60`），交付了提交 16-18
-一直在等的真实字段契约。提交 16-20 尚未合入。已用 `git merge-tree` 确认能
-干净合并到当前 `release/v0.1-launch`（无冲突），已发消息问 team-lead 要不要
-沿用这条分支继续合，还是切一条新分支（比如日志里提过的 XM-CHAN-WIRE0）,
-回复之前不擅自改分支名/不强推。见 risks 里的完整记录。
+**⚠️ 分支状态（2026-09-02 解决）**：这条分支的提交 1-15（本文档覆盖的范围）
+已经被验收线合入 `release/v0.1-launch`（`5cc7b25`/`06536df`，ACCEPTANCE-LOG
+"MERGED XM-CHAN-MERGE0 渠道管理单表"）——本片一度在不知情的情况下继续在本地
+按 team-lead 更精确的规格做了更多提交。team-lead 回复确认：**沿用同一条
+分支，不重开、不改名、不强推**；分支上 `5131b8f` 之后的提交由验收线记账为
+独立切片 **XM-CHAN-WIRE0**（消费并行切片 XM-CHAN-FIELDS0 交付的真实字段
+契约），完整内容见 `docs/handoffs/slices/XM-CHAN-WIRE0-catalog-wire.md`,
+不在本文档范围内。
 
 ## commit
 
@@ -376,23 +377,23 @@ API：
 
 ## risks
 
-- **提交 1-15 已经被合入 `release/v0.1-launch`，提交 16-20 还没有**（见上方
-  「分支状态」）——本片开工时没有意识到自己的分支已经被合并，继续在本地按
-  team-lead 更精确的规格（含逐字段 JSON 名）做了 5 个提交；这些提交此刻只
-  存在于本地分支，不在生产分支历史里。`git merge-tree --write-tree
-  release/v0.1-launch HEAD` 确认能干净合并（chanfields 改的是 Go/contracts,
-  本片改的是前端，没有文件重叠），但要不要真的合、用什么名义合（继续这条
-  分支，还是切一条新的比如 XM-CHAN-WIRE0），是等 team-lead 回复的开放问题,
-  本片没有擅自决定。
+- ~~提交 1-15 已经被合入 release/v0.1-launch，提交 16-20 还没有~~——**已解决**：
+  team-lead 确认沿用同一条分支继续合，`5131b8f` 之后的提交由验收线记账为
+  独立切片 XM-CHAN-WIRE0（见 `docs/handoffs/slices/XM-CHAN-WIRE0-catalog-wire.md`）。
+  这条风险原样保留一份历史记录：本片开工时没有意识到自己的分支已经被合并,
+  继续在本地按 team-lead 更精确的规格做了提交——这是当时的真实过程，不是
+  凭空发生的，供以后类似情况参考（长任务应定期 `git fetch` 检查自己的分支
+  是否已被合入）。
 - **提交 16-18 最初是照 team-lead 消息里给的 JSON 字段名猜的形状，提交 20
   用 chanfields 实际交付的契约（`contracts/connectors/{sub2api,newapi}.
   channel-catalog.v3.md` 与 `internal/platform/httpapi/platform_channels.go`
   的 struct tag）核对过一遍，发现并修了两处真实的类型/数值编码错误**（详见
-  提交 20 的说明）：`rate_multiplier`/`upstream_multiplier` 契约是
-  `*float64`（数字），不是十进制字符串；`today.success_rate` 是 0-1 小数且
-  Sub2API 端恒为 null，即使 `requests`/`cost_minor` 有真数据，之前的实现会
-  默认成 0 显示假的"0.0%"。修完之后逐字段核对过 Go struct 的 json tag,
-  确认类型定义与实际契约完全一致，不只是跟裁定摘要或 team-lead 的转述一致。
+  提交 20 的说明，以及 XM-CHAN-WIRE0 handoff 的完整记录）：`rate_multiplier`/
+  `upstream_multiplier` 契约是 `*float64`（数字），不是十进制字符串；
+  `today.success_rate` 是 0-1 小数且 Sub2API 端恒为 null，即使
+  `requests`/`cost_minor` 有真数据，之前的实现会默认成 0 显示假的"0.0%"。
+  修完之后逐字段核对过 Go struct 的 json tag，确认类型定义与实际契约完全
+  一致，不只是跟裁定摘要或 team-lead 的转述一致。
 - **「平台 / 类型」列与详情页「类型」字段的默认二分逻辑（`accountRowType`)
   把 `official_api` 与 `upstream_key` 都归到"上游渠道"**——这个归类没有经过
   产品侧对"官方直连算不算上游渠道"这个具体问题的确认，是从裁定"行内区分

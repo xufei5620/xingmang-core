@@ -6,6 +6,7 @@ import { Link, useParams } from "react-router";
 import { listServices } from "../api/platform";
 import { listPlatformChannels, type PlatformChannelRow } from "../api/platformChannels";
 import { accountRowType, describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
+import { channelFieldNullReason, SCHEDULING_WRITE_HINT, USAGE_WINDOW_SUB2API_HINT } from "../lib/channelFieldReasons";
 import { formatScaledMinorUnits } from "../lib/money";
 import { runwayReasonText } from "../lib/runway";
 import { ApiStateView } from "../components/ApiStateView";
@@ -317,7 +318,7 @@ function ChannelDetailBody({
 
         <DetailSection
           title="容量与调度"
-          hint="XM-CHAN-FIELDS0 扩展渠道目录契约后自动出真值；调度即使有值也只做只读展示，写操作另立 XM-SCHED0"
+          hint="XM-CHAN-FIELDS0 已交付渠道目录契约；每个未接入字段的原因按平台各不相同，见各字段说明。调度即使有值也只做只读展示，写操作另立 XM-SCHED0"
         >
           <DetailList>
             {row.capacity ? (
@@ -325,9 +326,16 @@ function ChannelDetailBody({
                 {row.capacity.used} / {row.capacity.limit}
               </Fact>
             ) : (
-              <UnavailableFact label="容量 / 并发" />
+              <UnavailableFact label="容量 / 并发" hint={channelFieldNullReason("capacity", platform)} />
             )}
-            <Fact label="调度" hint="调度开关待 XM-SCHED0 Action；开关 / 优先级这类写操作另立切片，本轮任何时候都只做只读展示">
+            <Fact
+              label="调度"
+              hint={
+                row.scheduling
+                  ? SCHEDULING_WRITE_HINT
+                  : `${channelFieldNullReason("scheduling", platform)}；${SCHEDULING_WRITE_HINT}`
+              }
+            >
               {row.scheduling ? (
                 <>
                   {row.scheduling.enabled ? "已开启" : "已关闭"} · 优先级 {row.scheduling.priority}
@@ -345,26 +353,47 @@ function ChannelDetailBody({
                 {formatScaledMinorUnits(row.today.costMinor, row.today.currency, row.today.scale)}
               </Fact>
             ) : (
-              <UnavailableFact label="今日统计" hint="请求数 · 成功率 · 消耗" />
+              <UnavailableFact label="今日统计" hint={`请求数 · 成功率 · 消耗。${channelFieldNullReason("today", platform)}`} />
             )}
             {(() => {
               const kind = row.binding ? (row.kind ?? (account ? accountRowType(account.access_method).value : null)) : null;
               if (kind === "upstream") {
-                return <Fact label="用量窗口" hint="上游渠道没有用量窗口这个概念">不适用</Fact>;
+                return (
+                  <Fact label="用量窗口" hint="上游渠道没有用量窗口这个概念">
+                    不适用
+                  </Fact>
+                );
               }
-              return row.usageWindow ? (
-                <Fact label="用量窗口">
+              if (!row.usageWindow) {
+                return <UnavailableFact label="用量窗口" hint={channelFieldNullReason("usageWindow", platform)} />;
+              }
+              return (
+                <Fact label="用量窗口" hint={platform === "sub2api" ? USAGE_WINDOW_SUB2API_HINT : undefined}>
                   {Math.round(row.usageWindow.usedRatio * 100)}%
                   {row.usageWindow.resetsAt ? `，重置于 ${row.usageWindow.resetsAt}` : ""}
                 </Fact>
-              ) : (
-                <UnavailableFact label="用量窗口" />
               );
             })()}
-            {row.lastUsedAt ? <Fact label="最近使用">{row.lastUsedAt}</Fact> : <UnavailableFact label="最近使用" />}
-            {row.createdAt ? <Fact label="创建时间">{row.createdAt}</Fact> : <UnavailableFact label="创建时间" />}
-            {row.expiresAt ? <Fact label="过期时间">{row.expiresAt}</Fact> : <UnavailableFact label="过期时间" />}
-            {row.proxy ? <Fact label="代理">{row.proxy}</Fact> : <UnavailableFact label="代理" />}
+            {row.lastUsedAt ? (
+              <Fact label="最近使用">{row.lastUsedAt}</Fact>
+            ) : (
+              <UnavailableFact label="最近使用" hint={channelFieldNullReason("lastUsed", platform)} />
+            )}
+            {row.createdAt ? (
+              <Fact label="创建时间">{row.createdAt}</Fact>
+            ) : (
+              <UnavailableFact label="创建时间" hint={channelFieldNullReason("createdAt", platform)} />
+            )}
+            {row.expiresAt ? (
+              <Fact label="过期时间">{row.expiresAt}</Fact>
+            ) : (
+              <UnavailableFact label="过期时间" hint={channelFieldNullReason("expiresAt", platform)} />
+            )}
+            {row.proxy ? (
+              <Fact label="代理">{row.proxy}</Fact>
+            ) : (
+              <UnavailableFact label="代理" hint={channelFieldNullReason("proxy", platform)} />
+            )}
           </DetailList>
         </DetailSection>
 
