@@ -2,15 +2,24 @@
 
 ## status
 
-READY（待验收线审读、复跑并人工合入）
+**BLOCKED（等 team-lead 决定提交 16-20 怎么合入，见下方「⚠️ 分支状态」）**
 
 ## branch
 
 `ai/claude/XM-CHAN-MERGE0-channel-upstream-merge`（base `release/v0.1-launch` @ `b47af3d`）
 
+**⚠️ 分支状态（2026-09-02 07:25 发现）**：这条分支的提交 1-15 已经被验收线合入
+`release/v0.1-launch`（`5cc7b25`/`06536df`，ACCEPTANCE-LOG "MERGED XM-CHAN-MERGE0
+渠道管理单表"）——本片当时不知道，继续在本地按 team-lead 更精确的规格做提交
+16-20。随后并行切片 XM-CHAN-FIELDS0 也已合入（`0502e60`），交付了提交 16-18
+一直在等的真实字段契约。提交 16-20 尚未合入。已用 `git merge-tree` 确认能
+干净合并到当前 `release/v0.1-launch`（无冲突），已发消息问 team-lead 要不要
+沿用这条分支继续合，还是切一条新分支（比如日志里提过的 XM-CHAN-WIRE0）,
+回复之前不擅自改分支名/不强推。见 risks 里的完整记录。
+
 ## commit
 
-十八个提交，最新为 `23cb559`：
+二十个提交，最新为 `0896a33`：
 
 1. `1f8c834` refactor(admin-web): extract supplier-grain grouping for upstream registry
 2. `075ed4c` feat(nav): drop the standalone suppliers tab on Sub2API/NewAPI
@@ -27,9 +36,15 @@ READY（待验收线审读、复跑并人工合入）
 13. `9d5c107` docs(admin-ia): record the 07:20 supplementary ruling on §8.8
 14. `98343b9` docs(handoff): rewrite XM-CHAN-MERGE0 handoff for the 07:20 final state
 15. `5131b8f` docs(handoff): fix stale commit count after the handoff-rewrite commit itself
+
+**——提交 15 是 `release/v0.1-launch` 上 `5cc7b25` 合并进去的边界，往上都已经
+在生产分支历史里了；往下是尚未合入的部分——**
+
 16. `6c150e3` feat(admin-web): code the channel table against chanfields' exact JSON contract
 17. `03acb95` feat(admin-web): match the channel detail page to the new field contract
 18. `23cb559` docs(admin-ia): record team-lead's precise 07:20/07:25 implementation spec
+19. `bf2e30c` docs(handoff): update for the third refinement pass and its browser proof
+20. `0896a33` fix(admin-web): correct rate_multiplier/success_rate numeric encoding
 
 **⚠️ 提交 1-9 实现的是第一版已经被推翻的中间设计，提交 10-15 是第二版（按
 ACCEPTANCE-LOG 里 07:20 裁定摘要重做）**，读这份 handoff 之前请看下面「两条
@@ -361,6 +376,23 @@ API：
 
 ## risks
 
+- **提交 1-15 已经被合入 `release/v0.1-launch`，提交 16-20 还没有**（见上方
+  「分支状态」）——本片开工时没有意识到自己的分支已经被合并，继续在本地按
+  team-lead 更精确的规格（含逐字段 JSON 名）做了 5 个提交；这些提交此刻只
+  存在于本地分支，不在生产分支历史里。`git merge-tree --write-tree
+  release/v0.1-launch HEAD` 确认能干净合并（chanfields 改的是 Go/contracts,
+  本片改的是前端，没有文件重叠），但要不要真的合、用什么名义合（继续这条
+  分支，还是切一条新的比如 XM-CHAN-WIRE0），是等 team-lead 回复的开放问题,
+  本片没有擅自决定。
+- **提交 16-18 最初是照 team-lead 消息里给的 JSON 字段名猜的形状，提交 20
+  用 chanfields 实际交付的契约（`contracts/connectors/{sub2api,newapi}.
+  channel-catalog.v3.md` 与 `internal/platform/httpapi/platform_channels.go`
+  的 struct tag）核对过一遍，发现并修了两处真实的类型/数值编码错误**（详见
+  提交 20 的说明）：`rate_multiplier`/`upstream_multiplier` 契约是
+  `*float64`（数字），不是十进制字符串；`today.success_rate` 是 0-1 小数且
+  Sub2API 端恒为 null，即使 `requests`/`cost_minor` 有真数据，之前的实现会
+  默认成 0 显示假的"0.0%"。修完之后逐字段核对过 Go struct 的 json tag,
+  确认类型定义与实际契约完全一致，不只是跟裁定摘要或 team-lead 的转述一致。
 - **「平台 / 类型」列与详情页「类型」字段的默认二分逻辑（`accountRowType`)
   把 `official_api` 与 `upstream_key` 都归到"上游渠道"**——这个归类没有经过
   产品侧对"官方直连算不算上游渠道"这个具体问题的确认，是从裁定"行内区分
