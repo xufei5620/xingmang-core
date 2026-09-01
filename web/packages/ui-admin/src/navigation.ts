@@ -342,7 +342,10 @@ const ASSURANCE_SUB_TABS = sub(
  *
  *  原型最终态把它从 Sub2API/NewAPI 的页签数组里挤掉了（被「上游管理」顶替），
  *  但页面 `V["s2/model"]` 与路由分支都还在——是原型自己的孤儿路由。
- *  产品负责人裁定按选项 A 恢复，位置取选项字面的「第 9 个页签」= 页签条末位。
+ *  产品负责人裁定按选项 A 恢复，位置取选项字面的「末位」= 页签条末位
+ *  （2026-08-28 裁定时原文写的是「第 9 个页签」，当时页签条一共 9 格；
+ *  2026-09-02 「上游管理」并入「渠道管理」页内区块后条数减到 8 格，
+ *  但「末位」这个位置本身没有变，仍是 ASSURANCE_TAB 排最后一个）。
  *  CPA 不动，仍按原型字面排在第 4 格。 */
 const ASSURANCE_TAB: PlatformTabSpec = {
   value: "model",
@@ -351,14 +354,19 @@ const ASSURANCE_TAB: PlatformTabSpec = {
   subTabs: ASSURANCE_SUB_TABS,
 };
 
-/** Sub2API 与 NewAPI 的公共前 8 格（ADMIN-IA §2.1：两者同构）。
- *  `finance` 的子页签两边不同，所以由各自传入。 */
+/** Sub2API 与 NewAPI 的公共前 7 格（ADMIN-IA §2.1：两者同构）。
+ *  `finance` 的子页签两边不同，所以由各自传入。
+ *
+ *  2026-09-02 产品负责人裁定（ACCEPTANCE-LOG）：「上游管理」不再是独立页签，
+ *  并入「渠道管理」页内区块——上游管理相关的账号/供应商登记簿、余额与整体
+ *  毛利汇总，现在渲染在 `渠道管理` 页面渠道表下方，不再单独占一格页签。
+ *  旧的 `suppliers` 页签值仍在 `LEGACY_TAB_ALIASES` 里保留 redirect
+ *  （见 admin-web/lib/platforms.ts），不会变成 404。 */
 function apiPlatformTabs(financeSubTabs: readonly NavSubTab[]): readonly PlatformTabSpec[] {
   return [
     { value: "overview", label: "概览", subTabs: [] },
     { value: "users", label: "用户管理", subTabs: [] },
     { value: "upstream", label: "渠道管理", subTabs: [] },
-    { value: "suppliers", label: "上游管理", subTabs: [] },
     { value: "finance", label: "支付与财务", subTabs: financeSubTabs },
     { value: "usage", label: "请求详情", subTabs: [] },
     { value: "creds", label: "连接与凭据", subTabs: [] },

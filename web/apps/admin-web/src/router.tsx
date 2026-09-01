@@ -35,6 +35,7 @@ import {
   resolvePlatformTab,
   CHANNELS_REDIRECT,
   LEGACY_PLATFORM_ROUTES,
+  LEGACY_TAB_ALIAS_ANCHORS,
   type PlatformEntry,
   type RegistryState,
 } from "./lib/platforms";
@@ -221,13 +222,24 @@ export function ShellLayout() {
 function platformTabLoader({ request, params }: LoaderFunctionArgs) {
   const url = new URL(request.url);
   const serviceType = params.serviceType ?? "";
-  const resolution = resolvePlatformTab(serviceType, url.searchParams.get("tab"));
+  const rawTab = url.searchParams.get("tab");
+  const resolution = resolvePlatformTab(serviceType, rawTab);
 
   switch (resolution.kind) {
     case "redirect": {
       const next = new URL(url);
       next.searchParams.set("tab", resolution.tab);
-      return redirect(`${next.pathname}${next.search}`);
+      // 「上游管理」页签降级为「渠道管理」页内区块之后，旧 `?tab=suppliers`
+      // 书签只改跳 `?tab=upstream` 还不够——落地会停在页顶，让人以为
+      // 上游管理没了。带上锚点，页面挂载后滚到对应区块（ChannelTable 里
+      // `id="upstream-management"` 的那个 <section>）。查表用的是**原始**
+      // tab 名（`resources`/`suppliers` 这类改名前的值），不是已经解析出的
+      // `resolution.tab`——两者在这条分支里通常一样，但保持用原值更贴合
+      // 「这是哪个旧地址触发的」这件事本身。
+      const anchor = LEGACY_TAB_ALIAS_ANCHORS[rawTab ?? ""];
+      next.hash = anchor ?? "";
+      // `URL#hash` 的取值已经自带前导 `#`（非空时），不必再拼一次
+      return redirect(`${next.pathname}${next.search}${next.hash}`);
     }
     case "moved":
       return redirect(resolution.path);

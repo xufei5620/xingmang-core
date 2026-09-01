@@ -461,6 +461,11 @@ function okHandler(url: string): Response {
     return fakeResponse(200, financeChannelsBody);
   if (url.startsWith("/api/v1/finance/upstreams/summary"))
     return fakeResponse(200, financeUpstreamsBody);
+  // 渠道管理页 2026-09-02 起在页内挂了「上游管理」区块（XM-CHAN-MERGE0），
+  // 默认空登记簿——需要具体账号数据的用例自己覆盖 stubFetch，不在这个
+  // 共用兜底里编样例行（与服务器登记簿四个查询同一条注释里的规矩）。
+  if (url.startsWith("/api/v1/finance/upstream-accounts"))
+    return fakeResponse(200, { items: [] });
   if (url.startsWith("/api/v1/finance/runway-thresholds/history"))
     return fakeResponse(200, { items: [{ environment: "development", revision: 1, critical_days: 5, warning_days: 10, serious_days: 20, changed_at: "2026-08-28T10:00:00Z", changed_by: "bootstrap", reason: "initial", request_id: "req-1", change_source: "bootstrap" }], has_more: false });
   if (url.startsWith("/api/v1/finance/runway-thresholds/preview"))
@@ -897,14 +902,15 @@ describe("Sub2API 平台详情·渠道管理页签（XM-0052 逐格对齐原型�
     expect(table.getByText(/订阅型渠道没有余额，可用天数对它无意义/)).not.toBeNull();
   });
 
-  it("口径声明照抄原型，并给出去上游管理的入口", async () => {
+  it("口径声明照抄原型，并给出跳到本页下方上游管理区块的入口", async () => {
+    // 2026-09-02 裁定：「上游管理」并入渠道管理页内区块，不再跳另一个页签
     renderRoute("/platforms/sub2api?tab=upstream");
     expect(
       await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不在这里汇总上游/),
     ).not.toBeNull();
     expect(
-      screen.getByRole("link", { name: "上游管理" }).getAttribute("href"),
-    ).toBe("/platforms/sub2api?tab=suppliers");
+      screen.getByRole("link", { name: "本页下方「上游管理」区块" }).getAttribute("href"),
+    ).toBe("#upstream-management");
   });
 
   it("该环境没有上游账号时给空态而不是空表", async () => {
@@ -947,8 +953,9 @@ describe("NewAPI 平台详情（XM-0035）", () => {
     renderRoute("/platforms/newapi");
     // servicesBody 里没有 newapi——页面靠指标活着，不靠登记
     expect(await screen.findByRole("tab", { name: "概览" })).not.toBeNull();
-    // 九格：ADMIN-IA v3 §2.1 的 8 格 + 裁定 #1 恢复的「渠道保障」
-    expect(screen.getAllByRole("tab")).toHaveLength(9);
+    // 八格：2026-09-02 裁定「上游管理」并入渠道管理页内区块后，
+    // ADMIN-IA v3 §2.1 的 7 格 + 裁定 #1 恢复的「渠道保障」
+    expect(screen.getAllByRole("tab")).toHaveLength(8);
     // 断言的是**页头上**没挂「未登记」徽章，而不是全屏搜「未接入」——
     // 导航上 CPA / 服务器确实还挂着「未接入·Mx」，那是对的。
     expect(screen.queryByText("未登记")).toBeNull();
@@ -1475,6 +1482,13 @@ describe("旧路径 redirect 全表（ADMIN-IA v3 §4.1，逐条断言）", () =
     expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
   });
 
+  it("?tab=suppliers → ?tab=upstream（2026-09-02 裁定：上游管理并入渠道管理页内区块）", async () => {
+    renderRoute("/platforms/sub2api?tab=suppliers");
+    expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
+    // 落地之后还能看到区块本身，不是跳到一个没有上游管理内容的页面
+    expect(await screen.findByText(/由平台手工登记不同上游/)).not.toBeNull();
+  });
+
   it("?tab=requests → ?tab=usage（「请求」改名「请求详情」）", async () => {
     renderRoute("/platforms/sub2api?tab=requests");
     expect(await screen.findByRole("tab", { name: "请求详情", selected: true })).not.toBeNull();
@@ -1563,14 +1577,14 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("Sub2API 九格，顺序与命名逐字（第 9 格是裁定 #1 恢复的渠道保障）", async () => {
+  it("Sub2API 八格，顺序与命名逐字（末格是裁定 #1 恢复的渠道保障）", async () => {
+    // 2026-09-02 裁定：「上游管理」并入渠道管理页内区块，不再单独占页签
     renderRoute("/platforms/sub2api");
     const tabs = await screen.findAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "概览",
       "用户管理",
       "渠道管理",
-      "上游管理",
       "支付与财务",
       "请求详情",
       "连接与凭据",

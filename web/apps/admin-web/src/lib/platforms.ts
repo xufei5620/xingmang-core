@@ -249,6 +249,23 @@ const LEGACY_TAB_ALIASES: Readonly<Record<string, string>> = {
   containers: "services",
   certs: "domains",
   logs: "monitoring",
+  // 2026-09-02 产品负责人裁定：Sub2API/NewAPI 的「上游管理」页签并入
+  // 「渠道管理」页内区块，不再是独立页签——旧书签跳到 upstream，
+  // 由 router.tsx 的 platformTabLoader 额外带上 #upstream-management
+  // 锚点，落地后自动滚到页内那个区块（不是这条 alias 表能表达的那一半）。
+  // 服务器平台的 `suppliers`（供应商与采购）不受影响：它本来就是
+  // server 页签集合里的现役页签，不会走到这条 alias。
+  suppliers: "upstream",
+};
+
+/** `?tab=` 别名改跳之后，需要额外带上的页内锚点。
+ *
+ *  只有「上游管理」这一条需要：它从独立页签降级为渠道管理页下方的区块，
+ *  单纯跳 `?tab=upstream` 落地在页顶，会让点旧书签的人以为上游管理消失了。
+ *  键是**原始**（改名前）的 tab 值，不是改名后的——查表时必须拿用户实际
+ *  贴过来的那个旧名字去找，不能拿 resolvePlatformTab 已经改写过的新名字。 */
+export const LEGACY_TAB_ALIAS_ANCHORS: Readonly<Record<string, string>> = {
+  suppliers: "upstream-management",
 };
 
 /** 裁定 #4：平台级「操作」页签砍掉，Action 入口收进全局「操作与审批」。 */
