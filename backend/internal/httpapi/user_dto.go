@@ -111,7 +111,19 @@ func userFundingLotDTOs(lots []domain.FundingLot) []userFundingLot {
 			reference = reference[len(reference)-8:]
 		}
 		reasonCode := ""
-		if lot.RefundFrozen {
+		if lot.EligibilityStatus == "source_unavailable" {
+			// The web client enforces the invariant
+			// eligibility_status=source_unavailable => reason_code=SOURCE_NOT_READY
+			// and refuses to render the whole list otherwise, so this status
+			// must outrank every other reason. Semantically that is also
+			// right: while the source's five streams are not all fresh,
+			// consumption/refund-derived reasons are computed from numbers
+			// the freshness gate just declared untrustworthy. The RC58
+			// production canary hit exactly this: a fresh zero-consumption
+			// lot under a stale source produced source_unavailable +
+			// NO_POST_START_CONSUMPTION and blanked the page.
+			reasonCode = "SOURCE_NOT_READY"
+		} else if lot.RefundFrozen {
 			reasonCode = "SOURCE_REFUND"
 		} else if kind == "legacy" && !lot.CompletedAt.IsZero() && lot.CompletedAt.Before(adminsettings.RequiredEligibilityStartAt) {
 			reasonCode = "BEFORE_ELIGIBILITY_START"
@@ -123,8 +135,6 @@ func userFundingLotDTOs(lots []domain.FundingLot) []userFundingLot {
 			reasonCode = "NO_POST_START_CONSUMPTION"
 		} else if lot.EligibilityStatus == "syncing" {
 			reasonCode = "LEDGER_SYNCING"
-		} else if lot.EligibilityStatus == "source_unavailable" {
-			reasonCode = "SOURCE_NOT_READY"
 		} else if lot.EligibilityStatus != "active" {
 			reasonCode = "LEDGER_FROZEN"
 		}
