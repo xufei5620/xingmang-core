@@ -2717,7 +2717,10 @@ td small {
   width: 100%;
   height: auto;
   min-height: 48px;
-  padding: 7px 10px;
+  /* The embedding platform pages float their own "新窗口打开" button over
+     the iframe's top-right corner. Reserve that corner so no interactive
+     or informational element of ours ever sits under the host overlay. */
+  padding: 7px 128px 7px 10px;
   display: flex;
   flex-direction: row;
   align-items: center;
