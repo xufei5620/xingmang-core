@@ -140,14 +140,15 @@ export function resolvePlatformSourceInstanceId(
 // EMBED_ALLOWED_PARENT_ORIGINS env var/doc entry, neither wired into any Go
 // or TypeScript code. What follows is therefore a new, narrow, same-origin
 // channel: a popup opened by this same page notifying *this page* (its
-// window.opener, from the popup's own point of view) that OIDC finished --
-// never a channel to whatever platform origin frames this page, which is a
-// separate concern (the platform-side EmbeddedConsoleFrame component,
-// XM-INVCON0, not this slice). Because the popup and the page that opened it
-// are always the same origin (invoice.solov.cc) regardless of what frames
-// the *iframe*, the only origin this channel ever needs to accept is this
-// page's own -- see isAdminAuthPopupCompleteMessage's callers in
-// AuthProvider.tsx.
+// window.opener, from the popup's own point of view) that OIDC finished.
+// This is a different channel from the cross-origin one further down this
+// file (this page notifying its *framing* console, via window.parent, of
+// its content height) -- that one now exists too (XM-INVCON0's
+// EmbeddedConsoleFrame is merged and listens for it), this one still
+// doesn't need it: the popup and the page that opened it are always the
+// same origin (invoice.solov.cc) regardless of what frames the iframe, so
+// the only origin this channel ever needs to accept is this page's own --
+// see isAdminAuthPopupCompleteMessage's callers in AuthProvider.tsx.
 
 export const ADMIN_AUTH_POPUP_MESSAGE = {
   source: "invoice-admin-embed-auth",
@@ -180,4 +181,42 @@ export function isAdminAuthPopupReturn(searchParams: URLSearchParams): boolean {
 export function withAdminAuthPopupReturnParam(returnTo: string): string {
   const separator = returnTo.includes("?") ? "&" : "?";
   return `${returnTo}${separator}${ADMIN_AUTH_POPUP_RETURN_PARAM}=1`;
+}
+
+// --- Height sync to the hosting console -------------------------------
+//
+// The platform side (XM-INVCON0, merged) sizes the iframe from a message
+// this page posts to its own window.parent -- the cross-origin channel the
+// popup-auth handshake above deliberately isn't. Exactly one parent origin
+// is ever valid to send this to: the same one this page's own
+// frame-ancestors CSP names (deploy/nginx/invoice.solov.cc.conf.template's
+// /admin location, and web/nginx.conf's matching @admin_spa block) -- never
+// "*", and never anything computed from the page's own embedding context
+// (there is no reliable way to read the framing origin from inside a
+// cross-origin iframe, nor should there be).
+
+export const XM_EMBED_CONSOLE_ORIGIN = "https://console.solov.cc";
+
+export interface XmEmbedHeightMessage {
+  type: "xm-embed";
+  version: 1;
+  kind: "height";
+  height: number;
+}
+
+export function buildXmEmbedHeightMessage(height: number): XmEmbedHeightMessage {
+  return { type: "xm-embed", version: 1, kind: "height", height };
+}
+
+// Height sync must run only for this admin embed, and only when this page
+// is actually framed -- never in standalone /admin (nothing to size for)
+// and never in the user embed (`?ui_mode=embedded`), which predates this
+// contract and has no listener for it. `isFramed` is the caller's own
+// `window.parent !== window` check, passed in rather than read here so this
+// stays a plain, environment-free predicate to unit test.
+export function shouldSyncEmbeddedAdminHeight(
+  embeddedAdminMode: boolean,
+  isFramed: boolean,
+): boolean {
+  return embeddedAdminMode && isFramed;
 }

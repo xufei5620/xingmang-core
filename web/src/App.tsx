@@ -71,10 +71,13 @@ import {
 } from "./lib/embedded-scope";
 import {
   appendEmbeddedAdminParams,
+  buildXmEmbedHeightMessage,
   isAdminNavItemVisible,
   parseEmbeddedAdminMode,
   parseEmbeddedAdminScope,
   resolvePlatformSourceInstanceId,
+  shouldSyncEmbeddedAdminHeight,
+  XM_EMBED_CONSOLE_ORIGIN,
   type AdminNavItemKey,
 } from "./lib/embedded-admin-scope";
 import { apiCapabilities, apiMode, invoiceApi } from "./lib/api";
@@ -179,6 +182,40 @@ function useEmbeddedAdminPlatformSourceInstanceId(): string | null {
     };
   }, [platform]);
   return sourceInstanceId;
+}
+
+// Posts this document's height to the hosting console (XM-INVCON0's
+// EmbeddedConsoleFrame, merged on the platform side) so it can size the
+// iframe: once right after mount, then again on every subsequent size
+// change, debounced ~100ms so a burst of layout changes (a page swap, data
+// loading in) collapses into one message instead of a flood. Gated by
+// shouldSyncEmbeddedAdminHeight so it only ever runs for this admin embed
+// while actually framed -- never standalone /admin, never the user embed,
+// and never posted at all (not even a single call) when neither holds.
+// Mounted once at the App root so it covers the whole embedded-admin
+// session regardless of which admin sub-page is showing, not re-created on
+// every route change.
+function useEmbeddedAdminHeightSync() {
+  useEffect(() => {
+    if (!shouldSyncEmbeddedAdminHeight(embeddedAdminMode, window.parent !== window)) return;
+    const sendHeight = () => {
+      window.parent.postMessage(
+        buildXmEmbedHeightMessage(document.documentElement.scrollHeight),
+        XM_EMBED_CONSOLE_ORIGIN,
+      );
+    };
+    sendHeight();
+    let debounceTimer: number | undefined;
+    const observer = new ResizeObserver(() => {
+      if (debounceTimer !== undefined) window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(sendHeight, 100);
+    });
+    observer.observe(document.documentElement);
+    return () => {
+      observer.disconnect();
+      if (debounceTimer !== undefined) window.clearTimeout(debounceTimer);
+    };
+  }, []);
 }
 
 type AppData = {
@@ -5037,6 +5074,10 @@ function App() {
     setToast({ message, tone });
     window.setTimeout(() => setToast(null), 3200);
   };
+  // Mounted at the root (not inside AuthenticatedApplication) so the console
+  // can size the iframe correctly even before login -- the hook itself is a
+  // no-op unless embedded-admin mode is on and the page is actually framed.
+  useEmbeddedAdminHeightSync();
   return (
     <AuthProvider>
       <ToastContext.Provider value={showToast}>

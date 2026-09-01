@@ -3,13 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   ADMIN_AUTH_POPUP_MESSAGE,
   appendEmbeddedAdminParams,
+  buildXmEmbedHeightMessage,
   isAdminAuthPopupCompleteMessage,
   isAdminAuthPopupReturn,
   isAdminNavItemVisible,
   parseEmbeddedAdminMode,
   parseEmbeddedAdminScope,
   resolvePlatformSourceInstanceId,
+  shouldSyncEmbeddedAdminHeight,
   withAdminAuthPopupReturnParam,
+  XM_EMBED_CONSOLE_ORIGIN,
 } from "./embedded-admin-scope";
 
 describe("parseEmbeddedAdminMode", () => {
@@ -226,5 +229,40 @@ describe("admin auth popup handshake", () => {
         new URLSearchParams("embedded_admin_auth_popup=0"),
       ),
     ).toBe(false);
+  });
+});
+
+describe("embedded admin height sync", () => {
+  it("builds the exact contract the console listens for", () => {
+    expect(buildXmEmbedHeightMessage(842)).toEqual({
+      type: "xm-embed",
+      version: 1,
+      kind: "height",
+      height: 842,
+    });
+  });
+
+  it("always targets the one approved console origin, never a wildcard", () => {
+    expect(XM_EMBED_CONSOLE_ORIGIN).toBe("https://console.solov.cc");
+    expect(XM_EMBED_CONSOLE_ORIGIN).not.toBe("*");
+  });
+
+  it("syncs only when embedded-admin mode is on and the page is actually framed", () => {
+    expect(shouldSyncEmbeddedAdminHeight(true, true)).toBe(true);
+  });
+
+  it("never syncs standalone admin, even if somehow framed", () => {
+    expect(shouldSyncEmbeddedAdminHeight(false, true)).toBe(false);
+  });
+
+  it("never syncs the user embed (embeddedAdminMode is false there)", () => {
+    // The user embed sets embeddedUserMode, not embeddedAdminMode -- from
+    // this function's point of view that is indistinguishable from
+    // standalone: embeddedAdminMode false either way.
+    expect(shouldSyncEmbeddedAdminHeight(false, true)).toBe(false);
+  });
+
+  it("never syncs when not actually framed, even in embedded-admin mode", () => {
+    expect(shouldSyncEmbeddedAdminHeight(true, false)).toBe(false);
   });
 });
