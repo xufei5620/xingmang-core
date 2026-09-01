@@ -18,6 +18,12 @@
 #   XM_WEB_OIDC_CLIENT_ID   oidc 时必填，例 xingmang-admin-web
 #                           必须与 platform-api 的 XM_OIDC_AUDIENCE 相同
 #   XM_WEB_OIDC_SCOPES      可选；留空由前端取 "openid profile email"
+#   XM_INVOICE_CONSOLE_ORIGIN 可选；开票控制台嵌入来源（CR-0005 平台线 i），
+#                           例 https://invoice.solov.cc（不含路径）。静态直传，
+#                           同 reqlog/CPA 先例——不像上面的 auth 三项那样互相
+#                           校验；这里只做直传 + 一句非致命提醒，真正「形状
+#                           对不对」由前端 runtimeConfig.ts 判断，缺省或形状
+#                           不对时三处开票页签按未配置处理，不拦容器启动
 #   XM_WEB_APP_CONFIG_PATH  可选；默认 /usr/share/nginx/html/app-config.js（本地验证用）
 #
 # 输出文件的形状（浏览器端 src/auth/runtimeConfig.ts 读它）：
@@ -28,6 +34,7 @@ mode="${XM_WEB_AUTH_MODE:-dev-header}"
 issuer="${XM_WEB_OIDC_ISSUER:-}"
 client_id="${XM_WEB_OIDC_CLIENT_ID:-}"
 scopes="${XM_WEB_OIDC_SCOPES:-}"
+invoice_console_origin="${XM_INVOICE_CONSOLE_ORIGIN:-}"
 out="${XM_WEB_APP_CONFIG_PATH:-/usr/share/nginx/html/app-config.js}"
 
 case "$mode" in
@@ -53,6 +60,14 @@ if [ "$mode" = "oidc" ]; then
   esac
 fi
 
+# 静态直传，不像上面的 oidc 三项那样致命校验：这里只提醒、不 exit 1——
+# 缺省或形状不对时前端 runtimeConfig.ts 会按未配置处理（三处开票页签显示
+# PageState kind=unavailable），拦启动反而会让一个可选功能挡住整个 web 容器
+case "$invoice_console_origin" in
+  ""|https://*) ;;
+  *) echo "[web-app-config] 警告：XM_INVOICE_CONSOLE_ORIGIN 不是 https:// 地址（$invoice_console_origin），前端会按未配置处理" >&2 ;;
+esac
+
 # 写进 JS 字符串字面量前做最小转义：去换行、转义反斜杠与双引号。
 # 这些值是运营填的**公开**配置（issuer / client id 不是秘密），转义只是防手滑
 # （值里带引号）把整个文件写成语法错误——那会让前端悄悄回落到 dev-header。
@@ -70,9 +85,12 @@ tmp="$out.tmp.$$"
   if [ -n "$scopes" ]; then
     echo "  \"oidcScopes\": \"$(js_string "$scopes")\","
   fi
+  if [ -n "$invoice_console_origin" ]; then
+    echo "  \"invoiceConsoleOrigin\": \"$(js_string "$invoice_console_origin")\","
+  fi
   echo "  \"generatedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
   echo "};"
 } > "$tmp"
 mv "$tmp" "$out"
 
-echo "[web-app-config] 已生成 $out：authMode=$mode issuer=${issuer:-<无>} clientId=${client_id:-<无>}"
+echo "[web-app-config] 已生成 $out：authMode=$mode issuer=${issuer:-<无>} clientId=${client_id:-<无>} invoiceConsoleOrigin=${invoice_console_origin:-<未配置>}"

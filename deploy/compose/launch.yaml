@@ -472,6 +472,11 @@ services:
       XM_WEB_AUTH_MODE: ${XM_WEB_AUTH_MODE:-dev-header}
       XM_WEB_OIDC_ISSUER: ${XM_WEB_OIDC_ISSUER:-${XM_OIDC_ISSUER:-}}
       XM_WEB_OIDC_CLIENT_ID: ${XM_WEB_OIDC_CLIENT_ID:-${XM_OIDC_AUDIENCE:-}}
+      # 开票控制台嵌入来源（CR-0005 平台线 i）。静态直传，同 reqlog/CPA 先例——
+      # 不是上面 auth 那种要互相校验的模式开关。留空时 Sub2API/NewAPI「支付与
+      # 财务 → 开票」与治理「跨平台财务 → 开票集成」三处都显示未配置，不渲染
+      # iframe；不会猜一个默认地址——开票系统部署在哪不是这个仓库该硬编码的事。
+      XM_INVOICE_CONSOLE_ORIGIN: ${XM_INVOICE_CONSOLE_ORIGIN:-}
     ports:
       # 这个发布口是给**服务器部署**用的。本开发机的宿主→容器端口转发被
       # 代理 TUN 劫持（SYN 停滞），从宿主浏览器访问多半不通——不是栈的问题，
