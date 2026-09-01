@@ -2815,6 +2815,30 @@ td small {
 .portal-embedded .eligibility-summary-card {
   margin-bottom: 12px;
 }
+.portal-embedded .embedded-account-badge {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 220px;
+  height: 30px;
+  padding: 0 10px;
+  gap: 5px;
+  border-radius: 8px;
+  background: #eef1f6;
+  color: #4b5568;
+  font-size: 11px;
+  font-weight: 500;
+}
+.portal-embedded .embedded-account-badge svg {
+  flex: none;
+  opacity: 0.65;
+}
+.portal-embedded .embedded-account-badge span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 @media (max-width: 480px) {
   .portal-embedded .sidebar {
@@ -2826,6 +2850,10 @@ td small {
   }
   .portal-embedded .nav-item-muted span {
     display: none;
+  }
+  .portal-embedded .embedded-account-badge {
+    max-width: 120px;
+    padding: 0 7px;
   }
   .portal-embedded .content {
     padding: 13px 9px 34px;

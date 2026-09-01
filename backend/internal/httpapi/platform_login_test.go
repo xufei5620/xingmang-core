@@ -183,6 +183,9 @@ func TestPlatformLoginSuccessIssuesSessionWithPlatformIdentity(t *testing.T) {
 	if user["platform"] != "sub2api" || user["id"] != "sub2api:555" {
 		t.Fatalf("unexpected session user: %+v", user)
 	}
+	if user["platform_user_id"] != "555" {
+		t.Fatalf("expected the session's platform_user_id to surface the authenticator's PlatformUserID: %+v", user)
+	}
 
 	if login, twoFA := sub2api.counts(); login != 1 || twoFA != 0 {
 		t.Fatalf("unexpected authenticator calls: login=%d twoFA=%d", login, twoFA)
@@ -429,6 +432,9 @@ func TestPlatformLoginSessionsAreIsolatedAcrossPlatformsAndAccounts(t *testing.T
 	}
 	if newUser["platform"] != "newapi" || newUser["id"] != "newapi:222" {
 		t.Fatalf("unexpected newapi session user: %+v", newUser)
+	}
+	if sub2User["platform_user_id"] != "111" || newUser["platform_user_id"] != "222" {
+		t.Fatalf("expected each session's platform_user_id to stay isolated to its own platform account: sub2=%+v new=%+v", sub2User, newUser)
 	}
 	if sub2User["id"] == newUser["id"] {
 		t.Fatalf("sub2api and newapi identities must never collapse onto the same local user")

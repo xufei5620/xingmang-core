@@ -30,6 +30,7 @@ const mockSession: AuthSession = {
     emailVerified: true,
     role: "admin",
     platform: null,
+    platformUserId: null,
   },
   csrfToken: "mock-csrf-token",
   adminStepUpRequired: false,

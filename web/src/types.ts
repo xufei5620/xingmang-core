@@ -55,6 +55,9 @@ export interface AuthUser {
   emailVerified: boolean;
   role: UserRole;
   platform: SourceType | null;
+  // Non-null only alongside `platform` (a platform-password session): the
+  // account's ID on that source platform, e.g. New API's numeric user ID.
+  platformUserId: string | null;
 }
 
 export interface PlatformLoginInput {
