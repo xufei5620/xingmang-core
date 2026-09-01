@@ -63,10 +63,12 @@ func (f *fakeClient) ChannelDirectory(ctx context.Context) (ManagedChannelDirect
 		if balance.TokenValid {
 			status = "active"
 		}
-		items = append(items, ManagedChannel{
+		item := ManagedChannel{
 			Snapshot: balance.Snapshot, ChannelID: balance.ChannelID, Name: balance.ChannelName,
 			Status: status, BalanceMinorUnits: &value, Currency: balance.Currency,
-		})
+		}
+		applyFakeCatalogFields(&item)
+		items = append(items, item)
 	}
 	reported := int64(len(items))
 	return ManagedChannelDirectory{
@@ -78,6 +80,77 @@ func (f *fakeClient) ChannelDirectory(ctx context.Context) (ManagedChannelDirect
 		CoveragePartial: f.opts.Partial,
 		Items:           items,
 	}, nil
+}
+
+// applyFakeCatalogFields 给固定的三条假渠道（ch-1/ch-2/ch-3，见
+// ChannelBalances）附上 XM-CHAN-FIELDS0 目录字段，覆盖三种真实组合：
+//
+//	ch-1  订阅型（oauth）+ 有 usage_window + 有 proxy + 有 upstream_multiplier
+//	ch-2  密钥型（apikey）+ 无 usage_window（任务要求：key 账号恒 null）
+//	ch-3  密钥型（apikey）+ 停用 + 大部分目录字段仍给（今日统计/容量与
+//	      启停状态无关——一个被停用的账号今天之前完全可能有过请求）
+//
+// 数值固定不随机，理由与既有 fakeOrders 系列同款注释一致：Fake 的意义是让
+// 上层不被真实凭据阻塞，不是模拟真实波动。
+func applyFakeCatalogFields(item *ManagedChannel) {
+	vendor := "anthropic"
+	kind := channelKindSubscription
+	capacityUsed, capacityLimit := int64(2), int64(5)
+	schedulingEnabled, schedulingPriority := true, int64(10)
+	todayRequests, todayCost, todayCurrency, todayScale := int64(842), int64(15_60), "CNY", 2
+	// 倍率与比例一律按 ppm（百万分之一）整数表达，不用 float64——与
+	// ErrorRatePPM/宪法 13 条同一条纪律，见 channel_directory.go 的字段注释。
+	rateMultiplierPPM := int64(1_000_000) // 1.0x
+	createdAt := item.Snapshot.ObservedAt.Add(-90 * 24 * time.Hour)
+	lastUsedAt := item.Snapshot.ObservedAt.Add(-5 * time.Minute)
+
+	var usageWindowRatioPPM *int64
+	var usageWindowResetsAt *time.Time
+	var proxyLabel *string
+	var upstreamMultiplierPPM *int64
+	var expiresAt *time.Time
+
+	switch item.ChannelID {
+	case "ch-1":
+		ratio := int64(420_000) // 0.42
+		resets := item.Snapshot.ObservedAt.Add(3 * time.Hour)
+		usageWindowRatioPPM, usageWindowResetsAt = &ratio, &resets
+		label := "hk-residential-01"
+		proxyLabel = &label
+		um := int64(1_100_000) // 1.1x
+		upstreamMultiplierPPM = &um
+	case "ch-2":
+		vendor, kind = "openai", channelKindUpstream
+		capacityUsed, capacityLimit = 1, 10
+		schedulingPriority = 20
+		rateMultiplierPPM = 1_200_000 // 1.2x
+	default: // ch-3
+		vendor, kind = "openai", channelKindUpstream
+		capacityUsed, capacityLimit = 0, 10
+		schedulingEnabled, schedulingPriority = false, 30
+		exp := item.Snapshot.ObservedAt.Add(-24 * time.Hour) // 已过期，与停用状态呼应
+		expiresAt = &exp
+	}
+
+	kindCopy := kind
+	item.Kind = &kindCopy
+	item.Vendor = &vendor
+	item.CapacityUsed = &capacityUsed
+	item.CapacityLimit = &capacityLimit
+	item.SchedulingEnabled = &schedulingEnabled
+	item.SchedulingPriority = &schedulingPriority
+	item.TodayRequests = &todayRequests
+	item.TodayCostMinorUnits = &todayCost
+	item.TodayCurrency = &todayCurrency
+	item.TodayScale = &todayScale
+	item.UsageWindowUsedRatioPPM = usageWindowRatioPPM
+	item.UsageWindowResetsAt = usageWindowResetsAt
+	item.ProxyLabel = proxyLabel
+	item.RateMultiplierPPM = &rateMultiplierPPM
+	item.UpstreamMultiplierPPM = upstreamMultiplierPPM
+	item.LastUsedAt = &lastUsedAt
+	item.CreatedAt = &createdAt
+	item.ExpiresAt = expiresAt
 }
 
 func (f *fakeClient) now() time.Time { return f.opts.Now().UTC() }
