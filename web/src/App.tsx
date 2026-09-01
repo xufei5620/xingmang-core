@@ -454,13 +454,6 @@ function PortalLayout({
           )}
         </nav>
 
-        {embedded && accountLabel && (
-          <div className="embedded-account-badge" title="当前登录账号">
-            <UserRound size={14} />
-            <span>{accountLabel}</span>
-          </div>
-        )}
-
         <div className="sidebar-spacer" />
         <div className="sidebar-security">
           <ShieldCheck size={18} />
@@ -483,6 +476,16 @@ function PortalLayout({
           <LogOut size={18} />
           <span>退出登录</span>
         </button>
+        {embedded && accountLabel && (
+          // Rightmost on purpose: the embedding platform pages float their
+          // own "新窗口打开" overlay over the iframe's top-right corner, and
+          // it was covering the logout button. The badge is display-only, so
+          // it is the element allowed to sit under that overlay.
+          <div className="embedded-account-badge" title="当前登录账号">
+            <UserRound size={14} />
+            <span>{accountLabel}</span>
+          </div>
+        )}
       </aside>
       {mobileOpen && (
         <button
