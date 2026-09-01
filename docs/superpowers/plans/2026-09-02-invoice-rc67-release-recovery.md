@@ -1,5 +1,10 @@
 # RC67 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC67 shipped at signed tag
+> `v0.1.0-rc67-signed` (`e391dc2`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-02-invoice-rc68-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC67 — the four scan-cycle coverage joins cast their TEXT side to uuid so they hit the mapping-table index (0.34ms vs 75ms per probe measured on production), collapsing a heavy account's first-login replay from hours to minutes with no schema change.
