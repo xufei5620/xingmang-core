@@ -335,8 +335,10 @@ task adopted for that reason.
   in this repo when run outside the acceptance line). Production
   verification against the real database is explicitly the acceptance
   line's job, not this task's; I never connected to any server.
-- **commits:** land on top of `25c8a0f` (this branch's prior HEAD), same
-  branch `ai/claude/XM-INV-AUTOLOGIN`, no new branch.
+- **commits:** `6841f58`, on top of `25c8a0f` (this branch's prior HEAD),
+  same branch `ai/claude/XM-INV-AUTOLOGIN`, no new branch. (This one-line
+  hash update is itself a small follow-up commit on top of `6841f58` --
+  same pattern as the auto-detect section's own header fix-up above.)
 - **dispatched as a higher-priority interrupt** of the auto-detect task
   above, mid-session, after the acceptance line's canary caught a real 403
   on a real account. I was handed the root cause pre-diagnosed and told not
