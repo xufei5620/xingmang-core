@@ -10,7 +10,7 @@ READY（待验收线审读、复跑并人工合入）
 
 ## commit
 
-十三个提交，最新为 `9d5c107`：
+十四个提交，最新为 `98343b9`：
 
 1. `1f8c834` refactor(admin-web): extract supplier-grain grouping for upstream registry
 2. `075ed4c` feat(nav): drop the standalone suppliers tab on Sub2API/NewAPI
@@ -25,9 +25,10 @@ READY（待验收线审读、复跑并人工合入）
 11. `ccb588a` feat(admin-web): add type badge and pending-field section to channel detail
 12. `edbe8d3` refactor(admin-web): drop the upstream-management anchor from the legacy redirect
 13. `9d5c107` docs(admin-ia): record the 07:20 supplementary ruling on §8.8
+14. `98343b9` docs(handoff): rewrite XM-CHAN-MERGE0 handoff for the 07:20 final state
 
 **⚠️ 提交 1-9 实现的是一个已经被推翻的中间设计**，读这份 handoff 之前请看下面
-「两条裁定、一次交付」这一节——本文档描述的是提交 10-13 落地之后的**最终状态**,
+「两条裁定、一次交付」这一节——本文档描述的是提交 10-14 落地之后的**最终状态**,
 不是提交 9 时的状态（提交 9 当时也写过一份 handoff，内容现在已经不对，被本文件
 取代）。
 
