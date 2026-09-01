@@ -1,6 +1,16 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { MemoryRouter } from "react-router";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { financeSubTab } from "./PlatformFinancePanel";
+
+function response(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response;
+}
 
 const ORIGIN = "https://invoice.example.test";
 
@@ -38,9 +48,39 @@ describe("financeSubTab · invoices（CR-0005）", () => {
     expect(screen.queryByTitle("开票")).toBeNull();
   });
 
-  it("其余子页签不受影响：Sub2API 的 orders 仍是既有占位", () => {
-    render(<>{financeSubTab("sub2api", "orders")}</>);
-    expect(screen.getByText("充值订单")).not.toBeNull();
+  it("其余子页签不受影响：Sub2API 的 orders 正常渲染充值订单台账（XM-PAY1）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(200, {
+            items: [],
+            next_cursor: "",
+            stats_by_status: {},
+            from: "2026-08-27",
+            to: "2026-08-27",
+            data_source: "sub2api-fake",
+            freshness: {
+              state: "fresh",
+              staleness_seconds: 1,
+              threshold_seconds: 60,
+              is_partial: false,
+              observed_at: "2026-08-27T10:00:00Z",
+              last_success: "2026-08-27T10:00:00Z",
+              last_error_code: "",
+            },
+          }),
+        ),
+      ),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <MemoryRouter initialEntries={["/platforms/sub2api?tab=finance&sub=orders"]}>
+        <QueryClientProvider client={queryClient}>{financeSubTab("sub2api", "orders")}</QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("这个窗口没有充值订单")).not.toBeNull();
+    vi.unstubAllGlobals();
   });
 
   it("认不出的子页签 id 仍回落 undefined，交给调用方处理", () => {

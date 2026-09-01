@@ -106,6 +106,9 @@ export interface MetricHistoryItem {
   /** null 表示上游没给观测时刻，只能用 synced_at 定位。 */
   observed_at: string | null;
   synced_at: string;
+  /** 逐点来源（后端 historyItem 顶部注释：一条曲线可能混着不同来源——
+   *  Fake 切 real、换实例都会在同一条线上换源，之前这里漏了这个字段）。 */
+  source: string;
   status: string;
   is_partial: boolean;
   watermark: string;

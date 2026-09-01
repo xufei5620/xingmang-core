@@ -72,6 +72,16 @@ type Order struct {
 	// UpstreamOrderRef 是上游自己生成的业务订单号（trade_no），
 	// 供人工核对时在上游后台按号查找。
 	UpstreamOrderRef string
+	// FeeMinorUnits 与 RefundAmountMinorUnits 恒为 nil（XM-PAY1 新增字段，
+	// 与 connectors/sub2api.Order 对称，供 httpapi 层统一投影两个平台）：
+	// model.TopUp 既没有第二个金额字段可供相减出手续费，也没有任何退款
+	// 字段/状态/函数（controller/topup.go、model/topup.go 全文核对，见本文件
+	// 顶部 DailyPaymentSummary.ByStatus 的同款说明）。nil 不是"这两个字段
+	// 恰好是 0"，是"这个上游压根没有这两个概念"——与 sub2api 侧
+	// RefundAmountMinorUnits 对每笔订单都给出真实数字（哪怕是 0）不是同一件
+	// 事，调用方不能把两边的 nil 与非 nil 混着比较着看。
+	FeeMinorUnits          *int64
+	RefundAmountMinorUnits *int64
 }
 
 // OrderStats 是若干订单的笔数与金额合计。

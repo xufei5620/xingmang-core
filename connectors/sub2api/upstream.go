@@ -1249,15 +1249,21 @@ type adminPaymentOrderItem struct {
 	CreatedAt    string    `json:"created_at"`
 }
 
-// orderRow 是 fetchOrders 的内部产出：公开的 Order 字段之外，多带
-// RefundAmountMinorUnits 与 FeeMinorUnits——公开的 Order 类型故意不含这两个
-// 字段（见 payments.go 的 DailyPaymentSummary 注释：逐笔明细不展开退款金额，
-// 只在按日汇总里用到），但 DailyPaymentSummary 的"refunded"桶与手续费合计
-// 需要它们，所以内部多带一份，不为了传两个数就去解两遍上游响应。
+// orderRow 是 fetchOrders 的内部产出：Order 之外，多带**未经门禁**的原始
+// rawRefundAmountMinorUnits/rawFeeMinorUnits——DailyPaymentSummary 的
+// "refunded"桶与手续费合计需要对**全部**候选订单无条件求和（包括那些在
+// Order.FeeMinorUnits 上按桶门禁被置 nil 的订单，见 payments.go 的
+// Order.FeeMinorUnits 注释），所以内部单独留一份不受门禁影响的原始值，
+// 不为了聚合就去解两遍上游响应。
+//
+// 故意不叫 RefundAmountMinorUnits/FeeMinorUnits（与 Order 内嵌字段同名）：
+// Go 允许外层字段遮蔽内嵌字段的同名字段，`row.FeeMinorUnits` 与
+// `row.Order.FeeMinorUnits` 会静默变成两个不同的东西，看代码的人很容易
+// 弄混（曾经就是这样，XM-PAY1 改名修掉）。
 type orderRow struct {
 	Order
-	RefundAmountMinorUnits int64
-	FeeMinorUnits          int64
+	rawRefundAmountMinorUnits int64
+	rawFeeMinorUnits          int64
 }
 
 // fetchOrders 翻页读取 [from, to] 闭区间（按 created_at）内、可选按 status
@@ -1378,20 +1384,36 @@ func decodeOrderRow(item adminPaymentOrderItem, createdAt time.Time, scale int) 
 		// FeeMinorUnits 的求和悄悄把别的订单的手续费抵消掉。
 		fee = 0
 	}
+	status := strings.ToUpper(strings.TrimSpace(item.Status))
+
+	// Order.FeeMinorUnits（对外公开的逐笔手续费，XM-PAY1）只在这笔订单落进
+	// succeeded/refunded 桶时才给出——与 fetchDailyPaymentSummary 聚合手续费
+	// 同一条闸（只对"钱真的动过"的订单求和），门禁逻辑不能有第二份。
+	var feeExposed *int64
+	if bucket, ok := paymentStatusBucket(status); ok &&
+		(bucket == PaymentStatusSucceeded || bucket == PaymentStatusRefunded) {
+		feeCopy := fee
+		feeExposed = &feeCopy
+	}
+	// Order.RefundAmountMinorUnits 对每一笔订单都给出，不受上面的门禁影响
+	// ——见 payments.go 该字段的注释。
+	refundExposed := refundAmount
 
 	return orderRow{
 		Order: Order{
-			OrderID:          strconv.FormatInt(id, 10),
-			CreatedAt:        createdAt,
-			Status:           strings.ToUpper(strings.TrimSpace(item.Status)),
-			AmountMinorUnits: amount,
-			Currency:         currency,
-			Method:           strings.TrimSpace(item.PaymentType),
-			UserRef:          maskUserRef(item.UserEmail, userID),
-			UpstreamOrderRef: strings.TrimSpace(item.OutTradeNo),
+			OrderID:                strconv.FormatInt(id, 10),
+			CreatedAt:              createdAt,
+			Status:                 status,
+			AmountMinorUnits:       amount,
+			Currency:               currency,
+			Method:                 strings.TrimSpace(item.PaymentType),
+			UserRef:                maskUserRef(item.UserEmail, userID),
+			UpstreamOrderRef:       strings.TrimSpace(item.OutTradeNo),
+			FeeMinorUnits:          feeExposed,
+			RefundAmountMinorUnits: &refundExposed,
 		},
-		RefundAmountMinorUnits: refundAmount,
-		FeeMinorUnits:          fee,
+		rawRefundAmountMinorUnits: refundAmount,
+		rawFeeMinorUnits:          fee,
 	}, nil
 }
 
@@ -1482,15 +1504,16 @@ func (c *client) fetchDailyPaymentSummary(ctx context.Context, op string, parsed
 		if bucket == PaymentStatusRefunded {
 			// 退款桶统计的是**实际退还金额**，不是原订单面值——两者对
 			// PARTIALLY_REFUNDED 从定义上就不同，见 payments.go 顶部的
-			// DailyPaymentSummary 注释。
-			amount = row.RefundAmountMinorUnits
+			// DailyPaymentSummary 注释。用未经门禁的原始值：这里就是在算
+			// "succeeded/refunded 桶"本身，门禁条件在这个循环里已经满足。
+			amount = row.rawRefundAmountMinorUnits
 		}
 		s := byStatus[bucket]
 		s.Count++
 		if row.Currency == c.currency {
 			s.AmountMinorUnits += amount
 			if bucket == PaymentStatusSucceeded || bucket == PaymentStatusRefunded {
-				feeTotal += row.FeeMinorUnits
+				feeTotal += row.rawFeeMinorUnits
 			}
 		} else {
 			currencyGap = true

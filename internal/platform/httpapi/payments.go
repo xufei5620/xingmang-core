@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -63,6 +64,12 @@ type PlatformOrderItem struct {
 	Method           string
 	UserRef          string
 	UpstreamOrderRef string
+	// FeeMinorUnits 与 RefundAmountMinorUnits（XM-PAY1）逐一对应连接器
+	// Order 类型的同名字段——nil 语义两边不同，见那两个字段各自的注释：
+	// 前者按桶门禁（只有 succeeded/refunded 才给），后者 Sub2API 恒给出、
+	// NewAPI 恒为 nil。这里原样透传，不在这一层再判断一次。
+	FeeMinorUnits          *int64
+	RefundAmountMinorUnits *int64
 }
 
 // PlatformOrderStat 是某个原始状态的笔数与金额合计（只在 Currency 对应的
@@ -84,6 +91,12 @@ type platformOrderItemBody struct {
 	Method           string     `json:"method"`
 	UserRef          string     `json:"user_ref"`
 	UpstreamOrderRef string     `json:"upstream_order_ref"`
+	// Fee 与 RefundAmount（XM-PAY1）总是与订单同币种——手续费和退款额从
+	// 不会用别的币种记账，因此不单独携带 currency 字段的另一份来源，直接
+	// 复用 item.Currency（见 nilableAmountBody）。MinorUnits 为 null 时前端
+	// 显示「未接入」，不是「¥0.00」（规格 §12）。
+	Fee          amountBody `json:"fee"`
+	RefundAmount amountBody `json:"refund_amount"`
 }
 
 func toPlatformOrderItemBody(item PlatformOrderItem) platformOrderItemBody {
@@ -98,7 +111,20 @@ func toPlatformOrderItemBody(item PlatformOrderItem) platformOrderItemBody {
 		Method:           item.Method,
 		UserRef:          item.UserRef,
 		UpstreamOrderRef: item.UpstreamOrderRef,
+		Fee:              nilableAmountBody(item.FeeMinorUnits, item.Currency),
+		RefundAmount:     nilableAmountBody(item.RefundAmountMinorUnits, item.Currency),
 	}
+}
+
+// nilableAmountBody 把逐笔订单里"可能给不出"的手续费/退款额转成
+// amountBody：nil 时给零值（MinorUnits 为 JSON null，与 toAmountBody 对
+// "未知" 的既有约定一致），非 nil 时用调用方传入的币种——手续费与退款额
+// 永远与订单本身同币种，不需要另外携带一份来源。
+func nilableAmountBody(minorUnits *int64, currency string) amountBody {
+	if minorUnits == nil {
+		return amountBody{}
+	}
+	return amountBody{MinorUnits: amountString(*minorUnits), Currency: currency}
 }
 
 // platformOrderStatBody 是某个原始状态的笔数与金额合计的对外表示。
@@ -299,4 +325,93 @@ func ListPlatformOrdersHandler(q PlatformOrdersQuerier) http.HandlerFunc {
 func amountString(minorUnits int64) *string {
 	s := strconv.FormatInt(minorUnits, 10)
 	return &s
+}
+
+// platformOrderDetailBody 是订单详情端点（XM-PAY1）的响应体。
+type platformOrderDetailBody struct {
+	Order      platformOrderItemBody `json:"order"`
+	From       string                `json:"from"`
+	To         string                `json:"to"`
+	DataSource string                `json:"data_source"`
+	Freshness  freshnessBody         `json:"freshness"`
+}
+
+// GetPlatformOrderHandler 按 ID 在给定窗口内定位单笔订单（XM-PAY1：订单
+// 详情页 `V_paymentDetail`/`V_refundDetail` 的数据来源）。
+//
+// 两个上游的逐笔订单列表端点都没有"按 ID 查一笔"的能力（见
+// contracts/connectors/payments.read.v1.md 的 OrderFilter 注释：From/To
+// 必须非零，没有无界查询这个选项），因此复用既有 ListOrders + 窗口参数，
+// 在窗口内的候选里找 ID 匹配的那一条——不新增 Querier 方法、不改连接器。
+//
+// 窗口默认值与 ListPlatformOrdersHandler 一致（都不传时是当前 UTC 业务日）；
+// 从"充值订单"/"退款与冲正"表格跳转时，前端应把该订单 CreatedAt 所在的
+// 业务日原样带上（?day=），保证同一天内点开的详情页总能命中。裸链接
+// （直接分享/收藏、没带 day）落到"今天"找不到是预期行为，不是 bug——与
+// ListOrders 本身"查询更早日期需要先翻过之后的订单"的已知限制同一条道理
+// （XM-PAY0 交接文档 risks 一节）。
+//
+// 找不到时诚实返回 404 + 已搜索的窗口，不当作 500，也不悄悄换一个窗口重试
+// 或回退到另一条订单（ADMIN-IA 交接文档 §8"不允许默默回退到第一条样例记录"
+// 同一条纪律，与 GetPlatformUserHandler 的 ErrNotFound 分支同款处理）。
+func GetPlatformOrderHandler(q PlatformOrdersQuerier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, ok := principal.FromContext(r.Context())
+		if !ok {
+			WriteError(w, r, action.NewError(action.CodePermissionDenied, "缺少身份", nil))
+			return
+		}
+		platform := chi.URLParam(r, "platform")
+		if platform != "sub2api" && platform != "newapi" {
+			WriteError(w, r, action.NewError(action.CodeNotRegistered, "平台不支持订单查询", nil))
+			return
+		}
+		orderID := strings.TrimSpace(chi.URLParam(r, "id"))
+		if orderID == "" {
+			WriteError(w, r, action.NewError(action.CodeInvalidParams, "订单 ID 不能为空", nil))
+			return
+		}
+		env, err := resolveEnvironment(r, p)
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		from, to, err := parseOrdersWindow(
+			r.URL.Query().Get("day"), r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+
+		result, err := q.ListOrders(r.Context(), PlatformOrdersInput{
+			Platform:    platform,
+			Environment: string(env),
+			From:        from,
+			To:          to,
+		})
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+
+		fromText := from.UTC().Format(platformOrdersDateLayout)
+		toText := to.UTC().Format(platformOrdersDateLayout)
+		for _, item := range result.Items {
+			if item.OrderID != orderID {
+				continue
+			}
+			WriteJSON(w, http.StatusOK, platformOrderDetailBody{
+				Order:      toPlatformOrderItemBody(item),
+				From:       fromText,
+				To:         toText,
+				DataSource: result.Source,
+				Freshness: platformOrdersFreshness(
+					result.ObservedAt, result.Watermark, result.IsPartial, time.Now().UTC()),
+			})
+			return
+		}
+
+		WriteError(w, r, action.NewError(action.CodeNotRegistered,
+			fmt.Sprintf("订单 %s 在 %s 至 %s 窗口内未找到", orderID, fromText, toText), nil))
+	}
 }

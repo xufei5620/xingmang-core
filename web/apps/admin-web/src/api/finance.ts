@@ -13,9 +13,18 @@
  *     前端必须把那个原因显示出来：一个没有解释的「—」会被读成 bug。
  */
 
-import { apiClient, type ApiClient } from "./client";
+import {
+  ApiError,
+  FeatureNotMountedError,
+  apiClient,
+  looksLikeUnmountedRoute,
+  type ApiClient,
+} from "./client";
 import { appApiConfig, type PlatformApiConfig } from "./config";
 import { executeAction, type ActionRun, type ListOptions } from "./platform";
+import type { AmountBody } from "./users";
+import type { FreshnessContract } from "@xingmang/ui-admin";
+import type { BadgeTone } from "@xingmang/ui-primitives";
 
 /** §13 的 `Money`：大整数按字符串传（超 2^53 不丢精度）。 */
 export interface Money {
@@ -816,6 +825,236 @@ export function accountRowType(accessMethod: string): { value: "subscription" | 
   return accessMethod === "subscription_account"
     ? { value: "subscription", label: "订阅账号" }
     : { value: "upstream", label: "上游渠道" };
+}
+
+// ============================================================================
+// XM-PAY1：payments.read.v1 逐笔订单查询（`contracts/connectors/
+// payments.read.v1.md`，后端见 internal/platform/httpapi/payments.go）
+//
+// 与上面两部分都不同层：看板供数是按业务日窗口聚合出来的投影，登记簿是
+// 上游账号本身的配置；这里是**逐笔可核对的原始台账**——"充值订单"/
+// "退款与冲正"页签，以及它们各自的详情页，直接消费这一段。
+//
+// 三条贯穿本节的纪律，都是后端形状的直接映射：
+//
+// 1. **金额是十进制字符串**（`amount.minor_units` 等），不是 JSON number：
+//    订单金额一旦超过 2^53 会在 JS 里静默丢精度（宪法 13 条）。
+// 2. **`fee`/`refund_amount` 可空，null ≠ 0**：`fee` 只在这笔订单落进
+//    succeeded/refunded 桶时才有值；`refund_amount` 在 Sub2API 上永远有值
+//    （未退款订单是已知的 0），在 NewAPI 上永远是 null（这个上游没有退款
+//    概念）——两边的 null 不是同一件事，界面判空时不能把它们混着看。
+// 3. **净额没有对应字段**：契约里压根不存在"逐笔净入账"这个概念（净现金流
+//    公式尚未确定，见 XM-PAY0 交接文档），界面上任何"净额"列都只能显示
+//    「未接入」，不能用 amount-fee 现算一个——那等于替后端做了一个它明确
+//    拒绝做的假设。
+// ============================================================================
+
+/** 一笔订单的查询投影（`GET /platforms/{platform}/orders` 的 `items[]`）。 */
+export interface PlatformOrderItem {
+  order_id: string;
+  created_at: string;
+  /** 上游原始状态字面量，不归一化——与 stats_by_status 的键同一个空间。 */
+  status: string;
+  amount: AmountBody;
+  method: string;
+  user_ref: string;
+  upstream_order_ref: string;
+  /** 手续费，仅 succeeded/refunded 桶给出（Sub2API），NewAPI 恒为空。 */
+  fee: AmountBody;
+  /** 退款额：Sub2API 每笔都给出（未退款是已知的 0），NewAPI 恒为空。 */
+  refund_amount: AmountBody;
+}
+
+export interface PlatformOrderStat {
+  count: number;
+  amount: AmountBody;
+}
+
+export interface PlatformOrdersPage {
+  items: PlatformOrderItem[];
+  /** 空串 = 已翻到底，不是 null（与用户清单同一条约定）。 */
+  next_cursor: string;
+  /** 键是上游**原始**状态字面量，不是归一化分桶——归一化分桶走
+   *  `sub2api.payments.daily`/`newapi.payments.daily` 指标（见 lib/metrics.ts
+   *  的 readPaymentsDailySummary），两个通道口径刻意不同。 */
+  stats_by_status: Record<string, PlatformOrderStat>;
+  from: string;
+  to: string;
+  data_source: string;
+  freshness: FreshnessContract;
+}
+
+export interface ListPlatformOrdersOptions extends ListOptions {
+  /** 单日简写，与 from/to 互斥。 */
+  day?: string;
+  from?: string;
+  to?: string;
+  /** 上游原始状态；空 = 不过滤。 */
+  status?: string;
+  /** 上一页 next_cursor 原样回传；不透明偏移量，不假设内部结构。 */
+  cursor?: string;
+  limit?: number;
+}
+
+const PAYMENTS_NOT_MOUNTED_DESCRIPTION =
+  "支付与财务的逐笔订单在当前环境未启用（XM_PLATFORM_PAYMENTS_MODE=off）。接入真实支付数据源后会自动出现，无需手动开启。";
+
+function ordersWindowParams(
+  options: Pick<ListPlatformOrdersOptions, "day" | "from" | "to">,
+): Record<string, string | undefined> {
+  return { day: options.day, from: options.from, to: options.to };
+}
+
+/** 逐笔订单列表（§13 的展示分页，Query 层的 keyset 游标）。 */
+export async function listPlatformOrders(
+  platform: string,
+  options: ListPlatformOrdersOptions = {},
+  client: ApiClient = apiClient,
+): Promise<PlatformOrdersPage> {
+  try {
+    const body = await client.get<Partial<PlatformOrdersPage>>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/orders`,
+      {
+        searchParams: {
+          ...ordersWindowParams(options),
+          ...(options.status ? { status: options.status } : {}),
+          ...(options.cursor ? { cursor: options.cursor } : {}),
+          ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    return {
+      items: body.items ?? [],
+      next_cursor: body.next_cursor ?? "",
+      stats_by_status: body.stats_by_status ?? {},
+      from: body.from ?? "",
+      to: body.to ?? "",
+      data_source: body.data_source ?? "",
+      freshness: body.freshness as FreshnessContract,
+    };
+  } catch (error) {
+    if (looksLikeUnmountedRoute(error)) {
+      throw new FeatureNotMountedError(error, PAYMENTS_NOT_MOUNTED_DESCRIPTION);
+    }
+    throw error;
+  }
+}
+
+/** 订单详情（`GET /platforms/{platform}/orders/{id}`）的响应体。 */
+export interface PlatformOrderDetail {
+  order: PlatformOrderItem;
+  /** 后端实际搜索过的窗口——找不到时前端据此说清"在哪个范围内没找到"。 */
+  from: string;
+  to: string;
+  data_source: string;
+  freshness: FreshnessContract;
+}
+
+export type PlatformOrderLookupResult =
+  | { kind: "found"; detail: PlatformOrderDetail }
+  | {
+      kind: "notFound";
+      /** 后端的安全文案（`action.Error.Message`），已经带上了搜索过的窗口
+       *  （例如"订单 X 在 2026-08-27 至 2026-08-27 窗口内未找到"），前端直接
+       *  展示即可，不需要另外拼一遍。 */
+      message: string;
+    };
+
+export interface GetPlatformOrderOptions extends ListOptions {
+  /** 建议总是带上：订单所在的业务日（从列表行的 created_at 取）。上游没有
+   *  "按 ID 查一笔"的能力，端点用这个窗口内翻页找——不带时退到"今天"，
+   *  裸链接/分享链接因此可能找不到较早的订单，这不是 bug（见
+   *  GetPlatformOrderHandler 的顶部注释）。 */
+  day?: string;
+  from?: string;
+  to?: string;
+}
+
+/** 按 ID 在给定窗口内查一笔订单；找不到时返回 `notFound`，不抛错也不回退到
+ *  另一条记录（ADMIN-IA 交接文档 §8）。整组端点未挂载时仍然抛
+ *  `FeatureNotMountedError`——那与"这一条没找到"是完全不同的两件事。 */
+export async function getPlatformOrder(
+  platform: string,
+  orderId: string,
+  options: GetPlatformOrderOptions = {},
+  client: ApiClient = apiClient,
+): Promise<PlatformOrderLookupResult> {
+  try {
+    const body = await client.get<PlatformOrderDetail>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/orders/${encodeURIComponent(orderId)}`,
+      {
+        searchParams: ordersWindowParams(options),
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    return { kind: "found", detail: body };
+  } catch (error) {
+    if (looksLikeUnmountedRoute(error)) {
+      throw new FeatureNotMountedError(error, PAYMENTS_NOT_MOUNTED_DESCRIPTION);
+    }
+    // 结构化的"没找到"：GetPlatformOrderHandler 用 ACTION_NOT_REGISTERED +
+    // 安全文案区分"这一条没找到"与"整组端点没挂载"（上面那支已经先接住了
+    // 后者），只有前者才落到这里——不把其它 404 也悄悄吞成"未找到"。
+    if (error instanceof ApiError && error.status === 404) {
+      return { kind: "notFound", message: error.message };
+    }
+    throw error;
+  }
+}
+
+/** 归一化的四个资金桶——与 sub2api.payments.daily/newapi.payments.daily 指标、
+ *  `connectors/{sub2api,newapi}.PaymentStatus*` 常量同一空间。 */
+export const PAYMENT_BUCKET_LABELS: Record<string, string> = {
+  succeeded: "成功到账",
+  pending: "待处理",
+  failed: "失败",
+  refunded: "退款与冲正",
+};
+
+const PAYMENT_STATUS_DISPLAY: Record<string, { label: string; tone: BadgeTone }> = {
+  // Sub2API（原始状态，大写）
+  PENDING: { label: "待处理", tone: "warning" },
+  PAID: { label: "已支付", tone: "success" },
+  RECHARGING: { label: "入账中", tone: "success" },
+  COMPLETED: { label: "已完成", tone: "success" },
+  EXPIRED: { label: "已过期", tone: "neutral" },
+  CANCELLED: { label: "已取消", tone: "neutral" },
+  FAILED: { label: "失败", tone: "danger" },
+  REFUND_REQUESTED: { label: "退款申请中", tone: "warning" },
+  REFUNDING: { label: "退款处理中", tone: "warning" },
+  REFUND_PENDING: { label: "退款待处理", tone: "warning" },
+  PARTIALLY_REFUNDED: { label: "部分退款", tone: "warning" },
+  REFUNDED: { label: "已退款", tone: "neutral" },
+  REFUND_FAILED: { label: "退款失败", tone: "danger" },
+  // NewAPI（原始状态，小写）
+  SUCCESS: { label: "已到账", tone: "success" },
+};
+
+/** 上游原始状态 → 展示口径。认不出的枚举值原样显示 + 中性色，不猜
+ *  （与 describeAccessMethod 同一条纪律：前端不认识不等于上游给错了）。 */
+export function describePaymentStatus(rawStatus: string): { label: string; tone: BadgeTone } {
+  const key = rawStatus.toUpperCase().trim();
+  return PAYMENT_STATUS_DISPLAY[key] ?? { label: rawStatus || "状态未知", tone: "neutral" };
+}
+
+/** 退款生命周期状态集合（Sub2API 专用，逐字抄自 payments.read.v1 契约的
+ *  paymentStatusBucket 判据）：这些原始状态归一化后落进 refunded 桶。
+ *  "退款与冲正"页签用它从 ListOrders 结果里挑行——不重新发一次请求，
+ *  也不新增一个只按分桶过滤的端点。 */
+export const REFUND_LIFECYCLE_STATUSES: ReadonlySet<string> = new Set([
+  "REFUND_REQUESTED",
+  "REFUNDING",
+  "REFUND_PENDING",
+  "REFUND_FAILED",
+  "PARTIALLY_REFUNDED",
+  "REFUNDED",
+]);
+
+/** 平台是否有"退款与冲正"这一格。**只有 Sub2API**：NewAPI 没有退款概念
+ *  （model/topup.go 全文核对，见 XM-PAY0 交接文档），不是"还没做"。 */
+export function platformHasRefunds(serviceType: string): boolean {
+  return serviceType === "sub2api";
 }
 
 /** 凭据的展示口径。**永远只说状态，不显示值**（ADR-014、宪法 7 条）。 */

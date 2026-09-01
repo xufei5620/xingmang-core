@@ -36,6 +36,9 @@ const METRIC_LABELS: Record<string, string> = {
   "newapi.requests.daily": "NewAPI 调用量（日）",
   "newapi.requests.success_rate_24h": "NewAPI 成功率（24h）",
   "newapi.requests.trend_7d": "NewAPI 调用量趋势（7 日）",
+  // XM-PAY1：资金概览卡消费的按日按状态资金汇总（XM-PAY0 新增指标）。
+  "sub2api.payments.daily": "Sub2API 支付日汇总",
+  "newapi.payments.daily": "NewAPI 支付日汇总",
 };
 
 /** 没有可信数值时主位显示的占位符。 */
@@ -660,3 +663,148 @@ export function metricLabel(metricKey: string): string {
 
 /** 渠道余额指标的键。渠道明细页要从指标列表里挑出这一条。 */
 export const CHANNEL_BALANCE_METRIC_KEY = "sub2api.channels.balance";
+
+// --- 支付按日按状态资金汇总（XM-PAY1，消费 XM-PAY0 新增的 sub2api.payments.daily
+// / newapi.payments.daily）---
+
+/** 某个归一化分桶的笔数与金额（`by_status` 的一条）。null 表示这个字段本身
+ *  不是合法整数——与"这个桶没出现"是两回事：后者体现为 byStatus 里压根
+ *  没有这个键（见 DailyPaymentSummary.ByStatus 的契约注释："上游这一天
+ *  没有落进某个桶的订单，那个桶的键就不出现"，前端解析原样保留这个空缺，
+ *  不补一个 {count:0, amountMinor:0n} 冒充"确认过是零"）。 */
+export interface PaymentBucketAmount {
+  count: bigint | null;
+  amountMinor: bigint | null;
+}
+
+/** 资金概览卡消费的整份指标 value（见 payments.read.v1 契约"ops.metric_
+ *  observation 观测"一节的 JSON 示例）。 */
+export interface PaymentsDailySummary {
+  /** 业务日，null 表示字段缺失或形状不对（不猜）。 */
+  day: string | null;
+  /** 本次汇总的合约币种；空串表示上游没给。 */
+  currency: string;
+  /** 键是四个归一化分桶之一；上游这天没有的桶，键就不出现。 */
+  byStatus: Partial<Record<"succeeded" | "pending" | "failed" | "refunded", PaymentBucketAmount>>;
+  /** null 表示未知（规格 §12），不是 0——两平台的语义都可能是"确实不知道"。 */
+  feeMinorUnits: bigint | null;
+  /** 恒为 null：净现金流公式尚未确定，见 XM-PAY0 交接文档，前端不现算。 */
+  netMinorUnits: bigint | null;
+}
+
+function readPaymentBucketAmount(raw: unknown): PaymentBucketAmount | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  return {
+    count: toIntegerValue(record["count"]),
+    amountMinor: toIntegerValue(record["amount_minor_units"]),
+  };
+}
+
+/** 解析 sub2api.payments.daily / newapi.payments.daily 指标的 value。
+ *
+ *  与本文件其余 read* 函数同一条纪律：只做形状解析，不做业务判断——
+ *  「NewAPI 的 refunded 桶永远不出现」这类判断留给消费方（组件层），
+ *  这里原样把"这个桶存在与否"透传出去。 */
+export function readPaymentsDailySummary(
+  value: Record<string, unknown> | null,
+): PaymentsDailySummary {
+  const day = readString(value ?? {}, "day") ?? null;
+  const currency = currencyOf(value ?? {});
+  const byStatus: PaymentsDailySummary["byStatus"] = {};
+  const rawByStatus = value?.["by_status"];
+  if (rawByStatus && typeof rawByStatus === "object") {
+    for (const bucket of ["succeeded", "pending", "failed", "refunded"] as const) {
+      const parsed = readPaymentBucketAmount((rawByStatus as Record<string, unknown>)[bucket]);
+      if (parsed) byStatus[bucket] = parsed;
+    }
+  }
+  return {
+    day,
+    currency,
+    byStatus,
+    feeMinorUnits: toIntegerValue(value?.["fee_minor_units"]),
+    netMinorUnits: toIntegerValue(value?.["net_minor_units"]),
+  };
+}
+
+/** 「月累计」（NewAPI「资金与订单」四格之一）的聚合结果。 */
+export interface MonthToDateSummary {
+  /** null = 一天可用数据都没有，不是 0。 */
+  amountMinor: bigint | null;
+  /** 缺席数据时空串——没有任何一天给出过合约币种。 */
+  currency: string;
+  /** 落在 [monthStart, today] 且拿到健康快照的天数。 */
+  coveredDays: number;
+  /** 月初到目标日应有的天数（含首尾）。 */
+  totalDays: number;
+  /** coveredDays === totalDays 且没有任何一天带 is_partial 才算完整。 */
+  complete: boolean;
+}
+
+/** `YYYY-MM-DD` 两个日期（同月）之间的天数，含首尾。用字符串直接算而不经过
+ *  `Date` 减法：两者都已经是业务日文本，字符串切片比再解析一次时区更不会漂。 */
+function daysBetweenInclusive(from: string, to: string): number {
+  const fromMs = Date.parse(`${from}T00:00:00Z`);
+  const toMs = Date.parse(`${to}T00:00:00Z`);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) return 0;
+  return Math.round((toMs - fromMs) / 86_400_000) + 1;
+}
+
+/** 把 `/api/v1/metrics/history` 返回的 `sub2api.payments.daily`/
+ *  `newapi.payments.daily` 历史观测，聚合成 [monthStart, today] 区间内的
+ *  succeeded 桶月累计。
+ *
+ *  历史查询服务端硬顶 7 天（`maxHistoryHours=168`，见
+ *  internal/platform/httpapi/metrics_history.go 顶部注释：不让这个端点被
+ *  当成数据导出口）——当 monthStart 早于 7 天前，月初到那一刻之间天然没有
+ *  样本可用，`complete` 会据此为 false，调用方必须把这件事说清楚，不能只给
+ *  一个看起来完整的数字（规格 §12）。
+ *
+ *  逐日判据与单日的 `BucketCard` 完全一致，只是应用在每一天上而不是一天：
+ *  `status !== "ok"`（这一天同步本身失败）的样本整天跳过、不计入 coveredDays；
+ *  桶键缺席且 `is_partial` 为真时同样跳过（说不清是真的零还是漏了）；
+ *  其余情况计入 coveredDays 并累加金额（桶键缺席且非 partial 是契约里"确认
+ *  过的零"，加 0）。同一天可能同步多次（`synced_at` 不同），按最新的一条为准。 */
+export function monthToDateSucceeded(
+  items: readonly MetricHistoryItem[],
+  monthStart: string,
+  today: string,
+): MonthToDateSummary {
+  const totalDays = daysBetweenInclusive(monthStart, today);
+
+  const latestByDay = new Map<string, { item: MetricHistoryItem; syncedAtMs: number }>();
+  for (const item of items) {
+    const day = readString(item.value ?? {}, "day");
+    if (!day || day < monthStart || day > today) continue;
+    const syncedAtMs = Date.parse(item.synced_at);
+    if (!Number.isFinite(syncedAtMs)) continue;
+    const existing = latestByDay.get(day);
+    if (!existing || syncedAtMs > existing.syncedAtMs) {
+      latestByDay.set(day, { item, syncedAtMs });
+    }
+  }
+
+  let amount = 0n;
+  let currency = "";
+  let coveredDays = 0;
+  let anyDayPartial = false;
+  for (const { item } of latestByDay.values()) {
+    if (item.status !== "ok") continue;
+    const summary = readPaymentsDailySummary(item.value);
+    const bucket = summary.byStatus.succeeded ?? null;
+    if (bucket === null && item.is_partial) continue; // 说不清是真的零还是漏了
+    coveredDays += 1;
+    if (summary.currency) currency = currency || summary.currency;
+    if (bucket) amount += bucket.amountMinor ?? 0n;
+    if (item.is_partial) anyDayPartial = true;
+  }
+
+  return {
+    amountMinor: coveredDays === 0 ? null : amount,
+    currency,
+    coveredDays,
+    totalDays,
+    complete: coveredDays === totalDays && !anyDayPartial,
+  };
+}

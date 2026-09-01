@@ -1,14 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { FreshnessBadge, FreshnessNote, MetricCard, PeriodControls, StatTile } from "@xingmang/ui-admin";
+import { FreshnessBadge, FreshnessNote, MetricCard, PeriodControls } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { Fragment, useMemo, useState } from "react";
 import { listChannelSummaries } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
 import { aggregateChannelMoney, aggregateFailureText, aggregateFreshness, periodRangeFor, type ChannelMoneyAggregate, type FinancePeriodMode } from "../lib/financeOverview";
 import { ApiStateView } from "./ApiStateView";
+import { PaymentSummaryCards } from "./PaymentSummaryCards";
 
 const PAYMENT_CONNECTOR_NOTE = "支付 Connector（M3）未接入";
-const PAYMENT_CARD_LABELS = ["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费", "净现金流入"];
 
 function todayDateOnly(): string {
   const now = new Date();
@@ -22,10 +22,6 @@ function aggregateText(aggregate: ChannelMoneyAggregate): string {
 function coverageText(aggregate: ChannelMoneyAggregate): string {
   const { completeRows, totalRows } = aggregate.coverage;
   return totalRows > 0 && completeRows === totalRows ? `覆盖完整 ${completeRows}/${totalRows} 条渠道` : `覆盖不全 ${completeRows}/${totalRows} 条渠道`;
-}
-
-function PaymentUnavailableCard({ label }: { label: string }) {
-  return <StatTile label={label} value="—" unavailable status={<Badge tone="neutral">未接入</Badge>} note={`${PAYMENT_CONNECTOR_NOTE}；接入逐笔支付事件后提供此区间汇总。`} />;
 }
 
 function SourcedMetric({ label, aggregate }: { label: string; aggregate: ChannelMoneyAggregate }) {
@@ -72,8 +68,8 @@ export function Sub2ApiFinanceOverview({ initialDate }: { initialDate?: string }
     />
     <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
       <div className="flex flex-col gap-4">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          {PAYMENT_CARD_LABELS.map((label) => <PaymentUnavailableCard key={label} label={label} />)}
+        <PaymentSummaryCards platform="sub2api" range={range} />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <SourcedMetric label="使用收入" aggregate={revenue} />
           <SourcedMetric label="渠道毛利" aggregate={profit} />
         </div>

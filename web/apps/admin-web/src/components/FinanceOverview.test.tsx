@@ -209,10 +209,21 @@ describe("Sub2ApiFinanceOverview", () => {
   });
 
   it("renders the period control and eight finance cards in the approved order", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(fakeResponse({ items: [rawChannel(channel())] }))));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) =>
+        Promise.resolve(
+          fakeResponse(String(input).includes("/metrics") ? { items: [] } : { items: [rawChannel(channel())] }),
+        ),
+      ),
+    );
     renderOverview();
 
     await screen.findAllByText("$12.35");
+    // 资金概览卡是一条独立的 /api/v1/metrics Query，与渠道数据不是同一个
+    // Promise 链；等最后一张卡（净现金流入）出现，保证两条 Query 都已落定
+    // 再读取整页的标题顺序，否则偶发只等到渠道数据、payment 卡还没挂载。
+    await screen.findByRole("heading", { name: "净现金流入", level: 3 });
     expect(screen.getByLabelText("统计日期")).toBeTruthy();
     expect(screen.getByRole("button", { name: "日", pressed: true })).toBeTruthy();
     expect(
@@ -223,17 +234,27 @@ describe("Sub2ApiFinanceOverview", () => {
     ).toEqual(["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费", "净现金流入", "使用收入", "渠道毛利"]);
   });
 
-  it("keeps all six payment cards explicitly unavailable and never fabricates event amounts", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(fakeResponse({ items: [rawChannel(channel())] }))));
+  it("keeps all six payment cards explicitly unavailable/not-applicable and never fabricates event amounts", async () => {
+    // 没有 sub2api.payments.daily 指标（/api/v1/metrics 返回空），资金概览卡
+    // 因此走"未接入"分支——与渠道数据是两条独立的 Query，各自的假 fetch
+    // 都要能正确响应，不能靠同一个通配响应蒙混过去。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) =>
+        Promise.resolve(
+          fakeResponse(String(input).includes("/metrics") ? { items: [] } : { items: [rawChannel(channel())] }),
+        ),
+      ),
+    );
     renderOverview();
 
     await screen.findAllByText("$12.35");
     for (const label of ["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费", "净现金流入"]) {
-      const card = screen.getByRole("heading", { name: label, level: 3 }).closest("article");
+      const heading = await screen.findByRole("heading", { name: label, level: 3 });
+      const card = heading.closest("article");
       expect(card).not.toBeNull();
       expect(within(card!).getByText("未接入")).toBeTruthy();
       expect(within(card!).getByText("—")).toBeTruthy();
-      expect(within(card!).getByText(/支付 Connector（M3）未接入/)).toBeTruthy();
     }
     expect(screen.getByRole("table", { name: "最近事件" })).toBeTruthy();
     expect(screen.getByText(/支付事件端点尚未接入/)).toBeTruthy();

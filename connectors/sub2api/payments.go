@@ -69,6 +69,21 @@ type Order struct {
 	// 供人工核对时在上游后台按号查找——不是网关自己的 trade no
 	// （payment_trade_no），后者只在网关自己的对账台上有意义。
 	UpstreamOrderRef string
+	// FeeMinorUnits 是这一笔订单的支付手续费（pay_amount-amount），
+	// **只在这笔订单的钱真的动过时才公开**：与 DailyPaymentSummary 聚合
+	// 手续费同一条闸（只对 succeeded/refunded 两个归一化桶求和，见
+	// paymentStatusBucket 的注释）——pending/failed 订单的 pay_amount-amount
+	// 只是算术产物，不是已发生的手续费，公开出去会被误读成"这笔待处理订单
+	// 已经扣了手续费"。nil 表示"这笔订单当前状态下不适用"，不是 0
+	// （规格 §12）。XM-PAY1 新增：逐笔明细此前不展开手续费，见本文件旧注释
+	// （已随本次改动一并更新）。
+	FeeMinorUnits *int64
+	// RefundAmountMinorUnits 是上游 refund_amount 字段，**对每一笔订单都
+	// 公开**：这个字段本身永远存在且有意义——未退款订单上就是真实的 0，
+	// 不是"不知道"，与 FeeMinorUnits 的按桶门禁不是同一条规则（退款金额
+	// 不需要"这笔钱是否已结算"这个前提，它只是上游记录的一个数字字段）。
+	// XM-PAY1 新增，供"退款与冲正"页签按笔展示退款额。
+	RefundAmountMinorUnits *int64
 }
 
 // OrderStats 是若干订单的笔数与金额合计。

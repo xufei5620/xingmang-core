@@ -190,6 +190,7 @@ const historyBody = {
   items: [0, 1, 2, 3].map((i) => ({
     observed_at: `2026-08-26T0${i}:00:00Z`,
     synced_at: `2026-08-26T0${i}:05:00Z`,
+    source: "sub2api-prod",
     status: i === 2 ? "failed" : "ok",
     is_partial: false,
     watermark: `wm-${i}`,
@@ -479,6 +480,30 @@ function okHandler(url: string): Response {
     return fakeResponse(200, userDetailBody(url.includes("/platforms/newapi/") ? "newapi" : "sub2api"));
   }
   if (url.includes("/users")) return fakeResponse(200, usersBody);
+  // XM-PAY1：逐笔订单，默认空页——单条详情先判（路径比列表多一段），
+  // 否则列表分支会先吞掉详情请求。
+  if (/\/api\/v1\/platforms\/[^/]+\/orders\/[^/?]+/.test(url)) {
+    return fakeResponse(404, { error: { code: "ACTION_NOT_REGISTERED", message: "未找到订单" } });
+  }
+  if (/\/api\/v1\/platforms\/[^/]+\/orders/.test(url)) {
+    return fakeResponse(200, {
+      items: [],
+      next_cursor: "",
+      stats_by_status: {},
+      from: "2026-08-28",
+      to: "2026-08-28",
+      data_source: "fake",
+      freshness: {
+        state: "fresh",
+        staleness_seconds: 5,
+        threshold_seconds: 60,
+        is_partial: false,
+        observed_at: "2026-08-28T10:00:00Z",
+        last_success: "2026-08-28T10:00:00Z",
+        last_error_code: "",
+      },
+    });
+  }
   if (url.startsWith("/api/v1/alerts")) return fakeResponse(200, alertsBody);
   if (url.startsWith("/api/v1/audit/events"))
     return fakeResponse(200, { items: [auditEvent], next_before: 0 });
@@ -1906,10 +1931,20 @@ describe("支付与财务页签（框架）", () => {
     expect(screen.getByRole("tab", { name: "开票" })).not.toBeNull();
   });
 
-  it("NewAPI 资金与订单仍走既有概览，不出现 Sub2API 的资金概览八卡", async () => {
+  it("NewAPI 资金与订单保留原型的四格布局（区间到账/区间退款/月累计/支付失败），不是 Sub2API 的六卡", async () => {
     renderRoute("/platforms/newapi?tab=finance&sub=orders");
-    expect(await screen.findByText("暂无本平台的资金类指标")).not.toBeNull();
-    expect(screen.queryByRole("heading", { name: "区间成功到账", level: 3 })).toBeNull();
+    for (const label of ["区间到账", "区间退款", "月累计", "支付失败"]) {
+      expect(await screen.findByRole("heading", { name: label, level: 3 })).not.toBeNull();
+    }
+    // Sub2API 六卡独有的标签不该出现在 NewAPI 上
+    for (const label of ["区间成功到账", "退款与冲正", "支付手续费", "净现金流入"]) {
+      expect(screen.queryByRole("heading", { name: label, level: 3 })).toBeNull();
+    }
+    const refundHeading = screen.getByRole("heading", { name: "区间退款", level: 3 });
+    expect(within(refundHeading.closest("article") as HTMLElement).getByText("不适用")).not.toBeNull();
+    // Sub2API 独有的「充值订单/退款与冲正」两个独立页签不该出现在 NewAPI 上——
+    // NewAPI 的等价内容都在这一个「资金与订单」页签里。
+    expect(screen.queryByRole("tab", { name: "充值订单" })).toBeNull();
   });
 
   it("§9.8 的硬口径印在界面上：充值不是收入", async () => {

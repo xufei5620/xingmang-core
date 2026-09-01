@@ -5,9 +5,11 @@ import {
   metricLabel,
   metricPrimaryValue,
   metricSeriesValue,
+  monthToDateSucceeded,
   presentMetric,
   readChannelRows,
   readNewApiChannelRows,
+  readPaymentsDailySummary,
   readRequestsTrendDays,
   readSub2ApiChannelStatusRows,
   toSparkSamples,
@@ -239,6 +241,7 @@ describe("toSparkSamples：历史观测 → 趋势样本", () => {
     return {
       observed_at: "2026-08-26T10:00:00Z",
       synced_at: "2026-08-26T10:05:00Z",
+      source: "sub2api-prod",
       status: "ok",
       is_partial: false,
       watermark: "wm-1",
@@ -667,5 +670,175 @@ describe("Sub2API 渠道状态（XM-OVERVIEW-UI）", () => {
     expect(shown.label).toBe("Sub2API 渠道状态");
     expect(shown.primary).toBe("3 个渠道");
     expect(shown.secondary).toBe("可用 2 · 不可用 1");
+  });
+});
+
+describe("readPaymentsDailySummary（XM-PAY1）：sub2api.payments.daily / newapi.payments.daily", () => {
+  it("解析完整形状：四个桶、手续费、净现金流", () => {
+    const summary = readPaymentsDailySummary({
+      day: "2026-08-29",
+      currency: "USD",
+      by_status: {
+        succeeded: { count: 42, amount_minor_units: 418000 },
+        pending: { count: 3, amount_minor_units: 9900 },
+        failed: { count: 1, amount_minor_units: 3000 },
+        refunded: { count: 1, amount_minor_units: 20200 },
+      },
+      fee_minor_units: 20000,
+      net_minor_units: null,
+    });
+    expect(summary.day).toBe("2026-08-29");
+    expect(summary.currency).toBe("USD");
+    expect(summary.byStatus.succeeded).toEqual({ count: 42n, amountMinor: 418000n });
+    expect(summary.byStatus.refunded).toEqual({ count: 1n, amountMinor: 20200n });
+    expect(summary.feeMinorUnits).toBe(20000n);
+    expect(summary.netMinorUnits).toBeNull();
+  });
+
+  it("上游这天没有落进某个桶时，那个桶的键就不出现——不是 count:0 的对象", () => {
+    // 契约原话："上游这一天没有落进某个桶的订单，那个桶的键就不出现"
+    // （payments.read.v1.md）。NewAPI 的 refunded 桶恒不出现是这条规则的
+    // 一个特例，不是单独的逻辑分支。
+    const summary = readPaymentsDailySummary({
+      day: "2026-08-29",
+      currency: "USD",
+      by_status: { succeeded: { count: 5, amount_minor_units: 1000 } },
+      fee_minor_units: null,
+      net_minor_units: null,
+    });
+    expect(summary.byStatus.refunded).toBeUndefined();
+    expect(summary.byStatus.pending).toBeUndefined();
+    expect(summary.byStatus.failed).toBeUndefined();
+  });
+
+  it("fee_minor_units/net_minor_units 为 null 时保持 null，不折成 0", () => {
+    const summary = readPaymentsDailySummary({
+      day: "2026-08-29",
+      currency: "USD",
+      by_status: {},
+      fee_minor_units: null,
+      net_minor_units: null,
+    });
+    expect(summary.feeMinorUnits).toBeNull();
+    expect(summary.netMinorUnits).toBeNull();
+  });
+
+  it("value 为 null（从未采集）时给出全空但不抛错的形状", () => {
+    const summary = readPaymentsDailySummary(null);
+    expect(summary.day).toBeNull();
+    expect(summary.currency).toBe("");
+    expect(summary.byStatus).toEqual({});
+    expect(summary.feeMinorUnits).toBeNull();
+    expect(summary.netMinorUnits).toBeNull();
+  });
+
+  it("by_status 形状不对（不是对象）时不抛错，退回空", () => {
+    const summary = readPaymentsDailySummary({ day: "2026-08-29", by_status: "not-an-object" });
+    expect(summary.byStatus).toEqual({});
+  });
+});
+
+describe("monthToDateSucceeded（XM-PAY1）：/metrics/history 聚合月累计", () => {
+  function historyItem(day: string, over: Partial<MetricHistoryItem> = {}): MetricHistoryItem {
+    return {
+      observed_at: `${day}T10:00:00Z`,
+      synced_at: `${day}T10:00:00Z`,
+      source: "newapi-prod",
+      status: "ok",
+      is_partial: false,
+      watermark: `day:${day}`,
+      last_error_code: "",
+      value: {
+        day,
+        currency: "USD",
+        by_status: { succeeded: { count: 2, amount_minor_units: 1000 } },
+        fee_minor_units: null,
+        net_minor_units: null,
+      },
+      ...over,
+    };
+  }
+
+  it("完整覆盖时逐日累加，标记 complete", () => {
+    const items = [historyItem("2026-08-01"), historyItem("2026-08-02"), historyItem("2026-08-03")];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-03");
+    expect(summary.amountMinor).toBe(3000n);
+    expect(summary.currency).toBe("USD");
+    expect(summary.coveredDays).toBe(3);
+    expect(summary.totalDays).toBe(3);
+    expect(summary.complete).toBe(true);
+  });
+
+  it("同一天多次同步取 synced_at 最新的一条，不重复累加", () => {
+    const items = [
+      historyItem("2026-08-01", { synced_at: "2026-08-01T08:00:00Z", value: { day: "2026-08-01", currency: "USD", by_status: { succeeded: { count: 1, amount_minor_units: 500 } } } }),
+      historyItem("2026-08-01", { synced_at: "2026-08-01T20:00:00Z", value: { day: "2026-08-01", currency: "USD", by_status: { succeeded: { count: 2, amount_minor_units: 1000 } } } }),
+    ];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-01");
+    expect(summary.amountMinor).toBe(1000n); // 只取较晚那条（20:00），不是两条相加
+    expect(summary.coveredDays).toBe(1);
+  });
+
+  it("桶键缺席且当天非 partial 是确认过的零，计入覆盖但不加金额", () => {
+    const items = [
+      historyItem("2026-08-01"),
+      historyItem("2026-08-02", { value: { day: "2026-08-02", currency: "USD", by_status: {} } }),
+    ];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-02");
+    expect(summary.amountMinor).toBe(1000n);
+    expect(summary.coveredDays).toBe(2);
+    expect(summary.complete).toBe(true);
+  });
+
+  it("桶键缺席且当天 is_partial 时说不清是否真的是零，这一天不计入覆盖", () => {
+    const items = [
+      historyItem("2026-08-01"),
+      historyItem("2026-08-02", { is_partial: true, value: { day: "2026-08-02", currency: "USD", by_status: {} } }),
+    ];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-02");
+    expect(summary.amountMinor).toBe(1000n);
+    expect(summary.coveredDays).toBe(1);
+    expect(summary.complete).toBe(false);
+  });
+
+  it("桶键存在但当天 is_partial：仍然把这个真实数字加进去，但整体标记不完整", () => {
+    const items = [historyItem("2026-08-01"), historyItem("2026-08-02", { is_partial: true })];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-02");
+    expect(summary.amountMinor).toBe(2000n); // 两天都真实计入
+    expect(summary.coveredDays).toBe(2);
+    expect(summary.complete).toBe(false); // 但整体不完整，因为有一天覆盖不全
+  });
+
+  it("同步本身失败（status !== ok）的整天跳过，不计入覆盖", () => {
+    const items = [historyItem("2026-08-01"), historyItem("2026-08-02", { status: "failed" })];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-02");
+    expect(summary.amountMinor).toBe(1000n);
+    expect(summary.coveredDays).toBe(1);
+    expect(summary.complete).toBe(false);
+  });
+
+  it("历史查询够不到月初（服务端 7 天硬顶）时诚实标记不完整，而不是假装完整", () => {
+    // 月初是 08-01，但历史只从 08-25 开始有数据（模拟 7 天硬顶只覆盖到 08-25~08-31）
+    const items = [historyItem("2026-08-29"), historyItem("2026-08-30"), historyItem("2026-08-31")];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-31");
+    expect(summary.amountMinor).toBe(3000n); // 有覆盖到的那几天仍然给出真实数字
+    expect(summary.coveredDays).toBe(3);
+    expect(summary.totalDays).toBe(31);
+    expect(summary.complete).toBe(false);
+  });
+
+  it("完全没有落在区间内的样本时给 null，不是 0", () => {
+    const items = [historyItem("2026-07-15")]; // 落在区间之外
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-05");
+    expect(summary.amountMinor).toBeNull();
+    expect(summary.coveredDays).toBe(0);
+    expect(summary.complete).toBe(false);
+  });
+
+  it("区间外的样本被过滤，不会污染月累计", () => {
+    const items = [historyItem("2026-07-31"), historyItem("2026-08-01"), historyItem("2026-09-01")];
+    const summary = monthToDateSucceeded(items, "2026-08-01", "2026-08-31");
+    expect(summary.amountMinor).toBe(1000n);
+    expect(summary.coveredDays).toBe(1);
   });
 });

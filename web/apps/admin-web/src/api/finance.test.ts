@@ -1,15 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
+import { ApiError, FeatureNotMountedError } from "./client";
 import type { ApiClient } from "./client";
 import type { PlatformApiConfig } from "./config";
 import {
   describeAccessMethod,
   describeCredential,
+  describePaymentStatus,
+  getPlatformOrder,
   listChannelSummaries,
+  listPlatformOrders,
   listProxyAssets,
   listSubscriptionBatches,
   listUpstreamAccounts,
   listUpstreamSummaries,
+  platformHasRefunds,
   platformHasUpstreamRegistry,
+  REFUND_LIFECYCLE_STATUSES,
   registerSubscriptionBatch,
   removeTokenMapping,
   setProxyAsset,
@@ -463,6 +469,201 @@ describe("哪些平台有「上游管理」这一格", () => {
     // 一张 API 成本登记簿，而且看起来完全正常
     for (const p of ["server", "cpa", ""]) {
       expect(platformHasUpstreamRegistry(p)).toBe(false);
+    }
+  });
+});
+
+const fresh = {
+  state: "fresh",
+  staleness_seconds: 5,
+  threshold_seconds: 60,
+  is_partial: false,
+  observed_at: "2026-08-27T10:00:00Z",
+  last_success: "2026-08-27T10:00:00Z",
+  last_error_code: "",
+};
+
+function orderItemBody(overrides: Record<string, unknown> = {}) {
+  return {
+    order_id: "9001",
+    created_at: "2026-08-27T10:00:00Z",
+    status: "PAID",
+    amount: { minor_units: "10000", currency: "USD" },
+    method: "alipay",
+    user_ref: "a***@example.test",
+    upstream_order_ref: "OUT-9001",
+    fee: { minor_units: null, currency: "" },
+    refund_amount: { minor_units: "0", currency: "USD" },
+    ...overrides,
+  };
+}
+
+describe("listPlatformOrders（XM-PAY1）：逐笔订单查询", () => {
+  it("原样透传 items/next_cursor/stats_by_status/freshness，fee 缺席时不是 0", async () => {
+    const client = fakeClient({
+      items: [orderItemBody()],
+      next_cursor: "MTAw",
+      stats_by_status: { PAID: { count: 1, amount: { minor_units: "10000", currency: "USD" } } },
+      from: "2026-08-27",
+      to: "2026-08-27",
+      data_source: "sub2api-fake",
+      freshness: fresh,
+    });
+    const page = await listPlatformOrders("sub2api", {}, client);
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]!.fee.minor_units).toBeNull();
+    expect(page.items[0]!.refund_amount.minor_units).toBe("0");
+    expect(page.next_cursor).toBe("MTAw");
+    expect(page.stats_by_status["PAID"]).toEqual({ count: 1, amount: { minor_units: "10000", currency: "USD" } });
+    expect(page.freshness).toEqual(fresh);
+    expect(page.data_source).toBe("sub2api-fake");
+  });
+
+  it("缺字段时给出安全缺省，而不是抛错或裸 undefined", async () => {
+    const client = fakeClient({});
+    const page = await listPlatformOrders("sub2api", {}, client);
+    expect(page.items).toEqual([]);
+    expect(page.next_cursor).toBe("");
+    expect(page.stats_by_status).toEqual({});
+    expect(page.from).toBe("");
+    expect(page.to).toBe("");
+    expect(page.data_source).toBe("");
+  });
+
+  it("窗口/状态/游标/limit 原样转成查询参数", async () => {
+    const get = vi.fn().mockResolvedValue({ items: [] });
+    const client: ApiClient = { get, post: vi.fn() };
+    await listPlatformOrders(
+      "newapi",
+      { day: "2026-08-27", status: "success", cursor: "MTAw", limit: 25 },
+      client,
+    );
+    const [path, options] = get.mock.calls[0]!;
+    expect(path).toBe("/api/v1/platforms/newapi/orders");
+    expect(options.searchParams).toMatchObject({
+      day: "2026-08-27",
+      status: "success",
+      cursor: "MTAw",
+      limit: "25",
+    });
+  });
+
+  it("XM_PLATFORM_PAYMENTS_MODE=off 的裸 404 转成 FeatureNotMountedError", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformOrders("sub2api", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+    expect((error as FeatureNotMountedError).description).toContain("XM_PLATFORM_PAYMENTS_MODE=off");
+  });
+
+  it("其它错误原样透传，不吞", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(403, "PERMISSION_DENIED", "缺少权限 finance.read")),
+      post: vi.fn(),
+    };
+    await expect(listPlatformOrders("sub2api", {}, client)).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("getPlatformOrder（XM-PAY1）：订单详情，找不到不回退到别的订单", () => {
+  it("找到时返回 kind:found 与完整详情", async () => {
+    const client = fakeClient({
+      order: orderItemBody(),
+      from: "2026-08-27",
+      to: "2026-08-27",
+      data_source: "sub2api-fake",
+      freshness: fresh,
+    });
+    const result = await getPlatformOrder("sub2api", "9001", { day: "2026-08-27" }, client);
+    expect(result.kind).toBe("found");
+    if (result.kind === "found") {
+      expect(result.detail.order.order_id).toBe("9001");
+      expect(result.detail.from).toBe("2026-08-27");
+    }
+  });
+
+  it("结构化 404（ACTION_NOT_REGISTERED）转成 kind:notFound，带上后端的安全文案", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(
+        new ApiError(404, "ACTION_NOT_REGISTERED", "订单 bogus 在 2026-08-27 至 2026-08-27 窗口内未找到"),
+      ),
+      post: vi.fn(),
+    };
+    const result = await getPlatformOrder("sub2api", "bogus", { day: "2026-08-27" }, client);
+    expect(result.kind).toBe("notFound");
+    if (result.kind === "notFound") {
+      expect(result.message).toContain("窗口内未找到");
+    }
+  });
+
+  it("裸 404（未挂载）转成 FeatureNotMountedError，不是 notFound——两者是完全不同的两件事", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await getPlatformOrder("sub2api", "9001", {}, client).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+  });
+
+  it("非 404 错误原样透传", async () => {
+    const client: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(502, "EXECUTION_FAILED", "上游超时")),
+      post: vi.fn(),
+    };
+    await expect(getPlatformOrder("sub2api", "9001", {}, client)).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("describePaymentStatus：上游原始状态 → 展示口径", () => {
+  it("Sub2API 的状态枚举逐条给出中文与色调", () => {
+    expect(describePaymentStatus("PAID")).toMatchObject({ label: "已支付", tone: "success" });
+    expect(describePaymentStatus("pending")).toMatchObject({ label: "待处理", tone: "warning" });
+    expect(describePaymentStatus("REFUNDED")).toMatchObject({ label: "已退款", tone: "neutral" });
+    expect(describePaymentStatus("REFUND_FAILED")).toMatchObject({ label: "退款失败", tone: "danger" });
+  });
+
+  it("NewAPI 的状态枚举也认识（小写）", () => {
+    expect(describePaymentStatus("success")).toMatchObject({ label: "已到账", tone: "success" });
+    expect(describePaymentStatus("expired")).toMatchObject({ label: "已过期", tone: "neutral" });
+  });
+
+  it("认不出的枚举值原样显示 + 中性色，不猜", () => {
+    expect(describePaymentStatus("SOME_NEW_STATUS")).toEqual({ label: "SOME_NEW_STATUS", tone: "neutral" });
+    expect(describePaymentStatus("")).toMatchObject({ label: "状态未知", tone: "neutral" });
+  });
+});
+
+describe("platformHasRefunds：只有 Sub2API", () => {
+  it("sub2api 是 true，newapi 与其它一律 false", () => {
+    expect(platformHasRefunds("sub2api")).toBe(true);
+    expect(platformHasRefunds("newapi")).toBe(false);
+    expect(platformHasRefunds("cpa")).toBe(false);
+    expect(platformHasRefunds("")).toBe(false);
+  });
+});
+
+describe("REFUND_LIFECYCLE_STATUSES：与 paymentStatusBucket 的 refunded 桶判据一致", () => {
+  it("六个退款生命周期状态都在集合里，非退款状态不在", () => {
+    for (const status of [
+      "REFUND_REQUESTED",
+      "REFUNDING",
+      "REFUND_PENDING",
+      "REFUND_FAILED",
+      "PARTIALLY_REFUNDED",
+      "REFUNDED",
+    ]) {
+      expect(REFUND_LIFECYCLE_STATUSES.has(status)).toBe(true);
+    }
+    for (const status of ["PAID", "PENDING", "FAILED", "COMPLETED"]) {
+      expect(REFUND_LIFECYCLE_STATUSES.has(status)).toBe(false);
     }
   });
 });

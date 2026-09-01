@@ -289,6 +289,10 @@ func NewRouter(d Deps) http.Handler {
 			if d.PlatformOrders != nil {
 				api.With(RequireScope(finance.ScopeRead)).
 					Get("/platforms/{platform}/orders", ListPlatformOrdersHandler(d.PlatformOrders))
+				// 订单详情（XM-PAY1）：复用同一个 Querier，见
+				// GetPlatformOrderHandler 顶部注释。
+				api.With(RequireScope(finance.ScopeRead)).
+					Get("/platforms/{platform}/orders/{id}", GetPlatformOrderHandler(d.PlatformOrders))
 			}
 
 			// CPA 逐 key 用量（XM-CPA0）。路径写死 "cpa" 而不是 {platform}：

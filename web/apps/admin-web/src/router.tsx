@@ -21,6 +21,7 @@ import {
   type LoaderFunctionArgs,
 } from "react-router";
 import { appApiConfig } from "./api/config";
+import { platformHasRefunds } from "./api/finance";
 import { listServices } from "./api/platform";
 import { decodePlatformUserIdSegment, platformHasUsers } from "./api/users";
 import { RequireAuth } from "./auth/RequireAuth";
@@ -51,6 +52,7 @@ import { OpsPage } from "./pages/OpsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { PlatformDetailPage } from "./pages/PlatformDetailPage";
+import { PlatformOrderDetailPage, PlatformRefundDetailPage } from "./pages/PlatformOrderDetailPage";
 import { PlatformUserDetailPage } from "./pages/PlatformUserDetailPage";
 import { RegistryPage } from "./pages/RegistryPage";
 import { RequestDetailPage } from "./pages/RequestDetailPage";
@@ -312,6 +314,32 @@ function assertSupplyPlatform(platform: string): asserts platform is "sub2api" |
   }
 }
 
+/** 订单详情的 UI-only 路由门禁：只有 sub2api/newapi 有 payments.read.v1，
+ *  订单 ID 为空的链接不该走进一次注定失败的查询。 */
+function orderDetailLoader({ params }: LoaderFunctionArgs) {
+  const platform = params.serviceType ?? "";
+  if (!isSupplyPlatform(platform)) {
+    throw new Response(`平台 ${platform || "（空平台）"} 不支持订单详情`, { status: 404 });
+  }
+  if (!(params.orderId ?? "").trim()) {
+    throw new Response("订单 ID 为空，无法定位详情", { status: 404 });
+  }
+  return null;
+}
+
+/** 退款详情只在 Sub2API 存在——NewAPI 没有退款概念（XM-PAY0 交接文档逐字
+ *  核对：model/topup.go 全文没有 refund 字段/状态/函数），不是"还没做"。 */
+function refundDetailLoader({ params }: LoaderFunctionArgs) {
+  const platform = params.serviceType ?? "";
+  if (!platformHasRefunds(platform)) {
+    throw new Response(`平台 ${platform || "（空平台）"} 没有退款概念`, { status: 404 });
+  }
+  if (!(params.orderId ?? "").trim()) {
+    throw new Response("订单 ID 为空，无法定位详情", { status: 404 });
+  }
+  return null;
+}
+
 /** 未实装页的路由位，由导航数据生成。
  *
  *  逐条手写的话，「加一页」就变成两处要改（navigation.ts + 这里），而漏改的那一半
@@ -360,6 +388,22 @@ export const routes = [
                 path: "platforms/:serviceType/suppliers/new",
                 loader: supplyPlatformLoader,
                 Component: SupplierCreatePage,
+              },
+              {
+                // 订单详情（XM-PAY1，原型 V_paymentDetail）。挂在 finance/ 下
+                // 而不是全局 /orders/:id：同一个 order_id 在两个平台之间不保证
+                // 唯一，路径里少了平台就没法保证读的是哪一条——与请求详情页
+                // 同一条纪律。
+                path: "platforms/:serviceType/finance/orders/:orderId",
+                loader: orderDetailLoader,
+                Component: PlatformOrderDetailPage,
+              },
+              {
+                // 退款详情（XM-PAY1，原型 V_refundDetail）。只有 Sub2API 存在，
+                // 见 refundDetailLoader 的注释。
+                path: "platforms/:serviceType/finance/refunds/:orderId",
+                loader: refundDetailLoader,
+                Component: PlatformRefundDetailPage,
               },
               {
                 path: "platforms/:serviceType/suppliers/:upstreamId",
