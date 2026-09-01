@@ -121,6 +121,50 @@ func (f alwaysPendingBalanceProofFixture) makeImmediatelyClaimable(t *testing.T)
 	}
 }
 
+// TestProcessEligibilityProjectionJobEvaluatesProofWithoutTheAdvisoryLock
+// covers XM-INV-PROOF-CONTENTION requirement 2's other half:
+// processEligibilityProjectionJob must not hold the per-account advisory
+// lock (hashtextextended(...,43)) across ensureBalanceCarryForwardProofTx's
+// evaluation -- only around the write phase that follows a successful
+// evaluation. A job whose proof is (deterministically, by this fixture)
+// pending never reaches the write phase at all, so it never attempts the
+// lock; holding that same lock in another session for the whole call proves
+// this by its absence of effect -- if the lock were still acquired early
+// (the pre-fix behavior), this call would block for as long as the other
+// session holds it, instead of returning promptly with the pending outcome.
+func TestProcessEligibilityProjectionJobEvaluatesProofWithoutTheAdvisoryLock(t *testing.T) {
+	fixture := seedAlwaysPendingBalanceProofFixture(t)
+
+	lockTx, err := fixture.store.pool.Begin(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err = lockTx.Exec(fixture.ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, fixture.accountID); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := fixture.store.ProcessEligibilityProjectionJobs(fixture.ctx, 10, time.Now().UTC(),
+			AuditActor{Type: "system", ID: "lock-discipline-test-worker"})
+		done <- runErr
+	}()
+	select {
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatalf("ProcessEligibilityProjectionJobs err=%v (want nil: BALANCE_PROOF_PENDING is reported via the job row, not a returned error)", runErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ProcessEligibilityProjectionJobs did not return within 5s while another session held the account's advisory lock -- the evaluation phase (reanchor check + proof) must not need that lock")
+	}
+	status, lastErrorCode, attemptCount, _ := fixture.jobRow(t)
+	if status != "queued" || lastErrorCode != "BALANCE_PROOF_PENDING" || attemptCount != 1 {
+		t.Fatalf("job row status=%s last_error_code=%s attempt_count=%d, want queued/BALANCE_PROOF_PENDING/1 (the pending outcome itself must still be reported correctly)",
+			status, lastErrorCode, attemptCount)
+	}
+}
+
 // TestBalanceProofPendingBackoffGrowsExponentiallyPerAttempt covers
 // XM-INV-PROOF-CONTENTION requirement 1's backoff schedule: 30s, 60s, 120s,
 // 240s, 480s, then capped at 10 minutes from the 6th attempt on, keyed off

@@ -2482,9 +2482,6 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		       set_config('idle_in_transaction_session_timeout','300s',true)`); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
-		return err
-	}
 	var requested time.Time
 	err = tx.QueryRow(ctx, `
 		SELECT requested_through FROM eligibility_projection_jobs
@@ -2496,14 +2493,37 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 	if err != nil {
 		return err
 	}
-	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
+	// XM-INV-PROOF-CONTENTION 2: the per-account advisory lock
+	// (hashtextextended(...,43)) used to be acquired here, before reanchor
+	// and the proof evaluation, and held for the rest of the transaction --
+	// including ensureBalanceCarryForwardProofTx's evaluation, which on a
+	// contended production account took tens of seconds per attempt (before
+	// requirement 4's set-based rewrite) while retrying every 30s. A
+	// concurrent source-projection worker event for the same account
+	// (ObserveUsageEvent/ObserveCreditEvent/ObserveBalanceCheckpoint, which
+	// take the identical lock) blocked for that whole duration and could
+	// hit a lock timeout (see MarkSourceEventBusy's doc comment).
+	//
+	// Reanchor and the proof evaluation below now run against an unlocked
+	// read of the account (lock=false): reanchor is a one-time, per-account
+	// transition gated by bootstrap_kind, and the job-claim SKIP LOCKED
+	// handoff in ProcessEligibilityProjectionJobs already guarantees only
+	// one processEligibilityProjectionJob execution per account runs at a
+	// time, so neither step needs the advisory lock to exclude another
+	// instance of itself; SERIALIZABLE isolation still catches (and this
+	// job's own backoff still retries) any genuine conflict with a
+	// concurrent writer, such as a worker-side freeze, at commit. The lock
+	// is acquired below, immediately before the write phase that actually
+	// needs a stable, exclusive view of the account: reprojection, pending
+	// evidence, and publishing finalized_through.
+	account, err := getEligibilityAccountTx(ctx, tx, accountID, false)
 	if err != nil {
 		return err
 	}
 	if reanchored, err := reanchorLegacyEligibilityAccountTx(ctx, tx, account, actor); err != nil {
 		return err
 	} else if reanchored {
-		if account, err = getEligibilityAccountTx(ctx, tx, accountID, true); err != nil {
+		if account, err = getEligibilityAccountTx(ctx, tx, accountID, false); err != nil {
 			return err
 		}
 	}
@@ -2511,6 +2531,9 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		requested = account.FinalizedThrough
 	}
 	if err = ensureBalanceCarryForwardProofTx(ctx, tx, account, requested, actor); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
 		return err
 	}
 	if err = reprojectEligibilityTx(ctx, tx, accountID, requested, actor); err != nil {
@@ -2541,11 +2564,20 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 }
 
 func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, requested time.Time, actor AuditActor) error {
-	// The caller holds the account advisory lock and a row lock on the bound,
-	// non-syncing account. A published delta cycle may still contain parked
-	// checkpoints for unrelated identities; those must not block this account's
-	// unchanged proof. A later checkpoint for this account is rejected by the
-	// mutually exclusive proof/checkpoint contract.
+	// XM-INV-PROOF-CONTENTION 2: the caller (processEligibilityProjectionJob)
+	// deliberately does NOT hold the per-account advisory lock or a row lock
+	// on the account here -- only its own SERIALIZABLE snapshot, taken
+	// before this call, and the job-claim SKIP LOCKED handoff that already
+	// guarantees no other processEligibilityProjectionJob execution for this
+	// account is concurrently running. This function only reads (the
+	// carry-forward proof rows it inserts are additive and idempotent, keyed
+	// by (account,cycle) -- see the ON CONFLICT DO NOTHING below -- so a
+	// concurrent writer elsewhere in the account's row set cannot corrupt
+	// them; the caller re-locks for the write phase that follows). A
+	// published delta cycle may still contain parked checkpoints for
+	// unrelated identities; those must not block this account's unchanged
+	// proof. A later checkpoint for this account is rejected by the mutually
+	// exclusive proof/checkpoint contract.
 	if account.Status == "syncing" {
 		return errBalanceCarryForwardProofPending
 	}
