@@ -1,5 +1,11 @@
 # RC57 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC57 shipped at signed tag
+> `v0.1.0-rc57-signed` (`b29eb83`) and is deployed; its canary proved the
+> full create-path login in production and exposed the multi-platform
+> claim rejection; its evidence is immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc58-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC57 — claim-login sessions are now issued with the invoice_user's stored canonical oidc_issuer/oidc_subject pair (the auth_sessions INSERT guard rejected the synthetic platform pair with ErrIdentityMismatch); found by the RC56 production canary.
