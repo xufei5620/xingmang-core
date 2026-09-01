@@ -61,9 +61,9 @@ export interface AuthUser {
   // The raw account name captured from the platform's own login response
   // (Sub2API/New API), unlike `displayName` above which the backend always
   // backfills with a generic placeholder when there is nothing better to
-  // show. Null whenever there is no captured name to show -- including on
-  // every session reload today, since the backend has nowhere to persist it
-  // across requests (see docs/handoffs/XM-INV-OBS-BUNDLE.md).
+  // show. Persisted encrypted on the session row (backend migration 0017),
+  // so it survives a reload; null only for an OIDC session, or a
+  // platform-password session issued before that migration.
   username: string | null;
 }
 

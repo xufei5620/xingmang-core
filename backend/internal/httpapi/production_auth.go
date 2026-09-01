@@ -40,8 +40,7 @@ type BackchannelLogoutProcessor interface {
 }
 
 type SessionUser struct {
-	ID          string
-	DisplayName string
+	ID string
 	// Claimed is true when provisioning landed on a pre-existing invoice_user
 	// via the external-account claim path (see provisionPlatformOrOIDCUser in
 	// cmd/api/runtime.go) instead of creating a fresh one. It is
@@ -304,6 +303,11 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 			Roles: current.Session.Roles, ACR: current.Session.ACR, AMR: current.Session.AMR,
 			AuthTime: current.Session.AuthTime,
 			Platform: current.Session.Platform, PlatformUserID: current.Session.PlatformUserID,
+			// Carries the already-decrypted captured platform username forward
+			// across this CSRF-token rotation -- Rotate() re-encrypts it onto the
+			// new session row (migration 0017); this is a silent renewal of the
+			// same login, not a fresh one, so it must not be lost here.
+			DisplayName: current.Session.DisplayName,
 		}
 		credentials, rotateErr := a.Sessions.Rotate(r.Context(), auth.RotateSessionInput{
 			Token: current.SessionToken, ExpectedSessionID: current.Session.ID,
@@ -336,7 +340,11 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 			stepUpRequired = true
 		}
 	}
-	rawDisplayName := strings.TrimSpace(user.DisplayName)
+	// The captured platform username lives on the session row (encrypted,
+	// migration 0017), not on the invoice_user record -- CR-0003 makes
+	// identity strictly per-platform-login, and current.Session was already
+	// decrypted by PostgresSessionStore when a.authenticate loaded it above.
+	rawDisplayName := strings.TrimSpace(current.Session.DisplayName)
 	displayName := rawDisplayName
 	if displayName == "" {
 		displayName = maskedEmailName(user.Email)
@@ -357,9 +365,10 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 			// display_name above it is never backfilled with maskedEmailName's
 			// generic "用户" placeholder, so a caller can tell "we truly have a
 			// name" apart from "there was nothing better to show" without
-			// pattern-matching the fallback string. Empty until the user's next
-			// platform-password login re-populates it (see completeLogin);
-			// invoice_users has no column to persist it across sessions.
+			// pattern-matching the fallback string. Sourced from the session
+			// row (see current.Session.DisplayName above), not invoice_users --
+			// empty only for an OIDC session, or a platform session issued
+			// before migration 0017.
 			"username": rawDisplayName,
 		},
 		"admin_step_up_required": stepUpRequired,

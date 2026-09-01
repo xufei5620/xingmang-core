@@ -3,11 +3,14 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"invoice-system/backend/internal/securefields"
 )
 
 type PostgresFlowStore struct{ pool *pgxpool.Pool }
@@ -73,10 +76,50 @@ func scanAuthorizationFlow(row pgx.Row) (AuthorizationFlow, error) {
 	return flow, err
 }
 
-type PostgresSessionStore struct{ pool *pgxpool.Pool }
+type PostgresSessionStore struct {
+	pool    *pgxpool.Pool
+	keyring securefields.Keyring
+}
 
-func NewPostgresSessionStore(pool *pgxpool.Pool) *PostgresSessionStore {
-	return &PostgresSessionStore{pool: pool}
+func NewPostgresSessionStore(pool *pgxpool.Pool, keyring securefields.Keyring) *PostgresSessionStore {
+	return &PostgresSessionStore{pool: pool, keyring: keyring}
+}
+
+// sessionDisplayNameAAD binds display_name_ciphertext to its own session
+// row, mirroring application/crypto.go's per-record AAD convention (e.g.
+// userEmailAAD) so ciphertext can never be replayed onto a different
+// session row.
+func sessionDisplayNameAAD(sessionID string) string {
+	return "invoice-auth-session-display-name\n" + sessionID
+}
+
+// encryptDisplayName returns nil for an empty name (most sessions -- OIDC
+// principals never carry one) rather than encrypting an empty string, same
+// convention as application/crypto.go's encryptProfile.
+func (s *PostgresSessionStore) encryptDisplayName(sessionID, displayName string) ([]byte, error) {
+	if displayName == "" {
+		return nil, nil
+	}
+	ciphertext, err := s.keyring.Encrypt([]byte(displayName), sessionDisplayNameAAD(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("encrypt session display name: %w", err)
+	}
+	return ciphertext, nil
+}
+
+// decryptDisplayName returns "" for a NULL/absent ciphertext -- a session
+// issued before migration 0017, or one that never captured a name -- rather
+// than erroring, so those sessions keep working exactly as before this
+// column existed. A present-but-corrupt ciphertext still fails closed.
+func (s *PostgresSessionStore) decryptDisplayName(sessionID string, ciphertext []byte) (string, error) {
+	if len(ciphertext) == 0 {
+		return "", nil
+	}
+	plaintext, err := s.keyring.Decrypt(ciphertext, sessionDisplayNameAAD(sessionID))
+	if err != nil {
+		return "", fmt.Errorf("decrypt session display name: %w", err)
+	}
+	return string(plaintext), nil
 }
 
 func (s *PostgresSessionStore) Create(ctx context.Context, session Session) error {
@@ -86,12 +129,17 @@ func (s *PostgresSessionStore) Create(ctx context.Context, session Session) erro
 	if err := validateSessionRecord(session); err != nil {
 		return err
 	}
+	displayNameCiphertext, err := s.encryptDisplayName(session.ID, session.DisplayName)
+	if err != nil {
+		return err
+	}
 	result, err := s.pool.Exec(ctx, insertSessionSQL,
 		session.ID, session.FamilyID, session.UserID, session.Issuer, session.Subject,
 		session.TokenHash, session.CSRFHash, nullableString(session.ProviderSIDHash), session.Roles,
 		session.ACR, session.AMR, nullableTime(session.AuthTime), session.MFAAt,
 		nullableString(session.ClientIPHash), nullableString(session.UserAgentHash), session.CreatedAt,
-		session.LastSeenAt, session.IdleExpiresAt, session.AbsoluteExpiresAt, nullableString(session.RotatedFrom))
+		session.LastSeenAt, session.IdleExpiresAt, session.AbsoluteExpiresAt, nullableString(session.RotatedFrom),
+		displayNameCiphertext)
 	if err != nil {
 		return err
 	}
@@ -105,9 +153,10 @@ const insertSessionSQL = `
 	INSERT INTO auth_sessions(
 		id,family_id,invoice_user_id,token_hash,csrf_hash,provider_sid_hash,
 		roles,acr,amr,auth_time,mfa_at,client_ip_hmac,user_agent_hmac,
-		created_at,last_seen_at,idle_expires_at,absolute_expires_at,rotated_from
+		created_at,last_seen_at,idle_expires_at,absolute_expires_at,rotated_from,
+		display_name_ciphertext
 	)
-	SELECT $1,$2,u.id,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NULLIF($20,'')::uuid
+	SELECT $1,$2,u.id,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NULLIF($20,'')::uuid,$21
 	FROM invoice_users u
 	WHERE u.id=$3 AND u.oidc_issuer=$4 AND u.oidc_subject=$5 AND u.status='active'`
 
@@ -116,7 +165,7 @@ func (s *PostgresSessionStore) AuthenticateAndTouch(ctx context.Context, tokenHa
 		return Session{}, ErrSessionInvalid
 	}
 	desiredIdleExpiry := now.Add(idleTTL)
-	session, err := scanSession(s.pool.QueryRow(ctx, `
+	session, err := s.scanSession(s.pool.QueryRow(ctx, `
 		UPDATE auth_sessions s
 		SET last_seen_at=$4,idle_expires_at=LEAST(s.absolute_expires_at,$5)
 		FROM invoice_users u
@@ -129,7 +178,7 @@ func (s *PostgresSessionStore) AuthenticateAndTouch(ctx context.Context, tokenHa
 		          s.token_hash,s.csrf_hash,COALESCE(s.provider_sid_hash,''),s.roles,s.acr,s.amr,
 		          s.auth_time,s.mfa_at,COALESCE(s.client_ip_hmac,''),COALESCE(s.user_agent_hmac,''),
 		          s.created_at,s.last_seen_at,s.idle_expires_at,s.absolute_expires_at,
-		          COALESCE(s.rotated_from::text,''),s.revoked_at,s.revoked_reason`,
+		          COALESCE(s.rotated_from::text,''),s.revoked_at,s.revoked_reason,s.display_name_ciphertext`,
 		tokenHash, nullableString(binding.IPHash), nullableString(binding.UserAgentHash), now, desiredIdleExpiry))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrSessionInvalid
@@ -146,13 +195,13 @@ func (s *PostgresSessionStore) Rotate(ctx context.Context, oldTokenHash, expecte
 		return Session{}, err
 	}
 	defer tx.Rollback(context.Background())
-	old, err := scanSession(tx.QueryRow(ctx, `
+	old, err := s.scanSession(tx.QueryRow(ctx, `
 		SELECT s.id,s.family_id,s.invoice_user_id,u.oidc_issuer,u.oidc_subject,
 		       COALESCE(u.platform,''),COALESCE(u.platform_user_id,''),
 		       s.token_hash,s.csrf_hash,COALESCE(s.provider_sid_hash,''),s.roles,s.acr,s.amr,
 		       s.auth_time,s.mfa_at,COALESCE(s.client_ip_hmac,''),COALESCE(s.user_agent_hmac,''),
 		       s.created_at,s.last_seen_at,s.idle_expires_at,s.absolute_expires_at,
-		       COALESCE(s.rotated_from::text,''),s.revoked_at,s.revoked_reason
+		       COALESCE(s.rotated_from::text,''),s.revoked_at,s.revoked_reason,s.display_name_ciphertext
 		FROM auth_sessions s JOIN invoice_users u ON u.id=s.invoice_user_id
 		WHERE s.token_hash=$1 AND s.id=$2 AND s.revoked_at IS NULL
 		  AND s.idle_expires_at>$3 AND s.absolute_expires_at>$3 AND u.status='active'
@@ -179,12 +228,17 @@ func (s *PostgresSessionStore) Rotate(ctx context.Context, oldTokenHash, expecte
 	if err = validateSessionRecord(next); err != nil {
 		return Session{}, err
 	}
+	displayNameCiphertext, err := s.encryptDisplayName(next.ID, next.DisplayName)
+	if err != nil {
+		return Session{}, err
+	}
 	result, err := tx.Exec(ctx, insertSessionSQL,
 		next.ID, next.FamilyID, next.UserID, next.Issuer, next.Subject,
 		next.TokenHash, next.CSRFHash, nullableString(next.ProviderSIDHash), next.Roles,
 		next.ACR, next.AMR, nullableTime(next.AuthTime), next.MFAAt,
 		nullableString(next.ClientIPHash), nullableString(next.UserAgentHash), next.CreatedAt,
-		next.LastSeenAt, next.IdleExpiresAt, next.AbsoluteExpiresAt, next.RotatedFrom)
+		next.LastSeenAt, next.IdleExpiresAt, next.AbsoluteExpiresAt, next.RotatedFrom,
+		displayNameCiphertext)
 	if err != nil {
 		return Session{}, err
 	}
@@ -201,7 +255,7 @@ func (s *PostgresSessionStore) RevokeToken(ctx context.Context, tokenHash string
 	if s == nil || s.pool == nil {
 		return Session{}, errors.New("nil PostgreSQL session store")
 	}
-	session, err := scanSession(s.pool.QueryRow(ctx, `
+	session, err := s.scanSession(s.pool.QueryRow(ctx, `
 		UPDATE auth_sessions s SET revoked_at=$2,revoked_reason=$3
 		FROM invoice_users u
 		WHERE s.token_hash=$1 AND s.invoice_user_id=u.id AND s.revoked_at IS NULL
@@ -210,7 +264,7 @@ func (s *PostgresSessionStore) RevokeToken(ctx context.Context, tokenHash string
 		          s.token_hash,s.csrf_hash,COALESCE(s.provider_sid_hash,''),s.roles,s.acr,s.amr,
 		          s.auth_time,s.mfa_at,COALESCE(s.client_ip_hmac,''),COALESCE(s.user_agent_hmac,''),
 		          s.created_at,s.last_seen_at,s.idle_expires_at,s.absolute_expires_at,
-		          COALESCE(s.rotated_from::text,''),s.revoked_at,s.revoked_reason`, tokenHash, now, reason))
+		          COALESCE(s.rotated_from::text,''),s.revoked_at,s.revoked_reason,s.display_name_ciphertext`, tokenHash, now, reason))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrSessionInvalid
 	}
@@ -256,10 +310,14 @@ func (s *PostgresSessionStore) DeleteExpired(ctx context.Context, before time.Ti
 	return result.RowsAffected(), err
 }
 
-func scanSession(row pgx.Row) (Session, error) {
+// scanSession is a method (not a bare function) because it needs s.keyring
+// to decrypt display_name_ciphertext -- every SELECT/RETURNING that feeds it
+// must include that column last, matching the Scan order below.
+func (s *PostgresSessionStore) scanSession(row pgx.Row) (Session, error) {
 	var session Session
 	var authTime *time.Time
 	var platform string
+	var displayNameCiphertext []byte
 	err := row.Scan(
 		&session.ID, &session.FamilyID, &session.UserID, &session.Issuer, &session.Subject,
 		&platform, &session.PlatformUserID,
@@ -268,12 +326,20 @@ func scanSession(row pgx.Row) (Session, error) {
 		&session.ClientIPHash, &session.UserAgentHash, &session.CreatedAt,
 		&session.LastSeenAt, &session.IdleExpiresAt, &session.AbsoluteExpiresAt,
 		&session.RotatedFrom, &session.RevokedAt, &session.RevokedReason,
+		&displayNameCiphertext,
 	)
+	if err != nil {
+		return Session{}, err
+	}
 	session.Platform = Platform(platform)
 	if authTime != nil {
 		session.AuthTime = authTime.UTC()
 	}
-	return session, err
+	session.DisplayName, err = s.decryptDisplayName(session.ID, displayNameCiphertext)
+	if err != nil {
+		return Session{}, err
+	}
+	return session, nil
 }
 
 func nullableString(value string) any {

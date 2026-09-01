@@ -1197,7 +1197,7 @@ func TestClaimedIdentitySessionIssuesWithCanonicalPair(t *testing.T) {
 		t.Fatalf("GetCurrentUser must expose the stored canonical pair, got %q/%q", current.OIDCIssuer, current.OIDCSubject)
 	}
 
-	sessions, err := auth.NewSessionManager(auth.NewPostgresSessionStore(store.Pool()),
+	sessions, err := auth.NewSessionManager(auth.NewPostgresSessionStore(store.Pool(), testKeys()),
 		auth.SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour},
 		auth.NewPostgresSecurityAuditSink(store.Pool()))
 	if err != nil {

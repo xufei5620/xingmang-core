@@ -103,7 +103,7 @@ func TestProvisionPlatformOrOIDCUserClaimsExistingProjectedIdentity(t *testing.T
 		},
 	}
 	identity := &fakeIdentityStore{}
-	principal := auth.Principal{Issuer: "https://api.solov.cc", Subject: "1113", Platform: auth.PlatformSub2API, PlatformUserID: "1113", DisplayName: "xufei"}
+	principal := auth.Principal{Issuer: "https://api.solov.cc", Subject: "1113", Platform: auth.PlatformSub2API, PlatformUserID: "1113"}
 	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformSub2API: "sub2api-main"}
 
 	user, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-1", sourceInstanceIDs)
@@ -125,12 +125,10 @@ func TestProvisionPlatformOrOIDCUserClaimsExistingProjectedIdentity(t *testing.T
 	if deps.getCurrentUserCalls != 1 {
 		t.Fatalf("expected exactly one GetCurrentUser call, got %d", deps.getCurrentUserCalls)
 	}
-	// XM-INV-OBS-BUNDLE: the login's captured platform username and the
-	// claim-path marker both ride the returned SessionUser -- the former for
-	// display, the latter purely for completeLogin's observability log.
-	if user.DisplayName != "xufei" {
-		t.Fatalf("DisplayName must carry the login principal's captured username, got %q", user.DisplayName)
-	}
+	// XM-INV-OBS-BUNDLE: the claim-path marker rides the returned SessionUser
+	// purely for completeLogin's observability log line (the captured
+	// platform username itself now lives on the session row -- see
+	// auth/postgres_integration_test.go -- not on SessionUser).
 	if !user.Claimed {
 		t.Fatal("Claimed must be true on the claim path")
 	}
@@ -164,7 +162,7 @@ func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *t
 	identity := &fakeIdentityStore{resolve: func(auth.Principal) (auth.InvoiceIdentity, error) {
 		return auth.InvoiceIdentity{UserID: newUserID}, nil
 	}}
-	principal := auth.Principal{Issuer: "https://xm.solov.cc", Subject: "48", Platform: auth.PlatformNewAPI, PlatformUserID: "48", DisplayName: "zhangsan"}
+	principal := auth.Principal{Issuer: "https://xm.solov.cc", Subject: "48", Platform: auth.PlatformNewAPI, PlatformUserID: "48"}
 	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformNewAPI: "newapi-main"}
 
 	user, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-2", sourceInstanceIDs)
@@ -182,9 +180,6 @@ func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *t
 	}
 	if deps.claimCalls != 0 {
 		t.Fatalf("ClaimPlatformIdentity must not run when there is no existing binding: calls=%d", deps.claimCalls)
-	}
-	if user.DisplayName != "zhangsan" {
-		t.Fatalf("DisplayName must carry the login principal's captured username, got %q", user.DisplayName)
 	}
 	if user.Claimed {
 		t.Fatal("Claimed must be false on the create path")

@@ -232,7 +232,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
-	sessionStore := auth.NewPostgresSessionStore(store.Pool())
+	sessionStore := auth.NewPostgresSessionStore(store.Pool(), keyring)
 	auditSink := auth.NewPostgresSecurityAuditSink(store.Pool())
 	sessions, err := auth.NewSessionManager(sessionStore, auth.SessionConfig{}, auditSink)
 	if err != nil {
@@ -264,9 +264,12 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		},
 		LoadUser: func(loadCtx context.Context, userID string) (httpapi.SessionUser, error) {
 			// No principal is available on a plain session reload (only the
-			// stored userID), so DisplayName/Claimed cannot be recovered here --
-			// only a fresh login (see provisionPlatformOrOIDCUser) carries them.
-			return loadSessionUser(loadCtx, appService, userID, "", false)
+			// stored userID), so Claimed can't be recovered here -- only a fresh
+			// login (see provisionPlatformOrOIDCUser) sets it. The platform
+			// display name lives on the session row now (encrypted,
+			// migration 0017), not here -- sessionStatus reads it straight off
+			// current.Session.DisplayName instead of going through LoadUser.
+			return loadSessionUser(loadCtx, appService, userID, false)
 		},
 	}
 	platformLogin, err := buildPlatformLogin(productionAuth)
@@ -653,7 +656,7 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			if wakeErr := deps.WakeSourceAccountFacts(auditCtx, sourceInstanceID, principal.PlatformUserID); wakeErr != nil {
 				return httpapi.SessionUser{}, fmt.Errorf("wake parked source facts for claimed binding: %w", wakeErr)
 			}
-			return loadSessionUser(auditCtx, deps, existing.PrincipalID, principal.DisplayName, true)
+			return loadSessionUser(auditCtx, deps, existing.PrincipalID, true)
 		}
 		// Not found: fall through to the create-or-find path below exactly
 		// like a first-ever login (OIDC or platform) always has.
@@ -687,21 +690,21 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			return httpapi.SessionUser{}, fmt.Errorf("bind platform external account: %w", bindErr)
 		}
 	}
-	return loadSessionUser(auditCtx, deps, record.ID, principal.DisplayName, false)
+	return loadSessionUser(auditCtx, deps, record.ID, false)
 }
 
 // loadSessionUser loads the invoice_user row and layers the request-scoped
-// displayName/claimed onto it. displayName/claimed are only ever non-empty
-// on a fresh login (see provisionPlatformOrOIDCUser): invoice_users has no
-// column to persist a captured platform username, so a later session reload
-// (ProductionAuth.LoadUser, keyed only by userID) always passes "false".
-func loadSessionUser(ctx context.Context, service currentUserLoader, userID, displayName string, claimed bool) (httpapi.SessionUser, error) {
+// claimed marker onto it (see SessionUser.Claimed's doc comment -- log-line
+// observability only, never serialized to a response). claimed is only ever
+// true on the claim-path return above; the captured platform display name
+// lives on the session row instead (migration 0017), not here.
+func loadSessionUser(ctx context.Context, service currentUserLoader, userID string, claimed bool) (httpapi.SessionUser, error) {
 	user, err := service.GetCurrentUser(ctx, userID)
 	if err != nil {
 		return httpapi.SessionUser{}, err
 	}
 	return httpapi.SessionUser{
-		ID: user.ID, DisplayName: displayName, Claimed: claimed, Email: user.Email, EmailVerified: user.EmailVerified,
+		ID: user.ID, Claimed: claimed, Email: user.Email, EmailVerified: user.EmailVerified,
 		CanonicalIssuer: user.OIDCIssuer, CanonicalSubject: user.OIDCSubject,
 	}, nil
 }

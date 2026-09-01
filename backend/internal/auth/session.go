@@ -41,8 +41,17 @@ type Session struct {
 	// login (see platform_login.go). They are always re-derived from the
 	// joined invoice_users row, never trusted from a caller-supplied value --
 	// see PostgresSessionStore in postgres.go.
-	Platform          Platform `json:"-"`
-	PlatformUserID    string   `json:"-"`
+	Platform       Platform `json:"-"`
+	PlatformUserID string   `json:"-"`
+	// DisplayName is the platform's own captured account username
+	// (Principal.DisplayName, sourced from PlatformLoginResult.Username),
+	// empty for an OIDC session. Unlike Platform/PlatformUserID above it is
+	// NOT re-derived from invoice_users (which has no such column -- CR-0003
+	// makes identity strictly per-platform-login, and this belongs to the
+	// session, not the user record); PostgresSessionStore stores it
+	// encrypted in auth_sessions.display_name_ciphertext and decrypts it
+	// back into this plaintext field on every load.
+	DisplayName       string `json:"-"`
 	CreatedAt         time.Time
 	LastSeenAt        time.Time
 	IdleExpiresAt     time.Time
@@ -167,11 +176,12 @@ func (m *SessionManager) Issue(ctx context.Context, input IssueSessionInput) (Se
 		// have none -- a nil here broke the first real platform login in
 		// production (SQLSTATE 23502) after the claim fix let it reach
 		// session issuance.
-		Roles:           append([]string{}, input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string{}, input.Principal.AMR...),
+		Roles: append([]string{}, input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string{}, input.Principal.AMR...),
 		AuthTime: input.Principal.AuthTime, MFAAt: copyTime(input.MFAAt),
 		ClientIPHash: input.Binding.IPHash, UserAgentHash: input.Binding.UserAgentHash,
 		Platform: input.Principal.Platform, PlatformUserID: input.Principal.PlatformUserID,
-		CreatedAt: now, LastSeenAt: now, IdleExpiresAt: now.Add(m.config.IdleTTL), AbsoluteExpiresAt: now.Add(m.config.AbsoluteTTL),
+		DisplayName: input.Principal.DisplayName,
+		CreatedAt:   now, LastSeenAt: now, IdleExpiresAt: now.Add(m.config.IdleTTL), AbsoluteExpiresAt: now.Add(m.config.AbsoluteTTL),
 	}
 	if err = validateSessionRecord(session); err != nil {
 		return SessionCredentials{}, err
@@ -220,11 +230,12 @@ func (m *SessionManager) Rotate(ctx context.Context, input RotateSessionInput) (
 		// have none -- a nil here broke the first real platform login in
 		// production (SQLSTATE 23502) after the claim fix let it reach
 		// session issuance.
-		Roles:           append([]string{}, input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string{}, input.Principal.AMR...),
+		Roles: append([]string{}, input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string{}, input.Principal.AMR...),
 		AuthTime: input.Principal.AuthTime, MFAAt: copyTime(input.MFAAt),
 		ClientIPHash: input.Binding.IPHash, UserAgentHash: input.Binding.UserAgentHash,
 		Platform: input.Principal.Platform, PlatformUserID: input.Principal.PlatformUserID,
-		CreatedAt: now, LastSeenAt: now, IdleExpiresAt: now.Add(m.config.IdleTTL),
+		DisplayName: input.Principal.DisplayName,
+		CreatedAt:   now, LastSeenAt: now, IdleExpiresAt: now.Add(m.config.IdleTTL),
 	}
 	next, err = m.store.Rotate(ctx, sha256Hex(input.Token), input.ExpectedSessionID, next, now)
 	if err != nil {
@@ -318,6 +329,9 @@ func validateSessionRecord(session Session) error {
 	}
 	if len(session.PlatformUserID) > 512 || hasControl(session.PlatformUserID) || strings.TrimSpace(session.PlatformUserID) != session.PlatformUserID {
 		return errors.New("session platform user ID is invalid")
+	}
+	if len(session.DisplayName) > 512 || hasControl(session.DisplayName) || strings.TrimSpace(session.DisplayName) != session.DisplayName {
+		return errors.New("session display name is invalid")
 	}
 	if err := validateSessionClaimSet(session.Roles, 100); err != nil {
 		return err

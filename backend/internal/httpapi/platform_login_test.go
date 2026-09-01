@@ -94,12 +94,7 @@ func platformLoginServer(t *testing.T, sub2api, newapi auth.PlatformAuthenticato
 		OIDC: oidc, Logout: oidc, BackchannelLogout: &fakeBackchannelLogoutProcessor{}, Sessions: sessions, BindingHasher: hasher, CSRF: csrf,
 		Admin: auth.AdminPolicy{Role: "invoice-admin", RequiredACR: "urn:test:mfa", RequiredAMR: []string{"otp"}, StepUpMaxAge: 10 * time.Minute},
 		ProvisionUser: func(_ context.Context, principal auth.Principal, _ string) (SessionUser, error) {
-			return SessionUser{
-				ID: string(principal.Platform) + ":" + principal.PlatformUserID,
-				// Mirrors provisionPlatformOrOIDCUser (cmd/api/runtime.go): a fresh
-				// login always carries its principal's captured username through.
-				DisplayName: principal.DisplayName, Email: principal.Email, EmailVerified: principal.EmailVerified,
-			}, nil
+			return SessionUser{ID: string(principal.Platform) + ":" + principal.PlatformUserID, Email: principal.Email, EmailVerified: principal.EmailVerified}, nil
 		},
 		LoadUser: func(_ context.Context, userID string) (SessionUser, error) {
 			return SessionUser{ID: userID}, nil
@@ -193,17 +188,13 @@ func TestPlatformLoginSuccessIssuesSessionWithPlatformIdentity(t *testing.T) {
 	if user["platform_user_id"] != "555" {
 		t.Fatalf("expected the session's platform_user_id to surface the authenticator's PlatformUserID: %+v", user)
 	}
-	// XM-INV-OBS-BUNDLE: the captured username rides the *login response's*
-	// provisioning call (see TestPlatformLoginSuccessLogsStructuredInfo and
-	// runtime_test.go's provisionPlatformOrOIDCUser tests for that half), but
-	// this GET /session call is a separate, later request that resolves the
-	// user via ProductionAuth.LoadUser(userID) alone -- no principal, so no
-	// captured name to attach. invoice_users has no column to persist it
-	// across that boundary, so the session response still falls back to the
-	// generic maskedEmailName placeholder here, same as before this change.
-	// See docs/handoffs/XM-INV-OBS-BUNDLE.md for the full explanation.
-	if user["username"] != "" || user["display_name"] != "用户" {
-		t.Fatalf("a plain session reload has no principal to source a captured username from: %+v", user)
+	// XM-INV-OBS-BUNDLE follow-up: the captured username is stored on the
+	// session row itself (Session.DisplayName, encrypted in production via
+	// PostgresSessionStore -- see postgres_integration_test.go for the
+	// encrypt/decrypt round trip), so it survives this GET /session call
+	// even though that request only carries a userID, not a principal.
+	if user["username"] != "exampleuser" || user["display_name"] != "exampleuser" {
+		t.Fatalf("expected the session's captured username to surface on this session reload too: %+v", user)
 	}
 
 	if login, twoFA := sub2api.counts(); login != 1 || twoFA != 0 {
@@ -232,7 +223,7 @@ func TestPlatformLoginSuccessLogsStructuredInfo(t *testing.T) {
 	// TestPlatformLoginSuccessIssuesSessionWithPlatformIdentity's default).
 	const provisionedUserID = "10000000-0000-4000-8000-000000000001"
 	server.productionAuth.ProvisionUser = func(_ context.Context, principal auth.Principal, _ string) (SessionUser, error) {
-		return SessionUser{ID: provisionedUserID, DisplayName: principal.DisplayName, Claimed: true, Email: principal.Email, EmailVerified: principal.EmailVerified}, nil
+		return SessionUser{ID: provisionedUserID, Claimed: true, Email: principal.Email, EmailVerified: principal.EmailVerified}, nil
 	}
 	var logs bytes.Buffer
 	server.logger = slog.New(slog.NewTextHandler(&logs, nil))

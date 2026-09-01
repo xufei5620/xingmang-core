@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,7 +15,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"invoice-system/backend/internal/migrate"
+	"invoice-system/backend/internal/securefields"
 )
+
+// testSessionKeyring provides PostgresSessionStore's field-encryption
+// keyring for these integration tests -- same key-material shape as
+// client_test.go's inline keyrings elsewhere in this package.
+func testSessionKeyring() securefields.Keyring {
+	return securefields.Keyring{
+		CurrentKeyID:   "k1",
+		EncryptionKeys: map[string][]byte{"k1": []byte("0123456789abcdef0123456789abcdef")},
+		IndexKey:       []byte("abcdef0123456789abcdef0123456789"),
+	}
+}
 
 func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
@@ -69,7 +82,7 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	}
 
 	audit := NewPostgresSecurityAuditSink(pool)
-	sessionStore := NewPostgresSessionStore(pool)
+	sessionStore := NewPostgresSessionStore(pool, testSessionKeyring())
 	manager, err := NewSessionManager(sessionStore, SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, audit)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +291,7 @@ func TestPostgresPlatformSessionWithoutRolesOrAMR(t *testing.T) {
 	}
 
 	audit := NewPostgresSecurityAuditSink(pool)
-	sessionStore := NewPostgresSessionStore(pool)
+	sessionStore := NewPostgresSessionStore(pool, testSessionKeyring())
 	manager, err := NewSessionManager(sessionStore, SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, audit)
 	if err != nil {
 		t.Fatal(err)
@@ -313,5 +326,152 @@ func TestPostgresPlatformSessionWithoutRolesOrAMR(t *testing.T) {
 	}
 	if storedRoles == nil || len(storedRoles) != 0 || storedAMR == nil || len(storedAMR) != 0 {
 		t.Fatalf("rotated roles/amr must be stored as empty arrays, got roles=%#v amr=%#v", storedRoles, storedAMR)
+	}
+}
+
+// TestPostgresSessionDisplayNameEncryptedRotatedAndBackwardCompatible covers
+// migration 0017 (XM-INV-OBS-BUNDLE follow-up: persist the platform's
+// captured username on the session row, encrypted, rather than on
+// invoice_users): Issue() encrypts and stores it, Authenticate() decrypts it
+// back, Rotate() carries it forward onto the new row, a principal with no
+// captured name stores NULL (mirrors the roles/amr empty-array pattern
+// above, extended to this column), and a session row that predates the
+// migration -- display_name_ciphertext genuinely absent from the INSERT,
+// not just empty -- loads with an empty DisplayName instead of erroring.
+func TestPostgresSessionDisplayNameEncryptedRotatedAndBackwardCompatible(t *testing.T) {
+	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err = pool.Exec(ctx, `DROP SCHEMA public CASCADE;CREATE SCHEMA public`); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+
+	identityStore := NewPostgresIdentityStore(pool)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	principal := Principal{
+		Issuer: "https://api.solov.example", Subject: "2224",
+		Platform: PlatformSub2API, PlatformUserID: "2224", AuthTime: now,
+		DisplayName: "xufei",
+	}
+	identity, err := identityStore.ResolveOrCreate(ctx, principal, "req-displayname-identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	audit := NewPostgresSecurityAuditSink(pool)
+	sessionStore := NewPostgresSessionStore(pool, testSessionKeyring())
+	manager, err := NewSessionManager(sessionStore, SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return now }
+	issued, err := manager.Issue(ctx, IssueSessionInput{UserID: identity.UserID, Principal: principal, RequestID: "req-displayname-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The stored column must be actual ciphertext -- never the plaintext
+	// name, and long enough that it plainly isn't just base64 of "xufei".
+	var storedCiphertext []byte
+	if err = pool.QueryRow(ctx, `SELECT display_name_ciphertext FROM auth_sessions WHERE id=$1`, issued.Session.ID).
+		Scan(&storedCiphertext); err != nil {
+		t.Fatal(err)
+	}
+	if len(storedCiphertext) < 16 || strings.Contains(string(storedCiphertext), "xufei") {
+		t.Fatalf("display_name_ciphertext does not look encrypted: %q", storedCiphertext)
+	}
+
+	// Authenticate (used by GET /api/v1/auth/session) must decrypt it back.
+	authenticated, err := manager.Authenticate(ctx, issued.Token, ClientBinding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authenticated.DisplayName != "xufei" {
+		t.Fatalf("Authenticate must decrypt the captured display name, got %q", authenticated.DisplayName)
+	}
+
+	// Rotate must carry it forward onto the new row (mirrors sessionStatus's
+	// CSRF-rotation branch, which rebuilds Principal.DisplayName from the
+	// just-authenticated session).
+	manager.now = func() time.Time { return now.Add(time.Minute) }
+	rotatePrincipal := principal
+	rotatePrincipal.DisplayName = authenticated.DisplayName
+	rotated, err := manager.Rotate(ctx, RotateSessionInput{Token: issued.Token, ExpectedSessionID: issued.Session.ID, Principal: rotatePrincipal, RequestID: "req-displayname-rotate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Session.DisplayName != "xufei" {
+		t.Fatalf("Rotate must carry the display name forward, got %q", rotated.Session.DisplayName)
+	}
+	reauthenticated, err := manager.Authenticate(ctx, rotated.Token, ClientBinding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reauthenticated.DisplayName != "xufei" {
+		t.Fatalf("post-rotation Authenticate must still decrypt the display name, got %q", reauthenticated.DisplayName)
+	}
+
+	// A principal with no captured name (OIDC, or a platform response that
+	// genuinely returned none) must store NULL, not an encrypted empty
+	// string -- same "don't encrypt nothing" convention as
+	// application/crypto.go's encryptProfile.
+	noNamePrincipal := Principal{Issuer: "https://api.solov.example", Subject: "2225", Platform: PlatformSub2API, PlatformUserID: "2225", AuthTime: now}
+	noNameIdentity, err := identityStore.ResolveOrCreate(ctx, noNamePrincipal, "req-noname-identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noNameIssued, err := manager.Issue(ctx, IssueSessionInput{UserID: noNameIdentity.UserID, Principal: noNamePrincipal, RequestID: "req-noname-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var noNameCiphertext []byte
+	if err = pool.QueryRow(ctx, `SELECT display_name_ciphertext FROM auth_sessions WHERE id=$1`, noNameIssued.Session.ID).
+		Scan(&noNameCiphertext); err != nil {
+		t.Fatal(err)
+	}
+	if noNameCiphertext != nil {
+		t.Fatalf("a principal with no captured name must store NULL, got %q", noNameCiphertext)
+	}
+	noNameAuthenticated, err := manager.Authenticate(ctx, noNameIssued.Token, ClientBinding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noNameAuthenticated.DisplayName != "" {
+		t.Fatalf("a NULL ciphertext must decrypt to empty, got %q", noNameAuthenticated.DisplayName)
+	}
+
+	// Backward compatibility: a session row inserted the way pre-migration
+	// code would have -- display_name_ciphertext entirely absent from the
+	// column list, not merely NULL-valued -- must still load cleanly via
+	// AuthenticateAndTouch instead of erroring.
+	// validOpaqueToken requires a 43-128 char token; pad well past the
+	// minimum so this reads unambiguously as a test fixture, not a real one.
+	preMigrationToken := "pre-migration-token-" + strings.Repeat("a", 30)
+	preMigrationTokenHash := sha256Hex(preMigrationToken)
+	if _, err = pool.Exec(ctx, `
+		INSERT INTO auth_sessions(
+			id,family_id,invoice_user_id,token_hash,csrf_hash,roles,acr,amr,
+			created_at,last_seen_at,idle_expires_at,absolute_expires_at
+		) VALUES($1,$2,$3,$4,$5,'{}','',
+			'{}',$6::timestamptz,$6::timestamptz,$6::timestamptz+interval '1 hour',$6::timestamptz+interval '4 hours')`,
+		randomUUIDv4(), randomUUIDv4(), identity.UserID, preMigrationTokenHash, sha256Hex("pre-migration-csrf"), now); err != nil {
+		t.Fatal(err)
+	}
+	preMigration, err := manager.Authenticate(ctx, preMigrationToken, ClientBinding{})
+	if err != nil {
+		t.Fatalf("a pre-migration session (NULL display_name_ciphertext) must still authenticate: %v", err)
+	}
+	if preMigration.DisplayName != "" {
+		t.Fatalf("a pre-migration session must decrypt to an empty display name, got %q", preMigration.DisplayName)
 	}
 }
