@@ -662,7 +662,9 @@ func (s *Store) ExternalUserIDForFundingLot(ctx context.Context, lotID string) (
 	return externalUserID, err
 }
 
-func (s *Store) ListFundingLots(ctx context.Context, principalID string) ([]domain.FundingLot, error) {
+// ListFundingLots: platform (XM-INV-PLATFORM-SCOPE) narrows the result to
+// one source instance type when set; empty means unscoped.
+func (s *Store) ListFundingLots(ctx context.Context, principalID string, platform domain.SourceType) ([]domain.FundingLot, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT fl.id,fl.invoice_user_id,fl.source_instance_id,si.source_type,
 			fl.external_order_id,fl.trade_no,fl.currency,fl.original_minor,
@@ -674,9 +676,9 @@ func (s *Store) ListFundingLots(ctx context.Context, principalID string) ([]doma
 			COALESCE(fl.completed_at,'epoch'::timestamptz),fl.observed_at,fl.updated_at
 		FROM funding_lots fl JOIN source_instances si ON si.id=fl.source_instance_id
 		LEFT JOIN source_account_eligibility_state eas ON eas.external_account_id=fl.external_account_id
-		WHERE fl.invoice_user_id=$1
+		WHERE fl.invoice_user_id=$1 AND ($2='' OR si.source_type=$2)
 		ORDER BY fl.completed_at DESC NULLS LAST,fl.id
-		LIMIT 500`, principalID)
+		LIMIT 500`, principalID, string(platform))
 	if err != nil {
 		return nil, err
 	}

@@ -34,6 +34,22 @@ export function appendEmbeddedParams(
   return `${path}${separator}ui_mode=embedded${platformSuffix}`;
 }
 
+// XM-INV-PLATFORM-SCOPE (CR-0003): resolves the embedded view's effective
+// platform scope. A platform-password session's own login platform is
+// authoritative once known -- it is what the backend actually enforces
+// server-side on every /api/v1/user/* endpoint, so the frontend must agree
+// with it rather than trust a URL param the embedder could get wrong (or
+// simply not bother setting, now that the server enforces the boundary on
+// its own). The `platform` URL param (parseEmbeddedPlatform) remains a
+// fallback for a session with no platform -- an OIDC administrator embed, or
+// the brief window before the session finishes loading.
+export function resolveEmbeddedPlatform(
+  sessionPlatform: SourceType | null | undefined,
+  urlPlatform: SourceType | null,
+): SourceType | null {
+  return sessionPlatform ?? urlPlatform;
+}
+
 // Narrows a list of platform-tagged items (funding lots, eligibility
 // summaries, source account rows) down to one platform once the embedded
 // view is scoped; unscoped views (embeddedPlatform === null) are returned

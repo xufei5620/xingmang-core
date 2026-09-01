@@ -319,7 +319,7 @@ func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {
 	if err = store.UpsertFundingLot(ctx, lot); err != nil {
 		t.Fatal(err)
 	}
-	connected, err := service.ListExternalAccounts(ctx, user.ID)
+	connected, err := service.ListExternalAccounts(ctx, user.ID, "")
 	if err != nil || len(connected) != 1 || connected[0].BindingStatus != "verified" ||
 		connected[0].MaskedExternalUserID == "external-user-1" || connected[0].LastObservedAt.IsZero() {
 		t.Fatalf("connected source accounts=%+v err=%v", connected, err)
@@ -354,7 +354,7 @@ func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {
 		IdempotencyKey: "submit-1", Allocations: []ledger.AllocationInput{{
 			FundingLotID: lot.ID, AmountMinor: domain.MinimumRequestMinor,
 		}},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {
 	if result.Lot.Verification != domain.VerificationFrozen || len(result.AttentionRequestIDs) != 1 {
 		t.Fatalf("refund result=%+v", result)
 	}
-	requests, err := service.ListRequests(ctx, user.ID, false)
+	requests, err := service.ListRequests(ctx, user.ID, false, "")
 	if err != nil || len(requests) != 1 || requests[0].Status != domain.StatusRefundAttention {
 		t.Fatalf("requests=%+v err=%v", requests, err)
 	}
@@ -484,7 +484,7 @@ func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {
 	if err != nil || resolution.EvidenceReference != "manual-refund-review-1" || resolution.Note != "人工核对后确认本单无需红冲" {
 		t.Fatalf("refund resolution=%+v err=%v", resolution, err)
 	}
-	requests, err = service.ListRequests(ctx, user.ID, false)
+	requests, err = service.ListRequests(ctx, user.ID, false, "")
 	if err != nil || requests[0].Status != domain.StatusIssued {
 		t.Fatalf("resolved request=%+v err=%v", requests, err)
 	}
@@ -675,11 +675,11 @@ func TestSourceBatchProcessorProjectsBindingsCandidatesLotsAndRefunds(t *testing
 	if _, err = processor.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	connected, err := service.ListExternalAccounts(ctx, user.ID)
+	connected, err := service.ListExternalAccounts(ctx, user.ID, "")
 	if err != nil || len(connected) != 2 {
 		t.Fatalf("projected bindings=%+v err=%v", connected, err)
 	}
-	lots, err := service.ListFundingLots(ctx, user.ID)
+	lots, err := service.ListFundingLots(ctx, user.ID, "")
 	if err != nil || len(lots) != 2 {
 		t.Fatalf("projected lots=%+v err=%v", lots, err)
 	}
@@ -787,7 +787,7 @@ func TestSourceBatchProcessorProjectsBindingsCandidatesLotsAndRefunds(t *testing
 		IdempotencyKey: "sync-refund-request", Allocations: []ledger.AllocationInput{{
 			FundingLotID: sub2Lot.ID, AmountMinor: 20_000,
 		}},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +808,7 @@ func TestSourceBatchProcessorProjectsBindingsCandidatesLotsAndRefunds(t *testing
 	if _, err = processor.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	requests, err := service.ListRequests(ctx, user.ID, false)
+	requests, err := service.ListRequests(ctx, user.ID, false, "")
 	if err != nil || len(requests) != 1 || requests[0].Status != domain.StatusRefundAttention {
 		t.Fatalf("projected refund request=%+v err=%v", requests, err)
 	}

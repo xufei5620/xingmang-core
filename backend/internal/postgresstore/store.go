@@ -299,6 +299,13 @@ type SubmitInput struct {
 	MinimumRequestMinor       int64
 	Freshness                 SourceFreshnessPolicy
 	Actor                     AuditActor
+	// Platform (XM-INV-PLATFORM-SCOPE) is always sourced server-side from the
+	// session, never from client input. When set, every allocated funding lot
+	// must belong to this platform or the whole submission is rejected --
+	// never partially accepted (the existing source-mixing check already
+	// makes every allocation share one source_instance_id/type; this adds
+	// that the shared type must also match the session's platform).
+	Platform domain.SourceType
 }
 
 func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceRequest, error) {
@@ -419,6 +426,12 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 	for _, a := range allocs {
 		l := locked[a.FundingLotID]
 		if l.user != in.PrincipalID {
+			return domain.InvoiceRequest{}, domain.ErrForbidden
+		}
+		if in.Platform != "" && domain.SourceType(l.sourceType) != in.Platform {
+			// Same shape as the ownership check above: from a platform-scoped
+			// session's point of view, a lot on the other platform is not
+			// theirs to allocate, exactly like a lot owned by someone else.
 			return domain.InvoiceRequest{}, domain.ErrForbidden
 		}
 		if l.source != in.SourceInstanceID {

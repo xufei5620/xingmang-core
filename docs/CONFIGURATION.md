@@ -229,6 +229,24 @@ indistinguishable response by design (verified against
 preserves that and never surfaces which case occurred, matching CR-0004's
 "failure must not leak whether the account exists" requirement.
 
+### Embedded platform scope (CR-0003)
+
+A platform embeds the invoice center per-account via `?ui_mode=embedded`. As
+of XM-INV-PLATFORM-SCOPE, a platform-password session's own login platform is
+authoritative for scoping that embedded view: the backend already enforces
+it server-side on every `/api/v1/user/*` endpoint (funding lots, source
+accounts, eligibility summary, invoice requests, submit, cancel), so a
+Sub2API session can never see or operate on New API data and vice versa,
+regardless of the embed URL.
+
+**Operators no longer need to append `&platform=sub2api`/`&platform=newapi`
+to the embed link.** The URL param still exists as a fallback, but it now
+only matters for a session with no platform of its own -- an OIDC
+administrator embedding on a platform's behalf, or the brief window before
+the session finishes loading. For a platform-password session the param is
+redundant (the session already determines the scope) and is ignored in favor
+of it.
+
 ## 3. SMTP
 
 Local development uses Mailpit without credentials. Production requires TLS,

@@ -113,7 +113,7 @@ func TestRequestDetailEnforcesOwnershipAndListAdvertisesPagination(t *testing.T)
 		PrincipalID: "u1", ProfileID: profile.ID, SourceInstanceID: "sub2-main",
 		IdempotencyKey: "request-detail-test",
 		Allocations:    []ledger.AllocationInput{{FundingLotID: "u1-lot", AmountMinor: 20_000}},
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +719,7 @@ func TestPDFUploadAndDownloadRequireStateAndOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := service.Submit(context.Background(), ledger.SubmitInput{PrincipalID: "u1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "pdf", Allocations: []ledger.AllocationInput{{FundingLotID: "u1-lot", AmountMinor: 20_000}}})
+	request, err := service.Submit(context.Background(), ledger.SubmitInput{PrincipalID: "u1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "pdf", Allocations: []ledger.AllocationInput{{FundingLotID: "u1-lot", AmountMinor: 20_000}}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +801,7 @@ func TestUserCancelReleasesPendingAndReturnedReservations(t *testing.T) {
 				PrincipalID: "u1", ProfileID: profile.ID, SourceInstanceID: "sub2-main",
 				IdempotencyKey: "cancel-" + name,
 				Allocations:    []ledger.AllocationInput{{FundingLotID: "u1-lot", AmountMinor: 20_000}},
-			})
+			}, "")
 			if submitErr != nil {
 				t.Fatal(submitErr)
 			}
@@ -820,7 +820,7 @@ func TestUserCancelReleasesPendingAndReturnedReservations(t *testing.T) {
 			if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"user_cancelled"`) {
 				t.Fatalf("cancel status=%d body=%s", recorder.Code, recorder.Body.String())
 			}
-			lots, listErr := service.ListFundingLots(context.Background(), "u1")
+			lots, listErr := service.ListFundingLots(context.Background(), "u1", "")
 			if listErr != nil {
 				t.Fatal(listErr)
 			}

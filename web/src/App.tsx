@@ -67,6 +67,7 @@ import {
   accountIdentityLabel,
   appendEmbeddedParams,
   parseEmbeddedPlatform,
+  resolveEmbeddedPlatform,
   scopeBySource,
 } from "./lib/embedded-scope";
 import { apiCapabilities, apiMode, invoiceApi } from "./lib/api";
@@ -109,14 +110,27 @@ const embeddedUserMode =
   initialApplicationURL.searchParams.get("ui_mode") === "embedded";
 // XM-INV-EMBED-SCOPE: narrows the embedded view to one platform's data; see
 // lib/embedded-scope.ts. Parsed once from the initial URL, same as
-// embeddedUserMode above.
-const embeddedPlatform = parseEmbeddedPlatform(
+// embeddedUserMode above. XM-INV-PLATFORM-SCOPE (CR-0003) made the session's
+// own platform authoritative over this URL param wherever data is actually
+// scoped (useEmbeddedPlatform below) -- this raw URL-derived value survives
+// only as that fallback and to build in-app navigation links (userRoute),
+// which intentionally keep reflecting exactly what was in the original URL.
+const urlEmbeddedPlatform = parseEmbeddedPlatform(
   initialApplicationURL.searchParams,
   embeddedUserMode,
 );
 
 function userRoute(path: string) {
-  return appendEmbeddedParams(path, embeddedUserMode, embeddedPlatform);
+  return appendEmbeddedParams(path, embeddedUserMode, urlEmbeddedPlatform);
+}
+
+// XM-INV-PLATFORM-SCOPE: the effective embedded platform scope, session-first
+// (see resolveEmbeddedPlatform's own doc comment). Call this from any
+// component that scopes data or UI to one platform; do not read
+// urlEmbeddedPlatform directly for that purpose.
+function useEmbeddedPlatform(): SourceType | null {
+  const { user } = useAuth();
+  return resolveEmbeddedPlatform(user?.platform, urlEmbeddedPlatform);
 }
 
 type AppData = {
@@ -366,6 +380,7 @@ function PortalLayout({
   const [mobileOpen, setMobileOpen] = useState(false);
   const { loadError, refresh, sourceAccounts } = useData();
   const { user, logout, stepUpRequired } = useAuth();
+  const embeddedPlatform = useEmbeddedPlatform();
   const toast = useContext(ToastContext);
   const location = useLocation();
   const nav = admin ? adminNav : userNav;
@@ -575,6 +590,7 @@ function PageHeader({
 
 function SummaryCards() {
   const { summary, sourceAccounts: allSourceAccounts } = useData();
+  const embeddedPlatform = useEmbeddedPlatform();
   // Embedded views collapse the big "已关联的平台账号" panel into this
   // compact card once every (scoped) account is connected -- the panel's
   // remaining job there is binding guidance, which only matters while an
@@ -683,6 +699,7 @@ function SourceBadge({ source }: { source: SourceType }) {
 
 function SourceAccountStatus() {
   const { sourceAccounts: allSourceAccounts, loading, refresh } = useData();
+  const embeddedPlatform = useEmbeddedPlatform();
   const sourceAccounts = scopeBySource(allSourceAccounts, embeddedPlatform);
   if (loading) return null;
   if (
@@ -925,6 +942,7 @@ function OrdersPage() {
   const { loading, orders, profiles, eligibilitySummaries, refresh } = useData();
   const toast = useContext(ToastContext);
   const navigate = useNavigate();
+  const embeddedPlatform = useEmbeddedPlatform();
   const [source, setSource] = useState<"all" | SourceType>(
     embeddedPlatform ?? "all",
   );

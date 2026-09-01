@@ -82,7 +82,14 @@ func loadAllocations(ctx context.Context, q interface {
 	return out, rows.Err()
 }
 
-func (s *Store) GetRequestRecord(ctx context.Context, principalID, requestID string, admin bool) (RequestRecord, error) {
+// GetRequestRecord loads one request. platform (XM-INV-PLATFORM-SCOPE) is
+// always empty for admin or platform-less sessions. When set and the request
+// belongs to a different platform, it reports ErrNotFound rather than
+// ErrForbidden -- the request is genuinely this principal's own (the
+// ownership check above already passed or is bypassed by admin), but a
+// platform-scoped session must never be able to distinguish "belongs to the
+// other platform" from "does not exist" (CR-0003: no existence leak).
+func (s *Store) GetRequestRecord(ctx context.Context, principalID, requestID string, admin bool, platform domain.SourceType) (RequestRecord, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return RequestRecord{}, err
@@ -95,15 +102,18 @@ func (s *Store) GetRequestRecord(ctx context.Context, principalID, requestID str
 	if !admin && rec.Request.PrincipalID != principalID {
 		return RequestRecord{}, domain.ErrForbidden
 	}
+	if !admin && platform != "" && rec.Request.SourceType != platform {
+		return RequestRecord{}, domain.ErrNotFound
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return RequestRecord{}, err
 	}
 	return rec, nil
 }
 
-func (s *Store) ListRequestRecords(ctx context.Context, principalID string, admin bool, limit int) ([]RequestRecord, error) {
+func (s *Store) ListRequestRecords(ctx context.Context, principalID string, admin bool, limit int, platform domain.SourceType) ([]RequestRecord, error) {
 	page, err := s.ListRequestRecordsPage(ctx, RequestPageQuery{
-		PrincipalID: principalID, Admin: admin, Limit: limit,
+		PrincipalID: principalID, Admin: admin, Limit: limit, Platform: platform,
 	})
 	if err != nil {
 		return nil, err
@@ -154,6 +164,9 @@ func (s *Store) ListRequestRecordsPage(ctx context.Context, in RequestPageQuery)
 	}
 	if strings.TrimSpace(in.SourceInstanceID) != "" {
 		conditions = append(conditions, "ir.source_instance_id="+addArg(in.SourceInstanceID))
+	}
+	if in.Platform != "" {
+		conditions = append(conditions, "si.source_type="+addArg(string(in.Platform)))
 	}
 	if len(in.Statuses) > 0 {
 		statuses := make([]string, len(in.Statuses))
@@ -355,7 +368,10 @@ func issueReservations(ctx context.Context, tx pgx.Tx, requestID string) error {
 	return err
 }
 
-func (s *Store) CancelRequest(ctx context.Context, principalID, requestID string, expectedVersion int64, actor AuditActor) (RequestRecord, error) {
+// CancelRequest: see GetRequestRecord's doc comment for why a platform
+// mismatch (XM-INV-PLATFORM-SCOPE) reports ErrNotFound rather than
+// ErrForbidden -- the same no-existence-leak reasoning applies here.
+func (s *Store) CancelRequest(ctx context.Context, principalID, requestID string, expectedVersion int64, platform domain.SourceType, actor AuditActor) (RequestRecord, error) {
 	if expectedVersion <= 0 {
 		return RequestRecord{}, domain.ErrVersionConflict
 	}
@@ -370,6 +386,9 @@ func (s *Store) CancelRequest(ctx context.Context, principalID, requestID string
 	}
 	if rec.Request.PrincipalID != principalID {
 		return RequestRecord{}, domain.ErrForbidden
+	}
+	if platform != "" && rec.Request.SourceType != platform {
+		return RequestRecord{}, domain.ErrNotFound
 	}
 	if rec.Request.Version != expectedVersion {
 		return RequestRecord{}, domain.ErrVersionConflict
@@ -762,14 +781,22 @@ func sameDocument(a, b domain.InvoiceDocument) bool {
 		a.ScanStatus == b.ScanStatus && a.IssuedAt.UnixMicro() == b.IssuedAt.UnixMicro()
 }
 
-func (s *Store) GetDocumentForRequest(ctx context.Context, principalID, requestID string) (domain.InvoiceDocument, error) {
+// GetDocumentForRequest: a request belonging to a different platform than
+// the scoped session (XM-INV-PLATFORM-SCOPE) is excluded by the same
+// WHERE clause as "does not exist" or "not this principal's" -- the query
+// itself cannot distinguish those cases, which is exactly the no-existence
+// -leak behavior CR-0003 requires for a platform-scoped session.
+func (s *Store) GetDocumentForRequest(ctx context.Context, principalID, requestID string, platform domain.SourceType) (domain.InvoiceDocument, error) {
 	var doc domain.InvoiceDocument
 	err := s.pool.QueryRow(ctx, `
 		SELECT d.id,d.invoice_request_id,d.invoice_number,d.object_key,d.object_version,
 			d.sha256,d.size_bytes,d.mime_type,d.scan_status,d.uploaded_by,d.issued_at,d.created_at
-		FROM invoice_documents d JOIN invoice_requests ir ON ir.id=d.invoice_request_id
-		WHERE d.invoice_request_id=$1 AND ir.invoice_user_id=$2 AND ir.status='issued'`,
-		requestID, principalID).Scan(&doc.ID, &doc.RequestID, &doc.InvoiceNumber,
+		FROM invoice_documents d
+			JOIN invoice_requests ir ON ir.id=d.invoice_request_id
+			JOIN source_instances si ON si.id=ir.source_instance_id
+		WHERE d.invoice_request_id=$1 AND ir.invoice_user_id=$2 AND ir.status='issued'
+			AND ($3='' OR si.source_type=$3)`,
+		requestID, principalID, string(platform)).Scan(&doc.ID, &doc.RequestID, &doc.InvoiceNumber,
 		&doc.ObjectKey, &doc.ObjectVersion, &doc.SHA256, &doc.SizeBytes, &doc.MIME,
 		&doc.ScanStatus, &doc.UploadedBy, &doc.IssuedAt, &doc.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

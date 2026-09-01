@@ -324,7 +324,9 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 	return item, nil
 }
 
-func (s *Store) ListEligibilitySummaries(ctx context.Context, principalID string) ([]EligibilitySummary, error) {
+// ListEligibilitySummaries: platform (XM-INV-PLATFORM-SCOPE) narrows the
+// result to one source instance type when set; empty means unscoped.
+func (s *Store) ListEligibilitySummaries(ctx context.Context, principalID string, platform domain.SourceType) ([]EligibilitySummary, error) {
 	if !eligibilityUUIDPattern.MatchString(strings.TrimSpace(principalID)) {
 		return nil, domain.ErrForbidden
 	}
@@ -352,7 +354,8 @@ func (s *Store) ListEligibilitySummaries(ctx context.Context, principalID string
 				sum(service_units) FILTER (WHERE credit_kind NOT IN ('LEGACY_NON_INVOICEABLE','PRE_POLICY_NON_INVOICEABLE')) noncash
 			FROM source_credit_events ce WHERE ce.external_account_id=ea.id
 		) c ON true
-		WHERE ea.invoice_user_id=$1 ORDER BY si.source_type,si.name,si.id`, principalID)
+		WHERE ea.invoice_user_id=$1 AND ($2='' OR si.source_type=$2)
+		ORDER BY si.source_type,si.name,si.id`, principalID, string(platform))
 	if err != nil {
 		return nil, err
 	}

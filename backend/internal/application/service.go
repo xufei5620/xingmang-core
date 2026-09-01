@@ -364,8 +364,8 @@ func (s *Service) ClaimPlatformIdentity(ctx context.Context, userID, platform, p
 		auditActor(ctx, "platform", userID, "platform password login claimed a pre-existing projected identity"))
 }
 
-func (s *Service) ListExternalAccounts(ctx context.Context, principalID string) ([]postgresstore.ConnectedSourceAccount, error) {
-	return s.store.ListExternalAccounts(ctx, principalID)
+func (s *Service) ListExternalAccounts(ctx context.Context, principalID string, platform domain.SourceType) ([]postgresstore.ConnectedSourceAccount, error) {
+	return s.store.ListExternalAccounts(ctx, principalID, platform)
 }
 
 // GetExternalAccountBySourceUser is a read-only passthrough (see
@@ -569,8 +569,8 @@ func (s *Service) ListProfiles(ctx context.Context, principalID string) ([]domai
 	return out, nil
 }
 
-func (s *Service) ListFundingLots(ctx context.Context, principalID string) ([]domain.FundingLot, error) {
-	lots, err := s.store.ListFundingLots(ctx, principalID)
+func (s *Service) ListFundingLots(ctx context.Context, principalID string, platform domain.SourceType) ([]domain.FundingLot, error) {
+	lots, err := s.store.ListFundingLots(ctx, principalID, platform)
 	if err != nil {
 		return nil, err
 	}
@@ -605,7 +605,7 @@ func (s *Service) ListFundingLots(ctx context.Context, principalID string) ([]do
 	return lots, nil
 }
 
-func (s *Service) Submit(ctx context.Context, input ledger.SubmitInput) (domain.InvoiceRequest, error) {
+func (s *Service) Submit(ctx context.Context, input ledger.SubmitInput, platform domain.SourceType) (domain.InvoiceRequest, error) {
 	user, err := s.store.GetUser(ctx, input.PrincipalID)
 	if err != nil {
 		return domain.InvoiceRequest{}, err
@@ -654,8 +654,8 @@ func (s *Service) Submit(ctx context.Context, input ledger.SubmitInput) (domain.
 		SourceInstanceID: input.SourceInstanceID, IdempotencyKey: input.IdempotencyKey,
 		ProfileSnapshotCiphertext: encryptedSnapshot, IssuerCode: "default",
 		Allocations: allocations, MinimumRequestMinor: settings.MinimumRequestMinor,
-		Freshness: s.sourceFreshnessPolicy(),
-		Actor:     auditActor(ctx, "user", input.PrincipalID, "invoice request submitted"),
+		Freshness: s.sourceFreshnessPolicy(), Platform: platform,
+		Actor: auditActor(ctx, "user", input.PrincipalID, "invoice request submitted"),
 	})
 	if err != nil {
 		return domain.InvoiceRequest{}, err
@@ -664,8 +664,8 @@ func (s *Service) Submit(ctx context.Context, input ledger.SubmitInput) (domain.
 	return request, nil
 }
 
-func (s *Service) Cancel(ctx context.Context, principalID, requestID string, expectedVersion int64) (domain.InvoiceRequest, error) {
-	record, err := s.store.CancelRequest(ctx, principalID, requestID, expectedVersion,
+func (s *Service) Cancel(ctx context.Context, principalID, requestID string, expectedVersion int64, platform domain.SourceType) (domain.InvoiceRequest, error) {
+	record, err := s.store.CancelRequest(ctx, principalID, requestID, expectedVersion, platform,
 		auditActor(ctx, "user", principalID, "invoice request cancelled"))
 	if err != nil {
 		return domain.InvoiceRequest{}, err
@@ -739,7 +739,7 @@ func (s *Service) ConfirmManualIssue(ctx context.Context, adminID, requestID str
 }
 
 func (s *Service) GetIssueSnapshot(ctx context.Context, adminID, requestID string) (IssueSnapshot, error) {
-	record, err := s.store.GetRequestRecord(ctx, "", requestID, true)
+	record, err := s.store.GetRequestRecord(ctx, "", requestID, true, "")
 	if err != nil {
 		return IssueSnapshot{}, err
 	}
@@ -779,7 +779,7 @@ func validateIssueSnapshot(snapshot IssueSnapshot, storedRevision int64, setting
 }
 
 func (s *Service) AttachDocument(ctx context.Context, adminID string, document domain.InvoiceDocument, expectedVersion int64) (domain.InvoiceRequest, domain.InvoiceDocument, domain.EmailOutbox, error) {
-	record, err := s.store.GetRequestRecord(ctx, "", document.RequestID, true)
+	record, err := s.store.GetRequestRecord(ctx, "", document.RequestID, true, "")
 	if err != nil {
 		return domain.InvoiceRequest{}, domain.InvoiceDocument{}, domain.EmailOutbox{}, err
 	}
@@ -811,8 +811,8 @@ func (s *Service) AttachDocument(ctx context.Context, adminID string, document d
 	return request, saved, outbox, err
 }
 
-func (s *Service) GetDocumentForRequest(ctx context.Context, principalID, requestID string) (domain.InvoiceDocument, error) {
-	return s.store.GetDocumentForRequest(ctx, principalID, requestID)
+func (s *Service) GetDocumentForRequest(ctx context.Context, principalID, requestID string, platform domain.SourceType) (domain.InvoiceDocument, error) {
+	return s.store.GetDocumentForRequest(ctx, principalID, requestID, platform)
 }
 
 func (s *Service) GetDocumentForRequestAsAdmin(ctx context.Context, requestID string) (domain.InvoiceDocument, error) {
@@ -830,12 +830,16 @@ type InvoiceDeliveryStatus struct {
 	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
 }
 
-func (s *Service) GetInvoiceDeliveryState(ctx context.Context, principalID, requestID string, admin bool) (postgresstore.InvoiceDeliveryState, error) {
-	return s.store.GetInvoiceDeliveryState(ctx, principalID, requestID, admin)
+func (s *Service) GetInvoiceDeliveryState(ctx context.Context, principalID, requestID string, admin bool, platform domain.SourceType) (postgresstore.InvoiceDeliveryState, error) {
+	return s.store.GetInvoiceDeliveryState(ctx, principalID, requestID, admin, platform)
 }
 
+// GetInvoiceDeliveryStatus is not reachable from any HTTP handler (unlike
+// GetInvoiceDeliveryState, it is not part of OperationsService); unscoped
+// (XM-INV-PLATFORM-SCOPE does not apply -- nothing calls this with a
+// platform-scoped session).
 func (s *Service) GetInvoiceDeliveryStatus(ctx context.Context, principalID, requestID string, admin bool) (InvoiceDeliveryStatus, error) {
-	state, err := s.store.GetInvoiceDeliveryState(ctx, principalID, requestID, admin)
+	state, err := s.store.GetInvoiceDeliveryState(ctx, principalID, requestID, admin, "")
 	if err != nil {
 		return InvoiceDeliveryStatus{}, err
 	}
@@ -848,7 +852,7 @@ func (s *Service) GetInvoiceDeliveryStatus(ctx context.Context, principalID, req
 }
 
 func (s *Service) RequeueEmail(ctx context.Context, requestID, adminID, reason string) (domain.EmailOutbox, error) {
-	record, err := s.store.GetRequestRecord(ctx, "", requestID, true)
+	record, err := s.store.GetRequestRecord(ctx, "", requestID, true, "")
 	if err != nil {
 		return domain.EmailOutbox{}, err
 	}
@@ -873,12 +877,12 @@ func (s *Service) RecordAdminAudit(ctx context.Context, adminID, action, objectI
 	return s.store.RecordAdminOperationalAudit(ctx, adminID, action, objectID, requestID, outcome)
 }
 
-func (s *Service) ListRequests(ctx context.Context, principalID string, admin bool) ([]domain.InvoiceRequest, error) {
+func (s *Service) ListRequests(ctx context.Context, principalID string, admin bool, platform domain.SourceType) ([]domain.InvoiceRequest, error) {
 	limit := 200
 	if admin {
 		limit = 100
 	}
-	records, err := s.store.ListRequestRecords(ctx, principalID, admin, limit)
+	records, err := s.store.ListRequestRecords(ctx, principalID, admin, limit, platform)
 	if err != nil {
 		return nil, err
 	}
@@ -893,8 +897,8 @@ func (s *Service) ListRequests(ctx context.Context, principalID string, admin bo
 	return out, nil
 }
 
-func (s *Service) GetRequest(ctx context.Context, principalID, requestID string, admin bool) (domain.InvoiceRequest, error) {
-	record, err := s.store.GetRequestRecord(ctx, principalID, requestID, admin)
+func (s *Service) GetRequest(ctx context.Context, principalID, requestID string, admin bool, platform domain.SourceType) (domain.InvoiceRequest, error) {
+	record, err := s.store.GetRequestRecord(ctx, principalID, requestID, admin, platform)
 	if err != nil {
 		return domain.InvoiceRequest{}, err
 	}
@@ -909,6 +913,10 @@ type RequestPageQuery struct {
 	BeforeID          string
 	Statuses          []domain.RequestStatus
 	SourceInstanceID  string
+	// Platform scopes the page to one platform's requests (XM-INV-PLATFORM-SCOPE).
+	// Empty means unscoped; always sourced from the session, never from an
+	// admin-supplied filter (admin sessions never carry a platform).
+	Platform domain.SourceType
 }
 
 type RequestPage struct {
@@ -923,6 +931,7 @@ func (s *Service) ListRequestsPage(ctx context.Context, in RequestPageQuery) (Re
 		PrincipalID: in.PrincipalID, Admin: in.Admin, Limit: in.Limit,
 		BeforeSubmittedAt: in.BeforeSubmittedAt, BeforeID: in.BeforeID,
 		Statuses: in.Statuses, SourceInstanceID: in.SourceInstanceID,
+		Platform: in.Platform,
 	})
 	if err != nil {
 		return RequestPage{}, err
@@ -1117,8 +1126,8 @@ type UserEligibilitySummary struct {
 	Reasons           []string           `json:"reasons"`
 }
 
-func (s *Service) ListUserEligibilitySummaries(ctx context.Context, principalID string) ([]UserEligibilitySummary, error) {
-	base, err := s.store.ListEligibilitySummaries(ctx, strings.TrimSpace(principalID))
+func (s *Service) ListUserEligibilitySummaries(ctx context.Context, principalID string, platform domain.SourceType) ([]UserEligibilitySummary, error) {
+	base, err := s.store.ListEligibilitySummaries(ctx, strings.TrimSpace(principalID), platform)
 	if err != nil {
 		return nil, err
 	}

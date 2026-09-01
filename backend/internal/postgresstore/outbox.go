@@ -159,7 +159,10 @@ func (s *Store) GetOutbox(ctx context.Context, outboxID string) (domain.EmailOut
 	return out, err
 }
 
-func (s *Store) GetInvoiceDeliveryState(ctx context.Context, principalID, requestID string, admin bool) (InvoiceDeliveryState, error) {
+// GetInvoiceDeliveryState: see postgresstore's GetRequestRecord doc comment
+// for why a platform mismatch (XM-INV-PLATFORM-SCOPE) reports ErrNotFound
+// rather than ErrForbidden.
+func (s *Store) GetInvoiceDeliveryState(ctx context.Context, principalID, requestID string, admin bool, platform domain.SourceType) (InvoiceDeliveryState, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return InvoiceDeliveryState{}, err
@@ -171,6 +174,9 @@ func (s *Store) GetInvoiceDeliveryState(ctx context.Context, principalID, reques
 	}
 	if !admin && record.Request.PrincipalID != principalID {
 		return InvoiceDeliveryState{}, domain.ErrForbidden
+	}
+	if !admin && platform != "" && record.Request.SourceType != platform {
+		return InvoiceDeliveryState{}, domain.ErrNotFound
 	}
 	if !admin && record.Request.Status != domain.StatusIssued {
 		return InvoiceDeliveryState{}, domain.ErrInvalidState

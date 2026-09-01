@@ -4,6 +4,7 @@ import {
   accountIdentityLabel,
   appendEmbeddedParams,
   parseEmbeddedPlatform,
+  resolveEmbeddedPlatform,
   scopeBySource,
 } from "./embedded-scope";
 import type { AuthUser, SourceAccount } from "../types";
@@ -56,6 +57,27 @@ describe("appendEmbeddedParams", () => {
     expect(
       appendEmbeddedParams("/records?request_id=abc", true, "newapi"),
     ).toBe("/records?request_id=abc&ui_mode=embedded&platform=newapi");
+  });
+});
+
+describe("resolveEmbeddedPlatform", () => {
+  it("prefers the session's platform over the URL param when both are set", () => {
+    expect(resolveEmbeddedPlatform("sub2api", "newapi")).toBe("sub2api");
+    expect(resolveEmbeddedPlatform("newapi", "sub2api")).toBe("newapi");
+  });
+
+  it("uses the session's platform even when the URL param is unscoped", () => {
+    expect(resolveEmbeddedPlatform("sub2api", null)).toBe("sub2api");
+  });
+
+  it("falls back to the URL param only when the session has no platform", () => {
+    expect(resolveEmbeddedPlatform(null, "newapi")).toBe("newapi");
+    expect(resolveEmbeddedPlatform(undefined, "newapi")).toBe("newapi");
+  });
+
+  it("is unscoped when neither the session nor the URL param has a platform", () => {
+    expect(resolveEmbeddedPlatform(null, null)).toBeNull();
+    expect(resolveEmbeddedPlatform(undefined, null)).toBeNull();
   });
 });
 

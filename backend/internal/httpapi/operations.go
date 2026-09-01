@@ -28,7 +28,7 @@ func (s *Server) listSourceAccounts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "OPERATIONS_UNAVAILABLE", "source account status is unavailable")
 		return
 	}
-	accounts, err := s.operations.ListExternalAccounts(r.Context(), principal(r).UserID)
+	accounts, err := s.operations.ListExternalAccounts(r.Context(), principal(r).UserID, sessionPlatform(r))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "DATA_UNAVAILABLE", "source account status is unavailable")
 		return
@@ -51,7 +51,7 @@ func (s *Server) listUserEligibilitySummary(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusServiceUnavailable, "OPERATIONS_UNAVAILABLE", "invoice eligibility is unavailable")
 		return
 	}
-	items, err := s.operations.ListUserEligibilitySummaries(r.Context(), principal(r).UserID)
+	items, err := s.operations.ListUserEligibilitySummaries(r.Context(), principal(r).UserID, sessionPlatform(r))
 	if err != nil {
 		handleDomainError(w, err)
 		return
@@ -338,10 +338,12 @@ func (s *Server) getDeliveryState(w http.ResponseWriter, r *http.Request, admin 
 		return
 	}
 	principalID := principal(r).UserID
+	platform := sessionPlatform(r)
 	if admin {
 		principalID = ""
+		platform = ""
 	}
-	state, err := s.operations.GetInvoiceDeliveryState(r.Context(), principalID, r.PathValue("id"), admin)
+	state, err := s.operations.GetInvoiceDeliveryState(r.Context(), principalID, r.PathValue("id"), admin, platform)
 	if err != nil {
 		handleDomainError(w, err)
 		return

@@ -204,7 +204,7 @@ func TestBalanceDeltaCarryForwardFreezesUnchangedActualMismatch(t *testing.T) {
 		t.Fatalf("carry proof key=%q revision=%q balance=%s expected=%s difference=%s status=%s",
 			proofKey, revision, balance, expected, difference, evaluationStatus)
 	}
-	items, err := fixture.store.ListEligibilitySummaries(fixture.ctx, fixture.userID)
+	items, err := fixture.store.ListEligibilitySummaries(fixture.ctx, fixture.userID, "")
 	if err != nil || len(items) != 1 || items[0].EligibilityStatus != "frozen" ||
 		items[0].AvailableMinor != 0 || !items[0].HasOpenFreeze {
 		t.Fatalf("frozen eligibility summary=%+v err=%v", items, err)
