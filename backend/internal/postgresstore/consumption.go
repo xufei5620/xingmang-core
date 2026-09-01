@@ -2287,10 +2287,17 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			  AND lot.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
 			  AND NOT EXISTS (
 				SELECT 1 FROM source_events event
-				JOIN source_economic_scan_cycle_events mapped
+				-- Cast the TEXT side to uuid (values are always our own ingest
+			-- event UUIDs, stringified) so this join hits the
+			-- (source_instance_id, stream_id, event_id) index. The reverse
+			-- cast event_id::text defeated every index and filtered ~63k
+			-- rows per probe (75ms each); a heavy account's replay makes
+			-- thousands of these probes -- the first production whale
+			-- wedged for hours on exactly this.
+			JOIN source_economic_scan_cycle_events mapped
 				  ON mapped.source_instance_id=lot.source_instance_id
 				 AND mapped.stream_id='payments'
-				 AND mapped.event_id::text=event.external_event_id
+				 AND mapped.event_id=event.external_event_id::uuid
 				 AND mapped.payload_hash=lot.source_revision_hash
 				JOIN source_economic_scan_cycles cycle
 				  ON cycle.source_instance_id=mapped.source_instance_id
@@ -2320,7 +2327,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			JOIN source_economic_scan_cycle_events mapped
 			  ON mapped.source_instance_id=lot.source_instance_id
 			 AND mapped.stream_id='payments'
-			 AND mapped.event_id::text=event.external_event_id
+			 AND mapped.event_id=event.external_event_id::uuid
 			 AND mapped.payload_hash=lot.source_revision_hash
 			JOIN source_economic_scan_cycles cycle
 			  ON cycle.source_instance_id=mapped.source_instance_id
@@ -2372,7 +2379,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			JOIN source_economic_scan_cycle_events mapped
 			  ON mapped.source_instance_id=checkpoint.source_instance_id
 			 AND mapped.stream_id='balances'
-			 AND mapped.event_id::text=checkpoint.external_event_id
+			 AND mapped.event_id=checkpoint.external_event_id::uuid
 			 AND mapped.payload_hash=checkpoint.source_revision_hash
 			JOIN source_economic_scan_cycles cycle
 			  ON cycle.source_instance_id=mapped.source_instance_id
@@ -2402,7 +2409,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 					JOIN source_economic_scan_cycle_events mapped
 					  ON mapped.source_instance_id=checkpoint.source_instance_id
 					 AND mapped.stream_id='balances'
-					 AND mapped.event_id::text=checkpoint.external_event_id
+					 AND mapped.event_id=checkpoint.external_event_id::uuid
 					 AND mapped.payload_hash=checkpoint.source_revision_hash
 					WHERE checkpoint.external_account_id=$1
 					  AND mapped.scan_cycle_id=cycle.scan_cycle_id
