@@ -132,7 +132,7 @@ func (s *Server) listPaymentCandidates(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "OPERATIONS_UNAVAILABLE", "payment candidate queue is unavailable")
 		return
 	}
-	query := postgresstore.PaymentCandidatePageQuery{Limit: boundedQueryLimit(r, 100)}
+	query := postgresstore.PaymentCandidatePageQuery{Limit: boundedQueryLimit(r, 100), SourceInstanceID: strings.TrimSpace(r.URL.Query().Get("source_instance_id"))}
 	if r.URL.Query().Get("include_verified") == "true" {
 		query.States = []domain.VerificationState{
 			domain.VerificationPending, domain.VerificationFrozen, domain.VerificationVerified,
@@ -259,7 +259,7 @@ func (s *Server) listRefundCases(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "OPERATIONS_UNAVAILABLE", "refund queue is unavailable")
 		return
 	}
-	query := postgresstore.RefundCasePageQuery{Limit: boundedQueryLimit(r, 100), Status: strings.TrimSpace(r.URL.Query().Get("status"))}
+	query := postgresstore.RefundCasePageQuery{Limit: boundedQueryLimit(r, 100), Status: strings.TrimSpace(r.URL.Query().Get("status")), SourceInstanceID: strings.TrimSpace(r.URL.Query().Get("source_instance_id"))}
 	if value := strings.TrimSpace(r.URL.Query().Get("before_opened_at")); value != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, value)
 		if err != nil {

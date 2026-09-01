@@ -30,11 +30,18 @@ func scanRefundCase(row pgxRow) (RefundCase, error) {
 	return item, nil
 }
 
+// Columns are qualified with the refund_cases table name (rather than left
+// bare) so ListRefundCasesPage can optionally JOIN funding_lots for the
+// source-instance filter below without the two tables' overlapping column
+// names (id, updated_at, source_revision_hash, ...) becoming ambiguous. The
+// FROM clause stays a single table here; ResolveRefundCase's `... WHERE
+// id=$1 FOR UPDATE` use of this same constant is unaffected since it never
+// joins, and qualifying is a no-op without a join.
 const refundCaseSelect = `
-	SELECT id,invoice_request_id,funding_lot_id,source_revision_hash,
-		observed_refund_minor,issued_exposure_minor,observed_cap_minor,status,
-		COALESCE(resolution_evidence_hash,''),COALESCE(resolution_note_hash,''),COALESCE(resolved_by::text,''),
-		opened_at,updated_at,COALESCE(resolved_at,'epoch'::timestamptz)
+	SELECT refund_cases.id,refund_cases.invoice_request_id,refund_cases.funding_lot_id,refund_cases.source_revision_hash,
+		refund_cases.observed_refund_minor,refund_cases.issued_exposure_minor,refund_cases.observed_cap_minor,refund_cases.status,
+		COALESCE(refund_cases.resolution_evidence_hash,''),COALESCE(refund_cases.resolution_note_hash,''),COALESCE(refund_cases.resolved_by::text,''),
+		refund_cases.opened_at,refund_cases.updated_at,COALESCE(refund_cases.resolved_at,'epoch'::timestamptz)
 	FROM refund_cases`
 
 func (s *Store) ListRefundCasesPage(ctx context.Context, in RefundCasePageQuery) (RefundCasePage, error) {
@@ -53,14 +60,28 @@ func (s *Store) ListRefundCasesPage(ctx context.Context, in RefundCasePageQuery)
 	if in.BeforeOpenedAt.IsZero() != (strings.TrimSpace(in.BeforeID) == "") {
 		return RefundCasePage{}, errors.New("both refund case cursor fields are required")
 	}
-	query := refundCaseSelect + ` WHERE status=$1`
+	if in.SourceInstanceID != "" && !eligibilityUUIDPattern.MatchString(in.SourceInstanceID) {
+		return RefundCasePage{}, errors.New("invalid source instance filter")
+	}
+	// refund_cases carries no source column of its own; reach the source
+	// instance through its (always-present, NOT NULL) funding lot. The join
+	// is added only when actually filtering, since it is otherwise unneeded.
+	query := refundCaseSelect
+	if in.SourceInstanceID != "" {
+		query += ` JOIN funding_lots ON funding_lots.id=refund_cases.funding_lot_id`
+	}
+	query += ` WHERE refund_cases.status=$1`
 	args := []any{in.Status}
+	if in.SourceInstanceID != "" {
+		args = append(args, in.SourceInstanceID)
+		query += fmt.Sprintf(` AND funding_lots.source_instance_id=$%d::uuid`, len(args))
+	}
 	if !in.BeforeOpenedAt.IsZero() {
-		query += ` AND (opened_at,id)<($2,$3::uuid)`
 		args = append(args, in.BeforeOpenedAt, in.BeforeID)
+		query += fmt.Sprintf(` AND (refund_cases.opened_at,refund_cases.id)<($%d,$%d::uuid)`, len(args)-1, len(args))
 	}
 	args = append(args, in.Limit+1)
-	query += fmt.Sprintf(` ORDER BY opened_at DESC,id DESC LIMIT $%d`, len(args))
+	query += fmt.Sprintf(` ORDER BY refund_cases.opened_at DESC,refund_cases.id DESC LIMIT $%d`, len(args))
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return RefundCasePage{}, err
