@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"invoice-system/backend/internal/domain"
 )
@@ -324,6 +325,15 @@ func (s *Store) CommitSourceBatch(ctx context.Context, in SourceBatchInput) (Sou
 			nullableSnapshotRowCount(in.ScanSnapshotID, in.ScanSnapshotRowCount), in.Sequence,
 			in.ScanComplete, in.ProjectionStatus)
 		if cycleErr != nil {
+			// The one-active-cycle partial unique index (source_economic_one_active_scan_cycle)
+			// is not the ON CONFLICT arbiter above, so a second, different scan_cycle_id
+			// racing an already-processing cycle surfaces here as a real unique_violation,
+			// not as a RowsAffected()==0 update miss. That is an expected, temporary
+			// rejection, not a data conflict -- callers must back off and retry, not fail.
+			var pgErr *pgconn.PgError
+			if errors.As(cycleErr, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "source_economic_one_active_scan_cycle" {
+				return SourceBatchResult{}, domain.ErrScanCycleBusy
+			}
 			return SourceBatchResult{}, fmt.Errorf("record economic scan cycle: %w", cycleErr)
 		}
 		if command.RowsAffected() != 1 {
