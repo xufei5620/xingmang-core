@@ -282,8 +282,31 @@ The Sub2API iframe entry is treated as an untrusted credential-bearing entry:
 The invoice service must return a narrow `frame-ancestors` CSP containing only
 the approved Sub2API/New API origins. Menu visibility is not authorization.
 Administrator pages require invoice-side OIDC, MFA, RBAC and the trusted-source
-IP policy. Sensitive administration should open as a top-level page rather than
-inside an iframe.
+IP policy. Administrative authentication completes in a top-level window:
+Keycloak refuses to be framed, and sensitive authentication must happen
+outside any iframe regardless of how the surrounding page is hosted. The
+administrator page itself, however, may be framed by the single approved
+first-party console origin (CR-0005): its own `frame-ancestors` CSP names
+that one origin and no other, at both the edge and the application's own
+static-asset layer, so the two can never silently disagree and leave the page
+unframeable by accident. Menu visibility inside that embed is presentation
+only -- it narrows nothing that OIDC, MFA, RBAC, the IP allowlist or dual
+control already enforce, and the platform embedding it gains no new data
+channel or write path into the invoice system.
+
+Login and step-up from inside that embed open OIDC in a popup window (a
+direct `window.open` on the click that triggers it, satisfying browsers'
+user-gesture requirement for popups) rather than navigating the framed page
+itself, since navigating it would leave the hosting console. The popup's own
+return page notifies its opener with a small versioned `postMessage` and
+closes; the opener re-reads its own session rather than trusting the message
+content. That channel is same-origin by construction -- the popup and the
+page that opened it are always both `invoice.solov.cc`, regardless of what
+frames the page -- so it accepts only this origin's own messages, never the
+framing console's. It is a different channel from the iframe-to-console
+`postMessage` a console-side wrapper component may use for its own concerns
+(sizing, navigation); this one carries no invoice data and cannot be reached
+from outside this origin.
 
 Keycloak administration is separately isolated. `auth.solov.cc` exposes only
 the public realm/resource/discovery paths and returns 404 for `/admin`; the
