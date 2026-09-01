@@ -140,7 +140,10 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     expect(within(typeDetail).getByText("订阅账号")).not.toBeNull();
   });
 
-  it("「容量与调度」一节：8 个 XM-CHAN-FIELDS0 占位字段全部显式未接入", async () => {
+  it("「容量与调度」一节：字段未接前，7 个显式未接入，「用量窗口」对上游渠道类型显示不适用（不是未接入）", async () => {
+    // fixture 里的绑定账号默认 access_method=upstream_key → 类型是"上游渠道"，
+    // 上游渠道没有用量窗口这个概念，这一格必须显示"不适用"而不是"未接入"——
+    // 两者含义不同：未接入=字段还没接、不适用=这一类行本来就不该有这个字段
     stubDetailApi({});
     renderQueryPage(
       "/platforms/sub2api/upstream/detail/channel-a",
@@ -154,7 +157,57 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     for (const label of ["容量 / 并发", "调度", "今日统计", "用量窗口", "最近使用", "创建时间", "过期时间", "代理"]) {
       expect(withinSection.getByText(label)).not.toBeNull();
     }
+    expect(withinSection.getAllByText("未接入").length).toBe(7);
+    expect(withinSection.getByText("不适用")).not.toBeNull();
+  });
+
+  it("订阅账号类型的渠道：用量窗口字段未接时显示未接入（不是不适用）", async () => {
+    stubDetailApi({ accounts: [upstreamAccount({ access_method: "subscription_account" })] });
+    renderQueryPage(
+      "/platforms/sub2api/upstream/detail/channel-a",
+      <ChannelDetailPage />,
+      "/platforms/:serviceType/upstream/detail/:channelId",
+    );
+    await screen.findByText("OpenAI A");
+    const section = screen.getByRole("heading", { name: "容量与调度" }).closest("section");
+    const withinSection = within(section as HTMLElement);
     expect(withinSection.getAllByText("未接入").length).toBe(8);
+    expect(withinSection.queryByText("不适用")).toBeNull();
+  });
+
+  it("XM-CHAN-FIELDS0 字段一旦非 null，「容量与调度」不用改代码就显示真值", async () => {
+    stubDetailApi({
+      channels: [
+        boundChannelRow({
+          capacity: { used: 3, limit: 10 },
+          scheduling: { enabled: true, priority: 2 },
+          today: { requests: 120, success_rate: 98.5, cost_minor: "5000000", currency: "CNY", scale: 6 },
+          usage_window: { used_ratio: 0.42, resets_at: "2026-09-03T00:00:00Z" },
+          proxy: "socks5://10.0.0.1:1080",
+          last_used_at: "2026-09-02T05:00:00Z",
+          created_at: "2026-08-01T00:00:00Z",
+          expires_at: "2026-12-31T00:00:00Z",
+          kind: "subscription",
+          vendor: "官方直连-OpenAI",
+        }),
+      ],
+    });
+    renderQueryPage(
+      "/platforms/sub2api/upstream/detail/channel-a",
+      <ChannelDetailPage />,
+      "/platforms/:serviceType/upstream/detail/:channelId",
+    );
+    await screen.findByText("OpenAI A");
+    expect(await screen.findByText("3 / 10")).not.toBeNull();
+    expect(screen.getByText(/已开启 · 优先级 2/)).not.toBeNull();
+    expect(screen.getByText(/120 次 · 98.5% · ¥5.00/)).not.toBeNull();
+    expect(screen.getByText(/42%，重置于 2026-09-03T00:00:00Z/)).not.toBeNull();
+    expect(screen.getByText("socks5://10.0.0.1:1080")).not.toBeNull();
+    expect(screen.getByText("2026-09-02T05:00:00Z")).not.toBeNull();
+    expect(screen.getByText("2026-08-01T00:00:00Z")).not.toBeNull();
+    expect(screen.getByText("2026-12-31T00:00:00Z")).not.toBeNull();
+    expect(screen.getByText("官方直连-OpenAI")).not.toBeNull();
+    expect(screen.getAllByText("订阅账号").length).toBeGreaterThan(0);
   });
 
   it("未绑定的渠道：上游映射卡片显示候选/未映射状态，可以确认绑定", async () => {

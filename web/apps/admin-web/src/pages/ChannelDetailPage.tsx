@@ -257,15 +257,24 @@ function ChannelDetailBody({
               <Badge tone="info">{label}</Badge>
             </Fact>
             <Fact label="渠道名称 / 账号">{row.name || "未命名渠道"}</Fact>
-            <Fact label="类型" hint="订阅账号 / 上游渠道，按绑定账号的接入方式派生（2026-09-02 07:20 裁定补充）">
+            <Fact
+              label="类型"
+              hint="订阅账号 / 上游渠道；row.kind（XM-CHAN-FIELDS0）优先，没有则按绑定账号的接入方式派生（2026-09-02 07:20/07:25 裁定）"
+            >
               {row.binding ? (
-                <Badge tone="neutral">{accountRowType(account?.access_method ?? "").label}</Badge>
+                <Badge tone="neutral">
+                  {row.kind === "subscription"
+                    ? "订阅账号"
+                    : row.kind === "upstream"
+                      ? "上游渠道"
+                      : accountRowType(account?.access_method ?? "").label}
+                </Badge>
               ) : (
                 <Badge tone="neutral">未映射</Badge>
               )}
             </Fact>
-            {account ? (
-              <Fact label="来源上游">{account.upstream_name || account.base_url || "未接入"}</Fact>
+            {row.vendor || account ? (
+              <Fact label="来源上游">{row.vendor || account?.upstream_name || account?.base_url || "未接入"}</Fact>
             ) : (
               <UnavailableFact label="来源上游" hint={row.binding ? "已绑定但登记簿里找不到这个账号" : "还没有绑定上游账号"} />
             )}
@@ -274,8 +283,16 @@ function ChannelDetailBody({
             ) : (
               <UnavailableFact label="上游分组实际名" />
             )}
-            <Fact label="分组倍率" hint="独立展示，不并入充值比例，也不在前端重复乘算">
-              {account?.group_rate ? `${account.group_rate}×` : "未接入"}
+            <Fact
+              label="倍率 / 上游倍率"
+              hint="独立展示，不并入充值比例，也不在前端重复乘算；row.rateMultiplier/upstreamMultiplier（XM-CHAN-FIELDS0）优先，没有则退回登记簿"
+            >
+              {(() => {
+                const rate = row.rateMultiplier ?? account?.group_rate;
+                const upstreamRate = row.upstreamMultiplier ?? account?.recharge_ratio;
+                if (!rate && !upstreamRate) return "未接入";
+                return `${rate ? `${rate}×` : "—"}${upstreamRate ? ` / ${upstreamRate}×` : ""}`;
+              })()}
             </Fact>
             {access ? (
               <Fact label="接入方式" hint={access.hint}>
@@ -298,17 +315,51 @@ function ChannelDetailBody({
 
         <DetailSection
           title="容量与调度"
-          hint="XM-CHAN-FIELDS0 扩展渠道目录契约后才会有值；调度即使有值也只做只读展示，写操作另立 XM-SCHED0"
+          hint="XM-CHAN-FIELDS0 扩展渠道目录契约后自动出真值；调度即使有值也只做只读展示，写操作另立 XM-SCHED0"
         >
           <DetailList>
-            <UnavailableFact label="容量 / 并发" />
-            <UnavailableFact label="调度" hint="开关 / 优先级这类写操作另立 XM-SCHED0，本轮任何时候都只做只读展示" />
-            <UnavailableFact label="今日统计" />
-            <UnavailableFact label="用量窗口" />
-            <UnavailableFact label="最近使用" />
-            <UnavailableFact label="创建时间" />
-            <UnavailableFact label="过期时间" />
-            <UnavailableFact label="代理" />
+            {row.capacity ? (
+              <Fact label="容量 / 并发">
+                {row.capacity.used} / {row.capacity.limit}
+              </Fact>
+            ) : (
+              <UnavailableFact label="容量 / 并发" />
+            )}
+            <Fact label="调度" hint="调度开关待 XM-SCHED0 Action；开关 / 优先级这类写操作另立切片，本轮任何时候都只做只读展示">
+              {row.scheduling ? (
+                <>
+                  {row.scheduling.enabled ? "已开启" : "已关闭"} · 优先级 {row.scheduling.priority}
+                </>
+              ) : (
+                "未接入"
+              )}
+            </Fact>
+            {row.today ? (
+              <Fact label="今日统计">
+                {row.today.requests} 次 · {row.today.successRate.toFixed(1)}% ·{" "}
+                {formatScaledMinorUnits(row.today.costMinor, row.today.currency, row.today.scale)}
+              </Fact>
+            ) : (
+              <UnavailableFact label="今日统计" hint="请求数 · 成功率 · 消耗" />
+            )}
+            {(() => {
+              const kind = row.binding ? (row.kind ?? (account ? accountRowType(account.access_method).value : null)) : null;
+              if (kind === "upstream") {
+                return <Fact label="用量窗口" hint="上游渠道没有用量窗口这个概念">不适用</Fact>;
+              }
+              return row.usageWindow ? (
+                <Fact label="用量窗口">
+                  {Math.round(row.usageWindow.usedRatio * 100)}%
+                  {row.usageWindow.resetsAt ? `，重置于 ${row.usageWindow.resetsAt}` : ""}
+                </Fact>
+              ) : (
+                <UnavailableFact label="用量窗口" />
+              );
+            })()}
+            {row.lastUsedAt ? <Fact label="最近使用">{row.lastUsedAt}</Fact> : <UnavailableFact label="最近使用" />}
+            {row.createdAt ? <Fact label="创建时间">{row.createdAt}</Fact> : <UnavailableFact label="创建时间" />}
+            {row.expiresAt ? <Fact label="过期时间">{row.expiresAt}</Fact> : <UnavailableFact label="过期时间" />}
+            {row.proxy ? <Fact label="代理">{row.proxy}</Fact> : <UnavailableFact label="代理" />}
           </DetailList>
         </DetailSection>
 
