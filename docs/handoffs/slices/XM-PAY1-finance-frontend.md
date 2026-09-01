@@ -34,14 +34,22 @@ XM-PAY0 只做完了后端只读接入（`ListOrders`/`DailyPaymentSummary` + �
    在给定窗口内翻页查找匹配 ID 的订单；找不到就诚实 404（`ACTION_NOT_REGISTERED` +
    安全文案里带上已搜索的窗口），不会悄悄换一个窗口重试或回退到另一条订单。
 
+**验收线复核后的一处修正**：初版把 NewAPI「资金与订单」也改成了 Sub2API 同款
+六卡。验收线指出仓库既定原则是"UI 不做大改动，按原型"，原型对 NewAPI 这一页
+定的是四格布局（区间到账/区间退款/月累计/支付失败），要求按原型改回来，
+仍从同一份 `payments.daily` 数据接（不是另起一套数据源）。已按此修正：
+Sub2API「资金概览」保留六卡（`PaymentSummaryCards`，未改），NewAPI「资金与
+订单」换回原型四格，其中「月累计」是本片新增的一种数据形状——单日指标的
+`/api/v1/metrics` 给不出"自然月至今"这个概念，因此这一格改走
+`/api/v1/metrics/history`（按天历史观测求和），见下方"关键设计决定"。
+
 ## 已接入 / 仍未接入一览
 
 ### 已接入（真实数据，来自 `sub2api.payments.daily`/`newapi.payments.daily` 指标
 与 `/platforms/{platform}/orders[/​{id}]` 端点）
 
-- **资金概览六卡**（Sub2API「资金概览」子页签、NewAPI「资金与订单」子页签，两平台
-  同一套组件 `PaymentSummaryCards`）：区间成功到账 / 区间待处理 / 区间失败 /
-  退款与冲正 / 支付手续费 / 净现金流入。
+- **资金概览六卡**（**仅 Sub2API**「资金概览」子页签，`PaymentSummaryCards`）：
+  区间成功到账 / 区间待处理 / 区间失败 / 退款与冲正 / 支付手续费 / 净现金流入。
   - 指标是**单日**粒度：统计区间收窄到单日且与指标业务日一致时才展示真实值，
     周/月区间显示「周/月需要按天聚合；目前只提供单日汇总」，不会用单日值冒充
     区间合计。
@@ -51,13 +59,30 @@ XM-PAY0 只做完了后端只读接入（`ListOrders`/`DailyPaymentSummary` + �
     确认是否真的是零」。
   - 命中非合约币种（`is_partial=true`）时，卡片副行明说「覆盖不全：可能有非合约
     币种订单未计入金额（笔数仍计入）」，不只靠 FreshnessBadge 的笼统「数据不完整」。
-  - NewAPI 的「退款与冲正」**恒为「不适用」**（不是「未接入」）——结构性事实，
-    不随数据是否加载而变。
-  - 「支付手续费」：Sub2API 只在有 succeeded/refunded 订单时才有值；NewAPI 恒为
-    「未接入」（上游没有第二个金额字段）。
-  - 「净现金流入」：两平台**恒为「未接入」**——净现金流公式尚未确定（需先确认
+  - 「支付手续费」：只在有 succeeded/refunded 订单时才有值。
+  - 「净现金流入」：**恒为「未接入」**——净现金流公式尚未确定（需先确认
     手续费承担方与是否有未建模成本），前端不现算 amount-fee 去冒充一个后端
     明确拒绝下结论的数字。
+- **资金与订单四格**（**仅 NewAPI**，原型原样布局，不是 Sub2API 的六卡）：
+  区间到账 / 区间退款 / 月累计 / 支付失败，与 Sub2API 六卡共用同一份
+  `BucketCard`/`payments.daily` 判断逻辑——「区间到账」就是 `bucket="succeeded"`、
+  「支付失败」就是 `bucket="failed"`，「区间退款」传 `bucket="refunded"` 时
+  `BucketCard` 对 NewAPI 会自动落到「不适用」分支（结构性事实：上游没有 refund
+  字段/状态/函数，不随数据是否加载而变），三格与 Sub2API 同名分桶卡片是**同一段
+  代码**，不是照抄一遍再改。「月累计」是本片新增的第四种卡（`MonthToDateSucceededCard`）：
+  - 自然日历月至今的 succeeded 桶累计，**恒等于当前自然月**，不随 PeriodControls
+    的日/周/月选择变化——这是它与「区间到账」刻意不同的地方（后者跟着所选区间走，
+    月/周时会诚实显示"未接入"）。
+  - `/api/v1/metrics` 只给最新单日快照，给不出"本月至今"，因此这一格改走
+    `GET /api/v1/metrics/history?metric_key=…&hours=168`（既有端点，本片新增
+    调用方）按天求和；服务端硬顶 7 天（`maxHistoryHours=168`，见
+    `metrics_history.go` 的注释：不让这条端点被当成数据导出口）。月初超过 7 天前
+    的部分天然覆盖不到，卡片用「覆盖不全：N/M 天」+ 警示色徽章诚实说明，不会
+    显示一个看起来完整的月合计；月初 7 天以内时覆盖率能做到 100%，不带这个徽章。
+  - 逐日判据与单日的 `BucketCard` 完全一致，只是应用在每一天：同步失败
+    （`status !== "ok"`）的整天跳过；桶键缺席且当天 `is_partial` 时说不清是否
+    真的是零，跳过；其余情况计入并累加（键缺席且非 partial 是确认过的零，加 0）；
+    同一天多次同步取 `synced_at` 最新的一条。
 - **充值订单**（Sub2API 独立子页签 + NewAPI「资金与订单」页内表格，两边共用
   `platformOrdersColumns.tsx` 的列定义）：订单 / 用户 / 类型（固定"用户充值"，
   这个端点只返回充值订单） / 支付方式 / 订单金额 / 手续费 / 净额（恒未接入） /
@@ -105,14 +130,28 @@ XM-PAY0 只做完了后端只读接入（`ListOrders`/`DailyPaymentSummary` + �
   `newapi.payments.daily`"——这两个指标由 worker 每轮同步写入，HTTP 层没有
   `DailyPaymentSummary` 专属端点。本片严格照办，复用既有 `listMetrics()`，
   未新增聚合端点。
-- **NewAPI「资金与订单」改用六卡模型，不是原型原样的四格**（区间到账/区间退款/
-  月累计/支付失败）：团队负责人的任务描述明确要求"wire the six payment cards
-  (Sub2API 资金概览, NewAPI 资金与订单)"，两平台统一口径；这也是唯一能让
-  「NewAPI 的退款与冲正必须显示不适用」这条要求成立的结构（原型四格里没有一格
-  叫"退款与冲正"）。旧的 `newapi.recharge.daily` 单卡（"区间到账"）随之移除——
-  它与新的 `succeeded` 分桶是**两条不保证对得上的口径**（complete_time 到账时刻
-  vs. create_time 下单时刻，且只认 status=success），同时展示容易被读成「这两个
-  数应该相等」；`newapi.subscription.daily`（当日订阅收入）与本片无关，原样保留。
+- **NewAPI「资金与订单」保留原型原样的四格**（区间到账/区间退款/月累计/支付
+  失败），**不套用 Sub2API 的六卡**：初版按任务描述的字面表述做成了两平台统一
+  六卡，验收线复核后按仓库既定原则「UI 不做大改动，按原型」纠正——原型对这
+  一页定的就是四格，六卡是对原型的改动，不是接数据本身要求的。改回来之后
+  「区间到账/区间退款/支付失败」与 Sub2API 六卡里的同名卡片复用同一个
+  `BucketCard`（导出自 `PaymentSummaryCards.tsx`），不是另起一套判断——两边
+  除了挑了不同的分桶子集，逻辑必须是同一份，否则"未接入/不适用/覆盖不全"这
+  三态迟早会在两个平台上开始出现不一致的判定。旧的 `newapi.recharge.daily`
+  单卡（旧版"区间到账"）已移除——它与新的 `succeeded` 分桶是**两条不保证对得
+  上的口径**（complete_time 到账时刻 vs. create_time 下单时刻，且只认
+  status=success），同时展示容易被读成「这两个数应该相等」；
+  `newapi.subscription.daily`（当日订阅收入）与本片无关，原样保留。
+- **「月累计」是四格里唯一一个不能复用 `BucketCard` 单日判断的卡**：它回答的是
+  "自然月至今"而不是"所选区间"，这两件事在语义上刻意不同——PeriodControls
+  切到周/月不会改变"月累计"的值（它一直是当前自然月），也不会让"区间到账"
+  显示月累计的数字（那会让月累计变得多余）。因为 `/api/v1/metrics` 只保留
+  最新一条快照，实现这个概念唯一的路径是查历史（`/api/v1/metrics/history`，
+  服务端硬顶 7 天）后按天求和，这是本片除了两个 Go 新增之外，第三处真正意义
+  上的"新数据形状"（`lib/metrics.ts` 的 `monthToDateSucceeded`）。7 天硬顶
+  意味着**月初超过一周的部分永远覆盖不到**，不是一个会随时间自然消失的临时
+  限制——只要服务端这条上限不变，"月累计"在每个月的第 8 天开始就会一直带着
+  「覆盖不全」标记到月底，这是设计上已知且接受的行为，不是 bug。
 - **详情页复用 `ListOrders`，不新增"按 ID 查询"的连接器能力**：两个上游都没有
   这个能力（`OrderFilter` 强制要求非零时间窗口），给连接器加一个"无界按 ID 查"
   的假象比诚实复用现有窗口查询更危险。默认窗口退回"今天"、需要窗口参数
@@ -158,7 +197,9 @@ XM-PAY0 只做完了后端只读接入（`ListOrders`/`DailyPaymentSummary` + �
 新增：
 
 - `web/apps/admin-web/src/components/PaymentSummaryCards.tsx` + `.test.tsx`：
-  资金概览六卡，两平台共用。
+  Sub2API「资金概览」六卡（`PaymentSummaryCards`），同时导出
+  `BucketCard`/`MonthToDateSucceededCard`/`metricByKey`/`metricKeyFor`
+  供 `NewApiFinanceOverview.tsx` 组装自己的四格。
 - `web/apps/admin-web/src/components/platformOrdersColumns.tsx`：充值订单表的
   共用列定义（Sub2API 与 NewAPI 两处订单表共用同一份列集合）。
 - `web/apps/admin-web/src/components/Sub2ApiOrdersPanel.tsx` + `.test.tsx`：
@@ -177,20 +218,30 @@ XM-PAY0 只做完了后端只读接入（`ListOrders`/`DailyPaymentSummary` + �
   `getPlatformOrder`（含 `FeatureNotMountedError`/结构化 404→notFound 的区分处理）、
   `describePaymentStatus`、`platformHasRefunds`、`REFUND_LIFECYCLE_STATUSES`、
   `PAYMENT_BUCKET_LABELS`。
+- `web/apps/admin-web/src/api/platform.ts`：`MetricHistoryItem` 补上 `source`
+  字段——后端 `historyItem` 一直逐点带这个字段（顶部注释专门解释了为什么：
+  一条曲线可能混着不同来源），TS 类型此前漏了，"月累计"卡需要它显示「来源」
+  时才发现这个既有缺口，顺手补上。
 - `web/apps/admin-web/src/lib/metrics.ts` + `.test.ts`：新增
   `readPaymentsDailySummary`（解析 `sub2api.payments.daily`/
-  `newapi.payments.daily` 的 `value` 形状）与两条 `METRIC_LABELS` 登记。
+  `newapi.payments.daily` 的 `value` 形状）、两条 `METRIC_LABELS` 登记、
+  `monthToDateSucceeded`（把 `/api/v1/metrics/history` 的按天历史观测聚合成
+  「月累计」需要的求和结果，逐日判据与单日的 `BucketCard` 对齐）。
 - `web/apps/admin-web/src/components/Sub2ApiFinanceOverview.tsx`：六个占位卡换成
   `<PaymentSummaryCards platform="sub2api" range={range} />`；「使用收入」「渠道
   毛利」两卡从原来与六个占位共享的 4 列大网格拆成独立的 2 列小网格；「资金对账」
   「经营利润桥」「最近事件」三个区块未改动。
 - `web/apps/admin-web/src/components/NewApiFinanceOverview.tsx`：`OrdersView`
-  的四格占位换成 `<PaymentSummaryCards platform="newapi" range={range} />`；
-  新增 `OrdersLedger`（真实订单表，替换原来 `rows={[]}` 的占位表）；移除
-  未再使用的 `MetricAmountTile`/`MissingTile`/`NEWAPI_RECHARGE_METRIC`/
-  `metricOrderCount`/`FinanceOrderRow`/`ORDER_COLUMNS`（均已无调用点，
-  `ProfitView` 仍在用的 `InteractiveLedgerTable`/`PROFIT_COLUMNS` 未动）；
-  `SubscriptionEvidence`（当日订阅收入）原样保留。
+  的四格占位换成真实数据——`区间到账`/`区间退款`/`支付失败` 三格复用
+  `PaymentSummaryCards.tsx` 导出的 `BucketCard`（`platform="newapi"`），
+  `月累计` 换成新的 `MonthToDateSucceededCard`（自己发起独立的
+  `/api/v1/metrics/history` Query，与三个分桶卡共用的 `/api/v1/metrics`
+  Query 分开）；新增 `businessMonthStartDateOnly` 算当前自然月第一天；新增
+  `OrdersLedger`（真实订单表，替换原来 `rows={[]}` 的占位表）；移除未再使用的
+  `MetricAmountTile`/`MissingTile`/`NEWAPI_RECHARGE_METRIC`/`metricOrderCount`/
+  `FinanceOrderRow`/`ORDER_COLUMNS`（均已无调用点，`ProfitView` 仍在用的
+  `InteractiveLedgerTable`/`PROFIT_COLUMNS` 未动）；`SubscriptionEvidence`
+  （当日订阅收入）原样保留。
 - `web/apps/admin-web/src/components/PlatformFinancePanel.tsx` + `.test.tsx`：
   `sub2apiFinanceSubTab` 的 `orders`/`refunds` 从 `pending(...)` 占位换成
   `<Sub2ApiOrdersPanel />`/`<Sub2ApiRefundsPanel />`。
@@ -198,15 +249,17 @@ XM-PAY0 只做完了后端只读接入（`ListOrders`/`DailyPaymentSummary` + �
   （`platforms/:serviceType/finance/orders/:orderId`、`.../finance/refunds/
   :orderId`）+ 对应 loader（`orderDetailLoader` 校验平台已知、`refundDetailLoader`
   额外校验 `platformHasRefunds`）；`router.test.tsx` 的 `okHandler` 补上
-  `/api/v1/platforms/{platform}/orders[/​{id}]` 的默认响应（此前完全没有处理这
-  条路径，会落到裸 404 兜底）。
-- `web/apps/admin-web/src/components/FinanceOverview.test.tsx`：更新"六卡"
-  相关的两个测试以匹配真实数据（不再是固定占位文案），修复一处真实的异步竞态
-  （payment 卡的 `/api/v1/metrics` 与渠道数据的 `/api/v1/finance/channels/
+  `/api/v1/platforms/{platform}/orders[/​{id}]` 与 `historyBody` 的 `source`
+  字段（此前 `/orders` 路径完全没有处理，会落到裸 404 兜底）。
+- `web/apps/admin-web/src/components/FinanceOverview.test.tsx`：更新 Sub2API
+  六卡相关的两个测试以匹配真实数据（不再是固定占位文案），修复一处真实的异步
+  竞态（payment 卡的 `/api/v1/metrics` 与渠道数据的 `/api/v1/finance/channels/
   summary` 是两条独立 Query，原测试只等了后者）。
 - `web/apps/admin-web/src/components/NewApiFinanceOverview.test.tsx`：重写
-  "orders" 相关用例以匹配新行为（六卡替代四格占位、真实订单表替代空表格），
-  "profit" 相关用例未改动。
+  "orders" 相关用例以匹配四格 + 月累计的新行为，新增按当前真实挂钟日期动态
+  构造夹具的 `businessTodayForTest()`（"月累计"读的是真实"今天"，不受
+  `initialDate` 影响，测试夹具不能写死某个假设的日历日，否则换一天跑测试就会
+  全部落空——这条踩坑过程见下方 risks）；"profit" 相关用例未改动。
 
 ### 文档
 
@@ -233,7 +286,7 @@ unset 前缀绕开本机代理坑（见项目既有 Windows 工具链纪律）�
 - `pnpm --config.verify-deps-before-run=false -r run typecheck`：PASS，5 个
   工作区包（design-tokens/ui-primitives/ui-admin/ui-storybook/admin-web）全绿。
 - `pnpm --config.verify-deps-before-run=false -r run test`：PASS，
-  10+16+253+1346=1625 个测试全绿（0 失败），含本片新增的 8 个测试文件
+  10+16+253+1358=1637 个测试全绿（0 失败），含本片新增的 8 个测试文件
   （`PaymentSummaryCards.test.tsx`、`Sub2ApiOrdersPanel.test.tsx`、
   `Sub2ApiRefundsPanel.test.tsx`、`PlatformOrderDetailPage.test.tsx` 全新；
   `finance.test.ts`、`metrics.test.ts`、`FinanceOverview.test.tsx`、
@@ -261,14 +314,24 @@ unset 前缀绕开本机代理坑（见项目既有 Windows 工具链纪律）�
   - `sub2api-order-detail.png`：订单详情页四格 + 订单信息卡，创建时间格式化
     正确（发现并修复了一处用原始 ISO 字符串而非 `formatUtcTimestamp` 的
     小疏漏）。
-  - `newapi-finance-orders.png`：NewAPI 六卡（含"退款与冲正"显示"不适用"）+
-    当日订阅收入 + 4 行订单表（NewAPI 已知状态全集）。
+  - `newapi-finance-fourtile.png`：NewAPI 原型四格（区间到账 $20.00·1 笔 /
+    区间退款"不适用" / 月累计 $40.00·"覆盖 2/2 天·本月至今" / 支付失败
+    $70.00·2 笔）+ 当日订阅收入 + 4 行订单表（NewAPI 已知状态全集）。
+  - `newapi-finance-month-monthtodate-unaffected.png`：把 PeriodControls 切到
+    "月"后，区间到账/支付失败正确退回"未接入"（周/月需要按天聚合），但
+    "月累计"维持同一个 $40.00 不变——验证了它确实不受统计区间选择影响，
+    恒是当前自然月。
   - `newapi-order-detail.png`：NewAPI 订单详情，手续费/净额/退款金额三格均
     正确显示"未接入"。
   - `order-not-found.png`：未知订单 ID 的"未找到订单"诚实状态，回显已搜索
     窗口，未回退到其他订单。
   - `sub2api-overview-week.png`：切到"周"视图后六卡全部诚实显示"未接入"
     （周/月需要按天聚合），不会用单日值冒充周合计。
+
+  验证"月累计"时额外把 mock API 的 `/api/v1/metrics/history` 从空实现补成
+  返回最近 5 天的 `payments.daily` 历史观测（脚本改动只在本机 mock 里，未进
+  提交），实测确认了"覆盖 N/M 天"与"月累计不受周/月切换影响"两条行为均按
+  设计工作。
 
 ## not_run
 
@@ -303,10 +366,24 @@ unset 前缀绕开本机代理坑（见项目既有 Windows 工具链纪律）�
   在 `connectors/sub2api/upstream.go` 一个文件内，`go build`/`go vet`/全部 Go
   测试已验证行为不变；仅在此提示评审者这处 diff 看起来改动行数较多，但语义
   上是重命名 + 消除潜在的同名字段遮蔽风险，不是逻辑变化。
-- **NewAPI「资金与订单」从原型的四格占位换成六卡模型**是本片按团队负责人任务
-  描述做出的明确选择（详见"关键设计决定"），与原型 `V["newapi/finance"]`
-  的字面 UI 不完全一致；如果产品侧希望更贴近原型的四格布局，需要额外决定
-  「退款与冲正」在没有第五格位置的情况下如何呈现"不适用"这条要求。
+- **「月累计」在每个月第 8 天起会一直带着"覆盖不全"标记到月底**：这是
+  `/api/v1/metrics/history` 服务端硬顶 7 天（`maxHistoryHours=168`）的直接
+  后果，不是本片的实现缺陷，也没有绕过的办法（那条上限是刻意设计，见
+  `metrics_history.go` 的注释）。如果产品侧希望月累计不受这个限制，需要后端
+  另外提供一种不经过"历史查询"的月度预聚合（例如在指标 `value` 里内嵌一个
+  月至今累计字段，类似 `*.requests.trend_7d` 内嵌 7 天数组的做法），这是一项
+  新的后端能力，不在本片时间盒内。
+- **写测试时踩到一处真实的 React 协调（reconciliation）坑，已在组件里修掉**：
+  `MonthToDateSucceededCard` 自己管理独立的加载态，最初加载中/错误态委托给
+  共享的 `UnavailableCard` 包装组件、成功态直接返回 `StatTile`——两条分支在
+  同一个位置返回不同的组件类型，React 按类型做协调时会把整个子树卸载重挂，
+  而不是原地更新同一个 DOM 节点，导致组件从"加载中"过渡到"已加载"时旧的
+  `<article>` 引用变成 detached 节点。测试里用 `tile.closest("article")` 提前
+  拿到的引用因此永远等不到新内容，`findByText` 会一直超时。修法是让这张卡
+  全程只返回同一种元素类型（`<StatTile>`），不再让加载态经由另一个包装组件。
+  记录这条是因为它是一类容易被误判成"我的测试写法有问题"、实际是组件设计
+  该改的情况——任何卡片如果开始自己管理独立的异步状态（而不是像其余卡片
+  那样把加载态整个交给外层 `ApiStateView`），都要留意这同一个坑。
 
 ## follow_ups
 
@@ -321,3 +398,10 @@ unset 前缀绕开本机代理坑（见项目既有 Windows 工具链纪律）�
   如果产品侧希望下一片把它们也接上（例如"订单成功金额"其实已经等价于六卡的
   "区间成功到账"），需要先决定是否要在页面上暗示这两组数字应该相等——目前
   刻意分开陈列，避免造成"这两个数应该对得上"的错误印象。
+- 「月累计」目前每个月第 8 天起就会一直显示"覆盖不全"直到月底（`/metrics/
+  history` 服务端 7 天硬顶所致，见 risks）。如果这条限制在实际使用中确实
+  造成困扰，值得考虑的方向是让 worker 在写入 `sub2api.payments.daily`/
+  `newapi.payments.daily` 时顺带算一个"月至今累计"内嵌进 `value`（与
+  `*.requests.trend_7d` 内嵌 7 天数组同一个思路），这样"月累计"就能像
+  "区间到账"一样走单次 `/api/v1/metrics` 而不必依赖历史查询——这是一项
+  新的后端能力，留给以后需要时再做决定。
