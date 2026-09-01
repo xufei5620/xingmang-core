@@ -160,7 +160,14 @@ func (m *SessionManager) Issue(ctx context.Context, input IssueSessionInput) (Se
 		Issuer: input.Principal.Issuer, Subject: input.Principal.Subject,
 		TokenHash: sha256Hex(token), CSRFHash: sha256Hex(csrf),
 		ProviderSIDHash: optionalHash(input.Principal.ProviderSID),
-		Roles:           append([]string(nil), input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string(nil), input.Principal.AMR...),
+		// append onto a non-nil empty slice: auth_sessions.roles/amr are
+		// TEXT[] NOT NULL, and pgx encodes a nil []string as SQL NULL (the
+		// column DEFAULT does not apply to an explicit column list). OIDC
+		// principals always carry roles, but platform-password principals
+		// have none -- a nil here broke the first real platform login in
+		// production (SQLSTATE 23502) after the claim fix let it reach
+		// session issuance.
+		Roles:           append([]string{}, input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string{}, input.Principal.AMR...),
 		AuthTime: input.Principal.AuthTime, MFAAt: copyTime(input.MFAAt),
 		ClientIPHash: input.Binding.IPHash, UserAgentHash: input.Binding.UserAgentHash,
 		Platform: input.Principal.Platform, PlatformUserID: input.Principal.PlatformUserID,
@@ -206,7 +213,14 @@ func (m *SessionManager) Rotate(ctx context.Context, input RotateSessionInput) (
 		ID: randomUUIDv4(), Issuer: input.Principal.Issuer, Subject: input.Principal.Subject,
 		TokenHash: sha256Hex(token), CSRFHash: sha256Hex(csrf),
 		ProviderSIDHash: optionalHash(input.Principal.ProviderSID),
-		Roles:           append([]string(nil), input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string(nil), input.Principal.AMR...),
+		// append onto a non-nil empty slice: auth_sessions.roles/amr are
+		// TEXT[] NOT NULL, and pgx encodes a nil []string as SQL NULL (the
+		// column DEFAULT does not apply to an explicit column list). OIDC
+		// principals always carry roles, but platform-password principals
+		// have none -- a nil here broke the first real platform login in
+		// production (SQLSTATE 23502) after the claim fix let it reach
+		// session issuance.
+		Roles:           append([]string{}, input.Principal.Roles...), ACR: input.Principal.ACR, AMR: append([]string{}, input.Principal.AMR...),
 		AuthTime: input.Principal.AuthTime, MFAAt: copyTime(input.MFAAt),
 		ClientIPHash: input.Binding.IPHash, UserAgentHash: input.Binding.UserAgentHash,
 		Platform: input.Principal.Platform, PlatformUserID: input.Principal.PlatformUserID,

@@ -239,3 +239,79 @@ func (fixedBindingVerifier) VerifyBindingProof(_ context.Context, challenge Bind
 		Method: challenge.Method, EvidenceHash: sha256Hex(string(proof.Evidence)), SourceRevisionHash: proof.SourceRevisionHash,
 	}, nil
 }
+
+// TestPostgresPlatformSessionWithoutRolesOrAMR reproduces the first real
+// platform-password login in production after the identity-claim fix: a
+// platform principal carries no OIDC roles/AMR, and auth_sessions.roles/amr
+// are TEXT[] NOT NULL with an explicit column list, so a nil []string
+// (encoded by pgx as SQL NULL) broke session issuance with SQLSTATE 23502.
+// Issue and Rotate must both store empty arrays instead.
+func TestPostgresPlatformSessionWithoutRolesOrAMR(t *testing.T) {
+	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err = pool.Exec(ctx, `DROP SCHEMA public CASCADE;CREATE SCHEMA public`); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+
+	identityStore := NewPostgresIdentityStore(pool)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	// Exactly what httpapi's platform-login handler builds: no Roles, no ACR,
+	// no AMR, no ProviderSID, no MFA -- only the platform identity.
+	principal := Principal{
+		Issuer: "https://api.solov.example", Subject: "1113",
+		Platform: PlatformSub2API, PlatformUserID: "1113", AuthTime: now,
+	}
+	identity, err := identityStore.ResolveOrCreate(ctx, principal, "req-platform-identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	audit := NewPostgresSecurityAuditSink(pool)
+	sessionStore := NewPostgresSessionStore(pool)
+	manager, err := NewSessionManager(sessionStore, SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return now }
+	issued, err := manager.Issue(ctx, IssueSessionInput{UserID: identity.UserID, Principal: principal, RequestID: "req-platform-session"})
+	if err != nil {
+		t.Fatalf("platform session issuance must not require OIDC roles/AMR: %v", err)
+	}
+	var storedRoles, storedAMR []string
+	if err = pool.QueryRow(ctx, `SELECT roles,amr FROM auth_sessions WHERE id=$1`, issued.Session.ID).
+		Scan(&storedRoles, &storedAMR); err != nil {
+		t.Fatal(err)
+	}
+	if storedRoles == nil || len(storedRoles) != 0 || storedAMR == nil || len(storedAMR) != 0 {
+		t.Fatalf("roles/amr must be stored as empty arrays, got roles=%#v amr=%#v", storedRoles, storedAMR)
+	}
+	if _, err = manager.Authenticate(ctx, issued.Token, ClientBinding{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rotation constructs a second Session literal; it must hold the same
+	// invariant for a roles-free platform principal.
+	manager.now = func() time.Time { return now.Add(time.Minute) }
+	rotated, err := manager.Rotate(ctx, RotateSessionInput{Token: issued.Token, ExpectedSessionID: issued.Session.ID, Principal: principal, RequestID: "req-platform-rotate"})
+	if err != nil {
+		t.Fatalf("platform session rotation must not require OIDC roles/AMR: %v", err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT roles,amr FROM auth_sessions WHERE id=$1`, rotated.Session.ID).
+		Scan(&storedRoles, &storedAMR); err != nil {
+		t.Fatal(err)
+	}
+	if storedRoles == nil || len(storedRoles) != 0 || storedAMR == nil || len(storedAMR) != 0 {
+		t.Fatalf("rotated roles/amr must be stored as empty arrays, got roles=%#v amr=%#v", storedRoles, storedAMR)
+	}
+}
