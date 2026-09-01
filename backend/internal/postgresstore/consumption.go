@@ -2287,17 +2287,20 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			  AND lot.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
 			  AND NOT EXISTS (
 				SELECT 1 FROM source_events event
-				-- Cast the TEXT side to uuid (values are always our own ingest
-			-- event UUIDs, stringified) so this join hits the
-			-- (source_instance_id, stream_id, event_id) index. The reverse
+				-- Cast the TEXT side to uuid so this join hits the
+			-- (source_instance_id, stream_id, event_id) index: the reverse
 			-- cast event_id::text defeated every index and filtered ~63k
-			-- rows per probe (75ms each); a heavy account's replay makes
-			-- thousands of these probes -- the first production whale
-			-- wedged for hours on exactly this.
+			-- rows per probe (75ms each), and a heavy account's replay makes
+			-- thousands of such probes -- the first production whale wedged
+			-- for hours on exactly this. The CASE guard keeps synthetic
+			-- non-uuid external ids (e.g. carry-forward proof rows named
+			-- "carry-cutover-event") on the original no-match semantics
+			-- instead of a 22P02 cast error; CASE evaluation order is
+			-- guaranteed, a bare regex AND is not.
 			JOIN source_economic_scan_cycle_events mapped
 				  ON mapped.source_instance_id=lot.source_instance_id
 				 AND mapped.stream_id='payments'
-				 AND mapped.event_id=event.external_event_id::uuid
+				 AND mapped.event_id=CASE WHEN event.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN event.external_event_id::uuid END
 				 AND mapped.payload_hash=lot.source_revision_hash
 				JOIN source_economic_scan_cycles cycle
 				  ON cycle.source_instance_id=mapped.source_instance_id
@@ -2327,7 +2330,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			JOIN source_economic_scan_cycle_events mapped
 			  ON mapped.source_instance_id=lot.source_instance_id
 			 AND mapped.stream_id='payments'
-			 AND mapped.event_id=event.external_event_id::uuid
+			 AND mapped.event_id=CASE WHEN event.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN event.external_event_id::uuid END
 			 AND mapped.payload_hash=lot.source_revision_hash
 			JOIN source_economic_scan_cycles cycle
 			  ON cycle.source_instance_id=mapped.source_instance_id
@@ -2379,7 +2382,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			JOIN source_economic_scan_cycle_events mapped
 			  ON mapped.source_instance_id=checkpoint.source_instance_id
 			 AND mapped.stream_id='balances'
-			 AND mapped.event_id=checkpoint.external_event_id::uuid
+			 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
 			 AND mapped.payload_hash=checkpoint.source_revision_hash
 			JOIN source_economic_scan_cycles cycle
 			  ON cycle.source_instance_id=mapped.source_instance_id
@@ -2409,7 +2412,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 					JOIN source_economic_scan_cycle_events mapped
 					  ON mapped.source_instance_id=checkpoint.source_instance_id
 					 AND mapped.stream_id='balances'
-					 AND mapped.event_id=checkpoint.external_event_id::uuid
+					 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
 					 AND mapped.payload_hash=checkpoint.source_revision_hash
 					WHERE checkpoint.external_account_id=$1
 					  AND mapped.scan_cycle_id=cycle.scan_cycle_id
