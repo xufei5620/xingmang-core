@@ -1,5 +1,10 @@
 # RC66 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC66 shipped at signed tag
+> `v0.1.0-rc66-signed` (`3d7e36d`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-02-invoice-rc67-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC66 — eligibility reprojection jobs get a bounded transaction-local 300s timeout budget so a heavy account's first-login full-history replay cannot wedge at the runtime role's 15s statement_timeout.
