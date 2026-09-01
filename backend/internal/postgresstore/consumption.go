@@ -488,13 +488,29 @@ func tryPublishEconomicScanCyclesTx(ctx context.Context, tx pgx.Tx, sourceID, st
 	rows.Close()
 	for _, item := range cycles {
 		var incomplete, manifestRecords, checkpointRecords int64
+		// XM-INV-POLICY-ANCHOR 2.5: a failed/dead event no longer holds the
+		// cycle once its account has already been frozen over it -- the
+		// processor freezes before returning a plain (non-retryable) error on
+		// payload drift/conflict, so by the time the event reaches
+		// failed/dead an open freeze already exists. There is no ingest-layer
+		// column identifying which account/fact a frozen, encrypted event
+		// belongs to, so the correlation goes through source_revision_hash,
+		// which every freeze call site sets to the triggering fact's revision
+		// hash -- the same value stored as the ingest event's payload_hash.
+		// A failed/dead event with no matching freeze (pure transient
+		// exhaustion, retry budget not proven unrecoverable) still holds the
+		// cycle.
 		err = tx.QueryRow(ctx, `
-			SELECT count(*) FILTER (WHERE sie.processing_status NOT IN ('processed','parked_identity')),
+			SELECT count(*) FILTER (
+					WHERE sie.processing_status NOT IN ('processed','parked_identity')
+						AND NOT (sie.processing_status IN ('failed','dead') AND ef.id IS NOT NULL)
+				),
 				count(*) FILTER (WHERE sie.entity_type='cutover_manifest'),
 				count(*) FILTER (WHERE sie.entity_type='balance_checkpoint')
 			FROM source_economic_scan_cycle_events m
 			JOIN source_ingest_events sie ON sie.source_instance_id=m.source_instance_id
 				AND sie.stream_id=m.stream_id AND sie.event_id=m.event_id
+			LEFT JOIN eligibility_freezes ef ON ef.source_revision_hash=sie.payload_hash AND ef.status='open'
 			WHERE m.source_instance_id=$1 AND m.stream_id=$2 AND m.scan_cycle_id=$3::uuid`,
 			sourceID, streamID, item.id).Scan(&incomplete, &manifestRecords, &checkpointRecords)
 		if err != nil {
@@ -976,6 +992,27 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if errors.Is(err, domain.ErrSourceUnavailable) && in.CheckpointKind == "reconciliation" {
+		var policyStartAt time.Time
+		if err = tx.QueryRow(ctx, `SELECT eligibility_start_at FROM invoice_eligibility_policy
+			WHERE singleton_id=1`).Scan(&policyStartAt); err != nil {
+			return err
+		}
+		if manifest.CutoverAt.Before(policyStartAt) && in.AsOf.Before(policyStartAt) {
+			// XM-INV-POLICY-ANCHOR 2.1: a reconciliation checkpoint dated
+			// before the invoice policy start carries no eligibility-relevant
+			// information for an account that has not bootstrapped yet -- the
+			// account cannot become invoice-eligible before the policy start
+			// regardless of which row eventually establishes its cutover
+			// boundary. Acknowledge it instead of parking on the (possibly
+			// long-delayed) signed cutover row.
+			if err = writeAudit(ctx, tx, actor, "eligibility.pre_policy_checkpoint.skipped",
+				"external_account", accountID, nil, map[string]any{"checkpoint_id": in.CheckpointID,
+					"as_of": in.AsOf, "baseline_member": in.BaselineMember,
+					"policy_start_at": policyStartAt}); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 		if in.BaselineMember {
 			// This account existed in the signed global baseline. Its original
 			// cutover row may still be parked on identity binding and is the only

@@ -590,7 +590,36 @@ func (s *Store) RequeueSourceDependency(ctx context.Context, kind, keyHMAC strin
 		!dependencyHMACPattern.MatchString(keyHMAC) {
 		return 0, errors.New("invalid source dependency wakeup")
 	}
-	command, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if kind == "invoice_oidc_user" || kind == "source_external_account" {
+		// XM-INV-POLICY-ANCHOR 2.2: an identity wake can release a large
+		// backlog of parked usage/balance facts that predate the invoice
+		// policy start -- useless for invoicing regardless of which cutover
+		// boundary the account eventually bootstraps at. Acknowledge them
+		// here instead of releasing them into another park/replay cycle.
+		// Payments, credits, identities and manifests are never skipped: few
+		// in number, and legacy funding lots keep their pre-eligibility
+		// display state.
+		var policyStartAt time.Time
+		if err = tx.QueryRow(ctx, `SELECT eligibility_start_at FROM invoice_eligibility_policy
+			WHERE singleton_id=1`).Scan(&policyStartAt); err != nil {
+			return 0, err
+		}
+		if _, err = tx.Exec(ctx, `
+			UPDATE source_ingest_events SET processing_status='processed',processing_error='PRE_POLICY_SKIPPED',
+				processed_at=now(),lease_token=NULL,lease_expires_at=NULL,
+				dependency_kind=NULL,dependency_key_hmac=NULL,updated_at=now()
+			WHERE processing_status IN ('waiting_dependency','parked_identity') AND dependency_kind=$1 AND dependency_key_hmac=$2
+				AND entity_type IN ('usage_event','balance_checkpoint') AND observed_at<$3`,
+			kind, keyHMAC, policyStartAt); err != nil {
+			return 0, err
+		}
+	}
+	command, err := tx.Exec(ctx, `
 		UPDATE source_ingest_events SET processing_status='queued',processing_error=NULL,
 			catchup_key_hmac=CASE WHEN processing_status='parked_identity' THEN $2 ELSE catchup_key_hmac END,
 			dependency_kind=NULL,dependency_key_hmac=NULL,
@@ -600,7 +629,11 @@ func (s *Store) RequeueSourceDependency(ctx context.Context, kind, keyHMAC strin
 	if err != nil {
 		return 0, err
 	}
-	return command.RowsAffected(), nil
+	released := command.RowsAffected()
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return released, nil
 }
 
 func (s *Store) SourceIngestHealth(ctx context.Context) (SourceIngestHealth, error) {

@@ -32,7 +32,19 @@ type mutableSettings struct {
 	value adminsettings.Settings
 }
 
-func TestBaselineMemberReconciliationWaitsWithoutConsumingRetryBudget(t *testing.T) {
+// TestBaselineMemberPrePolicyCheckpointIgnoredWithoutConsumingRetryBudget
+// exercises design XM-INV-POLICY-ANCHOR 2.1: a baseline member's first
+// reconciliation checkpoint, dated before the invoice policy start, is
+// acknowledged (ignored) instead of parking on the signed cutover row. This
+// replaces the pre-XM-INV-POLICY-ANCHOR scenario the name used to describe
+// (RC62's parked_identity wait): under 2.1 a pre-policy checkpoint no longer
+// waits at all. The post-policy-start boundary -- where a baseline member
+// still waits for the signed cutover row because bootstrapping it directly
+// (bootstrap_kind='POLICY_ANCHOR') needs a schema migration this slice
+// cannot add -- is covered at the store layer by
+// TestPrePolicyReconciliationCheckpointIsIgnoredForAccountWithoutState in
+// postgresstore.
+func TestBaselineMemberPrePolicyCheckpointIgnoredWithoutConsumingRetryBudget(t *testing.T) {
 	service, store, _, ctx := integrationApplication(t)
 	sourceID := "10000000-0000-4000-8000-000000000078"
 	userID := "20000000-0000-4000-8000-000000000078"
@@ -70,9 +82,15 @@ func TestBaselineMemberReconciliationWaitsWithoutConsumingRetryBudget(t *testing
 		t.Fatal(err)
 	}
 	member := true
+	// integrationApplication pins the policy start at (setup time - 24h),
+	// captured moments before this line runs; this checkpoint's as_of must
+	// land strictly between the manifest cutover (now-25h) and the policy
+	// start (~now-24h) to exercise the pre-policy-ignore rule below rather
+	// than the (still-blocked) post-policy bootstrap boundary.
+	checkpointAsOf := now.Add(-24 * time.Hour).Add(-30 * time.Minute)
 	payload, err := json.Marshal(balanceCheckpointPayload{
 		ExternalUserID: "78", CheckpointID: snapshotHash + ":78", CheckpointKind: "reconciliation",
-		AsOf: now.Format(time.RFC3339Nano), BalanceServiceUnits: "100", UnitCode: "SUB2_BALANCE_1E8",
+		AsOf: checkpointAsOf.Format(time.RFC3339Nano), BalanceServiceUnits: "100", UnitCode: "SUB2_BALANCE_1E8",
 		SourceSnapshotID: snapshotHash, SnapshotRowCount: "1", BalanceNegative: false,
 		BaselineMember: &member, SourceCursor: "balance:78", CutoverManifestHash: manifestHash,
 		ConfigurationHash: configHash,
@@ -107,28 +125,32 @@ func TestBaselineMemberReconciliationWaitsWithoutConsumingRetryBudget(t *testing
 	if err != nil || processed != 1 {
 		t.Fatalf("baseline member processor processed=%d err=%v", processed, err)
 	}
-	var status, dependencyKind, cycleStatus string
-	var attempts int
-	if err = store.Pool().QueryRow(ctx, `SELECT processing_status,dependency_kind,attempt_count
+	var status, cycleStatus string
+	if err = store.Pool().QueryRow(ctx, `SELECT processing_status
 		FROM source_ingest_events WHERE source_instance_id=$1 AND stream_id='balances' AND event_id=$2`,
-		sourceID, eventID).Scan(&status, &dependencyKind, &attempts); err != nil {
+		sourceID, eventID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	// RC62: this wait PARKS (excluded from cycle completeness) instead of
-	// holding the cycle in 'processing' -- a real customer's single login
-	// during a half-provisioned window previously froze the whole stream
-	// behind the one-active-cycle constraint. The fact still materializes
-	// when its account's eligibility bootstraps and fires the wake.
-	if status != "parked_identity" || dependencyKind != "source_eligibility_cutover" || attempts != 0 {
-		t.Fatalf("baseline member status=%s dependency=%s attempts=%d", status, dependencyKind, attempts)
+	// XM-INV-POLICY-ANCHOR 2.1: a reconciliation checkpoint dated before the
+	// invoice policy start is acknowledged immediately instead of parking on
+	// the signed cutover row -- it carries no eligibility-relevant
+	// information for an account that has not bootstrapped yet. This
+	// replaces the RC62 parked_identity wait this fixture used to exercise
+	// (see TestPrePolicyReconciliationCheckpointIsIgnoredForAccountWithoutState
+	// in postgresstore for the still-unchanged post-policy-start boundary,
+	// where a baseline member still waits for the signed cutover row).
+	if status != "processed" {
+		t.Fatalf("pre-policy baseline checkpoint status=%s want processed", status)
 	}
+	// A processed event is excluded from cycle completeness the same as a
+	// parked one, so this still must not hold the cycle in 'processing'.
 	if err = store.Pool().QueryRow(ctx, `SELECT cycle_status FROM source_economic_scan_cycles
 		WHERE source_instance_id=$1 AND stream_id='balances' AND scan_cycle_id=$2::uuid`,
 		sourceID, cycleID).Scan(&cycleStatus); err != nil || cycleStatus == "processing" || cycleStatus == "receiving" {
-		t.Fatalf("parked baseline member must not hold the cycle active: status=%s err=%v", cycleStatus, err)
+		t.Fatalf("pre-policy checkpoint must not hold the cycle active: status=%s err=%v", cycleStatus, err)
 	}
 	if processed, err = processor.RunOnce(ctx); err != nil || processed != 0 {
-		t.Fatalf("parked dependency consumed retry budget: processed=%d err=%v", processed, err)
+		t.Fatalf("processed event was reprocessed: processed=%d err=%v", processed, err)
 	}
 	var states int
 	if err = store.Pool().QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state
