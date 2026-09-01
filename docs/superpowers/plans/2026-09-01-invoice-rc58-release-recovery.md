@@ -1,5 +1,12 @@
 # RC58 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC58 shipped at signed tag
+> `v0.1.0-rc58-signed` (`a5dbc78`) and is deployed; its canary proved
+> multi-platform login and live funding-lot materialization and exposed
+> the lot reason-code precedence defect; its evidence is immutable.
+> Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc59-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC58 — the claim path now accepts multi-platform identities: a login whose external account is bound to an SSO invoice_user already claimed by its sibling platform lands on that user instead of being rejected as a takeover; found by the RC57 production canary (a NewAPI login onto the Sub2API-claimed SSO identity).

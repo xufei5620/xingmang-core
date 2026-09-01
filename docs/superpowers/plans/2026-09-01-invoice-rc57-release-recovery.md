@@ -4,7 +4,7 @@
 > `v0.1.0-rc57-signed` (`b29eb83`) and is deployed; its canary proved the
 > full create-path login in production and exposed the multi-platform
 > claim rejection; its evidence is immutable. Continue only with
-> `docs/superpowers/plans/2026-09-01-invoice-rc58-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-01-invoice-rc59-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
