@@ -461,9 +461,10 @@ function okHandler(url: string): Response {
     return fakeResponse(200, financeChannelsBody);
   if (url.startsWith("/api/v1/finance/upstreams/summary"))
     return fakeResponse(200, financeUpstreamsBody);
-  // 渠道管理页 2026-09-02 起在页内挂了「上游管理」区块（XM-CHAN-MERGE0），
-  // 默认空登记簿——需要具体账号数据的用例自己覆盖 stubFetch，不在这个
-  // 共用兜底里编样例行（与服务器登记簿四个查询同一条注释里的规矩）。
+  // 渠道管理页 2026-09-02 起把登记簿字段直接并入渠道表的行与详情页
+  // （XM-CHAN-MERGE0），默认空登记簿——需要具体账号数据的用例自己覆盖
+  // stubFetch，不在这个共用兜底里编样例行（与服务器登记簿四个查询同一条
+  // 注释里的规矩）。
   if (url.startsWith("/api/v1/finance/upstream-accounts"))
     return fakeResponse(200, { items: [] });
   if (url.startsWith("/api/v1/finance/runway-thresholds/history"))
@@ -902,15 +903,14 @@ describe("Sub2API 平台详情·渠道管理页签（XM-0052 逐格对齐原型�
     expect(table.getByText(/订阅型渠道没有余额，可用天数对它无意义/)).not.toBeNull();
   });
 
-  it("口径声明照抄原型，并给出跳到本页下方上游管理区块的入口", async () => {
-    // 2026-09-02 裁定：「上游管理」并入渠道管理页内区块，不再跳另一个页签
+  it("口径声明照抄原型；07:20 补充裁定后不再指向任何独立区块的链接", async () => {
+    // 2026-09-02 07:20 补充裁定：登记簿字段直接并入渠道表的行与详情页，
+    // 不再有独立页签、也不再有独立区块可跳
     renderRoute("/platforms/sub2api?tab=upstream");
     expect(
-      await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不在这里汇总上游/),
+      await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不做跨账号汇总/),
     ).not.toBeNull();
-    expect(
-      screen.getByRole("link", { name: "本页下方「上游管理」区块" }).getAttribute("href"),
-    ).toBe("#upstream-management");
+    expect(screen.queryByRole("link", { name: /上游管理/ })).toBeNull();
   });
 
   it("该环境没有上游账号时给空态而不是空表", async () => {
@@ -1482,11 +1482,16 @@ describe("旧路径 redirect 全表（ADMIN-IA v3 §4.1，逐条断言）", () =
     expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
   });
 
-  it("?tab=suppliers → ?tab=upstream（2026-09-02 裁定：上游管理并入渠道管理页内区块）", async () => {
+  it("?tab=suppliers → ?tab=upstream（2026-09-02 裁定：上游管理并入渠道管理页）", async () => {
     renderRoute("/platforms/sub2api?tab=suppliers");
     expect(await screen.findByRole("tab", { name: "渠道管理", selected: true })).not.toBeNull();
-    // 落地之后还能看到区块本身，不是跳到一个没有上游管理内容的页面
-    expect(await screen.findByText(/由平台手工登记不同上游/)).not.toBeNull();
+    // 落地之后渠道管理页本身正常渲染，不带锚点：07:20 补充裁定把登记簿字段
+    // 直接并入了渠道表的行与详情页，已经没有独立区块要滚过去。这里的
+    // servicesBody 只登记了一个 degraded 的 sub2api 实例（不满足"恰好一个
+    // active"），走的是账号粒度回落分支，口径声明两条分支共用同一句话
+    expect(
+      await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不做跨账号汇总/),
+    ).not.toBeNull();
   });
 
   it("?tab=requests → ?tab=usage（「请求」改名「请求详情」）", async () => {
@@ -1607,9 +1612,12 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
     ]);
   });
 
-  it("`suppliers` 在 Sub2API 上是成本登记簿", async () => {
+  it("`suppliers` 在 Sub2API 上改跳渠道管理页，不是服务器的供应商登记簿", async () => {
     renderRoute("/platforms/sub2api?tab=suppliers");
-    expect(await screen.findByText(/由平台手工登记不同上游/)).not.toBeNull();
+    expect(
+      await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不做跨账号汇总/),
+    ).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "登记供应商" })).toBeNull();
   });
 
   it("`overview` 在服务器上是登记簿汇总（XM-SERVER0），不是一屏通用指标卡或蓝图", async () => {
@@ -1628,7 +1636,7 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
     renderRoute("/platforms/server?tab=suppliers");
     // 断言真实面板的内容，而不是旧蓝图占位（XM-SERVER0 已把这一格接成登记簿）
     expect(await screen.findByRole("button", { name: "登记供应商" })).not.toBeNull();
-    expect(screen.queryByText(/由平台手工登记不同上游/)).toBeNull();
+    expect(screen.queryByText(/渠道管理只做单账号/)).toBeNull();
     expect(screen.queryByText("「供应商与采购」尚未实现")).toBeNull();
   });
 

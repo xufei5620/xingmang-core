@@ -15,7 +15,6 @@ import {
   CHANNELS_REDIRECT,
   DEFAULT_PLATFORM_TAB,
   LEGACY_PLATFORM_ROUTES,
-  LEGACY_TAB_ALIAS_ANCHORS,
   NON_PLATFORM_SERVICE_TYPES,
   PLATFORM_CATALOG,
   USAGE_TAB,
@@ -268,14 +267,13 @@ describe("?tab= 解析：认识 / 改名 / 挪走 / 认不出来", () => {
     expect(resolvePlatformTab("sub2api", "trends")).toEqual({ kind: "redirect", tab: "overview" });
   });
 
-  it("2026-09-02 裁定：?tab=suppliers 改跳 ?tab=upstream，并带上页内区块锚点", () => {
+  it("2026-09-02 裁定：?tab=suppliers 改跳 ?tab=upstream", () => {
     expect(resolvePlatformTab("sub2api", "suppliers")).toEqual({ kind: "redirect", tab: "upstream" });
     expect(resolvePlatformTab("newapi", "suppliers")).toEqual({ kind: "redirect", tab: "upstream" });
-    // 锚点表以**原始** tab 名为键：router.tsx 的 loader 用它决定要不要在
-    // redirect 目标后面追加 #upstream-management
-    expect(LEGACY_TAB_ALIAS_ANCHORS.suppliers).toBe("upstream-management");
+    // 07:20 补充裁定把登记簿字段直接并入了渠道表的行与详情页，已经没有
+    // 独立区块可滚，因此不再需要一张"改跳之后额外带锚点"的表
     // 服务器的 suppliers 是现役页签（供应商与采购），不是这条别名，
-    // 不该被这张表误伤——它压根不该出现在锚点表的键里
+    // 不该被这条 alias 误伤
     expect(resolvePlatformTab("server", "suppliers")).toEqual({ kind: "ok", tab: "suppliers" });
   });
 

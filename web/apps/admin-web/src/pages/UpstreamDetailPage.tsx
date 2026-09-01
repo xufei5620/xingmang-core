@@ -42,9 +42,10 @@ export function UpstreamDetailPage() {
 
 function UpstreamDetailShell({ platform, upstreamId }: { platform: SupplyPlatform; upstreamId: string }) {
   const label = supplyPlatformLabel(platform);
-  // 2026-09-02 起「上游管理」是渠道管理页内区块（`id="upstream-management"`），
-  // 不再是独立页签——返回目标跟着从 ?tab=suppliers 改成 ?tab=upstream 加锚点
-  const backTo = `/platforms/${platform}?tab=upstream#upstream-management`;
+  // 2026-09-02 起「上游管理」不再是独立页签：登记簿字段并入了渠道管理页
+  // 表格的行与渠道详情页（07:20 补充裁定）——返回目标跟着从 ?tab=suppliers
+  // 改成 ?tab=upstream，不带锚点：已经没有独立区块可滚，落地在页顶即可
+  const backTo = `/platforms/${platform}?tab=upstream`;
 
   return (
     <section className="min-w-0">

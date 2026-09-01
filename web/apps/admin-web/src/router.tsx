@@ -35,7 +35,6 @@ import {
   resolvePlatformTab,
   CHANNELS_REDIRECT,
   LEGACY_PLATFORM_ROUTES,
-  LEGACY_TAB_ALIAS_ANCHORS,
   type PlatformEntry,
   type RegistryState,
 } from "./lib/platforms";
@@ -229,17 +228,12 @@ function platformTabLoader({ request, params }: LoaderFunctionArgs) {
     case "redirect": {
       const next = new URL(url);
       next.searchParams.set("tab", resolution.tab);
-      // 「上游管理」页签降级为「渠道管理」页内区块之后，旧 `?tab=suppliers`
-      // 书签只改跳 `?tab=upstream` 还不够——落地会停在页顶，让人以为
-      // 上游管理没了。带上锚点，页面挂载后滚到对应区块（ChannelTable 里
-      // `id="upstream-management"` 的那个 <section>）。查表用的是**原始**
-      // tab 名（`resources`/`suppliers` 这类改名前的值），不是已经解析出的
-      // `resolution.tab`——两者在这条分支里通常一样，但保持用原值更贴合
-      // 「这是哪个旧地址触发的」这件事本身。
-      const anchor = LEGACY_TAB_ALIAS_ANCHORS[rawTab ?? ""];
-      next.hash = anchor ?? "";
-      // `URL#hash` 的取值已经自带前导 `#`（非空时），不必再拼一次
-      return redirect(`${next.pathname}${next.search}${next.hash}`);
+      // 旧 `?tab=suppliers` 书签改跳 `?tab=upstream`：2026-09-02 04:40 裁定期间
+      // 「上游管理」曾降级为渠道管理页内的独立区块，那时这里还要带一个锚点
+      // 才能让人落地后自动滚过去；07:20 的补充裁定进一步把登记簿字段直接
+      // 并入了渠道表的行与详情页，已经没有独立区块可滚，因此这条分支不再
+      // 需要额外处理 hash——落地在渠道管理页顶部就是登记簿字段所在的地方。
+      return redirect(`${next.pathname}${next.search}`);
     }
     case "moved":
       return redirect(resolution.path);
