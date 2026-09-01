@@ -1,5 +1,6 @@
 import { navItemByPath, navStageHint, PageHeader, type NavItemSpec } from "@xingmang/ui-admin";
 import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
+import type { ReactNode } from "react";
 import { useLocation, useSearchParams } from "react-router";
 import {
   BlueprintBanner,
@@ -8,6 +9,7 @@ import {
   blueprintForPath,
   type BlueprintPage,
 } from "../blueprints";
+import { InvoiceConsolePanel } from "../components/InvoiceConsolePanel";
 import { NotFoundView } from "./NotFoundPage";
 
 /** 每一页「将来放什么、归谁做」的一句话。
@@ -95,7 +97,7 @@ function PlaceholderBody({ item }: { item: NavItemSpec }) {
             items={item.subTabs.map((tab) => ({
               value: tab.id,
               label: tab.label,
-              content: subTabContent(blueprint, tab.id, tab.label, item.stage),
+              content: subTabContent(item.path, blueprint, tab.id, tab.label, item.stage),
             }))}
           />
         ) : (
@@ -109,18 +111,38 @@ function PlaceholderBody({ item }: { item: NavItemSpec }) {
   );
 }
 
-/** 一个子页签渲染什么：有蓝图就渲染蓝图，没有就还是那句诚实的「尚未实现」。
+/** 少数子页签是**真实组件**而不是蓝图数据，在查蓝图之前先认一遍
+ *  （CR-0005 平台线 g：治理「跨平台财务 → 开票集成」承载 global 模式的开票
+ *  控制台嵌入）。放在蓝图查找之前而不是塞进 default 分支：与
+ *  PlatformDetailPage 的 `fallbackTabContent` 是同一个理由——写在后面的话,
+ *  任何一次蓝图数据调整都可能不小心把这个特例盖掉。
+ *
+ *  `FINANCE_BLUEPRINT` 里的 `invoicing` 条目本身**不删**：它的 id/label/source
+ *  仍然是 `blueprints.test.ts` 拿来跟 navigation.ts 对账的那份数据，只是渲染
+ *  时不再走 `BlueprintTabView`。 */
+function governanceSubTabOverride(path: string, tabId: string): ReactNode | undefined {
+  if (path === "/finance" && tabId === "invoicing") {
+    return <InvoiceConsolePanel mode="global" />;
+  }
+  return undefined;
+}
+
+/** 一个子页签渲染什么：先看有没有真实组件接管，再看有没有蓝图，都没有就还是
+ *  那句诚实的「尚未实现」。
  *
  *  按 **id** 匹配而不是按下标：navigation.ts 与蓝图规格是两份数据，
  *  按下标对齐的话，其中一边插一格就会让后面全部错位——而错位之后每一格
  *  看起来都仍然正常，只是内容对不上标题。`blueprints.test.ts` 另有一条
  *  断言两边的 id 集合逐一相等，这里是运行时的第二道。 */
 function subTabContent(
+  path: string,
   blueprint: BlueprintPage | undefined,
   tabId: string,
   tabLabel: string,
   stage: string,
 ) {
+  const override = governanceSubTabOverride(path, tabId);
+  if (override) return override;
   const spec = blueprint?.tabs.find((tab) => tab.id === tabId);
   if (spec) return <BlueprintTabView tab={spec} />;
   return (

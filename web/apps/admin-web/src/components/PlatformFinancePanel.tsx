@@ -1,12 +1,14 @@
 import { PageState } from "@xingmang/ui-admin";
 import type { ReactNode } from "react";
+import { InvoiceConsolePanel } from "./InvoiceConsolePanel";
 import { NewApiFinanceOverview } from "./NewApiFinanceOverview";
 import { Sub2ApiFinanceOverview } from "./Sub2ApiFinanceOverview";
 
 /** 支付与财务(原型 `V["s2/finance"]` / `V["newapi/finance"]`)。
  *
- *  本片只建**框架**：子页签条按 IA v3 定稿（Sub2API 5 格 / NewAPI 2 格）,
- *  每一格给出它将来放什么、现在被什么挡着。有真实数据可接的格先接。
+ *  子页签条按 IA v3 定稿（Sub2API 5 格 / NewAPI 3 格，NewAPI 的「开票」由
+ *  CR-0005 补上），每一格给出它将来放什么、现在被什么挡着。有真实数据可接
+ *  的格先接；「开票」两边都已接（CR-0005 第一阶段：嵌入开票系统管理端）。
  *
  *  §9.8 有一条硬口径必须在界面上说出来:
  *
@@ -41,33 +43,27 @@ function sub2apiFinanceSubTab(subId: string): ReactNode | undefined {
         "逐渠道的使用收入、上游成本、毛利与毛利率。数据来自 XM-0037 成本台账（finance.profit-daily 端点已有），接线随第 5 片「渠道管理 + 上游管理」一并做——那一片才会把渠道与上游账号对上号。",
       );
     case "invoices":
-      return (
-        <div className="flex flex-col gap-3">
-          <PageState
-            kind="unavailable"
-            title="开票"
-            description="申请单号、用户、开票金额、类型、抬头、状态，以及开票详情页。"
-          />
-          {/* 这一格的阻塞点是**契约**，不是工期，必须说清楚 */}
-          <p className="rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs text-fg-muted">
-            阻塞点是契约而不是工期：开票线（Codex）的独立系统与本页签是同库还是同步,
-            要等 <strong>CR-0002</strong> 冻结时一并定（ADMIN-IA §8.3）。
-            平台侧只展示与发起 Action,<strong>不得实现开票资格算法</strong>（ADR-006）。
-          </p>
-        </div>
-      );
+      // CR-0005 第一阶段：这一格的阻塞点曾经是**契约**（同库还是同步，要等
+      // CR-0002 冻结），产品负责人 2026-09-02 指令改走嵌入式迁入——不等
+      // CR-0002，直接嵌入开票系统自己的管理端（鉴权、审批、双人复核、审计
+      // 全部仍由它执行，平台不新增任何数据通道，也不展示任何开票数字）
+      return <InvoiceConsolePanel mode="sub2api" />;
     default:
       return undefined;
   }
 }
 
-/** NewAPI 的 2 个子页签。**刻意不补齐成 5 格**——裁定 #2 维持原型。 */
+/** NewAPI 的 3 个子页签。第 3 格「开票」是 CR-0005 补的
+ *  （2026-09-02 产品负责人指令推翻 ADMIN-IA §8.2 #2「不补开票」的裁定），
+ *  内容是与 Sub2API 同一种嵌入，只是按 newapi 过滤。 */
 function newapiFinanceSubTab(subId: string): ReactNode | undefined {
   switch (subId) {
     case "orders":
       return <NewApiFinanceOverview subId="orders" />;
     case "profit":
       return <NewApiFinanceOverview subId="profit" />;
+    case "invoices":
+      return <InvoiceConsolePanel mode="newapi" />;
     default:
       return undefined;
   }

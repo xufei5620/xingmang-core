@@ -230,9 +230,8 @@ describe("子页签逐字对齐 ADMIN-IA v3 §2.2", () => {
     ]);
   });
 
-  it("NewAPI 支付与财务只有 2 格且没有开票——原型没画，裁定 #2 维持原状", () => {
-    expect(subs("newapi", "finance")).toEqual(["资金与订单", "利润核算"]);
-    expect(subs("newapi", "finance")).not.toContain("开票");
+  it("NewAPI 支付与财务现在 3 格，含「开票」（CR-0005 推翻裁定 #2）", () => {
+    expect(subs("newapi", "finance")).toEqual(["资金与订单", "利润核算", "开票"]);
   });
 
   it("渠道保障 3 格，Sub2API / NewAPI / CPA 共用", () => {
