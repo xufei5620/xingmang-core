@@ -1,5 +1,5 @@
 import { apiClient, type ApiClient } from "./client";
-import type { ListOptions } from "./platform";
+import { executeAction, type ActionRun, type ListOptions } from "./platform";
 
 export type CandidateState = "unmapped" | "candidate" | "conflict" | "orphan";
 export type CandidateEvidenceStatus = "sufficient" | "insufficient" | "conflicting";
@@ -160,4 +160,76 @@ export async function listPlatformChannels(
 
 export function platformChannelRowKey(row: PlatformChannelRow): string {
   return `${row.channelRef.serviceId}:${row.channelRef.externalChannelId}`;
+}
+
+// ============================================================================
+// 渠道绑定的两个 L1 Action（XM-C-MAP0 后端已注册，之前没有前端 UI）。
+//
+// internal/platform/finance/channel_binding_actions.go：
+//   finance.platform_channel_binding.set@1 / .remove@1，
+//   Permission = finance.platform_channel_binding.manage，PrincipalTypes 只认 HUMAN。
+// 候选/冲突/已绑定这些状态本身仍来自上面的 listPlatformChannels 只读 Query；
+// 这里只是给已经存在的候选态一个可以真的点下去的确认/解绑入口。
+// ============================================================================
+
+/** 确认/改绑（`finance.platform_channel_binding.set@1`）需要的权限。 */
+export const PLATFORM_CHANNEL_BINDING_MANAGE_PERMISSION = "finance.platform_channel_binding.manage";
+
+export interface ConfirmPlatformChannelBindingParams {
+  serviceId: string;
+  externalChannelId: string;
+  upstreamAccountId: string;
+  /** 改绑时用于乐观并发校验；首次绑定留空。 */
+  expectedBindingId?: string;
+  reason: string;
+}
+
+/** 人工确认（或改绑）一条渠道 → 上游账号的映射。
+ *
+ *  `expectedBindingId` 留空 = 首次绑定；带上现有 `binding.id` = 改绑，
+ *  后端按它做乐观并发校验，绑定在这期间被别人改过会拒绝（CONFLICT）。 */
+export function confirmPlatformChannelBinding(
+  params: ConfirmPlatformChannelBindingParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const allowed: Record<string, string> = {
+    service_id: params.serviceId,
+    external_channel_id: params.externalChannelId,
+    upstream_account_id: params.upstreamAccountId,
+    reason: params.reason,
+    ...(params.expectedBindingId ? { expected_binding_id: params.expectedBindingId } : {}),
+  };
+  return executeAction(
+    { actionId: "finance.platform_channel_binding.set", version: "1", params: allowed },
+    options,
+    client,
+  );
+}
+
+export interface RemovePlatformChannelBindingParams {
+  serviceId: string;
+  externalChannelId: string;
+  /** 必填：解绑同样按乐观并发校验，必须带上当前 `binding.id`。 */
+  expectedBindingId: string;
+  reason: string;
+}
+
+/** 解除一条已确认的绑定。`reason` 必填——理由见 recharge_ratio 那批 Action 的同一条纪律。 */
+export function removePlatformChannelBinding(
+  params: RemovePlatformChannelBindingParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const allowed: Record<string, string> = {
+    service_id: params.serviceId,
+    external_channel_id: params.externalChannelId,
+    expected_binding_id: params.expectedBindingId,
+    reason: params.reason,
+  };
+  return executeAction(
+    { actionId: "finance.platform_channel_binding.remove", version: "1", params: allowed },
+    options,
+    client,
+  );
 }
