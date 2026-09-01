@@ -1,5 +1,10 @@
 # RC65 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC65 shipped at signed tag
+> `v0.1.0-rc65-signed` (`13d7446`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc66-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC65 — the embedded view collapses the connected-account panel into a compact fourth summary card (user-requested UX; the panel still appears while binding guidance is needed).
