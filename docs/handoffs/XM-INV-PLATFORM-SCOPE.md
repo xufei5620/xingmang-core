@@ -14,9 +14,11 @@ no server/production access of any kind was made.
 
 ## commit
 
-See the branch's commit history; the last commit adds this file. (Filled in
-mechanically by the commit sequence below -- run `git log --oneline -1` on
-this branch for the exact hash if it isn't visible from context.)
+Five commits on top of `8802e08`: `f522ef8` (server-side scoping),
+`8e92d01` (new tests), `1142da9` (web scope derivation), `1d1ea19` (docs),
+`59e9013` (this handoff file). This one-line fix to name the actual hashes
+is itself a small follow-up commit on top of `59e9013`, same pattern as
+prior handoffs in this repo.
 
 ## Summary
 
