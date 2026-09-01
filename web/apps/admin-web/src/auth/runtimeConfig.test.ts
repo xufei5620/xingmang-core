@@ -96,6 +96,88 @@ describe("resolveRuntimeConfig：运行时配置的三层回落", () => {
   });
 });
 
+describe("invoiceConsoleOrigin：静态直传，不参与 authMode 那套多层回落（CR-0005 平台线 i）", () => {
+  it("没配就是 undefined，且不算问题", () => {
+    const cfg = resolveRuntimeConfig(undefined, emptyEnv);
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    expect(cfg.problems).toEqual([]);
+  });
+
+  it("合法的 https 来源：原样接受", () => {
+    const cfg = resolveRuntimeConfig({ invoiceConsoleOrigin: "https://invoice.solov.cc" }, emptyEnv);
+    expect(cfg.invoiceConsoleOrigin).toBe("https://invoice.solov.cc");
+    expect(cfg.problems).toEqual([]);
+  });
+
+  it("末尾斜杠去掉，与 oidcIssuer 的归一化口径一致", () => {
+    const cfg = resolveRuntimeConfig({ invoiceConsoleOrigin: "https://invoice.solov.cc/" }, emptyEnv);
+    expect(cfg.invoiceConsoleOrigin).toBe("https://invoice.solov.cc");
+  });
+
+  it("带端口的来源（本地联调）也接受", () => {
+    const cfg = resolveRuntimeConfig(
+      { invoiceConsoleOrigin: "https://localhost:5173" },
+      emptyEnv,
+    );
+    expect(cfg.invoiceConsoleOrigin).toBe("https://localhost:5173");
+  });
+
+  it("带路径：拒绝，按未配置处理并记问题", () => {
+    const cfg = resolveRuntimeConfig(
+      { invoiceConsoleOrigin: "https://invoice.solov.cc/admin" },
+      emptyEnv,
+    );
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    expect(cfg.problems).toHaveLength(1);
+    expect(cfg.problems[0]).toContain("invoiceConsoleOrigin");
+  });
+
+  it("带查询参数：拒绝", () => {
+    const cfg = resolveRuntimeConfig(
+      { invoiceConsoleOrigin: "https://invoice.solov.cc?x=1" },
+      emptyEnv,
+    );
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    expect(cfg.problems).toHaveLength(1);
+  });
+
+  it("带片段：拒绝", () => {
+    const cfg = resolveRuntimeConfig(
+      { invoiceConsoleOrigin: "https://invoice.solov.cc#section" },
+      emptyEnv,
+    );
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    expect(cfg.problems).toHaveLength(1);
+  });
+
+  it("http（非 https）：拒绝", () => {
+    const cfg = resolveRuntimeConfig({ invoiceConsoleOrigin: "http://invoice.solov.cc" }, emptyEnv);
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    expect(cfg.problems).toHaveLength(1);
+  });
+
+  it("不是合法 URL：拒绝，不抛异常", () => {
+    const cfg = resolveRuntimeConfig({ invoiceConsoleOrigin: "不是网址" }, emptyEnv);
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    expect(cfg.problems).toHaveLength(1);
+  });
+
+  it("空串/空白当作没配，不算问题", () => {
+    const cfg = resolveRuntimeConfig({ invoiceConsoleOrigin: "   " }, emptyEnv);
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    expect(cfg.problems).toEqual([]);
+  });
+
+  it("没有 VITE_* 回落层：只认 window.__XM_CONFIG__", () => {
+    // authMode/oidcIssuer 有 vite-env 兜底,但这个字段是「静态环境变量模式」
+    // （同 reqlog/CPA 先例），刻意没有第二层——这里钉住这条边界不被以后悄悄补上
+    const cfg = resolveRuntimeConfig(undefined, {
+      VITE_XM_AUTH_MODE: "dev-header",
+    } as RuntimeEnv);
+    expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+  });
+});
+
 describe("getRuntimeConfig：从 window 读取", () => {
   afterEach(() => {
     delete window.__XM_CONFIG__;
@@ -112,5 +194,14 @@ describe("getRuntimeConfig：从 window 读取", () => {
 
   it("没有注入时是 dev-header", () => {
     expect(getRuntimeConfig().authMode).toBe("dev-header");
+  });
+
+  it("读 window.__XM_CONFIG__.invoiceConsoleOrigin", () => {
+    window.__XM_CONFIG__ = { invoiceConsoleOrigin: "https://invoice.solov.cc" };
+    expect(getRuntimeConfig().invoiceConsoleOrigin).toBe("https://invoice.solov.cc");
+  });
+
+  it("没有注入时 invoiceConsoleOrigin 是 undefined（三处开票页签据此显示未配置）", () => {
+    expect(getRuntimeConfig().invoiceConsoleOrigin).toBeUndefined();
   });
 });

@@ -215,6 +215,24 @@ describe("平台页签（ADMIN-IA v3 §2.1，逐字）", () => {
   it("认不出的 serviceType 返回 undefined，不编一套页签出来", () => {
     expect(platformNavSpec("someday-crm")).toBeUndefined();
   });
+
+  it("Sub2API 的「支付与财务」5 个子页签，末位是「开票」", () => {
+    const finance = platformNavSpec("sub2api")?.tabs.find((tab) => tab.value === "finance");
+    expect(finance?.subTabs.map((sub) => sub.id)).toEqual([
+      "overview",
+      "orders",
+      "refunds",
+      "profit",
+      "invoices",
+    ]);
+    expect(finance?.subTabs.at(-1)?.label).toBe("开票");
+  });
+
+  it("NewAPI 的「支付与财务」现在有「开票」子页签（CR-0005 推翻 ADMIN-IA §8.2 #2）", () => {
+    const finance = platformNavSpec("newapi")?.tabs.find((tab) => tab.value === "finance");
+    expect(finance?.subTabs.map((sub) => sub.id)).toEqual(["orders", "profit", "invoices"]);
+    expect(finance?.subTabs.map((sub) => sub.label)).toEqual(["资金与订单", "利润核算", "开票"]);
+  });
 });
 
 describe("查表与状态标签", () => {

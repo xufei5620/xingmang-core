@@ -1667,11 +1667,11 @@ describe("平台详情：按平台各自的页签集合（ADMIN-IA v3 §2.1）",
     }
   });
 
-  it("NewAPI 的支付与财务只有两格且没有开票（裁定 #2：维持原型）", async () => {
+  it("NewAPI 的支付与财务现在三格，末位是「开票」（CR-0005 推翻裁定 #2）", async () => {
     renderRoute("/platforms/newapi?tab=finance");
     expect(await screen.findByRole("tab", { name: "资金与订单" })).not.toBeNull();
     expect(screen.getByRole("tab", { name: "利润核算" })).not.toBeNull();
-    expect(screen.queryByRole("tab", { name: "开票" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "开票" })).not.toBeNull();
   });
 
   it("CPA 的支付与财务保持未接入，但写明具体缺什么（XM-CPA0）", async () => {
@@ -1877,11 +1877,11 @@ describe("支付与财务页签（框架）", () => {
     }
   });
 
-  it("NewAPI 只有两格，**刻意不补齐**（裁定 #2 维持原型）", async () => {
+  it("NewAPI 现在三格，含「开票」（CR-0005 推翻裁定 #2：不再刻意不补齐）", async () => {
     renderRoute("/platforms/newapi?tab=finance");
     expect(await screen.findByRole("tab", { name: "资金与订单" })).not.toBeNull();
     expect(screen.getByRole("tab", { name: "利润核算" })).not.toBeNull();
-    expect(screen.queryByRole("tab", { name: "开票" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "开票" })).not.toBeNull();
   });
 
   it("NewAPI 资金与订单仍走既有概览，不出现 Sub2API 的资金概览八卡", async () => {
@@ -1896,11 +1896,16 @@ describe("支付与财务页签（框架）", () => {
     expect(await screen.findByText(/「用户充值」不是当期收入/)).not.toBeNull();
   });
 
-  it("开票格说清楚阻塞点是契约（CR-0002），不是工期", async () => {
+  it("开票格是嵌入式开票控制台，未配置来源时诚实显示未接入（CR-0005 第一阶段）", async () => {
+    // CR-0005 之前，这一格说的是「阻塞点是契约（CR-0002）」；现在阻塞点已经
+    // 不是契约——第一阶段直接嵌入开票系统管理端，不等 CR-0002。路由测试没有
+    // 注入 window.__XM_CONFIG__，所以看到的是「未配置」态，不是 iframe；
+    // iframe 本身的行为见 ui-admin/EmbeddedConsoleFrame.test.tsx 与
+    // components/InvoiceConsolePanel.test.tsx
     renderRoute("/platforms/sub2api?tab=finance&sub=invoices");
-    expect(await screen.findByText(/CR-0002/)).not.toBeNull();
-    // 平台侧不得实现开票资格算法（ADR-006）
-    expect(screen.getByText(/不得实现开票资格算法/)).not.toBeNull();
+    expect(await screen.findByRole("tab", { name: "开票", selected: true })).not.toBeNull();
+    expect(screen.getByText(/未配置开票控制台来源（XM_INVOICE_CONSOLE_ORIGIN）/)).not.toBeNull();
+    expect(screen.queryByText(/CR-0002/)).toBeNull();
   });
 
   it("退款格明说上线后也不会有「直接退款」按钮", async () => {
