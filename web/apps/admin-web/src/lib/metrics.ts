@@ -727,3 +727,84 @@ export function readPaymentsDailySummary(
     netMinorUnits: toIntegerValue(value?.["net_minor_units"]),
   };
 }
+
+/** 「月累计」（NewAPI「资金与订单」四格之一）的聚合结果。 */
+export interface MonthToDateSummary {
+  /** null = 一天可用数据都没有，不是 0。 */
+  amountMinor: bigint | null;
+  /** 缺席数据时空串——没有任何一天给出过合约币种。 */
+  currency: string;
+  /** 落在 [monthStart, today] 且拿到健康快照的天数。 */
+  coveredDays: number;
+  /** 月初到目标日应有的天数（含首尾）。 */
+  totalDays: number;
+  /** coveredDays === totalDays 且没有任何一天带 is_partial 才算完整。 */
+  complete: boolean;
+}
+
+/** `YYYY-MM-DD` 两个日期（同月）之间的天数，含首尾。用字符串直接算而不经过
+ *  `Date` 减法：两者都已经是业务日文本，字符串切片比再解析一次时区更不会漂。 */
+function daysBetweenInclusive(from: string, to: string): number {
+  const fromMs = Date.parse(`${from}T00:00:00Z`);
+  const toMs = Date.parse(`${to}T00:00:00Z`);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) return 0;
+  return Math.round((toMs - fromMs) / 86_400_000) + 1;
+}
+
+/** 把 `/api/v1/metrics/history` 返回的 `sub2api.payments.daily`/
+ *  `newapi.payments.daily` 历史观测，聚合成 [monthStart, today] 区间内的
+ *  succeeded 桶月累计。
+ *
+ *  历史查询服务端硬顶 7 天（`maxHistoryHours=168`，见
+ *  internal/platform/httpapi/metrics_history.go 顶部注释：不让这个端点被
+ *  当成数据导出口）——当 monthStart 早于 7 天前，月初到那一刻之间天然没有
+ *  样本可用，`complete` 会据此为 false，调用方必须把这件事说清楚，不能只给
+ *  一个看起来完整的数字（规格 §12）。
+ *
+ *  逐日判据与单日的 `BucketCard` 完全一致，只是应用在每一天上而不是一天：
+ *  `status !== "ok"`（这一天同步本身失败）的样本整天跳过、不计入 coveredDays；
+ *  桶键缺席且 `is_partial` 为真时同样跳过（说不清是真的零还是漏了）；
+ *  其余情况计入 coveredDays 并累加金额（桶键缺席且非 partial 是契约里"确认
+ *  过的零"，加 0）。同一天可能同步多次（`synced_at` 不同），按最新的一条为准。 */
+export function monthToDateSucceeded(
+  items: readonly MetricHistoryItem[],
+  monthStart: string,
+  today: string,
+): MonthToDateSummary {
+  const totalDays = daysBetweenInclusive(monthStart, today);
+
+  const latestByDay = new Map<string, { item: MetricHistoryItem; syncedAtMs: number }>();
+  for (const item of items) {
+    const day = readString(item.value ?? {}, "day");
+    if (!day || day < monthStart || day > today) continue;
+    const syncedAtMs = Date.parse(item.synced_at);
+    if (!Number.isFinite(syncedAtMs)) continue;
+    const existing = latestByDay.get(day);
+    if (!existing || syncedAtMs > existing.syncedAtMs) {
+      latestByDay.set(day, { item, syncedAtMs });
+    }
+  }
+
+  let amount = 0n;
+  let currency = "";
+  let coveredDays = 0;
+  let anyDayPartial = false;
+  for (const { item } of latestByDay.values()) {
+    if (item.status !== "ok") continue;
+    const summary = readPaymentsDailySummary(item.value);
+    const bucket = summary.byStatus.succeeded ?? null;
+    if (bucket === null && item.is_partial) continue; // 说不清是真的零还是漏了
+    coveredDays += 1;
+    if (summary.currency) currency = currency || summary.currency;
+    if (bucket) amount += bucket.amountMinor ?? 0n;
+    if (item.is_partial) anyDayPartial = true;
+  }
+
+  return {
+    amountMinor: coveredDays === 0 ? null : amount,
+    currency,
+    coveredDays,
+    totalDays,
+    complete: coveredDays === totalDays && !anyDayPartial,
+  };
+}
