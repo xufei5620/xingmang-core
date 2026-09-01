@@ -1685,7 +1685,10 @@ function Assert-RC68RuntimeAndBackupBindings {
             throw 'web header verification does not require one container-local HTTP 200 response'
         }
         foreach ($exactHeaderContract in @(
-            "Content-Security-Policy: `$approvedContentSecurityPolicy",
+            "Content-Security-Policy: `$ExpectedContentSecurityPolicy",
+            "[string]`$ExpectedContentSecurityPolicy = `$approvedContentSecurityPolicy",
+            "-Path '/admin' -ExpectedContentSecurityPolicy `$approvedAdminContentSecurityPolicy",
+            "frame-ancestors https://console.solov.cc",
             'X-Content-Type-Options: nosniff',
             'Referrer-Policy: no-referrer'
         )) {
