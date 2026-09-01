@@ -1,5 +1,11 @@
 # RC61 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC61 shipped at signed tag
+> `v0.1.0-rc61-signed` (`0c92758`) and is deployed; it carries the
+> embedded platform scoping and identity badge; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc62-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC61 — the embedded invoice view gains platform scoping (platform=sub2api|newapi narrows lots, eligibility cards, and bound-account guidance to one platform) and an account identity badge; user-requested UX for the per-platform embeds (XM-INV-EMBED-SCOPE, reviewed and merged).

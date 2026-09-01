@@ -2,7 +2,7 @@
 
 > The RC1/RC17/RC24/RC32/RC34/RC38/RC48 entries retained later in this document
 > are historical evidence.
-> They are not renamed or rewritten as RC61 evidence.  The current RC61 section
+> They are not renamed or rewritten as RC62 evidence.  The current RC62 section
 > records source/static remediation design and review policy only; it is **not**
 > an image build, Trivy result, SBOM, signature, artifact-verifier, runtime,
 > provisioning, transfer, deployment, canary, or rollback record.
@@ -12,9 +12,9 @@ vulnerability and Java databases downloaded immediately before the scan.
 The policy fails on every HIGH or CRITICAL finding unless this file contains a
 specific reachability review.
 
-## Current RC61 remediation and review status (source/static only)
+## Current RC62 remediation and review status (source/static only)
 
-RC61 is an urgent remediation slice, not an approved release.  The RC48
+RC62 is an urgent remediation slice, not an approved release.  The RC48
 failure evidence at `release/0.1.0-rc48-exact1` remains byte-for-byte
 historical evidence and RC48 remains blocked.  No current image result is
 claimed here.
@@ -26,7 +26,7 @@ RC49 also remains failed historical evidence: signed tag
 `release/0.1.0-rc49-exact3` directories contain no release manifest. They are
 retained and must be treated as read-only; their file set and hashes are
 anchored by `docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt`. They cannot be renamed,
-amended, or used as RC61 evidence. RC61 requires a new exact tag, nine newly
+amended, or used as RC62 evidence. RC62 requires a new exact tag, nine newly
 tagged images, and a new artifact directory.
 
 RC50 also remains failed historical evidence: signed tag
@@ -34,7 +34,7 @@ RC50 also remains failed historical evidence: signed tag
 `d08b3a2e40e55f7f600759c250f45b16b82bd0e1`. The interrupted
 `release/0.1.0-rc50-exact1` contains no release manifest; its file set and
 SHA-256 are anchored by `docs/RC50-FAILURE-EVIDENCE-SHA256SUMS.txt`. Treat it
-as read-only and never resume, reuse, amend, rename, or represent it as RC61
+as read-only and never resume, reuse, amend, rename, or represent it as RC62
 evidence.
 
 RC51 also remains failed historical evidence: signed tag
@@ -44,7 +44,7 @@ scans, SBOMs and manifest generation, but final verification failed when
 PowerShell converted `reviewedAt` and `reviewDueAt` from ISO strings to
 `DateTime`. Its complete 65-file set is anchored by
 `docs/RC51-FAILURE-EVIDENCE-SHA256SUMS.txt`; treat it as read-only and never
-resume, amend, rename, reuse, or represent it as RC61 evidence.
+resume, amend, rename, reuse, or represent it as RC62 evidence.
 
 RC52 also remains failed historical evidence: signed tag
 `v0.1.0-rc52-signed` is fixed at
@@ -52,7 +52,7 @@ RC52 also remains failed historical evidence: signed tag
 verification because the isolated PostgreSQL 15 host port was unreachable
 through local host NAT. Its one-file set is anchored by
 `docs/RC52-FAILURE-EVIDENCE-SHA256SUMS.txt`; treat it as read-only and never
-resume, amend, rename, reuse, or represent it as RC61 evidence.
+resume, amend, rename, reuse, or represent it as RC62 evidence.
 
 ### Production versus RC48 fact
 
@@ -71,7 +71,7 @@ non-runtime tools image with the same OpenSSL finding.  Thus blocking RC48 was
 correct, but it did not reduce the exposure already present in production;
 remediation is urgent.
 
-### Actual RC61 source changes awaiting evidence
+### Actual RC62 source changes awaiting evidence
 
 - Alpine runtime stages install `libcrypto3=3.5.8-r0` and
   `libssl3=3.5.8-r0`.
@@ -85,25 +85,25 @@ remediation is urgent.
   and thereby remediates the RC48 `sqlite-libs` family
   `CVE-2026-11822` and `CVE-2026-11824`.  Final-image removal of the unused
   MSSQL JDBC driver and `/opt/keycloak/bin/client` is retained pruning proof
-  from the existing hardening; it is required evidence, not an RC61 source
+  from the existing hardening; it is required evidence, not an RC62 source
   remediation.
 
-The intended RC61 inventory is nine manifest-bound images under one exact,
+The intended RC62 inventory is nine manifest-bound images under one exact,
 immutable release tag: `invoice-system-api`, `invoice-system-pdf-scanner`,
 `invoice-system-tools`, `invoice-system-web`, `invoice-source-agent`,
 `invoice-postgres`, `invoice-clamav`, `invoice-ingest-proxy`, and
 `invoice-keycloak`.  Production Compose has no `build:` directives and every
 locally built service uses `pull_policy: never`; a missing transferred image
-must fail closed.  This inventory is a source contract until the RC61 release
+must fail closed.  This inventory is a source contract until the RC62 release
 gate produces and independently verifies the manifest and its IDs.
 
-### RC61 exception policy
+### RC62 exception policy
 
-PostgreSQL has **no RC61 exception**.  Its policy is zero findings: every old
+PostgreSQL has **no RC62 exception**.  Its policy is zero findings: every old
 `gosu` finding has an upstream fixed version and the legacy fixed-version
 fixture is deliberately rejected as exception-eligible.
 
-The sole permitted RC61 exception is the retained raw Keycloak finding with
+The sole permitted RC62 exception is the retained raw Keycloak finding with
 this exact tuple:
 
 The scanner policy remains `HIGH,CRITICAL` with `ignoreUnfixed=false`; there is
@@ -138,7 +138,7 @@ a new committed review.
 ## Historical RC1 approved-candidate snapshot (retired)
 
 This table is retained only as the 2026-08-21 RC1 snapshot. Its generic
-`release-candidate` tags are not RC61 references and do not authorize current
+`release-candidate` tags are not RC62 references and do not authorize current
 build, transfer, canary, or deployment work.
 
 | Image | Local immutable image ID | HIGH | CRITICAL |
@@ -224,7 +224,7 @@ At RC1 review time this was accepted as a narrow binary-reachability exception:
   in the binary but no call path to their vulnerable symbols.
 
 That retired exception required reevaluation whenever the PostgreSQL digest
-changed. It is not permitted for RC61, whose PostgreSQL policy is zero findings
+changed. It is not permitted for RC62, whose PostgreSQL policy is zero findings
 with a null exception record.
 
 ## Historical rejected 26.7.1 reference image
@@ -272,6 +272,6 @@ minutes and pass a real token canary.
 The alternative was therefore not added to the deployment tree. In that
 historical review, the self-hosted path was the then-reviewed Keycloak 26.7.2
 derived image above and still required the immutable-image gate plus real
-production OIDC/MFA/logout canary. The current RC61 path is defined only by the
-exact tuple and refreshed base digest in the bounded RC61 section at the top of
+production OIDC/MFA/logout canary. The current RC62 path is defined only by the
+exact tuple and refreshed base digest in the bounded RC62 section at the top of
 this document.
