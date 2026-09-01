@@ -257,3 +257,173 @@ func TestListPlatformOrdersRequiresPrincipal(t *testing.T) {
 		t.Fatalf("缺少 Principal 应拒绝而不是 200/500, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestListPlatformOrdersFeeAndRefundAmountAreNilByDefault：XM-PAY1 新增的
+// fee/refund_amount 字段，未设置时应渲染成 amountBody 的零值（minor_units 为
+// JSON null），不是裸 0——与既有 amount 字段的"未知不冒充 0"同一条纪律。
+func TestListPlatformOrdersFeeAndRefundAmountAreNilByDefault(t *testing.T) {
+	q := &fakeOrdersQuerier{result: sampleOrdersResult()}
+	rec := servePayments(t, q, "/platforms/sub2api/orders?day=2026-08-27")
+	body := decodeOrders(t, rec)
+	items := body["items"].([]any)
+	first := items[0].(map[string]any)
+	fee, ok := first["fee"].(map[string]any)
+	if !ok {
+		t.Fatalf("fee 字段缺失: %v", first)
+	}
+	if fee["minor_units"] != nil {
+		t.Fatalf("未设置 FeeMinorUnits 时 fee.minor_units 应为 null, got %v", fee["minor_units"])
+	}
+	refund, ok := first["refund_amount"].(map[string]any)
+	if !ok {
+		t.Fatalf("refund_amount 字段缺失: %v", first)
+	}
+	if refund["minor_units"] != nil {
+		t.Fatalf("未设置 RefundAmountMinorUnits 时 refund_amount.minor_units 应为 null, got %v", refund["minor_units"])
+	}
+}
+
+// TestListPlatformOrdersFeeAndRefundAmountArePresentWhenSet：设置了的话必须
+// 是十进制字符串（宪法 13 条），且币种复用订单自己的 Currency。
+func TestListPlatformOrdersFeeAndRefundAmountArePresentWhenSet(t *testing.T) {
+	result := sampleOrdersResult()
+	fee := int64(240)
+	refund := int64(0)
+	result.Items[0].FeeMinorUnits = &fee
+	result.Items[0].RefundAmountMinorUnits = &refund
+	q := &fakeOrdersQuerier{result: result}
+	rec := servePayments(t, q, "/platforms/sub2api/orders?day=2026-08-27")
+	body := decodeOrders(t, rec)
+	items := body["items"].([]any)
+	first := items[0].(map[string]any)
+	feeBody := first["fee"].(map[string]any)
+	if feeBody["minor_units"] != "240" {
+		t.Fatalf("fee.minor_units = %v, want \"240\"", feeBody["minor_units"])
+	}
+	if feeBody["currency"] != "USD" {
+		t.Fatalf("fee.currency = %v, want USD（应复用订单币种）", feeBody["currency"])
+	}
+	refundBody := first["refund_amount"].(map[string]any)
+	// 真实的 0（比如未退款订单）必须显示成 "0"，不是 null——两者是相反的
+	// 两件事（规格 §12）。
+	if refundBody["minor_units"] != "0" {
+		t.Fatalf("refund_amount.minor_units = %v, want \"0\"（已知的零，不是未知）", refundBody["minor_units"])
+	}
+}
+
+func serveOrderDetail(t *testing.T, q PlatformOrdersQuerier, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := chi.NewRouter()
+	r.Get("/platforms/{platform}/orders/{id}", GetPlatformOrderHandler(q))
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req = req.WithContext(principal.WithPrincipal(req.Context(), principal.Principal{
+		ID: "staff", Type: principal.TypeHuman, IdentityZone: "staff",
+		Issuer: "issuer", Subject: "subject", Environment: "staging",
+	}))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestGetPlatformOrderFoundInWindow(t *testing.T) {
+	q := &fakeOrdersQuerier{result: sampleOrdersResult()}
+	rec := serveOrderDetail(t, q, "/platforms/sub2api/orders/9002?day=2026-08-27")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	order, ok := body["order"].(map[string]any)
+	if !ok {
+		t.Fatalf("order 字段缺失: %v", body)
+	}
+	if order["order_id"] != "9002" {
+		t.Fatalf("order_id = %v, want 9002", order["order_id"])
+	}
+	if order["status"] != "PENDING" {
+		t.Fatalf("status = %v, want PENDING", order["status"])
+	}
+	if body["from"] != "2026-08-27" || body["to"] != "2026-08-27" {
+		t.Fatalf("from/to = %v/%v, 应回显已搜索的窗口", body["from"], body["to"])
+	}
+	if q.got.Status != "" {
+		t.Fatalf("订单详情不应按 status 过滤 Querier, got %q", q.got.Status)
+	}
+}
+
+// TestGetPlatformOrderNotFoundIsHonest：窗口内翻完全部候选找不到这个 ID 时
+// 必须诚实 404，不能悄悄回退到另一条订单（ADMIN-IA 交接文档 §8）。
+func TestGetPlatformOrderNotFoundIsHonest(t *testing.T) {
+	q := &fakeOrdersQuerier{result: sampleOrdersResult()}
+	rec := serveOrderDetail(t, q, "/platforms/sub2api/orders/does-not-exist?day=2026-08-27")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	errBody, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("缺少 error 字段: %v", body)
+	}
+	// 必须是结构化的业务错误码，不是 chi 的裸 404 文本——否则前端的
+	// looksLikeUnmountedRoute 会误把"这一条没找到"当成"整组端点没挂载"。
+	if errBody["code"] != "ACTION_NOT_REGISTERED" {
+		t.Fatalf("error.code = %v, want ACTION_NOT_REGISTERED", errBody["code"])
+	}
+}
+
+func TestGetPlatformOrderDefaultsToTodayWindow(t *testing.T) {
+	q := &fakeOrdersQuerier{result: sampleOrdersResult()}
+	rec := serveOrderDetail(t, q, "/platforms/sub2api/orders/does-not-exist")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+	if q.got.From.IsZero() || q.got.To.IsZero() {
+		t.Fatal("不传 day/from/to 时应默认当前 UTC 业务日，不该给 Querier 传零值窗口")
+	}
+}
+
+func TestGetPlatformOrderRejectsUnknownPlatform(t *testing.T) {
+	q := &fakeOrdersQuerier{result: sampleOrdersResult()}
+	rec := serveOrderDetail(t, q, "/platforms/bogus/orders/9001?day=2026-08-27")
+	if rec.Code == http.StatusOK {
+		t.Fatalf("未知平台应被拒绝, got 200: %s", rec.Body.String())
+	}
+}
+
+func TestGetPlatformOrderFeeAndRefundAmountRoundTrip(t *testing.T) {
+	result := sampleOrdersResult()
+	refund := int64(20000)
+	result.Items[0].RefundAmountMinorUnits = &refund
+	q := &fakeOrdersQuerier{result: result}
+	rec := serveOrderDetail(t, q, "/platforms/sub2api/orders/9001?day=2026-08-27")
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	order := body["order"].(map[string]any)
+	refundBody := order["refund_amount"].(map[string]any)
+	if refundBody["minor_units"] != "20000" {
+		t.Fatalf("refund_amount.minor_units = %v, want \"20000\"", refundBody["minor_units"])
+	}
+	feeBody := order["fee"].(map[string]any)
+	if feeBody["minor_units"] != nil {
+		t.Fatalf("未设置 FeeMinorUnits 时应为 null, got %v", feeBody["minor_units"])
+	}
+}
+
+func TestGetPlatformOrderRequiresPrincipal(t *testing.T) {
+	q := &fakeOrdersQuerier{result: sampleOrdersResult()}
+	r := chi.NewRouter()
+	r.Get("/platforms/{platform}/orders/{id}", GetPlatformOrderHandler(q))
+	req := httptest.NewRequest(http.MethodGet, "/platforms/sub2api/orders/9001?day=2026-08-27", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden && rec.Code != http.StatusUnauthorized {
+		t.Fatalf("缺少 Principal 应拒绝而不是 200/500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

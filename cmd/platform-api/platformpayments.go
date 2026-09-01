@@ -319,14 +319,16 @@ func sub2APIOrdersResult(page sub2api.OrderPage, source string) httpapi.Platform
 	items := make([]httpapi.PlatformOrderItem, 0, len(page.Items))
 	for _, o := range page.Items {
 		items = append(items, httpapi.PlatformOrderItem{
-			OrderID:          o.OrderID,
-			CreatedAt:        o.CreatedAt,
-			Status:           o.Status,
-			AmountMinorUnits: o.AmountMinorUnits,
-			Currency:         o.Currency,
-			Method:           o.Method,
-			UserRef:          o.UserRef,
-			UpstreamOrderRef: o.UpstreamOrderRef,
+			OrderID:                o.OrderID,
+			CreatedAt:              o.CreatedAt,
+			Status:                 o.Status,
+			AmountMinorUnits:       o.AmountMinorUnits,
+			Currency:               o.Currency,
+			Method:                 o.Method,
+			UserRef:                o.UserRef,
+			UpstreamOrderRef:       o.UpstreamOrderRef,
+			FeeMinorUnits:          o.FeeMinorUnits,
+			RefundAmountMinorUnits: o.RefundAmountMinorUnits,
 		})
 	}
 	stats := make(map[string]httpapi.PlatformOrderStat, len(page.StatsByStatus))
@@ -355,14 +357,16 @@ func newAPIOrdersResult(page newapi.OrderPage, source string) httpapi.PlatformOr
 	items := make([]httpapi.PlatformOrderItem, 0, len(page.Items))
 	for _, o := range page.Items {
 		items = append(items, httpapi.PlatformOrderItem{
-			OrderID:          o.OrderID,
-			CreatedAt:        o.CreatedAt,
-			Status:           o.Status,
-			AmountMinorUnits: o.AmountMinorUnits,
-			Currency:         o.Currency,
-			Method:           o.Method,
-			UserRef:          o.UserRef,
-			UpstreamOrderRef: o.UpstreamOrderRef,
+			OrderID:                o.OrderID,
+			CreatedAt:              o.CreatedAt,
+			Status:                 o.Status,
+			AmountMinorUnits:       o.AmountMinorUnits,
+			Currency:               o.Currency,
+			Method:                 o.Method,
+			UserRef:                o.UserRef,
+			UpstreamOrderRef:       o.UpstreamOrderRef,
+			FeeMinorUnits:          o.FeeMinorUnits,
+			RefundAmountMinorUnits: o.RefundAmountMinorUnits,
 		})
 	}
 	stats := make(map[string]httpapi.PlatformOrderStat, len(page.StatsByStatus))

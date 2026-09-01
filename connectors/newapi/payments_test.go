@@ -33,6 +33,29 @@ func TestFakeListOrdersRejectsInvalidFilter(t *testing.T) {
 	}
 }
 
+// TestFakeListOrdersFeeAndRefundAmountAlwaysNil（XM-PAY1）：NewAPI 的逐笔
+// 订单没有手续费也没有退款概念，两个字段必须恒为 nil——与 sub2api 侧
+// RefundAmountMinorUnits 永远给出真实数字（哪怕是 0）刻意不同，不能把两边
+// 的 nil 混着当同一件事看，见 connectors/newapi.Order 的字段注释。
+func TestFakeListOrdersFeeAndRefundAmountAlwaysNil(t *testing.T) {
+	c := newapi.NewFake(newapi.FakeOptions{})
+	from := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	page, err := c.ListOrders(context.Background(), newapi.OrderFilter{From: from, To: to})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) == 0 {
+		t.Fatal("宽窗口应返回若干笔固定数据")
+	}
+	for _, item := range page.Items {
+		if item.FeeMinorUnits != nil || item.RefundAmountMinorUnits != nil {
+			t.Errorf("订单 %s: FeeMinorUnits=%v RefundAmountMinorUnits=%v，NewAPI 两者必须恒为 nil",
+				item.OrderID, item.FeeMinorUnits, item.RefundAmountMinorUnits)
+		}
+	}
+}
+
 func TestFakeListOrdersHonorsWindowAndStatus(t *testing.T) {
 	c := newapi.NewFake(newapi.FakeOptions{})
 	ctx := context.Background()

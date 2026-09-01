@@ -2,6 +2,7 @@ package sub2api_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -66,6 +67,38 @@ func TestFakeListOrdersHonorsWindowAndStatus(t *testing.T) {
 	}
 	if len(filtered.Items) == 0 {
 		t.Fatal("固定数据覆盖 KnownOrderStatuses 全集，PAID 至少应有一笔")
+	}
+}
+
+// TestFakeListOrdersExposesFeeAndRefundAmountPerOrder（XM-PAY1）：假实现的
+// 逐笔 Fee/RefundAmount 门禁必须与真实客户端一致——固定数据覆盖
+// KnownOrderStatuses 全集，逐条按桶断言。
+func TestFakeListOrdersExposesFeeAndRefundAmountPerOrder(t *testing.T) {
+	c := sub2api.NewFake(sub2api.FakeOptions{})
+	from := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	page, err := c.ListOrders(context.Background(), sub2api.OrderFilter{From: from, To: to})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range page.Items {
+		// RefundAmountMinorUnits 对每一笔都必须非 nil：sub2api 侧这个字段永远
+		// 可知（未退款订单是已知的 0），与 FeeMinorUnits 的按桶门禁不是同一
+		// 条规则。
+		if item.RefundAmountMinorUnits == nil {
+			t.Errorf("订单 %s(%s).RefundAmountMinorUnits = nil, sub2api 侧应恒非 nil", item.OrderID, item.Status)
+		}
+		switch item.Status {
+		case "PAID", "RECHARGING", "COMPLETED", "REFUND_REQUESTED", "REFUNDING",
+			"REFUND_PENDING", "REFUND_FAILED", "PARTIALLY_REFUNDED", "REFUNDED":
+			if item.FeeMinorUnits == nil {
+				t.Errorf("订单 %s(%s) 落在 succeeded/refunded 桶，FeeMinorUnits 不该是 nil", item.OrderID, item.Status)
+			}
+		case "PENDING", "EXPIRED", "CANCELLED", "FAILED":
+			if item.FeeMinorUnits != nil {
+				t.Errorf("订单 %s(%s) 钱没真的动过，FeeMinorUnits 应为 nil, got %d", item.OrderID, item.Status, *item.FeeMinorUnits)
+			}
+		}
 	}
 }
 
@@ -186,6 +219,67 @@ func TestRealClientListOrdersMapsFieldsAndWindow(t *testing.T) {
 		// （202.00）——那个区分只在 DailyPaymentSummary 的归一化"refunded"桶里生效。
 		t.Errorf("StatsByStatus[REFUNDED] = %+v, want {Count:1 AmountMinorUnits:20000}（面值，非退款额）", refundStats)
 	}
+}
+
+// TestRealClientListOrdersExposesFeeAndRefundAmountPerOrder（XM-PAY1）：
+// FeeMinorUnits 只在 succeeded/refunded 桶才给出，RefundAmountMinorUnits
+// 对每一笔订单都给出（未退款订单是已知的 0，不是 nil）——与
+// DailyPaymentSummary 聚合手续费/退款额的门禁规则完全一致，只是落到了
+// 逐笔明细上。窗口固定命中 9001(PAID)/9002(PENDING)/9003(REFUNDED)/
+// 9004(FAILED) 四种桶，覆盖门禁的两个分支。
+func TestRealClientListOrdersExposesFeeAndRefundAmountPerOrder(t *testing.T) {
+	upstream := startFakeUpstream(t, sub2api.FakeOptions{})
+	client := upstream.newClient(t)
+
+	from := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 8, 27, 23, 59, 59, 0, time.UTC)
+	page, err := client.ListOrders(context.Background(), sub2api.OrderFilter{From: from, To: to})
+	if err != nil {
+		t.Fatalf("ListOrders: %v", err)
+	}
+	byID := make(map[string]sub2api.Order, len(page.Items))
+	for _, o := range page.Items {
+		byID[o.OrderID] = o
+	}
+
+	paid := byID["9001"] // amount=100.00 pay_amount=101.00 → fee=1.00；refund_amount=0.00
+	if paid.FeeMinorUnits == nil || *paid.FeeMinorUnits != 100 {
+		t.Errorf("9001(PAID→succeeded).FeeMinorUnits = %v, want *100（101.00-100.00）", ptrString(paid.FeeMinorUnits))
+	}
+	if paid.RefundAmountMinorUnits == nil || *paid.RefundAmountMinorUnits != 0 {
+		t.Errorf("9001.RefundAmountMinorUnits = %v, want *0（未退款订单是已知的 0，不是 nil）", ptrString(paid.RefundAmountMinorUnits))
+	}
+
+	pending := byID["9002"]
+	if pending.FeeMinorUnits != nil {
+		t.Errorf("9002(PENDING).FeeMinorUnits = %v, want nil（钱没真的动过，手续费不适用）", ptrString(pending.FeeMinorUnits))
+	}
+	if pending.RefundAmountMinorUnits == nil || *pending.RefundAmountMinorUnits != 0 {
+		t.Errorf("9002.RefundAmountMinorUnits = %v, want *0", ptrString(pending.RefundAmountMinorUnits))
+	}
+
+	refunded := byID["9003"] // amount=200.00 pay_amount=202.00 → fee=2.00；refund_amount=202.00
+	if refunded.FeeMinorUnits == nil || *refunded.FeeMinorUnits != 200 {
+		t.Errorf("9003(REFUNDED).FeeMinorUnits = %v, want *200（202.00-200.00）", ptrString(refunded.FeeMinorUnits))
+	}
+	if refunded.RefundAmountMinorUnits == nil || *refunded.RefundAmountMinorUnits != 20200 {
+		t.Errorf("9003.RefundAmountMinorUnits = %v, want *20200（实退金额，不是面值 20000）", ptrString(refunded.RefundAmountMinorUnits))
+	}
+
+	failed := byID["9004"]
+	if failed.FeeMinorUnits != nil {
+		t.Errorf("9004(FAILED).FeeMinorUnits = %v, want nil", ptrString(failed.FeeMinorUnits))
+	}
+	if failed.RefundAmountMinorUnits == nil || *failed.RefundAmountMinorUnits != 0 {
+		t.Errorf("9004.RefundAmountMinorUnits = %v, want *0", ptrString(failed.RefundAmountMinorUnits))
+	}
+}
+
+func ptrString(v *int64) string {
+	if v == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("*%d", *v)
 }
 
 func TestRealClientListOrdersForwardsStatusFilterToUpstream(t *testing.T) {

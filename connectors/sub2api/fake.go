@@ -237,15 +237,38 @@ func fakeOrders(from, to time.Time) []Order {
 	items := make([]Order, 0, n)
 	for i, status := range KnownOrderStatuses {
 		offset := time.Duration(int64(span) * int64(i) / int64(n))
+		amount := int64(1_000 * (i + 1))
+		bucket, hasBucket := paymentStatusBucket(status)
+
+		// FeeMinorUnits：与真实客户端 decodeOrderRow 同一条门禁（只有
+		// succeeded/refunded 桶才给），假数据也要遵守，否则联调时会把这条
+		// 门禁规则本身误当成 bug。比例（1%）明显是虚构的撑数手法，与
+		// DailyPaymentSummary 假实现同款。
+		var fee *int64
+		if hasBucket && (bucket == PaymentStatusSucceeded || bucket == PaymentStatusRefunded) {
+			feeValue := amount / 100
+			fee = &feeValue
+		}
+		// RefundAmountMinorUnits：对每一笔假订单都给出（与真实客户端一致，
+		// 未退款订单上是已知的 0，不是 nil）；退款桶给一个明显小于面值的
+		// 虚构退款额（面值 20%），让"退款金额 ≠ 原订单金额"在假数据里也
+		// 看得出来（对应 PARTIALLY_REFUNDED 的真实语义）。
+		var refund int64
+		if hasBucket && bucket == PaymentStatusRefunded {
+			refund = amount / 5
+		}
+
 		items = append(items, Order{
-			OrderID:          fmt.Sprintf("9%03d", i),
-			CreatedAt:        from.Add(offset),
-			Status:           status,
-			AmountMinorUnits: int64(1_000 * (i + 1)),
-			Currency:         "CNY",
-			Method:           fakeOrderMethods[i%len(fakeOrderMethods)],
-			UserRef:          fmt.Sprintf("fa***@example.com"),
-			UpstreamOrderRef: fmt.Sprintf("FAKE-SUB2API-%04d", 9000+i),
+			OrderID:                fmt.Sprintf("9%03d", i),
+			CreatedAt:              from.Add(offset),
+			Status:                 status,
+			AmountMinorUnits:       amount,
+			Currency:               "CNY",
+			Method:                 fakeOrderMethods[i%len(fakeOrderMethods)],
+			UserRef:                fmt.Sprintf("fa***@example.com"),
+			UpstreamOrderRef:       fmt.Sprintf("FAKE-SUB2API-%04d", 9000+i),
+			FeeMinorUnits:          fee,
+			RefundAmountMinorUnits: &refund,
 		})
 	}
 	return items
