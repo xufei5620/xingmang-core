@@ -136,6 +136,42 @@ func TestRunnerOpensCircuitAfterBoundedTransientFailures(t *testing.T) {
 	}
 }
 
+func TestRunnerScanCycleBusyBacksOffWithoutOpeningCircuit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	syncer := &scriptedPageSyncer{err: &IngestHTTPError{StatusCode: http.StatusServiceUnavailable, RetryAfter: 30 * time.Second}}
+	attempts := 0
+	const observeAttempts = 5 // far more than MaxConsecutiveFailures below
+	runner := &SyncRunner{
+		Coordinator: syncer, SourceType: SourceNewAPI,
+		PollInterval: 5 * time.Second, FullScanInterval: time.Hour,
+		MaxBackoff: time.Minute, MaxPagesPerCycle: 10,
+		MaxConsecutiveFailures: 2, // deliberately tiny: busy responses must never count against it
+		Jitter:                 func(value time.Duration) time.Duration { return value },
+		Sleep: func(_ context.Context, duration time.Duration) error {
+			attempts++
+			if duration != 30*time.Second {
+				t.Fatalf("attempt %d: busy retry did not honor Retry-After: waited %s", attempts, duration)
+			}
+			if attempts >= observeAttempts {
+				cancel()
+				return context.Canceled
+			}
+			return nil
+		},
+	}
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("scan-cycle-busy responses must never open the circuit or return a permanent error: %v", err)
+	}
+	if attempts < observeAttempts {
+		t.Fatalf("expected at least %d retried attempts, got %d", observeAttempts, attempts)
+	}
+	// One SyncPage call precedes each Sleep call within the same failed iteration,
+	// so the coordinator is called exactly once per observed busy attempt.
+	if len(syncer.modes) < observeAttempts {
+		t.Fatalf("coordinator (same batch/sequence source) was not retried on every busy attempt: calls=%d", len(syncer.modes))
+	}
+}
+
 func TestPositiveJitterIsBounded(t *testing.T) {
 	base := 10 * time.Second
 	for range 100 {

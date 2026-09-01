@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"errors"
 	"math/big"
+	"net/http"
 	"sort"
 	"time"
 )
@@ -105,7 +106,6 @@ func (r *SyncRunner) Run(ctx context.Context) error {
 		mode := r.modeAt(started, lastReconcile, lastFull)
 		result, err := r.runCycle(ctx, mode, now)
 		if err != nil {
-			consecutiveFailures++
 			var ingestErr *IngestHTTPError
 			if errors.As(err, &ingestErr) && ingestErr.Permanent() {
 				if r.OnFailure != nil {
@@ -113,11 +113,23 @@ func (r *SyncRunner) Run(ctx context.Context) error {
 				}
 				return err
 			}
-			if consecutiveFailures >= r.MaxConsecutiveFailures {
-				if r.OnFailure != nil {
-					r.OnFailure(SyncFailure{Mode: mode, Err: err, Permanent: true})
+			// The receiver sets a positive Retry-After only on its scan-cycle-busy
+			// rejection (503 SOURCE_SCAN_CYCLE_BUSY): the stream already has a
+			// legitimate cycle processing, which alone can take up to ~30 minutes.
+			// That is not evidence of a broken receiver, so it must not spend the
+			// consecutive-failure budget the way a real transient failure does --
+			// otherwise a long-running cycle alone trips the circuit breaker and
+			// restarts the process into an unnecessary reconcile sweep. Genuine
+			// transient failures (network errors, other 5xx) still count normally.
+			busy := errors.As(err, &ingestErr) && ingestErr.StatusCode == http.StatusServiceUnavailable && ingestErr.RetryAfter > 0
+			if !busy {
+				consecutiveFailures++
+				if consecutiveFailures >= r.MaxConsecutiveFailures {
+					if r.OnFailure != nil {
+						r.OnFailure(SyncFailure{Mode: mode, Err: err, Permanent: true})
+					}
+					return errors.Join(errors.New("source stream circuit opened after consecutive failures"), err)
 				}
-				return errors.Join(errors.New("source stream circuit opened after consecutive failures"), err)
 			}
 			wait := backoff
 			if wait > r.MaxBackoff {
