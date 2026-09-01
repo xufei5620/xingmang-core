@@ -712,6 +712,52 @@ UI 裁定补充条）:
 落地——分支历史上保留了 04:40 裁定的中间提交，但最终交付以 07:20 补充裁定
 描述的单表结构为准。
 
+#### 07:20 补充裁定的精确实现细节（team-lead 直接发给 XM-CHAN-MERGE0 的规格）
+
+ACCEPTANCE-LOG 里的 07:20 裁定条目是产品负责人裁定的**摘要**；team-lead
+随后直接给 XM-CHAN-MERGE0 发了一份更精确的规格（含逐字段 JSON 名），补记于此,
+免得只看 ACCEPTANCE-LOG 摘要的人漏掉这些实现细节：
+
+- **`平台 / 类型` 列显示真实供应商名，不是平台徽章**：`row.vendor`（新契约
+  字段）优先，取不到就退回登记簿 join 的 `upstream_name`。页面本身已经是
+  单平台域（Sub2API 页签 vs NewAPI 页签），再放一个"Sub2API"/"NewAPI" 徽章
+  是重复信息；供应商名才是这一格真正在区分的东西。
+- **`倍率 / 上游倍率` 与 `平台 / 类型` 的"类型"部分，是"新字段优先、退回
+  已有真实数据"，不是从头到尾未接入**：`row.rateMultiplier`/
+  `row.upstreamMultiplier` 优先于登记簿 join 的 `group_rate`/`recharge_ratio`;
+  `row.kind` 优先于 `accountRowType`（从 access_method 派生）。今天两个新
+  字段都是 null，所以显示的仍是登记簿 join 的真实值，不是未接入——这两处与
+  下面 8 个纯新增字段的诚实策略不同，是"有真数据先用，更权威的来源来了自动
+  切换"，不是无中生有也不是假装没有数据。
+- **`状态` 列没有接 `row.status`**：那是 chanfields 还没定形的枚举，贸然
+  映射进既有的健康/需关注徽章体系等于猜它的取值范围，违反宪法 12 条。
+  `PlatformChannelRow` 类型上已经留了 `status: string | null` 字段位置，
+  但渲染逻辑维持现状（绑定 + 观测新鲜度），这是记录在案的刻意取舍。
+- **JSON 字段名**（`PlatformChannelFieldsExtension`，`api/platformChannels.ts`,
+  全部可空，全部按这些名字解析）：`kind`("subscription"|"upstream")、
+  `vendor`、`status`、`capacity`{used,limit}、`scheduling`{enabled,priority}、
+  `today`{requests,success_rate,cost_minor,currency,scale}、`usage_window`
+  {used_ratio,resets_at}、`proxy`、`rate_multiplier`、`upstream_multiplier`、
+  `last_used_at`、`created_at`、`expires_at`。`id`/`name` 没有对应新增字段——
+  `channelRef.externalChannelId`/`name` 已经是稳定的真实数据源，加一个同义的
+  新字段只会制造两个真相源，没有价值。
+- **调度列即使字段到位也保持只读**：渲染一个 `role="switch"
+  aria-disabled="true"` 的禁用态开关（ui-primitives today 没有现成 Toggle
+  组件，这里用既有 token 化工具类画一个纯展示用的假开关，不是新增可复用
+  组件）+ 优先级数字，固定 tooltip 文案「调度开关待 XM-SCHED0 Action」。
+- **`用量窗口` 按类型分叉**：类型是"上游渠道"时这一格是**不适用**（不是
+  未接入——上游渠道本来就没有用量窗口这个概念）；类型是"订阅账号"或还
+  "未映射"时，字段非 null 显示真值，null 显示未接入。
+- **筛选**：`平台 / 来源`（按真实供应商名动态生成选项 + 未映射，不是原型
+  的假供应商列表；回到了 04:40 那一版最初的做法）、`类型`（订阅账号/上游
+  渠道/未映射——多出的"未映射"选项是为了让未绑定的行有筛选入口，不然会
+  漏筛）、`状态`（健康/需关注）。
+- **视图**：全部 / 订阅账号 / 上游渠道 / 需关注（四个，逐字照 team-lead 的
+  规格；"未映射"不再单独占一个预置视图，但仍是"类型"筛选下拉里的一个选项）。
+- **类型加到 `PlatformChannelFieldsExtension` 上是为了让 chanfields 交付之后
+  不用再改前端代码**：字段一旦从 null 变成有值，`ManagedChannelTable.tsx`
+  与 `ChannelDetailPage.tsx` 的渲染逻辑已经在读这些字段，会自动显示真值。
+
 ## 九、落地切片（详见实施计划）
 
 实施计划：`docs/superpowers/plans/2026-08-28-xm-0041-prototype-alignment.md`

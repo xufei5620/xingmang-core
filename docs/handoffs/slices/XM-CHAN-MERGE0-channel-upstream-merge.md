@@ -2,15 +2,24 @@
 
 ## status
 
-READY（待验收线审读、复跑并人工合入）
+**BLOCKED（等 team-lead 决定提交 16-20 怎么合入，见下方「⚠️ 分支状态」）**
 
 ## branch
 
 `ai/claude/XM-CHAN-MERGE0-channel-upstream-merge`（base `release/v0.1-launch` @ `b47af3d`）
 
+**⚠️ 分支状态（2026-09-02 07:25 发现）**：这条分支的提交 1-15 已经被验收线合入
+`release/v0.1-launch`（`5cc7b25`/`06536df`，ACCEPTANCE-LOG "MERGED XM-CHAN-MERGE0
+渠道管理单表"）——本片当时不知道，继续在本地按 team-lead 更精确的规格做提交
+16-20。随后并行切片 XM-CHAN-FIELDS0 也已合入（`0502e60`），交付了提交 16-18
+一直在等的真实字段契约。提交 16-20 尚未合入。已用 `git merge-tree` 确认能
+干净合并到当前 `release/v0.1-launch`（无冲突），已发消息问 team-lead 要不要
+沿用这条分支继续合，还是切一条新分支（比如日志里提过的 XM-CHAN-WIRE0）,
+回复之前不擅自改分支名/不强推。见 risks 里的完整记录。
+
 ## commit
 
-十四个提交，最新为 `98343b9`：
+二十个提交，最新为 `0896a33`：
 
 1. `1f8c834` refactor(admin-web): extract supplier-grain grouping for upstream registry
 2. `075ed4c` feat(nav): drop the standalone suppliers tab on Sub2API/NewAPI
@@ -26,11 +35,22 @@ READY（待验收线审读、复跑并人工合入）
 12. `edbe8d3` refactor(admin-web): drop the upstream-management anchor from the legacy redirect
 13. `9d5c107` docs(admin-ia): record the 07:20 supplementary ruling on §8.8
 14. `98343b9` docs(handoff): rewrite XM-CHAN-MERGE0 handoff for the 07:20 final state
+15. `5131b8f` docs(handoff): fix stale commit count after the handoff-rewrite commit itself
 
-**⚠️ 提交 1-9 实现的是一个已经被推翻的中间设计**，读这份 handoff 之前请看下面
-「两条裁定、一次交付」这一节——本文档描述的是提交 10-14 落地之后的**最终状态**,
-不是提交 9 时的状态（提交 9 当时也写过一份 handoff，内容现在已经不对，被本文件
-取代）。
+**——提交 15 是 `release/v0.1-launch` 上 `5cc7b25` 合并进去的边界，往上都已经
+在生产分支历史里了；往下是尚未合入的部分——**
+
+16. `6c150e3` feat(admin-web): code the channel table against chanfields' exact JSON contract
+17. `03acb95` feat(admin-web): match the channel detail page to the new field contract
+18. `23cb559` docs(admin-ia): record team-lead's precise 07:20/07:25 implementation spec
+19. `bf2e30c` docs(handoff): update for the third refinement pass and its browser proof
+20. `0896a33` fix(admin-web): correct rate_multiplier/success_rate numeric encoding
+
+**⚠️ 提交 1-9 实现的是第一版已经被推翻的中间设计，提交 10-15 是第二版（按
+ACCEPTANCE-LOG 里 07:20 裁定摘要重做）**，读这份 handoff 之前请看下面「两条
+裁定、一次交付」与「第三轮：team-lead 的精确规格」两节——本文档描述的是
+提交 16-18 落地之后的**最终状态**，不是提交 9 或提交 15 时的状态（那两个
+时间点都各自写过一份 handoff，内容现在都不对，被本文件取代）。
 
 ## summary
 
@@ -64,6 +84,46 @@ READY（待验收线审读、复跑并人工合入）
 提交 1-9 的分支历史原样保留（没有 rebase/squash），因为它们本身没有错——04:40
 裁定当时是真实、已批准的决定，提交 1-9 正确落地了它；07:20 裁定是产品负责人
 在看到落地方案后**主动修订**的决定，不是纠正 XM-CHAN-MERGE0 的错误。
+
+### 第三轮：team-lead 的精确规格（消息延迟到达）
+
+ACCEPTANCE-LOG 里的 07:20 裁定条目只是产品负责人裁定的**摘要**。team-lead
+在裁定发出后不久就给这一片发了完整规格（含逐字段 JSON 名、精确的筛选/视图
+清单、调度列的具体 UI 要求），但那几条 SendMessage 都没有以对话轮次的形式
+送达——本片是自己在验收线的 ACCEPTANCE-LOG 里挖到摘要、按摘要重做（提交
+10-15），写完 handoff 报告完成之后，那几条延迟的消息才真正送达。两次描述
+指向同一条裁定，没有冲突，只是精度不同：team-lead 的规格更精确、更可执行,
+提交 16-18 按它把提交 10-15 的实现修订到位（不是另一次推翻，是把摘要级的
+实现修成规格级的实现）。改动的东西：
+
+- 「平台 / 类型」列显示真实供应商名（`row.vendor` 优先，退回登记簿 join 的
+  `upstream_name`）+ 类型徽章，不是之前实现的"平台徽章 + 类型徽章"——页面
+  本身已经是单平台域，供应商名才是真正在区分行的信息。
+- 8 个占位字段有了逐字段 JSON 名（`kind`/`vendor`/`status`/`capacity`/
+  `scheduling`/`today`/`usage_window`/`proxy`/`rate_multiplier`/
+  `upstream_multiplier`/`last_used_at`/`created_at`/`expires_at`，全部可空）,
+  已经加进 `PlatformChannelRow` 类型并按这些名字解析——之前的实现是用一个
+  跟行数据完全无关的 `pendingFieldColumn` 硬编码显示未接入，字段到位后需要
+  另一次代码改动才能接上；现在渲染逻辑直接读这些字段，字段到位那天**不需要
+  再改前端代码**（已用真实数据端到端验证过，见 tests_run）。
+- 「倍率 / 上游倍率」与"类型"这两处是"新契约字段优先、查不到就退回已有的
+  登记簿 join"，不是从头到尾未接入——这两处今天就有真实数据，不该因为新契约
+  字段还没到位就从"有真数据"退化成"未接入"。
+- 「调度」列即使字段到位也保持只读：渲染一个禁用态的开关控件（`role="switch"
+  aria-disabled="true"`）+ 优先级，固定 tooltip「调度开关待 XM-SCHED0
+  Action」——之前的实现只有一段说明文字，没有开关外观。
+- 「用量窗口」按类型分叉：上游渠道类型显示"不适用"（不是"未接入"——这个
+  概念对上游渠道本来就不存在），订阅账号/未映射类型字段未接时才是"未接入"。
+- 「状态」列**刻意没有**接 chanfields 未来会给的 `status` 字段：那是还没
+  定形的枚举，盲目映射进既有的健康/需关注徽章体系等于猜取值，宪法 12 条
+  不允许——类型已经留在类型定义里备用，渲染逻辑维持现状，记录在案的取舍。
+- 筛选补回「平台 / 来源」（按真实供应商名动态生成选项，回到最早 04:40 那一版
+  的做法）；视图从"全部/未映射/需关注"改成规格要求的"全部/订阅账号/上游
+  渠道/需关注"（未映射仍是「类型」筛选下拉里的一个选项，只是不再单独占
+  一个预置视图）。
+
+精确规格的完整原文（`docs/architecture/ADMIN-IA.md` §8.8 新增小节）与本片的
+应对逐条对应，不在这里重复摘抄。
 
 ### 现状是什么、为什么要改（04:40 裁定的背景，仍然成立）
 
@@ -138,16 +198,17 @@ READY（待验收线审读、复跑并人工合入）
 
 ## files_changed
 
-对比 base `b47af3d` 的完整差异（36 个文件，含二进制截图）：
+对比 base `b47af3d` 的完整差异（39 个文件，含二进制截图）：
 
 **新增**
 
 - `web/apps/admin-web/src/components/ChannelBindingCard.tsx` —— 上游映射卡片 +
-  确认/解绑两个对话框（提交 6，07:20 未改动）
+  确认/解绑两个对话框（提交 6，后续两轮均未改动）
 - `docs/handoffs/slices/XM-CHAN-MERGE0-channel-upstream-merge.md` —— 本文件
-  （提交 9 曾写过一版，本次完全重写）
-- `docs/evidence/screens/XM-CHAN-MERGE0/09-11*.png` —— 07:20 最终设计的浏览器
-  截图（见 tests_run）
+  （提交 9、提交 14 各写过一版，本次是第三次重写）
+- `docs/evidence/screens/XM-CHAN-MERGE0/09-13*.png` —— 后两轮的浏览器截图
+  （见 tests_run；09-11 是第二轮"摘要级"设计，12-13 是第三轮"精确规格"设计,
+  含用真实数据点亮 8 个占位字段的端到端验证）
 
 **新增又删除（净值为零，但分支历史里存在过）**
 
@@ -173,9 +234,12 @@ READY（待验收线审读、复跑并人工合入）
 
 API：
 
-- `web/apps/admin-web/src/api/platformChannels.ts` + `.test.ts` —— 新增
+- `web/apps/admin-web/src/api/platformChannels.ts` + `.test.ts` —— 提交 3 新增
   `confirmPlatformChannelBinding` / `removePlatformChannelBinding` /
-  `PLATFORM_CHANNEL_BINDING_MANAGE_PERMISSION`（提交 3，07:20 未改动）
+  `PLATFORM_CHANNEL_BINDING_MANAGE_PERMISSION`；提交 16 新增
+  `PlatformChannelFieldsExtension`（XM-CHAN-FIELDS0 逐字段 JSON 名，全部
+  可空）与解析函数 `parseFieldsExtension`，`PlatformChannelRow` 继承这个
+  接口——字段一旦从服务端拿到非 null 值，行列渲染不需要再改代码
 - `web/apps/admin-web/src/api/finance.ts` —— 新增导出 `accountRowType`（提交
   10）：按绑定账号的 `access_method` 派生"订阅账号"/"上游渠道"二分，行列与
   详情页共用同一个函数
@@ -185,7 +249,13 @@ API：
 - `web/apps/admin-web/src/components/ManagedChannelTable.tsx` + `.test.tsx` ——
   提交 4 从映射工作台改回原型 11/10 列；提交 10 再次整体重写为单表 22 列
   （13 必需 + 9 可选），去掉平台条件分支，新增 ID/类型列与 8 个占位列，工具栏
-  加「＋ 添加上游」
+  加「＋ 添加上游」；提交 16 按 team-lead 的精确规格再次修订——「平台 / 类型」
+  改显示真实供应商名（`row.vendor` 优先、退回登记簿 join）而不是平台徽章,
+  「倍率 / 上游倍率」同样新契约字段优先、退回登记簿 join，8 个占位列改成
+  实际读取 `PlatformChannelFieldsExtension` 的字段（之前是硬编码未接入),
+  「调度」列加禁用态开关控件，「用量窗口」按类型分叉不适用/未接入，筛选
+  补回「平台 / 来源」（动态供应商名选项），视图改成 全部/订阅账号/上游渠道/
+  需关注
 - `web/apps/admin-web/src/components/ChannelTable.tsx` —— 提交 4 两条分支共享
   口径声明/顶部四格；提交 5 挂载页内登记簿区块 + 滚动锚点 effect；提交 10
   删除该区块的挂载与滚动 effect，给账号粒度回落分支补一份工具栏入口
@@ -201,7 +271,9 @@ API：
 
 - `web/apps/admin-web/src/pages/ChannelDetailPage.tsx` + `SupplyDetailPages.test.tsx`
   —— 提交 6 从纯 UI 壳接真实数据 + 上游映射卡片；提交 11 新增「类型」字段与
-  「容量与调度」区块（8 个占位字段）
+  「容量与调度」区块（8 个占位字段）；提交 17 把「类型」「倍率 / 上游倍率」
+  「来源上游」改成新契约字段优先、退回既有 join，「容量与调度」区块改成
+  实际读取扩展字段（不适用/未接入按类型分叉，同行为的行列版本）
 - `web/apps/admin-web/src/pages/UpstreamDetailPage.tsx` / `SupplierCreatePage.tsx`
   —— 返回链接：提交 5 改成 `?tab=upstream#upstream-management`，提交 12 简化
   为 `?tab=upstream`（不带锚点）
@@ -223,133 +295,149 @@ API：
 
 在 `web/` 目录串行执行（Windows worktree 用镜像脚本补齐 `node_modules`，
 命令带 `--config.verify-deps-before-run=false` 跳过 pnpm 依赖校验；未并发跑
-多个 pnpm 门禁）——以下是提交 13（最终状态）之后的复跑结果：
+多个 pnpm 门禁）——以下是提交 18（最终状态）之后的复跑结果：
 
 - `pnpm --config.verify-deps-before-run=false -r run typecheck` —— PASS
   （5 个前端 workspace 包全部 `tsc --noEmit` 无输出）
 - `pnpm --config.verify-deps-before-run=false -r run test` —— PASS：
-  design-tokens 10、ui-primitives 16、ui-admin 232、admin-web 1289，
-  共 1547 个用例全绿（ui-storybook 无单测，构建即验证）
+  design-tokens 10、ui-primitives 16、ui-admin 232、admin-web 1300，
+  共 1558 个用例全绿（ui-storybook 无单测，构建即验证）
 - `pnpm --config.verify-deps-before-run=false --filter ui-storybook run build`
   —— PASS（"Storybook build completed successfully"；本片没有新增/修改
-  ui-admin 包组件，只改了 `finance.ts` 这份 API 辅助函数与 admin-web 应用层
-  组件，`ui-admin` 包本身未改动，Storybook 不需要新故事）
+  ui-admin 包组件，只改了 `api/platformChannels.ts`/`api/finance.ts` 这两份
+  API 辅助函数与 admin-web 应用层组件，`ui-admin` 包本身未改动，Storybook
+  不需要新故事）
 - `bash scripts/check-governance.sh` —— PASS（exit 0，无输出）
 - `gitleaks git --log-opts="release/v0.1-launch..HEAD"` —— PASS
-  （13 commits scanned，"no leaks found"）
+  （18 commits scanned，"no leaks found"）
 
 真实浏览器实测（`node node_modules/vite/bin/vite.js --port 5180 --strictPort`
-+ 手写 mock 后端，同一套 mock 脚本复用自提交 9 那一轮，数据契约本片没有改动，
-只是渲染逻辑变了）：
++ 手写 mock 后端；同一套 mock 数据契约，仅为验证"字段点亮"这一件事在
+`ch-openai-main` 这一行额外填了 8 个扩展字段的样例值）：
 
-- Sub2API/NewAPI 的渠道管理页：单表 22 列（13 必需默认显示 + 9 可选默认收起）,
-  两平台列集完全一致；`列管理` 面板逐项核对必需/可选清单与预期完全一致
-  （截图 09）；打开一个可选列（上游分组）验证显示真实数据（`gpt-main`）
-  而不是空白
-- 「类型」筛选三态（订阅账号/上游渠道/未映射）与「状态」筛选两态渲染正确;
-  绑定到 `access_method=upstream_key` 的账号显示"上游渠道"，未绑定显示
-  "未映射"+候选数提示
-- 8 个占位列（容量/并发、调度、今日统计、用量窗口、最近使用、代理、创建
-  时间、过期时间）逐一核对显示"未接入"，`调度` 列的 title 属性核对确实
-  包含对 XM-CHAN-FIELDS0 与 XM-SCHED0 的说明文字
-- 工具栏「＋ 添加上游」按钮存在（截图 09）
-- 渠道详情页：新增的「类型」字段（截图 10 核对显示"上游渠道"）与「容量与
-  调度」区块（8 个字段全部"未接入"，区块说明文字核对）；既有的「上游映射」
-  卡片、经营核算、余额与预计补充、渠道保障等区块未受影响，逐一确认仍正常
-  渲染
-- 旧路径 `?tab=suppliers`（NewAPI）核对改跳到 `?tab=upstream`，地址栏确认
-  不带任何 hash（截图 11）
-- 过程中在浏览器 Network 面板发现一次 `net::ERR_CONNECTION_TIMED_OUT`——
-  追踪到是同一个 `/api/v1/finance/upstream-accounts` 请求的重复并发实例之一
-  超时（4 次请求里 1 个 aborted、1 个 timeout、2 个 200），与上一轮验证记录
-  过的 Windows 本地开发网络抖动是同一类环境问题（非应用代码缺陷）；页面在
-  后续成功请求到达后自我纠正，重新读取该表格数据后确认渲染正确，未发现
-  任何需要修的应用层 bug
+- Sub2API/NewAPI 的渠道管理页：单表 22 列，两平台列集完全一致；`列管理`
+  面板逐项核对 13 必需 + 9 可选清单（截图 09，第二轮验证时截的，列集本身
+  这一轮没变）
+- 「平台 / 来源」「类型」「状态」三个筛选与 全部/订阅账号/上游渠道/需关注
+  四个视图逐项核对；「平台 / 来源」的选项确认是真实供应商名（`Relay 甲`/
+  `Relay 甲直连`）动态生成，不是编的静态列表
+- **8 个占位列点亮验证**（本轮验证的核心）：给 `ch-openai-main` 这一行的
+  mock 数据填上 `kind`/`vendor`/`capacity`/`scheduling`/`today`/`proxy`/
+  `rate_multiplier`/`upstream_multiplier`/`last_used_at`/`created_at` 的
+  样例值（`usage_window`/`expires_at` 故意留 null，验证"部分字段点亮、部分
+  仍未接入"的混合状态也正确），刷新页面后逐格核对：供应商名显示
+  "Relay 甲直连"（覆盖登记簿 join 的"Relay 甲"）、容量"12 / 50"、调度开关
+  呈勾选态 + "优先级 1"、今日统计"842 次 · 99.2% · ¥45.60"、用量窗口因为
+  `kind=upstream` 显示"不适用"（不是未接入，尽管这一格本身也是 null）、
+  倍率"0.80× / 1.10×"（覆盖登记簿 join 的"0.85× / 1.15×"）、最近使用与
+  创建时间显示真实时间戳、过期时间仍未接入（截图 12）。**全程没有再改一行
+  渲染代码**——这正是 team-lead 规格里"字段到位后不需要再改前端"这个设计
+  目标的端到端证明，不只是单测断言
+- 渠道详情页同一行核对同样的点亮结果：「类型」「来源上游」「倍率 / 上游
+  倍率」「容量与调度」区块的每个字段都与行内一致（截图 13）
+- 过程中两次在浏览器 Network 面板看到 `/api/v1/finance/upstream-accounts`
+  的重复并发请求里有一个 timeout/aborted，与之前两轮验证记录过的 Windows
+  本地开发网络抖动是同一类环境问题（非应用代码缺陷）；页面在后续成功请求
+  到达后自我纠正，重新核对确认渲染正确，未发现任何需要修的应用层 bug
 
-截图新增（`docs/evidence/screens/XM-CHAN-MERGE0/`，编号接续提交 9 那一轮的
-01-08）：
+截图（`docs/evidence/screens/XM-CHAN-MERGE0/`）：
 
-- `09-single-table-column-manager.png` —— Sub2API 渠道管理页，列管理面板
-  展开，13 必需 + 9 可选清单可见
-- `10-channel-detail-capacity-scheduling.png` —— 渠道详情页，「渠道与映射」
-  区块的「类型」字段 + 新增「容量与调度」区块
-- `11-newapi-suppliers-legacy-redirect.png` —— NewAPI，`?tab=suppliers` 落地
-  后的渠道管理页（地址栏已改写为 `?tab=upstream`，无锚点）
+- `01-08`：第一轮（04:40 裁定摘要）实现的截图，画面上能看到已经被删除的
+  「上游管理」页内区块——保留作为历史记录，不代表当前状态
+- `09-11`：第二轮（07:20 裁定摘要）实现的截图，单表 22 列但字段渲染逻辑
+  是硬编码未接入——列集布局仍然正确，但截图里看不出"字段点亮"这件事
+  （那时候还没有真实字段可读）
+- `12-row-fields-lit-up.png`/`13-detail-fields-lit-up.png`：第三轮（精确
+  规格）实现的截图，用填了样例值的 mock 数据验证 8 个占位字段的渲染逻辑
+  真的在读 `PlatformChannelFieldsExtension`，不是摆设
 
-**01-08 号截图对应的是提交 9（04:40 裁定的中间状态）**，画面上还能看到已经
-被删除的「上游管理」页内区块——保留这些截图作为"04:40 裁定当时确实是这样
-实现并验证过的"历史记录，不代表当前交付状态；当前状态以 09-11 号截图与
-本文档正文为准。
+当前状态以 12-13 号截图与本文档正文为准。
 
 ## not_run
 
-- 后端 `go test ./...` / `go vet ./...`：本片全部十三个提交都未改动任何
+- 后端 `go test ./...` / `go vet ./...`：本片全部十八个提交都未改动任何
   `.go` 文件（只是接上了 XM-C-MAP0 早已注册好的两个 Action 与已批的 Query
   契约），未跑；建议验收线按常规仍复跑一次作为基线确认。
 - 生产环境验证：未跑，也不应该跑——本任务明确要求不部署、不碰服务器。
 - 移动端/窄视口截图：只测了 1440×1000 桌面视口。两张表都复用了
   `DataTableV2`/`stickyFirstColumn` 既有实现，理论上继承既有的横向滚动约束,
   但没有专门在窄视口下截图验证。
-- 未对照 `K:/sub2api-src`、`K:/newapi-src` 逐字段核对——07:20 裁定原文要求
-  这个核对由并行切片 **XM-CHAN-FIELDS0**（代理 chanfields）负责，不在本片
-  范围；本片开工前确认过 chanfields 分支尚未交付任何东西（worktree 停在
-  base 提交），因此本片的 8 个占位列这一轮完全没有真实字段可接，全部显式
-  未接入。等 chanfields 交付约定的 JSON 字段名之后，需要另一个后续切片把
-  真值接上（见 follow_ups）。
+- 未对照 `K:/sub2api-src`、`K:/newapi-src` 逐字段核对具体字段名/取值范围是否
+  与 chanfields 实际交付的契约完全一致——那本来就是 XM-CHAN-FIELDS0 自己的
+  工作，不是这一片能做的；本片只按 team-lead 给定的字段名把类型和渲染逻辑
+  先接好、用**编造的样例数据**证明了"字段非 null 时能正确渲染"这条链路,
+  不代表 chanfields 交付的真实契约形状与这里假设的完全一致——如果不一致
+  （比如某个字段实际是别的类型，或者嵌套结构不同），仍然需要一次小的对齐
+  修改，只是比"完全没有类型定义、从零接入"要小得多。
 - 未测试「订阅账号」类型在真实浏览器里的渲染（mock 数据里没有一条 sub2api/
-  newapi 的渠道行绑定到订阅型账号）——这条分支在单元测试里有专门覆盖
-  （`ManagedChannelTable.test.tsx`「绑定到订阅账号...显示订阅账号」），
+  newapi 的渠道行绑定到订阅型账号）——这条分支在单元测试里有专门覆盖,
   真实浏览器这一轮没有专门补一条 mock 数据去复现，风险较低（渲染逻辑与
   已验证过的"上游渠道"分支共用同一个组件、只是文案不同）。
 
 ## risks
 
-- **8 个占位列在这一轮完全没有真实数据可验证**——本片只能确认"字段不存在时
-  正确显示未接入、说明文字正确"，无法确认"字段存在时正确显示真值"，因为
-  `PlatformChannelRow` 类型本身没有为这 8 个字段预留 TypeScript 属性（有意
-  如此：预留了假的属性形状，等 XM-CHAN-FIELDS0 交付的真实契约如果字段名/
-  形状不一致，反而要返工两次）。后续接入这些字段的切片需要同时改
-  `api/platformChannels.ts` 的 `PlatformChannelRow`/`RawPage` 类型与
-  `ManagedChannelTable.tsx`/`ChannelDetailPage.tsx` 的渲染逻辑，不能只改
-  后者。
-- **「平台 / 类型」列的二分（订阅账号/上游渠道）与详情页「类型」字段是本片
-  按 07:20 裁定原文的措辞新设计的**，`accountRowType` 把 `official_api` 与
-  `upstream_key` 都归到"上游渠道"——这个归类没有经过产品侧对"官方直连算不算
-  上游渠道"这个具体问题的确认，是从裁定原文"行内区分订阅账号与上游渠道"这
-  句话反推出的最直接读法（非订阅即上游渠道）。如果产品负责人对官方直连这
-  个子类型有更细的期望，可能需要调整。
+- **提交 1-15 已经被合入 `release/v0.1-launch`，提交 16-20 还没有**（见上方
+  「分支状态」）——本片开工时没有意识到自己的分支已经被合并，继续在本地按
+  team-lead 更精确的规格（含逐字段 JSON 名）做了 5 个提交；这些提交此刻只
+  存在于本地分支，不在生产分支历史里。`git merge-tree --write-tree
+  release/v0.1-launch HEAD` 确认能干净合并（chanfields 改的是 Go/contracts,
+  本片改的是前端，没有文件重叠），但要不要真的合、用什么名义合（继续这条
+  分支，还是切一条新的比如 XM-CHAN-WIRE0），是等 team-lead 回复的开放问题,
+  本片没有擅自决定。
+- **提交 16-18 最初是照 team-lead 消息里给的 JSON 字段名猜的形状，提交 20
+  用 chanfields 实际交付的契约（`contracts/connectors/{sub2api,newapi}.
+  channel-catalog.v3.md` 与 `internal/platform/httpapi/platform_channels.go`
+  的 struct tag）核对过一遍，发现并修了两处真实的类型/数值编码错误**（详见
+  提交 20 的说明）：`rate_multiplier`/`upstream_multiplier` 契约是
+  `*float64`（数字），不是十进制字符串；`today.success_rate` 是 0-1 小数且
+  Sub2API 端恒为 null，即使 `requests`/`cost_minor` 有真数据，之前的实现会
+  默认成 0 显示假的"0.0%"。修完之后逐字段核对过 Go struct 的 json tag,
+  确认类型定义与实际契约完全一致，不只是跟裁定摘要或 team-lead 的转述一致。
+- **「平台 / 类型」列与详情页「类型」字段的默认二分逻辑（`accountRowType`)
+  把 `official_api` 与 `upstream_key` 都归到"上游渠道"**——这个归类没有经过
+  产品侧对"官方直连算不算上游渠道"这个具体问题的确认，是从裁定"行内区分
+  订阅账号与上游渠道"这句话反推出的最直接读法（非订阅即上游渠道）。今天
+  `row.kind` 非 null 时会覆盖这个默认逻辑，所以一旦 chanfields 交付了真实
+  的 `kind` 分类，这条风险自动消解；只在 chanfields 交付之前、且产品负责人
+  对这个子类型有不同期望时才需要手动调整默认逻辑。
 - **渠道详情页解析 `serviceId` 的方式与列表页的判据字面相同，但是各自独立
-  实现的**——这条风险延续自提交 9 那版 handoff，07:20 的改动没有涉及这部分
-  代码，风险原样保留：`ChannelTable.tsx` 用 props 传入，`ChannelDetailPage.tsx`
-  自己再查一次 `listServices()`。两处判据目前逻辑等价，但如果未来这条规则
-  改变，需要记得两处一起改。
+  实现的**——这条风险延续自最早的版本，三轮改动都没有涉及这部分代码，风险
+  原样保留：`ChannelTable.tsx` 用 props 传入，`ChannelDetailPage.tsx` 自己
+  再查一次 `listServices()`。两处判据目前逻辑等价，但如果未来这条规则改变,
+  需要记得两处一起改。
 - **确认/解绑映射 Action 参数里的 `service_id` 来自渠道详情页解析出的
-  `serviceId`，不是渠道行自带的**——同样延续自提交 9 版本，未受 07:20 影响。
-- **提交 1-9 与提交 10-13 之间存在一段"半成品"分支历史**：任何人直接
-  `git checkout` 到提交 1-9 之间的某个点，看到的是已经被推翻的 04:40 裁定
-  中间状态（比如 `UpstreamAccountsPanel.tsx` 存在、`?tab=suppliers` 带锚点）。
-  这在正常合并流程（合并 `HEAD`，不合并中间提交）下不是问题，只在有人手动
+  `serviceId`，不是渠道行自带的**——同样延续自最早版本，未受任何一轮改动
+  影响。
+- **分支历史里有两段已经被后续裁定推翻的中间状态**（提交 1-9 是 04:40 裁定
+  的实现，提交 10-15 是"按 ACCEPTANCE-LOG 摘要重做"的实现）：任何人直接
+  `git checkout` 到这两段之间的某个点，看到的都不是最终交付状态。这在正常
+  合并流程（合并 `HEAD`，不合并中间提交）下不是问题，只在有人手动
   cherry-pick 中间提交时才会造成困惑，记录在案。
+- **team-lead 的 SendMessage 有过不止一次没有以对话轮次形式送达这一片**
+  （原始的 07:20/07:25 规格消息、以及后续的重发消息 df28dc74，都是在本片
+  已经完成"按 ACCEPTANCE-LOG 摘要重做"并报告完成之后才真正送达的）——这不是
+  本片能修的问题，但导致了本文档记录的三轮实现而不是一轮；如果这类延迟是
+  系统性的，可能值得在协调层面单独排查，不只是"写进 handoff 记录一下"。
 
 ## follow_ups
 
-- **XM-CHAN-FIELDS0 交付后需要一个后续切片，把 8 个占位列接上真值**——这不是
-  本片能做的（chanfields 这一轮完全没有交付任何字段契约），但结构已经就位:
-  8 个字段的列位置、顺序、列头文案、headerTitle 说明都已经写好，后续切片
-  只需要（a）在 `api/platformChannels.ts` 里给 `PlatformChannelRow` 加上
-  真实字段，（b）把 `ManagedChannelTable.tsx`/`ChannelDetailPage.tsx` 里
-  对应的 `pendingFieldColumn`/`UnavailableFact` 换成读真实字段的渲染逻辑。
+- **等 chanfields 真正交付渠道目录契约扩展后，建议做一次小规模的核对**（不是
+  重新实现）：确认 `PlatformChannelFieldsExtension` 里假设的字段名/嵌套结构
+  与 chanfields 实际交付的完全一致；如果一致，字段会在不改代码的前提下自动
+  显示真值（本片已经用编造的样例数据端到端验证过这条链路，见 tests_run）;
+  如果有出入，需要调整 `api/platformChannels.ts` 的解析函数
+  `parseFieldsExtension`。
 - **调度的写操作（开关/优先级）是另一个切片 XM-SCHED0**——本片的「调度」列
-  与详情页字段都是只读占位，即使 XM-CHAN-FIELDS0 交付了只读字段，写操作
-  仍然需要一个新的 L1/L2 Action 设计，不在本片或推测中的"接字段"后续切片
-  范围内。
+  与详情页字段都是只读展示（禁用态开关控件），即使 XM-CHAN-FIELDS0 交付了
+  只读的 `scheduling` 字段，写操作仍然需要一个新的 L1/L2 Action 设计，不在
+  本片或"核对字段契约"这个后续 follow-up 的范围内。
 - **质量指标卡片（首字异常/缓存命中/在线率/TPS/主动探测）明确划给渠道保障
-  XM-ASSURE0**——07:20 裁定原文明确排除，本片没有做，也不应该有人在没有
-  确认 XM-ASSURE0 范围的情况下把它们加回渠道管理页。
+  XM-ASSURE0**——裁定原文明确排除，本片没有做，也不应该有人在没有确认
+  XM-ASSURE0 范围的情况下把它们加回渠道管理页。
 - ADMIN-IA §8.6 #1 记录的"上游管理仍缺一张真正的供应商实体表"这件事——04:40
-  裁定时曾在展示层做过缓解（供应商归并），07:20 裁定连这个缓解方案都推翻了,
-  现在完全没有任何供应商聚合视图。如果后续要做真正的供应商实体，需要另立
-  切片从头设计，不能复用本片删除的 `upstreamGrouping.ts`。
+  裁定时曾在展示层做过缓解（供应商归并），07:20/07:25 裁定连这个缓解方案都
+  推翻了，现在完全没有任何供应商聚合视图。如果后续要做真正的供应商实体,
+  需要另立切片从头设计，不能复用本片删除的 `upstreamGrouping.ts`。
 - 渠道绑定 Action 的错误处理已经接了 `ActionErrorNote`，但没有专门测试乐观
-  并发冲突（`CONFLICT`）在 UI 上的呈现是否清楚——延续自提交 9 版本的
-  follow-up，07:20 未涉及，建议后续针对并发冲突单独补一条集成测试。
+  并发冲突（`CONFLICT`）在 UI 上的呈现是否清楚——延续自最早版本的
+  follow-up，三轮改动都未涉及，建议后续针对并发冲突单独补一条集成测试。

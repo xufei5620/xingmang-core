@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { DataTableV2, type DataTableColumn } from "@xingmang/ui-admin";
-import { Badge } from "@xingmang/ui-primitives";
+import { Badge, cx } from "@xingmang/ui-primitives";
 import { Link } from "react-router";
 import { listPlatformChannels, type PlatformChannelRow } from "../api/platformChannels";
 import {
@@ -20,37 +20,41 @@ import { UpstreamAccountDialog } from "./UpstreamAccountDialog";
  *  `V["s2/upstream"]` / `V["newapi/upstream"]`），只在**恰好一个已登记且
  *  active 的 service** 时启用（见 `ChannelTable.tsx`）。
  *
- *  ## 两条裁定的叠加
+ *  ## 三轮裁定叠加
  *
- *  2026-09-02 04:40 产品负责人裁定（ACCEPTANCE-LOG）先把这张表从 XM-C-MAP0
- *  做成的映射工作台改回原型的渠道表；同一天 07:20 又裁定补充，推翻了 04:40
- *  裁定里"上游管理降级为页内区块"的做法——**登记簿不再有独立区块，也不再有
- *  独立表**，改成登记簿字段直接并入这张表的行与 `pages/ChannelDetailPage.tsx`
- *  详情页。这一版是两条裁定叠加之后的最终状态：
+ *  04:40 裁定把这张表从 XM-C-MAP0 的映射工作台改回原型渠道表；同日 07:20/
+ *  07:25 两条口径一致的补充裁定（先在 ACCEPTANCE-LOG 里发现、随后 team-lead
+ *  发来完整规格，含逐字段 JSON 名）把"上游管理降级为页内区块"整体推翻——
+ *  单表、新增 ID 列、按行区分「订阅账号」与「上游渠道」、登记簿字段并入行与
+ *  详情页。这一版是三轮叠加后的最终状态：
  *
- *  - 新增 `id` 独立列（原来是 `channel` 列里的一段子文字）；`name` 单独一列
- *  - 新增 `平台 / 类型` 列：`accountRowType` 把绑定账号的三态 `access_method`
- *    收成"订阅账号 / 上游渠道"两档；未绑定显示"未映射"
- *  - 「成功率」列整体去掉——07:20 裁定的必需列清单里没有它，且它恒为
- *    "未接入 · M1.5"，属于渠道保障（XM-ASSURE0）范围，不属于这张表
- *  - 新增 5 个必需占位列（容量/并发、调度、今日统计、用量窗口、最近使用）+
- *    3 个可选占位列（代理、创建时间、过期时间）：这 8 个字段今天在
- *    `GET /api/v1/platforms/{p}/channels` 里完全不存在，字段本身要等并行
- *    切片 XM-CHAN-FIELDS0 扩展渠道目录契约后才有——**结构先落地，占位显式
- *    标未接入并说明原因**，等契约到位后再把这些格子接上真值，不是这一片
- *    要做的事（宪法 12 条：未接的字段必须显式标未接入，不能不出现，也不能
- *    编数字）。「调度」额外说明：即使字段到位，写操作（开关/优先级）也另立
- *    XM-SCHED0，本轮任何时候都只做只读展示
- *  - 供给成本/我方计费消耗/上游分组/可用模型/上游名称联系人/充值成本率六个
- *    原本必需的列降级为列管理里默认收起的可选列——数据没变，只是不再默认
- *    铺满屏幕；候选/冲突/孤儿这些映射工作台专属状态，连同确认/解绑映射的
- *    操作，仍然在 `pages/ChannelDetailPage.tsx` 的「上游映射」卡片,
- *    这一层从 04:40 裁定起就没变过
- *  - 「＋ 添加上游」从页内区块的入口改成这张表工具条上的按钮（`toolbarExtra`),
- *    空态下也放一份，避免"目录是空的 → 连添加上游的入口都找不到"
+ *  - `平台 / 类型` 列显示**真实供应商名**（`row.vendor` 优先，没有则回退到
+ *    绑定账号的 `upstream_name` join）+ 类型徽章（`row.kind` 优先，没有则用
+ *    `accountRowType` 从 access_method 派生）——不是原型的假 AI 供应商分类
+ *  - `倍率 / 上游倍率` 同样"新字段优先，查不到就退回登记簿 join"：
+ *    `row.rateMultiplier`/`row.upstreamMultiplier` 优先于 `group_rate`/
+ *    `recharge_ratio`。这两个字段今天**有真实数据**（登记簿 join），
+ *    不是从头到尾的未接入——与下面 8 个纯新增字段的诚实策略不同，这里是
+ *    "有真数据就先用，新契约来了自动切换到更权威的来源"，不是无中生有
+ *  - `容量/并发`、`调度`、`今日统计`、`用量窗口`、`最近使用`（必需列）与
+ *    `代理`、`创建时间`、`过期时间`（可选列）这 8 个字段今天在
+ *    `GET /api/v1/platforms/{p}/channels` 里恒为 null——已经把类型定好、
+ *    按 XM-CHAN-FIELDS0 裁定给定的 JSON 名解析（`api/platformChannels.ts` 的
+ *    `PlatformChannelFieldsExtension`），这里只管渲染：字段非 null 就显示
+ *    真值，null 就显式未接入并说明原因。等 chanfields 交付，这张表**不需要
+ *    再改代码**，后端一开始下发真值格子就自动"亮起来"
+ *  - `调度` 列即使字段到位也保持只读：渲染一个禁用态的开关控件 + 优先级,
+ *    tooltip 固定文案「调度开关待 XM-SCHED0 Action」——写操作是另一个切片
+ *  - `状态` 列**没有**接 `row.status`：那是 chanfields 还没定形的枚举，
+ *    盲目塞进既有的健康/需关注徽章体系等于猜它的取值，宪法 12 条不允许。
+ *    类型已经加到 `PlatformChannelRow` 上备用，渲染逻辑维持现状（绑定 +
+ *    观测新鲜度），是刻意的、记录在案的取舍，不是漏做
+ *  - 筛选新增「平台 / 来源」（按真实供应商名动态生成选项，回到 04:40 那一版
+ *    的做法，与「类型」是两个独立维度）；视图改成 全部/订阅账号/上游渠道/
+ *    需关注（「未映射」不再单独占一个视图，但仍是「类型」筛选里的一个选项,
+ *    否则未映射的行会无处可筛）
  *
- *  顶部四格仍由父组件 `ChannelTable` 统一渲染（两个粒度共用同一份汇总数据),
- *  这里只画表本身。 */
+ *  顶部四格仍由父组件 `ChannelTable` 统一渲染，这里只画表本身。 */
 export function ManagedChannelTable({
   platform,
   serviceId,
@@ -96,42 +100,34 @@ export function ManagedChannelTable({
     />
   );
 
+  const columns = channelRefColumns({ platform, accountsById, summariesById });
+  const allColumnIds = columns.map((c) => c.id);
+
   return (
     <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
       <DataTableV2
         caption={`${label} 渠道管理：一行一个账号 / 渠道，ID、类型、状态、余额与毛利；登记簿字段并入本表与详情页`}
-        columns={channelRefColumns({ platform, accountsById, summariesById })}
+        columns={columns}
         rows={rows}
         rowKey={(row) => `${row.channelRef.serviceId}:${row.channelRef.externalChannelId}`}
         searchable
         stickyFirstColumn
         defaultDensity="compact"
-        filters={channelRefFilters()}
+        filters={channelRefFilters(rows, accountsById)}
         toolbarExtra={addUpstreamButton}
         views={[
+          { name: "全部", state: { query: "", filters: {}, sort: null, visibleColumns: allColumnIds, density: "compact" } },
           {
-            name: "全部",
-            state: { query: "", filters: {}, sort: null, visibleColumns: allColumnIds(platform), density: "compact" },
+            name: "订阅账号",
+            state: { query: "", filters: { platformType: "订阅账号" }, sort: null, visibleColumns: allColumnIds, density: "compact" },
           },
           {
-            name: "未映射",
-            state: {
-              query: "",
-              filters: { platformType: "未映射" },
-              sort: null,
-              visibleColumns: allColumnIds(platform),
-              density: "compact",
-            },
+            name: "上游渠道",
+            state: { query: "", filters: { platformType: "上游渠道" }, sort: null, visibleColumns: allColumnIds, density: "compact" },
           },
           {
             name: "需关注",
-            state: {
-              query: "",
-              filters: { status: "需关注" },
-              sort: null,
-              visibleColumns: allColumnIds(platform),
-              density: "compact",
-            },
+            state: { query: "", filters: { status: "需关注" }, sort: null, visibleColumns: allColumnIds, density: "compact" },
           },
         ]}
         emptyState={
@@ -151,19 +147,31 @@ export function ManagedChannelTable({
   );
 }
 
-function allColumnIds(platform: "sub2api" | "newapi"): string[] {
-  return channelRefColumns({
-    platform,
-    accountsById: new Map(),
-    summariesById: new Map(),
-  }).map((c) => c.id);
-}
+/** 「平台 / 来源」筛选：动态取当前页面上出现过的真实供应商名（`row.vendor`
+ *  优先，没有则回退登记簿 join 的 `upstream_name`），外加「未映射」——不是
+ *  原型的静态假供应商列表（宪法 12 条）。「类型」是固定三态，`accountRowType`
+ *  已经把它收成了封闭集合，多出的「未映射」选项是为了让未绑定的行也能被
+ *  筛出来，不然「类型」筛选覆盖不了所有行。「状态」沿用既有的健康 / 需关注
+ *  两态。 */
+function channelRefFilters(
+  rows: readonly PlatformChannelRow[],
+  accountsById: ReadonlyMap<string, UpstreamAccountItem>,
+): { columnId: string; label: string; options: readonly string[] }[] {
+  const vendors = new Set<string>();
+  let hasUnmapped = false;
+  for (const row of rows) {
+    if (row.binding) {
+      const account = accountsById.get(row.binding.upstreamAccountId);
+      vendors.add(row.vendor ?? account?.upstream_name ?? row.binding.upstreamAccountId);
+    } else {
+      hasUnmapped = true;
+    }
+  }
+  const vendorOptions = [...vendors].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  if (hasUnmapped) vendorOptions.push("未映射");
 
-/** 「类型」筛选是固定三态，不用像旧版「平台 / 来源」那样现场扫描行数据生成
- *  选项——`accountRowType` 已经把它收成了封闭集合。「状态」筛选沿用既有的
- *  健康 / 需关注两态。 */
-function channelRefFilters(): { columnId: string; label: string; options: readonly string[] }[] {
   return [
+    { columnId: "upstreamContact", label: "平台 / 来源", options: vendorOptions },
     { columnId: "platformType", label: "类型", options: ["订阅账号", "上游渠道", "未映射"] },
     { columnId: "status", label: "状态", options: ["健康", "需关注"] },
   ];
@@ -180,31 +188,23 @@ function fieldsPendingHint(label: string, extra?: string): string {
   return extra ? `${base}。${extra}` : base;
 }
 
-function pendingFieldColumn(
-  id: string,
-  header: string,
-  opts: { defaultHidden?: boolean; extraHint?: string } = {},
-): DataTableColumn<PlatformChannelRow> {
-  const hint = fieldsPendingHint(header, opts.extraHint);
-  return {
-    id,
-    header,
-    ...(opts.defaultHidden ? { defaultHidden: true } : {}),
-    cell: () => (
-      <span className="text-xs text-fg-muted" title={hint}>
-        未接入
-      </span>
-    ),
-    headerTitle: hint,
-  };
+function pendingBadge(hint: string) {
+  return (
+    <span className="text-xs text-fg-muted" title={hint}>
+      未接入
+    </span>
+  );
 }
 
 /** 未绑定 → "未映射"；绑定了但登记簿查不到这个账号 id → 保守按"上游渠道"处理
- *  （不是"订阅账号"，因为订阅账号的成本口径完全不同，不能猜）；其余按绑定
- *  账号的 access_method 走 `accountRowType`。列的 `value` 与单元格渲染共用
- *  这同一个函数，两者不会读出不一致的类型。 */
+ *  （不是"订阅账号"，因为订阅账号的成本口径完全不同，不能猜）；`row.kind`
+ *  有值时优先用它（chanfields 交付后更权威的来源），否则按绑定账号的
+ *  access_method 走 `accountRowType`。列的 `value` 与单元格渲染共用这同一个
+ *  函数，两者不会读出不一致的类型。 */
 function typeLabelFor(row: PlatformChannelRow, account: UpstreamAccountItem | undefined): "订阅账号" | "上游渠道" | "未映射" {
   if (!row.binding) return "未映射";
+  if (row.kind === "subscription") return "订阅账号";
+  if (row.kind === "upstream") return "上游渠道";
   return accountRowType(account?.access_method ?? "").label as "订阅账号" | "上游渠道";
 }
 
@@ -226,7 +226,7 @@ function channelRefColumns({
       header: "ID",
       primary: true,
       value: (row) => row.channelRef.externalChannelId,
-      cell: (row) => <span className="block min-w-24 break-all font-mono text-xs">{row.channelRef.externalChannelId}</span>,
+      cell: (row) => <span className="block min-w-24 select-all break-all font-mono text-xs">{row.channelRef.externalChannelId}</span>,
       headerTitle: platform === "sub2api" ? "Sub2API 账号 ID" : "NewAPI 渠道 ID",
     },
     {
@@ -246,38 +246,53 @@ function channelRefColumns({
       id: "platformType",
       header: "平台 / 类型",
       value: (row) => typeLabelFor(row, boundAccount(row)),
-      cell: (row) => <PlatformTypeCell platform={platform} row={row} account={boundAccount(row)} />,
-      headerTitle: "类型区分订阅账号与上游渠道（2026-09-02 07:20 裁定补充），按绑定账号的接入方式派生",
+      cell: (row) => <PlatformTypeCell row={row} account={boundAccount(row)} />,
+      headerTitle: "供应商名（真实登记簿数据，不是假的 AI 供应商分类）+ 类型徽章：类型区分订阅账号与上游渠道",
     },
-    pendingFieldColumn("capacity", "容量 / 并发"),
+    {
+      id: "capacity",
+      header: "容量 / 并发",
+      cell: (row) =>
+        row.capacity ? (
+          <span className="text-xs">
+            {row.capacity.used} / {row.capacity.limit}
+          </span>
+        ) : (
+          pendingBadge(fieldsPendingHint("容量 / 并发"))
+        ),
+      headerTitle: fieldsPendingHint("容量 / 并发"),
+    },
     {
       id: "status",
       header: "状态",
       value: (row) => statusText(row),
       cell: (row) => <StatusCell row={row} />,
-      headerTitle: "未映射到上游账号，或最近一次观测已过期时标「需关注」；不是请求成功率意义上的健康",
+      headerTitle: "未映射到上游账号，或最近一次观测已过期时标「需关注」；不是请求成功率意义上的健康。这一格没有接 chanfields 的 status 字段——那是尚未定形的枚举，盲目映射到健康/需关注体系等于猜取值",
     },
-    pendingFieldColumn("scheduling", "调度", {
-      extraHint: "即使字段到位，开关 / 优先级这类写操作也另立 XM-SCHED0；本轮任何时候都只做只读展示",
-    }),
-    pendingFieldColumn("todayStats", "今日统计"),
-    pendingFieldColumn("usageWindow", "用量窗口"),
+    {
+      id: "scheduling",
+      header: "调度",
+      cell: (row) => <SchedulingCell row={row} />,
+      headerTitle: fieldsPendingHint("调度", "即使字段到位，开关 / 优先级这类写操作也另立 XM-SCHED0；本轮任何时候都只做只读展示"),
+    },
+    {
+      id: "todayStats",
+      header: "今日统计",
+      cell: (row) => <TodayStatsCell row={row} />,
+      headerTitle: fieldsPendingHint("今日统计（请求数 · 成功率 · 消耗）"),
+    },
+    {
+      id: "usageWindow",
+      header: "用量窗口",
+      cell: (row) => <UsageWindowCell row={row} account={boundAccount(row)} />,
+      headerTitle: "订阅账号显示用量窗口占比与重置时间；上游渠道没有这个概念，显示不适用；" + fieldsPendingHint("用量窗口"),
+    },
     {
       id: "rate",
       header: "倍率 / 上游倍率",
-      value: (row) => boundAccount(row)?.group_rate ?? "",
-      cell: (row) => {
-        const account = boundAccount(row);
-        if (!account?.group_rate) {
-          return (
-            <span className="text-xs text-fg-muted" title={row.binding ? "这个上游账号没有登记分组倍率" : "渠道还没有绑定上游账号"}>
-              未接入
-            </span>
-          );
-        }
-        return <span className="text-xs">{account.group_rate}×</span>;
-      },
-      headerTitle: "分组倍率只展示，不并入成本折算（§10.2）",
+      value: (row) => row.rateMultiplier ?? boundAccount(row)?.group_rate ?? "",
+      cell: (row) => <RateCell row={row} account={boundAccount(row)} />,
+      headerTitle: "倍率只展示，不并入成本折算（§10.2）。新契约字段（rate_multiplier/upstream_multiplier）到位前，先用登记簿 join 的 group_rate/recharge_ratio",
     },
     {
       id: "balance",
@@ -297,7 +312,13 @@ function channelRefColumns({
       cell: (row) => <EconomicsCell row={row} field="profit" />,
       headerTitle: "我方计费消耗 − 供给成本，按渠道单独核算",
     },
-    pendingFieldColumn("lastUsed", "最近使用"),
+    {
+      id: "lastUsed",
+      header: "最近使用",
+      value: (row) => row.lastUsedAt ?? "",
+      cell: (row) => (row.lastUsedAt ? <span className="text-xs">{row.lastUsedAt}</span> : pendingBadge(fieldsPendingHint("最近使用"))),
+      headerTitle: fieldsPendingHint("最近使用"),
+    },
     {
       id: "detail",
       header: "详情",
@@ -311,7 +332,13 @@ function channelRefColumns({
       ),
       headerTitle: "上游映射的确认 / 解绑与候选、冲突详情都在渠道详情页",
     },
-    pendingFieldColumn("proxy", "代理", { defaultHidden: true }),
+    {
+      id: "proxy",
+      header: "代理",
+      defaultHidden: true,
+      cell: (row) => (row.proxy ? <span className="text-xs">{row.proxy}</span> : pendingBadge(fieldsPendingHint("代理"))),
+      headerTitle: fieldsPendingHint("代理"),
+    },
     {
       id: "upstreamGroup",
       header: "上游分组",
@@ -357,22 +384,37 @@ function channelRefColumns({
       cell: (row) => <EconomicsCell row={row} field="revenue" />,
       headerTitle: "这个账号 / Key 在窗口内产生的我方计费额",
     },
-    pendingFieldColumn("createdAt", "创建时间", { defaultHidden: true }),
-    pendingFieldColumn("expiresAt", "过期时间", { defaultHidden: true }),
+    {
+      id: "createdAt",
+      header: "创建时间",
+      defaultHidden: true,
+      value: (row) => row.createdAt ?? "",
+      cell: (row) => (row.createdAt ? <span className="text-xs">{row.createdAt}</span> : pendingBadge(fieldsPendingHint("创建时间"))),
+      headerTitle: fieldsPendingHint("创建时间"),
+    },
+    {
+      id: "expiresAt",
+      header: "过期时间",
+      defaultHidden: true,
+      value: (row) => row.expiresAt ?? "",
+      cell: (row) => (row.expiresAt ? <span className="text-xs">{row.expiresAt}</span> : pendingBadge(fieldsPendingHint("过期时间"))),
+      headerTitle: fieldsPendingHint("过期时间"),
+    },
     {
       id: "upstreamContact",
       header: "上游名称 / 联系人",
       defaultHidden: true,
-      value: (row) => boundAccount(row)?.upstream_name ?? "",
+      value: (row) => (row.binding ? row.vendor ?? boundAccount(row)?.upstream_name ?? "" : "未映射"),
       cell: (row) => {
         const account = boundAccount(row);
-        if (!account) {
+        const vendor = row.vendor ?? account?.upstream_name;
+        if (!account && !vendor) {
           return <span className="text-xs text-fg-muted">未接入</span>;
         }
         return (
           <div className="min-w-28 text-xs">
-            <span className="font-medium">{account.upstream_name || "未命名上游"}</span>
-            {account.upstream_contact ? <p className="text-fg-muted">{account.upstream_contact}</p> : null}
+            <span className="font-medium">{vendor || "未命名上游"}</span>
+            {account?.upstream_contact ? <p className="text-fg-muted">{account.upstream_contact}</p> : null}
           </div>
         );
       },
@@ -390,42 +432,127 @@ function channelRefColumns({
   ];
 }
 
-function PlatformTypeCell({
-  platform,
-  row,
-  account,
-}: {
-  platform: "sub2api" | "newapi";
-  row: PlatformChannelRow;
-  account: UpstreamAccountItem | undefined;
-}) {
-  const platformLabel = platform === "sub2api" ? "Sub2API" : "NewAPI";
+function PlatformTypeCell({ row, account }: { row: PlatformChannelRow; account: UpstreamAccountItem | undefined }) {
   if (!row.binding) {
     return (
       <div className="min-w-28">
-        <Badge tone="info">{platformLabel}</Badge>
-        <span className="ml-1">
-          <Badge tone={row.candidate.state === "conflict" ? "danger" : "neutral"}>未映射</Badge>
-        </span>
+        <Badge tone={row.candidate.state === "conflict" ? "danger" : "neutral"}>未映射</Badge>
         {row.candidate.upstreamAccountIds.length > 0 ? (
           <p className="mt-1 text-xs text-fg-muted">候选 {row.candidate.upstreamAccountIds.length} 个，详情页确认</p>
         ) : null}
       </div>
     );
   }
+  const vendor = row.vendor ?? account?.upstream_name;
   const type = typeLabelFor(row, account);
   return (
     <div className="min-w-28">
-      <Badge tone="info">{platformLabel}</Badge>
-      <span className="ml-1">
-        <Badge tone="neutral">{type}</Badge>
-      </span>
+      <span className="block text-xs font-medium">{vendor || "未接入"}</span>
+      <Badge tone="neutral">{type}</Badge>
       {!account ? (
         <p className="mt-1 text-xs text-fg-muted" title="已绑定但登记簿里找不到这个上游账号 id">
           账号 {row.binding.upstreamAccountId}
         </p>
       ) : null}
     </div>
+  );
+}
+
+const SCHEDULING_WRITE_HINT = "调度开关待 XM-SCHED0 Action";
+
+/** 禁用态的开关外观——ui-primitives 今天没有现成的 Toggle/Switch 组件，这里
+ *  用既有的 token 化工具类（边框/背景/圆角都取自设计令牌，没有硬编码颜色）
+ *  画一个纯展示用的假开关，不是新增一个可复用组件（只在这一格用，不值得
+ *  为它去走 Storybook-first 流程）。`aria-disabled` + 不挂 onClick/tabIndex,
+ *  读屏器会正确报成"已禁用的开关"，不会被当成可操作控件。 */
+function DisabledToggle({ checked }: { checked: boolean }) {
+  return (
+    <span
+      role="switch"
+      aria-checked={checked}
+      aria-disabled="true"
+      className={cx(
+        "inline-flex h-4 w-7 shrink-0 items-center rounded-full border border-edge-strong transition-colors",
+        checked ? "bg-accent/40" : "bg-surface-muted",
+      )}
+    >
+      <span
+        className={cx(
+          "block h-3 w-3 rounded-full bg-surface shadow-sm transition-transform",
+          checked ? "translate-x-3.5" : "translate-x-0.5",
+        )}
+      />
+    </span>
+  );
+}
+
+function SchedulingCell({ row }: { row: PlatformChannelRow }) {
+  if (!row.scheduling) {
+    return (
+      <div className="flex items-center gap-1.5" title={fieldsPendingHint("调度") + "；" + SCHEDULING_WRITE_HINT}>
+        <DisabledToggle checked={false} />
+        <span className="text-xs text-fg-muted">未接入</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5" title={SCHEDULING_WRITE_HINT}>
+      <DisabledToggle checked={row.scheduling.enabled} />
+      <span className="text-xs text-fg-muted">优先级 {row.scheduling.priority}</span>
+    </div>
+  );
+}
+
+function TodayStatsCell({ row }: { row: PlatformChannelRow }) {
+  if (!row.today) return pendingBadge(fieldsPendingHint("今日统计（请求数 · 成功率 · 消耗）"));
+  const cost = formatScaledMinorUnits(row.today.costMinor, row.today.currency, row.today.scale);
+  // successRate 是 0-1 的小数（契约的 ppm→小数换算），显示前要乘 100；
+  // Sub2API 端这个子字段恒为 null（没有数据源），即使 requests/cost 是真的
+  const successRate = row.today.successRate === null ? "成功率未接入" : `${(row.today.successRate * 100).toFixed(1)}%`;
+  return (
+    <span className="text-xs">
+      {row.today.requests} 次 · {successRate} · {cost}
+    </span>
+  );
+}
+
+function UsageWindowCell({ row, account }: { row: PlatformChannelRow; account: UpstreamAccountItem | undefined }) {
+  const type = typeLabelFor(row, account);
+  if (type === "上游渠道") {
+    return (
+      <span className="text-xs text-fg-muted" title="上游渠道没有用量窗口这个概念">
+        不适用
+      </span>
+    );
+  }
+  if (!row.usageWindow) return pendingBadge(fieldsPendingHint("用量窗口"));
+  const pct = Math.round(row.usageWindow.usedRatio * 100);
+  return (
+    <span className="text-xs">
+      {pct}%{row.usageWindow.resetsAt ? ` · 重置于 ${row.usageWindow.resetsAt}` : ""}
+    </span>
+  );
+}
+
+function RateCell({ row, account }: { row: PlatformChannelRow; account: UpstreamAccountItem | undefined }) {
+  // row.rateMultiplier/upstreamMultiplier 是数字（契约的数值编码），登记簿
+  // join 的 group_rate/recharge_ratio 是十进制字符串——两种表示法混在一个
+  // 兜底表达式里，显式判 null/undefined 而不是判假值：数字倍率理论上可以是
+  // 0（虽然实践中不太可能），用 `!rate` 会把真的 0 误判成"没有这个字段"
+  const rate = row.rateMultiplier ?? account?.group_rate ?? null;
+  const upstreamRate = row.upstreamMultiplier ?? account?.recharge_ratio ?? null;
+  if (rate === null && upstreamRate === null) {
+    return (
+      <span className="text-xs text-fg-muted" title={row.binding ? "这个上游账号没有登记倍率" : "渠道还没有绑定上游账号"}>
+        未接入
+      </span>
+    );
+  }
+  return (
+    <span className="text-xs">
+      {rate !== null ? `${rate}×` : "—"}
+      {upstreamRate !== null ? ` / ${upstreamRate}×` : ""}
+    </span>
   );
 }
 

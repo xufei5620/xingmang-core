@@ -224,12 +224,24 @@ describe("「平台 / 类型」列", () => {
     expect(await table.findByText("上游渠道")).toBeTruthy();
   });
 
-  it("平台徽章逐行都显示，即使整页只有一个平台", async () => {
-    stub({});
+  it("显示真实供应商名，不是平台徽章——页面本身已经是单平台域，供应商名才是区分行的信息", async () => {
+    stub({ accounts: [upstreamAccount({ upstream_name: "Relay 甲" })] });
     renderPanel();
     const table = within(await screen.findByRole("table"));
     await table.findByText("OpenAI A");
-    expect(table.getByText("NewAPI")).toBeTruthy();
+    expect(table.getAllByText("Relay 甲").length).toBeGreaterThan(0);
+    expect(table.queryByText("NewAPI")).toBeNull();
+  });
+
+  it("row.vendor（XM-CHAN-FIELDS0）优先于登记簿 join 的 upstream_name", async () => {
+    stub({
+      channels: [channelRow({ vendor: "官方直连-Anthropic" })],
+      accounts: [upstreamAccount({ upstream_name: "Relay 甲" })],
+    });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    expect(await table.findByText("官方直连-Anthropic")).toBeTruthy();
+    expect(table.queryByText("Relay 甲")).toBeNull();
   });
 });
 
@@ -273,6 +285,76 @@ describe("8 个 XM-CHAN-FIELDS0 占位列", () => {
       expect(table.getByRole("columnheader", { name: header })).toBeTruthy();
     }
   });
+
+  it("调度：字段未接时渲染一个禁用态开关 + 未接入，tooltip 固定文案「调度开关待 XM-SCHED0 Action」", async () => {
+    stub({});
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    await table.findByText("OpenAI A");
+    const toggle = table.getByRole("switch");
+    expect(toggle.getAttribute("aria-disabled")).toBe("true");
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(toggle.closest("[title]")?.getAttribute("title")).toMatch(/调度开关待 XM-SCHED0 Action/);
+  });
+
+  it("调度：row.scheduling 非空时显示开关状态与优先级，不再是未接入", async () => {
+    stub({ channels: [channelRow({ scheduling: { enabled: true, priority: 3 } })] });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    await table.findByText("OpenAI A");
+    const toggle = table.getByRole("switch");
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(table.getByText("优先级 3")).toBeTruthy();
+    // 只断言调度这一格自己不再显示未接入——同一行别的占位列（容量/今日统计等）
+    // 这条 fixture 没填，仍然是未接入，不该拿它们来断言整张表
+    expect(within(toggle.closest("div") as HTMLElement).queryByText("未接入")).toBeNull();
+  });
+
+  it("容量/今日统计/用量窗口/最近使用：字段非 null 时不用改代码直接显示真值", async () => {
+    stub({
+      channels: [
+        channelRow({
+          capacity: { used: 4, limit: 8 },
+          // success_rate 契约是 0-1 小数（0.96 = 96.0%），不是 0-100 的百分数
+          today: { requests: 50, success_rate: 0.96, cost_minor: "1200000", currency: "CNY", scale: 6 },
+          usage_window: { used_ratio: 0.3, resets_at: "2026-09-03T00:00:00Z" },
+          last_used_at: "2026-09-02T04:00:00Z",
+        }),
+      ],
+      accounts: [upstreamAccount({ access_method: "subscription_account" })],
+    });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    await table.findByText("OpenAI A");
+    expect(table.getByText("4 / 8")).toBeTruthy();
+    expect(table.getByText(/50 次 · 96\.0% · ¥1\.20/)).toBeTruthy();
+    expect(table.getByText(/30% · 重置于 2026-09-03T00:00:00Z/)).toBeTruthy();
+    expect(table.getByText("2026-09-02T04:00:00Z")).toBeTruthy();
+  });
+
+  it("用量窗口：上游渠道类型显示不适用（不是未接入），订阅账号类型字段未接时显示未接入", async () => {
+    stub({
+      channels: [
+        channelRow({ channel_ref: { service_id: "svc-1", external_channel_id: "1" }, name: "上游渠道行" }),
+        channelRow({
+          channel_ref: { service_id: "svc-1", external_channel_id: "2" },
+          name: "订阅账号行",
+          binding: { id: "b2", upstream_account_id: "up-2", valid_from: "2026-08-28T00:00:00Z", reason: "" },
+        }),
+      ],
+      accounts: [upstreamAccount({ id: "up-1" }), upstreamAccount({ id: "up-2", access_method: "subscription_account" })],
+    });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    await table.findByText("上游渠道行");
+    const upstreamRow = (await table.findByText("上游渠道行")).closest("tr") as HTMLElement;
+    const subRow = table.getByText("订阅账号行").closest("tr") as HTMLElement;
+    // 用量窗口列本身没有单独的 data-testid，行内其它占位列也会显示"未接入"——
+    // 这里只断言"不适用"只出现在上游渠道行，不出现在订阅账号行，这就是用量窗口
+    // 那一格按类型分叉的唯一来源（其它占位列不认识类型，不会输出"不适用"）
+    expect(within(upstreamRow).getByText("不适用")).toBeTruthy();
+    expect(within(subRow).queryByText("不适用")).toBeNull();
+  });
 });
 
 describe("登记簿字段并入行（6 个原本必需列，现在是默认收起的可选列）", () => {
@@ -287,13 +369,40 @@ describe("登记簿字段并入行（6 个原本必需列，现在是默认收�
     expect(await table.findByText("gpt-main")).toBeTruthy();
   });
 
-  it("倍率 / 上游倍率是独立于「上游分组」的必需列，默认就显示", async () => {
+  it("倍率 / 上游倍率是独立于「上游分组」的必需列，默认就显示；两个倍率都来自登记簿 join", async () => {
     stub({});
     renderPanel();
     const table = within(await screen.findByRole("table"));
-    expect(await table.findByText("0.85×")).toBeTruthy();
+    expect(await table.findByText("0.85× / 1.15×")).toBeTruthy();
     // 默认视图下「上游分组」这一列本身还没打开，看不到分组名文字单独出现在别处
     expect(table.queryByRole("columnheader", { name: "上游分组" })).toBeNull();
+  });
+
+  it("row.rateMultiplier / upstreamMultiplier（XM-CHAN-FIELDS0）优先于登记簿 join", async () => {
+    // 契约里这两个字段是数字，不是十进制字符串（与登记簿的 group_rate/
+    // recharge_ratio 不同）——数字字面量不保留末尾的 0，0.70 就是 0.7
+    stub({ channels: [channelRow({ rate_multiplier: 0.7, upstream_multiplier: 1.3 })] });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    expect(await table.findByText("0.7× / 1.3×")).toBeTruthy();
+    expect(table.queryByText("0.85× / 1.15×")).toBeNull();
+  });
+
+  it("row.rateMultiplier 为数字 0 时仍显示 0×，不误判成未接入（0 是假值但不是缺失值）", async () => {
+    // upstream_multiplier 不给：既有账号 fixture 自带 recharge_ratio,
+    // 这一格会退回 join——这里只关心 rateMultiplier=0 这一侧的显示是否正确
+    stub({ channels: [channelRow({ rate_multiplier: 0 })] });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    expect(await table.findByText(/^0× \//)).toBeTruthy();
+  });
+
+  it("今日统计：Sub2API 的常态——requests/cost 有真数据，success_rate 单独为 null 时显式说明，不默认成 0%", async () => {
+    stub({ channels: [channelRow({ today: { requests: 30, success_rate: null, cost_minor: "900000", currency: "CNY", scale: 6 } })] });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    expect(await table.findByText(/30 次 · 成功率未接入 · ¥0\.90/)).toBeTruthy();
+    expect(table.queryByText(/0\.0%/)).toBeNull();
   });
 
   it("可用模型有数就显示数量，没有就未接入 · M1.5，不显示 0", async () => {
@@ -323,7 +432,8 @@ describe("登记簿字段并入行（6 个原本必需列，现在是默认收�
     await screen.findByText("OpenAI A");
     switchToView("全部");
     const table = within(screen.getByRole("table"));
-    expect(await table.findByText("Relay 甲")).toBeTruthy();
+    // 「Relay 甲」同时出现在必需的「平台 / 类型」列（vendor 展示）与这个可选列里
+    expect((await table.findAllByText("Relay 甲")).length).toBeGreaterThanOrEqual(2);
     expect(table.getByText("老王 · 企业微信")).toBeTruthy();
   });
 
@@ -384,7 +494,57 @@ describe("余额 / 状态 / 详情（沿用既有逻辑）", () => {
     expect(table.getByText("OpenAI A")).toBeTruthy();
     expect(table.getByText("Claude B")).toBeTruthy();
     // 两行都绑定同一个上游，倍率格显示同一个值，但不在这里加总
-    expect(table.getAllByText("0.85×").length).toBe(2);
+    expect(table.getAllByText("0.85× / 1.15×").length).toBe(2);
+  });
+});
+
+describe("「平台 / 来源」筛选：按真实供应商名动态生成选项", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("选项来自页面上出现过的真实 vendor / upstream_name，外加未映射；不是编的静态供应商列表", async () => {
+    stub({
+      channels: [
+        channelRow({ channel_ref: { service_id: "svc-1", external_channel_id: "1" }, name: "行 A" }),
+        channelRow({
+          channel_ref: { service_id: "svc-1", external_channel_id: "2" },
+          name: "行 B",
+          binding: { id: "b2", upstream_account_id: "up-2", valid_from: "2026-08-28T00:00:00Z", reason: "" },
+        }),
+        channelRow({
+          channel_ref: { service_id: "svc-1", external_channel_id: "3" },
+          name: "行 C（未映射）",
+          binding: null,
+          candidate: { state: "unmapped", evidence_status: "insufficient", upstream_account_ids: [], reason_codes: [], platform_assignment_missing: false, inventory_unknown: false },
+        }),
+      ],
+      accounts: [upstreamAccount({ id: "up-1", upstream_name: "Relay 甲" }), upstreamAccount({ id: "up-2", upstream_name: "Relay 乙" })],
+    });
+    renderPanel();
+    await screen.findByText("行 A");
+    const filterSelect = screen.getByRole("combobox", { name: "平台 / 来源" });
+    const options = within(filterSelect).getAllByRole("option").map((o) => o.textContent);
+    // zh-CN 排序按拼音：甲(jiǎ) 在 乙(yǐ) 前面
+    expect(options).toEqual(["全部", "Relay 甲", "Relay 乙", "未映射"]);
+  });
+
+  it("按供应商名筛选后只剩绑定到那个供应商的行", async () => {
+    stub({
+      channels: [
+        channelRow({ channel_ref: { service_id: "svc-1", external_channel_id: "1" }, name: "行 A" }),
+        channelRow({
+          channel_ref: { service_id: "svc-1", external_channel_id: "2" },
+          name: "行 B",
+          binding: { id: "b2", upstream_account_id: "up-2", valid_from: "2026-08-28T00:00:00Z", reason: "" },
+        }),
+      ],
+      accounts: [upstreamAccount({ id: "up-1", upstream_name: "Relay 甲" }), upstreamAccount({ id: "up-2", upstream_name: "Relay 乙" })],
+    });
+    renderPanel();
+    const table = within(await screen.findByRole("table"));
+    await table.findByText("行 A");
+    fireEvent.change(screen.getByRole("combobox", { name: "平台 / 来源" }), { target: { value: "Relay 乙" } });
+    expect(table.getByText("行 B")).toBeTruthy();
+    expect(table.queryByText("行 A")).toBeNull();
   });
 });
 
@@ -398,16 +558,36 @@ describe("布局 / 视图 / 空态 / 错误态 / 添加上游入口", () => {
     expect(section?.getAttribute("data-density")).toBe("compact");
   });
 
-  it("视图：全部 / 未映射 / 需关注 三个", async () => {
+  it("视图：全部 / 订阅账号 / 上游渠道 / 需关注 四个（团队裁定的精确清单，未映射不再单独占一个视图）", async () => {
     stub({});
     renderPanel();
     await screen.findByRole("table");
     const viewSelect = screen.getByRole("combobox", { name: "视图" });
     const options = within(viewSelect).getAllByRole("option").map((o) => o.textContent);
-    expect(options).toEqual(["全部", "未映射", "需关注", "自定义"]);
+    expect(options).toEqual(["全部", "订阅账号", "上游渠道", "需关注", "自定义"]);
   });
 
-  it("「未映射」视图按类型筛选出未绑定的行", async () => {
+  it("「订阅账号」视图筛选出类型为订阅账号的行", async () => {
+    stub({
+      channels: [
+        channelRow({ channel_ref: { service_id: "svc-1", external_channel_id: "1" }, name: "上游渠道行" }),
+        channelRow({
+          channel_ref: { service_id: "svc-1", external_channel_id: "2" },
+          name: "订阅账号行",
+          binding: { id: "b2", upstream_account_id: "up-2", valid_from: "2026-08-28T00:00:00Z", reason: "" },
+        }),
+      ],
+      accounts: [upstreamAccount({ id: "up-1" }), upstreamAccount({ id: "up-2", access_method: "subscription_account" })],
+    });
+    renderPanel();
+    await screen.findByText("上游渠道行");
+    switchToView("订阅账号");
+    const table = within(screen.getByRole("table"));
+    expect(table.getByText("订阅账号行")).toBeTruthy();
+    expect(table.queryByText("上游渠道行")).toBeNull();
+  });
+
+  it("「未映射」不再是独立视图，但仍是「类型」筛选下拉里的一个选项，未绑定的行照样能被筛出来", async () => {
     stub({
       channels: [
         channelRow({ channel_ref: { service_id: "svc-1", external_channel_id: "1" }, name: "已绑定" }),
@@ -421,7 +601,7 @@ describe("布局 / 视图 / 空态 / 错误态 / 添加上游入口", () => {
     });
     renderPanel();
     await screen.findByText("已绑定");
-    switchToView("未映射");
+    fireEvent.change(screen.getByRole("combobox", { name: "类型" }), { target: { value: "未映射" } });
     const table = within(screen.getByRole("table"));
     expect(table.getByText("没绑定")).toBeTruthy();
     expect(table.queryByText("已绑定")).toBeNull();
