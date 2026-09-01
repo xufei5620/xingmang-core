@@ -114,16 +114,21 @@ func TestBaselineMemberReconciliationWaitsWithoutConsumingRetryBudget(t *testing
 		sourceID, eventID).Scan(&status, &dependencyKind, &attempts); err != nil {
 		t.Fatal(err)
 	}
-	if status != "waiting_dependency" || dependencyKind != "source_eligibility_cutover" || attempts != 0 {
+	// RC62: this wait PARKS (excluded from cycle completeness) instead of
+	// holding the cycle in 'processing' -- a real customer's single login
+	// during a half-provisioned window previously froze the whole stream
+	// behind the one-active-cycle constraint. The fact still materializes
+	// when its account's eligibility bootstraps and fires the wake.
+	if status != "parked_identity" || dependencyKind != "source_eligibility_cutover" || attempts != 0 {
 		t.Fatalf("baseline member status=%s dependency=%s attempts=%d", status, dependencyKind, attempts)
 	}
 	if err = store.Pool().QueryRow(ctx, `SELECT cycle_status FROM source_economic_scan_cycles
 		WHERE source_instance_id=$1 AND stream_id='balances' AND scan_cycle_id=$2::uuid`,
-		sourceID, cycleID).Scan(&cycleStatus); err != nil || cycleStatus == "published" {
-		t.Fatalf("waiting baseline member cycle status=%s err=%v", cycleStatus, err)
+		sourceID, cycleID).Scan(&cycleStatus); err != nil || cycleStatus == "processing" || cycleStatus == "receiving" {
+		t.Fatalf("parked baseline member must not hold the cycle active: status=%s err=%v", cycleStatus, err)
 	}
 	if processed, err = processor.RunOnce(ctx); err != nil || processed != 0 {
-		t.Fatalf("waiting dependency consumed retry budget: processed=%d err=%v", processed, err)
+		t.Fatalf("parked dependency consumed retry budget: processed=%d err=%v", processed, err)
 	}
 	var states int
 	if err = store.Pool().QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state

@@ -540,7 +540,21 @@ func (s *Store) MarkSourceEventWaitingDependency(ctx context.Context, claim Sour
 		return errors.New("invalid source dependency wait")
 	}
 	status := "waiting_dependency"
-	if kind == "invoice_oidc_user" || kind == "source_external_account" {
+	if kind == "invoice_oidc_user" || kind == "source_external_account" || kind == "source_eligibility_cutover" {
+		// Identity-shaped waits park instead of blocking: parked_identity is
+		// excluded from scan-cycle completeness, released only by its exact
+		// dependency wake, and never swept. source_eligibility_cutover joined
+		// this set in RC62: it fires when an account is BOUND but its
+		// eligibility state has not bootstrapped yet -- exactly the state a
+		// real customer left behind by logging in once during a window where
+		// binding succeeded and nothing woke their parked signed-cutover row.
+		// As waiting_dependency this held the stream's active scan cycle in
+		// 'processing' (waiting events count as incomplete), which blocked
+		// every new agent cycle behind the one-active-cycle constraint --
+		// one stranger's half-provisioned login froze the whole stream. Their
+		// facts still materialize the moment their eligibility bootstraps
+		// (the checkpoint/POST_CUTOVER paths fire this wake), matching the
+		// long-standing parked_identity semantics for unbound users.
 		status = "parked_identity"
 	}
 	tx, err := s.pool.Begin(ctx)
