@@ -297,6 +297,17 @@ func (p *PlatformLogin) completeLogin(server *Server, w http.ResponseWriter, r *
 		writeError(w, http.StatusForbidden, "USER_PROVISION_FAILED", "user account is unavailable")
 		return
 	}
+	if user.CanonicalIssuer != "" && user.CanonicalSubject != "" {
+		// The session INSERT only succeeds when the principal pair equals
+		// the invoice_user's stored oidc_issuer/oidc_subject. A claim login
+		// lands on a pre-existing identity whose canonical pair is its SSO
+		// identity, not this login's synthetic platform pair -- issue the
+		// session with the stored pair (the session row itself keeps
+		// Platform/PlatformUserID for audit). For freshly created platform
+		// users the two pairs are identical and this is a no-op.
+		principal.Issuer = user.CanonicalIssuer
+		principal.Subject = user.CanonicalSubject
+	}
 	credentials, err := p.Auth.Sessions.Issue(r.Context(), auth.IssueSessionInput{
 		UserID: user.ID, Principal: principal, Binding: binding, RequestID: loginRequestID,
 	})

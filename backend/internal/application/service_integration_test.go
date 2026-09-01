@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"invoice-system/backend/internal/adminsettings"
+	"invoice-system/backend/internal/auth"
 	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/ledger"
 	"invoice-system/backend/internal/migrate"
@@ -1161,5 +1162,63 @@ func TestPlatformPasswordBindingsGetDistinctSubjectIndexes(t *testing.T) {
 	if reboundA.ID != boundA.ID || reboundA.ExternalSubjectHMAC != boundA.ExternalSubjectHMAC {
 		t.Fatalf("re-bind must reuse the same row and index: got %q/%q want %q/%q",
 			reboundA.ID, reboundA.ExternalSubjectHMAC, boundA.ID, boundA.ExternalSubjectHMAC)
+	}
+}
+
+// TestClaimedIdentitySessionIssuesWithCanonicalPair is the end-to-end
+// regression for the RC56 production canary failure: a platform-password
+// login claims a source-projected SSO identity, but the auth_sessions
+// INSERT guards on the invoice_user's STORED oidc_issuer/oidc_subject, so
+// issuing the session with the login's synthetic platform pair fails closed
+// with ErrIdentityMismatch. The handler must issue with the canonical pair
+// exposed by GetCurrentUser.
+func TestClaimedIdentitySessionIssuesWithCanonicalPair(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+
+	ssoUser, err := service.EnsureUser(ctx, OIDCIdentity{
+		Issuer: "https://auth.solov.example/realms/solov", Subject: "6411d831-sso-subject", Status: "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = service.ClaimPlatformIdentity(ctx, ssoUser.ID, "sub2api", "1113"); err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.GetCurrentUser(ctx, ssoUser.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.OIDCIssuer != "https://auth.solov.example/realms/solov" || current.OIDCSubject != "6411d831-sso-subject" {
+		t.Fatalf("GetCurrentUser must expose the stored canonical pair, got %q/%q", current.OIDCIssuer, current.OIDCSubject)
+	}
+
+	sessions, err := auth.NewSessionManager(auth.NewPostgresSessionStore(store.Pool()),
+		auth.SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour},
+		auth.NewPostgresSecurityAuditSink(store.Pool()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// The synthetic platform pair must keep failing closed (the guard).
+	syntheticPrincipal := auth.Principal{
+		Issuer: "https://api.solov.example", Subject: "1113",
+		Platform: auth.PlatformSub2API, PlatformUserID: "1113", AuthTime: now,
+	}
+	if _, err = sessions.Issue(ctx, auth.IssueSessionInput{UserID: ssoUser.ID, Principal: syntheticPrincipal, RequestID: "req-synthetic"}); !errors.Is(err, auth.ErrIdentityMismatch) {
+		t.Fatalf("synthetic pair must be rejected with ErrIdentityMismatch, got %v", err)
+	}
+
+	// The canonical pair (what the fixed handler now sends) must succeed and
+	// still record the platform identity on the session for audit.
+	canonicalPrincipal := syntheticPrincipal
+	canonicalPrincipal.Issuer = current.OIDCIssuer
+	canonicalPrincipal.Subject = current.OIDCSubject
+	issued, err := sessions.Issue(ctx, auth.IssueSessionInput{UserID: ssoUser.ID, Principal: canonicalPrincipal, RequestID: "req-canonical"})
+	if err != nil {
+		t.Fatalf("canonical pair issuance failed: %v", err)
+	}
+	if issued.Session.Platform != auth.PlatformSub2API || issued.Session.PlatformUserID != "1113" {
+		t.Fatalf("session must keep the platform identity for audit, got %q/%q", issued.Session.Platform, issued.Session.PlatformUserID)
 	}
 }

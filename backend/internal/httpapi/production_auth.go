@@ -44,6 +44,17 @@ type SessionUser struct {
 	DisplayName   string
 	Email         string
 	EmailVerified bool
+	// CanonicalIssuer/CanonicalSubject carry the invoice_user's stored
+	// oidc_issuer/oidc_subject when provisioning landed on a pre-existing
+	// identity whose canonical pair differs from the login principal's
+	// (platform-password login claiming a source-projected SSO identity).
+	// The session INSERT guards on the stored pair
+	// (WHERE u.oidc_issuer AND u.oidc_subject), so issuing with the
+	// synthetic platform pair fails closed with ErrIdentityMismatch -- the
+	// RC56 production canary hit exactly that. Empty means the login
+	// principal's pair IS the canonical pair.
+	CanonicalIssuer  string
+	CanonicalSubject string
 }
 
 type ProductionAuth struct {

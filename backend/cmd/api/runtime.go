@@ -682,7 +682,10 @@ func loadSessionUser(ctx context.Context, service currentUserLoader, userID stri
 	if err != nil {
 		return httpapi.SessionUser{}, err
 	}
-	return httpapi.SessionUser{ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified}, nil
+	return httpapi.SessionUser{
+		ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified,
+		CanonicalIssuer: user.OIDCIssuer, CanonicalSubject: user.OIDCSubject,
+	}, nil
 }
 
 // loadPlatformSourceInstanceIDs resolves the one enabled source_instances row

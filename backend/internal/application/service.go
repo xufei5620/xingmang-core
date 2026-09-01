@@ -164,6 +164,14 @@ type CurrentUser struct {
 	Email         string `json:"email,omitempty"`
 	EmailVerified bool   `json:"email_verified"`
 	Status        string `json:"status"`
+	// OIDCIssuer/OIDCSubject are the invoice_user's stored canonical
+	// identity pair. Session issuance guards on this exact pair, so a
+	// login that lands on a pre-existing identity (platform-password
+	// claim of a source-projected SSO user) must issue its session with
+	// these values, not the login principal's synthetic pair. Never
+	// serialized to API responses.
+	OIDCIssuer  string `json:"-"`
+	OIDCSubject string `json:"-"`
 }
 
 func (s *Service) GetCurrentUser(ctx context.Context, userID string) (CurrentUser, error) {
@@ -171,7 +179,7 @@ func (s *Service) GetCurrentUser(ctx context.Context, userID string) (CurrentUse
 	if err != nil {
 		return CurrentUser{}, err
 	}
-	out := CurrentUser{ID: record.ID, Status: record.Status}
+	out := CurrentUser{ID: record.ID, Status: record.Status, OIDCIssuer: record.OIDCIssuer, OIDCSubject: record.OIDCSubject}
 	verified, err := s.store.GetLatestVerifiedEmail(ctx, userID)
 	if errors.Is(err, domain.ErrNotFound) {
 		return out, nil
