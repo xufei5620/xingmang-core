@@ -41,18 +41,18 @@ func TestSubmitIsIdempotent(t *testing.T) {
 	profile := seedProfile(t, service, "user-1")
 	seedLot(t, service, "lot-1", "user-1", "sub2-main", 50_000, domain.VerificationVerified)
 	input := SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "browser-request-1", Allocations: []AllocationInput{{FundingLotID: "lot-1", AmountMinor: 20_000}}}
-	first, err := service.Submit(context.Background(), input)
+	first, err := service.Submit(context.Background(), input, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.Submit(context.Background(), input)
+	second, err := service.Submit(context.Background(), input, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.ID != second.ID {
 		t.Fatalf("idempotent submit created two requests: %s and %s", first.ID, second.ID)
 	}
-	lots, err := service.ListFundingLots(context.Background(), "user-1")
+	lots, err := service.ListFundingLots(context.Background(), "user-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,11 +66,11 @@ func TestSubmitRejectsMinimumAmountAndSourceMixing(t *testing.T) {
 	profile := seedProfile(t, service, "user-1")
 	seedLot(t, service, "lot-a", "user-1", "sub2-main", 50_000, domain.VerificationVerified)
 	seedLot(t, service, "lot-b", "user-1", "sub2-second", 50_000, domain.VerificationVerified)
-	_, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "small", Allocations: []AllocationInput{{FundingLotID: "lot-a", AmountMinor: 19_999}}})
+	_, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "small", Allocations: []AllocationInput{{FundingLotID: "lot-a", AmountMinor: 19_999}}}, "")
 	if !errors.Is(err, domain.ErrMinimumAmount) {
 		t.Fatalf("minimum: got %v", err)
 	}
-	_, err = service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "mixed", Allocations: []AllocationInput{{FundingLotID: "lot-a", AmountMinor: 20_000}, {FundingLotID: "lot-b", AmountMinor: 20_000}}})
+	_, err = service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "mixed", Allocations: []AllocationInput{{FundingLotID: "lot-a", AmountMinor: 20_000}, {FundingLotID: "lot-b", AmountMinor: 20_000}}}, "")
 	if !errors.Is(err, domain.ErrSourceMixing) {
 		t.Fatalf("source mixing: got %v", err)
 	}
@@ -83,7 +83,7 @@ func TestNewAPICandidateMustBeVerified(t *testing.T) {
 	lot := service.lots["lot-pending"]
 	lot.SourceType = domain.SourceNewAPI
 	service.lots[lot.ID] = lot
-	_, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "newapi-main", IdempotencyKey: "pending", Allocations: []AllocationInput{{FundingLotID: "lot-pending", AmountMinor: 20_000}}})
+	_, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "newapi-main", IdempotencyKey: "pending", Allocations: []AllocationInput{{FundingLotID: "lot-pending", AmountMinor: 20_000}}}, "")
 	if !errors.Is(err, domain.ErrUnverifiedPayment) {
 		t.Fatalf("got %v", err)
 	}
@@ -121,7 +121,7 @@ func TestConcurrentSubmitCannotOverReserve(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "req-" + time.Now().Add(time.Duration(i)).Format(time.RFC3339Nano), Allocations: []AllocationInput{{FundingLotID: "lot-1", AmountMinor: 20_000}}})
+			_, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "req-" + time.Now().Add(time.Duration(i)).Format(time.RFC3339Nano), Allocations: []AllocationInput{{FundingLotID: "lot-1", AmountMinor: 20_000}}}, "")
 			if err == nil {
 				succeeded.Add(1)
 			} else if !errors.Is(err, domain.ErrInsufficientAmount) {
@@ -134,7 +134,7 @@ func TestConcurrentSubmitCannotOverReserve(t *testing.T) {
 	if got := succeeded.Load(); got != 5 {
 		t.Fatalf("successful submissions=%d, want 5", got)
 	}
-	lots, err := service.ListFundingLots(context.Background(), "user-1")
+	lots, err := service.ListFundingLots(context.Background(), "user-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestManualIssueDoesNotReleaseWhenDocumentMissing(t *testing.T) {
 	service := NewService()
 	profile := seedProfile(t, service, "user-1")
 	seedLot(t, service, "lot-1", "user-1", "sub2-main", 50_000, domain.VerificationVerified)
-	request, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "issue", Allocations: []AllocationInput{{FundingLotID: "lot-1", AmountMinor: 20_000}}})
+	request, err := service.Submit(context.Background(), SubmitInput{PrincipalID: "user-1", ProfileID: profile.ID, SourceInstanceID: "sub2-main", IdempotencyKey: "issue", Allocations: []AllocationInput{{FundingLotID: "lot-1", AmountMinor: 20_000}}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestManualIssueDoesNotReleaseWhenDocumentMissing(t *testing.T) {
 	if request.Status != domain.StatusIssuedAwaitingDocument {
 		t.Fatalf("status=%s", request.Status)
 	}
-	lots, err := service.ListFundingLots(context.Background(), "user-1")
+	lots, err := service.ListFundingLots(context.Background(), "user-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}

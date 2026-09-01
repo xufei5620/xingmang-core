@@ -238,7 +238,7 @@ func TestFundingCompletionDriftPreservesOriginalAndInvalidatesPending(t *testing
 	if err != nil || !lot.CompletedAt.Equal(originalCompleted) || lot.EligibilityStatus != "frozen" || lot.AvailableMinor() != 0 {
 		t.Fatalf("drifted lot remained usable: lot=%+v err=%v", lot, err)
 	}
-	record, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false)
+	record, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false, "")
 	if err != nil || record.Request.Status != domain.StatusRejected {
 		t.Fatalf("pending request was not invalidated: request=%+v err=%v", record.Request, err)
 	}
@@ -287,7 +287,7 @@ func TestFundingCompletionSameSideDriftMarksIssuedAttention(t *testing.T) {
 	if !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("same-side completion drift error=%v", err)
 	}
-	record, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false)
+	record, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false, "")
 	if err != nil || record.Request.Status != domain.StatusRefundAttention {
 		t.Fatalf("issued request did not enter attention: request=%+v err=%v", record.Request, err)
 	}
@@ -451,7 +451,7 @@ func TestConfirmManualIssueRejectsIssuerRevisionDriftAtomically(t *testing.T) {
 	}); !errors.Is(err, domain.ErrVersionConflict) {
 		t.Fatalf("issuer revision drift error=%v", err)
 	}
-	after, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false)
+	after, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -968,7 +968,7 @@ func TestListHardCapsAndAdminKeysetPagination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	userRecords, err := store.ListRequestRecords(ctx, "20000000-0000-4000-8000-000000000001", false, 9999)
+	userRecords, err := store.ListRequestRecords(ctx, "20000000-0000-4000-8000-000000000001", false, 9999, "")
 	if err != nil || len(userRecords) != 200 {
 		t.Fatalf("user request cap=%d err=%v", len(userRecords), err)
 	}
@@ -993,7 +993,7 @@ func TestListHardCapsAndAdminKeysetPagination(t *testing.T) {
 	if err != nil || len(profiles) != 500 {
 		t.Fatalf("profile cap=%d err=%v", len(profiles), err)
 	}
-	lots, err := store.ListFundingLots(ctx, "20000000-0000-4000-8000-000000000001")
+	lots, err := store.ListFundingLots(ctx, "20000000-0000-4000-8000-000000000001", "")
 	if err != nil || len(lots) != 500 {
 		t.Fatalf("funding lot cap=%d err=%v", len(lots), err)
 	}
@@ -1037,7 +1037,7 @@ func TestRefundInvalidatesUnissuedRequestAndReleasesAllReservations(t *testing.T
 	if reserved != 0 || issued != 0 {
 		t.Fatalf("reserved=%d issued=%d", reserved, issued)
 	}
-	stored, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false)
+	stored, err := store.GetRequestRecord(ctx, request.PrincipalID, request.ID, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}

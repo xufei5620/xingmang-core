@@ -690,8 +690,22 @@ func principal(r *http.Request) identity {
 	return value
 }
 
+// sessionPlatform reports the authenticated session's login platform
+// (XM-INV-PLATFORM-SCOPE, CR-0003): "sub2api"/"newapi" for a platform-password
+// session, or "" for an OIDC/admin session, a session-less mock-mode
+// identity, or before authentication. It is the single source every
+// /api/v1/user/* handler consults to scope its data query -- never a
+// client-supplied value.
+func sessionPlatform(r *http.Request) domain.SourceType {
+	current := principal(r)
+	if current.Session == nil {
+		return ""
+	}
+	return domain.SourceType(current.Session.Platform)
+}
+
 func (s *Server) listLots(w http.ResponseWriter, r *http.Request) {
-	items, err := s.ledger.ListFundingLots(r.Context(), principal(r).UserID)
+	items, err := s.ledger.ListFundingLots(r.Context(), principal(r).UserID, sessionPlatform(r))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "DATA_UNAVAILABLE", "funding data is temporarily unavailable")
 		return
@@ -736,12 +750,14 @@ func (s *Server) listAdminRequests(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listRequestsPage(w http.ResponseWriter, r *http.Request, admin bool) {
 	principalID := principal(r).UserID
+	platform := sessionPlatform(r)
 	if admin {
 		principalID = ""
+		platform = ""
 	}
 	pager, supportsPaging := s.ledger.(requestPageService)
 	if !supportsPaging {
-		items, err := s.ledger.ListRequests(r.Context(), principalID, admin)
+		items, err := s.ledger.ListRequests(r.Context(), principalID, admin, platform)
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "DATA_UNAVAILABLE", "invoice requests are temporarily unavailable")
 			return
@@ -753,7 +769,7 @@ func (s *Server) listRequestsPage(w http.ResponseWriter, r *http.Request, admin 
 		}
 		return
 	}
-	query := application.RequestPageQuery{PrincipalID: principalID, Admin: admin, Limit: boundedQueryLimit(r, 100)}
+	query := application.RequestPageQuery{PrincipalID: principalID, Admin: admin, Limit: boundedQueryLimit(r, 100), Platform: platform}
 	beforeAt := strings.TrimSpace(r.URL.Query().Get("before_submitted_at"))
 	beforeID := strings.TrimSpace(r.URL.Query().Get("before_id"))
 	if (beforeAt == "") != (beforeID == "") {
@@ -836,10 +852,12 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request, admin bool) 
 		return
 	}
 	principalID := principal(r).UserID
+	platform := sessionPlatform(r)
 	if admin {
 		principalID = ""
+		platform = ""
 	}
-	request, err := s.ledger.GetRequest(r.Context(), principalID, requestID, admin)
+	request, err := s.ledger.GetRequest(r.Context(), principalID, requestID, admin, platform)
 	if err != nil {
 		handleDomainError(w, err)
 		return
@@ -903,7 +921,7 @@ func (s *Server) submitRequest(w http.ResponseWriter, r *http.Request) {
 	if input.IdempotencyKey == "" {
 		input.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	}
-	request, err := s.ledger.Submit(r.Context(), input)
+	request, err := s.ledger.Submit(r.Context(), input, sessionPlatform(r))
 	if err != nil {
 		handleDomainError(w, err)
 		return
@@ -916,7 +934,7 @@ func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	request, err := s.ledger.Cancel(r.Context(), principal(r).UserID, r.PathValue("id"), version)
+	request, err := s.ledger.Cancel(r.Context(), principal(r).UserID, r.PathValue("id"), version, sessionPlatform(r))
 	if err != nil {
 		handleDomainError(w, err)
 		return
@@ -1033,7 +1051,7 @@ func (s *Server) downloadDocumentForRole(w http.ResponseWriter, r *http.Request,
 	if admin {
 		doc, err = s.ledger.GetDocumentForRequestAsAdmin(r.Context(), r.PathValue("id"))
 	} else {
-		doc, err = s.ledger.GetDocumentForRequest(r.Context(), principal(r).UserID, r.PathValue("id"))
+		doc, err = s.ledger.GetDocumentForRequest(r.Context(), principal(r).UserID, r.PathValue("id"), sessionPlatform(r))
 	}
 	if err != nil {
 		handleDomainError(w, err)

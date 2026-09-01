@@ -827,7 +827,9 @@ func (s *Store) BindExternalAccountFromSource(ctx context.Context, in ExternalAc
 	return in, false, nil
 }
 
-func (s *Store) ListExternalAccounts(ctx context.Context, principalID string) ([]ConnectedSourceAccount, error) {
+// ListExternalAccounts: platform (XM-INV-PLATFORM-SCOPE) narrows the result
+// to one source instance type when set; empty means unscoped.
+func (s *Store) ListExternalAccounts(ctx context.Context, principalID string, platform domain.SourceType) ([]ConnectedSourceAccount, error) {
 	if strings.TrimSpace(principalID) == "" {
 		return nil, errors.New("principal ID is required")
 	}
@@ -844,11 +846,11 @@ func (s *Store) ListExternalAccounts(ctx context.Context, principalID string) ([
 		FROM external_accounts ea
 		JOIN source_instances si ON si.id=ea.source_instance_id
 		LEFT JOIN funding_lots fl ON fl.external_account_id=ea.id
-		WHERE ea.invoice_user_id=$1
+		WHERE ea.invoice_user_id=$1 AND ($2='' OR si.source_type=$2)
 		GROUP BY ea.id,si.id,si.source_type,si.name,ea.external_user_id,
 			ea.binding_status,ea.verified_at
 		ORDER BY si.name,si.id,ea.id
-		LIMIT 50`, principalID)
+		LIMIT 50`, principalID, string(platform))
 	if err != nil {
 		return nil, fmt.Errorf("list connected source accounts: %w", err)
 	}

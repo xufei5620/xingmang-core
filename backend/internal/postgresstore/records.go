@@ -242,6 +242,9 @@ type RequestPageQuery struct {
 	BeforeID          string
 	Statuses          []domain.RequestStatus
 	SourceInstanceID  string
+	// Platform scopes the page to one platform's requests (XM-INV-PLATFORM-SCOPE,
+	// source_instances.source_type). Empty means unscoped.
+	Platform domain.SourceType
 }
 
 type RequestPage struct {

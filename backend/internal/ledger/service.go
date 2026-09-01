@@ -149,7 +149,12 @@ func (s *Service) VerifyNewAPIPaymentWithEvidence(ctx context.Context, _ string,
 	return s.VerifyNewAPIPayment(ctx, lotID, paidMinor, currency)
 }
 
-func (s *Service) Submit(_ context.Context, input SubmitInput) (domain.InvoiceRequest, error) {
+// Submit: platform (XM-INV-PLATFORM-SCOPE) is always sourced server-side
+// from the session, never from client input. When set, every allocated
+// funding lot must belong to this platform or the whole submission is
+// rejected -- never partially accepted (the mock has no transaction, but
+// every allocation is validated before any lot is mutated below).
+func (s *Service) Submit(_ context.Context, input SubmitInput, platform domain.SourceType) (domain.InvoiceRequest, error) {
 	if strings.TrimSpace(input.PrincipalID) == "" || strings.TrimSpace(input.IdempotencyKey) == "" || len(input.Allocations) == 0 {
 		return domain.InvoiceRequest{}, fmt.Errorf("invalid submission")
 	}
@@ -189,6 +194,12 @@ func (s *Service) Submit(_ context.Context, input SubmitInput) (domain.InvoiceRe
 			return domain.InvoiceRequest{}, domain.ErrNotFound
 		}
 		if lot.PrincipalID != input.PrincipalID {
+			return domain.InvoiceRequest{}, domain.ErrForbidden
+		}
+		if platform != "" && lot.SourceType != platform {
+			// Same shape as the ownership check above: from a platform-scoped
+			// session's point of view, a lot on the other platform is not
+			// theirs to allocate, exactly like a lot owned by someone else.
 			return domain.InvoiceRequest{}, domain.ErrForbidden
 		}
 		if lot.SourceInstanceID != input.SourceInstanceID {
@@ -237,7 +248,9 @@ func (s *Service) Submit(_ context.Context, input SubmitInput) (domain.InvoiceRe
 	return request, nil
 }
 
-func (s *Service) Cancel(_ context.Context, principalID, requestID string, expectedVersion int64) (domain.InvoiceRequest, error) {
+// Cancel: see GetRequest's doc comment for why a platform mismatch
+// (XM-INV-PLATFORM-SCOPE) reports ErrNotFound rather than ErrForbidden.
+func (s *Service) Cancel(_ context.Context, principalID, requestID string, expectedVersion int64, platform domain.SourceType) (domain.InvoiceRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	request, ok := s.requests[requestID]
@@ -246,6 +259,9 @@ func (s *Service) Cancel(_ context.Context, principalID, requestID string, expec
 	}
 	if request.PrincipalID != principalID {
 		return domain.InvoiceRequest{}, domain.ErrForbidden
+	}
+	if platform != "" && request.SourceType != platform {
+		return domain.InvoiceRequest{}, domain.ErrNotFound
 	}
 	if request.Version != expectedVersion {
 		return domain.InvoiceRequest{}, domain.ErrVersionConflict
@@ -397,12 +413,12 @@ func (s *Service) releaseLocked(request domain.InvoiceRequest) {
 	}
 }
 
-func (s *Service) ListFundingLots(_ context.Context, principalID string) ([]domain.FundingLot, error) {
+func (s *Service) ListFundingLots(_ context.Context, principalID string, platform domain.SourceType) ([]domain.FundingLot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []domain.FundingLot{}
 	for _, lot := range s.lots {
-		if lot.PrincipalID == principalID {
+		if lot.PrincipalID == principalID && (platform == "" || lot.SourceType == platform) {
 			out = append(out, lot)
 		}
 	}
@@ -422,12 +438,12 @@ func (s *Service) ListProfiles(_ context.Context, principalID string) ([]domain.
 	return out, nil
 }
 
-func (s *Service) ListRequests(_ context.Context, principalID string, admin bool) ([]domain.InvoiceRequest, error) {
+func (s *Service) ListRequests(_ context.Context, principalID string, admin bool, platform domain.SourceType) ([]domain.InvoiceRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []domain.InvoiceRequest{}
 	for _, request := range s.requests {
-		if admin || request.PrincipalID == principalID {
+		if (admin || request.PrincipalID == principalID) && (admin || platform == "" || request.SourceType == platform) {
 			out = append(out, request)
 		}
 	}
@@ -435,7 +451,12 @@ func (s *Service) ListRequests(_ context.Context, principalID string, admin bool
 	return out, nil
 }
 
-func (s *Service) GetRequest(_ context.Context, principalID, requestID string, admin bool) (domain.InvoiceRequest, error) {
+// GetRequest: a platform mismatch (XM-INV-PLATFORM-SCOPE) reports
+// ErrNotFound rather than ErrForbidden -- the request is genuinely this
+// principal's own, but a platform-scoped session must never be able to
+// distinguish "belongs to the other platform" from "does not exist"
+// (CR-0003: no existence leak).
+func (s *Service) GetRequest(_ context.Context, principalID, requestID string, admin bool, platform domain.SourceType) (domain.InvoiceRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	request, ok := s.requests[requestID]
@@ -445,10 +466,15 @@ func (s *Service) GetRequest(_ context.Context, principalID, requestID string, a
 	if !admin && request.PrincipalID != principalID {
 		return domain.InvoiceRequest{}, domain.ErrForbidden
 	}
+	if !admin && platform != "" && request.SourceType != platform {
+		return domain.InvoiceRequest{}, domain.ErrNotFound
+	}
 	return request, nil
 }
 
-func (s *Service) GetDocumentForRequest(_ context.Context, principalID, requestID string) (domain.InvoiceDocument, error) {
+// GetDocumentForRequest: see GetRequest's doc comment for why a platform
+// mismatch reports ErrNotFound rather than ErrForbidden.
+func (s *Service) GetDocumentForRequest(_ context.Context, principalID, requestID string, platform domain.SourceType) (domain.InvoiceDocument, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	request, ok := s.requests[requestID]
@@ -457,6 +483,9 @@ func (s *Service) GetDocumentForRequest(_ context.Context, principalID, requestI
 	}
 	if request.PrincipalID != principalID {
 		return domain.InvoiceDocument{}, domain.ErrForbidden
+	}
+	if platform != "" && request.SourceType != platform {
+		return domain.InvoiceDocument{}, domain.ErrNotFound
 	}
 	if request.Status != domain.StatusIssued {
 		return domain.InvoiceDocument{}, domain.ErrInvalidState

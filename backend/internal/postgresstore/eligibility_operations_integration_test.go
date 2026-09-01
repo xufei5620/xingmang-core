@@ -228,7 +228,7 @@ func TestEligibilitySummaryKeepsCashMinorSeparateFromServiceUnits(t *testing.T) 
 	if _, err := store.pool.Exec(ctx, `INSERT INTO source_credit_events(id,source_instance_id,external_account_id,external_event_id,external_credit_id,event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,credit_kind,source_sequence,source_cursor,stream_watermark_at,source_revision_hash,observed_at) VALUES('64000000-0000-4000-8000-000000000001',$1,$2,'legacy-event','legacy-credit',now()-interval '2 hours',100,'SUB2_BALANCE_1E8',$3,$4,'LEGACY_NON_INVOICEABLE',0,'legacy:1',now()-interval '2 hours',$5,now()-interval '2 hours'),('64000000-0000-4000-8000-000000000002',$1,$2,'bonus-event','bonus-credit',now()-interval '1 hour',50,'SUB2_BALANCE_1E8',$3,$4,'BONUS',1,'bonus:1',now()-interval '1 hour',$5,now()-interval '1 hour')`, f.sourceID, f.accountID, manifestHash, configHash, revision); err != nil {
 		t.Fatal(err)
 	}
-	items, err := store.ListEligibilitySummaries(ctx, f.userID)
+	items, err := store.ListEligibilitySummaries(ctx, f.userID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
