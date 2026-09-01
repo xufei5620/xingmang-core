@@ -1508,6 +1508,56 @@ remain visible but do not make unrelated users unhealthy. They use exact HMAC
 wakeups plus a 12-hour fallback; alert when the parked count approaches
 100,000 rather than shortening that interval or deleting paid-user evidence.
 
+### 7.1 Reading agent restart counts, and 409 vs 503 SOURCE_SCAN_CYCLE_BUSY
+
+Each of the ten `deploy/docker-compose.sources.yml` services (project
+`invoice-source-agents-prod`) is `restart: unless-stopped`; Docker restarts
+the container every time `source-agent-prod run` exits. Check restart counts:
+
+```bash
+docker compose -f deploy/docker-compose.sources.yml ps -a
+docker inspect -f '{{.Name}}: {{.RestartCount}}' \
+  $(docker compose -f deploy/docker-compose.sources.yml ps -aq)
+```
+
+A restart count that keeps climbing on one agent, together with
+`source stream stopped fail-closed` in `docker compose logs <service>`, is
+real: the runner hit something it treats as permanent, the process exited,
+and the fresh process re-runs a full reconcile sweep (hundreds of thousands
+of rows re-ingested for `sub2api-usage`/`newapi-usage`) before resuming. The
+receiver (`backend/internal/sourceingest/receiver.go`) returns two rejections
+for a failed commit that look similar from the outside but are not the same
+problem:
+
+- **409 `SOURCE_BATCH_COMMIT_REJECTED`** -- a real commit conflict (stale
+  sequence/hash chain, append to an already-finalized cycle, a duplicate
+  event with a different hash). The agent treats 409 as permanent and exits
+  immediately without retrying. A rising restart count with this code is an
+  incident: find the specific `stream_id`/`batch_id`/`sequence` in the
+  receiver log line and the matching `source_ingest_batches`/
+  `source_economic_scan_cycles` rows before letting it restart again.
+- **503 `SOURCE_SCAN_CYCLE_BUSY`** (with `Retry-After: 30`) -- expected,
+  temporary backpressure from the one-active-cycle constraint
+  (`source_economic_one_active_scan_cycle`,
+  `backend/internal/domain.ErrScanCycleBusy`): the stream already has a
+  `receiving`/`processing` scan cycle, which can legitimately run for up to
+  ~30 minutes on a large snapshot. Since XM-INV-CYCLE-BACKOFF the agent
+  treats this as transient, honors `Retry-After`, and keeps retrying the
+  *same* batch/sequence inside the *same* process -- it does not spend the
+  `SOURCE_MAX_CONSECUTIVE_FAILURES` (default `10`) budget and does not exit
+  or trigger a reconcile sweep. A healthy agent riding out a long cycle logs
+  repeated `transient sync failure ... error="ingestion rejected batch with
+  status 503"` with its restart count unchanged, not climbing. This is why
+  only the four v3 economic streams (`payments`/`usage`/`credits`/
+  `balances`) can show it; `identities` runs schema 2.0 and never opens a
+  scan cycle.
+
+A rising restart count paired with repeated `SOURCE_SCAN_CYCLE_BUSY` entries
+(rather than `SOURCE_BATCH_COMMIT_REJECTED`) means the deployed image
+predates XM-INV-CYCLE-BACKOFF (busy was still mapped to 409 and treated as
+permanent) -- redeploy the fixed build rather than investigating it as a
+commit conflict.
+
 ## 8. Configure upstream OIDC without source changes
 
 **Production change approval.** Take an upstream database/config backup first.

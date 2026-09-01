@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"invoice-system/backend/internal/application"
+	"invoice-system/backend/internal/domain"
 )
 
 type signatureFixture struct {
@@ -30,10 +32,14 @@ type signatureFixture struct {
 
 type captureAcceptor struct {
 	batch application.VerifiedSourceBatch
+	err   error
 }
 
 func (a *captureAcceptor) AcceptSourceBatch(_ context.Context, sourceID string, batch application.VerifiedSourceBatch) (application.SourceBatchAck, error) {
 	a.batch = batch
+	if a.err != nil {
+		return application.SourceBatchAck{}, a.err
+	}
 	return application.SourceBatchAck{Accepted: true, SourceInstanceID: sourceID, StreamID: batch.StreamID, BatchID: batch.BatchID, Sequence: batch.Sequence, AcceptedRecords: len(batch.Events)}, nil
 }
 
@@ -161,5 +167,57 @@ func TestReceiverRejectsTamperDuplicateJSONAndUntrustedNetwork(t *testing.T) {
 func TestParseProxyCIDRsRejectsBroadNetwork(t *testing.T) {
 	if _, err := ParseProxyCIDRs([]string{"0.0.0.0/0"}); err == nil {
 		t.Fatal("world-open ingestion proxy network accepted")
+	}
+}
+
+func TestReceiverMapsScanCycleBusyTo503WithRetryAfter(t *testing.T) {
+	receiver, fixture, batch, acceptor := testReceiver(t)
+	acceptor.err = domain.ErrScanCycleBusy
+	recorder := httptest.NewRecorder()
+	receiver.ServeHTTP(recorder, signedRequest(fixture, batch))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After=%q", got)
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"SOURCE_SCAN_CYCLE_BUSY"`) {
+		t.Fatalf("body missing busy code: %s", recorder.Body.String())
+	}
+}
+
+func TestReceiverMapsOtherCommitErrorsTo409WithoutRetryAfter(t *testing.T) {
+	receiver, fixture, batch, acceptor := testReceiver(t)
+	acceptor.err = errors.New("some other commit conflict")
+	recorder := httptest.NewRecorder()
+	receiver.ServeHTTP(recorder, signedRequest(fixture, batch))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("unexpected Retry-After on a real conflict: %q", got)
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"SOURCE_BATCH_COMMIT_REJECTED"`) {
+		t.Fatalf("body missing commit-rejected code: %s", recorder.Body.String())
+	}
+}
+
+func TestReceiverMapsContextErrorsTo503WithoutBusyCode(t *testing.T) {
+	for name, ctxErr := range map[string]error{"canceled": context.Canceled, "deadline exceeded": context.DeadlineExceeded} {
+		t.Run(name, func(t *testing.T) {
+			receiver, fixture, batch, acceptor := testReceiver(t)
+			acceptor.err = ctxErr
+			recorder := httptest.NewRecorder()
+			receiver.ServeHTTP(recorder, signedRequest(fixture, batch))
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Header().Get("Retry-After"); got != "" {
+				t.Fatalf("unexpected Retry-After on a context error: %q", got)
+			}
+			if !strings.Contains(recorder.Body.String(), `"code":"SOURCE_BATCH_COMMIT_REJECTED"`) {
+				t.Fatalf("body code changed for context errors: %s", recorder.Body.String())
+			}
+		})
 	}
 }

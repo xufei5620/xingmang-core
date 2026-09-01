@@ -333,6 +333,7 @@ var (
 	ErrNotFound           = errors.New("not found")
 	ErrForbidden          = errors.New("forbidden")
 	ErrConflict           = errors.New("conflict")
+	ErrScanCycleBusy      = errors.New("stream already has an active scan cycle")
 	ErrInsufficientAmount = errors.New("insufficient available amount")
 	ErrMinimumAmount      = fmt.Errorf("minimum invoice amount is %d minor units", MinimumRequestMinor)
 	ErrSourceMixing       = errors.New("allocations from different source instances cannot be combined")
