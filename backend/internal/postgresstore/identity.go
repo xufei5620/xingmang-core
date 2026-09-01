@@ -671,6 +671,69 @@ func (s *Store) BindExternalAccount(ctx context.Context, in ExternalAccountRecor
 	return in, nil
 }
 
+// ClaimPlatformIdentity backfills invoice_users.platform/platform_user_id for
+// userID with (platform, platformUserID), but only when those two columns are
+// still NULL. It never overwrites an already-set value.
+//
+// This exists for platform-password login "claiming" a pre-existing
+// invoice_user that a source-projection pipeline (BindExternalAccountFromSource)
+// already created and bound to an external account before the account owner
+// ever tried a password login (see runtime.go's ProvisionUser closure and
+// docs/handoffs/XM-INV-AUTOLOGIN.md for the 403 this fixes): that user row was
+// never created through ResolveOrCreate/EnsureUser, so its platform/
+// platform_user_id columns start out NULL even though it already owns real
+// funding lots.
+//
+// The caller MUST compare the returned storedPlatform/storedPlatformUserID
+// against what it asked to claim: if they differ, this invoice_user already
+// carries a *different* platform identity (backfilled by an earlier claim, or
+// -- if that should ever become possible -- some other path) and the login
+// must be rejected rather than silently letting two different platform
+// accounts collapse onto the same invoice_user.
+func (s *Store) ClaimPlatformIdentity(ctx context.Context, userID, platform, platformUserID string, actor AuditActor) (storedPlatform, storedPlatformUserID string, err error) {
+	userID = strings.TrimSpace(userID)
+	platformUserID = strings.TrimSpace(platformUserID)
+	if userID == "" || platform == "" || platformUserID == "" {
+		return "", "", errors.New("user id, platform and platform user id are required to claim an identity")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var beforePlatform, beforePlatformUserID string
+	lookupErr := tx.QueryRow(ctx, `
+		SELECT COALESCE(platform,''),COALESCE(platform_user_id,'')
+		FROM invoice_users WHERE id=$1 FOR UPDATE`, userID).Scan(&beforePlatform, &beforePlatformUserID)
+	if errors.Is(lookupErr, pgx.ErrNoRows) {
+		return "", "", domain.ErrNotFound
+	}
+	if lookupErr != nil {
+		return "", "", fmt.Errorf("lock invoice user for platform claim: %w", lookupErr)
+	}
+	if beforePlatform != "" || beforePlatformUserID != "" {
+		// Already claimed (by this login's own platform identity on a prior
+		// login, or -- the case the caller must reject -- a different one):
+		// never overwrite. Nothing to commit; report what is actually stored.
+		return beforePlatform, beforePlatformUserID, nil
+	}
+	if err = tx.QueryRow(ctx, `
+		UPDATE invoice_users SET platform=$2,platform_user_id=$3,updated_at=now()
+		WHERE id=$1
+		RETURNING platform,platform_user_id`,
+		userID, platform, platformUserID).Scan(&storedPlatform, &storedPlatformUserID); err != nil {
+		return "", "", fmt.Errorf("claim platform identity: %w", err)
+	}
+	if err = writeAudit(ctx, tx, actor, "invoice_user.platform_identity_claimed", "invoice_user", userID, nil,
+		map[string]any{"platform": platform, "platform_user_id": platformUserID}); err != nil {
+		return "", "", err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", "", err
+	}
+	return storedPlatform, storedPlatformUserID, nil
+}
+
 func (s *Store) BindExternalAccountFromSource(ctx context.Context, in ExternalAccountRecord, actor AuditActor) (ExternalAccountRecord, bool, error) {
 	if in.ID == "" {
 		in.ID = randomUUID()

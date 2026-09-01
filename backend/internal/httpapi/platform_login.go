@@ -80,6 +80,7 @@ type platformLoginTwoFARequest struct {
 
 func (p *PlatformLogin) login(server *Server, w http.ResponseWriter, r *http.Request) {
 	if !sameOriginBrowserRequest(r) {
+		server.logger.Error("platform login rejected: cross-site request", "request_id", requestID(r))
 		writeError(w, http.StatusForbidden, "CROSS_SITE_REQUEST_REJECTED", "cross-site login requests are not allowed")
 		return
 	}
@@ -142,6 +143,7 @@ func (p *PlatformLogin) login(server *Server, w http.ResponseWriter, r *http.Req
 
 func (p *PlatformLogin) verifyTwoFA(server *Server, w http.ResponseWriter, r *http.Request) {
 	if !sameOriginBrowserRequest(r) {
+		server.logger.Error("platform login 2fa rejected: cross-site request", "request_id", requestID(r))
 		writeError(w, http.StatusForbidden, "CROSS_SITE_REQUEST_REJECTED", "cross-site login requests are not allowed")
 		return
 	}
@@ -263,12 +265,15 @@ func (p *PlatformLogin) handleAuthenticatorError(w http.ResponseWriter, rateLimi
 }
 
 func (p *PlatformLogin) completeLogin(server *Server, w http.ResponseWriter, r *http.Request, platform auth.Platform, result auth.PlatformLoginResult) {
+	loginRequestID := requestID(r)
 	if strings.TrimSpace(result.PlatformUserID) == "" {
+		server.logger.Error("platform login failed: authenticator returned no platform user ID", "request_id", loginRequestID, "platform", string(platform))
 		writeError(w, http.StatusServiceUnavailable, "PLATFORM_LOGIN_UNAVAILABLE", "登录服务暂时不可用，请稍后重试")
 		return
 	}
 	binding, err := p.Auth.clientBinding(server, r)
 	if err != nil {
+		server.logger.Error("platform login failed: client binding unavailable", "request_id", loginRequestID, "platform", string(platform), "error", err)
 		writeError(w, http.StatusServiceUnavailable, "CLIENT_BINDING_FAILED", "client binding is unavailable")
 		return
 	}
@@ -283,9 +288,12 @@ func (p *PlatformLogin) completeLogin(server *Server, w http.ResponseWriter, r *
 		Platform: platform, PlatformUserID: result.PlatformUserID,
 		AuthTime: time.Now().UTC(),
 	}
-	loginRequestID := requestID(r)
 	user, err := p.Auth.ProvisionUser(r.Context(), principal, loginRequestID)
 	if err != nil || user.ID == "" {
+		if err == nil {
+			err = errors.New("provisioned user has no ID")
+		}
+		server.logger.Error("platform login failed: user provisioning failed", "request_id", loginRequestID, "platform", string(platform), "error", err)
 		writeError(w, http.StatusForbidden, "USER_PROVISION_FAILED", "user account is unavailable")
 		return
 	}
@@ -293,6 +301,7 @@ func (p *PlatformLogin) completeLogin(server *Server, w http.ResponseWriter, r *
 		UserID: user.ID, Principal: principal, Binding: binding, RequestID: loginRequestID,
 	})
 	if err != nil {
+		server.logger.Error("platform login failed: session issuance failed", "request_id", loginRequestID, "platform", string(platform), "error", err)
 		writeError(w, http.StatusForbidden, "SESSION_ISSUE_FAILED", "login session could not be established")
 		return
 	}

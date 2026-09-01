@@ -947,3 +947,96 @@ func TestSourceDependencyWaitRecoversStartupOrderAndMonotonicTombstones(t *testi
 		t.Fatalf("stale audit count=%d err=%v", staleAudits, err)
 	}
 }
+
+// TestClaimPlatformIdentityBackfillsOnlyWhenNullAndNeverOverwrites covers the
+// production 403 fix (XM-INV-AUTOLOGIN, see docs/handoffs/XM-INV-AUTOLOGIN.md):
+// a source-projection pipeline can bind an external account to an
+// invoice_user whose platform/platform_user_id columns are still NULL
+// (EnsureUser never sets them). ClaimPlatformIdentity backfills them exactly
+// once and never overwrites an already-claimed value on a later call, even
+// with different arguments.
+func TestClaimPlatformIdentityBackfillsOnlyWhenNullAndNeverOverwrites(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+
+	projected, err := service.EnsureUser(ctx, OIDCIdentity{
+		Issuer: "https://source-projection.example", Subject: "projected-subject-1", Status: "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID := "10000000-0000-4000-8000-000000000031"
+	if _, err = store.UpsertSourceInstance(ctx, postgresstore.SourceInstanceRecord{
+		ID: sourceID, SourceType: domain.SourceSub2API, Name: "sub2-claim-test", RuntimeVersion: "test-runtime", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.BindExternalAccount(ctx, postgresstore.ExternalAccountRecord{
+		PrincipalID: projected.ID, SourceInstanceID: sourceID, ExternalUserID: "1113",
+		BindingMethod: "source_signed_oidc_projection", BindingStatus: "verified",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var beforePlatform, beforePlatformUserID *string
+	if err = store.Pool().QueryRow(ctx, `SELECT platform,platform_user_id FROM invoice_users WHERE id=$1`, projected.ID).
+		Scan(&beforePlatform, &beforePlatformUserID); err != nil {
+		t.Fatal(err)
+	}
+	if beforePlatform != nil || beforePlatformUserID != nil {
+		t.Fatalf("a source-projection-created user must start with NULL platform columns: platform=%v platform_user_id=%v", beforePlatform, beforePlatformUserID)
+	}
+
+	// First claim: columns are NULL, so this backfills them.
+	storedPlatform, storedPlatformUserID, err := service.ClaimPlatformIdentity(ctx, projected.ID, "sub2api", "1113")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedPlatform != "sub2api" || storedPlatformUserID != "1113" {
+		t.Fatalf("first claim stored=%s/%s, want sub2api/1113", storedPlatform, storedPlatformUserID)
+	}
+
+	// Second claim with the same values: an idempotent re-login still reports
+	// the already-claimed values.
+	storedPlatform, storedPlatformUserID, err = service.ClaimPlatformIdentity(ctx, projected.ID, "sub2api", "1113")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedPlatform != "sub2api" || storedPlatformUserID != "1113" {
+		t.Fatalf("idempotent re-claim stored=%s/%s, want sub2api/1113", storedPlatform, storedPlatformUserID)
+	}
+
+	// A later claim with a DIFFERENT platform_user_id must not overwrite: it
+	// reports back the ORIGINAL claimed identity, letting the caller detect
+	// and reject the mismatch.
+	storedPlatform, storedPlatformUserID, err = service.ClaimPlatformIdentity(ctx, projected.ID, "sub2api", "999-different")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedPlatform != "sub2api" || storedPlatformUserID != "1113" {
+		t.Fatalf("a later mismatched claim must not overwrite: stored=%s/%s, want the original sub2api/1113", storedPlatform, storedPlatformUserID)
+	}
+
+	var dbPlatform, dbPlatformUserID string
+	if err = store.Pool().QueryRow(ctx, `SELECT platform,platform_user_id FROM invoice_users WHERE id=$1`, projected.ID).
+		Scan(&dbPlatform, &dbPlatformUserID); err != nil {
+		t.Fatal(err)
+	}
+	if dbPlatform != "sub2api" || dbPlatformUserID != "1113" {
+		t.Fatalf("invoice_users row platform=%s platform_user_id=%s, want sub2api/1113", dbPlatform, dbPlatformUserID)
+	}
+	var claimAudits int
+	if err = store.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE action='invoice_user.platform_identity_claimed' AND object_id=$1`, projected.ID).Scan(&claimAudits); err != nil {
+		t.Fatal(err)
+	}
+	if claimAudits != 1 {
+		t.Fatalf("expected exactly one claim audit event (only the first, backfilling call), got %d", claimAudits)
+	}
+}
+
+func TestClaimPlatformIdentityUnknownUserFailsClosed(t *testing.T) {
+	service, _, _, ctx := integrationApplication(t)
+	if _, _, err := service.ClaimPlatformIdentity(ctx, "00000000-0000-4000-8000-000000000099", "sub2api", "1113"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected domain.ErrNotFound for an unknown user id, got %v", err)
+	}
+}

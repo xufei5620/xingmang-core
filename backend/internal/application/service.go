@@ -300,8 +300,29 @@ func (s *Service) BindExternalAccount(ctx context.Context, record postgresstore.
 		auditActor(ctx, "user", record.PrincipalID, "external account binding verified"))
 }
 
+// ClaimPlatformIdentity backfills a pre-existing invoice_user's platform/
+// platform_user_id columns for a platform-password login that landed on an
+// identity a source-projection pipeline already created and bound (see
+// postgresstore.Store.ClaimPlatformIdentity for the full rationale). The
+// caller must compare the returned stored values against what it asked to
+// claim -- a mismatch means this invoice_user already belongs to a different
+// platform identity and the login must be rejected.
+func (s *Service) ClaimPlatformIdentity(ctx context.Context, userID, platform, platformUserID string) (storedPlatform, storedPlatformUserID string, err error) {
+	return s.store.ClaimPlatformIdentity(ctx, userID, platform, platformUserID,
+		auditActor(ctx, "platform", userID, "platform password login claimed a pre-existing projected identity"))
+}
+
 func (s *Service) ListExternalAccounts(ctx context.Context, principalID string) ([]postgresstore.ConnectedSourceAccount, error) {
 	return s.store.ListExternalAccounts(ctx, principalID)
+}
+
+// GetExternalAccountBySourceUser is a read-only passthrough (see
+// ListExternalAccounts above for the same pattern): platform-password login
+// uses it to check whether a source-projection pipeline already bound this
+// external account to an invoice_user before deciding whether to claim that
+// existing identity or provision a new one.
+func (s *Service) GetExternalAccountBySourceUser(ctx context.Context, sourceInstanceID, externalUserID string) (postgresstore.ExternalAccountRecord, error) {
+	return s.store.GetExternalAccountBySourceUser(ctx, sourceInstanceID, externalUserID)
 }
 
 type FundingObservation struct {

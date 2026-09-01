@@ -260,43 +260,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		OIDC: oidcClient, Sessions: sessions, BindingHasher: bindingHasher,
 		CSRF: csrf, Admin: adminPolicy, Logout: oidcClient, BackchannelLogout: backchannelLogout,
 		ProvisionUser: func(callbackCtx context.Context, principal auth.Principal, requestID string) (httpapi.SessionUser, error) {
-			identity, resolveErr := identityStore.ResolveOrCreate(callbackCtx, principal, requestID)
-			if resolveErr != nil {
-				return httpapi.SessionUser{}, resolveErr
-			}
-			actorType := "oidc"
-			reason := "OIDC login synchronized"
-			if principal.Platform != "" {
-				actorType = "platform"
-				reason = "platform password login synchronized"
-			}
-			auditCtx := application.WithAuditActor(callbackCtx, postgresstore.AuditActor{Type: actorType, ID: principal.IdentityHash(), RequestID: requestID, Reason: reason})
-			record, ensureErr := appService.EnsureUser(auditCtx, application.OIDCIdentity{Issuer: principal.Issuer, Subject: principal.Subject, Email: principal.Email, EmailVerified: principal.EmailVerified, Status: "active"})
-			if ensureErr != nil || record.ID != identity.UserID {
-				if ensureErr == nil {
-					ensureErr = errors.New("identity persistence mismatch")
-				}
-				return httpapi.SessionUser{}, ensureErr
-			}
-			if principal.Platform != "" {
-				// Platform password login IS the account-ownership proof (the
-				// platform's own login endpoint just verified it): bind the
-				// matching external account immediately instead of requiring
-				// the separate out-of-band challenge flow in binding.go, so
-				// the user's funding lots resolve on first login.
-				sourceInstanceID := platformSourceInstanceIDs[principal.Platform]
-				if sourceInstanceID == "" {
-					return httpapi.SessionUser{}, fmt.Errorf("no enabled source instance configured for platform %q", principal.Platform)
-				}
-				if _, bindErr := appService.BindExternalAccount(auditCtx, postgresstore.ExternalAccountRecord{
-					PrincipalID: record.ID, SourceInstanceID: sourceInstanceID,
-					ExternalUserID: principal.PlatformUserID, BindingMethod: "platform_password_login",
-					BindingStatus: "verified",
-				}); bindErr != nil {
-					return httpapi.SessionUser{}, fmt.Errorf("bind platform external account: %w", bindErr)
-				}
-			}
-			return loadSessionUser(auditCtx, appService, record.ID)
+			return provisionPlatformOrOIDCUser(callbackCtx, appService, identityStore, principal, requestID, platformSourceInstanceIDs)
 		},
 		LoadUser: func(loadCtx context.Context, userID string) (httpapi.SessionUser, error) {
 			return loadSessionUser(loadCtx, appService, userID)
@@ -601,7 +565,119 @@ func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.S
 	return nil
 }
 
-func loadSessionUser(ctx context.Context, service *application.Service, userID string) (httpapi.SessionUser, error) {
+// currentUserLoader is the minimal dependency loadSessionUser needs.
+// provisionUserDeps embeds it since provisioning always ends by loading the
+// resulting session user.
+type currentUserLoader interface {
+	GetCurrentUser(ctx context.Context, userID string) (application.CurrentUser, error)
+}
+
+// provisionUserDeps groups the application-service dependencies
+// provisionPlatformOrOIDCUser needs, narrowed to an interface so its
+// claim-vs-create branching (XM-INV-AUTOLOGIN: see
+// docs/handoffs/XM-INV-AUTOLOGIN.md) is unit-tested against fakes in
+// runtime_test.go instead of requiring a live PostgreSQL connection.
+// *application.Service satisfies this in production.
+type provisionUserDeps interface {
+	currentUserLoader
+	GetExternalAccountBySourceUser(ctx context.Context, sourceInstanceID, externalUserID string) (postgresstore.ExternalAccountRecord, error)
+	ClaimPlatformIdentity(ctx context.Context, userID, platform, platformUserID string) (storedPlatform, storedPlatformUserID string, err error)
+	EnsureUser(ctx context.Context, identity application.OIDCIdentity) (postgresstore.UserRecord, error)
+	BindExternalAccount(ctx context.Context, record postgresstore.ExternalAccountRecord) (postgresstore.ExternalAccountRecord, error)
+}
+
+// provisionPlatformOrOIDCUser resolves the local invoice_user for a verified
+// login -- OIDC administrator or platform-password -- and returns the
+// session-ready projection of it.
+//
+// For a platform-password principal, it first checks whether a
+// source-projection pipeline (BindExternalAccountFromSource) already owns
+// this external account, bound to a pre-existing invoice_user with real
+// funding lots already attached, before its owner ever tried a
+// platform-password login. If so, it claims that existing identity instead
+// of creating a second, orphaned one. Without this check,
+// identity.ResolveOrCreate below always resolves/creates a *different*
+// invoice_user (keyed by the platform's own issuer/subject pair), and
+// BindExternalAccount's UPSERT then fails closed with domain.ErrForbidden
+// because the external account already belongs to someone else's
+// invoice_user_id -- this was the root cause of a production 403
+// ("当前账号没有执行此操作的权限") on every platform-password login for an
+// account a source-projection pipeline had already touched. See
+// docs/handoffs/XM-INV-AUTOLOGIN.md for the full writeup.
+func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, identity auth.IdentityStore, principal auth.Principal, requestID string, sourceInstanceIDs map[auth.Platform]string) (httpapi.SessionUser, error) {
+	actorType := "oidc"
+	reason := "OIDC login synchronized"
+	var sourceInstanceID string
+	if principal.Platform != "" {
+		actorType = "platform"
+		reason = "platform password login synchronized"
+		sourceInstanceID = sourceInstanceIDs[principal.Platform]
+		if sourceInstanceID == "" {
+			return httpapi.SessionUser{}, fmt.Errorf("no enabled source instance configured for platform %q", principal.Platform)
+		}
+	}
+	auditCtx := application.WithAuditActor(ctx, postgresstore.AuditActor{Type: actorType, ID: principal.IdentityHash(), RequestID: requestID, Reason: reason})
+
+	if principal.Platform != "" {
+		existing, lookupErr := deps.GetExternalAccountBySourceUser(ctx, sourceInstanceID, principal.PlatformUserID)
+		if lookupErr != nil && !errors.Is(lookupErr, domain.ErrNotFound) {
+			return httpapi.SessionUser{}, fmt.Errorf("look up existing external account binding: %w", lookupErr)
+		}
+		if lookupErr == nil {
+			// Found: claim it. ClaimPlatformIdentity backfills
+			// invoice_users.platform/platform_user_id only if they are still
+			// NULL; the caller must still compare its return against what
+			// was asked, since it never overwrites an already-set value.
+			storedPlatform, storedPlatformUserID, claimErr := deps.ClaimPlatformIdentity(auditCtx, existing.PrincipalID, string(principal.Platform), principal.PlatformUserID)
+			if claimErr != nil {
+				return httpapi.SessionUser{}, fmt.Errorf("claim existing platform identity: %w", claimErr)
+			}
+			if storedPlatform != string(principal.Platform) || storedPlatformUserID != principal.PlatformUserID {
+				// This invoice_user already carries a *different* platform
+				// identity: claiming it here would silently collapse two
+				// distinct platform accounts onto one invoice_user. Reject
+				// instead -- httpapi.completeLogin logs this with the full
+				// error chain before mapping it to USER_PROVISION_FAILED.
+				return httpapi.SessionUser{}, errors.New("external account is already bound to a different platform identity")
+			}
+			return loadSessionUser(auditCtx, deps, existing.PrincipalID)
+		}
+		// Not found: fall through to the create-or-find path below exactly
+		// like a first-ever login (OIDC or platform) always has.
+	}
+
+	resolved, resolveErr := identity.ResolveOrCreate(ctx, principal, requestID)
+	if resolveErr != nil {
+		return httpapi.SessionUser{}, resolveErr
+	}
+	record, ensureErr := deps.EnsureUser(auditCtx, application.OIDCIdentity{Issuer: principal.Issuer, Subject: principal.Subject, Email: principal.Email, EmailVerified: principal.EmailVerified, Status: "active"})
+	if ensureErr != nil || record.ID != resolved.UserID {
+		if ensureErr == nil {
+			ensureErr = errors.New("identity persistence mismatch")
+		}
+		return httpapi.SessionUser{}, ensureErr
+	}
+	if principal.Platform != "" {
+		// Platform password login IS the account-ownership proof (the
+		// platform's own login endpoint just verified it): bind the matching
+		// external account immediately instead of requiring the separate
+		// out-of-band challenge flow in binding.go, so the user's funding
+		// lots resolve on first login. The claim path above already handled
+		// an external account that was bound to a different, pre-existing
+		// identity, so this UPSERT only ever runs for a genuinely new
+		// binding.
+		if _, bindErr := deps.BindExternalAccount(auditCtx, postgresstore.ExternalAccountRecord{
+			PrincipalID: record.ID, SourceInstanceID: sourceInstanceID,
+			ExternalUserID: principal.PlatformUserID, BindingMethod: "platform_password_login",
+			BindingStatus: "verified",
+		}); bindErr != nil {
+			return httpapi.SessionUser{}, fmt.Errorf("bind platform external account: %w", bindErr)
+		}
+	}
+	return loadSessionUser(auditCtx, deps, record.ID)
+}
+
+func loadSessionUser(ctx context.Context, service currentUserLoader, userID string) (httpapi.SessionUser, error) {
 	user, err := service.GetCurrentUser(ctx, userID)
 	if err != nil {
 		return httpapi.SessionUser{}, err
