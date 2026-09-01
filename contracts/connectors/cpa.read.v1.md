@@ -2,18 +2,17 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | **DRAFT（XM-CPA0）**。表结构由任务简报核对确认，但 usage_events 的部分 token 列名、codex_inspection_runs 的时间戳列、业务日时区三项**未对真实生产库核对**，见 §8 |
+| 状态 | **DRAFT（XM-CPA-SNAPSHOT）**。生产 schema/WAL 已核对；业务日时区与 model_prices 货币口径仍待上游正式确认，见 §8 |
 | Connector Key | `cpa` |
 | Contract Version | `1` |
-| 实现 | `connectors/cpa`：只读文件后端 `NewFileClient`，直读 cpa-manager-plus 落盘的 `usage.sqlite`（`modernc`/`ncruces` 系纯 Go SQLite 驱动，无 CGO），不经 HTTP。**没有 real（HTTP 管理 API）后端**——见 §1 |
+| 实现 | `connectors/cpa`：只读文件后端 `NewFileClient`，读取宿主 `cpa-snapshot` 以 ncruces online backup 原子发布的独立 `usage.sqlite`，不经 HTTP、不直挂活动 WAL。**没有 real（HTTP 管理 API）后端**——见 §1 |
 | 合规判据 | `go test ./connectors/cpa/...`（合成 sqlite 库，覆盖用量/成本折算/账号巡检/token 列回退/schema 缺失场景） |
 | 平台侧入口 | 周期同步：`internal/platform/jobs.CPASyncWorker`（写 `internal/platform/ops` 四条观测）；HTTP 层：`internal/platform/httpapi/cpa_keys.go`（仅 `GET /platforms/cpa/keys`，其余页面读 `/api/v1/metrics`） |
 | 依据 | 团队交接口述简报（XM-CPA0，2026-08-31）；`docs/architecture/ADMIN-IA.md` CPA 5 页签定义 |
 
-⚠️ **DRAFT 的含义**：usage.sqlite 的核心表（`usage_events`/`model_prices`/
-`api_key_aliases`/`codex_inspection_runs`/`codex_inspection_results`）与本契约
-实际读取的列已由任务简报核对；但部分列名与两个业务假设（时区、货币）**未对
-生产库或代码核对**，逐项列在 §8。冻结前（真实部署验收）不得把这些假设当作
+⚠️ **DRAFT 的含义**：核心表、token 列、巡检主外键、`started_at_ms`、WAL
+行为和 SQLite 值类型已在生产只读核对；两个业务假设（时区、货币）仍列在
+§8。冻结前不得把这两个假设当作
 已核实的事实写进跨线接口。
 
 ---
@@ -26,23 +25,22 @@ CPA 在本仓库语境里指两个容器：
 - **`cpa-manager-plus`**：管理与用量统计侧车，监听 `127.0.0.1:18317`，把
   用量、定价与账号巡检结果落进 SQLite（`/root/cpa-stack/cpam-data/usage.sqlite`）。
 
-平台**不参与 cli-proxy-api 的实时请求路径**（宪法 5 条），只在 cpa-manager-plus
-落盘的库上做**周期只读快照**。cpa-manager-plus 是否暴露一个值得读的 HTTP
-管理 API 未经验证——本契约的唯一数据路径是直读它自己的 SQLite 文件。
+平台**不参与 cli-proxy-api 的实时请求路径**（宪法 5 条）。宿主 lifecycle
+工具从 cpa-manager-plus 活动库生成一致性只读副本，平台只读该副本。
+cpa-manager-plus 是否暴露一个值得读的 HTTP 管理 API 未经验证。
 
 **绝不读取、绝不挂载**：`/root/cpa-stack/cpa/auths`（上游 OAuth 令牌）与任何
 `config.yaml`（含 API key 等凭据）。平台容器只读绑定挂载
-`/root/cpa-stack/cpam-data`（整个目录，理由见 §5），不触碰凭据目录——这是
+`/var/lib/xingmang/cpa-snapshot/published`，不触碰活动库或凭据目录——这是
 本契约与部署配置共同承担的红线，代码层面 `connectors/cpa` 也没有任何路径
 能读到这两个位置之外的文件。
 
 usage.sqlite 已核对的表（任务简报确认，列名逐字）：
 
-- `usage_events(id, request_id, event_hash, timestamp_ms, timestamp, provider, executor_type, model, endpoint, method, path, auth_type, auth_index, source, source_hash, api_key_hash, …)` ——
-  token 计数列名**未核对**，见 §8；
+- `usage_events(id, request_id, event_hash, timestamp_ms, timestamp, provider, executor_type, model, endpoint, method, path, auth_type, auth_index, source, source_hash, api_key_hash, …)`；
 - `model_prices(model, prompt_per_1m, completion_per_1m, cache_per_1m, cache_read_per_1m, cache_creation_per_1m, …)` —— 均为 `REAL`（USD/1M tokens）；
 - `api_key_aliases(api_key_hash, alias)`；
-- `codex_inspection_runs(run_id, …)` / `codex_inspection_results(run_id, account_key, file_name, display_account, auth_index, account_id, provider, disabled, status, state, action, action_reason, …)`；
+- `codex_inspection_runs(id INTEGER, started_at_ms INTEGER, …)` / `codex_inspection_results(run_id INTEGER, account_key, file_name, display_account, auth_index, account_id, provider, disabled, status, state, action, action_reason, …)`；
 - `settings`, `usage_rollup_checkpoints`（本契约不读）。
 
 ## 2. 能力清单
@@ -129,8 +127,8 @@ type AccountAnomaly struct {
 }
 type AccountHealthSummary struct {
     Snapshot
-    RunID         string     // "" = 从未跑完一轮
-    RunAt         *time.Time // 恒为 nil，见 §8（无已核实时间戳列）
+    RunID         string     // runs.id 的十进制字符串；"" = 从未跑完一轮
+    RunAt         *time.Time // started_at_ms 的 UTC 时间；无轮次时 nil
     AccountCount, DisabledCount int64
     Anomalies     []AccountAnomaly // 已按 MaxAnomalies=50 截断
     AnomalyCount  int64            // 截断前的真实条数
@@ -138,8 +136,8 @@ type AccountHealthSummary struct {
 }
 ```
 
-"最近一轮"取 `codex_inspection_runs` 里 SQLite `rowid` 最大的一行——插入序的
-代理指标，见 §8。"异常"定义为 `disabled=true` 或 `action` 非空且不等于
+"最近一轮"按 `started_at_ms DESC, id DESC` 取一行，并用整数 `id` 关联
+`codex_inspection_results.run_id`。"异常"定义为 `disabled=true` 或 `action` 非空且不等于
 `"none"`（大小写不敏感）；列表截断上限 50 条，前端必须显示"还有 N 条"
 （XM-0051 的教训：不设上限的列表能把整页撑到几千像素）。
 
@@ -147,8 +145,8 @@ type AccountHealthSummary struct {
 
 ```go
 type Snapshot struct {
-    ObservedAt time.Time // 本次读取发生的时刻（UTC）——usage.sqlite 没有自己的水位
-    Watermark  string    // ObservedAt 的 RFC3339 文本
+    ObservedAt time.Time // 宿主 producer 完成本代快照的 UTC 时间
+    Watermark  string    // 快照内嵌的唯一 generation
     IsPartial  bool      // 有未配价行、token 角色未解析或巡检列表被截断时为 true
     Instance   string    // 恒为 FileInstance = "cpa-file"
 }
@@ -170,16 +168,23 @@ type Snapshot struct {
   `platform.users.read` 的调用仍走 httpapi 通用访问日志（`RequestID`/
   `AccessLog` 中间件），与其它只读端点一致。
 
-## 5. 只读边界（部署纪律，非代码可强制）
+## 5. 一致性快照与只读边界
 
-- **挂载整个 `cpam-data` 目录，不是单个 `.sqlite` 文件**：SQLite WAL 模式下
-  只读连接需要能读到同目录的 `-wal`/`-shm` 兄弟文件，只挂主文件会在
-  checkpoint 前后读到不一致的快照（`connectors/cpa/file_client.go` 的
-  `FileConfig.DataDir` 文档）。
-- **只读打开**：DSN 固定 `file:<path>?mode=ro&_pragma=busy_timeout(5000)`
-  （`connectors/cpa` 的 `busyTimeoutMillis`）——`mode=ro` 由 SQLite 自身强制
-  只读，不依赖容器文件系统权限这一层防线；`busy_timeout` 让读者在极少数
-  与 cpa-manager-plus 的 checkpoint 撞车时重试而不是直接报错。
+- **禁止平台容器挂活动 `cpam-data`**：生产已证明 ncruces 在活动 WAL 目录的
+  Docker `:ro` bind 中仍需 SHM 协调，四项读取统一失败。不得靠放宽 API/worker
+  权限、`immutable=1`、删 WAL/SHM 或修改 CPA 原库规避。
+- **宿主 producer**：版本化静态 `cpa-snapshot` 以 `mode=ro` + `query_only`
+  打开活动库，用 ncruces online backup 写独立临时库；转成 DELETE journal，
+  写入 `xingmang_snapshot_metadata_v1`，要求 `quick_check=ok`、必需 schema 完整、
+  无 WAL/SHM/journal 后，fsync 并同目录原子替换 published `usage.sqlite`。
+  失败只删未发布临时文件，上一代保持不变。
+- **只挂 published 目录**：API/worker 只读挂
+  `/var/lib/xingmang/cpa-snapshot/published:/var/lib/xm/cpa`；长语法
+  `create_host_path:false`，首代缺失即部署失败。
+- **读侧新鲜度**：每个方法从同一 SQLite 句柄读取内嵌 generation/captured
+  time；worker 若在原子替换边界读到两个 generation，四项整轮失败关闭并保留
+  上一成功值。读取时钟不得冒充快照生成时间。
+- **只读打开**：消费者 DSN 保持 `mode=ro`，不使用 `immutable=1`。
 - **文件名受限于挂载目录**：`XM_CPA_FILE_NAME` 只接受不含路径分隔符、卷名、
   `..` 或 SQLite URI 控制字符的单一 basename；构造器拒绝绝对路径、目录穿越
   与 query 注入，不能借该变量越出 `XM_CPA_DATA_DIR`。
@@ -195,7 +200,8 @@ type Snapshot struct {
 
 | 场景 | Kind |
 |---|---|
-| usage.sqlite 打不开 / busy_timeout 用尽仍占用 | `unavailable` |
+| published usage.sqlite 打不开 | `unavailable` |
+| snapshot metadata 缺失/畸形/未来时间/混合 generation | `bad_response` |
 | `day` 参数格式非法（非 `YYYY-MM-DD`） | `bad_response` |
 | 表结构读不出（`PRAGMA table_info` 失败） | `bad_response` |
 | token 角色无法按候选列解析 | `Health().Healthy=false` / `bad_response`；用量结果标 `IsPartial=true` |
@@ -212,7 +218,7 @@ cli-proxy-api 的版本——usage.sqlite 没有已知的 schema 版本标记可
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `XM_CPA_MODE` | `off` | `off` \| `file`。**没有 fake**：SQLite 文件没有值得伪造的响应形状 |
-| `XM_CPA_DATA_DIR` | 空 | 容器内只读挂载目录，`file` 模式必填 |
+| `XM_CPA_DATA_DIR` | 空 | 容器内 published 快照只读挂载目录，`file` 模式必填 |
 | `XM_CPA_FILE_NAME` | 空（回落 `usage.sqlite`） | 覆盖库文件名，一般不需要；只允许挂载目录内的安全 basename |
 | `XM_CPA_SYNC_ENABLED` | 跟随 `XM_CPA_MODE` | 留空 = file 打开/off 关闭；显式 `false` 可在 file 模式下暂停（宪法 26 条），**不能**在 off 模式下打开（矛盾配置启动即拒） |
 | `XM_CPA_SYNC_INTERVAL` | `300s` | 同步周期 |
@@ -232,34 +238,20 @@ cli-proxy-api 的版本——usage.sqlite 没有已知的 schema 版本标记可
 | `cpa.requests.daily` | `total_request_count`、`by_provider`、`by_model` |
 | `cpa.cost.daily` | `total_cost_minor_units`（scale 6，money.MicroScale）+ `currency`，或 `total_omitted_reason`；`unpriced_request_count`、`unpriced_models` |
 | `cpa.keys.usage` | `key_count` + 前 20 名 `top_keys` 小样本；**不是**完整明细（那是 §3.2 的端点） |
-| `cpa.accounts.health` | `run_id`、`account_count`、`disabled_count`、`anomalies`（≤50）、`truncated` |
+| `cpa.accounts.health` | `run_id`、`run_at`、`account_count`、`disabled_count`、`anomalies`（≤50）、`truncated` |
 
 四条键的新鲜度阈值均为 1800 秒（对齐 5 分钟采集周期，两轮失败才判 stale）。
 
-## 8. 等真实部署核对的字段清单
+## 8. 仍待上游业务口径确认的清单
 
-与 reqlog DRAFT 契约同一套纪律：这是本契约与真实运行环境之间**唯一的**
-差异台账，接入真实生产库后逐项核对、写回结论。
+生产只读核对已确认：token 角色列可解析；`disabled` 为 SQLite INTEGER；
+`codex_inspection_runs.id/started_at_ms` 与 results 整数外键为真实结构。仍有：
 
-1. **`usage_events` 的 token 计数列名**——任务简报只给了 join/定价相关列，
-   四个 token 角色（input/output/cache_read/cache_creation）的具体列名
-   没有核对。`connectors/cpa/schema.go` 用 `PRAGMA table_info` 在候选名单
-   （`input_tokens`/`prompt_tokens`… 等）里挑第一个匹配的，全不匹配时该
-   角色按 0 计、用量结果显式标 `IsPartial=true`，且 `Health()` 返回 unhealthy
-   并报告缺哪个角色——不会崩，也不会把偏低值冒充完整结果。**核对动作**：
-   对生产库跑一次 `PRAGMA table_info(usage_events)`，
-   把真实列名写回 `candidateInputTokenColumns` 等常量的候选名单首位。
-2. **业务日时区**——`dayBoundsUTC` 假设 `timestamp_ms` 是 UTC 纪元毫秒，
+1. **业务日时区**——`dayBoundsUTC` 假设 `timestamp_ms` 是 UTC 纪元毫秒，
    业务日按 UTC 日历日切分。未核对 cli-proxy-api 是否按本地时区打时间戳。
    若实际是本地时间（如 UTC+8），当前实现会把"日"切错 8 小时。
-3. **`codex_inspection_runs` 的时间戳列**——"最近一轮"目前靠 SQLite `rowid`
-   排序代替真实时间戳（该表除 `run_id` 外的列名未核对）。若表其实有
-   `started_at`/`created_at` 之类的列，应该改用它，并把 `AccountHealthSummary.
-   RunAt` 从恒为 `nil` 改成真实值。
-4. **`Currency = "USD"` 假设**——`model_prices` 没有货币列；假设所有价格是
+2. **`Currency = "USD"` 假设**——`model_prices` 没有货币列；假设所有价格是
    USD，未核对是否存在非 USD 计价的 provider。
-5. **`disabled` 列的真实类型**——按 SQLite `INTEGER`（0/1）读入
-   `sql.NullBool`；未核对是否可能是其它编码（如字符串 `"true"`）。
 
 ## 9. 为什么账号巡检落在"渠道保障"页签位置
 

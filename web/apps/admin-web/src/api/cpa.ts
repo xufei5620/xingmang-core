@@ -108,11 +108,45 @@ export interface CPAAccountAnomaly {
 
 export interface CPAAccountsHealthValue {
   run_id?: string;
+  run_at?: string;
   account_count?: number;
   disabled_count?: number;
   anomaly_count?: number;
   anomalies?: CPAAccountAnomaly[];
   truncated?: boolean;
+}
+
+export function formatCPARunAt(value: string | undefined): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "时间格式异常";
+  const iso = parsed.toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+export function cpaSnapshotFreshness(
+  snapshot: CPAKeyUsagePage["snapshot"],
+  nowMS = Date.now(),
+) {
+  const observedMS = Date.parse(snapshot.observed_at);
+  const validObserved = Number.isFinite(observedMS);
+  const staleness = validObserved ? Math.max(0, Math.floor((nowMS - observedMS) / 1000)) : null;
+  const state = !validObserved
+    ? "failed"
+    : snapshot.is_partial
+      ? "partial"
+      : staleness !== null && staleness >= 1800
+        ? "stale"
+        : "fresh";
+  return {
+    state,
+    staleness_seconds: staleness,
+    threshold_seconds: 1800,
+    is_partial: snapshot.is_partial,
+    observed_at: validObserved ? snapshot.observed_at : null,
+    last_success: validObserved ? snapshot.observed_at : null,
+    last_error_code: validObserved ? "" : "invalid_snapshot_time",
+  } as const;
 }
 
 export const CPA_REQUESTS_METRIC_KEY = "cpa.requests.daily";

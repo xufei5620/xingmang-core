@@ -9,7 +9,7 @@ import {
   type FreshnessContract,
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
-import { listCPAKeys, type CPAKeyUsageItem, type CPAKeyUsagePage, type MoneyBody } from "../api/cpa";
+import { cpaSnapshotFreshness, listCPAKeys, type CPAKeyUsageItem, type CPAKeyUsagePage, type MoneyBody } from "../api/cpa";
 import { formatScaledMinorUnits, formatCount, toIntegerValue } from "../lib/money";
 import { ApiStateView } from "./ApiStateView";
 
@@ -119,15 +119,7 @@ const COLUMN_LAST_USED: DataTableColumn<CPAKeyUsageItem> = {
 };
 
 function CPAKeysTable({ page }: { page: CPAKeyUsagePage }) {
-  const freshness: FreshnessContract = {
-    state: page.snapshot.is_partial ? "partial" : "fresh",
-    staleness_seconds: null,
-    threshold_seconds: 1800,
-    is_partial: page.snapshot.is_partial,
-    observed_at: page.snapshot.observed_at,
-    last_success: page.snapshot.observed_at,
-    last_error_code: "",
-  };
+  const freshness: FreshnessContract = cpaSnapshotFreshness(page.snapshot);
 
   return (
     <div className="flex flex-col gap-2">

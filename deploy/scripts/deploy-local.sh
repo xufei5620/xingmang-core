@@ -112,6 +112,8 @@ read_env_value() {
     lhs="$(trim "$lhs")"
     [ "$lhs" = "$key" ] || continue
     rhs="$(trim "${line#*=}")"
+    rhs="$(printf '%s\n' "$rhs" | sed 's/[[:space:]]#.*$//')"
+    rhs="$(trim "$rhs")"
     case "$rhs" in
       \"*\") rhs="${rhs:1:${#rhs}-2}" ;;
       \'*\') rhs="${rhs:1:${#rhs}-2}" ;;
@@ -421,7 +423,16 @@ export POSTGRES_DB=xingmang POSTGRES_USER=xingmang
 export BUILD_VERSION="$expected_environment" BUILD_COMMIT="$target_sha"
 
 tmp_dir="$(mktemp -d)" || die "无法创建部署临时目录"
-cleanup() { rm -rf -- "$tmp_dir"; }
+cpa_timer_recovery_needed=0
+cleanup() {
+  if [ "$cpa_timer_recovery_needed" -eq 1 ]; then
+    # The newly installed producer and first generation were independently
+    # verified. If a later app/smoke gate fails, keep refresh alive instead of
+    # stranding a previously healthy timer in the stopped state.
+    systemctl enable --now xingmang-cpa-snapshot.timer >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$tmp_dir"
+}
 trap cleanup EXIT
 docker_config="$tmp_dir/docker-config"
 mkdir -p -- "$docker_config"
@@ -498,6 +509,42 @@ if [ -n "$existing_stack" ]; then
 else
   echo "baseline=absent"
 fi
+cpa_mode_value="$(read_env_value XM_CPA_MODE 2>/dev/null || true)"
+cpa_mode_value="$(trim "$cpa_mode_value")"
+cpa_sync_enabled_value="$(read_env_value XM_CPA_SYNC_ENABLED 2>/dev/null || true)"
+cpa_sync_enabled_value="$(trim "$cpa_sync_enabled_value")"
+cpa_sync_enabled_value="${cpa_sync_enabled_value,,}"
+cpa_sync_disabled=0
+case "$cpa_sync_enabled_value" in 0|f|false) cpa_sync_disabled=1 ;; esac
+if [ "$expected_environment" = "production" ]; then
+  [ "${EUID:-$(id -u)}" -eq 0 ] || die "cpa-snapshot: production bind preparation requires root"
+  command -v install >/dev/null 2>&1 || die "cpa-snapshot: install utility is unavailable"
+  cpa_published_dir=/var/lib/xingmang/cpa-snapshot/published
+  if [ -e "$cpa_published_dir" ]; then
+    [ -d "$cpa_published_dir" ] && [ ! -L "$cpa_published_dir" ] \
+      || die "cpa-snapshot: published bind source is not a real directory"
+  else
+    install -d -o root -g 10001 -m 0750 "$cpa_published_dir" \
+      || die "cpa-snapshot: cannot create fixed published bind source"
+  fi
+fi
+if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ]; then
+  # CPA file mode requires migrate in build service set: the host binary must
+  # come from this exact target_sha, never an older cached migrate image.
+  migrate_selected=0
+  for selected_service in "${build_services[@]}"; do
+    [ "$selected_service" = "migrate" ] && migrate_selected=1
+  done
+  [ "$migrate_selected" -eq 1 ] || die "build: CPA file mode requires migrate in build service set"
+  [ "${EUID:-$(id -u)}" -eq 0 ] || die "cpa-snapshot: production file mode requires root"
+  cpa_source=/root/cpa-stack/cpam-data/usage.sqlite
+  cpa_source_dir=/root/cpa-stack/cpam-data
+  [ -d "$cpa_source_dir" ] && [ ! -L "$cpa_source_dir" ] && [ -w "$cpa_source_dir" ] \
+    || die "cpa-snapshot: active source directory is missing, symlinked, or cannot coordinate SHM"
+  [ -f "$cpa_source" ] && [ ! -L "$cpa_source" ] && [ -s "$cpa_source" ] \
+    || die "cpa-snapshot: active source database is not a non-empty regular file"
+  command -v systemctl >/dev/null 2>&1 || die "cpa-snapshot: systemd is unavailable"
+fi
 phase="build"
 run_compose build --pull=false "${build_services[@]}" >/dev/null 2>&1 || die "$phase: 构建失败"
 
@@ -555,6 +602,56 @@ else
   echo "bootstrap=ok summary=$bootstrap_summary"
 fi
 
+phase="cpa-snapshot"
+if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ]; then
+  [ "${EUID:-$(id -u)}" -eq 0 ] || die "$phase: production file mode requires root lifecycle installation"
+  snapshot_binary="$tmp_dir/cpa-snapshot"
+  # migrate is the exact image just built from target_sha and has completed
+  # before runway-bootstrap succeeds. Extract only the static lifecycle tool;
+  # no Go/sqlite development package is installed on the host.
+  run_compose cp migrate:/usr/local/bin/cpa-snapshot "$snapshot_binary" >/dev/null 2>&1 \
+    || die "$phase: cannot extract the commit-bound snapshot binary"
+  chmod 0700 "$snapshot_binary" || die "$phase: cannot protect extracted snapshot binary"
+  snapshot_install_log="$tmp_dir/cpa-snapshot-install.log"
+  if ! bash "$repo_path/deploy/scripts/install-cpa-snapshot.sh" "$snapshot_binary" "$target_sha" >"$snapshot_install_log" 2>&1; then
+    die "$phase: initial snapshot/install failed; API/worker were not started"
+  fi
+  snapshot_summary="$(grep -F 'CPA SNAPSHOT INSTALL PASS:' "$snapshot_install_log" | tail -n 1 || true)"
+  [ -n "$snapshot_summary" ] || die "$phase: installer returned without verified evidence"
+  cpa_timer_recovery_needed=1
+  echo "cpa-snapshot=ok summary=$snapshot_summary"
+else
+  echo "cpa-snapshot=skipped environment=$expected_environment mode=${cpa_mode_value:-off}"
+fi
+
+phase="cpa-consumer-preflight"
+if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ]; then
+  /opt/xingmang/cpa-snapshot/current/cpa-snapshot verify >/dev/null 2>&1 \
+    || die "$phase: host published snapshot verification failed"
+  run_compose run --rm --no-deps --entrypoint sh platform-worker -eu -c '
+    test -r /var/lib/xm/cpa/usage.sqlite
+    test ! -w /var/lib/xm/cpa/usage.sqlite
+    test ! -e /var/lib/xm/cpa/usage.sqlite-wal
+    test ! -e /var/lib/xm/cpa/usage.sqlite-shm
+    test ! -e /var/lib/xm/cpa/usage.sqlite-journal
+  ' >/dev/null 2>&1 || die "$phase: new worker image cannot consume the standalone read-only snapshot"
+  echo "cpa-consumer-preflight=verified"
+fi
+
+enable_cpa_snapshot_timer() {
+  if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ]; then
+    phase="cpa-snapshot-timer"
+    systemctl enable --now xingmang-cpa-snapshot.timer >/dev/null 2>&1 \
+      || die "$phase: cannot enable verified snapshot refresh"
+    systemctl is-enabled --quiet xingmang-cpa-snapshot.timer \
+      || die "$phase: timer is not enabled"
+    systemctl is-active --quiet xingmang-cpa-snapshot.timer \
+      || die "$phase: timer is not active"
+    cpa_timer_recovery_needed=0
+    echo "cpa-snapshot-timer=enabled"
+  fi
+}
+
 phase="up-app"
 # 只有阈值与演示数据都完成后才启动 API/worker/web，确保运行时切换
 # 从第一轮请求起就是 DB-backed。这里不使用 --remove-orphans，避免
@@ -564,6 +661,64 @@ run_compose up -d platform-api platform-worker web >/dev/null 2>&1 || die "$phas
 phase="worker"
 worker_container_id="$(run_compose ps -q --status running platform-worker 2>/dev/null || true)"
 [ -n "$worker_container_id" ] || die "$phase: platform-worker 未处于 running 状态"
+
+phase="cpa-consumer"
+if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ]; then
+  /opt/xingmang/cpa-snapshot/current/cpa-snapshot verify >/dev/null 2>&1 \
+    || die "$phase: host published snapshot verification failed after app start"
+  for cpa_service in platform-api platform-worker; do
+    cpa_container_id="$(run_compose ps -q --status running "$cpa_service" 2>/dev/null || true)"
+    [ -n "$cpa_container_id" ] || die "$phase: $cpa_service is not running"
+    cpa_runtime_mount="$("$docker_bin" inspect "$cpa_container_id" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/xm/cpa"}}{{printf "%s|%t" .Source .RW}}{{end}}{{end}}' 2>/dev/null || true)"
+    [ "$cpa_runtime_mount" = "/var/lib/xingmang/cpa-snapshot/published|false" ] \
+      || die "$phase: $cpa_service is not bound read-only to the fixed published directory"
+    run_compose exec -T "$cpa_service" sh -eu -c '
+      test -r /var/lib/xm/cpa/usage.sqlite
+      test ! -w /var/lib/xm/cpa/usage.sqlite
+      test ! -e /var/lib/xm/cpa/usage.sqlite-wal
+      test ! -e /var/lib/xm/cpa/usage.sqlite-shm
+      test ! -e /var/lib/xm/cpa/usage.sqlite-journal
+    ' >/dev/null 2>&1 || die "$phase: $cpa_service cannot consume the standalone read-only snapshot"
+  done
+  echo "cpa-consumer=verified services=platform-api,platform-worker"
+fi
+
+phase="cpa-observations"
+if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ] && [ "$cpa_sync_disabled" -eq 0 ]; then
+  cpa_verify_json="$(/opt/xingmang/cpa-snapshot/current/cpa-snapshot verify 2>/dev/null)" \
+    || die "$phase: cannot read published generation"
+  cpa_expected_generation="$(printf '%s\n' "$cpa_verify_json" | sed -n 's/.*"generation":"\([0-9a-f]\{32\}\)".*/\1/p')"
+  [[ "$cpa_expected_generation" =~ ^[0-9a-f]{32}$ ]] \
+    || die "$phase: published generation is malformed"
+  cpa_observation_ok=0
+  cpa_observation_state=""
+  for cpa_observation_attempt in $(seq 1 "$probe_attempts"); do
+    cpa_observation_state="$(run_compose exec -T postgres psql -X -qAt -F '|' \
+      -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+        SELECT count(*), count(DISTINCT watermark), min(watermark),
+               count(*) FILTER (WHERE status='ok'),
+               count(*) FILTER (WHERE observed_at IS NULL),
+               count(*) FILTER (
+                 WHERE metric_key='cpa.accounts.health'
+                   AND COALESCE(value_json->>'run_at','') <> ''
+               )
+        FROM ops.metric_observation
+        WHERE environment='production'
+          AND metric_key IN (
+            'cpa.requests.daily','cpa.cost.daily','cpa.keys.usage','cpa.accounts.health'
+          )" 2>/dev/null || true)"
+    if [ "$cpa_observation_state" = "4|1|$cpa_expected_generation|4|0|1" ]; then
+      cpa_observation_ok=1
+      echo "cpa-observations=ok generation=$cpa_expected_generation attempt=$cpa_observation_attempt"
+      break
+    fi
+    [ "$cpa_observation_attempt" -lt "$probe_attempts" ] && sleep 2
+  done
+  [ "$cpa_observation_ok" -eq 1 ] \
+    || die "$phase: four same-generation successful CPA observations with run_at were not produced"
+elif [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ]; then
+  echo "cpa-observations=skipped reason=XM_CPA_SYNC_ENABLED=false"
+fi
 
 phase="probes"
 request_json healthz "$web_url/healthz" '"status"[[:space:]]*:[[:space:]]*"ok"' || die "$phase: /healthz 失败"
@@ -580,6 +735,7 @@ if [ "$auth_mode_local" -eq 1 ]; then
     *) die "$phase: local 鉴权闸门异常（/api/v1/auth/me 返回 ${gate_status:-无响应}，应为 401/403）" ;;
   esac
   echo "worker-log=$( [ -n "$worker_container_id" ] && echo available || echo unavailable )"
+  enable_cpa_snapshot_timer
   echo "DEPLOY LOCAL PASS: sha=$target_sha project=xingmang-launch healthz=200 readyz=200 smoke=auth-gate:$gate_status"
   exit 0
 fi
@@ -599,4 +755,5 @@ else
   echo "worker-log=unavailable (non-blocking)"
 fi
 
+enable_cpa_snapshot_timer
 echo "DEPLOY LOCAL PASS: sha=$target_sha project=xingmang-launch healthz=200 readyz=200 smoke=services:200,metrics:200,alerts:200"

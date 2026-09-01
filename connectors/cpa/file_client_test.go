@@ -14,6 +14,9 @@ import (
 // fixedNow is the clock every test in this file injects: freshness is a
 // function of time, testing it against a real clock builds the test on sand.
 var fixedNow = time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+var snapshotObserved = time.Date(2026, 8, 31, 11, 45, 0, 0, time.UTC)
+
+const snapshotGeneration = "0123456789abcdef0123456789abcdef"
 
 const fullSchemaDDL = `
 CREATE TABLE usage_events (
@@ -51,10 +54,11 @@ CREATE TABLE api_key_aliases (
 	alias TEXT
 );
 CREATE TABLE codex_inspection_runs (
-	run_id TEXT PRIMARY KEY
+	id INTEGER PRIMARY KEY,
+	started_at_ms INTEGER NOT NULL
 );
 CREATE TABLE codex_inspection_results (
-	run_id TEXT,
+	run_id INTEGER,
 	account_key TEXT,
 	file_name TEXT,
 	display_account TEXT,
@@ -88,6 +92,13 @@ func newSyntheticDB(t *testing.T, ddl string, seed func(t *testing.T, db *sql.DB
 		db.Close()
 		t.Fatalf("create schema: %v", err)
 	}
+	mustExec(t, db, `CREATE TABLE xingmang_snapshot_metadata_v1 (
+		singleton_id INTEGER PRIMARY KEY,
+		generation TEXT NOT NULL,
+		observed_at_ms INTEGER NOT NULL
+	)`)
+	mustExec(t, db, `INSERT INTO xingmang_snapshot_metadata_v1(singleton_id,generation,observed_at_ms) VALUES(1,?,?)`,
+		snapshotGeneration, snapshotObserved.UnixMilli())
 	if seed != nil {
 		seed(t, db)
 	}
@@ -174,13 +185,16 @@ func seedUsageFixture(t *testing.T, db *sql.DB) {
 	mustExec(t, db, `INSERT INTO usage_events (timestamp_ms, provider, model, api_key_hash, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES (?,?,?,?,?,?,?,?)`,
 		priorDayMs, "anthropic", "claude-x", "hash-key-c", 9999, 9999, 0, 0)
 
-	// Two inspection runs; only the later one (higher rowid) should be read.
-	mustExec(t, db, `INSERT INTO codex_inspection_runs (run_id) VALUES ('run-old')`)
-	mustExec(t, db, `INSERT INTO codex_inspection_results (run_id, account_key, display_account, provider, disabled, status, state, action, action_reason) VALUES ('run-old','acct-old','Old Account','anthropic',1,'stale','stale','disable','superseded run')`)
+	// The newest run has the smaller integer ID. Ordering by ID/rowid would
+	// therefore choose 900 incorrectly; only started_at_ms chooses 101.
+	oldRunAt := time.Date(2026, 8, 31, 9, 0, 0, 0, time.UTC).UnixMilli()
+	newRunAt := time.Date(2026, 8, 31, 10, 30, 0, 0, time.UTC).UnixMilli()
+	mustExec(t, db, `INSERT INTO codex_inspection_runs (id,started_at_ms) VALUES (?,?)`, 900, oldRunAt)
+	mustExec(t, db, `INSERT INTO codex_inspection_results (run_id, account_key, display_account, provider, disabled, status, state, action, action_reason) VALUES (900,'acct-old','Old Account','anthropic',1,'stale','stale','disable','superseded run')`)
 
-	mustExec(t, db, `INSERT INTO codex_inspection_runs (run_id) VALUES ('run-new')`)
-	mustExec(t, db, `INSERT INTO codex_inspection_results (run_id, account_key, display_account, provider, disabled, status, state, action, action_reason) VALUES ('run-new','acct-ok','OK Account','anthropic',0,'clean','clean','','')`)
-	mustExec(t, db, `INSERT INTO codex_inspection_results (run_id, account_key, display_account, provider, disabled, status, state, action, action_reason) VALUES ('run-new','acct-bad','Bad Account','anthropic',0,'error','needs_review','reauth_required','token expired')`)
+	mustExec(t, db, `INSERT INTO codex_inspection_runs (id,started_at_ms) VALUES (?,?)`, 101, newRunAt)
+	mustExec(t, db, `INSERT INTO codex_inspection_results (run_id, account_key, display_account, provider, disabled, status, state, action, action_reason) VALUES (101,'acct-ok','OK Account','anthropic',0,'clean','clean','','')`)
+	mustExec(t, db, `INSERT INTO codex_inspection_results (run_id, account_key, display_account, provider, disabled, status, state, action, action_reason) VALUES (101,'acct-bad','Bad Account','anthropic',0,'error','needs_review','reauth_required','token expired')`)
 }
 
 func TestFileClient_VersionHealthCapabilities(t *testing.T) {
@@ -226,6 +240,9 @@ func TestFileClient_UsageSummary(t *testing.T) {
 	}
 	if got.Instance != FileInstance {
 		t.Fatalf("Instance = %q, want %q", got.Instance, FileInstance)
+	}
+	if !got.ObservedAt.Equal(snapshotObserved) || got.Watermark != snapshotGeneration {
+		t.Fatalf("Snapshot = %+v, want producer time %s and generation %s", got.Snapshot, snapshotObserved, snapshotGeneration)
 	}
 	if got.TotalRequestCount != 3 {
 		t.Fatalf("TotalRequestCount = %d, want 3 (prior-day row must be excluded)", got.TotalRequestCount)
@@ -352,8 +369,15 @@ func TestFileClient_AccountHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AccountHealth: %v", err)
 	}
-	if got.RunID != "run-new" {
-		t.Fatalf("RunID = %q, want %q (the later run by rowid)", got.RunID, "run-new")
+	if got.RunID != "101" {
+		t.Fatalf("RunID = %q, want decimal integer ID 101 selected by started_at_ms", got.RunID)
+	}
+	wantRunAt := time.Date(2026, 8, 31, 10, 30, 0, 0, time.UTC)
+	if got.RunAt == nil || !got.RunAt.Equal(wantRunAt) {
+		t.Fatalf("RunAt = %v, want %v", got.RunAt, wantRunAt)
+	}
+	if !got.ObservedAt.Equal(snapshotObserved) || got.Watermark != snapshotGeneration {
+		t.Fatalf("Snapshot = %+v, want producer metadata", got.Snapshot)
 	}
 	if got.AccountCount != 2 {
 		t.Fatalf("AccountCount = %d, want 2 (run-old's account must not be counted)", got.AccountCount)
@@ -387,6 +411,24 @@ func TestFileClient_AccountHealth_NoRunsYet(t *testing.T) {
 	}
 }
 
+func TestFileClientRejectsDatabaseWithoutPublishedSnapshotMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.ToSlash(filepath.Join(dir, defaultDatabaseFileName))
+	db, err := sql.Open("sqlite3", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(fullSchemaDDL); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	client := newTestClient(t, dir)
+	if _, err = client.UsageSummary(context.Background(), "2026-08-31"); err == nil {
+		t.Fatal("UsageSummary accepted an ordinary database without snapshot metadata")
+	}
+}
+
 // TestFileClient_TokenColumnFallback proves the PRAGMA-driven column
 // resolution actually falls back through the candidate list (contract §8)
 // instead of only ever matching the first-choice names the main fixture
@@ -406,8 +448,8 @@ CREATE TABLE usage_events (
 );
 CREATE TABLE model_prices (model TEXT PRIMARY KEY, prompt_per_1m REAL, completion_per_1m REAL, cache_per_1m REAL, cache_read_per_1m REAL, cache_creation_per_1m REAL);
 CREATE TABLE api_key_aliases (api_key_hash TEXT PRIMARY KEY, alias TEXT);
-CREATE TABLE codex_inspection_runs (run_id TEXT PRIMARY KEY);
-CREATE TABLE codex_inspection_results (run_id TEXT, account_key TEXT, display_account TEXT, provider TEXT, disabled INTEGER, status TEXT, state TEXT, action TEXT, action_reason TEXT);
+CREATE TABLE codex_inspection_runs (id INTEGER PRIMARY KEY, started_at_ms INTEGER NOT NULL);
+CREATE TABLE codex_inspection_results (run_id INTEGER, account_key TEXT, display_account TEXT, provider TEXT, disabled INTEGER, status TEXT, state TEXT, action TEXT, action_reason TEXT);
 `
 	dir := newSyntheticDB(t, altDDL, func(t *testing.T, db *sql.DB) {
 		mustExec(t, db, `INSERT INTO usage_events (timestamp_ms, provider, model, api_key_hash, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?)`,

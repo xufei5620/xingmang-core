@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"  // embeds the pure-Go (WASM) SQLite runtime — no CGO
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
+	"github.com/xufei5620/xingmang-platform/internal/platform/cpasnapshot"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
 
@@ -29,17 +31,14 @@ const fileBackendVersion = "file/1"
 // all; this only matters for the rare case of a checkpoint in progress.
 const busyTimeoutMillis = 5000
 
-// defaultDatabaseFileName is production's real file name (task brief).
+// defaultDatabaseFileName is the host producer's atomically published file.
 const defaultDatabaseFileName = "usage.sqlite"
 
 // FileConfig configures NewFileClient.
 type FileConfig struct {
-	// DataDir is the read-only mounted **directory** holding usage.sqlite
-	// and its -wal/-shm siblings — not the file path itself. A WAL-mode
-	// reader needs sibling file access alongside the main database file, so
-	// production mounts the whole cpam-data directory read-only rather than
-	// a single file (see package doc and contracts/connectors/cpa.read.v1.md
-	// §2). Required.
+	// DataDir is the read-only mounted published snapshot directory. The file
+	// is standalone DELETE-journal SQLite; the active WAL directory never
+	// enters the platform container. Required.
 	DataDir string
 	// FileName overrides the database file name within DataDir; defaults to
 	// "usage.sqlite".
@@ -87,7 +86,7 @@ func NewFileClient(cfg FileConfig) (ReadClient, error) {
 		now = time.Now
 	}
 	path := filepath.ToSlash(filepath.Join(dir, name))
-	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(%d)", path, busyTimeoutMillis)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(ON)&_pragma=busy_timeout(%d)", path, busyTimeoutMillis)
 	return &fileClient{dsn: dsn, logger: logger, now: now}, nil
 }
 
@@ -146,6 +145,9 @@ func (c *fileClient) Health(ctx context.Context) (connector.HealthResult, error)
 		return unhealthy("usage.sqlite 不可打开或不可读"), nil
 	}
 	defer db.Close()
+	if _, err = cpasnapshot.ReadMetadata(ctx, db); err != nil {
+		return unhealthy("已发布 CPA 快照缺少有效 generation/observed_at 元数据"), nil
+	}
 
 	_, missing, err := resolveTokenColumns(ctx, db)
 	if err != nil {
@@ -219,6 +221,10 @@ func (c *fileClient) UsageSummary(ctx context.Context, day string) (UsageSummary
 		return UsageSummary{}, connector.NewError(connector.KindUnavailable, op, err)
 	}
 	defer db.Close()
+	metadata, err := cpasnapshot.ReadMetadata(ctx, db)
+	if err != nil {
+		return UsageSummary{}, connector.NewError(connector.KindBadResponse, op, err)
+	}
 
 	cols, missing, err := resolveTokenColumns(ctx, db)
 	if err != nil {
@@ -288,10 +294,9 @@ func (c *fileClient) UsageSummary(ctx context.Context, day string) (UsageSummary
 	if totalCost != nil {
 		currency = Currency
 	}
-	observed := c.clock()
 	return UsageSummary{
 		Snapshot: Snapshot{
-			ObservedAt: observed, Watermark: observed.Format(time.RFC3339),
+			ObservedAt: metadata.ObservedAt, Watermark: metadata.Generation,
 			IsPartial: unpricedRequests > 0 || len(missing) > 0, Instance: FileInstance,
 		},
 		BusinessDay:          day,
@@ -343,6 +348,10 @@ func (c *fileClient) KeyUsage(ctx context.Context, day string) (KeyUsagePage, er
 		return KeyUsagePage{}, connector.NewError(connector.KindUnavailable, op, err)
 	}
 	defer db.Close()
+	metadata, err := cpasnapshot.ReadMetadata(ctx, db)
+	if err != nil {
+		return KeyUsagePage{}, connector.NewError(connector.KindBadResponse, op, err)
+	}
 
 	cols, missing, err := resolveTokenColumns(ctx, db)
 	if err != nil {
@@ -445,10 +454,9 @@ func (c *fileClient) KeyUsage(ctx context.Context, day string) (KeyUsagePage, er
 		return out[i].APIKeyHash < out[j].APIKeyHash
 	})
 
-	observed := c.clock()
 	return KeyUsagePage{
 		Snapshot: Snapshot{
-			ObservedAt: observed, Watermark: observed.Format(time.RFC3339),
+			ObservedAt: metadata.ObservedAt, Watermark: metadata.Generation,
 			IsPartial: isPartial || len(missing) > 0, Instance: FileInstance,
 		},
 		BusinessDay:   day,
@@ -527,10 +535,8 @@ func loadAPIKeyAliases(ctx context.Context, db *sql.DB) (map[string]string, erro
 
 // AccountHealth reads the latest codex_inspection run's results.
 //
-// "Latest" is the run with the greatest SQLite rowid in codex_inspection_runs
-// — an insertion-order proxy, used because that table's own timestamp column
-// name (if any) was not confirmed against a live database (contract §8).
-// This is a documented best-effort choice, not a verified guarantee.
+// "Latest" is the greatest started_at_ms, with integer id as the deterministic
+// tie-break. Both columns were verified against the production CPA schema.
 func (c *fileClient) AccountHealth(ctx context.Context) (AccountHealthSummary, error) {
 	const op = "cpa.account_health.read"
 	if err := ctx.Err(); err != nil {
@@ -542,12 +548,15 @@ func (c *fileClient) AccountHealth(ctx context.Context) (AccountHealthSummary, e
 	}
 	defer db.Close()
 
-	observed := c.clock()
-	baseSnapshot := Snapshot{ObservedAt: observed, Watermark: observed.Format(time.RFC3339), Instance: FileInstance}
+	metadata, err := cpasnapshot.ReadMetadata(ctx, db)
+	if err != nil {
+		return AccountHealthSummary{}, connector.NewError(connector.KindBadResponse, op, err)
+	}
+	baseSnapshot := Snapshot{ObservedAt: metadata.ObservedAt, Watermark: metadata.Generation, Instance: FileInstance}
 
-	var runID sql.NullString
+	var runID, startedAtMS int64
 	err = db.QueryRowContext(ctx,
-		`SELECT run_id FROM codex_inspection_runs ORDER BY rowid DESC LIMIT 1`).Scan(&runID)
+		`SELECT id, started_at_ms FROM codex_inspection_runs ORDER BY started_at_ms DESC, id DESC LIMIT 1`).Scan(&runID, &startedAtMS)
 	switch {
 	case err == sql.ErrNoRows:
 		return AccountHealthSummary{Snapshot: baseSnapshot}, nil
@@ -557,7 +566,7 @@ func (c *fileClient) AccountHealth(ctx context.Context) (AccountHealthSummary, e
 
 	rows, err := db.QueryContext(ctx,
 		`SELECT account_key, display_account, provider, disabled, status, state, action, action_reason
-		 FROM codex_inspection_results WHERE run_id = ?`, runID.String)
+		 FROM codex_inspection_results WHERE run_id = ?`, runID)
 	if err != nil {
 		return AccountHealthSummary{}, connector.NewError(connector.KindBadResponse, op, fmt.Errorf("查询 codex_inspection_results 失败: %w", err))
 	}
@@ -604,10 +613,11 @@ func (c *fileClient) AccountHealth(ctx context.Context) (AccountHealthSummary, e
 	}
 
 	baseSnapshot.IsPartial = truncated
+	runAt := time.UnixMilli(startedAtMS).UTC()
 	return AccountHealthSummary{
 		Snapshot:      baseSnapshot,
-		RunID:         runID.String,
-		RunAt:         nil, // see doc comment: no confirmed timestamp column to read
+		RunID:         strconv.FormatInt(runID, 10),
+		RunAt:         &runAt,
 		AccountCount:  accountCount,
 		DisabledCount: disabledCount,
 		Anomalies:     shown,

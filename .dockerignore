@@ -36,6 +36,11 @@ storybook-static
 **/*.age
 **/*.pem
 **/*.key
+**/*.sqlite
+**/*.sqlite-*
+**/*.db
+**/*.dump
+**/*.tar
 secrets/
 var/
 

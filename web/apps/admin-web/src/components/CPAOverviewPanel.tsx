@@ -5,6 +5,7 @@ import {
   CPA_ACCOUNTS_METRIC_KEY,
   CPA_COST_METRIC_KEY,
   CPA_REQUESTS_METRIC_KEY,
+  formatCPARunAt,
   type CPAAccountsHealthValue,
   type CPACostValue,
   type CPARequestsValue,
@@ -45,8 +46,8 @@ export function CPAOverviewPanel() {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-xs text-fg-muted">
-        CLI Proxy API + cpa-manager-plus 的用量、成本折算与账号健康；数据源是宿主机只读挂载的
-        usage.sqlite（cpa_sync 每 5 分钟同步一次，不参与实时请求路径）。
+        CLI Proxy API + cpa-manager-plus 的用量、成本折算与账号健康；数据源是宿主机原子发布的
+        独立 SQLite 快照（cpa_sync 每 5 分钟同步一次，不参与实时请求路径）。
       </p>
       <ApiStateView
         isPending={query.isPending}
@@ -154,28 +155,41 @@ function AccountsCard({ item }: { item: MetricItem | undefined }) {
   const disabled = value.disabled_count ?? 0;
   const anomalies = value.anomaly_count ?? 0;
   const unavailable = uninitialized || total === undefined;
+  const runAt = formatCPARunAt(value.run_at);
 
-  if (unavailable) {
+  if (unavailable || !value.run_id) {
     return (
       <StatTile
         label="账号健康"
         value="—"
         unavailable
-        note="尚未观测到任何巡检结果（codex_inspection_runs 里还没有一轮完成）"
-        status={<Badge tone="neutral">未接入</Badge>}
+        note="codex_inspection_runs 里还没有一轮完成"
+        status={<Badge tone="neutral">无巡检</Badge>}
+      />
+    );
+  }
+
+  if (item.freshness.state === "failed") {
+    return (
+      <StatTile
+        label="账号健康"
+        value={`${formatCount(total)} 个账号`}
+        note={`保留上一成功值 · ${item.freshness.last_error_code || "同步失败"}`}
+        status={<Badge tone="danger">同步失败</Badge>}
       />
     );
   }
 
   const tone = anomalies > 0 ? "warning" : disabled > 0 ? "warning" : "success";
+  const current = item.freshness.state === "fresh";
   return (
     <StatTile
       label="账号健康"
       value={`${formatCount(total)} 个账号`}
-      note={`禁用 ${formatCount(disabled)} · 异常 ${formatCount(anomalies)}${value.run_id ? ` · 巡检 ${value.run_id}` : ""}`}
+      note={`禁用 ${formatCount(disabled)} · 异常 ${formatCount(anomalies)}${value.run_id ? ` · 巡检 ${value.run_id}` : ""}${runAt ? ` · ${runAt}` : ""}`}
       status={
-        <Badge tone={tone}>
-          {anomalies > 0 ? `${formatCount(anomalies)} 项待处理` : "正常"}
+        <Badge tone={current ? tone : "warning"}>
+          {!current ? "数据陈旧" : anomalies > 0 ? `${formatCount(anomalies)} 项待处理` : "正常"}
         </Badge>
       }
     />

@@ -3,8 +3,8 @@
 // management sidecar cpa-manager-plus (container, 127.0.0.1:18317).
 //
 // ⚠️ **This contract is DRAFT** (XM-CPA0). Only the `file` backend exists: a
-// read-only bind mount of cpa-manager-plus's own SQLite usage database
-// (`/root/cpa-stack/cpam-data/usage.sqlite` on the host). There is no `real`
+// read-only bind mount of the host lifecycle producer's consistent SQLite
+// snapshot. The active cpa-manager-plus WAL directory is never mounted. There is no `real`
 // (HTTP management API) backend yet — nobody has confirmed cpa-manager-plus
 // exposes one worth reading from, and CLI Proxy API's own management surface
 // is explicitly out of bounds (see below). `off` is the only other mode.
@@ -20,7 +20,7 @@
 // config.yaml under the CPA stack. Those hold upstream OAuth tokens and raw
 // API keys for the providers CLI Proxy API fronts — credentials never enter
 // this platform's containers, mounted or otherwise (constitution §7). The
-// only thing this connector ever opens is a read-only copy of
+// only thing this connector ever opens is the atomically published read-only copy of
 // cpa-manager-plus's own usage/telemetry SQLite database, which contains
 // hashes and aggregates, not credential material.
 //
@@ -121,13 +121,11 @@ const FileInstance = "cpa-file"
 
 // Snapshot is the freshness envelope every read result carries (spec §9.1).
 type Snapshot struct {
-	// ObservedAt is when this read happened (UTC) — usage.sqlite has no
-	// "as of" watermark of its own beyond the rows themselves, so this is the
-	// only honest freshness anchor.
+	// ObservedAt is when the host producer captured this immutable snapshot,
+	// read from xingmang_snapshot_metadata_v1. It is never the consumer clock.
 	ObservedAt time.Time
-	// Watermark free-form identifies how current the read is; the file
-	// backend uses ObservedAt's RFC3339 form (there is no upstream sequence
-	// number to report instead).
+	// Watermark is the producer's unique snapshot generation. All successful
+	// reads in one cpa_sync round must carry the same generation.
 	Watermark string
 	// IsPartial is true when some rows could not be priced/classified and
 	// the result is a knowingly incomplete view (see UnpricedRequestCount on
@@ -245,10 +243,8 @@ type AccountHealthSummary struct {
 	// RunID identifies which codex_inspection_runs row this summary reflects.
 	// "" when no run has ever completed.
 	RunID string
-	// RunAt is that run's approximate time. The file backend derives it from
-	// SQLite rowid ordering (codex_inspection_runs has no confirmed timestamp
-	// column — contract §8), so this is best-effort ordering evidence, not a
-	// guaranteed wall-clock time; nil when no run exists.
+	// RunAt is codex_inspection_runs.started_at_ms converted to UTC; nil only
+	// when no run exists.
 	RunAt *time.Time
 	// AccountCount is every account codex_inspection_results reported for
 	// this run, priced or not, anomalous or not.

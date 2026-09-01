@@ -112,9 +112,11 @@ func TestKeysObservation_CapsSample(t *testing.T) {
 }
 
 func TestAccountsObservation(t *testing.T) {
+	runAt := time.Date(2026, 8, 31, 11, 58, 0, 0, time.UTC)
 	health := AccountHealthSummary{
 		Snapshot:      Snapshot{ObservedAt: obsObserved, Watermark: "wm", Instance: FileInstance},
 		RunID:         "run-new",
+		RunAt:         &runAt,
 		AccountCount:  2,
 		DisabledCount: 0,
 		AnomalyCount:  1,
@@ -126,6 +128,9 @@ func TestAccountsObservation(t *testing.T) {
 	mustValidate(t, o)
 	if o.Value["run_id"] != "run-new" {
 		t.Fatalf("run_id = %v, want run-new", o.Value["run_id"])
+	}
+	if o.Value["run_at"] != "2026-08-31T11:58:00Z" {
+		t.Fatalf("run_at = %v, want the real inspection start time", o.Value["run_at"])
 	}
 	if o.Value["account_count"] != int64(2) {
 		t.Fatalf("account_count = %v, want 2", o.Value["account_count"])

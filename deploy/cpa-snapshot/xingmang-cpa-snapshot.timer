@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Xingmang CPA consistent SQLite snapshot
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=15s
+AccuracySec=15s
+Persistent=true
+Unit=xingmang-cpa-snapshot.service
+
+[Install]
+WantedBy=timers.target

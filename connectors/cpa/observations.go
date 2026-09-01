@@ -159,6 +159,17 @@ func AccountsObservation(now time.Time, source, environment string, health Accou
 			"action_reason":   a.ActionReason,
 		})
 	}
+	value := map[string]any{
+		"run_id":         health.RunID,
+		"account_count":  health.AccountCount,
+		"disabled_count": health.DisabledCount,
+		"anomaly_count":  health.AnomalyCount,
+		"anomalies":      anomalies,
+		"truncated":      health.Truncated,
+	}
+	if health.RunAt != nil {
+		value["run_at"] = health.RunAt.UTC().Format(time.RFC3339)
+	}
 	return ops.Observation{
 		MetricKey:                 MetricAccountsHealth,
 		Source:                    source,
@@ -170,14 +181,7 @@ func AccountsObservation(now time.Time, source, environment string, health Accou
 		Status:                    ops.SyncOK,
 		LastSuccess:               timePtr(health.ObservedAt),
 		StalenessThresholdSeconds: AccountsStalenessThresholdSeconds,
-		Value: map[string]any{
-			"run_id":         health.RunID,
-			"account_count":  health.AccountCount,
-			"disabled_count": health.DisabledCount,
-			"anomaly_count":  health.AnomalyCount,
-			"anomalies":      anomalies,
-			"truncated":      health.Truncated,
-		},
+		Value:                     value,
 	}
 }
 

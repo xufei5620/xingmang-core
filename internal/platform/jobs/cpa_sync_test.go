@@ -169,6 +169,30 @@ func TestCPASyncPartialFailurePreservesOtherMetrics(t *testing.T) {
 	}
 }
 
+func TestCPASyncRejectsMixedSnapshotGenerationForEntireRound(t *testing.T) {
+	store := newMemoryStore()
+	var logs bytes.Buffer
+	usage := successfulUsage()
+	keys := successfulKeys()
+	health := successfulHealth()
+	usage.Watermark = "generation-a"
+	keys.Watermark = "generation-b"
+	health.Watermark = "generation-a"
+	worker := newTestCPAWorker(store, cpaFactory(stubCPAClient{
+		usage: usage, keys: keys, health: health,
+	}, nil), &logs)
+
+	if err := worker.Work(context.Background(), cpaSyncJob()); err != nil {
+		t.Fatalf("Work = %v, want nil (generation drift is recorded as failed observations)", err)
+	}
+	for _, key := range cpaMetricKeys {
+		row := store.byKey(t, key)
+		if row.Status != ops.SyncFailed || row.LastErrorCode != string(connector.KindBadResponse) {
+			t.Fatalf("%s = %+v, want SyncFailed/bad_response", key, row)
+		}
+	}
+}
+
 // TestCPASyncFailurePreservesPriorGoodValue proves a failed sync keeps the
 // dashboard showing the last known value/observed-at instead of erasing
 // history (same discipline as sub2api_sync/cost_sync).

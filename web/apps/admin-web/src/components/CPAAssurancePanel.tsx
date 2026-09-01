@@ -4,6 +4,7 @@ import { Badge } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import {
   CPA_ACCOUNTS_METRIC_KEY,
+  formatCPARunAt,
   type CPAAccountAnomaly,
   type CPAAccountsHealthValue,
 } from "../api/cpa";
@@ -65,10 +66,22 @@ function NoRunYet() {
 function AccountHealthBody({ item }: { item: MetricItem }) {
   if (item.freshness.state === "uninitialized") return <NoRunYet />;
   const value = (item.value ?? {}) as CPAAccountsHealthValue;
+  if (!value.run_id) return <NoRunYet />;
+  if (item.freshness.state === "failed") {
+    return (
+      <PageState
+        kind="error"
+        title="巡检同步失败"
+        description={`当前展示值未更新；错误码 ${item.freshness.last_error_code || "unknown"}。`}
+      />
+    );
+  }
   const total = value.account_count ?? 0;
   const disabled = value.disabled_count ?? 0;
   const anomalies = value.anomalies ?? [];
   const anomalyCount = value.anomaly_count ?? anomalies.length;
+  const runAt = formatCPARunAt(value.run_at);
+  const current = item.freshness.state === "fresh";
 
   return (
     <div className="flex flex-col gap-3">
@@ -76,13 +89,13 @@ function AccountHealthBody({ item }: { item: MetricItem }) {
         <StatTile
           label="账号总数"
           value={formatCount(total)}
-          note={value.run_id ? `巡检批次 ${value.run_id}` : "最近一轮巡检"}
+          note={value.run_id ? `巡检批次 ${value.run_id}${runAt ? ` · ${runAt}` : ""}` : "最近一轮巡检"}
         />
         <StatTile
           label="已禁用"
           value={formatCount(disabled)}
           note="被巡检标记为禁用的账号"
-          status={disabled > 0 ? <Badge tone="warning">需关注</Badge> : <Badge tone="success">0</Badge>}
+          status={disabled > 0 ? <Badge tone="warning">需关注</Badge> : <Badge tone={current ? "success" : "warning"}>{current ? "0" : "数据陈旧"}</Badge>}
         />
         <StatTile
           label="异常 / 待处理"
@@ -92,7 +105,7 @@ function AccountHealthBody({ item }: { item: MetricItem }) {
             anomalyCount > 0 ? (
               <Badge tone="warning">{formatCount(anomalyCount)}</Badge>
             ) : (
-              <Badge tone="success">正常</Badge>
+              <Badge tone={current ? "success" : "warning"}>{current ? "正常" : "数据陈旧"}</Badge>
             )
           }
         />

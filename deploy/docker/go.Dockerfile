@@ -29,7 +29,7 @@ ARG BUILD_COMMIT=unknown
 ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -trimpath -buildvcs=false \
       -ldflags "-s -w -X github.com/xufei5620/xingmang-platform/internal/platform/buildinfo.Version=${BUILD_VERSION} -X github.com/xufei5620/xingmang-platform/internal/platform/buildinfo.Commit=${BUILD_COMMIT}" \
-      -o /out/ ./cmd/platform-api ./cmd/platform-worker ./cmd/migrate ./cmd/runway-threshold-bootstrap ./cmd/staff-bootstrap
+      -o /out/ ./cmd/platform-api ./cmd/platform-worker ./cmd/migrate ./cmd/runway-threshold-bootstrap ./cmd/staff-bootstrap ./cmd/cpa-snapshot
 
 # ---------- 运行阶段的共同底座 ----------
 # alpine 而不是 scratch：出问题时要能 exec 进去 wget/psql 一下。
@@ -71,6 +71,9 @@ COPY --from=builder /out/runway-threshold-bootstrap /usr/local/bin/runway-thresh
 # Platform Lifecycle Operation，只在 tools profile 里显式运行一次，不参与
 # 常规 `up`，所以放进同一个 migrate 镜像而不是单开一个运行阶段。
 COPY --from=builder /out/staff-bootstrap /usr/local/bin/staff-bootstrap
+# cpa-snapshot 是宿主机 Platform Lifecycle Operation。部署脚本只从已完成
+# migrate 的精确镜像提取这一个静态二进制；服务器不安装 Go/sqlite 工具链。
+COPY --from=builder /out/cpa-snapshot /usr/local/bin/cpa-snapshot
 COPY --chown=10001:10001 db/migrations /app/db/migrations
 # --chmod 而不是 RUN chmod：Windows 检出的文件没有可执行位，
 # 靠 git 保留 mode 在这条链路上不可靠

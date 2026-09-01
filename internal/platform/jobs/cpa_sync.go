@@ -284,10 +284,21 @@ func (w *CPASyncWorker) readAll(ctx context.Context, now time.Time, day string) 
 		return out, string(kind)
 	}
 
+	usage, usageErr := client.UsageSummary(ctx, day)
+	keys, keysErr := client.KeyUsage(ctx, day)
+	health, healthErr := client.AccountHealth(ctx)
+	if !sameCPASnapshotGeneration(usage, usageErr, keys, keysErr, health, healthErr) {
+		kind := connector.KindBadResponse
+		out := make([]ops.Observation, 0, len(cpaMetricKeys))
+		for _, key := range cpaMetricKeys {
+			out = append(out, w.failureObservation(ctx, key, now, kind))
+		}
+		return out, string(kind)
+	}
+
 	var out []ops.Observation
 	errorCode := ""
 
-	usage, usageErr := client.UsageSummary(ctx, day)
 	if usageErr != nil {
 		kind := connector.KindOf(usageErr)
 		errorCode = string(kind)
@@ -300,7 +311,6 @@ func (w *CPASyncWorker) readAll(ctx context.Context, now time.Time, day string) 
 			cpa.CostObservation(now, w.instanceID, w.environment, usage))
 	}
 
-	keys, keysErr := client.KeyUsage(ctx, day)
 	if keysErr != nil {
 		kind := connector.KindOf(keysErr)
 		errorCode = string(kind)
@@ -309,7 +319,6 @@ func (w *CPASyncWorker) readAll(ctx context.Context, now time.Time, day string) 
 		out = append(out, cpa.KeysObservation(now, w.instanceID, w.environment, keys))
 	}
 
-	health, healthErr := client.AccountHealth(ctx)
 	if healthErr != nil {
 		kind := connector.KindOf(healthErr)
 		errorCode = string(kind)
@@ -319,6 +328,39 @@ func (w *CPASyncWorker) readAll(ctx context.Context, now time.Time, day string) 
 	}
 
 	return out, errorCode
+}
+
+func sameCPASnapshotGeneration(
+	usage cpa.UsageSummary, usageErr error,
+	keys cpa.KeyUsagePage, keysErr error,
+	health cpa.AccountHealthSummary, healthErr error,
+) bool {
+	generation := ""
+	successes := 0
+	for _, candidate := range []struct {
+		watermark string
+		err       error
+	}{
+		{watermark: usage.Watermark, err: usageErr},
+		{watermark: keys.Watermark, err: keysErr},
+		{watermark: health.Watermark, err: healthErr},
+	} {
+		if candidate.err != nil {
+			continue
+		}
+		successes++
+		if candidate.watermark == "" {
+			return false
+		}
+		if generation == "" {
+			generation = candidate.watermark
+			continue
+		}
+		if candidate.watermark != generation {
+			return false
+		}
+	}
+	return successes == 0 || generation != ""
 }
 
 // failureObservation builds a SyncFailed observation for one metric,
