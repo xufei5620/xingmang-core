@@ -109,24 +109,22 @@ afterEach(() => {
 });
 
 describe("口径声明（§12.2 / 原型 warnbar）", () => {
-  it("Sub2API 照抄原型那句话，并给出去上游管理的入口", async () => {
+  it("Sub2API 照抄原型那句话；07:20 补充裁定后不再有跳区块的链接", async () => {
+    // 2026-09-02 07:20 补充裁定：登记簿字段直接并入渠道表的行与详情页，
+    // warnbar 不再指向任何独立区块（04:40 裁定期间那个区块已被推翻）
     stubApi([rawChannel()]);
     renderPanel(<ChannelsPanel />);
     expect(
-      await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不在这里汇总上游/),
+      await screen.findByText(/渠道管理只做单账号 \/ 单 Key 核算，不做跨账号汇总/),
     ).toBeTruthy();
-    expect(screen.getByText(/请到顶部「上游管理」查看共享余额与整体利润/)).toBeTruthy();
-    const link = screen.getByRole("link", { name: "上游管理" });
-    expect(link.getAttribute("href")).toBe("/platforms/sub2api?tab=suppliers");
+    expect(screen.queryByRole("link", { name: /上游管理/ })).toBeNull();
   });
 
   it("NewAPI 说的是共用上游目录但各自核算", async () => {
     stubApi([rawChannel({ platform_id: "newapi" })]);
     renderPanel(<NewApiChannelsPanel />);
     expect(await screen.findByText(/NewAPI 与 Sub2API 共用上游目录和充值成本率/)).toBeTruthy();
-    expect(screen.getByRole("link", { name: "上游管理" }).getAttribute("href")).toBe(
-      "/platforms/newapi?tab=suppliers",
-    );
+    expect(screen.queryByRole("link", { name: /上游管理/ })).toBeNull();
   });
 
   it("说清一行 = 一个上游账号，且余额可能是多个令牌共享的", async () => {

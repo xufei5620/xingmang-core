@@ -129,7 +129,10 @@ export function UpstreamAccountDialog({ platform, account, onDone }: UpstreamAcc
             修改
           </Button>
         ) : (
-          <Button size="sm">登记上游账号</Button>
+          // 按钮文案照原型「＋ 添加上游」（`V["s2/suppliers"]` 的
+          // `<a class="tb-btn" href="#/s2/suppliers/new">＋ 添加上游</a>`）；
+          // 对话框标题保留「登记上游账号」，说的是这个 Action 实际做什么
+          <Button size="sm">＋ 添加上游</Button>
         )
       }
       title={editing ? "修改上游账号" : "登记上游账号"}

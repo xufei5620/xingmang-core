@@ -31,7 +31,9 @@ export function SupplierCreatePage() {
 }
 function SupplierCreateShell({ platform }: { platform: SupplyPlatform }) {
   const label = supplyPlatformLabel(platform);
-  const backTo = `/platforms/${platform}?tab=suppliers`;
+  // 2026-09-02 起「上游管理」不再是独立页签：登记簿字段并入了渠道管理页
+  // 表格的行与渠道详情页（07:20 补充裁定），返回目标不再带锚点
+  const backTo = `/platforms/${platform}?tab=upstream`;
 
   return (
     <section className="min-w-0">

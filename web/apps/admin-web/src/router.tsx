@@ -221,12 +221,18 @@ export function ShellLayout() {
 function platformTabLoader({ request, params }: LoaderFunctionArgs) {
   const url = new URL(request.url);
   const serviceType = params.serviceType ?? "";
-  const resolution = resolvePlatformTab(serviceType, url.searchParams.get("tab"));
+  const rawTab = url.searchParams.get("tab");
+  const resolution = resolvePlatformTab(serviceType, rawTab);
 
   switch (resolution.kind) {
     case "redirect": {
       const next = new URL(url);
       next.searchParams.set("tab", resolution.tab);
+      // 旧 `?tab=suppliers` 书签改跳 `?tab=upstream`：2026-09-02 04:40 裁定期间
+      // 「上游管理」曾降级为渠道管理页内的独立区块，那时这里还要带一个锚点
+      // 才能让人落地后自动滚过去；07:20 的补充裁定进一步把登记簿字段直接
+      // 并入了渠道表的行与详情页，已经没有独立区块可滚，因此这条分支不再
+      // 需要额外处理 hash——落地在渠道管理页顶部就是登记簿字段所在的地方。
       return redirect(`${next.pathname}${next.search}`);
     }
     case "moved":

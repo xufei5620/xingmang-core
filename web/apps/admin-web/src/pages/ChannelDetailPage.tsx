@@ -1,7 +1,15 @@
+import { useQuery } from "@tanstack/react-query";
 import { PageHeader, PageState, StatTile } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { Link, useParams } from "react-router";
+import { listServices } from "../api/platform";
+import { listPlatformChannels, type PlatformChannelRow } from "../api/platformChannels";
+import { accountRowType, describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
+import { formatScaledMinorUnits } from "../lib/money";
+import { runwayReasonText } from "../lib/runway";
+import { ApiStateView } from "../components/ApiStateView";
+import { ChannelBindingCard } from "../components/ChannelBindingCard";
 import { NotFoundView } from "./NotFoundPage";
 
 export type SupplyPlatform = "sub2api" | "newapi";
@@ -32,12 +40,25 @@ export function upstreamCreatePath(platform: string): string {
   return `/platforms/${encodeURIComponent(platform)}/suppliers/new`;
 }
 
-/** 渠道详情 UI-only 壳。
+/** 渠道详情。
  *
- *  渠道粒度是一个平台账号/Key 到上游分组的映射。当前只确定了 URL 中的
- *  `platform` 与 `channelId`，并没有获批的逐渠道详情读契约，因此本页不会
- *  请求 API 或从列表缓存拼接数据；所有经营字段都显式标为「未接入」。
- */
+ *  2026-09-02 起不再是纯 UI-only 壳：渠道目录本身(`GET /api/v1/platforms/{p}/channels`,
+ *  XM-C-MAP0 已批的数据契约)在渠道管理列表页上一直是真实数据，这一片第一次
+ *  把它接到详情页——按 `service_id + external_channel_id` 从目录里取出这一行,
+ *  并把「上游映射」的确认/解绑操作也从列表页搬过来（ManagedChannelTable.tsx
+ *  文件头有完整说明）。
+ *
+ *  07:20 补充裁定进一步要求"登记簿数据并入行与详情页"：这一页因此比列表页
+ *  多留了「容量与调度」一整节——8 个字段（容量/并发、调度、今日统计、用量
+ *  窗口、最近使用、创建时间、过期时间、代理）今天在渠道目录契约里完全不
+ *  存在，要等并行切片 XM-CHAN-FIELDS0 扩展契约后才有；这里先把字段位置和
+ *  说明落地，全部显式标未接入，不是这一片的范围去猜它们的值。
+ *
+ *  仍然诚实：目录没有的字段（经营核算、渠道保障探测结果、凭据别名明细）
+ *  继续显式标「未接入」，不因为搬了个位置就编数据。定位这条渠道需要**恰好
+ *  一个已登记且 active 的 service**——这与渠道管理列表页切换 ChannelRef
+ *  粒度的判据完全一样（见 `ChannelTable.tsx`），多实例或未登记时说明原因,
+ *  不猜一个 service 出来。 */
 export function ChannelDetailPage() {
   const { serviceType = "", channelId = "" } = useParams();
 
@@ -66,6 +87,36 @@ function ChannelDetailShell({ platform, channelId }: { platform: SupplyPlatform;
   const label = supplyPlatformLabel(platform);
   const backTo = `/platforms/${platform}?tab=upstream`;
 
+  const servicesQuery = useQuery({
+    queryKey: ["services"],
+    queryFn: ({ signal }) => listServices({ signal }),
+  });
+  const services = (servicesQuery.data ?? []).filter((s) => s.service_type === platform);
+  const singleActive = services.length === 1 && services[0]?.status === "active" ? services[0] : undefined;
+
+  const channelsQuery = useQuery({
+    queryKey: ["platform-channels", platform, singleActive?.id],
+    queryFn: ({ signal }) => listPlatformChannels(platform, singleActive!.id, { signal }),
+    enabled: Boolean(singleActive),
+  });
+
+  const accountsQuery = useQuery({
+    queryKey: ["finance-upstream-accounts"],
+    queryFn: ({ signal }) => listUpstreamAccounts({ signal }),
+  });
+  const summaryQuery = useQuery({
+    queryKey: ["finance", "upstreams", "summary"],
+    queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
+  });
+
+  const row = channelsQuery.data?.items.find((item) => item.channelRef.externalChannelId === channelId);
+  const account = row?.binding
+    ? (accountsQuery.data ?? []).find((a) => a.id === row.binding!.upstreamAccountId)
+    : undefined;
+  const summary = row?.binding
+    ? (summaryQuery.data?.items ?? []).find((s) => s.id === row.binding!.upstreamAccountId)
+    : undefined;
+
   return (
     <section className="min-w-0">
       <Link
@@ -79,7 +130,6 @@ function ChannelDetailShell({ platform, channelId }: { platform: SupplyPlatform;
 
       <PageHeader
         title="渠道详情"
-        status={<Badge tone="warning">未接入·UI</Badge>}
         description={
           <span className="break-all">
             平台 {label} · 渠道 ID <code className="font-mono">{channelId}</code> · 单渠道经营核算
@@ -87,128 +137,259 @@ function ChannelDetailShell({ platform, channelId }: { platform: SupplyPlatform;
         }
       />
 
-      <div className="flex min-w-0 flex-col gap-4">
-        <p
-          role="status"
-          className="rounded-md border-2 border-warning bg-warning/15 px-3 py-2 text-xs text-fg"
+      {!singleActive ? (
+        <MissingServiceNotice servicesPending={servicesQuery.isPending} servicesError={servicesQuery.error} count={services.length} />
+      ) : (
+        <ApiStateView
+          isPending={channelsQuery.isPending}
+          error={channelsQuery.error}
+          onRetry={() => void channelsQuery.refetch()}
         >
-          只读结构预览：渠道详情读契约尚未接入。本页不读取渠道、上游或请求 API，
-          不显示凭据明文，也不提供倍率修改、停用或其它写操作。
-        </p>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
-          <StatTile label="来源平台" value={label} note="由路由平台段确定，不从名称推断" />
-          <StatTile
-            label="上游分组"
-            value="未接入"
-            unavailable
-            status={<Badge tone="neutral">未知</Badge>}
-            note="等待渠道绑定与分组目录契约"
-          />
-          <StatTile
-            label="今日供给成本"
-            value="—"
-            unavailable
-            status={<Badge tone="neutral">未接入</Badge>}
-            note="上游 Key / 订阅 / 代理成本投影"
-          />
-          <StatTile
-            label="今日我方计费"
-            value="—"
-            unavailable
-            status={<Badge tone="neutral">未接入</Badge>}
-            note="本渠道令牌产生的计费消耗"
-          />
-          <StatTile
-            label="今日毛利"
-            value="—"
-            unavailable
-            status={<Badge tone="neutral">未接入</Badge>}
-            note="我方计费消耗 − 供给成本"
-          />
-        </div>
-
-        <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
-          <DetailSection title="渠道与映射" hint="一行 = 一个账号/Key 到一个上游分组的映射">
-            <DetailList>
-              <Fact label="渠道 ID">
-                <span className="break-all font-mono text-xs">{channelId}</span>
-              </Fact>
-              <Fact label="平台">
-                <Badge tone="info">{label}</Badge>
-              </Fact>
-              <UnavailableFact label="渠道名称 / 账号" />
-              <UnavailableFact label="来源上游" />
-              <UnavailableFact label="上游分组实际名" />
-              <UnavailableFact label="分组倍率" hint="独立展示，不并入充值比例，也不在前端重复乘算" />
-              <UnavailableFact label="接入方式" />
-              <UnavailableFact label="Key / 账号别名" hint="只显示脱敏别名；完整凭据永不进入页面响应" />
-              <UnavailableFact label="可用模型" />
-              <UnavailableFact label="登记状态" />
-            </DetailList>
-          </DetailSection>
-
-          <DetailSection title="经营核算" hint="成本、计费与毛利按渠道单独核算">
-            <DetailList>
-              <UnavailableFact label="统计区间" />
-              <UnavailableFact label="上游供给成本" />
-              <UnavailableFact label="我方计费消耗" />
-              <UnavailableFact label="毛利" />
-              <UnavailableFact label="毛利率" />
-              <UnavailableFact label="币种 / 计费单位" />
-              <UnavailableFact label="成本口径" hint="计量型按实扣 ÷ 充值比例；订阅型按批次日摊；官方 API 口径待定" />
-              <UnavailableFact label="成本观测时间" />
-              <UnavailableFact label="计费观测时间" />
-              <UnavailableFact label="数据来源" />
-            </DetailList>
-          </DetailSection>
-
-          <DetailSection title="余额与预计补充" hint="余额只作为上游账号共享引用，不在多个渠道重复合计">
-            <DetailList>
-              <UnavailableFact label="上游共享余额" />
-              <UnavailableFact label="本渠道近 7 日日均消耗" />
-              <UnavailableFact label="上游全部渠道日均" />
-              <UnavailableFact label="预计可用天数" />
-              <UnavailableFact label="预计补充时间" />
-              <UnavailableFact label="充值比例" />
-              <UnavailableFact label="充值成本率" />
-              <UnavailableFact label="余额观测时间" />
-              <UnavailableFact label="可用天数覆盖窗口" />
-            </DetailList>
-          </DetailSection>
-
-          <DetailSection title="渠道保障" hint="模型检测、成功率与延迟属于独立保障观测">
-            <DetailList>
-              <UnavailableFact label="最近保障状态" />
-              <UnavailableFact label="24h 成功率" />
-              <UnavailableFact label="最近模型检测" />
-              <UnavailableFact label="已验证模型数" />
-              <UnavailableFact label="已配置模型数" />
-              <UnavailableFact label="最近检测时间" />
-            </DetailList>
-          </DetailSection>
-        </div>
-
-        <ReadOnlyTableSection
-          title="可用模型"
-          hint="模型名称、验证结果与最近检测时间"
-          columns={["模型", "可用状态", "最近检测", "证据"]}
-          description="模型清单属于渠道保障（M1.5）读契约；当前不把空列表解释成「没有可用模型」。"
-        />
-
-        <ReadOnlyTableSection
-          title="凭据边界"
-          hint="只显示引用与状态"
-          columns={["类型", "账号别名", "密钥引用（CredentialRef）", "状态", "最近验证"]}
-          description="凭据只经 CredentialRef；密码、私钥、Token 与完整 API Key 不进入页面响应。"
-        />
-
-        <p className="text-xs text-fg-muted">
-          页面字段依据渠道管理蓝图与 ADMIN-IA 的渠道详情语义。当前只确认平台与渠道 ID，
-          其它字段均等待对应的只读契约和观测证据；未知值不会被折算为 0、1 或「正常」。
-        </p>
-      </div>
+          {row ? (
+            <ChannelDetailBody
+              platform={platform}
+              channelId={channelId}
+              row={row}
+              serviceId={singleActive.id}
+              account={account}
+              summary={summary}
+              onBindingChanged={() => void channelsQuery.refetch()}
+            />
+          ) : (
+            <PageState
+              kind="empty"
+              title="渠道目录里没有这一条"
+              description={`当前 ${label} 渠道目录（共 ${channelsQuery.data?.items.length ?? 0} 条）里没有 ID 为 ${channelId} 的记录；可能已被下线，或链接输入有误。`}
+            />
+          )}
+        </ApiStateView>
+      )}
     </section>
+  );
+}
+
+function MissingServiceNotice({
+  servicesPending,
+  servicesError,
+  count,
+}: {
+  servicesPending: boolean;
+  servicesError: unknown;
+  count: number;
+}) {
+  if (servicesPending) return <PageState kind="loading" />;
+  if (servicesError) return <PageState kind="error" message="服务注册表读取失败" />;
+  return (
+    <PageState
+      kind="unavailable"
+      title="无法定位这条渠道"
+      description={
+        count === 0
+          ? "当前环境没有登记该平台的 service 实例，渠道目录读不到任何一条渠道。"
+          : `当前环境登记了 ${count} 个该平台的 service 实例（或不是 active 状态），无法判定这条渠道属于哪一个——与渠道管理列表页切换到逐渠道视图的判据一致。`
+      }
+    />
+  );
+}
+
+function ChannelDetailBody({
+  platform,
+  channelId,
+  row,
+  serviceId,
+  account,
+  summary,
+  onBindingChanged,
+}: {
+  platform: SupplyPlatform;
+  channelId: string;
+  row: PlatformChannelRow;
+  serviceId: string;
+  account: UpstreamAccountItem | undefined;
+  summary: UpstreamSummary | undefined;
+  onBindingChanged: () => void;
+}) {
+  const label = supplyPlatformLabel(platform);
+  const access = account ? describeAccessMethod(account.access_method) : undefined;
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <StatTile label="来源平台" value={label} note="由路由平台段确定，不从名称推断" />
+        <StatTile
+          label="上游分组"
+          value={account?.upstream_group || "未接入"}
+          {...(!account?.upstream_group ? { unavailable: true, status: <Badge tone="neutral">{row.binding ? "未知" : "未映射"}</Badge> } : {})}
+          note={row.binding ? "来自绑定上游账号的登记簿" : "等待渠道绑定与分组目录契约"}
+        />
+        <StatTile
+          label="今日供给成本"
+          value="—"
+          unavailable
+          status={<Badge tone="neutral">未接入</Badge>}
+          note={row.economicsState || "服务端尚未按渠道拆分经营字段"}
+        />
+        <StatTile
+          label="今日我方计费"
+          value="—"
+          unavailable
+          status={<Badge tone="neutral">未接入</Badge>}
+          note="本渠道令牌产生的计费消耗"
+        />
+        <StatTile
+          label="今日毛利"
+          value="—"
+          unavailable
+          status={<Badge tone="neutral">未接入</Badge>}
+          note="我方计费消耗 − 供给成本"
+        />
+      </div>
+
+      <ChannelBindingCard serviceId={serviceId} row={row} onDone={onBindingChanged} />
+
+      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
+        <DetailSection title="渠道与映射" hint="一行 = 一个账号/Key 到一个上游分组的映射">
+          <DetailList>
+            <Fact label="渠道 ID">
+              <span className="break-all font-mono text-xs">{channelId}</span>
+            </Fact>
+            <Fact label="平台">
+              <Badge tone="info">{label}</Badge>
+            </Fact>
+            <Fact label="渠道名称 / 账号">{row.name || "未命名渠道"}</Fact>
+            <Fact label="类型" hint="订阅账号 / 上游渠道，按绑定账号的接入方式派生（2026-09-02 07:20 裁定补充）">
+              {row.binding ? (
+                <Badge tone="neutral">{accountRowType(account?.access_method ?? "").label}</Badge>
+              ) : (
+                <Badge tone="neutral">未映射</Badge>
+              )}
+            </Fact>
+            {account ? (
+              <Fact label="来源上游">{account.upstream_name || account.base_url || "未接入"}</Fact>
+            ) : (
+              <UnavailableFact label="来源上游" hint={row.binding ? "已绑定但登记簿里找不到这个账号" : "还没有绑定上游账号"} />
+            )}
+            {account?.upstream_group ? (
+              <Fact label="上游分组实际名">{account.upstream_group}</Fact>
+            ) : (
+              <UnavailableFact label="上游分组实际名" />
+            )}
+            <Fact label="分组倍率" hint="独立展示，不并入充值比例，也不在前端重复乘算">
+              {account?.group_rate ? `${account.group_rate}×` : "未接入"}
+            </Fact>
+            {access ? (
+              <Fact label="接入方式" hint={access.hint}>
+                {access.label}
+              </Fact>
+            ) : (
+              <UnavailableFact label="接入方式" />
+            )}
+            <UnavailableFact label="Key / 账号别名" hint="只显示脱敏别名；完整凭据永不进入页面响应" />
+            {typeof row.models?.count === "number" ? (
+              <Fact label="可用模型">{row.models.count} 个（仅数量，验证详情见渠道保障 M1.5）</Fact>
+            ) : (
+              <UnavailableFact label="可用模型" hint="要渠道保障（M1.5）上线后才有" />
+            )}
+            <Fact label="登记状态">
+              {account ? <Badge tone={account.status === "active" ? "success" : "neutral"}>{account.status}</Badge> : "未接入"}
+            </Fact>
+          </DetailList>
+        </DetailSection>
+
+        <DetailSection
+          title="容量与调度"
+          hint="XM-CHAN-FIELDS0 扩展渠道目录契约后才会有值；调度即使有值也只做只读展示，写操作另立 XM-SCHED0"
+        >
+          <DetailList>
+            <UnavailableFact label="容量 / 并发" />
+            <UnavailableFact label="调度" hint="开关 / 优先级这类写操作另立 XM-SCHED0，本轮任何时候都只做只读展示" />
+            <UnavailableFact label="今日统计" />
+            <UnavailableFact label="用量窗口" />
+            <UnavailableFact label="最近使用" />
+            <UnavailableFact label="创建时间" />
+            <UnavailableFact label="过期时间" />
+            <UnavailableFact label="代理" />
+          </DetailList>
+        </DetailSection>
+
+        <DetailSection title="经营核算" hint="成本、计费与毛利按渠道单独核算">
+          <DetailList>
+            <UnavailableFact label="统计区间" />
+            <UnavailableFact label="上游供给成本" hint={row.economicsState} />
+            <UnavailableFact label="我方计费消耗" hint={row.economicsState} />
+            <UnavailableFact label="毛利" hint={row.economicsState} />
+            <UnavailableFact label="毛利率" />
+            <UnavailableFact label="币种 / 计费单位" />
+            <UnavailableFact label="成本口径" hint="计量型按实扣 ÷ 充值比例；订阅型按批次日摊；官方 API 口径待定" />
+            <UnavailableFact label="成本观测时间" />
+            <UnavailableFact label="计费观测时间" />
+            <Fact label="数据来源">{row.economicsState || "服务端未提供"}</Fact>
+          </DetailList>
+        </DetailSection>
+
+        <DetailSection title="余额与预计补充" hint="余额只作为上游账号共享引用，不在多个渠道重复合计">
+          <DetailList>
+            {summary?.runway.balance ? (
+              <Fact label="上游共享余额">
+                {formatScaledMinorUnits(summary.runway.balance.amountMinor, summary.runway.balance.currency, summary.runway.balance.scale)}
+              </Fact>
+            ) : (
+              <UnavailableFact label="上游共享余额" hint={summary ? (runwayReasonText(summary.runway) ?? undefined) : "未绑定上游账号，或汇总还没有这一条"} />
+            )}
+            <UnavailableFact label="本渠道近 7 日日均消耗" hint="经营字段未按渠道拆分" />
+            {summary?.runway.dailyAverage ? (
+              <Fact label="上游全部渠道日均">
+                {formatScaledMinorUnits(summary.runway.dailyAverage.amountMinor, summary.runway.dailyAverage.currency, summary.runway.dailyAverage.scale)}
+              </Fact>
+            ) : (
+              <UnavailableFact label="上游全部渠道日均" />
+            )}
+            {summary?.runway.days !== undefined && summary?.runway.days !== null ? (
+              <Fact label="预计可用天数">约 {summary.runway.days} 天</Fact>
+            ) : (
+              <UnavailableFact label="预计可用天数" hint={summary ? (runwayReasonText(summary.runway) ?? undefined) : undefined} />
+            )}
+            <UnavailableFact label="预计补充时间" />
+            <Fact label="充值比例">{account?.recharge_ratio || "未接入"}</Fact>
+            <Fact label="充值成本率">{account?.recharge_cost_rate || "未接入"}</Fact>
+            <Fact label="余额观测时间">{summary?.runway.balanceObservedAt || "未接入"}</Fact>
+            <Fact label="可用天数覆盖窗口">
+              {summary ? `覆盖 ${summary.runway.coveredDays}/${summary.runway.windowDays} 天` : "未接入"}
+            </Fact>
+          </DetailList>
+        </DetailSection>
+
+        <DetailSection title="渠道保障" hint="模型检测、成功率与延迟属于独立保障观测">
+          <DetailList>
+            <UnavailableFact label="最近保障状态" />
+            <UnavailableFact label="24h 成功率" />
+            <UnavailableFact label="最近模型检测" />
+            <UnavailableFact label="已验证模型数" />
+            <UnavailableFact label="已配置模型数" />
+            <UnavailableFact label="最近检测时间" />
+          </DetailList>
+        </DetailSection>
+      </div>
+
+      <ReadOnlyTableSection
+        title="可用模型"
+        hint="模型名称、验证结果与最近检测时间"
+        columns={["模型", "可用状态", "最近检测", "证据"]}
+        description="模型清单属于渠道保障（M1.5）读契约；当前不把空列表解释成「没有可用模型」。"
+      />
+
+      <ReadOnlyTableSection
+        title="凭据边界"
+        hint="只显示引用与状态"
+        columns={["类型", "账号别名", "密钥引用（CredentialRef）", "状态", "最近验证"]}
+        description="凭据只经 CredentialRef；密码、私钥、Token 与完整 API Key 不进入页面响应。"
+      />
+
+      <p className="text-xs text-fg-muted">
+        渠道基本信息、上游映射与共享余额来自渠道目录与登记簿的只读 Query；经营核算（成本/计费/毛利）
+        与渠道保障探测结果仍等待对应的读契约，未知值不会被折算为 0、1 或「正常」。
+      </p>
+    </div>
   );
 }
 

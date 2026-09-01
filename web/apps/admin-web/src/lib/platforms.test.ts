@@ -141,18 +141,18 @@ describe("排除名单：被降级的三个 service_type 不许从 Registry 爬�
 });
 
 describe("平台页签集合逐字对齐 ADMIN-IA v3 §2.1", () => {
-  it("Sub2API 9 格（原型 8 格 + 裁定 #1 恢复的「渠道保障」）", () => {
+  it("Sub2API 8 格（2026-09-02 裁定：上游管理并入渠道管理页内区块，不再单独占页签）", () => {
     expect(labels("sub2api")).toEqual([
       "概览",
       "用户管理",
       "渠道管理",
-      "上游管理",
       "支付与财务",
       "请求详情",
       "连接与凭据",
       "告警",
       "渠道保障",
     ]);
+    expect(values("sub2api")).not.toContain("suppliers");
   });
 
   it("NewAPI 与 Sub2API 同构", () => {
@@ -264,6 +264,16 @@ describe("?tab= 解析：认识 / 改名 / 挪走 / 认不出来", () => {
     expect(resolvePlatformTab("sub2api", "connection")).toEqual({ kind: "redirect", tab: "creds" });
     // 裁定 #3：趋势并进各页卡片，概览那一格就是它的落点
     expect(resolvePlatformTab("sub2api", "trends")).toEqual({ kind: "redirect", tab: "overview" });
+  });
+
+  it("2026-09-02 裁定：?tab=suppliers 改跳 ?tab=upstream", () => {
+    expect(resolvePlatformTab("sub2api", "suppliers")).toEqual({ kind: "redirect", tab: "upstream" });
+    expect(resolvePlatformTab("newapi", "suppliers")).toEqual({ kind: "redirect", tab: "upstream" });
+    // 07:20 补充裁定把登记簿字段直接并入了渠道表的行与详情页，已经没有
+    // 独立区块可滚，因此不再需要一张"改跳之后额外带锚点"的表
+    // 服务器的 suppliers 是现役页签（供应商与采购），不是这条别名，
+    // 不该被这条 alias 误伤
+    expect(resolvePlatformTab("server", "suppliers")).toEqual({ kind: "ok", tab: "suppliers" });
   });
 
   it("原型自带的三条服务器别名（ADMIN-IA §三）", () => {

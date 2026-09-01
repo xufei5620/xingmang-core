@@ -189,10 +189,13 @@ describe("平台页签（ADMIN-IA v3 §2.1，逐字）", () => {
     ]);
   });
 
-  it("Sub2API / NewAPI 各 9 格，「渠道保障」在末位（裁定 #1 的落点）", () => {
+  it("Sub2API / NewAPI 各 8 格，「渠道保障」在末位（裁定 #1 的落点）", () => {
+    // 2026-09-02 产品负责人裁定：「上游管理」并入「渠道管理」页内区块，
+    // 不再单独占一格页签——9 格降为 8 格，「渠道保障」仍在末位不变
     for (const serviceType of ["sub2api", "newapi"]) {
       const tabs = platformNavSpec(serviceType)?.tabs ?? [];
-      expect(tabs).toHaveLength(9);
+      expect(tabs).toHaveLength(8);
+      expect(tabs.map((t) => t.value)).not.toContain("suppliers");
       expect(tabs.at(-1)?.value).toBe("model");
       expect(tabs.at(-1)?.label).toBe("渠道保障");
       expect(tabs.at(-1)?.stage).toBe("M1.5");
