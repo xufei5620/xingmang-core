@@ -43,6 +43,8 @@ if [[ -z "$newest_backup" ]] || (( $(( ( $(date +%s) - $(stat -c %Y "$newest_bac
 fi
 
 compose() { docker compose --env-file "$env_file" -f "$deploy_dir/$1" up -d --no-build; }
+echo "==> [0/6] migrations (no-op when the schema is already current)"
+docker compose --env-file "$env_file" -f "$deploy_dir/docker-compose.prod.yml" run --rm --pull never migrate 2>&1 | tail -1 | grep -q 'migrations applied' || { echo "migrate one-shot did not report success" >&2; exit 1; }
 echo "==> [1/6] keycloak project -> $tag";      compose docker-compose.idp.yml
 echo "==> [2/6] main project -> $tag";          compose docker-compose.prod.yml
 echo "==> [3/6] source agents -> $tag";         compose docker-compose.sources.yml
