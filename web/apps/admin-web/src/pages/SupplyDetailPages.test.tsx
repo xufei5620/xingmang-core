@@ -124,6 +124,39 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     );
   });
 
+  it("「类型」字段按绑定账号的接入方式派生：订阅账号 / 上游渠道 / 未映射", async () => {
+    stubDetailApi({ accounts: [upstreamAccount({ access_method: "subscription_account" })] });
+    renderQueryPage(
+      "/platforms/sub2api/upstream/detail/channel-a",
+      <ChannelDetailPage />,
+      "/platforms/:serviceType/upstream/detail/:channelId",
+    );
+    await screen.findByText("OpenAI A");
+    // 「类型」（本片新增，粗二分）与「接入方式」（既有，三态）在 subscription_account
+    // 这个值上恰好显示同一个字样，因此按「类型」这个 <dt> 的同级 <dd> 精确定位,
+    // 不用全局文字查找——否则会撞上「接入方式」那一条
+    const typeTerm = screen.getByText("类型", { selector: "dt" });
+    const typeDetail = typeTerm.nextElementSibling as HTMLElement;
+    expect(within(typeDetail).getByText("订阅账号")).not.toBeNull();
+  });
+
+  it("「容量与调度」一节：8 个 XM-CHAN-FIELDS0 占位字段全部显式未接入", async () => {
+    stubDetailApi({});
+    renderQueryPage(
+      "/platforms/sub2api/upstream/detail/channel-a",
+      <ChannelDetailPage />,
+      "/platforms/:serviceType/upstream/detail/:channelId",
+    );
+    await screen.findByText("OpenAI A");
+    const section = screen.getByRole("heading", { name: "容量与调度" }).closest("section");
+    expect(section).not.toBeNull();
+    const withinSection = within(section as HTMLElement);
+    for (const label of ["容量 / 并发", "调度", "今日统计", "用量窗口", "最近使用", "创建时间", "过期时间", "代理"]) {
+      expect(withinSection.getByText(label)).not.toBeNull();
+    }
+    expect(withinSection.getAllByText("未接入").length).toBe(8);
+  });
+
   it("未绑定的渠道：上游映射卡片显示候选/未映射状态，可以确认绑定", async () => {
     stubDetailApi({
       channels: [
@@ -290,8 +323,8 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
   });
 });
 
-describe("上游详情 / 添加上游：仍是 UI-only 壳，返回入口跟着上游管理并入区块改名", () => {
-  it("上游详情明确展示比例、余额、成本和凭据边界，返回入口指向渠道管理页的上游管理区块", () => {
+describe("上游详情 / 添加上游：仍是 UI-only 壳，返回入口跟着上游管理并入渠道管理页改名", () => {
+  it("上游详情明确展示比例、余额、成本和凭据边界，返回入口指向渠道管理页", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -307,12 +340,12 @@ describe("上游详情 / 添加上游：仍是 UI-only 壳，返回入口跟着�
     expect(screen.getByText("上游全部分组")).not.toBeNull();
     expect(screen.getByText(/上游账号密码、API Key 与 Token 永不回显/)).not.toBeNull();
     const link = screen.getByRole("link", { name: "返回 NewAPI 上游管理" });
-    expect(link.getAttribute("href")).toBe("/platforms/newapi?tab=upstream#upstream-management");
+    expect(link.getAttribute("href")).toBe("/platforms/newapi?tab=upstream");
     expect(screen.queryAllByRole("button")).toHaveLength(0);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("`suppliers/new` 是只读字段蓝图，所有输入禁用且没有提交按钮；返回入口同样指向上游管理区块", () => {
+  it("`suppliers/new` 是只读字段蓝图，所有输入禁用且没有提交按钮；返回入口同样指向渠道管理页", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -327,7 +360,7 @@ describe("上游详情 / 添加上游：仍是 UI-only 壳，返回入口跟着�
     expect(screen.getAllByRole("textbox").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("textbox").every((input) => (input as HTMLInputElement).disabled)).toBe(true);
     const link = screen.getByRole("link", { name: "返回 Sub2API 上游管理" });
-    expect(link.getAttribute("href")).toBe("/platforms/sub2api?tab=upstream#upstream-management");
+    expect(link.getAttribute("href")).toBe("/platforms/sub2api?tab=upstream");
     expect(screen.queryAllByRole("button")).toHaveLength(0);
     expect(fetchMock).not.toHaveBeenCalled();
   });

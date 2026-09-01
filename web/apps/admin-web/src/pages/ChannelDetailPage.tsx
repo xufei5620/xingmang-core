@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { listServices } from "../api/platform";
 import { listPlatformChannels, type PlatformChannelRow } from "../api/platformChannels";
-import { describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
+import { accountRowType, describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
 import { formatScaledMinorUnits } from "../lib/money";
 import { runwayReasonText } from "../lib/runway";
 import { ApiStateView } from "../components/ApiStateView";
@@ -47,6 +47,12 @@ export function upstreamCreatePath(platform: string): string {
  *  把它接到详情页——按 `service_id + external_channel_id` 从目录里取出这一行,
  *  并把「上游映射」的确认/解绑操作也从列表页搬过来（ManagedChannelTable.tsx
  *  文件头有完整说明）。
+ *
+ *  07:20 补充裁定进一步要求"登记簿数据并入行与详情页"：这一页因此比列表页
+ *  多留了「容量与调度」一整节——8 个字段（容量/并发、调度、今日统计、用量
+ *  窗口、最近使用、创建时间、过期时间、代理）今天在渠道目录契约里完全不
+ *  存在，要等并行切片 XM-CHAN-FIELDS0 扩展契约后才有；这里先把字段位置和
+ *  说明落地，全部显式标未接入，不是这一片的范围去猜它们的值。
  *
  *  仍然诚实：目录没有的字段（经营核算、渠道保障探测结果、凭据别名明细）
  *  继续显式标「未接入」，不因为搬了个位置就编数据。定位这条渠道需要**恰好
@@ -251,6 +257,13 @@ function ChannelDetailBody({
               <Badge tone="info">{label}</Badge>
             </Fact>
             <Fact label="渠道名称 / 账号">{row.name || "未命名渠道"}</Fact>
+            <Fact label="类型" hint="订阅账号 / 上游渠道，按绑定账号的接入方式派生（2026-09-02 07:20 裁定补充）">
+              {row.binding ? (
+                <Badge tone="neutral">{accountRowType(account?.access_method ?? "").label}</Badge>
+              ) : (
+                <Badge tone="neutral">未映射</Badge>
+              )}
+            </Fact>
             {account ? (
               <Fact label="来源上游">{account.upstream_name || account.base_url || "未接入"}</Fact>
             ) : (
@@ -280,6 +293,22 @@ function ChannelDetailBody({
             <Fact label="登记状态">
               {account ? <Badge tone={account.status === "active" ? "success" : "neutral"}>{account.status}</Badge> : "未接入"}
             </Fact>
+          </DetailList>
+        </DetailSection>
+
+        <DetailSection
+          title="容量与调度"
+          hint="XM-CHAN-FIELDS0 扩展渠道目录契约后才会有值；调度即使有值也只做只读展示，写操作另立 XM-SCHED0"
+        >
+          <DetailList>
+            <UnavailableFact label="容量 / 并发" />
+            <UnavailableFact label="调度" hint="开关 / 优先级这类写操作另立 XM-SCHED0，本轮任何时候都只做只读展示" />
+            <UnavailableFact label="今日统计" />
+            <UnavailableFact label="用量窗口" />
+            <UnavailableFact label="最近使用" />
+            <UnavailableFact label="创建时间" />
+            <UnavailableFact label="过期时间" />
+            <UnavailableFact label="代理" />
           </DetailList>
         </DetailSection>
 
