@@ -35,8 +35,12 @@ LockPersonality=yes
 # on some architectures, so MemoryDenyWriteExecute is deliberately not set.
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
+# SQLite WAL 库的读者（含 online-backup API）必须能写同目录的 -shm 与主库的
+# 锁字节——把 usage.sqlite 本身钉成 ReadOnlyPaths 会让 open 直接失败
+# （unable to open database file，2026-09-01 首次安装即踩中）。目录级
+# ReadWritePaths 已是最小必需面；数据页不会被 backup 读者改写，SQLite 自身
+# 保证只动锁与 shm。
 ReadWritePaths=/root/cpa-stack/cpam-data /var/lib/xingmang/cpa-snapshot
-ReadOnlyPaths=/root/cpa-stack/cpam-data/usage.sqlite -/root/cpa-stack/cpam-data/usage.sqlite-wal
 InaccessiblePaths=/root/cpa-stack/cpa/auths /root/cpa-stack/cpa/config.yaml
 InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd/containerd.sock -/run/systemd/private -/run/dbus/system_bus_socket -/run/podman/podman.sock -/run/crio/crio.sock
 SystemCallFilter=@system-service
