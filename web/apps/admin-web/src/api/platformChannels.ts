@@ -21,7 +21,36 @@ export interface PlatformChannelInventory {
   evidence: string;
 }
 
-export interface PlatformChannelRow {
+/** XM-CHAN-FIELDS0（代理 chanfields）扩展渠道目录契约要新增的字段
+ *  （2026-09-02 07:25 产品负责人补充裁定，JSON 名逐字照裁定原文）。
+ *
+ *  这一片（XM-CHAN-MERGE0）开工时确认过 chanfields 分支尚未交付任何东西——
+ *  这些字段今天在 `GET /api/v1/platforms/{p}/channels` 里恒为 null，不是
+ *  "查出来是空"。提前把类型定出来、按这些 JSON 名解析（下面的 `RawPage`
+ *  与映射函数），是为了让 chanfields 交付之后**前端不用再改一次**：只要
+ *  后端开始下发非 null 值，`ManagedChannelTable.tsx`/`ChannelDetailPage.tsx`
+ *  已经在读这些字段的渲染逻辑会自动"亮起来"。 */
+export interface PlatformChannelFieldsExtension {
+  /** 粗二分"订阅账号/上游渠道"；今天前端自己按绑定账号的 access_method 派生
+   *  （`accountRowType`），这里是等 chanfields 提供更权威的来源之后的覆盖项。 */
+  kind: "subscription" | "upstream" | null;
+  /** 真实供应商/上游名称——不是原型的假 AI 供应商分类。今天前端已经能通过
+   *  绑定账号 join 到 `upstream_name`，这里同样是等更权威来源的覆盖项。 */
+  vendor: string | null;
+  status: string | null;
+  capacity: { used: number; limit: number } | null;
+  scheduling: { enabled: boolean; priority: number } | null;
+  today: { requests: number; successRate: number; costMinor: string; currency: string; scale: number } | null;
+  usageWindow: { usedRatio: number; resetsAt: string | null } | null;
+  proxy: string | null;
+  rateMultiplier: string | null;
+  upstreamMultiplier: string | null;
+  lastUsedAt: string | null;
+  createdAt: string | null;
+  expiresAt: string | null;
+}
+
+export interface PlatformChannelRow extends PlatformChannelFieldsExtension {
   channelRef: PlatformChannelRef;
   name: string;
   binding: { id: string; upstreamAccountId: string; validFrom: string; reason: string } | null;
@@ -71,9 +100,76 @@ interface RawPage {
     assurance?: Record<string, unknown> | null;
     runway?: Record<string, unknown> | null;
     observed?: { source?: string; observed_at?: string | null; is_stale?: boolean };
+    // XM-CHAN-FIELDS0 扩展字段。今天服务端不下发这些键，全部走 `?? null`
+    kind?: "subscription" | "upstream" | null;
+    vendor?: string | null;
+    status?: string | null;
+    capacity?: { used?: number; limit?: number } | null;
+    scheduling?: { enabled?: boolean; priority?: number } | null;
+    today?: { requests?: number; success_rate?: number; cost_minor?: string; currency?: string; scale?: number } | null;
+    usage_window?: { used_ratio?: number; resets_at?: string | null } | null;
+    proxy?: string | null;
+    rate_multiplier?: string | null;
+    upstream_multiplier?: string | null;
+    last_used_at?: string | null;
+    created_at?: string | null;
+    expires_at?: string | null;
   }> | null;
   runway_coverage?: { total?: number; known?: number; reasons?: Record<string, number> };
   next_cursor?: string | null;
+}
+
+/** 解析 XM-CHAN-FIELDS0 扩展字段。定义字段的关键子键缺失时整体按 null 处理,
+ *  不拼一个"半真半假"的对象——比如 `capacity.used` 有、`capacity.limit` 没有,
+ *  这时不该显示"3 / undefined"，应该跟完全没有这个字段一样显示未接入。 */
+function parseFieldsExtension(item: {
+  kind?: "subscription" | "upstream" | null;
+  vendor?: string | null;
+  status?: string | null;
+  capacity?: { used?: number; limit?: number } | null;
+  scheduling?: { enabled?: boolean; priority?: number } | null;
+  today?: { requests?: number; success_rate?: number; cost_minor?: string; currency?: string; scale?: number } | null;
+  usage_window?: { used_ratio?: number; resets_at?: string | null } | null;
+  proxy?: string | null;
+  rate_multiplier?: string | null;
+  upstream_multiplier?: string | null;
+  last_used_at?: string | null;
+  created_at?: string | null;
+  expires_at?: string | null;
+}): PlatformChannelFieldsExtension {
+  return {
+    kind: item.kind ?? null,
+    vendor: item.vendor ?? null,
+    status: item.status ?? null,
+    capacity:
+      typeof item.capacity?.used === "number" && typeof item.capacity?.limit === "number"
+        ? { used: item.capacity.used, limit: item.capacity.limit }
+        : null,
+    scheduling:
+      item.scheduling && typeof item.scheduling.enabled === "boolean"
+        ? { enabled: item.scheduling.enabled, priority: item.scheduling.priority ?? 0 }
+        : null,
+    today:
+      item.today && typeof item.today.requests === "number"
+        ? {
+            requests: item.today.requests,
+            successRate: item.today.success_rate ?? 0,
+            costMinor: item.today.cost_minor ?? "0",
+            currency: item.today.currency ?? "",
+            scale: item.today.scale ?? 0,
+          }
+        : null,
+    usageWindow:
+      item.usage_window && typeof item.usage_window.used_ratio === "number"
+        ? { usedRatio: item.usage_window.used_ratio, resetsAt: item.usage_window.resets_at ?? null }
+        : null,
+    proxy: item.proxy ?? null,
+    rateMultiplier: item.rate_multiplier ?? null,
+    upstreamMultiplier: item.upstream_multiplier ?? null,
+    lastUsedAt: item.last_used_at ?? null,
+    createdAt: item.created_at ?? null,
+    expiresAt: item.expires_at ?? null,
+  };
 }
 
 export interface PlatformChannelListOptions extends ListOptions {
@@ -148,6 +244,7 @@ export async function listPlatformChannels(
         observedAt: item.observed?.observed_at ?? null,
         isStale: item.observed?.is_stale ?? false,
       },
+      ...parseFieldsExtension(item),
     })),
     runwayCoverage: {
       total: body.runway_coverage?.total ?? 0,
