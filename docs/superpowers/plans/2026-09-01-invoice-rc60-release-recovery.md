@@ -1,5 +1,10 @@
 # RC60 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC60 shipped at signed tag
+> `v0.1.0-rc60-signed` (`ae61282`) and is deployed; it carries the
+> claim-path binding wake; its evidence is immutable. Continue only with
+> `docs/superpowers/plans/2026-09-01-invoice-rc61-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC60 — claim logins now fire the idempotent source_external_account wake, releasing signed-baseline accounts whose parked cutover rows wedged eligibility bootstrap, scan cycles, and the live agent streams; diagnosed from the RC59-era production stream wedge after the operator requeue re-parked.
