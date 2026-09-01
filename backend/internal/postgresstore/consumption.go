@@ -2662,14 +2662,138 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	}
 	rows.Close()
 
-	type proof struct {
+	type carryCandidate struct {
 		cycleID, batchID, snapshotID, cursor, revision string
 		priorID, balance                               string
 		asOf, watermark, observed                      time.Time
 		snapshotRows, sequence                         int64
 		negative, baselineMember, hasRealCheckpoint    bool
 	}
+	// XM-INV-PROOF-CONTENTION 4: set-based evaluation, replacing what used to
+	// be up to two queries issued per entry of `visibilities` (each ~42ms on
+	// production, up to ~1,150 checkpoints in the contention incident's
+	// window -- tens of seconds per attempt, spent holding up whatever else
+	// needed this account; see the design note on
+	// processEligibilityProjectionJob). Both per-visibility lookups below are
+	// "smallest candidate ceiling >= some threshold" queries; since
+	// `visibilities` is fixed, sorted, and deduplicated up front, prefetch
+	// every candidate once (bounded by the account's own real-checkpoint and
+	// the source's published-cycle counts in the window -- not by how many
+	// distinct visibilities they end up covering) and walk both lists with
+	// `visibilities` using an ordinary ascending two-pointer merge, computing
+	// identical results to the original per-visibility queries: a
+	// same-shape, forward-only pointer is valid here for the same reason a
+	// merge join is valid on two sorted inputs, and this loop already
+	// establishes that visibilities themselves are processed in ascending,
+	// deduplicated order.
+	//
+	// Real-checkpoint candidates first (query A below, unbounded above like
+	// the original -- only the checkpoint's own as_of is bounded by
+	// `requested`, not the cycle ceiling it's tied to): a checkpoint's own
+	// arrival cycle is preferred over any delta-carry cycle regardless of
+	// which has the smaller ceiling, exactly as the original code's
+	// try-real-then-fall-back-to-carry order did.
+	realCeilings := make([]time.Time, 0, len(visibilities))
+	realRows, err := tx.Query(ctx, `
+		SELECT cycle.scan_ceiling_at
+		FROM balance_reconciliation_checkpoints checkpoint
+		JOIN source_economic_scan_cycle_events mapped
+		  ON mapped.source_instance_id=checkpoint.source_instance_id
+		 AND mapped.stream_id='balances'
+		 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
+		 AND mapped.payload_hash=checkpoint.source_revision_hash
+		JOIN source_economic_scan_cycles cycle
+		  ON cycle.source_instance_id=mapped.source_instance_id
+		 AND cycle.stream_id=mapped.stream_id
+		 AND cycle.scan_cycle_id=mapped.scan_cycle_id
+		WHERE checkpoint.external_account_id=$1
+		  AND checkpoint.checkpoint_kind='reconciliation'
+		  AND checkpoint.as_of>$2 AND checkpoint.as_of<=$3
+		  AND cycle.cycle_status='published' AND cycle.scan_ceiling_at>=$2
+		ORDER BY cycle.scan_ceiling_at,cycle.first_sequence`,
+		account.ExternalAccountID, account.FinalizedThrough, requested.UTC())
+	if err != nil {
+		return err
+	}
+	for realRows.Next() {
+		var ceiling time.Time
+		if err = realRows.Scan(&ceiling); err != nil {
+			realRows.Close()
+			return err
+		}
+		realCeilings = append(realCeilings, ceiling.UTC())
+	}
+	if err = realRows.Err(); err != nil {
+		realRows.Close()
+		return err
+	}
+	realRows.Close()
+
+	// Delta-carry candidates (query B below): every published balances cycle
+	// in the window, each with its own prior-checkpoint delta and
+	// has_real_checkpoint flag precomputed -- identical per-row logic to the
+	// original, just evaluated for every candidate cycle once instead of
+	// only for the ones an earlier per-visibility query happened to land on.
+	carryCandidates := make([]carryCandidate, 0, len(visibilities))
+	carryRows, err := tx.Query(ctx, `
+		SELECT cycle.scan_cycle_id::text,batch.batch_id::text,cycle.scan_snapshot_id,
+			cycle.scan_snapshot_row_count,cycle.scan_ceiling_at,cycle.stream_watermark_at,
+			cycle.source_cursor,cycle.final_sequence,batch.body_hash,batch.source_captured_at,
+			prior.id::text,prior.balance_service_units::text,prior.balance_negative,prior.baseline_member,
+			EXISTS (
+				SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
+				JOIN source_economic_scan_cycle_events mapped
+				  ON mapped.source_instance_id=checkpoint.source_instance_id
+				 AND mapped.stream_id='balances'
+				 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
+				 AND mapped.payload_hash=checkpoint.source_revision_hash
+				WHERE checkpoint.external_account_id=$1
+				  AND mapped.scan_cycle_id=cycle.scan_cycle_id
+			) AS has_real_checkpoint
+		FROM source_economic_scan_cycles cycle
+		JOIN source_ingest_batches batch
+		  ON batch.source_instance_id=cycle.source_instance_id
+		 AND batch.stream_id=cycle.stream_id
+		 AND batch.scan_cycle_id=cycle.scan_cycle_id
+		 AND batch.sequence=cycle.final_sequence
+		JOIN LATERAL (
+			SELECT checkpoint.id,checkpoint.balance_service_units,
+				checkpoint.balance_negative,checkpoint.baseline_member
+			FROM balance_reconciliation_checkpoints checkpoint
+			WHERE checkpoint.external_account_id=$1
+			  AND (checkpoint.as_of<cycle.scan_ceiling_at
+			       OR (checkpoint.as_of=cycle.scan_ceiling_at
+			           AND checkpoint.source_sequence<cycle.final_sequence))
+			ORDER BY checkpoint.as_of DESC,checkpoint.source_sequence DESC,checkpoint.id DESC LIMIT 1
+		) prior ON true
+		WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
+		  AND cycle.cycle_status='published'
+		  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
+		ORDER BY cycle.scan_ceiling_at,cycle.first_sequence`,
+		account.ExternalAccountID, account.SourceInstanceID, account.FinalizedThrough, requested.UTC())
+	if err != nil {
+		return err
+	}
+	for carryRows.Next() {
+		var item carryCandidate
+		if err = carryRows.Scan(&item.cycleID, &item.batchID, &item.snapshotID, &item.snapshotRows,
+			&item.asOf, &item.watermark, &item.cursor, &item.sequence, &item.revision,
+			&item.observed, &item.priorID, &item.balance, &item.negative, &item.baselineMember,
+			&item.hasRealCheckpoint); err != nil {
+			carryRows.Close()
+			return err
+		}
+		item.asOf, item.watermark, item.observed = item.asOf.UTC(), item.watermark.UTC(), item.observed.UTC()
+		carryCandidates = append(carryCandidates, item)
+	}
+	if err = carryRows.Err(); err != nil {
+		carryRows.Close()
+		return err
+	}
+	carryRows.Close()
+
 	coveredVisibility := account.FinalizedThrough.UTC()
+	realIndex, carryIndex := 0, 0
 	for _, visibility := range visibilities {
 		if !visibility.After(coveredVisibility) {
 			continue
@@ -2678,80 +2802,21 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		// own as_of must be finalizable, while the enclosing published cycle must
 		// be at or after the fact's receiver visibility. Delta carry proofs are
 		// stricter below because they derive as_of from the cycle ceiling itself.
-		var realCycleCoverage time.Time
-		realErr := tx.QueryRow(ctx, `
-			SELECT cycle.scan_ceiling_at
-			FROM balance_reconciliation_checkpoints checkpoint
-			JOIN source_economic_scan_cycle_events mapped
-			  ON mapped.source_instance_id=checkpoint.source_instance_id
-			 AND mapped.stream_id='balances'
-			 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
-			 AND mapped.payload_hash=checkpoint.source_revision_hash
-			JOIN source_economic_scan_cycles cycle
-			  ON cycle.source_instance_id=mapped.source_instance_id
-			 AND cycle.stream_id=mapped.stream_id
-			 AND cycle.scan_cycle_id=mapped.scan_cycle_id
-			WHERE checkpoint.external_account_id=$1
-			  AND checkpoint.checkpoint_kind='reconciliation'
-			  AND checkpoint.as_of>$2 AND checkpoint.as_of<=$3
-			  AND cycle.cycle_status='published' AND cycle.scan_ceiling_at>=$4
-			ORDER BY cycle.scan_ceiling_at,cycle.first_sequence LIMIT 1`,
-			account.ExternalAccountID, account.FinalizedThrough, requested.UTC(), visibility).Scan(&realCycleCoverage)
-		if realErr == nil {
-			coveredVisibility = realCycleCoverage.UTC()
+		for realIndex < len(realCeilings) && realCeilings[realIndex].Before(visibility) {
+			realIndex++
+		}
+		if realIndex < len(realCeilings) {
+			coveredVisibility = realCeilings[realIndex]
 			continue
 		}
-		if !errors.Is(realErr, pgx.ErrNoRows) {
-			return realErr
+		for carryIndex < len(carryCandidates) && carryCandidates[carryIndex].asOf.Before(visibility) {
+			carryIndex++
 		}
-		var item proof
-		err = tx.QueryRow(ctx, `
-			SELECT cycle.scan_cycle_id::text,batch.batch_id::text,cycle.scan_snapshot_id,
-				cycle.scan_snapshot_row_count,cycle.scan_ceiling_at,cycle.stream_watermark_at,
-				cycle.source_cursor,cycle.final_sequence,batch.body_hash,batch.source_captured_at,
-				prior.id::text,prior.balance_service_units::text,prior.balance_negative,prior.baseline_member,
-				EXISTS (
-					SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
-					JOIN source_economic_scan_cycle_events mapped
-					  ON mapped.source_instance_id=checkpoint.source_instance_id
-					 AND mapped.stream_id='balances'
-					 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
-					 AND mapped.payload_hash=checkpoint.source_revision_hash
-					WHERE checkpoint.external_account_id=$1
-					  AND mapped.scan_cycle_id=cycle.scan_cycle_id
-				) AS has_real_checkpoint
-			FROM source_economic_scan_cycles cycle
-			JOIN source_ingest_batches batch
-			  ON batch.source_instance_id=cycle.source_instance_id
-			 AND batch.stream_id=cycle.stream_id
-			 AND batch.scan_cycle_id=cycle.scan_cycle_id
-			 AND batch.sequence=cycle.final_sequence
-			JOIN LATERAL (
-				SELECT checkpoint.id,checkpoint.balance_service_units,
-					checkpoint.balance_negative,checkpoint.baseline_member
-				FROM balance_reconciliation_checkpoints checkpoint
-				WHERE checkpoint.external_account_id=$1
-				  AND (checkpoint.as_of<cycle.scan_ceiling_at
-				       OR (checkpoint.as_of=cycle.scan_ceiling_at
-				           AND checkpoint.source_sequence<cycle.final_sequence))
-				ORDER BY checkpoint.as_of DESC,checkpoint.source_sequence DESC,checkpoint.id DESC LIMIT 1
-			) prior ON true
-			WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
-			  AND cycle.cycle_status='published'
-			  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
-			ORDER BY cycle.scan_ceiling_at,cycle.first_sequence LIMIT 1`,
-			account.ExternalAccountID, account.SourceInstanceID, visibility, requested.UTC()).Scan(
-			&item.cycleID, &item.batchID, &item.snapshotID, &item.snapshotRows,
-			&item.asOf, &item.watermark, &item.cursor, &item.sequence, &item.revision,
-			&item.observed, &item.priorID, &item.balance, &item.negative, &item.baselineMember,
-			&item.hasRealCheckpoint)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if carryIndex >= len(carryCandidates) {
 			return errBalanceCarryForwardProofPending
 		}
-		if err != nil {
-			return err
-		}
-		coveredVisibility = item.asOf.UTC()
+		item := carryCandidates[carryIndex]
+		coveredVisibility = item.asOf
 		if item.hasRealCheckpoint {
 			continue
 		}
