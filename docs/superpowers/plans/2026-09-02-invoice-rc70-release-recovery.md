@@ -20,16 +20,22 @@
 
 ### Task 1: Source identity
 
-- [ ] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
-- [ ] Create `v0.1.0-rc70-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
+- [x] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
+- [x] Create `v0.1.0-rc70-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
 
 ### Task 2: Image evidence
 
-- [ ] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC70 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
+- [x] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC70 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
 
 ### Task 3: Production and repair
 
-- [ ] Sign exactly one strict-ready RC70 directory, transfer only its nine manifest-bound images, take a fresh pre-deploy backup (the RC69 backup is older than two hours; offline signing key on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, and record deployment evidence beside the release.
-- [ ] Run `invoice-eligibility-repair` from the RC70 tools image in `--dry-run`; compare the summary against the incident (about 106 `SOURCE_GAP`, 100 `EVENT_DEAD`, 101–102 requeued events); then `--apply` with the approved operator id; confirm readyz returns 200, the requeued events are processed as `pre_anchor_skipped` audit rows, and the accounts are `active` again.
+- [x] Sign exactly one strict-ready RC70 directory, transfer only its nine manifest-bound images, take a fresh pre-deploy backup (the RC69 backup is older than two hours; offline signing key on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, and record deployment evidence beside the release.
+- [x] Run `invoice-eligibility-repair` from the RC70 tools image in `--dry-run`; compare the summary against the incident (about 106 `SOURCE_GAP`, 100 `EVENT_DEAD`, 101–102 requeued events); then `--apply` with the approved operator id; confirm readyz returns 200, the requeued events are processed as `pre_anchor_skipped` audit rows, and the accounts are `active` again.
 
 Production remains blocked until the credentialed human canary (a previously frozen account's projection completing, its usage after the anchor allocating normally, the user-facing web showing no administrator login entry) binds RC70.
+
+## Execution record (2026-09-02)
+
+- Task 1: pre-anchor fix merged (`696044f`), admin-login entry hidden (`04b76fa`), Dockerfile COPY order fix (`b9d51f6`). Backend 26/26 (one shared-database test flake in `cmd/eligibility-repair` passed on the immediate rerun and on the full second run), web 79/79 + build, gitleaks clean, four failure-evidence verifiers 0, gate self-test 0. Tag `v0.1.0-rc70-signed` -> `b9d51f6` (re-created once, before any transfer).
+- Task 2: `release/0.1.0-rc70-exact2` (exact1 retained: `scripts/verify.ps1` requires the literal `/out/invoice-oidc-preflight /usr/local/bin/` substring in the backend Dockerfile, which the appended repair binary had broken). Image gate 42, ordinary and strict verifiers 0, `SHA256SUMS.sig` verified.
+- Task 3: transfer verified on the host; staging loaded nine images and verified tag and evidence signatures; backup `invoice-20260902T041727Z` (signed, first attempt); `deploy/roll-forward.sh b9d51f6…` completed steps 0-5 with every container on `0.1.0-rc70` and healthz 200; verify timed out on readyz as expected. Repair: dry-run selected exactly one account (98cce4c8: 101 `SOURCE_GAP` usage freezes, 101 `EVENT_DEAD` freezes, 101 dead events — the incident was one account's 101 pre-anchor facts, not 106 accounts), `--apply` with the owner-approved operator resolved 202 freezes and requeued 101 events, the following dry-run reported 0. Dead events are gone; readyz stayed 503 because account 40bd883d's projection job sits in RC69's `BALANCE_PROOF_PENDING` backoff and its age trips the 15-minute rule — tracked as XM-INV-READY-PENDING (RC71). Remaining open freezes for admin review: 16 balance-related `SOURCE_GAP` on 98cce4c8, 3 `USAGE_EXCEEDS_LEDGER`, 1 `UNKNOWN_NEGATIVE_BALANCE`.
