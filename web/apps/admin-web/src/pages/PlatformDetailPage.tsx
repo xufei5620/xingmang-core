@@ -88,6 +88,9 @@ export function PlatformDetailPage() {
     void servicesQuery.refetch();
     void queryClient.invalidateQueries({ queryKey: ["metrics"] });
     void queryClient.invalidateQueries({ queryKey: [METRIC_HISTORY_QUERY_PREFIX] });
+    // 渠道保障 · 保障概览 / 历史记录（XM-ASSURE0）：两个查询键都以
+    // "assurance" 开头，一次失效两者，与其余指标一起刷新
+    void queryClient.invalidateQueries({ queryKey: ["assurance"] });
   };
 
   const pending = entry && !platformOpens(entry);
@@ -241,11 +244,12 @@ function subTabContent(
       // XM-CPA0），与 Sub2API/NewAPI 那套仍是纯 UI 蓝图的模型路由验证
       // 完全是两回事，只是落在同一个页签位置——只判平台，先问 CPA 有没有
       // 接管这个子页签，没有（probes/history）才落回共享蓝图。
-      // 其余平台：UI 蓝图态。布局与文案照原型，数据一行都没有——
-      // 交接文档 §9.7 明写「真实探针不能提前冒充已上线」
+      // 其余平台：Sub2API/NewAPI 共用同一套组件，「保障概览」「历史记录」
+      // 两个子页签已接被动指标（XM-ASSURE0 第一片），「检测任务」（主动探测）
+      // 仍是纯 UI 蓝图——交接文档 §9.7 明写「真实探针不能提前冒充已上线」
       return (
         (entry.spec.serviceType === "cpa" ? cpaAssuranceSubTab(subId) : undefined) ??
-        assuranceSubTab(subId)
+        assuranceSubTab(subId, entry.spec.serviceType)
       );
     case "finance":
       return financeSubTab(entry.spec.serviceType, subId);

@@ -69,6 +69,134 @@ const servicesBody = {
   ],
 };
 
+const ASSURANCE_CHANNEL_REASON =
+  "请求审计落盘格式不采集渠道/上游字段，无法按渠道拆分——不是这一片没接，是这条数据源从写入那一刻起就不产出这个维度。";
+
+const assuranceFreshness = {
+  state: "fresh",
+  staleness_seconds: 0,
+  threshold_seconds: 60,
+  is_partial: false,
+  observed_at: "2026-08-31T10:00:00Z",
+  last_success: "2026-08-31T10:00:00Z",
+  last_error_code: "",
+};
+
+/** 一个空窗口/空业务日的保障聚合——okHandler 的默认兜底用它，不在共用兜底
+ *  里编样例数据（与本文件 servers/upstream-accounts 默认空列表同一条规矩），
+ *  需要非空断言的用例自己覆盖 stubFetch。 */
+function emptyAssuranceAggregate(day?: string) {
+  const zeroPercentiles = { sample_count: 0, p50_ms: null, p95_ms: null, p99_ms: null };
+  return {
+    ...(day ? { day } : {}),
+    since: "2026-08-31T09:00:00Z",
+    until: "2026-08-31T10:00:00Z",
+    request_count: 0,
+    status_classes: { success: 0, client_error: 0, server_error: 0, disconnected: 0, other: 0 },
+    duration_ms: zeroPercentiles,
+    ttfb_ms: zeroPercentiles,
+    models: [],
+    models_truncated: false,
+    coverage: { spanned_days: 1, missing_days: 0, bad_lines: 0 },
+  };
+}
+
+function emptyAssuranceOverviewBody(window: string) {
+  return {
+    source: "sub2api",
+    window,
+    ...emptyAssuranceAggregate(),
+    channel_breakdown_supported: false,
+    channel_breakdown_reason: ASSURANCE_CHANNEL_REASON,
+    retention_days: 30,
+    freshness: assuranceFreshness,
+  };
+}
+
+function emptyAssuranceHistoryBody() {
+  return {
+    source: "sub2api",
+    days: Array.from({ length: 7 }, (_, i) => ({
+      ...emptyAssuranceAggregate(`2026-08-${25 + i}`),
+      missing: false,
+    })),
+    channel_breakdown_supported: false,
+    channel_breakdown_reason: ASSURANCE_CHANNEL_REASON,
+    retention_days: 30,
+    freshness: assuranceFreshness,
+  };
+}
+
+/** 非空的保障概览响应，覆盖成功/两类失败/按模型拆分（含一个空模型名）,
+ *  供「显示真实数据」这条用例断言。 */
+function richAssuranceOverviewBody(window: string) {
+  const bigModel = {
+    model: "claude-3-opus",
+    request_count: 9,
+    status_classes: { success: 8, client_error: 1, server_error: 0, disconnected: 0, other: 0 },
+    duration_ms: { sample_count: 9, p50_ms: 110, p95_ms: 400, p99_ms: 800 },
+    ttfb_ms: { sample_count: 6, p50_ms: 35, p95_ms: 80, p99_ms: 120 },
+  };
+  const unknownModel = {
+    model: "",
+    request_count: 3,
+    status_classes: { success: 2, client_error: 0, server_error: 1, disconnected: 0, other: 0 },
+    duration_ms: { sample_count: 3, p50_ms: 200, p95_ms: 600, p99_ms: 900 },
+    ttfb_ms: { sample_count: 2, p50_ms: 60, p95_ms: 100, p99_ms: 140 },
+  };
+  return {
+    source: "sub2api",
+    window,
+    since: "2026-08-31T09:00:00Z",
+    until: "2026-08-31T10:00:00Z",
+    request_count: 12,
+    status_classes: { success: 10, client_error: 1, server_error: 1, disconnected: 0, other: 0 },
+    duration_ms: { sample_count: 12, p50_ms: 120, p95_ms: 480, p99_ms: 900 },
+    ttfb_ms: { sample_count: 8, p50_ms: 40, p95_ms: 90, p99_ms: 150 },
+    models: [bigModel, unknownModel],
+    models_truncated: false,
+    channel_breakdown_supported: false,
+    channel_breakdown_reason: ASSURANCE_CHANNEL_REASON,
+    coverage: { spanned_days: 1, missing_days: 0, bad_lines: 0 },
+    retention_days: 30,
+    freshness: assuranceFreshness,
+  };
+}
+
+/** 近 7 天里只有最后一天（今天）有数据，其余 6 天目录缺失——覆盖历史记录
+ *  「missing 标记」与「涉及模型数」两条断言。 */
+function richAssuranceHistoryBody() {
+  const days = Array.from({ length: 7 }, (_, i) => ({
+    ...emptyAssuranceAggregate(`2026-08-${25 + i}`),
+    missing: true,
+  }));
+  days[6] = {
+    ...emptyAssuranceAggregate("2026-08-31"),
+    request_count: 40,
+    status_classes: { success: 38, client_error: 1, server_error: 1, disconnected: 0, other: 0 },
+    duration_ms: { sample_count: 40, p50_ms: 100, p95_ms: 300, p99_ms: 500 },
+    ttfb_ms: { sample_count: 20, p50_ms: 30, p95_ms: 70, p99_ms: 110 },
+    models: [
+      {
+        model: "gpt-4o",
+        request_count: 40,
+        status_classes: { success: 38, client_error: 1, server_error: 1, disconnected: 0, other: 0 },
+        duration_ms: { sample_count: 40, p50_ms: 100, p95_ms: 300, p99_ms: 500 },
+        ttfb_ms: { sample_count: 20, p50_ms: 30, p95_ms: 70, p99_ms: 110 },
+      },
+    ],
+    missing: false,
+  };
+  return {
+    source: "sub2api",
+    days,
+    channel_breakdown_supported: false,
+    channel_breakdown_reason: ASSURANCE_CHANNEL_REASON,
+    retention_days: 30,
+    freshness: assuranceFreshness,
+  };
+}
+
 /** 只实现客户端用到的 ok/status/json 三样，不依赖 jsdom 是否提供 Response。 */
 function fakeResponse(status: number, body: unknown): Response {
   return {
@@ -510,6 +638,17 @@ function okHandler(url: string): Response {
   // XM-SERVER0：服务器登记簿四个只读查询，默认空列表——各测试用例需要
   // 具体数据时自己覆盖 stubFetch，不在这个共用兜底里编样例行。
   if (url.startsWith("/api/v1/servers/")) return fakeResponse(200, { items: [] });
+  // XM-ASSURE0：渠道保障被动指标，默认空窗口/空历史——同上，需要非空数据的
+  // 用例自己覆盖 stubFetch。history 必须排在 overview 前面：两者的路径是
+  // 包含关系（.../assurance/overview 不会匹配 .../assurance/history 的正则，
+  // 反过来也一样，这里其实互不包含，但保持与 metrics/history 那条注释一致
+  // 的排列习惯，以防将来任一路径改名产生真正的前缀重叠）。
+  if (/\/api\/v1\/platforms\/[^/]+\/assurance\/history/.test(url))
+    return fakeResponse(200, emptyAssuranceHistoryBody());
+  if (/\/api\/v1\/platforms\/[^/]+\/assurance\/overview/.test(url)) {
+    const window = new URL(url, "http://localhost").searchParams.get("window") ?? "1h";
+    return fakeResponse(200, emptyAssuranceOverviewBody(window));
+  }
   return fakeResponse(404, { error: { code: "NOT_REGISTERED", message: "未知路径" } });
 }
 
@@ -1863,42 +2002,89 @@ describe("平台用户详情完整页（XM-B001）", () => {
   );
 });
 
-describe("渠道保障页签（裁定 #1 的 A 落地，UI 蓝图态）", () => {
+describe("渠道保障页签（裁定 #1 的 A 落地；XM-ASSURE0 起「保障概览」「历史记录」接被动指标）", () => {
   beforeEach(() => {
     devLogin();
     stubFetch(okHandler);
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("三个子页签逐字，且都带原型那句 warnbar", async () => {
+  it("三个子页签逐字，默认落在保障概览且带窗口选择", async () => {
     renderRoute("/platforms/sub2api?tab=model");
     for (const label of ["保障概览", "检测任务", "历史记录"]) {
       expect(await screen.findByRole("tab", { name: label })).not.toBeNull();
     }
-    expect(screen.getByText(/这是目标布局/)).not.toBeNull();
+    expect(await screen.findByRole("group", { name: "保障概览统计窗口" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "1 小时", pressed: true })).not.toBeNull();
   });
 
-  it("**一行检测结果都不显示**——交接文档 §9.7：真实探针不能提前冒充已上线", async () => {
-    renderRoute("/platforms/sub2api?tab=model&sub=history");
-    expect(await screen.findByText("还没有保障历史")).not.toBeNull();
+  it("保障概览显示真实的请求量/成功率/延迟与按模型明细，并原样转述渠道拆分限制", async () => {
+    stubFetch((url) =>
+      /\/assurance\/overview/.test(url)
+        ? fakeResponse(
+            200,
+            richAssuranceOverviewBody(new URL(url, "http://localhost").searchParams.get("window") ?? "1h"),
+          )
+        : okHandler(url),
+    );
+    renderRoute("/platforms/sub2api?tab=model");
+
+    const requestsTile = (await screen.findByRole("heading", { name: "请求量", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(requestsTile).getByText("12")).not.toBeNull();
+
+    expect(await screen.findByText("claude-3-opus")).not.toBeNull();
+    expect(screen.getByText("(未知模型)")).not.toBeNull();
+    // 服务端给出的原因原样出现，前端不重新编一份措辞
+    expect(screen.getByText(ASSURANCE_CHANNEL_REASON)).not.toBeNull();
+  });
+
+  it("切换窗口会带上新的 window 参数重新请求保障概览", async () => {
+    const fetchMock = stubFetch(okHandler);
+    renderRoute("/platforms/sub2api?tab=model");
+    await screen.findByRole("button", { name: "1 小时", pressed: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "24 小时" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          (call) => String(call[0]).includes("/assurance/overview") && String(call[0]).includes("window=24h"),
+        ),
+      ).toBe(true);
+    });
+    expect(await screen.findByRole("button", { name: "24 小时", pressed: true })).not.toBeNull();
+  });
+
+  it("检测任务：仍是纯蓝图，明确指向 XM-ASSURE1 与 Kill Switch 要求，不显示任何检测结果", async () => {
+    renderRoute("/platforms/sub2api?tab=model&sub=probes");
+    for (const col of ["任务", "渠道", "目标模型", "策略", "最近一次", "结果"]) {
+      expect(await screen.findByRole("columnheader", { name: col })).not.toBeNull();
+    }
+    // 两处文案都提到 XM-ASSURE1/Kill Switch（顶部说明 + 蓝图表空态），
+    // 用 getAllByText 而不是 getByText——后者在命中多个元素时会抛错
+    expect(screen.getAllByText(/XM-ASSURE1/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Kill Switch/).length).toBeGreaterThan(0);
     // 原型样例里的那些「结果」不许出现在界面上
     expect(screen.queryByText(/probe-88/)).toBeNull();
     expect(screen.queryByText("疑似退化")).toBeNull();
   });
 
-  it("画出列结构，让蓝图有内容可看", async () => {
-    renderRoute("/platforms/sub2api?tab=model&sub=probes");
-    for (const col of ["任务", "渠道", "目标模型", "策略", "最近一次", "结果"]) {
-      expect(await screen.findByRole("columnheader", { name: col })).not.toBeNull();
-    }
-  });
+  it("历史记录显示真实的近 7 天聚合，缺目录的天数标记覆盖不全", async () => {
+    stubFetch((url) =>
+      /\/assurance\/history/.test(url) ? fakeResponse(200, richAssuranceHistoryBody()) : okHandler(url),
+    );
+    renderRoute("/platforms/sub2api?tab=model&sub=history");
 
-  it("四格计数显示「—」而不是原型里的 5 / 11 / 38 / 2", async () => {
-    renderRoute("/platforms/sub2api?tab=model");
-    const tile = (await screen.findByRole("heading", { name: "受保障渠道", level: 3 })).closest(
-      "article",
-    ) as HTMLElement;
-    expect(within(tile).getByText("—")).not.toBeNull();
+    const todayCell = await screen.findByText("2026-08-31");
+    expect(screen.getAllByText("目录缺失")).toHaveLength(6);
+    expect(screen.getByText("完整")).not.toBeNull();
+    // 「涉及模型数」列：今天这一行是 1，历史记录本身不逐个列出模型名——
+    // 那属于「保障概览」的按模型明细表，两张表分工不同
+    const todayRow = todayCell.closest("tr") as HTMLElement;
+    expect(within(todayRow).getByText("1")).not.toBeNull();
+    expect(screen.getByText(/近 7 天中有 6 天索引目录缺失/)).not.toBeNull();
   });
 });
 
