@@ -1,0 +1,27 @@
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "id": "u_10241",
+        "email": "test-user-one@example.invalid",
+        "username": "test-user-one",
+        "status": "active",
+        "balance": "1234.56000000",
+        "last_active_at": "2026-08-28T09:00:00Z"
+      },
+      {
+        "id": "u_10242",
+        "email": "test-user-two@example.invalid",
+        "username": "test-user-two",
+        "status": "disabled",
+        "balance": "-5.00000000",
+        "last_active_at": null,
+        "role": "superadmin",
+        "frozen_balance": "999.00000000"
+      }
+    ],
+    "total": 2
+  }
+}

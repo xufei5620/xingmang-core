@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "version": "v0.9.12",
+    "start_time": 1798444800,
+    "quota_per_unit": 500000,
+    "SystemName": "should not matter",
+    "email_verification": true
+  }
+}
