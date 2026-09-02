@@ -27,7 +27,14 @@ export function isConnectorMode(value: string): value is ConnectorMode {
 /** GET /api/v1/connectors/config 的一行：数据库里当前生效的接入配置。
  *
  *  platform/mode 保持为 string 而不是收窄成联合类型：读到一个前端不认识的
- *  平台或模式时，应当原样显示出来，而不是在投影阶段悄悄丢掉或改成 fake。 */
+ *  平台或模式时，应当原样显示出来，而不是在投影阶段悄悄丢掉或改成 fake。
+ *
+ *  probe_enabled/probe_credential_registered 是 XM-ASSURE1-glue 补的两个
+ *  字段（后端 internal/platform/httpapi/credentials.go 的
+ *  connectorConfigItem 同批新增，见 docs/handoffs/slices/XM-ASSURE1-glue.md）
+ *  ——检测任务 Kill Switch 控件用它们在该平台零声明时也能显示当前状态，
+ *  见 components/AssuranceProbeKillSwitch.tsx。probe_credential_registered
+ *  是布尔值，不是探测凭据引用的字面串——后端刻意不透出引用文本本身。 */
 export interface ConnectorConfig {
   platform: string;
   mode: string;
@@ -37,6 +44,8 @@ export interface ConnectorConfig {
   version: number;
   updated_at: string;
   updated_by: string;
+  probe_enabled: boolean;
+  probe_credential_registered: boolean;
 }
 
 export interface ConnectorConfigInput {
@@ -76,6 +85,8 @@ function projectConfig(raw: unknown, index: number): ConnectorConfig {
     version: typeof version === "number" && Number.isSafeInteger(version) && version >= 0 ? version : 0,
     updated_at: stringOrEmpty(row.updated_at),
     updated_by: stringOrEmpty(row.updated_by),
+    probe_enabled: row.probe_enabled === true,
+    probe_credential_registered: row.probe_credential_registered === true,
   };
 }
 

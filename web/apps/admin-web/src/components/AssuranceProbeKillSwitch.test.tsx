@@ -18,12 +18,15 @@ function fakeResponse(body: unknown, status = 200): Response {
   return { ok: status < 400, status, json: () => Promise.resolve(body) } as unknown as Response;
 }
 
-function renderSwitch(currentState: string | null) {
+function renderSwitch(
+  currentState: string | null,
+  fallbackConfig?: { mode: string; probeEnabled: boolean; probeCredentialRegistered: boolean } | null,
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <AssuranceProbeKillSwitch platform="sub2api" currentState={currentState} />
+        <AssuranceProbeKillSwitch platform="sub2api" currentState={currentState} fallbackConfig={fallbackConfig} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -49,12 +52,50 @@ describe("检测 Kill Switch 入口", () => {
     expect(dialog.getByText("已启用")).not.toBeNull();
   });
 
-  it("零声明时（读不到当前状态）如实显示未知，不猜测", async () => {
+  it("零声明且连接器配置也读不到时如实显示未知，不猜测", async () => {
     hasRole.mockReturnValue(true);
-    renderSwitch(null);
+    renderSwitch(null, null);
     fireEvent.click(screen.getByRole("button", { name: /Kill Switch/ }));
     const dialog = within(await screen.findByRole("dialog"));
-    expect(dialog.getByText(/未知（尚无检测任务，读不到当前状态）/)).not.toBeNull();
+    expect(dialog.getByText(/未知（读不到当前状态）/)).not.toBeNull();
+  });
+
+  it("零声明但能读到连接器配置时（XM-ASSURE1-glue），用它派生当前状态", async () => {
+    hasRole.mockReturnValue(true);
+    renderSwitch(null, { mode: "real", probeEnabled: true, probeCredentialRegistered: true });
+    fireEvent.click(screen.getByRole("button", { name: /Kill Switch/ }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("已启用")).not.toBeNull();
+    // 初始目标状态也要跟着派生值走，不是永远默认"启用"（与
+    // PlatformUsersPanel.test.tsx 同一条纪律：选中态靠 aria-pressed，不只是颜色）
+    const enableButton = within(dialog.getByRole("group", { name: "目标状态" })).getByRole("button", { name: "启用" });
+    expect(enableButton.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("零声明 + 连接器配置 mode=real 但 probe_enabled=false 时显示未启用", async () => {
+    hasRole.mockReturnValue(true);
+    renderSwitch(null, { mode: "real", probeEnabled: false, probeCredentialRegistered: false });
+    fireEvent.click(screen.getByRole("button", { name: /Kill Switch/ }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("未启用")).not.toBeNull();
+  });
+
+  it("零声明 + 连接器配置 mode=fake 时显示 fake 模式（不适用），与被动 not_applicable_fake 同一文案", async () => {
+    hasRole.mockReturnValue(true);
+    renderSwitch(null, { mode: "fake", probeEnabled: false, probeCredentialRegistered: false });
+    fireEvent.click(screen.getByRole("button", { name: /Kill Switch/ }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("fake 模式（不适用）")).not.toBeNull();
+  });
+
+  it("检测任务表本身有数据时优先用它的 kill_switch_state，忽略 fallbackConfig", async () => {
+    hasRole.mockReturnValue(true);
+    // currentState="enabled" 与 fallbackConfig 刻意矛盾（disabled），
+    // 证明有 currentState 时 fallbackConfig 完全不参与判断。
+    renderSwitch("enabled", { mode: "real", probeEnabled: false, probeCredentialRegistered: false });
+    fireEvent.click(screen.getByRole("button", { name: /Kill Switch/ }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("已启用")).not.toBeNull();
   });
 
   it("启用并填写凭据引用后提交，params 带上 probe_credential_ref，成功后显示 run_id", async () => {

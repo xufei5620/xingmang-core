@@ -26,6 +26,8 @@ describe("connectors API contract", () => {
       version: 4,
       updated_at: "2026-08-30T09:00:00Z",
       updated_by: "HUMAN:operator",
+      probe_enabled: true,
+      probe_credential_registered: true,
     };
     const c = client({ items: [{ ...row, secret_value: "must-not-be-projected" }] });
 
@@ -48,6 +50,8 @@ describe("connectors API contract", () => {
         version: 0,
         updated_at: "",
         updated_by: "",
+        probe_enabled: false,
+        probe_credential_registered: false,
       },
     ]);
   });
@@ -55,6 +59,26 @@ describe("connectors API contract", () => {
   it("rejects rows without a platform and tolerates a missing items array", async () => {
     await expect(listConnectorConfigs({}, client({ items: [{ mode: "fake" }] }))).rejects.toThrow(/platform/);
     expect(await listConnectorConfigs({}, client({}))).toEqual([]);
+  });
+
+  it("coerces probe_enabled/probe_credential_registered strictly to booleans (XM-ASSURE1-glue)", async () => {
+    // 后端只应该发 true/false，但这里防御性地校验：任何不是字面 true 的值
+    // 都必须被当成 false，不能把"某个非空字符串"误判成"已启用"——与
+    // credential_ref 从不被这个投影层当作"是否已登记"的判据是同一条纪律，
+    // 这里只认布尔字面值。
+    const c = client({
+      items: [
+        { platform: "sub2api", probe_enabled: true, probe_credential_registered: true },
+        { platform: "newapi", probe_enabled: "true", probe_credential_registered: 1 },
+      ],
+    });
+    const items = await listConnectorConfigs({}, c);
+    expect(items).toHaveLength(2);
+    const [sub2api, newapi] = items;
+    expect(sub2api?.probe_enabled).toBe(true);
+    expect(sub2api?.probe_credential_registered).toBe(true);
+    expect(newapi?.probe_enabled).toBe(false);
+    expect(newapi?.probe_credential_registered).toBe(false);
   });
 
   it("sends connector.config.set@1 with a normalized comma-separated allowlist string", async () => {
