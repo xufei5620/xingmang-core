@@ -172,6 +172,9 @@ export interface EligibilityFreeze {
   openedAt: string;
   resolvedAt?: string;
   version: number;
+  // CR-0007 problem one: the upstream platform's own (digital) user ID for
+  // this account, plain and unmasked -- see docs/ELIGIBILITY-OPERATIONS.md.
+  externalUserId: string;
 }
 
 export interface EligibilityFreezePage {
@@ -183,6 +186,9 @@ export interface EligibilityFreezeFilters {
   status: "open" | "resolved" | "all";
   reason?: EligibilityFreezeReason;
   sourceInstanceId?: string;
+  // CR-0007 problem one: exact match on the upstream platform's external
+  // user ID, optionally combined with sourceInstanceId to disambiguate.
+  externalUserId?: string;
 }
 
 export interface ResolveEligibilityFreezeInput {

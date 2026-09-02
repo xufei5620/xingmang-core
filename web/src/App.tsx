@@ -2846,6 +2846,24 @@ function EligibilityFreezesPage() {
   const [filters, setFilters] = useState<EligibilityFreezeFilters>({
     status: "open",
   });
+  // CR-0007 problem one: local, immediately-editable input state, committed
+  // into filters.externalUserId (which actually triggers the server refetch
+  // below) after a short pause in typing -- this codebase has no existing
+  // free-text filter that hits the server, so this reuses the same debounce
+  // idiom already established for height-sync above (useEmbeddedAdminHeightSync)
+  // rather than refetching on every keystroke.
+  const [externalUserIdInput, setExternalUserIdInput] = useState("");
+  useEffect(() => {
+    const trimmed = externalUserIdInput.trim();
+    const timer = window.setTimeout(() => {
+      setFilters((current) =>
+        current.externalUserId === (trimmed || undefined)
+          ? current
+          : { ...current, externalUserId: trimmed || undefined },
+      );
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [externalUserIdInput]);
   const [items, setItems] = useState<EligibilityFreeze[]>([]);
   const [nextCursor, setNextCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
@@ -2918,7 +2936,7 @@ function EligibilityFreezesPage() {
     setNextCursor(undefined);
     setSelected(null);
     void load();
-  }, [filters.status, filters.reason, filters.sourceInstanceId]);
+  }, [filters.status, filters.reason, filters.sourceInstanceId, filters.externalUserId]);
 
   const sourceOptionLabels = useMemo(() => {
     const counters: Partial<Record<SourceType, number>> = {};
@@ -2962,6 +2980,17 @@ function EligibilityFreezesPage() {
       </div>
       <section className="card admin-table-card">
         <div className="toolbar freeze-toolbar">
+          <div className="search-box">
+            <Search size={17} />
+            <input
+              aria-label="来源用户 ID"
+              value={externalUserIdInput}
+              maxLength={512}
+              autoComplete="off"
+              placeholder="按来源用户 ID 精确过滤"
+              onChange={(event) => setExternalUserIdInput(event.target.value)}
+            />
+          </div>
           <select
             aria-label="冻结状态"
             value={filters.status}
@@ -3035,6 +3064,7 @@ function EligibilityFreezesPage() {
               <thead>
                 <tr>
                   <th>来源</th>
+                  <th>来源用户 ID</th>
                   <th>冻结原因</th>
                   <th>范围</th>
                   <th>资格状态</th>
@@ -3050,6 +3080,7 @@ function EligibilityFreezesPage() {
                       <SourceBadge source={item.source} />
                       <small>{item.sourceLabel}</small>
                     </td>
+                    <td>{item.externalUserId}</td>
                     <td>
                       <strong>{eligibilityFreezeReasonLabels[item.reason]}</strong>
                       {item.reason === "SOURCE_REFUND" && (
@@ -3112,8 +3143,21 @@ function EligibilityFreezesPage() {
                     item.id === resolved.id ? resolved : item,
                   ),
             );
-            setSelected(null);
+            // CR-0007 problem two: show the now-resolved item's own
+            // "already resolved" branch (below) as the inline success
+            // confirmation, in addition to this toast, instead of nulling
+            // selected immediately. It still auto-closes shortly after (the
+            // queue has dozens of records to work through, one at a time --
+            // requiring a manual close on every success would slow that
+            // down) but only if the operator has not already navigated
+            // elsewhere in the meantime.
+            setSelected(resolved);
             toast("普通资格冻结已通过服务端安全门禁解除。", "success");
+            window.setTimeout(() => {
+              setSelected((current) =>
+                current?.id === resolved.id ? null : current,
+              );
+            }, 1600);
           }}
         />
       )}
@@ -3134,6 +3178,16 @@ function EligibilityFreezeDrawer({
   const [evidenceReference, setEvidenceReference] = useState("");
   const [note, setNote] = useState("");
   const [working, setWorking] = useState(false);
+  // CR-0007 problem two: the embedded console can stretch this page's iframe
+  // to up to 4000px while the browser viewport stays much shorter, so a
+  // toast anchored to the iframe's own document corner can land outside the
+  // visible area -- an operator sees no feedback and assumes the click did
+  // nothing. This mirrors the same failure into the drawer's own visible
+  // area (in addition to, not instead of, the toast).
+  const [resolveError, setResolveError] = useState<{
+    message: string;
+    code: string;
+  } | null>(null);
 
   const resolve = async () => {
     if (working || item.status !== "open" || item.reason === "SOURCE_REFUND")
@@ -3141,7 +3195,9 @@ function EligibilityFreezeDrawer({
     const evidence = evidenceReference.trim();
     const resolutionNote = note.trim();
     if (!evidence || !resolutionNote) {
-      toast("必须填写可追溯证据引用和处理说明。", "error");
+      const message = "必须填写可追溯证据引用和处理说明。";
+      setResolveError({ message, code: "EVIDENCE_REQUIRED" });
+      toast(message, "error");
       return;
     }
     if (
@@ -3151,10 +3207,13 @@ function EligibilityFreezeDrawer({
       /\0/.test(resolutionNote) ||
       /^manual-ui:/i.test(evidence)
     ) {
-      toast("证据引用或处理说明包含不允许的内容。", "error");
+      const message = "证据引用或处理说明包含不允许的内容。";
+      setResolveError({ message, code: "EVIDENCE_INVALID" });
+      toast(message, "error");
       return;
     }
     setWorking(true);
+    setResolveError(null);
     try {
       const resolved = await invoiceApi.resolveEligibilityFreeze(item.id, {
         version: item.version,
@@ -3165,10 +3224,11 @@ function EligibilityFreezeDrawer({
       setNote("");
       onResolved(resolved);
     } catch (error) {
-      toast(
-        error instanceof Error ? error.message : "资格冻结处理失败。",
-        "error",
-      );
+      const message =
+        error instanceof Error ? error.message : "资格冻结处理失败。";
+      const code = error instanceof InvoiceApiError ? error.code : "UNKNOWN";
+      setResolveError({ message, code });
+      toast(message, "error");
     } finally {
       setWorking(false);
     }
@@ -3204,6 +3264,10 @@ function EligibilityFreezeDrawer({
               <div>
                 <dt>来源</dt>
                 <dd>{item.sourceLabel}</dd>
+              </div>
+              <div>
+                <dt>来源用户 ID</dt>
+                <dd>{item.externalUserId}</dd>
               </div>
               <div>
                 <dt>冻结范围</dt>
@@ -3252,6 +3316,15 @@ function EligibilityFreezeDrawer({
               <p className="freeze-form-note">
                 证据和说明会在服务端加密保存；本页面不会读取或回显已保存内容。
               </p>
+              {resolveError && (
+                <div className="freeze-resolution-result freeze-resolution-result-error" role="alert">
+                  <CircleAlert size={16} />
+                  <div>
+                    <span>{resolveError.message}</span>
+                    <small>错误代码：{resolveError.code}</small>
+                  </div>
+                </div>
+              )}
               <div className="modal-actions">
                 <button className="button button-secondary" disabled={working} onClick={onClose}>
                   取消
@@ -5119,8 +5192,17 @@ function App() {
     <AuthProvider>
       <ToastContext.Provider value={showToast}>
         <AuthenticatedApplication />
+        {/* CR-0007 problem two: .toast is position:fixed against this
+            page's OWN document, not the browser viewport. The embedded
+            console can stretch this admin iframe up to 4000px tall while
+            the real viewport stays much shorter, so a toast anchored to
+            the document's bottom-right corner can land below the visible
+            area. Anchoring to the top instead keeps it inside the part of
+            the iframe that is always scrolled into view on load. */}
         {toast && (
-          <div className={`toast toast-${toast.tone}`}>
+          <div
+            className={`toast toast-${toast.tone}${embeddedAdminMode ? " toast-anchor-top" : ""}`}
+          >
             {toast.tone === "success" ? (
               <CheckCircle2 size={18} />
             ) : (

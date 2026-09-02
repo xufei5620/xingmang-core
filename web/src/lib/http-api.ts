@@ -145,6 +145,10 @@ type BackendEligibilityFreeze = {
   opened_at: string;
   resolved_at?: string;
   version: number;
+  // CR-0007 problem one: must stay byte-for-byte in sync with the backend
+  // Go DTO's key set (eligibilityFreezeDTO) and mapEligibilityFreeze's
+  // `allowed` list below -- see exactObjectKeys's callers.
+  external_user_id: string;
 };
 
 type BackendSourceHealth = {
@@ -636,6 +640,7 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     "opened_at",
     "resolved_at",
     "version",
+    "external_user_id",
   ] as const;
   exactObjectKeys(
     value,
@@ -663,7 +668,11 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     !Number.isSafeInteger(value.version) ||
     value.version <= 0 ||
     (value.status === "open" && value.resolved_at !== undefined) ||
-    (value.status === "resolved" && !validTimestamp(value.resolved_at))
+    (value.status === "resolved" && !validTimestamp(value.resolved_at)) ||
+    typeof value.external_user_id !== "string" ||
+    value.external_user_id.length === 0 ||
+    value.external_user_id.length > 512 ||
+    /[\r\n\0]/.test(value.external_user_id)
   ) {
     throw new InvoiceApiError("资格冻结记录包含无效字段，已停止显示。", {
       code: "INVALID_ELIGIBILITY_FREEZE_RESPONSE",
@@ -681,6 +690,7 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     openedAt: value.opened_at,
     resolvedAt: value.resolved_at,
     version: value.version,
+    externalUserId: value.external_user_id,
   } satisfies EligibilityFreeze;
 }
 
@@ -1939,7 +1949,11 @@ export const httpInvoiceApi: InvoiceApiClient = {
       (filters.reason !== undefined &&
         !eligibilityFreezeReasons.includes(filters.reason)) ||
       (filters.sourceInstanceId !== undefined &&
-        !uuidPattern.test(filters.sourceInstanceId))
+        !uuidPattern.test(filters.sourceInstanceId)) ||
+      (filters.externalUserId !== undefined &&
+        (filters.externalUserId.length === 0 ||
+          filters.externalUserId.length > 512 ||
+          /[\r\n\0]/.test(filters.externalUserId)))
     ) {
       throw new InvoiceApiError("资格冻结筛选条件无效。", {
         code: "INVALID_FILTER",
@@ -1949,6 +1963,8 @@ export const httpInvoiceApi: InvoiceApiClient = {
     if (filters.reason) query.set("reason", filters.reason);
     if (filters.sourceInstanceId)
       query.set("source_instance_id", filters.sourceInstanceId);
+    if (filters.externalUserId)
+      query.set("external_user_id", filters.externalUserId);
     if (cursor) {
       const decoded = eligibilityFreezeCursor(cursor);
       query.set("before_opened_at", decoded.beforeOpenedAt);

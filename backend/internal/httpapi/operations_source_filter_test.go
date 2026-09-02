@@ -27,6 +27,9 @@ type fakeSourceFilterOperations struct {
 
 	refundCasesQuery postgresstore.RefundCasePageQuery
 	refundCasesPage  postgresstore.RefundCasePage
+
+	eligibilityFreezesQuery postgresstore.EligibilityFreezePageQuery
+	eligibilityFreezesPage  postgresstore.EligibilityFreezePage
 }
 
 func (f *fakeSourceFilterOperations) SourceHealth(context.Context) (postgresstore.SourceHealthReport, error) {
@@ -52,8 +55,9 @@ func (f *fakeSourceFilterOperations) ListRefundCasesPage(_ context.Context, in p
 	f.refundCasesQuery = in
 	return f.refundCasesPage, nil
 }
-func (f *fakeSourceFilterOperations) ListEligibilityFreezesPage(context.Context, postgresstore.EligibilityFreezePageQuery) (postgresstore.EligibilityFreezePage, error) {
-	panic("unused in this test")
+func (f *fakeSourceFilterOperations) ListEligibilityFreezesPage(_ context.Context, in postgresstore.EligibilityFreezePageQuery) (postgresstore.EligibilityFreezePage, error) {
+	f.eligibilityFreezesQuery = in
+	return f.eligibilityFreezesPage, nil
 }
 func (f *fakeSourceFilterOperations) ResolveEligibilityFreeze(context.Context, string, string, int64, string, string) (postgresstore.EligibilityFreeze, error) {
 	panic("unused in this test")
@@ -170,5 +174,52 @@ func TestListRefundCasesHandlerForwardsSourceInstanceFilter(t *testing.T) {
 	}
 	if fake.refundCasesQuery.SourceInstanceID != "" {
 		t.Fatalf("expected no source instance filter, got %q", fake.refundCasesQuery.SourceInstanceID)
+	}
+}
+
+// CR-0007 problem one: GET /api/v1/admin/eligibility-freezes must forward the
+// new external_user_id query parameter to the store query unchanged, and
+// must return it (plain, unmasked) on every returned item.
+func TestListEligibilityFreezesHandlerForwardsExternalUserIDFilter(t *testing.T) {
+	server, fake := sourceFilterTestServer(t)
+	fake.eligibilityFreezesPage = postgresstore.EligibilityFreezePage{Items: []postgresstore.EligibilityFreeze{
+		{ID: "61000000-0000-4000-8000-000000000050", PrincipalID: "20000000-0000-4000-8000-000000000001",
+			ExternalUserID: "1147", SourceInstanceID: "10000000-0000-4000-8000-000000000001",
+			SourceType: domain.SourceSub2API, SourceName: "Sub2API", FreezeReason: "SOURCE_GAP",
+			Status: "open", EligibilityStatus: "frozen", OpenedAt: time.Now().UTC(), ResolutionVersion: 1},
+	}}
+
+	request := adminRequest("GET", "/api/v1/admin/eligibility-freezes?external_user_id=1147", "127.0.0.1", "")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != 200 {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if fake.eligibilityFreezesQuery.ExternalUserID != "1147" {
+		t.Fatalf("handler did not forward external_user_id: query=%+v", fake.eligibilityFreezesQuery)
+	}
+	var body struct {
+		Items []struct {
+			ExternalUserID string `json:"external_user_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 1 || body.Items[0].ExternalUserID != "1147" {
+		t.Fatalf("unexpected response body: %s", recorder.Body.String())
+	}
+
+	// Omitting the parameter must leave the filter empty (unscoped), same as
+	// every other optional eligibility-freeze filter.
+	unscopedRequest := adminRequest("GET", "/api/v1/admin/eligibility-freezes", "127.0.0.1", "")
+	unscopedRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unscopedRecorder, unscopedRequest)
+	if unscopedRecorder.Code != 200 {
+		t.Fatalf("unscoped status=%d body=%s", unscopedRecorder.Code, unscopedRecorder.Body.String())
+	}
+	if fake.eligibilityFreezesQuery.ExternalUserID != "" {
+		t.Fatalf("expected no external user id filter, got %q", fake.eligibilityFreezesQuery.ExternalUserID)
 	}
 }

@@ -23,9 +23,14 @@ var eligibilityFreezeReasons = map[string]struct{}{
 }
 
 type EligibilityFreeze struct {
-	ID                string            `json:"id"`
-	PrincipalID       string            `json:"-"`
-	ExternalAccountID string            `json:"-"`
+	ID                string `json:"id"`
+	PrincipalID       string `json:"-"`
+	ExternalAccountID string `json:"-"`
+	// ExternalUserID is the upstream platform's own (digital) user ID for
+	// this account, plain and unmasked (CR-0007 problem one). It is exposed
+	// deliberately -- see eligibilityFreezeDTO's comment in httpapi for why
+	// this is not the same redaction posture as ExternalAccountID above.
+	ExternalUserID    string            `json:"-"`
 	SourceInstanceID  string            `json:"source_instance_id"`
 	SourceType        domain.SourceType `json:"source_type"`
 	SourceName        string            `json:"source_name"`
@@ -45,8 +50,13 @@ type EligibilityFreezePageQuery struct {
 	Status           string
 	FreezeReason     string
 	SourceInstanceID string
-	BeforeOpenedAt   time.Time
-	BeforeID         string
+	// ExternalUserID filters to an exact match on external_accounts.
+	// external_user_id (CR-0007 problem one), the upstream platform's own
+	// user ID. It may be combined with SourceInstanceID to disambiguate
+	// across platforms that could otherwise reuse the same external ID.
+	ExternalUserID string
+	BeforeOpenedAt time.Time
+	BeforeID       string
 }
 
 type EligibilityFreezePage struct {
@@ -89,7 +99,8 @@ func scanEligibilityFreeze(row pgxRow) (EligibilityFreeze, error) {
 	var item EligibilityFreeze
 	err := row.Scan(&item.ID, &item.PrincipalID, &item.ExternalAccountID, &item.SourceInstanceID, &item.SourceType,
 		&item.SourceName, &item.FundingLotID, &item.FreezeReason, &item.Status, &item.EligibilityStatus,
-		&item.OpenedAt, &item.ResolvedAt, &item.ResolutionVersion, &item.EvidenceHash, &item.NoteHash)
+		&item.OpenedAt, &item.ResolvedAt, &item.ResolutionVersion, &item.EvidenceHash, &item.NoteHash,
+		&item.ExternalUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, domain.ErrNotFound
 	}
@@ -106,7 +117,8 @@ const eligibilityFreezeSelect = `
 	SELECT ef.id,ea.invoice_user_id::text,ef.external_account_id::text,eas.source_instance_id::text,
 		si.source_type,si.name,COALESCE(ef.funding_lot_id::text,''),ef.freeze_reason,ef.status,
 		eas.eligibility_status,ef.opened_at,COALESCE(ef.resolved_at,'epoch'::timestamptz),
-		ef.resolution_version,COALESCE(ef.resolution_evidence_hash,''),COALESCE(ef.resolution_note_hash,'')
+		ef.resolution_version,COALESCE(ef.resolution_evidence_hash,''),COALESCE(ef.resolution_note_hash,''),
+		ea.external_user_id
 	FROM eligibility_freezes ef
 	JOIN external_accounts ea ON ea.id=ef.external_account_id
 	JOIN source_account_eligibility_state eas ON eas.external_account_id=ef.external_account_id
@@ -133,6 +145,9 @@ func (s *Store) ListEligibilityFreezesPage(ctx context.Context, in EligibilityFr
 	if in.SourceInstanceID != "" && !eligibilityUUIDPattern.MatchString(in.SourceInstanceID) {
 		return EligibilityFreezePage{}, errors.New("invalid source instance filter")
 	}
+	if in.ExternalUserID != "" && (len(in.ExternalUserID) > 512 || strings.ContainsAny(in.ExternalUserID, "\r\n\x00")) {
+		return EligibilityFreezePage{}, errors.New("invalid external user id filter")
+	}
 	if in.BeforeOpenedAt.IsZero() != (strings.TrimSpace(in.BeforeID) == "") || in.BeforeID != "" && !eligibilityUUIDPattern.MatchString(in.BeforeID) {
 		return EligibilityFreezePage{}, errors.New("both valid eligibility freeze cursor fields are required")
 	}
@@ -147,6 +162,9 @@ func (s *Store) ListEligibilityFreezesPage(ctx context.Context, in EligibilityFr
 	}
 	if in.SourceInstanceID != "" {
 		add(` AND eas.source_instance_id=$%d::uuid`, in.SourceInstanceID)
+	}
+	if in.ExternalUserID != "" {
+		add(` AND ea.external_user_id=$%d`, in.ExternalUserID)
 	}
 	if !in.BeforeOpenedAt.IsZero() {
 		args = append(args, in.BeforeOpenedAt, in.BeforeID)

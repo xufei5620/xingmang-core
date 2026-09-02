@@ -212,6 +212,57 @@ func TestEligibilityFreezeSourceRefundNeverUsesGenericResolution(t *testing.T) {
 	}
 }
 
+// CR-0007 problem one: the admin queue's SELECT must return the joined
+// external_accounts.external_user_id ("u1" for the shared integration
+// baseline seeded by integrationStore), and the new ExternalUserID filter
+// must narrow to it (optionally alongside SourceInstanceID) with no matches
+// for an unrelated ID -- exercising both the SQL wiring and the validation
+// added to ListEligibilityFreezesPage.
+func TestEligibilityFreezePageSelectsAndFiltersByExternalUserID(t *testing.T) {
+	store, ctx := integrationStore(t)
+	f := seedEligibilityOpsFixture(t, store, ctx)
+
+	page, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ExternalUserID != "u1" {
+		t.Fatalf("unscoped page did not carry the baseline external user id: %+v", page.Items)
+	}
+
+	matched, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched.Items) != 1 || matched.Items[0].ID != f.freezeID {
+		t.Fatalf("external_user_id=u1 filter did not match the baseline freeze: %+v", matched.Items)
+	}
+
+	// Combined with SourceInstanceID, still matches (the two filters agree).
+	combined, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "u1", SourceInstanceID: f.sourceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(combined.Items) != 1 {
+		t.Fatalf("external_user_id + source_instance_id combined filter dropped the match: %+v", combined.Items)
+	}
+
+	unmatched, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "no-such-upstream-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unmatched.Items) != 0 {
+		t.Fatalf("unrelated external_user_id unexpectedly matched: %+v", unmatched.Items)
+	}
+
+	if _, err = store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "bad\r\nvalue"}); err == nil {
+		t.Fatal("external_user_id filter with control characters was accepted")
+	}
+	if _, err = store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: strings.Repeat("a", 513)}); err == nil {
+		t.Fatal("oversized external_user_id filter was accepted")
+	}
+}
+
 func TestEligibilitySummaryKeepsCashMinorSeparateFromServiceUnits(t *testing.T) {
 	store, ctx := integrationStore(t)
 	f := seedEligibilityOpsFixture(t, store, ctx)

@@ -9,12 +9,25 @@ ledger. It does not create a manual amount override.
 administrator role, fresh MFA step-up, CSRF policy and administrator IP
 allowlist. It supports a maximum page size of 100 and keyset pagination with
 `before_opened_at` plus `before_id`. Filters are `status=open|resolved|all`,
-the compiled freeze-reason whitelist and a source-instance UUID.
+the compiled freeze-reason whitelist, a source-instance UUID and (CR-0007) an
+exact-match `external_user_id`, which may be combined with the source-instance
+filter to disambiguate across platforms that could otherwise reuse the same
+external ID.
 
-The response contains only invoice-side IDs, source label/type, optional
-funding-lot ID, freeze reason/status, timestamps and CAS version. It never
-returns external user IDs, source cursors, trigger object IDs, revision or
-configuration hashes, evidence references, notes or ciphertext.
+The response contains invoice-side IDs, source label/type, optional
+funding-lot ID, freeze reason/status, timestamps, CAS version and (CR-0007,
+reversing this endpoint's prior posture) the upstream platform's own
+`external_user_id`, plain and unmasked. It still never returns source
+cursors, trigger object IDs, revision or configuration hashes, evidence
+references, notes or ciphertext, and it still never returns the invoice
+system's own internal external-account row ID. The plain external user ID is
+not a new PII exposure: the platform console's own user detail page already
+shows the identical numeric ID in the clear, and the self-service
+`listSourceAccounts` endpoint already treats it as administrator-visible
+(there, masked). See `docs/change-requests/CR-0007-invoice-admin-freeze-queue-operability.md`
+for why the queue previously omitted it (an 83-record backlog was otherwise
+unidentifiable without querying the database directly) and why exposing it
+plain does not cross a new trust boundary.
 
 ## Safe resolution
 
