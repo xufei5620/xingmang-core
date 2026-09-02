@@ -23,6 +23,12 @@ import (
 // catalogFields) — these tests exercise the httpapi decode
 // (catalogRowsForService/applyCatalog), not the connector encode side
 // (already covered by each connector's own tests).
+//
+// XM-CHAN-GROUP0 extended this same suite with one more field ("group",
+// NewAPI-only — connectors/newapi.ChannelStatus.Group) rather than adding a
+// parallel test file: it decodes through the exact same
+// catalogRowsForService/applyCatalog path as every other v3 field, so it
+// belongs in the same round-trip test, not a separate one.
 
 // catalogObservation builds a "<service_type>.channels.status" observation
 // whose single channel row carries the full v3 catalog shape, mirroring
@@ -53,6 +59,7 @@ func catalogObservation(serviceType string) ops.Observation {
 					"last_used_at":        "2026-08-29T00:55:00Z",
 					"created_at":          "2026-01-01T00:00:00Z",
 					"expires_at":          "2027-01-01T00:00:00Z",
+					"group":               "default,vip",
 				},
 			},
 		}, StalenessThresholdSeconds: 1800,
@@ -90,6 +97,7 @@ type platformChannelsCatalogBody struct {
 		LastUsedAt         *string  `json:"last_used_at"`
 		CreatedAt          *string  `json:"created_at"`
 		ExpiresAt          *string  `json:"expires_at"`
+		Group              *string  `json:"group"`
 		Capacity           *struct {
 			Used  *int64 `json:"used"`
 			Limit *int64 `json:"limit"`
@@ -210,6 +218,9 @@ func TestPlatformChannelsQueryExposesV3CatalogFields(t *testing.T) {
 	if item.ExpiresAt == nil || *item.ExpiresAt != "2027-01-01T00:00:00Z" {
 		t.Fatalf("expires_at = %v", item.ExpiresAt)
 	}
+	if item.Group == nil || *item.Group != "default,vip" {
+		t.Fatalf("group = %v, want default,vip", item.Group)
+	}
 }
 
 // TestPlatformChannelsQueryLeavesCatalogFieldsNilWhenAbsent: a channel with
@@ -235,7 +246,8 @@ func TestPlatformChannelsQueryLeavesCatalogFieldsNilWhenAbsent(t *testing.T) {
 	if item.Kind != nil || item.Vendor != nil || item.Capacity != nil || item.Scheduling != nil ||
 		item.Today != nil || item.UsageWindow != nil || item.Proxy != nil ||
 		item.RateMultiplier != nil || item.UpstreamMultiplier != nil ||
-		item.LastUsedAt != nil || item.CreatedAt != nil || item.ExpiresAt != nil {
+		item.LastUsedAt != nil || item.CreatedAt != nil || item.ExpiresAt != nil ||
+		item.Group != nil {
 		t.Fatalf("expected every v3 field except status to be JSON null for a bare channel row, got %+v", item)
 	}
 	// Also confirm this is genuinely a pre-existing-field regression guard:
