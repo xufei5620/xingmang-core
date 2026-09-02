@@ -60,6 +60,20 @@ fast-forward(即真正分叉,不是单纯落后)时,脚本会打印精确的手�
 重新运行本脚本。fetch 本身失败(网络/镜像不可达)不算这个退出码,仍走既有的"有精确匹配
 SHA 才放行"fail-closed 路径(退出码 1)。
 
+**cpa-observations 等待预算(XM-DEPLOY-CPAWAIT0)**:production file 模式下,`deploy-local.sh`
+在 API/worker 启动后会等待新部署对应的四条同一 generation 的成功 CPA 观测落库
+(`cpa.requests.daily`/`cpa.cost.daily`/`cpa.keys.usage`/`cpa.accounts.health`)。等待预算 =
+worker 自己的 cpa_sync 周期(读同一个 `XM_CPA_SYNC_INTERVAL`、同一解析规则和默认值,未设置
+时用 worker 侧默认 300s)+60s 安全边际,不再是固定的~24s 窗口——worker 容器刚重建时,即使
+周期任务会在启动时尝试同步一次,也没有一个可靠的亚分钟级上界能保证这次尝试已经落库完成,
+唯一确定的上界是"最迟不超过下一个正常周期节拍"。曾经因为这个窗口太短,两次生产部署在
+观测值已经正确产生之后才被误判失败。
+
+每 10s 轮询一次,至多每 60s 打印一行进度(`cpa-observations=waiting elapsed=…s
+expected_generation=…`)。预算耗尽仍未匹配时,失败行会把期望的状态元组和最后一次观测到的
+状态元组一起打出来(`expected=... observed=...`),用来判断是旧 generation 还在、部分到齐
+还是完全没有。
+
 ## 之后再升级为 DEPLOY0 全流程(可选)
 
 `deploy/scripts/install-git-server.sh --repo /srv/git/xingmang-platform.git --ci-dir /srv/ci --confirm`
