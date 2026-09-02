@@ -122,6 +122,14 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     expect(screen.getByRole("link", { name: "返回 Sub2API 渠道管理" }).getAttribute("href")).toBe(
       "/platforms/sub2api?tab=upstream",
     );
+    // 渠道保障区块：被动指标与检测任务都指路到平台整体真实数据（检测任务
+    // 按平台/模型声明，不按单一渠道），不编一个只属于本渠道的结论
+    expect(
+      screen.getByRole("link", { name: "查看 Sub2API 渠道保障 · 保障概览 →" }).getAttribute("href"),
+    ).toBe("/platforms/sub2api?tab=model&sub=overview");
+    expect(
+      screen.getByRole("link", { name: "查看 Sub2API 渠道保障 · 检测任务 →" }).getAttribute("href"),
+    ).toBe("/platforms/sub2api?tab=model&sub=probes");
   });
 
   it("「类型」字段按绑定账号的接入方式派生：订阅账号 / 上游渠道 / 未映射", async () => {
