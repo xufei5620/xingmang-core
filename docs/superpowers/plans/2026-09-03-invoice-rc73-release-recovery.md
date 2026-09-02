@@ -20,16 +20,22 @@
 
 ### Task 1: Source identity
 
-- [ ] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
-- [ ] Create `v0.1.0-rc73-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
+- [x] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
+- [x] Create `v0.1.0-rc73-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
 
 ### Task 2: Image evidence
 
-- [ ] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC73 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
+- [x] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC73 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
 
 ### Task 3: Production and repair
 
-- [ ] Sign exactly one strict-ready RC73 directory, transfer only its nine manifest-bound images, reuse the latest pre-deploy backup if it is under two hours old (otherwise take a new one with the offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, require readyz 200 in the verify step, and record deployment evidence beside the release.
+- [x] Sign exactly one strict-ready RC73 directory, transfer only its nine manifest-bound images, reuse the latest pre-deploy backup if it is under two hours old (otherwise take a new one with the offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, require readyz 200 in the verify step, and record deployment evidence beside the release.
 - [ ] Run `invoice-eligibility-repair --kind=balance-anchor` from the RC73 tools image in `--dry-run`; compare the per-account summary against the 2026-09-02 snapshot (66 freezes on 98cce4c8, 13 on 6706ea6a, likely grown since); then `--apply` with the approved operator id only after the owner's approval; confirm the accounts leave `frozen` unless another freeze reason remains, and that subsequent checkpoints evaluate without new `SOURCE_GAP` freezes.
 
 Production remains blocked until the credentialed human canary (an anchored account's next balance checkpoint evaluating `matched`, the admin freeze queue showing the source user id and a refused unfreeze explaining its reason inside the embedded drawer) binds RC73.
+
+## Execution record (2026-09-03)
+
+- Task 1: XM-INV-ANCHOR-BALANCE (`80ae6e5`), XM-INV-FREEZE-QUEUE-UX (`220ba75`), XM-INV-TRIVY-REFRESH-FIX (`4c72520`), XM-INV-GATE-TMPDIR (`423f1be`) merged; identity bump `6eb8362` + `c467b30`. Backend full suite green, web typecheck/94 tests/build green, gitleaks clean, four failure-evidence verifiers 0, gate self-test 0. Tag first created at `c467b30`.
+- Task 2: `release/0.1.0-rc73-exact1` … `exact4` retained as failed evidence: the source-verification step's shared PostgreSQL sidecar (512 MiB tmpfs) filled up — its WAL alone measured ~320 MiB after the enlarged integration suite — and PostgreSQL aborted (SIGABRT, then "the database system is in recovery mode") while migration 0009 committed inside `internal/migrate`. Fix `7061d81` (`scripts/verify-postgres.ps1`: 2g tmpfs, `max_wal_size=256MB`, `min_wal_size=64MB`, `checkpoint_timeout=60s`); tag re-created once at `7061d81` before any transfer. `release/0.1.0-rc73-exact5`: image gate 42, ordinary and strict verifiers 0, `SHA256SUMS.sig` verified.
+- Task 3: transfer verified on the host; staging loaded nine images and verified tag and evidence signatures; fresh backup `invoice-20260902T213458Z` (RC72's was older than two hours; signing key on tmpfs, shredded after); `deploy/roll-forward.sh 7061d81…` ROLL FORWARD PASS with 18 containers on `0.1.0-rc73`, healthz 200, readyz 200. `CONSOLE_ASSERTION_ENABLED` stays unset. Deployment record `deployment-records/rc73-deploy-*`. Balance-anchor repair: dry-run next; apply only after the owner's approval.
