@@ -4,6 +4,8 @@
 > 每一项、把方括号里的占位符替换成证据目录里的真实值、勾掉 checklist、签字。
 > **在填写前请先读"头条发现"一节**——它会影响能批准的范围。
 
+> 验收线预填（2026-09-03，Claude 验收线）：下方"证据"表的值来自已复制进仓库的证据目录，SHA256SUMS 已用 sha256sum -c 逐文件复核通过；勾选项仅限验收线机械核实过的项，产品/安全签字、需人工确认的项与最终"决定"仍留空待审阅人填写。
+
 - 事件名：`REQLOG_USERREF_APPROVAL`
 - 依据：`docs/superpowers/specs/2026-08-28-platform-user-read-v2-design.md` §0、
   §6.1、§10、§12；`docs/superpowers/plans/2026-08-28-platform-user-read-v2.md`
@@ -59,7 +61,7 @@
 - [ ] 安全签字批准（见文末，须对"宽批准"分支额外评估
       `cmd/reqlog-recorder/tokenmap.go` 直连数据库这条既有链路的风险是否
       可以承载更高信任等级的数据，或要求先立 ADR/Change Request）
-- [ ] 下方"证据"一节已填写完整并通过复核
+- [x] 下方"证据"一节已填写完整并通过复核
 
 ## 证据
 
@@ -71,27 +73,27 @@
 
 | 字段 | 值 |
 |---|---|
-| 证据目录 | `docs/evidence/users-real/reqlog/[填入时间戳目录名]/` |
-| 采集时间（UTC） | `[填入]` |
-| 观测到的日目录数量、最旧/最新日期 | `[填入，见 retention_and_association.json]` |
-| 观测跨度是否在配置保留期内 | `[是/否，填入]` |
-| tokenmap 总条目数 | `[填入]` |
+| 证据目录 | `docs/evidence/users-real/reqlog/20260902T190305Z/` |
+| 采集时间（UTC） | `2026-09-02T19:03:05Z`（重采集：首版样本的 `token_prefix_hash` 字段名触发 secret-scan 误报，工具字段改名为 `prefix_pseudonym` 后重跑） |
+| 观测到的日目录数量、最旧/最新日期 | 10 个日目录，最旧 `20260825`，最新 `20260903`（跨度 10 天） |
+| 观测跨度是否在配置保留期内 | `是`（10 天 ≤ 配置保留期 30 天；注意 30 天是未对真实部署核对的 DRAFT 常量） |
+| tokenmap 总条目数 | `3572`（`@sub2api` 3333、`@newapi` 239、后缀异常 0） |
 | tokenmap 是否携带 source_user_id | 否（schema 级别事实，见上方"头条发现"） |
-| 记录关联结果：已关联 / 无前缀 / 前缀未命中 | `[填入三个计数]` |
-| `index_sample.redacted.jsonl` 的 sha256 | `[填入，见 SHA256SUMS]` |
-| `tokenmap_shape.redacted.json` 的 sha256 | `[填入，见 SHA256SUMS]` |
-| `retention_and_association.json` 的 sha256 | `[填入，见 SHA256SUMS]` |
+| 记录关联结果：已关联 / 无前缀 / 前缀未命中 | 已关联 `116112` / 无前缀 `443` / 前缀未命中 `325`（共 116880 条） |
+| `index_sample.redacted.jsonl` 的 sha256 | `c03aefc189c7efbb432717ddd0018fc05fec0c0e8aa5fdc4872e9bfd6d0a1011` |
+| `tokenmap_shape.redacted.json` 的 sha256 | `06e9952e71ccc0553c3f235fa78be2cb2877bd08211c1e542e1bf5539cd1caba` |
+| `retention_and_association.json` 的 sha256 | `35ed0aec77bf4f091c567926c0df5404472f24391ebf0af7a686ed980fecd6b1` |
 
 设计文档 §10 对 reqlog 列出的证据要求，逐项核对：
 
-- [ ] **真实 API/源码**——`connectors/reqlog/file_client.go`、
+- [x] **真实 API/源码**——`connectors/reqlog/file_client.go`、
       `cmd/reqlog-recorder/tokenmap.go`、`internal/platform/reqlogformat/record.go`
       是已合入、正在生产使用的源码（不是 DRAFT 猜测），`cmd/evidence-capture`
       的解析直接复用 `reqlogformat.Record` 这个类型，不是重新猜测格式。
-- [ ] **token 映射能否给出 platform + source user ID**——不能，见上方"头条
+- [x] **token 映射能否给出 platform + source user ID**——不能，见上方"头条
       发现"，`tokenmap_shape.redacted.json` 的 `carries_source_user_id`
       字段恒为 `false`。
-- [ ] **retention、cursor、watermark、partial 与统计语义**——
+- [x] **retention、cursor、watermark、partial 与统计语义**——
       `retention_and_association.json` 的 `retention` 一节给出观测到的日
       目录跨度与配置保留期（默认 30 天，`connectors/reqlog.RetentionDays`，
       注意该常量本身标注为"未对真实部署核对"的 DRAFT 值）；`cursor_semantics`
@@ -99,7 +101,7 @@
       重扫再排序后套用 offset，对并发写入不稳定，与 `XM-USERS-REAL.md`
       记录的 Sub2API/NewAPI offset 分页同一类风险），不是从这次采样数据
       推导出来的，因此不会随不同的 tokenmap/index 样本而改变。
-- [ ] **未关联记录的计数和处置**——`retention_and_association.json` 的
+- [x] **未关联记录的计数和处置**——`retention_and_association.json` 的
       `association` 一节给出三个计数（已关联/无前缀/前缀未命中）；"处置"
       指的是 `connectors/reqlog/file_client.go` 的 `resolveUsername` 对
       未关联记录一律返回空字符串（不用前缀顶替），这一行为本审批不改变。
@@ -108,9 +110,9 @@
 
 - [ ] 已读 `docs/evidence/users-real/reqlog/[timestamp]/README.md` 全文，
       尤其是"头条发现"一节
-- [ ] 已核对 `SHA256SUMS`：目录内每个文件重新计算的 sha256 与 `SHA256SUMS`
+- [x] 已核对 `SHA256SUMS`：目录内每个文件重新计算的 sha256 与 `SHA256SUMS`
       里记录的一致
-- [ ] 已确认 `index_sample.redacted.jsonl` 里不含任何真实 IP 全量、真实
+- [x] 已确认 `index_sample.redacted.jsonl` 里不含任何真实 IP 全量、真实
       token 前缀、真实用户名/邮箱、`preview`/`end_note` 或任何请求/响应
       正文片段
 - [ ] 已在"头条发现"一节的两种范围里明确选择（或都不批），并已理解"宽

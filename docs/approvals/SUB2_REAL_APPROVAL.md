@@ -4,6 +4,8 @@
 > 每一项、把方括号里的占位符替换成证据目录里的真实值、勾掉 checklist、签字，
 > 不需要再做任何额外的工程调查。
 
+> 验收线预填（2026-09-03，Claude 验收线）：下方"证据"表的值来自已复制进仓库的证据目录，SHA256SUMS 已用 sha256sum -c 逐文件复核通过；勾选项仅限验收线机械核实过的项，产品/安全签字、需人工确认的项与最终"决定"仍留空待审阅人填写。
+
 - 事件名：`SUB2_REAL_APPROVAL`
 - 依据：`docs/superpowers/specs/2026-08-28-platform-user-read-v2-design.md` §0、
   §10、§12；`docs/superpowers/plans/2026-08-28-platform-user-read-v2.md` Task 4
@@ -25,7 +27,7 @@ CORE_APPROVAL 已通过、本模板存在、脱敏证据已采集，**均不构�
 
 - [ ] 产品签字批准（见文末）
 - [ ] 安全签字批准（见文末）
-- [ ] 下方"证据"一节已填写完整并通过复核
+- [x] 下方"证据"一节已填写完整并通过复核
 - [ ] 人工已在 Sub2API 后台，用即将登记给平台的那个 admin 账号，完成一次合规
       确认（等价于 `POST /api/v1/admin/compliance/accept`，见
       `docs/runbooks/SWITCH-SUB2API-REAL.md` 前置一节）。**这一步必须由人工
@@ -41,21 +43,21 @@ CORE_APPROVAL 已通过、本模板存在、脱敏证据已采集，**均不构�
 
 | 字段 | 值 |
 |---|---|
-| 证据目录 | `docs/evidence/users-real/sub2api/[填入时间戳目录名]/` |
-| 采集时间（UTC） | `[填入]` |
-| 上游实例版本（`version.json` 的 `version`） | `[填入]` |
-| 上游 endpoint 主机（`README.md` 的 endpoint host） | `[填入]` |
-| 使用的 CredentialRef | `[填入，形如 secret://sub2api-prod/read-token]` |
-| `users_page.redacted.json` 的 sha256 | `[填入，见 SHA256SUMS]` |
-| `user_detail.redacted.json` 的 sha256 | `[填入，见 SHA256SUMS]` |
-| `version.json` 的 sha256 | `[填入，见 SHA256SUMS]` |
-| 本次采集是否遇到 AdminComplianceGuard（423） | `[是/否]`——若为"是"，说明前置
+| 证据目录 | `docs/evidence/users-real/sub2api/20260902T054723Z/` |
+| 采集时间（UTC） | `2026-09-02T05:47:23Z`（version 请求）/ `2026-09-02T05:47:24Z`（users_page 请求） |
+| 上游实例版本（`version.json` 的 `version`） | `0.1.184`（比 `EV-2026-08-27` 矩阵上限 0.1.183 高一个 patch 版，见下方核对项） |
+| 上游 endpoint 主机（`README.md` 的 endpoint host） | `api.solov.cc`（环境标签 production） |
+| 使用的 CredentialRef | `secret://sub2api-prod/read-token` |
+| `users_page.redacted.json` 的 sha256 | `02013b4f7761cbd60e7aea86bbd6ca8ff4fd3471a9c61c3307b88ada3e7ce4ee` |
+| `user_detail.redacted.json` 的 sha256 | `d250d91f403b4dbafbaf8f1b9c841b8ae742734f4e3774167248e42f08ddaad9` |
+| `version.json` 的 sha256 | `8f3991ad282def8b5774479c57731a6318a19fc8d6399f42d08dd8e36d1da7d8` |
+| 本次采集是否遇到 AdminComplianceGuard（423） | `否`（两次请求均 200，证据文件已写出）——若为"是"，说明前置
   条件尚未满足，不得批准，需回去补做合规确认后重新采集 |
 
 设计文档 §10 对 Sub2API 列出的四项证据要求，逐项核对（勾选即代表审阅人已在
 证据目录里亲自核实，不是自动为真）：
 
-- [ ] **脱敏的 `/api/v1/admin/users` 响应形状和实例版本**——对照证据目录的
+- [x] **脱敏的 `/api/v1/admin/users` 响应形状和实例版本**——对照证据目录的
       `users_page.redacted.json`（列表形状）与 `version.json`（实例版本）。
 - [ ] **分页、ID、状态、余额 scale、created/last-active 的解释**——对照证据
       目录 `README.md`"字段捕获（脱敏）vs. 丢弃"一节；kept 字段应恰好是
@@ -63,6 +65,7 @@ CORE_APPROVAL 已通过、本模板存在、脱敏证据已采集，**均不构�
       `connectors/platformusers/upstream.go` 已核对过的 `sub2apiUserItem`
       逐字一致。若观测到的版本比该文件注释的 0.1.133～0.1.183 更新，需要
       额外核对是否新增/删除了字段（dropped 字段列表里出现陌生名字就是信号）。
+      验收线核对：kept 恰好为 `balance`/`email`/`id`/`last_active_at`/`status`/`username` 六项；观测版本 0.1.184 超出矩阵一个 patch 版，dropped 列表为 `allowed_groups`、`balance_notify_*`（4 项）、`concurrency`、`created_at`、`current_concurrency`、`frozen_balance`、`last_used_at`、`notes`、`restrict_public_groups`、`role`、`rpm_limit`、`total_recharged`、`updated_at`，未见与六个 kept 字段同名或替代它们的陌生字段；是否接受"一个 patch 版外"的兼容性结论由审阅人在此勾选。
 - [ ] **人工已完成 AdminComplianceGuard 确认的记录**——由人工在此处附证据
       （完成确认的时间、操作人）：`[填入]`。本工具无法验证这一步是否真的
       做过，只能在没做时因为收到 423 而拒绝写出证据（见上表最后一行）。
@@ -79,9 +82,9 @@ CORE_APPROVAL 已通过、本模板存在、脱敏证据已采集，**均不构�
 ## 审阅人 checklist
 
 - [ ] 已读 `docs/evidence/users-real/sub2api/[timestamp]/README.md` 全文
-- [ ] 已核对 `SHA256SUMS`：目录内每个文件重新计算的 sha256 与 `SHA256SUMS`
+- [x] 已核对 `SHA256SUMS`：目录内每个文件重新计算的 sha256 与 `SHA256SUMS`
       里记录的一致（`sha256sum -c SHA256SUMS` 或等价操作）
-- [ ] 已确认 `users_page.redacted.json` / `user_detail.redacted.json` 里
+- [x] 已确认 `users_page.redacted.json` / `user_detail.redacted.json` 里
       不含任何真实邮箱全文、真实用户名、真实 token、真实完整余额数字——
       邮箱应形如 `zh***@真实域名`，id/用户名应是 `u_`/`name_` 前缀的十六进
       制串，余额应是数字位全部被替换成 0（或 1 打头）的占位串

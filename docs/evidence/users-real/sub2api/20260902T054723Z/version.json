@@ -1,0 +1,6 @@
+{
+  "observed_at": "2026-09-02T05:47:23.872200191Z",
+  "platform": "sub2api",
+  "route": "/api/v1/admin/system/version",
+  "version": "0.1.184"
+}

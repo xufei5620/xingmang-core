@@ -220,3 +220,73 @@ func TestKernelRequiresRequestID(t *testing.T) {
 		t.Fatalf("缺 RequestID 应 INVALID_PARAMS, got %v", err)
 	}
 }
+
+// TestKernelPreservesHandlerActionErrorCode 回归的是验收线发现的真实故障：
+// Handler 用 NewError 做了域错误映射（比如 assurance 包对着不存在的渠道返回
+// CodeInvalidParams），内核却一律把 Handler 失败压成 EXECUTION_FAILED，导致
+// httpapi.safeMessage（errors.As 只认最外层 *Error）够不到 Handler 的安全文案，
+// 真实 HTTP 调用方看到的是错误的状态码（502 而非 400）和一句无意义的通用提示，
+// ActionRun / 审计事件里存的错误码也是错的。
+func TestKernelPreservesHandlerActionErrorCode(t *testing.T) {
+	cause := errors.New("pq: no rows in result set for channel_id=ch_9x2")
+	k, runs, sink := newAuditedKernel(t, demoDefinition(),
+		func(context.Context, map[string]any) (any, error) {
+			return nil, NewError(CodeInvalidParams, "渠道目录里查无此渠道", cause)
+		})
+	ctx := principal.WithPrincipal(context.Background(), testPrincipal("registry.service.manage"))
+
+	_, err := k.Execute(ctx, okRequest())
+	if err == nil {
+		t.Fatal("Handler 失败时 Execute 应返回错误")
+	}
+	if ErrorCode(err) != CodeInvalidParams {
+		t.Fatalf("Kernel 应保留 Handler 的错误码, got %v", ErrorCode(err))
+	}
+	var ae *Error
+	if !errors.As(err, &ae) || ae.Message != "渠道目录里查无此渠道" {
+		t.Fatalf("Kernel 应保留 Handler 的安全文案, got %+v", ae)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("内部仍应能 unwrap 到根因")
+	}
+	if got := err.Error(); strings.Contains(got, "pq:") || strings.Contains(got, "no rows") {
+		t.Fatalf("对外错误泄漏底层细节: %s", got)
+	}
+	if len(runs.runs) != 1 || runs.runs[0].ErrorCode != CodeInvalidParams {
+		t.Fatalf("ActionRun 的 ErrorCode 应是 Handler 的错误码: %+v", runs.runs)
+	}
+	events := sink.all()
+	if len(events) != 1 || events[0].ErrorCode != CodeInvalidParams {
+		t.Fatalf("审计事件的 ErrorCode 应是 Handler 的错误码: %+v", events)
+	}
+}
+
+// TestKernelPreservesHandlerActionErrorCodeIsGeneric 证明上一条测试的保留逻辑
+// 是通用的，不是只认 CodeInvalidParams 的特判：换成 CodeConflict 同样成立。
+func TestKernelPreservesHandlerActionErrorCodeIsGeneric(t *testing.T) {
+	cause := errors.New("pq: revision 3 does not match current revision 5")
+	k, runs, sink := newAuditedKernel(t, demoDefinition(),
+		func(context.Context, map[string]any) (any, error) {
+			return nil, NewError(CodeConflict, "渠道绑定已变更，请刷新后重试", cause)
+		})
+	ctx := principal.WithPrincipal(context.Background(), testPrincipal("registry.service.manage"))
+
+	_, err := k.Execute(ctx, okRequest())
+	if ErrorCode(err) != CodeConflict {
+		t.Fatalf("Kernel 应保留 Handler 的错误码, got %v", ErrorCode(err))
+	}
+	var ae *Error
+	if !errors.As(err, &ae) || ae.Message != "渠道绑定已变更，请刷新后重试" {
+		t.Fatalf("Kernel 应保留 Handler 的安全文案, got %+v", ae)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("内部仍应能 unwrap 到根因")
+	}
+	if len(runs.runs) != 1 || runs.runs[0].ErrorCode != CodeConflict {
+		t.Fatalf("ActionRun 的 ErrorCode 应随 Handler 变化: %+v", runs.runs)
+	}
+	events := sink.all()
+	if len(events) != 1 || events[0].ErrorCode != CodeConflict {
+		t.Fatalf("审计事件的 ErrorCode 应随 Handler 变化: %+v", events)
+	}
+}

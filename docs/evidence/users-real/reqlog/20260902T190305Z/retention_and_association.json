@@ -1,0 +1,19 @@
+{
+  "association": {
+    "total_records": 116880,
+    "no_prefix_count": 443,
+    "unresolved_prefix_count": 325,
+    "resolved_count": 116112
+  },
+  "cursor_semantics": "Cursor is the opaque string \"reqlog:\u003coffset\u003e\" (connectors/reqlog/fake.go cursorPrefix + encodeCursor/decodeCursor) wrapping a plain integer offset into a result set that connectors/reqlog/file_client.go's matchedSummaries fully re-scans and re-sorts (by OccurredAt, descending) on EVERY call, before the offset is applied. It is not a stable position against concurrent writes: a request recorded between page 1 and page 2 of the same query shifts every later offset by one, so a record at the old page boundary can repeat across pages or be skipped entirely - the same class of hazard already documented for the platformusers real client's offset-based Sub2API/NewAPI pagination (docs/handoffs/slices/XM-USERS-REAL.md). This is a fact read from source, not derived from the sample data in this directory - it does not change from one capture run to the next.",
+  "index_line_warnings_skipped": 0,
+  "retention": {
+    "day_dirs_found": 10,
+    "oldest_day": "20260825",
+    "newest_day": "20260903",
+    "observed_span_days": 10,
+    "configured_retention_days": 30,
+    "span_within_configured": true,
+    "note": "RetentionDays is a DRAFT constant in connectors/reqlog/contract.go, sourced from an implementation report's stated \"30-day auto cleanup\" and explicitly marked \"未对真实部署核对\" (not verified against a real deployment). observed_span_days only reports what is currently on disk in the copy this tool was pointed at; it cannot by itself prove a cleanup job is (or is not) running on schedule - a short span is equally consistent with \"cleanup works\" and \"this deployment is younger than the retention window\"."
+  }
+}
