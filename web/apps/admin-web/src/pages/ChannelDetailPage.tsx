@@ -37,10 +37,6 @@ export function upstreamDetailPath(platform: string, upstreamId: string): string
   return `/platforms/${encodeURIComponent(platform)}/suppliers/${encodeURIComponent(upstreamId)}`;
 }
 
-export function upstreamCreatePath(platform: string): string {
-  return `/platforms/${encodeURIComponent(platform)}/suppliers/new`;
-}
-
 /** 渠道保障页签的「保障概览」子页签（XM-ASSURE0），按平台/模型的真实被动
  *  指标就在这里——渠道详情页给不出按渠道拆分的数字（见 ChannelDetailBody
  *  的「渠道保障」区块），但可以指路到平台整体真实数据，而不是让人以为
