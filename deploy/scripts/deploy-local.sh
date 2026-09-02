@@ -36,8 +36,117 @@
 # 核实/解决分叉后重新运行本脚本。fetch 本身失败（网络/镜像不可达）不算
 # 这个退出码——那种情况仍走既有的「有精确匹配 SHA 才放行」fail-closed 路径
 # （exit 1），因为无法确认 upstream 状态和"确认落后"不是一回事。
+# cpa-observations 等待预算（XM-DEPLOY-CPAWAIT0）：production file 模式下，
+# 该阶段等待新部署对应的四条同一 generation 的成功 CPA 观测
+# （cpa.requests.daily/cpa.cost.daily/cpa.keys.usage/cpa.accounts.health）落库。
+# 等待预算 = worker 自己的 cpa_sync 周期（同一个 XM_CPA_SYNC_INTERVAL、同一
+# 解析规则和默认值，见 cmd/platform-worker/config.go 与
+# internal/platform/jobs/cpa_sync.go 的 DefaultCPASyncInterval）+60s 安全边际，
+# 不再复用其它探针共享的 probe_attempts×2s（约 24s）窗口——worker 容器刚
+# 重建时，即使周期任务的 RunOnStart 会让它一启动就尝试同步一次，也没有一个
+# 可靠的亚分钟级上界能保证这次尝试已经落库完成；唯一确定的上界是「最迟不超过
+# 下一个正常周期节拍」。团队交接记录：这个窗口过短曾让两次生产部署在观测值
+# 已经正确产生之后才被误判失败，详见本片 Handoff
+# docs/handoffs/slices/XM-DEPLOY-CPAWAIT0.md。每 10s 轮询一次，至多每 60s
+# 打印一行 cpa-observations=waiting 进度；预算耗尽仍未匹配时，失败行会把
+# 最后一次观测到的状态元组和期望元组一起打出来，方便判断是旧 generation
+# 还在、部分到齐还是完全没有。等待循环本身（parse_duration_seconds /
+# cpa_observation_wait）定义在 main() 之外——纯函数、无副作用，方便
+# tests/deploy/deploy-local.test.sh 直接 source 后单独调用验证，不需要经过
+# Docker/Git/生产 root 前置检查；这不影响自我更新安全性
+# （XM-DEPLOY-SELFUPDATE0）的「整份文件先解析完再执行」保证，因为它们和 main()
+# 一样，都要等到文件读完、bash 到达文件最后一行才会真正被调用。
 set -Eeuo pipefail
 umask 077
+
+# CPA_SYNC_DEFAULT_INTERVAL_SECONDS 镜像 internal/platform/jobs/cpa_sync.go 的
+# DefaultCPASyncInterval（300s）——worker 在 XM_CPA_SYNC_INTERVAL 未设置时使用
+# 的同一个默认值。cpa-observations 阶段据此推算等待预算；两处常量万一分叉，
+# 唯一后果是等待预算不再精确匹配 worker 的真实周期（仍然安全，因为还加了
+# 60s 安全边际），不是新的正确性风险。
+CPA_SYNC_DEFAULT_INTERVAL_SECONDS=300
+
+# 把 cmd/platform-worker/config.go 用 time.ParseDuration 解析
+# XM_CPA_SYNC_INTERVAL 时会接受的字符串（如"300s"、"5m"、"1h30m"）转换成整数秒，
+# 向上取整；只识别整数量值 + ns/us/ms/s/m/h 单位的序列——本仓库
+# deploy/compose/.env.example 与两份 compose 文件里全部 *_INTERVAL 配置都是
+# 这种形状，不支持 Go 允许但这里从未配过的小数量值。解析失败时返回非零，
+# 调用方回退到 CPA_SYNC_DEFAULT_INTERVAL_SECONDS。
+parse_duration_seconds() {
+  local remaining="$1" total=0 unit number
+  [ -n "$remaining" ] || return 1
+  while [ -n "$remaining" ]; do
+    [[ "$remaining" =~ ^([0-9]+)(ns|us|ms|s|m|h) ]] || return 1
+    number="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    remaining="${remaining:${#BASH_REMATCH[0]}}"
+    case "$unit" in
+      h) total=$((total + number * 3600)) ;;
+      m) total=$((total + number * 60)) ;;
+      s) total=$((total + number)) ;;
+      ns|us|ms) : ;;
+    esac
+  done
+  [ "$total" -gt 0 ] || return 1
+  printf '%s' "$total"
+}
+
+# 格式化 cpa-observations 阶段的等待预算公告行（XM-DEPLOY-CPAWAIT0）。纯字符串
+# 拼接，不重新解析 XM_CPA_SYNC_INTERVAL——main() 已经算出 interval_seconds，
+# 这里只做 interval_seconds+60=budget 这一步并格式化输出。单独抽成函数是为了
+# 让 tests/deploy/deploy-local.test.sh 能在不牵动 Docker/Git/生产 root 检查的
+# 情况下，直接断言"budget 随 interval 变化"这条公式本身。
+cpa_observation_budget_line() {
+  local interval_seconds="$1" poll_seconds="$2" expected_generation="$3"
+  echo "cpa-observations=budget budget=$((interval_seconds + 60))s interval=${interval_seconds}s poll=${poll_seconds}s expected_generation=$expected_generation"
+}
+
+# cpa-observations 阶段的等待循环（XM-DEPLOY-CPAWAIT0）。生产路径下由 main()
+# 在 cpa-observations 阶段以同名局部变量 run_compose/POSTGRES_USER/
+# POSTGRES_DB（bash 动态作用域：调用时可见，不需要额外传参）调用，行为与
+# 内联在 main() 里完全一致。测试直接 source 本文件后自行定义同名的
+# run_compose 假函数、POSTGRES_USER/POSTGRES_DB 变量与 sleep 函数来驱动它，
+# 不牵动 Docker/Git/生产 root 检查。
+#
+# 每 poll_seconds 轮询一次 run_compose exec 出来的 Postgres 状态元组，直到
+# 等于 expected_state 或用满 budget_seconds；至多每 60 秒打印一行等待进度
+# （cpa-observations=waiting elapsed=…s expected_generation=…）。返回 0 表示
+# 已匹配，1 表示预算耗尽；调用方从 CPA_OBSERVATION_LAST_STATE 读最后一次
+# 观测到的元组去拼失败信息（bash 函数返回不了字符串，这里沿用 request_json()
+# 把结果放进调用方看得到的地方这个既有做法，只是用变量而不是 $tmp_dir 文件
+# ——这个值不需要跨进程，没必要落盘）。
+cpa_observation_wait() {
+  local expected_generation="$1" expected_state="$2" budget_seconds="$3" poll_seconds="$4"
+  local elapsed=0 next_progress=0
+  CPA_OBSERVATION_LAST_STATE=""
+  while :; do
+    CPA_OBSERVATION_LAST_STATE="$(run_compose exec -T postgres psql -X -qAt -F '|' \
+      -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+        SELECT count(*), count(DISTINCT watermark), min(watermark),
+               count(*) FILTER (WHERE status='ok'),
+               count(*) FILTER (WHERE observed_at IS NULL),
+               count(*) FILTER (
+                 WHERE metric_key='cpa.accounts.health'
+                   AND COALESCE(value_json->>'run_at','') <> ''
+               )
+        FROM ops.metric_observation
+        WHERE environment='production'
+          AND metric_key IN (
+            'cpa.requests.daily','cpa.cost.daily','cpa.keys.usage','cpa.accounts.health'
+          )" 2>/dev/null || true)"
+    if [ "$CPA_OBSERVATION_LAST_STATE" = "$expected_state" ]; then
+      echo "cpa-observations=ok generation=$expected_generation elapsed=${elapsed}s"
+      return 0
+    fi
+    if [ "$elapsed" -ge "$next_progress" ]; then
+      echo "cpa-observations=waiting elapsed=${elapsed}s expected_generation=$expected_generation"
+      next_progress=$((elapsed + 60))
+    fi
+    [ "$elapsed" -ge "$budget_seconds" ] && return 1
+    sleep "$poll_seconds"
+    elapsed=$((elapsed + poll_seconds))
+  done
+}
 
 main() {
 original_args=("$@")
@@ -764,32 +873,28 @@ if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ] 
   cpa_expected_generation="$(printf '%s\n' "$cpa_verify_json" | sed -n 's/.*"generation":"\([0-9a-f]\{32\}\)".*/\1/p')"
   [[ "$cpa_expected_generation" =~ ^[0-9a-f]{32}$ ]] \
     || die "$phase: published generation is malformed"
-  cpa_observation_ok=0
-  cpa_observation_state=""
-  for cpa_observation_attempt in $(seq 1 "$probe_attempts"); do
-    cpa_observation_state="$(run_compose exec -T postgres psql -X -qAt -F '|' \
-      -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
-        SELECT count(*), count(DISTINCT watermark), min(watermark),
-               count(*) FILTER (WHERE status='ok'),
-               count(*) FILTER (WHERE observed_at IS NULL),
-               count(*) FILTER (
-                 WHERE metric_key='cpa.accounts.health'
-                   AND COALESCE(value_json->>'run_at','') <> ''
-               )
-        FROM ops.metric_observation
-        WHERE environment='production'
-          AND metric_key IN (
-            'cpa.requests.daily','cpa.cost.daily','cpa.keys.usage','cpa.accounts.health'
-          )" 2>/dev/null || true)"
-    if [ "$cpa_observation_state" = "4|1|$cpa_expected_generation|4|0|1" ]; then
-      cpa_observation_ok=1
-      echo "cpa-observations=ok generation=$cpa_expected_generation attempt=$cpa_observation_attempt"
-      break
-    fi
-    [ "$cpa_observation_attempt" -lt "$probe_attempts" ] && sleep 2
-  done
+
+  # 等待预算见文件头部「cpa-observations 等待预算」说明；这里不复用
+  # probe_attempts（那是给其它探针共享的重试次数，cpa-observations 改用
+  # 独立的时间预算，不受 --probe-attempts 影响）。
+  cpa_sync_interval_raw="$(read_env_value XM_CPA_SYNC_INTERVAL 2>/dev/null || true)"
+  cpa_sync_interval_raw="$(trim "$cpa_sync_interval_raw")"
+  cpa_sync_interval_seconds="$(parse_duration_seconds "$cpa_sync_interval_raw" 2>/dev/null || true)"
+  [[ "$cpa_sync_interval_seconds" =~ ^[0-9]+$ ]] && [ "$cpa_sync_interval_seconds" -gt 0 ] \
+    || cpa_sync_interval_seconds="$CPA_SYNC_DEFAULT_INTERVAL_SECONDS"
+  cpa_observation_budget_seconds=$((cpa_sync_interval_seconds + 60))
+  cpa_observation_poll_seconds=10
+  cpa_observation_budget_line "$cpa_sync_interval_seconds" "$cpa_observation_poll_seconds" "$cpa_expected_generation"
+
+  cpa_observation_expected_state="4|1|$cpa_expected_generation|4|0|1"
+  if cpa_observation_wait "$cpa_expected_generation" "$cpa_observation_expected_state" \
+      "$cpa_observation_budget_seconds" "$cpa_observation_poll_seconds"; then
+    cpa_observation_ok=1
+  else
+    cpa_observation_ok=0
+  fi
   [ "$cpa_observation_ok" -eq 1 ] \
-    || die "$phase: four same-generation successful CPA observations with run_at were not produced"
+    || die "$phase: four same-generation successful CPA observations with run_at were not produced (expected=$cpa_observation_expected_state observed=${CPA_OBSERVATION_LAST_STATE:-<none>})"
 elif [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ]; then
   echo "cpa-observations=skipped reason=XM_CPA_SYNC_ENABLED=false"
 fi
@@ -833,4 +938,6 @@ enable_cpa_snapshot_timer
 echo "DEPLOY LOCAL PASS: sha=$target_sha project=xingmang-launch healthz=200 readyz=200 smoke=services:200,metrics:200,alerts:200"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi
