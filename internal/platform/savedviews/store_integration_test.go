@@ -83,7 +83,10 @@ func TestStoreIsolatesOwnerEnvironmentAndTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checks := []struct {
+	// List is scoped by owner + environment + table_key: none of these three
+	// substitutions (different owner, different environment, different table)
+	// may see the row.
+	listChecks := []struct {
 		owner savedviews.Owner
 		table string
 	}{
@@ -91,14 +94,32 @@ func TestStoreIsolatesOwnerEnvironmentAndTable(t *testing.T) {
 		{owner("alice", "production"), "platform.sub2api.channels"},
 		{owner("alice", "staging"), "platform.newapi.channels"},
 	}
-	for _, check := range checks {
+	for _, check := range listChecks {
 		items, listErr := store.List(ctx, check.owner, check.table)
 		if listErr != nil || len(items) != 0 {
 			t.Fatalf("foreign list = %#v, %v", items, listErr)
 		}
-		if _, removeErr := store.Remove(ctx, check.owner, created.After.ID); !errors.Is(removeErr, savedviews.ErrNotFound) {
+	}
+	// Remove takes no table_key (the action schema only accepts saved_view_id;
+	// see savedviews.removeDefinition) — a row is addressed by id and scoped by
+	// owner + environment only, since id alone already pins the exact row
+	// (table_key included). So only a different owner or a different
+	// environment must be refused here; a "different table" case has nothing
+	// to assert (there is no table argument to be wrong about), and calling
+	// Remove with alice/staging (the row's real owner) would just delete it.
+	removeChecks := []savedviews.Owner{
+		owner("bob", "staging"),
+		owner("alice", "production"),
+	}
+	for _, foreignOwner := range removeChecks {
+		if _, removeErr := store.Remove(ctx, foreignOwner, created.After.ID); !errors.Is(removeErr, savedviews.ErrNotFound) {
 			t.Fatalf("foreign remove err = %v", removeErr)
 		}
+	}
+	// The true owner can still remove it afterwards — proves the row survived
+	// every foreign attempt above rather than having been silently deleted.
+	if _, err := store.Remove(ctx, owner("alice", "staging"), created.After.ID); err != nil {
+		t.Fatalf("owner remove err = %v", err)
 	}
 }
 
