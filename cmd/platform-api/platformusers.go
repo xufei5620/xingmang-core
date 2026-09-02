@@ -191,10 +191,19 @@ func (c *dynamicUsersClient) resolve(ctx context.Context) (usersMode, connusers.
 }
 
 // ---------------------------------------------------------------------------
-// v2(逐用户详情/日用量/Key 元数据):本任务(XM-USERS-REAL)不实装 real 端的
-// v2,只保证 dynamicUsersClient 包一层之后**不弄丢** fake 端原本就有的 v2
-// 能力(GetUser/DailyUsage/ListKeyMetadata 只有 *connusers.FakeClient 实现,
-// 见 fake_v2.go / daily_usage.go / key_metadata.go)。
+// v2(逐用户详情/日用量/Key 元数据)。
+//
+// **GetUser 现在 real 会下场了(XM-USERS-V2-REAL,Task 4/5,
+// SUB2_REAL_APPROVAL/NEWAPI_REAL_APPROVAL,均 APPROVED 2026-09-03)。**
+// 生效模式解析成 real 时,转发给 connusers.RealClient.GetUser(sub2api_v2.go/
+// newapi_v2.go,只声明 platformusers.user.detail_read 一项能力);解析成
+// fake 时仍转发给 FakeClient,与 ListUsers 的 real/fake 二选一结构对称。
+//
+// **DailyUsage/ListKeyMetadata 依旧只有 fake 端**:它们的 real reader
+// 需要各自独立的 DAILY_USAGE_APPROVAL/KEY_SCOPE_APPROVAL 真实数据面审批
+// (设计文档 §0),本次两份批准都明确不覆盖这两项——RealClient 没有实现
+// DailyUsageReader/KeyMetadataReader(任务范围明确排除),所以下面这两个
+// 方法的转发在生效模式解析成 real 时继续统一返回 not_supported。
 //
 // internal/platform/platformusers.NewService 在**构造期**用一次类型断言
 // (c.(UserDetailReader) 等)决定要不要把某个 source 登记进
@@ -203,14 +212,9 @@ func (c *dynamicUsersClient) resolve(ctx context.Context) (usersMode, connusers.
 // *dynamicUsersClient,如果它不实现这三个接口,fake 模式下的用户详情页、
 // 日用量图表、Key 元数据列表会全部悄悄变成 501,而 ListUsers 本身照样正常
 // ——这是一个只有点开详情页才会发现的静默回归,所以 dynamicUsersClient 必须
-// 转发这三个方法。
-//
-// **real 端不下场**:RealClient 没有实现这三个接口(任务范围明确排除 v2),
-// 所以下面的转发只在生效模式解析成 fake 时才真的调用 FakeClient;解析成
-// real 时统一返回 not_supported,与「保持既有 not_supported 行为」的要求
-// 一致。这里不加 production+fake 闸——那道闸是 XM-USERS-REAL 专门针对
-// ListUsers(v1)新加的纪律,v2 在这次改动之前就没有这道闸,不在本任务范围内
-// 引入,以免连带改变一个没有被要求改变的行为。
+// 转发这三个方法(GetUser 的 UserDetailReader 类型断言不看能力声明,只看
+// 有没有实现方法,所以它在 fake 与 real 两种生效模式下都会被登记——真正的
+// real/fake 分支在 GetUser 方法体内部,与 ListUsers 一致)。
 // ---------------------------------------------------------------------------
 
 // V2Capabilities / V2KeyCapabilities 声明与 FakeClient 相同的能力集合。
@@ -228,20 +232,41 @@ func (c *dynamicUsersClient) V2KeyCapabilities() []registry.Capability {
 	return connusers.NewFakeClient(c.source, nil).V2KeyCapabilities()
 }
 
-// GetUser 转发给 fake 端(生效模式为 real 时 not_supported)。
+// GetUser 按生效模式转发:real 用 XM-USERS-V2-REAL 新增的
+// connusers.RealClient.GetUser(SUB2_REAL_APPROVAL/NEWAPI_REAL_APPROVAL,
+// 仅 detail_read 能力),fake 用既有 FakeClient——与 ListUsers 同一个
+// resolve() 决策表、同一条"配置要每次请求时解析"的纪律。
+//
+// production 环境下生效模式仍是 fake 时同样拒绝(与 ListUsers 的
+// production+fake 闸同一条纪律,宪法 12 条):这道闸在 GetUser 首次接入
+// real 之前没有意义(反正无条件 not_supported),现在 real 真的可能被
+// 选中,一个在生产环境被误配成 fake 的连接器如果不拒绝,用户详情页会把
+// 演示样本悄悄当成真实客户资料展示。
 func (c *dynamicUsersClient) GetUser(ctx context.Context, query connusers.GetUserQuery) (connusers.UserDetail, error) {
-	mode, _, err := c.resolve(ctx)
+	mode, cfg, err := c.resolve(ctx)
 	if err != nil {
 		return connusers.UserDetail{}, err
 	}
-	if mode != usersModeFake {
+	if mode == usersModeFake && c.environment == "production" {
 		return connusers.UserDetail{}, connector.NewError(connector.KindNotSupported,
-			"platformusers.user.detail_read", errPlatformUsersV2RealNotImplemented)
+			"platformusers.user.detail_read", jobs.ErrConnectorProductionFake)
+	}
+	if mode == usersModeReal {
+		client, err := connusers.NewRealClient(cfg)
+		if err != nil {
+			// 构造期校验失败(端点/白名单/CredentialRef 不齐全):配置问题,
+			// 不是上游的问题,归 internal——与 ListUsers 同一条纪律。
+			return connusers.UserDetail{}, connector.NewError(connector.KindInternal,
+				"platformusers.client.config", err)
+		}
+		return client.GetUser(ctx, query)
 	}
 	return connusers.NewFakeClient(c.source, nil).GetUser(ctx, query)
 }
 
-// DailyUsage 转发给 fake 端(生效模式为 real 时 not_supported)。
+// DailyUsage 转发给 fake 端(生效模式为 real 时 not_supported——real
+// DailyUsage reader 需要独立的 DAILY_USAGE_APPROVAL 真实数据面审批,
+// 不在 XM-USERS-V2-REAL 范围内)。
 func (c *dynamicUsersClient) DailyUsage(ctx context.Context, query connusers.DailyUsageQuery) (connusers.DailyUsageSeries, error) {
 	mode, _, err := c.resolve(ctx)
 	if err != nil {
@@ -254,7 +279,9 @@ func (c *dynamicUsersClient) DailyUsage(ctx context.Context, query connusers.Dai
 	return connusers.NewFakeClient(c.source, nil).DailyUsage(ctx, query)
 }
 
-// ListKeyMetadata 转发给 fake 端(生效模式为 real 时 not_supported)。
+// ListKeyMetadata 转发给 fake 端(生效模式为 real 时 not_supported——real
+// Key metadata reader 需要独立的 KEY_SCOPE_APPROVAL 真实数据面审批,
+// 不在 XM-USERS-V2-REAL 范围内)。
 func (c *dynamicUsersClient) ListKeyMetadata(ctx context.Context, query connusers.KeyMetadataQuery) (connusers.KeyMetadataPage, error) {
 	mode, _, err := c.resolve(ctx)
 	if err != nil {
@@ -268,7 +295,8 @@ func (c *dynamicUsersClient) ListKeyMetadata(ctx context.Context, query connuser
 }
 
 var errPlatformUsersV2RealNotImplemented = fmt.Errorf(
-	"platformusers: real 端 v2(逐用户详情/日用量/Key 元数据)未实装,XM-USERS-REAL 范围之外")
+	"platformusers: real 端日用量/Key 元数据未实装,需要独立的" +
+		" DAILY_USAGE_APPROVAL/KEY_SCOPE_APPROVAL 真实数据面审批")
 
 // normalizeUsersAllowlist 与 cmd/platform-worker 的 parseHostAllowlist、
 // internal/platform/jobs 的 normalizeAllowlist 同一口径:去空白、转小写、

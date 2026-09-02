@@ -278,20 +278,21 @@ func TestBuildPlatformUsersFakeModeKeepsV2Capabilities(t *testing.T) {
 	}
 }
 
-// TestDynamicUsersClientV2NotSupportedWhenReal:生效模式解析成 real 时,
-// v2 三个方法必须 not_supported——本任务(XM-USERS-REAL)明确不实装 real
-// 端的 v2,保持既有行为(不是回落到 fake、也不是 panic)。
-func TestDynamicUsersClientV2NotSupportedWhenReal(t *testing.T) {
+// TestDynamicUsersClientDailyKeyStayNotSupportedWhenReal:生效模式解析成
+// real 时,DailyUsage/ListKeyMetadata 必须仍然 not_supported——它们的
+// real reader 需要各自独立的 DAILY_USAGE_APPROVAL/KEY_SCOPE_APPROVAL 真实
+// 数据面审批(设计文档 §0),XM-USERS-V2-REAL(SUB2_REAL_APPROVAL/
+// NEWAPI_REAL_APPROVAL)明确不覆盖它们,保持既有行为(不是回落到 fake、
+// 也不是 panic)。
+//
+// GetUser 不在这条测试里:它现在 real 会下场,见
+// TestDynamicUsersClientGetUserAttemptsRealDispatchWhenReal。
+func TestDynamicUsersClientDailyKeyStayNotSupportedWhenReal(t *testing.T) {
 	c := &dynamicUsersClient{
 		source:      connusers.SourceSub2API,
 		defaultMode: usersModeReal,
 		environment: "development",
 		secrets:     noopSecrets(),
-	}
-	if _, err := c.GetUser(context.Background(), connusers.GetUserQuery{
-		Ref: connusers.UserRef{Platform: connusers.SourceSub2API, ID: "u_10241"},
-	}); connector.KindOf(err) != connector.KindNotSupported {
-		t.Fatalf("GetUser 分类 = %q, want not_supported(err=%v)", connector.KindOf(err), err)
 	}
 	if _, err := c.DailyUsage(context.Background(), connusers.DailyUsageQuery{
 		Ref: connusers.UserRef{Platform: connusers.SourceSub2API, ID: "u_10241"}, Days: 7,
@@ -302,5 +303,53 @@ func TestDynamicUsersClientV2NotSupportedWhenReal(t *testing.T) {
 		Ref: connusers.UserRef{Platform: connusers.SourceSub2API, ID: "u_10241"},
 	}); connector.KindOf(err) != connector.KindNotSupported {
 		t.Fatalf("ListKeyMetadata 分类 = %q, want not_supported", connector.KindOf(err))
+	}
+}
+
+// TestDynamicUsersClientGetUserAttemptsRealDispatchWhenReal:生效模式解析
+// 成 real 且没有配置端点/白名单/凭据引用时,GetUser 必须真的尝试构造
+// RealClient 并因为配置不全而报 internal(配置问题,不是上游问题)——
+// 而不是像 XM-USERS-V2-REAL 之前那样统一回落成 not_supported。这条断言
+// 本身就是"real 已经下场"的证据:如果 GetUser 仍然直接转发给 fake 或
+// 直接 not_supported,这里应该得到 fake 数据或 not_supported,而不是
+// internal 配置错误。真正的 HTTP 映射(分页扫描、423、quota_per_unit 现读)
+// 由 connectors/platformusers/{sub2api,newapi}_v2_test.go 覆盖——那里能用
+// WithBaseTransport 信任 httptest 的自签证书,这里没有注入测试 transport,
+// 所以只能验证到"确实在尝试连 real"这一步,与 ListUsers 的
+// TestDynamicUsersClientRealRowEndToEnd 注释里说明的边界一致。
+func TestDynamicUsersClientGetUserAttemptsRealDispatchWhenReal(t *testing.T) {
+	c := &dynamicUsersClient{
+		source:      connusers.SourceSub2API,
+		defaultMode: usersModeReal,
+		environment: "development",
+		secrets:     noopSecrets(),
+	}
+	_, err := c.GetUser(context.Background(), connusers.GetUserQuery{
+		Ref: connusers.UserRef{Platform: connusers.SourceSub2API, ID: "u_10241"},
+	})
+	if connector.KindOf(err) != connector.KindInternal {
+		t.Fatalf("GetUser 分类 = %q, want internal(未配置 endpoint/allowlist/credential_ref 时 NewRealClient 应当拒绝,err=%v)",
+			connector.KindOf(err), err)
+	}
+}
+
+// TestDynamicUsersClientGetUserProductionFakeGate:与 ListUsers 同一条纪律
+// (宪法 12 条)——生产环境下生效模式仍是 fake 时,GetUser 必须拒绝,
+// 不能把演示样本悄悄当成真实客户资料在用户详情页展示出来。
+func TestDynamicUsersClientGetUserProductionFakeGate(t *testing.T) {
+	c := &dynamicUsersClient{
+		source:      connusers.SourceSub2API,
+		defaultMode: usersModeFake,
+		environment: "production",
+		secrets:     noopSecrets(),
+	}
+	_, err := c.GetUser(context.Background(), connusers.GetUserQuery{
+		Ref: connusers.UserRef{Platform: connusers.SourceSub2API, ID: "u_10241"},
+	})
+	if connector.KindOf(err) != connector.KindNotSupported {
+		t.Fatalf("分类 = %q, want not_supported(err=%v)", connector.KindOf(err), err)
+	}
+	if !errors.Is(err, jobs.ErrConnectorProductionFake) {
+		t.Fatalf("应能用 errors.Is 认出 jobs.ErrConnectorProductionFake: %v", err)
 	}
 }
