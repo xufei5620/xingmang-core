@@ -15,6 +15,7 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/assurance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
@@ -317,6 +318,23 @@ type Config struct {
 	// production must leave it empty (same rule as every other *RunID
 	// field on this Config).
 	ConnectorProbeRunID string
+	// AssuranceProbeGlobalEnabled is the ADR-019 global Kill Switch
+	// (XM_ASSURE_PROBE_ENABLED). Off by default: real-mode probing needs
+	// this **and** the per-platform core.connector_config.probe_enabled
+	// both on. This process (platform-worker) parses the same env var
+	// independently of cmd/platform-api — the two processes cannot see
+	// each other's memory, same precedent as XM_CONNECTOR_PROBE_ENABLED.
+	AssuranceProbeGlobalEnabled bool
+	// AssuranceProbeDailyBudget overrides
+	// assurance.DefaultDailyBudgetPerPlatform when > 0.
+	AssuranceProbeDailyBudget int
+	// AssuranceProbeSecrets resolves a platform's probe_credential_ref
+	// (real mode only). Unlike Sub2APISecrets/NewAPISecrets, this cannot be
+	// scoped to one fixed ref at process start — the ref lives per-platform
+	// in core.connector_config and is only known at Job execution time —
+	// so this is a generic "resolve whatever secret:// ref you're handed,
+	// rooted at XM_SECRET_ROOT" provider.
+	AssuranceProbeSecrets secrets.SecretProvider
 }
 
 // DefaultConfig returns the safe local-development baseline.
@@ -1102,11 +1120,35 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		periodic = append(periodic, cpaPeriodic)
 	}
 
+	// XM-ASSURE1-core：检测任务批次处理器。**始终注册**，不受任何
+	// _ENABLED 开关影响，也不进 periodic 列表——它是按需触发的（由
+	// assurance.probe.run@1 Action 入队），不是周期任务。fake 模式的探测
+	// 完全绕过两道 Kill Switch（ADR-019 决策·四），如果这里也加一个"未启用
+	// 就不注册 Worker"的开关，会让 fake 模式的批次卡死在 pending（River
+	// 找不到能处理这个 kind 的 Worker，报 unhandled job kind）。真正"允许
+	// 探测花钱"的闸在 assurance.Store.checkGates 里，不是"这个 Worker
+	// 存不存在"。
+	assuranceStore, err := assurance.NewStore(pool, nil, ops.NewStore(pool),
+		assurance.WithLimits(assurance.Limits{DailyBudgetPerPlatform: cfg.AssuranceProbeDailyBudget}),
+		assurance.WithGlobalKillSwitch(cfg.AssuranceProbeGlobalEnabled),
+	)
+	if err != nil {
+		return nil, err
+	}
+	river.AddWorker(workers, NewAssuranceProbeWorker(AssuranceProbeOptions{
+		Logger:                  cfg.Logger,
+		Environment:             cfg.Environment,
+		Store:                   assuranceStore,
+		GlobalKillSwitchEnabled: cfg.AssuranceProbeGlobalEnabled,
+		ProbeSecrets:            cfg.AssuranceProbeSecrets,
+	}))
+
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Logger: cfg.Logger,
 		Queues: map[string]river.QueueConfig{
-			river.QueueDefault: {MaxWorkers: cfg.MaxWorkers},
-			QueueMaintenance:   {MaxWorkers: cfg.MaxWorkers},
+			river.QueueDefault:   {MaxWorkers: cfg.MaxWorkers},
+			QueueMaintenance:     {MaxWorkers: cfg.MaxWorkers},
+			assurance.QueueProbe: {MaxWorkers: cfg.MaxWorkers},
 		},
 		Workers:      workers,
 		PeriodicJobs: periodic,
