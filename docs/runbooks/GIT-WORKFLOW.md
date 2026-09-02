@@ -68,3 +68,52 @@ deploy/scripts/mirror-github.sh --reason "release mirror XM-…"
 `.github/workflows/` 与旧设计稿中的 PR 命令保留用于历史追溯和未来恢复，不是当前
 放行条件。任何要恢复 Actions、ruleset、PR 必选检查或更换服务器 origin 的动作，
 都应先写新的变更记录并由产品负责人批准；不要在切片中偷偷切回双轨。
+
+## 6. 每个 worktree 独立测试库
+
+**背景**：此前所有 worktree/agent 共用同一个 `xm_test` 库。2026-09-02 门禁脚本
+第一次导出 `XM_TEST_DATABASE_URL`（此前一直未导出，所有 DB 集成测试从未真正
+跑过，见 `docs/handoffs/slices/XM-AUTH-TOTP0.md`），随即在 2026-09-03 暴露出
+`internal/platform/credentials` 与 `internal/platform/jobs` 两个包共用同一个
+`xm_test` 库时的真实冲突：`credentials` 包的测试往 `core.connector_config` 写
+`(sub2api|newapi, staging)` 这两行且跑完不清理，`jobs` 包的同库测试一旦跑在它
+后面就会撞上残留行报 `duplicate key value violates unique constraint`（详见
+`docs/handoffs/slices/XM-DBTEST-FIX0.md` 的 risks 一节）。这是"跑测顺序/并发
+敏感"的耦合，根上是多个 worktree/包共用同一个库；每个 worktree 拿到自己独立
+的库就不会再撞。
+
+**用法**（`scripts/dev/worktree-testdb.sh`，POSIX bash，Windows 下用 Git Bash
+跑；PowerShell 用户可用同目录的 `worktree-testdb.ps1`，参数一一对应，行为
+逐字一致）：
+
+```bash
+# 默认动作：库不存在就建、灌迁移到最新版本，打印 export 语句
+# （本仓库脚本不靠可执行位分发，一律显式 bash 前缀，同 check-governance.sh）
+bash scripts/dev/worktree-testdb.sh
+# 直接让当前 shell 生效：
+eval "$(bash scripts/dev/worktree-testdb.sh)"
+# 或只取连接串自己赋值（--print-url 只打印 URL，不带 export 前缀）：
+export XM_TEST_DATABASE_URL=$(bash scripts/dev/worktree-testdb.sh --print-url)
+
+# 列出所有 xm_test_* 测试库及大小
+bash scripts/dev/worktree-testdb.sh --list
+```
+
+```powershell
+$env:XM_TEST_DATABASE_URL = & scripts\dev\worktree-testdb.ps1 -PrintUrl
+scripts\dev\worktree-testdb.ps1 -ListDatabases
+```
+
+库名由当前 worktree 目录名派生：取 basename，规整成 `[a-z0-9_]`，加
+`xm_test_` 前缀（例如 worktree 目录 `wt-wtdb` 得到 `xm_test_wt_wtdb`）。管理
+连接默认是本机 `invoice-test-pg` 容器（`127.0.0.1:55432`，superuser
+`postgres`），可用 `--pg-url` 覆盖。
+
+**清理**：任务结束、移除 worktree 前跑一次
+
+```bash
+bash scripts/dev/worktree-testdb.sh --drop
+```
+
+删除当前 worktree 专属的测试库（含终止其残留连接）；不会碰其他 worktree 的库
+或旧的共享 `xm_test` 库，后者仍可手工按既有约定使用/清理。

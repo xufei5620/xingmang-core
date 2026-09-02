@@ -26,6 +26,8 @@
 - 前端：`pnpm install`、`pnpm -r run typecheck`、`pnpm -r run test`
 - Storybook 构建：`pnpm --filter ui-storybook run build`
 - 治理检查（CI 同款）：`bash scripts/check-governance.sh`
+- 每 worktree 独立测试库：`bash scripts/dev/worktree-testdb.sh`（PowerShell 用
+  `worktree-testdb.ps1`），见 `docs/runbooks/GIT-WORKFLOW.md` 第 6 节
 
 ## 红线
 
