@@ -4,7 +4,7 @@
 > `v0.1.0-rc55-signed` (`f36ed2b`) and is deployed, but its credentialed
 > canary failed at second-user platform binding (UNIQUE NULLS NOT DISTINCT
 > subject HMAC, SQLSTATE 23505); its evidence is immutable. Continue only
-> with `docs/superpowers/plans/2026-09-02-invoice-rc69-release-recovery.md`.
+> with `docs/superpowers/plans/2026-09-02-invoice-rc70-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

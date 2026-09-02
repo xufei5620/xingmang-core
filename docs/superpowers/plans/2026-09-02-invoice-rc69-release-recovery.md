@@ -1,5 +1,10 @@
 # RC69 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC69 shipped at signed tag
+> `v0.1.0-rc69-signed` (`43bdc59`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-02-invoice-rc70-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC69 — the settlement lock-contention fix (XM-INV-PROOF-CONTENTION: exponential BALANCE_PROOF_PENDING backoff preserved across requeues, non-blocking per-account advisory locks in the source-projection worker, the projection job locking only its write phase, worker fault isolation, set-based carry-forward proof evaluation, EVENT_DEAD attribution from the application layer) plus the toolchain tails (XM-INV-TOOLCHAIN0: per-worktree integration databases, Trivy cache refresh script, detached ceremony runner).
