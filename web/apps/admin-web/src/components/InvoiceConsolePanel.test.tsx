@@ -132,16 +132,37 @@ describe("InvoiceConsolePanel（CR-0005 平台线 g/h/i/j/k）", () => {
       expect(await screen.findByText("无权访问")).not.toBeNull();
     });
 
-    it("端点未挂载（404，未启用断言登录）：显示未接入说明", async () => {
+    it("XM-INVCON1-FALLBACK：端点未挂载（404，未启用断言登录）时回落到旧版直接 iframe，并带诚实提示，不是错误/无权访问态", async () => {
+      setLocalConfig(ORIGIN);
+      stubFetch({
+        // chi 对未挂载路由的响应体没有 error.code（looksLikeUnmountedRoute
+        // 判据），与 XM-INVCON1 交接文档记录的既定纪律一致。
+        "/api/v1/auth/console-assertion": () => ({ status: 404, body: {} }),
+      });
+      render(<InvoiceConsolePanel mode="sub2api" scopes={[FINANCE_READ_PERMISSION]} />);
+      expect(
+        await screen.findByText("控制台断言登录尚未启用，当前使用开票系统自身的登录（过渡期）"),
+      ).not.toBeNull();
+      const frame = screen.getByTitle("开票") as HTMLIFrameElement;
+      // 与 XM-INVCON0 完全相同的直接 iframe：同一个 URL 拼法，且不带
+      // assertion（这里没有直接手段断言"没有传某个 prop"，但可以确认没有
+      // 因为断言路径而产生额外的签发/登录相关的错误状态）。
+      expect(frame.src).toBe(`${ORIGIN}/embed/admin/sub2api`);
+      expect(screen.queryByText("无权访问")).toBeNull();
+      expect(screen.queryByText("加载失败")).toBeNull();
+    });
+
+    it("XM-INVCON1-FALLBACK：未启用断言登录时不出现「无权访问」措辞（那是 finance.read/denied 专用文案）", async () => {
       setLocalConfig(ORIGIN);
       stubFetch({
         "/api/v1/auth/console-assertion": () => ({ status: 404, body: {} }),
       });
-      render(<InvoiceConsolePanel mode="sub2api" scopes={[FINANCE_READ_PERMISSION]} />);
-      expect(await screen.findByText(/开票系统未启用断言登录/)).not.toBeNull();
+      render(<InvoiceConsolePanel mode="newapi" scopes={[FINANCE_READ_PERMISSION]} />);
+      await screen.findByTitle("开票");
+      expect(screen.queryByText(/无权/)).toBeNull();
     });
 
-    it("其它错误码：显示加载失败与可点的重试按钮", async () => {
+    it("已挂载但返回其它错误码（如 INTERNAL/500）：真正的错误态，显示加载失败与可点的重试按钮，不回落到旧版 iframe", async () => {
       setLocalConfig(ORIGIN);
       let calls = 0;
       stubFetch({

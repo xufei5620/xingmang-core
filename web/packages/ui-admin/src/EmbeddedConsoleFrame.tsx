@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cx } from "@xingmang/ui-primitives";
 import { PageState } from "./PageState";
@@ -234,5 +235,32 @@ export function EmbeddedConsoleFrame({
       )}
       style={height === undefined ? undefined : { height: `${height}px` }}
     />
+  );
+}
+
+export interface EmbeddedConsoleLegacyNoticeProps {
+  /** 说明文案。调用方按自己的过渡期场景填——ui-admin 不认识"开票"这类具体
+   *  业务名词（见 `EmbeddedConsoleFrame` 本身的同一条原则：不认识、不展示
+   *  嵌入内容），所以这里不预置默认文案，交给调用方（如 XM-INVCON1-FALLBACK
+   *  的 InvoiceConsolePanel）传一句诚实、具体的说明。 */
+  children: ReactNode;
+}
+
+/** 嵌入控制台"降级到旧登录方式"时的诚实提示（CR-0006 XM-INVCON1-FALLBACK）。
+ *
+ *  用在断言登录尚未启用/暂不可用、组件退回到不带 `assertion` 的直接 iframe
+ *  时——不是错误、不是权限问题，是过渡期的一种正常状态，所以不用 `PageState
+ *  kind="error"`/`"unavailable"`那种整块替换内容的呈现，而是一条常驻在 iframe
+ *  上方的小字提示，与 `DemoDataBanner`（admin-web）"不可关闭、判不出来就不挂"
+ *  的诚实原则同源，但视觉上是嵌在面板内部的小提示条，不是页面顶部通栏——调用
+ *  场景不同：那条是全局横幅，这条只影响一个面板。 */
+export function EmbeddedConsoleLegacyNotice({ children }: EmbeddedConsoleLegacyNoticeProps) {
+  return (
+    <p
+      role="status"
+      className="rounded-md border border-warning bg-warning/10 px-3 py-2 text-xs font-medium text-warning"
+    >
+      {children}
+    </p>
   );
 }

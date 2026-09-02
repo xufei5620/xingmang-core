@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { EmbeddedConsoleFrame } from "./EmbeddedConsoleFrame";
+import { EmbeddedConsoleFrame, EmbeddedConsoleLegacyNotice } from "./EmbeddedConsoleFrame";
 
 const meta = {
   title: "Admin/EmbeddedConsoleFrame",
@@ -65,5 +65,26 @@ export const AssertionNeededCallback: Story = {
     path: "/embed/admin/sub2api",
     title: "开票",
     onAssertionNeeded: () => {},
+  },
+};
+
+/** CR-0006 XM-INVCON1-FALLBACK：断言登录尚未启用/暂不可用时，调用方（如
+ *  admin-web 的 `InvoiceConsolePanel`）退回到不带 `assertion` 的直接 iframe——
+ *  与 XM-INVCON0 交付时完全相同的旧行为——但在上方加一条诚实提示，而不是把
+ *  整块内容换成 `PageState kind="unavailable"`。这里用一个真实的组合渲染，
+ *  演示的正是调用方将会拼出的样子。 */
+export const LegacyFallbackWithNotice: Story = {
+  render: (args) => (
+    <div className="flex flex-col gap-2">
+      <EmbeddedConsoleLegacyNotice>
+        控制台断言登录尚未启用，当前使用开票系统自身的登录（过渡期）
+      </EmbeddedConsoleLegacyNotice>
+      <EmbeddedConsoleFrame {...args} />
+    </div>
+  ),
+  args: {
+    origin: "https://invoice.example.test",
+    path: "/embed/admin/sub2api",
+    title: "开票",
   },
 };

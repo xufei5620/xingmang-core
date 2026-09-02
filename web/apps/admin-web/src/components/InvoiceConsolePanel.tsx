@@ -1,4 +1,9 @@
-import { EmbeddedConsoleFrame, PageState, type EmbeddedConsolePath } from "@xingmang/ui-admin";
+import {
+  EmbeddedConsoleFrame,
+  EmbeddedConsoleLegacyNotice,
+  PageState,
+  type EmbeddedConsolePath,
+} from "@xingmang/ui-admin";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { appApiConfig } from "../api/config";
 import { ApiError, looksLikeUnmountedRoute } from "../api/client";
@@ -29,6 +34,15 @@ const EMBED_PATH: Readonly<Record<InvoiceConsoleMode, EmbeddedConsolePath>> = {
  *  平台线 i 原文写的就是这个标题，不跟着页签名走。 */
 const TITLE = "开票";
 
+/** CR-0006 XM-INVCON1-FALLBACK：断言签发端点未挂载（生产仍是
+ *  `XM_INVOICE_CONSOLE_ASSERTION_ENABLED=false` 的过渡期常态，CR-0006 第一
+ *  阶段本就与旧的 Keycloak OIDC 弹窗登录并存一整个发布周期）时显示的诚实
+ *  提示——不是错误，是"这一路径暂未启用，你现在走的是另一条本来就还在的
+ *  登录方式"。文案不隐瞒也不夸大：断言登录确实没开，但开票系统自己的登录
+ *  确实能用。 */
+const ASSERTION_NOT_ENABLED_NOTICE =
+  "控制台断言登录尚未启用，当前使用开票系统自身的登录（过渡期）";
+
 /** 重新签发的安全余量：在断言真正过期前这么久就主动换新的一份，留出网络
  *  往返与用户观察延迟的余地——真过期了才补救，iframe 至少会经历一次
  *  "已登录→掉线"的闪烁，不如提前换。 */
@@ -45,11 +59,25 @@ type AssertionState =
   | { kind: "ready"; assertion: string }
   | { kind: "step-up" }
   | { kind: "denied"; message: string }
-  | { kind: "unavailable" }
+  /** XM-INVCON1-FALLBACK：断言端点未挂载，回落到 XM-INVCON0 的直接 iframe
+   *  （旧行为），不是错误态——见下方渲染分支与 `ASSERTION_NOT_ENABLED_NOTICE`。
+   *  取代了原来的 `unavailable` 态：那个态原本渲染一块整页替换的
+   *  `PageState kind="unavailable"`，把整个开票页签变成不可用，恰恰是本片
+   *  要修的回归本身（过渡期真实可用的旧登录路径被藏起来了）。 */
+  | { kind: "legacy" }
   | { kind: "error"; message: string };
 
 function mapAssertionError(cause: unknown): AssertionState {
-  if (looksLikeUnmountedRoute(cause)) return { kind: "unavailable" };
+  // 404（chi 对未挂载路由的响应，`code===UNKNOWN_CODE`）是
+  // `XM_INVOICE_CONSOLE_ASSERTION_ENABLED=false` 时**唯一**的信号——
+  // consoleassertion 包的既定纪律是 `Deps.ConsoleAssertion` 为 nil 时路由
+  // 完全不挂载，不是挂载后返回某个"已禁用"的结构化错误码（`cmd/platform-api/
+  // consoleassertion.go` 的 `buildConsoleAssertionHandlers` 在 `!Enabled` 时
+  // 直接 `return nil, nil`）；XM-INVCON1 交接文档记录的错误码表
+  // （FINANCE_SCOPE_REQUIRED/ADMIN_NETWORK_DENIED/ADMIN_STEP_UP_REQUIRED/
+  // INVALID_PARAMS/PERMISSION_DENIED/INTERNAL）里也没有单独的"disabled"码。
+  // 因此这里只认 404，不去猜一个目前后端契约里并不存在的错误码。
+  if (looksLikeUnmountedRoute(cause)) return { kind: "legacy" };
   if (cause instanceof ApiError) {
     switch (cause.code) {
       case "FINANCE_SCOPE_REQUIRED":
@@ -58,6 +86,7 @@ function mapAssertionError(cause: unknown): AssertionState {
       case "ADMIN_STEP_UP_REQUIRED":
         return { kind: "step-up" };
       default:
+        // 挂载了但失败（如 INTERNAL/500）：真正的错误态，带重试。
         return { kind: "error", message: cause.message };
     }
   }
@@ -138,7 +167,7 @@ function useConsoleAssertion(scope: ConsoleAssertionScope, active: boolean) {
  *  一次自己刚验过 TOTP，再把这份证明转交给 iframe"这一步，服务端裁决权
  *  仍在开票系统自己的兑换端点。
  *
- *  k：平台侧不展示任何开票数字。三种状态（denied / unavailable / 正常）都不
+ *  k：平台侧不展示任何开票数字。各状态（denied / legacy / 正常 / …）都不
  *  读取、不显示开票记录数或金额，iframe 内部的内容对这个组件永远不透明——
  *  断言本身也只是一枚不透明的字符串，本组件不解析它的 claims。 */
 export function InvoiceConsolePanel({
@@ -197,13 +226,16 @@ function InvoiceConsoleFrameWithAssertion({
       // 不传 title——沿用 PageState 默认的「无权访问」，与上方 finance.read
       // 缺失时的呈现方式一致（同一件事只有一种说法）。
       return <PageState kind="denied" description={state.message} />;
-    case "unavailable":
+    case "legacy":
+      // 断言登录未启用：回落到 XM-INVCON0 的直接 iframe（与 !isLocalAuth 分支
+      // 完全同一种渲染——同一个 URL 拼法、同一次高度同步、同一套 sandbox/allow
+      // 属性，不传 assertion/onAssertionNeeded），只在上方加一条诚实的过渡期
+      // 提示。开票系统自己的弹窗 OIDC 登录不受影响、照常工作。
       return (
-        <PageState
-          kind="unavailable"
-          title={TITLE}
-          description="开票系统未启用断言登录，请联系运维确认 XM_INVOICE_CONSOLE_ASSERTION_ENABLED 配置。"
-        />
+        <div className="flex flex-col gap-2">
+          <EmbeddedConsoleLegacyNotice>{ASSERTION_NOT_ENABLED_NOTICE}</EmbeddedConsoleLegacyNotice>
+          <EmbeddedConsoleFrame origin={origin} path={EMBED_PATH[mode]} title={TITLE} />
+        </div>
       );
     case "error":
       return <PageState kind="error" title={TITLE} message={state.message} onRetry={reissue} />;
