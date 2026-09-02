@@ -269,3 +269,85 @@ func TestSourceIngestRuntimeReadinessBoundsPendingAge(t *testing.T) {
 		})
 	}
 }
+
+func TestEligibilityProjectionReadyDistinguishesProofPendingFromStuck(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for name, fixture := range map[string]struct {
+		health postgresstore.EligibilityProjectionHealth
+		ready  bool
+	}{
+		"empty":                   {health: postgresstore.EligibilityProjectionHealth{}, ready: true},
+		"failed alone":            {health: postgresstore.EligibilityProjectionHealth{Failed: 1}, ready: false},
+		"fresh oldest pending":    {health: postgresstore.EligibilityProjectionHealth{Queued: 1, OldestPending: now.Add(-14 * time.Minute)}, ready: true},
+		"oldest pending at limit": {health: postgresstore.EligibilityProjectionHealth{Queued: 1, OldestPending: now.Add(-15 * time.Minute)}, ready: true},
+		"oldest pending too old":  {health: postgresstore.EligibilityProjectionHealth{Queued: 1, OldestPending: now.Add(-15*time.Minute - time.Nanosecond)}, ready: false},
+		"proof pending never fails alone": {
+			health: postgresstore.EligibilityProjectionHealth{Queued: 1, ProofPending: 1, OldestProofPending: now.Add(-6 * time.Hour)},
+			ready:  true,
+		},
+		"proof pending alongside a stuck job still fails": {
+			health: postgresstore.EligibilityProjectionHealth{
+				Queued: 2, OldestPending: now.Add(-20 * time.Minute),
+				ProofPending: 1, OldestProofPending: now.Add(-6 * time.Hour),
+			},
+			ready: false,
+		},
+		"failed overrides a fresh oldest pending": {health: postgresstore.EligibilityProjectionHealth{Failed: 1, OldestPending: now}, ready: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := eligibilityProjectionReady(fixture.health, now)
+			if (err == nil) != fixture.ready {
+				t.Fatalf("ready=%t err=%v", fixture.ready, err)
+			}
+		})
+	}
+}
+
+func TestShouldWarnProofPendingRateLimitsToOncePerInterval(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	stale := postgresstore.EligibilityProjectionHealth{ProofPending: 1, OldestProofPending: now.Add(-61 * time.Minute)}
+	for name, fixture := range map[string]struct {
+		health       postgresstore.EligibilityProjectionHealth
+		lastWarnedAt time.Time
+		want         bool
+	}{
+		"no proof pending":                                              {health: postgresstore.EligibilityProjectionHealth{}, want: false},
+		"proof pending but fresh":                                       {health: postgresstore.EligibilityProjectionHealth{ProofPending: 1, OldestProofPending: now.Add(-59 * time.Minute)}, want: false},
+		"exactly at the age limit":                                      {health: postgresstore.EligibilityProjectionHealth{ProofPending: 1, OldestProofPending: now.Add(-60 * time.Minute)}, want: false},
+		"stale, never warned before":                                    {health: stale, want: true},
+		"stale, warned a minute ago":                                    {health: stale, lastWarnedAt: now.Add(-time.Minute), want: false},
+		"stale, warned exactly one interval ago":                        {health: stale, lastWarnedAt: now.Add(-5 * time.Minute), want: true},
+		"stale, warned just under one interval ago":                     {health: stale, lastWarnedAt: now.Add(-5*time.Minute + time.Second), want: false},
+		"zero OldestProofPending is ignored even with a positive count": {health: postgresstore.EligibilityProjectionHealth{ProofPending: 1}, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := shouldWarnProofPending(fixture.health, now, fixture.lastWarnedAt)
+			if got != fixture.want {
+				t.Fatalf("shouldWarnProofPending=%t want %t", got, fixture.want)
+			}
+		})
+	}
+}
+
+func TestEligibilityProofPendingWarnerRateLimitsAcrossCalls(t *testing.T) {
+	warner := &eligibilityProofPendingWarner{}
+	now := time.Now().UTC().Truncate(time.Second)
+	stale := postgresstore.EligibilityProjectionHealth{ProofPending: 1, OldestProofPending: now.Add(-2 * time.Hour)}
+
+	warner.warnIfStale(stale, now)
+	if !warner.lastAt.Equal(now) {
+		t.Fatalf("first stale evaluation did not record a warning: lastAt=%v", warner.lastAt)
+	}
+
+	soonAfter := now.Add(time.Minute)
+	warner.warnIfStale(stale, soonAfter)
+	if !warner.lastAt.Equal(now) {
+		t.Fatalf("warner fired again inside the rate-limit interval: lastAt=%v", warner.lastAt)
+	}
+
+	afterInterval := now.Add(eligibilityProofPendingWarnInterval)
+	warner.warnIfStale(stale, afterInterval)
+	if !warner.lastAt.Equal(afterInterval) {
+		t.Fatalf("warner did not fire again once the interval elapsed: lastAt=%v", warner.lastAt)
+	}
+}

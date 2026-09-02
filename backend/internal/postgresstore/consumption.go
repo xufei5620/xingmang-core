@@ -52,7 +52,7 @@ const defaultEligibilityFinalizationDelay = 15 * time.Minute
 // reason, mid-lease, or freshly failed) is unaffected -- it keeps the
 // pre-existing immediate-requeue behavior.
 const (
-	balanceProofPendingBackoffCapSeconds = 600
+	balanceProofPendingBackoffCapSeconds  = 600
 	balanceProofPendingRequeueResetWindow = 5 * time.Minute
 )
 
@@ -125,21 +125,59 @@ type eligibilityProjection struct {
 	ShortfallUsage  string
 }
 
+// EligibilityProjectionHealth's OldestPending/ProofPending split
+// (XM-INV-READY-PENDING) exists because a job can be legitimately, not
+// unhealthily, unresolved for a long time: XM-INV-PROOF-CONTENTION's
+// BALANCE_PROOF_PENDING exponential backoff (up to the 10-minute cap) means
+// every attempt so far has successfully decided "the balance proof is not
+// published yet" and correctly rescheduled itself -- that is forward
+// progress, not a stall, even though the row itself (and its created_at) can
+// be very old if the source stream stays behind for a while. A production
+// account tripped exactly this: /readyz stayed 503 solely because a
+// proof-pending job's created_at exceeded the 15-minute readiness window,
+// even though attempt_count kept climbing on schedule and nothing was
+// actually stuck.
+//
+// A row counts as "waiting on a balance proof" (ProofPending/
+// OldestProofPending) only while ALL of: status='queued' (which the table's
+// own CHECK constraint already guarantees means lease_token/lease_expires_at
+// are both clear -- processing jobs are never proof-pending),
+// last_error_code='BALANCE_PROOF_PENDING', and next_attempt_at is still in
+// the future (an actively scheduled backoff, not one the worker missed).
+// Every other row -- processing, failed, plain queued, or a
+// BALANCE_PROOF_PENDING row whose own backoff window has already elapsed
+// without a retry -- falls into OldestPending instead, keyed off updated_at
+// (the last real attempt: set by the claim UPDATE, the failure/backoff
+// marks, and the ON CONFLICT requeue upserts) rather than created_at, so a
+// job actively cycling through real attempts never looks stale merely
+// because its row has existed for a while. Only a genuine gap between
+// attempts -- the worker not reaching a due row -- ages OldestPending past
+// the readiness threshold.
 type EligibilityProjectionHealth struct {
 	Queued, Failed, Processing int64
 	OldestPending              time.Time
+	ProofPending               int64
+	OldestProofPending         time.Time
 }
 
 func (s *Store) EligibilityProjectionHealth(ctx context.Context) (EligibilityProjectionHealth, error) {
+	now := time.Now().UTC()
 	var health EligibilityProjectionHealth
 	err := s.pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='failed'),
 			count(*) FILTER (WHERE status='processing'),
-			COALESCE(min(created_at),'epoch'::timestamptz)
-		FROM eligibility_projection_jobs`).Scan(&health.Queued, &health.Failed, &health.Processing,
-		&health.OldestPending)
+			COALESCE(min(updated_at) FILTER (WHERE NOT (
+				status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1
+			)),'epoch'::timestamptz),
+			count(*) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1),
+			COALESCE(min(updated_at) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1),'epoch'::timestamptz)
+		FROM eligibility_projection_jobs`, now).Scan(&health.Queued, &health.Failed, &health.Processing,
+		&health.OldestPending, &health.ProofPending, &health.OldestProofPending)
 	if health.OldestPending.Equal(time.Unix(0, 0).UTC()) {
 		health.OldestPending = time.Time{}
+	}
+	if health.OldestProofPending.Equal(time.Unix(0, 0).UTC()) {
+		health.OldestProofPending = time.Time{}
 	}
 	return health, err
 }
