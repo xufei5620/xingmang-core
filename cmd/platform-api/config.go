@@ -6,10 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/oidcauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
 // config 只承载**非机密**配置。
@@ -58,6 +60,86 @@ type config struct {
 	// 断言签发端点（XM-INVCON1，届时应读取**同一个**环境变量，两侧配置须
 	// 保持一致）各自独立校验。
 	ConsoleAdminIPAllowlist localauth.AdminIPAllowlist
+
+	// ConsoleAssertion 是 CR-0006/XM-INVCON1 断言签发端点的配置。
+	// Enabled=false（默认）时 cmd/platform-api 完全不构造签名器/Handlers，
+	// 路由不挂载 POST /api/v1/auth/console-assertion（404，不是拿一个未装配
+	// 的依赖硬跑出 500——与 LocalAuth/RequestLogs 同一条纪律）。
+	ConsoleAssertion consoleAssertionConfig
+}
+
+// consoleAssertionConfig 承载 CR-0006/XM-INVCON1 的非机密配置；私钥只有一个
+// CredentialRef（KeyRef），明文永不出现在这个结构体里。
+type consoleAssertionConfig struct {
+	Enabled      bool
+	Issuer       string
+	Audience     string
+	KeyRef       secrets.CredentialRef
+	StepUpMaxAge time.Duration
+}
+
+// consoleAssertionConfigFromEnv 解析 XM_INVOICE_CONSOLE_ASSERTION_* 五个
+// 环境变量。**enabled=false 时对其余四项一律不校验**——与本文件其它「未启用
+// 的功能不该因为配置半吊子而拒绝整个进程启动」的既定纪律一致（对照
+// authConfigFromEnv 对 dev-header/oidc/local 三态的分层校验）；一旦
+// enabled=true，任何一项非法都拒绝启动（Fail Closed，同 XM_CONSOLE_ADMIN_IP_
+// ALLOWLIST 的既定纪律）。
+//
+// authMode 是已解析好的当前 XM_AUTH_MODE：断言签发依赖 mfa_at/TOTP 新鲜度，
+// 这个概念只有 local 模式的 Resolver 会填充（见 principal.Principal.MFAAt
+// 的注释，dev-header/oidc 两种解析器留空），因此 enabled=true 时同时要求
+// authMode=local，否则签发端点会对每一次请求都判"从未过二因素"，永远
+// ADMIN_STEP_UP_REQUIRED，是一种可预见但无意义的死锁——不如启动时直接拒绝。
+func consoleAssertionConfigFromEnv(getenv func(string) string, authMode authMode) (consoleAssertionConfig, error) {
+	c := consoleAssertionConfig{}
+	enabledRaw := strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_ENABLED"))
+	if enabledRaw == "" {
+		return c, nil
+	}
+	enabled, err := strconv.ParseBool(enabledRaw)
+	if err != nil {
+		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_ENABLED=%q 必须是布尔值: %w", enabledRaw, err)
+	}
+	if !enabled {
+		return c, nil
+	}
+	c.Enabled = true
+
+	if authMode != authModeLocal {
+		return consoleAssertionConfig{}, fmt.Errorf(
+			"XM_INVOICE_CONSOLE_ASSERTION_ENABLED=true 要求 XM_AUTH_MODE=local" +
+				"（断言签发依赖本地登录的 TOTP 新鲜度 mfa_at，oidc/dev-header 两种" +
+				"身份解析器都不填充这个字段）")
+	}
+
+	issuer, err := consoleassertion.ValidateIssuer(getenv("XM_INVOICE_CONSOLE_ASSERTION_ISSUER"))
+	if err != nil {
+		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_ISSUER: %w", err)
+	}
+	c.Issuer = issuer
+	c.Audience = strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_AUDIENCE"))
+
+	keyRefRaw := strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_KEY_REF"))
+	if keyRefRaw == "" {
+		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_ENABLED=true 时 XM_INVOICE_CONSOLE_ASSERTION_KEY_REF 必填")
+	}
+	keyRef, err := secrets.ParseCredentialRef(keyRefRaw)
+	if err != nil {
+		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_KEY_REF: %w", err)
+	}
+	c.KeyRef = keyRef
+
+	if v := strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE: %w", err)
+		}
+		if d <= 0 {
+			return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE must be positive, got %s", v)
+		}
+		c.StepUpMaxAge = d
+	}
+	return c, nil
 }
 
 // defaultSecretRoot 与 deploy/compose/launch.yaml 里 xm-secrets 卷的挂载点一致。
@@ -186,6 +268,12 @@ func configFromEnv(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	c.ConsoleAdminIPAllowlist = allowlist
+
+	consoleAssertionCfg, err := consoleAssertionConfigFromEnv(getenv, c.Auth.Mode)
+	if err != nil {
+		return config{}, err
+	}
+	c.ConsoleAssertion = consoleAssertionCfg
 	return c, nil
 }
 

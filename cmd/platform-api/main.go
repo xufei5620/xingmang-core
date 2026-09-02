@@ -20,6 +20,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
+	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
@@ -192,6 +193,26 @@ func main() {
 			localAuthStore, cfg.Environment, auditStore, logger,
 			kernel, totpSecretReader, cfg.ConsoleAdminIPAllowlist,
 		)
+	}
+	// 断言签发端点（CR-0006/XM-INVCON1）：只在 local 模式 + 显式启用时装配
+	// （configFromEnv 已经把"enabled=true 但 auth mode 不是 local"当成启动期
+	// 错误拒绝了，这里 localAuthStore!=nil 与 cfg.ConsoleAssertion.Enabled
+	// 因此不会出现"想启用却没有 store"的组合）。私钥经与 TOTP 同一份
+	// XM_SECRET_ROOT 目录的 SecretProvider 解析，装配失败即拒绝启动——
+	// 一个「配置说启用了，但私钥读不出来」的进程不该在没有签发能力的情况下
+	// 假装自己就绪。
+	var consoleAssertionHandlers *consoleassertion.Handlers
+	if cfg.ConsoleAssertion.Enabled {
+		h, err := buildConsoleAssertionHandlers(
+			ctx, cfg, localAuthStore, platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger),
+			auditStore, logger,
+		)
+		if err != nil {
+			logger.Error("api_start_failed", slog.String("module", "platform.api"),
+				slog.String("error_code", "console_assertion_config_invalid"), slog.Any("err", err))
+			os.Exit(2)
+		}
+		consoleAssertionHandlers = h
 	}
 	opsStore := ops.NewStore(pool)
 	runwaySummaryStore := finance.NewSummaryStore(pool, nil)
@@ -387,6 +408,9 @@ func main() {
 		RateLimit:                  cfg.RateLimit,
 		// nil 时本地登录端点不挂载（XM-LOGIN，只有 XM_AUTH_MODE=local 才有值）
 		LocalAuth: localAuthHandlersOrNil(localAuthHandlers),
+		// nil 时断言签发端点不挂载（CR-0006/XM-INVCON1，只有
+		// XM_INVOICE_CONSOLE_ASSERTION_ENABLED=true 才有值）
+		ConsoleAssertion: consoleAssertionHandlersOrNil(consoleAssertionHandlers),
 		// 运行保障页「控制平面健康」子页（XM-OPS0）。复用凭据登记的同一个
 		// 仓储——它已经在读 core.connector_config，不必再开一条访问路径。
 		OpsConnectorConfigs: credentialStore,

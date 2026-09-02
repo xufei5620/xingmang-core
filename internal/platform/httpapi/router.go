@@ -119,6 +119,17 @@ type Deps struct {
 	// 与 RequestLogs/PlatformUsers 同一条纪律：端点不存在（404）比端点存在
 	// 却拿一个 nil 依赖硬跑更诚实。
 	LocalAuth LocalAuthHandlers
+	// ConsoleAssertion 为 nil 时断言签发端点（CR-0006/XM-INVCON1，
+	// POST /api/v1/auth/console-assertion）不挂载——只有
+	// XM_INVOICE_CONSOLE_ASSERTION_ENABLED=true 时才会有值。与 LocalAuth
+	// 同一条纪律：端点不存在（404）比端点存在却拿一个未装配的签名器硬跑
+	// 更诚实。挂载位置在 RequirePrincipal 组内（要求 xm_session + CSRF
+	// 头），不额外声明 RequireScope——finance.read/IP 名单/TOTP 新鲜度三重
+	// 校验需要各自返回不同的错误码（FINANCE_SCOPE_REQUIRED/
+	// ADMIN_NETWORK_DENIED/ADMIN_STEP_UP_REQUIRED），比通用 RequireScope
+	// 中间件统一回 PERMISSION_DENIED 更精确，因此校验放在 Handler 内部，
+	// 与 localauth.Handlers 自身端点的既有做法一致。
+	ConsoleAssertion ConsoleAssertionHandlers
 	// OpsConnectorConfigs 供运行保障页的「控制平面健康」子页展示每条同步
 	// 任务的生效模式（XM-OPS0）。为 nil 时该字段在响应里如实报告
 	// config_available=false，而不是猜一个模式——与 Credentials 为 nil 时
@@ -457,6 +468,9 @@ func NewRouter(d Deps) http.Handler {
 				// reset_password 同一种"管理员改别人账号"的形状——两者统一走
 				// 上面已经注册的通用 /actions/{id}/versions/{version}/execute
 				// 入口即可，不必每加一个管理员动作就新开一条路由。
+			}
+			if d.ConsoleAssertion != nil {
+				api.Post("/auth/console-assertion", d.ConsoleAssertion.Issue)
 			}
 		})
 	})
