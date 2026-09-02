@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
+	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/oidcauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
@@ -43,11 +44,20 @@ type config struct {
 	//
 	// 运营粘贴的凭据以 <root>/<scope>/<name> 落盘；worker 与本进程都用同一个
 	// 目录构造 secrets.NewFileProvider 读值。本进程绝大部分路径仍是只写：
-	// 唯一的读路径是 XM-USERS-REAL 的 real 模式（platformUsersSecretProvider，
-	// 见 cmd/platform-api/platformusers.go），用来把 core.connector_config 里
-	// 的 CredentialRef 解析成请求头。
+	// 读路径包括 XM-USERS-REAL 的 real 模式（platformUsersSecretProvider，
+	// 见 cmd/platform-api/platformusers.go）与 XM-AUTH-TOTP0 登录时读回 TOTP
+	// 密钥（同一个 Provider 构造，见 main.go 里 registerLocalAuthActions /
+	// localauth.NewHandlers 的装配点），两者复用同一份 XM_SECRET_ROOT 目录。
 	// 目录本身不是机密，路径可以进日志；目录里的文件永远不能。
 	SecretRoot string
+
+	// ConsoleAdminIPAllowlist 是 XM-AUTH-TOTP0/CR-0006 c 条的管理员来源 IP
+	// 名单（XM_CONSOLE_ADMIN_IP_ALLOWLIST，逗号分隔 CIDR；空＝不启用）。
+	// 只对已经/将要被要求启用 TOTP 的账号（管理员）生效，见
+	// localauth.accountNeedsAdminIPCheck。这是纵深防御，不是唯一防线——与
+	// 断言签发端点（XM-INVCON1，届时应读取**同一个**环境变量，两侧配置须
+	// 保持一致）各自独立校验。
+	ConsoleAdminIPAllowlist localauth.AdminIPAllowlist
 }
 
 // defaultSecretRoot 与 deploy/compose/launch.yaml 里 xm-secrets 卷的挂载点一致。
@@ -167,6 +177,15 @@ func configFromEnv(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	c.CPA = cpaCfg
+
+	// XM_CONSOLE_ADMIN_IP_ALLOWLIST（XM-AUTH-TOTP0）：非法 CIDR 一律拒绝
+	// 启动，不回落成"未启用"——一个写错的 CIDR 段本该收紧访问却悄悄放开，
+	// 比进程直接起不来更危险（宪法同一条 Fail Closed 精神）。
+	allowlist, err := localauth.ParseAdminIPAllowlist(getenv("XM_CONSOLE_ADMIN_IP_ALLOWLIST"))
+	if err != nil {
+		return config{}, err
+	}
+	c.ConsoleAdminIPAllowlist = allowlist
 	return c, nil
 }
 

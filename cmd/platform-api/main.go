@@ -159,21 +159,12 @@ func main() {
 	runwayThresholdStore := finance.NewRunwayThresholdStore(pool, nil)
 	// 每次 Action 执行（成功或被拒）都进哈希链审计（规格 §4.4）
 	auditStore := audit.NewStore(pool)
-	// 本地登录账号管理（XM-LOGIN）：只在 local 模式下注册这四个 Action。
-	// 其余模式 localAuthStore 为 nil，staff.account.* 在 /api/v1/actions 的
-	// 清单里不存在——前端应据此隐藏账号管理入口，而不是显示一个一调就 403
-	// 的按钮。注册失败即拒绝启动，同其它模块的纪律。
-	var localAuthHandlers *localauth.Handlers
-	if localAuthStore != nil {
-		if err := registerLocalAuthActions(actionRegistry, cfg, localAuthStore); err != nil {
-			logger.Error("api_start_failed", slog.String("module", "platform.api"),
-				slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
-			os.Exit(1)
-		}
-		localAuthHandlers = localauth.NewHandlers(localAuthStore, cfg.Environment, auditStore, logger)
-	}
 	// 具名保留：Kernel 用它写执行记录，httpapi 用它读——操作与审批页
 	// 「执行记录」子页签（XM-ACTIONS0）不另开一条写路径，只加只读查询。
+	//
+	// 建在本地登录账号管理那个 if 块之前（早于历史顺序）：XM-AUTH-TOTP0 的
+	// EnrollTOTP/ConfirmTOTP/ResetTOTP 三个 HTTP 方法内部要经同一个 Kernel
+	// 执行对应 Action，localauth.NewHandlers 需要它作为构造参数。
 	actionRunStore := action.NewPgRunStore(pool, logger)
 	kernel := action.NewKernel(
 		actionRegistry,
@@ -181,6 +172,27 @@ func main() {
 		action.WithAuditSink(audit.NewActionSink(auditStore)),
 		action.WithLogger(logger),
 	)
+	// 本地登录账号管理（XM-LOGIN + XM-AUTH-TOTP0）：只在 local 模式下注册
+	// 这七个 Action（四个既有 + 三个 TOTP）。其余模式 localAuthStore 为 nil，
+	// staff.account.* 在 /api/v1/actions 的清单里不存在——前端应据此隐藏
+	// 账号管理入口，而不是显示一个一调就 403 的按钮。注册失败即拒绝启动，
+	// 同其它模块的纪律。
+	var localAuthHandlers *localauth.Handlers
+	if localAuthStore != nil {
+		// TOTP 密钥的读路径：与 XM-USERS-REAL real 模式同一构造（文件优先、
+		// 审计过的 SecretProvider，指向同一个 XM_SECRET_ROOT），登录二步校验
+		// 与 confirm_totp 都要读回当前生效的密钥。
+		totpSecretReader := platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger)
+		if err := registerLocalAuthActions(actionRegistry, cfg, localAuthStore, credentialStore, totpSecretReader); err != nil {
+			logger.Error("api_start_failed", slog.String("module", "platform.api"),
+				slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+			os.Exit(1)
+		}
+		localAuthHandlers = localauth.NewHandlers(
+			localAuthStore, cfg.Environment, auditStore, logger,
+			kernel, totpSecretReader, cfg.ConsoleAdminIPAllowlist,
+		)
+	}
 	opsStore := ops.NewStore(pool)
 	runwaySummaryStore := finance.NewSummaryStore(pool, nil)
 	// 后台任务页（XM-JOBS0）：只读 river_job / river_queue，不依赖 River

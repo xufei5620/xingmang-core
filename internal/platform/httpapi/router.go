@@ -174,6 +174,11 @@ func NewRouter(d Deps) http.Handler {
 		// LocalAuth 为 nil（未运行在 local 模式）时整组不挂载。
 		if d.LocalAuth != nil {
 			api.Post("/auth/login", d.LocalAuth.Login)
+			// /auth/login/totp（XM-AUTH-TOTP0）同组挂在 RequirePrincipal 之外：
+			// 它服务两种调用形态，其一（携带 temp_token 完成登录第二步）本身
+			// 也是在建立身份；另一种（步进刷新，不带 temp_token）由 LoginTOTP
+			// 内部直接读 Cookie 校验，不复用这里的中间件。
+			api.Post("/auth/login/totp", d.LocalAuth.LoginTOTP)
 			api.Post("/auth/logout", d.LocalAuth.Logout)
 		}
 
@@ -438,6 +443,20 @@ func NewRouter(d Deps) http.Handler {
 				api.Post("/auth/password", d.LocalAuth.ChangePassword)
 				api.With(RequireScope(localAuthScopeManage)).
 					Get("/staff/accounts", d.LocalAuth.ListAccounts)
+				api.Post("/auth/totp/enroll", d.LocalAuth.EnrollTOTP)
+				api.Post("/auth/totp/confirm", d.LocalAuth.ConfirmTOTP)
+				// TOTP 自助启用/确认（XM-AUTH-TOTP0，CR-0006 技术规格 §5.1 只为
+				// 这两个开了专用端点）：作用对象只能是调用者自己，权限由各自的
+				// Action Schema（staff.account.enroll_totp/confirm_totp，
+				// Permission=staff.manage）在内核里裁决，路由层不重复声明
+				// RequireScope——与既有的 /actions/.../execute 通用执行入口
+				// 同一条纪律，避免同一份权限判定分两处维护。
+				//
+				// 管理员重置他人 TOTP（staff.account.reset_totp）**没有**专用
+				// 端点：技术规格没有为它单开一条，且它与 staff.account.
+				// reset_password 同一种"管理员改别人账号"的形状——两者统一走
+				// 上面已经注册的通用 /actions/{id}/versions/{version}/execute
+				// 入口即可，不必每加一个管理员动作就新开一条路由。
 			}
 		})
 	})

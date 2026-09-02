@@ -16,6 +16,12 @@ export interface StaffAccount {
   /** null 表示从未登录过。 */
   last_login_at: string | null;
   created_at: string;
+  /** XM-AUTH-TOTP0：是否已激活 TOTP（totp_enrolled_at 非空）。 */
+  totp_enrolled: boolean;
+  /** 语义与 must_change_password 完全对称：持有需要 TOTP 的角色、且尚未
+   *  激活时为真。 */
+  must_enroll_totp: boolean;
+  totp_enrolled_at: string | null;
 }
 
 interface ItemsResponse {
@@ -31,6 +37,9 @@ interface StaffAccountRaw {
   locked_until?: unknown;
   last_login_at?: unknown;
   created_at?: unknown;
+  totp_enrolled?: unknown;
+  must_enroll_totp?: unknown;
+  totp_enrolled_at?: unknown;
 }
 
 function str(value: unknown): string {
@@ -60,6 +69,9 @@ function projectStaffAccount(raw: unknown): StaffAccount {
     locked_until: strOrNull(row.locked_until),
     last_login_at: strOrNull(row.last_login_at),
     created_at: str(row.created_at),
+    totp_enrolled: row.totp_enrolled === true,
+    must_enroll_totp: row.must_enroll_totp === true,
+    totp_enrolled_at: strOrNull(row.totp_enrolled_at),
   };
 }
 

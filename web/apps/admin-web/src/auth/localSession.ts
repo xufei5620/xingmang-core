@@ -24,6 +24,15 @@ export interface LocalUser {
   display_name: string;
   roles: string[];
   must_change_password: boolean;
+  /** XM-AUTH-TOTP0：是否已激活 TOTP（totp_enrolled_at 非空）。 */
+  totp_enrolled: boolean;
+  /** 语义与 must_change_password 完全对称：账号持有需要 TOTP 的角色、且
+   *  尚未激活时为真。RequireAuth 据此把人无论原本要去哪都先带到启用页。 */
+  must_enroll_totp: boolean;
+  totp_enrolled_at: string | null;
+  /** 仅在 totp_enrolled 为真时可能有值；null 表示服务端没有返回（不代表
+   *  "0 张"，账号安全页应区分"未知"与"确实为 0"）。 */
+  recovery_codes_remaining: number | null;
 }
 
 interface LocalUserResponse {
@@ -31,6 +40,10 @@ interface LocalUserResponse {
   display_name?: unknown;
   roles?: unknown;
   must_change_password?: unknown;
+  totp_enrolled?: unknown;
+  must_enroll_totp?: unknown;
+  totp_enrolled_at?: unknown;
+  recovery_codes_remaining?: unknown;
 }
 
 function projectLocalUser(body: LocalUserResponse): LocalUser {
@@ -44,7 +57,29 @@ function projectLocalUser(body: LocalUserResponse): LocalUser {
     display_name: displayName,
     roles,
     must_change_password: body.must_change_password === true,
+    totp_enrolled: body.totp_enrolled === true,
+    must_enroll_totp: body.must_enroll_totp === true,
+    totp_enrolled_at: typeof body.totp_enrolled_at === "string" ? body.totp_enrolled_at : null,
+    recovery_codes_remaining:
+      typeof body.recovery_codes_remaining === "number" ? body.recovery_codes_remaining : null,
   };
+}
+
+/** POST /api/v1/auth/login 密码校验通过、TOTP 待验证时的中间态。 */
+export interface TotpChallenge {
+  tempToken: string;
+  username: string;
+}
+
+/** login() 的判别联合：调用方先看 kind 再决定往哪个方向走，不需要猜测
+ *  "有没有 temp_token 字段"这种隐式判据。 */
+export type LoginOutcome =
+  | { kind: "authenticated"; user: LocalUser }
+  | { kind: "totp_required"; challenge: TotpChallenge };
+
+interface LoginResponseRaw extends LocalUserResponse {
+  requires_totp?: unknown;
+  temp_token?: unknown;
 }
 
 // 惰性构造：真正调用 createApiClient() 推迟到第一次实际发请求时才发生，
@@ -69,10 +104,37 @@ export function setCachedLocalUser(user: LocalUser | null): void {
   cachedUser = user;
 }
 
-export async function login(username: string, password: string): Promise<LocalUser> {
-  const body = await authClient().post<LocalUserResponse>("/api/v1/auth/login", {
+/** 登录第一步：密码校验。已激活 TOTP 的账号在这一步**不会**建立会话
+ *  （不设 Cookie），返回 `{kind:"totp_required"}`，调用方据此转到二步验证
+ *  （completeTotpLogin）；否则一步到位，与改动前行为一致。 */
+export async function login(username: string, password: string): Promise<LoginOutcome> {
+  const body = await authClient().post<LoginResponseRaw>("/api/v1/auth/login", {
     username,
     password,
+  });
+  if (body.requires_totp === true) {
+    return {
+      kind: "totp_required",
+      challenge: {
+        tempToken: typeof body.temp_token === "string" ? body.temp_token : "",
+        username: typeof body.username === "string" && body.username ? body.username : username,
+      },
+    };
+  }
+  const user = projectLocalUser(body);
+  cachedUser = user;
+  return { kind: "authenticated", user };
+}
+
+/** 登录第二步：用动态码或恢复码（二选一）完成登录，成功后与一步登录一样
+ *  签发会话。 */
+export async function completeTotpLogin(
+  tempToken: string,
+  credential: { code: string } | { recoveryCode: string },
+): Promise<LocalUser> {
+  const body = await authClient().post<LocalUserResponse>("/api/v1/auth/login/totp", {
+    temp_token: tempToken,
+    ...("code" in credential ? { code: credential.code } : { recovery_code: credential.recoveryCode }),
   });
   const user = projectLocalUser(body);
   cachedUser = user;

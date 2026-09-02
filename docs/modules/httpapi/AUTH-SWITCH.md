@@ -314,15 +314,24 @@ CR-0001 §3 的表大部分已经对上，下面几项是前端流**硬依赖**�
 
 | 方法 | 路径 | 要求 Principal？ | 说明 |
 |---|---|---|---|
-| POST | `/api/v1/auth/login` | 否 | `{username,password}` → 成功 200 + `Set-Cookie: xm_session`；失败见 11.3 |
+| POST | `/api/v1/auth/login` | 否 | `{username,password}` → 未启用 TOTP 时成功 200 + `Set-Cookie: xm_session`；已启用 TOTP 时成功 200 + `{requires_totp:true,temp_token}`（不设 Cookie）；失败见 11.3 |
+| POST | `/api/v1/auth/login/totp` | 否（见 11.7） | 登录第二步与步进刷新，见 11.7 |
 | POST | `/api/v1/auth/logout` | 否（有 Cookie 就吊销，没有也 200） | 清 Cookie、吊销会话 |
-| GET | `/api/v1/auth/me` | 是 | 与登录成功同形状 |
+| GET | `/api/v1/auth/me` | 是 | 与登录成功同形状，另含 TOTP 状态字段（见 11.7） |
 | POST | `/api/v1/auth/password` | 是 | `{current_password,new_password}`，自助改密，成功后重签会话 |
-| GET | `/api/v1/staff/accounts` | 是 + `staff.manage` | 账号清单（不含密码哈希） |
+| GET | `/api/v1/staff/accounts` | 是 + `staff.manage` | 账号清单（不含密码哈希，含 TOTP 状态） |
+| POST | `/api/v1/auth/totp/enroll` | 是 | 委托 `staff.account.enroll_totp@1`，见 11.7 |
+| POST | `/api/v1/auth/totp/confirm` | 是 | 委托 `staff.account.confirm_totp@1`，见 11.7 |
 
-登录/登出**不**挂 `RequirePrincipal`（在建立/终止身份，不可能先要求一个还
-不存在的身份），其余三条与 `/api/v1` 下所有其它端点一样必须先过
-`RequirePrincipal`（这里即 `localauth.Resolver.Resolve`）。
+管理员重置他人 TOTP（`staff.account.reset_totp@1`）没有专用端点，走既有的
+通用 `POST /api/v1/actions/staff.account.reset_totp/versions/1/execute`
+入口，与 `staff.account.reset_password@1` 同一形状（CR-0006 技术规格 §5.1
+只为 enroll/confirm 两个自助操作开了专用端点）。
+
+登录/登出（以及 `/auth/login/totp` 的 temp_token 分支）**不**挂
+`RequirePrincipal`（在建立/终止身份，不可能先要求一个还不存在的身份），
+其余端点与 `/api/v1` 下所有其它端点一样必须先过 `RequirePrincipal`
+（这里即 `localauth.Resolver.Resolve`）。
 
 ### 11.2 Cookie 与 CSRF
 
@@ -360,6 +369,9 @@ IP 分桶的限流（默认 20/分钟、瞬时 10），与全局 XM-R011 限流�
 | `staff.account.set_roles@1` | `username`、`roles` | 覆盖角色集合 |
 | `staff.account.set_disabled@1` | `username`、`disabled` | 停用会连带吊销该账号全部会话 |
 | `staff.account.reset_password@1` | `username`、`new_password`（可选） | 强制 `must_change_password=true` 并吊销全部会话；留空密码同样只回显一次 |
+| `staff.account.enroll_totp@1` | 无 | 只作用于调用者自己；生成新密钥并挂到账号（未激活），见 11.7 |
+| `staff.account.confirm_totp@1` | `code` | 只作用于调用者自己；校验后激活并一次性发恢复码，见 11.7 |
+| `staff.account.reset_totp@1` | `username` | 管理员动作，撤销目标账号的 TOTP 启用状态，见 11.7 |
 
 `roles` 必须是 `XM_OIDC_ROLE_SCOPES`（留空则 `oidcauth.DefaultRoleScopeMap`）
 里已有的角色名——两种登录模式共用同一张「角色 → scope」翻译表，不需要为
@@ -389,7 +401,88 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml \
 `DATABASE_PASSWORD_REF` 的 CredentialRef 纪律，与 `runway-threshold-bootstrap`
 同构。
 
-### 11.6 已知缺口
+### 11.7 TOTP 二因素（XM-AUTH-TOTP0，CR-0006 第一阶段）
+
+登录改为两步：密码校验通过后，若账号已激活 TOTP（`totp_enrolled_at` 非空），
+不直接签发会话，转而在 `core.staff_login_challenge` 建一条 5 分钟有效的
+"登录挑战"，返回 `{requires_totp:true,temp_token}`；前端拿 `temp_token`
+配合动态码或恢复码调用 `POST /api/v1/auth/login/totp` 完成登录，成功后
+`core.staff_session` 记录 `amr=["pwd","otp"]`、`mfa_at`。未激活 TOTP 的账号
+（含"待启用但还没 confirm"）登录路径不变，一步签发会话。
+
+**同一个端点服务两种场景**（请求体是否带 `temp_token` 区分）：
+
+| 请求体 | 场景 | 鉴权 |
+|---|---|---|
+| `{temp_token,code}` 或 `{temp_token,recovery_code}` | 完成登录第二步 | 无（temp_token 本身就是凭据） |
+| `{code}` 或 `{recovery_code}`（无 temp_token） | 步进刷新：已登录会话重新证明"刚过了一次 TOTP" | 需要有效 `xm_session` Cookie + `X-Requested-With` 头 |
+
+步进刷新调用 `Store.TouchSessionMFA`，只更新**当前**会话的 `mfa_at`/`amr`，
+不换 `session id`、不重新设 Cookie。这是为团队内后续切片（XM-INVCON1 的
+断言签发端点，签发前要求 `mfa_at` 在 `StepUpMaxAge` 内）准备的能力；本片
+本身没有任何端点消费它。判定用 `localauth.RequireFreshOTP(p, maxAge, now)`
+——读 `principal.Principal.MFAAt`（`localauth.Resolver.Resolve` 从会话的
+`mfa_at` 列填入），不在解析阶段折叠成布尔值,由调用方按自己的新鲜度阈值判断。
+
+**启用 / 确认 / 重置**（RFC 6238：30 秒步长、6 位数字、SHA1、±1 步容忍窗口）：
+
+1. `POST /api/v1/auth/totp/enroll` → 生成新密钥，经**既有**
+   `credential.secret.upsert` 写路径写入 `secret://staff-totp/<account_id>`
+   （不新增写入口，CR-0006 正文原话），返回 `otpauth://` URI 与 base32
+   手动录入串（密钥明文只出现这一次）；
+2. `POST /api/v1/auth/totp/confirm {code}` → 校验通过则激活（写
+   `totp_enrolled_at`、清 `must_enroll_totp`）并一次性生成 10 个恢复码（仅
+   哈希落库，明文只在这次响应里）；
+3. `staff.account.reset_totp@1`（管理员，`staff.manage`，走通用执行入口，
+   见上）→ 撤销目标账号的启用状态、删除其全部恢复码、吊销其全部会话、经
+   既有 `credential.secret.revoke` 吊销密钥文件，`must_enroll_totp` 重新
+   置真。
+
+**强制启用**：`core.staff_account.must_enroll_totp` 语义与既有
+`must_change_password` 完全对称——账号被授予需要 TOTP 的角色（翻译出的
+scope 含 `staff.manage` 或 `finance.read`，见 `localauth.rolesRequireTOTP`）
+时置真，`confirm_totp` 成功后置假。**这是前端 `RequireAuth` 的软重定向**
+（与 `must_change_password` 同一模式，不是后端 API 级别的强制拦截）：
+`GET /api/v1/auth/me`/登录响应把这个字段带给前端，前端据此把人无论原本要
+去哪都先带到启用页；后端不因为这个字段拒绝其它 API 调用。
+
+**管理员来源 IP 名单**（`XM_CONSOLE_ADMIN_IP_ALLOWLIST`，逗号分隔 CIDR，空＝
+不启用）：只对落入 TOTP 管辖范围的账号生效（`must_enroll_totp` 或已激活
+TOTP 任一为真），在密码校验通过之后、签发会话或完成步进之前校验来源 IP
+（`clientIP` 解析，与本文件其余 XFF 处理同一条纪律），不过返回 403
+`ADMIN_NETWORK_DENIED` 并写审计（`CompensationResult=ip_denied`）。这是纵深
+防御，与 CR-0006 后续切片（XM-INVCON1）的断言签发端点各自独立校验——两侧
+应配置**同一份** CIDR 列表，但目前没有自动同步机制，运维需手工保持一致
+（与 `XM_INVOICE_CONSOLE_ORIGIN` 一类"两个仓库各存一份、必须一致"的既有
+操作代价同类）。
+
+**错误码**（沿用本文件既有的 `httpapi.ErrorResponse` 信封）：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 401 | `CHALLENGE_INVALID` | temp_token 不存在/已过期/已消费 |
+| 401 | `INVALID_CREDENTIALS` | temp_token（或步进的会话）有效，但 code/recovery_code 不对 |
+| 423 | `ACCOUNT_LOCKED` | 二步验证连续失败达到 `lockThreshold`（复用密码登录同一套账号锁定） |
+| 403 | `ADMIN_NETWORK_DENIED` | 来源 IP 不在 `XM_CONSOLE_ADMIN_IP_ALLOWLIST` |
+| 429 | `RATE_LIMITED` | 按目标账号用户名分桶的验证码尝试限流（10/分钟、突发 5，独立于登录的按 IP 限流） |
+| 409 | `CONFLICT` | `enroll_totp`/`confirm_totp` 时账号已激活 TOTP |
+| 412 | `PRECONDITION_FAILED` | `confirm_totp` 时账号尚未开始 enroll |
+
+**恢复码**：确认启用时一次性生成 10 个，`core.staff_totp_recovery_code`
+仅存 sha256 摘要，单次可用（`used_at` 非空即失效）。登录第二步与步进均可用
+恢复码代替动态码（`recovery_code` 字段，与 `code` 二选一，不能同传）。
+`GET /api/v1/auth/me` 的 `recovery_codes_remaining` 字段供账号安全页提醒
+"还剩几张"，不返回任何码本身；用尽后没有自动补发路径——管理员走
+`reset_totp` 让账号重新走一遍启用即可拿到一套新恢复码。
+
+相关文件：`internal/platform/localauth/totp.go`（RFC 6238 核心，含对
+RFC 6238 附录 B 官方测试向量的单测）、`adminip.go`（CIDR 名单）、
+`actions.go`（三个 Action）、`handlers.go`（`Login`/`LoginTOTP`/
+`EnrollTOTP`/`ConfirmTOTP`/`ResetTOTP`）、`resolver.go`（`RequireFreshOTP`）、
+`db/migrations/000024_staff_totp.up.sql`、
+`contracts/actions/staff.account.{enroll,confirm,reset}_totp.v1.json`。
+
+### 11.8 已知缺口
 
 - **前端还没有本地登录页**：`server-prod.yaml` 已把 `platform-api` 的默认
   `XM_AUTH_MODE` 改成 `local`，但 `web` 容器的 `XM_WEB_AUTH_MODE` 仍固定
