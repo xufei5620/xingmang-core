@@ -20,15 +20,21 @@
 
 ### Task 1: Source identity
 
-- [ ] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
-- [ ] Create `v0.1.0-rc74-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
+- [x] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
+- [x] Create `v0.1.0-rc74-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
 
 ### Task 2: Image evidence
 
-- [ ] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC74 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
+- [x] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC74 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
 
 ### Task 3: Production
 
-- [ ] Sign exactly one strict-ready RC74 directory, transfer only its nine manifest-bound images, stage with the RC74 staging script (which appends `CONSOLE_ASSERTION_KEYRING_FILE` to the new release env), confirm the host placeholder file exists, reuse the latest pre-deploy backup if it is under two hours old (otherwise take a new one with the offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, require readyz 200 in the verify step, confirm the api container shows the read-only `/config/console-assertion-keyring.json` mount and `CONSOLE_ASSERTION_ENABLED=false`, and record deployment evidence beside the release.
+- [x] Sign exactly one strict-ready RC74 directory, transfer only its nine manifest-bound images, stage with the RC74 staging script (which appends `CONSOLE_ASSERTION_KEYRING_FILE` to the new release env), confirm the host placeholder file exists, reuse the latest pre-deploy backup if it is under two hours old (otherwise take a new one with the offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, require readyz 200 in the verify step, confirm the api container shows the read-only `/config/console-assertion-keyring.json` mount and `CONSOLE_ASSERTION_ENABLED=false`, and record deployment evidence beside the release.
 
 Production remains blocked until the credentialed human canary (OIDC admin login still working with the feature dark; the api's keyring mount present as a file) binds RC74.
+
+## Execution record (2026-09-03)
+
+- Task 1: XM-INV-CONSOLE-ASSERT-DEPLOY merged (`a6ca8df`), identity bump (`e38d7c0`). Backend full suite green, web typecheck/94 tests/build green, gitleaks clean, four failure-evidence verifiers 0, gate self-test 0. Tag `v0.1.0-rc74-signed` -> `e38d7c0`.
+- Task 2: `release/0.1.0-rc74-exact1` first try: image gate 42, ordinary and strict verifiers 0, `SHA256SUMS.sig` verified.
+- Task 3: transfer verified on the host; staging loaded nine images, verified tag and evidence signatures, and appended `CONSOLE_ASSERTION_KEYRING_FILE` to the new release env; the RC73 backup `invoice-20260902T213458Z` was 55 minutes old and reused; `deploy/roll-forward.sh e38d7c0…` ROLL FORWARD PASS with 18 containers on `0.1.0-rc74`, healthz 200, readyz 200; the api container mounts `/config/console-assertion-keyring.json` read-only from the host placeholder and reports `CONSOLE_ASSERTION_ENABLED=false`, `OIDC_ADMIN_LOGIN_ENABLED=true`. Deployment record `deployment-records/rc74-deploy-*`.
