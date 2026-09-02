@@ -84,21 +84,37 @@ var resolve = sync.OnceValues(func() (string, error) {
 	if rawURL == "" {
 		return "", errNotSet
 	}
-	root, err := worktreeRoot()
+	return resolveURL(rawURL, worktreeRoot, ensureDatabaseExists)
+})
+
+// resolveURL is the testable core of resolve. The per-worktree redirection
+// only makes sense where several git worktrees can share one PostgreSQL:
+// when no git marker is found above this package (the release gate's
+// scripts/verify-postgres.ps1 copies the source tree into a disposable
+// container without .git and runs every package against a database no
+// other checkout can reach), the raw URL is used unchanged instead of
+// failing every integration test -- that run is isolated by construction,
+// so there is nothing to redirect.
+func resolveURL(
+	rawURL string,
+	lookupRoot func() (string, error),
+	ensure func(ctx context.Context, sourceURL, dbName string) error,
+) (string, error) {
+	root, err := lookupRoot()
 	if err != nil {
-		return "", fmt.Errorf("locate git worktree root for per-worktree test database: %w", err)
+		return rawURL, nil
 	}
 	resolvedURL, dbName, rewritten, err := rewriteURLForWorktree(rawURL, root)
 	if err != nil {
 		return "", fmt.Errorf("derive per-worktree test database url: %w", err)
 	}
 	if rewritten {
-		if err := ensureDatabaseExists(context.Background(), rawURL, dbName); err != nil {
+		if err := ensure(context.Background(), rawURL, dbName); err != nil {
 			return "", fmt.Errorf("ensure per-worktree test database %q exists: %w", dbName, err)
 		}
 	}
 	return resolvedURL, nil
-})
+}
 
 // URL returns the connection URL this test process should use, rewriting
 // the shared default database to a per-worktree one and creating it on

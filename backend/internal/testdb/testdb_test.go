@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -266,4 +267,56 @@ func dropDatabase(t *testing.T, adminURL, dbName string) {
 	}
 	defer pool.Close()
 	_, _ = pool.Exec(context.Background(), `DROP DATABASE IF EXISTS `+quoteIdentifier(dbName))
+}
+
+func TestResolveURLFallsBackToRawURLWithoutGitRoot(t *testing.T) {
+	// scripts/verify-postgres.ps1 runs the suite from a source copy inside a
+	// disposable container: no .git anywhere above the package, one database
+	// nobody else can reach. That must use the URL exactly as given.
+	rawURL := "postgres://postgres:secret@127.0.0.1:5432/invoice_test?sslmode=disable"
+	ensureCalled := false
+	got, err := resolveURL(rawURL,
+		func() (string, error) { return "", errors.New("no .git found walking up from /src/internal/testdb") },
+		func(context.Context, string, string) error { ensureCalled = true; return nil })
+	if err != nil {
+		t.Fatalf("resolveURL returned error: %v", err)
+	}
+	if got != rawURL {
+		t.Fatalf("resolveURL = %q, want the raw URL %q", got, rawURL)
+	}
+	if ensureCalled {
+		t.Fatal("ensure must not run when no per-worktree rewrite happened")
+	}
+}
+
+func TestResolveURLRewritesAndEnsuresWhenGitRootIsFound(t *testing.T) {
+	rawURL := "postgres://postgres:secret@127.0.0.1:5432/invoice_test?sslmode=disable"
+	var ensuredDB string
+	got, err := resolveURL(rawURL,
+		func() (string, error) { return filepath.Join("K:", "repo", "wt-Feature-A"), nil },
+		func(_ context.Context, sourceURL, dbName string) error {
+			if sourceURL != rawURL {
+				t.Fatalf("ensure received sourceURL %q, want %q", sourceURL, rawURL)
+			}
+			ensuredDB = dbName
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("resolveURL returned error: %v", err)
+	}
+	if ensuredDB != "invoice_test_wt_feature_a" {
+		t.Fatalf("ensured database = %q, want invoice_test_wt_feature_a", ensuredDB)
+	}
+	if got != "postgres://postgres:secret@127.0.0.1:5432/invoice_test_wt_feature_a?sslmode=disable" {
+		t.Fatalf("resolveURL = %q", got)
+	}
+}
+
+func TestResolveURLReportsEnsureFailure(t *testing.T) {
+	_, err := resolveURL("postgres://postgres:secret@127.0.0.1:5432/invoice_test",
+		func() (string, error) { return filepath.Join("K:", "repo", "wt-x"), nil },
+		func(context.Context, string, string) error { return errors.New("connection refused") })
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("expected the ensure error to be reported, got %v", err)
+	}
 }

@@ -413,3 +413,7 @@ pwsh -NoProfile -File scripts\test-refresh-trivy-cache.ps1
    problem at today's scale (a handful of worktrees), but worth a periodic
    cleanup note (e.g. `DROP DATABASE` for a worktree that has since been
    removed) if this grows unbounded over many months.
+
+## Post-merge fix (release line, 2026-09-02)
+
+RC69 `release/0.1.0-rc69-exact2` failed in the image gate's source-verification step: `scripts/verify-postgres.ps1` runs every integration package from a source copy inside a disposable container that has no `.git`, so `testdb.URL` failed with "no .git found walking up from /src/internal/testdb" for all 40+ PostgreSQL tests. `resolveURL` (the now-testable core of `resolve`) falls back to the raw `INVOICE_TEST_DATABASE_URL` when no git marker is found -- that container run is isolated by construction, so there is nothing to redirect. Covered by `TestResolveURLFallsBackToRawURLWithoutGitRoot`, `TestResolveURLRewritesAndEnsuresWhenGitRootIsFound` and `TestResolveURLReportsEnsureFailure`; `scripts/verify-postgres.ps1` re-run green before re-tagging.
