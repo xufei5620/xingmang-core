@@ -37,9 +37,17 @@ type ConnectorConfig struct {
 	Endpoint        string
 	TargetAllowlist []string
 	CredentialRef   string
-	Version         int
-	UpdatedAt       time.Time
-	UpdatedBy       string
+	// ProbeEnabled / ProbeCredentialRef 是 XM-ASSURE1 的探测 Kill Switch 与
+	// 探测专用凭据引用（ADR-019 决策·四·#4）。两列只经 assurance 包新增的
+	// 独立 Action（assurance.probe.kill_switch.set@1，见 internal/platform/
+	// assurance/actions.go）写入，connector.config.set@1 的 Handler 从不
+	// 触碰它们——SetConnectorConfig 的 SQL 里这两列不在 ON CONFLICT 的
+	// SET 子句内，切 fake/real 或改端点/白名单不会顺带清空探测开关。
+	ProbeEnabled       bool
+	ProbeCredentialRef string
+	Version            int
+	UpdatedAt          time.Time
+	UpdatedBy          string
 }
 
 // ParseAllowlist 把逗号分隔的主机清单拆成规整后的切片：去空白、去空项、
@@ -114,12 +122,14 @@ func ValidateConnectorConfig(cfg ConnectorConfig) error {
 }
 
 const selectConnectorConfigColumns = `
-platform, environment, mode, endpoint, target_allowlist, credential_ref, version, updated_at, updated_by`
+platform, environment, mode, endpoint, target_allowlist, credential_ref,
+probe_enabled, probe_credential_ref, version, updated_at, updated_by`
 
 func scanConnectorConfig(row rowScanner) (ConnectorConfig, error) {
 	var c ConnectorConfig
 	if err := row.Scan(&c.Platform, &c.Environment, &c.Mode, &c.Endpoint, &c.TargetAllowlist,
-		&c.CredentialRef, &c.Version, &c.UpdatedAt, &c.UpdatedBy); err != nil {
+		&c.CredentialRef, &c.ProbeEnabled, &c.ProbeCredentialRef,
+		&c.Version, &c.UpdatedAt, &c.UpdatedBy); err != nil {
 		return ConnectorConfig{}, err
 	}
 	if c.TargetAllowlist == nil {
@@ -169,8 +179,9 @@ FROM core.connector_config WHERE platform = $1 AND environment = $2 FOR UPDATE`,
 
 	after, err = scanConnectorConfig(tx.QueryRow(ctx, `
 INSERT INTO core.connector_config AS c
-    (platform, environment, mode, endpoint, target_allowlist, credential_ref, version, updated_at, updated_by)
-VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8)
+    (platform, environment, mode, endpoint, target_allowlist, credential_ref,
+     probe_enabled, probe_credential_ref, version, updated_at, updated_by)
+VALUES ($1, $2, $3, $4, $5, $6, false, '', 1, $7, $8)
 ON CONFLICT (platform, environment) DO UPDATE SET
     mode             = EXCLUDED.mode,
     endpoint         = EXCLUDED.endpoint,
@@ -187,6 +198,102 @@ RETURNING`+selectConnectorConfigColumns,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, ConnectorConfig{}, storeError("commit", err)
+	}
+	return before, after, nil
+}
+
+// ErrConnectorConfigNotFound：某平台+环境尚未有 connector_config 行。
+// 探测 Kill Switch 只能改一个已经存在的配置——先用 connector.config.set@1
+// 把 mode/endpoint 配好，再谈"允许探测花钱"，两者不能反过来。
+var ErrConnectorConfigNotFound = errors.New("connector config not found")
+
+// GetConnectorConfig 读取某平台+环境当前的配置；不存在返回 (nil, nil)——
+// 与 ListConnectorConfigs 同一条纪律，"没有行"是 fake 模式的合法默认状态，
+// 不是错误（调用方不应该用 GetConnectorConfig 返回 nil 来判断"配置错了"）。
+func (s *Store) GetConnectorConfig(ctx context.Context, platform, environment string) (*ConnectorConfig, error) {
+	if s.pool == nil {
+		return nil, storeError("pool", errors.New("nil pool"))
+	}
+	cfg, err := scanConnectorConfig(s.pool.QueryRow(ctx, `SELECT`+selectConnectorConfigColumns+`
+FROM core.connector_config WHERE platform = $1 AND environment = $2`, platform, environment))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, storeError("get", err)
+	}
+	return &cfg, nil
+}
+
+// SetProbeSwitch 写入探测 Kill Switch 的两列（且**只**这两列——mode / endpoint /
+// target_allowlist / credential_ref 一律不碰，ADR-019 决策·四·#4 的"两个操作
+// 可分开授权"在这里体现为两个操作根本不共用同一段写 SQL）。
+//
+// credentialRef 为 nil 表示调用方（Action Schema 里省略了这个参数）没有传，
+// 保留现有引用不动；非 nil（哪怕是空字符串）表示显式覆盖/清空——对应设计稿
+// "otherwise 可省略/清空" 的两种手感。probeEnabled=true 时校验：配置必须已
+// 存在、mode 必须是 real、credentialRef 必须非空且能解析。
+func (s *Store) SetProbeSwitch(
+	ctx context.Context, platform, environment string, probeEnabled bool, credentialRef *string, actor string,
+) (before, after ConnectorConfig, err error) {
+	platform = strings.TrimSpace(platform)
+	if !slices.Contains(Platforms, platform) {
+		return ConnectorConfig{}, ConnectorConfig{},
+			fmt.Errorf("platform %q 不在 %v 内: %w", platform, Platforms, ErrInvalidConnectorConfig)
+	}
+	if strings.TrimSpace(environment) == "" || strings.TrimSpace(actor) == "" {
+		return ConnectorConfig{}, ConnectorConfig{}, fmt.Errorf("environment/actor 为空: %w", ErrInvalidInput)
+	}
+	if s.pool == nil {
+		return ConnectorConfig{}, ConnectorConfig{}, storeError("pool", errors.New("nil pool"))
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return ConnectorConfig{}, ConnectorConfig{}, storeError("begin", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	existing, err := scanConnectorConfig(tx.QueryRow(ctx, `SELECT`+selectConnectorConfigColumns+`
+FROM core.connector_config WHERE platform = $1 AND environment = $2 FOR UPDATE`, platform, environment))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ConnectorConfig{}, ConnectorConfig{}, ErrConnectorConfigNotFound
+	}
+	if err != nil {
+		return ConnectorConfig{}, ConnectorConfig{}, storeError("lock", err)
+	}
+	before = existing
+
+	nextRef := existing.ProbeCredentialRef
+	if credentialRef != nil {
+		nextRef = strings.TrimSpace(*credentialRef)
+	}
+	if probeEnabled {
+		if existing.Mode != ModeReal {
+			return ConnectorConfig{}, ConnectorConfig{}, fmt.Errorf(
+				"平台 %q 当前 mode=%q，打开探测前请先把连接器切到 real: %w",
+				platform, existing.Mode, ErrInvalidConnectorConfig)
+		}
+		if nextRef == "" {
+			return ConnectorConfig{}, ConnectorConfig{}, fmt.Errorf(
+				"probe_enabled=true 需要 probe_credential_ref: %w", ErrInvalidConnectorConfig)
+		}
+		if _, err := secrets.ParseCredentialRef(nextRef); err != nil {
+			return ConnectorConfig{}, ConnectorConfig{}, fmt.Errorf(
+				"probe_credential_ref: %v: %w", err, ErrInvalidConnectorConfig)
+		}
+	}
+
+	after, err = scanConnectorConfig(tx.QueryRow(ctx, `
+UPDATE core.connector_config
+SET probe_enabled = $3, probe_credential_ref = $4, updated_at = $5, updated_by = $6
+WHERE platform = $1 AND environment = $2
+RETURNING`+selectConnectorConfigColumns,
+		platform, environment, probeEnabled, nextRef, s.now(), strings.TrimSpace(actor)))
+	if err != nil {
+		return ConnectorConfig{}, ConnectorConfig{}, storeError("probe_switch", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ConnectorConfig{}, ConnectorConfig{}, storeError("commit", err)
 	}
 	return before, after, nil
 }
