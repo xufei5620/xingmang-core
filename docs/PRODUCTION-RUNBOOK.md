@@ -285,6 +285,31 @@ lock races. No vulnerability is ignored. RC68 PostgreSQL has no exception and
 must report zero HIGH/CRITICAL findings; the former fixed-version `gosu`
 finding is not exception-eligible.
 
+**Keeping the Trivy cache warm ahead of a gate run.** The gate above updates
+its own `invoice-release-gate-trivy-0-74-0` cache volume synchronously, every
+run, via `trivy image --download-db-only`/`--download-java-db-only` inside
+its own container -- slow and occasionally unreliable through this machine's
+local proxy, and wasted effort on a day the upstream database has not
+changed. `scripts/refresh-trivy-cache.ps1` refreshes the same volume ahead of
+time, independently of any gate run, by talking to the OCI registry
+(`mirror.gcr.io/aquasec/trivy-db:2` and `.../trivy-java-db:1`) directly: a
+24-way ranged, resumable, parallel `curl` download of each database's single
+OCI layer, an OCI digest check against the manifest before anything is
+trusted, and a throwaway `postgres:18.6-alpine` container (the same pinned
+base this gate already builds from) to copy the verified files into the
+volume. It takes the exact same `.trivy-0.74.release-gate.lock` this gate
+does, so the two can never race the shared volume -- like the gate, it fails
+fast rather than waiting if that lock is already held. It is idempotent and
+safe to run daily (e.g. from Task Scheduler): each database records the OCI
+digest it was seeded from, so a run against an unchanged upstream does no
+network transfer beyond one manifest fetch and no reseed at all, and it
+always prints each database's `UpdatedAt`/`NextUpdate` before exiting. It
+refuses to replace an already-seeded database with a strictly older download
+(`-Force` overrides that deliberately). Run it with no arguments for a
+default daily refresh, or `-WhatIf` to see what it would do without changing
+anything; see its own doc comment (`Get-Help
+.\scripts\refresh-trivy-cache.ps1 -Full`) for every parameter.
+
 The command above is the ordinary internal-consistency mode, so operators can
 retain and diagnose failed or validation-only bundles. It is not transfer
 authority. Immediately before signing `SHA256SUMS`, rerun the independent
