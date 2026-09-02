@@ -312,6 +312,13 @@ mock API 精确复刻了 `internal/platform/consoleassertion/handlers.go` 的
   "设计取舍"）。
 - 待"一个完整发布周期"生产验证窗口达成后，开工 XM-INV-KEYCLOAK-RETIRE
   （见 `docs/roadmap/CR-0006-console-auth-slices.md`，需产品负责人另行放行）。
+- **XM-INVCON1-FALLBACK**（已交付）：生产在断言登录正式启用前的过渡期一直
+  运行在 `XM_INVOICE_CONSOLE_ASSERTION_ENABLED=false`，`InvoiceConsolePanel`
+  当时会把 404（未挂载）判成 `unavailable`，渲染一块整页替换的
+  `PageState`，导致开票页签在断言未启用期间直接不可用——比 XM-INVCON0
+  的旧行为（弹窗 OIDC 仍能用）倒退了。该片把这个 404 判定改为回落到
+  XM-INVCON0 原版直接 iframe（旧登录方式不受影响），上方加一条诚实提示；
+  详见 `docs/handoffs/slices/XM-INVCON1-FALLBACK.md`。
 
 ## 生产上线步骤（本片只装配能力，不激活；见 risks 的顺序依赖）
 

@@ -1,6 +1,10 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EmbeddedConsoleFrame, type EmbeddedConsolePath } from "./EmbeddedConsoleFrame";
+import {
+  EmbeddedConsoleFrame,
+  EmbeddedConsoleLegacyNotice,
+  type EmbeddedConsolePath,
+} from "./EmbeddedConsoleFrame";
 
 const ORIGIN = "https://invoice.example.test";
 const TITLE = "开票";
@@ -240,5 +244,16 @@ describe("EmbeddedConsoleFrame", () => {
     expect((screen.getByTitle(TITLE) as HTMLIFrameElement).src).toBe(
       `${ORIGIN}/embed/admin/newapi`,
     );
+  });
+
+  describe("EmbeddedConsoleLegacyNotice（CR-0006 XM-INVCON1-FALLBACK）", () => {
+    it("按 role=status 呈现调用方传入的文案，原样透传不做任何加工", () => {
+      render(
+        <EmbeddedConsoleLegacyNotice>控制台断言登录尚未启用，当前使用开票系统自身的登录（过渡期）</EmbeddedConsoleLegacyNotice>,
+      );
+      expect(screen.getByRole("status").textContent).toBe(
+        "控制台断言登录尚未启用，当前使用开票系统自身的登录（过渡期）",
+      );
+    });
   });
 });
