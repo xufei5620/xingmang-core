@@ -62,6 +62,14 @@ export interface PlatformChannelFieldsExtension {
   lastUsedAt: string | null;
   createdAt: string | null;
   expiresAt: string | null;
+  /** XM-CHAN-GROUP0：NewAPI 渠道原生的逗号分隔分组名字符串（如
+   *  "default,vip"），原样透传服务端已经归一化过的值，不在这一层再拆分或
+   *  重新格式化。Sub2API 没有这个概念，恒为 null——与其它按平台恒为 null
+   *  的字段（如 capacity 在 NewAPI 侧）同一条纪律，原因见
+   *  `channelFieldNullReason("group", platform)`。不要与「上游分组」
+   *  （`UpstreamAccountItem.upstream_group`，登记簿字段，两个平台通用）
+   *  混淆——那是完全不同的一个维度，来自绑定账号的登记簿，不是这里。 */
+  group: string | null;
 }
 
 export interface PlatformChannelRow extends PlatformChannelFieldsExtension {
@@ -128,6 +136,7 @@ interface RawPage {
     last_used_at?: string | null;
     created_at?: string | null;
     expires_at?: string | null;
+    group?: string | null;
   }> | null;
   runway_coverage?: { total?: number; known?: number; reasons?: Record<string, number> };
   next_cursor?: string | null;
@@ -150,6 +159,7 @@ function parseFieldsExtension(item: {
   last_used_at?: string | null;
   created_at?: string | null;
   expires_at?: string | null;
+  group?: string | null;
 }): PlatformChannelFieldsExtension {
   return {
     kind: item.kind ?? null,
@@ -185,6 +195,7 @@ function parseFieldsExtension(item: {
     lastUsedAt: item.last_used_at ?? null,
     createdAt: item.created_at ?? null,
     expiresAt: item.expires_at ?? null,
+    group: item.group ?? null,
   };
 }
 

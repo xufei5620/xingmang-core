@@ -75,6 +75,13 @@ type platformChannelRow struct {
 	LastUsedAt         *string                             `json:"last_used_at"`
 	CreatedAt          *string                             `json:"created_at"`
 	ExpiresAt          *string                             `json:"expires_at"`
+	// Group is XM-CHAN-GROUP0: NewAPI's comma-separated channel group list
+	// (e.g. "default,vip"), passed through as the connector normalized it —
+	// see connectors/newapi's ChannelStatus.Group doc comment. Sub2API's
+	// catalogFields never writes a "group" key into the observation, so this
+	// decodes to nil for every sub2api row, same as any other dimension the
+	// connector doesn't populate — not a special case in this layer.
+	Group *string `json:"group"`
 
 	Binding        *channelBindingResponse  `json:"binding"`
 	Candidate      channelCandidateResponse `json:"candidate"`
@@ -115,6 +122,7 @@ type platformChannelCatalog struct {
 	lastUsedAt           *string
 	createdAt            *string
 	expiresAt            *string
+	group                *string
 }
 
 // toInt64FromAny coerces a decoded observation value into *int64. Values
@@ -237,6 +245,7 @@ func catalogRowsForService(observations []ops.Observation, service finance.Bindi
 		c.lastUsedAt = toStringFromAny(row["last_used_at"])
 		c.createdAt = toStringFromAny(row["created_at"])
 		c.expiresAt = toStringFromAny(row["expires_at"])
+		c.group = toStringFromAny(row["group"])
 		out[id] = c
 	}
 	return out
@@ -255,6 +264,7 @@ func applyCatalog(row *platformChannelRow, c platformChannelCatalog) {
 	row.LastUsedAt = c.lastUsedAt
 	row.CreatedAt = c.createdAt
 	row.ExpiresAt = c.expiresAt
+	row.Group = c.group
 	if c.capacityUsed != nil || c.capacityLimit != nil {
 		row.Capacity = &platformChannelCapacityResponse{Used: c.capacityUsed, Limit: c.capacityLimit}
 	}

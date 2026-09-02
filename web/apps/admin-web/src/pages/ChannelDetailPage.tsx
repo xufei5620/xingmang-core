@@ -336,6 +336,16 @@ function ChannelDetailBody({
             ) : (
               <UnavailableFact label="容量 / 并发" hint={channelFieldNullReason("capacity", platform)} />
             )}
+            {row.group ? (
+              <Fact
+                label="分组"
+                hint="NewAPI 渠道原生分组字段（用于路由/计费分组）；与上方“上游分组”（登记簿字段，来自绑定的上游账号）是两个不同维度，不要混淆"
+              >
+                {row.group}
+              </Fact>
+            ) : (
+              <UnavailableFact label="分组" hint={channelFieldNullReason("group", platform)} />
+            )}
             <Fact
               label="调度"
               hint={

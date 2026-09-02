@@ -464,4 +464,8 @@ func AssertChannelStatusCatalogInvariants(t *testing.T, item newapi.ChannelStatu
 		t.Logf("提醒：渠道 %s 的 CapacityUsed(%d) > CapacityLimit(%d)，确认不是字段对调",
 			item.ChannelID, *item.CapacityUsed, *item.CapacityLimit)
 	}
+	if item.Group != nil && strings.TrimSpace(*item.Group) == "" {
+		t.Fatalf("渠道 %s 的 Group 是非 nil 的空白字符串——归一化后为空必须是 nil，不是空字符串（XM-CHAN-GROUP0）",
+			item.ChannelID)
+	}
 }

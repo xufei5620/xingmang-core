@@ -558,7 +558,7 @@ ADR-006 的决策是「后台产品体验统一为『财务中心』，但**底�
 | 用户总数 | `newapi.users.total` | ✅ 已接（含今日活跃） |
 | 今日我方计费 / 今日上游成本 / 今日毛利 | `GET /finance/channels/summary` 按 newapi 过滤后经 `lib/financeOverview.ts` 聚合 `usageRevenue` / `supplyCost` / `grossProfit` | ✅ 已接；币种不混算，覆盖不全时不显示合计（XM-PAY0/PAY1） |
 | 今日请求量 / 成功率（24h） / 今日订阅 | `newapi.requests.daily` / `newapi.requests.success_rate_24h` / `newapi.subscription.daily` | 前两格数据源已在 reqlog 线上（同 Sub2API），原型 NewAPI 概览没有这两格，不额外加卡；今日订阅未观测，未接入 + 原因 |
-| 渠道健康 | 渠道目录 `listPlatformChannels("newapi", serviceId)`（渠道 / 上游=`vendor` / 成功率=`today.successRate`，XM-CHAN-FIELDS0）+ `newapi.channels.status`（启停 / 错误率，按 channel_id 关联） | ✅ 已接（XM-NEWAPI-OVERVIEW0），每行链到渠道详情；恰好一个已登记 service 时才读目录，否则回退指标视图。分组：未接入 —— 尚无连接器读 NewAPI `group`（XM-CHAN-GROUP0 在做） |
+| 渠道健康 | 渠道目录 `listPlatformChannels("newapi", serviceId)`（渠道 / 上游=`vendor` / 成功率=`today.successRate`，XM-CHAN-FIELDS0）+ `newapi.channels.status`（启停 / 错误率，按 channel_id 关联） | ✅ 已接（XM-NEWAPI-OVERVIEW0），每行链到渠道详情；恰好一个已登记 service 时才读目录，否则回退指标视图。分组：✅ 已接（XM-CHAN-GROUP0，NewAPI 原生 `group` 逗号分隔组名经连接器归一化进渠道目录；未配置分组的行显示未接入 + 原因；Sub2API 没有分组概念，恒为未接入 + 原因） |
 | 近 7 日请求量 | `newapi.requests.trend_7d` | ✅ 已接（XM-NEWAPI-OVERVIEW0），与 Sub2API 同一条 reqlog 线 |
 
 **原型没有的格去了哪**（逐条处置，页面底部也写了一句）

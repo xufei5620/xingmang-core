@@ -110,6 +110,7 @@ function catalogRawItem(over: Record<string, unknown> = {}): Record<string, unkn
     observed: { source: "newapi-connector", observed_at: "2026-08-31T09:00:00Z", is_stale: false },
     kind: null,
     vendor: null,
+    group: null,
     status: null,
     capacity: null,
     scheduling: null,
@@ -574,6 +575,7 @@ describe("NewAPI 概览按它自己的原型页", () => {
       platformChannels: catalogPage([
         catalogRawItem({
           vendor: "Anthropic",
+          group: "default,vip",
           today: { requests: 312, success_rate: 0.974, cost_minor: "1880000", currency: "CNY", scale: 6 },
         }),
       ]),
@@ -583,6 +585,8 @@ describe("NewAPI 概览按它自己的原型页", () => {
     const card = (await screen.findByText("渠道健康")).closest("section") as HTMLElement;
     // 上游：真实供应商名，不再是「未接入」（渠道目录 Query 是异步的，等它落地）
     expect(await within(card).findByText("Anthropic")).toBeTruthy();
+    // 分组：真实值（XM-CHAN-GROUP0），不再是恒定的未接入
+    expect(within(card).getByText("default,vip")).toBeTruthy();
     // 成功率：0-1 小数乘 100，一位小数
     expect(within(card).getByText("97.4%")).toBeTruthy();
     // 渠道名链到渠道详情页，路由与 ManagedChannelTable/ChannelDetailPage 同一条
@@ -590,18 +594,18 @@ describe("NewAPI 概览按它自己的原型页", () => {
     expect(link.getAttribute("href")).toBe("/platforms/newapi/upstream/detail/c1");
     // 状态列仍然来自 newapi.channels.status 指标口径（按 id 关联），不是目录的 status 枚举
     expect(within(card).getByText("启用")).toBeTruthy();
-    // 分组没有任何数据源，恒未接入
-    expect(within(card).getByTitle(/分组.*没有采集这一维度/)).toBeTruthy();
     // 新鲜度徽章在（目录 Query 的 inventory.observed_at 现算）
     expect(within(card).getByText("数据新鲜")).toBeTruthy();
   });
 
-  it("渠道目录字段为 null 时上游 / 成功率显示未接入 + 具体原因，不是猜的三列（XM-NEWAPI-OVERVIEW0）", async () => {
+  it("渠道目录字段为 null 时上游 / 分组 / 成功率显示未接入 + 具体原因，不是猜的三列（XM-NEWAPI-OVERVIEW0/XM-CHAN-GROUP0）", async () => {
     stub({ platformChannels: catalogPage([catalogRawItem()]) }); // 扩展字段全 null
     renderPanel("newapi", "NewAPI", { serviceId: NEWAPI_SERVICE_ID, serviceStatus: "active" });
 
     const card = (await screen.findByText("渠道健康")).closest("section") as HTMLElement;
     expect(await within(card).findByTitle(/供应商映射表内/)).toBeTruthy();
+    // 分组为 null 时是「这一条渠道没有配置」，不是「没有数据源」——数据源已经接上了
+    expect(within(card).getByTitle(/这条渠道没有配置任何分组/)).toBeTruthy();
     expect(within(card).getByTitle(/newapi.channels.status 指标里没有匹配记录/)).toBeTruthy();
     // today 整体是 null（不是 today 有值但 successRate 单独 null）
     expect(within(card).getByTitle(/超出本次读取的预算|还没有今日数据/)).toBeTruthy();

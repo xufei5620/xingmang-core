@@ -222,6 +222,17 @@ type ChannelStatus struct {
 	RateMultiplierPPM     *int64
 	UpstreamMultiplierPPM *int64
 
+	// Group 来自 Channel.Group（model/channel.go:40，逗号分隔的分组名字符串，
+	// 上游默认值 "default"，用于按分组路由/计费——XM-CHAN-GROUP0 新增，晚于
+	// 本文件其余字段一轮）。原样保留逗号分隔字符串这个上游自己的线上格式,
+	// 不拆成数组：上游 JSON 字段本身就是一个字符串（不是数组），把它拆开
+	// 再重组是替上游做了一次它自己都没做的结构决定。仅做归一化——去掉外层
+	// 多余逗号与每段的首尾空白（同 model/channel.go:296-305 GetGroups() 的
+	// 归一化规则，逐行核对），再丢弃归一化后仍为空的段——不是近似，是把
+	// "1,,2" 这种脏数据在展示前清理成 "1,2"，见 parseChannelGroup。
+	// 归一化后整条为空（原始未配置任何分组）时为 nil，不是空字符串。
+	Group *string
+
 	// LastUsedAt 恒为 nil：上游没有「渠道最近一次服务请求」的时间字段
 	// （TestTime 是连通性测试时刻，不是服务请求时刻，两者不能混用）。
 	LastUsedAt *time.Time
@@ -336,6 +347,9 @@ func (c ChannelStatus) catalogFields() map[string]any {
 	}
 	if c.ProxyLabel != nil {
 		row["proxy"] = *c.ProxyLabel
+	}
+	if c.Group != nil {
+		row["group"] = *c.Group
 	}
 	if c.RateMultiplierPPM != nil {
 		row["rate_multiplier"] = ppmToFraction(*c.RateMultiplierPPM)
