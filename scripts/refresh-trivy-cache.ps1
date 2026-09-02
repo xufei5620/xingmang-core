@@ -41,6 +41,20 @@ param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
     [string]$SeedImage = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2',
 
+    # Must match scripts/release-image-gate.ps1's own $trivyImage pin exactly
+    # -- the mandatory post-seed self-check below runs this same Trivy
+    # build against a staging volume, so it needs to be the same version
+    # the real release gate will actually use.
+    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [string]$TrivyImage = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969',
+
+    # A small image already present in the local Docker image store, scanned
+    # by the mandatory post-seed self-check below. Defaults to -SeedImage
+    # itself (already required, already pinned by digest, already present)
+    # rather than introduce a second pinned-image dependency just for this.
+    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [string]$SelfCheckImageReference = $SeedImage,
+
     [AllowEmptyString()]
     [string]$WorkDirectory = '',
 
@@ -78,6 +92,19 @@ network transfer and no reseed at all. When the digest *has* changed, the
 newly downloaded database's own UpdatedAt is compared against whatever is
 currently seeded, and this script refuses to replace a newer cache with an
 older download (pass -Force to override deliberately).
+
+Before anything reaches the live cache volume, each refreshed component's
+metadata.json is corrected to carry a real DownloadedAt (Trivy's own
+downloader stamps this after a successful download; the upstream OCI
+artifact ships it as Go's zero time value, which is otherwise
+indistinguishable from "never really downloaded" to Trivy's own freshness
+check -- see refresh-trivy-cache-lib.ps1's Set-TrivyDbMetadataDownloadedAt
+for the full story), and the complete would-be new cache state (this run's
+refreshed component(s) layered onto a clone of whatever is currently live)
+is built in a disposable staging volume and proven to actually work --
+both a real offline vulnerability scan and Trivy's own `--download-*-only`
+freshness check must succeed against it -- before any live component is
+replaced. A failed self-check leaves the live volume completely untouched.
 
 Takes the exact same shared lock release-image-gate.ps1 does
 (release\.trivy-0.74.release-gate.lock) for the whole run, so this script
@@ -155,6 +182,7 @@ try {
     }
 
     $summaries = [Collections.Generic.List[object]]::new()
+    $pendingComponents = [Collections.Generic.List[object]]::new()
     foreach ($component in $components) {
         Write-Host "==> $($component.Name) ($($component.Registry)/$($component.Repository):$($component.Tag))"
         $componentWorkDirectory = Join-Path $WorkDirectory $component.Name
@@ -207,7 +235,8 @@ try {
                 throw "$($component.Name): extracted archive is missing expected file $fileName"
             }
         }
-        $candidateMetadataText = Get-Content -Raw -LiteralPath (Join-Path $extractDirectory 'metadata.json')
+        $metadataPath = Join-Path $extractDirectory 'metadata.json'
+        $candidateMetadataText = Get-Content -Raw -LiteralPath $metadataPath
         $candidateMetadata = Read-TrivyDbMetadataText -JsonText $candidateMetadataText
 
         $currentMetadata = $null
@@ -223,13 +252,62 @@ try {
             Write-Warning "$($component.Name): -Force overriding the newer-cache-than-download guard (current UpdatedAt=$currentUpdatedAt, download UpdatedAt=$($candidateMetadata.UpdatedAt))"
         }
 
-        if ($PSCmdlet.ShouldProcess("$TrivyCacheVolume`:/$($component.SubPath)", "Seed from $($layer.Digest)")) {
-            Publish-TrivyCacheComponentToVolume -Volume $TrivyCacheVolume -SubPath $component.SubPath `
-                -LocalSourceDirectory $extractDirectory -Digest $layer.Digest -SeedImage $SeedImage -FileNames $component.FileNames
-            Write-Host "    seeded $($component.Name) into $TrivyCacheVolume/$($component.SubPath)"
-            $summaries.Add([pscustomobject]@{ Name = $component.Name; UpdatedAt = $candidateMetadata.UpdatedAt; NextUpdate = $candidateMetadata.NextUpdate; Action = 'refreshed' })
+        # Stamp a real DownloadedAt exactly as Trivy's own downloader does,
+        # before this content is ever seeded anywhere (staging included) --
+        # see Set-TrivyDbMetadataDownloadedAt's own doc comment for why the
+        # raw upstream file (DownloadedAt still Go's zero time value) is not
+        # safe to seed as-is.
+        $downloadedAtMetadataText = Set-TrivyDbMetadataDownloadedAt -JsonText $candidateMetadataText -DownloadedAt ([DateTimeOffset]::UtcNow)
+        [IO.File]::WriteAllText($metadataPath, $downloadedAtMetadataText, [Text.UTF8Encoding]::new($false))
+
+        $pendingComponents.Add([pscustomobject]@{
+            Component        = $component
+            Digest           = $layer.Digest
+            ExtractDirectory = $extractDirectory
+            UpdatedAt        = $candidateMetadata.UpdatedAt
+            NextUpdate       = $candidateMetadata.NextUpdate
+        })
+    }
+
+    if ($pendingComponents.Count -gt 0) {
+        $pendingNames = ($pendingComponents | ForEach-Object { $_.Component.Name }) -join ', '
+        if ($PSCmdlet.ShouldProcess($TrivyCacheVolume, "Stage, self-check, then seed: $pendingNames")) {
+            $stagingVolume = "$TrivyCacheVolume-staging-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+            Write-Host "==> Building staging volume $stagingVolume (live clone + this run's refreshed component(s)) for the mandatory post-seed self-check"
+            try {
+                New-TrivyCacheVolumeIfMissing -Volume $stagingVolume
+                Copy-TrivyCacheVolumeToVolume -SourceVolume $TrivyCacheVolume -DestinationVolume $stagingVolume -SeedImage $SeedImage
+
+                foreach ($pending in $pendingComponents) {
+                    Publish-TrivyCacheComponentToVolume -Volume $stagingVolume -SubPath $pending.Component.SubPath `
+                        -LocalSourceDirectory $pending.ExtractDirectory -Digest $pending.Digest -SeedImage $SeedImage -FileNames $pending.Component.FileNames
+                }
+
+                Write-Host "    self-check 1/2: offline vulnerability scan of $SelfCheckImageReference against $stagingVolume"
+                Invoke-TrivyCacheOfflineScanSelfCheck -Volume $stagingVolume -TrivyImage $TrivyImage -ScanImageReference $SelfCheckImageReference | Out-Null
+                Write-Host '    self-check 1/2 passed'
+
+                $stagedJavaDbState = Get-TrivyCacheVolumeComponentState -Volume $stagingVolume -SubPath 'java-db' -SeedImage $SeedImage
+                $includeJavaDbInFreshnessCheck = -not [string]::IsNullOrWhiteSpace($stagedJavaDbState.Digest)
+                Write-Host "    self-check 2/2: Trivy's own --download-db-only$(if ($includeJavaDbInFreshnessCheck) { '/--download-java-db-only' }) freshness check against $stagingVolume"
+                Invoke-TrivyCacheFreshnessSelfCheck -Volume $stagingVolume -TrivyImage $TrivyImage -IncludeJavaDb $includeJavaDbInFreshnessCheck -ProxyUrl $ProxyUrl | Out-Null
+                Write-Host '    self-check 2/2 passed'
+
+                foreach ($pending in $pendingComponents) {
+                    Publish-TrivyCacheComponentToVolume -Volume $TrivyCacheVolume -SubPath $pending.Component.SubPath `
+                        -LocalSourceDirectory $pending.ExtractDirectory -Digest $pending.Digest -SeedImage $SeedImage -FileNames $pending.Component.FileNames
+                    Write-Host "    seeded $($pending.Component.Name) into $TrivyCacheVolume/$($pending.Component.SubPath)"
+                    $summaries.Add([pscustomobject]@{ Name = $pending.Component.Name; UpdatedAt = $pending.UpdatedAt; NextUpdate = $pending.NextUpdate; Action = 'refreshed' })
+                }
+            } finally {
+                if (Test-DockerVolumeExists -Volume $stagingVolume) {
+                    & docker volume rm --force $stagingVolume *> $null
+                }
+            }
         } else {
-            $summaries.Add([pscustomobject]@{ Name = $component.Name; UpdatedAt = $candidateMetadata.UpdatedAt; NextUpdate = $candidateMetadata.NextUpdate; Action = 'would-refresh (-WhatIf)' })
+            foreach ($pending in $pendingComponents) {
+                $summaries.Add([pscustomobject]@{ Name = $pending.Component.Name; UpdatedAt = $pending.UpdatedAt; NextUpdate = $pending.NextUpdate; Action = 'would-refresh (-WhatIf)' })
+            }
         }
     }
 

@@ -179,6 +179,41 @@ if (Test-CandidateMetadataIsAcceptable -CandidateUpdatedAt '2026-09-01T00:00:00Z
 }
 Write-Host 'Read-TrivyDbMetadataText and Test-CandidateMetadataIsAcceptable fixtures passed, including the newer-cache refusal.'
 
+# --- Set-TrivyDbMetadataDownloadedAt ------------------------------------------
+# The upstream OCI-published metadata.json ships DownloadedAt as Go's zero
+# time value ("0001-01-01T00:00:00Z") -- confirmed directly against the
+# real trivy-db:2 artifact while investigating this fix. Trivy's own
+# `--download-db-only` (no skip flags -- exactly what release-image-
+# gate.ps1 runs every release) treats that zero value as a sign the local
+# database "may be corrupted" and unconditionally redownloads, even though
+# the database content itself is perfectly valid -- reproduced verbatim,
+# including the exact log line, against a cache this script seeded before
+# this fix. That is the actual root cause this fix responds to, so the
+# function that corrects it gets its own fixture, independent of live
+# network (the live section below additionally proves this against the
+# real, currently-published upstream artifact).
+$zeroDownloadedAtMetadataText = '{"Version":2,"NextUpdate":"2026-09-03T00:20:12Z","UpdatedAt":"2026-09-02T00:20:12Z","DownloadedAt":"0001-01-01T00:00:00Z"}'
+$stampedDownloadedAt = [DateTimeOffset]::Parse('2026-09-02T18:30:00.1234567Z')
+$stampedMetadataText = Set-TrivyDbMetadataDownloadedAt -JsonText $zeroDownloadedAtMetadataText -DownloadedAt $stampedDownloadedAt
+$stampedMetadata = $stampedMetadataText | ConvertFrom-Json -DateKind String
+if ([DateTimeOffset]::Parse([string]$stampedMetadata.DownloadedAt) -ne $stampedDownloadedAt) {
+    throw "Set-TrivyDbMetadataDownloadedAt did not stamp the expected DownloadedAt: $stampedMetadataText"
+}
+if ([string]$stampedMetadata.UpdatedAt -cne '2026-09-02T00:20:12Z' -or [string]$stampedMetadata.NextUpdate -cne '2026-09-03T00:20:12Z') {
+    throw "Set-TrivyDbMetadataDownloadedAt altered UpdatedAt/NextUpdate, which must pass through unchanged: $stampedMetadataText"
+}
+Read-TrivyDbMetadataText -JsonText $stampedMetadataText | Out-Null # must still validate; DownloadedAt was never part of that contract
+# Also confirm it adds the field when absent entirely (defensive: in case a
+# future upstream shape omits DownloadedAt rather than zero-valuing it),
+# not only when overwriting an existing zero value.
+$missingDownloadedAtMetadataText = '{"Version":2,"NextUpdate":"2026-09-03T00:20:12Z","UpdatedAt":"2026-09-02T00:20:12Z"}'
+$stampedFromMissingText = Set-TrivyDbMetadataDownloadedAt -JsonText $missingDownloadedAtMetadataText -DownloadedAt $stampedDownloadedAt
+$stampedFromMissing = $stampedFromMissingText | ConvertFrom-Json -DateKind String
+if ([DateTimeOffset]::Parse([string]$stampedFromMissing.DownloadedAt) -ne $stampedDownloadedAt) {
+    throw "Set-TrivyDbMetadataDownloadedAt did not add DownloadedAt when the field was absent entirely: $stampedFromMissingText"
+}
+Write-Host 'Set-TrivyDbMetadataDownloadedAt stamps DownloadedAt (overwriting an existing zero value, or adding it when absent) without disturbing UpdatedAt/NextUpdate.'
+
 # --- Get-BlobDownloadPlanExcludingCompleteParts (resumability) ---------------
 $resumeScratch = Join-Path ([IO.Path]::GetTempPath()) "trivy-cache-test-resume-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
 New-Item -ItemType Directory -Path $resumeScratch -Force | Out-Null
@@ -263,6 +298,9 @@ if ($networkAvailable -and $dockerAvailable) {
     $workScratch = Join-Path ([IO.Path]::GetTempPath()) "trivy-cache-test-work-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
     New-Item -ItemType Directory -Path $workScratch -Force | Out-Null
     $seedImage = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
+    # Must match release-image-gate.ps1's own $trivyImage pin and refresh-
+    # trivy-cache.ps1's own -TrivyImage default exactly.
+    $trivyImageForTest = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969'
 
     try {
         New-TrivyCacheVolumeIfMissing -Volume $testVolume
@@ -341,6 +379,96 @@ if ($networkAvailable -and $dockerAvailable) {
         }
         Write-Host 'Newer-cache guard correctly refuses to accept a real (older) download over a synthetic far-future currently-seeded metadata.json.'
         # Restore the real, correct content for the rest of this test.
+        Publish-TrivyCacheComponentToVolume -Volume $testVolume -SubPath 'db' -LocalSourceDirectory $extractDirectory `
+            -Digest $realDbLayer.Digest -SeedImage $seedImage -FileNames @('trivy.db', 'metadata.json')
+
+        # --- staging + mandatory post-seed self-check (same real download
+        # above, no extra network cost for the trivy.db content itself) -----
+        $rawMetadataParsed = $realMetadataText | ConvertFrom-Json -DateKind String
+        if ([string]$rawMetadataParsed.DownloadedAt -cne '0001-01-01T00:00:00Z') {
+            Write-Warning "the live trivy-db:2 upstream artifact's raw DownloadedAt is '$($rawMetadataParsed.DownloadedAt)', not the Go zero value this fix was written against -- upstream may have changed. Set-TrivyDbMetadataDownloadedAt is applied unconditionally by refresh-trivy-cache.ps1 regardless, so this is informational, not fatal, here."
+        } else {
+            Write-Host "Confirmed live: the real trivy-db:2 upstream artifact still ships DownloadedAt as Go's zero value -- exactly the precondition this fix corrects."
+        }
+
+        # Correct the metadata in place (mutating $extractDirectory directly
+        # rather than copying the 1.3GB trivy.db elsewhere) and re-publish,
+        # exactly as refresh-trivy-cache.ps1 itself now does before ever
+        # seeding anything.
+        $correctedMetadataText = Set-TrivyDbMetadataDownloadedAt -JsonText $realMetadataText -DownloadedAt ([DateTimeOffset]::UtcNow)
+        $correctedMetadata = Read-TrivyDbMetadataText -JsonText $correctedMetadataText
+        if ($correctedMetadata.UpdatedAt -cne $realMetadata.UpdatedAt) {
+            throw 'Set-TrivyDbMetadataDownloadedAt altered UpdatedAt on the real downloaded metadata.json'
+        }
+        [IO.File]::WriteAllText((Join-Path $extractDirectory 'metadata.json'), $correctedMetadataText, [Text.UTF8Encoding]::new($false))
+        Publish-TrivyCacheComponentToVolume -Volume $testVolume -SubPath 'db' -LocalSourceDirectory $extractDirectory `
+            -Digest $realDbLayer.Digest -SeedImage $seedImage -FileNames @('trivy.db', 'metadata.json')
+
+        $stagingTestVolume = "$testVolume-staging-test"
+        $rawExtractForRegressionTest = $null
+        try {
+            New-TrivyCacheVolumeIfMissing -Volume $stagingTestVolume
+            Copy-TrivyCacheVolumeToVolume -SourceVolume $testVolume -DestinationVolume $stagingTestVolume -SeedImage $seedImage
+            $clonedState = Get-TrivyCacheVolumeComponentState -Volume $stagingTestVolume -SubPath 'db' -SeedImage $seedImage
+            if ($clonedState.Digest -cne $realDbLayer.Digest) {
+                throw "Copy-TrivyCacheVolumeToVolume did not clone the db component's digest sidecar correctly: got $($clonedState.Digest)"
+            }
+            $clonedMetadata = Read-TrivyDbMetadataText -JsonText $clonedState.MetadataText
+            if ($clonedMetadata.UpdatedAt -cne $realMetadata.UpdatedAt) {
+                throw 'Copy-TrivyCacheVolumeToVolume did not clone metadata.json correctly'
+            }
+            $tmpDirCheck = (& docker run --rm -v "${stagingTestVolume}:/cache:ro" $seedImage sh -c 'if [ -d /cache/tmp ]; then echo TMPDIR_OK; fi' 2>&1) -join "`n"
+            if (-not $tmpDirCheck.Contains('TMPDIR_OK')) {
+                throw 'Copy-TrivyCacheVolumeToVolume did not create the tmp/ directory Invoke-TrivyCacheFreshnessSelfCheck points TMPDIR at (needed so a real redownload, if the freshness check ever triggers one, does not hit the cross-filesystem TMPDIR move bug found while investigating this incident)'
+            }
+            Write-Host 'Copy-TrivyCacheVolumeToVolume clones the digest sidecar and metadata.json correctly and creates the tmp/ directory the freshness self-check depends on.'
+
+            Invoke-TrivyCacheOfflineScanSelfCheck -Volume $stagingTestVolume -TrivyImage $trivyImageForTest -ScanImageReference $seedImage | Out-Null
+            Write-Host 'Invoke-TrivyCacheOfflineScanSelfCheck passes against a correctly-staged (DownloadedAt-stamped) volume.'
+
+            Invoke-TrivyCacheFreshnessSelfCheck -Volume $stagingTestVolume -TrivyImage $trivyImageForTest -IncludeJavaDb $false -ProxyUrl $proxyUrl | Out-Null
+            Write-Host 'Invoke-TrivyCacheFreshnessSelfCheck passes (fast, no-op) against a correctly-staged (DownloadedAt-stamped) volume.'
+
+            # Prove the freshness check earns its place: reseed staging with
+            # the RAW (zero-DownloadedAt) upstream metadata and confirm (a)
+            # the offline-scan check alone still PASSES (documenting exactly
+            # why it is not sufficient by itself -- this is what the manual
+            # incident repro also saw) and (b) the freshness check now fails
+            # on Trivy's real "may be corrupted" signal.
+            $rawExtractForRegressionTest = Join-Path $workScratch 'raw-metadata-regression'
+            New-Item -ItemType Directory -Path $rawExtractForRegressionTest -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $extractDirectory 'trivy.db') -Destination (Join-Path $rawExtractForRegressionTest 'trivy.db')
+            Set-Content -LiteralPath (Join-Path $rawExtractForRegressionTest 'metadata.json') -Value $realMetadataText -NoNewline -Encoding utf8
+            Publish-TrivyCacheComponentToVolume -Volume $stagingTestVolume -SubPath 'db' -LocalSourceDirectory $rawExtractForRegressionTest `
+                -Digest $realDbLayer.Digest -SeedImage $seedImage -FileNames @('trivy.db', 'metadata.json')
+
+            Invoke-TrivyCacheOfflineScanSelfCheck -Volume $stagingTestVolume -TrivyImage $trivyImageForTest -ScanImageReference $seedImage | Out-Null
+            Write-Host 'Confirmed: the offline-scan self-check alone PASSES even against a raw zero-DownloadedAt cache -- exactly why this fix also added the freshness self-check below.'
+
+            $regressionCaught = $false
+            try {
+                Invoke-TrivyCacheFreshnessSelfCheck -Volume $stagingTestVolume -TrivyImage $trivyImageForTest -IncludeJavaDb $false -ProxyUrl $proxyUrl -TimeoutSeconds 8 | Out-Null
+            } catch {
+                $regressionCaught = $_.Exception.Message.Contains('may be corrupted', [StringComparison]::OrdinalIgnoreCase) -or
+                    $_.Exception.Message.Contains('does not recognize this seeded cache as fresh', [StringComparison]::OrdinalIgnoreCase)
+                if (-not $regressionCaught) { throw }
+            }
+            if (-not $regressionCaught) {
+                throw 'Invoke-TrivyCacheFreshnessSelfCheck did not fail against a raw zero-DownloadedAt cache -- it should catch the exact regression class that caused this incident'
+            }
+            Write-Host "Invoke-TrivyCacheFreshnessSelfCheck correctly fails against a raw zero-DownloadedAt cache, reproducing (and this time catching) the incident's root cause."
+        } finally {
+            if (Test-DockerVolumeExists -Volume $stagingTestVolume) {
+                & docker volume rm --force $stagingTestVolume *> $null
+            }
+            if ($rawExtractForRegressionTest) {
+                Remove-Item -LiteralPath $rawExtractForRegressionTest -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Restore the real, DownloadedAt-corrected content once more so the
+        # CLI end-to-end checks below (which reuse $testVolume) see the
+        # correct shape too.
         Publish-TrivyCacheComponentToVolume -Volume $testVolume -SubPath 'db' -LocalSourceDirectory $extractDirectory `
             -Digest $realDbLayer.Digest -SeedImage $seedImage -FileNames @('trivy.db', 'metadata.json')
 
