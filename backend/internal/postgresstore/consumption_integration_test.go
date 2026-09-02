@@ -877,15 +877,22 @@ func TestMissingUsageIsCaughtByLowerBalanceCheckpointWithoutIncreasingEligibilit
 		manifestHash, configHash, strings.Repeat("f", 64)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.pool.Exec(ctx, `INSERT INTO eligibility_projection_jobs(
-		external_account_id,requested_through,status) VALUES($1,$2,'queued')`, accountID, asOf); err != nil {
-		t.Fatal(err)
-	}
-	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute),
-		AuditActor{Type: "system", ID: "test-worker"})
-	if err != nil || processed != 1 {
-		t.Fatalf("missing-usage reconciliation processed=%d err=%v", processed, err)
-	}
+	// processEligibilityWithoutReanchor, not ProcessEligibilityProjectionJobs
+	// (XM-INV-ANCHOR-BALANCE): this fixture's account is SIGNED_CUTOVER
+	// (integrationStore's shared default, bootstrapped by
+	// UpsertFundingLot's fixture path), and the checkpoint just inserted
+	// above -- dated at/after the policy start -- is otherwise
+	// indistinguishable from a design XM-INV-POLICY-ANCHOR 2.4 re-anchor
+	// candidate to reanchorLegacyEligibilityAccountTx's lookup, which cares
+	// only about checkpoint_kind/as_of, never about a test's own intent for
+	// the row. Going through the real job queue here would silently
+	// re-anchor the account to this exact checkpoint first (see
+	// processEligibilityWithoutReanchor's own doc comment for this same
+	// class of fixture/design-2.4 interaction), replacing what this test
+	// wants to exercise -- a real checkpoint reporting less balance than
+	// the ledger's own SIGNED_CUTOVER-boundary projection expects -- with
+	// an unrelated fresh-POLICY_ANCHOR-anchor evaluation instead.
+	processEligibilityWithoutReanchor(t, store, ctx, accountID, asOf, AuditActor{Type: "system", ID: "test-worker"})
 	lot, err := store.GetFundingLot(ctx, lotID)
 	if err != nil || lot.EligibilityStatus != "frozen" || lot.AvailableMinor() != 0 {
 		t.Fatalf("missing usage did not fail closed: lot=%+v err=%v", lot, err)
@@ -1446,10 +1453,20 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 		PayloadCiphertext: bytes.Repeat([]byte{8}, 32), ObservedAt: finalCeiling}
 	matchingBalanceCycle := chain.commit(t, store, ctx, sourceID, "balances",
 		"8d000000-0000-4000-8000-000000000006", finalCeiling, []SourceBatchEvent{matchingBalanceEvent})
+	// 100, not the pre-XM-INV-ANCHOR-BALANCE fixture's 50 (XM-INV-ANCHOR-BALANCE):
+	// this account's own anchor checkpoint (100 units at accountCutover) is
+	// now correctly treated as a trusted opening non-cash credit -- see the
+	// postPaymentLot assertion below -- so it is available to, and fully
+	// consumed by, the 100-unit usage above before that usage ever reaches
+	// postPayment's cash. ExpectedBalance at this as_of is therefore
+	// 0 (anchor credit, fully drained) + 100 (postPayment's cash,
+	// untouched) = 100, which is what a real reconciliation checkpoint at
+	// this point would report; a hardcoded "50" no longer reconciles and
+	// freezes UNKNOWN_NEGATIVE_BALANCE instead of matching.
 	if err = store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
 		SourceInstanceID: sourceID, ExternalUserID: "77", ExternalEventID: matchingBalanceEvent.EventID,
 		CheckpointID: strings.Repeat("8", 64) + ":77", CheckpointKind: "reconciliation",
-		BalanceServiceUnits: "50", UnitCode: unitCode,
+		BalanceServiceUnits: "100", UnitCode: unitCode,
 		SourceSnapshotID: testHash(matchingBalanceCycle.cycleID), SnapshotRowCount: "1", BaselineMember: false,
 		AsOf: accountCutover.Add(15 * time.Minute), ObservedAt: finalCeiling, StreamWatermarkAt: finalCeiling,
 		SourceCursor: "new-account-matched:77", SourceRevision: matchingBalanceEvent.PayloadHash,
@@ -1464,9 +1481,16 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 	if err != nil || processed == 0 {
 		t.Fatalf("new-account post-bootstrap projection processed=%d err=%v", processed, err)
 	}
+	// 0, not the pre-XM-INV-ANCHOR-BALANCE fixture's 100_000 (XM-INV-ANCHOR-BALANCE):
+	// the account's own 100-unit anchor is now a real, trusted non-cash
+	// credit (design XM-INV-POLICY-ANCHOR 2.1's "entirely non-invoiceable"
+	// opening balance, finally honored end-to-end) and fully absorbs the
+	// 100-unit usage above, so postPayment's real paid cash is never
+	// touched -- exactly the non-invoiceable-opening-balance guarantee this
+	// slice fixes, not a regression.
 	postPaymentLot, err := store.GetFundingLot(ctx, postPayment.Lot.ID)
-	if err != nil || postPaymentLot.ConsumedCashMinor != 100_000 {
-		t.Fatalf("post-bootstrap wallet usage did not become eligible: lot=%+v err=%v", postPaymentLot, err)
+	if err != nil || postPaymentLot.ConsumedCashMinor != 0 {
+		t.Fatalf("post-bootstrap usage unexpectedly spent real cash instead of the account's own non-cash anchor: lot=%+v err=%v", postPaymentLot, err)
 	}
 	// preWallet stays LEGACY_NON_INVOICEABLE (established above) and
 	// contributes no eligible cash, so it must remain untouched by this

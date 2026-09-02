@@ -3112,6 +3112,33 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				}
 			case 1:
 				var intervalStart time.Time
+				// XM-INV-ANCHOR-BALANCE: a POLICY_ANCHOR account's own
+				// anchor (account.CutoverAt, design XM-INV-POLICY-ANCHOR
+				// 2.1's bootstrap reconciliation checkpoint) is an
+				// unconditionally trusted interval start, exactly as a
+				// legacy account's checkpoint_kind='cutover' row is in the
+				// first UNION branch above -- it plays the identical role
+				// (the account's own observed opening balance), it is just
+				// sourced from source_account_eligibility_state instead of
+				// a separate checkpoint row, because a POLICY_ANCHOR
+				// bootstrap never inserts a checkpoint_kind='cutover' row
+				// (only 'reconciliation', which this same function must
+				// still evaluate -- see ObserveBalanceCheckpoint's
+				// POLICY_ANCHOR branch). Before this branch existed, a
+				// fresh POLICY_ANCHOR account's very first balance
+				// evaluation (typically its own anchor checkpoint) found no
+				// trusted interval start at all and froze SOURCE_GAP --
+				// production accounts 98cce4c8... and 6706ea6a... (see
+				// docs/handoffs/XM-INV-ANCHOR-BALANCE.md). Scoped strictly
+				// to bootstrap_kind='POLICY_ANCHOR' so legacy accounts are
+				// unaffected: they never have a matching row here. Once a
+				// real matched/positive_classified_non_cash evaluation
+				// exists (second UNION branch), it is always later than
+				// this fixed anchor point and wins the max() below, so this
+				// branch only ever matters for the account's first
+				// evaluation -- the same way a legacy account's single
+				// checkpoint_kind='cutover' row is superseded the moment
+				// something later has matched.
 				err = tx.QueryRow(ctx, `
 					SELECT max(q.as_of) FROM (
 						SELECT checkpoint.as_of FROM balance_reconciliation_checkpoints checkpoint
@@ -3129,6 +3156,10 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 						WHERE proof.external_account_id=$1
 						  AND (proof.as_of<$2 OR (proof.as_of=$2 AND proof.source_sequence<$3))
 						  AND evaluation.evaluation_status IN ('matched','positive_classified_non_cash')
+						UNION ALL
+						SELECT state.cutover_at FROM source_account_eligibility_state state
+						WHERE state.external_account_id=$1 AND state.bootstrap_kind='POLICY_ANCHOR'
+						  AND state.cutover_at<=$2
 					) q`, accountID, item.asOf, item.sequence).Scan(&intervalStart)
 				if err != nil || intervalStart.IsZero() {
 					status = "source_gap_frozen"
