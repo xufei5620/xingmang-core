@@ -1,5 +1,10 @@
 # RC72 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC72 shipped at signed tag
+> `v0.1.0-rc72-signed` (`cadf009`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc73-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC72 — CR-0006 phase 1 on the invoice side: the console-assertion administrator login (XM-INV-CONSOLE-ASSERT: `POST /api/v1/auth/console-assertion`, Ed25519 JWS verified against a static reviewed key manifest, single-use nonces, `OIDC_ADMIN_LOGIN_ENABLED`/`CONSOLE_ASSERTION_*` configuration, the embedded admin page accepting `admin-assertion` postMessages) and the administrator identity migration tool (XM-INV-IDENTITY-MIGRATE: `invoice-identity-migrate` in the tools image, dry-run/apply, re-encrypting the email ciphertext under the new identity). Both features ship dark: `CONSOLE_ASSERTION_ENABLED` defaults to false and OIDC stays enabled.
