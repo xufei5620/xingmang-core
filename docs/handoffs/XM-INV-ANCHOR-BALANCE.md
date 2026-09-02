@@ -260,7 +260,7 @@ pre-existing files' CRLF stripped first via `sed 's/\r$//'` before diffing so on
 differences show): clean on every file. New files were formatted directly with `gofmt -w` (safe —
 written by the editing tools as LF-native, so no CRLF conversion risk).
 
-`gitleaks git --log-opts="cadf009..HEAD" .`: <fill in after commits are made — see note below>.
+`gitleaks git --log-opts="cadf009..HEAD" .`: clean — "3 commits scanned... no leaks found."
 
 ## Not run
 
