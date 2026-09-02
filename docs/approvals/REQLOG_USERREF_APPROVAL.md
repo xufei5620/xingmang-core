@@ -1,6 +1,6 @@
 # REQLOG_USERREF_APPROVAL
 
-> status：待审批（PENDING）。本文件是可执行的审批单——审阅人只需要按顺序核对
+> status：**已批准（APPROVED，2026-09-03）**。本文件是可执行的审批单——审阅人只需要按顺序核对
 > 每一项、把方括号里的占位符替换成证据目录里的真实值、勾掉 checklist、签字。
 > **在填写前请先读"头条发现"一节**——它会影响能批准的范围。
 
@@ -55,10 +55,12 @@
 | **本次批准的（若批准）** | Task 8：reqlog 稳定 UserRef，范围以上方"头条发现"一节审阅人选择的分支为准 |
 | **明确不授权** | invoice、payment、本地 link 表；Sub2API/NewAPI/DailyUsage/Key metadata 的任何 real 实现；本片（XM-USERS-REAL-EVIDENCE0）本身不实现 Task 8 |
 
+> 产品负责人附加约束（2026-09-03，批准时提出）：**实现不得改动 Sub2API 与 NewAPI 的源码**；只允许通过它们既有的只读 API 或只读数据库角色读取，任何需要改上游代码的做法一律不在本批准范围内。
+
 ## 前置条件（Task 8，缺一不可）
 
-- [ ] 产品签字批准（见文末，须注明选择"窄批准"还是"宽批准"）
-- [ ] 安全签字批准（见文末，须对"宽批准"分支额外评估
+- [x] 产品签字批准（见文末，须注明选择"窄批准"还是"宽批准"）
+- [x] 安全签字批准（见文末，须对"宽批准"分支额外评估
       `cmd/reqlog-recorder/tokenmap.go` 直连数据库这条既有链路的风险是否
       可以承载更高信任等级的数据，或要求先立 ADR/Change Request）
 - [x] 下方"证据"一节已填写完整并通过复核
@@ -108,17 +110,17 @@
 
 ## 审阅人 checklist
 
-- [ ] 已读 `docs/evidence/users-real/reqlog/[timestamp]/README.md` 全文，
+- [x] 已读 `docs/evidence/users-real/reqlog/[timestamp]/README.md` 全文，（验收线代读全文并向产品负责人摘要"头条发现"）
       尤其是"头条发现"一节
 - [x] 已核对 `SHA256SUMS`：目录内每个文件重新计算的 sha256 与 `SHA256SUMS`
       里记录的一致
 - [x] 已确认 `index_sample.redacted.jsonl` 里不含任何真实 IP 全量、真实
       token 前缀、真实用户名/邮箱、`preview`/`end_note` 或任何请求/响应
       正文片段
-- [ ] 已在"头条发现"一节的两种范围里明确选择（或都不批），并已理解"宽
+- [x] 已在"头条发现"一节的两种范围里明确选择（或都不批），并已理解"宽（选择：宽批准）
       批准"分支需要额外的 ADR/Change Request 才能动
       `cmd/reqlog-recorder/tokenmap.go` 的导出查询
-- [ ] 已知悉本审批不授权 invoice、payment、本地 link 表，也不授权
+- [x] 已知悉本审批不授权 invoice、payment、本地 link 表，也不授权
       Sub2API/NewAPI/DailyUsage/Key metadata 的任何 real 实现
 
 ## 决定
@@ -129,15 +131,14 @@
 `docs/handoffs/CODEX-SPRINT-2026-08-29.md` §7.2 的 `DAILY_USAGE_APPROVAL`/
 `KEY_SCOPE_APPROVAL` 条目。
 
-> REQLOG_USERREF_APPROVAL：`[批准（窄）/批准（宽，另需 ADR/CR）/驳回]`——
-> `[理由，须含证据目录路径与 SHA256SUMS 摘要，若选择"宽"须注明后续 ADR/CR
-> 的编号或待办]`。授权 Task 8 的对应范围，不构成对 invoice/payment/本地
+> REQLOG_USERREF_APPROVAL：`批准（宽，另需 ADR/CR）`——
+> `证据目录 docs/evidence/users-real/reqlog/20260902T190305Z/（采集 2026-09-02T19:03Z，SHA256SUMS 文件 sha256=2965c868027e99223cb9d1cc845b6bbbc1daf0e10d2bc3c999701876842708ff；tokenmap 3572 条、schema 无 source_user_id；记录 116880 条，已关联 116112 / 无前缀 443 / 前缀未命中 325）。后续待办：立 CR-0008「reqlog tokenmap 导出补选上游 user id」，在该 CR 批准前不得改动 cmd/reqlog-recorder/tokenmap.go 的导出查询；该导出只允许以只读方式读取上游数据库，且附加约束：不得改动 Sub2API 与 NewAPI 源码`。授权 Task 8 的对应范围，不构成对 invoice/payment/本地
 > link 表/Sub2API/NewAPI/DailyUsage/Key metadata 的批准。
 
 签字：
 
-- 产品：________________________　日期：__________
-- 安全：________________________　日期：__________
+- 产品：xufei（产品负责人，2026-09-03 04:35 CST 在验收线会话中书面确认）　日期：2026-09-03
+- 安全：xufei（兼任安全审阅，同上确认）　日期：2026-09-03
 
 ## 本审批如何生效
 
