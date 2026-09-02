@@ -20,15 +20,21 @@
 
 ### Task 1: Source identity
 
-- [ ] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
-- [ ] Create `v0.1.0-rc72-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
+- [x] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
+- [x] Create `v0.1.0-rc72-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
 
 ### Task 2: Image evidence
 
-- [ ] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC72 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
+- [x] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC72 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
 
 ### Task 3: Production
 
-- [ ] Sign exactly one strict-ready RC72 directory, transfer only its nine manifest-bound images, reuse the latest pre-deploy backup if it is under two hours old (otherwise take a new one with the offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, require readyz 200 in the verify step, and record deployment evidence beside the release. Do not switch `CONSOLE_ASSERTION_ENABLED` on in the same step.
+- [x] Sign exactly one strict-ready RC72 directory, transfer only its nine manifest-bound images, reuse the latest pre-deploy backup if it is under two hours old (otherwise take a new one with the offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, require readyz 200 in the verify step, and record deployment evidence beside the release. Do not switch `CONSOLE_ASSERTION_ENABLED` on in the same step.
 
 Production remains blocked until the credentialed human canary (OIDC login still working with the feature dark; then, after the platform side XM-INVCON1 is live, one console-issued assertion exchanged for an admin session on the embedded page, the identity migration applied, and the owner logging in through the console only) binds RC72.
+
+## Execution record (2026-09-02/03)
+
+- Task 1: console-assertion login and identity-migrate merged (`2139408`), identity bump (`cadf009`). Backend suite green, web typecheck/tests/build green, gitleaks clean, four failure-evidence verifiers 0, gate self-test 0. Tag `v0.1.0-rc72-signed` -> `cadf009`.
+- Task 2: `release/0.1.0-rc72-exact1` retained as failed evidence (Trivy cache volume rejected as corrupted: the refresh script had written a non-native layout with a zero `DownloadedAt`; the volume was reseeded with Trivy's own downloader and validated by an offline scan). `release/0.1.0-rc72-exact2`: image gate 42, ordinary and strict verifiers 0, `SHA256SUMS.sig` verified.
+- Task 3: transfer verified on the host; staging loaded nine images and verified tag and evidence signatures; fresh backup `invoice-20260902T185730Z` (the RC70 backup was older than two hours; signing key on tmpfs, shredded after); `deploy/roll-forward.sh cadf009…` ROLL FORWARD PASS with 18 containers on `0.1.0-rc72`, healthz 200, readyz 200. `CONSOLE_ASSERTION_ENABLED` stays unset; OIDC admin login unchanged. Deployment record `deployment-records/rc72-deploy-*`.
