@@ -340,9 +340,49 @@ Inspect the registered task with `Get-ScheduledTask InvoiceTrivyCacheRefresh
 last/next run time and last result); its Task Scheduler history is under
 Task Scheduler Library's root (`\`) in `taskschd.msc`. Remove it with
 `Unregister-ScheduledTask -TaskName InvoiceTrivyCacheRefresh -Confirm:$false`.
-See `scripts/register-trivy-refresh-task.ps1`'s own doc comment (`Get-Help
-.\scripts\register-trivy-refresh-task.ps1 -Full`) for its parameters,
-including `-RepoRoot`, `-TaskName`, `-StartTime` and `-UserId`.
+The task also retries itself the same day if it exits non-zero: 3 times, 30
+minutes apart by default (`-RestartCount`/`-RestartInterval`), which covers
+both a skipped run (exit 75, below) and a genuine failure, on top of
+`StartWhenAvailable` already covering the machine being off/asleep at
+05:30. See `scripts/register-trivy-refresh-task.ps1`'s own doc comment
+(`Get-Help .\scripts\register-trivy-refresh-task.ps1 -Full`) for its
+parameters, including `-RepoRoot`, `-TaskName`, `-StartTime`, `-UserId`,
+`-RestartCount` and `-RestartInterval`.
+
+**Reading a refresh run's own log.** Every `refresh-trivy-cache.ps1`
+invocation -- manual, via `scripts\run-detached.ps1`, or the Scheduled Task
+above -- writes its own transcript-style log to
+`logs\trivy-cache-refresh\runs\<UTC stamp>-<pid>.log` (stdout/stderr, the
+console summary, start/end time, exit code, and on failure the exception
+message and the failing script line), and keeps only the 30 most recent
+(older ones are pruned automatically). It also updates
+`logs\trivy-cache-refresh\runs\latest.json` after every run:
+
+```json
+{
+  "started_at": "2026-09-03T05:30:00.1234567+00:00",
+  "finished_at": "2026-09-03T05:30:04.7654321+00:00",
+  "exit_code": 0,
+  "action_db": "unchanged",
+  "action_java_db": "unchanged",
+  "error": null
+}
+```
+
+`exit_code` is `0` on success, `1` on a genuine failure (`error` then holds
+the exception message; the matching run log also has the failing script
+line), or **75** when the release image gate (or a concurrently running
+refresh) already held the shared `release\.trivy-0.74.release-gate.lock`
+lock -- a skip, not a failure: the cache volume was never touched, `error`
+reads `gate holds the cache volume; skipped`, and the Scheduled Task's own
+`RestartCount`/`RestartInterval` above retries it later the same day.
+`action_db`/`action_java_db` are each one of `unchanged`, `refreshed`,
+`would-refresh (-WhatIf)`, or `null` (component skipped via `-SkipJavaDb`,
+or the run never reached it, e.g. exit 75). This is what to check first
+after an operator notices `Get-ScheduledTaskInfo
+InvoiceTrivyCacheRefresh`'s `LastTaskResult` is non-zero: `latest.json`
+gives the outcome at a glance, and the matching timestamped file under
+`runs\` has the full detail.
 
 The command above is the ordinary internal-consistency mode, so operators can
 retain and diagnose failed or validation-only bundles. It is not transfer
