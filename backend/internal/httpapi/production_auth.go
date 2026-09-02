@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"mime"
 	"net/http"
 	"slices"
@@ -73,10 +74,44 @@ type ProductionAuth struct {
 	SessionCookieName string
 	ProvisionUser     func(context.Context, auth.Principal, string) (SessionUser, error)
 	LoadUser          func(context.Context, string) (SessionUser, error)
+	// DisableOIDCAdminLogin gates whether the OIDC login/callback/admin-step-
+	// up/backchannel-logout routes are registered at all (CR-0006 phase 1's
+	// OIDC_ADMIN_LOGIN_ENABLED, inverted so the zero value -- false --
+	// preserves today's behavior for every existing caller and test that
+	// constructs a ProductionAuth without knowing this field exists). When
+	// true, OIDC/Logout may be nil: Register skips wiring routes that would
+	// otherwise call through them, and Validate does not require them.
+	DisableOIDCAdminLogin bool
+	// ConsoleAssertionEnabled gates the exchange handler itself (the route is
+	// always registered so a flip from false->true never needs a fresh
+	// binary; see consoleAssertionExchange's own disabled-check for the
+	// CONSOLE_ASSERTION_DISABLED response), CR-0006's CONSOLE_ASSERTION_ENABLED.
+	ConsoleAssertionEnabled bool
+	ConsoleAssertionKeyring *auth.ConsoleAssertionKeyring
+	ConsoleAssertionConfig  auth.ConsoleAssertionConfig
+	ConsoleAssertionNonces  auth.ConsoleAssertionNonceStore
+	// ConsoleAssertionRateLimiter bounds console-assertion exchange attempts
+	// by client IP with the same failure-lockout primitive PlatformLogin
+	// already uses (auth.LoginRateLimiter), so a malformed/forged-signature
+	// flood gets a real ASSERTION_INVALID-shaped rejection with a distinct
+	// RATE_LIMITED code once the caller floods too fast -- the edge's
+	// nginx limit_req (zone=invoice_auth, 20r/m, matching the design spec's
+	// cited rate exactly) already covers this route by prefix, but returns a
+	// bare non-JSON response, not this endpoint's own typed error envelope.
+	ConsoleAssertionRateLimiter *auth.LoginRateLimiter
+	// SecurityAudit is a direct reference to the same sink Sessions already
+	// writes through internally (see cmd/api/runtime.go's wiring) -- needed
+	// here because the console-assertion exchange audits both a distinct
+	// success event and every rejection reason (team lead's brief), neither
+	// of which SessionManager's own private helper covers.
+	SecurityAudit auth.SecurityAuditSink
 }
 
 func (a *ProductionAuth) Validate() error {
-	if a == nil || a.OIDC == nil || a.Logout == nil || a.BackchannelLogout == nil || a.Sessions == nil || a.BindingHasher == nil || a.ProvisionUser == nil || a.LoadUser == nil {
+	if a == nil || a.BackchannelLogout == nil || a.Sessions == nil || a.BindingHasher == nil || a.ProvisionUser == nil || a.LoadUser == nil {
+		return errors.New("production authentication runtime is incomplete")
+	}
+	if !a.DisableOIDCAdminLogin && (a.OIDC == nil || a.Logout == nil) {
 		return errors.New("production authentication runtime is incomplete")
 	}
 	if err := a.Admin.Validate(); err != nil {
@@ -88,6 +123,14 @@ func (a *ProductionAuth) Validate() error {
 	name := a.cookieName()
 	if !strings.HasPrefix(name, "__Host-") || strings.ContainsAny(name, ";=, \t\r\n\x00") {
 		return errors.New("production session cookie name is invalid")
+	}
+	if a.ConsoleAssertionEnabled {
+		if a.ConsoleAssertionKeyring == nil || a.ConsoleAssertionNonces == nil || a.ConsoleAssertionRateLimiter == nil || a.SecurityAudit == nil {
+			return errors.New("console assertion runtime is incomplete")
+		}
+		if err := a.ConsoleAssertionConfig.Validate(); err != nil {
+			return fmt.Errorf("console assertion config: %w", err)
+		}
 	}
 	return nil
 }
@@ -101,10 +144,23 @@ func (a *ProductionAuth) cookieName() string {
 
 func (a *ProductionAuth) Register(server *Server) {
 	server.mux.Handle("GET /api/v1/auth/session", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.sessionStatus(server, w, r) }))
-	server.mux.Handle("GET /api/v1/auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.beginLogin(w, r) }))
-	server.mux.Handle("GET /api/v1/auth/callback", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.callback(server, w, r) }))
-	server.mux.Handle("GET /api/v1/auth/admin/step-up", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.beginAdminStepUp(server, w, r) }))
-	server.mux.Handle("POST /api/v1/auth/backchannel-logout", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.backchannelLogout(server, w, r) }))
+	// CR-0006 (XM-INV-CONSOLE-ASSERT): OIDC login/callback/admin-step-up/
+	// backchannel-logout are only registered while OIDC_ADMIN_LOGIN_ENABLED
+	// is true (the default, unchanged, in this phase). This is the "OIDC
+	// path 是否注册" switch the change request describes for the eventual
+	// Keycloak-retirement slice; flipping it off here today is exercised by
+	// tests but not yet used in production, where it stays on.
+	if !a.DisableOIDCAdminLogin {
+		server.mux.Handle("GET /api/v1/auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.beginLogin(w, r) }))
+		server.mux.Handle("GET /api/v1/auth/callback", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.callback(server, w, r) }))
+		server.mux.Handle("GET /api/v1/auth/admin/step-up", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.beginAdminStepUp(server, w, r) }))
+		server.mux.Handle("POST /api/v1/auth/backchannel-logout", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.backchannelLogout(server, w, r) }))
+	}
+	// The exchange route is always registered (see ConsoleAssertionEnabled's
+	// doc comment): the handler itself answers CONSOLE_ASSERTION_DISABLED
+	// when the feature is off, so flipping the flag on later never needs a
+	// fresh binary/route table.
+	server.mux.Handle("POST /api/v1/auth/console-assertion", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.consoleAssertionExchange(server, w, r) }))
 	server.mux.Handle("POST /api/v1/auth/logout", a.Require(server, "user", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a.logout(w, r) })))
 }
 
@@ -288,11 +344,168 @@ func (a *ProductionAuth) callback(server *Server, w http.ResponseWriter, r *http
 	http.Redirect(w, r, result.ReturnPath, http.StatusSeeOther)
 }
 
+// consoleAssertionExchange is CR-0006's console-assertion login path: an
+// unauthenticated (no pre-existing session/CSRF token possible), same-shape
+// sibling of callback() above, reached from the embedded admin iframe's
+// postMessage handshake or a future top-level entry instead of the OIDC
+// redirect dance. See docs/superpowers/specs/2026-09-02-cr0006-console-
+// assertion-design.md section 5.2 for the frozen error-code table this
+// implements exactly, and console_assertion.go's package doc for the claims
+// contract. Every branch below records a security-audit event before
+// responding -- both the one success event and every rejection reason
+// (team lead's brief) -- because, unlike the OIDC callback, this endpoint
+// has no upstream identity provider of its own keeping a parallel log.
+func (a *ProductionAuth) consoleAssertionExchange(server *Server, w http.ResponseWriter, r *http.Request) {
+	requestIDValue := requestID(r)
+	if !a.ConsoleAssertionEnabled {
+		writeError(w, http.StatusServiceUnavailable, "CONSOLE_ASSERTION_DISABLED", "console-assertion login is not enabled")
+		return
+	}
+	binding, err := a.clientBinding(server, r)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "INTERNAL", "client identity is unavailable")
+		return
+	}
+	rateLimitKey := binding.IPHash
+	if rateLimitKey == "" || !a.ConsoleAssertionRateLimiter.Allow(rateLimitKey) {
+		a.auditConsoleAssertionRejection(r.Context(), "", requestIDValue, "rate_limited")
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many console-assertion attempts; try again later")
+		return
+	}
+
+	origins := r.Header.Values("Origin")
+	if len(origins) != 1 || origins[0] != a.ConsoleAssertionConfig.Issuer {
+		a.ConsoleAssertionRateLimiter.RecordFailure(rateLimitKey)
+		a.auditConsoleAssertionRejection(r.Context(), "", requestIDValue, "origin_rejected")
+		writeError(w, http.StatusForbidden, "ORIGIN_REJECTED", "request origin is not the configured console origin")
+		return
+	}
+
+	var body struct {
+		Assertion string `json:"assertion"`
+	}
+	if !decodeJSON(w, r, &body) {
+		a.ConsoleAssertionRateLimiter.RecordFailure(rateLimitKey)
+		a.auditConsoleAssertionRejection(r.Context(), "", requestIDValue, "malformed")
+		return
+	}
+	if strings.TrimSpace(body.Assertion) == "" {
+		a.ConsoleAssertionRateLimiter.RecordFailure(rateLimitKey)
+		a.auditConsoleAssertionRejection(r.Context(), "", requestIDValue, "malformed")
+		writeError(w, http.StatusBadRequest, "ASSERTION_MALFORMED", "assertion is required")
+		return
+	}
+
+	claims, err := auth.VerifyConsoleAssertion(body.Assertion, a.ConsoleAssertionKeyring, a.ConsoleAssertionConfig, a.Admin.Role, time.Now().UTC())
+	if err != nil {
+		a.ConsoleAssertionRateLimiter.RecordFailure(rateLimitKey)
+		a.auditConsoleAssertionRejection(r.Context(), consoleAssertionAttemptHash(body.Assertion), requestIDValue, "assertion_invalid: "+err.Error())
+		writeError(w, http.StatusUnauthorized, "ASSERTION_INVALID", "console assertion is invalid")
+		return
+	}
+
+	consumed, err := a.ConsoleAssertionNonces.ConsumeNonce(r.Context(), consoleAssertionNonceHash(claims.Nonce), claims.ExpiresAt)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "INTERNAL", "console assertion could not be verified")
+		return
+	}
+	if !consumed {
+		a.ConsoleAssertionRateLimiter.RecordFailure(rateLimitKey)
+		a.auditConsoleAssertionRejection(r.Context(), claims.Subject, requestIDValue, "replayed")
+		writeError(w, http.StatusUnauthorized, "ASSERTION_INVALID", "console assertion is invalid")
+		return
+	}
+
+	principal := auth.ConsolePrincipalFromClaims(claims, a.ConsoleAssertionConfig.Issuer, a.Admin.RequiredACR)
+	user, err := a.ProvisionUser(r.Context(), principal, requestIDValue)
+	if err != nil || user.ID == "" {
+		a.auditConsoleAssertionRejection(r.Context(), claims.Subject, requestIDValue, "user_provision_failed")
+		writeError(w, http.StatusForbidden, "USER_PROVISION_FAILED", "user account is unavailable")
+		return
+	}
+	// Mirrors callback()'s FlowLogin branch exactly: VerifyFreshPrincipal
+	// re-derives mfa_at from the SAME roles/acr/amr/AuthTime fields
+	// AuthorizeSession later re-checks, so a console assertion satisfies
+	// admin step-up precisely because its amr already proves "otp" and its
+	// iat (copied onto AuthTime) is recent -- no bespoke step-up logic
+	// needed here at all (CR-0006 change list item 4).
+	var mfaAt *time.Time
+	if a.Admin.VerifyFreshPrincipal(principal, time.Now().UTC(), time.Time{}) == nil {
+		value := principal.AuthTime.UTC()
+		mfaAt = &value
+	}
+	credentials, err := a.Sessions.Issue(r.Context(), auth.IssueSessionInput{
+		UserID: user.ID, Principal: principal, Binding: binding, MFAAt: mfaAt, RequestID: requestIDValue,
+	})
+	if err != nil {
+		a.auditConsoleAssertionRejection(r.Context(), claims.Subject, requestIDValue, "session_issue_failed")
+		writeError(w, http.StatusForbidden, "SESSION_ISSUE_FAILED", "login session could not be established")
+		return
+	}
+	a.ConsoleAssertionRateLimiter.Reset(rateLimitKey)
+	a.setSessionCookies(w, credentials)
+	_ = a.SecurityAudit.RecordSecurityEvent(r.Context(), auth.SecurityAuditEvent{
+		ActorType: "console_assertion", ActorID: claims.Subject,
+		Action: "auth.console_assertion.exchanged", ObjectType: "auth_session", ObjectID: credentials.Session.ID,
+		RequestID: requestIDValue, Severity: auth.SeverityNotice,
+		Reason: fmt.Sprintf("kid=%s scope=%s nonce_hash=%s", safeAuditToken(claims.KeyID), safeAuditToken(claims.Scope), consoleAssertionNonceHash(claims.Nonce)[:16]),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// auditConsoleAssertionRejection records every rejection reason server-side
+// (team lead's brief), independent of the single generic ASSERTION_INVALID
+// response every case above sends the caller -- see console_assertion.go's
+// ErrConsoleAssertionInvalid doc comment for why the two must not carry the
+// same detail. actorID is best-effort: the raw assertion's own sha256 (via
+// consoleAssertionAttemptHash) before signature verification succeeds (claims
+// are not yet trustworthy), or the verified claims.Subject after.
+func (a *ProductionAuth) auditConsoleAssertionRejection(ctx context.Context, actorID, requestIDValue, reason string) {
+	if a.SecurityAudit == nil {
+		return
+	}
+	if actorID == "" {
+		actorID = "unknown"
+	}
+	_ = a.SecurityAudit.RecordSecurityEvent(ctx, auth.SecurityAuditEvent{
+		ActorType: "console_assertion", ActorID: actorID,
+		Action: "auth.console_assertion.rejected", ObjectType: "console_assertion_attempt", ObjectID: requestIDValue,
+		RequestID: requestIDValue, Reason: safeAuditToken(reason), Severity: auth.SeverityWarning,
+	})
+}
+
+func consoleAssertionNonceHash(nonce string) string {
+	sum := sha256.Sum256([]byte(nonce))
+	return hex.EncodeToString(sum[:])
+}
+
+func consoleAssertionAttemptHash(assertion string) string {
+	sum := sha256.Sum256([]byte(assertion))
+	return hex.EncodeToString(sum[:])
+}
+
+// safeAuditToken bounds a value that will be embedded in an audit Reason
+// field (SecurityAuditEvent.Validate caps it at 500 bytes and rejects
+// control characters) -- verifier error strings are all package-internal
+// constants today, but this keeps the call sites safe even if that changes.
+func safeAuditToken(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == 0 {
+			return ' '
+		}
+		return r
+	}, value)
+	if len(value) > 200 {
+		value = value[:200]
+	}
+	return value
+}
+
 func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r *http.Request) {
 	current, err := a.authenticate(server, r)
 	if err != nil {
 		a.clearAuthCookies(w)
-		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false, "oidc_admin_login_enabled": !a.DisableOIDCAdminLogin})
 		return
 	}
 	csrf, ok := validCSRFCookie(r, *current.Session)
@@ -316,7 +529,7 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 		})
 		if bindingErr != nil || rotateErr != nil {
 			a.clearAuthCookies(w)
-			writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+			writeJSON(w, http.StatusOK, map[string]any{"authenticated": false, "oidc_admin_login_enabled": !a.DisableOIDCAdminLogin})
 			return
 		}
 		current.Session = &credentials.Session
@@ -328,7 +541,7 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 	if err != nil || user.ID != current.UserID {
 		_ = a.Sessions.RevokeToken(r.Context(), current.SessionToken, "user record unavailable", requestID(r))
 		a.clearAuthCookies(w)
-		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false, "oidc_admin_login_enabled": !a.DisableOIDCAdminLogin})
 		return
 	}
 	role := "user"
@@ -350,8 +563,9 @@ func (a *ProductionAuth) sessionStatus(server *Server, w http.ResponseWriter, r 
 		displayName = maskedEmailName(user.Email)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"authenticated": true,
-		"csrf_token":    csrf,
+		"authenticated":            true,
+		"csrf_token":               csrf,
+		"oidc_admin_login_enabled": !a.DisableOIDCAdminLogin,
 		"user": map[string]any{
 			"id": user.ID, "display_name": displayName, "email": user.Email,
 			"email_verified": user.EmailVerified, "role": role, "platform": current.Session.Platform,
@@ -383,9 +597,17 @@ func (a *ProductionAuth) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	// A platform-password session (current.Session.Platform != "") never went
 	// through the OIDC provider, so there is no RP-initiated logout URL to
-	// send the browser to -- only the local session is revoked.
+	// send the browser to -- only the local session is revoked. A
+	// console-assertion session (CR-0006: Issuer == the configured console
+	// origin) is the same story -- it never touched Keycloak either, despite
+	// also having Platform=="" like an OIDC session (both use the identical
+	// ResolveOrCreate path, see identity.go). And once OIDC admin login is
+	// disabled outright (DisableOIDCAdminLogin), a.Logout was never built at
+	// all, so there is no RP-initiated URL to compute for any session
+	// regardless of its origin.
+	consoleAssertionSession := current.Session != nil && a.ConsoleAssertionConfig.Issuer != "" && current.Session.Issuer == a.ConsoleAssertionConfig.Issuer
 	logoutURL := ""
-	if current.Session == nil || current.Session.Platform == "" {
+	if !a.DisableOIDCAdminLogin && !consoleAssertionSession && (current.Session == nil || current.Session.Platform == "") {
 		var err error
 		logoutURL, err = a.Logout.RPInitiatedLogoutURL()
 		if err != nil {
