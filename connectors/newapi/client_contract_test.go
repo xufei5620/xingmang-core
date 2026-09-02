@@ -156,19 +156,25 @@ const fakeUserTotal = 4
 // id=1 内嵌完整代理 URL（含用户名密码，必须脱敏成 scheme://host:port）、
 // id=2 完全没有 setting 字段（ProxyLabel 必须是 nil）、
 // id=3 有 setting 但 proxy 是空串（同样必须是 nil，不是空字符串标签）。
+//
+// XM-CHAN-GROUP0 追加：group 从三条统一的 "default" 改成三种边界——
+// id=1 多分组的正常形态（"default,vip"）、id=2 空字符串（上游允许，
+// 渠道从未配置分组 → Group 必须是 nil，不是空字符串）、id=3 脏格式
+// （首尾空白 + 尾随逗号 + 段内空白，" default , vip, "）验证
+// parseChannelGroup 的归一化真的在生效，不是原样透传。
 const fakeChannelItems = `[
   {"id":1,"name":"openai-main","type":1,"status":1,"key":"",
    "balance":31.50,"balance_updated_time":%d,"used_quota":123456,
-   "models":"gpt-4o,gpt-4o-mini, ,o3","group":"default","response_time":480,
+   "models":"gpt-4o,gpt-4o-mini, ,o3","group":"default,vip","response_time":480,
    "priority":10,"test_time":%d,"created_time":1735689600,
    "setting":"{\"proxy\":\"socks5://proxyuser:proxypass@10.0.0.5:1080\"}"},
   {"id":2,"name":"gemini-backup","type":24,"status":2,"key":"",
    "balance":0,"balance_updated_time":0,"used_quota":0,
-   "models":"gemini-2.5-pro","group":"default","response_time":0,
+   "models":"gemini-2.5-pro","group":"","response_time":0,
    "priority":5,"test_time":0,"created_time":1738368000},
   {"id":3,"name":"relay-cheap","type":8,"status":1,"key":"",
    "balance":0,"balance_updated_time":%d,"used_quota":9999,
-   "models":"","group":"default","response_time":2340,
+   "models":"","group":" default , vip, ","response_time":2340,
    "priority":1,"test_time":%d,"created_time":1740787200,
    "setting":"{\"proxy\":\"\"}"}
 ]`
@@ -935,6 +941,9 @@ func TestRealClientMapsChannelCatalogFields(t *testing.T) {
 		if got.TodaySuccessRatePPM == nil || *got.TodaySuccessRatePPM != 990_588 {
 			t.Fatalf("TodaySuccessRatePPM = %v, want 990588（842/850）", got.TodaySuccessRatePPM)
 		}
+		if got.Group == nil || *got.Group != "default,vip" {
+			t.Fatalf("Group = %v, want default,vip（原样已是干净格式，验证正常路径不误伤）", got.Group)
+		}
 		// 本包恒为 nil 的维度：确认真的是 nil，不是漏填了别的值。
 		if got.Kind != nil || got.CapacityUsed != nil || got.CapacityLimit != nil {
 			t.Fatalf("kind/capacity 在本包应恒为 nil: kind=%v used=%v limit=%v", got.Kind, got.CapacityUsed, got.CapacityLimit)
@@ -972,6 +981,9 @@ func TestRealClientMapsChannelCatalogFields(t *testing.T) {
 		if got.TodaySuccessRatePPM != nil {
 			t.Fatalf("TodaySuccessRatePPM = %v, want nil（0/0 没有意义的答案）", got.TodaySuccessRatePPM)
 		}
+		if got.Group != nil {
+			t.Fatalf("Group = %v, want nil（上游 group 是空字符串，这个渠道没有配置任何分组）", *got.Group)
+		}
 	})
 
 	t.Run("渠道3：custom/空proxy字符串同样是nil/success=100%", func(t *testing.T) {
@@ -991,6 +1003,9 @@ func TestRealClientMapsChannelCatalogFields(t *testing.T) {
 		}
 		if got.TodaySuccessRatePPM == nil || *got.TodaySuccessRatePPM != 1_000_000 {
 			t.Fatalf("TodaySuccessRatePPM = %v, want 1000000（5/5=100%%，没有错误日志）", got.TodaySuccessRatePPM)
+		}
+		if got.Group == nil || *got.Group != "default,vip" {
+			t.Fatalf("Group = %v, want default,vip（原始是脏格式 \" default , vip, \"，验证 parseChannelGroup 真的做了归一化，不是原样透传）", got.Group)
 		}
 	})
 }
@@ -1017,6 +1032,7 @@ func TestFakeChannelCatalogFieldsSatisfyInvariants(t *testing.T) {
 		t.Fatal("Fake 目录不应为空")
 	}
 	sawEnabled, sawDisabled := false, false
+	sawGroup, sawNoGroup := false, false
 	for _, item := range directory.Items {
 		contracttest.AssertChannelStatusCatalogInvariants(t, item)
 		if item.StatusLabel == nil {
@@ -1028,6 +1044,11 @@ func TestFakeChannelCatalogFieldsSatisfyInvariants(t *testing.T) {
 		if *item.StatusLabel == "manually_disabled" {
 			sawDisabled = true
 		}
+		if item.Group != nil {
+			sawGroup = true
+		} else {
+			sawNoGroup = true
+		}
 		// 本包恒为 nil 的维度，Fake 不该在真实客户端给不出的地方造数据。
 		if item.Kind != nil || item.RateMultiplierPPM != nil || item.UpstreamMultiplierPPM != nil {
 			t.Fatalf("Fake 渠道 %s 在恒为 nil 的维度上给了值: kind=%v rate=%v upstream=%v",
@@ -1037,6 +1058,12 @@ func TestFakeChannelCatalogFieldsSatisfyInvariants(t *testing.T) {
 	if !sawEnabled || !sawDisabled {
 		t.Fatalf("Fake 应同时覆盖 enabled/manually_disabled 两种 StatusLabel (enabled=%v disabled=%v)",
 			sawEnabled, sawDisabled)
+	}
+	// XM-CHAN-GROUP0：Group 不是本包恒为 nil 的维度，Fake 必须同时覆盖
+	// 「有分组」与「没配置分组」两条路径——只给出全部非 nil 的样例数据会让
+	// 前端联调看不到 null 分支要处理的那条真实路径。
+	if !sawGroup || !sawNoGroup {
+		t.Fatalf("Fake 应同时覆盖 Group 非 nil 与 nil 两种情况 (有分组=%v 无分组=%v)", sawGroup, sawNoGroup)
 	}
 }
 

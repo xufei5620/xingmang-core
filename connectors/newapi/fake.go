@@ -274,7 +274,17 @@ var fakeVendorNames = map[string]string{
 	"ch-4": "Custom", "ch-5": "Ollama", "ch-6": "Azure",
 }
 
-// applyFakeCatalogFields 给固定的六条假渠道附上 XM-CHAN-FIELDS0 目录字段。
+// fakeGroups 是 applyFakeCatalogFields 的按 ChannelID 查表数据
+// （XM-CHAN-GROUP0）。ch-6 故意不登记：真实上游允许 Group 归一化后为空
+// （渠道从未配置过分组），Fake 需要覆盖这条路径，不能让全部六条渠道都有值——
+// 那会让消费方误以为这个字段"总是有值"，掩盖了真实的 nil 语义。
+var fakeGroups = map[string]string{
+	"ch-1": "default,vip", "ch-2": "default", "ch-3": "default",
+	"ch-4": "default,vip,svip", "ch-5": "default",
+}
+
+// applyFakeCatalogFields 给固定的六条假渠道附上 XM-CHAN-FIELDS0/XM-CHAN-GROUP0
+// 目录字段。
 //
 // Kind/CapacityUsed/CapacityLimit/UsageWindow*/RateMultiplierPPM/
 // UpstreamMultiplierPPM/LastUsedAt/ExpiresAt 恒为 nil——与真实客户端一致：
@@ -285,6 +295,9 @@ var fakeVendorNames = map[string]string{
 func applyFakeCatalogFields(item *ChannelStatus) {
 	if name, ok := fakeVendorNames[item.ChannelID]; ok {
 		item.Vendor = &name
+	}
+	if group, ok := fakeGroups[item.ChannelID]; ok {
+		item.Group = &group
 	}
 	statusLabel := "enabled"
 	if !item.Enabled {

@@ -738,6 +738,14 @@ type channelItem struct {
 	// "setting"）。列表/详情端点从不主动过滤它，本包只从中取 proxy 一项
 	// （见 channelSettingProxy），其余键一律不解析、不转发。
 	Setting *string `json:"setting"`
+
+	// XM-CHAN-GROUP0 新增：
+	// Group 是逗号分隔的分组名字符串（model/channel.go:40，字段名
+	// "group"，gorm 默认值 "default"），上游用它做按分组路由/计费
+	// （model.ApplyChannelGroupFilter、setting/ratio_setting 的分组倍率）。
+	// 非指针 string：上游这个字段永远不是 null，最坏情况是空字符串
+	// （见 parseChannelGroup 对空值的处理）。
+	Group string `json:"group"`
 }
 
 // channelSettingProxy 只解 Channel.Setting JSON 里的 proxy 一个键
@@ -778,6 +786,41 @@ func parseChannelProxyLabel(setting *string) *string {
 	}
 	label := u.Scheme + "://" + u.Host
 	return &label
+}
+
+// parseChannelGroup 归一化 Channel.Group 的逗号分隔分组名字符串
+// （XM-CHAN-GROUP0）。
+//
+// 归一化规则逐条对照上游自己的 model/channel.go:296-305 GetGroups()：
+// 去掉整串的首尾逗号，按逗号切分，每一段去首尾空白。本函数比上游那个方法
+// 多做一步——丢弃归一化后仍为空的段（上游的 GetGroups() 不做这一步，
+// "a,,b" 会被它解析成三段、中间一段是空字符串）：一个空字符串不是一个
+// 分组名，把它当分组名展示出来只会让人误以为上游真有一个叫"（空）"的分组，
+// 这里选择清理掉，不是编造数据——原始逗号分隔串里客观存在的空洞不代表
+// 一个真实分组。
+//
+// 归一化后一段都不剩（原始为空串，或全是逗号/空白）时返回 nil：这个渠道
+// 没有配置任何分组，不是空字符串——与本包其余可空字段同一条纪律（宪法
+// 12 条，禁止用空值冒充「有数据」）。
+func parseChannelGroup(raw string) *string {
+	trimmed := strings.Trim(strings.TrimSpace(raw), ",")
+	if trimmed == "" {
+		return nil
+	}
+	parts := strings.Split(trimmed, ",")
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		cleaned = append(cleaned, part)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	joined := strings.Join(cleaned, ",")
+	return &joined
 }
 
 // fetchChannels 读取全部渠道。
@@ -884,6 +927,7 @@ func (c *client) fetchChannelDirectory(ctx context.Context) (ChannelDirectorySna
 				SchedulingPriority: priority,
 				ProxyLabel:         parseChannelProxyLabel(item.Setting),
 				CreatedAt:          createdAt,
+				Group:              parseChannelGroup(item.Group),
 			})
 			ids = append(ids, id)
 		}
