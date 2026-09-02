@@ -164,6 +164,14 @@ func DefaultRoleScopeMap() map[string][]string {
 			// resolver_test 的 TestDefaultRoleScopeMapIsConservative 断言
 			// admin 含它、staff 不含它。
 			"server.manage",
+			// XM-ASSURE1-core（渠道主动探测/检测任务）：declare/cancel/run 三个
+			// L1 Action 与 finance.upstream_account.manage 等同一档——纯配置写
+			// / 触发一次受多重闸约束的探测批次，进 admin。**probe.kill_switch
+			// 刻意不在这里**：ADR-019 决策·四·#4 明确要求"允许这个平台探测
+			// 花钱"是一个独立可授予/可审计的权限，与本行放宽 admin 的其它
+			// scope 不是同一类判断——见下面专门角色 assurance-probe-admin。
+			"assurance.probe.manage",
+			"assurance.probe.run",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
@@ -178,6 +186,12 @@ func DefaultRoleScopeMap() map[string][]string {
 		// 目录，connector.manage 决定 worker 下一轮连哪台上游——两者都不是
 		// 「管理员顺带获得」的能力，要给就在 Realm 里建这个角色并人工审定。
 		"credential-admin": {"credential.manage", "connector.manage"},
+		// XM-ASSURE1-core：谁能打开"这个平台允许探测花钱"的开关，由专门角色
+		// 独立授予（ADR-019 决策·四·#4）——不进 admin，即便 admin 已经拿到了
+		// assurance.probe.manage/run（上面的裁定：declare/cancel/run 是普通
+		// 配置写与受闸约束的触发，kill_switch 是"批准花真钱"本身，两者不是
+		// 同一类判断，一并给 admin 会让这条独立授权的设计意图落空）。
+		"assurance-probe-admin": {"assurance.probe.kill_switch"},
 	}
 }
 

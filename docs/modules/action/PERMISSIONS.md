@@ -12,6 +12,18 @@ Action 本身不定义权限点——每个 Action 在 Definition 中声明它�
 | `registry.connector.create` | 1 | L2 | `registry.connector.manage` | ❌ 需 Foundation-B |
 | `registry.connection.create` | 1 | L3 | `registry.connection.manage` | ❌ 需 Foundation-B |
 | `registry.connection.set_status` | 1 | L2 | `registry.connection.kill` | ❌ 需 Foundation-B |
+| `assurance.probe.declare` | 1 | L1 | `assurance.probe.manage` | ✅ |
+| `assurance.probe.cancel` | 1 | L1 | `assurance.probe.manage` | ✅ |
+| `assurance.probe.run` | 1 | L1 | `assurance.probe.run` | ✅ |
+| `assurance.probe.kill_switch.set` | 1 | L1 | `assurance.probe.kill_switch` | ✅ |
+
+`assurance.probe.*` 四个 Action（XM-ASSURE1-core，渠道主动探测/检测任务）
+全部定为 L1，权威推理见 `docs/adr/ADR-019-渠道主动探测通道.md` 决策·三
+（`assurance.probe.run@1` 会发出真实计费的出站请求，直觉容易归到 L2，
+但 L2 在 Foundation-A 下是内核硬拒绝而非"多一道审批"，本 ADR 明确不采用
+那个直觉）。`assurance.probe.kill_switch` 是与 `connector.manage` 分开的
+独立权限点（ADR-019 决策·四·#4）：能批准"这个平台允许探测花钱"的人，
+未必需要同时拥有"改连接器怎么连上游"的权限。
 
 ## 授权规则
 

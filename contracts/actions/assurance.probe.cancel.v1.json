@@ -1,0 +1,17 @@
+{
+  "id": "assurance.probe.cancel",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "assurance.probe.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_IDEMPOTENT_NOT_FOUND_IS_ERROR",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {"required": false},
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "declaration_id": {"type": "string", "required": true},
+    "reason": {"type": "string", "required": true}
+  },
+  "notes": "撤销一条检测任务声明（status → cancelled）。声明必须当前是 active；对已 cancelled 的声明再次 cancel 返回 PRECONDITION_FAILED（不是静默成功——防止“我以为我刚取消了”的误判）；对不存在的 declaration_id 同样返回一个不存在的错误。cancel 只作用于声明本身，不撤销一个已经入队/正在跑的 probe_run（本片没有单独撤销单次批次的 Action，见 docs/handoffs/slices/XM-ASSURE1-core.md 的说明）。compensation_mode=AUTOMATIC：重新 declare（不带 declaration_id，取新 id）即可恢复同等效果。"
+}

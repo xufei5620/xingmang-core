@@ -1,0 +1,18 @@
+{
+  "id": "assurance.probe.kill_switch.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "assurance.probe.kill_switch",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NONE",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {"required": false},
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "platform": {"type": "string", "required": true},
+    "probe_enabled": {"type": "bool", "required": true},
+    "probe_credential_ref": {"type": "string", "required": false}
+  },
+  "notes": "平台级探测 Kill Switch（core.connector_config.probe_enabled/probe_credential_ref）。刻意用独立权限 assurance.probe.kill_switch，不复用 connector.config.set@1 的 connector.manage：能批准“这个平台允许探测花钱”的人，未必需要同时拥有“改连接器怎么连上游、换只读 admin 凭据”的权限，两者要能分开授予、分开审计（ADR-019 决策·四·#4）。Handler 只更新 probe_enabled/probe_credential_ref 两列，不触碰 mode/endpoint/target_allowlist/credential_ref。probe_credential_ref 省略（Schema 白名单语义下的“参数不存在”）保留原值不动；显式传空串会清空。probe_enabled=true 时校验：该平台 connector_config 必须已存在（否则 PRECONDITION_FAILED，提示先用 connector.config.set@1 配置）、当前 mode 必须是 real（否则拒绝，提示先切 real）、probe_credential_ref（新值或保留的旧值）必须非空且是合法 secret:// 引用。本 Action 不校验 probe_credential_ref 指向的主机——探测目标主机的允许性由 target_host 逐条声明并在 run@1 执行时对照 target_allowlist 校验。"
+}
