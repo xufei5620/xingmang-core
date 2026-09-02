@@ -46,6 +46,7 @@ import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChannelDetailPage, isSupplyPlatform } from "./pages/ChannelDetailPage";
 import { IdentityPage } from "./pages/IdentityPage";
+import { JobsPage } from "./pages/JobsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { OpsPage } from "./pages/OpsPage";
@@ -378,6 +379,16 @@ export const routes = [
               { path: "alerts", Component: AlertsPage },
               { path: "audit", Component: AuditPage },
               { path: "actions", Component: ActionsPage },
+              // XM-OPS-TAILS0：这一行在 XM-JOBS0 交付时本应存在（router.test.tsx
+              // 一条既有注释"XM-JOBS0 把 /jobs 接上真实数据后…"就是证据），但在后续
+              // 某次并行合并里丢了——navigation.ts 里 `jobs` 早已标 built:true 且被
+              // navigation.test.ts 断言"已实装"，`JobsPage.tsx`/`JobsPage.test.tsx`
+              // 也一直都在，只是从没被这张路由表实际引用过。侧栏「后台任务」因此
+              // 点进去落到最后的 `*` 兜底 404，而不是任何测试会去断言的地方——
+              // JobsPage.test.tsx 直接渲染组件、不经真实路由，router.test.tsx 也没有
+              // 一条用例真的导航到 /jobs，两边测试各自绿，缺口留在中间。补 router.test.tsx
+              // 回归用例见下方改动。
+              { path: "jobs", Component: JobsPage },
               { path: "ops", Component: OpsPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
