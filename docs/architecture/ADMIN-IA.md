@@ -540,15 +540,15 @@ ADR-006 的决策是「后台产品体验统一为『财务中心』，但**底�
 
 | 格 | 数据源 | 状态 |
 |---|---|---|
-| 今日调用量 | 无 | 未接入 —— 调用量归 XM-0039 reqlog 只读网关，今天只有逐条请求记录，没有按业务日聚合的指标 |
-| 成功率（24h） | 无 | 未接入 —— Sub2API 侧没有成功率指标；NewAPI 的逐渠道错误率是另一个平台、另一个口径，不顶替 |
+| 今日调用量 | `sub2api.requests.daily`（XM-REQLOG-METRICS，reqlog 索引按业务日聚合） | ✅ 已接（XM-OVERVIEW-UI），带新鲜度徽章；reqlog 非 file 模式时未接入 + 原因 |
+| 成功率（24h） | `sub2api.requests.success_rate_24h`（同一条 reqlog 线） | ✅ 已接（XM-OVERVIEW-UI）；不拿 NewAPI 的逐渠道错误率顶替 |
 | 今日充值 | `sub2api.revenue.daily` | ✅ 已接。契约口径是**当天支付订单 `pay_amount` 累加（毛额、不扣退款）**，正是原型说的「充值」；指标注册表里它叫「日收入」，那个名字与 §9.8「用户充值不是当期收入」冲突，页面按契约口径叫充值并写明 |
 | 今日成本 | `sub2api.cost.daily` | ✅ 已接。**Sub2API 自己面板的口径**，与今日充值同一份快照 |
 | 需要处理的事 | 活跃告警（按 `source_metric_key` 的平台前缀过滤） | ✅ 已接。只收严重/注意两档（info 不进），最多摆 4 条并报出还剩几条 |
 | 上游健康 · 上游渠道 | `sub2api.channels.balance` 的 `token_valid` | ✅ 已接。`token_valid` 缺失**算分母不算分子**——状态未知不等于可用 |
 | 上游健康 · 订阅账号 | 成本登记簿的订阅型账号 | 🔨 部分。只报启用/停用；原型画的「冷却」「疑似封禁」登记簿没有，要上游账号健康探针（M1.5），不拿 disabled 冒充 |
 | 上游健康 · 连接状态 | 指标 source 是否演示实例（`lib/demoData` 同一判据） | ✅ 已接 |
-| 近 7 日调用量 | 无 | 未接入 —— 同「今日调用量」。已接的充值/成本七天趋势在两张卡的迷你折线里 |
+| 近 7 日调用量 | `sub2api.requests.trend_7d` | ✅ 已接（XM-OVERVIEW-UI）；无数据的天留空不画 0。充值/成本七天趋势仍在两张卡的迷你折线里 |
 | 样例数据提示条 | 同上判据 | ✅ 已接，**判得出来才挂**：原型把它写死是因为整站都是样例，真实产品里一条永远在的警告等于没有警告 |
 
 **NewAPI 概览（原型 `V["newapi/overview"]`，结构与 Sub2API 不同）**
@@ -556,9 +556,10 @@ ADR-006 的决策是「后台产品体验统一为『财务中心』，但**底�
 | 格 | 数据源 | 状态 |
 |---|---|---|
 | 用户总数 | `newapi.users.total` | ✅ 已接（含今日活跃） |
-| 今日请求量 / 成功率（24h） / 今日订阅 | 无 / 无 / `newapi.subscription.daily` 未观测 | 未接入，各写明原因 |
-| 渠道健康 | `newapi.channels.status` | ✅ 已接（渠道 / 类型 / 错误率 / 启停）。原型这张表还有上游、分组、成功率三列：前两列要「平台渠道 ↔ 上游账号」的对应关系（同 §8.6 第 4 条），成功率没有数据源，都不画空列 |
-| 近 7 日请求量 | 无 | 未接入 |
+| 今日我方计费 / 今日上游成本 / 今日毛利 | `GET /finance/channels/summary` 按 newapi 过滤后经 `lib/financeOverview.ts` 聚合 `usageRevenue` / `supplyCost` / `grossProfit` | ✅ 已接；币种不混算，覆盖不全时不显示合计（XM-PAY0/PAY1） |
+| 今日请求量 / 成功率（24h） / 今日订阅 | `newapi.requests.daily` / `newapi.requests.success_rate_24h` / `newapi.subscription.daily` | 前两格数据源已在 reqlog 线上（同 Sub2API），原型 NewAPI 概览没有这两格，不额外加卡；今日订阅未观测，未接入 + 原因 |
+| 渠道健康 | 渠道目录 `listPlatformChannels("newapi", serviceId)`（渠道 / 上游=`vendor` / 成功率=`today.successRate`，XM-CHAN-FIELDS0）+ `newapi.channels.status`（启停 / 错误率，按 channel_id 关联） | ✅ 已接（XM-NEWAPI-OVERVIEW0），每行链到渠道详情；恰好一个已登记 service 时才读目录，否则回退指标视图。分组：未接入 —— 尚无连接器读 NewAPI `group`（XM-CHAN-GROUP0 在做） |
+| 近 7 日请求量 | `newapi.requests.trend_7d` | ✅ 已接（XM-NEWAPI-OVERVIEW0），与 Sub2API 同一条 reqlog 线 |
 
 **原型没有的格去了哪**（逐条处置，页面底部也写了一句）
 
