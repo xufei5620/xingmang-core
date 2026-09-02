@@ -506,8 +506,104 @@ if ($networkAvailable -and $dockerAvailable) {
                 throw "refresh-trivy-cache.ps1 did not print the DB UpdatedAt/NextUpdate summary:`n$idempotentOutput"
             }
             Write-Host 'refresh-trivy-cache.ps1 (no -WhatIf) against the same already-current volume is a true no-op (Action=unchanged) and prints UpdatedAt/NextUpdate, proving the idempotent-daily-run contract end to end.'
+
+            # --- per-run logging + latest.json + pruning (XM-INV-TRIVY-REFRESH-LOG) ---
+            # A dedicated -WorkDirectory (never the real logs\trivy-cache-
+            # refresh) so this fixture's 35 synthetic pre-existing run logs,
+            # and the pruning they trigger, never touch real run history.
+            $loggingWorkDirectory = Join-Path $workScratch 'logging-fixture'
+            $loggingRunsDirectory = Join-Path $loggingWorkDirectory 'runs'
+            New-Item -ItemType Directory -Path $loggingRunsDirectory -Force | Out-Null
+            for ($i = 0; $i -lt 35; $i++) {
+                $fakeRunLogPath = Join-Path $loggingRunsDirectory "19700101T000000Z-fake$i.log"
+                Set-Content -LiteralPath $fakeRunLogPath -Value "pre-existing run log $i, only used to exercise pruning" -Encoding utf8
+                (Get-Item -LiteralPath $fakeRunLogPath).LastWriteTimeUtc = [DateTime]::new(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc).AddSeconds($i)
+            }
+
+            $loggingOutput = & pwsh -NoProfile -NonInteractive -File $scriptPath -TrivyCacheVolume $testVolume -SkipJavaDb -ProxyUrl $proxyUrl -WorkDirectory $loggingWorkDirectory 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) {
+                throw "refresh-trivy-cache.ps1 against an already-current test volume (custom -WorkDirectory, logging fixture) failed (exit $LASTEXITCODE):`n$loggingOutput"
+            }
+
+            $survivingRunLogs = @(Get-ChildItem -LiteralPath $loggingRunsDirectory -Filter '*.log' -File)
+            if ($survivingRunLogs.Count -ne 30) {
+                throw "expected exactly 30 run logs to survive pruning (35 pre-seeded + 1 new = 36, keep the last 30), got $($survivingRunLogs.Count)"
+            }
+            $newestRunLog = $survivingRunLogs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+            if ($newestRunLog.Name -notmatch '^\d{8}T\d{6}Z-\d+\.log$') {
+                throw "the newest run log's name does not match the documented <UTC stamp>-<pid>.log shape: $($newestRunLog.Name)"
+            }
+            $newestRunLogContent = Get-Content -Raw -LiteralPath $newestRunLog.FullName
+            foreach ($expectedFragment in @('Run started (UTC):', 'Run finished (UTC):', 'Exit code:          0', 'already up to date')) {
+                if (-not $newestRunLogContent.Contains($expectedFragment, [StringComparison]::Ordinal)) {
+                    throw "the newest run log is missing an expected fragment '$expectedFragment':`n$newestRunLogContent"
+                }
+            }
+            if ($newestRunLogContent.Contains('Error:', [StringComparison]::Ordinal)) {
+                throw "a successful run's log must not contain an Error: line:`n$newestRunLogContent"
+            }
+            Write-Host 'refresh-trivy-cache.ps1 writes a per-run transcript log (start/end time, exit code, the console summary) under runs\<UTC stamp>-<pid>.log and prunes older run logs down to the last 30.'
+
+            $loggingLatestJsonPath = Join-Path $loggingRunsDirectory 'latest.json'
+            if (-not (Test-Path -LiteralPath $loggingLatestJsonPath -PathType Leaf)) {
+                throw "refresh-trivy-cache.ps1 did not write latest.json to $loggingLatestJsonPath"
+            }
+            $latestSummary = Get-Content -Raw -LiteralPath $loggingLatestJsonPath | ConvertFrom-Json
+            if ($latestSummary.exit_code -ne 0) { throw "latest.json exit_code should be 0 for a successful run, got $($latestSummary.exit_code)" }
+            if ($latestSummary.action_db -cne 'unchanged') { throw "latest.json action_db should be 'unchanged' for this already-current volume, got '$($latestSummary.action_db)'" }
+            if ($null -ne $latestSummary.action_java_db) { throw "latest.json action_java_db should be null (this run used -SkipJavaDb), got '$($latestSummary.action_java_db)'" }
+            if ($null -ne $latestSummary.error) { throw "latest.json error should be null for a successful run, got '$($latestSummary.error)'" }
+            foreach ($requiredField in @('started_at', 'finished_at')) {
+                if ([string]::IsNullOrWhiteSpace($latestSummary.$requiredField)) { throw "latest.json is missing or has an empty $requiredField" }
+            }
+            Write-Host 'latest.json correctly summarizes a successful run: exit_code=0, action_db=unchanged, action_java_db=null, error=null.'
         } else {
-            Write-Warning 'The real shared release-gate Trivy lock is currently held by another process (likely a real release image gate run elsewhere in this session) -- skipping the two brief CLI-level checks above rather than risk contending with it. Every other test in this file already covers the same logic against the isolated test volume and a scratch lock path.'
+            Write-Warning 'The real shared release-gate Trivy lock is currently held by another process (likely a real release image gate run elsewhere in this session) -- skipping the CLI-level checks above rather than risk contending with it. Every other test in this file already covers the same logic against the isolated test volume and a scratch lock path.'
+        }
+
+        # --- exit code 75: release gate holds the shared lock, skip without touching the volume ---
+        # A fresh attempt at the real shared lock (independent of
+        # $lockCurrentlyFree above, which only reflects its state before the
+        # CLI checks that just ran): this fixture needs to hold the lock
+        # itself for the duration of one child CLI invocation, so it cannot
+        # reuse that earlier, momentary check.
+        $heldLock = $null
+        try { $heldLock = Enter-TrivyReleaseGateLock -LockPath (Get-TrivyReleaseGateLockPath -ProjectRoot $projectRoot) } catch { $heldLock = $null }
+        if ($null -eq $heldLock) {
+            Write-Warning 'The real shared release-gate Trivy lock is currently held by another process -- skipping the exit-75 (gate holds the cache volume) CLI fixture rather than risk contending with it.'
+        } else {
+            try {
+                $lockContentionWorkDirectory = Join-Path $workScratch 'lock-contention-fixture'
+                $lockContentionOutput = & pwsh -NoProfile -NonInteractive -File $scriptPath -TrivyCacheVolume $testVolume -SkipJavaDb -ProxyUrl $proxyUrl -WorkDirectory $lockContentionWorkDirectory 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 75) {
+                    throw "refresh-trivy-cache.ps1 did not exit 75 while this test process held the shared release-gate lock (exit $LASTEXITCODE):`n$lockContentionOutput"
+                }
+                if (-not $lockContentionOutput.Contains('gate holds the cache volume; skipped', [StringComparison]::Ordinal)) {
+                    throw "refresh-trivy-cache.ps1's lock-contention output did not contain the documented skip message:`n$lockContentionOutput"
+                }
+
+                $stateAfterLockContention = Get-TrivyCacheVolumeComponentState -Volume $testVolume -SubPath 'db' -SeedImage $seedImage
+                if ($stateAfterLockContention.Digest -cne $realDbLayer.Digest) {
+                    throw 'the live test volume state changed even though the run should have exited on lock contention before ever touching it'
+                }
+
+                $lockContentionLatestJsonPath = Join-Path $lockContentionWorkDirectory 'runs\latest.json'
+                $lockContentionLatest = Get-Content -Raw -LiteralPath $lockContentionLatestJsonPath | ConvertFrom-Json
+                if ($lockContentionLatest.exit_code -ne 75) { throw "lock-contention latest.json exit_code should be 75, got $($lockContentionLatest.exit_code)" }
+                if ($lockContentionLatest.error -cnotmatch 'gate holds the cache volume') { throw "lock-contention latest.json error field does not mention the gate holding the cache volume: '$($lockContentionLatest.error)'" }
+                if ($null -ne $lockContentionLatest.action_db -or $null -ne $lockContentionLatest.action_java_db) {
+                    throw "lock-contention latest.json should report both actions as null (nothing was ever attempted), got action_db='$($lockContentionLatest.action_db)' action_java_db='$($lockContentionLatest.action_java_db)'"
+                }
+
+                $lockContentionRunLog = Get-ChildItem -LiteralPath (Join-Path $lockContentionWorkDirectory 'runs') -Filter '*.log' -File | Select-Object -First 1
+                $lockContentionLogContent = Get-Content -Raw -LiteralPath $lockContentionRunLog.FullName
+                if (-not $lockContentionLogContent.Contains('Exit code:          75', [StringComparison]::Ordinal)) {
+                    throw "lock-contention run log does not record exit code 75:`n$lockContentionLogContent"
+                }
+                Write-Host 'refresh-trivy-cache.ps1 exits 75 with a clear message and an untouched cache volume when the release image gate (or a concurrent refresh) already holds the shared Trivy cache lock; recorded correctly in both the run log and latest.json.'
+            } finally {
+                $heldLock.Dispose()
+            }
         }
     } finally {
         if (Test-DockerVolumeExists -Volume $testVolume) {
