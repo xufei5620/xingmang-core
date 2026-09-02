@@ -61,7 +61,7 @@ import {
 } from "react-router-dom";
 
 import { dateTime, maskTaxId, money } from "./lib/format";
-import { shouldShowAdminReturn } from "./lib/portal-navigation";
+import { isAdminAreaPath, shouldShowAdminReturn } from "./lib/portal-navigation";
 import { sourceName } from "./lib/source-labels";
 import {
   accountIdentityLabel,
@@ -4580,6 +4580,13 @@ function EmptyState({
 
 function LoginPage() {
   const { login, error, refresh } = useAuth();
+  const location = useLocation();
+  // XM-INV-HIDE-ADMIN-LOGIN: only the admin area's own login screen (direct
+  // /admin navigation, or the console embed, which always lands on /admin --
+  // see lib/portal-navigation.ts) still offers the administrator-OIDC entry
+  // point below. Every user-facing path (/, /orders, /profiles, /records,
+  // and the user embed's /?ui_mode=embedded&source=...) never shows it.
+  const showAdminLoginEntry = isAdminAreaPath(location.pathname);
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -4726,20 +4733,21 @@ function LoginPage() {
             </button>
           </form>
         )}
-        {showAdminLogin ? (
-          <button className="button button-dark button-wide" onClick={login}>
-            <ShieldCheck size={17} />
-            使用统一身份账号登录
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="button button-ghost button-wide"
-            onClick={() => setShowAdminLogin(true)}
-          >
-            管理员登录
-          </button>
-        )}
+        {showAdminLoginEntry &&
+          (showAdminLogin ? (
+            <button className="button button-dark button-wide" onClick={login}>
+              <ShieldCheck size={17} />
+              使用统一身份账号登录
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="button button-ghost button-wide"
+              onClick={() => setShowAdminLogin(true)}
+            >
+              管理员登录
+            </button>
+          ))}
       </section>
     </main>
   );
