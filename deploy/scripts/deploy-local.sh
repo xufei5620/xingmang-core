@@ -16,8 +16,31 @@
 #   scripts/verify-real-mode.sh --mode real --platform sub2api,newapi
 # 该脚本会额外校验 GET /api/v1/connectors/config 与 Worker 日志两者是否
 # 与期望模式一致（XM-OPS-TAILS0）。
+#
+# 自我更新安全性（XM-DEPLOY-SELFUPDATE0）：本脚本会 fetch/checkout/
+# fast-forward 自己所在的 checkout（见下方 git 段落），这意味着运行中
+# 脚本自身的磁盘字节可能被自己触发的 git 操作改写。为避免 bash 在脚本
+# 执行到一半时按旧文件偏移量读到新文件内容（语法错误或错误步骤），全部
+# 脚本主体被包在单个 main() 函数里、只在文件最后一行调用——bash 必须先
+# 读完整个函数定义（含其后的全部逻辑）才能开始执行，因此运行中途改写
+# 磁盘文件不影响本次已经在跑的进程。self-update 成功把 checkout 快进到
+# 新 SHA 后，本脚本会以同样的参数 exec 一次刚更新的自身（用环境变量
+# XM_DEPLOY_LOCAL_REEXEC=1 防止再次触发，仅内部使用，不供调用方设置），
+# 确保真正部署的是新版本脚本而不是旧版本已解析在内存里的逻辑。
+#
+# 退出码 3：本地 release checkout 落后/分叉于 upstream 且无法自动
+# fast-forward（fetch 已成功但 git merge --ff-only 失败，说明本地有
+# upstream 没有的提交）。此时脚本会打印精确指令并停止，不猜测、不强推、
+# 不部署一个状态不确定的 checkout；按提示手动执行
+# `git fetch origin release/v0.1-launch && git merge --ff-only FETCH_HEAD`
+# 核实/解决分叉后重新运行本脚本。fetch 本身失败（网络/镜像不可达）不算
+# 这个退出码——那种情况仍走既有的「有精确匹配 SHA 才放行」fail-closed 路径
+# （exit 1），因为无法确认 upstream 状态和"确认落后"不是一回事。
 set -Eeuo pipefail
 umask 077
+
+main() {
+original_args=("$@")
 
 # 先保存仅供契约测试使用的覆盖项，再清掉所有可能参与 Compose 插值的
 # 调用者环境变量。Compose 的 shell 环境优先级高于 --env-file，不能让
@@ -51,6 +74,8 @@ export GIT_TERMINAL_PROMPT=0
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 default_repo="$(cd -- "$script_dir/../.." && pwd -P)"
+self_path="$script_dir/$(basename -- "${BASH_SOURCE[0]}")"
+EXIT_CHECKOUT_BEHIND=3
 
 usage() {
   cat <<'USAGE'
@@ -85,6 +110,14 @@ USAGE
 die() {
   echo "DEPLOY LOCAL FAIL: $*" >&2
   exit 1
+}
+
+# 专用于「fetch 成功但本地 checkout 无法 fast-forward」——见文件头部对
+# 退出码 3 的说明。与 die() 分开是为了给这一类失败一个可脚本化区分的
+# 退出码，而不是和其它任意失败共用 exit 1。
+die_checkout_behind() {
+  echo "DEPLOY LOCAL FAIL: $*" >&2
+  exit "$EXIT_CHECKOUT_BEHIND"
 }
 
 trim() {
@@ -409,7 +442,7 @@ if [ -n "$expected_sha" ] && [ "${current_sha,,}" != "${expected_sha,,}" ]; then
   if [ "$fetch_ok" -eq 1 ]; then
     fetched_sha="$(git -C "$repo_path" rev-parse FETCH_HEAD 2>/dev/null || true)"
     if [ "${fetched_sha,,}" = "${expected_sha,,}" ]; then
-      git -C "$repo_path" merge --ff-only FETCH_HEAD >/dev/null 2>&1 || die "release 无法快进到指定 sha"
+      git -C "$repo_path" merge --ff-only FETCH_HEAD >/dev/null 2>&1 || die_checkout_behind "release 无法快进到指定 sha（本地有 upstream 没有的提交）；请执行 git fetch origin release/v0.1-launch && git merge --ff-only FETCH_HEAD 核实/解决分叉后重新运行本脚本"
       current_sha="$(git -C "$repo_path" rev-parse HEAD 2>/dev/null || true)"
     fi
   fi
@@ -418,11 +451,44 @@ elif [ -z "$expected_sha" ] && [ "$fetch_ok" -eq 1 ]; then
   fetched_sha="$(git -C "$repo_path" rev-parse FETCH_HEAD 2>/dev/null || true)"
   [ -n "$fetched_sha" ] || die "无法解析 fetch 后的 release SHA"
   if [ "${current_sha,,}" != "${fetched_sha,,}" ]; then
-    git -C "$repo_path" merge --ff-only FETCH_HEAD >/dev/null 2>&1 || die "release 无法快进到 fetch 后的 SHA"
+    git -C "$repo_path" merge --ff-only FETCH_HEAD >/dev/null 2>&1 || die_checkout_behind "release 无法快进到 fetch 后的 SHA（本地有 upstream 没有的提交）；请执行 git fetch origin release/v0.1-launch && git merge --ff-only FETCH_HEAD 核实/解决分叉后重新运行本脚本"
     current_sha="$(git -C "$repo_path" rev-parse HEAD 2>/dev/null || true)"
   fi
 fi
 target_sha="$current_sha"
+
+# 自我更新 re-exec：只有真的做了 git 写操作（非 skip_git）且 checkout 内容
+# 确实前进了（target_sha != 本次运行开始时的 SHA）才考虑；只有「被更新的
+# checkout 就是本脚本自己所在的那份」时 re-exec 才有意义——--repo 指向
+# 别的 checkout 时，本进程当前执行的字节从未被这次 git 操作动过，继续用
+# 已解析在内存里的逻辑即可。用 XM_DEPLOY_LOCAL_REEXEC 保证最多 re-exec 一次。
+if [ "$skip_git" -eq 0 ] && [ "$target_sha" != "$pre_fetch_sha" ]; then
+  self_in_repo="$repo_path/deploy/scripts/$(basename -- "$self_path")"
+  if [ "$self_in_repo" = "$self_path" ]; then
+    if [ "${XM_DEPLOY_LOCAL_REEXEC:-0}" != "1" ]; then
+      echo "self-update=applied from=$pre_fetch_sha to=$target_sha action=reexec"
+      # 顶部的调用者环境清理会 unset 所有 XM_/DOCKER_/... 前缀变量（防止
+      # 遗留变量偷偷重定向正式部署），这里必须把契约测试用到的覆盖项显式
+      # 传回子进程，否则 re-exec 出去的第二个进程会以为自己没收到这些覆盖。
+      # 生产场景这些值本就是空/默认，显式传递不改变任何正式部署行为。
+      XM_DEPLOY_LOCAL_REEXEC=1 \
+      XM_DEPLOY_LOCAL_TEST_MODE="$test_gate_value" \
+      XM_DEPLOY_LOCAL_SKIP_GIT="$skip_git_value" \
+      XM_DEPLOY_LOCAL_REPO="$repo_override_value" \
+      XM_DEPLOY_LOCAL_ENV_FILE="$env_file_override_value" \
+      XM_DEPLOY_LOCAL_COMPOSE_FILE="$compose_file_override_value" \
+      XM_DEPLOY_LOCAL_WEB_URL="$web_url_override_value" \
+      XM_DEPLOY_LOCAL_DOCKER_BIN="$docker_override_value" \
+      XM_DEPLOY_LOCAL_CURL_BIN="$curl_override_value" \
+      exec "${BASH:-bash}" "$self_path" "${original_args[@]}"
+      die "self-update: 无法 exec 刚更新的脚本 $self_path"
+    else
+      echo "self-update=skipped reason=already-reexeced from=$pre_fetch_sha to=$target_sha" >&2
+    fi
+  else
+    echo "self-update=skipped reason=repo-not-self from=$pre_fetch_sha to=$target_sha" >&2
+  fi
+fi
 
 # Compose 只允许使用本机 staging 的受控插值；这些值覆盖 .env/调用者可能
 # 留下的同名变量，数据库口令本身仍只由 --env-file 提供，绝不在 shell 中回显。
@@ -765,3 +831,6 @@ fi
 
 enable_cpa_snapshot_timer
 echo "DEPLOY LOCAL PASS: sha=$target_sha project=xingmang-launch healthz=200 readyz=200 smoke=services:200,metrics:200,alerts:200"
+}
+
+main "$@"

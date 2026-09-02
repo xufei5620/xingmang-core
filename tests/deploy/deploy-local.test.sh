@@ -84,6 +84,17 @@ mkdir -p "$fake_bin"
 write_executable "$fake_bin/docker" '#!/usr/bin/env bash
 set -u
 printf "docker %s\n" "$*" >> "${DEPLOY_LOCAL_TRACE:?}"
+# XM-DEPLOY-SELFUPDATE0：仅供「运行中途脚本文件被改写」回归测试使用。
+# 在 build 这一步把目标路径的脚本文件替换成明显损坏的内容，模拟脚本
+# 运行期间被别的 git/部署操作重写；只做一次，不影响其它测试。
+if [ -n "${FAKE_DOCKER_CORRUPT_SCRIPT_PATH:-}" ] && [ ! -e "${FAKE_DOCKER_CORRUPT_SCRIPT_PATH}.done" ]; then
+  case " $* " in
+    *" build "*)
+      printf "#!/usr/bin/env bash\necho SELFUPDATE-CORRUPTION-MARKER\nif [ 1 -eq 1 ]; then\n  echo unterminated-on-purpose\n" > "$FAKE_DOCKER_CORRUPT_SCRIPT_PATH"
+      : > "${FAKE_DOCKER_CORRUPT_SCRIPT_PATH}.done"
+      ;;
+  esac
+fi
 if [ "${FAKE_REQUIRE_LOCAL_ENV:-0}" = "1" ]; then
   [ "${ENVIRONMENT:-}" = "staging" ] || exit 41
   [ "${WEB_BIND:-}" = "127.0.0.1" ] || exit 41
@@ -327,6 +338,127 @@ expect_failure "不带 server-prod 覆盖时拒绝 ENVIRONMENT=production" env "
 expect_failure "server-prod 覆盖要求 env-file 显式 production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$fixture/deploy/compose/.env"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/server-prod.yaml" --sha "$fixture_sha"
 grep -q 'export ENVIRONMENT="$expected_environment"' "$deploy_script" && ok "Compose 插值环境随覆盖文件" || bad "Compose 插值环境仍钉死 staging"
 grep -q 'bootstrap=skipped reason=service-not-in-profile' "$deploy_script" && ok "bootstrap 按 profile 存在性跳过" || bad "bootstrap 未按 profile 跳过"
+
+# ============================================================
+# XM-DEPLOY-SELFUPDATE0：脚本自我更新期间的安全性回归测试
+# ============================================================
+
+# (a) 运行中途脚本文件被改写（模拟自身触发的 git 操作或并发 fetch 重写了
+# 磁盘上的脚本），不应该让本次已经在跑的进程读到新旧混杂的字节。main()
+# 包裹把整份脚本预先解析完，运行中途改写磁盘应对本次执行完全没有影响。
+under_test="$tmp/deploy-local-under-test.sh"
+cp "$deploy_script" "$under_test"
+chmod +x "$under_test"
+: > "$trace"
+expect_success "运行中途脚本文件被改写仍完成本次部署" env "${common_env[@]}" \
+  FAKE_DOCKER_CORRUPT_SCRIPT_PATH="$under_test" \
+  "$under_test" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
+  --compose-file "$fixture/deploy/compose/launch.yaml" --probe-attempts 1
+assert_text "改写后仍输出本地部署通过" 'DEPLOY LOCAL PASS' "$tmp/stdout"
+assert_text "改写后仍继续到 up" ' up -d platform-api platform-worker web' "$trace"
+assert_text "改写后仍继续到探针" '/healthz' "$trace"
+assert_text "改写后仍继续到烟测" '/api/v1/services' "$trace"
+if [ -e "${under_test}.done" ] && grep -Fq 'SELFUPDATE-CORRUPTION-MARKER' "$under_test"; then
+  ok "运行期间脚本文件确实被改写（验证测试本身有效）"
+else
+  bad "运行期间脚本文件确实被改写（验证测试本身有效）"
+fi
+if bash -n "$under_test" >/dev/null 2>&1; then
+  bad "改写后的字节本身是损坏的（反证：不是因为没改坏才通过）"
+else
+  ok "改写后的字节本身是损坏的（反证：不是因为没改坏才通过）"
+fi
+
+# (b) fetch 成功但本地 checkout 无法 fast-forward（真正分叉，不是单纯落后）
+# 时必须以文档化的退出码 3 停止，并给出精确的人工修复指令，不猜测、不强推。
+# 复用 $fixture：它此刻已经领先 $remote 一个未推送的本地提交（prod-override
+# 及之后的改动）；这里让 $remote 独立再推进一个不同的提交，制造真正分叉。
+selfupdate_divergent_seed="$tmp/selfupdate-divergent-seed"
+git clone -q "$remote" "$selfupdate_divergent_seed"
+git -C "$selfupdate_divergent_seed" config user.email deploy-local-test@example.invalid
+git -C "$selfupdate_divergent_seed" config user.name deploy-local-test
+printf 'remote-divergent\n' > "$selfupdate_divergent_seed/remote-divergent-marker"
+git -C "$selfupdate_divergent_seed" add remote-divergent-marker
+git -C "$selfupdate_divergent_seed" commit -qm remote-divergent
+git -C "$selfupdate_divergent_seed" push -q origin HEAD:refs/heads/release/v0.1-launch
+
+: > "$trace"
+behind_stdout="$tmp/behind.stdout"
+behind_stderr="$tmp/behind.stderr"
+env XM_DEPLOY_LOCAL_TEST_MODE=1 XM_DEPLOY_LOCAL_DOCKER_BIN="$fake_bin/docker" XM_DEPLOY_LOCAL_CURL_BIN="$fake_bin/curl" DEPLOY_LOCAL_TRACE="$trace" \
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
+  --compose-file "$fixture/deploy/compose/launch.yaml" --probe-attempts 1 \
+  >"$behind_stdout" 2>"$behind_stderr"
+behind_rc=$?
+if [ "$behind_rc" -eq 3 ]; then
+  ok "checkout 分叉时退出码是文档化的 3"
+else
+  bad "checkout 分叉时退出码是文档化的 3（实际 $behind_rc）"
+fi
+assert_text "分叉失败信息带 DEPLOY LOCAL FAIL 前缀" 'DEPLOY LOCAL FAIL' "$behind_stderr"
+assert_text "分叉失败信息给出精确的手动修复指令" 'git merge --ff-only' "$behind_stderr"
+if grep -Fq '/healthz' "$trace" || grep -Fq ' build ' "$trace"; then
+  bad "分叉失败未继续到 build/探针"
+else
+  ok "分叉失败未继续到 build/探针"
+fi
+# 分叉状态到此测试为止；后续没有测试再复用 $fixture 的 git 历史。
+
+# (c) self-update 成功快进、且被更新的 checkout 就是脚本自己所在的那份时，
+# 脚本必须以同样的参数 exec 一次刚更新的自身，让新版本的逻辑真正生效——
+# 而不是继续用旧版本已经解析在内存里的代码跑完部署。构造一个「自带
+# deploy-local.sh」的独立 checkout，让 --repo 的默认值（脚本自身所在目录）
+# 与被 self-update 改写的目录重合。
+selfupdate_repo="$tmp/selfupdate-checkout"
+mkdir -p "$selfupdate_repo/deploy/compose" "$selfupdate_repo/deploy/scripts"
+cp "$repo_root/deploy/compose/launch.yaml" "$selfupdate_repo/deploy/compose/launch.yaml"
+printf 'ENVIRONMENT=staging\nPOSTGRES_DB=xingmang\nPOSTGRES_USER=xingmang\nDATABASE_PASSWORD=test-only.invalid\n' > "$selfupdate_repo/deploy/compose/.env"
+cp "$deploy_script" "$selfupdate_repo/deploy/scripts/deploy-local.sh"
+chmod +x "$selfupdate_repo/deploy/scripts/deploy-local.sh"
+git -C "$selfupdate_repo" init -q
+git -C "$selfupdate_repo" config user.email test@example.invalid
+git -C "$selfupdate_repo" config user.name deploy-local-test
+git -C "$selfupdate_repo" add deploy
+git -C "$selfupdate_repo" commit -qm seed-v1
+git -C "$selfupdate_repo" branch -M release/v0.1-launch
+
+selfupdate_remote="$tmp/selfupdate-remote.git"
+git init --bare -q "$selfupdate_remote"
+git -C "$selfupdate_repo" remote add origin "$selfupdate_remote"
+git -C "$selfupdate_repo" push -q origin release/v0.1-launch:refs/heads/release/v0.1-launch
+git --git-dir="$selfupdate_remote" symbolic-ref HEAD refs/heads/release/v0.1-launch
+
+selfupdate_v2_seed="$tmp/selfupdate-v2-seed"
+git clone -q --branch release/v0.1-launch "$selfupdate_remote" "$selfupdate_v2_seed"
+git -C "$selfupdate_v2_seed" config user.email deploy-local-test@example.invalid
+git -C "$selfupdate_v2_seed" config user.name deploy-local-test
+sed -i '/^main() {$/a echo SELFUPDATE-TEST-V2-MARKER' "$selfupdate_v2_seed/deploy/scripts/deploy-local.sh"
+if grep -Fq 'SELFUPDATE-TEST-V2-MARKER' "$selfupdate_v2_seed/deploy/scripts/deploy-local.sh"; then
+  ok "re-exec 测试的 v2 脚本已注入可观测标记"
+else
+  bad "re-exec 测试的 v2 脚本已注入可观测标记"
+fi
+git -C "$selfupdate_v2_seed" add deploy/scripts/deploy-local.sh
+git -C "$selfupdate_v2_seed" commit -qm v2-marker
+git -C "$selfupdate_v2_seed" push -q origin HEAD:refs/heads/release/v0.1-launch
+
+: > "$trace"
+expect_success "self-update 成功后 re-exec 到刚更新的脚本" env XM_DEPLOY_LOCAL_TEST_MODE=1 XM_DEPLOY_LOCAL_DOCKER_BIN="$fake_bin/docker" XM_DEPLOY_LOCAL_CURL_BIN="$fake_bin/curl" DEPLOY_LOCAL_TRACE="$trace" \
+  "$selfupdate_repo/deploy/scripts/deploy-local.sh" --test-mode --probe-attempts 1
+assert_text "输出记录 self-update 已应用" 'self-update=applied' "$tmp/stdout"
+assert_text "re-exec 后的新版本脚本真的执行了" 'SELFUPDATE-TEST-V2-MARKER' "$tmp/stdout"
+assert_text "re-exec 后仍完成部署" 'DEPLOY LOCAL PASS' "$tmp/stdout"
+build_calls="$(grep -c ' build ' "$trace" || true)"
+if [ "$build_calls" = "1" ]; then
+  ok "re-exec 未导致部署步骤重复执行"
+else
+  bad "re-exec 未导致部署步骤重复执行（build 出现 ${build_calls} 次）"
+fi
+if grep -Fq 'SELFUPDATE-TEST-V2-MARKER' "$selfupdate_repo/deploy/scripts/deploy-local.sh"; then
+  ok "checkout 磁盘上的脚本已快进到 v2"
+else
+  bad "checkout 磁盘上的脚本已快进到 v2"
+fi
 
 [ "$fail" -eq 0 ] && echo "DEPLOY-LOCAL-TEST-OK"
 exit "$fail"
