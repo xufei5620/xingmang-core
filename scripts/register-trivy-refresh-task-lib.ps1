@@ -61,6 +61,15 @@ function Get-InvoiceTrivyRefreshTaskArguments {
 # RunLevel Limited (not Highest) is also deliberate: refresh-trivy-cache.ps1
 # only needs a normal user token to reach curl, tar, and Docker Desktop's
 # named pipe, so this task never requests elevation.
+#
+# RestartCount/RestartInterval (default 3 times, 30 minutes apart) is Task
+# Scheduler's own built-in retry: it fires whenever the action's process
+# exits non-zero -- which now includes exit 75, refresh-trivy-cache.ps1's
+# "the release image gate holds the shared cache volume; skipped" outcome
+# (see that script's own .DESCRIPTION) -- so a run skipped or genuinely
+# failed once still gets refreshed later the same day, on top of
+# StartWhenAvailable already covering the machine being off/asleep at
+# StartTime.
 function New-InvoiceTrivyRefreshTaskDefinition {
     param(
         [Parameter(Mandatory)][string]$PwshPath,
@@ -69,7 +78,13 @@ function New-InvoiceTrivyRefreshTaskDefinition {
         [Parameter(Mandatory)][string]$UserId,
 
         [ValidatePattern('^([01]\d|2[0-3]):[0-5]\d$')]
-        [string]$StartTime = '05:30'
+        [string]$StartTime = '05:30',
+
+        [ValidateRange(0, 10)]
+        [int]$RestartCount = 3,
+
+        [ValidateNotNull()]
+        [TimeSpan]$RestartInterval = (New-TimeSpan -Minutes 30)
     )
     if (-not [IO.Path]::IsPathFullyQualified($PwshPath)) {
         throw "PwshPath must be a fully qualified path: $PwshPath"
@@ -77,11 +92,14 @@ function New-InvoiceTrivyRefreshTaskDefinition {
     if (-not [IO.Path]::IsPathFullyQualified($WorkingDirectory)) {
         throw "WorkingDirectory must be a fully qualified path: $WorkingDirectory"
     }
+    if ($RestartInterval -le [TimeSpan]::Zero) {
+        throw "RestartInterval must be a positive timespan, got $RestartInterval"
+    }
 
     $taskArguments = Get-InvoiceTrivyRefreshTaskArguments -RefreshScriptPath $RefreshScriptPath
     $action = New-ScheduledTaskAction -Execute $PwshPath -Argument $taskArguments -WorkingDirectory $WorkingDirectory
     $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
-    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount $RestartCount -RestartInterval $RestartInterval
     $principal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType S4U -RunLevel Limited
 
     return [pscustomobject]@{
