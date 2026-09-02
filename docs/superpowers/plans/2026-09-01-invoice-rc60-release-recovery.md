@@ -3,7 +3,7 @@
 > **SUPERSEDED — DO NOT EXECUTE.** RC60 shipped at signed tag
 > `v0.1.0-rc60-signed` (`ae61282`) and is deployed; it carries the
 > claim-path binding wake; its evidence is immutable. Continue only with
-> `docs/superpowers/plans/2026-09-03-invoice-rc73-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-03-invoice-rc74-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

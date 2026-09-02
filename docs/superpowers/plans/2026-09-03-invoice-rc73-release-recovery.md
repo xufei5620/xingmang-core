@@ -1,5 +1,10 @@
 # RC73 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC73 shipped at signed tag
+> `v0.1.0-rc73-signed` (`7061d81`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc74-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC73 — the POLICY_ANCHOR balance-evidence fix (XM-INV-ANCHOR-BALANCE: a POLICY_ANCHOR account's own anchor is a trusted interval start for balance checkpoints and carry-forward proofs, so post-anchor evidence no longer opens one `SOURCE_GAP` freeze per checkpoint; `invoice-eligibility-repair --kind=balance-anchor` resolves the existing freezes), the CR-0007 freeze-queue operability delivery (XM-INV-FREEZE-QUEUE-UX: `external_user_id` on the admin freeze queue with an exact-match filter, embedded-mode inline resolve results and top-anchored toasts, distinguishable resolve-precondition error codes), and the release-tooling hardening (XM-INV-TRIVY-REFRESH-FIX, XM-INV-GATE-TMPDIR).

@@ -67,13 +67,13 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 
 ## 3. Build and release gates
 
-Run locally from the exact RC73 candidate worktree
+Run locally from the exact RC74 candidate worktree
 `K:\发票\wt-XM-INV-AUTOLOGIN`:
 
 ```powershell
 pwsh -NoProfile -File .\scripts\verify.ps1
 $sourceGateExit = $LASTEXITCODE
-if ($sourceGateExit -ne 0) { throw "RC73 full source gate failed with exit $sourceGateExit" }
+if ($sourceGateExit -ne 0) { throw "RC74 full source gate failed with exit $sourceGateExit" }
 ```
 
 The default gate includes Go race/vet tests, frontend production builds,
@@ -88,7 +88,7 @@ RC49 is a failed historical candidate. The signed tag
 `release/0.1.0-rc49-exact3` are retained failure evidence and must be treated
 as read-only. Their exact file set and hashes are anchored by
 `docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt`; never reuse, rename, edit, or
-transfer them as RC73 evidence.
+transfer them as RC74 evidence.
 
 RC50 is also failed historical evidence. `v0.1.0-rc50-signed` remains fixed at
 `d08b3a2e40e55f7f600759c250f45b16b82bd0e1`; the interrupted
@@ -115,7 +115,7 @@ Release tooling requires PowerShell 7.5 or newer because every production JSON
 parse uses `ConvertFrom-Json -DateKind String` behind the centralized duplicate-
 checking parser.
 
-Before copying images to the server, begin from and verify the clean signed RC73
+Before copying images to the server, begin from and verify the clean signed RC74
 source commit and annotated tag.  The tag must peel to the signed source commit
 used by the gate; do not create or move it after image evidence exists:
 
@@ -123,7 +123,7 @@ used by the gate; do not create or move it after image evidence exists:
 $expectedWorktree = (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path
 $worktreeLines = @(git rev-parse --show-toplevel)
 $worktreeExit = $LASTEXITCODE
-if ($worktreeExit -ne 0 -or -not [string]::Equals(($worktreeLines -join '').Trim(), $expectedWorktree, [StringComparison]::OrdinalIgnoreCase)) { throw 'wrong RC73 candidate worktree' }
+if ($worktreeExit -ne 0 -or -not [string]::Equals(($worktreeLines -join '').Trim(), $expectedWorktree, [StringComparison]::OrdinalIgnoreCase)) { throw 'wrong RC74 candidate worktree' }
 pwsh -NoProfile -File .\scripts\verify-rc49-failure-evidence.ps1
 $rc49AnchorExit = $LASTEXITCODE
 if ($rc49AnchorExit -ne 0) { throw "RC49 failure evidence anchor verification failed with exit $rc49AnchorExit" }
@@ -138,66 +138,66 @@ $rc52AnchorExit = $LASTEXITCODE
 if ($rc52AnchorExit -ne 0) { throw "RC52 failure evidence anchor verification failed with exit $rc52AnchorExit" }
 gitleaks git --redact --no-banner --log-opts="08aff147766c046b12e19221a6aabb675485d452..HEAD"
 $gitleaksExit = $LASTEXITCODE
-if ($gitleaksExit -ne 0) { throw "RC73 release-range gitleaks failed with exit $gitleaksExit" }
+if ($gitleaksExit -ne 0) { throw "RC74 release-range gitleaks failed with exit $gitleaksExit" }
 git diff --check
 $diffExit = $LASTEXITCODE
-if ($diffExit -ne 0) { throw "RC73 source diff check failed with exit $diffExit" }
+if ($diffExit -ne 0) { throw "RC74 source diff check failed with exit $diffExit" }
 $statusLines = @(git status --porcelain=v1)
 $statusExit = $LASTEXITCODE
-if ($statusExit -ne 0) { throw "RC73 git status failed with exit $statusExit" }
-if ($statusLines.Count -ne 0) { throw 'RC73 source worktree is dirty' }
+if ($statusExit -ne 0) { throw "RC74 git status failed with exit $statusExit" }
+if ($statusLines.Count -ne 0) { throw 'RC74 source worktree is dirty' }
 git verify-commit HEAD
 $commitVerifyExit = $LASTEXITCODE
-if ($commitVerifyExit -ne 0) { throw "RC73 source commit signature verification failed with exit $commitVerifyExit" }
-git tag -s -a v0.1.0-rc73-signed -m 'RC73 image-security release candidate'
+if ($commitVerifyExit -ne 0) { throw "RC74 source commit signature verification failed with exit $commitVerifyExit" }
+git tag -s -a v0.1.0-rc74-signed -m 'RC74 image-security release candidate'
 $tagCreateExit = $LASTEXITCODE
-if ($tagCreateExit -ne 0) { throw "RC73 signed tag creation failed with exit $tagCreateExit" }
-git verify-tag refs/tags/v0.1.0-rc73-signed
+if ($tagCreateExit -ne 0) { throw "RC74 signed tag creation failed with exit $tagCreateExit" }
+git verify-tag refs/tags/v0.1.0-rc74-signed
 $tagVerifyExit = $LASTEXITCODE
-if ($tagVerifyExit -ne 0) { throw "RC73 tag signature verification failed with exit $tagVerifyExit" }
-$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc73-signed^{}')
+if ($tagVerifyExit -ne 0) { throw "RC74 tag signature verification failed with exit $tagVerifyExit" }
+$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc74-signed^{}')
 $tagHeadExit = $LASTEXITCODE
 $headLines = @(git rev-parse --verify HEAD)
 $headExit = $LASTEXITCODE
-if ($tagHeadExit -ne 0 -or $headExit -ne 0 -or ($tagHeadLines -join '').Trim() -cne ($headLines -join '').Trim()) { throw 'RC73 signed tag does not peel to candidate HEAD' }
+if ($tagHeadExit -ne 0 -or $headExit -ne 0 -or ($tagHeadLines -join '').Trim() -cne ($headLines -join '').Trim()) { throw 'RC74 signed tag does not peel to candidate HEAD' }
 ```
 
-Then complete the RC73 image gate from that exact signed source.  It builds all
+Then complete the RC74 image gate from that exact signed source.  It builds all
 nine manifest-bound images: API, PDF scanner, tools, web, source agent, derived
 PostgreSQL, derived ClamAV, derived ingest proxy, and Keycloak.  It updates the
 exact Trivy 0.74.0 databases, scans serially, generates CycloneDX 1.7 SBOMs,
 and binds every report to the immutable local image ID:
 
 ```powershell
-# Creates new RC73 evidence; do not reuse or overwrite RC48 through RC52 evidence.
+# Creates new RC74 evidence; do not reuse or overwrite RC48 through RC52 evidence.
 $worktreeLines = @(git rev-parse --show-toplevel)
 $worktreeExit = $LASTEXITCODE
 $headLines = @(git rev-parse --verify HEAD)
 $headExit = $LASTEXITCODE
-$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc73-signed^{}')
+$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc74-signed^{}')
 $tagHeadExit = $LASTEXITCODE
 if ($worktreeExit -ne 0 -or $headExit -ne 0 -or $tagHeadExit -ne 0 -or
     -not [string]::Equals(($worktreeLines -join '').Trim(), (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path, [StringComparison]::OrdinalIgnoreCase) -or
-    ($headLines -join '').Trim() -cne ($tagHeadLines -join '').Trim()) { throw 'RC73 worktree/tag/HEAD binding failed' }
-$rc73ReleaseDirectory = 1..99 |
-  ForEach-Object { "release\0.1.0-rc73-exact$_" } |
+    ($headLines -join '').Trim() -cne ($tagHeadLines -join '').Trim()) { throw 'RC74 worktree/tag/HEAD binding failed' }
+$rc74ReleaseDirectory = 1..99 |
+  ForEach-Object { "release\0.1.0-rc74-exact$_" } |
   Where-Object { -not (Test-Path -LiteralPath $_) } |
   Select-Object -First 1
-if ([string]::IsNullOrWhiteSpace($rc73ReleaseDirectory)) { throw 'no unused RC73 exact directory remains' }
+if ([string]::IsNullOrWhiteSpace($rc74ReleaseDirectory)) { throw 'no unused RC74 exact directory remains' }
 pwsh -NoProfile -File .\scripts\release-image-gate.ps1 `
-  -ReleaseName 0.1.0-rc73 `
-  -ImageTag 0.1.0-rc73 `
+  -ReleaseName 0.1.0-rc74 `
+  -ImageTag 0.1.0-rc74 `
   -SourceAgentVersion 0.3.0 `
-  -ReleaseDirectory $rc73ReleaseDirectory `
+  -ReleaseDirectory $rc74ReleaseDirectory `
   -IdPMode keycloak
 $imageGateExit = $LASTEXITCODE
-if ($imageGateExit -ne 42) { throw "RC73 image gate expected exit 42, got $imageGateExit" }
-pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc73ReleaseDirectory
+if ($imageGateExit -ne 42) { throw "RC74 image gate expected exit 42, got $imageGateExit" }
+pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc74ReleaseDirectory
 $ordinaryVerifyExit = $LASTEXITCODE
-if ($ordinaryVerifyExit -ne 0) { throw "ordinary RC73 artifact verification failed with exit $ordinaryVerifyExit" }
-pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc73ReleaseDirectory -RequireTransferReady -SignedReleaseTag v0.1.0-rc73-signed
+if ($ordinaryVerifyExit -ne 0) { throw "ordinary RC74 artifact verification failed with exit $ordinaryVerifyExit" }
+pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc74ReleaseDirectory -RequireTransferReady -SignedReleaseTag v0.1.0-rc74-signed
 $strictVerifyExit = $LASTEXITCODE
-if ($strictVerifyExit -ne 0) { throw "strict RC73 transfer-ready verification failed with exit $strictVerifyExit" }
+if ($strictVerifyExit -ne 0) { throw "strict RC74 transfer-ready verification failed with exit $strictVerifyExit" }
 ```
 
 **Running the gate detached, when the operator's own shell cannot stay
@@ -275,13 +275,13 @@ but their machine manifest keeps `productionLaunch` blocked with
 requires the reviewed source commit/tag to exist before the gate runs; the
 gate never invents an author identity or commits files itself.
 
-The one-block RC73 gate above already runs the ordinary verifier immediately
+The one-block RC74 gate above already runs the ordinary verifier immediately
 after exit `42`; do not split those commands across shells or processes.
 
 The verifier rejects a report/SBOM whose embedded Trivy ImageID, manifest
 hash, checksum or current local image ID has drifted. Trivy runs under an
 exclusive release-cache lock and every scan is serial, avoiding shared-cache
-lock races. No vulnerability is ignored. RC73 PostgreSQL has no exception and
+lock races. No vulnerability is ignored. RC74 PostgreSQL has no exception and
 must report zero HIGH/CRITICAL findings; the former fixed-version `gosu`
 finding is not exception-eligible.
 
@@ -347,19 +347,19 @@ including `-RepoRoot`, `-TaskName`, `-StartTime` and `-UserId`.
 The command above is the ordinary internal-consistency mode, so operators can
 retain and diagnose failed or validation-only bundles. It is not transfer
 authority. Immediately before signing `SHA256SUMS`, rerun the independent
-verifier in strict transfer-ready mode against the signed RC73 tag. The
+verifier in strict transfer-ready mode against the signed RC74 tag. The
 one-block gate above performs this immediately after ordinary verification;
 both verifiers must exit `0`.
 
 Strict mode verifies the annotated tag signature and peels it to a commit. It
 then requires `source.gitDirty=false`, a 40-hex `source.gitHead` equal to that
-commit, `releaseName=0.1.0-rc73`, all nine exact `:0.1.0-rc73` image
+commit, `releaseName=0.1.0-rc74`, all nine exact `:0.1.0-rc74` image
 references, `applicationImageGate=passed`, and exactly one production block reason:
 `idp_self_hosted_pending_canary`. Missing or additional reasons fail closed.
 `productionLaunch` must remain `blocked`; transfer is preparation for the real
 production canary, never approval to cut over traffic.
 
-RC73 permits only the exact Keycloak vendor-rejected tuple documented in
+RC74 permits only the exact Keycloak vendor-rejected tuple documented in
 `docs/IMAGE-SCAN-REVIEW.md`: `CVE-2026-22020`, `os-pkgs`/`redhat`,
 `java-21-openjdk-headless@1:21.0.12.1.1-1.2.el9`, empty fixed version,
 `HIGH`/`affected`, with the exact refreshed base digest and review deadline.
@@ -375,26 +375,26 @@ independent allowed-signers file:
 
 ```powershell
 $strictReadyCandidates = [Collections.Generic.List[string]]::new()
-foreach ($candidate in Get-ChildItem -LiteralPath release -Directory -Filter '0.1.0-rc73-exact*') {
-  pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $candidate.FullName -RequireTransferReady -SignedReleaseTag v0.1.0-rc73-signed
+foreach ($candidate in Get-ChildItem -LiteralPath release -Directory -Filter '0.1.0-rc74-exact*') {
+  pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $candidate.FullName -RequireTransferReady -SignedReleaseTag v0.1.0-rc74-signed
   $candidateVerifyExit = $LASTEXITCODE
   if ($candidateVerifyExit -eq 0) { $strictReadyCandidates.Add($candidate.FullName) }
 }
-if ($strictReadyCandidates.Count -ne 1) { throw "expected one strict-ready RC73 directory, found $($strictReadyCandidates.Count)" }
+if ($strictReadyCandidates.Count -ne 1) { throw "expected one strict-ready RC74 directory, found $($strictReadyCandidates.Count)" }
 $releaseRoot = $strictReadyCandidates[0]
 $checksumManifest = Join-Path $releaseRoot 'SHA256SUMS'
 $releaseSignature = "$checksumManifest.sig"
-$releaseSigningKey = '<offline RC73 release Ed25519 private key>'
+$releaseSigningKey = '<offline RC74 release Ed25519 private key>'
 $releaseAllowedSigners = '<reviewed release-tree allowed_signers file>'
 
 & ssh-keygen -Y sign -q -f "$releaseSigningKey" -n solov-invoice-release-v1 "$checksumManifest"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $releaseSignature -PathType Leaf)) {
-  throw 'RC73 artifact SHA256SUMS signature was not created'
+  throw 'RC74 artifact SHA256SUMS signature was not created'
 }
 Get-Content -Raw -LiteralPath $checksumManifest | & ssh-keygen -Y verify `
   -f "$releaseAllowedSigners" -I invoice-release@solov.cc `
   -n solov-invoice-release-v1 -s "$releaseSignature"
-if ($LASTEXITCODE -ne 0) { throw 'RC73 artifact SHA256SUMS signature verification failed' }
+if ($LASTEXITCODE -ne 0) { throw 'RC74 artifact SHA256SUMS signature verification failed' }
 ```
 
 Only after this signature and its verification pass may the exact signed source
@@ -403,7 +403,7 @@ and the nine manifest-bound images be transferred. Image-gate exit `42` is the
 sole expected pending-canary result and still requires both verifiers to exit
 `0`; every other non-zero exit is a release block.
 
-The RC73 source baselines are Go 1.25.13, pgx 5.9.2, x/text 0.39.0,
+The RC74 source baselines are Go 1.25.13, pgx 5.9.2, x/text 0.39.0,
 PostgreSQL 18.6, Keycloak 26.7.2 and ClamAV 1.4.5 LTS.  PostgreSQL, ClamAV and
 ingest Nginx are locally built derivatives with fixed Alpine OpenSSL
 `3.5.8-r0`; Keycloak is derived from
@@ -419,7 +419,7 @@ Refresh any base only through the full image scan/SBOM/review flow.
 > came from exactly this order mistake). The public path via the host Nginx to
 > the published port is unaffected.
 
-Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC73
+Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC74
 manifest, signature and artifact verifier have passed. Production Compose has
 no image-tag fallback: all nine images (`invoice-system-api`,
 `invoice-system-pdf-scanner`, `invoice-system-tools`, `invoice-system-web`,
@@ -444,9 +444,9 @@ After any code or deployment change, the prior RC evidence is historical and a
 new image gate must be generated before containers are recreated. Never mix an
 older API container with a newer web/scanner container under one release.
 
-For RC73, continue with sections 4, 5, 6, 7, 8, 9, 10, 11 (excluding 11.1),
+For RC74, continue with sections 4, 5, 6, 7, 8, 9, 10, 11 (excluding 11.1),
 12, and 13 in order. Section 3.1 (RC39 one-off), section 3.2 (balance cleanup),
-and section 11.1 (quarterly deletion) are outside the RC73 release and require
+and section 11.1 (quarterly deletion) are outside the RC74 release and require
 separate explicit approval. The section 6 unactivated-v4 replacement path is
 conditional and also requires its predicates plus separate maintenance approval.
 
@@ -787,10 +787,10 @@ DSN files. Use URL-safe/hex passwords so a DSN is not ambiguously encoded.
 Generate the application field keyring without printing key material:
 
 ```bash
-export INVOICE_IMAGE_TAG='<exact tag from the verified RC73 release manifest>'
-: "${RC73_RELEASE_DIRECTORY:?set the exact strict-verified and signed RC73 exactN directory name from the release ticket}"
-case "$RC73_RELEASE_DIRECTORY" in 0.1.0-rc73-exact[1-9]|0.1.0-rc73-exact[1-9][0-9]) ;; *) echo 'invalid RC73 release directory' >&2; exit 1 ;; esac
-RELEASE_MANIFEST="/root/invoice-system/release/$RC73_RELEASE_DIRECTORY/release-manifest.json"
+export INVOICE_IMAGE_TAG='<exact tag from the verified RC74 release manifest>'
+: "${RC74_RELEASE_DIRECTORY:?set the exact strict-verified and signed RC74 exactN directory name from the release ticket}"
+case "$RC74_RELEASE_DIRECTORY" in 0.1.0-rc74-exact[1-9]|0.1.0-rc74-exact[1-9][0-9]) ;; *) echo 'invalid RC74 release directory' >&2; exit 1 ;; esac
+RELEASE_MANIFEST="/root/invoice-system/release/$RC74_RELEASE_DIRECTORY/release-manifest.json"
 # The transferred manifest-bound images must already exist; production never builds or pulls them.
 test "$(jq '[.images[] | .name] | length' "$RELEASE_MANIFEST")" -eq 9
 for image_name in api pdf-scanner tools web source-agent postgres-runtime clamav-runtime ingest-proxy keycloak; do
@@ -1086,7 +1086,7 @@ KEYCLOAK_BOOTSTRAP_PASSWORD_FILE=/root/invoice-system/secrets/keycloak_bootstrap
 The fixed `/root/invoice-system/keycloak-backups` directory must already be
 `root:root 0700` on a non-ephemeral filesystem. The age identity and
 Ed25519 signing key are temporarily mounted offline material and must not live
-under the backup directory. The RC73 installation must create root-only
+under the backup directory. The RC74 installation must create root-only
 `SOURCE_COMMIT`, `SOURCE_TAG`, `KEYCLOAK_IMAGE`, `SMTP_TRANSPORT` and an exact
 six-entry `RELEASE-TREE.sha256`, then sign it with the release key under the
 dedicated release-tree namespace. The production operator re-verifies this
@@ -1094,7 +1094,7 @@ attestation using the independent root-only release-tree trust file. This is a
 signed installed-tree attestation; the deployment wrapper must separately
 verify the Git tag signature and peeled tag commit before generating it.
 
-Before the mail window, rebuild/recreate the exact RC73 Keycloak container and
+Before the mail window, rebuild/recreate the exact RC74 Keycloak container and
 prove its immutable image ID plus the explicit default TLS hostname verifier
 and disabled Kubernetes truststore environment. Run the negative wrong-hostname
 SMTP canary when available; do not use this operator to send from an older
@@ -1348,20 +1348,20 @@ snapshot columns. Before applying it:
 
 1. verify signed tag `v0.1.0-rc17-signed` peels to commit
    `b17dbe4ba2d1a2c4926d0156abf80c9207a74a54` and retain the RC17 release
-   manifest's exact rollback image IDs; verify the exact RC73 candidate images,
+   manifest's exact rollback image IDs; verify the exact RC74 candidate images,
    then resolve the existing-pair/first-install path below without starting
    invoice ingestion;
 2. stop the old `api`, `ingest-proxy`, and all source-agent containers and prove
    there are no invoice writer sessions;
 3. while they remain stopped, run
-   the reviewed RC73 `deploy/backup/backup.sh` with
+   the reviewed RC74 `deploy/backup/backup.sh` with
    `BACKUP_SCHEMA_MODE=pre-0011`; it records initial service state and must not
-   start a service that was stopped. Restore it with the RC73 drill and
+   start a service that was stopped. Restore it with the RC74 drill and
    `RESTORE_SCHEMA_MODE=pre-0011` plus the exact RC17
    `PRE_0011_TOOLS_IMAGE`, which proves migration 0011/policy table are absent
    while the source-agent image bound to the archived state generation validates
    its cutover/state contracts. An old V3 pair requires the exact RC24 source
-   agent; the RC73 V4 agent must not be used to reinterpret it. Do not use the
+   agent; the RC74 V4 agent must not be used to reinterpret it. Do not use the
    older RC17 backup script here because it resumes every service unconditionally;
 4. verify `funding_lots`, `source_usage_events`, `source_credit_events`,
    `consumption_allocations`, `invoice_requests`, and
@@ -1379,13 +1379,13 @@ create-only cutover pairs, so resolve one of these paths during item 1:
   `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`; require the exact source
   V3 contract, both clocks strictly before the boundary, and record the
   encrypted file hashes in the pre-0011 backup ticket. This proves the rollback
-  generation only; it is not authorization to start the RC73 receiver.
+  generation only; it is not authorization to start the RC74 receiver.
 - First installation with no pair: before applying 0011, stop one upstream
   application, pass the explicit-container quiescence gate, and use the exact
-  RC73 source-agent image to capture that source once and immediately run
+  RC74 source-agent image to capture that source once and immediately run
   `check-cutover`; restart it, repeat for the other source, then initialize the
   ten empty durable state directories without starting ingestion. Now create
-  and restore-test the full backup in explicit RC73 pre-0011 mode while the
+  and restore-test the full backup in explicit RC74 pre-0011 mode while the
   services remain stopped. These same
   encrypted pairs are registered after migration; they are never captured
   again.
@@ -1403,8 +1403,8 @@ locks and rechecks these conditions.
 1. Keep the verified pre-0011 package. Create, sign and restore-test a separate
    post-0011 recovery point containing the unused RC24 state generation and
    both old pairs. Its source-state check must use the exact RC24 source-agent
-   image recorded for that recovery generation, never RC73.
-2. Stop all source agents. Install the RC73 v4 semantic-fingerprint functions
+   image recorded for that recovery generation, never RC74.
+2. Stop all source agents. Install the RC74 v4 semantic-fingerprint functions
    through the reviewed wrapper and re-prove exact function hashes, roles,
    ACLs and `pg_depend=0`. Run all ten `check-db-static` commands; full
    `check-db` cannot pass against the old V3 pair and is forbidden at this step.
@@ -1446,7 +1446,7 @@ BACKUP_SCHEMA_MODE=pre-0011 BACKUP_QUIESCE_CONFIRMED=YES \
 RESTORE_SCHEMA_MODE=pre-0011 \
 RESTORE_POSTGRES_TMPFS_SIZE=16g \
 PRE_0011_TOOLS_IMAGE='<exact RC17 tools image from its release manifest>' \
-INVOICE_TOOLS_IMAGE='<exact RC73 tools image>' \
+INVOICE_TOOLS_IMAGE='<exact RC74 tools image>' \
 SOURCE_AGENT_IMAGE='<exact RC24 source-agent image bound to this old V3 backup>' \
   bash deploy/backup/restore-drill.sh
 ```
@@ -1792,7 +1792,7 @@ the receiver's five-minute maximum clock skew plus two poll intervals. A missed
 non-identity heartbeat still fails after five minutes independently of the
 watermark budget. After startup, an idle Sub2API payment stream must continue
 publishing a watermark near source time minus five minutes; a watermark pinned
-to the timestamp of the last payment is an RC73 rollback condition.
+to the timestamp of the last payment is an RC74 rollback condition.
 
 ```bash
 docker compose --env-file deploy/.env.production \
