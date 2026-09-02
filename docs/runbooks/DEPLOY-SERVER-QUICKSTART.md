@@ -45,6 +45,21 @@ cd /srv/deploy/xingmang-platform && nice -n 10 deploy/scripts/deploy-local.sh
 `deploy-local.sh` 会从 origin(服务器裸仓库)刷新 release、要求工作树干净、只重建有变化的服务,
 迁移与 bootstrap 幂等;失败即停、不自动回滚、容器与数据卷保留。
 
+自我更新安全性(XM-DEPLOY-SELFUPDATE0):脚本 fast-forward 自己所在的 checkout 时,
+新拉取的提交也会改写 `deploy-local.sh` 自身。脚本内部把全部逻辑包在一个函数里、只在
+文件最后一行调用,保证 bash 已经把整份脚本读完再开始执行,运行中途磁盘文件被改写(不管是
+这次 self-update 自己触发的,还是操作员在另一个终端并发 `git pull`)都不会让当前这次运行
+读到新旧混杂的字节。self-update 成功快进后,脚本会以同样的参数自动 `exec` 一次刚更新的
+自身(内部用 `XM_DEPLOY_LOCAL_REEXEC=1` 保证只发生一次),确保真正跑起来的是新版本脚本,
+不需要操作员按老办法"先手动 fast-forward、再运行"。
+
+**退出码 3**:fetch 已经成功、但本地 checkout 有 upstream 没有的提交、无法自动
+fast-forward(即真正分叉,不是单纯落后)时,脚本会打印精确的手动修复指令并以退出码 3
+停止——不会尝试合并或强推。收到退出码 3 时,按提示手动执行
+`git fetch origin release/v0.1-launch && git merge --ff-only FETCH_HEAD` 核实/解决分叉后
+重新运行本脚本。fetch 本身失败(网络/镜像不可达)不算这个退出码,仍走既有的"有精确匹配
+SHA 才放行"fail-closed 路径(退出码 1)。
+
 ## 之后再升级为 DEPLOY0 全流程(可选)
 
 `deploy/scripts/install-git-server.sh --repo /srv/git/xingmang-platform.git --ci-dir /srv/ci --confirm`
