@@ -19,6 +19,13 @@ import {
   UPSTREAM_ACCOUNTS_QUERY,
 } from "../api/finance";
 import { listMetrics, type MetricItem } from "../api/platform";
+import {
+  listPlatformChannels,
+  platformChannelRowKey,
+  type PlatformChannelPage,
+  type PlatformChannelRow,
+} from "../api/platformChannels";
+import { channelFieldNullReason } from "../lib/channelFieldReasons";
 import { appDemoDataConfig, shouldShowDemoBanner } from "../lib/demoData";
 import {
   connectionHealth,
@@ -40,6 +47,7 @@ import {
   readRequestsTrendDays,
   readSub2ApiChannelStatusRows,
   toTrendSparkSamples,
+  type NewApiChannelRow,
 } from "../lib/metrics";
 import { formatErrorRatePPM, formatScaledMinorUnits } from "../lib/money";
 import {
@@ -49,6 +57,7 @@ import {
   type ChannelMoneyAggregate,
 } from "../lib/financeOverview";
 import { platformOfMetricKey } from "../lib/platforms";
+import { channelDetailPath } from "../pages/ChannelDetailPage";
 import { ApiStateView } from "./ApiStateView";
 import { FinanceSummaryCards } from "./FinanceSummaryCards";
 import { MetricSparkline } from "./MetricSparkline";
@@ -58,7 +67,12 @@ const SEVEN_DAYS_HOURS = 168;
 
 /** NewAPI 概览使用的指标键。集中声明避免各处把平台归属写成相似但不一致的字符串。 */
 const NEWAPI_USERS_TOTAL_METRIC_KEY = "newapi.users.total";
-const NEWAPI_MODELS_USAGE_METRIC_KEY = "newapi.models.usage";
+/** XM-NEWAPI-OVERVIEW0：「近 7 日请求量」从 newapi.models.usage（模型用量,
+ *  经 metric-history 管线）换成 newapi.requests.trend_7d——与 Sub2API「近 7 日
+ *  调用量」同一条 reqlog 管线、同一个内嵌逐日数组形状，缺数据的日子有显式
+ *  missing 标记，而不是靠历史轮询间隔猜断点。newapi.models.usage 仍然是已注册
+ *  指标（其它地方要用随时可用），只是这张卡不再消费它。 */
+const NEWAPI_REQUESTS_TREND_7D_METRIC_KEY = "newapi.requests.trend_7d";
 
 /** Sub2API 概览新增的请求量三件套（XM-OVERVIEW-UI）：今日调用量、24h 成功率、
  *  近 7 日调用量趋势，均来自请求审计线（reqlog）按业务日/滚动窗口聚合而来。 */
@@ -113,9 +127,16 @@ export function platformHasPrototypeOverview(serviceType: string): boolean {
 export function PlatformOverviewPanel({
   serviceType,
   label,
+  serviceId,
+  serviceStatus,
 }: {
   serviceType: string;
   label: string;
+  /** 恰好一个已登记且 active 的 service 时才有值（与 ChannelTable.tsx 的
+   *  usesChannelRefGrain 同一个判据）。目前只有 NewAPI 的渠道健康卡需要它
+   *  读取真实渠道目录；Sub2API 分支忽略这两个参数。 */
+  serviceId?: string;
+  serviceStatus?: string;
 }) {
   const metricsQuery = useQuery({
     queryKey: ["metrics"],
@@ -144,7 +165,14 @@ export function PlatformOverviewPanel({
         <div className="flex flex-col gap-4">
           <SampleDataBanner platform={serviceType} demo={demo} hasMetrics={mine.length > 0} />
           {serviceType === "newapi" ? (
-            <NewApiOverview byKey={byKey} label={label} demo={demo} hasMetrics={mine.length > 0} />
+            <NewApiOverview
+              byKey={byKey}
+              label={label}
+              demo={demo}
+              hasMetrics={mine.length > 0}
+              serviceId={serviceId}
+              serviceStatus={serviceStatus}
+            />
           ) : (
             <Sub2ApiOverview byKey={byKey} label={label} demo={demo} hasMetrics={mine.length > 0} />
           )}
@@ -287,15 +315,24 @@ function NewApiOverview({
   label,
   demo,
   hasMetrics,
+  serviceId,
+  serviceStatus,
 }: {
   byKey: Map<string, MetricItem>;
   label: string;
   demo: boolean;
   hasMetrics: boolean;
+  serviceId?: string;
+  serviceStatus?: string;
 }) {
   const users = byKey.get(NEWAPI_USERS_TOTAL_METRIC_KEY);
   const channels = byKey.get(NEWAPI_CHANNELS_METRIC_KEY);
-  const requests = byKey.get(NEWAPI_MODELS_USAGE_METRIC_KEY);
+  // 只在恰好一个已登记且 active 的 service 时启用真实渠道目录：与
+  // ChannelTable.tsx 的 usesChannelRefGrain 同一个判据，多实例/未登记场景
+  // 没有 serviceId 可用，猜一个是错的（见 NewApiChannelHealthCard 的说明）。
+  const usesChannelRefGrain = Boolean(serviceId && serviceStatus === "active");
+  const requestsTrend = usableTrendDaysMetric(byKey.get(NEWAPI_REQUESTS_TREND_7D_METRIC_KEY));
+  const trendDays = requestsTrend ? readRequestsTrendDays(requestsTrend.value) : [];
 
   // NewAPI 的「我方计费 / 上游成本 / 毛利」不是充值指标：它们来自同一份
   // 渠道汇总快照，按 system_type 过滤后再分别聚合。这样页面不会把用户充值
@@ -363,11 +400,15 @@ function NewApiOverview({
       ) : null}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <NewApiChannelHealthCard item={channels} />
+        <NewApiChannelHealthCard
+          item={channels}
+          serviceId={usesChannelRefGrain ? serviceId : undefined}
+        />
         <TrendCard
           title="近 7 日请求量"
-          item={usableTrendMetric(requests)}
-          pendingNote="没有采到 newapi.models.usage；请求趋势归 NewAPI 模型用量指标，接入后显示。"
+          item={requestsTrend}
+          pendingNote="没有采到 newapi.requests.trend_7d；请求量趋势归请求审计线（reqlog），接入后按自然日显示请求数，缺数据的日子在图上断开、不用 0 顶替。"
+          samples={requestsTrend ? toTrendSparkSamples(trendDays) : undefined}
         />
       </div>
 
@@ -503,18 +544,13 @@ function financeRangeLabel(from: string | undefined, to: string | undefined): st
   return from === to ? `业务日 ${from}` : `业务日 ${from} ~ ${to}`;
 }
 
-function usableTrendMetric(item: MetricItem | undefined): MetricItem | undefined {
-  if (!item || item.freshness.state === "uninitialized") return undefined;
-  return metricPrimaryValue(item.metric_key, item.value).raw === null ? undefined : item;
-}
-
-/** trend_7d 的可用性判断与 usableTrendMetric **不是同一回事**：那个函数假设
- *  「主数值」是个扁平字段（走 metricPrimaryValue，未登记时 raw 会是 null），
- *  trend_7d 的 value 是内嵌的逐日数组，根本没有这个意义上的主数值——
- *  用 usableTrendMetric 判它会永远判成「不可用」（metricPrimaryValue 的兜底
- *  口径找不到能当主数值的标量字段）。存在且初始化过就交给 Sparkline 自己
- *  判断样本够不够画线：不足两个可画点时它会显示「暂无趋势」，不需要在这里
- *  重复判断一遍。 */
+/** trend_7d 的可用性判断不能走「主数值非 null」那一套（`metricPrimaryValue`
+ *  假设「主数值」是个扁平字段，未登记时 raw 会是 null）：trend_7d 的 value
+ *  是内嵌的逐日数组，根本没有这个意义上的主数值，套用那套判据会永远判成
+ *  「不可用」（兜底口径找不到能当主数值的标量字段）。存在且初始化过就交给
+ *  Sparkline 自己判断样本够不够画线：不足两个可画点时它会显示「暂无趋势」，
+ *  不需要在这里重复判断一遍。Sub2API/NewAPI 的「近 7 日调用量/请求量」两张
+ *  趋势卡共用这一个判据（XM-OVERVIEW-UI 引入，XM-NEWAPI-OVERVIEW0 复用）。 */
 function usableTrendDaysMetric(item: MetricItem | undefined): MetricItem | undefined {
   if (!item || item.freshness.state === "uninitialized") return undefined;
   return item;
@@ -748,8 +784,222 @@ function badgeTone(tone: HealthRow["tone"]): "success" | "warning" | "danger" | 
   }
 }
 
-/** NewAPI 的「渠道健康」表（原型左栏）。 */
-function NewApiChannelHealthCard({ item }: { item: MetricItem | undefined }) {
+/** NewAPI 供应商映射表查不到这个渠道类型时的原因——渠道目录契约的 vendor
+ *  字段本身就是 null（不是没接，是查表落空），XM-CHAN-WIRE0 的 handoff 已经
+ *  记录过这条：上游新增渠道类型后需要人工同步 chanfields 的静态映射表。 */
+const NEWAPI_VENDOR_NULL_REASON =
+  "这个渠道的类型不在 NewAPI 供应商映射表内（渠道目录契约 vendor 字段查表查不到，需要人工同步映射表）";
+
+/** 「分组」列没有任何数据源：渠道目录契约（XM-CHAN-FIELDS0）的 14 个扩展
+ *  字段里没有分组维度。NewAPI 上游确实有原生 Group 字段（model/channel.go
+ *  的 group 列，路由用），但今天没有任何连接器/契约把它读出来——摆位置显示
+ *  未接入，不编数字（宪法 12 条）。 */
+const NEWAPI_GROUP_NULL_REASON =
+  "NewAPI 渠道原生有分组字段（用于路由），但渠道目录契约（XM-CHAN-FIELDS0）没有采集这一维度，暂无数据源";
+
+/** 「状态」列没有匹配到 newapi.channels.status 指标记录时的原因——覆盖两种
+ *  情况（整条指标没采到 / 这一条渠道单独没匹配上），不细分是为了不过度
+ *  声称精度：两种情况给运营的下一步动作是一样的（等下一轮采集）。 */
+const NEWAPI_STATUS_NULL_REASON = "该渠道在 newapi.channels.status 指标里没有匹配记录，或该指标尚未成功采集";
+
+/** 渠道目录 Query（`GET /api/v1/platforms/newapi/channels`）的新鲜度契约。
+ *  目录本身不是指标观测，没有现成的 FreshnessContract 可用，这里从
+ *  inventory.observedAt/complete 构造一份；阈值沿用全站 1800 秒的惯例
+ *  （financeOverview.ts 的 aggregateFreshness 同一约定）。 */
+function channelCatalogFreshness(page: PlatformChannelPage, now: number): FreshnessContract {
+  if (!page.inventory.observedAt) {
+    return {
+      state: "uninitialized",
+      staleness_seconds: null,
+      threshold_seconds: 1800,
+      is_partial: false,
+      observed_at: null,
+      last_success: null,
+      last_error_code: "",
+    };
+  }
+  const seconds = Math.max(0, Math.round((now - Date.parse(page.inventory.observedAt)) / 1000));
+  const partial = !page.inventory.complete || page.inventory.coveragePartial;
+  return {
+    state: partial ? "partial" : seconds >= 1800 ? "stale" : "fresh",
+    staleness_seconds: seconds,
+    threshold_seconds: 1800,
+    is_partial: partial,
+    observed_at: page.inventory.observedAt,
+    last_success: page.inventory.observedAt,
+    last_error_code: "",
+  };
+}
+
+/** NewAPI 的「渠道健康」表（原型左栏）。
+ *
+ *  XM-NEWAPI-OVERVIEW0：行的主数据源从 newapi.channels.status 指标换成真实
+ *  渠道目录（`listPlatformChannels`，XM-CHAN-FIELDS0/WIRE0 已经交付真实的
+ *  vendor / today.successRate 两个字段）——渠道/上游/成功率三列因此从「摆
+ *  位置不给数字」升级成真数据，并且每行链接到渠道详情页（原型
+ *  `data-go="newapi/upstream/detail/<id>"`，`channelDetailPath` 与
+ *  ManagedChannelTable/ChannelDetailPage 同一个路由，点进去是同一个页面）。
+ *
+ *  「状态」列刻意继续用 newapi.channels.status 指标的 enabled/error_rate_ppm,
+ *  不改用目录的 row.status 字符串——那是 XM-CHAN-MERGE0 记录在案的刻意取舍
+ *  （sub2api/newapi 的 status 取值集合不同、都不是健康语义，贸然映射等于猜,
+ *  见该片 handoff 的 risks 一节），本片认同这个判断、不重新决定它。两个数据
+ *  源共用同一条底层 observation（`newapi.channels.status`，见
+ *  internal/platform/httpapi/channel_bindings.go 的 findChannelsObservation
+ *  注释：目录 Query 与指标端点读的是同一个 observation），按
+ *  channel_id / channelRef.externalChannelId 关联，两边 id 同源，不是猜的。
+ *
+ *  只在**恰好一个已登记且 active 的 service** 时启用目录数据源（与
+ *  ChannelTable.tsx 的 usesChannelRefGrain 同一个判据，由 NewApiOverview
+ *  算好通过 serviceId 传进来）；没有 serviceId 时落回纯指标口径的旧实现
+ *  （LegacyNewApiChannelHealthCard，行为逐字不变）——多实例/未登记场景没有
+ *  serviceId 可用，猜一个是错的。 */
+function NewApiChannelHealthCard({
+  item,
+  serviceId,
+}: {
+  item: MetricItem | undefined;
+  serviceId: string | undefined;
+}) {
+  if (!serviceId) return <LegacyNewApiChannelHealthCard item={item} />;
+  return <RealNewApiChannelHealthCard item={item} serviceId={serviceId} />;
+}
+
+function RealNewApiChannelHealthCard({
+  item,
+  serviceId,
+}: {
+  item: MetricItem | undefined;
+  serviceId: string;
+}) {
+  const query = useQuery({
+    queryKey: ["platform-channels", "newapi", serviceId],
+    queryFn: ({ signal }) => listPlatformChannels("newapi", serviceId, { signal }),
+  });
+
+  // 「状态」列的匹配表：与目录共用同一条底层 observation（见上方文档注释）,
+  // 按渠道 id 关联，指标未采集/未初始化时留空表，所有行落到「未接入」分支。
+  const statusByChannelId = new Map<string, NewApiChannelRow>();
+  if (item && item.freshness.state !== "uninitialized") {
+    for (const row of readNewApiChannelRows(item.value)) statusByChannelId.set(row.channelId, row);
+  }
+
+  const page = query.data;
+  const freshness = page ? channelCatalogFreshness(page, Date.now()) : null;
+
+  return (
+    <Card title="渠道健康" hint={page ? `${page.items.length} 条 NewAPI 渠道` : undefined}>
+      <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()} compact>
+        {page && page.items.length === 0 ? (
+          <PageState
+            kind="empty"
+            compact
+            title="NewAPI 渠道目录为空"
+            description="当前 service 的渠道目录为空或尚未成功采集；这不等于上游没有渠道。"
+          />
+        ) : page && freshness ? (
+          <>
+            <div className="relative max-w-full overflow-x-auto rounded-md border border-edge">
+              <table className="w-full border-collapse">
+                <caption className="sr-only">
+                  NewAPI 渠道健康：渠道、上游、分组、成功率与状态，点击渠道名进入详情页
+                </caption>
+                <thead className="border-b border-edge bg-surface-muted">
+                  <tr>
+                    {["渠道", "上游", "分组", "成功率", "状态"].map((h) => (
+                      <th
+                        key={h}
+                        scope="col"
+                        className="px-2 py-1 text-left text-xs font-medium whitespace-nowrap text-fg-muted"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {page.items.map((row) => (
+                    <NewApiChannelHealthRow
+                      key={platformChannelRowKey(row)}
+                      row={row}
+                      status={statusByChannelId.get(row.channelRef.externalChannelId)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+              <FreshnessBadge freshness={freshness} />
+              <FreshnessNote freshness={freshness} />
+              <span>来源 {page.inventory.source || "未声明"}</span>
+              <span>· 覆盖 {page.items.length} 条渠道目录</span>
+            </div>
+            <p className="text-xs text-fg-muted">{NEWAPI_GROUP_NULL_REASON}</p>
+          </>
+        ) : null}
+      </ApiStateView>
+    </Card>
+  );
+}
+
+/** 渠道健康表的一行：渠道名链到详情页，上游/成功率来自目录，分组恒未接入,
+ *  状态来自按 id 关联到的指标行（可能没有匹配，见 NEWAPI_STATUS_NULL_REASON）。 */
+function NewApiChannelHealthRow({
+  row,
+  status,
+}: {
+  row: PlatformChannelRow;
+  status: NewApiChannelRow | undefined;
+}) {
+  const successRate =
+    row.today === null
+      ? { text: null, reason: channelFieldNullReason("today", "newapi") }
+      : row.today.successRate === null
+        ? { text: null, reason: "该渠道今日统计已返回请求数与成本，但没有返回成功率" }
+        : { text: `${(row.today.successRate * 100).toFixed(1)}%`, reason: null };
+
+  return (
+    <tr className="border-b border-edge last:border-b-0">
+      <td className="px-2 py-1 text-xs text-fg">
+        <Link
+          to={channelDetailPath("newapi", row.channelRef.externalChannelId)}
+          className="block font-medium text-accent underline underline-offset-2"
+        >
+          {row.name || row.channelRef.externalChannelId || "—"}
+        </Link>
+        {status?.type ? <span className="block text-fg-muted">类型 {status.type}</span> : null}
+      </td>
+      <td className="px-2 py-1 text-xs text-fg">
+        {row.vendor ? row.vendor : <HealthUnavailableCell reason={NEWAPI_VENDOR_NULL_REASON} />}
+      </td>
+      <td className="px-2 py-1 text-xs">
+        <HealthUnavailableCell reason={NEWAPI_GROUP_NULL_REASON} />
+      </td>
+      <td className="px-2 py-1 text-xs text-fg">
+        {successRate.text ?? <HealthUnavailableCell reason={successRate.reason ?? ""} />}
+      </td>
+      <td className="px-2 py-1 text-xs text-fg">
+        {status ? (
+          <div className="flex flex-col items-start gap-1">
+            <Badge tone={status.enabled === true ? "success" : status.enabled === false ? "neutral" : "warning"}>
+              {status.enabled === true ? "启用" : status.enabled === false ? "停用" : "未知"}
+            </Badge>
+            <span className="text-fg-muted">
+              错误率 {status.errorRatePPM === null ? "未接入" : formatErrorRatePPM(status.errorRatePPM)}
+            </span>
+          </div>
+        ) : (
+          <HealthUnavailableCell reason={NEWAPI_STATUS_NULL_REASON} />
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/** 没有 serviceId（0 个或多个已登记 service）时的旧实现：纯指标口径，
+ *  上游 / 分组 / 成功率三列摆位置但不给数字。多实例/未登记场景没有真实
+ *  渠道目录可读，猜一个 serviceId 是错的，因此原样保留这条兜底路径。 */
+function LegacyNewApiChannelHealthCard({ item }: { item: MetricItem | undefined }) {
   if (!item || item.freshness.state === "uninitialized") {
     return (
       <Card title="渠道健康">
@@ -810,13 +1060,13 @@ function NewApiChannelHealthCard({ item }: { item: MetricItem | undefined }) {
                   <span className="block text-fg-muted">类型 {row.type || "未返回"}</span>
                 </td>
                 <td className="px-2 py-1 text-xs">
-                  <HealthUnavailableCell reason="渠道 ↔ 上游映射未接入" />
+                  <HealthUnavailableCell reason="没有 serviceId 可用（0 个或多个已登记 service），无法读取真实渠道目录来解析渠道 ↔ 上游映射" />
                 </td>
                 <td className="px-2 py-1 text-xs">
                   <HealthUnavailableCell reason="上游分组字段未接入" />
                 </td>
                 <td className="px-2 py-1 text-xs">
-                  <HealthUnavailableCell reason="平台成功率口径未接入" />
+                  <HealthUnavailableCell reason="没有 serviceId 可用（0 个或多个已登记 service），无法读取真实渠道目录来解析平台成功率" />
                 </td>
                 <td className="px-2 py-1 text-xs text-fg">
                   <div className="flex flex-col items-start gap-1">
@@ -839,11 +1089,13 @@ function NewApiChannelHealthCard({ item }: { item: MetricItem | undefined }) {
         <span>来源 {item.source || "未声明"}</span>
         <span>· 覆盖 {rows.length} 条逐渠道状态</span>
       </div>
-      {/* 原型这张表的上游 / 分组 / 成功率列保留位置，但当前状态指标没有可信
-          映射与平台成功率口径；每个单元格显式写「未接入」，避免空白被误读。 */}
+      {/* 原型这张表的上游 / 分组 / 成功率列保留位置，但这条兜底路径没有
+          serviceId、读不到真实渠道目录；每个单元格显式写「未接入」，避免
+          空白被误读。恰好一个已登记且 active 的 service 时会走
+          RealNewApiChannelHealthCard，那条路径上游/成功率是真数据。 */}
       <p className="text-xs text-fg-muted">
-        上游、分组与成功率三列暂未接入：前两列要等「平台渠道 ↔ 上游账号」的对应关系，
-        成功率需要独立的平台口径；当前可用的是启停与错误率。
+        上游、分组与成功率三列暂未接入：这个环境没有恰好一个已登记且运行中的 NewAPI
+        service，无法读取真实渠道目录；分组字段本身也还没有任何数据源。当前可用的是启停与错误率。
       </p>
     </Card>
   );

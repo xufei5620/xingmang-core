@@ -17,6 +17,9 @@ const REQUESTS_DAILY_METRIC = "sub2api.requests.daily";
 const SUCCESS_RATE_METRIC = "sub2api.requests.success_rate_24h";
 const TREND_METRIC = "sub2api.requests.trend_7d";
 const SUB2API_CHANNEL_STATUS_METRIC = "sub2api.channels.status";
+const NEWAPI_TREND_METRIC = "newapi.requests.trend_7d";
+const NEWAPI_CHANNELS_PATH = "/api/v1/platforms/newapi/channels";
+const NEWAPI_SERVICE_ID = "svc-newapi-1";
 
 const freshness = {
   state: "fresh",
@@ -80,7 +83,80 @@ function fakeResponse(body: unknown, status = 200): Response {
   return { ok: status < 400, status, json: () => Promise.resolve(body) } as unknown as Response;
 }
 
-function stub(over: { metrics?: unknown[]; alerts?: unknown[]; accounts?: unknown[] } = {}) {
+/** 渠道目录 Query（`GET /api/v1/platforms/newapi/channels`）的一条原始行,
+ *  按 `RawPage["items"][number]` 的 snake_case 形状铺默认值，扩展字段
+ *  （vendor/today/…）默认全 null——覆盖哪个字段就传哪个，其余保持「渠道目录
+ *  契约已交付但这一行这个字段确实是 null」的诚实默认态。 */
+function catalogRawItem(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    channel_ref: { service_id: NEWAPI_SERVICE_ID, external_channel_id: "c1" },
+    name: "gpt 主",
+    binding: null,
+    candidate: {
+      state: "unmapped",
+      evidence_status: "insufficient",
+      upstream_account_ids: [],
+      reason_codes: [],
+      platform_assignment_missing: false,
+      inventory_unknown: false,
+    },
+    economics: null,
+    economics_state: "unknown",
+    conflicts: [],
+    health: null,
+    models: null,
+    assurance: null,
+    runway: null,
+    observed: { source: "newapi-connector", observed_at: "2026-08-31T09:00:00Z", is_stale: false },
+    kind: null,
+    vendor: null,
+    status: null,
+    capacity: null,
+    scheduling: null,
+    today: null,
+    usage_window: null,
+    proxy: null,
+    rate_multiplier: null,
+    upstream_multiplier: null,
+    last_used_at: null,
+    created_at: null,
+    expires_at: null,
+    ...over,
+  };
+}
+
+/** 渠道目录 Query 的整页响应。`inventoryObservedAt` 默认取「现在」而不是写死
+ *  的历史时间戳——新鲜度是客户端按 Date.now() 现算的（channelCatalogFreshness
+ *  没有服务端预算好的 state 字段可用），写死时间戳会让「数据新鲜」断言随测试
+ *  实际运行的那一刻漂移，动态取当下时间才是确定性的。 */
+function catalogPage(
+  items: Record<string, unknown>[],
+  over: { inventoryObservedAt?: string | null; complete?: boolean; coveragePartial?: boolean } = {},
+): Record<string, unknown> {
+  return {
+    service: { id: NEWAPI_SERVICE_ID, service_type: "newapi", instance_id: "inst-1", environment: "development" },
+    inventory: {
+      state: "ready",
+      source: "newapi-connector",
+      observed_at: over.inventoryObservedAt === undefined ? new Date().toISOString() : over.inventoryObservedAt,
+      complete: over.complete ?? true,
+      truncated: false,
+      reported_count: items.length,
+      fetched_count: items.length,
+      coverage_partial: over.coveragePartial ?? false,
+      evidence: "",
+    },
+    from: "2026-08-31",
+    to: "2026-08-31",
+    items,
+    runway_coverage: { total: 0, known: 0, reasons: {} },
+    next_cursor: null,
+  };
+}
+
+function stub(
+  over: { metrics?: unknown[]; alerts?: unknown[]; accounts?: unknown[]; platformChannels?: unknown } = {},
+) {
   const fetchMock = vi.fn((url: string) => {
     if (url.startsWith("/api/v1/metrics/history")) return Promise.resolve(fakeResponse({ items: [] }));
     if (url.startsWith("/api/v1/metrics")) {
@@ -92,6 +168,9 @@ function stub(over: { metrics?: unknown[]; alerts?: unknown[]; accounts?: unknow
     if (url.includes("/finance/upstream-accounts")) {
       return Promise.resolve(fakeResponse({ items: over.accounts ?? [] }));
     }
+    if (url.startsWith(NEWAPI_CHANNELS_PATH)) {
+      return Promise.resolve(fakeResponse(over.platformChannels ?? catalogPage([])));
+    }
     // 成本卡那一行的两个汇总端点
     return Promise.resolve(fakeResponse({ items: [] }));
   });
@@ -99,12 +178,21 @@ function stub(over: { metrics?: unknown[]; alerts?: unknown[]; accounts?: unknow
   return fetchMock;
 }
 
-function renderPanel(serviceType = "sub2api", label = "Sub2API") {
+function renderPanel(
+  serviceType = "sub2api",
+  label = "Sub2API",
+  service: { serviceId?: string; serviceStatus?: string } = {},
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
-        <PlatformOverviewPanel serviceType={serviceType} label={label} />
+        <PlatformOverviewPanel
+          serviceType={serviceType}
+          label={label}
+          serviceId={service.serviceId}
+          serviceStatus={service.serviceStatus}
+        />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -472,5 +560,113 @@ describe("NewAPI 概览按它自己的原型页", () => {
     const card = (await screen.findByText("今日我方计费")).closest("article") as HTMLElement;
     expect(within(card).getByText("同步失败")).toBeTruthy();
     expect(within(card).queryByText("数据不完整")).toBeNull();
+  });
+
+  it("恰好一个 active service 时，渠道健康表从真实渠道目录读上游与成功率，并链到详情页（XM-NEWAPI-OVERVIEW0）", async () => {
+    stub({
+      metrics: [
+        metric(
+          NEWAPI_CHANNELS_METRIC,
+          { channels: [{ channel_id: "c1", name: "gpt 主", type: "openai", enabled: true, error_rate_ppm: 1200 }] },
+          "newapi-prod",
+        ),
+      ],
+      platformChannels: catalogPage([
+        catalogRawItem({
+          vendor: "Anthropic",
+          today: { requests: 312, success_rate: 0.974, cost_minor: "1880000", currency: "CNY", scale: 6 },
+        }),
+      ]),
+    });
+    renderPanel("newapi", "NewAPI", { serviceId: NEWAPI_SERVICE_ID, serviceStatus: "active" });
+
+    const card = (await screen.findByText("渠道健康")).closest("section") as HTMLElement;
+    // 上游：真实供应商名，不再是「未接入」（渠道目录 Query 是异步的，等它落地）
+    expect(await within(card).findByText("Anthropic")).toBeTruthy();
+    // 成功率：0-1 小数乘 100，一位小数
+    expect(within(card).getByText("97.4%")).toBeTruthy();
+    // 渠道名链到渠道详情页，路由与 ManagedChannelTable/ChannelDetailPage 同一条
+    const link = within(card).getByRole("link", { name: "gpt 主" });
+    expect(link.getAttribute("href")).toBe("/platforms/newapi/upstream/detail/c1");
+    // 状态列仍然来自 newapi.channels.status 指标口径（按 id 关联），不是目录的 status 枚举
+    expect(within(card).getByText("启用")).toBeTruthy();
+    // 分组没有任何数据源，恒未接入
+    expect(within(card).getByTitle(/分组.*没有采集这一维度/)).toBeTruthy();
+    // 新鲜度徽章在（目录 Query 的 inventory.observed_at 现算）
+    expect(within(card).getByText("数据新鲜")).toBeTruthy();
+  });
+
+  it("渠道目录字段为 null 时上游 / 成功率显示未接入 + 具体原因，不是猜的三列（XM-NEWAPI-OVERVIEW0）", async () => {
+    stub({ platformChannels: catalogPage([catalogRawItem()]) }); // 扩展字段全 null
+    renderPanel("newapi", "NewAPI", { serviceId: NEWAPI_SERVICE_ID, serviceStatus: "active" });
+
+    const card = (await screen.findByText("渠道健康")).closest("section") as HTMLElement;
+    expect(await within(card).findByTitle(/供应商映射表内/)).toBeTruthy();
+    expect(within(card).getByTitle(/newapi.channels.status 指标里没有匹配记录/)).toBeTruthy();
+    // today 整体是 null（不是 today 有值但 successRate 单独 null）
+    expect(within(card).getByTitle(/超出本次读取的预算|还没有今日数据/)).toBeTruthy();
+  });
+
+  it("多个 / 零个已登记 service 时落回旧实现，行为与接目录之前逐字一致（XM-NEWAPI-OVERVIEW0）", async () => {
+    // 不传 serviceId：与本文件其它没有 serviceId 的 NewAPI 用例同一条路径,
+    // 断言沿用既有的「渠道健康表缺的三列说出来」用例的措辞
+    const fetchMock = stub({
+      metrics: [
+        metric(NEWAPI_CHANNELS_METRIC, { channels: [{ channel_id: "c1", name: "gpt 主", enabled: true }] }, "newapi-prod"),
+      ],
+    });
+    renderPanel("newapi", "NewAPI");
+
+    expect(await screen.findByText(/上游、分组与成功率三列/)).toBeTruthy();
+    // 没有 serviceId 就不该打渠道目录端点——多实例/未登记场景猜一个 serviceId 是错的
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith(NEWAPI_CHANNELS_PATH))).toBe(false);
+  });
+
+  it("渠道目录观测过期（超过 30 分钟）时，渠道健康卡显示数据延迟", async () => {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    stub({
+      platformChannels: catalogPage([catalogRawItem({ vendor: "Anthropic" })], { inventoryObservedAt: twoHoursAgo }),
+    });
+    renderPanel("newapi", "NewAPI", { serviceId: NEWAPI_SERVICE_ID, serviceStatus: "active" });
+
+    const card = (await screen.findByText("渠道健康")).closest("section") as HTMLElement;
+    await within(card).findByText("Anthropic");
+    expect(within(card).getByText("数据延迟")).toBeTruthy();
+  });
+
+  it("渠道目录 coverage_partial 时，渠道健康卡标记数据不完整", async () => {
+    stub({
+      platformChannels: catalogPage([catalogRawItem({ vendor: "Anthropic" })], { coveragePartial: true }),
+    });
+    renderPanel("newapi", "NewAPI", { serviceId: NEWAPI_SERVICE_ID, serviceStatus: "active" });
+
+    const card = (await screen.findByText("渠道健康")).closest("section") as HTMLElement;
+    await within(card).findByText("Anthropic");
+    expect(within(card).getByText("数据不完整")).toBeTruthy();
+  });
+
+  it("近 7 日请求量没有采到 newapi.requests.trend_7d 时仍是未接入，不编数字", async () => {
+    stub({ metrics: [metric(USERS_TOTAL_METRIC, { total_users: 926, active_users: 184 }, "newapi-prod")] });
+    renderPanel("newapi", "NewAPI");
+
+    const card = (await screen.findByText("近 7 日请求量")).closest("section") as HTMLElement;
+    expect(within(card).getByText("未接入")).toBeTruthy();
+    expect(within(card).getByText(/newapi\.requests\.trend_7d/)).toBeTruthy();
+  });
+
+  it("近 7 日请求量接上 newapi.requests.trend_7d 后显示真实趋势，缺数据的日子入图但不是 0（XM-NEWAPI-OVERVIEW0）", async () => {
+    const days = Array.from({ length: 7 }, (_, i) => ({
+      day: `2026-08-2${i}`,
+      request_count: i === 4 ? 0 : 4000 + i * 100,
+      success_count: i === 4 ? 0 : 3900 + i * 100,
+      missing: i === 4,
+    }));
+    stub({ metrics: [metric(NEWAPI_TREND_METRIC, { days }, "newapi-prod")] });
+    renderPanel("newapi", "NewAPI");
+
+    const card = (await screen.findByText("近 7 日请求量")).closest("section") as HTMLElement;
+    expect(within(card).queryByText("未接入")).toBeNull();
+    // Sparkline 的 svg 带 role="img"；能找到它就说明真的在画折线，不是 PageState 占位文案
+    expect(within(card).getByRole("img")).toBeTruthy();
   });
 });
