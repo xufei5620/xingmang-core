@@ -59,6 +59,31 @@ for filename, body in {
     "inconsistent-partial.json": document("sub2api-staging", inconsistent=True),
 }.items():
     (root / filename).write_text(json.dumps(body, separators=(",", ":")) + "\n", encoding="utf-8")
+
+# core.connector_config 的 GET /connectors/config 脱敏 fixture（XM-OPS-TAILS0）：
+# 形状对齐 internal/platform/httpapi/credentials.go 的 connectorConfigItem。
+# 「没有这一行」用省略该平台条目表示，与 credentials.Store.ListConnectorConfigs
+# 「没有行的平台不在结果里」的真实行为一致，而不是发明一个第三态。
+def connector_config_document(modes):
+    items = []
+    for platform, mode in modes.items():
+        items.append({
+            "platform": platform, "mode": mode,
+            "endpoint": "https://upstream.invalid" if mode == "real" else "",
+            "target_allowlist": ["upstream.invalid"] if mode == "real" else [],
+            "credential_ref": f"secret://{platform}/token" if mode == "real" else "",
+            "version": 1, "updated_at": "2026-08-30T00:00:00Z", "updated_by": "fixture",
+        })
+    return {"items": items}
+
+for filename, modes in {
+    "connector-config-staging.json": {"sub2api": "fake", "newapi": "fake"},
+    "connector-config-real.json": {"sub2api": "real", "newapi": "real"},
+    "connector-config-unconfigured.json": {},
+    "connector-config-stale-real.json": {"sub2api": "fake", "newapi": "real"},
+}.items():
+    (root / filename).write_text(
+        json.dumps(connector_config_document(modes), separators=(",", ":")) + "\n", encoding="utf-8")
 PY
 
 ok() { printf 'ok - %s\n' "$1"; }
@@ -140,6 +165,7 @@ case "$url" in
   */api/v1/services) body='{"items":[{"service_type":"sub2api","instance_id":"sub2api-staging","environment":"staging","status":"active"}]}' ;;
   */api/v1/metrics) body="$(cat "${VERIFY_METRICS_FIXTURE:?}")" ;;
   */api/v1/alerts) body='{"items":[]}' ;;
+  */api/v1/connectors/config) body="$(cat "${VERIFY_CONNECTOR_CONFIG_FIXTURE:?}")" ;;
 esac
 [ -n "$out" ] && printf '%s\n' "$body" > "$out" || printf '%s\n' "$body"
 printf '200'
@@ -169,6 +195,7 @@ common=(
   "XM_VERIFY_REAL_MODE_PYTHON_BIN=${PYTHON_BIN:-python3}"
   "VERIFY_WORKER_LOG_FIXTURE=$fixture_root/worker-staging.log"
   "VERIFY_METRICS_FIXTURE=$fixture_root/staging-metrics.json"
+  "VERIFY_CONNECTOR_CONFIG_FIXTURE=$fixture_root/connector-config-staging.json"
 )
 
 expect_success "staging 正向 fixture 通过三 smoke、指标和 worker 日志" \
@@ -180,24 +207,46 @@ expect_success "staging 正向 fixture 通过三 smoke、指标和 worker 日志
 assert_text "正向输出含 healthz" 'healthz=200' "$tmp/stdout"
 assert_text "正向输出含三 smoke" 'smoke=services:200,metrics:200,alerts:200' "$tmp/stdout"
 assert_text "正向输出声明 finance rows deferred" 'finance.rows_written=deferred' "$tmp/stdout"
+assert_text "正向输出声明 connector_config 逐平台模式" 'connector_config_mode=sub2api:fake,newapi:fake' "$tmp/stdout"
 assert_not_text "正向输出不回显 fixture token" 'fixture-token-SHOULD-NOT-ECHO' "$tmp/stdout"
 assert_not_text "正向错误输出不回显 fixture token" 'fixture-token-SHOULD-NOT-ECHO' "$tmp/stderr"
 
 expect_success "real 正向 fixture 接受非演示来源与合法 partial" \
   env "${common[@]}" VERIFY_WORKER_LOG_FIXTURE="$fixture_root/worker-real.log" VERIFY_METRICS_FIXTURE="$fixture_root/real-metrics.json" \
+  VERIFY_CONNECTOR_CONFIG_FIXTURE="$fixture_root/connector-config-real.json" \
   "$verify_script" --test-mode --repo "$fixture_repo" \
   --compose-file "$fixture_repo/deploy/compose/launch.yaml" \
   --env-file "$fixture_repo/deploy/compose/.env" --mode real --platform sub2api,newapi \
   --probe-attempts 1
 assert_text "real 输出标记 real" 'mode=real' "$tmp/stdout"
+assert_text "real 输出声明 connector_config 逐平台模式" 'connector_config_mode=sub2api:real,newapi:real' "$tmp/stdout"
 
 expect_failure "real 拒绝演示 source" \
   env "${common[@]}" VERIFY_WORKER_LOG_FIXTURE="$fixture_root/worker-real.log" \
+  VERIFY_CONNECTOR_CONFIG_FIXTURE="$fixture_root/connector-config-real.json" \
   "$verify_script" --test-mode --repo "$fixture_repo" \
   --compose-file "$fixture_repo/deploy/compose/launch.yaml" \
   --env-file "$fixture_repo/deploy/compose/.env" --mode real --platform sub2api \
   --probe-attempts 1
 assert_text "演示 source 失败原因不泄漏响应正文" 'demo source' "$tmp/stderr"
+
+expect_failure "core.connector_config 模式与请求模式不一致时被拒（热切换未被察觉）" \
+  env "${common[@]}" VERIFY_WORKER_LOG_FIXTURE="$fixture_root/worker-real.log" VERIFY_METRICS_FIXTURE="$fixture_root/real-metrics.json" \
+  VERIFY_CONNECTOR_CONFIG_FIXTURE="$fixture_root/connector-config-stale-real.json" \
+  "$verify_script" --test-mode --repo "$fixture_repo" \
+  --compose-file "$fixture_repo/deploy/compose/launch.yaml" \
+  --env-file "$fixture_repo/deploy/compose/.env" --mode real --platform sub2api,newapi \
+  --probe-attempts 1
+assert_text "connector_config 不一致失败明确指出 mismatch" 'core.connector_config mode mismatch' "$tmp/stderr"
+assert_text "connector_config 不一致失败点名具体平台" 'sub2api=fake' "$tmp/stderr"
+
+expect_success "core.connector_config 里没有该平台的行按 fake 处理（未配置=正常状态）" \
+  env "${common[@]}" VERIFY_CONNECTOR_CONFIG_FIXTURE="$fixture_root/connector-config-unconfigured.json" \
+  "$verify_script" --test-mode --repo "$fixture_repo" \
+  --compose-file "$fixture_repo/deploy/compose/launch.yaml" \
+  --env-file "$fixture_repo/deploy/compose/.env" --mode staging --platform sub2api \
+  --probe-attempts 1
+assert_text "未配置平台按 fake 汇报" 'connector_config_mode=sub2api:fake' "$tmp/stdout"
 
 expect_failure "缺 key 的 metrics fixture 被拒" \
   env "${common[@]}" VERIFY_METRICS_FIXTURE="$fixture_root/missing-metric.json" \
