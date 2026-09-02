@@ -1319,6 +1319,37 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 		return err
 	}
 	if !in.EventTime.After(account.CutoverAt) {
+		if account.BootstrapKind == "POLICY_ANCHOR" {
+			// XM-INV-PREANCHOR-USAGE: a POLICY_ANCHOR account's cutover_at is
+			// itself a reconciliation checkpoint (design XM-INV-POLICY-ANCHOR
+			// 2.1), not a replayed history boundary -- a fact at or before it
+			// cannot be attributed to any ledger baseline by construction,
+			// whether or not it is also before the account's own policy
+			// start. That is not evidence of a missing source event the way
+			// it is for a legacy SIGNED_CUTOVER/POST_CUTOVER_REPLAY account
+			// (whose cutover replays real history up to a known point), so
+			// freezing SOURCE_GAP here is wrong: see the 2026-09-02
+			// production incident in docs/handoffs/XM-INV-PREANCHOR-USAGE.md
+			// (106 accounts freshly POLICY_ANCHOR-bootstrapped by a balances
+			// checkpoint had their own backlog of pre-anchor usage facts
+			// rejected this way in the same reconcile pass, wedging the
+			// ingestion pipeline dead after 8 retries each). Skip: no
+			// freeze, one audit row, commit so the caller marks the source
+			// event processed. Deliberately does not persist a
+			// source_usage_events/source_credit_events row for this fact --
+			// consistent with the existing pre-policy-checkpoint precedent
+			// (ObserveBalanceCheckpoint's eligibility.pre_policy_checkpoint.skipped
+			// path above), a skipped fact is represented purely by its audit
+			// row, never as a stored ledger-visible fact.
+			if err = writeAudit(ctx, tx, actor, "eligibility."+in.Kind+".pre_anchor_skipped",
+				"external_account", accountID, nil, map[string]any{
+					"external_object_id": in.ExternalObjectID, "external_event_id": in.ExternalEventID,
+					"event_time": in.EventTime, "cutover_at": account.CutoverAt,
+					"source_revision": in.SourceRevision}); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 		if err = freezeEligibilityTx(ctx, tx, accountID, "", "SOURCE_GAP", in.Kind, in.ExternalObjectID, in.SourceRevision, actor); err != nil {
 			return err
 		}
