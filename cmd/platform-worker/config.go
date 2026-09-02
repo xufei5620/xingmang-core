@@ -306,6 +306,32 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		config.ConnectorProbeInterval = interval
 	}
 
+	// XM-ASSURE1-core：渠道主动探测（检测任务）的全局 Kill Switch 与每平台
+	// 每日预算（ADR-019 决策·四·#5 / 决策·五）。默认关闭、默认预算 50——
+	// 与其它 _ENABLED 开关同一条纪律（宪法 26 条：新平台/新环境天生不允许
+	// 探测花钱，必须显式打开）。这个 Worker 侧的解析独立于
+	// cmd/platform-api 那一侧对同一个变量的解析（两个进程互不可见对方
+	// 内存，XM_CONNECTOR_PROBE_ENABLED 的既有先例同理）——两侧必须配同一个
+	// 值，否则 Action 接受时的判断会和 Job 执行时刻复检的判断不一致。
+	if value := getenv("XM_ASSURE_PROBE_ENABLED"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("assurance probe enabled: %w", err)
+		}
+		config.AssuranceProbeGlobalEnabled = enabled
+	}
+	if value := getenv("XM_ASSURE_PROBE_DAILY_BUDGET"); value != "" {
+		budget, err := strconv.Atoi(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("assurance probe daily budget: %w", err)
+		}
+		if budget <= 0 {
+			return jobs.Config{}, fmt.Errorf(
+				"XM_ASSURE_PROBE_DAILY_BUDGET 必须为正，got %s（预算为 0 应使用 XM_ASSURE_PROBE_ENABLED=false 关闭探测，而不是把预算调成 0）", value)
+		}
+		config.AssuranceProbeDailyBudget = budget
+	}
+
 	// XM-CPA0：CPA（CLI Proxy API + cpa-manager-plus）只读文件后端周期同步。
 	// 默认 off——没有凭据要处理，也没有 fake 模式垫底，一个没配 XM_CPA_MODE
 	// 的环境应当保持关闭，而不是每轮同步都对着一个不存在的挂载路径报错

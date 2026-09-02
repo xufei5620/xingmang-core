@@ -1,0 +1,17 @@
+{
+  "id": "assurance.probe.run",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "assurance.probe.run",
+  "principal_types": ["HUMAN", "SERVICE"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "OPTIONAL_CLIENT_RUN_KEY",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {"required": false},
+  "compensation_mode": "NOT_POSSIBLE",
+  "params": {
+    "declaration_id": {"type": "string", "required": true},
+    "client_run_key": {"type": "string", "required": false}
+  },
+  "notes": "触发一次检测批次（ADR-019 决策·三：定为 L1，见该 ADR 的完整推理，不是 L2）。compensation_mode=NOT_POSSIBLE：探测一旦发出真实请求，花费已经发生，无法撤销这次调用本身；可撤销的只是后续调度，走 cancel@1（撤销声明本身，不撤销单次批次）。Handler 按顺序判定：声明必须 active（否则 refused，reason=declaration_cancelled）→ connector_config 不存在或 mode=fake 时直接放行（fake 模式零成本，跳过下面全部闸）→ mode=real 时依次校验全局 Kill Switch（XM_ASSURE_PROBE_ENABLED）/ 平台 Kill Switch（core.connector_config.probe_enabled）/ probe_credential_ref 非空 / target_host 在 target_allowlist 内 / 当日预算未耗尽 / 冷却已过 / 该平台没有其它 pending/running 批次——任一条件不满足都写一条 status=refused 的 probe_run 行并正常返回（Action 层不报错，“决定不跑”本身是一次成功执行，返回值里带 run_id/status=refused/refusal_reason，供前端与历史记录展示）；全部通过则写 status=pending 的 probe_run 行，与入队 River 任务 assurance_probe 同一个数据库事务。client_run_key 提供时：若同一 declaration_id+client_run_key 已存在一条 pending/running 的 run，直接返回该 run 而不新建（防止“发起检测”按钮被连点两次造成两条重复历史）。principal_types 刻意含 SERVICE（供未来的定时调度以 worker:platform 触发，本片未接线任何定时调度器）、刻意不含 AI（ADR-019 决策·七·6：探测会花真钱、打真实第三方相邻的产品接口，在没有运行时间证据之前先不让 AI 身份触发探测）。"
+}

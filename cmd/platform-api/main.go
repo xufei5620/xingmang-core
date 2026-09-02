@@ -18,6 +18,7 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/assurance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
 	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
@@ -155,6 +156,51 @@ func main() {
 	if err := credentials.RegisterActions(actionRegistry, credentialStore); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 渠道主动探测（XM-ASSURE1-core）：declare/cancel/run 三个 L1 Action 走
+	// 本包新仓储；kill_switch.set 复用 credentialStore 的 SetProbeSwitch——
+	// 与 connector.config.set@1 分开授权、分开审计（ADR-019 决策·四·#4）。
+	// run@1 需要在与 probe_run 行插入的同一个事务里入队 River Job，本进程
+	// 从不运行 Worker，因此这里只建一个"只插入"的 River 客户端（见
+	// newAssuranceProbeInsertClient 的文档注释）。注册失败即拒绝启动，
+	// 同其它模块的纪律。
+	assuranceGlobalKillSwitch, err := assuranceProbeGlobalKillSwitchFromEnv(os.Getenv)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "assurance_probe_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	assuranceDailyBudget, err := assuranceProbeDailyBudgetFromEnv(os.Getenv)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "assurance_probe_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	assuranceJobs, err := newAssuranceProbeInsertClient(pool, logger)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "assurance_probe_job_client_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	assuranceStore, err := assurance.NewStore(pool, assuranceJobs, ops.NewStore(pool),
+		assurance.WithLimits(assurance.Limits{DailyBudgetPerPlatform: assuranceDailyBudget}),
+		assurance.WithGlobalKillSwitch(assuranceGlobalKillSwitch),
+	)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "assurance_probe_store_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := assurance.RegisterActions(actionRegistry, assuranceStore, credentialStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	assuranceService, err := assurance.NewService(assuranceStore)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "assurance_probe_service_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
 	runwayThresholdStore := finance.NewRunwayThresholdStore(pool, nil)
@@ -370,6 +416,11 @@ func main() {
 		RequestLogs: requestLogsOrNil(requestLogs),
 		// nil 时「渠道保障」两个端点不挂载（见 httpapi.Deps.ChannelAssurance）
 		ChannelAssurance: channelAssuranceOrNil(channelAssurance),
+		// 检测任务 / 主动检测历史（XM-ASSURE1-core）。assuranceService 恒非
+		// nil（构造失败已在上面拒绝启动），这里仍走同一个接口类型赋值，
+		// 与 assurance.Service 满足 httpapi.AssuranceProbeQuerier 的窄接口
+		// 约定一致。
+		AssuranceProbes: assuranceService,
 		// nil 时用户端点不挂载（见 httpapi.Deps.PlatformUsers）
 		PlatformUsers:          platformUsersOrNil(platformUserService),
 		PlatformUserDetails:    platformUserDetailsOrNil(platformUserService),

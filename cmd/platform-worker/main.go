@@ -98,6 +98,14 @@ func main() {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "alert_wecom_credential_ref_invalid")
 		os.Exit(2)
 	}
+	// XM-ASSURE1-core：探测专用凭据（core.connector_config.probe_credential_ref）
+	// 的通用 Provider——与上面几条不同，引用是"因平台而异、存在数据库里"的，
+	// 见 assuranceProbeSecretsFromEnv 的注释。
+	config.AssuranceProbeSecrets, err = assuranceProbeSecretsFromEnv(os.Getenv, logger, config.Environment, config.SecretRoot)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "assurance_probe_secret_provider_invalid")
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -194,7 +202,12 @@ func main() {
 		"reqlog_metrics_mode", string(config.ReqlogMetricsMode),
 		"reqlog_metrics_mode_recognized", config.ReqlogMetricsModeRecognized,
 		"reqlog_metrics_data_dir", config.ReqlogMetricsDataDir,
-		"reqlog_metrics_interval", config.ReqlogMetricsInterval.String())
+		"reqlog_metrics_interval", config.ReqlogMetricsInterval.String(),
+		// XM-ASSURE1-core：检测任务的 Worker 永远注册（按需触发，不是周期
+		// 任务），这里只打 Kill Switch/预算这两个真正门控探测是否发生的值。
+		"assurance_probe_global_enabled", config.AssuranceProbeGlobalEnabled,
+		"assurance_probe_daily_budget", config.AssuranceProbeDailyBudget,
+		"assurance_probe_secrets_configured", config.AssuranceProbeSecrets != nil)
 
 	<-ctx.Done()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

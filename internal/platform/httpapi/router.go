@@ -67,6 +67,12 @@ type Deps struct {
 	// 的 index.jsonl（见 connectors/reqlog 的 MetricsReader），fake/real 两种
 	// 模式都没有可供扫描的真实磁盘数据，为 nil 时两个端点不挂载。
 	ChannelAssurance ChannelAssuranceQuerier
+	// AssuranceProbes 供"检测任务" / "主动检测历史"两个只读端点（XM-ASSURE1
+	// -core，主动探测）。始终有值（本片不像 ChannelAssurance 依赖 reqlog
+	// file 模式那样有可选依赖——assurance schema 是本片自带的表，只要
+	// core.environment 存在就能挂载），但仍按同一条 nil 网关纪律处理：为 nil
+	// 时两个端点不挂载而不是带着 nil 依赖硬跑成 500。
+	AssuranceProbes AssuranceProbeQuerier
 	// PlatformUsers 为 nil 时「用户管理」端点不挂载（XM-0046）。
 	// 与 RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
 	PlatformUsers          PlatformUsersQuerier
@@ -290,6 +296,22 @@ func NewRouter(d Deps) http.Handler {
 				api.With(RequireScope(requestlog.ScopeRead)).
 					Get("/platforms/{platform}/assurance/history",
 						GetPlatformAssuranceHistoryHandler(d.ChannelAssurance))
+			}
+
+			// 渠道保障 · 检测任务 / 主动检测历史（XM-ASSURE1-core，主动探测）。
+			// 复用 requestlog.ScopeRead 同一个理由：这批数据的敏感度与被动
+			// 指标同级（都是"这个平台今天调用多不多/健不健康"，不含 Prompt
+			// 具体输出），团队交接明确要求能复用就不新增。**这两个端点与上面
+			// 两个（保障概览/历史记录，被动）是完全独立的两组数据源**——
+			// 主动探测的历史来自 assurance.probe_result，不与被动统计共用
+			// 任何 metric_key 命名空间（ADR-019 决策·六）。
+			if d.AssuranceProbes != nil {
+				api.With(RequireScope(requestlog.ScopeRead)).
+					Get("/platforms/{platform}/assurance/probes",
+						GetPlatformAssuranceProbesHandler(d.AssuranceProbes))
+				api.With(RequireScope(requestlog.ScopeRead)).
+					Get("/platforms/{platform}/assurance/probe-history",
+						GetPlatformAssuranceProbeHistoryHandler(d.AssuranceProbes))
 			}
 
 			// 被管平台的终端用户清单（XM-0046）。**不复用 ops.read**：
