@@ -287,8 +287,18 @@ function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
       // 只有 sub2api / newapi 有按原型对齐的概览（两版结构还不一样）。
       // **不匹配时落回蓝图那条路**：服务器的概览由 UI 第 6 片画了蓝图，
       // 在这里截胡会把它悄悄换成一屏通用指标卡（与 suppliers 同一类错误）
+      //
+      // serviceId/serviceStatus：与下面 "upstream" case 的 usesChannelRefGrain
+      // 同一个判据（XM-NEWAPI-OVERVIEW0）——NewAPI 概览的「渠道健康」卡要读
+      // 真实渠道目录，需要恰好一个已登记 service 的 id；Sub2API 分支忽略
+      // 这两个参数，多传不影响它的渲染。
       return platformHasPrototypeOverview(spec.serviceType) ? (
-        <PlatformOverviewPanel serviceType={spec.serviceType} label={spec.label} />
+        <PlatformOverviewPanel
+          serviceType={spec.serviceType}
+          label={spec.label}
+          serviceId={entry.services.length === 1 ? entry.services[0]?.id : undefined}
+          serviceStatus={entry.services.length === 1 ? entry.services[0]?.status : undefined}
+        />
       ) : (
         fallbackTabContent(entry, tab)
       );
