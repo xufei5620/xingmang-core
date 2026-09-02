@@ -337,6 +337,106 @@ describe("契约缺口提示条", () => {
   });
 });
 
+describe("翻页（keyset cursor 加载更多）", () => {
+  /** 依次返回 bodies 里的响应；耗尽后重复最后一个，模拟游标到底后的稳定态。 */
+  function stubFetchPages(bodies: Record<string, unknown>[]) {
+    const urls: string[] = [];
+    let call = 0;
+    const fetchMock = vi.fn((input: unknown) => {
+      urls.push(String(input));
+      const body = bodies[Math.min(call, bodies.length - 1)];
+      call += 1;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(body),
+      } as unknown as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return urls;
+  }
+
+  it("还有更多时显示「加载更多」，点击后带上一页的 cursor 追加行而不是替换", async () => {
+    const urls = stubFetchPages([
+      pageBody({ next_cursor: "c2" }),
+      pageBody({
+        next_cursor: "",
+        items: [userItem({ id: "u_next", username: "第二页用户" })],
+      }),
+    ]);
+    renderPanel();
+    await screen.findByText("张伟");
+    expect(screen.queryByText("第二页用户")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+
+    await screen.findByText("第二页用户");
+    // 第一页的两条还在——是追加，不是替换
+    expect(screen.getByText("张伟")).toBeTruthy();
+    expect(screen.getByText("Studio X")).toBeTruthy();
+    expect(urls[urls.length - 1]).toContain("cursor=c2");
+  });
+
+  it("没有更多页时显示已加载合计条数，不显示「加载更多」按钮", async () => {
+    stubFetchPages([pageBody({ next_cursor: "" })]);
+    renderPanel();
+    await screen.findByText("张伟");
+
+    expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
+    // 「已加载」出自来源卡片（与 Sub2ApiOrdersPanel 同一措辞）；DataTableV2 自带的
+    // 「共 N 条」页脚是另一件事（当前渲染的行数），两者不是同一句话。
+    expect(screen.getByText(/已加载 2 条/)).toBeTruthy();
+  });
+
+  it("翻页不影响需关注计数的诚实范围说明（改为「已加载」而不是固定「本页」）", async () => {
+    stubFetchPages([
+      pageBody({ next_cursor: "c2" }),
+      pageBody({
+        next_cursor: "",
+        items: [userItem({ id: "u_next", username: "第二页用户", status: "disabled" })],
+      }),
+    ]);
+    renderPanel("newapi");
+    await screen.findByText("张伟");
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+    await screen.findByText("第二页用户");
+
+    // 已加载 3 条（第一页 2 条 + 第二页 1 条），其中 2 条不是「正常」
+    // （Studio X 是 limited，第二页用户是 disabled）
+    expect(screen.getByText("已加载 3 条里状态不是「正常」的（上游未提供全库计数）")).toBeTruthy();
+  });
+});
+
+describe("查询缓存（TanStack Query staleTime）", () => {
+  it("15 秒新鲜期内重新挂载命中缓存，不发出第二次请求（来回导航不刷屏）", async () => {
+    const urls = stubFetch();
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 15_000 } },
+    });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/"]}>
+          <PlatformUsersPanel platform="sub2api" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText("张伟");
+    expect(urls.length).toBe(1);
+    view.unmount();
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/"]}>
+          <PlatformUsersPanel platform="sub2api" />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    // 缓存命中：数据立刻可见，不经过一次新的加载态
+    expect(screen.getByText("张伟")).toBeTruthy();
+    expect(urls.length).toBe(1);
+  });
+});
+
 describe("XM_PLATFORM_USERS_MODE=off（端点未挂载）", () => {
   /** chi 对没挂载的路由回纯文本 404：json() 会像浏览器解析 HTML/纯文本一样抛出，
    *  不是 pageBody 那种带 error.code 的 JSON 错误包。 */

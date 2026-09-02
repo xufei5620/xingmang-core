@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import {
   DataTableV2,
   FreshnessBadge,
@@ -173,8 +173,9 @@ interface PlatformUsersView {
   /** 顶部说明（原型 `phead` 的副标题）。 */
   intro: string;
   columns: DataTableColumn<PlatformUserItem>[];
-  /** 顶部四格。 */
-  tiles: (page: PlatformUserPage) => React.ReactNode;
+  /** 顶部四格。`items` 是**目前已加载的全部页**（不只是最后一页），
+   *  给需要诚实标注范围的格（如「需关注」）用。 */
+  tiles: (page: PlatformUserPage, items: PlatformUserItem[]) => React.ReactNode;
 }
 
 const COLUMN_PERIOD_RECHARGE = amountColumn("recharge", "区间充值", (u) => u.period_recharge);
@@ -263,7 +264,7 @@ const NEWAPI_VIEW: PlatformUsersView = {
     COLUMN_STATUS,
     COLUMN_LAST_ACTIVE,
   ],
-  tiles: (page) => (
+  tiles: (page, items) => (
     <>
       <StatTile
         label="用户总数"
@@ -282,22 +283,24 @@ const NEWAPI_VIEW: PlatformUsersView = {
         note="含可用余额，不含上游余额"
       />
       <PeriodTotalTile label="区间消费" amount={page.period_totals.consumed} page={page} />
-      <NeedsAttentionTile page={page} />
+      <NeedsAttentionTile items={items} />
     </>
   ),
 };
 
-/** 「需关注」= 本页里状态不是「正常」的用户数（NewAPI 原型第四格）。
+/** 「需关注」= 目前已加载的行里状态不是「正常」的用户数（NewAPI 原型第四格）。
  *
- *  副行必须说清它数的是**本页**：服务端只按状态筛，没有给「全库有多少条
- *  需关注」这个数。写成一个不带范围的「2」，会被读成全平台只有两个问题账号。 */
-function NeedsAttentionTile({ page }: { page: PlatformUserPage }) {
-  const count = page.items.filter((u) => u.status !== "active").length;
+ *  副行必须说清它数的是**已加载的行**：服务端只按状态筛，没有给「全库有多少条
+ *  需关注」这个数；点了几次「加载更多」，这个范围就跟着变，不能钉死在第一页
+ *  50 条上——那样翻了页之后这句话就会开始撒谎。写成一个不带范围的「2」，
+ *  会被读成全平台只有两个问题账号。 */
+function NeedsAttentionTile({ items }: { items: PlatformUserItem[] }) {
+  const count = items.filter((u) => u.status !== "active").length;
   return (
     <StatTile
       label="需关注"
       value={String(count)}
-      note={`本页 ${page.items.length} 条里状态不是「正常」的（上游未提供全库计数）`}
+      note={`已加载 ${items.length} 条里状态不是「正常」的（上游未提供全库计数）`}
     />
   );
 }
@@ -333,9 +336,9 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
     setSearchParams(next, { replace: true });
   };
 
-  const query = useQuery({
+  const query = useInfiniteQuery({
     queryKey: ["platform-users", platform, { sort, day, granularity }],
-    queryFn: ({ signal }) =>
+    queryFn: ({ pageParam, signal }) =>
       listPlatformUsers(platform, {
         signal,
         sort,
@@ -343,9 +346,21 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
         // 空串不传：让服务端解释「今天」
         ...(day ? { day } : {}),
         granularity,
+        ...(pageParam ? { cursor: pageParam } : {}),
       }),
+    initialPageParam: "",
+    getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
+    // 与 main.tsx 的全局默认一致地显式声明一遍：翻回这个页签命中缓存直接
+    // 展示已加载的数据，不在新鲜期内重新刷屏；多页缓存条目更容易被将来的
+    // 改动无意间改掉，所以这里不依赖隐式继承。
+    staleTime: 15_000,
   });
-  const page = query.data;
+  const pages = query.data?.pages ?? [];
+  // 顶部四格、来源、新鲜度都是「全体用户」口径的聚合（后端注释：TotalBalance/
+  // ActiveToday 本来就要求全量，不随游标变化），取最后一次成功响应即可；
+  // 逐行表格才需要把已加载的每一页拼起来。
+  const page = pages.length > 0 ? pages[pages.length - 1] : undefined;
+  const items = pages.flatMap((p) => p.items);
   // 未挂载时下面渲染的是「未接入」空状态，不是样本表格：这句 warnbar 明说
   // 「下面的逐用户流水来自样本数据源」，在未接入场景下继续显示等于把「没接」
   // 说成「接了但是假的」——两者对运营是完全不同的下一步
@@ -390,14 +405,13 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
         {page === undefined ? null : (
           <div className="flex flex-col gap-3">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              {view.tiles(page)}
+              {view.tiles(page, items)}
             </div>
 
             <div className="rounded-lg border border-edge bg-surface p-3">
               <FreshnessNote freshness={page.freshness} />
               <p className="text-xs text-fg-muted">
-                来源 {page.data_source || "—"} · 本页 {page.items.length} 条
-                {page.next_cursor ? " · 还有更多（排序在服务端，翻页随第 6 片补齐）" : null}
+                来源 {page.data_source || "—"} · 已加载 {items.length} 条
               </p>
             </div>
 
@@ -406,7 +420,7 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
             <DataTableV2
               caption="终端用户：余额、区间充值与消费、状态与最后活跃"
               columns={[...view.columns, detailColumn(platform)]}
-              rows={page.items}
+              rows={items}
               rowKey={(u) => u.id}
               searchable
               filters={[
@@ -418,6 +432,18 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
                   title="这个平台还没有用户"
                   description="上游用户清单里一条都没有；也可能这条链路刚接上，还没同步过。"
                 />
+              }
+              footerExtra={
+                query.hasNextPage ? (
+                  <button
+                    type="button"
+                    onClick={() => void query.fetchNextPage()}
+                    disabled={query.isFetchingNextPage}
+                    className="min-h-9 rounded-md border border-edge-strong px-3 py-1 text-xs font-medium text-accent hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {query.isFetchingNextPage ? "加载中…" : "加载更多"}
+                  </button>
+                ) : null
               }
             />
           </div>
