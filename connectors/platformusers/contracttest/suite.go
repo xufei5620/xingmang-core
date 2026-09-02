@@ -8,6 +8,7 @@ package contracttest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"regexp"
 	"strings"
@@ -43,6 +44,28 @@ func assertV2Capabilities(t *testing.T, source string, client platformusers.Read
 			if err != nil || parsed.IsWrite() {
 				t.Fatalf("v2 capability %q 无效或为写能力: %v", cap, err)
 			}
+		}
+	}
+	if containsCapability(v2Caps, platformusers.CapabilityUserDetailRead) {
+		reader, ok := client.(platformusers.UserDetailReader)
+		if !ok {
+			t.Fatal("声明 detail_read capability 却未实现 UserDetailReader")
+		}
+		// 不同调用方(Fake 固定样本、各个 real 固件测试)拥有的用户集合互不
+		// 相同,这里不能假设某个具体 ID 存在;用一个任何实现都不可能真的
+		// 拥有的哨兵 ID 只断言"能力布线正确 + 未知 ID 走 ErrNotFound"这条
+		// 对所有实现都成立的通用行为,与 assertUnknownSourceRejected 用
+		// 「查无此平台」探测未知来源同一个思路。
+		const sentinelID = "contracttest-sentinel-user-does-not-exist"
+		_, err := reader.GetUser(context.Background(), platformusers.GetUserQuery{
+			Ref: platformusers.UserRef{Platform: source, ID: sentinelID},
+		})
+		if err == nil {
+			t.Fatal("探测用的哨兵 ID 不应该真的命中任何客户端的样本用户")
+		}
+		if !errors.Is(err, platformusers.ErrNotFound) && !errors.Is(err, platformusers.ErrLookupIncomplete) {
+			skipIfNotSupported(t, err)
+			t.Fatalf("对不存在的 ID,GetUser 应返回 ErrNotFound(或翻页耗尽的 ErrLookupIncomplete),得到 %v", err)
 		}
 	}
 	if containsCapability(v2Caps, platformusers.CapabilityUserDailyUsageRead) {

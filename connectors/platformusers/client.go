@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
+	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
@@ -250,6 +251,58 @@ func (c *RealClient) ListUsers(ctx context.Context, filter ListFilter) (UserPage
 		NextCursor:   next,
 		Snapshot:     snapshot,
 	}, nil
+}
+
+// GetUser 是 UserDetailReader 的 real 实现(XM-USERS-V2-REAL,Task 4/5,
+// SUB2_REAL_APPROVAL / NEWAPI_REAL_APPROVAL)。
+//
+// 两个上游都没有原生的"按 ID 精确查询"端点——两份批准的证据都只覆盖各自的
+// 用户清单端点,所以真正的分页扫描逻辑在 sub2api_v2.go / newapi_v2.go 里
+// (getSub2APIUser / getNewAPIUser),本方法只做来源校验、区间归一化与
+// 分发,与 ListUsers 的结构对称。
+func (c *RealClient) GetUser(ctx context.Context, query GetUserQuery) (UserDetail, error) {
+	if err := ctx.Err(); err != nil {
+		return UserDetail{}, err
+	}
+	if err := query.Ref.Validate(); err != nil || query.Ref.Platform != c.cfg.Source {
+		return UserDetail{}, connectorBadSource(query.Ref.Platform)
+	}
+	now := c.clock()
+	period, err := (Period{Day: query.Day, Granularity: query.Granularity}).Normalize(now, nil)
+	if err != nil {
+		return UserDetail{}, connectorBadPeriod(err)
+	}
+
+	var detail UserDetail
+	switch c.cfg.Source {
+	case SourceSub2API:
+		detail, err = c.getSub2APIUser(ctx, query.Ref)
+	case SourceNewAPI:
+		detail, err = c.getNewAPIUser(ctx, query.Ref)
+	default:
+		// 不可达:cfg.Source 已在 NewRealClient 里经 ParseSource 校验过。
+		return UserDetail{}, connectorBadSource(c.cfg.Source)
+	}
+	if err != nil {
+		return UserDetail{}, err
+	}
+	detail.Period = period
+	detail.Capabilities = c.V2Capabilities()
+	return detail, nil
+}
+
+// V2Capabilities 声明本 real 客户端已实现且经共享 contracttest 验证过的 v2
+// 能力。**只有 detail_read 一项**:DailyUsage / Key metadata 的 real reader
+// 需要各自独立的 DAILY_USAGE_APPROVAL / KEY_SCOPE_APPROVAL 真实数据面审批
+// (设计文档 §0),SUB2_REAL_APPROVAL / NEWAPI_REAL_APPROVAL 明确不覆盖它们
+// ——声明了却没实现 DailyUsageReader / KeyMetadataReader,contracttest 的
+// assertV2Capabilities 会在断言阶段就拒绝这种"先宣称、后实现"的做法。
+//
+// 两个来源共用同一个方法而不按 c.cfg.Source 分支:real 端目前只对两个来源
+// 都实现了这一项能力,没有理由让它们的声明不同(与 Fake 端 Sub2API 独占
+// daily/key 两项的情况不同,那是因为 Fake 两项都实现了,real 都没实现)。
+func (c *RealClient) V2Capabilities() []registry.Capability {
+	return []registry.Capability{CapabilityUserDetailRead}
 }
 
 func (c *RealClient) clock() time.Time { return c.now().UTC() }
