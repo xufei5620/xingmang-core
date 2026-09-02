@@ -100,15 +100,6 @@ func identityMigrationHash(issuer, subject string) string {
 	return sha256Hex(issuer + "\n" + subject)
 }
 
-// MigrateOIDCBinding validates and, only when in.Apply, executes the CR-0006
-// item f identity rebind in one all-or-nothing transaction: it locks the
-// matched row, rewrites oidc_issuer/oidc_subject (and re-encrypts
-// email_ciphertext under the new pair's AAD, if an email is on file --
-// otherwise it would remain permanently undecryptable under the old AAD once
-// the issuer/subject that authenticated it change), invalidates every live
-// auth_sessions row for that user, and writes the identityMigratedAction
-// audit row. A dry run (Apply==false) runs every one of the same validation
-// and lookup queries, inside the same transaction, then always rolls back.
 // validateIdentityMigrationInput checks in independently of any database
 // connection -- every "refuses when subject formats are invalid" /
 // "--operator-id is required with --apply" rule MigrateOIDCBinding documents,
@@ -144,6 +135,15 @@ func validateIdentityMigrationInput(in IdentityMigrationInput) (fromIssuer, from
 	return fromIssuer, fromSubject, toIssuer, toSubject, operatorID, nil
 }
 
+// MigrateOIDCBinding validates and, only when in.Apply, executes the CR-0006
+// item f identity rebind in one all-or-nothing transaction: it locks the
+// matched row, rewrites oidc_issuer/oidc_subject (and re-encrypts
+// email_ciphertext under the new pair's AAD, if an email is on file --
+// otherwise it would remain permanently undecryptable under the old AAD once
+// the issuer/subject that authenticated it change), invalidates every live
+// auth_sessions row for that user, and writes the identityMigratedAction
+// audit row. A dry run (Apply==false) runs every one of the same validation
+// and lookup queries, inside the same transaction, then always rolls back.
 func MigrateOIDCBinding(ctx context.Context, pool *pgxpool.Pool, keyring securefields.Keyring, in IdentityMigrationInput) (IdentityMigrationResult, error) {
 	if pool == nil {
 		return IdentityMigrationResult{}, errors.New("nil PostgreSQL connection pool")
