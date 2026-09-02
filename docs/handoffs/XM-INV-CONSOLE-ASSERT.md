@@ -164,6 +164,19 @@ skips RP-initiated Keycloak logout for a console-assertion-issued session
 reports `oidc_admin_login_enabled` in both branches so the frontend can
 gate its own UI without a new endpoint.
 
+**Break-glass network policy is unaffected, by construction.** This slice
+does not touch `internal/adminsettings`, `server.go`'s `adminIPAllowed`, or
+either of `AdminIPAllowlist`/`BreakGlassCIDRs` in any way — the existing
+IP-network restriction on admin routes (`Require("admin", ...)` in
+production_auth.go, checked identically regardless of whether the session
+came from OIDC or a console assertion) and the separate, deployment-only
+break-glass CIDR recovery path (`ADMIN_BREAK_GLASS_CIDRS_FILE`) continue to
+apply exactly as they do today, for every login mechanism. This holds even
+once `OIDC_ADMIN_LOGIN_ENABLED=false`: an operator physically on a
+break-glass network can still reach the admin API regardless of which
+login path is active, since network-level access and login-mechanism
+choice are two independent, unrelated gates in the existing design.
+
 ### d. Runtime wiring (`backend/cmd/api/runtime.go`, `main.go`)
 
 `boolEnv` (new) parses exactly `"true"`/`"false"`, erroring on anything
