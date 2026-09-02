@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -10,22 +12,70 @@ import (
 	"invoice-system/backend/internal/postgresstore"
 )
 
+// CR-0007 problem one deliberately reverses this endpoint's prior "never
+// returns external user IDs" posture: external_user_id must now appear (see
+// the "required" list below), plain and unmasked, while every other
+// previously-redacted internal identifier/secret stays out (the "forbidden"
+// list). ExternalAccountID stays redacted -- only ExternalUserID (the
+// upstream platform's own user ID) is the field this CR intentionally
+// exposes.
 func TestEligibilityFreezeDTOIsExplicitlyRedacted(t *testing.T) {
-	item := postgresstore.EligibilityFreeze{ID: "61000000-0000-4000-8000-000000000001", PrincipalID: "20000000-0000-4000-8000-000000000001", ExternalAccountID: "sensitive-account-id", SourceInstanceID: "10000000-0000-4000-8000-000000000001", SourceType: domain.SourceSub2API, SourceName: "Sub2API", FundingLotID: "50000000-0000-4000-8000-000000000001", FreezeReason: "SOURCE_GAP", Status: "open", EligibilityStatus: "frozen", OpenedAt: time.Now(), EvidenceHash: strings.Repeat("a", 64), NoteHash: strings.Repeat("b", 64)}
+	item := postgresstore.EligibilityFreeze{ID: "61000000-0000-4000-8000-000000000001", PrincipalID: "20000000-0000-4000-8000-000000000001", ExternalAccountID: "sensitive-account-id", ExternalUserID: "1147", SourceInstanceID: "10000000-0000-4000-8000-000000000001", SourceType: domain.SourceSub2API, SourceName: "Sub2API", FundingLotID: "50000000-0000-4000-8000-000000000001", FreezeReason: "SOURCE_GAP", Status: "open", EligibilityStatus: "frozen", OpenedAt: time.Now(), EvidenceHash: strings.Repeat("a", 64), NoteHash: strings.Repeat("b", 64)}
 	raw, err := json.Marshal(eligibilityFreezeDTO(item))
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	for _, forbidden := range []string{"sensitive-account-id", strings.Repeat("a", 64), strings.Repeat("b", 64), "external_user", "source_cursor", "evidence", "trigger_object", "revision_hash"} {
+	for _, forbidden := range []string{"sensitive-account-id", strings.Repeat("a", 64), strings.Repeat("b", 64), "source_cursor", "evidence", "trigger_object", "revision_hash"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("eligibility freeze DTO leaked %q: %s", forbidden, text)
 		}
 	}
-	for _, required := range []string{"freeze_reason", "source_type", "principal_id", "version"} {
+	for _, required := range []string{"freeze_reason", "source_type", "principal_id", "version", `"external_user_id":"1147"`} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("eligibility freeze DTO omitted %q: %s", required, text)
 		}
+	}
+}
+
+// CR-0007 problem three: each of the four narrowed ResolveEligibilityFreeze
+// preconditions must reach the wire as its own distinct code, and the prior
+// generic behavior (version conflict, and the plain, unwrapped generic
+// sentinels) must be completely unchanged.
+func TestHandleDomainErrorMapsEligibilityResolutionSentinels(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{"five-stream freshness", domain.ErrEligibilitySourceStale, http.StatusServiceUnavailable, "ELIGIBILITY_SOURCE_STALE"},
+		{"projection job pending", domain.ErrEligibilityProjectionPending, http.StatusConflict, "ELIGIBILITY_PROJECTION_PENDING"},
+		{"refund exposure", domain.ErrEligibilityRefundExposed, http.StatusConflict, "ELIGIBILITY_REFUND_EXPOSED"},
+		{"balance evaluation unmatched", domain.ErrEligibilityEvaluationUnmatched, http.StatusConflict, "ELIGIBILITY_EVALUATION_UNMATCHED"},
+		{"version conflict stays generic", domain.ErrVersionConflict, http.StatusConflict, "CONFLICT"},
+		{"plain invalid state stays generic", domain.ErrInvalidState, http.StatusConflict, "CONFLICT"},
+		{"plain source unavailable stays generic", domain.ErrSourceUnavailable, http.StatusServiceUnavailable, "SOURCE_SYNC_UNAVAILABLE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handleDomainError(recorder, tc.err)
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", recorder.Code, tc.wantStatus, recorder.Body.String())
+			}
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Error.Code != tc.wantCode {
+				t.Fatalf("code=%q want=%q", body.Error.Code, tc.wantCode)
+			}
+		})
 	}
 }
 

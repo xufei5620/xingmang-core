@@ -59,6 +59,14 @@ func (s *Server) listUserEligibilitySummary(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+// eligibilityFreezeDTO is the sole source of truth for this endpoint's wire
+// shape (the underlying EligibilityFreeze struct's own json tags are inert --
+// see its comment). external_user_id (CR-0007 problem one) is deliberately
+// plain, not masked: the operator-facing precedent for that already exists
+// (identity.go's ListExternalAccounts masks the same column only for the
+// self-service listSourceAccounts endpoint; the platform console's own user
+// detail page shows the identical numeric ID in the clear), and unlike
+// ExternalAccountID/PrincipalID this is not an internal row identifier.
 func eligibilityFreezeDTO(item postgresstore.EligibilityFreeze) map[string]any {
 	scope := "account"
 	if item.FundingLotID != "" {
@@ -68,7 +76,7 @@ func eligibilityFreezeDTO(item postgresstore.EligibilityFreeze) map[string]any {
 		"source_instance_id": item.SourceInstanceID, "source_type": item.SourceType, "source_name": item.SourceName,
 		"funding_lot_id": item.FundingLotID, "scope": scope, "freeze_reason": item.FreezeReason,
 		"status": item.Status, "eligibility_status": item.EligibilityStatus, "opened_at": item.OpenedAt,
-		"version": item.ResolutionVersion}
+		"version": item.ResolutionVersion, "external_user_id": item.ExternalUserID}
 	if !item.ResolvedAt.IsZero() {
 		dto["resolved_at"] = item.ResolvedAt
 	}
@@ -80,7 +88,7 @@ func (s *Server) listEligibilityFreezes(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "OPERATIONS_UNAVAILABLE", "eligibility freeze queue is unavailable")
 		return
 	}
-	query := postgresstore.EligibilityFreezePageQuery{Limit: boundedQueryLimit(r, 100), Status: strings.TrimSpace(r.URL.Query().Get("status")), FreezeReason: strings.TrimSpace(r.URL.Query().Get("reason")), SourceInstanceID: strings.TrimSpace(r.URL.Query().Get("source_instance_id"))}
+	query := postgresstore.EligibilityFreezePageQuery{Limit: boundedQueryLimit(r, 100), Status: strings.TrimSpace(r.URL.Query().Get("status")), FreezeReason: strings.TrimSpace(r.URL.Query().Get("reason")), SourceInstanceID: strings.TrimSpace(r.URL.Query().Get("source_instance_id")), ExternalUserID: strings.TrimSpace(r.URL.Query().Get("external_user_id"))}
 	if value := strings.TrimSpace(r.URL.Query().Get("before_opened_at")); value != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, value)
 		if err != nil {

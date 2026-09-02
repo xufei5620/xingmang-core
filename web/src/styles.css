@@ -1638,6 +1638,16 @@ td small {
   background: #fff2f4;
   border-color: #f1c0c8;
 }
+/* CR-0007 problem two: in embedded-admin mode (ui_mode=embedded_admin) the
+   hosting console can stretch this page's iframe far taller than the real
+   browser viewport, so a toast anchored to the document's bottom-right
+   corner can render outside what is actually visible. Anchoring to the top
+   instead keeps it inside the region that is on-screen right after the
+   iframe loads, regardless of how tall the document grows below it. */
+.toast-anchor-top {
+  top: 22px;
+  bottom: auto;
+}
 
 .settings-stack {
   display: grid;
@@ -2256,6 +2266,41 @@ td small {
   font-size: 9px;
   line-height: 1.5;
 }
+/* CR-0007 problem two: the resolve form's inline result block, shown under
+   the form in addition to the toast (which can land outside the visible
+   area in an embedded, over-tall iframe -- see the .toast-anchor-top
+   comment). Same palette as .api-error-banner above for consistency. */
+.freeze-resolution-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.freeze-resolution-result > svg {
+  flex: 0 0 auto;
+}
+.freeze-resolution-result > div {
+  display: grid;
+  gap: 3px;
+}
+.freeze-resolution-result span {
+  display: block;
+}
+.freeze-resolution-result small {
+  opacity: 0.75;
+  font-size: 8px;
+}
+.freeze-resolution-result-error {
+  color: #a13a49;
+  border: 1px solid #efc1c8;
+  background: #fff4f5;
+}
+.freeze-resolution-result-error > svg {
+  color: #b94153;
+}
 .refund-guardrail > div {
   display: grid;
   gap: 4px;
@@ -2672,6 +2717,10 @@ td small {
     right: 15px;
     bottom: 15px;
     min-width: 0;
+  }
+  .toast-anchor-top {
+    top: 15px;
+    bottom: auto;
   }
   .settings-form-grid {
     grid-template-columns: 1fr;

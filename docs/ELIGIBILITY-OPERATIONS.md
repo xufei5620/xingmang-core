@@ -9,12 +9,25 @@ ledger. It does not create a manual amount override.
 administrator role, fresh MFA step-up, CSRF policy and administrator IP
 allowlist. It supports a maximum page size of 100 and keyset pagination with
 `before_opened_at` plus `before_id`. Filters are `status=open|resolved|all`,
-the compiled freeze-reason whitelist and a source-instance UUID.
+the compiled freeze-reason whitelist, a source-instance UUID and (CR-0007) an
+exact-match `external_user_id`, which may be combined with the source-instance
+filter to disambiguate across platforms that could otherwise reuse the same
+external ID.
 
-The response contains only invoice-side IDs, source label/type, optional
-funding-lot ID, freeze reason/status, timestamps and CAS version. It never
-returns external user IDs, source cursors, trigger object IDs, revision or
-configuration hashes, evidence references, notes or ciphertext.
+The response contains invoice-side IDs, source label/type, optional
+funding-lot ID, freeze reason/status, timestamps, CAS version and (CR-0007,
+reversing this endpoint's prior posture) the upstream platform's own
+`external_user_id`, plain and unmasked. It still never returns source
+cursors, trigger object IDs, revision or configuration hashes, evidence
+references, notes or ciphertext, and it still never returns the invoice
+system's own internal external-account row ID. The plain external user ID is
+not a new PII exposure: the platform console's own user detail page already
+shows the identical numeric ID in the clear, and the self-service
+`listSourceAccounts` endpoint already treats it as administrator-visible
+(there, masked). See `docs/change-requests/CR-0007-invoice-admin-freeze-queue-operability.md`
+for why the queue previously omitted it (an 83-record backlog was otherwise
+unidentifiable without querying the database directly) and why exposing it
+plain does not cross a new trust boundary.
 
 ## Safe resolution
 
@@ -53,6 +66,29 @@ reprojection job is queued. Submit/issue SQL also requires that no projection
 job exists, so entitlement cannot be consumed until that job commits. Refund
 and red-letter exposure must be closed through the dedicated refund workflow;
 this endpoint cannot bypass it.
+
+None of the above judgment conditions, their order, or the role/CSRF/IP
+access control around this endpoint changed for CR-0007. What changed is only
+which error code a rejection reports. Previously all four rejection reasons
+below were indistinguishable on the wire (409 `CONFLICT`, or 503
+`SOURCE_SYNC_UNAVAILABLE` for the first one); each now has its own code so the
+admin console can show an operator a specific, correctly-actionable reason
+instead of a generic "refresh and retry":
+
+- one or more of the five source streams are not fresh enough: 503
+  `ELIGIBILITY_SOURCE_STALE`;
+- an eligibility projection job is still pending for the account: 409
+  `ELIGIBILITY_PROJECTION_PENDING`;
+- the account has open refund exposure (an open `SOURCE_REFUND` freeze --
+  including the target row itself -- a refund-frozen lot, an open refund
+  case, or a request in `refund_attention`): 409 `ELIGIBILITY_REFUND_EXPOSED`;
+- the latest finalized reconciliation checkpoint's evaluation is neither
+  `matched` nor `positive_classified_non_cash` (including "no evaluation
+  recorded yet"): 409 `ELIGIBILITY_EVALUATION_UNMATCHED`.
+
+A stale CAS `version` (including the self-freeze/non-admin-actor guard) still
+reports the unchanged generic 409 `CONFLICT` -- "refresh and retry" remains
+the accurate advice there, unlike for the four reasons above.
 
 ## User summary
 

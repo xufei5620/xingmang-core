@@ -1156,6 +1156,18 @@ func handleDomainError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnprocessableEntity, "EVIDENCE_REQUIRED", "independent payment evidence is required")
 	case errors.Is(err, application.ErrIssuerNotConfigured):
 		writeError(w, http.StatusConflict, "ISSUER_NOT_CONFIGURED", "invoice issuer is not configured")
+	// CR-0007 problem three: these four must be matched before the generic
+	// ErrSourceUnavailable/ErrInvalidState cases below -- each wraps one of
+	// those two sentinels, so errors.Is would still match the generic case
+	// too; checking the specific ones first is what makes them win.
+	case errors.Is(err, domain.ErrEligibilitySourceStale):
+		writeError(w, http.StatusServiceUnavailable, "ELIGIBILITY_SOURCE_STALE", "one or more source streams are not fresh enough to resolve this eligibility freeze")
+	case errors.Is(err, domain.ErrEligibilityProjectionPending):
+		writeError(w, 409, "ELIGIBILITY_PROJECTION_PENDING", "an eligibility projection job is still pending for this account")
+	case errors.Is(err, domain.ErrEligibilityRefundExposed):
+		writeError(w, 409, "ELIGIBILITY_REFUND_EXPOSED", "the account has open refund exposure")
+	case errors.Is(err, domain.ErrEligibilityEvaluationUnmatched):
+		writeError(w, 409, "ELIGIBILITY_EVALUATION_UNMATCHED", "the latest balance evaluation is not a matched or safe outcome")
 	case errors.Is(err, domain.ErrSourceUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "SOURCE_SYNC_UNAVAILABLE", "source synchronization is stale or still processing")
 	case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrVersionConflict), errors.Is(err, domain.ErrInvalidState):

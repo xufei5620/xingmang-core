@@ -118,7 +118,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `INSERT INTO balance_reconciliation_checkpoints(id,source_instance_id,external_account_id,external_event_id,checkpoint_id,checkpoint_kind,as_of,balance_service_units,expected_service_units,difference_service_units,unit_code,cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,source_cursor,stream_watermark_at,source_revision_hash,observed_at) SELECT '62000000-0000-4000-8000-000000000002',source_instance_id,external_account_id,'ops-checkpoint-event-2','ops-checkpoint-2',checkpoint_kind,as_of,balance_service_units,expected_service_units,difference_service_units,unit_code,cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence+1,'balance:2',stream_watermark_at,$2,observed_at FROM balance_reconciliation_checkpoints WHERE id=$1`, f.checkpointID, strings.Repeat("2", 64)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilityEvaluationUnmatched) {
 		t.Fatalf("unevaluated latest checkpoint resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `INSERT INTO balance_checkpoint_evaluations(id,checkpoint_id,projection_version,expected_service_units,difference_service_units,evaluation_status) VALUES('63000000-0000-4000-8000-000000000002','62000000-0000-4000-8000-000000000002',1,0,0,'matched')`); err != nil {
@@ -127,7 +127,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `UPDATE source_ingest_state SET projection_status='blocked' WHERE source_instance_id=$1 AND stream_id='usage'`, f.sourceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrSourceUnavailable) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilitySourceStale) {
 		t.Fatalf("unready source resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `UPDATE source_ingest_state SET projection_status='healthy' WHERE source_instance_id=$1 AND stream_id='usage'`, f.sourceID); err != nil {
@@ -136,7 +136,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `INSERT INTO eligibility_projection_jobs(external_account_id,requested_through) VALUES($1,now())`, f.accountID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilityProjectionPending) {
 		t.Fatalf("pending job resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1`, f.accountID); err != nil {
@@ -145,7 +145,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `UPDATE funding_lots SET refund_frozen=TRUE WHERE id=$1`, f.lotID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilityRefundExposed) {
 		t.Fatalf("refund-frozen lot resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `UPDATE funding_lots SET refund_frozen=FALSE WHERE id=$1`, f.lotID); err != nil {
@@ -207,8 +207,59 @@ func TestEligibilityFreezeSourceRefundNeverUsesGenericResolution(t *testing.T) {
 	if _, err := store.pool.Exec(ctx, `UPDATE eligibility_freezes SET freeze_reason='SOURCE_REFUND' WHERE id=$1`, f.freezeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ResolveEligibilityFreeze(ctx, validFreezeResolution(f)); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err := store.ResolveEligibilityFreeze(ctx, validFreezeResolution(f)); !errors.Is(err, domain.ErrEligibilityRefundExposed) {
 		t.Fatalf("SOURCE_REFUND generic resolution err=%v", err)
+	}
+}
+
+// CR-0007 problem one: the admin queue's SELECT must return the joined
+// external_accounts.external_user_id ("u1" for the shared integration
+// baseline seeded by integrationStore), and the new ExternalUserID filter
+// must narrow to it (optionally alongside SourceInstanceID) with no matches
+// for an unrelated ID -- exercising both the SQL wiring and the validation
+// added to ListEligibilityFreezesPage.
+func TestEligibilityFreezePageSelectsAndFiltersByExternalUserID(t *testing.T) {
+	store, ctx := integrationStore(t)
+	f := seedEligibilityOpsFixture(t, store, ctx)
+
+	page, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ExternalUserID != "u1" {
+		t.Fatalf("unscoped page did not carry the baseline external user id: %+v", page.Items)
+	}
+
+	matched, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched.Items) != 1 || matched.Items[0].ID != f.freezeID {
+		t.Fatalf("external_user_id=u1 filter did not match the baseline freeze: %+v", matched.Items)
+	}
+
+	// Combined with SourceInstanceID, still matches (the two filters agree).
+	combined, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "u1", SourceInstanceID: f.sourceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(combined.Items) != 1 {
+		t.Fatalf("external_user_id + source_instance_id combined filter dropped the match: %+v", combined.Items)
+	}
+
+	unmatched, err := store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "no-such-upstream-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unmatched.Items) != 0 {
+		t.Fatalf("unrelated external_user_id unexpectedly matched: %+v", unmatched.Items)
+	}
+
+	if _, err = store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: "bad\r\nvalue"}); err == nil {
+		t.Fatal("external_user_id filter with control characters was accepted")
+	}
+	if _, err = store.ListEligibilityFreezesPage(ctx, EligibilityFreezePageQuery{Status: "open", ExternalUserID: strings.Repeat("a", 513)}); err == nil {
+		t.Fatal("oversized external_user_id filter was accepted")
 	}
 }
 

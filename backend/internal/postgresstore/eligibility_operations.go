@@ -23,9 +23,14 @@ var eligibilityFreezeReasons = map[string]struct{}{
 }
 
 type EligibilityFreeze struct {
-	ID                string            `json:"id"`
-	PrincipalID       string            `json:"-"`
-	ExternalAccountID string            `json:"-"`
+	ID                string `json:"id"`
+	PrincipalID       string `json:"-"`
+	ExternalAccountID string `json:"-"`
+	// ExternalUserID is the upstream platform's own (digital) user ID for
+	// this account, plain and unmasked (CR-0007 problem one). It is exposed
+	// deliberately -- see eligibilityFreezeDTO's comment in httpapi for why
+	// this is not the same redaction posture as ExternalAccountID above.
+	ExternalUserID    string            `json:"-"`
 	SourceInstanceID  string            `json:"source_instance_id"`
 	SourceType        domain.SourceType `json:"source_type"`
 	SourceName        string            `json:"source_name"`
@@ -45,8 +50,13 @@ type EligibilityFreezePageQuery struct {
 	Status           string
 	FreezeReason     string
 	SourceInstanceID string
-	BeforeOpenedAt   time.Time
-	BeforeID         string
+	// ExternalUserID filters to an exact match on external_accounts.
+	// external_user_id (CR-0007 problem one), the upstream platform's own
+	// user ID. It may be combined with SourceInstanceID to disambiguate
+	// across platforms that could otherwise reuse the same external ID.
+	ExternalUserID string
+	BeforeOpenedAt time.Time
+	BeforeID       string
 }
 
 type EligibilityFreezePage struct {
@@ -89,7 +99,8 @@ func scanEligibilityFreeze(row pgxRow) (EligibilityFreeze, error) {
 	var item EligibilityFreeze
 	err := row.Scan(&item.ID, &item.PrincipalID, &item.ExternalAccountID, &item.SourceInstanceID, &item.SourceType,
 		&item.SourceName, &item.FundingLotID, &item.FreezeReason, &item.Status, &item.EligibilityStatus,
-		&item.OpenedAt, &item.ResolvedAt, &item.ResolutionVersion, &item.EvidenceHash, &item.NoteHash)
+		&item.OpenedAt, &item.ResolvedAt, &item.ResolutionVersion, &item.EvidenceHash, &item.NoteHash,
+		&item.ExternalUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, domain.ErrNotFound
 	}
@@ -106,7 +117,8 @@ const eligibilityFreezeSelect = `
 	SELECT ef.id,ea.invoice_user_id::text,ef.external_account_id::text,eas.source_instance_id::text,
 		si.source_type,si.name,COALESCE(ef.funding_lot_id::text,''),ef.freeze_reason,ef.status,
 		eas.eligibility_status,ef.opened_at,COALESCE(ef.resolved_at,'epoch'::timestamptz),
-		ef.resolution_version,COALESCE(ef.resolution_evidence_hash,''),COALESCE(ef.resolution_note_hash,'')
+		ef.resolution_version,COALESCE(ef.resolution_evidence_hash,''),COALESCE(ef.resolution_note_hash,''),
+		ea.external_user_id
 	FROM eligibility_freezes ef
 	JOIN external_accounts ea ON ea.id=ef.external_account_id
 	JOIN source_account_eligibility_state eas ON eas.external_account_id=ef.external_account_id
@@ -133,6 +145,9 @@ func (s *Store) ListEligibilityFreezesPage(ctx context.Context, in EligibilityFr
 	if in.SourceInstanceID != "" && !eligibilityUUIDPattern.MatchString(in.SourceInstanceID) {
 		return EligibilityFreezePage{}, errors.New("invalid source instance filter")
 	}
+	if in.ExternalUserID != "" && (len(in.ExternalUserID) > 512 || strings.ContainsAny(in.ExternalUserID, "\r\n\x00")) {
+		return EligibilityFreezePage{}, errors.New("invalid external user id filter")
+	}
 	if in.BeforeOpenedAt.IsZero() != (strings.TrimSpace(in.BeforeID) == "") || in.BeforeID != "" && !eligibilityUUIDPattern.MatchString(in.BeforeID) {
 		return EligibilityFreezePage{}, errors.New("both valid eligibility freeze cursor fields are required")
 	}
@@ -147,6 +162,9 @@ func (s *Store) ListEligibilityFreezesPage(ctx context.Context, in EligibilityFr
 	}
 	if in.SourceInstanceID != "" {
 		add(` AND eas.source_instance_id=$%d::uuid`, in.SourceInstanceID)
+	}
+	if in.ExternalUserID != "" {
+		add(` AND ea.external_user_id=$%d`, in.ExternalUserID)
 	}
 	if !in.BeforeOpenedAt.IsZero() {
 		args = append(args, in.BeforeOpenedAt, in.BeforeID)
@@ -205,6 +223,15 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		return EligibilityFreeze{}, err
 	}
 	if err = assertSourceFreshTx(ctx, tx, sourceID, in.FreshnessPolicy); err != nil {
+		// CR-0007 problem three: report the specific sentinel only for this
+		// one call site (ResolveEligibilityFreeze's own admin-facing failure
+		// surface). assertSourceFreshTx is also called from the unrelated
+		// invoice-submission paths (requests.go, store.go), which must keep
+		// seeing the generic domain.ErrSourceUnavailable -- so the remap
+		// happens here, not inside assertSourceFreshTx itself.
+		if errors.Is(err, domain.ErrSourceUnavailable) {
+			return EligibilityFreeze{}, domain.ErrEligibilitySourceStale
+		}
 		return EligibilityFreeze{}, err
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,47))`, accountID); err != nil {
@@ -233,7 +260,10 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		return EligibilityFreeze{}, domain.ErrVersionConflict
 	}
 	if item.FreezeReason == "SOURCE_REFUND" {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+		// This is the same refund-exposure family the unsafeRefund query
+		// below also detects (its first EXISTS clause matches this exact
+		// row), just short-circuited before running that heavier query.
+		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
 	}
 	var unsafeRefund, projectionJob bool
 	if err = tx.QueryRow(ctx, `
@@ -245,8 +275,16 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 			EXISTS(SELECT 1 FROM eligibility_projection_jobs j WHERE j.external_account_id=$1)`, accountID).Scan(&unsafeRefund, &projectionJob); err != nil {
 		return EligibilityFreeze{}, err
 	}
-	if unsafeRefund || projectionJob {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+	// CR-0007 problem three: unsafeRefund folds four refund-exposure
+	// sub-cases into one boolean (operator remediation is identical for all
+	// four, per the change request), so it maps to one code distinct from
+	// projectionJob's -- unchanged from today, this if/else only changes
+	// which sentinel each branch reports, not whether either one fires.
+	if unsafeRefund {
+		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
+	}
+	if projectionJob {
+		return EligibilityFreeze{}, domain.ErrEligibilityProjectionPending
 	}
 	var evaluation string
 	err = tx.QueryRow(ctx, `
@@ -273,13 +311,13 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		) latest
 		ORDER BY latest.as_of DESC,latest.source_sequence DESC,latest.id DESC LIMIT 1`, accountID).Scan(&evaluation)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+		return EligibilityFreeze{}, domain.ErrEligibilityEvaluationUnmatched
 	}
 	if err != nil {
 		return EligibilityFreeze{}, err
 	}
 	if evaluation != "matched" && evaluation != "positive_classified_non_cash" {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+		return EligibilityFreeze{}, domain.ErrEligibilityEvaluationUnmatched
 	}
 	before := item
 	now := time.Now().UTC()

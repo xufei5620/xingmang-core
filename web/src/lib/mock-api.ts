@@ -414,6 +414,7 @@ let eligibilityFreezes: EligibilityFreeze[] = [
     eligibilityStatus: "frozen",
     openedAt: "2026-08-20T08:30:00.000Z",
     version: 1,
+    externalUserId: "1147",
   },
   {
     id: "31000000-0000-4000-8000-000000000002",
@@ -426,6 +427,7 @@ let eligibilityFreezes: EligibilityFreeze[] = [
     eligibilityStatus: "frozen",
     openedAt: "2026-08-19T04:10:00.000Z",
     version: 1,
+    externalUserId: "88210",
   },
   {
     id: "31000000-0000-4000-8000-000000000003",
@@ -439,6 +441,7 @@ let eligibilityFreezes: EligibilityFreeze[] = [
     openedAt: "2026-08-10T02:20:00.000Z",
     resolvedAt: "2026-08-11T05:00:00.000Z",
     version: 2,
+    externalUserId: "30044",
   },
 ];
 
@@ -864,7 +867,9 @@ export const mockInvoiceApi: InvoiceApiClient = {
           (filters.status === "all" || freeze.status === filters.status) &&
           (!filters.reason || freeze.reason === filters.reason) &&
           (!filters.sourceInstanceId ||
-            freeze.sourceInstanceId === filters.sourceInstanceId),
+            freeze.sourceInstanceId === filters.sourceInstanceId) &&
+          (!filters.externalUserId ||
+            freeze.externalUserId === filters.externalUserId),
       )
       .sort(
         (left, right) =>
@@ -923,7 +928,7 @@ export const mockInvoiceApi: InvoiceApiClient = {
       if (freeze.id !== freezeId) return freeze;
       if (freeze.reason === "SOURCE_REFUND")
         throw new InvoiceApiError("退款冻结必须先在退款与红冲队列结案。", {
-          code: "CONFLICT",
+          code: "ELIGIBILITY_REFUND_EXPOSED",
           status: 409,
         });
       if (freeze.status !== "open" || freeze.version !== input.version)
