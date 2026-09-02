@@ -34,10 +34,14 @@ func actionPool(t *testing.T) *pgxpool.Pool {
 	// 它们对 upstream_account 的外键是 ON DELETE RESTRICT（历史台账与付款
 	// 记录不该随账号一起消失），而 TRUNCATE 要求一次列全所有引用方，
 	// 漏掉任何一张这条语句会直接报错。
+	//
+	// platform_channel_binding（XM-C-MAP2）同样是 ON DELETE RESTRICT，
+	// migrations/000016 之后新增，同一条道理必须列进来。
 	if _, err := pool.Exec(ctx,
 		"TRUNCATE finance.balance_history, finance.amortization_loss, "+
 			"finance.subscription_cost_batch, "+
 			"finance.proxy_asset, finance.profit_daily, finance.token_map, "+
+			"finance.platform_channel_binding, "+
 			"finance.upstream_account"); err != nil {
 		t.Fatalf("清空登记簿失败: %v", err)
 	}
