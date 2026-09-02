@@ -3,8 +3,8 @@
 - **status:** implemented and self-tested locally; gates below.
 - **branch:** `ai/claude/XM-INV-READY-PENDING` (based on `ai/claude/XM-INV-AUTOLOGIN` at
   `b9d51f6`, tag `v0.1.0-rc70-signed`), worktree `K:/发票/wt-XM-INV-READYPEND`.
-- **commit:** see `git log` on the branch (single commit, trailers per the standing attribution
-  instructions).
+- **commit:** `dbe58c1` fix(readiness): tolerate BALANCE_PROOF_PENDING backoff in eligibility
+  projection health (single commit, trailers per the standing attribution instructions).
 
 ## Problem
 
@@ -182,9 +182,12 @@ map-literal column alignment in `main_test.go` and the new integration test file
 whole repo is not used (known repo-wide CRLF false-positive list, documented in prior handoffs);
 per-file `-d` diffing is the reliable check.
 
-`pwsh -NoProfile -File scripts/test-release-image-gate.ps1`: `<fill in>`
+`pwsh -NoProfile -File scripts/test-release-image-gate.ps1`: "Release image gate offline/static
+fixtures passed." (unaffected by this slice; no `release/`, `scripts/`, or release-identity file
+touched).
 
-`gitleaks`: `<fill in>`
+`gitleaks`: `gitleaks detect --source=. --log-opts="b9d51f6..HEAD" --verbose --redact=0` against
+this slice's one commit (`dbe58c1`) — "1 commits scanned... no leaks found".
 
 ## Not run
 
