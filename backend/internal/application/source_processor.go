@@ -41,6 +41,38 @@ func (e *sourceDependencyWait) Error() string {
 	return "source projection dependency is not available yet"
 }
 
+// deadEventAccountHint carries the resolved external_account_id alongside a
+// processing error, for the three entity types (usage_event, credit_event,
+// balance_checkpoint) whose store-layer EVENT_DEAD correlation
+// (source_sync.go's MarkSourceEventFailed) can only find the triggering
+// account by joining the claim's payload_hash against an already-persisted
+// domain fact. A repeated failure that never got as far as writing that fact
+// -- every attempt rejected by the same deterministic, non-retryable check --
+// leaves nothing to correlate even though this layer decrypted the payload
+// and already resolved its account. Wrapping the error here, once the
+// account is known, closes that gap without threading a second return value
+// through every ProcessSourceEvent case; RunOnce unwraps it with errors.As
+// only on the path that would otherwise mark the event dead.
+type deadEventAccountHint struct {
+	accountID string
+	err       error
+}
+
+func (e *deadEventAccountHint) Error() string { return e.err.Error() }
+func (e *deadEventAccountHint) Unwrap() error { return e.err }
+
+// wrapWithAccountHint attaches accountID to a non-nil err so RunOnce can pass
+// it to MarkSourceEventFailed if the event ends up dead. A nil err (success)
+// or an empty accountID (not yet resolved) pass through unchanged; wrapping
+// preserves the original error for errors.Is/errors.As (including the
+// existing *sourceDependencyWait check in RunOnce), since Unwrap returns it.
+func wrapWithAccountHint(accountID string, err error) error {
+	if err == nil || accountID == "" {
+		return err
+	}
+	return &deadEventAccountHint{accountID: accountID, err: err}
+}
+
 func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 	if p.Service == nil {
 		return 0, errors.New("source event processor is not configured")
@@ -53,29 +85,80 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("claim source events: %w", err)
 	}
+	// XM-INV-PROOF-CONTENTION 3: a single claim's bookkeeping call
+	// (MarkSourceEvent{WaitingDependency,Failed,Processed}) failing --
+	// notably a lock timeout contending with a long-running
+	// processEligibilityProjectionJob for the same account, see requirement
+	// 2 below -- used to return immediately, aborting the rest of the
+	// batch. Every remaining claim in it then sat in processing_status=
+	// 'processing' holding its lease for the full 10-minute
+	// sourceEventLease with no worker able to touch it, which starved that
+	// stream's scan cycle of completeness and kept its watermark from
+	// advancing. Each claim now follows its own outcome; one isolated
+	// failure is recorded and the loop proceeds to the rest of the batch.
+	// The isolated count and a sample error are folded into the returned
+	// summary error (if any) rather than logged here directly, matching
+	// this package's convention of leaving logging to cmd/api's runtime
+	// harness, which already logs whatever RunOnce returns.
 	processed := 0
+	isolated := 0
+	var lastIsolatedErr error
 	for _, claim := range claims {
+		claimSourceInstanceID, claimStreamID, claimEventID := claim.SourceInstanceID, claim.StreamID, claim.EventID
+		recordIsolated := func(context string, err error) {
+			isolated++
+			lastIsolatedErr = fmt.Errorf("%s (source=%s stream=%s event=%s): %w",
+				context, claimSourceInstanceID, claimStreamID, claimEventID, err)
+		}
 		processErr := p.Service.ProcessSourceEvent(ctx, claim)
 		if processErr != nil {
+			if errors.Is(processErr, domain.ErrAccountLockBusy) {
+				// XM-INV-PROOF-CONTENTION 2: this account's per-account
+				// advisory lock (hashtextextended(...,43)) is held by a
+				// concurrent processEligibilityProjectionJob run. That is
+				// expected, routine contention, not a processing failure --
+				// reschedule shortly without spending any of the event's
+				// real attempt/retry budget (mirrors the existing
+				// waiting_dependency attempt_count credit-back below).
+				if err = p.Service.store.MarkSourceEventBusy(ctx, claim, now().Add(15*time.Second)); err != nil {
+					recordIsolated("mark source event busy", err)
+				} else {
+					processed++
+				}
+				continue
+			}
 			var dependency *sourceDependencyWait
 			if errors.As(processErr, &dependency) {
 				if err = p.Service.store.MarkSourceEventWaitingDependency(ctx, claim,
 					dependency.Kind, dependency.KeyHMAC, now().Add(sourceDependencyFallbackRetry)); err != nil {
-					return processed, fmt.Errorf("mark source dependency wait: %w", err)
+					recordIsolated("mark source dependency wait", err)
+					continue
 				}
 				processed++
 				continue
 			}
-			if err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute)); err != nil {
-				return processed, fmt.Errorf("mark source event failed: %w", err)
+			var hint *deadEventAccountHint
+			_ = errors.As(processErr, &hint)
+			hintAccountID := ""
+			if hint != nil {
+				hintAccountID = hint.accountID
+			}
+			if err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute), hintAccountID); err != nil {
+				recordIsolated("mark source event failed", err)
+				continue
 			}
 			processed++
 			continue
 		}
 		if err = p.Service.store.MarkSourceEventProcessed(ctx, claim, now()); err != nil {
-			return processed, fmt.Errorf("mark source event processed: %w", err)
+			recordIsolated("mark source event processed", err)
+			continue
 		}
 		processed++
+	}
+	if isolated > 0 {
+		return processed, fmt.Errorf("source-projection run summary: claimed=%d processed=%d isolated_failures=%d; last isolated error: %w",
+			len(claims), processed, isolated, lastIsolatedErr)
 	}
 	return processed, nil
 }
@@ -445,7 +528,8 @@ func (s *Service) processUsageEvent(ctx context.Context, claim postgresstore.Sou
 	if err := strictJSON(body, &payload); err != nil {
 		return err
 	}
-	if _, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID); err != nil {
+	account, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID)
+	if err != nil {
 		return err
 	}
 	occurredAt, err := time.Parse(time.RFC3339Nano, payload.OccurredAt)
@@ -465,7 +549,7 @@ func (s *Service) processUsageEvent(ctx context.Context, claim postgresstore.Sou
 	if errors.Is(err, domain.ErrSourceUnavailable) {
 		return s.waitForDependency("source_eligibility_cutover", claim.SourceInstanceID, payload.ExternalUserID)
 	}
-	return err
+	return wrapWithAccountHint(account.ID, err)
 }
 
 func (s *Service) processCreditEvent(ctx context.Context, claim postgresstore.SourceEventClaim, body []byte) error {
@@ -476,7 +560,8 @@ func (s *Service) processCreditEvent(ctx context.Context, claim postgresstore.So
 	if err := strictJSON(body, &payload); err != nil {
 		return err
 	}
-	if _, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID); err != nil {
+	account, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID)
+	if err != nil {
 		return err
 	}
 	occurredAt, err := time.Parse(time.RFC3339Nano, payload.OccurredAt)
@@ -496,7 +581,7 @@ func (s *Service) processCreditEvent(ctx context.Context, claim postgresstore.So
 	if errors.Is(err, domain.ErrSourceUnavailable) {
 		return s.waitForDependency("source_eligibility_cutover", claim.SourceInstanceID, payload.ExternalUserID)
 	}
-	return err
+	return wrapWithAccountHint(account.ID, err)
 }
 
 func (s *Service) processBalanceCheckpoint(ctx context.Context, claim postgresstore.SourceEventClaim, body []byte) error {
@@ -517,7 +602,8 @@ func (s *Service) processBalanceCheckpoint(ctx context.Context, claim postgresst
 	if !manifestReady {
 		return s.waitForDependency("source_cutover_manifest", claim.SourceInstanceID, claim.SourceInstanceID)
 	}
-	if _, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID); err != nil {
+	account, err := s.verifiedExternalAccount(ctx, claim, payload.ExternalUserID)
+	if err != nil {
 		return err
 	}
 	asOf, err := time.Parse(time.RFC3339Nano, payload.AsOf)
@@ -542,7 +628,7 @@ func (s *Service) processBalanceCheckpoint(ctx context.Context, claim postgresst
 		CatchupKeyHMAC: claim.CatchupKeyHMAC, BatchID: claim.BatchID, ScanCycleID: claim.ScanCycleID,
 	}, auditActor(ctx, "source_connector", claim.SourceInstanceID, "verified v3 balance checkpoint"))
 	if err != nil {
-		return s.balanceCheckpointDependencyError(err, claim, payload)
+		return wrapWithAccountHint(account.ID, s.balanceCheckpointDependencyError(err, claim, payload))
 	}
 	return s.wakeDependency(ctx, "source_eligibility_cutover", claim.SourceInstanceID, payload.ExternalUserID)
 }

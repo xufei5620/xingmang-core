@@ -523,7 +523,13 @@ func (s *Store) MarkSourceEventProcessed(ctx context.Context, claim SourceEventC
 	return tx.Commit(ctx)
 }
 
-func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClaim, errorCode string, next time.Time) error {
+// hintAccountID is the external_account_id the application layer already
+// resolved from the decrypted payload before this event's processing
+// failed, or "" if it never got that far (payload undecryptable, or the
+// account itself could not be resolved). See XM-INV-PROOF-CONTENTION 5 in
+// the dead-status branch below for why this is needed in addition to the
+// pre-existing source_revision_hash correlation.
+func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClaim, errorCode string, next time.Time, hintAccountID string) error {
 	errorCode = strings.TrimSpace(errorCode)
 	if errorCode == "" || len(errorCode) > 512 || strings.ContainsAny(errorCode, "\r\n\x00") {
 		return errors.New("invalid source event processing error code")
@@ -576,10 +582,27 @@ func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClai
 		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return lookupErr
 		}
-		if lookupErr == nil {
+		reason := "dead event correlated to a persisted fact"
+		if errors.Is(lookupErr, pgx.ErrNoRows) && hintAccountID != "" {
+			// XM-INV-PROOF-CONTENTION 5: the correlation above only finds a
+			// match when some earlier attempt actually persisted the domain
+			// fact -- a dead event whose every attempt was rejected before
+			// any INSERT (e.g. a deterministic validation failure) leaves
+			// nothing to correlate here, even though the application layer
+			// decrypted the payload and already resolved its account on the
+			// same attempt that ultimately failed. Use that hint instead so
+			// the freeze -- and the cycle publish it unblocks, see
+			// tryPublishEconomicScanCyclesTx -- still happens. There is no
+			// persisted fact to point trigger_object_id at, so point it at
+			// the ingest event itself.
+			accountID, objectType, objectID = hintAccountID, claim.EntityType, claim.EventID
+			lookupErr = nil
+			reason = "dead event attributed via the application layer's resolved account"
+		}
+		if lookupErr == nil && accountID != "" {
 			if err = freezeEligibilityTx(ctx, tx, accountID, "", "EVENT_DEAD", objectType, objectID,
 				claim.PayloadHash, AuditActor{Type: "source_connector", ID: claim.SourceInstanceID,
-					Reason: "dead event correlated to a persisted fact"}); err != nil {
+					Reason: reason}); err != nil {
 				return err
 			}
 		}
@@ -640,6 +663,41 @@ func (s *Store) MarkSourceEventWaitingDependency(ctx context.Context, claim Sour
 			AuditActor{Type: "source_connector", ID: claim.SourceInstanceID, Reason: "identity-unbound fact parked durably"}); err != nil {
 			return err
 		}
+	}
+	return tx.Commit(ctx)
+}
+
+// MarkSourceEventBusy reschedules a claim shortly without spending any of
+// its attempt/retry budget. XM-INV-PROOF-CONTENTION 2: ObserveUsageEvent/
+// ObserveCreditEvent/ObserveBalanceCheckpoint's per-account
+// pg_try_advisory_xact_lock found the account's advisory lock
+// (hashtextextended(...,43)) held by a concurrent eligibility projection
+// job. That is routine, expected contention -- not a processing failure --
+// so unlike MarkSourceEventFailed this credits the attempt back (mirrors
+// MarkSourceEventWaitingDependency's attempt_count-1) instead of spending
+// it, and reuses the existing 'queued' status rather than adding a new one.
+func (s *Store) MarkSourceEventBusy(ctx context.Context, claim SourceEventClaim, next time.Time) error {
+	if next.IsZero() {
+		return errors.New("invalid source event busy reschedule")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	command, err := tx.Exec(ctx, `
+		UPDATE source_ingest_events SET processing_status='queued',
+			attempt_count=greatest(attempt_count-1,0),processing_error='ACCOUNT_LOCK_BUSY',
+			dependency_kind=NULL,dependency_key_hmac=NULL,next_attempt_at=$1,
+			lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+		WHERE source_instance_id=$2 AND stream_id=$3 AND event_id=$4
+			AND processing_status='processing' AND lease_token=$5`,
+		next, claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return domain.ErrConflict
 	}
 	return tx.Commit(ctx)
 }

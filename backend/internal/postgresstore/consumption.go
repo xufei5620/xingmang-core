@@ -17,6 +17,45 @@ import (
 
 const defaultEligibilityFinalizationDelay = 15 * time.Minute
 
+// XM-INV-PROOF-CONTENTION 1: BALANCE_PROOF_PENDING retry schedule.
+//
+// ProcessEligibilityProjectionJobs's BALANCE_PROOF_PENDING requeue backs off
+// exponentially per attempt (the job's own attempt_count, already
+// incremented by the claim step above it): 30s, 60s, 120s, 240s, 480s, then
+// capped at balanceProofPendingBackoffCapSeconds (10 minutes) from the 6th
+// attempt on. Before this, every attempt retried at a flat 30s regardless of
+// how many times it had already found the proof unprovable -- on the
+// production account that motivated this slice, that meant 500+ retries
+// each re-running the (now also fixed, see ensureBalanceCarryForwardProofTx)
+// per-visibility proof loop under the per-account advisory lock every 30s
+// for hours.
+//
+// A newly observed fact for the account (the two ON CONFLICT(external_account_id)
+// DO UPDATE requeue upserts, in finalizeSourceAccountsTx and
+// ObserveBalanceCheckpoint) still may mean the proof has become provable
+// sooner than the backoff schedule would otherwise retry it -- a new
+// balances cycle publishing is exactly the kind of fact that can unblock a
+// pending proof. But unconditionally resetting next_attempt_at=now() on
+// every such upsert (the pre-existing behavior) is what let the retry
+// cadence collapse back to sub-second in practice: every fact for a
+// contended account -- including ones unrelated to the proof itself, since
+// facts keep streaming in while the proof stays pending -- re-armed the job
+// immediately, defeating the backoff entirely and re-creating the same lock
+// contention the backoff exists to bound. The requeue upserts below instead
+// pull a deep backoff forward to "now" only when the job is currently
+// BALANCE_PROOF_PENDING *and* still more than balanceProofPendingRequeueResetWindow
+// away from its next attempt; once pulled forward, the job's own next
+// failure re-derives next_attempt_at from its (unchanged, honestly
+// incrementing) attempt_count, so a burst of facts within that window cannot
+// keep re-arming it faster than once per window. A job that is not
+// currently in a BALANCE_PROOF_PENDING backoff (queued for an unrelated
+// reason, mid-lease, or freshly failed) is unaffected -- it keeps the
+// pre-existing immediate-requeue behavior.
+const (
+	balanceProofPendingBackoffCapSeconds = 600
+	balanceProofPendingRequeueResetWindow = 5 * time.Minute
+)
+
 var (
 	serviceUnitsPattern                = regexp.MustCompile(`^(0|[1-9][0-9]{0,77})$`)
 	unitCodePattern                    = regexp.MustCompile(`^[A-Z0-9_:-]{1,32}$`)
@@ -402,8 +441,16 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 		SELECT external_account_id,requested_through,'queued',now() FROM changed
 		ON CONFLICT(external_account_id) DO UPDATE SET
 			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
-			status='queued',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now(),updated_at=now()`,
-		sourceID, minWatermark)
+			status='queued',lease_token=NULL,lease_expires_at=NULL,
+			next_attempt_at=CASE
+				WHEN eligibility_projection_jobs.status='queued'
+					AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
+					AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
+				THEN eligibility_projection_jobs.next_attempt_at
+				ELSE now()
+			END,
+			updated_at=now()`,
+		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds())
 	if err != nil {
 		return err
 	}
@@ -823,8 +870,19 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 	if in.UnitCode != expectedUnitForSource(sourceType) {
 		return domain.ErrConflict
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
+	// XM-INV-PROOF-CONTENTION 2: try, don't block. processEligibilityProjectionJob
+	// holds this same per-account lock for its write phase; a source-projection
+	// worker call that instead waited here risked a lock-timeout error deep
+	// inside its own transaction, and one such failure used to abort the
+	// worker's whole batch (see RunOnce, application/source_processor.go).
+	// A busy account is routine, expected contention -- the caller reschedules
+	// this claim shortly (MarkSourceEventBusy) without spending its retry budget.
+	var locked bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,43))`, accountID).Scan(&locked); err != nil {
 		return err
+	}
+	if !locked {
+		return domain.ErrAccountLockBusy
 	}
 	if _, err = verifyFactBatchContextTx(ctx, tx, in.SourceInstanceID, "balances", in.ExternalEventID,
 		in.BatchID, in.ScanCycleID, in.SourceRevision, in.StreamWatermarkAt); err != nil {
@@ -1116,8 +1174,16 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			VALUES($1,$2,'queued',now())
 			ON CONFLICT(external_account_id) DO UPDATE SET
 				requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
-				status='queued',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now(),updated_at=now()`,
-			accountID, account.FinalizedThrough)
+				status='queued',lease_token=NULL,lease_expires_at=NULL,
+				next_attempt_at=CASE
+					WHEN eligibility_projection_jobs.status='queued'
+						AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
+						AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
+					THEN eligibility_projection_jobs.next_attempt_at
+					ELSE now()
+				END,
+				updated_at=now()`,
+			accountID, account.FinalizedThrough, balanceProofPendingRequeueResetWindow.Seconds())
 		if err != nil {
 			return err
 		}
@@ -1219,8 +1285,14 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 	if in.UnitCode != expectedUnitForSource(sourceType) {
 		return domain.ErrConflict
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
+	// XM-INV-PROOF-CONTENTION 2: try, don't block -- see the identical
+	// comment in ObserveBalanceCheckpoint above.
+	var locked bool
+	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,43))`, accountID).Scan(&locked); err != nil {
 		return err
+	}
+	if !locked {
+		return domain.ErrAccountLockBusy
 	}
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {
@@ -2066,11 +2138,18 @@ func (s *Store) ProcessEligibilityProjectionJobs(ctx context.Context, limit int,
 	for _, accountID := range ids {
 		if processErr := s.processEligibilityProjectionJob(ctx, accountID, lease, actor); processErr != nil {
 			if errors.Is(processErr, errBalanceCarryForwardProofPending) {
-				_, markErr := s.pool.Exec(ctx, `
+				// Exponential backoff keyed off the job's own attempt_count
+				// (already incremented by the claim step's UPDATE above):
+				// 30s,60s,120s,240s,480s, capped at balanceProofPendingBackoffCapSeconds
+				// from the 6th attempt on. See the doc comment on that
+				// constant for the full rationale.
+				_, markErr := s.pool.Exec(ctx, fmt.Sprintf(`
 					UPDATE eligibility_projection_jobs SET status='queued',lease_token=NULL,lease_expires_at=NULL,
 						last_error_code='BALANCE_PROOF_PENDING',
-						next_attempt_at=$3::timestamptz+interval '30 seconds',updated_at=$3::timestamptz
-					WHERE external_account_id=$1 AND lease_token=$2`, accountID, lease, now.UTC())
+						next_attempt_at=$3::timestamptz+(LEAST(%d,30*power(2,LEAST(attempt_count,11)-1)))::int*interval '1 second',
+						updated_at=$3::timestamptz
+					WHERE external_account_id=$1 AND lease_token=$2`, balanceProofPendingBackoffCapSeconds),
+					accountID, lease, now.UTC())
 				if markErr != nil {
 					return processed, markErr
 				}
@@ -2403,9 +2482,6 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		       set_config('idle_in_transaction_session_timeout','300s',true)`); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
-		return err
-	}
 	var requested time.Time
 	err = tx.QueryRow(ctx, `
 		SELECT requested_through FROM eligibility_projection_jobs
@@ -2417,14 +2493,37 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 	if err != nil {
 		return err
 	}
-	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
+	// XM-INV-PROOF-CONTENTION 2: the per-account advisory lock
+	// (hashtextextended(...,43)) used to be acquired here, before reanchor
+	// and the proof evaluation, and held for the rest of the transaction --
+	// including ensureBalanceCarryForwardProofTx's evaluation, which on a
+	// contended production account took tens of seconds per attempt (before
+	// requirement 4's set-based rewrite) while retrying every 30s. A
+	// concurrent source-projection worker event for the same account
+	// (ObserveUsageEvent/ObserveCreditEvent/ObserveBalanceCheckpoint, which
+	// take the identical lock) blocked for that whole duration and could
+	// hit a lock timeout (see MarkSourceEventBusy's doc comment).
+	//
+	// Reanchor and the proof evaluation below now run against an unlocked
+	// read of the account (lock=false): reanchor is a one-time, per-account
+	// transition gated by bootstrap_kind, and the job-claim SKIP LOCKED
+	// handoff in ProcessEligibilityProjectionJobs already guarantees only
+	// one processEligibilityProjectionJob execution per account runs at a
+	// time, so neither step needs the advisory lock to exclude another
+	// instance of itself; SERIALIZABLE isolation still catches (and this
+	// job's own backoff still retries) any genuine conflict with a
+	// concurrent writer, such as a worker-side freeze, at commit. The lock
+	// is acquired below, immediately before the write phase that actually
+	// needs a stable, exclusive view of the account: reprojection, pending
+	// evidence, and publishing finalized_through.
+	account, err := getEligibilityAccountTx(ctx, tx, accountID, false)
 	if err != nil {
 		return err
 	}
 	if reanchored, err := reanchorLegacyEligibilityAccountTx(ctx, tx, account, actor); err != nil {
 		return err
 	} else if reanchored {
-		if account, err = getEligibilityAccountTx(ctx, tx, accountID, true); err != nil {
+		if account, err = getEligibilityAccountTx(ctx, tx, accountID, false); err != nil {
 			return err
 		}
 	}
@@ -2432,6 +2531,9 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		requested = account.FinalizedThrough
 	}
 	if err = ensureBalanceCarryForwardProofTx(ctx, tx, account, requested, actor); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
 		return err
 	}
 	if err = reprojectEligibilityTx(ctx, tx, accountID, requested, actor); err != nil {
@@ -2462,11 +2564,20 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 }
 
 func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, requested time.Time, actor AuditActor) error {
-	// The caller holds the account advisory lock and a row lock on the bound,
-	// non-syncing account. A published delta cycle may still contain parked
-	// checkpoints for unrelated identities; those must not block this account's
-	// unchanged proof. A later checkpoint for this account is rejected by the
-	// mutually exclusive proof/checkpoint contract.
+	// XM-INV-PROOF-CONTENTION 2: the caller (processEligibilityProjectionJob)
+	// deliberately does NOT hold the per-account advisory lock or a row lock
+	// on the account here -- only its own SERIALIZABLE snapshot, taken
+	// before this call, and the job-claim SKIP LOCKED handoff that already
+	// guarantees no other processEligibilityProjectionJob execution for this
+	// account is concurrently running. This function only reads (the
+	// carry-forward proof rows it inserts are additive and idempotent, keyed
+	// by (account,cycle) -- see the ON CONFLICT DO NOTHING below -- so a
+	// concurrent writer elsewhere in the account's row set cannot corrupt
+	// them; the caller re-locks for the write phase that follows). A
+	// published delta cycle may still contain parked checkpoints for
+	// unrelated identities; those must not block this account's unchanged
+	// proof. A later checkpoint for this account is rejected by the mutually
+	// exclusive proof/checkpoint contract.
 	if account.Status == "syncing" {
 		return errBalanceCarryForwardProofPending
 	}
@@ -2551,14 +2662,138 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	}
 	rows.Close()
 
-	type proof struct {
+	type carryCandidate struct {
 		cycleID, batchID, snapshotID, cursor, revision string
 		priorID, balance                               string
 		asOf, watermark, observed                      time.Time
 		snapshotRows, sequence                         int64
 		negative, baselineMember, hasRealCheckpoint    bool
 	}
+	// XM-INV-PROOF-CONTENTION 4: set-based evaluation, replacing what used to
+	// be up to two queries issued per entry of `visibilities` (each ~42ms on
+	// production, up to ~1,150 checkpoints in the contention incident's
+	// window -- tens of seconds per attempt, spent holding up whatever else
+	// needed this account; see the design note on
+	// processEligibilityProjectionJob). Both per-visibility lookups below are
+	// "smallest candidate ceiling >= some threshold" queries; since
+	// `visibilities` is fixed, sorted, and deduplicated up front, prefetch
+	// every candidate once (bounded by the account's own real-checkpoint and
+	// the source's published-cycle counts in the window -- not by how many
+	// distinct visibilities they end up covering) and walk both lists with
+	// `visibilities` using an ordinary ascending two-pointer merge, computing
+	// identical results to the original per-visibility queries: a
+	// same-shape, forward-only pointer is valid here for the same reason a
+	// merge join is valid on two sorted inputs, and this loop already
+	// establishes that visibilities themselves are processed in ascending,
+	// deduplicated order.
+	//
+	// Real-checkpoint candidates first (query A below, unbounded above like
+	// the original -- only the checkpoint's own as_of is bounded by
+	// `requested`, not the cycle ceiling it's tied to): a checkpoint's own
+	// arrival cycle is preferred over any delta-carry cycle regardless of
+	// which has the smaller ceiling, exactly as the original code's
+	// try-real-then-fall-back-to-carry order did.
+	realCeilings := make([]time.Time, 0, len(visibilities))
+	realRows, err := tx.Query(ctx, `
+		SELECT cycle.scan_ceiling_at
+		FROM balance_reconciliation_checkpoints checkpoint
+		JOIN source_economic_scan_cycle_events mapped
+		  ON mapped.source_instance_id=checkpoint.source_instance_id
+		 AND mapped.stream_id='balances'
+		 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
+		 AND mapped.payload_hash=checkpoint.source_revision_hash
+		JOIN source_economic_scan_cycles cycle
+		  ON cycle.source_instance_id=mapped.source_instance_id
+		 AND cycle.stream_id=mapped.stream_id
+		 AND cycle.scan_cycle_id=mapped.scan_cycle_id
+		WHERE checkpoint.external_account_id=$1
+		  AND checkpoint.checkpoint_kind='reconciliation'
+		  AND checkpoint.as_of>$2 AND checkpoint.as_of<=$3
+		  AND cycle.cycle_status='published' AND cycle.scan_ceiling_at>=$2
+		ORDER BY cycle.scan_ceiling_at,cycle.first_sequence`,
+		account.ExternalAccountID, account.FinalizedThrough, requested.UTC())
+	if err != nil {
+		return err
+	}
+	for realRows.Next() {
+		var ceiling time.Time
+		if err = realRows.Scan(&ceiling); err != nil {
+			realRows.Close()
+			return err
+		}
+		realCeilings = append(realCeilings, ceiling.UTC())
+	}
+	if err = realRows.Err(); err != nil {
+		realRows.Close()
+		return err
+	}
+	realRows.Close()
+
+	// Delta-carry candidates (query B below): every published balances cycle
+	// in the window, each with its own prior-checkpoint delta and
+	// has_real_checkpoint flag precomputed -- identical per-row logic to the
+	// original, just evaluated for every candidate cycle once instead of
+	// only for the ones an earlier per-visibility query happened to land on.
+	carryCandidates := make([]carryCandidate, 0, len(visibilities))
+	carryRows, err := tx.Query(ctx, `
+		SELECT cycle.scan_cycle_id::text,batch.batch_id::text,cycle.scan_snapshot_id,
+			cycle.scan_snapshot_row_count,cycle.scan_ceiling_at,cycle.stream_watermark_at,
+			cycle.source_cursor,cycle.final_sequence,batch.body_hash,batch.source_captured_at,
+			prior.id::text,prior.balance_service_units::text,prior.balance_negative,prior.baseline_member,
+			EXISTS (
+				SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
+				JOIN source_economic_scan_cycle_events mapped
+				  ON mapped.source_instance_id=checkpoint.source_instance_id
+				 AND mapped.stream_id='balances'
+				 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
+				 AND mapped.payload_hash=checkpoint.source_revision_hash
+				WHERE checkpoint.external_account_id=$1
+				  AND mapped.scan_cycle_id=cycle.scan_cycle_id
+			) AS has_real_checkpoint
+		FROM source_economic_scan_cycles cycle
+		JOIN source_ingest_batches batch
+		  ON batch.source_instance_id=cycle.source_instance_id
+		 AND batch.stream_id=cycle.stream_id
+		 AND batch.scan_cycle_id=cycle.scan_cycle_id
+		 AND batch.sequence=cycle.final_sequence
+		JOIN LATERAL (
+			SELECT checkpoint.id,checkpoint.balance_service_units,
+				checkpoint.balance_negative,checkpoint.baseline_member
+			FROM balance_reconciliation_checkpoints checkpoint
+			WHERE checkpoint.external_account_id=$1
+			  AND (checkpoint.as_of<cycle.scan_ceiling_at
+			       OR (checkpoint.as_of=cycle.scan_ceiling_at
+			           AND checkpoint.source_sequence<cycle.final_sequence))
+			ORDER BY checkpoint.as_of DESC,checkpoint.source_sequence DESC,checkpoint.id DESC LIMIT 1
+		) prior ON true
+		WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
+		  AND cycle.cycle_status='published'
+		  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
+		ORDER BY cycle.scan_ceiling_at,cycle.first_sequence`,
+		account.ExternalAccountID, account.SourceInstanceID, account.FinalizedThrough, requested.UTC())
+	if err != nil {
+		return err
+	}
+	for carryRows.Next() {
+		var item carryCandidate
+		if err = carryRows.Scan(&item.cycleID, &item.batchID, &item.snapshotID, &item.snapshotRows,
+			&item.asOf, &item.watermark, &item.cursor, &item.sequence, &item.revision,
+			&item.observed, &item.priorID, &item.balance, &item.negative, &item.baselineMember,
+			&item.hasRealCheckpoint); err != nil {
+			carryRows.Close()
+			return err
+		}
+		item.asOf, item.watermark, item.observed = item.asOf.UTC(), item.watermark.UTC(), item.observed.UTC()
+		carryCandidates = append(carryCandidates, item)
+	}
+	if err = carryRows.Err(); err != nil {
+		carryRows.Close()
+		return err
+	}
+	carryRows.Close()
+
 	coveredVisibility := account.FinalizedThrough.UTC()
+	realIndex, carryIndex := 0, 0
 	for _, visibility := range visibilities {
 		if !visibility.After(coveredVisibility) {
 			continue
@@ -2567,80 +2802,21 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		// own as_of must be finalizable, while the enclosing published cycle must
 		// be at or after the fact's receiver visibility. Delta carry proofs are
 		// stricter below because they derive as_of from the cycle ceiling itself.
-		var realCycleCoverage time.Time
-		realErr := tx.QueryRow(ctx, `
-			SELECT cycle.scan_ceiling_at
-			FROM balance_reconciliation_checkpoints checkpoint
-			JOIN source_economic_scan_cycle_events mapped
-			  ON mapped.source_instance_id=checkpoint.source_instance_id
-			 AND mapped.stream_id='balances'
-			 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
-			 AND mapped.payload_hash=checkpoint.source_revision_hash
-			JOIN source_economic_scan_cycles cycle
-			  ON cycle.source_instance_id=mapped.source_instance_id
-			 AND cycle.stream_id=mapped.stream_id
-			 AND cycle.scan_cycle_id=mapped.scan_cycle_id
-			WHERE checkpoint.external_account_id=$1
-			  AND checkpoint.checkpoint_kind='reconciliation'
-			  AND checkpoint.as_of>$2 AND checkpoint.as_of<=$3
-			  AND cycle.cycle_status='published' AND cycle.scan_ceiling_at>=$4
-			ORDER BY cycle.scan_ceiling_at,cycle.first_sequence LIMIT 1`,
-			account.ExternalAccountID, account.FinalizedThrough, requested.UTC(), visibility).Scan(&realCycleCoverage)
-		if realErr == nil {
-			coveredVisibility = realCycleCoverage.UTC()
+		for realIndex < len(realCeilings) && realCeilings[realIndex].Before(visibility) {
+			realIndex++
+		}
+		if realIndex < len(realCeilings) {
+			coveredVisibility = realCeilings[realIndex]
 			continue
 		}
-		if !errors.Is(realErr, pgx.ErrNoRows) {
-			return realErr
+		for carryIndex < len(carryCandidates) && carryCandidates[carryIndex].asOf.Before(visibility) {
+			carryIndex++
 		}
-		var item proof
-		err = tx.QueryRow(ctx, `
-			SELECT cycle.scan_cycle_id::text,batch.batch_id::text,cycle.scan_snapshot_id,
-				cycle.scan_snapshot_row_count,cycle.scan_ceiling_at,cycle.stream_watermark_at,
-				cycle.source_cursor,cycle.final_sequence,batch.body_hash,batch.source_captured_at,
-				prior.id::text,prior.balance_service_units::text,prior.balance_negative,prior.baseline_member,
-				EXISTS (
-					SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
-					JOIN source_economic_scan_cycle_events mapped
-					  ON mapped.source_instance_id=checkpoint.source_instance_id
-					 AND mapped.stream_id='balances'
-					 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
-					 AND mapped.payload_hash=checkpoint.source_revision_hash
-					WHERE checkpoint.external_account_id=$1
-					  AND mapped.scan_cycle_id=cycle.scan_cycle_id
-				) AS has_real_checkpoint
-			FROM source_economic_scan_cycles cycle
-			JOIN source_ingest_batches batch
-			  ON batch.source_instance_id=cycle.source_instance_id
-			 AND batch.stream_id=cycle.stream_id
-			 AND batch.scan_cycle_id=cycle.scan_cycle_id
-			 AND batch.sequence=cycle.final_sequence
-			JOIN LATERAL (
-				SELECT checkpoint.id,checkpoint.balance_service_units,
-					checkpoint.balance_negative,checkpoint.baseline_member
-				FROM balance_reconciliation_checkpoints checkpoint
-				WHERE checkpoint.external_account_id=$1
-				  AND (checkpoint.as_of<cycle.scan_ceiling_at
-				       OR (checkpoint.as_of=cycle.scan_ceiling_at
-				           AND checkpoint.source_sequence<cycle.final_sequence))
-				ORDER BY checkpoint.as_of DESC,checkpoint.source_sequence DESC,checkpoint.id DESC LIMIT 1
-			) prior ON true
-			WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
-			  AND cycle.cycle_status='published'
-			  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
-			ORDER BY cycle.scan_ceiling_at,cycle.first_sequence LIMIT 1`,
-			account.ExternalAccountID, account.SourceInstanceID, visibility, requested.UTC()).Scan(
-			&item.cycleID, &item.batchID, &item.snapshotID, &item.snapshotRows,
-			&item.asOf, &item.watermark, &item.cursor, &item.sequence, &item.revision,
-			&item.observed, &item.priorID, &item.balance, &item.negative, &item.baselineMember,
-			&item.hasRealCheckpoint)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if carryIndex >= len(carryCandidates) {
 			return errBalanceCarryForwardProofPending
 		}
-		if err != nil {
-			return err
-		}
-		coveredVisibility = item.asOf.UTC()
+		item := carryCandidates[carryIndex]
+		coveredVisibility = item.asOf
 		if item.hasRealCheckpoint {
 			continue
 		}
