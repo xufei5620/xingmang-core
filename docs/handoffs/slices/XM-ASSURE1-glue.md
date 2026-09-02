@@ -2,9 +2,10 @@
 
 ## status
 
-READY（待验收线审读、复跑并人工合入）。全部本地门禁绿；发现一处不在本片
-范围内、影响全平台的 Kernel 缺口，已拆成独立切片 XM-KERNEL-ERRCODE0
-（team-lead 确认并排期），本片按指示未修复，见下方"重要发现"。
+READY（待验收线审读、复跑并人工合入）。全部本地门禁绿；开工期间发现一处
+不在本片范围内、影响全平台的 Kernel 缺口，已拆成独立切片
+XM-KERNEL-ERRCODE0 并已修复合入 `release/v0.1-launch`——本片已把
+`release/v0.1-launch` 合并进来、更新了相关断言，见下方"重要发现"。
 
 ## branch / commit
 
@@ -12,12 +13,22 @@ READY（待验收线审读、复跑并人工合入）。全部本地门禁绿；
 - worktree: `K:/星芒统一控制平台/wt-xmASSURE1G`
 - base: `release/v0.1-launch` @ `5b69b91`（含 XM-ASSURE1-core 与
   XM-ASSURE1-ui 两片合入）
-- 三个提交（`git log --oneline release/v0.1-launch..HEAD`，按时间顺序）：
+- 提交（`git log --oneline release/v0.1-launch..HEAD`，按时间顺序，
+  base 一节的 `5b69b91` 是本片开工时的 base；分支中途又合并了一次更新后的
+  `release/v0.1-launch`，见下面第 6 条）：
   1. `257fa4e` fix(httpapi): project probe_enabled/probe_credential_registered on connectors config
   2. `e1069eb` feat(admin-web): fall back to connector config for kill-switch state on zero probes
   3. `f129779` test(jobs): prove XM-ASSURE1-ui/-core compatibility with a real declare->run->query pass
-  本文件作为第四个提交单独加入（团队约定 Handoff 最后提交，先例见
-  XM-ASSURE1-core/-ui）。
+  4. `db101f0` docs(handoffs): add XM-ASSURE1-glue slice handoff
+  5. `d151b7d` docs(handoffs): reference XM-KERNEL-ERRCODE0 for the Kernel error-code finding
+  6. `git merge release/v0.1-launch`（无 rebase，把 XM-KERNEL-ERRCODE0
+     的修复——含 `internal/platform/action/kernel.go` 的 Execute() 改动、
+     该切片自己的 handoff——合并进本分支；干净合并，无冲突）
+  7. 本次更新（团队约定 Handoff 随最后一次改动一起提交，见下方"重要发现"）
+  本文件作为分支上的一部分随第 7 个提交更新（先例见 XM-ASSURE1-core/-ui
+  把 Handoff 作为独立提交；本片因为在验收反馈后有过两轮回填，
+  Handoff 文件本身经历了三次提交，符合"Handoff 是本分支最后落地状态"的
+  精神，不是字面"只提交一次"）。
 
 ## 派工任务的三处具体要求，逐条回报
 
@@ -98,44 +109,20 @@ Query 的响应字段名、Action ID 字面量、权限点/角色名常量——
 
 没有发现 UI 请求形状与后端不匹配、需要改小的地方。
 
-## 重要发现（不在本片范围内，已拆成独立切片 XM-KERNEL-ERRCODE0）
+## 重要发现（已由 XM-KERNEL-ERRCODE0 修复，本片已同步）
 
-**`internal/platform/action/kernel.go` 的 `Execute()` 会丢弃 Handler
-自己算出的错误码**：Handler 返回任何非 nil error，Kernel 一律重新包一层
-`newError(CodeExecutionFailed, ..., err)`；`httpapi.safeMessage`/
-`action.ErrorCode` 用 `errors.As` 只找链条上第一个 `*action.Error`,
-那正是 Kernel 新包的这一层。`assurance.domainError`（以及
-`credentials`/`finance` 等包的同类函数）在 Handler 内部算出来的
-`CodeInvalidParams`/`CodePreconditionFailed` 等具体错误码，
-因此在真实 HTTP 路径上到不了调用方，一律变成 `EXECUTION_FAILED`
-（502）。这些函数自己的单元测试直接调 Handler、绕过 Kernel,
-从未暴露这个问题；`action/kernel_test.go` 的
-`TestKernelRecordsHandlerFailureWithoutLeaking` 也只覆盖了"Handler 返回
-一个原始 `errors.New`"这一种情形，同样没覆盖到。
-
-具体到本片：`assurance.probe.declare@1` 对着渠道目录里不存在的
-`channel_id` 声明，今天走真实 HTTP 会收到 `EXECUTION_FAILED`（502、
-通用文案"执行失败"），而不是 `assurance/store.go` 的 `domainError`
-本来想给出的 `INVALID_PARAMS`（400、"渠道目录里查无此渠道 …"）。
-`TestUICompatDeclareRejectsUnknownChannelID` 精确钉住了这个现状：断言
-当前真实返回码是 `EXECUTION_FAILED`，同时用 `errors.Is`/`errors.Unwrap`
-证明具体拒绝原因仍然完整保留在错误链条里，只是这一层被 Kernel 的通用
-包装挡住了。
-
-这不是 ASSURE1 两片之间的不兼容，是 `action.Kernel` 的共享行为，影响
-**全平台所有** Action（凡是 Handler 主动返回带具体 Code 的 `*action.Error`
-都会被这样吞掉）。修复需要评估对全仓库其它 Action 的影响面（很可能有
-其它切片的 Handler 也依赖了"Handler 的 Code 能透传到 HTTP 层"这个假设，
-一次 Kernel 改动的回归验证范围远超本片），因此判断为不在本片范围内。
-开工期间通过 SendMessage 同步给 team-lead，team-lead 已确认并拆成独立
-切片 **XM-KERNEL-ERRCODE0**（agent `kernelerrcode`，worktree
-`wt-kernel-errcode0`）单独修复，本片按指示不动手改 `kernel.go`。
-
-`TestUICompatDeclareRejectsUnknownChannelID` 里断言
-`action.CodeExecutionFailed` 的那一处专门写了一条注释指向
-`XM-KERNEL-ERRCODE0`——那条切片落地后，这条断言需要翻成
-`action.CodeInvalidParams`，届时请一并检查这条测试是否需要更新，不要
-留一条断言着"已修复前的错误行为"的测试静默过关。
+开工期间发现 `internal/platform/action/kernel.go` 的 `Execute()` 会把
+Handler 自己算出的错误码一律丢弃、重新包成通用的 `CodeExecutionFailed`
+（`errors.As` 只找链条上第一个 `*action.Error`，那是 Kernel 新包的外层，
+不是 Handler 原本返回的那个），影响全平台所有 Action，不只是 ASSURE1。
+已通过 SendMessage 同步给 team-lead，确认后拆成独立切片
+**XM-KERNEL-ERRCODE0**（agent `kernelerrcode`，worktree
+`wt-kernel-errcode0`）修复，修复提交 `e6ddbfe`（`fix(action): preserve
+handler error codes through Kernel.Execute`）已合入
+`release/v0.1-launch`。本片随后 `git merge release/v0.1-launch` 把这个
+修复带了进来，并把 `TestUICompatDeclareRejectsUnknownChannelID` 的断言
+从"当前真实行为是 EXECUTION_FAILED"改成了"修复后应该是
+INVALID_PARAMS"（见 tests_run），本片自己不再需要跟踪这件事。
 
 ## summary
 
@@ -147,9 +134,17 @@ Query 的响应字段名、Action ID 字面量、权限点/角色名常量——
    支撑、从未被真正验证过的兼容性假设（`channel_id` 的 ID 空间、自由
    文本模型名），证明两片确实彼此兼容。
 3. 逐项核对全部 Action/Query 请求形状，未发现需要改小的地方。
-4. 意外发现并上报一处不在本片范围内、影响全平台的 Kernel 缺口。
+4. 意外发现一处不在本片范围内、影响全平台的 Kernel 缺口，上报后由
+   XM-KERNEL-ERRCODE0 独立修复并已合入，本片合并了这次修复并同步更新
+   了相关断言（见"重要发现"）。
 
 ## files_changed
+
+（`git merge release/v0.1-launch` 带进来的 XM-KERNEL-ERRCODE0 修复
+——`internal/platform/action/kernel.go`/`kernel_test.go` 与其它随
+`release/v0.1-launch` 一并合入的文件——不计入本片 files_changed，那些
+不是本片改的；完整清单见 `docs/handoffs/slices/XM-KERNEL-ERRCODE0.md`。
+下面只列本片自己写的改动。）
 
 修改：
 
@@ -201,6 +196,26 @@ XM_TEST_DATABASE_URL=... env -u HTTP_PROXY ... go test -p 1 -count=1 ./...
     `httpapi` 四个包单独 `-count=2` 跑了两遍，确认不是偶发）
 ```
 
+合并 `release/v0.1-launch`（带着 XM-KERNEL-ERRCODE0 的修复）之后又跑了
+一轮，针对性验证团队交接消息要求的范围：
+
+```
+git merge release/v0.1-launch
+  —— 干净合并，无冲突（26 files changed）
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
+  go vet ./internal/platform/jobs/... ./internal/platform/action/...
+  —— PASS（无输出）
+"$(go env GOROOT)/bin/gofmt" -l internal/platform/jobs/assurance_probe_ui_compat_integration_test.go
+  —— 干净，无需改动
+XM_TEST_DATABASE_URL="postgres://postgres:test@127.0.0.1:55432/xm_test?sslmode=disable" \
+  env -u HTTP_PROXY ... go test -p 1 -count=1 -v ./internal/platform/jobs/...
+  —— PASS（含 TestUICompatDeclareRunQueryEndToEnd/
+    TestUICompatDeclareRejectsUnknownChannelID 两条，后者现在断言
+    CodeInvalidParams 且通过）
+XM_TEST_DATABASE_URL=... env -u HTTP_PROXY ... go test -p 1 -count=1 ./internal/platform/action/...
+  —— PASS
+```
+
 `internal/platform/jobs/assurance_probe_ui_compat_integration_test.go`
 新增测试覆盖：
 
@@ -210,8 +225,12 @@ XM_TEST_DATABASE_URL=... env -u HTTP_PROXY ... go test -p 1 -count=1 ./...
   `Service.ProbeHistory` 核对渠道 ID、自由文本模型名、`ok` 结果全部
   正确回显。
 - `TestUICompatDeclareRejectsUnknownChannelID`：对渠道目录里确实不存在
-  的 `channel_id` 声明，钉住"当前真实返回码是 EXECUTION_FAILED，但具体
-  拒绝原因仍完整保留在 Unwrap 链条里"这一现状（见"重要发现"一节）。
+  的 `channel_id` 声明，断言 `action.ErrorCode(err) ==
+  action.CodeInvalidParams`（XM-KERNEL-ERRCODE0 修复后的正确行为，合并
+  该切片前这里断言的是 `CodeExecutionFailed`，见"重要发现"一节）、
+  `errors.Is(err, assurance.ErrInvalidInput)` 为真，以及 `err.Error()`
+  直接提到具体的未知渠道 ID（修复后 Handler 的 Message 也会原样带到最
+  外层，不再需要 Unwrap 才能看到）。
 
 `internal/platform/httpapi/credentials_test.go` 更新的
 `TestListConnectorConfigsShape`：两个新字段的非零值/零值分支、字段数
@@ -272,8 +291,6 @@ gitleaks：见下方 risks 之前的说明（本片提交前跑过，见 not_run
   connector_config 行）——real 模式的四层闸（Kill Switch/预算/白名单/
   冷却+并发）验证属于 XM-ASSURE1-core 交接文档划给 XM-ASSURE1-real 的
   范围，本片不重复覆盖。
-- **未修复"重要发现"里的 Kernel 缺口**：判断依据见上方专门一节，
-  不在本片范围内。
 - **未对着真实浏览器重新截图**：本片未改动任何视觉呈现（`AssuranceProbeKillSwitch`
   的文案微调是"未知"分支的措辞，不是新增视觉状态），XM-ASSURE1-ui
   已经交付过的六张截图仍然如实反映当前 UI。
@@ -284,13 +301,8 @@ gitleaks：见下方 risks 之前的说明（本片提交前跑过，见 not_run
    冲突**（见"派工任务的三处具体要求"第 1 条）：如果验收线认为应该
    跟随既有先例原样透传引用字面值，需要一次改动（Go 字段类型、前端
    `ConnectorConfig` 类型、两处测试），影响面小但需要明确决定。
-2. **Kernel 缺口影响全平台**（见"重要发现"）：这是本片交付前发现的
-   最重要的一件事——不只是"检测任务声明被拒绝时前端看到的错误码不对",
-   而是**任何** Action 的 Handler 只要返回一个带具体 Code 的
-   `*action.Error`，走真实 HTTP 路径都会被收窄成 `EXECUTION_FAILED`
-   （502）。建议验收线评估是否需要单独排一个切片修 Kernel（`errors.As`
-   改成先看 Handler 自己的 Code，只在完全没有 `*action.Error` 时才落
-   `EXECUTION_FAILED`），并评估这个改动对全仓库其它 Action 的回归影响面。
+2. ~~Kernel 缺口影响全平台~~ **已解决**：已由 XM-KERNEL-ERRCODE0 修复
+   并合入 `release/v0.1-launch`，本片已合并该修复，见"重要发现"。
 3. **零声明兜底的全局开关盲区**（见"派工任务"第 1 条）：一个平台的
    Kill Switch 本身已打开、但进程级全局开关
    `XM_ASSURE_PROBE_ENABLED` 被关闭这种少见运维场景下，零声明兜底会
@@ -300,12 +312,8 @@ gitleaks：见下方 risks 之前的说明（本片提交前跑过，见 not_run
 
 ## follow_ups
 
-- **Kernel 错误码透传缺口**（risks #2）：已拆成独立切片
-  **XM-KERNEL-ERRCODE0**（team-lead 确认并排期，agent `kernelerrcode`,
-  worktree `wt-kernel-errcode0`）单独修复，本片不动手改。该切片落地后
-  记得回来把 `TestUICompatDeclareRejectsUnknownChannelID` 里断言
-  `CodeExecutionFailed` 的那条改成 `CodeInvalidParams`（测试里已经写了
-  指向 XM-KERNEL-ERRCODE0 的注释，容易找到）。
+- ~~Kernel 错误码透传缺口~~（risks #2）：**已完成**——XM-KERNEL-ERRCODE0
+  已修复并合入，本片已合并、更新断言、重跑门禁，不再需要后续动作。
 - **`probe_credential_registered` 是否改回原样透传**（risks #1）：需要
   产品/安全负责人一次性拍板，两种做法都只是几行改动。
 - **全局开关状态的前端可见性**（risks #3）：如果运营侧认为这个盲区

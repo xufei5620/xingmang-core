@@ -411,41 +411,30 @@ func TestUICompatDeclareRejectsUnknownChannelID(t *testing.T) {
 	if err == nil {
 		t.Fatal("declare@1 对渠道目录里查无此渠道的声明返回了 nil error，want 非 nil")
 	}
-	// XM-ASSURE1-glue 发现的一处平台级缺口，已拆成独立切片
-	// XM-KERNEL-ERRCODE0 修复（team-lead 确认后的裁定，本片不动手改
-	// kernel.go）：internal/platform/action/kernel.go 的 Execute() 对
-	// Handler 返回的任何非 nil error 一律重新包一层
-	// newError(CodeExecutionFailed, ..., err)，而
-	// httpapi.safeMessage/action.ErrorCode 用 errors.As 只找链条上
-	// **第一个** *action.Error——那正是 Kernel 这层新包的外层，
-	// assurance.domainError 在 Handler 内部算出来的 CodeInvalidParams 因此
-	// 走真实 HTTP 路径时到不了调用方，变成了 CodeExecutionFailed（502）。
-	// 这不是 assurance/credentials 包 domainError 系列函数写错了——它们的
-	// 单元测试直接调 Handler、绕过 Kernel，因此从未暴露这个问题。这是
-	// action.Kernel 的共享行为，影响全平台所有 Action，不是 ASSURE1 两片
-	// 之间的不兼容。
-	//
-	// **XM-KERNEL-ERRCODE0 落地后**，这条断言要改成
-	// action.CodeInvalidParams——这里断言的是**当前真实行为**（Kernel 修复
-	// 前），不是期望行为，修复后应该把这条断言与下面这条 t.Fatalf 的
-	// 说明文字一并翻过来，而不是悄悄留着一条名不副实的断言。
-	if action.ErrorCode(err) != action.CodeExecutionFailed {
-		t.Fatalf("ErrorCode(err) = %q, want EXECUTION_FAILED（当前 Kernel 的真实行为，XM-KERNEL-ERRCODE0 落地后应改为 INVALID_PARAMS，见上面的长注释）; err = %v",
+	// 此前 internal/platform/action/kernel.go 的 Execute() 会把 Handler
+	// 自己算出的错误码一律吞成 CodeExecutionFailed（XM-ASSURE1-glue 发现、
+	// 已拆成独立切片 XM-KERNEL-ERRCODE0 修复，见该切片的 handoff 与
+	// internal/platform/action/kernel_test.go 的
+	// TestKernelPreservesHandlerActionErrorCode）——现在 Kernel 会用
+	// errors.As 识别出 Handler 返回的就是 *action.Error，原样透传它的
+	// Code/Message，因此这里断言的是修复后的正确行为：
+	// assurance.domainError 在 Handler 内部算出来的 CodeInvalidParams 能
+	// 一路走到调用方，不再变成通用的 CodeExecutionFailed。
+	if action.ErrorCode(err) != action.CodeInvalidParams {
+		t.Fatalf("ErrorCode(err) = %q, want INVALID_PARAMS（XM-KERNEL-ERRCODE0 修复后 Handler 的 Code 应原样透传）; err = %v",
 			action.ErrorCode(err), err)
 	}
-	// 但 Store/Handler 层自己算出的具体原因仍然完整保留在 Unwrap 链条里
-	// （errors.Is 会走完整条链，不像 errors.As 只看第一个匹配）——证明
-	// "存在性校验认的是渠道目录的 external_channel_id 这同一个 ID 空间"这条
-	// 业务逻辑本身是对的，只是这一层被 Kernel 的通用包装挡住了，不是
-	// checkTargetsExist 本身失效。
+	// Store/Handler 层自己算出的具体原因通过 errors.Is 可达（Unwrap 链条
+	// 完整）——证明"存在性校验认的是渠道目录的 external_channel_id 这同一个
+	// ID 空间"这条业务逻辑本身是对的，不只是外层 Code 碰巧对了。
 	if !errors.Is(err, assurance.ErrInvalidInput) {
 		t.Fatalf("errors.Is(err, assurance.ErrInvalidInput) = false，want true（具体拒绝原因应仍在 Unwrap 链里）: %v", err)
 	}
-	// err.Error() 本身只是 Kernel 外层那句通用的"执行失败"（*action.Error.
-	// Error() 不递归拼接 cause 的文本）——具体原因要 Unwrap 一层，看
-	// Handler 通过 domainError() 包出来的那个 *action.Error 的 Message。
-	inner := errors.Unwrap(err)
-	if inner == nil || !strings.Contains(inner.Error(), unknownChannelID) {
-		t.Fatalf("Unwrap(err).Error() = %v，want 提及具体的未知渠道 ID %q", inner, unknownChannelID)
+	// 修复后 Kernel 把 Handler 的 Message 原样带到最外层（不再是一句通用的
+	// "执行失败"），err.Error() 本身就应该直接提到具体的未知渠道 ID，不需要
+	// 再 Unwrap 一层才能看到——这一点本身也是 XM-KERNEL-ERRCODE0 修复的一部分，
+	// 值得单独断言。
+	if !strings.Contains(err.Error(), unknownChannelID) {
+		t.Fatalf("err.Error() = %q，want 提及具体的未知渠道 ID %q", err.Error(), unknownChannelID)
 	}
 }
