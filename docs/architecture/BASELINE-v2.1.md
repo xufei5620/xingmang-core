@@ -35,3 +35,11 @@
 
 开工门槛 P-0~P-6 → Foundation-A → M1 → M1.5 → Foundation-B →
 M2/M3/M4（A 读先行、B 写依赖 Foundation-B）→ 开票二阶段 → 后置能力。
+
+## 跨切片路线索引
+
+单条变更单涉及多个有先后依赖的切片时，其执行排序记录在 `docs/roadmap/`，本节只做索引，不重复内容：
+
+| 变更单 | 路线文件 |
+|---|---|
+| [CR-0006](../change-requests/CR-0006-console-auth-for-invoice-admin.md) | [CR-0006-console-auth-slices.md](../roadmap/CR-0006-console-auth-slices.md) |
