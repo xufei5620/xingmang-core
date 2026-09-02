@@ -1,5 +1,10 @@
 # RC68 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC68 shipped at signed tag
+> `v0.1.0-rc68-signed` (`ca6fa80`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-02-invoice-rc69-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, rehearse, canary, and deploy RC68 — the ledger anchored at the invoice policy start (XM-INV-POLICY-ANCHOR: migration 0016, POLICY_ANCHOR bootstrap, pre-policy backlog skipped at wake, one-time re-anchor of legacy accounts, EVENT_DEAD freeze), the platform username persisted on the session row (XM-INV-OBS-BUNDLE: migration 0017, silent-failure logging, zero-value sync display fix), the source-agent busy-cycle backoff (XM-INV-CYCLE-BACKOFF: 503 SOURCE_SCAN_CYCLE_BUSY instead of the 409 crash loop), and server-side platform scoping of every user-facing endpoint to the session's login platform (XM-INV-PLATFORM-SCOPE, CR-0003: cross-platform data is 404, a mixed-platform submission is rejected, the embed no longer depends on the `&platform=` URL parameter), and the embedded administrator mode for the platform console (XM-INV-ADMIN-EMBED, CR-0005: `/embed/admin/*` entries, per-platform admin scoping, popup OIDC/step-up, `/admin` framed only by `https://console.solov.cc`, height sync to the console).
