@@ -130,7 +130,13 @@ export interface DailyUsageOptions extends ListOptions {
   days?: number;
 }
 
-/** 读取指定用户按业务日排列的消费序列；服务端负责 CST 日期解释。 */
+/** 读取指定用户按业务日排列的消费序列；服务端负责 CST 日期解释。
+ *
+ *  与 `listPlatformUsers` 同一判据：`XM_PLATFORM_USERS_MODE=off` 时这条端点
+ *  与用户管理其余端点一起整组不挂载，chi 的默认 404 没有可解析的 `error.code`；
+ *  具体这个用户没有日消费记录时，后端把连接器的 `ErrNotFound` 翻译成带
+ *  `error.code`（`ACTION_NOT_REGISTERED`）的结构化 404（platformusers/
+ *  service.go `translateError`），结构不同，不会被误判成「未接入」。 */
 export async function listPlatformUserDailyUsage(
   platform: string,
   userId: string,
@@ -138,16 +144,23 @@ export async function listPlatformUserDailyUsage(
   client: ApiClient = apiClient,
 ): Promise<DailyUsageSeriesBody> {
   const segment = encodePlatformUserIdSegment(userId);
-  return client.get<DailyUsageSeriesBody>(
-    `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}/daily-usage`,
-    {
-      searchParams: {
-        ...(options.day ? { day: options.day } : {}),
-        ...(options.days === undefined ? {} : { days: String(options.days) }),
+  try {
+    return await client.get<DailyUsageSeriesBody>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}/daily-usage`,
+      {
+        searchParams: {
+          ...(options.day ? { day: options.day } : {}),
+          ...(options.days === undefined ? {} : { days: String(options.days) }),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
       },
-      ...(options.signal ? { signal: options.signal } : {}),
-    },
-  );
+    );
+  } catch (error) {
+    if (looksLikeUnmountedRoute(error)) {
+      throw new FeatureNotMountedError(error, USERS_NOT_MOUNTED_DESCRIPTION);
+    }
+    throw error;
+  }
 }
 
 export interface KeyMetadataBody {
@@ -175,7 +188,11 @@ export interface KeyMetadataOptions extends ListOptions {
   cursor?: string;
 }
 
-/** 读取元数据-only API Key 列表。响应永远没有完整 Key、secret 或 credential 字段。 */
+/** 读取元数据-only API Key 列表。响应永远没有完整 Key、secret 或 credential 字段。
+ *
+ *  未接入判据与 `listPlatformUserDailyUsage` 逐字相同：整组不挂载时是没有
+ *  `error.code` 的纯文本 404，具体用户没有 Key 记录时是带 `error.code`
+ *  （`ACTION_NOT_REGISTERED`）的结构化 404，两者不会混淆。 */
 export async function listPlatformUserKeys(
   platform: string,
   userId: string,
@@ -183,16 +200,23 @@ export async function listPlatformUserKeys(
   client: ApiClient = apiClient,
 ): Promise<KeyMetadataPageBody> {
   const segment = encodePlatformUserIdSegment(userId);
-  return client.get<KeyMetadataPageBody>(
-    `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}/keys`,
-    {
-      searchParams: {
-        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
-        ...(options.cursor ? { cursor: options.cursor } : {}),
+  try {
+    return await client.get<KeyMetadataPageBody>(
+      `/api/v1/platforms/${encodeURIComponent(platform)}/users/${segment}/keys`,
+      {
+        searchParams: {
+          ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+          ...(options.cursor ? { cursor: options.cursor } : {}),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
       },
-      ...(options.signal ? { signal: options.signal } : {}),
-    },
-  );
+    );
+  } catch (error) {
+    if (looksLikeUnmountedRoute(error)) {
+      throw new FeatureNotMountedError(error, USERS_NOT_MOUNTED_DESCRIPTION);
+    }
+    throw error;
+  }
 }
 
 /** `platform.users.read` —— 读取用户清单需要的权限。
