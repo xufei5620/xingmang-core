@@ -219,6 +219,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	// 渠道保障 · 被动指标（XM-ASSURE0 第一片）。只在 XM_REQLOG_MODE=file 时
+	// 有值——聚合直接扫描记录代理落盘的同一份数据，fake/real 两种模式没有
+	// 真实磁盘数据可读，两个端点因此不挂载（见 newChannelAssuranceService
+	// 的完整说明）。配置校验与 reqlog 共用同一份 cfg.Reqlog，配错同样拒绝启动。
+	channelAssurance, err := newChannelAssuranceService(cfg.Reqlog, logger)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "channel_assurance_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+
 	// 用户清单（XM-0046 / XM-USERS-REAL）。与 reqlog 同一条纪律：配错了就拒绝
 	// 启动。默认 fake（理由见 parseUsersMode）——样本客户一眼可辨，且
 	// data_source 带 -fake，前端据此挂演示横幅。
@@ -303,6 +314,8 @@ func main() {
 		PlatformChannelBindings: channelBindingStore,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
+		// nil 时「渠道保障」两个端点不挂载（见 httpapi.Deps.ChannelAssurance）
+		ChannelAssurance: channelAssuranceOrNil(channelAssurance),
 		// nil 时用户端点不挂载（见 httpapi.Deps.PlatformUsers）
 		PlatformUsers:          platformUsersOrNil(platformUserService),
 		PlatformUserDetails:    platformUserDetailsOrNil(platformUserService),

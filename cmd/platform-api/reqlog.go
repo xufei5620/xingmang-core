@@ -8,6 +8,7 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/connectors/reqlog"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
+	"github.com/xufei5620/xingmang-platform/internal/platform/channelassurance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
@@ -209,6 +210,48 @@ func newRequestLogService(
 	default:
 		return nil, fmt.Errorf("未知的 reqlog 模式 %q", cfg.Mode)
 	}
+}
+
+// channelAssuranceOrNil 把「没启用」翻译成一个真正为 nil 的接口值——与
+// requestLogsOrNil 同一个理由（把具体类型的 nil 指针直接赋给接口字段会得到
+// 一个非 nil 的接口，router 里的 `!= nil` 判断会失真，端点会带着 nil 依赖
+// 照挂，第一次调用直接 panic 而不是我们想要的「未启用即 404」）。
+func channelAssuranceOrNil(s *channelassurance.Service) httpapi.ChannelAssuranceQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+// newChannelAssuranceService 按配置装配「渠道保障」被动指标查询入口
+// （XM-ASSURE0 第一片）。
+//
+// **只在 reqlogModeFile 下才构造**，fake/real/off 三种模式一律返回
+// (nil, nil)（端点不挂载）——理由与 internal/platform/jobs/reqlog_metrics.go
+// 的 reqlog_metrics 周期任务完全同源（那条任务遇到 fake/real 同样退化成
+// 不注册，见其 ParseReqlogMetricsMode 的注释）：
+//
+//   - fake 模式：reqlog.NewFake 是一个纯内存的 ReadClient，不落盘任何
+//     index.jsonl，MetricsReader 扫的是一个真实文件系统路径，两者天生不是
+//     同一份数据，硬接上只会让「保障概览」显示一堆与请求列表页对不上的假
+//     聚合数字；
+//   - real 模式：控制台 HTTP API 形状尚未核实（§5 未决冲突），根本没有
+//     数据可读；
+//   - file 模式：MetricsReader 与 file 模式的 NewFileClient 读的是**同一份**
+//     磁盘数据（同一个 DataDir），聚合出来的数字与「请求详情」列表页显示
+//     的记录是同一件事的两种视角，这是唯一诚实的组合。
+func newChannelAssuranceService(cfg reqlogConfig, logger *slog.Logger) (*channelassurance.Service, error) {
+	if cfg.Mode != reqlogModeFile {
+		return nil, nil
+	}
+	if strings.TrimSpace(cfg.DataDir) == "" {
+		return nil, fmt.Errorf("XM_REQLOG_MODE=file 需要 XM_REQLOG_DATA_DIR 非空（渠道保障复用同一份数据目录）")
+	}
+	reader, err := reqlog.NewMetricsReader(reqlog.MetricsReaderConfig{DataDir: cfg.DataDir, Logger: logger})
+	if err != nil {
+		return nil, err
+	}
+	return channelassurance.NewService(reader)
 }
 
 // newReqlogFileClient 构造只读文件后端客户端（XM-REQLOG-MERGE）。
