@@ -1,5 +1,10 @@
 # RC71 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC71 shipped at signed tag
+> `v0.1.0-rc71-signed` (`ca4c1c0`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc72-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC71 — the readiness rule fix (XM-INV-READY-PENDING: a projection job that is legitimately waiting inside its `BALANCE_PROOF_PENDING` backoff window no longer counts as a stuck job for `/readyz`; stuck detection now uses the last attempt time; a rate-limited warning surfaces proof-pending jobs older than an hour).

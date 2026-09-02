@@ -368,13 +368,18 @@ production, in order:
    existing convention. This is a real, reviewable compose change; I did
    not make it because the task brief explicitly said not to touch deploy
    compose files beyond adding env vars to the example templates.
-4. **Run the CR-0006 data migration (change item f)** to move the existing
-   admin's `oidc_issuer`/`oidc_subject` onto the console's values *before*
-   flipping `CONSOLE_ASSERTION_ENABLED=true`, so the first assertion login
-   lands on the same `invoice_users` row rather than creating an orphaned
-   second identity. **The tool to do this does not exist yet** — see "Not
-   run" above; this needs its own follow-up slice or an extension of this
-   one before step 5 below is safe.
+4. **Run the CR-0006 data migration (change item f) AFTER enabling the
+   assertion path, not before.** Acceptance-line ruling (2026-09-03,
+   platform ACCEPTANCE-LOG): first set `CONSOLE_ASSERTION_ENABLED=true`
+   with the key manifest deployed (OIDC stays enabled), then run
+   `invoice-identity-migrate` (XM-INV-IDENTITY-MIGRATE: dry-run, then
+   `--apply` with the approved operator) to move the existing admin's
+   `oidc_issuer`/`oidc_subject` onto the console's values, and only then
+   turn `OIDC_ADMIN_LOGIN_ENABLED` off. Migrating first would break the
+   still-working Keycloak path for a window with no replacement; enabling
+   first only risks an orphaned row if someone tries the new console path
+   before the migration, which the migration tool refuses to guess about
+   (see docs/handoffs/XM-INV-IDENTITY-MIGRATE.md, "Production runbook").
 5. **Enable and canary.** Set `CONSOLE_ASSERTION_ENABLED=true`, redeploy,
    confirm `GET /api/v1/auth/session`'s `oidc_admin_login_enabled` still
    reads `true` (OIDC stays live throughout this step — `OIDC_ADMIN_LOGIN_

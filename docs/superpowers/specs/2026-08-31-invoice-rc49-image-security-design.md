@@ -2,7 +2,7 @@
 
 > **SUPERSEDED — DO NOT EXECUTE.** This design is retained as historical RC49
 > evidence. Current execution is governed only by
-> `docs/superpowers/plans/2026-09-02-invoice-rc71-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-03-invoice-rc72-release-recovery.md`.
 
 ## Approval and goal
 
