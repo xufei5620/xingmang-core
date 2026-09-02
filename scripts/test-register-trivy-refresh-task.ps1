@@ -85,6 +85,19 @@ if ($actualStartTimeOfDay -cne '05:30') {
 if ($definition.Settings.StartWhenAvailable -ne $true) {
     throw 'task settings do not retry a missed run when the machine becomes available (StartWhenAvailable)'
 }
+# RestartCount/RestartInterval: Task Scheduler's own SettingsSet CimInstance
+# reports RestartCount as an integer and RestartInterval as an ISO-8601
+# duration string (e.g. "PT30M") -- confirmed directly in this environment,
+# not a TimeSpan/DateTime -- so round-trip it back via XmlConvert (the same
+# BCL type Task Scheduler's own duration strings are defined against) to
+# assert the actual interval rather than string-matching one representation.
+if ($definition.Settings.RestartCount -ne 3) {
+    throw "task settings do not retry 3 times by default (RestartCount): actual=$($definition.Settings.RestartCount)"
+}
+$defaultRestartInterval = [Xml.XmlConvert]::ToTimeSpan($definition.Settings.RestartInterval)
+if ($defaultRestartInterval -ne (New-TimeSpan -Minutes 30)) {
+    throw "task settings do not retry 30 minutes apart by default (RestartInterval): actual=$($definition.Settings.RestartInterval)"
+}
 
 if ($definition.Principal.UserId -cne $userIdFixture) {
     throw "task principal UserId does not match: actual='$($definition.Principal.UserId)' expected='$userIdFixture'"
@@ -118,6 +131,47 @@ $eveningDefinition = New-InvoiceTrivyRefreshTaskDefinition `
 $eveningStartTimeOfDay = Get-LocalTimeOfDayFromTaskTriggerStartBoundary -StartBoundary $eveningDefinition.Trigger.StartBoundary
 if ($eveningStartTimeOfDay -cne '23:15') {
     throw "a non-default StartTime did not propagate to the task trigger: actual=$eveningStartTimeOfDay"
+}
+
+# A different RestartCount/RestartInterval propagates all the way through
+# to the settings (a skipped/failed run's own retry policy).
+$customRestartDefinition = New-InvoiceTrivyRefreshTaskDefinition `
+    -PwshPath $pwshPathFixture `
+    -RefreshScriptPath $refreshScriptPathFixture `
+    -WorkingDirectory $workingDirectoryFixture `
+    -UserId $userIdFixture `
+    -RestartCount 5 `
+    -RestartInterval (New-TimeSpan -Minutes 15)
+if ($customRestartDefinition.Settings.RestartCount -ne 5) {
+    throw "a non-default RestartCount did not propagate to the task settings: actual=$($customRestartDefinition.Settings.RestartCount)"
+}
+$customRestartInterval = [Xml.XmlConvert]::ToTimeSpan($customRestartDefinition.Settings.RestartInterval)
+if ($customRestartInterval -ne (New-TimeSpan -Minutes 15)) {
+    throw "a non-default RestartInterval did not propagate to the task settings: actual=$($customRestartDefinition.Settings.RestartInterval)"
+}
+Assert-ThrowsLike `
+    -Action {
+        New-InvoiceTrivyRefreshTaskDefinition `
+            -PwshPath $pwshPathFixture `
+            -RefreshScriptPath $refreshScriptPathFixture `
+            -WorkingDirectory $workingDirectoryFixture `
+            -UserId $userIdFixture `
+            -RestartInterval ([TimeSpan]::Zero) | Out-Null
+    } `
+    -ExpectedMessagePattern 'RestartInterval must be a positive timespan' `
+    -FailureMessage 'task definition accepted a zero RestartInterval'
+foreach ($invalidRestartCount in @(-1, 11)) {
+    Assert-ThrowsLike `
+        -Action {
+            New-InvoiceTrivyRefreshTaskDefinition `
+                -PwshPath $pwshPathFixture `
+                -RefreshScriptPath $refreshScriptPathFixture `
+                -WorkingDirectory $workingDirectoryFixture `
+                -UserId $userIdFixture `
+                -RestartCount $invalidRestartCount | Out-Null
+        } `
+        -ExpectedMessagePattern 'Cannot validate argument|RestartCount' `
+        -FailureMessage "task definition accepted an out-of-range RestartCount: $invalidRestartCount"
 }
 
 foreach ($invalidStartTime in @('5:30', '25:00', '05:60', '05-30', '0530', '')) {

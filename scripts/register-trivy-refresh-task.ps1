@@ -13,7 +13,18 @@ param(
     [string]$StartTime = '05:30',
 
     [ValidateNotNullOrEmpty()]
-    [string]$UserId = "$env:USERDOMAIN\$env:USERNAME"
+    [string]$UserId = "$env:USERDOMAIN\$env:USERNAME",
+
+    # How many times, and how far apart, Task Scheduler retries this task
+    # the same day after it exits non-zero -- including exit 75 (refresh-
+    # trivy-cache.ps1 skipped because the release image gate held the
+    # shared cache volume). See register-trivy-refresh-task-lib.ps1's own
+    # comment on New-InvoiceTrivyRefreshTaskDefinition for the full reasoning.
+    [ValidateRange(0, 10)]
+    [int]$RestartCount = 3,
+
+    [ValidateNotNull()]
+    [TimeSpan]$RestartInterval = (New-TimeSpan -Minutes 30)
 )
 
 <#
@@ -40,6 +51,13 @@ for the task is preserved.
 .PARAMETER RepoRoot
 Repository root containing scripts\refresh-trivy-cache.ps1. Defaults to this
 script's own repo root (the parent of the scripts\ directory it lives in).
+
+.PARAMETER RestartCount
+.PARAMETER RestartInterval
+How many times (default 3), and how far apart (default 30 minutes), Task
+Scheduler retries the task the same day after refresh-trivy-cache.ps1 exits
+non-zero -- including exit 75, which means the release image gate held the
+shared cache volume and the run was skipped rather than failed.
 
 .PARAMETER WhatIf
 Prints the task definition (action, trigger, settings, principal) without
@@ -86,7 +104,9 @@ $definition = New-InvoiceTrivyRefreshTaskDefinition `
     -RefreshScriptPath $refreshScriptPath `
     -WorkingDirectory $repoRootFullPath `
     -UserId $UserId `
-    -StartTime $StartTime
+    -StartTime $StartTime `
+    -RestartCount $RestartCount `
+    -RestartInterval $RestartInterval
 
 $taskFullName = "$TaskPath$TaskName"
 Write-Host "Task definition for '$taskFullName':"
@@ -95,7 +115,7 @@ Write-Host "  Arguments:        $($definition.Action.Arguments)"
 Write-Host "  WorkingDirectory: $($definition.Action.WorkingDirectory)"
 Write-Host "  Trigger:          daily at $StartTime local time (recurrence DaysInterval=$($definition.Trigger.DaysInterval))"
 Write-Host "  Principal:        $($definition.Principal.UserId), LogonType=$($definition.Principal.LogonType), RunLevel=$($definition.Principal.RunLevel)"
-Write-Host "  Settings:         StartWhenAvailable=$($definition.Settings.StartWhenAvailable)"
+Write-Host "  Settings:         StartWhenAvailable=$($definition.Settings.StartWhenAvailable), RestartCount=$($definition.Settings.RestartCount), RestartInterval=$($definition.Settings.RestartInterval)"
 
 $existingTask = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
 $taskDescription = 'Refreshes the invoice-release-gate-trivy-0-74-0 Docker volume via scripts/refresh-trivy-cache.ps1. Registered by scripts/register-trivy-refresh-task.ps1; see docs/PRODUCTION-RUNBOOK.md.'
