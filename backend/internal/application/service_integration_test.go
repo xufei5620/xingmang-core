@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -302,6 +303,106 @@ func TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccoun
 		WHERE source_instance_id=$1 AND stream_id='usage' AND scan_cycle_id=$2::uuid`,
 		sourceID, cycleID).Scan(&cycleStatus); err != nil || cycleStatus != "published" {
 		t.Fatalf("cycle did not publish after the dead event was frozen: status=%s err=%v", cycleStatus, err)
+	}
+}
+
+// TestSourceProjectionWorkerLogsProjectionFailure is the end-to-end wiring
+// check for RunOnce's new log line (XM-INV-PREANCHOR-USAGE requirement 2):
+// a source event that deterministically fails processing on its very first
+// attempt must produce a Warn log carrying the source/stream/event ids and
+// the error text, and must never carry the decrypted payload contents. Uses
+// the same deterministic unit_code mismatch as
+// TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccountHint
+// above, stopping after the first (PROJECTION_FAILED, not yet dead) attempt
+// since that is the only new behavior under test here.
+func TestSourceProjectionWorkerLogsProjectionFailure(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+	sourceID := "10000000-0000-4000-8000-000000000080"
+	userID := "20000000-0000-4000-8000-000000000080"
+	accountID := "30000000-0000-4000-8000-000000000080"
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO source_instances(id,source_type,name,runtime_version)
+		VALUES($1,'sub2api','projection-failure-log','log-v3')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+		VALUES($1,'https://id.example','projection-failure-log')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+		VALUES($1,$2,$3,'80',$4,'test','verified')`, accountID, userID, sourceID,
+		"h1:"+strings.Repeat("8", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProvisionSourceStream(ctx, sourceID, "usage",
+		postgresstore.AuditActor{Type: "system", ID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := store.Pool().Exec(ctx, `INSERT INTO source_cutover_manifests(
+		source_instance_id,manifest_hash,cutover_at,database_clock,source_runtime_version,
+		projection_contract,configuration_hash,unit_code,payments_ceiling,usage_ceiling,
+		credits_ceiling,balances_ceiling,baseline_snapshot_id,baseline_snapshot_hash,
+		baseline_row_count,signing_key_id)
+		VALUES($1,$2,$3,$3,'log-v3','sub2api-economic-v4',$4,'SUB2_BALANCE_1E8',
+		'p0','u0','c0','b0',$5,$5,1,'log-key')`, sourceID, strings.Repeat("e", 64),
+		now.Add(-48*time.Hour), strings.Repeat("f", 64), strings.Repeat("2", 64)); err != nil {
+		t.Fatal(err)
+	}
+	causalOrder := "1"
+	// A never-matching unit_code is a deterministic, non-payload-dependent
+	// way to make ProcessSourceEvent return a plain error (domain.ErrConflict
+	// from observeEligibilityFact's expectedUnitForSource check) on the very
+	// first attempt -- never PROJECTION_ELIGIBLE, never a dependency wait.
+	secretMarker := "must-not-leak-into-logs-payload-marker"
+	payload, err := json.Marshal(usageEventPayload{
+		ExternalUserID: "80", ExternalUsageID: secretMarker, OccurredAt: now.Format(time.RFC3339Nano),
+		ServiceUnits: "10", UnitCode: "WRONG_UNIT_CODE", BillingScope: "wallet",
+		SourceCursor: "usage:1", CausalDomain: "usage_event", CausalOrder: &causalOrder,
+		CutoverManifestHash: strings.Repeat("a", 64), ConfigurationHash: strings.Repeat("b", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadSum := sha256.Sum256(payload)
+	payloadHash := hex.EncodeToString(payloadSum[:])
+	eventID := "80000000-0000-4000-8000-000000000001"
+	batchID := "80000000-0000-4000-8000-000000000002"
+	cycleID := "80000000-0000-4000-8000-000000000003"
+	ciphertext, err := service.keys.Encrypt(payload, ingestEventAAD(sourceID, "usage", eventID, payloadHash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CommitSourceBatch(ctx, postgresstore.SourceBatchInput{
+		SchemaVersion: "3.0", SourceInstanceID: sourceID, StreamID: "usage",
+		BatchID: batchID, Sequence: 1, BodyHash: strings.Repeat("d", 64), SigningKeyID: "log-key",
+		SourceRuntimeVersion: "log-v3", SourceAgentVersion: "log-agent", SourceCapturedAt: now,
+		ProjectionStatus: "healthy", StreamWatermarkAt: now, SourceCursor: "usage:1",
+		ScanCeilingAt: now, ScanCeilingCursor: "usage-ceiling:80", ScanCycleID: cycleID,
+		ScanComplete: true,
+		Events: []postgresstore.SourceBatchEvent{{EventID: eventID, EntityType: "usage_event",
+			Operation: "upsert", PayloadHash: payloadHash, PayloadCiphertext: ciphertext, ObservedAt: now}},
+		Actor: postgresstore.AuditActor{Type: "source_connector", ID: sourceID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var logBuf bytes.Buffer
+	processor := SourceEventProcessor{Service: service, BatchSize: 10,
+		Now: func() time.Time { return now.Add(time.Minute) }, Logger: slog.New(slog.NewTextHandler(&logBuf, nil))}
+	if processed, err := processor.RunOnce(ctx); err != nil || processed != 1 {
+		t.Fatalf("processed=%d err=%v", processed, err)
+	}
+	logged := logBuf.String()
+	for _, want := range []string{sourceID, "usage", eventID} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("projection failure log missing %q: %s", want, logged)
+		}
+	}
+	if !strings.Contains(logged, "level=WARN") {
+		t.Fatalf("projection failure was not logged at Warn level: %s", logged)
+	}
+	if strings.Contains(logged, secretMarker) {
+		t.Fatalf("projection failure log leaked payload contents: %s", logged)
 	}
 }
 
