@@ -511,6 +511,59 @@ func validateVerifiedBindingProof(proof VerifiedBindingProof) error {
 	return nil
 }
 
+// PostgresConsoleAssertionNonceStore backs ConsoleAssertionNonceStore
+// (console_assertion.go) with the console_assertion_nonces table (migration
+// 0018). Same INSERT...ON CONFLICT DO NOTHING single-use pattern as
+// oidc_backchannel_logout_events' (issuer_hash, jti_hash) judge -- see that
+// table's comment in 0007_oidc_logout.sql for the precedent this follows.
+type PostgresConsoleAssertionNonceStore struct{ pool *pgxpool.Pool }
+
+func NewPostgresConsoleAssertionNonceStore(pool *pgxpool.Pool) *PostgresConsoleAssertionNonceStore {
+	return &PostgresConsoleAssertionNonceStore{pool: pool}
+}
+
+// ConsumeNonce atomically claims nonceHash. ok is true only for the caller
+// that actually inserted the row (first-to-arrive wins); a replayed nonce
+// observes ok=false with a nil error, never an error by itself, so the
+// handler can fold it into the same generic ASSERTION_INVALID outcome as
+// every other rejection.
+func (s *PostgresConsoleAssertionNonceStore) ConsumeNonce(ctx context.Context, nonceHash string, expiresAt time.Time) (bool, error) {
+	if s == nil || s.pool == nil {
+		return false, errors.New("nil PostgreSQL console-assertion nonce store")
+	}
+	if len(nonceHash) != 64 || expiresAt.IsZero() {
+		return false, errors.New("invalid console assertion nonce hash or expiry")
+	}
+	result, err := s.pool.Exec(ctx, `
+		INSERT INTO console_assertion_nonces(nonce_hash,consumed_at,expires_at)
+		VALUES($1,$2,$3)
+		ON CONFLICT (nonce_hash) DO NOTHING`, nonceHash, time.Now().UTC(), expiresAt)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+// DeleteExpired sweeps rows whose assertion validity ended over an hour ago
+// (see migration 0018's comment: the extra hour is a troubleshooting
+// window, not a security requirement -- an expired assertion can never pass
+// verification again regardless of whether its nonce row still exists).
+func (s *PostgresConsoleAssertionNonceStore) DeleteExpired(ctx context.Context, before time.Time) (int64, error) {
+	if s == nil || s.pool == nil {
+		return 0, errors.New("nil PostgreSQL console-assertion nonce store")
+	}
+	// $1 must be cast explicitly: with only one occurrence of the parameter,
+	// PostgreSQL's type inference for "$1 - interval '1 hour'" resolves via
+	// the interval-interval overload (defaulting $1 to interval) rather than
+	// the intended timestamptz-interval one, and then fails to compare an
+	// interval against the timestamptz expires_at column. PostgresFlowStore's
+	// equivalent query above never hits this because it uses the same
+	// parameter a second time in a plain comparison first, which pins its
+	// type before the subtraction is resolved.
+	result, err := s.pool.Exec(ctx, `DELETE FROM console_assertion_nonces WHERE expires_at < $1::timestamptz - interval '1 hour'`, before)
+	return result.RowsAffected(), err
+}
+
 func insertSecurityAudit(ctx context.Context, tx pgx.Tx, event SecurityAuditEvent) error {
 	if err := event.Validate(); err != nil {
 		return err
