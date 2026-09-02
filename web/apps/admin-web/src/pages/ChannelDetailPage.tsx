@@ -49,6 +49,14 @@ export function channelAssuranceOverviewPath(platform: string): string {
   return `/platforms/${encodeURIComponent(platform)}?tab=model&sub=overview`;
 }
 
+/** 渠道保障页签的「检测任务」子页签（XM-ASSURE1-ui）。检测任务按
+ *  平台/模型声明，不按单一渠道——同一条声明的 targets 数组可以跨多个
+ *  渠道，因此这里同样是"指路到平台整体真实数据"，不是编一个只属于这条
+ *  渠道的检测结论。 */
+export function channelAssuranceProbesPath(platform: string): string {
+  return `/platforms/${encodeURIComponent(platform)}?tab=model&sub=probes`;
+}
+
 /** 渠道详情。
  *
  *  2026-09-02 起不再是纯 UI-only 壳：渠道目录本身(`GET /api/v1/platforms/{p}/channels`,
@@ -474,10 +482,13 @@ function ChannelDetailBody({
             <FactLink label="平台被动指标" to={channelAssuranceOverviewPath(platform)}>
               查看 {label} 渠道保障 · 保障概览 →
             </FactLink>
-            <UnavailableFact
+            <FactLink
               label="最近模型检测结论"
-              hint="主动探测（声明 → 探针 → 结论）需要独立 Action 且必须带 Kill Switch（宪法 26 条），划给 XM-ASSURE1，尚未实现"
-            />
+              to={channelAssuranceProbesPath(platform)}
+              hint="检测任务按平台/模型声明，同一条声明的目标渠道可能不止这一条——这里同样给不出「只属于本渠道」的结论，跳转到平台整体真实检测任务表"
+            >
+              查看 {label} 渠道保障 · 检测任务 →
+            </FactLink>
             <UnavailableFact label="已验证模型数" hint="同上，等 XM-ASSURE1" />
             <UnavailableFact label="已配置模型数" hint="同上，等 XM-ASSURE1" />
             <UnavailableFact label="最近检测时间" hint="同上，等 XM-ASSURE1" />
@@ -556,10 +567,22 @@ function UnavailableFact({ label, hint }: { label: string; hint?: string }) {
 /** 与 Fact 同一个 dt/dd 结构，dd 内容换成到别处真实数据的链接——用在
  *  「这一条渠道给不出这个数字，但平台整体有」的场景，比单纯的未接入更
  *  诚实：既不冒充有数据，也不让人以为这条能力完全不存在。 */
-function FactLink({ label, to, children }: { label: string; to: string; children: ReactNode }) {
+function FactLink({
+  label,
+  to,
+  hint,
+  children,
+}: {
+  label: string;
+  to: string;
+  hint?: string;
+  children: ReactNode;
+}) {
   return (
     <div className="min-w-0">
-      <dt className="text-xs text-fg-muted">{label}</dt>
+      <dt className="text-xs text-fg-muted" title={hint}>
+        {label}
+      </dt>
       <dd className="mt-0.5 min-w-0 text-sm">
         <Link
           to={to}

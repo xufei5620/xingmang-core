@@ -205,6 +205,101 @@ function richAssuranceHistoryBody() {
   };
 }
 
+/** XM-ASSURE1-ui：检测任务表 / 主动检测历史的空响应，与被动指标同一条
+ *  "共用兜底给空、需要非空数据的用例自己覆盖 stubFetch"规矩。 */
+function emptyProbeListBody() {
+  return {
+    platform: "sub2api",
+    probes: [] as Array<Record<string, unknown>>,
+    freshness: assuranceFreshness,
+    assertion_disclaimer: "检测结果为形状与延迟检测，非语义正确性保证。",
+    channel_breakdown_supported: true,
+  };
+}
+
+function emptyProbeHistoryBody() {
+  return {
+    platform: "sub2api",
+    entries: [] as Array<Record<string, unknown>>,
+    next_cursor: null,
+    freshness: assuranceFreshness,
+    channel_breakdown_supported: true,
+  };
+}
+
+/** 非空的检测任务表：一行 fake 模式已声明、`can_run_now=true`；一行
+ *  real 模式因平台 Kill Switch 关闭而 `can_run_now=false`——覆盖"运行
+ *  按钮在各 cannot_run_reason 下禁用+tooltip"（设计稿 §8.4）与"未启用
+ *  pill 与结果 pill 视觉可区分"两条断言。 */
+function richProbeListBody() {
+  return {
+    platform: "sub2api",
+    probes: [
+      {
+        declaration_id: "decl-1",
+        name: "模型指纹",
+        channel_ids: ["chn-1"],
+        channel_names: ["Claude 官方 API"],
+        target_models: ["claude-sonnet-4"],
+        policy_text: "按需 · 无定时",
+        last_run_at: "2026-08-31T02:30:00Z",
+        last_run_status: "ok",
+        last_run_verdict: "模型自称与声明一致",
+        kill_switch_state: "not_applicable_fake",
+        can_run_now: true,
+        cannot_run_reason: "",
+        cannot_run_reason_text: "",
+      },
+      {
+        declaration_id: "decl-2",
+        name: "基准题集",
+        channel_ids: ["chn-2"],
+        channel_names: ["Azure 东亚"],
+        target_models: ["gpt-4o"],
+        policy_text: "按需 · 无定时",
+        last_run_at: null,
+        last_run_status: "never_run",
+        last_run_verdict: null,
+        kill_switch_state: "disabled",
+        can_run_now: false,
+        cannot_run_reason: "platform_kill_switch_off",
+        cannot_run_reason_text: "该平台检测未启用，请在治理段打开开关",
+      },
+    ],
+    freshness: assuranceFreshness,
+    assertion_disclaimer: "检测结果为形状与延迟检测，非语义正确性保证。",
+    channel_breakdown_supported: true,
+  };
+}
+
+function richProbeHistoryBody() {
+  return {
+    platform: "sub2api",
+    entries: [
+      {
+        observed_at: "2026-08-31T02:30:00Z",
+        channel_id: "chn-1",
+        external_channel_id: "",
+        model: "claude-sonnet-4",
+        declaration_name: "模型指纹",
+        prompt_template_key: "model_fingerprint",
+        status: "ok",
+        verdict: "模型自称与声明一致",
+        evidence_ref: "probe-8f3a1c2d",
+        latency_ms: 12,
+        first_token_ms: 5,
+        measured_first_token: true,
+        tokens_used: 8,
+        http_status: 200,
+        error_kind: "",
+      },
+    ],
+    next_cursor: null,
+    freshness: assuranceFreshness,
+    channel_breakdown_supported: true,
+  };
+}
+
 /** 只实现客户端用到的 ok/status/json 三样，不依赖 jsdom 是否提供 Response。 */
 function fakeResponse(status: number, body: unknown): Response {
   return {
@@ -684,6 +779,14 @@ function okHandler(url: string): Response {
     const window = new URL(url, "http://localhost").searchParams.get("window") ?? "1h";
     return fakeResponse(200, emptyAssuranceOverviewBody(window));
   }
+  // XM-ASSURE1-ui：检测任务 / 主动检测历史，默认空——同上，需要非空数据
+  // 的用例自己覆盖 stubFetch。probe-history 必须排在 probes 前面判断吗？
+  // 不必——两条路径互不是彼此前缀（.../assurance/probes 与
+  // .../assurance/probe-history），谁在前都不影响匹配。
+  if (/\/api\/v1\/platforms\/[^/]+\/assurance\/probe-history/.test(url))
+    return fakeResponse(200, emptyProbeHistoryBody());
+  if (/\/api\/v1\/platforms\/[^/]+\/assurance\/probes/.test(url))
+    return fakeResponse(200, emptyProbeListBody());
   return fakeResponse(404, { error: { code: "NOT_REGISTERED", message: "未知路径" } });
 }
 
@@ -2092,18 +2195,39 @@ describe("渠道保障页签（裁定 #1 的 A 落地；XM-ASSURE0 起「保障�
     expect(await screen.findByRole("button", { name: "24 小时", pressed: true })).not.toBeNull();
   });
 
-  it("检测任务：仍是纯蓝图，明确指向 XM-ASSURE1 与 Kill Switch 要求，不显示任何检测结果", async () => {
+  it("检测任务：空表时显示发起检测入口与空态说明，不冒充有数据", async () => {
     renderRoute("/platforms/sub2api?tab=model&sub=probes");
-    for (const col of ["任务", "渠道", "目标模型", "策略", "最近一次", "结果"]) {
+    expect(await screen.findByRole("button", { name: "发起检测" })).not.toBeNull();
+    // dev-header 模式读不到角色声明，Kill Switch 入口默认隐藏（见
+    // auth/session.ts currentUserHasRole 的说明）
+    expect(screen.queryByRole("button", { name: /Kill Switch/ })).toBeNull();
+    expect(await screen.findByText("还没有检测任务")).not.toBeNull();
+    // 空表时 DataTableV2 只渲染 emptyState，不渲染表头（ui-admin 既有行为：
+    // `rows.length === 0` 直接返回 emptyState）——因此列结构断言放在下面
+    // 「显示真实声明」这条有数据的用例里
+  });
+
+  it("检测任务：显示真实声明与结果 pill，未启用的行禁用运行按钮并给出人话原因", async () => {
+    stubFetch((url) =>
+      /\/assurance\/probes/.test(url) ? fakeResponse(200, richProbeListBody()) : okHandler(url),
+    );
+    renderRoute("/platforms/sub2api?tab=model&sub=probes");
+
+    for (const col of ["任务", "渠道", "目标模型", "策略", "最近一次", "结果", "操作"]) {
       expect(await screen.findByRole("columnheader", { name: col })).not.toBeNull();
     }
-    // 两处文案都提到 XM-ASSURE1/Kill Switch（顶部说明 + 蓝图表空态），
-    // 用 getAllByText 而不是 getByText——后者在命中多个元素时会抛错
-    expect(screen.getAllByText(/XM-ASSURE1/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Kill Switch/).length).toBeGreaterThan(0);
-    // 原型样例里的那些「结果」不许出现在界面上
-    expect(screen.queryByText(/probe-88/)).toBeNull();
-    expect(screen.queryByText("疑似退化")).toBeNull();
+    expect(screen.getByText("模型指纹")).not.toBeNull();
+    expect(screen.getByText("模型自称与声明一致")).not.toBeNull();
+    expect(screen.getByText("从未运行")).not.toBeNull();
+    expect(screen.getByText("未启用")).not.toBeNull();
+
+    const runButtons = screen.getAllByRole("button", { name: /^运行/ });
+    expect((runButtons[0] as HTMLButtonElement).disabled).toBe(false);
+    expect((runButtons[1] as HTMLButtonElement).disabled).toBe(true);
+    expect(runButtons[1]!.getAttribute("title")).toBe("该平台检测未启用，请在治理段打开开关");
+    // 检测结果为形状/延迟检测这条常驻说明必须出现，替换掉原型的
+    // 「这是目标布局」warnbar
+    expect(screen.getByText("检测结果为形状与延迟检测，非语义正确性保证。")).not.toBeNull();
   });
 
   it("历史记录显示真实的近 7 天聚合，缺目录的天数标记覆盖不全", async () => {
@@ -2120,6 +2244,23 @@ describe("渠道保障页签（裁定 #1 的 A 落地；XM-ASSURE0 起「保障�
     const todayRow = todayCell.closest("tr") as HTMLElement;
     expect(within(todayRow).getByText("1")).not.toBeNull();
     expect(screen.getByText(/近 7 天中有 6 天索引目录缺失/)).not.toBeNull();
+    // 历史记录页渲染两张独立卡片，不合并成一张看起来是同一份数据的表
+    // （设计稿 §6.2）：被动卡片有自己的标题，主动检测历史卡片另起一段
+    expect(screen.getByRole("heading", { name: "被动聚合（近 7 天）", level: 3 })).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "主动检测历史", level: 3 })).not.toBeNull();
+  });
+
+  it("历史记录：主动检测历史卡片独立请求、独立渲染，与被动聚合互不影响", async () => {
+    stubFetch((url) =>
+      /\/assurance\/probe-history/.test(url) ? fakeResponse(200, richProbeHistoryBody()) : okHandler(url),
+    );
+    renderRoute("/platforms/sub2api?tab=model&sub=history");
+
+    expect(await screen.findByText("probe-8f3a1c2d")).not.toBeNull();
+    expect(screen.getByText("模型自称与声明一致")).not.toBeNull();
+    // 被动卡片仍按 okHandler 的默认空聚合（7 天各 0 请求）正常渲染，不受
+    // 主动卡片有数据影响——两条 stubFetch 分支互不干扰
+    expect(screen.getByText(/近 7 天索引目录均完整/)).not.toBeNull();
   });
 });
 
