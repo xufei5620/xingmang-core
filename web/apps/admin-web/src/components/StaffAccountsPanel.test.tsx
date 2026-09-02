@@ -22,6 +22,23 @@ const aliceRow = {
   locked_until: null,
   last_login_at: "2026-08-28T03:00:00Z",
   created_at: "2026-01-01T00:00:00Z",
+  totp_enrolled: false,
+  must_enroll_totp: false,
+  totp_enrolled_at: null,
+};
+
+const bobEnrolledRow = {
+  username: "bob",
+  display_name: "Bob",
+  roles: ["admin"],
+  disabled: false,
+  must_change_password: false,
+  locked_until: null,
+  last_login_at: null,
+  created_at: "2026-01-02T00:00:00Z",
+  totp_enrolled: true,
+  must_enroll_totp: false,
+  totp_enrolled_at: "2026-08-01T00:00:00Z",
 };
 
 function renderPanel() {
@@ -120,6 +137,33 @@ describe("人员与权限 · 账号与身份", () => {
     );
   });
 
+  it("两步验证列展示状态，且只有已启用/待启用的账号才出示「重置 TOTP」按钮", async () => {
+    vi.stubGlobal("fetch", handler({ rows: [aliceRow, bobEnrolledRow] }));
+    renderPanel();
+    await screen.findByText("alice");
+
+    const table = within(screen.getByRole("table"));
+    expect(table.getByText("未启用")).toBeTruthy();
+    expect(table.getByText("已启用")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重置 alice 的两步验证" })).toBeNull();
+    expect(screen.getByRole("button", { name: "重置 bob 的两步验证" })).toBeTruthy();
+  });
+
+  it("重置 TOTP：确认后调用 staff.account.reset_totp@1，参数是目标用户名", async () => {
+    const fetchMock = handler({ rows: [bobEnrolledRow] });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPanel();
+    await screen.findByText("bob");
+
+    fireEvent.click(screen.getByRole("button", { name: "重置 bob 的两步验证" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    await waitFor(() => expect(postCallTo(fetchMock, "staff.account.reset_totp")).toBeTruthy());
+    const [url, init] = postCallTo(fetchMock, "staff.account.reset_totp");
+    expect(url).toContain("/api/v1/actions/staff.account.reset_totp/versions/1/execute");
+    expect(JSON.parse(init.body as string)).toEqual({ params: { username: "bob" } });
+  });
+
   it("改角色：提交调用 staff.account.set_roles@1，参数是逗号拼接的角色集合", async () => {
     const fetchMock = handler();
     vi.stubGlobal("fetch", fetchMock);
@@ -139,7 +183,16 @@ describe("人员与权限 · 账号与身份", () => {
   });
 
   it("不能禁用自己当前登录使用的账号", async () => {
-    setCachedLocalUser({ username: "alice", display_name: "Alice", roles: ["admin"], must_change_password: false });
+    setCachedLocalUser({
+      username: "alice",
+      display_name: "Alice",
+      roles: ["admin"],
+      must_change_password: false,
+      totp_enrolled: false,
+      must_enroll_totp: false,
+      totp_enrolled_at: null,
+      recovery_codes_remaining: null,
+    });
     vi.stubGlobal("fetch", handler());
     renderPanel();
     await screen.findByText("alice");

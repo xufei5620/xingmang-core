@@ -14,6 +14,7 @@ import {
   STAFF_ROLE_CATALOG,
   type StaffAccount,
 } from "../api/staff";
+import { resetStaffAccountTotp } from "../api/totp";
 import { cachedLocalUser } from "../auth/localSession";
 import {
   EMPTY_STAFF_ACCOUNT_FORM,
@@ -355,6 +356,23 @@ function CreateAccountDialog({
   );
 }
 
+/** 三种状态：已启用（激活过一次动态码）、待启用（角色要求但还没做）、
+ *  未启用（角色不要求，账号也没有主动启用）——与 must_change_password 的
+ *  展示同一条纪律，三态各自说清楚是什么原因。 */
+function totpStatus(row: StaffAccount): { label: string; tone: BadgeTone; title: string } {
+  if (row.totp_enrolled) {
+    return {
+      label: "已启用",
+      tone: "success",
+      title: row.totp_enrolled_at ? `启用于 ${formatUtcTimestamp(row.totp_enrolled_at)}` : "已启用两步验证",
+    };
+  }
+  if (row.must_enroll_totp) {
+    return { label: "待启用", tone: "warning", title: "该账号的角色要求启用两步验证，尚未完成" };
+  }
+  return { label: "未启用", tone: "neutral", title: "尚未启用两步验证" };
+}
+
 /** 三种状态说三句不同的话：禁用是人做的决定，锁定是登录失败次数触发的临时状态。 */
 function accountStatus(row: StaffAccount): { label: string; tone: BadgeTone; title: string } {
   if (row.disabled) return { label: "已禁用", tone: "danger", title: "账号已被禁用，无法登录" };
@@ -429,6 +447,19 @@ function AccountsTable({
       },
     },
     {
+      id: "totp",
+      header: "两步验证",
+      value: (row) => (row.totp_enrolled ? "已启用" : row.must_enroll_totp ? "待启用" : "未启用"),
+      cell: (row) => {
+        const status = totpStatus(row);
+        return (
+          <Badge tone={status.tone} title={status.title}>
+            {status.label}
+          </Badge>
+        );
+      },
+    },
+    {
       id: "locked_until",
       header: "锁定至",
       value: (row) => row.locked_until ?? "",
@@ -461,6 +492,9 @@ function AccountsTable({
             disabled={row.username === currentUsername}
           />
           <ResetPasswordDialog account={row} client={client} onChanged={onChanged} />
+          {row.totp_enrolled || row.must_enroll_totp ? (
+            <ResetTotpDialog account={row} client={client} onChanged={onChanged} />
+          ) : null}
         </div>
       ),
     },
@@ -704,6 +738,65 @@ function ResetPasswordDialog({
           </div>
         </form>
       )}
+    </Dialog>
+  );
+}
+
+/** 管理员重置他人 TOTP（staff.account.reset_totp@1，XM-AUTH-TOTP0）：清空
+ *  目标账号的启用状态、恢复码与会话，`must_enroll_totp` 重新置真，下次
+ *  登录会被强制带去重新走一遍启用页——与重置密码不同，这里不生成任何
+ *  一次性凭据可展示，确认后直接完成，不需要"只显示一次"的揭示态。 */
+function ResetTotpDialog({
+  account,
+  client,
+  onChanged,
+}: {
+  account: StaffAccount;
+  client?: ApiClient;
+  onChanged: (result: ActionResult) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const mutation = useMutation({
+    mutationFn: () => resetStaffAccountTotp(account.username, {}, client),
+    onSuccess: (run) => {
+      setOpen(false);
+      onChanged({ title: `已重置 ${account.username} 的两步验证`, runId: run.runId });
+    },
+  });
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) mutation.reset();
+      }}
+      trigger={
+        <Button size="sm" variant="danger" aria-label={`重置 ${account.username} 的两步验证`}>
+          重置 TOTP
+        </Button>
+      }
+      title={`重置两步验证：${account.username}`}
+      description="通过 staff.account.reset_totp@1 撤销该账号已启用的 TOTP，并吊销其全部会话；对方需要在下次登录时重新完成启用。"
+    >
+      <div className="flex flex-col gap-3">
+        <ActionErrorNote error={mutation.error} permission={STAFF_MANAGE_PERMISSION} />
+        <div className="flex justify-end gap-2">
+          <Button type="button" size="sm" variant="secondary" onClick={() => setOpen(false)} disabled={mutation.isPending}>
+            取消
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="danger"
+            loading={mutation.isPending}
+            onClick={() => mutation.mutate()}
+          >
+            确认重置
+          </Button>
+        </div>
+      </div>
     </Dialog>
   );
 }

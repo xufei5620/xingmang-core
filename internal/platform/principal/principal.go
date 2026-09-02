@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 )
 
 // Type 是身份类别（规格 §4.1，值逐字对齐规格）。
@@ -47,6 +48,14 @@ type Principal struct {
 	AuthenticationLevel string // 如 mfa、pwd；对应 ACR
 	Environment         string
 	Scopes              []string
+	// MFAAt 是本次会话最近一次通过二因素（如 TOTP/恢复码）校验的时刻；
+	// nil 表示这次会话从未过二因素，或当前身份来源不适用这个概念
+	// （dev-header/oidc 两种解析器留空）。这是一个时间戳而不是布尔值——
+	// 调用方（如日后签发断言前的步进校验）要按**自己的**新鲜度阈值
+	// （StepUpMaxAge）判断"够不够新"，不能由解析阶段用某个固定窗口预先
+	// 折叠成 true/false（XM-AUTH-TOTP0，localauth.RequireFreshOTP 是这个
+	// 字段的标准判定helper）。
+	MFAAt *time.Time
 }
 
 // Validate 校验身份的必要字段。

@@ -121,7 +121,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	acc, err := store.CreateAccount(ctx, username, username, bootstrapRoles, hash, "lifecycle:staff-bootstrap")
+	// bootstrapRoles 固定含 "admin"，而 admin 角色持有 staff.manage
+	// （oidcauth.DefaultRoleScopeMap）——按 XM-AUTH-TOTP0 的强制范围裁定
+	// （CR-0006 正文："仅限持有 staff.manage ... 的账号"），第一个账号同样
+	// 必须在下次登录后启用 TOTP，不因为是 bootstrap 账号而豁免：must_enroll_totp
+	// 只是把人引导去启用页（RequireAuth 的软重定向，与 must_change_password
+	// 同一语义），从不在后端层面拒绝登录或锁死账号，因此不存在"第一个账号被
+	// 自己的安全策略锁在门外"的风险（见 docs/handoffs/slices/XM-AUTH-TOTP0.md
+	// 对这条取舍的完整说明）。
+	acc, err := store.CreateAccount(ctx, username, username, bootstrapRoles, hash, "lifecycle:staff-bootstrap", true)
 	if err != nil {
 		logger.Error("创建账号失败", slog.Any("err", err))
 		os.Exit(1)

@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { RouterProvider, createMemoryRouter, useLocation } from "react-router";
+import { RouterProvider, createMemoryRouter, useLocation, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { devLogin, devLogout } from "./devSession";
 import { setCachedLocalUser, type LocalUser } from "./localSession";
@@ -93,6 +93,7 @@ function renderLocalGate(path: string, fetchLocalUser: () => Promise<LocalUser>)
         children: [
           { path: "dashboard", element: <div>受保护内容</div> },
           { path: "account/password", element: <div>改密页</div> },
+          { path: "account/totp", element: <div>TOTP 启用页</div> },
         ],
       },
     ],
@@ -108,6 +109,10 @@ describe("RequireAuth：local 模式（XM-LOGIN）", () => {
     display_name: "Alice",
     roles: ["staff"],
     must_change_password: false,
+    totp_enrolled: false,
+    must_enroll_totp: false,
+    totp_enrolled_at: null,
+    recovery_codes_remaining: null,
   };
 
   beforeEach(() => {
@@ -141,6 +146,36 @@ describe("RequireAuth：local 模式（XM-LOGIN）", () => {
       Promise.resolve({ ...user, must_change_password: true }),
     );
     expect(await screen.findByText("改密页")).not.toBeNull();
+  });
+
+  it("must_enroll_totp 为真且未激活：无论访问哪个页面都先拦到启用页", async () => {
+    renderLocalGate("/dashboard", () =>
+      Promise.resolve({ ...user, must_enroll_totp: true, totp_enrolled: false }),
+    );
+    expect(await screen.findByText("TOTP 启用页")).not.toBeNull();
+    expect(screen.queryByText("受保护内容")).toBeNull();
+  });
+
+  it("must_enroll_totp 为真时启用页本身照常放行，不会把自己重定向到自己", async () => {
+    renderLocalGate("/account/totp", () =>
+      Promise.resolve({ ...user, must_enroll_totp: true, totp_enrolled: false }),
+    );
+    expect(await screen.findByText("TOTP 启用页")).not.toBeNull();
+  });
+
+  it("must_enroll_totp 为真但已经激活：不拦（已完成启用，字段还没来得及被后端清掉也不该再拦）", async () => {
+    renderLocalGate("/dashboard", () =>
+      Promise.resolve({ ...user, must_enroll_totp: true, totp_enrolled: true }),
+    );
+    expect(await screen.findByText("受保护内容")).not.toBeNull();
+  });
+
+  it("must_change_password 与 must_enroll_totp 同时为真：先拦到改密页（不是启用页）", async () => {
+    renderLocalGate("/dashboard", () =>
+      Promise.resolve({ ...user, must_change_password: true, must_enroll_totp: true, totp_enrolled: false }),
+    );
+    expect(await screen.findByText("改密页")).not.toBeNull();
+    expect(screen.queryByText("TOTP 启用页")).toBeNull();
   });
 
   it("命中内存缓存（比如刚登录成功跳转过来）时不再重复请求 me()", async () => {

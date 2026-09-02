@@ -1,0 +1,27 @@
+{
+  "id": "staff.account.confirm_totp",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "staff.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "code": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-AUTH-TOTP0（CR-0006 第一阶段）。作用对象只能是调用者自己（同 staff.account.enroll_totp，不接受 username）。code 是认证器 App 当前显示的 6 位数字。执行顺序：读回调用者账号当前「启用中」的密钥引用（totp_secret_ref 非空、totp_enrolled_at 为 NULL）——尚未开始 enroll 时返回 PRECONDITION_FAILED；已经激活过时返回 CONFLICT（提示需先 reset）；经既有 SecretProvider 读路径解出密钥字节，用 RFC 6238（±1 步容忍）校验 code，不通过返回 INVALID_PARAMS；通过则原子地把 totp_enrolled_at 置为当前时刻、must_enroll_totp 清假，并在同一事务里生成 10 个一次性恢复码（sha256 落库，仅哈希），随成功响应把恢复码明文返回一次（recovery_codes 字段）——审计摘要不含明文也不含哈希。ConfirmTOTP 仓储方法额外校验调用方持有的密钥引用与账号当前引用完全一致，防止 TOCTOU（确认过程中密钥被另一次 enroll 换掉）。"
+}

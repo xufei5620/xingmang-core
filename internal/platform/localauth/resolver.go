@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
@@ -32,6 +33,11 @@ const (
 	identityZoneStaff = "staff"
 	issuerLocalAuth   = "xingmang://localauth"
 	authLevelPassword = "password"
+	// authLevelMFA 与 oidcauth 令牌解析出的 "mfa" 取值同一形态（AUTH-SWITCH.md
+	// §7：amr 含 otp/mfa/hwk 时映射为 mfa）——两种登录模式的 Principal
+	// 消费方（如任何按 AuthenticationLevel 判断的下游代码）不需要关心
+	// 身份具体来自 OIDC 还是本地登录。
+	authLevelMFA = "mfa"
 )
 
 // sessionLookup 是 Resolver 依赖的最小面（*Store 满足），便于测试注入假实现。
@@ -97,21 +103,43 @@ func (r *Resolver) Resolve(req *http.Request) (principal.Principal, error) {
 		return principal.Principal{}, err
 	}
 
+	authLevel := authLevelPassword
+	if acc.SessionMFAAt != nil {
+		// 与 oidcauth 的 amr/acr 推导同一惯例（AUTH-SWITCH.md §7）：
+		// 会话验证过 TOTP/恢复码即视为 mfa 等级，不要求"此刻"仍在
+		// 任何步进窗口内——那是 RequireFreshOTP 的判断范畴，
+		// AuthenticationLevel 只是粗粒度展示，MFAAt 才是精确依据。
+		authLevel = authLevelMFA
+	}
 	p := principal.Principal{
 		ID:                  "staff:" + acc.Username,
 		Type:                principal.TypeHuman,
 		IdentityZone:        identityZoneStaff,
 		Issuer:              issuerLocalAuth,
 		Subject:             acc.ID.String(),
-		AuthenticationLevel: authLevelPassword,
+		AuthenticationLevel: authLevel,
 		// 绝不从请求读环境（与 oidcauth/dev-header 同一条纪律，规格 §20.5）
 		Environment: r.environment,
 		Scopes:      r.roleScopes(acc.Roles),
+		MFAAt:       acc.SessionMFAAt,
 	}
 	if err := p.Validate(); err != nil {
 		return principal.Principal{}, action.NewError(action.CodePermissionDenied, "身份不合法", err)
 	}
 	return p, nil
+}
+
+// RequireFreshOTP 判断 p.MFAAt 是否在 maxAge 时限内（步进/step-up 校验的
+// 标准判定 helper，供日后需要"最近验证过 TOTP"这类前置检查的场景使用
+// ——如 XM-INVCON1 的断言签发端点，签发前要求 mfa_at 在 StepUpMaxAge
+// 内，否则回 ADMIN_STEP_UP_REQUIRED）。MFAAt 为 nil（从未过 TOTP，或
+// 当前身份来源不适用这个概念）一律视为不新鲜。
+func RequireFreshOTP(p principal.Principal, maxAge time.Duration, now time.Time) bool {
+	if p.MFAAt == nil {
+		return false
+	}
+	age := now.Sub(*p.MFAAt)
+	return age >= 0 && age <= maxAge
 }
 
 // requireCSRFHeader 对非只读方法要求 X-Requested-With: xingmang。

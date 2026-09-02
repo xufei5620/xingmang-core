@@ -1,0 +1,27 @@
+{
+  "id": "staff.account.reset_totp",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "staff.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "username": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-AUTH-TOTP0（CR-0006 第一阶段）。管理员动作，作用于**另一个**账号（username 参数），语义与既有 staff.account.reset_password 对称。执行效果：清空目标账号的 totp_secret_ref/totp_enrolled_at（回到未启用状态）、删除该账号全部恢复码、把 must_enroll_totp 重新置真（总是要求下次登录重新启用，不判断当前角色是否仍然需要——与 reset_password 的 mustChange 总是 true 同一条纪律）、**吊销该账号的全部会话**（一个安全因子被管理员重置后，任何在旧因子下建立的会话都不该继续有效）；若目标账号此前有已登记的密钥文件（无论是否已激活），额外经**既有** credential.secret.revoke 写路径吊销对应的 secret://staff-totp/<account_id> 文件——DB 引用与文件系统状态保持一致，不留一把没有任何行指向、也没被标记吊销的悬空密钥。不要求目标账号当前处于「已激活」状态：一个只启用到一半（未确认）的悬空密钥同样可能需要管理员清掉。"
+}

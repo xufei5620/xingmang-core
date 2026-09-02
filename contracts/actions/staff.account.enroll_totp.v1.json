@@ -1,0 +1,22 @@
+{
+  "id": "staff.account.enroll_totp",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "staff.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {},
+  "notes": "XM-AUTH-TOTP0（CR-0006 第一阶段）。无参数——作用对象只能是调用者自己（callerPrincipal 派生），不接受 username 字段，防止一个持有 staff.manage 的账号顺手把 TOTP 挂到别人名下；管理员重置他人 TOTP 走独立的 staff.account.reset_totp。Permission 复用既有 staff.manage（不新开一枚人人都有的 scope）：CR-0006 正文裁定 TOTP 强制范围「仅限持有 staff.manage 或后续开票断言所需角色（finance.read）的账号」，今天唯一持有前者的角色是 admin，同一枚 scope 天然圈住这个人群。执行效果：若账号已激活 TOTP（totp_enrolled_at 非空）返回 CONFLICT，提示需先走 reset_totp；否则生成一把新的 160 bit 密钥，经**既有** credential.secret.upsert 写路径写入 secret://staff-totp/<account_id>（不新增写入口），再把该引用挂到 core.staff_account.totp_secret_ref（此时仍是「启用中」，totp_enrolled_at 仍为 NULL，未激活），返回 otpauth:// URI 与 base32 手动录入串——密钥明文只出现在这一次响应里，审计 After 摘要不含 otpauth_uri/secret_base32。RFC 6238：30 秒步长、6 位数字、SHA1、±1 步容忍窗口。需要接续调用 staff.account.confirm_totp 用一次正确的动态码把密钥转正才算真正启用。"
+}

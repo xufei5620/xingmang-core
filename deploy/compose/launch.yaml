@@ -213,6 +213,10 @@ services:
       XM_OIDC_JWKS_URL: ${XM_OIDC_JWKS_URL:-}
       XM_OIDC_ROLE_SCOPES: ${XM_OIDC_ROLE_SCOPES:-}
       XM_OIDC_CLOCK_SKEW: ${XM_OIDC_CLOCK_SKEW:-}
+      # 管理员来源 IP 名单（XM-AUTH-TOTP0/CR-0006 c 条）：逗号分隔 CIDR，空=不启用。
+      # 只对已经/将要被要求启用 TOTP 的账号（管理员）生效；留空即维持今天的行为
+      # （不限制来源）。启用前请先读 docs/modules/httpapi/AUTH-SWITCH.md §11.7。
+      XM_CONSOLE_ADMIN_IP_ALLOWLIST: ${XM_CONSOLE_ADMIN_IP_ALLOWLIST:-}
       XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
       # 用户清单模式（XM-0046）：off / fake / real。留空沿用进程默认 fake；
       # 生产应显式 off——real 客户端未交付前，fake 客户不得出现在生产页面。

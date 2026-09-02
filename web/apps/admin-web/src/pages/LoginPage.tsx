@@ -3,10 +3,16 @@ import { useId, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { ApiError } from "../api/client";
 import { devLogin } from "../auth/devSession";
-import { login as localLogin } from "../auth/localSession";
+import {
+  completeTotpLogin,
+  login as localLogin,
+  type LocalUser,
+  type TotpChallenge,
+} from "../auth/localSession";
 import { safeNextPath } from "../auth/oidc";
 import { getRuntimeConfig } from "../auth/runtimeConfig";
 import { loginReasonMessage, oidc } from "../auth/session";
+import { validateRecoveryCode, validateTotpCode } from "../lib/totpForm";
 
 /** 登录页（XM-AUTH1 起 oidc/dev-header 两态；XM-LOGIN 加入 local）。
  *
@@ -22,7 +28,7 @@ export function LoginPage() {
   return <OidcOrDevLoginPage />;
 }
 
-/** local 模式的错误文案：按后端契约的三个错误码给「如实且具体」的说明；
+/** local 模式的错误文案：按后端契约的错误码给「如实且具体」的说明；
  *  不认识的错误码回落到通用文案 + 错误码本身，方便报障。 */
 function localLoginErrorMessage(cause: unknown): string {
   if (cause instanceof ApiError) {
@@ -33,6 +39,10 @@ function localLoginErrorMessage(cause: unknown): string {
         return "账号已被锁定，请联系管理员解锁后重试。";
       case "ACCOUNT_DISABLED":
         return "账号已被停用，请联系管理员。";
+      case "ADMIN_NETWORK_DENIED":
+        return "当前网络不在管理员访问名单内，请更换网络或联系管理员。";
+      case "RATE_LIMITED":
+        return "尝试过于频繁，请稍后重试。";
       default:
         return `${cause.message}（错误码 ${cause.code}）`;
     }
@@ -40,13 +50,83 @@ function localLoginErrorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : "登录失败，请重试。";
 }
 
+/** 登录第二步（TOTP/恢复码）的错误文案。CHALLENGE_INVALID 单独区分：
+ *  这不是"码不对"，是整个登录请求已经过期，重试码没有意义，只能回到第一步
+ *  重新输入密码——两种情形对用户是不同的下一步动作，不该用同一句话糊弄过去。 */
+function totpLoginErrorMessage(cause: unknown): { message: string; expired: boolean } {
+  if (cause instanceof ApiError) {
+    switch (cause.code) {
+      case "CHALLENGE_INVALID":
+        return { message: "登录请求已过期，请重新输入密码。", expired: true };
+      case "INVALID_CREDENTIALS":
+        return { message: "验证码或恢复码不正确。", expired: false };
+      case "ACCOUNT_LOCKED":
+        return { message: "验证失败次数过多，账号已被锁定，请稍后重试或联系管理员。", expired: false };
+      case "ADMIN_NETWORK_DENIED":
+        return { message: "当前网络不在管理员访问名单内，请更换网络或联系管理员。", expired: false };
+      case "RATE_LIMITED":
+        return { message: "尝试过于频繁，请稍后重试。", expired: false };
+      default:
+        return { message: `${cause.message}（错误码 ${cause.code}）`, expired: false };
+    }
+  }
+  return { message: cause instanceof Error ? cause.message : "验证失败，请重试。", expired: false };
+}
+
 function LocalLoginPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const next = safeNextPath(params.get("next"));
   const notice = loginReasonMessage(params.get("reason"));
-  const fieldPrefix = useId();
 
+  const [challenge, setChallenge] = useState<TotpChallenge | null>(null);
+  const [expiredNotice, setExpiredNotice] = useState(false);
+
+  const afterAuthenticated = (user: LocalUser) => {
+    // must_change_password 的强制改密由 RequireAuth 统一处理；这里也直接
+    // 判一次是为了不必绕经门禁再跳一次——提交成功后一步到位。TOTP 待启用
+    // （must_enroll_totp）不在这里判断：走到这个函数说明登录已经完全成功，
+    // 而只有"尚未激活 TOTP"的账号才可能 must_enroll_totp=true，那种账号根本
+    // 不会经过二步验证——RequireAuth 会在下一次渲染时统一处理引导。
+    void navigate(user.must_change_password ? "/account/password" : next);
+  };
+
+  if (challenge) {
+    return (
+      <TotpStepPage
+        challenge={challenge}
+        expiredNotice={expiredNotice}
+        onSuccess={afterAuthenticated}
+        onExpired={() => {
+          setChallenge(null);
+          setExpiredNotice(true);
+        }}
+      />
+    );
+  }
+
+  return (
+    <PasswordStepPage
+      notice={notice}
+      onRequiresTotp={(c) => {
+        setExpiredNotice(false);
+        setChallenge(c);
+      }}
+      onAuthenticated={afterAuthenticated}
+    />
+  );
+}
+
+function PasswordStepPage({
+  notice,
+  onRequiresTotp,
+  onAuthenticated,
+}: {
+  notice: string | null;
+  onRequiresTotp: (challenge: TotpChallenge) => void;
+  onAuthenticated: (user: LocalUser) => void;
+}) {
+  const fieldPrefix = useId();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -56,10 +136,12 @@ function LocalLoginPage() {
     setBusy(true);
     setError(null);
     try {
-      const user = await localLogin(username, password);
-      // must_change_password 的强制改密由 RequireAuth 统一处理；这里也直接
-      // 判一次是为了不必绕经门禁再跳一次——提交成功后一步到位
-      void navigate(user.must_change_password ? "/account/password" : next);
+      const outcome = await localLogin(username, password);
+      if (outcome.kind === "totp_required") {
+        onRequiresTotp(outcome.challenge);
+        return;
+      }
+      onAuthenticated(outcome.user);
     } catch (cause) {
       setError(localLoginErrorMessage(cause));
     } finally {
@@ -131,6 +213,146 @@ function LocalLoginPage() {
             {error}
           </p>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** 登录第二步：动态码 / 恢复码二选一。默认展示动态码输入框，「改用恢复码」
+ *  切换成另一种输入——两者互斥，与后端 code/recovery_code 二选一的契约一致。 */
+function TotpStepPage({
+  challenge,
+  expiredNotice,
+  onSuccess,
+  onExpired,
+}: {
+  challenge: TotpChallenge;
+  expiredNotice: boolean;
+  onSuccess: (user: LocalUser) => void;
+  onExpired: () => void;
+}) {
+  const fieldPrefix = useId();
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
+  const [code, setCode] = useState("");
+  const [recoveryCode, setRecoveryCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fieldError = useRecoveryCode ? validateRecoveryCode(recoveryCode) : validateTotpCode(code);
+
+  const submit = async () => {
+    if (fieldError) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const user = await completeTotpLogin(
+        challenge.tempToken,
+        useRecoveryCode ? { recoveryCode } : { code },
+      );
+      onSuccess(user);
+    } catch (cause) {
+      const { message, expired } = totpLoginErrorMessage(cause);
+      if (expired) {
+        onExpired();
+        return;
+      }
+      setError(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-canvas font-sans">
+      <div className="w-96 max-w-full rounded-lg border border-edge bg-surface p-8 shadow-md">
+        <div className="mb-1 flex items-center gap-2">
+          <span
+            aria-hidden="true"
+            className="h-5 w-0.5 shrink-0 rounded-full bg-linear-to-b from-accent to-transparent"
+          />
+          <h1 className="text-lg font-semibold text-fg">两步验证</h1>
+        </div>
+        <p className="mb-6 text-xs text-fg-muted">
+          {challenge.username ? `${challenge.username}，` : ""}
+          {useRecoveryCode
+            ? "请输入一张尚未使用过的恢复码。"
+            : "请输入认证器 App 中显示的 6 位动态码。"}
+        </p>
+
+        {expiredNotice ? (
+          <p
+            role="status"
+            className="mb-4 rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs text-fg"
+          >
+            登录请求已过期，请重新输入密码。
+          </p>
+        ) : null}
+
+        <form
+          className="flex flex-col gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          {useRecoveryCode ? (
+            <FormField
+              label="恢复码"
+              htmlFor={`${fieldPrefix}-recovery-code`}
+              required
+              hint="启用 TOTP 时生成的一次性恢复码，每张只能用一次"
+            >
+              <Input
+                id={`${fieldPrefix}-recovery-code`}
+                value={recoveryCode}
+                disabled={busy}
+                onChange={(event) => setRecoveryCode(event.target.value)}
+                autoComplete="off"
+                autoFocus
+                spellCheck={false}
+              />
+            </FormField>
+          ) : (
+            <FormField label="动态码" htmlFor={`${fieldPrefix}-code`} required>
+              <Input
+                id={`${fieldPrefix}-code`}
+                value={code}
+                disabled={busy}
+                onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                autoFocus
+                spellCheck={false}
+              />
+            </FormField>
+          )}
+
+          <Button
+            type="submit"
+            className="w-full"
+            loading={busy}
+            disabled={Boolean(useRecoveryCode ? validateRecoveryCode(recoveryCode) : validateTotpCode(code))}
+          >
+            验证并登录
+          </Button>
+        </form>
+
+        {error ? (
+          <p role="alert" className="mt-4 text-xs text-danger">
+            {error}
+          </p>
+        ) : null}
+
+        <button
+          type="button"
+          className="mt-4 text-xs font-medium text-accent hover:underline"
+          onClick={() => {
+            setUseRecoveryCode((prev) => !prev);
+            setError(null);
+          }}
+        >
+          {useRecoveryCode ? "改用动态码" : "改用恢复码"}
+        </button>
       </div>
     </div>
   );

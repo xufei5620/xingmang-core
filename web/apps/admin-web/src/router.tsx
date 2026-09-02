@@ -61,6 +61,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { ServerDetailPage } from "./pages/ServerDetailPage";
 import { isServerDetailPreviewId } from "./blueprints/server";
 import { SupplierCreatePage } from "./pages/SupplierCreatePage";
+import { TotpEnrollPage } from "./pages/TotpEnrollPage";
 import { UpstreamDetailPage } from "./pages/UpstreamDetailPage";
 
 // 登录门禁见 ./auth/RequireAuth.tsx（XM-AUTH1）：dev-header 模式看 localStorage 的
@@ -362,6 +363,10 @@ export const routes = [
       // （没有侧栏/顶栏）——must_change_password 为真时 RequireAuth 会把人
       // 无论要去哪都先带到这里，套壳只会让人多一条「先去点别的」的岔路
       { path: "account/password", Component: ChangePasswordPage },
+      // TOTP 自助启用 + 账号安全状态（XM-AUTH-TOTP0）：同样不套壳，同样的
+      // 理由——must_enroll_totp 为真且尚未激活时 RequireAuth 会把人带到
+      // 这里；已启用的人主动访问时展示状态，不是产品导航能到达的常规页面
+      { path: "account/totp", Component: TotpEnrollPage },
       {
         Component: ShellLayout,
         children: [
