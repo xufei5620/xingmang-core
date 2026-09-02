@@ -1,0 +1,5 @@
+{
+  "test-prefix-newapi-one": "test-user-one@newapi",
+  "test-prefix-sub2api-one": "test-user-two@sub2api",
+  "malformed-suffix-entry": "test-user-three@unknownsource"
+}
