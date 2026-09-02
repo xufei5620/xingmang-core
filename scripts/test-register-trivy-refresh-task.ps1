@@ -1,0 +1,185 @@
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+# Static fixtures for scripts/register-trivy-refresh-task.ps1's task-
+# definition builder. Dot-sources only register-trivy-refresh-task-lib.ps1
+# (never register-trivy-refresh-task.ps1 itself, and never Get-/Register-/
+# Set-/Unregister-ScheduledTask) so this file never touches the real Task
+# Scheduler, mirroring test-release-image-gate.ps1's and test-refresh-trivy-
+# cache.ps1's own split between a pure -lib.ps1 file and the executable
+# script that wraps it.
+
+$scriptsRoot = $PSScriptRoot
+. (Join-Path $scriptsRoot 'register-trivy-refresh-task-lib.ps1')
+
+Assert-RegisterTrivyRefreshTaskPowerShellRuntime | Out-Null
+
+function Assert-ThrowsLike {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [Parameter(Mandatory)][string]$ExpectedMessagePattern,
+        [Parameter(Mandatory)][string]$FailureMessage
+    )
+
+    $caught = $null
+    try { & $Action } catch { $caught = $_ }
+    if ($null -eq $caught -or $caught.Exception.Message -notmatch $ExpectedMessagePattern) {
+        $actual = if ($null -eq $caught) { '<no exception>' } else { $caught.Exception.Message }
+        throw "$FailureMessage (actual: $actual)"
+    }
+}
+
+# --- Get-InvoiceTrivyRefreshTaskArguments ------------------------------------
+
+$refreshScriptPathFixture = 'C:\repo\scripts\refresh-trivy-cache.ps1'
+$expectedArguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\repo\scripts\refresh-trivy-cache.ps1"'
+$actualArguments = Get-InvoiceTrivyRefreshTaskArguments -RefreshScriptPath $refreshScriptPathFixture
+if ($actualArguments -cne $expectedArguments) {
+    throw "InvoiceTrivyCacheRefresh task arguments do not match: actual='$actualArguments' expected='$expectedArguments'"
+}
+if ($actualArguments -match '(?i)password|secret|token|bearer') {
+    throw 'InvoiceTrivyCacheRefresh task arguments must never embed a credential or secret'
+}
+Assert-ThrowsLike `
+    -Action { Get-InvoiceTrivyRefreshTaskArguments -RefreshScriptPath 'scripts\refresh-trivy-cache.ps1' | Out-Null } `
+    -ExpectedMessagePattern 'fully qualified path' `
+    -FailureMessage 'task arguments builder accepted a relative RefreshScriptPath'
+
+# --- New-InvoiceTrivyRefreshTaskDefinition -----------------------------------
+
+$pwshPathFixture = 'C:\Program Files\PowerShell\7\pwsh.exe'
+$workingDirectoryFixture = 'C:\repo'
+$userIdFixture = 'CONTOSO\invoice-operator'
+
+$definition = New-InvoiceTrivyRefreshTaskDefinition `
+    -PwshPath $pwshPathFixture `
+    -RefreshScriptPath $refreshScriptPathFixture `
+    -WorkingDirectory $workingDirectoryFixture `
+    -UserId $userIdFixture `
+    -StartTime '05:30'
+
+if ($definition.Action.Execute -cne $pwshPathFixture) {
+    throw "task action Execute does not match: actual='$($definition.Action.Execute)' expected='$pwshPathFixture'"
+}
+if ($definition.Action.Arguments -cne $expectedArguments) {
+    throw "task action Arguments does not match: actual='$($definition.Action.Arguments)' expected='$expectedArguments'"
+}
+if ($definition.Action.WorkingDirectory -cne $workingDirectoryFixture) {
+    throw "task action WorkingDirectory does not match: actual='$($definition.Action.WorkingDirectory)' expected='$workingDirectoryFixture'"
+}
+
+if ($definition.Trigger.CimClass.CimClassName -cne 'MSFT_TaskDailyTrigger') {
+    throw "task trigger is not a daily trigger: $($definition.Trigger.CimClass.CimClassName)"
+}
+if ($definition.Trigger.DaysInterval -ne 1) {
+    throw "task trigger does not recur every day: DaysInterval=$($definition.Trigger.DaysInterval)"
+}
+if ($definition.Trigger.Enabled -ne $true) {
+    throw 'task trigger is not enabled'
+}
+$actualStartTimeOfDay = Get-LocalTimeOfDayFromTaskTriggerStartBoundary -StartBoundary $definition.Trigger.StartBoundary
+if ($actualStartTimeOfDay -cne '05:30') {
+    throw "task trigger does not fire at 05:30 local time: actual local time of day = $actualStartTimeOfDay"
+}
+
+if ($definition.Settings.StartWhenAvailable -ne $true) {
+    throw 'task settings do not retry a missed run when the machine becomes available (StartWhenAvailable)'
+}
+
+if ($definition.Principal.UserId -cne $userIdFixture) {
+    throw "task principal UserId does not match: actual='$($definition.Principal.UserId)' expected='$userIdFixture'"
+}
+if ($definition.Principal.LogonType -ne 'S4U') {
+    throw "task principal LogonType is not S4U (runs without a stored password whether or not the user is logged on): actual=$($definition.Principal.LogonType)"
+}
+if ($definition.Principal.RunLevel -ne 'Limited') {
+    throw "task principal RunLevel is not Limited (the task must not request elevation): actual=$($definition.Principal.RunLevel)"
+}
+
+# A default StartTime is documented and reviewed as 05:30; confirm the
+# parameter default itself, not just an explicitly passed value.
+$defaultStartTimeDefinition = New-InvoiceTrivyRefreshTaskDefinition `
+    -PwshPath $pwshPathFixture `
+    -RefreshScriptPath $refreshScriptPathFixture `
+    -WorkingDirectory $workingDirectoryFixture `
+    -UserId $userIdFixture
+$defaultStartTimeOfDay = Get-LocalTimeOfDayFromTaskTriggerStartBoundary -StartBoundary $defaultStartTimeDefinition.Trigger.StartBoundary
+if ($defaultStartTimeOfDay -cne '05:30') {
+    throw "InvoiceTrivyCacheRefresh's default start time is not 05:30 local time: actual=$defaultStartTimeOfDay"
+}
+
+# A different StartTime propagates all the way through to the trigger.
+$eveningDefinition = New-InvoiceTrivyRefreshTaskDefinition `
+    -PwshPath $pwshPathFixture `
+    -RefreshScriptPath $refreshScriptPathFixture `
+    -WorkingDirectory $workingDirectoryFixture `
+    -UserId $userIdFixture `
+    -StartTime '23:15'
+$eveningStartTimeOfDay = Get-LocalTimeOfDayFromTaskTriggerStartBoundary -StartBoundary $eveningDefinition.Trigger.StartBoundary
+if ($eveningStartTimeOfDay -cne '23:15') {
+    throw "a non-default StartTime did not propagate to the task trigger: actual=$eveningStartTimeOfDay"
+}
+
+foreach ($invalidStartTime in @('5:30', '25:00', '05:60', '05-30', '0530', '')) {
+    Assert-ThrowsLike `
+        -Action {
+            New-InvoiceTrivyRefreshTaskDefinition `
+                -PwshPath $pwshPathFixture `
+                -RefreshScriptPath $refreshScriptPathFixture `
+                -WorkingDirectory $workingDirectoryFixture `
+                -UserId $userIdFixture `
+                -StartTime $invalidStartTime | Out-Null
+        } `
+        -ExpectedMessagePattern 'Cannot validate argument|StartTime' `
+        -FailureMessage "task definition accepted an invalid StartTime: '$invalidStartTime'"
+}
+
+Assert-ThrowsLike `
+    -Action {
+        New-InvoiceTrivyRefreshTaskDefinition `
+            -PwshPath 'pwsh.exe' `
+            -RefreshScriptPath $refreshScriptPathFixture `
+            -WorkingDirectory $workingDirectoryFixture `
+            -UserId $userIdFixture | Out-Null
+    } `
+    -ExpectedMessagePattern 'PwshPath must be a fully qualified path' `
+    -FailureMessage 'task definition accepted a non-fully-qualified PwshPath'
+Assert-ThrowsLike `
+    -Action {
+        New-InvoiceTrivyRefreshTaskDefinition `
+            -PwshPath $pwshPathFixture `
+            -RefreshScriptPath $refreshScriptPathFixture `
+            -WorkingDirectory 'repo' `
+            -UserId $userIdFixture | Out-Null
+    } `
+    -ExpectedMessagePattern 'WorkingDirectory must be a fully qualified path' `
+    -FailureMessage 'task definition accepted a non-fully-qualified WorkingDirectory'
+
+# --- wiring: the main script never embeds a secret and never runs the refresh itself ---
+
+$registerScriptSource = Get-Content -Raw -LiteralPath (Join-Path $scriptsRoot 'register-trivy-refresh-task.ps1')
+if ($registerScriptSource -match '(?i)-Password\b|Get-Credential|ConvertTo-SecureString|\[PSCredential\]|\bSecureString\b') {
+    throw 'register-trivy-refresh-task.ps1 must not collect or embed a credential'
+}
+if (-not $registerScriptSource.Contains('SupportsShouldProcess', [StringComparison]::Ordinal)) {
+    throw 'register-trivy-refresh-task.ps1 does not support -WhatIf/-Confirm'
+}
+if ($registerScriptSource -match '(?m)^\s*&\s*.*refresh-trivy-cache\.ps1' -or
+    $registerScriptSource -match '(?m)^\s*pwsh\b.*refresh-trivy-cache\.ps1' -or
+    $registerScriptSource -match 'Start-Process\b.*refresh-trivy-cache\.ps1') {
+    throw 'register-trivy-refresh-task.ps1 must only schedule refresh-trivy-cache.ps1, never invoke it directly'
+}
+if (-not $registerScriptSource.Contains('-RunLevel', [StringComparison]::Ordinal) -and
+    -not $registerScriptSource.Contains('New-InvoiceTrivyRefreshTaskDefinition', [StringComparison]::Ordinal)) {
+    throw 'register-trivy-refresh-task.ps1 does not build its task principal through the reviewed builder'
+}
+if ($registerScriptSource -notmatch "TaskName\s*=\s*'InvoiceTrivyCacheRefresh'") {
+    throw 'register-trivy-refresh-task.ps1 does not default TaskName to InvoiceTrivyCacheRefresh'
+}
+if (-not $registerScriptSource.Contains('Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue', [StringComparison]::Ordinal) -or
+    -not $registerScriptSource.Contains('Register-ScheduledTask', [StringComparison]::Ordinal) -or
+    -not $registerScriptSource.Contains('Set-ScheduledTask', [StringComparison]::Ordinal)) {
+    throw 'register-trivy-refresh-task.ps1 does not register when absent and update in place when the task already exists'
+}
+
+Write-Host 'All register-trivy-refresh-task fixtures passed.'

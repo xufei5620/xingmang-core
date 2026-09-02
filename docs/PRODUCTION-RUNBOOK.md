@@ -310,6 +310,40 @@ default daily refresh, or `-WhatIf` to see what it would do without changing
 anything; see its own doc comment (`Get-Help
 .\scripts\refresh-trivy-cache.ps1 -Full`) for every parameter.
 
+**Registering the daily refresh as a Windows Scheduled Task.**
+`scripts/register-trivy-refresh-task.ps1` registers, or updates in place, a
+Scheduled Task named `InvoiceTrivyCacheRefresh` that runs the command above
+once daily at 05:30 local time, so the cache stays warm without an operator
+running the refresh by hand. It only schedules `refresh-trivy-cache.ps1`; it
+never runs the refresh itself, and it embeds no secret -- the task's logon
+type is S4U, which lets it run under the current user's identity whether or
+not that user is interactively logged in at 05:30, without Task Scheduler
+ever storing a password. Its run level is Limited (not Highest); the refresh
+needs no elevation. Rerunning the script is idempotent: it registers the
+task if `InvoiceTrivyCacheRefresh` does not exist yet, or updates its
+action/trigger/settings/principal in place with `Set-ScheduledTask` if it
+does, preserving Task Scheduler's own run history for the task rather than
+recreating it. `-WhatIf` prints the full task definition (executable,
+arguments, working directory, trigger, principal, settings) without
+registering or changing anything:
+
+```powershell
+pwsh -NoProfile -File .\scripts\register-trivy-refresh-task.ps1 -WhatIf
+# Prints the task definition only; registers/changes nothing.
+
+pwsh -NoProfile -File .\scripts\register-trivy-refresh-task.ps1
+# Registers InvoiceTrivyCacheRefresh if absent, or updates it in place.
+```
+
+Inspect the registered task with `Get-ScheduledTask InvoiceTrivyCacheRefresh
+| Format-List *` (or `Get-ScheduledTaskInfo InvoiceTrivyCacheRefresh` for its
+last/next run time and last result); its Task Scheduler history is under
+Task Scheduler Library's root (`\`) in `taskschd.msc`. Remove it with
+`Unregister-ScheduledTask -TaskName InvoiceTrivyCacheRefresh -Confirm:$false`.
+See `scripts/register-trivy-refresh-task.ps1`'s own doc comment (`Get-Help
+.\scripts\register-trivy-refresh-task.ps1 -Full`) for its parameters,
+including `-RepoRoot`, `-TaskName`, `-StartTime` and `-UserId`.
+
 The command above is the ordinary internal-consistency mode, so operators can
 retain and diagnose failed or validation-only bundles. It is not transfer
 authority. Immediately before signing `SHA256SUMS`, rerun the independent
