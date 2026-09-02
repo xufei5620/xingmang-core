@@ -9,13 +9,15 @@ import {
 } from "react";
 
 import { invoiceApi } from "./lib/api";
-import { subscribeAuthFailures } from "./lib/api-contract";
+import { InvoiceApiError, subscribeAuthFailures } from "./lib/api-contract";
 import {
   ADMIN_AUTH_POPUP_MESSAGE,
   isAdminAuthPopupCompleteMessage,
   isAdminAuthPopupReturn,
   parseEmbeddedAdminMode,
+  parseXmEmbedAdminAssertionMessage,
   withAdminAuthPopupReturnParam,
+  XM_EMBED_CONSOLE_ORIGIN,
 } from "./lib/embedded-admin-scope";
 import type { AuthSession, AuthUser } from "./types";
 
@@ -34,6 +36,11 @@ type AuthContextValue = {
   authenticated: boolean;
   error: string | null;
   stepUpRequired: boolean;
+  // CR-0006 (XM-INV-CONSOLE-ASSERT): whether the OIDC administrator login
+  // entry should be shown at all (LoginPage). True while loading/unknown --
+  // see mapSession/getSession's own fallback defaults for why "show it" is
+  // the safe default rather than "hide it".
+  oidcAdminLoginEnabled: boolean;
   refresh: () => Promise<void>;
   login: () => void;
   logout: () => Promise<void>;
@@ -106,8 +113,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(
     () =>
       subscribeAuthFailures((failure) => {
-        if (failure === "login") setSession({ authenticated: false });
-        else setStepUpRequired(true);
+        if (failure === "login") {
+          // The OIDC_ADMIN_LOGIN_ENABLED flag is a deployment setting, not
+          // session-specific -- preserve whatever value the last real
+          // getSession() reported rather than resetting it, so the login
+          // page's OIDC-entry visibility does not flicker on an ordinary
+          // session expiry.
+          setSession((previous) => ({
+            authenticated: false,
+            oidcAdminLoginEnabled: previous?.oidcAdminLoginEnabled ?? true,
+          }));
+        } else {
+          setStepUpRequired(true);
+        }
       }),
     [],
   );
@@ -149,6 +167,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("message", handleMessage);
   }, [refresh]);
 
+  // CR-0006 (XM-INV-CONSOLE-ASSERT): the console signs a short-lived login
+  // credential and posts it here instead of this page opening an OIDC
+  // popup. A DIFFERENT channel from the two popup-auth effects above --
+  // those are same-origin (invoice.solov.cc popup <-> its own opener); this
+  // one is deliberately cross-origin (the framing console), the same trust
+  // boundary the height-sync message (App.tsx) already crosses, so it uses
+  // that message's own origin constant rather than window.location.origin.
+  // Listened for unconditionally, not gated on embeddedAdminMode -- see
+  // parseXmEmbedAdminAssertionMessage's doc comment in embedded-admin-
+  // scope.ts for why a standalone /admin tab stays receptive too.
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== XM_EMBED_CONSOLE_ORIGIN) return;
+      const assertion = parseXmEmbedAdminAssertionMessage(event.data);
+      if (!assertion) return;
+      void (async () => {
+        try {
+          await invoiceApi.exchangeConsoleAssertion(assertion);
+          await refresh();
+        } catch (cause) {
+          setError(
+            cause instanceof InvoiceApiError
+              ? cause.message
+              : "控制台登录凭证兑换失败。",
+          );
+        }
+      })();
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [refresh]);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       loading,
@@ -156,6 +206,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authenticated: session?.authenticated === true,
       error,
       stepUpRequired,
+      oidcAdminLoginEnabled: session?.oidcAdminLoginEnabled ?? true,
       refresh,
       login: () => {
         if (embeddedAdminMode) {
@@ -169,7 +220,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       logout: async () => {
         const logoutURL = await invoiceApi.logout();
-        setSession({ authenticated: false });
+        setSession((previous) => ({
+          authenticated: false,
+          oidcAdminLoginEnabled: previous?.oidcAdminLoginEnabled ?? true,
+        }));
         setStepUpRequired(false);
         if (logoutURL) navigateTopLevel(logoutURL);
       },

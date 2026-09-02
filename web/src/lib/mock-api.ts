@@ -35,6 +35,7 @@ const mockSession: AuthSession = {
   },
   csrfToken: "mock-csrf-token",
   adminStepUpRequired: false,
+  oidcAdminLoginEnabled: true,
 };
 
 const sourceAccounts: SourceAccount[] = [
@@ -461,6 +462,12 @@ export const mockInvoiceApi: InvoiceApiClient = {
   },
   adminStepUpURL(returnTo) {
     return returnTo;
+  },
+  // Demo mode has no real console counterpart to receive a postMessage
+  // from, and mockSession is already authenticated -- nothing ever calls
+  // this in practice, but the interface must still be implemented.
+  async exchangeConsoleAssertion() {
+    await delay(80);
   },
   async platformLogin() {
     await delay(80);

@@ -220,3 +220,51 @@ export function shouldSyncEmbeddedAdminHeight(
 ): boolean {
   return embeddedAdminMode && isFramed;
 }
+
+// --- Console-assertion login (CR-0006, XM-INV-CONSOLE-ASSERT) -------------
+//
+// The reverse direction of the height-sync channel above: the console posts
+// a short-lived signed login credential into this page instead of this page
+// opening an OIDC popup. Same envelope (`xm-embed` v1), same one valid
+// sender origin (XM_EMBED_CONSOLE_ORIGIN) -- only `kind` is new. Listened
+// for unconditionally (not gated on embeddedAdminMode): a standalone /admin
+// tab that is, or ever becomes, a popup/tab the console opened is just as
+// entitled to receive one, and an unsolicited message from any other origin
+// is dropped before it is ever inspected regardless of mode (see
+// AuthProvider.tsx's listener, which checks event.origin itself -- this
+// module never reads window.location/document, staying a plain predicate to
+// unit test, same convention as every other export in this file).
+
+export interface XmEmbedAdminAssertionMessage {
+  type: "xm-embed";
+  version: 1;
+  kind: "admin-assertion";
+  assertion: string;
+}
+
+// A JWS compact serialization is never shorter than a few dozen bytes (three
+// base64url segments plus two dots) and this codebase already bounds every
+// other bearer-shaped token well under 8KB elsewhere (see e.g. ExtractDesktop
+// Bearer's 256KB ceiling on the Go side, deliberately far more generous) --
+// 8192 here is a generous sanity cap, not the real validity check, which is
+// entirely the backend exchange endpoint's job.
+const maxAssertionLength = 8192;
+
+// parseXmEmbedAdminAssertionMessage validates only event.data's shape --
+// callers must check event.origin themselves first (this function has no
+// access to it by design, so a caller cannot forget the origin check and
+// still compile against a "give me the origin too" signature that silently
+// tempted them to skip it).
+export function parseXmEmbedAdminAssertionMessage(data: unknown): string | null {
+  if (typeof data !== "object" || data === null) return null;
+  const value = data as Record<string, unknown>;
+  if (value.type !== "xm-embed" || value.version !== 1 || value.kind !== "admin-assertion") {
+    return null;
+  }
+  if (typeof value.assertion !== "string") return null;
+  const assertion = value.assertion;
+  if (assertion.length === 0 || assertion.length > maxAssertionLength) return null;
+  const segments = assertion.split(".");
+  if (segments.length !== 3 || segments.some((segment) => segment.length === 0)) return null;
+  return assertion;
+}

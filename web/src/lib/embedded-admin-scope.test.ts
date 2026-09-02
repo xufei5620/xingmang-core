@@ -9,6 +9,7 @@ import {
   isAdminNavItemVisible,
   parseEmbeddedAdminMode,
   parseEmbeddedAdminScope,
+  parseXmEmbedAdminAssertionMessage,
   resolvePlatformSourceInstanceId,
   shouldSyncEmbeddedAdminHeight,
   withAdminAuthPopupReturnParam,
@@ -264,5 +265,54 @@ describe("embedded admin height sync", () => {
 
   it("never syncs when not actually framed, even in embedded-admin mode", () => {
     expect(shouldSyncEmbeddedAdminHeight(true, false)).toBe(false);
+  });
+});
+
+describe("parseXmEmbedAdminAssertionMessage", () => {
+  const validAssertion = "aaaa.bbbb.cccc";
+
+  it("accepts the exact console-assertion envelope", () => {
+    expect(
+      parseXmEmbedAdminAssertionMessage({
+        type: "xm-embed",
+        version: 1,
+        kind: "admin-assertion",
+        assertion: validAssertion,
+      }),
+    ).toBe(validAssertion);
+  });
+
+  it("ignores a malformed message instead of throwing", () => {
+    for (const data of [
+      null,
+      undefined,
+      "a string, not an object",
+      42,
+      [],
+      {},
+      { type: "xm-embed", version: 1, kind: "height", height: 10 },
+      { type: "xm-embed", version: 2, kind: "admin-assertion", assertion: validAssertion },
+      { type: "other", version: 1, kind: "admin-assertion", assertion: validAssertion },
+      { type: "xm-embed", version: 1, kind: "admin-assertion" },
+      { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: 12345 },
+      { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: "" },
+      { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: "not-three-segments" },
+      { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: "a..c" },
+      { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: "a.b.c.d" },
+      {
+        type: "xm-embed",
+        version: 1,
+        kind: "admin-assertion",
+        assertion: "a".repeat(9000),
+      },
+    ]) {
+      expect(parseXmEmbedAdminAssertionMessage(data)).toBeNull();
+    }
+  });
+
+  it("never confuses the height-sync message for an assertion", () => {
+    expect(
+      parseXmEmbedAdminAssertionMessage(buildXmEmbedHeightMessage(400)),
+    ).toBeNull();
   });
 });

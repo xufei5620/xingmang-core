@@ -37,6 +37,10 @@ type BackendError = { error?: { code?: string; message?: string } };
 type BackendSession = {
   authenticated: boolean;
   admin_step_up_required?: boolean;
+  // CR-0006 (XM-INV-CONSOLE-ASSERT). Optional on the wire only so an older
+  // cached response shape never hard-fails mapSession; treated as true
+  // (today's actual default) when absent -- see mapSession below.
+  oidc_admin_login_enabled?: boolean;
   user?: {
     id: string;
     display_name: string;
@@ -1171,9 +1175,10 @@ async function getRequestDetail(requestId: string, admin: boolean) {
 }
 
 function mapSession(value: BackendSession): AuthSession {
+  const oidcAdminLoginEnabled = value.oidc_admin_login_enabled !== false;
   if (!value.authenticated) {
     sessionCSRFToken = "";
-    return { authenticated: false };
+    return { authenticated: false, oidcAdminLoginEnabled };
   }
   if (!value.user || !value.csrf_token) {
     throw new InvoiceApiError("服务返回的安全会话不完整。", {
@@ -1209,6 +1214,7 @@ function mapSession(value: BackendSession): AuthSession {
     },
     csrfToken: value.csrf_token,
     adminStepUpRequired: value.admin_step_up_required === true,
+    oidcAdminLoginEnabled,
   };
 }
 
@@ -1507,7 +1513,11 @@ export const httpInvoiceApi: InvoiceApiClient = {
     } catch (error) {
       if (error instanceof InvoiceApiError && error.requiresLogin) {
         sessionCSRFToken = "";
-        return { authenticated: false };
+        // The request itself failed, so there is no oidc_admin_login_enabled
+        // to read -- default true (today's actual default): worst case an
+        // operator briefly sees a login button that leads nowhere useful,
+        // never a security issue either way.
+        return { authenticated: false, oidcAdminLoginEnabled: true };
       }
       throw error;
     }
@@ -1566,6 +1576,19 @@ export const httpInvoiceApi: InvoiceApiClient = {
     return endpointURL(
       `/api/v1/auth/admin/step-up?return_to=${encodeURIComponent(returnTo)}`,
     );
+  },
+
+  // CR-0006 (XM-INV-CONSOLE-ASSERT): skipCSRF for the same reason
+  // platformLogin below does -- there is no pre-existing session yet, so no
+  // synchronizer token exists to send. The backend's own defense here is an
+  // exact Origin check, not CSRF (see production_auth.go's
+  // consoleAssertionExchange).
+  async exchangeConsoleAssertion(assertion) {
+    await requestJSON<{ ok: boolean }>("/api/v1/auth/console-assertion", {
+      method: "POST",
+      skipCSRF: true,
+      body: { assertion },
+    });
   },
 
   async platformLogin(input) {

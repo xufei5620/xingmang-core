@@ -89,6 +89,13 @@ export interface InvoiceApiClient {
   logout(): Promise<string | null>;
   loginURL(returnTo: string): string;
   adminStepUpURL(returnTo: string): string;
+  // CR-0006 (XM-INV-CONSOLE-ASSERT): exchanges a signed console-assertion
+  // credential (received via postMessage, see AuthProvider.tsx) for a
+  // session, the same way loginURL's OIDC redirect does but without ever
+  // leaving this page. Throws InvoiceApiError on any rejection -- the
+  // caller does not get to distinguish which one (see the backend's
+  // ASSERTION_INVALID error code, deliberately unified).
+  exchangeConsoleAssertion(assertion: string): Promise<void>;
   platformLogin(input: PlatformLoginInput): Promise<PlatformLoginOutcome>;
   verifyPlatformLoginTwoFA(
     input: PlatformLoginTwoFAInput,

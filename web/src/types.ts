@@ -91,12 +91,21 @@ export type PlatformLoginOutcome =
   | { ok: true; requiresTwoFA: true; tempToken: string };
 
 export type AuthSession =
-  | { authenticated: false; user?: never; csrfToken?: never }
+  | {
+      authenticated: false;
+      user?: never;
+      csrfToken?: never;
+      // CR-0006 (XM-INV-CONSOLE-ASSERT): whether the OIDC administrator
+      // login entry should be offered at all. False once an operator turns
+      // OIDC_ADMIN_LOGIN_ENABLED off (phase 2 -- default stays true today).
+      oidcAdminLoginEnabled: boolean;
+    }
   | {
       authenticated: true;
       user: AuthUser;
       csrfToken: string;
       adminStepUpRequired: boolean;
+      oidcAdminLoginEnabled: boolean;
     };
 
 export interface SourceAccount {

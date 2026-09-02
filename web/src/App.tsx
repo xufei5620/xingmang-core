@@ -4579,7 +4579,7 @@ function EmptyState({
 }
 
 function LoginPage() {
-  const { login, error, refresh } = useAuth();
+  const { login, error, refresh, oidcAdminLoginEnabled } = useAuth();
   const location = useLocation();
   // XM-INV-HIDE-ADMIN-LOGIN: only the admin area's own login screen (direct
   // /admin navigation, or the console embed, which always lands on /admin --
@@ -4733,7 +4733,15 @@ function LoginPage() {
             </button>
           </form>
         )}
-        {showAdminLoginEntry &&
+        {/* CR-0006 (XM-INV-CONSOLE-ASSERT): once OIDC_ADMIN_LOGIN_ENABLED is
+            turned off, this OIDC entry point is hidden entirely -- it would
+            only lead to a 404 (the route is no longer registered; see
+            production_auth.go's Register). In embedded-admin mode there is
+            nothing else to show here: the console posts a signed assertion
+            in automatically (AuthProvider's listener) with no button needed.
+            Standalone /admin gets an explicit pointer to the console instead
+            of silently offering nothing. */}
+        {showAdminLoginEntry && oidcAdminLoginEnabled &&
           (showAdminLogin ? (
             <button className="button button-dark button-wide" onClick={login}>
               <ShieldCheck size={17} />
@@ -4748,6 +4756,9 @@ function LoginPage() {
               管理员登录
             </button>
           ))}
+        {showAdminLoginEntry && !oidcAdminLoginEnabled && !embeddedAdminMode && (
+          <p>请通过星芒控制台登录后使用开票管理功能。</p>
+        )}
       </section>
     </main>
   );
