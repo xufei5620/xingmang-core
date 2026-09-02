@@ -44,6 +44,14 @@ READY
 - `GET /api/v1/credentials?environment=` → `{"items":[{credential_ref, scope, updated_at, fingerprint, version, available, revoked}]}`，scope `credential.manage`
 - `GET /api/v1/credentials/expected` → `{"items":[{credential_ref, platform, purpose, configured}]}`（configured = 已登记 ∧ 未吊销 ∧ 文件可读）
 - `GET /api/v1/connectors/config` → `{"items":[{platform, mode, endpoint, target_allowlist, credential_ref, version, updated_at, updated_by}]}`，scope `connector.manage`
+  **[XM-ASSURE1-glue 补充，2026-09-03]**：响应行新增 `probe_enabled`（bool）、
+  `probe_credential_registered`（bool，= probe_credential_ref 非空，**不**
+  透出引用字面值，与 credential_ref 字段的既有先例刻意不同）两个字段，
+  供检测任务 Kill Switch 控件在该平台零声明时也能显示当前状态。字段来自
+  `core.connector_config` 的 `probe_enabled`/`probe_credential_ref` 两列
+  （XM-ASSURE1-core 迁移新增，只经 `assurance.probe.kill_switch.set@1`
+  写入）。详见 `internal/platform/httpapi/credentials.go` 的
+  `connectorConfigItem` 与 `docs/handoffs/slices/XM-ASSURE1-glue.md`。
 - 环境解析沿用 `resolveEnvironment`：不传用 Principal 的；传了必须一致。
 
 ### 装配与部署

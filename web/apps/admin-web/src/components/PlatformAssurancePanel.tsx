@@ -35,6 +35,7 @@ import {
   type ProbeListItem,
 } from "../api/assuranceProbes";
 import type { ApiClient } from "../api/client";
+import { listConnectorConfigs } from "../api/connectors";
 import { formatCount } from "../lib/money";
 import { AssuranceProbeDeclareDialog } from "./AssuranceProbeDeclareDialog";
 import { AssuranceProbeKillSwitch } from "./AssuranceProbeKillSwitch";
@@ -512,6 +513,21 @@ function AssuranceProbes({
   // 零声明时没有信号可判断真假，不猜测（宪法 12 条同一条纪律）。
   const allFake = probes.length > 0 && probes.every((p) => p.killSwitchState === "not_applicable_fake");
   const killSwitchCurrentState = probes[0]?.killSwitchState ?? null;
+  // 零声明兜底：检测任务表读不到 kill_switch_state 时（该平台还没有任何
+  // 声明），退回 GET /api/v1/connectors/config 派生一个近似值（见
+  // AssuranceProbeKillSwitch 的 fallbackConfig 文档注释——这不是同一件事，
+  // 缺全局开关这个因子）。只在真的需要时才发这个请求：探测任务表已经
+  // 有数据就不必再打一次连接器配置端点，且这个端点的权限
+  // （`connector.manage`）与检测任务的权限点是分开的，持有
+  // `assurance-probe-admin` 角色的人不一定有它，查询失败时静默回退成
+  // "未知"（既有行为），不让整块面板报错。
+  const connectorConfigQuery = useQuery({
+    queryKey: ["connectors", "config"],
+    queryFn: ({ signal }) => listConnectorConfigs({ signal }, client),
+    enabled: query.isSuccess && probes.length === 0,
+    retry: false,
+  });
+  const killSwitchFallbackConfig = connectorConfigQuery.data?.find((c) => c.platform === platform);
 
   return (
     <div className="flex flex-col gap-3">
@@ -542,7 +558,20 @@ function AssuranceProbes({
             })
           }
         />
-        <AssuranceProbeKillSwitch platform={platform} currentState={killSwitchCurrentState} client={client} />
+        <AssuranceProbeKillSwitch
+          platform={platform}
+          currentState={killSwitchCurrentState}
+          fallbackConfig={
+            killSwitchFallbackConfig
+              ? {
+                  mode: killSwitchFallbackConfig.mode,
+                  probeEnabled: killSwitchFallbackConfig.probe_enabled,
+                  probeCredentialRegistered: killSwitchFallbackConfig.probe_credential_registered,
+                }
+              : null
+          }
+          client={client}
+        />
       </div>
       <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
         <DataTableV2

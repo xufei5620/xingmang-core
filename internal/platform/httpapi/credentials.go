@@ -44,6 +44,21 @@ type expectedCredentialItem struct {
 }
 
 // connectorConfigItem 是一份连接器配置的对外表示。credential_ref 只是引用。
+//
+// ProbeEnabled/ProbeCredentialRegistered 是 XM-ASSURE1-glue 补的两个字段
+// （XM-ASSURE1-ui 交接文档 risks #2 记录的缺口）：检测任务的 Kill Switch
+// 控件需要在该平台**零声明**时也能显示当前状态，而 GET
+// /api/v1/platforms/{p}/assurance/probes 只在至少有一条声明时才能派生出
+// kill_switch_state（见 assurance.Service.killSwitchState 读的是声明表，
+// 不是 connector_config 本身）。
+//
+// **ProbeCredentialRegistered 是布尔值，不是 ProbeCredentialRef 原串**——
+// 这里特意跟 CredentialRef 字段的先例不一致：CredentialRef 只是一个指向
+// SecretProvider 目录的引用名，本身不含凭据值，因此上面按现状直接透传；
+// 但探测专用凭据引用是否已登记，对 Kill Switch 控件的唯一价值是"能不能
+// 开"，没有必要把具体引用名（可能暴露探测账号的命名/编号规律）发到前端，
+// 派工消息也明确要求"redacted to a boolean"。这是本片对"跟随既有先例"与
+// "派工消息字面要求"两者冲突时的取舍，留给验收线确认。
 type connectorConfigItem struct {
 	Platform        string   `json:"platform"`
 	Mode            string   `json:"mode"`
@@ -53,6 +68,12 @@ type connectorConfigItem struct {
 	Version         int      `json:"version"`
 	UpdatedAt       string   `json:"updated_at"`
 	UpdatedBy       string   `json:"updated_by"`
+	// ProbeEnabled 是探测 Kill Switch 当前是否打开（core.connector_config.
+	// probe_enabled，只经 assurance.probe.kill_switch.set@1 写入）。
+	ProbeEnabled bool `json:"probe_enabled"`
+	// ProbeCredentialRegistered = probe_credential_ref 非空——即"是否已经
+	// 登记过一个探测专用凭据引用"，不透出引用字面值本身。
+	ProbeCredentialRegistered bool `json:"probe_credential_registered"`
 }
 
 func toCredentialItem(m credentials.Metadata) credentialItem {
@@ -69,14 +90,16 @@ func toCredentialItem(m credentials.Metadata) credentialItem {
 
 func toConnectorConfigItem(c credentials.ConnectorConfig) connectorConfigItem {
 	return connectorConfigItem{
-		Platform:        c.Platform,
-		Mode:            c.Mode,
-		Endpoint:        c.Endpoint,
-		TargetAllowlist: append([]string{}, c.TargetAllowlist...),
-		CredentialRef:   c.CredentialRef,
-		Version:         c.Version,
-		UpdatedAt:       c.UpdatedAt.UTC().Format(time.RFC3339),
-		UpdatedBy:       c.UpdatedBy,
+		Platform:                  c.Platform,
+		Mode:                      c.Mode,
+		Endpoint:                  c.Endpoint,
+		TargetAllowlist:           append([]string{}, c.TargetAllowlist...),
+		CredentialRef:             c.CredentialRef,
+		Version:                   c.Version,
+		UpdatedAt:                 c.UpdatedAt.UTC().Format(time.RFC3339),
+		UpdatedBy:                 c.UpdatedBy,
+		ProbeEnabled:              c.ProbeEnabled,
+		ProbeCredentialRegistered: c.ProbeCredentialRef != "",
 	}
 }
 
