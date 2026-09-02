@@ -411,20 +411,26 @@ func TestUICompatDeclareRejectsUnknownChannelID(t *testing.T) {
 	if err == nil {
 		t.Fatal("declare@1 对渠道目录里查无此渠道的声明返回了 nil error，want 非 nil")
 	}
-	// XM-ASSURE1-glue 发现的一处平台级缺口（已同步团队交接消息，见
-	// internal/platform/action/kernel.go Execute（））：Kernel 对 Handler
-	// 返回的任何非 nil error 一律重新包一层 newError(CodeExecutionFailed,
-	// ..., err)，而 httpapi.safeMessage/action.ErrorCode 用 errors.As 只找
-	// 链条上**第一个** *action.Error——那正是 Kernel 这层新包的外层，
+	// XM-ASSURE1-glue 发现的一处平台级缺口，已拆成独立切片
+	// XM-KERNEL-ERRCODE0 修复（team-lead 确认后的裁定，本片不动手改
+	// kernel.go）：internal/platform/action/kernel.go 的 Execute() 对
+	// Handler 返回的任何非 nil error 一律重新包一层
+	// newError(CodeExecutionFailed, ..., err)，而
+	// httpapi.safeMessage/action.ErrorCode 用 errors.As 只找链条上
+	// **第一个** *action.Error——那正是 Kernel 这层新包的外层，
 	// assurance.domainError 在 Handler 内部算出来的 CodeInvalidParams 因此
 	// 走真实 HTTP 路径时到不了调用方，变成了 CodeExecutionFailed（502）。
 	// 这不是 assurance/credentials 包 domainError 系列函数写错了——它们的
 	// 单元测试直接调 Handler、绕过 Kernel，因此从未暴露这个问题。这是
 	// action.Kernel 的共享行为，影响全平台所有 Action，不是 ASSURE1 两片
-	// 之间的不兼容，修复需要独立评估对全仓库其它 Action 的影响面，不在
-	// 本片范围内。这里断言的是**当前真实行为**，不是期望行为。
+	// 之间的不兼容。
+	//
+	// **XM-KERNEL-ERRCODE0 落地后**，这条断言要改成
+	// action.CodeInvalidParams——这里断言的是**当前真实行为**（Kernel 修复
+	// 前），不是期望行为，修复后应该把这条断言与下面这条 t.Fatalf 的
+	// 说明文字一并翻过来，而不是悄悄留着一条名不副实的断言。
 	if action.ErrorCode(err) != action.CodeExecutionFailed {
-		t.Fatalf("ErrorCode(err) = %q, want EXECUTION_FAILED（当前 Kernel 的真实行为，见上面的长注释）; err = %v",
+		t.Fatalf("ErrorCode(err) = %q, want EXECUTION_FAILED（当前 Kernel 的真实行为，XM-KERNEL-ERRCODE0 落地后应改为 INVALID_PARAMS，见上面的长注释）; err = %v",
 			action.ErrorCode(err), err)
 	}
 	// 但 Store/Handler 层自己算出的具体原因仍然完整保留在 Unwrap 链条里

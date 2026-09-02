@@ -2,8 +2,9 @@
 
 ## status
 
-READY（待验收线审读、复跑并人工合入）。全部本地门禁绿；发现并记录了一处
-不在本片范围内、影响全平台的 Kernel 缺口（见下方"重要发现"），未修复。
+READY（待验收线审读、复跑并人工合入）。全部本地门禁绿；发现一处不在本片
+范围内、影响全平台的 Kernel 缺口，已拆成独立切片 XM-KERNEL-ERRCODE0
+（team-lead 确认并排期），本片按指示未修复，见下方"重要发现"。
 
 ## branch / commit
 
@@ -97,7 +98,7 @@ Query 的响应字段名、Action ID 字面量、权限点/角色名常量——
 
 没有发现 UI 请求形状与后端不匹配、需要改小的地方。
 
-## 重要发现（不在本片范围内，已同步团队交接消息）
+## 重要发现（不在本片范围内，已拆成独立切片 XM-KERNEL-ERRCODE0）
 
 **`internal/platform/action/kernel.go` 的 `Execute()` 会丢弃 Handler
 自己算出的错误码**：Handler 返回任何非 nil error，Kernel 一律重新包一层
@@ -125,9 +126,16 @@ Query 的响应字段名、Action ID 字面量、权限点/角色名常量——
 **全平台所有** Action（凡是 Handler 主动返回带具体 Code 的 `*action.Error`
 都会被这样吞掉）。修复需要评估对全仓库其它 Action 的影响面（很可能有
 其它切片的 Handler 也依赖了"Handler 的 Code 能透传到 HTTP 层"这个假设，
-一次 Kernel 改动的回归验证范围远超本片），因此判断为不在本片范围内，
-只记录、上报，不动手改。已在开工过程中同步过团队交接消息（见下方
-follow_ups 的第一条）。
+一次 Kernel 改动的回归验证范围远超本片），因此判断为不在本片范围内。
+开工期间通过 SendMessage 同步给 team-lead，team-lead 已确认并拆成独立
+切片 **XM-KERNEL-ERRCODE0**（agent `kernelerrcode`，worktree
+`wt-kernel-errcode0`）单独修复，本片按指示不动手改 `kernel.go`。
+
+`TestUICompatDeclareRejectsUnknownChannelID` 里断言
+`action.CodeExecutionFailed` 的那一处专门写了一条注释指向
+`XM-KERNEL-ERRCODE0`——那条切片落地后，这条断言需要翻成
+`action.CodeInvalidParams`，届时请一并检查这条测试是否需要更新，不要
+留一条断言着"已修复前的错误行为"的测试静默过关。
 
 ## summary
 
@@ -292,9 +300,12 @@ gitleaks：见下方 risks 之前的说明（本片提交前跑过，见 not_run
 
 ## follow_ups
 
-- **Kernel 错误码透传缺口**（risks #2）：已通过 SendMessage 同步给
-  team-lead（消息内容见本片开工期间的交接记录），建议作为独立切片
-  排期，需要先盘点全仓库有多少 Handler 依赖"Code 能透传"这个假设。
+- **Kernel 错误码透传缺口**（risks #2）：已拆成独立切片
+  **XM-KERNEL-ERRCODE0**（team-lead 确认并排期，agent `kernelerrcode`,
+  worktree `wt-kernel-errcode0`）单独修复，本片不动手改。该切片落地后
+  记得回来把 `TestUICompatDeclareRejectsUnknownChannelID` 里断言
+  `CodeExecutionFailed` 的那条改成 `CodeInvalidParams`（测试里已经写了
+  指向 XM-KERNEL-ERRCODE0 的注释，容易找到）。
 - **`probe_credential_registered` 是否改回原样透传**（risks #1）：需要
   产品/安全负责人一次性拍板，两种做法都只是几行改动。
 - **全局开关状态的前端可见性**（risks #3）：如果运营侧认为这个盲区
