@@ -1,7 +1,9 @@
 package jobs
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -80,6 +82,63 @@ func TestDecodeAllowedArgs(t *testing.T) {
 	t.Run("非法 JSON 报错而不是静默吞掉", func(t *testing.T) {
 		if _, err := decodeAllowedArgs([]byte("{not json")); err == nil {
 			t.Fatal("want an error for malformed JSON")
+		}
+	})
+}
+
+func TestScheduleConfiguredModePlatform(t *testing.T) {
+	cases := []struct {
+		kind           string
+		wantPlatform   string
+		wantApplicable bool
+	}{
+		{Sub2APISyncJobKind, ConnectorPlatformSub2API, true},
+		{NewAPISyncJobKind, ConnectorPlatformNewAPI, true},
+		{HeartbeatJobKind, "", false},
+		{RetentionJobKind, "", false},
+		{FinanceCollectJobKind, "", false},
+		{AlertEvaluateJobKind, "", false},
+		{ReqlogMetricsJobKind, "", false},
+		{ConnectorProbeJobKind, "", false},
+		{CPASyncJobKind, "", false},
+	}
+	for _, tc := range cases {
+		platform, applicable := scheduleConfiguredModePlatform(tc.kind)
+		if platform != tc.wantPlatform || applicable != tc.wantApplicable {
+			t.Errorf("%q: got (%q, %v), want (%q, %v)", tc.kind, platform, applicable, tc.wantPlatform, tc.wantApplicable)
+		}
+	}
+}
+
+func TestQueryStoreConfiguredModeFor(t *testing.T) {
+	t.Run("库里有行时用库里的模式", func(t *testing.T) {
+		store := &QueryStore{connectorConfig: ConnectorConfigSourceFunc(
+			func(context.Context, string, string) (*ConnectorConfig, error) {
+				return &ConnectorConfig{Mode: "real"}, nil
+			})}
+		got := store.configuredModeFor(context.Background(), ConnectorPlatformSub2API, "staging")
+		if got == nil || got.Mode != "real" || got.Source != "database" {
+			t.Fatalf("got %+v, want {real database}", got)
+		}
+	})
+
+	t.Run("没有行时按 fake 兜底", func(t *testing.T) {
+		store := &QueryStore{connectorConfig: ConnectorConfigSourceFunc(
+			func(context.Context, string, string) (*ConnectorConfig, error) { return nil, nil })}
+		got := store.configuredModeFor(context.Background(), ConnectorPlatformNewAPI, "staging")
+		if got == nil || got.Mode != "fake" || got.Source != "default" {
+			t.Fatalf("got %+v, want {fake default}", got)
+		}
+	})
+
+	t.Run("读库失败时标 unavailable 而不是让调用方连锁报错", func(t *testing.T) {
+		store := &QueryStore{connectorConfig: ConnectorConfigSourceFunc(
+			func(context.Context, string, string) (*ConnectorConfig, error) {
+				return nil, errors.New("boom")
+			})}
+		got := store.configuredModeFor(context.Background(), ConnectorPlatformSub2API, "staging")
+		if got == nil || got.Source != "unavailable" || got.Mode != "" {
+			t.Fatalf("got %+v, want {\"\" unavailable}", got)
 		}
 	})
 }

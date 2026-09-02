@@ -263,6 +263,76 @@ func TestQueryStoreOverviewPostgresIntegration(t *testing.T) {
 	}
 }
 
+// TestQueryStoreOverviewConfiguredScheduleAndModePostgresIntegration 验证
+// XM-OPS-TAILS0 加的两个可选依赖（WithDeployedSchedules /
+// WithConnectorConfigSource）真的在 Overview() 里生效——上一测试用的是
+// 零值 NewQueryStore(pool)，不会触到这条新路径。
+func TestQueryStoreOverviewConfiguredScheduleAndModePostgresIntegration(t *testing.T) {
+	pool, closePool := mustQueryStorePool(t)
+	defer closePool()
+	ctx := context.Background()
+
+	deployed, err := DeployedSchedulesFromEnv(func(key string) string {
+		if key == "XM_SUB2API_SYNC_ENABLED" {
+			return "false"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("DeployedSchedulesFromEnv: %v", err)
+	}
+
+	// 假连接器配置源：sub2api 有行（real），newapi 没有行（按既定口径落回
+	// fake）——同一次断言里覆盖两条不同的落点，不必分两个测试各起一次 DB。
+	connectorConfig := ConnectorConfigSourceFunc(func(_ context.Context, platform, environment string) (*ConnectorConfig, error) {
+		if platform == ConnectorPlatformSub2API && environment == "staging" {
+			return &ConnectorConfig{Platform: platform, Environment: environment, Mode: "real"}, nil
+		}
+		return nil, nil
+	})
+
+	store := NewQueryStore(pool, WithDeployedSchedules(deployed), WithConnectorConfigSource(connectorConfig))
+
+	overview, err := store.Overview(ctx, "staging")
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+
+	var sub2apiSchedule, newapiSchedule, heartbeatSchedule *ScheduleStatus
+	for i := range overview.Schedules {
+		switch overview.Schedules[i].Kind {
+		case Sub2APISyncJobKind:
+			sub2apiSchedule = &overview.Schedules[i]
+		case NewAPISyncJobKind:
+			newapiSchedule = &overview.Schedules[i]
+		case HeartbeatJobKind:
+			heartbeatSchedule = &overview.Schedules[i]
+		}
+	}
+	if sub2apiSchedule == nil || newapiSchedule == nil || heartbeatSchedule == nil {
+		t.Fatal("expected sub2api_sync / newapi_sync / platform_heartbeat schedules in the catalog")
+	}
+
+	if sub2apiSchedule.Configured == nil || sub2apiSchedule.Configured.Enabled {
+		t.Fatalf("sub2api_sync Configured = %+v, want Enabled=false (XM_SUB2API_SYNC_ENABLED=false)", sub2apiSchedule.Configured)
+	}
+	if heartbeatSchedule.Configured == nil || !heartbeatSchedule.Configured.Enabled || heartbeatSchedule.Configured.EnabledSource != "always" {
+		t.Fatalf("heartbeat Configured = %+v, want Enabled=true source=always", heartbeatSchedule.Configured)
+	}
+
+	if sub2apiSchedule.ConfiguredMode == nil || sub2apiSchedule.ConfiguredMode.Mode != "real" || sub2apiSchedule.ConfiguredMode.Source != "database" {
+		t.Fatalf("sub2api_sync ConfiguredMode = %+v, want {real database}", sub2apiSchedule.ConfiguredMode)
+	}
+	if newapiSchedule.ConfiguredMode == nil || newapiSchedule.ConfiguredMode.Mode != "fake" || newapiSchedule.ConfiguredMode.Source != "default" {
+		t.Fatalf("newapi_sync ConfiguredMode = %+v, want {fake default} (no row = fake per credentials.Store convention)", newapiSchedule.ConfiguredMode)
+	}
+	// heartbeat 没有平台概念（不在 core.connector_config 的 CHECK 约束里），
+	// ConfiguredMode 恒为 nil——"没有这个维度"，不是"未知"。
+	if heartbeatSchedule.ConfiguredMode != nil {
+		t.Fatalf("heartbeat ConfiguredMode = %+v, want nil (heartbeat has no platform mode)", heartbeatSchedule.ConfiguredMode)
+	}
+}
+
 func TestQueryStoreListRunsPostgresIntegration(t *testing.T) {
 	pool, closePool := mustQueryStorePool(t)
 	defer closePool()
