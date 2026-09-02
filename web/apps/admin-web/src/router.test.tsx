@@ -86,7 +86,14 @@ const assuranceFreshness = {
  *  里编样例数据（与本文件 servers/upstream-accounts 默认空列表同一条规矩），
  *  需要非空断言的用例自己覆盖 stubFetch。 */
 function emptyAssuranceAggregate(day?: string) {
-  const zeroPercentiles = { sample_count: 0, p50_ms: null, p95_ms: null, p99_ms: null };
+  // 显式放宽为 number | null：字面量推断成 null 会让后面按天覆盖的
+  // 有样本数据（数字百分位）赋不进去（tsc 报 TS2322）。
+  const zeroPercentiles: {
+    sample_count: number;
+    p50_ms: number | null;
+    p95_ms: number | null;
+    p99_ms: number | null;
+  } = { sample_count: 0, p50_ms: null, p95_ms: null, p99_ms: null };
   return {
     ...(day ? { day } : {}),
     since: "2026-08-31T09:00:00Z",
@@ -95,7 +102,8 @@ function emptyAssuranceAggregate(day?: string) {
     status_classes: { success: 0, client_error: 0, server_error: 0, disconnected: 0, other: 0 },
     duration_ms: zeroPercentiles,
     ttfb_ms: zeroPercentiles,
-    models: [],
+    // 同理：空数组会推断成 never[]，按天覆盖时塞不进模型行
+    models: [] as Array<Record<string, unknown>>,
     models_truncated: false,
     coverage: { spanned_days: 1, missing_days: 0, bad_lines: 0 },
   };
