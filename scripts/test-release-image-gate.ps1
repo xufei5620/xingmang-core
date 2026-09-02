@@ -1162,7 +1162,8 @@ foreach ($supersededRC49Document in @(
     'docs\superpowers\plans\2026-09-02-invoice-rc68-release-recovery.md',
     'docs\superpowers\plans\2026-09-02-invoice-rc69-release-recovery.md',
     'docs\superpowers\plans\2026-09-02-invoice-rc70-release-recovery.md',
-    'docs\superpowers\plans\2026-09-02-invoice-rc71-release-recovery.md'
+    'docs\superpowers\plans\2026-09-02-invoice-rc71-release-recovery.md',
+    'docs\superpowers\plans\2026-09-03-invoice-rc72-release-recovery.md'
 )) {
     $documentPrefix = @(Get-Content -LiteralPath (Join-Path $projectRoot $supersededRC49Document) -TotalCount 8) -join "`n"
     if (-not $documentPrefix.Contains('**SUPERSEDED — DO NOT EXECUTE.**', [StringComparison]::Ordinal) -or
