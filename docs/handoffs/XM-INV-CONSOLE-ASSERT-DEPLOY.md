@@ -5,15 +5,19 @@
   passing with proxy env vars unset; `docker compose ... config` renders
   successfully against a throwaway env derived from
   `deploy/.env.production.example`; `scripts/test-release-image-gate.ps1`
-  offline/static fixtures passing; gitleaks scan of the commit clean --
-  see "Tests run"). Not deployed, no production or server contact of any
-  kind, no release ceremony run, no RC advanced.
+  offline/static fixtures passing; a real fixture break found and fixed in
+  `scripts/verify.ps1`'s own compose-rendering `$productionEnv` (see part
+  d); gitleaks scan of all three commits clean -- see "Tests run"). Not
+  deployed, no production or server contact of any kind, no release
+  ceremony run, no RC advanced.
 - **branch:** `ai/claude/XM-INV-CONSOLE-ASSERT-DEPLOY`, based on
   `ai/claude/XM-INV-AUTOLOGIN` at `4d21cc9` (production RC73 line),
   worktree `K:/发票/wt-XM-INV-ASSERT-DEPLOY`.
 - **commits:**
   - `4683ff4` feat(deploy): wire console-assertion compose plumbing (CR-0006 phase 2 step 2)
-  - *(this commit)* docs(handoff): add XM-INV-CONSOLE-ASSERT-DEPLOY handoff
+  - `b632b5a` docs(handoff): add XM-INV-CONSOLE-ASSERT-DEPLOY handoff
+  - `459650c` fix(scripts): feed CONSOLE_ASSERTION_KEYRING_FILE to verify.ps1's compose render
+  - *(this commit)* docs(handoff): record the verify.ps1 fixture fix above
 
 ## Summary
 
@@ -125,10 +129,38 @@ design; this is the desired behavior, not a bug, since it forces an
 operator to notice at startup if they enable the feature before the real
 manifest is installed).
 
+### d. `scripts/verify.ps1`'s own compose-rendering fixture (found while checking "keep every fixture passing")
+
+`scripts/verify.ps1` (the full source gate run from the exact RC candidate
+worktree, `docs/PRODUCTION-RUNBOOK.md` section 3) builds its own
+`$productionEnv` hashtable of every variable `docker-compose.prod.yml`
+requires, sets them as process environment variables, and renders the
+compose file twice (`config --quiet`, then `--profile tools ... config
+--format json`) to assert on specific fields (ingest-proxy trust,
+subnets, PDF-scanner isolation, etc.) -- this is exactly the kind of
+"fixture that pins the compose file's content" I was asked to find. The
+new `CONSOLE_ASSERTION_KEYRING_FILE` bind mount is required with no
+default, and `$productionEnv` did not yet set it -- meaning the next full
+run of `verify.ps1` would have failed closed on the compose render step,
+purely because of this branch's change, before ever reaching the actual
+checks the rest of the script performs. Fixed by adding one line pointing
+it at the existing `contracts/auth/console-assertion-keyring.v1.json`
+placeholder (matching this same hashtable's existing pattern of reusing
+committed example/placeholder files for `SOURCE_TRUST_CONFIG_FILE` and
+friends, rather than inventing a new file). `scripts/verify-postgres.ps1`
+was also checked and does not reference `docker-compose.prod.yml` or any
+of these variables at all -- nothing to fix there. I did not run the rest
+of `verify.ps1` (it also runs `go test -race ./...` twice and `npm run
+build`, a multi-minute full-repo gate well beyond this task's scope and
+explicit test list); see "Not run" for how the fix itself was verified
+instead.
+
 ## Files changed
 
 - `deploy/docker-compose.prod.yml` -- `api` service: five new environment
   entries, one new read-only volume mount.
+- `scripts/verify.ps1` -- one new line in `$productionEnv` so its own
+  compose-config render keeps succeeding (see part d above).
 - `deploy/roll-forward.sh` -- header precondition bullet; new preflight
   block creating an empty keyring placeholder only when missing.
 - `deploy/.env.production.example` -- documents
@@ -284,12 +316,19 @@ unset entirely, confirmed as a no-op (Compose's own `:?set ...` on
 `CONSOLE_ASSERTION_KEYRING_FILE` is the fail-closed backstop for that
 case, not this preflight).
 
+`scripts/verify.ps1`'s fix (part d above) was verified by replicating its
+exact `$productionEnv`-driven approach standalone (same hashtable, same
+two `docker compose config` invocations): both exit 0 with the new line
+present; both `services.api.environment.CONSOLE_ASSERTION_KEYS_FILE` and
+the `/config/console-assertion-keyring.json` volume mount's resolved
+`source` render exactly as expected.
+
 gitleaks (native binary, `/c/Users/58439/.local/bin/gitleaks`, no Docker
-needed):
+needed), re-run after each new commit:
 
 ```
 gitleaks git --no-banner --log-opts="4d21cc9..HEAD" .
-# 1 commit scanned, ~17.92 KB, no leaks found
+# final run (3 commits): no leaks found
 ```
 
 ## Not run / not verified
@@ -307,6 +346,16 @@ gitleaks git --no-banner --log-opts="4d21cc9..HEAD" .
   loaded release images, and a signed backup -- none of which exist in
   this environment); only the new preflight block's logic was isolated
   and tested, as described above.
+- **`scripts/verify.ps1` was not run end to end** -- beyond the compose
+  render, it also runs `go test -race ./...` (twice), `go vet ./...`
+  (twice) and `npm run build`/`typecheck`, a multi-minute full-repo gate
+  that duplicates this task's own `go build`/`go vet`/`go test` runs above
+  and is out of this task's explicit test list. Only the two
+  `docker compose config` calls its `$productionEnv` hashtable drives were
+  directly re-verified after my fix (see Tests run) -- I am confident the
+  rest of the script is unaffected (nothing else in it references any
+  console-assertion variable), but a full run has not been performed by
+  me.
 - Frontend/`web/` not touched; no frontend tests applicable.
 
 ## Risks
