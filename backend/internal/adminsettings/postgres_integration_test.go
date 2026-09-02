@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"invoice-system/backend/internal/migrate"
-	"os"
+	"invoice-system/backend/internal/testdb"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -30,10 +30,10 @@ func waitAdminSettingsPool(t *testing.T, pool *pgxpool.Pool) {
 }
 
 func TestPostgresSettingsCASAuditAndEncryptedSecret(t *testing.T) {
-	url := os.Getenv("INVOICE_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
-	}
+	// testdb.URL rewrites the shared default "invoice_test" database to a
+	// per-git-worktree database (created on first use), so concurrent
+	// worktrees never race the DROP SCHEMA CASCADE below.
+	url := testdb.URL(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
@@ -87,10 +87,10 @@ func TestPostgresSettingsCASAuditAndEncryptedSecret(t *testing.T) {
 }
 
 func TestPostgresConcurrentInitializationUsesRevisionConflict(t *testing.T) {
-	url := os.Getenv("INVOICE_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
-	}
+	// testdb.URL rewrites the shared default "invoice_test" database to a
+	// per-git-worktree database (created on first use), so concurrent
+	// worktrees never race the DROP SCHEMA CASCADE below.
+	url := testdb.URL(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {

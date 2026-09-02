@@ -14,6 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"invoice-system/backend/internal/testdb"
 )
 
 func testChecksum(value string) string {
@@ -727,10 +729,13 @@ func TestPolicyAnchorMigrationValidatesBootstrapKindAndTriggerBoundary(t *testin
 }
 
 func TestSourceReadinessActiveIndexMigrationCatalogContract(t *testing.T) {
-	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
-	}
+	// testdb.URL rewrites the shared default "invoice_test" database to a
+	// per-git-worktree database (created on first use), so concurrent
+	// worktrees never race resetBeforeReadiness's DROP SCHEMA CASCADE
+	// below. This is the only test in this file that resets the shared
+	// "public" schema; every other test here already uses its own
+	// uniquely-named schema per run and is not exposed to that race.
+	databaseURL := testdb.URL(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {

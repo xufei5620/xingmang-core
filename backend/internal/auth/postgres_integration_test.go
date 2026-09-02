@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 
 	"invoice-system/backend/internal/migrate"
 	"invoice-system/backend/internal/securefields"
+	"invoice-system/backend/internal/testdb"
 )
 
 // testSessionKeyring provides PostgresSessionStore's field-encryption
@@ -30,10 +30,10 @@ func testSessionKeyring() securefields.Keyring {
 }
 
 func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
-	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
-	}
+	// testdb.URL rewrites the shared default "invoice_test" database to a
+	// per-git-worktree database (created on first use), so concurrent
+	// worktrees never race the DROP SCHEMA CASCADE below.
+	databaseURL := testdb.URL(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -260,10 +260,10 @@ func (fixedBindingVerifier) VerifyBindingProof(_ context.Context, challenge Bind
 // (encoded by pgx as SQL NULL) broke session issuance with SQLSTATE 23502.
 // Issue and Rotate must both store empty arrays instead.
 func TestPostgresPlatformSessionWithoutRolesOrAMR(t *testing.T) {
-	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
-	}
+	// testdb.URL rewrites the shared default "invoice_test" database to a
+	// per-git-worktree database (created on first use), so concurrent
+	// worktrees never race the DROP SCHEMA CASCADE below.
+	databaseURL := testdb.URL(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -339,10 +339,10 @@ func TestPostgresPlatformSessionWithoutRolesOrAMR(t *testing.T) {
 // migration -- display_name_ciphertext genuinely absent from the INSERT,
 // not just empty -- loads with an empty DisplayName instead of erroring.
 func TestPostgresSessionDisplayNameEncryptedRotatedAndBackwardCompatible(t *testing.T) {
-	databaseURL := os.Getenv("INVOICE_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
-	}
+	// testdb.URL rewrites the shared default "invoice_test" database to a
+	// per-git-worktree database (created on first use), so concurrent
+	// worktrees never race the DROP SCHEMA CASCADE below.
+	databaseURL := testdb.URL(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {

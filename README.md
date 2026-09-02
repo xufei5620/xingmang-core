@@ -59,6 +59,20 @@ pwsh -NoProfile -File .\scripts\verify.ps1
 pwsh -NoProfile -File .\scripts\verify-postgres.ps1
 ```
 
+Running `go test` directly against the shared long-lived PostgreSQL dev
+container (rather than `scripts/verify-postgres.ps1`'s isolated one-off
+container) with `INVOICE_TEST_DATABASE_URL` pointed at its default
+`invoice_test` database is safe from multiple worktrees at once: every
+integration test that resets the `public` schema (`backend/internal/
+postgresstore`, `oidcretention`, `auth`, `adminsettings`, and one `migrate`
+test -- see `backend/internal/testdb`'s package doc) automatically
+redirects to a database named after the current git worktree
+(`invoice_test_<sanitized worktree directory name>`), creating it on first
+use, so two worktrees testing at the same time never race each other's
+schema resets. Point `INVOICE_TEST_DATABASE_URL` at any other, explicit
+database name (e.g. `invoice_test_mytask`) to opt out of that redirection
+and use exactly that database.
+
 The backend now has separate mock and fail-closed production boot paths. The
 production path includes central OIDC/PKCE sessions, administrator LoA2/MFA and
 IP policy, PostgreSQL application services, encrypted sensitive fields and PDF
