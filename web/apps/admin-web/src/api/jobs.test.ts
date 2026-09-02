@@ -124,7 +124,16 @@ describe("kind/state 中文名", () => {
   it("已知 kind 翻成中文，未知 kind 原样返回", () => {
     expect(jobKindLabel("platform_heartbeat")).toBe("平台心跳");
     expect(jobKindLabel("sub2api_sync")).toBe("Sub2API 同步");
-    expect(jobKindLabel("reqlog_metrics")).toBe("reqlog_metrics");
+    // XM-OPS-TAILS0 前 reqlog_metrics/connector_probe/cpa_sync 三个已注册
+    // 任务还没有中文名，靠"未知则原样显示"兜底；本片补了三个，这里改用一个
+    // 真正不存在的 kind 验证兜底路径仍然有效。
+    expect(jobKindLabel("a-kind-that-does-not-exist")).toBe("a-kind-that-does-not-exist");
+  });
+
+  it("XM-OPS-TAILS0 新补的三个周期任务 kind 中文名", () => {
+    expect(jobKindLabel("reqlog_metrics")).toBe("请求量指标聚合");
+    expect(jobKindLabel("connector_probe")).toBe("连接器健康探测");
+    expect(jobKindLabel("cpa_sync")).toBe("CPA 用量同步");
   });
 
   it("已知 state 翻成中文，未知 state 显式标注而不是隐藏", () => {

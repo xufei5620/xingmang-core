@@ -257,7 +257,7 @@ function ScheduledTab({ label }: { label: string }) {
     <section>
       <PageHeader
         title={label}
-        description="平台注册的周期任务目录；「观测周期」「预计下次」是从最近两次出现的时间差推算出来的观测值，不是配置值——本页读不到 Platform Worker 手上的运行时配置，因此不显示「已启用/已停用」。"
+        description="平台注册的周期任务目录；「观测周期」「预计下次」「活跃度」是从 river_job 里最近的运行记录推算出来的观测值，不是配置值。「部署状态」是另一件事：Platform API 进程按与 Platform Worker 相同的规则解析同一份部署环境变量（并对 Sub2API/NewAPI 两个同步任务读取 core.connector_config 的实际模式）得到的部署声明——不是对 Worker 进程正在跑什么的实时确认，两者在正常部署下应当一致，但这是两件不同的事。"
       />
       <ApiStateView isPending={query.isPending} error={query.error} onRetry={refresh} compact>
         <ScheduledTable schedules={query.data?.schedules ?? []} />
@@ -334,6 +334,12 @@ function scheduledColumns(): DataTableColumn<JobScheduleStatus>[] {
       },
     },
     {
+      id: "configured",
+      header: "部署状态",
+      value: (s) => `${s.configured_enabled ?? ""} ${s.configured_mode ?? ""}`,
+      cell: (s) => <ConfiguredCell schedule={s} />,
+    },
+    {
       id: "lastError",
       header: "最近错误",
       value: (s) => s.last_run?.last_error?.message ?? "",
@@ -345,6 +351,41 @@ function scheduledColumns(): DataTableColumn<JobScheduleStatus>[] {
         ),
     },
   ];
+}
+
+const CONFIGURED_MODE_DISPLAY: Record<"real" | "fake", { label: string; tone: BadgeTone }> = {
+  real: { label: "真实接入", tone: "success" },
+  fake: { label: "演示数据", tone: "neutral" },
+};
+
+/** 「部署状态」列：configured_enabled/configured_mode 两件事分两行摆——
+ *  「启用/停用」对全部任务有意义，「真实接入/演示数据」只对 Sub2API/NewAPI
+ *  两个同步任务有意义，混进同一句话容易让人以为其它任务也有真实/演示之分。
+ *  两者都明确标着来源（环境变量名 / database·default·unavailable），
+ *  不让"部署声明"读起来像"Worker 已确认"。 */
+function ConfiguredCell({ schedule }: { schedule: JobScheduleStatus }) {
+  // typeof 判断而不是 === null：真实后端响应里这个字段恒为显式 boolean
+  // 或 null（Go 侧没有加 omitempty），但顺带也接住字段整个缺失
+  // （undefined）的情形，不因为一次边界写法差异就崩成白屏。
+  if (typeof schedule.configured_enabled !== "boolean") {
+    return <span className="text-fg-muted" title="本次装配没有接部署配置读数">—</span>;
+  }
+  const modeShown = schedule.configured_mode ? CONFIGURED_MODE_DISPLAY[schedule.configured_mode] : null;
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <Badge tone={schedule.configured_enabled ? "success" : "neutral"}>
+        {schedule.configured_enabled ? "已配置启用" : "已配置停用"}
+      </Badge>
+      {modeShown ? (
+        <Badge tone={modeShown.tone}>{modeShown.label}</Badge>
+      ) : schedule.configured_mode_source === "unavailable" ? (
+        <span className="text-xs text-danger">connector_config 读取失败</span>
+      ) : null}
+      <span className="text-xs text-fg-muted" title="决定「已配置启用/停用」的环境变量">
+        {schedule.configured_source}
+      </span>
+    </div>
+  );
 }
 
 function ScheduledTable({ schedules }: { schedules: JobScheduleStatus[] }) {
