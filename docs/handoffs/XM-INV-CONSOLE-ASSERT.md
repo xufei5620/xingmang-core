@@ -357,17 +357,19 @@ production, in order:
    the manifest file to the server as a root-managed file (same custody
    discipline as `FIELD_KEYRING_FILE`/`SOURCE_TRUST_FILE`); it contains
    only public key material, no secret to protect beyond integrity.
-3. **Wire the compose plumbing this slice deliberately did not touch**:
-   add `CONSOLE_ASSERTION_ENABLED`/`CONSOLE_ASSERTION_ISSUER`/
-   `CONSOLE_ASSERTION_AUDIENCE`/`CONSOLE_ASSERTION_KEYS_FILE` to the `api`
-   service's `environment:` block in `docker-compose.prod.yml`, and a
-   read-only volume mount for the keys file (same pattern as
-   `SOURCE_TRUST_CONFIG_FILE:/config/source-trust.json:ro` a few lines
-   above it) — a new `CONSOLE_ASSERTION_KEYS_CONFIG_FILE` host-side env var
-   pointing at the deployed manifest is the natural name to match that
-   existing convention. This is a real, reviewable compose change; I did
-   not make it because the task brief explicitly said not to touch deploy
-   compose files beyond adding env vars to the example templates.
+3. **Wire the compose plumbing this slice deliberately did not touch** — done
+   by `XM-INV-CONSOLE-ASSERT-DEPLOY` (see `docs/handoffs/XM-INV-CONSOLE-
+   ASSERT-DEPLOY.md`): `docker-compose.prod.yml`'s `api` service now
+   declares `OIDC_ADMIN_LOGIN_ENABLED`/`CONSOLE_ASSERTION_ENABLED`/
+   `CONSOLE_ASSERTION_ISSUER`/`CONSOLE_ASSERTION_AUDIENCE`/`CONSOLE_
+   ASSERTION_KEYS_FILE` and a read-only volume mount (same pattern as
+   `SOURCE_TRUST_CONFIG_FILE:/config/source-trust.json:ro`, host-side
+   variable named `CONSOLE_ASSERTION_KEYRING_FILE` — not the `CONSOLE_
+   ASSERTION_KEYS_CONFIG_FILE` name speculated just above; see the newer
+   handoff and `docs/PRODUCTION-RUNBOOK.md` section 4.1 for the exact
+   wiring, the Docker empty-directory-on-missing-mount-source guard, and
+   the full enable order). Both flags still default to today's behavior;
+   this remains a dark-shipped capability, not an activation.
 4. **Run the CR-0006 data migration (change item f) AFTER enabling the
    assertion path, not before.** Acceptance-line ruling (2026-09-03,
    platform ACCEPTANCE-LOG): first set `CONSOLE_ASSERTION_ENABLED=true`
@@ -549,9 +551,10 @@ scanned). Every Ed25519 keypair used in tests is generated at test-run time
 2. Once XM-INVCON1 lands, replace the empty keyring placeholder with the
    real reviewed key and re-verify the exchange end-to-end against a live
    signer (not just the frozen contract) before any canary.
-3. Wire `docker-compose.prod.yml`'s `environment:`/volume plumbing for the
-   five new env vars — deliberately out of this slice's scope, see
-   Production rollout step 3.
+3. ~~Wire `docker-compose.prod.yml`'s `environment:`/volume plumbing for the
+   five new env vars~~ — done by `XM-INV-CONSOLE-ASSERT-DEPLOY`, see
+   Production rollout step 3 above and `docs/handoffs/XM-INV-CONSOLE-ASSERT-
+   DEPLOY.md`.
 4. If a real top-level (non-embedded) console-assertion entry is ever
    wanted, design it as its own reviewed piece — see Risk 5.
 5. Consider whether `docs/SECURITY-ARCHITECTURE.md` should gain a section
