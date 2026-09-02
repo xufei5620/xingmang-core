@@ -228,10 +228,27 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		LogoutTokenMaxAge:         logoutTokenMaxAge, RequireBackchannelLogout: true,
 		MaximumHTTPResponseBytes: oidcMaximumResponseBytes,
 	}
-	flowStore := auth.NewPostgresFlowStore(store.Pool())
-	oidcClient, err := auth.NewOIDCClient(ctx, oidcConfig, flowStore, auth.SecureFieldsFlowProtector{Keyring: keyring})
+	// CR-0006 (XM-INV-CONSOLE-ASSERT): OIDC_ADMIN_LOGIN_ENABLED defaults true
+	// (unchanged production behavior in this phase; Keycloak stays the
+	// default admin login path). When explicitly set to false, OIDC
+	// discovery below is skipped entirely (a real network dependency on the
+	// IdP at every process start) and ProductionAuth.Register does not wire
+	// the OIDC-touching routes at all -- see production_auth.go.
+	oidcAdminLoginEnabled, err := boolEnv("OIDC_ADMIN_LOGIN_ENABLED", true)
 	if err != nil {
 		return appRuntime{}, err
+	}
+	consoleAssertionEnabled, err := boolEnv("CONSOLE_ASSERTION_ENABLED", false)
+	if err != nil {
+		return appRuntime{}, err
+	}
+	flowStore := auth.NewPostgresFlowStore(store.Pool())
+	var oidcClient *auth.OIDCClient
+	if oidcAdminLoginEnabled {
+		oidcClient, err = auth.NewOIDCClient(ctx, oidcConfig, flowStore, auth.SecureFieldsFlowProtector{Keyring: keyring})
+		if err != nil {
+			return appRuntime{}, err
+		}
 	}
 	sessionStore := auth.NewPostgresSessionStore(store.Pool(), keyring)
 	auditSink := auth.NewPostgresSecurityAuditSink(store.Pool())
@@ -257,9 +274,47 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
+	// CR-0006: CONSOLE_ASSERTION_ENABLED defaults false (unchanged
+	// production behavior in this phase). The nonce store, rate limiter and
+	// audit sink have no external config of their own and are always built;
+	// only the issuer/audience/keys-file below need "fail closed on
+	// malformed config" gated to when the feature is actually meant to be
+	// used -- an operator who never turns this on should not need a valid
+	// CONSOLE_ASSERTION_ISSUER or keys file at all.
+	consoleAssertionNonces := auth.NewPostgresConsoleAssertionNonceStore(store.Pool())
+	// 20/minute matches the design spec's own cited rate exactly (section
+	// 5.2) and the edge nginx zone (invoice_auth, deploy/nginx/invoice-
+	// http-context.conf) that already covers this route by prefix -- kept
+	// as a fixed value, not a new env var, so there is exactly one place
+	// this number is decided rather than two that could drift apart.
+	consoleAssertionRateLimiter := auth.NewLoginRateLimiter(20, time.Minute)
+	var consoleAssertionKeyring *auth.ConsoleAssertionKeyring
+	var consoleAssertionCfg auth.ConsoleAssertionConfig
+	if consoleAssertionEnabled {
+		consoleAssertionCfg = auth.ConsoleAssertionConfig{
+			Issuer:   os.Getenv("CONSOLE_ASSERTION_ISSUER"),
+			Audience: env("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1"),
+		}
+		if err = consoleAssertionCfg.Validate(); err != nil {
+			return appRuntime{}, fmt.Errorf("console assertion config: %w", err)
+		}
+		keysFilePath := strings.TrimSpace(os.Getenv("CONSOLE_ASSERTION_KEYS_FILE"))
+		if keysFilePath == "" {
+			return appRuntime{}, errors.New("CONSOLE_ASSERTION_KEYS_FILE is required when CONSOLE_ASSERTION_ENABLED=true")
+		}
+		keysFileBytes, readErr := readBoundedConfigFile(keysFilePath, 256<<10)
+		if readErr != nil {
+			return appRuntime{}, fmt.Errorf("read CONSOLE_ASSERTION_KEYS_FILE: %w", readErr)
+		}
+		consoleAssertionKeyring, err = auth.LoadConsoleAssertionKeyringJSON(keysFileBytes)
+		if err != nil {
+			return appRuntime{}, fmt.Errorf("load console assertion keyring: %w", err)
+		}
+	}
 	productionAuth := &httpapi.ProductionAuth{
-		OIDC: oidcClient, Sessions: sessions, BindingHasher: bindingHasher,
-		CSRF: csrf, Admin: adminPolicy, Logout: oidcClient, BackchannelLogout: backchannelLogout,
+		Sessions: sessions, BindingHasher: bindingHasher,
+		CSRF: csrf, Admin: adminPolicy, BackchannelLogout: backchannelLogout,
+		DisableOIDCAdminLogin: !oidcAdminLoginEnabled,
 		ProvisionUser: func(callbackCtx context.Context, principal auth.Principal, requestID string) (httpapi.SessionUser, error) {
 			return provisionPlatformOrOIDCUser(callbackCtx, appService, identityStore, principal, requestID, platformSourceInstanceIDs)
 		},
@@ -272,6 +327,23 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			// current.Session.DisplayName instead of going through LoadUser.
 			return loadSessionUser(loadCtx, appService, userID, false)
 		},
+		ConsoleAssertionEnabled:     consoleAssertionEnabled,
+		ConsoleAssertionKeyring:     consoleAssertionKeyring,
+		ConsoleAssertionConfig:      consoleAssertionCfg,
+		ConsoleAssertionNonces:      consoleAssertionNonces,
+		ConsoleAssertionRateLimiter: consoleAssertionRateLimiter,
+		SecurityAudit:               auditSink,
+	}
+	// oidcClient is only non-nil when oidcAdminLoginEnabled (see its
+	// construction above); assigning it unconditionally here would wrap a
+	// nil *auth.OIDCClient inside the OIDC/Logout interface fields, which is
+	// NOT a nil interface (the classic Go footgun) -- Register's route-
+	// registration gate is the real defense, but leaving these fields as a
+	// literal nil interface value when disabled is a second, independent
+	// guard against ever calling through a nil pointer.
+	if oidcAdminLoginEnabled {
+		productionAuth.OIDC = oidcClient
+		productionAuth.Logout = oidcClient
 	}
 	platformLogin, err := buildPlatformLogin(productionAuth)
 	if err != nil {
@@ -384,7 +456,14 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 				return int(flows), flowErr
 			}
 			sessionCount, sessionErr := sessionStore.DeleteExpired(cleanCtx, time.Now().UTC())
-			return int(flows + sessionCount), sessionErr
+			if sessionErr != nil {
+				return int(flows + sessionCount), sessionErr
+			}
+			// console_assertion_nonces (migration 0018): harmless to sweep
+			// even when CONSOLE_ASSERTION_ENABLED=false -- the table simply
+			// stays empty in that case.
+			nonceCount, nonceErr := consoleAssertionNonces.DeleteExpired(cleanCtx, time.Now().UTC())
+			return int(flows + sessionCount + nonceCount), nonceErr
 		})},
 	}
 	closeOnError = false

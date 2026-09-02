@@ -57,6 +57,26 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+// boolEnv accepts exactly "true"/"false" (case-sensitive, no other spelling
+// -- unlike EnforceProductionAuthMode's tolerant AUTH_MODE parsing, a
+// security-relevant on/off switch like OIDC_ADMIN_LOGIN_ENABLED or
+// CONSOLE_ASSERTION_ENABLED must fail closed on anything ambiguous (e.g.
+// "1", "yes", "True") rather than silently guessing.
+func boolEnv(key string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	switch raw {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be exactly \"true\" or \"false\"", key)
+	}
+}
+
 func csvEnv(key, fallback string) []string {
 	value := env(key, fallback)
 	if strings.TrimSpace(value) == "" {
