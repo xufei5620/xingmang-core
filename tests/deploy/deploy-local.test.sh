@@ -460,5 +460,131 @@ else
   bad "checkout 磁盘上的脚本已快进到 v2"
 fi
 
+# ============================================================
+# XM-DEPLOY-CPAWAIT0：cpa-observations 等待预算与轮询进度
+# ============================================================
+#
+# cpa-observations 阶段完整走一遍需要 expected_environment=production 且
+# cpa_mode_value=file；这条路径在 main() 更早的阶段就会要求 EUID=0（生产
+# root，见 baseline 阶段的 CPA 宿主准备）以及硬编码的宿主路径
+# /opt/xingmang/cpa-snapshot/current/cpa-snapshot（不经任何测试可覆盖的
+# 变量）——两者都不是本测试文件能在便携环境下满足的前置条件，且都来自更早、
+# 与本片无关的 XM-CPA-SNAPSHOT 切片，不在本片改动范围内。
+#
+# 所以这里直接 source 本文件（利用文件末尾新增的
+# `[ "${BASH_SOURCE[0]}" = "${0}" ]` 守卫跳过 `main "$@"`），单独调用
+# parse_duration_seconds/cpa_observation_budget_line/cpa_observation_wait
+# 这三个定义在 main() 之外的函数——测的是部署脚本里真实跑的那份代码，不是
+# 重新实现一遍；main() 内部调用它们的方式（同样的函数名、同样的参数）与这里
+# 完全一致。
+
+parse_duration_seconds_case() {
+  local input="$1" want="$2" got rc
+  got="$(source "$deploy_script" || true; parse_duration_seconds "$input")"
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then
+    ok "parse_duration_seconds($input)=$want"
+  else
+    bad "parse_duration_seconds($input)=$want（got rc=$rc got=$got）"
+  fi
+}
+parse_duration_seconds_case "300s" "300"
+parse_duration_seconds_case "5m" "300"
+parse_duration_seconds_case "1h30m" "5400"
+parse_duration_seconds_case "60s" "60"
+parse_duration_seconds_case "24h" "86400"
+
+parse_duration_seconds_fail_case() {
+  local input="$1" got rc
+  got="$(source "$deploy_script" || true; parse_duration_seconds "$input" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    ok "parse_duration_seconds(\"$input\") 无法识别时返回非零"
+  else
+    bad "parse_duration_seconds(\"$input\") 无法识别时返回非零（got rc=0 got=$got）"
+  fi
+}
+parse_duration_seconds_fail_case ""
+parse_duration_seconds_fail_case "abc"
+parse_duration_seconds_fail_case "300seconds"
+parse_duration_seconds_fail_case "0s"
+
+# (c) XM_CPA_SYNC_INTERVAL 改变时等待预算跟着变：cpa_observation_budget_line
+# 就是 main() 用来打印 cpa-observations=budget 这一行的同一个函数，budget 恒等于
+# interval+60（60s 安全边际）。
+budget_line_default="$(source "$deploy_script" || true; cpa_observation_budget_line "$CPA_SYNC_DEFAULT_INTERVAL_SECONDS" 10 deadbeefdeadbeefdeadbeefdeadbeef)"
+if [ "$budget_line_default" = "cpa-observations=budget budget=360s interval=300s poll=10s expected_generation=deadbeefdeadbeefdeadbeefdeadbeef" ]; then
+  ok "cpa_observation_budget_line 默认 300s 周期给出 360s 预算"
+else
+  bad "cpa_observation_budget_line 默认 300s 周期给出 360s 预算（got: $budget_line_default）"
+fi
+
+budget_line_override="$(source "$deploy_script" || true; cpa_observation_budget_line 600 10 deadbeefdeadbeefdeadbeefdeadbeef)"
+if [ "$budget_line_override" = "cpa-observations=budget budget=660s interval=600s poll=10s expected_generation=deadbeefdeadbeefdeadbeefdeadbeef" ]; then
+  ok "XM_CPA_SYNC_INTERVAL=600s 对应的等待预算是 660s（随周期变化，不是写死的 360s）"
+else
+  bad "XM_CPA_SYNC_INTERVAL=600s 对应的等待预算是 660s（随周期变化，不是写死的 360s）（got: $budget_line_override）"
+fi
+
+# (a) 观测在第三次轮询命中：PASS，且打印过等待进度行。
+#
+# 假 run_compose 需要跨调用计数「这是第几次被叫到」，但 cpa_observation_wait
+# 是用 "$(run_compose ...)" 命令替换来拿返回值的——命令替换总会 fork 一个
+# 子 shell，子 shell 里对普通 shell 变量的修改不会传回父进程，所以计数器必须
+# 落盘（用文件而不是变量），思路与本文件前面 FAKE_DOCKER_CORRUPT_SCRIPT_PATH
+# 那处"只做一次"标记文件是同一手法。
+#
+# cpa_observation_wait 命中/耗尽后都是靠 return 0/1 传递结果，而 source 本文件
+# 带进了 set -Eeuo pipefail；不能裸调用它——一旦它 return 1，errexit 会让整个
+# 子 shell 立刻退出，后面拼 RC=.../LAST_STATE=... 的 printf 根本不会执行。所以
+# 用 `cmd && rc=0 || rc=$?` 这个 -e 安全的写法先把真实返回码存进变量，再打印。
+cpa_wait_out_a="$tmp/cpa-observation-wait-a.out"
+cpa_wait_a_counter="$tmp/cpa-observation-wait-a.counter"
+: > "$cpa_wait_a_counter"
+(
+  source "$deploy_script" || true
+  POSTGRES_USER=xingmang
+  POSTGRES_DB=xingmang
+  run_compose() {
+    local n
+    n="$(cat "$cpa_wait_a_counter" 2>/dev/null || echo 0)"
+    n=$((n + 1))
+    printf '%s' "$n" > "$cpa_wait_a_counter"
+    if [ "$n" -ge 3 ]; then
+      printf '4|1|deadbeefdeadbeefdeadbeefdeadbeef|4|0|1'
+    else
+      printf '2|1|deadbeefdeadbeefdeadbeefdeadbeef|2|0|0'
+    fi
+  }
+  sleep() { :; }
+  cpa_observation_wait "deadbeefdeadbeefdeadbeefdeadbeef" \
+    "4|1|deadbeefdeadbeefdeadbeefdeadbeef|4|0|1" 300 10 && cpa_wait_rc=0 || cpa_wait_rc=$?
+  printf 'RC=%s\n' "$cpa_wait_rc"
+) >"$cpa_wait_out_a" 2>&1
+assert_text "cpa_observation_wait 第三次轮询命中即返回成功" 'RC=0' "$cpa_wait_out_a"
+assert_text "cpa_observation_wait 打印过等待进度行" 'cpa-observations=waiting elapsed=0s expected_generation=deadbeefdeadbeefdeadbeefdeadbeef' "$cpa_wait_out_a"
+assert_text "cpa_observation_wait 命中后打印 ok 行且用 elapsed 而不是 attempt 计数" 'cpa-observations=ok generation=deadbeefdeadbeefdeadbeefdeadbeef elapsed=20s' "$cpa_wait_out_a"
+
+# (b) 预算耗尽：FAIL，且保留最后一次观测到的（旧 generation 的）状态元组，
+# 方便调用方在失败行里同时打出 expected 与 observed。
+cpa_wait_out_b="$tmp/cpa-observation-wait-b.out"
+(
+  source "$deploy_script" || true
+  POSTGRES_USER=xingmang
+  POSTGRES_DB=xingmang
+  run_compose() { printf '4|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|4|0|1'; }
+  sleep() { :; }
+  cpa_observation_wait "deadbeefdeadbeefdeadbeefdeadbeef" \
+    "4|1|deadbeefdeadbeefdeadbeefdeadbeef|4|0|1" 25 10 && cpa_wait_rc=0 || cpa_wait_rc=$?
+  printf 'RC=%s\n' "$cpa_wait_rc"
+  printf 'LAST_STATE=%s\n' "$CPA_OBSERVATION_LAST_STATE"
+) >"$cpa_wait_out_b" 2>&1
+assert_text "cpa_observation_wait 预算耗尽返回失败" 'RC=1' "$cpa_wait_out_b"
+assert_text "cpa_observation_wait 预算耗尽时保留最后一次观测到的旧 generation 元组" 'LAST_STATE=4|1|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|4|0|1' "$cpa_wait_out_b"
+assert_text "cpa_observation_wait 预算耗尽前也打印过等待进度行" 'cpa-observations=waiting elapsed=0s expected_generation=deadbeefdeadbeefdeadbeefdeadbeef' "$cpa_wait_out_b"
+
+# source 本文件不应该意外跑起 main()（否则会尝试连真实 Docker/Git）。
+assert_not_text "source 本文件不触发 DEPLOY LOCAL PASS/FAIL" 'DEPLOY LOCAL' "$cpa_wait_out_a"
+
 [ "$fail" -eq 0 ] && echo "DEPLOY-LOCAL-TEST-OK"
 exit "$fail"
