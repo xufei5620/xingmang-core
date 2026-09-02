@@ -365,6 +365,122 @@ func TestEffectiveManifestRejectsMismatchedScheduleSource(t *testing.T) {
 	}
 }
 
+// XM-OPS-TAILS1: EffectiveJobSchedules is the shared, validated core
+// BuildEffectiveManifest uses, exposed without the R210 fleet-identity
+// requirement so jobs.DeployedSchedulesFromEnv (and therefore the "后台任务"
+// page's per-task enabled column) can go through the same validation instead
+// of calling effectiveJobConfig directly.
+
+func TestEffectiveJobSchedulesNeedsNoFleetIdentity(t *testing.T) {
+	// DefaultConfig leaves Environment/WorkerClusterID/RiverSchema empty by
+	// design (client.go: "callers must declare it" / "intentionally not
+	// inferred or defaulted here") — exactly what jobs.DeployedSchedulesFromEnv
+	// passes in production today (it never sets any of the three). If
+	// EffectiveJobSchedules required them the way BuildEffectiveManifest
+	// does, this would have to fail; it must not.
+	cfg := DefaultConfig()
+	if cfg.Environment != "" || cfg.WorkerClusterID != "" || cfg.RiverSchema != "" {
+		t.Fatalf("test assumption broken: DefaultConfig no longer leaves identity fields empty: %+v", cfg)
+	}
+	if _, err := EffectiveJobSchedules(cfg); err != nil {
+		t.Fatalf("EffectiveJobSchedules must not require fleet identity: %v", err)
+	}
+}
+
+func TestEffectiveJobSchedulesCoversExactlyRegisteredJobsSortedByID(t *testing.T) {
+	rows, err := EffectiveJobSchedules(DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := RegisteredPeriodicJobSpecs()
+	if len(rows) != len(registered) {
+		t.Fatalf("got %d rows, want %d (one per registered job)", len(rows), len(registered))
+	}
+	ids := make([]string, len(rows))
+	for i, row := range rows {
+		ids[i] = row.ID
+		if row.IntervalSeconds <= 0 {
+			t.Errorf("%s: IntervalSeconds = %d, want positive", row.ID, row.IntervalSeconds)
+		}
+	}
+	if !sort.StringsAreSorted(ids) {
+		t.Fatalf("rows are not byte-order sorted by ID: %v", ids)
+	}
+	for _, spec := range registered {
+		found := false
+		for _, row := range rows {
+			if row.ID == spec.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing row for registered job %q", spec.ID)
+		}
+	}
+}
+
+func TestEffectiveJobSchedulesHonorsConfigOverrides(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RetentionEnabled = false
+	cfg.Sub2APISyncInterval = 10 * time.Minute
+	rows, err := EffectiveJobSchedules(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]EffectiveJobSpec, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	if byID[RetentionJobKind].Enabled {
+		t.Error("retention_prune should be disabled by cfg.RetentionEnabled = false")
+	}
+	if byID[Sub2APISyncJobKind].IntervalSeconds != 600 {
+		t.Errorf("sub2api_sync interval = %d, want 600 (10m)", byID[Sub2APISyncJobKind].IntervalSeconds)
+	}
+}
+
+// TestDeployedSchedulesFromEnvGoesThroughEffectiveJobSchedules pins the
+// wiring itself: jobs.DeployedSchedulesFromEnv must report exactly the same
+// Enabled/IntervalSeconds values EffectiveJobSchedules computes for the same
+// cfg, because it now gets them by calling EffectiveJobSchedules rather than
+// effectiveJobConfig directly (see deployed_schedule.go). A regression here
+// (someone reverting to the direct per-job call) would silently drop the
+// ScheduleConfig cross-check this slice added without failing any other test,
+// since RegisteredPeriodicJobSpecs() is self-consistent and never actually
+// triggers that cross-check today.
+func TestDeployedSchedulesFromEnvGoesThroughEffectiveJobSchedules(t *testing.T) {
+	overrides := map[string]string{
+		"XM_SUB2API_SYNC_ENABLED": "false",
+		"XM_RETENTION_INTERVAL":   "45m",
+	}
+	deployed, err := DeployedSchedulesFromEnv(envMap(overrides))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Sub2APISyncEnabled = false
+	cfg.RetentionInterval = 45 * time.Minute
+	rows, err := EffectiveJobSchedules(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, row := range rows {
+		got, ok := deployed[row.ID]
+		if !ok {
+			t.Fatalf("DeployedSchedulesFromEnv missing entry for %q", row.ID)
+		}
+		if got.Enabled != row.Enabled {
+			t.Errorf("%s: DeployedSchedulesFromEnv.Enabled = %v, EffectiveJobSchedules.Enabled = %v", row.ID, got.Enabled, row.Enabled)
+		}
+		if got.IntervalSeconds != row.IntervalSeconds {
+			t.Errorf("%s: DeployedSchedulesFromEnv.IntervalSeconds = %d, EffectiveJobSchedules.IntervalSeconds = %d", row.ID, got.IntervalSeconds, row.IntervalSeconds)
+		}
+	}
+}
+
 func deepCopyJSONMap(src map[string]any) map[string]any {
 	raw, _ := json.Marshal(src)
 	var dst map[string]any

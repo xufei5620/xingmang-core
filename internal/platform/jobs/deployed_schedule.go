@@ -25,6 +25,15 @@ import (
 // 刻意只读 Enabled / Interval / RunOnStart 三类字段：凭据、端点、白名单、
 // 请求超时、实例 ID 等字段与"这个任务是否注册"无关，httpaph 没有理由
 // 解析它们（最小权限：能不读的秘密相关配置就不读）。
+//
+// XM-OPS-TAILS1：per-job 的 enabled/interval 解析现在经由
+// EffectiveJobSchedules（effective_manifest.go）——也就是 BuildEffectiveManifest
+// 给 R210 信号化车队清单用的那同一段已校验核心，只是跳过了车队身份字段
+// （见 EffectiveJobSchedules 的文档注释：本仓库里从没有任何进程真正设置过
+// WorkerClusterID/RiverSchema，编一个假值只为了满足校验，本身就是宪法反对的
+// 那种伪造事实）。以前这里直接调 effectiveJobConfig，跳过了「注册目录里的
+// ScheduleConfig 是否与解析规则一致」这层交叉校验；现在两条路径共用同一段
+// 校验代码，不会再各自维护一份可能悄悄分叉的判断。
 
 // DeployedJobSchedule 是某个周期任务从部署环境变量解析出的"应然"调度。
 type DeployedJobSchedule struct {
@@ -142,16 +151,23 @@ func DeployedSchedulesFromEnv(getenv func(string) string) (map[string]DeployedJo
 		CPASyncJobKind:        "XM_CPA_MODE=file (or XM_CPA_SYNC_ENABLED override)",
 	}
 
-	out := make(map[string]DeployedJobSchedule, len(RegisteredPeriodicJobSpecs()))
-	for _, spec := range RegisteredPeriodicJobSpecs() {
-		enabled, _, interval, _, err := effectiveJobConfig(cfg, spec.ID)
-		if err != nil {
-			return nil, fmt.Errorf("deployed schedule: %q: %w", spec.ID, err)
-		}
-		out[spec.ID] = DeployedJobSchedule{
-			Enabled:         enabled,
-			IntervalSeconds: int64(interval / time.Second),
-			EnabledSource:   sources[spec.ID],
+	// EffectiveJobSchedules (effective_manifest.go) is the same validated
+	// per-job core BuildEffectiveManifest uses for the not-yet-wired R210
+	// fleet manifest — it additionally cross-checks that each registered
+	// job's declared ScheduleConfig source still matches what this package's
+	// switch statement (effectiveJobConfig) expects for that job ID, which a
+	// direct per-job call here previously did not. It needs no fleet
+	// identity (see EffectiveJobSchedules' doc comment).
+	effective, err := EffectiveJobSchedules(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("deployed schedule: %w", err)
+	}
+	out := make(map[string]DeployedJobSchedule, len(effective))
+	for _, row := range effective {
+		out[row.ID] = DeployedJobSchedule{
+			Enabled:         row.Enabled,
+			IntervalSeconds: row.IntervalSeconds,
+			EnabledSource:   sources[row.ID],
 		}
 	}
 	return out, nil

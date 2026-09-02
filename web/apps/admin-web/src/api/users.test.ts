@@ -37,6 +37,58 @@ describe("用户详情扩展只读查询", () => {
     );
     expect(JSON.stringify((client.get as ReturnType<typeof vi.fn>).mock.calls[0])).not.toMatch(/secret|plaintext|complete.?key/i);
   });
+
+  it("每日消费：XM_PLATFORM_USERS_MODE=off 时的 404（没有 error.code）转成 FeatureNotMountedError", async () => {
+    const notMounted: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformUserDailyUsage("sub2api", "u_10241", {}, notMounted).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+    expect((error as FeatureNotMountedError).description).toContain("XM_PLATFORM_USERS_MODE=off");
+  });
+
+  it("每日消费：具体用户没有记录的结构化 404（带 error.code）原样抛出，不被误判成未接入", async () => {
+    const notFound: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "ACTION_NOT_REGISTERED", "没有这条用户记录")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformUserDailyUsage("sub2api", "u_10241", {}, notFound).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(FeatureNotMountedError);
+  });
+
+  it("Key 元数据：XM_PLATFORM_USERS_MODE=off 时的 404（没有 error.code）转成 FeatureNotMountedError", async () => {
+    const notMounted: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "UNKNOWN", "请求失败（HTTP 404）")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformUserKeys("sub2api", "u_10241", {}, notMounted).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(FeatureNotMountedError);
+    expect((error as FeatureNotMountedError).description).toContain("XM_PLATFORM_USERS_MODE=off");
+  });
+
+  it("Key 元数据：具体用户没有记录的结构化 404（带 error.code）原样抛出，不被误判成未接入", async () => {
+    const notFound: ApiClient = {
+      get: vi.fn().mockRejectedValue(new ApiError(404, "ACTION_NOT_REGISTERED", "没有这条用户记录")),
+      post: vi.fn(),
+    };
+    const error = await listPlatformUserKeys("sub2api", "u_10241", {}, notFound).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(FeatureNotMountedError);
+  });
 });
 
 describe("不透明用户 ID 的 URL 路径段 codec", () => {
