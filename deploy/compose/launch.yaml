@@ -217,6 +217,31 @@ services:
       # 只对已经/将要被要求启用 TOTP 的账号（管理员）生效；留空即维持今天的行为
       # （不限制来源）。启用前请先读 docs/modules/httpapi/AUTH-SWITCH.md §11.7。
       XM_CONSOLE_ADMIN_IP_ALLOWLIST: ${XM_CONSOLE_ADMIN_IP_ALLOWLIST:-}
+      # --- 开票管理员断言签发（CR-0006/XM-INVCON1）：默认关闭，只装能力不激活 --
+      # 启用前置条件：XM_AUTH_MODE=local（断言依赖本地登录的 TOTP 新鲜度
+      # mfa_at，oidc/dev-header 两种身份解析器都不填充它）。启用后还需要：
+      # ① 用 cmd/console-assertion-keygen 生成一把 Ed25519 密钥，把私钥经
+      #    credential.secret.upsert 存到 XM_INVOICE_CONSOLE_ASSERTION_KEY_REF
+      #    指向的引用（形如 secret://console-assertion/signing-key-<key_id>）；
+      # ② 把同一次生成的公钥清单条目提交进本仓库与开票仓库各自的
+      #    contracts/auth/console-assertion-keyring.v1.json（两边必须一致）；
+      # ③ 与开票侧核对 CONSOLE_ASSERTION_ISSUER/CONSOLE_ASSERTION_AUDIENCE 取值
+      #    逐字相同——断言的 iss/aud 是两侧各自独立配置的，不是同一个值自动
+      #    同步。详见 docs/handoffs/slices/XM-INVCON1.md「生产上线步骤」。
+      XM_INVOICE_CONSOLE_ASSERTION_ENABLED: ${XM_INVOICE_CONSOLE_ASSERTION_ENABLED:-false}
+      # 精确 https 来源（不带路径/查询/片段），即断言的 iss claim，也应等于
+      # 开票侧 CONSOLE_ASSERTION_ISSUER 与要求的 Origin 头。
+      XM_INVOICE_CONSOLE_ASSERTION_ISSUER: ${XM_INVOICE_CONSOLE_ASSERTION_ISSUER:-}
+      # 留空即用内置默认值 xingmang-console-assertion-v1，与开票侧
+      # CONSOLE_ASSERTION_AUDIENCE 的默认值一致，通常不需要改。
+      XM_INVOICE_CONSOLE_ASSERTION_AUDIENCE: ${XM_INVOICE_CONSOLE_ASSERTION_AUDIENCE:-}
+      # 签名私钥的 CredentialRef，形如
+      # secret://console-assertion/signing-key-2026-09——key_id（示例里的
+      # "2026-09"）同时也是 JWS 的 kid，两者永远一致，不需要另配一个 kid 变量。
+      XM_INVOICE_CONSOLE_ASSERTION_KEY_REF: ${XM_INVOICE_CONSOLE_ASSERTION_KEY_REF:-}
+      # 断言签发前要求 mfa_at 在此时长内（步进新鲜度）；留空用默认 10 分钟，
+      # 与开票侧 AdminPolicy.StepUpMaxAge 现有默认值一致。
+      XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE: ${XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE:-}
       XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
       # 用户清单模式（XM-0046）：off / fake / real。留空沿用进程默认 fake；
       # 生产应显式 off——real 客户端未交付前，fake 客户不得出现在生产页面。
