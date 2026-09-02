@@ -223,6 +223,29 @@ const auditEvent = {
  *
  *  刻意配成这两条：前者是「已触发但没人被通知到」，后者是「静默不是解决」——
  *  两个最容易在界面上被显示错的状态。 */
+/** 后台任务概览（XM-JOBS0 / XM-OPS-TAILS0，GET /api/v1/jobs/overview）。
+ *  只挂一个 schedule 条目——这里只是验证路由真的挂了 JobsPage，不是
+ *  JobsPage.test.tsx 那种逐字段覆盖。 */
+const jobsOverviewBody = {
+  environment: "development",
+  generated_at: "2026-08-31T10:00:00Z",
+  schedules: [
+    {
+      id: "platform_heartbeat", kind: "platform_heartbeat", queue: "maintenance",
+      schedule_config_env: "HEARTBEAT_INTERVAL", side_effect_class: "audit_append",
+      last_run: null, observed_interval_seconds: null, next_run_estimated_at: null,
+      activity: "never_observed",
+      configured_enabled: null, configured_interval_seconds: null, configured_source: null,
+      configured_mode: null, configured_mode_source: null,
+    },
+  ],
+  queue_backlog: [
+    { queue: "default", available: 0, running: 0, retryable: 0, scheduled: 0, completed_24h: 0, discarded: 0 },
+    { queue: "maintenance", available: 0, running: 0, retryable: 0, scheduled: 0, completed_24h: 0, discarded: 0 },
+  ],
+  worker_heartbeat: { last_seen_at: null, seconds_ago: null, state: "", environment: "platform", known: false },
+};
+
 const alertsBody = {
   items: [
     {
@@ -504,6 +527,10 @@ function okHandler(url: string): Response {
       },
     });
   }
+  // 后台任务：runs 必须排在 overview 前面判断吗？不必——两条路径互不是
+  // 彼此前缀（/jobs/overview 与 /jobs/runs），谁在前都不影响匹配。
+  if (url.startsWith("/api/v1/jobs/overview")) return fakeResponse(200, jobsOverviewBody);
+  if (url.startsWith("/api/v1/jobs/runs")) return fakeResponse(200, { items: [], next_before: 0 });
   if (url.startsWith("/api/v1/alerts")) return fakeResponse(200, alertsBody);
   if (url.startsWith("/api/v1/audit/events"))
     return fakeResponse(200, { items: [auditEvent], next_before: 0 });
@@ -2297,5 +2324,34 @@ describe("创建静默窗口（写路径）", () => {
     expect(JSON.parse(String(post[1].body))).toEqual({
       params: { rule_key: "", duration_minutes: 60, reason: "上游 Sub2API 维护窗口" },
     });
+  });
+});
+
+describe("后台任务路由挂载（XM-OPS-TAILS0：回归修复）", () => {
+  // navigation.ts 早把 jobs 标 built:true（navigation.test.ts 断言"后台任务
+  // 已实装"），JobsPage.tsx/JobsPage.test.tsx 也一直都在——但这张路由表
+  // 里独独少了 `{ path: "jobs", Component: JobsPage }` 这一行，侧栏「后台
+  // 任务」点进去落到最后的 `*` 兜底 NotFoundPage。两边测试各自绿掉是因为
+  // JobsPage.test.tsx 直接渲染组件、不经真实路由，这里之前没有一条用例
+  // 真的导航到 /jobs 去验证。本用例锁定"路由表真的挂了 JobsPage"这件事,
+  // 不重复 JobsPage.test.tsx 已经覆盖的字段级断言。
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("/jobs 渲染真实的后台任务页，不是兜底 404", async () => {
+    renderRoute("/jobs");
+    expect(await screen.findByRole("heading", { name: "后台任务", level: 2 })).not.toBeNull();
+    // NotFoundPage 的兜底文案是"页面不存在"／"没有这个地址"；确认没有落到那条分支。
+    expect(screen.queryByText("页面不存在")).toBeNull();
+    expect(screen.queryByText(/没有这个地址/)).toBeNull();
+  });
+
+  it("/jobs?sub=scheduled 渲染「定时任务」页签内容", async () => {
+    renderRoute("/jobs?sub=scheduled");
+    expect(await screen.findByRole("tab", { name: "定时任务", selected: true })).not.toBeNull();
+    expect(await screen.findByText("平台心跳")).not.toBeNull();
   });
 });

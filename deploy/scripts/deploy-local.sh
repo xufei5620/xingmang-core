@@ -8,6 +8,14 @@
 #
 # 它与服务器上的 deploy.sh 有意分开：本地没有生产晋级、服务器 bare repo
 # 或生产审计闸门，但仍然拒绝跨项目、跨环境和脏工作树操作。
+#
+# 本脚本的烟测只确认三个端点能拿到 200——不核实 Sub2API/NewAPI 各自
+# 处于 real 还是 fake（那需要读 core.connector_config，与这里的
+# dev-header 冒烟身份是不同的鉴权面，见 scripts/verify-real-mode.sh 顶部
+# 注释）。部署完成后如果要确认「哪个平台现在真的在用真实上游」，另外手动跑：
+#   scripts/verify-real-mode.sh --mode real --platform sub2api,newapi
+# 该脚本会额外校验 GET /api/v1/connectors/config 与 Worker 日志两者是否
+# 与期望模式一致（XM-OPS-TAILS0）。
 set -Eeuo pipefail
 umask 077
 

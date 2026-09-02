@@ -54,7 +54,13 @@ export interface JobRunItem {
  *
  *  **没有 enabled 字段**：platform-api 进程读不到 platform-worker 手上的
  *  运行时配置，任何「已启用/已停用」的断言都会是装出来的事实。activity
- *  只描述「river_job 里看到了什么」，不是配置真相。 */
+ *  只描述「river_job 里看到了什么」，不是配置真相。
+ *
+ *  XM-OPS-TAILS0 加了 configured_* / configured_mode*：这些**不是**上面这句
+ *  话的反悔——它们是 httpapi 进程按与 worker 相同的规则解析同一份部署
+ *  环境变量 / 读 core.connector_config 得到的"部署声明"，不是 worker 进程
+ *  的实时确认（两者在正常部署下应当一致，但这不是同一句话，前端渲染时
+ *  用词必须体现这个区别，见 ScheduledTab 的说明文案）。 */
 export interface JobScheduleStatus {
   id: string;
   kind: string;
@@ -67,6 +73,20 @@ export interface JobScheduleStatus {
   observed_interval_seconds: number | null;
   next_run_estimated_at: string | null;
   activity: "activity_observed" | "no_recent_activity" | "never_observed";
+  /** 部署环境变量声明的启用状态；null = 本次装配没有接这份数据源。 */
+  configured_enabled: boolean | null;
+  /** 部署环境变量声明的周期（秒）；null 同上。 */
+  configured_interval_seconds: number | null;
+  /** 决定 configured_enabled 的环境变量名（heartbeat 恒为 "always"）；
+   *  null 同上。 */
+  configured_source: string | null;
+  /** 只有 sub2api_sync / newapi_sync 非 null——real/fake 是
+   *  core.connector_config 的 platform 维度，其余任务没有这个概念。 */
+  configured_mode: "real" | "fake" | null;
+  /** "database"（库里确有配置行）/ "default"（没配过，按 fake 兜底）/
+   *  "unavailable"（读库失败，此时 configured_mode 也是 null）。任务本身
+   *  没有模式维度时（非 sub2api_sync/newapi_sync）也是 null。 */
+  configured_mode_source: "database" | "default" | "unavailable" | null;
 }
 
 /** 一个队列的积压快照（httpapi jobQueueBacklogBody）。
@@ -180,6 +200,11 @@ const JOB_KIND_LABELS: Readonly<Record<string, string>> = {
   retention_prune: "保留期清理",
   alert_evaluate: "告警评估",
   audit_archive_manual: "审计归档（手动触发）",
+  // XM-OPS-TAILS0：补三个已注册但此前没有中文名的周期任务（此前只是回落
+  // 显示原始 kind，功能上不算错，但列表里混着中英文不好认）。
+  reqlog_metrics: "请求量指标聚合",
+  connector_probe: "连接器健康探测",
+  cpa_sync: "CPA 用量同步",
 };
 
 /** 把 job kind 翻成中文名；未知 kind 原样返回。 */

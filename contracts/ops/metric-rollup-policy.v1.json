@@ -12,22 +12,12 @@
       "reason": "invoice contract is not frozen"
     },
     {
-      "metric_key": "sub2api.requests.daily",
-      "gate": "XM-REQLOG-METRICS",
-      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
-    },
-    {
       "metric_key": "sub2api.requests.success_rate_24h",
       "gate": "XM-REQLOG-METRICS",
       "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
     },
     {
       "metric_key": "sub2api.requests.trend_7d",
-      "gate": "XM-REQLOG-METRICS",
-      "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
-    },
-    {
-      "metric_key": "newapi.requests.daily",
       "gate": "XM-REQLOG-METRICS",
       "reason": "requests metrics rollup policy not yet designed (windowed/multi-day shapes in the same family)"
     },
@@ -151,6 +141,22 @@
     },
     {
       "policy_version": 1,
+      "metric_key": "newapi.requests.daily",
+      "value_kind": "daily_snapshot",
+      "primary_kind": "count",
+      "primary_json_pointer": "/request_count",
+      "currency_json_pointer": "",
+      "business_day_json_pointer": "",
+      "unit": "requests",
+      "scale": 1,
+      "sum_mode": "forbidden",
+      "bucket_timezone": "UTC",
+      "expected_interval_seconds": null,
+      "full_value_required": true,
+      "partial_value_allowed": true
+    },
+    {
+      "policy_version": 1,
       "metric_key": "newapi.subscription.daily",
       "value_kind": "daily_snapshot",
       "primary_kind": "money_minor",
@@ -240,6 +246,22 @@
       "currency_json_pointer": "/currency",
       "business_day_json_pointer": "",
       "unit": "minor_units",
+      "scale": 1,
+      "sum_mode": "forbidden",
+      "bucket_timezone": "UTC",
+      "expected_interval_seconds": null,
+      "full_value_required": true,
+      "partial_value_allowed": true
+    },
+    {
+      "policy_version": 1,
+      "metric_key": "sub2api.requests.daily",
+      "value_kind": "daily_snapshot",
+      "primary_kind": "count",
+      "primary_json_pointer": "/request_count",
+      "currency_json_pointer": "",
+      "business_day_json_pointer": "",
+      "unit": "requests",
       "scale": 1,
       "sum_mode": "forbidden",
       "bucket_timezone": "UTC",

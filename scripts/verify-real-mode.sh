@@ -187,7 +187,10 @@ fi
 
 curl_common=(--noproxy '*' -sS --connect-timeout 5 --max-time 15)
 if [ "$environment" != production ] || [ "$test_mode" -eq 1 ]; then
-  curl_common+=(-H 'X-Dev-Principal-ID: dev-operator' -H 'X-Dev-Principal-Type: HUMAN' -H 'X-Dev-Scopes: ops.read,registry.read,finance.read,platform.users.read')
+  # connector.manage 是 GET /api/v1/connectors/config 的读权限（XM-CRED0：
+  # 与写 Action connector.config.set@1 同一个 scope，见 router.go 的注释——
+  # 能看出「哪条通道还是 fake」本身就是敏感信息，不下放到 ops.read）。
+  curl_common+=(-H 'X-Dev-Principal-ID: dev-operator' -H 'X-Dev-Principal-Type: HUMAN' -H 'X-Dev-Scopes: ops.read,registry.read,finance.read,platform.users.read,connector.manage')
 fi
 probe() {
   local name="$1" path="$2" out="$tmp/$1.json" code attempt
@@ -203,13 +206,18 @@ readyz="$(probe readyz /readyz)"
 services="$(probe services /api/v1/services)"
 metrics="$(probe metrics /api/v1/metrics)"
 alerts="$(probe alerts /api/v1/alerts)"
+# core.connector_config 是 XM-CRED0 的接入模式来源，worker 每轮动态读取,
+# 切换不重启容器——所以它是判定「平台当前实际在哪个模式」唯一权威的地方。
+# 旧版本本脚本只信 Worker 启动日志里的 {platform}_mode 字段（进程起来那一刻
+# 的快照），后台切换模式后不重启容器就检测不出来。
+connectors_config="$(probe connectors_config /api/v1/connectors/config)"
 compose logs --no-color --since "$worker_started_at" "$worker_service" >"$tmp/worker.log" 2>"$tmp/docker-logs.err" || die "无法读取 Worker 日志"
 [ -s "$tmp/worker.log" ] || die "Worker 日志为空"
 
 VERIFY_ENVIRONMENT="$environment" VERIFY_MODE="$mode" VERIFY_PLATFORMS="$platform_list" \
-  "$python_bin" - "$tmp/metrics.json" "$tmp/worker.log" <<'PY'
+  "$python_bin" - "$tmp/metrics.json" "$tmp/worker.log" "$tmp/connectors_config.json" <<'PY'
 import json, os, sys
-metrics_path, worker_path = sys.argv[1:3]
+metrics_path, worker_path, connectors_config_path = sys.argv[1:4]
 environment = os.environ["VERIFY_ENVIRONMENT"]
 requested_mode = os.environ["VERIFY_MODE"]
 platforms = os.environ["VERIFY_PLATFORMS"].split()
@@ -250,6 +258,36 @@ for row in worker_lines:
 missing_starts = [p for p in platforms if p not in starts]
 if missing_starts:
     fail("worker mode/source mismatch: " + ",".join(missing_starts))
+
+# core.connector_config 校验：这是本轮真正生效的模式来源（XM-CRED0，worker
+# 每轮读取、切换不重启），与上面 worker 启动日志的快照是两件事——一次热切换
+# 之后启动日志不会变，只有这张表会变。GET /connectors/config 只返回**存在**
+# 的行；没有行的平台按 credentials.Store.ListConnectorConfigs 的既定口径
+# 视为 fake（"没在后台配过"是正常状态，不是错误）。
+try:
+    with open(connectors_config_path, encoding="utf-8") as stream:
+        connector_config_doc = json.load(stream)
+except (OSError, json.JSONDecodeError):
+    fail("connector config response invalid")
+connector_config_items = connector_config_doc.get("items")
+if not isinstance(connector_config_items, list):
+    fail("connector config response invalid")
+db_mode_by_platform = {}
+for row in connector_config_items:
+    if not isinstance(row, dict):
+        continue
+    platform, row_mode = row.get("platform"), row.get("mode")
+    if platform in ("sub2api", "newapi") and row_mode in ("fake", "real"):
+        db_mode_by_platform[platform] = row_mode
+db_mode_mismatch = []
+for platform in platforms:
+    actual = db_mode_by_platform.get(platform, "fake")
+    if actual != worker_mode:
+        db_mode_mismatch.append(f"{platform}={actual}")
+if db_mode_mismatch:
+    fail(f"core.connector_config mode mismatch (expected {worker_mode}): " + ",".join(db_mode_mismatch))
+connector_config_summary = ",".join(f"{p}:{db_mode_by_platform.get(p, 'fake')}" for p in platforms)
+
 if requested_mode == "real":
     demo = [p for p, source in starts.items() if source.endswith("-staging")]
     if demo:
@@ -295,7 +333,11 @@ for platform in platforms:
             fail(f"metric observed_at missing: {key}")
         if freshness.get("last_error_code") not in ("", None):
             fail(f"metric last_error_code present: {key}")
-print(f"verified_platforms={','.join(platforms)} metrics_checked={sum(len(required_suffixes[p]) for p in platforms)}")
+print(f"verified_platforms={','.join(platforms)} metrics_checked={sum(len(required_suffixes[p]) for p in platforms)} connector_config_mode={connector_config_summary}")
 PY
 
-echo "VERIFY REAL MODE PASS: environment=$environment mode=$mode healthz=$healthz readyz=$readyz smoke=services:$services,metrics:$metrics,alerts:$alerts finance.rows_written=deferred worker=running"
+# connector_config_mode 是本轮从 core.connector_config 读到、并已通过上面
+# db_mode_mismatch 校验的逐平台真实模式；Python 已经把它打在上面那一行,
+# 这里不重复解析同一份 JSON，只是把这句话说清楚：**这一行不是回显 --mode
+# 参数**，是脚本独立核实过的结论。
+echo "VERIFY REAL MODE PASS: environment=$environment mode=$mode healthz=$healthz readyz=$readyz smoke=services:$services,metrics:$metrics,alerts:$alerts,connectors_config:$connectors_config finance.rows_written=deferred worker=running"

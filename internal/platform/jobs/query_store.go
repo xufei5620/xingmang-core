@@ -161,6 +161,40 @@ type ScheduleStatus struct {
 	// 同样是估计值，不是 River 调度器的真值。
 	NextRunEstimatedAt *time.Time
 	Activity           ScheduleActivity
+
+	// --- XM-OPS-TAILS0：部署配置读数，补 XM-JOBS0 留的两处诚实缺口 ---
+	//
+	// 两组字段都可能为 nil/空——QueryStore 在没有接上对应依赖
+	// （WithDeployedSchedules / WithConnectorConfigSource）时保持旧行为，
+	// 不假装有数据。
+
+	// Configured 是从 httpapi 进程自己的环境变量解析出的"部署声明"调度
+	// （DeployedSchedulesFromEnv）。nil 表示 QueryStore 没有接这份数据源
+	// （测试或未升级的装配路径），不是"未配置"。
+	//
+	// ⚠️ 这不是"worker 进程确认"：httpapi 与 worker 是两个进程，读不到
+	// 对方内存里的 Config（同 XM-JOBS0 的既有诚实声明）。它是"httpapi 按
+	// 与 worker 相同的规则解析同一份部署环境变量得到的结论"——两个进程在
+	// 正常部署下共享同一份 .env / compose 环境变量，通常一致，但这不是
+	// 一个可以替代"worker 真的在跑"这句话的证据。
+	Configured *DeployedJobSchedule
+
+	// ConfiguredMode 只对 sub2api_sync / newapi_sync 有意义（platform 概念
+	// 来自 core.connector_config 的 CHECK 约束，只认 sub2api/newapi）；
+	// 其它任务恒为 nil，代表"该任务没有 real/fake 这个维度"，不是"未知"。
+	ConfiguredMode *ConfiguredModeStatus
+}
+
+// ConfiguredModeStatus 是某个平台在 core.connector_config 里的当前生效模式。
+type ConfiguredModeStatus struct {
+	// Mode 是 "real" 或 "fake"。库里没有这一行时按 credentials.Store.
+	// ListConnectorConfigs 的既定口径视为 "fake"（"没在后台配过"是正常
+	// 状态，Source 会标成 "default"，不是错误）。
+	Mode string
+	// Source: "database" 表示库里确实有这一行；"default" 表示没有配过、
+	// 按 fake 兜底；"unavailable" 表示读库失败（QueryStore 不会因此让整个
+	// Overview 报错，只在这一格如实说"读不到"）。
+	Source string
 }
 
 // QueueBacklogRow 是一个队列的积压快照。Completed24h 只统计最近 24 小时——
@@ -230,11 +264,53 @@ const (
 // 因为它从不插入或修改任何任务，只读 river_job / river_queue。
 type QueryStore struct {
 	pool *pgxpool.Pool
+
+	// deployedSchedules / connectorConfig 都是 XM-OPS-TAILS0 新增的可选
+	// 依赖，零值（nil）时 Overview() 完全不填 Configured* 字段——旧的装配
+	// 路径（比如现有测试直接 NewQueryStore(pool)）行为不变。
+	deployedSchedules map[string]DeployedJobSchedule
+	connectorConfig   ConnectorConfigSource
 }
 
-// NewQueryStore 创建仓储。
-func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
-	return &QueryStore{pool: pool}
+// QueryStoreOption 配置 QueryStore 的可选依赖。
+type QueryStoreOption func(*QueryStore)
+
+// WithDeployedSchedules 接上 DeployedSchedulesFromEnv 的结果，让 Overview()
+// 在每个 schedule 目录项上补 Configured 字段。
+func WithDeployedSchedules(schedules map[string]DeployedJobSchedule) QueryStoreOption {
+	return func(s *QueryStore) { s.deployedSchedules = schedules }
+}
+
+// WithConnectorConfigSource 接上 core.connector_config 的读源（通常是
+// NewPgConnectorConfigSource(pool)，带 30s 缓存），让 Overview() 在
+// sub2api_sync / newapi_sync 两个 schedule 目录项上补 ConfiguredMode。
+func WithConnectorConfigSource(source ConnectorConfigSource) QueryStoreOption {
+	return func(s *QueryStore) { s.connectorConfig = source }
+}
+
+// NewQueryStore 创建仓储。opts 均可省略；不传时 Overview() 的
+// Configured/ConfiguredMode 字段保持 nil（见两个字段各自的注释）。
+func NewQueryStore(pool *pgxpool.Pool, opts ...QueryStoreOption) *QueryStore {
+	s := &QueryStore{pool: pool}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// scheduleConfiguredMode 把 spec.Kind 映射到 core.connector_config 的
+// platform 列。只有 sub2api_sync / newapi_sync 有对应平台——这与该表的
+// CHECK 约束（platform IN ('sub2api','newapi')）逐字一致，不是本层新发明
+// 的裁量。
+func scheduleConfiguredModePlatform(kind string) (platform string, applicable bool) {
+	switch kind {
+	case Sub2APISyncJobKind:
+		return ConnectorPlatformSub2API, true
+	case NewAPISyncJobKind:
+		return ConnectorPlatformNewAPI, true
+	default:
+		return "", false
+	}
 }
 
 // scheduleActivityWindow 决定「多久没露面算失联」。取观测周期的 3 倍、
@@ -296,6 +372,19 @@ func (s *QueryStore) Overview(ctx context.Context, environment string) (Overview
 				status.Activity = ScheduleActivityStale
 			}
 		}
+
+		if s.deployedSchedules != nil {
+			if configured, ok := s.deployedSchedules[spec.ID]; ok {
+				c := configured
+				status.Configured = &c
+			}
+		}
+		if s.connectorConfig != nil {
+			if platform, applicable := scheduleConfiguredModePlatform(spec.Kind); applicable {
+				status.ConfiguredMode = s.configuredModeFor(ctx, platform, environment)
+			}
+		}
+
 		schedules = append(schedules, status)
 
 		if spec.Kind == HeartbeatJobKind && status.LastRun != nil {
@@ -320,6 +409,27 @@ func (s *QueryStore) Overview(ctx context.Context, environment string) (Overview
 		Environment: environment, GeneratedAt: now,
 		Schedules: schedules, QueueBacklog: backlog, WorkerHeartbeat: heartbeat,
 	}, nil
+}
+
+// configuredModeFor 读一次 core.connector_config（经 s.connectorConfig，
+// 通常带 30s 缓存，见 NewPgConnectorConfigSource）。读库失败**不让整个
+// Overview() 报错**——这是一个附加在已有目录项上的补充事实，不是
+// 主查询；失败时如实标 "unavailable"，其余格子照常返回。
+func (s *QueryStore) configuredModeFor(ctx context.Context, platform, environment string) *ConfiguredModeStatus {
+	row, err := s.connectorConfig.Get(ctx, platform, environment)
+	if err != nil {
+		return &ConfiguredModeStatus{Source: "unavailable"}
+	}
+	if row == nil {
+		// 没有这一行 = 没在后台配过，按既定口径视为 fake
+		// （credentials.Store.ListConnectorConfigs 的同一条注释；
+		// core.connector_config.mode 的 CHECK 约束只接受 'fake'/'real'
+		// 两个裸字符串，这里直接用字面量而不是借用某个平台专属的
+		// Sub2APIMode/NewAPIMode 类型常量——那两个是给客户端工厂用的
+		// 类型化枚举，不是这张表的字面量）。
+		return &ConfiguredModeStatus{Mode: "fake", Source: "default"}
+	}
+	return &ConfiguredModeStatus{Mode: row.Mode, Source: "database"}
 }
 
 const recentRunsByKindSQL = `

@@ -55,16 +55,32 @@ CHECK ((status = 'failed') = (last_error_code <> ''))
 `currency_set`。`ops.metric_rollup_receipt` 与 `ops.metric_rollup_state` 只提供
 DS1 schema 基座，逐样本 exactly-once/受限 ACL 属后续 DS2/DBR 片。
 
-策略文件是 `contracts/ops/metric-rollup-policy.v1.json`。当前 registry 实测 22
-项：14 项 active policy，8 项显式 exclusion（`invoice.requests.daily` 与
-`invoice.amount.daily` 以 CR-0002 gate 保留，未冻结前不会生成或聚合 invoice
-policy；`sub2api.requests.*` 与 `newapi.requests.*` 六项以 XM-REQLOG-METRICS
-gate 保留——`success_rate_24h` 是滚动 24h 窗口而非按业务日切分的快照，
-`trend_7d` 把 7 个日桶打包进一条观测的数组里，两者都不符合现有 ValueKind
-「一条样本对应一个标量、可选一个业务日」的形状假设；`*.requests.daily`
-本身是标准的 daily_snapshot，是未来激活 policy 的候选，但为免在时间盒内
-仓促设计半成品语义，本次随同族其余两项一并 exclusion，见
-`docs/handoffs/slices/XM-REQLOG-METRICS.md`）。
+策略文件是 `contracts/ops/metric-rollup-policy.v1.json`。当前 registry 实测 32
+项（本文档此前记的「22 项」已过期于其他切片新增的 policy，XM-OPS-TAILS0
+顺带修正）：24 项 active policy，8 项显式 exclusion（`invoice.requests.daily`
+与 `invoice.amount.daily` 以 CR-0002 gate 保留，未冻结前不会生成或聚合
+invoice policy；`sub2api.payments.daily`/`newapi.payments.daily` 以
+ROLLUP-MULTI-BUCKET gate 保留——`by_status` 是多个金额桶，v1 policy schema
+每条指标只支持一个 `primary_json_pointer`；`sub2api.requests.success_rate_24h`/
+`trend_7d` 与 NewAPI 同名两项以 XM-REQLOG-METRICS gate 保留——
+`success_rate_24h` 是滚动 24h 窗口而非按业务日切分的快照，`trend_7d` 把 7
+个日桶打包进一条观测的数组里，两者都不符合现有 ValueKind「一条样本对应
+一个标量、可选一个业务日」的形状假设，激活需要先给 RollupPolicy 引入新
+ValueKind，是独立设计任务）。`sub2api.requests.daily`/`newapi.requests.daily`
+本身是标准的 daily_snapshot（与 `newapi.models.usage`/`cpa.requests.daily`
+同一形状），XM-OPS-TAILS0 已激活为 active policy（`primary_json_pointer=
+/request_count`，`business_day_json_pointer` 留空——与仓库里全部其余
+daily_snapshot policy 一致，该字段目前没有任何消费方在读）；此前随同族
+其余两项一并 exclusion 的历史见 `docs/handoffs/slices/XM-REQLOG-METRICS.md`。
+⚠️ 激活只保证 policy-coverage 完整性校验通过，`ops/rollup_metadata.go` 的
+`annotateRollupMetadata` 早已给全部样本（含被排除的指标）无条件盖上当前
+`RollupPolicyVersion`——**没有任何进程读取 `LoadRollupPolicies`
+的返回值来生产 `ops.metric_observation_daily` 的日粒度行**（全仓库 grep
+确认，`contracts/ops/metric-rollup-policy.v1.json` 只有测试在读），所以这次
+激活目前只是把契约声明补齐、供未来的降采样引擎直接复用设计，不会让这两条
+指标立刻多出日粒度聚合结果；运营工作台/概览页展示的「今日调用量」等卡片
+读的是 `/api/v1/metrics` 的原始观测，与 rollup policy 是否 active 无关，
+早在 XM-OVERVIEW-UI（Sub2API 侧）就已经接了真实数据，见下一节。
 
 ## 请求量/成功率指标（XM-REQLOG-METRICS）
 

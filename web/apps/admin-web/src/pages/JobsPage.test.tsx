@@ -26,6 +26,11 @@ const emptyOverviewBody = {
       observed_interval_seconds: null,
       next_run_estimated_at: null,
       activity: "never_observed",
+      configured_enabled: null,
+      configured_interval_seconds: null,
+      configured_source: null,
+      configured_mode: null,
+      configured_mode_source: null,
     },
   ],
   queue_backlog: [
@@ -64,6 +69,11 @@ const populatedOverviewBody = {
       observed_interval_seconds: 60,
       next_run_estimated_at: "2026-08-31T10:00:30Z",
       activity: "activity_observed",
+      configured_enabled: true,
+      configured_interval_seconds: 60,
+      configured_source: "always",
+      configured_mode: null,
+      configured_mode_source: null,
     },
     {
       id: "finance_cost_sync",
@@ -75,6 +85,30 @@ const populatedOverviewBody = {
       observed_interval_seconds: null,
       next_run_estimated_at: null,
       activity: "never_observed",
+      configured_enabled: false,
+      configured_interval_seconds: 300,
+      configured_source: "XM_FINANCE_COLLECT_ENABLED",
+      configured_mode: null,
+      configured_mode_source: null,
+    },
+    {
+      id: "sub2api_sync",
+      kind: "sub2api_sync",
+      queue: "maintenance",
+      schedule_config_env: "XM_SUB2API_SYNC_INTERVAL",
+      side_effect_class: "upstream_read_then_db_transaction",
+      last_run: null,
+      observed_interval_seconds: null,
+      next_run_estimated_at: null,
+      // 故意与另外两个 fixture 条目的 activity 取值不同（never_observed /
+      // activity_observed 都已被那两条各自独占断言），避免 getByText 在
+      // "定时任务页签"既有测试里因为多一行同值而从唯一匹配变成多重匹配。
+      activity: "no_recent_activity",
+      configured_enabled: true,
+      configured_interval_seconds: 300,
+      configured_source: "XM_SUB2API_SYNC_ENABLED",
+      configured_mode: "real",
+      configured_mode_source: "database",
     },
   ],
   queue_backlog: [
@@ -201,6 +235,51 @@ describe("定时任务页签", () => {
     // 那句话正是在说明为什么没有这个断言，本身不构成一个装出来的「已启用」徽章。
     expect(screen.queryByText("已启用")).toBeNull();
     expect(screen.queryByText("已停用")).toBeNull();
+  });
+
+  it("「部署状态」列区分部署声明与观测活跃度，不同两件事混着说", async () => {
+    renderJobs("/jobs?sub=scheduled", { overview: populatedOverviewBody });
+    await screen.findByText("平台心跳");
+
+    // 心跳与 sub2api_sync 在本 fixture 里都是 configured_enabled=true，
+    // 两行都渲染"已配置启用"——用 getAllByText 而不是要求唯一匹配。
+    expect(screen.getAllByText("已配置启用").length).toBe(2);
+    expect(screen.getByText("always")).not.toBeNull();
+    // finance_cost_sync 在本 fixture 里配置为停用。
+    expect(screen.getByText("已配置停用")).not.toBeNull();
+    expect(screen.getByText("XM_FINANCE_COLLECT_ENABLED")).not.toBeNull();
+    // sub2api_sync 的 configured_mode=real，应显示"真实接入"徽章而不是
+    // fake 的"演示数据"。
+    expect(screen.getByText("真实接入")).not.toBeNull();
+    expect(screen.queryByText("演示数据")).toBeNull();
+  });
+
+  it("configured_enabled 为 null 时「部署状态」列显示未接数据源，而不是猜一个停用", async () => {
+    renderJobs("/jobs?sub=scheduled", { overview: emptyOverviewBody });
+    await screen.findByText("平台心跳");
+
+    expect(screen.queryByText("已配置启用")).toBeNull();
+    expect(screen.queryByText("已配置停用")).toBeNull();
+    // ConfiguredCell 在没有数据源时渲染一个带 title 说明的 "—"。
+    const dash = screen.getByTitle("本次装配没有接部署配置读数");
+    expect(dash.textContent).toBe("—");
+  });
+
+  it("configured_mode_source 为 unavailable 时明确提示读取失败，而不是悄悄不显示", async () => {
+    const overview = {
+      ...populatedOverviewBody,
+      schedules: [
+        {
+          ...populatedOverviewBody.schedules[0],
+          configured_mode: null,
+          configured_mode_source: "unavailable",
+        },
+      ],
+    };
+    renderJobs("/jobs?sub=scheduled", { overview });
+    await screen.findByText("平台心跳");
+
+    expect(screen.getByText("connector_config 读取失败")).not.toBeNull();
   });
 });
 
