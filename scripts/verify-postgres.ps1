@@ -81,13 +81,18 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'failed to build shared PostgreSQL source-agent test runner image' }
 
     try {
+    # XM-INV-GATE-TMPFS: the whole backend suite shares this sidecar; its WAL alone reached
+    # ~320 MiB before the RC73 gate's PostgreSQL aborted on a full 512 MiB tmpfs (SIGABRT, then
+    # 'the database system is in recovery mode'). The 2g tmpfs and the WAL bounds passed as
+    # server arguments below are test-sidecar-only settings.
     docker run --detach --rm `
         --name $containerName `
         --env "POSTGRES_DB=$databaseName" `
         --env "POSTGRES_USER=$databaseUser" `
         --env "POSTGRES_PASSWORD=$databasePassword" `
-		--tmpfs '/var/lib/postgresql:rw,nosuid,nodev,size=512m' `
-        $PostgresImage | Out-Null
+		--tmpfs '/var/lib/postgresql:rw,nosuid,nodev,size=2g' `
+        $PostgresImage `
+        postgres -c max_wal_size=256MB -c min_wal_size=64MB -c checkpoint_timeout=60s | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'failed to start isolated PostgreSQL test container' }
     $containerStarted = $true
 
