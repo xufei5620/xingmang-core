@@ -50,7 +50,7 @@ RUN /usr/local/bin/invoice-pdf-policy-check --self-test \
 FROM api-base AS tools
 RUN apk add --no-cache qpdf=12.3.2-r0 \
     && qpdf --version | grep -F 'qpdf version 12.3.2'
-COPY --from=build /out/invoice-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-oidc-logout-retention /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-oidc-preflight /out/invoice-eligibility-repair /usr/local/bin/
+COPY --from=build /out/invoice-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-oidc-logout-retention /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-eligibility-repair /out/invoice-oidc-preflight /usr/local/bin/
 COPY migrations /app/migrations
 
 ENV MIGRATIONS_DIR=/app/migrations
