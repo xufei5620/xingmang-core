@@ -245,11 +245,19 @@ function subTabContent(
       // 完全是两回事，只是落在同一个页签位置——只判平台，先问 CPA 有没有
       // 接管这个子页签，没有（probes/history）才落回共享蓝图。
       // 其余平台：Sub2API/NewAPI 共用同一套组件，「保障概览」「历史记录」
-      // 两个子页签已接被动指标（XM-ASSURE0 第一片），「检测任务」（主动探测）
-      // 仍是纯 UI 蓝图——交接文档 §9.7 明写「真实探针不能提前冒充已上线」
+      // 两个子页签接被动指标（XM-ASSURE0），「检测任务」（主动探测）接
+      // XM-ASSURE1-core 的真实 Query/Action（XM-ASSURE1-ui）。
+      // serviceId：与上面 tabContent 的 "upstream"/"overview" 分支同一个
+      // 判据——"检测任务"子页签的「发起检测」对话框要读渠道目录，需要恰好
+      // 一个已登记 service 才能定位是哪个 service_id，多实例或未登记时
+      // 由 AssuranceProbeDeclareDialog 自己说明原因，不猜一个出来。
       return (
         (entry.spec.serviceType === "cpa" ? cpaAssuranceSubTab(subId) : undefined) ??
-        assuranceSubTab(subId, entry.spec.serviceType)
+        assuranceSubTab(
+          subId,
+          entry.spec.serviceType,
+          entry.services.length === 1 ? entry.services[0]?.id : undefined,
+        )
       );
     case "finance":
       return financeSubTab(entry.spec.serviceType, subId);

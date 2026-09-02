@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DataTableV2,
   FreshnessBadge,
@@ -8,7 +8,7 @@ import {
   formatUtcTimestamp,
   type DataTableColumn,
 } from "@xingmang/ui-admin";
-import { Badge } from "@xingmang/ui-primitives";
+import { Badge, Button, Dialog, FormField, Input, type BadgeTone } from "@xingmang/ui-primitives";
 import { useState, type ReactNode } from "react";
 import {
   ASSURANCE_WINDOWS,
@@ -24,7 +24,22 @@ import {
   type AssuranceStatusClasses,
   type AssuranceWindow,
 } from "../api/assurance";
+import {
+  cancelProbe,
+  getPlatformAssuranceProbeHistory,
+  getPlatformAssuranceProbes,
+  PROBE_MANAGE_PERMISSION,
+  PROBE_RUN_PERMISSION,
+  runProbe,
+  type ProbeHistoryEntry,
+  type ProbeListItem,
+} from "../api/assuranceProbes";
+import type { ApiClient } from "../api/client";
 import { formatCount } from "../lib/money";
+import { AssuranceProbeDeclareDialog } from "./AssuranceProbeDeclareDialog";
+import { AssuranceProbeKillSwitch } from "./AssuranceProbeKillSwitch";
+import { ActionErrorNote } from "./ActionErrorNote";
+import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
 
 /** 渠道保障（原型孤儿页 `V["s2/model"]`，ADMIN-IA v3 §8.1 裁定 #1 恢复为页签）。
@@ -286,62 +301,339 @@ function AssuranceOverview({ platform }: { platform: string }) {
   );
 }
 
-// --- 检测任务（主动探测，划给 XM-ASSURE1，本片只保留蓝图） ---
+// --- 检测任务（主动探测，XM-ASSURE1-ui 起接真实 Query/Action） ---
 
-const PROBES_NOT_MOUNTED_DESCRIPTION =
-  "主动探测（声明 → 探针 → 结论）需要一个真正发起请求的 Action，且必须带停用/Kill Switch（宪法 26 条：所有生产写动作必须可以停用）；设计与实现是独立切片 XM-ASSURE1，不在本片（XM-ASSURE0，只做被动指标）范围内。这里只保留原型的列结构，不显示任何检测结果——编一行探测记录会让人以为真的探测已经在跑。";
+/** 结果列 pill：按 `last_run_status` 映射。muted（neutral）专门留给
+ *  「从未运行」「已取消」这类非结果状态，不复用 warning 的黄色去表示
+ *  它们（设计稿 §6.1 明确要求区分）。 */
+function probeResultDisplay(item: ProbeListItem): { tone: BadgeTone; label: string } {
+  switch (item.lastRunStatus) {
+    case "never_run":
+      return { tone: "neutral", label: "从未运行" };
+    case "pending":
+      return { tone: "info", label: "进行中（排队）" };
+    case "running":
+      return { tone: "info", label: "进行中" };
+    case "refused":
+      return { tone: "warning", label: item.lastRunVerdict || "已拒绝执行" };
+    case "cancelled":
+      return { tone: "neutral", label: "已取消" };
+    case "ok":
+      return { tone: "success", label: item.lastRunVerdict || "一致" };
+    case "degraded":
+      return { tone: "warning", label: item.lastRunVerdict || "疑似退化" };
+    case "failed":
+      return { tone: "danger", label: item.lastRunVerdict || "失败" };
+    case "timeout":
+      return { tone: "danger", label: item.lastRunVerdict || "超时" };
+    default:
+      return { tone: "warning", label: `未知状态（${item.lastRunStatus}）` };
+  }
+}
 
-/** 只有表头的蓝图表。画出列结构而不是一句「敬请期待」：蓝图的内容就是
- *  「将来这里有哪几列」，而空态说清楚为什么现在没有行。 */
-function BlueprintTable({
-  caption,
-  columns,
-  emptyTitle,
-  emptyDescription,
+/** Kill Switch 状态徽章：与结果 pill 分开的一列信息，同样不用 warning 的
+ *  黄色表示「未启用」这种非结果状态（设计稿 §6.1）。 */
+function killSwitchBadge(state: string): ReactNode {
+  if (state === "disabled") return <Badge tone="neutral">未启用</Badge>;
+  if (state === "not_applicable_fake") return <Badge tone="neutral">fake 模式</Badge>;
+  return null;
+}
+
+function CancelProbeDialog({
+  item,
+  client,
+  onDone,
 }: {
-  caption: string;
-  columns: string[];
-  emptyTitle: string;
-  emptyDescription: string;
+  item: ProbeListItem;
+  client?: ApiClient;
+  onDone: (result: ActionResult) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => cancelProbe({ declarationId: item.declarationId, reason: reason.trim() }, {}, client),
+    onSuccess: (run) => {
+      setOpen(false);
+      onDone({ title: `已取消检测任务「${item.name}」`, runId: run.runId });
+      void queryClient.invalidateQueries({ queryKey: ["assurance", "probes"] });
+    },
+  });
   return (
-    <div className="flex flex-col overflow-hidden rounded-lg border border-edge bg-surface shadow-sm">
-      <div className="max-w-full overflow-x-auto">
-        <table className="w-full border-collapse text-sm">
-          <caption className="sr-only">{caption}</caption>
-          <thead className="border-b border-edge bg-surface-muted">
-            <tr>
-              {columns.map((c) => (
-                <th
-                  key={c}
-                  scope="col"
-                  className="px-3 py-2 text-left text-xs font-medium text-fg-muted whitespace-nowrap"
-                >
-                  {c}
-                </th>
-              ))}
-            </tr>
-          </thead>
-        </table>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) {
+          setReason("");
+          mutation.reset();
+        }
+      }}
+      trigger={
+        <Button size="sm" variant="secondary" aria-label={`取消检测任务 ${item.name}`}>
+          取消
+        </Button>
+      }
+      title={`取消检测任务：${item.name}`}
+      description="撤销这条声明（assurance.probe.cancel@1）。撤销只作用于声明本身，不影响已经在跑的批次；要恢复需要重新声明一条新的检测任务。"
+    >
+      <div className="flex flex-col gap-3">
+        <FormField label="取消原因" htmlFor="cancel-probe-reason" required>
+          <Input
+            id="cancel-probe-reason"
+            value={reason}
+            disabled={mutation.isPending}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </FormField>
+        <ActionErrorNote error={mutation.error} permission={PROBE_MANAGE_PERMISSION} />
+        <div className="flex justify-end gap-2">
+          <Button type="button" size="sm" variant="secondary" onClick={() => setOpen(false)} disabled={mutation.isPending}>
+            返回
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="danger"
+            loading={mutation.isPending}
+            disabled={!reason.trim()}
+            onClick={() => mutation.mutate()}
+          >
+            确认取消
+          </Button>
+        </div>
       </div>
-      <PageState kind="unavailable" title={emptyTitle} description={emptyDescription} compact />
+    </Dialog>
+  );
+}
+
+function ProbeRowActions({
+  item,
+  client,
+  onDone,
+}: {
+  item: ProbeListItem;
+  client?: ApiClient;
+  onDone: (result: ActionResult) => void;
+}) {
+  const queryClient = useQueryClient();
+  const runMutation = useMutation({
+    mutationFn: () => runProbe({ declarationId: item.declarationId }, {}, client),
+    onSuccess: (run) => {
+      const result = run.result as { status?: string; refusal_reason?: string } | undefined;
+      const refused = result?.status === "refused";
+      onDone({
+        title: refused
+          ? `「${item.name}」被拒绝执行（${result?.refusal_reason ?? "未知原因"}）`
+          : `已触发「${item.name}」的检测批次`,
+        runId: run.runId,
+      });
+      void queryClient.invalidateQueries({ queryKey: ["assurance", "probes"] });
+    },
+  });
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Button
+        size="sm"
+        aria-label={`运行 ${item.name}`}
+        title={item.canRunNow ? undefined : item.cannotRunReasonText}
+        disabled={!item.canRunNow || runMutation.isPending}
+        loading={runMutation.isPending}
+        onClick={() => runMutation.mutate()}
+      >
+        运行
+      </Button>
+      <CancelProbeDialog item={item} client={client} onDone={onDone} />
+      {runMutation.error ? <ActionErrorNote error={runMutation.error} permission={PROBE_RUN_PERMISSION} /> : null}
     </div>
   );
 }
 
-function AssuranceProbes() {
+function probeColumns(client: ApiClient | undefined, onDone: (result: ActionResult) => void): DataTableColumn<ProbeListItem>[] {
+  return [
+    { id: "name", header: "任务", primary: true, value: (p) => p.name, cell: (p) => p.name },
+    {
+      id: "channels",
+      header: "渠道",
+      cell: (p) => (p.channelNames.length > 0 ? p.channelNames.join("、") : p.channelIds.join("、") || "—"),
+    },
+    {
+      id: "models",
+      header: "目标模型",
+      cell: (p) => (p.targetModels.length > 0 ? p.targetModels.join("、") : "—"),
+    },
+    {
+      id: "policy",
+      header: "策略",
+      cell: (p) => (
+        <span className="flex flex-wrap items-center gap-1.5">
+          <span>{p.policyText}</span>
+          {killSwitchBadge(p.killSwitchState)}
+        </span>
+      ),
+    },
+    {
+      id: "last-run",
+      header: "最近一次",
+      cell: (p) => (p.lastRunAt ? formatUtcTimestamp(p.lastRunAt) : "—"),
+    },
+    {
+      id: "result",
+      header: "结果",
+      cell: (p) => {
+        const d = probeResultDisplay(p);
+        return <Badge tone={d.tone}>{d.label}</Badge>;
+      },
+    },
+    {
+      id: "actions",
+      header: "操作",
+      cell: (p) => <ProbeRowActions item={p} client={client} onDone={onDone} />,
+    },
+  ];
+}
+
+function AssuranceProbes({
+  platform,
+  serviceId,
+  client,
+}: {
+  platform: string;
+  serviceId?: string;
+  client?: ApiClient;
+}) {
+  const query = useQuery({
+    queryKey: ["assurance", "probes", platform],
+    queryFn: ({ signal }) => getPlatformAssuranceProbes(platform, { signal }, client),
+  });
+  const [notice, setNotice] = useState<ActionResult | null>(null);
+  const probes = query.data?.probes ?? [];
+  // fake 模式标记：只在读到至少一行、且全部都是 not_applicable_fake 时显示——
+  // 零声明时没有信号可判断真假，不猜测（宪法 12 条同一条纪律）。
+  const allFake = probes.length > 0 && probes.every((p) => p.killSwitchState === "not_applicable_fake");
+  const killSwitchCurrentState = probes[0]?.killSwitchState ?? null;
+
   return (
     <div className="flex flex-col gap-3">
-      <p role="status" className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg">
-        {PROBES_NOT_MOUNTED_DESCRIPTION}
+      <p role="status" className="rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs text-fg-muted">
+        {query.data?.assertionDisclaimer ?? "检测结果为形状与延迟检测，非语义正确性保证。"}
       </p>
-      <p className="text-xs text-fg-muted">支持不定时抽检，也保证最低检测频率——这是 XM-ASSURE1 的设计目标，尚未实现。</p>
-      <BlueprintTable
-        caption="检测任务"
-        columns={["任务", "渠道", "目标模型", "策略", "最近一次", "结果"]}
-        emptyTitle="还没有检测任务"
-        emptyDescription="需要 XM-ASSURE1（主动探测 Action + Kill Switch）完成后才会有数据。"
-      />
+      {allFake ? <Badge tone="neutral">演示数据（该平台探测走 fake 模式，不产生真实调用/费用）</Badge> : null}
+      {notice ? <ActionResultNote result={notice} onDismiss={() => setNotice(null)} /> : null}
+      {/* 声明+Kill Switch 入口放在 DataTableV2 外层，不走它的 toolbarExtra——
+          DataTableV2 空表时只渲染 emptyState、完全跳过 toolbarExtra
+          （见该组件 "rows.length === 0" 分支），塞进 toolbarExtra 会导致
+          "还没有一条声明"时连"发起检测"入口都看不见，是先有鸡还是先有蛋的
+          死结（与 ManagedChannelTable 的"添加上游"按钮撞过的同一个坑，
+          那边解法是在 emptyState 里塞第二份按钮；这里直接放外层，
+          不需要维护两处相同的按钮）。 */}
+      <div className="flex items-center gap-2">
+        <AssuranceProbeDeclareDialog
+          platform={platform}
+          serviceId={serviceId}
+          client={client}
+          onDone={(summary) =>
+            setNotice({
+              title:
+                summary.runResult?.status === "refused"
+                  ? `已声明检测任务，但触发的批次被拒绝执行（${summary.runResult.refusal_reason ?? "未知原因"}）`
+                  : "已声明检测任务并触发一次批次",
+              runId: summary.declareRunId,
+            })
+          }
+        />
+        <AssuranceProbeKillSwitch platform={platform} currentState={killSwitchCurrentState} client={client} />
+      </div>
+      <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
+        <DataTableV2
+          caption="检测任务"
+          columns={probeColumns(client, setNotice)}
+          rows={probes}
+          rowKey={(p) => p.declarationId}
+          emptyState={
+            <PageState
+              kind="empty"
+              title="还没有检测任务"
+              description="点击上方「发起检测」声明一条新的检测任务并立即触发一次批次。"
+            />
+          }
+        />
+        {query.data ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+            <FreshnessBadge freshness={query.data.freshness} />
+            <FreshnessNote freshness={query.data.freshness} />
+          </div>
+        ) : null}
+      </ApiStateView>
+    </div>
+  );
+}
+
+// --- 主动检测历史（与被动近 7 天聚合各自独立渲染） ---
+
+const PROBE_HISTORY_PAGE_SIZE = 50;
+
+function probeHistoryResultDisplay(status: string, verdict: string): { tone: BadgeTone; label: string } {
+  switch (status) {
+    case "ok":
+      return { tone: "success", label: verdict || "一致" };
+    case "degraded":
+      return { tone: "warning", label: verdict || "疑似退化" };
+    case "failed":
+      return { tone: "danger", label: verdict || "失败" };
+    case "timeout":
+      return { tone: "danger", label: verdict || "超时" };
+    default:
+      return { tone: "neutral", label: verdict || status };
+  }
+}
+
+const PROBE_HISTORY_COLUMNS: DataTableColumn<ProbeHistoryEntry>[] = [
+  {
+    id: "observed-at",
+    header: "时间",
+    primary: true,
+    value: (e) => e.observedAt,
+    cell: (e) => formatUtcTimestamp(e.observedAt),
+  },
+  { id: "channel", header: "渠道", cell: (e) => e.channelId || "—" },
+  { id: "model", header: "模型", cell: (e) => e.model || "—" },
+  { id: "declaration", header: "检测项", cell: (e) => e.declarationName || e.promptTemplateKey },
+  {
+    id: "result",
+    header: "结果",
+    cell: (e) => {
+      const d = probeHistoryResultDisplay(e.status, e.verdict);
+      return <Badge tone={d.tone}>{d.label}</Badge>;
+    },
+  },
+  { id: "evidence", header: "证据", cell: (e) => e.evidenceRef || "—" },
+];
+
+function AssuranceProbeHistoryCard({ platform, client }: { platform: string; client?: ApiClient }) {
+  const query = useQuery({
+    queryKey: ["assurance", "probe-history", platform],
+    queryFn: ({ signal }) => getPlatformAssuranceProbeHistory(platform, { limit: PROBE_HISTORY_PAGE_SIZE, signal }, client),
+  });
+  return (
+    <div className="flex flex-col gap-3">
+      <h3 className="text-sm font-semibold text-fg">主动检测历史</h3>
+      <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
+        <DataTableV2
+          caption="主动检测历史：按时间倒序的逐条检测结果"
+          columns={PROBE_HISTORY_COLUMNS}
+          rows={query.data?.entries ?? []}
+          rowKey={(e) => `${e.observedAt}:${e.channelId}:${e.model}:${e.evidenceRef}`}
+          emptyState={<PageState kind="empty" title="没有主动检测历史" description="还没有任何检测批次产生过结果。" />}
+        />
+        {query.data ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+            <FreshnessBadge freshness={query.data.freshness} />
+            <FreshnessNote freshness={query.data.freshness} />
+            {query.data.nextCursor ? <span>还有更多历史，未来可加「加载更多」</span> : null}
+          </div>
+        ) : null}
+      </ApiStateView>
     </div>
   );
 }
@@ -386,6 +678,7 @@ function AssuranceHistoryBody({ history }: { history: AssuranceHistoryData }) {
   const missingCount = history.days.filter((d) => d.missing).length;
   return (
     <div className="flex flex-col gap-3">
+      <h3 className="text-sm font-semibold text-fg">被动聚合（近 7 天）</h3>
       <ChannelBreakdownNotice reason={history.channelBreakdownReason} />
       <DataTableV2
         caption="渠道保障历史：按业务日聚合的请求量/成功率/延迟"
@@ -410,24 +703,31 @@ function AssuranceHistoryBody({ history }: { history: AssuranceHistoryData }) {
   );
 }
 
-function AssuranceHistory({ platform }: { platform: string }) {
+/** 历史记录子页签渲染**两张独立卡片**：被动聚合（近 7 天，ASSURE0 原样
+ *  不动）与主动检测历史（本片新增）。两者数据源、写路径、风险等级完全
+ *  独立，不合并成一张看起来是同一份数据的表（设计稿 §0 / §6.2）。 */
+function AssuranceHistory({ platform, client }: { platform: string; client?: ApiClient }) {
   const query = useQuery({
     queryKey: ["assurance", "history", platform],
     queryFn: ({ signal }) => getPlatformAssuranceHistory(platform, { signal }),
   });
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs text-fg-muted">
-        最近 7 天的被动保障指标，按业务日（Asia/Shanghai）聚合。没有可用的降采样汇总时这是唯一的历史来源，因此固定
-        7 天，不支持更长区间——不让这个 Query 被当成数据导出口。
-      </p>
-      <ApiStateView
-        isPending={query.isPending}
-        error={query.error}
-        onRetry={() => void query.refetch()}
-      >
-        {query.data ? <AssuranceHistoryBody history={query.data} /> : null}
-      </ApiStateView>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-3">
+        <p className="text-xs text-fg-muted">
+          最近 7 天的被动保障指标，按业务日（Asia/Shanghai）聚合。没有可用的降采样汇总时这是唯一的历史来源，因此固定
+          7 天，不支持更长区间——不让这个 Query 被当成数据导出口。
+        </p>
+        <ApiStateView
+          isPending={query.isPending}
+          error={query.error}
+          onRetry={() => void query.refetch()}
+        >
+          {query.data ? <AssuranceHistoryBody history={query.data} /> : null}
+        </ApiStateView>
+      </div>
+      <hr className="border-edge" />
+      <AssuranceProbeHistoryCard platform={platform} client={client} />
     </div>
   );
 }
@@ -435,15 +735,23 @@ function AssuranceHistory({ platform }: { platform: string }) {
 /** 按子页签 id 取内容。认不出的返回 undefined，由调用方回落到通用占位。
  *
  *  platform 是 Sub2API/NewAPI 的 serviceType（"sub2api" / "newapi"）——两个
- *  平台共用同一套组件，数据源与聚合逻辑完全对称，只是查询参数不同。 */
-export function assuranceSubTab(subId: string, platform: string): ReactNode | undefined {
+ *  平台共用同一套组件，数据源与聚合逻辑完全对称，只是查询参数不同。
+ *  serviceId 只有"检测任务"子页签用到（发起检测对话框要读渠道目录，需要
+ *  恰好一个已登记 service）；client 只在单测里注入，生产路径始终省略,
+ *  由各 api 函数回落到默认单例。 */
+export function assuranceSubTab(
+  subId: string,
+  platform: string,
+  serviceId?: string,
+  client?: ApiClient,
+): ReactNode | undefined {
   switch (subId) {
     case "overview":
       return <AssuranceOverview platform={platform} />;
     case "probes":
-      return <AssuranceProbes />;
+      return <AssuranceProbes platform={platform} serviceId={serviceId} client={client} />;
     case "history":
-      return <AssuranceHistory platform={platform} />;
+      return <AssuranceHistory platform={platform} client={client} />;
     default:
       return undefined;
   }
