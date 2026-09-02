@@ -70,6 +70,31 @@ export function currentUserLabel(): string {
   return "开发模式";
 }
 
+/** 当前登录者的角色清单；`null` 表示"这个鉴权模式下前端读不到角色"，不是
+ *  "零角色"——调用方必须把两者分开处理，不能把 null 当空数组用。
+ *
+ *  只有 local 模式（XM-LOGIN）把角色下发给前端（`GET /api/v1/auth/me`
+ *  的 `roles` 字段，见 auth/localSession.ts）。oidc/dev-header 两种模式
+ *  目前都不在前端暴露角色声明——oidc 模式的角色映射在服务端
+ *  `XM_OIDC_ROLE_SCOPES`，没有对应的只读端点把它们下发到前端；dev-header
+ *  模式的 `X-Dev-Scopes` 是 scope 清单，不是角色名，两者不能互相冒充。
+ *  按角色门禁 UI 控件（如 XM-ASSURE1-ui 的检测 Kill Switch 入口）的调用方
+ *  应把 null 当"判不出来"处理，而不是当作"没有这个角色"。 */
+export function currentUserRoles(): string[] | null {
+  if (authMode() !== "local") return null;
+  return cachedLocalUser()?.roles ?? null;
+}
+
+/** 当前登录者是否持有某个角色。角色判不出来（非 local 模式）时返回
+ *  `false`——用于门禁一个"多数人看不到也无妨、少数人常用"的便利控件时，
+ *  判不出来应默认当作"不显示"处理（前端隐藏不构成安全控制，这里只是
+ *  减少无关人员看到一个几乎注定 403 的按钮；服务端权限检查不受这个判断
+ *  影响，真正持有该角色的人在 oidc/dev-header 模式下暂时看不到这个便利
+ *  入口是已知的、待跟进的局限，不是被拒绝访问）。 */
+export function currentUserHasRole(role: string): boolean {
+  return (currentUserRoles() ?? []).includes(role);
+}
+
 export function loginPath(next?: string, reason?: LoginReason): string {
   const params = new URLSearchParams();
   const safeNext = safeNextPath(next, "");
