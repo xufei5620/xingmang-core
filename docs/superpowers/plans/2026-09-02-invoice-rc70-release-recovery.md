@@ -1,5 +1,10 @@
 # RC70 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC70 shipped at signed tag
+> `v0.1.0-rc70-signed` (`b9d51f6`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-02-invoice-rc71-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC70 — the pre-anchor usage incident fix (XM-INV-PREANCHOR-USAGE: usage/credit facts dated at or before a `POLICY_ANCHOR` account's cutover are skipped with an audit row instead of freezing `SOURCE_GAP`; projection failures are logged before an event is marked failed or dead; the `invoice-eligibility-repair` tool in the tools image resolves the 2026-09-02 incident freezes and requeues its dead events) plus the owner-ruled removal of the administrator login entry from the user-facing web (XM-INV-HIDE-ADMIN-LOGIN, when merged before the tag).
