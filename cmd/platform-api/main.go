@@ -185,7 +185,28 @@ func main() {
 	runwaySummaryStore := finance.NewSummaryStore(pool, nil)
 	// 后台任务页（XM-JOBS0）：只读 river_job / river_queue，不依赖 River
 	// 客户端本身，也不需要额外配置——river_job 是本平台自己数据库里的表。
-	jobsQueryStore := jobs.NewQueryStore(pool)
+	//
+	// XM-OPS-TAILS0 补两处只读依赖：
+	//   ① core.connector_config（NewPgConnectorConfigSource，与 worker 侧
+	//      同一张表、同一套缓存，只读不写）—— sub2api_sync/newapi_sync 的
+	//      「实际配置模式」（real/fake）。
+	//   ② DeployedSchedulesFromEnv(os.Getenv)——本进程按与
+	//      cmd/platform-worker/config.go 相同的规则解析部署环境变量，得到
+	//      「这套部署配置声明的应然调度」。这不是 worker 进程的实时确认
+	//      （两个进程互不可见对方内存里的 Config，见该函数与
+	//      jobs.ScheduleStatus.Configured 的注释）——解析失败即拒绝启动，
+	//      与本文件其余启动期配置错误同一条纪律：宁可现在暴露一个写错的
+	//      环境变量，也不要让「后台任务」页悄悄漏一格数据。
+	connectorConfigSource := jobs.NewPgConnectorConfigSource(pool)
+	deployedSchedules, err := jobs.DeployedSchedulesFromEnv(os.Getenv)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "deployed_schedule_invalid"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	jobsQueryStore := jobs.NewQueryStore(pool,
+		jobs.WithConnectorConfigSource(connectorConfigSource),
+		jobs.WithDeployedSchedules(deployedSchedules))
 
 	// 演示数据种子（XM-0037d）：只在显式开启时跑，**生产硬拒**。
 	//

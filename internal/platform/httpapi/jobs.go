@@ -72,6 +72,26 @@ type jobScheduleBody struct {
 	// Activity: activity_observed / no_recent_activity / never_observed。
 	// 没有 enabled 字段——那会是一个装出来的事实，见上。
 	Activity string `json:"activity"`
+
+	// --- XM-OPS-TAILS0 ---
+
+	// ConfiguredEnabled / ConfiguredIntervalSeconds / ConfiguredSource 是
+	// httpapi 自己按与 worker 相同的规则解析部署环境变量得到的"应然"调度
+	// （jobs.DeployedSchedulesFromEnv）。null 表示本次装配没有接这份数据源
+	// （见 jobs.ScheduleStatus.Configured 的注释）——**不是** worker 进程的
+	// 实时确认，两者的区别必须原样透给前端，不能被字段名"configured"暗示成
+	// "已核实在跑"。
+	ConfiguredEnabled         *bool   `json:"configured_enabled"`
+	ConfiguredIntervalSeconds *int64  `json:"configured_interval_seconds"`
+	ConfiguredSource          *string `json:"configured_source"`
+
+	// ConfiguredMode / ConfiguredModeSource 只在 sub2api_sync / newapi_sync
+	// 两个 kind 上非 null——real/fake 是 core.connector_config 的 platform
+	// 维度，其余任务没有这个概念（见 jobs.ScheduleStatus.ConfiguredMode）。
+	// ModeSource: "database"（库里确有这一行）/ "default"（没配过，按 fake
+	// 兜底）/ "unavailable"（读库失败，此时 ConfiguredMode 也是 null）。
+	ConfiguredMode       *string `json:"configured_mode"`
+	ConfiguredModeSource *string `json:"configured_mode_source"`
 }
 
 type jobQueueBacklogBody struct {
@@ -148,6 +168,24 @@ func toOverviewBody(o jobs.Overview) jobsOverviewBody {
 		if sch.LastRun != nil {
 			item := toJobRunItem(*sch.LastRun)
 			body.LastRun = &item
+		}
+		if sch.Configured != nil {
+			enabled := sch.Configured.Enabled
+			seconds := sch.Configured.IntervalSeconds
+			source := sch.Configured.EnabledSource
+			body.ConfiguredEnabled = &enabled
+			body.ConfiguredIntervalSeconds = &seconds
+			body.ConfiguredSource = &source
+		}
+		if sch.ConfiguredMode != nil {
+			source := sch.ConfiguredMode.Source
+			body.ConfiguredModeSource = &source
+			// unavailable 时 Mode 本身是空字符串（读库失败，没有可信的模式
+			// 值）——留 null 而不是回一个看着合法实际是空串的 "mode":""。
+			if sch.ConfiguredMode.Source != "unavailable" {
+				mode := sch.ConfiguredMode.Mode
+				body.ConfiguredMode = &mode
+			}
 		}
 		schedules = append(schedules, body)
 	}

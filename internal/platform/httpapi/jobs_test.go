@@ -145,6 +145,95 @@ func TestJobsOverviewHandlerReturnsSnapshot(t *testing.T) {
 	}
 }
 
+func TestJobsOverviewHandlerConfiguredScheduleAndMode(t *testing.T) {
+	enabled := true
+	interval := int64(300)
+	q := &fakeJobsQuerier{overview: jobs.Overview{
+		Schedules: []jobs.ScheduleStatus{
+			{
+				Kind:     jobs.Sub2APISyncJobKind,
+				Activity: jobs.ScheduleActivityNever,
+				Configured: &jobs.DeployedJobSchedule{
+					Enabled: enabled, IntervalSeconds: interval, EnabledSource: "XM_SUB2API_SYNC_ENABLED",
+				},
+				ConfiguredMode: &jobs.ConfiguredModeStatus{Mode: "real", Source: "database"},
+			},
+			{
+				Kind:           jobs.NewAPISyncJobKind,
+				Activity:       jobs.ScheduleActivityNever,
+				ConfiguredMode: &jobs.ConfiguredModeStatus{Source: "unavailable"},
+			},
+			{
+				// heartbeat：两个新字段都不接（QueryStore 没配对应依赖时的
+				// 缺省形状），必须原样输出 null，不能编一个假值。
+				Kind:     jobs.HeartbeatJobKind,
+				Activity: jobs.ScheduleActivityNever,
+			},
+		},
+	}}
+	h := testRouterWithJobs(t, q)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/overview", nil)
+	devHeaders(req, "ops.read")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Schedules []struct {
+			Kind                      string  `json:"kind"`
+			ConfiguredEnabled         *bool   `json:"configured_enabled"`
+			ConfiguredIntervalSeconds *int64  `json:"configured_interval_seconds"`
+			ConfiguredSource          *string `json:"configured_source"`
+			ConfiguredMode            *string `json:"configured_mode"`
+			ConfiguredModeSource      *string `json:"configured_mode_source"`
+		} `json:"schedules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应非预期结构: %v (%s)", err, rec.Body.String())
+	}
+	if len(got.Schedules) != 3 {
+		t.Fatalf("schedules = %+v", got.Schedules)
+	}
+
+	sub2api := got.Schedules[0]
+	if sub2api.ConfiguredEnabled == nil || !*sub2api.ConfiguredEnabled {
+		t.Fatalf("sub2api configured_enabled = %v, want true", sub2api.ConfiguredEnabled)
+	}
+	if sub2api.ConfiguredIntervalSeconds == nil || *sub2api.ConfiguredIntervalSeconds != 300 {
+		t.Fatalf("sub2api configured_interval_seconds = %v, want 300", sub2api.ConfiguredIntervalSeconds)
+	}
+	if sub2api.ConfiguredSource == nil || *sub2api.ConfiguredSource != "XM_SUB2API_SYNC_ENABLED" {
+		t.Fatalf("sub2api configured_source = %v", sub2api.ConfiguredSource)
+	}
+	if sub2api.ConfiguredMode == nil || *sub2api.ConfiguredMode != "real" {
+		t.Fatalf("sub2api configured_mode = %v, want real", sub2api.ConfiguredMode)
+	}
+	if sub2api.ConfiguredModeSource == nil || *sub2api.ConfiguredModeSource != "database" {
+		t.Fatalf("sub2api configured_mode_source = %v, want database", sub2api.ConfiguredModeSource)
+	}
+
+	newapi := got.Schedules[1]
+	// unavailable：configured_mode 必须是 null（没有可信的模式值），
+	// configured_mode_source 仍然如实报告 "unavailable"——两者不能都是 null,
+	// 否则前端分不清"这个任务没有模式维度"与"读库失败"。
+	if newapi.ConfiguredMode != nil {
+		t.Fatalf("newapi configured_mode = %v, want null when source is unavailable", newapi.ConfiguredMode)
+	}
+	if newapi.ConfiguredModeSource == nil || *newapi.ConfiguredModeSource != "unavailable" {
+		t.Fatalf("newapi configured_mode_source = %v, want unavailable", newapi.ConfiguredModeSource)
+	}
+
+	heartbeat := got.Schedules[2]
+	if heartbeat.ConfiguredEnabled != nil || heartbeat.ConfiguredIntervalSeconds != nil || heartbeat.ConfiguredSource != nil {
+		t.Fatalf("heartbeat Configured* fields = %+v, want all null (QueryStore had no deployed-schedule dependency)", heartbeat)
+	}
+	if heartbeat.ConfiguredMode != nil || heartbeat.ConfiguredModeSource != nil {
+		t.Fatalf("heartbeat ConfiguredMode* fields = %+v, want all null (no platform mode dimension)", heartbeat)
+	}
+}
+
 func TestJobsOverviewHandlerNeverEnabledFlag(t *testing.T) {
 	// 回归防线：Activity 字段存在就够了，响应体绝不能出现一个叫 enabled 的
 	// 布尔字段——httpapi 进程读不到 worker 的 jobs.Config，任何 enabled 断言

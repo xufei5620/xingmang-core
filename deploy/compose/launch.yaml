@@ -256,6 +256,33 @@ services:
       XM_ALERT_TELEGRAM_BOT_REF: ${XM_ALERT_TELEGRAM_BOT_REF:-}
       XM_ALERT_TELEGRAM_CHAT_ID: ${XM_ALERT_TELEGRAM_CHAT_ID:-}
       XM_ALERT_WEBHOOK_URL: ${XM_ALERT_WEBHOOK_URL:-}
+      # --- 周期任务部署配置（XM-OPS-TAILS0）---------------------------------
+      # 「后台任务」页要如实回答"这个周期任务在这套部署里是否配置为启用、
+      # 配的周期是多久"（jobs.DeployedSchedulesFromEnv）。这不是本进程新增
+      # 的一条采集链路——本进程从不用这些变量构造任何客户端或注册任何任务，
+      # 只是**只读解析**，与下面 platform-worker 用同一套变量名/同一套
+      # 解析规则，让两个进程在正常部署（同一份 .env）下得出一致的结论。
+      # 值本身与 platform-worker 那份逐条对齐，改一处务必同改两处。
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-1m}
+      XM_SUB2API_SYNC_ENABLED: ${XM_SUB2API_SYNC_ENABLED:-true}
+      XM_SUB2API_SYNC_INTERVAL: ${XM_SUB2API_SYNC_INTERVAL:-300s}
+      XM_NEWAPI_SYNC_ENABLED: ${XM_NEWAPI_SYNC_ENABLED:-true}
+      XM_NEWAPI_SYNC_INTERVAL: ${XM_NEWAPI_SYNC_INTERVAL:-300s}
+      XM_FINANCE_COLLECT_ENABLED: ${XM_FINANCE_COLLECT_ENABLED:-true}
+      XM_FINANCE_COLLECT_INTERVAL: ${XM_FINANCE_COLLECT_INTERVAL:-300s}
+      XM_RETENTION_ENABLED: ${XM_RETENTION_ENABLED:-true}
+      XM_RETENTION_INTERVAL: ${XM_RETENTION_INTERVAL:-24h}
+      XM_ALERT_EVALUATE_ENABLED: ${XM_ALERT_EVALUATE_ENABLED:-true}
+      XM_ALERT_EVALUATE_INTERVAL: ${XM_ALERT_EVALUATE_INTERVAL:-60s}
+      XM_CONNECTOR_PROBE_ENABLED: ${XM_CONNECTOR_PROBE_ENABLED:-true}
+      XM_CONNECTOR_PROBE_INTERVAL: ${XM_CONNECTOR_PROBE_INTERVAL:-5m}
+      # XM_REQLOG_MODE 已在上面「请求详情」小节透传，本节只补
+      # reqlog_metrics 任务独有的周期变量。
+      XM_REQLOG_METRICS_INTERVAL: ${XM_REQLOG_METRICS_INTERVAL:-5m}
+      # XM_CPA_MODE 已在上面「CPA 逐 key 用量」小节透传，本节只补
+      # cpa_sync 任务独有的启用开关与周期变量。
+      XM_CPA_SYNC_ENABLED: ${XM_CPA_SYNC_ENABLED:-}
+      XM_CPA_SYNC_INTERVAL: ${XM_CPA_SYNC_INTERVAL:-300s}
     volumes:
       # 命名卷而不是 bind：凭据文件只该存在于这个栈里，宿主目录一不小心就
       # 被 rsync / 备份脚本带走。镜像里已把挂载点交给运行用户（go.Dockerfile）。
