@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 
 	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/migrate"
+	"invoice-system/backend/internal/testdb"
 )
 
 func waitIntegrationPool(t *testing.T, pool *pgxpool.Pool) {
@@ -40,12 +40,13 @@ func integrationStore(t *testing.T) (*Store, context.Context) {
 
 func integrationStoreWithPolicyStart(t *testing.T, fixturePolicyStart time.Time) (*Store, context.Context) {
 	t.Helper()
-	url := os.Getenv("INVOICE_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("INVOICE_TEST_DATABASE_URL is not set")
-	}
+	// testdb.URL rewrites the shared default "invoice_test" database to a
+	// per-git-worktree database (created on first use), so concurrent
+	// worktrees never race the DROP SCHEMA CASCADE below. See
+	// internal/testdb's package doc for the full rationale.
+	databaseURL := testdb.URL(t)
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, url)
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}

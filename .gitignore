@@ -16,6 +16,7 @@ deploy/secrets/
 .playwright-cli/
 .worktrees/
 /release/
+/logs/
 *.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts

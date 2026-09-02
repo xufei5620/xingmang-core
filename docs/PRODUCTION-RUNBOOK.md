@@ -200,6 +200,47 @@ $strictVerifyExit = $LASTEXITCODE
 if ($strictVerifyExit -ne 0) { throw "strict RC69 transfer-ready verification failed with exit $strictVerifyExit" }
 ```
 
+**Running the gate detached, when the operator's own shell cannot stay
+attached for the whole gate.** An interactive tool/agent sandbox commonly
+kills whatever is still in the foreground of one shell invocation after
+about ten minutes; the one-block RC68 gate above (nine image builds plus a
+serial Trivy scan and SBOM per image) routinely runs longer than that. A
+hidden/non-interactive console on a zh-CN Windows locale also defaults to
+the GBK code page, which mangles UTF-8 byte output from git and docker --
+including this repo's own `发票` path segment -- if the gate (or anything
+that shells out to git/docker) is simply launched in the background without
+addressing that separately. `scripts/run-detached.ps1` runs a target
+PowerShell script in a genuinely detached, hidden process (not tied to the
+launching shell's own lifetime) with `chcp 65001` plus UTF-8 console
+encodings set first, a full-output transcript log, and an exit-code file,
+then returns almost immediately -- so there is nothing left in the
+foreground for a sandbox timeout to kill. Save the one-block gate command
+above as a `.ps1` file (e.g. `release\run-rc68-gate.ps1`) and launch it
+detached instead of running it directly:
+
+```powershell
+pwsh -NoProfile -File .\scripts\run-detached.ps1 `
+  -ScriptPath .\release\run-rc68-gate.ps1 `
+  -RunName rc68-gate
+# Prints the run directory (under logs\detached-runs\) and returns in well
+# under a second; the gate keeps running in the background.
+
+# Check on it later -- each call is its own short, independent invocation:
+pwsh -NoProfile -File .\scripts\run-detached.ps1 `
+  -AttachRunDirectory 'logs\detached-runs\rc68-gate-...' -Wait -TimeoutSeconds 540
+# Exit code 4 means "still running, poll again the same way"; any other
+# exit code is the gate script's own, propagated through unchanged (so 42
+# still means the same pending-canary result it always has). The run
+# directory's transcript.log has the gate's complete merged output exactly
+# as if it had run in the foreground; exitcode.txt has the same code once
+# the run finishes.
+```
+
+See `scripts/run-detached.ps1`'s own doc comment (`Get-Help
+.\scripts\run-detached.ps1 -Full`) for the rest of its options, and
+`scripts/test-run-detached.ps1` for the mechanism proven end to end
+(including the exact exit-42 shape this gate produces).
+
 `ReleaseDirectory` must be a new or empty directory below `release/`; the
 script never removes or overwrites an existing artifact directory. The default
 IdP mode is deliberately `keycloak`: it must actually build the exact pinned
@@ -243,6 +284,31 @@ exclusive release-cache lock and every scan is serial, avoiding shared-cache
 lock races. No vulnerability is ignored. RC69 PostgreSQL has no exception and
 must report zero HIGH/CRITICAL findings; the former fixed-version `gosu`
 finding is not exception-eligible.
+
+**Keeping the Trivy cache warm ahead of a gate run.** The gate above updates
+its own `invoice-release-gate-trivy-0-74-0` cache volume synchronously, every
+run, via `trivy image --download-db-only`/`--download-java-db-only` inside
+its own container -- slow and occasionally unreliable through this machine's
+local proxy, and wasted effort on a day the upstream database has not
+changed. `scripts/refresh-trivy-cache.ps1` refreshes the same volume ahead of
+time, independently of any gate run, by talking to the OCI registry
+(`mirror.gcr.io/aquasec/trivy-db:2` and `.../trivy-java-db:1`) directly: a
+24-way ranged, resumable, parallel `curl` download of each database's single
+OCI layer, an OCI digest check against the manifest before anything is
+trusted, and a throwaway `postgres:18.6-alpine` container (the same pinned
+base this gate already builds from) to copy the verified files into the
+volume. It takes the exact same `.trivy-0.74.release-gate.lock` this gate
+does, so the two can never race the shared volume -- like the gate, it fails
+fast rather than waiting if that lock is already held. It is idempotent and
+safe to run daily (e.g. from Task Scheduler): each database records the OCI
+digest it was seeded from, so a run against an unchanged upstream does no
+network transfer beyond one manifest fetch and no reseed at all, and it
+always prints each database's `UpdatedAt`/`NextUpdate` before exiting. It
+refuses to replace an already-seeded database with a strictly older download
+(`-Force` overrides that deliberately). Run it with no arguments for a
+default daily refresh, or `-WhatIf` to see what it would do without changing
+anything; see its own doc comment (`Get-Help
+.\scripts\refresh-trivy-cache.ps1 -Full`) for every parameter.
 
 The command above is the ordinary internal-consistency mode, so operators can
 retain and diagnose failed or validation-only bundles. It is not transfer
