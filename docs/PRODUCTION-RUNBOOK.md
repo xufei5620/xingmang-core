@@ -883,6 +883,72 @@ with all capabilities dropped, leaving it at the image's default root user
 would make the host-owned `0400` owner DSN unreadable rather than more
 privileged.
 
+### 4.1 Console-assertion keyring manifest (CR-0006, XM-INV-CONSOLE-ASSERT-DEPLOY)
+
+`docker-compose.prod.yml`'s `api` service reads three new environment
+variables and mounts one new read-only file:
+
+- `OIDC_ADMIN_LOGIN_ENABLED` (default `true`) and `CONSOLE_ASSERTION_ENABLED`
+  (default `false`) gate the two admin login paths; both ship dark by
+  default, so this compose change alone does not alter production behavior.
+- `CONSOLE_ASSERTION_ISSUER`/`CONSOLE_ASSERTION_AUDIENCE` are only read and
+  validated when `CONSOLE_ASSERTION_ENABLED=true`
+  (`backend/cmd/api/runtime.go`'s `loadConsoleAssertionRuntimeConfig`) --
+  an operator who never turns the feature on needs no valid value for either.
+- `CONSOLE_ASSERTION_KEYRING_FILE` (host path, required with no default, same
+  convention as `SOURCE_TRUST_CONFIG_FILE`/`ADMIN_SETTINGS_BOOTSTRAP_FILE`
+  above) binds read-only to the fixed container path
+  `/config/console-assertion-keyring.json`, which `CONSOLE_ASSERTION_KEYS_
+  FILE` also names as a literal -- the two must always match exactly.
+
+**Before the first `docker compose ... up -d --no-build` that includes this
+compose change**, the host file named by `CONSOLE_ASSERTION_KEYRING_FILE` must exist
+as a plain file, even while the feature stays disabled: Docker creates an
+empty *directory* at a bind-mount source that does not exist yet, and once a
+container has been created against a directory-shaped mount, turning
+`CONSOLE_ASSERTION_ENABLED` on later needs a full container recreate (not
+merely a restart) to pick up a real file in its place. `deploy/roll-
+forward.sh` checks for this itself and creates an empty placeholder file
+only if none exists yet (it never overwrites a file that is already there);
+this is purely mechanical and independent of whether the real reviewed
+keyring has been generated -- see the enable order below for when the
+placeholder is actually replaced with real key material. An empty file is
+intentionally not a valid enabled-mode keyring: `CONSOLE_ASSERTION_ENABLED
+=true` with zero trusted keys fails the process closed at startup rather
+than silently accepting every assertion as invalid forever.
+
+**Enable order** (CR-0006 phase 2; full detail and audit-evidence steps live
+in the platform repo's `docs/superpowers/plans/2026-09-03-cr0006-phase2-
+rollout.md`, steps 1/3/4/5):
+
+1. Generate the signing keypair on the platform side, review the public key
+   record, and copy the identical JSON entry into both repositories'
+   `contracts/auth/console-assertion-keyring.v1.json`.
+2. Install the reviewed manifest at the exact `CONSOLE_ASSERTION_KEYRING_
+   FILE` host path (`install -m 0444 -o root -g root`), replacing the empty
+   placeholder above -- confirm `sha256sum` matches the reviewed repository
+   file before proceeding.
+3. Enable the platform-side signer first (`XM_INVOICE_CONSOLE_ASSERTION_
+   ENABLED=true` and its issuer/audience/key-ref variables on
+   `platform-api`), confirm `console_assertion_signer_loaded` in its startup
+   log.
+4. Only then set `CONSOLE_ASSERTION_ENABLED=true` on the invoice side and
+   restart `api`; keep `OIDC_ADMIN_LOGIN_ENABLED=true` throughout this step
+   -- OIDC stays the working fallback during the canary.
+5. Canary a real console login end to end (see `docs/handoffs/XM-INV-
+   CONSOLE-ASSERT.md`'s "Production rollout" for the exact confirmation
+   checklist) before running the identity migration (XM-INV-IDENTITY-
+   MIGRATE) and, only after that and a clean full release cycle, setting
+   `OIDC_ADMIN_LOGIN_ENABLED=false` (a separate, later slice -- see the
+   platform plan's steps 4/5).
+
+**Rollback:** flip the flag that was most recently changed back to its prior
+value and restart `api` -- `CONSOLE_ASSERTION_ENABLED=false` alone fully
+restores today's OIDC-only behavior with zero effect on Keycloak; if
+`OIDC_ADMIN_LOGIN_ENABLED` was already set to `false` in some later release,
+set it back to `true` and restart instead. Neither direction requires a
+migration or a schema change; see section 12 below.
+
 ## 5. Central Keycloak reference deployment
 
 This section is optional if an existing IdP meets the same contract.
@@ -2128,7 +2194,11 @@ keys. After traffic is accepted:
   deployment-before `PUBLIC TEMPORARY` baseline. Use legacy reconcile only when
   Bridge V4 was never installed;
 - OIDC configuration rollback re-enables prior login methods but must not
-  delete IdP bindings or silently merge accounts.
+  delete IdP bindings or silently merge accounts;
+- console-assertion rollback (CR-0006, section 4.1): flip whichever of
+  `CONSOLE_ASSERTION_ENABLED`/`OIDC_ADMIN_LOGIN_ENABLED` was most recently
+  changed back to its prior value and restart `api`; zero migration,
+  zero schema change, Keycloak unaffected either direction.
 
 ## 13. Final go/no-go
 

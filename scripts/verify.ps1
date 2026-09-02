@@ -151,6 +151,7 @@ $productionEnv = @{
     ADMIN_SETTINGS_BOOTSTRAP_FILE = (Join-Path $projectRoot 'deploy\admin-settings.bootstrap.example.json')
     SOURCE_TRUST_CONFIG_FILE = (Join-Path $projectRoot 'deploy\source-trust.example.json')
     SOURCE_INSTANCES_CONFIG_FILE = (Join-Path $projectRoot 'deploy\source-instances.example.json')
+    CONSOLE_ASSERTION_KEYRING_FILE = (Join-Path $projectRoot 'contracts\auth\console-assertion-keyring.v1.json')
     INVOICE_EDGE_SUBNET = '172.30.239.0/28'
     INVOICE_DB_SUBNET = '172.30.240.0/28'
     INVOICE_APP_SUBNET = '172.30.241.0/28'

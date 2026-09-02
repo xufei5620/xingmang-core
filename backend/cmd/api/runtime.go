@@ -288,28 +288,9 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	// as a fixed value, not a new env var, so there is exactly one place
 	// this number is decided rather than two that could drift apart.
 	consoleAssertionRateLimiter := auth.NewLoginRateLimiter(20, time.Minute)
-	var consoleAssertionKeyring *auth.ConsoleAssertionKeyring
-	var consoleAssertionCfg auth.ConsoleAssertionConfig
-	if consoleAssertionEnabled {
-		consoleAssertionCfg = auth.ConsoleAssertionConfig{
-			Issuer:   os.Getenv("CONSOLE_ASSERTION_ISSUER"),
-			Audience: env("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1"),
-		}
-		if err = consoleAssertionCfg.Validate(); err != nil {
-			return appRuntime{}, fmt.Errorf("console assertion config: %w", err)
-		}
-		keysFilePath := strings.TrimSpace(os.Getenv("CONSOLE_ASSERTION_KEYS_FILE"))
-		if keysFilePath == "" {
-			return appRuntime{}, errors.New("CONSOLE_ASSERTION_KEYS_FILE is required when CONSOLE_ASSERTION_ENABLED=true")
-		}
-		keysFileBytes, readErr := readBoundedConfigFile(keysFilePath, 256<<10)
-		if readErr != nil {
-			return appRuntime{}, fmt.Errorf("read CONSOLE_ASSERTION_KEYS_FILE: %w", readErr)
-		}
-		consoleAssertionKeyring, err = auth.LoadConsoleAssertionKeyringJSON(keysFileBytes)
-		if err != nil {
-			return appRuntime{}, fmt.Errorf("load console assertion keyring: %w", err)
-		}
+	consoleAssertionKeyring, consoleAssertionCfg, err := loadConsoleAssertionRuntimeConfig(consoleAssertionEnabled)
+	if err != nil {
+		return appRuntime{}, err
 	}
 	productionAuth := &httpapi.ProductionAuth{
 		Sessions: sessions, BindingHasher: bindingHasher,
@@ -468,6 +449,52 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	}
 	closeOnError = false
 	return appRuntime{API: api, AuthMode: "oidc", SourceMode: "agent", Workers: workers, close: store.Close}, nil
+}
+
+// loadConsoleAssertionRuntimeConfig is the pure config-loading decision
+// extracted from buildProductionRuntime so the "off means untouched" contract
+// is table-testable without a database (same extraction pattern as
+// eligibilityProjectionReady below, XM-INV-READY-PENDING).
+//
+// When enabled is false it must read neither CONSOLE_ASSERTION_ISSUER/
+// CONSOLE_ASSERTION_AUDIENCE nor the CONSOLE_ASSERTION_KEYS_FILE path, and
+// must not touch the filesystem at all -- an operator who has never turned
+// this feature on needs no valid keys file to exist. This matters concretely
+// for docker-compose.prod.yml's CONSOLE_ASSERTION_KEYRING_FILE bind mount
+// (XM-INV-CONSOLE-ASSERT-DEPLOY): the mounted path may be an empty
+// placeholder file, or briefly absent before deploy/roll-forward.sh's own
+// preflight creates one, for every release where this flag stays false.
+//
+// When enabled is true, a missing/empty/malformed keys file must still fail
+// the process closed (auth.LoadConsoleAssertionKeyringJSON already refuses an
+// empty manifest -- "at least one key" -- by design, see its own doc
+// comment): silently starting with zero trusted keys would make the
+// exchange endpoint reject every assertion forever instead of the operator
+// noticing at startup that the real reviewed manifest was never installed.
+func loadConsoleAssertionRuntimeConfig(enabled bool) (*auth.ConsoleAssertionKeyring, auth.ConsoleAssertionConfig, error) {
+	if !enabled {
+		return nil, auth.ConsoleAssertionConfig{}, nil
+	}
+	cfg := auth.ConsoleAssertionConfig{
+		Issuer:   os.Getenv("CONSOLE_ASSERTION_ISSUER"),
+		Audience: env("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1"),
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, auth.ConsoleAssertionConfig{}, fmt.Errorf("console assertion config: %w", err)
+	}
+	keysFilePath := strings.TrimSpace(os.Getenv("CONSOLE_ASSERTION_KEYS_FILE"))
+	if keysFilePath == "" {
+		return nil, auth.ConsoleAssertionConfig{}, errors.New("CONSOLE_ASSERTION_KEYS_FILE is required when CONSOLE_ASSERTION_ENABLED=true")
+	}
+	keysFileBytes, readErr := readBoundedConfigFile(keysFilePath, 256<<10)
+	if readErr != nil {
+		return nil, auth.ConsoleAssertionConfig{}, fmt.Errorf("read CONSOLE_ASSERTION_KEYS_FILE: %w", readErr)
+	}
+	keyring, err := auth.LoadConsoleAssertionKeyringJSON(keysFileBytes)
+	if err != nil {
+		return nil, auth.ConsoleAssertionConfig{}, fmt.Errorf("load console assertion keyring: %w", err)
+	}
+	return keyring, cfg, nil
 }
 
 func validateIssuerReadiness(settings adminsettings.Settings) error {

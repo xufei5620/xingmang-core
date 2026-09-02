@@ -3,8 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -346,5 +354,125 @@ func TestRunWorkerLogsProcessedCountAlongsideError(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("log missing %q: %s", want, logText)
 		}
+	}
+}
+
+// testConsoleAssertionKeyJSON mirrors auth's unexported wire shape for
+// contracts/auth/console-assertion-keyring.v1.json (see console_assertion.go)
+// -- redefined here since the real type is unexported and this package
+// cannot import it, only build an equivalent JSON document by hand.
+type testConsoleAssertionKeyJSON struct {
+	KeyID       string `json:"key_id"`
+	Algorithm   string `json:"algorithm"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
+	Purpose     string `json:"purpose"`
+	Protocol    string `json:"protocol"`
+	ValidFrom   string `json:"valid_from"`
+	ValidUntil  string `json:"valid_until"`
+}
+
+// writeTestConsoleAssertionKeyringFile writes a single valid, freshly
+// generated Ed25519 trust record to a temp file and returns its path. Every
+// keypair used here is generated at test-run time, never a literal committed
+// key (matching this codebase's existing console-assertion test discipline).
+func writeTestConsoleAssertionKeyringFile(t *testing.T, dir string) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test ed25519 key: %v", err)
+	}
+	sum := sha256.Sum256(pub)
+	raw, err := json.Marshal([]testConsoleAssertionKeyJSON{{
+		KeyID:       "2026-09-test",
+		Algorithm:   "Ed25519",
+		PublicKey:   base64.StdEncoding.EncodeToString(pub),
+		Fingerprint: hex.EncodeToString(sum[:]),
+		Purpose:     "console_admin_assertion_signing",
+		Protocol:    "xm-console-assertion-v1",
+		ValidFrom:   "2020-01-01T00:00:00Z",
+		ValidUntil:  "2099-01-01T00:00:00Z",
+	}})
+	if err != nil {
+		t.Fatalf("marshal test keyring: %v", err)
+	}
+	path := filepath.Join(dir, "console-assertion-keyring.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write test keyring file: %v", err)
+	}
+	return path
+}
+
+func TestLoadConsoleAssertionRuntimeConfigDisabledNeverTouchesEnvOrFilesystem(t *testing.T) {
+	// docker-compose.prod.yml's CONSOLE_ASSERTION_KEYRING_FILE bind mount
+	// (XM-INV-CONSOLE-ASSERT-DEPLOY) may point at an absent or empty host
+	// path for every release where this flag stays false. Deliberately set
+	// garbage/absent values for all three variables this function would need
+	// if it actually read them, so this test fails loudly if the "disabled
+	// means untouched" guard is ever removed or weakened.
+	t.Setenv("CONSOLE_ASSERTION_ISSUER", "")
+	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "")
+	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
+
+	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(false)
+	if err != nil {
+		t.Fatalf("disabled config load must never fail, got: %v", err)
+	}
+	if keyring != nil {
+		t.Fatalf("disabled config load must return a nil keyring, got %v", keyring)
+	}
+	if cfg != (auth.ConsoleAssertionConfig{}) {
+		t.Fatalf("disabled config load must return a zero-value config, got %+v", cfg)
+	}
+}
+
+func TestLoadConsoleAssertionRuntimeConfigEnabledLoadsValidKeyring(t *testing.T) {
+	keysPath := writeTestConsoleAssertionKeyringFile(t, t.TempDir())
+	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
+	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
+	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", keysPath)
+
+	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if keyring.Len() != 1 {
+		t.Fatalf("expected exactly one trusted key, got %d", keyring.Len())
+	}
+	if cfg.Issuer != "https://console.example.test" || cfg.Audience != "xingmang-console-assertion-v1" {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadConsoleAssertionRuntimeConfigEnabledRequiresKeysFilePath(t *testing.T) {
+	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
+	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
+	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", "")
+
+	if _, _, err := loadConsoleAssertionRuntimeConfig(true); err == nil ||
+		!strings.Contains(err.Error(), "CONSOLE_ASSERTION_KEYS_FILE is required") {
+		t.Fatalf("expected a required-keys-file error, got: %v", err)
+	}
+}
+
+func TestLoadConsoleAssertionRuntimeConfigEnabledFailsClosedOnEmptyKeysFile(t *testing.T) {
+	// Simulates the exact Docker bind-mount footgun the compose change
+	// guards against: an empty placeholder file at the mounted path
+	// (deploy/roll-forward.sh creates one only when nothing exists yet)
+	// must never be silently accepted as "zero trusted keys" once the flag
+	// is actually turned on -- an operator who flips
+	// CONSOLE_ASSERTION_ENABLED before the real reviewed manifest is
+	// installed must see a loud startup failure, not a verifier that
+	// silently rejects every assertion forever.
+	emptyPath := filepath.Join(t.TempDir(), "console-assertion-keyring.json")
+	if err := os.WriteFile(emptyPath, nil, 0o600); err != nil {
+		t.Fatalf("write empty test keys file: %v", err)
+	}
+	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
+	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
+	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", emptyPath)
+
+	if _, _, err := loadConsoleAssertionRuntimeConfig(true); err == nil {
+		t.Fatal("expected an empty keys file to fail closed when the flag is enabled")
 	}
 }

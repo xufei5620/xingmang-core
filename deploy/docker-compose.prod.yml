@@ -232,6 +232,20 @@ services:
       OIDC_TOKEN_AUTH_METHOD: client_secret_basic
       OIDC_LOGOUT_TOKEN_MAX_AGE: ${OIDC_LOGOUT_TOKEN_MAX_AGE:-10m}
       OIDC_MAX_HTTP_RESPONSE_BYTES: ${OIDC_MAX_HTTP_RESPONSE_BYTES:-1048576}
+      # CR-0006 (XM-INV-CONSOLE-ASSERT / XM-INV-CONSOLE-ASSERT-DEPLOY): the
+      # xingmang platform console can sign a short-lived admin login
+      # credential in place of the OIDC redirect above. Both flags default to
+      # today's behavior (OIDC stays the sole active admin login path) --
+      # flipping CONSOLE_ASSERTION_ENABLED and later OIDC_ADMIN_LOGIN_ENABLED
+      # follows the ordered rollout in docs/PRODUCTION-RUNBOOK.md and the
+      # platform repo's CR-0006 phase 2 plan, never both at once. See the
+      # CONSOLE_ASSERTION_KEYRING_FILE volume below: it is a hard startup
+      # precondition only once CONSOLE_ASSERTION_ENABLED=true.
+      OIDC_ADMIN_LOGIN_ENABLED: ${OIDC_ADMIN_LOGIN_ENABLED:-true}
+      CONSOLE_ASSERTION_ENABLED: ${CONSOLE_ASSERTION_ENABLED:-false}
+      CONSOLE_ASSERTION_ISSUER: ${CONSOLE_ASSERTION_ISSUER:-}
+      CONSOLE_ASSERTION_AUDIENCE: ${CONSOLE_ASSERTION_AUDIENCE:-xingmang-console-assertion-v1}
+      CONSOLE_ASSERTION_KEYS_FILE: /config/console-assertion-keyring.json
       # User-facing login (CR-0004/XM-INV-LOGIN): the invoice-system backend
       # forwards submitted credentials to the platform's own login endpoint
       # over HTTPS and never stores or logs the password. These base URLs are
@@ -278,6 +292,7 @@ services:
       - clamav_database:/clamav-db:ro
       - invoice_pdf_scanner_socket:/scanner:ro
       - ${SOURCE_TRUST_CONFIG_FILE:?set SOURCE_TRUST_CONFIG_FILE}:/config/source-trust.json:ro
+      - ${CONSOLE_ASSERTION_KEYRING_FILE:?set CONSOLE_ASSERTION_KEYRING_FILE}:/config/console-assertion-keyring.json:ro
     depends_on:
       postgres:
         condition: service_healthy

@@ -8,7 +8,11 @@
 # Preconditions (this script checks them and refuses otherwise):
 #   - /root/invoice-system/app/releases/<sha>/{source,.env.production} exist;
 #   - .env.production names an INVOICE_IMAGE_TAG whose nine images are loaded;
-#   - a fresh pre-deploy backup exists (BACKUP_MAX_AGE_MINUTES, default 120).
+#   - a fresh pre-deploy backup exists (BACKUP_MAX_AGE_MINUTES, default 120);
+#   - if .env.production sets CONSOLE_ASSERTION_KEYRING_FILE (CR-0006,
+#     XM-INV-CONSOLE-ASSERT-DEPLOY), its parent directory already exists and,
+#     if the file itself is still missing, this script creates it empty (see
+#     the preflight below) so Compose never binds a directory in its place.
 #
 # Order and why (see docs/PRODUCTION-RUNBOOK.md, "Cutover ordering"):
 #   1. idp, 2. main, 3. sources  -- Compose recreates only what changed;
@@ -40,6 +44,28 @@ done
 newest_backup=$(ls -t /root/invoice-system/backups/invoice-*.sha256.sig 2>/dev/null | head -1 || true)
 if [[ -z "$newest_backup" ]] || (( $(( ( $(date +%s) - $(stat -c %Y "$newest_backup") ) / 60 )) > backup_max_age )); then
   echo "no signed backup newer than ${backup_max_age} minutes; take one first" >&2; exit 2
+fi
+
+# CR-0006 (XM-INV-CONSOLE-ASSERT-DEPLOY): docker-compose.prod.yml's api
+# service now bind-mounts CONSOLE_ASSERTION_KEYRING_FILE read-only. Compose
+# creates an empty DIRECTORY at a bind-mount source that does not exist yet
+# when a container is first created for it, silently turning the mount into
+# the wrong type -- a later flip of CONSOLE_ASSERTION_ENABLED would then need
+# a full container recreate, not just a restart, to pick up the real file.
+# Pre-create an empty placeholder FILE here so every `up -d` below always
+# binds a file, regardless of whether the real reviewed keyring has been
+# installed yet. This does not weaken the fail-closed contract: the variable
+# itself is still required with no default (Compose refuses to start
+# otherwise), and CONSOLE_ASSERTION_ENABLED stays false until the real keys
+# file replaces this placeholder (see docs/PRODUCTION-RUNBOOK.md's
+# console-assertion section for the full enable order).
+keyring_file=$(sed -n 's/^CONSOLE_ASSERTION_KEYRING_FILE=//p' "$env_file")
+if [[ -n "$keyring_file" ]]; then
+  test -d "$(dirname "$keyring_file")" || { echo "CONSOLE_ASSERTION_KEYRING_FILE parent directory missing: $(dirname "$keyring_file")" >&2; exit 2; }
+  if [[ ! -e "$keyring_file" ]]; then
+    : > "$keyring_file"
+    echo "created empty console-assertion keyring placeholder (feature stays off until the real manifest is installed): $keyring_file"
+  fi
 fi
 
 compose() { docker compose --env-file "$env_file" -f "$deploy_dir/$1" up -d --no-build; }
