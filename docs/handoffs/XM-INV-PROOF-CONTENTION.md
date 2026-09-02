@@ -359,3 +359,12 @@ run `gofmt -w` anywhere, repo-wide or otherwise, per the task's instruction.
    minutes) should be operator-configurable rather than compile-time constants, if production
    experience with this incident class suggests different values are needed per source or per
    account tier.
+4. **Resolved by XM-INV-READY-PENDING** (2026-09-02): this backoff, once live, meant a job could
+   legitimately sit `BALANCE_PROOF_PENDING` past `/readyz`'s 15-minute `OldestPending` window
+   (`created_at` never resets while a job keeps failing the proof check), tripping readiness even
+   though every attempt was succeeding on schedule — hit in production exactly as predicted here.
+   `EligibilityProjectionHealth` now excludes an actively-backed-off `BALANCE_PROOF_PENDING` job
+   from `OldestPending` entirely (tracked separately as `ProofPending`/`OldestProofPending`, with a
+   rate-limited Warn log if it waits over an hour) and switched `OldestPending` itself from
+   `created_at` to `updated_at` for the jobs that remain in it. See
+   `docs/handoffs/XM-INV-READY-PENDING.md`.

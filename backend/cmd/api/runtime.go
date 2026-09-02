@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"invoice-system/backend/internal/adminsettings"
@@ -313,6 +314,11 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if len(trustedProxies) == 0 {
 		return appRuntime{}, errors.New("production trusted proxy CIDRs are required")
 	}
+	// One instance for the process lifetime: the Readiness closure below
+	// calls warnIfStale on every /readyz evaluation, and the rate limit
+	// (eligibilityProofPendingWarnInterval) only works if state persists
+	// across calls instead of being reset per-request.
+	eligibilityProofPendingWarnings := &eligibilityProofPendingWarner{}
 	api, err := httpapi.NewWithConfig(appService, httpapi.Config{
 		AuthMode: "oidc", SourceMode: "agent", AdminIPAllowlist: settings.AdminCIDRs,
 		BreakGlassCIDRs: breakGlass, TrustedProxies: trustedProxies,
@@ -350,9 +356,10 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			if healthErr != nil {
 				return healthErr
 			}
-			if eligibilityHealth.Failed > 0 ||
-				!eligibilityHealth.OldestPending.IsZero() && time.Since(eligibilityHealth.OldestPending) > 15*time.Minute {
-				return errors.New("invoice eligibility projection is unhealthy")
+			readinessNow := time.Now().UTC()
+			eligibilityProofPendingWarnings.warnIfStale(eligibilityHealth, readinessNow)
+			if readinessErr := eligibilityProjectionReady(eligibilityHealth, readinessNow); readinessErr != nil {
+				return readinessErr
 			}
 			if readinessErr := validateSourceRuntimeReadiness(sourceHealth.Report); readinessErr != nil {
 				return readinessErr
@@ -389,6 +396,76 @@ func validateIssuerReadiness(settings adminsettings.Settings) error {
 		return application.ErrIssuerNotConfigured
 	}
 	return nil
+}
+
+// eligibilityProjectionStuckAfter bounds EligibilityProjectionHealth's
+// OldestPending (a job making no real progress: claimed, failed, or queued
+// for a reason other than an actively-scheduled BALANCE_PROOF_PENDING
+// backoff -- see that struct's doc comment in postgresstore/consumption.go).
+// A job legitimately waiting on a balance proof never counts toward
+// OldestPending and so never trips this on its own, however long it waits;
+// eligibilityProofPendingWarnAge below is its own, non-blocking signal for
+// that case.
+const eligibilityProjectionStuckAfter = 15 * time.Minute
+
+// eligibilityProjectionReady is the pure decision extracted from the
+// Readiness closure in buildProductionRuntime so it is table-testable
+// without a database (XM-INV-READY-PENDING).
+func eligibilityProjectionReady(health postgresstore.EligibilityProjectionHealth, now time.Time) error {
+	if health.Failed > 0 {
+		return errors.New("invoice eligibility projection is unhealthy")
+	}
+	if !health.OldestPending.IsZero() && now.Sub(health.OldestPending) > eligibilityProjectionStuckAfter {
+		return errors.New("invoice eligibility projection is unhealthy")
+	}
+	return nil
+}
+
+// eligibilityProofPendingWarnAge/-Interval bound the operations-visibility
+// Warn log for balance-proof-pending jobs that have been waiting a long
+// time. This never affects readiness (see eligibilityProjectionReady) --
+// it exists only so a source stream that stays behind for hours is visible
+// in application logs, not discoverable only by querying the database. The
+// interval rate-limits it: a /readyz probe firing every few seconds must
+// not spam this line on every single evaluation once the age threshold is
+// crossed.
+const (
+	eligibilityProofPendingWarnAge      = 60 * time.Minute
+	eligibilityProofPendingWarnInterval = 5 * time.Minute
+)
+
+// shouldWarnProofPending is eligibilityProofPendingWarner's decision, pulled
+// out as a pure function (health/now/lastWarnedAt in, bool out) so the rate
+// limit's boundary is table-testable without touching the mutex or slog.
+func shouldWarnProofPending(health postgresstore.EligibilityProjectionHealth, now, lastWarnedAt time.Time) bool {
+	if health.ProofPending <= 0 || health.OldestProofPending.IsZero() {
+		return false
+	}
+	if now.Sub(health.OldestProofPending) <= eligibilityProofPendingWarnAge {
+		return false
+	}
+	return lastWarnedAt.IsZero() || now.Sub(lastWarnedAt) >= eligibilityProofPendingWarnInterval
+}
+
+// eligibilityProofPendingWarner holds the one piece of state
+// shouldWarnProofPending's rate limit needs across readiness evaluations.
+// One instance is shared for the life of the process (see its construction
+// in buildProductionRuntime); the mutex guards concurrent /readyz requests.
+type eligibilityProofPendingWarner struct {
+	mu     sync.Mutex
+	lastAt time.Time
+}
+
+func (w *eligibilityProofPendingWarner) warnIfStale(health postgresstore.EligibilityProjectionHealth, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !shouldWarnProofPending(health, now, w.lastAt) {
+		return
+	}
+	w.lastAt = now
+	slog.Warn("invoice eligibility projection has balance-proof-pending jobs waiting a long time",
+		"proof_pending", health.ProofPending,
+		"oldest_proof_pending_age", now.Sub(health.OldestProofPending).Round(time.Second).String())
 }
 
 func validateSourceRuntimeReadiness(report postgresstore.SourceHealthReport) error {
