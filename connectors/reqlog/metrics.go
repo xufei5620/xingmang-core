@@ -247,8 +247,13 @@ func (r *MetricsReader) DailyStats(ctx context.Context, source string, at time.T
 //
 // 按目录名剪枝的做法与 fileClient.ListRequests 的已知取舍同源（见该方法
 // 注释）：目录按 CST 分天，过滤边界按 UTC 毫秒时间戳，为了不在换算里丢
-// 数据，本函数枚举窗口起止之间**全部**跨越到的 CST 日历日目录，而不是
-// 只看 since/until 各自的那一天——"宁可多扫，不可漏扫"（宪法 1 条）。
+// 数据，本函数枚举窗口起止之间**全部**跨越到的 CST 日历日目录（见
+// spanningDayDirs），而不是只看 since/until 各自的那一天——
+// "宁可多扫，不可漏扫"（宪法 1 条）。
+//
+// 目录枚举逻辑与 WindowAssurance（XM-ASSURE0）共用 spanningDayDirs——
+// 两者都要回答「这个窗口跨了哪些天的目录」，抽成包级函数后避免同一段
+// 日期算术在两处各写一份、迟早漂开（宪法 4 条）。
 func (r *MetricsReader) WindowStats(ctx context.Context, source string, since, until time.Time) (WindowStats, error) {
 	if err := ctx.Err(); err != nil {
 		return WindowStats{}, err
@@ -259,33 +264,8 @@ func (r *MetricsReader) WindowStats(ctx context.Context, source string, since, u
 	sinceMs := since.UTC().UnixMilli()
 	untilMs := until.UTC().UnixMilli()
 
-	dirs := []string{reqlogformat.DayDir(since)}
-	if last := reqlogformat.DayDir(until); last != dirs[0] {
-		dirs = append(dirs, last)
-	}
-	// 24 小时窗口最多跨 2 个 CST 日历日；本函数保持通用，窗口跨度超过一个
-	// 自然日时补齐首尾之间的全部 CST 日历日目录，防止漏扫中间那些天。
-	if until.Sub(since) > 24*time.Hour {
-		cur := since.In(reqlogformat.CST)
-		cur = time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, reqlogformat.CST).Add(24 * time.Hour)
-		for cur.Before(until) {
-			dd := reqlogformat.DayDir(cur)
-			found := false
-			for _, existing := range dirs {
-				if existing == dd {
-					found = true
-					break
-				}
-			}
-			if !found {
-				dirs = append(dirs, dd)
-			}
-			cur = cur.Add(24 * time.Hour)
-		}
-	}
-
 	var out WindowStats
-	for _, dd := range dirs {
+	for _, dd := range spanningDayDirs(since, until) {
 		if err := ctx.Err(); err != nil {
 			return WindowStats{}, err
 		}

@@ -41,6 +41,14 @@ export function upstreamCreatePath(platform: string): string {
   return `/platforms/${encodeURIComponent(platform)}/suppliers/new`;
 }
 
+/** 渠道保障页签的「保障概览」子页签（XM-ASSURE0），按平台/模型的真实被动
+ *  指标就在这里——渠道详情页给不出按渠道拆分的数字（见 ChannelDetailBody
+ *  的「渠道保障」区块），但可以指路到平台整体真实数据，而不是让人以为
+ *  这条能力完全不存在。 */
+export function channelAssuranceOverviewPath(platform: string): string {
+  return `/platforms/${encodeURIComponent(platform)}?tab=model&sub=overview`;
+}
+
 /** 渠道详情。
  *
  *  2026-09-02 起不再是纯 UI-only 壳：渠道目录本身(`GET /api/v1/platforms/{p}/channels`,
@@ -444,14 +452,25 @@ function ChannelDetailBody({
           </DetailList>
         </DetailSection>
 
-        <DetailSection title="渠道保障" hint="模型检测、成功率与延迟属于独立保障观测">
+        <DetailSection
+          title="渠道保障"
+          hint="被动指标（XM-ASSURE0）只能按平台/模型统计，无法归因到单一渠道；模型检测（主动探测）另见下方说明"
+        >
           <DetailList>
-            <UnavailableFact label="最近保障状态" />
-            <UnavailableFact label="24h 成功率" />
-            <UnavailableFact label="最近模型检测" />
-            <UnavailableFact label="已验证模型数" />
-            <UnavailableFact label="已配置模型数" />
-            <UnavailableFact label="最近检测时间" />
+            <UnavailableFact
+              label="本渠道 24h 成功率"
+              hint="请求审计（reqlog）落盘格式本身不采集渠道/上游字段——不是这一片没接，是这条数据源从写入那一刻起就没有这个维度，任何按渠道拆分的数字都是编造。平台整体按模型拆分的真实被动指标见下方链接"
+            />
+            <FactLink label="平台被动指标" to={channelAssuranceOverviewPath(platform)}>
+              查看 {label} 渠道保障 · 保障概览 →
+            </FactLink>
+            <UnavailableFact
+              label="最近模型检测结论"
+              hint="主动探测（声明 → 探针 → 结论）需要独立 Action 且必须带 Kill Switch（宪法 26 条），划给 XM-ASSURE1，尚未实现"
+            />
+            <UnavailableFact label="已验证模型数" hint="同上，等 XM-ASSURE1" />
+            <UnavailableFact label="已配置模型数" hint="同上，等 XM-ASSURE1" />
+            <UnavailableFact label="最近检测时间" hint="同上，等 XM-ASSURE1" />
           </DetailList>
         </DetailSection>
       </div>
@@ -521,6 +540,25 @@ function UnavailableFact({ label, hint }: { label: string; hint?: string }) {
         未接入
       </Badge>
     </Fact>
+  );
+}
+
+/** 与 Fact 同一个 dt/dd 结构，dd 内容换成到别处真实数据的链接——用在
+ *  「这一条渠道给不出这个数字，但平台整体有」的场景，比单纯的未接入更
+ *  诚实：既不冒充有数据，也不让人以为这条能力完全不存在。 */
+function FactLink({ label, to, children }: { label: string; to: string; children: ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-fg-muted">{label}</dt>
+      <dd className="mt-0.5 min-w-0 text-sm">
+        <Link
+          to={to}
+          className="font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          {children}
+        </Link>
+      </dd>
+    </div>
   );
 }
 

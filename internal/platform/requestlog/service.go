@@ -190,6 +190,15 @@ func (s *Service) Content(ctx context.Context, in ContentInput) (reqlog.RequestL
 // 而对一个**存在但没有请求数据**的平台（CPA、开票）同样是 404——
 // 从这个端点的角度，那个平台的请求资源确实不存在。
 func (s *Service) resolvePlatform(platform string) (string, error) {
+	return ResolvePlatform(platform)
+}
+
+// ResolvePlatform 是 resolvePlatform 的导出版本，供其余同样消费 reqlog
+// 磁盘数据的只读 Query（例如 XM-ASSURE0 的 internal/platform/channelassurance）
+// 复用同一份「未知平台 / 没有请求数据的平台一律 404」判定与措辞，不在两处
+// 各写一份容易漂开的翻译（宪法 4 条：同一个业务动作只实现一次）。两个 Query
+// 的平台覆盖范围本就相同——都来自同一条 reqlog 磁盘数据，只是聚合维度不同。
+func ResolvePlatform(platform string) (string, error) {
 	source, err := reqlog.ParseSource(platform)
 	if err != nil {
 		return "", action.NewError(action.CodeNotRegistered,

@@ -61,6 +61,12 @@ type Deps struct {
 	// 一个没部署它的环境不该因此起不来。而挂了 nil 却照样注册路由更糟——
 	// 那会让端点存在、一调就 500，前端分不清「没接」和「坏了」。
 	RequestLogs RequestLogQuerier
+	// ChannelAssurance 供「渠道保障 · 保障概览 / 历史记录」两个只读端点
+	// （XM-ASSURE0 第一片，被动指标）。与 RequestLogs 同一条纪律，甚至更窄
+	// ——它只在 reqlog **file 模式**下才有值：这批聚合直接扫描记录代理落盘
+	// 的 index.jsonl（见 connectors/reqlog 的 MetricsReader），fake/real 两种
+	// 模式都没有可供扫描的真实磁盘数据，为 nil 时两个端点不挂载。
+	ChannelAssurance ChannelAssuranceQuerier
 	// PlatformUsers 为 nil 时「用户管理」端点不挂载（XM-0046）。
 	// 与 RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
 	PlatformUsers          PlatformUsersQuerier
@@ -252,6 +258,22 @@ func NewRouter(d Deps) http.Handler {
 				api.With(RequireScope(requestlog.ScopeContentRead)).
 					Get("/platforms/{platform}/requests/{requestID}",
 						GetPlatformRequestContentHandler(d.RequestLogs))
+			}
+
+			// 渠道保障 · 保障概览 / 历史记录（XM-ASSURE0 第一片，被动指标）。
+			// 复用 requestlog.ScopeRead（request.read）而不是新开 scope——这批
+			// 数据是同一条 reqlog 磁盘来源的聚合视图，泄漏面与「请求」列表端点
+			// 相同（都是元数据聚合，不含正文），团队交接明确要求能复用就不新增。
+			//
+			// 没有配 reqlog file 模式的部署整组不挂载：与 RequestLogs 同一条
+			// 纪律，端点不存在（404）比端点存在却一调就 500 诚实。
+			if d.ChannelAssurance != nil {
+				api.With(RequireScope(requestlog.ScopeRead)).
+					Get("/platforms/{platform}/assurance/overview",
+						GetPlatformAssuranceOverviewHandler(d.ChannelAssurance))
+				api.With(RequireScope(requestlog.ScopeRead)).
+					Get("/platforms/{platform}/assurance/history",
+						GetPlatformAssuranceHistoryHandler(d.ChannelAssurance))
 			}
 
 			// 被管平台的终端用户清单（XM-0046）。**不复用 ops.read**：
