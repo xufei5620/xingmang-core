@@ -140,7 +140,7 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     expect(within(typeDetail).getByText("订阅账号")).not.toBeNull();
   });
 
-  it("「容量与调度」一节：字段未接前，7 个显式未接入，「用量窗口」对上游渠道类型显示不适用（不是未接入）", async () => {
+  it("「容量与调度」一节：字段未接前，8 个显式未接入，「用量窗口」对上游渠道类型显示不适用（不是未接入）", async () => {
     // fixture 里的绑定账号默认 access_method=upstream_key → 类型是"上游渠道"，
     // 上游渠道没有用量窗口这个概念，这一格必须显示"不适用"而不是"未接入"——
     // 两者含义不同：未接入=字段还没接、不适用=这一类行本来就不该有这个字段
@@ -154,10 +154,10 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     const section = screen.getByRole("heading", { name: "容量与调度" }).closest("section");
     expect(section).not.toBeNull();
     const withinSection = within(section as HTMLElement);
-    for (const label of ["容量 / 并发", "调度", "今日统计", "用量窗口", "最近使用", "创建时间", "过期时间", "代理"]) {
+    for (const label of ["容量 / 并发", "分组", "调度", "今日统计", "用量窗口", "最近使用", "创建时间", "过期时间", "代理"]) {
       expect(withinSection.getByText(label)).not.toBeNull();
     }
-    expect(withinSection.getAllByText("未接入").length).toBe(7);
+    expect(withinSection.getAllByText("未接入").length).toBe(8);
     expect(withinSection.getByText("不适用")).not.toBeNull();
   });
 
@@ -171,7 +171,7 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     await screen.findByText("OpenAI A");
     const section = screen.getByRole("heading", { name: "容量与调度" }).closest("section");
     const withinSection = within(section as HTMLElement);
-    expect(withinSection.getAllByText("未接入").length).toBe(8);
+    expect(withinSection.getAllByText("未接入").length).toBe(9);
     expect(withinSection.queryByText("不适用")).toBeNull();
   });
 
@@ -204,6 +204,7 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
           expires_at: "2026-12-31T00:00:00Z",
           kind: "subscription",
           vendor: "官方直连-OpenAI",
+          group: "assistants,vip",
         }),
       ],
     });
@@ -214,6 +215,7 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     );
     await screen.findByText("OpenAI A");
     expect(await screen.findByText("3 / 10")).not.toBeNull();
+    expect(screen.getByText("assistants,vip")).not.toBeNull();
     expect(screen.getByText(/已开启 · 优先级 2/)).not.toBeNull();
     expect(screen.getByText(/120 次 · 98.5% · ¥5.00/)).not.toBeNull();
     expect(screen.getByText(/42%，重置于 2026-09-03T00:00:00Z/)).not.toBeNull();
@@ -223,6 +225,106 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
     expect(screen.getByText("2026-12-31T00:00:00Z")).not.toBeNull();
     expect(screen.getByText("官方直连-OpenAI")).not.toBeNull();
     expect(screen.getAllByText("订阅账号").length).toBeGreaterThan(0);
+  });
+
+  it("NewAPI 渠道：「分组」显示真实值，与「上游分组」（登记簿字段）互不干扰（XM-CHAN-GROUP0）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/api/v1/services")) {
+          return Promise.resolve(
+            fakeResponse({ items: [{ ...ACTIVE_SERVICE, id: "svc-n1", service_type: "newapi", instance_id: "newapi-a" }] }),
+          );
+        }
+        if (url.includes("/platforms/newapi/channels")) {
+          return Promise.resolve(
+            fakeResponse({
+              service: { id: "svc-n1", service_type: "newapi", instance_id: "newapi-a", environment: "development" },
+              inventory: {
+                state: "ok", source: "newapi-a", observed_at: "2026-08-29T01:00:00Z",
+                complete: true, truncated: false, reported_count: 1, fetched_count: 1,
+                coverage_partial: false, evidence: "reported_count",
+              },
+              from: "2026-08-29", to: "2026-08-29",
+              items: [
+                {
+                  channel_ref: { service_id: "svc-n1", external_channel_id: "n-1" },
+                  name: "Claude 主渠道",
+                  binding: null,
+                  candidate: { state: "unmapped", evidence_status: "insufficient", upstream_account_ids: [], reason_codes: [], platform_assignment_missing: false, inventory_unknown: false },
+                  economics: null, economics_state: "unknown", conflicts: [],
+                  health: null, models: null, assurance: null, runway: null,
+                  observed: { source: "newapi-connector", observed_at: "2026-08-29T01:00:00Z", is_stale: false },
+                  group: "default,vip",
+                },
+              ],
+              runway_coverage: { total: 0, known: 0, reasons: {} }, next_cursor: null,
+            }),
+          );
+        }
+        return Promise.resolve(fakeResponse({ items: [] }));
+      }),
+    );
+    renderQueryPage(
+      "/platforms/newapi/upstream/detail/n-1",
+      <ChannelDetailPage />,
+      "/platforms/:serviceType/upstream/detail/:channelId",
+    );
+    await screen.findByText("Claude 主渠道");
+    const section = screen.getByRole("heading", { name: "容量与调度" }).closest("section") as HTMLElement;
+    // 真实分组值出现在「容量与调度」区块——这条渠道没有绑定上游账号，
+    // 顶部「上游分组」StatTile 与「渠道与映射」区块的「上游分组实际名」
+    // 都应显式未接入，证明两个维度确实互相独立，不是同一个值被显示了两次
+    expect(within(section).getByText("default,vip")).not.toBeNull();
+    expect(screen.getAllByText("未接入").length).toBeGreaterThan(0);
+  });
+
+  it("NewAPI 渠道：「分组」为 null 时显示 NewAPI 专属原因，不是 Sub2API 那条（XM-CHAN-GROUP0）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/api/v1/services")) {
+          return Promise.resolve(
+            fakeResponse({ items: [{ ...ACTIVE_SERVICE, id: "svc-n1", service_type: "newapi", instance_id: "newapi-a" }] }),
+          );
+        }
+        if (url.includes("/platforms/newapi/channels")) {
+          return Promise.resolve(
+            fakeResponse({
+              service: { id: "svc-n1", service_type: "newapi", instance_id: "newapi-a", environment: "development" },
+              inventory: {
+                state: "ok", source: "newapi-a", observed_at: "2026-08-29T01:00:00Z",
+                complete: true, truncated: false, reported_count: 1, fetched_count: 1,
+                coverage_partial: false, evidence: "reported_count",
+              },
+              from: "2026-08-29", to: "2026-08-29",
+              items: [
+                {
+                  channel_ref: { service_id: "svc-n1", external_channel_id: "n-1" },
+                  name: "Claude 主渠道",
+                  binding: null,
+                  candidate: { state: "unmapped", evidence_status: "insufficient", upstream_account_ids: [], reason_codes: [], platform_assignment_missing: false, inventory_unknown: false },
+                  economics: null, economics_state: "unknown", conflicts: [],
+                  health: null, models: null, assurance: null, runway: null,
+                  observed: { source: "newapi-connector", observed_at: "2026-08-29T01:00:00Z", is_stale: false },
+                },
+              ],
+              runway_coverage: { total: 0, known: 0, reasons: {} }, next_cursor: null,
+            }),
+          );
+        }
+        return Promise.resolve(fakeResponse({ items: [] }));
+      }),
+    );
+    renderQueryPage(
+      "/platforms/newapi/upstream/detail/n-1",
+      <ChannelDetailPage />,
+      "/platforms/:serviceType/upstream/detail/:channelId",
+    );
+    await screen.findByText("Claude 主渠道");
+    const section = screen.getByRole("heading", { name: "容量与调度" }).closest("section") as HTMLElement;
+    const groupTerm = within(section).getByText("分组", { selector: "dt" });
+    expect(groupTerm.getAttribute("title")).toMatch(/这条渠道没有配置任何分组/);
   });
 
   it("未绑定的渠道：上游映射卡片显示候选/未映射状态，可以确认绑定", async () => {

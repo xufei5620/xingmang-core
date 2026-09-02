@@ -42,6 +42,14 @@ const FIELD_NULL_REASONS = {
     sub2api: "登记簿没有这个时间戳",
     newapi: "NewAPI 的到期概念（Codex OAuth 令牌过期）编码在读不到的凭据字段里",
   },
+  /** XM-CHAN-GROUP0：NewAPI 渠道原生的分组字段（用于路由/计费分组）,
+   *  不要与「上游分组」（登记簿字段 upstream_group，两个平台通用、来自绑定
+   *  账号）混淆——那是完全不同的一个维度，有自己独立的展示位置（详情页顶部
+   *  StatTile 与「渠道与映射」区块），不共用这份原因。 */
+  group: {
+    sub2api: "Sub2API 账号没有分组这个概念——分组是 NewAPI 渠道独有的路由/计费维度",
+    newapi: "这条渠道没有配置任何分组（上游 group 字段为空）",
+  },
 } as const;
 
 export type ChannelFieldWithNullReason = keyof typeof FIELD_NULL_REASONS;

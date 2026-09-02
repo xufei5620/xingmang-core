@@ -790,13 +790,6 @@ function badgeTone(tone: HealthRow["tone"]): "success" | "warning" | "danger" | 
 const NEWAPI_VENDOR_NULL_REASON =
   "这个渠道的类型不在 NewAPI 供应商映射表内（渠道目录契约 vendor 字段查表查不到，需要人工同步映射表）";
 
-/** 「分组」列没有任何数据源：渠道目录契约（XM-CHAN-FIELDS0）的 14 个扩展
- *  字段里没有分组维度。NewAPI 上游确实有原生 Group 字段（model/channel.go
- *  的 group 列，路由用），但今天没有任何连接器/契约把它读出来——摆位置显示
- *  未接入，不编数字（宪法 12 条）。 */
-const NEWAPI_GROUP_NULL_REASON =
-  "NewAPI 渠道原生有分组字段（用于路由），但渠道目录契约（XM-CHAN-FIELDS0）没有采集这一维度，暂无数据源";
-
 /** 「状态」列没有匹配到 newapi.channels.status 指标记录时的原因——覆盖两种
  *  情况（整条指标没采到 / 这一条渠道单独没匹配上），不细分是为了不过度
  *  声称精度：两种情况给运营的下一步动作是一样的（等下一轮采集）。 */
@@ -839,6 +832,12 @@ function channelCatalogFreshness(page: PlatformChannelPage, now: number): Freshn
  *  位置不给数字」升级成真数据，并且每行链接到渠道详情页（原型
  *  `data-go="newapi/upstream/detail/<id>"`，`channelDetailPath` 与
  *  ManagedChannelTable/ChannelDetailPage 同一个路由，点进去是同一个页面）。
+ *
+ *  XM-CHAN-GROUP0：「分组」列同样换成真数据——NewAPI 连接器现在从
+ *  `Channel.Group` 采集这一维度（`row.group`），不再是恒定摆位置的
+ *  未接入。null 时用共享的 `channelFieldNullReason("group", "newapi")`
+ *  给出这一条渠道具体的原因（通常是"没有配置任何分组"），不是"没有数据源"
+ *  ——数据源已经有了，只是这一行的值恰好是空。
  *
  *  「状态」列刻意继续用 newapi.channels.status 指标的 enabled/error_rate_ppm,
  *  不改用目录的 row.status 字符串——那是 XM-CHAN-MERGE0 记录在案的刻意取舍
@@ -934,7 +933,6 @@ function RealNewApiChannelHealthCard({
               <span>来源 {page.inventory.source || "未声明"}</span>
               <span>· 覆盖 {page.items.length} 条渠道目录</span>
             </div>
-            <p className="text-xs text-fg-muted">{NEWAPI_GROUP_NULL_REASON}</p>
           </>
         ) : null}
       </ApiStateView>
@@ -942,7 +940,7 @@ function RealNewApiChannelHealthCard({
   );
 }
 
-/** 渠道健康表的一行：渠道名链到详情页，上游/成功率来自目录，分组恒未接入,
+/** 渠道健康表的一行：渠道名链到详情页，上游/分组/成功率均来自渠道目录,
  *  状态来自按 id 关联到的指标行（可能没有匹配，见 NEWAPI_STATUS_NULL_REASON）。 */
 function NewApiChannelHealthRow({
   row,
@@ -972,8 +970,8 @@ function NewApiChannelHealthRow({
       <td className="px-2 py-1 text-xs text-fg">
         {row.vendor ? row.vendor : <HealthUnavailableCell reason={NEWAPI_VENDOR_NULL_REASON} />}
       </td>
-      <td className="px-2 py-1 text-xs">
-        <HealthUnavailableCell reason={NEWAPI_GROUP_NULL_REASON} />
+      <td className="px-2 py-1 text-xs text-fg">
+        {row.group ? row.group : <HealthUnavailableCell reason={channelFieldNullReason("group", "newapi")} />}
       </td>
       <td className="px-2 py-1 text-xs text-fg">
         {successRate.text ?? <HealthUnavailableCell reason={successRate.reason ?? ""} />}
@@ -1063,7 +1061,7 @@ function LegacyNewApiChannelHealthCard({ item }: { item: MetricItem | undefined 
                   <HealthUnavailableCell reason="没有 serviceId 可用（0 个或多个已登记 service），无法读取真实渠道目录来解析渠道 ↔ 上游映射" />
                 </td>
                 <td className="px-2 py-1 text-xs">
-                  <HealthUnavailableCell reason="上游分组字段未接入" />
+                  <HealthUnavailableCell reason="没有 serviceId 可用（0 个或多个已登记 service），无法读取真实渠道目录来解析分组" />
                 </td>
                 <td className="px-2 py-1 text-xs">
                   <HealthUnavailableCell reason="没有 serviceId 可用（0 个或多个已登记 service），无法读取真实渠道目录来解析平台成功率" />
@@ -1092,10 +1090,12 @@ function LegacyNewApiChannelHealthCard({ item }: { item: MetricItem | undefined 
       {/* 原型这张表的上游 / 分组 / 成功率列保留位置，但这条兜底路径没有
           serviceId、读不到真实渠道目录；每个单元格显式写「未接入」，避免
           空白被误读。恰好一个已登记且 active 的 service 时会走
-          RealNewApiChannelHealthCard，那条路径上游/成功率是真数据。 */}
+          RealNewApiChannelHealthCard，那条路径上游/分组/成功率都是真数据
+          （分组字段本身 XM-CHAN-GROUP0 已经接上，这条兜底路径缺的是
+          serviceId，不是数据源）。 */}
       <p className="text-xs text-fg-muted">
         上游、分组与成功率三列暂未接入：这个环境没有恰好一个已登记且运行中的 NewAPI
-        service，无法读取真实渠道目录；分组字段本身也还没有任何数据源。当前可用的是启停与错误率。
+        service，无法读取真实渠道目录。当前可用的是启停与错误率。
       </p>
     </Card>
   );
