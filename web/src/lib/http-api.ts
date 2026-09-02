@@ -397,7 +397,21 @@ function responseError(
   );
 }
 
+// CR-0007 problem three: these four resolve-precondition codes each get a
+// specific, correctly-actionable Chinese sentence instead of falling into
+// the generic 409/5xx branches below (which read as "refresh and retry" --
+// misleading when the server correctly blocked an unsafe resolution, since
+// retrying does nothing until the real underlying condition changes). Every
+// other status/code keeps the exact fallback behavior it had before.
 function friendlyError(status: number, code: string, message: string) {
+  if (code === "ELIGIBILITY_SOURCE_STALE")
+    return "来源数据尚未同步新鲜，暂时无法判定是否可以安全解冻，请稍后重试。";
+  if (code === "ELIGIBILITY_PROJECTION_PENDING")
+    return "该账号存在尚未完成的资格重算任务，需等待任务结束后才能解冻。";
+  if (code === "ELIGIBILITY_REFUND_EXPOSED")
+    return "该账号存在未结案的退款或红冲风险，须先在退款与红冲队列处理后才能解冻。";
+  if (code === "ELIGIBILITY_EVALUATION_UNMATCHED")
+    return "最新余额对账结论尚未匹配，暂不满足安全解冻条件。";
   if (status === 401) return "登录状态已失效，请重新登录。";
   if (status === 403) return "当前账号没有执行此操作的权限。";
   if (status === 409) return "数据已经发生变化，请刷新后重试。";

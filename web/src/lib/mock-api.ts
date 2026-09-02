@@ -928,7 +928,7 @@ export const mockInvoiceApi: InvoiceApiClient = {
       if (freeze.id !== freezeId) return freeze;
       if (freeze.reason === "SOURCE_REFUND")
         throw new InvoiceApiError("退款冻结必须先在退款与红冲队列结案。", {
-          code: "CONFLICT",
+          code: "ELIGIBILITY_REFUND_EXPOSED",
           status: 409,
         });
       if (freeze.status !== "open" || freeze.version !== input.version)

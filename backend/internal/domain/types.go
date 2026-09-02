@@ -348,4 +348,21 @@ var (
 	// job, not a processing failure: reschedule shortly, do not spend
 	// retry/attempt budget on it.
 	ErrAccountLockBusy = errors.New("account is locked by a concurrent projection job")
+
+	// The following four sentinels (CR-0007 problem three) distinguish
+	// ResolveEligibilityFreeze's previously-undifferentiated ErrSourceUnavailable/
+	// ErrInvalidState outcomes so the HTTP layer and the admin UI can tell an
+	// operator which of four independent safety preconditions is unmet,
+	// instead of one generic "unavailable"/"conflict" message. Each wraps the
+	// sentinel it used to be reported as (via fmt.Errorf("%w", ...)), so any
+	// existing errors.Is(err, domain.ErrSourceUnavailable) / errors.Is(err,
+	// domain.ErrInvalidState) check keeps matching unchanged; only
+	// ResolveEligibilityFreeze's own caller needs to check these specific
+	// values to get the finer-grained reason. This does not add, remove or
+	// reorder any judgment ResolveEligibilityFreeze makes -- it only narrows
+	// which sentinel value an already-existing return point reports.
+	ErrEligibilitySourceStale         = fmt.Errorf("%w: one or more of the five source streams are not fresh enough to resolve an eligibility freeze", ErrSourceUnavailable)
+	ErrEligibilityProjectionPending   = fmt.Errorf("%w: an eligibility projection job is still pending for this account", ErrInvalidState)
+	ErrEligibilityRefundExposed       = fmt.Errorf("%w: the account has open refund exposure", ErrInvalidState)
+	ErrEligibilityEvaluationUnmatched = fmt.Errorf("%w: the latest balance evaluation is not a matched or safe outcome", ErrInvalidState)
 )

@@ -223,6 +223,15 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		return EligibilityFreeze{}, err
 	}
 	if err = assertSourceFreshTx(ctx, tx, sourceID, in.FreshnessPolicy); err != nil {
+		// CR-0007 problem three: report the specific sentinel only for this
+		// one call site (ResolveEligibilityFreeze's own admin-facing failure
+		// surface). assertSourceFreshTx is also called from the unrelated
+		// invoice-submission paths (requests.go, store.go), which must keep
+		// seeing the generic domain.ErrSourceUnavailable -- so the remap
+		// happens here, not inside assertSourceFreshTx itself.
+		if errors.Is(err, domain.ErrSourceUnavailable) {
+			return EligibilityFreeze{}, domain.ErrEligibilitySourceStale
+		}
 		return EligibilityFreeze{}, err
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,47))`, accountID); err != nil {
@@ -251,7 +260,10 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		return EligibilityFreeze{}, domain.ErrVersionConflict
 	}
 	if item.FreezeReason == "SOURCE_REFUND" {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+		// This is the same refund-exposure family the unsafeRefund query
+		// below also detects (its first EXISTS clause matches this exact
+		// row), just short-circuited before running that heavier query.
+		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
 	}
 	var unsafeRefund, projectionJob bool
 	if err = tx.QueryRow(ctx, `
@@ -263,8 +275,16 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 			EXISTS(SELECT 1 FROM eligibility_projection_jobs j WHERE j.external_account_id=$1)`, accountID).Scan(&unsafeRefund, &projectionJob); err != nil {
 		return EligibilityFreeze{}, err
 	}
-	if unsafeRefund || projectionJob {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+	// CR-0007 problem three: unsafeRefund folds four refund-exposure
+	// sub-cases into one boolean (operator remediation is identical for all
+	// four, per the change request), so it maps to one code distinct from
+	// projectionJob's -- unchanged from today, this if/else only changes
+	// which sentinel each branch reports, not whether either one fires.
+	if unsafeRefund {
+		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
+	}
+	if projectionJob {
+		return EligibilityFreeze{}, domain.ErrEligibilityProjectionPending
 	}
 	var evaluation string
 	err = tx.QueryRow(ctx, `
@@ -291,13 +311,13 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		) latest
 		ORDER BY latest.as_of DESC,latest.source_sequence DESC,latest.id DESC LIMIT 1`, accountID).Scan(&evaluation)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+		return EligibilityFreeze{}, domain.ErrEligibilityEvaluationUnmatched
 	}
 	if err != nil {
 		return EligibilityFreeze{}, err
 	}
 	if evaluation != "matched" && evaluation != "positive_classified_non_cash" {
-		return EligibilityFreeze{}, domain.ErrInvalidState
+		return EligibilityFreeze{}, domain.ErrEligibilityEvaluationUnmatched
 	}
 	before := item
 	now := time.Now().UTC()

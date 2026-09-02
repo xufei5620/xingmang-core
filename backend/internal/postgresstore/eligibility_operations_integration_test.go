@@ -118,7 +118,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `INSERT INTO balance_reconciliation_checkpoints(id,source_instance_id,external_account_id,external_event_id,checkpoint_id,checkpoint_kind,as_of,balance_service_units,expected_service_units,difference_service_units,unit_code,cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,source_cursor,stream_watermark_at,source_revision_hash,observed_at) SELECT '62000000-0000-4000-8000-000000000002',source_instance_id,external_account_id,'ops-checkpoint-event-2','ops-checkpoint-2',checkpoint_kind,as_of,balance_service_units,expected_service_units,difference_service_units,unit_code,cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence+1,'balance:2',stream_watermark_at,$2,observed_at FROM balance_reconciliation_checkpoints WHERE id=$1`, f.checkpointID, strings.Repeat("2", 64)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilityEvaluationUnmatched) {
 		t.Fatalf("unevaluated latest checkpoint resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `INSERT INTO balance_checkpoint_evaluations(id,checkpoint_id,projection_version,expected_service_units,difference_service_units,evaluation_status) VALUES('63000000-0000-4000-8000-000000000002','62000000-0000-4000-8000-000000000002',1,0,0,'matched')`); err != nil {
@@ -127,7 +127,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `UPDATE source_ingest_state SET projection_status='blocked' WHERE source_instance_id=$1 AND stream_id='usage'`, f.sourceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrSourceUnavailable) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilitySourceStale) {
 		t.Fatalf("unready source resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `UPDATE source_ingest_state SET projection_status='healthy' WHERE source_instance_id=$1 AND stream_id='usage'`, f.sourceID); err != nil {
@@ -136,7 +136,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `INSERT INTO eligibility_projection_jobs(external_account_id,requested_through) VALUES($1,now())`, f.accountID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilityProjectionPending) {
 		t.Fatalf("pending job resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1`, f.accountID); err != nil {
@@ -145,7 +145,7 @@ func TestEligibilityFreezeAdminPageAndSafeResolution(t *testing.T) {
 	if _, err = store.pool.Exec(ctx, `UPDATE funding_lots SET refund_frozen=TRUE WHERE id=$1`, f.lotID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err = store.ResolveEligibilityFreeze(ctx, in); !errors.Is(err, domain.ErrEligibilityRefundExposed) {
 		t.Fatalf("refund-frozen lot resolve err=%v", err)
 	}
 	if _, err = store.pool.Exec(ctx, `UPDATE funding_lots SET refund_frozen=FALSE WHERE id=$1`, f.lotID); err != nil {
@@ -207,7 +207,7 @@ func TestEligibilityFreezeSourceRefundNeverUsesGenericResolution(t *testing.T) {
 	if _, err := store.pool.Exec(ctx, `UPDATE eligibility_freezes SET freeze_reason='SOURCE_REFUND' WHERE id=$1`, f.freezeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ResolveEligibilityFreeze(ctx, validFreezeResolution(f)); !errors.Is(err, domain.ErrInvalidState) {
+	if _, err := store.ResolveEligibilityFreeze(ctx, validFreezeResolution(f)); !errors.Is(err, domain.ErrEligibilityRefundExposed) {
 		t.Fatalf("SOURCE_REFUND generic resolution err=%v", err)
 	}
 }
