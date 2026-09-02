@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"math/big"
 	"net/url"
@@ -24,6 +25,35 @@ type SourceEventProcessor struct {
 	Service   *Service
 	BatchSize int
 	Now       func() time.Time
+	// Logger receives structured failure logs (e.g. a projection error about
+	// to be marked PROJECTION_FAILED/dead, XM-INV-PREANCHOR-USAGE
+	// requirement 2). Nil falls back to slog.Default(), matching
+	// sourceingest.Receiver's Logger convention.
+	Logger *slog.Logger
+}
+
+func (p SourceEventProcessor) logger() *slog.Logger {
+	if p.Logger != nil {
+		return p.Logger
+	}
+	return slog.Default()
+}
+
+// logProjectionFailure records a source event's projection failure (source,
+// stream and event ids plus the error text -- never payload contents)
+// whenever RunOnce is about to mark an event PROJECTION_FAILED.
+// MarkSourceEventFailed is the single call site responsible for both the
+// resulting 'failed' and 'dead' outcomes (it decides between them
+// internally off the claim's own attempt_count), so this one log call site
+// covers both, matching the task's "marked PROJECTION_FAILED or dead"
+// requirement without needing to know here which one it will become.
+func logProjectionFailure(logger *slog.Logger, claim postgresstore.SourceEventClaim, cause error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("source event projection failed",
+		"source_instance_id", claim.SourceInstanceID, "stream_id", claim.StreamID,
+		"event_id", claim.EventID, "error", cause)
 }
 
 type sourceDependencyWait struct {
@@ -143,6 +173,11 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 			if hint != nil {
 				hintAccountID = hint.accountID
 			}
+			// XM-INV-PREANCHOR-USAGE 2: log before marking, since this one
+			// call site is where an event becomes PROJECTION_FAILED or,
+			// after enough attempts, dead -- see logProjectionFailure's doc
+			// comment. Never logs payload contents, only ids and the error.
+			logProjectionFailure(p.logger(), claim, processErr)
 			if err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute), hintAccountID); err != nil {
 				recordIsolated("mark source event failed", err)
 				continue

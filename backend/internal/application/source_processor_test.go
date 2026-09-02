@@ -1,7 +1,9 @@
 package application
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"math"
 	"strings"
 	"testing"
@@ -36,6 +38,44 @@ func TestStrictSourcePayloadRejectsUnknownAndTrailingData(t *testing.T) {
 	if err := strictJSON([]byte(`{} {}`), &payload); err == nil {
 		t.Fatal("trailing source payload JSON was accepted")
 	}
+}
+
+// TestLogProjectionFailureLogsSourceStreamEventAndErrorNotPayload covers the
+// standalone logging helper RunOnce calls right before marking an event
+// PROJECTION_FAILED (the same call site MarkSourceEventFailed uses whether
+// the event ends up 'failed' or, after enough attempts, 'dead' -- see
+// MarkSourceEventFailed's own attempt_count>=8 branch in source_sync.go).
+// Exercised directly against a hand-built claim rather than through RunOnce:
+// Service.store is a concrete *postgresstore.Store, not an interface, so a
+// true fake-store unit test of the full RunOnce loop is not practical
+// without a real database (see TestSourceProjectionWorkerLogsProjectionFailure
+// in service_integration_test.go for the real end-to-end wiring check).
+func TestLogProjectionFailureLogsSourceStreamEventAndErrorNotPayload(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	claim := postgresstore.SourceEventClaim{
+		SourceInstanceID:  "10000000-0000-4000-8000-000000000001",
+		StreamID:          "usage",
+		EventID:           "82000000-0000-4000-8000-000000000001",
+		PayloadCiphertext: []byte("must-never-appear-in-the-log-line"),
+	}
+	cause := errors.New("boom: deterministic unit code mismatch")
+	logProjectionFailure(logger, claim, cause)
+	out := buf.String()
+	for _, want := range []string{claim.SourceInstanceID, claim.StreamID, claim.EventID, cause.Error()} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log line missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "must-never-appear-in-the-log-line") {
+		t.Fatalf("log line leaked payload contents: %s", out)
+	}
+}
+
+func TestLogProjectionFailureDefaultsToSlogDefaultWithoutPanicking(t *testing.T) {
+	// A nil logger must not panic -- matches sourceingest.Receiver's
+	// Logger-falls-back-to-slog.Default() convention.
+	logProjectionFailure(nil, postgresstore.SourceEventClaim{SourceInstanceID: "x", StreamID: "usage", EventID: "y"}, errors.New("boom"))
 }
 
 func TestBalanceCheckpointDependencyClassificationIsExact(t *testing.T) {

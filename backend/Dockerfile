@@ -17,7 +17,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-pdf-policy-check ./cmd/pdf-policy-check \
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-pdf-scanner ./cmd/pdf-scanner \
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-archive-verify ./cmd/archive-verify \
-    && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-oidc-preflight ./cmd/oidc-preflight
+    && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-oidc-preflight ./cmd/oidc-preflight \
+    && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-eligibility-repair ./cmd/eligibility-repair
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS api-base
 
@@ -49,7 +50,7 @@ RUN /usr/local/bin/invoice-pdf-policy-check --self-test \
 FROM api-base AS tools
 RUN apk add --no-cache qpdf=12.3.2-r0 \
     && qpdf --version | grep -F 'qpdf version 12.3.2'
-COPY --from=build /out/invoice-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-oidc-logout-retention /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-oidc-preflight /usr/local/bin/
+COPY --from=build /out/invoice-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-oidc-logout-retention /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-oidc-preflight /out/invoice-eligibility-repair /usr/local/bin/
 COPY migrations /app/migrations
 
 ENV MIGRATIONS_DIR=/app/migrations

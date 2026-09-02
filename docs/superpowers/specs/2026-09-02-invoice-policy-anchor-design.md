@@ -6,7 +6,10 @@ superseded an earlier DELETE-and-reinsert draft that turned out to be blocked by
 foreign keys, and a since-corrected "cutover_at < policy start" trigger-signal draft that was not
 actually a distinguishing condition). See **2.0** for the schema decision, and
 `docs/handoffs/XM-INV-POLICY-ANCHOR.md` for the full implementation record (files changed, tests,
-exact gate results).
+exact gate results). **2.6 (added 2026-09-02, slice XM-INV-PREANCHOR-USAGE) closes a production
+gap this design left open**: the projection path (`observeEligibilityFact`, not `2.1`'s bootstrap
+path) still froze a POLICY_ANCHOR account's own pre-anchor usage/credit facts as `SOURCE_GAP` —
+see **2.6** and `docs/handoffs/XM-INV-PREANCHOR-USAGE.md`.
 **Owner decision:** 开票只针对 2026-09-01 00:00 (Asia/Shanghai) 之后的真实充值；此前流水对开票无用。
 **Replaces:** the idea of re-running `cutover-init` — rejected because `CaptureCutover`
 snapshots the live database at run time and cannot produce a historical (9/1) baseline.
@@ -201,6 +204,53 @@ kinds truly legacy" rule (2.1) rather than being weakened to keep an old asserti
 already freezes on payload drift / conflict). Pure transient failures (retry budget not yet
 exhausted) still hold the cycle. A `dead` event without a freeze freezes the account with
 reason `EVENT_DEAD` so the ledger stays honest.
+
+### 2.6 Pre-anchor usage/credit facts must not freeze SOURCE_GAP (added 2026-09-02, slice
+XM-INV-PREANCHOR-USAGE, production incident)
+
+**Gap.** RC68 (this design) went live 2026-09-01T23:58Z. At 2026-09-02T02:00:13Z the Sub2API
+balances cycle bootstrapped 106 accounts to `bootstrap_kind='POLICY_ANCHOR'` via 2.1's checkpoint
+path. Within the same second, a Sub2API usage-stream daily reconcile replay (~99,900 usage
+records) delivered pre-anchor usage/credit facts for those same 106 accounts —
+`event_time` after the invoice policy start but at or before each account's own fresh
+`cutover_at`. **2.1/2.2/2.3 only handle this timing at bootstrap time** (a no-state account) and
+at identity-wake time (`RequeueSourceDependency`'s bulk skip) — neither covers a fact that arrives
+through the *ordinary projection path*, `postgresstore/consumption.go`'s `observeEligibilityFact`,
+for an account that **already has** `POLICY_ANCHOR` state. That function's
+`!in.EventTime.After(account.CutoverAt)` check (present before this design, meant to catch a real
+gap in a legacy account's replayed history) treated every one of these facts as `SOURCE_GAP`,
+freezing the account and returning `ErrConflict`; the source events retried every 5 minutes and
+went `dead` after 8 attempts. Production result: 106 open `SOURCE_GAP` freezes, ~100 open
+`EVENT_DEAD` freezes, ~102 dead/failed `source_ingest_events`, and the readiness gate returning
+503 (`cmd/api/runtime.go`'s `validateSourceIngestRuntimeReadiness` fails closed whenever any dead
+event exists).
+
+**Why this is not evidence of a gap.** A `POLICY_ANCHOR` account's `cutover_at` is a reconciliation
+checkpoint's own `as_of` (2.1) — an observed fact, not a replayed history boundary the way a
+`SIGNED_CUTOVER`/`POST_CUTOVER_REPLAY` account's cutover is. A fact at or before it can never be
+attributed to any ledger baseline, by construction, whether or not it also predates the account's
+own policy start. `SOURCE_GAP` correctly still applies to a legacy account's fact at or before its
+cutover (real replayed history, so a missing predecessor really is a gap) — this section changes
+nothing about that case.
+
+**Fix.** `observeEligibilityFact`'s `SOURCE_GAP` branch now checks `account.BootstrapKind` first:
+for `POLICY_ANCHOR`, the fact is skipped (one audit row, `eligibility.usage.pre_anchor_skipped` /
+`eligibility.credit.pre_anchor_skipped`, no freeze, `nil` returned so the caller marks the source
+event processed) instead of frozen. No schema change — consistent with 2.1/2.2's own precedent, a
+skipped fact is represented by its audit row only, never persisted as a `source_usage_events`/
+`source_credit_events` row. Legacy bootstrap kinds are unchanged.
+
+**Production repair.** A versioned, human-approved `eligibility-repair` CLI
+(`backend/cmd/eligibility-repair`, store method `RepairPreAnchorUsageEligibility`) resolves the
+freezes and requeues the events this gap left behind, scoped precisely to the accounts and facts
+this bug — and only this bug — could have produced; a legacy account's real `SOURCE_GAP` freeze is
+never touched. See `docs/handoffs/XM-INV-PREANCHOR-USAGE.md` for the exact runbook and expected
+counts.
+
+Also added: `application/source_processor.go`'s `RunOnce` now logs (slog Warn) every projection
+failure — source/stream/event ids and the error text, never payload contents — before marking an
+event `PROJECTION_FAILED`/dead, so a future incident of this shape is visible in application logs,
+not only discoverable by querying the database.
 
 ## 3. Verification gates (all must pass before production)
 1. Unit + integration suites (full `go test -p 1 ./...` with INVOICE_TEST_DATABASE_URL). Done as
