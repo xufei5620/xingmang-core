@@ -41,23 +41,38 @@ CREATE TABLE IF NOT EXISTS core.connector_config (
     platform         text NOT NULL CHECK (platform IN ('sub2api', 'newapi')),
     environment      text NOT NULL,
     mode             text NOT NULL CHECK (mode IN ('fake', 'real')),
-    endpoint         text,
-    target_allowlist text[],
-    credential_ref   text,
-    version          int,
-    updated_at       timestamptz,
-    updated_by       text,
+    endpoint         text NOT NULL DEFAULT '',
+    target_allowlist text[] NOT NULL DEFAULT '{}',
+    credential_ref   text NOT NULL DEFAULT '',
+    version          integer NOT NULL DEFAULT 1 CHECK (version > 0),
+    updated_at       timestamptz NOT NULL,
+    updated_by       text NOT NULL,
     PRIMARY KEY (platform, environment)
 )`); err != nil {
 		t.Fatal(err)
 	}
 
-	environment := "staging" // 迁移后 environment 有 FK 到 core.environment,只能用已登记环境
+	// environment 有 FK 到 core.environment，只能用已登记环境（development/
+	// staging/production 三选一）——platform(2) x environment(3) 的键空间
+	// 小到不可能靠“挑一个没人用过的值”换隔离；其他包（如
+	// internal/platform/credentials 的 TestConnectorConfigSetAndList）
+	// 同样会写 ('sub2api','staging')，且不保证在它之后清干净。所以本用例
+	// 既要在开跑前把自己要用的键位清空一遍（不依赖表原本是空的），也要在
+	// 结束时清理，两头都做才是真正的自包含。
+	environment := "staging"
+	cleanup := func(ctx context.Context) error {
+		_, err := pool.Exec(ctx,
+			`DELETE FROM core.connector_config WHERE platform IN ('sub2api', 'newapi') AND environment = $1`,
+			environment)
+		return err
+	}
+	if err := cleanup(ctx); err != nil {
+		t.Fatalf("预清理接入配置行: %v", err)
+	}
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		if _, err := pool.Exec(cleanupCtx,
-			`DELETE FROM core.connector_config WHERE environment = $1`, environment); err != nil {
+		if err := cleanup(cleanupCtx); err != nil {
 			t.Errorf("清理接入配置行: %v", err)
 		}
 	}()
@@ -71,10 +86,17 @@ VALUES ('sub2api', $1, 'real', 'https://api.example.test', ARRAY['api.example.te
 		environment, updatedAt); err != nil {
 		t.Fatal(err)
 	}
-	// newapi 行故意把可空列全留 NULL：COALESCE 必须把它们读成空值而不是报错。
+	// newapi 行只给必填列（platform/environment/mode/updated_at/updated_by）：
+	// endpoint/target_allowlist/credential_ref/version 都吃迁移里的 DEFAULT
+	// （''/{}'/''/1），一列都不会是 NULL——migrations/000020 给这四列都上了
+	// NOT NULL DEFAULT，updated_at/updated_by 则是 NOT NULL 无默认值，必须
+	// 显式给。COALESCE 仍然保留在读取侧：它读到的是「默认值」而不是
+	// 「NULL」，这条 SELECT 对两者一视同仁，不必因为库层已经堵死 NULL
+	// 就删掉这层防御。
+	newapiUpdatedAt := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(ctx, `
-INSERT INTO core.connector_config (platform, environment, mode)
-VALUES ('newapi', $1, 'fake')`, environment); err != nil {
+INSERT INTO core.connector_config (platform, environment, mode, updated_at, updated_by)
+VALUES ('newapi', $1, 'fake', $2, 'itest')`, environment, newapiUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -97,8 +119,8 @@ VALUES ('newapi', $1, 'fake')`, environment); err != nil {
 		t.Fatalf("Get newapi: %v", err)
 	}
 	if row == nil || row.Mode != "fake" || row.Endpoint != "" || row.CredentialRef != "" ||
-		len(row.TargetAllowlist) != 0 || row.Version != 0 || !row.UpdatedAt.IsZero() {
-		t.Fatalf("NULL 列应读成空值: %+v", row)
+		len(row.TargetAllowlist) != 0 || row.Version != 1 || !row.UpdatedAt.Equal(newapiUpdatedAt) {
+		t.Fatalf("未填的可空列应读成 DEFAULT 值: %+v", row)
 	}
 
 	// 没有这一行 = (nil, nil)，不是错误。

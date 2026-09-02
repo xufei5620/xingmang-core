@@ -49,10 +49,15 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	// XM-0037c 的三张表同样要列全：amortization_loss 引用批次与代理，
 	// 批次引用代理与登记簿——TRUNCATE 要求一次列全所有引用方，
 	// 漏掉任何一张这条语句会直接报错。
+	//
+	// platform_channel_binding（XM-C-MAP2）对 upstream_account 同样是
+	// ON DELETE RESTRICT，migrations/000016 之后新增；同一条道理，漏了它
+	// TRUNCATE upstream_account 会直接报错。
 	if _, err := pool.Exec(ctx,
 		"TRUNCATE finance.balance_history, finance.amortization_loss, "+
 			"finance.subscription_cost_batch, "+
 			"finance.proxy_asset, finance.profit_daily, finance.token_map, "+
+			"finance.platform_channel_binding, "+
 			"finance.upstream_account"); err != nil {
 		t.Fatalf("清空登记簿失败: %v", err)
 	}
