@@ -1,11 +1,20 @@
-// Command eligibility-repair implements design XM-INV-PREANCHOR-USAGE part 3:
-// a versioned, human-approved lifecycle operation that cleans up the
-// 2026-09-02 production incident's SOURCE_GAP/EVENT_DEAD freezes and stuck
-// source_ingest_events for POLICY_ANCHOR accounts, now that the projection
-// rule itself (internal/postgresstore's observeEligibilityFact) no longer
-// produces them. Defaults to --dry-run; --apply requires an operator id and
-// actually mutates the database. See docs/handoffs/XM-INV-PREANCHOR-USAGE.md
-// for the production runbook (expected counts, exact invocation order).
+// Command eligibility-repair implements two versioned, human-approved
+// lifecycle operations that clean up production incidents left behind by
+// design XM-INV-POLICY-ANCHOR, now that the underlying projection bugs are
+// fixed:
+//   - --kind=pre-anchor-usage (the default, unchanged): design
+//     XM-INV-PREANCHOR-USAGE's SOURCE_GAP/EVENT_DEAD freezes and stuck
+//     source_ingest_events for POLICY_ANCHOR accounts. See
+//     docs/handoffs/XM-INV-PREANCHOR-USAGE.md.
+//   - --kind=balance-anchor: design XM-INV-ANCHOR-BALANCE's SOURCE_GAP
+//     freezes on a POLICY_ANCHOR account's own balance_checkpoint/
+//     balance_carry_forward_proof evidence. See
+//     docs/handoffs/XM-INV-ANCHOR-BALANCE.md.
+//
+// Defaults to --dry-run; --apply requires an operator id and actually
+// mutates the database. Omitting --kind reproduces this tool's original
+// (pre-anchor-usage) behavior exactly, so any existing invocation (e.g.
+// rc70-repair.sh) keeps working unchanged.
 package main
 
 import (
@@ -29,14 +38,21 @@ import (
 	"invoice-system/backend/internal/securefields"
 )
 
-const fixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
+const (
+	kindPreAnchorUsage = "pre-anchor-usage"
+	kindBalanceAnchor  = "balance-anchor"
+
+	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
+	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
+)
 
 func main() {
 	databaseURLFile := flag.String("database-url-file", "", "absolute path to the database URL secret")
 	keyringFile := flag.String("field-keyring-file", "", "absolute path to the field encryption keyring")
 	migrationsDir := flag.String("migrations-dir", "/app/migrations", "bundled migration directory")
-	apply := flag.Bool("apply", false, "actually resolve freezes and requeue events (default is a dry run that changes nothing)")
+	apply := flag.Bool("apply", false, "actually resolve freezes (and, for pre-anchor-usage, requeue events; default is a dry run that changes nothing)")
 	operatorID := flag.String("operator-id", "", "the approving operator's admin UUID (required with --apply)")
+	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE) or balance-anchor (design XM-INV-ANCHOR-BALANCE)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")
@@ -51,13 +67,16 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, os.Stdout); err != nil {
+	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, os.Stdout); err != nil {
 		slog.Error("eligibility-repair failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID string, out io.Writer) error {
+func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, out io.Writer) error {
+	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor {
+		return fmt.Errorf("unknown --kind %q, want %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor)
+	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
 	if err != nil {
 		return fmt.Errorf("read database credential: %w", err)
@@ -79,39 +98,76 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	}
 	store := postgresstore.New(pool)
 
+	if apply && operatorID == "" {
+		return errors.New("--operator-id is required with --apply")
+	}
+	if kind == kindBalanceAnchor {
+		return runBalanceAnchor(ctx, store, apply, operatorID, keyring, out)
+	}
+	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
+}
+
+func runPreAnchorUsage(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, keyring securefields.Keyring, out io.Writer) error {
 	in := postgresstore.PreAnchorUsageRepairInput{Apply: apply, OperatorID: operatorID}
 	if apply {
-		if operatorID == "" {
-			return errors.New("--operator-id is required with --apply")
-		}
 		// Evidence and note are the same fixed text here -- an automated
 		// repair has no separate human-authored justification distinct from
 		// its own reason -- but are still encrypted and hashed
 		// independently (two ciphertexts under two AAD labels), matching the
 		// manual resolution path's column shape exactly.
-		fixedSum := sha256.Sum256([]byte(fixedResolutionNote))
-		fixedHash := hex.EncodeToString(fixedSum[:])
-		evidenceCiphertext, encErr := keyring.Encrypt([]byte(fixedResolutionNote),
-			"eligibility-repair/XM-INV-PREANCHOR-USAGE/evidence")
+		hash, evidenceCiphertext, noteCiphertext, encErr := encryptFixedResolution(keyring,
+			preAnchorUsageFixedResolutionNote, "XM-INV-PREANCHOR-USAGE")
 		if encErr != nil {
-			return fmt.Errorf("encrypt resolution evidence: %w", encErr)
+			return encErr
 		}
-		noteCiphertext, encErr := keyring.Encrypt([]byte(fixedResolutionNote),
-			"eligibility-repair/XM-INV-PREANCHOR-USAGE/note")
-		if encErr != nil {
-			return fmt.Errorf("encrypt resolution note: %w", encErr)
-		}
-		in.EvidenceHash, in.EvidenceCiphertext = fixedHash, evidenceCiphertext
-		in.NoteHash, in.NoteCiphertext = fixedHash, noteCiphertext
+		in.EvidenceHash, in.EvidenceCiphertext = hash, evidenceCiphertext
+		in.NoteHash, in.NoteCiphertext = hash, noteCiphertext
 	}
-
 	result, err := store.RepairPreAnchorUsageEligibility(ctx, in, postgresstore.AuditActor{
 		Type: "admin", ID: operatorID, Reason: "XM-INV-PREANCHOR-USAGE repair tool " + modeLabel(apply)})
 	if err != nil {
 		return fmt.Errorf("repair pre-anchor usage eligibility: %w", err)
 	}
-	printSummary(out, result)
+	printPreAnchorUsageSummary(out, result)
 	return nil
+}
+
+func runBalanceAnchor(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, keyring securefields.Keyring, out io.Writer) error {
+	in := postgresstore.BalanceAnchorRepairInput{Apply: apply, OperatorID: operatorID}
+	if apply {
+		hash, evidenceCiphertext, noteCiphertext, encErr := encryptFixedResolution(keyring,
+			balanceAnchorFixedResolutionNote, "XM-INV-ANCHOR-BALANCE")
+		if encErr != nil {
+			return encErr
+		}
+		in.EvidenceHash, in.EvidenceCiphertext = hash, evidenceCiphertext
+		in.NoteHash, in.NoteCiphertext = hash, noteCiphertext
+	}
+	result, err := store.RepairBalanceAnchorEligibility(ctx, in, postgresstore.AuditActor{
+		Type: "admin", ID: operatorID, Reason: "XM-INV-ANCHOR-BALANCE repair tool " + modeLabel(apply)})
+	if err != nil {
+		return fmt.Errorf("repair balance anchor eligibility: %w", err)
+	}
+	printBalanceAnchorSummary(out, result)
+	return nil
+}
+
+// encryptFixedResolution encrypts the same fixed note text under two AAD
+// labels (evidence and note), matching every repair kind's identical
+// column-shape requirement, and returns the shared hex hash plus both
+// ciphertexts.
+func encryptFixedResolution(keyring securefields.Keyring, note, aadPrefix string) (hash string, evidenceCiphertext, noteCiphertext []byte, err error) {
+	sum := sha256.Sum256([]byte(note))
+	hash = hex.EncodeToString(sum[:])
+	evidenceCiphertext, err = keyring.Encrypt([]byte(note), "eligibility-repair/"+aadPrefix+"/evidence")
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("encrypt resolution evidence: %w", err)
+	}
+	noteCiphertext, err = keyring.Encrypt([]byte(note), "eligibility-repair/"+aadPrefix+"/note")
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("encrypt resolution note: %w", err)
+	}
+	return hash, evidenceCiphertext, noteCiphertext, nil
 }
 
 func modeLabel(apply bool) string {
@@ -121,7 +177,7 @@ func modeLabel(apply bool) string {
 	return "dry-run"
 }
 
-func printSummary(out io.Writer, result postgresstore.PreAnchorUsageRepairResult) {
+func printPreAnchorUsageSummary(out io.Writer, result postgresstore.PreAnchorUsageRepairResult) {
 	mode := "DRY RUN (nothing was changed)"
 	if result.Applied {
 		mode = "APPLIED"
@@ -135,6 +191,22 @@ func printSummary(out io.Writer, result postgresstore.PreAnchorUsageRepairResult
 	}
 	fmt.Fprintf(out, "\n%-38s %10d %10d %10d\n", "TOTAL", result.TotalSourceGapFreezesResolved,
 		result.TotalEventDeadFreezesResolved, result.TotalEventsRequeued)
+	fmt.Fprintf(out, "\naccounts affected: %d\n", len(result.Accounts))
+}
+
+func printBalanceAnchorSummary(out io.Writer, result postgresstore.BalanceAnchorRepairResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-ANCHOR-BALANCE: %s\n\n", mode)
+	fmt.Fprintf(out, "%-38s %10s %11s %11s\n", "ACCOUNT", "SRC_GAP", "CKPT_RESET", "REACTIVATED")
+	for _, account := range result.Accounts {
+		fmt.Fprintf(out, "%-38s %10d %11d %11t\n", account.ExternalAccountID,
+			account.SourceGapFreezesResolved, account.CheckpointEvaluationsReset, account.Reactivated)
+	}
+	fmt.Fprintf(out, "\n%-38s %10d %11d\n", "TOTAL", result.TotalSourceGapFreezesResolved,
+		result.TotalCheckpointEvaluationsReset)
 	fmt.Fprintf(out, "\naccounts affected: %d\n", len(result.Accounts))
 }
 

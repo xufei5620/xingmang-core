@@ -28,6 +28,17 @@ func applyResultFixture() postgresstore.PreAnchorUsageRepairResult {
 	}
 }
 
+func balanceAnchorApplyResultFixture() postgresstore.BalanceAnchorRepairResult {
+	return postgresstore.BalanceAnchorRepairResult{
+		Applied: true,
+		Accounts: []postgresstore.BalanceAnchorRepairAccount{{
+			ExternalAccountID: "30000000-0000-4000-8000-000000000080", SourceInstanceID: "10000000-0000-4000-8000-000000000080",
+			SourceGapFreezesResolved: 3, CheckpointEvaluationsReset: 2, Reactivated: true,
+		}},
+		TotalSourceGapFreezesResolved: 3, TotalCheckpointEvaluationsReset: 2,
+	}
+}
+
 // setupRepairCLIEnv migrates a fresh isolated schema (mirroring
 // postgresstore's own integration test helpers, which this package cannot
 // import directly -- they are unexported test-file helpers in a different
@@ -72,12 +83,17 @@ func setupRepairCLIEnv(t *testing.T) (databaseURLFile, keyringFile, migrationsDi
 // together correctly. The repair logic itself (candidate selection, apply,
 // safety, idempotency) is exhaustively covered at the store layer by
 // internal/postgresstore's TestRepairPreAnchorUsageEligibility* tests.
+// Omitting --kind (the empty-string default flag.String would never
+// actually produce, since main() supplies kindPreAnchorUsage -- this test
+// passes it explicitly to exercise exactly what an existing, unmodified
+// invocation like rc70-repair.sh gets) proves the pre-anchor-usage path
+// still works unchanged.
 func TestRunDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPreAnchorUsage, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -89,31 +105,83 @@ func TestRunDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	}
 }
 
-// TestRunApplyWithoutOperatorIDIsRejected confirms --apply refuses to run
-// without an approving operator id, per the task's "human-approved" and
-// "resolved_by = a caller-supplied operator id" requirements.
-func TestRunApplyWithoutOperatorIDIsRejected(t *testing.T) {
+// TestRunBalanceAnchorDryRunAgainstEmptyDatabaseReportsNothing is the same
+// wiring smoke test for --kind=balance-anchor (design XM-INV-ANCHOR-BALANCE).
+func TestRunBalanceAnchorDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", &out)
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceAnchor, &out); err != nil {
+		t.Fatal(err)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "XM-INV-ANCHOR-BALANCE") || !strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("dry run output missing expected banner: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 0") {
+		t.Fatalf("dry run against an empty database found work: %s", printed)
+	}
+}
+
+// TestRunUnknownKindIsRejected confirms an unrecognized --kind fails
+// closed before ever opening the database.
+func TestRunUnknownKindIsRejected(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", "unknown-kind", &out)
 	if err == nil {
-		t.Fatal("--apply without --operator-id was accepted")
+		t.Fatal("unknown --kind was accepted")
 	}
 	if out.Len() != 0 {
-		t.Fatalf("rejected apply still printed output: %s", out.String())
+		t.Fatalf("rejected kind still printed output: %s", out.String())
+	}
+}
+
+// TestRunApplyWithoutOperatorIDIsRejected confirms --apply refuses to run
+// without an approving operator id, per the task's "human-approved" and
+// "resolved_by = a caller-supplied operator id" requirements -- for both
+// repair kinds.
+func TestRunApplyWithoutOperatorIDIsRejected(t *testing.T) {
+	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor} {
+		databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+		var out bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", kind, &out)
+		cancel()
+		if err == nil {
+			t.Fatalf("--apply without --operator-id was accepted for --kind=%s", kind)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("rejected apply still printed output for --kind=%s: %s", kind, out.String())
+		}
 	}
 }
 
 // TestPrintSummaryFormatsAccountsAndTotals is a pure formatting check
-// (no database) for the table printSummary emits.
+// (no database) for the table printPreAnchorUsageSummary emits.
 func TestPrintSummaryFormatsAccountsAndTotals(t *testing.T) {
 	var out bytes.Buffer
-	printSummary(&out, applyResultFixture())
+	printPreAnchorUsageSummary(&out, applyResultFixture())
 	printed := out.String()
 	for _, want := range []string{"APPLIED", "30000000-0000-4000-8000-000000000079", "TOTAL",
 		"accounts affected: 1"} {
+		if !strings.Contains(printed, want) {
+			t.Fatalf("summary output missing %q: %s", want, printed)
+		}
+	}
+}
+
+// TestPrintBalanceAnchorSummaryFormatsAccountsAndTotals is the same
+// formatting check for printBalanceAnchorSummary.
+func TestPrintBalanceAnchorSummaryFormatsAccountsAndTotals(t *testing.T) {
+	var out bytes.Buffer
+	printBalanceAnchorSummary(&out, balanceAnchorApplyResultFixture())
+	printed := out.String()
+	for _, want := range []string{"XM-INV-ANCHOR-BALANCE", "APPLIED", "30000000-0000-4000-8000-000000000080",
+		"TOTAL", "accounts affected: 1"} {
 		if !strings.Contains(printed, want) {
 			t.Fatalf("summary output missing %q: %s", want, printed)
 		}
