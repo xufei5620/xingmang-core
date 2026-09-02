@@ -1,0 +1,49 @@
+{
+  "code": 0,
+  "message": "",
+  "data": {
+    "items": [
+      {
+        "balance": 1.0,
+        "email": "52***@qq.com",
+        "id": "u_aaaa185f870148e7",
+        "last_active_at": "2026-09-02T11:59:39.556509+08:00",
+        "status": "active",
+        "username": ""
+      },
+      {
+        "balance": 1.0,
+        "email": "19***@qq.com",
+        "id": "u_c829128c3e4f043d",
+        "last_active_at": "2026-09-02T10:06:50.69135+08:00",
+        "status": "active",
+        "username": ""
+      },
+      {
+        "balance": 1.0,
+        "email": "87***@qq.com",
+        "id": "u_be730f3a05377a44",
+        "last_active_at": "2026-09-01T22:37:38.10377+08:00",
+        "status": "active",
+        "username": ""
+      },
+      {
+        "balance": 1.0,
+        "email": "15***@qq.com",
+        "id": "u_3b3e7c9f4d418d22",
+        "last_active_at": "2026-09-01T22:12:51.698793+08:00",
+        "status": "active",
+        "username": ""
+      },
+      {
+        "balance": 1.00000000,
+        "email": "72***@qq.com",
+        "id": "u_2c9c8a829bf7b0d1",
+        "last_active_at": "2026-09-01T23:06:28.305448+08:00",
+        "status": "active",
+        "username": ""
+      }
+    ],
+    "total": 2800
+  }
+}

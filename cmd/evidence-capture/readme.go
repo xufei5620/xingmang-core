@@ -206,7 +206,7 @@ func renderReqlogReadme(retention retentionEvidence, tokenEv tokenMapEvidence, a
 	fmt.Fprintln(&b, "`index_sample.redacted.jsonl` holds up to the requested `--sample-size` rows, "+
 		"newest day first. Per row: `id` -> one-way per-run hash (`rec_` + 16 hex chars), "+
 		"`client_ip` -> `connectors/reqlog.MaskIP` (the platform's own reviewed masking, keeps "+
-		"/24 or the IPv6 /48), `token_prefix` -> one-way per-run hash (`pfx_` + 12 hex chars) plus "+
+		"/24 or the IPv6 /48), `token_prefix` -> `prefix_pseudonym`, a one-way per-run hash (`pfx_` + 12 hex chars) plus "+
 		"a `username_resolved` boolean - never the prefix itself, never the resolved identity. "+
 		"`ua`, `upstream_request_id`, `resp_body_id`, `end_note`, `preview`, `path` and `method` "+
 		"are dropped entirely: none are needed for this evidence door, and `preview`/`end_note` "+

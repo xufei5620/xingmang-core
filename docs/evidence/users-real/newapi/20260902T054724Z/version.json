@@ -1,0 +1,7 @@
+{
+  "observed_at": "2026-09-02T05:47:24.845176106Z",
+  "platform": "newapi",
+  "quota_per_unit": 500000,
+  "route": "/api/status",
+  "version": "v1.0.0-rc.30"
+}

@@ -462,7 +462,7 @@ type redactedIndexRow struct {
 	OutTok           int    `json:"out_tok,omitempty"`
 	CacheTok         int    `json:"cache_tok,omitempty"`
 	ClientIPMasked   string `json:"client_ip_masked,omitempty"`
-	TokenPrefixHash  string `json:"token_prefix_hash,omitempty"`
+	TokenPrefixHash  string `json:"prefix_pseudonym,omitempty"`
 	UsernameResolved bool   `json:"username_resolved"`
 }
 
