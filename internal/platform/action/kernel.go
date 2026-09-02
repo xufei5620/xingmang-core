@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -101,6 +102,14 @@ func NewKernel(reg *Registry, runs RunStore, opts ...KernelOption) *Kernel {
 // Environment → 权限 → Schema → Handler。任何一步失败都会写 ActionRun
 // （未注册与无身份除外——那时无法确定 risk_level / principal_id 等非空字段，
 // 写入会污染审计口径）。
+//
+// Handler 失败时的错误码：若 err 的 Unwrap 链上能 errors.As 出 *Error
+// （即 Handler 自己用 NewError 做了域错误映射，如 assurance/alerts/
+// credentials/finance 等包常见的 CodeInvalidParams、CodeConflict、
+// CodePreconditionFailed），内核原样保留该 Code 与 Message——ActionRun、
+// 审计事件与对外返回的错误三处一致。只有非 *Error 的失败（裸的驱动/底层
+// 错误）才会归一成 CodeExecutionFailed 和固定文案，避免把内部细节泄漏给
+// 调用方（规格 §18.4）。
 func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 	def, handler, ok := k.registry.Lookup(req.ActionID, req.ActionVersion)
 	if !ok {
@@ -198,14 +207,24 @@ func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 	}
 
 	if err != nil {
+		code := CodeExecutionFailed
+		message := fmt.Sprintf("action %s 执行失败", def.ID)
+		var ae *Error
+		if errors.As(err, &ae) {
+			// Handler 已经做出了准确的错误码/文案判断（比如参数校验、状态冲突），
+			// 内核不能覆盖成 EXECUTION_FAILED——否则 httpapi.safeMessage 永远够不到
+			// Handler 的设计文案，调用方看到的会是错误的 HTTP 状态码和一句无意义的
+			// 通用提示。
+			code = ae.Code
+			message = ae.Message
+		}
 		run.Status = RunFailed
-		run.ErrorCode = CodeExecutionFailed
+		run.ErrorCode = code
 		k.record(ctx, run)
 		auditEvent.Succeeded = false
-		auditEvent.ErrorCode = CodeExecutionFailed
+		auditEvent.ErrorCode = code
 		k.recordAudit(ctx, auditEvent)
-		return Result{}, newError(CodeExecutionFailed,
-			fmt.Sprintf("action %s 执行失败", def.ID), err)
+		return Result{}, newError(code, message, err)
 	}
 	run.Status = RunSucceeded
 	k.record(ctx, run)
