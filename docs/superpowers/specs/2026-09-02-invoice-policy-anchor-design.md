@@ -9,7 +9,14 @@ actually a distinguishing condition). See **2.0** for the schema decision, and
 exact gate results). **2.6 (added 2026-09-02, slice XM-INV-PREANCHOR-USAGE) closes a production
 gap this design left open**: the projection path (`observeEligibilityFact`, not `2.1`'s bootstrap
 path) still froze a POLICY_ANCHOR account's own pre-anchor usage/credit facts as `SOURCE_GAP` —
-see **2.6** and `docs/handoffs/XM-INV-PREANCHOR-USAGE.md`.
+see **2.6** and `docs/handoffs/XM-INV-PREANCHOR-USAGE.md`. **2.7 (added 2026-09-03, slice
+XM-INV-ANCHOR-BALANCE) closes a second, distinct production gap**: 2.1's own claim in its
+"Carry-forward proofs" bullet below ("anchor at `account.CutoverAt`... no change needed") turned
+out to be only half true — `account.CutoverAt` was already the correct lower bound for
+`buildEligibilityProjectionTx`'s window, but `evaluatePendingBalanceEvidenceTx`'s *separate*
+trusted-interval query never recognized it as a valid interval start, so a POLICY_ANCHOR account's
+own anchor checkpoint (and everything evaluated before any later checkpoint matched) froze
+`SOURCE_GAP` — see **2.7** and `docs/handoffs/XM-INV-ANCHOR-BALANCE.md`.
 **Owner decision:** 开票只针对 2026-09-01 00:00 (Asia/Shanghai) 之后的真实充值；此前流水对开票无用。
 **Replaces:** the idea of re-running `cutover-init` — rejected because `CaptureCutover`
 snapshots the live database at run time and cannot produce a historical (9/1) baseline.
@@ -251,6 +258,88 @@ Also added: `application/source_processor.go`'s `RunOnce` now logs (slog Warn) e
 failure — source/stream/event ids and the error text, never payload contents — before marking an
 event `PROJECTION_FAILED`/dead, so a future incident of this shape is visible in application logs,
 not only discoverable by querying the database.
+
+### 2.7 A POLICY_ANCHOR account's own anchor checkpoint must be a trusted balance-evidence
+interval start (added 2026-09-03, slice XM-INV-ANCHOR-BALANCE, production incident)
+
+**Gap.** `evaluatePendingBalanceEvidenceTx` (`postgresstore/consumption.go`) reconciles every real
+balance checkpoint and carry-forward proof against `buildEligibilityProjectionTx`'s computed
+`ExpectedBalance`. When the evidence reports *more* than expected, the code needs a trusted
+interval start before it will treat the excess as an unattributed, self-healing non-cash credit
+(`positive_classified_non_cash`) instead of freezing `SOURCE_GAP` — this trust query recognized
+exactly two sources: a legacy account's `checkpoint_kind='cutover'` row, or an evidence item
+already evaluated `matched`/`positive_classified_non_cash` earlier in time. Neither exists for a
+fresh `POLICY_ANCHOR` account: its bootstrap (2.1) inserts only a `checkpoint_kind='reconciliation'`
+row (which itself needs evaluating, not a separate cutover-kind anchor) and seeds no opening
+credit the way a legacy `SIGNED_CUTOVER`/`POST_CUTOVER_REPLAY` bootstrap does. `account.CutoverAt`
+was already the correct *lower bound* for `buildEligibilityProjectionTx`'s own window — 2.1's
+"carry-forward proofs... no change needed" claim was checking that bound, not this separate trust
+query — but it was never a candidate *interval start* for the evidence-evaluation trust chain.
+Result: a `POLICY_ANCHOR` account's very first balance evaluation (typically its own anchor
+checkpoint, reporting its full opening balance against an `ExpectedBalance` of `0`) always froze
+`SOURCE_GAP`, and — since `eligibility_freezes_one_open_trigger` is unique per trigger object —
+every subsequent checkpoint and carry-forward proof opened its *own* new `SOURCE_GAP` freeze too,
+none of them ever reaching a trusted starting point. Measured in production (2026-09-02): account
+`98cce4c8-a03c-4b55-9049-61b650db2d0e` (anchored 09-02 02:00Z) accumulated 60 `balance_checkpoint`
++ 6 `balance_carry_forward_proof` open `SOURCE_GAP` freezes; account
+`6706ea6a-...` (anchored 09-02 14:49Z) accumulated 11 + 2. The one production `POLICY_ANCHOR`
+account unaffected, `40bd883d-...`, has a *legacy* cutover checkpoint from before its later
+`POLICY_ANCHOR` re-anchor (2.4), which happened to satisfy the query's first branch.
+
+**This also affects design 2.4's re-anchored legacy accounts, not only 2.1's fresh bootstraps.**
+Once `reanchorLegacyEligibilityAccountTx` re-anchors a legacy account to a candidate checkpoint,
+that account is `bootstrap_kind='POLICY_ANCHOR'` with the identical shape a fresh bootstrap has —
+its own anchor checkpoint is the same `checkpoint_kind='reconciliation'` row, still pending
+evaluation, with the same missing trust source. The fix below is not scoped to "freshly bootstrapped
+via 2.1"; it is scoped to `bootstrap_kind='POLICY_ANCHOR'`, covering both origins.
+
+**Fix.** `evaluatePendingBalanceEvidenceTx`'s trusted-interval query gains a fourth `UNION ALL`
+branch: for a `bootstrap_kind='POLICY_ANCHOR'` account, its own `source_account_eligibility_state.cutover_at`
+is unconditionally a valid interval start (`state.cutover_at<=$2`, no source_sequence tie-break
+needed — a state row is not a same-instant competing evidence row the way a checkpoint or proof
+is). This plays exactly the role a legacy account's `checkpoint_kind='cutover'` row plays in the
+first `UNION` branch, just sourced from the state table instead of a separate checkpoint row,
+because a `POLICY_ANCHOR` bootstrap never creates one. The first time this fires (typically the
+account's own anchor checkpoint), the evidence's full reported balance becomes a synthesized
+`UNKNOWN_POSITIVE` non-cash credit dated exactly at `cutover_at` — the *existing*
+`positive_classified_non_cash` mechanism this design's legacy accounts already use for the
+symmetric case, applied here for the first time to a `POLICY_ANCHOR` account. Because
+`buildEligibilityProjectionTx`'s window already starts at `account.CutoverAt` and its credit query
+already includes a credit dated exactly at `cutover_at` with `credit_kind IN ('LEGACY_NON_INVOICEABLE',
+'UNKNOWN_POSITIVE')` (added by 2.1/pre-existing respectively), every evaluation *after* this first
+one reconciles directly against the synthesized credit with no further reliance on the new branch —
+the same way a legacy account's single `checkpoint_kind='cutover'` row is superseded the moment a
+later evaluation has matched. **The opening balance stays entirely non-invoiceable**: it is a
+non-cash credit like any other, drained by usage before any real paid cash lot, exactly as 2.1
+specifies — verified end-to-end (a real `WALLET_CASH` payment survives untouched until usage
+exceeds the synthesized opening credit, then only the excess draws on it).
+
+No migration: `UNKNOWN_POSITIVE` was already an allowed `source_credit_events.credit_kind` value
+(migration 0009), added for this exact self-healing mechanism on the legacy side.
+
+**Not a new risk for legacy accounts, and not a new blind spot for POLICY_ANCHOR accounts either.**
+The new branch is scoped to `bootstrap_kind='POLICY_ANCHOR'`, so it contributes nothing to a
+legacy account's query — verified with a regression test constructing a legacy account with
+*no* trust source at all (no `checkpoint_kind='cutover'` row, direct SQL only, since no production
+code path creates one otherwise), confirming it still freezes `SOURCE_GAP` exactly as before this
+slice. The self-healing permissiveness this branch grants a `POLICY_ANCHOR` account's *first*
+evaluation is identical in kind to what a legacy account's `checkpoint_kind='cutover'` row already
+grants *every* evaluation before the first real match — this design's evidence-reconciliation
+mechanism has always treated "no attributable gap since the last trusted point" as
+self-healing rather than fail-closed; this fix extends that existing posture to `POLICY_ANCHOR`
+accounts rather than introducing a new one.
+
+**Production repair.** A second mode on the existing `eligibility-repair` CLI
+(`--kind=balance-anchor`; the pre-existing `--kind=pre-anchor-usage` stays the default), store
+method `RepairBalanceAnchorEligibility`, resolves the `SOURCE_GAP` freezes this gap produced for
+`POLICY_ANCHOR` accounts (`trigger_object_type IN ('balance_checkpoint','balance_carry_forward_proof')`)
+and deletes the stale `source_gap_frozen` `balance_checkpoint_evaluations` rows so the fixed code
+re-evaluates them on the account's next projection job. `balance_carry_forward_evaluations` is
+immutable by design (migration 0014) — a `balance_carry_forward_proof` freeze is still resolved,
+but its own stale evaluation row is left as a permanent (and, once resolved, inert) historical
+record; this does not block the account's recovery, since the trust query only ever counts
+`matched`/`positive_classified_non_cash` rows, never `source_gap_frozen` ones. See
+`docs/handoffs/XM-INV-ANCHOR-BALANCE.md` for the exact runbook and expected counts.
 
 ## 3. Verification gates (all must pass before production)
 1. Unit + integration suites (full `go test -p 1 ./...` with INVOICE_TEST_DATABASE_URL). Done as
