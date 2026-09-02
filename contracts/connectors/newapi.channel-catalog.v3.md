@@ -7,6 +7,14 @@ version, independent of the package's overall `ContractVersion` (still `"2"` —
 method changed shape or signature; every new field is additive on `ChannelStatus`, and old fields
 are unchanged). v1/v2 docs stay frozen; this is a new file, not an edit to them.
 
+**2026-09-02, XM-CHAN-GROUP0**: added the `group` field (see table below) on top of
+XM-CHAN-FIELDS0's original delivery. This file stays a living, additive registry for the
+channel-catalog scope — unlike the interface-level v1/v2 docs it extends, it isn't frozen per
+slice; a later slice adding one more catalog field extends this same file rather than forking a
+v4, exactly because the field is additive on the same `ChannelStatus` type under the same
+catalog-scoped version. Every field this addendum did not touch is unchanged from the original
+delivery.
+
 Every new field below is traced to a specific `K:/newapi-src` field or endpoint. Fields with no
 real upstream backing are documented as always `null`, never approximated — for NewAPI this is
 most of the new surface (see table). All fields are individually nullable, including ones the
@@ -38,6 +46,7 @@ Identity/state fields come from `GET /api/channel/` (route confirmed `router/cha
 | `last_used_at` | — | **Always `null`.** No field tracks "channel last served a request" — `TestTime` (`model/channel.go:33`) is a connectivity-*test* timestamp, not a request-serving one, and conflating them would misrepresent an untouched-but-tested channel as recently active. |
 | `created_at` | `Channel.CreatedTime` (`model/channel.go:32`, unix seconds) | |
 | `expires_at` | — | **Always `null`** at the channel level. The one real expiry concept — Codex OAuth token expiry, `Expired` inside the `OAuthKey` blob (`relay/channel/codex/oauth_key.go:18`) — lives inside the excluded `Key` column, same unreachability as `kind` above. |
+| `group` (XM-CHAN-GROUP0) | `Channel.Group` (`model/channel.go:40`, non-pointer `string`, gorm default `'default'`) | Comma-separated group-name list (e.g. `"default,vip"`), the dimension upstream itself uses for group-scoped routing (`model.ApplyChannelGroupFilter`) and group-scoped pricing ratios (`setting/ratio_setting/`). This connector normalizes it the same way upstream's own `Channel.GetGroups()` does (`model/channel.go:296-305`, cited in `parseChannelGroup`'s doc comment) — trim outer commas/whitespace, split on `,`, trim each segment — then additionally drops segments that are empty after trimming (upstream's own helper does not: `"a,,b"` becomes a literal empty-string group entry there) and rejoins with `,`. `null` when the normalized result has no segments left, i.e. this channel has no group configured — not an empty string. Sub2API has no analogous concept anywhere in its account model; its `catalogFields()` never writes a `group` key, so httpapi decodes `null` for every Sub2API row through the same "dimension absent from the observation" path every other platform-specific-null field already uses (see `sub2api.channel-catalog.v3.md`'s own per-field table for what that connector does emit) — this file does not need to say anything on Sub2API's behalf, and `sub2api.channel-catalog.v3.md` does not gain a `group` row: it emits no such field to document. |
 
 ## Numeric encoding
 
@@ -75,4 +84,10 @@ comment: a `/api/status` outage should not also take down channel status).
   cost of not importing upstream's own table (not possible; separate Go module).
 - **Today-stats budget** (40 channels/read): large fleets will see `today: null` on most rows,
   same caveat as the Sub2API sibling doc.
+- **`group`** (XM-CHAN-GROUP0): upstream's own gorm default is `'default'`, so in practice most
+  real channels are expected to carry at least that one group — a `null` value on a real instance
+  most likely means the channel row predates that default (migrated data) or was explicitly
+  cleared, not a connector gap. `group` is a routing/pricing dimension, not a health or identity
+  one; this connector does not interpret group membership (e.g. it does not derive `vendor` or
+  `kind` from it) and callers should not either.
 - Not verified against a real NewAPI instance — same disclaimer as `newapi.read.v1.md`.
