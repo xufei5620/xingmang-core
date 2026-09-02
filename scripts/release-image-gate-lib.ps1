@@ -53,6 +53,108 @@ function ConvertFrom-TrivyDatabaseTimestamp {
     return [DateTimeOffset]::ParseExact($normalized, 'yyyy-MM-dd HH:mm:ss.fffffff zzz', [Globalization.CultureInfo]::InvariantCulture)
 }
 
+# --- release-gate live-volume Trivy download TMPDIR fix ----------------------
+#
+# scripts/release-image-gate.ps1 runs Trivy's own `--download-db-only`/
+# `--download-java-db-only` against the shared, live Trivy cache volume at
+# the start of every release, whenever that cache is stale. Trivy 0.74
+# downloads into $TMPDIR (defaulting to the container's own /tmp) and only
+# then moves the result into --cache-dir; when --cache-dir is a mounted
+# Docker volume (as it always is here) that move crosses filesystems and can
+# silently fail, leaving no db/java-db directory behind while still logging
+# success -- found by the team lead while reseeding the real shared cache
+# volume during the XM-INV-TRIVY-REFRESH-FIX investigation (see
+# docs/handoffs/XM-INV-TRIVY-REFRESH-FIX.md, "Other bugs found" #2), which
+# explicitly flagged this exact gap in release-image-gate.ps1 as a follow-up
+# rather than fix it there (out of that branch's scope). scripts/refresh-
+# trivy-cache-lib.ps1's own Invoke-TrivyCacheFreshnessSelfCheck already works
+# around this for its own (separate, disposable staging-volume) Trivy
+# invocations by pointing TMPDIR at a directory already on the same volume;
+# the functions below give release-image-gate.ps1's real, live-volume
+# download steps the same fix.
+
+# Assert-SafeTrivyCacheContainerDirectory guards the one container path these
+# functions accept before it is ever embedded into a shell command (mkdir/rm)
+# or a docker -e value -- mirrors refresh-trivy-cache-lib.ps1's own Assert-
+# SafeTrivyCacheSubPath / Assert-SafeOciDigestForShell "validate before
+# shelling out" convention.
+function Assert-SafeTrivyCacheContainerDirectory {
+    param([Parameter(Mandatory)][string]$ContainerDirectory)
+    if ($ContainerDirectory -notmatch '^/[0-9A-Za-z._/-]+$') {
+        throw "unsafe Trivy cache container directory: $ContainerDirectory"
+    }
+}
+
+# Get-TrivyCacheDownloadArguments builds the docker "run" argument list for
+# release-image-gate.ps1's own Trivy database-download invocations
+# (--download-db-only / --download-java-db-only): identical to that script's
+# own Get-TrivyArguments (--rm, docker socket mount, cache volume mount,
+# Trivy image, then Command) but also sets TMPDIR to a directory inside the
+# mounted cache volume, so a real download triggered by a stale cache never
+# crosses filesystems on its final move into --cache-dir. The caller is
+# responsible for the directory at TMPDIR actually existing on the volume
+# before this runs (New-TrivyCacheTmpDirectoryDockerArguments below) and for
+# removing it afterward (New-TrivyCacheTmpDirectoryCleanupDockerArguments).
+function Get-TrivyCacheDownloadArguments {
+    param(
+        [Parameter(Mandatory)][string[]]$Command,
+        [Parameter(Mandatory)][string]$Volume,
+        [Parameter(Mandatory)][string]$TrivyImage,
+        [Parameter(Mandatory)][string]$ContainerCacheDirectory
+    )
+    Assert-SafeTrivyCacheContainerDirectory -ContainerDirectory $ContainerCacheDirectory | Out-Null
+    return @(
+        'run', '--rm',
+        '-e', "TMPDIR=$ContainerCacheDirectory/tmp",
+        '-v', '/var/run/docker.sock:/var/run/docker.sock',
+        '-v', "${Volume}:${ContainerCacheDirectory}",
+        $TrivyImage
+    ) + $Command
+}
+
+# New-TrivyCacheTmpDirectoryDockerArguments / New-TrivyCacheTmpDirectoryCleanupDockerArguments
+# build the docker "run" argument lists release-image-gate.ps1 uses to
+# create, respectively remove, the TMPDIR directory Get-
+# TrivyCacheDownloadArguments points Trivy's downloader at -- directly
+# against the live cache volume (there is no staging clone here, unlike
+# refresh-trivy-cache-lib.ps1's own Copy-TrivyCacheVolumeToVolume, which
+# creates this same "tmp" directory only as a side effect of cloning into a
+# disposable volume). Reuses the already-pulled Trivy tool image itself
+# (Alpine-based, with a real /bin/sh) with its entrypoint overridden to a
+# shell -- the same "--entrypoint override for a utility shell command
+# against an already-pulled image" pattern release-image-gate.ps1 already
+# uses for its Keycloak runtime-pruning proof -- rather than pulling a
+# second image just to run mkdir/rm against the volume.
+function New-TrivyCacheTmpDirectoryDockerArguments {
+    param(
+        [Parameter(Mandatory)][string]$Volume,
+        [Parameter(Mandatory)][string]$TrivyImage,
+        [Parameter(Mandatory)][string]$ContainerCacheDirectory
+    )
+    Assert-SafeTrivyCacheContainerDirectory -ContainerDirectory $ContainerCacheDirectory | Out-Null
+    return @(
+        'run', '--rm', '--entrypoint', 'sh',
+        '-v', "${Volume}:${ContainerCacheDirectory}",
+        $TrivyImage,
+        '-c', "mkdir -p '$ContainerCacheDirectory/tmp'"
+    )
+}
+
+function New-TrivyCacheTmpDirectoryCleanupDockerArguments {
+    param(
+        [Parameter(Mandatory)][string]$Volume,
+        [Parameter(Mandatory)][string]$TrivyImage,
+        [Parameter(Mandatory)][string]$ContainerCacheDirectory
+    )
+    Assert-SafeTrivyCacheContainerDirectory -ContainerDirectory $ContainerCacheDirectory | Out-Null
+    return @(
+        'run', '--rm', '--entrypoint', 'sh',
+        '-v', "${Volume}:${ContainerCacheDirectory}",
+        $TrivyImage,
+        '-c', "rm -rf '$ContainerCacheDirectory/tmp'"
+    )
+}
+
 function Assert-KeycloakDockerfileLiteralBasePins {
     param(
         [Parameter(Mandatory)][string]$DockerfileText,

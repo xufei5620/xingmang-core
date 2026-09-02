@@ -710,6 +710,98 @@ $trivyTimestamp = ConvertFrom-TrivyDatabaseTimestamp -Timestamp '2026-08-20 19:4
 if ($trivyTimestamp.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ') -cne '2026-08-20T19:46:52.8223882Z') {
     throw 'Trivy Go-style nanosecond database timestamp was not parsed deterministically'
 }
+
+# --- XM-INV-GATE-TMPDIR: same-volume TMPDIR for the gate's own Trivy downloads ---
+
+function Assert-ExactStringArray {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Actual,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Expected,
+        [Parameter(Mandatory)][string]$Label
+    )
+    if ($Actual.Count -ne $Expected.Count) {
+        throw "$Label has $($Actual.Count) argument(s), expected $($Expected.Count): actual=[$($Actual -join ' ')] expected=[$($Expected -join ' ')]"
+    }
+    for ($i = 0; $i -lt $Expected.Count; $i++) {
+        if ($Actual[$i] -cne $Expected[$i]) {
+            throw "$Label differs at index ${i}: actual='$($Actual[$i])' expected='$($Expected[$i])' (actual=[$($Actual -join ' ')] expected=[$($Expected -join ' ')])"
+        }
+    }
+}
+
+$trivyCacheVolumeFixture = 'invoice-release-gate-trivy-0-74-0-fixture'
+$trivyImageFixture = 'trivy-image-fixture:latest'
+$trivyCacheContainerDirectoryFixture = '/root/.cache/trivy'
+
+Assert-ExactStringArray -Label 'Trivy cache --download-db-only arguments' -Expected @(
+    'run', '--rm',
+    '-e', 'TMPDIR=/root/.cache/trivy/tmp',
+    '-v', '/var/run/docker.sock:/var/run/docker.sock',
+    '-v', "${trivyCacheVolumeFixture}:${trivyCacheContainerDirectoryFixture}",
+    $trivyImageFixture,
+    'image', '--timeout', '15m', '--download-db-only', '--no-progress'
+) -Actual (Get-TrivyCacheDownloadArguments -Command @('image', '--timeout', '15m', '--download-db-only', '--no-progress') -Volume $trivyCacheVolumeFixture -TrivyImage $trivyImageFixture -ContainerCacheDirectory $trivyCacheContainerDirectoryFixture)
+
+Assert-ExactStringArray -Label 'Trivy cache --download-java-db-only arguments' -Expected @(
+    'run', '--rm',
+    '-e', 'TMPDIR=/root/.cache/trivy/tmp',
+    '-v', '/var/run/docker.sock:/var/run/docker.sock',
+    '-v', "${trivyCacheVolumeFixture}:${trivyCacheContainerDirectoryFixture}",
+    $trivyImageFixture,
+    'image', '--timeout', '15m', '--download-java-db-only', '--no-progress'
+) -Actual (Get-TrivyCacheDownloadArguments -Command @('image', '--timeout', '15m', '--download-java-db-only', '--no-progress') -Volume $trivyCacheVolumeFixture -TrivyImage $trivyImageFixture -ContainerCacheDirectory $trivyCacheContainerDirectoryFixture)
+
+Assert-ExactStringArray -Label 'Trivy cache tmp directory creation arguments' -Expected @(
+    'run', '--rm', '--entrypoint', 'sh',
+    '-v', "${trivyCacheVolumeFixture}:${trivyCacheContainerDirectoryFixture}",
+    $trivyImageFixture,
+    '-c', "mkdir -p '$trivyCacheContainerDirectoryFixture/tmp'"
+) -Actual (New-TrivyCacheTmpDirectoryDockerArguments -Volume $trivyCacheVolumeFixture -TrivyImage $trivyImageFixture -ContainerCacheDirectory $trivyCacheContainerDirectoryFixture)
+
+Assert-ExactStringArray -Label 'Trivy cache tmp directory cleanup arguments' -Expected @(
+    'run', '--rm', '--entrypoint', 'sh',
+    '-v', "${trivyCacheVolumeFixture}:${trivyCacheContainerDirectoryFixture}",
+    $trivyImageFixture,
+    '-c', "rm -rf '$trivyCacheContainerDirectoryFixture/tmp'"
+) -Actual (New-TrivyCacheTmpDirectoryCleanupDockerArguments -Volume $trivyCacheVolumeFixture -TrivyImage $trivyImageFixture -ContainerCacheDirectory $trivyCacheContainerDirectoryFixture)
+
+foreach ($unsafeContainerDirectory in @('root/.cache/trivy', '/root/.cache/trivy; rm -rf /', "/root/.cache/trivy'; echo pwned #")) {
+    Assert-ThrowsLike `
+        -Action { Get-TrivyCacheDownloadArguments -Command @('image', '--download-db-only') -Volume $trivyCacheVolumeFixture -TrivyImage $trivyImageFixture -ContainerCacheDirectory $unsafeContainerDirectory | Out-Null } `
+        -ExpectedMessagePattern 'unsafe Trivy cache container directory' `
+        -FailureMessage "Trivy cache download arguments accepted an unsafe container directory: $unsafeContainerDirectory"
+    Assert-ThrowsLike `
+        -Action { New-TrivyCacheTmpDirectoryDockerArguments -Volume $trivyCacheVolumeFixture -TrivyImage $trivyImageFixture -ContainerCacheDirectory $unsafeContainerDirectory | Out-Null } `
+        -ExpectedMessagePattern 'unsafe Trivy cache container directory' `
+        -FailureMessage "Trivy cache tmp directory creation accepted an unsafe container directory: $unsafeContainerDirectory"
+    Assert-ThrowsLike `
+        -Action { New-TrivyCacheTmpDirectoryCleanupDockerArguments -Volume $trivyCacheVolumeFixture -TrivyImage $trivyImageFixture -ContainerCacheDirectory $unsafeContainerDirectory | Out-Null } `
+        -ExpectedMessagePattern 'unsafe Trivy cache container directory' `
+        -FailureMessage "Trivy cache tmp directory cleanup accepted an unsafe container directory: $unsafeContainerDirectory"
+}
+
+if (-not $gateSource.Contains('$trivyCacheContainerDirectory = ''/root/.cache/trivy''', [StringComparison]::Ordinal)) {
+    throw 'release image gate does not define a single-source-of-truth Trivy cache container directory'
+}
+if (-not $gateSource.Contains('New-TrivyCacheTmpDirectoryDockerArguments -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory', [StringComparison]::Ordinal)) {
+    throw 'release image gate does not create a same-volume TMPDIR before its own Trivy database downloads'
+}
+if (-not $gateSource.Contains('Get-TrivyCacheDownloadArguments -Command @(''image'', ''--timeout'', ''15m'', ''--download-db-only'', ''--no-progress'') -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory', [StringComparison]::Ordinal)) {
+    throw 'release image gate does not route its Trivy vulnerability-database download through the same-volume TMPDIR arguments'
+}
+if (-not $gateSource.Contains('Get-TrivyCacheDownloadArguments -Command @(''image'', ''--timeout'', ''15m'', ''--download-java-db-only'', ''--no-progress'') -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory', [StringComparison]::Ordinal)) {
+    throw 'release image gate does not route its Trivy Java-database download through the same-volume TMPDIR arguments'
+}
+if (-not $gateSource.Contains('New-TrivyCacheTmpDirectoryCleanupDockerArguments -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory', [StringComparison]::Ordinal)) {
+    throw 'release image gate does not clean up the Trivy database download TMPDIR'
+}
+$trivyDownloadOrderMatch = [regex]::Match($gateSource, '(?s)New-TrivyCacheTmpDirectoryDockerArguments.*?\btry\s*\{(?<tryBody>.*?)\}\s*finally\s*\{(?<finallyBody>.*?)\}')
+if (-not $trivyDownloadOrderMatch.Success -or
+    $trivyDownloadOrderMatch.Groups['tryBody'].Value -notmatch '--download-db-only' -or
+    $trivyDownloadOrderMatch.Groups['tryBody'].Value -notmatch '--download-java-db-only' -or
+    $trivyDownloadOrderMatch.Groups['finallyBody'].Value -notmatch 'New-TrivyCacheTmpDirectoryCleanupDockerArguments') {
+    throw 'release image gate does not wrap both Trivy database downloads in a try/finally that always cleans up the TMPDIR'
+}
 $goodReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'good-vulnerability-report.json') | ConvertFrom-Json
 $goodBom = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'good-sbom.json') | ConvertFrom-Json
 
