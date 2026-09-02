@@ -122,6 +122,111 @@ describe("EmbeddedConsoleFrame", () => {
     expect(screen.getByText(/加载失败/)).not.toBeNull();
   });
 
+  describe("CR-0006 XM-INVCON1：断言 postMessage 投递与重新签发请求", () => {
+    it("拿到断言时向 iframe 投递，targetOrigin 精确等于 origin", () => {
+      render(
+        <EmbeddedConsoleFrame
+          origin={ORIGIN}
+          path="/embed/admin/sub2api"
+          title={TITLE}
+          assertion={{ assertion: "jws-compact-value" }}
+        />,
+      );
+      const frame = screen.getByTitle(TITLE) as HTMLIFrameElement;
+      const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+      fireEvent.load(frame);
+      expect(postMessage).toHaveBeenCalledWith(
+        { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: "jws-compact-value" },
+        ORIGIN,
+      );
+    });
+
+    it("assertion 为 null 时不投递任何消息", () => {
+      render(
+        <EmbeddedConsoleFrame origin={ORIGIN} path="/embed/admin/sub2api" title={TITLE} assertion={null} />,
+      );
+      const frame = screen.getByTitle(TITLE) as HTMLIFrameElement;
+      const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+      fireEvent.load(frame);
+      expect(postMessage).not.toHaveBeenCalled();
+    });
+
+    it("assertion 从无到有：对象恒等性变化即重新投递", () => {
+      const { rerender } = render(
+        <EmbeddedConsoleFrame origin={ORIGIN} path="/embed/admin/sub2api" title={TITLE} assertion={null} />,
+      );
+      const frame = screen.getByTitle(TITLE) as HTMLIFrameElement;
+      const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+      rerender(
+        <EmbeddedConsoleFrame
+          origin={ORIGIN}
+          path="/embed/admin/sub2api"
+          title={TITLE}
+          assertion={{ assertion: "second-value" }}
+        />,
+      );
+      expect(postMessage).toHaveBeenCalledWith(
+        { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: "second-value" },
+        ORIGIN,
+      );
+    });
+
+    it("收到 kind=admin-assertion-needed 时回调 onAssertionNeeded", () => {
+      const onAssertionNeeded = vi.fn();
+      render(
+        <EmbeddedConsoleFrame
+          origin={ORIGIN}
+          path="/embed/admin/sub2api"
+          title={TITLE}
+          onAssertionNeeded={onAssertionNeeded}
+        />,
+      );
+      postMessageFrom(ORIGIN, { type: "xm-embed", version: 1, kind: "admin-assertion-needed" });
+      expect(onAssertionNeeded).toHaveBeenCalledTimes(1);
+    });
+
+    it("admin-assertion-needed 消息来自非配置来源时忽略", () => {
+      const onAssertionNeeded = vi.fn();
+      render(
+        <EmbeddedConsoleFrame
+          origin={ORIGIN}
+          path="/embed/admin/sub2api"
+          title={TITLE}
+          onAssertionNeeded={onAssertionNeeded}
+        />,
+      );
+      postMessageFrom("https://evil.example.test", {
+        type: "xm-embed",
+        version: 1,
+        kind: "admin-assertion-needed",
+      });
+      expect(onAssertionNeeded).not.toHaveBeenCalled();
+    });
+
+    it("未传 onAssertionNeeded 时收到该消息不报错，也不误判成高度消息", () => {
+      render(<EmbeddedConsoleFrame origin={ORIGIN} path="/embed/admin/sub2api" title={TITLE} />);
+      const frame = screen.getByTitle(TITLE) as HTMLIFrameElement;
+      expect(() =>
+        postMessageFrom(ORIGIN, { type: "xm-embed", version: 1, kind: "admin-assertion-needed" }),
+      ).not.toThrow();
+      expect(frame.style.height).toBe("");
+    });
+
+    it("高度同步消息不会被误判成断言重签发请求", () => {
+      const onAssertionNeeded = vi.fn();
+      render(
+        <EmbeddedConsoleFrame
+          origin={ORIGIN}
+          path="/embed/admin/sub2api"
+          title={TITLE}
+          onAssertionNeeded={onAssertionNeeded}
+        />,
+      );
+      postMessageFrom(ORIGIN, { type: "xm-embed", version: 1, kind: "height", height: 900 });
+      expect(onAssertionNeeded).not.toHaveBeenCalled();
+    });
+  });
+
   it("切换 path 会重置失败态与高度，不带着上一轮的判定", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { rerender } = render(

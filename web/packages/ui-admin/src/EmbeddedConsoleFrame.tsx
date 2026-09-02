@@ -17,6 +17,19 @@ export interface EmbeddedConsoleFrameProps {
   path: EmbeddedConsolePath;
   /** iframe 的可访问标题，也是加载失败卡片的标题。 */
   title: string;
+  /** CR-0006 XM-INVCON1：待投递的断言载荷。每次拿到新断言就传一个新对象
+   *  （对象恒等性变化即触发重新投递，调用方不需要自己判断"是不是同一个
+   *  值"）；为 `null`/`undefined` 时不投递任何消息。iframe 尚未 `load` 完成
+   *  时先记住这份负载，`onLoad` 触发的那一刻立即补发一次——跨源 iframe 在
+   *  自己的脚本跑起来之前收不到任何 postMessage，早发的一次很可能丢在
+   *  导航完成之前，这里用"记住 + onLoad 补发"兜底，不依赖时序恰好对齐。 */
+  assertion?: { assertion: string } | null;
+  /** 收到 iframe 侧 `kind:"admin-assertion-needed"` 消息时回调——开票前端
+   *  判断自己手头的断言已经用不了（未曾收到过、已过期、或兑换失败）时会
+   *  主动发这条消息；调用方应据此重新签发一份新断言并再次传入 `assertion`
+   *  prop。仅在传了这个回调时才认这个 kind，省得每个不参与断言登录的嵌入
+   *  场景都要处理一条永远不会来的消息。 */
+  onAssertionNeeded?: () => void;
 }
 
 /** postMessage 高度同步的版本化消息（CR-0005 平台线 h：「仅接受
@@ -40,6 +53,31 @@ function isEmbedHeightMessage(data: unknown): data is EmbedHeightMessage {
     typeof value.height === "number" &&
     Number.isFinite(value.height)
   );
+}
+
+/** 断言过期/兑换失败时，iframe 主动要求重新签发（CR-0006 XM-INVCON1，与
+ *  开票线在同一份技术规格下并行实现）。与高度消息同一个信封形状，只是
+ *  `kind` 不同——沿用 XM-INVCON0 已建立的版本化信封，不需要升版本。 */
+interface EmbedAdminAssertionNeededMessage {
+  type: "xm-embed";
+  version: 1;
+  kind: "admin-assertion-needed";
+}
+
+function isAdminAssertionNeededMessage(data: unknown): data is EmbedAdminAssertionNeededMessage {
+  if (typeof data !== "object" || data === null) return false;
+  const value = data as Record<string, unknown>;
+  return value.type === "xm-embed" && value.version === 1 && value.kind === "admin-assertion-needed";
+}
+
+/** 控制台 → iframe 的断言投递消息（CR-0006 正文 d 条："沿用 XM-INVCON0
+ *  已建立的 xm-embed 版本化信封，新增一个 kind 值即可"）。方向与高度同步/
+ *  重新签发请求相反：这是唯一一条由控制台主动发起的消息。 */
+interface EmbedAdminAssertionMessage {
+  type: "xm-embed";
+  version: 1;
+  kind: "admin-assertion";
+  assertion: string;
 }
 
 /** 高度钳制范围。下限保证一屏管理界面不会被压成一条缝；上限防止一条形状对、
@@ -71,16 +109,43 @@ function clampHeight(height: number): number {
  *  不加 `sandbox`：开票系统的登录走弹出的顶层窗口 + iframe 内的同站
  *  Cookie（CR-0005 开票线 d），`sandbox` 会同时挡掉弹窗与 Cookie，
  *  这个功能就直接不能用了——这不是遗漏，是这次嵌入唯一不能加它的理由。 */
-export function EmbeddedConsoleFrame({ origin, path, title }: EmbeddedConsoleFrameProps) {
+export function EmbeddedConsoleFrame({
+  origin,
+  path,
+  title,
+  assertion = null,
+  onAssertionNeeded,
+}: EmbeddedConsoleFrameProps) {
   const [height, setHeight] = useState<number | undefined>(undefined);
   const [failed, setFailed] = useState(false);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
   const src = `${origin}${path}`;
 
   const markFailed = useCallback(() => {
     clearTimeout(timeoutRef.current);
     setFailed(true);
   }, []);
+
+  // 投递断言：iframe 已挂载且拿到了非空断言就发；同一个 useEffect 兜住两条
+  // 触发路径（assertion 变化、iframe 重新 onLoad），不必分别在两处各写一份
+  // postMessage 调用。targetOrigin 精确等于 origin——与高度消息的入站校验
+  // 对称，跨源投递永远不放宽成通配符。
+  const deliverAssertion = useCallback(() => {
+    const node = frameRef.current;
+    if (!node?.contentWindow || !assertion) return;
+    const message: EmbedAdminAssertionMessage = {
+      type: "xm-embed",
+      version: 1,
+      kind: "admin-assertion",
+      assertion: assertion.assertion,
+    };
+    node.contentWindow.postMessage(message, origin);
+  }, [assertion, origin]);
+
+  useEffect(() => {
+    deliverAssertion();
+  }, [deliverAssertion]);
 
   // React 的合成事件系统不给 <iframe> 接 "error"：react-dom 按标签分发原生
   // 监听时只对 iframe/object/embed 接了 "load"，"error" 只接给
@@ -93,6 +158,7 @@ export function EmbeddedConsoleFrame({ origin, path, title }: EmbeddedConsoleFra
   // useEffect 的清理一致。
   const attachErrorListener = useCallback(
     (node: HTMLIFrameElement | null) => {
+      frameRef.current = node;
       if (!node) return;
       node.addEventListener("error", markFailed);
       return () => node.removeEventListener("error", markFailed);
@@ -104,12 +170,17 @@ export function EmbeddedConsoleFrame({ origin, path, title }: EmbeddedConsoleFra
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
       if (event.origin !== origin) return;
-      if (!isEmbedHeightMessage(event.data)) return;
-      setHeight(clampHeight(event.data.height));
+      if (isEmbedHeightMessage(event.data)) {
+        setHeight(clampHeight(event.data.height));
+        return;
+      }
+      if (onAssertionNeeded && isAdminAssertionNeededMessage(event.data)) {
+        onAssertionNeeded();
+      }
     }
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [origin]);
+  }, [origin, onAssertionNeeded]);
 
   // src 变了（切平台页签、换配置）就重新走一遍加载判定；上一轮的定时器不能
   // 带到这一轮，否则旧请求的超时会把新请求判成失败
@@ -122,6 +193,11 @@ export function EmbeddedConsoleFrame({ origin, path, title }: EmbeddedConsoleFra
 
   function handleLoad() {
     clearTimeout(timeoutRef.current);
+    // iframe 刚完成一次（新）导航：这一刻它自己的脚本才第一次有机会接收
+    // postMessage，之前若已经拿到断言但那次投递发生在导航完成之前，iframe
+    // 永远不会收到——这里补发一次，弥补"src 没变但内容重新加载"（如
+    // iframe 内部自己刷新）与"首次加载"两种场景。
+    deliverAssertion();
   }
 
   if (failed) {

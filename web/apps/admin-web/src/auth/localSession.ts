@@ -141,6 +141,20 @@ export async function completeTotpLogin(
   return user;
 }
 
+/** 步进刷新：不带 temp_token，要求已有有效 xm_session（后端
+ *  `stepUpTOTP`，CR-0006 技术规格 §4.2）。校验通过后写入新的
+ *  `mfa_at`——这正是 XM-INVCON1 断言签发端点判断"TOTP 是否新鲜"依据的同一
+ *  个时间戳，调用方（InvoiceConsolePanel 的 ADMIN_STEP_UP_REQUIRED 处理）
+ *  成功后应重新调用签发端点，而不是自己假定"验证过了就一定新鲜"。 */
+export async function stepUpTotp(credential: { code: string } | { recoveryCode: string }): Promise<LocalUser> {
+  const body = await authClient().post<LocalUserResponse>("/api/v1/auth/login/totp", {
+    ...("code" in credential ? { code: credential.code } : { recovery_code: credential.recoveryCode }),
+  });
+  const user = projectLocalUser(body);
+  cachedUser = user;
+  return user;
+}
+
 /** 探测当前会话；401/403＝没有有效会话，原样把 ApiError 抛给调用方判断。 */
 export async function me(): Promise<LocalUser> {
   const body = await authClient().get<LocalUserResponse>("/api/v1/auth/me");

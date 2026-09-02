@@ -40,3 +40,30 @@ export const Global: Story = {
     title: "开票",
   },
 };
+
+/** CR-0006 XM-INVCON1：已经拿到一份断言，组件应把它 postMessage 给 iframe。
+ *  Storybook 静态构建里没有真实 iframe 内容可验证投递效果（同上方三个故事
+ *  的既有说明——没有真实开票控制台可连），这里主要证明传入 `assertion`
+ *  prop 不会让壳本身的渲染出任何岔子（不额外画一层遮罩，与不传时视觉上
+ *  完全一致）。 */
+export const WithAssertion: Story = {
+  args: {
+    origin: "https://invoice.example.test",
+    path: "/embed/admin/sub2api",
+    title: "开票",
+    assertion: { assertion: "eyJhbGciOiJFZERTQSJ9.storybook-demo-payload.signature" },
+  },
+};
+
+/** CR-0006 XM-INVCON1：`onAssertionNeeded` 只是一个回调 prop，不影响初始
+ *  渲染——这里用一个空函数证明传了它之后组件仍正常呈现 iframe 壳，真实的
+ *  "收到消息即回调"由 EmbeddedConsoleFrame.test.tsx 的 vitest 用例覆盖
+ *  （jsdom 可以派发真实的 `message` 事件，Storybook 静态构建做不到）。 */
+export const AssertionNeededCallback: Story = {
+  args: {
+    origin: "https://invoice.example.test",
+    path: "/embed/admin/sub2api",
+    title: "开票",
+    onAssertionNeeded: () => {},
+  },
+};

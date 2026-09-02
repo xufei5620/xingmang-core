@@ -8,6 +8,7 @@ import {
   logout,
   me,
   setCachedLocalUser,
+  stepUpTotp,
   type LocalUser,
 } from "./localSession";
 
@@ -209,6 +210,40 @@ describe("auth/localSession", () => {
     expect(JSON.parse(call[1].body as string)).toEqual({
       temp_token: "temp-abc",
       recovery_code: "ABCDE-FGHIJ",
+    });
+  });
+
+  describe("stepUpTotp()（CR-0006 XM-INVCON1 断言签发前的步进刷新）", () => {
+    it("请求体只带 code，不带 temp_token——与登录第二步是同一个端点的另一条分支", async () => {
+      const fetchMock = vi.fn(() =>
+        Promise.resolve(
+          response({ username: "carol", display_name: "Carol", roles: ["admin"], must_change_password: false }),
+        ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const user = await stepUpTotp({ code: "123456" });
+      const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(call[0]).toContain("/api/v1/auth/login/totp");
+      expect(JSON.parse(call[1].body as string)).toEqual({ code: "123456" });
+      expect(user.username).toBe("carol");
+      expect(cachedLocalUser()?.username).toBe("carol");
+    });
+
+    it("恢复码分支发 recovery_code 字段", async () => {
+      const fetchMock = vi.fn(() => Promise.resolve(response({ username: "carol", roles: [] })));
+      vi.stubGlobal("fetch", fetchMock);
+      await stepUpTotp({ recoveryCode: "ABCDE-FGHIJ" });
+      const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(JSON.parse(call[1].body as string)).toEqual({ recovery_code: "ABCDE-FGHIJ" });
+    });
+
+    it("失败（验证码不对）：抛出 ApiError，不写缓存", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() => Promise.resolve(response({ error: { code: "INVALID_CREDENTIALS" } }, 401))),
+      );
+      await expect(stepUpTotp({ code: "000000" })).rejects.toBeInstanceOf(ApiError);
+      expect(cachedLocalUser()).toBeNull();
     });
   });
 });
