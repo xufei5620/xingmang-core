@@ -26,6 +26,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 Assert-ReleasePowerShellRuntime | Out-Null
 
 $trivyImage = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969'
+$trivyCacheContainerDirectory = '/root/.cache/trivy'
 $postgresBaseReference = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2'
 $clamavBaseReference = 'clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8'
 $nginxBaseReference = 'nginx:1.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
@@ -116,7 +117,7 @@ function Get-TrivyArguments {
     return @(
         'run', '--rm',
         '-v', '/var/run/docker.sock:/var/run/docker.sock',
-        '-v', "${TrivyCacheVolume}:/root/.cache/trivy",
+        '-v', "${TrivyCacheVolume}:${trivyCacheContainerDirectory}",
         $trivyImage
     ) + $Command
 }
@@ -231,8 +232,13 @@ try {
         $trivyAcquisition = Ensure-PinnedImage -Reference $trivyImage -LogPath (Join-Path $releaseRoot 'logs\trivy-tool-pull.log') -Description 'Refreshing exact Trivy 0.74.0 tool digest'
         $trivyToolID = Get-RequiredImageId -Reference $trivyImage
         if ($trivyAcquisition.ImageId -cne $trivyToolID) { throw 'Trivy tool ID changed after acquisition' }
-        Invoke-DockerLogged -Arguments (Get-TrivyArguments -Command @('image', '--timeout', '15m', '--download-db-only', '--no-progress')) -LogPath (Join-Path $releaseRoot 'logs\trivy-db-update.log') -Description 'Updating Trivy vulnerability database'
-        Invoke-DockerLogged -Arguments (Get-TrivyArguments -Command @('image', '--timeout', '15m', '--download-java-db-only', '--no-progress')) -LogPath (Join-Path $releaseRoot 'logs\trivy-java-db-update.log') -Description 'Updating Trivy Java database'
+        Invoke-DockerLogged -Arguments (New-TrivyCacheTmpDirectoryDockerArguments -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory) -LogPath (Join-Path $releaseRoot 'logs\trivy-cache-tmp-dir.log') -Description 'Creating a same-volume TMPDIR for Trivy database downloads'
+        try {
+            Invoke-DockerLogged -Arguments (Get-TrivyCacheDownloadArguments -Command @('image', '--timeout', '15m', '--download-db-only', '--no-progress') -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory) -LogPath (Join-Path $releaseRoot 'logs\trivy-db-update.log') -Description 'Updating Trivy vulnerability database'
+            Invoke-DockerLogged -Arguments (Get-TrivyCacheDownloadArguments -Command @('image', '--timeout', '15m', '--download-java-db-only', '--no-progress') -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory) -LogPath (Join-Path $releaseRoot 'logs\trivy-java-db-update.log') -Description 'Updating Trivy Java database'
+        } finally {
+            Invoke-DockerLogged -Arguments (New-TrivyCacheTmpDirectoryCleanupDockerArguments -Volume $TrivyCacheVolume -TrivyImage $trivyImage -ContainerCacheDirectory $trivyCacheContainerDirectory) -LogPath (Join-Path $releaseRoot 'logs\trivy-cache-tmp-dir-cleanup.log') -Description 'Cleaning up the Trivy database download TMPDIR'
+        }
         $trivyVersionPath = Join-Path $releaseRoot 'proof\trivy-version.txt'
         Invoke-DockerTextCapture -Arguments (Get-TrivyArguments -Command @('--version')) -OutputPath $trivyVersionPath -ErrorLogPath (Join-Path $releaseRoot 'logs\trivy-version.log') -Description 'Recording Trivy and database versions'
         $trivyVersionText = Get-Content -Raw -LiteralPath $trivyVersionPath
