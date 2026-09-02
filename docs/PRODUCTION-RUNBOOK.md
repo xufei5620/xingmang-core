@@ -200,6 +200,47 @@ $strictVerifyExit = $LASTEXITCODE
 if ($strictVerifyExit -ne 0) { throw "strict RC68 transfer-ready verification failed with exit $strictVerifyExit" }
 ```
 
+**Running the gate detached, when the operator's own shell cannot stay
+attached for the whole gate.** An interactive tool/agent sandbox commonly
+kills whatever is still in the foreground of one shell invocation after
+about ten minutes; the one-block RC68 gate above (nine image builds plus a
+serial Trivy scan and SBOM per image) routinely runs longer than that. A
+hidden/non-interactive console on a zh-CN Windows locale also defaults to
+the GBK code page, which mangles UTF-8 byte output from git and docker --
+including this repo's own `发票` path segment -- if the gate (or anything
+that shells out to git/docker) is simply launched in the background without
+addressing that separately. `scripts/run-detached.ps1` runs a target
+PowerShell script in a genuinely detached, hidden process (not tied to the
+launching shell's own lifetime) with `chcp 65001` plus UTF-8 console
+encodings set first, a full-output transcript log, and an exit-code file,
+then returns almost immediately -- so there is nothing left in the
+foreground for a sandbox timeout to kill. Save the one-block gate command
+above as a `.ps1` file (e.g. `release\run-rc68-gate.ps1`) and launch it
+detached instead of running it directly:
+
+```powershell
+pwsh -NoProfile -File .\scripts\run-detached.ps1 `
+  -ScriptPath .\release\run-rc68-gate.ps1 `
+  -RunName rc68-gate
+# Prints the run directory (under logs\detached-runs\) and returns in well
+# under a second; the gate keeps running in the background.
+
+# Check on it later -- each call is its own short, independent invocation:
+pwsh -NoProfile -File .\scripts\run-detached.ps1 `
+  -AttachRunDirectory 'logs\detached-runs\rc68-gate-...' -Wait -TimeoutSeconds 540
+# Exit code 4 means "still running, poll again the same way"; any other
+# exit code is the gate script's own, propagated through unchanged (so 42
+# still means the same pending-canary result it always has). The run
+# directory's transcript.log has the gate's complete merged output exactly
+# as if it had run in the foreground; exitcode.txt has the same code once
+# the run finishes.
+```
+
+See `scripts/run-detached.ps1`'s own doc comment (`Get-Help
+.\scripts\run-detached.ps1 -Full`) for the rest of its options, and
+`scripts/test-run-detached.ps1` for the mechanism proven end to end
+(including the exact exit-42 shape this gate produces).
+
 `ReleaseDirectory` must be a new or empty directory below `release/`; the
 script never removes or overwrites an existing artifact directory. The default
 IdP mode is deliberately `keycloak`: it must actually build the exact pinned
