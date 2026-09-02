@@ -197,6 +197,27 @@ to exist and strictly decode before the process is allowed to start ("fail
 closed on malformed config", scoped to only apply when the feature is
 actually meant to be used).
 
+**On `validateIssuerReadiness`, named in the task brief's readiness item —
+deliberately not touched.** I read that function before changing anything
+near it: `validateIssuerReadiness`/`adminsettings.IsIssuerConfigured` check
+`adminsettings.Settings.IssuerName` against the reserved placeholder
+`"待配置开票主体"` — this is the invoice-issuing **business entity's legal
+name** (printed on issued invoices), a completely unrelated admin setting
+with no connection to OIDC or any identity provider; grep confirms no
+second function of that name exists and no OIDC-related check appears
+anywhere in the `Readiness` closure passed to `httpapi.Config` at all. I
+believe the task brief's premise here was a naming-pattern
+mis-identification (matching "issuer" without checking which "issuer"),
+not an intentional instruction, so I left `validateIssuerReadiness`
+untouched — changing it would have broken an unrelated invoice-business
+readiness gate for no OIDC-related benefit. The actual, real dependency the
+brief's intent was pointing at — "readiness/startup must not hard-require
+OIDC when it is disabled" — is what the OIDC-discovery-skip two paragraphs
+above addresses: `auth.NewOIDCClient` (the one real startup-time network
+dependency on the IdP) is now conditional on `OIDC_ADMIN_LOGIN_ENABLED`,
+and there was nothing else to gate since no OIDC-specific check exists in
+the readiness callback to begin with.
+
 ## Endpoint contract
 
 `POST /api/v1/auth/console-assertion` — **note the path differs from the
