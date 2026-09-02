@@ -12,7 +12,7 @@ import {
 import { safeNextPath } from "../auth/oidc";
 import { getRuntimeConfig } from "../auth/runtimeConfig";
 import { loginReasonMessage, oidc } from "../auth/session";
-import { validateRecoveryCode, validateTotpCode } from "../lib/totpForm";
+import { TotpVerifyForm } from "../components/TotpVerifyForm";
 
 /** 登录页（XM-AUTH1 起 oidc/dev-header 两态；XM-LOGIN 加入 local）。
  *
@@ -218,8 +218,11 @@ function PasswordStepPage({
   );
 }
 
-/** 登录第二步：动态码 / 恢复码二选一。默认展示动态码输入框，「改用恢复码」
- *  切换成另一种输入——两者互斥，与后端 code/recovery_code 二选一的契约一致。 */
+/** 登录第二步：动态码 / 恢复码二选一。委托给共享的 `TotpVerifyForm`
+ *  （XM-AUTH-TOTP0 起；CR-0006 XM-INVCON1 把它抽成独立组件后，这里是它的
+ *  第一个调用方，第二个是 InvoiceConsolePanel 的步进提示）——外层只保留
+ *  这个页面独有的部分：欢迎语里的用户名前缀、页面级卡片外壳、以及
+ *  过期提示条。 */
 function TotpStepPage({
   challenge,
   expiredNotice,
@@ -231,53 +234,16 @@ function TotpStepPage({
   onSuccess: (user: LocalUser) => void;
   onExpired: () => void;
 }) {
-  const fieldPrefix = useId();
-  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
-  const [code, setCode] = useState("");
-  const [recoveryCode, setRecoveryCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const fieldError = useRecoveryCode ? validateRecoveryCode(recoveryCode) : validateTotpCode(code);
-
-  const submit = async () => {
-    if (fieldError) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const user = await completeTotpLogin(
-        challenge.tempToken,
-        useRecoveryCode ? { recoveryCode } : { code },
-      );
-      onSuccess(user);
-    } catch (cause) {
-      const { message, expired } = totpLoginErrorMessage(cause);
-      if (expired) {
-        onExpired();
-        return;
-      }
-      setError(message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="flex min-h-screen items-center justify-center bg-canvas font-sans">
-      <div className="w-96 max-w-full rounded-lg border border-edge bg-surface p-8 shadow-md">
-        <div className="mb-1 flex items-center gap-2">
+      <div className="w-96 max-w-full">
+        <div className="mb-4 flex items-center gap-2 px-1">
           <span
             aria-hidden="true"
             className="h-5 w-0.5 shrink-0 rounded-full bg-linear-to-b from-accent to-transparent"
           />
-          <h1 className="text-lg font-semibold text-fg">两步验证</h1>
+          <h1 className="text-lg font-semibold text-fg">星芒统一控制平台</h1>
         </div>
-        <p className="mb-6 text-xs text-fg-muted">
-          {challenge.username ? `${challenge.username}，` : ""}
-          {useRecoveryCode
-            ? "请输入一张尚未使用过的恢复码。"
-            : "请输入认证器 App 中显示的 6 位动态码。"}
-        </p>
 
         {expiredNotice ? (
           <p
@@ -288,71 +254,17 @@ function TotpStepPage({
           </p>
         ) : null}
 
-        <form
-          className="flex flex-col gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void submit();
+        <TotpVerifyForm
+          title="两步验证"
+          description={`${challenge.username ? `${challenge.username}，` : ""}请输入认证器 App 中显示的 6 位动态码。`}
+          submitLabel="验证并登录"
+          mapError={totpLoginErrorMessage}
+          onExpired={onExpired}
+          onVerify={async (input) => {
+            const user = await completeTotpLogin(challenge.tempToken, input);
+            onSuccess(user);
           }}
-        >
-          {useRecoveryCode ? (
-            <FormField
-              label="恢复码"
-              htmlFor={`${fieldPrefix}-recovery-code`}
-              required
-              hint="启用 TOTP 时生成的一次性恢复码，每张只能用一次"
-            >
-              <Input
-                id={`${fieldPrefix}-recovery-code`}
-                value={recoveryCode}
-                disabled={busy}
-                onChange={(event) => setRecoveryCode(event.target.value)}
-                autoComplete="off"
-                autoFocus
-                spellCheck={false}
-              />
-            </FormField>
-          ) : (
-            <FormField label="动态码" htmlFor={`${fieldPrefix}-code`} required>
-              <Input
-                id={`${fieldPrefix}-code`}
-                value={code}
-                disabled={busy}
-                onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                autoFocus
-                spellCheck={false}
-              />
-            </FormField>
-          )}
-
-          <Button
-            type="submit"
-            className="w-full"
-            loading={busy}
-            disabled={Boolean(useRecoveryCode ? validateRecoveryCode(recoveryCode) : validateTotpCode(code))}
-          >
-            验证并登录
-          </Button>
-        </form>
-
-        {error ? (
-          <p role="alert" className="mt-4 text-xs text-danger">
-            {error}
-          </p>
-        ) : null}
-
-        <button
-          type="button"
-          className="mt-4 text-xs font-medium text-accent hover:underline"
-          onClick={() => {
-            setUseRecoveryCode((prev) => !prev);
-            setError(null);
-          }}
-        >
-          {useRecoveryCode ? "改用动态码" : "改用恢复码"}
-        </button>
+        />
       </div>
     </div>
   );
