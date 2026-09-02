@@ -475,3 +475,89 @@ func TestPostgresSessionDisplayNameEncryptedRotatedAndBackwardCompatible(t *test
 		t.Fatalf("a pre-migration session must decrypt to an empty display name, got %q", preMigration.DisplayName)
 	}
 }
+
+// TestPostgresConsoleAssertionNonceStoreSingleUseAndRetention exercises the
+// real INSERT...ON CONFLICT DO NOTHING semantics ConsumeNonce depends on
+// (console_assertion.go's pure verifier deliberately does not cover this --
+// it is a storage-layer, not a claims-verification, concern) and the
+// retention sweep's boundary.
+func TestPostgresConsoleAssertionNonceStoreSingleUseAndRetention(t *testing.T) {
+	databaseURL := testdb.URL(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err = pool.Exec(ctx, `DROP SCHEMA public CASCADE;CREATE SCHEMA public`); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewPostgresConsoleAssertionNonceStore(pool)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	nonceHash := sha256Hex("nonce-1")
+
+	ok, err := store.ConsumeNonce(ctx, nonceHash, now.Add(5*time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("first consume: ok=%v err=%v", ok, err)
+	}
+	ok, err = store.ConsumeNonce(ctx, nonceHash, now.Add(5*time.Minute))
+	if err != nil || ok {
+		t.Fatalf("replayed nonce must observe ok=false with no error: ok=%v err=%v", ok, err)
+	}
+
+	// Concurrent race on a distinct nonce: exactly one of two simultaneous
+	// callers may win, matching the "first-to-arrive wins" contract the
+	// exchange handler relies on to fold a replay into ASSERTION_INVALID
+	// without a second round trip.
+	raceNonce := sha256Hex("nonce-race")
+	var wins atomic.Int64
+	var wait sync.WaitGroup
+	for range 5 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			won, raceErr := store.ConsumeNonce(ctx, raceNonce, now.Add(5*time.Minute))
+			if raceErr != nil {
+				t.Errorf("unexpected concurrent consume error: %v", raceErr)
+				return
+			}
+			if won {
+				wins.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("expected exactly one winner of the concurrent nonce race, got %d", wins.Load())
+	}
+
+	// Retention: a nonce whose expiry is more than an hour in the past is
+	// swept; one within the hour, or not yet expired, is kept.
+	longExpired := sha256Hex("nonce-long-expired")
+	recentlyExpired := sha256Hex("nonce-recently-expired")
+	stillValid := sha256Hex("nonce-still-valid")
+	for hash, expiresAt := range map[string]time.Time{
+		longExpired:     now.Add(-2 * time.Hour),
+		recentlyExpired: now.Add(-30 * time.Minute),
+		stillValid:      now.Add(time.Minute),
+	} {
+		if ok, err = store.ConsumeNonce(ctx, hash, expiresAt); err != nil || !ok {
+			t.Fatalf("seed consume for %q: ok=%v err=%v", hash, ok, err)
+		}
+	}
+	deleted, err := store.DeleteExpired(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected exactly the long-expired row to be swept, got %d", deleted)
+	}
+	var remaining int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM console_assertion_nonces WHERE nonce_hash IN ($1,$2)`, recentlyExpired, stillValid).Scan(&remaining); err != nil || remaining != 2 {
+		t.Fatalf("expected the recently-expired and still-valid rows to survive: remaining=%d err=%v", remaining, err)
+	}
+}
