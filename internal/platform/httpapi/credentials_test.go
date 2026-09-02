@@ -184,9 +184,14 @@ func TestListConnectorConfigsShape(t *testing.T) {
 		Endpoint: "https://api.solov.cc", TargetAllowlist: []string{"api.solov.cc"},
 		CredentialRef: "secret://sub2api-prod/read-token", Version: 3,
 		UpdatedAt: time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC), UpdatedBy: "staff_alice",
+		// ProbeEnabled/ProbeCredentialRef：XM-ASSURE1-glue 补的投影覆盖——
+		// 探测 Kill Switch 已打开、已登记一个探测专用凭据引用。
+		ProbeEnabled: true, ProbeCredentialRef: "secret://sub2api-probe/probe-token",
 	}, {
 		Platform: "newapi", Environment: "staging", Mode: "fake", TargetAllowlist: nil, Version: 1,
 		UpdatedAt: time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC), UpdatedBy: "staff_bob",
+		// 零值：探测 Kill Switch 未打开、未登记探测凭据——覆盖
+		// probe_credential_registered 的 false 分支。
 	}}}
 	rec := callCredentials(t, ListConnectorConfigsHandler(store), "/api/v1/connectors/config", credentialPrincipal(credentials.ScopeConnectorManage))
 	if rec.Code != http.StatusOK {
@@ -206,6 +211,7 @@ func TestListConnectorConfigsShape(t *testing.T) {
 		"platform": "sub2api", "mode": "real", "endpoint": "https://api.solov.cc",
 		"credential_ref": "secret://sub2api-prod/read-token", "version": float64(3),
 		"updated_at": "2026-08-30T01:02:03Z", "updated_by": "staff_alice",
+		"probe_enabled": true, "probe_credential_registered": true,
 	} {
 		if first[key] != want {
 			t.Fatalf("items[0].%s = %#v, want %#v", key, first[key], want)
@@ -214,8 +220,16 @@ func TestListConnectorConfigsShape(t *testing.T) {
 	if list, ok := first["target_allowlist"].([]any); !ok || len(list) != 1 || list[0] != "api.solov.cc" {
 		t.Fatalf("target_allowlist = %#v", first["target_allowlist"])
 	}
-	if len(first) != 8 {
-		t.Fatalf("响应字段应恰好是契约里的 8 个, got %#v", first)
+	if len(first) != 10 {
+		t.Fatalf("响应字段应恰好是契约里的 10 个（XM-ASSURE1-glue 加了 probe_enabled/probe_credential_registered）, got %#v", first)
+	}
+	// 零值行（未打开 Kill Switch、未登记探测凭据）两个新字段都应是 false——
+	// XM-ASSURE1-ui 交接文档 risks #2 描述的"零声明时读不到当前状态"这条
+	// 缺口，本片补的正是这两个 false，不是省略字段。
+	second := body.Items[1]
+	if second["probe_enabled"] != false || second["probe_credential_registered"] != false {
+		t.Fatalf("items[1] probe_enabled/probe_credential_registered = %#v/%#v, want false/false",
+			second["probe_enabled"], second["probe_credential_registered"])
 	}
 	// nil 白名单要输出 []，不能是 null——前端按数组遍历
 	if list, ok := body.Items[1]["target_allowlist"].([]any); !ok || len(list) != 0 {
@@ -223,6 +237,12 @@ func TestListConnectorConfigsShape(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"environment"`) {
 		t.Fatalf("response leaked environment: %s", rec.Body.String())
+	}
+	// probe_credential_registered 必须是布尔值——探测专用凭据引用的字面串
+	// 一律不出现在响应里（与 credential_ref 字段的既有先例刻意不同，见
+	// connectorConfigItem 的文档注释）。
+	if strings.Contains(rec.Body.String(), "probe-token") {
+		t.Fatalf("response leaked probe_credential_ref literal: %s", rec.Body.String())
 	}
 }
 
