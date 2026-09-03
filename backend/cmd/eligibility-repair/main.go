@@ -21,6 +21,13 @@
 //     left over from before XM-INV-ELIG-AUTO-RECONCILE and
 //     XM-INV-ELIG-QUEUE-NARROW shipped. See
 //     docs/handoffs/XM-INV-ELIG-QUEUE-NARROW.md.
+//   - --kind=policy-start-reanchor: design XM-INV-ELIG-SIMPLIFY section
+//     3(D) -- re-anchors the POLICY_ANCHOR accounts bootstrapped before
+//     that slice shipped (cutover_at still the triggering checkpoint's own
+//     as_of, not the global policy start) so a real in-window cash payment
+//     is no longer permanently excluded. An account with no in-window
+//     funding lot is left untouched in both modes ("expected no-op"). See
+//     docs/handoffs/XM-INV-ELIG-POLICY-START-ANCHOR.md.
 //
 // Defaults to --dry-run; --apply requires an operator id and actually
 // mutates the database. Omitting --kind reproduces this tool's original
@@ -50,10 +57,11 @@ import (
 )
 
 const (
-	kindPreAnchorUsage = "pre-anchor-usage"
-	kindBalanceAnchor  = "balance-anchor"
-	kindBalanceBlip    = "balance-blip"
-	kindQueueNarrow    = "queue-narrow"
+	kindPreAnchorUsage      = "pre-anchor-usage"
+	kindBalanceAnchor       = "balance-anchor"
+	kindBalanceBlip         = "balance-blip"
+	kindQueueNarrow         = "queue-narrow"
+	kindPolicyStartReanchor = "policy-start-reanchor"
 
 	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
 	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
@@ -69,7 +77,7 @@ func main() {
 	migrationsDir := flag.String("migrations-dir", "/app/migrations", "bundled migration directory")
 	apply := flag.Bool("apply", false, "actually resolve freezes (and, for pre-anchor-usage, requeue events; default is a dry run that changes nothing)")
 	operatorID := flag.String("operator-id", "", "the approving operator's admin UUID (required with --apply)")
-	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), or queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C))")
+	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), or policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D))")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")
@@ -91,8 +99,8 @@ func main() {
 }
 
 func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, out io.Writer) error {
-	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow {
-		return fmt.Errorf("unknown --kind %q, want %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow)
+	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow && kind != kindPolicyStartReanchor {
+		return fmt.Errorf("unknown --kind %q, want %q, %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor)
 	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
 	if err != nil {
@@ -126,6 +134,9 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	}
 	if kind == kindQueueNarrow {
 		return runQueueNarrow(ctx, store, apply, operatorID, keyring, out)
+	}
+	if kind == kindPolicyStartReanchor {
+		return runPolicyStartReanchor(ctx, store, apply, operatorID, out)
 	}
 	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
 }
@@ -212,6 +223,21 @@ func runQueueNarrow(ctx context.Context, store *postgresstore.Store, apply bool,
 		return fmt.Errorf("repair queue narrow eligibility: %w", err)
 	}
 	printQueueNarrowSummary(out, result)
+	return nil
+}
+
+func runPolicyStartReanchor(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, out io.Writer) error {
+	// Unlike the other three kinds, this repair never resolves an
+	// eligibility_freezes row (a POLICY_ANCHOR account's cutover boundary is
+	// not gated behind one), so there is no encrypted resolution note or
+	// evidence to prepare here.
+	in := postgresstore.PolicyStartReanchorRepairInput{Apply: apply, OperatorID: operatorID}
+	result, err := store.RepairPolicyStartReanchorEligibility(ctx, in, postgresstore.AuditActor{
+		Type: "admin", ID: operatorID, Reason: "XM-INV-ELIG-POLICY-START-ANCHOR repair tool " + modeLabel(apply)})
+	if err != nil {
+		return fmt.Errorf("repair policy start reanchor eligibility: %w", err)
+	}
+	printPolicyStartReanchorSummary(out, result)
 	return nil
 }
 
@@ -306,6 +332,28 @@ func printQueueNarrowSummary(out io.Writer, result postgresstore.QueueNarrowRepa
 	fmt.Fprintf(out, "\n%-38s %8d %9d %9d\n", "TOTAL", result.TotalNegativeBalanceFreezesResolved,
 		result.TotalUsageExceedsLedgerFreezesResolved, result.TotalLateFactFreezesResolved)
 	fmt.Fprintf(out, "\naccounts affected: %d\n", len(result.Accounts))
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(out, "\nACCOUNT ERRORS (not applied, other accounts still processed):\n")
+		for _, accountErr := range result.Errors {
+			fmt.Fprintf(out, "%-38s %s\n", accountErr.ExternalAccountID, accountErr.Message)
+		}
+	}
+}
+
+func printPolicyStartReanchorSummary(out io.Writer, result postgresstore.PolicyStartReanchorRepairResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-ELIG-POLICY-START-ANCHOR: %s\n\n", mode)
+	fmt.Fprintf(out, "%-38s %20s %20s %9s %6s %8s %11s\n", "ACCOUNT", "OLD_CUTOVER_AT", "NEW_CUTOVER_AT", "WIN_LOTS", "NOOP", "BLOCKED", "REPROJECTED")
+	for _, account := range result.Accounts {
+		fmt.Fprintf(out, "%-38s %20s %20s %9d %6t %8t %11t\n", account.ExternalAccountID,
+			account.OldCutoverAt.UTC().Format(time.RFC3339), account.NewCutoverAt.UTC().Format(time.RFC3339),
+			account.WindowFundingLots, account.NoOp, account.Blocked, account.Reprojected)
+		fmt.Fprintf(out, "  old_balance=%s new_balance=%s\n", account.OldCutoverBalanceUnits, account.NewCutoverBalanceUnits)
+	}
+	fmt.Fprintf(out, "\naccounts examined: %d\n", len(result.Accounts))
 	if len(result.Errors) > 0 {
 		fmt.Fprintf(out, "\nACCOUNT ERRORS (not applied, other accounts still processed):\n")
 		for _, accountErr := range result.Errors {
