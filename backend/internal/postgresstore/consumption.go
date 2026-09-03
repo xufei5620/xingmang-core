@@ -1481,6 +1481,27 @@ func scanCausal(domainValue, orderValue string) (string, *big.Int, error) {
 }
 
 func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, through time.Time) (eligibilityProjection, error) {
+	return buildEligibilityProjectionExcludingUsageTx(ctx, tx, account, through, nil)
+}
+
+// buildEligibilityProjectionExcludingUsageTx is buildEligibilityProjectionTx
+// with one extra ability: excludeUsageIDs, when non-nil, removes the named
+// source_usage_events rows from the projection entirely (as if they had
+// never been observed), while every other fact (credits, payments, every
+// other usage event) is included exactly as buildEligibilityProjectionTx
+// would. This exists solely for XM-INV-BALANCE-BLIP's evidence-evaluation
+// boundary rule (evaluatePendingBalanceEvidenceTx): a checkpoint/proof whose
+// as_of coincides with a usage event's event_time can disagree with the
+// upstream source's own reported balance purely because of that timing
+// coincidence -- the source snapshot may have been captured before that
+// instant's own debit was applied, while this function's inclusive
+// event_time<=through window already subtracts it. Recomputing the
+// projection with that one boundary usage fact excluded is how the
+// evaluator checks whether the difference is explained entirely by the
+// coincidence rather than a real gap. Nothing about the ordinary projection
+// path (buildEligibilityProjectionTx, used for real reprojection/allocation
+// building) changes: it always passes nil here.
+func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, through time.Time, excludeUsageIDs map[string]bool) (eligibilityProjection, error) {
 	projection := eligibilityProjection{
 		Lots: map[string]*projectedLot{}, ExpectedBalance: new(big.Int),
 	}
@@ -1590,6 +1611,9 @@ func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligib
 		if err = rows.Scan(&id, &at, &unitsText, &invoiceEligible, &causalDomain, &causalOrder, &revision); err != nil {
 			rows.Close()
 			return projection, err
+		}
+		if excludeUsageIDs != nil && excludeUsageIDs[id] {
+			continue
 		}
 		units, parseErr := parseUnsignedUnits(unitsText, "stored usage units", false)
 		if parseErr != nil {
@@ -3022,6 +3046,16 @@ func applyPrePolicyWalletFundingTx(
 		nil, map[string]any{"eligibility_start_at": account.PolicyStartAt, "credit_event_id": derivedID})
 }
 
+// balanceEvidenceBoundaryTolerance bounds how close a usage event's
+// event_time may be to a balance checkpoint/proof's as_of before
+// evaluatePendingBalanceEvidenceTx's boundary rule (XM-INV-BALANCE-BLIP)
+// treats it as a same-instant timing hazard rather than two genuinely
+// distinct moments: the balances stream and the usage stream are captured
+// independently on the source side, so two facts that are conceptually
+// simultaneous there can still carry timestamps a small amount apart rather
+// than bit-identical.
+const balanceEvidenceBoundaryTolerance = time.Second
+
 func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, actor AuditActor) error {
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {
@@ -3081,6 +3115,72 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		return err
 	}
 	rows.Close()
+
+	objectTypeOf := func(item proof) string {
+		if item.kind == "carry" {
+			return "balance_carry_forward_proof"
+		}
+		return "balance_checkpoint"
+	}
+	writeEvaluation := func(item proof, status string, expected, difference *big.Int) error {
+		var execErr error
+		if item.kind == "carry" {
+			_, execErr = tx.Exec(ctx, `
+				INSERT INTO balance_carry_forward_evaluations(
+					id,proof_id,projection_version,expected_service_units,
+					difference_service_units,evaluation_status)
+				VALUES($1,$2,$3,$4::numeric,$5::numeric,$6)`, randomUUID(), item.id,
+				account.Version+1, expected.String(), difference.String(), status)
+		} else {
+			_, execErr = tx.Exec(ctx, `
+				INSERT INTO balance_checkpoint_evaluations(
+					id,checkpoint_id,projection_version,expected_service_units,
+					difference_service_units,evaluation_status)
+				VALUES($1,$2,$3,$4::numeric,$5::numeric,$6)`, randomUUID(), item.id,
+				account.Version+1, expected.String(), difference.String(), status)
+		}
+		if execErr != nil {
+			return execErr
+		}
+		action := "eligibility.balance_checkpoint.evaluated"
+		if item.kind == "carry" {
+			action = "eligibility.balance_carry_forward.evaluated"
+		}
+		return writeAudit(ctx, tx, actor, action, objectTypeOf(item), item.id, nil, map[string]any{
+			"status": status, "evidence_key": item.key,
+		})
+	}
+	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) error {
+		_, execErr := tx.Exec(ctx, `
+			INSERT INTO source_credit_events(
+				id,source_instance_id,external_account_id,external_event_id,external_credit_id,
+				event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
+				credit_kind,source_sequence,source_cursor,stream_watermark_at,
+				source_revision_hash,observed_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,
+				'UNKNOWN_POSITIVE',$11,$12,$13,$14,$15)
+			ON CONFLICT(source_instance_id,external_event_id) DO NOTHING`, randomUUID(),
+			account.SourceInstanceID, accountID, "unknown-positive:"+item.externalEventID,
+			"unknown-positive:"+item.id, intervalStart.UTC(), amount.String(),
+			account.UnitCode, account.ManifestHash, account.ConfigurationHash,
+			item.sequence, item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
+		return execErr
+	}
+
+	// pending holds a checkpoint/proof whose positive difference was not
+	// resolved by the boundary rule below and has not yet been confirmed or
+	// disconfirmed by the next item in this ordered sequence -- see the
+	// XM-INV-BALANCE-BLIP comment on the case-1 branch further down. At
+	// most one item is ever deferred at a time: each iteration either
+	// resolves the previous pending item (confirm or disconfirm) before
+	// classifying the current one, or defers the current one in its place.
+	type pendingBlip struct {
+		item                 proof
+		intervalStart        time.Time
+		expected, difference *big.Int
+	}
+	var pending *pendingBlip
+
 	for _, item := range items {
 		balance, parseErr := parseUnsignedUnits(item.balanceText, "carry-forward balance", true)
 		if parseErr != nil {
@@ -3091,15 +3191,56 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			return projectionErr
 		}
 		difference := new(big.Int).Sub(new(big.Int).Set(balance), projection.ExpectedBalance)
-		status := "matched"
-		objectType := "balance_checkpoint"
-		if item.kind == "carry" {
-			objectType = "balance_carry_forward_proof"
+
+		if pending != nil {
+			if !item.balanceNegative && difference.Sign() == 1 && difference.Cmp(pending.difference) == 0 {
+				// Confirmed: the very next piece of evidence shows the
+				// exact same positive gap against an otherwise-unchanged
+				// ledger -- a genuine, persistent discrepancy, not a
+				// one-off blip. Synthesize using the deferred item's own
+				// original interval start and amount: nothing was written
+				// for it while it was pending, so recomputing its trust
+				// interval now would give the identical answer anyway.
+				if err = synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference); err != nil {
+					return err
+				}
+				if err = writeEvaluation(pending.item, "positive_classified_non_cash", pending.expected, pending.difference); err != nil {
+					return err
+				}
+				pending = nil
+				// The credit just inserted is dated at or before this item
+				// (pending.intervalStart <= pending.item.asOf <= item.asOf),
+				// so it is now inside buildEligibilityProjectionTx's window
+				// for this item -- rebuild rather than trust algebra.
+				projection, projectionErr = buildEligibilityProjectionTx(ctx, tx, account, item.asOf)
+				if projectionErr != nil {
+					return projectionErr
+				}
+				difference = new(big.Int).Sub(new(big.Int).Set(balance), projection.ExpectedBalance)
+				if difference.Sign() != 0 {
+					return fmt.Errorf("balance blip confirmation for checkpoint/proof %s did not reconcile: still differs by %s",
+						item.key, difference.String())
+				}
+				if err = writeEvaluation(item, "matched", projection.ExpectedBalance, difference); err != nil {
+					return err
+				}
+				continue
+			}
+			// Disconfirmed: the ledger reconciled (or moved a different
+			// way) without the deferred item's excess recurring, proving
+			// it was transient. Record it as such and fall through to
+			// classify the current item on its own merits below.
+			if err = writeEvaluation(pending.item, "positive_blip_ignored", pending.expected, pending.difference); err != nil {
+				return err
+			}
+			pending = nil
 		}
+
+		status := "matched"
 		if item.balanceNegative {
 			status = "negative_frozen"
 			if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-				objectType, item.key, item.revision, actor); err != nil {
+				objectTypeOf(item), item.key, item.revision, actor); err != nil {
 				return err
 			}
 		} else {
@@ -3107,115 +3248,157 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			case -1:
 				status = "negative_frozen"
 				if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-					objectType, item.key, item.revision, actor); err != nil {
+					objectTypeOf(item), item.key, item.revision, actor); err != nil {
 					return err
 				}
 			case 1:
-				var intervalStart time.Time
-				// XM-INV-ANCHOR-BALANCE: a POLICY_ANCHOR account's own
-				// anchor (account.CutoverAt, design XM-INV-POLICY-ANCHOR
-				// 2.1's bootstrap reconciliation checkpoint) is an
-				// unconditionally trusted interval start, exactly as a
-				// legacy account's checkpoint_kind='cutover' row is in the
-				// first UNION branch above -- it plays the identical role
-				// (the account's own observed opening balance), it is just
-				// sourced from source_account_eligibility_state instead of
-				// a separate checkpoint row, because a POLICY_ANCHOR
-				// bootstrap never inserts a checkpoint_kind='cutover' row
-				// (only 'reconciliation', which this same function must
-				// still evaluate -- see ObserveBalanceCheckpoint's
-				// POLICY_ANCHOR branch). Before this branch existed, a
-				// fresh POLICY_ANCHOR account's very first balance
-				// evaluation (typically its own anchor checkpoint) found no
-				// trusted interval start at all and froze SOURCE_GAP --
-				// production accounts 98cce4c8... and 6706ea6a... (see
-				// docs/handoffs/XM-INV-ANCHOR-BALANCE.md). Scoped strictly
-				// to bootstrap_kind='POLICY_ANCHOR' so legacy accounts are
-				// unaffected: they never have a matching row here. Once a
-				// real matched/positive_classified_non_cash evaluation
-				// exists (second UNION branch), it is always later than
-				// this fixed anchor point and wins the max() below, so this
-				// branch only ever matters for the account's first
-				// evaluation -- the same way a legacy account's single
-				// checkpoint_kind='cutover' row is superseded the moment
-				// something later has matched.
-				err = tx.QueryRow(ctx, `
-					SELECT max(q.as_of) FROM (
-						SELECT checkpoint.as_of FROM balance_reconciliation_checkpoints checkpoint
-						WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='cutover'
-						  AND (checkpoint.as_of<$2 OR (checkpoint.as_of=$2 AND checkpoint.source_sequence<$3))
-						UNION ALL
-						SELECT checkpoint.as_of FROM balance_reconciliation_checkpoints checkpoint
-						JOIN balance_checkpoint_evaluations evaluation ON evaluation.checkpoint_id=checkpoint.id
-						WHERE checkpoint.external_account_id=$1
-						  AND (checkpoint.as_of<$2 OR (checkpoint.as_of=$2 AND checkpoint.source_sequence<$3))
-						  AND evaluation.evaluation_status IN ('matched','positive_classified_non_cash')
-						UNION ALL
-						SELECT proof.as_of FROM balance_carry_forward_proofs proof
-						JOIN balance_carry_forward_evaluations evaluation ON evaluation.proof_id=proof.id
-						WHERE proof.external_account_id=$1
-						  AND (proof.as_of<$2 OR (proof.as_of=$2 AND proof.source_sequence<$3))
-						  AND evaluation.evaluation_status IN ('matched','positive_classified_non_cash')
-						UNION ALL
-						SELECT state.cutover_at FROM source_account_eligibility_state state
-						WHERE state.external_account_id=$1 AND state.bootstrap_kind='POLICY_ANCHOR'
-						  AND state.cutover_at<=$2
-					) q`, accountID, item.asOf, item.sequence).Scan(&intervalStart)
-				if err != nil || intervalStart.IsZero() {
+				// XM-INV-BALANCE-BLIP boundary rule: a usage event landing
+				// at or immediately before this item's as_of can make this
+				// function's own inclusive projection (event_time<=through)
+				// subtract a debit the upstream balance snapshot had not
+				// yet applied at that exact instant -- production account
+				// 40bd883d's checkpoint at 22:24:47Z coincided exactly with
+				// a 3,667,080-unit usage event's own event_time (see
+				// docs/handoffs/XM-INV-BALANCE-BLIP.md). Recomputing the
+				// projection with that boundary usage excluded and
+				// accepting an exact match there, before ever considering
+				// synthesis or deferral, resolves this specific, narrow
+				// timing coincidence immediately.
+				resolvedExpected, boundaryErr := resolveBalanceEvidenceBoundaryUsageTx(ctx, tx, account, item.asOf, balance)
+				if boundaryErr != nil {
+					return boundaryErr
+				}
+				if resolvedExpected != nil {
+					status = "matched"
+					projection.ExpectedBalance = resolvedExpected
+					difference = big.NewInt(0)
+				} else if intervalStart, hasPriorRealEvaluation, intervalErr := balanceEvidenceTrustIntervalTx(
+					ctx, tx, accountID, item.asOf, item.sequence); intervalErr != nil || intervalStart.IsZero() {
 					status = "source_gap_frozen"
 					if err = freezeEligibilityTx(ctx, tx, accountID, "", "SOURCE_GAP",
-						objectType, item.key, item.revision, actor); err != nil {
+						objectTypeOf(item), item.key, item.revision, actor); err != nil {
+						return err
+					}
+				} else if !hasPriorRealEvaluation {
+					// XM-INV-ANCHOR-BALANCE: the account's first-ever real
+					// balance evidence (a fresh POLICY_ANCHOR anchor
+					// checkpoint, or a legacy account's first reconciliation
+					// checkpoint against its own checkpoint_kind='cutover'
+					// row) still self-heals immediately -- there is no
+					// "next" evidence to confirm it against yet, and design
+					// XM-INV-ANCHOR-BALANCE's own tests require this exact
+					// behavior to keep working unchanged.
+					status = "positive_classified_non_cash"
+					if err = synthesizeUnknownPositive(item, intervalStart, difference); err != nil {
 						return err
 					}
 				} else {
-					status = "positive_classified_non_cash"
-					_, err = tx.Exec(ctx, `
-						INSERT INTO source_credit_events(
-							id,source_instance_id,external_account_id,external_event_id,external_credit_id,
-							event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
-							credit_kind,source_sequence,source_cursor,stream_watermark_at,
-							source_revision_hash,observed_at)
-						VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,
-							'UNKNOWN_POSITIVE',$11,$12,$13,$14,$15)
-						ON CONFLICT(source_instance_id,external_event_id) DO NOTHING`, randomUUID(),
-						account.SourceInstanceID, accountID, "unknown-positive:"+item.externalEventID,
-						"unknown-positive:"+item.id, intervalStart.UTC(), difference.String(),
-						account.UnitCode, account.ManifestHash, account.ConfigurationHash,
-						item.sequence, item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
-					if err != nil {
-						return err
-					}
+					// XM-INV-BALANCE-BLIP: a positive difference on an
+					// account that already has real prior balance-evidence
+					// history must not synthesize a credit by itself --
+					// defer, and let the next item in this ordered sequence
+					// confirm (recurs with the exact same difference: a
+					// real, persistent gap) or disconfirm (anything else: a
+					// transient blip) it. Nothing is written for this item
+					// yet; if it is the last item in this batch, it simply
+					// stays pending for a future evaluator run to pair with
+					// whatever real evidence arrives next.
+					pending = &pendingBlip{item: item, intervalStart: intervalStart,
+						expected:   new(big.Int).Set(projection.ExpectedBalance),
+						difference: new(big.Int).Set(difference)}
+					continue
 				}
 			}
 		}
-		if item.kind == "carry" {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO balance_carry_forward_evaluations(
-					id,proof_id,projection_version,expected_service_units,
-					difference_service_units,evaluation_status)
-				VALUES($1,$2,$3,$4::numeric,$5::numeric,$6)`, randomUUID(), item.id,
-				account.Version+1, projection.ExpectedBalance.String(), difference.String(), status)
-		} else {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO balance_checkpoint_evaluations(
-					id,checkpoint_id,projection_version,expected_service_units,
-					difference_service_units,evaluation_status)
-				VALUES($1,$2,$3,$4::numeric,$5::numeric,$6)`, randomUUID(), item.id,
-				account.Version+1, projection.ExpectedBalance.String(), difference.String(), status)
-		}
-		if err != nil {
-			return err
-		}
-		action := "eligibility.balance_checkpoint.evaluated"
-		if item.kind == "carry" {
-			action = "eligibility.balance_carry_forward.evaluated"
-		}
-		if err = writeAudit(ctx, tx, actor, action,
-			objectType, item.id, nil, map[string]any{
-				"status": status, "evidence_key": item.key,
-			}); err != nil {
+		if err = writeEvaluation(item, status, projection.ExpectedBalance, difference); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// resolveBalanceEvidenceBoundaryUsageTx implements the XM-INV-BALANCE-BLIP
+// boundary rule described on evaluatePendingBalanceEvidenceTx's case-1
+// branch: it looks for usage events landing within
+// balanceEvidenceBoundaryTolerance at or before asOf and, if any exist,
+// recomputes the projection with all of them excluded. A non-nil return is
+// the exact ExpectedBalance that reconciles balance against that adjusted
+// projection (their difference is exactly zero); nil means either no
+// boundary usage exists, or excluding it does not exactly explain the
+// difference, and the caller falls back to its own classification using the
+// unadjusted (inclusive) projection already in hand.
+func resolveBalanceEvidenceBoundaryUsageTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, asOf time.Time, balance *big.Int) (*big.Int, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id FROM source_usage_events
+		WHERE external_account_id=$1 AND event_time>$2 AND event_time<=$3 AND event_time>$4`,
+		account.ExternalAccountID, asOf.Add(-balanceEvidenceBoundaryTolerance), asOf, account.CutoverAt)
+	if err != nil {
+		return nil, err
+	}
+	excludeUsageIDs := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		excludeUsageIDs[id] = true
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(excludeUsageIDs) == 0 {
+		return nil, nil
+	}
+	adjusted, err := buildEligibilityProjectionExcludingUsageTx(ctx, tx, account, asOf, excludeUsageIDs)
+	if err != nil {
+		return nil, err
+	}
+	if new(big.Int).Sub(new(big.Int).Set(balance), adjusted.ExpectedBalance).Sign() != 0 {
+		return nil, nil
+	}
+	return adjusted.ExpectedBalance, nil
+}
+
+// balanceEvidenceTrustIntervalTx is evaluatePendingBalanceEvidenceTx's
+// trusted-interval-start query (design XM-INV-ANCHOR-BALANCE): for a
+// positive difference to ever be treated as self-healing rather than a
+// SOURCE_GAP freeze, some earlier point must already be trusted -- a legacy
+// account's own checkpoint_kind='cutover' row, an earlier checkpoint/proof
+// already evaluated matched or positive_classified_non_cash, or (design
+// XM-INV-ANCHOR-BALANCE) a POLICY_ANCHOR account's own cutover_at.
+// XM-INV-BALANCE-BLIP adds the second return value, hasPriorRealEvaluation:
+// whether that trust came from an actual prior evaluation (the second or
+// third UNION branch) rather than only a structural bootstrap anchor (the
+// first or fourth branch). The account's very first piece of real balance
+// evidence has no "next" item to confirm against and must keep
+// self-healing immediately; every later positive difference has real
+// history behind it and must defer instead (see evaluatePendingBalanceEvidenceTx's
+// case-1 branch).
+func balanceEvidenceTrustIntervalTx(ctx context.Context, tx pgx.Tx, accountID string, asOf time.Time, sequence int64) (intervalStart time.Time, hasPriorRealEvaluation bool, err error) {
+	err = tx.QueryRow(ctx, `
+		SELECT max(q.as_of),COALESCE(bool_or(q.is_real),FALSE) FROM (
+			SELECT checkpoint.as_of,FALSE AS is_real FROM balance_reconciliation_checkpoints checkpoint
+			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='cutover'
+			  AND (checkpoint.as_of<$2 OR (checkpoint.as_of=$2 AND checkpoint.source_sequence<$3))
+			UNION ALL
+			SELECT checkpoint.as_of,TRUE FROM balance_reconciliation_checkpoints checkpoint
+			JOIN balance_checkpoint_evaluations evaluation ON evaluation.checkpoint_id=checkpoint.id
+			WHERE checkpoint.external_account_id=$1
+			  AND (checkpoint.as_of<$2 OR (checkpoint.as_of=$2 AND checkpoint.source_sequence<$3))
+			  AND evaluation.evaluation_status IN ('matched','positive_classified_non_cash')
+			UNION ALL
+			SELECT proof.as_of,TRUE FROM balance_carry_forward_proofs proof
+			JOIN balance_carry_forward_evaluations evaluation ON evaluation.proof_id=proof.id
+			WHERE proof.external_account_id=$1
+			  AND (proof.as_of<$2 OR (proof.as_of=$2 AND proof.source_sequence<$3))
+			  AND evaluation.evaluation_status IN ('matched','positive_classified_non_cash')
+			UNION ALL
+			SELECT state.cutover_at,FALSE FROM source_account_eligibility_state state
+			WHERE state.external_account_id=$1 AND state.bootstrap_kind='POLICY_ANCHOR'
+			  AND state.cutover_at<=$2
+		) q`, accountID, asOf, sequence).Scan(&intervalStart, &hasPriorRealEvaluation)
+	return intervalStart, hasPriorRealEvaluation, err
 }
