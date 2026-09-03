@@ -221,6 +221,9 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	// before 0021, by number order); excluded here for the same reason 0016
 	// itself is.
 	delete(all, "0021_policy_anchor_start_reanchor.sql")
+	// 0022 (XM-INV-SCAN-CYCLE-SUPERSEDE) alters source_economic_scan_cycles,
+	// also created by the excluded 0009 -- same reason as 0016/0020 above.
+	delete(all, "0022_scan_cycle_supersede.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
