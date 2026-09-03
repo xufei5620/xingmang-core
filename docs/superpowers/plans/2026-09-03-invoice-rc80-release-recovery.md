@@ -1,5 +1,10 @@
 # RC80 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC80 shipped at signed tag
+> `v0.1.0-rc80-signed` (`6a98f62`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc81-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, shadow-evaluate, and deploy RC80 — XM-INV-PROJECTION-FAILURE-GRADING: per-account eligibility projection failures are retried with exponential backoff (30 s doubling, capped at 30 minutes) and graded `dead` only after 8 consecutive failures; readiness turns not-ready only on a dead job or an actionable backlog older than 15 minutes, never on a retrying account; `eligibility_projection_jobs` gains `attempts`/`last_error` and the `dead` status (migration 0023); dead rows are never revived by fact upserts; `invoice-eligibility-repair --kind=projection-requeue-dead` requeues them after a fix; the admin source-health response carries `eligibility_projection` (retrying/dead) counters. This closes the structural gap found by the RC79 read-only audit: a single account's transient projection error could make the whole API not ready (the RC75 incident mechanism).
