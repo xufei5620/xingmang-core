@@ -3,12 +3,15 @@
 - **status:** implemented and self-tested locally; gates below. Not merged, not pushed, not tagged.
 - **branch:** `ai/claude/XM-INV-AGENT-RESTART-GRACE` (based on `ai/claude/XM-INV-AUTOLOGIN` at
   `a0efc92`, RC77 line), worktree `K:/发票/wt-XM-INV-RESTART-GRACE`.
-- **commits (3, in order):**
+- **commits (5, in order):**
   - `044a225` feat(source-agent): persist reconcile/full-scan schedule across restarts (part C)
   - `1633dba` fix(source-agent): rolling reconcile window for the usage economic stream (part B)
   - `0ab1f58` feat(api): readiness grace for an active source economic rescan (part A)
+  - `05e0fba` docs: XM-INV-AGENT-RESTART-GRACE operations notes and handoff
+  - a follow-up commit widening the part A activity window after a production-data correction (see
+    "Post-delivery correction" below) -- hash filled in once committed.
 
-## Production problem (verified before this work started)
+## Production problem (verified before this work started, magnitude corrected after -- see below)
 
 `deploy/roll-forward.sh` recreates the source-agent containers on every deploy. In
 `agents/sourceagent/runner.go:98` (pre-fix), `lastReconcile`/`lastFull` were local variables in
@@ -20,11 +23,15 @@ Worse, in `agents/sourceagent/economics_db.go:194-202` (pre-fix), `prepareCursor
 `ScanReconcile` cycle's `PositionCursor` all the way back to the cutover manifest
 (`canonicalDomainCursor(domains, cutoverPositions)`) -- and this was not restart-specific: **every**
 `ScanReconcile` cycle did this, including the routine one every `SOURCE_RECONCILE_INTERVAL` (6h,
-`deploy/docker-compose.sources.yml:24`), restart or not. For Sub2API usage (~4M rows, ~1000 pages
-x 100 rows per ~6-minute outer cycle, `SOURCE_MAX_PAGES_PER_CYCLE=1000`), one full rewound rescan
-took roughly 5 hours. Per `agents/sourceagent/economics_db.go:118-132` (pre-fix numbering), the
-stream watermark only advances when the whole cycle completes (`!hasMore` at the end of `Scan`),
-so for the entire duration:
+`deploy/docker-compose.sources.yml:24`), restart or not. The cutover manifest position
+(`c.Manifest.HighWaters[c.Stream].Cursor`) is captured exactly once, at cutover time, into a
+create-only encrypted state file (`agents/sourceagent/cutover.go:297` `CaptureCutover`, reading
+`usage_cursor` from a single read-only snapshot transaction) and never advances afterward. So this
+was not "rescans the whole 4M-row table every time" -- it rescans **everything since cutover**, a
+window whose size grows by one more day's worth of usage every day that passes without this fix,
+regardless of restarts. Per `agents/sourceagent/economics_db.go:118-132` (pre-fix numbering), the
+stream watermark only advances when the whole cycle completes (`!hasMore` at the end of `Scan`), so
+for the entire duration of any given cycle:
 
 - Backend readiness (`evaluateSourceStreamHealth`, `backend/internal/postgresstore/source_sync.go`)
   reported `ECONOMIC_WATERMARK_STALE` once `SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS` (15m,
@@ -38,6 +45,33 @@ so for the entire duration:
 above, the periodic reconcile *also* rewinds to cutover, independent of restarts -- confirmed by
 reading `prepareCursor` (the branch that resets `PositionCursor` does not check "is this a
 restart", only "is this a new cycle and is the mode Full or Reconcile").
+
+### Post-delivery correction (production data, after the first four commits landed)
+
+The original task brief estimated the rescan at "~4M rows, ~1000 pages x 100 rows per ~6-minute
+cycle, roughly 5 hours" -- an estimate, not a direct measurement, and it read as "rescans the whole
+table." The team lead relayed the actual production observation for the restart-triggered cycle
+this fix addresses (Sub2API usage, source cutover 2026-08-25): started 06:31Z, published complete
+06:56Z, 3,327 batches, roughly 330k records -- about **25 minutes**, not 5 hours, and bounded to the
+~9 days of usage since cutover, not the full source table. Both corrections are exactly what the
+code above (cutover manifest = one fixed, non-advancing position) predicts, and part B's fix -- start
+from the previous reconcile's baseline instead of the fixed cutover position -- is unaffected by the
+correction: it is the right fix regardless of the window's absolute size, and it is what keeps this
+window from continuing to grow, day over day, once deployed.
+
+What the correction *did* change: part A's activity-window sizing (`economicRescanActivityMaxAge`,
+`backend/cmd/api/runtime.go`), which was originally derived only from the agent's own page-to-page
+pacing (`2*SOURCE_POLL_INTERVAL + SOURCE_ECONOMIC_SAFETY_DELAY`, 7 minutes) -- comfortably covering
+gaps *while the agent is actively sending pages*, but not accounting for the separate gap after the
+agent's last page lands (`source_economic_scan_cycles.cycle_status` flips `receiving`->`processing`)
+and before the backend's own projection workers finish processing every event in the cycle and
+publish it, during which nothing touches that row's `updated_at` at all. The observed 25-minute
+cycle doesn't reveal how that time split between the two phases, so the fix (see "Files changed"
+below) adds a separate, generously-margined `economicRescanProcessingTailAllowance` (30 minutes) for
+that second gap, sized to exceed the entire observed cycle even under the worst-case assumption that
+all 25 minutes were motionless in `processing`, while staying well inside `SOURCE_RECONCILE_INTERVAL`
+(6h) so a genuinely stalled cycle is still caught same-day. New total: `2*SOURCE_POLL_INTERVAL +
+SOURCE_ECONOMIC_SAFETY_DELAY + economicRescanProcessingTailAllowance` = 2m + 5m + 30m = 37 minutes.
 
 ## Design and what changed, by part
 
@@ -136,9 +170,12 @@ its own new legitimate input as internally inconsistent.
 
 The activity window is derived, not independently configured:
 `economicRescanActivityMaxAge := economicRescanActivityPollWindows*sourcePollInterval +
-economicSafetyDelay` in `backend/cmd/api/runtime.go`, where `economicRescanActivityPollWindows = 2`
-is the one named constant this budget is built from (per the brief's "never a hard-coded magic
-number without a named constant"). Threaded through `application.Options` ->
+economicSafetyDelay + economicRescanProcessingTailAllowance` in `backend/cmd/api/runtime.go` (2
+minutes + 5 minutes + 30 minutes = 37 minutes) -- both `economicRescanActivityPollWindows` (2) and
+`economicRescanProcessingTailAllowance` (30m) are named constants this budget is built from (per
+the brief's "never a hard-coded magic number without a named constant"); see the "Post-delivery
+correction" section above for why the window has two separate terms and how the second one is
+calibrated. Threaded through `application.Options` ->
 `Service.sourceEconomicRescanActivityMaxAge` -> `sourceFreshnessPolicy()`. It is **not** part of the
 existing all-or-nothing 3-value freshness bundle check in `NewService` (heartbeat/watermark/
 identities) -- it is independently optional, and zero (absent) is always safe (grace never
@@ -207,8 +244,9 @@ No other deviations from the brief.
 - `backend/internal/application/rescan_grace_integration_test.go` (new) -- application-layer
   end-to-end test: `ListFundingLots` stays actionable during an active rescan, becomes
   `source_unavailable` once it stalls.
-- `backend/cmd/api/runtime.go` -- `economicRescanActivityPollWindows` constant, activity-window
-  derivation, `Options` wiring, `validateSourceRuntimeReadiness` extended
+- `backend/cmd/api/runtime.go` -- `economicRescanActivityPollWindows`/
+  `economicRescanProcessingTailAllowance` constants, activity-window derivation, `Options` wiring,
+  `validateSourceRuntimeReadiness` extended
   (`readySourceStreamAllowedReasons`/`notReadySourceStreamAllowedReasons`/`reasonsWithinSet`/
   `containsReason`).
 - `backend/cmd/api/main_test.go` -- new test for the extended `validateSourceRuntimeReadiness`

@@ -1734,11 +1734,18 @@ persisted reconcile/full-scan schedule from the same state file instead of
 unconditionally forcing a new cycle, and `sub2api-usage`'s periodic
 `ScanReconcile` itself only re-verifies the window since the previous
 completed reconcile, not the full history since cutover -- so a climbing
-restart count no longer implies a multi-hour full rescan every time. It still
-does on the very first restart after upgrading to 0.3.1 (no schedule/baseline
-recorded yet under the old binary) and, if the state volume itself was lost
-or replaced, from a genuinely fresh state file; watch `OnCycle`'s log line for
-`mode="reconcile"` cycles taking hundreds of thousands of rows, and for
+restart count no longer implies a growing-without-bound rescan every time.
+Before this fix, every `ScanReconcile` rewound to the cutover manifest's
+position, a fixed point captured once and never advanced (2026-08-25 for this
+source), so the re-verified window grew every day since cutover; a
+restart-triggered cycle observed 2026-09-03 (before this fix reached
+production) ran 06:31Z-06:56Z, 3,327 batches, roughly 330k rows -- about 25
+minutes, not the full source table, but already large and getting larger
+day over day. A climbing restart count still forces one cycle on the very
+first restart after upgrading to 0.3.1 (no schedule/baseline recorded yet
+under the old binary) and, if the state volume itself was lost or replaced,
+from a genuinely fresh state file; watch `OnCycle`'s log line for
+`mode="reconcile"` cycles' `records` count, and for
 `legacy_reconcile_cycle_abandoned` in its `warnings` field, which marks that
 one-time abandonment of a pre-upgrade in-flight cycle explicitly. The receiver
 (`backend/internal/sourceingest/receiver.go`) returns two rejections
@@ -1848,12 +1855,16 @@ to the timestamp of the last payment is an RC77 rollback condition.
 `SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS` alone would keep `/readyz` (and the
 funding-lot five-stream freshness gate) failed for the full duration of any
 Sub2API usage reconcile, including the one-time forced cycle on the first
-restart after an agent upgrade. The API derives an activity window --
-`economicRescanActivityPollWindows` (2) `* SOURCE_POLL_INTERVAL` +
-`SOURCE_ECONOMIC_SAFETY_DELAY`, backend/cmd/api/runtime.go -- and, while a
-stream's `source_economic_scan_cycles` row proves the rescan's `updated_at`
-is still advancing within that window, downgrades `ECONOMIC_WATERMARK_STALE`
-to the non-fatal `ECONOMIC_RESCAN_ACTIVE` reason (see the admin source-health
+restart after an agent upgrade. The API derives an activity window -- `economicRescanActivityPollWindows`
+(2) `* SOURCE_POLL_INTERVAL` + `SOURCE_ECONOMIC_SAFETY_DELAY` +
+`economicRescanProcessingTailAllowance` (30m, a separate margin for the gap
+between the agent finishing a cycle's last page and the backend finishing
+processing/publishing it, since nothing touches the row's `updated_at` during
+that gap -- see its doc comment in backend/cmd/api/runtime.go for the
+production reconcile this is calibrated against) -- and, while a stream's
+`source_economic_scan_cycles` row proves the rescan's `updated_at` is still
+advancing within that window, downgrades `ECONOMIC_WATERMARK_STALE` to the
+non-fatal `ECONOMIC_RESCAN_ACTIVE` reason (see the admin source-health
 report) instead of failing readiness. It fails closed the moment that row
 stops updating -- a stalled or crashed rescan gets no grace and the endpoint
 degrades exactly as it did before this change. This grace needs no operator
