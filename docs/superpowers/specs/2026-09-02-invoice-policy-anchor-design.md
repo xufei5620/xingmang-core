@@ -16,7 +16,13 @@ out to be only half true — `account.CutoverAt` was already the correct lower b
 `buildEligibilityProjectionTx`'s window, but `evaluatePendingBalanceEvidenceTx`'s *separate*
 trusted-interval query never recognized it as a valid interval start, so a POLICY_ANCHOR account's
 own anchor checkpoint (and everything evaluated before any later checkpoint matched) froze
-`SOURCE_GAP` — see **2.7** and `docs/handoffs/XM-INV-ANCHOR-BALANCE.md`.
+`SOURCE_GAP` — see **2.7** and `docs/handoffs/XM-INV-ANCHOR-BALANCE.md`. **2.8 (added 2026-09-03,
+slice XM-INV-BALANCE-BLIP) closes a third, distinct production gap in the same evaluator**: once
+2.7's fix let a checkpoint self-heal on a positive difference, a single *transient* positive
+difference (a boundary-timing coincidence between the balances and usage streams, or any other
+one-off blip) still permanently inflated the account's expected balance, freezing every later
+checkpoint `UNKNOWN_NEGATIVE_BALANCE` by the same constant amount — see **2.8** and
+`docs/handoffs/XM-INV-BALANCE-BLIP.md`.
 **Owner decision:** 开票只针对 2026-09-01 00:00 (Asia/Shanghai) 之后的真实充值；此前流水对开票无用。
 **Replaces:** the idea of re-running `cutover-init` — rejected because `CaptureCutover`
 snapshots the live database at run time and cannot produce a historical (9/1) baseline.
@@ -340,6 +346,95 @@ but its own stale evaluation row is left as a permanent (and, once resolved, ine
 record; this does not block the account's recovery, since the trust query only ever counts
 `matched`/`positive_classified_non_cash` rows, never `source_gap_frozen` ones. See
 `docs/handoffs/XM-INV-ANCHOR-BALANCE.md` for the exact runbook and expected counts.
+
+### 2.8 A single transient positive balance-evidence difference must not, by itself,
+synthesize a permanent credit (added 2026-09-03, slice XM-INV-BALANCE-BLIP, production incident)
+
+**Gap.** 2.7's fix made a trusted interval start unconditionally treat a positive difference as
+self-healing (`positive_classified_non_cash`, synthesizing an `UNKNOWN_POSITIVE` credit) the
+instant one was available — correct for the account's own first-ever balance evidence (2.7's own
+scope), but too permissive for every evaluation after that: a single checkpoint's positive
+difference could be a genuine, structural gap, or it could be a one-off timing artifact that the
+very next checkpoint would show never happened. The evaluator could not tell the two apart and
+always synthesized immediately, permanently inflating `buildEligibilityProjectionTx`'s expected
+balance from that point forward. Measured in production (account `40bd883d-...`, sub2api's largest
+customer, 2026-09-02): a checkpoint at 22:24:47Z had `as_of` exactly equal to the `event_time` of a
+3,667,080-unit usage event (`source_sequence` 92410) — the upstream balance snapshot was captured
+before that instant's own debit was applied, while `buildEligibilityProjectionTx`'s inclusive
+`event_time<=through` window already subtracted it, producing a difference of exactly
++3,667,080. The account was firmly mid-stream (606 `matched` and 2 `positive_classified_non_cash`
+evaluations earlier that same day), so this was never a first-evaluation bootstrap case — it was a
+single transient blip that the evaluator nonetheless treated as a permanent credit. Every one of
+the eight following checkpoints (22:25:49Z–22:33:27Z) and the 23:06Z carry-forward proof then
+differed by exactly −3,667,080 (the phantom credit permanently inflating expected balance), each
+freezing `UNKNOWN_NEGATIVE_BALANCE` — nine freezes opened at 23:06:09Z, on top of two genuine,
+older `USAGE_EXCEEDS_LEDGER` freezes that must stay untouched by any repair. The usage event itself
+was ingested 25 minutes late (source agents were recreated mid roll-forward, delaying usage
+ingestion) but had already landed in `source_usage_events` well before the 23:06:09Z batch
+evaluation that produced the credit — this was not a race the evaluator could dodge by waiting
+longer within a single job run; the batch had the usage the whole time and still got it wrong.
+
+**Fix.** `evaluatePendingBalanceEvidenceTx`'s positive-difference branch (case 1) gains two rules,
+applied in order, before any credit is ever synthesized:
+1. **Boundary rule.** If one or more usage events land within one second at or before the
+   checkpoint/proof's own `as_of`, recompute the projection with exactly those usage events
+   excluded (`buildEligibilityProjectionExcludingUsageTx`, a `buildEligibilityProjectionTx`
+   variant used only here) and accept an exact match there as `matched` — no credit, no freeze.
+   This resolves the production incident's own root cause immediately, on the very checkpoint that
+   hit it, with no new evaluation status and no migration.
+2. **Defer/confirm rule.** Otherwise, check whether the account already has *any* prior real
+   evaluation (`matched` or `positive_classified_non_cash`) before this item
+   (`balanceEvidenceTrustIntervalTx`'s new second return value, `hasPriorRealEvaluation`). If not —
+   this is the account's first-ever balance evidence, exactly design XM-INV-ANCHOR-BALANCE's own
+   bootstrap case — synthesize immediately as before; **this is what keeps the existing
+   XM-INV-ANCHOR-BALANCE tests green**. If real prior evaluation history exists, the item is
+   *deferred*: no evaluation row is written yet, and the very next item in the same ordered
+   sequence either **confirms** it (an exact repeat of the same positive difference, proving a
+   real, persistent gap — synthesize now, dated at the deferred item's own trust interval start,
+   exactly as 2.7's mechanism already does) or **disconfirms** it (anything else — the ledger
+   reconciled without the excess recurring, proving it was transient). A disconfirmed item is
+   recorded with a new terminal `evaluation_status`, `'positive_blip_ignored'` (migration
+   `0019_balance_blip_repair.sql`, extending both `balance_checkpoint_evaluations` and
+   `balance_carry_forward_evaluations`'s CHECK constraints identically) — deliberately excluded
+   from the trusted-interval query's own candidate list, so it can never itself become a later
+   item's trust anchor. If the deferred item is the last one in a batch, it simply stays pending
+   (no row at all) for a future evaluator run to pair with whatever real evidence arrives next —
+   the same "no evaluation row yet" shape `evaluatePendingBalanceEvidenceTx`'s own pending-evidence
+   query already treats as unevaluated, requiring no new bookkeeping. Exact equality (not a
+   tolerance window) is required to confirm: a genuine structural gap reproduces as a *constant*
+   offset regardless of what else happened in between (both sides of the comparison shift together
+   by the same real activity), which is exactly the signature production showed across all eight
+   poisoned checkpoints.
+
+**Production repair.** A third mode on the existing `eligibility-repair` CLI
+(`--kind=balance-blip`; `--kind=pre-anchor-usage` stays the default), store method
+`RepairBalanceBlipEligibility`. Not scoped to `POLICY_ANCHOR` accounts only (unlike 2.6's and 2.7's
+own repairs) — this bug lived entirely in the evaluator's own defer/boundary logic, not in any
+`POLICY_ANCHOR`-specific code path, so a legacy account's blip is repaired identically. Detection:
+an `UNKNOWN_POSITIVE` credit's `external_credit_id` names its own origin checkpoint/proof; the
+"blip signature" is that origin having evaluated `positive_classified_non_cash` while one or more
+*later* checkpoint/proof evaluations for the same account are `negative_frozen` by exactly the
+negation of the credit's own amount — the precise, permanent shape only this bug produces. The
+repair deletes the poisoned `balance_checkpoint_evaluations` rows (no immutability trigger, so the
+fixed evaluator re-evaluates them on the next projection job, exactly as 2.7's own repair already
+established) but, as with `balance_carry_forward_evaluations`, cannot delete a poisoned
+`balance_carry_forward_evaluations` row (immutable) and instead only resolves its freeze. It
+resolves every `UNKNOWN_NEGATIVE_BALANCE` freeze the poisoned rows opened, then deletes the
+now-untrue `UNKNOWN_POSITIVE` credit itself. `source_credit_events` is otherwise unconditionally
+immutable (migration 0009) — correct for every externally-sourced fact, but an `UNKNOWN_POSITIVE`
+row is never external, it is the one credit_kind this system invents by inference rather than
+observes. Migration `0019_balance_blip_repair.sql` therefore also replaces
+`source_credit_events`'s own immutability trigger with a narrow, transaction-scoped, GUC-gated
+exception (`invoice.balance_blip_repair_delete='on'`, set via `set_config(...,true)`, never
+persisted) that permits `DELETE` only when `OLD.credit_kind='UNKNOWN_POSITIVE'` — mirroring
+migration 0016's own guarded `POLICY_ANCHOR` re-anchor `UPDATE` exception in spirit (a narrow,
+auditable carve-out for one specific repair operation, not a general weakening), every other
+`credit_kind` and every other table's fact-immutability trigger untouched. The origin checkpoint's
+own `positive_classified_non_cash` evaluation row is left exactly as it is (a true historical
+record: at the time, that credit did explain its own difference) even after the credit backing it
+is gone — the same "some historical rows become inert after a repair" posture 2.7's own repair
+already established for its stuck carry-forward proof evaluations. See
+`docs/handoffs/XM-INV-BALANCE-BLIP.md` for the exact runbook and expected counts.
 
 ## 3. Verification gates (all must pass before production)
 1. Unit + integration suites (full `go test -p 1 ./...` with INVOICE_TEST_DATABASE_URL). Done as
