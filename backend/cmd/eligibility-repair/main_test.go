@@ -39,6 +39,17 @@ func balanceAnchorApplyResultFixture() postgresstore.BalanceAnchorRepairResult {
 	}
 }
 
+func balanceBlipApplyResultFixture() postgresstore.BalanceBlipRepairResult {
+	return postgresstore.BalanceBlipRepairResult{
+		Applied: true,
+		Accounts: []postgresstore.BalanceBlipRepairAccount{{
+			ExternalAccountID: "30000000-0000-4000-8000-000000000081", SourceInstanceID: "10000000-0000-4000-8000-000000000081",
+			BlipCreditsRemoved: 1, NegativeFreezesResolved: 8, CheckpointEvaluationsReset: 8, Reactivated: true,
+		}},
+		TotalBlipCreditsRemoved: 1, TotalNegativeFreezesResolved: 8, TotalCheckpointEvaluationsReset: 8,
+	}
+}
+
 // setupRepairCLIEnv migrates a fresh isolated schema (mirroring
 // postgresstore's own integration test helpers, which this package cannot
 // import directly -- they are unexported test-file helpers in a different
@@ -124,6 +135,25 @@ func TestRunBalanceAnchorDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) 
 	}
 }
 
+// TestRunBalanceBlipDryRunAgainstEmptyDatabaseReportsNothing is the same
+// wiring smoke test for --kind=balance-blip (design XM-INV-BALANCE-BLIP).
+func TestRunBalanceBlipDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceBlip, &out); err != nil {
+		t.Fatal(err)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "XM-INV-BALANCE-BLIP") || !strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("dry run output missing expected banner: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 0") {
+		t.Fatalf("dry run against an empty database found work: %s", printed)
+	}
+}
+
 // TestRunUnknownKindIsRejected confirms an unrecognized --kind fails
 // closed before ever opening the database.
 func TestRunUnknownKindIsRejected(t *testing.T) {
@@ -142,10 +172,10 @@ func TestRunUnknownKindIsRejected(t *testing.T) {
 
 // TestRunApplyWithoutOperatorIDIsRejected confirms --apply refuses to run
 // without an approving operator id, per the task's "human-approved" and
-// "resolved_by = a caller-supplied operator id" requirements -- for both
-// repair kinds.
+// "resolved_by = a caller-supplied operator id" requirements -- for all
+// three repair kinds.
 func TestRunApplyWithoutOperatorIDIsRejected(t *testing.T) {
-	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor} {
+	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip} {
 		databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -181,6 +211,20 @@ func TestPrintBalanceAnchorSummaryFormatsAccountsAndTotals(t *testing.T) {
 	printBalanceAnchorSummary(&out, balanceAnchorApplyResultFixture())
 	printed := out.String()
 	for _, want := range []string{"XM-INV-ANCHOR-BALANCE", "APPLIED", "30000000-0000-4000-8000-000000000080",
+		"TOTAL", "accounts affected: 1"} {
+		if !strings.Contains(printed, want) {
+			t.Fatalf("summary output missing %q: %s", want, printed)
+		}
+	}
+}
+
+// TestPrintBalanceBlipSummaryFormatsAccountsAndTotals is the same
+// formatting check for printBalanceBlipSummary.
+func TestPrintBalanceBlipSummaryFormatsAccountsAndTotals(t *testing.T) {
+	var out bytes.Buffer
+	printBalanceBlipSummary(&out, balanceBlipApplyResultFixture())
+	printed := out.String()
+	for _, want := range []string{"XM-INV-BALANCE-BLIP", "APPLIED", "30000000-0000-4000-8000-000000000081",
 		"TOTAL", "accounts affected: 1"} {
 		if !strings.Contains(printed, want) {
 			t.Fatalf("summary output missing %q: %s", want, printed)

@@ -3,8 +3,11 @@ package postgresstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // balanceAnchorRepairFixture builds the exact mixed shape the 2026-09-02
@@ -599,9 +602,8 @@ func TestRepairBalanceAnchorEligibilityApplyResolvesResetsAndReactivates(t *test
 	// The repair's own reactivation queued a fresh eligibility_projection_jobs
 	// row for account A (mirroring RepairPreAnchorUsageEligibility's
 	// reactivation logic). Confirm that job actually completes cleanly
-	// under the fixed code -- both reset checkpoints (the account's own
-	// anchor and the second one) must re-evaluate without opening a new
-	// freeze, proving the repair does not merely flip a status flag but
+	// under the fixed code -- re-evaluating both reset checkpoints opens no
+	// new freeze, proving the repair does not merely flip a status flag but
 	// leaves the account able to make real forward progress.
 	processed, err := f.store.ProcessEligibilityProjectionJobs(f.ctx, 10, time.Now().UTC().Add(time.Minute),
 		AuditActor{Type: "system", ID: "post-repair-worker"})
@@ -616,15 +618,35 @@ func TestRepairBalanceAnchorEligibilityApplyResolvesResetsAndReactivates(t *test
 		WHERE external_account_id=$1 AND status='open'`, f.acctA).Scan(&postRepairFreezes); err != nil || postRepairFreezes != 0 {
 		t.Fatalf("account A open freezes after post-repair projection=%d err=%v, want 0", postRepairFreezes, err)
 	}
-	for _, checkpointID := range []string{f.ckptA1.checkpointID, f.ckptA2.checkpointID} {
-		var status string
-		if err := f.store.pool.QueryRow(f.ctx, `SELECT evaluation_status FROM balance_checkpoint_evaluations
-			WHERE checkpoint_id=$1`, checkpointID).Scan(&status); err != nil {
-			t.Fatal(err)
-		}
-		if status != "matched" && status != "positive_classified_non_cash" {
-			t.Fatalf("checkpoint %s re-evaluated as %q, want matched or positive_classified_non_cash", checkpointID, status)
-		}
+	// ckptA1 is the account's own anchor: design XM-INV-ANCHOR-BALANCE's
+	// first-evaluation self-heal, unchanged by XM-INV-BALANCE-BLIP, and
+	// must resolve immediately.
+	var anchorStatus string
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT evaluation_status FROM balance_checkpoint_evaluations
+		WHERE checkpoint_id=$1`, f.ckptA1.checkpointID).Scan(&anchorStatus); err != nil {
+		t.Fatal(err)
+	}
+	if anchorStatus != "matched" && anchorStatus != "positive_classified_non_cash" {
+		t.Fatalf("anchor checkpoint re-evaluated as %q, want matched or positive_classified_non_cash", anchorStatus)
+	}
+	// ckptA2 is a *second*, mid-stream checkpoint on the same account,
+	// evaluated in the same pass right after the anchor's own self-heal
+	// already gave the account real prior balance-evidence history.
+	// Design XM-INV-BALANCE-BLIP (layered on top of this repair) requires
+	// a mid-stream positive difference to defer until a further checkpoint
+	// confirms or disconfirms it -- this fixture provides no third
+	// checkpoint, so ckptA2 legitimately stays pending (no evaluation row
+	// yet) rather than self-healing alone here. That is still real forward
+	// progress (no freeze, the account stays active) even though it is not
+	// yet a terminal status.
+	var secondStatus string
+	secondErr := f.store.pool.QueryRow(f.ctx, `SELECT evaluation_status FROM balance_checkpoint_evaluations
+		WHERE checkpoint_id=$1`, f.ckptA2.checkpointID).Scan(&secondStatus)
+	if secondErr != nil && !errors.Is(secondErr, pgx.ErrNoRows) {
+		t.Fatal(secondErr)
+	}
+	if secondErr == nil && secondStatus != "matched" && secondStatus != "positive_classified_non_cash" && secondStatus != "positive_blip_ignored" {
+		t.Fatalf("second checkpoint re-evaluated as %q, want matched, positive_classified_non_cash or positive_blip_ignored", secondStatus)
 	}
 }
 

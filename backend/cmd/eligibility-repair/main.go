@@ -1,7 +1,7 @@
-// Command eligibility-repair implements two versioned, human-approved
+// Command eligibility-repair implements three versioned, human-approved
 // lifecycle operations that clean up production incidents left behind by
-// design XM-INV-POLICY-ANCHOR, now that the underlying projection bugs are
-// fixed:
+// design XM-INV-POLICY-ANCHOR and its balance-evidence evaluator, now that
+// the underlying bugs are fixed:
 //   - --kind=pre-anchor-usage (the default, unchanged): design
 //     XM-INV-PREANCHOR-USAGE's SOURCE_GAP/EVENT_DEAD freezes and stuck
 //     source_ingest_events for POLICY_ANCHOR accounts. See
@@ -10,6 +10,11 @@
 //     freezes on a POLICY_ANCHOR account's own balance_checkpoint/
 //     balance_carry_forward_proof evidence. See
 //     docs/handoffs/XM-INV-ANCHOR-BALANCE.md.
+//   - --kind=balance-blip: design XM-INV-BALANCE-BLIP's synthesized
+//     UNKNOWN_POSITIVE credits from a single transient positive checkpoint,
+//     and the UNKNOWN_NEGATIVE_BALANCE freezes that credit's permanent
+//     excess produced on every checkpoint after it. See
+//     docs/handoffs/XM-INV-BALANCE-BLIP.md.
 //
 // Defaults to --dry-run; --apply requires an operator id and actually
 // mutates the database. Omitting --kind reproduces this tool's original
@@ -41,9 +46,11 @@ import (
 const (
 	kindPreAnchorUsage = "pre-anchor-usage"
 	kindBalanceAnchor  = "balance-anchor"
+	kindBalanceBlip    = "balance-blip"
 
 	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
 	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
+	balanceBlipFixedResolutionNote    = "balance blip credit reversed by XM-INV-BALANCE-BLIP repair"
 )
 
 func main() {
@@ -52,7 +59,7 @@ func main() {
 	migrationsDir := flag.String("migrations-dir", "/app/migrations", "bundled migration directory")
 	apply := flag.Bool("apply", false, "actually resolve freezes (and, for pre-anchor-usage, requeue events; default is a dry run that changes nothing)")
 	operatorID := flag.String("operator-id", "", "the approving operator's admin UUID (required with --apply)")
-	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE) or balance-anchor (design XM-INV-ANCHOR-BALANCE)")
+	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), or balance-blip (design XM-INV-BALANCE-BLIP)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")
@@ -74,8 +81,8 @@ func main() {
 }
 
 func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, out io.Writer) error {
-	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor {
-		return fmt.Errorf("unknown --kind %q, want %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor)
+	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip {
+		return fmt.Errorf("unknown --kind %q, want %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip)
 	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
 	if err != nil {
@@ -103,6 +110,9 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	}
 	if kind == kindBalanceAnchor {
 		return runBalanceAnchor(ctx, store, apply, operatorID, keyring, out)
+	}
+	if kind == kindBalanceBlip {
+		return runBalanceBlip(ctx, store, apply, operatorID, keyring, out)
 	}
 	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
 }
@@ -149,6 +159,26 @@ func runBalanceAnchor(ctx context.Context, store *postgresstore.Store, apply boo
 		return fmt.Errorf("repair balance anchor eligibility: %w", err)
 	}
 	printBalanceAnchorSummary(out, result)
+	return nil
+}
+
+func runBalanceBlip(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, keyring securefields.Keyring, out io.Writer) error {
+	in := postgresstore.BalanceBlipRepairInput{Apply: apply, OperatorID: operatorID}
+	if apply {
+		hash, evidenceCiphertext, noteCiphertext, encErr := encryptFixedResolution(keyring,
+			balanceBlipFixedResolutionNote, "XM-INV-BALANCE-BLIP")
+		if encErr != nil {
+			return encErr
+		}
+		in.EvidenceHash, in.EvidenceCiphertext = hash, evidenceCiphertext
+		in.NoteHash, in.NoteCiphertext = hash, noteCiphertext
+	}
+	result, err := store.RepairBalanceBlipEligibility(ctx, in, postgresstore.AuditActor{
+		Type: "admin", ID: operatorID, Reason: "XM-INV-BALANCE-BLIP repair tool " + modeLabel(apply)})
+	if err != nil {
+		return fmt.Errorf("repair balance blip eligibility: %w", err)
+	}
+	printBalanceBlipSummary(out, result)
 	return nil
 }
 
@@ -207,6 +237,23 @@ func printBalanceAnchorSummary(out io.Writer, result postgresstore.BalanceAnchor
 	}
 	fmt.Fprintf(out, "\n%-38s %10d %11d\n", "TOTAL", result.TotalSourceGapFreezesResolved,
 		result.TotalCheckpointEvaluationsReset)
+	fmt.Fprintf(out, "\naccounts affected: %d\n", len(result.Accounts))
+}
+
+func printBalanceBlipSummary(out io.Writer, result postgresstore.BalanceBlipRepairResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-BALANCE-BLIP: %s\n\n", mode)
+	fmt.Fprintf(out, "%-38s %10s %11s %11s %11s\n", "ACCOUNT", "CREDITS", "FREEZES", "CKPT_RESET", "REACTIVATED")
+	for _, account := range result.Accounts {
+		fmt.Fprintf(out, "%-38s %10d %11d %11d %11t\n", account.ExternalAccountID,
+			account.BlipCreditsRemoved, account.NegativeFreezesResolved,
+			account.CheckpointEvaluationsReset, account.Reactivated)
+	}
+	fmt.Fprintf(out, "\n%-38s %10d %11d %11d\n", "TOTAL", result.TotalBlipCreditsRemoved,
+		result.TotalNegativeFreezesResolved, result.TotalCheckpointEvaluationsReset)
 	fmt.Fprintf(out, "\naccounts affected: %d\n", len(result.Accounts))
 }
 

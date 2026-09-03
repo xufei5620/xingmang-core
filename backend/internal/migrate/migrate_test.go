@@ -969,5 +969,9 @@ func migrationMapBeforeReadinessIndex(t *testing.T) fstest.MapFS {
 	files := migrationMapFS(t)
 	delete(files, "0013_source_readiness_active_index.sql")
 	delete(files, "0014_balance_carry_forward_proof.sql")
+	// 0019 (XM-INV-BALANCE-BLIP) ALTERs balance_checkpoint_evaluations and
+	// balance_carry_forward_evaluations, the latter created by 0014 -- it
+	// cannot apply on top of this deliberately-reduced set either.
+	delete(files, "0019_balance_blip_repair.sql")
 	return files
 }
