@@ -311,6 +311,18 @@ tool_exit=$?
 set -e
 
 if [[ ! -s "$report_json" ]]; then
+  # The tools container never got far enough to print anything (a real
+  # production run hit exactly this: a "read database credential:
+  # permission denied" error before the permission fix above). `>"$report_json"`
+  # already created an empty file the instant the docker run command
+  # started, regardless of what it wrote -- leaving that empty file behind
+  # is a confusing, silently-misleading artifact (it looks like *some*
+  # report exists). Overwrite it with an explicit, valid, self-describing
+  # failure marker instead: shadow_eval_report_is_valid (shadow-eval-lib.sh)
+  # recognizes this exact shape and refuses to compute a ready/not_ready
+  # verdict from it, so this can never be silently folded into either.
+  printf '{\n  "tooling_failure": true,\n  "reason": "eligibility-shadow produced no report",\n  "tool_exit_code": %d,\n  "log_file": "%s"\n}\n' \
+    "$tool_exit" "$tool_log" >"$report_json"
   echo "eligibility-shadow produced no report (exit $tool_exit); see $tool_log" >&2
   cat "$tool_log" >&2 || true
   exit 1
@@ -323,6 +335,15 @@ first_char=$(grep -m1 -v '^[[:space:]]*$' "$report_json" | cut -c1)
 last_char=$(tail -n 5 "$report_json" | tr -d '[:space:]' | tail -c1)
 [[ "$first_char" == '{' && "$last_char" == '}' ]] || {
   echo "eligibility-shadow report does not look like a JSON object: $report_json" >&2
+  exit 1
+}
+# Belt and suspenders on top of the emptiness check above: anything that is
+# valid JSON but still not a genuine report (missing "verdict", or somehow
+# itself carrying a tooling_failure marker) must also never reach the
+# verdict logic below.
+shadow_eval_report_is_valid "$report_json" || {
+  echo "eligibility-shadow report is not a valid report (execution failure, not a verdict): $report_json" >&2
+  cat "$tool_log" >&2 || true
   exit 1
 }
 

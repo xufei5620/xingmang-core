@@ -337,6 +337,18 @@ write_fixture failed-accounts-not-ready.json <<'JSON'
 }
 JSON
 
+# A tooling/execution failure -- not a real report at all. Matches
+# shadow-eval.sh's exact literal shape when invoice-eligibility-shadow
+# produces nothing (see its own comment on that write).
+write_fixture tooling-failure.json <<'JSON'
+{
+  "tooling_failure": true,
+  "reason": "eligibility-shadow produced no report",
+  "tool_exit_code": 1,
+  "log_file": "/root/invoice-system/rehearsals/20260903T070721Z-551778/eligibility-shadow.log"
+}
+JSON
+
 assert_new_reasons() {
   local file=$1 expected=$2 label=$3
   local actual
@@ -386,6 +398,42 @@ assert_has_errors failed-accounts-not-ready.json true "failed accounts alone"
 assert_verdict failed-accounts-not-ready.json not_ready 3 "failed accounts alone"
 
 echo "report comparison logic: ok"
+
+# ---------------------------------------------------------------------------
+# A tooling/execution failure must never be folded into "ready" (0) or
+# "not_ready" (3) -- shadow_eval_report_is_valid rejects it, and
+# shadow_eval_verdict_exit_code must report a distinct "execution_failure"
+# outcome (exit 1) instead of computing anything from its (absent)
+# before/after freeze data. This is the exact regression a real production
+# run surfaced: the tools container failed before printing anything, and
+# an earlier version of this tooling did not clearly distinguish that from
+# a real verdict.
+# ---------------------------------------------------------------------------
+if shadow_eval_report_is_valid "$fixtures_dir/no-freezes-ready.json"; then :; else
+  fail "shadow_eval_report_is_valid rejected a genuine valid report"
+fi
+if shadow_eval_report_is_valid "$fixtures_dir/tooling-failure.json"; then
+  fail "shadow_eval_report_is_valid accepted a tooling-failure marker as a genuine report"
+fi
+
+set +e
+verdict_output=$(shadow_eval_verdict_exit_code "$fixtures_dir/tooling-failure.json")
+verdict_exit=$?
+set -e
+if [[ "$verdict_output" != "execution_failure" || "$verdict_exit" != 1 ]]; then
+  fail "tooling-failure fixture: expected output=execution_failure exit=1, got output='$verdict_output' exit=$verdict_exit"
+fi
+
+failure_summary=$(shadow_eval_human_summary "$fixtures_dir/tooling-failure.json")
+for needle in "EXECUTION FAILURE" "eligibility-shadow produced no report" "eligibility-shadow.log"; do
+  if [[ "$failure_summary" != *"$needle"* ]]; then
+    fail "tooling-failure human summary missing expected text: $needle"
+  fi
+done
+if [[ "$failure_summary" == *"open freezes"* ]]; then
+  fail "tooling-failure human summary should not render freeze/error counts from a non-report"
+fi
+echo "tooling-failure handling: ok"
 
 # ---------------------------------------------------------------------------
 # Human summary: must not crash and must mention the key facts.
