@@ -1,5 +1,10 @@
 # RC83 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC83 shipped at signed tag
+> `v0.1.0-rc83-signed` (`702990f`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc84-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC83 — XM-INV-AGENT-CREDITS-RECONCILE-FIX (source agent 0.3.2): the economics scanner stamps the rolling reconcile-window baseline (`reconcile_baseline_cursor`) only on the usage stream. Agent 0.3.1 stamped it on every stream while the stored-cursor validator allows it on usage only, so the Sub2API credits stream's first 6-hour periodic reconcile under 0.3.1 (2026-09-03 14:58Z) failed permanently ("pending batch cursor transition is invalid"), the credits watermark froze at 14:52Z and readiness fell to 503 during the RC82 roll-forward verify step.
