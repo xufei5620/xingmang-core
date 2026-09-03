@@ -56,6 +56,22 @@ const (
 	balanceProofPendingRequeueResetWindow = 5 * time.Minute
 )
 
+// eligibilityProjectionReclaimGraceSeconds (XM-INV-READY-LEASE) bounds the
+// brief window between a queued BALANCE_PROOF_PENDING job's next_attempt_at
+// elapsing and the 2-second eligibility-projection worker (see its Interval
+// in buildProductionRuntime) actually ticking around to reclaim and retry it.
+// Without this grace, EligibilityProjectionHealth's ProofPending bucket
+// (below) would drop such a row the instant next_attempt_at passes, and it
+// would count toward OldestPending instead carrying its *previous* attempt's
+// updated_at -- which can be many minutes old for a job on a long backoff --
+// even though the worker simply has not had its next tick yet. 30s is
+// comfortably larger than the 2s tick interval (so a normal reclaim never
+// trips it) yet far short of eligibilityProjectionStuckAfter (15m, in
+// cmd/api/runtime.go) or even the shortest realistic backoff, so a row that
+// is genuinely stuck -- the worker skipped it for much longer than one tick
+// -- still ages into OldestPending as before.
+const eligibilityProjectionReclaimGraceSeconds = 30
+
 var (
 	serviceUnitsPattern                = regexp.MustCompile(`^(0|[1-9][0-9]{0,77})$`)
 	unitCodePattern                    = regexp.MustCompile(`^[A-Z0-9_:-]{1,32}$`)
@@ -143,16 +159,30 @@ type eligibilityProjection struct {
 // own CHECK constraint already guarantees means lease_token/lease_expires_at
 // are both clear -- processing jobs are never proof-pending),
 // last_error_code='BALANCE_PROOF_PENDING', and next_attempt_at is still in
-// the future (an actively scheduled backoff, not one the worker missed).
-// Every other row -- processing, failed, plain queued, or a
-// BALANCE_PROOF_PENDING row whose own backoff window has already elapsed
-// without a retry -- falls into OldestPending instead, keyed off updated_at
-// (the last real attempt: set by the claim UPDATE, the failure/backoff
-// marks, and the ON CONFLICT requeue upserts) rather than created_at, so a
-// job actively cycling through real attempts never looks stale merely
-// because its row has existed for a while. Only a genuine gap between
-// attempts -- the worker not reaching a due row -- ages OldestPending past
-// the readiness threshold.
+// the future or elapsed less than eligibilityProjectionReclaimGraceSeconds
+// ago (an actively scheduled backoff the worker has not had a tick to
+// reclaim yet, not one it missed). Every other row -- failed, plain queued,
+// a BALANCE_PROOF_PENDING row whose own backoff window elapsed longer ago
+// than that grace, or a processing row whose lease has lapsed -- falls into
+// OldestPending instead, keyed off updated_at (the last real attempt: set by
+// the claim UPDATE, the failure/backoff marks, and the ON CONFLICT requeue
+// upserts) rather than created_at, so a job actively cycling through real
+// attempts never looks stale merely because its row has existed for a while.
+// Only a genuine gap between attempts -- the worker not reaching a due row --
+// ages OldestPending past the readiness threshold.
+//
+// XM-INV-READY-LEASE: a processing row whose lease is still live
+// (lease_expires_at in the future) is likewise excluded from OldestPending.
+// ProcessEligibilityProjectionJobs' batch claim stamps every row it claims
+// with one shared "now" as updated_at, then works through the batch
+// serially, each account taking up to its own 300s budget -- so a row still
+// waiting its turn legitimately carries an updated_at that ages well past
+// eligibilityProjectionStuckAfter (cmd/api/runtime.go) even though the
+// worker has not abandoned it. A confirmed production incident
+// (2026-09-03 03:17:24Z) tripped /readyz on exactly this: two rows sitting
+// status='processing', both still within their lease, both actively being
+// attempted. Only a lapsed lease -- the worker crashed, or the process died
+// mid-batch -- means a processing row is actually stuck.
 type EligibilityProjectionHealth struct {
 	Queued, Failed, Processing int64
 	OldestPending              time.Time
@@ -163,15 +193,16 @@ type EligibilityProjectionHealth struct {
 func (s *Store) EligibilityProjectionHealth(ctx context.Context) (EligibilityProjectionHealth, error) {
 	now := time.Now().UTC()
 	var health EligibilityProjectionHealth
-	err := s.pool.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, fmt.Sprintf(`
 		SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='failed'),
 			count(*) FILTER (WHERE status='processing'),
 			COALESCE(min(updated_at) FILTER (WHERE NOT (
-				status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1
+				(status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds')
+				OR (status='processing' AND lease_expires_at>$1)
 			)),'epoch'::timestamptz),
-			count(*) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1),
-			COALESCE(min(updated_at) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1),'epoch'::timestamptz)
-		FROM eligibility_projection_jobs`, now).Scan(&health.Queued, &health.Failed, &health.Processing,
+			count(*) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds'),
+			COALESCE(min(updated_at) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds'),'epoch'::timestamptz)
+		FROM eligibility_projection_jobs`, eligibilityProjectionReclaimGraceSeconds), now).Scan(&health.Queued, &health.Failed, &health.Processing,
 		&health.OldestPending, &health.ProofPending, &health.OldestProofPending)
 	if health.OldestPending.Equal(time.Unix(0, 0).UTC()) {
 		health.OldestPending = time.Time{}
