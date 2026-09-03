@@ -1079,6 +1079,13 @@ func (s *Service) ListEligibilityFreezesPage(ctx context.Context, in postgressto
 	return s.store.ListEligibilityFreezesPage(ctx, in)
 }
 
+// ListEligibilityLedgerPage: XM-INV-USER-LEDGER-QUERY (design section 3(E)),
+// a plain passthrough to the store -- see postgresstore.eligibility_ledger.go
+// for the read-only query itself.
+func (s *Service) ListEligibilityLedgerPage(ctx context.Context, in postgresstore.EligibilityLedgerPageQuery) (postgresstore.EligibilityLedgerPage, error) {
+	return s.store.ListEligibilityLedgerPage(ctx, in)
+}
+
 func (s *Service) ResolveEligibilityFreeze(ctx context.Context, adminID, freezeID string, expectedVersion int64, evidenceReference, note string) (postgresstore.EligibilityFreeze, error) {
 	adminID = strings.TrimSpace(adminID)
 	freezeID = strings.TrimSpace(freezeID)

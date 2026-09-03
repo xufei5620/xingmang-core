@@ -90,6 +90,79 @@ A stale CAS `version` (including the self-freeze/non-admin-actor guard) still
 reports the unchanged generic 409 `CONFLICT` -- "refresh and retry" remains
 the accurate advice there, unlike for the four reasons above.
 
+## Per-account ledger (`GET /api/v1/admin/eligibility-ledger`)
+
+XM-INV-USER-LEDGER-QUERY (design doc
+`2026-09-03-xm-inv-eligibility-simplification-design.md`, section 3(E)) adds a
+second, read-only admin endpoint: one row per external account, for the
+per-user account-ledger view CR-0009 builds on the platform side. This route
+path is a proposal -- CR-0009 finalizes it. It is protected by the same
+administrator role and IP allowlist as `eligibility-freezes` above (no MFA
+step-up or CSRF token is required -- it is a pure `GET`, unlike
+`eligibility-freezes/{id}/resolve`). It never reads `audit_events`: every
+field comes from a plaintext column already on `source_account_eligibility_state`,
+`funding_lots`, or `eligibility_freezes`.
+
+Pagination is keyset, `before_id` plus `limit` (default and max 100, same
+mechanics as every other admin list in this file -- `WHERE id<before_id
+ORDER BY id DESC`), scoped to the external account's own id; there is no
+per-item `id` field in the response, only the page envelope's opaque
+`next_before_id`. An optional `external_user_id` query parameter does an
+exact-match lookup, identical in posture to `eligibility-freezes`'s own
+filter of the same name.
+
+Each item:
+
+```json
+{
+  "source_instance_id": "...", "source_type": "sub2api", "source_name": "...",
+  "external_user_id": "34",
+  "recharged_since_policy_start_minor": 500000,
+  "consumed_minor": 320000,
+  "invoiceable_minor": 180000,
+  "threshold_minor": 20000,
+  "threshold_reached": true,
+  "eligibility_status": "not_invoiceable_pending_reconciliation",
+  "block_reason": "UNKNOWN_NEGATIVE_BALANCE",
+  "block_detail": "balance_checkpoint ckpt-xxx at 2026-09-03T10:00:00Z reported balance -120, expected 380 (difference -500)",
+  "block_since": "2026-09-03T10:00:12Z"
+}
+```
+
+- `recharged_since_policy_start_minor` sums `verified_cash_minor` across every
+  `WALLET_CASH`/`SUBSCRIPTION_CASH` funding lot with `completed_at` on or
+  after the account's own `cutover_at` -- the design doc's own formula
+  (inclusive `>=`), independent of verification/refund-freeze state. This
+  reads `cutover_at` as it stands today: XM-INV-ELIG-POLICY-START-ANCHOR
+  (design section 3(D), a later, independent slice) is what makes `cutover_at`
+  always equal the policy start; until that slice lands, a legacy-bootstrapped
+  account's `cutover_at` can still be its first-observed-checkpoint time
+  instead, and this field reads whatever value is on the row either way.
+- `consumed_minor`/`invoiceable_minor` use the identical formula the user
+  summary's own `consumed_minor`/`available_minor` above already uses
+  (same filters: CNY, `WALLET_CASH`/`SUBSCRIPTION_CASH`, verified lots;
+  `invoiceable_minor` additionally excludes refund-frozen lots and nets out
+  reserved/issued amounts) -- not re-derived, the SQL text is a deliberate,
+  documented duplicate of that same formula.
+- `threshold_minor`/`threshold_reached` reuse the real, admin-configurable
+  minimum invoice amount (the same value that gates actual submission), not a
+  hardcoded constant. `threshold_reached` is a plain numeric comparison --
+  it can be `true` even while the account is blocked, exactly as the example
+  above shows.
+- `block_reason`/`block_detail`/`block_since` are `null` unless
+  `eligibility_status` is `not_invoiceable_pending_reconciliation` (read
+  directly from that state's own five plaintext columns, see "Automatic
+  reconciliation" below) or `frozen` (read from the latest open
+  `eligibility_freezes` row instead: `freeze_reason` becomes `block_reason`,
+  `block_since` is that row's `opened_at`, and `block_detail` is composed
+  from its `trigger_object_type`/`trigger_object_id` -- there is no stored
+  human-readable sentence for a freeze the way there is for pending
+  reconciliation). A `frozen` account with no open `eligibility_freezes` row
+  (should not happen by construction, but not assumed) still returns a row,
+  with all three left `null` rather than erroring. Recorded usage overage
+  (`non_invoiceable_overage_*`) never surfaces here at all -- it does not
+  block the account, and design section 3(E) has no field for it.
+
 ## User summary
 
 `GET /api/v1/user/eligibility-summary` returns one item per connected source:
