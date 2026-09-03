@@ -1320,6 +1320,22 @@ td small {
   border-radius: 8px;
   font-size: 10px;
 }
+/* CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the "资格冻结" tab's default-narrow
+   toggle -- a compact inline checkbox+label matching the toolbar's own
+   height/font scale, distinct from .confirm-row (a multi-line form
+   checkbox with its own bottom margin, wrong fit for an inline toolbar
+   control). */
+.toolbar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #717c8f;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.toolbar-toggle input {
+  accent-color: #2862d7;
+}
 .clickable-row {
   cursor: pointer;
   transition: 0.12s ease;

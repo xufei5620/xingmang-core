@@ -23,6 +23,7 @@ import {
   Mail,
   Menu,
   Network,
+  NotebookText,
   PanelLeftClose,
   Plus,
   ReceiptText,
@@ -60,7 +61,7 @@ import {
   useNavigate,
 } from "react-router-dom";
 
-import { dateTime, maskTaxId, money } from "./lib/format";
+import { dateTime, dateTimeShanghai, maskTaxId, money } from "./lib/format";
 import { isAdminAreaPath, shouldShowAdminReturn } from "./lib/portal-navigation";
 import { sourceName } from "./lib/source-labels";
 import {
@@ -88,12 +89,17 @@ import {
   currentLocalDateTimeValue,
   eligibilityStartLabel,
   invoicePDFSizeAllowed,
+  isMechanicalReconciliationFreeze,
   normalizeIssuedAt,
   replaceDirectRequestAfterMutation,
   userCancellationLabel,
 } from "./lib/workflow";
 import { AuthProvider, useAuth } from "./AuthProvider";
 import type {
+  AccountBlockState,
+  AccountLedgerDetail,
+  AccountLedgerFilters,
+  AccountLedgerListItem,
   InvoiceSystemSettings,
   DashboardSummary,
   EligibilityFreeze,
@@ -470,6 +476,7 @@ const adminNav = [
   { to: "/admin", label: "审核工作台", icon: LayoutDashboard, scopeKey: "review" },
   { to: "/admin/payment-candidates", label: "支付核验", icon: ShieldCheck, scopeKey: "payment-candidates" },
   { to: "/admin/eligibility-freezes", label: "资格冻结", icon: EyeOff, scopeKey: "eligibility-freezes" },
+  { to: "/admin/accounts/ledger", label: "用户账本", icon: NotebookText, scopeKey: "account-ledger" },
   { to: "/admin/refund-cases", label: "退款与红冲", icon: CircleAlert, scopeKey: "refund-cases" },
   { to: "/admin/source-health", label: "同步状态", icon: Network, scopeKey: "source-health" },
   { to: "/admin?view=issued", label: "发票档案", icon: FileCheck2, scopeKey: "review" },
@@ -2873,6 +2880,18 @@ function EligibilityFreezesPage() {
   const [knownSources, setKnownSources] = useState<
     Array<{ id: string; source: SourceType }>
   >([]);
+  // CR-0009 "变更范围" item 5: default narrowed to accounts genuinely
+  // needing manual review; a visible toggle reveals the mechanically
+  // self-healing legacy rows too (see isMechanicalReconciliationFreeze).
+  const [showAllReasons, setShowAllReasons] = useState(false);
+  const visibleItems = useMemo(
+    () =>
+      showAllReasons
+        ? items
+        : items.filter((item) => !isMechanicalReconciliationFreeze(item)),
+    [items, showAllReasons],
+  );
+  const hiddenCount = items.length - visibleItems.length;
   const loadVersion = useRef(0);
   const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
 
@@ -3043,8 +3062,17 @@ function EligibilityFreezesPage() {
               ))}
             </select>
           )}
+          <label className="toolbar-toggle">
+            <input
+              type="checkbox"
+              checked={showAllReasons}
+              onChange={(event) => setShowAllReasons(event.target.checked)}
+            />
+            <span>显示全部（含等对账自愈的记录）</span>
+          </label>
           <Badge tone={filters.status === "open" ? "amber" : "blue"}>
-            本页 {items.length} 条
+            本页 {visibleItems.length} 条
+            {!showAllReasons && hiddenCount > 0 ? `（已隐藏 ${hiddenCount} 条自愈中）` : ""}
           </Badge>
         </div>
         {pageError && (
@@ -3074,7 +3102,7 @@ function EligibilityFreezesPage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => (
+                {visibleItems.map((item) => (
                   <tr key={item.id}>
                     <td>
                       <SourceBadge source={item.source} />
@@ -3111,11 +3139,19 @@ function EligibilityFreezesPage() {
                 ))}
               </tbody>
             </table>
-            {!items.length && (
+            {!visibleItems.length && (
               <EmptyState
                 icon={<ShieldCheck />}
-                title="当前筛选条件下没有冻结记录"
-                description="没有待处理记录时无需进行任何人工操作。"
+                title={
+                  !showAllReasons && hiddenCount > 0
+                    ? "没有需要人工复核的冻结记录"
+                    : "当前筛选条件下没有冻结记录"
+                }
+                description={
+                  !showAllReasons && hiddenCount > 0
+                    ? `本页 ${hiddenCount} 条记录都在等待下一次对账自动解除；勾选“显示全部”可查看。`
+                    : "没有待处理记录时无需进行任何人工操作。"
+                }
               />
             )}
           </div>
@@ -3350,6 +3386,417 @@ function EligibilityFreezeDrawer({
             </section>
           )}
         </div>
+      </aside>
+    </div>
+  );
+}
+
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the four account block_state values
+// -- read-only display labels/tones only, the backend computes the state
+// itself (see docs/ELIGIBILITY-OPERATIONS.md's "管理员账本视图" section).
+const accountBlockStateLabels: Record<AccountBlockState, string> = {
+  frozen_manual_review: "冻结待人工复核",
+  not_invoiceable_pending_reconciliation: "对账中暂不可开票",
+  below_threshold: "未达起票门槛",
+  invoiceable: "可开票",
+};
+
+function accountBlockStateTone(state: AccountBlockState) {
+  switch (state) {
+    case "frozen_manual_review":
+      return "red";
+    case "not_invoiceable_pending_reconciliation":
+      return "amber";
+    case "below_threshold":
+      return "neutral";
+    case "invoiceable":
+      return "green";
+  }
+}
+
+function AccountLedgerPage() {
+  const toast = useContext(ToastContext);
+  const [filters, setFilters] = useState<AccountLedgerFilters>({});
+  // Same debounce idiom as EligibilityFreezesPage's own externalUserIdInput
+  // above (CR-0007 problem one's precedent) -- this codebase's established
+  // pattern for a free-text filter that hits the server.
+  const [externalUserIdInput, setExternalUserIdInput] = useState("");
+  useEffect(() => {
+    const trimmed = externalUserIdInput.trim();
+    const timer = window.setTimeout(() => {
+      setFilters((current) =>
+        current.externalUserId === (trimmed || undefined)
+          ? current
+          : { ...current, externalUserId: trimmed || undefined },
+      );
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [externalUserIdInput]);
+  const [items, setItems] = useState<AccountLedgerListItem[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | undefined>();
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const loadVersion = useRef(0);
+  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
+
+  // Platform-scoped embedded admin forces the filter to the resolved
+  // platform, same as EligibilityFreezesPage's own identical effect (CR-0005
+  // (c)) -- there is no visible source-instance selector on this page to
+  // override it with (task brief item 4 does not ask for one), so scoping
+  // here is entirely invisible/automatic.
+  useEffect(() => {
+    if (!embeddedAdminPlatform() || !platformSourceInstanceId) return;
+    setFilters((current) =>
+      current.sourceInstanceId === platformSourceInstanceId
+        ? current
+        : { ...current, sourceInstanceId: platformSourceInstanceId },
+    );
+  }, [platformSourceInstanceId]);
+
+  const load = async (cursor?: string) => {
+    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
+    const version = cursor ? loadVersion.current : ++loadVersion.current;
+    cursor ? setLoadingMore(true) : setLoading(true);
+    try {
+      const page = await invoiceApi.getAccountLedger(filters, cursor);
+      if (version !== loadVersion.current) return;
+      setItems((current) =>
+        cursor
+          ? [
+              ...current,
+              ...page.items.filter(
+                (item) =>
+                  !current.some(
+                    (existing) => existing.externalAccountId === item.externalAccountId,
+                  ),
+              ),
+            ]
+          : page.items,
+      );
+      setNextCursor(page.nextCursor);
+      setPageError(null);
+    } catch (error) {
+      if (version !== loadVersion.current) return;
+      setPageError(error instanceof Error ? error.message : "用户账本读取失败。");
+    } finally {
+      if (version === loadVersion.current) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    setItems([]);
+    setNextCursor(undefined);
+    setSelectedAccountId(null);
+    void load();
+  }, [filters.externalUserId, filters.sourceInstanceId, filters.sort]);
+
+  return (
+    <PortalLayout admin>
+      <PageHeader
+        eyebrow="ACCOUNT LEDGER"
+        title="用户账本"
+        description="按用户账号聚合查看 2026-09-01 起充值、消耗与可开票金额，替代逐条冻结记录排查（CR-0009）。"
+        action={
+          <button
+            className="button button-secondary"
+            disabled={loading}
+            onClick={() => void load()}
+          >
+            <RefreshCcw size={16} className={loading ? "spin" : ""} />
+            刷新账本
+          </button>
+        }
+      />
+      <section className="card admin-table-card">
+        <div className="toolbar">
+          <div className="search-box">
+            <Search size={17} />
+            <input
+              aria-label="来源用户 ID"
+              value={externalUserIdInput}
+              maxLength={512}
+              autoComplete="off"
+              placeholder="按来源用户 ID 精确过滤"
+              onChange={(event) => setExternalUserIdInput(event.target.value)}
+            />
+          </div>
+          <select
+            aria-label="排序方式"
+            value={filters.sort ?? "invoiceable_now_minor"}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                sort:
+                  event.target.value === "block_state" ? "block_state" : undefined,
+              }))
+            }
+          >
+            <option value="invoiceable_now_minor">按可开票金额排序</option>
+            <option value="block_state">按状态排序（待处理优先）</option>
+          </select>
+          <Badge tone="blue">本页 {items.length} 条</Badge>
+        </div>
+        {pageError && (
+          <div className="api-error-banner" role="alert">
+            <CircleAlert size={18} />
+            <span>{pageError}</span>
+            <button className="button button-secondary" onClick={() => void load()}>
+              重试
+            </button>
+          </div>
+        )}
+        {loading ? (
+          <LoadingBlock />
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源</th>
+                  <th>来源用户 ID</th>
+                  <th>起点后充值</th>
+                  <th>起点后消耗</th>
+                  <th>可开票</th>
+                  <th>已开票</th>
+                  <th>状态</th>
+                  <th>最近检查点</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.externalAccountId}>
+                    <td>
+                      <SourceBadge source={item.source} />
+                    </td>
+                    <td>{item.externalUserId}</td>
+                    <td>
+                      {money(item.rechargesSinceStartMinor)}
+                      <small>{item.rechargesSinceStartCount} 笔</small>
+                    </td>
+                    <td>{money(item.consumedSinceStartMinor)}</td>
+                    <td>
+                      {money(item.invoiceableNowMinor)}
+                      {!item.thresholdReached && (
+                        <small className="error-text">未达门槛</small>
+                      )}
+                    </td>
+                    <td>{money(item.issuedMinor)}</td>
+                    <td>
+                      <Badge tone={accountBlockStateTone(item.blockState)}>
+                        {accountBlockStateLabels[item.blockState]}
+                      </Badge>
+                    </td>
+                    <td>
+                      {item.lastCheckpointAt
+                        ? dateTimeShanghai(item.lastCheckpointAt)
+                        : "尚无记录"}
+                    </td>
+                    <td className="action-cell">
+                      <button
+                        className="button button-secondary button-small"
+                        onClick={() => setSelectedAccountId(item.externalAccountId)}
+                      >
+                        查看
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!items.length && (
+              <EmptyState
+                icon={<NotebookText />}
+                title="当前筛选条件下没有账号"
+                description="按来源用户 ID 精确过滤，或调整排序方式后重试。"
+              />
+            )}
+          </div>
+        )}
+      </section>
+      {nextCursor && (
+        <button
+          className="button button-secondary load-more"
+          disabled={loadingMore}
+          onClick={() => void load(nextCursor)}
+        >
+          {loadingMore && <Loader2 className="spin" size={16} />}
+          加载更多账号
+        </button>
+      )}
+      {selectedAccountId && (
+        <AccountLedgerDetailDrawer
+          externalAccountId={selectedAccountId}
+          onClose={() => setSelectedAccountId(null)}
+        />
+      )}
+    </PortalLayout>
+  );
+}
+
+function AccountLedgerDetailDrawer({
+  externalAccountId,
+  onClose,
+}: {
+  externalAccountId: string;
+  onClose: () => void;
+}) {
+  const [detail, setDetail] = useState<AccountLedgerDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(null);
+    setDetail(null);
+    invoiceApi
+      .getAccountLedgerDetail(externalAccountId)
+      .then((result) => {
+        if (active) setDetail(result);
+      })
+      .catch((caught) => {
+        if (active)
+          setError(caught instanceof Error ? caught.message : "账本详情读取失败。");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [externalAccountId]);
+
+  return (
+    <div className="drawer-layer" role="dialog" aria-modal="true">
+      <button className="drawer-backdrop" aria-label="关闭" onClick={onClose} />
+      <aside className="drawer account-ledger-drawer">
+        <div className="drawer-head">
+          <div>
+            <span>用户账本详情</span>
+            <h2>{detail?.externalUserId ?? "加载中"}</h2>
+          </div>
+          <button className="icon-button" onClick={onClose}>
+            <X size={19} />
+          </button>
+        </div>
+        {loading ? (
+          <LoadingBlock />
+        ) : error ? (
+          <div className="api-error-banner" role="alert">
+            <CircleAlert size={18} />
+            <span>{error}</span>
+          </div>
+        ) : detail ? (
+          <>
+            <div className="drawer-status">
+              <SourceBadge source={detail.source} />
+              <Badge tone={accountBlockStateTone(detail.blockState)}>
+                {accountBlockStateLabels[detail.blockState]}
+              </Badge>
+              <span>策略起点 {dateTimeShanghai(detail.policyStartAt)}</span>
+            </div>
+            <div className="drawer-body">
+              <section className="detail-section">
+                <h3>账本概览</h3>
+                <dl className="key-values">
+                  <div>
+                    <dt>起点后充值</dt>
+                    <dd>
+                      {money(detail.rechargesSinceStartMinor)}（
+                      {detail.rechargesSinceStartCount} 笔）
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>起点后消耗</dt>
+                    <dd>{money(detail.consumedSinceStartMinor)}</dd>
+                  </div>
+                  <div>
+                    <dt>可开票金额</dt>
+                    <dd>
+                      {money(detail.invoiceableNowMinor)}
+                      {!detail.thresholdReached && "（未达起票门槛）"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>已开票金额</dt>
+                    <dd>{money(detail.issuedMinor)}</dd>
+                  </div>
+                  <div>
+                    <dt>期初余额（非现金）</dt>
+                    <dd>
+                      {detail.openingBalance.serviceUnits}{" "}
+                      {detail.openingBalance.unitCode}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>最近检查点</dt>
+                    <dd>
+                      {detail.lastCheckpointAt
+                        ? dateTimeShanghai(detail.lastCheckpointAt)
+                        : "尚无记录"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>最近对账通过</dt>
+                    <dd>
+                      {detail.lastReconciledAt
+                        ? dateTimeShanghai(detail.lastReconciledAt)
+                        : "尚无记录"}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+              {detail.blockReason && (
+                <section className="detail-section">
+                  <h3>阻断原因</h3>
+                  <p>{detail.blockReason}</p>
+                </section>
+              )}
+              <section className="detail-section">
+                <h3>起点后充值明细</h3>
+                {detail.recharges.length ? (
+                  detail.recharges.map((recharge) => (
+                    <div className="allocation-row" key={recharge.fundingLotId}>
+                      <div>
+                        <strong>{dateTimeShanghai(recharge.completedAt)}</strong>
+                        <span>
+                          {recharge.eligibilityKind === "WALLET_CASH"
+                            ? "钱包充值"
+                            : "订阅充值"}
+                          {recharge.refundFrozen ? " · 退款冻结中" : ""}
+                        </span>
+                      </div>
+                      <span>{money(recharge.amountMinor)}</span>
+                    </div>
+                  ))
+                ) : (
+                  <p>尚无符合条件的充值记录。</p>
+                )}
+              </section>
+              <section className="detail-section">
+                <h3>消耗时间线（按天，Asia/Shanghai）</h3>
+                {detail.consumptionTimeline.length ? (
+                  detail.consumptionTimeline.map((day) => (
+                    <div className="allocation-row" key={day.date}>
+                      <div>
+                        <strong>{day.date}</strong>
+                      </div>
+                      <span>{money(day.consumedMinor)}</span>
+                    </div>
+                  ))
+                ) : (
+                  <p>尚无消耗记录。</p>
+                )}
+              </section>
+            </div>
+          </>
+        ) : null}
       </aside>
     </div>
   );
@@ -5142,6 +5589,14 @@ function AuthenticatedApplication() {
           element={
             <RequireAdmin>
               <EligibilityFreezesPage />
+            </RequireAdmin>
+          }
+        />
+        <Route
+          path="/admin/accounts/ledger"
+          element={
+            <RequireAdmin>
+              <AccountLedgerPage />
             </RequireAdmin>
           }
         />
