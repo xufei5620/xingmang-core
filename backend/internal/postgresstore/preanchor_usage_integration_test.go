@@ -130,21 +130,34 @@ func (f preAnchorUsageFixture) auditCount(t *testing.T, action string) int {
 }
 
 // TestPolicyAnchorAccountPreCutoverUsageFactSkippedWithoutFreeze covers the
-// XM-INV-INV-PREANCHOR-USAGE incident directly: a usage fact dated at/before
-// a POLICY_ANCHOR account's own cutover_at (but after the policy start,
-// exactly the shape of the 2026-09-02 Sub2API reconcile replay) must be
-// skipped -- not frozen SOURCE_GAP -- since it cannot be attributed to any
-// ledger baseline by construction (the account's baseline IS that cutover
-// checkpoint). ObserveUsageEvent must return nil so the caller marks the
-// source event processed, not PROJECTION_FAILED/dead.
+// XM-INV-PREANCHOR-USAGE incident's own mechanism (design 2.6): a usage fact
+// dated at/before a POLICY_ANCHOR account's own cutover_at must be skipped --
+// not frozen SOURCE_GAP -- since it cannot be attributed to any ledger
+// baseline by construction. ObserveUsageEvent must return nil so the caller
+// marks the source event processed, not PROJECTION_FAILED/dead.
+//
+// preUsageAt is dated before the policy start itself, not merely before the
+// fixture's own (pre-XM-INV-ELIG-POLICY-START-ANCHOR-shaped) anchor
+// checkpoint: XM-INV-ELIG-POLICY-START-ANCHOR (design XM-INV-ELIG-SIMPLIFY
+// section 3(D)) made cutover_at unconditionally equal to the global policy
+// start for every account this fixture's own ObserveBalanceCheckpoint call
+// now bootstraps, so the original incident's exact shape -- a fact after the
+// policy start but at/before the account's own (later) cutover_at -- is the
+// very dead zone that slice eliminates; such a fact is now correctly
+// persisted and projected normally instead (see
+// policy_start_anchor_integration_test.go's own
+// TestPolicyStartBootstrapIncludesInWindowCashFundingLot for that positive
+// case). This test's own mechanism (2.6's skip-without-freeze branch) is
+// still live and still needed for a fact genuinely at/before the policy
+// start itself, exercised here.
 func TestPolicyAnchorAccountPreCutoverUsageFactSkippedWithoutFreeze(t *testing.T) {
 	f := newPreAnchorUsageFixture(t, "40")
 	if err := f.store.ProvisionSourceStream(f.ctx, f.sourceID, "usage", AuditActor{Type: "system", ID: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	preUsageAt := f.cutoverAt.Add(-30 * time.Minute)
-	if !preUsageAt.After(f.policyStart) {
-		t.Fatalf("fixture bug: pre-usage time %s must be after policy start %s", preUsageAt, f.policyStart)
+	preUsageAt := f.policyStart.Add(-30 * time.Minute)
+	if !preUsageAt.Before(f.policyStart) {
+		t.Fatalf("fixture bug: pre-usage time %s must be before policy start %s", preUsageAt, f.policyStart)
 	}
 	usageEvent := SourceBatchEvent{EventID: "82000000-0000-4000-8000-000000000440",
 		EntityType: "usage_event", Operation: "upsert", PayloadHash: testHash("pre-anchor-usage-pre-fact-40"),
@@ -182,13 +195,16 @@ func TestPolicyAnchorAccountPreCutoverUsageFactSkippedWithoutFreeze(t *testing.T
 
 // TestPolicyAnchorAccountPreCutoverCreditFactSkippedWithoutFreeze mirrors the
 // usage case for a non-cash credit fact (observeEligibilityFact is shared by
-// both ObserveUsageEvent and ObserveCreditEvent).
+// both ObserveUsageEvent and ObserveCreditEvent). See
+// TestPolicyAnchorAccountPreCutoverUsageFactSkippedWithoutFreeze's own doc
+// comment for why preCreditAt is dated before the policy start itself, not
+// merely before the fixture's own anchor checkpoint.
 func TestPolicyAnchorAccountPreCutoverCreditFactSkippedWithoutFreeze(t *testing.T) {
 	f := newPreAnchorUsageFixture(t, "41")
 	if err := f.store.ProvisionSourceStream(f.ctx, f.sourceID, "credits", AuditActor{Type: "system", ID: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	preCreditAt := f.cutoverAt.Add(-30 * time.Minute)
+	preCreditAt := f.policyStart.Add(-30 * time.Minute)
 	creditEvent := SourceBatchEvent{EventID: "82000000-0000-4000-8000-000000000441",
 		EntityType: "credit_event", Operation: "upsert", PayloadHash: testHash("pre-anchor-usage-pre-fact-41"),
 		PayloadCiphertext: bytes.Repeat([]byte{4}, 32), ObservedAt: preCreditAt}

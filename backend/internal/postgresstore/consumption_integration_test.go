@@ -1366,22 +1366,40 @@ func TestPostCutoverNewAccountReplaysFromGlobalCutoverAndBlocksSubscriptionWitho
 	// account's cutover_at was pinned to the source's own global cutover, so
 	// a wallet payment completed anywhere after that (even before this
 	// specific account's later per-account boundary) was retained,
-	// unclassified, for later replay. XM-INV-POLICY-ANCHOR 2.1 changes what
-	// cutover_at means for a bootstrapped account: for POLICY_ANCHOR it is
-	// the anchoring checkpoint's own as_of (accountCutover here, 2h after
-	// globalCutover), not the manifest's global cutover -- applyFundingObservationEligibilityTx's
-	// wallet-cash branch keys off account.CutoverAt, so a wallet payment
-	// completed before that (like preWallet's, only 1h after globalCutover)
-	// is simply not in scope for this account yet and is left at its
-	// unclassified default (LEGACY_NON_INVOICEABLE, frozen), not "retained
-	// for replay" under a wider global-cutover window that no longer exists
-	// for this bootstrap kind. domain.EligibilitySubscriptionCash is
-	// unaffected (it keys off account.GlobalCutoverAt, unchanged by 2.1),
-	// which is exactly why the subscription checked just above this still
-	// passes unmodified.
-	if err != nil || preWallet.Lot.EligibilityKind != domain.EligibilityLegacyNonInvoiceable ||
-		preWallet.Lot.EligibilityStatus != "frozen" || preWallet.Lot.AvailableMinor() != 0 {
-		t.Fatalf("post-global, pre-account-cutover wallet payment classification changed unexpectedly: lot=%+v err=%v", preWallet.Lot, err)
+	// unclassified, for later replay. XM-INV-POLICY-ANCHOR 2.1 (as it
+	// originally shipped) instead pinned a POLICY_ANCHOR account's
+	// cutover_at to the anchoring checkpoint's own as_of (accountCutover
+	// here, 2h after globalCutover), so a wallet payment completed before
+	// that but after globalCutover (like preWallet's, only 1h after
+	// globalCutover) fell into a dead zone: not in scope for this account
+	// yet, left at its unclassified default (LEGACY_NON_INVOICEABLE,
+	// frozen).
+	//
+	// XM-INV-ELIG-POLICY-START-ANCHOR (design XM-INV-ELIG-SIMPLIFY section
+	// 3(D)) closes exactly that dead zone: cutover_at is now unconditionally
+	// the global policy start, so applyFundingObservationEligibilityTx's
+	// wallet-cash branch (keyed off account.CutoverAt) now finds preWallet's
+	// completed_at (policyStart+59m) after account.CutoverAt (policyStart)
+	// and classifies it normally -- verified, WALLET_CASH, active, fully
+	// available pending consumption -- instead of leaving it at the
+	// unclassified default. This is the intended behavior, not a regression:
+	// it is the same "a real in-window cash payment must not be permanently
+	// excluded" guarantee policy_start_anchor_integration_test.go's own
+	// TestPolicyStartBootstrapIncludesInWindowCashFundingLot exercises for a
+	// checkpoint-triggered bootstrap, here exercised for a funding-lot
+	// observation arriving after the account has already bootstrapped.
+	// domain.EligibilitySubscriptionCash is unaffected (it keys off
+	// account.GlobalCutoverAt, untouched by either slice), which is exactly
+	// why the subscription checked just above this still passes unmodified.
+	// AvailableMinor() is 0 here, not VerifiedCashMinor: it tracks
+	// ConsumedCashMinor (cash already recognized by an actual usage
+	// allocation) minus what is reserved/issued, not merely "verified" --
+	// no projection has run yet for this freshly-observed lot, so nothing
+	// has been recognized against it yet regardless of eligibility kind.
+	if err != nil || preWallet.Lot.EligibilityKind != domain.EligibilityWalletCash ||
+		preWallet.Lot.EligibilityStatus != "active" || preWallet.Lot.VerifiedCashMinor != 50_000 ||
+		preWallet.Lot.ConsumedCashMinor != 0 || preWallet.Lot.AvailableMinor() != 0 {
+		t.Fatalf("post-global, post-policy-start wallet payment was not classified normally: lot=%+v err=%v", preWallet.Lot, err)
 	}
 	preGlobalSubscription, err := store.ObserveFundingLot(ctx, SourceObservation{
 		Lot: domain.FundingLot{PrincipalID: userID, SourceInstanceID: sourceID, SourceType: domain.SourceSub2API,

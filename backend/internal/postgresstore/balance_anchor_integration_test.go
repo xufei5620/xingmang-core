@@ -31,7 +31,7 @@ import (
 // credit before ever touching the paid cash lot.
 func TestPolicyAnchorAccountBalanceCheckpointsEvaluateWithoutSourceGap(t *testing.T) {
 	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
-	policyStart := fixtureNow.Add(-2 * time.Hour)
+	policyStart := fixtureNow.Add(-2 * time.Hour).Truncate(time.Second)
 	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
 	sourceID := "10000000-0000-4000-8000-000000000270"
 	userID := "20000000-0000-4000-8000-000000000270"
@@ -132,10 +132,24 @@ func TestPolicyAnchorAccountBalanceCheckpointsEvaluateWithoutSourceGap(t *testin
 		}
 	}
 
-	// Step 1: evaluate the anchor's own checkpoint alone. Before the fix
-	// this opens a SOURCE_GAP freeze immediately -- there is no
-	// checkpoint_kind='cutover' row and no prior matched evaluation to
-	// ground the trust chain, only account.CutoverAt itself.
+	// Step 1: evaluate the pending balance evidence. Before the
+	// XM-INV-ANCHOR-BALANCE fix this opened a SOURCE_GAP freeze immediately
+	// -- there was no checkpoint_kind='cutover' row and no prior matched
+	// evaluation to ground the trust chain, only account.CutoverAt itself.
+	//
+	// XM-INV-ELIG-POLICY-START-ANCHOR (design XM-INV-ELIG-SIMPLIFY section
+	// 3(D)): cutover_at is now the global policy start, not this checkpoint's
+	// own as_of, and a second, derived reconciliation checkpoint exists at
+	// as_of=policyStart (this fixture has no window facts between policyStart
+	// and anchorAt, so its derived balance equals the same 500 unchanged).
+	// That derived checkpoint -- not the real one at anchorAt -- is now the
+	// account's first-ever balance evidence (earliest as_of): it self-heals
+	// into the synthesized UNKNOWN_POSITIVE credit, dated at policyStart. The
+	// real checkpoint at anchorAt is evaluated second (in the same batch) and
+	// reconciles directly against that credit: matched, difference 0. Both
+	// outcomes together are exactly what the pre-fix code could never reach
+	// (no freeze, real forward progress) -- only which of the two rows carries
+	// which terminal status changed from this slice.
 	queueJobThrough(anchorAt.Add(time.Minute))
 	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute), worker)
 	if err != nil || processed != 1 {
@@ -147,8 +161,21 @@ func TestPolicyAnchorAccountBalanceCheckpointsEvaluateWithoutSourceGap(t *testin
 		WHERE checkpoint_id=$1`, anchorCheckpointID).Scan(&step1Status); err != nil {
 		t.Fatal(err)
 	}
-	if step1Status != "positive_classified_non_cash" {
-		t.Fatalf("anchor checkpoint evaluation status=%q, want positive_classified_non_cash", step1Status)
+	if step1Status != "matched" {
+		t.Fatalf("real anchor checkpoint evaluation status=%q, want matched (reconciles against the derived checkpoint's own synthesized credit)", step1Status)
+	}
+	var derivedCheckpointID string
+	if err := store.pool.QueryRow(ctx, `SELECT id FROM balance_reconciliation_checkpoints
+		WHERE external_account_id=$1 AND checkpoint_id=$2`, accountID, "policy-start:anchor-balance-anchor").Scan(&derivedCheckpointID); err != nil {
+		t.Fatalf("derived reconciliation checkpoint row missing: %v", err)
+	}
+	var derivedStatus string
+	if err := store.pool.QueryRow(ctx, `SELECT evaluation_status FROM balance_checkpoint_evaluations
+		WHERE checkpoint_id=$1`, derivedCheckpointID).Scan(&derivedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if derivedStatus != "positive_classified_non_cash" {
+		t.Fatalf("derived checkpoint evaluation status=%q, want positive_classified_non_cash", derivedStatus)
 	}
 	var syntheticUnits string
 	var syntheticAt time.Time
@@ -156,8 +183,8 @@ func TestPolicyAnchorAccountBalanceCheckpointsEvaluateWithoutSourceGap(t *testin
 		WHERE external_account_id=$1 AND credit_kind='UNKNOWN_POSITIVE'`, accountID).Scan(&syntheticAt, &syntheticUnits); err != nil {
 		t.Fatalf("synthesized opening non-cash credit missing: %v", err)
 	}
-	if syntheticUnits != "500" || !syntheticAt.Equal(anchorAt.UTC()) {
-		t.Fatalf("synthesized opening credit units=%s at=%s, want 500 at %s", syntheticUnits, syntheticAt, anchorAt)
+	if syntheticUnits != "500" || !syntheticAt.Equal(policyStart.UTC()) {
+		t.Fatalf("synthesized opening credit units=%s at=%s, want 500 at policyStart=%s", syntheticUnits, syntheticAt, policyStart)
 	}
 
 	// Step 2: a real post-anchor credit, then a real checkpoint reflecting
@@ -325,7 +352,7 @@ func TestPolicyAnchorAccountBalanceCheckpointsEvaluateWithoutSourceGap(t *testin
 // anchor as a real checkpoint does, not freeze SOURCE_GAP.
 func TestPolicyAnchorAccountCarryForwardProofEvaluatesWithoutSourceGap(t *testing.T) {
 	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
-	policyStart := fixtureNow.Add(-2 * time.Hour)
+	policyStart := fixtureNow.Add(-2 * time.Hour).Truncate(time.Second)
 	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
 	sourceID := "10000000-0000-4000-8000-000000000280"
 	userID := "20000000-0000-4000-8000-000000000280"
@@ -469,10 +496,26 @@ func TestPolicyAnchorAccountCarryForwardProofEvaluatesWithoutSourceGap(t *testin
 		WHERE external_account_id=$1 AND status='open'`, accountID).Scan(&freezeCount); err != nil || freezeCount != 0 {
 		t.Fatalf("open freeze count=%d err=%v, want 0", freezeCount, err)
 	}
+	// XM-INV-ELIG-POLICY-START-ANCHOR: as in
+	// TestPolicyAnchorAccountBalanceCheckpointsEvaluateWithoutSourceGap above,
+	// the *derived* reconciliation checkpoint (as_of=policyStart, not
+	// anchorAt) is now the account's first-ever balance evidence and carries
+	// the positive_classified_non_cash self-heal; the real anchor checkpoint
+	// reconciles against that credit and is matched instead.
 	var anchorStatus string
 	if err := store.pool.QueryRow(ctx, `SELECT evaluation_status FROM balance_checkpoint_evaluations
-		WHERE checkpoint_id=$1`, anchorCheckpointID).Scan(&anchorStatus); err != nil || anchorStatus != "positive_classified_non_cash" {
-		t.Fatalf("anchor checkpoint evaluation status=%q err=%v, want positive_classified_non_cash", anchorStatus, err)
+		WHERE checkpoint_id=$1`, anchorCheckpointID).Scan(&anchorStatus); err != nil || anchorStatus != "matched" {
+		t.Fatalf("real anchor checkpoint evaluation status=%q err=%v, want matched", anchorStatus, err)
+	}
+	var derivedCheckpointID string
+	if err := store.pool.QueryRow(ctx, `SELECT id FROM balance_reconciliation_checkpoints
+		WHERE external_account_id=$1 AND checkpoint_id=$2`, accountID, "policy-start:anchor-carry-anchor").Scan(&derivedCheckpointID); err != nil {
+		t.Fatalf("derived reconciliation checkpoint row missing: %v", err)
+	}
+	var derivedStatus string
+	if err := store.pool.QueryRow(ctx, `SELECT evaluation_status FROM balance_checkpoint_evaluations
+		WHERE checkpoint_id=$1`, derivedCheckpointID).Scan(&derivedStatus); err != nil || derivedStatus != "positive_classified_non_cash" {
+		t.Fatalf("derived checkpoint evaluation status=%q err=%v, want positive_classified_non_cash", derivedStatus, err)
 	}
 	var proofStatus, proofDifference string
 	if err := store.pool.QueryRow(ctx, `
