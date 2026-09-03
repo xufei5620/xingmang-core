@@ -20,16 +20,22 @@
 
 ### Task 1: Source identity
 
-- [ ] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
-- [ ] Create `v0.1.0-rc75-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
+- [x] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet, full unit suite, integration suite against a disposable PostgreSQL 18, web typecheck/tests, and release-range gitleaks; capture every native exit immediately and require `0`.
+- [x] Create `v0.1.0-rc75-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
 
 ### Task 2: Image evidence
 
-- [ ] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC75 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
+- [x] In one block (run through `scripts/run-detached.ps1`), bind worktree/tag/HEAD, select the first unused RC75 exactN, run the image gate and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
 
 ### Task 3: Production and repair
 
-- [ ] Sign exactly one strict-ready RC75 directory, transfer only its nine manifest-bound images, stage, take a fresh pre-deploy backup (migration release: never reuse an older backup; offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, confirm migration 0019 applied (the evaluation CHECK constraints list `positive_blip_ignored`), require readyz 200 in the verify step, and record deployment evidence beside the release.
+- [x] Sign exactly one strict-ready RC75 directory, transfer only its nine manifest-bound images, stage, take a fresh pre-deploy backup (migration release: never reuse an older backup; offline backup signing key mounted on tmpfs for the run only, `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), run `bash deploy/roll-forward.sh <sha>`, confirm migration 0019 applied (the evaluation CHECK constraints list `positive_blip_ignored`), require readyz 200 in the verify step, and record deployment evidence beside the release.
 - [ ] Run `invoice-eligibility-repair --kind=balance-blip` from the RC75 tools image in `--dry-run` (expected: account 40bd883d, one `UNKNOWN_POSITIVE` credit of 3,667,080, nine `UNKNOWN_NEGATIVE_BALANCE` freezes, eight checkpoint evaluations reset); then, together with the still-pending `--kind=balance-anchor` apply (79 freezes on 98cce4c8/6706ea6a), `--apply` with the approved operator id only after the owner's approval; confirm subsequent checkpoints evaluate `matched` and no new freezes open.
 
 Production remains blocked until the credentialed human canary (the whale's next balance checkpoint evaluating `matched` after the repair, and no `positive_classified_non_cash` synthesized from a lone checkpoint in the following day) binds RC75.
+
+## Execution record (2026-09-03)
+
+- Task 1: XM-INV-BALANCE-BLIP merged (`84e1f34`), XM-INV-TRIVY-REFRESH-LOG merged (`881bfcb`), identity bump (`37636ca`). Backend full suite green (twice, including the migrate exact-set tests with 0019), web typecheck/94 tests/build green, gitleaks clean, four failure-evidence verifiers 0, gate self-test 0. Tag `v0.1.0-rc75-signed` -> `37636ca`.
+- Task 2: `release/0.1.0-rc75-exact1` first try: image gate 42, ordinary and strict verifiers 0, `SHA256SUMS.sig` verified.
+- Task 3: transfer verified on the host; staging loaded nine images and verified tag and evidence signatures; fresh backup `invoice-20260903T011358Z` (migration release; signing key on tmpfs, shredded after); `deploy/roll-forward.sh 37636ca…` ROLL FORWARD PASS with 18 containers on `0.1.0-rc75`, healthz 200, readyz 200; migration 0019 confirmed applied (both evaluation-status CHECK constraints list `positive_blip_ignored`). Deployment record `deployment-records/rc75-deploy-*`. Repairs: dry-runs next; apply only after the owner's approval.
