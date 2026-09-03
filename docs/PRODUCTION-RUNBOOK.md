@@ -1905,6 +1905,31 @@ degrades exactly as it did before this change. This grace needs no operator
 action; it is derived from the same timing contract in the paragraph above,
 not independently configured.
 
+**Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING).**
+A per-account error from the eligibility-projection worker no longer trips
+`/readyz` on the first occurrence. `EligibilityProjectionHealth.Dead` --
+`eligibility_projection_jobs.status='dead'` -- is the only per-account
+condition that makes readiness unhealthy; it is reached only after 8
+consecutive processing errors for the same account, with exponential backoff
+(30s doubling, capped at 30 minutes) between attempts. A job merely retrying
+inside that backoff (`Retrying` in the admin source-health report,
+`GET /api/v1/admin/source-health`'s `eligibility_projection` object) never
+affects readiness, and is excluded from the stuck-job budget
+(`OldestPending`, 15 minutes) for as long as its own backoff has not
+elapsed -- the same treatment `BALANCE_PROOF_PENDING` jobs already got. A
+dead job never revives on its own (a new fact for that account advances its
+pending work but leaves it dead); recover it with:
+
+```bash
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
+```
+
+See `docs/ELIGIBILITY-OPERATIONS.md` for the full grading/dead/requeue
+contract.
+
 ```bash
 docker compose --env-file deploy/.env.production \
   -f deploy/docker-compose.prod.yml up -d --no-build api web ingest-proxy

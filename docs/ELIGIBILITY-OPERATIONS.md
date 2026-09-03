@@ -398,3 +398,98 @@ repair runs, since the repair's own guarded UPDATE depends on the sibling
 GUC it adds), then dry-run, then owner-approved apply. Expect an
 all-no-op dry-run report for the three known accounts unless a real
 in-window payment has appeared since this was last checked.
+
+## Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING, 2026-09-03)
+
+Before this slice, `ProcessEligibilityProjectionJobs` marked any per-account
+error other than a pending balance proof `status='failed'` immediately --
+no attempt counter, no backoff, no terminal grade -- and
+`EligibilityProjectionHealth`/`eligibilityProjectionReady` turned `/readyz`
+503 the instant any row carried that status. A single account hitting a
+transient error (a serialization failure, a momentary database error, a
+one-off evaluator bug) took the whole API not-ready until a human
+intervened. This is the same production incident mechanism as RC75's
+balance-blip loop (`docs/handoffs/XM-INV-BLIP-SOFTFAIL.md`), now fixed at
+its structural root rather than only for that one bug class.
+
+`eligibility_projection_jobs` (migration 0023) gained the same retry/dead
+shape `source_ingest_events` already has via `MarkSourceEventFailed`:
+
+- `attempts` (new column, distinct from the pre-existing `attempt_count`,
+  which the worker's claim step increments on every claim regardless of
+  outcome) counts consecutive per-account processing errors. A balance-proof-
+  pending outcome (`errBalanceCarryForwardProofPending`) is a separate,
+  unrelated backoff and never spends an attempt.
+- Below 8 consecutive failures (`projectionFailureDeadThreshold`,
+  mirroring `source_ingest_events`' own `attempt_count>=8` threshold), the
+  job stays `status='queued'` with an exponential backoff -- 30s doubling,
+  capped at 30 minutes (`projectionFailureBackoffBaseSeconds`/
+  `projectionFailureBackoffCapSeconds`) -- and `last_error`/`last_error_code`
+  record what happened.
+- At the threshold the job becomes a terminal `status='dead'` and an audit
+  event (`eligibility.projection.dead`, carrying the account id, `attempts`
+  and the last error) is written. `status='failed'` stays a valid value for
+  compatibility with any row already in that status at deploy time (the
+  worker's claim query still picks those up and grades them going forward)
+  but the code no longer produces it.
+- A successful run still deletes the job row outright, unchanged from
+  before -- the account's next error, if any, starts a fresh `attempts=0`
+  row.
+- A new fact for a dead account (a usage/credit/checkpoint observation, or
+  the source-projection worker's own bulk requeue) never silently revives
+  it -- only `requested_through` still advances, so the account's full
+  backlog is picked up the moment it *is* requeued. The only way a dead job
+  returns to the queue is `invoice-eligibility-repair
+  --kind=projection-requeue-dead` below.
+
+`EligibilityProjectionHealth` (surfaced at
+`GET /api/v1/admin/source-health`'s `eligibility_projection` object,
+alongside the five source streams that endpoint already reports) exposes:
+
+- `Dead` (renamed from `Failed`) -- `status='dead'` count. This is the only
+  eligibility-projection condition `eligibilityProjectionReady` treats as
+  not-ready.
+- `Retrying` -- `status='queued' AND attempts>0` count. Purely
+  informational; never affects readiness by itself. It can overlap with
+  `ProofPending` for a job that failed before and later separately hit a
+  proof-pending outcome (attempts is not reset by that outcome) -- both
+  counts then legitimately include that one row.
+- `OldestPending` (the 15-minute stuck-job budget) excludes a
+  failure-grading job whose own backoff has not elapsed yet, the same
+  treatment `BALANCE_PROOF_PENDING` jobs and live-lease `processing` rows
+  already got (XM-INV-READY-PENDING/XM-INV-READY-LEASE) -- a job legitimately
+  waiting out its own backoff is not stuck.
+
+**`invoice-eligibility-repair --kind=projection-requeue-dead`** lists every
+dead job (optionally narrowed with `--account`) with its previous attempt
+count, last error code/text and how long it has been dead; apply resets
+`attempts=0`, `status='queued'`, `next_attempt_at=now()` and writes an audit
+event (`eligibility.projection.requeued`). Like `--kind=queue-narrow`, this
+processes one account per transaction, so one account's own conflict never
+blocks any other account in the same run.
+
+```
+# dry run (default) -- reports what would change, writes nothing
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=projection-requeue-dead
+
+# apply -- requires an approving operator id
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=projection-requeue-dead --apply --operator-id=<admin-uuid>
+
+# narrow to one account
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=projection-requeue-dead --account=<external-account-uuid> \
+  --apply --operator-id=<admin-uuid>
+```
+
+Before requeuing a dead job, check `last_error`/`last_error_code` in the
+dry-run report -- requeuing an account whose underlying data problem was
+never actually fixed just spends another 8 attempts (roughly 63 minutes of
+backoff) before it goes dead again.
