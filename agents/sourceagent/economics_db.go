@@ -56,6 +56,8 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 	if delay < time.Minute || delay > 24*time.Hour {
 		return ScanPage{}, errors.New("economic safety delay is outside the reviewed range")
 	}
+	abandoningLegacyReconcile := shouldAbandonLegacyReconcileCycle(req.Cursor,
+		req.Cursor.Version == 0 || req.Cursor.Completed, req.Mode, c.Stream)
 	cursor, err := c.prepareCursor(ctx, req, delay)
 	if err != nil {
 		return ScanPage{}, err
@@ -129,6 +131,17 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 	if !hasMore {
 		next.WatermarkAt = next.CeilingAt
 		next.WatermarkCursor = next.CeilingCursor
+		if req.Mode == ScanReconcile {
+			// XM-INV-AGENT-RESTART-GRACE part B: record where this completed
+			// reconcile reached so the next one starts here instead of
+			// rewinding to the cutover manifest. Equal to WatermarkCursor at
+			// this point (both are the ceiling this cycle proved complete).
+			next.ReconcileBaselineCursor = next.WatermarkCursor
+		}
+	}
+	var pageWarnings []string
+	if abandoningLegacyReconcile {
+		pageWarnings = append(pageWarnings, "legacy_reconcile_cycle_abandoned")
 	}
 	now := time.Now
 	if c.Now != nil {
@@ -158,10 +171,61 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 		projections = append(projections, Projection{EntityType: EntityCreditEvent, ExternalID: row.SourceCursor,
 			ObservedAt: now().UTC().Format(time.RFC3339Nano), Operation: "upsert", Payload: payload})
 	}
-	return ScanPage{Projections: projections, NextCursor: next, HasMore: hasMore,
+	return ScanPage{Projections: projections, NextCursor: next, HasMore: hasMore, Warnings: pageWarnings,
 		StreamWatermarkAt: next.WatermarkAt, SourceCursor: next.WatermarkCursor,
 		ScanCeilingAt: next.CeilingAt, ScanCeilingCursor: next.CeilingCursor,
 		ScanCycleID: next.ScanCycleID, ScanComplete: next.Completed}, nil
+}
+
+// shouldAbandonLegacyReconcileCycle reports whether an in-flight (not yet
+// completed) ScanReconcile cycle must be abandoned and restarted fresh from
+// the rolling-window baseline instead of resumed from its stored position.
+// This is XM-INV-AGENT-RESTART-GRACE part B's upgrade path: an older agent
+// binary always rewound a new ScanReconcile cycle to the cutover manifest, so
+// a cycle left in flight by that binary (Completed=false, position possibly
+// far behind the current watermark) predates the rolling reconcile window and
+// would otherwise resume a stale, unbounded rescan for the rest of its
+// duration. ReconcileWindowBounded is only ever set true by this package once
+// a cycle's starting position has been computed by the new logic, so a stored
+// cursor that lacks it (including every cursor written before this field
+// existed) is unambiguously such a legacy cycle.
+//
+// Only the usage stream can carry this legacy state: credits already
+// restarts its position at zero on every new cycle regardless of mode (see
+// prepareCursor below), so it never rewound to the cutover manifest on
+// ScanReconcile in the first place and has nothing to abandon.
+func shouldAbandonLegacyReconcileCycle(cursor ScanCursor, newCycle bool, mode ScanMode, stream string) bool {
+	return !newCycle && mode == ScanReconcile && stream == StreamUsage && !cursor.ReconcileWindowBounded
+}
+
+// reconcileWindowStart picks the domain positions a ScanReconcile cycle
+// starts from, implementing the XM-INV-AGENT-RESTART-GRACE rolling reconcile
+// window: resume from the previous completed reconcile's baseline so each
+// periodic reconcile re-verifies only what was ingested since the last one,
+// instead of rewinding all the way back to the cutover manifest. When no
+// baseline is recorded yet (the very first reconcile ever, or a legacy
+// in-flight cycle being abandoned on upgrade) it falls back to the live
+// watermark -- i.e. no rewind beyond what is already known complete. Either
+// value failing to parse against the current domain set (corrupt or
+// stream-mismatched state) falls back the same way, and the cutover manifest
+// position is always the floor: this must never rewind to before cutover.
+func reconcileWindowStart(domains []string, baselineCursor, watermarkCursor string, cutoverPositions map[string]int64) map[string]int64 {
+	positions, err := parseDomainCursor(baselineCursor, domains)
+	if err != nil {
+		positions, err = parseDomainCursor(watermarkCursor, domains)
+	}
+	if err != nil {
+		positions = make(map[string]int64, len(domains))
+		for _, domain := range domains {
+			positions[domain] = cutoverPositions[domain]
+		}
+	}
+	for _, domain := range domains {
+		if positions[domain] < cutoverPositions[domain] {
+			positions[domain] = cutoverPositions[domain]
+		}
+	}
+	return positions
 }
 
 func (c *EconomicDBConnector) prepareCursor(ctx context.Context, req ScanRequest, delay time.Duration) (ScanCursor, error) {
@@ -188,17 +252,27 @@ func (c *EconomicDBConnector) prepareCursor(ctx context.Context, req ScanRequest
 	} else if cursor.Version != 2 || cursor.CutoverAt != c.Manifest.CutoverAt {
 		return ScanCursor{}, errors.New("economic cursor conflicts with the cutover manifest")
 	}
-	if !newCycle {
+	abandonLegacyCycle := shouldAbandonLegacyReconcileCycle(cursor, newCycle, req.Mode, c.Stream)
+	if !newCycle && !abandonLegacyCycle {
 		return cursor, nil
 	}
-	if c.Stream == StreamCredits {
+	switch {
+	case c.Stream == StreamCredits:
 		zero := map[string]int64{}
 		for _, domain := range domains {
 			zero[domain] = 0
 		}
 		cursor.PositionCursor = canonicalDomainCursor(domains, zero)
-	} else if req.Mode == ScanFull || req.Mode == ScanReconcile {
+	case req.Mode == ScanFull:
 		cursor.PositionCursor = canonicalDomainCursor(domains, cutoverPositions)
+	case req.Mode == ScanReconcile:
+		// XM-INV-AGENT-RESTART-GRACE part B: a rolling window, not a rewind to
+		// cutover. abandonLegacyCycle reaches this branch precisely when a
+		// pre-upgrade in-flight cycle is being discarded; either way the
+		// starting position is recomputed the same way a fresh cycle would be.
+		cursor.PositionCursor = canonicalDomainCursor(domains,
+			reconcileWindowStart(domains, cursor.ReconcileBaselineCursor, cursor.WatermarkCursor, cutoverPositions))
+		cursor.ReconcileWindowBounded = true
 	}
 	var horizon time.Time
 	if err := c.DB.QueryRowContext(ctx, `SELECT transaction_timestamp() - $1::interval`, delay.String()).Scan(&horizon); err != nil {
