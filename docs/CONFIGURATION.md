@@ -749,7 +749,14 @@ At startup, production must reject:
 - public document storage, stale ClamAV signatures, disabled malware scanning,
   an unavailable/wrong-version isolated qpdf scanner, unsafe/missing scanner
   capability, or a non-tmpfs quarantine;
-- an upstream Admin API URL exposed to a browser or invoice web process.
+- an upstream Admin API URL exposed to a browser or invoice web process;
+- a runtime database role holding more than the append/read grants the code
+  actually uses, including `UPDATE` on `console_assertion_nonces` -- the
+  table that records whether a console assertion has already been redeemed.
+  `deploy/postgres/harden-runtime-role.sql` revokes it, but that job sits
+  behind Compose's `tools` profile and is not part of `deploy/roll-forward.sh`
+  (see `docs/PRODUCTION-RUNBOOK.md` section 4.1); the startup assertion is
+  what makes forgetting the replay a loud failure instead of a silent one.
 
 ## 9. Administrator self-service settings model
 

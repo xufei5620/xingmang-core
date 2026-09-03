@@ -816,6 +816,16 @@ func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.S
 	var canInsertAudit, canUpdateAudit, canDeleteAudit, canUpdateLogoutEvent, canDeleteLogoutEvent, canCreateSchema, canReadMigrations, canTemporary bool
 	var canUpdateSourceEvent, canUpdateSourceBatch, canUpdatePaymentReview, canUpdateUsageFact, canUpdateCreditFact, canUpdateBalanceFact bool
 	var canUpdateConsumptionAllocation bool
+	// console_assertion_nonces is the single-use judge for console assertions.
+	// The store only ever INSERTs (ON CONFLICT DO NOTHING, which needs no
+	// UPDATE privilege) and DELETEs expired rows, so UPDATE here would only
+	// ever be an attacker's or a bug's tool for rewriting a claim that has
+	// already been redeemed. deploy/postgres/harden-runtime-role.sql revokes
+	// it; this assertion is what stops the process from running against a
+	// database where that job was never replayed (XM-INV-CONSOLE-ASSERT-
+	// ADMIN-ROLE's release notes and PRODUCTION-RUNBOOK section 4.1 spell out
+	// the replay, which roll-forward deliberately does not do for you).
+	var canUpdateConsoleNonce bool
 	var canReadEligibilityPolicy, canWriteEligibilityPolicy bool
 	var superuser, createDB, createRole, replication, bypassRLS, inherit, memberOfRole bool
 	var connectionLimit int
@@ -832,6 +842,7 @@ func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.S
 		       has_table_privilege(current_user,'source_credit_events','UPDATE'),
 		       has_table_privilege(current_user,'balance_reconciliation_checkpoints','UPDATE'),
 		       has_table_privilege(current_user,'consumption_allocations','UPDATE'),
+		       has_table_privilege(current_user,'console_assertion_nonces','UPDATE'),
 		       has_table_privilege(current_user,'invoice_eligibility_policy','SELECT'),
 		       has_table_privilege(current_user,'invoice_eligibility_policy','UPDATE'),
 		       has_schema_privilege(current_user,'public','CREATE'),
@@ -844,6 +855,7 @@ func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.S
 		&canInsertAudit, &canUpdateAudit, &canDeleteAudit, &canUpdateLogoutEvent, &canDeleteLogoutEvent,
 		&canUpdateSourceEvent, &canUpdateSourceBatch, &canUpdatePaymentReview, &canUpdateUsageFact,
 		&canUpdateCreditFact, &canUpdateBalanceFact, &canUpdateConsumptionAllocation,
+		&canUpdateConsoleNonce,
 		&canReadEligibilityPolicy, &canWriteEligibilityPolicy, &canCreateSchema,
 		&canReadMigrations, &canTemporary, &superuser, &createDB, &createRole,
 		&replication, &bypassRLS, &inherit, &connectionLimit, &memberOfRole)
@@ -853,6 +865,7 @@ func verifyRuntimeDatabasePrivileges(ctx context.Context, store *postgresstore.S
 	if !canInsertAudit || canUpdateAudit || canDeleteAudit || canUpdateLogoutEvent || canDeleteLogoutEvent ||
 		canUpdateSourceEvent || canUpdateSourceBatch || canUpdatePaymentReview || canUpdateUsageFact ||
 		canUpdateCreditFact || canUpdateBalanceFact || canUpdateConsumptionAllocation ||
+		canUpdateConsoleNonce ||
 		!canReadEligibilityPolicy || canWriteEligibilityPolicy ||
 		canCreateSchema || !canReadMigrations || canTemporary ||
 		superuser || createDB || createRole || replication || bypassRLS || inherit || connectionLimit != 20 || memberOfRole {
