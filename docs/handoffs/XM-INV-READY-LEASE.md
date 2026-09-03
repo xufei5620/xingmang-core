@@ -3,7 +3,8 @@
 - **status:** implemented and self-tested locally; gates below.
 - **branch:** `ai/claude/XM-INV-READY-LEASE` (based on `ai/claude/XM-INV-AUTOLOGIN` at `9cf0046`,
   RC75 line), worktree `K:/发票/wt-XM-INV-READY-LEASE`.
-- **commit:** see `git log` on this branch (single commit, trailers per the standing attribution
+- **commit:** `3ab33be` fix(readiness): exclude live-lease processing rows and worker-reclaim grace
+  from eligibility projection stuck bucket (single commit, trailers per the standing attribution
   instructions).
 
 ## Problem
