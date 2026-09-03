@@ -306,6 +306,14 @@ func TestLogoutDoesNotClaimSuccessWhenLocalRevocationFails(t *testing.T) {
 const (
 	testConsoleAssertionIssuer   = "https://console.example"
 	testConsoleAssertionAudience = "xingmang-console-assertion-v1"
+	// testConsoleAssertionAdminRole is the CONSOLE's own administrator role
+	// name, deliberately different from the invoice AdminPolicy role
+	// ("invoice-admin") these tests configure. Production is shaped exactly
+	// this way -- the console signs core.staff_account.roles verbatim while
+	// the transitional Keycloak login carries the realm role -- and every
+	// exchange test below therefore exercises the role translation
+	// (XM-INV-CONSOLE-ASSERT-ADMIN-ROLE).
+	testConsoleAssertionAdminRole = "admin"
 	// testConsoleAssertionACR must match console_assertion.go's own
 	// unexported consoleAssertionRequiredACR constant -- duplicated here
 	// because it is package-private in internal/auth and this is a
@@ -400,9 +408,12 @@ func consoleAssertionServer(t *testing.T, disableOIDC bool) consoleAssertionFixt
 		LoadUser: func(context.Context, string) (SessionUser, error) {
 			return SessionUser{ID: "10000000-0000-4000-8000-000000000001", Email: "user@example.com", EmailVerified: true}, nil
 		},
-		ConsoleAssertionEnabled:     true,
-		ConsoleAssertionKeyring:     keyring,
-		ConsoleAssertionConfig:      auth.ConsoleAssertionConfig{Issuer: testConsoleAssertionIssuer, Audience: testConsoleAssertionAudience},
+		ConsoleAssertionEnabled: true,
+		ConsoleAssertionKeyring: keyring,
+		ConsoleAssertionConfig: auth.ConsoleAssertionConfig{
+			Issuer: testConsoleAssertionIssuer, Audience: testConsoleAssertionAudience,
+			AdminRole: testConsoleAssertionAdminRole,
+		},
 		ConsoleAssertionNonces:      newMemoryConsoleAssertionNonceStore(),
 		ConsoleAssertionRateLimiter: auth.NewLoginRateLimiter(3, time.Minute),
 		SecurityAudit:               &auth.MemorySecurityAuditSink{},
@@ -435,7 +446,7 @@ func signTestConsoleAssertion(t *testing.T, private ed25519.PrivateKey, kid stri
 	payload := map[string]any{
 		"iss": testConsoleAssertionIssuer, "aud": testConsoleAssertionAudience,
 		"sub": "22222222-2222-4222-8222-222222222222", "username": "console-operator",
-		"roles": []string{"invoice-admin"}, "acr": testConsoleAssertionACR,
+		"roles": []string{testConsoleAssertionAdminRole, "credential-admin", "staff"}, "acr": testConsoleAssertionACR,
 		"amr": []string{"pwd", "otp"}, "scope": "sub2api",
 		"nonce": base64.RawURLEncoding.EncodeToString(nonce),
 		"iat":   now.Unix(), "exp": now.Unix() + 300, "nbf": now.Unix(),
@@ -532,6 +543,29 @@ func TestConsoleAssertionExchangeIssuesAdminSessionSatisfyingStepUp(t *testing.T
 	}
 	if !response.OIDCAdminLoginEnabled {
 		t.Fatalf("expected oidc_admin_login_enabled=true when OIDC stays on, got %+v", response)
+	}
+}
+
+// TestConsoleAssertionExchangeRejectsTheOIDCRealmRole is the regression test
+// for XM-INV-CONSOLE-ASSERT-ADMIN-ROLE. Before that change the exchange
+// checked the assertion's roles against the invoice AdminPolicy role, so an
+// assertion carrying the console's real staff roles was rejected in
+// production while this fabricated one would have passed. The check now runs
+// against the configured CONSOLE administrator role, so the relationship is
+// inverted: the realm role alone is not enough.
+func TestConsoleAssertionExchangeRejectsTheOIDCRealmRole(t *testing.T) {
+	fixture := consoleAssertionServer(t, false)
+	token := signTestConsoleAssertion(t, fixture.privateKey, fixture.keyID, func(payload map[string]any) {
+		payload["roles"] = []string{"invoice-admin", "staff"}
+	})
+
+	recorder := httptest.NewRecorder()
+	fixture.server.Handler().ServeHTTP(recorder, consoleAssertionExchangeRequest(token))
+	if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "ASSERTION_INVALID") {
+		t.Fatalf("expected the realm role alone to be rejected, got %d %s", recorder.Code, recorder.Body.String())
+	}
+	if len(recorder.Result().Cookies()) != 0 {
+		t.Fatalf("a rejected exchange must not set cookies: %v", recorder.Result().Cookies())
 	}
 }
 

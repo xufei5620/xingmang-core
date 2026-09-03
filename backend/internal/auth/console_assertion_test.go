@@ -17,7 +17,7 @@ const (
 )
 
 func testConsoleAssertionCfg() ConsoleAssertionConfig {
-	return ConsoleAssertionConfig{Issuer: testConsoleAssertionIssuer, Audience: testConsoleAssertionAudience}
+	return ConsoleAssertionConfig{Issuer: testConsoleAssertionIssuer, Audience: testConsoleAssertionAudience, AdminRole: testConsoleAssertionRole}
 }
 
 // consoleAssertionKeyFixture bundles a generated Ed25519 keypair with a
@@ -101,7 +101,7 @@ func TestVerifyConsoleAssertionAcceptsWellFormedAssertion(t *testing.T) {
 	fixture := newConsoleAssertionKeyFixture(t, "2026-09", now.Add(-time.Hour), now.Add(time.Hour), nil)
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), defaultAssertionPayload(t, now))
 
-	claims, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now)
+	claims, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now)
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -131,7 +131,7 @@ func TestVerifyConsoleAssertionClockSkewBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := defaultAssertionPayload(t, tc.signAt)
 			token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-			_, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now)
+			_, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now)
 			if tc.wantErr && err == nil {
 				t.Fatal("expected rejection, got success")
 			}
@@ -145,12 +145,12 @@ func TestVerifyConsoleAssertionClockSkewBoundary(t *testing.T) {
 	// nominally expired) but still within the 60s tolerance on the exp side.
 	nearExpiry := now.Add(-5*time.Minute - time.Second)
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), defaultAssertionPayload(t, nearExpiry))
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); err != nil {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); err != nil {
 		t.Fatalf("expected exp-side skew tolerance to accept, got %v", err)
 	}
 	tooOld := now.Add(-5*time.Minute - 61*time.Second)
 	token = signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), defaultAssertionPayload(t, tooOld))
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); err == nil {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); err == nil {
 		t.Fatal("expected expiry beyond skew tolerance to be rejected")
 	}
 }
@@ -162,7 +162,7 @@ func TestVerifyConsoleAssertionRejectsOverlongLifetimeDespiteValidSignature(t *t
 	payload["exp"] = now.Unix() + 360 // 6 minutes, exceeds the 5-minute structural cap
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
 
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, ErrConsoleAssertionInvalid) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, ErrConsoleAssertionInvalid) {
 		t.Fatalf("expected rejection for overlong lifetime, got %v", err)
 	}
 }
@@ -185,7 +185,7 @@ func TestVerifyConsoleAssertionRejectsTamperedPayload(t *testing.T) {
 	}
 	tampered := parts[0] + "." + base64.RawURLEncoding.EncodeToString(tamperedPayload) + "." + parts[2]
 
-	if _, err := VerifyConsoleAssertion(tampered, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadSignature) {
+	if _, err := VerifyConsoleAssertion(tampered, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadSignature) {
 		t.Fatalf("expected signature failure, got %v", err)
 	}
 }
@@ -198,7 +198,7 @@ func TestVerifyConsoleAssertionRejectsBadSignatureBytes(t *testing.T) {
 	badSig := make([]byte, ed25519.SignatureSize)
 	tampered := parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(badSig)
 
-	if _, err := VerifyConsoleAssertion(tampered, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadSignature) {
+	if _, err := VerifyConsoleAssertion(tampered, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadSignature) {
 		t.Fatalf("expected signature failure, got %v", err)
 	}
 }
@@ -220,7 +220,7 @@ func TestVerifyConsoleAssertionRejectsWrongIssuerOrAudience(t *testing.T) {
 			payload := defaultAssertionPayload(t, now)
 			tc.mutate(payload)
 			token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-			_, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now)
+			_, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("expected %v, got %v", tc.wantErr, err)
 			}
@@ -234,7 +234,7 @@ func TestVerifyConsoleAssertionRejectsUnknownRevokedOrNotYetValidKey(t *testing.
 	t.Run("unknown kid", func(t *testing.T) {
 		fixture := newConsoleAssertionKeyFixture(t, "2026-09", now.Add(-time.Hour), now.Add(time.Hour), nil)
 		token := signAssertion(t, fixture.private, defaultAssertionHeader("some-other-kid"), defaultAssertionPayload(t, now))
-		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionUnknownKey) {
+		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionUnknownKey) {
 			t.Fatalf("expected unknown key rejection, got %v", err)
 		}
 	})
@@ -243,7 +243,7 @@ func TestVerifyConsoleAssertionRejectsUnknownRevokedOrNotYetValidKey(t *testing.
 		revokedAt := now.Add(-time.Minute)
 		fixture := newConsoleAssertionKeyFixture(t, "2026-09", now.Add(-time.Hour), now.Add(time.Hour), &revokedAt)
 		token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), defaultAssertionPayload(t, now))
-		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionUnknownKey) {
+		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionUnknownKey) {
 			t.Fatalf("expected revoked key rejection, got %v", err)
 		}
 	})
@@ -252,7 +252,7 @@ func TestVerifyConsoleAssertionRejectsUnknownRevokedOrNotYetValidKey(t *testing.
 		revokedAt := now.Add(time.Minute)
 		fixture := newConsoleAssertionKeyFixture(t, "2026-09", now.Add(-time.Hour), now.Add(time.Hour), &revokedAt)
 		token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), defaultAssertionPayload(t, now))
-		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); err != nil {
+		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); err != nil {
 			t.Fatalf("expected pre-revocation signature to still verify, got %v", err)
 		}
 	})
@@ -260,7 +260,7 @@ func TestVerifyConsoleAssertionRejectsUnknownRevokedOrNotYetValidKey(t *testing.
 	t.Run("key not yet valid", func(t *testing.T) {
 		fixture := newConsoleAssertionKeyFixture(t, "2026-09", now.Add(time.Hour), now.Add(2*time.Hour), nil)
 		token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), defaultAssertionPayload(t, now))
-		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionUnknownKey) {
+		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionUnknownKey) {
 			t.Fatalf("expected not-yet-valid key rejection, got %v", err)
 		}
 	})
@@ -275,7 +275,7 @@ func TestVerifyConsoleAssertionRejectsAlgorithmDowngrade(t *testing.T) {
 			header := defaultAssertionHeader("2026-09")
 			header["alg"] = alg
 			token := signAssertion(t, fixture.private, header, defaultAssertionPayload(t, now))
-			if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadAlgorithm) {
+			if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadAlgorithm) {
 				t.Fatalf("expected algorithm rejection, got %v", err)
 			}
 		})
@@ -288,7 +288,7 @@ func TestVerifyConsoleAssertionRejectsWrongType(t *testing.T) {
 	header := defaultAssertionHeader("2026-09")
 	header["typ"] = "JWT"
 	token := signAssertion(t, fixture.private, header, defaultAssertionPayload(t, now))
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadType) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadType) {
 		t.Fatalf("expected typ rejection, got %v", err)
 	}
 }
@@ -309,7 +309,7 @@ func TestVerifyConsoleAssertionRejectsMissingOTP(t *testing.T) {
 			payload := defaultAssertionPayload(t, now)
 			payload["amr"] = tc.amr
 			token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-			_, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now)
+			_, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now)
 			if !errors.Is(err, errConsoleAssertionMissingAMR) {
 				t.Fatalf("expected AMR rejection, got %v", err)
 			}
@@ -323,7 +323,7 @@ func TestVerifyConsoleAssertionRejectsMissingAdminRole(t *testing.T) {
 	payload := defaultAssertionPayload(t, now)
 	payload["roles"] = []string{"finance.read"}
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionMissingRole) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionMissingRole) {
 		t.Fatalf("expected role rejection, got %v", err)
 	}
 }
@@ -334,7 +334,7 @@ func TestVerifyConsoleAssertionRejectsWrongACR(t *testing.T) {
 	payload := defaultAssertionPayload(t, now)
 	payload["acr"] = "urn:solov:loa:2" // a real OIDC ACR value, not the assertion domain constant
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadACR) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadACR) {
 		t.Fatalf("expected ACR rejection, got %v", err)
 	}
 }
@@ -345,7 +345,7 @@ func TestVerifyConsoleAssertionRejectsBadScope(t *testing.T) {
 	payload := defaultAssertionPayload(t, now)
 	payload["scope"] = "everything"
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadScope) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadScope) {
 		t.Fatalf("expected scope rejection, got %v", err)
 	}
 }
@@ -358,7 +358,7 @@ func TestVerifyConsoleAssertionRejectsMalformedNonce(t *testing.T) {
 		payload := defaultAssertionPayload(t, now)
 		payload["nonce"] = nonce
 		token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadNonce) {
+		if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadNonce) {
 			t.Fatalf("nonce=%q: expected nonce rejection, got %v", nonce, err)
 		}
 	}
@@ -370,7 +370,7 @@ func TestVerifyConsoleAssertionRejectsMismatchedNbf(t *testing.T) {
 	payload := defaultAssertionPayload(t, now)
 	payload["nbf"] = now.Unix() - 30
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, errConsoleAssertionBadClaimShape) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, errConsoleAssertionBadClaimShape) {
 		t.Fatalf("expected nbf-mismatch rejection, got %v", err)
 	}
 }
@@ -392,7 +392,7 @@ func TestVerifyConsoleAssertionRejectsMalformedCompactSerialization(t *testing.T
 		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := VerifyConsoleAssertion(raw, fixture.keyring, cfg, testConsoleAssertionRole, now); !errors.Is(err, ErrConsoleAssertionInvalid) {
+			if _, err := VerifyConsoleAssertion(raw, fixture.keyring, cfg, now); !errors.Is(err, ErrConsoleAssertionInvalid) {
 				t.Fatalf("expected malformed rejection, got %v", err)
 			}
 		})
@@ -412,7 +412,7 @@ func TestVerifyConsoleAssertionRejectsDuplicateJSONKeys(t *testing.T) {
 	signature := ed25519.Sign(fixture.private, []byte(headerB64+"."+payloadB64))
 	token := headerB64 + "." + payloadB64 + "." + base64.RawURLEncoding.EncodeToString(signature)
 
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, ErrConsoleAssertionInvalid) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, ErrConsoleAssertionInvalid) {
 		t.Fatalf("expected duplicate-key rejection, got %v", err)
 	}
 }
@@ -423,7 +423,7 @@ func TestVerifyConsoleAssertionRejectsUnknownFields(t *testing.T) {
 	payload := defaultAssertionPayload(t, now)
 	payload["extra_unexpected_field"] = "surprise"
 	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
-	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), testConsoleAssertionRole, now); !errors.Is(err, ErrConsoleAssertionInvalid) {
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, ErrConsoleAssertionInvalid) {
 		t.Fatalf("expected unknown-field rejection, got %v", err)
 	}
 }
@@ -439,7 +439,7 @@ func TestConsolePrincipalFromClaimsUsesConfiguredACRNotAssertionConstant(t *test
 	// THIS value, not the assertion's own "xingmang-console-totp-v1" claim,
 	// so AuthorizeSession's single exact-match ACR check keeps working
 	// unchanged for OIDC and assertion sessions issued side by side.
-	principal := ConsolePrincipalFromClaims(claims, testConsoleAssertionIssuer, "urn:solov:loa:2")
+	principal := ConsolePrincipalFromClaims(claims, testConsoleAssertionIssuer, "urn:solov:loa:2", testConsoleAssertionRole)
 	if principal.ACR != "urn:solov:loa:2" {
 		t.Fatalf("expected policy-configured ACR to be copied onto the principal, got %q", principal.ACR)
 	}
@@ -451,15 +451,67 @@ func TestConsolePrincipalFromClaimsUsesConfiguredACRNotAssertionConstant(t *test
 	}
 }
 
+// TestVerifyConsoleAssertionChecksTheConfiguredConsoleRole is the regression
+// test for XM-INV-CONSOLE-ASSERT-ADMIN-ROLE: the role that must appear in
+// the assertion is the one the CONFIG names, so a deployment whose console
+// signs its own staff vocabulary (admin, credential-admin, staff) can accept
+// assertions while its OIDC AdminPolicy keeps requiring a different realm
+// role. In production the mismatch rejected every exchange with
+// errConsoleAssertionMissingRole.
+func TestVerifyConsoleAssertionChecksTheConfiguredConsoleRole(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture := newConsoleAssertionKeyFixture(t, "2026-09", now.Add(-time.Hour), now.Add(time.Hour), nil)
+	payload := defaultAssertionPayload(t, now)
+	payload["roles"] = []string{"admin", "credential-admin", "staff"}
+	token := signAssertion(t, fixture.private, defaultAssertionHeader("2026-09"), payload)
+
+	consoleCfg := testConsoleAssertionCfg()
+	consoleCfg.AdminRole = "admin"
+	claims, err := VerifyConsoleAssertion(token, fixture.keyring, consoleCfg, now)
+	if err != nil {
+		t.Fatalf("console staff roles must be accepted when the config names one of them: %v", err)
+	}
+	if len(claims.Roles) != 3 || claims.Roles[0] != "admin" {
+		t.Fatalf("verified claims must keep the console's own roles for auditing, got %+v", claims.Roles)
+	}
+	// The invoice realm role is NOT what this endpoint checks any more.
+	if _, err := VerifyConsoleAssertion(token, fixture.keyring, testConsoleAssertionCfg(), now); !errors.Is(err, ErrConsoleAssertionInvalid) {
+		t.Fatalf("expected a missing-role rejection when the config names a role the assertion lacks, got %v", err)
+	}
+}
+
+// TestConsolePrincipalFromClaimsGrantsTheConfiguredAdminRole covers the other
+// half of the same fix: once the console role has been verified, the
+// principal must speak this system's vocabulary, or every admin route would
+// still refuse the session it just issued.
+func TestConsolePrincipalFromClaimsGrantsTheConfiguredAdminRole(t *testing.T) {
+	claims := ConsoleAssertionClaims{
+		Subject: "sub-1", Username: "operator",
+		Roles: []string{"admin", "credential-admin", "staff"},
+		ACR:   consoleAssertionRequiredACR, AMR: []string{"pwd", "otp"}, Scope: "global",
+		Nonce: "nonce", IssuedAt: time.Now().UTC(),
+	}
+	principal := ConsolePrincipalFromClaims(claims, testConsoleAssertionIssuer, "urn:solov:loa:2", "invoice-admin")
+	if len(principal.Roles) != 1 || principal.Roles[0] != "invoice-admin" {
+		t.Fatalf("expected exactly the configured invoice admin role, got %+v", principal.Roles)
+	}
+	policy := AdminPolicy{Role: "invoice-admin", RequiredACR: "urn:solov:loa:2", RequiredAMR: []string{"otp"}, StepUpMaxAge: 10 * time.Minute}
+	if err := policy.verifyClaims(principal.Roles, principal.ACR, principal.AMR); err != nil {
+		t.Fatalf("a console-assertion principal must satisfy the invoice admin policy: %v", err)
+	}
+}
+
 func TestConsoleAssertionConfigValidate(t *testing.T) {
 	if err := testConsoleAssertionCfg().Validate(); err != nil {
 		t.Fatalf("expected valid config, got %v", err)
 	}
 	for name, cfg := range map[string]ConsoleAssertionConfig{
-		"non-https issuer":  {Issuer: "http://console.solov.cc", Audience: "a"},
-		"issuer with query": {Issuer: "https://console.solov.cc?x=1", Audience: "a"},
-		"empty audience":    {Issuer: testConsoleAssertionIssuer, Audience: ""},
-		"padded audience":   {Issuer: testConsoleAssertionIssuer, Audience: " a "},
+		"non-https issuer":  {Issuer: "http://console.solov.cc", Audience: "a", AdminRole: "admin"},
+		"issuer with query": {Issuer: "https://console.solov.cc?x=1", Audience: "a", AdminRole: "admin"},
+		"empty audience":    {Issuer: testConsoleAssertionIssuer, Audience: "", AdminRole: "admin"},
+		"padded audience":   {Issuer: testConsoleAssertionIssuer, Audience: " a ", AdminRole: "admin"},
+		"empty admin role":  {Issuer: testConsoleAssertionIssuer, Audience: testConsoleAssertionAudience},
+		"padded admin role": {Issuer: testConsoleAssertionIssuer, Audience: testConsoleAssertionAudience, AdminRole: " admin "},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := cfg.Validate(); err == nil {

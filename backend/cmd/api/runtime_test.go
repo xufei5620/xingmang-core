@@ -414,7 +414,7 @@ func TestLoadConsoleAssertionRuntimeConfigDisabledNeverTouchesEnvOrFilesystem(t 
 	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "")
 	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
 
-	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(false)
+	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(false, "invoice-admin")
 	if err != nil {
 		t.Fatalf("disabled config load must never fail, got: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestLoadConsoleAssertionRuntimeConfigEnabledLoadsValidKeyring(t *testing.T)
 	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
 	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", keysPath)
 
-	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(true)
+	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -442,6 +442,49 @@ func TestLoadConsoleAssertionRuntimeConfigEnabledLoadsValidKeyring(t *testing.T)
 	if cfg.Issuer != "https://console.example.test" || cfg.Audience != "xingmang-console-assertion-v1" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
+	// CONSOLE_ASSERTION_ADMIN_ROLE unset must fall back to this deployment's
+	// OIDC_ADMIN_ROLE, so turning the feature on without the newer variable
+	// keeps the behavior every release before XM-INV-CONSOLE-ASSERT-ADMIN-ROLE
+	// had.
+	if cfg.AdminRole != "invoice-admin" {
+		t.Fatalf("expected the OIDC admin role as the default console admin role, got %q", cfg.AdminRole)
+	}
+}
+
+// TestLoadConsoleAssertionRuntimeConfigAdminRoleOverride is the production
+// shape after XM-INV-CONSOLE-ASSERT-ADMIN-ROLE: the console signs staff roles
+// (admin, credential-admin, staff) while the transitional Keycloak login
+// still carries invoice-admin, so the two roles must be configurable apart.
+func TestLoadConsoleAssertionRuntimeConfigAdminRoleOverride(t *testing.T) {
+	keysPath := writeTestConsoleAssertionKeyringFile(t, t.TempDir())
+	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
+	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
+	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", keysPath)
+	t.Setenv("CONSOLE_ASSERTION_ADMIN_ROLE", "admin")
+
+	_, cfg, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AdminRole != "admin" {
+		t.Fatalf("expected the configured console admin role, got %q", cfg.AdminRole)
+	}
+}
+
+// TestLoadConsoleAssertionRuntimeConfigRejectsInvalidAdminRole keeps the
+// startup fail-closed contract: a blank OIDC_ADMIN_ROLE with no override
+// would otherwise produce a config whose role matches nothing.
+func TestLoadConsoleAssertionRuntimeConfigRejectsInvalidAdminRole(t *testing.T) {
+	keysPath := writeTestConsoleAssertionKeyringFile(t, t.TempDir())
+	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
+	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
+	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", keysPath)
+	t.Setenv("CONSOLE_ASSERTION_ADMIN_ROLE", " admin ")
+
+	if _, _, err := loadConsoleAssertionRuntimeConfig(true, ""); err == nil ||
+		!strings.Contains(err.Error(), "administrator role") {
+		t.Fatalf("expected an administrator-role validation error, got: %v", err)
+	}
 }
 
 func TestLoadConsoleAssertionRuntimeConfigEnabledRequiresKeysFilePath(t *testing.T) {
@@ -449,7 +492,7 @@ func TestLoadConsoleAssertionRuntimeConfigEnabledRequiresKeysFilePath(t *testing
 	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
 	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", "")
 
-	if _, _, err := loadConsoleAssertionRuntimeConfig(true); err == nil ||
+	if _, _, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin"); err == nil ||
 		!strings.Contains(err.Error(), "CONSOLE_ASSERTION_KEYS_FILE is required") {
 		t.Fatalf("expected a required-keys-file error, got: %v", err)
 	}
@@ -472,7 +515,7 @@ func TestLoadConsoleAssertionRuntimeConfigEnabledFailsClosedOnEmptyKeysFile(t *t
 	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
 	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", emptyPath)
 
-	if _, _, err := loadConsoleAssertionRuntimeConfig(true); err == nil {
+	if _, _, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin"); err == nil {
 		t.Fatal("expected an empty keys file to fail closed when the flag is enabled")
 	}
 }

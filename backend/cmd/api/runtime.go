@@ -334,7 +334,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	// as a fixed value, not a new env var, so there is exactly one place
 	// this number is decided rather than two that could drift apart.
 	consoleAssertionRateLimiter := auth.NewLoginRateLimiter(20, time.Minute)
-	consoleAssertionKeyring, consoleAssertionCfg, err := loadConsoleAssertionRuntimeConfig(consoleAssertionEnabled)
+	consoleAssertionKeyring, consoleAssertionCfg, err := loadConsoleAssertionRuntimeConfig(consoleAssertionEnabled, oidcConfig.AdminRole)
 	if err != nil {
 		return appRuntime{}, err
 	}
@@ -517,13 +517,21 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 // comment): silently starting with zero trusted keys would make the
 // exchange endpoint reject every assertion forever instead of the operator
 // noticing at startup that the real reviewed manifest was never installed.
-func loadConsoleAssertionRuntimeConfig(enabled bool) (*auth.ConsoleAssertionKeyring, auth.ConsoleAssertionConfig, error) {
+// oidcAdminRole is this deployment's OIDC_ADMIN_ROLE and serves as the
+// default for CONSOLE_ASSERTION_ADMIN_ROLE, so a deployment that has not set
+// the newer variable keeps the exact behavior it had before that variable
+// existed. Production sets them to different values on purpose: the console
+// signs its own staff role vocabulary while the transitional Keycloak login
+// carries the realm role -- see ConsoleAssertionConfig.AdminRole's doc
+// comment (XM-INV-CONSOLE-ASSERT-ADMIN-ROLE).
+func loadConsoleAssertionRuntimeConfig(enabled bool, oidcAdminRole string) (*auth.ConsoleAssertionKeyring, auth.ConsoleAssertionConfig, error) {
 	if !enabled {
 		return nil, auth.ConsoleAssertionConfig{}, nil
 	}
 	cfg := auth.ConsoleAssertionConfig{
-		Issuer:   os.Getenv("CONSOLE_ASSERTION_ISSUER"),
-		Audience: env("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1"),
+		Issuer:    os.Getenv("CONSOLE_ASSERTION_ISSUER"),
+		Audience:  env("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1"),
+		AdminRole: env("CONSOLE_ASSERTION_ADMIN_ROLE", oidcAdminRole),
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, auth.ConsoleAssertionConfig{}, fmt.Errorf("console assertion config: %w", err)

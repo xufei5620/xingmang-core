@@ -245,6 +245,10 @@ services:
       CONSOLE_ASSERTION_ENABLED: ${CONSOLE_ASSERTION_ENABLED:-false}
       CONSOLE_ASSERTION_ISSUER: ${CONSOLE_ASSERTION_ISSUER:-}
       CONSOLE_ASSERTION_AUDIENCE: ${CONSOLE_ASSERTION_AUDIENCE:-xingmang-console-assertion-v1}
+      # Empty means "same as OIDC_ADMIN_ROLE" -- the pre-XM-INV-CONSOLE-ASSERT-
+      # ADMIN-ROLE behavior. Production sets it to the console's own staff
+      # role, which is a different vocabulary from the Keycloak realm role.
+      CONSOLE_ASSERTION_ADMIN_ROLE: ${CONSOLE_ASSERTION_ADMIN_ROLE:-}
       CONSOLE_ASSERTION_KEYS_FILE: /config/console-assertion-keyring.json
       # User-facing login (CR-0004/XM-INV-LOGIN): the invoice-system backend
       # forwards submitted credentials to the platform's own login endpoint

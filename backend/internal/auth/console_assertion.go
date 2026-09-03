@@ -319,10 +319,23 @@ func decodeConsoleAssertionPublicKey(encoded string) (ed25519.PublicKey, error) 
 }
 
 // ConsoleAssertionConfig is the deployment-configured half of the contract:
-// CONSOLE_ASSERTION_ISSUER / CONSOLE_ASSERTION_AUDIENCE.
+// CONSOLE_ASSERTION_ISSUER / CONSOLE_ASSERTION_AUDIENCE /
+// CONSOLE_ASSERTION_ADMIN_ROLE.
+//
+// AdminRole is the role name an assertion's own `roles` claim must contain
+// before it can be exchanged for an administrator session. It is configured
+// separately from OIDCConfig.AdminRole because the two issuers keep separate
+// role vocabularies: the console signs a staff account's roles verbatim
+// (admin, credential-admin, staff ...), while the transitional Keycloak login
+// carries this deployment's realm role (invoice-admin). Both paths are live
+// at once during CR-0006 phase 2, so one configured name cannot serve both --
+// XM-INV-CONSOLE-ASSERT-ADMIN-ROLE. Where it is loaded (cmd/api/runtime.go)
+// it defaults to OIDCConfig.AdminRole, so a deployment that never sets the
+// new variable behaves exactly as it did before.
 type ConsoleAssertionConfig struct {
-	Issuer   string
-	Audience string
+	Issuer    string
+	Audience  string
+	AdminRole string
 }
 
 func (c ConsoleAssertionConfig) Validate() error {
@@ -331,6 +344,9 @@ func (c ConsoleAssertionConfig) Validate() error {
 	}
 	if strings.TrimSpace(c.Audience) == "" || strings.TrimSpace(c.Audience) != c.Audience || len(c.Audience) > 256 || hasControl(c.Audience) {
 		return errors.New("console assertion audience is required")
+	}
+	if strings.TrimSpace(c.AdminRole) == "" || strings.TrimSpace(c.AdminRole) != c.AdminRole || len(c.AdminRole) > 512 || hasControl(c.AdminRole) {
+		return errors.New("console assertion administrator role is required")
 	}
 	return nil
 }
@@ -382,12 +398,16 @@ type consoleAssertionPayload struct {
 // VerifyConsoleAssertion checks the JWS compact serialization's structure,
 // EdDSA signature against the keyring, and every claim constraint from the
 // design spec section 3.2 except nonce replay (see ConsoleAssertionClaims'
-// doc comment). requiredRole is the invoice AdminPolicy.Role currently
-// configured -- rejecting a non-admin assertion here, not merely at a later
-// Require("admin", ...) check, matches this endpoint's sole purpose (issuing
-// an administrator session) and the design spec's own error table folding
-// "roles 不含所需角色" into the same unified ASSERTION_INVALID outcome.
-func VerifyConsoleAssertion(raw string, keyring *ConsoleAssertionKeyring, cfg ConsoleAssertionConfig, requiredRole string, now time.Time) (ConsoleAssertionClaims, error) {
+// doc comment). The role the `roles` claim must contain is cfg.AdminRole,
+// the console administrator role this deployment configures -- read from the
+// config rather than accepted as a separate argument, so a caller cannot pass
+// a role name belonging to a different issuer's vocabulary, which is exactly
+// how XM-INV-CONSOLE-ASSERT-ADMIN-ROLE reached production. Rejecting a
+// non-admin assertion here, not merely at a later Require("admin", ...)
+// check, matches this endpoint's sole purpose (issuing an administrator
+// session) and the design spec's own error table folding "roles 不含所需角色"
+// into the same unified ASSERTION_INVALID outcome.
+func VerifyConsoleAssertion(raw string, keyring *ConsoleAssertionKeyring, cfg ConsoleAssertionConfig, now time.Time) (ConsoleAssertionClaims, error) {
 	if len(raw) == 0 || len(raw) > consoleAssertionMaxSize || strings.ContainsAny(raw, " \t\r\n\x00") {
 		return ConsoleAssertionClaims{}, errConsoleAssertionMalformed
 	}
@@ -472,7 +492,7 @@ func VerifyConsoleAssertion(raw string, keyring *ConsoleAssertionKeyring, cfg Co
 	if err = validateConsoleAssertionClaimSet(payload.Roles, consoleAssertionMaxRoles); err != nil {
 		return ConsoleAssertionClaims{}, errConsoleAssertionBadClaimShape
 	}
-	if len(payload.Roles) == 0 || !slices.Contains(payload.Roles, requiredRole) {
+	if len(payload.Roles) == 0 || !slices.Contains(payload.Roles, cfg.AdminRole) {
 		return ConsoleAssertionClaims{}, errConsoleAssertionMissingRole
 	}
 	if err = validateConsoleAssertionClaimSet(payload.AMR, consoleAssertionMaxAMR); err != nil {
@@ -536,14 +556,28 @@ func strictUnmarshal(raw []byte, target any) error {
 // shape the OIDC callback produces, so it enters session issuance through
 // the identical Platform=="" path (identity.go's ResolveOrCreate,
 // cmd/api/runtime.go's provisionPlatformOrOIDCUser) -- CR-0006 change list
-// item (e) requires zero changes to that path. requiredACR is the caller's
-// CURRENTLY CONFIGURED AdminPolicy.RequiredACR (not the fixed
-// consoleAssertionRequiredACR constant already checked inside
-// VerifyConsoleAssertion) -- see that constant's doc comment for why.
-func ConsolePrincipalFromClaims(claims ConsoleAssertionClaims, issuer, requiredACR string) Principal {
+// item (e) requires zero changes to that path.
+//
+// Two claims are deliberately TRANSLATED rather than copied, because the
+// console and this system keep separate vocabularies for them and the
+// principal must speak this system's:
+//
+//   - requiredACR is the caller's CURRENTLY CONFIGURED
+//     AdminPolicy.RequiredACR (not the fixed consoleAssertionRequiredACR
+//     constant already checked inside VerifyConsoleAssertion) -- see that
+//     constant's doc comment for why.
+//   - adminRole is the caller's CURRENTLY CONFIGURED AdminPolicy.Role, and
+//     becomes the principal's only role. VerifyConsoleAssertion has already
+//     required the assertion to carry the configured console administrator
+//     role, so that fact is established; carrying the console's own role
+//     names through instead would leave a foreign vocabulary in invoice
+//     sessions that still fails every AdminPolicy check, which is precisely
+//     what XM-INV-CONSOLE-ASSERT-ADMIN-ROLE observed in production. The
+//     console's raw roles stay in the verified claims for auditing.
+func ConsolePrincipalFromClaims(claims ConsoleAssertionClaims, issuer, requiredACR, adminRole string) Principal {
 	return Principal{
 		Issuer: issuer, Subject: claims.Subject, DisplayName: claims.Username,
-		Roles: append([]string{}, claims.Roles...), ACR: requiredACR,
+		Roles: []string{adminRole}, ACR: requiredACR,
 		AMR: append([]string{}, claims.AMR...), AuthTime: claims.IssuedAt,
 	}
 }

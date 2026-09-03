@@ -409,7 +409,7 @@ func (a *ProductionAuth) consoleAssertionExchange(server *Server, w http.Respons
 		return
 	}
 
-	claims, err := auth.VerifyConsoleAssertion(body.Assertion, a.ConsoleAssertionKeyring, a.ConsoleAssertionConfig, a.Admin.Role, time.Now().UTC())
+	claims, err := auth.VerifyConsoleAssertion(body.Assertion, a.ConsoleAssertionKeyring, a.ConsoleAssertionConfig, time.Now().UTC())
 	if err != nil {
 		a.ConsoleAssertionRateLimiter.RecordFailure(rateLimitKey)
 		a.auditConsoleAssertionRejection(r.Context(), consoleAssertionAttemptHash(body.Assertion), requestIDValue, "assertion_invalid: "+err.Error())
@@ -429,7 +429,7 @@ func (a *ProductionAuth) consoleAssertionExchange(server *Server, w http.Respons
 		return
 	}
 
-	principal := auth.ConsolePrincipalFromClaims(claims, a.ConsoleAssertionConfig.Issuer, a.Admin.RequiredACR)
+	principal := auth.ConsolePrincipalFromClaims(claims, a.ConsoleAssertionConfig.Issuer, a.Admin.RequiredACR, a.Admin.Role)
 	user, err := a.ProvisionUser(r.Context(), principal, requestIDValue)
 	if err != nil || user.ID == "" {
 		a.auditConsoleAssertionRejection(r.Context(), claims.Subject, requestIDValue, "user_provision_failed")
