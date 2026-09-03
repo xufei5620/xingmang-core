@@ -790,3 +790,111 @@ func TestUsageOverageClearsOnceLedgerCatchesUp(t *testing.T) {
 		t.Fatalf("open freeze count=%d, want 0 throughout", count)
 	}
 }
+
+// TestPendingReconciliationBatchStillProcessesHealthyAccount is this file's
+// own per-account-isolation regression guard (team lead's RC75-derived hard
+// rule, following XM-INV-BLIP-SOFTFAIL's own
+// TestBalanceBlipSoftfailBatchStillProcessesHealthyAccount precedent): a
+// single ProcessEligibilityProjectionJobs batch containing one account
+// entering not_invoiceable_pending_reconciliation (a negative checkpoint,
+// via the real entrypoints) alongside a wholly separate, ordinary healthy
+// account in the same source must process both to completion. None of this
+// slice's own additions (enterPendingReconciliationTx,
+// advancePendingReconciliationMatchTx, recordUsageOverageTx) ever return a
+// synthetic business-logic error -- every branch either records a defined
+// evaluation outcome or is a documented no-op (see each function's own doc
+// comment) -- so this test is expected to find nothing to isolate against;
+// it exists to prove that claim empirically at the batch level, the same
+// way the sibling slice's own test does for its softfail/rebaseline outcome.
+func TestPendingReconciliationBatchStillProcessesHealthyAccount(t *testing.T) {
+	store, ctx, sourceID, accountID, _, manifestHash, configHash, anchorAt, chain := newAutoReconcileFixture(t)
+	worker := AuditActor{Type: "system", ID: "test-worker"}
+
+	creditAt := anchorAt.Add(5 * time.Minute)
+	observeSimpleCreditEvent(t, store, ctx, chain, sourceID, manifestHash, configHash, "auto-reconcile-batch-credit", "BONUS",
+		creditAt, "100", 2)
+	negativeAt := anchorAt.Add(10 * time.Minute)
+	observeSimpleCheckpoint(t, store, ctx, chain, sourceID, manifestHash, configHash, "auto-reconcile-batch-negative",
+		negativeAt, "60", 2) // expected 100, reported 60: enters pending reconciliation
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
+		VALUES($1,$2,'queued',now())`, accountID, negativeAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second, ordinary healthy account in the same source, sharing the
+	// fixture's manifest/config -- just its own anchor checkpoint, nothing
+	// else pending (same shape as balance_blip_softfail_integration_test.go's
+	// own sibling-account fixture).
+	healthyUserID := autoReconcileUUID('2', 900)
+	healthyAccountID := autoReconcileUUID('3', 900)
+	if _, err := store.pool.Exec(ctx, `INSERT INTO invoice_users(id,oidc_issuer,oidc_subject)
+		VALUES($1,'test','auto-reconcile-healthy-user')`, healthyUserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `INSERT INTO external_accounts(
+		id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,binding_method,binding_status)
+		VALUES($1,$2,$3,'900','auto-reconcile-healthy-hmac','test','verified')`,
+		healthyAccountID, healthyUserID, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	// Dated after account A's own negative checkpoint (not at anchorAt,
+	// unlike the sibling XM-INV-BLIP-SOFTFAIL test's healthy-account fixture):
+	// that test's own cp2/cp3 are inserted via the direct-SQL bypass helper
+	// (no scan-cycle commit at all), while this test's account A uses the
+	// real ObserveCreditEvent/ObserveBalanceCheckpoint entrypoints, which
+	// already advanced the source's shared "balances" stream ceiling past
+	// negativeAt -- committing an earlier-dated cycle here would regress it.
+	healthyAnchorAt := negativeAt.Add(5 * time.Minute)
+	healthyAnchorEvent := SourceBatchEvent{EventID: autoReconcileUUID('8', 900),
+		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: testHash("auto-reconcile-healthy-anchor-event"),
+		PayloadCiphertext: bytes.Repeat([]byte{9}, 32), ObservedAt: healthyAnchorAt}
+	healthyAnchorCycle := chain.commit(t, store, ctx, sourceID, "balances", autoReconcileUUID('9', 900), healthyAnchorAt, []SourceBatchEvent{healthyAnchorEvent})
+	if err := store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
+		SourceInstanceID: sourceID, ExternalUserID: "900", ExternalEventID: healthyAnchorEvent.EventID,
+		CheckpointID: "auto-reconcile-healthy-anchor", CheckpointKind: "reconciliation", BaselineMember: true,
+		BalanceServiceUnits: "500", UnitCode: "SUB2_BALANCE_1E8", SourceSnapshotID: testHash(healthyAnchorCycle.cycleID),
+		SnapshotRowCount: "1", AsOf: healthyAnchorAt, ObservedAt: healthyAnchorAt, StreamWatermarkAt: healthyAnchorAt,
+		SourceCursor: "balance:900:anchor", SourceRevision: healthyAnchorEvent.PayloadHash,
+		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 1,
+		BatchID: healthyAnchorCycle.batchID, ScanCycleID: healthyAnchorCycle.cycleID,
+	}, AuditActor{Type: "source_connector", ID: sourceID}); err != nil {
+		t.Fatal(err)
+	}
+	markV3CycleProcessed(t, store, ctx, sourceID, "balances", healthyAnchorCycle)
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
+		VALUES($1,$2,'queued',now())`, healthyAccountID, healthyAnchorAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute), worker)
+	if err != nil {
+		t.Fatalf("batch returned an error: %v", err)
+	}
+	if processed != 2 {
+		t.Fatalf("processed=%d, want 2 (both the pending-reconciliation account and the healthy account)", processed)
+	}
+
+	var pendingStatus string
+	if err := store.pool.QueryRow(ctx, `SELECT eligibility_status FROM source_account_eligibility_state
+		WHERE external_account_id=$1`, accountID).Scan(&pendingStatus); err != nil || pendingStatus != "not_invoiceable_pending_reconciliation" {
+		t.Fatalf("pending account status=%q err=%v, want not_invoiceable_pending_reconciliation", pendingStatus, err)
+	}
+	var healthyStatus string
+	if err := store.pool.QueryRow(ctx, `SELECT eligibility_status FROM source_account_eligibility_state
+		WHERE external_account_id=$1`, healthyAccountID).Scan(&healthyStatus); err != nil || healthyStatus != "active" {
+		t.Fatalf("healthy account status=%q err=%v, want active", healthyStatus, err)
+	}
+	if count := openFreezeCount(t, store, ctx, healthyAccountID); count != 0 {
+		t.Fatalf("healthy account open freeze count=%d, want 0", count)
+	}
+	var remainingJobs int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_projection_jobs
+		WHERE external_account_id IN ($1,$2)`, accountID, healthyAccountID).Scan(&remainingJobs); err != nil {
+		t.Fatal(err)
+	}
+	if remainingJobs != 0 {
+		t.Fatalf("remaining eligibility_projection_jobs rows=%d, want 0 (both succeeded)", remainingJobs)
+	}
+}
