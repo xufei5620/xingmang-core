@@ -135,6 +135,11 @@ func userFundingLotDTOs(lots []domain.FundingLot) []userFundingLot {
 			reasonCode = "NO_POST_START_CONSUMPTION"
 		} else if lot.EligibilityStatus == "syncing" {
 			reasonCode = "LEDGER_SYNCING"
+		} else if lot.EligibilityStatus == "not_invoiceable_pending_reconciliation" {
+			// XM-INV-ELIG-AUTO-RECONCILE: distinct from LEDGER_FROZEN -- this
+			// account is not in the manual admin freeze queue and clears
+			// itself automatically once the ledger reconciles.
+			reasonCode = "LEDGER_PENDING_RECONCILIATION"
 		} else if lot.EligibilityStatus != "active" {
 			reasonCode = "LEDGER_FROZEN"
 		}

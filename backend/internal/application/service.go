@@ -1156,6 +1156,13 @@ func (s *Service) ListUserEligibilitySummaries(ctx context.Context, principalID 
 			reasons = append(reasons, "ACCOUNT_FROZEN")
 			blocked = true
 		}
+		if item.EligibilityStatus == "not_invoiceable_pending_reconciliation" {
+			// XM-INV-ELIG-AUTO-RECONCILE: distinct from ACCOUNT_FROZEN -- no
+			// admin queue entry exists for this account, and it clears
+			// itself automatically once the ledger reconciles.
+			reasons = append(reasons, "PENDING_RECONCILIATION")
+			blocked = true
+		}
 		if item.ProjectionPending || item.EligibilityStatus == "syncing" {
 			reasons = append(reasons, "PROJECTION_PENDING")
 			blocked = true

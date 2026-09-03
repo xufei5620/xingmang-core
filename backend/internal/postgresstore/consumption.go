@@ -138,7 +138,13 @@ type eligibilityProjection struct {
 	Allocations     []projectedAllocation
 	ExpectedBalance *big.Int
 	AmbiguousAt     time.Time
-	ShortfallUsage  string
+	// ShortfallUsage/ShortfallUnits (XM-INV-ELIG-AUTO-RECONCILE, design
+	// section 3(B)) identify the first usage fact this projection could not
+	// fully allocate against any non-cash or cash pool, and how many units
+	// of it were left unallocated -- reprojectEligibilityTx records these on
+	// the account row (recordUsageOverageTx) instead of freezing.
+	ShortfallUsage string
+	ShortfallUnits *big.Int
 }
 
 // EligibilityProjectionHealth's OldestPending/ProofPending split
@@ -1069,8 +1075,13 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			return err
 		}
 		if in.BalanceNegative {
-			if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-				"balance_checkpoint", in.CheckpointID, in.SourceRevision, actor); err != nil {
+			// XM-INV-ELIG-AUTO-RECONCILE: a negative opening balance at
+			// bootstrap no longer opens a manual eligibility_freezes row --
+			// see enterPendingReconciliationTx's doc comment.
+			detail := fmt.Sprintf("balance_checkpoint %s at %s reported a negative balance at account bootstrap",
+				in.CheckpointID, in.AsOf.UTC().Format(time.RFC3339Nano))
+			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
+				"balance_checkpoint", in.CheckpointID, detail, actor); err != nil {
 				return err
 			}
 		}
@@ -1196,8 +1207,13 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			return err
 		}
 		if in.BalanceNegative {
-			if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-				"balance_checkpoint", in.CheckpointID, in.SourceRevision, actor); err != nil {
+			// XM-INV-ELIG-AUTO-RECONCILE: see the SIGNED_CUTOVER bootstrap
+			// branch above -- identical treatment for a POLICY_ANCHOR
+			// account's own opening balance.
+			detail := fmt.Sprintf("balance_checkpoint %s at %s reported a negative balance at account bootstrap",
+				in.CheckpointID, in.AsOf.UTC().Format(time.RFC3339Nano))
+			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
+				"balance_checkpoint", in.CheckpointID, detail, actor); err != nil {
 				return err
 			}
 		}
@@ -1731,6 +1747,7 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 			if !fact.InvoiceEligible {
 				if remaining.Sign() > 0 && projection.ShortfallUsage == "" {
 					projection.ShortfallUsage = fact.UsageID
+					projection.ShortfallUnits = new(big.Int).Set(remaining)
 				}
 				continue
 			}
@@ -1760,6 +1777,7 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 			}
 			if remaining.Sign() > 0 && projection.ShortfallUsage == "" {
 				projection.ShortfallUsage = fact.UsageID
+				projection.ShortfallUnits = new(big.Int).Set(remaining)
 			}
 		}
 	}
@@ -1850,11 +1868,8 @@ func reprojectEligibilityTx(ctx context.Context, tx pgx.Tx, accountID string, th
 		return freezeEligibilityTx(ctx, tx, accountID, "", "AMBIGUOUS_EVENT_ORDER", "event_time",
 			projection.AmbiguousAt.UTC().Format(time.RFC3339Nano), "", actor)
 	}
-	if projection.ShortfallUsage != "" {
-		if err = freezeEligibilityTx(ctx, tx, accountID, "", "USAGE_EXCEEDS_LEDGER", "usage_event",
-			projection.ShortfallUsage, "", actor); err != nil {
-			return err
-		}
+	if err = recordUsageOverageTx(ctx, tx, accountID, projection.ShortfallUsage, projection.ShortfallUnits, actor); err != nil {
+		return err
 	}
 	// Derived allocations may be rebuilt because source facts themselves are
 	// immutable. The account advisory lock and SERIALIZABLE transaction make a
@@ -1958,7 +1973,11 @@ func freezeEligibilityTx(ctx context.Context, tx pgx.Tx, accountID, lotID, reaso
 	}
 	if _, err = tx.Exec(ctx, `
 		UPDATE source_account_eligibility_state
-		SET eligibility_status='frozen',projection_version=projection_version+1,updated_at=now()
+		SET eligibility_status='frozen',projection_version=projection_version+1,
+			pending_reconciliation_reason=NULL,pending_reconciliation_trigger_type=NULL,
+			pending_reconciliation_trigger_id=NULL,pending_reconciliation_detail=NULL,
+			pending_reconciliation_since=NULL,pending_reconciliation_consecutive_matches=0,
+			updated_at=now()
 		WHERE external_account_id=$1`, accountID); err != nil {
 		return err
 	}
@@ -1972,6 +1991,176 @@ func freezeEligibilityTx(ctx context.Context, tx pgx.Tx, accountID, lotID, reaso
 		return err
 	}
 	return nil
+}
+
+// pendingReconciliationExitMatches (design XM-INV-ELIG-SIMPLIFY section
+// 3(A), acceptance-line ruling 2026-09-03) is N: the number of consecutive
+// real balance-evidence items (checkpoint or carry-forward proof) that must
+// evaluate matched before an account auto-exits
+// not_invoiceable_pending_reconciliation back to active. Two, not one, so a
+// single lucky reconciliation cannot mask a still-real gap.
+const pendingReconciliationExitMatches = 2
+
+// enterPendingReconciliationTx (XM-INV-ELIG-AUTO-RECONCILE, design section
+// 3(A)) replaces freezeEligibilityTx for a negative/unreconciled balance
+// difference: this downgrades the account to a self-clearing state instead
+// of opening a manual eligibility_freezes row -- ResolveEligibilityFreeze/MFA
+// is never involved, and no admin queue entry is ever created for this
+// reason. Reservations are still invalidated (the account must stop being
+// invoiceable immediately, exactly like a real freeze), but the account
+// reconciles automatically once pendingReconciliationExitMatches consecutive
+// real evaluations come back matched (see advancePendingReconciliationMatchTx
+// below, invoked from evaluatePendingBalanceEvidenceTx's writeEvaluation
+// closure).
+//
+// Frozen priority: a real, distinct eligibility_freezes reason always wins.
+// If the account is already 'frozen', this call is a no-op for the account
+// row and its five pending_reconciliation_* columns (reservations are still
+// invalidated defensively, matching freezeEligibilityTx's own unconditional
+// behavior) -- it never downgrades a genuinely frozen account, and never
+// overwrites which real freeze reason governs it.
+//
+// Re-entering while already pending (a later negative item, before the
+// account has auto-exited) refreshes reason/trigger/detail to the latest
+// evidence and resets the consecutive-match counter to zero -- a fresh
+// negative difference means the previous streak of matches, if any, did not
+// actually resolve the gap -- but preserves the original
+// pending_reconciliation_since so operators can see how long the account has
+// been unreconciled, not just since its most recent negative item.
+func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, reason, triggerType, triggerID, detail string, actor AuditActor) error {
+	if strings.TrimSpace(triggerID) == "" {
+		triggerID = accountID
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE source_account_eligibility_state
+		SET eligibility_status='not_invoiceable_pending_reconciliation',
+			pending_reconciliation_reason=$2,
+			pending_reconciliation_trigger_type=$3,
+			pending_reconciliation_trigger_id=$4,
+			pending_reconciliation_detail=$5,
+			pending_reconciliation_since=CASE
+				WHEN eligibility_status='not_invoiceable_pending_reconciliation'
+				THEN pending_reconciliation_since ELSE now() END,
+			pending_reconciliation_consecutive_matches=0,
+			projection_version=projection_version+1,updated_at=now()
+		WHERE external_account_id=$1 AND eligibility_status<>'frozen'`,
+		accountID, reason, triggerType, triggerID, detail)
+	if err != nil {
+		return err
+	}
+	if err = invalidateAccountReservationsTx(ctx, tx, accountID, actor); err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		// Frozen priority: a real, distinct freeze already governs this
+		// account -- do not downgrade or overwrite its trigger detail.
+		return nil
+	}
+	return writeAudit(ctx, tx, actor, "eligibility.pending_reconciliation.entered", "external_account", accountID,
+		nil, map[string]any{"reason": reason, "trigger_type": triggerType, "trigger_id": triggerID, "detail": detail})
+}
+
+// advancePendingReconciliationMatchTx (XM-INV-ELIG-AUTO-RECONCILE) is called
+// by evaluatePendingBalanceEvidenceTx's writeEvaluation closure after it
+// records a real "matched" evaluation. Per design section 3(A): each
+// consecutive matched evaluation while the account sits in
+// not_invoiceable_pending_reconciliation counts toward automatic exit --
+// pendingReconciliationExitMatches consecutive matches, and no separate open
+// eligibility_freezes row (reusing ResolveEligibilityFreeze's own open-freeze
+// guard, count(*)...status='open', for identical semantics -- see
+// eligibility_operations.go), clear the five pending_reconciliation_*
+// columns and return the account to active. A non-matched real evaluation
+// (negative_frozen) already resets the counter to zero as part of
+// enterPendingReconciliationTx's own unconditional reset above; a
+// non-matched, non-negative evaluation (source_gap_frozen,
+// positive_classified_non_cash, positive_blip_ignored) leaves the counter
+// untouched, per the design's own enumeration -- this function is only ever
+// invoked for status=="matched", so those cases never reach it.
+func advancePendingReconciliationMatchTx(ctx context.Context, tx pgx.Tx, accountID string, actor AuditActor) error {
+	var matches int
+	err := tx.QueryRow(ctx, `
+		UPDATE source_account_eligibility_state
+		SET pending_reconciliation_consecutive_matches=pending_reconciliation_consecutive_matches+1,updated_at=now()
+		WHERE external_account_id=$1 AND eligibility_status='not_invoiceable_pending_reconciliation'
+		RETURNING pending_reconciliation_consecutive_matches`, accountID).Scan(&matches)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if matches < pendingReconciliationExitMatches {
+		return nil
+	}
+	var hasOpenFreeze bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM eligibility_freezes WHERE external_account_id=$1 AND status='open')`,
+		accountID).Scan(&hasOpenFreeze); err != nil {
+		return err
+	}
+	if hasOpenFreeze {
+		return nil
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE source_account_eligibility_state
+		SET eligibility_status='active',
+			pending_reconciliation_reason=NULL,pending_reconciliation_trigger_type=NULL,
+			pending_reconciliation_trigger_id=NULL,pending_reconciliation_detail=NULL,
+			pending_reconciliation_since=NULL,pending_reconciliation_consecutive_matches=0,
+			projection_version=projection_version+1,updated_at=now()
+		WHERE external_account_id=$1 AND eligibility_status='not_invoiceable_pending_reconciliation'`, accountID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return nil
+	}
+	return writeAudit(ctx, tx, actor, "eligibility.pending_reconciliation.exited", "external_account", accountID,
+		nil, map[string]any{"consecutive_matches": matches})
+}
+
+// recordUsageOverageTx (XM-INV-ELIG-AUTO-RECONCILE, design section 3(B))
+// replaces reprojectEligibilityTx's old unconditional USAGE_EXCEEDS_LEDGER
+// freeze: usage with no non-cash or cash pool left to draw from no longer
+// blocks the account -- buildEligibilityProjectionTx never lets a cash lot's
+// own consumed_cash_minor exceed its verified_cash_minor, so the unallocated
+// overage was never invoiceable in the first place; recording it here is
+// purely informational (surfaced later by a read-only ledger query), not a
+// new safety mechanism. Every reprojection call updates both columns:
+// cleared when the projection no longer has a shortfall (usageID==""),
+// otherwise set to the first shortfall usage event's own id and its
+// unallocated remainder. Each branch is a no-op (no write, no audit event)
+// when the stored value already matches, so a routine reprojection with an
+// unchanged (or still absent) overage does not spam the audit log.
+func recordUsageOverageTx(ctx context.Context, tx pgx.Tx, accountID, usageID string, units *big.Int, actor AuditActor) error {
+	if usageID == "" {
+		command, err := tx.Exec(ctx, `
+			UPDATE source_account_eligibility_state
+			SET non_invoiceable_overage_units=NULL,non_invoiceable_overage_usage_event_id=NULL,updated_at=now()
+			WHERE external_account_id=$1 AND non_invoiceable_overage_usage_event_id IS NOT NULL`, accountID)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() == 0 {
+			return nil
+		}
+		return writeAudit(ctx, tx, actor, "eligibility.usage.overage_cleared", "external_account", accountID, nil, nil)
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE source_account_eligibility_state
+		SET non_invoiceable_overage_units=$2::numeric,non_invoiceable_overage_usage_event_id=$3::uuid,updated_at=now()
+		WHERE external_account_id=$1
+			AND (non_invoiceable_overage_units IS DISTINCT FROM $2::numeric
+				OR non_invoiceable_overage_usage_event_id IS DISTINCT FROM $3::uuid)`,
+		accountID, units.String(), usageID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return nil
+	}
+	return writeAudit(ctx, tx, actor, "eligibility.usage.overage_recorded", "external_account", accountID, nil,
+		map[string]any{"usage_event_id": usageID, "overage_units": units.String()})
 }
 
 func freezeRefundedLotTx(ctx context.Context, tx pgx.Tx, accountID, lotID string, oldConsumed int64, revision string, actor AuditActor) error {
@@ -3177,9 +3366,20 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		if item.kind == "carry" {
 			action = "eligibility.balance_carry_forward.evaluated"
 		}
-		return writeAudit(ctx, tx, actor, action, objectTypeOf(item), item.id, nil, map[string]any{
+		if err := writeAudit(ctx, tx, actor, action, objectTypeOf(item), item.id, nil, map[string]any{
 			"status": status, "evidence_key": item.key,
-		})
+		}); err != nil {
+			return err
+		}
+		if status != "matched" {
+			return nil
+		}
+		// XM-INV-ELIG-AUTO-RECONCILE: a real matched evaluation is exactly
+		// the forward-progress signal that lets an account auto-exit
+		// not_invoiceable_pending_reconciliation -- see
+		// advancePendingReconciliationMatchTx's own doc comment. A no-op for
+		// an account not currently in that state.
+		return advancePendingReconciliationMatchTx(ctx, tx, accountID, actor)
 	}
 	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) error {
 		_, execErr := tx.Exec(ctx, `
@@ -3270,16 +3470,27 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		status := "matched"
 		if item.balanceNegative {
 			status = "negative_frozen"
-			if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-				objectTypeOf(item), item.key, item.revision, actor); err != nil {
+			// XM-INV-ELIG-AUTO-RECONCILE: a negative balance no longer
+			// opens a manual eligibility_freezes row -- see
+			// enterPendingReconciliationTx's doc comment. evaluation_status
+			// stays 'negative_frozen': that column classifies what this
+			// piece of evidence showed, independent of how the account is
+			// handled for it.
+			detail := fmt.Sprintf("%s %s at %s reported a negative balance",
+				objectTypeOf(item), item.key, item.asOf.UTC().Format(time.RFC3339Nano))
+			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
+				objectTypeOf(item), item.key, detail, actor); err != nil {
 				return err
 			}
 		} else {
 			switch difference.Sign() {
 			case -1:
 				status = "negative_frozen"
-				if err = freezeEligibilityTx(ctx, tx, accountID, "", "UNKNOWN_NEGATIVE_BALANCE",
-					objectTypeOf(item), item.key, item.revision, actor); err != nil {
+				detail := fmt.Sprintf("%s %s at %s reported balance %s, expected %s (difference %s)",
+					objectTypeOf(item), item.key, item.asOf.UTC().Format(time.RFC3339Nano),
+					balance.String(), projection.ExpectedBalance.String(), difference.String())
+				if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
+					objectTypeOf(item), item.key, detail, actor); err != nil {
 					return err
 				}
 			case 1:

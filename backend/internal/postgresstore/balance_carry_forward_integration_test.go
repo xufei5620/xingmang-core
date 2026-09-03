@@ -157,29 +157,50 @@ func seedCarryForwardFixture(t *testing.T, creditUnits, usageUnits string) carry
 		manifestHash: manifestHash, configHash: configHash}
 }
 
+// TestBalanceDeltaCarryForwardFreezesUnchangedActualMismatch's name predates
+// XM-INV-ELIG-AUTO-RECONCILE (design section 3(A)): a carry-forward proof's
+// unchanged-actual negative mismatch no longer opens a manual
+// eligibility_freezes row -- the account downgrades to the self-clearing
+// not_invoiceable_pending_reconciliation state instead (kept unrenamed,
+// matching XM-INV-ANCHOR-BALANCE/XM-INV-BALANCE-BLIP's own precedent of
+// correcting assertions in place rather than renaming the test). Verified
+// the *unmodified* assertions below fail against the fixed evaluator (status
+// stayed "not_invoiceable_pending_reconciliation", not "frozen") before
+// updating them, confirming the fix -- not a fixture change -- is what
+// changed the outcome.
 func TestBalanceDeltaCarryForwardFreezesUnchangedActualMismatch(t *testing.T) {
 	fixture := seedCarryForwardFixture(t, "20", "")
+	before := time.Now().UTC()
 	processed, err := fixture.store.ProcessEligibilityProjectionJobs(fixture.ctx, 10, time.Now().UTC().Add(time.Minute),
 		AuditActor{Type: "system", ID: "carry-forward-worker"})
 	if err != nil || processed != 1 {
 		t.Fatalf("carry-forward projection processed=%d err=%v", processed, err)
 	}
-	var status string
-	var finalized time.Time
-	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT eligibility_status,finalized_through
+	var status, reason, triggerType, triggerID, detail string
+	var finalized, since time.Time
+	var consecutiveMatches int
+	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT eligibility_status,finalized_through,
+			COALESCE(pending_reconciliation_reason,''),COALESCE(pending_reconciliation_trigger_type,''),
+			COALESCE(pending_reconciliation_trigger_id,''),COALESCE(pending_reconciliation_detail,''),
+			COALESCE(pending_reconciliation_since,'epoch'::timestamptz),pending_reconciliation_consecutive_matches
 		FROM source_account_eligibility_state WHERE external_account_id=$1`, fixture.accountID).Scan(
-		&status, &finalized); err != nil {
+		&status, &finalized, &reason, &triggerType, &triggerID, &detail, &since, &consecutiveMatches); err != nil {
 		t.Fatal(err)
 	}
-	if status != "frozen" || !finalized.Equal(fixture.requested) {
-		t.Fatalf("unchanged actual was not fail-closed status=%q finalized=%s requested=%s",
+	if status != "not_invoiceable_pending_reconciliation" || !finalized.Equal(fixture.requested) {
+		t.Fatalf("unchanged actual was not downgraded to pending reconciliation status=%q finalized=%s requested=%s",
 			status, finalized, fixture.requested)
+	}
+	if reason != "UNKNOWN_NEGATIVE_BALANCE" || triggerType != "balance_carry_forward_proof" || triggerID == "" ||
+		detail == "" || since.Before(before) || consecutiveMatches != 0 {
+		t.Fatalf("pending reconciliation columns reason=%q triggerType=%q triggerID=%q detail=%q since=%s matches=%d",
+			reason, triggerType, triggerID, detail, since, consecutiveMatches)
 	}
 	var freezes int
 	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM eligibility_freezes
-		WHERE external_account_id=$1 AND freeze_reason='UNKNOWN_NEGATIVE_BALANCE' AND status='open'`,
-		fixture.accountID).Scan(&freezes); err != nil || freezes != 1 {
-		t.Fatalf("carry-forward mismatch freezes=%d err=%v", freezes, err)
+		WHERE external_account_id=$1 AND status='open'`,
+		fixture.accountID).Scan(&freezes); err != nil || freezes != 0 {
+		t.Fatalf("carry-forward mismatch no longer opens a manual freeze: open freezes=%d err=%v", freezes, err)
 	}
 	var proofKey, revision, evaluationStatus, balance, expected, difference string
 	if err = fixture.store.pool.QueryRow(fixture.ctx, `
@@ -205,9 +226,9 @@ func TestBalanceDeltaCarryForwardFreezesUnchangedActualMismatch(t *testing.T) {
 			proofKey, revision, balance, expected, difference, evaluationStatus)
 	}
 	items, err := fixture.store.ListEligibilitySummaries(fixture.ctx, fixture.userID, "")
-	if err != nil || len(items) != 1 || items[0].EligibilityStatus != "frozen" ||
-		items[0].AvailableMinor != 0 || !items[0].HasOpenFreeze {
-		t.Fatalf("frozen eligibility summary=%+v err=%v", items, err)
+	if err != nil || len(items) != 1 || items[0].EligibilityStatus != "not_invoiceable_pending_reconciliation" ||
+		items[0].AvailableMinor != 0 || items[0].HasOpenFreeze {
+		t.Fatalf("pending-reconciliation eligibility summary=%+v err=%v", items, err)
 	}
 	var audits int
 	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT count(*) FROM audit_events
