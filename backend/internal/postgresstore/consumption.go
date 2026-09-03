@@ -3087,6 +3087,20 @@ func applyPrePolicyWalletFundingTx(
 // than bit-identical.
 const balanceEvidenceBoundaryTolerance = time.Second
 
+// balanceBlipRebaselineCap bounds XM-INV-BLIP-SOFTFAIL's rebaseline outcome
+// (see the case-1 defer branch below): a blip confirmation attempt whose
+// pre-check difference matched the deferred item exactly, but whose
+// post-synthesis rebuild did not reconcile to zero, ignores the deferred
+// item and rebaselines onto the current one rather than erroring. A
+// production account whose ledger is missing a real structural fact (e.g. an
+// anchor opening balance) can reproduce that exact non-reconciling shape on
+// every subsequent checkpoint, forever -- once this many rebaselines have
+// happened back to back for an account with no clean confirm/disconfirm in
+// between, the account instead gets a single SOURCE_GAP freeze on the
+// triggering item (the designed escalation) so the evaluator always makes
+// forward progress instead of looping.
+const balanceBlipRebaselineCap = 3
+
 func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, actor AuditActor) error {
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {
@@ -3225,46 +3239,88 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 
 		if pending != nil {
 			if !item.balanceNegative && difference.Sign() == 1 && difference.Cmp(pending.difference) == 0 {
-				// Confirmed: the very next piece of evidence shows the
-				// exact same positive gap against an otherwise-unchanged
-				// ledger -- a genuine, persistent discrepancy, not a
-				// one-off blip. Synthesize using the deferred item's own
-				// original interval start and amount: nothing was written
-				// for it while it was pending, so recomputing its trust
-				// interval now would give the identical answer anyway.
+				// Tentatively confirmed: the very next piece of evidence
+				// shows the exact same positive gap against an
+				// otherwise-unchanged ledger -- looks like a genuine,
+				// persistent discrepancy, not a one-off blip. Synthesize
+				// using the deferred item's own original interval start and
+				// amount (nothing was written for it while it was pending,
+				// so recomputing its trust interval now would give the
+				// identical answer anyway), then rebuild -- not trust
+				// algebra -- to actually verify it.
 				if err = synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference); err != nil {
 					return err
 				}
-				if err = writeEvaluation(pending.item, "positive_classified_non_cash", pending.expected, pending.difference); err != nil {
+				confirmProjection, confirmErr := buildEligibilityProjectionTx(ctx, tx, account, item.asOf)
+				if confirmErr != nil {
+					return confirmErr
+				}
+				confirmDifference := new(big.Int).Sub(new(big.Int).Set(balance), confirmProjection.ExpectedBalance)
+				if confirmDifference.Sign() == 0 {
+					// The credit just inserted is dated at or before this
+					// item (pending.intervalStart <= pending.item.asOf <=
+					// item.asOf), so it is now inside
+					// buildEligibilityProjectionTx's window for this item,
+					// and the rebuild proves it accounts for the entire gap.
+					if err = writeEvaluation(pending.item, "positive_classified_non_cash", pending.expected, pending.difference); err != nil {
+						return err
+					}
+					if err = writeEvaluation(item, "matched", confirmProjection.ExpectedBalance, confirmDifference); err != nil {
+						return err
+					}
+					pending = nil
+					continue
+				}
+				// XM-INV-BLIP-SOFTFAIL: the tentative credit does not
+				// cleanly reconcile -- the pre-check match was real, but
+				// some other fact (e.g. usage that already exceeded the
+				// available credit pool at an intervening instant, floored
+				// at zero, which the tentative credit only partially
+				// recovers once it is dated earlier than that usage) means
+				// this was never actually a simple confirmed blip; a
+				// production account whose ledger is missing a real
+				// structural fact (its own anchor opening balance) hit
+				// exactly this shape. Returning an error here would fail
+				// the whole account's projection job on every retry,
+				// forever (see docs/handoffs/XM-INV-BLIP-SOFTFAIL.md) --
+				// instead, undo the tentative credit, record the deferred
+				// item as ignored (never confirmed), and let the current
+				// item fall through to be classified fresh below, exactly
+				// like an ordinary disconfirmation. Its own
+				// difference/balanceNegative are unchanged since the top of
+				// this iteration -- the deferred item's credit never
+				// affected them; they were computed before it existed.
+				if _, err = tx.Exec(ctx, `SELECT set_config('invoice.balance_blip_repair_delete','on',true)`); err != nil {
+					return err
+				}
+				if _, err = tx.Exec(ctx, `
+					DELETE FROM source_credit_events
+					WHERE source_instance_id=$1 AND external_event_id=$2 AND credit_kind='UNKNOWN_POSITIVE'`,
+					account.SourceInstanceID, "unknown-positive:"+pending.item.externalEventID); err != nil {
+					return err
+				}
+				if err = writeEvaluation(pending.item, "positive_blip_ignored", pending.expected, pending.difference); err != nil {
+					return err
+				}
+				if err = writeAudit(ctx, tx, actor, "eligibility.balance_blip.rebaselined", objectTypeOf(pending.item), pending.item.id, nil, map[string]any{
+					"deferred_difference":       pending.difference.String(),
+					"confirming_item_key":       item.key,
+					"confirming_raw_difference": difference.String(),
+					"reconciliation_residual":   confirmDifference.String(),
+				}); err != nil {
 					return err
 				}
 				pending = nil
-				// The credit just inserted is dated at or before this item
-				// (pending.intervalStart <= pending.item.asOf <= item.asOf),
-				// so it is now inside buildEligibilityProjectionTx's window
-				// for this item -- rebuild rather than trust algebra.
-				projection, projectionErr = buildEligibilityProjectionTx(ctx, tx, account, item.asOf)
-				if projectionErr != nil {
-					return projectionErr
-				}
-				difference = new(big.Int).Sub(new(big.Int).Set(balance), projection.ExpectedBalance)
-				if difference.Sign() != 0 {
-					return fmt.Errorf("balance blip confirmation for checkpoint/proof %s did not reconcile: still differs by %s",
-						item.key, difference.String())
-				}
-				if err = writeEvaluation(item, "matched", projection.ExpectedBalance, difference); err != nil {
+			} else {
+				// Disconfirmed: the ledger reconciled (or moved a different
+				// way) without the deferred item's excess recurring, proving
+				// it was transient. Record it as such and fall through to
+				// classify the current item on its own merits below.
+				if err = writeEvaluation(pending.item, "positive_blip_ignored", pending.expected, pending.difference); err != nil {
 					return err
 				}
-				continue
+				pending = nil
 			}
-			// Disconfirmed: the ledger reconciled (or moved a different
-			// way) without the deferred item's excess recurring, proving
-			// it was transient. Record it as such and fall through to
-			// classify the current item on its own merits below.
-			if err = writeEvaluation(pending.item, "positive_blip_ignored", pending.expected, pending.difference); err != nil {
-				return err
-			}
-			pending = nil
 		}
 
 		status := "matched"
@@ -3334,10 +3390,31 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 					// yet; if it is the last item in this batch, it simply
 					// stays pending for a future evaluator run to pair with
 					// whatever real evidence arrives next.
-					pending = &pendingBlip{item: item, intervalStart: intervalStart,
-						expected:   new(big.Int).Set(projection.ExpectedBalance),
-						difference: new(big.Int).Set(difference)}
-					continue
+					//
+					// XM-INV-BLIP-SOFTFAIL: unless this account has already
+					// rebaselined balanceBlipRebaselineCap times in a row
+					// with no clean confirm/disconfirm landing in between --
+					// a real, unresolved structural gap can reproduce the
+					// exact same non-reconciling shape on every subsequent
+					// checkpoint, forever. Escalate to the designed
+					// SOURCE_GAP freeze on this item instead of deferring
+					// again, so the account always makes forward progress.
+					rebaselineStreak, streakErr := countConsecutiveRebaselinedBlipsTx(ctx, tx, accountID, item.asOf, item.sequence)
+					if streakErr != nil {
+						return streakErr
+					}
+					if rebaselineStreak >= balanceBlipRebaselineCap {
+						status = "source_gap_frozen"
+						if err = freezeEligibilityTx(ctx, tx, accountID, "", "SOURCE_GAP",
+							objectTypeOf(item), item.key, item.revision, actor); err != nil {
+							return err
+						}
+					} else {
+						pending = &pendingBlip{item: item, intervalStart: intervalStart,
+							expected:   new(big.Int).Set(projection.ExpectedBalance),
+							difference: new(big.Int).Set(difference)}
+						continue
+					}
 				}
 			}
 		}
@@ -3432,4 +3509,62 @@ func balanceEvidenceTrustIntervalTx(ctx context.Context, tx pgx.Tx, accountID st
 			  AND state.cutover_at<=$2
 		) q`, accountID, asOf, sequence).Scan(&intervalStart, &hasPriorRealEvaluation)
 	return intervalStart, hasPriorRealEvaluation, err
+}
+
+// countConsecutiveRebaselinedBlipsTx supports XM-INV-BLIP-SOFTFAIL's
+// rebaseline cap: it counts how many of this account's most recent
+// checkpoint/proof evaluations strictly before (asOf,sequence), taken in
+// descending as_of/source_sequence order, are an unbroken run of
+// positive_blip_ignored evaluations that were specifically produced by a
+// failed blip confirmation attempt (an eligibility.balance_blip.rebaselined
+// audit row exists for that exact item), stopping at the first evaluation
+// that is either a different status or an ordinary positive_blip_ignored
+// disconfirmation (XM-INV-BALANCE-BLIP's own pre-existing rule, not a failed
+// rebaseline). Deliberately narrower than counting positive_blip_ignored
+// alone: a run of genuine, clean disconfirmations is expected, healthy
+// behavior with no risk of looping, and must never itself trip the cap. The
+// result is only ever used against balanceBlipRebaselineCap, so the query
+// stops early once it can no longer matter.
+func countConsecutiveRebaselinedBlipsTx(ctx context.Context, tx pgx.Tx, accountID string, asOf time.Time, sequence int64) (int, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT evaluation_status,rebaselined FROM (
+			SELECT checkpoint.as_of,checkpoint.source_sequence,evaluation.evaluation_status,
+				EXISTS(SELECT 1 FROM audit_events ae WHERE ae.action='eligibility.balance_blip.rebaselined'
+					AND ae.object_type='balance_checkpoint' AND ae.object_id=checkpoint.id::text) AS rebaselined
+			FROM balance_checkpoint_evaluations evaluation
+			JOIN balance_reconciliation_checkpoints checkpoint ON checkpoint.id=evaluation.checkpoint_id
+			WHERE checkpoint.external_account_id=$1
+			  AND (checkpoint.as_of<$2 OR (checkpoint.as_of=$2 AND checkpoint.source_sequence<$3))
+			UNION ALL
+			SELECT proof.as_of,proof.source_sequence,evaluation.evaluation_status,
+				EXISTS(SELECT 1 FROM audit_events ae WHERE ae.action='eligibility.balance_blip.rebaselined'
+					AND ae.object_type='balance_carry_forward_proof' AND ae.object_id=proof.id::text)
+			FROM balance_carry_forward_evaluations evaluation
+			JOIN balance_carry_forward_proofs proof ON proof.id=evaluation.proof_id
+			WHERE proof.external_account_id=$1
+			  AND (proof.as_of<$2 OR (proof.as_of=$2 AND proof.source_sequence<$3))
+		) q ORDER BY as_of DESC,source_sequence DESC LIMIT $4`,
+		accountID, asOf, sequence, balanceBlipRebaselineCap+1)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for rows.Next() {
+		var status string
+		var rebaselined bool
+		if scanErr := rows.Scan(&status, &rebaselined); scanErr != nil {
+			rows.Close()
+			return 0, scanErr
+		}
+		if status != "positive_blip_ignored" || !rebaselined {
+			break
+		}
+		count++
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	return count, nil
 }
