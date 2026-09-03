@@ -572,8 +572,8 @@ func TestPendingReconciliationDoesNotStickReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if health.Queued != 0 || health.Failed != 0 || health.Processing != 0 || !health.OldestPending.IsZero() ||
-		health.ProofPending != 0 || !health.OldestProofPending.IsZero() {
+	if health.Queued != 0 || health.Dead != 0 || health.Processing != 0 || !health.OldestPending.IsZero() ||
+		health.ProofPending != 0 || !health.OldestProofPending.IsZero() || health.Retrying != 0 {
 		t.Fatalf("EligibilityProjectionHealth must show nothing stuck for a pending-reconciliation account: %+v", health)
 	}
 }

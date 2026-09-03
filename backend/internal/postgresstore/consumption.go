@@ -72,6 +72,30 @@ const (
 // -- still ages into OldestPending as before.
 const eligibilityProjectionReclaimGraceSeconds = 30
 
+// XM-INV-PROJECTION-FAILURE-GRADING: a per-account error from
+// processEligibilityProjectionJob other than errBalanceCarryForwardProofPending
+// (that case keeps its own, unrelated BALANCE_PROOF_PENDING backoff below --
+// it is never graded here and never spends an attempt) is graded exactly like
+// MarkSourceEventFailed grades a source_ingest_events row (source_sync.go):
+// the job's own consecutive-failure counter, attempts -- a new column,
+// deliberately distinct from the pre-existing attempt_count, which the claim
+// UPDATE above increments on every claim regardless of outcome, so it cannot
+// tell a genuine failure streak from a job that has simply been retried many
+// times while succeeding or waiting on a balance proof -- increments by one;
+// below projectionFailureDeadThreshold consecutive failures the job stays
+// status='queued' with an exponential backoff (30s doubling, capped at
+// projectionFailureBackoffCapSeconds); at the threshold it becomes a
+// terminal status='dead' and an audit event is written. A successful run
+// resets the counter to zero the same way source_ingest_events' dead-letter
+// contract does: the job row is deleted outright (unchanged by this slice --
+// see processEligibilityProjectionJob's final DELETE), so any future error
+// for this account starts a brand new row at attempts=0.
+const (
+	projectionFailureDeadThreshold      = 8
+	projectionFailureBackoffBaseSeconds = 30
+	projectionFailureBackoffCapSeconds  = 1800
+)
+
 var (
 	serviceUnitsPattern                = regexp.MustCompile(`^(0|[1-9][0-9]{0,77})$`)
 	unitCodePattern                    = regexp.MustCompile(`^[A-Z0-9_:-]{1,32}$`)
@@ -189,27 +213,51 @@ type eligibilityProjection struct {
 // status='processing', both still within their lease, both actively being
 // attempted. Only a lapsed lease -- the worker crashed, or the process died
 // mid-batch -- means a processing row is actually stuck.
+//
+// XM-INV-PROJECTION-FAILURE-GRADING: Dead (renamed from Failed -- readiness
+// and the release-rehearsal shadow tool were its only two consumers, both
+// updated by this slice) now counts only status='dead', the new terminal
+// grade reached after projectionFailureDeadThreshold consecutive per-account
+// failures; a job merely retrying with backoff (status='queued', attempts>0)
+// is not terminal and must never make /readyz unhealthy by itself -- see
+// Retrying below and eligibilityProjectionReady in cmd/api/runtime.go. For
+// the same reason OldestPending's exclusion is widened, alongside the
+// pre-existing proof-pending and live-lease cases, to a queued job whose own
+// failure-grading backoff has not elapsed yet (attempts>0 and
+// next_attempt_at still in the future, with the same worker-reclaim grace as
+// the proof-pending case): a job sitting in backoff is legitimately
+// scheduled forward, not stuck, exactly like a BALANCE_PROOF_PENDING job.
+// Retrying counts every job currently in the failure-grading retry ladder,
+// due or not -- a coarser, purely informational operational signal, not a
+// readiness input. It can overlap with ProofPending in one edge case (a job
+// that failed at least once, so attempts>0, and later separately hit a
+// balance-proof-pending outcome, which never resets attempts): both counts
+// then include that one row, which is intentional -- it really is both
+// "has failed before" and "currently proof-pending" at once.
 type EligibilityProjectionHealth struct {
-	Queued, Failed, Processing int64
-	OldestPending              time.Time
-	ProofPending               int64
-	OldestProofPending         time.Time
+	Queued, Dead, Processing int64
+	OldestPending            time.Time
+	ProofPending             int64
+	OldestProofPending       time.Time
+	Retrying                 int64
 }
 
 func (s *Store) EligibilityProjectionHealth(ctx context.Context) (EligibilityProjectionHealth, error) {
 	now := time.Now().UTC()
 	var health EligibilityProjectionHealth
 	err := s.pool.QueryRow(ctx, fmt.Sprintf(`
-		SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='failed'),
+		SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='dead'),
 			count(*) FILTER (WHERE status='processing'),
 			COALESCE(min(updated_at) FILTER (WHERE NOT (
 				(status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds')
+				OR (status='queued' AND attempts>0 AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds')
 				OR (status='processing' AND lease_expires_at>$1)
 			)),'epoch'::timestamptz),
 			count(*) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds'),
-			COALESCE(min(updated_at) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds'),'epoch'::timestamptz)
-		FROM eligibility_projection_jobs`, eligibilityProjectionReclaimGraceSeconds), now).Scan(&health.Queued, &health.Failed, &health.Processing,
-		&health.OldestPending, &health.ProofPending, &health.OldestProofPending)
+			COALESCE(min(updated_at) FILTER (WHERE status='queued' AND last_error_code='BALANCE_PROOF_PENDING' AND next_attempt_at>$1::timestamptz-interval '%[1]d seconds'),'epoch'::timestamptz),
+			count(*) FILTER (WHERE status='queued' AND attempts>0)
+		FROM eligibility_projection_jobs`, eligibilityProjectionReclaimGraceSeconds), now).Scan(&health.Queued, &health.Dead, &health.Processing,
+		&health.OldestPending, &health.ProofPending, &health.OldestProofPending, &health.Retrying)
 	if health.OldestPending.Equal(time.Unix(0, 0).UTC()) {
 		health.OldestPending = time.Time{}
 	}
@@ -516,15 +564,26 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 		SELECT external_account_id,requested_through,'queued',now() FROM changed
 		ON CONFLICT(external_account_id) DO UPDATE SET
 			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
-			status='queued',lease_token=NULL,lease_expires_at=NULL,
+			-- XM-INV-PROJECTION-FAILURE-GRADING: a new fact must never silently
+			-- revive a status='dead' job -- that terminal grade exists
+			-- specifically so a persistently failing account stops being
+			-- retried automatically until an operator investigates (via
+			-- invoice-eligibility-repair --kind=projection-requeue-dead), the
+			-- same as source_ingest_events' own dead-letter contract. Only
+			-- requested_through above still advances while dead, so the
+			-- repair tool's requeue immediately picks up every fact that
+			-- arrived in the meantime.
+			status=CASE WHEN eligibility_projection_jobs.status='dead' THEN 'dead' ELSE 'queued' END,
+			lease_token=NULL,lease_expires_at=NULL,
 			next_attempt_at=CASE
+				WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.next_attempt_at
 				WHEN eligibility_projection_jobs.status='queued'
 					AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
 					AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
 				THEN eligibility_projection_jobs.next_attempt_at
 				ELSE now()
 			END,
-			updated_at=now()`,
+			updated_at=CASE WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.updated_at ELSE now() END`,
 		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds())
 	if err != nil {
 		return err
@@ -1294,15 +1353,20 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			VALUES($1,$2,'queued',now())
 			ON CONFLICT(external_account_id) DO UPDATE SET
 				requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
-				status='queued',lease_token=NULL,lease_expires_at=NULL,
+				-- XM-INV-PROJECTION-FAILURE-GRADING: see the identical guard's
+				-- own comment in finalizeSourceAccountsTx above -- a new fact
+				-- must never silently revive a status='dead' job.
+				status=CASE WHEN eligibility_projection_jobs.status='dead' THEN 'dead' ELSE 'queued' END,
+				lease_token=NULL,lease_expires_at=NULL,
 				next_attempt_at=CASE
+					WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.next_attempt_at
 					WHEN eligibility_projection_jobs.status='queued'
 						AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
 						AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
 					THEN eligibility_projection_jobs.next_attempt_at
 					ELSE now()
 				END,
-				updated_at=now()`,
+				updated_at=CASE WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.updated_at ELSE now() END`,
 			accountID, account.FinalizedThrough, balanceProofPendingRequeueResetWindow.Seconds())
 		if err != nil {
 			return err
@@ -2653,11 +2717,7 @@ func (s *Store) ProcessEligibilityProjectionJobs(ctx context.Context, limit int,
 			if firstProcessingError == nil {
 				firstProcessingError = fmt.Errorf("eligibility projection job failed: %w", processErr)
 			}
-			_, markErr := s.pool.Exec(ctx, `
-				UPDATE eligibility_projection_jobs SET status='failed',lease_token=NULL,lease_expires_at=NULL,
-					last_error_code='PROJECTION_FAILED',next_attempt_at=now()+interval '5 minutes',updated_at=now()
-				WHERE external_account_id=$1 AND lease_token=$2`, accountID, lease)
-			if markErr != nil {
+			if markErr := s.markEligibilityProjectionJobFailedOrDead(ctx, accountID, lease, now.UTC(), processErr, actor); markErr != nil {
 				return processed, markErr
 			}
 			continue
@@ -2665,6 +2725,63 @@ func (s *Store) ProcessEligibilityProjectionJobs(ctx context.Context, limit int,
 		processed++
 	}
 	return processed, firstProcessingError
+}
+
+// markEligibilityProjectionJobFailedOrDead grades one per-account processing
+// error (XM-INV-PROJECTION-FAILURE-GRADING): below projectionFailureDeadThreshold
+// consecutive failures it requeues with exponential backoff, exactly
+// mirroring MarkSourceEventFailed's attempt_count>=8 dead-letter escalation
+// for source_ingest_events (source_sync.go); at the threshold it escalates
+// the job to a terminal status='dead' and writes an audit event so an
+// operator (or invoice-eligibility-repair --kind=projection-requeue-dead) can
+// find and act on it. Every branch returns a defined result: a lease
+// mismatch (another process already reclaimed this row -- not expected under
+// the claim step's exclusive SKIP LOCKED lease and this function's serial,
+// single-worker-instance processing loop, but never treated as a hard
+// failure) is silently ignored, matching the pre-existing BALANCE_PROOF_PENDING
+// branch's own tolerance of that case; only a genuine database error is
+// returned, and the caller (ProcessEligibilityProjectionJobs) never lets that
+// abort processing of any other account already claimed in the same batch.
+func (s *Store) markEligibilityProjectionJobFailedOrDead(ctx context.Context, accountID, lease string, now time.Time, processErr error, actor AuditActor) error {
+	errText := processErr.Error()
+	if len(errText) > 2000 {
+		errText = errText[:2000]
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var attempts int64
+	var status string
+	err = tx.QueryRow(ctx, fmt.Sprintf(`
+		UPDATE eligibility_projection_jobs SET
+			attempts=attempts+1,
+			status=CASE WHEN attempts+1>=%[1]d THEN 'dead' ELSE 'queued' END,
+			lease_token=NULL,lease_expires_at=NULL,
+			last_error_code=CASE WHEN attempts+1>=%[1]d THEN 'PROJECTION_DEAD' ELSE 'PROJECTION_FAILED' END,
+			last_error=$4,
+			next_attempt_at=CASE WHEN attempts+1>=%[1]d THEN next_attempt_at
+				ELSE $3::timestamptz+(LEAST(%[2]d,%[3]d*power(2,attempts)))::int*interval '1 second' END,
+			updated_at=$3::timestamptz
+		WHERE external_account_id=$1 AND lease_token=$2
+		RETURNING attempts,status`,
+		projectionFailureDeadThreshold, projectionFailureBackoffCapSeconds, projectionFailureBackoffBaseSeconds),
+		accountID, lease, now, errText).Scan(&attempts, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status == "dead" {
+		if err = writeAudit(ctx, tx, actor, "eligibility.projection.dead", "external_account", accountID, nil,
+			map[string]any{"attempts": attempts, "last_error": errText,
+				"threshold": projectionFailureDeadThreshold}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func applyFundingObservationEligibilityTx(ctx context.Context, tx pgx.Tx, lotID, accountID string, in SourceObservation, actor AuditActor) error {
@@ -3794,6 +3911,20 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 					// again, so the account always makes forward progress.
 					rebaselineStreak, streakErr := countConsecutiveRebaselinedBlipsTx(ctx, tx, accountID, item.asOf, item.sequence)
 					if streakErr != nil {
+						// XM-INV-PROJECTION-FAILURE-GRADING audit finding 2: this
+						// is deliberately left a bare, retryable error, not turned
+						// into a freeze -- an infrastructure error here (a
+						// serialization failure, a momentary database error) says
+						// nothing about whether the account's balance evidence is
+						// actually a genuine structural gap, and freezing on it
+						// would misclassify a transient problem as a real one.
+						// markEligibilityProjectionJobFailedOrDead (above, in
+						// ProcessEligibilityProjectionJobs) is what now grades and
+						// retries this error with backoff, escalating to a
+						// terminal, operator-visible status='dead' only after
+						// projectionFailureDeadThreshold consecutive failures --
+						// that grading is the correct home for "this keeps
+						// failing," not a premature freeze here.
 						return streakErr
 					}
 					if rebaselineStreak >= balanceBlipRebaselineCap {

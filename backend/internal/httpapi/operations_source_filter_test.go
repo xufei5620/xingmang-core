@@ -41,6 +41,9 @@ type fakeSourceFilterOperations struct {
 func (f *fakeSourceFilterOperations) SourceHealth(context.Context) (postgresstore.SourceHealthReport, error) {
 	panic("unused in this test")
 }
+func (f *fakeSourceFilterOperations) EligibilityProjectionHealth(context.Context) (postgresstore.EligibilityProjectionHealth, error) {
+	panic("unused in this test")
+}
 func (f *fakeSourceFilterOperations) ListExternalAccounts(context.Context, string, domain.SourceType) ([]postgresstore.ConnectedSourceAccount, error) {
 	panic("unused in this test")
 }

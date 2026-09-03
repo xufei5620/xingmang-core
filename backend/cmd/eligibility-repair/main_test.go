@@ -50,6 +50,21 @@ func balanceBlipApplyResultFixture() postgresstore.BalanceBlipRepairResult {
 	}
 }
 
+func projectionRequeueDeadApplyResultFixture() postgresstore.ProjectionRequeueDeadRepairResult {
+	return postgresstore.ProjectionRequeueDeadRepairResult{
+		Applied: true,
+		Accounts: []postgresstore.ProjectionRequeueDeadRepairAccount{{
+			ExternalAccountID: "30000000-0000-4000-8000-000000000084", PreviousAttempts: 8,
+			LastErrorCode: "PROJECTION_DEAD", LastError: "simulated poison account error",
+			DeadSince: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC), Requeued: true,
+		}},
+		Errors: []postgresstore.ProjectionRequeueDeadRepairAccountError{{
+			ExternalAccountID: "30000000-0000-4000-8000-000000000085", Message: "simulated per-account failure",
+		}},
+		TotalRequeued: 1,
+	}
+}
+
 func queueNarrowApplyResultFixture() postgresstore.QueueNarrowRepairResult {
 	return postgresstore.QueueNarrowRepairResult{
 		Applied: true,
@@ -119,7 +134,7 @@ func TestRunDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPreAnchorUsage, &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPreAnchorUsage, "", &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -138,7 +153,7 @@ func TestRunBalanceAnchorDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) 
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceAnchor, &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceAnchor, "", &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -157,7 +172,7 @@ func TestRunBalanceBlipDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceBlip, &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceBlip, "", &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -177,11 +192,31 @@ func TestRunQueueNarrowDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindQueueNarrow, &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindQueueNarrow, "", &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
 	if !strings.Contains(printed, "XM-INV-ELIG-QUEUE-NARROW") || !strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("dry run output missing expected banner: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 0") {
+		t.Fatalf("dry run against an empty database found work: %s", printed)
+	}
+}
+
+// TestRunProjectionRequeueDeadDryRunAgainstEmptyDatabaseReportsNothing is the
+// same wiring smoke test for --kind=projection-requeue-dead
+// (XM-INV-PROJECTION-FAILURE-GRADING).
+func TestRunProjectionRequeueDeadDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindProjectionRequeueDead, "", &out); err != nil {
+		t.Fatal(err)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "XM-INV-PROJECTION-FAILURE-GRADING") || !strings.Contains(printed, "DRY RUN") {
 		t.Fatalf("dry run output missing expected banner: %s", printed)
 	}
 	if !strings.Contains(printed, "accounts affected: 0") {
@@ -196,7 +231,7 @@ func TestRunUnknownKindIsRejected(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", "unknown-kind", &out)
+	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", "unknown-kind", "", &out)
 	if err == nil {
 		t.Fatal("unknown --kind was accepted")
 	}
@@ -207,14 +242,14 @@ func TestRunUnknownKindIsRejected(t *testing.T) {
 
 // TestRunApplyWithoutOperatorIDIsRejected confirms --apply refuses to run
 // without an approving operator id, per the task's "human-approved" and
-// "resolved_by = a caller-supplied operator id" requirements -- for all
-// three repair kinds.
+// "resolved_by = a caller-supplied operator id" requirements -- for every
+// repair kind.
 func TestRunApplyWithoutOperatorIDIsRejected(t *testing.T) {
-	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow} {
+	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead} {
 		databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", kind, &out)
+		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", kind, "", &out)
 		cancel()
 		if err == nil {
 			t.Fatalf("--apply without --operator-id was accepted for --kind=%s", kind)
@@ -279,6 +314,23 @@ func TestPrintQueueNarrowSummaryFormatsAccountsAndTotals(t *testing.T) {
 	for _, want := range []string{"XM-INV-ELIG-QUEUE-NARROW", "APPLIED", "30000000-0000-4000-8000-000000000082",
 		"TOTAL", "accounts affected: 1", "ACCOUNT ERRORS", "30000000-0000-4000-8000-000000000083",
 		"simulated per-account failure"} {
+		if !strings.Contains(printed, want) {
+			t.Fatalf("summary output missing %q: %s", want, printed)
+		}
+	}
+}
+
+// TestPrintProjectionRequeueDeadSummaryFormatsAccountsAndTotals is the same
+// formatting check for printProjectionRequeueDeadSummary, plus its own
+// account-error section (matching every other repair kind's per-account
+// isolation).
+func TestPrintProjectionRequeueDeadSummaryFormatsAccountsAndTotals(t *testing.T) {
+	var out bytes.Buffer
+	printProjectionRequeueDeadSummary(&out, projectionRequeueDeadApplyResultFixture())
+	printed := out.String()
+	for _, want := range []string{"XM-INV-PROJECTION-FAILURE-GRADING", "APPLIED", "30000000-0000-4000-8000-000000000084",
+		"PROJECTION_DEAD", "simulated poison account error", "total requeued: 1", "accounts affected: 1",
+		"ACCOUNT ERRORS", "30000000-0000-4000-8000-000000000085", "simulated per-account failure"} {
 		if !strings.Contains(printed, want) {
 			t.Fatalf("summary output missing %q: %s", want, printed)
 		}

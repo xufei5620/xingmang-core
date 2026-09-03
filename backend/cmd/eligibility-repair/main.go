@@ -28,6 +28,12 @@
 //     is no longer permanently excluded. An account with no in-window
 //     funding lot is left untouched in both modes ("expected no-op"). See
 //     docs/handoffs/XM-INV-ELIG-POLICY-START-ANCHOR.md.
+//   - --kind=projection-requeue-dead: XM-INV-PROJECTION-FAILURE-GRADING --
+//     resets every eligibility_projection_jobs row the failure grading
+//     escalated to the terminal status='dead' (after 8 consecutive
+//     per-account processing errors) back to status='queued'/attempts=0 so
+//     the worker retries it. Optional --account narrows to one external
+//     account id. See docs/handoffs/XM-INV-PROJECTION-FAILURE-GRADING.md.
 //
 // Defaults to --dry-run; --apply requires an operator id and actually
 // mutates the database. Omitting --kind reproduces this tool's original
@@ -57,11 +63,12 @@ import (
 )
 
 const (
-	kindPreAnchorUsage      = "pre-anchor-usage"
-	kindBalanceAnchor       = "balance-anchor"
-	kindBalanceBlip         = "balance-blip"
-	kindQueueNarrow         = "queue-narrow"
-	kindPolicyStartReanchor = "policy-start-reanchor"
+	kindPreAnchorUsage        = "pre-anchor-usage"
+	kindBalanceAnchor         = "balance-anchor"
+	kindBalanceBlip           = "balance-blip"
+	kindQueueNarrow           = "queue-narrow"
+	kindPolicyStartReanchor   = "policy-start-reanchor"
+	kindProjectionRequeueDead = "projection-requeue-dead"
 
 	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
 	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
@@ -77,7 +84,8 @@ func main() {
 	migrationsDir := flag.String("migrations-dir", "/app/migrations", "bundled migration directory")
 	apply := flag.Bool("apply", false, "actually resolve freezes (and, for pre-anchor-usage, requeue events; default is a dry run that changes nothing)")
 	operatorID := flag.String("operator-id", "", "the approving operator's admin UUID (required with --apply)")
-	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), or policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D))")
+	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D)), or projection-requeue-dead (XM-INV-PROJECTION-FAILURE-GRADING)")
+	accountID := flag.String("account", "", "optional external account id filter (projection-requeue-dead only; empty means every dead job)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")
@@ -92,15 +100,17 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, os.Stdout); err != nil {
+	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, *accountID, os.Stdout); err != nil {
 		slog.Error("eligibility-repair failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, out io.Writer) error {
-	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow && kind != kindPolicyStartReanchor {
-		return fmt.Errorf("unknown --kind %q, want %q, %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor)
+func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind, accountID string, out io.Writer) error {
+	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow &&
+		kind != kindPolicyStartReanchor && kind != kindProjectionRequeueDead {
+		return fmt.Errorf("unknown --kind %q, want %q, %q, %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor,
+			kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead)
 	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
 	if err != nil {
@@ -137,6 +147,9 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	}
 	if kind == kindPolicyStartReanchor {
 		return runPolicyStartReanchor(ctx, store, apply, operatorID, out)
+	}
+	if kind == kindProjectionRequeueDead {
+		return runProjectionRequeueDead(ctx, store, apply, operatorID, accountID, out)
 	}
 	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
 }
@@ -223,6 +236,20 @@ func runQueueNarrow(ctx context.Context, store *postgresstore.Store, apply bool,
 		return fmt.Errorf("repair queue narrow eligibility: %w", err)
 	}
 	printQueueNarrowSummary(out, result)
+	return nil
+}
+
+func runProjectionRequeueDead(ctx context.Context, store *postgresstore.Store, apply bool, operatorID, accountID string, out io.Writer) error {
+	// Unlike the freeze-resolution repairs, this one never resolves an
+	// eligibility_freezes row, so there is no encrypted resolution note or
+	// evidence to prepare here -- same reasoning as policy-start-reanchor.
+	in := postgresstore.ProjectionRequeueDeadRepairInput{Apply: apply, OperatorID: operatorID, AccountID: accountID}
+	result, err := store.RepairProjectionRequeueDead(ctx, in, postgresstore.AuditActor{
+		Type: "admin", ID: operatorID, Reason: "XM-INV-PROJECTION-FAILURE-GRADING repair tool " + modeLabel(apply)})
+	if err != nil {
+		return fmt.Errorf("repair projection requeue dead: %w", err)
+	}
+	printProjectionRequeueDeadSummary(out, result)
 	return nil
 }
 
@@ -354,6 +381,34 @@ func printPolicyStartReanchorSummary(out io.Writer, result postgresstore.PolicyS
 		fmt.Fprintf(out, "  old_balance=%s new_balance=%s\n", account.OldCutoverBalanceUnits, account.NewCutoverBalanceUnits)
 	}
 	fmt.Fprintf(out, "\naccounts examined: %d\n", len(result.Accounts))
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(out, "\nACCOUNT ERRORS (not applied, other accounts still processed):\n")
+		for _, accountErr := range result.Errors {
+			fmt.Fprintf(out, "%-38s %s\n", accountErr.ExternalAccountID, accountErr.Message)
+		}
+	}
+}
+
+func printProjectionRequeueDeadSummary(out io.Writer, result postgresstore.ProjectionRequeueDeadRepairResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-PROJECTION-FAILURE-GRADING: %s\n\n", mode)
+	fmt.Fprintf(out, "%-38s %8s %10s %16s %10s\n", "ACCOUNT", "ATTEMPTS", "ERROR_CODE", "DEAD_SINCE", "REQUEUED")
+	for _, account := range result.Accounts {
+		deadSince := ""
+		if !account.DeadSince.IsZero() {
+			deadSince = account.DeadSince.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(out, "%-38s %8d %10s %16s %10t\n", account.ExternalAccountID,
+			account.PreviousAttempts, account.LastErrorCode, deadSince, account.Requeued)
+		if account.LastError != "" {
+			fmt.Fprintf(out, "  last_error: %s\n", account.LastError)
+		}
+	}
+	fmt.Fprintf(out, "\ntotal requeued: %d\n", result.TotalRequeued)
+	fmt.Fprintf(out, "accounts affected: %d\n", len(result.Accounts))
 	if len(result.Errors) > 0 {
 		fmt.Fprintf(out, "\nACCOUNT ERRORS (not applied, other accounts still processed):\n")
 		for _, accountErr := range result.Errors {

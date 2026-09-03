@@ -227,6 +227,10 @@ func (s *Service) SourceHealth(ctx context.Context) (postgresstore.SourceHealthR
 	return s.store.SourceHealth(ctx, s.sourceFreshnessPolicy())
 }
 
+func (s *Service) EligibilityProjectionHealth(ctx context.Context) (postgresstore.EligibilityProjectionHealth, error) {
+	return s.store.EligibilityProjectionHealth(ctx)
+}
+
 func (s *Service) SourceReadinessHealth(ctx context.Context) (postgresstore.SourceReadinessHealth, error) {
 	return s.store.SourceReadinessHealth(ctx, s.sourceFreshnessPolicy())
 }

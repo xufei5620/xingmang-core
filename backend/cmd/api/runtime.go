@@ -560,15 +560,33 @@ func validateIssuerReadiness(settings adminsettings.Settings) error {
 // that case.
 const eligibilityProjectionStuckAfter = 15 * time.Minute
 
+// eligibilityProjectionDeadReason/eligibilityProjectionStuckReason
+// (XM-INV-PROJECTION-FAILURE-GRADING) are eligibilityProjectionReady's two
+// distinct not-ready reasons, named so an operator reading /readyz's error
+// text (or application logs) can immediately tell "a job needs
+// invoice-eligibility-repair --kind=projection-requeue-dead" apart from "the
+// queue is not making progress" -- previously both conditions returned the
+// identical generic string.
+const (
+	eligibilityProjectionDeadReason  = "invoice eligibility projection has dead jobs requiring operator repair"
+	eligibilityProjectionStuckReason = "invoice eligibility projection is not making progress"
+)
+
 // eligibilityProjectionReady is the pure decision extracted from the
 // Readiness closure in buildProductionRuntime so it is table-testable
-// without a database (XM-INV-READY-PENDING).
+// without a database (XM-INV-READY-PENDING). XM-INV-PROJECTION-FAILURE-GRADING:
+// Dead (renamed from Failed) counts only the new terminal status='dead'
+// grade -- a job merely retrying with backoff (Retrying>0, EligibilityProjectionHealth's
+// Queued/attempts>0 bucket) is never terminal and must never trip readiness
+// on its own; OldestPending already excludes such a job while its backoff
+// has not elapsed (see that struct's own doc comment), so a purely
+// backoff-driven retry loop never ages into the stuck bucket either.
 func eligibilityProjectionReady(health postgresstore.EligibilityProjectionHealth, now time.Time) error {
-	if health.Failed > 0 {
-		return errors.New("invoice eligibility projection is unhealthy")
+	if health.Dead > 0 {
+		return errors.New(eligibilityProjectionDeadReason)
 	}
 	if !health.OldestPending.IsZero() && now.Sub(health.OldestPending) > eligibilityProjectionStuckAfter {
-		return errors.New("invoice eligibility projection is unhealthy")
+		return errors.New(eligibilityProjectionStuckReason)
 	}
 	return nil
 }

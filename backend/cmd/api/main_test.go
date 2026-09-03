@@ -359,7 +359,7 @@ func TestEligibilityProjectionReadyDistinguishesProofPendingFromStuck(t *testing
 		ready  bool
 	}{
 		"empty":                   {health: postgresstore.EligibilityProjectionHealth{}, ready: true},
-		"failed alone":            {health: postgresstore.EligibilityProjectionHealth{Failed: 1}, ready: false},
+		"dead alone":              {health: postgresstore.EligibilityProjectionHealth{Dead: 1}, ready: false},
 		"fresh oldest pending":    {health: postgresstore.EligibilityProjectionHealth{Queued: 1, OldestPending: now.Add(-14 * time.Minute)}, ready: true},
 		"oldest pending at limit": {health: postgresstore.EligibilityProjectionHealth{Queued: 1, OldestPending: now.Add(-15 * time.Minute)}, ready: true},
 		"oldest pending too old":  {health: postgresstore.EligibilityProjectionHealth{Queued: 1, OldestPending: now.Add(-15*time.Minute - time.Nanosecond)}, ready: false},
@@ -374,7 +374,18 @@ func TestEligibilityProjectionReadyDistinguishesProofPendingFromStuck(t *testing
 			},
 			ready: false,
 		},
-		"failed overrides a fresh oldest pending": {health: postgresstore.EligibilityProjectionHealth{Failed: 1, OldestPending: now}, ready: false},
+		"dead overrides a fresh oldest pending": {health: postgresstore.EligibilityProjectionHealth{Dead: 1, OldestPending: now}, ready: false},
+		// XM-INV-PROJECTION-FAILURE-GRADING: a job merely retrying with
+		// backoff (Retrying>0, EligibilityProjectionHealth.Queued and
+		// attempts>0) is never terminal and must never make /readyz
+		// unhealthy by itself -- EligibilityProjectionHealth's own query
+		// already keeps such a job out of OldestPending while its backoff
+		// has not elapsed, so this is ready purely because OldestPending
+		// stays zero here, exactly like the "proof pending never fails
+		// alone" case above.
+		"retrying account alone never fails": {
+			health: postgresstore.EligibilityProjectionHealth{Queued: 1, Retrying: 1}, ready: true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := eligibilityProjectionReady(fixture.health, now)

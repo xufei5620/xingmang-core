@@ -45,12 +45,16 @@ type EligibilityShadowEvaluationCount struct {
 }
 
 // EligibilityShadowFailedJob is one eligibility_projection_jobs row left in
-// status='failed'. It is the only durable trace of a per-account projection
-// error: ProcessEligibilityProjectionJobs marks a genuinely failing account
-// 'failed' with the fixed last_error_code 'PROJECTION_FAILED' (see its doc
-// comment) rather than persisting the underlying Go error text, which is
-// returned to the caller only as that round's in-memory
-// firstProcessingError.
+// status='dead' (XM-INV-PROJECTION-FAILURE-GRADING renamed the durable
+// terminal grade from 'failed', which markEligibilityProjectionJobFailedOrDead
+// no longer produces, to 'dead' after projectionFailureDeadThreshold
+// consecutive failures; a job merely retrying with backoff is status='queued'
+// and intentionally excluded here -- see the type's own field-shape note
+// below). It is the only durable, per-account trace of a genuinely stuck
+// projection error: ProcessEligibilityProjectionJobs' round-level
+// firstProcessingError (surfaced as this report's RoundErrors) records that
+// some account failed during a round, but not which one, nor whether it
+// later recovered on its own backoff-driven retry within the same rehearsal.
 type EligibilityShadowFailedJob struct {
 	ExternalAccountID string
 	LastErrorCode     string
@@ -175,11 +179,13 @@ func (s *Store) EligibilityProjectionClaimableCount(ctx context.Context, now tim
 }
 
 // EligibilityShadowFailedJobs lists every eligibility_projection_jobs row
-// currently left in status='failed'.
+// currently left in status='dead' (see EligibilityShadowFailedJob's own doc
+// comment for why 'dead', not the legacy 'failed', is the right predicate
+// after XM-INV-PROJECTION-FAILURE-GRADING).
 func (s *Store) EligibilityShadowFailedJobs(ctx context.Context) ([]EligibilityShadowFailedJob, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT external_account_id::text,COALESCE(last_error_code,''),attempt_count,updated_at
-		FROM eligibility_projection_jobs WHERE status='failed' ORDER BY external_account_id`)
+		FROM eligibility_projection_jobs WHERE status='dead' ORDER BY external_account_id`)
 	if err != nil {
 		return nil, err
 	}
