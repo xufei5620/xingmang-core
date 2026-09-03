@@ -1,5 +1,10 @@
 # RC78 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC78 shipped at signed tag
+> `v0.1.0-rc78-signed` (`99377ea`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc79-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, shadow-evaluate, and deploy RC78 — the eligibility simplification slices 1, 2 and 4 (XM-INV-ELIG-AUTO-RECONCILE with migration 0020: negative or unreconciled balance differences downgrade the account to the self-clearing `not_invoiceable_pending_reconciliation` state instead of a manual freeze and `USAGE_EXCEEDS_LEDGER` only records the overage; XM-INV-ELIG-QUEUE-NARROW: late facts reproject without freezing and `invoice-eligibility-repair --kind=queue-narrow` resolves the legacy negative-balance/usage-overage/late-fact freezes; XM-INV-USER-LEDGER-QUERY: read-only admin ledger endpoint), the release-rehearsal shadow-evaluation tool (XM-INV-SHADOW-EVAL with the three fixes from its two real server runs), and XM-INV-AGENT-RESTART-GRACE (source agent 0.3.1: persisted reconcile schedule, rolling usage reconcile window that never rewinds to the cutover, readiness grace while a rescan is actively receiving). RC77 (`a0efc92`) was signed and image-gated but deliberately not deployed; RC78 supersedes it.

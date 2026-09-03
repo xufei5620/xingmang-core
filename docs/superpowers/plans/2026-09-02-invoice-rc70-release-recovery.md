@@ -3,7 +3,7 @@
 > **SUPERSEDED — DO NOT EXECUTE.** RC70 shipped at signed tag
 > `v0.1.0-rc70-signed` (`b9d51f6`) and is deployed; its evidence is
 > immutable. Continue only with
-> `docs/superpowers/plans/2026-09-03-invoice-rc78-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-03-invoice-rc79-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

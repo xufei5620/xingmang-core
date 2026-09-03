@@ -1,19 +1,19 @@
-# Release readiness: RC32 historical issuer lifecycle and RC78 image-security candidate
+# Release readiness: RC32 historical issuer lifecycle and RC79 image-security candidate
 
 Status as of 2026-08-31:
 
 - prior application/full non-image baseline at `75fac62522a823ce8854f11f6bd4fa8ff82b526e`:
-  **GO** (`scripts/verify.ps1` passed); the current RC78 script/document delta
+  **GO** (`scripts/verify.ps1` passed); the current RC79 script/document delta
   has only targeted verification and must rerun the full gate before signing;
-- isolated staging deployment: **GO only after the fresh RC78 image/SBOM gate
+- isolated staging deployment: **GO only after the fresh RC79 image/SBOM gate
   and strict artifact verification**;
 - direct public production launch: **NO-GO** until every item in the final
   checklist below is completed.
 
-## RC78 source/static security stage (current)
+## RC79 source/static security stage (current)
 
-**Production: NO-GO.**  RC78 has source/static changes only.  The complete
-release evidence is still absent: no RC78 Docker build, zero-finding scan, SBOM,
+**Production: NO-GO.**  RC79 has source/static changes only.  The complete
+release evidence is still absent: no RC79 Docker build, zero-finding scan, SBOM,
 signature/tag, artifact verifier, runtime/provisioning proof, transfer,
 deployment, canary, or rollback point has occurred.  The passing
 `scripts/test-release-image-gate.ps1` fixture suite validates source contracts;
@@ -26,37 +26,37 @@ RC49 is failed historical evidence. `v0.1.0-rc49-signed` remains fixed at
 release manifest and must be treated as read-only. Their file set and hashes
 are anchored by `docs/RC49-FAILURE-EVIDENCE-SHA256SUMS.txt`. They are not
 transfer authority and must not be reused, renamed, amended, or represented as
-RC78 evidence.
+RC79 evidence.
 
 RC50 is also failed historical evidence. `v0.1.0-rc50-signed` remains fixed at
 `d08b3a2e40e55f7f600759c250f45b16b82bd0e1`; the interrupted
 `release/0.1.0-rc50-exact1` contains no manifest and must be treated as
 read-only. Its exact file set and SHA-256 are anchored by
 `docs/RC50-FAILURE-EVIDENCE-SHA256SUMS.txt`. Never move the tag or resume,
-reuse, rename, amend, or transfer exact1 as RC78 evidence.
+reuse, rename, amend, or transfer exact1 as RC79 evidence.
 
 RC51 is also failed historical evidence. `v0.1.0-rc51-signed` remains fixed at
 `229ca5bea04e9fa8384fa308e342fcf5f6b6332f`; exact1 completed build, scan,
 SBOM and manifest generation but final verification failed because PowerShell
 converted the two reviewed ISO date strings to `DateTime`. Its complete 65-file
 set is anchored by `docs/RC51-FAILURE-EVIDENCE-SHA256SUMS.txt`; never move the
-tag or resume, rewrite, rename, reuse, or transfer exact1 as RC78 evidence.
+tag or resume, rewrite, rename, reuse, or transfer exact1 as RC79 evidence.
 
 RC52 is also failed historical evidence. `v0.1.0-rc52-signed` remains fixed at
 `adf152771e779e6a1bd7a95b3e628d5fa85c3b3f`; exact1 stopped in source
 verification because the isolated PostgreSQL 15 host port could not become
 reachable through local host NAT. Its one-file set is anchored by
 `docs/RC52-FAILURE-EVIDENCE-SHA256SUMS.txt`; never move the tag or resume,
-rewrite, rename, reuse, or transfer exact1 as RC78 evidence.
+rewrite, rename, reuse, or transfer exact1 as RC79 evidence.
 
 The pending release must build and bind one common tag for nine images: API,
 PDF scanner, tools, web, source agent, derived PostgreSQL, derived ClamAV,
-derived ingest proxy, and Keycloak.  PostgreSQL is zero-finding with no RC78
+derived ingest proxy, and Keycloak.  PostgreSQL is zero-finding with no RC79
 exception.  The only permitted residual tuple is the exact time-bounded
 Keycloak vendor-rejected finding recorded in `docs/IMAGE-SCAN-REVIEW.md`;
 tuple/digest drift or expiry on `2026-09-30T00:00:00Z` blocks the gate.
 
-RC78 keeps the two-stage hard gate: first create and verify the signed source
+RC79 keeps the two-stage hard gate: first create and verify the signed source
 commit/tag, then produce, independently verify, and separately sign the
 manifest-bound image evidence; transfer only those images and then complete
 backup, isolated startup, migration and real production canaries.
@@ -173,7 +173,7 @@ saved; orchestration must not route user invoice traffic before readiness.
 
 ## Production prerequisites not yet performed
 
-- generate and independently verify a fresh RC78 image/SBOM/vulnerability
+- generate and independently verify a fresh RC79 image/SBOM/vulnerability
   manifest bound to the committed source and one exact image tag;
 - retain the verified pre-0011 rollback package and the independently restored
   post-0011 RC24 recovery point. Archive the unused RC24 sequence-zero state
@@ -189,7 +189,7 @@ saved; orchestration must not route user invoice traffic before readiness.
 - after both new pairs and all ten fresh sequence-zero states validate, apply
   migration 0012. It must refuse any accepted manifest, batch, advanced source
   sequence, watermark, eligibility state or financial-ledger row;
-- deploy all Invoice images under the same RC78 tag and pass real production
+- deploy all Invoice images under the same RC79 tag and pass real production
   OIDC ID-token, administrator MFA `acr`/`amr`,
   RP-initiated logout and back-channel logout canary before enabling traffic;
 - supply exact administrator and independent break-glass `/32` or `/128`
@@ -204,7 +204,7 @@ saved; orchestration must not route user invoice traffic before readiness.
   New API two-person verification plus independent issuer, PDF rejection and
   download, SMTP delivery, refund attention and more than ten simultaneous
   back-channel logouts;
-- create and locally verify the RC78 commit and signed release tag; no GitHub
+- create and locally verify the RC79 commit and signed release tag; no GitHub
   push or remote publication is authorized.
 
 ## Conservative V1 decisions requiring owner acknowledgement
