@@ -20,7 +20,42 @@ func (s *Server) getSourceHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "SOURCE_HEALTH_UNAVAILABLE", "source synchronization status is unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, report)
+	// XM-INV-PROJECTION-FAILURE-GRADING: the eligibility-projection worker's
+	// own Retrying/Dead grading is merged in here, alongside the five source
+	// streams report.Items already carries -- there is no separate
+	// admin-facing eligibility projection health endpoint. This deliberately
+	// does not affect the top-level "ready" field's existing meaning (the
+	// five-stream source readiness this endpoint has always reported);
+	// eligibility_projection is purely additional, informational detail.
+	projectionHealth, projectionErr := s.operations.EligibilityProjectionHealth(r.Context())
+	if projectionErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "SOURCE_HEALTH_UNAVAILABLE", "source synchronization status is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ready": report.Ready, "items": report.Items,
+		"eligibility_projection": eligibilityProjectionHealthDTO(projectionHealth),
+	})
+}
+
+// eligibilityProjectionHealthDTO is the sole source of truth for this field's
+// wire shape, mirroring eligibilityFreezeDTO's own pattern just above: the
+// underlying postgresstore.EligibilityProjectionHealth struct carries no json
+// tags (it was never serialized before this slice added the first
+// admin-facing consumer of it).
+func eligibilityProjectionHealthDTO(health postgresstore.EligibilityProjectionHealth) map[string]any {
+	dto := map[string]any{
+		"queued": health.Queued, "processing": health.Processing,
+		"retrying": health.Retrying, "dead": health.Dead,
+		"proof_pending": health.ProofPending,
+	}
+	if !health.OldestPending.IsZero() {
+		dto["oldest_pending"] = health.OldestPending
+	}
+	if !health.OldestProofPending.IsZero() {
+		dto["oldest_proof_pending"] = health.OldestProofPending
+	}
+	return dto
 }
 
 func (s *Server) listSourceAccounts(w http.ResponseWriter, r *http.Request) {

@@ -47,6 +47,12 @@ type InvoiceService interface {
 // the same trailing domain.SourceType "platform" convention applies here.
 type OperationsService interface {
 	SourceHealth(context.Context) (postgresstore.SourceHealthReport, error)
+	// EligibilityProjectionHealth (XM-INV-PROJECTION-FAILURE-GRADING) is
+	// merged into getSourceHealth's response alongside the five source
+	// streams above -- there is no separate admin-facing eligibility
+	// projection health endpoint, and this is the only "health" report the
+	// API currently serves.
+	EligibilityProjectionHealth(context.Context) (postgresstore.EligibilityProjectionHealth, error)
 	ListExternalAccounts(context.Context, string, domain.SourceType) ([]postgresstore.ConnectedSourceAccount, error)
 	ListPaymentCandidatesPage(context.Context, postgresstore.PaymentCandidatePageQuery) (postgresstore.PaymentCandidatePage, error)
 	RejectNewAPIPaymentWithEvidence(context.Context, string, string, string, string) (domain.FundingLot, error)
