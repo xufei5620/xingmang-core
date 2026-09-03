@@ -355,6 +355,19 @@ func (a *ProductionAuth) callback(server *Server, w http.ResponseWriter, r *http
 // responding -- both the one success event and every rejection reason
 // (team lead's brief) -- because, unlike the OIDC callback, this endpoint
 // has no upstream identity provider of its own keeping a parallel log.
+//
+// Origin (see consoleAssertionOriginAllowed): the integrated protocol
+// (XM-INV-ASSERT-HANDSHAKE) has the platform console postMessage the signed
+// assertion INTO the embedded invoice iframe, and it is the invoice web app
+// itself -- running at its own public origin -- that redeems the assertion
+// with a same-origin fetch. The browser therefore sends
+// Origin: <the invoice app's own public origin>, not the console's. A first
+// production canary (2026-09-03) proved this out: every redemption failed
+// ORIGIN_REJECTED because this handler only ever accepted the configured
+// console issuer, an assumption written before the postMessage-into-iframe
+// shape was settled. The console issuer stays accepted too, for a
+// hypothetical direct cross-origin POST from the console itself -- never
+// actually observed, but not contradicted by the design spec either.
 func (a *ProductionAuth) consoleAssertionExchange(server *Server, w http.ResponseWriter, r *http.Request) {
 	requestIDValue := requestID(r)
 	if !a.ConsoleAssertionEnabled {
@@ -374,10 +387,10 @@ func (a *ProductionAuth) consoleAssertionExchange(server *Server, w http.Respons
 	}
 
 	origins := r.Header.Values("Origin")
-	if len(origins) != 1 || origins[0] != a.ConsoleAssertionConfig.Issuer {
+	if len(origins) != 1 || !consoleAssertionOriginAllowed(origins[0], server.publicOrigin, a.ConsoleAssertionConfig.Issuer) {
 		a.ConsoleAssertionRateLimiter.RecordFailure(rateLimitKey)
 		a.auditConsoleAssertionRejection(r.Context(), "", requestIDValue, "origin_rejected")
-		writeError(w, http.StatusForbidden, "ORIGIN_REJECTED", "request origin is not the configured console origin")
+		writeError(w, http.StatusForbidden, "ORIGIN_REJECTED", "request origin is not an allowed origin for console-assertion exchange")
 		return
 	}
 
@@ -472,6 +485,26 @@ func (a *ProductionAuth) auditConsoleAssertionRejection(ctx context.Context, act
 		Action: "auth.console_assertion.rejected", ObjectType: "console_assertion_attempt", ObjectID: requestIDValue,
 		RequestID: requestIDValue, Reason: safeAuditToken(reason), Severity: auth.SeverityWarning,
 	})
+}
+
+// consoleAssertionOriginAllowed reports whether a single Origin header value
+// is one of the two legitimate callers of POST /api/v1/auth/console-
+// assertion: the invoice web app's own public origin (invoiceOrigin, the
+// same value already used to build the OIDC redirect URI and the CSRF
+// allowed-origin list -- see runtime.go's publicOrigin, threaded through as
+// server.publicOrigin) -- the actual caller in the integrated protocol,
+// since the invoice frontend redeems the assertion with a same-origin
+// fetch -- or the configured console issuer (consoleIssuer,
+// ConsoleAssertionConfig.Issuer), kept for a hypothetical direct
+// cross-origin POST from the console itself. A blank config value never
+// matches a blank Origin: an Origin header is never empty on a real
+// browser request, and a config value left unset must not accidentally
+// widen the check.
+func consoleAssertionOriginAllowed(origin, invoiceOrigin, consoleIssuer string) bool {
+	if origin == "" {
+		return false
+	}
+	return (invoiceOrigin != "" && origin == invoiceOrigin) || (consoleIssuer != "" && origin == consoleIssuer)
 }
 
 func consoleAssertionNonceHash(nonce string) string {
