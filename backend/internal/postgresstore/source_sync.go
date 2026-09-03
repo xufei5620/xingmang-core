@@ -149,6 +149,22 @@ type SourceBatchInput struct {
 	ScanSnapshotRowCount int64
 	Events               []SourceBatchEvent
 	Actor                AuditActor
+	// Now and StaleActiveScanCycleMaxAge (XM-INV-SCAN-CYCLE-SUPERSEDE) let
+	// CommitSourceBatch decide whether an existing active scan cycle for this
+	// (SourceInstanceID,StreamID) under a DIFFERENT ScanCycleID has gone stale
+	// enough to supersede instead of rejecting this batch with
+	// domain.ErrScanCycleBusy forever -- see supersedeStaleActiveScanCycleTx.
+	// Both are zero-value safe: an unset Now or a non-positive
+	// StaleActiveScanCycleMaxAge disables the supersede path entirely and
+	// preserves the pre-existing behavior (a different active cycle id is
+	// always busy), the same "zero disables" convention
+	// SourceFreshnessPolicy.EconomicRescanActivityMaxAge already uses.
+	// CommitVerifiedSourceBatch (application/service.go) wires
+	// StaleActiveScanCycleMaxAge from that exact same field
+	// (Service.sourceEconomicRescanActivityMaxAge) so both call sites agree on
+	// what "still looks like a live rescan" means.
+	Now                        time.Time
+	StaleActiveScanCycleMaxAge time.Duration
 }
 
 type SourceBatchResult struct {
@@ -314,6 +330,9 @@ func (s *Store) CommitSourceBatch(ctx context.Context, in SourceBatchInput) (Sou
 		return SourceBatchResult{}, fmt.Errorf("insert source batch: %w", err)
 	}
 	if in.SchemaVersion == "3.0" {
+		if err = supersedeStaleActiveScanCycleTx(ctx, tx, in); err != nil {
+			return SourceBatchResult{}, err
+		}
 		command, cycleErr := tx.Exec(ctx, `
 			INSERT INTO source_economic_scan_cycles(
 				source_instance_id,stream_id,scan_cycle_id,stream_watermark_at,source_cursor,
@@ -427,6 +446,105 @@ func (s *Store) CommitSourceBatch(ctx context.Context, in SourceBatchInput) (Sou
 		return SourceBatchResult{}, err
 	}
 	return SourceBatchResult{AcceptedRecords: len(in.Events), Sequence: in.Sequence}, nil
+}
+
+// scanCycleSupersededAction is the audit action recorded when
+// supersedeStaleActiveScanCycleTx (XM-INV-SCAN-CYCLE-SUPERSEDE) blocks a
+// stale active scan cycle to let a new one take its place.
+const scanCycleSupersededAction = "source.scan_cycle.superseded"
+
+// scanCycleSupersedeReason is the free-text reason persisted on the
+// abandoned row itself (source_economic_scan_cycles.supersede_reason,
+// migration 0022) so an operator reading that table directly -- not just the
+// audit log -- can see why a row went 'blocked' without an explicit freeze.
+const scanCycleSupersedeReason = "stale active scan cycle abandoned by an agent restart; superseded by a new scan cycle after exceeding the rescan activity grace window"
+
+// supersedeStaleActiveScanCycleTx is XM-INV-SCAN-CYCLE-SUPERSEDE's fix for the
+// production incident where an agent restart (XM-INV-AGENT-RESTART-GRACE part
+// B's shouldAbandonLegacyReconcileCycle) abandons a legacy in-flight scan
+// cycle client-side and starts a brand-new scan_cycle_id from its rolling
+// baseline, but nothing server-side ever closed the orphaned row the new
+// cycle replaces: CommitSourceBatch's one-active-cycle partial unique index
+// (source_economic_one_active_scan_cycle, migration 0009) rejected every
+// batch of the new cycle as domain.ErrScanCycleBusy forever, and the agent
+// treats that 503 as transient and retries without end.
+//
+// Called (from CommitSourceBatch, only for schema v3 batches) inside the same
+// transaction that already holds the per-(source,stream) advisory xact lock
+// taken at the top of CommitSourceBatch, so no concurrent CommitSourceBatch
+// call for this stream can race this decision -- the SELECT below is a
+// consistent, exclusive read of "the" active cycle, not a check that could go
+// stale before the INSERT that follows it.
+//
+//   - No active cycle at all, or the active cycle's id matches in.ScanCycleID
+//     (a continuation batch of the same cycle): nothing to do, the caller's
+//     INSERT proceeds exactly as before this feature existed.
+//   - A different active cycle id that is still fresh -- its updated_at is
+//     within in.StaleActiveScanCycleMaxAge of in.Now, the exact same
+//     "still looks like a live rescan" test evaluateSourceStreamHealth uses
+//     for readiness grace (economicRescanActivityWithinWindow) -- returns
+//     domain.ErrScanCycleBusy, matching the pre-existing comment on the
+//     INSERT's unique_violation mapping below: this is the expected,
+//     temporary rejection while a genuinely active cycle owns the stream.
+//   - A different active cycle id that has gone stale (no update within that
+//     same window) is marked 'blocked' with superseded_by_scan_cycle_id/
+//     supersede_reason set and an audit event recorded, then this returns nil
+//     so the caller's INSERT proceeds: the partial unique index no longer
+//     sees a conflicting row by the time that INSERT runs.
+//
+// in.Now.IsZero() or in.StaleActiveScanCycleMaxAge<=0 (the caller did not opt
+// in) disables this entirely and always returns domain.ErrScanCycleBusy for a
+// different active cycle id, preserving the pre-existing behavior byte for
+// byte.
+func supersedeStaleActiveScanCycleTx(ctx context.Context, tx pgx.Tx, in SourceBatchInput) error {
+	var activeCycleID, activeCycleStatus string
+	var activeUpdatedAt time.Time
+	var activeFirstSequence, activeLastSequence int64
+	err := tx.QueryRow(ctx, `
+		SELECT scan_cycle_id::text,cycle_status,updated_at,first_sequence,last_sequence
+		FROM source_economic_scan_cycles
+		WHERE source_instance_id=$1 AND stream_id=$2 AND cycle_status IN ('receiving','processing')
+		FOR UPDATE`, in.SourceInstanceID, in.StreamID).Scan(
+		&activeCycleID, &activeCycleStatus, &activeUpdatedAt, &activeFirstSequence, &activeLastSequence)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if activeCycleID == in.ScanCycleID {
+		return nil
+	}
+	if in.Now.IsZero() || in.StaleActiveScanCycleMaxAge <= 0 {
+		return domain.ErrScanCycleBusy
+	}
+	stillFresh := economicRescanActivityWithinWindow(activeUpdatedAt, SourceFreshnessPolicy{
+		Now: in.Now, EconomicRescanActivityMaxAge: in.StaleActiveScanCycleMaxAge,
+	})
+	if stillFresh {
+		return domain.ErrScanCycleBusy
+	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE source_economic_scan_cycles
+		SET cycle_status='blocked',superseded_by_scan_cycle_id=$1::uuid,supersede_reason=$2,updated_at=now()
+		WHERE source_instance_id=$3 AND stream_id=$4 AND scan_cycle_id=$5::uuid`,
+		in.ScanCycleID, scanCycleSupersedeReason, in.SourceInstanceID, in.StreamID, activeCycleID); err != nil {
+		return fmt.Errorf("supersede stale active scan cycle: %w", err)
+	}
+	if err = writeAudit(ctx, tx, in.Actor, scanCycleSupersededAction, "source_scan_cycle",
+		in.SourceInstanceID+"/"+in.StreamID+"/"+activeCycleID,
+		map[string]any{
+			"scan_cycle_id": activeCycleID, "cycle_status": activeCycleStatus,
+			"first_sequence": activeFirstSequence, "last_sequence": activeLastSequence,
+			"updated_at": activeUpdatedAt,
+		},
+		map[string]any{
+			"scan_cycle_id": in.ScanCycleID, "superseded_scan_cycle_id": activeCycleID,
+			"sequence": in.Sequence, "cycle_status": "blocked",
+		}); err != nil {
+		return err
+	}
+	return nil
 }
 
 const sourceEventLease = 10 * time.Minute

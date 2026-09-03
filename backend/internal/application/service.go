@@ -492,6 +492,14 @@ func (s *Service) CommitVerifiedSourceBatch(ctx context.Context, authenticatedSo
 		ScanCycleID: batch.ScanCycleID, ScanComplete: batch.ScanComplete,
 		ScanSnapshotID: batch.ScanSnapshotID, ScanSnapshotRowCount: batch.ScanSnapshotRowCount,
 		Events: events, Actor: auditActor(ctx, "source_connector", authenticatedSourceID, "verified source batch durably accepted"),
+		// XM-INV-SCAN-CYCLE-SUPERSEDE: reuse the exact same activity-freshness
+		// budget the readiness endpoint already grants an active rescan
+		// (sourceFreshnessPolicy's EconomicRescanActivityMaxAge, derived in
+		// backend/cmd/api/runtime.go) so "still looks like a live rescan"
+		// answers the same question here (should a competing scan cycle id be
+		// superseded) as it does there (should /readyz tolerate a
+		// stale-looking watermark).
+		Now: s.now(), StaleActiveScanCycleMaxAge: s.sourceEconomicRescanActivityMaxAge,
 	})
 }
 
