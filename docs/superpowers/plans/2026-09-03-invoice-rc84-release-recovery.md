@@ -1,5 +1,10 @@
 # RC84 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC84 shipped at signed tag
+> `v0.1.0-rc84-signed` (`adc67fb`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc85-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC84 — XM-INV-CONSOLE-ASSERT-ADMIN-ROLE: the console-assertion exchange checks the assertion's `roles` claim against the console's own configured administrator role (`CONSOLE_ASSERTION_ADMIN_ROLE`, defaulting to `OIDC_ADMIN_ROLE`) instead of this deployment's Keycloak realm role, and the principal it builds carries the invoice `AdminPolicy.Role` so the session it issues satisfies every admin route. The third CR-0006 canary (2026-09-03 16:38Z, on RC83) rejected every exchange with `roles does not include the configured administrator role`: the console signs a staff account's own roles verbatim (`admin`, `credential-admin`, `staff`) while the invoice side required `invoice-admin`.
