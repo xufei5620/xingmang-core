@@ -182,6 +182,52 @@ _shadow_eval_scalar() {
   grep -m1 -E "^  \"$key\": " "$report" | sed -E "s/^  \"$key\": \"?([^\",]*)\"?,?\$/\\1/"
 }
 
+# _shadow_eval_migrations_applied <report.json>
+# Prints one migration file name per line from the top-level
+# "migrations_applied" array (empty when it is the literal `null` --
+# nothing was newly applied because the restored backup was already at the
+# candidate's migration set). Same shape convention as round_errors/
+# failed_accounts; see report_test.go's
+# TestReportJSONShapeMatchesShadowEvalLibAssumptions for the pinned
+# null-vs-populated marshaling this depends on.
+_shadow_eval_migrations_applied() {
+  local report=$1
+  awk '/"migrations_applied": \[/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}"/{v=$0; sub(/^ {4}"/,"",v); sub(/",?$/,"",v); print v}' "$report"
+}
+
+# shadow_eval_migrate_docker_args <network> <tools_image> <secret_bind_source>
+# Prints, one argument per line, the exact `docker run` argument list for
+# the candidate tools image's invoice-migrate step against the restored,
+# isolated database -- read-only, non-root-capable (the caller is
+# responsible for having already chowned secret_bind_source to the tools
+# image's own runtime uid, same as for invoice-eligibility-shadow), on the
+# rehearsal's own network, reusing the same database-url secret bind-mount
+# shadow-eval.sh already prepared for invoice-eligibility-shadow.
+#
+# backend/cmd/migrate/main.go takes no command-line flags at all: its
+# connection comes from the DATABASE_URL_FILE environment variable, and its
+# migrations directory from MIGRATIONS_DIR (already set by
+# backend/Dockerfile's tools stage, `ENV MIGRATIONS_DIR=/app/migrations`, so
+# not repeated here). This deliberately does not set APP_ENV or
+# MIGRATION_MODE: leaving APP_ENV unset skips its production-only
+# ELIGIBILITY_START_AT precondition (validateMigrationEligibilityPolicy --
+# this is a throwaway rehearsal database, never production), and leaving
+# MIGRATION_MODE unset selects its default apply mode (migrate.Up, not the
+# read-only migrate.Verify) -- exactly what this rehearsal needs: bring the
+# restored production schema up to the candidate's own migration set before
+# driving its projection worker, the same as deploy/roll-forward.sh's own
+# migrate step does against real production before anything else runs.
+shadow_eval_migrate_docker_args() {
+  local network=$1 tools_image=$2 secret_bind_source=$3
+  printf '%s\n' \
+    --pull never --rm --network "$network" --read-only \
+    --cap-drop ALL --security-opt no-new-privileges:true \
+    --mount "type=bind,src=$secret_bind_source,dst=/run/secrets/database-url,readonly" \
+    --env DATABASE_URL_FILE=/run/secrets/database-url \
+    --entrypoint /usr/local/bin/invoice-migrate \
+    "$tools_image"
+}
+
 # shadow_eval_human_summary <report.json>
 # Prints a short human-readable rendering of the report to stdout -- or, for
 # anything shadow_eval_report_is_valid rejects (see its own doc comment), a
@@ -198,16 +244,18 @@ shadow_eval_human_summary() {
     printf '  log file:      %s\n' "$(_shadow_eval_scalar "$report" log_file)"
     return 0
   fi
-  local before_freezes after_freezes new_reasons round_error_count failed_account_count
+  local before_freezes after_freezes new_reasons round_error_count failed_account_count migrations_applied
   before_freezes=$(_shadow_eval_freeze_block "$report" 1 | awk -F'\t' '{printf "%s%s=%s", (NR>1?", ":""), $1, $2}')
   after_freezes=$(_shadow_eval_freeze_block "$report" 2 | awk -F'\t' '{printf "%s%s=%s", (NR>1?", ":""), $1, $2}')
   new_reasons=$(shadow_eval_new_freeze_reasons "$report" | paste -sd ',' - | sed 's/,/, /g')
   round_error_count=$(awk '/"round_errors": \[/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}"/{n++} END{print n+0}' "$report")
   failed_account_count=$(awk '/"failed_accounts": \[/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}\{/{n++} END{print n+0}' "$report")
+  migrations_applied=$(_shadow_eval_migrations_applied "$report" | paste -sd ',' - | sed 's/,/, /g')
 
   printf 'XM-INV-SHADOW-EVAL rehearsal report\n'
   printf '  backup:              %s\n' "$(_shadow_eval_scalar "$report" backup_label)"
   printf '  candidate image tag: %s\n' "$(_shadow_eval_scalar "$report" candidate_image_tag)"
+  printf '  migrations applied:  %s\n' "${migrations_applied:-none}"
   printf '  generated at:        %s\n' "$(_shadow_eval_scalar "$report" generated_at)"
   printf '  rounds run:          %s / %s\n' "$(_shadow_eval_scalar "$report" rounds_run)" "$(_shadow_eval_scalar "$report" max_rounds)"
   printf '  queue drained:       %s\n' "$(_shadow_eval_scalar "$report" queue_drained)"
