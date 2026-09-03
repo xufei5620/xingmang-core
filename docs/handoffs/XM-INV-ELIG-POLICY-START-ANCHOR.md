@@ -11,6 +11,16 @@
   POLICY_ANCHOR bootstrap and migration 0016 this slice builds on) plus this slice's own new section
   2.10.
 
+## Code review follow-up (commit `a27cd87`)
+
+A code reviewer caught a real defect in `deriveCutoverBalanceUnitsTx`: the original formula (matching
+the design doc's own text) subtracted non-cash credits but not cash payments in the derivation
+window, which the reviewer correctly identified as live for the ordinary case of a brand-new account
+whose first real activity is a recharge, not merely a theoretical edge case. Fixed in commit
+`a27cd87` -- see "Design decisions" and "Risks" below, both updated in place to describe the fix
+rather than the original gap. New tests added for the payment term (unit-level and end-to-end) and
+for the repair's `Blocked` path. Full suite, `gofmt`, and `gitleaks` re-run and reported below.
+
 ## Base commit note (deviation, flagged as it happened)
 
 The team lead's delegation message gave two things for the worktree's base: a `git worktree add`
@@ -62,24 +72,28 @@ Implements design section 3(D) in full:
 
 ## Design decisions
 
-### `deriveCutoverBalanceUnitsTx` does not subtract cash funding-lot units (flagged, not fixed --
-see Risks)
+### `deriveCutoverBalanceUnitsTx` subtracts cash funding-lot units too (fixed after code review)
 
-The design doc's own formula (and the team lead's brief, independently, word-for-word the same) is
+The design doc's own formula (and the original brief, independently, word-for-word the same) was
 `first observed checkpoint balance − credits(window) + usage(window)`, with no term for cash
-payments. I verified this is *self-consistent* with the rest of the evaluator mechanism (a synthetic
-`UNKNOWN_POSITIVE` credit gets created for the derived checkpoint, and the real checkpoint then
-reconciles to exactly zero) **only when the window contains no real cash payment** -- if
-`buildEligibilityProjectionExcludingUsageTx`'s cash-pool query (which does add a window payment's
-units to `ExpectedBalance`) finds a real `WALLET_CASH` payment in that same window, the derived
-value would be off by exactly that payment's unit amount, since nothing in the formula unwinds it.
-Today's callers (a fresh bootstrap, and the three-account repair) are both verified to have no such
-payment in the relevant window, so this is not live in practice -- flagged in
-`deriveCutoverBalanceUnitsTx`'s own doc comment as a theoretical correctness gap for a
-possible-but-unobserved future shape (a brand-new account's very first payment landing between the
-policy start and its first checkpoint), not fixed, since the design doc and the brief both
-independently specify the formula exactly as implemented and I did not have authorization to widen
-its scope unilaterally. See Risks item 1.
+payments -- the design text's "credits" was loose; the intent, confirmed on review, is *all inflows*.
+A code reviewer correctly flagged this as a live defect, not a theoretical one: `buildEligibilityProjectionExcludingUsageTx`'s
+cash-pool query independently adds a window payment's own `cash_service_units` to `ExpectedBalance`
+once the window includes it, so a derivation that only subtracted non-cash credits would inflate the
+derived opening balance by exactly that payment's own amount -- the ordinary shape for any account
+first observed after the policy start (a new user who registers, recharges, and is then first seen
+at a checkpoint has that recharge inside this exact window). Fixed: the formula is now
+`checkpoint balance − non-cash credits(window) − cash payments(window) + usage(window)`, reading the
+payment's own service-unit value off `funding_lot_consumption_state.cash_service_units` (not a
+minor-unit amount -- `funding_lots` alone does not carry the ledger's own unit-equivalent), matching
+`buildEligibilityProjectionExcludingUsageTx`'s own cash-pool predicate exactly (`eligibility_kind='WALLET_CASH'`,
+`verification_state='verified'`, `refund_frozen=FALSE`; `SUBSCRIPTION_CASH` is excluded from that
+pool today and so is excluded here too). Re-verified the same reconciliation property algebraically
+with the payment term included (worked through by hand before writing the fix): the real checkpoint
+still reconciles to exactly zero difference once its own in-window payment is subtracted at
+derivation time and re-added by the projection once the window opens around it. Applied identically
+to both callers (the bootstrap branch and the repair's re-anchor derivation), since both go through
+this one shared function. New tests added -- see Tests below.
 
 ### No code change needed for design 2.2's own boundary (`RequeueSourceDependency`)
 
@@ -211,14 +225,21 @@ on the next normal worker cycle, not synchronously inside the repair's own trans
   bootstrap branch (cutover_at/cutover_balance_units derivation, second checkpoint insert, enriched
   audit detail); new `deriveCutoverBalanceUnitsTx` and
   `synthesizePolicyStartReconciliationCheckpointTx` functions. No other function in this file was
-  touched.
+  touched. **Follow-up commit `a27cd87`:** `deriveCutoverBalanceUnitsTx` also subtracts in-window
+  cash payments (see "Code review follow-up" above) -- no other function touched by the follow-up
+  either.
 - `backend/internal/postgresstore/policy_start_reanchor_repair.go` (new) --
   `RepairPolicyStartReanchorEligibility` and its helpers (`policyStartReanchorCandidateAccountIDs`,
-  `repairPolicyStartReanchorAccount`).
+  `repairPolicyStartReanchorAccount`). Unchanged by the follow-up commit (it reuses
+  `deriveCutoverBalanceUnitsTx` as-is, so the fix applies here automatically).
 - `backend/internal/postgresstore/policy_start_anchor_integration_test.go` (new) -- this slice's own
-  bootstrap-side tests, see Tests below.
+  bootstrap-side tests, see Tests below. **Follow-up commit `a27cd87`** adds
+  `TestDeriveCutoverBalanceUnitsSubtractsCashPaymentsInWindow`,
+  `TestPolicyStartBootstrapWithInWindowCashPaymentReconcilesWithoutNegativeDifference`, and the
+  `insertWalletCashLotWithFlagsDirect` helper.
 - `backend/internal/postgresstore/policy_start_reanchor_repair_integration_test.go` (new) -- this
-  slice's own repair-tool tests, see Tests below.
+  slice's own repair-tool tests, see Tests below. **Follow-up commit `a27cd87`** adds
+  `TestPolicyStartReanchorBlockedByActiveInvoiceExposureWritesNothing`.
 - `backend/internal/postgresstore/policy_anchor_integration_test.go` --
   `TestReconciliationCheckpointIgnoredPrePolicyAndBootstrapsPolicyAnchorPostPolicy`'s `cutover_at`
   assertion corrected (was `postAsOf`, now `policyStart`) -- the one assertion in that test that
@@ -297,6 +318,25 @@ New tests, all green:
   `cutover_at` becomes the policy start -- design's own "confirm with a test" requirement.
 - `TestPolicyStartBootstrapCheckpointExactlyAtPolicyStartReconcilesCleanly` -- the required edge case;
   see "Bootstrap edge cases" above.
+- `TestDeriveCutoverBalanceUnitsSubtractsCashPaymentsInWindow` (added after code review) -- direct
+  unit test of the fixed three-term formula: checkpoint 1000, a 200-unit credit, a 50-unit usage
+  fact, and a verified 300-unit `WALLET_CASH` payment, all in the window -- derived = 550
+  (1000-200-300+50). An unverified 900-unit payment and a refund-frozen 900-unit payment (both
+  otherwise in-window) must not count; a 900-unit payment after the checkpoint must not count either.
+  A "before policy start" case is not constructable at all for a cash lot: `funding_lots`' own
+  `funding_lots_invoice_policy_guard` trigger unconditionally rejects any `WALLET_CASH`/
+  `SUBSCRIPTION_CASH` row with `completed_at` before the policy start at INSERT time.
+- `TestPolicyStartBootstrapWithInWindowCashPaymentReconcilesWithoutNegativeDifference` (added after
+  code review) -- the real, non-theoretical shape: a fresh account's only in-window activity is one
+  500-unit verified recharge, checkpoint balance 600. Verifies the derived checkpoint's own balance
+  is exactly 100 (600-500); driving `reprojectEligibilityTx`/`evaluatePendingBalanceEvidenceTx`
+  directly (not `ProcessEligibilityProjectionJobs`, whose own `ensureBalanceCarryForwardProofTx`
+  additionally requires every in-window `WALLET_CASH` lot to be traceable to a real
+  `source_economic_scan_cycle_events` row -- an unrelated ceremony this test's direct-insert bypass
+  does not wire up, matching this package's own precedent for evaluator-focused tests) confirms both
+  checkpoints reach a terminal status (one `matched`, one `positive_classified_non_cash`, never
+  `negative_frozen`), zero open freezes, account `active`, and the recharge's own lot unchanged
+  (still verified, `WALLET_CASH`, not refund-frozen).
 
 **`policy_start_reanchor_repair_integration_test.go`:**
 - `TestPolicyStartReanchorDryRunZeroLotsReportsNoOpAndChangesNothing` -- row-for-row equality
@@ -318,6 +358,13 @@ New tests, all green:
   in-window lot. Asserts the repair itself returns no error, exactly one collected per-account error
   for the broken account, and the good account is processed to completion; the broken account's own
   failed transaction left no partial trace.
+- `TestPolicyStartReanchorBlockedByActiveInvoiceExposureWritesNothing` (added after code review) --
+  an account with a real in-window `WALLET_CASH` lot (`WindowFundingLots=1`, so not the zero-lot
+  NoOp case) that also carries a real `invoice_allocations` row in `'reserved'` state on that same
+  lot. Row-for-row equality of the account row (before/after both dry-run and apply, mirroring the
+  NoOp test's own technique) plus explicit checks that the lot's `consumed_cash_minor` and the
+  allocation's own `allocation_state` are both unchanged. Both modes report `Blocked: true`,
+  `Reprojected: false`.
 
 Existing tests re-run unmodified as part of the full package runs below, including every prior
 `consumption.go` evaluator/bootstrap test and every sibling repair tool's own tests -- all still
@@ -347,23 +394,29 @@ Full package list, all `ok`: `cmd/api`, `cmd/bootstrap-settings`, `cmd/bootstrap
 `internal/migrate`, `internal/oidcretention`, `internal/pdfscanner`, `internal/postgresstore`,
 `internal/securefields`, `internal/sourceingest`, `internal/testdb`.
 
-One flake observed and reported: the very first full-suite run hit a connection-dial failure in
-`cmd/eligibility-repair` (`dial tcp 127.0.0.1:55432 ... connectex: ...`) -- rerunning exactly that
-package (and, separately, the full suite again) came back clean both times, consistent with this
-machine's own documented Docker-port-forwarding flakiness, not a code issue. `internal/postgresstore`
-(the package this slice's own changes and tests live in) was green on every run, no flake observed
-there.
+Flakes observed and isolated-rerun-confirmed transient, across the original submission and the
+code-review follow-up fix: a connection-dial failure in `cmd/eligibility-repair` (first submission);
+`cmd/identity-migrate` and two different `internal/auth` tests failing on a connection-dial or OIDC
+discovery mock error on one full run each, then passing cleanly when rerun in isolation immediately
+after (follow-up fix run) -- a different test failed each time, consistent with this machine's own
+documented Docker-port-forwarding/proxy-TUN flakiness, not a code issue; none of these packages
+contain any code this slice touches. `internal/postgresstore` (the package this slice's own changes
+and tests live in) was green on every run across both the original submission and the follow-up fix,
+no flake observed there at any point.
 
 `"$(go env GOROOT)/bin/gofmt" -l` against the **staged git blob** of every file this slice touches or
 adds (`git show ":<path>"`, matching this machine's documented CRLF-checkout `gofmt` false-positive
-handling): three real formatting issues found and fixed before committing
+handling): three real formatting issues found and fixed before the original commits
 (`cmd/eligibility-repair/main.go`'s new constant misaligned with its siblings;
 `policy_start_anchor_integration_test.go`'s a struct-literal field alignment;
 `policy_start_reanchor_repair.go`'s a struct-field alignment) -- `gofmt -w` applied to exactly those
 three files (confirmed via `git status` that no other file was touched by the formatting pass), clean
-on every file afterward.
+on every file afterward. Re-checked after the code-review follow-up fix (the three files it touched):
+clean, no further issues.
 
-`gitleaks git --no-banner --log-opts="a9e70f3..HEAD" .`: clean, two commits scanned, no leaks.
+`gitleaks git --no-banner --log-opts="a9e70f3..HEAD" .`: clean on the original submission (two
+commits scanned) and clean again after the follow-up fix commit(s) -- see the commit list at the top
+of this document for the exact final range.
 
 ## Not run
 
@@ -380,32 +433,21 @@ on every file afterward.
 
 ## Risks / things to sign off on
 
-1. **`deriveCutoverBalanceUnitsTx` does not account for a real cash payment inside the derivation
-   window** -- see "Design decisions" above. Matches the design doc's own formula exactly (and the
-   brief's, independently); flagged as a theoretical gap for a future account whose very first
-   payment lands between the policy start and its first checkpoint, not fixed. No production account
-   is known to have this shape today (design's own text: "今日生产没有账号在该窗口内有真实充值（已验
-   证）").
-2. **`reanchorLegacyEligibilityAccountTx` (design 2.4) still anchors at the candidate checkpoint's
+1. **`reanchorLegacyEligibilityAccountTx` (design 2.4) still anchors at the candidate checkpoint's
    own `as_of`, not the policy start** -- untouched, out of this slice's stated scope. Any future
    legacy-account re-anchor via that path will re-introduce the dead zone this slice closes, for that
    one account. Flagging as a known gap for a future slice or a deliberate decision to also update
    2.4, not attempted here.
-3. **No dedicated test for a real `Blocked` (active invoice exposure) account** -- the exposure guard
-   itself is a straightforward, directly-modeled-on-2.4 query; given time budget, verified by code
-   inspection and by the fact that *without* it, `TestPolicyStartReanchorAccountIsolation`'s original
-   fixture attempt (before I added the guard) reliably reproduced the exact constraint violation the
-   guard now prevents. A dedicated test constructing a real `invoice_allocations` row in `'reserved'`
-   state on an otherwise-eligible account and asserting `Blocked: true` with zero writes would close
-   this gap.
-4. **The `TestPolicyStartReanchorAccountIsolation` broken-account fixture is hand-constructed to be
+2. **The `TestPolicyStartReanchorAccountIsolation` broken-account fixture is hand-constructed to be
    self-consistent at every intermediate step** (a real usage fact, a matching `consumption_allocations`
    row, all three of `funding_lots`/`funding_lot_consumption_state`/`consumption_allocations` inserted
    in one explicit transaction so the deferred consumption-mirror trigger sees all three by commit) --
    this was necessary discovery during implementation (see the test's own extensive doc comment); it
    does not by itself prove a *production* account can reach this exact broken shape, only that the
-   repair correctly isolates a genuine database error for one account when it occurs.
-5. No new float amounts, no logged/persisted secrets, no `contracts/` changes, no admin-OIDC changes,
+   repair correctly isolates a genuine database error for one account when it occurs. The same
+   technique (and the same reasoning) applies to `TestPolicyStartReanchorBlockedByActiveInvoiceExposureWritesNothing`'s
+   own fixture.
+3. No new float amounts, no logged/persisted secrets, no `contracts/` changes, no admin-OIDC changes,
    no tags created, no touch to `backend/Dockerfile`, no touch to any file outside this slice's own
    stated scope -- checked.
 
