@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xufei5620/xingmang-platform/connectors/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 )
@@ -195,7 +196,16 @@ type RequestLogSummary struct {
 	// 保留它的理由是映射失败时它是唯一的追查锚点（拿它去 NewAPI 后台反查）。
 	// 即便如此，前端只在详情页显示，列表页优先显示用户名。
 	TokenPrefix string
-	Model       string
+	// User 是本条记录关联到的稳定上游身份；nil 表示未关联，不能由
+	// Username/TokenPrefix 反推（platform-user-read-v2 设计文档 §6.1；
+	// CR-0008「契约变化」）。与 Username/TokenPrefix 并存，是新增的第三条
+	// 身份线索，不是替换——两个既有字段不删除、行为不变。
+	//
+	// 今天唯一能填出非 nil 值的路径是文件后端读到 tokenmap.v2.json 且
+	// 该记录的 token 前缀在其中登记了非空 user_id（见 file_client.go 的
+	// resolveUserRef）；映射不到时同样按 nil 处理，不是新错误类别。
+	User  *platformusers.UserRef
+	Model string
 	// Channel / Upstream 是本次实际路由的渠道与上游显示名；空串表示未记录。
 	Channel  string
 	Upstream string
@@ -385,6 +395,14 @@ type ListFilter struct {
 	// 模糊匹配在这里是**扩大**可见范围的操作：输入 "a" 就能扫出全部
 	// 含 a 的用户名及其请求元数据。要模糊搜索得先有一个想清楚的授权模型。
 	Username string
+	// User 精确过滤（Platform + ID 都要匹配）；nil 表示不按此过滤。
+	// User.Platform 必须与 Source 相等（同 §6.1 判据）——ValidateFilter
+	// 会拒绝不相等的组合，不是静默忽略。
+	//
+	// 与 Username 同一条"过滤器只做收窄"的纪律：上游没给用户 ID
+	// （tokenmap.v2.json 缺失、这条前缀未关联到 ID）时，按这个过滤器
+	// 查询恒为空结果，不是错误（CR-0008 变更范围#3）。
+	User *platformusers.UserRef
 	// Model 精确匹配。
 	Model  string
 	Status StatusFilter

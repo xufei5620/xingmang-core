@@ -53,6 +53,12 @@ type FileConfig struct {
 	// TokenMapPath 是 tokenmap.json 的路径，可留空——留空时 Username 恒为
 	// 空串（"映射不到"是契约允许的合法状态，不是错误）。
 	TokenMapPath string
+	// TokenMapV2Path 是 tokenmap.v2.json 的路径（CR-0008 新增的并行文件，
+	// 与 tokenmap.json 同一次刷新写出，携带上游数字/不透明用户 ID）；
+	// 可留空——留空、文件不存在或解析失败时 RequestLogSummary.User 恒为
+	// nil，与 TokenMapPath 缺席时 Username 恒为空串同一条"映射不到"纪律，
+	// 不是新错误类别（ADR-020 决策·三前置的契约变化说明）。
+	TokenMapV2Path string
 	// RetentionDays 覆盖每页返回的保留期天数；<=0 时用契约常量 RetentionDays。
 	//
 	// 之所以可覆盖而不是死读常量：记录代理自己的保留天数已经做成可配置
@@ -69,11 +75,12 @@ type FileConfig struct {
 }
 
 type fileClient struct {
-	dataDir       string
-	tokenMapPath  string
-	retentionDays int
-	logger        *slog.Logger
-	now           func() time.Time
+	dataDir        string
+	tokenMapPath   string
+	tokenMapV2Path string
+	retentionDays  int
+	logger         *slog.Logger
+	now            func() time.Time
 }
 
 // NewFileClient 构造只读文件后端客户端（XM-REQLOG-MERGE）。
@@ -98,11 +105,12 @@ func NewFileClient(cfg FileConfig) (ReadClient, error) {
 		retention = RetentionDays
 	}
 	return &fileClient{
-		dataDir:       dir,
-		tokenMapPath:  strings.TrimSpace(cfg.TokenMapPath),
-		retentionDays: retention,
-		logger:        logger,
-		now:           now,
+		dataDir:        dir,
+		tokenMapPath:   strings.TrimSpace(cfg.TokenMapPath),
+		tokenMapV2Path: strings.TrimSpace(cfg.TokenMapV2Path),
+		retentionDays:  retention,
+		logger:         logger,
+		now:            now,
 	}, nil
 }
 
@@ -248,6 +256,7 @@ func (c *fileClient) matchedSummaries(ctx context.Context, filter ListFilter) ([
 		return nil, connector.NewError(connector.KindUnavailable, op, err)
 	}
 	tokenMap := c.loadTokenMap()
+	tokenMapV2 := c.loadTokenMapV2()
 
 	var out []RequestLogSummary
 	for _, day := range days {
@@ -258,7 +267,7 @@ func (c *fileClient) matchedSummaries(ctx context.Context, filter ListFilter) ([
 			if r.Source != filter.Source {
 				continue
 			}
-			s := c.summaryFromRecord(day, r, tokenMap)
+			s := c.summaryFromRecord(day, r, tokenMap, tokenMapV2)
 			if !matchesFilter(s, filter) {
 				continue
 			}
@@ -275,7 +284,7 @@ func (c *fileClient) matchedSummaries(ctx context.Context, filter ListFilter) ([
 // （从 <id>.json.gz 里 FullRecord.Record 读到的同一形状）共用这一个函数，
 // 保证两条路径对同一条记录给出完全一致的摘要（contracttest 的
 // testResultsCarrySnapshot 断言了这一点）。
-func (c *fileClient) summaryFromRecord(day string, r reqlogformat.Record, tokenMap map[string]string) RequestLogSummary {
+func (c *fileClient) summaryFromRecord(day string, r reqlogformat.Record, tokenMap map[string]string, tokenMapV2 map[string]tokenMapV2Entry) RequestLogSummary {
 	var ttfb *int64
 	if r.MeasuredTTFB() {
 		v := r.TtfbMs
@@ -287,6 +296,7 @@ func (c *fileClient) summaryFromRecord(day string, r reqlogformat.Record, tokenM
 		OccurredAt:  time.UnixMilli(r.TsMs).UTC(),
 		Username:    resolveUsername(tokenMap, r.TokenPfx, r.Source),
 		TokenPrefix: r.TokenPfx,
+		User:        resolveUserRef(tokenMapV2, r.TokenPfx, r.Source),
 		Model:       r.Model,
 		// reqlog 磁盘记录不含渠道/上游字段——确认自桌面端原型 reqlogger.go
 		// 的 Record 结构体（没有 channel/upstream 字段），不是"暂时没接"。
@@ -338,7 +348,8 @@ func (c *fileClient) RequestContent(ctx context.Context, source, id string) (Req
 	}
 
 	tokenMap := c.loadTokenMap()
-	summary := c.summaryFromRecord(day, full.Record, tokenMap)
+	tokenMapV2 := c.loadTokenMapV2()
+	summary := c.summaryFromRecord(day, full.Record, tokenMap, tokenMapV2)
 
 	turns := reqlogformat.ParseTurns(full.ReqBody)
 	messages := make([]Message, 0, len(turns))
@@ -487,6 +498,94 @@ func splitCompositeID(id string) (day, recordID string, ok bool) {
 		return "", "", false
 	}
 	return m[1], m[2], true
+}
+
+// --- 令牌前缀 → 上游用户 ID（tokenmap.v2.json，CR-0008）---
+
+// tokenMapV2File / tokenMapV2Entry 镜像 cmd/reqlog-recorder 写侧的同名磁盘
+// 形状。两边**独立定义**而不是共享一个 Go 类型：cmd/reqlog-recorder 是
+// `main` 包，本包不能导入它；反过来让 cmd/reqlog-recorder 导入一个只读
+// 连接器包也不合适。JSON 形状本身才是两边共享的契约（CR-0008「契约变化」
+// 一节给出的形状），与 tokenmap.json（v1，`map[string]string`）今天已经是
+// 同一种"两边各自按同一份文字契约实现"的关系。
+type tokenMapV2File struct {
+	SchemaVersion int                        `json:"schema_version"`
+	Entries       map[string]tokenMapV2Entry `json:"entries"`
+}
+
+type tokenMapV2Entry struct {
+	Username string `json:"username"`
+	Source   string `json:"source"`
+	UserID   string `json:"user_id"`
+}
+
+// loadTokenMapV2 读 tokenmap.v2.json。路径为空、文件不存在、JSON 解析失败、
+// 或 schema_version 不是本读侧认识的 2，一律返回 nil——与 loadTokenMap 对
+// tokenmap.json 缺失/损坏的处理同一条容错纪律：调用方把 nil 当作"这一轮
+// 没有 v2 数据"，resolveUserRef 据此让 User 恒为 nil，不是新错误类别
+// （CR-0008 变更范围#3、ADR-020 决策·三前置的契约变化说明）。
+//
+// 只在文件真的**读不到**（非 IsNotExist）或**解析不出**时记警告——路径
+// 留空、文件尚不存在都是正常的"这个环境还没升级/没配置"状态，不该刷日志。
+func (c *fileClient) loadTokenMapV2() map[string]tokenMapV2Entry {
+	if c.tokenMapV2Path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(c.tokenMapV2Path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			c.logger.Warn("reqlog_file_client_tokenmap_v2_unreadable", slog.String("error", err.Error()))
+		}
+		return nil
+	}
+	var v tokenMapV2File
+	if err := json.Unmarshal(b, &v); err != nil {
+		c.logger.Warn("reqlog_file_client_tokenmap_v2_malformed", slog.String("error", err.Error()))
+		return nil
+	}
+	if v.SchemaVersion != 2 {
+		c.logger.Warn("reqlog_file_client_tokenmap_v2_unknown_schema_version",
+			slog.Int("schema_version", v.SchemaVersion))
+		return nil
+	}
+	return v.Entries
+}
+
+// resolveUserRef 把 token_prefix 解到稳定上游 UserRef。
+//
+// 四种情况统一判"映射不到"（返回 nil），与 resolveUsername 对陌生/缺席
+// 输入的处理同一条纪律——不把一个未经审视的值交给调用方：
+//   - 没有 v2 数据（loadTokenMapV2 返回 nil）或前缀为空；
+//   - 前缀未在 v2 里登记；
+//   - 登记了，但 user_id 为空串（上游导出时这一列为空，CR-0008 变更范围#1
+//     允许这种情况：SQL 多选的 u.id 列本身不可能为 NULL——两条查询都是
+//     `JOIN users u on u.id=...`，等值 JOIN 意味着能出现在结果里的 u.id
+//     必然非空——但导出脚本以外的来源（比如手工编辑的 v2 文件、未来的
+//     格式演进）仍可能给出空 user_id，读侧不能假设写侧的不变量永远成立）；
+//   - 登记了 source，但与本条记录的 Source 不一致（防御性校验，理由同
+//     resolveUsername 的"@<source>"后缀检查：前缀空间本不应跨来源撞上，
+//     一旦撞上更可能是数据损坏而不是巧合，不该把它当成合法关联）；
+//   - 拼出的 UserRef 校验不过（Platform/ID 形状异常）。
+func resolveUserRef(tokenMapV2 map[string]tokenMapV2Entry, prefix, source string) *platformusers.UserRef {
+	if len(tokenMapV2) == 0 || prefix == "" {
+		return nil
+	}
+	entry, ok := tokenMapV2[prefix]
+	if !ok {
+		return nil
+	}
+	userID := strings.TrimSpace(entry.UserID)
+	if userID == "" {
+		return nil
+	}
+	if entry.Source != "" && entry.Source != source {
+		return nil
+	}
+	ref := &platformusers.UserRef{Platform: source, ID: userID}
+	if err := ref.Validate(); err != nil {
+		return nil
+	}
+	return ref
 }
 
 // --- 令牌前缀 → 用户名 ---

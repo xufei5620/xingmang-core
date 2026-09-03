@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "entries": {
+    "test-prefix-newapi-one": {"username": "test-user-one", "source": "newapi", "user_id": ""}
+  }
+}

@@ -76,12 +76,16 @@ type reqlogConfig struct {
 	TargetAllowlist []string
 	CredentialRef   string
 	Timeout         time.Duration
-	// 以下两项只在 file 模式用到。都是**路径**，不是凭据——不经
+	// 以下三项只在 file 模式用到。都是**路径**，不是凭据——不经
 	// CredentialRef（见 reqlog.FileConfig 的文档：DataDir/TokenMapPath 与
 	// XM_SECRET_ROOT 是同一类基础设施路径，权限边界由只读挂载本身承担，
 	// 不是"向第三方系统认证用的凭据"）。
 	DataDir      string
 	TokenMapPath string
+	// TokenMapV2Path 是 tokenmap.v2.json（CR-0008）在**容器内**的路径，
+	// 可留空——留空、文件不存在或解析失败时 RequestLogSummary.User 恒为
+	// nil，与 TokenMapPath 留空时 Username 恒为空串同一条"映射不到"纪律。
+	TokenMapV2Path string
 }
 
 // defaultReqlogTimeout 是单次控制台读取的超时。
@@ -114,6 +118,10 @@ func reqlogConfigFromEnv(getenv func(string) string) (reqlogConfig, error) {
 		// 能力（Username 恒为空串，契约允许的合法状态），不是"用一个大概率
 		// 不存在的路径去连"。
 		TokenMapPath: strings.TrimSpace(getenv("XM_REQLOG_TOKENMAP")),
+		// TokenMapV2Path 同样默认留空（CR-0008 新增可选字段，同 TokenMapPath
+		// 的"留空即不生效"约定）：没配就是没有稳定 UserRef 关联能力
+		// （User 恒为 nil，契约允许的合法状态），不是新错误类别。
+		TokenMapV2Path: strings.TrimSpace(getenv("XM_REQLOG_TOKENMAP_V2")),
 	}
 	if v := strings.TrimSpace(getenv("XM_REQLOG_DATA_DIR")); v != "" {
 		c.DataDir = v
@@ -264,9 +272,10 @@ func newReqlogFileClient(cfg reqlogConfig, logger *slog.Logger) (requestlog.Clie
 		return nil, fmt.Errorf("XM_REQLOG_MODE=file 需要 XM_REQLOG_DATA_DIR 非空")
 	}
 	client, err := reqlog.NewFileClient(reqlog.FileConfig{
-		DataDir:      cfg.DataDir,
-		TokenMapPath: cfg.TokenMapPath,
-		Logger:       logger,
+		DataDir:        cfg.DataDir,
+		TokenMapPath:   cfg.TokenMapPath,
+		TokenMapV2Path: cfg.TokenMapV2Path,
+		Logger:         logger,
 	})
 	if err != nil {
 		return nil, err

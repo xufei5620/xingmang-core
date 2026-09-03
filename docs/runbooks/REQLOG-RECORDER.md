@@ -122,6 +122,12 @@ XM_REQLOG_MODE=file
 `XM_REQLOG_DATA_DIR`/`XM_REQLOG_TOKENMAP`（容器内路径）不需要改，
 `deploy/compose/server-prod.yaml` 已经把它们的默认值与只读挂载目标钉在一起。
 
+> CR-0008 新增的 `tokenmap.v2.json`（上游用户 ID）**不在**这一步覆盖：
+> `cmd/platform-api` 已经能读 `XM_REQLOG_TOKENMAP_V2`，但
+> `server-prod.yaml` 还没有对应的只读挂载，需要单独补。见下方
+> "CR-0008：tokenmap.v2.json（上游用户 ID，稳定 UserRef 的数据前提）"
+> 一节的接入步骤。
+
 ## 第 7 步：用生产覆盖重新部署 platform-api
 
 按本仓库当前的生产部署方式执行（见 `docs/runbooks/DEPLOY.md` §3 与
@@ -184,12 +190,97 @@ cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.
   切回旧版本后，新版本按新权限（0750/0640 + GID 10001）写的记录仍然
   可读（旧版本只是不再收紧权限，不影响读取）。
 
+## CR-0008：tokenmap.v2.json（上游用户 ID，稳定 UserRef 的数据前提）
+
+`refreshTokenMap`（`cmd/reqlog-recorder/tokenmap.go`）在写 `tokenmap.json`
+（v1，格式逐字节不变）的同一次刷新里，额外写一份并行文件
+`tokenmap.v2.json`（默认路径 `/root/reqlog/tokenmap.v2.json`，可用
+`--tokenmap-v2-path` / `XM_REQLOG_RECORDER_TOKENMAP_V2` 覆盖，留空则不写），
+携带两条导出 SQL 已经 `JOIN` 到、但 v1 从未选出的 `u.id`（上游数字/不透明
+用户 ID）。`connectors/reqlog` 的文件后端（`FileConfig.TokenMapV2Path`）
+可选读取它，解出 `RequestLogSummary.User`；文件缺失或解析失败一律按
+"映射不到"处理（`User` 为 `nil`），与 v1 tokenmap 缺失时 `Username` 恒为
+空串同一条容错纪律，不是新错误类别。详见
+`docs/change-requests/CR-0008-reqlog-tokenmap-upstream-user-id.md` 与
+`docs/adr/ADR-020-请求日志记录器的上游库只读接入.md`。
+
+**容器化 `platform-api` 的接入现状（本 CR 范围内已完成的部分）**：
+`cmd/platform-api` 读环境变量 `XM_REQLOG_TOKENMAP_V2`（容器内路径）传给
+`FileConfig.TokenMapV2Path`，与既有 `XM_REQLOG_TOKENMAP` 同一条模式。
+**但 `deploy/compose/server-prod.yaml` 尚未新增对应的只读绑定挂载**
+（第 6 步"平台切到 file 模式"描述的 `XM_REQLOG_HOST_TOKENMAP` 挂载没有
+`_V2` 版本）——这是本 CR 明确留给后续切片的部署配置改动（CR-0008"变更
+范围"第 5 条只要求记录代理二进制的重建/替换/属组核对，不含 compose 改
+动）。在这条挂载补上之前，即便记录代理已经在写 `tokenmap.v2.json`，
+容器化 `platform-api` 也读不到它——`User` 仍会恒为 `nil`，这是"缺席"而
+不是"错误"的同一条容错路径，不影响 `Username`/其余字段的既有行为。
+
+需要接入时，在部署这份 prod 覆盖的机器上补：
+
+```dotenv
+# .env
+XM_REQLOG_TOKENMAP_V2=/var/lib/xm/reqlog-tokenmap-v2.json
+XM_REQLOG_HOST_TOKENMAP_V2=/root/reqlog/tokenmap.v2.json
+```
+
+并在 `deploy/compose/server-prod.yaml` 的 `platform-api` 服务下补一条
+只读绑定挂载（与第 62～63 行 `XM_REQLOG_HOST_TOKENMAP` 的写法对称）：
+
+```yaml
+- ${XM_REQLOG_HOST_TOKENMAP_V2:-/root/reqlog/tokenmap.v2.json}:/var/lib/xm/reqlog-tokenmap-v2.json:ro
+```
+
+同第 3 步的告诫：宿主机路径在部署这份覆盖前必须已经存在（记录代理已经
+按本文档"第 1～5 步"升级并跑过至少一轮刷新），否则 Docker 会把它当空
+目录创建，容器能起来但读不到任何 v2 数据（`User` 恒为 `nil`，不是报错，
+排查时先看这里——与 v1 `tokenmap.json` 挂载的既有风险同一类）。
+
+### 验收标准第 1 条的服务器验证命令（本次实现未跑，留给能连服务器的会话）
+
+CR-0008 验收标准第 1 条要求"服务器上产出一份 `tokenmap.v2.json` 后，
+抽样核对：前缀命中的记录中至少 99% 能解出非空 `User`"。本次实现在开发
+机上跑不了（没有到生产服务器的连接），需要在完成第 1～5 步升级、记录
+代理至少刷新过一轮之后，在服务器上执行（只读，不改任何数据）：
+
+```bash
+# 1) 确认 v2 文件已产出且形状合法
+sudo test -s /root/reqlog/tokenmap.v2.json && \
+  sudo jq -e '.schema_version == 2 and (.entries | type == "object")' /root/reqlog/tokenmap.v2.json
+
+# 2) 抽样核对：v2 里有多少条目携带非空 user_id（分母是 v2 总条目数，
+#    不是全部 tokenmap 条目数——前缀命中但 v2 未登记的条目本身就不该计入
+#    这条"能否解出非空 User"的比例）
+sudo jq '
+  (.entries | length) as $total |
+  ([.entries[] | select(.user_id != null and .user_id != "")] | length) as $with_id |
+  {total: $total, with_id: $with_id,
+   pct: (if $total == 0 then 0 else ($with_id * 100.0 / $total) end)}
+' /root/reqlog/tokenmap.v2.json
+```
+
+`pct` 应 `>= 99`。若明显偏低，先核对两条导出 SQL 是否确实带上了新增的
+`u.id` 列（`docker exec postgres psql -c "..."`/`docker exec
+sub2api-mig-postgres sh -c '...'`，SQL 原文见 `tokenmap.go` 的
+`newapiTokenMapQuery`/`sub2apiTokenMapQuery` 常量），而不是先怀疑读侧。
+
 ## 已知限制（不在本次收编范围内）
 
 - 令牌映射刷新仍然经 `docker exec postgres psql` / `docker exec
   sub2api-mig-postgres sh -c 'psql ...'` 只读导出，绕开了平台的
   Connector/CredentialRef 体系（ADR-014、ADR-018）。这是既有做法的原样
-  保留，重新设计需要独立的 ADR/Change Request。
+  保留，重新设计需要独立的 ADR/Change Request；ADR-020「请求日志记录器的
+  上游库只读接入」把这条通道接受为一个有边界的例外（详见该 ADR"决策·一"）。
+  **连接主体现状**（ADR-020 决策·一·2 要求记录在此，供审计者不必重新读
+  源码确认）：这条通道**不是**专用只读数据库角色——NewAPI 侧 `docker
+  exec` 显式声明 `-U root`，Sub2API 侧使用该容器已配置的
+  `$POSTGRES_USER`；"只读"这一属性今天完全由查询文本承载（两条 SQL 逐字
+  只有 `SELECT`），不是由数据库权限承载。**凭据落地现状**：这条通道不经
+  `SecretProvider`/`CredentialRef`，"凭据"事实上是宿主机 `root` 身份本身
+  （`deploy/reqlog/reqlog-recorder.service` 的 `User=root`）加上该身份对
+  Docker socket 的访问权；数据库侧认证在容器内部完成，平台侧管理不到、
+  也看不到这一层。若 NewAPI/Sub2API 未来提供专用只读数据库角色，导出
+  连接应改用该角色（属运维配置变更，不强制同 PR 代码改动），切换后应回
+  ADR-020 补记"决策·一·2"。
 - 如果上游连接在**响应头返回之前**就失败，这次请求完全不会被记录（不是
   记一条 `status=0` 的记录）——`status=0` 只出现在响应头已经拿到、但读
   响应体过程中连接中断的场景。

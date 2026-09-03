@@ -22,6 +22,10 @@ const (
 	DefaultListenSub2API   = "127.0.0.1:9302"
 	DefaultUpstreamSub2API = "http://127.0.0.1:8081"
 	DefaultTokenMapPath    = "/root/reqlog/tokenmap.json"
+	// DefaultTokenMapV2Path 是 CR-0008 新增并行文件的默认落盘位置——与
+	// DefaultTokenMapPath 同目录、并行命名，不是"原值"（老版本原型没有这个
+	// 文件），见 tokenmap.go 的 refreshTokenMap/writeTokenMapV2。
+	DefaultTokenMapV2Path  = "/root/reqlog/tokenmap.v2.json"
 	DefaultRetentionDays   = 30
 	DefaultMaxReqBody      = 64 << 20  // 64MB，原值 maxReqBody
 	DefaultMaxRespBody     = 256 << 20 // 256MB，原值 maxRespBody
@@ -48,6 +52,7 @@ type Config struct {
 	ListenSub2API   string
 	UpstreamSub2API string
 	TokenMapPath    string
+	TokenMapV2Path  string
 	RetentionDays   int
 	MaxReqBody      int64
 	MaxRespBody     int64
@@ -177,6 +182,9 @@ func ParseConfig(args []string, getenv func(string) string) (Config, error) {
 	fs.StringVar(&cfg.TokenMapPath, "tokenmap-path",
 		envOrDefault(getenv, "XM_REQLOG_RECORDER_TOKENMAP", DefaultTokenMapPath),
 		"令牌前缀→用户名映射文件路径")
+	fs.StringVar(&cfg.TokenMapV2Path, "tokenmap-v2-path",
+		envOrDefault(getenv, "XM_REQLOG_RECORDER_TOKENMAP_V2", DefaultTokenMapV2Path),
+		"令牌前缀→用户名+上游用户ID映射文件路径（CR-0008 新增并行文件，留空则不写）")
 	fs.IntVar(&cfg.RetentionDays, "retention-days",
 		envOrDefaultInt(getenv, "XM_REQLOG_RECORDER_RETENTION_DAYS", DefaultRetentionDays),
 		"保留天数（按 CST 日历日清理）")
