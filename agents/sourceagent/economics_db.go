@@ -131,7 +131,7 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 	if !hasMore {
 		next.WatermarkAt = next.CeilingAt
 		next.WatermarkCursor = next.CeilingCursor
-		next.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(req.Mode, c.Stream, next.WatermarkCursor)
+		next.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(req.Mode, c.Stream, cursor.ReconcileBaselineCursor, next.WatermarkCursor)
 	}
 	var pageWarnings []string
 	if abandoningLegacyReconcile {
@@ -198,18 +198,35 @@ func shouldAbandonLegacyReconcileCycle(cursor ScanCursor, newCycle bool, mode Sc
 // regardless of mode (see prepareCursor's StreamCredits case below), so a
 // rolling-window baseline is meaningless for it, and the stored-cursor
 // validator (state_store_file.go validateStoredFileCursorForStream) rejects
-// a non-empty ReconcileBaselineCursor on any stream other than StreamUsage.
+// a non-empty ReconcileBaselineCursor on any stream other than StreamUsage --
+// so every non-usage stream unconditionally gets "" here, regardless of
+// carried.
+//
+// For usage, a completed ScanReconcile records the fresh baseline (the
+// rolling window this field exists for, XM-INV-AGENT-RESTART-GRACE part B).
+// A completed ScanIncremental or ScanFull must instead *preserve* whatever
+// baseline the last completed reconcile recorded (carried, i.e. the incoming
+// cursor's own ReconcileBaselineCursor) rather than clear it: usage runs many
+// incremental cycles between reconciles, and the next periodic reconcile's
+// reconcileWindowStart needs that baseline to still be there. Losing it here
+// would make every incremental completion silently erase the rolling window,
+// forcing the next reconcile to fall back to the live watermark and
+// re-verify nothing (a regression caught in review of the fix below, before
+// the credits fix ever reached production usage traffic).
 //
 // XM-INV-AGENT-CREDITS-RECONCILE-FIX: stamping this field unconditionally on
 // every completed ScanReconcile page (regardless of stream) made every
 // completed credits reconcile page produce a cursor the pending spool then
 // permanently refused to accept, looping the credits stream's periodic
 // reconcile forever in production and leaving its watermark stale.
-func reconcileBaselineCursorAfterCompletion(mode ScanMode, stream, completedWatermarkCursor string) string {
-	if mode == ScanReconcile && stream == StreamUsage {
+func reconcileBaselineCursorAfterCompletion(mode ScanMode, stream, carried, completedWatermarkCursor string) string {
+	if stream != StreamUsage {
+		return ""
+	}
+	if mode == ScanReconcile {
 		return completedWatermarkCursor
 	}
-	return ""
+	return carried
 }
 
 // reconcileWindowStart picks the domain positions a ScanReconcile cycle

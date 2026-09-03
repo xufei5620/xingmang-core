@@ -2,11 +2,18 @@
 
 - **status:** implemented and self-tested locally; gates below all green. Not merged, not pushed, not
   tagged.
-- **branch:** `ai/claude/XM-INV-AUTOLOGIN` (HEAD `65d2098`, RC82 line), worktree
+- **branch:** `ai/claude/XM-INV-AUTOLOGIN` (based at HEAD `65d2098`, RC82 line), worktree
   `K:/发票/wt-XM-INV-AUTOLOGIN`.
-- **commit:** a single commit on this branch (`fix(agent): stamp the reconcile baseline cursor only
-  on the usage stream (credits reconcile loop)`), containing the fix, the regression tests, the
-  agent version bump, and this doc. See `git show --stat` on that commit for the exact file list.
+- **commits (2, in order):**
+  1. `fix(agent): stamp the reconcile baseline cursor only on the usage stream (credits reconcile
+     loop)` -- the original fix, regression tests, agent version bump (`0.3.1` -> `0.3.2`), and this
+     doc.
+  2. a follow-up fix-up commit (not an amend) addressing a regression caught in code review of commit
+     1 before it reached production usage traffic: the original helper cleared usage's rolling
+     reconcile baseline on every completed incremental/full cycle instead of preserving it. See
+     "Deviations from the brief" below for the full explanation.
+
+  See `git show --stat` on each commit for the exact file list.
 
 ## Incident summary
 
@@ -99,14 +106,32 @@ at all. Read to confirm, not guessed.
 ## Fix
 
 1. `agents/sourceagent/economics_db.go`: extracted the baseline-stamping decision into a small pure
-   helper, `reconcileBaselineCursorAfterCompletion(mode ScanMode, stream, completedWatermarkCursor string) string`,
-   mirroring the existing style of `shouldAbandonLegacyReconcileCycle`/`reconcileWindowStart`. It
-   returns the completed watermark cursor only for `mode == ScanReconcile && stream == StreamUsage`,
-   and `""` for every other stream/mode combination (including credits). `Scan` now always calls it
-   on cycle completion instead of conditionally assigning inline, so a non-usage stream's field is
-   explicitly cleared rather than merely "not written this time" (defensive: it was never legitimately
-   non-empty for credits in the first place). Comment updated to explain the usage-only invariant and
-   name this incident.
+   helper, `reconcileBaselineCursorAfterCompletion(mode ScanMode, stream, carried, completedWatermarkCursor string) string`,
+   mirroring the existing style of `shouldAbandonLegacyReconcileCycle`/`reconcileWindowStart`. Rules,
+   in order: any stream other than usage always gets `""` (unconditionally, regardless of `carried`
+   -- credits, and defensively every other stream, must never carry this field, matching the
+   stored-cursor validator's invariant); for usage, a completed `ScanReconcile` records the fresh
+   completed watermark cursor (the rolling window this field exists for); a completed
+   `ScanIncremental` or `ScanFull` instead **preserves `carried`** -- the incoming cursor's own
+   `ReconcileBaselineCursor`, i.e. whatever the last completed reconcile recorded. `Scan`'s call site
+   passes the incoming `cursor.ReconcileBaselineCursor` as `carried`.
+
+   **Review follow-up, same day, before this reached usage traffic:** the first version of this fix
+   called the helper with only `(mode, stream, completedWatermarkCursor)` and returned `""` for
+   every case except `(ScanReconcile, StreamUsage)` -- correct for credits, but wrong for usage's own
+   `ScanIncremental`/`ScanFull` completions. In `0.3.1`, `Scan` only touched `ReconcileBaselineCursor`
+   inside `if req.Mode == ScanReconcile { ... }`, so an incremental or full completion left the field
+   exactly as carried in from `cursor` (`next := cursor` upstream). Usage runs many incremental
+   cycles between periodic reconciles; the first version of this fix cleared the baseline to `""` on
+   the very next completed incremental page after any reconcile, so the *next* reconcile's
+   `reconcileWindowStart` would find an empty baseline, fail to parse it, and fall back to the live
+   watermark -- silently re-verifying nothing, defeating the entire `XM-INV-AGENT-RESTART-GRACE` part
+   B rolling window for usage. Caught in code review before deploy; production's live usage
+   `state.json` at the time showed `reconcile_baseline_cursor: usage_logs:3971732` with
+   `reconcile_window_bounded: true` persisting correctly across incremental cycles committing every
+   ~65s since the 15:21Z reconcile, which is the evidence this preservation behavior is real and
+   load-bearing. Comment on the helper updated to explain both the usage-only invariant and the
+   carried-value preservation rule, and to name this incident.
 2. `agents/sourceagent/pending_spool.go` `validatePending`: the `CursorAfter` validation branch now
    wraps the underlying cause with `%w` instead of discarding it, while keeping the exact prefix
    `"pending batch cursor transition is invalid"` (checked: nothing in `agents/` or `backend/`
@@ -134,12 +159,22 @@ All new tests were written first, confirmed to fail (the first three failed to c
 `reconcileBaselineCursorAfterCompletion` did not exist yet -- and would have failed at the assertion
 had the helper merely stubbed empty; the fourth failed with `pending spool accepted a credits cursor
 carrying usage-only reconcile baseline metadata` under the pre-fix message), then made to pass by the
-implementation above.
+implementation above. The review follow-up's table cases and its dedicated validator-level test were
+added against the corrected two-case helper signature (`carried` added as a parameter); confirmed
+against the *first* version's logic (which ignored `carried` and returned `""` for every
+non-reconcile case) that they would have failed there too, before the fix in this same commit made
+them pass -- this repository's DB-gated `Scan`-level integration harness
+(`agents/cmd/source-agent-prod`, `SOURCE_AGENT_TEST_DATABASE_URL`-gated) was not exercised for this
+follow-up since no test database URL is configured in this environment; the pure-function and
+validator-level tests below are the full coverage for this change.
 
 - `TestReconcileBaselineCursorAfterCompletion` (`economics_db_test.go`) -- table test over every
-  `(mode, stream)` combination for both usage and credits: usage records the baseline only on
-  `ScanReconcile`, credits never records one regardless of mode. This is requirement (b) (usage
-  behavior unchanged) and half of (a) (credits never stamps it) in one table.
+  `(mode, stream)` combination for both usage and credits, now with an explicit `carried` value
+  distinct from the completed watermark: usage `ScanReconcile` records the fresh watermark
+  (discarding `carried`), usage `ScanIncremental`/`ScanFull` preserve `carried` unchanged, and credits
+  returns `""` in every mode even when `carried` is non-empty (the historical bug's exact shape,
+  covered defensively). This is requirement (b) (usage behavior unchanged, now including the
+  preservation case) and half of (a) (credits never stamps it) in one table.
 - `TestCreditsReconcileCompletionCursorPassesStoredCursorValidation` (`economics_db_test.go`) --
   ties the helper directly to the actual regression signature: builds a V2 cursor via the existing
   `testV3Cursor` fixture, applies the helper, and asserts
@@ -148,6 +183,12 @@ implementation above.
 - `TestUsageReconcileCompletionCursorPassesStoredCursorValidation` (`economics_db_test.go`) -- the
   usage counterpart, proving the recorded baseline still passes stored-cursor validation (it must,
   usage is the one stream the validator allows it on).
+- `TestUsageIncrementalCompletionPreservesCarriedBaselineAndPassesValidation`
+  (`economics_db_test.go`, new, review follow-up) -- the validator-level regression signature for the
+  bug this review caught: a usage cursor already carrying a reconcile baseline (modeled on the
+  production `state.json` value, `usage_logs:3971732`, with `ReconcileWindowBounded: true`) keeps that
+  exact baseline, unchanged, after a completed `ScanIncremental` cycle, and the result still passes
+  `validateStoredFileCursorForStream`.
 - `TestValidatePendingRejectsCreditsCursorCarryingReconcileBaseline` (`pending_spool_test.go`) --
   requirement (c): builds a real encrypted pending-spool store, a valid V3 credits batch (new test
   helper `creditEventProjectionForTest`, following the existing `candidateProjectionForTest`
@@ -173,16 +214,27 @@ check), with `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` unset per the documented Win
 **gofmt note:** this checkout has `core.autocrlf=true`; `gofmt -l`/`-w` on the real CRLF files either
 falsely reports every file or (if `-w` is run directly) strips CRLF to LF. Every changed file was
 checked by stripping `\r` into a scratch copy first, per the workflow recorded in this repository's
-`windows-toolchain-quirks` memory. One file (`economics_db_test.go`) needed an actual alignment fix
-inside the new table-test map literals; after `gofmt -w` was run (on the real file, inadvertently
-converting it to LF), its CRLF endings were restored byte-for-byte before committing, and the exact
-same CRLF-stripped gofmt check was re-run clean.
+`windows-toolchain-quirks` memory. In the original commit, `economics_db_test.go` needed an actual
+alignment fix inside the new table-test map literals; `gofmt -w` was run directly on the real file,
+inadvertently converting it to LF, and its CRLF endings were restored byte-for-byte before
+committing. In the review follow-up commit, the same kind of alignment issue recurred (new map
+literal entries) and was this time fixed by hand directly in the CRLF file (no `gofmt -w` on the real
+file), avoiding the round trip entirely; the CRLF-stripped gofmt check was re-run clean both times.
 
 ## Deviations from the brief
 
-None. The one open question the brief flagged (whether anything compares the full
-`"pending batch cursor transition is invalid"` string) was checked by grep across `agents/` and
+None in the original commit. The one open question the brief flagged (whether anything compares the
+full `"pending batch cursor transition is invalid"` string) was checked by grep across `agents/` and
 `backend/`: nothing does. The prefix-plus-`%w` approach was applied as specified.
+
+**Review follow-up (second commit, same branch, not an amend):** code review of the original commit
+caught a real regression before it reached production usage traffic -- see "Fix" above for the full
+technical explanation. The original helper cleared `ReconcileBaselineCursor` on every completed usage
+cycle that was not itself a `ScanReconcile` (i.e. `ScanIncremental`/`ScanFull`), when `0.3.1`'s actual
+behavior was to preserve whatever the last completed reconcile had recorded across those cycles. Fixed
+by adding a `carried` parameter to the helper (call site passes the incoming cursor's
+`ReconcileBaselineCursor`), threading it through as the preserved value for non-reconcile completions.
+New regression tests added and this doc updated in the same follow-up commit.
 
 ## Verification plan (after deploy)
 
@@ -200,3 +252,10 @@ None. The one open question the brief flagged (whether anything compares the ful
    cycle's completion time, `ECONOMIC_WATERMARK_STALE` clears).
 5. Confirm no repeat of the `"pending batch cursor transition is invalid"` log line for the credits
    stream across at least one full subsequent reconcile cycle.
+6. **Usage regression check (the review follow-up's concern):** confirm the usage stream's
+   `reconcile_baseline_cursor` in its `state.json` remains stable and non-empty across ordinary
+   incremental cycles between reconciles (it must not reset to empty after the first incremental
+   completion following a reconcile), and that the next scheduled usage reconcile's starting position
+   reflects that baseline rather than the live watermark (i.e. the rolling window is actually
+   narrower than a full rescan since the last reconcile, not silently widened back to "since last
+   watermark").

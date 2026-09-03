@@ -3,35 +3,43 @@ package sourceagent
 import "testing"
 
 // TestReconcileBaselineCursorAfterCompletion covers the
-// XM-INV-AGENT-CREDITS-RECONCILE-FIX regression: the rolling reconcile
-// baseline recorded when a scan page completes a cycle must be usage-only.
-// Stamping it for credits made every completed credits reconcile page
-// produce a cursor the stored-cursor validator (and, downstream, the pending
-// spool) rejected, looping the credits stream's periodic reconcile forever
-// in production.
+// XM-INV-AGENT-CREDITS-RECONCILE-FIX regression and its own review
+// follow-up: the rolling reconcile baseline recorded when a scan page
+// completes a cycle must be usage-only (stamping it for credits looped the
+// credits stream's periodic reconcile forever in production), AND a
+// completed usage cycle that is NOT itself a reconcile (incremental or full)
+// must preserve whatever baseline the last completed reconcile recorded
+// rather than clear it -- clearing it here silently erases the rolling
+// window between reconciles, making the next reconcile fall back to the
+// live watermark and re-verify nothing.
 func TestReconcileBaselineCursorAfterCompletion(t *testing.T) {
+	const carriedBaseline = "usage_logs:500"
+	const completedWatermark = "usage_logs:900"
 	for name, fixture := range map[string]struct {
 		mode ScanMode
 		want string
 	}{
-		"usage reconcile completion records the baseline":                   {mode: ScanReconcile, want: "usage_logs:900"},
-		"usage full scan completion does not record a reconcile baseline":   {mode: ScanFull, want: ""},
-		"usage incremental completion does not record a reconcile baseline": {mode: ScanIncremental, want: ""},
+		"usage reconcile completion records the fresh baseline, discarding any carried value": {mode: ScanReconcile, want: completedWatermark},
+		"usage incremental completion preserves the carried baseline":                         {mode: ScanIncremental, want: carriedBaseline},
+		"usage full scan completion preserves the carried baseline":                           {mode: ScanFull, want: carriedBaseline},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := reconcileBaselineCursorAfterCompletion(fixture.mode, StreamUsage, "usage_logs:900"); got != fixture.want {
+			if got := reconcileBaselineCursorAfterCompletion(fixture.mode, StreamUsage, carriedBaseline, completedWatermark); got != fixture.want {
 				t.Fatalf("reconcileBaselineCursorAfterCompletion(usage)=%q want=%q", got, fixture.want)
 			}
 		})
 	}
+	// Credits (and, defensively, any non-usage stream) must never carry this
+	// field, in any mode, even if a carried value is somehow already present
+	// (it never legitimately should be -- this is the exact historical bug).
 	for name, fixture := range map[string]struct{ mode ScanMode }{
 		"credits reconcile completion never records a baseline: credits restarts at zero every cycle": {mode: ScanReconcile},
 		"credits full scan completion does not record a reconcile baseline":                           {mode: ScanFull},
 		"credits incremental completion does not record a reconcile baseline":                         {mode: ScanIncremental},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := reconcileBaselineCursorAfterCompletion(fixture.mode, StreamCredits, "promo_code_usages:900;user_affiliate_ledger:1;redeem_codes:1"); got != "" {
-				t.Fatalf("reconcileBaselineCursorAfterCompletion(credits)=%q want empty", got)
+			if got := reconcileBaselineCursorAfterCompletion(fixture.mode, StreamCredits, carriedBaseline, completedWatermark); got != "" {
+				t.Fatalf("reconcileBaselineCursorAfterCompletion(credits)=%q want empty even with a carried value", got)
 			}
 		})
 	}
@@ -45,7 +53,7 @@ func TestReconcileBaselineCursorAfterCompletion(t *testing.T) {
 // exact check.
 func TestCreditsReconcileCompletionCursorPassesStoredCursorValidation(t *testing.T) {
 	cursor := testV3Cursor(StreamCredits, "credits-reconcile-completion")
-	cursor.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(ScanReconcile, StreamCredits, cursor.WatermarkCursor)
+	cursor.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(ScanReconcile, StreamCredits, cursor.ReconcileBaselineCursor, cursor.WatermarkCursor)
 	if cursor.ReconcileBaselineCursor != "" {
 		t.Fatalf("credits reconcile completion recorded a baseline: %q", cursor.ReconcileBaselineCursor)
 	}
@@ -60,12 +68,32 @@ func TestCreditsReconcileCompletionCursorPassesStoredCursorValidation(t *testing
 // the one stream the validator allows this field on.
 func TestUsageReconcileCompletionCursorPassesStoredCursorValidation(t *testing.T) {
 	cursor := testV3Cursor(StreamUsage, "usage-reconcile-completion")
-	cursor.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(ScanReconcile, StreamUsage, cursor.WatermarkCursor)
+	cursor.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(ScanReconcile, StreamUsage, cursor.ReconcileBaselineCursor, cursor.WatermarkCursor)
 	if cursor.ReconcileBaselineCursor != cursor.WatermarkCursor {
 		t.Fatalf("usage reconcile completion did not record the baseline: %q", cursor.ReconcileBaselineCursor)
 	}
 	if err := validateStoredFileCursorForStream(cursor, StreamUsage); err != nil {
 		t.Fatalf("usage cursor after a completed reconcile failed stored-cursor validation: %v", err)
+	}
+}
+
+// TestUsageIncrementalCompletionPreservesCarriedBaselineAndPassesValidation
+// is the review follow-up's regression signature at the validator level:
+// a usage cursor that already carries a reconcile baseline (from the last
+// completed reconcile) must still carry that exact same baseline -- not
+// empty -- after a completed ScanIncremental cycle, and the result must
+// still pass stored-cursor validation.
+func TestUsageIncrementalCompletionPreservesCarriedBaselineAndPassesValidation(t *testing.T) {
+	cursor := testV3Cursor(StreamUsage, "usage-incremental-completion")
+	cursor.ReconcileBaselineCursor = "usage_logs:3971732"
+	cursor.ReconcileWindowBounded = true
+	before := cursor.ReconcileBaselineCursor
+	cursor.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(ScanIncremental, StreamUsage, cursor.ReconcileBaselineCursor, cursor.WatermarkCursor)
+	if cursor.ReconcileBaselineCursor != before {
+		t.Fatalf("usage incremental completion changed the carried baseline: got %q want %q", cursor.ReconcileBaselineCursor, before)
+	}
+	if err := validateStoredFileCursorForStream(cursor, StreamUsage); err != nil {
+		t.Fatalf("usage cursor after a completed incremental cycle failed stored-cursor validation: %v", err)
 	}
 }
 
