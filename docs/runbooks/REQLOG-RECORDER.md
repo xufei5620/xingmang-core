@@ -122,11 +122,11 @@ XM_REQLOG_MODE=file
 `XM_REQLOG_DATA_DIR`/`XM_REQLOG_TOKENMAP`（容器内路径）不需要改，
 `deploy/compose/server-prod.yaml` 已经把它们的默认值与只读挂载目标钉在一起。
 
-> CR-0008 新增的 `tokenmap.v2.json`（上游用户 ID）**不在**这一步覆盖：
-> `cmd/platform-api` 已经能读 `XM_REQLOG_TOKENMAP_V2`，但
-> `server-prod.yaml` 还没有对应的只读挂载，需要单独补。见下方
-> "CR-0008：tokenmap.v2.json（上游用户 ID，稳定 UserRef 的数据前提）"
-> 一节的接入步骤。
+> CR-0008 新增的 `tokenmap.v2.json`（上游用户 ID）也在这一步一起覆盖：
+> `server-prod.yaml` 现在带 `XM_REQLOG_TOKENMAP_V2` 与对称的只读挂载，
+> 宿主机默认路径就是记录代理的 `DefaultTokenMapV2Path`。同一条告诫适用：
+> 部署这份覆盖前该文件必须已经存在。见下方
+> "CR-0008：tokenmap.v2.json（上游用户 ID，稳定 UserRef 的数据前提）"。
 
 ## 第 7 步：用生产覆盖重新部署 platform-api
 
@@ -204,36 +204,26 @@ cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.
 `docs/change-requests/CR-0008-reqlog-tokenmap-upstream-user-id.md` 与
 `docs/adr/ADR-020-请求日志记录器的上游库只读接入.md`。
 
-**容器化 `platform-api` 的接入现状（本 CR 范围内已完成的部分）**：
-`cmd/platform-api` 读环境变量 `XM_REQLOG_TOKENMAP_V2`（容器内路径）传给
-`FileConfig.TokenMapV2Path`，与既有 `XM_REQLOG_TOKENMAP` 同一条模式。
-**但 `deploy/compose/server-prod.yaml` 尚未新增对应的只读绑定挂载**
-（第 6 步"平台切到 file 模式"描述的 `XM_REQLOG_HOST_TOKENMAP` 挂载没有
-`_V2` 版本）——这是本 CR 明确留给后续切片的部署配置改动（CR-0008"变更
-范围"第 5 条只要求记录代理二进制的重建/替换/属组核对，不含 compose 改
-动）。在这条挂载补上之前，即便记录代理已经在写 `tokenmap.v2.json`，
-容器化 `platform-api` 也读不到它——`User` 仍会恒为 `nil`，这是"缺席"而
-不是"错误"的同一条容错路径，不影响 `Username`/其余字段的既有行为。
-
-需要接入时，在部署这份 prod 覆盖的机器上补：
-
-```dotenv
-# .env
-XM_REQLOG_TOKENMAP_V2=/var/lib/xm/reqlog-tokenmap-v2.json
-XM_REQLOG_HOST_TOKENMAP_V2=/root/reqlog/tokenmap.v2.json
-```
-
-并在 `deploy/compose/server-prod.yaml` 的 `platform-api` 服务下补一条
-只读绑定挂载（与第 62～63 行 `XM_REQLOG_HOST_TOKENMAP` 的写法对称）：
+**容器化 `platform-api` 的接入现状**：`cmd/platform-api` 读环境变量
+`XM_REQLOG_TOKENMAP_V2`（容器内路径）传给 `FileConfig.TokenMapV2Path`，与
+既有 `XM_REQLOG_TOKENMAP` 同一条模式；`deploy/compose/server-prod.yaml`
+现在也带上了这个变量与对称的只读绑定挂载（XM-REQLOG-TOKENMAP-V2-MOUNT）：
 
 ```yaml
+XM_REQLOG_TOKENMAP_V2: ${XM_REQLOG_TOKENMAP_V2:-/var/lib/xm/reqlog-tokenmap-v2.json}
 - ${XM_REQLOG_HOST_TOKENMAP_V2:-/root/reqlog/tokenmap.v2.json}:/var/lib/xm/reqlog-tokenmap-v2.json:ro
 ```
+
+两个默认值分别对应记录代理的 `DefaultTokenMapV2Path` 与上面这个容器内
+路径，所以**不需要**在 `.env` 里写任何东西；只有把文件放在别处时才用
+`XM_REQLOG_HOST_TOKENMAP_V2` / `XM_REQLOG_TOKENMAP_V2` 覆盖。
 
 同第 3 步的告诫：宿主机路径在部署这份覆盖前必须已经存在（记录代理已经
 按本文档"第 1～5 步"升级并跑过至少一轮刷新），否则 Docker 会把它当空
 目录创建，容器能起来但读不到任何 v2 数据（`User` 恒为 `nil`，不是报错，
-排查时先看这里——与 v1 `tokenmap.json` 挂载的既有风险同一类）。
+排查时先看这里——与 v1 `tokenmap.json` 挂载的既有风险同一类）。这条
+挂载本身缺席时的行为不变：读侧把"文件缺失/解析失败"与"映射不到"视作
+同一件事，`User` 恒为 `nil`，不影响 `Username` 与其余字段。
 
 ### 验收标准第 1 条的服务器验证命令（本次实现未跑，留给能连服务器的会话）
 

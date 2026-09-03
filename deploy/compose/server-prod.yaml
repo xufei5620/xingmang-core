@@ -42,6 +42,10 @@ services:
       # docs/runbooks/REQLOG-RECORDER.md 的切换步骤）。
       XM_REQLOG_DATA_DIR: ${XM_REQLOG_DATA_DIR:-/var/lib/xm/reqlog}
       XM_REQLOG_TOKENMAP: ${XM_REQLOG_TOKENMAP:-/var/lib/xm/reqlog-tokenmap.json}
+      # CR-0008 的并行文件（上游用户 ID）。读侧把"文件缺失/解析失败"与
+      # "映射不到"视作同一条容错路径（User 恒为 nil），所以这条挂载补上
+      # 之前一切照旧、补上之后也不会新增错误类别。
+      XM_REQLOG_TOKENMAP_V2: ${XM_REQLOG_TOKENMAP_V2:-/var/lib/xm/reqlog-tokenmap-v2.json}
       # --- CPA 逐 key 用量 file 模式（XM-CPA0）--------------------------------
       # 容器内路径固定为下面的默认值，与下方 volumes 的挂载目标一一对应；
       # 真正切换要不要读 file 模式由 .env 的 XM_CPA_MODE 决定（默认继承
@@ -61,6 +65,11 @@ services:
       # 读到的是空的请求列表，不是报错，排查时先看这里。
       - ${XM_REQLOG_HOST_DATA_DIR:-/root/reqlog/data}:/var/lib/xm/reqlog:ro
       - ${XM_REQLOG_HOST_TOKENMAP:-/root/reqlog/tokenmap.json}:/var/lib/xm/reqlog-tokenmap.json:ro
+      # CR-0008：与上面一条对称。宿主机默认路径就是记录代理的
+      # DefaultTokenMapV2Path；同样受"源路径不存在就被当成空目录创建"的
+      # 影响，先按 docs/runbooks/REQLOG-RECORDER.md 的 CR-0008 一节确认
+      # 文件已产出再部署这份覆盖。
+      - ${XM_REQLOG_HOST_TOKENMAP_V2:-/root/reqlog/tokenmap.v2.json}:/var/lib/xm/reqlog-tokenmap-v2.json:ro
       # 只读消费宿主快照 producer 原子发布的独立 DELETE-journal SQLite。
       # 平台容器绝不再挂 active cpam-data/WAL，也不接触 auths/config.yaml。
       # 长语法关闭 Docker 的“源路径不存在就造空目录”行为，首代快照缺失
