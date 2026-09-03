@@ -145,3 +145,59 @@ happens inside the same eligibility-projection job that, on success,
 unconditionally deletes its own `eligibility_projection_jobs` row regardless
 of which status the account ends up in -- there is no separate queue entry
 for either state to get stuck in.
+
+## Manual queue narrowing (XM-INV-ELIG-QUEUE-NARROW, 2026-09-03)
+
+Two changes, together with the automatic reconciliation above, narrowed the
+administrator freeze queue down to what genuinely needs a human: refund/
+red-letter exposure (`SOURCE_REFUND`), a self-heal failure on a data gap
+(`SOURCE_GAP`), a precise, funding-lot-scoped red-reversal
+(`LATE_FINALIZED_EVENT` with a `funding_lot_id`), and the six data-integrity/
+migration-period reasons (`EVENT_PAYLOAD_DRIFT`, `UNIT_MISMATCH`,
+`AMBIGUOUS_EVENT_ORDER`, `STREAM_WATERMARK_REGRESSION`, `EVENT_DEAD`,
+`POLICY_ANCHOR_BLOCKED`), which are unaffected by this slice.
+
+- **A late-arriving fact no longer freezes the whole account by default.**
+  Previously, any fact (a usage or credit event) observed after the account's
+  own `finalized_through` watermark had already passed it froze the entire
+  account (`LATE_FINALIZED_EVENT`, no `funding_lot_id`) purely as a defensive
+  measure, regardless of whether the resulting reprojection actually caused
+  any problem. That generalized freeze is gone: the late fact still triggers
+  a full reprojection (`eligibility.late_fact.reprojected` audit event, no
+  freeze), and reprojection's own, unchanged, precise check still opens a
+  `funding_lot`-scoped `LATE_FINALIZED_EVENT` freeze exactly when a late fact
+  genuinely causes a red-reversal -- an already-issued invoice's recognized
+  amount dropping below what was issued on that lot. That real, still-manual
+  case is untouched.
+- **`invoice-eligibility-repair --kind=queue-narrow`** migrates every
+  still-open freeze this slice and XM-INV-ELIG-AUTO-RECONCILE made obsolete:
+  `UNKNOWN_NEGATIVE_BALANCE`, `USAGE_EXCEEDS_LEDGER`, and a
+  `LATE_FINALIZED_EVENT` freeze with no `funding_lot_id` (the generalized
+  form removed above). Each matching freeze is resolved with the fixed note
+  "由 XM-INV-ELIG-SIMPLIFY 迁移自动解除", using the same column shape the
+  interactive resolve endpoint writes. For the first two reasons, the tool
+  does not simply clear the account: it rebuilds `not_invoiceable_pending_reconciliation`
+  from the account's latest real balance evaluation if that evaluation still
+  shows a negative difference (so an account still genuinely unreconciled is
+  never misreported "resolved"), and reprojects so the usage-overage columns
+  reflect the current projection. An account returns to `active` only when no
+  open freeze remains at all, through the same rules the interactive resolve
+  endpoint uses -- never forced. Unlike the other three `eligibility-repair`
+  kinds, this one processes one account per transaction rather than the whole
+  run in one transaction: a single account's own data inconsistency is
+  reported as a per-account error and does not block any other account in
+  the same run.
+
+  ```
+  # dry run (default) -- reports what would change, writes nothing
+  /app/bin/invoice-eligibility-repair \
+    --database-url-file=/run/secrets/invoice-db-url \
+    --field-keyring-file=/run/secrets/field-keyring.json \
+    --kind=queue-narrow
+
+  # apply -- requires an approving operator id
+  /app/bin/invoice-eligibility-repair \
+    --database-url-file=/run/secrets/invoice-db-url \
+    --field-keyring-file=/run/secrets/field-keyring.json \
+    --kind=queue-narrow --apply --operator-id=<admin-uuid>
+  ```
