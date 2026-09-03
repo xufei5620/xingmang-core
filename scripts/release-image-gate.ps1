@@ -7,7 +7,7 @@ param(
     [string]$ImageTag = 'release-candidate',
 
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$')]
-    [string]$SourceAgentVersion = '0.3.0',
+    [string]$SourceAgentVersion = '0.3.1',
 
     [ValidateSet('keycloak', 'none', 'external-managed')]
     [string]$IdPMode = 'keycloak',

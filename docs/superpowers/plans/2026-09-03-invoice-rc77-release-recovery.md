@@ -1,5 +1,11 @@
 # RC77 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC77 was signed (`v0.1.0-rc77-signed`,
+> `a0efc92`) and image-gated (`release/0.1.0-rc77-exact2`) but deliberately not
+> deployed: it is folded into RC78 so production restarts once. Its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc78-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, shadow-evaluate, and deploy RC77 — eligibility simplification slice 1 (XM-INV-ELIG-AUTO-RECONCILE: a negative or unreconciled balance difference downgrades the account to the self-clearing `not_invoiceable_pending_reconciliation` state instead of opening a manual freeze, auto-exiting after two consecutive matched evaluations; `USAGE_EXCEEDS_LEDGER` records the overage on the account row instead of freezing; migration 0020) plus the release-rehearsal shadow-evaluation tool (XM-INV-SHADOW-EVAL: `invoice-eligibility-shadow` in the tools image and `deploy/rehearsal/shadow-eval.sh`).

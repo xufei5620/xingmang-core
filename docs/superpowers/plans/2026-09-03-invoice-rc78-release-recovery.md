@@ -1,0 +1,38 @@
+# RC78 Release Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
+
+**Goal:** Build, strictly verify, sign, shadow-evaluate, and deploy RC78 — the eligibility simplification slices 1, 2 and 4 (XM-INV-ELIG-AUTO-RECONCILE with migration 0020: negative or unreconciled balance differences downgrade the account to the self-clearing `not_invoiceable_pending_reconciliation` state instead of a manual freeze and `USAGE_EXCEEDS_LEDGER` only records the overage; XM-INV-ELIG-QUEUE-NARROW: late facts reproject without freezing and `invoice-eligibility-repair --kind=queue-narrow` resolves the legacy negative-balance/usage-overage/late-fact freezes; XM-INV-USER-LEDGER-QUERY: read-only admin ledger endpoint), the release-rehearsal shadow-evaluation tool (XM-INV-SHADOW-EVAL with the three fixes from its two real server runs), and XM-INV-AGENT-RESTART-GRACE (source agent 0.3.1: persisted reconcile schedule, rolling usage reconcile window that never rewinds to the cutover, readiness grace while a rescan is actively receiving). RC77 (`a0efc92`) was signed and image-gated but deliberately not deployed; RC78 supersedes it.
+
+**Architecture:** RC78 is a migration release from RC76 (0020 adds columns and CHECK constraints to `source_account_eligibility_state`; no data rewrite). `deploy/roll-forward.sh` keeps the cutover order (migrate → idp → main → sources → restart api → restart ingest-proxy); the tools image gains `invoice-eligibility-shadow` and the queue-narrow repair kind; the source-agent image reports 0.3.1 and the release env carries `SOURCE_AGENT_VERSION=0.3.1`. Because this release changes the evaluator, Task 3 runs the shadow evaluation for real before roll-forward: the latest signed backup's database component is restored into an isolated throwaway PostgreSQL on the host, the RC78 tools image applies the candidate migrations to that copy, then drains the projection queue there; only exit 0 (ready) allows production. A migration release never reuses an older backup: a fresh signed pre-deploy backup is mandatory. On the first restart with agent 0.3.1 a legacy in-flight reconcile cycle is abandoned and the usage stream resumes from its watermark (`legacy_reconcile_cycle_abandoned` warning expected once per usage stream).
+
+**Tech Stack:** PowerShell 7.5+, Git signatures, gitleaks 8.30.1, Docker/Compose, Trivy 0.74.0, age + pg_restore (shadow evaluation).
+
+**Spec:** `docs/handoffs/XM-INV-ELIG-AUTO-RECONCILE.md`; `docs/handoffs/XM-INV-ELIG-QUEUE-NARROW.md`; `docs/handoffs/XM-INV-USER-LEDGER-QUERY.md`; `docs/handoffs/XM-INV-SHADOW-EVAL.md`; `docs/handoffs/XM-INV-AGENT-RESTART-GRACE.md`; `docs/superpowers/specs/2026-09-03-xm-inv-eligibility-simplification-design.md`; `docs/PRODUCTION-RUNBOOK.md` section 11.2
+
+## Constraints
+
+- Signed tags rc53 (`9bbae4a`) through rc77 (`a0efc92`) stay fixed; RC76 (`17945dc`) is the release in production; RC77 evidence is immutable and unused.
+- RC49–RC52 anchors/tags remain immutable.
+- RC78 uses only `v0.1.0-rc78-signed`, `releaseName=0.1.0-rc78`, nine exact `:0.1.0-rc78` references, `SourceAgentVersion=0.3.1`, and one new `release/0.1.0-rc78-exactN`.
+- Toolchain/environment failures re-run into a fresh exactN under the SAME release name; failed exactN directories are retained evidence and never edited. Detached gates are launched from PowerShell (a Bash-launched run breaks the ClamAV symlink fixture).
+- Evaluator-change discipline (2026-09-03): every evaluator branch returns a defined outcome; per-account isolation tests stay green; the shadow evaluation is mandatory and a `regressed` verdict (exit 3) blocks production without exception.
+- Migration release: take a fresh pre-deploy backup; never reuse an older backup.
+
+### Task 1: Source identity
+
+- [ ] From `K:\发票\wt-XM-INV-AUTOLOGIN`, verify PowerShell 7.5+, all four failure-evidence scripts (run from `K:\发票\wt-XM-INV-SEC-RC49`), build/vet for backend and agents, full unit suite, integration suite against a disposable PostgreSQL 18 (loopback timeouts re-run in isolation; assertion failures stop), agents module tests, web typecheck/tests, `deploy/rehearsal/test-shadow-eval.sh`, gate self-test, and release-range gitleaks; capture every native exit immediately and require `0`.
+- [ ] Create `v0.1.0-rc78-signed` only if absent, verify it, and require the fully qualified tag to peel to `HEAD`.
+
+### Task 2: Image evidence
+
+- [ ] In one block (run through `scripts/run-detached.ps1` from PowerShell), bind worktree/tag/HEAD, select the first unused RC78 exactN, run the image gate with `-SourceAgentVersion 0.3.1` and require exit `42`, then require ordinary and strict verifier exits `0` and `0` without manually parsing manifest decisions; retry into a fresh exactN only when every failed backend package passes in isolation immediately afterwards.
+
+### Task 3: Shadow evaluation, rehearsal, and production
+
+- [ ] Sign exactly one strict-ready RC78 directory, transfer only its nine manifest-bound images plus the signed source bundle and evidence, and stage (load images, verify tag and evidence signatures, prepare the release env with `INVOICE_IMAGE_TAG=0.1.0-rc78` and `SOURCE_AGENT_VERSION=0.3.1`).
+- [ ] Shadow evaluation (third real run of the tool, first with all three fixes): on the host, from the staged RC78 source, run `deploy/rehearsal/shadow-eval.sh --image-tag 0.1.0-rc78` against the latest signed backup with `BACKUP_DIR`, `BACKUP_ALLOWED_SIGNERS_FILE`, and `AGE_IDENTITY_FILE` (identity on tmpfs for the run only, shredded after). Require `migrations_applied` to list 0020 and exit `0` (ready); exit `3` (regressed) blocks production and returns the slices to development; exit `1`/`2` is a tooling defect — fix the tool, re-bump the identity, and rerun Tasks 1–3. Copy `rehearsals/<stamp>/shadow-eval.json` and `shadow-eval-summary.txt` beside the release evidence.
+- [ ] Take a fresh pre-deploy backup (offline backup signing key mounted on tmpfs for the run only, shredded after; `RELEASE_METADATA_FILE` pointing at the flat `evidence/release-manifest.json` of the running release), then run `bash deploy/roll-forward.sh <sha>`, require readyz 200 in the verify step, confirm migration 0020 applied (`source_account_eligibility_state` status CHECK includes `not_invoiceable_pending_reconciliation`; the pending-reconciliation and overage columns exist), confirm the Sub2API usage agent logs `agent_version="0.3.1"` and at most one `legacy_reconcile_cycle_abandoned` warning, and record deployment evidence beside the release.
+- [ ] Post-deploy repair (owner-approved 2026-09-03 for the rule simplification): run `invoice-eligibility-repair --kind=queue-narrow` dry-run, record the per-account plan, then apply; record freeze counts before/after.
+
+Production remains blocked until the credentialed human canary (the projection worker completing batches without projection errors for 30 minutes, readiness staying 200 through the source-agent restart and any active rescan, no account entering `frozen` for `UNKNOWN_NEGATIVE_BALANCE` or `USAGE_EXCEEDS_LEDGER` after the cutover) binds RC78.
