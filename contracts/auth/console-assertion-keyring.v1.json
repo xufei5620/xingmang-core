@@ -1,1 +1,14 @@
-[]
+[
+  {
+    "key_id": "2026-09",
+    "algorithm": "EdDSA",
+    "public_key": "VtD6nZd3JPDPebHJwn3pL6SWJxxVoVOk403t2fiWLGQ=",
+    "fingerprint": "14a8a638758896ff1267e4fc856454295f34f7f1ddd869a51b5c1c016f083677",
+    "purpose": "console_admin_assertion_signing",
+    "protocol": "xm-console-assertion-v1",
+    "valid_from": "2026-09-03T11:53:17Z",
+    "valid_until": "2027-09-03T11:53:17Z",
+    "revoked_at": null,
+    "revoke_reason": ""
+  }
+]
