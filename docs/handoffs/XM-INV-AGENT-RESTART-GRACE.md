@@ -8,8 +8,8 @@
   - `1633dba` fix(source-agent): rolling reconcile window for the usage economic stream (part B)
   - `0ab1f58` feat(api): readiness grace for an active source economic rescan (part A)
   - `05e0fba` docs: XM-INV-AGENT-RESTART-GRACE operations notes and handoff
-  - a follow-up commit widening the part A activity window after a production-data correction (see
-    "Post-delivery correction" below) -- hash filled in once committed.
+  - `1f4bac1` fix(api): widen the active-rescan activity window for the processing tail (post-delivery
+    correction from production data -- see "Post-delivery correction" below)
 
 ## Production problem (verified before this work started, magnitude corrected after -- see below)
 
