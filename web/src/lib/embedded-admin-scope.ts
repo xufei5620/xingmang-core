@@ -275,3 +275,91 @@ export function parseXmEmbedAdminAssertionMessage(data: unknown): string | null 
   if (segments.length !== 3 || segments.some((segment) => segment.length === 0)) return null;
   return assertion;
 }
+
+// --- Assertion-needed handshake (iframe -> console) ------------------------
+//
+// XM-INV-ASSERT-HANDSHAKE, closing a real production gap XM-INV-CONSOLE-
+// ASSERT's own handoff flagged but did not build: EmbeddedConsoleFrame (the
+// platform side) posts its signed assertion exactly twice -- once when the
+// assertion is ready, once more on the iframe's onLoad -- and this page's
+// own message listener (the effect above) only exists once its React bundle
+// has run, which is not guaranteed to be true yet at either delivery. When
+// both deliveries lose that race, nothing ever asks for a third: the
+// console has no idea redemption never happened, and the admin is stuck on
+// the login card despite a real, successfully-issued assertion. This is the
+// missing half -- the iframe telling the console "I'm listening, and I
+// still have no session" -- so the console's own re-issue-on-request logic
+// (see AuthProvider.tsx's posting effect) gets a chance to run. Same
+// envelope family as the height/admin-assertion messages above, one valid
+// origin, no payload beyond the kind: this page has nothing to prove here,
+// it is only ever asking, never asserting anything about itself.
+
+export interface XmEmbedAdminAssertionNeededMessage {
+  type: "xm-embed";
+  version: 1;
+  kind: "admin-assertion-needed";
+}
+
+export function buildXmEmbedAdminAssertionNeededMessage(): XmEmbedAdminAssertionNeededMessage {
+  return { type: "xm-embed", version: 1, kind: "admin-assertion-needed" };
+}
+
+// Backoff schedule for repeated admin-assertion-needed posts. The first four
+// retries widen (2s/4s/8s/16s) to ride out the common case -- the console's
+// own "ready"/onLoad delivery was just briefly ahead of this page's
+// listener -- without hammering postMessage; every attempt after that
+// settles to a fixed 30s cadence for as long as the tab genuinely sits on
+// the login card (an operator stepping away mid-TOTP, a slow platform
+// round-trip, etc.). ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS bounds the total
+// (40 posts: ~30s of backoff plus 36 more at 30s is roughly 18 minutes) so a
+// durably-stuck embed -- a misconfigured console origin, XM-INVCON1 not
+// actually deployed -- eventually goes quiet instead of posting to
+// window.parent forever.
+export const ADMIN_ASSERTION_NEEDED_RETRY_DELAYS_MS = [2000, 4000, 8000, 16000] as const;
+export const ADMIN_ASSERTION_NEEDED_STEADY_INTERVAL_MS = 30000;
+export const ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS = 40;
+
+// `attempt` is the 0-based count of admin-assertion-needed posts already
+// sent (the immediate first post is attempt 0); returns the delay before
+// the next one (attempt + 1).
+export function nextAdminAssertionNeededDelayMs(attempt: number): number {
+  return attempt < ADMIN_ASSERTION_NEEDED_RETRY_DELAYS_MS.length
+    ? ADMIN_ASSERTION_NEEDED_RETRY_DELAYS_MS[attempt]
+    : ADMIN_ASSERTION_NEEDED_STEADY_INTERVAL_MS;
+}
+
+// Whether another post should be scheduled after `attemptsSoFar` have
+// already been sent (the immediate first post counts as one attempt).
+export function shouldScheduleNextAdminAssertionNeededAttempt(attemptsSoFar: number): boolean {
+  return attemptsSoFar < ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS;
+}
+
+// The posting gate itself: only while genuinely framed (a standalone /admin
+// tab has no console parent to ask) and only once the session check has
+// resolved to "not authenticated" -- `sessionLoading` true is the safe
+// default to withhold posting on, the same way oidcAdminLoginEnabled
+// defaults to "show it" while unknown (AuthProvider's own doc comment):
+// posting mid-check would race a session that turns out to already be
+// valid, e.g. a page reload with a live cookie.
+export function shouldRequestAdminAssertion(
+  isFramed: boolean,
+  sessionLoading: boolean,
+  authenticated: boolean,
+): boolean {
+  return isFramed && !sessionLoading && !authenticated;
+}
+
+// Nonce replay protection (backend, XM-INV-CONSOLE-ASSERT) makes every
+// assertion single-use -- exchanging the exact same compact JWS twice (the
+// console's own ready + onLoad deliveries carry one identical assertion, not
+// two distinct ones) always fails the second time with a spurious replay
+// error rather than a no-op. Comparing by raw assertion string is enough: a
+// *fresh* assertion (issued after an admin-assertion-needed post) is always
+// a different signed value, so this never blocks a legitimate re-delivery,
+// only a literal repeat.
+export function shouldExchangeAdminAssertion(
+  assertion: string,
+  lastExchangedAssertion: string | null,
+): boolean {
+  return assertion !== lastExchangedAssertion;
+}
