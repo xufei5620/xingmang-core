@@ -140,22 +140,31 @@ func TestEligibilityProjectionClaimableCount(t *testing.T) {
 	}
 }
 
+// TestEligibilityShadowFailedJobs seeds a status='dead' row, not 'failed':
+// XM-INV-PROJECTION-FAILURE-GRADING renamed EligibilityShadowFailedJobs' own
+// predicate from the legacy 'failed' status (no longer produced by
+// ProcessEligibilityProjectionJobs) to the new terminal 'dead' grade -- see
+// that method's own doc comment. A merely-retrying queued job (attempts>0,
+// still short of the dead threshold) must not show up here either.
 func TestEligibilityShadowFailedJobs(t *testing.T) {
 	store, ctx := integrationStore(t)
 	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
-	failedAccount := "60000000-0000-4000-8000-0000000000b1"
+	deadAccount := "60000000-0000-4000-8000-0000000000b1"
 	queuedAccount := "60000000-0000-4000-8000-0000000000b2"
-	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, failedAccount, "failed-job", cutover, manifestHash, configHash)
+	retryingAccount := "60000000-0000-4000-8000-0000000000b3"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, deadAccount, "dead-job", cutover, manifestHash, configHash)
 	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, queuedAccount, "queued-job", cutover, manifestHash, configHash)
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, retryingAccount, "retrying-job", cutover, manifestHash, configHash)
 	now := time.Now().UTC().Truncate(time.Second)
-	seedEligibilityProjectionJobRow(t, store, ctx, failedAccount, "failed", strPtr("PROJECTION_FAILED"), now, now, now.Add(5*time.Minute))
+	seedEligibilityProjectionJobRow(t, store, ctx, deadAccount, "dead", strPtr("PROJECTION_DEAD"), now, now, now.Add(5*time.Minute))
 	seedEligibilityProjectionJobRow(t, store, ctx, queuedAccount, "queued", nil, now, now, now)
+	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, retryingAccount, "queued", 3, strPtr("PROJECTION_FAILED"), now, now, now.Add(2*time.Minute))
 
 	failed, err := store.EligibilityShadowFailedJobs(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(failed) != 1 || failed[0].ExternalAccountID != failedAccount || failed[0].LastErrorCode != "PROJECTION_FAILED" {
-		t.Fatalf("expected exactly the one failed job, got %+v", failed)
+	if len(failed) != 1 || failed[0].ExternalAccountID != deadAccount || failed[0].LastErrorCode != "PROJECTION_DEAD" {
+		t.Fatalf("expected exactly the one dead job, got %+v", failed)
 	}
 }

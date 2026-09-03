@@ -52,6 +52,15 @@ type Snapshot struct {
 }
 
 // ProjectionHealth is the JSON shape of postgresstore.EligibilityProjectionHealth.
+// Failed is populated from that struct's Dead field (XM-INV-PROJECTION-FAILURE-GRADING
+// renamed postgresstore.EligibilityProjectionHealth.Failed to Dead: it now
+// counts only the new terminal status='dead' grade, not a job merely
+// retrying with backoff) -- kept under its historical JSON key name here
+// deliberately, to avoid churning deploy/rehearsal/test-shadow-eval.sh's
+// fixture JSON, which never reads this field (only round_errors and
+// failed_accounts drive shadow_eval_has_errors -- see
+// deploy/rehearsal/shadow-eval-lib.sh). See
+// docs/handoffs/XM-INV-PROJECTION-FAILURE-GRADING.md.
 type ProjectionHealth struct {
 	Queued             int64     `json:"queued"`
 	Failed             int64     `json:"failed"`
@@ -184,7 +193,7 @@ func toReportSnapshot(snapshot postgresstore.EligibilityShadowSnapshot) Snapshot
 
 func toReportHealth(health postgresstore.EligibilityProjectionHealth) ProjectionHealth {
 	return ProjectionHealth{
-		Queued: health.Queued, Failed: health.Failed, Processing: health.Processing,
+		Queued: health.Queued, Failed: health.Dead, Processing: health.Processing,
 		OldestPending: health.OldestPending, ProofPending: health.ProofPending,
 		OldestProofPending: health.OldestProofPending,
 	}

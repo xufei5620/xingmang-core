@@ -312,7 +312,7 @@ func TestBalanceDeltaCarryForwardMissingProofFailsWithoutAdvancing(t *testing.T)
 		t.Fatalf("missing proof job status=%q error_code=%q err=%v", jobStatus, errorCode, err)
 	}
 	health, err := fixture.store.EligibilityProjectionHealth(fixture.ctx)
-	if err != nil || health.Failed != 0 || health.Queued != 1 {
+	if err != nil || health.Dead != 0 || health.Queued != 1 {
 		t.Fatalf("pending proof health=%+v err=%v", health, err)
 	}
 }
@@ -417,8 +417,27 @@ func TestBalanceDeltaCarryForwardRejectsUnmappedFundingVisibility(t *testing.T) 
 	if !finalized.Equal(fixture.cutover) {
 		t.Fatalf("unmapped funding advanced finalized boundary=%s", finalized)
 	}
+	// XM-INV-PROJECTION-FAILURE-GRADING: a single per-account processing
+	// error no longer leaves the job status='failed' (which used to trip
+	// EligibilityProjectionHealth's Failed count, and /readyz, immediately)
+	// -- it is graded like any other transient failure, requeued with
+	// backoff (status='queued', attempts=1). Only
+	// projectionFailureDeadThreshold consecutive failures would escalate it
+	// to Dead; see TestProjectionFailureGradingEscalatesToDeadAfterConsecutiveFailures
+	// in projection_failure_grading_integration_test.go for that ladder.
+	var jobStatus string
+	var attempts int64
+	var lastError string
+	if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT status,attempts,COALESCE(last_error,'')
+		FROM eligibility_projection_jobs WHERE external_account_id=$1`, fixture.accountID).Scan(
+		&jobStatus, &attempts, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if jobStatus != "queued" || attempts != 1 || !strings.Contains(lastError, errBalanceCarryForwardProofInvalid.Error()) {
+		t.Fatalf("invalid funding proof job status=%q attempts=%d last_error=%q", jobStatus, attempts, lastError)
+	}
 	health, err := fixture.store.EligibilityProjectionHealth(fixture.ctx)
-	if err != nil || health.Failed != 1 {
+	if err != nil || health.Dead != 0 || health.Retrying != 1 {
 		t.Fatalf("invalid funding proof health=%+v err=%v", health, err)
 	}
 }

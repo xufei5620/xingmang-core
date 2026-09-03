@@ -55,6 +55,26 @@ func seedEligibilityProjectionJobRow(t *testing.T, store *Store, ctx context.Con
 
 func strPtr(v string) *string { return &v }
 
+// seedEligibilityProjectionJobRowWithAttempts is
+// seedEligibilityProjectionJobRow's sibling for XM-INV-PROJECTION-FAILURE-GRADING
+// scenarios that need to pin the new attempts column explicitly (Retrying's
+// count, and the OldestPending backoff exclusion, both key off it) --
+// factored out separately rather than widening seedEligibilityProjectionJobRow
+// itself, since most existing callers of that helper are unrelated to
+// grading and do not care about attempts (it defaults to 0, matching the
+// migration's own column default).
+func seedEligibilityProjectionJobRowWithAttempts(t *testing.T, store *Store, ctx context.Context, accountID string, status string, attempts int, lastErrorCode *string, createdAt, updatedAt, nextAttemptAt time.Time) {
+	t.Helper()
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO eligibility_projection_jobs(
+			external_account_id,requested_through,status,attempt_count,attempts,next_attempt_at,
+			last_error_code,created_at,updated_at)
+		VALUES($1,$2,$3,3,$4,$5,$6,$7,$8)`,
+		accountID, nextAttemptAt.Add(time.Hour), status, attempts, nextAttemptAt, lastErrorCode, createdAt, updatedAt); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // seedEligibilityProjectionJobRowProcessing writes a 'processing' row with an
 // explicit lease, for XM-INV-READY-LEASE's live-lease exclusion tests below.
 // Unlike seedEligibilityProjectionJobRow, this always sets
@@ -307,9 +327,11 @@ func TestEligibilityProjectionHealthSeparatesProofPendingFromStuck(t *testing.T)
 		"queued", nil,
 		now.Add(-25*time.Minute), now.Add(-20*time.Minute), now.Add(-5*time.Minute))
 
-	// (c) a failed job; Failed must reflect it regardless of age.
+	// (c) a dead job (XM-INV-PROJECTION-FAILURE-GRADING's terminal grade,
+	// which replaced the pre-existing 'failed' status this test used to
+	// seed here); Dead must reflect it regardless of age.
 	seedEligibilityProjectionJobRow(t, store, ctx, accounts["c-failed"],
-		"failed", strPtr("PROJECTION_FAILED"),
+		"dead", strPtr("PROJECTION_DEAD"),
 		now.Add(-2*time.Minute), now.Add(-1*time.Minute), now.Add(4*time.Minute))
 
 	// (d) last attempted 16 minutes ago with last_error_code=BALANCE_PROOF_PENDING,
@@ -327,8 +349,8 @@ func TestEligibilityProjectionHealthSeparatesProofPendingFromStuck(t *testing.T)
 	if health.Queued != 3 {
 		t.Errorf("Queued=%d want 3 (a,b,d)", health.Queued)
 	}
-	if health.Failed != 1 {
-		t.Errorf("Failed=%d want 1 (c)", health.Failed)
+	if health.Dead != 1 {
+		t.Errorf("Dead=%d want 1 (c)", health.Dead)
 	}
 	if health.Processing != 0 {
 		t.Errorf("Processing=%d want 0", health.Processing)
@@ -366,7 +388,7 @@ func TestEligibilityProjectionHealthEmptyIsZeroValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if health.Queued != 0 || health.Failed != 0 || health.Processing != 0 || health.ProofPending != 0 {
+	if health.Queued != 0 || health.Dead != 0 || health.Processing != 0 || health.ProofPending != 0 || health.Retrying != 0 {
 		t.Fatalf("non-zero counts on an empty table: %+v", health)
 	}
 	if !health.OldestPending.IsZero() || !health.OldestProofPending.IsZero() {
