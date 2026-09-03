@@ -125,14 +125,41 @@ shadow_eval_has_errors() {
   fi
 }
 
+# shadow_eval_report_is_valid <report.json>
+# Returns 0 only when the file looks like a genuine
+# backend/cmd/eligibility-shadow report (carries a top-level "verdict" key
+# and no "tooling_failure" marker), 1 otherwise. A real production run
+# reached the point where invoice-eligibility-shadow itself never got to
+# print anything (a "read database credential: permission denied" error,
+# fixed separately) -- shadow-eval.sh now writes an explicit
+# `{"tooling_failure": true, ...}` marker into shadow-eval.json for exactly
+# that case rather than leaving an empty file behind. Both
+# shadow_eval_verdict_exit_code and shadow_eval_human_summary check this
+# first and refuse to compute a verdict or render freeze/error counts from
+# anything that fails it: an infrastructure/tooling problem must never be
+# silently folded into "not_ready" (which would misrepresent it as the
+# *candidate* regressing) or into "ready" (which would misrepresent it as
+# nothing wrong at all).
+shadow_eval_report_is_valid() {
+  local report=$1
+  grep -qE '^  "verdict": ' "$report" && ! grep -qE '^  "tooling_failure": true,?$' "$report"
+}
+
 # shadow_eval_verdict_exit_code <report.json>
 # Prints "ready" or "not_ready" on stdout and returns 0 for ready, 3 for
 # not_ready -- the same release-blocking contract as
 # backend/cmd/eligibility-shadow's own process exit code (see ExitCode in
-# report.go).
+# report.go) -- for a genuine report (shadow_eval_report_is_valid). For
+# anything else, prints "execution_failure" and returns 1, matching
+# shadow-eval.sh's own script-level exit-code contract ("1: any other
+# execution failure") rather than misusing 0 or 3.
 shadow_eval_verdict_exit_code() {
   local report=$1
   local new_reasons has_errors
+  if ! shadow_eval_report_is_valid "$report"; then
+    printf 'execution_failure\n'
+    return 1
+  fi
   new_reasons=$(shadow_eval_new_freeze_reasons "$report")
   has_errors=$(shadow_eval_has_errors "$report")
   if [[ -n "$new_reasons" || "$has_errors" == "true" ]]; then
@@ -156,9 +183,21 @@ _shadow_eval_scalar() {
 }
 
 # shadow_eval_human_summary <report.json>
-# Prints a short human-readable rendering of the report to stdout.
+# Prints a short human-readable rendering of the report to stdout -- or, for
+# anything shadow_eval_report_is_valid rejects (see its own doc comment), a
+# short explanation that this was a tooling/execution failure with no
+# verdict, instead of silently rendering blank or nonsensical freeze/error
+# counts from a non-report file.
 shadow_eval_human_summary() {
   local report=$1
+  if ! shadow_eval_report_is_valid "$report"; then
+    printf 'XM-INV-SHADOW-EVAL rehearsal report\n'
+    printf '  EXECUTION FAILURE -- no report was produced, so there is no verdict.\n'
+    printf '  reason:        %s\n' "$(_shadow_eval_scalar "$report" reason)"
+    printf '  tool exit code: %s\n' "$(_shadow_eval_scalar "$report" tool_exit_code)"
+    printf '  log file:      %s\n' "$(_shadow_eval_scalar "$report" log_file)"
+    return 0
+  fi
   local before_freezes after_freezes new_reasons round_error_count failed_account_count
   before_freezes=$(_shadow_eval_freeze_block "$report" 1 | awk -F'\t' '{printf "%s%s=%s", (NR>1?", ":""), $1, $2}')
   after_freezes=$(_shadow_eval_freeze_block "$report" 2 | awk -F'\t' '{printf "%s%s=%s", (NR>1?", ":""), $1, $2}')

@@ -1,8 +1,9 @@
 # XM-INV-SHADOW-EVAL: release-rehearsal shadow evaluation of the eligibility projection worker
 
-- **status:** implemented and self-tested locally; gates below. A first real run on the server found
-  and this update fixes one real bug (a secret-file permission error in the tools container -- see
-  "Not run"); a second real run to confirm the fix is still needed.
+- **status:** implemented and self-tested locally; gates below. A first real run on the server found,
+  and this update fixes, two real problems (a secret-file permission error in the tools container, and
+  an empty/confusing `shadow-eval.json` left behind on that failure path -- see "Not run"); a second
+  real run to confirm both fixes is still needed.
 - **branch:** `ai/claude/XM-INV-SHADOW-EVAL` (based on `ai/claude/XM-INV-AUTOLOGIN` at `0177e72`),
   worktree `K:/发票/wt-XM-INV-SHADOW-EVAL`.
 - **commits:**
@@ -10,9 +11,12 @@
   - `2fb6331` feat(rehearsal): add shadow-eval.sh orchestration and its static test
   - `d1f0468` test(eligibility-shadow): pin the Go/bash report JSON-shape contract
   - `196f810` docs(shadow-eval): production runbook section and handoff
-  - plus a follow-up commit fixing the tools-container secret-file permission bug the first real run
-    found (this file's own commit is not self-referenceable by hash from inside itself; see
-    `git log --oneline 0177e72..HEAD` on this branch for the exact, current commit list)
+  - `d8e27e2` fix(rehearsal): chown the tools-container secret to its actual runtime uid
+  - plus a follow-up commit that writes an explicit failure marker into `shadow-eval.json` instead of
+    leaving it empty when the tool produces no report, and makes the verdict/summary logic explicitly
+    refuse to treat that marker as a verdict (this file's own commit is not self-referenceable by hash
+    from inside itself; see `git log --oneline 0177e72..HEAD` on this branch for the exact, current
+    commit list)
 
 ## Summary
 
@@ -150,15 +154,23 @@ the RC-plan Task 1 bullet to add for any RC that changes the evaluator/projectio
   stage; the two literal substrings `scripts/verify.ps1` checks
   (`/out/invoice-oidc-preflight ./cmd/oidc-preflight` and `/out/invoice-oidc-preflight /usr/local/bin/`)
   are unchanged.
-- `deploy/rehearsal/shadow-eval.sh` -- the orchestrator (see Summary). Post-first-real-run fix:
+- `deploy/rehearsal/shadow-eval.sh` -- the orchestrator (see Summary). Post-first-real-run fixes:
   `resolve_tools_container_ids` resolves the tools image's runtime uid/gid and the database-url secret
-  file/work directory are `chown`ed to it (see "Not run" below for the incident this fixes).
+  file/work directory are `chown`ed to it; an empty report is overwritten with an explicit
+  `tooling_failure` marker instead of left as a 0-byte file, and `shadow_eval_report_is_valid` is
+  checked as a second, independent guard before the verdict logic runs (see "Not run" below for the
+  two incidents these fix).
 - `deploy/rehearsal/shadow-eval-lib.sh` -- the bash-side report-comparison/summary functions, sourced
-  by both `shadow-eval.sh` and `test-shadow-eval.sh`; also now `shadow_eval_parse_config_user`, the
-  pure/testable half of the uid/gid resolution above.
+  by both `shadow-eval.sh` and `test-shadow-eval.sh`; also now `shadow_eval_parse_config_user` (the
+  pure/testable half of the uid/gid resolution above) and `shadow_eval_report_is_valid` (checked by
+  both `shadow_eval_verdict_exit_code`, which now returns a distinct `"execution_failure"`/exit 1
+  instead of ever computing ready/not_ready from a non-report, and `shadow_eval_human_summary`, which
+  renders a clear execution-failure explanation instead of blank/nonsensical freeze counts).
 - `deploy/rehearsal/test-shadow-eval.sh` -- static test: every argument-parsing failure path, the
-  comparison logic against fixture JSON (including the empty-array edge case), the human summary, and
-  `shadow_eval_parse_config_user`'s numeric/named/malformed `Config.User` cases.
+  comparison logic against fixture JSON (including the empty-array edge case), the human summary,
+  `shadow_eval_parse_config_user`'s numeric/named/malformed `Config.User` cases, and
+  `shadow_eval_report_is_valid`/`shadow_eval_verdict_exit_code`/`shadow_eval_human_summary`'s handling
+  of a tooling-failure-marker fixture.
 - `docs/PRODUCTION-RUNBOOK.md` -- new section 11.2 (see Summary).
 - `docs/handoffs/XM-INV-SHADOW-EVAL.md` -- this document.
 
@@ -240,6 +252,21 @@ Re-ran, on the same worktree, after this fix:
   (exit 0).
 - `/c/Users/58439/.local/bin/gitleaks git --no-banner --log-opts="0177e72..HEAD" .`: `no leaks found`.
 
+### Follow-up: the tooling-failure-marker / verdict-guard fix
+
+Also entirely bash; same reasoning as above for not re-running the Go gates. Re-ran, on the same
+worktree, after this fix:
+
+- `bash -n` on all three shell scripts: clean.
+- `bash deploy/rehearsal/test-shadow-eval.sh`: `argument parsing: ok`, `report comparison logic: ok`,
+  `tooling-failure handling: ok` (new: `shadow_eval_report_is_valid` accepts a genuine report and
+  rejects the tooling-failure-marker fixture; `shadow_eval_verdict_exit_code` on that fixture prints
+  `execution_failure` and returns exit 1, not 0 or 3; `shadow_eval_human_summary` on it renders a clear
+  "EXECUTION FAILURE" explanation naming the log file, and does not render any "open freezes" text),
+  `human summary: ok`, `shadow_eval_parse_config_user: ok`, `test-shadow-eval.sh: all checks passed`
+  (exit 0).
+- `/c/Users/58439/.local/bin/gitleaks git --no-banner --log-opts="0177e72..HEAD" .`: `no leaks found`.
+
 ## Not run
 
 - **A real rehearsal against a real signed backup on the production server, still not completed.**
@@ -258,7 +285,11 @@ Re-ran, on the same worktree, after this fix:
   the common case, since the Dockerfile pins it literally -- falling back to asking the image itself
   via `id` when it is empty or a name), refuses to proceed if that resolves to root, `chown`s the
   secret file to that uid before mounting it, and `chown`/`chmod 0710`s the enclosing work directory
-  to that gid as defense in depth. The pure uid/gid-parsing half
+  to that gid as defense in depth. The team lead confirmed on the server that
+  `docker image inspect invoice-system-tools:0.1.0-rc77` reports `Config.User` as the literal
+  `"10001:10001"` (numeric, no container-start fallback needed in practice) -- the id-fallback path is
+  kept anyway since it is cheap (one short-lived `--rm` container, only exercised if `Config.User` is
+  ever empty or a name) and untested against a real image. The pure uid/gid-parsing half
   (`shadow_eval_parse_config_user` in `shadow-eval-lib.sh`) is now covered by
   `test-shadow-eval.sh`; the `chown`/`chmod` calls themselves and the actual container read are still
   unverified against a real server, so **a second real rehearsal run is still needed** before the
@@ -267,6 +298,27 @@ Re-ran, on the same worktree, after this fix:
   `restore-drill.sh`'s already-production-proven equivalents (same `age`/`ssh-keygen -Y
   verify`/tmpfs-postgres/cleanup-trap patterns, same `docker-cleanup-state.sh` helper), and this first
   real run's clean signature/restore/teardown behavior is itself evidence for that.
+
+  **Second finding from the same run, also fixed:** the team lead separately noticed that the
+  rehearsal directory (`/root/invoice-system/rehearsals/20260903T070721Z-551778/`) still contained a
+  `shadow-eval.json` file even though the tool produced no report -- `>"$report_json"` creates the
+  redirection target the instant the `docker run` command starts, regardless of what (if anything) it
+  writes, so this was an empty (0-byte) file. `shadow-eval.sh`'s own `[[ ! -s "$report_json" ]]` check
+  already correctly exited 1 *before* ever calling the summary/verdict functions on it -- so this
+  specific run was never at risk of misreporting an infrastructure failure as a verdict -- but an empty
+  file left on disk named exactly like a real report is a misleading, confusing artifact on its own,
+  and the invariant "a tooling failure can never become a verdict" was previously enforced only by that
+  one call-site check, not by the summary/verdict functions themselves. Both are now fixed: (1)
+  `shadow-eval.sh` overwrites the empty `report_json` with an explicit
+  `{"tooling_failure": true, "reason": ..., "tool_exit_code": ..., "log_file": ...}` marker before
+  exiting 1, so the on-disk artifact is self-describing instead of an empty mystery file; (2) a new
+  `shadow_eval_report_is_valid` in `shadow-eval-lib.sh` (a report must carry a top-level `"verdict"` key
+  and no `"tooling_failure"` marker) is now checked by both `shadow_eval_verdict_exit_code` (returns
+  the distinct `"execution_failure"`/exit 1 instead of ever computing ready/not_ready from it) and
+  `shadow_eval_human_summary` (prints a clear execution-failure explanation instead of blank/nonsensical
+  freeze counts), and `shadow-eval.sh` itself now also checks it explicitly right after the
+  structural-JSON sanity check, as a second, independent layer on top of the original emptiness check.
+  Covered by three new `test-shadow-eval.sh` cases against a fixture matching this exact marker shape.
 - **`scripts/verify.ps1` in full.** The task asked to check its Dockerfile-literal substring
   assertions specifically (confirmed via direct inspection: both required substrings are present and
   unbroken), not to run the whole script, which renders the full production Compose stack against a
@@ -303,14 +355,25 @@ Re-ran, on the same worktree, after this fix:
    worth calling out since it is the first place *this* script relies on it for a `chown` specifically.
    If `Config.User` on a future tools image is ever a bare name instead of numeric, the fallback path
    (`docker run --rm --entrypoint id <image> -u/-g`) starts one extra short-lived container per
-   rehearsal to answer that -- untested against a real image (the current one never takes this path,
-   `Config.User` is always `10001:10001`), only unit-tested for its numeric-parsing half.
+   rehearsal to answer that -- confirmed on the server (`docker image inspect
+   invoice-system-tools:0.1.0-rc77`) that the current image never takes this path, `Config.User` is
+   literally `10001:10001`; the fallback itself is still untested against a real image, only
+   unit-tested for its numeric-parsing half.
+6. **New, from the tooling-failure-marker fix.** The `log_file` value embedded in the
+   `{"tooling_failure": true, ...}` marker JSON (`shadow-eval.sh`) is not escaped for arbitrary
+   characters -- it is always a path this script itself constructed
+   (`$rehearsal_root/$stamp/eligibility-shadow.log`, where `$stamp` is a `date`/`$$`-derived value this
+   script controls), so this is safe under the same "operator controls their own environment, not
+   adversarial" trust model the rest of this tool already assumes for path inputs (e.g.
+   `BACKUP_DIR`/`REHEARSAL_ROOT`), but would need proper JSON string escaping if this marker's shape
+   is ever extended to embed less-trusted text (such as raw program output) directly.
 
 ## Follow-ups (recommended, not blocking)
 
-1. Run a second real rehearsal on the server (after the permission fix above) against the current
-   production backup, with a currently-loaded RC's own image tag, before treating the section 11.2
-   RC-plan bullet as load-bearing.
+1. Run a second real rehearsal on the server (after both fixes above -- the permission fix and the
+   tooling-failure-marker/verdict-guard fix) against the current production backup, with a
+   currently-loaded RC's own image tag, before treating the section 11.2 RC-plan bullet as
+   load-bearing.
 2. If a future slice wants full coverage of the carry-forward-proof evaluation branch, factor out (or
    reuse, if one already exists elsewhere by then) a full `source_economic_scan_cycles`/
    `source_ingest_batches`/`balance_carry_forward_proofs` fixture helper.
