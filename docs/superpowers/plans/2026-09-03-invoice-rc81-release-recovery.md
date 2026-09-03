@@ -40,3 +40,10 @@
 - [ ] Canary (product owner, real browser): console login (password + TOTP) → Sub2API "支付与财务→开票" renders the signed-in admin console without the login card; repeat for NewAPI. Evidence: platform `audit.audit_event` `staff.console_assertion.issue` rows and invoice `audit_events` console-assertion redemption rows for the same minute.
 
 Production remains blocked until the credentialed human canary (projection worker completing batches without errors for 30 minutes, readiness 200 through the restart, and the assertion login canary above) binds RC81.
+
+## Execution record (2026-09-03)
+
+- Task 1: merged XM-INV-ASSERT-HANDSHAKE (`81c1f3e`); identity bump `ced1bfb`. Backend full suite green, agents module tests green, web typecheck/tests/build green, gitleaks 0, gate self-test 0, shadow static test 0.
+- Task 2: `release/0.1.0-rc81-exact1` first try: image gate 42, ordinary and strict verifiers 0, `SHA256SUMS.sig` verified; nine local image IDs matched the manifest.
+- Task 3: transfer verified on the host; staging loaded nine images, verified tag and evidence signatures, release env `INVOICE_IMAGE_TAG=0.1.0-rc81`, `SOURCE_AGENT_VERSION=0.3.1`, console-assertion variables carried over. Shadow evaluation skipped by rule (no evaluator, projection, or migration change). Backup `invoice-20260903T120610Z` reused (under two hours old). Roll-forward PASS 13:55Z: 18 containers on rc81, healthz/readyz 200; deployment record `rc81-deploy-20260903T135454Z`.
+- Canary: 30 minutes readyz 200, projection errors 0, reconcile errors 0. Assertion canary (product owner, real browser): the handshake now fires (the console re-issues an assertion every 30 s and the invoice api receives the exchange), but every exchange was rejected with `origin_rejected` because the exchange endpoint required `Origin` to equal the console issuer while the embedded invoice frontend redeems same-origin (`Origin: https://invoice.solov.cc`). Fixed in RC82 (XM-INV-ASSERT-ORIGIN).
