@@ -31,11 +31,15 @@ func TestReqlogConfigFromEnvFileMode(t *testing.T) {
 	if cfg.TokenMapPath != "" {
 		t.Fatalf("TokenMapPath 默认应为空串（可空）, got %q", cfg.TokenMapPath)
 	}
+	if cfg.TokenMapV2Path != "" {
+		t.Fatalf("TokenMapV2Path 默认应为空串（可空，CR-0008 新增字段）, got %q", cfg.TokenMapV2Path)
+	}
 
 	cfg2, err := reqlogConfigFromEnv(envFrom(map[string]string{
-		"XM_REQLOG_MODE":     "file",
-		"XM_REQLOG_DATA_DIR": "/custom/data/dir",
-		"XM_REQLOG_TOKENMAP": "/custom/tokenmap.json",
+		"XM_REQLOG_MODE":        "file",
+		"XM_REQLOG_DATA_DIR":    "/custom/data/dir",
+		"XM_REQLOG_TOKENMAP":    "/custom/tokenmap.json",
+		"XM_REQLOG_TOKENMAP_V2": "/custom/tokenmap.v2.json",
 	}))
 	if err != nil {
 		t.Fatalf("reqlogConfigFromEnv: %v", err)
@@ -45,6 +49,9 @@ func TestReqlogConfigFromEnvFileMode(t *testing.T) {
 	}
 	if cfg2.TokenMapPath != "/custom/tokenmap.json" {
 		t.Fatalf("TokenMapPath = %q", cfg2.TokenMapPath)
+	}
+	if cfg2.TokenMapV2Path != "/custom/tokenmap.v2.json" {
+		t.Fatalf("TokenMapV2Path = %q", cfg2.TokenMapV2Path)
 	}
 }
 

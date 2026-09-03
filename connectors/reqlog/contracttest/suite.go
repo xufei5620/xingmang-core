@@ -56,6 +56,39 @@ func RunSuite(t *testing.T, newClient Factory) {
 	t.Run("上下文取消立即返回", func(t *testing.T) { testContextCancellation(t, newClient) })
 	t.Run("部分数据被标记", func(t *testing.T) { testPartialIsFlagged(t, newClient) })
 	t.Run("能力可少于清单", func(t *testing.T) { testCapabilitiesMayBeSubset(t, newClient) })
+	t.Run("用户身份未关联时为nil", func(t *testing.T) { testUserRefNilWhenUnassociated(t, newClient) })
+}
+
+// testUserRefNilWhenUnassociated 覆盖 CR-0008 验收标准第 5 条里"nil（未
+// 关联/无 v2 数据）"这一态：在没有配出 v2 数据的默认场景下（Fake 从不产出
+// User；文件后端不配 TokenMapV2Path 时同样如此），RequestLogSummary.User
+// 必须恒为 nil，而不是编出一个看起来像真的值。"非 nil（已关联）"这一态是
+// 后端特定的（依赖具体后端怎么配出关联数据），由各后端自己的测试覆盖
+// （见 connectors/reqlog/file_client_test.go 的 TestUserRefPopulatedFromTokenMapV2）
+// ——这条套件测的是跨全体后端都成立的下界："给不出就不该冒充"，而不是
+// "怎么给出"。
+func testUserRefNilWhenUnassociated(t *testing.T, newClient Factory) {
+	c := newClient(reqlog.FakeOptions{})
+	ctx := context.Background()
+	for _, source := range []string{reqlog.SourceSub2API, reqlog.SourceNewAPI} {
+		items := listAll(t, c, source)
+		if len(items) == 0 {
+			t.Fatalf("来源 %s 没有样本", source)
+		}
+		for _, item := range items {
+			if item.User != nil {
+				t.Fatalf("记录 %s 在未配置上游用户 ID 关联数据的默认场景下 User 应为 nil，got %+v",
+					item.ID, item.User)
+			}
+			content, err := c.RequestContent(ctx, item.Source, item.ID)
+			if err != nil {
+				t.Fatalf("RequestContent(%s): %v", item.ID, err)
+			}
+			if content.Summary.User != nil {
+				t.Fatalf("记录 %s 的内容摘要 User 应为 nil，got %+v", item.ID, content.Summary.User)
+			}
+		}
+	}
 }
 
 func testStatsCoverFullFilteredSet(t *testing.T, newClient Factory) {

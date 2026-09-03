@@ -286,7 +286,8 @@ func ParseSource(s string) (string, error) {
 
 // ValidateFilter 校验过滤条件。
 func ValidateFilter(f ListFilter) error {
-	if _, err := ParseSource(f.Source); err != nil {
+	source, err := ParseSource(f.Source)
+	if err != nil {
 		return err
 	}
 	switch f.Status {
@@ -296,6 +297,15 @@ func ValidateFilter(f ListFilter) error {
 	}
 	if !f.Since.IsZero() && !f.Until.IsZero() && !f.Until.After(f.Since) {
 		return fmt.Errorf("时间区间为空：until 必须晚于 since")
+	}
+	if f.User != nil {
+		if err := f.User.Validate(); err != nil {
+			return fmt.Errorf("user: %w", err)
+		}
+		if f.User.Platform != source {
+			return fmt.Errorf("user.platform %q 必须与 source %q 相等（同 §6.1 判据）",
+				f.User.Platform, source)
+		}
 	}
 	return nil
 }
@@ -320,6 +330,11 @@ func matchesFilter(s RequestLogSummary, f ListFilter) bool {
 	}
 	if f.Username != "" && s.Username != f.Username {
 		return false
+	}
+	if f.User != nil {
+		if s.User == nil || s.User.Platform != f.User.Platform || s.User.ID != f.User.ID {
+			return false
+		}
 	}
 	if f.Model != "" && s.Model != f.Model {
 		return false

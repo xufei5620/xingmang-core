@@ -1,9 +1,14 @@
 # CR-0008：reqlog tokenmap 导出补选上游用户 ID（稳定 UserRef 的数据前提）
 
-> 状态：**proposed**。优先级 P2（解除 platform-user-read-v2 设计文档 Task 8 的数据前提；不阻塞发布）。
+> 状态：**implemented-pending-verification**（2026-09-03，分支
+> `ai/claude/XM-REQLOG-TOKENMAP-V2`）。优先级 P2（解除 platform-user-read-v2 设计文档 Task 8 的数据
+> 前提；不阻塞发布）。
 > 依据：`docs/approvals/REQLOG_USERREF_APPROVAL.md`（APPROVED，2026-09-03，选择"宽批准，另需 ADR/CR"，
 > 决定原文要求"在该 CR 批准前不得改动 `cmd/reqlog-recorder/tokenmap.go` 的导出查询"）；产品负责人同日
 > 附加约束：**不得改动 Sub2API 与 NewAPI 源码**，只允许经既有只读 API 或只读数据库角色读取。
+> ADR-020「请求日志记录器的上游库只读接入」已于 2026-09-03 被接受，本 CR 的实现前置条件已满足。
+> 实现细节、门禁结果与未验证事项见 `docs/handoffs/slices/XM-REQLOG-TOKENMAP-V2.md`——**验收标准第 1
+> 条（服务器上 99% 解出非空 User）需要连服务器的会话验证，本次实现未验证**。
 
 ## 发起方
 验收线（准备 `REQLOG_USERREF_APPROVAL` 审批证据与回写时的直接发现；本 CR 正是该审批要求的前置变更单）。
@@ -150,7 +155,9 @@ P2——解除 Task 8（reqlog 稳定 UserRef 面板，已获 `REQLOG_USERREF_AP
 任何已发布或待发布的生产能力，也不阻塞 v0.1 发布线。
 
 ## 状态
-proposed。需先有 ADR-020 被接受，实现切片才能合入（见"兼容性/安全"）。
+implemented-pending-verification。ADR-020 已被接受（2026-09-03），实现切片见分支
+`ai/claude/XM-REQLOG-TOKENMAP-V2`（`docs/handoffs/slices/XM-REQLOG-TOKENMAP-V2.md`）；验收标准第 1
+条需服务器验证，尚未完成。
 
 ## 明确不变
 - 不新增 invoice、payment 或任何平台本地 link 表；`UserRef` 只在 reqlog 一域内生效，不做跨域自动
@@ -172,3 +179,8 @@ proposed。需先有 ADR-020 被接受，实现切片才能合入（见"兼容�
 
 ## 执行记录
 - 2026-09-03 立单（设计阶段，未派发实现切片；实现前置条件为 ADR-020 被接受）。
+- 2026-09-03 ADR-020 被接受（产品负责人"按建议默认接受"四项待拍板问题），实现切片派发。
+- 2026-09-03 实现切片完成（分支 `ai/claude/XM-REQLOG-TOKENMAP-V2`）：变更范围 1～5 全部落地，
+  验收标准第 2～5 条已通过本地测试验证；第 1 条（服务器上 99% 解出非空 `User`）需连服务器的会话
+  验证，本次未验证。细节、门禁结果、偏离与 follow-up 见
+  `docs/handoffs/slices/XM-REQLOG-TOKENMAP-V2.md`。

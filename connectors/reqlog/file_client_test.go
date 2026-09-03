@@ -278,6 +278,121 @@ func TestResolveUsernameAndEmailMasking(t *testing.T) {
 	}
 }
 
+// TestUserRefPopulatedFromTokenMapV2 covers CR-0008 acceptance criterion 5's
+// "non-nil (associated)" state: with a tokenmap.v2.json configured, records
+// whose token prefix carries a non-empty user_id resolve to a populated
+// User, while unmapped prefixes still resolve to nil (same "not associated"
+// path Username already has). The nil-by-default state (no v2 file
+// configured at all) is covered generically for every backend by
+// contracttest's testUserRefNilWhenUnassociated.
+func TestUserRefPopulatedFromTokenMapV2(t *testing.T) {
+	dataDir, tokenMapPath := buildFixtureDataDir(t)
+	tokenMapV2Path := filepath.Join(filepath.Dir(tokenMapPath), "tokenmap.v2.json")
+	writeTokenMapV2Fixture(t, tokenMapV2Path)
+
+	c := mustFileClient(t, reqlog.FileConfig{
+		DataDir: dataDir, TokenMapPath: tokenMapPath, TokenMapV2Path: tokenMapV2Path,
+	})
+	ctx := context.Background()
+
+	page, err := c.ListRequests(ctx, reqlog.ListFilter{Source: reqlog.SourceSub2API, Limit: reqlog.MaxListLimit})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	byPrefix := map[string]reqlog.RequestLogSummary{}
+	for _, item := range page.Items {
+		if _, exists := byPrefix[item.TokenPrefix]; !exists {
+			byPrefix[item.TokenPrefix] = item
+		}
+	}
+
+	associated, ok := byPrefix["sk-test0001invalid00"]
+	if !ok {
+		t.Fatal("固件里应该有 sk-test0001invalid00 前缀的记录")
+	}
+	if associated.User == nil {
+		t.Fatal("这条前缀在 tokenmap.v2.json 里登记了非空 user_id，User 不该是 nil")
+	}
+	wantRef := platformusers.UserRef{Platform: reqlog.SourceSub2API, ID: "9001"}
+	if *associated.User != wantRef {
+		t.Fatalf("User = %+v, want %+v", *associated.User, wantRef)
+	}
+	if err := associated.User.Validate(); err != nil {
+		t.Fatalf("解出的 UserRef 应该能通过校验: %v", err)
+	}
+
+	unmapped, ok := byPrefix["sk-unmapped-token-01"]
+	if !ok {
+		t.Fatal("固件里应该有未登记的 token 前缀样本")
+	}
+	if unmapped.User != nil {
+		t.Fatalf("未在 tokenmap.v2.json 登记的前缀应该解不出 User，got %+v", unmapped.User)
+	}
+	// Username（v1）与 User（v2）是两条独立的身份线索：未登记 v2 的前缀
+	// 仍然可能在 v1 里有效——本固件里两者是同一批前缀（tokenMapFixture 与
+	// tokenMapV2Fixture 都只登记 sk-test000{1,2}invalid00），所以这里只
+	// 确认"没有 v2 数据的记录，User 恒为 nil，不影响 Username 已经验过的
+	// 行为"（见 TestResolveUsernameAndEmailMasking）。
+
+	content, err := c.RequestContent(ctx, associated.Source, associated.ID)
+	if err != nil {
+		t.Fatalf("RequestContent: %v", err)
+	}
+	if content.Summary.User == nil || *content.Summary.User != wantRef {
+		t.Fatalf("RequestContent 的摘要 User = %+v, want %+v", content.Summary.User, wantRef)
+	}
+}
+
+// TestUserRefFilterNarrowsResults exercises ListFilter.User (CR-0008
+// contract change): filtering by a UserRef narrows to exactly the matching
+// record(s), an unmatched UserRef yields an empty page (not an error), and
+// a User.Platform that disagrees with Source is rejected at validation time
+// (same discipline as the source/platform check in ValidateFilter).
+func TestUserRefFilterNarrowsResults(t *testing.T) {
+	dataDir, tokenMapPath := buildFixtureDataDir(t)
+	tokenMapV2Path := filepath.Join(filepath.Dir(tokenMapPath), "tokenmap.v2.json")
+	writeTokenMapV2Fixture(t, tokenMapV2Path)
+
+	c := mustFileClient(t, reqlog.FileConfig{
+		DataDir: dataDir, TokenMapPath: tokenMapPath, TokenMapV2Path: tokenMapV2Path,
+	})
+	ctx := context.Background()
+
+	target := platformusers.UserRef{Platform: reqlog.SourceSub2API, ID: "9001"}
+	page, err := c.ListRequests(ctx, reqlog.ListFilter{
+		Source: reqlog.SourceSub2API, User: &target, Limit: reqlog.MaxListLimit,
+	})
+	if err != nil {
+		t.Fatalf("按 User 过滤: %v", err)
+	}
+	if len(page.Items) == 0 {
+		t.Fatal("按已关联的 UserRef 过滤后为空")
+	}
+	for _, item := range page.Items {
+		if item.User == nil || *item.User != target {
+			t.Fatalf("按 User 过滤后混进了 %+v", item.User)
+		}
+	}
+
+	noSuch := platformusers.UserRef{Platform: reqlog.SourceSub2API, ID: "no-such-upstream-id"}
+	empty, err := c.ListRequests(ctx, reqlog.ListFilter{
+		Source: reqlog.SourceSub2API, User: &noSuch, Limit: reqlog.MaxListLimit,
+	})
+	if err != nil {
+		t.Fatalf("按不存在的 UserRef 过滤不该报错: %v", err)
+	}
+	if len(empty.Items) != 0 {
+		t.Fatalf("按不存在的 UserRef 过滤应为空，got %d 条", len(empty.Items))
+	}
+
+	mismatched := platformusers.UserRef{Platform: reqlog.SourceNewAPI, ID: "9001"}
+	if _, err := c.ListRequests(ctx, reqlog.ListFilter{
+		Source: reqlog.SourceSub2API, User: &mismatched, Limit: reqlog.MaxListLimit,
+	}); err == nil {
+		t.Fatal("User.Platform 与 Source 不一致应被拒绝")
+	}
+}
+
 func TestRequestContentRejectsMalformedID(t *testing.T) {
 	dataDir, tokenMapPath := buildFixtureDataDir(t)
 	c := mustFileClient(t, reqlog.FileConfig{DataDir: dataDir, TokenMapPath: tokenMapPath})

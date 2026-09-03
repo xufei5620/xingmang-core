@@ -27,13 +27,14 @@ import (
 // all, only files already at rest.
 
 type reqlogFlags struct {
-	dataDir       string
-	tokenMapPath  string
-	retentionDays int
-	sampleSize    int
-	out           string
-	nowText       string
-	dryRun        bool
+	dataDir        string
+	tokenMapPath   string
+	tokenMapV2Path string
+	retentionDays  int
+	sampleSize     int
+	out            string
+	nowText        string
+	dryRun         bool
 }
 
 func parseReqlogFlags(args []string, stderr io.Writer) (reqlogFlags, error) {
@@ -42,6 +43,7 @@ func parseReqlogFlags(args []string, stderr io.Writer) (reqlogFlags, error) {
 	var f reqlogFlags
 	fs.StringVar(&f.dataDir, "data-dir", "", "local copy of reqlog's day-partitioned data directory, e.g. a copy of /root/reqlog/data (required unless -dry-run)")
 	fs.StringVar(&f.tokenMapPath, "tokenmap", "", "local copy of tokenmap.json, e.g. a copy of /root/reqlog/tokenmap.json (required unless -dry-run)")
+	fs.StringVar(&f.tokenMapV2Path, "tokenmap-v2", "", "optional local copy of tokenmap.v2.json (CR-0008's parallel companion file); when given and it parses as schema_version=2 with at least one non-empty user_id, carries_source_user_id is reported true")
 	fs.IntVar(&f.retentionDays, "retention-days", reqlog.RetentionDays, "expected retention window in days, compared against what is actually observed on disk (default matches connectors/reqlog.RetentionDays)")
 	fs.IntVar(&f.sampleSize, "sample-size", 20, "redacted index rows to include in the fixture (newest day first)")
 	fs.StringVar(&f.out, "out", "", "evidence output root (default: "+defaultEvidenceRoot+"/reqlog)")
@@ -119,6 +121,15 @@ func runReqlog(args []string, stdout, stderr io.Writer, deps reqlogDeps) int {
 		fmt.Fprintf(stderr, "evidence-capture: failed to read %s: %v\n", f.tokenMapPath, err)
 		return exitFailed
 	}
+	var tokenMapV2 *tokenMapV2File
+	if strings.TrimSpace(f.tokenMapV2Path) != "" {
+		v2, err := loadLocalTokenMapV2(f.tokenMapV2Path)
+		if err != nil {
+			fmt.Fprintf(stderr, "evidence-capture: failed to read %s: %v\n", f.tokenMapV2Path, err)
+			return exitFailed
+		}
+		tokenMapV2 = v2
+	}
 
 	retention := computeRetentionEvidence(dayDirs, f.retentionDays, now)
 
@@ -163,21 +174,26 @@ func runReqlog(args []string, stdout, stderr io.Writer, deps reqlogDeps) int {
 		return exitFailed
 	}
 
-	tokenMapShape := mustMarshalIndent(map[string]any{
+	tokenMapV2Evidence := computeTokenMapV2Evidence(tokenMapV2)
+	carriesSourceUserID := tokenMapV2 != nil && tokenMapV2.SchemaVersion == 2 && tokenMapV2Evidence.WithUserID > 0
+
+	tokenMapShapeFields := map[string]any{
 		"schema":                 "flat map[string]string; key = token prefix, value = \"<username-or-email>@<source>\"",
 		"total_entries":          tokenEvidence.TotalEntries,
 		"suffix_newapi":          tokenEvidence.SuffixNewAPI,
 		"suffix_sub2api":         tokenEvidence.SuffixSub2API,
 		"malformed_suffix":       tokenEvidence.MalformedSuffix,
-		"carries_source_user_id": false,
-		"finding": "the value shape has no field for an upstream numeric/opaque user id - only a " +
-			"display identifier (username or email) suffixed with the source. " +
-			"cmd/reqlog-recorder/tokenmap.go's own export queries only SELECT username/email, " +
-			"never id, from both upstream databases. Today's tokenmap therefore cannot supply " +
-			"platform + source_user_id (REQLOG_USERREF_APPROVAL's evidence requirement) without " +
-			"a change to that export query - this is a schema-level fact, true regardless of " +
-			"which tokenmap.json was sampled.",
-	})
+		"carries_source_user_id": carriesSourceUserID,
+		"finding":                reqlogTokenMapShapeFinding(tokenMapV2, carriesSourceUserID, tokenMapV2Evidence),
+	}
+	if tokenMapV2 != nil {
+		tokenMapShapeFields["v2_schema"] = "optional companion file tokenmap.v2.json (CR-0008): " +
+			"{schema_version:2, entries:{<token_prefix>:{username, source, user_id}}}"
+		tokenMapShapeFields["v2_schema_version_observed"] = tokenMapV2.SchemaVersion
+		tokenMapShapeFields["v2_total_entries"] = tokenMapV2Evidence.TotalEntries
+		tokenMapShapeFields["v2_entries_with_user_id"] = tokenMapV2Evidence.WithUserID
+	}
+	tokenMapShape := mustMarshalIndent(tokenMapShapeFields)
 	if violations := scanForbidden(tokenMapShape); len(violations) > 0 {
 		fmt.Fprintln(stderr, "evidence-capture: refusing to write tokenmap_shape.redacted.json - failed final safety scan:")
 		for _, v := range violations {
@@ -204,7 +220,8 @@ func runReqlog(args []string, stdout, stderr io.Writer, deps reqlogDeps) int {
 	}
 
 	sums := computeSums(dataFiles)
-	readme := renderReqlogReadme(retention, tokenEvidence, assocEvidence, dayDirs, sums, now, fmt.Sprintf("%x", salt))
+	readme := renderReqlogReadme(retention, tokenEvidence, assocEvidence, dayDirs, sums, now, fmt.Sprintf("%x", salt),
+		tokenMapV2, carriesSourceUserID, tokenMapV2Evidence)
 	allFiles := append(append([]evidenceFile{}, dataFiles...),
 		evidenceFile{Name: "SHA256SUMS", Data: sumsFileContent(dataFiles, sums)},
 		evidenceFile{Name: "README.md", Data: readme},
@@ -234,6 +251,14 @@ func printReqlogDryRun(stdout io.Writer, f reqlogFlags) {
 	}
 	fmt.Fprintf(stdout, "would scan every YYYYMMDD subdirectory of %s for an index.jsonl\n", dataDir)
 	fmt.Fprintf(stdout, "would read %s as a flat JSON object (token prefix -> \"name@source\")\n", tm)
+	if f.tokenMapV2Path != "" {
+		fmt.Fprintf(stdout, "would also read %s as CR-0008's optional companion file "+
+			"({schema_version:2, entries:{prefix:{username,source,user_id}}}) and report "+
+			"carries_source_user_id=true only if it parses as schema_version=2 with at least one "+
+			"non-empty user_id\n", f.tokenMapV2Path)
+	} else {
+		fmt.Fprintln(stdout, "no --tokenmap-v2 given: would report carries_source_user_id=false (same as before CR-0008)")
+	}
 	fmt.Fprintln(stdout, "would compute: retention span vs --retention-days, cursor semantics (from source,")
 	fmt.Fprintln(stdout, "not from the sample), tokenmap schema findings, and per-record association")
 	fmt.Fprintln(stdout, "outcome counts (resolved / no prefix / prefix not in tokenmap) - never the")
@@ -316,6 +341,101 @@ func loadLocalTokenMap(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("not a flat JSON object of strings: %w", err)
 	}
 	return m, nil
+}
+
+// tokenMapV2File / tokenMapV2FileEntry mirror the on-disk shape CR-0008
+// defines for the optional companion file tokenmap.v2.json (same shape
+// cmd/reqlog-recorder writes and connectors/reqlog/file_client.go reads).
+// This tool keeps its own copy of the shape rather than importing either of
+// those packages - cmd/reqlog-recorder is a `main` package that cannot be
+// imported, and connectors/reqlog's own copy is unexported - the JSON shape
+// itself is the contract shared across all three, same as tokenmap.json
+// (v1, a flat map[string]string) already is.
+type tokenMapV2File struct {
+	SchemaVersion int                            `json:"schema_version"`
+	Entries       map[string]tokenMapV2FileEntry `json:"entries"`
+}
+
+type tokenMapV2FileEntry struct {
+	Username string `json:"username"`
+	Source   string `json:"source"`
+	UserID   string `json:"user_id"`
+}
+
+// loadLocalTokenMapV2 reads an optional local copy of tokenmap.v2.json.
+// Unlike loadLocalTokenMap, this is only called when the operator explicitly
+// passed --tokenmap-v2, so a read/parse failure here is reported loudly
+// (exitFailed by the caller) rather than silently treated as "absent" -
+// the operator asked for this file to be included in the evidence.
+func loadLocalTokenMapV2(path string) (*tokenMapV2File, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var v tokenMapV2File
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, fmt.Errorf("not a valid tokenmap.v2.json object: %w", err)
+	}
+	return &v, nil
+}
+
+// tokenMapV2Evidence reports facts about an (optional) tokenmap.v2.json
+// sample - counts only, never the usernames/emails/user_ids themselves,
+// same redaction discipline as tokenMapEvidence for the v1 file.
+type tokenMapV2Evidence struct {
+	TotalEntries int `json:"total_entries"`
+	WithUserID   int `json:"with_user_id"`
+}
+
+// computeTokenMapV2Evidence tolerates a nil file (the --tokenmap-v2 flag
+// was not given) by returning the zero value - callers gate on the flag
+// having been passed, not on this evidence being non-zero, to keep "not
+// provided" and "provided but empty" distinguishable upstream.
+func computeTokenMapV2Evidence(v2 *tokenMapV2File) tokenMapV2Evidence {
+	var ev tokenMapV2Evidence
+	if v2 == nil {
+		return ev
+	}
+	ev.TotalEntries = len(v2.Entries)
+	for _, entry := range v2.Entries {
+		if strings.TrimSpace(entry.UserID) != "" {
+			ev.WithUserID++
+		}
+	}
+	return ev
+}
+
+// reqlogTokenMapShapeFinding renders the "finding" text for
+// tokenmap_shape.redacted.json. It always states the schema-level fact
+// about tokenmap.json (v1): that shape alone never carries an upstream user
+// id. When a tokenmap.v2.json sample was also provided (CR-0008's parallel
+// companion file), it appends what this specific run observed about it,
+// rather than leaving the pre-CR-0008 finding text stale and misleading
+// once the gap it describes has actually been closed for a given recorder
+// instance.
+func reqlogTokenMapShapeFinding(v2 *tokenMapV2File, carriesSourceUserID bool, v2Ev tokenMapV2Evidence) string {
+	base := "the tokenmap.json (v1) value shape has no field for an upstream numeric/opaque user id - " +
+		"only a display identifier (username or email) suffixed with the source. " +
+		"cmd/reqlog-recorder/tokenmap.go's export queries only SELECT username/email (not id) into " +
+		"this v1 file. This is a schema-level fact about tokenmap.json itself, true regardless of " +
+		"which tokenmap.json was sampled."
+	if v2 == nil {
+		return base + " No tokenmap.v2.json companion file was provided to this run (--tokenmap-v2), so " +
+			"this run cannot say whether this recorder instance can supply platform + source_user_id " +
+			"(REQLOG_USERREF_APPROVAL's evidence requirement) via CR-0008's companion file - only that " +
+			"the v1 file alone cannot."
+	}
+	if carriesSourceUserID {
+		return fmt.Sprintf(base+" CR-0008 (docs/change-requests/CR-0008-reqlog-tokenmap-upstream-user-id.md) "+
+			"closes this gap with a parallel tokenmap.v2.json file: this run found schema_version=%d, "+
+			"%d entries, %d of them carrying a non-empty user_id. This recorder instance CAN supply "+
+			"platform + source_user_id via the v2 companion file.",
+			v2.SchemaVersion, v2Ev.TotalEntries, v2Ev.WithUserID)
+	}
+	return fmt.Sprintf(base+" A tokenmap.v2.json companion file was provided (schema_version=%d, %d "+
+		"entries) but none of the sampled entries carry a non-empty user_id, so this recorder instance "+
+		"still cannot supply platform + source_user_id from this sample.",
+		v2.SchemaVersion, v2Ev.TotalEntries)
 }
 
 // retentionEvidence describes what is actually on disk, not a pass/fail

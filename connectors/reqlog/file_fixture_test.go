@@ -204,6 +204,44 @@ func tokenMapFixture() map[string]string {
 	}
 }
 
+// tokenMapV2FixtureFile / tokenMapV2FixtureEntry mirror the JSON shape
+// file_client.go's unexported tokenMapV2File/tokenMapV2Entry read (CR-0008's
+// "契约变化" schema) - this test file is package reqlog_test and cannot
+// reference the connector's unexported types, so it keeps its own copy of
+// the shape, same as tokenMapFixture already does for the v1 flat map.
+type tokenMapV2FixtureFile struct {
+	SchemaVersion int                               `json:"schema_version"`
+	Entries       map[string]tokenMapV2FixtureEntry `json:"entries"`
+}
+
+type tokenMapV2FixtureEntry struct {
+	Username string `json:"username"`
+	Source   string `json:"source"`
+	UserID   string `json:"user_id"`
+}
+
+// tokenMapV2Fixture pairs up with tokenMapFixture's two registered prefixes,
+// giving each a placeholder upstream user id, and deliberately leaves the
+// unmapped-token prefixes (sk-unmapped-token-*) out entirely - covering the
+// "not associated" path the same way tokenMapFixture does for usernames.
+func tokenMapV2Fixture() map[string]tokenMapV2FixtureEntry {
+	return map[string]tokenMapV2FixtureEntry{
+		"sk-test0001invalid00": {Username: "fixture-user", Source: "sub2api", UserID: "9001"},
+		"sk-test0002invalid00": {Username: "fixture.user@test-only.invalid", Source: "sub2api", UserID: "9002"},
+	}
+}
+
+func writeTokenMapV2Fixture(t *testing.T, path string) {
+	t.Helper()
+	b, err := json.Marshal(tokenMapV2FixtureFile{SchemaVersion: 2, Entries: tokenMapV2Fixture()})
+	if err != nil {
+		t.Fatalf("marshal tokenmap v2: %v", err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("写 tokenmap v2 固件: %v", err)
+	}
+}
+
 func writeTokenMapFixture(t *testing.T, path string) {
 	t.Helper()
 	b, err := json.Marshal(tokenMapFixture())

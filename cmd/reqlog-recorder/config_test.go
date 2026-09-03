@@ -29,6 +29,11 @@ func TestParseConfigDefaultsMatchOriginalHardcodedValues(t *testing.T) {
 	if cfg.TokenMapPath != DefaultTokenMapPath {
 		t.Errorf("TokenMapPath = %q, want %q", cfg.TokenMapPath, DefaultTokenMapPath)
 	}
+	// TokenMapV2Path 是 CR-0008 新增字段，不是"原值"，但同样应该有一个
+	// 与 TokenMapPath 并行的默认值（见 config.go 的 DefaultTokenMapV2Path）。
+	if cfg.TokenMapV2Path != DefaultTokenMapV2Path {
+		t.Errorf("TokenMapV2Path = %q, want %q", cfg.TokenMapV2Path, DefaultTokenMapV2Path)
+	}
 	if cfg.RetentionDays != DefaultRetentionDays {
 		t.Errorf("RetentionDays = %d, want %d", cfg.RetentionDays, DefaultRetentionDays)
 	}
@@ -57,12 +62,16 @@ func TestParseConfigEnvOverridesDefaults(t *testing.T) {
 		"XM_REQLOG_GID":                     "0",
 		"XM_REQLOG_RECORDER_DIR_PERM":       "0700",
 		"XM_REQLOG_RECORDER_FILE_PERM":      "600",
+		"XM_REQLOG_RECORDER_TOKENMAP_V2":    "/tmp/reqlog-data/tokenmap.v2.json",
 	}))
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}
 	if cfg.DataDir != "/tmp/reqlog-data" {
 		t.Errorf("DataDir = %q", cfg.DataDir)
+	}
+	if cfg.TokenMapV2Path != "/tmp/reqlog-data/tokenmap.v2.json" {
+		t.Errorf("TokenMapV2Path = %q", cfg.TokenMapV2Path)
 	}
 	if cfg.RetentionDays != 7 {
 		t.Errorf("RetentionDays = %d", cfg.RetentionDays)
