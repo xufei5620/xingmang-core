@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -12,10 +13,15 @@ import { invoiceApi } from "./lib/api";
 import { InvoiceApiError, subscribeAuthFailures } from "./lib/api-contract";
 import {
   ADMIN_AUTH_POPUP_MESSAGE,
+  buildXmEmbedAdminAssertionNeededMessage,
   isAdminAuthPopupCompleteMessage,
   isAdminAuthPopupReturn,
+  nextAdminAssertionNeededDelayMs,
   parseEmbeddedAdminMode,
   parseXmEmbedAdminAssertionMessage,
+  shouldExchangeAdminAssertion,
+  shouldRequestAdminAssertion,
+  shouldScheduleNextAdminAssertionNeededAttempt,
   withAdminAuthPopupReturnParam,
   XM_EMBED_CONSOLE_ORIGIN,
 } from "./lib/embedded-admin-scope";
@@ -88,6 +94,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stepUpRequired, setStepUpRequired] = useState(false);
+  const authenticated = session?.authenticated === true;
+  // Guards against exchanging the exact same assertion string twice --
+  // EmbeddedConsoleFrame delivers one assertion on "ready" and again on
+  // onLoad, and nonce replay protection means a second exchange of the
+  // identical JWS always fails server-side. A *fresh* assertion (a
+  // different string, issued after an admin-assertion-needed post below)
+  // is never blocked by this -- see shouldExchangeAdminAssertion's doc.
+  const exchangedAssertionRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -182,6 +196,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (event.origin !== XM_EMBED_CONSOLE_ORIGIN) return;
       const assertion = parseXmEmbedAdminAssertionMessage(event.data);
       if (!assertion) return;
+      if (!shouldExchangeAdminAssertion(assertion, exchangedAssertionRef.current)) return;
+      exchangedAssertionRef.current = assertion;
       void (async () => {
         try {
           await invoiceApi.exchangeConsoleAssertion(assertion);
@@ -199,11 +215,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("message", handleMessage);
   }, [refresh]);
 
+  // XM-INV-ASSERT-HANDSHAKE: the other half of the handshake above -- while
+  // this page is framed and has confirmed it has no session yet, ask the
+  // console for an assertion instead of only ever waiting for one of its two
+  // fixed deliveries (ready, onLoad) to have landed after this listener
+  // existed. Posts once immediately, then on a bounded backoff (see
+  // embedded-admin-scope.ts's schedule doc), until an assertion is received
+  // (authenticated flips true, or the listener above is mid-exchange) or the
+  // tab is unmounted. `shouldRequest` -- not `loading`/`authenticated`
+  // individually -- is the effect's dependency: it is a primitive boolean,
+  // so a loading flicker that does not change the *outcome* (e.g. refresh()
+  // running after a failed exchange, session still unauthenticated) does not
+  // reset an in-flight backoff; the effect only restarts, or stops for good,
+  // when framed-and-unauthenticated actually flips.
+  const shouldRequest = shouldRequestAdminAssertion(
+    window.parent !== window,
+    loading,
+    authenticated,
+  );
+  useEffect(() => {
+    if (!shouldRequest) return;
+    let attempt = 0;
+    let timer: number | undefined;
+    const postNeeded = () => {
+      window.parent.postMessage(
+        buildXmEmbedAdminAssertionNeededMessage(),
+        XM_EMBED_CONSOLE_ORIGIN,
+      );
+    };
+    const scheduleNext = () => {
+      if (!shouldScheduleNextAdminAssertionNeededAttempt(attempt)) return;
+      timer = window.setTimeout(() => {
+        attempt += 1;
+        postNeeded();
+        scheduleNext();
+      }, nextAdminAssertionNeededDelayMs(attempt));
+    };
+    postNeeded();
+    scheduleNext();
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [shouldRequest]);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       loading,
       user: session?.authenticated ? session.user : null,
-      authenticated: session?.authenticated === true,
+      authenticated,
       error,
       stepUpRequired,
       oidcAdminLoginEnabled: session?.oidcAdminLoginEnabled ?? true,
@@ -238,7 +297,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         navigateTopLevel(invoiceApi.adminStepUpURL(currentReturnTo()));
       },
     }),
-    [error, loading, refresh, session, stepUpRequired],
+    [authenticated, error, loading, refresh, session, stepUpRequired],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
