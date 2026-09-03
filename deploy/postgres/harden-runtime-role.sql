@@ -26,6 +26,18 @@ GRANT SELECT, INSERT ON TABLE audit_events TO invoice_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE oidc_backchannel_logout_events FROM invoice_app;
 GRANT SELECT, INSERT ON TABLE oidc_backchannel_logout_events TO invoice_app;
 
+-- console_assertion_nonces (migration 0018) is the single-use judge for
+-- console assertions: PostgresConsoleAssertionNonceStore.ConsumeNonce claims
+-- a nonce with INSERT ... ON CONFLICT DO NOTHING (which needs no UPDATE
+-- privilege, unlike DO UPDATE) and reads nothing back, and DeleteExpired
+-- sweeps rows an hour past expiry. DELETE therefore stays granted -- the one
+-- difference from oidc_backchannel_logout_events above, whose retention job
+-- runs as the owner. UPDATE would let a claimed nonce be rewritten and
+-- TRUNCATE would clear every claim at once, so both are revoked: a replay
+-- must never become possible by editing this table through the runtime role.
+REVOKE UPDATE, TRUNCATE ON TABLE console_assertion_nonces FROM invoice_app;
+GRANT SELECT, INSERT, DELETE ON TABLE console_assertion_nonces TO invoice_app;
+
 REVOKE DELETE, TRUNCATE ON TABLE
   source_events,
   funding_lots,

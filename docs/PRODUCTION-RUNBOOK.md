@@ -982,6 +982,27 @@ rollout.md`, steps 1/3/4/5):
    `OIDC_ADMIN_LOGIN_ENABLED=false` (a separate, later slice -- see the
    platform plan's steps 4/5).
 
+**Runtime-role grants.** Migration 0018 creates `console_assertion_nonces`
+after the `permissions` job last ran, so the runtime role's grants on it come
+only from that job's blanket `GRANT ... ON ALL TABLES`. Replay the job once
+after the migration -- `docker compose --env-file "$PRODUCTION_ENV_FILE" -f
+deploy/docker-compose.prod.yml run --rm permissions` (the service sits behind
+the `tools` profile and never runs as part of `up -d` or
+`deploy/roll-forward.sh`, so nothing replays it for you). Skipping it leaves
+`invoice_app` able to `UPDATE` and `TRUNCATE` the table that decides whether
+an assertion has already been redeemed. Confirm afterwards:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE"   -f deploy/docker-compose.prod.yml exec -T postgres   psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|'   -c "SELECT has_table_privilege('invoice_app','console_assertion_nonces','INSERT'),
+             has_table_privilege('invoice_app','console_assertion_nonces','DELETE'),
+             has_table_privilege('invoice_app','console_assertion_nonces','UPDATE'),
+             has_table_privilege('invoice_app','console_assertion_nonces','TRUNCATE')"
+```
+
+Expect `t|t|f|f`: the store claims a nonce with `INSERT ... ON CONFLICT DO
+NOTHING` and sweeps expired rows with `DELETE`, and neither rewriting a
+claimed nonce nor clearing every claim at once is ever a runtime operation.
+
 **Rollback:** flip the flag that was most recently changed back to its prior
 value and restart `api` -- `CONSOLE_ASSERTION_ENABLED=false` alone fully
 restores today's OIDC-only behavior with zero effect on Keycloak; if
