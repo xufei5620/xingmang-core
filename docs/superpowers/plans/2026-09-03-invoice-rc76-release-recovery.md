@@ -1,5 +1,10 @@
 # RC76 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC76 shipped at signed tag
+> `v0.1.0-rc76-signed` (`17945dc`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc77-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, rehearse, canary, and deploy RC76 — the RC75 regression hotfix (XM-INV-BLIP-SOFTFAIL: a blip confirmation whose post-synthesis rebuild does not reconcile softfails and rebaselines instead of erroring; at most three consecutive rebaselines before a single `SOURCE_GAP` freeze) and the readiness false-positive fix (XM-INV-READY-LEASE: live-lease processing rows and the 30-second reclaim grace are not "stuck").

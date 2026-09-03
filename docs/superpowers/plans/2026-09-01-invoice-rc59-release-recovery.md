@@ -3,7 +3,7 @@
 > **SUPERSEDED — DO NOT EXECUTE.** RC59 shipped at signed tag
 > `v0.1.0-rc59-signed` (`7975339`) and is deployed; it restored the
 > funding-lot list rendering; its evidence is immutable. Continue only
-> with `docs/superpowers/plans/2026-09-03-invoice-rc76-release-recovery.md`.
+> with `docs/superpowers/plans/2026-09-03-invoice-rc77-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
