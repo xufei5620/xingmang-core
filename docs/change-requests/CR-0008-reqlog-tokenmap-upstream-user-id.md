@@ -1,6 +1,6 @@
 # CR-0008：reqlog tokenmap 导出补选上游用户 ID（稳定 UserRef 的数据前提）
 
-> 状态：**implemented-pending-verification**（2026-09-03，分支
+> 状态：**implemented-verified（2026-09-03，tokenmap.v2.json 3593/3593 解析出 user_id）**（2026-09-03，分支
 > `ai/claude/XM-REQLOG-TOKENMAP-V2`）。优先级 P2（解除 platform-user-read-v2 设计文档 Task 8 的数据
 > 前提；不阻塞发布）。
 > 依据：`docs/approvals/REQLOG_USERREF_APPROVAL.md`（APPROVED，2026-09-03，选择"宽批准，另需 ADR/CR"，
