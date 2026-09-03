@@ -158,7 +158,9 @@ export type EligibilityFreezeReason =
   | "USAGE_EXCEEDS_LEDGER"
   | "STREAM_WATERMARK_REGRESSION"
   | "SOURCE_GAP"
-  | "SOURCE_REFUND";
+  | "SOURCE_REFUND"
+  | "EVENT_DEAD"
+  | "POLICY_ANCHOR_BLOCKED";
 
 export interface EligibilityFreeze {
   id: string;
@@ -166,7 +168,14 @@ export interface EligibilityFreeze {
   sourceInstanceId: string;
   sourceLabel: string;
   scope: "account" | "funding_lot";
-  reason: EligibilityFreezeReason;
+  // A known EligibilityFreezeReason, or any other well-formed (but not yet
+  // catalogued/labeled) reason code the backend's own freeze_reason enum
+  // may add in the future -- `& { readonly brand?: unique symbol }`-free
+  // widening (`string & {}`) keeps literal-type autocomplete for the known
+  // values while still accepting an unrecognized one at the type level, to
+  // match mapEligibilityFreeze's own tolerant runtime validation (an
+  // unrecognized-but-well-formed code must not fail the whole list).
+  reason: EligibilityFreezeReason | (string & {});
   status: "open" | "resolved";
   eligibilityStatus: FundingOrder["eligibilityStatus"];
   openedAt: string;
@@ -195,6 +204,74 @@ export interface ResolveEligibilityFreezeInput {
   version: number;
   evidenceReference: string;
   note: string;
+}
+
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the operator "用户账本" view --
+// GET /api/v1/admin/accounts/ledger (list) and
+// GET /api/v1/admin/accounts/{external_account_id}/ledger (detail).
+// block_state is a read-only composition of existing signals server-side
+// (see docs/ELIGIBILITY-OPERATIONS.md's "管理员账本视图" section); this
+// frontend never computes it, only displays it.
+export type AccountBlockState =
+  | "frozen_manual_review"
+  | "not_invoiceable_pending_reconciliation"
+  | "below_threshold"
+  | "invoiceable";
+
+export interface AccountLedgerListItem {
+  externalAccountId: string;
+  source: SourceType;
+  externalUserId: string;
+  policyStartAt: string;
+  rechargesSinceStartCount: number;
+  rechargesSinceStartMinor: number;
+  consumedSinceStartMinor: number;
+  invoiceableNowMinor: number;
+  issuedMinor: number;
+  thresholdReached: boolean;
+  blockState: AccountBlockState;
+  // Absent when this account has never had a reconciliation checkpoint or
+  // carry-forward proof evaluated at all.
+  lastCheckpointAt?: string;
+}
+
+export interface AccountLedgerRecharge {
+  fundingLotId: string;
+  completedAt: string;
+  amountMinor: number;
+  eligibilityKind: "WALLET_CASH" | "SUBSCRIPTION_CASH";
+  refundFrozen: boolean;
+}
+
+export interface AccountLedgerConsumptionDay {
+  // Asia/Shanghai calendar date, "YYYY-MM-DD".
+  date: string;
+  consumedMinor: number;
+}
+
+export interface AccountLedgerDetail extends AccountLedgerListItem {
+  openingBalance: { serviceUnits: string; unitCode: string };
+  recharges: AccountLedgerRecharge[];
+  consumptionTimeline: AccountLedgerConsumptionDay[];
+  // A concrete Chinese sentence naming the blocking fact, present unless
+  // blockState is "invoiceable" (nothing to explain).
+  blockReason?: string;
+  // Absent when no evaluation for this account has ever been 'matched'.
+  lastReconciledAt?: string;
+}
+
+export interface AccountLedgerPage {
+  items: AccountLedgerListItem[];
+  nextCursor?: string;
+}
+
+export interface AccountLedgerFilters {
+  externalUserId?: string;
+  sourceInstanceId?: string;
+  // Default (undefined) sorts by invoiceable_now_minor descending;
+  // "block_state" sorts frozen_manual_review first (see the backend's own
+  // accountBlockStateRankExpr).
+  sort?: "block_state";
 }
 
 export interface PaymentCandidate {

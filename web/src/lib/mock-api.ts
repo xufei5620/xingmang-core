@@ -1,4 +1,7 @@
 import type {
+  AccountLedgerDetail,
+  AccountLedgerFilters,
+  AccountLedgerListItem,
   AdminReviewPayload,
   AuthSession,
   DashboardSummary,
@@ -444,6 +447,161 @@ let eligibilityFreezes: EligibilityFreeze[] = [
     externalUserId: "30044",
   },
 ];
+
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): one fixture account per block_state,
+// matching the design doc's own illustrative example numbers where
+// possible. Detail is the single source of truth; the list view's own
+// entries are derived from it below (mirroring how the real backend's list
+// endpoint is a summary projection of the same underlying account row the
+// detail endpoint reads in full).
+const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
+  "41000000-0000-4000-8000-000000000001": {
+    externalAccountId: "41000000-0000-4000-8000-000000000001",
+    source: "sub2api",
+    externalUserId: "1147",
+    policyStartAt: "2026-08-31T16:00:00.000Z",
+    rechargesSinceStartCount: 3,
+    rechargesSinceStartMinor: 128_000,
+    consumedSinceStartMinor: 96_000,
+    invoiceableNowMinor: 31_800,
+    issuedMinor: 0,
+    thresholdReached: true,
+    blockState: "invoiceable",
+    lastCheckpointAt: "2026-09-03T06:25:11.000Z",
+    openingBalance: { serviceUnits: "48200", unitCode: "SUB2_BALANCE_1E8" },
+    recharges: [
+      {
+        fundingLotId: "51000000-0000-4000-8000-000000000001",
+        completedAt: "2026-09-02T03:11:00.000Z",
+        amountMinor: 50_000,
+        eligibilityKind: "WALLET_CASH",
+        refundFrozen: false,
+      },
+      {
+        fundingLotId: "51000000-0000-4000-8000-000000000002",
+        completedAt: "2026-09-02T09:40:00.000Z",
+        amountMinor: 48_000,
+        eligibilityKind: "WALLET_CASH",
+        refundFrozen: false,
+      },
+      {
+        fundingLotId: "51000000-0000-4000-8000-000000000003",
+        completedAt: "2026-09-03T01:05:00.000Z",
+        amountMinor: 30_000,
+        eligibilityKind: "WALLET_CASH",
+        refundFrozen: false,
+      },
+    ],
+    consumptionTimeline: [
+      { date: "2026-09-02", consumedMinor: 60_000 },
+      { date: "2026-09-03", consumedMinor: 36_000 },
+    ],
+    lastReconciledAt: "2026-09-03T06:25:11.000Z",
+  },
+  "41000000-0000-4000-8000-000000000002": {
+    externalAccountId: "41000000-0000-4000-8000-000000000002",
+    source: "newapi",
+    externalUserId: "8821",
+    policyStartAt: "2026-08-31T16:00:00.000Z",
+    rechargesSinceStartCount: 1,
+    rechargesSinceStartMinor: 20_000,
+    consumedSinceStartMinor: 20_000,
+    invoiceableNowMinor: 20_000,
+    issuedMinor: 0,
+    thresholdReached: false,
+    blockState: "frozen_manual_review",
+    lastCheckpointAt: "2026-09-02T18:00:00.000Z",
+    openingBalance: { serviceUnits: "0", unitCode: "NEWAPI_QUOTA" },
+    recharges: [
+      {
+        fundingLotId: "51000000-0000-4000-8000-000000000004",
+        completedAt: "2026-09-01T10:00:00.000Z",
+        amountMinor: 20_000,
+        eligibilityKind: "WALLET_CASH",
+        refundFrozen: false,
+      },
+    ],
+    consumptionTimeline: [{ date: "2026-09-01", consumedMinor: 20_000 }],
+    lastReconciledAt: "2026-09-02T18:00:00.000Z",
+    blockReason:
+      "2026-09-02 18:00（Asia/Shanghai）因来源退款核实中被冻结（原因代码 SOURCE_REFUND，关联对象 funding_lot:51000000-0000-4000-8000-000000000004），需人工核实后在“资格冻结”页签手动解除。",
+  },
+  "41000000-0000-4000-8000-000000000003": {
+    externalAccountId: "41000000-0000-4000-8000-000000000003",
+    source: "sub2api",
+    externalUserId: "34",
+    policyStartAt: "2026-08-31T16:00:00.000Z",
+    rechargesSinceStartCount: 2,
+    rechargesSinceStartMinor: 50_000,
+    consumedSinceStartMinor: 32_000,
+    invoiceableNowMinor: 18_000,
+    issuedMinor: 0,
+    thresholdReached: false,
+    blockState: "not_invoiceable_pending_reconciliation",
+    lastCheckpointAt: "2026-09-03T06:25:11.000Z",
+    openingBalance: { serviceUnits: "48200", unitCode: "SUB2_BALANCE_1E8" },
+    recharges: [
+      {
+        fundingLotId: "51000000-0000-4000-8000-000000000005",
+        completedAt: "2026-09-01T08:00:00.000Z",
+        amountMinor: 30_000,
+        eligibilityKind: "WALLET_CASH",
+        refundFrozen: false,
+      },
+      {
+        fundingLotId: "51000000-0000-4000-8000-000000000006",
+        completedAt: "2026-09-02T03:11:00.000Z",
+        amountMinor: 20_000,
+        eligibilityKind: "WALLET_CASH",
+        refundFrozen: false,
+      },
+    ],
+    consumptionTimeline: [{ date: "2026-09-02", consumedMinor: 32_000 }],
+    lastReconciledAt: "2026-09-02T18:04:02.000Z",
+    blockReason:
+      "2026-09-03 06:25（Asia/Shanghai）balance_checkpoint ckpt-xxx 上报余额差额 -4（单位 SUB2_BALANCE_1E8，非人民币元），预期 380，上报余额与账本预期存在负向差额，等待下一次核对。",
+  },
+  "41000000-0000-4000-8000-000000000004": {
+    externalAccountId: "41000000-0000-4000-8000-000000000004",
+    source: "sub2api",
+    externalUserId: "56",
+    policyStartAt: "2026-08-31T16:00:00.000Z",
+    rechargesSinceStartCount: 1,
+    rechargesSinceStartMinor: 5_000,
+    consumedSinceStartMinor: 1_000,
+    invoiceableNowMinor: 4_000,
+    issuedMinor: 0,
+    thresholdReached: false,
+    blockState: "below_threshold",
+    lastCheckpointAt: "2026-09-03T01:00:00.000Z",
+    openingBalance: { serviceUnits: "0", unitCode: "SUB2_BALANCE_1E8" },
+    recharges: [
+      {
+        fundingLotId: "51000000-0000-4000-8000-000000000007",
+        completedAt: "2026-09-01T12:00:00.000Z",
+        amountMinor: 5_000,
+        eligibilityKind: "WALLET_CASH",
+        refundFrozen: false,
+      },
+    ],
+    consumptionTimeline: [{ date: "2026-09-01", consumedMinor: 1_000 }],
+    lastReconciledAt: "2026-09-03T01:00:00.000Z",
+    blockReason: "当前可开票金额 40.00 元未达到起票门槛 200.00 元，还差 160.00 元。",
+  },
+};
+
+const accountLedgerItems: AccountLedgerListItem[] = Object.values(
+  accountLedgerDetails,
+).map(
+  ({
+    recharges: _recharges,
+    consumptionTimeline: _consumptionTimeline,
+    openingBalance: _openingBalance,
+    blockReason: _blockReason,
+    lastReconciledAt: _lastReconciledAt,
+    ...listItem
+  }) => listItem,
+);
 
 export const mockInvoiceApi: InvoiceApiClient = {
   mode: "mock",
@@ -951,6 +1109,80 @@ export const mockInvoiceApi: InvoiceApiClient = {
         status: 404,
       });
     return structuredClone(resolved);
+  },
+
+  async getAccountLedger(filters: AccountLedgerFilters, cursor?: string) {
+    await delay(160);
+    // sourceInstanceId is not part of the list contract's own fields (see
+    // AccountLedgerListItem), matching the real endpoint -- the mock has
+    // nothing to filter that by either, so only externalUserId is applied
+    // here, same as every other mock filter in this file that mirrors a
+    // real query-param the response itself doesn't echo back.
+    const visible = accountLedgerItems
+      .filter(
+        (item) =>
+          !filters.externalUserId ||
+          item.externalUserId === filters.externalUserId,
+      )
+      .sort((left, right) => {
+        if (filters.sort === "block_state") {
+          const rank = {
+            frozen_manual_review: 0,
+            not_invoiceable_pending_reconciliation: 1,
+            below_threshold: 2,
+            invoiceable: 3,
+          } as const;
+          return (
+            rank[left.blockState] - rank[right.blockState] ||
+            right.externalAccountId.localeCompare(left.externalAccountId)
+          );
+        }
+        return (
+          right.invoiceableNowMinor - left.invoiceableNowMinor ||
+          right.externalAccountId.localeCompare(left.externalAccountId)
+        );
+      });
+    let start = 0;
+    if (cursor) {
+      try {
+        const decoded = JSON.parse(cursor) as { beforeId?: string };
+        start =
+          visible.findIndex((item) => item.externalAccountId === decoded.beforeId) +
+          1;
+      } catch {
+        throw new InvoiceApiError("用户账本分页游标无效。", {
+          code: "INVALID_CURSOR",
+        });
+      }
+      if (start <= 0)
+        throw new InvoiceApiError("用户账本分页游标已失效。", {
+          code: "INVALID_CURSOR",
+        });
+    }
+    const pageSize = 2;
+    const items = visible.slice(start, start + pageSize);
+    const last = items.at(-1);
+    return {
+      items: structuredClone(items),
+      nextCursor:
+        last && start + pageSize < visible.length
+          ? JSON.stringify({
+              beforeInvoiceableMinor: last.invoiceableNowMinor,
+              beforeId: last.externalAccountId,
+            })
+          : undefined,
+    };
+  },
+
+  async getAccountLedgerDetail(externalAccountId: string) {
+    await delay(160);
+    const detail = accountLedgerDetails[externalAccountId];
+    if (!detail)
+      throw new InvoiceApiError("未找到该记录，可能已被删除或地址有误。", {
+        code: "NOT_FOUND",
+        status: 404,
+      });
+    return structuredClone(detail);
   },
 
   async adminReview(payload: AdminReviewPayload) {

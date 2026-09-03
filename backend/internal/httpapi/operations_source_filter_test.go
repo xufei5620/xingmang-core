@@ -31,8 +31,11 @@ type fakeSourceFilterOperations struct {
 	eligibilityFreezesQuery postgresstore.EligibilityFreezePageQuery
 	eligibilityFreezesPage  postgresstore.EligibilityFreezePage
 
-	eligibilityLedgerQuery postgresstore.EligibilityLedgerPageQuery
-	eligibilityLedgerPage  postgresstore.EligibilityLedgerPage
+	accountLedgerQuery     postgresstore.AccountLedgerPageQuery
+	accountLedgerPage      postgresstore.AccountLedgerPage
+	accountLedgerDetail    postgresstore.AccountLedgerDetail
+	accountLedgerDetailErr error
+	accountLedgerDetailID  string
 }
 
 func (f *fakeSourceFilterOperations) SourceHealth(context.Context) (postgresstore.SourceHealthReport, error) {
@@ -65,9 +68,13 @@ func (f *fakeSourceFilterOperations) ListEligibilityFreezesPage(_ context.Contex
 func (f *fakeSourceFilterOperations) ResolveEligibilityFreeze(context.Context, string, string, int64, string, string) (postgresstore.EligibilityFreeze, error) {
 	panic("unused in this test")
 }
-func (f *fakeSourceFilterOperations) ListEligibilityLedgerPage(_ context.Context, in postgresstore.EligibilityLedgerPageQuery) (postgresstore.EligibilityLedgerPage, error) {
-	f.eligibilityLedgerQuery = in
-	return f.eligibilityLedgerPage, nil
+func (f *fakeSourceFilterOperations) ListAccountLedgerPage(_ context.Context, in postgresstore.AccountLedgerPageQuery) (postgresstore.AccountLedgerPage, error) {
+	f.accountLedgerQuery = in
+	return f.accountLedgerPage, nil
+}
+func (f *fakeSourceFilterOperations) GetAccountLedgerDetail(_ context.Context, externalAccountID string, _ int64) (postgresstore.AccountLedgerDetail, error) {
+	f.accountLedgerDetailID = externalAccountID
+	return f.accountLedgerDetail, f.accountLedgerDetailErr
 }
 func (f *fakeSourceFilterOperations) ListUserEligibilitySummaries(context.Context, string, domain.SourceType) ([]application.UserEligibilitySummary, error) {
 	panic("unused in this test")

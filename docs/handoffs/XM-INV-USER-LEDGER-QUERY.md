@@ -1,5 +1,15 @@
 # XM-INV-USER-LEDGER-QUERY: per-account eligibility ledger query (design section 3(E))
 
+> **Route finalized by CR-0009** (XM-INV-CR0009-LEDGER-VIEW): the provisional
+> `GET /api/v1/admin/eligibility-ledger` route this handoff describes below
+> was replaced by `GET /api/v1/admin/accounts/ledger` (list) and
+> `GET /api/v1/admin/accounts/{external_account_id}/ledger` (detail), per
+> CR-0009's own finalized contract -- see
+> `docs/handoffs/XM-INV-CR0009-LEDGER-VIEW.md`. The rest of this document
+> describes this slice's own original implementation as delivered and is
+> kept for history; it no longer reflects the routes or field names live in
+> production.
+
 - **status:** implemented and self-tested locally; full backend suite green
   (`go test -p 1 -count=1 ./...`, two full runs -- see Gate results), `go vet`
   clean, `go build` clean, `gofmt` clean (staged-blob method, per this

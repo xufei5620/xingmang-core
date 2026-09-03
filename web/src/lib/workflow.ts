@@ -1,4 +1,4 @@
-import type { InvoiceRequest } from "../types";
+import type { EligibilityFreeze, InvoiceRequest } from "../types";
 
 export const maxInvoicePDFBytes = 20 * 1024 * 1024;
 
@@ -54,4 +54,22 @@ export function replaceDirectRequestAfterMutation<
   T extends { id: string },
 >(current: T | null, updated: T) {
   return current?.id === updated.id ? updated : current;
+}
+
+// CR-0009 "变更范围" item 5: after XM-INV-ELIG-AUTO-RECONCILE/
+// XM-INV-ELIG-QUEUE-NARROW, UNKNOWN_NEGATIVE_BALANCE/USAGE_EXCEEDS_LEDGER
+// freezes and a generalized (account-scoped) LATE_FINALIZED_EVENT freeze
+// are all mechanically self-healing on the next reconciliation cycle -- any
+// that still appear on /admin/eligibility-freezes are legacy rows from
+// before those slices shipped (or before the queue-narrowing migration tool
+// has actually been run in production), not something an operator needs to
+// act on. Used by App.tsx's EligibilityFreezesPage as a client-side display
+// filter only: the server's own /admin/eligibility-freezes contract and the
+// resolve flow are unchanged (CR-0009 "契约变化").
+export function isMechanicalReconciliationFreeze(item: EligibilityFreeze) {
+  return (
+    item.reason === "UNKNOWN_NEGATIVE_BALANCE" ||
+    item.reason === "USAGE_EXCEEDS_LEDGER" ||
+    (item.reason === "LATE_FINALIZED_EVENT" && item.scope === "account")
+  );
 }

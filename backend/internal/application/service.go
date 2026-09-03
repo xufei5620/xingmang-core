@@ -1093,11 +1093,16 @@ func (s *Service) ListEligibilityFreezesPage(ctx context.Context, in postgressto
 	return s.store.ListEligibilityFreezesPage(ctx, in)
 }
 
-// ListEligibilityLedgerPage: XM-INV-USER-LEDGER-QUERY (design section 3(E)),
-// a plain passthrough to the store -- see postgresstore.eligibility_ledger.go
-// for the read-only query itself.
-func (s *Service) ListEligibilityLedgerPage(ctx context.Context, in postgresstore.EligibilityLedgerPageQuery) (postgresstore.EligibilityLedgerPage, error) {
-	return s.store.ListEligibilityLedgerPage(ctx, in)
+// ListAccountLedgerPage/GetAccountLedgerDetail: CR-0009's operator "用户
+// 账本" view (finalizing XM-INV-USER-LEDGER-QUERY, design section 3(E)),
+// plain passthroughs to the store -- see
+// postgresstore.accounts_ledger.go for the read-only queries themselves.
+func (s *Service) ListAccountLedgerPage(ctx context.Context, in postgresstore.AccountLedgerPageQuery) (postgresstore.AccountLedgerPage, error) {
+	return s.store.ListAccountLedgerPage(ctx, in)
+}
+
+func (s *Service) GetAccountLedgerDetail(ctx context.Context, externalAccountID string, thresholdMinor int64) (postgresstore.AccountLedgerDetail, error) {
+	return s.store.GetAccountLedgerDetail(ctx, externalAccountID, thresholdMinor)
 }
 
 func (s *Service) ResolveEligibilityFreeze(ctx context.Context, adminID, freezeID string, expectedVersion int64, evidenceReference, note string) (postgresstore.EligibilityFreeze, error) {

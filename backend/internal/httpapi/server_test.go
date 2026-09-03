@@ -157,7 +157,7 @@ func TestRequestIDIsSanitizedAndReturned(t *testing.T) {
 
 func TestAdminEndpointsRequireAdminRole(t *testing.T) {
 	server, _ := testServer(t)
-	for _, endpoint := range []struct{ method, path string }{{http.MethodGet, "/api/v1/admin/invoice-requests"}, {http.MethodGet, "/api/v1/admin/eligibility-freezes"}, {http.MethodPost, "/api/v1/admin/eligibility-freezes/61000000-0000-4000-8000-000000000001/resolve"}, {http.MethodGet, "/api/v1/admin/eligibility-ledger"}} {
+	for _, endpoint := range []struct{ method, path string }{{http.MethodGet, "/api/v1/admin/invoice-requests"}, {http.MethodGet, "/api/v1/admin/eligibility-freezes"}, {http.MethodPost, "/api/v1/admin/eligibility-freezes/61000000-0000-4000-8000-000000000001/resolve"}, {http.MethodGet, "/api/v1/admin/accounts/ledger"}, {http.MethodGet, "/api/v1/admin/accounts/61000000-0000-4000-8000-000000000001/ledger"}} {
 		request := httptest.NewRequest(endpoint.method, endpoint.path, nil)
 		request.Header.Set("X-Mock-User-ID", "u1")
 		request.Header.Set("X-Mock-Role", "user")

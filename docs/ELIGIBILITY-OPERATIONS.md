@@ -90,78 +90,130 @@ A stale CAS `version` (including the self-freeze/non-admin-actor guard) still
 reports the unchanged generic 409 `CONFLICT` -- "refresh and retry" remains
 the accurate advice there, unlike for the four reasons above.
 
-## Per-account ledger (`GET /api/v1/admin/eligibility-ledger`)
+## 管理员账本视图（CR-0009，XM-INV-CR0009-LEDGER-VIEW）
 
-XM-INV-USER-LEDGER-QUERY (design doc
-`2026-09-03-xm-inv-eligibility-simplification-design.md`, section 3(E)) adds a
-second, read-only admin endpoint: one row per external account, for the
-per-user account-ledger view CR-0009 builds on the platform side. This route
-path is a proposal -- CR-0009 finalizes it. It is protected by the same
-administrator role and IP allowlist as `eligibility-freezes` above (no MFA
-step-up or CSRF token is required -- it is a pure `GET`, unlike
-`eligibility-freezes/{id}/resolve`). It never reads `audit_events`: every
-field comes from a plaintext column already on `source_account_eligibility_state`,
-`funding_lots`, or `eligibility_freezes`.
+CR-0009（`docs/change-requests/CR-0009-invoice-admin-user-ledger-view.md`）把
+运营复核的聚合单位从"按冻结记录逐行看"换成"按用户账号看账本"，最终确定了
+XM-INV-USER-LEDGER-QUERY（design 3(E)）的查询契约，取代其原有的提案路由
+`GET /api/v1/admin/eligibility-ledger`（该路由从未上线生产，见
+`docs/handoffs/XM-INV-USER-LEDGER-QUERY.md`的替换说明）。两个新端点与
+`eligibility-freezes`同一套准入（管理员角色 + IP 白名单，纯 `GET`，无需
+MFA 或 CSRF），全程只读，从不读取 `audit_events`——`block_reason`引用的每一
+个事实都来自明文列或本节下方列出的既有表。
 
-Pagination is keyset, `before_id` plus `limit` (default and max 100, same
-mechanics as every other admin list in this file -- `WHERE id<before_id
-ORDER BY id DESC`), scoped to the external account's own id; there is no
-per-item `id` field in the response, only the page envelope's opaque
-`next_before_id`. An optional `external_user_id` query parameter does an
-exact-match lookup, identical in posture to `eligibility-freezes`'s own
-filter of the same name.
+### 列表：`GET /api/v1/admin/accounts/ledger`
 
-Each item:
+分页 keyset：默认按 `invoiceable_now_minor` 降序，游标为
+`before_invoiceable_minor`+`before_id`（两者必须同时提供或同时省略）；
+`sort=block_state`时改为按 block_state 优先级排序（`frozen_manual_review`→
+`not_invoiceable_pending_reconciliation`→`below_threshold`→`invoiceable`，
+最需要处理的排最前，这是实现层面的选择，CR-0009 本身未规定具体方向），
+tie-break 为 id 降序，此时游标只需要 `before_id`（`before_invoiceable_minor`
+被忽略）。过滤：`external_user_id`（精确匹配）、`source_instance_id`（精确
+匹配）。邮箱前缀搜索未实现——用户邮箱经 securefields 加密存储，没有可搜索的
+明文列，CR-0009 本身也把这条列为"若无明文列可搜索列则省略并记录偏差"的
+条件分支，这里记录为该条件确实成立后的省略，不是遗漏。
 
 ```json
 {
-  "source_instance_id": "...", "source_type": "sub2api", "source_name": "...",
-  "external_user_id": "34",
-  "recharged_since_policy_start_minor": 500000,
-  "consumed_minor": 320000,
-  "invoiceable_minor": 180000,
-  "threshold_minor": 20000,
-  "threshold_reached": true,
-  "eligibility_status": "not_invoiceable_pending_reconciliation",
-  "block_reason": "UNKNOWN_NEGATIVE_BALANCE",
-  "block_detail": "balance_checkpoint ckpt-xxx at 2026-09-03T10:00:00Z reported balance -120, expected 380 (difference -500)",
-  "block_since": "2026-09-03T10:00:12Z"
+  "items": [{
+    "external_account_id": "1a2b...", "source_type": "sub2api",
+    "external_user_id": "1147", "policy_start_at": "2026-09-01T00:00:00+08:00",
+    "recharges_since_start_count": 3, "recharges_since_start_minor": 128000,
+    "consumed_since_start_minor": 96000, "invoiceable_now_minor": 31800,
+    "issued_minor": 0, "threshold_reached": true,
+    "block_state": "invoiceable", "last_checkpoint_at": "2026-09-03T06:25:11Z"
+  }],
+  "has_more": false, "next_before_invoiceable_minor": null, "next_before_id": null
 }
 ```
 
-- `recharged_since_policy_start_minor` sums `verified_cash_minor` across every
-  `WALLET_CASH`/`SUBSCRIPTION_CASH` funding lot with `completed_at` on or
-  after the account's own `cutover_at` -- the design doc's own formula
-  (inclusive `>=`), independent of verification/refund-freeze state. This
-  reads `cutover_at` as it stands today: XM-INV-ELIG-POLICY-START-ANCHOR
-  (design section 3(D), a later, independent slice) is what makes `cutover_at`
-  always equal the policy start; until that slice lands, a legacy-bootstrapped
-  account's `cutover_at` can still be its first-observed-checkpoint time
-  instead, and this field reads whatever value is on the row either way.
-- `consumed_minor`/`invoiceable_minor` use the identical formula the user
-  summary's own `consumed_minor`/`available_minor` above already uses
-  (same filters: CNY, `WALLET_CASH`/`SUBSCRIPTION_CASH`, verified lots;
-  `invoiceable_minor` additionally excludes refund-frozen lots and nets out
-  reserved/issued amounts) -- not re-derived, the SQL text is a deliberate,
-  documented duplicate of that same formula.
-- `threshold_minor`/`threshold_reached` reuse the real, admin-configurable
-  minimum invoice amount (the same value that gates actual submission), not a
-  hardcoded constant. `threshold_reached` is a plain numeric comparison --
-  it can be `true` even while the account is blocked, exactly as the example
-  above shows.
-- `block_reason`/`block_detail`/`block_since` are `null` unless
-  `eligibility_status` is `not_invoiceable_pending_reconciliation` (read
-  directly from that state's own five plaintext columns, see "Automatic
-  reconciliation" below) or `frozen` (read from the latest open
-  `eligibility_freezes` row instead: `freeze_reason` becomes `block_reason`,
-  `block_since` is that row's `opened_at`, and `block_detail` is composed
-  from its `trigger_object_type`/`trigger_object_id` -- there is no stored
-  human-readable sentence for a freeze the way there is for pending
-  reconciliation). A `frozen` account with no open `eligibility_freezes` row
-  (should not happen by construction, but not assumed) still returns a row,
-  with all three left `null` rather than erroring. Recorded usage overage
-  (`non_invoiceable_overage_*`) never surfaces here at all -- it does not
-  block the account, and design section 3(E) has no field for it.
+- `recharges_since_start_minor`/`_count` sum/count `verified_cash_minor` over
+  `WALLET_CASH`/`SUBSCRIPTION_CASH` funding lots with `completed_at>=`账号自身
+  `cutover_at`（design 3(E) 的逐字公式），**且要求
+  `verification_state='verified'`**——这是对 XM-INV-USER-LEDGER-QUERY 原有
+  查询的一处修正（那个版本省略了这个过滤，见其自己的 handoff），改为与
+  design 第 2 节的完整公式和本文件其余每一处触及现金 lot 的公式一致。
+  `cutover_at` 读的是当前值：XM-INV-ELIG-POLICY-START-ANCHOR（design 3(D)）
+  落地前，遗留账号的 `cutover_at` 仍可能是首个检查点时间而非真正策略起点。
+- `consumed_since_start_minor`/`invoiceable_now_minor`/`issued_minor` 与用户
+  自助摘要（"User summary"一节）的 `consumed_minor`/`available_minor`/
+  `issued_minor` 是同一份公式（同样的过滤条件），不重新推导，SQL 文本是有意
+  的重复；因为 `WALLET_CASH`/`SUBSCRIPTION_CASH` 这两种 `eligibility_kind`
+  本就被 `enforce_funding_lot_invoice_policy`（迁移 0016）强制要求
+  `completed_at>=`策略起点，这三个字段不需要也没有额外的 `>=cutover_at`
+  过滤（与 `recharges_since_start_minor` 不同，后者需要，见上）。
+- `threshold_reached` 复用真实的、管理员可配置的最低起票金额
+  （`ledger.MinimumRequestMinor()`），不是硬编码常量。
+
+### 详情：`GET /api/v1/admin/accounts/{external_account_id}/ledger`
+
+列表字段基础上追加 `opening_balance_units`（期初余额，`{service_units,
+unit_code}`，即账号自己的 `cutover_balance_units`/`unit_code`，沿用"服务
+单位 + unit_code"表达，不假装非现金单位是人民币）、`recharges_since_start[]`
+（`funding_lot_id`/`completed_at`/`amount_minor`/`eligibility_kind`/
+`refund_frozen`，按 `completed_at` 升序，含退款冻结中的 lot——这类现金
+确实到账了，只是暂不可开票）、`consumption_timeline`（按 Asia/Shanghai
+日历日聚合的每日消耗，来自 `consumption_allocations` 关联 `source_usage_events`
+与 `funding_lots`——现有表已支持，不需要新聚合表；"按检查点"聚合是另一个
+可行选项，本实现选了"按天"，更符合运营按日核对的习惯）、`block_reason`
+（详见下）、`last_reconciled_at`（最近一次评估为 `matched` 的时间，区别于
+`last_checkpoint_at`——后者是最近一次收到任何检查点/结转证明的时间，可能
+本身就是一次不匹配）。未知账号（不存在或格式不合法）返回 404，沿用既有
+错误信封约定。
+
+### `block_state`（四态，只读组合既有信号，不新增判定条件）
+
+- `frozen_manual_review`：存在 `status='open'` 的 `eligibility_freezes`
+  行，或者 `eligibility_status='frozen'`（即便查不到对应的开放冻结行——
+  按构造不应发生，但不假设）。XM-INV-ELIG-AUTO-RECONCILE 与
+  XM-INV-ELIG-QUEUE-NARROW 上线后，任何新产生的开放冻结都已经是design 3(C)
+  "保留清单"里的人工复核原因（`SOURCE_REFUND`/精确的
+  `LATE_FINALIZED_EVENT`/`SOURCE_GAP`/六种数据完整性原因），所以判定不再
+  按 `freeze_reason` 白名单过滤——本任务的实现仍把这份白名单记录成一个带
+  中文说明的 Go 常量（`accountLedgerFreezeReasonDescriptions`，
+  `httpapi/accounts_ledger.go`），既满足"保留白名单以备查"的要求，也用来
+  给 `block_reason` 生成具体的中文原因描述，包括两个历史遗留原因
+  （`UNKNOWN_NEGATIVE_BALANCE`/`USAGE_EXCEEDS_LEDGER`——若队列收窄迁移工具
+  还没在生产跑过，这两种旧冻结行仍可能存在）。
+- `not_invoiceable_pending_reconciliation`：`eligibility_status`正是该值，
+  或者存在 `eligibility_projection_jobs` 行（该表只在排队中/处理中/失败时
+  才有行，成功后无条件删除，见 XM-INV-ELIG-AUTO-RECONCILE 的说明），或者
+  最近一次余额评估状态不在 `matched`/`positive_classified_non_cash`/
+  `positive_blip_ignored` 之内——**含"从未有过任何评估记录"**（此时判定为
+  "不在白名单内"，与 `ResolveEligibilityFreeze`
+  自己"未记录评估视为不匹配"的既有先例一致，不是本次新发明的读法）。
+- `below_threshold`：以上都不成立，但 `invoiceable_now_minor` 低于当前
+  配置的最低起票金额。
+- `invoiceable`：以上都不成立。
+
+### `block_reason`：具体中文原因，绝不是"数据异常"这类泛泛表述
+
+只在详情端点返回（列表端点没有这个字段），`block_state=invoiceable`时为
+`null`。时间一律换算为 Asia/Shanghai 展示；凡是已知为人民币分的金额（可
+开票额、起票门槛、被红冲 lot 的已开票额）都换算成"元"两位小数（纯整数
+运算，不经过浮点）；但对账检查点/结转证明的差额数字**不**换算成"元"——
+`unit_code`（例如测试夹具里的 `SUB2_BALANCE_1E8`）是上游来源自己的记账
+单位，这个系统里从未有过一个全局、已验证的"服务单位→人民币"换算系数
+（`funding_lot_consumption_state`里的换算是逐笔 lot 各自计算的，不是一个
+常数），编一个换算系数会是编造的精度——与"不假装非现金单位是人民币"这条
+既有原则（用户摘要的 `legacy_noninvoiceable`/`noncash`）一致。这条是对
+任务简报"金额一律按元两位小数"这句话的一处刻意收窄读法，记录在
+`docs/handoffs/XM-INV-CR0009-LEDGER-VIEW.md`。
+
+## "资格冻结"页签收窄（CR-0009 前端，纯客户端过滤，服务端契约不变）
+
+`GET /api/v1/admin/eligibility-freezes`本身的查询参数、响应形状、解冻流程
+（`POST .../resolve`）完全不变——CR-0009 明确"这是前端过滤条件收窄，不是
+服务端契约变化"。默认只展示`isMechanicalReconciliationFreeze`判定为假的
+记录（`web/src/lib/workflow.ts`）：隐藏
+`UNKNOWN_NEGATIVE_BALANCE`/`USAGE_EXCEEDS_LEDGER`原因的记录，以及
+`scope='account'`（泛化、非精确红冲）的`LATE_FINALIZED_EVENT`记录——这三类
+在 XM-INV-ELIG-AUTO-RECONCILE/XM-INV-ELIG-QUEUE-NARROW 上线后都已经不会
+再被新建，仍然出现的只可能是那两个切片上线前、或队列收窄迁移工具尚未在
+生产跑过时遗留的历史行。页面右上角有一个"显示全部"复选框可以关闭这条
+默认过滤，解冻流程本身不受影响（用户账本页签本身完全只读，不提供解冻
+入口）。
 
 ## User summary
 
