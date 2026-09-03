@@ -1750,9 +1750,11 @@ describe("详情深链整合（服务器 / 渠道 / 上游）", () => {
     expect(screen.getAllByText("Sub2API").length).toBeGreaterThan(0);
   });
 
-  it("新增上游路由优先于动态 upstreamId", async () => {
+  it("suppliers/new 只读评审蓝图已下线（产品负责人 2026-09-03 裁定），落回动态 upstreamId 路由自带的 not-found 兜底", async () => {
     renderRoute("/platforms/newapi/suppliers/new");
-    expect(await screen.findByRole("heading", { name: "添加上游", level: 2 })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+    expect(screen.getByText(/新增上游/)).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "添加上游", level: 2 })).toBeNull();
   });
 });
 

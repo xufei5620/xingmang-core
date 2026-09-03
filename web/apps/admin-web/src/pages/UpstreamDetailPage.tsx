@@ -32,7 +32,11 @@ export function UpstreamDetailPage() {
     return (
       <NotFoundView
         pathname={upstreamDetailPath(serviceType, upstreamId)}
-        detail={upstreamId === "new" ? "新增上游请使用专用登记页面" : "上游 ID 为空，无法定位详情"}
+        detail={
+          upstreamId === "new"
+            ? "新增上游请到渠道管理页使用「＋ 添加上游」（专用评审蓝图页已于 2026-09-03 按产品负责人裁定下线）"
+            : "上游 ID 为空，无法定位详情"
+        }
       />
     );
   }

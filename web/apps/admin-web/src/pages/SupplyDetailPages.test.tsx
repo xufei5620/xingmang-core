@@ -3,7 +3,6 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChannelDetailPage } from "./ChannelDetailPage";
-import { SupplierCreatePage } from "./SupplierCreatePage";
 import { UpstreamDetailPage } from "./UpstreamDetailPage";
 
 function renderPage(path: string, element: React.ReactElement, route: string) {
@@ -523,23 +522,19 @@ describe("上游详情 / 添加上游：仍是 UI-only 壳，返回入口跟着�
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("`suppliers/new` 是只读字段蓝图，所有输入禁用且没有提交按钮；返回入口同样指向渠道管理页", () => {
+  it("`suppliers/new` 只读字段蓝图已按产品负责人 2026-09-03 裁定下线，落回上游详情自带的 not-found 兜底", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     renderPage(
       "/platforms/sub2api/suppliers/new",
-      <SupplierCreatePage />,
-      "/platforms/:serviceType/suppliers/new",
+      <UpstreamDetailPage />,
+      "/platforms/:serviceType/suppliers/:upstreamId",
     );
 
-    expect(screen.getByRole("heading", { name: "添加上游", level: 2 })).not.toBeNull();
-    expect(screen.getByText(/只读表单蓝图：当前不会保存、提交或调用任何 Action/)).not.toBeNull();
-    expect(screen.getAllByRole("textbox").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("textbox").every((input) => (input as HTMLInputElement).disabled)).toBe(true);
-    const link = screen.getByRole("link", { name: "返回 Sub2API 上游管理" });
-    expect(link.getAttribute("href")).toBe("/platforms/sub2api?tab=upstream");
-    expect(screen.queryAllByRole("button")).toHaveLength(0);
+    expect(screen.getByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+    expect(screen.getByText(/新增上游/)).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: "添加上游", level: 2 })).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

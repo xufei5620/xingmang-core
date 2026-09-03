@@ -60,7 +60,6 @@ import { RequestDetailPage } from "./pages/RequestDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ServerDetailPage } from "./pages/ServerDetailPage";
 import { isServerDetailPreviewId } from "./blueprints/server";
-import { SupplierCreatePage } from "./pages/SupplierCreatePage";
 import { TotpEnrollPage } from "./pages/TotpEnrollPage";
 import { UpstreamDetailPage } from "./pages/UpstreamDetailPage";
 
@@ -282,12 +281,6 @@ function serverDetailLoader({ params }: LoaderFunctionArgs) {
   return null;
 }
 
-/** 渠道/上游详情的 UI-only 路由门禁。 */
-function supplyPlatformLoader({ params }: LoaderFunctionArgs) {
-  assertSupplyPlatform(params.serviceType ?? "");
-  return null;
-}
-
 function channelDetailLoader({ params }: LoaderFunctionArgs) {
   const platform = params.serviceType ?? "";
   assertSupplyPlatform(platform);
@@ -399,11 +392,6 @@ export const routes = [
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,
                 Component: ChannelDetailPage,
-              },
-              {
-                path: "platforms/:serviceType/suppliers/new",
-                loader: supplyPlatformLoader,
-                Component: SupplierCreatePage,
               },
               {
                 // 订单详情（XM-PAY1，原型 V_paymentDetail）。挂在 finance/ 下
