@@ -1505,10 +1505,21 @@ func (s *Store) observeEligibilityFact(ctx context.Context, in eligibilityFactOb
 	}
 	late := !in.EventTime.After(account.FinalizedThrough)
 	if late {
+		// XM-INV-ELIG-QUEUE-NARROW (design XM-INV-ELIG-SIMPLIFY section
+		// 3(C) item 2): this generalized "any late fact freezes the whole
+		// account" defense is removed -- reprojectEligibilityTx alone
+		// already opens its own precise, funding_lot-scoped freeze
+		// (freezeEligibilityTx call in reprojectEligibilityTx's own
+		// lot.RoundedMinor<lot.IssuedMinor branch) whenever a late fact
+		// actually causes a red-reversal (an already-issued invoice's
+		// recognized amount would drop below what was issued). A late fact
+		// that reprojects cleanly no longer freezes anything.
 		if err = reprojectEligibilityTx(ctx, tx, accountID, account.FinalizedThrough, actor); err != nil {
 			return err
 		}
-		if err = freezeEligibilityTx(ctx, tx, accountID, "", "LATE_FINALIZED_EVENT", in.Kind, in.ExternalObjectID, in.SourceRevision, actor); err != nil {
+		if err = writeAudit(ctx, tx, actor, "eligibility.late_fact.reprojected", in.Kind, id,
+			nil, map[string]any{"external_account_id": accountID, "event_time": in.EventTime,
+				"external_object_id": in.ExternalObjectID}); err != nil {
 			return err
 		}
 	}

@@ -15,6 +15,12 @@
 //     and the UNKNOWN_NEGATIVE_BALANCE freezes that credit's permanent
 //     excess produced on every checkpoint after it. See
 //     docs/handoffs/XM-INV-BALANCE-BLIP.md.
+//   - --kind=queue-narrow: design XM-INV-ELIG-SIMPLIFY section 3(C)'s
+//     manual-queue narrowing -- every still-open UNKNOWN_NEGATIVE_BALANCE,
+//     USAGE_EXCEEDS_LEDGER or funding_lot-less LATE_FINALIZED_EVENT freeze
+//     left over from before XM-INV-ELIG-AUTO-RECONCILE and
+//     XM-INV-ELIG-QUEUE-NARROW shipped. See
+//     docs/handoffs/XM-INV-ELIG-QUEUE-NARROW.md.
 //
 // Defaults to --dry-run; --apply requires an operator id and actually
 // mutates the database. Omitting --kind reproduces this tool's original
@@ -47,10 +53,14 @@ const (
 	kindPreAnchorUsage = "pre-anchor-usage"
 	kindBalanceAnchor  = "balance-anchor"
 	kindBalanceBlip    = "balance-blip"
+	kindQueueNarrow    = "queue-narrow"
 
 	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
 	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
 	balanceBlipFixedResolutionNote    = "balance blip credit reversed by XM-INV-BALANCE-BLIP repair"
+	// queueNarrowFixedResolutionNote is design section 3(C) item 3's own
+	// specified fixed resolution note text, verbatim.
+	queueNarrowFixedResolutionNote = "由 XM-INV-ELIG-SIMPLIFY 迁移自动解除"
 )
 
 func main() {
@@ -59,7 +69,7 @@ func main() {
 	migrationsDir := flag.String("migrations-dir", "/app/migrations", "bundled migration directory")
 	apply := flag.Bool("apply", false, "actually resolve freezes (and, for pre-anchor-usage, requeue events; default is a dry run that changes nothing)")
 	operatorID := flag.String("operator-id", "", "the approving operator's admin UUID (required with --apply)")
-	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), or balance-blip (design XM-INV-BALANCE-BLIP)")
+	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), or queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C))")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")
@@ -81,8 +91,8 @@ func main() {
 }
 
 func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, out io.Writer) error {
-	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip {
-		return fmt.Errorf("unknown --kind %q, want %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip)
+	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow {
+		return fmt.Errorf("unknown --kind %q, want %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow)
 	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
 	if err != nil {
@@ -113,6 +123,9 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	}
 	if kind == kindBalanceBlip {
 		return runBalanceBlip(ctx, store, apply, operatorID, keyring, out)
+	}
+	if kind == kindQueueNarrow {
+		return runQueueNarrow(ctx, store, apply, operatorID, keyring, out)
 	}
 	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
 }
@@ -179,6 +192,26 @@ func runBalanceBlip(ctx context.Context, store *postgresstore.Store, apply bool,
 		return fmt.Errorf("repair balance blip eligibility: %w", err)
 	}
 	printBalanceBlipSummary(out, result)
+	return nil
+}
+
+func runQueueNarrow(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, keyring securefields.Keyring, out io.Writer) error {
+	in := postgresstore.QueueNarrowRepairInput{Apply: apply, OperatorID: operatorID}
+	if apply {
+		hash, evidenceCiphertext, noteCiphertext, encErr := encryptFixedResolution(keyring,
+			queueNarrowFixedResolutionNote, "XM-INV-ELIG-QUEUE-NARROW")
+		if encErr != nil {
+			return encErr
+		}
+		in.EvidenceHash, in.EvidenceCiphertext = hash, evidenceCiphertext
+		in.NoteHash, in.NoteCiphertext = hash, noteCiphertext
+	}
+	result, err := store.RepairQueueNarrowEligibility(ctx, in, postgresstore.AuditActor{
+		Type: "admin", ID: operatorID, Reason: "XM-INV-ELIG-QUEUE-NARROW repair tool " + modeLabel(apply)})
+	if err != nil {
+		return fmt.Errorf("repair queue narrow eligibility: %w", err)
+	}
+	printQueueNarrowSummary(out, result)
 	return nil
 }
 
@@ -255,6 +288,30 @@ func printBalanceBlipSummary(out io.Writer, result postgresstore.BalanceBlipRepa
 	fmt.Fprintf(out, "\n%-38s %10d %11d %11d\n", "TOTAL", result.TotalBlipCreditsRemoved,
 		result.TotalNegativeFreezesResolved, result.TotalCheckpointEvaluationsReset)
 	fmt.Fprintf(out, "\naccounts affected: %d\n", len(result.Accounts))
+}
+
+func printQueueNarrowSummary(out io.Writer, result postgresstore.QueueNarrowRepairResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-ELIG-QUEUE-NARROW: %s\n\n", mode)
+	fmt.Fprintf(out, "%-38s %8s %9s %9s %11s %9s %11s\n", "ACCOUNT", "NEG_BAL", "USAGE_EXC", "LATE_FACT", "PEND_RECON", "OVERAGE", "REACTIVATED")
+	for _, account := range result.Accounts {
+		fmt.Fprintf(out, "%-38s %8d %9d %9d %11t %9t %11t\n", account.ExternalAccountID,
+			account.NegativeBalanceFreezesResolved, account.UsageExceedsLedgerFreezesResolved,
+			account.LateFactFreezesResolved, account.RebuiltPendingReconciliation,
+			account.UsageOverageReprojected, account.Reactivated)
+	}
+	fmt.Fprintf(out, "\n%-38s %8d %9d %9d\n", "TOTAL", result.TotalNegativeBalanceFreezesResolved,
+		result.TotalUsageExceedsLedgerFreezesResolved, result.TotalLateFactFreezesResolved)
+	fmt.Fprintf(out, "\naccounts affected: %d\n", len(result.Accounts))
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(out, "\nACCOUNT ERRORS (not applied, other accounts still processed):\n")
+		for _, accountErr := range result.Errors {
+			fmt.Fprintf(out, "%-38s %s\n", accountErr.ExternalAccountID, accountErr.Message)
+		}
+	}
 }
 
 func readOneLineSecret(path string) (string, error) {

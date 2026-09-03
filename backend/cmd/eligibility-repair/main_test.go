@@ -50,6 +50,21 @@ func balanceBlipApplyResultFixture() postgresstore.BalanceBlipRepairResult {
 	}
 }
 
+func queueNarrowApplyResultFixture() postgresstore.QueueNarrowRepairResult {
+	return postgresstore.QueueNarrowRepairResult{
+		Applied: true,
+		Accounts: []postgresstore.QueueNarrowRepairAccount{{
+			ExternalAccountID: "30000000-0000-4000-8000-000000000082", SourceInstanceID: "10000000-0000-4000-8000-000000000082",
+			NegativeBalanceFreezesResolved: 1, UsageExceedsLedgerFreezesResolved: 1, LateFactFreezesResolved: 1,
+			RebuiltPendingReconciliation: true, UsageOverageReprojected: true, Reactivated: false,
+		}},
+		Errors: []postgresstore.QueueNarrowRepairAccountError{{
+			ExternalAccountID: "30000000-0000-4000-8000-000000000083", Message: "simulated per-account failure",
+		}},
+		TotalNegativeBalanceFreezesResolved: 1, TotalUsageExceedsLedgerFreezesResolved: 1, TotalLateFactFreezesResolved: 1,
+	}
+}
+
 // setupRepairCLIEnv migrates a fresh isolated schema (mirroring
 // postgresstore's own integration test helpers, which this package cannot
 // import directly -- they are unexported test-file helpers in a different
@@ -154,6 +169,26 @@ func TestRunBalanceBlipDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	}
 }
 
+// TestRunQueueNarrowDryRunAgainstEmptyDatabaseReportsNothing is the same
+// wiring smoke test for --kind=queue-narrow (design XM-INV-ELIG-SIMPLIFY
+// section 3(C)).
+func TestRunQueueNarrowDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindQueueNarrow, &out); err != nil {
+		t.Fatal(err)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "XM-INV-ELIG-QUEUE-NARROW") || !strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("dry run output missing expected banner: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 0") {
+		t.Fatalf("dry run against an empty database found work: %s", printed)
+	}
+}
+
 // TestRunUnknownKindIsRejected confirms an unrecognized --kind fails
 // closed before ever opening the database.
 func TestRunUnknownKindIsRejected(t *testing.T) {
@@ -175,7 +210,7 @@ func TestRunUnknownKindIsRejected(t *testing.T) {
 // "resolved_by = a caller-supplied operator id" requirements -- for all
 // three repair kinds.
 func TestRunApplyWithoutOperatorIDIsRejected(t *testing.T) {
-	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip} {
+	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow} {
 		databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -226,6 +261,24 @@ func TestPrintBalanceBlipSummaryFormatsAccountsAndTotals(t *testing.T) {
 	printed := out.String()
 	for _, want := range []string{"XM-INV-BALANCE-BLIP", "APPLIED", "30000000-0000-4000-8000-000000000081",
 		"TOTAL", "accounts affected: 1"} {
+		if !strings.Contains(printed, want) {
+			t.Fatalf("summary output missing %q: %s", want, printed)
+		}
+	}
+}
+
+// TestPrintQueueNarrowSummaryFormatsAccountsAndTotals is the same formatting
+// check for printQueueNarrowSummary, plus its own account-error section
+// (design's own account-isolation requirement: a per-account failure must be
+// visible to the operator without aborting the printed report for every
+// other account).
+func TestPrintQueueNarrowSummaryFormatsAccountsAndTotals(t *testing.T) {
+	var out bytes.Buffer
+	printQueueNarrowSummary(&out, queueNarrowApplyResultFixture())
+	printed := out.String()
+	for _, want := range []string{"XM-INV-ELIG-QUEUE-NARROW", "APPLIED", "30000000-0000-4000-8000-000000000082",
+		"TOTAL", "accounts affected: 1", "ACCOUNT ERRORS", "30000000-0000-4000-8000-000000000083",
+		"simulated per-account failure"} {
 		if !strings.Contains(printed, want) {
 			t.Fatalf("summary output missing %q: %s", want, printed)
 		}
