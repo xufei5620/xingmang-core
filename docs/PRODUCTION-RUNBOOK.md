@@ -2299,6 +2299,12 @@ human-readable rendering, also printed to stdout). The important fields:
   work -- treat `false` as inconclusive and re-run with a higher
   `--max-rounds`, not as a pass.
 - `new_freeze_reasons`: the exact set of newly appearing categories, if any.
+  `shadow-eval-summary.txt`'s "freeze reason deltas" line additionally shows
+  every reason's before/after count and delta (e.g. `SOURCE_GAP 79 -> 85
+  (+6)`) -- purely informational, never itself a factor in the verdict; a
+  pre-existing reason's count growing (ordinary source-stream lag opening
+  more of an already-known freeze type) is expected operation, not a
+  regression signal.
 - `migrations_applied`: the migration files the `invoice-migrate` step newly
   applied to the restored backup before the projection worker ran (`null`/
   "none" when the backup was already at the candidate's migration set). A

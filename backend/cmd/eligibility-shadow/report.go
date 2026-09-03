@@ -190,7 +190,28 @@ func toReportHealth(health postgresstore.EligibilityProjectionHealth) Projection
 	}
 }
 
+// toReportFailedAccounts returns nil, not an initialized-but-empty slice,
+// when failed has no elements. A real production run (RC78) caught the bug
+// in this function's previous unconditional
+// make([]FailedAccount, 0, len(failed)): json.MarshalIndent renders a
+// non-nil empty slice as the inline "[]", but
+// deploy/rehearsal/shadow-eval-lib.sh's shadow_eval_has_errors (at the
+// time) only recognized "no failures" via the literal `null`, not "[]" --
+// so a genuinely clean rehearsal ("ready" per this process's own ExitCode)
+// was independently recomputed as "not_ready" by shadow-eval.sh's bash
+// verdict, and the two disagreeing was itself treated as a
+// rehearsal-tooling failure. RoundErrors never had this bug (it is only
+// ever nil-until-appended, see run() in main.go); this brings
+// FailedAccounts in line with that same "nil means none" contract instead
+// of just patching the bash side to tolerate both shapes (shadow-eval-lib.sh
+// is hardened to do that too, as defense in depth -- see its own comments
+// -- but the two independent implementations must first agree on one
+// definition, and nil-means-none is the one every other []T field here
+// already follows).
 func toReportFailedAccounts(failed []postgresstore.EligibilityShadowFailedJob) []FailedAccount {
+	if len(failed) == 0 {
+		return nil
+	}
 	result := make([]FailedAccount, 0, len(failed))
 	for _, job := range failed {
 		result = append(result, FailedAccount{

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"invoice-system/backend/internal/postgresstore"
 )
 
 // TestReportJSONShapeMatchesShadowEvalLibAssumptions pins the exact
@@ -123,6 +125,39 @@ func TestParseMigrationsAppliedTrimsAndDropsEmptyEntries(t *testing.T) {
 func TestParseMigrationsAppliedSingleEntry(t *testing.T) {
 	got := parseMigrationsApplied("0020_eligibility_auto_reconcile.sql")
 	want := []string{"0020_eligibility_auto_reconcile.sql"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected %#v, got %#v", want, got)
+	}
+}
+
+// TestToReportFailedAccountsEmptyInputIsNil is the regression test for the
+// exact bug a real production run (RC78) caught: this conversion previously
+// always returned make([]FailedAccount, 0, len(failed)) -- a non-nil empty
+// slice even when failed had zero elements -- which marshals as the inline
+// "[]" instead of the literal `null`.
+// deploy/rehearsal/shadow-eval-lib.sh's shadow_eval_has_errors (before its
+// own fix) only recognized `null` as "no failures", so a genuinely healthy
+// rehearsal's report was independently recomputed as not_ready by the bash
+// side while this process's own ExitCode said ready -- and the two
+// disagreeing was itself treated as a rehearsal-tooling failure. This test
+// exists so a future regression here fails in `go test`, not by producing a
+// silently wrong verdict on the next real run.
+func TestToReportFailedAccountsEmptyInputIsNil(t *testing.T) {
+	if got := toReportFailedAccounts(nil); got != nil {
+		t.Fatalf("expected nil for a nil input, got %#v", got)
+	}
+	if got := toReportFailedAccounts([]postgresstore.EligibilityShadowFailedJob{}); got != nil {
+		t.Fatalf("expected nil for an empty (non-nil) input slice, got %#v", got)
+	}
+}
+
+func TestToReportFailedAccountsPopulatedInput(t *testing.T) {
+	got := toReportFailedAccounts([]postgresstore.EligibilityShadowFailedJob{
+		{ExternalAccountID: "acct-1", LastErrorCode: "PROJECTION_FAILED", AttemptCount: 3},
+	})
+	want := []FailedAccount{
+		{ExternalAccountID: "acct-1", LastErrorCode: "PROJECTION_FAILED", AttemptCount: 3},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected %#v, got %#v", want, got)
 	}

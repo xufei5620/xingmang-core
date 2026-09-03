@@ -1,12 +1,18 @@
 # XM-INV-SHADOW-EVAL: release-rehearsal shadow evaluation of the eligibility projection worker
 
-- **status:** implemented and self-tested locally; gates below. Two real server runs have now
+- **status:** implemented and self-tested locally; gates below. Three real server runs have now
   happened. The first found, and an update fixed, a secret-file permission error in the tools
   container plus an empty/confusing `shadow-eval.json` left behind on that failure path. The second
   (with the permission fix in place) confirmed the credential now reads correctly, and found a second
-  real problem -- the restored backup's schema was behind the candidate's own migration set -- which
-  this update also fixes by adding an `invoice-migrate` step before the projection worker runs. See
-  "Not run" for the full detail on both runs. A third real run to confirm this fix is still needed.
+  real problem -- the restored backup's schema was behind the candidate's own migration set -- fixed
+  by adding an `invoice-migrate` step before the projection worker runs. The third (all three earlier
+  fixes in place) ran the **entire chain successfully end to end** -- restore, migrate, drain, verdict
+  -- but caught a genuine bug: the Go tool's own verdict said `"ready"` while `shadow-eval.sh`'s
+  independently recomputed bash verdict said `not_ready`, and the disagreement itself was (correctly,
+  per its own design) treated as a rehearsal-tooling failure. Root cause and fix are in this update;
+  see "Not run" for the full detail on all three runs. This is the fix the previous two runs were
+  waiting to be confirmed by; no outstanding known-fix is unverified as of this update, but a fourth
+  real run remains prudent before the rehearsal is treated as fully load-bearing.
 - **branch:** `ai/claude/XM-INV-SHADOW-EVAL` (based on `ai/claude/XM-INV-AUTOLOGIN` at `0177e72`),
   worktree `K:/发票/wt-XM-INV-SHADOW-EVAL`.
 - **commits:**
@@ -16,9 +22,11 @@
   - `196f810` docs(shadow-eval): production runbook section and handoff
   - `d8e27e2` fix(rehearsal): chown the tools-container secret to its actual runtime uid
   - `fdf3d2f` fix(rehearsal): mark tooling failures explicitly so a verdict can't hide one
-  - plus a follow-up commit that adds the `invoice-migrate` step (second real run's finding) --
-    this file's own commit is not self-referenceable by hash from inside itself; see
-    `git log --oneline 0177e72..HEAD` on this branch for the exact, current commit list
+  - `81bcbeb` fix(rehearsal): run the candidate's invoice-migrate before the projection worker
+  - plus a follow-up commit that fixes the failed_accounts nil-vs-empty-array disagreement (third
+    real run's finding) and adds per-reason delta rendering -- this file's own commit is not
+    self-referenceable by hash from inside itself; see `git log --oneline 0177e72..HEAD` on this
+    branch for the exact, current commit list
 
 ## Summary
 
@@ -145,11 +153,14 @@ the RC-plan Task 1 bullet to add for any RC that changes the evaluator/projectio
   `parseMigrationsApplied`) echoed into the report.
 - `backend/cmd/eligibility-shadow/report.go` -- `Report`/`Snapshot`/`FreezeCount`/`EvaluationCount`/
   `FailedAccount`/`ProjectionHealth` JSON types, `EvaluateReadiness` (pure comparison logic) and
-  `ExitCode`. New: `Report.MigrationsApplied []string`.
+  `ExitCode`. New: `Report.MigrationsApplied []string`. Fixed (third real run's finding):
+  `toReportFailedAccounts` now returns `nil`, not an initialized-but-empty slice, for zero failed
+  accounts -- the actual root cause of the Go/bash verdict disagreement, see Summary/Not run.
 - `backend/cmd/eligibility-shadow/report_test.go` -- unit tests for `EvaluateReadiness`/`ExitCode`
   (no database) plus `TestReportJSONShapeMatchesShadowEvalLibAssumptions` (the Go↔bash shape
   contract, see design decision 2 above, now also pinning `MigrationsApplied`'s null-vs-populated
-  marshaling) and three new `parseMigrationsApplied` unit tests.
+  marshaling), three `parseMigrationsApplied` unit tests, and two new regression tests,
+  `TestToReportFailedAccountsEmptyInputIsNil`/`TestToReportFailedAccountsPopulatedInput`.
 - `backend/internal/postgresstore/eligibility_shadow_report.go` -- `EligibilityShadowSnapshot`,
   `EligibilityProjectionClaimableCount`, `EligibilityShadowFailedJobs`.
 - `backend/internal/postgresstore/eligibility_shadow_report_integration_test.go` -- four integration
@@ -179,13 +190,23 @@ the RC-plan Task 1 bullet to add for any RC that changes the evaluator/projectio
   renders a clear execution-failure explanation instead of blank/nonsensical freeze counts),
   `shadow_eval_migrate_docker_args` (the testable argument-construction half of the new migrate step),
   and `_shadow_eval_migrations_applied` (rendered into the human summary as "migrations applied").
+  Fixed (third real run's finding, defense in depth alongside the Go fix above):
+  `shadow_eval_has_errors` now recognizes either the literal `null` or the inlined `[]` for both
+  `round_errors` and `failed_accounts`; `round_error_count`/`failed_account_count`
+  (`shadow_eval_human_summary`) and `_shadow_eval_migrations_applied`'s opening-bracket markers are now
+  anchored to end-of-line, matching `_shadow_eval_freeze_block`'s original hardening, so none of them
+  can misread an empty inlined array as unclosed. New: `shadow_eval_freeze_deltas` (per-reason
+  before/after/delta rendering, informational only, rendered into `shadow_eval_human_summary` as a new
+  "freeze reason deltas" line).
 - `deploy/rehearsal/test-shadow-eval.sh` -- static test: every argument-parsing failure path, the
   comparison logic against fixture JSON (including the empty-array edge case), the human summary,
   `shadow_eval_parse_config_user`'s numeric/named/malformed `Config.User` cases,
   `shadow_eval_report_is_valid`/`shadow_eval_verdict_exit_code`/`shadow_eval_human_summary`'s handling
   of a tooling-failure-marker fixture, `shadow_eval_migrate_docker_args`'s exact argument list (in
   particular, that it never emits the `--database-url-file` flag `invoice-migrate` does not support),
-  and `migrations_applied` rendering/fallback-to-"none".
+  and `migrations_applied` rendering/fallback-to-"none". New: the real RC78 `shadow-eval.json` copied
+  in verbatim as fixture `rc78-real-shadow-eval.json` (exit `0`/`"ready"`, delta rendering), plus a
+  derived `rc78-real-plus-new-reason-not-ready.json` (exit `3`/`"not_ready"`).
 - `docs/PRODUCTION-RUNBOOK.md` -- new section 11.2 (see Summary).
 - `docs/handoffs/XM-INV-SHADOW-EVAL.md` -- this document.
 
@@ -312,6 +333,40 @@ and the extended `TestReportJSONShapeMatchesShadowEvalLibAssumptions`; `internal
   clean (this session always re-runs gitleaks after every commit and would not have reported the
   commit id in its reply to the team lead otherwise).
 
+### Follow-up: the failed_accounts nil-vs-empty-array disagreement fix (third real run)
+
+Reproduced first, per the task brief: sourced `deploy/rehearsal/shadow-eval-lib.sh` and called
+`shadow_eval_verdict_exit_code` directly against the real `shadow-eval.json` the team lead copied to
+`H:\temp\claude\...\scratchpad\rc78-rehearsal\`, confirming `not_ready`/exit 3 against the unmodified
+library -- matching the disagreement exactly -- before making any change.
+
+Changes Go code again (`toReportFailedAccounts`), so the full gate list applies:
+
+```
+go build ./...                                                              # exit 0
+go vet ./...                                                                # exit 0
+go test -p 1 -count=1 -timeout 15m ./cmd/eligibility-shadow/... ./internal/postgresstore/...
+```
+
+Both packages `ok` (`cmd/eligibility-shadow` includes the two new
+`TestToReportFailedAccounts*` regression tests; `internal/postgresstore` ~113s, unaffected -- no
+regression). `gofmt -l` against the staged blobs: clean.
+
+- `bash -n` on all three shell scripts: clean.
+- Reproduced the fix directly against the real report before touching the test suite: sourced the
+  fixed `shadow-eval-lib.sh` and re-ran `shadow_eval_verdict_exit_code`/`shadow_eval_has_errors`/
+  `shadow_eval_freeze_deltas`/`shadow_eval_human_summary` against the same real
+  `shadow-eval.json` -- now `ready`/exit 0, `has_errors: false`, and the summary renders
+  `SOURCE_GAP 79 -> 85 (+6)`.
+- `bash deploy/rehearsal/test-shadow-eval.sh`: every prior group still `ok`, plus new
+  `RC78 regression: ok` (the real report as a fixture: exit `0`/`"ready"`, no new reasons, `has_errors:
+  false`, the rendered `SOURCE_GAP 79 -> 85 (+6)` and an unchanged-reason `(0)` delta line both present;
+  a derived variant with one genuinely new freeze reason spliced in via `sed`, independently verified
+  to still be valid JSON before use: exit `3`/`"not_ready"`, `new_freeze_reasons` containing exactly
+  that one new reason). `test-shadow-eval.sh: all checks passed` (exit 0).
+- `/c/Users/58439/.local/bin/gitleaks git --no-banner --log-opts="0177e72..HEAD" .`: run after
+  committing this fix; see the commit list at the top of this document for confirmation.
+
 ## Not run
 
 - **A real rehearsal against a real signed backup on the production server, still not completed.**
@@ -393,6 +448,72 @@ and the extended `TestReportJSONShapeMatchesShadowEvalLibAssumptions`; `internal
   covered by new `test-shadow-eval.sh`/Go test cases; the actual `invoice-migrate` invocation against a
   real schema mismatch is still unverified against a real server, so **a third real rehearsal run is
   still needed** before the RC-plan bullet in section 11.2 is treated as load-bearing.
+
+  **Third real run, with `81bcbeb`'s scripts (RC78 tools image, all three fixes so far):** the entire
+  chain worked end to end -- signed backup restore, `invoice-migrate` applied
+  `0020_eligibility_auto_reconcile.sql`, `invoice-eligibility-shadow` drained the queue in 1 round with
+  0 round errors and 0 failed accounts, and its own process verdict was `"ready"` (open freezes before
+  `SOURCE_GAP=79`/`UNKNOWN_NEGATIVE_BALANCE=158`/`USAGE_EXCEEDS_LEDGER=4`, after `SOURCE_GAP=85`, the
+  other two unchanged -- `SOURCE_GAP` growing from ordinary source-stream lag, not a new category).
+  But `shadow-eval.sh` then printed `bash-recomputed verdict (not_ready) disagrees with the tool's own
+  verdict (ready) -- treating this as a rehearsal-tooling failure` and exited 1. The team lead copied
+  the real artifacts (`shadow-eval.json`, `shadow-eval-summary.txt`, `eligibility-shadow.log`,
+  `invoice-migrate.log`) locally for reproduction.
+
+  **Root cause, reproduced locally** by sourcing `shadow-eval-lib.sh` and calling
+  `shadow_eval_verdict_exit_code` directly against the real `shadow-eval.json`: the report contained
+  `"failed_accounts": []` -- an empty, but **non-nil**, array -- not the literal `null`.
+  `shadow_eval_has_errors` checked only for the literal `"failed_accounts": null`, so it read this as
+  "there is a failure" and returned `true`, which `shadow_eval_verdict_exit_code` then turned into
+  `not_ready`. Tracing further found the actual bug was on the **Go side**:
+  `toReportFailedAccounts` (`report.go`) unconditionally built its result via
+  `make([]FailedAccount, 0, len(failed))`, which is a non-nil slice even when `failed` has zero
+  elements -- unlike `RoundErrors`, which is only ever `append`ed to and so stays genuinely `nil`
+  until something is added. `json.MarshalIndent` renders a non-nil empty slice as the inline `[]` and
+  a nil slice as `null` -- two different, both individually reasonable-looking, JSON shapes for "no
+  failures", and the bash side only recognized one of them.
+
+  **Fixed**, on both sides, so the two independent implementations agree on the one documented
+  definition ("a candidate is `ready` iff there are no new freeze-reason categories versus the
+  post-restore baseline and no projection errors; per-reason count deltas are informational and do
+  not change the verdict"), not just patched around each other's symptom:
+  - **Go (the actual root cause):** `toReportFailedAccounts` now returns `nil`, not
+    `make([]FailedAccount, 0, 0)`, when its input is empty -- bringing it in line with the
+    nil-means-none contract every other optional `[]T` report field (`RoundErrors`,
+    `MigrationsApplied`) already follows. New regression tests:
+    `TestToReportFailedAccountsEmptyInputIsNil` (both a nil and an empty-non-nil input must produce
+    nil output) and `TestToReportFailedAccountsPopulatedInput` (a real entry still round-trips
+    correctly).
+  - **Bash (defense in depth, so a future regression in either implementation alone cannot repeat
+    this):** `shadow_eval_has_errors` now recognizes either the literal `null` or the inlined `[]` for
+    both `round_errors` and `failed_accounts`. Two further latent bugs of the identical shape, caught
+    while auditing every other place this file parses a `[`-prefixed key, were fixed alongside it even
+    though neither had actually misfired yet: `shadow_eval_human_summary`'s `round_error_count`/
+    `failed_account_count` awk extraction and `_shadow_eval_migrations_applied` all matched their
+    opening-bracket marker as a bare substring (`/"key": \[/`) rather than anchored to end-of-line
+    (`/"key": \[$/`) -- meaning an empty inlined `"key": [],` would have been misread as an *unclosed*
+    array, silently consuming lines until the next unrelated closing-bracket-shaped line was found
+    (exactly the mechanism `_shadow_eval_freeze_block` was already hardened against, from the start,
+    for `open_freezes_by_reason` -- this pass brings the other three array-parsing sites to the same
+    standard).
+  - **New: per-reason delta rendering**, per the task brief's explicit ask that a per-reason count
+    change stay informational, visible, and clearly not a verdict factor.
+    `shadow_eval_freeze_deltas` prints one line per freeze reason appearing in either snapshot
+    ("`REASON before -> after (+delta)`", e.g. `SOURCE_GAP 79 -> 85 (+6)`), rendered into
+    `shadow_eval_human_summary` as a new "freeze reason deltas (informational, does not affect the
+    verdict)" line and into `docs/PRODUCTION-RUNBOOK.md` section 11.2's field description.
+  - **Regression coverage using the real report:** the real `shadow-eval.json` from this run (only
+    UUIDs and counts, nothing sensitive) is copied verbatim into `test-shadow-eval.sh` as fixture
+    `rc78-real-shadow-eval.json` -- exercising the actual JSON layout the Go program produces, not an
+    idealized hand-written one -- asserting exit `0`/`"ready"` and the rendered `SOURCE_GAP 79 -> 85
+    (+6)` delta text. A second fixture, `rc78-real-plus-new-reason-not-ready.json`, is the same real
+    report with one genuinely new freeze-reason category spliced in (`sed`, verified to produce valid
+    JSON), asserting exit `3`/`"not_ready"` -- so a real "everything is fine" report and a real report
+    with one real regression both take the exact path they should.
+
+  This closes every fix this rehearsal's development runs have surfaced so far; a fourth real run is
+  still recommended (see Follow-ups) before treating it as fully load-bearing, but there is no
+  currently-known unverified fix outstanding.
 - **`scripts/verify.ps1` in full.** The task asked to check its Dockerfile-literal substring
   assertions specifically (confirmed via direct inspection: both required substrings are present and
   unbroken), not to run the whole script, which renders the full production Compose stack against a
@@ -414,17 +535,18 @@ and the extended `TestReportJSONShapeMatchesShadowEvalLibAssumptions`; `internal
    `queue_drained` could silently stop meaning what this handoff says it means. Flagged prominently in
    both functions' doc comments.
 2. Design decision 6 above (partial evaluation-status test coverage).
-3. **Updated by the second real run's fix.** This tool was designed and tested entirely against the
-   AUTOLOGIN-line schema at `0177e72` (migrations through `0019_balance_blip_repair.sql`). Originally
-   this risk noted that `backend/cmd/eligibility-shadow`'s own `migrate.Verify` precondition would fail
-   closed on a schema mismatch rather than produce a wrong report -- and a real production run
-   confirmed exactly that failure mode (`required migration 0020_eligibility_auto_reconcile.sql is not
-   applied`), except it turned out to be the *expected*, not exceptional, case: the restored backup is
-   normally behind the candidate's migration set, since the candidate has not shipped yet.
-   `shadow-eval.sh` now runs the candidate's own `invoice-migrate` first (see Summary), so
-   `migrate.Verify` should pass in the normal case going forward -- but the combination "a
-   schema-changing RC's projection logic, rehearsed via this tool, with the new migrate step actually
-   bringing the schema forward" has still not been exercised against a real server.
+3. **Resolved and confirmed by the second and third real runs.** This tool was designed and tested
+   entirely against the AUTOLOGIN-line schema at `0177e72` (migrations through
+   `0019_balance_blip_repair.sql`). Originally this risk noted that `backend/cmd/eligibility-shadow`'s
+   own `migrate.Verify` precondition would fail closed on a schema mismatch rather than produce a wrong
+   report -- a real production run (the second) confirmed exactly that failure mode (`required
+   migration 0020_eligibility_auto_reconcile.sql is not applied`), which turned out to be the
+   *expected*, not exceptional, case: the restored backup is normally behind the candidate's migration
+   set, since the candidate has not shipped yet. `shadow-eval.sh` was then fixed to run the candidate's
+   own `invoice-migrate` first (see Summary), and the third real run confirmed the fix directly:
+   `invoice-migrate` applied `0020_eligibility_auto_reconcile.sql` and `migrate.Verify` passed, so
+   `invoice-eligibility-shadow` proceeded normally. No longer an open risk for this specific migration;
+   a future RC bringing its own new migration exercises the same already-proven path.
 4. No new float amounts, no logged/persisted secrets beyond the throwaway restore-only container
    password already discussed, no `contracts/` changes, no schema/migration changes, no admin-OIDC
    changes, no touch to any file outside this slice's stated scope -- checked.
@@ -454,17 +576,30 @@ and the extended `TestReportJSONShapeMatchesShadowEvalLibAssumptions`; `internal
    line-per-element parsing. Not enforced by any check in this rehearsal itself; relies on the existing
    migration-file-naming convention holding. `shadow_eval_migrate_docker_args`'s `chown`/non-root
    requirements are the same as `resolve_tools_container_ids`' (risk 5) since it reuses the identical
-   secret file. The `invoice-migrate` invocation itself (as opposed to its argument construction) is
-   unverified against a real schema mismatch -- see "Not run".
+   secret file. The `invoice-migrate` invocation itself (as opposed to its argument construction) has
+   now been confirmed against a real schema mismatch by the third real run.
+8. **New, from the third real run's fix.** The nil-vs-empty-array disagreement was fixed at its actual
+   root (Go) plus, as defense in depth, in bash -- but this pattern (a `[]T` field that is documented to
+   be "nil means none" yet gets built via an unconditional `make([]T, 0, n)`) is a class of bug, not a
+   one-off: any *future* field added to `Report` with the same intended contract needs the same
+   nil-when-empty care in its own conversion function, and `TestReportJSONShapeMatchesShadowEvalLibAssumptions`
+   only pins the marshaling shape of fields it already knows about -- it cannot catch a same-shaped bug
+   in a field added later unless that field's own test is added too (as
+   `TestToReportFailedAccountsEmptyInputIsNil` now does for this one). No automated check enforces this
+   convention across all current and future fields at once.
 
 ## Follow-ups (recommended, not blocking)
 
-1. Run a third real rehearsal on the server (after all three fixes above -- the permission fix, the
-   tooling-failure-marker/verdict-guard fix, and the invoice-migrate step) against the current
-   production backup, with a currently-loaded RC's own image tag, before treating the section 11.2
-   RC-plan bullet as load-bearing.
+1. Run a fourth real rehearsal on the server (after all four fixes so far -- the permission fix, the
+   tooling-failure-marker/verdict-guard fix, the invoice-migrate step, and the
+   nil-vs-empty-array/delta-rendering fix) before treating the section 11.2 RC-plan bullet as fully
+   load-bearing. Three consecutive real runs have each found and had fixed a distinct real bug; a clean
+   fourth run would be the first evidence the chain is actually stable end to end.
 2. If a future slice wants full coverage of the carry-forward-proof evaluation branch, factor out (or
    reuse, if one already exists elsewhere by then) a full `source_economic_scan_cycles`/
    `source_ingest_batches`/`balance_carry_forward_proofs` fixture helper.
 3. If `ProcessEligibilityProjectionJobs`' claim-query condition ever changes, update
    `EligibilityProjectionClaimableCount` in the same change (see risk 1).
+4. If a future field is added to `Report` with a "nil means none" contract (matching `RoundErrors`/
+   `FailedAccounts`/`MigrationsApplied`), add its own empty-input regression test at the same time (see
+   risk 8) -- do not rely solely on the shape-pinning test noticing after the fact.

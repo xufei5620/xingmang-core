@@ -112,13 +112,20 @@ shadow_eval_new_freeze_reasons() {
 # Prints "true" or "false": whether the report recorded any round error
 # (ProcessEligibilityProjectionJobs' own first-error-per-round contract) or
 # any account left behind in eligibility_projection_jobs status='failed'
-# (the durable per-account trace). Report.go leaves both fields as their nil
-# ([]T) zero value, which MarshalIndent renders as the literal `null`, until
-# something is appended -- so "both still null" is the precise, unambiguous
-# "no errors" case.
+# (the durable per-account trace). Report.go's documented contract is that
+# both fields are nil-until-appended, which MarshalIndent renders as the
+# literal `null` -- but a real production run (RC78) hit a genuinely clean
+# rehearsal (Go's own ExitCode said "ready") independently recomputed here
+# as "not_ready", because toReportFailedAccounts (before its own fix) broke
+# that contract and returned a non-nil empty slice, which marshals as the
+# inline "[]" instead of `null`. Both are now fixed -- the Go side to
+# actually honor its own nil-means-none contract (see report.go's comment on
+# toReportFailedAccounts), and this check, as defense in depth, to recognize
+# EITHER `null` or an empty "[]" as "nothing here", so a future regression
+# in either implementation alone cannot silently mis-verdict a rehearsal.
 shadow_eval_has_errors() {
   local report=$1
-  if grep -qE '^  "round_errors": null,?$' "$report" && grep -qE '^  "failed_accounts": null,?$' "$report"; then
+  if grep -qE '^  "round_errors": (null|\[\]),?$' "$report" && grep -qE '^  "failed_accounts": (null|\[\]),?$' "$report"; then
     printf 'false\n'
   else
     printf 'true\n'
@@ -189,10 +196,16 @@ _shadow_eval_scalar() {
 # candidate's migration set). Same shape convention as round_errors/
 # failed_accounts; see report_test.go's
 # TestReportJSONShapeMatchesShadowEvalLibAssumptions for the pinned
-# null-vs-populated marshaling this depends on.
+# null-vs-populated marshaling this depends on. The opening-bracket marker
+# is anchored to end-of-line ("\[$") specifically so an empty-but-non-nil
+# "[]" (which this field never actually produces today, since
+# parseMigrationsApplied returns nil for an empty flag -- but round_errors/
+# failed_accounts' own history is exactly why this is not assumed) is never
+# misread as an unclosed array, silently swallowing everything up to the
+# next line that happens to match the closing-bracket pattern.
 _shadow_eval_migrations_applied() {
   local report=$1
-  awk '/"migrations_applied": \[/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}"/{v=$0; sub(/^ {4}"/,"",v); sub(/",?$/,"",v); print v}' "$report"
+  awk '/"migrations_applied": \[$/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}"/{v=$0; sub(/^ {4}"/,"",v); sub(/",?$/,"",v); print v}' "$report"
 }
 
 # shadow_eval_migrate_docker_args <network> <tools_image> <secret_bind_source>
@@ -228,6 +241,39 @@ shadow_eval_migrate_docker_args() {
     "$tools_image"
 }
 
+# shadow_eval_freeze_deltas <report.json>
+# Prints one line per freeze reason that appears in either snapshot, sorted:
+# "REASON before -> after (+delta)" (or a "-" sign for a decrease, or no
+# sign for zero). Purely informational -- never affects the verdict. Only
+# whether a reason is genuinely NEW does that (shadow_eval_new_freeze_reasons);
+# a pre-existing reason's count growing or shrinking is expected, ordinary
+# operation (e.g. a batch of new SOURCE_GAP freezes opening from ordinary
+# source-stream lag) and must never be mistaken for a regression -- this is
+# what lets an operator see "SOURCE_GAP 79 -> 85 (+6)" in the summary without
+# drawing that wrong conclusion themselves either.
+shadow_eval_freeze_deltas() {
+  local report=$1
+  local before_file after_file reasons_file reason before_count after_count delta sign
+  before_file=$(mktemp)
+  after_file=$(mktemp)
+  reasons_file=$(mktemp)
+  _shadow_eval_freeze_block "$report" 1 >"$before_file"
+  _shadow_eval_freeze_block "$report" 2 >"$after_file"
+  { cut -f1 "$before_file"; cut -f1 "$after_file"; } | sort -u >"$reasons_file"
+  while IFS= read -r reason; do
+    [[ -n "$reason" ]] || continue
+    before_count=$(awk -F'\t' -v r="$reason" '$1==r{print $2}' "$before_file")
+    after_count=$(awk -F'\t' -v r="$reason" '$1==r{print $2}' "$after_file")
+    before_count=${before_count:-0}
+    after_count=${after_count:-0}
+    delta=$((after_count - before_count))
+    sign=""
+    (( delta > 0 )) && sign="+"
+    printf '%s %s -> %s (%s%s)\n' "$reason" "$before_count" "$after_count" "$sign" "$delta"
+  done <"$reasons_file"
+  rm -f "$before_file" "$after_file" "$reasons_file"
+}
+
 # shadow_eval_human_summary <report.json>
 # Prints a short human-readable rendering of the report to stdout -- or, for
 # anything shadow_eval_report_is_valid rejects (see its own doc comment), a
@@ -244,12 +290,18 @@ shadow_eval_human_summary() {
     printf '  log file:      %s\n' "$(_shadow_eval_scalar "$report" log_file)"
     return 0
   fi
-  local before_freezes after_freezes new_reasons round_error_count failed_account_count migrations_applied
+  local before_freezes after_freezes new_reasons freeze_deltas round_error_count failed_account_count migrations_applied
   before_freezes=$(_shadow_eval_freeze_block "$report" 1 | awk -F'\t' '{printf "%s%s=%s", (NR>1?", ":""), $1, $2}')
   after_freezes=$(_shadow_eval_freeze_block "$report" 2 | awk -F'\t' '{printf "%s%s=%s", (NR>1?", ":""), $1, $2}')
   new_reasons=$(shadow_eval_new_freeze_reasons "$report" | paste -sd ',' - | sed 's/,/, /g')
-  round_error_count=$(awk '/"round_errors": \[/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}"/{n++} END{print n+0}' "$report")
-  failed_account_count=$(awk '/"failed_accounts": \[/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}\{/{n++} END{print n+0}' "$report")
+  freeze_deltas=$(shadow_eval_freeze_deltas "$report" | paste -sd ';' - | sed 's/;/; /g')
+  # The opening-bracket markers below are anchored to end-of-line ("\[$")
+  # for the identical reason _shadow_eval_migrations_applied's is: an
+  # empty-but-non-nil "[]" (exactly what a real production run, RC78, hit
+  # for failed_accounts before toReportFailedAccounts' own fix) must never
+  # be misread as an unclosed array.
+  round_error_count=$(awk '/"round_errors": \[$/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}"/{n++} END{print n+0}' "$report")
+  failed_account_count=$(awk '/"failed_accounts": \[$/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}\{/{n++} END{print n+0}' "$report")
   migrations_applied=$(_shadow_eval_migrations_applied "$report" | paste -sd ',' - | sed 's/,/, /g')
 
   printf 'XM-INV-SHADOW-EVAL rehearsal report\n'
@@ -263,6 +315,7 @@ shadow_eval_human_summary() {
   printf '\n'
   printf '  open freezes before: %s\n' "$before_freezes"
   printf '  open freezes after:  %s\n' "$after_freezes"
+  printf '  freeze reason deltas (informational, does not affect the verdict): %s\n' "$freeze_deltas"
   printf '  new freeze reasons:  %s\n' "$new_reasons"
   printf '  round errors:        %s\n' "$round_error_count"
   printf '  failed accounts:     %s\n' "$failed_account_count"
