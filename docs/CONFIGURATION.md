@@ -593,10 +593,39 @@ Deploy ten independent containers when both sources are enabled: each source
 has `payments`, `identities`, `usage`, `credits`, and `balances` streams. Each
 has a distinct state file, spool file, spool key, mTLS identity
 and signing key; do not share a writable state volume. New API forces a full
-scan after restart and on `NEWAPI_FULL_SCAN_INTERVAL` (which cannot exceed 24
-hours). Sub2API uses incrementals between `SOURCE_RECONCILE_INTERVAL` scans.
-In-memory stores are test-only, and the production launcher never falls back to
-mock data or Admin API mode.
+scan on `NEWAPI_FULL_SCAN_INTERVAL` (which cannot exceed 24 hours). Sub2API
+uses incrementals between `SOURCE_RECONCILE_INTERVAL` scans. In-memory stores
+are test-only, and the production launcher never falls back to mock data or
+Admin API mode.
+
+**Restart does not force an extra cycle (XM-INV-AGENT-RESTART-GRACE, agent
+0.3.1+).** The reconcile/full-scan schedule is persisted in the same state
+file as the cursor, so a container recreation (`deploy/roll-forward.sh`)
+resumes the schedule instead of starting a full ScanReconcile/ScanFull the
+moment the process comes back up. A state file written by an older agent
+binary has no schedule recorded and forces one cycle on the first restart
+after upgrade -- expected and one-time, not a bug. Independently, a periodic
+Sub2API usage `ScanReconcile` cycle itself no longer rewinds all the way back
+to the cutover manifest: it resumes from where the previous completed
+reconcile left off, so `SOURCE_RECONCILE_INTERVAL` reconciles verify only the
+data ingested since the last reconcile, not the entire history since cutover.
+The very first reconcile ever (or a legacy in-flight cycle abandoned on
+upgrade, logged as `legacy_reconcile_cycle_abandoned` in the OnCycle warnings)
+still starts from the live watermark, which for a fresh cutover is the
+cutover manifest itself. The credits stream and New API's mandatory full scans
+are unaffected -- see agents/sourceagent/economics_db.go's `prepareCursor` doc
+comments for exactly which branch each stream/mode takes.
+
+During a long Sub2API reconcile (restart-forced on first upgrade, or simply a
+large backlog), the economic watermark for that stream stays where it was
+until the cycle completes, which would otherwise report `ECONOMIC_WATERMARK_STALE`
+and fail `/readyz` and the funding-lot freshness gate for the whole duration.
+As long as the agent's `source_economic_scan_cycles` row for that stream keeps
+its `updated_at` moving -- proving the rescan is still making progress, not
+stalled -- the API downgrades that finding to the non-fatal
+`ECONOMIC_RESCAN_ACTIVE` reason instead (visible in the admin source-health
+report) and keeps the stream ready. See docs/PRODUCTION-RUNBOOK.md section 9's
+readiness note for the exact activity-window budget.
 
 `SOURCE_SCAN_LIMIT` may be at most 166 for the Sub2API payments stream because
 one source order can emit the base order plus one cumulative gateway-refund
