@@ -1781,6 +1781,40 @@ predates XM-INV-CYCLE-BACKOFF (busy was still mapped to 409 and treated as
 permanent) -- redeploy the fixed build rather than investigating it as a
 commit conflict.
 
+**Self-healing a stale cycle left by an agent restart (XM-INV-SCAN-CYCLE-SUPERSEDE).**
+Production incident 2026-09-03: a pre-deploy backup quiesce restarted the
+0.3.0 Sub2API usage agent, opening scan cycle `c272b5a4` (`receiving`,
+sequences 106054-106231, last update 08:58:21Z); the roll-forward then
+started the 0.3.1 agent, whose rolling-window logic abandoned that legacy
+in-flight cycle client-side (see `legacy_reconcile_cycle_abandoned` above)
+and opened a fresh cycle id. Every batch of the new cycle was rejected as
+`SOURCE_SCAN_CYCLE_BUSY` -- correctly, per the one-active-cycle constraint --
+but nothing server-side ever closed the orphaned `c272b5a4` row, so the
+stream stayed wedged behind it indefinitely; before this fix, the only way
+out was an operator manually marking that row `blocked`.
+`CommitSourceBatch` now does this itself: when a v3 batch arrives for a
+stream whose one active cycle has a *different* `scan_cycle_id` and that
+cycle's `updated_at` has stopped advancing for longer than the same activity
+window the readiness grace above already tolerates (`economicRescanActivityPollWindows *
+SOURCE_POLL_INTERVAL + SOURCE_ECONOMIC_SAFETY_DELAY +
+economicRescanProcessingTailAllowance`, so no separate configuration), it
+marks the stale row `cycle_status='blocked'` with
+`superseded_by_scan_cycle_id`/`supersede_reason` set (migration 0022) and
+records a `source.scan_cycle.superseded` audit event (old/new cycle ids and
+sequences), then accepts the new cycle in the same transaction. A still-fresh
+active cycle with a different id is unaffected and keeps returning
+`SOURCE_SCAN_CYCLE_BUSY` exactly as before -- this only ever fires once the
+old cycle has genuinely gone stale, never as a race against a cycle that is
+still legitimately running. What an operator sees now: the same transient
+`SOURCE_SCAN_CYCLE_BUSY` retries during the grace window, then the stream
+recovers on its own once that window elapses -- no manual `UPDATE
+source_economic_scan_cycles SET cycle_status='blocked'` required. A stream
+still wedged on `SOURCE_SCAN_CYCLE_BUSY` well past that window (or a deployed
+image predating this fix) is a real incident: check
+`source_economic_scan_cycles.updated_at`/`superseded_by_scan_cycle_id` for
+the stream's active row and the `audit_events` table for
+`source.scan_cycle.superseded` before assuming a manual fix is needed.
+
 ## 8. Configure upstream OIDC without source changes
 
 **Production change approval.** Take an upstream database/config backup first.
