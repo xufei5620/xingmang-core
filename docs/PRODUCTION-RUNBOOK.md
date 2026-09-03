@@ -2201,6 +2201,101 @@ files `0600`); run the drill and migration verify; only then start the API and
 receiver, followed by the ten agents. Never start an agent against restored DB
 state while its cursor/pending spool is from a different snapshot.
 
+### 11.2 影子评估 / shadow evaluation (release rehearsal, XM-INV-SHADOW-EVAL)
+
+`deploy/rehearsal/shadow-eval.sh` restores the database component of a signed
+production backup into a throwaway, isolated PostgreSQL container and runs a
+**candidate** release's eligibility-projection worker
+(`ProcessEligibilityProjectionJobs`/`EligibilityProjectionHealth`, via the
+tools image's `invoice-eligibility-shadow` entrypoint) against that restored
+copy, reporting the delta in open freezes and projection errors versus the
+state immediately after restore. It never starts, stops, restarts or connects
+to any container of the running `invoice-system-prod`, `invoice-system-prod`
+source-agent, or `invoice-system-idp` Compose projects; every container and
+network it creates is unnamed-project, freshly created, and torn down (with
+its cleanup trap, mirroring `deploy/backup/restore-drill.sh`) before the
+script exits, success or failure.
+
+**When:** run this once per release candidate whose diff touches the
+eligibility evaluator or projection worker --
+`backend/internal/postgresstore/consumption.go`'s
+`ProcessEligibilityProjectionJobs`/`processEligibilityProjectionJob`/
+`buildEligibilityProjectionTx`/`ensureBalanceCarryForwardProofTx` family, any
+of the `balance_anchor_repair.go`/`balance_blip_repair.go`/
+`eligibility_repair.go` repair logic, or a migration that changes
+`eligibility_freezes`, `balance_checkpoint_evaluations`,
+`balance_carry_forward_evaluations` or `eligibility_projection_jobs`. This
+incident class (XM-INV-BLIP-SOFTFAIL: a projection batch's evaluator error
+looping a whole account's retries instead of failing that account alone) is
+exactly what this rehearsal exists to catch before it reaches production,
+against real production data instead of a synthetic fixture.
+
+**How:** run it on the server, after the candidate's nine images are loaded
+(the tag must already be `docker image inspect`-able) and before
+`deploy/roll-forward.sh` rolls that candidate forward. It needs the same
+signed-backup authenticity inputs as the restore drill above
+(`BACKUP_ALLOWED_SIGNERS_FILE`, `AGE_IDENTITY_FILE`) but, unlike the restore
+drill, not the field keyring or the ten source spool/cutover keys --
+eligibility projection never touches documents or source-state archives, so
+this rehearsal checks only the database backup component's line in the
+signed manifest, not the full backup-integrity set:
+
+```bash
+BACKUP_DIR=/root/invoice-system/backups \
+BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
+AGE_IDENTITY_FILE=/offline/backup-age-identity.txt \
+  bash deploy/rehearsal/shadow-eval.sh --image-tag 0.1.0-rcNN
+```
+
+Add `--backup invoice-TIMESTAMP` to pin a specific backup instead of the
+newest signed one under `BACKUP_DIR`, `--max-rounds N` (default 200) to bound
+how many `ProcessEligibilityProjectionJobs` rounds it will run before giving
+up on draining the queue, and `--batch-limit N` (default 25, same cap the
+worker itself enforces) to change accounts claimed per round.
+
+**How to read the report:** it writes
+`/root/invoice-system/rehearsals/<stamp>/shadow-eval.json` (the full
+machine-readable report: per-account eligibility status and open freezes
+before/after, open freezes by reason before/after, balance-evidence
+evaluations by status before/after, every account left `failed` and every
+round's captured error) and `shadow-eval-summary.txt` (the same script's
+human-readable rendering, also printed to stdout). The important fields:
+
+- `verdict` / `verdict_reason`: `"ready"` or `"not_ready"`, computed by
+  comparing the `after` snapshot's open freeze-reason categories against the
+  `before` snapshot taken immediately after restore -- a **new** category, or
+  any `round_errors`/`failed_accounts` entry, means `not_ready`. A
+  pre-existing reason's open count merely growing does not.
+- `queue_drained`: `true` when nothing was left immediately claimable at the
+  end (whether because the queue emptied or every remaining row is on a
+  future backoff), `false` when it hit `--max-rounds` still finding claimable
+  work -- treat `false` as inconclusive and re-run with a higher
+  `--max-rounds`, not as a pass.
+- `new_freeze_reasons`: the exact set of newly appearing categories, if any.
+
+The script's own exit code is release-blocking and is **independently
+recomputed from the published JSON** in bash
+(`deploy/rehearsal/shadow-eval-lib.sh`), not merely propagated from the
+`invoice-eligibility-shadow` process -- the two are compared and a
+disagreement is itself treated as a rehearsal-tooling failure (exit `1`),
+matching this runbook's usual double-checked gates. Exit `0` means ready to
+proceed; exit `3` means the candidate regressed and must not be rolled
+forward as-is; exit `2` is a usage error (bad flag, image not loaded); any
+other non-zero exit is an execution failure (decrypt/restore/signature/Docker
+problem) with no verdict at all.
+
+**RC plan template step:** for any RC plan whose Task 1 scope matches the
+"when" list above, add this bullet to Task 1, after the full test suite and
+before the tag is created:
+
+```
+- [ ] Run deploy/rehearsal/shadow-eval.sh against the newest signed backup with
+      this RC's candidate image tag; require verdict "ready" (exit 0). A
+      "not_ready" verdict (exit 3) blocks the tag until the report's
+      new_freeze_reasons/round_errors/failed_accounts are root-caused and
+      fixed, not silently re-run past.
+```
+
 ## 12. Rollback
 
 Before first public traffic, an image-only rollback is allowed only when the
