@@ -224,6 +224,9 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	// 0022 (XM-INV-SCAN-CYCLE-SUPERSEDE) alters source_economic_scan_cycles,
 	// also created by the excluded 0009 -- same reason as 0016/0020 above.
 	delete(all, "0022_scan_cycle_supersede.sql")
+	// 0023 (XM-INV-PROJECTION-FAILURE-GRADING) alters eligibility_projection_jobs,
+	// also created by the excluded 0009 -- same reason as 0016/0020/0022 above.
+	delete(all, "0023_projection_failure_grading.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
