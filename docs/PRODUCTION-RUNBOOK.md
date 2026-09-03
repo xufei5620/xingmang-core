@@ -1728,10 +1728,20 @@ docker inspect -f '{{.Name}}: {{.RestartCount}}' \
 
 A restart count that keeps climbing on one agent, together with
 `source stream stopped fail-closed` in `docker compose logs <service>`, is
-real: the runner hit something it treats as permanent, the process exited,
-and the fresh process re-runs a full reconcile sweep (hundreds of thousands
-of rows re-ingested for `sub2api-usage`/`newapi-usage`) before resuming. The
-receiver (`backend/internal/sourceingest/receiver.go`) returns two rejections
+real: the runner hit something it treats as permanent and the process exited.
+Since XM-INV-AGENT-RESTART-GRACE (agent 0.3.1+) the fresh process resumes the
+persisted reconcile/full-scan schedule from the same state file instead of
+unconditionally forcing a new cycle, and `sub2api-usage`'s periodic
+`ScanReconcile` itself only re-verifies the window since the previous
+completed reconcile, not the full history since cutover -- so a climbing
+restart count no longer implies a multi-hour full rescan every time. It still
+does on the very first restart after upgrading to 0.3.1 (no schedule/baseline
+recorded yet under the old binary) and, if the state volume itself was lost
+or replaced, from a genuinely fresh state file; watch `OnCycle`'s log line for
+`mode="reconcile"` cycles taking hundreds of thousands of rows, and for
+`legacy_reconcile_cycle_abandoned` in its `warnings` field, which marks that
+one-time abandonment of a pre-upgrade in-flight cycle explicitly. The receiver
+(`backend/internal/sourceingest/receiver.go`) returns two rejections
 for a failed commit that look similar from the outside but are not the same
 problem:
 
@@ -1833,6 +1843,22 @@ non-identity heartbeat still fails after five minutes independently of the
 watermark budget. After startup, an idle Sub2API payment stream must continue
 publishing a watermark near source time minus five minutes; a watermark pinned
 to the timestamp of the last payment is an RC77 rollback condition.
+
+**Active-rescan readiness grace (XM-INV-AGENT-RESTART-GRACE, agent 0.3.1+).**
+`SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS` alone would keep `/readyz` (and the
+funding-lot five-stream freshness gate) failed for the full duration of any
+Sub2API usage reconcile, including the one-time forced cycle on the first
+restart after an agent upgrade. The API derives an activity window --
+`economicRescanActivityPollWindows` (2) `* SOURCE_POLL_INTERVAL` +
+`SOURCE_ECONOMIC_SAFETY_DELAY`, backend/cmd/api/runtime.go -- and, while a
+stream's `source_economic_scan_cycles` row proves the rescan's `updated_at`
+is still advancing within that window, downgrades `ECONOMIC_WATERMARK_STALE`
+to the non-fatal `ECONOMIC_RESCAN_ACTIVE` reason (see the admin source-health
+report) instead of failing readiness. It fails closed the moment that row
+stops updating -- a stalled or crashed rescan gets no grace and the endpoint
+degrades exactly as it did before this change. This grace needs no operator
+action; it is derived from the same timing contract in the paragraph above,
+not independently configured.
 
 ```bash
 docker compose --env-file deploy/.env.production \

@@ -89,6 +89,73 @@ func TestFileStateStoreDurableCAS(t *testing.T) {
 	}
 }
 
+// TestFileScheduleStoreLegacyFileLoadsUnchanged proves that a state.json
+// written before the reconcile/full schedule fields existed decodes them as
+// empty (XM-INV-AGENT-RESTART-GRACE part C: "load unchanged"), and that
+// reading it does not disturb the cursor already on disk.
+func TestFileScheduleStoreLegacyFileLoadsUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sender-state.json")
+	state := &FileStateStore{Path: path, SourceID: "10000000-0000-4000-8000-000000000001", StreamID: "usage"}
+	ctx := context.Background()
+	legacyCursor := ScanCursor{Version: 1, UpdatedAt: "2026-08-20T12:00:00Z", ID: 9}
+	writeTestStateEnvelope(t, state, legacyCursor)
+
+	schedule := FileScheduleStore{State: state}
+	loaded, err := schedule.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded != (ScheduleState{}) {
+		t.Fatalf("legacy state file must decode an empty schedule, got %#v", loaded)
+	}
+	cursor, err := (FileCursorStore{State: state}).Load(ctx, state.SourceID)
+	if err != nil || cursor.ID != 9 {
+		t.Fatalf("reading the schedule must not disturb the existing cursor: cursor=%#v err=%v", cursor, err)
+	}
+}
+
+// TestFileScheduleStoreDurableAndSharesEnvelopeWithCursor proves the schedule
+// persists across a reopen (a fresh *FileStateStore, proving it came from
+// disk) and that saving it never clobbers the cursor/sequence fields sharing
+// the same envelope file.
+func TestFileScheduleStoreDurableAndSharesEnvelopeWithCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sender-state.json")
+	state := &FileStateStore{Path: path, SourceID: "10000000-0000-4000-8000-000000000001", StreamID: "usage"}
+	ctx := context.Background()
+	if err := InitializeFileState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	cursors := FileCursorStore{State: state}
+	loadedCursor, err := cursors.Load(ctx, state.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextCursor := ScanCursor{Revision: loadedCursor.Revision, Version: 1, UpdatedAt: "2026-08-20T12:00:00Z", ID: 3}
+	if matched, err := cursors.CompareAndSwap(ctx, state.SourceID, loadedCursor, nextCursor); err != nil || !matched {
+		t.Fatalf("seed cursor CAS failed: matched=%t err=%v", matched, err)
+	}
+
+	schedule := FileScheduleStore{State: state}
+	saved := ScheduleState{LastReconcileAt: "2026-08-21T00:00:00Z", LastFullAt: "2026-08-21T01:00:00Z"}
+	if err := schedule.Save(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := &FileStateStore{Path: path, SourceID: state.SourceID, StreamID: state.StreamID}
+	reloadedSchedule, err := (FileScheduleStore{State: reopened}).Load(ctx)
+	if err != nil || reloadedSchedule != saved {
+		t.Fatalf("schedule was not durable: got=%#v err=%v", reloadedSchedule, err)
+	}
+	reloadedCursor, err := (FileCursorStore{State: reopened}).Load(ctx, state.SourceID)
+	if err != nil || reloadedCursor.ID != 3 {
+		t.Fatalf("saving the schedule must not disturb the cursor: cursor=%#v err=%v", reloadedCursor, err)
+	}
+
+	if err := schedule.Save(ctx, ScheduleState{LastReconcileAt: "not-a-time"}); err == nil {
+		t.Fatal("an unparseable schedule timestamp was accepted")
+	}
+}
+
 func TestFileStateStoreFailsClosedWithoutInitializedVolumeState(t *testing.T) {
 	state := &FileStateStore{Path: filepath.Join(t.TempDir(), "missing.json"), SourceID: "10000000-0000-4000-8000-000000000002", StreamID: "payments"}
 	if _, err := (FileCursorStore{State: state}).Load(context.Background(), "10000000-0000-4000-8000-000000000002"); err == nil {

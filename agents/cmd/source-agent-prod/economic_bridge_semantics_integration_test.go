@@ -449,6 +449,118 @@ func TestNewAPIBridgePreservesTransitionSafetyAndConfigurationDrift(t *testing.T
 	}
 }
 
+// TestSub2APIUsageReconcileRollingWindowAndCreditsSemanticsPreserved is the
+// end-to-end (real bridge SQL) proof for XM-INV-AGENT-RESTART-GRACE part B:
+// a completed ScanReconcile cycle's baseline, not the cutover manifest, is
+// where the next reconcile starts; a legacy in-flight cycle left by a
+// pre-upgrade binary is abandoned and restarted from that same baseline
+// instead of resumed; and the credits stream's pre-existing "restart at zero
+// every cycle" behavior is completely unaffected.
+func TestSub2APIUsageReconcileRollingWindowAndCreditsSemanticsPreserved(t *testing.T) {
+	adminURL := os.Getenv("SOURCE_AGENT_TEST_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("SOURCE_AGENT_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	configuration, err := pgx.ParseConfig(adminURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := stdlib.OpenDB(*configuration)
+	defer admin.Close()
+	cleanupBridgeFixture(t, ctx, admin)
+	defer cleanupBridgeFixture(t, ctx, admin)
+	setupBridgeFixture(t, ctx, admin, sourceagent.SourceSub2API)
+	applyBridgeContracts(t, ctx, admin, sourceagent.SourceSub2API)
+
+	var hash string
+	if err = readSub2HealthHash(ctx, admin).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	cutover := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
+	manifest := sourceagent.CutoverManifest{SchemaVersion: 1,
+		SourceID: "10000000-0000-4000-8000-000000000009", SourceType: sourceagent.SourceSub2API,
+		SourceRuntime: "0.1.179", CutoverAt: cutover.Format(time.RFC3339Nano), DatabaseClock: cutover.Format(time.RFC3339Nano),
+		ProjectionContract: sourceagent.ProjectionContractSub2APIV4, ConfigurationHash: hash, UnitCode: "SUB2_BALANCE_1E8",
+		SigningKeyID: "key-1", BaselineSnapshotID: strings.Repeat("b", 64), BaselineRowCount: "2",
+		HighWaters: map[string]sourceagent.SourceHighWater{
+			sourceagent.StreamPayments: {EventTime: cutover.Format(time.RFC3339Nano), Cursor: "payment_orders:0"},
+			sourceagent.StreamUsage:    {EventTime: cutover.Format(time.RFC3339Nano), Cursor: "usage_logs:0"},
+			sourceagent.StreamCredits:  {EventTime: cutover.Format(time.RFC3339Nano), Cursor: "promo_code_usages:0;user_affiliate_ledger:0;redeem_codes:0"},
+			sourceagent.StreamBalances: {EventTime: cutover.Format(time.RFC3339Nano), Cursor: "balance_snapshot:0"},
+		}}
+	manifest.ManifestHash = bridgeManifestHash(t, manifest)
+
+	usage := &sourceagent.EconomicDBConnector{DB: admin, Source: sourceagent.SourceSub2API, Stream: sourceagent.StreamUsage, Manifest: manifest, SafetyDelay: time.Minute}
+
+	// Cycle 1: the very first ScanReconcile ever still rewinds to the cutover
+	// manifest and picks up the pre-existing fixture row (usage_logs id=1).
+	first, err := usage.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanReconcile, Limit: 10})
+	if err != nil || first.HasMore || !first.ScanComplete || len(first.Projections) != 1 ||
+		first.NextCursor.PositionCursor != "usage_logs:1" {
+		t.Fatalf("first reconcile cycle page=%#v cursor=%#v err=%v", first, first.NextCursor, err)
+	}
+	if !first.NextCursor.ReconcileWindowBounded || first.NextCursor.ReconcileBaselineCursor != first.NextCursor.WatermarkCursor {
+		t.Fatalf("completed reconcile did not record a rolling-window baseline: %#v", first.NextCursor)
+	}
+	committed := first.NextCursor
+	committed.Revision++
+
+	// A second row appears after cycle 1 committed. The bug this fixes would
+	// rewind cycle 2 all the way back to the cutover manifest and re-emit
+	// usage_logs id=1 too; the fix must emit only the new row.
+	if _, err = admin.ExecContext(ctx, `INSERT INTO public.usage_logs VALUES(2,1,0,0.00000001,now()-interval '9 minutes','secret','192.0.2.2')`); err != nil {
+		t.Fatal(err)
+	}
+	second, err := usage.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanReconcile, Cursor: committed, Limit: 10})
+	if err != nil || !second.ScanComplete || len(second.Projections) != 1 || second.Projections[0].ExternalID != "usage_logs:2" {
+		t.Fatalf("second reconcile did not start from the rolling-window baseline (rewound to cutover instead): page=%#v err=%v", second, err)
+	}
+
+	// Simulate a legacy in-flight cycle left on disk by a pre-upgrade binary:
+	// rewound to the cutover manifest, Completed=false, and -- because it
+	// predates this field -- ReconcileWindowBounded is unset.
+	legacyInFlight := second.NextCursor
+	legacyInFlight.Revision++
+	legacyInFlight.Completed = false
+	legacyInFlight.ReconcileWindowBounded = false
+	legacyInFlight.PositionCursor = "usage_logs:0"
+	abandoned, err := usage.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanReconcile, Cursor: legacyInFlight, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(abandoned.Warnings) != 1 || abandoned.Warnings[0] != "legacy_reconcile_cycle_abandoned" {
+		t.Fatalf("legacy in-flight cycle was not flagged as abandoned: %#v", abandoned)
+	}
+	if !abandoned.ScanComplete || len(abandoned.Projections) != 0 {
+		// Both usage rows (ids 1 and 2) are already at or behind the rolling
+		// window baseline, so restarting from the baseline finds nothing new.
+		// Rewinding to the cutover manifest instead would have re-emitted both.
+		t.Fatalf("abandoned legacy cycle did not restart from the rolling-window baseline: %#v", abandoned)
+	}
+	if !abandoned.NextCursor.ReconcileWindowBounded {
+		t.Fatal("abandoned legacy cycle was not marked bounded for future restarts")
+	}
+
+	// Credits semantics are completely untouched by this change: every new
+	// cycle restarts at position zero regardless of mode, so a second
+	// ScanReconcile still re-scans and re-emits the same pre-existing rows
+	// (the bonus-backed promo/affiliate credits; the cash-backed redeem is
+	// excluded by the bridge's own financial-safety filter).
+	credits := &sourceagent.EconomicDBConnector{DB: admin, Source: sourceagent.SourceSub2API, Stream: sourceagent.StreamCredits, Manifest: manifest, SafetyDelay: time.Minute}
+	firstCredits, err := credits.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanReconcile, Limit: 10})
+	if err != nil || !firstCredits.ScanComplete || len(firstCredits.Projections) != 2 {
+		t.Fatalf("first credits reconcile page=%#v err=%v", firstCredits, err)
+	}
+	committedCredits := firstCredits.NextCursor
+	committedCredits.Revision++
+	secondCredits, err := credits.Scan(ctx, sourceagent.ScanRequest{Mode: sourceagent.ScanReconcile, Cursor: committedCredits, Limit: 10})
+	if err != nil || !secondCredits.ScanComplete || len(secondCredits.Projections) != 2 {
+		t.Fatalf("credits reconcile must still re-scan from zero every cycle (unchanged semantics): page=%#v err=%v", secondCredits, err)
+	}
+}
+
 func readSub2HealthHash(ctx context.Context, database interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }) *sql.Row {

@@ -66,6 +66,96 @@ func containsReason(values []string, want string) bool {
 	return false
 }
 
+// TestEconomicWatermarkStaleDowngradesToActiveRescanOnlyWithinTheBoundedWindow
+// is the pure (no database) proof for XM-INV-AGENT-RESTART-GRACE part A's
+// honesty guard: an active_rescan_updated_at within
+// EconomicRescanActivityMaxAge of policy.Now downgrades the otherwise-fatal
+// ECONOMIC_WATERMARK_STALE reason to the non-fatal ECONOMIC_RESCAN_ACTIVE and
+// flips Ready back to true; anything outside that window, or a policy with
+// the grace disabled (zero EconomicRescanActivityMaxAge), reports the plain,
+// fatal reason exactly as before this feature existed.
+func TestEconomicWatermarkStaleDowngradesToActiveRescanOnlyWithinTheBoundedWindow(t *testing.T) {
+	now := time.Date(2026, time.August, 25, 2, 0, 0, 0, time.UTC)
+	basePolicy := SourceFreshnessPolicy{
+		EconomicHeartbeatMaxAge: 5 * time.Minute, EconomicWatermarkMaxAge: 15 * time.Minute,
+		IdentitiesMaxAge: 15 * time.Minute, EconomicRescanActivityMaxAge: 10 * time.Minute, Now: now,
+	}
+	newStaleItem := func() SourceStreamHealth {
+		return SourceStreamHealth{
+			SourceEnabled: true, StreamID: "usage", ApprovedRuntimeVersion: "0.1.179",
+			ObservedRuntimeVersion: "0.1.179", ProjectionStatus: "healthy",
+			LastAcceptedAt: now.Add(-30 * time.Second), EconomicWatermarkAt: now.Add(-16 * time.Minute),
+		}
+	}
+
+	for name, fixture := range map[string]struct {
+		policy                SourceFreshnessPolicy
+		activeRescanUpdatedAt time.Time
+		wantReady             bool
+		wantReason            string
+	}{
+		"fresh active cycle downgrades to the non-fatal reason": {
+			policy: basePolicy, activeRescanUpdatedAt: now.Add(-2 * time.Minute),
+			wantReady: true, wantReason: "ECONOMIC_RESCAN_ACTIVE",
+		},
+		"exactly at the window boundary still counts as active": {
+			policy: basePolicy, activeRescanUpdatedAt: now.Add(-10 * time.Minute),
+			wantReady: true, wantReason: "ECONOMIC_RESCAN_ACTIVE",
+		},
+		"one nanosecond beyond the window is stalled, not active": {
+			policy: basePolicy, activeRescanUpdatedAt: now.Add(-10*time.Minute - time.Nanosecond),
+			wantReady: false, wantReason: "ECONOMIC_WATERMARK_STALE",
+		},
+		"no active cycle at all reports the plain reason": {
+			policy: basePolicy, activeRescanUpdatedAt: time.Time{},
+			wantReady: false, wantReason: "ECONOMIC_WATERMARK_STALE",
+		},
+		"the grace disabled (zero max age) never downgrades even with a fresh cycle": {
+			policy: SourceFreshnessPolicy{
+				EconomicHeartbeatMaxAge: basePolicy.EconomicHeartbeatMaxAge, EconomicWatermarkMaxAge: basePolicy.EconomicWatermarkMaxAge,
+				IdentitiesMaxAge: basePolicy.IdentitiesMaxAge, Now: now,
+			},
+			activeRescanUpdatedAt: now.Add(-time.Second), wantReady: false, wantReason: "ECONOMIC_WATERMARK_STALE",
+		},
+		"a cycle updated in the future beyond clock skew tolerance is not trusted": {
+			policy: basePolicy, activeRescanUpdatedAt: now.Add(6 * time.Minute),
+			wantReady: false, wantReason: "ECONOMIC_WATERMARK_STALE",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			item := newStaleItem()
+			item.ActiveRescanUpdatedAt = fixture.activeRescanUpdatedAt
+			evaluateSourceStreamHealth(&item, fixture.policy)
+			if item.Ready != fixture.wantReady || len(item.Reasons) != 1 || item.Reasons[0] != fixture.wantReason {
+				t.Fatalf("ready=%t reasons=%v want ready=%t reason=%q", item.Ready, item.Reasons, fixture.wantReady, fixture.wantReason)
+			}
+		})
+	}
+}
+
+// TestSourceHealthQueryJoinsScanCyclesThroughTheActivePartialIndex mirrors
+// TestSourceReadinessQueryIsBoundedToActivePartialIndex for the
+// XM-INV-AGENT-RESTART-GRACE part A join: it must filter to the same
+// cycle_status set the partial unique index (source_economic_one_active_scan_cycle,
+// backend/migrations/0009_consumption_eligibility_ledger.sql) covers, so
+// Postgres can satisfy it as an index lookup regardless of how large
+// source_economic_scan_cycles grows.
+func TestSourceHealthQueryJoinsScanCyclesThroughTheActivePartialIndex(t *testing.T) {
+	activeCyclePredicate := "sesc.cycle_status IN ('receiving','processing')"
+	readinessQuery := strings.Join(strings.Fields(sourceReadinessHealthQuery), " ")
+	if !strings.Contains(readinessQuery, "LEFT JOIN source_economic_scan_cycles sesc ON sesc.source_instance_id=si.id AND sesc.stream_id=required.stream_id AND "+activeCyclePredicate) {
+		t.Fatalf("readiness query's scan-cycle join is not bound to the active partial index: %s", readinessQuery)
+	}
+	migration, err := os.ReadFile("../../migrations/0009_consumption_eligibility_ledger.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddl := strings.Join(strings.Fields(string(migration)), " ")
+	if !strings.Contains(ddl, "CREATE UNIQUE INDEX source_economic_one_active_scan_cycle ON source_economic_scan_cycles(source_instance_id,stream_id) WHERE cycle_status IN ('receiving','processing')") {
+		t.Fatalf("the active-scan-cycle partial unique index no longer covers this join's predicate: %s", ddl)
+	}
+}
+
 func TestSourceReadinessQueryIsBoundedToActivePartialIndex(t *testing.T) {
 	query := strings.Join(strings.Fields(sourceReadinessHealthQuery), " ")
 	activePredicate := "processing_status IN ('queued','failed','processing','dead')"

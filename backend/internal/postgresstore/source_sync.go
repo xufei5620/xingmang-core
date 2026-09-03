@@ -68,7 +68,16 @@ type SourceFreshnessPolicy struct {
 	EconomicHeartbeatMaxAge time.Duration
 	EconomicWatermarkMaxAge time.Duration
 	IdentitiesMaxAge        time.Duration
-	Now                     time.Time
+	// EconomicRescanActivityMaxAge (XM-INV-AGENT-RESTART-GRACE part A) bounds
+	// the readiness-grace window for a stream whose economic watermark looks
+	// stale only because a source_economic_scan_cycles row proves an active,
+	// still-updating rescan (agents/sourceagent's ScanReconcile rolling
+	// window, or a mandatory New API full scan) is in progress -- see
+	// evaluateSourceStreamHealth. Zero or negative disables the grace
+	// entirely: an ECONOMIC_WATERMARK_STALE finding is never downgraded, the
+	// same as before this field existed.
+	EconomicRescanActivityMaxAge time.Duration
+	Now                          time.Time
 }
 
 func (p SourceFreshnessPolicy) enabled() bool {
@@ -76,26 +85,32 @@ func (p SourceFreshnessPolicy) enabled() bool {
 }
 
 type SourceStreamHealth struct {
-	SourceInstanceID                   string            `json:"source_instance_id"`
-	SourceType                         domain.SourceType `json:"source_type"`
-	SourceName                         string            `json:"source_name"`
-	SourceEnabled                      bool              `json:"source_enabled"`
-	StreamID                           string            `json:"stream_id"`
-	Sequence                           int64             `json:"sequence"`
-	ApprovedRuntimeVersion             string            `json:"approved_runtime_version"`
-	ObservedRuntimeVersion             string            `json:"observed_runtime_version"`
-	ObservedAgentVersion               string            `json:"observed_agent_version"`
-	ProjectionStatus                   string            `json:"projection_status"`
-	LastAcceptedAt                     time.Time         `json:"last_accepted_at"`
-	LastNonemptyBatchAt                time.Time         `json:"last_nonempty_batch_at"`
-	EconomicWatermarkAt                time.Time         `json:"economic_watermark_at,omitempty"`
-	MaximumAgeSeconds                  int64             `json:"maximum_age_seconds"`
-	EconomicWatermarkMaximumAgeSeconds int64             `json:"economic_watermark_maximum_age_seconds,omitempty"`
-	PendingEvents                      int64             `json:"pending_events"`
-	DeadEvents                         int64             `json:"dead_events"`
-	WaitingDependencies                int64             `json:"waiting_dependencies"`
-	Ready                              bool              `json:"ready"`
-	Reasons                            []string          `json:"reasons"`
+	SourceInstanceID       string            `json:"source_instance_id"`
+	SourceType             domain.SourceType `json:"source_type"`
+	SourceName             string            `json:"source_name"`
+	SourceEnabled          bool              `json:"source_enabled"`
+	StreamID               string            `json:"stream_id"`
+	Sequence               int64             `json:"sequence"`
+	ApprovedRuntimeVersion string            `json:"approved_runtime_version"`
+	ObservedRuntimeVersion string            `json:"observed_runtime_version"`
+	ObservedAgentVersion   string            `json:"observed_agent_version"`
+	ProjectionStatus       string            `json:"projection_status"`
+	LastAcceptedAt         time.Time         `json:"last_accepted_at"`
+	LastNonemptyBatchAt    time.Time         `json:"last_nonempty_batch_at"`
+	EconomicWatermarkAt    time.Time         `json:"economic_watermark_at,omitempty"`
+	// ActiveRescanUpdatedAt (XM-INV-AGENT-RESTART-GRACE part A) is the
+	// updated_at of this (source, stream)'s source_economic_scan_cycles row
+	// still in 'receiving' or 'processing' status, if any -- the partial
+	// unique index source_economic_one_active_scan_cycle guarantees at most
+	// one. Zero means no scan cycle is currently in progress.
+	ActiveRescanUpdatedAt              time.Time `json:"active_rescan_updated_at,omitempty"`
+	MaximumAgeSeconds                  int64     `json:"maximum_age_seconds"`
+	EconomicWatermarkMaximumAgeSeconds int64     `json:"economic_watermark_maximum_age_seconds,omitempty"`
+	PendingEvents                      int64     `json:"pending_events"`
+	DeadEvents                         int64     `json:"dead_events"`
+	WaitingDependencies                int64     `json:"waiting_dependencies"`
+	Ready                              bool      `json:"ready"`
+	Reasons                            []string  `json:"reasons"`
 }
 
 type SourceHealthReport struct {
@@ -774,6 +789,35 @@ func maximumHeartbeatAgeForStream(policy SourceFreshnessPolicy, streamID string)
 	return policy.EconomicHeartbeatMaxAge
 }
 
+// economicRescanActiveReason is the XM-INV-AGENT-RESTART-GRACE part A
+// honesty-guard downgrade of ECONOMIC_WATERMARK_STALE: it still appears in
+// SourceStreamHealth.Reasons for the admin source-health report, but --
+// unlike every other reason -- it does not make the stream not-ready. See
+// evaluateSourceStreamHealth and the sole other non-fatal reason,
+// EVENTS_PENDING, which is instead tolerated one layer up in
+// validateSourceRuntimeReadiness (backend/cmd/api/runtime.go); this one must
+// live here because ListFundingLots/Submit's five-stream gate reads
+// stream.Ready directly and never goes through that readyz-only layer.
+const economicRescanActiveReason = "ECONOMIC_RESCAN_ACTIVE"
+
+// nonFatalStreamHealthReasons lists reasons that are surfaced for visibility
+// but never make item.Ready false on their own.
+var nonFatalStreamHealthReasons = map[string]bool{economicRescanActiveReason: true}
+
+// economicRescanActivityWithinWindow reports whether ActiveRescanUpdatedAt
+// proves a genuinely still-progressing scan cycle, per the bounded activity
+// window in policy.EconomicRescanActivityMaxAge (zero disables the grace
+// entirely). A cycle whose updated_at stopped advancing beyond the window --
+// stalled, crashed, or simply old -- does not count: evaluateSourceStreamHealth
+// then reports the plain, fatal ECONOMIC_WATERMARK_STALE instead.
+func economicRescanActivityWithinWindow(activeAt time.Time, policy SourceFreshnessPolicy) bool {
+	if activeAt.IsZero() || policy.EconomicRescanActivityMaxAge <= 0 {
+		return false
+	}
+	age := policy.Now.Sub(activeAt)
+	return age >= 0 && age <= policy.EconomicRescanActivityMaxAge && !activeAt.After(policy.Now.Add(5*time.Minute))
+}
+
 func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshnessPolicy) {
 	item.MaximumAgeSeconds = int64(maximumHeartbeatAgeForStream(policy, item.StreamID) / time.Second)
 	item.EconomicWatermarkMaximumAgeSeconds = 0
@@ -800,7 +844,11 @@ func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshness
 	} else if item.StreamID != "identities" &&
 		(policy.Now.Sub(item.EconomicWatermarkAt) > policy.EconomicWatermarkMaxAge ||
 			item.EconomicWatermarkAt.After(policy.Now.Add(5*time.Minute))) {
-		item.Reasons = append(item.Reasons, "ECONOMIC_WATERMARK_STALE")
+		if economicRescanActivityWithinWindow(item.ActiveRescanUpdatedAt, policy) {
+			item.Reasons = append(item.Reasons, economicRescanActiveReason)
+		} else {
+			item.Reasons = append(item.Reasons, "ECONOMIC_WATERMARK_STALE")
+		}
 	}
 	if item.PendingEvents > 0 {
 		item.Reasons = append(item.Reasons, "EVENTS_PENDING")
@@ -808,7 +856,13 @@ func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshness
 	if item.DeadEvents > 0 {
 		item.Reasons = append(item.Reasons, "EVENTS_DEAD")
 	}
-	item.Ready = len(item.Reasons) == 0
+	item.Ready = true
+	for _, reason := range item.Reasons {
+		if !nonFatalStreamHealthReasons[reason] {
+			item.Ready = false
+			break
+		}
+	}
 }
 
 const sourceReadinessHealthQuery = `
@@ -833,13 +887,19 @@ const sourceReadinessHealthQuery = `
 		COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
 		COALESCE(sew.watermark_at,'epoch'::timestamptz),
 		COALESCE(aeh.pending_events,0),COALESCE(aeh.dead_events,0),
-		ingest.pending_events,ingest.dead_events,ingest.oldest_pending
+		ingest.pending_events,ingest.dead_events,ingest.oldest_pending,
+		COALESCE(sesc.updated_at,'epoch'::timestamptz)
 	FROM source_instances si
 	CROSS JOIN (VALUES ('payments'::text),('identities'::text),('usage'::text),('credits'::text),('balances'::text)) required(stream_id)
 	LEFT JOIN source_ingest_state sis ON sis.source_instance_id=si.id AND sis.stream_id=required.stream_id
 	LEFT JOIN source_economic_stream_watermarks sew ON sew.source_instance_id=si.id AND sew.stream_kind=required.stream_id
 	LEFT JOIN active_event_health aeh ON aeh.source_instance_id=si.id AND aeh.stream_id=required.stream_id
 	CROSS JOIN ingest_health ingest
+	-- XM-INV-AGENT-RESTART-GRACE part A: at most one row can match, via the
+	-- partial unique index source_economic_one_active_scan_cycle, so this join
+	-- stays index-bound regardless of how large the cycle history table grows.
+	LEFT JOIN source_economic_scan_cycles sesc ON sesc.source_instance_id=si.id AND sesc.stream_id=required.stream_id
+		AND sesc.cycle_status IN ('receiving','processing')
 	ORDER BY si.source_type,si.id,required.stream_id`
 
 // SourceReadinessHealth returns the same freshness/version/projection evidence
@@ -865,7 +925,7 @@ func (s *Store) SourceReadinessHealth(ctx context.Context, policy SourceFreshnes
 			&item.ApprovedRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
 			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents,
-			&ingest.Pending, &ingest.Dead, &ingest.OldestPending); err != nil {
+			&ingest.Pending, &ingest.Dead, &ingest.OldestPending, &item.ActiveRescanUpdatedAt); err != nil {
 			return SourceReadinessHealth{}, err
 		}
 		if item.LastAcceptedAt.Equal(time.Unix(0, 0).UTC()) {
@@ -879,6 +939,9 @@ func (s *Store) SourceReadinessHealth(ctx context.Context, policy SourceFreshnes
 		}
 		if ingest.OldestPending.Equal(time.Unix(0, 0).UTC()) {
 			ingest.OldestPending = time.Time{}
+		}
+		if item.ActiveRescanUpdatedAt.Equal(time.Unix(0, 0).UTC()) {
+			item.ActiveRescanUpdatedAt = time.Time{}
 		}
 		health.Ingest = ingest
 		evaluateSourceStreamHealth(&item, policy)
@@ -915,12 +978,18 @@ func (s *Store) SourceHealth(ctx context.Context, policy SourceFreshnessPolicy) 
 			COALESCE(sew.watermark_at,'epoch'::timestamptz),
 			count(sie.event_id) FILTER (WHERE sie.processing_status IN ('queued','failed','processing')),
 			count(sie.event_id) FILTER (WHERE sie.processing_status='dead'),
-			count(sie.event_id) FILTER (WHERE sie.processing_status IN ('waiting_dependency','parked_identity'))
+			count(sie.event_id) FILTER (WHERE sie.processing_status IN ('waiting_dependency','parked_identity')),
+			COALESCE(max(sesc.updated_at),'epoch'::timestamptz)
 		FROM source_instances si
 		CROSS JOIN (VALUES ('payments'::text),('identities'::text),('usage'::text),('credits'::text),('balances'::text)) required(stream_id)
 		LEFT JOIN source_ingest_state sis ON sis.source_instance_id=si.id AND sis.stream_id=required.stream_id
 		LEFT JOIN source_economic_stream_watermarks sew ON sew.source_instance_id=si.id AND sew.stream_kind=required.stream_id
 		LEFT JOIN source_ingest_events sie ON sie.source_instance_id=si.id AND sie.stream_id=required.stream_id
+		-- XM-INV-AGENT-RESTART-GRACE part A: at most one row can match (see
+		-- source_economic_one_active_scan_cycle), so max() here is a no-op
+		-- aggregate over that single value, not a real fan-out reduction.
+		LEFT JOIN source_economic_scan_cycles sesc ON sesc.source_instance_id=si.id AND sesc.stream_id=required.stream_id
+			AND sesc.cycle_status IN ('receiving','processing')
 		GROUP BY si.id,si.source_type,si.name,si.enabled,required.stream_id,sis.sequence,
 			si.runtime_version,sis.source_runtime_version,sis.source_agent_version,sis.projection_status,
 			sis.last_accepted_at,sis.last_nonempty_batch_at,sew.watermark_at
@@ -937,7 +1006,8 @@ func (s *Store) SourceHealth(ctx context.Context, policy SourceFreshnessPolicy) 
 			&item.SourceEnabled, &item.StreamID, &item.Sequence,
 			&item.ApprovedRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
-			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.WaitingDependencies); err != nil {
+			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.WaitingDependencies,
+			&item.ActiveRescanUpdatedAt); err != nil {
 			return SourceHealthReport{}, err
 		}
 		if item.LastAcceptedAt.Equal(time.Unix(0, 0).UTC()) {
@@ -948,6 +1018,9 @@ func (s *Store) SourceHealth(ctx context.Context, policy SourceFreshnessPolicy) 
 		}
 		if item.EconomicWatermarkAt.Equal(time.Unix(0, 0).UTC()) {
 			item.EconomicWatermarkAt = time.Time{}
+		}
+		if item.ActiveRescanUpdatedAt.Equal(time.Unix(0, 0).UTC()) {
+			item.ActiveRescanUpdatedAt = time.Time{}
 		}
 		evaluateSourceStreamHealth(&item, policy)
 		if item.SourceEnabled {

@@ -372,6 +372,22 @@ type ScanCursor struct {
 	HasSnapshotMetadata bool   `json:"has_snapshot_metadata,omitempty"`
 	ScanCycleID         string `json:"scan_cycle_id,omitempty"`
 	ProjectionBlocked   bool   `json:"projection_blocked,omitempty"`
+	// ReconcileBaselineCursor and ReconcileWindowBounded implement the XM-INV-AGENT-RESTART-GRACE
+	// rolling reconcile window (usage stream only; see economics_db.go prepareCursor).
+	// ReconcileBaselineCursor is the domain cursor position where the last
+	// completed ScanReconcile cycle finished; the next reconcile starts there
+	// instead of rewinding to the cutover manifest. Empty means no reconcile
+	// has completed under this logic yet (the reconcile then starts from the
+	// live WatermarkCursor -- no rewind).
+	ReconcileBaselineCursor string `json:"reconcile_baseline_cursor,omitempty"`
+	// ReconcileWindowBounded is true once the currently in-flight (or last
+	// started) reconcile cycle's starting position was computed by the
+	// bounded rolling-window logic. A stored cursor from before this field
+	// existed decodes it as false, which lets prepareCursor recognize and
+	// abandon a legacy in-flight reconcile cycle (started by an older agent
+	// binary that always rewound to the cutover manifest) instead of
+	// resuming it: see shouldAbandonLegacyReconcileCycle.
+	ReconcileWindowBounded bool `json:"reconcile_window_bounded,omitempty"`
 }
 
 type ScanRequest struct {
