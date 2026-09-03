@@ -4,6 +4,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"sort"
@@ -48,6 +49,17 @@ type SyncRunner struct {
 	Jitter                 func(time.Duration) time.Duration
 	OnCycle                func(SyncCycleResult)
 	OnFailure              func(SyncFailure)
+	// Schedule persists the reconcile/full-scan schedule (XM-INV-AGENT-RESTART-GRACE
+	// part C) so a process restart resumes it instead of forcing an immediate
+	// ScanReconcile/ScanFull cycle. A nil Schedule keeps the pre-existing
+	// behavior: every process start forces one initial complete cycle, purely
+	// in memory, exactly as before this field existed.
+	Schedule ScheduleStore
+	// OnScheduleError reports a failure to load or persist Schedule. It is
+	// purely observational: Schedule failures never stop or fail the runner --
+	// the worst case is falling back to the always-safe, pre-existing
+	// behavior of forcing another initial cycle on the next restart.
+	OnScheduleError func(error)
 }
 
 func (r *SyncRunner) Validate() error {
@@ -75,8 +87,10 @@ func (r *SyncRunner) Validate() error {
 	return nil
 }
 
-// Run starts with a complete reconciliation/full scan after every process
-// restart. New API then performs mandatory full scans on the configured bounded
+// Run resumes the persisted reconcile/full-scan schedule (Schedule) across a
+// process restart when one is configured and recorded; otherwise, exactly as
+// before this schedule existed, it starts with a complete reconciliation/full
+// scan. New API then performs mandatory full scans on the configured bounded
 // cadence; Sub2API performs keyset incrementals between reconciliations.
 func (r *SyncRunner) Run(ctx context.Context) error {
 	if err := r.Validate(); err != nil {
@@ -96,6 +110,9 @@ func (r *SyncRunner) Run(ctx context.Context) error {
 	}
 
 	var lastReconcile, lastFull time.Time
+	if r.Schedule != nil {
+		lastReconcile, lastFull = r.loadSchedule(ctx)
+	}
 	backoff := time.Second
 	consecutiveFailures := 0
 	for {
@@ -160,9 +177,11 @@ func (r *SyncRunner) Run(ctx context.Context) error {
 		consecutiveFailures = 0
 		if result.Complete && mode == ScanReconcile {
 			lastReconcile = result.FinishedAt
+			r.saveSchedule(ctx, lastReconcile, lastFull)
 		}
 		if result.Complete && mode == ScanFull {
 			lastFull = result.FinishedAt
+			r.saveSchedule(ctx, lastReconcile, lastFull)
 		}
 		if r.OnCycle != nil {
 			r.OnCycle(result)
@@ -174,6 +193,53 @@ func (r *SyncRunner) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// loadSchedule best-effort restores the persisted reconcile/full-scan
+// schedule. Any failure -- store unavailable, corrupt/unparseable timestamp,
+// or a state file written before Schedule existed -- resolves to the zero
+// value for that timestamp, which is exactly today's pre-existing behavior
+// (forces one initial cycle of that kind). It never fails Run.
+func (r *SyncRunner) loadSchedule(ctx context.Context) (lastReconcile, lastFull time.Time) {
+	state, err := r.Schedule.Load(ctx)
+	if err != nil {
+		if r.OnScheduleError != nil {
+			r.OnScheduleError(fmt.Errorf("load persisted reconcile/full schedule: %w", err))
+		}
+		return time.Time{}, time.Time{}
+	}
+	if state.LastReconcileAt != "" {
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, state.LastReconcileAt); parseErr == nil {
+			lastReconcile = parsed
+		}
+	}
+	if state.LastFullAt != "" {
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, state.LastFullAt); parseErr == nil {
+			lastFull = parsed
+		}
+	}
+	return lastReconcile, lastFull
+}
+
+// saveSchedule best-effort persists the reconcile/full-scan schedule after a
+// cycle of that kind completes. A save failure is reported but never stops
+// the runner: the worst case on the next restart is a forced initial cycle,
+// which is the safe, pre-existing behavior.
+func (r *SyncRunner) saveSchedule(ctx context.Context, lastReconcile, lastFull time.Time) {
+	if r.Schedule == nil {
+		return
+	}
+	state := ScheduleState{LastReconcileAt: formatScheduleTime(lastReconcile), LastFullAt: formatScheduleTime(lastFull)}
+	if err := r.Schedule.Save(ctx, state); err != nil && r.OnScheduleError != nil {
+		r.OnScheduleError(fmt.Errorf("persist reconcile/full schedule: %w", err))
+	}
+}
+
+func formatScheduleTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func (r *SyncRunner) modeAt(now, lastReconcile, lastFull time.Time) ScanMode {

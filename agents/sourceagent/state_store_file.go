@@ -68,6 +68,15 @@ type fileStateEnvelope struct {
 	PublishRevision uint64     `json:"publish_revision"`
 	Sequence        uint64     `json:"sequence"`
 	LastBatchHash   string     `json:"last_batch_hash"`
+	// LastReconcileAt and LastFullAt (XM-INV-AGENT-RESTART-GRACE) persist the
+	// SyncRunner reconcile/full-scan schedule so a process restart resumes it
+	// instead of forcing an immediate ScanReconcile/ScanFull cycle. Both are
+	// RFC3339Nano UTC timestamps; empty means "never completed". A state file
+	// written before this field existed decodes both as empty strings, which
+	// reproduces today's always-forced-first-cycle behavior exactly once,
+	// after which the new schedule is persisted going forward.
+	LastReconcileAt string `json:"last_reconcile_at,omitempty"`
+	LastFullAt      string `json:"last_full_at,omitempty"`
 }
 
 // InitializeFileState explicitly creates an empty state file. It refuses to
@@ -194,6 +203,74 @@ func (s FileSequenceStore) CompareAndSwap(ctx context.Context, oldState, newStat
 		return nil
 	})
 	return matched, err
+}
+
+// ScheduleState is the SyncRunner reconcile/full-scan schedule
+// (XM-INV-AGENT-RESTART-GRACE). Both timestamps are RFC3339Nano UTC strings;
+// empty means the corresponding cycle kind has never completed.
+type ScheduleState struct {
+	LastReconcileAt string
+	LastFullAt      string
+}
+
+// ScheduleStore is implemented by FileScheduleStore in production. SyncRunner
+// treats a nil ScheduleStore as "no persistence available" and keeps its
+// pre-existing in-memory-only behavior (always forces an initial cycle).
+type ScheduleStore interface {
+	Load(context.Context) (ScheduleState, error)
+	Save(context.Context, ScheduleState) error
+}
+
+// FileScheduleStore shares its underlying envelope, mutex and process lock
+// with FileCursorStore/FileSequenceStore over the same FileStateStore -- all
+// three read-modify-write the one JSON file sequentially within one process,
+// so a save from one never clobbers fields owned by the others.
+type FileScheduleStore struct{ State *FileStateStore }
+
+var _ ScheduleStore = FileScheduleStore{}
+
+func (s FileScheduleStore) Load(ctx context.Context) (ScheduleState, error) {
+	if s.State == nil {
+		return ScheduleState{}, errors.New("file schedule store is not configured")
+	}
+	var state ScheduleState
+	err := s.State.readLocked(ctx, func(envelope fileStateEnvelope) error {
+		state = ScheduleState{LastReconcileAt: envelope.LastReconcileAt, LastFullAt: envelope.LastFullAt}
+		return validateFileScheduleState(state)
+	})
+	return state, err
+}
+
+func (s FileScheduleStore) Save(ctx context.Context, state ScheduleState) error {
+	if s.State == nil {
+		return errors.New("file schedule store is not configured")
+	}
+	if err := validateFileScheduleState(state); err != nil {
+		return err
+	}
+	s.State.mu.Lock()
+	defer s.State.mu.Unlock()
+	return s.State.withProcessLock(ctx, func() error {
+		envelope, err := s.State.readUnlocked()
+		if err != nil {
+			return err
+		}
+		envelope.LastReconcileAt = state.LastReconcileAt
+		envelope.LastFullAt = state.LastFullAt
+		return s.State.writeLocked(envelope)
+	})
+}
+
+func validateFileScheduleState(state ScheduleState) error {
+	for _, value := range []string{state.LastReconcileAt, state.LastFullAt} {
+		if value == "" {
+			continue
+		}
+		if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+			return errors.New("stored reconcile/full schedule timestamp is invalid")
+		}
+	}
+	return nil
 }
 
 func (s *FileStateStore) readLocked(ctx context.Context, use func(fileStateEnvelope) error) error {
@@ -375,7 +452,7 @@ func validateStoredFileCursor(cursor ScanCursor) error {
 			}
 		}
 	}
-	for _, value := range []string{cursor.Domain, cursor.WatermarkCursor, cursor.CeilingCursor, cursor.PositionCursor, cursor.SnapshotID, cursor.ScanCycleID} {
+	for _, value := range []string{cursor.Domain, cursor.WatermarkCursor, cursor.CeilingCursor, cursor.PositionCursor, cursor.SnapshotID, cursor.ScanCycleID, cursor.ReconcileBaselineCursor} {
 		if len(value) > 256 || strings.ContainsAny(value, "\r\n\x00") {
 			return errors.New("stored V3 cursor metadata is invalid")
 		}
@@ -417,6 +494,9 @@ func validateStoredFileCursorForStream(cursor ScanCursor, streamID string) error
 	}
 	if cursor.HasSnapshotMetadata || cursor.SnapshotID != "" || cursor.SnapshotRowCount != 0 {
 		return errors.New("stored non-balance cursor carried snapshot metadata")
+	}
+	if streamID != StreamUsage && (cursor.ReconcileBaselineCursor != "" || cursor.ReconcileWindowBounded) {
+		return errors.New("stored cursor carried usage-only reconcile window metadata")
 	}
 	return nil
 }

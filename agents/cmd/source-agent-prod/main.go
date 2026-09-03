@@ -27,7 +27,12 @@ import (
 	"invoice-system/agents/sourceagent"
 )
 
-var buildVersion = "0.3.0"
+// XM-INV-AGENT-RESTART-GRACE changed agent restart/reconcile behavior
+// (persisted reconcile/full schedule, rolling reconcile window): bump per
+// repository convention. See docs/handoffs/XM-INV-AGENT-RESTART-GRACE.md for
+// every place this version string must be mirrored (release gate default,
+// verify.ps1 fixture, compose files).
+var buildVersion = "0.3.1"
 var requiredEligibilityStartAt = time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
 
 var productionSourceIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
@@ -725,6 +730,11 @@ func runFromEnvironment() error {
 		PollInterval: config.PollInterval, ReconcileInterval: config.ReconcileInterval,
 		FullScanInterval: config.FullScanInterval, MaxBackoff: config.MaxBackoff,
 		MaxPagesPerCycle: config.MaxPages, MaxConsecutiveFailures: config.MaxConsecutiveFailures,
+		// XM-INV-AGENT-RESTART-GRACE part C: resume the reconcile/full-scan
+		// schedule from the same state file/volume already used for the
+		// cursor and sequence, so a container restart does not force an
+		// immediate ScanReconcile/ScanFull cycle when one is not yet due.
+		Schedule: sourceagent.FileScheduleStore{State: state},
 		OnCycle: func(result sourceagent.SyncCycleResult) {
 			log.Printf("cycle complete source=%q stream=%q mode=%q scan_complete=%t pages=%d records=%d sequence=%d batch=%q warnings=%q",
 				config.SourceID, config.StreamID, result.Mode, result.Complete, result.Pages, result.Records,
@@ -738,6 +748,10 @@ func runFromEnvironment() error {
 			}
 			log.Printf("transient sync failure source=%q stream=%q mode=%q retry_in=%q error=%q",
 				config.SourceID, config.StreamID, failure.Mode, failure.RetryIn, failure.Err)
+		},
+		OnScheduleError: func(err error) {
+			log.Printf("reconcile/full schedule persistence issue source=%q stream=%q error=%q (falls back to a forced cycle on next restart; not fatal)",
+				config.SourceID, config.StreamID, err)
 		},
 	}
 	log.Printf("starting source=%q stream=%q type=%q schema=%q agent_version=%q",

@@ -25,6 +25,30 @@ func (s *scriptedPageSyncer) SyncPage(_ context.Context, mode ScanMode) (ScanPag
 	return page, IngestAck{Accepted: true, BatchID: "batch", Sequence: uint64(len(s.modes))}, nil
 }
 
+// memoryScheduleStore is a minimal in-memory ScheduleStore fake used only to
+// test SyncRunner's own load/save wiring (XM-INV-AGENT-RESTART-GRACE part
+// C); FileScheduleStore's durable behavior is covered separately in
+// state_store_file_test.go.
+type memoryScheduleStore struct {
+	state   ScheduleState
+	loadErr error
+	saveErr error
+	saves   []ScheduleState
+}
+
+func (m *memoryScheduleStore) Load(context.Context) (ScheduleState, error) {
+	return m.state, m.loadErr
+}
+
+func (m *memoryScheduleStore) Save(_ context.Context, state ScheduleState) error {
+	m.saves = append(m.saves, state)
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.state = state
+	return nil
+}
+
 func TestRunnerForcesNewAPIFullAndSub2APIReconciliation(t *testing.T) {
 	now := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
 	newAPI := &SyncRunner{SourceType: SourceNewAPI, FullScanInterval: time.Hour}
@@ -169,6 +193,109 @@ func TestRunnerScanCycleBusyBacksOffWithoutOpeningCircuit(t *testing.T) {
 	// so the coordinator is called exactly once per observed busy attempt.
 	if len(syncer.modes) < observeAttempts {
 		t.Fatalf("coordinator (same batch/sequence source) was not retried on every busy attempt: calls=%d", len(syncer.modes))
+	}
+}
+
+func TestRunnerResumesPersistedReconcileScheduleAcrossRestart(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	schedule := &memoryScheduleStore{state: ScheduleState{LastReconcileAt: now.Add(-10 * time.Minute).Format(time.RFC3339Nano)}}
+	syncer := &scriptedPageSyncer{pages: []ScanPage{{HasMore: false}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &SyncRunner{
+		Coordinator: syncer, SourceType: SourceSub2API,
+		PollInterval: 5 * time.Second, ReconcileInterval: time.Hour,
+		MaxBackoff: time.Minute, MaxPagesPerCycle: 10, MaxConsecutiveFailures: 10,
+		Now:      func() time.Time { return now },
+		Schedule: schedule,
+		Sleep:    func(context.Context, time.Duration) error { cancel(); return context.Canceled },
+	}
+	if err := runner.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(syncer.modes) != 1 || syncer.modes[0] != ScanIncremental {
+		t.Fatalf("restart forced an unnecessary cycle despite a fresh persisted schedule: modes=%#v", syncer.modes)
+	}
+}
+
+func TestRunnerPersistsCompletedReconcileScheduleForNextRestart(t *testing.T) {
+	schedule := &memoryScheduleStore{}
+	syncer := &scriptedPageSyncer{pages: []ScanPage{{HasMore: false}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	finishedAt := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	runner := &SyncRunner{
+		Coordinator: syncer, SourceType: SourceSub2API,
+		PollInterval: 5 * time.Second, ReconcileInterval: time.Hour,
+		MaxBackoff: time.Minute, MaxPagesPerCycle: 10, MaxConsecutiveFailures: 10,
+		Now:      func() time.Time { return finishedAt },
+		Schedule: schedule,
+		Sleep:    func(context.Context, time.Duration) error { cancel(); return context.Canceled },
+	}
+	if err := runner.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(schedule.saves) != 1 || schedule.saves[0].LastReconcileAt != finishedAt.Format(time.RFC3339Nano) || schedule.saves[0].LastFullAt != "" {
+		t.Fatalf("completed reconcile cycle was not persisted: %#v", schedule.saves)
+	}
+
+	// A second runner instance loading from the same store must resume
+	// Incremental instead of forcing another reconcile -- proving the
+	// persisted value, not just the Save call shape, drives modeAt.
+	resumedSyncer := &scriptedPageSyncer{pages: []ScanPage{{HasMore: false}}}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	resumed := &SyncRunner{
+		Coordinator: resumedSyncer, SourceType: SourceSub2API,
+		PollInterval: 5 * time.Second, ReconcileInterval: time.Hour,
+		MaxBackoff: time.Minute, MaxPagesPerCycle: 10, MaxConsecutiveFailures: 10,
+		Now:      func() time.Time { return finishedAt.Add(10 * time.Minute) },
+		Schedule: schedule,
+		Sleep:    func(context.Context, time.Duration) error { cancel2(); return context.Canceled },
+	}
+	if err := resumed.Run(ctx2); err != nil {
+		t.Fatal(err)
+	}
+	if len(resumedSyncer.modes) != 1 || resumedSyncer.modes[0] != ScanIncremental {
+		t.Fatalf("restart did not resume the persisted schedule: modes=%#v", resumedSyncer.modes)
+	}
+}
+
+func TestRunnerScheduleLoadFailureFallsBackToForcedInitialCycle(t *testing.T) {
+	schedule := &memoryScheduleStore{loadErr: errors.New("boom")}
+	syncer := &scriptedPageSyncer{pages: []ScanPage{{HasMore: false}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	var reported error
+	runner := &SyncRunner{
+		Coordinator: syncer, SourceType: SourceSub2API,
+		PollInterval: 5 * time.Second, ReconcileInterval: time.Hour,
+		MaxBackoff: time.Minute, MaxPagesPerCycle: 10, MaxConsecutiveFailures: 10,
+		Schedule:        schedule,
+		OnScheduleError: func(err error) { reported = err },
+		Sleep:           func(context.Context, time.Duration) error { cancel(); return context.Canceled },
+	}
+	if err := runner.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(syncer.modes) != 1 || syncer.modes[0] != ScanReconcile {
+		t.Fatalf("schedule load failure must fall back to the safe forced initial cycle: modes=%#v", syncer.modes)
+	}
+	if reported == nil {
+		t.Fatal("schedule load failure was not reported via OnScheduleError")
+	}
+}
+
+func TestRunnerNilScheduleKeepsPreExistingBehavior(t *testing.T) {
+	syncer := &scriptedPageSyncer{pages: []ScanPage{{HasMore: false}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &SyncRunner{
+		Coordinator: syncer, SourceType: SourceSub2API,
+		PollInterval: 5 * time.Second, ReconcileInterval: time.Hour,
+		MaxBackoff: time.Minute, MaxPagesPerCycle: 10, MaxConsecutiveFailures: 10,
+		Sleep: func(context.Context, time.Duration) error { cancel(); return context.Canceled },
+	}
+	if err := runner.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(syncer.modes) != 1 || syncer.modes[0] != ScanReconcile {
+		t.Fatalf("a nil Schedule must keep forcing the initial cycle exactly as before: modes=%#v", syncer.modes)
 	}
 }
 
