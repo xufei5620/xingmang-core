@@ -202,10 +202,12 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/admin/refund-cases", s.require("admin", http.HandlerFunc(s.listRefundCases)))
 	s.mux.Handle("GET /api/v1/admin/eligibility-freezes", s.require("admin", http.HandlerFunc(s.listEligibilityFreezes)))
 	s.mux.Handle("POST /api/v1/admin/eligibility-freezes/{id}/resolve", s.require("admin", http.HandlerFunc(s.resolveEligibilityFreeze)))
-	// XM-INV-USER-LEDGER-QUERY (design section 3(E)): route path is a
-	// proposal -- the platform-side CR-0009 finalizes it. See
-	// docs/handoffs/XM-INV-USER-LEDGER-QUERY.md.
-	s.mux.Handle("GET /api/v1/admin/eligibility-ledger", s.require("admin", http.HandlerFunc(s.listEligibilityLedger)))
+	// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the operator "用户账本" view,
+	// finalizing XM-INV-USER-LEDGER-QUERY's provisional route (design
+	// section 3(E)) into these two paths. See
+	// docs/handoffs/XM-INV-CR0009-LEDGER-VIEW.md.
+	s.mux.Handle("GET /api/v1/admin/accounts/ledger", s.require("admin", http.HandlerFunc(s.listAccountLedger)))
+	s.mux.Handle("GET /api/v1/admin/accounts/{external_account_id}/ledger", s.require("admin", http.HandlerFunc(s.getAccountLedgerDetail)))
 	s.mux.Handle("POST /api/v1/admin/refund-cases/{id}/resolve", s.require("admin", http.HandlerFunc(s.resolveRefundCase)))
 	s.mux.Handle("POST /api/v1/admin/invoice-requests/{id}/email/requeue", s.require("admin", http.HandlerFunc(s.requeueInvoiceEmail)))
 	s.mux.Handle("POST /api/v1/admin/invoice-requests/{id}/review", s.require("admin", http.HandlerFunc(s.reviewRequest)))
