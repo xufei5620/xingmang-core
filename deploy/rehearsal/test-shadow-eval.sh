@@ -398,6 +398,38 @@ for needle in "invoice-20260903T011358Z" "0.1.0-rc77" "UNKNOWN_NEGATIVE_BALANCE"
 done
 echo "human summary: ok"
 
+# ---------------------------------------------------------------------------
+# shadow_eval_parse_config_user: the statically-testable half of resolving
+# the tools container's runtime uid/gid for the database-url secret file
+# (see shadow-eval.sh's resolve_tools_container_ids and its own comments --
+# a real production run hit "permission denied" reading that secret before
+# this resolution existed, because the file was root-owned while the tools
+# container runs as a non-root, non-root-owned uid).
+# ---------------------------------------------------------------------------
+assert_parse_config_user() {
+  local input=$1 expected_exit=$2 expected_output=$3 label=$4
+  local actual_output actual_exit
+  set +e
+  actual_output=$(shadow_eval_parse_config_user "$input")
+  actual_exit=$?
+  set -e
+  if [[ "$actual_exit" != "$expected_exit" || "$actual_output" != "$expected_output" ]]; then
+    fail "$label: expected exit=$expected_exit output='$expected_output', got exit=$actual_exit output='$actual_output'"
+  fi
+}
+
+# The real, current backend/Dockerfile pin for the tools stage.
+assert_parse_config_user "10001:10001" 0 "10001 10001" "uid:gid pin (the real Dockerfile value)"
+assert_parse_config_user "10001" 0 "10001 10001" "bare uid, gid defaults to uid"
+assert_parse_config_user "0:0" 0 "0 0" "root uid:gid (caller must separately refuse this)"
+assert_parse_config_user "0" 0 "0 0" "bare root uid"
+assert_parse_config_user "" 1 "" "empty Config.User (defaults to root) must not be treated as numeric"
+assert_parse_config_user "app" 1 "" "named user must fall back to asking the image"
+assert_parse_config_user "10001:" 1 "" "trailing colon with no group must not parse"
+assert_parse_config_user ":10001" 1 "" "leading colon with no uid must not parse"
+assert_parse_config_user "10001:app" 1 "" "numeric uid with a named group must not parse"
+echo "shadow_eval_parse_config_user: ok"
+
 if (( failures > 0 )); then
   echo "test-shadow-eval.sh: $failures failure(s)" >&2
   exit 1

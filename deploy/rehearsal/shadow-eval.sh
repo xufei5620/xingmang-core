@@ -94,6 +94,41 @@ tools_image="invoice-system-tools:$image_tag"
 postgres_image="invoice-postgres:$image_tag"
 docker image inspect "$tools_image" "$postgres_image" >/dev/null
 
+# resolve_tools_container_ids prints "<uid> <gid>" for the numeric user the
+# tools image's invoice-eligibility-shadow entrypoint actually runs as, via
+# shadow_eval_parse_config_user (shadow-eval-lib.sh; statically tested
+# there) when `Config.User` is already numeric -- backend/Dockerfile's tools
+# stage currently pins this literally (`USER 10001:10001`), so this is the
+# common case and starts no container just to answer the question -- or by
+# asking the image itself, via `id`, running as its own configured default
+# user, when `Config.User` is empty (root) or a name. The database-url
+# secret file below must be readable by exactly this uid: this container
+# runs `--read-only` as a non-root user, so a file merely readable by the
+# host's root (this script's own user) is not readable inside it -- a real
+# production run hit exactly this ("permission denied" reading
+# /run/secrets/database-url) before this resolution step existed.
+resolve_tools_container_ids() {
+  local image=$1
+  local config_user parsed uid gid
+  config_user=$(docker image inspect --format '{{.Config.User}}' "$image")
+  if parsed=$(shadow_eval_parse_config_user "$config_user"); then
+    read -r uid gid <<<"$parsed"
+  else
+    uid=$(docker run --pull never --rm --entrypoint id "$image" -u) || return 1
+    gid=$(docker run --pull never --rm --entrypoint id "$image" -g) || return 1
+    [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return 1
+  fi
+  printf '%s %s\n' "$uid" "$gid"
+}
+read -r tools_uid tools_gid < <(resolve_tools_container_ids "$tools_image") || {
+  echo "could not resolve the numeric user the tools image runs as" >&2
+  exit 1
+}
+[[ "$tools_uid" != 0 && "$tools_gid" != 0 ]] || {
+  echo "refusing to prepare a rehearsal secret for a tools image that runs as root" >&2
+  exit 1
+}
+
 if [[ -z "$backup_name" ]]; then
   latest_signature=$(ls -t "$BACKUP_DIR"/invoice-*.sha256.sig 2>/dev/null | head -1 || true)
   [[ -n "$latest_signature" ]] || { echo "no signed backup found under $BACKUP_DIR" >&2; exit 2; }
@@ -205,6 +240,14 @@ if mount -t tmpfs -o size=16m,mode=0700,nosuid,nodev,noexec tmpfs "$work_dir" 2>
 else
   echo "warning: could not mount a dedicated tmpfs for the rehearsal work directory; continuing on $work_dir" >&2
 fi
+# Owned by root, group-owned by the tools container's own gid, traversable
+# by that group alone (0710: rwx for root, --x for the group, nothing for
+# anyone else) -- not the file's own readability (that is the 0400 chown
+# below, and is what the container process actually needs), but defense in
+# depth against any other host-side user or process browsing in here while
+# the rehearsal runs.
+chown 0:"$tools_gid" "$work_dir"
+chmod 0710 "$work_dir"
 
 mkdir -p -- "$rehearsal_dir"
 
@@ -247,6 +290,11 @@ age --decrypt -i "$AGE_IDENTITY_FILE" "$database_backup" \
   | docker exec -i "$container" pg_restore -U postgres -d invoice --no-owner --no-acl --exit-on-error
 
 printf '%s\n' 'postgres://postgres:restore-drill-only@postgres:5432/invoice?sslmode=disable' >"$work_dir/database-url"
+# Owned by the tools container's own numeric user (resolved above) and
+# readable by no one else -- the container runs as this uid, non-root,
+# --read-only, so the file must be readable by exactly this uid or nothing
+# else in the container can open it.
+chown "$tools_uid:$tools_gid" "$work_dir/database-url"
 chmod 0400 "$work_dir/database-url"
 
 set +e
