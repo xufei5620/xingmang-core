@@ -596,6 +596,249 @@ if [[ "$none_summary" != *"migrations applied:  none"* ]]; then
 fi
 echo "migrations_applied handling: ok"
 
+# ---------------------------------------------------------------------------
+# Regression test for the exact disagreement a real production run (RC78)
+# hit: the whole restore/migrate/drain chain succeeded, the tool's own
+# ExitCode said "ready", but shadow-eval.sh's independently recomputed bash
+# verdict said "not_ready" and treated the disagreement as a
+# rehearsal-tooling failure. Root cause: "failed_accounts": [] (an empty,
+# non-nil array -- toReportFailedAccounts' own bug, since fixed) was not
+# recognized as "no failures" by shadow_eval_has_errors, which checked only
+# for the literal `null`. This is the real captured report (only UUIDs and
+# counts; nothing sensitive) -- copied verbatim, not hand-simplified, so this
+# test exercises the actual JSON layout the Go program produces, not an
+# idealized fixture.
+# ---------------------------------------------------------------------------
+write_fixture rc78-real-shadow-eval.json <<'JSON'
+{
+  "generated_at": "2026-09-03T08:26:23.060830505Z",
+  "backup_label": "invoice-20260903T050943Z",
+  "candidate_image_tag": "0.1.0-rc78",
+  "migrations_applied": [
+    "0020_eligibility_auto_reconcile.sql"
+  ],
+  "max_rounds": 200,
+  "rounds_run": 1,
+  "queue_drained": true,
+  "before": {
+    "accounts": [
+      {
+        "external_account_id": "058bcc7a-b48b-4b6c-99cb-e96894d20736",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      },
+      {
+        "external_account_id": "40bd883d-26fa-4938-b8c8-0f51c8b88686",
+        "eligibility_status": "frozen",
+        "open_freezes": 159
+      },
+      {
+        "external_account_id": "561ea459-1011-42e2-b882-4f75542eda4e",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      },
+      {
+        "external_account_id": "6706ea6a-c3c1-4dd6-945a-f7517f8be781",
+        "eligibility_status": "frozen",
+        "open_freezes": 13
+      },
+      {
+        "external_account_id": "98cce4c8-a03c-4b55-9049-61b650db2d0e",
+        "eligibility_status": "frozen",
+        "open_freezes": 68
+      },
+      {
+        "external_account_id": "acdcdce9-c7f4-4cb4-9a02-ce527849a440",
+        "eligibility_status": "frozen",
+        "open_freezes": 1
+      },
+      {
+        "external_account_id": "bcceeda6-b221-4389-b5d4-45e14c4fead2",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      },
+      {
+        "external_account_id": "f2c6515c-208c-4831-9abd-17b9d092a674",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      }
+    ],
+    "open_freezes_by_reason": [
+      {
+        "freeze_reason": "SOURCE_GAP",
+        "open": 79
+      },
+      {
+        "freeze_reason": "UNKNOWN_NEGATIVE_BALANCE",
+        "open": 158
+      },
+      {
+        "freeze_reason": "USAGE_EXCEEDS_LEDGER",
+        "open": 4
+      }
+    ],
+    "evaluations_by_status": [
+      {
+        "evaluation_status": "matched",
+        "count": 1800
+      },
+      {
+        "evaluation_status": "negative_frozen",
+        "count": 157
+      },
+      {
+        "evaluation_status": "positive_blip_ignored",
+        "count": 8
+      },
+      {
+        "evaluation_status": "positive_classified_non_cash",
+        "count": 6
+      },
+      {
+        "evaluation_status": "source_gap_frozen",
+        "count": 79
+      }
+    ]
+  },
+  "before_projection_health": {
+    "queued": 1,
+    "failed": 1,
+    "processing": 0,
+    "oldest_pending": "2026-09-03T05:09:43.950097Z",
+    "proof_pending": 0,
+    "oldest_proof_pending": "0001-01-01T00:00:00Z"
+  },
+  "after": {
+    "accounts": [
+      {
+        "external_account_id": "058bcc7a-b48b-4b6c-99cb-e96894d20736",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      },
+      {
+        "external_account_id": "40bd883d-26fa-4938-b8c8-0f51c8b88686",
+        "eligibility_status": "frozen",
+        "open_freezes": 159
+      },
+      {
+        "external_account_id": "561ea459-1011-42e2-b882-4f75542eda4e",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      },
+      {
+        "external_account_id": "6706ea6a-c3c1-4dd6-945a-f7517f8be781",
+        "eligibility_status": "frozen",
+        "open_freezes": 13
+      },
+      {
+        "external_account_id": "98cce4c8-a03c-4b55-9049-61b650db2d0e",
+        "eligibility_status": "frozen",
+        "open_freezes": 74
+      },
+      {
+        "external_account_id": "acdcdce9-c7f4-4cb4-9a02-ce527849a440",
+        "eligibility_status": "frozen",
+        "open_freezes": 1
+      },
+      {
+        "external_account_id": "bcceeda6-b221-4389-b5d4-45e14c4fead2",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      },
+      {
+        "external_account_id": "f2c6515c-208c-4831-9abd-17b9d092a674",
+        "eligibility_status": "active",
+        "open_freezes": 0
+      }
+    ],
+    "open_freezes_by_reason": [
+      {
+        "freeze_reason": "SOURCE_GAP",
+        "open": 85
+      },
+      {
+        "freeze_reason": "UNKNOWN_NEGATIVE_BALANCE",
+        "open": 158
+      },
+      {
+        "freeze_reason": "USAGE_EXCEEDS_LEDGER",
+        "open": 4
+      }
+    ],
+    "evaluations_by_status": [
+      {
+        "evaluation_status": "matched",
+        "count": 1800
+      },
+      {
+        "evaluation_status": "negative_frozen",
+        "count": 157
+      },
+      {
+        "evaluation_status": "positive_blip_ignored",
+        "count": 26
+      },
+      {
+        "evaluation_status": "positive_classified_non_cash",
+        "count": 6
+      },
+      {
+        "evaluation_status": "source_gap_frozen",
+        "count": 85
+      }
+    ]
+  },
+  "after_projection_health": {
+    "queued": 1,
+    "failed": 0,
+    "processing": 0,
+    "oldest_pending": "0001-01-01T00:00:00Z",
+    "proof_pending": 1,
+    "oldest_proof_pending": "2026-09-03T08:26:23.076659Z"
+  },
+  "failed_accounts": [],
+  "round_errors": null,
+  "new_freeze_reasons": null,
+  "has_projection_errors": false,
+  "verdict": "ready",
+  "verdict_reason": "no new freeze reason categories and no projection errors versus the post-restore baseline"
+}
+JSON
+
+assert_verdict rc78-real-shadow-eval.json ready 0 "RC78 real report (failed_accounts: [])"
+assert_new_reasons rc78-real-shadow-eval.json "" "RC78 real report"
+assert_has_errors rc78-real-shadow-eval.json false "RC78 real report (empty [] failed_accounts must not read as an error)"
+
+rc78_deltas=$(shadow_eval_freeze_deltas "$fixtures_dir/rc78-real-shadow-eval.json")
+if [[ "$rc78_deltas" != *"SOURCE_GAP 79 -> 85 (+6)"* ]]; then
+  fail "shadow_eval_freeze_deltas: expected the SOURCE_GAP 79 -> 85 (+6) delta line, got:
+$rc78_deltas"
+fi
+if [[ "$rc78_deltas" != *"UNKNOWN_NEGATIVE_BALANCE 158 -> 158 (0)"* ]]; then
+  fail "shadow_eval_freeze_deltas: expected an unchanged-reason delta line, got:
+$rc78_deltas"
+fi
+
+rc78_summary=$(shadow_eval_human_summary "$fixtures_dir/rc78-real-shadow-eval.json")
+if [[ "$rc78_summary" != *"SOURCE_GAP 79 -> 85 (+6)"* ]]; then
+  fail "human summary did not render the RC78 SOURCE_GAP delta"
+fi
+
+# A companion fixture derived from the same real report, with a genuinely
+# new freeze-reason category added to "after" -- both the growing
+# pre-existing SOURCE_GAP count (still not a regression on its own) and the
+# new category must be handled correctly together.
+write_fixture rc78-real-plus-new-reason-not-ready.json <"$fixtures_dir/rc78-real-shadow-eval.json"
+sed -i \
+  -e 's/"open": 85$/"open": 85\n      },\n      {\n        "freeze_reason": "AMBIGUOUS_EVENT_ORDER",\n        "open": 1/' \
+  -e 's/"verdict": "ready"/"verdict": "not_ready"/' \
+  -e 's/no new freeze reason categories and no projection errors versus the post-restore baseline/new freeze reason categories appeared after the candidate ran/' \
+  "$fixtures_dir/rc78-real-plus-new-reason-not-ready.json"
+
+assert_verdict rc78-real-plus-new-reason-not-ready.json not_ready 3 "RC78 real report plus a genuinely new reason"
+assert_new_reasons rc78-real-plus-new-reason-not-ready.json "AMBIGUOUS_EVENT_ORDER" "RC78 real report plus a genuinely new reason"
+echo "RC78 regression: ok"
+
 if (( failures > 0 )); then
   echo "test-shadow-eval.sh: $failures failure(s)" >&2
   exit 1
