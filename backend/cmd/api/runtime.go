@@ -120,6 +120,16 @@ func buildMockRuntime(authMode string) (appRuntime, error) {
 	return appRuntime{API: api, AuthMode: authMode, SourceMode: "mock"}, nil
 }
 
+// economicRescanActivityPollWindows is the XM-INV-AGENT-RESTART-GRACE part A
+// readiness-grace activity-window multiplier: how many SOURCE_POLL_INTERVAL
+// windows of continued source_economic_scan_cycles updated_at activity are
+// tolerated (see buildProductionRuntime's economicRescanActivityMaxAge and
+// postgresstore.economicRescanActivityWithinWindow) before an actively
+// rescanning stream is treated as stalled instead of in-progress. Two windows
+// gives one full cycle of margin beyond the single window a healthy,
+// continuously-updating cycle would already satisfy.
+const economicRescanActivityPollWindows = 2
+
 func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, error) {
 	if authMode != "oidc" || strings.ToLower(strings.TrimSpace(os.Getenv("SOURCE_MODE"))) != "agent" {
 		return appRuntime{}, errors.New("production requires AUTH_MODE=oidc and SOURCE_MODE=agent")
@@ -188,6 +198,15 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
+	// XM-INV-AGENT-RESTART-GRACE part A: the readiness-grace activity window
+	// for a source_economic_scan_cycles row proving an active rescan.
+	// Derived, not independently configured, from the same poll-interval and
+	// safety-delay budget the freshness check above already validates:
+	// economicRescanActivityPollWindows poll intervals of slack (an agent
+	// page/cycle can legitimately take up to about one poll interval to post
+	// its next batch) plus the safety delay (the same horizon margin the
+	// stream's own economic scan already reserves).
+	economicRescanActivityMaxAge := economicRescanActivityPollWindows*sourcePollInterval + economicSafetyDelay
 	if err = validateSourceFreshnessBudget(economicWatermarkMaxAge, economicSafetyDelay, sourcePollInterval); err != nil {
 		return appRuntime{}, err
 	}
@@ -205,10 +224,11 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	}
 	appService, err := application.NewService(store, keyring, settingsService, application.Options{
 		MinimumRequestMinor: settings.MinimumRequestMinor, DownloadBaseURL: publicOrigin,
-		EmailTemplateVersion:          "invoice-ready-v1",
-		SourceEconomicHeartbeatMaxAge: economicHeartbeatMaxAge,
-		SourceEconomicWatermarkMaxAge: economicWatermarkMaxAge,
-		SourceIdentitiesMaxAge:        identitiesMaxAge,
+		EmailTemplateVersion:               "invoice-ready-v1",
+		SourceEconomicHeartbeatMaxAge:      economicHeartbeatMaxAge,
+		SourceEconomicWatermarkMaxAge:      economicWatermarkMaxAge,
+		SourceIdentitiesMaxAge:             identitiesMaxAge,
+		SourceEconomicRescanActivityMaxAge: economicRescanActivityMaxAge,
 	})
 	if err != nil {
 		return appRuntime{}, err
@@ -574,6 +594,35 @@ func (w *eligibilityProofPendingWarner) warnIfStale(health postgresstore.Eligibi
 		"oldest_proof_pending_age", now.Sub(health.OldestProofPending).Round(time.Second).String())
 }
 
+// readySourceStreamAllowedReasons and notReadySourceStreamAllowedReasons are
+// the exact non-fatal reason combinations validateSourceRuntimeReadiness
+// tolerates for, respectively, a Ready and a not-Ready required source
+// stream -- everything else is treated as a genuine problem and fails
+// /readyz. XM-INV-AGENT-RESTART-GRACE part A added ECONOMIC_RESCAN_ACTIVE
+// alongside the pre-existing EVENTS_PENDING tolerance.
+var (
+	readySourceStreamAllowedReasons    = map[string]bool{"ECONOMIC_RESCAN_ACTIVE": true}
+	notReadySourceStreamAllowedReasons = map[string]bool{"EVENTS_PENDING": true, "ECONOMIC_RESCAN_ACTIVE": true}
+)
+
+func reasonsWithinSet(reasons []string, allowed map[string]bool) bool {
+	for _, reason := range reasons {
+		if !allowed[reason] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsReason(reasons []string, want string) bool {
+	for _, reason := range reasons {
+		if reason == want {
+			return true
+		}
+	}
+	return false
+}
+
 func validateSourceRuntimeReadiness(report postgresstore.SourceHealthReport) error {
 	requiredStreams := map[string]struct{}{"payments": {}, "identities": {}, "usage": {}, "credits": {}, "balances": {}}
 	type sourceState struct {
@@ -613,17 +662,23 @@ func validateSourceRuntimeReadiness(report postgresstore.SourceHealthReport) err
 		}
 		switch {
 		case item.Ready:
-			if len(item.Reasons) != 0 || item.PendingEvents != 0 || item.DeadEvents != 0 {
+			// XM-INV-AGENT-RESTART-GRACE part A: Ready may now carry the
+			// non-fatal ECONOMIC_RESCAN_ACTIVE reason (an active, bounded
+			// rescan downgraded from ECONOMIC_WATERMARK_STALE -- see
+			// evaluateSourceStreamHealth), and nothing else.
+			if item.PendingEvents != 0 || item.DeadEvents != 0 || !reasonsWithinSet(item.Reasons, readySourceStreamAllowedReasons) {
 				return errors.New("ready source stream has inconsistent health evidence")
 			}
 		case item.DeadEvents != 0:
 			return errors.New("required source stream contains dead events")
-		case item.PendingEvents <= 0 || len(item.Reasons) != 1 || item.Reasons[0] != "EVENTS_PENDING":
+		case item.PendingEvents <= 0 || !containsReason(item.Reasons, "EVENTS_PENDING") ||
+			!reasonsWithinSet(item.Reasons, notReadySourceStreamAllowedReasons):
 			return errors.New("required source streams are stale, blocked, dead, or version-mismatched")
 		}
 		// The preceding SourceIngestHealth check already bounds the oldest
-		// pending event to 15 minutes. This exact pending-only state must not
-		// remove an otherwise healthy API from service; irreversible invoice
+		// pending event to 15 minutes. This exact pending-only state (whether
+		// or not it is joined by an active, bounded rescan) must not remove
+		// an otherwise healthy API from service; irreversible invoice
 		// operations still use the stricter per-stream freshness policy.
 	}
 	if !enabledTypes[domain.SourceSub2API] || !enabledTypes[domain.SourceNewAPI] {

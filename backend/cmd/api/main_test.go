@@ -176,6 +176,88 @@ func TestSourceRuntimeReadinessAllowsOnlyBoundedPendingWork(t *testing.T) {
 	}
 }
 
+// TestSourceRuntimeReadinessAllowsActiveRescanGrace is the /readyz-layer
+// counterpart of postgresstore's evaluateSourceStreamHealth tests
+// (XM-INV-AGENT-RESTART-GRACE part A): validateSourceRuntimeReadiness must
+// accept Ready=true streams carrying only the non-fatal ECONOMIC_RESCAN_ACTIVE
+// reason, and must accept a not-Ready stream whose only reasons are
+// EVENTS_PENDING and/or ECONOMIC_RESCAN_ACTIVE together -- mirroring the
+// pre-existing EVENTS_PENDING-alone tolerance -- while still rejecting any
+// other reason, whether alone or alongside these two.
+func TestSourceRuntimeReadinessAllowsActiveRescanGrace(t *testing.T) {
+	buildReport := func(mutate func(*postgresstore.SourceStreamHealth)) postgresstore.SourceHealthReport {
+		report := postgresstore.SourceHealthReport{Ready: true}
+		for _, source := range []struct {
+			id         string
+			sourceType domain.SourceType
+		}{{"sub2", domain.SourceSub2API}, {"new", domain.SourceNewAPI}} {
+			for _, stream := range []string{"payments", "identities", "usage", "credits", "balances"} {
+				item := postgresstore.SourceStreamHealth{
+					SourceInstanceID: source.id, SourceType: source.sourceType, SourceEnabled: true,
+					StreamID: stream, Ready: true,
+				}
+				report.Items = append(report.Items, item)
+			}
+		}
+		mutate(&report.Items[0])
+		report.Ready = report.Items[0].Ready
+		for _, item := range report.Items[1:] {
+			report.Ready = report.Ready && item.Ready
+		}
+		return report
+	}
+
+	for name, fixture := range map[string]struct {
+		mutate func(*postgresstore.SourceStreamHealth)
+		wantOK bool
+	}{
+		"ready with only the active-rescan reason is accepted": {
+			mutate: func(item *postgresstore.SourceStreamHealth) {
+				item.Reasons = []string{"ECONOMIC_RESCAN_ACTIVE"}
+			},
+			wantOK: true,
+		},
+		"not ready with only pending plus active-rescan is accepted, same as pending alone": {
+			mutate: func(item *postgresstore.SourceStreamHealth) {
+				item.Ready, item.PendingEvents, item.Reasons = false, 1, []string{"ECONOMIC_RESCAN_ACTIVE", "EVENTS_PENDING"}
+			},
+			wantOK: true,
+		},
+		"ready with the active-rescan reason plus pending events is inconsistent": {
+			mutate: func(item *postgresstore.SourceStreamHealth) {
+				item.PendingEvents, item.Reasons = 1, []string{"ECONOMIC_RESCAN_ACTIVE"}
+			},
+			wantOK: false,
+		},
+		"ready with the active-rescan reason plus a genuine fatal reason is inconsistent": {
+			mutate: func(item *postgresstore.SourceStreamHealth) {
+				item.Ready, item.Reasons = false, []string{"ECONOMIC_RESCAN_ACTIVE", "STREAM_STALE"}
+			},
+			wantOK: false,
+		},
+		"not ready with only the active-rescan reason and no pending events is inconsistent": {
+			mutate: func(item *postgresstore.SourceStreamHealth) {
+				item.Ready, item.Reasons = false, []string{"ECONOMIC_RESCAN_ACTIVE"}
+			},
+			wantOK: false,
+		},
+		"dead events alongside the active-rescan reason still fails closed": {
+			mutate: func(item *postgresstore.SourceStreamHealth) {
+				item.Ready, item.PendingEvents, item.DeadEvents, item.Reasons = false, 1, 1, []string{"ECONOMIC_RESCAN_ACTIVE", "EVENTS_PENDING"}
+			},
+			wantOK: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := buildReport(fixture.mutate)
+			err := validateSourceRuntimeReadiness(report)
+			if (err == nil) != fixture.wantOK {
+				t.Fatalf("validateSourceRuntimeReadiness err=%v want ok=%t report_item=%#v", err, fixture.wantOK, report.Items[0])
+			}
+		})
+	}
+}
+
 func TestSourceRuntimeReadinessRejectsInconsistentHealthEvidence(t *testing.T) {
 	healthy := postgresstore.SourceHealthReport{Ready: true}
 	for _, source := range []struct {

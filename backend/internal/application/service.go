@@ -43,19 +43,26 @@ type Options struct {
 	SourceEconomicHeartbeatMaxAge time.Duration
 	SourceEconomicWatermarkMaxAge time.Duration
 	SourceIdentitiesMaxAge        time.Duration
+	// SourceEconomicRescanActivityMaxAge (XM-INV-AGENT-RESTART-GRACE part A)
+	// is independently optional: zero disables the readiness grace entirely
+	// (an ECONOMIC_WATERMARK_STALE finding is never downgraded), which is
+	// always safe -- it is not part of the SourceEconomic*/SourceIdentities
+	// all-or-nothing bundle checked below.
+	SourceEconomicRescanActivityMaxAge time.Duration
 }
 
 type Service struct {
-	store                         *postgresstore.Store
-	keys                          securefields.Keyring
-	settings                      SettingsProvider
-	minimumRequestMinor           atomic.Int64
-	publicBaseURL                 *url.URL
-	emailTemplateVersion          string
-	sourceEconomicHeartbeatMaxAge time.Duration
-	sourceEconomicWatermarkMaxAge time.Duration
-	sourceIdentitiesMaxAge        time.Duration
-	now                           func() time.Time
+	store                              *postgresstore.Store
+	keys                               securefields.Keyring
+	settings                           SettingsProvider
+	minimumRequestMinor                atomic.Int64
+	publicBaseURL                      *url.URL
+	emailTemplateVersion               string
+	sourceEconomicHeartbeatMaxAge      time.Duration
+	sourceEconomicWatermarkMaxAge      time.Duration
+	sourceIdentitiesMaxAge             time.Duration
+	sourceEconomicRescanActivityMaxAge time.Duration
+	now                                func() time.Time
 }
 
 func NewService(store *postgresstore.Store, keys securefields.Keyring, settings SettingsProvider, options Options) (*Service, error) {
@@ -103,11 +110,16 @@ func NewService(store *postgresstore.Store, keys securefields.Keyring, settings 
 			identitiesMaxAge < 30*time.Second || identitiesMaxAge > 24*time.Hour) {
 		return nil, errors.New("source freshness thresholds must be between 30 seconds and 24 hours")
 	}
+	economicRescanActivityMaxAge := options.SourceEconomicRescanActivityMaxAge
+	if economicRescanActivityMaxAge != 0 && (economicRescanActivityMaxAge < 30*time.Second || economicRescanActivityMaxAge > 24*time.Hour) {
+		return nil, errors.New("source economic rescan activity threshold must be between 30 seconds and 24 hours")
+	}
 	service := &Service{
 		store: store, keys: keys, settings: settings, publicBaseURL: base,
 		emailTemplateVersion: template, sourceEconomicHeartbeatMaxAge: economicHeartbeatMaxAge,
 		sourceEconomicWatermarkMaxAge: economicWatermarkMaxAge,
-		sourceIdentitiesMaxAge:        identitiesMaxAge, now: func() time.Time { return time.Now().UTC() },
+		sourceIdentitiesMaxAge:        identitiesMaxAge, sourceEconomicRescanActivityMaxAge: economicRescanActivityMaxAge,
+		now: func() time.Time { return time.Now().UTC() },
 	}
 	service.minimumRequestMinor.Store(minimum)
 	return service, nil
@@ -115,9 +127,11 @@ func NewService(store *postgresstore.Store, keys securefields.Keyring, settings 
 
 func (s *Service) sourceFreshnessPolicy() postgresstore.SourceFreshnessPolicy {
 	return postgresstore.SourceFreshnessPolicy{
-		EconomicHeartbeatMaxAge: s.sourceEconomicHeartbeatMaxAge,
-		EconomicWatermarkMaxAge: s.sourceEconomicWatermarkMaxAge,
-		IdentitiesMaxAge:        s.sourceIdentitiesMaxAge, Now: s.now().UTC(),
+		EconomicHeartbeatMaxAge:      s.sourceEconomicHeartbeatMaxAge,
+		EconomicWatermarkMaxAge:      s.sourceEconomicWatermarkMaxAge,
+		IdentitiesMaxAge:             s.sourceIdentitiesMaxAge,
+		EconomicRescanActivityMaxAge: s.sourceEconomicRescanActivityMaxAge,
+		Now:                          s.now().UTC(),
 	}
 }
 
