@@ -105,6 +105,7 @@ import type {
   EligibilityFreeze,
   EligibilityFreezeFilters,
   EligibilityFreezeReason,
+  EligibilityProjectionHealth,
   FundingOrder,
   InvoiceProfile,
   InvoiceProfileType,
@@ -5358,6 +5359,111 @@ const sourceStreamLabels: Record<SourceStreamHealth["streamId"], string> = {
   balances: "余额对账",
 };
 
+// EligibilityProjectionCard surfaces the eligibility-projection worker's own
+// queue grading (XM-INV-PROJECTION-FAILURE-GRADING) next to the per-stream
+// rows. The counters are global -- one queue serves every account on both
+// platforms -- so the card says so rather than sitting inside the
+// platform-filtered stream table above, where an embedded admin would read
+// them as this platform's numbers.
+//
+// Dead is the one counter that is never normal: a job stops retrying after
+// eight graded failures and then only an operator repair
+// (invoice-eligibility-repair --kind=projection-requeue-dead) moves it.
+function EligibilityProjectionCard({
+  health,
+  loading,
+  loaded,
+}: {
+  health?: EligibilityProjectionHealth;
+  loading: boolean;
+  loaded: boolean;
+}) {
+  const healthy = health ? health.dead === 0 : undefined;
+  return (
+    <section className="card admin-table-card">
+      <div className="card-heading split-heading">
+        <div>
+          <p className="eyebrow">Eligibility projection</p>
+          <h2>资格投影队列</h2>
+          <small>
+            全局队列，两个平台的全部账号共用；死信需运维修复后才会继续。
+          </small>
+        </div>
+        {health ? (
+          <span className={`badge ${healthy ? "badge-green" : "badge-red"}`}>
+            {healthy ? "无死信" : `死信 ${health.dead}`}
+          </span>
+        ) : null}
+      </div>
+      {loading ? (
+        <LoadingBlock />
+      ) : !health ? (
+        <EmptyState
+          icon={<Network />}
+          title="服务未返回资格投影明细"
+          description={
+            loaded
+              ? "同步状态接口未包含该字段，通常表示服务端版本早于该能力；请核对开票服务版本，暂不能据此判断队列是否积压。"
+              : "尚未读取到同步状态。"
+          }
+        />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>排队 / 处理中</th>
+                <th>重试中</th>
+                <th>死信</th>
+                <th>等待余额证明</th>
+                <th>最早未完成</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <strong>
+                    {health.queued} / {health.processing}
+                  </strong>
+                  <small>排队等待认领 / 正在处理</small>
+                </td>
+                <td>
+                  <strong>{health.retrying}</strong>
+                  <small>按 30s 起指数退避重试</small>
+                </td>
+                <td>
+                  <strong>{health.dead}</strong>
+                  <small>
+                    {health.dead === 0
+                      ? "无需人工介入"
+                      : "已停止重试，需运维修复"}
+                  </small>
+                </td>
+                <td>
+                  <strong>{health.proofPending}</strong>
+                  <small>
+                    {health.oldestProofPendingAt
+                      ? `最早 ${dateTime(health.oldestProofPendingAt)}`
+                      : "无等待中的证明"}
+                  </small>
+                </td>
+                <td>
+                  <strong>
+                    {health.oldestPendingAt
+                      ? dateTime(health.oldestPendingAt)
+                      : "队列已排空"}
+                  </strong>
+                  <small>超过 15 分钟未完成才计入就绪门禁</small>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SourceHealthPage() {
   const [report, setReport] = useState<SourceHealthReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -5557,6 +5663,11 @@ function SourceHealthPage() {
           </div>
         )}
       </section>
+      <EligibilityProjectionCard
+        health={report?.eligibilityProjection}
+        loading={loading && !report}
+        loaded={Boolean(report)}
+      />
     </PortalLayout>
   );
 }

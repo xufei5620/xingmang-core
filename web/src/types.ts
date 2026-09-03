@@ -440,10 +440,28 @@ export interface SourceStreamHealth {
   reasons: string[];
 }
 
+// EligibilityProjectionHealth is the eligibility-projection worker's own
+// queue grading (XM-INV-PROJECTION-FAILURE-GRADING), reported alongside the
+// per-stream rows by the same admin endpoint. It is global rather than
+// per-source: one queue serves every account on both platforms.
+export interface EligibilityProjectionHealth {
+  queued: number;
+  processing: number;
+  retrying: number;
+  dead: number;
+  proofPending: number;
+  oldestPendingAt?: string;
+  oldestProofPendingAt?: string;
+}
+
 export interface SourceHealthReport {
   ready: boolean;
   degradedHTTP: boolean;
   items: SourceStreamHealth[];
+  // Optional because a server predating XM-INV-PROJECTION-FAILURE-GRADING
+  // omits the block entirely; the screen says so rather than showing zeros
+  // that would read as a healthy queue.
+  eligibilityProjection?: EligibilityProjectionHealth;
 }
 
 export interface SubmitInvoicePayload {

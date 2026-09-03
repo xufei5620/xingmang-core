@@ -785,6 +785,14 @@ export const mockInvoiceApi: InvoiceApiClient = {
           reasons: [],
         })),
       ),
+      eligibilityProjection: {
+        queued: 2,
+        processing: 1,
+        retrying: 0,
+        dead: 0,
+        proofPending: 0,
+        oldestPendingAt: new Date(Date.now() - 45_000).toISOString(),
+      },
     };
   },
 

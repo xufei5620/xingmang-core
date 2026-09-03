@@ -10,6 +10,7 @@ import type {
   DashboardSummary,
   EligibilityFreeze,
   EligibilityFreezeFilters,
+  EligibilityProjectionHealth,
   FundingOrder,
   InvoicePolicy,
   InvoiceProfile,
@@ -220,6 +221,17 @@ type BackendSourceHealth = {
     ready: boolean;
     reasons: string[];
   }>;
+  // XM-INV-PROJECTION-FAILURE-GRADING added this block; a server from before
+  // that slice omits it, which is why it is optional here.
+  eligibility_projection?: {
+    queued: number;
+    processing: number;
+    retrying: number;
+    dead: number;
+    proof_pending: number;
+    oldest_pending?: string;
+    oldest_proof_pending?: string;
+  };
 };
 
 type BackendPaymentCandidate = {
@@ -1772,6 +1784,57 @@ function mapSourceHealth(
     ready: !degradedHTTP && value.ready && requiredStreamsReady,
     degradedHTTP,
     items,
+    eligibilityProjection: mapEligibilityProjectionHealth(
+      value.eligibility_projection,
+    ),
+  };
+}
+
+// mapEligibilityProjectionHealth validates the optional projection block with
+// the same strictness the per-stream rows above get: a present-but-malformed
+// block means the same broken server contract, and silently rendering part of
+// it would be worse than failing the screen closed. An ABSENT block is not an
+// error -- it is what a server predating this field returns -- and maps to
+// undefined so the screen can say the counters were not reported instead of
+// showing zeros that look like an idle, healthy queue.
+function mapEligibilityProjectionHealth(
+  value: BackendSourceHealth["eligibility_projection"],
+): EligibilityProjectionHealth | undefined {
+  if (value === undefined) return undefined;
+  const counters = [
+    value.queued,
+    value.processing,
+    value.retrying,
+    value.dead,
+    value.proof_pending,
+  ];
+  const timestamps = [value.oldest_pending, value.oldest_proof_pending];
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !counters.every(
+      (counter) => Number.isSafeInteger(counter) && counter >= 0,
+    ) ||
+    !timestamps.every(
+      (timestamp) =>
+        timestamp === undefined ||
+        (typeof timestamp === "string" &&
+          timestamp.length <= 64 &&
+          Number.isFinite(Date.parse(timestamp))),
+    )
+  ) {
+    throw new InvoiceApiError("资格投影健康明细包含无效字段。", {
+      code: "INVALID_SOURCE_HEALTH_RESPONSE",
+    });
+  }
+  return {
+    queued: value.queued,
+    processing: value.processing,
+    retrying: value.retrying,
+    dead: value.dead,
+    proofPending: value.proof_pending,
+    oldestPendingAt: value.oldest_pending,
+    oldestProofPendingAt: value.oldest_proof_pending,
   };
 }
 
