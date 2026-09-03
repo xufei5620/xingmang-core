@@ -51,6 +51,38 @@ Redis, Mailpit, source-agent, or object-storage ports.
 The mock source returns the versioned example contract. It has no route to a
 production source.
 
+### Integration-test databases, one per worktree
+
+Every integration test in this repository skips unless
+`INVOICE_TEST_DATABASE_URL` is set (the source agents use
+`SOURCE_AGENT_TEST_DATABASE_URL`). Point it at the local PostgreSQL above, and
+give **each worktree its own database inside that one server**:
+
+```bash
+docker exec invoice-test-pg psql -U postgres -c "CREATE DATABASE invoice_test_<slug>"
+export INVOICE_TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/invoice_test_<slug>
+go test -p 1 -count=1 ./...
+```
+
+`<slug>` is a short name for the worktree's slice; the release gate uses
+`invoice_test_release` and must not be shared with slice work in progress.
+
+The per-worktree database is about **contention, not correctness**. The tests
+already isolate themselves within a database: each integration test creates a
+uniquely named `invoice_app_test_<uuid>` schema, sets `search_path` to it, and
+drops it on cleanup, so two suites in the same database do not see each
+other's rows. What they do share is one PostgreSQL server's connection
+capacity, and suites running in parallel across worktrees exhaust it — the
+failure looks like a connection-pool timeout in `postgresstore`, `auth` or
+`finance` rather than an assertion failure, which is why such a timeout is
+treated as environmental and re-run in isolation rather than investigated as
+a product defect. A database per worktree keeps each suite's pools accounted
+for separately and keeps `\l` readable when a run has to be inspected after
+the fact.
+
+Drop a slice's database when its worktree goes away; nothing depends on the
+data surviving a run.
+
 ## 2. OIDC
 
 Production uses one central OIDC issuer and distinct clients:
