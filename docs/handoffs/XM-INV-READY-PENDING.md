@@ -227,3 +227,13 @@ this slice's one commit (`dbe58c1`) — "1 commits scanned... no leaks found".
 2. `eligibility_projection_jobs` has no admin/ops HTTP surface today (confirmed above). If one is
    ever added, it should read `ProofPending`/`OldestProofPending` honestly rather than lumping them
    into a single "pending" number, for the same reason readiness now separates them.
+
+## Follow-up: XM-INV-READY-LEASE (2026-09-03)
+
+Risk 1 above was correct to flag, but production hit a different edge than a stalled worker: a
+confirmed 03:17:24Z false positive traced back to `EligibilityProjectionHealth` counting a
+`status='processing'` row toward `OldestPending` unconditionally, even while its lease was still
+live and the batch claim (`ProcessEligibilityProjectionJobs`) simply hadn't reached its turn yet in
+the serial per-account loop. See `docs/handoffs/XM-INV-READY-LEASE.md` for the full mechanism and
+fix (a live lease, and a small worker-reclaim grace on the proof-pending window, are now both
+excluded from `OldestPending` alongside the proof-pending exclusion documented above).
