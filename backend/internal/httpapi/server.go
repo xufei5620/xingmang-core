@@ -202,6 +202,10 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/admin/refund-cases", s.require("admin", http.HandlerFunc(s.listRefundCases)))
 	s.mux.Handle("GET /api/v1/admin/eligibility-freezes", s.require("admin", http.HandlerFunc(s.listEligibilityFreezes)))
 	s.mux.Handle("POST /api/v1/admin/eligibility-freezes/{id}/resolve", s.require("admin", http.HandlerFunc(s.resolveEligibilityFreeze)))
+	// XM-INV-USER-LEDGER-QUERY (design section 3(E)): route path is a
+	// proposal -- the platform-side CR-0009 finalizes it. See
+	// docs/handoffs/XM-INV-USER-LEDGER-QUERY.md.
+	s.mux.Handle("GET /api/v1/admin/eligibility-ledger", s.require("admin", http.HandlerFunc(s.listEligibilityLedger)))
 	s.mux.Handle("POST /api/v1/admin/refund-cases/{id}/resolve", s.require("admin", http.HandlerFunc(s.resolveRefundCase)))
 	s.mux.Handle("POST /api/v1/admin/invoice-requests/{id}/email/requeue", s.require("admin", http.HandlerFunc(s.requeueInvoiceEmail)))
 	s.mux.Handle("POST /api/v1/admin/invoice-requests/{id}/review", s.require("admin", http.HandlerFunc(s.reviewRequest)))

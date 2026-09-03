@@ -30,6 +30,9 @@ type fakeSourceFilterOperations struct {
 
 	eligibilityFreezesQuery postgresstore.EligibilityFreezePageQuery
 	eligibilityFreezesPage  postgresstore.EligibilityFreezePage
+
+	eligibilityLedgerQuery postgresstore.EligibilityLedgerPageQuery
+	eligibilityLedgerPage  postgresstore.EligibilityLedgerPage
 }
 
 func (f *fakeSourceFilterOperations) SourceHealth(context.Context) (postgresstore.SourceHealthReport, error) {
@@ -61,6 +64,10 @@ func (f *fakeSourceFilterOperations) ListEligibilityFreezesPage(_ context.Contex
 }
 func (f *fakeSourceFilterOperations) ResolveEligibilityFreeze(context.Context, string, string, int64, string, string) (postgresstore.EligibilityFreeze, error) {
 	panic("unused in this test")
+}
+func (f *fakeSourceFilterOperations) ListEligibilityLedgerPage(_ context.Context, in postgresstore.EligibilityLedgerPageQuery) (postgresstore.EligibilityLedgerPage, error) {
+	f.eligibilityLedgerQuery = in
+	return f.eligibilityLedgerPage, nil
 }
 func (f *fakeSourceFilterOperations) ListUserEligibilitySummaries(context.Context, string, domain.SourceType) ([]application.UserEligibilitySummary, error) {
 	panic("unused in this test")

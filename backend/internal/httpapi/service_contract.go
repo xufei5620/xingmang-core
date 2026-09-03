@@ -55,6 +55,7 @@ type OperationsService interface {
 	ListRefundCasesPage(context.Context, postgresstore.RefundCasePageQuery) (postgresstore.RefundCasePage, error)
 	ListEligibilityFreezesPage(context.Context, postgresstore.EligibilityFreezePageQuery) (postgresstore.EligibilityFreezePage, error)
 	ResolveEligibilityFreeze(context.Context, string, string, int64, string, string) (postgresstore.EligibilityFreeze, error)
+	ListEligibilityLedgerPage(context.Context, postgresstore.EligibilityLedgerPageQuery) (postgresstore.EligibilityLedgerPage, error)
 	ListUserEligibilitySummaries(context.Context, string, domain.SourceType) ([]application.UserEligibilitySummary, error)
 	ResolveRefundCase(context.Context, string, string, string, string, string) (postgresstore.RefundCase, error)
 	GetInvoiceDeliveryState(context.Context, string, string, bool, domain.SourceType) (postgresstore.InvoiceDeliveryState, error)
