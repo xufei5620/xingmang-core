@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# shadow-eval.sh -- XM-INV-SHADOW-EVAL release rehearsal.
+#
+# Restores a signed production database backup into a throwaway, isolated
+# PostgreSQL container, runs a candidate release's eligibility-projection
+# worker against that restored copy until its queue drains (or --max-rounds
+# is reached), and reports the delta in open freezes/errors versus the
+# state immediately after restore. It never touches the running production
+# Compose projects (invoice-system-prod_*, or the source-agent/idp
+# projects): everything it starts is a bare, unnamed-project `docker
+# network`/`docker run` pair on its own network, torn down before this
+# script exits.
+#
+# Usage:
+#   BACKUP_DIR=/root/invoice-system/backups \
+#   BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
+#   AGE_IDENTITY_FILE=/offline/backup-age-identity.txt \
+#     bash deploy/rehearsal/shadow-eval.sh --image-tag 0.1.0-rc77 \
+#       [--backup invoice-20260903T011358Z] [--max-rounds 200] [--batch-limit 25]
+#
+# Exit codes:
+#   0  the candidate is ready: no new open freeze-reason category and no
+#      projection error versus the snapshot taken immediately after restore.
+#   3  the candidate regressed: a new freeze-reason category or a
+#      projection error appeared. The written report explains which.
+#   2  usage error (bad flag, missing/invalid env, image not loaded).
+#   1  any other execution failure (decrypt/restore/signature/Docker).
+set -Eeuo pipefail
+umask 077
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=deploy/backup/docker-cleanup-state.sh
+source "$script_dir/../backup/docker-cleanup-state.sh"
+# shellcheck source=deploy/rehearsal/shadow-eval-lib.sh
+source "$script_dir/shadow-eval-lib.sh"
+capacity_validator="$script_dir/../backup/validate-restore-postgres-capacity.sh"
+test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator"
+
+backup_name=""
+image_tag=""
+max_rounds=200
+batch_limit=25
+tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE:-16g}
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: shadow-eval.sh --image-tag <0.1.0-rcNN> [--backup <invoice-TIMESTAMP>]
+                       [--max-rounds N] [--batch-limit N]
+USAGE
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --backup)
+      (( $# >= 2 )) || { echo '--backup requires a value' >&2; exit 2; }
+      backup_name=$2; shift 2 ;;
+    --image-tag)
+      (( $# >= 2 )) || { echo '--image-tag requires a value' >&2; exit 2; }
+      image_tag=$2; shift 2 ;;
+    --max-rounds)
+      (( $# >= 2 )) || { echo '--max-rounds requires a value' >&2; exit 2; }
+      max_rounds=$2; shift 2 ;;
+    --batch-limit)
+      (( $# >= 2 )) || { echo '--batch-limit requires a value' >&2; exit 2; }
+      batch_limit=$2; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+[[ "$image_tag" =~ ^0\.1\.0-rc[0-9]+$ ]] || { echo "--image-tag must look like 0.1.0-rcNN, got '$image_tag'" >&2; exit 2; }
+[[ "$max_rounds" =~ ^[1-9][0-9]{0,3}$ ]] || { echo '--max-rounds must be an integer 1-9999' >&2; exit 2; }
+[[ "$batch_limit" =~ ^[1-9][0-9]?$ ]] || { echo '--batch-limit must be an integer 1-99' >&2; exit 2; }
+# An explicit --backup's shape is pure input validation and belongs with the
+# other flag checks above -- before any environment or tool-availability
+# check below -- so a typo'd backup name fails immediately regardless of
+# what is or is not installed/configured on the host.
+[[ -z "$backup_name" || "$backup_name" =~ ^invoice-[0-9]{8}T[0-9]{6}Z$ ]] || { echo "--backup must look like invoice-TIMESTAMP, got '$backup_name'" >&2; exit 2; }
+
+: "${BACKUP_DIR:?set BACKUP_DIR to the signed backup directory}"
+: "${BACKUP_ALLOWED_SIGNERS_FILE:?set the offline-reviewed OpenSSH allowed_signers file}"
+: "${AGE_IDENTITY_FILE:?set AGE_IDENTITY_FILE to the offline restore identity}"
+rehearsal_root=${REHEARSAL_ROOT:-/root/invoice-system/rehearsals}
+
+for command in age docker sha256sum ssh-keygen stat grep awk comm sort mktemp; do command -v "$command" >/dev/null; done
+test -d "$BACKUP_DIR"
+test -f "$BACKUP_ALLOWED_SIGNERS_FILE" && test ! -L "$BACKUP_ALLOWED_SIGNERS_FILE" && test -s "$BACKUP_ALLOWED_SIGNERS_FILE"
+(( $(stat -c '%s' "$BACKUP_ALLOWED_SIGNERS_FILE") <= 65536 ))
+test -f "$AGE_IDENTITY_FILE" && test ! -L "$AGE_IDENTITY_FILE" && test -s "$AGE_IDENTITY_FILE"
+
+tools_image="invoice-system-tools:$image_tag"
+postgres_image="invoice-postgres:$image_tag"
+docker image inspect "$tools_image" "$postgres_image" >/dev/null
+
+if [[ -z "$backup_name" ]]; then
+  latest_signature=$(ls -t "$BACKUP_DIR"/invoice-*.sha256.sig 2>/dev/null | head -1 || true)
+  [[ -n "$latest_signature" ]] || { echo "no signed backup found under $BACKUP_DIR" >&2; exit 2; }
+  backup_name=$(basename "$latest_signature")
+  backup_name=${backup_name%.sha256.sig}
+  # The resolved name still gets the identical shape check the explicit
+  # --backup case already passed above -- a signed-looking file that
+  # somehow does not match the expected naming convention must not be used.
+  [[ "$backup_name" =~ ^invoice-[0-9]{8}T[0-9]{6}Z$ ]] || { echo "resolved latest backup has an unexpected name: '$backup_name'" >&2; exit 1; }
+fi
+
+database_backup="$BACKUP_DIR/$backup_name.postgres.dump.age"
+manifest_file="$BACKUP_DIR/$backup_name.sha256"
+signature_file="$manifest_file.sig"
+for file in "$database_backup" "$manifest_file" "$signature_file"; do
+  test -f "$file" && test ! -L "$file" && test -s "$file"
+done
+(( $(stat -c '%s' "$manifest_file") <= 65536 ))
+(( $(stat -c '%s' "$signature_file") <= 16384 ))
+
+backup_signature_namespace=solov-invoice-backup-v1
+backup_signer_identity=invoice-backup
+validate_allowed_signers() {
+  local count=0
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^invoice-backup[[:space:]]+namespaces=\"solov-invoice-backup-v1\"[[:space:]]+ssh-ed25519[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]] || {
+      echo 'allowed_signers must contain only namespace-bound invoice-backup Ed25519 keys' >&2
+      return 1
+    }
+    count=$((count+1))
+  done <"$BACKUP_ALLOWED_SIGNERS_FILE"
+  (( count > 0 ))
+}
+validate_allowed_signers
+
+# Authenticity before anything else, exactly as restore-drill.sh does: verify
+# the signed manifest before trusting any checksum line in it or decrypting
+# any attacker-controlled ciphertext.
+ssh-keygen -Y verify -f "$BACKUP_ALLOWED_SIGNERS_FILE" -I "$backup_signer_identity" \
+  -n "$backup_signature_namespace" -s "$signature_file" <"$manifest_file"
+
+# This rehearsal only needs the database component -- eligibility projection
+# never touches the document volume or source-state archives -- so it checks
+# only the database backup's line in the signed manifest, not every
+# component restore-drill.sh's full backup-integrity check requires. It does
+# not certify the backup as a whole; the standard restore drill (run
+# separately, see docs/PRODUCTION-RUNBOOK.md section 11) still owns that.
+database_backup_name=$(basename "$database_backup")
+[[ "$database_backup_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ ]] || { echo "unsafe backup component filename: $database_backup_name" >&2; exit 1; }
+manifest_matches=$(grep -c -E "^[0-9a-f]{64}  $(printf '%s' "$database_backup_name" | sed 's/[.[\*^$]/\\&/g')\$" "$manifest_file" || true)
+[[ "$manifest_matches" == 1 ]] || { echo "signed manifest has $manifest_matches (want exactly 1) entries for $database_backup_name" >&2; exit 1; }
+manifest_line=$(grep -E "^[0-9a-f]{64}  $(printf '%s' "$database_backup_name" | sed 's/[.[\*^$]/\\&/g')\$" "$manifest_file")
+(cd "$BACKUP_DIR" && printf '%s\n' "$manifest_line" | sha256sum -c -) >/dev/null
+
+host_available_bytes=$(awk '/^MemAvailable:/ { printf "%.0f\n",$2*1024; found=1 } END { if (!found) exit 1 }' /proc/meminfo)
+docker_total_bytes=$(docker info --format '{{.MemTotal}}')
+restore_postgres_tmpfs_bytes=$(bash "$capacity_validator" "$tmpfs_size" "$host_available_bytes" "$docker_total_bytes")
+[[ "$restore_postgres_tmpfs_bytes" =~ ^[1-9][0-9]*$ ]]
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$
+network="invoice-shadow-$stamp"
+container="invoice-shadow-pg-$stamp"
+rehearsal_dir="$rehearsal_root/$stamp"
+work_dir=$(mktemp -d)
+work_mounted=false
+network_created=false
+started=false
+report_json="$rehearsal_dir/shadow-eval.json"
+summary_txt="$rehearsal_dir/shadow-eval-summary.txt"
+tool_log="$rehearsal_dir/eligibility-shadow.log"
+
+cleanup() {
+  local original_status=$?
+  local cleanup_failed=false
+  set +e
+  if $started; then
+    remove_docker_resource_strict container "$container" || cleanup_failed=true
+  fi
+  if $network_created; then
+    remove_docker_resource_strict network "$network" || cleanup_failed=true
+  fi
+  if [[ -f "$work_dir/database-url" ]]; then
+    shred -u "$work_dir/database-url" 2>/dev/null || rm -f "$work_dir/database-url" || cleanup_failed=true
+  fi
+  if $work_mounted; then
+    umount "$work_dir" 2>/dev/null || cleanup_failed=true
+  fi
+  rm -rf -- "$work_dir" || cleanup_failed=true
+  [[ -e "$work_dir" ]] && cleanup_failed=true
+  if $cleanup_failed; then
+    echo 'CRITICAL: shadow-eval cleanup left a container, network, or temporary key material behind' >&2
+    exit 1
+  fi
+  exit "$original_status"
+}
+trap cleanup EXIT
+
+# The work directory holds only a throwaway restore-only database credential
+# (a fixed, non-production password, matching restore-drill.sh's
+# "restore-drill-only" convention) -- never the decrypted database dump
+# itself, which is streamed directly from `age` into `pg_restore` over a
+# pipe and never touches disk. It is still mounted as its own small tmpfs
+# and shredded before removal, matching the task's key-material-handling
+# requirement.
+if mount -t tmpfs -o size=16m,mode=0700,nosuid,nodev,noexec tmpfs "$work_dir" 2>/dev/null; then
+  work_mounted=true
+else
+  echo "warning: could not mount a dedicated tmpfs for the rehearsal work directory; continuing on $work_dir" >&2
+fi
+
+mkdir -p -- "$rehearsal_dir"
+
+if docker network inspect "$network" >/dev/null 2>&1 || docker container inspect "$container" >/dev/null 2>&1; then
+  echo 'shadow-eval Docker resource name collision' >&2
+  exit 1
+fi
+network_created=true
+docker network create "$network" >/dev/null
+
+started=true
+docker run --pull never --detach --rm --name "$container" --network "$network" --network-alias postgres \
+  --env POSTGRES_PASSWORD=restore-drill-only \
+  --env POSTGRES_DB=invoice \
+  --tmpfs "/var/lib/postgresql:rw,nosuid,nodev,size=$tmpfs_size" \
+  "$postgres_image" >/dev/null
+
+deadline=$((SECONDS+60))
+until docker exec "$container" pg_isready -U postgres -d invoice >/dev/null 2>&1; do
+  (( SECONDS < deadline )) || { echo 'shadow-eval PostgreSQL did not become ready' >&2; exit 1; }
+  sleep 1
+done
+# See restore-drill.sh's identical comment: a single pg_isready can hit the
+# official image's transient bootstrap postmaster before its restart into
+# the final server. Require the init-complete marker plus three consecutive
+# final-server readiness checks.
+until docker logs "$container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; do
+  (( SECONDS < deadline )) || { echo 'shadow-eval PostgreSQL initialization did not complete' >&2; exit 1; }
+  sleep 1
+done
+for _ in 1 2 3; do
+  docker exec "$container" pg_isready -U postgres -d invoice >/dev/null 2>&1 || {
+    echo 'shadow-eval PostgreSQL final server did not remain ready' >&2
+    exit 1
+  }
+  sleep 1
+done
+
+age --decrypt -i "$AGE_IDENTITY_FILE" "$database_backup" \
+  | docker exec -i "$container" pg_restore -U postgres -d invoice --no-owner --no-acl --exit-on-error
+
+printf '%s\n' 'postgres://postgres:restore-drill-only@postgres:5432/invoice?sslmode=disable' >"$work_dir/database-url"
+chmod 0400 "$work_dir/database-url"
+
+set +e
+docker run --pull never --rm --network "$network" --read-only \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  --mount "type=bind,src=$work_dir/database-url,dst=/run/secrets/database-url,readonly" \
+  --entrypoint /usr/local/bin/invoice-eligibility-shadow "$tools_image" \
+  --database-url-file /run/secrets/database-url \
+  --migrations-dir /app/migrations \
+  --max-rounds "$max_rounds" --batch-limit "$batch_limit" \
+  --backup-label "$backup_name" --candidate-image-tag "$image_tag" \
+  >"$report_json" 2>"$tool_log"
+tool_exit=$?
+set -e
+
+if [[ ! -s "$report_json" ]]; then
+  echo "eligibility-shadow produced no report (exit $tool_exit); see $tool_log" >&2
+  cat "$tool_log" >&2 || true
+  exit 1
+fi
+# A lightweight structural sanity check (this repo avoids a jq dependency
+# here, see shadow-eval-lib.sh's header comment) -- the tool always prints
+# exactly one JSON object via json.MarshalIndent, so the first and last
+# non-blank characters must be the object braces.
+first_char=$(grep -m1 -v '^[[:space:]]*$' "$report_json" | cut -c1)
+last_char=$(tail -n 5 "$report_json" | tr -d '[:space:]' | tail -c1)
+[[ "$first_char" == '{' && "$last_char" == '}' ]] || {
+  echo "eligibility-shadow report does not look like a JSON object: $report_json" >&2
+  exit 1
+}
+
+shadow_eval_human_summary "$report_json" >"$summary_txt"
+cat "$summary_txt"
+
+set +e
+verdict=$(shadow_eval_verdict_exit_code "$report_json")
+recomputed_exit=$?
+set -e
+
+# Defense in depth (matching this repo's usual double-checked gates, e.g.
+# scripts/verify.ps1): the two verdicts are computed by independent
+# implementations from the same published JSON. They should always agree;
+# if they do not, treat it as a rehearsal-tooling bug and fail loudly rather
+# than silently trusting either one.
+tool_verdict=$(_shadow_eval_scalar "$report_json" verdict)
+if [[ "$verdict" != "$tool_verdict" ]]; then
+  echo "shadow-eval: bash-recomputed verdict ($verdict) disagrees with the tool's own verdict ($tool_verdict) -- treating this as a rehearsal-tooling failure" >&2
+  exit 1
+fi
+
+echo "shadow-eval: report written to $report_json"
+echo "shadow-eval: summary written to $summary_txt"
+echo "shadow-eval: verdict=$verdict (independently recomputed; tool process exit was $tool_exit)"
+exit "$recomputed_exit"
