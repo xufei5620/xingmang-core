@@ -22,7 +22,14 @@ slice XM-INV-BALANCE-BLIP) closes a third, distinct production gap in the same e
 difference (a boundary-timing coincidence between the balances and usage streams, or any other
 one-off blip) still permanently inflated the account's expected balance, freezing every later
 checkpoint `UNKNOWN_NEGATIVE_BALANCE` by the same constant amount — see **2.8** and
-`docs/handoffs/XM-INV-BALANCE-BLIP.md`.
+`docs/handoffs/XM-INV-BALANCE-BLIP.md`. **2.9 (added 2026-09-03, slice XM-INV-BLIP-SOFTFAIL) closes
+a regression in 2.8's own defer/confirm rule**: a confirmation attempt whose pre-check difference
+matched the deferred item exactly could still fail to reconcile once the tentative credit was
+actually inserted (a further, unrelated structural gap already floored some intervening usage), and
+the evaluator returned a hard error instead of a defined outcome — this wedged one production
+account's projection job in an infinite fail/retry loop and, because any single `failed` job trips
+`/readyz` unconditionally, kept the whole service's readiness probe down for hours — see **2.9** and
+`docs/handoffs/XM-INV-BLIP-SOFTFAIL.md`.
 **Owner decision:** 开票只针对 2026-09-01 00:00 (Asia/Shanghai) 之后的真实充值；此前流水对开票无用。
 **Replaces:** the idea of re-running `cutover-init` — rejected because `CaptureCutover`
 snapshots the live database at run time and cannot produce a historical (9/1) baseline.
@@ -435,6 +442,64 @@ record: at the time, that credit did explain its own difference) even after the 
 is gone — the same "some historical rows become inert after a repair" posture 2.7's own repair
 already established for its stuck carry-forward proof evaluations. See
 `docs/handoffs/XM-INV-BALANCE-BLIP.md` for the exact runbook and expected counts.
+
+### 2.9 A blip confirmation attempt that does not reconcile must softfail, not error
+(added 2026-09-03, slice XM-INV-BLIP-SOFTFAIL, production incident)
+
+**Gap.** 2.8's confirm branch treated an exact pre-check match (the current item's raw difference
+equals the deferred item's) as proof of a genuine, persistent gap, synthesized the deferred item's
+credit, then rebuilt the projection to *verify* the confirming item now reconciles to exactly zero
+— correct in design ("rebuild rather than trust algebra"), but the code's response when that rebuild
+did *not* reach zero was `return fmt.Errorf(...)`. This is reachable whenever the account has a
+second, unrelated structural gap: if usage between the deferred item's trust-interval start and the
+confirming item's `as_of` already exceeded the credit available at that time (floored at zero, e.g.
+because the account's ledger is missing a real fact such as its own anchor opening balance), the
+tentative credit — dated earlier than that usage — only *partially* recovers the floored amount once
+inserted, so the pre-check match (computed before the credit existed) and the post-synthesis
+reconciliation (computed after) can legitimately disagree. Production account `98cce4c8-...`
+(`POLICY_ANCHOR`, 66 historical `source_gap_frozen` checkpoint evaluations from before
+XM-INV-ANCHOR-BALANCE, not yet repaired) hit exactly this on 2026-09-03 (RC75): every attempt at
+`ProcessEligibilityProjectionJobs` for this account returned `balance blip confirmation for
+checkpoint/proof ...:2092 did not reconcile: still differs by 104322912`, identically, because each
+attempt's transaction rolled back on the error — no forward progress was ever possible, and the job
+reached `attempt_count` 298 while `/readyz` stayed 503 (`eligibilityProjectionReady` fails
+unconditionally whenever any job is `status='failed'`, regardless of age — confirmed still correct,
+unchanged, by this slice; see the handoff doc). See `docs/handoffs/XM-INV-BLIP-SOFTFAIL.md` for the
+full incident reconstruction, including why the incident brief's initial "differs by a different
+amount" description referred to the post-synthesis residual, not the pre-check (which, per the code,
+must match exactly to reach this branch at all).
+
+**Fix.** `evaluatePendingBalanceEvidenceTx`'s confirm branch now treats a non-zero post-synthesis
+residual as a **softfail**, never an error:
+1. The tentative credit is removed (the same GUC-gated `source_credit_events` delete exception
+   migration `0019` already added for the repair tool, `invoice.balance_blip_repair_delete='on'`,
+   reused here for an inline, same-transaction self-correction rather than a separate repair run).
+2. The deferred item is recorded `positive_blip_ignored` (never confirmed) plus a new audit action,
+   `eligibility.balance_blip.rebaselined`, carrying both the deferred item's own difference and the
+   confirming item's raw (pre-synthesis) difference — distinct from an ordinary disconfirmation's
+   audit trail, so a later account-health query can tell "genuinely transient, cleanly disconfirmed"
+   apart from "confirmation attempted and failed to reconcile."
+3. The confirming item falls through to be classified fresh, exactly like an ordinary
+   disconfirmation — its own difference is still positive, so (assuming real prior evaluation
+   history, unchanged) it becomes the *new* pending blip: a **rebaseline**.
+4. Rebaselining is capped (`balanceBlipRebaselineCap = 3`, counted via
+   `countConsecutiveRebaselinedBlipsTx`, an audit-log-backed query — not a raw
+   `positive_blip_ignored` count, which would also catch ordinary clean disconfirmations and cap an
+   account that never had a reconciliation failure at all). Once an account has rebaselined this many
+   times in a row with no clean confirm/disconfirm landing in between, the *next* would-be rebaseline
+   instead opens a single `SOURCE_GAP` freeze on the triggering item — the same terminal outcome an
+   account with no trust anchor at all already gets, and the designed escalation for "a real,
+   unresolved structural gap, not a sequence of one-off blips."
+
+Per-account isolation in `ProcessEligibilityProjectionJobs`'s own batch loop was checked and found
+already correct and unmodified by this slice: each account's `processEligibilityProjectionJob` call
+is individually wrapped, a failure there marks only that account `status='failed'` with the existing
+5-minute backoff, and the loop continues to the next account regardless — no other account's
+processing was ever blocked by this bug. The production symptom ("checkpoints stopped being
+evaluated," "/readyz down for hours") was this *one* account's own job perpetually failing and
+retrying into the identical error, plus `eligibilityProjectionReady`'s pre-existing, correct,
+unconditional `Failed>0` rule surfacing that stuck job as a readiness failure — not a batch-level
+abort. See the handoff doc for the full trace.
 
 ## 3. Verification gates (all must pass before production)
 1. Unit + integration suites (full `go test -p 1 ./...` with INVOICE_TEST_DATABASE_URL). Done as
