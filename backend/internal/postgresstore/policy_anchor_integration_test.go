@@ -19,15 +19,30 @@ import (
 // an account that cannot become invoice-eligible before the policy start
 // regardless of which row eventually establishes its cutover boundary. A
 // later checkpoint at/after the policy start bootstraps the account directly
-// (bootstrap_kind='POLICY_ANCHOR', migration 0016's trigger validates the
-// cutover_at/cutover_balance_units/unit_code match against the anchoring
+// (bootstrap_kind='POLICY_ANCHOR', migration 0016/0021's trigger validates
+// the cutover_at/cutover_balance_units/unit_code match against the anchoring
 // checkpoint row), and the account functions normally afterward.
+//
+// cutover_at below is asserted against policyStart, not postAsOf: design
+// XM-INV-ELIG-SIMPLIFY section 3(D) (slice XM-INV-ELIG-POLICY-START-ANCHOR)
+// changed ObserveBalanceCheckpoint's POLICY_ANCHOR bootstrap so cutover_at is
+// unconditionally the global policy start, not the triggering checkpoint's
+// own as_of -- this is the one assertion in this test that encoded the
+// pre-XM-INV-ELIG-POLICY-START-ANCHOR behavior; see
+// policy_start_anchor_integration_test.go for that slice's own dedicated
+// tests (window-fact derivation, the derived reconciliation checkpoint row,
+// in-window cash-lot inclusion, and the exactly-at-policy-start edge case).
+// cutoverBalance stays "500" unchanged here since this fixture has no window
+// facts (the account has no state until this very checkpoint arrives, and
+// nothing else was inserted for it beforehand) -- the derivation formula's
+// own arithmetic is covered directly by
+// TestDeriveCutoverBalanceUnitsSubtractsCreditsAddsUsageInWindow.
 func TestReconciliationCheckpointIgnoredPrePolicyAndBootstrapsPolicyAnchorPostPolicy(t *testing.T) {
 	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
 	// Leave headroom after policyStart: migration 0016's POLICY_ANCHOR
 	// validation rejects a cutover_at in the future, and postAsOf below is
 	// policyStart+1h.
-	policyStart := fixtureNow.Add(-2 * time.Hour)
+	policyStart := fixtureNow.Add(-2 * time.Hour).Truncate(time.Second)
 	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
 	sourceID := "10000000-0000-4000-8000-000000000210"
 	userID := "20000000-0000-4000-8000-000000000210"
@@ -141,8 +156,9 @@ func TestReconciliationCheckpointIgnoredPrePolicyAndBootstrapsPolicyAnchorPostPo
 		&bootstrapKind, &storedCutoverAt, &cutoverBalance); err != nil {
 		t.Fatal(err)
 	}
-	if bootstrapKind != "POLICY_ANCHOR" || !storedCutoverAt.Equal(postAsOf.UTC()) || cutoverBalance != "500" {
-		t.Fatalf("policy anchor bootstrap kind=%s cutover_at=%s balance=%s", bootstrapKind, storedCutoverAt, cutoverBalance)
+	if bootstrapKind != "POLICY_ANCHOR" || !storedCutoverAt.Equal(policyStart.UTC()) || cutoverBalance != "500" {
+		t.Fatalf("policy anchor bootstrap kind=%s cutover_at=%s (want policyStart=%s) balance=%s",
+			bootstrapKind, storedCutoverAt, policyStart, cutoverBalance)
 	}
 	var checkpointKind, reconciliationStatus string
 	var baselineMemberFlag bool

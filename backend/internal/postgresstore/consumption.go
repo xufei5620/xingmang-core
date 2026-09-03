@@ -1159,16 +1159,40 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 		// other and is skipped above). This reconciliation checkpoint is
 		// at/after the policy start, so bootstrap directly from it instead of
 		// waiting for the (possibly indefinitely parked) signed cutover row.
-		// The checkpoint's entire balance becomes the account's opening,
-		// non-invoiceable balance -- the same treatment a SIGNED_CUTOVER
-		// baseline gets, just anchored to a later point the invoice policy
-		// actually cares about. The state row must be inserted *before* the
-		// checkpoint row: the checkpoint table's own (unchanged, immediate)
+		//
+		// XM-INV-ELIG-POLICY-START-ANCHOR (design XM-INV-ELIG-SIMPLIFY section
+		// 3(D)): cutover_at is no longer this triggering checkpoint's own
+		// as_of -- it is unconditionally policyStartAt, so that facts dated
+		// between the policy start and this checkpoint (previously a dead
+		// zone: discarded by observeEligibilityFact's cutover-boundary check
+		// and excluded from buildEligibilityProjectionTx's window) are
+		// persisted and projected normally from now on. cutover_balance_units
+		// is derived by unwinding this checkpoint's own observed balance
+		// backward across that window (deriveCutoverBalanceUnitsTx) --
+		// exactly what the balance would have been at the policy start, using
+		// only facts already persisted in the window at this moment. To keep
+		// migration 0016's anchor-checkpoint validation intact (cutover_at/
+		// cutover_balance_units must exactly match a real reconciliation
+		// checkpoint row), a second checkpoint row is inserted at as_of=
+		// policyStartAt with the derived balance, borrowing this triggering
+		// checkpoint's own provenance columns -- the same technique 2.7/2.8's
+		// synthesizeUnknownPositive already uses for a value that is derived,
+		// not directly observed (see
+		// synthesizePolicyStartReconciliationCheckpointTx). The state row
+		// must still be inserted before either checkpoint row: the checkpoint
+		// table's own (unchanged, immediate)
 		// balance_reconciliation_checkpoints_contract_guard trigger requires
 		// a trusted state row to already exist, while this state row's own
-		// new POLICY_ANCHOR validation (migration 0016) is deferred to
-		// COMMIT specifically so it can, in turn, require this same
-		// checkpoint row to already exist by then.
+		// POLICY_ANCHOR validation (migration 0016, extended by 0021) is
+		// deferred to COMMIT specifically so it can, in turn, require the
+		// derived checkpoint row to exist by then -- insertion order between
+		// the two checkpoint rows themselves does not matter, since both are
+		// only checked at COMMIT.
+		policyStartAt = policyStartAt.UTC()
+		derivedBalance, err := deriveCutoverBalanceUnitsTx(ctx, tx, accountID, policyStartAt, in.AsOf, balance)
+		if err != nil {
+			return err
+		}
 		eligibilityStatus := "active"
 		if in.CatchupKeyHMAC != "" {
 			if !dependencyHMACPattern.MatchString(in.CatchupKeyHMAC) {
@@ -1182,7 +1206,7 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				cutover_manifest_hash,bootstrap_kind,finalized_through,finalization_delay_seconds,
 				catchup_key_hmac,eligibility_status)
 			VALUES($1,$2,$3,$4,$5::numeric,$6,'POLICY_ANCHOR',$3,$7,NULLIF($8,''),$9)`,
-			accountID, in.SourceInstanceID, in.AsOf.UTC(), in.UnitCode, balance.String(),
+			accountID, in.SourceInstanceID, policyStartAt, in.UnitCode, derivedBalance.String(),
 			in.CutoverManifestHash, int(defaultEligibilityFinalizationDelay/time.Second),
 			in.CatchupKeyHMAC, eligibilityStatus)
 		if err != nil {
@@ -1206,10 +1230,19 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 		if err != nil {
 			return err
 		}
+		if err = synthesizePolicyStartReconciliationCheckpointTx(ctx, tx, accountID, in.SourceInstanceID,
+			in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash, in.CheckpointID, in.ExternalEventID,
+			policyStartAt, derivedBalance, in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt,
+			in.SourceRevision, in.ObservedAt); err != nil {
+			return err
+		}
 		if in.BalanceNegative {
 			// XM-INV-ELIG-AUTO-RECONCILE: see the SIGNED_CUTOVER bootstrap
 			// branch above -- identical treatment for a POLICY_ANCHOR
-			// account's own opening balance.
+			// account's own opening balance. Keyed off the triggering
+			// checkpoint's own reported negative flag, not the (always
+			// non-negative, floored) derived balance -- see
+			// deriveCutoverBalanceUnitsTx's own doc comment on the floor.
 			detail := fmt.Sprintf("balance_checkpoint %s at %s reported a negative balance at account bootstrap",
 				in.CheckpointID, in.AsOf.UTC().Format(time.RFC3339Nano))
 			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
@@ -1218,8 +1251,10 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			}
 		}
 		if err = writeAudit(ctx, tx, actor, "eligibility.policy_anchor.bootstrapped", "external_account", accountID,
-			nil, map[string]any{"cutover_at": in.AsOf, "opening_units": balance.String(),
-				"baseline_member": in.BaselineMember, "status": eligibilityStatus}); err != nil {
+			nil, map[string]any{"cutover_at": policyStartAt, "opening_units": derivedBalance.String(),
+				"triggering_checkpoint_id": in.CheckpointID, "triggering_checkpoint_as_of": in.AsOf,
+				"triggering_checkpoint_balance": balance.String(),
+				"baseline_member":               in.BaselineMember, "status": eligibilityStatus}); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -1278,6 +1313,142 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// deriveCutoverBalanceUnitsTx implements design XM-INV-ELIG-SIMPLIFY section
+// 3(D)'s policy-start balance derivation: checkpointBalance (a real,
+// observed reconciliation checkpoint's own balance at checkpointAsOf),
+// unwound backward across the window (policyStartAt, checkpointAsOf] by
+// subtracting every inflow already persisted in that window at the moment
+// this runs -- every non-cash credit AND every verified cash payment (in the
+// same service units buildEligibilityProjectionTx's own cash-pool query
+// already reads off funding_lot_consumption_state.cash_service_units, not a
+// minor-unit amount) -- and adding back every usage fact, the exact inverse
+// of buildEligibilityProjectionTx's own window predicate (event_time/
+// completed_at>cutover_at for all three fact kinds). Once cutover_at becomes
+// policyStartAt and this derived value becomes cutover_balance_units, the
+// window's own credits/payments/usage are exactly what
+// buildEligibilityProjectionTx will independently (re)count once its window
+// opens up to include them, so re-evaluating the real checkpoint this was
+// derived from reconciles to zero -- see evaluatePendingBalanceEvidenceTx's
+// case-1 self-heal (design XM-INV-ANCHOR-BALANCE 2.7), which turns the
+// earlier, empty-window derived checkpoint's own positive difference into
+// exactly this credit.
+//
+// The cash-payment term was missing from an earlier draft of this function
+// (matching the design doc's own prose, which named only "credits" without
+// spelling out that a real top-up is also an inflow that must be unwound).
+// Found to be a live, not merely theoretical, gap during review: any account
+// whose very first real cash payment lands between the policy start and its
+// first observed checkpoint -- ordinary for a brand-new user who registers,
+// recharges, and is then first seen at a checkpoint -- would otherwise have
+// its derived opening balance inflated by exactly that payment's own units,
+// since the payment's own funding lot independently enters
+// buildEligibilityProjectionTx's cash pool once the window includes it.
+// Without this term, the account's very next real checkpoint would show a
+// permanent negative difference of that same amount, landing the account in
+// not_invoiceable_pending_reconciliation for a difference that was never
+// real. Included here identically to how credits are handled: read
+// (verified, non-refund-frozen WALLET_CASH only, matching that same
+// cash-pool query's own predicate exactly -- SUBSCRIPTION_CASH is excluded
+// from that pool today and so is excluded here too), summed, subtracted.
+//
+// Two callers: ObserveBalanceCheckpoint's POLICY_ANCHOR bootstrap branch
+// (checkpointAsOf/checkpointBalance are the triggering checkpoint's own
+// as_of/balance), and the policy-start-reanchor repair tool (checkpointAsOf/
+// checkpointBalance are the account's *existing* cutover_at/
+// cutover_balance_units, treated as a checkpoint data point for the same
+// unwind) -- both derive the same way from whatever is persisted in the
+// window right now.
+//
+// Floors at zero rather than going negative: cutover_balance_units carries a
+// NOT NULL CHECK (>=0). An unwind that would need special handling for
+// arriving at a hypothetically-negative implied opening balance is exactly
+// the "every branch returns a defined result" hard rule -- flooring, not
+// erroring, on a data shape not known to occur in production today (window
+// inflows exceeding checkpoint balance plus usage).
+func deriveCutoverBalanceUnitsTx(ctx context.Context, tx pgx.Tx, accountID string, policyStartAt, checkpointAsOf time.Time, checkpointBalance *big.Int) (*big.Int, error) {
+	var creditsText, usageText, paymentsText string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(sum(service_units),0)::text FROM source_credit_events
+		WHERE external_account_id=$1 AND event_time>$2 AND event_time<=$3`,
+		accountID, policyStartAt, checkpointAsOf).Scan(&creditsText); err != nil {
+		return nil, err
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(sum(service_units),0)::text FROM source_usage_events
+		WHERE external_account_id=$1 AND event_time>$2 AND event_time<=$3`,
+		accountID, policyStartAt, checkpointAsOf).Scan(&usageText); err != nil {
+		return nil, err
+	}
+	// Matches buildEligibilityProjectionExcludingUsageTx's own cash-pool
+	// query predicate exactly (eligibility_kind='WALLET_CASH',
+	// verification_state='verified', refund_frozen=FALSE) so this counts
+	// precisely the payments that query will independently include once the
+	// window opens up around them.
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(sum(flcs.cash_service_units),0)::text
+		FROM funding_lots fl JOIN funding_lot_consumption_state flcs ON flcs.funding_lot_id=fl.id
+		WHERE fl.external_account_id=$1 AND fl.eligibility_kind='WALLET_CASH'
+			AND fl.verification_state='verified' AND fl.refund_frozen=FALSE
+			AND fl.completed_at>$2 AND fl.completed_at<=$3`,
+		accountID, policyStartAt, checkpointAsOf).Scan(&paymentsText); err != nil {
+		return nil, err
+	}
+	credits, ok := new(big.Int).SetString(strings.TrimSpace(creditsText), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid summed credit units %q", creditsText)
+	}
+	usage, ok := new(big.Int).SetString(strings.TrimSpace(usageText), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid summed usage units %q", usageText)
+	}
+	payments, ok := new(big.Int).SetString(strings.TrimSpace(paymentsText), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid summed payment units %q", paymentsText)
+	}
+	derived := new(big.Int).Sub(checkpointBalance, credits)
+	derived.Sub(derived, payments)
+	derived.Add(derived, usage)
+	if derived.Sign() < 0 {
+		derived = new(big.Int)
+	}
+	return derived, nil
+}
+
+// synthesizePolicyStartReconciliationCheckpointTx inserts the derived
+// reconciliation checkpoint row design XM-INV-ELIG-SIMPLIFY section 3(D)
+// requires migration 0016/0021's POLICY_ANCHOR validation to find at COMMIT:
+// checkpoint_kind='reconciliation', as_of=policyStartAt,
+// balance_service_units=derivedBalance, borrowing the real checkpoint this
+// derivation is anchored to (checkpointIDSeed/externalEventIDSeed and the
+// five provenance columns: source_sequence/source_cursor/
+// stream_watermark_at/source_revision_hash/observed_at) -- the same
+// technique 2.7/2.8's synthesizeUnknownPositive already uses for a value
+// that is derived, not directly observed. checkpointIDSeed/
+// externalEventIDSeed are prefixed so this synthetic row's own business keys
+// never collide with the real checkpoint's; ON CONFLICT DO NOTHING is
+// defensive idempotency (mirroring synthesizeUnknownPositive's own choice),
+// not expected to fire in practice -- both callers only reach this once per
+// real checkpoint/account.
+func synthesizePolicyStartReconciliationCheckpointTx(ctx context.Context, tx pgx.Tx, accountID, sourceInstanceID,
+	unitCode, manifestHash, configurationHash, checkpointIDSeed, externalEventIDSeed string, policyStartAt time.Time,
+	derivedBalance *big.Int, sourceSequence int64, sourceCursor string, streamWatermarkAt time.Time,
+	sourceRevisionHash string, observedAt time.Time) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO balance_reconciliation_checkpoints(
+			id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
+			checkpoint_kind,baseline_member,as_of,balance_service_units,balance_negative,unit_code,
+			cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
+			source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+		VALUES($1,$2,$3,$4,$5,'reconciliation',FALSE,$6,$7::numeric,FALSE,$8,$9,$10,
+			'cutover_baseline',$11,$12,$13,$14,$15)
+		ON CONFLICT(source_instance_id,external_event_id) DO NOTHING`,
+		randomUUID(), sourceInstanceID, accountID, "policy-start:"+externalEventIDSeed,
+		"policy-start:"+checkpointIDSeed, policyStartAt.UTC(), derivedBalance.String(), unitCode,
+		manifestHash, configurationHash, sourceSequence, sourceCursor, streamWatermarkAt.UTC(),
+		sourceRevisionHash, observedAt.UTC())
+	return err
 }
 
 func nullableBigInt(value *big.Int) any {

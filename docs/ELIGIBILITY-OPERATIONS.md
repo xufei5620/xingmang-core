@@ -274,3 +274,75 @@ migration-period reasons (`EVENT_PAYLOAD_DRIFT`, `UNIT_MISMATCH`,
     --field-keyring-file=/run/secrets/field-keyring.json \
     --kind=queue-narrow --apply --operator-id=<admin-uuid>
   ```
+
+## Policy-start anchoring (XM-INV-ELIG-POLICY-START-ANCHOR, 2026-09-03)
+
+XM-INV-ELIG-POLICY-START-ANCHOR (design XM-INV-ELIG-SIMPLIFY section 3(D))
+changed how a `POLICY_ANCHOR` account's `cutover_at` is set: it is now
+unconditionally the global invoice policy start (`invoice_eligibility_policy.
+eligibility_start_at`), not the triggering reconciliation checkpoint's own
+`as_of`. `cutover_balance_units` is derived by unwinding that checkpoint's
+observed balance backward across the window using whatever credit/usage
+facts are already persisted at bootstrap time, and a second, derived
+reconciliation checkpoint row is inserted at the policy start so migration
+0016/0021's anchor-checkpoint validation still holds. This closes a dead
+zone between the policy start and an account's first observed checkpoint:
+facts, and cash payments, dated inside that window are now persisted and
+projected normally instead of being permanently excluded.
+
+Every account bootstrapped by the fixed code already gets this correctly.
+The three accounts bootstrapped by the pre-fix code (`40bd883d-...`,
+`98cce4c8-...`, `6706ea6a-...`) still carry the old, later `cutover_at` and
+need a one-time re-anchor.
+
+**`invoice-eligibility-repair --kind=policy-start-reanchor`** re-anchors
+those accounts. For each `POLICY_ANCHOR` account whose `cutover_at` is still
+after the policy start, it checks for a verified, non-refund-frozen
+`WALLET_CASH` funding lot with `completed_at` in the window between the
+policy start and the account's current `cutover_at` -- exactly the
+predicate `buildEligibilityProjectionTx`'s own cash-pool query uses, so this
+precisely predicts whether re-anchoring changes anything:
+
+- **Zero such lots (expected for all three accounts today):** a deliberate,
+  reported no-op in both dry-run and apply -- nothing is written. Moving
+  `cutover_at` back with no invoiceable amount to gain is pure downside
+  risk; the usage/credit facts that fell in this window before the fix are
+  already unrecoverable (never persisted), so only a real cash payment
+  makes re-anchoring worth doing at all.
+- **A real in-window lot found (unexpected -- production has been verified
+  to have none as of this writing):** apply inserts the derived
+  reconciliation checkpoint, moves `cutover_at`/`cutover_balance_units` via
+  the guarded UPDATE migration 0021 adds, resets and rebuilds the account's
+  consumption state, and queues a projection job so the balance evaluator
+  picks up the derived checkpoint on its next run. Any resulting negative
+  difference or usage overage flows through the existing automatic
+  reconciliation/overage recording above, never a freeze.
+- **A live invoice reservation, issuance or refund-review exists on any of
+  the account's funding lots:** reported `Blocked`, left completely
+  untouched in either mode (mirrors design XM-INV-POLICY-ANCHOR 2.4's own
+  guard in `reanchorLegacyEligibilityAccountTx` -- resetting consumption
+  state under real invoice exposure would corrupt accounting already
+  depending on it). Re-run the tool later once the exposure clears.
+
+Like `--kind=queue-narrow`, this processes one account per transaction, not
+the whole run in one transaction.
+
+```
+# dry run (default) -- reports what would change, writes nothing
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=policy-start-reanchor
+
+# apply -- requires an approving operator id
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=policy-start-reanchor --apply --operator-id=<admin-uuid>
+```
+
+Production sequence: apply migration 0021 first (it must be live before the
+repair runs, since the repair's own guarded UPDATE depends on the sibling
+GUC it adds), then dry-run, then owner-approved apply. Expect an
+all-no-op dry-run report for the three known accounts unless a real
+in-window payment has appeared since this was last checked.

@@ -110,13 +110,33 @@ func newBalanceBlipFixture(t *testing.T) (store *Store, ctx context.Context, sou
 	if err != nil || processed != 1 {
 		t.Fatalf("fixture: anchor self-heal processed=%d err=%v", processed, err)
 	}
+	// XM-INV-ELIG-POLICY-START-ANCHOR (design XM-INV-ELIG-SIMPLIFY section
+	// 3(D)): cutover_at is now the global policy start, not this checkpoint's
+	// own as_of, and a second, derived reconciliation checkpoint exists at
+	// as_of=policyStart (this fixture has no window facts between policyStart
+	// and anchorAt, so its derived balance equals the same 1000 unchanged).
+	// That derived checkpoint -- not the real "blip-anchor" row -- is now the
+	// account's first-ever balance evidence (earliest as_of) and carries the
+	// positive_classified_non_cash self-heal; the real "blip-anchor"
+	// checkpoint reconciles against that credit and is matched instead. This
+	// fixture's own goal (establish one real, trusted piece of prior
+	// evaluation history before any test-specific blip) is unaffected -- it
+	// is simply now split across two rows instead of one.
 	var anchorStatus string
 	if err := store.pool.QueryRow(ctx, `
 		SELECT evaluation_status FROM balance_checkpoint_evaluations
 		WHERE checkpoint_id=(SELECT id FROM balance_reconciliation_checkpoints
 			WHERE external_account_id=$1 AND checkpoint_id='blip-anchor')`,
-		accountID).Scan(&anchorStatus); err != nil || anchorStatus != "positive_classified_non_cash" {
-		t.Fatalf("fixture: anchor checkpoint evaluation status=%q err=%v, want positive_classified_non_cash", anchorStatus, err)
+		accountID).Scan(&anchorStatus); err != nil || anchorStatus != "matched" {
+		t.Fatalf("fixture: real anchor checkpoint evaluation status=%q err=%v, want matched", anchorStatus, err)
+	}
+	var derivedStatus string
+	if err := store.pool.QueryRow(ctx, `
+		SELECT evaluation_status FROM balance_checkpoint_evaluations
+		WHERE checkpoint_id=(SELECT id FROM balance_reconciliation_checkpoints
+			WHERE external_account_id=$1 AND checkpoint_id='policy-start:blip-anchor')`,
+		accountID).Scan(&derivedStatus); err != nil || derivedStatus != "positive_classified_non_cash" {
+		t.Fatalf("fixture: derived checkpoint evaluation status=%q err=%v, want positive_classified_non_cash", derivedStatus, err)
 	}
 	return store, ctx, sourceID, accountID, manifestHash, configHash, anchorAt, chain
 }

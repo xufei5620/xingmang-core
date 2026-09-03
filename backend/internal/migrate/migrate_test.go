@@ -214,6 +214,13 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	// 0020 (XM-INV-ELIG-AUTO-RECONCILE) also alters
 	// source_account_eligibility_state -- same reason as 0016 above.
 	delete(all, "0020_eligibility_auto_reconcile.sql")
+	// 0021 (XM-INV-ELIG-POLICY-START-ANCHOR) replaces
+	// enforce_account_eligibility_cutover_contract() -- the same function
+	// 0016 defines -- and is never meant to apply without 0016 already
+	// having run first (a real sequential migration run always applies 0016
+	// before 0021, by number order); excluded here for the same reason 0016
+	// itself is.
+	delete(all, "0021_policy_anchor_start_reanchor.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
@@ -500,6 +507,10 @@ func TestPolicyAnchorMigrationValidatesBootstrapKindAndTriggerBoundary(t *testin
 
 	beforeAnchor := migrationMapBeforeReadinessIndex(t)
 	delete(beforeAnchor, "0016_policy_anchor.sql")
+	// 0021 replaces the same trigger function 0016 defines and is never
+	// meant to apply without it -- see the identical exclusion's own
+	// comment further up this file.
+	delete(beforeAnchor, "0021_policy_anchor_start_reanchor.sql")
 	if err = UpFS(ctx, pool, beforeAnchor); err != nil {
 		t.Fatal(err)
 	}
