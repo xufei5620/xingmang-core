@@ -127,8 +127,32 @@ func buildMockRuntime(authMode string) (appRuntime, error) {
 // postgresstore.economicRescanActivityWithinWindow) before an actively
 // rescanning stream is treated as stalled instead of in-progress. Two windows
 // gives one full cycle of margin beyond the single window a healthy,
-// continuously-updating cycle would already satisfy.
-const economicRescanActivityPollWindows = 2
+// continuously-updating cycle would already satisfy -- this covers the gap
+// between successive agent-side batches while a cycle is still 'receiving'.
+//
+// economicRescanProcessingTailAllowance covers a second, separate gap that
+// the poll-interval term above does not: once the agent has sent every page
+// (the row flips from 'receiving' to 'processing'), nothing touches
+// updated_at again until the backend's own projection workers finish
+// processing every event in the cycle and it publishes -- CommitSourceBatch's
+// INSERT only fires from the agent side (source_sync.go), and the row is not
+// touched again until postgresstore's projection/publish path (consumption.go)
+// marks it published or blocked. A production reconcile observed end to end
+// (2026-09-03, Sub2API usage, restart-triggered, cutover 2026-08-25): started
+// 06:31Z, published 06:56Z, 3,327 batches -- about 25 minutes total, covering
+// only the data since cutover (not the full source table; a fixed, one-time
+// cutover manifest position never advances, so this window grows slowly with
+// time since cutover -- exactly what part B now bounds to "since the last
+// reconcile" instead). The receiving/processing split within that 25 minutes
+// is not separately known, so this allowance is sized to exceed the entire
+// observed cycle even in the worst case (all 25 minutes spent motionless in
+// 'processing'), with real margin, while staying well short of
+// SOURCE_RECONCILE_INTERVAL (6h) so a genuinely stalled cycle -- the agent
+// crashed, or the backend workers stopped -- is still caught same-day.
+const (
+	economicRescanActivityPollWindows     = 2
+	economicRescanProcessingTailAllowance = 30 * time.Minute
+)
 
 func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, error) {
 	if authMode != "oidc" || strings.ToLower(strings.TrimSpace(os.Getenv("SOURCE_MODE"))) != "agent" {
@@ -199,14 +223,16 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		return appRuntime{}, err
 	}
 	// XM-INV-AGENT-RESTART-GRACE part A: the readiness-grace activity window
-	// for a source_economic_scan_cycles row proving an active rescan.
-	// Derived, not independently configured, from the same poll-interval and
-	// safety-delay budget the freshness check above already validates:
-	// economicRescanActivityPollWindows poll intervals of slack (an agent
-	// page/cycle can legitimately take up to about one poll interval to post
-	// its next batch) plus the safety delay (the same horizon margin the
-	// stream's own economic scan already reserves).
-	economicRescanActivityMaxAge := economicRescanActivityPollWindows*sourcePollInterval + economicSafetyDelay
+	// for a source_economic_scan_cycles row proving an active rescan. Derived,
+	// not independently configured, from the same poll-interval and
+	// safety-delay budget the freshness check above already validates
+	// (economicRescanActivityPollWindows poll intervals of slack while the
+	// agent is actively posting pages, plus the safety delay), plus
+	// economicRescanProcessingTailAllowance for the separate gap after the
+	// agent finishes sending and before the backend finishes processing and
+	// publishes -- see that constant's doc comment for the production
+	// measurement this is calibrated against.
+	economicRescanActivityMaxAge := economicRescanActivityPollWindows*sourcePollInterval + economicSafetyDelay + economicRescanProcessingTailAllowance
 	if err = validateSourceFreshnessBudget(economicWatermarkMaxAge, economicSafetyDelay, sourcePollInterval); err != nil {
 		return appRuntime{}, err
 	}
