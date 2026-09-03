@@ -524,3 +524,25 @@ abort. See the handoff doc for the full trace.
 
 ## 4. Out of scope
 Chunked/set-based replay (XM-INV-REPLAY-PERF phase 2), username persistence, embed link params.
+
+### 2.10 Policy-start anchoring (added 2026-09-03, slice XM-INV-ELIG-POLICY-START-ANCHOR, design
+XM-INV-ELIG-SIMPLIFY section 3(D))
+
+Section 2.1's own bootstrap ("anchor at the triggering reconciliation checkpoint's own `as_of`") is
+superseded: `cutover_at` is now unconditionally the global policy start
+(`invoice_eligibility_policy.eligibility_start_at`), and `cutover_balance_units` is derived by
+unwinding the triggering checkpoint's own balance backward across the window using whatever
+credit/usage facts are already persisted at that moment (`deriveCutoverBalanceUnitsTx`). A second,
+derived reconciliation checkpoint row is inserted at the policy start (borrowing the triggering
+checkpoint's own provenance columns, the same technique 2.7/2.8's `synthesizeUnknownPositive` uses)
+so this migration's own anchor-checkpoint validation still holds — migration 0021 adds the sibling
+GUC (`invoice.policy_anchor_start_reanchor`) permitting a POLICY_ANCHOR-to-POLICY_ANCHOR re-anchor of
+that kind, alongside this migration's own legacy-to-POLICY_ANCHOR one. This closes the dead zone
+between the policy start and an account's first observed checkpoint that 2.1's original bootstrap
+left open (facts and cash payments dated inside that window were previously excluded permanently).
+The three accounts bootstrapped by the pre-2.10 code are re-anchored by
+`invoice-eligibility-repair --kind=policy-start-reanchor`. See
+`docs/handoffs/XM-INV-ELIG-POLICY-START-ANCHOR.md` and
+`docs/superpowers/specs/2026-09-03-xm-inv-eligibility-simplification-design.md` section 3(D) for the
+full design and `docs/ELIGIBILITY-OPERATIONS.md`'s own "Policy-start anchoring" section for the
+repair's operational runbook.
