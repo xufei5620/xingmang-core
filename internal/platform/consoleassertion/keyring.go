@@ -102,12 +102,15 @@ func (r PublicKeyRecord) Validate() error {
 	if err := validateKeyID(r.KeyID); err != nil {
 		return fmt.Errorf("key %q: %w", r.KeyID, err)
 	}
-	if r.Algorithm != Algorithm {
-		// NB: fleet_keyring.go's FleetSignatureAlgorithm and this package's
-		// Algorithm are both today the literal string "Ed25519"/"EdDSA"
-		// respectively for different purposes (one names a key algorithm,
-		// the other a JWS alg) -- see the constant doc comments.
-		return fmt.Errorf("key %q: algorithm must be Ed25519", r.KeyID)
+	if r.Algorithm != KeyringAlgorithm {
+		// NB: this checks against KeyringAlgorithm ("Ed25519"), not
+		// Algorithm ("EdDSA") -- the manifest's "algorithm" field names the
+		// key algorithm, the JWS header's alg claim (produced by
+		// signCompact, never read from this record) names the signature
+		// scheme. Conflating the two here is exactly the
+		// XM-INVCON-KEYRING-ALG incident: see the constant doc comments in
+		// consoleassertion.go.
+		return fmt.Errorf("key %q: manifest field \"algorithm\" must be %q, got %q", r.KeyID, KeyringAlgorithm, r.Algorithm)
 	}
 	if r.Purpose != KeyringPurpose || r.Protocol != KeyringProtocol {
 		return fmt.Errorf("key %q: purpose/protocol is not the console-assertion signing domain", r.KeyID)
@@ -170,7 +173,7 @@ func NewPublicKeyRecord(keyID string, pub ed25519.PublicKey, validFrom, validUnt
 		return PublicKeyRecord{}, fmt.Errorf("public key must be %d bytes", ed25519.PublicKeySize)
 	}
 	record := PublicKeyRecord{
-		KeyID: keyID, Algorithm: Algorithm,
+		KeyID: keyID, Algorithm: KeyringAlgorithm,
 		PublicKey:   base64.StdEncoding.EncodeToString(pub),
 		Fingerprint: fingerprintOf(pub),
 		Purpose:     KeyringPurpose, Protocol: KeyringProtocol,

@@ -34,10 +34,30 @@ const (
 	// verifier elsewhere in either system (spec §3.1).
 	TokenType = "xm-console-assertion+jwt"
 
-	// Algorithm is the only accepted signature algorithm. No negotiation:
-	// signing always uses EdDSA (Ed25519); the invoice side's verifier
-	// rejects any assertion whose header claims anything else.
+	// Algorithm is the JWS header's alg claim, and *only* the JWS header's
+	// alg claim -- signCompact (claims.go) is its one production caller. No
+	// negotiation: signing always uses EdDSA (Ed25519); the invoice side's
+	// verifier rejects any assertion whose header claims anything else.
+	//
+	// This is a distinct name from the key algorithm on purpose. Do not
+	// reuse this constant for contracts/auth/console-assertion-keyring.v1.
+	// json's "algorithm" field -- see KeyringAlgorithm below, and the
+	// XM-INVCON-KEYRING-ALG incident write-up
+	// (docs/handoffs/slices/XM-INVCON-KEYRING-ALG.md) for what happened the
+	// one time this package conflated the two: the committed manifest ended
+	// up with "algorithm":"EdDSA", and the invoice-system consumer (which
+	// checks the manifest field against the literal key-algorithm name,
+	// per the frozen spec's §3.3 example and CR-0006 phase 2 rollout plan
+	// step 1) refused to start.
 	Algorithm = "EdDSA"
+
+	// KeyringAlgorithm is the only accepted value of the manifest's
+	// "algorithm" field (contracts/auth/console-assertion-keyring.v1.json,
+	// PublicKeyRecord.Algorithm in keyring.go) -- the key algorithm's own
+	// name, not the JWS header's alg claim. Both this package's keyring
+	// validation and cmd/console-assertion-keygen's output must use this
+	// constant, never Algorithm, for that field.
+	KeyringAlgorithm = "Ed25519"
 
 	// ACR is the fixed acr claim value that replaces what Keycloak used to
 	// issue (spec §3.2). The invoice side's own session-issuance code
