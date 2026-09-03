@@ -318,10 +318,20 @@ besides `internal/postgresstore` failed in either run.
 gitleaks git --no-banner --log-opts="a8605ac..HEAD" .
 ```
 
-Result and exact commit range: see the final report (this file is written
-before the commits it describes exist, so the precise range is confirmed
-after committing -- exit code and any findings are reported alongside the
-commit list).
+Clean: `2 commits scanned`, `no leaks found`, exit 0. Commit range
+`a8605ac..HEAD` covers exactly this slice's two commits:
+
+```
+a753279 docs(eligibility-ledger): document the new admin endpoint and handoff
+e1f7560 feat(postgresstore): add read-only eligibility ledger store query
+```
+
+(Two commits, not more, because a broad `git add -A` run earlier -- to check
+`gofmt` against staged blobs, this machine's documented CRLF-checkout
+workaround -- left the httpapi wiring already staged by the time of the
+first `git commit`, so the store layer and the httpapi/application wiring
+around it landed together in one commit rather than split further. Still two
+logically distinct commits: implementation, then documentation.)
 
 ## Not verified
 
