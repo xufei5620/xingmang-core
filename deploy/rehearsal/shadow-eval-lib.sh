@@ -33,6 +33,27 @@
 # own fixtures below additionally exercise this file's parsing logic itself
 # against literal JSON text in that same shape.
 
+# shadow_eval_parse_config_user <config-user-string>
+# Given a Docker image's `Config.User` field, prints "<uid> <gid>" and
+# returns 0 when it is already a numeric uid[:gid] pinned literally in the
+# Dockerfile (gid defaults to uid when the ":gid" part is absent); prints
+# nothing and returns 1 for anything else (empty, meaning root by default,
+# or a name such as "app") -- callers must resolve that case by asking the
+# image itself (see shadow-eval.sh's resolve_tools_container_ids, of which
+# this is the container-free, statically-testable half). This exists
+# because backend/Dockerfile's tools stage sets `USER 10001:10001`
+# literally, so the common case never needs to start a container just to
+# learn its own configured user -- but the parsing itself must not assume
+# that pin never changes.
+shadow_eval_parse_config_user() {
+  local config_user=$1
+  if [[ "$config_user" =~ ^([0-9]+)(:([0-9]+))?$ ]]; then
+    printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}"
+    return 0
+  fi
+  return 1
+}
+
 # _shadow_eval_freeze_block <report.json> <occurrence: 1|2>
 # Prints "freeze_reason<TAB>open" once per element of the Nth
 # "open_freezes_by_reason" array in the file (1 = the "before" snapshot's

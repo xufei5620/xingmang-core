@@ -1,15 +1,17 @@
 # XM-INV-SHADOW-EVAL: release-rehearsal shadow evaluation of the eligibility projection worker
 
-- **status:** implemented and self-tested locally; gates below. Not run against a real production
-  backup or a real server (see "Not run").
+- **status:** implemented and self-tested locally; gates below. A first real run on the server found
+  and this update fixes one real bug (a secret-file permission error in the tools container -- see
+  "Not run"); a second real run to confirm the fix is still needed.
 - **branch:** `ai/claude/XM-INV-SHADOW-EVAL` (based on `ai/claude/XM-INV-AUTOLOGIN` at `0177e72`),
   worktree `K:/发票/wt-XM-INV-SHADOW-EVAL`.
 - **commits:**
   - `6fe4145` feat(eligibility-shadow): add release-rehearsal projection driver and reporting queries
   - `2fb6331` feat(rehearsal): add shadow-eval.sh orchestration and its static test
   - `d1f0468` test(eligibility-shadow): pin the Go/bash report JSON-shape contract
-  - plus the commit adding this handoff and the `docs/PRODUCTION-RUNBOOK.md` section 11.2 it
-    describes (this file's own commit is not self-referenceable by hash from inside itself; see
+  - `196f810` docs(shadow-eval): production runbook section and handoff
+  - plus a follow-up commit fixing the tools-container secret-file permission bug the first real run
+    found (this file's own commit is not self-referenceable by hash from inside itself; see
     `git log --oneline 0177e72..HEAD` on this branch for the exact, current commit list)
 
 ## Summary
@@ -148,11 +150,15 @@ the RC-plan Task 1 bullet to add for any RC that changes the evaluator/projectio
   stage; the two literal substrings `scripts/verify.ps1` checks
   (`/out/invoice-oidc-preflight ./cmd/oidc-preflight` and `/out/invoice-oidc-preflight /usr/local/bin/`)
   are unchanged.
-- `deploy/rehearsal/shadow-eval.sh` -- the orchestrator (see Summary).
+- `deploy/rehearsal/shadow-eval.sh` -- the orchestrator (see Summary). Post-first-real-run fix:
+  `resolve_tools_container_ids` resolves the tools image's runtime uid/gid and the database-url secret
+  file/work directory are `chown`ed to it (see "Not run" below for the incident this fixes).
 - `deploy/rehearsal/shadow-eval-lib.sh` -- the bash-side report-comparison/summary functions, sourced
-  by both `shadow-eval.sh` and `test-shadow-eval.sh`.
+  by both `shadow-eval.sh` and `test-shadow-eval.sh`; also now `shadow_eval_parse_config_user`, the
+  pure/testable half of the uid/gid resolution above.
 - `deploy/rehearsal/test-shadow-eval.sh` -- static test: every argument-parsing failure path, the
-  comparison logic against fixture JSON (including the empty-array edge case), and the human summary.
+  comparison logic against fixture JSON (including the empty-array edge case), the human summary, and
+  `shadow_eval_parse_config_user`'s numeric/named/malformed `Config.User` cases.
 - `docs/PRODUCTION-RUNBOOK.md` -- new section 11.2 (see Summary).
 - `docs/handoffs/XM-INV-SHADOW-EVAL.md` -- this document.
 
@@ -220,16 +226,47 @@ change did not break this gate.
 `no leaks found` (run once after the first two commits, and confirmed clean again after the final
 commit below).
 
+### Follow-up: the tools-container secret-file permission fix
+
+No Go file changed for this fix (`resolve_tools_container_ids`/`shadow_eval_parse_config_user` and
+their `chown` calls are entirely bash), so `go build`/`go vet`/`go test` were not re-run -- there is
+nothing in this fix they could catch that `bash -n` and `test-shadow-eval.sh` do not already cover.
+Re-ran, on the same worktree, after this fix:
+
+- `bash -n` on all three shell scripts: clean.
+- `bash deploy/rehearsal/test-shadow-eval.sh`: `argument parsing: ok`, `report comparison logic: ok`,
+  `human summary: ok`, `shadow_eval_parse_config_user: ok` (new: numeric uid:gid, bare uid, root
+  uid:gid, empty/named/malformed `Config.User` cases), `test-shadow-eval.sh: all checks passed`
+  (exit 0).
+- `/c/Users/58439/.local/bin/gitleaks git --no-banner --log-opts="0177e72..HEAD" .`: `no leaks found`.
+
 ## Not run
 
-- **A real rehearsal against a real signed backup on the production server.** This session has no
-  server access. `shadow-eval.sh`'s restore/decrypt/signature-verification/teardown mechanics closely
-  mirror `restore-drill.sh`'s already-production-proven equivalents (same `age`/`ssh-keygen -Y
-  verify`/tmpfs-postgres/cleanup-trap patterns, same `docker-cleanup-state.sh` helper), and its own
-  argument-parsing paths are covered by `test-shadow-eval.sh`, but the actual restore-into-throwaway-
-  container-then-drain-the-queue end-to-end flow has not been exercised against real data. Recommend
-  a dry run against the current production backup, on the server, before the RC-plan bullet in section
-  11.2 is treated as load-bearing for a real release decision.
+- **A real rehearsal against a real signed backup on the production server, still not completed.**
+  This session has no server access. **Update, first real run:** the team lead ran
+  `shadow-eval.sh` on the server against the RC77 tools image and the newest signed backup.
+  Signature verification, the isolated PostgreSQL container start, and the streamed `age`/`pg_restore`
+  all worked correctly -- but the `invoice-eligibility-shadow` tools container then failed immediately:
+  `ERROR read database credential error="open /run/secrets/database-url: permission denied"` (exit 1,
+  "eligibility-shadow produced no report"). Teardown and the tmpfs shred both worked correctly even on
+  this failure path. **Root cause:** the database-url secret file was written root-owned, mode 0400,
+  inside a root-owned work directory, and bind-mounted read-only into a container that
+  `backend/Dockerfile`'s tools stage runs as a non-root, non-root-owned uid (`USER 10001:10001`) --
+  root-only-readable is not readable by that uid. **Fixed** (new commit below):
+  `resolve_tools_container_ids` in `shadow-eval.sh` resolves the tools image's actual numeric
+  uid/gid (reading `docker image inspect --format '{{.Config.User}}'` when it is already numeric --
+  the common case, since the Dockerfile pins it literally -- falling back to asking the image itself
+  via `id` when it is empty or a name), refuses to proceed if that resolves to root, `chown`s the
+  secret file to that uid before mounting it, and `chown`/`chmod 0710`s the enclosing work directory
+  to that gid as defense in depth. The pure uid/gid-parsing half
+  (`shadow_eval_parse_config_user` in `shadow-eval-lib.sh`) is now covered by
+  `test-shadow-eval.sh`; the `chown`/`chmod` calls themselves and the actual container read are still
+  unverified against a real server, so **a second real rehearsal run is still needed** before the
+  RC-plan bullet in section 11.2 is treated as load-bearing for a real release decision.
+  `shadow-eval.sh`'s restore/decrypt/signature-verification/teardown mechanics otherwise closely mirror
+  `restore-drill.sh`'s already-production-proven equivalents (same `age`/`ssh-keygen -Y
+  verify`/tmpfs-postgres/cleanup-trap patterns, same `docker-cleanup-state.sh` helper), and this first
+  real run's clean signature/restore/teardown behavior is itself evidence for that.
 - **`scripts/verify.ps1` in full.** The task asked to check its Dockerfile-literal substring
   assertions specifically (confirmed via direct inspection: both required substrings are present and
   unbroken), not to run the whole script, which renders the full production Compose stack against a
@@ -259,11 +296,21 @@ commit below).
 4. No new float amounts, no logged/persisted secrets beyond the throwaway restore-only container
    password already discussed, no `contracts/` changes, no schema/migration changes, no admin-OIDC
    changes, no touch to any file outside this slice's stated scope -- checked.
+5. **New, from the first real run's fix.** `resolve_tools_container_ids`' `chown` calls (both the
+   secret file and the work directory) require the whole script to run as root on the server, same as
+   every other privileged operation it already does (the tmpfs `mount`, `restore-drill.sh`'s own
+   `chown -R 65532:65532` calls on its analogous per-container key copies). Not a new assumption, but
+   worth calling out since it is the first place *this* script relies on it for a `chown` specifically.
+   If `Config.User` on a future tools image is ever a bare name instead of numeric, the fallback path
+   (`docker run --rm --entrypoint id <image> -u/-g`) starts one extra short-lived container per
+   rehearsal to answer that -- untested against a real image (the current one never takes this path,
+   `Config.User` is always `10001:10001`), only unit-tested for its numeric-parsing half.
 
 ## Follow-ups (recommended, not blocking)
 
-1. Run one real rehearsal on the server against the current production backup, with a currently-loaded
-   RC's own image tag, before treating the section 11.2 RC-plan bullet as load-bearing.
+1. Run a second real rehearsal on the server (after the permission fix above) against the current
+   production backup, with a currently-loaded RC's own image tag, before treating the section 11.2
+   RC-plan bullet as load-bearing.
 2. If a future slice wants full coverage of the carry-forward-proof evaluation branch, factor out (or
    reuse, if one already exists elsewhere by then) a full `source_economic_scan_cycles`/
    `source_ingest_batches`/`balance_carry_forward_proofs` fixture helper.
