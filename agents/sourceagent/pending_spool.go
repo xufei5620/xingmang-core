@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -378,7 +379,15 @@ func (s *EncryptedFilePendingStore) validatePending(pending PendingBatch) error 
 	if err := validateStoredFileCursorForStream(pending.CursorBefore, s.StreamID); err != nil {
 		return err
 	}
-	if err := validateStoredFileCursorForStream(pending.CursorAfter, s.StreamID); err != nil || pending.CursorAfter.Revision != pending.CursorBefore.Revision {
+	// The prefix is load-bearing: keep it exact and lead with it so any
+	// caller matching on it (or just reading the log) still recognizes this
+	// failure, while %w preserves the underlying cause for diagnosis --
+	// XM-INV-AGENT-CREDITS-RECONCILE-FIX was this exact message with no
+	// cause attached, which took longer to root-cause than it should have.
+	if err := validateStoredFileCursorForStream(pending.CursorAfter, s.StreamID); err != nil {
+		return fmt.Errorf("pending batch cursor transition is invalid: %w", err)
+	}
+	if pending.CursorAfter.Revision != pending.CursorBefore.Revision {
 		return errors.New("pending batch cursor transition is invalid")
 	}
 	return nil

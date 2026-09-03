@@ -131,13 +131,7 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 	if !hasMore {
 		next.WatermarkAt = next.CeilingAt
 		next.WatermarkCursor = next.CeilingCursor
-		if req.Mode == ScanReconcile {
-			// XM-INV-AGENT-RESTART-GRACE part B: record where this completed
-			// reconcile reached so the next one starts here instead of
-			// rewinding to the cutover manifest. Equal to WatermarkCursor at
-			// this point (both are the ceiling this cycle proved complete).
-			next.ReconcileBaselineCursor = next.WatermarkCursor
-		}
+		next.ReconcileBaselineCursor = reconcileBaselineCursorAfterCompletion(req.Mode, c.Stream, next.WatermarkCursor)
 	}
 	var pageWarnings []string
 	if abandoningLegacyReconcile {
@@ -196,6 +190,26 @@ func (c *EconomicDBConnector) Scan(ctx context.Context, req ScanRequest) (ScanPa
 // ScanReconcile in the first place and has nothing to abandon.
 func shouldAbandonLegacyReconcileCycle(cursor ScanCursor, newCycle bool, mode ScanMode, stream string) bool {
 	return !newCycle && mode == ScanReconcile && stream == StreamUsage && !cursor.ReconcileWindowBounded
+}
+
+// reconcileBaselineCursorAfterCompletion decides the ReconcileBaselineCursor
+// value to record when a scan page completes a cycle (!hasMore in Scan). It
+// is usage-only: credits resets its position to zero on every new cycle
+// regardless of mode (see prepareCursor's StreamCredits case below), so a
+// rolling-window baseline is meaningless for it, and the stored-cursor
+// validator (state_store_file.go validateStoredFileCursorForStream) rejects
+// a non-empty ReconcileBaselineCursor on any stream other than StreamUsage.
+//
+// XM-INV-AGENT-CREDITS-RECONCILE-FIX: stamping this field unconditionally on
+// every completed ScanReconcile page (regardless of stream) made every
+// completed credits reconcile page produce a cursor the pending spool then
+// permanently refused to accept, looping the credits stream's periodic
+// reconcile forever in production and leaving its watermark stale.
+func reconcileBaselineCursorAfterCompletion(mode ScanMode, stream, completedWatermarkCursor string) string {
+	if mode == ScanReconcile && stream == StreamUsage {
+		return completedWatermarkCursor
+	}
+	return ""
 }
 
 // reconcileWindowStart picks the domain positions a ScanReconcile cycle

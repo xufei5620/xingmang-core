@@ -101,6 +101,44 @@ func TestEncryptedPendingSpoolRoundTripAndTamperFailsClosed(t *testing.T) {
 	}
 }
 
+// TestValidatePendingRejectsCreditsCursorCarryingReconcileBaseline documents
+// the XM-INV-AGENT-CREDITS-RECONCILE-FIX production failure mode: prior to
+// the fix, economics_db.go stamped ReconcileBaselineCursor on every completed
+// ScanReconcile page regardless of stream, but the stored-cursor validator
+// (validateStoredFileCursorForStream) only allows this field on the usage
+// stream. A credits CursorAfter carrying it must be rejected here, and the
+// error must include the underlying cause, not just the generic message.
+func TestValidatePendingRejectsCreditsCursorCarryingReconcileBaseline(t *testing.T) {
+	directory := t.TempDir()
+	keyPath := filepath.Join(directory, "spool.key")
+	key := bytes.Repeat([]byte{0x42}, 32)
+	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &EncryptedFilePendingStore{
+		Path: filepath.Join(directory, "pending.enc"), SourceID: "10000000-0000-4000-8000-000000000002", StreamID: StreamCredits,
+		Keys: FileSpoolKeyProvider{Path: keyPath},
+	}
+	before := testV3Cursor(StreamCredits, "before")
+	after := testV3Cursor(StreamCredits, "after")
+	// The historical bug: economics_db.go stamped this unconditionally.
+	after.ReconcileBaselineCursor = after.WatermarkCursor
+	batch, err := (BatchBuilder{
+		SchemaVersion: SchemaVersionV3, SourceInstanceID: "10000000-0000-4000-8000-000000000002", StreamID: StreamCredits, SourceType: SourceSub2API,
+		SourceRuntimeVersion: "v1.0.0-rc.25", AgentVersion: "test", Mode: "db_projection",
+	}).BuildPage(1, "", []Projection{creditEventProjectionForTest()}, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := PendingBatch{Batch: batch, CursorBefore: before, CursorAfter: after}
+	if _, err := store.SaveIfAbsent(context.Background(), pending); err == nil {
+		t.Fatal("pending spool accepted a credits cursor carrying usage-only reconcile baseline metadata")
+	} else if !strings.HasPrefix(err.Error(), "pending batch cursor transition is invalid") ||
+		!strings.Contains(err.Error(), "stored cursor carried usage-only reconcile window metadata") {
+		t.Fatalf("expected the prefixed message with the underlying cause, got: %v", err)
+	}
+}
+
 func TestAckLossRetriesExactPendingBatch(t *testing.T) {
 	ctx := context.Background()
 	sequence := &MemorySequenceStore{}

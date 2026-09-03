@@ -390,3 +390,22 @@ func candidateProjectionForTest() Projection {
 		},
 	}
 }
+
+func creditEventProjectionForTest() Projection {
+	return Projection{
+		EntityType: EntityCreditEvent,
+		ExternalID: "promo_code_usages:1",
+		ObservedAt: "2026-09-03T14:58:00Z",
+		Operation:  "upsert",
+		Payload: CreditEventPayload{
+			ExternalUserID: "7", ExternalCreditID: "promo_code_usages:1",
+			OccurredAt: "2026-09-03T14:57:00Z", ServiceUnits: "100", UnitCode: "SUB2_BALANCE_1E8",
+			CreditKind: "bonus",
+			FactMetadata: FactMetadata{
+				SourceCursor:        "promo_code_usages:1",
+				CutoverManifestHash: SHA256Hex([]byte("manifest")),
+				ConfigurationHash:   SHA256Hex([]byte("config")),
+			},
+		},
+	}
+}

@@ -32,7 +32,12 @@ import (
 // repository convention. See docs/handoffs/XM-INV-AGENT-RESTART-GRACE.md for
 // every place this version string must be mirrored (release gate default,
 // verify.ps1 fixture, compose files).
-var buildVersion = "0.3.1"
+//
+// XM-INV-AGENT-CREDITS-RECONCILE-FIX fixed a production incident where the
+// credits stream's reconcile permanently failed (see
+// docs/handoffs/XM-INV-AGENT-CREDITS-RECONCILE-FIX.md): bumped 0.3.1 ->
+// 0.3.2. Same mirroring requirement applies to this bump.
+var buildVersion = "0.3.2"
 var requiredEligibilityStartAt = time.Date(2026, time.August, 31, 16, 0, 0, 0, time.UTC)
 
 var productionSourceIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
