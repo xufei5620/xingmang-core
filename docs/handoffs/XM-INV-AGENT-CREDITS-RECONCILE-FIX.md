@@ -10,8 +10,8 @@
      doc.
   2. a follow-up fix-up commit (not an amend) addressing a regression caught in code review of commit
      1 before it reached production usage traffic: the original helper cleared usage's rolling
-     reconcile baseline on every completed incremental/full cycle instead of preserving it. See
-     "Deviations from the brief" below for the full explanation.
+     reconcile baseline on every completed incremental/full cycle instead of preserving it. See "Fix"
+     below for the full explanation.
 
   See `git show --stat` on each commit for the exact file list.
 
@@ -220,21 +220,6 @@ inadvertently converting it to LF, and its CRLF endings were restored byte-for-b
 committing. In the review follow-up commit, the same kind of alignment issue recurred (new map
 literal entries) and was this time fixed by hand directly in the CRLF file (no `gofmt -w` on the real
 file), avoiding the round trip entirely; the CRLF-stripped gofmt check was re-run clean both times.
-
-## Deviations from the brief
-
-None in the original commit. The one open question the brief flagged (whether anything compares the
-full `"pending batch cursor transition is invalid"` string) was checked by grep across `agents/` and
-`backend/`: nothing does. The prefix-plus-`%w` approach was applied as specified.
-
-**Review follow-up (second commit, same branch, not an amend):** code review of the original commit
-caught a real regression before it reached production usage traffic -- see "Fix" above for the full
-technical explanation. The original helper cleared `ReconcileBaselineCursor` on every completed usage
-cycle that was not itself a `ScanReconcile` (i.e. `ScanIncremental`/`ScanFull`), when `0.3.1`'s actual
-behavior was to preserve whatever the last completed reconcile had recorded across those cycles. Fixed
-by adding a `carried` parameter to the helper (call site passes the incoming cursor's
-`ReconcileBaselineCursor`), threading it through as the preserved value for non-reconcile completions.
-New regression tests added and this doc updated in the same follow-up commit.
 
 ## Verification plan (after deploy)
 
