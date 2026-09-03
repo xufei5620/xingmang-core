@@ -411,8 +411,12 @@ func consoleAssertionServer(t *testing.T, disableOIDC bool) consoleAssertionFixt
 		runtime.OIDC = nil
 		runtime.Logout = nil
 	}
+	// PublicOrigin mirrors runtime.go's publicOrigin (PUBLIC_ORIGIN) wiring --
+	// the same value the CSRF policy above uses -- and is what
+	// consoleAssertionOriginAllowed checks a redeeming request's Origin
+	// header against alongside the console issuer (XM-INV-ASSERT-ORIGIN).
 	server, err := NewWithConfig(ledger.NewService(), Config{
-		AuthMode: "oidc", AdminIPAllowlist: []string{"127.0.0.1/32"}, ProductionAuth: runtime,
+		AuthMode: "oidc", AdminIPAllowlist: []string{"127.0.0.1/32"}, ProductionAuth: runtime, PublicOrigin: "https://invoice.example",
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -552,6 +556,13 @@ func TestConsoleAssertionExchangeRejectsWrongOrDuplicateOrigin(t *testing.T) {
 		"missing":   func(r *http.Request) { r.Header.Del("Origin") },
 		"wrong":     func(r *http.Request) { r.Header.Set("Origin", "https://attacker.example") },
 		"duplicate": func(r *http.Request) { r.Header.Add("Origin", "https://other.example") },
+		// Even when BOTH headers are individually legitimate (console issuer,
+		// plus the invoice app's own origin -- see
+		// TestConsoleAssertionExchangeAcceptsInvoiceOriginSameOriginRedeem
+		// below), exactly-one is still required: a request carrying two
+		// Origin headers is never something a real browser produces, and
+		// must still be rejected.
+		"duplicate_both_legitimate": func(r *http.Request) { r.Header.Add("Origin", "https://invoice.example") },
 		"http_not_https": func(r *http.Request) {
 			r.Header.Set("Origin", strings.Replace(testConsoleAssertionIssuer, "https://", "http://", 1))
 		},
@@ -569,6 +580,97 @@ func TestConsoleAssertionExchangeRejectsWrongOrDuplicateOrigin(t *testing.T) {
 			fixture.server.Handler().ServeHTTP(recorder, request)
 			if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "ORIGIN_REJECTED") {
 				t.Fatalf("response=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// TestConsoleAssertionExchangeAcceptsInvoiceOriginSameOriginRedeem is the
+// XM-INV-ASSERT-ORIGIN regression: the integrated protocol has the invoice
+// web app itself -- not the console -- redeem the assertion with a
+// same-origin fetch, so the browser sends the invoice app's own public
+// origin (server.publicOrigin, wired from PUBLIC_ORIGIN/PublicOrigin, same
+// value the CSRF policy above already uses) as Origin. Before this slice,
+// only the console issuer was accepted and every real redemption failed
+// ORIGIN_REJECTED (2026-09-03 canary finding).
+func TestConsoleAssertionExchangeAcceptsInvoiceOriginSameOriginRedeem(t *testing.T) {
+	fixture := consoleAssertionServer(t, false)
+	token := signTestConsoleAssertion(t, fixture.privateKey, fixture.keyID, nil)
+	request := consoleAssertionExchangeRequest(token)
+	request.Header.Set("Origin", "https://invoice.example")
+
+	recorder := httptest.NewRecorder()
+	fixture.server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"ok":true`) {
+		t.Fatalf("same-origin invoice exchange response=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestConsoleAssertionExchangeAcceptsConfiguredConsoleIssuerOrigin makes the
+// second accepted origin explicit (consoleAssertionExchangeRequest already
+// defaults Origin to the console issuer and every other exchange test above
+// relies on that implicitly): a hypothetical direct cross-origin POST from
+// the console itself must keep working, not just the invoice app's own
+// same-origin redeem this slice adds.
+func TestConsoleAssertionExchangeAcceptsConfiguredConsoleIssuerOrigin(t *testing.T) {
+	fixture := consoleAssertionServer(t, false)
+	token := signTestConsoleAssertion(t, fixture.privateKey, fixture.keyID, nil)
+	request := consoleAssertionExchangeRequest(token)
+	request.Header.Set("Origin", testConsoleAssertionIssuer)
+
+	recorder := httptest.NewRecorder()
+	fixture.server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"ok":true`) {
+		t.Fatalf("console-issuer-origin exchange response=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestConsoleAssertionExchangeForeignOriginRejectionCountsAgainstRateLimit
+// proves origin_rejected still feeds ConsoleAssertionRateLimiter.RecordFailure
+// (team lead's brief: "keep rate-limit failure accounting") -- a genuinely
+// foreign origin must still exhaust the limiter exactly like any other
+// rejection reason, not get a quieter path now that two origins are legitimate.
+func TestConsoleAssertionExchangeForeignOriginRejectionCountsAgainstRateLimit(t *testing.T) {
+	fixture := consoleAssertionServer(t, false) // rate limiter allows 3 failures per minute
+	for i := 0; i < 3; i++ {
+		token := signTestConsoleAssertion(t, fixture.privateKey, fixture.keyID, nil)
+		request := consoleAssertionExchangeRequest(token)
+		request.Header.Set("Origin", "https://attacker.example")
+		recorder := httptest.NewRecorder()
+		fixture.server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "ORIGIN_REJECTED") {
+			t.Fatalf("attempt %d response=%d body=%s", i, recorder.Code, recorder.Body.String())
+		}
+	}
+	// A LEGITIMATE origin, still rate limited by the three prior failures.
+	token := signTestConsoleAssertion(t, fixture.privateKey, fixture.keyID, nil)
+	recorder := httptest.NewRecorder()
+	fixture.server.Handler().ServeHTTP(recorder, consoleAssertionExchangeRequest(token))
+	if recorder.Code != http.StatusTooManyRequests || !strings.Contains(recorder.Body.String(), "RATE_LIMITED") {
+		t.Fatalf("response=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestConsoleAssertionOriginAllowed is a pure-function table test of the
+// origin-matching logic itself, independent of the HTTP-level tests above.
+func TestConsoleAssertionOriginAllowed(t *testing.T) {
+	cases := []struct {
+		name                          string
+		origin, invoiceOrigin, issuer string
+		want                          bool
+	}{
+		{"matches invoice origin", "https://invoice.example", "https://invoice.example", "https://console.example", true},
+		{"matches console issuer", "https://console.example", "https://invoice.example", "https://console.example", true},
+		{"matches neither", "https://attacker.example", "https://invoice.example", "https://console.example", false},
+		{"empty origin never matches", "", "https://invoice.example", "https://console.example", false},
+		{"unset invoice origin does not widen the check", "https://invoice.example", "", "https://console.example", false},
+		{"unset console issuer does not widen the check", "https://console.example", "https://invoice.example", "", false},
+		{"both unset", "https://invoice.example", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := consoleAssertionOriginAllowed(tc.origin, tc.invoiceOrigin, tc.issuer); got != tc.want {
+				t.Fatalf("consoleAssertionOriginAllowed(%q,%q,%q)=%v want %v", tc.origin, tc.invoiceOrigin, tc.issuer, got, tc.want)
 			}
 		})
 	}
