@@ -4,7 +4,7 @@
 > `v0.1.0-rc62-signed` (`2ceade0`) and is deployed; the stream wedge
 > fully recovered behind it (public readyz 200); its evidence is
 > immutable. Continue only with
-> `docs/superpowers/plans/2026-09-03-invoice-rc74-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-03-invoice-rc75-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

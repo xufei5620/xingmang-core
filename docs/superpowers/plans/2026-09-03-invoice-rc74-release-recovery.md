@@ -1,5 +1,10 @@
 # RC74 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC74 shipped at signed tag
+> `v0.1.0-rc74-signed` (`e38d7c0`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc75-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC74 — CR-0006 phase 2 step 2 on the invoice side (XM-INV-CONSOLE-ASSERT-DEPLOY): `docker-compose.prod.yml` mounts the console-assertion public-key manifest read-only into the api container and declares the `OIDC_ADMIN_LOGIN_ENABLED` / `CONSOLE_ASSERTION_ENABLED` / `CONSOLE_ASSERTION_ISSUER` / `CONSOLE_ASSERTION_AUDIENCE` / `CONSOLE_ASSERTION_KEYS_FILE` keys with dark defaults; `deploy/roll-forward.sh` pre-creates an empty placeholder so Compose never binds a directory; the api reads the keyring only when the feature flag is on.

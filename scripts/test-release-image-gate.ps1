@@ -182,29 +182,29 @@ if (-not $gateSource.Contains('Get-ReleaseGateBlockedExitCode', [StringCompariso
     throw 'release image gate does not reserve exit 42 for the sole pending-canary state'
 }
 
-foreach ($validStrictDirectory in @('release\0.1.0-rc74-exact1', 'release\0.1.0-rc74-exact99')) {
-    Assert-StrictReleaseDirectoryName -ReleaseDirectory $validStrictDirectory -ExpectedReleaseName '0.1.0-rc74' | Out-Null
+foreach ($validStrictDirectory in @('release\0.1.0-rc75-exact1', 'release\0.1.0-rc75-exact99')) {
+    Assert-StrictReleaseDirectoryName -ReleaseDirectory $validStrictDirectory -ExpectedReleaseName '0.1.0-rc75' | Out-Null
 }
 foreach ($invalidStrictDirectory in @(
     'release\0.1.0-rc52-exact1',
-    'release\0.1.0-RC74-exact1',
-    'release\0.1.0-rc74-exact0',
-    'release\0.1.0-rc74-exact100',
-    'release\rc74-exact1'
+    'release\0.1.0-RC75-exact1',
+    'release\0.1.0-rc75-exact0',
+    'release\0.1.0-rc75-exact100',
+    'release\rc75-exact1'
 )) {
     Assert-ThrowsLike `
-        -Action { Assert-StrictReleaseDirectoryName -ReleaseDirectory $invalidStrictDirectory -ExpectedReleaseName '0.1.0-rc74' | Out-Null } `
+        -Action { Assert-StrictReleaseDirectoryName -ReleaseDirectory $invalidStrictDirectory -ExpectedReleaseName '0.1.0-rc75' | Out-Null } `
         -ExpectedMessagePattern 'strict transfer release directory' `
         -FailureMessage "strict transfer accepted invalid release directory $invalidStrictDirectory"
 }
 
-$validStrictManifestJson = '{"releaseName":"0.1.0-rc74","images":[{"name":"api","reference":"invoice-system-api:0.1.0-rc74"}]}'
+$validStrictManifestJson = '{"releaseName":"0.1.0-rc75","images":[{"name":"api","reference":"invoice-system-api:0.1.0-rc75"}]}'
 Assert-JsonHasNoDuplicateProperties -JsonText $validStrictManifestJson | Out-Null
 foreach ($duplicateJsonFixture in @(
-    [pscustomobject]@{ Label = 'same-case top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","releaseName":"0.1.0-rc74"}' },
-    [pscustomobject]@{ Label = 'case-drifted top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","ReleaseName":"0.1.0-rc74"}' },
-    [pscustomobject]@{ Label = 'same-case nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","reference":"invoice-system-api:0.1.0-rc74"}]}' },
-    [pscustomobject]@{ Label = 'case-drifted nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","Reference":"invoice-system-api:0.1.0-rc74"}]}' }
+    [pscustomobject]@{ Label = 'same-case top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","releaseName":"0.1.0-rc75"}' },
+    [pscustomobject]@{ Label = 'case-drifted top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","ReleaseName":"0.1.0-rc75"}' },
+    [pscustomobject]@{ Label = 'same-case nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","reference":"invoice-system-api:0.1.0-rc75"}]}' },
+    [pscustomobject]@{ Label = 'case-drifted nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","Reference":"invoice-system-api:0.1.0-rc75"}]}' }
 )) {
     Assert-ThrowsLike `
         -Action { Assert-JsonHasNoDuplicateProperties -JsonText $duplicateJsonFixture.Json | Out-Null } `
@@ -489,7 +489,7 @@ if (-not (Test-Path -LiteralPath $postgresDockerfilePath) -or
     -not (Test-Path -LiteralPath $postgresGoSumPath) -or
     -not (Test-Path -LiteralPath $clamavDockerfilePath) -or
     -not (Test-Path -LiteralPath $ingestDockerfilePath)) {
-    throw 'RC74 derived PostgreSQL, ClamAV, and ingest runtime image sources are missing'
+    throw 'RC75 derived PostgreSQL, ClamAV, and ingest runtime image sources are missing'
 }
 
 $postgresDockerfile = Get-Content -Raw -LiteralPath $postgresDockerfilePath
@@ -524,14 +524,14 @@ foreach ($requiredTask2Helper in @(
     'Assert-ComposeServiceImage'
 )) {
     if (-not (Get-Command -Name $requiredTask2Helper -ErrorAction SilentlyContinue)) {
-        throw "RC74 focused static checker is missing: $requiredTask2Helper"
+        throw "RC75 focused static checker is missing: $requiredTask2Helper"
     }
 }
 
 $apiBaseStart = $backendDockerfile.IndexOf('FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS api-base', [StringComparison]::Ordinal)
 $scannerBaseStart = $backendDockerfile.IndexOf('FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS scanner-base', [StringComparison]::Ordinal)
 if ($apiBaseStart -lt 0 -or $scannerBaseStart -le $apiBaseStart) {
-    throw 'RC74 backend fixture does not contain the named runtime stages'
+    throw 'RC75 backend fixture does not contain the named runtime stages'
 }
 $backendWithoutApiBaseOpenSslPins = $backendDockerfile.Substring(0, $apiBaseStart) +
     $backendDockerfile.Substring($apiBaseStart, $scannerBaseStart - $apiBaseStart).Replace($fixedAlpinePackages, '') +
@@ -606,7 +606,7 @@ if (-not $webDockerfile.Contains($fixedAlpinePackages) -or
     -not $postgresDockerfile.Contains($fixedAlpinePackages) -or
     -not $clamavDockerfile.Contains($fixedAlpinePackages) -or
     -not $ingestDockerfile.Contains($fixedAlpinePackages)) {
-    throw 'RC74 runtime Alpine stages do not pin both fixed OpenSSL packages'
+    throw 'RC75 runtime Alpine stages do not pin both fixed OpenSSL packages'
 }
 if (-not $postgresDockerfile.Contains($goBuilderReference) -or
     -not $postgresDockerfile.Contains($postgresBaseReference) -or
@@ -618,15 +618,15 @@ if (-not $postgresDockerfile.Contains($goBuilderReference) -or
     -not $postgresDockerfile.Contains('test "$TARGETOS" = "linux"') -or
     -not $postgresDockerfile.Contains('test "$TARGETARCH" = "amd64"') -or
     $postgresDockerfile.Contains('go mod download -mod=readonly')) {
-    throw 'RC74 PostgreSQL gosu rebuild is not pinned, platform-gated, and read-only at build time'
+    throw 'RC75 PostgreSQL gosu rebuild is not pinned, platform-gated, and read-only at build time'
 }
-Assert-ExactNormalizedText -Actual $postgresGoMod -Expected $expectedGosuGoMod -Label 'RC74 PostgreSQL gosu go.mod'
-Assert-ExactNormalizedText -Actual $postgresGoSum -Expected $expectedGosuGoSum -Label 'RC74 PostgreSQL gosu go.sum'
+Assert-ExactNormalizedText -Actual $postgresGoMod -Expected $expectedGosuGoMod -Label 'RC75 PostgreSQL gosu go.mod'
+Assert-ExactNormalizedText -Actual $postgresGoSum -Expected $expectedGosuGoSum -Label 'RC75 PostgreSQL gosu go.sum'
 if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
     -not $clamavDockerfile.Contains('ClamAV 1.4.5') -or
     -not $ingestDockerfile.Contains($nginxBaseReference) -or
     -not $ingestDockerfile.Contains('nginx/1.30.4')) {
-    throw 'RC74 PostgreSQL, ClamAV, or ingest runtime is not pinned to the reviewed base'
+    throw 'RC75 PostgreSQL, ClamAV, or ingest runtime is not pinned to the reviewed base'
 }
 Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $keycloakBaseReference | Out-Null
 
@@ -696,7 +696,7 @@ $productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'depl
 if ($productionComposeText -match '(?m)^\s+image:\s+postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2\s*$' -or
     $productionComposeText -match '(?m)^\s+image:\s+clamav/clamav:1\.4\.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8\s*$' -or
     $productionComposeText -match '(?m)^\s+image:\s+nginx:1\.30-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46\s*$') {
-    throw 'RC74 production Compose retains external PostgreSQL, ClamAV, or ingest runtime image references'
+    throw 'RC75 production Compose retains external PostgreSQL, ClamAV, or ingest runtime image references'
 }
 Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'postgres' -ExpectedImage $localPostgresImage
 Assert-ComposeServiceImage -ComposeText $productionCompose -Service 'permissions' -ExpectedImage $localPostgresImage
@@ -838,7 +838,7 @@ $postgresUnapprovedNoFixReport.Results[0].Vulnerabilities[0] | Add-Member -NoteP
 $postgresUnapprovedNoFixSummary = Get-TrivyFindingSummary -Report $postgresUnapprovedNoFixReport
 Assert-ThrowsLike `
     -Action { Assert-PostgresGosuFindingScope -ImageReference $postgresReference -ImageId $postgresID -Summary $postgresUnapprovedNoFixSummary -ExpectedReference $postgresReference -ExpectedImageId $postgresID | Out-Null } `
-    -ExpectedMessagePattern 'no approved RC74 no-fix tuple' `
+    -ExpectedMessagePattern 'no approved RC75 no-fix tuple' `
     -FailureMessage 'PostgreSQL exception did not fail closed with an empty approved no-fix tuple set'
 
 $postgresUnreviewedStatusReport = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'postgres-gosu-vulnerability-report.json') | ConvertFrom-Json
@@ -977,7 +977,7 @@ Test-Task5ARequirement -Label 'generator re-parses manifest JSON before exact co
 if ($artifactVerifierSource -match 'approved-by-exact-binary-exception' -or
     $artifactVerifierSource -notmatch '\[string\]\$postgres\[0\]\.policyStatus\s*-cne\s*''approved''' -or
     $artifactVerifierSource -notmatch '\$null\s*-ne\s*\$postgres\[0\]\.exception') {
-    throw 'RC74 artifact verification still permits a PostgreSQL vulnerability exception'
+    throw 'RC75 artifact verification still permits a PostgreSQL vulnerability exception'
 }
 Test-Task5ARequirement -Label 'artifact verifier avoids vulnerability counter coercion after exact JSON validation' -Action {
     if ($artifactVerifierSource -match '\[int\][^\r\n]*\.vulnerabilities\.(?:high|critical|total)' -or
@@ -998,8 +998,8 @@ if ($artifactVerifierSource -notmatch '\[switch\]\$RequireTransferReady' -or
     $artifactVerifierSource -notmatch '(?ms)if \(\$RequireTransferReady\) \{\s*Assert-TransferReadyManifest -Manifest \$manifest -ExpectedGitHead \$signedTagCommit\s*\| Out-Null\s*\}') {
     throw 'independent artifact verifier is missing the strict signed-tag transfer-ready source contract'
 }
-if (-not $artifactVerifierSource.Contains("Assert-StrictReleaseDirectoryName -ReleaseDirectory `$releaseRoot -ExpectedReleaseName '0.1.0-rc74'", [StringComparison]::Ordinal)) {
-    throw 'independent artifact verifier does not bind strict transfer to an RC74 exactN directory leaf'
+if (-not $artifactVerifierSource.Contains("Assert-StrictReleaseDirectoryName -ReleaseDirectory `$releaseRoot -ExpectedReleaseName '0.1.0-rc75'", [StringComparison]::Ordinal)) {
+    throw 'independent artifact verifier does not bind strict transfer to an RC75 exactN directory leaf'
 }
 Test-Task5ARequirement -Label 'artifact verifier rejects raw duplicate JSON properties before object conversion' -Action {
     $rawManifestOffset = $artifactVerifierSource.IndexOf('$manifestJson = Get-Content -Raw -LiteralPath $manifestPath', [StringComparison]::Ordinal)
@@ -1029,9 +1029,9 @@ Test-Task5ARequirement -Label 'fully qualified signed tag ref is used for every 
         throw 'strict Git lookup still accepts the unqualified SignedReleaseTag value'
     }
 }
-Test-Task5ARequirement -Label 'exact RC74 tag name maps to the fully qualified tag ref' -Action {
-    $resolvedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag 'v0.1.0-rc74-signed'
-    if ($resolvedTagRef -cne 'refs/tags/v0.1.0-rc74-signed') {
+Test-Task5ARequirement -Label 'exact RC75 tag name maps to the fully qualified tag ref' -Action {
+    $resolvedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag 'v0.1.0-rc75-signed'
+    if ($resolvedTagRef -cne 'refs/tags/v0.1.0-rc75-signed') {
         throw "unexpected resolved tag ref: $resolvedTagRef"
     }
 }
@@ -1040,24 +1040,24 @@ foreach ($invalidTagName in @(
     'v0.1.0-rc50-signed',
     'v0.1.0-rc51-signed',
     'v0.1.0-rc52-signed',
-    'v0.1.0-rc74-signed-sibling',
-    'refs/heads/v0.1.0-rc74-signed',
-    'refs/tags/v0.1.0-rc74-signed'
+    'v0.1.0-rc75-signed-sibling',
+    'refs/heads/v0.1.0-rc75-signed',
+    'refs/tags/v0.1.0-rc75-signed'
 )) {
     Test-Task5AMutationRejected -Label "non-exact signed tag input $invalidTagName" -Action {
         Get-StrictSignedReleaseTagRef -SignedReleaseTag $invalidTagName | Out-Null
     }
 }
 $productionRunbook = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
-Test-Task5ARequirement -Label 'production runbook invokes the exact RC74 strict transfer-ready verifier parameters' -Action {
+Test-Task5ARequirement -Label 'production runbook invokes the exact RC75 strict transfer-ready verifier parameters' -Action {
     if (-not $productionRunbook.Contains('-RequireTransferReady', [StringComparison]::Ordinal) -or
-        -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc74-signed', [StringComparison]::Ordinal) -or
+        -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc75-signed', [StringComparison]::Ordinal) -or
         $productionRunbook -match '\bRC(?:32|38)\b') {
         throw 'production runbook does not invoke the exact strict transfer-ready verifier parameters'
     }
 }
 
-function Assert-RC74ProductionPrerequisites {
+function Assert-RC75ProductionPrerequisites {
     param([Parameter(Mandatory)][string]$ReadinessText)
 
     $sectionStart = $ReadinessText.IndexOf('## Production prerequisites not yet performed', [StringComparison]::Ordinal)
@@ -1066,13 +1066,13 @@ function Assert-RC74ProductionPrerequisites {
         throw 'release readiness does not contain the bounded production prerequisites section'
     }
     $prerequisites = $ReadinessText.Substring($sectionStart, $sectionEnd - $sectionStart)
-    foreach ($requiredRC74Instruction in @(
-        'fresh RC74 image/SBOM/vulnerability',
-        'same RC74 tag',
-        'RC74 commit and signed release tag'
+    foreach ($requiredRC75Instruction in @(
+        'fresh RC75 image/SBOM/vulnerability',
+        'same RC75 tag',
+        'RC75 commit and signed release tag'
     )) {
-        if (-not $prerequisites.Contains($requiredRC74Instruction, [StringComparison]::Ordinal)) {
-            throw "release readiness production prerequisites are missing RC74 instruction: $requiredRC74Instruction"
+        if (-not $prerequisites.Contains($requiredRC75Instruction, [StringComparison]::Ordinal)) {
+            throw "release readiness production prerequisites are missing RC75 instruction: $requiredRC75Instruction"
         }
     }
     if ($prerequisites.Contains('RC32', [StringComparison]::Ordinal)) {
@@ -1081,40 +1081,40 @@ function Assert-RC74ProductionPrerequisites {
 }
 
 $releaseReadiness = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'RELEASE-READINESS.md')
-Assert-RC74ProductionPrerequisites -ReadinessText $releaseReadiness
+Assert-RC75ProductionPrerequisites -ReadinessText $releaseReadiness
 foreach ($staleInstructionMutation in @(
-    [pscustomobject]@{ Current = 'fresh RC74 image/SBOM/vulnerability'; Stale = 'fresh RC52 image/SBOM/vulnerability' },
-    [pscustomobject]@{ Current = 'same RC74 tag'; Stale = 'same RC52 tag' },
-    [pscustomobject]@{ Current = 'RC74 commit and signed release tag'; Stale = 'RC52 commit and signed release tag' }
+    [pscustomobject]@{ Current = 'fresh RC75 image/SBOM/vulnerability'; Stale = 'fresh RC52 image/SBOM/vulnerability' },
+    [pscustomobject]@{ Current = 'same RC75 tag'; Stale = 'same RC52 tag' },
+    [pscustomobject]@{ Current = 'RC75 commit and signed release tag'; Stale = 'RC52 commit and signed release tag' }
 )) {
     Test-Task5AMutationRejected -Label "stale readiness instruction $($staleInstructionMutation.Stale)" -Action {
-        Assert-RC74ProductionPrerequisites -ReadinessText ($releaseReadiness.Replace(
+        Assert-RC75ProductionPrerequisites -ReadinessText ($releaseReadiness.Replace(
             [string]$staleInstructionMutation.Current,
             [string]$staleInstructionMutation.Stale
         ))
     }
 }
 
-function Assert-RC74ImageScanReviewCurrentSection {
+function Assert-RC75ImageScanReviewCurrentSection {
     param([Parameter(Mandatory)][string]$ReviewText)
 
-    $sectionStart = $ReviewText.IndexOf('## Current RC74 remediation and review status (source/static only)', [StringComparison]::Ordinal)
+    $sectionStart = $ReviewText.IndexOf('## Current RC75 remediation and review status (source/static only)', [StringComparison]::Ordinal)
     $sectionEnd = $ReviewText.IndexOf('## Historical RC1 approved-candidate snapshot (retired)', [StringComparison]::Ordinal)
     if ($sectionStart -lt 0 -or $sectionEnd -le $sectionStart) {
-        throw 'image scan review does not contain a bounded current RC74 section'
+        throw 'image scan review does not contain a bounded current RC75 section'
     }
     $currentReview = $ReviewText.Substring($sectionStart, $sectionEnd - $sectionStart)
-    foreach ($requiredRC74SecurityContract in @(
-        'PostgreSQL has **no RC74 exception**',
-        'The sole permitted RC74 exception',
+    foreach ($requiredRC75SecurityContract in @(
+        'PostgreSQL has **no RC75 exception**',
+        'The sole permitted RC75 exception',
         'sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067',
         'CVE-2026-22020',
         'java-21-openjdk-headless` / `1:21.0.12.1.1-1.2.el9',
         '`HIGH` / `affected`',
         '`HIGH,CRITICAL` with `ignoreUnfixed=false`'
     )) {
-        if (-not $currentReview.Contains($requiredRC74SecurityContract, [StringComparison]::Ordinal)) {
-            throw "current RC74 image scan review is missing exact security contract: $requiredRC74SecurityContract"
+        if (-not $currentReview.Contains($requiredRC75SecurityContract, [StringComparison]::Ordinal)) {
+            throw "current RC75 image scan review is missing exact security contract: $requiredRC75SecurityContract"
         }
     }
     foreach ($retiredSecurityContract in @(
@@ -1124,15 +1124,15 @@ function Assert-RC74ImageScanReviewCurrentSection {
         'accepted, narrow binary-reachability exception'
     )) {
         if ($currentReview.Contains($retiredSecurityContract, [StringComparison]::Ordinal)) {
-            throw "current RC74 image scan review includes retired security contract: $retiredSecurityContract"
+            throw "current RC75 image scan review includes retired security contract: $retiredSecurityContract"
         }
     }
 }
 
 $imageScanReview = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\IMAGE-SCAN-REVIEW.md')
-Assert-RC74ImageScanReviewCurrentSection -ReviewText $imageScanReview
-Test-Task5AMutationRejected -Label 'retired Keycloak base injected into current RC74 scan section' -Action {
-    Assert-RC74ImageScanReviewCurrentSection -ReviewText ($imageScanReview.Replace(
+Assert-RC75ImageScanReviewCurrentSection -ReviewText $imageScanReview
+Test-Task5AMutationRejected -Label 'retired Keycloak base injected into current RC75 scan section' -Action {
+    Assert-RC75ImageScanReviewCurrentSection -ReviewText ($imageScanReview.Replace(
         'sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067',
         'sha256:6efbadc00f0ed0237610becf11f4101b9c3ad8edf08a5b70c97aa4154ed436ec'
     ))
@@ -1164,11 +1164,12 @@ foreach ($supersededRC49Document in @(
     'docs\superpowers\plans\2026-09-02-invoice-rc70-release-recovery.md',
     'docs\superpowers\plans\2026-09-02-invoice-rc71-release-recovery.md',
     'docs\superpowers\plans\2026-09-03-invoice-rc72-release-recovery.md',
-    'docs\superpowers\plans\2026-09-03-invoice-rc73-release-recovery.md'
+    'docs\superpowers\plans\2026-09-03-invoice-rc73-release-recovery.md',
+    'docs\superpowers\plans\2026-09-03-invoice-rc74-release-recovery.md'
 )) {
     $documentPrefix = @(Get-Content -LiteralPath (Join-Path $projectRoot $supersededRC49Document) -TotalCount 8) -join "`n"
     if (-not $documentPrefix.Contains('**SUPERSEDED — DO NOT EXECUTE.**', [StringComparison]::Ordinal) -or
-        -not $documentPrefix.Contains('docs/superpowers/plans/2026-09-03-invoice-rc74-release-recovery.md', [StringComparison]::Ordinal)) {
+        -not $documentPrefix.Contains('docs/superpowers/plans/2026-09-03-invoice-rc75-release-recovery.md', [StringComparison]::Ordinal)) {
         throw "historical release document is still executable: $supersededRC49Document"
     }
 }
@@ -1177,31 +1178,31 @@ $failureEvidenceVerifierSource = Get-Content -Raw -LiteralPath (Join-Path $PSScr
 $failureEvidenceVerifier50Source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-rc50-failure-evidence.ps1')
 $failureEvidenceVerifier51Source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-rc51-failure-evidence.ps1')
 $failureEvidenceVerifier52Source = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-rc52-failure-evidence.ps1')
-$rc74RecoveryPlan = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\superpowers\plans\2026-09-03-invoice-rc74-release-recovery.md')
+$rc75RecoveryPlan = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\superpowers\plans\2026-09-03-invoice-rc75-release-recovery.md')
 if (-not $failureEvidenceVerifierSource.Contains('Assert-RC49FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
     -not $failureEvidenceVerifier50Source.Contains('Assert-RC50FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
     -not $failureEvidenceVerifier51Source.Contains('Assert-RC51FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
     -not $failureEvidenceVerifier52Source.Contains('Assert-RC52FailureEvidenceAnchor -ProjectRoot $projectRoot -AnchorText $anchorText', [StringComparison]::Ordinal) -or
-    -not $rc74RecoveryPlan.Contains('all four failure-evidence scripts', [StringComparison]::Ordinal) -or
+    -not $rc75RecoveryPlan.Contains('all four failure-evidence scripts', [StringComparison]::Ordinal) -or
     -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc49-failure-evidence.ps1', [StringComparison]::Ordinal) -or
     -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc50-failure-evidence.ps1', [StringComparison]::Ordinal) -or
     -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc51-failure-evidence.ps1', [StringComparison]::Ordinal) -or
     -not $productionRunbook.Contains('pwsh -NoProfile -File .\scripts\verify-rc52-failure-evidence.ps1', [StringComparison]::Ordinal)) {
-    throw 'RC74 recovery flow does not invoke all four dedicated failure evidence anchor verifiers'
+    throw 'RC75 recovery flow does not invoke all four dedicated failure evidence anchor verifiers'
 }
-foreach ($requiredRC74RecoveryContract in @(
+foreach ($requiredRC75RecoveryContract in @(
     'PowerShell 7.5+',
     'exit `42`',
     'ordinary and strict verifier exits `0` and `0`',
-    'v0.1.0-rc74-signed',
+    'v0.1.0-rc75-signed',
     'without manually parsing manifest decisions'
 )) {
-    if (-not $rc74RecoveryPlan.Contains($requiredRC74RecoveryContract, [StringComparison]::Ordinal)) {
-        throw "RC74 recovery plan is missing fail-closed contract: $requiredRC74RecoveryContract"
+    if (-not $rc75RecoveryPlan.Contains($requiredRC75RecoveryContract, [StringComparison]::Ordinal)) {
+        throw "RC75 recovery plan is missing fail-closed contract: $requiredRC75RecoveryContract"
     }
 }
-if ($rc74RecoveryPlan -match '\[string\]\$rc74Manifest') {
-    throw 'RC74 recovery plan manually coerces manifest decisions instead of trusting the verifiers'
+if ($rc75RecoveryPlan -match '\[string\]\$rc75Manifest') {
+    throw 'RC75 recovery plan manually coerces manifest decisions instead of trusting the verifiers'
 }
 
 $trackedFailureEvidenceAnchor = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\RC49-FAILURE-EVIDENCE-SHA256SUMS.txt')
@@ -1367,7 +1368,7 @@ try {
     }
 }
 
-function Assert-RC74DerivedImageGateSource {
+function Assert-RC75DerivedImageGateSource {
     param(
         [Parameter(Mandatory)][string]$Gate,
         [Parameter(Mandatory)][string]$Library,
@@ -1380,7 +1381,7 @@ function Assert-RC74DerivedImageGateSource {
         'New-ImageDefinition -Name ''ingest-proxy'' -ArtifactName ''invoice-ingest-proxy'' -Reference "invoice-ingest-proxy:$ImageTag" -Kind ''built'' -Policy ''zero-findings'' -Context ''ingest-proxy'' -Dockerfile ''deploy/ingest-proxy/Dockerfile'''
     )) {
         if (-not $Gate.Contains($requiredDefinition, [StringComparison]::Ordinal)) {
-            throw "RC74 release gate is missing locally built derived image definition: $requiredDefinition"
+            throw "RC75 release gate is missing locally built derived image definition: $requiredDefinition"
         }
     }
     foreach ($baseBinding in @(
@@ -1389,7 +1390,7 @@ function Assert-RC74DerivedImageGateSource {
         '-BaseReference $nginxBaseReference'
     )) {
         if (-not $Gate.Contains($baseBinding, [StringComparison]::Ordinal)) {
-            throw "RC74 derived image definition is missing exact base binding: $baseBinding"
+            throw "RC75 derived image definition is missing exact base binding: $baseBinding"
         }
     }
     foreach ($contextBinding in @(
@@ -1399,17 +1400,17 @@ function Assert-RC74DerivedImageGateSource {
     )) {
         if ($Gate -notmatch "(?m)^\s+$([regex]::Escape($contextBinding.Fingerprint)) = Get-ContextFingerprint" -or
             [regex]::Matches($Gate, "(?m)^\s+'?$([regex]::Escape($contextBinding.Context))'?\s*\{ Join-Path \`$projectRoot").Count -ne 1) {
-            throw "RC74 release gate does not fingerprint and build exact context $($contextBinding.Context)"
+            throw "RC75 release gate does not fingerprint and build exact context $($contextBinding.Context)"
         }
     }
     if ($Gate -notmatch "@\('build', '--pull', '--platform', 'linux/amd64', '--provenance=false'" -or
         -not $Gate.Contains('Assert-LinuxAmd64Platform -Platform "$($metadata.Os)/$($metadata.Architecture)"', [StringComparison]::Ordinal) -or
         -not $Library.Contains("function Assert-LinuxAmd64Platform", [StringComparison]::Ordinal)) {
-        throw 'RC74 locally built images are not build-time and post-build gated to linux/amd64'
+        throw 'RC75 locally built images are not build-time and post-build gated to linux/amd64'
     }
     if ($Gate -match "exact-postgres-gosu-exception|approved-by-exact-binary-exception|postgres_exception_proof_failed" -or
         -not $Gate.Contains('postgresException = $null', [StringComparison]::Ordinal)) {
-        throw 'RC74 release gate retains an active PostgreSQL exception/proof path'
+        throw 'RC75 release gate retains an active PostgreSQL exception/proof path'
     }
     foreach ($fingerprint in @('postgres', 'clamav', 'ingestProxy')) {
         if (-not $ArtifactVerifier.Contains("$fingerprint = Get-ContextFingerprint", [StringComparison]::Ordinal)) {
@@ -1421,7 +1422,7 @@ function Assert-RC74DerivedImageGateSource {
         -not $ArtifactVerifier.Contains('current image platform does not match the manifest-bound linux/amd64 platform', [StringComparison]::Ordinal) -or
         -not $ArtifactVerifier.Contains("[string]`$record.kind -cne 'built'", [StringComparison]::Ordinal) -or
         -not $ArtifactVerifier.Contains("[string]`$record.acquisition -cne 'built-from-source'", [StringComparison]::Ordinal)) {
-        throw 'independent artifact verifier does not reject non-built or non-linux/amd64 RC74 image records'
+        throw 'independent artifact verifier does not reject non-built or non-linux/amd64 RC75 image records'
     }
 }
 
@@ -1434,14 +1435,14 @@ if ($gateSource -match '\bConvertFrom-Json\b' -or
     -not $artifactVerifierSource.Contains('Assert-ReleasePowerShellRuntime | Out-Null', [StringComparison]::Ordinal)) {
     throw 'production release JSON parsing bypasses the centralized DateKind String parser or PowerShell 7.5 boundary'
 }
-Assert-RC74DerivedImageGateSource -Gate $gateSource -Library $gateLibrarySource -ArtifactVerifier $artifactVerifierSource
+Assert-RC75DerivedImageGateSource -Gate $gateSource -Library $gateLibrarySource -ArtifactVerifier $artifactVerifierSource
 
 $platformRejected = $false
 try { Assert-LinuxAmd64Platform -Platform 'linux/arm64' | Out-Null } catch { $platformRejected = $true }
 if (-not $platformRejected) { throw 'linux/arm64 release image fixture was accepted' }
 Assert-LinuxAmd64Platform -Platform 'linux/amd64' | Out-Null
 
-$bindingFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('invoice-rc74-artifact-binding-' + [guid]::NewGuid().ToString('N'))
+$bindingFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('invoice-rc75-artifact-binding-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $bindingFixtureRoot | Out-Null
 try {
     $bindingReportPath = Join-Path $bindingFixtureRoot 'report.json'
@@ -1504,18 +1505,18 @@ try {
 }
 
 $transferReadyManifest = [pscustomobject]@{
-    releaseName = '0.1.0-rc74'
+    releaseName = '0.1.0-rc75'
     source = [pscustomobject]@{ gitDirty = $false; gitHead = '0123456789abcdef0123456789abcdef01234567' }
     images = @(
-        [pscustomobject]@{ name = 'api'; reference = 'invoice-system-api:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'pdf-scanner'; reference = 'invoice-system-pdf-scanner:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'postgres-runtime'; reference = 'invoice-postgres:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'clamav-runtime'; reference = 'invoice-clamav:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'ingest-proxy'; reference = 'invoice-ingest-proxy:0.1.0-rc74' },
-        [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:0.1.0-rc74' }
+        [pscustomobject]@{ name = 'api'; reference = 'invoice-system-api:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'pdf-scanner'; reference = 'invoice-system-pdf-scanner:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'postgres-runtime'; reference = 'invoice-postgres:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'clamav-runtime'; reference = 'invoice-clamav:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'ingest-proxy'; reference = 'invoice-ingest-proxy:0.1.0-rc75' },
+        [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:0.1.0-rc75' }
     )
     decisions = [pscustomobject]@{
         applicationImageGate = 'passed'
@@ -1545,17 +1546,17 @@ Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.sou
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.source.gitHead = '1123456789abcdef0123456789abcdef01234567' } -ExpectedMessagePattern 'signed tag commit' -FailureMessage 'strict transfer mode accepted a source commit different from the signed tag'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.applicationImageGate = 'failed' } -ExpectedMessagePattern 'applicationImageGate=passed' -FailureMessage 'strict transfer mode accepted a failed application image gate'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.productionLaunch = 'approved' } -ExpectedMessagePattern 'productionLaunch=blocked' -FailureMessage 'strict transfer mode accepted a non-blocked production launch decision'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc52' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc74' -FailureMessage 'strict transfer mode accepted the failed RC52 release name'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc74-sibling' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc74' -FailureMessage 'strict transfer mode accepted a sibling RC74 release name'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-RC74' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc74' -FailureMessage 'strict transfer mode accepted a case-drifted RC74 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc52' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc75' -FailureMessage 'strict transfer mode accepted the failed RC52 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc75-sibling' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc75' -FailureMessage 'strict transfer mode accepted a sibling RC75 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-RC75' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc75' -FailureMessage 'strict transfer mode accepted a case-drifted RC75 release name'
 foreach ($invalidReleaseNameFixture in @(
     [pscustomobject]@{ Label = 'null'; Value = $null },
     [pscustomobject]@{ Label = 'Boolean'; Value = $false },
-    [pscustomobject]@{ Label = 'singleton array'; Value = [string[]]@('0.1.0-rc74') }
+    [pscustomobject]@{ Label = 'singleton array'; Value = [string[]]@('0.1.0-rc75') }
 )) {
     Assert-TransferManifestMutationRejected `
         -Mutate { param($manifest) $manifest.releaseName = $invalidReleaseNameFixture.Value } `
-        -ExpectedMessagePattern 'releaseName=0\.1\.0-rc74' `
+        -ExpectedMessagePattern 'releaseName=0\.1\.0-rc75' `
         -FailureMessage "strict transfer mode accepted $($invalidReleaseNameFixture.Label) releaseName"
 }
 
@@ -1563,7 +1564,7 @@ Assert-TransferManifestMutationRejected `
     -Mutate {
         param($manifest)
         $manifest.PSObject.Properties.Remove('releaseName')
-        $manifest | Add-Member -NotePropertyName 'ReleaseName' -NotePropertyValue '0.1.0-rc74'
+        $manifest | Add-Member -NotePropertyName 'ReleaseName' -NotePropertyValue '0.1.0-rc75'
     } `
     -ExpectedMessagePattern 'exact property releaseName' `
     -FailureMessage 'strict transfer mode accepted case-drifted ReleaseName'
@@ -1579,7 +1580,7 @@ Assert-TransferManifestMutationRejected `
     -Mutate {
         param($manifest)
         $manifest.images[0].PSObject.Properties.Remove('reference')
-        $manifest.images[0] | Add-Member -NotePropertyName 'Reference' -NotePropertyValue 'invoice-system-api:0.1.0-rc74'
+        $manifest.images[0] | Add-Member -NotePropertyName 'Reference' -NotePropertyValue 'invoice-system-api:0.1.0-rc75'
     } `
     -ExpectedMessagePattern 'exact property reference' `
     -FailureMessage 'strict transfer mode accepted case-drifted image Reference'
@@ -1591,7 +1592,7 @@ $missingReleaseNameManifest = $transferReadyManifest | ConvertTo-Json -Depth 10 
 $missingReleaseNameManifest.PSObject.Properties.Remove('releaseName')
 Assert-ThrowsLike `
     -Action { Assert-TransferReadyManifest -Manifest $missingReleaseNameManifest -ExpectedGitHead '0123456789abcdef0123456789abcdef01234567' | Out-Null } `
-    -ExpectedMessagePattern 'releaseName=0\.1\.0-rc74' `
+    -ExpectedMessagePattern 'releaseName=0\.1\.0-rc75' `
     -FailureMessage 'strict transfer mode accepted a missing releaseName'
 
 foreach ($inventoryMutation in @(
@@ -1612,28 +1613,28 @@ foreach ($inventoryMutation in @(
     },
     [pscustomobject]@{
         Label = 'non-array images value'
-        Expected = 'exact RC74 image inventory'
-        Mutate = { param($manifest) $manifest.images = 'invoice-system-api:0.1.0-rc74' }
+        Expected = 'exact RC75 image inventory'
+        Mutate = { param($manifest) $manifest.images = 'invoice-system-api:0.1.0-rc75' }
     },
     [pscustomobject]@{
         Label = 'eight-image inventory'
-        Expected = 'exact RC74 image inventory'
+        Expected = 'exact RC75 image inventory'
         Mutate = { param($manifest) $manifest.images = @($manifest.images | Select-Object -First 8) }
     },
     [pscustomobject]@{
         Label = 'ten-image inventory'
-        Expected = 'exact RC74 image inventory'
+        Expected = 'exact RC75 image inventory'
         Mutate = {
             param($manifest)
             $manifest.images = @($manifest.images) + [pscustomobject]@{
                 name = 'unexpected'
-                reference = 'invoice-unexpected:0.1.0-rc74'
+                reference = 'invoice-unexpected:0.1.0-rc75'
             }
         }
     },
     [pscustomobject]@{
         Label = 'duplicate image name'
-        Expected = 'exact RC74 image inventory'
+        Expected = 'exact RC75 image inventory'
         Mutate = { param($manifest) $manifest.images[8].name = 'api' }
     },
     [pscustomobject]@{
@@ -1648,13 +1649,13 @@ foreach ($inventoryMutation in @(
     },
     [pscustomobject]@{
         Label = 'case-drifted image name value'
-        Expected = 'exact RC74 image inventory'
+        Expected = 'exact RC75 image inventory'
         Mutate = { param($manifest) $manifest.images[0].name = 'API' }
     },
     [pscustomobject]@{
         Label = 'case-drifted image reference value'
-        Expected = 'exact RC74 image inventory'
-        Mutate = { param($manifest) $manifest.images[0].reference = 'Invoice-system-api:0.1.0-rc74' }
+        Expected = 'exact RC75 image inventory'
+        Mutate = { param($manifest) $manifest.images[0].reference = 'Invoice-system-api:0.1.0-rc75' }
     }
 )) {
     Assert-TransferManifestMutationRejected `
@@ -1664,7 +1665,7 @@ foreach ($inventoryMutation in @(
 }
 
 foreach ($imageStringField in @('name', 'reference')) {
-    $validSingletonValue = if ($imageStringField -ceq 'name') { 'api' } else { 'invoice-system-api:0.1.0-rc74' }
+    $validSingletonValue = if ($imageStringField -ceq 'name') { 'api' } else { 'invoice-system-api:0.1.0-rc75' }
     foreach ($invalidImageStringFixture in @(
         [pscustomobject]@{ Label = 'null'; Value = $null },
         [pscustomobject]@{ Label = 'Boolean'; Value = $false },
@@ -1672,20 +1673,20 @@ foreach ($imageStringField in @('name', 'reference')) {
     )) {
         Assert-TransferManifestMutationRejected `
             -Mutate { param($manifest) $manifest.images[0].$imageStringField = $invalidImageStringFixture.Value } `
-            -ExpectedMessagePattern 'exact RC74 image inventory' `
+            -ExpectedMessagePattern 'exact RC75 image inventory' `
             -FailureMessage "strict transfer mode accepted $($invalidImageStringFixture.Label) image $imageStringField"
     }
 }
 
 foreach ($expectedImage in @($transferReadyManifest.images)) {
-    foreach ($wrongTag in @('0.1.0-rc52', '0.1.0-rc74-sibling')) {
+    foreach ($wrongTag in @('0.1.0-rc52', '0.1.0-rc75-sibling')) {
         Assert-TransferManifestMutationRejected `
             -Mutate {
                 param($manifest)
                 $record = @($manifest.images | Where-Object { [string]$_.name -ceq [string]$expectedImage.name })
-                $record[0].reference = ([string]$record[0].reference) -replace ':0\.1\.0-rc74$', ":$wrongTag"
+                $record[0].reference = ([string]$record[0].reference) -replace ':0\.1\.0-rc75$', ":$wrongTag"
             } `
-            -ExpectedMessagePattern 'exact RC74 image inventory' `
+            -ExpectedMessagePattern 'exact RC75 image inventory' `
             -FailureMessage "strict transfer mode accepted $($expectedImage.name) image tag $wrongTag"
     }
 }
@@ -1735,7 +1736,7 @@ foreach ($transferMutation in @(
     }
 }
 
-function Assert-RC74RuntimeAndBackupBindings {
+function Assert-RC75RuntimeAndBackupBindings {
     param([Parameter(Mandatory)][string]$ProjectRoot)
 
     $runtimeVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-keycloak-runtime.ps1')
@@ -1815,7 +1816,7 @@ function Assert-RC74RuntimeAndBackupBindings {
         @{ Source = $headerVerifier; Required = '[string]$ExpectedImageID'; Label = 'web header image ID' }
     )) {
         if (-not $binding.Source.Contains($binding.Required, [StringComparison]::Ordinal)) {
-            throw "RC74 verifier is missing expected ID binding: $($binding.Label)"
+            throw "RC75 verifier is missing expected ID binding: $($binding.Label)"
         }
     }
     foreach ($requiredGateArgument in @(
@@ -1854,11 +1855,11 @@ function Assert-RC74RuntimeAndBackupBindings {
         -not $restore.Contains('docker image inspect "$restore_postgres_image"', [StringComparison]::Ordinal) -or
         -not $backup.Contains('docker run --pull never', [StringComparison]::Ordinal) -or
         -not $restore.Contains('docker run --pull never', [StringComparison]::Ordinal)) {
-        throw 'current backup/restore drill is not bound to existing no-pull RC74 derived images'
+        throw 'current backup/restore drill is not bound to existing no-pull RC75 derived images'
     }
 }
 
-Assert-RC74RuntimeAndBackupBindings -ProjectRoot $projectRoot
+Assert-RC75RuntimeAndBackupBindings -ProjectRoot $projectRoot
 
 if ($task5AMutationFailures.Count -gt 0) {
     throw "Task 5A focused mutation failures:`n- $($task5AMutationFailures -join "`n- ")"
