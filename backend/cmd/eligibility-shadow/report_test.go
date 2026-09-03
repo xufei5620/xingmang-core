@@ -1,9 +1,92 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+// TestReportJSONShapeMatchesShadowEvalLibAssumptions pins the exact
+// json.MarshalIndent(report, "", "  ") shape that
+// deploy/rehearsal/shadow-eval-lib.sh's hand-written bash/awk parser depends
+// on, since that parser cannot use a JSON library (see its own header
+// comment for why) and instead exploits three specific properties of this
+// output:
+//  1. Before's fields always serialize before After's (Go preserves struct
+//     declaration order), so the Nth occurrence of a repeated key
+//     unambiguously identifies which snapshot it belongs to.
+//  2. A non-empty []T slice is always expanded one element per line, never
+//     inlined, regardless of how many elements it has.
+//  3. An empty (zero-length) []T slice is always inlined as "[]" on the key's
+//     own line, and a nil []T slice always marshals as the literal `null` --
+//     these are what shadow_eval_has_errors and the empty-array branch of
+//     _shadow_eval_freeze_block each depend on.
+//
+// If a future change to Report/Snapshot/FreezeCount's field order, an added
+// custom MarshalJSON, or a switch away from MarshalIndent ever breaks one of
+// these, this test fails loudly here -- long before a real rehearsal run
+// would surface it as a silently wrong verdict.
+func TestReportJSONShapeMatchesShadowEvalLibAssumptions(t *testing.T) {
+	report := Report{
+		Before: Snapshot{
+			OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 3}},
+		},
+		After: Snapshot{
+			OpenFreezes: []FreezeCount{
+				{FreezeReason: "SOURCE_GAP", Open: 3},
+				{FreezeReason: "UNKNOWN_NEGATIVE_BALANCE", Open: 1},
+			},
+		},
+		RoundErrors:    nil,
+		FailedAccounts: nil,
+	}
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+
+	beforeIdx := strings.Index(text, `"open_freezes_by_reason": [`)
+	afterIdx := strings.LastIndex(text, `"open_freezes_by_reason": [`)
+	if beforeIdx < 0 || afterIdx <= beforeIdx {
+		t.Fatalf("expected two distinct expanded open_freezes_by_reason arrays with Before first, got:\n%s", text)
+	}
+	if strings.Count(text, `"open_freezes_by_reason": [`) != 2 {
+		t.Fatalf("expected exactly two occurrences of the expanded-array marker, got:\n%s", text)
+	}
+	if !strings.Contains(text, "\n      {\n        \"freeze_reason\": \"SOURCE_GAP\",\n        \"open\": 3\n      }") {
+		t.Fatalf("expected each freeze-count element on its own indented lines, got:\n%s", text)
+	}
+
+	if !strings.Contains(text, `"round_errors": null`) {
+		t.Fatalf("expected a nil RoundErrors to marshal as the literal null, got:\n%s", text)
+	}
+	if !strings.Contains(text, `"failed_accounts": null`) {
+		t.Fatalf("expected a nil FailedAccounts to marshal as the literal null, got:\n%s", text)
+	}
+
+	emptyArrayReport := Report{
+		Before: Snapshot{OpenFreezes: []FreezeCount{}},
+		After:  Snapshot{OpenFreezes: []FreezeCount{}},
+	}
+	emptyEncoded, err := json.MarshalIndent(emptyArrayReport, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(emptyEncoded), `"open_freezes_by_reason": [],`) {
+		t.Fatalf("expected an empty (non-nil) OpenFreezes slice to inline as [], got:\n%s", string(emptyEncoded))
+	}
+
+	populatedErrors := Report{RoundErrors: []string{"boom"}}
+	populatedEncoded, err := json.MarshalIndent(populatedErrors, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(populatedEncoded), "\"round_errors\": [\n    \"boom\"\n  ]") {
+		t.Fatalf("expected a populated RoundErrors to expand one string per line, got:\n%s", string(populatedEncoded))
+	}
+}
 
 func TestEvaluateReadinessNoChangesIsReady(t *testing.T) {
 	report := Report{

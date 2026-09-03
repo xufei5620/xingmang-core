@@ -22,10 +22,16 @@
 # `encoding/json` MarshalIndent output has a fixed, deterministic shape:
 # 2-space indent per nesting level, struct fields always in Go declaration
 # order, and -- critically -- an array with any elements is always expanded
-# one element per line, never inlined. report_test.go's fixtures in this
-# directory pin that shape; if a future change to report.go's field order or
-# indentation ever breaks it, that test catches it long before a rehearsal
-# run would.
+# one element per line, never inlined, while an empty (non-nil) one inlines
+# as "[]" and a nil one marshals as the literal `null`.
+# backend/cmd/eligibility-shadow/report_test.go's
+# TestReportJSONShapeMatchesShadowEvalLibAssumptions pins exactly this
+# contract against the real Report struct; if a future change to its field
+# order, an added custom MarshalJSON, or a switch away from MarshalIndent
+# ever breaks one of these properties, that test fails loudly long before a
+# rehearsal run would produce a silently wrong verdict. test-shadow-eval.sh's
+# own fixtures below additionally exercise this file's parsing logic itself
+# against literal JSON text in that same shape.
 
 # _shadow_eval_freeze_block <report.json> <occurrence: 1|2>
 # Prints "freeze_reason<TAB>open" once per element of the Nth
