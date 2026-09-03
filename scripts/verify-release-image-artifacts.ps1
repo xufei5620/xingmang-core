@@ -24,19 +24,19 @@ if ($RequireTransferReady) {
     $peeledSignedTagRef = "$signedTagRef^{}"
     $tagObjectType = (& git -C $projectRoot cat-file -t $signedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $tagObjectType -cne 'tag') {
-        throw 'strict transfer requires the supplied RC82 name to resolve to an annotated tag object'
+        throw 'strict transfer requires the supplied RC83 name to resolve to an annotated tag object'
     }
     & git -C $projectRoot verify-tag $signedTagRef *> $null
     if ($LASTEXITCODE -ne 0) {
-        throw 'strict transfer requires a valid signature on the supplied RC82 tag'
+        throw 'strict transfer requires a valid signature on the supplied RC83 tag'
     }
     $signedTagCommit = (& git -C $projectRoot rev-parse --verify $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $signedTagCommit -notmatch '^[0-9a-f]{40}$') {
-        throw 'strict transfer could not peel the supplied signed RC82 tag to a commit'
+        throw 'strict transfer could not peel the supplied signed RC83 tag to a commit'
     }
     $peeledObjectType = (& git -C $projectRoot cat-file -t $peeledSignedTagRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $peeledObjectType -cne 'commit') {
-        throw 'strict transfer signed RC82 tag did not peel to a commit object'
+        throw 'strict transfer signed RC83 tag did not peel to a commit object'
     }
 }
 
@@ -53,7 +53,7 @@ if (((Get-Item -LiteralPath $releaseRoot -Force).Attributes -band [IO.FileAttrib
     throw 'release artifact directory cannot be a symlink/reparse point'
 }
 if ($RequireTransferReady) {
-    Assert-StrictReleaseDirectoryName -ReleaseDirectory $releaseRoot -ExpectedReleaseName '0.1.0-rc82' | Out-Null
+    Assert-StrictReleaseDirectoryName -ReleaseDirectory $releaseRoot -ExpectedReleaseName '0.1.0-rc83' | Out-Null
 }
 
 Assert-Sha256Sums -ReleaseDirectory $releaseRoot | Out-Null
@@ -112,7 +112,7 @@ if ($idpMode -ceq 'keycloak') { $requiredNames += 'keycloak' }
 $records = @($manifest.images)
 $names = @($records | ForEach-Object { [string]$_.name })
 if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw 'release manifest has duplicate image names' }
-if ($names.Count -ne $requiredNames.Count) { throw 'release manifest does not contain the exact RC82 image inventory' }
+if ($names.Count -ne $requiredNames.Count) { throw 'release manifest does not contain the exact RC83 image inventory' }
 foreach ($name in $requiredNames) {
     if ($name -notin $names) { throw "release manifest is missing required image $name" }
 }
@@ -177,11 +177,11 @@ foreach ($record in $records) {
         [string]$record.reference -cne "${expectedRepository}:$releaseImageTag" -or
         [string]$record.kind -cne 'built' -or
         [string]$record.acquisition -cne 'built-from-source') {
-        throw "RC82 image is not an exact locally built common-tag record: $($record.name)"
+        throw "RC83 image is not an exact locally built common-tag record: $($record.name)"
     }
     if ($expectedDerivedBases.Contains([string]$record.name) -and
         [string]$record.baseReference -cne [string]$expectedDerivedBases[[string]$record.name]) {
-        throw "RC82 derived image base reference drifted: $($record.name)"
+        throw "RC83 derived image base reference drifted: $($record.name)"
     }
     if ([string]$record.name -notin @('postgres-runtime', 'keycloak')) {
         if ($record.vulnerabilities.total -ne 0 -or [string]$record.policyStatus -cne 'approved') {
@@ -195,7 +195,7 @@ if ($postgres.Count -ne 1) { throw 'release manifest must have exactly one Postg
 if ($postgres[0].vulnerabilities.total -ne 0 -or
     [string]$postgres[0].policyStatus -cne 'approved' -or
     $null -ne $postgres[0].exception) {
-    throw 'RC82 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
+    throw 'RC83 PostgreSQL image must have zero HIGH/CRITICAL findings and no exception'
 }
 
 $ingest = @($records | Where-Object name -eq 'ingest-proxy')

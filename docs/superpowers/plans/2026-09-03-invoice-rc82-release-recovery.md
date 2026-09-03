@@ -1,5 +1,10 @@
 # RC82 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC82 shipped at signed tag
+> `v0.1.0-rc82-signed` (`65d2098`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc83-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC82 — XM-INV-ASSERT-ORIGIN (backend only): the console-assertion exchange accepts the invoice app's own public origin as the caller (the embedded console redeems with a same-origin fetch from https://invoice.solov.cc) in addition to the console issuer, closing the `origin_rejected` failure found in the second CR-0006 canary after RC81 made the handshake itself work.
