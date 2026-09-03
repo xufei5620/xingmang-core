@@ -1,5 +1,10 @@
 # RC79 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC79 shipped at signed tag
+> `v0.1.0-rc79-signed` (`5cd525a`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc80-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, shadow-evaluate, and deploy RC79 — eligibility simplification slice 3 (XM-INV-ELIG-POLICY-START-ANCHOR: POLICY_ANCHOR accounts anchor at the global policy start with a derived opening balance that unwinds credits, cash recharges and usage inside the window; migration 0021 adds the `invoice.policy_anchor_start_reanchor` GUC; `invoice-eligibility-repair --kind=policy-start-reanchor`), the scan-cycle self-heal (XM-INV-SCAN-CYCLE-SUPERSEDE: a stale active scan cycle is superseded inside CommitSourceBatch instead of wedging the stream; migration 0022), the operator user-ledger view (XM-INV-CR0009-LEDGER-VIEW: `GET /api/v1/admin/accounts/ledger` and per-account detail, the 用户账本 tab, the narrowed 资格冻结 tab, tolerant freeze-reason labels), the 37-minute rescan activity window (XM-INV-AGENT-RESTART-GRACE follow-up), and the shadow-eval verdict fix (nil-means-none report contract, per-reason freeze deltas).
