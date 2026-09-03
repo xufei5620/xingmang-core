@@ -86,6 +86,46 @@ func TestReportJSONShapeMatchesShadowEvalLibAssumptions(t *testing.T) {
 	if !strings.Contains(string(populatedEncoded), "\"round_errors\": [\n    \"boom\"\n  ]") {
 		t.Fatalf("expected a populated RoundErrors to expand one string per line, got:\n%s", string(populatedEncoded))
 	}
+
+	// deploy/rehearsal/shadow-eval.sh's own invoice-migrate step
+	// (XM-INV-SHADOW-EVAL migration-set fix) reads MigrationsApplied the
+	// same way: nil (an empty --migrations-applied flag, the restored
+	// backup was already current) must marshal as null, and a populated
+	// slice must expand one migration name per line, matching
+	// RoundErrors/FailedAccounts exactly.
+	if !strings.Contains(text, `"migrations_applied": null`) {
+		t.Fatalf("expected a nil MigrationsApplied to marshal as the literal null, got:\n%s", text)
+	}
+	populatedMigrations := Report{MigrationsApplied: []string{"0020_eligibility_auto_reconcile.sql"}}
+	populatedMigrationsEncoded, err := json.MarshalIndent(populatedMigrations, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(populatedMigrationsEncoded), "\"migrations_applied\": [\n    \"0020_eligibility_auto_reconcile.sql\"\n  ]") {
+		t.Fatalf("expected a populated MigrationsApplied to expand one name per line, got:\n%s", string(populatedMigrationsEncoded))
+	}
+}
+
+func TestParseMigrationsAppliedEmptyIsNil(t *testing.T) {
+	if got := parseMigrationsApplied(""); got != nil {
+		t.Fatalf("expected nil for an empty flag value, got %#v", got)
+	}
+}
+
+func TestParseMigrationsAppliedTrimsAndDropsEmptyEntries(t *testing.T) {
+	got := parseMigrationsApplied(" 0020_eligibility_auto_reconcile.sql ,, 0021_next.sql")
+	want := []string{"0020_eligibility_auto_reconcile.sql", "0021_next.sql"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected %#v, got %#v", want, got)
+	}
+}
+
+func TestParseMigrationsAppliedSingleEntry(t *testing.T) {
+	got := parseMigrationsApplied("0020_eligibility_auto_reconcile.sql")
+	want := []string{"0020_eligibility_auto_reconcile.sql"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected %#v, got %#v", want, got)
+	}
 }
 
 func TestEvaluateReadinessNoChangesIsReady(t *testing.T) {

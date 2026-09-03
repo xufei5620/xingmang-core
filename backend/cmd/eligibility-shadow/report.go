@@ -71,9 +71,20 @@ type Report struct {
 	GeneratedAt       time.Time `json:"generated_at"`
 	BackupLabel       string    `json:"backup_label,omitempty"`
 	CandidateImageTag string    `json:"candidate_image_tag,omitempty"`
-	MaxRounds         int       `json:"max_rounds"`
-	RoundsRun         int       `json:"rounds_run"`
-	QueueDrained      bool      `json:"queue_drained"`
+	// MigrationsApplied lists, in the order deploy/rehearsal/shadow-eval.sh
+	// applied them, every migration file its candidate-tools-image
+	// invoice-migrate step newly added to the restored backup's own
+	// schema_migrations table (computed by that script diffing the table
+	// before and after running invoice-migrate, then passed in via
+	// --migrations-applied) -- nil/omitted when the restored backup was
+	// already at the candidate's migration set (nothing to apply). This is
+	// what makes the verdict below explicitly "candidate schema + candidate
+	// evaluator against production data", not merely "candidate evaluator
+	// against whatever schema the backup happened to be taken at".
+	MigrationsApplied []string `json:"migrations_applied"`
+	MaxRounds         int      `json:"max_rounds"`
+	RoundsRun         int      `json:"rounds_run"`
+	QueueDrained      bool     `json:"queue_drained"`
 
 	Before       Snapshot         `json:"before"`
 	BeforeHealth ProjectionHealth `json:"before_projection_health"`

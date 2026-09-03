@@ -478,6 +478,124 @@ assert_parse_config_user ":10001" 1 "" "leading colon with no uid must not parse
 assert_parse_config_user "10001:app" 1 "" "numeric uid with a named group must not parse"
 echo "shadow_eval_parse_config_user: ok"
 
+# ---------------------------------------------------------------------------
+# shadow_eval_migrate_docker_args: the testable argument-construction half of
+# the invoice-migrate step (XM-INV-SHADOW-EVAL migration-set fix -- a real
+# production run hit "required migration 0020_eligibility_auto_reconcile.sql
+# is not applied" because the restored backup was still at the running
+# release's schema). backend/cmd/migrate/main.go takes no command-line flags
+# at all: its connection comes from the DATABASE_URL_FILE environment
+# variable, unlike invoice-eligibility-shadow's --database-url-file flag --
+# the single most likely copy-paste mistake this test guards against.
+# ---------------------------------------------------------------------------
+mapfile -t migrate_args < <(shadow_eval_migrate_docker_args "invoice-shadow-fixture-net" "invoice-system-tools:0.1.0-rc77" "/work/database-url")
+migrate_args_joined=$(printf '\x1f%s' "${migrate_args[@]}")$'\x1f'
+
+assert_migrate_arg_present() {
+  local expected=$1 label=$2
+  if [[ "$migrate_args_joined" != *$'\x1f'"$expected"$'\x1f'* ]]; then
+    fail "shadow_eval_migrate_docker_args: missing expected argument '$expected' ($label)"
+  fi
+}
+assert_migrate_arg_absent() {
+  local unexpected=$1 label=$2
+  if [[ "$migrate_args_joined" == *"$unexpected"* ]]; then
+    fail "shadow_eval_migrate_docker_args: unexpectedly present '$unexpected' ($label)"
+  fi
+}
+
+assert_migrate_arg_present "--pull" "no accidental image pull"
+assert_migrate_arg_present "--rm" "cleans itself up"
+assert_migrate_arg_present "--network" "network flag"
+assert_migrate_arg_present "invoice-shadow-fixture-net" "the given network value"
+assert_migrate_arg_present "--read-only" "read-only root filesystem"
+assert_migrate_arg_present "--cap-drop" "cap-drop flag"
+assert_migrate_arg_present "ALL" "drops every capability"
+assert_migrate_arg_present "--security-opt" "security-opt flag"
+assert_migrate_arg_present "no-new-privileges:true" "no privilege escalation"
+assert_migrate_arg_present "--env" "env flag for the connection"
+assert_migrate_arg_present "DATABASE_URL_FILE=/run/secrets/database-url" "invoice-migrate reads its connection from exactly this env var (backend/cmd/migrate/main.go)"
+assert_migrate_arg_present "--entrypoint" "entrypoint flag"
+assert_migrate_arg_present "/usr/local/bin/invoice-migrate" "the migrate binary, not eligibility-shadow"
+assert_migrate_arg_present "invoice-system-tools:0.1.0-rc77" "the candidate tools image"
+assert_migrate_arg_present "type=bind,src=/work/database-url,dst=/run/secrets/database-url,readonly" "reuses the same secret bind-mount as invoice-eligibility-shadow"
+
+assert_migrate_arg_absent "--database-url-file" "invoice-migrate takes no command-line flags at all -- unlike invoice-eligibility-shadow"
+assert_migrate_arg_absent "MIGRATION_MODE" "must not set MIGRATION_MODE=verify -- the rehearsal needs migrate.Up (apply), not the read-only verify mode"
+assert_migrate_arg_absent "APP_ENV" "must not set APP_ENV=production -- this is a throwaway rehearsal database, and production mode enforces a strict ELIGIBILITY_START_AT precondition"
+echo "shadow_eval_migrate_docker_args: ok"
+
+# ---------------------------------------------------------------------------
+# migrations_applied: the report field recording what shadow-eval.sh's
+# invoice-migrate step newly applied (or "none").
+# ---------------------------------------------------------------------------
+write_fixture migrations-applied-populated.json <<'JSON'
+{
+  "generated_at": "2026-09-03T12:00:00Z",
+  "backup_label": "invoice-20260903T011358Z",
+  "candidate_image_tag": "0.1.0-rc77",
+  "migrations_applied": [
+    "0020_eligibility_auto_reconcile.sql"
+  ],
+  "max_rounds": 200,
+  "rounds_run": 0,
+  "queue_drained": true,
+  "before": {
+    "accounts": [],
+    "open_freezes_by_reason": [],
+    "evaluations_by_status": []
+  },
+  "before_projection_health": {
+    "queued": 0,
+    "failed": 0,
+    "processing": 0,
+    "oldest_pending": "0001-01-01T00:00:00Z",
+    "proof_pending": 0,
+    "oldest_proof_pending": "0001-01-01T00:00:00Z"
+  },
+  "after": {
+    "accounts": [],
+    "open_freezes_by_reason": [],
+    "evaluations_by_status": []
+  },
+  "after_projection_health": {
+    "queued": 0,
+    "failed": 0,
+    "processing": 0,
+    "oldest_pending": "0001-01-01T00:00:00Z",
+    "proof_pending": 0,
+    "oldest_proof_pending": "0001-01-01T00:00:00Z"
+  },
+  "failed_accounts": null,
+  "round_errors": null,
+  "new_freeze_reasons": null,
+  "has_projection_errors": false,
+  "verdict": "ready",
+  "verdict_reason": "no new freeze reason categories and no projection errors versus the post-restore baseline"
+}
+JSON
+
+migrations_applied_extracted=$(_shadow_eval_migrations_applied "$fixtures_dir/migrations-applied-populated.json" | paste -sd ',' -)
+if [[ "$migrations_applied_extracted" != "0020_eligibility_auto_reconcile.sql" ]]; then
+  fail "_shadow_eval_migrations_applied: expected the one populated migration name, got '$migrations_applied_extracted'"
+fi
+migrations_summary=$(shadow_eval_human_summary "$fixtures_dir/migrations-applied-populated.json")
+if [[ "$migrations_summary" != *"migrations applied:  0020_eligibility_auto_reconcile.sql"* ]]; then
+  fail "human summary did not render the applied migration name"
+fi
+
+# A report with migrations_applied absent entirely (an older-shaped fixture,
+# and also the null case) must render "none", not crash or print blank.
+none_extracted=$(_shadow_eval_migrations_applied "$fixtures_dir/no-freezes-ready.json" | paste -sd ',' -)
+if [[ -n "$none_extracted" ]]; then
+  fail "_shadow_eval_migrations_applied: expected nothing extracted when the key is absent, got '$none_extracted'"
+fi
+none_summary=$(shadow_eval_human_summary "$fixtures_dir/no-freezes-ready.json")
+if [[ "$none_summary" != *"migrations applied:  none"* ]]; then
+  fail "human summary did not fall back to 'none' when no migrations were applied"
+fi
+echo "migrations_applied handling: ok"
+
 if (( failures > 0 )); then
   echo "test-shadow-eval.sh: $failures failure(s)" >&2
   exit 1

@@ -1,9 +1,12 @@
 # XM-INV-SHADOW-EVAL: release-rehearsal shadow evaluation of the eligibility projection worker
 
-- **status:** implemented and self-tested locally; gates below. A first real run on the server found,
-  and this update fixes, two real problems (a secret-file permission error in the tools container, and
-  an empty/confusing `shadow-eval.json` left behind on that failure path -- see "Not run"); a second
-  real run to confirm both fixes is still needed.
+- **status:** implemented and self-tested locally; gates below. Two real server runs have now
+  happened. The first found, and an update fixed, a secret-file permission error in the tools
+  container plus an empty/confusing `shadow-eval.json` left behind on that failure path. The second
+  (with the permission fix in place) confirmed the credential now reads correctly, and found a second
+  real problem -- the restored backup's schema was behind the candidate's own migration set -- which
+  this update also fixes by adding an `invoice-migrate` step before the projection worker runs. See
+  "Not run" for the full detail on both runs. A third real run to confirm this fix is still needed.
 - **branch:** `ai/claude/XM-INV-SHADOW-EVAL` (based on `ai/claude/XM-INV-AUTOLOGIN` at `0177e72`),
   worktree `K:/发票/wt-XM-INV-SHADOW-EVAL`.
 - **commits:**
@@ -12,11 +15,10 @@
   - `d1f0468` test(eligibility-shadow): pin the Go/bash report JSON-shape contract
   - `196f810` docs(shadow-eval): production runbook section and handoff
   - `d8e27e2` fix(rehearsal): chown the tools-container secret to its actual runtime uid
-  - plus a follow-up commit that writes an explicit failure marker into `shadow-eval.json` instead of
-    leaving it empty when the tool produces no report, and makes the verdict/summary logic explicitly
-    refuse to treat that marker as a verdict (this file's own commit is not self-referenceable by hash
-    from inside itself; see `git log --oneline 0177e72..HEAD` on this branch for the exact, current
-    commit list)
+  - `fdf3d2f` fix(rehearsal): mark tooling failures explicitly so a verdict can't hide one
+  - plus a follow-up commit that adds the `invoice-migrate` step (second real run's finding) --
+    this file's own commit is not self-referenceable by hash from inside itself; see
+    `git log --oneline 0177e72..HEAD` on this branch for the exact, current commit list
 
 ## Summary
 
@@ -138,13 +140,16 @@ the RC-plan Task 1 bullet to add for any RC that changes the evaluator/projectio
 
 - `backend/cmd/eligibility-shadow/main.go` -- CLI entry point: flag parsing, database open/migration
   verify, the drain loop (claimable-count check, then `ProcessEligibilityProjectionJobs`, capped by
-  `--max-rounds`), snapshot-before/after, JSON report to stdout, human log to stderr, exit code.
+  `--max-rounds`), snapshot-before/after, JSON report to stdout, human log to stderr, exit code. New,
+  from the second real run's fix: `--migrations-applied` (comma-separated, parsed by the new
+  `parseMigrationsApplied`) echoed into the report.
 - `backend/cmd/eligibility-shadow/report.go` -- `Report`/`Snapshot`/`FreezeCount`/`EvaluationCount`/
   `FailedAccount`/`ProjectionHealth` JSON types, `EvaluateReadiness` (pure comparison logic) and
-  `ExitCode`.
+  `ExitCode`. New: `Report.MigrationsApplied []string`.
 - `backend/cmd/eligibility-shadow/report_test.go` -- unit tests for `EvaluateReadiness`/`ExitCode`
   (no database) plus `TestReportJSONShapeMatchesShadowEvalLibAssumptions` (the Go↔bash shape
-  contract, see design decision 2 above).
+  contract, see design decision 2 above, now also pinning `MigrationsApplied`'s null-vs-populated
+  marshaling) and three new `parseMigrationsApplied` unit tests.
 - `backend/internal/postgresstore/eligibility_shadow_report.go` -- `EligibilityShadowSnapshot`,
   `EligibilityProjectionClaimableCount`, `EligibilityShadowFailedJobs`.
 - `backend/internal/postgresstore/eligibility_shadow_report_integration_test.go` -- four integration
@@ -158,26 +163,38 @@ the RC-plan Task 1 bullet to add for any RC that changes the evaluator/projectio
   `resolve_tools_container_ids` resolves the tools image's runtime uid/gid and the database-url secret
   file/work directory are `chown`ed to it; an empty report is overwritten with an explicit
   `tooling_failure` marker instead of left as a 0-byte file, and `shadow_eval_report_is_valid` is
-  checked as a second, independent guard before the verdict logic runs (see "Not run" below for the
-  two incidents these fix).
+  checked as a second, independent guard before the verdict logic runs. Post-second-real-run fix: a new
+  `invoice-migrate` step (via `shadow_eval_migrate_docker_args`) runs between the restore and
+  `invoice-eligibility-shadow`, diffs `schema_migrations` before/after via `docker exec ... psql`
+  (reusing the identical technique `restore-drill.sh` already uses for its own migration-state
+  comparison), and passes the result as `--migrations-applied`; a new shared
+  `write_tooling_failure_marker` function (factored out of the pre-existing empty-report handling)
+  writes the same marker for a failed migrate step. See "Not run" below for all three incidents these
+  fix.
 - `deploy/rehearsal/shadow-eval-lib.sh` -- the bash-side report-comparison/summary functions, sourced
   by both `shadow-eval.sh` and `test-shadow-eval.sh`; also now `shadow_eval_parse_config_user` (the
-  pure/testable half of the uid/gid resolution above) and `shadow_eval_report_is_valid` (checked by
+  pure/testable half of the uid/gid resolution above), `shadow_eval_report_is_valid` (checked by
   both `shadow_eval_verdict_exit_code`, which now returns a distinct `"execution_failure"`/exit 1
   instead of ever computing ready/not_ready from a non-report, and `shadow_eval_human_summary`, which
-  renders a clear execution-failure explanation instead of blank/nonsensical freeze counts).
+  renders a clear execution-failure explanation instead of blank/nonsensical freeze counts),
+  `shadow_eval_migrate_docker_args` (the testable argument-construction half of the new migrate step),
+  and `_shadow_eval_migrations_applied` (rendered into the human summary as "migrations applied").
 - `deploy/rehearsal/test-shadow-eval.sh` -- static test: every argument-parsing failure path, the
   comparison logic against fixture JSON (including the empty-array edge case), the human summary,
-  `shadow_eval_parse_config_user`'s numeric/named/malformed `Config.User` cases, and
+  `shadow_eval_parse_config_user`'s numeric/named/malformed `Config.User` cases,
   `shadow_eval_report_is_valid`/`shadow_eval_verdict_exit_code`/`shadow_eval_human_summary`'s handling
-  of a tooling-failure-marker fixture.
+  of a tooling-failure-marker fixture, `shadow_eval_migrate_docker_args`'s exact argument list (in
+  particular, that it never emits the `--database-url-file` flag `invoice-migrate` does not support),
+  and `migrations_applied` rendering/fallback-to-"none".
 - `docs/PRODUCTION-RUNBOOK.md` -- new section 11.2 (see Summary).
 - `docs/handoffs/XM-INV-SHADOW-EVAL.md` -- this document.
 
 **Not touched:** any Sub2API/NewAPI source ([[no-upstream-source-changes]]), `deploy/backup/backup.sh`
 or `deploy/backup/restore-drill.sh` (read only, per the task brief), `deploy/docker-compose.prod.yml`
 or any other Compose file (this tool never runs via Compose and needs no new service), any migration,
-`backend/cmd/api`, `backend/internal/postgresstore/consumption.go` or any other existing evaluator/
+`backend/cmd/api`, `backend/cmd/migrate` (read only -- its connection/mode contract was read and
+mirrored exactly by `shadow_eval_migrate_docker_args`, never modified), `backend/internal/migrate`,
+`backend/internal/postgresstore/consumption.go` or any other existing evaluator/
 projection code (read only, per the task brief -- this tool drives the existing worker, it does not
 change it), release identity files, `release/`, `contracts/`, `web/`.
 
@@ -267,6 +284,34 @@ worktree, after this fix:
   (exit 0).
 - `/c/Users/58439/.local/bin/gitleaks git --no-banner --log-opts="0177e72..HEAD" .`: `no leaks found`.
 
+### Follow-up: the invoice-migrate step
+
+Unlike the two fixes above, this one changes Go code (`Report.MigrationsApplied`,
+`parseMigrationsApplied`, the new flag), so the full gate list applies again. From `backend/`, with
+`INVOICE_TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/invoice_test_shadow`:
+
+```
+go build ./...                                                              # exit 0
+go vet ./...                                                                # exit 0
+go test -p 1 -count=1 -timeout 15m ./cmd/eligibility-shadow/... ./internal/postgresstore/...
+```
+
+Both packages `ok` (`cmd/eligibility-shadow` 0.25s, including three new `parseMigrationsApplied` tests
+and the extended `TestReportJSONShapeMatchesShadowEvalLibAssumptions`; `internal/postgresstore`
+109.9s, unaffected by this fix -- no regression). `gofmt -l` against the staged blobs: clean.
+
+- `bash -n` on all three shell scripts: clean.
+- `bash deploy/rehearsal/test-shadow-eval.sh`: all prior groups still `ok`, plus new
+  `shadow_eval_migrate_docker_args: ok` (asserts the exact argument list, in particular that
+  `--database-url-file` -- the flag `invoice-eligibility-shadow` takes but `invoice-migrate` does not
+  support at all -- never appears, and that `DATABASE_URL_FILE=/run/secrets/database-url` does) and
+  `migrations_applied handling: ok` (extraction from a populated fixture, and fallback to "none" when
+  the field is absent/null). `test-shadow-eval.sh: all checks passed` (exit 0).
+- `/c/Users/58439/.local/bin/gitleaks git --no-banner --log-opts="0177e72..HEAD" .`: run after
+  committing this fix; see the commit list at the top of this document for confirmation it came back
+  clean (this session always re-runs gitleaks after every commit and would not have reported the
+  commit id in its reply to the team lead otherwise).
+
 ## Not run
 
 - **A real rehearsal against a real signed backup on the production server, still not completed.**
@@ -319,6 +364,35 @@ worktree, after this fix:
   freeze counts), and `shadow-eval.sh` itself now also checks it explicitly right after the
   structural-JSON sanity check, as a second, independent layer on top of the original emptiness check.
   Covered by three new `test-shadow-eval.sh` cases against a fixture matching this exact marker shape.
+
+  **Second real run, with `d8e27e2`'s scripts:** the team lead ran `shadow-eval.sh` again. The
+  permission fix was confirmed: the tools container now reads the credential and connects. It failed
+  one step later: `ERROR database migration set mismatch error="required migration
+  0020_eligibility_auto_reconcile.sql is not applied"` (exit 1, empty `shadow-eval.json` -- this run
+  predates `fdf3d2f`, so the marker logic above was not yet on the server for it to use). **Root
+  cause:** the restored production backup is at the *running* release's migration set (through 0019),
+  while the candidate tools image (which brings migration 0020) requires that migration to be applied
+  before `backend/cmd/eligibility-shadow`'s own `migrate.Verify` precondition passes. This is the
+  normal case for any candidate that ships a migration, exactly as `deploy/roll-forward.sh` always runs
+  `invoice-migrate` before anything else against real production. **Fixed** (new commit below):
+  `shadow-eval.sh` now runs the candidate tools image's `invoice-migrate` entrypoint against the
+  isolated database -- same network, same read-only bind-mount of the database-url secret, same
+  non-root uid handling -- immediately after the restore and before `invoice-eligibility-shadow`,
+  reading `backend/cmd/migrate/main.go`'s actual connection contract exactly (`DATABASE_URL_FILE`
+  environment variable; it takes no command-line flags at all, unlike
+  `invoice-eligibility-shadow`'s `--database-url-file`), with `APP_ENV`/`MIGRATION_MODE` deliberately
+  left unset (skipping the production-only `ELIGIBILITY_START_AT` precondition and selecting the
+  default apply -- not verify-only -- mode). It diffs `schema_migrations` before and after that step
+  (via `docker exec ... psql`, the same technique `restore-drill.sh` already uses for its own
+  migration-state comparison) and passes the newly-applied migration names into
+  `invoice-eligibility-shadow`'s new `--migrations-applied` flag, which the report now carries as a
+  top-level `migrations_applied` field (`null`/"none" when the backup was already current) -- so the
+  verdict is explicitly "candidate schema + candidate evaluator against production data". A failed
+  migrate step writes the same `tooling_failure` marker (fixed above) and exits 1, never a verdict. The
+  argument-construction half (`shadow_eval_migrate_docker_args`) and the new report field are both
+  covered by new `test-shadow-eval.sh`/Go test cases; the actual `invoice-migrate` invocation against a
+  real schema mismatch is still unverified against a real server, so **a third real rehearsal run is
+  still needed** before the RC-plan bullet in section 11.2 is treated as load-bearing.
 - **`scripts/verify.ps1` in full.** The task asked to check its Dockerfile-literal substring
   assertions specifically (confirmed via direct inspection: both required substrings are present and
   unbroken), not to run the whole script, which renders the full production Compose stack against a
@@ -340,11 +414,17 @@ worktree, after this fix:
    `queue_drained` could silently stop meaning what this handoff says it means. Flagged prominently in
    both functions' doc comments.
 2. Design decision 6 above (partial evaluation-status test coverage).
-3. This tool was designed and tested entirely against the AUTOLOGIN-line schema at `0177e72`
-   (migrations through `0019_balance_blip_repair.sql`). It calls `migrate.Verify` before doing
-   anything else, so a schema mismatch against whatever the candidate release's own migrations bring
-   fails closed with a clear error rather than a wrong report -- but this combination (a schema-
-   changing RC's projection logic, rehearsed via this tool) has not itself been exercised.
+3. **Updated by the second real run's fix.** This tool was designed and tested entirely against the
+   AUTOLOGIN-line schema at `0177e72` (migrations through `0019_balance_blip_repair.sql`). Originally
+   this risk noted that `backend/cmd/eligibility-shadow`'s own `migrate.Verify` precondition would fail
+   closed on a schema mismatch rather than produce a wrong report -- and a real production run
+   confirmed exactly that failure mode (`required migration 0020_eligibility_auto_reconcile.sql is not
+   applied`), except it turned out to be the *expected*, not exceptional, case: the restored backup is
+   normally behind the candidate's migration set, since the candidate has not shipped yet.
+   `shadow-eval.sh` now runs the candidate's own `invoice-migrate` first (see Summary), so
+   `migrate.Verify` should pass in the normal case going forward -- but the combination "a
+   schema-changing RC's projection logic, rehearsed via this tool, with the new migrate step actually
+   bringing the schema forward" has still not been exercised against a real server.
 4. No new float amounts, no logged/persisted secrets beyond the throwaway restore-only container
    password already discussed, no `contracts/` changes, no schema/migration changes, no admin-OIDC
    changes, no touch to any file outside this slice's stated scope -- checked.
@@ -367,13 +447,22 @@ worktree, after this fix:
    adversarial" trust model the rest of this tool already assumes for path inputs (e.g.
    `BACKUP_DIR`/`REHEARSAL_ROOT`), but would need proper JSON string escaping if this marker's shape
    is ever extended to embed less-trusted text (such as raw program output) directly.
+7. **New, from the invoice-migrate fix.** `migrations_applied_csv` is computed by `comm -13` over two
+   `schema_migrations` snapshots, joined with `paste -sd ',' -`; if a migration file name ever
+   legitimately contained a comma (none do today -- they are fixed, reviewed, numbered `.sql` file
+   names) it would corrupt the CSV join and, downstream, `_shadow_eval_migrations_applied`'s
+   line-per-element parsing. Not enforced by any check in this rehearsal itself; relies on the existing
+   migration-file-naming convention holding. `shadow_eval_migrate_docker_args`'s `chown`/non-root
+   requirements are the same as `resolve_tools_container_ids`' (risk 5) since it reuses the identical
+   secret file. The `invoice-migrate` invocation itself (as opposed to its argument construction) is
+   unverified against a real schema mismatch -- see "Not run".
 
 ## Follow-ups (recommended, not blocking)
 
-1. Run a second real rehearsal on the server (after both fixes above -- the permission fix and the
-   tooling-failure-marker/verdict-guard fix) against the current production backup, with a
-   currently-loaded RC's own image tag, before treating the section 11.2 RC-plan bullet as
-   load-bearing.
+1. Run a third real rehearsal on the server (after all three fixes above -- the permission fix, the
+   tooling-failure-marker/verdict-guard fix, and the invoice-migrate step) against the current
+   production backup, with a currently-loaded RC's own image tag, before treating the section 11.2
+   RC-plan bullet as load-bearing.
 2. If a future slice wants full coverage of the carry-forward-proof evaluation branch, factor out (or
    reuse, if one already exists elsewhere by then) a full `source_economic_scan_cycles`/
    `source_ingest_batches`/`balance_carry_forward_proofs` fixture helper.

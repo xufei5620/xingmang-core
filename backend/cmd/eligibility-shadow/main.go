@@ -35,6 +35,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,6 +62,7 @@ func main() {
 	timeout := flag.Duration("timeout", 25*time.Minute, "overall context budget for the whole drain loop")
 	backupLabel := flag.String("backup-label", "", "identifying label of the restored backup, echoed into the report")
 	candidateTag := flag.String("candidate-image-tag", "", "the candidate release's image tag, echoed into the report")
+	migrationsApplied := flag.String("migrations-applied", "", "comma-separated migration file names deploy/rehearsal/shadow-eval.sh's own invoice-migrate step newly applied before this run, empty when the restored backup was already current")
 	flag.Parse()
 
 	if flag.NArg() != 0 {
@@ -107,6 +109,7 @@ func main() {
 	report, err := run(ctx, store, runOptions{
 		MaxRounds: *maxRounds, BatchLimit: *batchLimit,
 		BackupLabel: *backupLabel, CandidateImageTag: *candidateTag,
+		MigrationsApplied: parseMigrationsApplied(*migrationsApplied),
 	})
 	if err != nil {
 		slog.Error("eligibility-shadow rehearsal failed", "error", err)
@@ -132,12 +135,31 @@ func main() {
 type runOptions struct {
 	MaxRounds, BatchLimit          int
 	BackupLabel, CandidateImageTag string
+	MigrationsApplied              []string
+}
+
+// parseMigrationsApplied splits --migrations-applied's comma-separated
+// value into a slice, trimming whitespace and dropping empty entries so an
+// empty flag (the restored backup was already at the candidate's migration
+// set -- nothing for deploy/rehearsal/shadow-eval.sh's invoice-migrate step
+// to apply) yields a nil slice, matching Report.MigrationsApplied's
+// "nil means none" convention shared with RoundErrors/FailedAccounts.
+func parseMigrationsApplied(value string) []string {
+	var names []string
+	for _, name := range strings.Split(value, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Report, error) {
 	report := Report{
 		GeneratedAt: time.Now().UTC(), BackupLabel: opts.BackupLabel,
 		CandidateImageTag: opts.CandidateImageTag, MaxRounds: opts.MaxRounds,
+		MigrationsApplied: opts.MigrationsApplied,
 	}
 
 	before, err := store.EligibilityShadowSnapshot(ctx)

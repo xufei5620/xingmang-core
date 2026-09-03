@@ -2204,12 +2204,21 @@ state while its cursor/pending spool is from a different snapshot.
 ### 11.2 影子评估 / shadow evaluation (release rehearsal, XM-INV-SHADOW-EVAL)
 
 `deploy/rehearsal/shadow-eval.sh` restores the database component of a signed
-production backup into a throwaway, isolated PostgreSQL container and runs a
-**candidate** release's eligibility-projection worker
+production backup into a throwaway, isolated PostgreSQL container, brings its
+schema up to the **candidate** tools image's own migration set (running that
+image's `invoice-migrate` entrypoint -- the restored backup is normally still
+at the *running* release's migration set, one or more steps behind the
+candidate under rehearsal, exactly like `deploy/roll-forward.sh` always runs
+`invoice-migrate` first against real production), and then runs the
+candidate's eligibility-projection worker
 (`ProcessEligibilityProjectionJobs`/`EligibilityProjectionHealth`, via the
-tools image's `invoice-eligibility-shadow` entrypoint) against that restored
-copy, reporting the delta in open freezes and projection errors versus the
-state immediately after restore. It never starts, stops, restarts or connects
+tools image's `invoice-eligibility-shadow` entrypoint) against that
+restored-and-migrated copy, reporting the delta in open freezes and
+projection errors versus the state immediately after restore-and-migrate.
+This makes the verdict explicitly "candidate schema + candidate evaluator
+against production data", not merely "candidate evaluator against whatever
+schema the backup happened to be taken at". It never starts, stops, restarts
+or connects
 to any container of the running `invoice-system-prod`, `invoice-system-prod`
 source-agent, or `invoice-system-idp` Compose projects; every container and
 network it creates is unnamed-project, freshly created, and torn down (with
@@ -2253,6 +2262,24 @@ how many `ProcessEligibilityProjectionJobs` rounds it will run before giving
 up on draining the queue, and `--batch-limit N` (default 25, same cap the
 worker itself enforces) to change accounts claimed per round.
 
+The `invoice-migrate` step needs no additional inputs: it runs inside the
+same isolated network, reuses the identical read-only database-url secret
+bind-mount and non-root-uid handling already prepared for
+`invoice-eligibility-shadow`, and reads its own connection from the
+`DATABASE_URL_FILE` environment variable (it takes no command-line flags at
+all, unlike `invoice-eligibility-shadow`'s `--database-url-file`). It
+deliberately runs with `APP_ENV` unset (skipping its production-only
+`ELIGIBILITY_START_AT` precondition -- this is a throwaway rehearsal
+database, never production) and with `MIGRATION_MODE` unset (selecting its
+default apply mode, not the read-only verify-only mode). If this step fails
+-- a migration that cannot apply cleanly against real production data is
+exactly the kind of defect this rehearsal exists to catch before it reaches
+production too -- the rehearsal stops immediately with exit `1` and an
+explicit `tooling_failure` marker (see below), never a `not_ready` verdict: a
+broken migration is a defect in the candidate release itself, to be
+root-caused and fixed directly, not a projection-worker regression this
+rehearsal's verdict machinery is designed to characterize.
+
 **How to read the report:** it writes
 `/root/invoice-system/rehearsals/<stamp>/shadow-eval.json` (the full
 machine-readable report: per-account eligibility status and open freezes
@@ -2272,6 +2299,23 @@ human-readable rendering, also printed to stdout). The important fields:
   work -- treat `false` as inconclusive and re-run with a higher
   `--max-rounds`, not as a pass.
 - `new_freeze_reasons`: the exact set of newly appearing categories, if any.
+- `migrations_applied`: the migration files the `invoice-migrate` step newly
+  applied to the restored backup before the projection worker ran (`null`/
+  "none" when the backup was already at the candidate's migration set). A
+  populated list here is expected and healthy for any candidate that ships a
+  migration; it is what makes the verdict explicitly about the candidate's
+  *combined* schema-plus-evaluator change, not the evaluator alone.
+
+An empty or unparseable `shadow-eval.json` (the tools container never got far
+enough to print a real report -- a real production run hit this twice: once
+from a secret-permission error, once from a migration-set mismatch before the
+`invoice-migrate` step existed) is overwritten with an explicit
+`{"tooling_failure": true, "reason": ..., "tool_exit_code": ..., "log_file":
+...}` marker instead of being left empty or missing. Both the human summary
+and the verdict computation recognize this marker and refuse to compute
+`ready`/`not_ready` from it -- they report a distinct execution failure
+instead, so an infrastructure or tooling problem can never be silently read
+as either a passing or a regressing verdict.
 
 The script's own exit code is release-blocking and is **independently
 recomputed from the published JSON** in bash
@@ -2281,8 +2325,9 @@ disagreement is itself treated as a rehearsal-tooling failure (exit `1`),
 matching this runbook's usual double-checked gates. Exit `0` means ready to
 proceed; exit `3` means the candidate regressed and must not be rolled
 forward as-is; exit `2` is a usage error (bad flag, image not loaded); any
-other non-zero exit is an execution failure (decrypt/restore/signature/Docker
-problem) with no verdict at all.
+other non-zero exit -- including a failed `invoice-migrate` step or the
+`tooling_failure` marker case above -- is an execution failure
+(decrypt/restore/signature/migration/Docker problem) with no verdict at all.
 
 **RC plan template step:** for any RC plan whose Task 1 scope matches the
 "when" list above, add this bullet to Task 1, after the full test suite and
@@ -2293,7 +2338,9 @@ before the tag is created:
       this RC's candidate image tag; require verdict "ready" (exit 0). A
       "not_ready" verdict (exit 3) blocks the tag until the report's
       new_freeze_reasons/round_errors/failed_accounts are root-caused and
-      fixed, not silently re-run past.
+      fixed, not silently re-run past. A failed invoice-migrate step inside
+      the rehearsal (exit 1, no verdict) blocks the tag the same way -- fix
+      the migration itself before retrying.
 ```
 
 ## 12. Rollback

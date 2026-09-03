@@ -2,11 +2,16 @@
 # shadow-eval.sh -- XM-INV-SHADOW-EVAL release rehearsal.
 #
 # Restores a signed production database backup into a throwaway, isolated
-# PostgreSQL container, runs a candidate release's eligibility-projection
-# worker against that restored copy until its queue drains (or --max-rounds
+# PostgreSQL container, brings its schema up to the candidate tools image's
+# own migration set (the same invoice-migrate step
+# deploy/roll-forward.sh always runs before anything else against real
+# production -- the restored backup is normally still at the *running*
+# release's migration set, one or more steps behind the candidate under
+# rehearsal), runs the candidate's eligibility-projection worker against
+# that restored-and-migrated copy until its queue drains (or --max-rounds
 # is reached), and reports the delta in open freezes/errors versus the
-# state immediately after restore. It never touches the running production
-# Compose projects (invoice-system-prod_*, or the source-agent/idp
+# state immediately after restore-and-migrate. It never touches the running
+# production Compose projects (invoice-system-prod_*, or the source-agent/idp
 # projects): everything it starts is a bare, unnamed-project `docker
 # network`/`docker run` pair on its own network, torn down before this
 # script exits.
@@ -201,6 +206,7 @@ started=false
 report_json="$rehearsal_dir/shadow-eval.json"
 summary_txt="$rehearsal_dir/shadow-eval-summary.txt"
 tool_log="$rehearsal_dir/eligibility-shadow.log"
+migrate_log="$rehearsal_dir/invoice-migrate.log"
 
 cleanup() {
   local original_status=$?
@@ -293,9 +299,54 @@ printf '%s\n' 'postgres://postgres:restore-drill-only@postgres:5432/invoice?sslm
 # Owned by the tools container's own numeric user (resolved above) and
 # readable by no one else -- the container runs as this uid, non-root,
 # --read-only, so the file must be readable by exactly this uid or nothing
-# else in the container can open it.
+# else in the container can open it. Shared by both the invoice-migrate
+# step below and the invoice-eligibility-shadow run after it.
 chown "$tools_uid:$tools_gid" "$work_dir/database-url"
 chmod 0400 "$work_dir/database-url"
+
+# write_tooling_failure_marker <reason> <exit_code> <log_file>
+# Overwrites report_json with an explicit, self-describing failure marker
+# instead of leaving an empty or partial file behind -- shared by both
+# possible tooling failures below (the migrate step and the
+# eligibility-shadow step). shadow_eval_report_is_valid (shadow-eval-lib.sh)
+# recognizes this exact shape and refuses to compute a ready/not_ready
+# verdict from it, so a tooling/execution failure can never be silently
+# folded into either.
+write_tooling_failure_marker() {
+  local reason=$1 exit_code=$2 log_file=$3
+  printf '{\n  "tooling_failure": true,\n  "reason": "%s",\n  "tool_exit_code": %d,\n  "log_file": "%s"\n}\n' \
+    "$reason" "$exit_code" "$log_file" >"$report_json"
+}
+
+# The restored backup is at whatever migration set the running production
+# release left it (e.g. through 0019), while the candidate tools image's
+# invoice-eligibility-shadow requires the candidate's own set (e.g. through
+# 0020) -- exactly the mismatch a real production run hit
+# ("required migration 0020_eligibility_auto_reconcile.sql is not
+# applied"). deploy/roll-forward.sh always runs invoice-migrate before
+# anything else against real production; this rehearsal must do the same
+# against the restored copy, so the verdict below is explicitly "candidate
+# schema + candidate evaluator against production data", not merely
+# "candidate evaluator against whatever schema the backup happened to be
+# taken at".
+schema_migrations_before=$(docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d invoice -At \
+  -c "SELECT name FROM schema_migrations ORDER BY name")
+
+mapfile -t migrate_docker_args < <(shadow_eval_migrate_docker_args "$network" "$tools_image" "$work_dir/database-url")
+set +e
+docker run "${migrate_docker_args[@]}" >"$migrate_log" 2>&1
+migrate_exit=$?
+set -e
+if (( migrate_exit != 0 )); then
+  write_tooling_failure_marker "candidate invoice-migrate failed" "$migrate_exit" "$migrate_log"
+  echo "candidate invoice-migrate failed (exit $migrate_exit); see $migrate_log" >&2
+  cat "$migrate_log" >&2 || true
+  exit 1
+fi
+
+schema_migrations_after=$(docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d invoice -At \
+  -c "SELECT name FROM schema_migrations ORDER BY name")
+migrations_applied_csv=$(comm -13 <(printf '%s\n' "$schema_migrations_before") <(printf '%s\n' "$schema_migrations_after") | paste -sd ',' -)
 
 set +e
 docker run --pull never --rm --network "$network" --read-only \
@@ -306,6 +357,7 @@ docker run --pull never --rm --network "$network" --read-only \
   --migrations-dir /app/migrations \
   --max-rounds "$max_rounds" --batch-limit "$batch_limit" \
   --backup-label "$backup_name" --candidate-image-tag "$image_tag" \
+  --migrations-applied "$migrations_applied_csv" \
   >"$report_json" 2>"$tool_log"
 tool_exit=$?
 set -e
@@ -317,12 +369,9 @@ if [[ ! -s "$report_json" ]]; then
   # already created an empty file the instant the docker run command
   # started, regardless of what it wrote -- leaving that empty file behind
   # is a confusing, silently-misleading artifact (it looks like *some*
-  # report exists). Overwrite it with an explicit, valid, self-describing
-  # failure marker instead: shadow_eval_report_is_valid (shadow-eval-lib.sh)
-  # recognizes this exact shape and refuses to compute a ready/not_ready
-  # verdict from it, so this can never be silently folded into either.
-  printf '{\n  "tooling_failure": true,\n  "reason": "eligibility-shadow produced no report",\n  "tool_exit_code": %d,\n  "log_file": "%s"\n}\n' \
-    "$tool_exit" "$tool_log" >"$report_json"
+  # report exists). write_tooling_failure_marker overwrites it with an
+  # explicit, valid, self-describing failure marker instead.
+  write_tooling_failure_marker "eligibility-shadow produced no report" "$tool_exit" "$tool_log"
   echo "eligibility-shadow produced no report (exit $tool_exit); see $tool_log" >&2
   cat "$tool_log" >&2 || true
   exit 1
