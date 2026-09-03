@@ -197,6 +197,74 @@ export interface ResolveEligibilityFreezeInput {
   note: string;
 }
 
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the operator "用户账本" view --
+// GET /api/v1/admin/accounts/ledger (list) and
+// GET /api/v1/admin/accounts/{external_account_id}/ledger (detail).
+// block_state is a read-only composition of existing signals server-side
+// (see docs/ELIGIBILITY-OPERATIONS.md's "管理员账本视图" section); this
+// frontend never computes it, only displays it.
+export type AccountBlockState =
+  | "frozen_manual_review"
+  | "not_invoiceable_pending_reconciliation"
+  | "below_threshold"
+  | "invoiceable";
+
+export interface AccountLedgerListItem {
+  externalAccountId: string;
+  source: SourceType;
+  externalUserId: string;
+  policyStartAt: string;
+  rechargesSinceStartCount: number;
+  rechargesSinceStartMinor: number;
+  consumedSinceStartMinor: number;
+  invoiceableNowMinor: number;
+  issuedMinor: number;
+  thresholdReached: boolean;
+  blockState: AccountBlockState;
+  // Absent when this account has never had a reconciliation checkpoint or
+  // carry-forward proof evaluated at all.
+  lastCheckpointAt?: string;
+}
+
+export interface AccountLedgerRecharge {
+  fundingLotId: string;
+  completedAt: string;
+  amountMinor: number;
+  eligibilityKind: "WALLET_CASH" | "SUBSCRIPTION_CASH";
+  refundFrozen: boolean;
+}
+
+export interface AccountLedgerConsumptionDay {
+  // Asia/Shanghai calendar date, "YYYY-MM-DD".
+  date: string;
+  consumedMinor: number;
+}
+
+export interface AccountLedgerDetail extends AccountLedgerListItem {
+  openingBalance: { serviceUnits: string; unitCode: string };
+  recharges: AccountLedgerRecharge[];
+  consumptionTimeline: AccountLedgerConsumptionDay[];
+  // A concrete Chinese sentence naming the blocking fact, present unless
+  // blockState is "invoiceable" (nothing to explain).
+  blockReason?: string;
+  // Absent when no evaluation for this account has ever been 'matched'.
+  lastReconciledAt?: string;
+}
+
+export interface AccountLedgerPage {
+  items: AccountLedgerListItem[];
+  nextCursor?: string;
+}
+
+export interface AccountLedgerFilters {
+  externalUserId?: string;
+  sourceInstanceId?: string;
+  // Default (undefined) sorts by invoiceable_now_minor descending;
+  // "block_state" sorts frozen_manual_review first (see the backend's own
+  // accountBlockStateRankExpr).
+  sort?: "block_state";
+}
+
 export interface PaymentCandidate {
   id: string;
   source: "newapi";

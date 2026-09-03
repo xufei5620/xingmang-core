@@ -75,6 +75,7 @@ export type AdminNavItemKey =
   | "review"
   | "payment-candidates"
   | "eligibility-freezes"
+  | "account-ledger"
   | "refund-cases"
   | "source-health"
   | "settings"
@@ -83,6 +84,12 @@ export type AdminNavItemKey =
 // CR-0005 (b): platform mode renders 申请审核(+发票档案)/资格冻结/退款与红冲/
 // 源健康, plus 支付候选 for NewAPI only (Sub2API structurally has no payment-
 // candidate queue -- newapi-only server-side already, not merely hidden).
+// CR-0009 adds 用户账本 ("account-ledger") alongside 资格冻结 with the
+// identical visibility rule (falls through to the final `return true`
+// below for platform scope; hidden for global scope, matching
+// eligibility-freezes -- CR-0009's own "明确不变" says the three embed
+// entry points render this new tab unchanged, no platform-side awareness
+// needed).
 // global mode renders only 系统设置 and the (unfiltered, both-platform)
 // source-health overview. "返回用户端" never applies inside an admin-only
 // embed. Standalone (scope === null, including an unparseable embedded-admin

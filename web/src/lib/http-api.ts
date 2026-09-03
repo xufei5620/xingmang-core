@@ -1,4 +1,11 @@
 import type {
+  AccountBlockState,
+  AccountLedgerConsumptionDay,
+  AccountLedgerDetail,
+  AccountLedgerFilters,
+  AccountLedgerListItem,
+  AccountLedgerPage,
+  AccountLedgerRecharge,
   AuthSession,
   DashboardSummary,
   EligibilityFreeze,
@@ -149,6 +156,45 @@ type BackendEligibilityFreeze = {
   // Go DTO's key set (eligibilityFreezeDTO) and mapEligibilityFreeze's
   // `allowed` list below -- see exactObjectKeys's callers.
   external_user_id: string;
+};
+
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): must stay byte-for-byte in sync with
+// the backend's accountLedgerListDTO/accountLedgerDetailDTO (httpapi/
+// accounts_ledger.go) -- see exactObjectKeys's callers below.
+type BackendAccountLedgerListItem = {
+  external_account_id: string;
+  source_type: "sub2api" | "newapi";
+  external_user_id: string;
+  policy_start_at: string;
+  recharges_since_start_count: number;
+  recharges_since_start_minor: number;
+  consumed_since_start_minor: number;
+  invoiceable_now_minor: number;
+  issued_minor: number;
+  threshold_reached: boolean;
+  block_state: string;
+  last_checkpoint_at: string | null;
+};
+
+type BackendAccountLedgerRecharge = {
+  funding_lot_id: string;
+  completed_at: string;
+  amount_minor: number;
+  eligibility_kind: string;
+  refund_frozen: boolean;
+};
+
+type BackendAccountLedgerConsumptionDay = {
+  date: string;
+  consumed_minor: number;
+};
+
+type BackendAccountLedgerDetail = BackendAccountLedgerListItem & {
+  opening_balance_units: { service_units: string; unit_code: string };
+  recharges_since_start: BackendAccountLedgerRecharge[];
+  consumption_timeline: BackendAccountLedgerConsumptionDay[];
+  last_reconciled_at: string | null;
+  block_reason: string | null;
 };
 
 type BackendSourceHealth = {
@@ -412,6 +458,13 @@ function friendlyError(status: number, code: string, message: string) {
     return "该账号存在未结案的退款或红冲风险，须先在退款与红冲队列处理后才能解冻。";
   if (code === "ELIGIBILITY_EVALUATION_UNMATCHED")
     return "最新余额对账结论尚未匹配，暂不满足安全解冻条件。";
+  // CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the account ledger detail endpoint
+  // is this app's first GET-by-id consumer of the shared NOT_FOUND code --
+  // added here rather than only in that one caller so every existing and
+  // future 404 gets this same, correctly-actionable Chinese sentence
+  // instead of the server's own raw (English) error text falling through
+  // to the generic `message ||` fallback below.
+  if (code === "NOT_FOUND") return "未找到该记录，可能已被删除或地址有误。";
   if (status === 401) return "登录状态已失效，请重新登录。";
   if (status === 403) return "当前账号没有执行此操作的权限。";
   if (status === 409) return "数据已经发生变化，请刷新后重试。";
@@ -457,6 +510,17 @@ const eligibilityStatuses = [
   "missing",
   "source_unavailable",
 ] as const;
+
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the four account block_state values
+// -- see docs/ELIGIBILITY-OPERATIONS.md's "管理员账本视图" section.
+const accountBlockStates = [
+  "frozen_manual_review",
+  "not_invoiceable_pending_reconciliation",
+  "below_threshold",
+  "invoiceable",
+] as const;
+
+const accountEligibilityKinds = ["WALLET_CASH", "SUBSCRIPTION_CASH"] as const;
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -727,6 +791,223 @@ function eligibilityFreezeCursor(cursor: string) {
   } catch (error) {
     if (error instanceof InvoiceApiError) throw error;
     throw new InvoiceApiError("资格冻结分页游标无效。", {
+      code: "INVALID_CURSOR",
+    });
+  }
+}
+
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW) -------------------------------------
+
+const accountLedgerListKeys = [
+  "external_account_id",
+  "source_type",
+  "external_user_id",
+  "policy_start_at",
+  "recharges_since_start_count",
+  "recharges_since_start_minor",
+  "consumed_since_start_minor",
+  "invoiceable_now_minor",
+  "issued_minor",
+  "threshold_reached",
+  "block_state",
+  "last_checkpoint_at",
+] as const;
+
+// Shared by mapAccountLedgerListItem (which first checks the narrower list
+// key set) and mapAccountLedgerDetail (which already checked its own wider
+// key set) -- validates and converts the list-shaped fields alone, so
+// neither caller re-runs exactObjectKeys against the wrong key set.
+function accountLedgerListFieldsToItem(
+  value: BackendAccountLedgerListItem,
+): AccountLedgerListItem {
+  if (
+    !uuidPattern.test(value.external_account_id) ||
+    !["sub2api", "newapi"].includes(value.source_type) ||
+    typeof value.external_user_id !== "string" ||
+    value.external_user_id.length === 0 ||
+    value.external_user_id.length > 512 ||
+    /[\r\n\0]/.test(value.external_user_id) ||
+    !validTimestamp(value.policy_start_at) ||
+    !Number.isSafeInteger(value.recharges_since_start_count) ||
+    value.recharges_since_start_count < 0 ||
+    typeof value.threshold_reached !== "boolean" ||
+    !accountBlockStates.includes(value.block_state as AccountBlockState) ||
+    (value.last_checkpoint_at !== null && !validTimestamp(value.last_checkpoint_at))
+  ) {
+    throw new InvoiceApiError("用户账本记录包含无效字段，已停止显示。", {
+      code: "INVALID_ACCOUNT_LEDGER_RESPONSE",
+    });
+  }
+  return {
+    externalAccountId: value.external_account_id,
+    source: value.source_type,
+    externalUserId: value.external_user_id,
+    policyStartAt: value.policy_start_at,
+    rechargesSinceStartCount: value.recharges_since_start_count,
+    rechargesSinceStartMinor: requireSafeMinor(
+      value.recharges_since_start_minor,
+      "起点后充值金额",
+    ),
+    consumedSinceStartMinor: requireSafeMinor(
+      value.consumed_since_start_minor,
+      "起点后消耗金额",
+    ),
+    invoiceableNowMinor: requireSafeMinor(value.invoiceable_now_minor, "可开票金额"),
+    issuedMinor: requireSafeMinor(value.issued_minor, "已开票金额"),
+    thresholdReached: value.threshold_reached,
+    blockState: value.block_state as AccountBlockState,
+    lastCheckpointAt: value.last_checkpoint_at ?? undefined,
+  } satisfies AccountLedgerListItem;
+}
+
+function mapAccountLedgerListItem(
+  value: BackendAccountLedgerListItem,
+): AccountLedgerListItem {
+  exactObjectKeys(value, accountLedgerListKeys, accountLedgerListKeys, "用户账本列表项");
+  return accountLedgerListFieldsToItem(value);
+}
+
+function mapAccountLedgerRecharge(
+  value: BackendAccountLedgerRecharge,
+): AccountLedgerRecharge {
+  const allowed = [
+    "funding_lot_id",
+    "completed_at",
+    "amount_minor",
+    "eligibility_kind",
+    "refund_frozen",
+  ] as const;
+  exactObjectKeys(value, allowed, allowed, "用户账本充值明细");
+  if (
+    !uuidPattern.test(value.funding_lot_id) ||
+    !validTimestamp(value.completed_at) ||
+    !accountEligibilityKinds.includes(
+      value.eligibility_kind as (typeof accountEligibilityKinds)[number],
+    ) ||
+    typeof value.refund_frozen !== "boolean"
+  ) {
+    throw new InvoiceApiError("用户账本充值明细包含无效字段，已停止显示。", {
+      code: "INVALID_ACCOUNT_LEDGER_RESPONSE",
+    });
+  }
+  return {
+    fundingLotId: value.funding_lot_id,
+    completedAt: value.completed_at,
+    amountMinor: requireSafeMinor(value.amount_minor, "充值金额"),
+    eligibilityKind: value.eligibility_kind as AccountLedgerRecharge["eligibilityKind"],
+    refundFrozen: value.refund_frozen,
+  } satisfies AccountLedgerRecharge;
+}
+
+const accountLedgerDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+function mapAccountLedgerConsumptionDay(
+  value: BackendAccountLedgerConsumptionDay,
+): AccountLedgerConsumptionDay {
+  exactObjectKeys(value, ["date", "consumed_minor"], ["date", "consumed_minor"], "用户账本消耗时间线");
+  if (
+    typeof value.date !== "string" ||
+    !accountLedgerDatePattern.test(value.date)
+  ) {
+    throw new InvoiceApiError("用户账本消耗时间线包含无效字段，已停止显示。", {
+      code: "INVALID_ACCOUNT_LEDGER_RESPONSE",
+    });
+  }
+  return {
+    date: value.date,
+    consumedMinor: requireSafeMinor(value.consumed_minor, "当日消耗金额"),
+  } satisfies AccountLedgerConsumptionDay;
+}
+
+function mapAccountLedgerDetail(
+  value: BackendAccountLedgerDetail,
+): AccountLedgerDetail {
+  const allowed = [
+    ...accountLedgerListKeys,
+    "opening_balance_units",
+    "recharges_since_start",
+    "consumption_timeline",
+    "last_reconciled_at",
+    "block_reason",
+  ] as const;
+  exactObjectKeys(value, allowed, allowed, "用户账本详情");
+  const listItem = accountLedgerListFieldsToItem(value);
+  exactObjectKeys(
+    value.opening_balance_units,
+    ["service_units", "unit_code"],
+    ["service_units", "unit_code"],
+    "用户账本期初余额",
+  );
+  const expectedUnit =
+    value.source_type === "sub2api" ? "SUB2_BALANCE_1E8" : "NEWAPI_QUOTA";
+  if (
+    typeof value.opening_balance_units.service_units !== "string" ||
+    !serviceUnitsPattern.test(value.opening_balance_units.service_units) ||
+    value.opening_balance_units.unit_code !== expectedUnit ||
+    !Array.isArray(value.recharges_since_start) ||
+    !Array.isArray(value.consumption_timeline) ||
+    (value.last_reconciled_at !== null && !validTimestamp(value.last_reconciled_at)) ||
+    (value.block_reason !== null &&
+      (typeof value.block_reason !== "string" ||
+        value.block_reason.length === 0 ||
+        value.block_reason.length > 4000))
+  ) {
+    throw new InvoiceApiError("用户账本详情包含无效字段，已停止显示。", {
+      code: "INVALID_ACCOUNT_LEDGER_RESPONSE",
+    });
+  }
+  // A blocked account must carry a concrete reason, and an invoiceable one
+  // must not -- see buildAccountBlockReason's own doc comment on the
+  // backend side for why "invoiceable" is the only null-block_reason state.
+  if ((listItem.blockState === "invoiceable") !== (value.block_reason === null)) {
+    throw new InvoiceApiError("用户账本阻断原因与状态不一致，已停止显示。", {
+      code: "INCONSISTENT_ACCOUNT_LEDGER_RESPONSE",
+    });
+  }
+  return {
+    ...listItem,
+    openingBalance: {
+      serviceUnits: value.opening_balance_units.service_units,
+      unitCode: value.opening_balance_units.unit_code,
+    },
+    recharges: value.recharges_since_start.map((item) =>
+      mapAccountLedgerRecharge(item),
+    ),
+    consumptionTimeline: value.consumption_timeline.map((item) =>
+      mapAccountLedgerConsumptionDay(item),
+    ),
+    blockReason: value.block_reason ?? undefined,
+    lastReconciledAt: value.last_reconciled_at ?? undefined,
+  } satisfies AccountLedgerDetail;
+}
+
+function accountLedgerCursor(cursor: string) {
+  try {
+    const decoded = JSON.parse(cursor) as unknown;
+    exactObjectKeys(
+      decoded,
+      ["beforeInvoiceableMinor", "beforeId"],
+      ["beforeId"],
+      "用户账本分页游标",
+    );
+    if (
+      !uuidPattern.test(String(decoded.beforeId)) ||
+      (decoded.beforeInvoiceableMinor !== undefined &&
+        decoded.beforeInvoiceableMinor !== null &&
+        !Number.isSafeInteger(decoded.beforeInvoiceableMinor))
+    ) {
+      throw new Error("invalid cursor values");
+    }
+    return {
+      beforeInvoiceableMinor:
+        typeof decoded.beforeInvoiceableMinor === "number"
+          ? decoded.beforeInvoiceableMinor
+          : undefined,
+      beforeId: String(decoded.beforeId),
+    };
+  } catch (error) {
+    if (error instanceof InvoiceApiError) throw error;
+    throw new InvoiceApiError("用户账本分页游标无效。", {
       code: "INVALID_CURSOR",
     });
   }
@@ -2064,6 +2345,88 @@ export const httpInvoiceApi: InvoiceApiClient = {
       },
     );
     return mapEligibilityFreeze(response as BackendEligibilityFreeze);
+  },
+
+  async getAccountLedger(filters: AccountLedgerFilters, cursor?: string) {
+    if (
+      (filters.sourceInstanceId !== undefined &&
+        !uuidPattern.test(filters.sourceInstanceId)) ||
+      (filters.externalUserId !== undefined &&
+        (filters.externalUserId.length === 0 ||
+          filters.externalUserId.length > 512 ||
+          /[\r\n\0]/.test(filters.externalUserId))) ||
+      (filters.sort !== undefined && filters.sort !== "block_state")
+    ) {
+      throw new InvoiceApiError("用户账本筛选条件无效。", {
+        code: "INVALID_FILTER",
+      });
+    }
+    const query = new URLSearchParams({ limit: "50" });
+    if (filters.sort) query.set("sort", filters.sort);
+    if (filters.sourceInstanceId)
+      query.set("source_instance_id", filters.sourceInstanceId);
+    if (filters.externalUserId)
+      query.set("external_user_id", filters.externalUserId);
+    if (cursor) {
+      const decoded = accountLedgerCursor(cursor);
+      if (decoded.beforeInvoiceableMinor !== undefined) {
+        query.set(
+          "before_invoiceable_minor",
+          String(decoded.beforeInvoiceableMinor),
+        );
+      }
+      query.set("before_id", decoded.beforeId);
+    }
+    const response = await requestJSON<unknown>(
+      `/api/v1/admin/accounts/ledger?${query.toString()}`,
+      { role: "admin" },
+    );
+    exactObjectKeys(
+      response,
+      ["items", "has_more", "next_before_invoiceable_minor", "next_before_id"],
+      ["items", "has_more", "next_before_invoiceable_minor", "next_before_id"],
+      "用户账本分页响应",
+    );
+    if (
+      !Array.isArray(response.items) ||
+      response.items.length > 50 ||
+      typeof response.has_more !== "boolean" ||
+      !(
+        response.next_before_invoiceable_minor === null ||
+        Number.isSafeInteger(response.next_before_invoiceable_minor)
+      ) ||
+      typeof response.next_before_id !== "string" ||
+      response.next_before_id.length > 64 ||
+      (response.has_more && !uuidPattern.test(response.next_before_id))
+    ) {
+      throw new InvoiceApiError("用户账本分页响应无效，已停止显示。", {
+        code: "INVALID_ACCOUNT_LEDGER_RESPONSE",
+      });
+    }
+    return {
+      items: response.items.map((item) =>
+        mapAccountLedgerListItem(item as BackendAccountLedgerListItem),
+      ),
+      nextCursor: response.has_more
+        ? JSON.stringify({
+            beforeInvoiceableMinor: response.next_before_invoiceable_minor,
+            beforeId: response.next_before_id,
+          })
+        : undefined,
+    } satisfies AccountLedgerPage;
+  },
+
+  async getAccountLedgerDetail(externalAccountId: string) {
+    if (!uuidPattern.test(externalAccountId)) {
+      throw new InvoiceApiError("账号地址无效。", {
+        code: "INVALID_ACCOUNT_ID",
+      });
+    }
+    const response = await requestJSON<unknown>(
+      `/api/v1/admin/accounts/${encodeURIComponent(externalAccountId)}/ledger`,
+      { role: "admin" },
+    );
+    return mapAccountLedgerDetail(response as BackendAccountLedgerDetail);
   },
 
   async adminReview(payload) {

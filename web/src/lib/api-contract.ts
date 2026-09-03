@@ -1,6 +1,9 @@
 import type {
   AdminReviewPayload,
   AdminAccessSettingsInput,
+  AccountLedgerDetail,
+  AccountLedgerFilters,
+  AccountLedgerPage,
   AuthSession,
   DashboardSummary,
   EligibilityFreeze,
@@ -152,6 +155,12 @@ export interface InvoiceApiClient {
     freezeId: string,
     input: ResolveEligibilityFreezeInput,
   ): Promise<EligibilityFreeze>;
+  // CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the operator "用户账本" view.
+  getAccountLedger(
+    filters: AccountLedgerFilters,
+    cursor?: string,
+  ): Promise<AccountLedgerPage>;
+  getAccountLedgerDetail(externalAccountId: string): Promise<AccountLedgerDetail>;
   adminReview(payload: AdminReviewPayload): Promise<void>;
   adminUploadInvoice(
     request: InvoiceRequest,
