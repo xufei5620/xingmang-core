@@ -894,7 +894,12 @@ func TestMissingUsageIsCaughtByLowerBalanceCheckpointWithoutIncreasingEligibilit
 	// an unrelated fresh-POLICY_ANCHOR-anchor evaluation instead.
 	processEligibilityWithoutReanchor(t, store, ctx, accountID, asOf, AuditActor{Type: "system", ID: "test-worker"})
 	lot, err := store.GetFundingLot(ctx, lotID)
-	if err != nil || lot.EligibilityStatus != "frozen" || lot.AvailableMinor() != 0 {
+	// XM-INV-ELIG-AUTO-RECONCILE: a negative balance difference no longer
+	// freezes the account (eligibility_freezes/manual queue) -- it downgrades
+	// to the self-clearing not_invoiceable_pending_reconciliation state
+	// instead. Still fails closed (AvailableMinor()==0): submit/issue still
+	// require eligibility_status='active'.
+	if err != nil || lot.EligibilityStatus != "not_invoiceable_pending_reconciliation" || lot.AvailableMinor() != 0 {
 		t.Fatalf("missing usage did not fail closed: lot=%+v err=%v", lot, err)
 	}
 }

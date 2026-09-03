@@ -99,8 +99,49 @@ the accurate advice there, unlike for the four reasons above.
 - `legacy_noninvoiceable` and `noncash` as `{service_units, unit_code}` rather
   than pretending quota/balance units are yuan;
 - a closed reason list: `READY`, `BINDING_NOT_VERIFIED`, `ACCOUNT_FROZEN`,
-  `PROJECTION_PENDING`, `SOURCE_NOT_READY`, or `NO_CONSUMED_CASH`.
+  `PENDING_RECONCILIATION`, `PROJECTION_PENDING`, `SOURCE_NOT_READY`, or
+  `NO_CONSUMED_CASH`.
 
-Available CNY is reported as zero while binding, source health, freeze or
-reprojection prevents a new invoice request. Historical consumed/issued values
-remain visible for reconciliation.
+Available CNY is reported as zero while binding, source health, freeze,
+pending reconciliation or reprojection prevents a new invoice request.
+Historical consumed/issued values remain visible for reconciliation.
+
+## Automatic reconciliation (`not_invoiceable_pending_reconciliation`)
+
+XM-INV-ELIG-AUTO-RECONCILE (2026-09-03) downgraded two freeze reasons that
+were purely about reconciliation *timing*, not genuine data problems, from
+the manual admin queue to an account-local, self-clearing state. Neither ever
+creates an `eligibility_freezes` row, so neither ever appears in the
+administrator queue above and neither is affected by "safe resolution":
+
+- **A negative or otherwise unreconciled balance difference**
+  (`UNKNOWN_NEGATIVE_BALANCE`, historically a freeze reason and still used as
+  such for other trigger shapes -- see below). The account's
+  `eligibility_status` becomes `not_invoiceable_pending_reconciliation` and
+  `source_account_eligibility_state` carries five plaintext columns
+  describing why: `pending_reconciliation_reason`,
+  `pending_reconciliation_trigger_type`/`_trigger_id`,
+  `pending_reconciliation_detail` (a human-readable sentence) and
+  `pending_reconciliation_since`. The account auto-returns to `active` once
+  two consecutive real balance-evidence items (a reconciliation checkpoint or
+  carry-forward proof) evaluate `matched` -- a single reconciliation is not
+  enough, to avoid masking a still-real gap with one lucky match. A genuinely
+  frozen account (any other, real open freeze) is never downgraded into this
+  state -- frozen always takes priority, and this state and `frozen` can
+  never coexist on one account row.
+- **Usage exceeding the ledger** (`USAGE_EXCEEDS_LEDGER`). This no longer
+  freezes the account at all -- the invoiceable amount was always capped at
+  what actually got allocated into a cash pool, so the unallocated overage
+  was never invoiceable in the first place. It is recorded instead, on the
+  same account row: `non_invoiceable_overage_units` and
+  `non_invoiceable_overage_usage_event_id`, cleared automatically the next
+  time reprojection no longer finds a shortfall. `USAGE_EXCEEDS_LEDGER`
+  remains a valid `freeze_reason` value (for historical rows), but no code
+  path opens a new freeze for it any more.
+
+Both states are invisible to `/readyz` and to
+`EligibilityProjectionHealth` by construction: entering or exiting either one
+happens inside the same eligibility-projection job that, on success,
+unconditionally deletes its own `eligibility_projection_jobs` row regardless
+of which status the account ends up in -- there is no separate queue entry
+for either state to get stuck in.

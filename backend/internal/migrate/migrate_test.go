@@ -211,6 +211,9 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	// 0016 alters source_account_eligibility_state/eligibility_freezes, both
 	// created by the excluded 0009 -- same reason 0010-0012 are excluded here.
 	delete(all, "0016_policy_anchor.sql")
+	// 0020 (XM-INV-ELIG-AUTO-RECONCILE) also alters
+	// source_account_eligibility_state -- same reason as 0016 above.
+	delete(all, "0020_eligibility_auto_reconcile.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
