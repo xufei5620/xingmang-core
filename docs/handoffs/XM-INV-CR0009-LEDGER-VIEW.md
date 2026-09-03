@@ -203,20 +203,64 @@ Both behind the same `s.require("admin", ...)` middleware as
     its own message's scope prefix suggests; flagging rather than silently
     leaving it unmentioned.
 
-### A pre-existing gap discovered, not fixed (out of this CR's scope)
+### A pre-existing gap discovered, fixed in a follow-up commit
 
 While reading `web/src/lib/http-api.ts`'s `eligibilityFreezeReasons` list
 and `App.tsx`'s `eligibilityFreezeReasonLabels` (both used to validate/label
-`/admin/eligibility-freezes` rows), neither includes `EVENT_DEAD` or
+`/admin/eligibility-freezes` rows), neither included `EVENT_DEAD` or
 `POLICY_ANCHOR_BLOCKED` -- two `freeze_reason` values migration `0016`
 (XM-INV-POLICY-ANCHOR) added to the backend's own CHECK constraint before
-this CR-0009 task started. If the backend ever returns a freeze row with
+this CR-0009 task started. If the backend ever returned a freeze row with
 either reason, `mapEligibilityFreeze`'s existing validation would throw for
 that *entire page* (`"资格冻结记录包含无效字段，已停止显示。"`), not just
 that one row -- predating this task, unrelated to CR-0009's own stated
-scope (a frontend enum gap from before this CR, not something CR-0009 asks
-to fix), and left untouched here. Flagging for the team to decide whether a
-follow-up is warranted.
+scope. Originally left flagged-but-unfixed here; addressed in a same-branch
+follow-up commit (see "Follow-up" below) at the requesting team lead's ask,
+before merge.
+
+## Follow-up: freeze-reason drift fixed, response mapping made tolerant
+
+Requested by the team lead reviewing this branch before merge, addressing
+the gap flagged above:
+
+- `EVENT_DEAD`/`POLICY_ANCHOR_BLOCKED` added to `types.ts`'s
+  `EligibilityFreezeReason` union, `http-api.ts`'s `eligibilityFreezeReasons`
+  (used for the `reason` *filter* query param's own validation -- an
+  operator can now filter the freeze queue by either), and `App.tsx`'s
+  `eligibilityFreezeReasonLabels` (`EVENT_DEAD` → "事件已失效（源事实死信）",
+  `POLICY_ANCHOR_BLOCKED` → "策略锚定被阻断").
+- **Root-caused and closed the underlying class of bug, not just this one
+  instance of it.** `mapEligibilityFreeze`'s validation of a *response*
+  item's `freeze_reason` (`http-api.ts`) is no longer "must be a member of
+  the closed, labeled list" -- it is now "must be a well-formed, enum-shaped
+  code" (`freezeReasonPattern`, `/^[A-Z][A-Z0-9_]{0,62}$/`; still rejects
+  empty/lowercase/injection-shaped/over-length values). This means a future
+  backend `freeze_reason` this frontend has not labeled yet renders instead
+  of blanking the entire "资格冻结" list -- the exact failure mode this
+  gap already caused once. `EligibilityFreeze.reason`'s own type widened
+  from the closed `EligibilityFreezeReason` union to
+  `EligibilityFreezeReason | (string & {})` to match (literal-type
+  autocomplete preserved for known values, still accepts any string).
+  The `reason` *filter* query param is deliberately **not** loosened the
+  same way -- it stays validated against the closed, labeled list, since
+  filtering by a reason this UI cannot label would be a confusing dead end,
+  not a data-tolerance question.
+- `App.tsx` gained `freezeReasonLabel(reason)`, a small helper
+  (`eligibilityFreezeReasonLabels[reason] ?? reason`) used at both places a
+  freeze reason is rendered (the list row and the resolution drawer's
+  title) -- an unlabeled reason now shows its raw code instead of
+  `undefined`.
+- New test file `http-api.eligibility-freeze-reason-tolerance.test.ts`:
+  both newly-catalogued reasons map through cleanly; an unrecognized-but-
+  well-formed reason on one row does not reject that row or the rest of the
+  page; six malformed-shape cases (empty, lowercase, leading digit, embedded
+  space, CR/LF injection, over the length cap) are still rejected; a
+  non-string `freeze_reason` is rejected; the `reason` filter param still
+  rejects an uncatalogued value and still accepts both new reasons.
+- Gates re-run on this range: `npm run typecheck` (both tsconfigs), `npm
+  test -- --run` (10 files, 141 tests, all green), `npm run build` all exit
+  0; `gitleaks git --log-opts="a7c5072..HEAD" .` clean over the full
+  updated range (see the commit id reported to the team lead).
 
 ## Files changed
 
@@ -285,6 +329,17 @@ follow-up is warranted.
 - `web/src/lib/workflow.test.ts` (new).
 - `web/src/lib/embedded-admin-scope.test.ts` -- extended to the new
   `"account-ledger"` key.
+
+**Follow-up** (freeze-reason drift fix, see that section above):
+- `web/src/types.ts` -- `EligibilityFreezeReason` gains `EVENT_DEAD`/
+  `POLICY_ANCHOR_BLOCKED`; `EligibilityFreeze.reason` widened to
+  `EligibilityFreezeReason | (string & {})`.
+- `web/src/lib/http-api.ts` -- `eligibilityFreezeReasons` gains the two
+  reasons; `mapEligibilityFreeze`'s response-side reason check replaced
+  with `freezeReasonPattern`, an enum-shape check.
+- `web/src/App.tsx` -- the two new labels; `freezeReasonLabel` helper used
+  at both render sites.
+- `web/src/lib/http-api.eligibility-freeze-reason-tolerance.test.ts` (new).
 
 **Not touched** (per the task brief's explicit scope, confirmed by grep
 before finishing): `backend/internal/postgresstore/consumption.go`, any

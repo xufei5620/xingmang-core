@@ -2842,11 +2842,23 @@ const eligibilityFreezeReasonLabels: Record<EligibilityFreezeReason, string> = {
   STREAM_WATERMARK_REGRESSION: "来源数据流水位回退",
   SOURCE_GAP: "来源事实或日志出现完整性缺口",
   SOURCE_REFUND: "来源退款需先完成红冲处置",
+  EVENT_DEAD: "事件已失效（源事实死信）",
+  POLICY_ANCHOR_BLOCKED: "策略锚定被阻断",
 };
 
 const eligibilityFreezeReasonOptions = Object.entries(
   eligibilityFreezeReasonLabels,
 ) as Array<[EligibilityFreezeReason, string]>;
+
+// http-api.ts's mapEligibilityFreeze deliberately accepts any well-formed
+// (not just catalogued) freeze_reason so one unrecognized row never fails
+// the whole "资格冻结" list -- this is the display-side half of that same
+// tolerance: an item.reason not in eligibilityFreezeReasonLabels (a future
+// backend reason this frontend hasn't labeled yet) renders its raw code
+// instead of `undefined`.
+function freezeReasonLabel(reason: EligibilityFreeze["reason"]) {
+  return (eligibilityFreezeReasonLabels as Record<string, string>)[reason] ?? reason;
+}
 
 function EligibilityFreezesPage() {
   const toast = useContext(ToastContext);
@@ -3110,7 +3122,7 @@ function EligibilityFreezesPage() {
                     </td>
                     <td>{item.externalUserId}</td>
                     <td>
-                      <strong>{eligibilityFreezeReasonLabels[item.reason]}</strong>
+                      <strong>{freezeReasonLabel(item.reason)}</strong>
                       {item.reason === "SOURCE_REFUND" && (
                         <small className="error-text">只能从退款与红冲队列结案</small>
                       )}
@@ -3277,7 +3289,7 @@ function EligibilityFreezeDrawer({
         <div className="drawer-head">
           <div>
             <span>开票资格安全处置</span>
-            <h2>{eligibilityFreezeReasonLabels[item.reason]}</h2>
+            <h2>{freezeReasonLabel(item.reason)}</h2>
           </div>
           <button className="icon-button" onClick={onClose} disabled={working}>
             <X size={19} />

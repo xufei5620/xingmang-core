@@ -10,7 +10,6 @@ import type {
   DashboardSummary,
   EligibilityFreeze,
   EligibilityFreezeFilters,
-  EligibilityFreezeReason,
   FundingOrder,
   InvoicePolicy,
   InvoiceProfile,
@@ -491,6 +490,14 @@ const eligibilitySummaryReasons = [
   "READY",
 ] as const;
 
+// The known, labeled freeze reasons -- used to validate the `reason` filter
+// query param (an operator can only ask to filter by a reason this UI
+// actually knows how to label) and by mock-api.ts. Not used to validate the
+// server's own freeze_reason on a *response* item any more -- see
+// mapEligibilityFreeze's own freezeReasonPattern check below for why an
+// eleventh-hour backend addition (this array was missing EVENT_DEAD/
+// POLICY_ANCHOR_BLOCKED, both added by migration 0016 before this array was
+// last updated) must not fail the whole list.
 const eligibilityFreezeReasons = [
   "UNKNOWN_NEGATIVE_BALANCE",
   "LATE_FINALIZED_EVENT",
@@ -501,7 +508,20 @@ const eligibilityFreezeReasons = [
   "STREAM_WATERMARK_REGRESSION",
   "SOURCE_GAP",
   "SOURCE_REFUND",
+  "EVENT_DEAD",
+  "POLICY_ANCHOR_BLOCKED",
 ] as const;
+
+// A freeze_reason on a response item only needs to be a well-formed,
+// enum-shaped code (matching this codebase's own Go constant naming
+// convention) -- not a member of the closed eligibilityFreezeReasons list
+// above. This is deliberately looser than that list: a reason the backend's
+// own CHECK constraint added before this frontend's known-reasons list was
+// updated (exactly what happened with EVENT_DEAD/POLICY_ANCHOR_BLOCKED)
+// must still render, with App.tsx's own label lookup falling back to the
+// raw code, rather than throwing and blanking the entire "资格冻结" list
+// over one unrecognized row.
+const freezeReasonPattern = /^[A-Z][A-Z0-9_]{0,62}$/;
 
 const eligibilityStatuses = [
   "active",
@@ -737,9 +757,8 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     typeof value.funding_lot_id !== "string" ||
     (value.scope === "account" && value.funding_lot_id !== "") ||
     (value.scope === "funding_lot" && !uuidPattern.test(value.funding_lot_id)) ||
-    !eligibilityFreezeReasons.includes(
-      value.freeze_reason as EligibilityFreezeReason,
-    ) ||
+    typeof value.freeze_reason !== "string" ||
+    !freezeReasonPattern.test(value.freeze_reason) ||
     !["open", "resolved"].includes(value.status) ||
     !eligibilityStatuses.includes(value.eligibility_status) ||
     !validTimestamp(value.opened_at) ||
@@ -762,7 +781,7 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     sourceInstanceId: value.source_instance_id,
     sourceLabel: fixedSourceLabel(value.source_type),
     scope: value.scope,
-    reason: value.freeze_reason as EligibilityFreezeReason,
+    reason: value.freeze_reason,
     status: value.status,
     eligibilityStatus: value.eligibility_status,
     openedAt: value.opened_at,

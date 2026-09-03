@@ -158,7 +158,9 @@ export type EligibilityFreezeReason =
   | "USAGE_EXCEEDS_LEDGER"
   | "STREAM_WATERMARK_REGRESSION"
   | "SOURCE_GAP"
-  | "SOURCE_REFUND";
+  | "SOURCE_REFUND"
+  | "EVENT_DEAD"
+  | "POLICY_ANCHOR_BLOCKED";
 
 export interface EligibilityFreeze {
   id: string;
@@ -166,7 +168,14 @@ export interface EligibilityFreeze {
   sourceInstanceId: string;
   sourceLabel: string;
   scope: "account" | "funding_lot";
-  reason: EligibilityFreezeReason;
+  // A known EligibilityFreezeReason, or any other well-formed (but not yet
+  // catalogued/labeled) reason code the backend's own freeze_reason enum
+  // may add in the future -- `& { readonly brand?: unique symbol }`-free
+  // widening (`string & {}`) keeps literal-type autocomplete for the known
+  // values while still accepting an unrecognized one at the type level, to
+  // match mapEligibilityFreeze's own tolerant runtime validation (an
+  // unrecognized-but-well-formed code must not fail the whole list).
+  reason: EligibilityFreezeReason | (string & {});
   status: "open" | "resolved";
   eligibilityStatus: FundingOrder["eligibilityStatus"];
   openedAt: string;
