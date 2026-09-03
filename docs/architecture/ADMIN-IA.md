@@ -704,14 +704,27 @@ UI 裁定补充条）:
 `?tab=upstream`，**不带锚点**——04:40 裁定期间登记簿是页内独立区块，改跳时
 曾带 `#upstream-management` 锚点（`LEGACY_TAB_ALIAS_ANCHORS`）；07:20 补充
 裁定把登记簿字段直接并入了渠道表的行与详情页，已经没有独立区块可滚，
-`LEGACY_TAB_ALIAS_ANCHORS` 与相关的滚动逻辑已删除。上游详情与添加上游路由
-（`/platforms/:p/suppliers/:id`、`/platforms/:p/suppliers/new`）不变，仍是
-账号粒度的 UI-only 壳，返回入口指向 `?tab=upstream`（同样不带锚点），见
-§三 详情路由表。
+`LEGACY_TAB_ALIAS_ANCHORS` 与相关的滚动逻辑已删除。上游详情路由
+（`/platforms/:p/suppliers/:id`）不变，仍是账号粒度的 UI-only 壳，返回
+入口指向 `?tab=upstream`（同样不带锚点），见§三 详情路由表。
 
 **落地切片**：仍是 XM-CHAN-MERGE0（同一条分支），两条裁定在同一片内一次性
 落地——分支历史上保留了 04:40 裁定的中间提交，但最终交付以 07:20 补充裁定
 描述的单表结构为准。
+
+> **2026-09-03 产品负责人裁定补记（`/platforms/:p/suppliers/new` 下线）**：
+> 上一段原本还包含 `/platforms/:p/suppliers/new`（只读字段/布局评审蓝图
+> `SupplierCreatePage.tsx`）——XM-OPS-TAILS1（同日更早核实）曾明确判定这
+> 条路由**不是孤儿**，是当时产品负责人就近记录、要求保留的评审壳，两条
+> 路径（这条蓝图 + `UpstreamAccountDialog` 工具栏对话框）共存是设计决定。
+> 本条是**独立于那次核实的新裁定**：产品负责人当天晚些时候改判这个专门
+> 评审用的只读壳不再需要保留——真正能用、且唯一保留的「添加上游」入口
+> 是 `UpstreamAccountDialog`（渠道表工具栏「＋ 添加上游」，见上文第 7
+> 点）。`SupplierCreatePage.tsx`、其路由注册（`supplyPlatformLoader`）与
+> 两处既有测试均已删除；地址 `/platforms/:p/suppliers/new` 落回
+> `suppliers/:upstreamId` 动态路由既有的 `upstreamId === "new"` not-found
+> 兜底分支（提示语同步更新为指向工具栏「＋ 添加上游」，不再提"专用登记
+> 页面"）。落地切片 XM-CHAN-SUPPLIER-BLUEPRINT-REMOVE。
 
 #### 07:20 补充裁定的精确实现细节（team-lead 直接发给 XM-CHAN-MERGE0 的规格）
 
