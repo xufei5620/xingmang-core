@@ -1,5 +1,10 @@
 # RC81 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC81 shipped at signed tag
+> `v0.1.0-rc81-signed` (`ced1bfb`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc82-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC81 — XM-INV-ASSERT-HANDSHAKE (web only): the embedded admin console posts `admin-assertion-needed` to the framing console until a console assertion is delivered, closing the handshake gap found in the first CR-0006 canary (the framing console delivers on ready and onLoad, which can both precede the iframe's listener registration; the invoice side never asked for a re-delivery, so the embedded admin stayed on the login card).
