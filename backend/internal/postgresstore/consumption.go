@@ -1319,17 +1319,39 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 // 3(D)'s policy-start balance derivation: checkpointBalance (a real,
 // observed reconciliation checkpoint's own balance at checkpointAsOf),
 // unwound backward across the window (policyStartAt, checkpointAsOf] by
-// subtracting every non-cash credit and adding back every usage fact already
-// persisted in that window at the moment this runs -- the exact inverse of
-// buildEligibilityProjectionTx's own window predicate (event_time>cutover_at
-// for both facts). Once cutover_at becomes policyStartAt and this derived
-// value becomes cutover_balance_units, the window's own credits/usage are
-// exactly what buildEligibilityProjectionTx will independently (re)count
-// once its window opens up to include them, so re-evaluating the real
-// checkpoint this was derived from reconciles to zero -- see
-// evaluatePendingBalanceEvidenceTx's case-1 self-heal (design
-// XM-INV-ANCHOR-BALANCE 2.7), which turns the earlier, empty-window derived
-// checkpoint's own positive difference into exactly this credit.
+// subtracting every inflow already persisted in that window at the moment
+// this runs -- every non-cash credit AND every verified cash payment (in the
+// same service units buildEligibilityProjectionTx's own cash-pool query
+// already reads off funding_lot_consumption_state.cash_service_units, not a
+// minor-unit amount) -- and adding back every usage fact, the exact inverse
+// of buildEligibilityProjectionTx's own window predicate (event_time/
+// completed_at>cutover_at for all three fact kinds). Once cutover_at becomes
+// policyStartAt and this derived value becomes cutover_balance_units, the
+// window's own credits/payments/usage are exactly what
+// buildEligibilityProjectionTx will independently (re)count once its window
+// opens up to include them, so re-evaluating the real checkpoint this was
+// derived from reconciles to zero -- see evaluatePendingBalanceEvidenceTx's
+// case-1 self-heal (design XM-INV-ANCHOR-BALANCE 2.7), which turns the
+// earlier, empty-window derived checkpoint's own positive difference into
+// exactly this credit.
+//
+// The cash-payment term was missing from an earlier draft of this function
+// (matching the design doc's own prose, which named only "credits" without
+// spelling out that a real top-up is also an inflow that must be unwound).
+// Found to be a live, not merely theoretical, gap during review: any account
+// whose very first real cash payment lands between the policy start and its
+// first observed checkpoint -- ordinary for a brand-new user who registers,
+// recharges, and is then first seen at a checkpoint -- would otherwise have
+// its derived opening balance inflated by exactly that payment's own units,
+// since the payment's own funding lot independently enters
+// buildEligibilityProjectionTx's cash pool once the window includes it.
+// Without this term, the account's very next real checkpoint would show a
+// permanent negative difference of that same amount, landing the account in
+// not_invoiceable_pending_reconciliation for a difference that was never
+// real. Included here identically to how credits are handled: read
+// (verified, non-refund-frozen WALLET_CASH only, matching that same
+// cash-pool query's own predicate exactly -- SUBSCRIPTION_CASH is excluded
+// from that pool today and so is excluded here too), summed, subtracted.
 //
 // Two callers: ObserveBalanceCheckpoint's POLICY_ANCHOR bootstrap branch
 // (checkpointAsOf/checkpointBalance are the triggering checkpoint's own
@@ -1337,39 +1359,16 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 // checkpointBalance are the account's *existing* cutover_at/
 // cutover_balance_units, treated as a checkpoint data point for the same
 // unwind) -- both derive the same way from whatever is persisted in the
-// window right now. For the three pre-existing production accounts this
-// repair targets, that window's credits/usage are known to be empty (the
-// pre-XM-INV-PREANCHOR-USAGE/XM-INV-ELIG-POLICY-START-ANCHOR code discarded
-// them without persisting a row, per design 3(D)'s own text), so in practice
-// the repair's own derivation reduces to the existing balance unchanged --
-// only a real in-window cash funding lot (checked separately, not by this
-// function -- see the repair's own doc comment) makes re-anchoring worth
-// doing at all for those three accounts.
-//
-// Deliberately does not consider cash funding lots (WALLET_CASH/
-// SUBSCRIPTION_CASH payments) in the window -- design 3(D) specifies this
-// exact formula with no cash-payment term, and today's only real callers
-// both have no real cash payment in this window (verified for the three
-// existing accounts; true by construction for a fresh bootstrap only when
-// no such payment has landed yet). Flagged in the handoff doc as a
-// theoretical correctness risk if a real cash payment ever lands strictly
-// between the policy start and an account's first checkpoint before that
-// checkpoint arrives: buildEligibilityProjectionTx's own ExpectedBalance
-// does add a cash lot's units to the pool once its window includes it (see
-// that function's own cash/nonCash pool accumulation), so a window payment
-// this formula does not subtract would make the account's real checkpoint
-// evaluation permanently differ by exactly that payment's unit amount --
-// self-healing via XM-INV-BALANCE-BLIP's defer/confirm rule (not a freeze,
-// per this design's own auto-downgrade), but not a clean, immediate match.
+// window right now.
 //
 // Floors at zero rather than going negative: cutover_balance_units carries a
 // NOT NULL CHECK (>=0). An unwind that would need special handling for
 // arriving at a hypothetically-negative implied opening balance is exactly
 // the "every branch returns a defined result" hard rule -- flooring, not
 // erroring, on a data shape not known to occur in production today (window
-// credits exceeding window balance plus usage).
+// inflows exceeding checkpoint balance plus usage).
 func deriveCutoverBalanceUnitsTx(ctx context.Context, tx pgx.Tx, accountID string, policyStartAt, checkpointAsOf time.Time, checkpointBalance *big.Int) (*big.Int, error) {
-	var creditsText, usageText string
+	var creditsText, usageText, paymentsText string
 	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(sum(service_units),0)::text FROM source_credit_events
 		WHERE external_account_id=$1 AND event_time>$2 AND event_time<=$3`,
@@ -1382,6 +1381,20 @@ func deriveCutoverBalanceUnitsTx(ctx context.Context, tx pgx.Tx, accountID strin
 		accountID, policyStartAt, checkpointAsOf).Scan(&usageText); err != nil {
 		return nil, err
 	}
+	// Matches buildEligibilityProjectionExcludingUsageTx's own cash-pool
+	// query predicate exactly (eligibility_kind='WALLET_CASH',
+	// verification_state='verified', refund_frozen=FALSE) so this counts
+	// precisely the payments that query will independently include once the
+	// window opens up around them.
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(sum(flcs.cash_service_units),0)::text
+		FROM funding_lots fl JOIN funding_lot_consumption_state flcs ON flcs.funding_lot_id=fl.id
+		WHERE fl.external_account_id=$1 AND fl.eligibility_kind='WALLET_CASH'
+			AND fl.verification_state='verified' AND fl.refund_frozen=FALSE
+			AND fl.completed_at>$2 AND fl.completed_at<=$3`,
+		accountID, policyStartAt, checkpointAsOf).Scan(&paymentsText); err != nil {
+		return nil, err
+	}
 	credits, ok := new(big.Int).SetString(strings.TrimSpace(creditsText), 10)
 	if !ok {
 		return nil, fmt.Errorf("invalid summed credit units %q", creditsText)
@@ -1390,7 +1403,12 @@ func deriveCutoverBalanceUnitsTx(ctx context.Context, tx pgx.Tx, accountID strin
 	if !ok {
 		return nil, fmt.Errorf("invalid summed usage units %q", usageText)
 	}
+	payments, ok := new(big.Int).SetString(strings.TrimSpace(paymentsText), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid summed payment units %q", paymentsText)
+	}
 	derived := new(big.Int).Sub(checkpointBalance, credits)
+	derived.Sub(derived, payments)
 	derived.Add(derived, usage)
 	if derived.Sign() < 0 {
 		derived = new(big.Int)

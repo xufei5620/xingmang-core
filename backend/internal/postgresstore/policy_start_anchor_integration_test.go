@@ -139,6 +139,105 @@ func TestDeriveCutoverBalanceUnitsFloorsAtZero(t *testing.T) {
 	}
 }
 
+// TestDeriveCutoverBalanceUnitsSubtractsCashPaymentsInWindow is the fix for a
+// real (not merely theoretical) defect a code reviewer caught: a verified
+// cash payment inside the derivation window is also an inflow that must be
+// unwound, exactly like a non-cash credit -- buildEligibilityProjectionTx's
+// own cash-pool query independently adds the payment's own
+// cash_service_units to ExpectedBalance once the window includes it, so a
+// derivation that only subtracted credits would inflate the derived opening
+// balance by the payment's own amount. This is the ordinary shape for any
+// account first observed after the policy start: a brand-new user who
+// registers, recharges, and is then first seen at a checkpoint has that
+// recharge inside this exact window. checkpoint balance 1000, a 200-unit
+// non-cash credit, a 50-unit usage fact, and a verified WALLET_CASH payment
+// worth 300 cash_service_units, all inside the window: derived =
+// 1000-200-300+50=550. A second, unverified payment of 900 units and a
+// third, refund-frozen payment of 900 units (both otherwise in-window) must
+// not affect the result -- only verified, non-refund-frozen WALLET_CASH
+// payments count, matching buildEligibilityProjectionTx's own cash-pool
+// predicate exactly. A payment dated before the policy start is not a
+// constructable case at all here: funding_lots' own
+// funding_lots_invoice_policy_guard trigger unconditionally rejects any
+// WALLET_CASH/SUBSCRIPTION_CASH row with completed_at before the policy
+// start at INSERT time, so "before policy start" is already fully excluded
+// at the schema level, independent of this derivation.
+func TestDeriveCutoverBalanceUnitsSubtractsCashPaymentsInWindow(t *testing.T) {
+	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
+	policyStart := fixtureNow.Add(-3 * time.Hour).Truncate(time.Second)
+	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
+	accountID, sourceID, manifestHash, configHash := newPolicyStartMinimalAccount(t, store, ctx, 202, policyStart)
+
+	checkpointAsOf := policyStart.Add(2 * time.Hour)
+	insertCreditEventDirect(t, store, ctx, sourceID, accountID, "derive-payment-credit",
+		policyStart.Add(20*time.Minute), "200", "BONUS", 1, manifestHash, configHash)
+	insertUsageEventDirect(t, store, ctx, sourceID, accountID, "derive-payment-usage",
+		policyStart.Add(40*time.Minute), "50", 2, manifestHash, configHash)
+	insertWalletCashLotWithFlagsDirect(t, store, ctx, accountID, sourceID, "derive-payment-verified",
+		policyStart.Add(30*time.Minute), "300", true, false)
+	// Must not count: unverified.
+	insertWalletCashLotWithFlagsDirect(t, store, ctx, accountID, sourceID, "derive-payment-unverified",
+		policyStart.Add(35*time.Minute), "900", false, false)
+	// Must not count: refund-frozen.
+	insertWalletCashLotWithFlagsDirect(t, store, ctx, accountID, sourceID, "derive-payment-refund-frozen",
+		policyStart.Add(45*time.Minute), "900", true, true)
+	// A payment after the checkpoint -- must not affect the derivation
+	// either (mirrors the credit/usage test's own outside-window checks).
+	insertWalletCashLotWithFlagsDirect(t, store, ctx, accountID, sourceID, "derive-payment-after-checkpoint",
+		checkpointAsOf.Add(30*time.Minute), "900", true, false)
+
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	derived, err := deriveCutoverBalanceUnitsTx(ctx, tx, accountID, policyStart, checkpointAsOf, big.NewInt(1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if derived.Cmp(big.NewInt(550)) != 0 {
+		t.Fatalf("derived=%s, want 550 (1000-200-300+50)", derived)
+	}
+}
+
+// insertWalletCashLotWithFlagsDirect inserts a minimal WALLET_CASH funding_lots row
+// (plus its matching, self-consistent, zero-consumed funding_lot_consumption_state
+// row) directly, for tests that only need this repair/derivation-relevant
+// shape rather than a full ObserveFundingLot pipeline run.
+func insertWalletCashLotWithFlagsDirect(t *testing.T, store *Store, ctx context.Context, accountID, sourceID, orderSuffix string,
+	completedAt time.Time, cashServiceUnits string, verified, refundFrozen bool) string {
+	t.Helper()
+	lotID := randomUUID()
+	verificationState := "verified"
+	if !verified {
+		verificationState = "pending"
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO funding_lots(
+			id,invoice_user_id,external_account_id,source_instance_id,external_order_id,currency,
+			original_minor,current_cap_minor,reserved_minor,issued_minor,verification_state,source_status,
+			source_revision_hash,completed_at,observed_at,eligibility_kind,eligibility_cutover_at,
+			verified_cash_minor,consumed_cash_minor,refund_frozen,eligibility_revision)
+		VALUES($1,(SELECT invoice_user_id FROM external_accounts WHERE id=$2),$2,$3,$4,'CNY',
+			100000,100000,0,0,$5,'COMPLETED',$6,$7,$7,'WALLET_CASH',$7,
+			CASE WHEN $5='verified' THEN 100000 ELSE 0 END,0,$8,1)`,
+		lotID, accountID, sourceID, "wallet-cash-direct-"+orderSuffix, verificationState,
+		testHash("wallet-cash-direct-"+orderSuffix), completedAt, refundFrozen); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO funding_lot_consumption_state(
+			funding_lot_id,cash_service_units,consumed_service_units,cumulative_cash_numerator,
+			rounded_consumed_cash_minor,rounding_remainder_numerator)
+		VALUES($1,$2::numeric,0,0,0,0)`, lotID, cashServiceUnits); err != nil {
+		t.Fatal(err)
+	}
+	return lotID
+}
+
 // policyStartBootstrapFixture builds the account/manifest/stream scaffolding
 // shared by this file's ObserveBalanceCheckpoint-driven scenarios (matching
 // TestReconciliationCheckpointIgnoredPrePolicyAndBootstrapsPolicyAnchorPostPolicy's
@@ -378,6 +477,134 @@ func TestPolicyStartBootstrapIncludesInWindowCashFundingLot(t *testing.T) {
 	}
 	if _, ok := projection.Lots[lotID]; !ok {
 		t.Fatalf("in-window cash lot %s was not included in the projection: lots=%+v", lotID, projection.Lots)
+	}
+}
+
+// TestPolicyStartBootstrapWithInWindowCashPaymentReconcilesWithoutNegativeDifference
+// covers the ordinary, non-theoretical shape a code reviewer flagged: an
+// account first observed after the policy start whose only activity in the
+// derivation window is a single verified cash recharge (no other credits or
+// usage) -- exactly a brand-new user who registers, recharges, and is then
+// first seen at a balance checkpoint. Before deriveCutoverBalanceUnitsTx
+// also subtracted cash payments, the derived opening balance would have
+// been inflated by the recharge's own units (since the same recharge
+// independently enters buildEligibilityProjectionTx's cash pool once the
+// window opens around it), permanently offsetting every later checkpoint by
+// that amount and landing the account in not_invoiceable_pending_reconciliation
+// for a difference that was never real.
+//
+// The recharge is inserted directly (bypassing ObserveFundingLot -- which
+// itself requires the account's eligibility state to already exist, so it
+// cannot observe a payment before a checkpoint has bootstrapped the account
+// at all; matching this file's own established bypass precedent, e.g.
+// TestPolicyStartBootstrapIncludesInWindowCashFundingLot). Evaluation is
+// driven directly through reprojectEligibilityTx/evaluatePendingBalanceEvidenceTx
+// (not ProcessEligibilityProjectionJobs): that entrypoint's own
+// ensureBalanceCarryForwardProofTx additionally requires every in-window
+// WALLET_CASH lot to be traceable to a real source_economic_scan_cycle_events
+// row, an unrelated ceremony this test's own direct-insert bypass does not
+// wire up and does not need to -- matching this package's own established
+// precedent for evaluator-focused tests (e.g. balance_blip_integration_test.go's
+// own direct evaluator calls).
+//
+// Verifies: the derived checkpoint's own balance is exactly checkpoint
+// balance minus the recharge's units; the account reconciles cleanly (both
+// checkpoints terminal, one matched and one positive_classified_non_cash,
+// zero open freezes, zero pending reconciliation, status active); and the
+// recharge's own funding lot is untouched by any of this (still verified,
+// WALLET_CASH, not refund-frozen) -- it stays invoiceable, just not yet
+// consumed by any usage.
+func TestPolicyStartBootstrapWithInWindowCashPaymentReconcilesWithoutNegativeDifference(t *testing.T) {
+	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
+	policyStart := fixtureNow.Add(-2 * time.Hour).Truncate(time.Second)
+	store, ctx, sourceID, accountID, manifestHash, configHash, chain := policyStartBootstrapFixture(t, 214, policyStart)
+
+	paymentAt := policyStart.Add(1 * time.Hour)
+	lotID := insertWalletCashLotWithFlagsDirect(t, store, ctx, accountID, sourceID, "recharge-214", paymentAt, "500", true, false)
+
+	postAsOf := policyStart.Add(2 * time.Hour)
+	postEvent := SourceBatchEvent{EventID: policyStartUUID('8', 2142),
+		EntityType: "balance_checkpoint", Operation: "upsert", PayloadHash: testHash("policy-start-payment-post-event"),
+		PayloadCiphertext: bytes.Repeat([]byte{3}, 32), ObservedAt: postAsOf}
+	postCycle := chain.commit(t, store, ctx, sourceID, "balances", policyStartUUID('9', 2142), postAsOf, []SourceBatchEvent{postEvent})
+	if err := store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
+		SourceInstanceID: sourceID, ExternalUserID: "214", ExternalEventID: postEvent.EventID,
+		CheckpointID: "reconcile-post-214", CheckpointKind: "reconciliation", BaselineMember: true,
+		BalanceServiceUnits: "600", UnitCode: "SUB2_BALANCE_1E8", SourceSnapshotID: testHash(postCycle.cycleID),
+		SnapshotRowCount: "1", AsOf: postAsOf, ObservedAt: postAsOf, StreamWatermarkAt: postAsOf,
+		SourceCursor: "balance:214:post", SourceRevision: postEvent.PayloadHash,
+		CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: 1,
+		BatchID: postCycle.batchID, ScanCycleID: postCycle.cycleID,
+	}, AuditActor{Type: "source_connector", ID: sourceID}); err != nil {
+		t.Fatalf("post-policy baseline checkpoint should bootstrap POLICY_ANCHOR directly: %v", err)
+	}
+
+	var derivedBalance string
+	if err := store.pool.QueryRow(ctx, `SELECT balance_service_units::text FROM balance_reconciliation_checkpoints
+		WHERE external_account_id=$1 AND checkpoint_id=$2`, accountID, "policy-start:reconcile-post-214").Scan(&derivedBalance); err != nil {
+		t.Fatalf("derived reconciliation checkpoint row missing: %v", err)
+	}
+	if derivedBalance != "100" {
+		t.Fatalf("derived checkpoint balance=%s, want 100 (600 checkpoint - 500 recharge)", derivedBalance)
+	}
+
+	worker := AuditActor{Type: "system", ID: "test-worker"}
+	through := postAsOf.Add(time.Minute)
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = reprojectEligibilityTx(ctx, tx, accountID, through, worker); err != nil {
+		t.Fatalf("reproject failed: %v", err)
+	}
+	if err = evaluatePendingBalanceEvidenceTx(ctx, tx, accountID, through, worker); err != nil {
+		t.Fatalf("evaluate failed: %v", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if status := accountEligibilityStatus(t, store, ctx, accountID); status != "active" {
+		t.Fatalf("account status=%q, want active (no negative difference should ever have been produced)", status)
+	}
+	var openFreezes int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes
+		WHERE external_account_id=$1 AND status='open'`, accountID).Scan(&openFreezes); err != nil || openFreezes != 0 {
+		t.Fatalf("open freezes=%d err=%v, want 0", openFreezes, err)
+	}
+
+	rows, err := store.pool.Query(ctx, `SELECT bce.evaluation_status FROM balance_checkpoint_evaluations bce
+		JOIN balance_reconciliation_checkpoints c ON c.id=bce.checkpoint_id
+		WHERE c.external_account_id=$1 ORDER BY bce.evaluation_status`, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	statuses := make([]string, 0, 2)
+	for rows.Next() {
+		var status string
+		if err = rows.Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		statuses = append(statuses, status)
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 2 || statuses[0] != "matched" || statuses[1] != "positive_classified_non_cash" {
+		t.Fatalf("checkpoint evaluation statuses=%v, want exactly one matched and one positive_classified_non_cash (never negative_frozen)", statuses)
+	}
+
+	var verificationState string
+	var eligibilityKind string
+	var refundFrozen bool
+	if err := store.pool.QueryRow(ctx, `SELECT verification_state,eligibility_kind,refund_frozen
+		FROM funding_lots WHERE id=$1`, lotID).Scan(&verificationState, &eligibilityKind, &refundFrozen); err != nil {
+		t.Fatal(err)
+	}
+	if verificationState != "verified" || eligibilityKind != "WALLET_CASH" || refundFrozen {
+		t.Fatalf("recharge lot state changed unexpectedly: verification=%s kind=%s refund_frozen=%t",
+			verificationState, eligibilityKind, refundFrozen)
 	}
 }
 

@@ -422,6 +422,140 @@ func TestPolicyStartReanchorAccountIsolation(t *testing.T) {
 	}
 }
 
+// TestPolicyStartReanchorBlockedByActiveInvoiceExposureWritesNothing covers
+// the exposure guard added during implementation (mirroring design
+// XM-INV-POLICY-ANCHOR 2.4's own reanchorLegacyEligibilityAccountTx guard):
+// an account with a real, unexpected in-window WALLET_CASH funding lot
+// (WindowFundingLots>0, so NOT the zero-lot NoOp case) that also carries a
+// live invoice_allocations reservation on that same lot must be reported
+// Blocked and left completely untouched in both dry-run and apply -- resetting
+// consumption state under real invoice exposure would corrupt accounting
+// already depending on it (and would otherwise hit funding_lots' own
+// immediate consumed-cash-vs-reserved/issued CHECK the instant the reset
+// zeroes consumed_cash_minor).
+func TestPolicyStartReanchorBlockedByActiveInvoiceExposureWritesNothing(t *testing.T) {
+	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
+	policyStart := fixtureNow.Add(-3 * time.Hour).Truncate(time.Second)
+	store, ctx := integrationStoreWithPolicyStart(t, policyStart)
+	oldCutoverAt := policyStart.Add(2 * time.Hour)
+	accountID, sourceID, manifestHash, configHash, _ := newPreSlicePolicyAnchorAccount(t, store, ctx, 520, policyStart, oldCutoverAt, "500")
+
+	lotID := randomUUID()
+	paymentAt := policyStart.Add(1 * time.Hour)
+	usageID := insertUsageEventDirect(t, store, ctx, sourceID, accountID, "policy-reanchor-blocked-usage",
+		paymentAt.Add(10*time.Minute), "200", 1, manifestHash, configHash)
+	// The lot, its consumption state, and a matching consumption_allocations
+	// row must land in one explicit transaction: funding_lot_consumption_mirror_guard
+	// (migration 0009, DEFERRABLE INITIALLY DEFERRED) checks
+	// consumption_allocations against funding_lot_consumption_state at
+	// COMMIT for any 'active' account -- see
+	// newPreSlicePolicyAnchorAccount's own identical note. A reservation
+	// (reserved_minor=20000) also requires consumed_cash_minor to already
+	// cover it (funding_lots' own immediate CHECK), so this lot cannot
+	// start at zero consumption the way the NoOp test's clean lot does.
+	blockedTx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = blockedTx.Exec(ctx, `
+		INSERT INTO funding_lots(
+			id,invoice_user_id,external_account_id,source_instance_id,external_order_id,currency,
+			original_minor,current_cap_minor,reserved_minor,issued_minor,verification_state,source_status,
+			source_revision_hash,completed_at,observed_at,eligibility_kind,eligibility_cutover_at,
+			verified_cash_minor,consumed_cash_minor,refund_frozen,eligibility_revision)
+		VALUES($1,(SELECT invoice_user_id FROM external_accounts WHERE id=$2),$2,$3,'policy-reanchor-blocked-order','CNY',
+			30000,30000,20000,0,'verified','COMPLETED',$4,$5,$5,'WALLET_CASH',$5,30000,20000,FALSE,1)`,
+		lotID, accountID, sourceID, testHash("policy-reanchor-blocked-payment"), paymentAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = blockedTx.Exec(ctx, `
+		INSERT INTO funding_lot_consumption_state(
+			funding_lot_id,cash_service_units,consumed_service_units,cumulative_cash_numerator,
+			rounded_consumed_cash_minor,rounding_remainder_numerator)
+		VALUES($1,300,200,6000000,20000,0)`, lotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = blockedTx.Exec(ctx, `
+		INSERT INTO consumption_allocations(
+			id,usage_event_id,funding_lot_id,allocation_order,service_units,cash_minor_delta,projection_version)
+		VALUES($1,$2,$3,1,200,20000,1)`, randomUUID(), usageID, lotID); err != nil {
+		t.Fatal(err)
+	}
+	if err = blockedTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A real invoice_allocations row in 'reserved' state, referencing this
+	// lot -- the live exposure the guard must catch. invoice_profiles and
+	// invoice_requests exist purely to satisfy invoice_allocations' own FK
+	// chain; their content is otherwise irrelevant to this test.
+	profileID := randomUUID()
+	requestID := randomUUID()
+	allocationID := randomUUID()
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO invoice_profiles(id,invoice_user_id,profile_type,title_ciphertext,email_ciphertext)
+		VALUES($1,(SELECT invoice_user_id FROM external_accounts WHERE id=$2),'personal',decode('11','hex'),decode('22','hex'))`,
+		profileID, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO invoice_requests(
+			id,request_no,invoice_user_id,source_instance_id,profile_id,profile_snapshot_ciphertext,
+			currency,amount_minor,status,idempotency_key,eligibility_policy_start_at,eligibility_policy_version)
+		VALUES($1,$2,(SELECT invoice_user_id FROM external_accounts WHERE id=$3),$4,$5,decode('33','hex'),
+			'CNY',20000,'pending_review','policy-reanchor-blocked-request',
+			(SELECT eligibility_start_at FROM invoice_eligibility_policy WHERE singleton_id=1),
+			(SELECT policy_version FROM invoice_eligibility_policy WHERE singleton_id=1))`,
+		requestID, "POLICY-REANCHOR-BLOCKED-520", accountID, sourceID, profileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO invoice_allocations(id,invoice_request_id,funding_lot_id,amount_minor,source_revision_hash,allocation_state)
+		VALUES($1,$2,$3,20000,$4,'reserved')`,
+		allocationID, requestID, lotID, testHash("policy-reanchor-blocked-allocation")); err != nil {
+		t.Fatal(err)
+	}
+
+	before := snapshotEligibilityState(t, store, ctx, accountID)
+
+	dryRun, err := store.RepairPolicyStartReanchorEligibility(ctx, PolicyStartReanchorRepairInput{Apply: false}, AuditActor{Type: "admin", ID: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dryRun.Accounts) != 1 || !dryRun.Accounts[0].Blocked || dryRun.Accounts[0].NoOp || dryRun.Accounts[0].Reprojected {
+		t.Fatalf("dry run=%+v, want Blocked=true NoOp=false Reprojected=false", dryRun.Accounts)
+	}
+	if dryRun.Accounts[0].WindowFundingLots != 1 {
+		t.Fatalf("dry run WindowFundingLots=%d, want 1 (the exposure guard fires only once a real window lot exists)", dryRun.Accounts[0].WindowFundingLots)
+	}
+	afterDryRun := snapshotEligibilityState(t, store, ctx, accountID)
+	if !before.equal(afterDryRun) {
+		t.Fatalf("dry run mutated the account row: before=%+v after=%+v", before, afterDryRun)
+	}
+
+	apply, err := store.RepairPolicyStartReanchorEligibility(ctx, PolicyStartReanchorRepairInput{
+		Apply: true, OperatorID: policyReanchorFixedOperator()}, AuditActor{Type: "admin", ID: policyReanchorFixedOperator()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apply.Accounts) != 1 || !apply.Accounts[0].Blocked || apply.Accounts[0].Reprojected {
+		t.Fatalf("apply=%+v, want Blocked=true Reprojected=false", apply.Accounts)
+	}
+	afterApply := snapshotEligibilityState(t, store, ctx, accountID)
+	if !before.equal(afterApply) {
+		t.Fatalf("apply mutated a Blocked account: before=%+v after=%+v", before, afterApply)
+	}
+	var lotConsumedCashMinor int64
+	if err := store.pool.QueryRow(ctx, `SELECT consumed_cash_minor FROM funding_lots WHERE id=$1`,
+		lotID).Scan(&lotConsumedCashMinor); err != nil || lotConsumedCashMinor != 20000 {
+		t.Fatalf("lot consumed_cash_minor=%d err=%v, want unchanged=20000", lotConsumedCashMinor, err)
+	}
+	var allocationState string
+	if err := store.pool.QueryRow(ctx, `SELECT allocation_state FROM invoice_allocations WHERE id=$1`,
+		allocationID).Scan(&allocationState); err != nil || allocationState != "reserved" {
+		t.Fatalf("allocation_state=%q err=%v, want unchanged=reserved", allocationState, err)
+	}
+}
+
 type eligibilityStateSnapshot struct {
 	CutoverAt           time.Time
 	CutoverBalanceUnits string
