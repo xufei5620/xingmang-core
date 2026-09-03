@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS,
+  ADMIN_ASSERTION_NEEDED_RETRY_DELAYS_MS,
+  ADMIN_ASSERTION_NEEDED_STEADY_INTERVAL_MS,
   ADMIN_AUTH_POPUP_MESSAGE,
   appendEmbeddedAdminParams,
+  buildXmEmbedAdminAssertionNeededMessage,
   buildXmEmbedHeightMessage,
   isAdminAuthPopupCompleteMessage,
   isAdminAuthPopupReturn,
   isAdminNavItemVisible,
+  nextAdminAssertionNeededDelayMs,
   parseEmbeddedAdminMode,
   parseEmbeddedAdminScope,
   parseXmEmbedAdminAssertionMessage,
   resolvePlatformSourceInstanceId,
+  shouldExchangeAdminAssertion,
+  shouldRequestAdminAssertion,
+  shouldScheduleNextAdminAssertionNeededAttempt,
   shouldSyncEmbeddedAdminHeight,
   withAdminAuthPopupReturnParam,
   XM_EMBED_CONSOLE_ORIGIN,
@@ -317,5 +325,92 @@ describe("parseXmEmbedAdminAssertionMessage", () => {
     expect(
       parseXmEmbedAdminAssertionMessage(buildXmEmbedHeightMessage(400)),
     ).toBeNull();
+  });
+});
+
+describe("buildXmEmbedAdminAssertionNeededMessage", () => {
+  it("builds the exact contract the console listens for", () => {
+    expect(buildXmEmbedAdminAssertionNeededMessage()).toEqual({
+      type: "xm-embed",
+      version: 1,
+      kind: "admin-assertion-needed",
+    });
+  });
+
+  it("is never confused with the height or admin-assertion messages", () => {
+    const needed = buildXmEmbedAdminAssertionNeededMessage();
+    expect(parseXmEmbedAdminAssertionMessage(needed)).toBeNull();
+    expect(needed).not.toEqual(buildXmEmbedHeightMessage(400));
+  });
+});
+
+describe("nextAdminAssertionNeededDelayMs", () => {
+  it("follows the widening backoff for the first four retries", () => {
+    expect(nextAdminAssertionNeededDelayMs(0)).toBe(2000);
+    expect(nextAdminAssertionNeededDelayMs(1)).toBe(4000);
+    expect(nextAdminAssertionNeededDelayMs(2)).toBe(8000);
+    expect(nextAdminAssertionNeededDelayMs(3)).toBe(16000);
+    expect(ADMIN_ASSERTION_NEEDED_RETRY_DELAYS_MS).toEqual([2000, 4000, 8000, 16000]);
+  });
+
+  it("settles to the fixed steady interval after the backoff is exhausted", () => {
+    expect(nextAdminAssertionNeededDelayMs(4)).toBe(ADMIN_ASSERTION_NEEDED_STEADY_INTERVAL_MS);
+    expect(nextAdminAssertionNeededDelayMs(5)).toBe(ADMIN_ASSERTION_NEEDED_STEADY_INTERVAL_MS);
+    expect(nextAdminAssertionNeededDelayMs(39)).toBe(ADMIN_ASSERTION_NEEDED_STEADY_INTERVAL_MS);
+    expect(ADMIN_ASSERTION_NEEDED_STEADY_INTERVAL_MS).toBe(30000);
+  });
+});
+
+describe("shouldScheduleNextAdminAssertionNeededAttempt", () => {
+  it("allows scheduling below the named attempt cap", () => {
+    expect(shouldScheduleNextAdminAssertionNeededAttempt(0)).toBe(true);
+    expect(shouldScheduleNextAdminAssertionNeededAttempt(ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS - 1)).toBe(
+      true,
+    );
+  });
+
+  it("stops for good once the cap is reached, never exceeding it", () => {
+    expect(shouldScheduleNextAdminAssertionNeededAttempt(ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS)).toBe(
+      false,
+    );
+    expect(
+      shouldScheduleNextAdminAssertionNeededAttempt(ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS + 1),
+    ).toBe(false);
+  });
+});
+
+describe("shouldRequestAdminAssertion", () => {
+  it("posts only while framed, session-check resolved, and unauthenticated", () => {
+    expect(shouldRequestAdminAssertion(true, false, false)).toBe(true);
+  });
+
+  it("never posts when not framed, even mid-login-card", () => {
+    expect(shouldRequestAdminAssertion(false, false, false)).toBe(false);
+  });
+
+  it("never posts while the session check is still in flight", () => {
+    expect(shouldRequestAdminAssertion(true, true, false)).toBe(false);
+  });
+
+  it("never posts once authenticated", () => {
+    expect(shouldRequestAdminAssertion(true, false, true)).toBe(false);
+  });
+
+  it("never posts when both loading and authenticated are true (an impossible but still-safe combination)", () => {
+    expect(shouldRequestAdminAssertion(true, true, true)).toBe(false);
+  });
+});
+
+describe("shouldExchangeAdminAssertion", () => {
+  it("exchanges the first assertion seen", () => {
+    expect(shouldExchangeAdminAssertion("aaaa.bbbb.cccc", null)).toBe(true);
+  });
+
+  it("refuses to re-exchange the exact same assertion (the ready + onLoad double-delivery case)", () => {
+    expect(shouldExchangeAdminAssertion("aaaa.bbbb.cccc", "aaaa.bbbb.cccc")).toBe(false);
+  });
+
+  it("still exchanges a genuinely fresh assertion, even after a prior one already succeeded", () => {
+    expect(shouldExchangeAdminAssertion("dddd.eeee.ffff", "aaaa.bbbb.cccc")).toBe(true);
   });
 });
