@@ -1,5 +1,10 @@
 # RC75 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC75 shipped at signed tag
+> `v0.1.0-rc75-signed` (`37636ca`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc76-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, canary, and deploy RC75 — the balance-evidence blip fix (XM-INV-BALANCE-BLIP: a usage event within one second of a checkpoint's `as_of` is reconciled by a boundary rule instead of synthesizing a credit; a mid-stream positive difference is deferred until the next checkpoint or proof confirms it exactly, otherwise recorded as `positive_blip_ignored`; `invoice-eligibility-repair --kind=balance-blip` reverses the 2026-09-02 whale incident) plus the release-tooling follow-up XM-INV-TRIVY-REFRESH-LOG.
