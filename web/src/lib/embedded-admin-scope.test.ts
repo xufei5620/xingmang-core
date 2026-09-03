@@ -124,6 +124,7 @@ describe("isAdminNavItemVisible", () => {
       "review",
       "payment-candidates",
       "eligibility-freezes",
+      "account-ledger",
       "refund-cases",
       "source-health",
       "settings",
@@ -137,6 +138,7 @@ describe("isAdminNavItemVisible", () => {
     const scope = { kind: "platform", platform: "sub2api" } as const;
     expect(isAdminNavItemVisible("review", scope)).toBe(true);
     expect(isAdminNavItemVisible("eligibility-freezes", scope)).toBe(true);
+    expect(isAdminNavItemVisible("account-ledger", scope)).toBe(true);
     expect(isAdminNavItemVisible("refund-cases", scope)).toBe(true);
     expect(isAdminNavItemVisible("source-health", scope)).toBe(true);
     expect(isAdminNavItemVisible("payment-candidates", scope)).toBe(false);
@@ -157,6 +159,7 @@ describe("isAdminNavItemVisible", () => {
     expect(isAdminNavItemVisible("review", scope)).toBe(false);
     expect(isAdminNavItemVisible("payment-candidates", scope)).toBe(false);
     expect(isAdminNavItemVisible("eligibility-freezes", scope)).toBe(false);
+    expect(isAdminNavItemVisible("account-ledger", scope)).toBe(false);
     expect(isAdminNavItemVisible("refund-cases", scope)).toBe(false);
     expect(isAdminNavItemVisible("return-to-user", scope)).toBe(false);
   });
