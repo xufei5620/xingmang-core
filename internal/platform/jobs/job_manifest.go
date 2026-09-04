@@ -134,6 +134,16 @@ func RegisteredPeriodicJobSpecs() []JobSpec {
 			Execution: jobManifestExecution, SideEffectClass: "upstream_read_then_db_transaction",
 			IdempotencyEvidence: "latest+sample atomic transaction; retry remains upstream-read attempt",
 		},
+		{
+			// XM-CARD2：异步开卡的轮询与不确定态的对账收敛。
+			//
+			ID: CardSyncJobKind, Kind: CardSyncJobKind, Queue: QueueMaintenance,
+			OwnerProcess: jobManifestOwnerProcess, Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CARDS_SYNC_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.CardSyncRunOnStart",
+			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
+			Execution: jobManifestExecution, SideEffectClass: "upstream_read_then_db_transaction",
+			IdempotencyEvidence: "reconcile matches by card_alias before any write; retry re-reads upstream",
+		},
 	}
 	return cloneJobSpecs(rows)
 }

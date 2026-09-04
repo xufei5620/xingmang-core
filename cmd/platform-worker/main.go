@@ -24,12 +24,12 @@ func main() {
 
 	config, err := configFromEnv(os.Getenv)
 	if err != nil {
-		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "worker_config_invalid")
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "worker_config_invalid", "err", err.Error())
 		os.Exit(2)
 	}
 	databaseURL, err := databaseURLFromEnv(ctx, os.Getenv, logger)
 	if err != nil {
-		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "database_url_invalid")
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "database_url_invalid", "err", err.Error())
 		os.Exit(2)
 	}
 	// Sub2API 只读凭据的 Provider（XM-0017）。装配在进程入口，任务层只拿接口。
@@ -138,7 +138,7 @@ func main() {
 		config.Environment, os.Getenv)
 	if err != nil {
 		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed",
-			"module", "platform.worker", "error_code", "cards_config_invalid")
+			"module", "platform.worker", "error_code", "cards_config_invalid", "err", err.Error())
 		os.Exit(2)
 	}
 	if cardSyncer != nil {
@@ -157,11 +157,11 @@ func main() {
 
 	client, err := jobs.NewClient(pool, config)
 	if err != nil {
-		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "worker_config_invalid")
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "worker_config_invalid", "err", err.Error())
 		os.Exit(2)
 	}
 	if err := client.Start(ctx); err != nil {
-		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "worker_start_error")
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed", "module", "platform.worker", "error_code", "worker_start_error", "err", err.Error())
 		os.Exit(1)
 	}
 	// 启动时就把采集配置摊开：运维必须能一眼看出这个进程写进看板的数字

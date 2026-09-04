@@ -174,6 +174,8 @@ func effectiveJobConfig(cfg Config, id string) (enabled, runOnStart bool, interv
 		return cfg.ConnectorProbeEnabled, cfg.ConnectorProbeRunOnStart, cfg.ConnectorProbeInterval, "XM_CONNECTOR_PROBE_INTERVAL", nil
 	case CPASyncJobKind:
 		return cfg.CPASyncEnabled, cfg.CPASyncRunOnStart, cfg.CPASyncInterval, "XM_CPA_SYNC_INTERVAL", nil
+	case CardSyncJobKind:
+		return cfg.CardSyncEnabled, cfg.CardSyncRunOnStart, cfg.CardSyncInterval, "XM_CARDS_SYNC_INTERVAL", nil
 	default:
 		return false, false, 0, "", fmt.Errorf("effective job manifest: unknown job %q", id)
 	}
