@@ -254,3 +254,102 @@ func TestOverdrawnUsageWithNoLaterTopUpStaysAnOverage(t *testing.T) {
 			len(projection.Allocations))
 	}
 }
+
+// TestPreAnchorCheckpointIsNotGapEvidence is XM-INV-PREANCHOR-BALANCE's guard.
+//
+// A POLICY_ANCHOR account's ledger begins at its own cutover_at. Balance
+// evidence dated before that says nothing about this account's books, because
+// buildEligibilityProjectionTx floors every fact query at cutover_at -- so the
+// expected balance comes out 0, the whole reported balance reads as an
+// unexplained positive difference, and there is no trust interval to anchor a
+// synthesis against. The result is SOURCE_GAP, permanently: the repair tool
+// resolves the freeze and reopens the checkpoint, the next projection redoes
+// the identical arithmetic, and the freeze comes straight back.
+//
+// Production account 98cce4c8 sat there with four such checkpoints, stranded
+// in the 21 hours between its own first post-policy checkpoint and the RC68
+// deploy that first taught the system to bootstrap an anchor at all. The fact
+// side already skips rather than freezes for the same reason
+// (XM-INV-PREANCHOR-USAGE); this is the balance side catching up.
+func TestPreAnchorCheckpointIsNotGapEvidence(t *testing.T) {
+	store, ctx, sourceID, accountID, manifestHash, configHash, policyStart := seedOverdrawFixture(t, 216)
+
+	var anchor time.Time
+	var bootstrapKind string
+	if err := store.pool.QueryRow(ctx, `SELECT cutover_at,bootstrap_kind
+		FROM source_account_eligibility_state WHERE external_account_id=$1`,
+		accountID).Scan(&anchor, &bootstrapKind); err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapKind != "POLICY_ANCHOR" {
+		t.Fatalf("fixture bootstrap_kind=%q, want POLICY_ANCHOR", bootstrapKind)
+	}
+
+	// A checkpoint dated before the account's own anchor, carrying a real
+	// upstream balance -- exactly the production shape.
+	// Note what the fixture shows about the blast radius: the current
+	// bootstrap anchors an account at the *global policy start*, so for any
+	// account created today "after the policy start but before its own
+	// anchor" is an empty window and this shape cannot arise. Production
+	// account 98cce4c8 has it only because it was bootstrapped by the older
+	// code, which anchored at the triggering checkpoint's own as_of. That is
+	// why this is a one-off to clean up rather than a growing problem -- and
+	// why the evidence here is placed relative to the anchor rather than to
+	// the policy start, which is the same instant.
+	_ = policyStart
+	before := anchor.Add(-30 * time.Minute)
+	insertPreAnchorCheckpoint(t, store, ctx, sourceID, accountID, "pre-anchor-216",
+		before, "3338358924", manifestHash, configHash)
+
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = evaluatePendingBalanceEvidenceTx(ctx, tx, accountID, time.Now().UTC().Add(time.Hour),
+		AuditActor{Type: "system", ID: "pre-anchor-test"}); err != nil {
+		t.Fatalf("evaluating pending evidence failed: %v", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var evaluations, freezes int
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM balance_checkpoint_evaluations e
+		JOIN balance_reconciliation_checkpoints c ON c.id=e.checkpoint_id
+		WHERE c.external_account_id=$1 AND c.as_of<$2`, accountID, anchor).Scan(&evaluations); err != nil {
+		t.Fatal(err)
+	}
+	if evaluations != 0 {
+		t.Fatalf("a pre-anchor checkpoint was evaluated (%d rows): its expected balance is 0 by construction, "+
+			"so evaluating it can only ever produce an unexplainable difference", evaluations)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes
+		WHERE external_account_id=$1 AND status='open'`, accountID).Scan(&freezes); err != nil {
+		t.Fatal(err)
+	}
+	if freezes != 0 {
+		t.Fatalf("a pre-anchor checkpoint froze the account: open freezes=%d", freezes)
+	}
+}
+
+// insertPreAnchorCheckpoint writes one reconciliation checkpoint directly, at
+// an as_of the caller chooses -- ObserveBalanceCheckpoint would refuse to
+// place evidence before an already-bootstrapped anchor, which is the very
+// state this test needs to reproduce.
+func insertPreAnchorCheckpoint(t *testing.T, store *Store, ctx context.Context,
+	sourceID, accountID, key string, asOf time.Time, balanceUnits, manifestHash, configHash string) {
+	t.Helper()
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO balance_reconciliation_checkpoints(
+			id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
+			checkpoint_kind,as_of,balance_service_units,unit_code,cutover_manifest_hash,
+			configuration_hash,reconciliation_status,source_sequence,source_cursor,
+			stream_watermark_at,source_revision_hash,observed_at)
+		VALUES($1,$2,$3,$4,$4,'reconciliation',$5,$6::numeric,'SUB2_BALANCE_1E8',$7,$8,
+			'pending_finalization',1,$9,$5,$10,$5)`,
+		randomUUID(), sourceID, accountID, key, asOf, balanceUnits,
+		manifestHash, configHash, "cursor:"+key, testHash(key)); err != nil {
+		t.Fatal(err)
+	}
+}

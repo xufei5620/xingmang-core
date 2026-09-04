@@ -3707,6 +3707,37 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		return err
 	}
 	rows, err := tx.Query(ctx, `
+		WITH evidence_floor AS (
+			-- XM-INV-PREANCHOR-BALANCE: balance evidence dated before a
+			-- POLICY_ANCHOR account's own cutover_at is not evidence about
+			-- this account's ledger, because that ledger does not exist
+			-- before the anchor. Evaluating it anyway builds the expected
+			-- balance from an empty window (buildEligibilityProjectionTx
+			-- floors every fact query at cutover_at), so expected comes out
+			-- 0, the whole reported balance reads as an unexplained positive
+			-- difference, and balanceEvidenceTrustIntervalTx has no interval
+			-- to anchor a synthesis against -- SOURCE_GAP, permanently.
+			--
+			-- It is a fixed point, not a transient: RepairBalanceAnchorEligibility
+			-- resolves the freeze and deletes the evaluation so the item goes
+			-- pending again, the next projection redoes the identical
+			-- arithmetic, and the freeze comes straight back. Production
+			-- account 98cce4c8 sat there with four such checkpoints, all
+			-- from the 21 hours between its own first post-policy checkpoint
+			-- and the RC68 deploy that first taught the system to bootstrap
+			-- an anchor at all.
+			--
+			-- This mirrors the fact side, which XM-INV-PREANCHOR-USAGE
+			-- already taught to skip rather than freeze for exactly the same
+			-- reason (see observeEligibilityFact's own BootstrapKind guard).
+			-- A legacy SIGNED_CUTOVER/POST_CUTOVER_REPLAY account keeps the
+			-- old behaviour: its cutover replays real history to a known
+			-- point, so evidence before it genuinely is a gap.
+			SELECT CASE WHEN state.bootstrap_kind='POLICY_ANCHOR'
+				THEN state.cutover_at ELSE '-infinity'::timestamptz END AS anchor_floor
+			FROM source_account_eligibility_state state
+			WHERE state.external_account_id=$1
+		)
 		SELECT evidence_kind,id,evidence_key,external_event_id,as_of,balance_service_units,
 			balance_negative,source_sequence,source_cursor,stream_watermark_at,
 			source_revision_hash,observed_at
@@ -3719,6 +3750,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			FROM balance_reconciliation_checkpoints checkpoint
 			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
 			  AND checkpoint.as_of<=$2
+			  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
 			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
 				WHERE evaluation.checkpoint_id=checkpoint.id)
 			UNION ALL
@@ -3728,6 +3760,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				proof.source_revision_hash,proof.observed_at
 			FROM balance_carry_forward_proofs proof
 			WHERE proof.external_account_id=$1 AND proof.as_of<=$2
+			  AND proof.as_of>=(SELECT anchor_floor FROM evidence_floor)
 			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
 				WHERE evaluation.proof_id=proof.id)
 		) pending
