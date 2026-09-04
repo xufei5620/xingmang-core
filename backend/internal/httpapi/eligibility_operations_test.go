@@ -26,7 +26,19 @@ func TestEligibilityFreezeDTOIsExplicitlyRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	for _, forbidden := range []string{"sensitive-account-id", strings.Repeat("a", 64), strings.Repeat("b", 64), "source_cursor", "evidence", "trigger_object", "revision_hash"} {
+	// trigger_object_* left this list in XM-INV-FREEZE-TRIGGER-VISIBLE. It sat
+	// here among genuine internal identifiers, but it is not one: the account
+	// ledger's own detail already renders the identical pair into its
+	// block_reason sentence ("关联对象 %s:%s", see buildFrozenManualReviewReason)
+	// for the same operator in the same console, so withholding it here was an
+	// inconsistency rather than a boundary. Withholding it also had a cost --
+	// production showed four SOURCE_GAP freezes on one account, identical in
+	// every visible column because freezeEligibilityTx dedupes on
+	// (account, reason, trigger_object_type, trigger_object_id) and each
+	// triggering checkpoint gets its own row, so the trigger was the only
+	// thing that told them apart. Everything else in this list stays
+	// forbidden.
+	for _, forbidden := range []string{"sensitive-account-id", strings.Repeat("a", 64), strings.Repeat("b", 64), "source_cursor", "evidence", "revision_hash"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("eligibility freeze DTO leaked %q: %s", forbidden, text)
 		}
@@ -35,6 +47,52 @@ func TestEligibilityFreezeDTOIsExplicitlyRedacted(t *testing.T) {
 		if !strings.Contains(text, required) {
 			t.Fatalf("eligibility freeze DTO omitted %q: %s", required, text)
 		}
+	}
+	// The fixture above carries no trigger, and absent must stay absent
+	// rather than becoming an empty-string placeholder -- same posture as
+	// account_email beside it.
+	if strings.Contains(text, "trigger_object") {
+		t.Fatalf("a freeze with no trigger must not carry the keys at all: %s", text)
+	}
+}
+
+// TestEligibilityFreezeDTOCarriesTheTriggerThatTellsRowsApart is
+// XM-INV-FREEZE-TRIGGER-VISIBLE's guard. Production had four open SOURCE_GAP
+// freezes on account 2092, same reason, same scope, same second -- four rows
+// an operator could not tell apart, could not reference, and could not judge
+// whether handling one handled all of them.
+func TestEligibilityFreezeDTOCarriesTheTriggerThatTellsRowsApart(t *testing.T) {
+	base := postgresstore.EligibilityFreeze{ID: "61000000-0000-4000-8000-000000000001",
+		PrincipalID: "20000000-0000-4000-8000-000000000001", ExternalAccountID: "acct",
+		ExternalUserID: "2092", SourceInstanceID: "10000000-0000-4000-8000-000000000001",
+		SourceType: domain.SourceSub2API, SourceName: "Sub2API", FreezeReason: "SOURCE_GAP",
+		Status: "open", EligibilityStatus: "frozen", OpenedAt: time.Now(),
+		TriggerObjectType: "balance_checkpoint"}
+	first := base
+	first.TriggerObjectID = "a9e2f44623b7f63b9a2b8df595da"
+	second := base
+	second.ID = "61000000-0000-4000-8000-000000000002"
+	second.TriggerObjectID = "25e36ba7e37a184cda995ddd8309"
+
+	firstRaw, err := json.Marshal(eligibilityFreezeDTO(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRaw, err := json.Marshal(eligibilityFreezeDTO(second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`"trigger_object_type":"balance_checkpoint"`,
+		`"trigger_object_id":"a9e2f44623b7f63b9a2b8df595da"`} {
+		if !strings.Contains(string(firstRaw), required) {
+			t.Fatalf("freeze DTO omitted %q: %s", required, firstRaw)
+		}
+	}
+	if strings.Contains(string(secondRaw), "a9e2f44623b7f63b9a2b8df595da") {
+		t.Fatalf("second freeze reported the first one's trigger: %s", secondRaw)
+	}
+	if string(firstRaw) == string(secondRaw) {
+		t.Fatal("two freezes differing only in their trigger serialised identically -- the queue would render them as duplicates again")
 	}
 }
 

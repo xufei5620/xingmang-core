@@ -484,8 +484,28 @@ func TestAccountLedgerPageCoversEveryBlockStateAndFilters(t *testing.T) {
 		}
 	})
 
-	t.Run("projection job alone drives pending state", func(t *testing.T) {
+	// XM-INV-LEDGER-SETTLING-STATE renamed this outcome. A queued projection
+	// job used to report not_invoiceable_pending_reconciliation, which claims
+	// the books and the source disagree; it means only that the figures are
+	// not final yet. Jobs are enqueued every finalization cycle, so healthy
+	// production accounts flickered into that state all day -- the operator
+	// screenshot that started this had two of eight accounts showing it while
+	// the database had none in that eligibility_status at all.
+	t.Run("projection job alone reports settling, not a reconciliation problem", func(t *testing.T) {
 		page, err := store.ListAccountLedgerPage(ctx, AccountLedgerPageQuery{ExternalUserID: "ledger-8", ThresholdMinor: threshold})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) != 1 || page.Items[0].BlockState != AccountBlockStateSettling {
+			t.Fatalf("items=%+v", page.Items)
+		}
+	})
+
+	t.Run("a real reconciliation problem still outranks a queued job", func(t *testing.T) {
+		// ledger-7 has the negative_frozen evaluation AND gets a job here:
+		// the dispute is what the operator has to act on, so it wins.
+		insertProjectionJob(t, store, ctx, evalOnlyID)
+		page, err := store.ListAccountLedgerPage(ctx, AccountLedgerPageQuery{ExternalUserID: "ledger-7", ThresholdMinor: threshold})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -599,7 +619,9 @@ func TestAccountLedgerPageCoversEveryBlockStateAndFilters(t *testing.T) {
 		if len(seen) != 9 {
 			t.Fatalf("walked %d accounts, want 9: %v", len(seen), seen)
 		}
-		rank := map[string]int{AccountBlockStateFrozenManualReview: 0, AccountBlockStateNotInvoiceablePendingReconciliation: 1, AccountBlockStateBelowThreshold: 2, AccountBlockStateInvoiceable: 3}
+		// settling shares rank 1 with pending reconciliation, mirroring
+		// accountBlockStateRank (XM-INV-LEDGER-SETTLING-STATE).
+		rank := map[string]int{AccountBlockStateFrozenManualReview: 0, AccountBlockStateNotInvoiceablePendingReconciliation: 1, AccountBlockStateSettling: 1, AccountBlockStateBelowThreshold: 2, AccountBlockStateInvoiceable: 3}
 		for i := 1; i < len(seenStates); i++ {
 			if rank[seenStates[i]] < rank[seenStates[i-1]] {
 				t.Fatalf("block_state sort went backwards at position %d: %v", i, seenStates)

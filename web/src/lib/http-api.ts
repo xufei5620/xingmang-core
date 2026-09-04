@@ -159,6 +159,10 @@ type BackendEligibilityFreeze = {
   // Present only when the account has a verified address on file
   // (XM-INV-LEDGER-ACCOUNT-EMAIL); the backend omits the key otherwise.
   account_email?: string;
+  // Which piece of evidence opened the freeze (XM-INV-FREEZE-TRIGGER-VISIBLE).
+  // Omitted for a row that predates the columns carrying a value.
+  trigger_object_type?: string;
+  trigger_object_id?: string;
 };
 
 // CR-0009 (XM-INV-CR0009-LEDGER-VIEW): must stay byte-for-byte in sync with
@@ -547,11 +551,13 @@ const eligibilityStatuses = [
   "source_unavailable",
 ] as const;
 
-// CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the four account block_state values
-// -- see docs/ELIGIBILITY-OPERATIONS.md's "管理员账本视图" section.
+// CR-0009 (XM-INV-CR0009-LEDGER-VIEW), plus "settling"
+// (XM-INV-LEDGER-SETTLING-STATE) -- see docs/ELIGIBILITY-OPERATIONS.md's
+// "管理员账本视图" section.
 const accountBlockStates = [
   "frozen_manual_review",
   "not_invoiceable_pending_reconciliation",
+  "settling",
   "below_threshold",
   "invoiceable",
 ] as const;
@@ -756,11 +762,19 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     "version",
     "external_user_id",
     "account_email",
+    "trigger_object_type",
+    "trigger_object_id",
   ] as const;
+  const optional = new Set<string>([
+    "resolved_at",
+    "account_email",
+    "trigger_object_type",
+    "trigger_object_id",
+  ]);
   exactObjectKeys(
     value,
     allowed,
-    allowed.filter((key) => key !== "resolved_at" && key !== "account_email"),
+    allowed.filter((key) => !optional.has(key)),
     "资格冻结记录",
   );
   if (
@@ -807,6 +821,8 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     version: value.version,
     externalUserId: value.external_user_id,
     accountEmail: value.account_email,
+    triggerObjectType: value.trigger_object_type,
+    triggerObjectId: value.trigger_object_id,
   } satisfies EligibilityFreeze;
 }
 

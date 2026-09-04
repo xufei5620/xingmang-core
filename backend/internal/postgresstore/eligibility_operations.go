@@ -35,19 +35,28 @@ type EligibilityFreeze struct {
 	// by the application layer and empty when there is none on file. Same
 	// display-only role as the ledger's own field of this name
 	// (XM-INV-LEDGER-ACCOUNT-EMAIL).
-	AccountEmail      string            `json:"-"`
-	SourceInstanceID  string            `json:"source_instance_id"`
-	SourceType        domain.SourceType `json:"source_type"`
-	SourceName        string            `json:"source_name"`
-	FundingLotID      string            `json:"funding_lot_id,omitempty"`
-	FreezeReason      string            `json:"freeze_reason"`
-	Status            string            `json:"status"`
-	EligibilityStatus string            `json:"eligibility_status"`
-	OpenedAt          time.Time         `json:"opened_at"`
-	ResolvedAt        time.Time         `json:"resolved_at,omitempty"`
-	ResolutionVersion int64             `json:"version"`
-	EvidenceHash      string            `json:"-"`
-	NoteHash          string            `json:"-"`
+	AccountEmail     string            `json:"-"`
+	SourceInstanceID string            `json:"source_instance_id"`
+	SourceType       domain.SourceType `json:"source_type"`
+	SourceName       string            `json:"source_name"`
+	FundingLotID     string            `json:"funding_lot_id,omitempty"`
+	FreezeReason     string            `json:"freeze_reason"`
+	// TriggerObjectType/TriggerObjectID name the specific piece of evidence
+	// that opened this freeze (XM-INV-FREEZE-TRIGGER-VISIBLE). Without them
+	// the queue renders several freezes on one account as identical rows --
+	// production had four SOURCE_GAP rows on account 2092, same reason, same
+	// scope, same second, differing only in which balance checkpoint tripped
+	// each one, and an operator could not tell them apart or know whether
+	// handling one handled all four.
+	TriggerObjectType string    `json:"trigger_object_type"`
+	TriggerObjectID   string    `json:"trigger_object_id"`
+	Status            string    `json:"status"`
+	EligibilityStatus string    `json:"eligibility_status"`
+	OpenedAt          time.Time `json:"opened_at"`
+	ResolvedAt        time.Time `json:"resolved_at,omitempty"`
+	ResolutionVersion int64     `json:"version"`
+	EvidenceHash      string    `json:"-"`
+	NoteHash          string    `json:"-"`
 }
 
 type EligibilityFreezePageQuery struct {
@@ -105,7 +114,7 @@ func scanEligibilityFreeze(row pgxRow) (EligibilityFreeze, error) {
 	err := row.Scan(&item.ID, &item.PrincipalID, &item.ExternalAccountID, &item.SourceInstanceID, &item.SourceType,
 		&item.SourceName, &item.FundingLotID, &item.FreezeReason, &item.Status, &item.EligibilityStatus,
 		&item.OpenedAt, &item.ResolvedAt, &item.ResolutionVersion, &item.EvidenceHash, &item.NoteHash,
-		&item.ExternalUserID)
+		&item.ExternalUserID, &item.TriggerObjectType, &item.TriggerObjectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, domain.ErrNotFound
 	}
@@ -123,7 +132,7 @@ const eligibilityFreezeSelect = `
 		si.source_type,si.name,COALESCE(ef.funding_lot_id::text,''),ef.freeze_reason,ef.status,
 		eas.eligibility_status,ef.opened_at,COALESCE(ef.resolved_at,'epoch'::timestamptz),
 		ef.resolution_version,COALESCE(ef.resolution_evidence_hash,''),COALESCE(ef.resolution_note_hash,''),
-		ea.external_user_id
+		ea.external_user_id,COALESCE(ef.trigger_object_type,''),COALESCE(ef.trigger_object_id,'')
 	FROM eligibility_freezes ef
 	JOIN external_accounts ea ON ea.id=ef.external_account_id
 	JOIN source_account_eligibility_state eas ON eas.external_account_id=ef.external_account_id

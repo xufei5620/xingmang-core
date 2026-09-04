@@ -8,6 +8,8 @@ import {
   appendEmbeddedAdminParams,
   buildXmEmbedAdminAssertionNeededMessage,
   buildXmEmbedHeightMessage,
+  shouldPostEmbeddedAdminHeight,
+  XM_EMBED_HEIGHT_DEAD_BAND_PX,
   isAdminAuthPopupCompleteMessage,
   isAdminAuthPopupReturn,
   isAdminNavItemVisible,
@@ -477,5 +479,49 @@ describe("shouldExchangeAdminAssertion", () => {
 
   it("still exchanges a genuinely fresh assertion, even after a prior one already succeeded", () => {
     expect(shouldExchangeAdminAssertion("dddd.eeee.ffff", "aaaa.bbbb.cccc")).toBe(true);
+  });
+});
+
+// XM-INV-EMBED-LOOP: production walked the frame upward 2px a round -- 650,
+// 651, 653, 655 ... 761 and climbing -- because the embedded layout was
+// `min-height: 100vh`, so the document could never be shorter than the frame
+// the console had just sized from this page's own report, and the iframe's
+// 1px borders made every measurement come back a little taller. The layout
+// fix removes that coupling; the dead band makes any future one inert.
+describe("shouldPostEmbeddedAdminHeight", () => {
+  it("posts the first real measurement", () => {
+    expect(shouldPostEmbeddedAdminHeight(700, 0)).toBe(true);
+  });
+
+  it("never posts a height of zero, even as the first one", () => {
+    expect(shouldPostEmbeddedAdminHeight(0, 0)).toBe(false);
+    expect(shouldPostEmbeddedAdminHeight(-1, 0)).toBe(false);
+  });
+
+  it("says nothing when the measurement did not move", () => {
+    expect(shouldPostEmbeddedAdminHeight(700, 700)).toBe(false);
+  });
+
+  it("breaks the feedback loop instead of riding it", () => {
+    // What production actually did: the page reported H, the console sized
+    // the frame to H, and the next measurement came back H+2 -- the iframe's
+    // own borders. Posting that started the next round, and the pair walked
+    // upward 2px at a time (650, 651, 653, 655 ... 761) until the console's
+    // clamp caught them.
+    //
+    // The measurement is a function of the frame, so refusing to post is
+    // what ends it: the console never resizes, the next measurement is the
+    // same H+2, and it is refused again. The loop stops on the first round
+    // rather than converging slowly.
+    const posted = 650;
+    for (let round = 0; round < 50; round += 1) {
+      expect(shouldPostEmbeddedAdminHeight(posted + 2, posted)).toBe(false);
+    }
+  });
+
+  it("still reports real growth, in either direction", () => {
+    expect(shouldPostEmbeddedAdminHeight(650 + XM_EMBED_HEIGHT_DEAD_BAND_PX, 650)).toBe(true);
+    expect(shouldPostEmbeddedAdminHeight(1200, 650)).toBe(true);
+    expect(shouldPostEmbeddedAdminHeight(480, 1200)).toBe(true);
   });
 });

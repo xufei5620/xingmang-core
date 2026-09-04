@@ -189,6 +189,12 @@ export interface EligibilityFreeze {
   // placeholder, which would read as an empty mailbox
   // (XM-INV-LEDGER-ACCOUNT-EMAIL).
   accountEmail?: string;
+  // Which piece of evidence opened this freeze, when the row carries it
+  // (XM-INV-FREEZE-TRIGGER-VISIBLE). Several freezes on one account can share
+  // a reason, a scope and a second, and this is the only thing that tells
+  // them apart.
+  triggerObjectType?: string;
+  triggerObjectId?: string;
 }
 
 export interface EligibilityFreezePage {
@@ -220,6 +226,10 @@ export interface ResolveEligibilityFreezeInput {
 export type AccountBlockState =
   | "frozen_manual_review"
   | "not_invoiceable_pending_reconciliation"
+  // XM-INV-LEDGER-SETTLING-STATE: the account is only waiting for its own
+  // projection to finish, which is the ordinary rhythm of a busy account --
+  // not a disagreement between the books and the source.
+  | "settling"
   | "below_threshold"
   | "invoiceable";
 

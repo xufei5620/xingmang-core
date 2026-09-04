@@ -2948,7 +2948,16 @@ td small {
    same selectors. */
 .portal-embedded-admin {
   display: block;
-  min-height: 100vh;
+  /* XM-INV-EMBED-LOOP: never size this against the viewport while embedded.
+     Inside the frame, 100vh IS the height the console just applied from the
+     height this page reported, so the document could never be shorter than
+     the frame and every measurement came back a little taller than the last
+     one -- the iframe's own 1px top and bottom borders. Production grew by
+     exactly 2px per round, forever, until the console's 4000px clamp caught
+     it. 480px is the console's own MIN_HEIGHT_PX: a constant, so it agrees
+     with the clamp instead of chasing it, and a short page still paints its
+     own background over the whole frame. */
+  min-height: 480px;
 }
 .portal-embedded-admin .sidebar {
   position: sticky;

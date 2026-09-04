@@ -214,13 +214,15 @@ export interface XmEmbedHeightMessage {
 // measureEmbeddedAdminHeight is the height this page asks the framing console
 // to give it (XM-INV-EMBED-HEIGHT).
 //
-// It reads BOTH scroll heights and takes the larger. Reading
-// documentElement alone is what shipped first, and it under-reports here: the
-// embedded layout pins `.portal-embedded-admin` to `min-height: 100vh`, so
-// once the console has sized the frame the root element's own box is exactly
-// the viewport and stops growing with the content beneath it. The body box
-// does grow, so the maximum of the two is the value that keeps tracking a
-// table as rows arrive.
+// It reads BOTH scroll heights and takes the larger, because either box can
+// be the one that stops growing with the content beneath it depending on how
+// the embedded layout resolves.
+//
+// It deliberately measures nothing that is sized against the viewport. Inside
+// the frame the viewport IS what the console set from this page's own last
+// report, so any such measurement feeds back on itself -- see
+// XM-INV-EMBED-LOOP and `.portal-embedded-admin` in styles.css, where a
+// `min-height: 100vh` did exactly that and walked production up 2px a round.
 //
 // Returns 0 when neither element exists (a document being torn down); the
 // caller treats 0 as "nothing to report" rather than posting a height that
@@ -235,6 +237,25 @@ export function measureEmbeddedAdminHeight(doc: {
     (value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0,
   );
   return candidates.length === 0 ? 0 : Math.max(...candidates);
+}
+
+// XM_EMBED_HEIGHT_DEAD_BAND_PX is how much a new measurement has to differ
+// from the last one this page reported before it is worth another message.
+//
+// It exists because of what a smaller value costs when something does couple
+// the content height back to the frame height: each round trip then adds a
+// pixel or two, and the page and the console chase each other upward until
+// the console's clamp stops them. The layout fix (styles.css) removes today's
+// coupling; this makes any future one cost nothing, because a difference this
+// small is never worth a re-render on its own.
+export const XM_EMBED_HEIGHT_DEAD_BAND_PX = 4;
+
+// shouldPostEmbeddedAdminHeight decides whether a freshly measured height is
+// worth sending. lastPosted is 0 before anything has been sent.
+export function shouldPostEmbeddedAdminHeight(height: number, lastPosted: number): boolean {
+  if (height <= 0) return false;
+  if (lastPosted === 0) return true;
+  return Math.abs(height - lastPosted) >= XM_EMBED_HEIGHT_DEAD_BAND_PX;
 }
 
 export function buildXmEmbedHeightMessage(height: number): XmEmbedHeightMessage {

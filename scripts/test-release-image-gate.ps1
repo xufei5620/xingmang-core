@@ -370,6 +370,27 @@ function Assert-ComposeServiceImage {
     }
 }
 
+# XM-INV-EMBED-LOOP: the embedded admin layout must never size itself against
+# the viewport. Inside the frame the viewport IS whatever height the console
+# last applied from this page's own reported height, so any viewport-relative
+# rule feeds back on itself: production walked upward two pixels a round --
+# the iframe's own borders -- from 650 to the console's 4000px clamp, and the
+# operator was left with a frame that still had an inner scrollbar. This lives
+# in the gate rather than in vitest because vitest stubs CSS imports, so a
+# test there cannot read the stylesheet at all.
+$embeddedLayoutRule = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'web\src\styles.css')
+$embeddedRuleMatch = [regex]::Match($embeddedLayoutRule, '\.portal-embedded-admin\s*\{(?<body>[^}]*)\}')
+if (-not $embeddedRuleMatch.Success) {
+    throw '.portal-embedded-admin rule is missing from web/src/styles.css'
+}
+$embeddedRuleBody = [regex]::Replace($embeddedRuleMatch.Groups['body'].Value, '/\*[\s\S]*?\*/', '')
+if ($embeddedRuleBody -match '\d\s*v(h|min|max)') {
+    throw 'XM-INV-EMBED-LOOP: .portal-embedded-admin sizes against the viewport, which feeds the iframe height back into itself'
+}
+if ($embeddedRuleBody -notmatch 'min-height:\s*480px') {
+    throw 'XM-INV-EMBED-LOOP: .portal-embedded-admin must keep the constant 480px floor that matches the console clamp'
+}
+
 $idpCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.idp.yml')
 $artifactVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify-release-image-artifacts.ps1')
 $sourceVerifier = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')

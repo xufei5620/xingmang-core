@@ -134,6 +134,12 @@ func buildAccountBlockReason(detail postgresstore.AccountLedgerDetail, threshold
 		return buildFrozenManualReviewReason(detail)
 	case postgresstore.AccountBlockStateNotInvoiceablePendingReconciliation:
 		return buildPendingReconciliationReason(detail)
+	case postgresstore.AccountBlockStateSettling:
+		// XM-INV-LEDGER-SETTLING-STATE: say what is actually happening. There
+		// is no dispute to report here and no operator action to take -- the
+		// figures simply are not final yet, and the next projection round
+		// makes them so.
+		return "本轮结算尚未完成：仍有投影任务在队列中，当前可开票金额可能未包含最新用量，结算完成后自动更新"
 	case postgresstore.AccountBlockStateBelowThreshold:
 		return fmt.Sprintf("当前可开票金额 %s 元未达到起票门槛 %s 元，还差 %s 元",
 			formatYuanMinor(detail.InvoiceableNowMinor), formatYuanMinor(thresholdMinor),

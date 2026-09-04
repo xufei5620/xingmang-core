@@ -31,8 +31,21 @@ import (
 const (
 	AccountBlockStateFrozenManualReview                  = "frozen_manual_review"
 	AccountBlockStateNotInvoiceablePendingReconciliation = "not_invoiceable_pending_reconciliation"
-	AccountBlockStateBelowThreshold                      = "below_threshold"
-	AccountBlockStateInvoiceable                         = "invoiceable"
+	// AccountBlockStateSettling (XM-INV-LEDGER-SETTLING-STATE) is the account
+	// whose only reason for not being invoiceable is that a projection job is
+	// still queued for it -- its figures may not include the newest usage yet.
+	//
+	// It used to be reported as not_invoiceable_pending_reconciliation, which
+	// says something quite different and much worse: that the books and the
+	// source disagree. A queued job is the ordinary rhythm of a busy account,
+	// enqueued every finalization cycle, so healthy accounts flickered into
+	// "对账中暂不可开票" all day and the column stopped being worth reading.
+	// Blocking is still right -- the amount is genuinely not final -- but the
+	// operator has to be able to tell "still adding up" from "the numbers
+	// disagree".
+	AccountBlockStateSettling       = "settling"
+	AccountBlockStateBelowThreshold = "below_threshold"
+	AccountBlockStateInvoiceable    = "invoiceable"
 )
 
 // accountLedgerRechargesLateral: recharges_since_start_count/minor, CR-0009
@@ -218,15 +231,21 @@ const accountLedgerFrom = `
 //     brief's hard rule requires this exact shape to still produce a
 //     sensible row rather than falling through to a wrong state).
 //   - not_invoiceable_pending_reconciliation: eligibility_status is that
-//     value, OR any row in eligibility_projection_jobs (that table only
-//     ever holds queued/processing/failed rows -- see its own migration
-//     comment -- so existence alone means "not yet finalized"), OR the
-//     latest balance evaluation is not one of the three "good" outcomes
-//     (matched/positive_classified_non_cash/positive_blip_ignored) --
-//     including "no evaluation recorded at all" (latest_evaluation_status
-//     COALESCEd to ” upstream, which is trivially NOT IN the good set),
-//     matching ResolveEligibilityFreeze's own existing precedent of
-//     treating "no evaluation yet" as unmatched, not as a free pass.
+//     value, OR the latest balance evaluation is not one of the three
+//     "good" outcomes (matched/positive_classified_non_cash/
+//     positive_blip_ignored) -- including "no evaluation recorded at all"
+//     (latest_evaluation_status COALESCEd to ” upstream, which is
+//     trivially NOT IN the good set), matching ResolveEligibilityFreeze's
+//     own existing precedent of treating "no evaluation yet" as unmatched,
+//     not as a free pass. Both mean the same thing to an operator: the
+//     books and the source do not currently agree.
+//   - settling: none of the above, but a row exists in
+//     eligibility_projection_jobs (that table only ever holds
+//     queued/processing/failed rows -- see its own migration comment -- so
+//     existence alone means "not yet finalized"). Split out of the state
+//     above by XM-INV-LEDGER-SETTLING-STATE: a queued job is routine, and
+//     calling it a reconciliation problem taught operators to ignore the
+//     column. It still blocks, because the figures are not final.
 //   - below_threshold: none of the above, but invoiceable_minor is under
 //     the real, admin-configurable minimum invoice amount.
 //   - invoiceable: otherwise.
@@ -234,21 +253,25 @@ func accountBlockStateExpr(thresholdSQL string) string {
 	return `CASE
 		WHEN has_open_freeze OR eligibility_status='frozen' THEN '` + AccountBlockStateFrozenManualReview + `'
 		WHEN eligibility_status='` + AccountBlockStateNotInvoiceablePendingReconciliation + `'
-			OR has_projection_job
 			OR latest_evaluation_status NOT IN ('matched','positive_classified_non_cash','positive_blip_ignored')
 			THEN '` + AccountBlockStateNotInvoiceablePendingReconciliation + `'
+		WHEN has_projection_job THEN '` + AccountBlockStateSettling + `'
 		WHEN invoiceable_minor<` + thresholdSQL + ` THEN '` + AccountBlockStateBelowThreshold + `'
 		ELSE '` + AccountBlockStateInvoiceable + `'
 	END`
 }
 
 func accountBlockStateRankExpr(thresholdSQL string) string {
+	// settling shares rank 1 with pending reconciliation on purpose: both are
+	// "not invoiceable yet", they sort as one group ahead of below_threshold,
+	// and giving settling its own rank would have shifted every rank below it
+	// and mis-paged any cursor issued before this change.
 	return `CASE
 		WHEN has_open_freeze OR eligibility_status='frozen' THEN 0
 		WHEN eligibility_status='` + AccountBlockStateNotInvoiceablePendingReconciliation + `'
-			OR has_projection_job
 			OR latest_evaluation_status NOT IN ('matched','positive_classified_non_cash','positive_blip_ignored')
 			THEN 1
+		WHEN has_projection_job THEN 1
 		WHEN invoiceable_minor<` + thresholdSQL + ` THEN 2
 		ELSE 3
 	END`
@@ -267,8 +290,11 @@ func accountBlockStateRank(hasOpenFreeze bool, eligibilityStatus string, hasProj
 	if hasOpenFreeze || eligibilityStatus == "frozen" {
 		return 0
 	}
-	if eligibilityStatus == AccountBlockStateNotInvoiceablePendingReconciliation || hasProjectionJob ||
+	if eligibilityStatus == AccountBlockStateNotInvoiceablePendingReconciliation ||
 		(latestEvaluationStatus != "matched" && latestEvaluationStatus != "positive_classified_non_cash" && latestEvaluationStatus != "positive_blip_ignored") {
+		return 1
+	}
+	if hasProjectionJob {
 		return 1
 	}
 	if invoiceableMinor < thresholdMinor {

@@ -75,6 +75,7 @@ import {
   appendEmbeddedAdminParams,
   buildXmEmbedHeightMessage,
   measureEmbeddedAdminHeight,
+  shouldPostEmbeddedAdminHeight,
   isAdminNavItemVisible,
   parseEmbeddedAdminMode,
   parseEmbeddedAdminScope,
@@ -220,13 +221,16 @@ function useEmbeddedAdminPlatformSourceInstanceId(): string | null {
 function useEmbeddedAdminHeightSync() {
   useEffect(() => {
     if (!shouldSyncEmbeddedAdminHeight(embeddedAdminMode, window.parent !== window)) return;
-    // XM-INV-EMBED-HEIGHT: only post when the value actually changed. The
-    // observers below can fire for reasons that do not move the height, and a
-    // repeated identical post would make the console re-render for nothing.
+    // XM-INV-EMBED-HEIGHT: only post when the value actually moved, and
+    // XM-INV-EMBED-LOOP: only when it moved by more than a pixel or two. The
+    // observers below fire for reasons that do not move the height, and a
+    // difference smaller than the dead band is never worth a console
+    // re-render -- which is also what stops a measurement that tracks the
+    // frame from walking the two of us upward forever.
     let lastPosted = 0;
     const sendHeight = () => {
       const height = measureEmbeddedAdminHeight(document);
-      if (height === 0 || height === lastPosted) return;
+      if (!shouldPostEmbeddedAdminHeight(height, lastPosted)) return;
       lastPosted = height;
       window.parent.postMessage(
         buildXmEmbedHeightMessage(height),
@@ -240,9 +244,9 @@ function useEmbeddedAdminHeightSync() {
       debounceTimer = window.setTimeout(sendHeight, 100);
     };
     const observer = new ResizeObserver(schedule);
-    // Both boxes, for the reason measureEmbeddedAdminHeight documents: the
-    // root element stops growing once the console has sized the frame, so
-    // observing it alone goes quiet exactly when a table starts filling in.
+    // Both boxes: the root element can stop growing once the console has
+    // sized the frame, so observing it alone can go quiet exactly when a
+    // table starts filling in.
     observer.observe(document.documentElement);
     if (document.body) observer.observe(document.body);
     // A slow safety net for growth neither observer reports -- an image
@@ -2876,6 +2880,35 @@ const eligibilityFreezeReasonOptions = Object.entries(
 // tolerance: an item.reason not in eligibilityFreezeReasonLabels (a future
 // backend reason this frontend hasn't labeled yet) renders its raw code
 // instead of `undefined`.
+// FreezeTriggerLine names the specific evidence that opened one freeze
+// (XM-INV-FREEZE-TRIGGER-VISIBLE).
+//
+// Several freezes on one account routinely share a reason, a scope and even
+// the same second: production had four SOURCE_GAP rows on account 2092 whose
+// only difference was which balance checkpoint tripped each one, and the
+// queue rendered them as four identical rows. Renders nothing when the row
+// carries no trigger, on the same "absent means absent" posture as the
+// account email beside it.
+function FreezeTriggerLine({
+  objectType,
+  objectId,
+}: {
+  objectType?: string;
+  objectId?: string;
+}) {
+  if (!objectType && !objectId) return null;
+  // The id is an upstream event/checkpoint key, long and opaque; the head of
+  // it is enough to tell two rows apart and to search the audit trail with,
+  // and the full value stays available on hover.
+  const shortId = objectId ? objectId.slice(0, 12) : "";
+  return (
+    <small className="muted-text" title={objectId ?? undefined}>
+      触发对象 {objectType || "未知类型"}
+      {shortId ? `:${shortId}` : ""}
+    </small>
+  );
+}
+
 function freezeReasonLabel(reason: EligibilityFreeze["reason"]) {
   return (eligibilityFreezeReasonLabels as Record<string, string>)[reason] ?? reason;
 }
@@ -3146,6 +3179,10 @@ function EligibilityFreezesPage() {
                     </td>
                     <td>
                       <strong>{freezeReasonLabel(item.reason)}</strong>
+                      <FreezeTriggerLine
+                        objectType={item.triggerObjectType}
+                        objectId={item.triggerObjectId}
+                      />
                       {item.reason === "SOURCE_REFUND" && (
                         <small className="error-text">只能从退款与红冲队列结案</small>
                       )}
@@ -3435,6 +3472,7 @@ function EligibilityFreezeDrawer({
 const accountBlockStateLabels: Record<AccountBlockState, string> = {
   frozen_manual_review: "冻结待人工复核",
   not_invoiceable_pending_reconciliation: "对账中暂不可开票",
+  settling: "结算中",
   below_threshold: "未达起票门槛",
   invoiceable: "可开票",
 };
@@ -3445,6 +3483,9 @@ function accountBlockStateTone(state: AccountBlockState) {
       return "red";
     case "not_invoiceable_pending_reconciliation":
       return "amber";
+    // Settling is a wait, not a warning: neutral, like below_threshold.
+    case "settling":
+      return "neutral";
     case "below_threshold":
       return "neutral";
     case "invoiceable":

@@ -118,6 +118,16 @@ func eligibilityFreezeDTO(item postgresstore.EligibilityFreeze) map[string]any {
 	if item.AccountEmail != "" {
 		dto["account_email"] = item.AccountEmail
 	}
+	// XM-INV-FREEZE-TRIGGER-VISIBLE: which piece of evidence opened this
+	// freeze. Same present-or-absent posture -- an older row that predates
+	// the columns being populated simply does not carry the keys, and the
+	// page renders the row without them rather than inventing a placeholder.
+	if item.TriggerObjectType != "" {
+		dto["trigger_object_type"] = item.TriggerObjectType
+	}
+	if item.TriggerObjectID != "" {
+		dto["trigger_object_id"] = item.TriggerObjectID
+	}
 	if !item.ResolvedAt.IsZero() {
 		dto["resolved_at"] = item.ResolvedAt
 	}

@@ -1140,9 +1140,13 @@ export const mockInvoiceApi: InvoiceApiClient = {
       )
       .sort((left, right) => {
         if (filters.sort === "block_state") {
+          // Mirrors postgresstore.accountBlockStateRank: settling shares
+          // rank 1 with pending reconciliation -- both are "not invoiceable
+          // yet" and sort as one group.
           const rank = {
             frozen_manual_review: 0,
             not_invoiceable_pending_reconciliation: 1,
+            settling: 1,
             below_threshold: 2,
             invoiceable: 3,
           } as const;
