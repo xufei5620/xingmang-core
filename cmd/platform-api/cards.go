@@ -72,19 +72,6 @@ type cardsAccountConfig struct {
 	BaseURL string
 }
 
-// IsSandbox 说明这个账号指向的是不是非生产端点。
-//
-// 用途是**在页面上标出来**：一张沙箱假卡与一张真卡在列表里长得一模一样，
-// 不标记比没有沙箱更危险——运营会拿假卡去付真账单，或者以为真卡是测试卡
-// 而随手冻结。
-func (a cardsAccountConfig) IsSandbox(processBaseURL string) bool {
-	base := a.BaseURL
-	if base == "" {
-		base = processBaseURL
-	}
-	return strings.Contains(strings.ToLower(base), "sandbox")
-}
-
 // cardsConfig 是卡片功能的进程级配置。
 type cardsConfig struct {
 	Mode cardsMode

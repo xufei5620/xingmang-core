@@ -1,12 +1,14 @@
 package infini
 
 import (
+	"time"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/money"
@@ -304,7 +306,15 @@ type CardTransaction struct {
 	Status      string
 	Currency    string
 	Merchant    string
-	OccurredAt  string
+	// OccurredAt / SettledAt 是 RFC3339 文本；缺失为空串。
+	OccurredAt string
+	SettledAt  string
+	// TransactionAmount / TransactionCurrency 是商户侧原始币种的金额：
+	// 一张 USD 卡在欧元商户消费，AmountMinor 是折成 USD 的，这里才是 EUR 原值。
+	// 保持十进制文本：币种可能是任何一种，逐一验证标度不现实，而这两列
+	// 目前只展示、不计算。
+	TransactionAmount   string
+	TransactionCurrency string
 }
 
 // TransactionPage 是一页流水。
@@ -331,10 +341,16 @@ func (c *Client) CardTransactions(ctx context.Context, cardID string, page, page
 			Type            string          `json:"type"`
 			Amount          money.RawAmount `json:"amount"`
 			Fee             money.RawAmount `json:"fee"`
-			Status          string          `json:"status"`
-			Currency        string          `json:"currency"`
-			Merchant        string          `json:"merchant"`
-			TransactionTime string          `json:"transaction_time"`
+			Status   string          `json:"status"`
+			Currency string          `json:"currency"`
+			Merchant string          `json:"merchant"`
+			// 时间戳实测是 Unix 秒数字（卡片对象那边 2026-09-04 已踩过一次），
+			// 文档示例写的是字符串；两种都收。
+			TransactionTime rawTimestamp `json:"transaction_time"`
+			SettledAt       rawTimestamp `json:"settled_at"`
+			// 官方 CARDS.md 列出的两个字段；缺失时为空。
+			TransactionAmount   money.RawAmount `json:"transaction_amount"`
+			TransactionCurrency string          `json:"transaction_currency"`
 		} `json:"transactions"`
 		Total      int `json:"total"`
 		Page       int `json:"page"`
@@ -361,15 +377,27 @@ func (c *Client) CardTransactions(ctx context.Context, cardID string, page, page
 			return TransactionPage{}, connector.NewError(connector.KindBadResponse, op, err)
 		}
 
+		occurred, err := optionalTimestamp(raw.TransactionTime, "transaction_time")
+		if err != nil {
+			return TransactionPage{}, connector.NewError(connector.KindBadResponse, op, err)
+		}
+		settled, err := optionalTimestamp(raw.SettledAt, "settled_at")
+		if err != nil {
+			return TransactionPage{}, connector.NewError(connector.KindBadResponse, op, err)
+		}
+
 		txs = append(txs, CardTransaction{
-			CardID:      raw.CardID,
-			Type:        raw.Type,
-			AmountMinor: amount,
-			FeeMinor:    fee,
-			Status:      raw.Status,
-			Currency:    raw.Currency,
-			Merchant:    raw.Merchant,
-			OccurredAt:  raw.TransactionTime,
+			CardID:              raw.CardID,
+			Type:                raw.Type,
+			AmountMinor:         amount,
+			FeeMinor:            fee,
+			Status:              raw.Status,
+			Currency:            raw.Currency,
+			Merchant:            raw.Merchant,
+			OccurredAt:          occurred,
+			SettledAt:           settled,
+			TransactionAmount:   strings.TrimSpace(string(raw.TransactionAmount)),
+			TransactionCurrency: strings.TrimSpace(raw.TransactionCurrency),
 		})
 	}
 
@@ -388,4 +416,87 @@ func minorOrZero(raw money.RawAmount, scale int) (int64, error) {
 		return 0, nil
 	}
 	return money.ParseMinorUnits(string(raw), scale)
+}
+
+// optionalTimestamp 把可缺席的时间戳转成 RFC3339 文本；缺席为空串。
+//
+// 与 parseTimestamp 的区别只在「缺席不算错」：流水里 settled_at 在授权
+// 未结算时本来就没有。
+func optionalTimestamp(raw rawTimestamp, field string) (string, error) {
+	if raw.unix == 0 && raw.text == "" {
+		return "", nil
+	}
+	t, err := parseTimestamp(raw, field)
+	if err != nil {
+		return "", err
+	}
+	return t.UTC().Format(time.RFC3339), nil
+}
+
+// ---------- 批量状态 ----------
+
+// batchStatusMax 是上游一次批量查询的上限（文档：1~100）。
+const batchStatusMax = 100
+
+// BatchCardStatus 一次查多张卡的生命周期状态，返回 card_id → status。
+//
+// 同步作业此前每张卡一次 GET /v2/cards/status；卡一多就是几十次调用/轮，
+// 而上游限流阈值文档未提及。改成批量后每 100 张一次。
+//
+// 超过上限**在本地拒绝**：一个注定被上游拒绝的请求不该发出去——
+// 它既浪费配额，又会在日志里留下一条看起来像上游故障的错误。
+func (c *Client) BatchCardStatus(ctx context.Context, cardIDs []string) (map[string]string, error) {
+	if len(cardIDs) == 0 {
+		return map[string]string{}, nil
+	}
+	if len(cardIDs) > batchStatusMax {
+		return nil, connector.NewError(connector.KindRejected, "infini POST /v2/cards/status/batch",
+			fmt.Errorf("一次最多 %d 张，收到 %d 张", batchStatusMax, len(cardIDs)))
+	}
+
+	body, err := json.Marshal(map[string]any{"card_ids": cardIDs})
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Cards []struct {
+			CardID string `json:"card_id"`
+			Status string `json:"status"`
+		} `json:"cards"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v2/cards/status/batch", body, &data); err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(data.Cards))
+	for _, row := range data.Cards {
+		if row.CardID != "" {
+			out[row.CardID] = row.Status
+		}
+	}
+	return out, nil
+}
+
+// ---------- 账户余额（资金 API） ----------
+
+// AccountBalances 是组织账户的可用余额，三个币种都是十进制文本。
+//
+// 来自 GET /v2/funds/balances（资金 API，不在卡 API 里——2026-09-05 之前
+// 误以为没有账户级余额接口）。需要 fund.withdraw 权限。
+// 只反映 AVAILABLE_BALANCE，不含锁定与预留；USD 现金账户未激活时回 "0"。
+type AccountBalances struct {
+	USDT string
+	USDC string
+	USD  string
+}
+
+func (c *Client) AccountBalances(ctx context.Context) (AccountBalances, error) {
+	var data struct {
+		USDT string `json:"available_balance_usdt"`
+		USDC string `json:"available_balance_usdc"`
+		USD  string `json:"available_balance_usd"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v2/funds/balances", nil, &data); err != nil {
+		return AccountBalances{}, err
+	}
+	return AccountBalances{USDT: data.USDT, USDC: data.USDC, USD: data.USD}, nil
 }
