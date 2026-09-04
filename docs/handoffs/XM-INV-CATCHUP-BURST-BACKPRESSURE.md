@@ -1,6 +1,6 @@
 # XM-INV-CATCHUP-BURST-BACKPRESSURE: chunk a released account's first projection
 
-- **status:** open, not started. Filed 2026-09-04 from the RC87 canary.
+- **status:** open; **root cause revised 2026-09-05 after a copy-run and a code trace. The proposed fix below does not address it.** Filed 2026-09-04 from the RC87 canary.
 - **branch:** none yet.
 - **found in production**, 2026-09-04, while verifying the XM-INV-CATCHUP-RELEASE fix.
 
@@ -88,3 +88,130 @@ Two things to preserve while doing it:
    are identical to what the single-pass implementation produces for the same
    input. This is the regression that matters: chunking must not change any
    eligibility decision.
+
+## Revision, 2026-09-05: what the evidence actually shows
+
+Everything above was written on the night of the incident from log excerpts,
+without reading the projection code. A reproduction on a restored copy of the
+pre-incident backup (`invoice-20260904T033226Z`, rc87 images, account released
+and enqueued exactly as in production) plus a trace of the code and the
+surviving production rows changes the diagnosis in four places.
+
+### 1. The proposed fix cannot bound the transaction
+
+`reprojectEligibilityTx` (consumption.go:2216) deletes every
+`consumption_allocations` row for the account and rebuilds from scratch, and
+`buildEligibilityProjectionExcludingUsageTx` (1829) reads every fact from
+`cutover_at`, not from `finalized_through`. A "bounded time window per
+transaction" therefore replays the whole history up to the window's end on
+every chunk; the last chunk is the single-pass replay. "A loop bound rather
+than new machinery" is false: bounding by window requires an incremental
+projection, which is new machinery.
+
+What does scale with a bound is the evidence pass: `evaluatePendingBalanceEvidenceTx`
+(3704) calls `buildEligibilityProjectionTx` once per pending checkpoint, and
+once more when confirming a deferred positive. The night's transaction
+evaluated 379 checkpoints in one pass (379 `pending_reconciliation.entered`
+audit rows, one timestamp). Chunking by checkpoint count, with the allocation
+replay left whole, is the only variant of the original idea that reduces
+per-transaction work. It remains a second-order fix; see section 4.
+
+### 2. The timeline was wrong, and so was the cause of the 503
+
+Hard rows, not log excerpts:
+
+| source | fact |
+| --- | --- |
+| `rc87-watch.log` | readyz 503 from 03:45:21 to 03:54:22, 200 briefly, 503 again 04:00:23 to about 04:14 |
+| `source_economic_scan_cycles`, balances | ceiling 03:44:27 published 03:54:31 (10 min late); ceiling 03:45:39 published 04:14:40 (29 min late); ceiling 03:55:37 published 04:15:10. Every other stream published on time |
+| `audit_events`, acdcdce9 | checkpoint observed 03:54:37 and 04:15:10, seconds after each late publish |
+| `audit_events`, all accounts | two projections committed in the window: whale `40bd883d` at 04:16:38, `acdcdce9` at 04:16:42 |
+| `source_ingest_events`, balances | two events parked as WAITING_DEPENDENCY after retries, at exactly 03:54:31 (attempt 1) and 04:14:40 (attempt 2), the late-publish instants |
+
+The stall began at 03:44, fourteen minutes before the "03:58:22 first
+deferral" the original write-up anchored on. And readiness did not go 503
+because a watermark aged past 15 minutes: `runtime.go:711` marks a stream
+not-ready the moment it has any pending event (`item.PendingEvents != 0`),
+which is why the 503 appeared within a minute of the first stuck event. The
+freshness gate is a later, separate trigger that never got the chance to fire.
+
+### 3. The lock chain is not the one described
+
+The projection job path locks no scan-cycle or batch row at all (verified by
+enumerating every FOR UPDATE and UPDATE in consumption.go and mapping each to
+its function). What it does hold for its whole SERIALIZABLE transaction:
+
+- its own `eligibility_projection_jobs` row: FOR UPDATE at 3208, taken before
+  anything else;
+- the account's `source_account_eligibility_state` row: FOR UPDATE OF eas via
+  `getEligibilityAccountTx(..., true)` inside `reprojectEligibilityTx`;
+- every WALLET_CASH lot: FOR UPDATE OF fl,flcs at 1881;
+- the per-account advisory lock for the write phase (3260).
+
+Two ingest-side steps run into those under the role's `lock_timeout='5s'`
+(deploy/postgres/010-invoice-roles.sh:18):
+
+- Cycle publication. `tryPublishEconomicScanCyclesTx` holds FOR UPDATE on the
+  stream's cycle rows (651) and the watermark row (743), marks the cycle
+  published (780), and then calls `finalizeSourceAccountsTx` (789), whose
+  `INSERT ... ON CONFLICT (external_account_id) DO UPDATE` on
+  `eligibility_projection_jobs` (566-591) must lock the conflicting row. If
+  that account's job is mid-transaction, the publish waits 5 s and dies with
+  55P03, taking the whole publish, and the event mark that wrapped it, down
+  with it. That is the 04:04:44 "mark source dependency wait ... lock timeout"
+  line verbatim.
+- Checkpoint observation. `ObserveBalanceCheckpoint` takes the advisory lock
+  with `pg_try_advisory_xact_lock` (1047; non-blocking, ACCOUNT_LOCK_BUSY,
+  15 s requeue) and then `getEligibilityAccountTx(..., true)` at two sites, a
+  blocking row lock on the state row the projection holds. Either way the
+  account's own checkpoint event cannot reach a terminal state while its
+  projection runs; a non-terminal event keeps the cycle from publishing
+  (tryPublish requires every event processed or parked) and, per section 2,
+  flips readiness to 503 by itself.
+
+The asymmetry in section 2 follows: finalization runs on every stream's
+publish, but only the balances stream carries an event for the locked
+account that must complete before its cycle can publish. The other three
+streams published on schedule all night.
+
+### 4. Fix direction, re-ranked
+
+1. Decouple publication from the job row. `finalizeSourceAccountsTx` should
+   not wait on an account whose job is processing: exclude those accounts
+   from `changed` (their `requested_through` is recomputed from the
+   watermarks on the next pass, so nothing is lost), or run finalization after
+   the publish transaction commits so a wait there can never hold cycle rows.
+   Small, local, and it removes the global blast radius regardless of how long
+   any projection takes.
+2. Stop a stuck checkpoint from flipping readiness. `ObserveBalanceCheckpoint`
+   blocking on the state row is the second coupling; whether the answer is a
+   try-lock there too, or readiness treating ACCOUNT_LOCK_BUSY as benign the
+   way it treats ECONOMIC_RESCAN_ACTIVE, needs a design pass. The second
+   option must not hide a genuinely stuck stream.
+3. Bound the evidence pass by checkpoint count. Still worth doing for the
+   300 s single-statement cliff (a job that exceeds it fails and restarts the
+   whole replay under the same locks: the "36 retries" case in the code's own
+   comments) and to shorten holds. Validate with the differential run the
+   shadow-eval fix now makes possible: single-pass vs chunked on two restores
+   of the same backup, per-account quantities diffed. Not before 1 and 2.
+
+### The copy-run itself
+
+The reproduction ran (report `rehearsals/20260904T212236Z-1678684`) and
+stopped before the replay: the job was claimed and immediately requeued with
+BALANCE_PROOF_PENDING, and the drain loop read "nothing claimable" as
+"drained". Reconstruction from production shows why: the window's latest fact
+visibility is 03:12:03 (the watermark of the batch that delivered a fact timed
+at or before 03:11:42), and the latest published balances ceiling with a real
+checkpoint at the backup instant is 03:11:00. No cover, so the proof waits for
+a cycle that a frozen copy will never publish. In production that wait ended
+when the balances stream finally published at 04:14:40, which is also why the
+heavy evaluation committed at 04:16:42, about 90 s later, rather than after an
+18-minute transaction. A second copy-run with `requested_through` chosen inside
+the covered range would give the per-checkpoint replay cost; it is optional now
+that the mechanism is established from rows rather than timing.
+
+Note for the drain loop: "nothing claimable" because of backoff is
+indistinguishable from "drained" in the report, the same shape as
+XM-INV-SHADOW-EVAL-VACUOUS one layer down. Worth a `requeued_with_backoff`
+count in the report.
