@@ -1,8 +1,10 @@
-# XM-CARD0：Infini 卡服务连接器与供应商写通道
+# XM-CARD0/1/2：Infini 卡服务连接器、领域层与写操作 Action
 
 ## status
 
-IN PROGRESS（第一片的代码部分完成；真实端点验证被密钥与 IP 白名单阻塞）
+IN PROGRESS（连接器、领域层、开卡与 reveal 两个 Action 完成；
+Postgres Store、同步作业、其余四个 Action、管理端未做；
+真实端点验证被密钥与 IP 白名单阻塞）
 
 ## branch
 
@@ -10,8 +12,10 @@ IN PROGRESS（第一片的代码部分完成；真实端点验证被密钥与 IP
 
 ## commit
 
-`9bd74eb` — feat(connector): add vendor write channel and Infini request signing
-（本文件与端点层、替身、契约在后续提交）
+- `9bd74eb` — feat(connector): 供应商写通道与 Infini 请求签名
+- `751e157` — feat(infini): 九个端点、替身、连接器契约与本文件
+- `39e4f0c` — feat(cards): 开卡 Action、限额、幂等台账与投影表迁移
+- `ddf3e7e` — feat(cards): reveal Action 与审计贡献接线
 
 ## summary
 
@@ -114,19 +118,45 @@ HMAC 与 Digest 的期望值由 openssl 独立算出，不是拿本包实现自�
 6. **上游无幂等键**是这个功能的结构性风险，不是本片能消除的，只能在领域层
    用台账 + 对账收敛来控制。
 
+## 实现期发现（写测试时才暴露的两处，都不是风格问题）
+
+**一、Action 的返回值不进审计。** Handler 返回的东西只进 `Result.Value`
+回给调用方；审计的 resource_type / resource_id / before / after 必须用
+`action.RecordResource` / `RecordAfter` 显式塞进 ctx 由内核取走。第一版开卡
+Handler 漏了这一步，结果审计只知道「有人执行了 cards.card.issue」，
+出事时无法定位到具体哪张卡。这一层**只有走真内核才测得到**，直接调 Handler
+测不出来——所以审计测试用真 Kernel + 捕获审计的 Sink。
+
+**二、L2 及以上的 Action 在当前平台无法执行。** 内核的
+`RiskLevel.RequiresAdvancedControls()` 对 L2/L3/L4 返回 true，而 Advanced
+Controls（幂等键、写后读取确认、审批、Step-up MFA、冷却、Kill Switch）属
+Foundation-B / XM-0030 尚未实现，执行时直接返回 `ADVANCED_CONTROLS_REQUIRED`。
+开卡按性质本该高于 L1，但声明成 L2 会让它变成一个永远跑不起来的摆设，
+因此定 L1，护栏由本片自己实现的幂等键 + 金额上限 + 审计承担。
+**Foundation-B 落地后应重估这一级。** 顺带发现：现有
+`registry.connection.set_status` 与 `registry.connector.create` 两份契约声明
+为 L2，若它们真的被调用过，应当同样被内核拒掉——建议验收线核一下这两个
+Action 是否实际可用。
+
+**三、限额的精度闸。** 测试先写出来才发现：`money.ParseMinorUnits` 对超出
+标度的精度做四舍五入，于是 `0.30000001` 会被舍成 `0.300000` 与上限比较并
+放行，而发给上游的仍是原始文本——一个比校验值更大的数。金额小到可以忽略，
+但「校验对象与执行对象不是同一个值」不能接受，因此加了一道精度闸：
+小数位超出比较标度的金额直接拒绝，不舍入。
+
 ## follow_ups
 
 - **ADR-021（供应商写通道）**：必须补，否则写通道在评审时被当成绕过 ADR-018。
 - **产品负责人待办**（挡住真实验证）：申请 API key（keyId + secret）→ 申请
   `card.create` 与 `card.reveal` 权限 → 查出平台出口 IP 并登记白名单。
   若服务器走动态出口或代理，白名单会时灵时不灵，须先解决出口固定性。
-- **XM-CARD1**：卡表 + 迁移 `000026` + `card.issue` Action + 幂等台账 + 限额
-  （建议起步单笔 ≤ 100 USD、单日 ≤ 500 USD，可配置）+ 审计。
-- **XM-CARD2**：`card.reveal` 与充值/冻结/解冻/赎回的 Action。
-  已定：`reveal` 走 Action 而非普通读接口，理由是 Query 层没有审计钩子，
-  而「谁在何时看了哪张卡的明文」是本功能最该留痕的一条。契约里须注明
-  「不得引为先例」。
+- **Postgres Store**：实现 `cards.Store` 接口对接迁移 `000026` 的三张表，
+  外加需要测试库的集成测试。领域层的接口与内存替身已就位，这一步不阻塞逻辑。
+- **其余四个 Action**：充值、赎回、冻结、解冻。连接器方法与领域层模式都已
+  铺好，照 `cards.card.issue` 的样子加即可。
 - **XM-CARD3**：管理端页面、开卡表单、reveal 弹窗、流水。
+- **限额的实际数值**待产品负责人拍板（建议起步单笔 ≤ 100、单日 ≤ 500，
+  单位是 token 本身，不做汇率换算）。
 - **同步作业**：`jobs/card_sync.go`，承担开卡异步流程的轮询与不确定态对账。
   建议起步周期：卡状态 5 分钟、流水 15 分钟、`pending` 申请单 30 秒，
   不确定态宽限 30 分钟后亮红条并锁死同参数重试。
