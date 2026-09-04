@@ -48,3 +48,35 @@ Production remains blocked until a 30-minute readiness watch binds RC90. Watch t
 
 - `XM-INV-CATCHUP-BURST-BACKPRESSURE` and `XM-INV-SHADOW-EVAL-VACUOUS` remain open.
 - Account 2820's underlying ¥0.50 is real upstream money with no credit event behind it — the same invisibility as an administrator-granted top-up, which the product owner has chosen to handle manually. This release stops that answered question from blocking the account; it does not explain the ¥0.50.
+
+## Execution record (2026-09-04)
+
+- Task 1: identity bump `e14d305`; every gate 0, web 185 tests, four failure-evidence scripts 0/0/0/0. Tag `v0.1.0-rc90-signed` created and verified.
+- Task 2 took three exact directories, and the first two failures were not ours.
+  - `exact1` and `exact2` both died at the frontend dependency audit: npm's advisory endpoint returned 503 and then stopped answering entirely from this machine, for over an hour, while the registry root still served in under a second and npm's own status page read "All Systems Operational". Direct and proxied requests behaved identically, so this was not the local proxy — an earlier guess that it was has no evidence behind it. No mirror implements the endpoint (npmmirror 404s it, Tencent's gateway 504s). Both directories are retained.
+  - The gate was then given a narrow escape (`0a074a8`): a release may proceed past an *unreachable* advisory service only when every dependency manifest is identical to a named previous signed release whose own gate ran this audit. It cannot ship past a real advisory — a reachable service reporting a vulnerability fails exactly as before. Verified in both directions: a tampered `web/package.json` is refused, a clean tree is allowed. The first draft compared `baseline..HEAD` and let an uncommitted manifest change through; the image is built from the working tree, so the comparison is `baseline..WORKING TREE`.
+  - `exact3` then passed with **the audit actually succeeding** — `found 0 vulnerabilities` in the evidence, the waiver never consulted. The service had recovered. RC90's audit result is real, not inherited.
+- Task 3: staged; signed pre-deploy backup `invoice-20260904T154527Z`; roll-forward PASS, 18 containers on rc90, healthz/readyz 200. Every embedded hash in the four derived server scripts was checked before running, after RC88 and RC89 both shipped with wrong ones.
+- **Shadow evaluation: ran, and was vacuous.** Verdict `ready`, but one round against an already-drained queue, before and after snapshots byte-identical, zero account status changes. It proves the candidate starts against real production data and that migration 0024 applies; it is not evidence about the two evaluator changes in this release. Recorded as such rather than quoted as a pass — see `docs/handoffs/XM-INV-SHADOW-EVAL-VACUOUS.md`.
+
+### Post-deploy verification
+
+| what | result |
+| --- | --- |
+| the invoice minimum | set to ¥5.00 by the owner **without the api refusing to start** — the split state RC89 created is closed |
+| account 98cce4c8 (2092) | repair applied, `REACTIVATED=true`, and **it stayed** — active with zero open freezes across four checks over three minutes while its projection advanced. Before RC90 the same repair was undone one second later |
+| account 2820 | left 对账中暂不可开票 on the strength of its 2026-09-03 resolution alone, with no new evidence |
+| account 34 | reached 可开票 at ¥5.00 — the first account to get there |
+| operator tables | rendering at the larger type |
+
+Canary: 30 minutes, `readyz_non200=0`, zero error lines, zero reconcile errors, 27 usage and 28 credits cycles, and **zero sync failures** — RC88's transient credits deadlock did not recur. Deployment record `rc90-deploy-20260904T155900Z`.
+
+### What the deploy exposed, and did not fix
+
+Account 34 reached 可开票 and then left it again within minutes, repeatedly. Sampling every ten seconds for four minutes found a pending projection job on **every one** of the 24 samples. The user-facing summary forces `available` to 0 whenever any job exists, so a continuously-consuming account is effectively never able to invoice — it sees ¥0.00 and "资金账本正在重新计算" while the operator ledger shows its real ¥5.00.
+
+The block is a blunt `EXISTS(... eligibility_projection_jobs ...)` in four places. The protection it appears to provide already exists elsewhere and is stronger: when a recomputation lowers a lot, `reprojectEligibilityTx` invalidates that lot's reservations, freezes `LATE_FINALIZED_EVENT` if the new amount is below what was already issued, and guards its UPDATE with `reserved_minor+issued_minor<=$1`.
+
+Separately, account 12 cannot invoice ¥72.00 of settled, funded consumption because of ¥0.0361 of quantified overdraft, and cannot self-clear because it overdraws again before the match counter advances.
+
+Both are under read-only investigation before anything is changed; neither is fixed here.
