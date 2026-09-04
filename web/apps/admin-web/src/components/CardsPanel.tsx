@@ -426,6 +426,15 @@ export function CardsPanel() {
       primary: true,
     },
     {
+      id: "challenge",
+      header: "验证码",
+      // 单独一列而不是挂在状态下面：在线支付时人要的就是这个数字，
+      // 它得能被一眼扫到、能被复制。没有待验证时留空而不是「—」，
+      // 让有码的那几行在满屏里跳出来。
+      cell: (row) => <ChallengeCell challenge={challengesByCard.get(`${row.account}/${row.card_id}`)} />,
+      value: (row) => challengesByCard.get(`${row.account}/${row.card_id}`)?.code ?? "",
+    },
+    {
       id: "cvv",
       header: "CVV",
       // 与卡号同一逻辑：明文由后端按 card.reveal 权限决定回不回，
@@ -461,12 +470,7 @@ export function CardsPanel() {
     {
       id: "status",
       header: "状态",
-      cell: (row) => (
-        <span className="flex flex-col gap-1">
-          <Badge tone={cardStatusTone(row.status)}>{cardStatusLabel(row.status)}</Badge>
-          <ChallengeBadge challenge={challengesByCard.get(`${row.account}/${row.card_id}`)} />
-        </span>
-      ),
+      cell: (row) => <Badge tone={cardStatusTone(row.status)}>{cardStatusLabel(row.status)}</Badge>,
       value: (row) => cardStatusLabel(row.status),
     },
     {
@@ -638,7 +642,7 @@ function AccountBalancesStrip() {
   );
 }
 
-/** 待验证的 3DS 挑战。
+/** 验证码单元格。
  *
  *  持卡人在线支付时上游会要一次验证码。把它摆在这里，用卡的人就不用去翻
  *  邮件或 Infini App。
@@ -647,19 +651,30 @@ function AccountBalancesStrip() {
  *  真实事件没有。所以这里分两种显示——有码就显示码，没码就只提示「有一笔
  *  待验证」。按文档假定它一定存在，会做出一个永远空白的栏位。
  */
-function ChallengeBadge({ challenge }: { challenge?: CardChallenge }) {
+function ChallengeCell({ challenge }: { challenge?: CardChallenge }) {
+  // 没有待验证时留空：满屏的「—」会把真正有码的那几行淹掉。
   if (!challenge) return null;
-  if (challenge.code) {
+
+  if (!challenge.code) {
     return (
-      <Badge tone="warning" title="在线支付验证码，仅数分钟内有效">
-        验证码 {challenge.code}
+      <Badge tone="warning" title="上游要求验证，但回调里没有给出验证码——请到 Infini 后台或邮件里查看">
+        待验证
       </Badge>
     );
   }
   return (
-    <Badge tone="warning" title="上游要求验证，但回调里没有给出验证码——请到 Infini 后台或邮件里查看">
-      待验证
-    </Badge>
+    <span className="flex items-center gap-2">
+      <span className="font-mono text-base font-semibold" title="在线支付验证码，仅数分钟内有效">
+        {challenge.code}
+      </span>
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => void navigator.clipboard?.writeText(challenge.code ?? "")}
+      >
+        复制
+      </Button>
+    </span>
   );
 }
 

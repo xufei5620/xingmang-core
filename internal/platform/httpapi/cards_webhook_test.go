@@ -31,6 +31,7 @@ type fakeWebhookProcessor struct {
 	markedDone   []string
 	challenges   []cards.CardChallenge
 	challengeErr error
+	notified     []cards.Notification
 }
 
 func (f *fakeWebhookProcessor) WebhookSecret(ctx context.Context, account string) (string, error) {
@@ -59,6 +60,10 @@ func (f *fakeWebhookProcessor) MarkWebhookEventProcessed(ctx context.Context, ac
 
 func (f *fakeWebhookProcessor) RecordWebhookEventFailure(ctx context.Context, account, eventID, reason string) error {
 	return nil
+}
+
+func (f *fakeWebhookProcessor) NotifyCardEvent(ctx context.Context, n cards.Notification) {
+	f.notified = append(f.notified, n)
 }
 
 func (f *fakeWebhookProcessor) RecordCardChallenge(ctx context.Context, c cards.CardChallenge) error {
@@ -225,5 +230,75 @@ func TestCardWebhookStoresChallengeWithoutRefreshing(t *testing.T) {
 	}
 	if len(p.refreshed) != 0 {
 		t.Fatalf("挑战事件不该刷新卡片, got %v", p.refreshed)
+	}
+}
+
+// 每一类卡片事件都要推送，且带上够判断「这是不是我」的信息。
+func TestCardWebhookNotifiesOnEveryCardEvent(t *testing.T) {
+	cases := map[string]struct {
+		payload string
+		want    string
+	}{
+		"状态变更": {statusChangePayload, cards.NotifyStatusChange},
+		"消费": {`{"event":"card.transaction","data":{"card":{"card_id":"card-1","last_four":"9228"},` +
+			`"transaction_id":"t-1","type":"consume","status":"authorized",` +
+			`"amount":"10.50","currency":"USD","merchant":{"name":"Amazon"}}}`, cards.NotifyTransaction},
+		"验证码": {`{"event":"card.challenge","data":{"card":{"card_id":"card-1","last_four":"9228"},` +
+			`"challenge_id":"ch-1","challenge":"123456","expires_at":1788553063}}`, cards.NotifyChallenge},
+	}
+
+	for name, tc := range cases {
+		p := newProcessor()
+		ts := strconv.FormatInt(hookNow.Unix(), 10)
+		mac := hmac.New(sha256.New, []byte(hookSecret))
+		mac.Write([]byte(ts + ".evt-1." + tc.payload))
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/infini/CHRIS", strings.NewReader(tc.payload))
+		req.Header.Set("X-Webhook-Signature", hex.EncodeToString(mac.Sum(nil)))
+		req.Header.Set("X-Webhook-Timestamp", ts)
+		req.Header.Set("X-Webhook-Event-Id", "evt-1")
+
+		if rec := serveHook(p, req); rec.Code != http.StatusOK {
+			t.Fatalf("%s: 状态码 = %d", name, rec.Code)
+		}
+		if len(p.notified) != 1 || p.notified[0].Kind != tc.want {
+			t.Fatalf("%s: 应推一条 %s, got %+v", name, tc.want, p.notified)
+		}
+		// 卡号只带掩码——完整卡号绝不进推送。
+		if p.notified[0].Account != "CHRIS" {
+			t.Fatalf("%s: 推送要带账号, got %+v", name, p.notified[0])
+		}
+	}
+}
+
+// 推送在**标记完成之后**发生，且不改变响应。
+//
+// 顺序是刻意的：推送失败若回 5xx，上游会重投一个已经处理过的事件——
+// 重投会被去重挡掉，推送也不会补发，只是白白让上游重试八次。
+func TestCardWebhookNotifiesAfterMarkingProcessed(t *testing.T) {
+	p := newProcessor()
+	rec := serveHook(p, hookRequest(t, "CHRIS", statusChangePayload, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d", rec.Code)
+	}
+	if len(p.markedDone) != 1 {
+		t.Fatal("应先标记完成")
+	}
+	if len(p.notified) != 1 {
+		t.Fatal("再推送")
+	}
+}
+
+// 处理失败时不推送：那条事件还会被上游重投，推了就会推两次。
+func TestCardWebhookDoesNotNotifyWhenProcessingFails(t *testing.T) {
+	p := newProcessor()
+	p.refreshErr = errors.New("上游超时")
+
+	rec := serveHook(p, hookRequest(t, "CHRIS", statusChangePayload, nil))
+	if rec.Code < 500 {
+		t.Fatalf("状态码 = %d", rec.Code)
+	}
+	if len(p.notified) != 0 {
+		t.Fatalf("处理失败不该推送——事件还会重投, got %+v", p.notified)
 	}
 }

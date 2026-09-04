@@ -158,6 +158,17 @@ type WebhookEvent struct {
 	ChallengeType      string
 	ChallengeCode      string
 	ChallengeExpiresAt time.Time
+	// 以下**只用于推送正文**，不进任何账目。
+	//
+	// 金额仍然不用于写库（理由见 NeedsCardRefresh）——但推送给人的那条
+	// 消息里必须有金额与商户，否则"你的卡刚被刷了"这句话没法判断是不是自己。
+	// 读一遍上游再推会让通知慢好几秒，而通知的价值恰恰在于快。
+	CardLastFour  string
+	CardStatus    string
+	Merchant      string
+	Amount        string
+	Currency      string
+	FailureReason string
 }
 
 // NeedsCardRefresh 说明这个事件是否要求我们去重新读一次这张卡。
@@ -193,8 +204,18 @@ func ParseWebhookEvent(payload []byte, eventID string) (WebhookEvent, error) {
 		OccurredAt int64  `json:"occurred_at"`
 		Data struct {
 			Card struct {
-				CardID string `json:"card_id"`
+				CardID    string `json:"card_id"`
+				LastFour  string `json:"last_four"`
+				Status    string `json:"status"`
 			} `json:"card"`
+			Amount   string `json:"amount"`
+			Currency string `json:"currency"`
+			Merchant struct {
+				Name string `json:"name"`
+			} `json:"merchant"`
+			Failure struct {
+				Reason string `json:"reason"`
+			} `json:"failure"`
 			TransactionID        string `json:"transaction_id"`
 			RelatedTransactionID string `json:"related_transaction_id"`
 			Type                 string `json:"type"`
@@ -221,6 +242,12 @@ func ParseWebhookEvent(payload []byte, eventID string) (WebhookEvent, error) {
 		ChallengeID:          raw.Data.ChallengeID,
 		ChallengeType:        raw.Data.ChallengeType,
 		ChallengeCode:        raw.Data.Challenge,
+		CardLastFour:         raw.Data.Card.LastFour,
+		CardStatus:           raw.Data.Card.Status,
+		Merchant:             raw.Data.Merchant.Name,
+		Amount:               raw.Data.Amount,
+		Currency:             raw.Data.Currency,
+		FailureReason:        raw.Data.Failure.Reason,
 	}
 	if raw.Data.ExpiresAt > 0 {
 		ev.ChallengeExpiresAt = time.Unix(raw.Data.ExpiresAt, 0).UTC()

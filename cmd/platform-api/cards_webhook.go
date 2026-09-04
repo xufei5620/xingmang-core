@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
@@ -19,6 +20,9 @@ type cardWebhookProcessor struct {
 	provider secrets.SecretProvider
 	store    *cards.PgStore
 	syncer   *cards.Syncer
+	// notifier 为 nil 时不推送（没配 webhook 地址的部署）。
+	notifier cards.Notifier
+	logger   *slog.Logger
 }
 
 // WebhookSecret 解析某账号的回调密钥。
@@ -71,6 +75,23 @@ func (p *cardWebhookProcessor) RecordCardChallenge(ctx context.Context, c cards.
 	return p.store.RecordCardChallenge(ctx, c)
 }
 
+// NotifyCardEvent 尽力而为地推送。
+//
+// **不返回错误**：调用方（回调端点）已经把事件处理完并标记完成了，
+// 此时推送失败若能改变响应，上游就会重投一个已经处理过的事件——重投会被
+// 去重挡掉，推送也不会补发，只是白白让上游重试八次。丢一条推送是可接受的
+// 损失，丢一次状态刷新不是。
+func (p *cardWebhookProcessor) NotifyCardEvent(ctx context.Context, n cards.Notification) {
+	if p.notifier == nil {
+		return
+	}
+	if err := p.notifier.Notify(ctx, n); err != nil {
+		p.logger.WarnContext(ctx, "card_notify_failed",
+			"module", "platform.api", "account", n.Account, "kind", n.Kind,
+			"err", err.Error())
+	}
+}
+
 func (p *cardWebhookProcessor) RecordWebhookEventFailure(
 	ctx context.Context, account, eventID, reason string,
 ) error {
@@ -90,14 +111,50 @@ func buildCardWebhookProcessor(
 	store *cards.PgStore,
 	accounts []cards.Account,
 	provider secrets.SecretProvider,
+	logger *slog.Logger,
 ) *cardWebhookProcessor {
 	if cfg.Mode == cardsModeOff || store == nil || len(accounts) == 0 {
 		return nil
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	// 同步器在这里只用它的定向刷新：周期同步仍然只在 worker 里跑，
 	// API 进程不注册任何周期任务。
 	syncer := cards.NewSyncer(accounts, store, cards.SyncOptions{})
-	return &cardWebhookProcessor{provider: provider, store: store, syncer: syncer}
+	return &cardWebhookProcessor{
+		provider: provider, store: store, syncer: syncer, logger: logger,
+		notifier: cardNotifier(provider),
+	}
+}
+
+// cardNotifier 构造推送器。
+//
+// **地址每次调用时解析**：它是凭据（URL 里就带 key），运营在管理端轮换后
+// 下一条推送就该用新值，而不是等进程重启。
+//
+// 用独立的引用而不是复用 alerts 那条：卡片推送里会出现 3DS 验证码，
+// 而告警群通常人更多。分开两条引用，运营可以把卡片推送指到一个只有自己的
+// 群；想用同一个群时把同一个地址填两遍即可。
+func cardNotifier(provider secrets.SecretProvider) cards.Notifier {
+	if provider == nil {
+		return nil
+	}
+	ref, err := secrets.ParseCredentialRef(cardNotifyWebhookRef)
+	if err != nil {
+		return nil
+	}
+	return cards.NewWeComNotifier(func(ctx context.Context) (string, error) {
+		value, err := provider.Resolve(ctx, ref, "card event notification")
+		if err != nil {
+			return "", err
+		}
+		endpoint := strings.TrimSpace(value.Reveal())
+		if endpoint == "" {
+			return "", fmt.Errorf("推送地址为空")
+		}
+		return endpoint, nil
+	}, nil)
 }
 
 // cardWebhookOrNil 把「未装配」如实变成接口的 nil。

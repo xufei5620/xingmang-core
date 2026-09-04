@@ -315,6 +315,13 @@ func cardAccountIDs(svc *cards.Service) []string {
 // 运营在那一页填值与轮换，写进去的就是 SecretProvider 读的文件——
 // 所以「加一个账号」只需要改 XM_CARDS_ACCOUNTS，凭据在界面上补，不用改代码、
 // 不用登服务器写文件。
+// cardNotifyWebhookRef 是卡片事件推送的目标地址（企业微信群机器人 Webhook）。
+//
+// 与 alerts 那条分开：卡片推送里会出现 3DS 验证码，而告警群通常人更多。
+// 分成两条引用，运营可以把卡片推送指到一个只有自己的群；想用同一个群时
+// 把同一个地址填两遍即可。
+const cardNotifyWebhookRef = "secret://cards/notify-webhook"
+
 func cardExpectedCredentials(cfg cardsConfig) []credentials.ExpectedRef {
 	out := make([]credentials.ExpectedRef, 0, len(cfg.Accounts)*3)
 	for _, a := range cfg.Accounts {
@@ -336,6 +343,11 @@ func cardExpectedCredentials(cfg cardsConfig) []credentials.ExpectedRef {
 			},
 		)
 	}
+	// 推送地址与账号无关，只登记一条。没配就不推送，不影响任何其他功能。
+	out = append(out, credentials.ExpectedRef{
+		Ref: cardNotifyWebhookRef, Platform: "infini",
+		Purpose: "卡片事件推送的企业微信群机器人 Webhook（含 3DS 验证码，建议指向只有自己的群）",
+	})
 	return out
 }
 
