@@ -1,6 +1,6 @@
 # XM-INV-SHADOW-EVAL-VACUOUS: the shadow evaluation has never exercised a projection
 
-- **status:** implemented 2026-09-05, not yet exercised against a real backup. Filed 2026-09-04 from the RC88 rehearsal.
+- **status:** implemented 2026-09-05; the unchanged half is verified against a real backup, the new half needs RC92. Filed 2026-09-04 from the RC88 rehearsal.
 - **branch:** ai/claude/XM-INV-AUTOLOGIN.
 - **found in production rehearsal**, 2026-09-04, while gating XM-INV-OVERAGE-CARRY-FORWARD.
 
@@ -166,3 +166,51 @@ instead of predicting what the seed helper wrote.
   touching the evaluator, the projection, or a migration feeding either. Until
   that line exists in the template, this is a capability, not a gate.
 - `XM-INV-CATCHUP-BURST-BACKPRESSURE` remains untouched.
+
+## Real-backup run, 2026-09-05
+
+Ran the modified rehearsal scripts against backup `invoice-20260904T184003Z`
+with the **rc91** tools image, deliberately without `--reproject-all` — the
+flag lives in the tool binary, and rc91's image predates it. Report:
+`/root/invoice-system/rehearsals/20260904T203559Z-1390425/`.
+
+Verified:
+
+- The restore → verify → migrate → drain → report chain still works with the
+  edited scripts. Exit 0.
+- **The two verdict implementations agree on a real report**, not just on
+  fixtures: `verdict=ready (independently recomputed; tool process exit was
+  0)`. The new `shadow_eval_run_was_vacuous` does not misfire on a report that
+  carries neither `reproject_all_requested` nor `accounts_projected` — both
+  keys confirmed absent, both scalars read empty, condition correctly false.
+  Reports already on disk from earlier rehearsals stay readable.
+- Migration 0025 applies cleanly to a restored production backup.
+
+And it captured the defect itself, in full:
+
+```
+accounts before: 8   after: 8
+before == after : True
+rounds_run: 1    queue_drained: True
+matched 3251 / negative_frozen 429 / positive_blip_ignored 220 /
+positive_classified_non_cash 10 / source_gap_frozen 8   -- identical either side
+```
+
+That is the exact report shape RC78, RC79 and RC88 were gated on. Eight
+accounts, none projected, verdict "ready".
+
+**Not verified, and this is the whole point of the slice:** the enqueue and
+the vacuity block. Both live in the tool binary, so they need an image built
+from this commit.
+
+### Acceptance for RC92
+
+Add to RC92's Task 3, as an explicit one-off verification of this gate rather
+than a routine step:
+
+- [ ] Run the shadow evaluation with `--reproject-all` against the newest
+      signed backup. Require `accounts_enqueued` == `accounts_projected` == the
+      row count of `source_account_eligibility_state` (8 at the time of
+      writing). If `accounts_projected` is 0 the verdict must be `not_ready`
+      with exit 3 — that outcome is the gate working, not the release failing,
+      and it means this slice did not do its job.
