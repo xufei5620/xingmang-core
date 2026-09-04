@@ -2393,10 +2393,16 @@ shipped an evaluator or migration change past a "ready" verdict produced that
 way, with `before` and `after` byte-identical (XM-INV-SHADOW-EVAL-VACUOUS).
 
 With the flag, the run queues one job per account at that account's own
-`finalized_through` before taking its baseline, and the report carries
-`accounts_enqueued` and `accounts_projected`. If `accounts_projected` is zero
-the verdict is `not_ready` (exit 3) — a run that was asked to reproject
-everything and reprojected nothing must never read as a pass.
+`finalized_through` before taking its baseline — retargeting any job the
+backup already held for the account unless it is `dead` (a continuously
+consuming account always has a queued job at backup time, requested through
+a window the frozen copy can never cover; left as captured it would only
+ever return `BALANCE_PROOF_PENDING`) — and the report carries
+`accounts_enqueued`, `accounts_projected`, and `pending_accounts` naming any
+job still queued when the drain stopped and why. If `accounts_projected` is
+zero the verdict is `not_ready` (exit 3) — a run that was asked to reproject
+everything and reprojected nothing must never read as a pass. A non-empty
+`pending_accounts` is informational, not a failure.
 
 Do not read `rounds_run` as evidence that the rehearsal did anything.
 Production has eight accounts and the batch limit is twenty-five, so a

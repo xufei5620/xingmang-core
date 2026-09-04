@@ -269,17 +269,65 @@ func (s *Store) EligibilityShadowFailedJobs(ctx context.Context) ([]EligibilityS
 // forwards; the account ends where it started, having recomputed everything
 // in between with the candidate's code.
 //
-// ON CONFLICT DO NOTHING leaves any pre-existing job untouched, including a
-// status='dead' one: this must add work, never quietly reset the state the
-// restored backup captured.
+// A pre-existing job that is not dead is retargeted to the account's own
+// boundary rather than left alone (RC92 finding). A continuously-consuming
+// account always has a queued job at backup time, requested through a window
+// whose tail no balances cycle in the frozen copy will ever cover, so left as
+// captured it is claimed once, returns BALANCE_PROOF_PENDING, and the account
+// -- the one whose reprojection matters most -- is the one the rehearsal
+// never exercises. Requested at its own finalized_through the proof has no
+// uncovered visibility to wait on and the replay runs. A status='dead' row is
+// still left untouched: that terminal grade exists so a persistently failing
+// account stops being retried until an operator looks, and a rehearsal must
+// not quietly revive it. The returned count includes retargeted rows.
 func (s *Store) EnqueueEligibilityShadowReprojection(ctx context.Context) (int64, error) {
 	command, err := s.pool.Exec(ctx, `
 		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
 		SELECT external_account_id,finalized_through,'queued',now()-interval '1 second'
 		FROM source_account_eligibility_state
-		ON CONFLICT (external_account_id) DO NOTHING`)
+		ON CONFLICT (external_account_id) DO UPDATE SET
+			requested_through=EXCLUDED.requested_through,status='queued',
+			next_attempt_at=EXCLUDED.next_attempt_at,lease_token=NULL,lease_expires_at=NULL,
+			last_error_code=NULL,attempt_count=0,updated_at=now()
+		WHERE eligibility_projection_jobs.status<>'dead'`)
 	if err != nil {
 		return 0, err
 	}
 	return command.RowsAffected(), nil
+}
+
+// EligibilityShadowPendingJob is one eligibility_projection_jobs row still
+// present after the drain that is not dead: a job the drain could not finish,
+// usually because it was requeued with backoff (BALANCE_PROOF_PENDING) and its
+// next attempt lies beyond the drain's "nothing claimable" exit. Without this
+// list the report can only say "7 of 8"; with it, it says which account and
+// why.
+type EligibilityShadowPendingJob struct {
+	ExternalAccountID string
+	Status            string
+	LastErrorCode     string
+	AttemptCount      int64
+	RequestedThrough  time.Time
+	NextAttemptAt     time.Time
+}
+
+// EligibilityShadowPendingJobs lists every non-dead job row left after the
+// drain. Read-only; the dead rows are EligibilityShadowFailedJobs' concern.
+func (s *Store) EligibilityShadowPendingJobs(ctx context.Context) ([]EligibilityShadowPendingJob, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT external_account_id::text,status,COALESCE(last_error_code,''),attempt_count,requested_through,next_attempt_at
+		FROM eligibility_projection_jobs WHERE status<>'dead' ORDER BY external_account_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []EligibilityShadowPendingJob
+	for rows.Next() {
+		var job EligibilityShadowPendingJob
+		if err = rows.Scan(&job.ExternalAccountID, &job.Status, &job.LastErrorCode, &job.AttemptCount, &job.RequestedThrough, &job.NextAttemptAt); err != nil {
+			return nil, err
+		}
+		pending = append(pending, job)
+	}
+	return pending, rows.Err()
 }

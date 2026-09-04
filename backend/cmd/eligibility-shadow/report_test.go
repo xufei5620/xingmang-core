@@ -364,3 +364,44 @@ func TestEvaluateReadinessVacuityIsCheckedBeforeFreezeComparison(t *testing.T) {
 		t.Fatalf("vacuity must be reported ahead of the freeze comparison, got %q", report.VerdictReason)
 	}
 }
+
+// RC92 finding: the report could only say "7 of 8 projected". PendingAccounts
+// says which account and why, on the same nil-means-none contract as
+// FailedAccounts (deploy/rehearsal/shadow-eval-lib.sh counts it for the human
+// summary and never reads it for a verdict).
+func TestPendingAccountsMarshalNullWhenNoneAndArrayWhenPresent(t *testing.T) {
+	empty, err := json.Marshal(Report{PendingAccounts: toReportPendingAccounts(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(empty), `"pending_accounts":null`) {
+		t.Fatalf("no pending accounts must marshal as null, got %s", empty)
+	}
+	populated, err := json.Marshal(Report{PendingAccounts: toReportPendingAccounts([]postgresstore.EligibilityShadowPendingJob{
+		{ExternalAccountID: "40bd883d", Status: "queued", LastErrorCode: "BALANCE_PROOF_PENDING", AttemptCount: 1},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(populated), `"pending_accounts":[{"external_account_id":"40bd883d","status":"queued","last_error_code":"BALANCE_PROOF_PENDING"`) {
+		t.Fatalf("pending accounts must marshal as an array of objects, got %s", populated)
+	}
+}
+
+func TestEvaluateReadinessIgnoresPendingAccounts(t *testing.T) {
+	// A proof-pending job is not a projection error: on a frozen copy a
+	// continuously-consuming account can never pass the carry-forward proof,
+	// and reporting it must not block a release the way a dead job does.
+	report := Report{
+		ReprojectAllRequested: true,
+		AccountsEnqueued:      8,
+		AccountsProjected:     7,
+		PendingAccounts:       []PendingAccount{{ExternalAccountID: "40bd883d", Status: "queued", LastErrorCode: "BALANCE_PROOF_PENDING"}},
+		Before:                Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+		After:                 Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+	}
+	EvaluateReadiness(&report)
+	if report.Verdict != VerdictReady || report.HasProjectionErrors {
+		t.Fatalf("pending accounts must not block readiness, got verdict=%q errors=%v", report.Verdict, report.HasProjectionErrors)
+	}
+}

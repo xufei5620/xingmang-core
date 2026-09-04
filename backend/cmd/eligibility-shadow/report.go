@@ -57,6 +57,20 @@ type FailedAccount struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+// PendingAccount is one account whose projection job was still present, and
+// not dead, when the drain stopped -- typically requeued with backoff
+// (BALANCE_PROOF_PENDING) past the drain's "nothing claimable" exit. It is
+// informational: a pending job is not a projection error, but "7 of 8
+// projected" must be able to say which account and why without a database.
+type PendingAccount struct {
+	ExternalAccountID string    `json:"external_account_id"`
+	Status            string    `json:"status"`
+	LastErrorCode     string    `json:"last_error_code"`
+	AttemptCount      int64     `json:"attempt_count"`
+	RequestedThrough  time.Time `json:"requested_through"`
+	NextAttemptAt     time.Time `json:"next_attempt_at"`
+}
+
 // Snapshot is one point-in-time read of account/freeze/evaluation state.
 type Snapshot struct {
 	Accounts    []AccountStatus   `json:"accounts"`
@@ -128,6 +142,10 @@ type Report struct {
 
 	FailedAccounts []FailedAccount `json:"failed_accounts"`
 	RoundErrors    []string        `json:"round_errors"`
+	// PendingAccounts follows the same nil-means-none contract as the two
+	// fields above; deploy/rehearsal/shadow-eval-lib.sh never reads it for a
+	// verdict, only to print a count in the human summary.
+	PendingAccounts []PendingAccount `json:"pending_accounts"`
 
 	NewFreezeReasons    []string `json:"new_freeze_reasons"`
 	HasProjectionErrors bool     `json:"has_projection_errors"`
@@ -272,6 +290,22 @@ func toReportFailedAccounts(failed []postgresstore.EligibilityShadowFailedJob) [
 		result = append(result, FailedAccount{
 			ExternalAccountID: job.ExternalAccountID, LastErrorCode: job.LastErrorCode,
 			AttemptCount: job.AttemptCount, UpdatedAt: job.UpdatedAt,
+		})
+	}
+	return result
+}
+
+// toReportPendingAccounts follows toReportFailedAccounts' nil-means-none
+// contract for the same reason (see its comment).
+func toReportPendingAccounts(pending []postgresstore.EligibilityShadowPendingJob) []PendingAccount {
+	if len(pending) == 0 {
+		return nil
+	}
+	result := make([]PendingAccount, 0, len(pending))
+	for _, job := range pending {
+		result = append(result, PendingAccount{
+			ExternalAccountID: job.ExternalAccountID, Status: job.Status, LastErrorCode: job.LastErrorCode,
+			AttemptCount: job.AttemptCount, RequestedThrough: job.RequestedThrough, NextAttemptAt: job.NextAttemptAt,
 		})
 	}
 	return result

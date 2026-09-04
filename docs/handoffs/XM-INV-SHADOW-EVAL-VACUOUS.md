@@ -1,6 +1,6 @@
 # XM-INV-SHADOW-EVAL-VACUOUS: the shadow evaluation has never exercised a projection
 
-- **status:** implemented and verified on RC92 (2026-09-05): 7 of 8 accounts reprojected on a real backup, the eighth proof-pending by structure; two follow-ups at the end of this document. Filed 2026-09-04 from the RC88 rehearsal.
+- **status:** implemented and verified on RC92 (2026-09-05): 7 of 8 accounts reprojected on a real backup, the eighth proof-pending by structure; both follow-ups implemented the same day (see the end of this document), pending an RC93 rehearsal to show the eighth account moving. Filed 2026-09-04 from the RC88 rehearsal.
 - **branch:** ai/claude/XM-INV-AUTOLOGIN.
 - **found in production rehearsal**, 2026-09-04, while gating XM-INV-OVERAGE-CARRY-FORWARD.
 
@@ -248,3 +248,18 @@ Two follow-ups, both small:
    — the account whose reprojection matters most — be exercised on a copy.
    `EnqueueEligibilityShadowReprojection` already computes per account; the
    cap is one more subquery, and the existing integration tests pin the rest.
+
+### Follow-ups implemented, 2026-09-05
+
+1. `pending_accounts` in the report: every non-dead job row left when the
+   drain stopped, with status, `last_error_code`, attempt count and
+   `requested_through`. The bash summary prints the count; the verdict
+   ignores it (a proof-pending job is not a projection error).
+2. `--reproject-all` now retargets a pre-existing non-dead job to the
+   account's own `finalized_through` (status queued, backoff and lease
+   cleared) instead of leaving it as captured. A dead job is still left
+   alone. Pinned by `TestEnqueueEligibilityShadowReprojectionRetargetsAQueuedJobToTheAccountsOwnBoundary`.
+
+Expected on the next rehearsal: `accounts_enqueued = accounts_projected = 8`,
+`pending_accounts` null. If the whale still lands in `pending_accounts`, the
+reason will be in the row.

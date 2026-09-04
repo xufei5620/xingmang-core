@@ -282,3 +282,76 @@ func TestEnqueueEligibilityShadowReprojectionLeavesExistingJobsUntouched(t *test
 		t.Fatalf("dead job was modified: status=%q requested_through=%s", status, requested)
 	}
 }
+
+// RC92 finding: the whale had a queued job in the backup, requested through a
+// window a frozen copy could never cover, so ON CONFLICT DO NOTHING left the
+// one account that matters most unexercised. A non-dead job is now retargeted
+// to the account's own boundary: claimable at once, backoff and lease cleared.
+func TestEnqueueEligibilityShadowReprojectionRetargetsAQueuedJobToTheAccountsOwnBoundary(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	account := "60000000-0000-4000-8000-0000000000e1"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, account, "reproject-retarget", cutover, manifestHash, configHash)
+	boundary := cutover.Add(3 * time.Hour)
+	if _, err := store.pool.Exec(ctx, `UPDATE source_account_eligibility_state SET finalized_through=$2 WHERE external_account_id=$1`, account, boundary); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	// Queued, backed off ten minutes into the future with a proof-pending
+	// error and three attempts: the shape a continuously-consuming account's
+	// job has at backup time.
+	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, account, "queued", 3, strPtr("BALANCE_PROOF_PENDING"), now, now, now.Add(10*time.Minute))
+
+	enqueued, err := store.EnqueueEligibilityShadowReprojection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accounts int64
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state`).Scan(&accounts); err != nil {
+		t.Fatal(err)
+	}
+	if enqueued != accounts {
+		t.Fatalf("a retargeted row must count as enqueued: expected %d, got %d", accounts, enqueued)
+	}
+	var status string
+	var lastError *string
+	var attempts int64
+	var requested, next time.Time
+	if err = store.pool.QueryRow(ctx, `SELECT status,last_error_code,attempt_count,requested_through,next_attempt_at
+		FROM eligibility_projection_jobs WHERE external_account_id=$1`, account).Scan(&status, &lastError, &attempts, &requested, &next); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || lastError != nil || attempts != 0 || !requested.Equal(boundary) || next.After(time.Now().UTC()) {
+		t.Fatalf("job was not retargeted to the account's own boundary: status=%q err=%v attempts=%d requested=%s next=%s", status, lastError, attempts, requested, next)
+	}
+	claimable, err := store.EligibilityProjectionClaimableCount(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimable != accounts {
+		t.Fatalf("expected every job claimable at once (%d), got %d", accounts, claimable)
+	}
+}
+
+func TestEligibilityShadowPendingJobsListsNonDeadRowsWithTheirReason(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	pendingAccount := "60000000-0000-4000-8000-0000000000f1"
+	deadAccount := "60000000-0000-4000-8000-0000000000f2"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, pendingAccount, "pending-listing", cutover, manifestHash, configHash)
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, deadAccount, "dead-listing", cutover, manifestHash, configHash)
+	now := time.Now().UTC().Truncate(time.Second)
+	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, pendingAccount, "queued", 2, strPtr("BALANCE_PROOF_PENDING"), now, now, now.Add(5*time.Minute))
+	seedEligibilityProjectionJobRow(t, store, ctx, deadAccount, "dead", strPtr("PROJECTION_DEAD"), now, now, now)
+
+	pending, err := store.EligibilityShadowPendingJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Account, status and reason are what a reader needs; the attempt count is
+	// whatever the row holds (the shared seed helper sets it itself) and is
+	// only asserted to be carried through, not to be a particular number.
+	if len(pending) != 1 || pending[0].ExternalAccountID != pendingAccount || pending[0].LastErrorCode != "BALANCE_PROOF_PENDING" || pending[0].Status != "queued" || pending[0].AttemptCount <= 0 {
+		t.Fatalf("expected exactly the queued proof-pending job, got %+v", pending)
+	}
+}

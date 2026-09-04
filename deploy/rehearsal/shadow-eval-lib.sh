@@ -336,6 +336,7 @@ shadow_eval_human_summary() {
   # be misread as an unclosed array.
   round_error_count=$(awk '/"round_errors": \[$/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}"/{n++} END{print n+0}' "$report")
   failed_account_count=$(awk '/"failed_accounts": \[$/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}\{/{n++} END{print n+0}' "$report")
+  pending_account_count=$(awk '/"pending_accounts": \[$/{c=1;next} c&&/^ {2}\],?$/{exit} c&&/^ {4}\{/{n++} END{print n+0}' "$report")
   migrations_applied=$(_shadow_eval_migrations_applied "$report" | paste -sd ',' - | sed 's/,/, /g')
 
   printf 'XM-INV-SHADOW-EVAL rehearsal report\n'
@@ -353,4 +354,5 @@ shadow_eval_human_summary() {
   printf '  new freeze reasons:  %s\n' "$new_reasons"
   printf '  round errors:        %s\n' "$round_error_count"
   printf '  failed accounts:     %s\n' "$failed_account_count"
+  printf '  pending accounts:    %s\n' "$pending_account_count"
 }

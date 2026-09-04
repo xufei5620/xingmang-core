@@ -230,6 +230,11 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 		return report, fmt.Errorf("list failed projection jobs: %w", err)
 	}
 	report.FailedAccounts = toReportFailedAccounts(failed)
+	pending, err := store.EligibilityShadowPendingJobs(ctx)
+	if err != nil {
+		return report, fmt.Errorf("list pending projection jobs: %w", err)
+	}
+	report.PendingAccounts = toReportPendingAccounts(pending)
 
 	EvaluateReadiness(&report)
 	return report, nil
