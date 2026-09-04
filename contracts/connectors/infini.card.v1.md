@@ -61,8 +61,15 @@ Authorization: Signature keyId="{keyId}",algorithm="hmac-sha256",
 `path` 含查询串。请求体不参与签名——这一条反直觉，已由
 `TestNewRequestBodyDoesNotAffectSignature` 钉住。
 
-凭据经 CredentialRef 注入，scope `infini-prod`，两个 name：
-`api-key-id`、`api-key-secret`。scope 需在部署配置登记后方可使用（ADR-014）。
+凭据经 CredentialRef 注入。**引用由账号 id 推出，不单独配置**：
+`secret://infini-<账号id小写>/api-key-id` 与 `.../api-secret`。
+
+**值在管理端「人员与权限 → 密钥引用」页填写与轮换**（`credential.secret.upsert`
+/ `credential.secret.rotate` 两个既有 Action），那一页写进去的就是
+SecretProvider 读的文件——不用登服务器手写，也不用改环境变量。
+
+keyId 与 secret 分成两个引用是为了让它们能各自轮换。keyId 是公开半边
+（每次请求都明文放在 `Authorization` 头里），secret 才是真正的秘密。
 
 `card.create` 与 `card.reveal` 两项权限在上游侧**要求 IP 白名单**，平台出口 IP
 必须固定。

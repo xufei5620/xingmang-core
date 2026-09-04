@@ -100,6 +100,9 @@ type Deps struct {
 	Cards CardQuerier
 	// CardAccounts 是已配置的账号清单，供管理端的开卡表单填下拉。
 	CardAccounts []string
+	// ExtraExpectedCredentials 是运行时才知道的预期凭据引用（卡片账号等），
+	// 与 credentials.ExpectedRefs() 的固定清单合并后一起显示在密钥引用页。
+	ExtraExpectedCredentials []credentials.ExpectedRef
 	// CardSyncInterval 供新鲜度判定；为零时用 5 分钟兜底。
 	CardSyncInterval time.Duration
 
@@ -402,7 +405,8 @@ func NewRouter(d Deps) http.Handler {
 				api.With(RequireScope(credentials.ScopeManage)).
 					Get("/credentials", ListCredentialsHandler(d.Credentials))
 				api.With(RequireScope(credentials.ScopeManage)).
-					Get("/credentials/expected", ListExpectedCredentialsHandler(d.Credentials))
+					Get("/credentials/expected",
+						ListExpectedCredentialsHandler(d.Credentials, d.ExtraExpectedCredentials))
 				api.With(RequireScope(credentials.ScopeConnectorManage)).
 					Get("/connectors/config", ListConnectorConfigsHandler(d.Credentials))
 			}

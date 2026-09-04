@@ -58,7 +58,7 @@ func buildCardSyncer(
 		case "fake":
 			client = infini.NewFake()
 		case "real":
-			realClient, err := workerInfiniClient(baseURL, id, provider, getenv)
+			realClient, err := workerInfiniClient(baseURL, id, provider)
 			if err != nil {
 				return nil, fmt.Errorf("账号 %s: %w", id, err)
 			}
@@ -112,17 +112,17 @@ func workerAccountIDs(raw string) ([]string, error) {
 func workerInfiniClient(
 	baseURL, id string,
 	provider secrets.SecretProvider,
-	getenv func(string) string,
 ) (*infini.Client, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("real 模式需要 SecretProvider")
 	}
 
-	keyIDRaw := strings.TrimSpace(getenv("XM_CARDS_" + id + "_KEY_ID_REF"))
-	secretRaw := strings.TrimSpace(getenv("XM_CARDS_" + id + "_SECRET_REF"))
-	if baseURL == "" || keyIDRaw == "" || secretRaw == "" {
-		return nil, fmt.Errorf("real 模式需要 XM_CARDS_BASE_URL 与 XM_CARDS_%s_{KEY_ID_REF,SECRET_REF}", id)
+	if baseURL == "" {
+		return nil, fmt.Errorf("real 模式需要 XM_CARDS_BASE_URL")
 	}
+	// 引用由账号 id 推出，与 API 侧同一条推导——两边必须落在同一个 scope，
+	// 否则管理端写进一个目录、worker 读另一个目录。
+	keyIDRaw, secretRaw := cards.CredentialRefsFor(id)
 
 	keyIDRef, err := secrets.ParseCredentialRef(keyIDRaw)
 	if err != nil {

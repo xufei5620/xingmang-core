@@ -458,9 +458,12 @@ func main() {
 		CPAKeys: cpaKeys,
 		// nil 时卡片只读端点整组不挂载（XM_CARDS_MODE=off）。
 		// 写路径只走 cards.card.* Action，这里不开第二条。
-		Cards:            cardQuerierOrNil(cardStore),
-		CardAccounts:     cardAccountIDs(cardService),
-		CardSyncInterval: cardsCfg.SyncInterval,
+		Cards:        cardQuerierOrNil(cardStore),
+		CardAccounts: cardAccountIDs(cardService),
+		// 卡片账号的凭据引用进密钥引用页：运营在那里填值与轮换，
+		// 写进去的就是 SecretProvider 读的文件。
+		ExtraExpectedCredentials: cardExpectedCredentials(cardsCfg),
+		CardSyncInterval:         cardsCfg.SyncInterval,
 		// 凭据登记的读与写共用同一个仓储：清单里只有指纹与可用性，没有值
 		Credentials: credentialStore,
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler

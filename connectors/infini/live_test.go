@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/connectors/infini"
+	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
@@ -39,12 +40,13 @@ func TestLiveReadOnlyProbe(t *testing.T) {
 	}
 
 	baseURL := strings.TrimSpace(os.Getenv("XM_CARDS_BASE_URL"))
-	keyIDRaw := strings.TrimSpace(os.Getenv("XM_CARDS_KEY_ID_REF"))
-	secretRaw := strings.TrimSpace(os.Getenv("XM_CARDS_SECRET_REF"))
+	account := strings.TrimSpace(os.Getenv("XM_CARDS_ACCOUNT"))
 	secretRoot := strings.TrimSpace(os.Getenv("XM_SECRET_ROOT"))
-	if baseURL == "" || keyIDRaw == "" || secretRaw == "" || secretRoot == "" {
-		t.Fatal("需要 XM_CARDS_BASE_URL / XM_CARDS_KEY_ID_REF / XM_CARDS_SECRET_REF / XM_SECRET_ROOT")
+	if baseURL == "" || account == "" || secretRoot == "" {
+		t.Fatal("需要 XM_CARDS_BASE_URL / XM_CARDS_ACCOUNT / XM_SECRET_ROOT")
 	}
+	keyIDRaw, secretRaw := cards.CredentialRefsFor(account)
+	t.Logf("账号 %s 的凭据引用：%s / %s", account, keyIDRaw, secretRaw)
 
 	keyIDRef, err := secrets.ParseCredentialRef(keyIDRaw)
 	if err != nil {

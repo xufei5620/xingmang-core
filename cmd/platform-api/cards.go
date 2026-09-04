@@ -13,6 +13,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/infini"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
+	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
@@ -52,10 +53,12 @@ func parseCardsMode(s string) (cardsMode, error) {
 var accountIDPattern = regexp.MustCompile(`^[A-Z0-9_]{1,32}$`)
 
 // cardsAccountConfig 是单个账号的配置。
+//
+// **凭据引用不在这里配**：它由账号 id 推出（cards.CredentialRefsFor），
+// 值由运营在管理端「密钥引用」页填写与轮换，写进去的就是 SecretProvider
+// 读的那个文件。少两个环境变量就是少两处可以配错的地方。
 type cardsAccountConfig struct {
-	ID        string
-	KeyIDRef  string
-	SecretRef string
+	ID string
 	// 金额上限按账号各配一份：两个账号的资金是分开的。
 	PerOperationLimit string
 	PerDayLimit       string
@@ -103,8 +106,6 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 	for _, id := range ids {
 		acct := cardsAccountConfig{
 			ID:                id,
-			KeyIDRef:          strings.TrimSpace(getenv("XM_CARDS_" + id + "_KEY_ID_REF")),
-			SecretRef:         strings.TrimSpace(getenv("XM_CARDS_" + id + "_SECRET_REF")),
 			PerOperationLimit: strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_OPERATION")),
 			PerDayLimit:       strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_DAY")),
 		}
@@ -114,16 +115,6 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 		var missing []string
 		if acct.PerOperationLimit == "" || acct.PerDayLimit == "" {
 			missing = append(missing, "XM_CARDS_"+id+"_LIMIT_PER_OPERATION 与 _LIMIT_PER_DAY")
-		}
-		if mode == cardsModeReal {
-			// real 模式下凭据引用也不能少。启动期硬拒绝，而不是等到有人
-			// 点开卡时才发现——那时的错误会长得像上游故障。
-			if acct.KeyIDRef == "" {
-				missing = append(missing, "XM_CARDS_"+id+"_KEY_ID_REF")
-			}
-			if acct.SecretRef == "" {
-				missing = append(missing, "XM_CARDS_"+id+"_SECRET_REF")
-			}
 		}
 		if len(missing) > 0 {
 			return cardsConfig{}, fmt.Errorf(
@@ -227,13 +218,17 @@ func newInfiniClient(
 		return nil, fmt.Errorf("real 模式需要 SecretProvider")
 	}
 
-	keyIDRef, err := secrets.ParseCredentialRef(acct.KeyIDRef)
+	// 引用由账号 id 推出，值在管理端填。启动期不校验「值存不存在」——
+	// 那是运营还没填的正常状态，不该拦住进程启动；真去调用时会报 auth，
+	// 而密钥引用页上那条会显示成「未配置」。
+	keyIDRaw, secretRaw := cards.CredentialRefsFor(acct.ID)
+	keyIDRef, err := secrets.ParseCredentialRef(keyIDRaw)
 	if err != nil {
-		return nil, fmt.Errorf("KEY_ID_REF: %w", err)
+		return nil, fmt.Errorf("keyId 引用 %q: %w", keyIDRaw, err)
 	}
-	secretRef, err := secrets.ParseCredentialRef(acct.SecretRef)
+	secretRef, err := secrets.ParseCredentialRef(secretRaw)
 	if err != nil {
-		return nil, fmt.Errorf("SECRET_REF: %w", err)
+		return nil, fmt.Errorf("secret 引用 %q: %w", secretRaw, err)
 	}
 
 	host, err := hostFromBaseURL(baseURL)
@@ -289,4 +284,27 @@ func cardAccountIDs(svc *cards.Service) []string {
 		return nil
 	}
 	return svc.AccountIDs()
+}
+
+// cardExpectedCredentials 把配置的账号翻成密钥引用页要显示的条目。
+//
+// 运营在那一页填值与轮换，写进去的就是 SecretProvider 读的文件——
+// 所以「加一个账号」只需要改 XM_CARDS_ACCOUNTS，凭据在界面上补，不用改代码、
+// 不用登服务器写文件。
+func cardExpectedCredentials(cfg cardsConfig) []credentials.ExpectedRef {
+	out := make([]credentials.ExpectedRef, 0, len(cfg.Accounts)*2)
+	for _, a := range cfg.Accounts {
+		keyIDRef, secretRef := cards.CredentialRefsFor(a.ID)
+		out = append(out,
+			credentials.ExpectedRef{
+				Ref: keyIDRef, Platform: "infini",
+				Purpose: "Infini 账号 " + a.ID + " 的 API keyId（公开半边，进 Authorization 头）",
+			},
+			credentials.ExpectedRef{
+				Ref: secretRef, Platform: "infini",
+				Purpose: "Infini 账号 " + a.ID + " 的 API 私钥（签名用，绝不回前端）",
+			},
+		)
+	}
+	return out
 }

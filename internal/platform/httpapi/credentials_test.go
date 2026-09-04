@@ -140,7 +140,7 @@ func TestListCredentialsStoreFailureIsSafe(t *testing.T) {
 
 func TestListExpectedCredentialsMarksConfigured(t *testing.T) {
 	store := &fakeCredentialQuerier{items: credentialFixtures()}
-	rec := callCredentials(t, ListExpectedCredentialsHandler(store), "/api/v1/credentials/expected", credentialPrincipal(credentials.ScopeManage))
+	rec := callCredentials(t, ListExpectedCredentialsHandler(store, nil), "/api/v1/credentials/expected", credentialPrincipal(credentials.ScopeManage))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
