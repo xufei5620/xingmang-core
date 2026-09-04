@@ -38,3 +38,40 @@
 - [ ] Confirm the embedded console frame grows with its content: the 用户账本 table should render without the frame's own scrollbar.
 
 Production remains blocked until a 30-minute readiness watch binds RC87.
+
+## Execution record (2026-09-04)
+
+- Task 1: identity bump `705beb4` over `ee5add9` (XM-INV-CATCHUP-RELEASE) and `0e553b5` (XM-INV-EMBED-HEIGHT). Every gate exit 0: backend build/vet, full unit suite, integration suite against the disposable PostgreSQL 18, agents module tests, web typecheck/tests/build, gate self-test, shadow static test, release-range gitleaks. The self-test refused the bump once, correctly: the plan above was missing the verbatim phrase the guard requires about not manually parsing manifest decisions. Tag `v0.1.0-rc87-signed` created, verified, peeling to HEAD.
+- Task 2: `release/0.1.0-rc87-exact1` first try: image gate 42, ordinary and strict verifiers 0 and 0.
+- Task 3: transfer verified on the host; staging loaded nine images and verified the tag and evidence signatures; release env carried over from RC86 with `INVOICE_IMAGE_TAG=0.1.0-rc87` and `SOURCE_AGENT_VERSION=0.3.2`. Shadow evaluation skipped by rule. Fresh signed pre-deploy backup `invoice-20260904T033226Z`, signing key on tmpfs and shredded after. Roll-forward PASS 03:36Z: 18 containers on rc87, healthz/readyz 200. Deployment record `rc87-deploy-20260904T033632Z`; `console_assertion_nonces` still `t|t|f|f`.
+
+### The canary did not pass, and the cause was the repair
+
+The 30-minute watch recorded 17 non-200 readiness probes: every probe from 04:00:23Z to the watch's end at 04:06:24Z, with the api log showing the condition persisting to about 04:17Z. Zero error lines, zero reconcile errors, normal cycle counts throughout.
+
+One batch on the sub2api `balances` stream was deferred every minute from 03:58:22Z to 04:14:03Z with "stream already has an active scan cycle", and two lock timeouts sit inside that window — the source-projection worker failing to mark a dependency wait on a balances event at 04:04:44Z, and a credits batch commit rejected at 04:14:55Z. A stream that cannot commit goes stale, and the readiness freshness gate answers 503.
+
+The trigger is the post-deploy repair itself. Clearing `catchup_key_hmac` released an account that had been excluded from finalization since 2026-09-01 12:14Z, so its first projection had three days of backlog to replay in a single pass — the audit shows that replay landing at 04:16:42Z as one `eligibility.projection.rebuilt` with 378 `pending_reconciliation.entered` rows behind it. That transaction contends for exactly the rows the ingest path needs.
+
+It resolved without intervention: the account's `finalized_through` reached 04:01:35Z, the projection job queue drained to zero, readiness returned to 200, and the balances watermark is current again.
+
+This is a real standing risk rather than a one-off — any future release of a long-excluded account repeats it. Follow-up filed as `docs/handoffs/XM-INV-CATCHUP-BURST-BACKPRESSURE.md`. A clean 30-minute watch was re-run afterwards to bind RC87 properly.
+
+### Post-deploy repair: what the account actually shows
+
+The four indicators the plan asks for, before and after:
+
+| indicator | before | after |
+| --- | --- | --- |
+| `finalized_through` | 2026-09-01 12:14:31, frozen | tracks real time (04:01:35Z and advancing) |
+| projection job | none ever enqueued | enqueued, ran, queue drained to zero |
+| checkpoint evaluation | stopped at 2026-09-01 12:14:31 | current |
+| `consumed_cash_minor` | 546 | 6186 |
+
+The third indicator was worded as "checkpoints leaving `pending_finalization`", which is not the signal it sounds like: that column stays `pending_finalization` after a checkpoint is evaluated, and the real evidence is rows in `balance_checkpoint_evaluations`. Read that way, the account is current.
+
+The recovered numbers reconcile against the upstream balance independently. Six cash top-ups totalling ¥70.00 (¥20 on 09-01, then ¥10 each on 09-03 ×3 and 09-04 ×2), ¥61.86 consumed oldest-lot-first, ¥8.14 left. The checkpoint at 03:55:37Z put our expected balance at 814359980 units — ¥8.1436 at this source's 1e8 units per yuan — against 812998180 reported upstream. The gap is ¥0.0136.
+
+That gap is why the account sits in `not_invoiceable_pending_reconciliation` with `pending_reconciliation_consecutive_matches` at 0 since 04:16:42Z, reason `UNKNOWN_NEGATIVE_BALANCE`. The state is self-clearing by design and needs consecutive matches to leave.
+
+Worth flagging to the owner rather than treating as settled: the three-day backlog contained 378 negative-balance checkpoints. This account habitually runs its balance to zero and tops up ¥10 at a time, so it will keep re-entering the pending state, and will be non-invoiceable for much of any given window. That is the eligibility rules working as written, not a defect, but it is a product question about whether small-balance accounts should be handled differently.
