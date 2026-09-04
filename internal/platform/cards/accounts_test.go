@@ -159,7 +159,7 @@ func TestSyncCoversEveryAccount(t *testing.T) {
 		key     string
 		fake    *infini.Fake
 	}{{"main", "u-main", a}, {"backup", "u-backup", b}} {
-		alias := AliasFor(tc.key)
+		alias := AliasFor(tc.key, "")
 		if _, err := tc.fake.ApplyCard(context.Background(), infini.ApplyCardRequest{
 			ProductID: 1, TopUpAmount: "10", TokenType: "USDT",
 			UserEmail: "o@e.com", HolderName: "A B", Alias: alias,
@@ -192,7 +192,7 @@ func TestSyncNeverMatchesCardFromAnotherAccount(t *testing.T) {
 	a := infini.NewFake()
 	b := infini.NewFake()
 
-	alias := AliasFor("u-cross")
+	alias := AliasFor("u-cross", "")
 	// 卡开在 main 上，但台账记的是 backup 账号的操作
 	if _, err := a.ApplyCard(context.Background(), infini.ApplyCardRequest{
 		ProductID: 1, TopUpAmount: "10", TokenType: "USDT",

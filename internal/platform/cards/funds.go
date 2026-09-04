@@ -78,7 +78,8 @@ func (s *Service) fundsOperation(
 		Kind:           kind,
 		State:          StatePending,
 		CardID:         req.CardID,
-		Alias:          AliasFor(req.IdempotencyKey),
+		// 资金操作没有用途标签；alias 在这里只当台账里的信标，不写给上游。
+		Alias:          AliasFor(req.IdempotencyKey, ""),
 		AmountText:     req.Amount,
 		TokenType:      req.TokenType,
 		StartedAt:      now,

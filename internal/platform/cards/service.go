@@ -169,7 +169,8 @@ func (s *Service) IssueCard(ctx context.Context, req IssueRequest) (IssueResult,
 		return IssueResult{}, err
 	}
 
-	alias := AliasFor(req.IdempotencyKey)
+	// 用途标签进 alias 的可读前缀：上游把 card_alias 当卡片名称显示。
+	alias := AliasFor(req.IdempotencyKey, req.OwnerRef)
 	op := Operation{
 		IdempotencyKey: req.IdempotencyKey,
 		Account:        acct.ID,

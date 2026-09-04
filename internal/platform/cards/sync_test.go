@@ -25,7 +25,7 @@ func TestSyncConvergesUnknownIssueWhenCardFound(t *testing.T) {
 	// 先让上游真的把卡开出来，但让平台侧以为自己不知道结果
 	app, err := fake.ApplyCard(context.Background(), infini.ApplyCardRequest{
 		ProductID: 1, TopUpAmount: "10", TokenType: "USDT",
-		UserEmail: "o@e.com", HolderName: "A B", Alias: AliasFor("issue-x"),
+		UserEmail: "o@e.com", HolderName: "A B", Alias: AliasFor("issue-x", ""),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestSyncConvergesUnknownIssueWhenCardFound(t *testing.T) {
 		Account:        testAccount,
 		Kind:           OpIssue,
 		State:          StateUnknown,
-		Alias:          AliasFor("issue-x"),
+		Alias:          AliasFor("issue-x", ""),
 		StartedAt:      issueNow.Add(-time.Minute),
 	}
 
@@ -64,7 +64,7 @@ func TestSyncEscalatesStaleUnknownWithoutMarkingFailed(t *testing.T) {
 		Account:        testAccount,
 		Kind:           OpIssue,
 		State:          StateUnknown,
-		Alias:          AliasFor("issue-y"),
+		Alias:          AliasFor("issue-y", ""),
 		StartedAt:      issueNow.Add(-31 * time.Minute),
 	}
 
@@ -118,7 +118,7 @@ func TestSyncKeepsUnknownIntactWhenUpstreamUnavailable(t *testing.T) {
 		Account:        testAccount,
 		Kind:           OpIssue,
 		State:          StateUnknown,
-		Alias:          AliasFor("issue-z"),
+		Alias:          AliasFor("issue-z", ""),
 		StartedAt:      issueNow.Add(-time.Minute),
 	}
 	fake.FailNext(connector.NewError(connector.KindUnavailable, "op", nil))
