@@ -120,16 +120,24 @@ function FundsForm({
  *
  *  卡面明文由后端按 card.reveal 权限决定回不回——前端只负责显示它拿到的
  *  东西，不做「本地隐藏」那种假控制。 */
+type DetailTab = "info" | "usage" | "topup" | "redeem" | "tx";
+
 export function CardDetailDialog({
   card,
   onWrite,
+  initialTab = "info",
+  triggerLabel = "详情",
 }: {
   card: CardItem;
   onWrite: (result: ActionResult) => void;
+  /** 打开时落在哪个页签。操作列的「充值」「赎回」直接跳到对应表单，
+   *  免得运营先开详情再找页签——对齐上游后台一键直达的体验。 */
+  initialTab?: DetailTab;
+  triggerLabel?: string;
 }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<"info" | "usage" | "topup" | "redeem" | "tx">("info");
+  const [tab, setTab] = useState<DetailTab>(initialTab);
 
   const txQuery = useQuery({
     queryKey: [CARD_TX_QUERY, card.account, card.card_id],
@@ -190,7 +198,7 @@ export function CardDetailDialog({
       description={`账号 ${card.account}`}
       trigger={
         <Button variant="secondary" size="sm">
-          详情
+          {triggerLabel}
         </Button>
       }
     >
