@@ -8,7 +8,9 @@
 - **found in production**, 2026-09-04, while verifying XM-INV-CATCHUP-RELEASE.
 - **product decision** (owner, 2026-09-04): carry the overdraw forward and
   invoice it, rather than writing it off. The owner confirmed the upstream
-  behaviour directly: "用户的负余额会在下次充值的时候被抵扣掉".
+  behaviour directly: "用户的负余额会在下次充值的时候被抵扣掉". After the
+  production evidence below, the owner narrowed it further: settle a carried
+  debt from cash only.
 
 ## Symptom
 
@@ -74,15 +76,20 @@ since — it would have been parked on its next top-up.
 
 ## Fix
 
-The allocation loop now keeps unallocated usage in a `carried` queue instead of
-dropping it, and drains that queue, oldest debt first, whenever new funding
-appears — a cash lot or a non-cash credit. A usage event can therefore be paid
-in instalments, so allocation order is tracked per usage event
-(`consumption_allocations` is `UNIQUE (usage_event_id, allocation_order)`)
-rather than restarting at each visit.
+The allocation loop keeps unallocated usage in a `carried` queue instead of
+dropping it, and drains that queue, oldest debt first, whenever a **cash**
+top-up arrives. A usage event can therefore be paid in instalments, so
+allocation order is tracked per usage event (`consumption_allocations` is
+`UNIQUE (usage_event_id, allocation_order)`) rather than restarting at each
+visit.
+
+**Only cash settles a debt.** Non-cash pools never drain one, and a usage fact
+that is not invoice-eligible is never carried at all, because cash is the one
+thing that could settle it and it may not touch cash. The reason is in the next
+section.
 
 `ShortfallUsage`/`ShortfallUnits` now describe what is *still* unallocated at
-the end of the window. An overdraw a later top-up settled is no longer an
+the end of the window. An overdraw a later cash top-up settled is no longer an
 overage at all, because its units were charged to that top-up's lot.
 
 Consequences, all intended:
@@ -93,10 +100,48 @@ Consequences, all intended:
   `cash_minor_delta`, so they are invoiced.
 - Nothing else about the loop changed: allocation still goes non-cash first
   then cash, a lot's `consumed_service_units` still cannot exceed its own
-  `cash_service_units`, and every invariant
-  `enforce_lot_consumption_mirror()` checks still holds, because the
-  carry-forward path runs through the same `cumulativeCashRound` call as the
-  ordinary path.
+  `cash_service_units`, and every invariant `enforce_lot_consumption_mirror()`
+  checks still holds, because the carry-forward path runs through the same
+  `cumulativeCashRound` call as the ordinary path.
+
+## Why only cash, and what that changes about the blast radius
+
+The first draft drained a debt against whatever pool arrived next, cash or not.
+Production data showed that is wrong, and the product owner's account of how
+the sources are operated explained why.
+
+Two accounts carry a recorded overage. They are not the same case:
+
+| | `acdcdce9` (user 12) | `40bd883d` (user 34) |
+| --- | --- | --- |
+| status | `not_invoiceable_pending_reconciliation` | `active` |
+| overage | 1361800 | 300000 |
+| latest checkpoint difference | −1361800 | **0** |
+| pools | six real cash top-ups, ¥70.00 | one ¥5 top-up, plus four synthesized `UNKNOWN_POSITIVE` credits totalling 50,288,881,378 units |
+
+Account 12's difference equals its overage exactly: the source did deduct the
+overdraw, and the next top-up settled it. Carrying it forward against cash puts
+the expected balance back on the source's number.
+
+Account 34 reconciles perfectly today, which is the evidence that the source
+did **not** deduct its overdraw. It is the team's own test account: a ¥5 real
+top-up, quota added by an administrator (which leaves no payment record, so the
+evaluator synthesizes `UNKNOWN_POSITIVE` credits to explain the balance it
+cannot attribute), and a deliberately inflated per-user rate multiplier used to
+burn quota quickly. Draining its debt into those synthesized credits would have
+lowered its expected balance by 300000 and moved a reconciling account off zero
+for nothing.
+
+Restricting settlement to cash is not a hedge, it is the correct rule: we carry
+a debt forward only when real money covers it. When a gift, a `REBATE`, or a
+synthesized credit is what cleared the negative balance upstream, the
+consumption is not invoiceable anyway, so writing it off — the behaviour that
+predates this slice — is already the right answer.
+
+The blast radius is therefore exactly one account: `acdcdce9`. Every other
+account's projection is byte-identical, because `carried` only becomes non-empty
+where the old code recorded an overage, and of the two accounts that did, only
+one has cash arriving after the overdraw that is not already fully consumed.
 
 ## Tests
 
@@ -108,11 +153,16 @@ against a real database:
   split 500/300 across the two lots with distinct allocation orders, and a
   30000-minor cash delta on the second lot. **Verified red before the fix**:
   `expected balance 500, want 200`.
+- `TestOverdrawnUsageIsNotSettledByNonCashCredit` — same shape, but a
+  non-cash `REBATE` credit arrives instead of a second cash top-up. Asserts
+  the credit stays whole, the debt stays outstanding, and no allocation lands
+  on a credit. **Verified red against the first draft**: `expected balance
+  200, want 500`.
 - `TestOverdrawnUsageWithNoLaterTopUpStaysAnOverage` — same shape without the
   second top-up. Asserts the 300 units stay unallocated and keep being
   reported as the overage. Carry forward is not forgiveness.
 
-Full `internal/postgresstore` suite green (173s), full backend suite green.
+Full `internal/postgresstore` suite green (181s), full backend suite green.
 
 ## What about the snapshot racing the usage stream?
 

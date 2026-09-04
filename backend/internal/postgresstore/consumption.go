@@ -169,8 +169,9 @@ type eligibilityProjection struct {
 	//
 	// Since XM-INV-OVERAGE-CARRY-FORWARD these describe what is *still*
 	// unallocated at the end of the window, not the first shortfall ever seen:
-	// an overdraw that a later top-up settled is no longer an overage at all,
-	// because the units were charged to that top-up's lot when it arrived.
+	// an overdraw that a later cash top-up settled is no longer an overage at
+	// all, because the units were charged to that top-up's lot when it
+	// arrived. Only cash settles one; see the carried queue's own comment.
 	ShortfallUsage string
 	ShortfallUnits *big.Int
 }
@@ -1997,36 +1998,46 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 	nonCash := make([]pool, 0)
 	cash := make([]pool, 0)
 	// XM-INV-OVERAGE-CARRY-FORWARD: usage that the pools of the moment cannot
-	// cover is no longer dropped -- it waits in carried and is charged to the
-	// next funding that arrives.
+	// cover is no longer dropped -- it waits in carried, and the next *cash*
+	// top-up settles it.
 	//
 	// Both sources bill as they go and let a request overdraw: the upstream
 	// balance goes negative, and the user's next top-up settles that debt
-	// before anything else. Writing the overdraw off, as this loop used to,
-	// left the projection permanently expecting more balance than the source
-	// reports -- by exactly the overdrawn amount, on every checkpoint after
-	// it. Production account acdcdce9 sat in
-	// not_invoiceable_pending_reconciliation behind 380 negative differences
-	// that were all the same number, 1361800, which is precisely the overage
-	// its own row already recorded; it could never reach two consecutive
-	// matches, so it could never leave. The same write-off also under-invoiced
-	// that consumption forever, even though the next top-up is what really
-	// paid for it. Carrying the debt forward fixes both at once: the expected
-	// balance tracks the source again, and the units land on the lot whose
-	// cash actually covered them.
+	// before anything else (confirmed by the product owner). Writing the
+	// overdraw off, as this loop used to, left the projection permanently
+	// expecting more balance than the source reports -- by exactly the
+	// overdrawn amount, on every checkpoint after it. Production account
+	// acdcdce9 sat in not_invoiceable_pending_reconciliation behind 380
+	// negative differences that were all the same number, 1361800, which is
+	// precisely the overage its own row already recorded; every entry into
+	// that state resets the consecutive-match counter, so it could never
+	// leave. The same write-off also never invoiced consumption the next
+	// top-up had really paid for.
+	//
+	// Only cash settles a carried debt. A debt drained against a non-cash pool
+	// -- a gift, a REBATE credit, or an UNKNOWN_POSITIVE the evaluator
+	// synthesized to explain a positive difference it could not attribute --
+	// would lower the expected balance without any payment behind it, and the
+	// consumption would stay non-invoiceable anyway, so dropping it (as
+	// before) is already the right answer for that case. Production account
+	// 40bd883d is exactly it: its overdraw is not deducted upstream either --
+	// its difference reads 0 today -- so carrying it against that account's
+	// synthesized credits would have moved a reconciling account off zero for
+	// nothing. Non-cash pools therefore never drain a debt, and a usage fact
+	// that is not invoice-eligible is never carried at all, because cash is
+	// the one thing that could settle it and it may not touch cash.
 	type debt struct {
-		usageID         string
-		units           *big.Int
-		invoiceEligible bool
+		usageID string
+		units   *big.Int
 	}
 	carried := make([]debt, 0)
 	// One usage event can now be paid in instalments -- partly when it
-	// happens, the rest whenever later funding lands -- so its allocation
+	// happens, the rest whenever a later top-up lands -- so its allocation
 	// order has to keep climbing across those separate visits rather than
 	// restarting at each one (consumption_allocations is UNIQUE on
 	// (usage_event_id, allocation_order)).
 	allocationOrder := map[string]int{}
-	allocate := func(usageID string, remaining *big.Int, invoiceEligible bool) (*big.Int, error) {
+	allocateNonCash := func(usageID string, remaining *big.Int) *big.Int {
 		for i := range nonCash {
 			if remaining.Sign() == 0 {
 				break
@@ -2043,9 +2054,9 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 			nonCash[i].remaining.Sub(nonCash[i].remaining, amount)
 			remaining.Sub(remaining, amount)
 		}
-		if !invoiceEligible {
-			return remaining, nil
-		}
+		return remaining
+	}
+	allocateCash := func(usageID string, remaining *big.Int) (*big.Int, error) {
 		for i := range cash {
 			if remaining.Sign() == 0 {
 				break
@@ -2072,14 +2083,14 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 		}
 		return remaining, nil
 	}
-	// drainCarried charges everything still owed against the funding that just
-	// became available, oldest debt first. Oldest-first is what keeps a debt
-	// ahead of any later usage in the queue for that funding, which is the
-	// order the source itself settles in.
+	// drainCarried charges everything still owed against the cash top-up that
+	// just arrived, oldest debt first. Oldest-first keeps a debt ahead of any
+	// later usage in the queue for that lot, which is the order the source
+	// itself settles in.
 	drainCarried := func() error {
 		kept := carried[:0]
 		for _, owed := range carried {
-			remaining, allocErr := allocate(owed.usageID, owed.units, owed.invoiceEligible)
+			remaining, allocErr := allocateCash(owed.usageID, owed.units)
 			if allocErr != nil {
 				return allocErr
 			}
@@ -2095,30 +2106,36 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 		switch {
 		case strings.HasPrefix(fact.Kind, "credit:"):
 			nonCash = append(nonCash, pool{id: fact.CreditID, remaining: new(big.Int).Set(fact.Units)})
-			if drainErr := drainCarried(); drainErr != nil {
-				return projection, drainErr
-			}
 		case fact.Kind == "payment":
 			cash = append(cash, pool{id: fact.LotID, remaining: new(big.Int).Set(fact.Units)})
 			if drainErr := drainCarried(); drainErr != nil {
 				return projection, drainErr
 			}
 		case fact.Kind == "usage":
-			remaining, allocErr := allocate(fact.UsageID, new(big.Int).Set(fact.Units), fact.InvoiceEligible)
+			remaining := allocateNonCash(fact.UsageID, new(big.Int).Set(fact.Units))
+			if !fact.InvoiceEligible {
+				if remaining.Sign() > 0 && projection.ShortfallUsage == "" {
+					projection.ShortfallUsage = fact.UsageID
+					projection.ShortfallUnits = new(big.Int).Set(remaining)
+				}
+				continue
+			}
+			remaining, allocErr := allocateCash(fact.UsageID, remaining)
 			if allocErr != nil {
 				return projection, allocErr
 			}
 			if remaining.Sign() > 0 {
-				carried = append(carried, debt{usageID: fact.UsageID,
-					units: remaining, invoiceEligible: fact.InvoiceEligible})
+				carried = append(carried, debt{usageID: fact.UsageID, units: remaining})
 			}
 		}
 	}
 	// What is still owed at the end of the window is the genuinely
-	// non-invoiceable overage: consumption no funding has covered yet. The
-	// oldest outstanding debt identifies it, matching the single
-	// (usage_event_id, units) pair the account row can hold.
-	if len(carried) > 0 {
+	// non-invoiceable overage: consumption no cash has covered. The oldest
+	// outstanding debt identifies it, matching the single
+	// (usage_event_id, units) pair the account row can hold. A
+	// non-invoice-eligible shortfall recorded in the loop above keeps
+	// precedence, exactly as it had before this slice.
+	if len(carried) > 0 && projection.ShortfallUsage == "" {
 		projection.ShortfallUsage = carried[0].usageID
 		projection.ShortfallUnits = new(big.Int).Set(carried[0].units)
 	}

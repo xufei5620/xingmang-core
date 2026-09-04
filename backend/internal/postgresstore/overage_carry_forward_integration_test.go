@@ -98,7 +98,7 @@ func projectOverdrawAccount(t *testing.T, store *Store, ctx context.Context,
 // TestOverdrawnUsageIsChargedToTheNextTopUp is XM-INV-OVERAGE-CARRY-FORWARD's
 // regression guard.
 //
-// 500 units of funding, 800 units spent, then 500 more units of funding. The
+// 500 units of cash funding, 800 units spent, then 500 more units of cash. The
 // source lets that request through and carries the account 300 units negative,
 // then settles the debt out of the next top-up -- so after it, the source
 // reports 200 units of balance, and 300 units of the second top-up's cash paid
@@ -163,9 +163,73 @@ func TestOverdrawnUsageIsChargedToTheNextTopUp(t *testing.T) {
 	}
 }
 
+// insertOverdrawNonCashCredit gives the account a non-cash credit pool -- the
+// shape a gift, a REBATE, or an evaluator-synthesized UNKNOWN_POSITIVE takes
+// once it reaches the projection.
+func insertOverdrawNonCashCredit(t *testing.T, store *Store, ctx context.Context,
+	accountID, sourceID, suffix string, eventTime time.Time, units string,
+	manifestHash, configHash string) string {
+	t.Helper()
+	id := randomUUID()
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO source_credit_events(
+			id,source_instance_id,external_account_id,external_event_id,external_credit_id,
+			event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
+			credit_kind,source_sequence,source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+		VALUES($1,$2,$3,$4,$4,$5,$6::numeric,'SUB2_BALANCE_1E8',$7,$8,'REBATE',1,$9,$5,$10,$5)`,
+		id, sourceID, accountID, "overdraw-credit-"+suffix, eventTime, units,
+		manifestHash, configHash, "cursor:credit:"+suffix, testHash("credit-"+suffix)); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// TestOverdrawnUsageIsNotSettledByNonCashCredit pins the boundary the product
+// owner drew: only cash settles a carried debt.
+//
+// A gift, a REBATE, or an UNKNOWN_POSITIVE the evaluator synthesized to
+// explain a positive difference it could not attribute is not a payment.
+// Draining a debt against one would lower the expected balance with no money
+// behind it, and the consumption would stay non-invoiceable regardless -- so
+// the debt stays outstanding and keeps being reported as the overage.
+//
+// Production account 40bd883d is the live case: its overdraw is not deducted
+// upstream either (its difference reads 0), and its pools are four
+// synthesized UNKNOWN_POSITIVE credits. Draining into those would have pushed
+// a reconciling account off zero for nothing.
+func TestOverdrawnUsageIsNotSettledByNonCashCredit(t *testing.T) {
+	store, ctx, sourceID, accountID, manifestHash, configHash, policyStart := seedOverdrawFixture(t, 215)
+	insertOverdrawCashLot(t, store, ctx, accountID, sourceID, "only-cash",
+		policyStart.Add(1*time.Hour), "500")
+	usageRowID := insertUsageEventDirect(t, store, ctx, sourceID, accountID, "overdraw-usage-noncash",
+		policyStart.Add(2*time.Hour), "800", 1, manifestHash, configHash)
+	insertOverdrawNonCashCredit(t, store, ctx, accountID, sourceID, "gift",
+		policyStart.Add(3*time.Hour), "500", manifestHash, configHash)
+
+	projection := projectOverdrawAccount(t, store, ctx, accountID, policyStart.Add(4*time.Hour))
+
+	if want := big.NewInt(500); projection.ExpectedBalance.Cmp(want) != 0 {
+		t.Fatalf("expected balance %s, want %s: the non-cash credit must stay whole -- "+
+			"draining the 300-unit debt into it would lower the expected balance with no payment behind it",
+			projection.ExpectedBalance, want)
+	}
+	if projection.ShortfallUsage != usageRowID {
+		t.Fatalf("shortfall usage %q, want %q: an overdraw no cash has covered is still an overage",
+			projection.ShortfallUsage, usageRowID)
+	}
+	if want := big.NewInt(300); projection.ShortfallUnits == nil || projection.ShortfallUnits.Cmp(want) != 0 {
+		t.Fatalf("shortfall units %v, want %s", projection.ShortfallUnits, want)
+	}
+	for _, allocation := range projection.Allocations {
+		if allocation.CreditID != "" {
+			t.Fatalf("usage was allocated against non-cash credit %s: only cash settles a debt", allocation.CreditID)
+		}
+	}
+}
+
 // TestOverdrawnUsageWithNoLaterTopUpStaysAnOverage pins the other half: carry
-// forward is not forgiveness. Until funding actually arrives, the overdrawn
-// units remain unallocated and keep being reported as the account's
+// forward is not forgiveness. Until cash actually arrives, the overdrawn units
+// remain unallocated and keep being reported as the account's
 // non-invoiceable overage, exactly as before.
 func TestOverdrawnUsageWithNoLaterTopUpStaysAnOverage(t *testing.T) {
 	store, ctx, sourceID, accountID, manifestHash, configHash, policyStart := seedOverdrawFixture(t, 214)
