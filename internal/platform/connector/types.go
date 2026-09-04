@@ -23,7 +23,10 @@ const (
 	// 与 KindWriteAttempt 分开：那个表示「这条通道根本不该有写」，
 	// 这个表示「这条通道能写，但不该用这个方法」，排查方向完全不同。
 	KindMethodNotAllowed ErrorKind = "method_not_allowed"
-	KindInternal         ErrorKind = "internal"
+	// KindRejected 是上游收下了请求但业务上拒绝（余额不足、产品不可用等）。
+	// 与 KindUnavailable 分开：那个重试有意义，这个重试没有意义。
+	KindRejected ErrorKind = "rejected"
+	KindInternal ErrorKind = "internal"
 )
 
 // Error 是 Connector 层的统一错误。
