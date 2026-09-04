@@ -47,3 +47,27 @@ Production remains blocked until a 30-minute readiness watch binds RC91.
 - A continuously-consuming account is still blocked from invoicing while any projection job is queued. Two read-only investigations established that the obvious discriminator (`requested_through` vs `finalized_through`) is unsound — the jobs table holds one merged row per account — and that a forward-advancing reprojection *can* lower a settled lot via backdated `UNKNOWN_POSITIVE` synthesis. No change is made on a premise that has been disproven.
 - Account 12 remains blocked by a negative upstream balance. The magnitude of a negative balance is structurally unrepresentable (`CHECK (NOT balance_negative OR balance_service_units = 0)`), so "the negative is fully explained by the recorded overage" cannot be established in code. Its recovery path is a top-up, which RC88's carry-forward now settles automatically.
 - `XM-INV-CATCHUP-BURST-BACKPRESSURE` and `XM-INV-SHADOW-EVAL-VACUOUS` remain open.
+
+## Execution record (2026-09-05)
+
+- Task 1: identity bump `eb467a6`; every gate 0, web 185 tests, four failure-evidence scripts 0/0/0/0. Tag `v0.1.0-rc91-signed` created and verified, peeling to `HEAD`.
+- Task 2: `release/0.1.0-rc91-exact1`, first attempt, no retries. Binding bound to `eb467a68…`, loopback preflight passed on attempt 1, image gate 42, ordinary verifier 0, strict transfer-ready verifier 0.
+  - **The audit ran for real.** RC90's waiver was available and was deliberately not used: the advisory service answered again from this machine (`found 0 vulnerabilities`, exit 0) when probed before the gate, so the gate script clears `INVOICE_RELEASE_AUDIT_WAIVER_BASELINE_TAG` rather than setting it, and the evidence carries the real result with no waiver warning line. The waiver is for an unreachable service, not a convenient one.
+- Task 3: staged; signed pre-deploy backup `invoice-20260904T184003Z`; roll-forward PASS, 18 containers on rc91, healthz/readyz 200. Every embedded hash in the four derived server scripts was checked before running.
+- Shadow evaluation: skipped by rule — no evaluator, projection or allocation change.
+
+### Post-deploy verification
+
+| what | result |
+| --- | --- |
+| migration 0025 | applied; production `invoice_requests_amount_minor_check` now reads `CHECK ((amount_minor > 0))` |
+| the configured minimum | `admin_settings.minimum_request_minor` = 500, unchanged by the deploy |
+| account 34 (`40bd883d`) | `active`, `POLICY_ANCHOR`, zero open freezes, **zero queued projection jobs**; one WALLET_CASH lot, cap ¥5.00, cash consumed ¥5.00, reserved 0, issued 0 → ¥5.00 invoiceable |
+| `invoice_requests` | still 0 rows — the next submission will be this system's first invoice |
+| the new log line | `unclassified request failure` count 0 over the first ten minutes; the canary script now reports it every run |
+
+### What this release does not settle
+
+The end-to-end submission itself. The three layers that refused it are now all relaxed and the local reproduction that produced the exact production error passes as a regression test, but no request has actually been created in production. That is the owner's test to run, and it is the only thing that turns "the constraint is gone" into "invoicing works".
+
+Also unchanged: a continuously-consuming account is still blocked while any projection job is queued (account 34 happens to have none right now, which is why it is testable at all), and account 12 is still blocked by a negative upstream balance whose magnitude is structurally unstored. Both remain under the reasoning recorded in RC90.
