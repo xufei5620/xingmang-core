@@ -65,6 +65,10 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 	}
 
 	if kind, bad := kindForStatus(resp.StatusCode); bad {
+		if kind == connector.KindAuth {
+			// 401/403 再细分一次：签名问题与 IP 白名单问题的修法完全不同。
+			kind = kindForUnauthorized(string(raw))
+		}
 		// 状态码 + 体开头都进 cause（只进 Unwrap 链与服务端日志，
 		// 不进对外错误文本）。少了体开头，一个 404 就只剩「bad_response」
 		// 这五个字，运维完全无从下手——那等于没有错误分类。
@@ -114,6 +118,23 @@ func bodyPrefix(raw []byte) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
+// kindForUnauthorized 在 401/403 里进一步区分「签名不对」与「IP 不在白名单」。
+//
+// 依据是官方参考实现列出的两条网关文案（infini-skill/references/
+// ERROR_HANDLING.md）：
+//
+//	{"message":"ip not in whitelist"}            → 源 IP 没放行
+//	{"message":"client request can't be validated"} → HMAC/头/Digest/密钥不匹配
+//
+// 认不出的文案保守归到 auth：把一个未知的认证失败说成「IP 问题」，
+// 会让人跑去改白名单而真正的原因没人碰。
+func kindForUnauthorized(body string) connector.ErrorKind {
+	if strings.Contains(strings.ToLower(body), "ip not in whitelist") {
+		return connector.KindIPNotAllowed
+	}
+	return connector.KindAuth
+}
+
 // kindForStatus 把 HTTP 状态码映射成错误分类。
 //
 // 401/403 单独成类的理由很实际：这条通道上 401 最可能的成因是 IP 白名单
@@ -124,6 +145,7 @@ func kindForStatus(status int) (connector.ErrorKind, bool) {
 	case status >= 200 && status < 300:
 		return "", false
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		// 具体是签名还是 IP，由 kindForUnauthorized 看响应体决定。
 		return connector.KindAuth, true
 	case status == http.StatusTooManyRequests:
 		return connector.KindRateLimited, true

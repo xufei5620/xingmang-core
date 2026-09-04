@@ -62,6 +62,27 @@ type cardsAccountConfig struct {
 	// 金额上限按账号各配一份：两个账号的资金是分开的。
 	PerOperationLimit string
 	PerDayLimit       string
+	// BaseURL 覆盖进程级的 XM_CARDS_BASE_URL。
+	//
+	// 存在的唯一理由是**沙箱**：沙箱端点是
+	// https://openapi-sandbox.infini.money，与生产不同，而沙箱账号需要与
+	// 生产账号并存才能在同一套部署里联调回调（回调要公网可达，本地跑不了）。
+	//
+	// 留空即沿用进程级值。
+	BaseURL string
+}
+
+// IsSandbox 说明这个账号指向的是不是非生产端点。
+//
+// 用途是**在页面上标出来**：一张沙箱假卡与一张真卡在列表里长得一模一样，
+// 不标记比没有沙箱更危险——运营会拿假卡去付真账单，或者以为真卡是测试卡
+// 而随手冻结。
+func (a cardsAccountConfig) IsSandbox(processBaseURL string) bool {
+	base := a.BaseURL
+	if base == "" {
+		base = processBaseURL
+	}
+	return strings.Contains(strings.ToLower(base), "sandbox")
 }
 
 // cardsConfig 是卡片功能的进程级配置。
@@ -108,6 +129,7 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 			ID:                id,
 			PerOperationLimit: strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_OPERATION")),
 			PerDayLimit:       strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_DAY")),
+			BaseURL:           strings.TrimSpace(getenv("XM_CARDS_" + id + "_BASE_URL")),
 		}
 
 		// 金额上限在任何模式下都必填：fake 模式也要跑限额分支，
@@ -124,8 +146,16 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 		cfg.Accounts = append(cfg.Accounts, acct)
 	}
 
-	if mode == cardsModeReal && cfg.BaseURL == "" {
-		return cardsConfig{}, fmt.Errorf("XM_CARDS_MODE=real 但缺少 XM_CARDS_BASE_URL")
+	if mode == cardsModeReal {
+		// 每个账号都要有可用的端点：进程级的，或它自己覆盖的。
+		// 只校验进程级会漏掉「全靠覆盖、进程级留空」这种配法。
+		for _, acct := range cfg.Accounts {
+			if acct.BaseURL == "" && cfg.BaseURL == "" {
+				return cardsConfig{}, fmt.Errorf(
+					"XM_CARDS_MODE=real 但账号 %s 没有端点：配 XM_CARDS_BASE_URL 或 XM_CARDS_%s_BASE_URL",
+					acct.ID, acct.ID)
+			}
+		}
 	}
 	return cfg, nil
 }
@@ -159,21 +189,23 @@ func buildCards(
 	pool *pgxpool.Pool,
 	secretProvider secrets.SecretProvider,
 	environment string,
-) (*cards.Service, *cards.PgStore, error) {
+) (*cards.Service, *cards.PgStore, []cards.Account, error) {
 	if cfg.Mode == cardsModeOff {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if pool == nil {
-		return nil, nil, fmt.Errorf("卡片功能需要数据库连接")
+		return nil, nil, nil, fmt.Errorf("卡片功能需要数据库连接")
 	}
 
 	store := cards.NewPgStore(pool, environment, time.Now)
 
 	accounts, err := buildCardAccounts(ctx, cfg, secretProvider)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return cards.NewService(accounts, store, time.Now), store, nil
+	// 账号一并返回：回调处理器要用同一批已签名的客户端做定向刷新，
+	// 再造一遍等于把同一份凭据解析两次、也多一处可以配歪的地方。
+	return cards.NewService(accounts, store, time.Now), store, accounts, nil
 }
 
 // buildCardAccounts 把配置翻成运行时账号。
@@ -191,7 +223,12 @@ func buildCardAccounts(
 		case cardsModeFake:
 			client = infini.NewFake()
 		case cardsModeReal:
-			realClient, err := newInfiniClient(ctx, cfg.BaseURL, a, provider)
+			// 账号自己的端点优先：沙箱账号与生产账号可以并存。
+			baseURL := a.BaseURL
+			if baseURL == "" {
+				baseURL = cfg.BaseURL
+			}
+			realClient, err := newInfiniClient(ctx, baseURL, a, provider)
 			if err != nil {
 				return nil, fmt.Errorf("账号 %s: %w", a.ID, err)
 			}
@@ -292,7 +329,7 @@ func cardAccountIDs(svc *cards.Service) []string {
 // 所以「加一个账号」只需要改 XM_CARDS_ACCOUNTS，凭据在界面上补，不用改代码、
 // 不用登服务器写文件。
 func cardExpectedCredentials(cfg cardsConfig) []credentials.ExpectedRef {
-	out := make([]credentials.ExpectedRef, 0, len(cfg.Accounts)*2)
+	out := make([]credentials.ExpectedRef, 0, len(cfg.Accounts)*3)
 	for _, a := range cfg.Accounts {
 		keyIDRef, secretRef := cards.CredentialRefsFor(a.ID)
 		out = append(out,
@@ -303,6 +340,12 @@ func cardExpectedCredentials(cfg cardsConfig) []credentials.ExpectedRef {
 			credentials.ExpectedRef{
 				Ref: secretRef, Platform: "infini",
 				Purpose: "Infini 账号 " + a.ID + " 的 API 私钥（签名用，绝不回前端）",
+			},
+			// 回调密钥与 API 密钥各自独立轮换（上游就是这么划分的）。
+			// 没配它的账号，回调端点对该账号一律拒绝——不配 = 不启用。
+			credentials.ExpectedRef{
+				Ref: cards.WebhookSecretRefFor(a.ID), Platform: "infini",
+				Purpose: "Infini 账号 " + a.ID + " 的回调验签密钥（Webhook 设置页生成，与 API 密钥不同）",
 			},
 		)
 	}

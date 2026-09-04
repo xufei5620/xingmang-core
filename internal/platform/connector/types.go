@@ -14,6 +14,14 @@ type ErrorKind string
 const (
 	KindUnavailable     ErrorKind = "unavailable"      // 网络不可达、超时、上游 5xx
 	KindAuth            ErrorKind = "auth"             // 凭据无效或权限不足
+	// KindIPNotAllowed：请求到达了上游，但来源 IP 不在**上游**的白名单里。
+	//
+	// 与 KindAuth 分开的理由是修法不同：auth 要去查密钥与签名，
+	// 这一类要去上游后台加 IP。两者都是 401/403，归成一类会让台账上只剩
+	// 「认证失败」四个字，每次都要人工二选一去试。
+	// 注意与 KindForbiddenTarget 的区别：那一个是**我们自己的** allowlist
+	// 拦下了出站请求，请求根本没发出去。
+	KindIPNotAllowed ErrorKind = "ip_not_allowed"
 	KindRateLimited     ErrorKind = "rate_limited"     // 429 / Retry-After
 	KindNotSupported    ErrorKind = "not_supported"    // 上游版本不支持该能力
 	KindBadResponse     ErrorKind = "bad_response"     // 响应格式非法、字段缺失、超大

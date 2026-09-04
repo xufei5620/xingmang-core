@@ -171,7 +171,7 @@ func issueSummary(req IssueRequest, res IssueResult) map[string]any {
 		"product_id":    req.ProductID,
 		"top_up_amount": req.TopUpAmount,
 		"token_type":    req.TokenType,
-		"card_alias":    AliasFor(req.IdempotencyKey),
+		"card_alias":    AliasFor(req.IdempotencyKey, req.OwnerRef),
 	}
 	// 未成功时不写这个键：「没有卡 id」与「卡 id 是空串」在审计上是两件事。
 	if res.CardID != "" {

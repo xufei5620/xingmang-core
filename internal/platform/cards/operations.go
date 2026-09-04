@@ -4,7 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/xufei5620/xingmang-platform/connectors/infini"
 )
@@ -131,15 +134,76 @@ func ReconcileIssue(op Operation, found []infini.Card, now time.Time, grace time
 	}
 }
 
-// AliasFor 从幂等键派生出写给上游的 card_alias。
+// alias 的长度上限与标签上限。
 //
-// 三条要求：
-//   - 确定性——重试与对账要能算出同一个值；
-//   - 不含业务信息——幂等键里可能有邮箱，而 alias 会被送进上游一个我们
-//     不控制、也无法要求其删除的字段；
-//   - 定长且短——上游对该字段的长度限制未知，长了可能被静默截断，
-//     而截断会让「精确匹配」变成前缀碰撞。
-func AliasFor(idempotencyKey string) string {
+// 上游对 card_alias 的长度限制**没有文档**。已知的实测点只有一个：
+// 19 字节的 xm-e91ba7f121a23c63 原样回显。这两个数取得保守，
+// 让最坏情况（满标签）仍落在 40 字节以内。
+//
+// 为什么长度这么要紧：对账靠 alias 精确匹配，一旦上游把写进去的值截短，
+// 返回值就与台账里存的不相等，那笔操作会永远停在不确定态——
+// 而这恰恰发生在最需要对账的超时场景里。
+const (
+	aliasMaxBytes   = 40
+	aliasLabelBytes = 18
+	aliasLabelRunes = 8
+)
+
+// aliasHash 是 alias 里唯一由幂等键决定的部分。
+//
+// 单独成函数是为了让测试能断言「无论标签怎么变，哈希后缀不变」——
+// 那是对账真正依赖的部分。
+func aliasHash(idempotencyKey string) string {
 	sum := sha256.Sum256([]byte(idempotencyKey))
-	return "xm-" + hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:8])
+}
+
+// AliasFor 从幂等键与用途标签派生出写给上游的 card_alias。
+//
+// 形如 `测试-e91ba7f121a23c63`：前半段给人看，后半段给机器对账。
+//
+// 上游把这个字段当作「卡片名称」显示（产品负责人 2026-09-05 在 Infini 后台
+// 确认：别的卡叫「Chloe J」，我们的卡叫 xm-e91ba7f1）。纯哈希在那边完全
+// 不可读，所以把用途标签放在前面。
+//
+// 四条约束：
+//   - 确定性——重试与对账要能算出同一个值；
+//   - 哈希后缀只由幂等键决定——它是对账唯一可信的部分；
+//   - 不含敏感业务信息——标签是运营自己填的用途词，不是邮箱或姓名；
+//     alias 会被送进上游一个我们不控制、也无法要求其删除的字段；
+//   - 有界——见 aliasMaxBytes 的注释。
+//
+// 标签为空（或清洗后为空）时退回 `xm-` 前缀，保持与改造前一致。
+func AliasFor(idempotencyKey, label string) string {
+	suffix := aliasHash(idempotencyKey)
+	prefix := sanitizeAliasLabel(label)
+	if prefix == "" {
+		prefix = "xm"
+	}
+	return prefix + "-" + suffix
+}
+
+// sanitizeAliasLabel 把运营填的用途标签压成可以安全写进上游字段的前缀。
+//
+// 去掉的东西各有理由：
+//
+//	控制字符   会破坏上游的显示与我们自己的日志；
+//	连字符     alias 用它做分隔，标签里再出现会让「哪一段是哈希」变得含糊；
+//	首尾空白   粘贴时最常见的脏数据。
+//
+// 按 rune 与 byte 双重截断：只按 rune 截，一个满是中文的标签仍可能超字节上限。
+func sanitizeAliasLabel(label string) string {
+	var b strings.Builder
+	runes := 0
+	for _, r := range strings.TrimSpace(label) {
+		if r == '-' || unicode.IsControl(r) {
+			continue
+		}
+		if runes >= aliasLabelRunes || b.Len()+utf8.RuneLen(r) > aliasLabelBytes {
+			break
+		}
+		b.WriteRune(r)
+		runes++
+	}
+	return strings.TrimSpace(b.String())
 }

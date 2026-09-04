@@ -243,7 +243,9 @@ func TestIssueCardSendsDerivedAliasUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := AliasFor("issue-1")
+	// alias 的可读前缀来自请求里的用途标签（产品负责人 2026-09-05 拍板：
+	// 上游把 card_alias 当卡片名称显示，纯哈希在那边不可读）。
+	want := AliasFor("issue-1", issueReq().OwnerRef)
 	page, _ := fake.ListCards(context.Background(), infini.ListCardsQuery{Alias: want})
 	if len(page.Cards) != 1 {
 		t.Fatalf("上游应收到派生出的 alias %q", want)
@@ -302,7 +304,7 @@ func TestIssueCardKeepsAliasOnUnknownOutcome(t *testing.T) {
 	_, _ = svc.IssueCard(context.Background(), issueReq())
 
 	op := store.ops["issue-1"]
-	if op.Alias != AliasFor("issue-1") {
+	if op.Alias != AliasFor("issue-1", issueReq().OwnerRef) {
 		t.Fatalf("不确定态下 alias 必须留存, got %q", op.Alias)
 	}
 	if op.StartedAt.IsZero() {

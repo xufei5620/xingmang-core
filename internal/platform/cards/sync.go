@@ -279,3 +279,64 @@ func (s *Syncer) syncTransactions(ctx context.Context) error {
 // transactionPageSize 保守取值：上游限流阈值文档未提及，
 // 而流水同步的调用量与卡数成正比。
 const transactionPageSize = 50
+
+// cardStatusActive 是"卡已可用"的上游取值。
+//
+// 只定义这一个，不定义一整套枚举：文档没有给出完整的状态列表（示例里出现过
+// init / pending / active / pending_delete / deleted，但**冻结后变成什么从未
+// 写明**）。凭示例拼一个"完整"枚举，会让第一个没见过的取值被静默归到
+// 某个已知分类里，而那正是最需要被人看见的时刻。
+const cardStatusActive = "active"
+
+// RefreshCard 定向刷新一张卡：状态 → 明文卡面（若还没拉过）→ 流水。
+//
+// 供两条路径复用：
+//
+//	回调到达时（XM-CARD4）——把感知延迟从一个同步周期压到秒级；
+//	开卡刚成功时——卡若已 active，当场就有卡号，不必等下一轮。
+//
+// 与周期同步共用同一套写投影的代码。**全系统只有一条写投影的路**，
+// 是这个设计最要紧的性质：回调只决定「什么时候读」，不决定「写什么」。
+//
+// 流水只在 withTransactions 时拉：状态变更事件没必要顺带翻一遍流水，
+// 而交易事件必须。
+func (s *Syncer) RefreshCard(ctx context.Context, account, cardID string, withTransactions bool) error {
+	acct, ok := s.accounts[account]
+	if !ok {
+		// 与领域层同一条纪律：未配置的账号一律报错，绝不回落到别的账号。
+		return fmt.Errorf("%w: %q", ErrUnknownAccount, account)
+	}
+
+	card, err := acct.Client.CardStatus(ctx, cardID)
+	if err != nil {
+		return fmt.Errorf("读卡 %s 状态: %w", cardID, err)
+	}
+	// 归属信息传空：这条路径不知道这些，由存储层保留原值。
+	if err := s.store.UpsertCard(ctx, account, card, CardAttribution{}); err != nil {
+		return fmt.Errorf("落卡片投影 %s: %w", cardID, err)
+	}
+
+	// 卡刚变成 active 时顺手把明文拉下来。失败不让整次刷新报废：
+	// 卡状态已经写进去了，明文还有周期同步兜底，而让「明文拉失败」
+	// 把一次成功的状态刷新变成错误，会诱使上游重投——重投解决不了这个问题。
+	// 只有 active 的卡才有明文可拉。**不写死"其余状态一定拉不到"**——
+	// 文档没有给出完整的状态枚举，冻结后的取值至今未知（见契约的验证清单），
+	// 所以这里只对确定能拉的那一个取值动作，其余交给周期同步的既有判据。
+	if card.Status == cardStatusActive {
+		if revealed, err := acct.Client.RevealCard(ctx, cardID); err == nil {
+			_ = s.store.StoreCardSecrets(ctx, account, cardID, revealed)
+		}
+	}
+
+	if !withTransactions {
+		return nil
+	}
+	page, err := acct.Client.CardTransactions(ctx, cardID, 1, transactionPageSize)
+	if err != nil {
+		return fmt.Errorf("读卡 %s 流水: %w", cardID, err)
+	}
+	if err := s.store.UpsertTransactions(ctx, account, cardID, page.Transactions); err != nil {
+		return fmt.Errorf("落流水 %s: %w", cardID, err)
+	}
+	return nil
+}

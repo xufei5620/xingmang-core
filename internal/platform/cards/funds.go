@@ -78,7 +78,8 @@ func (s *Service) fundsOperation(
 		Kind:           kind,
 		State:          StatePending,
 		CardID:         req.CardID,
-		Alias:          AliasFor(req.IdempotencyKey),
+		// 资金操作没有用途标签；alias 在这里只当台账里的信标，不写给上游。
+		Alias:          AliasFor(req.IdempotencyKey, ""),
 		AmountText:     req.Amount,
 		TokenType:      req.TokenType,
 		StartedAt:      now,
@@ -240,6 +241,8 @@ func stateForUpstreamError(err error, kind string) OperationState {
 	switch connector.KindOf(err) {
 	case connector.KindRejected,
 		connector.KindAuth,
+		// IP 不在上游白名单：请求被网关挡在业务处理之前，与 auth 同一档。
+		connector.KindIPNotAllowed,
 		connector.KindRateLimited,
 		connector.KindForbiddenTarget,
 		connector.KindMethodNotAllowed,
