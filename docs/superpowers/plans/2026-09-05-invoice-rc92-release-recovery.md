@@ -44,3 +44,32 @@ Production remains blocked until a 30-minute readiness watch binds RC92.
 
 - Fix 1b (take the job row lock after the carry-forward proof phase), fix 2 (a stuck checkpoint event flipping readiness) and fix 3 (bound the evidence pass by checkpoint count) from the catch-up handoff's revised ranking. The observe-path enqueue deliberately still waits.
 - A continuously-consuming account is still blocked from invoicing while any projection job is queued; account 12 is still blocked by a negative upstream balance. Both remain under the reasoning recorded in RC90.
+
+## Execution record (2026-09-05)
+
+- Task 1: identity bump `8358ddc`; every gate 0, web 185 tests, four failure-evidence scripts 0/0/0/0. One self-inflicted rejection first: renaming the plan file to its true date (`2026-09-05-…`) while the gate self-test's superseded-document pointer literal had been rewritten to `2026-09-04-…` by the bump's token pass — the same pointer/date mismatch class RC89 hit. Fixed by correcting the literal; the plan keeps its true date. Tag `v0.1.0-rc92-signed` created and verified, peeling to `HEAD`; the derived roll-forward script's `SHA=` checked against the tag commit before anything ran.
+- Task 2: `release/0.1.0-rc92-exact1`, first attempt: binding bound to `8358ddce…`, loopback preflight passed on attempt 1, image gate 42, ordinary verifier 0, strict transfer-ready verifier 0. The audit ran for real (`found 0 vulnerabilities`), waiver cleared, not used.
+- Task 3: staged (nine images, tag and evidence signatures good); signed pre-deploy backup `invoice-20260904T225311Z`; roll-forward PASS, 18 containers on rc92, healthz/readyz 200, migrations a no-op (0025 remains the newest). Deployment record `rc92-deploy-20260904T225900Z`.
+
+### Shadow evaluation with `--reproject-all` — the acceptance of XM-INV-SHADOW-EVAL-VACUOUS
+
+Report `rehearsals/20260904T224617Z-2176602/shadow-eval.json`, backup `invoice-20260904T184003Z`, rc92 tools image.
+
+| field | value |
+| --- | --- |
+| `reproject_all_requested` | true |
+| `accounts_enqueued` / `accounts_projected` | **7 / 7** |
+| accounts in the copy | 8 |
+| `projection_version` moved | 7 of 8 |
+| `before_projection_health` | queued 8 (7 enqueued + one pre-existing), proof_pending 0 |
+| `after_projection_health` | queued 1, **proof_pending 1** |
+| verdict | `ready`, independently recomputed in bash, tool exit 0 |
+| per-account `consumed_cash_minor` / overage | unchanged for every account |
+
+**This is the first shadow evaluation that has ever projected an account.** Seven accounts were rebuilt by the candidate evaluator, and every quantity came out identical — which is exactly what a release with no evaluator change must show, and the first time the harness has been able to show it.
+
+**The eighth account is the whale, `40bd883d`, and the plan's acceptance line ("== 8") was wrong, not the gate.** The backup already held a queued job for it (the whale consumes continuously, so at any instant it has one), `ON CONFLICT DO NOTHING` correctly left that row alone, the drain claimed it in round 1, and `ensureBalanceCarryForwardProofTx` returned `BALANCE_PROOF_PENDING`: on a frozen copy no balances cycle will ever publish to cover the window's tail, so a continuously-consuming account can never pass the proof there. It is the same structural limit the morning's copy-run of acdcdce9 hit. The report exposes it (`proof_pending 1`) rather than hiding it, which is the behaviour the slice was built for. The acceptance is therefore restated: every account not proof-pending is projected, and proof-pending ones are visible. Two follow-ups filed in the handoff: name the proof-pending accounts in the report, and let `--reproject-all` cap each account's `requested_through` at its last covered visibility so even the whale can be exercised on a copy.
+
+### Canary
+
+30 minutes from 22:58:08Z: `readyz_non200=0`, zero error lines, zero reconcile errors, usage 27 cycles, credits 27 cycles with one reconcile cycle and zero sync failures, `unclassified_request_failures=0`. The three counters added for the finalization fix — `canceling statement due to lock timeout`, `stream already has an active scan cycle`, and balances cycles published more than six minutes after their ceiling — were **0, 0 and 0** for the whole window. Deployment record `rc92-deploy-20260904T225900Z` holds the containers list, roll-forward log, shadow-eval report and log, transfer checksums and the watch log.

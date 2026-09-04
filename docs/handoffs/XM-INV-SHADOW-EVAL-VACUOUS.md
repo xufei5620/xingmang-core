@@ -1,6 +1,6 @@
 # XM-INV-SHADOW-EVAL-VACUOUS: the shadow evaluation has never exercised a projection
 
-- **status:** implemented 2026-09-05; the unchanged half is verified against a real backup, the new half needs RC92. Filed 2026-09-04 from the RC88 rehearsal.
+- **status:** implemented and verified on RC92 (2026-09-05): 7 of 8 accounts reprojected on a real backup, the eighth proof-pending by structure; two follow-ups at the end of this document. Filed 2026-09-04 from the RC88 rehearsal.
 - **branch:** ai/claude/XM-INV-AUTOLOGIN.
 - **found in production rehearsal**, 2026-09-04, while gating XM-INV-OVERAGE-CARRY-FORWARD.
 
@@ -214,3 +214,37 @@ than a routine step:
       writing). If `accounts_projected` is 0 the verdict must be `not_ready`
       with exit 3 — that outcome is the gate working, not the release failing,
       and it means this slice did not do its job.
+
+## Verified on RC92, 2026-09-05
+
+The rehearsal ran with `--reproject-all` against `invoice-20260904T184003Z`
+using the rc92 tools image (report `rehearsals/20260904T224617Z-2176602`):
+`accounts_enqueued = accounts_projected = 7` of 8 accounts, `projection_version`
+moved on all seven, every `consumed_cash_minor` and overage identical before
+and after (this release carries no evaluator change, so identical is the
+correct answer — and the first time the harness could give it), verdict
+`ready` in both implementations. Acceptance items 1 and 3 are met; item 2
+(reproducing RC88's prediction) needs a backup that predates RC88 and is
+deferred.
+
+The eighth account, the whale `40bd883d`, was not projected, and the reason
+is structural rather than a defect: the backup already held its queued job
+(`ON CONFLICT DO NOTHING` left it alone, as designed), the drain claimed it,
+and the carry-forward proof returned `BALANCE_PROOF_PENDING` because a frozen
+copy never publishes the balances cycle that would cover the window's tail.
+A continuously-consuming account is always in that state at backup time. The
+report shows it (`after_projection_health.proof_pending = 1`) instead of
+hiding it.
+
+Two follow-ups, both small:
+
+1. **Name the proof-pending accounts in the report.** `after_projection_health`
+   gives a count; the per-account section should say which accounts did not
+   move and why (`BALANCE_PROOF_PENDING` from the job row's `last_error_code`),
+   so "7 of 8" is self-explaining without a database query.
+2. **Cap `requested_through` at the covered visibility.** With `--reproject-all`,
+   enqueue each account at the latest instant the copy's published balances
+   cycles actually cover, not at its `finalized_through`. That lets the whale
+   — the account whose reprojection matters most — be exercised on a copy.
+   `EnqueueEligibilityShadowReprojection` already computes per account; the
+   cap is one more subquery, and the existing integration tests pin the rest.
