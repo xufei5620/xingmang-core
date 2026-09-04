@@ -18,6 +18,15 @@ interface ListResponse<T> {
   items: T[] | null;
 }
 
+/** 卡片列表的响应：条目 + 已配置的账号清单。
+ *
+ *  账号清单由后端给，不从卡片数据里反推——一个还没开过卡的环境反推不出
+ *  任何账号，开卡表单会没有可选项。 */
+interface CardListResponse {
+  items: CardItem[] | null;
+  accounts: string[] | null;
+}
+
 /** 投影数据的新鲜度。判定在服务端做，前端只负责显示——
  *  两处各判一次迟早会分叉，而分叉的那一边会把陈旧数据显示成实时的。 */
 export interface CardFreshness {
@@ -30,6 +39,9 @@ export interface CardFreshness {
 
 /** 卡片列表一行。 */
 export interface CardItem {
+  /** 内部运营维度：这张卡的钱从哪个 Infini 账号出。
+   *  以后开放外部用户时，那一侧不暴露这个字段。 */
+  account: string;
   card_id: string;
   /** 掩码卡号。完整卡号只能经 `revealCard` 取得，不在任何读端点里。 */
   mask: string;
@@ -45,6 +57,7 @@ export interface CardItem {
 
 /** 一笔卡交易。 */
 export interface CardTransactionItem {
+  account: string;
   card_id: string;
   type: string;
   amount_minor: number;
@@ -60,6 +73,7 @@ export interface CardTransactionItem {
  *  每一条都意味着「有一笔花钱操作，我们至今不知道它到底成没成」。 */
 export interface CardOperationItem {
   idempotency_key: string;
+  account: string;
   kind: string;
   state: string;
   card_id?: string;
@@ -73,24 +87,35 @@ export interface CardOperationItem {
   retry_allowed: boolean;
 }
 
+/** 卡片列表 + 可选账号。 */
+export interface CardsView {
+  cards: CardItem[];
+  accounts: string[];
+}
+
 export async function listCards(
-  options: ListOptions & { ownerRef?: string } = {},
+  options: ListOptions & { account?: string; ownerRef?: string } = {},
   client: ApiClient = apiClient,
-): Promise<CardItem[]> {
-  const query = options.ownerRef ? `?owner_ref=${encodeURIComponent(options.ownerRef)}` : "";
-  const body = await client.get<ListResponse<CardItem>>(`/api/v1/cards${query}`, {
+): Promise<CardsView> {
+  const params = new URLSearchParams();
+  if (options.account) params.set("account", options.account);
+  if (options.ownerRef) params.set("owner_ref", options.ownerRef);
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  const body = await client.get<CardListResponse>(`/api/v1/cards${query}`, {
     ...(options.signal ? { signal: options.signal } : {}),
   });
-  return body.items ?? [];
+  return { cards: body.items ?? [], accounts: body.accounts ?? [] };
 }
 
 export async function listCardTransactions(
+  account: string,
   cardId: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<CardTransactionItem[]> {
   const body = await client.get<ListResponse<CardTransactionItem>>(
-    `/api/v1/cards/${encodeURIComponent(cardId)}/transactions`,
+    `/api/v1/cards/${encodeURIComponent(cardId)}/transactions?account=${encodeURIComponent(account)}`,
     { ...(options.signal ? { signal: options.signal } : {}) },
   );
   return body.items ?? [];
@@ -114,6 +139,7 @@ export async function listCardOperationsNeedingAttention(
  *  换一个键等于告诉后端「这是另一次开卡」，而上游没有幂等能力。 */
 export function issueCard(
   params: {
+    account: string;
     idempotency_key: string;
     product_id: number;
     top_up_amount: string;
@@ -131,6 +157,7 @@ export function issueCard(
 /** 给已有的卡充值（`cards.card.topup@1`）。同样受金额上限约束。 */
 export function topUpCard(
   params: {
+    account: string;
     idempotency_key: string;
     card_id: string;
     amount: string;
@@ -149,6 +176,7 @@ export function topUpCard(
  *  止损的时候拦住止损动作。 */
 export function redeemCard(
   params: {
+    account: string;
     idempotency_key: string;
     card_id: string;
     amount: string;
@@ -162,7 +190,7 @@ export function redeemCard(
 }
 
 export function freezeCard(
-  params: { idempotency_key: string; card_id: string },
+  params: { account: string; idempotency_key: string; card_id: string },
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<ActionRun> {
@@ -170,7 +198,7 @@ export function freezeCard(
 }
 
 export function unfreezeCard(
-  params: { idempotency_key: string; card_id: string },
+  params: { account: string; idempotency_key: string; card_id: string },
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<ActionRun> {
@@ -193,7 +221,7 @@ export interface RevealedCard {
  *  返回值**绝不能**写进任何状态容器、localStorage、URL 或日志——
  *  用完即弃，组件卸载时清空。 */
 export async function revealCard(
-  params: { card_id: string },
+  params: { account: string; card_id: string },
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<RevealedCard> {

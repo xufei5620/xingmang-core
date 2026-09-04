@@ -14,18 +14,23 @@ var issueNow = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 
 // memStore 是内存台账，只服务本包的测试。
 type memStore struct {
-	ops        map[string]Operation
-	cards      map[string]infini.Card
-	txs        map[string][]infini.CardTransaction
-	spentToday string
+	ops   map[string]Operation
+	cards map[string]infini.Card
+	// cardAccount 记住每张卡属于哪个账号，供 TrackedCards 还原。
+	cardAccount map[string]string
+	txs         map[string][]infini.CardTransaction
+	spentToday  string
+	// spentByAccount 非空时按账号取值，否则回落到 spentToday。
+	spentByAccount map[string]string
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		ops:        make(map[string]Operation),
-		cards:      make(map[string]infini.Card),
-		txs:        make(map[string][]infini.CardTransaction),
-		spentToday: "0",
+		ops:         make(map[string]Operation),
+		cards:       make(map[string]infini.Card),
+		cardAccount: make(map[string]string),
+		txs:         make(map[string][]infini.CardTransaction),
+		spentToday:  "0",
 	}
 }
 
@@ -42,12 +47,19 @@ func (m *memStore) ResolveOperation(ctx context.Context, op Operation) error {
 	return nil
 }
 
-func (m *memStore) SpentToday(ctx context.Context, kind string, day time.Time) (string, error) {
+func (m *memStore) SpentToday(ctx context.Context, account, kind string, day time.Time) (string, error) {
+	if m.spentByAccount != nil {
+		if v, ok := m.spentByAccount[account]; ok {
+			return v, nil
+		}
+		return "0", nil
+	}
 	return m.spentToday, nil
 }
 
-func (m *memStore) UpsertCard(ctx context.Context, card infini.Card, ownerRef string) error {
+func (m *memStore) UpsertCard(ctx context.Context, account string, card infini.Card, ownerRef string) error {
 	m.cards[card.ID] = card
+	m.cardAccount[card.ID] = account
 	return nil
 }
 
@@ -61,30 +73,33 @@ func (m *memStore) UnresolvedOperations(ctx context.Context) ([]Operation, error
 	return out, nil
 }
 
-func (m *memStore) TrackedCardIDs(ctx context.Context) ([]string, error) {
-	var out []string
+func (m *memStore) TrackedCards(ctx context.Context) ([]CardRef, error) {
+	var out []CardRef
 	for id := range m.cards {
-		out = append(out, id)
+		out = append(out, CardRef{Account: m.cardAccount[id], CardID: id})
 	}
 	return out, nil
 }
 
-func (m *memStore) UpsertTransactions(ctx context.Context, cardID string, txs []infini.CardTransaction) error {
+func (m *memStore) UpsertTransactions(ctx context.Context, account, cardID string, txs []infini.CardTransaction) error {
 	m.txs[cardID] = append(m.txs[cardID], txs...)
 	return nil
 }
 
+// testAccount 是既有单账号用例统一使用的账号 id。
+const testAccount = "main"
+
 func newService(client infini.CardClient, store *memStore) *Service {
-	return &Service{
-		client: client,
-		store:  store,
-		limits: Limits{PerOperation: "100", PerDay: "500"},
-		now:    func() time.Time { return issueNow },
-	}
+	return NewService([]Account{{
+		ID:     testAccount,
+		Client: client,
+		Limits: Limits{PerOperation: "100", PerDay: "500"},
+	}}, store, func() time.Time { return issueNow })
 }
 
 func issueReq() IssueRequest {
 	return IssueRequest{
+		Account:        testAccount,
 		IdempotencyKey: "issue-1",
 		ProductID:      1,
 		TopUpAmount:    "10",

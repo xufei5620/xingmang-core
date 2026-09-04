@@ -51,14 +51,14 @@ func (s *PgStore) BeginOperation(ctx context.Context, op Operation) (Operation, 
 
 	const insertSQL = `
 INSERT INTO cards.card_operation (
-    environment, idempotency_key, kind, state, card_alias, upstream_card_id,
+    environment, account, idempotency_key, kind, state, card_alias, upstream_card_id,
     amount_text, amount_scaled, amount_scale, token_type,
     started_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)
 ON CONFLICT (environment, idempotency_key) DO NOTHING`
 
 	tag, err := s.pool.Exec(ctx, insertSQL,
-		s.environment, op.IdempotencyKey, op.Kind, string(op.State), op.Alias, op.CardID,
+		s.environment, op.Account, op.IdempotencyKey, op.Kind, string(op.State), op.Alias, op.CardID,
 		op.AmountText, amountScaled, limitScale, op.TokenType,
 		op.StartedAt, now)
 	if err != nil {
@@ -110,7 +110,7 @@ UPDATE cards.card_operation
 //
 // **把 pending 与 unknown 都算进去**：那些可能真的花掉了，当没花过会让
 // 上限在最需要生效的时候失效。宁可少花，不可超限。
-func (s *PgStore) SpentToday(ctx context.Context, kind string, day time.Time) (string, error) {
+func (s *PgStore) SpentToday(ctx context.Context, account, kind string, day time.Time) (string, error) {
 	start := day.UTC().Truncate(24 * time.Hour)
 	end := start.Add(24 * time.Hour)
 
@@ -118,12 +118,13 @@ func (s *PgStore) SpentToday(ctx context.Context, kind string, day time.Time) (s
 SELECT COALESCE(SUM(amount_scaled), 0)
   FROM cards.card_operation
  WHERE environment = $1
-   AND kind = $2
+   AND account = $2
+   AND kind = $3
    AND state IN ('pending', 'succeeded', 'unknown')
-   AND started_at >= $3 AND started_at < $4`
+   AND started_at >= $4 AND started_at < $5`
 
 	var scaled int64
-	if err := s.pool.QueryRow(ctx, sumSQL, s.environment, kind, start, end).Scan(&scaled); err != nil {
+	if err := s.pool.QueryRow(ctx, sumSQL, s.environment, account, kind, start, end).Scan(&scaled); err != nil {
 		return "", fmt.Errorf("汇总今日金额: %w", err)
 	}
 	return minorToDecimal(scaled, limitScale), nil
@@ -132,16 +133,16 @@ SELECT COALESCE(SUM(amount_scaled), 0)
 // UpsertCard 落卡片投影。
 //
 // ownerRef 为空时**保留原值**：同步作业不知道归属，不该把运营填的标签清掉。
-func (s *PgStore) UpsertCard(ctx context.Context, card infini.Card, ownerRef string) error {
+func (s *PgStore) UpsertCard(ctx context.Context, account string, card infini.Card, ownerRef string) error {
 	now := s.now()
 
 	const upsertSQL = `
 INSERT INTO cards.infini_card (
-    environment, upstream_card_id, mask, holder_name, card_alias, status,
+    environment, account, upstream_card_id, mask, holder_name, card_alias, status,
     currency, balance_minor, owner_ref, upstream_user_id,
     upstream_created_at, upstream_updated_at, last_synced_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$13)
-ON CONFLICT (environment, upstream_card_id) DO UPDATE SET
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$14)
+ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     mask = EXCLUDED.mask,
     holder_name = EXCLUDED.holder_name,
     card_alias = EXCLUDED.card_alias,
@@ -164,7 +165,7 @@ ON CONFLICT (environment, upstream_card_id) DO UPDATE SET
 	}
 
 	if _, err := s.pool.Exec(ctx, upsertSQL,
-		s.environment, card.ID, card.Mask, card.HolderName, card.Alias, card.Status,
+		s.environment, account, card.ID, card.Mask, card.HolderName, card.Alias, card.Status,
 		card.Currency, card.BalanceMinor, ownerRef, card.UserID,
 		createdAt, updatedAt, now,
 	); err != nil {
@@ -176,7 +177,7 @@ ON CONFLICT (environment, upstream_card_id) DO UPDATE SET
 // UnresolvedOperations 返回尚未收敛的操作。
 func (s *PgStore) UnresolvedOperations(ctx context.Context) ([]Operation, error) {
 	const listSQL = `
-SELECT idempotency_key, kind, state, card_alias, upstream_card_id,
+SELECT idempotency_key, account, kind, state, card_alias, upstream_card_id,
        amount_text, token_type, needs_human_review, reason,
        started_at, resolved_at
   FROM cards.card_operation
@@ -200,12 +201,15 @@ SELECT idempotency_key, kind, state, card_alias, upstream_card_id,
 	return out, rows.Err()
 }
 
-// TrackedCardIDs 返回投影里已有的卡 id。
-func (s *PgStore) TrackedCardIDs(ctx context.Context) ([]string, error) {
+// TrackedCards 返回投影里已有的卡，带账号。
+//
+// 卡 id 只在自己账号内有意义，所以必须连账号一起返回——同步作业要拿它
+// 决定用哪个客户端去查。
+func (s *PgStore) TrackedCards(ctx context.Context) ([]CardRef, error) {
 	const listSQL = `
-SELECT upstream_card_id FROM cards.infini_card
+SELECT account, upstream_card_id FROM cards.infini_card
  WHERE environment = $1 AND status <> 'deleted'
- ORDER BY created_at`
+ ORDER BY account, created_at`
 
 	rows, err := s.pool.Query(ctx, listSQL, s.environment)
 	if err != nil {
@@ -213,13 +217,13 @@ SELECT upstream_card_id FROM cards.infini_card
 	}
 	defer rows.Close()
 
-	var out []string
+	var out []CardRef
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var ref CardRef
+		if err := rows.Scan(&ref.Account, &ref.CardID); err != nil {
 			return nil, err
 		}
-		out = append(out, id)
+		out = append(out, ref)
 	}
 	return out, rows.Err()
 }
@@ -228,7 +232,7 @@ SELECT upstream_card_id FROM cards.infini_card
 //
 // 去重键是**派生**的：上游的流水接口不返回交易 id（文档已逐字核对），
 // 没有去重键重复同步会造重复行。见迁移 000026 文件头第 3 条。
-func (s *PgStore) UpsertTransactions(ctx context.Context, cardID string, txs []infini.CardTransaction) error {
+func (s *PgStore) UpsertTransactions(ctx context.Context, account, cardID string, txs []infini.CardTransaction) error {
 	if len(txs) == 0 {
 		return nil
 	}
@@ -236,10 +240,10 @@ func (s *PgStore) UpsertTransactions(ctx context.Context, cardID string, txs []i
 
 	const upsertSQL = `
 INSERT INTO cards.infini_card_transaction (
-    environment, upstream_card_id, dedupe_key, tx_type, amount_minor, fee_minor,
+    environment, account, upstream_card_id, dedupe_key, tx_type, amount_minor, fee_minor,
     currency, status, merchant, occurred_at, synced_at, created_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
-ON CONFLICT (environment, dedupe_key) DO UPDATE SET
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
+ON CONFLICT (environment, account, dedupe_key) DO UPDATE SET
     status = EXCLUDED.status,
     synced_at = EXCLUDED.synced_at`
 
@@ -250,7 +254,7 @@ ON CONFLICT (environment, dedupe_key) DO UPDATE SET
 			occurredAt = parsed.UTC()
 		}
 		batch.Queue(upsertSQL,
-			s.environment, cardID, transactionDedupeKey(cardID, tx), tx.Type,
+			s.environment, account, cardID, transactionDedupeKey(cardID, tx), tx.Type,
 			tx.AmountMinor, tx.FeeMinor, tx.Currency, tx.Status, tx.Merchant,
 			occurredAt, now)
 	}
@@ -267,7 +271,7 @@ ON CONFLICT (environment, dedupe_key) DO UPDATE SET
 
 func (s *PgStore) operationByKey(ctx context.Context, key string) (Operation, error) {
 	const selectSQL = `
-SELECT idempotency_key, kind, state, card_alias, upstream_card_id,
+SELECT idempotency_key, account, kind, state, card_alias, upstream_card_id,
        amount_text, token_type, needs_human_review, reason,
        started_at, resolved_at
   FROM cards.card_operation
@@ -292,7 +296,7 @@ func scanOperation(row rowScanner) (Operation, error) {
 		resolvedAt *time.Time
 	)
 	if err := row.Scan(
-		&op.IdempotencyKey, &op.Kind, &state, &op.Alias, &op.CardID,
+		&op.IdempotencyKey, &op.Account, &op.Kind, &state, &op.Alias, &op.CardID,
 		&op.AmountText, &op.TokenType, &op.NeedsHumanReview, &op.Reason,
 		&op.StartedAt, &resolvedAt,
 	); err != nil {
@@ -354,6 +358,9 @@ func transactionDedupeKey(cardID string, tx infini.CardTransaction) string {
 // 只有掩码卡号。完整卡号、CVV、有效期不在库里，也不在任何读路径上——
 // 要看明文必须走 cards.card.reveal Action（宪法条款 7）。
 type CardView struct {
+	// Account 是内部运营维度：管理端要能按账号筛，
+	// 但以后开放给外部用户时这一列不暴露。
+	Account      string
 	CardID       string
 	Mask         string
 	HolderName   string
@@ -370,16 +377,17 @@ type CardView struct {
 // ownerRef 非空时只返回归属于它的卡——以后开放给外部用户时，
 // 这就是「只能看自己的卡」的落点，调用方（端点层）负责把当前身份
 // 翻译成 ownerRef，领域层不猜。
-func (s *PgStore) ListCards(ctx context.Context, ownerRef string) ([]CardView, error) {
+func (s *PgStore) ListCards(ctx context.Context, account, ownerRef string) ([]CardView, error) {
 	const listSQL = `
-SELECT upstream_card_id, mask, holder_name, card_alias, status,
+SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
        currency, balance_minor, owner_ref, last_synced_at
   FROM cards.infini_card
  WHERE environment = $1
-   AND ($2 = '' OR owner_ref = $2)
- ORDER BY created_at DESC`
+   AND ($2 = '' OR account = $2)
+   AND ($3 = '' OR owner_ref = $3)
+ ORDER BY account, created_at DESC`
 
-	rows, err := s.pool.Query(ctx, listSQL, s.environment, ownerRef)
+	rows, err := s.pool.Query(ctx, listSQL, s.environment, account, ownerRef)
 	if err != nil {
 		return nil, fmt.Errorf("查卡片投影: %w", err)
 	}
@@ -388,7 +396,7 @@ SELECT upstream_card_id, mask, holder_name, card_alias, status,
 	var out []CardView
 	for rows.Next() {
 		var v CardView
-		if err := rows.Scan(&v.CardID, &v.Mask, &v.HolderName, &v.Alias, &v.Status,
+		if err := rows.Scan(&v.Account, &v.CardID, &v.Mask, &v.HolderName, &v.Alias, &v.Status,
 			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.LastSyncedAt); err != nil {
 			return nil, err
 		}
@@ -411,7 +419,7 @@ type TransactionView struct {
 }
 
 // ListTransactions 读某张卡的流水。
-func (s *PgStore) ListTransactions(ctx context.Context, cardID string, limit int) ([]TransactionView, error) {
+func (s *PgStore) ListTransactions(ctx context.Context, account, cardID string, limit int) ([]TransactionView, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
@@ -420,11 +428,11 @@ func (s *PgStore) ListTransactions(ctx context.Context, cardID string, limit int
 SELECT upstream_card_id, tx_type, amount_minor, fee_minor, currency,
        status, merchant, occurred_at, synced_at
   FROM cards.infini_card_transaction
- WHERE environment = $1 AND upstream_card_id = $2
+ WHERE environment = $1 AND account = $2 AND upstream_card_id = $3
  ORDER BY occurred_at DESC NULLS LAST
- LIMIT $3`
+ LIMIT $4`
 
-	rows, err := s.pool.Query(ctx, listSQL, s.environment, cardID, limit)
+	rows, err := s.pool.Query(ctx, listSQL, s.environment, account, cardID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("查流水投影: %w", err)
 	}
@@ -454,7 +462,7 @@ SELECT upstream_card_id, tx_type, amount_minor, fee_minor, currency,
 // 不知道它到底成没成」。
 func (s *PgStore) OperationsNeedingAttention(ctx context.Context) ([]Operation, error) {
 	const listSQL = `
-SELECT idempotency_key, kind, state, card_alias, upstream_card_id,
+SELECT idempotency_key, account, kind, state, card_alias, upstream_card_id,
        amount_text, token_type, needs_human_review, reason,
        started_at, resolved_at
   FROM cards.card_operation

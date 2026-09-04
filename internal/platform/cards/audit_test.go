@@ -123,7 +123,7 @@ func TestRevealThroughKernelIsAudited(t *testing.T) {
 		ActionID:      ActionReveal,
 		ActionVersion: actionVersion,
 		RequestID:     "req-test",
-		Params:        map[string]any{"card_id": issued.CardID},
+		Params:        map[string]any{"account": testAccount, "card_id": issued.CardID},
 	}); err != nil {
 		t.Fatalf("reveal 执行失败: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestRevealAuditNeverContainsPlaintext(t *testing.T) {
 	svc := newService(fake, newMemStore())
 	issued, _ := svc.IssueCard(context.Background(), issueReq())
 
-	revealed, err := svc.RevealCard(context.Background(), issued.CardID)
+	revealed, err := svc.RevealCard(context.Background(), testAccount, issued.CardID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestRevealAuditNeverContainsPlaintext(t *testing.T) {
 		ActionID:      ActionReveal,
 		ActionVersion: actionVersion,
 		RequestID:     "req-test",
-		Params:        map[string]any{"card_id": issued.CardID},
+		Params:        map[string]any{"account": testAccount, "card_id": issued.CardID},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestRevealRequiresDedicatedPermission(t *testing.T) {
 		ActionID:      ActionReveal,
 		ActionVersion: actionVersion,
 		RequestID:     "req-test",
-		Params:        map[string]any{"card_id": issued.CardID},
+		Params:        map[string]any{"account": testAccount, "card_id": issued.CardID},
 	})
 	if err == nil {
 		t.Fatal("没有 card.reveal 权限必须被拒")

@@ -98,6 +98,8 @@ type Deps struct {
 	// 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
 	// 写路径只走 cards.card.* Action，这里不开第二条。
 	Cards CardQuerier
+	// CardAccounts 是已配置的账号清单，供管理端的开卡表单填下拉。
+	CardAccounts []string
 	// CardSyncInterval 供新鲜度判定；为零时用 5 分钟兜底。
 	CardSyncInterval time.Duration
 
@@ -269,7 +271,7 @@ func NewRouter(d Deps) http.Handler {
 					interval = 5 * time.Minute
 				}
 				api.With(RequireScope(cards.PermissionRead)).
-					Get("/cards", ListCardsHandler(d.Cards, interval))
+					Get("/cards", ListCardsHandler(d.Cards, d.CardAccounts, interval))
 				api.With(RequireScope(cards.PermissionRead)).
 					Get("/cards/{cardID}/transactions", ListCardTransactionsHandler(d.Cards))
 				// 待人工处置的操作单列一个端点：它是红条的数据源，

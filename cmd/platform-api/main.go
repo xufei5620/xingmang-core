@@ -459,6 +459,7 @@ func main() {
 		// nil 时卡片只读端点整组不挂载（XM_CARDS_MODE=off）。
 		// 写路径只走 cards.card.* Action，这里不开第二条。
 		Cards:            cardQuerierOrNil(cardStore),
+		CardAccounts:     cardAccountIDs(cardService),
 		CardSyncInterval: cardsCfg.SyncInterval,
 		// 凭据登记的读与写共用同一个仓储：清单里只有指纹与可用性，没有值
 		Credentials: credentialStore,

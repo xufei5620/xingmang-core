@@ -19,13 +19,16 @@ import (
 // 写路径（开卡/充值/冻结/解冻/赎回/查看卡面）**只走 cards.card.* Action**，
 // 这里不开第二条写路径。
 type CardQuerier interface {
-	ListCards(ctx context.Context, ownerRef string) ([]cards.CardView, error)
-	ListTransactions(ctx context.Context, cardID string, limit int) ([]cards.TransactionView, error)
+	ListCards(ctx context.Context, account, ownerRef string) ([]cards.CardView, error)
+	ListTransactions(ctx context.Context, account, cardID string, limit int) ([]cards.TransactionView, error)
 	OperationsNeedingAttention(ctx context.Context) ([]cards.Operation, error)
 }
 
 type cardItem struct {
-	CardID string `json:"card_id"`
+	// Account 是内部运营维度。管理端按它筛选与展示；
+	// 以后开放外部用户时，那一侧的响应不该带这个字段。
+	Account string `json:"account"`
+	CardID  string `json:"card_id"`
 	// Mask 是掩码卡号，库里存的就是它。完整卡号只能经
 	// cards.card.reveal Action 取得，不在任何读路径上。
 	Mask         string              `json:"mask"`
@@ -39,6 +42,7 @@ type cardItem struct {
 }
 
 type cardTransactionItem struct {
+	Account     string `json:"account"`
 	CardID      string `json:"card_id"`
 	Type        string `json:"type"`
 	AmountMinor int64  `json:"amount_minor"`
@@ -51,6 +55,7 @@ type cardTransactionItem struct {
 
 type cardOperationItem struct {
 	IdempotencyKey string `json:"idempotency_key"`
+	Account        string `json:"account"`
 	Kind           string `json:"kind"`
 	State          string `json:"state"`
 	CardID         string `json:"card_id,omitempty"`
@@ -66,19 +71,27 @@ type cardOperationItem struct {
 }
 
 // ListCardsHandler 列出卡片投影。
-func ListCardsHandler(store CardQuerier, syncInterval time.Duration) http.HandlerFunc {
+//
+// accounts 是已配置的账号清单，随响应一起返回：管理端的开卡表单要拿它
+// 填下拉。从卡片数据里反推账号是不行的——一个还没开过卡的环境会得到
+// 一个没有选项的表单。
+func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := principal.FromContext(r.Context()); !ok {
 			WriteError(w, r, action.NewError(action.CodePermissionDenied, "缺少身份", nil))
 			return
 		}
 
-		// owner_ref 过滤现在由调用方显式给出（内部运营看全部）。
-		// 以后开放给外部用户时，这里改成由身份推导而不是由参数决定——
-		// 那是权限边界，不能让请求方自己挑。
+		// account 与 owner_ref 都由调用方显式给出（内部运营看全部）。
+		//
+		// 两者不是一回事：account 是内部资金来源，owner_ref 是面向客户的
+		// 归属。以后开放给外部用户时，owner_ref 必须改成由身份推导而不是
+		// 由参数决定（那是权限边界，不能让请求方自己挑），而 account
+		// 干脆不出现在那一侧——账号是内部维度。
+		account := strings.TrimSpace(r.URL.Query().Get("account"))
 		ownerRef := strings.TrimSpace(r.URL.Query().Get("owner_ref"))
 
-		items, err := store.ListCards(r.Context(), ownerRef)
+		items, err := store.ListCards(r.Context(), account, ownerRef)
 		if err != nil {
 			WriteError(w, r, err)
 			return
@@ -88,6 +101,7 @@ func ListCardsHandler(store CardQuerier, syncInterval time.Duration) http.Handle
 		out := make([]cardItem, 0, len(items))
 		for _, c := range items {
 			out = append(out, cardItem{
+				Account:      c.Account,
 				CardID:       c.CardID,
 				Mask:         c.Mask,
 				HolderName:   c.HolderName,
@@ -99,7 +113,10 @@ func ListCardsHandler(store CardQuerier, syncInterval time.Duration) http.Handle
 				Freshness:    cards.Freshness(c.LastSyncedAt, now, syncInterval),
 			})
 		}
-		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+		if accounts == nil {
+			accounts = []string{}
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": out, "accounts": accounts})
 	}
 }
 
@@ -116,6 +133,12 @@ func ListCardTransactionsHandler(store CardQuerier) http.HandlerFunc {
 			WriteError(w, r, action.NewError(action.CodeInvalidParams, "缺少卡片 id", nil))
 			return
 		}
+		// 账号必填：卡 id 只在自己账号内有意义，不带账号查等于让存储层猜。
+		account := strings.TrimSpace(r.URL.Query().Get("account"))
+		if account == "" {
+			WriteError(w, r, action.NewError(action.CodeInvalidParams, "缺少账号", nil))
+			return
+		}
 
 		limit := 100
 		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
@@ -129,7 +152,7 @@ func ListCardTransactionsHandler(store CardQuerier) http.HandlerFunc {
 			limit = parsed
 		}
 
-		items, err := store.ListTransactions(r.Context(), cardID, limit)
+		items, err := store.ListTransactions(r.Context(), account, cardID, limit)
 		if err != nil {
 			WriteError(w, r, err)
 			return
@@ -138,7 +161,8 @@ func ListCardTransactionsHandler(store CardQuerier) http.HandlerFunc {
 		out := make([]cardTransactionItem, 0, len(items))
 		for _, t := range items {
 			item := cardTransactionItem{
-				CardID: t.CardID, Type: t.Type, AmountMinor: t.AmountMinor,
+				Account: account,
+				CardID:  t.CardID, Type: t.Type, AmountMinor: t.AmountMinor,
 				FeeMinor: t.FeeMinor, Currency: t.Currency, Status: t.Status,
 				Merchant: t.Merchant,
 			}
@@ -172,6 +196,7 @@ func ListCardOperationsNeedingAttentionHandler(store CardQuerier) http.HandlerFu
 		for _, op := range ops {
 			out = append(out, cardOperationItem{
 				IdempotencyKey: op.IdempotencyKey,
+				Account:        op.Account,
 				Kind:           op.Kind,
 				State:          string(op.State),
 				CardID:         op.CardID,

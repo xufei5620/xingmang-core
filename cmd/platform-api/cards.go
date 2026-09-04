@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -43,25 +44,38 @@ func parseCardsMode(s string) (cardsMode, error) {
 	}
 }
 
+// accountIDPattern 限制账号 id 的字符集。
+//
+// 账号 id 要拼进环境变量名（XM_CARDS_<ID>_KEY_ID_REF），所以只能是
+// 大写字母、数字与下划线——一个带连字符的 id 会拼出取不到值的变量名，
+// 而那种失败长得像「凭据没配」，排查方向完全错。
+var accountIDPattern = regexp.MustCompile(`^[A-Z0-9_]{1,32}$`)
+
+// cardsAccountConfig 是单个账号的配置。
+type cardsAccountConfig struct {
+	ID        string
+	KeyIDRef  string
+	SecretRef string
+	// 金额上限按账号各配一份：两个账号的资金是分开的。
+	PerOperationLimit string
+	PerDayLimit       string
+}
+
 // cardsConfig 是卡片功能的进程级配置。
 type cardsConfig struct {
 	Mode cardsMode
-	// BaseURL 是 Infini API 的根地址。不写死在代码里：换环境、换网关
-	// 都不该改代码。
-	BaseURL string
-	// KeyIDRef / SecretRef 是 CredentialRef（secret://<scope>/<name>），
-	// 禁止内联明文（ADR-014、宪法条款 7）。
-	KeyIDRef  string
-	SecretRef string
-	// PerOperationLimit / PerDayLimit 是金额上限（十进制文本，
-	// 单位与申请金额一致，不做汇率换算）。**未配齐时领域层 fail closed**。
-	PerOperationLimit string
-	PerDayLimit       string
+	// BaseURL 所有账号共用：同一个供应商，同一个端点。
+	BaseURL  string
+	Accounts []cardsAccountConfig
 	// SyncInterval 供读端点的新鲜度判定，与 worker 的同步周期保持一致。
 	SyncInterval time.Duration
 }
 
 // loadCardsConfig 从环境变量读取配置。
+//
+// 账号清单来自 XM_CARDS_ACCOUNTS（逗号分隔），每个账号的凭据引用与金额
+// 上限用 XM_CARDS_<ID>_* 取。**没有单账号的隐式回落**：一个「只配了一对
+// 凭据就默默当成唯一账号」的行为，会在加第二个账号时把钱花到错的地方。
 func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 	mode, err := parseCardsMode(getenv("XM_CARDS_MODE"))
 	if err != nil {
@@ -69,40 +83,81 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 	}
 
 	cfg := cardsConfig{
-		Mode:              mode,
-		BaseURL:           strings.TrimSpace(getenv("XM_CARDS_BASE_URL")),
-		KeyIDRef:          strings.TrimSpace(getenv("XM_CARDS_KEY_ID_REF")),
-		SecretRef:         strings.TrimSpace(getenv("XM_CARDS_SECRET_REF")),
-		PerOperationLimit: strings.TrimSpace(getenv("XM_CARDS_LIMIT_PER_OPERATION")),
-		PerDayLimit:       strings.TrimSpace(getenv("XM_CARDS_LIMIT_PER_DAY")),
-		SyncInterval:      5 * time.Minute,
+		Mode:         mode,
+		BaseURL:      strings.TrimSpace(getenv("XM_CARDS_BASE_URL")),
+		SyncInterval: 5 * time.Minute,
+	}
+	if mode == cardsModeOff {
+		return cfg, nil
 	}
 
-	if mode == cardsModeReal {
-		// real 模式下这四样一个都不能少。启动期硬拒绝，
-		// 而不是等到有人点开卡时才发现配置不全——那时的错误会长得像
-		// 上游故障，排查方向完全错。
-		missing := []string{}
-		if cfg.BaseURL == "" {
-			missing = append(missing, "XM_CARDS_BASE_URL")
+	ids, err := parseAccountIDs(getenv("XM_CARDS_ACCOUNTS"))
+	if err != nil {
+		return cardsConfig{}, err
+	}
+	if len(ids) == 0 {
+		return cardsConfig{}, fmt.Errorf(
+			"XM_CARDS_MODE=%s 但 XM_CARDS_ACCOUNTS 为空——账号清单必须显式声明", mode)
+	}
+
+	for _, id := range ids {
+		acct := cardsAccountConfig{
+			ID:                id,
+			KeyIDRef:          strings.TrimSpace(getenv("XM_CARDS_" + id + "_KEY_ID_REF")),
+			SecretRef:         strings.TrimSpace(getenv("XM_CARDS_" + id + "_SECRET_REF")),
+			PerOperationLimit: strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_OPERATION")),
+			PerDayLimit:       strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_DAY")),
 		}
-		if cfg.KeyIDRef == "" {
-			missing = append(missing, "XM_CARDS_KEY_ID_REF")
+
+		// 金额上限在任何模式下都必填：fake 模式也要跑限额分支，
+		// 否则「上限没配」这个 fail-closed 行为在演示环境永远测不到。
+		var missing []string
+		if acct.PerOperationLimit == "" || acct.PerDayLimit == "" {
+			missing = append(missing, "XM_CARDS_"+id+"_LIMIT_PER_OPERATION 与 _LIMIT_PER_DAY")
 		}
-		if cfg.SecretRef == "" {
-			missing = append(missing, "XM_CARDS_SECRET_REF")
-		}
-		if cfg.PerOperationLimit == "" || cfg.PerDayLimit == "" {
-			missing = append(missing, "XM_CARDS_LIMIT_PER_OPERATION 与 XM_CARDS_LIMIT_PER_DAY")
+		if mode == cardsModeReal {
+			// real 模式下凭据引用也不能少。启动期硬拒绝，而不是等到有人
+			// 点开卡时才发现——那时的错误会长得像上游故障。
+			if acct.KeyIDRef == "" {
+				missing = append(missing, "XM_CARDS_"+id+"_KEY_ID_REF")
+			}
+			if acct.SecretRef == "" {
+				missing = append(missing, "XM_CARDS_"+id+"_SECRET_REF")
+			}
 		}
 		if len(missing) > 0 {
 			return cardsConfig{}, fmt.Errorf(
-				"XM_CARDS_MODE=real 但缺少 %s——花钱的通道不接受默认值",
-				strings.Join(missing, "、"))
+				"账号 %s 缺少 %s——花钱的通道不接受默认值", id, strings.Join(missing, "、"))
 		}
+
+		cfg.Accounts = append(cfg.Accounts, acct)
 	}
 
+	if mode == cardsModeReal && cfg.BaseURL == "" {
+		return cardsConfig{}, fmt.Errorf("XM_CARDS_MODE=real 但缺少 XM_CARDS_BASE_URL")
+	}
 	return cfg, nil
+}
+
+// parseAccountIDs 解析并校验账号清单。
+func parseAccountIDs(raw string) ([]string, error) {
+	var ids []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		id := strings.ToUpper(strings.TrimSpace(part))
+		if id == "" {
+			continue
+		}
+		if !accountIDPattern.MatchString(id) {
+			return nil, fmt.Errorf("账号 id %q 非法：只接受大写字母、数字与下划线（它要拼进环境变量名）", id)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("账号 id %q 重复", id)
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // buildCards 组装卡片功能。mode=off 时返回 (nil, nil, nil)，
@@ -122,24 +177,39 @@ func buildCards(
 	}
 
 	store := cards.NewPgStore(pool, environment, time.Now)
-	limits := cards.Limits{
-		PerOperation: cfg.PerOperationLimit,
-		PerDay:       cfg.PerDayLimit,
-	}
 
-	var client infini.CardClient
-	switch cfg.Mode {
-	case cardsModeFake:
-		client = infini.NewFake()
-	case cardsModeReal:
-		real, err := newInfiniClient(ctx, cfg, secretProvider)
-		if err != nil {
-			return nil, nil, err
+	accounts, err := buildCardAccounts(ctx, cfg, secretProvider)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cards.NewService(accounts, store, time.Now), store, nil
+}
+
+// buildCardAccounts 把配置翻成运行时账号。
+func buildCardAccounts(
+	ctx context.Context,
+	cfg cardsConfig,
+	provider secrets.SecretProvider,
+) ([]cards.Account, error) {
+	out := make([]cards.Account, 0, len(cfg.Accounts))
+	for _, a := range cfg.Accounts {
+		limits := cards.Limits{PerOperation: a.PerOperationLimit, PerDay: a.PerDayLimit}
+
+		var client infini.CardClient
+		switch cfg.Mode {
+		case cardsModeFake:
+			client = infini.NewFake()
+		case cardsModeReal:
+			realClient, err := newInfiniClient(ctx, cfg.BaseURL, a, provider)
+			if err != nil {
+				return nil, fmt.Errorf("账号 %s: %w", a.ID, err)
+			}
+			client = realClient
 		}
-		client = real
-	}
 
-	return cards.NewService(client, store, limits, time.Now), store, nil
+		out = append(out, cards.Account{ID: a.ID, Client: client, Limits: limits})
+	}
+	return out, nil
 }
 
 // newInfiniClient 组装真实客户端。
@@ -149,30 +219,31 @@ func buildCards(
 // 启动期只校验引用格式，格式错要在启动就炸，而不是等到有人点开卡。
 func newInfiniClient(
 	_ context.Context,
-	cfg cardsConfig,
+	baseURL string,
+	acct cardsAccountConfig,
 	provider secrets.SecretProvider,
 ) (*infini.Client, error) {
 	if provider == nil {
-		return nil, fmt.Errorf("卡片功能 real 模式需要 SecretProvider")
+		return nil, fmt.Errorf("real 模式需要 SecretProvider")
 	}
 
-	keyIDRef, err := secrets.ParseCredentialRef(cfg.KeyIDRef)
+	keyIDRef, err := secrets.ParseCredentialRef(acct.KeyIDRef)
 	if err != nil {
-		return nil, fmt.Errorf("XM_CARDS_KEY_ID_REF: %w", err)
+		return nil, fmt.Errorf("KEY_ID_REF: %w", err)
 	}
-	secretRef, err := secrets.ParseCredentialRef(cfg.SecretRef)
+	secretRef, err := secrets.ParseCredentialRef(acct.SecretRef)
 	if err != nil {
-		return nil, fmt.Errorf("XM_CARDS_SECRET_REF: %w", err)
+		return nil, fmt.Errorf("SECRET_REF: %w", err)
 	}
 
-	host, err := hostFromBaseURL(cfg.BaseURL)
+	host, err := hostFromBaseURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
 
 	// allowlist 只放这一个主机：写通道的 fail-closed 语义要求它非空，
 	// 而放宽到多个主机没有任何业务理由。
-	return infini.NewClient(cfg.BaseURL, provider, keyIDRef, secretRef, []string{host}), nil
+	return infini.NewClient(baseURL, provider, keyIDRef, secretRef, []string{host}), nil
 }
 
 // hostFromBaseURL 从 base URL 取主机名，用作写通道的 allowlist。
@@ -209,4 +280,13 @@ func cardQuerierOrNil(store *cards.PgStore) httpapi.CardQuerier {
 		return nil
 	}
 	return store
+}
+
+// cardAccountIDs 取出已配置的账号，供读端点回给管理端填下拉。
+// svc 为 nil（mode=off）时返回 nil——端点那时也不挂载。
+func cardAccountIDs(svc *cards.Service) []string {
+	if svc == nil {
+		return nil
+	}
+	return svc.AccountIDs()
 }

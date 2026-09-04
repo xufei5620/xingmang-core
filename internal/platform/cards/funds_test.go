@@ -24,6 +24,7 @@ func TestTopUpGoesThroughLimitsAndLedger(t *testing.T) {
 	cardID := issuedCard(t, svc)
 
 	_, err := svc.TopUpCard(context.Background(), FundsRequest{
+		Account:        testAccount,
 		IdempotencyKey: "topup-1",
 		CardID:         cardID,
 		Amount:         "20",
@@ -46,6 +47,7 @@ func TestTopUpRejectsOverLimit(t *testing.T) {
 	cardID := issuedCard(t, svc)
 
 	_, err := svc.TopUpCard(context.Background(), FundsRequest{
+		Account:        testAccount,
 		IdempotencyKey: "topup-2", CardID: cardID, Amount: "101", TokenType: "USDT",
 	})
 	if !errors.Is(err, ErrPerOperationExceeded) {
@@ -62,6 +64,7 @@ func TestTopUpTimeoutLandsInUnknown(t *testing.T) {
 
 	fake.FailNext(connector.NewError(connector.KindUnavailable, "op", nil))
 	_, _ = svc.TopUpCard(context.Background(), FundsRequest{
+		Account:        testAccount,
 		IdempotencyKey: "topup-3", CardID: cardID, Amount: "20", TokenType: "USDT",
 	})
 
@@ -82,6 +85,7 @@ func TestRedeemIsNotBoundByLimits(t *testing.T) {
 
 	// 金额远超单笔上限 100
 	if _, err := svc.RedeemCard(context.Background(), FundsRequest{
+		Account:        testAccount,
 		IdempotencyKey: "redeem-1", CardID: cardID, Amount: "9999", TokenType: "USDT",
 	}); err != nil {
 		t.Fatalf("赎回不该被金额上限拦住: %v", err)
@@ -95,7 +99,7 @@ func TestRedeemIsIdempotent(t *testing.T) {
 	svc := newService(fake, store)
 	cardID := issuedCard(t, svc)
 
-	req := FundsRequest{IdempotencyKey: "redeem-2", CardID: cardID, Amount: "5", TokenType: "USDT"}
+	req := FundsRequest{Account: testAccount, IdempotencyKey: "redeem-2", CardID: cardID, Amount: "5", TokenType: "USDT"}
 	if _, err := svc.RedeemCard(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +122,7 @@ func TestFreezeTimeoutIsRetryableUnlikeSpendingOperations(t *testing.T) {
 	cardID := issuedCard(t, svc)
 
 	fake.FailNext(connector.NewError(connector.KindUnavailable, "op", nil))
-	_ = svc.FreezeCard(context.Background(), "freeze-1", cardID)
+	_ = svc.FreezeCard(context.Background(), testAccount, "freeze-1", cardID)
 
 	op := store.ops["freeze-1"]
 	if op.State != StateFailed {
@@ -134,7 +138,7 @@ func TestFreezeAndUnfreezeChangeUpstreamStatus(t *testing.T) {
 	svc := newService(fake, newMemStore())
 	cardID := issuedCard(t, svc)
 
-	if err := svc.FreezeCard(context.Background(), "freeze-2", cardID); err != nil {
+	if err := svc.FreezeCard(context.Background(), testAccount, "freeze-2", cardID); err != nil {
 		t.Fatal(err)
 	}
 	card, _ := fake.CardStatus(context.Background(), cardID)
@@ -142,7 +146,7 @@ func TestFreezeAndUnfreezeChangeUpstreamStatus(t *testing.T) {
 		t.Fatalf("冻结后上游状态 = %q", card.Status)
 	}
 
-	if err := svc.UnfreezeCard(context.Background(), "unfreeze-1", cardID); err != nil {
+	if err := svc.UnfreezeCard(context.Background(), testAccount, "unfreeze-1", cardID); err != nil {
 		t.Fatal(err)
 	}
 	card, _ = fake.CardStatus(context.Background(), cardID)

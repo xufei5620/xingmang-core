@@ -10,7 +10,7 @@ import (
 )
 
 func newSyncer(client infini.CardClient, store *memStore, now time.Time) *Syncer {
-	return NewSyncer(client, store, SyncOptions{
+	return NewSyncer([]Account{{ID: testAccount, Client: client}}, store, SyncOptions{
 		UnknownGrace: 30 * time.Minute,
 		Now:          func() time.Time { return now },
 	})
@@ -32,6 +32,7 @@ func TestSyncConvergesUnknownIssueWhenCardFound(t *testing.T) {
 	}
 	store.ops["issue-x"] = Operation{
 		IdempotencyKey: "issue-x",
+		Account:        testAccount,
 		Kind:           OpIssue,
 		State:          StateUnknown,
 		Alias:          AliasFor("issue-x"),
@@ -60,6 +61,7 @@ func TestSyncEscalatesStaleUnknownWithoutMarkingFailed(t *testing.T) {
 	store := newMemStore()
 	store.ops["issue-y"] = Operation{
 		IdempotencyKey: "issue-y",
+		Account:        testAccount,
 		Kind:           OpIssue,
 		State:          StateUnknown,
 		Alias:          AliasFor("issue-y"),
@@ -113,6 +115,7 @@ func TestSyncKeepsUnknownIntactWhenUpstreamUnavailable(t *testing.T) {
 	fake := infini.NewFake()
 	store.ops["issue-z"] = Operation{
 		IdempotencyKey: "issue-z",
+		Account:        testAccount,
 		Kind:           OpIssue,
 		State:          StateUnknown,
 		Alias:          AliasFor("issue-z"),
@@ -138,6 +141,7 @@ func TestSyncSkipsResolvedOperations(t *testing.T) {
 	store := newMemStore()
 	store.ops["done"] = Operation{
 		IdempotencyKey: "done",
+		Account:        testAccount,
 		Kind:           OpIssue,
 		State:          StateSucceeded,
 		CardID:         "card_done",

@@ -40,9 +40,14 @@ const (
 // Operation 是操作台账里的一笔记录。
 type Operation struct {
 	IdempotencyKey string
-	Kind           string
-	State          OperationState
-	CardID         string
+	// Account 是这笔操作打到哪个 Infini 账号。
+	//
+	// 不记账号的话对账时不知道该去哪个账号查，而拿 A 账号的卡去认 B 账号
+	// 那笔操作，等于把另一张卡的 id 记错地方——那种错不会报错。
+	Account string
+	Kind    string
+	State   OperationState
+	CardID  string
 	// Alias 是写进上游 card_alias 的幂等信标，对账时用它精确匹配。
 	Alias string
 	// AmountText 是原始金额文本——发给上游的就是它，进审计的也是它。

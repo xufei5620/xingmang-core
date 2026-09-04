@@ -124,7 +124,7 @@ function RevealDialog({ card }: { card: CardItem }) {
   const [error, setError] = useState<unknown>(null);
 
   const mutation = useMutation({
-    mutationFn: () => revealCard({ card_id: card.card_id }),
+    mutationFn: () => revealCard({ account: card.account, card_id: card.card_id }),
     onSuccess: (data) => {
       setRevealed(data);
       setError(null);
@@ -188,8 +188,15 @@ function RevealDialog({ card }: { card: CardItem }) {
  *  幂等键在**打开对话框时生成一次**，整个表单生命周期内不变：
  *  同一次提交的重试必须带同一个键，换一个键等于告诉后端「这是另一次开卡」，
  *  而上游没有幂等能力。 */
-function IssueCardDialog({ onIssued }: { onIssued: (result: ActionResult) => void }) {
+function IssueCardDialog({
+  accounts,
+  onIssued,
+}: {
+  accounts: string[];
+  onIssued: (result: ActionResult) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const [account, setAccount] = useState(accounts[0] ?? "");
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
   const [productId, setProductId] = useState("1");
   const [amount, setAmount] = useState("");
@@ -203,6 +210,7 @@ function IssueCardDialog({ onIssued }: { onIssued: (result: ActionResult) => voi
   const mutation = useMutation({
     mutationFn: () =>
       issueCard({
+        account,
         idempotency_key: idempotencyKey,
         product_id: Number(productId),
         top_up_amount: amount.trim(),
@@ -240,6 +248,18 @@ function IssueCardDialog({ onIssued }: { onIssued: (result: ActionResult) => voi
           mutation.mutate();
         }}
       >
+        <FormField
+          label="使用账号"
+          htmlFor={`${formId}-account`}
+          hint="这张卡的钱从哪个 Infini 账号出。两个账号的资金与额度是分开的。"
+        >
+          <Select
+            aria-label="使用账号"
+            options={accounts.map((a) => ({ value: a, label: a }))}
+            value={account}
+            onValueChange={setAccount}
+          />
+        </FormField>
         <FormField label="卡产品" htmlFor={`${formId}-product`}>
           <Select
             aria-label="卡产品"
@@ -340,7 +360,11 @@ export function CardsPanel() {
 
   const switchMutation = useMutation({
     mutationFn: ({ card, freeze }: { card: CardItem; freeze: boolean }) => {
-      const params = { idempotency_key: crypto.randomUUID(), card_id: card.card_id };
+      const params = {
+        account: card.account,
+        idempotency_key: crypto.randomUUID(),
+        card_id: card.card_id,
+      };
       return freeze ? freezeCard(params) : unfreezeCard(params);
     },
     onSuccess: (run, variables) =>
@@ -351,9 +375,16 @@ export function CardsPanel() {
     onError: (err) => setActionError(err),
   });
 
-  const rows = query.data ?? [];
+  const rows = query.data?.cards ?? [];
+  const accounts = query.data?.accounts ?? [];
 
   const columns: DataTableColumn<CardItem>[] = [
+    {
+      id: "account",
+      header: "账号",
+      cell: (row) => <Badge tone="neutral">{row.account}</Badge>,
+      value: (row) => row.account,
+    },
     {
       id: "mask",
       header: "卡号（掩码）",
@@ -421,8 +452,9 @@ export function CardsPanel() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="text-sm text-fg-muted">
           卡片数据由后台作业周期同步，不是实时读取——每行的新鲜度徽章说明它有多新。
+          「账号」是内部资金来源，与「用途」那一列（面向使用方的归属）是两回事。
         </p>
-        <IssueCardDialog onIssued={afterWrite} />
+        <IssueCardDialog accounts={accounts} onIssued={afterWrite} />
       </div>
 
       {result ? <ActionResultNote result={result} /> : null}

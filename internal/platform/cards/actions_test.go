@@ -11,7 +11,7 @@ import (
 )
 
 func TestIssueActionDefinitionIsValid(t *testing.T) {
-	if err := issueDef().Validate(); err != nil {
+	if err := issueDef(testAccounts).Validate(); err != nil {
 		t.Fatalf("声明非法: %v", err)
 	}
 }
@@ -24,7 +24,7 @@ func TestIssueActionDefinitionIsValid(t *testing.T) {
 // 而是「这个 Action 能被执行」——Foundation-B 落地后它会自然失效，
 // 那正是重估风险等级的时机。
 func TestIssueActionRiskLevelIsExecutableToday(t *testing.T) {
-	def := issueDef()
+	def := issueDef(testAccounts)
 
 	if def.RiskLevel.RequiresAdvancedControls() {
 		t.Fatalf("RiskLevel %q 需要尚未实现的 Advanced Controls，该 Action 将无法执行", def.RiskLevel)
@@ -32,7 +32,7 @@ func TestIssueActionRiskLevelIsExecutableToday(t *testing.T) {
 }
 
 func TestRevealActionRiskLevelIsExecutableToday(t *testing.T) {
-	if revealDef().RiskLevel.RequiresAdvancedControls() {
+	if revealDef(testAccounts).RiskLevel.RequiresAdvancedControls() {
 		t.Fatal("reveal 的风险等级会让它无法执行")
 	}
 }
@@ -40,7 +40,7 @@ func TestRevealActionRiskLevelIsExecutableToday(t *testing.T) {
 // 权限串单列，是「对内全量、对外受限」的落点：
 // 以后开放给外部用户时只给读权限，开卡权限不下放。
 func TestIssueActionPermissionIsDedicated(t *testing.T) {
-	if got, want := issueDef().Permission, "card.issue"; got != want {
+	if got, want := issueDef(testAccounts).Permission, "card.issue"; got != want {
 		t.Fatalf("Permission = %q, want %q", got, want)
 	}
 }
@@ -48,7 +48,7 @@ func TestIssueActionPermissionIsDedicated(t *testing.T) {
 // 机器身份不得开卡：让采集任务或 AI 有能力花钱，等于开了一条后门
 // （ADR-009：AI 不拥有生产后门）。
 func TestIssueActionAllowsHumansOnly(t *testing.T) {
-	for _, pt := range issueDef().PrincipalTypes {
+	for _, pt := range issueDef(testAccounts).PrincipalTypes {
 		if pt != principal.TypeHuman {
 			t.Fatalf("开卡不该允许 %q 身份", pt)
 		}
@@ -60,7 +60,7 @@ func TestIssueActionSchemaRejectsUnknownField(t *testing.T) {
 	params := validIssueParams()
 	params["amount_override"] = "999999"
 
-	err := issueDef().Schema.Validate(params)
+	err := issueDef(testAccounts).Schema.Validate(params)
 	if !errors.Is(err, action.ErrUnknownField) {
 		t.Fatalf("错误 = %v, want ErrUnknownField", err)
 	}
@@ -70,7 +70,7 @@ func TestIssueActionSchemaRequiresIdempotencyKey(t *testing.T) {
 	params := validIssueParams()
 	delete(params, "idempotency_key")
 
-	err := issueDef().Schema.Validate(params)
+	err := issueDef(testAccounts).Schema.Validate(params)
 	if !errors.Is(err, action.ErrRequiredField) {
 		t.Fatalf("缺幂等键必须被拒, err = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestIssueActionSchemaRestrictsTokenType(t *testing.T) {
 	params := validIssueParams()
 	params["token_type"] = "DOGE"
 
-	if err := issueDef().Schema.Validate(params); !errors.Is(err, action.ErrEnumViolation) {
+	if err := issueDef(testAccounts).Schema.Validate(params); !errors.Is(err, action.ErrEnumViolation) {
 		t.Fatalf("token_type 应受枚举限制, err = %v", err)
 	}
 }
@@ -149,6 +149,7 @@ func TestRegisterActionsRegistersIssue(t *testing.T) {
 
 func validIssueParams() map[string]any {
 	return map[string]any{
+		"account":         testAccount,
 		"idempotency_key": "issue-42",
 		"product_id":      1,
 		"top_up_amount":   "10",
@@ -158,3 +159,6 @@ func validIssueParams() map[string]any {
 		"owner_ref":       "ops-team",
 	}
 }
+
+// testAccounts 是测试里配置的账号枚举。
+var testAccounts = []string{testAccount}

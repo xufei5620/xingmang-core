@@ -15,9 +15,10 @@ const (
 )
 
 // fundsSchema 是充值/赎回的参数契约。
-func fundsSchema() action.Schema {
+func fundsSchema(accounts []string) action.Schema {
 	return action.Schema{
 		Fields: []action.Field{
+			accountField(accounts),
 			{Name: "idempotency_key", Type: action.FieldString, Required: true},
 			{Name: "card_id", Type: action.FieldString, Required: true},
 			{Name: "amount", Type: action.FieldString, Required: true},
@@ -31,9 +32,10 @@ func fundsSchema() action.Schema {
 //
 // 幂等键照样必填：虽然上游天然幂等，但台账要能回答「这次冻结是谁发起的、
 // 什么时候」，没有键就没法去重记录。
-func switchSchema() action.Schema {
+func switchSchema(accounts []string) action.Schema {
 	return action.Schema{
 		Fields: []action.Field{
+			accountField(accounts),
 			{Name: "idempotency_key", Type: action.FieldString, Required: true},
 			{Name: "card_id", Type: action.FieldString, Required: true},
 		},
@@ -42,38 +44,38 @@ func switchSchema() action.Schema {
 
 // 四个声明共用 PermissionManage：与 card.issue 分开，
 // 是为了「能开卡的人未必能动已有的卡」，反过来也一样。
-func topUpDef() action.Definition {
+func topUpDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID: ActionTopUp, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionManage,
-		Schema:       fundsSchema(),
+		Schema:       fundsSchema(accounts),
 		Environments: allEnvironments, PrincipalTypes: humanOnly,
 	}
 }
 
-func redeemDef() action.Definition {
+func redeemDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID: ActionRedeem, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionManage,
-		Schema:       fundsSchema(),
+		Schema:       fundsSchema(accounts),
 		Environments: allEnvironments, PrincipalTypes: humanOnly,
 	}
 }
 
-func freezeDef() action.Definition {
+func freezeDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID: ActionFreeze, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionManage,
-		Schema:       switchSchema(),
+		Schema:       switchSchema(accounts),
 		Environments: allEnvironments, PrincipalTypes: humanOnly,
 	}
 }
 
-func unfreezeDef() action.Definition {
+func unfreezeDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID: ActionUnfreeze, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionManage,
-		Schema:       switchSchema(),
+		Schema:       switchSchema(accounts),
 		Environments: allEnvironments, PrincipalTypes: humanOnly,
 	}
 }
@@ -99,6 +101,7 @@ func fundsHandler(
 			return nil, ErrServiceUnbound
 		}
 		req := FundsRequest{
+			Account:        stringParam(params, "account"),
 			IdempotencyKey: stringParam(params, "idempotency_key"),
 			CardID:         stringParam(params, "card_id"),
 			Amount:         stringParam(params, "amount"),
@@ -115,6 +118,7 @@ func fundsHandler(
 
 		summary := map[string]any{
 			"operation_key": out.OperationKey,
+			"account":       out.Account,
 			"state":         string(out.State),
 			"amount":        req.Amount,
 			"token_type":    req.TokenType,
@@ -128,37 +132,39 @@ func fundsHandler(
 }
 
 func freezeHandler(svc *Service) action.Handler {
-	return switchHandler(svc, "frozen", func(s *Service, ctx context.Context, key, cardID string) error {
-		return s.FreezeCard(ctx, key, cardID)
+	return switchHandler(svc, "frozen", func(s *Service, ctx context.Context, account, key, cardID string) error {
+		return s.FreezeCard(ctx, account, key, cardID)
 	})
 }
 
 func unfreezeHandler(svc *Service) action.Handler {
-	return switchHandler(svc, "active", func(s *Service, ctx context.Context, key, cardID string) error {
-		return s.UnfreezeCard(ctx, key, cardID)
+	return switchHandler(svc, "active", func(s *Service, ctx context.Context, account, key, cardID string) error {
+		return s.UnfreezeCard(ctx, account, key, cardID)
 	})
 }
 
 func switchHandler(
 	svc *Service,
 	intendedStatus string,
-	call func(*Service, context.Context, string, string) error,
+	call func(*Service, context.Context, string, string, string) error,
 ) action.Handler {
 	return func(ctx context.Context, params map[string]any) (any, error) {
 		if svc == nil {
 			return nil, ErrServiceUnbound
 		}
+		account := stringParam(params, "account")
 		key := stringParam(params, "idempotency_key")
 		cardID := stringParam(params, "card_id")
 
 		action.RecordResource(ctx, resourceCard, cardID)
 
-		if err := call(svc, ctx, key, cardID); err != nil {
+		if err := call(svc, ctx, account, key, cardID); err != nil {
 			return nil, err
 		}
 
 		summary := map[string]any{
 			"operation_key":   key,
+			"account":         account,
 			"intended_status": intendedStatus,
 		}
 		action.RecordAfter(ctx, summary)

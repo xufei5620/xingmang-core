@@ -17,7 +17,18 @@
 --      而 money.CurrencyScale 只登记法币——真实标度尚未验证，
 --      存一份「按猜测换算过的整数」会让原始值再也追不回来。
 --
---   3. 交易流水的去重键是**派生**的，不是上游给的。上游的
+--   3. 三张表都带 account 列。平台同时管理两个 Infini 账号（产品负责人
+--      2026-09-04 拍板「两个都长期用，并列管理」），账号是**内部运营维度**：
+--      只体现在管理后端，以后开放外部用户时不暴露给他们——那一侧的归属
+--      维度是 owner_ref。不加这一列的后果是两个账号的卡混在一张表里分不出
+--      谁是谁，而且对账时不知道该去哪个账号查。
+--
+--      唯一键的取舍：卡与流水按 (environment, account, …) 唯一，因为卡 id
+--      只在自己账号内有意义；**但操作台账的幂等键保持 (environment,
+--      idempotency_key) 全局唯一**，不带账号——幂等键标识的是「哪一笔业务
+--      操作」，允许同键在两个账号上各来一次等于让去重失效。
+--
+--   4. 交易流水的去重键是**派生**的，不是上游给的。上游的
 --      GET /v2/cards/transactions 响应里没有交易 id 字段（文档已逐字核对），
 --      没有它重复同步会造重复行。因此用 (card_id, occurred_at, amount_minor,
 --      merchant, tx_type) 的摘要当去重键。这是权宜之计：如果上游其实有 id
@@ -32,6 +43,9 @@ CREATE SCHEMA IF NOT EXISTS cards;
 CREATE TABLE cards.infini_card (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     environment         text NOT NULL REFERENCES core.environment (id) ON DELETE RESTRICT,
+    -- account 是平台侧的账号标识（如 main / backup），不是上游的账号 id：
+    -- 那个是上游的东西，换供应商就没了。
+    account             text NOT NULL,
     upstream_card_id    text NOT NULL,
     mask                text NOT NULL DEFAULT '',
     holder_name         text NOT NULL DEFAULT '',
@@ -49,17 +63,20 @@ CREATE TABLE cards.infini_card (
     last_synced_at      timestamptz NOT NULL,
     created_at          timestamptz NOT NULL,
     updated_at          timestamptz NOT NULL,
-    UNIQUE (environment, upstream_card_id)
+    UNIQUE (environment, account, upstream_card_id)
 );
 
-CREATE INDEX infini_card_alias_idx ON cards.infini_card (environment, card_alias)
+CREATE INDEX infini_card_alias_idx ON cards.infini_card (environment, account, card_alias)
     WHERE card_alias <> '';
+-- owner_ref 是**面向客户**的归属维度，与 account（内部资金来源）正交：
+-- 以后按客户过滤时不该被账号切开，所以这个索引不带 account。
 CREATE INDEX infini_card_owner_idx ON cards.infini_card (environment, owner_ref);
 
 -- 交易流水投影。
 CREATE TABLE cards.infini_card_transaction (
     id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     environment      text NOT NULL REFERENCES core.environment (id) ON DELETE RESTRICT,
+    account          text NOT NULL,
     upstream_card_id text NOT NULL,
     -- 见文件头第 3 条：上游不给交易 id，这是派生的去重键
     dedupe_key       text NOT NULL,
@@ -72,11 +89,11 @@ CREATE TABLE cards.infini_card_transaction (
     occurred_at      timestamptz,
     synced_at        timestamptz NOT NULL,
     created_at       timestamptz NOT NULL,
-    UNIQUE (environment, dedupe_key)
+    UNIQUE (environment, account, dedupe_key)
 );
 
 CREATE INDEX infini_card_transaction_card_idx
-    ON cards.infini_card_transaction (environment, upstream_card_id, occurred_at DESC);
+    ON cards.infini_card_transaction (environment, account, upstream_card_id, occurred_at DESC);
 
 -- 操作台账：花钱操作的幂等与不确定态收敛都靠这张表。
 --
@@ -85,6 +102,7 @@ CREATE INDEX infini_card_transaction_card_idx
 CREATE TABLE cards.card_operation (
     id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     environment        text NOT NULL REFERENCES core.environment (id) ON DELETE RESTRICT,
+    account            text NOT NULL,
     idempotency_key    text NOT NULL,
     kind               text NOT NULL CHECK (kind IN
                             ('issue', 'topup', 'redeem', 'freeze', 'unfreeze')),
@@ -108,16 +126,19 @@ CREATE TABLE cards.card_operation (
     resolved_at        timestamptz,
     created_at         timestamptz NOT NULL,
     updated_at         timestamptz NOT NULL,
+    -- **刻意不带 account**：见文件头第 3 条。
     UNIQUE (environment, idempotency_key)
 );
 
 -- 对账作业按这个索引捞待收敛的操作
 CREATE INDEX card_operation_unresolved_idx
-    ON cards.card_operation (environment, kind, started_at)
+    ON cards.card_operation (environment, account, kind, started_at)
     WHERE state IN ('pending', 'unknown');
 
--- 「今日累计」按这个索引求和。刻意覆盖 unknown：那些可能真的花掉了，
--- 当没花过会让上限在最需要生效的时候失效。
+-- 「今日累计」按这个索引求和，**按账号分**：两个账号的资金是分开的，
+-- 用一套全局上限会让「单日 500」变成两个账号抢同一个额度。
+-- 刻意覆盖 unknown：那些可能真的花掉了，当没花过会让上限在最需要
+-- 生效的时候失效。
 CREATE INDEX card_operation_spend_idx
-    ON cards.card_operation (environment, kind, started_at)
+    ON cards.card_operation (environment, account, kind, started_at)
     WHERE state IN ('pending', 'succeeded', 'unknown');

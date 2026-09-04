@@ -245,17 +245,24 @@ services:
       XM_REQLOG_MODE: ${XM_REQLOG_MODE:-off}
       # Infini 卡服务（XM-CARD）：off / fake / real。**默认 off 且必须显式开**
       # ——这些 Action 会花真钱，一个默认挂上开卡按钮的环境迟早有人在以为是
-      # 演示的地方点下去。real 模式缺任何一项（端点、两个凭据引用、两条金额
-      # 上限）都拒绝启动。凭据只经 CredentialRef，明文进 xm-secrets 卷。
+      # 演示的地方点下去。real 模式缺任何一项配置都拒绝启动。凭据只经
+      # CredentialRef，明文进 xm-secrets 卷。
+      #
+      # 平台同时管理两个 Infini 账号（内部运营维度，不进客户侧）。账号 id
+      # 要拼进变量名，所以 compose 只能**枚举**——改账号 id 时这里与 .env
+      # 都要跟着改。金额上限按账号各配一份：两个账号的资金是分开的，
+      # 用一套全局上限会让「单日 500」变成两个账号抢同一个额度。
       XM_CARDS_MODE: ${XM_CARDS_MODE:-off}
       XM_CARDS_BASE_URL: ${XM_CARDS_BASE_URL:-}
-      XM_CARDS_KEY_ID_REF: ${XM_CARDS_KEY_ID_REF:-}
-      XM_CARDS_SECRET_REF: ${XM_CARDS_SECRET_REF:-}
-      # 金额上限（十进制文本，单位是所选代币本身，不做汇率换算）。
-      # **未配齐时领域层 fail closed**，也就是开卡一律被拒——空配置绝不
-      # 等于「随便花」。
-      XM_CARDS_LIMIT_PER_OPERATION: ${XM_CARDS_LIMIT_PER_OPERATION:-}
-      XM_CARDS_LIMIT_PER_DAY: ${XM_CARDS_LIMIT_PER_DAY:-}
+      XM_CARDS_ACCOUNTS: ${XM_CARDS_ACCOUNTS:-}
+      XM_CARDS_MAIN_KEY_ID_REF: ${XM_CARDS_MAIN_KEY_ID_REF:-}
+      XM_CARDS_MAIN_SECRET_REF: ${XM_CARDS_MAIN_SECRET_REF:-}
+      XM_CARDS_MAIN_LIMIT_PER_OPERATION: ${XM_CARDS_MAIN_LIMIT_PER_OPERATION:-}
+      XM_CARDS_MAIN_LIMIT_PER_DAY: ${XM_CARDS_MAIN_LIMIT_PER_DAY:-}
+      XM_CARDS_BACKUP_KEY_ID_REF: ${XM_CARDS_BACKUP_KEY_ID_REF:-}
+      XM_CARDS_BACKUP_SECRET_REF: ${XM_CARDS_BACKUP_SECRET_REF:-}
+      XM_CARDS_BACKUP_LIMIT_PER_OPERATION: ${XM_CARDS_BACKUP_LIMIT_PER_OPERATION:-}
+      XM_CARDS_BACKUP_LIMIT_PER_DAY: ${XM_CARDS_BACKUP_LIMIT_PER_DAY:-}
       # 用户清单模式（XM-0046）：off / fake / real。留空沿用进程默认 fake；
       # 生产应显式 off——real 客户端未交付前，fake 客户不得出现在生产页面。
       XM_PLATFORM_USERS_MODE: ${XM_PLATFORM_USERS_MODE:-}
@@ -326,12 +333,16 @@ services:
       XM_CPA_SYNC_ENABLED: ${XM_CPA_SYNC_ENABLED:-}
       XM_CPA_SYNC_INTERVAL: ${XM_CPA_SYNC_INTERVAL:-300s}
       # 卡片同步（XM-CARD2）：承担异步开卡的轮询与不确定态的对账收敛。
-      # 四个 XM_CARDS_* 与 API 段同值——两个进程解析同一个凭据引用必须拿到
-      # 同一个值，否则签名会在一边通过、在另一边 401。
+      # XM_CARDS_* 与 API 段同值——两个进程必须解析出**同一组账号**，
+      # 否则会出现「API 能开卡的账号，worker 不认识」，那笔操作的不确定态
+      # 永远收敛不了。worker 不发起花钱操作，所以不读金额上限。
       XM_CARDS_MODE: ${XM_CARDS_MODE:-off}
       XM_CARDS_BASE_URL: ${XM_CARDS_BASE_URL:-}
-      XM_CARDS_KEY_ID_REF: ${XM_CARDS_KEY_ID_REF:-}
-      XM_CARDS_SECRET_REF: ${XM_CARDS_SECRET_REF:-}
+      XM_CARDS_ACCOUNTS: ${XM_CARDS_ACCOUNTS:-}
+      XM_CARDS_MAIN_KEY_ID_REF: ${XM_CARDS_MAIN_KEY_ID_REF:-}
+      XM_CARDS_MAIN_SECRET_REF: ${XM_CARDS_MAIN_SECRET_REF:-}
+      XM_CARDS_BACKUP_KEY_ID_REF: ${XM_CARDS_BACKUP_KEY_ID_REF:-}
+      XM_CARDS_BACKUP_SECRET_REF: ${XM_CARDS_BACKUP_SECRET_REF:-}
       # 不确定态的宽限期：期内查不到就继续等，超期才亮红条要人工。
       # 留空用 30 分钟——更短会把「上游慢了一点」变成一次不必要的人工介入。
       XM_CARDS_UNKNOWN_GRACE: ${XM_CARDS_UNKNOWN_GRACE:-}

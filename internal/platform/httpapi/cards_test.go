@@ -20,11 +20,11 @@ type fakeCardQuerier struct {
 	err   error
 }
 
-func (f *fakeCardQuerier) ListCards(ctx context.Context, ownerRef string) ([]cards.CardView, error) {
+func (f *fakeCardQuerier) ListCards(ctx context.Context, account, ownerRef string) ([]cards.CardView, error) {
 	return f.cards, f.err
 }
 
-func (f *fakeCardQuerier) ListTransactions(ctx context.Context, cardID string, limit int) ([]cards.TransactionView, error) {
+func (f *fakeCardQuerier) ListTransactions(ctx context.Context, account, cardID string, limit int) ([]cards.TransactionView, error) {
 	return f.txs, f.err
 }
 
@@ -49,7 +49,7 @@ func TestListCardsIncludesFreshness(t *testing.T) {
 	}}}
 
 	rec := httptest.NewRecorder()
-	ListCardsHandler(store, 5*time.Minute)(rec, cardRequest(t, "/api/v1/cards"))
+	ListCardsHandler(store, []string{"MAIN"}, 5*time.Minute)(rec, cardRequest(t, "/api/v1/cards"))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d，响应 = %s", rec.Code, rec.Body.String())
@@ -83,7 +83,7 @@ func TestListCardsNeverReturnsPlaintextPAN(t *testing.T) {
 	}}}
 
 	rec := httptest.NewRecorder()
-	ListCardsHandler(store, 5*time.Minute)(rec, cardRequest(t, "/api/v1/cards"))
+	ListCardsHandler(store, []string{"MAIN"}, 5*time.Minute)(rec, cardRequest(t, "/api/v1/cards"))
 
 	body := rec.Body.String()
 	for _, forbidden := range []string{"card_number", "cvv", "expiration", "expiry"} {
@@ -98,7 +98,7 @@ func TestListCardsRequiresPrincipal(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/cards", nil)
 
-	ListCardsHandler(&fakeCardQuerier{}, 5*time.Minute)(rec, req)
+	ListCardsHandler(&fakeCardQuerier{}, []string{"MAIN"}, 5*time.Minute)(rec, req)
 
 	if rec.Code == http.StatusOK {
 		t.Fatal("缺少身份时不该返回 200")
@@ -109,7 +109,7 @@ func TestListCardsRequiresPrincipal(t *testing.T) {
 // 拿到一份看起来对、其实没按他要求截断的列表。
 func TestListCardTransactionsRejectsBadLimit(t *testing.T) {
 	rec := httptest.NewRecorder()
-	ListCardTransactionsHandler(&fakeCardQuerier{})(rec, cardRequest(t, "/api/v1/cards/card_1/transactions?limit=abc"))
+	ListCardTransactionsHandler(&fakeCardQuerier{})(rec, cardRequest(t, "/api/v1/cards/card_1/transactions?account=main&limit=abc"))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("状态码 = %d, want 400（响应 %s）", rec.Code, rec.Body.String())

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,11 +16,18 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
+// 账号 id 要拼进环境变量名，字符集与 API 侧同一条规矩。
+var workerAccountIDPattern = regexp.MustCompile(`^[A-Z0-9_]{1,32}$`)
+
 // buildCardSyncer 按环境变量组装卡片同步器。
 //
 // 返回 nil 表示未启用（XM_CARDS_MODE 未设或为 off），调用方据此不打开
 // CardSyncEnabled。**默认关闭**与 API 侧同一条纪律：这条链路会打上游，
 // 一个没配好凭据就启用的环境会每 5 分钟产生一次注定失败的调用。
+//
+// 账号清单与 API 侧读同一批变量：两个进程必须解析出**同一组账号**，
+// 否则会出现「API 能开卡的账号，worker 不认识」——那笔操作的不确定态
+// 永远收敛不了。
 func buildCardSyncer(
 	pool *pgxpool.Pool,
 	provider secrets.SecretProvider,
@@ -30,21 +38,34 @@ func buildCardSyncer(
 	if mode == "" || mode == "off" {
 		return nil, nil
 	}
-
-	store := cards.NewPgStore(pool, environment, time.Now)
-
-	var client infini.CardClient
-	switch mode {
-	case "fake":
-		client = infini.NewFake()
-	case "real":
-		real, err := newWorkerInfiniClient(provider, getenv)
-		if err != nil {
-			return nil, err
-		}
-		client = real
-	default:
+	if mode != "fake" && mode != "real" {
 		return nil, fmt.Errorf("XM_CARDS_MODE %q: 只接受 off / fake / real", mode)
+	}
+
+	baseURL := strings.TrimSpace(getenv("XM_CARDS_BASE_URL"))
+	ids, err := workerAccountIDs(getenv("XM_CARDS_ACCOUNTS"))
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("XM_CARDS_MODE=%s 但 XM_CARDS_ACCOUNTS 为空", mode)
+	}
+
+	accounts := make([]cards.Account, 0, len(ids))
+	for _, id := range ids {
+		var client infini.CardClient
+		switch mode {
+		case "fake":
+			client = infini.NewFake()
+		case "real":
+			realClient, err := workerInfiniClient(baseURL, id, provider, getenv)
+			if err != nil {
+				return nil, fmt.Errorf("账号 %s: %w", id, err)
+			}
+			client = realClient
+		}
+		// 同步器不做限额判定（它不发起花钱操作），所以不读上限。
+		accounts = append(accounts, cards.Account{ID: id, Client: client})
 	}
 
 	grace := jobs.DefaultCardUnknownGrace
@@ -65,32 +86,51 @@ func buildCardSyncer(
 	// （见 contracts/connectors/infini.card.v1.md 的验证清单）。
 	syncTx := strings.EqualFold(strings.TrimSpace(getenv("XM_CARDS_SYNC_TRANSACTIONS")), "true")
 
-	return cards.NewSyncer(client, store, cards.SyncOptions{
+	store := cards.NewPgStore(pool, environment, time.Now)
+	return cards.NewSyncer(accounts, store, cards.SyncOptions{
 		UnknownGrace:     grace,
 		SyncTransactions: syncTx,
 		Now:              time.Now,
 	}), nil
 }
 
-func newWorkerInfiniClient(provider secrets.SecretProvider, getenv func(string) string) (*infini.Client, error) {
+func workerAccountIDs(raw string) ([]string, error) {
+	var ids []string
+	for _, part := range strings.Split(raw, ",") {
+		id := strings.ToUpper(strings.TrimSpace(part))
+		if id == "" {
+			continue
+		}
+		if !workerAccountIDPattern.MatchString(id) {
+			return nil, fmt.Errorf("账号 id %q 非法：只接受大写字母、数字与下划线", id)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func workerInfiniClient(
+	baseURL, id string,
+	provider secrets.SecretProvider,
+	getenv func(string) string,
+) (*infini.Client, error) {
 	if provider == nil {
-		return nil, fmt.Errorf("卡片同步 real 模式需要 SecretProvider")
+		return nil, fmt.Errorf("real 模式需要 SecretProvider")
 	}
 
-	baseURL := strings.TrimSpace(getenv("XM_CARDS_BASE_URL"))
-	keyIDRaw := strings.TrimSpace(getenv("XM_CARDS_KEY_ID_REF"))
-	secretRaw := strings.TrimSpace(getenv("XM_CARDS_SECRET_REF"))
+	keyIDRaw := strings.TrimSpace(getenv("XM_CARDS_" + id + "_KEY_ID_REF"))
+	secretRaw := strings.TrimSpace(getenv("XM_CARDS_" + id + "_SECRET_REF"))
 	if baseURL == "" || keyIDRaw == "" || secretRaw == "" {
-		return nil, fmt.Errorf("XM_CARDS_MODE=real 需要 XM_CARDS_BASE_URL / XM_CARDS_KEY_ID_REF / XM_CARDS_SECRET_REF")
+		return nil, fmt.Errorf("real 模式需要 XM_CARDS_BASE_URL 与 XM_CARDS_%s_{KEY_ID_REF,SECRET_REF}", id)
 	}
 
 	keyIDRef, err := secrets.ParseCredentialRef(keyIDRaw)
 	if err != nil {
-		return nil, fmt.Errorf("XM_CARDS_KEY_ID_REF: %w", err)
+		return nil, fmt.Errorf("KEY_ID_REF: %w", err)
 	}
 	secretRef, err := secrets.ParseCredentialRef(secretRaw)
 	if err != nil {
-		return nil, fmt.Errorf("XM_CARDS_SECRET_REF: %w", err)
+		return nil, fmt.Errorf("SECRET_REF: %w", err)
 	}
 
 	u, err := url.Parse(baseURL)

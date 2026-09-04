@@ -18,6 +18,10 @@
   },
   "compensation_mode": "NOT_POSSIBLE",
   "params": {
+    "account": {
+      "type": "string",
+      "required": true
+    },
     "idempotency_key": {
       "type": "string",
       "required": true
@@ -51,5 +55,5 @@
       "required": false
     }
   },
-  "notes": "XM-CARD1 开卡。风险等级 L1 是平台能力所限，不是对风险的判断：内核的 RequiresAdvancedControls() 对 L2 及以上返回 true，而 Advanced Controls 属 Foundation-B / XM-0030 尚未实现，声明成 L2 的 Action 会在执行时被直接拒掉。按动作性质开卡花真钱，本该更高。Foundation-B 落地后应重估——届时升到 L2 才是真的加了控制。idempotency 是 REQUIRED_CLIENT_KEY 而不是 REQUIRED_FOUNDATION_B：上游 /v2/cards/apply 没有幂等键，去重完全由平台承担——幂等键派生出 card_alias 写给上游，超时后靠 ListCards(alias) 精确匹配对账。compensation_mode 是 NOT_POSSIBLE：卡一旦开出来就无法「撤销开卡」，只能赎回余额并冻结，那是另外两个 Action。金额上限见 internal/platform/cards/limits.go，上限未配齐时 fail closed。"
+  "notes": "XM-CARD1 开卡。风险等级 L1 是平台能力所限，不是对风险的判断：内核的 RequiresAdvancedControls() 对 L2 及以上返回 true，而 Advanced Controls 属 Foundation-B / XM-0030 尚未实现，声明成 L2 的 Action 会在执行时被直接拒掉。按动作性质开卡花真钱，本该更高。Foundation-B 落地后应重估——届时升到 L2 才是真的加了控制。idempotency 是 REQUIRED_CLIENT_KEY 而不是 REQUIRED_FOUNDATION_B：上游 /v2/cards/apply 没有幂等键，去重完全由平台承担——幂等键派生出 card_alias 写给上游，超时后靠 ListCards(alias) 精确匹配对账。compensation_mode 是 NOT_POSSIBLE：卡一旦开出来就无法「撤销开卡」，只能赎回余额并冻结，那是另外两个 Action。金额上限见 internal/platform/cards/limits.go，上限未配齐时 fail closed。 account 参数是内部运营维度：平台同时管理两个 Infini 账号，每个账号各自持卡、各自有资金、各自算限额。必填且受枚举约束（枚举由运行时配置生成），**没有默认账号**——回落到「第一个」会把钱花到调用方没打算用的账号上。以后开放外部用户时，选账号的逻辑在平台侧，不暴露给外部调用方。"
 }

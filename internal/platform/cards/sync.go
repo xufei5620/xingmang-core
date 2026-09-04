@@ -9,21 +9,32 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/infini"
 )
 
+// CardRef 是「哪个账号的哪张卡」。
+//
+// 卡 id 只在自己账号内有意义：两个账号的卡各自独立，拿一个账号的 id 去
+// 另一个账号查是没有意义的调用（好一点的情况是查不到，坏一点的情况是
+// 撞上同名 id 拿回别人的卡）。
+type CardRef struct {
+	Account string
+	CardID  string
+}
+
 // SyncStore 是同步作业额外需要的读取能力。
 //
 // 与 Store 分开声明：写路径（Action）不需要遍历台账，同步作业不需要限额，
 // 两者的依赖面本来就不一样。
 type SyncStore interface {
 	Store
-	// UnresolvedOperations 返回尚未收敛的操作（pending 与 unknown）。
+	// UnresolvedOperations 返回尚未收敛的操作（pending 与 unknown），
+	// 每条都带账号。
 	//
 	// 已经 succeeded/failed 的不该被反复对账——每轮都打一次上游既浪费配额，
 	// 也提高触发限流的概率。
 	UnresolvedOperations(ctx context.Context) ([]Operation, error)
-	// TrackedCardIDs 返回投影里已有的卡 id，供状态与流水同步遍历。
-	TrackedCardIDs(ctx context.Context) ([]string, error)
+	// TrackedCards 返回投影里已有的卡，供状态与流水同步遍历。
+	TrackedCards(ctx context.Context) ([]CardRef, error)
 	// UpsertTransactions 落流水投影。
-	UpsertTransactions(ctx context.Context, cardID string, txs []infini.CardTransaction) error
+	UpsertTransactions(ctx context.Context, account, cardID string, txs []infini.CardTransaction) error
 }
 
 // SyncOptions 是同步作业的可调参数。
@@ -43,19 +54,29 @@ type SyncOptions struct {
 // 逻辑放在领域层而不是 River Worker 里，是为了能用替身完整测到——
 // 不确定态收敛这类分支在真实环境里既难复现又昂贵。
 type Syncer struct {
-	client infini.CardClient
-	store  SyncStore
-	opts   SyncOptions
+	accounts map[string]Account
+	order    []string
+	store    SyncStore
+	opts     SyncOptions
 }
 
-func NewSyncer(client infini.CardClient, store SyncStore, opts SyncOptions) *Syncer {
+func NewSyncer(accounts []Account, store SyncStore, opts SyncOptions) *Syncer {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
 	if opts.UnknownGrace <= 0 {
 		opts.UnknownGrace = 30 * time.Minute
 	}
-	return &Syncer{client: client, store: store, opts: opts}
+	s := &Syncer{
+		accounts: make(map[string]Account, len(accounts)),
+		store:    store,
+		opts:     opts,
+	}
+	for _, a := range accounts {
+		s.accounts[a.ID] = a
+		s.order = append(s.order, a.ID)
+	}
+	return s
 }
 
 // RunOnce 跑一轮同步。
@@ -95,10 +116,24 @@ func (s *Syncer) reconcileOperations(ctx context.Context) error {
 			continue
 		}
 
-		page, err := s.client.ListCards(ctx, infini.ListCardsQuery{Alias: op.Alias})
+		acct, ok := s.accounts[op.Account]
+		if !ok {
+			// 台账里有一笔操作，但它的账号已经不在配置里了。
+			// **不能当成「查不到卡」处理**——那会让它超宽限期后被判成
+			// 需人工，而真正的原因是配置被改掉了，两者的处置完全不同。
+			errs = append(errs, fmt.Errorf(
+				"操作 %s 的账号 %q 未配置，无法对账（配置被改动过？）",
+				op.IdempotencyKey, op.Account))
+			continue
+		}
+
+		// **只在这笔操作自己的账号里查**：跨账号找到一张 alias 相同的卡
+		// 就认下来，等于把别的账号的卡记到这笔操作头上。
+		page, err := acct.Client.ListCards(ctx, infini.ListCardsQuery{Alias: op.Alias})
 		if err != nil {
 			// 读不到就下一轮再来，**不动台账**。
-			errs = append(errs, fmt.Errorf("按 alias %s 查卡: %w", op.Alias, err))
+			errs = append(errs, fmt.Errorf("账号 %s 按 alias %s 查卡: %w",
+				acct.ID, op.Alias, err))
 			continue
 		}
 
@@ -135,7 +170,7 @@ func (s *Syncer) applyDecision(ctx context.Context, op Operation, d ReconcileDec
 	if d.CardID != "" {
 		for _, c := range found {
 			if c.ID == d.CardID {
-				if err := s.store.UpsertCard(ctx, c, ""); err != nil {
+				if err := s.store.UpsertCard(ctx, op.Account, c, ""); err != nil {
 					return fmt.Errorf("落卡片投影 %s: %w", c.ID, err)
 				}
 				break
@@ -149,40 +184,49 @@ func (s *Syncer) applyDecision(ctx context.Context, op Operation, d ReconcileDec
 //
 // 这也是异步开卡的轮询路径：申请单出来时卡是 init，靠这里推进到 active。
 func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
-	ids, err := s.store.TrackedCardIDs(ctx)
+	refs, err := s.store.TrackedCards(ctx)
 	if err != nil {
 		return err
 	}
 
 	var errs []error
-	for _, id := range ids {
-		card, err := s.client.CardStatus(ctx, id)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("查卡 %s: %w", id, err))
+	for _, ref := range refs {
+		acct, ok := s.accounts[ref.Account]
+		if !ok {
+			errs = append(errs, fmt.Errorf("卡 %s 的账号 %q 未配置", ref.CardID, ref.Account))
 			continue
 		}
-		if err := s.store.UpsertCard(ctx, card, ""); err != nil {
-			errs = append(errs, fmt.Errorf("落卡片投影 %s: %w", id, err))
+		card, err := acct.Client.CardStatus(ctx, ref.CardID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("账号 %s 查卡 %s: %w", ref.Account, ref.CardID, err))
+			continue
+		}
+		if err := s.store.UpsertCard(ctx, ref.Account, card, ""); err != nil {
+			errs = append(errs, fmt.Errorf("落卡片投影 %s: %w", ref.CardID, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
 func (s *Syncer) syncTransactions(ctx context.Context) error {
-	ids, err := s.store.TrackedCardIDs(ctx)
+	refs, err := s.store.TrackedCards(ctx)
 	if err != nil {
 		return err
 	}
 
 	var errs []error
-	for _, id := range ids {
-		page, err := s.client.CardTransactions(ctx, id, 1, transactionPageSize)
+	for _, ref := range refs {
+		acct, ok := s.accounts[ref.Account]
+		if !ok {
+			continue // 上面 refreshTrackedCards 已经报过这个账号缺配置
+		}
+		page, err := acct.Client.CardTransactions(ctx, ref.CardID, 1, transactionPageSize)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("查流水 %s: %w", id, err))
+			errs = append(errs, fmt.Errorf("账号 %s 查流水 %s: %w", ref.Account, ref.CardID, err))
 			continue
 		}
-		if err := s.store.UpsertTransactions(ctx, id, page.Transactions); err != nil {
-			errs = append(errs, fmt.Errorf("落流水 %s: %w", id, err))
+		if err := s.store.UpsertTransactions(ctx, ref.Account, ref.CardID, page.Transactions); err != nil {
+			errs = append(errs, fmt.Errorf("落流水 %s: %w", ref.CardID, err))
 		}
 	}
 	return errors.Join(errs...)

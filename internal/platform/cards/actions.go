@@ -57,16 +57,24 @@ var ErrServiceUnbound = errors.New("cards service 未绑定：本注册表实例
 // svc 允许为 nil：此时只登记声明而不绑定执行体，供「注册表完整性」类测试与
 // 文档生成使用；Handler 被调用时返回明确错误（照搬 finance / registry 的做法）。
 func RegisterActions(reg *action.Registry, svc *Service) error {
+	// 账号枚举从运行时配置生成：Schema 是白名单语义，账号写错在参数校验
+	// 这一层就被挡下，不会走到「未配置账号」那个错误。
+	// svc 为 nil（只登记声明）时枚举为空 = 不限制，声明照样合法。
+	var accounts []string
+	if svc != nil {
+		accounts = svc.AccountIDs()
+	}
+
 	defs := []struct {
 		def     action.Definition
 		handler action.Handler
 	}{
-		{issueDef(), issueHandler(svc)},
-		{revealDef(), revealHandler(svc)},
-		{topUpDef(), topUpHandler(svc)},
-		{redeemDef(), redeemHandler(svc)},
-		{freezeDef(), freezeHandler(svc)},
-		{unfreezeDef(), unfreezeHandler(svc)},
+		{issueDef(accounts), issueHandler(svc)},
+		{revealDef(accounts), revealHandler(svc)},
+		{topUpDef(accounts), topUpHandler(svc)},
+		{redeemDef(accounts), redeemHandler(svc)},
+		{freezeDef(accounts), freezeHandler(svc)},
+		{unfreezeDef(accounts), unfreezeHandler(svc)},
 	}
 	for _, d := range defs {
 		if err := reg.Register(d.def, d.handler); err != nil {
@@ -89,7 +97,7 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 // 金额上限（limits.go，fail closed）、以及内核强制的审计。
 // Foundation-B 落地后应重估这一级——届时升到 L2 才是真的加了控制，
 // 而不是让 Action 变得不可执行。
-func issueDef() action.Definition {
+func issueDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID:         ActionIssue,
 		Version:    actionVersion,
@@ -97,6 +105,7 @@ func issueDef() action.Definition {
 		Permission: PermissionIssue,
 		Schema: action.Schema{
 			Fields: []action.Field{
+				accountField(accounts),
 				// 幂等键必填：没有它就没有防重复扣钱的抓手，
 				// 而上游本身不提供幂等能力。
 				{Name: "idempotency_key", Type: action.FieldString, Required: true},
@@ -120,6 +129,7 @@ func issueHandler(svc *Service) action.Handler {
 		}
 
 		req := IssueRequest{
+			Account:        stringParam(params, "account"),
 			IdempotencyKey: stringParam(params, "idempotency_key"),
 			ProductID:      intParam(params, "product_id"),
 			TopUpAmount:    stringParam(params, "top_up_amount"),
@@ -155,6 +165,7 @@ func issueHandler(svc *Service) action.Handler {
 func issueSummary(req IssueRequest, res IssueResult) map[string]any {
 	m := map[string]any{
 		"operation_key": res.OperationKey,
+		"account":       res.Account,
 		"state":         string(res.State),
 		"product_id":    req.ProductID,
 		"top_up_amount": req.TopUpAmount,
@@ -206,7 +217,7 @@ const resourceCard = "cards.infini_card"
 //
 // **不得引为先例**：普通读操作仍走读路径。要复用这个理由，前提是该读操作
 // 同样暴露不可撤销的敏感数据。
-func revealDef() action.Definition {
+func revealDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID:         ActionReveal,
 		Version:    actionVersion,
@@ -214,6 +225,7 @@ func revealDef() action.Definition {
 		Permission: PermissionReveal,
 		Schema: action.Schema{
 			Fields: []action.Field{
+				accountField(accounts),
 				{Name: "card_id", Type: action.FieldString, Required: true},
 			},
 		},
@@ -227,9 +239,10 @@ func revealHandler(svc *Service) action.Handler {
 		if svc == nil {
 			return nil, ErrServiceUnbound
 		}
+		account := stringParam(params, "account")
 		cardID := stringParam(params, "card_id")
 
-		revealed, err := svc.RevealCard(ctx, cardID)
+		revealed, err := svc.RevealCard(ctx, account, cardID)
 		if err != nil {
 			// 资源照样要记：被拒绝的查看尝试同样进审计链，
 			// 而且那是审计最有价值的部分之一。
@@ -242,10 +255,28 @@ func revealHandler(svc *Service) action.Handler {
 		// 审计会被归档、导出、搜索。
 		action.RecordAfter(ctx, map[string]any{
 			"revealed":        true,
+			"account":         account,
 			"revealed_fields": "number,cvv,expiry",
 		})
 
 		// 明文只经返回值回到调用方，由管理端一次性渲染，不落库不进日志。
 		return revealed, nil
+	}
+}
+
+// accountField 是每个卡片 Action 都有的账号参数。
+//
+// **必填且受枚举约束**：双账号下没有安全的默认值，回落到「第一个账号」
+// 会把钱花到调用方没打算用的账号上。枚举来自运行时配置，所以账号写错在
+// 参数校验这一层就被挡下。
+//
+// 这是管理后端的参数。以后若开放外部用户，选账号的逻辑在平台侧，
+// 账号是内部运营维度，不暴露给外部调用方。
+func accountField(accounts []string) action.Field {
+	return action.Field{
+		Name:     "account",
+		Type:     action.FieldString,
+		Required: true,
+		Enum:     accounts,
 	}
 }
