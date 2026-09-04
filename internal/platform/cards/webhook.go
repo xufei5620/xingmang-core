@@ -225,22 +225,47 @@ func webhookMAC(key, content []byte) []byte {
 	return mac.Sum(nil)
 }
 
-// diagnoseSecretForm 在验签失败时判断「换一种密钥解释方式能否对上」。
+// diagnoseSecretForm 在验签失败时逐一试出「哪种密钥解释方式能对上」。
 //
-// 起因：webhook 密钥是 44 个字符，正好是 32 字节的 base64。文档的示例代码
-// 用原始字符串做 HMAC 密钥（Python 的 SECRET.encode("utf-8")），但实际服务
-// 端也可能用 base64 解码后的字节。这两种的失败症状完全一样——都是
-// 「签名不匹配」——而修法一个是改代码、一个是让人重填密钥，方向相反。
+// 起因：Infini 的密钥是 44 个字符，正好是 32 字节的 base64——但用的是
+// **base64url 字母表**（真实密钥里出现过 `_`），标准 base64 解码器会拒绝它。
+// 第一版诊断只试了标准 base64，于是把一个「可能能对上」的情况误报成
+// 「密钥不是 base64」。
 //
-// **只诊断，不放行**：多认一种密钥解释方式，就是多一条我们没有依据的
-// 信任路径。真相清楚之后再改成唯一的那一种。
+// 现在把现实可能一次覆盖：原文、标准 base64、base64url，各自带填充与不带。
+// 服务端到底用哪种没有文档，示例代码用原文（Python 的 SECRET.encode），
+// 但示例未必等于实现。
+//
+// **只诊断，不放行**：多认一种密钥解释方式，就是多一条没有依据的信任路径。
+// 真相清楚之后改成唯一的那一种。
 func diagnoseSecretForm(secret string, content, received []byte) string {
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(secret))
-	if err != nil {
-		return "密钥不是 base64，只可能按原文用"
+	trimmed := strings.TrimSpace(secret)
+
+	decoders := []struct {
+		name   string
+		decode func(string) ([]byte, error)
+	}{
+		{"标准 base64", base64.StdEncoding.DecodeString},
+		{"标准 base64（无填充）", base64.RawStdEncoding.DecodeString},
+		{"base64url", base64.URLEncoding.DecodeString},
+		{"base64url（无填充）", base64.RawURLEncoding.DecodeString},
 	}
-	if subtle.ConstantTimeCompare(webhookMAC(decoded, content), received) == 1 {
-		return "注意：按 base64 解码后的密钥算能对上——是代码的密钥解释方式错了，不是密钥填错了"
+
+	var tried []string
+	for _, d := range decoders {
+		key, err := d.decode(trimmed)
+		if err != nil {
+			continue
+		}
+		tried = append(tried, d.name)
+		if subtle.ConstantTimeCompare(webhookMAC(key, content), received) == 1 {
+			return "注意：按「" + d.name + "」解码后的密钥算能对上——" +
+				"是代码的密钥解释方式错了，不是密钥填错了"
+		}
 	}
-	return "两种密钥解释方式都对不上——大概率是密钥值本身不对"
+
+	if len(tried) == 0 {
+		return "密钥无法按任何 base64 变体解码，只可能按原文用；原文也对不上，说明密钥值本身不对"
+	}
+	return "原文与 " + strings.Join(tried, "、") + " 解码后都对不上——大概率是密钥值本身不对"
 }
