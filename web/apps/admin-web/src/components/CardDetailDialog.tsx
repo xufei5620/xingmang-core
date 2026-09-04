@@ -10,6 +10,7 @@ import {
   type CardItem,
   type CardTransactionItem,
 } from "../api/cards";
+import { transactionStatusLabel, transactionTypeLabel } from "../lib/cardStatus";
 import { formatMinorUnits } from "../lib/money";
 import { ActionErrorNote } from "./ActionErrorNote";
 import { type ActionResult } from "./ActionResultNote";
@@ -159,7 +160,12 @@ export function CardDetailDialog({
       primary: true,
     },
     { id: "merchant", header: "商户", cell: (row) => row.merchant || "—", value: (row) => row.merchant },
-    { id: "type", header: "类型", cell: (row) => row.type || "—", value: (row) => row.type },
+    {
+      id: "type",
+      header: "类型",
+      cell: (row) => transactionTypeLabel(row.type),
+      value: (row) => transactionTypeLabel(row.type),
+    },
     {
       id: "amount",
       header: "金额",
@@ -196,8 +202,8 @@ export function CardDetailDialog({
     {
       id: "status",
       header: "状态",
-      cell: (row) => <Badge tone="neutral">{row.status || "—"}</Badge>,
-      value: (row) => row.status,
+      cell: (row) => <Badge tone="neutral">{transactionStatusLabel(row.status)}</Badge>,
+      value: (row) => transactionStatusLabel(row.status),
     },
   ];
 

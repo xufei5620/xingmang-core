@@ -690,8 +690,9 @@ func (s *PgStore) RecordWebhookEvent(ctx context.Context, account string, ev Web
 	const upsertSQL = `
 INSERT INTO cards.webhook_event (
     environment, account, event_id, event_type, upstream_card_id,
-    occurred_at, received_at, attempts, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$7,$7)
+    occurred_at, received_at, attempts, created_at, updated_at,
+    transaction_id, related_transaction_id, transaction_type, transaction_status
+) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$7,$7,$8,$9,$10,$11)
 ON CONFLICT (environment, account, event_id) DO UPDATE SET
     attempts = cards.webhook_event.attempts + 1,
     updated_at = EXCLUDED.updated_at
@@ -705,6 +706,7 @@ RETURNING (xmax = 0) AS inserted, processed_at IS NOT NULL AS done`
 	var rec WebhookRecord
 	if err := s.pool.QueryRow(ctx, upsertSQL,
 		s.environment, account, ev.ID, ev.Type, ev.CardID, occurred, s.now(),
+		ev.TransactionID, ev.RelatedTransactionID, ev.TransactionType, ev.TransactionStatus,
 	).Scan(&rec.Fresh, &rec.AlreadyProcessed); err != nil {
 		return WebhookRecord{}, fmt.Errorf("登记回调事件 %s: %w", ev.ID, err)
 	}
@@ -761,4 +763,73 @@ SELECT status FROM cards.infini_card
 		return "", fmt.Errorf("查卡 %s 的当前状态: %w", cardID, err)
 	}
 	return status, nil
+}
+
+// CardChallenge 是一次 3DS 验证挑战。
+type CardChallenge struct {
+	Account   string
+	CardID    string
+	ID        string
+	Type      string
+	// Code 可能为空——上游不一定给（见迁移 000032 的说明）。
+	Code      string
+	ExpiresAt time.Time
+}
+
+// RecordCardChallenge 落一次挑战；同 challenge_id 重投时更新（验证码可能后到）。
+func (s *PgStore) RecordCardChallenge(ctx context.Context, c CardChallenge) error {
+	const upsertSQL = `
+INSERT INTO cards.card_challenge (
+    environment, account, upstream_card_id, challenge_id, challenge_type,
+    code, expires_at, received_at, created_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+ON CONFLICT (environment, account, challenge_id) DO UPDATE SET
+    -- 验证码只在非空时覆盖：重投若不带码，不能把已经收到的码抹掉。
+    code = COALESCE(NULLIF(EXCLUDED.code, ''), cards.card_challenge.code),
+    expires_at = COALESCE(EXCLUDED.expires_at, cards.card_challenge.expires_at)`
+
+	var expires any
+	if !c.ExpiresAt.IsZero() {
+		expires = c.ExpiresAt
+	}
+	if _, err := s.pool.Exec(ctx, upsertSQL,
+		s.environment, c.Account, c.CardID, c.ID, c.Type, c.Code, expires, s.now(),
+	); err != nil {
+		return fmt.Errorf("落验证挑战 %s: %w", c.ID, err)
+	}
+	return nil
+}
+
+// ActiveChallenges 返回尚未过期的挑战。
+//
+// 过期的一律不返回，也不靠调用方过滤：验证码是一次性敏感数据，
+// 过期之后价值归零而风险不变，最稳妥的做法是根本不让它离开数据库。
+func (s *PgStore) ActiveChallenges(ctx context.Context) ([]CardChallenge, error) {
+	const listSQL = `
+SELECT account, upstream_card_id, challenge_id, challenge_type, code, expires_at
+  FROM cards.card_challenge
+ WHERE environment = $1
+   AND expires_at IS NOT NULL
+   AND expires_at > $2
+ ORDER BY expires_at DESC`
+
+	rows, err := s.pool.Query(ctx, listSQL, s.environment, s.now())
+	if err != nil {
+		return nil, fmt.Errorf("查待验证挑战: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CardChallenge
+	for rows.Next() {
+		var c CardChallenge
+		var expires *time.Time
+		if err := rows.Scan(&c.Account, &c.CardID, &c.ID, &c.Type, &c.Code, &expires); err != nil {
+			return nil, err
+		}
+		if expires != nil {
+			c.ExpiresAt = *expires
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }

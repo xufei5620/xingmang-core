@@ -15,12 +15,14 @@ vi.mock("../api/cards", async () => {
     unfreezeCard: vi.fn(),
     issueCard: vi.fn(),
     listCardBalances: vi.fn(),
+    listCardChallenges: vi.fn(),
   };
 });
 
 import {
   freezeCard,
   listCardBalances,
+  listCardChallenges,
   unfreezeCard,
   issueCard,
   listCardOperationsNeedingAttention,
@@ -63,6 +65,7 @@ describe("CardsPanel", () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -88,6 +91,7 @@ describe("CardsPanel", () => {
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -101,6 +105,7 @@ describe("CardsPanel", () => {
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -137,6 +142,7 @@ describe("CardsPanel", () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -154,6 +160,7 @@ describe("CardsPanel", () => {
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -167,6 +174,7 @@ describe("CardsPanel", () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -178,6 +186,7 @@ describe("CardsPanel", () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
     vi.mocked(freezeCard).mockResolvedValue({ runId: "run-1", result: {} });
 
     renderPanel();
@@ -202,6 +211,7 @@ describe("CardsPanel", () => {
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
     vi.mocked(unfreezeCard).mockResolvedValue({ runId: "run-2", result: {} });
 
     renderPanel();
@@ -228,6 +238,7 @@ describe("CardsPanel", () => {
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -247,6 +258,7 @@ describe("CardsPanel", () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -268,6 +280,7 @@ describe("CardsPanel", () => {
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
 
     renderPanel();
 
@@ -288,6 +301,7 @@ describe("CardsPanel", () => {
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
     vi.mocked(issueCard).mockResolvedValue({ runId: "run-1", result: {} });
 
     renderPanel();
@@ -324,5 +338,51 @@ describe("资金池余额", () => {
     // 取不到的账号绝不能显示成 0——那会让人以为钱花光了。
     expect(screen.getByText(/读取失败/)).toBeTruthy();
     expect(screen.queryByText("0 USDT")).toBeNull();
+  });
+});
+
+describe("3DS 验证挑战", () => {
+  it("有验证码时直接显示码", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([
+      { account: "MAIN", card_id: "card_1", challenge_id: "ch-1", code: "123456" },
+    ]);
+
+    renderPanel();
+
+    expect(await screen.findByText(/验证码 123456/)).toBeTruthy();
+  });
+
+  // 上游不一定给验证码——生产收到的真实事件里就没有。这时只提示有待验证，
+  // 而不是显示一个空白的验证码栏位。
+  it("没有验证码时只提示待验证", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([
+      { account: "MAIN", card_id: "card_1", challenge_id: "ch-1" },
+    ]);
+
+    renderPanel();
+
+    expect(await screen.findByText("待验证")).toBeTruthy();
+    expect(screen.queryByText(/验证码/)).toBeNull();
+  });
+
+  // 别的卡的挑战不该串到这一行来。
+  it("挑战按账号+卡号匹配，不串行", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([
+      { account: "BACKUP", card_id: "card_1", challenge_id: "ch-2", code: "999999" },
+    ]);
+
+    renderPanel();
+
+    await screen.findByText("533228******1234");
+    expect(screen.queryByText(/999999/)).toBeNull();
   });
 });

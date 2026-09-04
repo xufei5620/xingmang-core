@@ -5,11 +5,13 @@ import { useId, useState } from "react";
 import {
   freezeCard,
   listCardBalances,
+  listCardChallenges,
   issueCard,
   listCardOperationsNeedingAttention,
   listCards,
   unfreezeCard,
   type CardFreshness,
+  type CardChallenge,
   type CardItem,
   type CardOperationItem,
 } from "../api/cards";
@@ -22,6 +24,7 @@ import { ApiStateView } from "./ApiStateView";
 
 const CARDS_QUERY = "cards";
 const CARD_BALANCES_QUERY = "card-balances";
+const CARD_CHALLENGES_QUERY = "card-challenges";
 const CARD_ATTENTION_QUERY = "card-operations-attention";
 
 /** 充值币种。与后端 Action 契约的枚举一致——多一个值会被后端当场拒掉。 */
@@ -390,6 +393,17 @@ export function CardsPanel() {
     onError: (err) => setActionError(err),
   });
 
+  // 待验证的 3DS 挑战：轮询得比卡片列表勤，因为验证码通常只有几分钟有效，
+  // 拿到时已经过期就等于没拿到。
+  const challengeQuery = useQuery({
+    queryKey: [CARD_CHALLENGES_QUERY],
+    queryFn: ({ signal }) => listCardChallenges({ signal }),
+    refetchInterval: 30_000,
+  });
+  const challengesByCard = new Map(
+    (challengeQuery.data ?? []).map((c) => [`${c.account}/${c.card_id}`, c]),
+  );
+
   const rows = query.data?.cards ?? [];
   const accounts = query.data?.accounts ?? [];
   const memberEmails = query.data?.memberEmails ?? [];
@@ -446,7 +460,12 @@ export function CardsPanel() {
     {
       id: "status",
       header: "状态",
-      cell: (row) => <Badge tone={cardStatusTone(row.status)}>{cardStatusLabel(row.status)}</Badge>,
+      cell: (row) => (
+        <span className="flex flex-col gap-1">
+          <Badge tone={cardStatusTone(row.status)}>{cardStatusLabel(row.status)}</Badge>
+          <ChallengeBadge challenge={challengesByCard.get(`${row.account}/${row.card_id}`)} />
+        </span>
+      ),
       value: (row) => cardStatusLabel(row.status),
     },
     {
@@ -614,5 +633,30 @@ function AccountBalancesStrip() {
         </div>
       ))}
     </div>
+  );
+}
+
+/** 待验证的 3DS 挑战。
+ *
+ *  持卡人在线支付时上游会要一次验证码。把它摆在这里，用卡的人就不用去翻
+ *  邮件或 Infini App。
+ *
+ *  **验证码可能不在回调里**：官方文档的示例带 challenge 字段，但生产收到的
+ *  真实事件没有。所以这里分两种显示——有码就显示码，没码就只提示「有一笔
+ *  待验证」。按文档假定它一定存在，会做出一个永远空白的栏位。
+ */
+function ChallengeBadge({ challenge }: { challenge?: CardChallenge }) {
+  if (!challenge) return null;
+  if (challenge.code) {
+    return (
+      <Badge tone="warning" title="在线支付验证码，仅数分钟内有效">
+        验证码 {challenge.code}
+      </Badge>
+    );
+  }
+  return (
+    <Badge tone="warning" title="上游要求验证，但回调里没有给出验证码——请到 Infini 后台或邮件里查看">
+      待验证
+    </Badge>
   );
 }

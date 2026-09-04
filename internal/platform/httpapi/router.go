@@ -302,6 +302,8 @@ func NewRouter(d Deps) http.Handler {
 						ListCardOperationsNeedingAttentionHandler(d.Cards))
 				// 资金池余额：实时上游调用，不是投影。为 nil 时不挂载
 				// （fake 模式下没有真实余额可读）。
+				api.With(RequireScope(cards.PermissionRead)).
+					Get("/cards/challenges", ListCardChallengesHandler(d.Cards))
 				if d.CardBalances != nil {
 					api.With(RequireScope(cards.PermissionRead)).
 						Get("/cards/balances", CardBalancesHandler(d.CardBalances, d.CardAccounts))

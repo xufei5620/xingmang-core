@@ -350,3 +350,28 @@ export async function listCardBalances(
     .catch(translateUnmounted);
   return body.items ?? [];
 }
+
+/** 一次尚未过期的 3DS 验证挑战。 */
+export interface CardChallenge {
+  account: string;
+  card_id: string;
+  challenge_id: string;
+  challenge_type?: string;
+  /** 验证码。只回给持有 card.reveal 的调用方，**而且上游不一定给**——
+   *  2026-09-05 生产收到的真实事件里就没有这个字段。 */
+  code?: string;
+  expires_at?: string;
+}
+
+/** 读尚未过期的验证挑战。过期的由服务端过滤掉，不到前端。 */
+export async function listCardChallenges(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardChallenge[]> {
+  const body = await client
+    .get<ListResponse<CardChallenge>>("/api/v1/cards/challenges", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return body.items ?? [];
+}

@@ -119,6 +119,11 @@ func formatUnix(t time.Time) string {
 const (
 	WebhookEventCardStatusChange = "card.status_change"
 	WebhookEventCardTransaction  = "card.transaction"
+	// WebhookEventCardChallenge 是在线支付的 3DS 验证挑战。
+	//
+	// 它**不触发卡片刷新**：与卡的状态、余额都无关，重读一次上游只是白打。
+	// 它的价值在于把验证码（如果上游给）摆到管理端，省得持卡人去翻邮件。
+	WebhookEventCardChallenge = "card.challenge"
 )
 
 // WebhookEvent 是回调信封里我们**真正使用**的那几项。
@@ -131,6 +136,28 @@ type WebhookEvent struct {
 	// CardID 只在卡片类事件里有意义。
 	CardID     string
 	OccurredAt time.Time
+	// 以下只在 card.transaction 事件里有值。
+	//
+	// **金额刻意不解析**：回调只当触发器，金额一律以主动读取上游为准
+	// （理由见 NeedsCardRefresh）。但交易身份要留下来——REST 的流水接口
+	// 不给交易 id，我们的去重键是派生的；回调给了真 id，存下来才能把
+	// 两边对上，也才能认出「同一笔交易从 authorized 变成 completed」。
+	TransactionID        string
+	RelatedTransactionID string
+	// TransactionType / TransactionStatus 保持上游原文，不在这里归一化：
+	// 大小写在 REST 与 webhook 之间不一致（Consume vs consume），
+	// 归一化放在显示层做，存储层留原文才能回答「上游当时到底说了什么」。
+	TransactionType   string
+	TransactionStatus string
+	// 以下只在 card.challenge 事件里有值。
+	//
+	// ChallengeCode 是 3DS 验证码，**可能为空**：官方文档的示例带
+	// "challenge":"123456"，但 2026-09-05 生产收到的真实事件里没有这个字段。
+	// 按文档假定它一定存在，会做出一个永远显示空白的验证码栏位。
+	ChallengeID        string
+	ChallengeType      string
+	ChallengeCode      string
+	ChallengeExpiresAt time.Time
 }
 
 // NeedsCardRefresh 说明这个事件是否要求我们去重新读一次这张卡。
@@ -164,10 +191,18 @@ func ParseWebhookEvent(payload []byte, eventID string) (WebhookEvent, error) {
 	var raw struct {
 		Event      string `json:"event"`
 		OccurredAt int64  `json:"occurred_at"`
-		Data       struct {
+		Data struct {
 			Card struct {
 				CardID string `json:"card_id"`
 			} `json:"card"`
+			TransactionID        string `json:"transaction_id"`
+			RelatedTransactionID string `json:"related_transaction_id"`
+			Type                 string `json:"type"`
+			Status               string `json:"status"`
+			ChallengeID          string `json:"challenge_id"`
+			ChallengeType        string `json:"challenge_type"`
+			Challenge            string `json:"challenge"`
+			ExpiresAt            int64  `json:"expires_at"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
@@ -177,13 +212,25 @@ func ParseWebhookEvent(payload []byte, eventID string) (WebhookEvent, error) {
 		return WebhookEvent{}, fmt.Errorf("%w: 缺少事件类型", ErrWebhookRejected)
 	}
 
-	ev := WebhookEvent{ID: eventID, Type: raw.Event, CardID: raw.Data.Card.CardID}
+	ev := WebhookEvent{
+		ID: eventID, Type: raw.Event, CardID: raw.Data.Card.CardID,
+		TransactionID:        raw.Data.TransactionID,
+		RelatedTransactionID: raw.Data.RelatedTransactionID,
+		TransactionType:      raw.Data.Type,
+		TransactionStatus:    raw.Data.Status,
+		ChallengeID:          raw.Data.ChallengeID,
+		ChallengeType:        raw.Data.ChallengeType,
+		ChallengeCode:        raw.Data.Challenge,
+	}
+	if raw.Data.ExpiresAt > 0 {
+		ev.ChallengeExpiresAt = time.Unix(raw.Data.ExpiresAt, 0).UTC()
+	}
 	if raw.OccurredAt > 0 {
 		ev.OccurredAt = time.Unix(raw.OccurredAt, 0).UTC()
 	}
 
 	switch ev.Type {
-	case WebhookEventCardStatusChange, WebhookEventCardTransaction:
+	case WebhookEventCardStatusChange, WebhookEventCardTransaction, WebhookEventCardChallenge:
 		if ev.CardID == "" {
 			// 卡片事件没有卡 id 就无从处理。静默放行会让一次真实的状态
 			// 变更被悄悄丢掉，而我们还回了 200 让上游不再重试。

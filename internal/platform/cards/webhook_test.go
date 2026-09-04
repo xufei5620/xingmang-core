@@ -277,3 +277,126 @@ func TestDiagnoseSecretFormTellsTheTwoCausesApart(t *testing.T) {
 		t.Fatalf("非 base64 密钥应如实说明, got %q", got)
 	}
 }
+
+// 交易类回调要能解析出交易身份与语义。
+//
+// 五种形态来自官方 webhook 文档：授权、结算（带 auth_settle_adjustment）、
+// 授权失败、冲正、退款。全部只当触发器——金额一律以主动读取为准——但
+// transaction_id 要留下来：REST 的流水接口**不给交易 id**，去重键是我们
+// 自己派生的；回调给了真 id，存下来才能把两边对上。
+func TestParseWebhookEventReadsTransactionIdentity(t *testing.T) {
+	cases := map[string]struct {
+		payload  string
+		wantType string
+		wantStat string
+		wantTxID string
+		wantRel  string
+	}{
+		"授权": {
+			payload: `{"event":"card.transaction","data":{"card":{"card_id":"c-1"},
+			  "transaction_id":"t-1","type":"consume","status":"authorized","direction":"debit"}}`,
+			wantType: "consume", wantStat: "authorized", wantTxID: "t-1",
+		},
+		"结算": {
+			payload: `{"event":"card.transaction","data":{"card":{"card_id":"c-1"},
+			  "transaction_id":"t-1","type":"consume","status":"completed","direction":"debit",
+			  "auth_settle_adjustment":{"authorized_amount":"10","settled_amount":"8"}}}`,
+			wantType: "consume", wantStat: "completed", wantTxID: "t-1",
+		},
+		"授权失败": {
+			payload: `{"event":"card.transaction","data":{"card":{"card_id":"c-1"},
+			  "transaction_id":"t-2","type":"consume","status":"failed","direction":"none",
+			  "failure":{"reason":"Insufficient balance"}}}`,
+			wantType: "consume", wantStat: "failed", wantTxID: "t-2",
+		},
+		"冲正": {
+			payload: `{"event":"card.transaction","data":{"card":{"card_id":"c-1"},
+			  "transaction_id":"t-3","related_transaction_id":"t-1","type":"reversal",
+			  "status":"completed","direction":"credit"}}`,
+			wantType: "reversal", wantStat: "completed", wantTxID: "t-3", wantRel: "t-1",
+		},
+		"退款": {
+			payload: `{"event":"card.transaction","data":{"card":{"card_id":"c-1"},
+			  "transaction_id":"t-4","related_transaction_id":"t-1","type":"refund",
+			  "status":"completed","direction":"credit"}}`,
+			wantType: "refund", wantStat: "completed", wantTxID: "t-4", wantRel: "t-1",
+		},
+	}
+
+	for name, tc := range cases {
+		ev, err := ParseWebhookEvent([]byte(tc.payload), "hdr-"+name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !ev.NeedsCardRefresh() {
+			t.Fatalf("%s: 交易事件应触发定向刷新", name)
+		}
+		if ev.TransactionID != tc.wantTxID || ev.RelatedTransactionID != tc.wantRel {
+			t.Fatalf("%s: 交易 id 解析错 %+v", name, ev)
+		}
+		if ev.TransactionType != tc.wantType || ev.TransactionStatus != tc.wantStat {
+			t.Fatalf("%s: 类型/状态解析错 %+v", name, ev)
+		}
+	}
+}
+
+// 状态变更事件没有交易字段，解析出来该是空的，不能编造。
+func TestParseWebhookEventLeavesTransactionFieldsEmptyOnStatusChange(t *testing.T) {
+	ev, err := ParseWebhookEvent([]byte(
+		`{"event":"card.status_change","data":{"card":{"card_id":"c-1","status":"suspend"}}}`), "hdr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.TransactionID != "" || ev.TransactionType != "" {
+		t.Fatalf("状态变更不该有交易字段: %+v", ev)
+	}
+}
+
+// 3DS 挑战事件：解析出挑战身份与过期时间。
+//
+// **验证码本身可能不在载荷里。** 官方 webhook 文档的示例带 "challenge":"123456"，
+// 但 2026-09-05 生产收到的真实事件里只有 challenge_id / challenge_type /
+// expires_at，没有验证码。所以这里把验证码当作**可选**：有就存下来给页面用，
+// 没有就只提示「有一笔待验证」——按文档示例假定它一定存在，会做出一个
+// 永远显示空白的验证码栏位。
+func TestParseWebhookEventReadsChallenge(t *testing.T) {
+	withCode := `{"event":"card.challenge","data":{"card":{"card_id":"c-1"},
+	  "challenge_id":"ch-1","challenge_type":"authorization_code",
+	  "challenge":"123456","expires_at":1763513700}}`
+
+	ev, err := ParseWebhookEvent([]byte(withCode), "hdr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ChallengeID != "ch-1" || ev.ChallengeType != "authorization_code" {
+		t.Fatalf("挑战身份解析错: %+v", ev)
+	}
+	if ev.ChallengeCode != "123456" {
+		t.Fatalf("验证码没解析出来: %+v", ev)
+	}
+	if ev.ChallengeExpiresAt.IsZero() {
+		t.Fatalf("过期时间没解析出来: %+v", ev)
+	}
+	// 挑战事件不该触发卡片刷新：它与卡的状态、余额都无关。
+	if ev.NeedsCardRefresh() {
+		t.Fatal("挑战事件不该触发定向刷新")
+	}
+}
+
+// 真实生产事件的形状：没有验证码字段，其余照常解析。
+func TestParseWebhookEventToleratesChallengeWithoutCode(t *testing.T) {
+	real := `{"event":"card.challenge","data":{"card":{"card_id":"c-1","status":"active"},
+	  "challenge_id":"c6bdb09b-037c-51f6-ad8b-ff1eb16acfa6",
+	  "challenge_type":"authorization_code","expires_at":1788553063}}`
+
+	ev, err := ParseWebhookEvent([]byte(real), "hdr-2")
+	if err != nil {
+		t.Fatalf("没有验证码的挑战事件不该报错: %v", err)
+	}
+	if ev.ChallengeID == "" || ev.ChallengeExpiresAt.IsZero() {
+		t.Fatalf("其余字段仍应解析: %+v", ev)
+	}
+	if ev.ChallengeCode != "" {
+		t.Fatalf("没有验证码时不能编一个出来: %+v", ev)
+	}
+}
