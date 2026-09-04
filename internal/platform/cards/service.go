@@ -182,3 +182,12 @@ func stateForUpstreamError(err error) OperationState {
 		return StateUnknown
 	}
 }
+
+// RevealCard 取一张卡的明文卡面数据。
+//
+// 不改任何状态，但它经领域层与 Action——理由是权限与审计：
+// 「谁在何时看了哪张卡的明文」是本功能最该留痕的一条记录，
+// 而普通读路径没有审计钩子。返回值不落库、不进日志。
+func (s *Service) RevealCard(ctx context.Context, cardID string) (infini.RevealedCard, error) {
+	return s.client.RevealCard(ctx, cardID)
+}

@@ -1,0 +1,27 @@
+{
+  "id": "cards.card.reveal",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "card.reveal",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NOT_APPLICABLE_READ_ONLY",
+  "write_confirmation": "NOT_APPLICABLE_READ_ONLY",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "NOT_POSSIBLE",
+  "params": {
+    "card_id": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-CARD2 查看明文卡面（卡号/CVV/有效期）。这是一个读操作却走 Action，是对宪法条款 2「读取走 Query」字面的有意偏离，理由与授权无关而与留痕有关：平台没有 Query 框架（internal/platform/query 是空目录），读路径就是普通 HTTP 处理函数，没有审计钩子；而「谁在何时看了哪张卡的明文」恰恰是本功能最该进 append-only 审计的一条。不得引为先例——要复用这个理由，前提是该读操作同样暴露不可撤销的敏感数据。明文只经 Action 返回值回到管理端一次性渲染，不落库、不进日志、不进审计摘要（审计只记 revealed 与被看字段名）。权限串独立于 card.issue / card.manage：能开卡不等于能看卡面，以后对外开放时这一档不下放。"
+}

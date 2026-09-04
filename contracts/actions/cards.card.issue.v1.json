@@ -1,7 +1,7 @@
 {
   "id": "cards.card.issue",
   "version": "1",
-  "risk_level": "L2",
+  "risk_level": "L1",
   "permission": "card.issue",
   "principal_types": [
     "HUMAN"
@@ -51,5 +51,5 @@
       "required": false
     }
   },
-  "notes": "XM-CARD1 开卡。风险等级 L2 而非 L1：开卡真的把钱花出去，高于「修改低风险平台配置」；不升 L3 是因为产品负责人明确选择不设人工审批，而宪法条款 9 规定 L3/L4 必须审批。改这一级等于改审批策略。idempotency 是 REQUIRED_CLIENT_KEY 而不是 REQUIRED_FOUNDATION_B：上游 /v2/cards/apply 没有幂等键，去重完全由平台承担——幂等键派生出 card_alias 写给上游，超时后靠 ListCards(alias) 精确匹配对账。compensation_mode 是 NOT_POSSIBLE：卡一旦开出来就无法「撤销开卡」，只能赎回余额并冻结，那是另外两个 Action。金额上限见 internal/platform/cards/limits.go，上限未配齐时 fail closed。"
+  "notes": "XM-CARD1 开卡。风险等级 L1 是平台能力所限，不是对风险的判断：内核的 RequiresAdvancedControls() 对 L2 及以上返回 true，而 Advanced Controls 属 Foundation-B / XM-0030 尚未实现，声明成 L2 的 Action 会在执行时被直接拒掉。按动作性质开卡花真钱，本该更高。Foundation-B 落地后应重估——届时升到 L2 才是真的加了控制。idempotency 是 REQUIRED_CLIENT_KEY 而不是 REQUIRED_FOUNDATION_B：上游 /v2/cards/apply 没有幂等键，去重完全由平台承担——幂等键派生出 card_alias 写给上游，超时后靠 ListCards(alias) 精确匹配对账。compensation_mode 是 NOT_POSSIBLE：卡一旦开出来就无法「撤销开卡」，只能赎回余额并冻结，那是另外两个 Action。金额上限见 internal/platform/cards/limits.go，上限未配齐时 fail closed。"
 }

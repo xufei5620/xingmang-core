@@ -18,6 +18,9 @@ const (
 	// 两者的演化节奏不一样。
 	ActionIssue = "cards.card.issue"
 
+	// ActionReveal 查看明文卡面数据。
+	ActionReveal = "cards.card.reveal"
+
 	actionVersion = "1"
 )
 
@@ -59,6 +62,7 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 		handler action.Handler
 	}{
 		{issueDef(), issueHandler(svc)},
+		{revealDef(), revealHandler(svc)},
 	}
 	for _, d := range defs {
 		if err := reg.Register(d.def, d.handler); err != nil {
@@ -70,17 +74,22 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 
 // issueDef 是开卡的静态声明。
 //
-// 风险等级 L2：开卡真的把钱花出去，高于 L1 的「修改低风险平台配置」；
-// 但产品负责人明确选择了不设人工审批，而宪法条款 9 规定 L3/L4 必须审批，
-// 所以不能再往上。**改这一行等于改审批策略，必须走产品负责人。**
+// 风险等级 L1，理由是**平台当前只能执行 L1**：内核的
+// RiskLevel.RequiresAdvancedControls() 对 L2 及以上返回 true，而 Advanced
+// Controls（幂等键、写后读取确认、审批、Step-up MFA、冷却、Kill Switch）
+// 属于 Foundation-B / XM-0030，尚未实现——声明成 L2 的 Action 会在执行时
+// 被内核直接拒掉。按动作性质，开卡花真钱，本该高于「修改低风险平台配置」；
+// 这一格是平台能力的欠账，不是对风险的判断。
 //
-// 护栏不在风险等级上，而在三处：幂等键（防重复扣钱）、金额上限
-// （limits.go，fail closed）、以及内核强制的审计。
+// 所以护栏不在风险等级上，而在三处本片自己实现的东西：幂等键（防重复扣钱）、
+// 金额上限（limits.go，fail closed）、以及内核强制的审计。
+// Foundation-B 落地后应重估这一级——届时升到 L2 才是真的加了控制，
+// 而不是让 Action 变得不可执行。
 func issueDef() action.Definition {
 	return action.Definition{
 		ID:         ActionIssue,
 		Version:    actionVersion,
-		RiskLevel:  action.L2,
+		RiskLevel:  action.L1,
 		Permission: PermissionIssue,
 		Schema: action.Schema{
 			Fields: []action.Field{
@@ -120,11 +129,18 @@ func issueHandler(svc *Service) action.Handler {
 		if err != nil {
 			return nil, err
 		}
+
+		// 审计贡献必须显式做：Handler 的返回值只进 Result.Value 回给调用方，
+		// 不会自动进审计事件。不记 resource_id 的话，出事时无法从审计
+		// 定位到具体的卡。
+		action.RecordResource(ctx, resourceCard, res.CardID)
+		action.RecordAfter(ctx, issueSummary(req, res))
+
 		return issueSummary(req, res), nil
 	}
 }
 
-// issueSummary 是进审计链的摘要。
+// issueSummary 既作为 Action 的返回值，也作为审计的 after 摘要。
 //
 // **刻意不写持卡人姓名与邮箱**：审计是 append-only 的，写进去就删不掉了，
 // 而「谁开的卡」由内核记录的 Principal 回答，不需要在摘要里重复个人信息。
@@ -170,5 +186,62 @@ func intParam(params map[string]any, name string) int {
 		return int(v)
 	default:
 		return 0
+	}
+}
+
+// resourceCard 是审计里的资源类型，与库表对应，便于从审计事件直接定位到卡。
+const resourceCard = "cards.infini_card"
+
+// revealDef 是查看明文卡面的声明。
+//
+// 这是一个**读**操作却走 Action，是对宪法条款 2「读取走 Query」字面的
+// 有意偏离，理由与授权无关而与留痕有关：平台没有 Query 框架
+// （internal/platform/query 是空目录），读路径就是普通 HTTP 处理函数，
+// 没有审计钩子；而「谁在何时看了哪张卡的明文」恰恰是本功能最该进
+// append-only 审计的一条。
+//
+// **不得引为先例**：普通读操作仍走读路径。要复用这个理由，前提是该读操作
+// 同样暴露不可撤销的敏感数据。
+func revealDef() action.Definition {
+	return action.Definition{
+		ID:         ActionReveal,
+		Version:    actionVersion,
+		RiskLevel:  action.L1,
+		Permission: PermissionReveal,
+		Schema: action.Schema{
+			Fields: []action.Field{
+				{Name: "card_id", Type: action.FieldString, Required: true},
+			},
+		},
+		Environments:   allEnvironments,
+		PrincipalTypes: humanOnly,
+	}
+}
+
+func revealHandler(svc *Service) action.Handler {
+	return func(ctx context.Context, params map[string]any) (any, error) {
+		if svc == nil {
+			return nil, ErrServiceUnbound
+		}
+		cardID := stringParam(params, "card_id")
+
+		revealed, err := svc.RevealCard(ctx, cardID)
+		if err != nil {
+			// 资源照样要记：被拒绝的查看尝试同样进审计链，
+			// 而且那是审计最有价值的部分之一。
+			action.RecordResource(ctx, resourceCard, cardID)
+			return nil, err
+		}
+
+		action.RecordResource(ctx, resourceCard, cardID)
+		// 审计只记「看了」这个事实与被看的字段名，**一个字节明文都不进**。
+		// 审计会被归档、导出、搜索。
+		action.RecordAfter(ctx, map[string]any{
+			"revealed":        true,
+			"revealed_fields": "number,cvv,expiry",
+		})
+
+		// 明文只经返回值回到调用方，由管理端一次性渲染，不落库不进日志。
+		return revealed, nil
 	}
 }

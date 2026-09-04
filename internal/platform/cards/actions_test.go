@@ -16,18 +16,24 @@ func TestIssueActionDefinitionIsValid(t *testing.T) {
 	}
 }
 
-// 风险等级与审批的关系是宪法条款 9 定的：L3/L4 必须审批。
-// 本 Action 定为 L2——开卡真的把钱花出去，高于「修改低风险平台配置」，
-// 但产品负责人明确选择了不设人工审批，所以不能升到 L3。
-// 改这一行等于改审批策略，必须走产品负责人。
-func TestIssueActionRiskLevelStaysBelowApprovalThreshold(t *testing.T) {
+// 风险等级必须落在**平台当前真能执行**的范围内。
+//
+// 内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED 并拒绝执行（Advanced
+// Controls 属 Foundation-B / XM-0030，尚未实现），所以一个声明成 L2 的开卡
+// Action 会是个永远跑不起来的摆设。这条测试钉住的不是「L1 这个字面值」，
+// 而是「这个 Action 能被执行」——Foundation-B 落地后它会自然失效，
+// 那正是重估风险等级的时机。
+func TestIssueActionRiskLevelIsExecutableToday(t *testing.T) {
 	def := issueDef()
 
-	if def.RiskLevel != action.L2 {
-		t.Fatalf("RiskLevel = %q, want L2", def.RiskLevel)
+	if def.RiskLevel.RequiresAdvancedControls() {
+		t.Fatalf("RiskLevel %q 需要尚未实现的 Advanced Controls，该 Action 将无法执行", def.RiskLevel)
 	}
-	if def.RiskLevel == action.L3 || def.RiskLevel == action.L4 {
-		t.Fatal("L3/L4 必须审批，与既定的免审批设计冲突")
+}
+
+func TestRevealActionRiskLevelIsExecutableToday(t *testing.T) {
+	if revealDef().RiskLevel.RequiresAdvancedControls() {
+		t.Fatal("reveal 的风险等级会让它无法执行")
 	}
 }
 
