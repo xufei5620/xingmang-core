@@ -23,7 +23,7 @@ func readJobManifestContract(t *testing.T) []byte {
 	return raw
 }
 
-func TestManifestCoversExactlyNineRegisteredPeriodicJobs(t *testing.T) {
+func TestManifestCoversExactlyTenRegisteredPeriodicJobs(t *testing.T) {
 	manifest, hash, err := LoadJobManifest(readJobManifestContract(t))
 	if err != nil {
 		t.Fatalf("load frozen manifest: %v", err)
@@ -32,8 +32,8 @@ func TestManifestCoversExactlyNineRegisteredPeriodicJobs(t *testing.T) {
 		t.Fatal("manifest hash must not be empty")
 	}
 	registered := RegisteredPeriodicJobSpecs()
-	if len(registered) != 9 {
-		t.Fatalf("registered periodic jobs = %d, want 9", len(registered))
+	if len(registered) != 10 {
+		t.Fatalf("registered periodic jobs = %d, want 10", len(registered))
 	}
 	if len(manifest.Jobs) != len(registered) {
 		t.Fatalf("manifest jobs = %d, registered = %d", len(manifest.Jobs), len(registered))
@@ -110,6 +110,15 @@ func TestManifestPinsStableIDsKindsQueuesScheduleSourcesAndCatchup(t *testing.T)
 			ID: CPASyncJobKind, Kind: CPASyncJobKind, Queue: QueueMaintenance,
 			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
 			ScheduleConfig: "XM_CPA_SYNC_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.CPASyncRunOnStart",
+			CatchUp: "at_most_one_immediate",
+		},
+		// XM-CARD2（2026-09-04）：异步开卡轮询与不确定态对账。
+		// 漏登记这一条曾让 worker 在生产崩溃重启——NewClient 找不到 spec
+		// 就拒绝启动，而崩溃日志当时只有 error_code、没有错误正文。
+		CardSyncJobKind: {
+			ID: CardSyncJobKind, Kind: CardSyncJobKind, Queue: QueueMaintenance,
+			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_CARDS_SYNC_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.CardSyncRunOnStart",
 			CatchUp: "at_most_one_immediate",
 		},
 	}
@@ -318,8 +327,8 @@ func TestEffectiveManifestDisabledJobAndConfigChangesChangeHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Jobs) != 9 {
-		t.Fatalf("jobs = %d, want 9", len(base.Jobs))
+	if len(base.Jobs) != 10 {
+		t.Fatalf("jobs = %d, want 10", len(base.Jobs))
 	}
 	cfg.RetentionEnabled = false
 	disabled, disabledHash, err := BuildEffectiveManifest(cfg, manifest)
@@ -508,6 +517,8 @@ func intervalForJob(id string) time.Duration {
 		return DefaultConnectorProbeInterval
 	case CPASyncJobKind:
 		return DefaultCPASyncInterval
+	case CardSyncJobKind:
+		return DefaultCardSyncInterval
 	default:
 		return 0
 	}

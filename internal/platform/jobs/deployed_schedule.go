@@ -131,6 +131,23 @@ func DeployedSchedulesFromEnv(getenv func(string) string) (map[string]DeployedJo
 	} else {
 		cfg.CPASyncEnabled = cpaMode == CPAModeFile
 	}
+	// 卡片同步没有独立的 ENABLED 开关：它由 XM_CARDS_MODE 决定，
+	// 与 worker 里 buildCardSyncer 的判据保持一致（off/空 => 不注册）。
+	// 两处判据分叉会让这张「部署态时刻表」显示一个与实际不符的状态，
+	// 而这张表存在的意义正是回答「现在到底在跑什么」。
+	switch strings.ToLower(strings.TrimSpace(getenv("XM_CARDS_MODE"))) {
+	case "fake", "real":
+		cfg.CardSyncEnabled = true
+	default:
+		cfg.CardSyncEnabled = false
+	}
+	if v := getenv("XM_CARDS_SYNC_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("cards sync interval: %w", err)
+		}
+		cfg.CardSyncInterval = d
+	}
 	if v := getenv("XM_CPA_SYNC_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -149,6 +166,7 @@ func DeployedSchedulesFromEnv(getenv func(string) string) (map[string]DeployedJo
 		ReqlogMetricsJobKind:  "XM_REQLOG_MODE=file",
 		ConnectorProbeJobKind: "XM_CONNECTOR_PROBE_ENABLED",
 		CPASyncJobKind:        "XM_CPA_MODE=file (or XM_CPA_SYNC_ENABLED override)",
+		CardSyncJobKind:       "XM_CARDS_MODE=fake|real",
 	}
 
 	// EffectiveJobSchedules (effective_manifest.go) is the same validated
