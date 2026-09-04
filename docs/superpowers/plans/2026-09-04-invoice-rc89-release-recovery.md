@@ -53,3 +53,20 @@ Production remains blocked until a 30-minute readiness watch binds RC89. Watch t
 
 - Account `98cce4c8` (external user 2092) stays frozen. Its POLICY_ANCHOR bootstrapped 21 hours after its own first post-policy checkpoint, stranding four checkpoints before its `cutover_at` where they evaluate against an expected balance of 0 and re-freeze immediately after any repair. The mechanism behind the late bootstrap is not yet established and is being investigated separately; guessing at a fix here would be the third wrong hypothesis on that account.
 - `XM-INV-CATCHUP-BURST-BACKPRESSURE` and `XM-INV-SHADOW-EVAL-VACUOUS` remain open.
+
+## Execution record (2026-09-04)
+
+- Task 1: identity bump `f5e2795`. The gate refused the first full run, correctly: relaxing the ¥200 floor broke two fixtures that used `adminsettings.MinimumMinor` as "the amount a fresh install starts at" and `¥199.99` as "an invalid value". Both were true only while the floor and the default were the same number, which is exactly the conflation this release separates — so the fixtures were realigned to say what they mean (`DefaultMinimumRequestMinor` for the seed, a non-positive value for the invalid case) rather than the assertions weakened. Second run: every gate 0, web 185 tests. Four failure-evidence scripts 0/0/0/0.
+- Task 2: `release/0.1.0-rc89-exact1`, image gate 42, verifiers 0 and 0.
+- Task 3: staged; signed pre-deploy backup `invoice-20260904T092019Z`; roll-forward PASS, 18 containers on rc89, healthz/readyz 200. Migration 0024 applied; `admin_settings.minimum_request_minor` unchanged at 20000, constraint now `CHECK (minimum_request_minor > 0)`.
+  - **Caught before running:** the derived `rc89-rollforward.sh` carried RC87's `SHA=`, `rc89-server-stage.sh`'s `PREV_SHA` had been mangled into a placeholder, and `rc89-backup.sh` still pointed at RC87's release directory and image tag. The rename pass rewrites `rcNN` strings and nothing else; every embedded hash must be checked by hand. RC88 had the same class of defect in one script, RC89 in three.
+- Shadow evaluation: skipped by rule (no evaluator or allocation change).
+- Post-deploy: the embedded frame stopped growing (the owner confirmed the inner scrollbar was gone), a queued projection job reported 结算中 rather than a reconciliation dispute, and the freeze queue rendered a distinct trigger on each of account 2092's four rows.
+
+### What RC89 got wrong, found the same evening
+
+RC89 claimed five places enforced the ¥200 floor and that all five were relaxed. There was a sixth layer: `domain.MinimumRequestMinor`, consulted by six guards across `application`, `ledger` and `postgresstore`. The claim was made by counting the places this slice had touched rather than by grepping the constant.
+
+The consequence was not "the setting had no effect". Saving ¥5.00 committed to `admin_settings` and was then refused by `SetMinimumRequestMinor`, so the API returned `LEDGER_POLICY_REFRESH_FAILED` with the row already written: the database said ¥5.00 and the running process still said ¥200. That split state was reported to the product owner as harmless — "nothing can be invoiced right now anyway" — which was wrong. Any api restart re-reads settings at boot, and RC89's binary refuses to start on a value below its floor. The next backup quiesced the api for a consistent snapshot, it would not come back, and production served 502 for about twenty minutes until the setting was reverted to 20000. Recovering also needed the ingest-proxy restarted to re-resolve the recreated api's address; that step exists in `deploy/roll-forward.sh` for precisely this reason and had to be run by hand here.
+
+The correct advice at the time was "this split state must be closed now, because the next restart will not come back", not "leave it". RC90 closes it: the database CHECK (`> 0`) and the code floor (`MinimumRequestFloorMinor = 1`) now agree exactly, so a value the database accepts can never be one the binary refuses.
