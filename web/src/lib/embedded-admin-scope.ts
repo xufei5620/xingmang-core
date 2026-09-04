@@ -336,17 +336,28 @@ export function shouldScheduleNextAdminAssertionNeededAttempt(attemptsSoFar: num
 
 // The posting gate itself: only while genuinely framed (a standalone /admin
 // tab has no console parent to ask) and only once the session check has
-// resolved to "not authenticated" -- `sessionLoading` true is the safe
-// default to withhold posting on, the same way oidcAdminLoginEnabled
-// defaults to "show it" while unknown (AuthProvider's own doc comment):
-// posting mid-check would race a session that turns out to already be
-// valid, e.g. a page reload with a live cookie.
+// resolved -- `sessionLoading` true is the safe default to withhold posting
+// on, the same way oidcAdminLoginEnabled defaults to "show it" while unknown
+// (AuthProvider's own doc comment): posting mid-check would race a session
+// that turns out to already be valid, e.g. a page reload with a live cookie.
+//
+// Two resolved states ask for an assertion, not one (XM-INV-ASSERT-STEPUP):
+//
+//   - no session at all -- the original handshake case; and
+//   - a live session whose administrator step-up has expired. An assertion
+//     exchange issues a session with a fresh mfa_at, so asking the console for
+//     one IS the step-up for this login path. Before CR-0006 phase 2 step 5
+//     that case was covered by the Keycloak step-up route; with
+//     OIDC_ADMIN_LOGIN_ENABLED=false that route is no longer registered, and
+//     an operator whose ten-minute freshness lapsed had no way forward at all.
 export function shouldRequestAdminAssertion(
   isFramed: boolean,
   sessionLoading: boolean,
   authenticated: boolean,
+  stepUpRequired = false,
 ): boolean {
-  return isFramed && !sessionLoading && !authenticated;
+  if (!isFramed || sessionLoading) return false;
+  return !authenticated || stepUpRequired;
 }
 
 // Nonce replay protection (backend, XM-INV-CONSOLE-ASSERT) makes every

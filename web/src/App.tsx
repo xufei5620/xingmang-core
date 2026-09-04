@@ -5318,7 +5318,13 @@ function SessionLoadingPage() {
 }
 
 function StepUpPage() {
-  const { stepUp } = useAuth();
+  const { stepUp, oidcAdminLoginEnabled } = useAuth();
+  // XM-INV-ASSERT-STEPUP: when the console assertion is the admin login (the
+  // Keycloak step-up route is gone), renewal needs no popup and no gesture --
+  // it is a postMessage to the framing console, and the automatic handshake
+  // in AuthProvider is already asking. Say so, and keep the button as the
+  // manual path rather than the only one.
+  const assertionRenewal = embeddedAdminMode && oidcAdminLoginEnabled === false;
   useEffect(() => {
     // Embedded admin mode opens step-up in a popup (see AuthProvider),
     // which browsers block unless it is triggered by a direct user gesture
@@ -5333,13 +5339,19 @@ function StepUpPage() {
         <span className="eyebrow">ADMIN STEP-UP</span>
         <h1>需要管理员二次验证</h1>
         <p>
-          {embeddedAdminMode
-            ? "此操作涉及支付证据或开票设置，请点击下方按钮在弹出窗口中完成强化认证。"
-            : "此操作涉及支付证据或开票设置，请在顶层页面完成强化认证后返回。"}
+          {assertionRenewal
+            ? "此操作涉及支付证据或开票设置，正在向控制台申请新的登录凭证，稍候即可自动恢复。"
+            : embeddedAdminMode
+              ? "此操作涉及支付证据或开票设置，请点击下方按钮在弹出窗口中完成强化认证。"
+              : "此操作涉及支付证据或开票设置，请在顶层页面完成强化认证后返回。"}
         </p>
         <button className="button button-dark button-wide" onClick={stepUp}>
           <KeyRound size={17} />
-          {embeddedAdminMode ? "重新验证" : "继续管理员验证"}
+          {assertionRenewal
+            ? "立即重新验证"
+            : embeddedAdminMode
+              ? "重新验证"
+              : "继续管理员验证"}
         </button>
       </section>
     </main>

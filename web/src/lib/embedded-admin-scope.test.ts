@@ -396,6 +396,27 @@ describe("shouldRequestAdminAssertion", () => {
     expect(shouldRequestAdminAssertion(true, false, true)).toBe(false);
   });
 
+  // XM-INV-ASSERT-STEPUP: an authenticated session whose administrator
+  // step-up has lapsed still needs a fresh assertion -- exchanging one issues
+  // a session with a fresh mfa_at, which IS the step-up for this login path.
+  // With the Keycloak step-up route closed there is no other way forward.
+  it("posts again when an authenticated session needs administrator step-up", () => {
+    expect(shouldRequestAdminAssertion(true, false, true, true)).toBe(true);
+  });
+
+  it("still withholds the step-up request while the session check is in flight", () => {
+    expect(shouldRequestAdminAssertion(true, true, true, true)).toBe(false);
+  });
+
+  it("still withholds the step-up request when not framed", () => {
+    expect(shouldRequestAdminAssertion(false, false, true, true)).toBe(false);
+  });
+
+  it("defaults the step-up flag to false so existing callers are unchanged", () => {
+    expect(shouldRequestAdminAssertion(true, false, true)).toBe(false);
+    expect(shouldRequestAdminAssertion(true, false, false)).toBe(true);
+  });
+
   it("never posts when both loading and authenticated are true (an impossible but still-safe combination)", () => {
     expect(shouldRequestAdminAssertion(true, true, true)).toBe(false);
   });

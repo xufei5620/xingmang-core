@@ -232,6 +232,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.parent !== window,
     loading,
     authenticated,
+    stepUpRequired,
   );
   useEffect(() => {
     if (!shouldRequest) return;
@@ -287,6 +288,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (logoutURL) navigateTopLevel(logoutURL);
       },
       stepUp: () => {
+        // XM-INV-ASSERT-STEPUP: with the transitional Keycloak admin login
+        // closed (CR-0006 phase 2 step 5) the step-up route is not registered
+        // at all, so opening it would land on a 404. The console assertion is
+        // the step-up for that deployment: ask for a fresh one and the
+        // exchange mints a session with a fresh mfa_at. The automatic
+        // handshake normally gets there first -- this button is the manual
+        // path for an operator who does not want to wait for the backoff.
+        if (window.parent !== window && session?.oidcAdminLoginEnabled === false) {
+          window.parent.postMessage(
+            buildXmEmbedAdminAssertionNeededMessage(),
+            XM_EMBED_CONSOLE_ORIGIN,
+          );
+          return;
+        }
         if (embeddedAdminMode) {
           const opened = openAdminAuthPopup(
             invoiceApi.adminStepUpURL(withAdminAuthPopupReturnParam(currentReturnTo())),
