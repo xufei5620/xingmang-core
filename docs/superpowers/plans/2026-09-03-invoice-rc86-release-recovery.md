@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
-**Goal:** Build, strictly verify, sign, and deploy RC86 — XM-INV-LEDGER-ACCOUNT-EMAIL (the operator 用户账本 and 资格冻结队列 lists, and the freeze detail, label each account with its verified email under the upstream numeric ID, rendering nothing when the account has none) together with the startup assertion that the runtime database role cannot `UPDATE console_assertion_nonces`.
+**Goal:** Build, strictly verify, sign, and deploy RC86 — three things: XM-INV-LEDGER-ACCOUNT-EMAIL (the operator 用户账本 and 资格冻结队列 lists, and the freeze detail, label each account with its verified email under the upstream numeric ID, rendering nothing when the account has none), XM-INV-ASSERT-STEPUP (an expired administrator step-up renews through the console assertion instead of the Keycloak step-up route that CR-0006 phase 2 step 5 unregistered), and the startup assertion that the runtime database role cannot `UPDATE console_assertion_nonces`.
+
+XM-INV-ASSERT-STEPUP is the urgent half: the product owner hit the dead step-up card in production about forty minutes after step 5 closed the Keycloak login, and until this ships the only way past it is to log out and let the auto-login handshake mint a new session.
 
 **Architecture:** RC86 is a backend-and-web roll-forward from RC85: no migration, no evaluator change, no authorization change, source agent unchanged at 0.3.2. `deploy/roll-forward.sh` keeps the cutover order (migrate no-op → idp → main → sources → restart api → restart ingest-proxy). The shadow evaluation is not required and is recorded as skipped. The release env carries over from RC85 unchanged, including `CONSOLE_ASSERTION_ADMIN_ROLE=admin` and `OIDC_ADMIN_LOGIN_ENABLED=false`.
 
@@ -10,7 +12,7 @@ The startup assertion is deliberately shipping one release *after* the revoke th
 
 **Tech Stack:** PowerShell 7.5+, Git signatures, gitleaks 8.30.1, Docker/Compose, Trivy 0.74.0.
 
-**Spec:** `docs/handoffs/XM-INV-LEDGER-ACCOUNT-EMAIL.md`; `docs/CONFIGURATION.md` section 8 (mandatory production assertions)
+**Spec:** `docs/handoffs/XM-INV-LEDGER-ACCOUNT-EMAIL.md`; `docs/handoffs/XM-INV-ASSERT-STEPUP.md`; `docs/CONFIGURATION.md` section 8 (mandatory production assertions)
 
 ## Constraints
 
@@ -35,5 +37,6 @@ The startup assertion is deliberately shipping one release *after* the revoke th
 - [ ] Shadow evaluation: skipped by rule (no evaluator, projection, or migration change); record the skip.
 - [ ] Take a fresh signed pre-deploy backup (signing key on tmpfs for the run only, shredded after), then run `bash deploy/roll-forward.sh <sha>` and require readyz 200 in the verify step. The api starting at all is itself the evidence for the new privilege assertion; confirm `console_assertion_nonces` still reads `t|t|f|f` afterwards. Record deployment evidence beside the release.
 - [ ] Confirm in the embedded admin console that 用户账本 and 资格冻结队列 show an email under the numeric ID for accounts that have one, and show the ID alone for the account that does not. Production has 7 of 8 bound accounts with a verified address, so both branches are observable.
+- [ ] Confirm the step-up renewal: leave the embedded console idle past the ten-minute MFA freshness window and require it to recover on its own, with a new `auth.console_assertion.exchanged` audit row and no visit to the dead Keycloak step-up route.
 
 Production remains blocked until a 30-minute readiness watch binds RC86.
