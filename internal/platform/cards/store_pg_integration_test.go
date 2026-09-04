@@ -40,6 +40,8 @@ func pgStore(t *testing.T) (*PgStore, *pgxpool.Pool) {
 		// 新增表忘了加进来的症状很隐蔽：单跑通过、连跑失败，
 		// 因为上一轮的行把唯一键占住了。
 		"cards.webhook_event",
+		"cards.card_challenge",
+		"cards.withdraw_request", "cards.withdraw_address",
 	} {
 		if _, err := pool.Exec(context.Background(), "TRUNCATE "+table); err != nil {
 			t.Fatal(err)
@@ -857,5 +859,183 @@ func TestPgStoreTransactionsLeaveUnsettledNull(t *testing.T) {
 	}
 	if !list[0].SettledAt.IsZero() {
 		t.Fatalf("未结算的流水不该有结算时间: %+v", list[0])
+	}
+}
+
+// 同一 request_id 只落一次，第二次拿回既有记录。
+//
+// 这是提现幂等的库侧一半：上游对 request_id 也有真幂等，但我们不靠它——
+// 同键重投时连上游都不打，少一次调用就少一次出错的机会。
+func TestPgStoreBeginWithdrawIsIdempotent(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if err := store.RegisterWithdrawAddress(ctx, WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TColdWallet", Label: "冷钱包",
+	}, "ops@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := WithdrawRecord{
+		RequestID: "w-1", Account: testAccount, Chain: "TRON", TokenType: "USDT",
+		Amount: "100", AddressID: "addr-1", Address: "TColdWallet",
+		Status: "pending", StartedAt: issueNow, UpdatedAt: issueNow,
+	}
+	if _, existed, err := store.BeginWithdraw(ctx, rec); err != nil || existed {
+		t.Fatalf("首次落台账 existed=%v err=%v", existed, err)
+	}
+
+	// 第二次同键：拿回既有记录，且**不覆盖金额**。
+	// 覆盖会让台账显示成第二次那笔的金额，而真正转出去的是第一次那笔。
+	second := rec
+	second.Amount = "9999"
+	stored, existed, err := store.BeginWithdraw(ctx, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !existed {
+		t.Fatal("同键重投必须被识别为已存在")
+	}
+	if stored.Amount != "100" {
+		t.Fatalf("既有记录的金额被覆盖了: %q", stored.Amount)
+	}
+}
+
+// 今日累计把**未收敛的也算进去**。
+//
+// pending 的那笔可能真的已经转出去了。当它没转过会让单日上限在最需要
+// 生效的时刻失效——恰恰是上游正在慢、人在反复点的时候。
+func TestPgStoreWithdrawnTodayCountsUnresolved(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		id     string
+		amount string
+		status string
+	}{
+		{"w-done", "100", "completed"},
+		{"w-open", "50", "pending"},
+		{"w-fail", "999", "failed"},
+	} {
+		if _, _, err := store.BeginWithdraw(ctx, WithdrawRecord{
+			RequestID: tc.id, Account: testAccount, Chain: "TRON", TokenType: "USDT",
+			Amount: tc.amount, AddressID: "addr-1", Address: "TColdWallet",
+			Status: tc.status, StartedAt: issueNow, UpdatedAt: issueNow,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := store.WithdrawnToday(ctx, testAccount, issueNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 100（成功）+ 50（未收敛）= 150。失败那笔 999 不算：
+	// 上游明确拒绝时钱确实没出去，把它算进去会平白吃掉当天的额度。
+	if got != "150" {
+		t.Fatalf("今日累计 = %q, want 150（成功 + 未收敛，不含确定失败）", got)
+	}
+}
+
+// 账号之间的额度是分开的：A 账号的提现不该吃掉 B 账号的当日额度。
+func TestPgStoreWithdrawnTodayIsPerAccount(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if _, _, err := store.BeginWithdraw(ctx, WithdrawRecord{
+		RequestID: "w-other", Account: "OTHER", Chain: "TRON", TokenType: "USDT",
+		Amount: "500", AddressID: "addr-x", Address: "TOther",
+		Status: "completed", StartedAt: issueNow, UpdatedAt: issueNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.WithdrawnToday(ctx, testAccount, issueNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "0" {
+		t.Fatalf("另一个账号的提现不该算进来, got %q", got)
+	}
+}
+
+// 地址按 id 取回，且 UpdateWithdraw 只覆盖非空字段。
+//
+// 终态回填只带回 tx_hash 与手续费，不带金额与地址；用 COALESCE 之外的写法
+// 会把那几列清空，而「这笔钱转到哪儿」必须永远查得到。
+func TestPgStoreUpdateWithdrawKeepsSnapshot(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if err := store.RegisterWithdrawAddress(ctx, WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TColdWallet",
+	}, "ops@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.BeginWithdraw(ctx, WithdrawRecord{
+		RequestID: "w-1", Account: testAccount, Chain: "TRON", TokenType: "USDT",
+		Amount: "100", AddressID: "addr-1", Address: "TColdWallet",
+		Status: "pending", StartedAt: issueNow, UpdatedAt: issueNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 终态回填：只给状态与链上信息。
+	if err := store.UpdateWithdraw(ctx, WithdrawRecord{
+		RequestID: "w-1", Status: "completed", TxHash: "0xabc",
+		ActualAmount: "99.5", GasFee: "0.5", GasFeeCurrency: "USDT",
+		UpdatedAt: issueNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := store.RecentWithdrawals(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("应有一条, got %d", len(rows))
+	}
+	got := rows[0]
+	if got.Status != "completed" || got.TxHash != "0xabc" || got.GasFee != "0.5" {
+		t.Fatalf("终态未回填: %+v", got)
+	}
+	if got.Address != "TColdWallet" || got.Amount != "100" || got.Chain != "TRON" {
+		t.Fatalf("地址/金额/链的快照被回填清空了: %+v", got)
+	}
+}
+
+// 地址清单能读回，且未登记的 id 取不到。
+func TestPgStoreAllowedAddressRejectsUnknown(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if err := store.RegisterWithdrawAddress(ctx, WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TColdWallet", Label: "冷钱包",
+	}, "ops@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.AllowedAddress(ctx, "addr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Address != "TColdWallet" || got.Chain != "TRON" || got.Label != "冷钱包" {
+		t.Fatalf("地址读回不完整: %+v", got)
+	}
+
+	if _, err := store.AllowedAddress(ctx, "从没登记过"); err == nil {
+		t.Fatal("未登记的地址必须取不到——这是白名单的全部意义")
+	}
+
+	list, err := store.ListWithdrawAddresses(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != "addr-1" {
+		t.Fatalf("清单不对: %+v", list)
 	}
 }

@@ -62,6 +62,18 @@ type cardsAccountConfig struct {
 	// 金额上限按账号各配一份：两个账号的资金是分开的。
 	PerOperationLimit string
 	PerDayLimit       string
+	// 提现额度**另配一份**，且没有任何默认值与回落。
+	//
+	// 卡片额度生产上是 unlimited（产品负责人裁定：余额本身是硬顶）；
+	// 提现的目的恰恰是把余额搬空，所以领域层的 CheckWithdraw 拒绝
+	// unlimited。若这里让提现回落到卡片额度，得到的是一个能启动、
+	// 一按就报「额度不许 unlimited」的功能。
+	//
+	// 两个都留空 = 这个账号不能提现（CheckWithdraw 落
+	// ErrLimitsUnconfigured，fail closed）。这是允许的状态：不用提现的
+	// 部署不该被逼着编两个数字，而为通过校验编出来的数字不构成约束。
+	WithdrawPerOperationLimit string
+	WithdrawPerDayLimit       string
 	// BaseURL 覆盖进程级的 XM_CARDS_BASE_URL。
 	//
 	// 存在的唯一理由是**沙箱**：沙箱端点是
@@ -117,6 +129,9 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 			PerOperationLimit: strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_OPERATION")),
 			PerDayLimit:       strings.TrimSpace(getenv("XM_CARDS_" + id + "_LIMIT_PER_DAY")),
 			BaseURL:           strings.TrimSpace(getenv("XM_CARDS_" + id + "_BASE_URL")),
+
+			WithdrawPerOperationLimit: strings.TrimSpace(getenv("XM_CARDS_" + id + "_WITHDRAW_LIMIT_PER_OPERATION")),
+			WithdrawPerDayLimit:       strings.TrimSpace(getenv("XM_CARDS_" + id + "_WITHDRAW_LIMIT_PER_DAY")),
 		}
 
 		// 金额上限在任何模式下都必填：fake 模式也要跑限额分支，
@@ -128,6 +143,10 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 		if len(missing) > 0 {
 			return cardsConfig{}, fmt.Errorf(
 				"账号 %s 缺少 %s——花钱的通道不接受默认值", id, strings.Join(missing, "、"))
+		}
+
+		if err := checkWithdrawLimits(id, acct); err != nil {
+			return cardsConfig{}, err
 		}
 
 		cfg.Accounts = append(cfg.Accounts, acct)
@@ -145,6 +164,33 @@ func loadCardsConfig(getenv func(string) string) (cardsConfig, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// checkWithdrawLimits 校验提现额度：要么两个都不配（该账号不能提现），
+// 要么两个都配成真数字。
+//
+// 两条都在**启动期**拒绝，而不是等到有人点下提现按钮。半配的情形行为上
+// 已经是安全的（落 ErrLimitsUnconfigured 被拒），但表现成「明明配了却
+// 用不了」，人会以为是 bug 去翻代码；unlimited 同理——它在领域层必然被
+// 拒，让人在部署时就看见比让他对着一个报错的按钮猜要便宜得多。
+func checkWithdrawLimits(id string, acct cardsAccountConfig) error {
+	per, day := acct.WithdrawPerOperationLimit, acct.WithdrawPerDayLimit
+	if per == "" && day == "" {
+		return nil
+	}
+	if per == "" || day == "" {
+		return fmt.Errorf(
+			"账号 %s 的提现额度只配了一半：XM_CARDS_%s_WITHDRAW_LIMIT_PER_OPERATION 与 _PER_DAY 要么都配、要么都不配（都不配 = 该账号不能提现）",
+			id, id)
+	}
+	for name, v := range map[string]string{"_PER_OPERATION": per, "_PER_DAY": day} {
+		if strings.EqualFold(v, cards.LimitUnlimited) {
+			return fmt.Errorf(
+				"账号 %s 的 XM_CARDS_%s_WITHDRAW_LIMIT%s 不接受 %s：把余额搬空正是提现的目的，余额不构成上限，必须给一个真数字",
+				id, id, name, cards.LimitUnlimited)
+		}
+	}
+	return nil
 }
 
 // parseAccountIDs 解析并校验账号清单。
@@ -222,7 +268,13 @@ func buildCardAccounts(
 			client = realClient
 		}
 
-		out = append(out, cards.Account{ID: a.ID, Client: client, Limits: limits})
+		out = append(out, cards.Account{
+			ID: a.ID, Client: client, Limits: limits,
+			WithdrawLimits: cards.Limits{
+				PerOperation: a.WithdrawPerOperationLimit,
+				PerDay:       a.WithdrawPerDayLimit,
+			},
+		})
 	}
 	return out, nil
 }
@@ -287,6 +339,26 @@ func registerCardActions(reg *action.Registry, svc *cards.Service) error {
 		return nil
 	}
 	return cards.RegisterActions(reg, svc)
+}
+
+// registerWithdrawActions 注册提现的两个 Action。
+//
+// 与卡片 Action 分开注册，但**不按「有没有配额度」决定注不注册**：
+// 没配额度的账号在领域层被 ErrLimitsUnconfigured 拒掉，那是一条会
+// 报错、能查、进审计的路径；按配置决定注册与否则会让页面上的按钮
+// 凭空消失，而「按钮没了」这种症状最难查。
+func registerWithdrawActions(
+	reg *action.Registry, svc *cards.WithdrawService,
+	store cards.WithdrawAddressStore, accounts []cards.Account,
+) error {
+	if svc == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		ids = append(ids, a.ID)
+	}
+	return cards.RegisterWithdrawActions(reg, svc, store, ids)
 }
 
 // cardQuerierOrNil 把「没启用」翻译成 nil 接口。
@@ -360,4 +432,15 @@ func cardBalanceReaderOrNil(svc *cards.Service) httpapi.CardBalanceReader {
 		return nil
 	}
 	return svc
+}
+
+// cardWithdrawQuerierOrNil 把「没启用」翻译成 nil 接口。
+//
+// 同 cardQuerierOrNil 那条纪律：一个装着 nil 指针的非 nil 接口会让路由
+// 以为端点该挂载，然后每次调用都空指针崩溃。
+func cardWithdrawQuerierOrNil(store *cards.PgStore) httpapi.WithdrawQuerier {
+	if store == nil {
+		return nil
+	}
+	return store
 }

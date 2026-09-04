@@ -26,6 +26,8 @@ type Fake struct {
 	// failReveal 只让 RevealCard 失败。开卡链路是 apply → status → reveal，
 	// failNext 只影响下一次调用，够不到中间那一步。
 	failReveal error
+	// withdrawals 按 request_id 记住提现，供幂等与状态查询。
+	withdrawals map[string]WithdrawState
 	// activateOnApply 让 apply 直接产出 active 的卡。
 	//
 	// 默认 false = 文档口径：开卡是异步的，卡从 init 起步，要轮询到 active。
@@ -284,4 +286,63 @@ func (f *Fake) DeleteCard(ctx context.Context, cardID string) error {
 	c.Status = "pending_delete"
 	c.UpdatedAt = f.Now()
 	return nil
+}
+
+// 提现替身：按 request_id 幂等，第二次返回 is_duplicate。
+func (f *Fake) Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeErr(); err != nil {
+		return WithdrawResult{}, err
+	}
+	if strings.TrimSpace(req.RequestID) == "" {
+		return WithdrawResult{}, fmt.Errorf("fake: request_id 必填")
+	}
+	if f.withdrawals == nil {
+		f.withdrawals = make(map[string]WithdrawState)
+	}
+	if _, seen := f.withdrawals[req.RequestID]; seen {
+		return WithdrawResult{RequestID: req.RequestID, Status: "pending", IsDuplicate: true}, nil
+	}
+	f.withdrawals[req.RequestID] = WithdrawState{
+		RequestID: req.RequestID, Status: "pending", Amount: req.Amount,
+		ActualAmount: req.Amount, Chain: req.Chain, TokenType: req.TokenType,
+	}
+	return WithdrawResult{RequestID: req.RequestID, Status: "pending"}, nil
+}
+
+func (f *Fake) WithdrawStatus(ctx context.Context, requestID string) (WithdrawState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeErr(); err != nil {
+		return WithdrawState{}, err
+	}
+	st, ok := f.withdrawals[requestID]
+	if !ok {
+		return WithdrawState{}, fmt.Errorf("fake: 提现 %s 不存在", requestID)
+	}
+	return st, nil
+}
+
+// AdvanceWithdraw 把一笔提现推进到指定状态，模拟上游的异步流转。
+func (f *Fake) AdvanceWithdraw(requestID, status, txHash string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st, ok := f.withdrawals[requestID]; ok {
+		st.Status = status
+		st.TransactionHash = txHash
+		f.withdrawals[requestID] = st
+	}
+}
+
+func (f *Fake) WithdrawFees(ctx context.Context) ([]WithdrawFee, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeErr(); err != nil {
+		return nil, err
+	}
+	return []WithdrawFee{
+		{Chain: "TRON", TokenType: "USDT", WithdrawFee: "1"},
+		{Chain: "ETHEREUM", TokenType: "USDT", WithdrawFee: "2"},
+	}, nil
 }

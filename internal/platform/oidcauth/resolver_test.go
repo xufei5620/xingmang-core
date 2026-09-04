@@ -571,6 +571,27 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 			t.Fatalf("staff 默认不该含 %s：开卡花真钱、卡面是明文，必须独立授予", sc)
 		}
 	}
+	// XM-CARD6（2026-09-05）：提现权限**不给 admin**。
+	//
+	// 与卡片四权限的处理刻意不同。卡片那四个给 admin 的理由是「不给就等于
+	// 功能对唯一能用它的人 403」；提现不适用同一条理由——它把钱转出平台、
+	// 不可逆，而 admin 是日常操作账号。一个被盗用的 admin 会话不该能把
+	// 资金池搬空。所以它由专门的 fund-operator 角色持有，需要人显式授予。
+	//
+	// 这与「定义了权限却没挂到任何角色」（那是 bug，功能对所有人 403）
+	// 是两回事：这里挂在一个真实存在、可以被指派的角色上。
+	for _, sc := range []string{"fund.withdraw", "fund.address.manage"} {
+		if slices.Contains(admin, sc) {
+			t.Fatalf("admin 不该含 %s：提现不可逆，日常操作账号不该持有它", sc)
+		}
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 更不该含 %s", sc)
+		}
+		if got := m["fund-operator"]; !slices.Contains(got, sc) {
+			t.Fatalf("fund-operator 角色应持有 %s，否则这个功能没有任何角色能用, got %v", sc, got)
+		}
+	}
+
 	// XM-LOGIN：admin 管理本地登录账号，staff 不该有这个能力。
 	if !slices.Contains(admin, "staff.manage") {
 		t.Fatalf("admin 应含 staff.manage（XM-LOGIN 账号管理）, got %v", admin)

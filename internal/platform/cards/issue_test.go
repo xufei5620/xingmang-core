@@ -1,9 +1,10 @@
 package cards
 
 import (
-	"fmt"
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ type memStore struct {
 	usage       map[string]CardUsage
 	// attributions 记住最后一次非空归属，供断言开卡费落库。
 	attributions map[string]CardAttribution
+	// 提现：登记的地址与台账。
+	addresses   map[string]WithdrawAddress
+	withdrawals map[string]WithdrawRecord
 	spentToday  string
 	// spentByAccount 非空时按账号取值，否则回落到 spentToday。
 	spentByAccount map[string]string
@@ -33,16 +37,18 @@ type memStore struct {
 
 func newMemStore() *memStore {
 	return &memStore{
-		ops:         make(map[string]Operation),
-		cards:       make(map[string]infini.Card),
-		cardAccount: make(map[string]string),
-		txs:         make(map[string][]infini.CardTransaction),
-		secrets:     make(map[string]infini.RevealedCard),
-		ownerRef:    make(map[string]string),
-		userEmail:   make(map[string]string),
+		ops:          make(map[string]Operation),
+		cards:        make(map[string]infini.Card),
+		cardAccount:  make(map[string]string),
+		txs:          make(map[string][]infini.CardTransaction),
+		secrets:      make(map[string]infini.RevealedCard),
+		ownerRef:     make(map[string]string),
+		userEmail:    make(map[string]string),
 		usage:        make(map[string]CardUsage),
 		attributions: make(map[string]CardAttribution),
-		spentToday:  "0",
+		addresses:    make(map[string]WithdrawAddress),
+		withdrawals:  make(map[string]WithdrawRecord),
+		spentToday:   "0",
 	}
 }
 
@@ -415,4 +421,67 @@ func TestIssueCardRecordsFeeAndPaidAmount(t *testing.T) {
 	if got.IssuePayAmount != issueReq().TopUpAmount {
 		t.Fatalf("实付金额应取自 total_pay_amount, got %+v", got)
 	}
+}
+
+func (m *memStore) AllowedAddress(ctx context.Context, id string) (WithdrawAddress, error) {
+	a, ok := m.addresses[id]
+	if !ok {
+		return WithdrawAddress{}, fmt.Errorf("%w: %q", ErrAddressNotAllowed, id)
+	}
+	return a, nil
+}
+
+func (m *memStore) BeginWithdraw(ctx context.Context, w WithdrawRecord) (WithdrawRecord, bool, error) {
+	if existing, ok := m.withdrawals[w.RequestID]; ok {
+		return existing, true, nil
+	}
+	m.withdrawals[w.RequestID] = w
+	return w, false, nil
+}
+
+// UpdateWithdraw 只覆盖非空字段，与 PgStore 的 COALESCE 行为一致。
+//
+// 整条替换会让替身比真实存储**更宽松**：终态回填只带回状态与链上信息，
+// 整条替换会把金额、链与地址快照清空，而真实存储不会。替身宽松一档，
+// 等于让一类真实存在的 bug 在单元测试里永远看不见。
+func (m *memStore) UpdateWithdraw(ctx context.Context, w WithdrawRecord) error {
+	cur := m.withdrawals[w.RequestID]
+	if w.Status != "" {
+		cur.Status = w.Status
+	}
+	if w.TxHash != "" {
+		cur.TxHash = w.TxHash
+	}
+	if w.ActualAmount != "" {
+		cur.ActualAmount = w.ActualAmount
+	}
+	if w.GasFee != "" {
+		cur.GasFee = w.GasFee
+		cur.GasFeeCurrency = w.GasFeeCurrency
+	}
+	if w.FXFee != "" {
+		cur.FXFee = w.FXFee
+		cur.FXFeeCurrency = w.FXFeeCurrency
+	}
+	if !w.UpdatedAt.IsZero() {
+		cur.UpdatedAt = w.UpdatedAt
+	}
+	m.withdrawals[w.RequestID] = cur
+	return nil
+}
+
+func (m *memStore) OpenWithdrawals(ctx context.Context) ([]WithdrawRecord, error) {
+	var out []WithdrawRecord
+	for _, w := range m.withdrawals {
+		if w.Status == "pending" || w.Status == "processing" {
+			out = append(out, w)
+		}
+	}
+	// 按 requestID 排序：map 迭代顺序不定，会让依赖顺序的断言随机失败。
+	sort.Slice(out, func(i, j int) bool { return out[i].RequestID < out[j].RequestID })
+	return out, nil
+}
+
+func (m *memStore) WithdrawnToday(ctx context.Context, account string, day time.Time) (string, error) {
+	return "0", nil
 }

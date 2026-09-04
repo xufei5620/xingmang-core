@@ -82,16 +82,39 @@ func buildCardSyncer(
 		grace = parsed
 	}
 
-	// 流水同步默认关闭：它的调用量与卡数成正比，而上游限流阈值未知
-	// （见 contracts/connectors/infini.card.v1.md 的验证清单）。
-	syncTx := strings.EqualFold(strings.TrimSpace(getenv("XM_CARDS_SYNC_TRANSACTIONS")), "true")
+	syncTx := syncTransactionsEnabled(getenv("XM_CARDS_SYNC_TRANSACTIONS"))
 
 	store := cards.NewPgStore(pool, environment, time.Now)
+	// 提现的收敛也挂在这一轮：上游受理后是异步上链的，提现响应只回一个
+	// 受理确认，没有这一步页面上的状态会永远停在「已提交」。
+	//
+	// 这里造的 WithdrawService **不带提现额度**（accounts 里没有
+	// WithdrawLimits）——worker 只查状态回写，不发起提现，而额度是发起时
+	// 的闸。给它一份额度反而会让人以为 worker 也能提现。
+	withdraw := cards.NewWithdrawService(accounts, store, time.Now)
 	return cards.NewSyncer(accounts, store, cards.SyncOptions{
 		UnknownGrace:     grace,
 		SyncTransactions: syncTx,
+		Withdrawals:      withdraw,
 		Now:              time.Now,
 	}), nil
+}
+
+// syncTransactionsEnabled 决定要不要在每轮同步里拉流水。**默认开启。**
+//
+// 它原本默认关闭，理由是「调用量与卡数成正比，而上游限流阈值未知」。
+// 那个未知在 2026-09-05 消失了：实测 600 次/分钟/密钥。按 250 张卡、
+// 5 分钟一轮算是 50 次/分钟，占预算的 8%；而卡状态刷新同期改成了批量
+// （250 张卡从 250 次调用降到 3 次），恰好把原先被它占掉的预算让了出来。
+//
+// 回调（XM-CARD4）已经能秒级推进单卡流水，所以这一轮周期同步是**兜底**：
+// 补回调丢掉的、以及回调里没有的历史。兜底默认开着才有意义。
+//
+// 无法识别的值按开启处理，因为这个开关的两个方向不对称：多同步一轮的
+// 代价是几十次调用，少同步的代价是流水长期缺失而没有任何报错。
+// 只有显式的 false 才关闭。
+func syncTransactionsEnabled(raw string) bool {
+	return !strings.EqualFold(strings.TrimSpace(raw), "false")
 }
 
 func workerAccountIDs(raw string) ([]string, error) {

@@ -1,0 +1,287 @@
+package cards
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/xufei5620/xingmang-platform/connectors/infini"
+)
+
+// 提现额度**不接受 unlimited**。
+//
+// 卡片那边产品负责人选了不限，理由是「Infini 账户余额本身就是硬顶」。
+// 提现不成立：提现的目的就是把余额搬空，余额不构成任何约束。
+func TestWithdrawLimitsRejectUnlimited(t *testing.T) {
+	l := Limits{PerOperation: LimitUnlimited, PerDay: "1000"}
+	if err := l.CheckWithdraw("1", "0"); err == nil {
+		t.Fatal("提现额度不许填 unlimited")
+	}
+	if err := (Limits{PerOperation: "100", PerDay: LimitUnlimited}).CheckWithdraw("1", "0"); err == nil {
+		t.Fatal("单日额度同样不许 unlimited")
+	}
+	// 真数字照常工作，且复用卡片那边的精度闸。
+	if err := (Limits{PerOperation: "100", PerDay: "1000"}).CheckWithdraw("50", "0"); err != nil {
+		t.Fatalf("正常额度应放行: %v", err)
+	}
+	if err := (Limits{PerOperation: "100", PerDay: "1000"}).CheckWithdraw("100.0000001", "0"); err == nil {
+		t.Fatal("超出可校验精度的金额必须拒绝——校验的值必须就是发出去的值")
+	}
+}
+
+// 未登记的地址一律拒绝，且**在打上游之前**拒绝。
+//
+// 白名单挡不住有人拿密钥直接打 Infini（那条路平台管不了），但能挡住误操作
+// 与通过后台的滥用——而这两样才是日常真正会发生的。
+func TestWithdrawRefusesUnlistedAddress(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	svc := newWithdrawService(fake, store)
+
+	_, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "10", AddressID: "没登记过",
+	})
+	if err == nil {
+		t.Fatal("未登记的地址必须拒绝")
+	}
+	if fake.withdrawCalls != 0 {
+		t.Fatal("必须在打上游之前就拒绝")
+	}
+}
+
+// 登记过的地址才放行，且**发给上游的是登记时存的地址**，不是调用方传的。
+//
+// 这一点是白名单真正的价值所在：调用方只能选「哪一条登记」，
+// 地址本身由服务端从库里取。传地址进来再比对，是另一回事——
+// 那样一个比对逻辑的疏漏就能让任意地址过去。
+func TestWithdrawUsesStoredAddressNotCallerSupplied(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TRealAddressFromDB", Label: "冷钱包",
+	}
+	svc := newWithdrawService(fake, store)
+
+	if _, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "10", AddressID: "addr-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.lastAddress != "TRealAddressFromDB" {
+		t.Fatalf("必须用库里存的地址, got %q", fake.lastAddress)
+	}
+}
+
+// 地址登记在哪个账号下，就只能在那个账号下用。
+//
+// 两个账号的资金是分开的；拿 A 账号登记的地址从 B 账号提现，
+// 等于绕过了 A 的白名单审核。
+func TestWithdrawAddressIsScopedToAccount(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: "OTHER", Chain: "TRON", Address: "TXYZ",
+	}
+	svc := newWithdrawService(fake, store)
+
+	if _, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "10", AddressID: "addr-1",
+	}); err == nil {
+		t.Fatal("别的账号登记的地址不能用")
+	}
+}
+
+// 链必须与地址登记时的链一致。
+//
+// 同一串地址在不同链上可能都「看起来合法」，但转错链的钱找不回来。
+func TestWithdrawRefusesChainMismatch(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ",
+	}
+	svc := newWithdrawService(fake, store)
+
+	_, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "ETHEREUM", TokenType: "USDT",
+		Amount: "10", AddressID: "addr-1",
+	})
+	if err == nil {
+		t.Fatal("链与登记不符必须拒绝——转错链的钱找不回来")
+	}
+	if !strings.Contains(err.Error(), "链") {
+		t.Fatalf("错误要说清是链的问题: %v", err)
+	}
+}
+
+// 超额必须在打上游之前拒绝。
+func TestWithdrawEnforcesLimitsBeforeCallingUpstream(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ",
+	}
+	svc := newWithdrawService(fake, store)
+
+	if _, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "999999", AddressID: "addr-1",
+	}); !errors.Is(err, ErrPerOperationExceeded) {
+		t.Fatalf("超额应被拒: %v", err)
+	}
+	if fake.withdrawCalls != 0 {
+		t.Fatal("必须在打上游之前拒绝")
+	}
+}
+
+// 同一个 request_id 重投不再打上游：台账已经有它了。
+func TestWithdrawIsIdempotentByRequestID(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ",
+	}
+	svc := newWithdrawService(fake, store)
+
+	req := WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "10", AddressID: "addr-1",
+	}
+	if _, err := svc.Withdraw(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Withdraw(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if fake.withdrawCalls != 1 {
+		t.Fatalf("同键重投不该再打上游, got %d", fake.withdrawCalls)
+	}
+}
+
+// ---- 测试替身 ----
+
+type withdrawFake struct {
+	*infini.Fake
+	withdrawCalls int
+	lastAddress   string
+}
+
+func newWithdrawFake() *withdrawFake { return &withdrawFake{Fake: infini.NewFake()} }
+
+func (f *withdrawFake) Withdraw(ctx context.Context, req infini.WithdrawRequest) (infini.WithdrawResult, error) {
+	f.withdrawCalls++
+	f.lastAddress = req.WalletAddress
+	return f.Fake.Withdraw(ctx, req)
+}
+
+// newWithdrawService 组一个带真实额度的服务。
+//
+// 额度用真数字而不是 unlimited：提现服务本来就拒绝 unlimited，
+// 用它组测试会让每个用例都卡在额度校验上。
+func newWithdrawService(client infini.CardClient, store WithdrawStore) *WithdrawService {
+	return NewWithdrawService([]Account{{
+		ID:             testAccount,
+		Client:         client,
+		Limits:         Limits{PerOperation: "1000", PerDay: "5000"},
+		WithdrawLimits: Limits{PerOperation: "1000", PerDay: "5000"},
+	}}, store, func() time.Time { return issueNow })
+}
+
+// 提现额度与卡片额度是**两套**，不能共用一个字段。
+//
+// 生产上卡片额度按产品负责人的裁定配成 unlimited（「只要 infini 那边有余额
+// 就可以开」）。若提现读的是同一个字段，CheckWithdraw 会永远抛
+// ErrWithdrawLimitsUnbounded——提现变成一个装好了但永远跑不起来的功能，
+// 而这种「fail-closed 到不可用」在上线当天才会被发现。
+func TestWithdrawLimitsAreSeparateFromCardLimits(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+	}
+	svc := NewWithdrawService([]Account{{
+		ID:     testAccount,
+		Client: fake,
+		// 卡片不限额——这就是生产的配法。
+		Limits: Limits{PerOperation: LimitUnlimited, PerDay: LimitUnlimited},
+		// 提现单独配真数字。
+		WithdrawLimits: Limits{PerOperation: "500", PerDay: "2000"},
+	}}, store, func() time.Time { return issueNow })
+
+	if _, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "100", AddressID: "addr-1",
+	}); err != nil {
+		t.Fatalf("卡片不限额不应妨碍提现: %v", err)
+	}
+
+	// 而提现自己的上限照常生效。
+	_, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-2", Chain: "TRON", TokenType: "USDT",
+		Amount: "600", AddressID: "addr-1",
+	})
+	if !errors.Is(err, ErrPerOperationExceeded) {
+		t.Fatalf("超出提现单次上限必须拒绝, got %v", err)
+	}
+}
+
+// 未收敛的提现由周期同步推进到终态。
+//
+// 没有这一步，页面上的状态会永远停在「已提交」——上游受理后是异步上链的，
+// 而提现响应只回一个受理确认。手动刷新按钮不算解法：人不会盯着看，
+// 而「钱到底转出去没有」正是最需要自己变准的那个数。
+func TestSyncerAdvancesOpenWithdrawals(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+	}
+	svc := newWithdrawService(fake, store)
+
+	if _, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "10", AddressID: "addr-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 上游随后上链完成。
+	fake.AdvanceWithdraw("w-1", "completed", "0xhash")
+
+	syncer := NewSyncer([]Account{{ID: testAccount, Client: fake}}, store, SyncOptions{
+		Withdrawals: svc,
+		Now:         func() time.Time { return issueNow },
+	})
+	if err := syncer.RunOnce(context.Background()); err != nil {
+		t.Fatalf("同步失败: %v", err)
+	}
+
+	got := store.withdrawals["w-1"]
+	if got.Status != "completed" {
+		t.Fatalf("提现状态应被推进到终态, got %q", got.Status)
+	}
+	if got.TxHash != "0xhash" {
+		t.Fatalf("链上哈希应被回填（人要拿它去区块浏览器核对）, got %q", got.TxHash)
+	}
+}
+
+// 没配提现服务时这一步整个跳过，不影响其余同步。
+//
+// 提现是可选功能（账号可以不配额度）；一个「没配提现就同步整体报错」的
+// worker 会让卡片同步跟着一起停。
+func TestSyncerSkipsWithdrawalsWhenUnconfigured(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	syncer := NewSyncer([]Account{{ID: testAccount, Client: fake}}, store, SyncOptions{
+		Now: func() time.Time { return issueNow },
+	})
+	if err := syncer.RunOnce(context.Background()); err != nil {
+		t.Fatalf("没配提现不该让同步失败: %v", err)
+	}
+}

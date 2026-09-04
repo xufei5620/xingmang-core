@@ -52,10 +52,21 @@ type SyncOptions struct {
 	// UnknownGrace 是不确定态的宽限期：期内查不到就继续等，
 	// 超期仍无结论才亮红条要人工。
 	UnknownGrace time.Duration
-	// SyncTransactions 为真时同时同步流水。默认关闭，
-	// 因为流水同步的调用量与卡数成正比，而上游限流阈值未知。
+	// SyncTransactions 为真时同时同步流水。
+	//
+	// 调用方（worker）默认给 true——原先默认关闭的理由是「调用量与卡数
+	// 成正比，而上游限流阈值未知」，那个未知已在 2026-09-05 实测掉：
+	// 600 次/分钟/密钥，250 张卡 5 分钟一轮只占 8%。
+	// 这个字段本身仍不设默认值：领域层不该替调用方决定花多少调用。
 	SyncTransactions bool
-	Now              func() time.Time
+	// Withdrawals 为非 nil 时，每轮把未收敛的提现推进到终态。
+	//
+	// 上游受理后是异步上链的，提现响应只回一个受理确认；没有这一步，
+	// 页面上的状态会永远停在「已提交」。做成可选是因为提现本身可选
+	// （账号可以不配额度），而「没配提现就让整轮同步报错」会把卡片同步
+	// 也一起拖停。
+	Withdrawals *WithdrawService
+	Now         func() time.Time
 }
 
 // Syncer 承担三件事：把异步开卡轮询到终态、把不确定态对账收敛、
@@ -110,6 +121,33 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 	if s.opts.SyncTransactions {
 		if err := s.syncTransactions(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("同步流水: %w", err))
+		}
+	}
+	if err := s.advanceWithdrawals(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("推进提现: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// advanceWithdrawals 把未收敛的提现查一遍上游，推进到终态。
+//
+// 未配提现时整步跳过（返回 nil），不影响其余同步——见 SyncOptions.Withdrawals。
+//
+// 逐笔的失败只收集不中断：一笔查不动不该让后面几笔也停在 pending，
+// 而「钱到底转出去没有」是最不该被一次网络抖动推迟的那个答案。
+func (s *Syncer) advanceWithdrawals(ctx context.Context) error {
+	svc := s.opts.Withdrawals
+	if svc == nil {
+		return nil
+	}
+	open, err := svc.OpenWithdrawals(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, w := range open {
+		if err := svc.RefreshWithdraw(ctx, w.Account, w.RequestID); err != nil {
+			errs = append(errs, fmt.Errorf("提现 %s: %w", w.RequestID, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -344,8 +382,11 @@ func (s *Syncer) syncTransactions(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// transactionPageSize 保守取值：上游限流阈值文档未提及，
-// 而流水同步的调用量与卡数成正比。
+// transactionPageSize 保守取值。
+//
+// 限流阈值现在已知（600/分钟/密钥，2026-09-05 实测），但这个数不由它决定：
+// 它是**一次拉多少条**，与调用次数无关。取 50 是因为一张卡在一个同步周期
+// 内产生超过 50 笔流水属于异常，而拉多了只是白白搬运数据。
 const transactionPageSize = 50
 
 // cardStatusActive 是"卡已可用"的上游取值。
