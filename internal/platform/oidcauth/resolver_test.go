@@ -556,6 +556,21 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 			t.Fatalf("admin 应含 %s（XM-LOGIN：bootstrap 管理员需要一上线就能用）, got %v", sc, admin)
 		}
 	}
+	// XM-CARD0（2026-09-04）：卡片四权限。admin 全给，staff 一个都不给。
+	//
+	// 给 admin 的理由与上面 credential.manage 同一条：本地登录的 bootstrap
+	// 管理员就是运营负责人，不给就等于功能对唯一能用它的人 403，而平台今天
+	// 没有第二个角色可申请。card.reveal（明文卡面）一并给——它与 card.issue
+	// 的分档意义在**对外开放时不下放**，那时外部用户走的是另一个角色，
+	// 不是今天这张表。
+	for _, sc := range []string{"card.read", "card.issue", "card.manage", "card.reveal"} {
+		if !slices.Contains(admin, sc) {
+			t.Fatalf("admin 应含 %s（否则卡片管理对唯一的管理员也是 403）, got %v", sc, admin)
+		}
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 默认不该含 %s：开卡花真钱、卡面是明文，必须独立授予", sc)
+		}
+	}
 	// XM-LOGIN：admin 管理本地登录账号，staff 不该有这个能力。
 	if !slices.Contains(admin, "staff.manage") {
 		t.Fatalf("admin 应含 staff.manage（XM-LOGIN 账号管理）, got %v", admin)

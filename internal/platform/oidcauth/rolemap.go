@@ -172,6 +172,20 @@ func DefaultRoleScopeMap() map[string][]string {
 			// scope 不是同一类判断——见下面专门角色 assurance-probe-admin。
 			"assurance.probe.manage",
 			"assurance.probe.run",
+			// XM-CARD0（2026-09-04）：Infini 虚拟卡的四个权限档。
+			//
+			// 全部给 admin，理由与上面 credential.manage 同一条：本地登录的
+			// bootstrap 管理员就是运营负责人，不给就等于这个功能对唯一能用它
+			// 的人也是 403，而平台今天没有第二个角色可以申请。上线当天就是
+			// 这么撞上的——页面报「需要权限: card.read」。
+			//
+			// 四档分开定义的意义不在今天这张表，而在**对外开放时**：那时
+			// 外部用户走另一个角色，只给 card.read，开卡与卡面都不下放。
+			// staff 一档都不给：开卡花真钱，卡面是明文卡号。
+			"card.read",
+			"card.issue",
+			"card.manage",
+			"card.reveal",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
