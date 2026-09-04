@@ -45,3 +45,13 @@ The startup assertion is deliberately shipping one release *after* the revoke th
 - [ ] Confirm the step-up renewal: leave the embedded console idle past the ten-minute MFA freshness window and require it to recover on its own, with a new `auth.console_assertion.exchanged` audit row and no visit to the dead Keycloak step-up route.
 
 Production remains blocked until a 30-minute readiness watch binds RC86.
+
+## Execution record (2026-09-04)
+
+- Task 1: identity bump `4c4a799` over `ef7451a` (ledger account email), the step-up renewal commit, and the runtime-privilege assertion. Backend build/vet and full unit suite green, integration suite green against the disposable PostgreSQL 18, agents module tests green, web typecheck 0 / 12 files / 170 tests / build 0, gitleaks 0, gate self-test 0, shadow static test 0. Tag `v0.1.0-rc86-signed` created and verified, peeling to HEAD.
+- Task 2: `release/0.1.0-rc86-exact1` first try: image gate 42, ordinary and strict verifiers 0 and 0, nine local image IDs matching the manifest.
+- Task 3: staging loaded nine images and verified the tag and evidence signatures; release env carried over from RC85 with `INVOICE_IMAGE_TAG=0.1.0-rc86` and `SOURCE_AGENT_VERSION=0.3.2`. Shadow evaluation skipped by rule. Fresh signed pre-deploy backup `invoice-20260904T023444Z`, signing key on tmpfs and shredded after. Roll-forward PASS 02:38Z–02:39Z: 18 containers on rc86, healthz/readyz 200, zero error lines. Deployment record `rc86-deploy-20260904T024006Z`.
+- The new startup assertion is satisfied by the api starting at all. `console_assertion_nonces` read `t|t|f|f` after the deploy, unchanged from the RC85 replay, so nothing had to be re-run.
+- Canary: 30 minutes, readyz 200 on every probe, zero error lines, 27 usage cycles and 27 credits cycles.
+- Post-deploy confirmation of XM-INV-LEDGER-ACCOUNT-EMAIL came from the product owner rather than from a probe: they read an account's address (`1247730682@qq.com`) straight off the 用户账本 list while raising a separate question about that account's invoiceable amount. That is the feature working on production data.
+- Still unconfirmed by the owner at the time RC87 shipped: the step-up renewal path, which needs someone to leave the embedded console idle past the ten-minute MFA freshness window and watch it recover without the dead Keycloak route.
