@@ -253,17 +253,27 @@ func TestDiagnoseSecretFormTellsTheTwoCausesApart(t *testing.T) {
 	content := []byte("1788609600.evt-1.{}")
 
 	decoded, _ := base64.StdEncoding.DecodeString(secret)
-	byDecoded := webhookMAC(decoded, content)
-	if got := diagnoseSecretForm(secret, content, byDecoded); !strings.Contains(got, "base64 解码") {
+	if got := diagnoseSecretForm(secret, content, webhookMAC(decoded, content)); !strings.Contains(got, "解码后的密钥算能对上") {
 		t.Fatalf("按解码密钥能对上时应如实指出, got %q", got)
 	}
 
-	if got := diagnoseSecretForm(secret, content, []byte("完全不相干")); !strings.Contains(got, "密钥值本身") {
-		t.Fatalf("两种都对不上时应指向密钥值, got %q", got)
+	// base64url 字母表：真实密钥里出现过 `_`，标准解码器会拒绝它。
+	// 第一版诊断只试标准 base64，于是把这种情况误报成「不是 base64」。
+	urlSecret := base64.URLEncoding.EncodeToString([]byte("ÿþ0123456789abcdef0123456789abcd"))
+	urlDecoded, err := base64.URLEncoding.DecodeString(urlSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := diagnoseSecretForm(urlSecret, content, webhookMAC(urlDecoded, content)); !strings.Contains(got, "base64url") {
+		t.Fatalf("base64url 密钥应被识别出来, got %q", got)
 	}
 
-	// 非 base64 的密钥不该给出误导性的建议。
-	if got := diagnoseSecretForm("not-base64!!", content, nil); !strings.Contains(got, "不是 base64") {
+	if got := diagnoseSecretForm(secret, content, []byte("完全不相干")); !strings.Contains(got, "密钥值本身") {
+		t.Fatalf("都对不上时应指向密钥值, got %q", got)
+	}
+
+	// 完全不是 base64 的密钥：如实说只能按原文用。
+	if got := diagnoseSecretForm("not base64!!", content, nil); !strings.Contains(got, "只可能按原文用") {
 		t.Fatalf("非 base64 密钥应如实说明, got %q", got)
 	}
 }
