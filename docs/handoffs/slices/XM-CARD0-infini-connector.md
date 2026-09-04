@@ -2,7 +2,9 @@
 
 ## status
 
-READY（待验收线审读、复跑并人工合入）。
+**已上线生产**（2026-09-04，release `7b63f7d`，迁移到 000028，`/api/v1/cards` 返回 403 说明路由已挂载、healthz/readyz 200）。
+
+凭据尚未填写，首次真实开卡未做——产品负责人上线后自行验证。
 
 **真实端点验证第一轮已通过**（2026-09-04，只读接口，零花费）：签名口径、
 Date 格式、IP 白名单、`card_alias` 回显、时间格式、`mask` 掩码形态六项确认。
@@ -178,7 +180,7 @@ PgStore）+ 七个测试文件
   与控制台是否对得上。产品负责人 2026-09-04 决定由本人上线后自行验证。
   已确认的输入：`product_id` 三个取值（1 Lite / 2 Pro / 102 AI，无产品列表
   端点）、费用只在 apply 响应的 `total_fee` 里、文档未写最低充值额。
-- **本地只跑过 fake 模式**：`XM_CARDS_MODE=live` 的完整链路（凭据解析 →
+- **本地只跑过 fake 模式**：`XM_CARDS_MODE=real` 的完整链路（凭据解析 →
   签名 → 上游 → 台账 → 投影 → 页面）没有端到端跑过。off 模式的界面表现
   已补（未启用说明，见 commit 29e2480）。
 - Storybook 构建：本片没有新增 ui-admin 组件（卡片页的组件都在 admin-web 内）。
@@ -197,7 +199,10 @@ AI 不部署生产（宪法红线）。合入后按这个顺序：
    `secret://infini-linfeng/{api-key-id,api-secret}`。引用由账号 id 推出，
    不需要配环境变量。**不要把明文写进 .env 或提交进仓库。**
 3. **环境变量**（`deploy/compose/.env`）：
-   - `XM_CARDS_MODE=live`（默认 off，不配就整组不挂载）
+   - `XM_CARDS_MODE=real`（取值只有 off / fake / real——**没有 live**。
+     写错不是被忽略，是 api 与 worker 直接启动失败：2026-09-04 上线时
+     照着「live」配，两个进程崩溃重启，生产控制台下线约 4 分钟。
+     默认 off，不配就整组不挂载）
    - `XM_CARDS_ACCOUNTS=CHRIS,LINFENG`
    - 四个 `XM_CARDS_<账号>_LIMIT_PER_{OPERATION,DAY}=unlimited`
      （留空 = 未配置 = 开卡被拒，这是有意的 fail closed）
@@ -296,3 +301,21 @@ Controls 属 Foundation-B / XM-0030 尚未实现，执行时直接返回
 二是开卡表单的账号下拉用 `useState(accounts[0] ?? "")` 初始化，而首屏
 `accounts` 还是空数组，于是账号永远提交空值。两个都编译通过、都有测试覆盖
 相邻逻辑，跑起来才发现。
+
+**七、上线当天的两个事故，都不是代码逻辑问题。**
+
+其一：`launch.yaml` 的 `platform-api` 段里 `XM_CARDS_MODE` 写了两次（本该给
+worker 的一段落错了服务）。YAML 同一映射内重复键，PyYAML 默认「后者覆盖
+前者」静默通过，而 docker compose 的 Go 解析器**拒绝整个文件**——于是全部
+本地门禁绿灯、合并推送照常，直到生产 preflight 才炸。补了
+`scripts/check-compose.py`：在此之前**没有任何一处门禁解析过 compose 文件**。
+跑得起来却没覆盖到的门禁比没有门禁更危险，它给出的是虚假的绿。
+
+顺带说，这个 bug 还藏着第二个后果：`platform-worker` 一个卡片变量都拿不到。
+如果重复键没先把栈拦下来，表现会是「装好了但开卡永远停在 pending」——
+比崩溃难查得多。严格解析器替我们挡了一次。
+
+其二：上线指令里把模式值写成 `live`，而代码只接受 `off / fake / real`。
+api 与 worker 因 `cards_config_invalid` 崩溃重启，**生产控制台下线约 4 分钟**。
+`.env.example` 里写的是对的，错的是照着记忆写的散文指令——**配置值要从
+`.env.example` 抄，不要凭印象写**。修正后一条 `docker compose up -d` 即恢复。
