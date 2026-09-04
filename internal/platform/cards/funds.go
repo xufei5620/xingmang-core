@@ -211,7 +211,7 @@ func (s *Service) refreshCard(ctx context.Context, acct Account, cardID string) 
 	if err != nil {
 		return
 	}
-	_ = s.store.UpsertCard(ctx, acct.ID, card, "")
+	_ = s.store.UpsertCard(ctx, acct.ID, card, CardAttribution{})
 }
 
 // naturallyIdempotent 标记那些重复执行不产生新效果的操作。

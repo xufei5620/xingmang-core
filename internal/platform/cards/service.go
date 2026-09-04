@@ -52,7 +52,30 @@ type Store interface {
 	// 当没花过会让上限在最需要生效的时候失效。
 	SpentToday(ctx context.Context, account, kind string, day time.Time) (string, error)
 	// UpsertCard 落卡片投影，归属到指定账号。
-	UpsertCard(ctx context.Context, account string, card infini.Card, ownerRef string) error
+	//
+	// attribution 里的字段**只在非空时覆盖**：同步作业不知道这些（上游的卡片
+	// 对象里没有），传空会把运营填的东西冲掉。
+	UpsertCard(ctx context.Context, account string, card infini.Card, attribution CardAttribution) error
+	// SetCardUsage 写卡片的业务用途登记（绑定账号、订阅服务、续费日期）。
+	//
+	// 放在 Store 而不是靠运行时类型断言取一个可选接口：断言失败是运行时
+	// 才炸的错误，而「存储支不支持登记」本该在编译期就定下来。
+	SetCardUsage(ctx context.Context, usage CardUsage) error
+}
+
+// CardAttribution 是只有平台自己知道的卡片归属信息。
+//
+// 上游的卡片对象里没有这两样：OwnerRef 是平台的用途标签，UserEmail 是开卡时
+// 指定的企业成员邮箱（上游只回 user_id）。所以它们只能在开卡那一刻写入，
+// 之后同步作业刷新状态时传空，由存储层保留原值。
+//
+// 成组传参而不是继续往 UpsertCard 后面加参数：再加一个就是四个位置参数，
+// 调用点上分不清哪个是哪个。
+type CardAttribution struct {
+	OwnerRef string
+	// UserEmail 供管理端的开卡表单做「选历史用过的成员」下拉——
+	// 上游没有成员列表接口，可选项只能来自平台自己开过的卡。
+	UserEmail string
 }
 
 // Service 是卡业务的领域服务。
@@ -205,7 +228,8 @@ func (s *Service) IssueCard(ctx context.Context, req IssueRequest) (IssueResult,
 	// 开卡是异步的：这里拿到的是申请单，卡要等作业轮询到 active。
 	// 台账记成 succeeded 表示「请求确定被上游接受了」，不表示卡已可用。
 	if card, statusErr := acct.Client.CardStatus(ctx, app.ID); statusErr == nil {
-		if err := s.store.UpsertCard(ctx, acct.ID, card, req.OwnerRef); err != nil {
+		attribution := CardAttribution{OwnerRef: req.OwnerRef, UserEmail: req.UserEmail}
+		if err := s.store.UpsertCard(ctx, acct.ID, card, attribution); err != nil {
 			return IssueResult{}, fmt.Errorf("落卡片投影: %w", err)
 		}
 	}

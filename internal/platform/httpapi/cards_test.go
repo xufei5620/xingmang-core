@@ -14,10 +14,11 @@ import (
 )
 
 type fakeCardQuerier struct {
-	cards []cards.CardView
-	txs   []cards.TransactionView
-	ops   []cards.Operation
-	err   error
+	cards        []cards.CardView
+	txs          []cards.TransactionView
+	ops          []cards.Operation
+	memberEmails []string
+	err          error
 }
 
 func (f *fakeCardQuerier) ListCards(ctx context.Context, account, ownerRef string) ([]cards.CardView, error) {
@@ -26,6 +27,10 @@ func (f *fakeCardQuerier) ListCards(ctx context.Context, account, ownerRef strin
 
 func (f *fakeCardQuerier) ListTransactions(ctx context.Context, account, cardID string, limit int) ([]cards.TransactionView, error) {
 	return f.txs, f.err
+}
+
+func (f *fakeCardQuerier) KnownMemberEmails(ctx context.Context) ([]string, error) {
+	return f.memberEmails, f.err
 }
 
 func (f *fakeCardQuerier) OperationsNeedingAttention(ctx context.Context) ([]cards.Operation, error) {

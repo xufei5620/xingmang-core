@@ -206,14 +206,14 @@ func TestPgStoreUpsertCardAndList(t *testing.T) {
 		Alias: "xm-abc", Status: "active", Currency: "USD", BalanceMinor: 49,
 		UserID: "u1", CreatedAt: issueNow, UpdatedAt: issueNow,
 	}
-	if err := store.UpsertCard(ctx, "CHRIS", card, "ops-team"); err != nil {
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{OwnerRef: "ops-team"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// 同一张卡再来一次（同步作业的常态），owner_ref 传空必须保留原值
 	card.BalanceMinor = 100
 	card.Status = "frozen"
-	if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{OwnerRef: ""}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -245,11 +245,11 @@ func TestPgStoreSameCardIDInTwoAccountsAreDistinct(t *testing.T) {
 		ID: "same_id", Mask: "400000******0000", Status: "active",
 		Currency: "USD", BalanceMinor: 1, CreatedAt: issueNow, UpdatedAt: issueNow,
 	}
-	if err := store.UpsertCard(ctx, "CHRIS", card, "a"); err != nil {
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{OwnerRef: "a"}); err != nil {
 		t.Fatal(err)
 	}
 	card.BalanceMinor = 2
-	if err := store.UpsertCard(ctx, "LINFENG", card, "b"); err != nil {
+	if err := store.UpsertCard(ctx, "LINFENG", card, CardAttribution{OwnerRef: "b"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -279,7 +279,7 @@ func TestPgStoreTrackedCardsCarriesAccount(t *testing.T) {
 			ID: "card_" + a, Status: "active", Currency: "USD",
 			CreatedAt: issueNow, UpdatedAt: issueNow,
 		}
-		if err := store.UpsertCard(ctx, a, card, ""); err != nil {
+		if err := store.UpsertCard(ctx, a, card, CardAttribution{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -414,7 +414,7 @@ func TestPgStoreCardsMissingSecretsRespectsBothConditions(t *testing.T) {
 			ID: c.id, Status: c.status, Currency: "USD",
 			CreatedAt: issueNow, UpdatedAt: issueNow,
 		}
-		if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+		if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{OwnerRef: ""}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -441,7 +441,7 @@ func TestPgStoreStoreCardSecretsRoundTrips(t *testing.T) {
 		ID: "card_1", Mask: "441357******7843", Status: "active",
 		Currency: "USD", CreatedAt: issueNow, UpdatedAt: issueNow,
 	}
-	if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{OwnerRef: ""}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.StoreCardSecrets(ctx, "CHRIS", "card_1", infini.RevealedCard{
@@ -476,7 +476,7 @@ func TestPgStoreUpsertCardDoesNotClearStoredSecrets(t *testing.T) {
 		ID: "card_1", Status: "active", Currency: "USD",
 		CreatedAt: issueNow, UpdatedAt: issueNow,
 	}
-	if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{OwnerRef: ""}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.StoreCardSecrets(ctx, "CHRIS", "card_1", infini.RevealedCard{
@@ -488,7 +488,7 @@ func TestPgStoreUpsertCardDoesNotClearStoredSecrets(t *testing.T) {
 	// 模拟下一轮同步：状态变了，再 upsert 一次
 	card.Status = "frozen"
 	card.BalanceMinor = 500
-	if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{OwnerRef: ""}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -499,4 +499,186 @@ func TestPgStoreUpsertCardDoesNotClearStoredSecrets(t *testing.T) {
 	if list[0].Status != "frozen" {
 		t.Fatal("状态该更新的还是要更新")
 	}
+}
+
+// 用途登记要能完整往返，尤其是日期列：它在库里是 date 而不是文本，
+// 空值必须回成空串而不是 0001-01-01——那种值会被前端当成「已登记且早已过期」。
+func TestPgStoreSetCardUsageRoundTrips(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	seedCard(t, store, "CHRIS", "card_1", "ops@example.com")
+
+	usage := CardUsage{
+		Account: "CHRIS", CardID: "card_1",
+		BoundAccount: "chris@example.com", BoundAccountKind: "email",
+		ServiceName: "OpenAI Plus", NextRenewalOn: "2026-10-15", Note: "团队共用",
+	}
+	if err := store.SetCardUsage(ctx, usage); err != nil {
+		t.Fatal(err)
+	}
+
+	got := onlyCard(t, store, "CHRIS")
+	if got.BoundAccount != "chris@example.com" || got.BoundAccountKind != "email" {
+		t.Fatalf("绑定账号没落库: %+v", got)
+	}
+	if got.ServiceName != "OpenAI Plus" || got.UsageNote != "团队共用" {
+		t.Fatalf("服务/备注没落库: %+v", got)
+	}
+	if got.NextRenewalOn != "2026-10-15" {
+		t.Fatalf("续费日期 = %q, 想要 2026-10-15", got.NextRenewalOn)
+	}
+
+	// 清空续费日期：date 列要回到 NULL，读出来是空串。
+	usage.NextRenewalOn = ""
+	if err := store.SetCardUsage(ctx, usage); err != nil {
+		t.Fatal(err)
+	}
+	if got := onlyCard(t, store, "CHRIS"); got.NextRenewalOn != "" {
+		t.Fatalf("清空续费日期后 = %q, 想要空串", got.NextRenewalOn)
+	}
+}
+
+// 登记不存在的卡必须报错。
+//
+// UPDATE 匹配不到行在 SQL 里不是错误，会静默成功——那样管理端会显示
+// 「已保存」，而运营以为设好的续费提醒根本不存在。
+func TestPgStoreSetCardUsageOnMissingCardFails(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	err := store.SetCardUsage(ctx, CardUsage{
+		Account: "CHRIS", CardID: "card_nope", ServiceName: "OpenAI Plus",
+	})
+	if err == nil {
+		t.Fatal("登记不存在的卡必须报错，不能静默成功")
+	}
+}
+
+// 登记按账号隔离：两个账号里同名的卡 id 是两张卡。
+func TestPgStoreSetCardUsageIsScopedToAccount(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	seedCard(t, store, "CHRIS", "card_1", "a@example.com")
+	seedCard(t, store, "LINFENG", "card_1", "b@example.com")
+
+	if err := store.SetCardUsage(ctx, CardUsage{
+		Account: "CHRIS", CardID: "card_1", ServiceName: "OpenAI Plus",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := onlyCard(t, store, "CHRIS"); got.ServiceName != "OpenAI Plus" {
+		t.Fatalf("CHRIS 的登记没生效: %+v", got)
+	}
+	if got := onlyCard(t, store, "LINFENG"); got.ServiceName != "" {
+		t.Fatalf("串账号了：LINFENG 的卡被写成 %q", got.ServiceName)
+	}
+}
+
+// 同步作业刷新卡片状态时不能冲掉用途登记。
+//
+// 与「不能冲掉已存的卡面明文」同一类错误，但更容易发生：同步每 5 分钟跑一次，
+// 一旦 UPSERT 把这几列一起覆盖，运营刚填的登记最多活五分钟。
+func TestPgStoreUpsertCardDoesNotClearUsage(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	seedCard(t, store, "CHRIS", "card_1", "ops@example.com")
+	if err := store.SetCardUsage(ctx, CardUsage{
+		Account: "CHRIS", CardID: "card_1",
+		BoundAccount: "chris@example.com", BoundAccountKind: "email",
+		ServiceName: "OpenAI Plus", NextRenewalOn: "2026-10-15", Note: "团队共用",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同步作业的常态：只带上游知道的字段，登记列一个都不带。
+	refreshed := infini.Card{
+		ID: "card_1", Mask: "441357******7843", HolderName: "ops@example.com",
+		Alias: "xm-abc", Status: "active", Currency: "USD", BalanceMinor: 900,
+		UserID: "u1", CreatedAt: issueNow, UpdatedAt: issueNow,
+	}
+	if err := store.UpsertCard(ctx, "CHRIS", refreshed, CardAttribution{}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := onlyCard(t, store, "CHRIS")
+	if got.BalanceMinor != 900 {
+		t.Fatalf("余额没刷新: %+v", got)
+	}
+	if got.ServiceName != "OpenAI Plus" || got.NextRenewalOn != "2026-10-15" {
+		t.Fatalf("同步冲掉了用途登记: %+v", got)
+	}
+	if got.BoundAccount != "chris@example.com" || got.UsageNote != "团队共用" {
+		t.Fatalf("同步冲掉了绑定账号/备注: %+v", got)
+	}
+}
+
+// 成员邮箱下拉的候选：去重、排序、跳过空值、按环境隔离。
+func TestPgStoreKnownMemberEmails(t *testing.T) {
+	store, pool := pgStore(t)
+	ctx := context.Background()
+
+	seedCard(t, store, "CHRIS", "card_1", "zoe@example.com")
+	seedCard(t, store, "CHRIS", "card_2", "adam@example.com")
+	// 同一个人开了两张卡：下拉里只能出现一次。
+	seedCard(t, store, "LINFENG", "card_3", "adam@example.com")
+	// 没记邮箱的老卡（同步先于开卡登记时会有）：不能变成一个空选项。
+	seedCard(t, store, "CHRIS", "card_4", "")
+
+	got, err := store.KnownMemberEmails(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"adam@example.com", "zoe@example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("候选 = %v, 想要 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("候选 = %v, 想要 %v", got, want)
+		}
+	}
+
+	// 另一个环境的卡不能出现在这里：生产的成员邮箱不该漏进开发环境的下拉。
+	other := NewPgStore(pool, "staging", func() time.Time { return issueNow })
+	seedCard(t, other, "CHRIS", "card_5", "leak@example.com")
+	got, err = store.KnownMemberEmails(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range got {
+		if e == "leak@example.com" {
+			t.Fatalf("串环境了: %v", got)
+		}
+	}
+}
+
+// seedCard 落一张最小可用的卡投影，供登记类用例做前置。
+func seedCard(t *testing.T, store *PgStore, account, cardID, userEmail string) {
+	t.Helper()
+	card := infini.Card{
+		ID: cardID, Mask: "441357******7843", HolderName: "ops@example.com",
+		Alias: "xm-" + cardID, Status: "active", Currency: "USD", BalanceMinor: 49,
+		UserID: "u1", CreatedAt: issueNow, UpdatedAt: issueNow,
+	}
+	if err := store.UpsertCard(context.Background(), account, card,
+		CardAttribution{UserEmail: userEmail}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// onlyCard 取某账号下唯一的一张卡；不唯一就是用例的前置错了。
+func onlyCard(t *testing.T, store *PgStore, account string) CardView {
+	t.Helper()
+	list, err := store.ListCards(context.Background(), account, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("账号 %s 下应有 1 张卡, got %d", account, len(list))
+	}
+	return list[0]
 }

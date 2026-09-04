@@ -5,6 +5,7 @@ import { useId, useState } from "react";
 import {
   listCardTransactions,
   redeemCard,
+  setCardUsage,
   topUpCard,
   type CardItem,
   type CardTransactionItem,
@@ -128,7 +129,7 @@ export function CardDetailDialog({
 }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<"info" | "topup" | "redeem" | "tx">("info");
+  const [tab, setTab] = useState<"info" | "usage" | "topup" | "redeem" | "tx">("info");
 
   const txQuery = useQuery({
     queryKey: [CARD_TX_QUERY, card.account, card.card_id],
@@ -175,6 +176,7 @@ export function CardDetailDialog({
 
   const tabs = [
     { id: "info" as const, label: "卡面信息" },
+    { id: "usage" as const, label: "用途登记" },
     { id: "topup" as const, label: "充值" },
     { id: "redeem" as const, label: "赎回" },
     { id: "tx" as const, label: "交易流水" },
@@ -220,9 +222,17 @@ export function CardDetailDialog({
             <Field label="用途" value={card.owner_ref ?? "—"} />
             <Field label="卡别名（幂等信标）" value={card.card_alias} mono />
             <Field
+              label="开卡日期"
+              value={card.issued_at ? formatUtcTimestamp(card.issued_at) : "—"}
+            />
+            <Field
               label="数据同步于"
               value={card.freshness.synced_at ? formatUtcTimestamp(card.freshness.synced_at) : "从未同步"}
             />
+            <Field label="企业成员" value={card.user_email ?? "—"} />
+            <Field label="绑定账号" value={card.bound_account ?? "—"} />
+            <Field label="订阅服务" value={card.service_name ?? "—"} />
+            <Field label="下次续费" value={card.next_renewal_on ?? "—"} mono />
             {card.pan ? null : (
               <p className="col-span-2 text-xs text-fg-muted">
                 卡面明文尚未拉取。卡要先变成 active，同步作业才拉得到；
@@ -232,6 +242,7 @@ export function CardDetailDialog({
           </dl>
         ) : null}
 
+        {tab === "usage" ? <UsageForm card={card} onDone={afterWrite} /> : null}
         {tab === "topup" ? <FundsForm card={card} kind="topup" onDone={afterWrite} /> : null}
         {tab === "redeem" ? <FundsForm card={card} kind="redeem" onDone={afterWrite} /> : null}
 
@@ -258,5 +269,106 @@ export function CardDetailDialog({
         ) : null}
       </div>
     </Dialog>
+  );
+}
+
+const BOUND_KIND_OPTIONS = [
+  { value: "", label: "（未指定）" },
+  { value: "email", label: "邮箱" },
+  { value: "username", label: "用户名" },
+  { value: "phone", label: "手机号" },
+  { value: "other", label: "其他" },
+];
+
+/** 用途登记表单：这张卡绑在哪个外部服务账号上、订了什么、什么时候续费。
+ *
+ *  这些字段上游一个都不知道，全是平台自己记的。续费日期是**人填的**：
+ *  从流水推断周期看着聪明，但试用转正、年付转月付、涨价都会让推断悄悄错掉，
+ *  而错了的提醒比没有提醒更糟——人会信它。 */
+function UsageForm({ card, onDone }: { card: CardItem; onDone: (r: ActionResult) => void }) {
+  const [boundAccount, setBoundAccount] = useState(card.bound_account ?? "");
+  const [boundKind, setBoundKind] = useState(card.bound_account_kind ?? "");
+  const [serviceName, setServiceName] = useState(card.service_name ?? "");
+  const [renewal, setRenewal] = useState(card.next_renewal_on ?? "");
+  const [note, setNote] = useState(card.usage_note ?? "");
+  const [error, setError] = useState<unknown>(null);
+  const formId = useId();
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      setCardUsage({
+        account: card.account,
+        card_id: card.card_id,
+        bound_account: boundAccount.trim(),
+        bound_account_kind: boundKind,
+        service_name: serviceName.trim(),
+        next_renewal_on: renewal.trim(),
+        note: note.trim(),
+      }),
+    onSuccess: (run) => {
+      onDone({ runId: run.runId, title: "已更新用途登记" });
+      setError(null);
+    },
+    onError: (err) => setError(err),
+  });
+
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        mutation.mutate();
+      }}
+    >
+      <FormField
+        label="绑定账号"
+        htmlFor={`${formId}-bound`}
+        hint="这张卡绑在哪个外部服务账号上，如 chris@example.com。"
+      >
+        <Input
+          id={`${formId}-bound`}
+          value={boundAccount}
+          onChange={(e) => setBoundAccount(e.target.value)}
+        />
+      </FormField>
+      <FormField
+        label="账号类型"
+        htmlFor={`${formId}-kind`}
+        hint="显式选择，不靠长相猜——有些服务的账号是用户名或手机号。"
+      >
+        <Select
+          aria-label="账号类型"
+          options={BOUND_KIND_OPTIONS}
+          value={boundKind}
+          onValueChange={setBoundKind}
+        />
+      </FormField>
+      <FormField label="订阅服务" htmlFor={`${formId}-service`} hint="如 OpenAI Plus。">
+        <Input
+          id={`${formId}-service`}
+          value={serviceName}
+          onChange={(e) => setServiceName(e.target.value)}
+        />
+      </FormField>
+      <FormField
+        label="下次续费日期"
+        htmlFor={`${formId}-renewal`}
+        hint="YYYY-MM-DD，留空表示不是订阅。续费日临近而卡上没钱时列表会标红。"
+      >
+        <Input
+          id={`${formId}-renewal`}
+          type="date"
+          value={renewal}
+          onChange={(e) => setRenewal(e.target.value)}
+        />
+      </FormField>
+      <FormField label="备注" htmlFor={`${formId}-note`}>
+        <Input id={`${formId}-note`} value={note} onChange={(e) => setNote(e.target.value)} />
+      </FormField>
+      {error ? <ActionErrorNote error={error} /> : null}
+      <Button type="submit" disabled={mutation.isPending}>
+        {mutation.isPending ? "保存中…" : "保存登记"}
+      </Button>
+    </form>
   );
 }

@@ -90,6 +90,54 @@ function CardNumberCell({ card }: { card: CardItem }) {
   );
 }
 
+/** 绑定账号单元格：标识 + 类型。类型显式显示，不靠长相猜——
+ *  有些服务的账号是用户名或手机号。 */
+function BoundAccountCell({ card }: { card: CardItem }) {
+  if (!card.bound_account) return <span className="text-fg-muted">—</span>;
+  return (
+    <span className="flex flex-col">
+      <span>{card.bound_account}</span>
+      {card.bound_account_kind ? (
+        <span className="text-xs text-fg-muted">{card.bound_account_kind}</span>
+      ) : null}
+    </span>
+  );
+}
+
+/** 续费单元格：日期 + 风险徽章。
+ *
+ *  风险等级由**服务端**判定（none / soon / unfunded / overdue），前端只翻译成
+ *  文案与语气——两处各算一遍迟早分叉，而分叉的那一边会把「续不上」显示成正常。
+ *
+ *  unfunded 是这一列真正的用处：续费日快到了而卡上没钱，订阅会直接掉，
+ *  而这种事通常没人提前发现。 */
+function RenewalCell({ card }: { card: CardItem }) {
+  if (!card.next_renewal_on) return <span className="text-fg-muted">—</span>;
+
+  const risk = card.renewal_risk;
+  const badge =
+    risk === "unfunded" ? (
+      <Badge tone="danger" title="续费日临近且卡上没钱——订阅会掉">
+        余额不足
+      </Badge>
+    ) : risk === "overdue" ? (
+      <Badge tone="warning" title="续费日已过：可能已经扣过（该更新日期），也可能没扣上（该查）">
+        已过期
+      </Badge>
+    ) : risk === "soon" ? (
+      <Badge tone="info" title="七天内续费">
+        即将续费
+      </Badge>
+    ) : null;
+
+  return (
+    <span className="flex flex-col gap-1">
+      <span className="font-mono text-sm">{card.next_renewal_on}</span>
+      {badge}
+    </span>
+  );
+}
+
 /** 卡状态徽章。冻结与删除都用 danger：它们都意味着这张卡现在刷不了。 */
 function cardStatusTone(status: string): "neutral" | "success" | "warning" | "danger" {
   switch (status) {
@@ -148,9 +196,11 @@ function AttentionBanner({ items }: { items: CardOperationItem[] }) {
  *  而上游没有幂等能力。 */
 function IssueCardDialog({
   accounts,
+  memberEmails,
   onIssued,
 }: {
   accounts: string[];
+  memberEmails: string[];
   onIssued: (result: ActionResult) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -251,15 +301,31 @@ function IssueCardDialog({
             onValueChange={setTokenType}
           />
         </FormField>
-        <FormField label="企业成员邮箱" htmlFor={`${formId}-email`}>
+        <FormField
+          label="企业成员邮箱"
+          htmlFor={`${formId}-email`}
+          hint={
+            memberEmails.length > 0
+              ? "可从历史用过的成员里选，也可以直接输入新的。"
+              : "上游没有成员列表接口，这里的候选来自平台开过的卡——第一次开卡时是空的。"
+          }
+        >
           <Input
             id={`${formId}-email`}
             type="email"
+            list={`${formId}-emails`}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
           />
         </FormField>
+        {/* 用 datalist 而不是 select：上游没有成员列表接口，候选只是
+            「以前用过的」，不该把没用过的新成员挡在外面。 */}
+        <datalist id={`${formId}-emails`}>
+          {memberEmails.map((m) => (
+            <option key={m} value={m} />
+          ))}
+        </datalist>
         <FormField label="持卡人姓名" htmlFor={`${formId}-holder`}>
           <Input
             id={`${formId}-holder`}
@@ -340,6 +406,7 @@ export function CardsPanel() {
 
   const rows = query.data?.cards ?? [];
   const accounts = query.data?.accounts ?? [];
+  const memberEmails = query.data?.memberEmails ?? [];
 
   const columns: DataTableColumn<CardItem>[] = [
     {
@@ -383,6 +450,33 @@ export function CardsPanel() {
       value: (row) => row.owner_ref ?? "",
     },
     {
+      id: "bound",
+      header: "绑定账号",
+      cell: (row) => <BoundAccountCell card={row} />,
+      value: (row) => row.bound_account ?? "",
+    },
+    {
+      id: "service",
+      header: "订阅服务",
+      cell: (row) => row.service_name || "—",
+      value: (row) => row.service_name ?? "",
+    },
+    {
+      id: "renewal",
+      header: "下次续费",
+      cell: (row) => <RenewalCell card={row} />,
+      // 排序按日期文本即可（YYYY-MM-DD 字典序 = 时间序）；
+      // 没登记的排最后，用一个不会出现的大值。
+      value: (row) => row.next_renewal_on || "9999-12-31",
+    },
+    {
+      id: "issued",
+      header: "开卡日期",
+      cell: (row) => (row.issued_at ? formatUtcTimestamp(row.issued_at) : "—"),
+      value: (row) => row.issued_at ?? "",
+      defaultHidden: true,
+    },
+    {
       id: "freshness",
       header: "数据新鲜度",
       cell: (row) => <CardFreshnessBadge freshness={row.freshness} />,
@@ -419,7 +513,7 @@ export function CardsPanel() {
           卡片数据由后台作业周期同步，不是实时读取——每行的新鲜度徽章说明它有多新。
           「账号」是内部资金来源，与「用途」那一列（面向使用方的归属）是两回事。
         </p>
-        <IssueCardDialog accounts={accounts} onIssued={afterWrite} />
+        <IssueCardDialog accounts={accounts} memberEmails={memberEmails} onIssued={afterWrite} />
       </div>
 
       {result ? <ActionResultNote result={result} /> : null}

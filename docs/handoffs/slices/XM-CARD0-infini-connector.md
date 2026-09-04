@@ -24,6 +24,7 @@ Date 格式、IP 白名单、`card_alias` 回显、时间格式、`mask` 掩码�
 - `ea2f380` — docs(handoff): 记录实现期发现
 - `(本次)` — feat(cards): 四个资金/状态 Action、同步作业、PgStore、装配
 - `(本次)` — feat(web): 管理端卡片页与 ADR-021
+- `(本次)` — feat(cards): 卡号明文落库、用途登记、成员邮箱下拉
 
 ## summary
 
@@ -137,23 +138,28 @@ PgStore）+ 七个测试文件
 **装配**：`cmd/platform-api/cards.go`、`cmd/platform-api/main.go`、
 `cmd/platform-worker/cards.go`、`cmd/platform-worker/main.go`
 
-**迁移**：`db/migrations/000026_infini_cards.{up,down}.sql`（三张表）
+**迁移**：`db/migrations/000026_infini_cards.{up,down}.sql`（三张表）、
+`000027_infini_card_pan`（卡面明文列）、`000028_infini_card_usage`（用途登记列）
 
 **契约**：`contracts/connectors/infini.card.v1.md`、
-`contracts/actions/cards.card.{issue,reveal}.v1.json`
+`contracts/actions/cards.card.{issue,reveal,usage.set}.v1.json`
 
 **架构**：`docs/adr/ADR-021-供应商写通道.md`
 
 **前端**：`api/cards.ts`、`components/CardsPanel.tsx`（+ 测试）、
-`pages/CardsPage.tsx`、`router.tsx`、`ui-admin/navigation.ts`（+ 测试）
+`components/CardDetailDialog.tsx`、`pages/CardsPage.tsx`、`router.tsx`、
+`ui-admin/navigation.ts`（+ 测试）
 
 ## tests_run
 
 - `go test -p 1 ./...`（**带真实测试库** `XM_TEST_DATABASE_URL`）—— 53 个包全绿
 - `go vet ./...`、`go build ./...` —— 干净
 - `bash scripts/check-governance.sh` —— 退出码 0
-- admin-web `vitest run` —— 104 文件 / 1480 用例全绿
+- admin-web `vitest run` —— 104 文件 / 1483 用例全绿
 - ui-admin `vitest run` —— 17 文件 / 261 用例全绿
+- PgStore 用途登记的四个集成测试做了变异验证：去掉 `SetCardUsage` 的账号谓词、
+  让 UPSERT 覆盖登记列，两次都被断言咬住（写在实现之后的测试立刻就过，
+  本身不证明它会咬人）
 - 两个前端包 `tsc --noEmit` —— 干净
 
 新增测试约 90 条。**全部走替身或 httptest，没有一次真实上游调用，没有花钱。**
@@ -241,3 +247,16 @@ Controls 属 Foundation-B / XM-0030 尚未实现，执行时直接返回
 **四、开卡是异步的。** `/v2/cards/apply` 返回申请单而非可用的卡，要轮询到
 `status=active`。这一条是在核对文档时发现的，直接改变了设计——同步作业从
 「可选的优化」变成「功能闭环的必要环节」。
+
+**五、`.env.local` 会把两个路由用例判成失败。** 本地起页面时建的
+`web/apps/admin-web/.env.local` 被 vitest 一并读入，改掉了
+`router.test.tsx` 两个用例断言的身份头与环境口径。这在更早一次全量门禁里
+出现过一次又"自愈"（那次刚好删了该文件），当时在提交信息里记成"疑似资源
+竞争"——**那个判断是错的**，现象是确定性的：有该文件必挂两条，无则 153 全过。
+本地预览改用 vitest 不读的 `.env.preview.local` + `--mode preview`。
+
+**六、UI 的两个 bug 只有把页面跑起来才会露头。** 一是表格 `rowKey` 用了
+`card_id`，两个账号下同 id 的卡被折成一行（另一个账号的卡直接从页面上消失）；
+二是开卡表单的账号下拉用 `useState(accounts[0] ?? "")` 初始化，而首屏
+`accounts` 还是空数组，于是账号永远提交空值。两个都编译通过、都有测试覆盖
+相邻逻辑，跑起来才发现。

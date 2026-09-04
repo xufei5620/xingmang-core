@@ -75,6 +75,7 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 		{redeemDef(accounts), redeemHandler(svc)},
 		{freezeDef(accounts), freezeHandler(svc)},
 		{unfreezeDef(accounts), unfreezeHandler(svc)},
+		{usageSetDef(accounts), usageSetHandler(svc)},
 	}
 	for _, d := range defs {
 		if err := reg.Register(d.def, d.handler); err != nil {

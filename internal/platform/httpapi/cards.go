@@ -20,6 +20,9 @@ import (
 // 这里不开第二条写路径。
 type CardQuerier interface {
 	ListCards(ctx context.Context, account, ownerRef string) ([]cards.CardView, error)
+	// KnownMemberEmails 供开卡表单的「选历史用过的成员」下拉。
+	// 上游没有成员列表接口，可选项只能来自平台自己开过的卡。
+	KnownMemberEmails(ctx context.Context) ([]string, error)
 	ListTransactions(ctx context.Context, account, cardID string, limit int) ([]cards.TransactionView, error)
 	OperationsNeedingAttention(ctx context.Context) ([]cards.Operation, error)
 }
@@ -36,16 +39,28 @@ type cardItem struct {
 	// 明文落库是产品负责人 2026-09-04 的决定（见迁移 000027）。原设计里
 	// 明文只经 cards.card.reveal Action 取得、每次都留审计；落库之后那条
 	// 审计链不复存在，这道权限闸是「谁能看卡号」剩下的唯一约束。
-	PAN          string              `json:"pan,omitempty"`
-	CVV          string              `json:"cvv,omitempty"`
-	ExpiryMMYY   string              `json:"expiry_mmyy,omitempty"`
-	HolderName   string              `json:"holder_name"`
-	Alias        string              `json:"card_alias"`
-	Status       string              `json:"status"`
-	Currency     string              `json:"currency"`
-	BalanceMinor int64               `json:"balance_minor"`
-	OwnerRef     string              `json:"owner_ref,omitempty"`
-	Freshness    cards.FreshnessInfo `json:"freshness"`
+	PAN          string `json:"pan,omitempty"`
+	CVV          string `json:"cvv,omitempty"`
+	ExpiryMMYY   string `json:"expiry_mmyy,omitempty"`
+	HolderName   string `json:"holder_name"`
+	Alias        string `json:"card_alias"`
+	Status       string `json:"status"`
+	Currency     string `json:"currency"`
+	BalanceMinor int64  `json:"balance_minor"`
+	OwnerRef     string `json:"owner_ref,omitempty"`
+	UserEmail    string `json:"user_email,omitempty"`
+	// 以下是平台自己的用途登记，上游一个都不知道。
+	BoundAccount     string `json:"bound_account,omitempty"`
+	BoundAccountKind string `json:"bound_account_kind,omitempty"`
+	ServiceName      string `json:"service_name,omitempty"`
+	NextRenewalOn    string `json:"next_renewal_on,omitempty"`
+	UsageNote        string `json:"usage_note,omitempty"`
+	// RenewalRisk 由**服务端**判定：让前端各算一遍，两处迟早分叉，
+	// 而分叉的那一边会把「续不上」显示成正常。
+	RenewalRisk string `json:"renewal_risk"`
+	// IssuedAt 是上游记的开卡时刻；缺失时字段不出现，而不是回一个 1970 年。
+	IssuedAt  string              `json:"issued_at,omitempty"`
+	Freshness cards.FreshnessInfo `json:"freshness"`
 }
 
 type cardTransactionItem struct {
@@ -113,16 +128,26 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 		out := make([]cardItem, 0, len(items))
 		for _, c := range items {
 			item := cardItem{
-				Account:      c.Account,
-				CardID:       c.CardID,
-				Mask:         c.Mask,
-				HolderName:   c.HolderName,
-				Alias:        c.Alias,
-				Status:       c.Status,
-				Currency:     c.Currency,
-				BalanceMinor: c.BalanceMinor,
-				OwnerRef:     c.OwnerRef,
-				Freshness:    cards.Freshness(c.LastSyncedAt, now, syncInterval),
+				Account:          c.Account,
+				CardID:           c.CardID,
+				Mask:             c.Mask,
+				HolderName:       c.HolderName,
+				Alias:            c.Alias,
+				Status:           c.Status,
+				Currency:         c.Currency,
+				BalanceMinor:     c.BalanceMinor,
+				OwnerRef:         c.OwnerRef,
+				UserEmail:        c.UserEmail,
+				BoundAccount:     c.BoundAccount,
+				BoundAccountKind: c.BoundAccountKind,
+				ServiceName:      c.ServiceName,
+				NextRenewalOn:    c.NextRenewalOn,
+				UsageNote:        c.UsageNote,
+				RenewalRisk:      string(cards.RenewalRisk(c.NextRenewalOn, c.BalanceMinor, now)),
+				Freshness:        cards.Freshness(c.LastSyncedAt, now, syncInterval),
+			}
+			if !c.UpstreamCreatedAt.IsZero() {
+				item.IssuedAt = c.UpstreamCreatedAt.UTC().Format(time.RFC3339)
 			}
 			if maySeePlaintext {
 				item.PAN, item.CVV, item.ExpiryMMYY = c.PAN, c.CVV, c.ExpiryMMYY
@@ -132,7 +157,15 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 		if accounts == nil {
 			accounts = []string{}
 		}
-		WriteJSON(w, http.StatusOK, map[string]any{"items": out, "accounts": accounts})
+		// 成员邮箱清单供开卡表单填下拉。取不到不算错误：它只是便利，
+		// 不是这个页面的主体——为一个下拉让整页 500 不值得。
+		memberEmails, err := store.KnownMemberEmails(r.Context())
+		if err != nil || memberEmails == nil {
+			memberEmails = []string{}
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"items": out, "accounts": accounts, "member_emails": memberEmails,
+		})
 	}
 }
 

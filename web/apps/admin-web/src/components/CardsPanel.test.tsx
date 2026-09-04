@@ -36,6 +36,7 @@ const activeCard: CardItem = {
   currency: "USD",
   balance_minor: 1234,
   owner_ref: "ops-team",
+  renewal_risk: "none",
   freshness: { synced_at: "2026-09-04T11:59:00Z", age_seconds: 60, stale: false, never_synced: false },
 };
 
@@ -56,7 +57,7 @@ afterEach(() => {
 
 describe("CardsPanel", () => {
   it("列出卡片时只显示掩码卡号", async () => {
-    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"] });
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
     renderPanel();
@@ -79,7 +80,7 @@ describe("CardsPanel", () => {
           },
         },
       ],
-      accounts: ["MAIN"],
+      accounts: ["MAIN"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
@@ -91,7 +92,7 @@ describe("CardsPanel", () => {
   it("从未同步与「很久没同步」显示成两回事", async () => {
     vi.mocked(listCards).mockResolvedValue({
       cards: [{ ...activeCard, freshness: { age_seconds: 0, stale: true, never_synced: true } }],
-      accounts: ["MAIN"],
+      accounts: ["MAIN"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
@@ -114,7 +115,7 @@ describe("CardsPanel", () => {
       started_at: "2026-09-04T11:00:00Z",
       retry_allowed: false,
     };
-    vi.mocked(listCards).mockResolvedValue({ cards: [], accounts: ["MAIN"] });
+    vi.mocked(listCards).mockResolvedValue({ cards: [], accounts: ["MAIN"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([stuck]);
 
     renderPanel();
@@ -127,7 +128,7 @@ describe("CardsPanel", () => {
   });
 
   it("没有待处置操作时不显示横幅", async () => {
-    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"] });
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
     renderPanel();
@@ -142,7 +143,7 @@ describe("CardsPanel", () => {
   it("拿到明文时列表直接显示完整卡号", async () => {
     vi.mocked(listCards).mockResolvedValue({
       cards: [{ ...activeCard, pan: "4413571234567843", cvv: "123", expiry_mmyy: "1229" }],
-      accounts: ["MAIN"],
+      accounts: ["MAIN"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
@@ -155,7 +156,7 @@ describe("CardsPanel", () => {
   // 没有明文（缺 card.reveal 权限，或卡还没 active 拉不到）时回落到掩码，
   // 且不该出现复制按钮——复制一个掩码没有意义。
   it("没有明文时回落到掩码", async () => {
-    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"] });
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
     renderPanel();
@@ -165,7 +166,7 @@ describe("CardsPanel", () => {
   });
 
   it("冻结走 Action 且每次带一个幂等键", async () => {
-    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"] });
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(freezeCard).mockResolvedValue({ runId: "run-1", result: {} });
 
@@ -184,7 +185,7 @@ describe("CardsPanel", () => {
   it("已冻结的卡显示解冻而不是冻结", async () => {
     vi.mocked(listCards).mockResolvedValue({
       cards: [{ ...activeCard, status: "frozen" }],
-      accounts: ["MAIN"],
+      accounts: ["MAIN"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
@@ -204,7 +205,7 @@ describe("CardsPanel", () => {
         { ...activeCard, account: "CHRIS", card_id: "same-id", holder_name: "ZHANG WEI" },
         { ...activeCard, account: "LINFENG", card_id: "same-id", holder_name: "LI FANG" },
       ],
-      accounts: ["CHRIS", "LINFENG"],
+      accounts: ["CHRIS", "LINFENG"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
@@ -223,7 +224,7 @@ describe("CardsPanel", () => {
   it("开卡表单默认选中第一个账号", async () => {
     vi.mocked(listCards).mockResolvedValue({
       cards: [],
-      accounts: ["CHRIS", "LINFENG"],
+      accounts: ["CHRIS", "LINFENG"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(issueCard).mockResolvedValue({ runId: "run-1", result: {} });

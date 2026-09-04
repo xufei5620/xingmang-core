@@ -183,7 +183,7 @@ func (s *Syncer) applyDecision(ctx context.Context, op Operation, d ReconcileDec
 	if d.CardID != "" {
 		for _, c := range found {
 			if c.ID == d.CardID {
-				if err := s.store.UpsertCard(ctx, op.Account, c, ""); err != nil {
+				if err := s.store.UpsertCard(ctx, op.Account, c, CardAttribution{}); err != nil {
 					return fmt.Errorf("落卡片投影 %s: %w", c.ID, err)
 				}
 				break
@@ -214,7 +214,7 @@ func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("账号 %s 查卡 %s: %w", ref.Account, ref.CardID, err))
 			continue
 		}
-		if err := s.store.UpsertCard(ctx, ref.Account, card, ""); err != nil {
+		if err := s.store.UpsertCard(ctx, ref.Account, card, CardAttribution{}); err != nil {
 			errs = append(errs, fmt.Errorf("落卡片投影 %s: %w", ref.CardID, err))
 		}
 	}

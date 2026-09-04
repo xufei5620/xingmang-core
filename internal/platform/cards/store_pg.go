@@ -133,15 +133,15 @@ SELECT COALESCE(SUM(amount_scaled), 0)
 // UpsertCard 落卡片投影。
 //
 // ownerRef 为空时**保留原值**：同步作业不知道归属，不该把运营填的标签清掉。
-func (s *PgStore) UpsertCard(ctx context.Context, account string, card infini.Card, ownerRef string) error {
+func (s *PgStore) UpsertCard(ctx context.Context, account string, card infini.Card, attribution CardAttribution) error {
 	now := s.now()
 
 	const upsertSQL = `
 INSERT INTO cards.infini_card (
     environment, account, upstream_card_id, mask, holder_name, card_alias, status,
-    currency, balance_minor, owner_ref, upstream_user_id,
+    currency, balance_minor, owner_ref, user_email, upstream_user_id,
     upstream_created_at, upstream_updated_at, last_synced_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$14)
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$15)
 ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     mask = EXCLUDED.mask,
     holder_name = EXCLUDED.holder_name,
@@ -150,6 +150,9 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     currency = EXCLUDED.currency,
     balance_minor = EXCLUDED.balance_minor,
     owner_ref = COALESCE(NULLIF(EXCLUDED.owner_ref, ''), cards.infini_card.owner_ref),
+    -- 同 owner_ref：同步作业不知道这个字段（上游卡片对象里没有），
+    -- 传空时保留原值，否则每轮同步都会把开卡时记下的邮箱冲掉。
+    user_email = COALESCE(NULLIF(EXCLUDED.user_email, ''), cards.infini_card.user_email),
     upstream_user_id = EXCLUDED.upstream_user_id,
     upstream_created_at = EXCLUDED.upstream_created_at,
     upstream_updated_at = EXCLUDED.upstream_updated_at,
@@ -166,7 +169,7 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
 
 	if _, err := s.pool.Exec(ctx, upsertSQL,
 		s.environment, account, card.ID, card.Mask, card.HolderName, card.Alias, card.Status,
-		card.Currency, card.BalanceMinor, ownerRef, card.UserID,
+		card.Currency, card.BalanceMinor, attribution.OwnerRef, attribution.UserEmail, card.UserID,
 		createdAt, updatedAt, now,
 	); err != nil {
 		return fmt.Errorf("落卡片投影: %w", err)
@@ -369,6 +372,9 @@ type CardView struct {
 	Currency     string
 	BalanceMinor int64
 	OwnerRef     string
+	// UserEmail 是开卡时指定的企业成员邮箱。上游不回这个字段，
+	// 是平台在开卡那一刻记下来的。
+	UserEmail    string
 	LastSyncedAt time.Time
 	// PAN / CVV / ExpiryMMYY 是卡面明文（产品负责人 2026-09-04 决定落库，
 	// 见迁移 000027）。空串 = 还没拉到（新卡在 active 之前拉不到）。
@@ -378,6 +384,15 @@ type CardView struct {
 	PAN        string
 	CVV        string
 	ExpiryMMYY string
+	// 以下是平台自己的登记数据，上游一个都不知道。
+	BoundAccount     string
+	BoundAccountKind string
+	ServiceName      string
+	// NextRenewalOn 是 YYYY-MM-DD 或空串。
+	NextRenewalOn string
+	UsageNote     string
+	// UpstreamCreatedAt 是上游记的开卡时刻。
+	UpstreamCreatedAt time.Time
 }
 
 // ListCards 读卡片投影。
@@ -388,8 +403,11 @@ type CardView struct {
 func (s *PgStore) ListCards(ctx context.Context, account, ownerRef string) ([]CardView, error) {
 	const listSQL = `
 SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
-       currency, balance_minor, owner_ref, last_synced_at,
-       pan, cvv, expiry_mmyy
+       currency, balance_minor, owner_ref, user_email, last_synced_at,
+       pan, cvv, expiry_mmyy,
+       bound_account, bound_account_kind, service_name,
+       COALESCE(to_char(next_renewal_on, 'YYYY-MM-DD'), ''), usage_note,
+       upstream_created_at
   FROM cards.infini_card
  WHERE environment = $1
    AND ($2 = '' OR account = $2)
@@ -404,11 +422,21 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
 
 	var out []CardView
 	for rows.Next() {
-		var v CardView
+		var (
+			v CardView
+			// 上游开卡时刻可空：老数据或解析失败时留零值，
+			// 端点层据此不输出该字段，而不是显示成 1970 年。
+			upstreamCreatedAt *time.Time
+		)
 		if err := rows.Scan(&v.Account, &v.CardID, &v.Mask, &v.HolderName, &v.Alias, &v.Status,
-			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.LastSyncedAt,
-			&v.PAN, &v.CVV, &v.ExpiryMMYY); err != nil {
+			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.UserEmail, &v.LastSyncedAt,
+			&v.PAN, &v.CVV, &v.ExpiryMMYY,
+			&v.BoundAccount, &v.BoundAccountKind, &v.ServiceName,
+			&v.NextRenewalOn, &v.UsageNote, &upstreamCreatedAt); err != nil {
 			return nil, err
+		}
+		if upstreamCreatedAt != nil {
+			v.UpstreamCreatedAt = *upstreamCreatedAt
 		}
 		out = append(out, v)
 	}
@@ -551,6 +579,64 @@ UPDATE cards.infini_card
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("卡 %s（账号 %s）不存在，无法落明文", cardID, account)
+	}
+	return nil
+}
+
+// KnownMemberEmails 返回平台开过卡时用过的企业成员邮箱，去重排序。
+//
+// 上游**没有成员列表接口**（2026-09-04 逐条核对文档目录确认），所以管理端
+// 开卡表单的下拉只能用这个。第一次开卡时它是空的——表单因此仍然允许手输，
+// 下拉只是「别再打一遍」的便利，不是一道校验。
+func (s *PgStore) KnownMemberEmails(ctx context.Context) ([]string, error) {
+	const listSQL = `
+SELECT DISTINCT user_email
+  FROM cards.infini_card
+ WHERE environment = $1 AND user_email <> ''
+ ORDER BY user_email`
+
+	rows, err := s.pool.Query(ctx, listSQL, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查已用成员邮箱: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		out = append(out, email)
+	}
+	return out, rows.Err()
+}
+
+// SetCardUsage 写卡片的业务用途登记。
+//
+// 这些列上游一个都不知道，只有平台自己写；同步作业碰不到它们
+// （UpsertCard 的 SQL 里没有这几列）。所以这里是全量覆盖，不做
+// COALESCE 保留——调用方提交的就是这张卡登记的完整内容。
+func (s *PgStore) SetCardUsage(ctx context.Context, usage CardUsage) error {
+	const updateSQL = `
+UPDATE cards.infini_card
+   SET bound_account = $3,
+       bound_account_kind = $4,
+       service_name = $5,
+       next_renewal_on = NULLIF($6, '')::date,
+       usage_note = $7,
+       updated_at = $8
+ WHERE environment = $1 AND account = $2 AND upstream_card_id = $9`
+
+	tag, err := s.pool.Exec(ctx, updateSQL,
+		s.environment, usage.Account,
+		usage.BoundAccount, usage.BoundAccountKind, usage.ServiceName,
+		usage.NextRenewalOn, usage.Note, s.now(), usage.CardID)
+	if err != nil {
+		return fmt.Errorf("写用途登记（账号 %s 卡 %s）: %w", usage.Account, usage.CardID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("卡 %s（账号 %s）不存在", usage.CardID, usage.Account)
 	}
 	return nil
 }

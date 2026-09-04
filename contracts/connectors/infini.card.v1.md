@@ -181,6 +181,39 @@ keyId 与 secret 分成两个引用是为了让它们能各自轮换。keyId 是
 只有 `card.read` 的仍然只看到 `mask`。表本身不加密——把密钥放在同一个系统里
 的加密层只会给出虚假的安全感。
 
+## 平台自有字段（上游一个都不知道）
+
+投影表里有几列不来自上游，也永远不会被同步覆盖，它们回答的是上游答不出的问题：
+
+| 列 | 含义 | 谁写 |
+| --- | --- | --- |
+| `owner_ref` | 这张卡归谁用 | 开卡时传入 |
+| `user_email` | 开卡时指定的企业成员邮箱（上游只回 `user_id`） | 开卡时传入 |
+| `bound_account` / `bound_account_kind` | 这张卡绑在哪个外部服务账号上，以及那个标识是邮箱/用户名/手机号 | `cards.card.usage.set` |
+| `service_name` | 订的什么服务 | `cards.card.usage.set` |
+| `next_renewal_on` | 下次续费日期（`date`，可空） | `cards.card.usage.set` |
+| `usage_note` | 备注 | `cards.card.usage.set` |
+
+三条约束：
+
+1. **同步作业绝不能覆盖这些列。** UPSERT 里 `owner_ref` 与 `user_email` 用
+   `COALESCE(NULLIF(...))` 保留原值，其余四列根本不在 UPSERT 的 SET 列表里。
+   同步每 5 分钟一轮，一旦覆盖，运营刚填的登记最多活五分钟——有集成测试守着。
+2. **续费日期由人填，不从流水推断。** 试用转正、年付转月付、涨价都会让推断
+   悄悄错掉，而错了的提醒比没有提醒更糟：人会信它。
+3. **续费风险由服务端判定**（`none` / `soon` / `unfunded` / `overdue`，
+   `soon` 的窗口是 7 天），前端只翻译成文案。两处各算一遍迟早分叉，
+   分叉的那一边会把「续不上」显示成正常。`unfunded`（续费日临近且卡上没钱）
+   是这一列真正的用处——订阅掉了通常没人提前发现。
+
+`bound_account_kind` 是显式枚举而不是从字面猜：有些服务的账号是用户名或手机号，
+猜错会让运营按错的方式去找账号。
+
+开卡表单的「企业成员邮箱」下拉，候选来自 `SELECT DISTINCT user_email`（按环境
+隔离）。**上游没有成员列表接口**，所以候选只能是「平台自己开过卡用过的」——
+第一次开卡时它是空的，因此用 `datalist` 而不是 `select`：不能把没用过的新成员
+挡在外面。
+
 ## 卡片状态取值
 
 `init`、`pending`、`active`、`pending_delete`、`deleted`。文档未列出冻结后的

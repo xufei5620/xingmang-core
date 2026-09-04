@@ -25,6 +25,9 @@ interface ListResponse<T> {
 interface CardListResponse {
   items: CardItem[] | null;
   accounts: string[] | null;
+  /** 平台开过卡时用过的企业成员邮箱。上游没有成员列表接口，
+   *  开卡表单的下拉只能用这个。第一次开卡时它是空的。 */
+  member_emails: string[] | null;
 }
 
 /** 投影数据的新鲜度。判定在服务端做，前端只负责显示——
@@ -60,6 +63,20 @@ export interface CardItem {
   /** 整数最小单位（USD 即分）。前端只做除法显示，不参与任何计算。 */
   balance_minor: number;
   owner_ref?: string;
+  user_email?: string;
+  /** 以下是平台自己的用途登记，上游一个都不知道。 */
+  bound_account?: string;
+  bound_account_kind?: string;
+  service_name?: string;
+  /** YYYY-MM-DD 或缺席。 */
+  next_renewal_on?: string;
+  usage_note?: string;
+  /** 续费风险由**服务端**判定：none / soon / unfunded / overdue。
+   *  前端不自己算——两处各算一遍迟早分叉，而分叉的那一边会把
+   *  「续不上」显示成正常。 */
+  renewal_risk: string;
+  /** 上游记的开卡时刻（RFC3339）；缺失时字段不出现。 */
+  issued_at?: string;
   freshness: CardFreshness;
 }
 
@@ -99,6 +116,7 @@ export interface CardOperationItem {
 export interface CardsView {
   cards: CardItem[];
   accounts: string[];
+  memberEmails: string[];
 }
 
 export async function listCards(
@@ -113,7 +131,11 @@ export async function listCards(
   const body = await client.get<CardListResponse>(`/api/v1/cards${query}`, {
     ...(options.signal ? { signal: options.signal } : {}),
   });
-  return { cards: body.items ?? [], accounts: body.accounts ?? [] };
+  return {
+    cards: body.items ?? [],
+    accounts: body.accounts ?? [],
+    memberEmails: body.member_emails ?? [],
+  };
 }
 
 export async function listCardTransactions(
@@ -239,4 +261,25 @@ export async function revealCard(
     client,
   );
   return run.result as RevealedCard;
+}
+
+/** 登记卡片的业务用途（`cards.card.usage.set@1`）。
+ *
+ *  绑定账号、订阅服务、下次续费日期这些上游一个都不知道，是平台自己记的。
+ *  续费日期是人填的而不是从流水推断的：试用转正、年付转月付、涨价都会让
+ *  推断悄悄错掉，而错了的提醒比没有提醒更糟。 */
+export function setCardUsage(
+  params: {
+    account: string;
+    card_id: string;
+    bound_account?: string;
+    bound_account_kind?: string;
+    service_name?: string;
+    next_renewal_on?: string;
+    note?: string;
+  },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.usage.set", version: "1", params }, options, client);
 }

@@ -171,3 +171,71 @@ func switchHandler(
 		return summary, nil
 	}
 }
+
+// ActionUsageSet 登记卡片的业务用途。
+const ActionUsageSet = "cards.card.usage.set"
+
+// usageSetDef 是用途登记的声明。
+//
+// 权限归 card.manage 而不是 card.issue：登记的是「这张已有的卡拿来干什么」，
+// 与开一张新卡是两件事。它不碰上游、不花钱，但仍走 Action——写操作唯一
+// 入口（宪法条款 2），而且「谁改了这张卡的绑定账号」值得留痕。
+func usageSetDef(accounts []string) action.Definition {
+	return action.Definition{
+		ID: ActionUsageSet, Version: actionVersion,
+		RiskLevel: action.L1, Permission: PermissionManage,
+		Schema: action.Schema{
+			Fields: []action.Field{
+				accountField(accounts),
+				{Name: "card_id", Type: action.FieldString, Required: true},
+				{Name: "bound_account", Type: action.FieldString},
+				// 枚举与迁移 000028 的 CHECK 约束一致：显式记录标识类型，
+				// 不靠「长得像邮箱就是邮箱」猜。
+				{Name: "bound_account_kind", Type: action.FieldString,
+					Enum: []string{"email", "username", "phone", "other"}},
+				{Name: "service_name", Type: action.FieldString},
+				// YYYY-MM-DD；空表示不是订阅。格式在领域层校验——
+				// 拼错的日期不能静默丢掉，那会让「本以为设了提醒」的卡悄悄扣不上。
+				{Name: "next_renewal_on", Type: action.FieldString},
+				{Name: "note", Type: action.FieldString},
+			},
+		},
+		Environments: allEnvironments, PrincipalTypes: humanOnly,
+	}
+}
+
+func usageSetHandler(svc *Service) action.Handler {
+	return func(ctx context.Context, params map[string]any) (any, error) {
+		if svc == nil {
+			return nil, ErrServiceUnbound
+		}
+		usage := CardUsage{
+			Account:          stringParam(params, "account"),
+			CardID:           stringParam(params, "card_id"),
+			BoundAccount:     stringParam(params, "bound_account"),
+			BoundAccountKind: stringParam(params, "bound_account_kind"),
+			ServiceName:      stringParam(params, "service_name"),
+			NextRenewalOn:    stringParam(params, "next_renewal_on"),
+			Note:             stringParam(params, "note"),
+		}
+
+		action.RecordResource(ctx, resourceCard, usage.CardID)
+
+		if err := svc.SetCardUsage(ctx, usage); err != nil {
+			return nil, err
+		}
+
+		// 绑定账号标识可能是邮箱这类个人信息——**不进审计摘要**。
+		// 审计只记「这张卡的用途登记被改过、改成了哪个服务、续费日期是什么」，
+		// 具体绑到谁去投影表查。审计是 append-only，写进去删不掉。
+		summary := map[string]any{
+			"account":            usage.Account,
+			"service_name":       usage.ServiceName,
+			"next_renewal_on":    usage.NextRenewalOn,
+			"bound_account_kind": usage.BoundAccountKind,
+			"bound_account_set":  usage.BoundAccount != "",
+		}
+		action.RecordAfter(ctx, summary)
+		return summary, nil
+	}
+}

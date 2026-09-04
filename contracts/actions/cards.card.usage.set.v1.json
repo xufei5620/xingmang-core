@@ -1,0 +1,57 @@
+{
+  "id": "cards.card.usage.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "card.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NATURALLY_IDEMPOTENT_LAST_WRITE_WINS",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REWRITE",
+  "params": {
+    "account": {
+      "type": "string",
+      "required": true
+    },
+    "card_id": {
+      "type": "string",
+      "required": true
+    },
+    "bound_account": {
+      "type": "string",
+      "required": false
+    },
+    "bound_account_kind": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "email",
+        "username",
+        "phone",
+        "other"
+      ]
+    },
+    "service_name": {
+      "type": "string",
+      "required": false
+    },
+    "next_renewal_on": {
+      "type": "string",
+      "required": false
+    },
+    "note": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-CARD2 登记一张卡的业务用途：绑在哪个外部服务账号上、订的什么服务、下次什么时候续费。这些字段上游一个都不知道，是平台自己记的，所以它只写平台投影表的登记列，不发任何供应商请求——也因此不花钱、不需要客户端幂等键：重复提交等于重复写同一份登记，最后一次生效。bound_account_kind 是显式枚举而不是从字面猜：有些服务的账号是用户名或手机号，猜错会让运营按错的方式去找账号。next_renewal_on 是 YYYY-MM-DD 或空串，格式在领域层校验后才落库——拼错的日期不能静默丢掉，那会让一张「本以为设了提醒」的卡悄悄扣不上。续费日期由人填而不是从流水推断：试用转正、年付转月付、涨价都会让推断悄悄错掉，而错了的提醒比没有提醒更糟，因为人会信它。续费风险（none/soon/unfunded/overdue）由服务端在读路径判定后下发，前端不自己算——两处各算一遍迟早分叉，分叉的那一边会把「续不上」显示成正常。权限用 card.manage 而不是 card.issue：登记用途改不动钱，但它确实改运营依赖的判断依据，所以也不放进只读档。account 参数必填，理由同其他卡 Action：卡 id 只在自己账号内有意义。"
+}

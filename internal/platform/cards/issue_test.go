@@ -20,6 +20,9 @@ type memStore struct {
 	cardAccount map[string]string
 	txs         map[string][]infini.CardTransaction
 	secrets     map[string]infini.RevealedCard
+	ownerRef    map[string]string
+	userEmail   map[string]string
+	usage       map[string]CardUsage
 	spentToday  string
 	// spentByAccount 非空时按账号取值，否则回落到 spentToday。
 	spentByAccount map[string]string
@@ -32,6 +35,9 @@ func newMemStore() *memStore {
 		cardAccount: make(map[string]string),
 		txs:         make(map[string][]infini.CardTransaction),
 		secrets:     make(map[string]infini.RevealedCard),
+		ownerRef:    make(map[string]string),
+		userEmail:   make(map[string]string),
+		usage:       make(map[string]CardUsage),
 		spentToday:  "0",
 	}
 }
@@ -59,9 +65,17 @@ func (m *memStore) SpentToday(ctx context.Context, account, kind string, day tim
 	return m.spentToday, nil
 }
 
-func (m *memStore) UpsertCard(ctx context.Context, account string, card infini.Card, ownerRef string) error {
+func (m *memStore) UpsertCard(ctx context.Context, account string, card infini.Card, attribution CardAttribution) error {
 	m.cards[card.ID] = card
 	m.cardAccount[card.ID] = account
+	// 与 PgStore 同口径：非空才覆盖，否则同步作业每轮都会把开卡时
+	// 记下的归属冲掉。
+	if attribution.OwnerRef != "" {
+		m.ownerRef[card.ID] = attribution.OwnerRef
+	}
+	if attribution.UserEmail != "" {
+		m.userEmail[card.ID] = attribution.UserEmail
+	}
 	return nil
 }
 
@@ -85,6 +99,11 @@ func (m *memStore) TrackedCards(ctx context.Context) ([]CardRef, error) {
 
 func (m *memStore) UpsertTransactions(ctx context.Context, account, cardID string, txs []infini.CardTransaction) error {
 	m.txs[cardID] = append(m.txs[cardID], txs...)
+	return nil
+}
+
+func (m *memStore) SetCardUsage(ctx context.Context, usage CardUsage) error {
+	m.usage[usage.CardID] = usage
 	return nil
 }
 
