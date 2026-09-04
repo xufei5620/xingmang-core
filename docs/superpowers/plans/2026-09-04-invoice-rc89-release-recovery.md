@@ -1,5 +1,10 @@
 # RC89 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC89 shipped at signed tag
+> `v0.1.0-rc89-signed` (`0d56abf`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-04-invoice-rc90-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC89 — four defects the product owner found working in the embedded admin console, three of them things the console showed wrongly rather than computed wrongly:
