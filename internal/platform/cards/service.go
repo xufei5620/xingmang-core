@@ -89,6 +89,8 @@ func (s *Service) IssueCard(ctx context.Context, req IssueRequest) (IssueResult,
 		Kind:           OpIssue,
 		State:          StatePending,
 		Alias:          alias,
+		AmountText:     req.TopUpAmount,
+		TokenType:      req.TokenType,
 		StartedAt:      now,
 	}
 
@@ -117,7 +119,7 @@ func (s *Service) IssueCard(ctx context.Context, req IssueRequest) (IssueResult,
 	})
 	if err != nil {
 		resolved := op
-		resolved.State = stateForUpstreamError(err)
+		resolved.State = stateForUpstreamError(err, OpIssue)
 		resolved.ResolvedAt = now
 		resolved.Reason = string(connector.KindOf(err))
 		if resolved.State == StateUnknown {
@@ -165,7 +167,12 @@ func (s *Service) IssueCard(ctx context.Context, req IssueRequest) (IssueResult,
 //
 // 把「可能已经执行」错判成「确定没执行」，就是允许了一次可能重复扣钱的重试。
 // 所以默认分支落在 unknown 一侧——不认识的错误按最坏情况处理。
-func stateForUpstreamError(err error) OperationState {
+func stateForUpstreamError(err error, kind string) OperationState {
+	// 天然幂等的操作（冻结/解冻）不进不确定态：重复执行不产生新效果，
+	// 所以重试是安全的。把它们也锁住只会让卡在出事时冻不上。
+	if naturallyIdempotent(kind) {
+		return StateFailed
+	}
 	switch connector.KindOf(err) {
 	case connector.KindRejected,
 		connector.KindAuth,

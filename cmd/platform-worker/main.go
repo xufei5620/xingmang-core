@@ -129,6 +129,23 @@ func main() {
 	// 装在这里而不是 configFromEnv：它需要连接池。
 	config.ConnectorConfigs = jobs.NewPgConnectorConfigSource(pool)
 
+	// Infini 卡片同步（XM-CARD2）：承担异步开卡的轮询与不确定态的对账收敛。
+	// 默认关闭（XM_CARDS_MODE 未设或 off 时 syncer 为 nil），装配失败即拒绝
+	// 启动——一个「以为在收敛不确定态、其实每轮都失败」的 worker，
+	// 会让那些可能已经花掉的钱永远停在不确定态而没人知道。
+	cardSyncer, err := buildCardSyncer(pool,
+		cardsSecretProvider(config.SecretRoot, config.Environment, logger),
+		config.Environment, os.Getenv)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed",
+			"module", "platform.worker", "error_code", "cards_config_invalid")
+		os.Exit(2)
+	}
+	if cardSyncer != nil {
+		config.CardSyncer = cardSyncer
+		config.CardSyncEnabled = true
+	}
+
 	if *migrate {
 		if err := jobs.Migrate(ctx, pool, logger); err != nil {
 			logger.ErrorContext(ctx, "worker_migration_failed", "event", "worker_migration_failed", "module", "platform.worker", "error_code", "migration_failed")

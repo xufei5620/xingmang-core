@@ -16,6 +16,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/metering"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/assurance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
@@ -240,6 +241,19 @@ type Config struct {
 	// revision 快照；仅测试/迁移过渡可使用上面的静态字段。
 	RunwayThresholdProvider finance.RunwayThresholdProvider
 
+	// CardSyncEnabled 决定是否注册卡片周期同步任务（XM-CARD2）。
+	//
+	// **默认关闭**，与其他同步任务一致，但理由更硬：这个任务承担不确定态的
+	// 对账收敛，而对账要打上游。一个没配好凭据就启用的环境，会每 5 分钟
+	// 产生一次注定失败的上游调用。
+	CardSyncEnabled bool
+	// CardSyncInterval 是同步周期，默认 DefaultCardSyncInterval。
+	CardSyncInterval time.Duration
+	// CardSyncer 是实际干活的领域层同步器；Enabled 时必须非 nil。
+	CardSyncer *cards.Syncer
+	// CardSyncRunOnStart 让进程起来就先同步一次，而不是干等一个周期。
+	CardSyncRunOnStart bool
+
 	// CPASyncEnabled 决定是否注册 CPA 周期同步任务（XM-CPA0）。
 	//
 	// 与其他采集开关不同，它的零值 false 就是 DefaultConfig 的默认值——
@@ -414,6 +428,10 @@ func DefaultConfig() Config {
 		// CPA 默认关闭（XM-CPA0）：off 是唯一不需要任何配置就安全的状态——
 		// 没有 fake 模式可以垫底，打开却没配 CPADataDir 只会让每轮同步都写一条
 		// SyncFailed。cmd/platform-worker/config.go 按 XM_CPA_MODE=file 显式打开。
+		CardSyncEnabled:    false,
+		CardSyncInterval:   DefaultCardSyncInterval,
+		CardSyncRunOnStart: true,
+
 		CPASyncEnabled:    false,
 		CPASyncInterval:   DefaultCPASyncInterval,
 		CPASyncRunOnStart: true,
@@ -511,6 +529,9 @@ func (c Config) normalized() Config {
 	}
 	if c.Logger == nil {
 		c.Logger = structuredDefaultLogger()
+	}
+	if c.CardSyncInterval == 0 {
+		c.CardSyncInterval = defaults.CardSyncInterval
 	}
 	if c.CPASyncInterval == 0 {
 		c.CPASyncInterval = defaults.CPASyncInterval
@@ -731,6 +752,14 @@ func (c Config) validate() error {
 	if c.CPASyncRunID != "" && c.Environment == "production" {
 		// 与 Sub2APISyncRunID 同一条理由：RunID 只服务于集成测试隔离。
 		return fmt.Errorf("cpa sync run ID must not be set in production")
+	}
+	if c.CardSyncEnabled && c.CardSyncer == nil {
+		// 启用了却没给 Syncer，等于注册一个每轮都必然失败的任务——
+		// 而这个任务失败意味着不确定态永远收敛不了。启动期就拒绝。
+		return fmt.Errorf("card sync 已启用但未提供 Syncer")
+	}
+	if c.CardSyncEnabled && c.CardSyncInterval < time.Second {
+		return fmt.Errorf("card sync interval %s is below River's one-second minimum", c.CardSyncInterval)
 	}
 	if c.CPASyncEnabled && c.CPAMode != CPAModeFile {
 		// off 是硬性的停用状态，不是「暂时没配」：即便有人误把 Enabled 设成
@@ -1091,6 +1120,22 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			return nil, err
 		}
 		periodic = append(periodic, connectorProbePeriodic)
+	}
+
+	if cfg.CardSyncEnabled {
+		river.AddWorker(workers, NewCardSyncWorker(cfg.Logger, cfg.CardSyncer))
+		cardPeriodic, err := newManifestPeriodicJob(
+			CardSyncJobKind, cfg.CardSyncInterval, cfg.CardSyncRunOnStart,
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := CardSyncArgs{}
+				opts := args.InsertOpts()
+				return args, &opts
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, cardPeriodic)
 	}
 
 	if cfg.CPASyncEnabled {

@@ -375,6 +375,32 @@ func main() {
 		NewAPIDefaults:  loadNewAPIPaymentsDefaults(),
 	})
 
+	// Infini 卡服务（XM-CARD0/1/2）。**默认 off**，与用户管理默认 fake 相反：
+	// 这些 Action 会花真钱，一个默认挂上开卡按钮的环境迟早有人在以为是
+	// 演示的地方点下去。real 模式缺任何一项配置（端点、两个凭据引用、
+	// 两条金额上限）都拒绝启动——那时的错误如果推迟到有人点开卡才出现，
+	// 会长得像上游故障，排查方向完全错。
+	cardsCfg, err := loadCardsConfig(os.Getenv)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "cards_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	cardService, cardStore, err := buildCards(ctx, cardsCfg, pool,
+		platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger), cfg.Environment)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "cards_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	// 注册失败即拒绝启动：一个「卡片页有开卡按钮但后端没注册动作」的进程，
+	// 会让运维在真要开卡时才发现按钮点不动。
+	if err := registerCardActions(actionRegistry, cardService); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+
 	// CPA 逐 key 用量（XM-CPA0）。与 reqlog file 模式同一条纪律：配错了就
 	// 拒绝启动；没启用（off）不算错误，路由据此不挂载
 	// /platforms/cpa/keys。这条链路只读一份只读挂载的本机 SQLite 文件，
@@ -430,6 +456,10 @@ func main() {
 		PlatformOrders: platformPaymentsOrNil(platformPaymentsQuerier),
 		// nil 时 /platforms/cpa/keys 不挂载（见 httpapi.Deps.CPAKeys）
 		CPAKeys: cpaKeys,
+		// nil 时卡片只读端点整组不挂载（XM_CARDS_MODE=off）。
+		// 写路径只走 cards.card.* Action，这里不开第二条。
+		Cards:            cardQuerierOrNil(cardStore),
+		CardSyncInterval: cardsCfg.SyncInterval,
 		// 凭据登记的读与写共用同一个仓储：清单里只有指纹与可用性，没有值
 		Credentials: credentialStore,
 		// 登记簿的读与写共用同一个仓储：Query 端点与 Action Handler

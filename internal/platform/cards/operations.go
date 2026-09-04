@@ -44,7 +44,11 @@ type Operation struct {
 	State          OperationState
 	CardID         string
 	// Alias 是写进上游 card_alias 的幂等信标，对账时用它精确匹配。
-	Alias       string
+	Alias string
+	// AmountText 是原始金额文本——发给上游的就是它，进审计的也是它。
+	// 台账另存一份按固定标度解析的整数用于求和，见迁移 000026 文件头。
+	AmountText  string
+	TokenType   string
 	RequestHash string
 	StartedAt   time.Time
 	ResolvedAt  time.Time

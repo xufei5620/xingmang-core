@@ -16,6 +16,7 @@ var issueNow = time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 type memStore struct {
 	ops        map[string]Operation
 	cards      map[string]infini.Card
+	txs        map[string][]infini.CardTransaction
 	spentToday string
 }
 
@@ -23,6 +24,7 @@ func newMemStore() *memStore {
 	return &memStore{
 		ops:        make(map[string]Operation),
 		cards:      make(map[string]infini.Card),
+		txs:        make(map[string][]infini.CardTransaction),
 		spentToday: "0",
 	}
 }
@@ -46,6 +48,29 @@ func (m *memStore) SpentToday(ctx context.Context, kind string, day time.Time) (
 
 func (m *memStore) UpsertCard(ctx context.Context, card infini.Card, ownerRef string) error {
 	m.cards[card.ID] = card
+	return nil
+}
+
+func (m *memStore) UnresolvedOperations(ctx context.Context) ([]Operation, error) {
+	var out []Operation
+	for _, op := range m.ops {
+		if op.State == StatePending || op.State == StateUnknown {
+			out = append(out, op)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) TrackedCardIDs(ctx context.Context) ([]string, error) {
+	var out []string
+	for id := range m.cards {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func (m *memStore) UpsertTransactions(ctx context.Context, cardID string, txs []infini.CardTransaction) error {
+	m.txs[cardID] = append(m.txs[cardID], txs...)
 	return nil
 }
 

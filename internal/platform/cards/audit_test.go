@@ -199,3 +199,13 @@ func TestRevealRequiresDedicatedPermission(t *testing.T) {
 		t.Fatal("没有 card.reveal 权限必须被拒")
 	}
 }
+
+// newRegistryWith 组一个注册表，供多处测试查声明。
+func newRegistryWith(t *testing.T, svc *Service) *action.Registry {
+	t.Helper()
+	reg := action.NewRegistry()
+	if err := RegisterActions(reg, svc); err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
