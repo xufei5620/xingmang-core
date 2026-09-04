@@ -11,11 +11,36 @@
  *  状态容器、localStorage、URL 或日志。** 后端的读端点里根本没有这些字段。
  */
 
-import { apiClient, type ApiClient } from "./client";
+import {
+  apiClient,
+  FeatureNotMountedError,
+  looksLikeUnmountedRoute,
+  type ApiClient,
+} from "./client";
 import { executeAction, type ActionRun, type ListOptions } from "./platform";
 
 interface ListResponse<T> {
   items: T[] | null;
+}
+
+/** 「卡片管理」在当前环境未启用的说明文案。
+ *
+ *  XM_CARDS_MODE=off 时后端整组不挂载这三个只读端点（router.go 的
+ *  `d.Cards != nil`），而侧栏里的「卡片管理」是无条件显示的。不做这层翻译，
+ *  未启用的环境点进去看到的是一个泛型报错，读的人会以为它坏了而不是没开。 */
+const CARDS_NOT_MOUNTED_DESCRIPTION =
+  "卡片管理在当前环境未启用（XM_CARDS_MODE=off）。配好 Infini 账号与凭据后会自动出现，无需手动开启。";
+
+/** 把「整组路由没挂载」的 404 翻成 FeatureNotMountedError。
+ *
+ *  只认没有 error.code 的裸 404（chi 的默认 404）。带 error.code 的 404 是
+ *  「这一条没找到」，两者混为一谈会把一次真实的查不到显示成「功能未启用」，
+ *  让人跑去改配置。 */
+function translateUnmounted(error: unknown): never {
+  if (looksLikeUnmountedRoute(error)) {
+    throw new FeatureNotMountedError(error, CARDS_NOT_MOUNTED_DESCRIPTION);
+  }
+  throw error;
 }
 
 /** 卡片列表的响应：条目 + 已配置的账号清单。
@@ -128,9 +153,11 @@ export async function listCards(
   if (options.ownerRef) params.set("owner_ref", options.ownerRef);
   const query = params.toString() ? `?${params.toString()}` : "";
 
-  const body = await client.get<CardListResponse>(`/api/v1/cards${query}`, {
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  const body = await client
+    .get<CardListResponse>(`/api/v1/cards${query}`, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
   return {
     cards: body.items ?? [],
     accounts: body.accounts ?? [],
@@ -144,10 +171,12 @@ export async function listCardTransactions(
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<CardTransactionItem[]> {
-  const body = await client.get<ListResponse<CardTransactionItem>>(
-    `/api/v1/cards/${encodeURIComponent(cardId)}/transactions?account=${encodeURIComponent(account)}`,
-    { ...(options.signal ? { signal: options.signal } : {}) },
-  );
+  const body = await client
+    .get<ListResponse<CardTransactionItem>>(
+      `/api/v1/cards/${encodeURIComponent(cardId)}/transactions?account=${encodeURIComponent(account)}`,
+      { ...(options.signal ? { signal: options.signal } : {}) },
+    )
+    .catch(translateUnmounted);
   return body.items ?? [];
 }
 
@@ -155,10 +184,11 @@ export async function listCardOperationsNeedingAttention(
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<CardOperationItem[]> {
-  const body = await client.get<ListResponse<CardOperationItem>>(
-    "/api/v1/cards/operations/attention",
-    { ...(options.signal ? { signal: options.signal } : {}) },
-  );
+  const body = await client
+    .get<ListResponse<CardOperationItem>>("/api/v1/cards/operations/attention", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
   return body.items ?? [];
 }
 
