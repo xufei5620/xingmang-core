@@ -108,8 +108,13 @@ func TestServiceValidationAndSecretNonDisclosure(t *testing.T) {
 	if settings.ServiceItem != FixedServiceItem {
 		t.Fatal(settings.ServiceItem)
 	}
+	// 19_999 used to be rejected here because ¥200 was an absolute floor.
+	// Since XM-INV-SETTABLE-INVOICE-MINIMUM it is a legitimate setting, so the
+	// rejected value is one that is genuinely not a policy choice: an invoice
+	// minimum of zero. TestMinimumRequestMinorIsASettingNotAFloor covers the
+	// other side, that ¥5.00 is now accepted.
 	bad := validInput()
-	bad.MinimumRequestMinor = 19_999
+	bad.MinimumRequestMinor = 0
 	if _, err = service.Update(context.Background(), bad, 1, Actor{ID: "admin", RequestID: "req2"}); !errors.Is(err, ErrInvalidSettings) {
 		t.Fatalf("minimum got %v", err)
 	}
@@ -296,7 +301,7 @@ func TestMetadataUpdatesMayPreserveLegacyPlaceholder(t *testing.T) {
 
 func TestUpdateSMTPIsOneRevisionAndEncryptionFailureChangesNothing(t *testing.T) {
 	now := time.Now().UTC()
-	initial := Settings{IssuerName: "开票主体", ServiceItem: FixedServiceItem, MinimumRequestMinor: MinimumMinor, EligibilityStartAt: RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "old@qq.com", SMTPFromName: "旧名称", SMTPStartTLS: true, AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	initial := Settings{IssuerName: "开票主体", ServiceItem: FixedServiceItem, MinimumRequestMinor: DefaultMinimumRequestMinor, EligibilityStartAt: RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "old@qq.com", SMTPFromName: "旧名称", SMTPStartTLS: true, AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	repo := NewMemoryRepository(initial)
 	input := validInput()
 	input.SMTPFrom = "new@qq.com"

@@ -40,7 +40,7 @@ func settingsServerWithIssuer(t *testing.T, issuerName string, adminCIDRs, break
 	now := time.Now().UTC()
 	repo := adminsettings.NewMemoryRepository(adminsettings.Settings{
 		IssuerName: issuerName, ServiceItem: adminsettings.FixedServiceItem,
-		MinimumRequestMinor: adminsettings.MinimumMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587,
+		MinimumRequestMinor: adminsettings.DefaultMinimumRequestMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587,
 		SMTPFrom: "invoice@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true,
 		AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: now, UpdatedAt: now,
 	})
@@ -266,7 +266,7 @@ func TestNotReadyStillServesHealthAndProtectedAdminConfiguration(t *testing.T) {
 	now := time.Now().UTC()
 	repo := adminsettings.NewMemoryRepository(adminsettings.Settings{
 		IssuerName: adminsettings.UnconfiguredIssuerName, ServiceItem: adminsettings.FixedServiceItem,
-		MinimumRequestMinor: adminsettings.MinimumMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587,
+		MinimumRequestMinor: adminsettings.DefaultMinimumRequestMinor, SMTPHost: "smtp.qq.com", SMTPPort: 587,
 		SMTPFrom: "invoice@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true,
 		AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, CreatedAt: now, UpdatedAt: now,
 	})
@@ -379,7 +379,11 @@ func TestTypedInvoiceSettingsRejectsReservedIssuerPlaceholder(t *testing.T) {
 			t.Errorf("issuer=%q status=%d body=%s", issuer, recorder.Code, recorder.Body.String())
 		}
 	}
-	if service.MinimumRequestMinor() != adminsettings.MinimumMinor {
+	// The point is that the rejected updates changed nothing -- compare
+	// against what the harness seeded, not against the floor a setting may be
+	// lowered to (XM-INV-SETTABLE-INVOICE-MINIMUM made those two different
+	// values, and conflating them is what this assertion used to do).
+	if service.MinimumRequestMinor() != adminsettings.DefaultMinimumRequestMinor {
 		t.Fatalf("failed updates changed ledger minimum to %d", service.MinimumRequestMinor())
 	}
 }
@@ -572,7 +576,7 @@ func smtpTestSettings(from string) *adminsettings.Service {
 	now := time.Now().UTC()
 	repo := adminsettings.NewMemoryRepository(adminsettings.Settings{
 		IssuerName: "示例科技有限公司", ServiceItem: adminsettings.FixedServiceItem,
-		MinimumRequestMinor: adminsettings.MinimumMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt,
+		MinimumRequestMinor: adminsettings.DefaultMinimumRequestMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt,
 		SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: from, SMTPFromName: "发票中心", SMTPStartTLS: true,
 		AdminCIDRs: []string{"203.0.113.8/32"}, Revision: 1, UpdatedBy: "test", CreatedAt: now, UpdatedAt: now,
 	})
