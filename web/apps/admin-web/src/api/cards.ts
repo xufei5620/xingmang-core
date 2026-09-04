@@ -1,0 +1,206 @@
+/** Infini 卡服务的 API 客户端（XM-CARD3）。
+ *
+ *  读走三个只读端点，写全部走 `cards.card.*` Action——后端没有第二条写路径，
+ *  这里也不该有。
+ *
+ *  条目形状**保持后端 snake_case 原样**，不另建一层驼峰映射：这批端点只有
+ *  一个消费者（卡片页），映射层的价值全在「多处消费时形状一致」，
+ *  为一个消费者建一层只是多一个会漂的地方（同 api/server.ts 的选择）。
+ *
+ *  **明文卡面数据只从 `revealCard` 的返回值里出现，永远不要把它写进任何
+ *  状态容器、localStorage、URL 或日志。** 后端的读端点里根本没有这些字段。
+ */
+
+import { apiClient, type ApiClient } from "./client";
+import { executeAction, type ActionRun, type ListOptions } from "./platform";
+
+interface ListResponse<T> {
+  items: T[] | null;
+}
+
+/** 投影数据的新鲜度。判定在服务端做，前端只负责显示——
+ *  两处各判一次迟早会分叉，而分叉的那一边会把陈旧数据显示成实时的。 */
+export interface CardFreshness {
+  synced_at?: string;
+  age_seconds: number;
+  stale: boolean;
+  /** 与「很久没同步」是两件事：这条说明这张卡从建立起就没被同步过。 */
+  never_synced: boolean;
+}
+
+/** 卡片列表一行。 */
+export interface CardItem {
+  card_id: string;
+  /** 掩码卡号。完整卡号只能经 `revealCard` 取得，不在任何读端点里。 */
+  mask: string;
+  holder_name: string;
+  card_alias: string;
+  status: string;
+  currency: string;
+  /** 整数最小单位（USD 即分）。前端只做除法显示，不参与任何计算。 */
+  balance_minor: number;
+  owner_ref?: string;
+  freshness: CardFreshness;
+}
+
+/** 一笔卡交易。 */
+export interface CardTransactionItem {
+  card_id: string;
+  type: string;
+  amount_minor: number;
+  fee_minor: number;
+  currency: string;
+  status: string;
+  merchant: string;
+  occurred_at?: string;
+}
+
+/** 一笔待人工处置的操作。
+ *
+ *  每一条都意味着「有一笔花钱操作，我们至今不知道它到底成没成」。 */
+export interface CardOperationItem {
+  idempotency_key: string;
+  kind: string;
+  state: string;
+  card_id?: string;
+  card_alias?: string;
+  amount?: string;
+  token_type?: string;
+  reason?: string;
+  started_at: string;
+  /** 由**服务端**判定。前端不要按 state 自己推：迟早会推出一个
+   *  「看起来该能重试」的不确定态，而重试可能重复扣钱。 */
+  retry_allowed: boolean;
+}
+
+export async function listCards(
+  options: ListOptions & { ownerRef?: string } = {},
+  client: ApiClient = apiClient,
+): Promise<CardItem[]> {
+  const query = options.ownerRef ? `?owner_ref=${encodeURIComponent(options.ownerRef)}` : "";
+  const body = await client.get<ListResponse<CardItem>>(`/api/v1/cards${query}`, {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return body.items ?? [];
+}
+
+export async function listCardTransactions(
+  cardId: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardTransactionItem[]> {
+  const body = await client.get<ListResponse<CardTransactionItem>>(
+    `/api/v1/cards/${encodeURIComponent(cardId)}/transactions`,
+    { ...(options.signal ? { signal: options.signal } : {}) },
+  );
+  return body.items ?? [];
+}
+
+export async function listCardOperationsNeedingAttention(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardOperationItem[]> {
+  const body = await client.get<ListResponse<CardOperationItem>>(
+    "/api/v1/cards/operations/attention",
+    { ...(options.signal ? { signal: options.signal } : {}) },
+  );
+  return body.items ?? [];
+}
+
+/** 开卡（`cards.card.issue@1`）。
+ *
+ *  `idempotency_key` 必填且必须由调用方**稳定**生成：它决定发给上游的
+ *  card_alias，也是超时后对账的唯一抓手。同一次提交重试要带同一个键——
+ *  换一个键等于告诉后端「这是另一次开卡」，而上游没有幂等能力。 */
+export function issueCard(
+  params: {
+    idempotency_key: string;
+    product_id: number;
+    top_up_amount: string;
+    token_type: string;
+    user_email: string;
+    holder_name: string;
+    owner_ref?: string;
+  },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.issue", version: "1", params }, options, client);
+}
+
+/** 给已有的卡充值（`cards.card.topup@1`）。同样受金额上限约束。 */
+export function topUpCard(
+  params: {
+    idempotency_key: string;
+    card_id: string;
+    amount: string;
+    token_type: string;
+    note?: string;
+  },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.topup", version: "1", params }, options, client);
+}
+
+/** 把卡上的余额退回账户（`cards.card.redeem@1`）。
+ *
+ *  不受金额上限约束：赎回是资金回流不是花钱，用上限卡住它会在最需要
+ *  止损的时候拦住止损动作。 */
+export function redeemCard(
+  params: {
+    idempotency_key: string;
+    card_id: string;
+    amount: string;
+    token_type: string;
+    note?: string;
+  },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.redeem", version: "1", params }, options, client);
+}
+
+export function freezeCard(
+  params: { idempotency_key: string; card_id: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.freeze", version: "1", params }, options, client);
+}
+
+export function unfreezeCard(
+  params: { idempotency_key: string; card_id: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.unfreeze", version: "1", params }, options, client);
+}
+
+/** 明文卡面数据。**只存在于这一次响应里。** */
+export interface RevealedCard {
+  Number: string;
+  CVV: string;
+  ExpiryMMYY: string;
+  Currency: string;
+}
+
+/** 查看明文卡号 / CVV / 有效期（`cards.card.reveal@1`）。
+ *
+ *  这是一个读操作却走 Action，因为它需要审计：「谁在何时看了哪张卡的明文」
+ *  是这个功能最该留痕的一条记录。
+ *
+ *  返回值**绝不能**写进任何状态容器、localStorage、URL 或日志——
+ *  用完即弃，组件卸载时清空。 */
+export async function revealCard(
+  params: { card_id: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<RevealedCard> {
+  const run = await executeAction(
+    { actionId: "cards.card.reveal", version: "1", params },
+    options,
+    client,
+  );
+  return run.result as RevealedCard;
+}
