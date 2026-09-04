@@ -86,7 +86,7 @@ function FundsForm({
     >
       <p className="text-xs text-fg-muted">
         {isTopUp
-          ? "充值受单笔与单日上限约束，超限会被直接拒绝。"
+          ? "金额上限按账号配置，未配置会被直接拒绝；当前口径是不设限。"
           : "赎回把余额退回账户，不受金额上限约束——用上限卡住止损动作没有道理。"}
       </p>
       <FormField label="金额" htmlFor={`${formId}-amount`} hint="十进制文本，单位是所选代币本身。">

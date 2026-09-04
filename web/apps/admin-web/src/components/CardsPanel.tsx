@@ -250,7 +250,7 @@ function IssueCardDialog({
       open={open}
       onOpenChange={setOpen}
       title="开卡"
-      description="开卡会真实扣款且不可撤销。金额受单笔与单日上限约束，超限会被直接拒绝。"
+      description="开卡会真实扣款。金额上限按账号配置，未配置会被直接拒绝；当前口径是不设限，实际的顶是 Infini 账户余额。"
       trigger={<Button>开卡</Button>}
     >
       <form
