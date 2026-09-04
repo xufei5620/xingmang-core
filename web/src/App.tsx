@@ -74,6 +74,7 @@ import {
 import {
   appendEmbeddedAdminParams,
   buildXmEmbedHeightMessage,
+  measureEmbeddedAdminHeight,
   isAdminNavItemVisible,
   parseEmbeddedAdminMode,
   parseEmbeddedAdminScope,
@@ -219,21 +220,39 @@ function useEmbeddedAdminPlatformSourceInstanceId(): string | null {
 function useEmbeddedAdminHeightSync() {
   useEffect(() => {
     if (!shouldSyncEmbeddedAdminHeight(embeddedAdminMode, window.parent !== window)) return;
+    // XM-INV-EMBED-HEIGHT: only post when the value actually changed. The
+    // observers below can fire for reasons that do not move the height, and a
+    // repeated identical post would make the console re-render for nothing.
+    let lastPosted = 0;
     const sendHeight = () => {
+      const height = measureEmbeddedAdminHeight(document);
+      if (height === 0 || height === lastPosted) return;
+      lastPosted = height;
       window.parent.postMessage(
-        buildXmEmbedHeightMessage(document.documentElement.scrollHeight),
+        buildXmEmbedHeightMessage(height),
         XM_EMBED_CONSOLE_ORIGIN,
       );
     };
     sendHeight();
     let debounceTimer: number | undefined;
-    const observer = new ResizeObserver(() => {
+    const schedule = () => {
       if (debounceTimer !== undefined) window.clearTimeout(debounceTimer);
       debounceTimer = window.setTimeout(sendHeight, 100);
-    });
+    };
+    const observer = new ResizeObserver(schedule);
+    // Both boxes, for the reason measureEmbeddedAdminHeight documents: the
+    // root element stops growing once the console has sized the frame, so
+    // observing it alone goes quiet exactly when a table starts filling in.
     observer.observe(document.documentElement);
+    if (document.body) observer.observe(document.body);
+    // A slow safety net for growth neither observer reports -- an image
+    // decoding late, a font swapping, a panel expanding inside an already
+    // sized box. It posts only on change, so a stable page costs one
+    // measurement per second and no messages at all.
+    const poll = window.setInterval(sendHeight, 1000);
     return () => {
       observer.disconnect();
+      window.clearInterval(poll);
       if (debounceTimer !== undefined) window.clearTimeout(debounceTimer);
     };
   }, []);

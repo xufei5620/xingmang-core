@@ -211,6 +211,32 @@ export interface XmEmbedHeightMessage {
   height: number;
 }
 
+// measureEmbeddedAdminHeight is the height this page asks the framing console
+// to give it (XM-INV-EMBED-HEIGHT).
+//
+// It reads BOTH scroll heights and takes the larger. Reading
+// documentElement alone is what shipped first, and it under-reports here: the
+// embedded layout pins `.portal-embedded-admin` to `min-height: 100vh`, so
+// once the console has sized the frame the root element's own box is exactly
+// the viewport and stops growing with the content beneath it. The body box
+// does grow, so the maximum of the two is the value that keeps tracking a
+// table as rows arrive.
+//
+// Returns 0 when neither element exists (a document being torn down); the
+// caller treats 0 as "nothing to report" rather than posting a height that
+// would clamp to the console's floor.
+export function measureEmbeddedAdminHeight(doc: {
+  documentElement?: { scrollHeight?: number } | null;
+  body?: { scrollHeight?: number } | null;
+}): number {
+  const root = doc?.documentElement?.scrollHeight;
+  const body = doc?.body?.scrollHeight;
+  const candidates = [root, body].filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
+  return candidates.length === 0 ? 0 : Math.max(...candidates);
+}
+
 export function buildXmEmbedHeightMessage(height: number): XmEmbedHeightMessage {
   return { type: "xm-embed", version: 1, kind: "height", height };
 }

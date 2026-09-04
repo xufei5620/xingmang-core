@@ -17,6 +17,7 @@ import {
   parseXmEmbedAdminAssertionMessage,
   resolvePlatformSourceInstanceId,
   shouldExchangeAdminAssertion,
+  measureEmbeddedAdminHeight,
   shouldRequestAdminAssertion,
   shouldScheduleNextAdminAssertionNeededAttempt,
   shouldSyncEmbeddedAdminHeight,
@@ -376,6 +377,49 @@ describe("shouldScheduleNextAdminAssertionNeededAttempt", () => {
     expect(
       shouldScheduleNextAdminAssertionNeededAttempt(ADMIN_ASSERTION_NEEDED_MAX_ATTEMPTS + 1),
     ).toBe(false);
+  });
+});
+
+describe("measureEmbeddedAdminHeight", () => {
+  // XM-INV-EMBED-HEIGHT: the root element stops growing once the console has
+  // sized the frame (the embedded layout pins it to min-height: 100vh), so a
+  // measurement that reads it alone goes quiet exactly when a table starts
+  // filling in. Taking the larger of the two boxes keeps tracking.
+  it("takes the larger of the two scroll heights", () => {
+    expect(
+      measureEmbeddedAdminHeight({
+        documentElement: { scrollHeight: 560 },
+        body: { scrollHeight: 940 },
+      }),
+    ).toBe(940);
+  });
+
+  it("still uses the root element when it is the taller one", () => {
+    expect(
+      measureEmbeddedAdminHeight({
+        documentElement: { scrollHeight: 1200 },
+        body: { scrollHeight: 800 },
+      }),
+    ).toBe(1200);
+  });
+
+  it("ignores a missing or zero box rather than reporting it", () => {
+    expect(
+      measureEmbeddedAdminHeight({ documentElement: { scrollHeight: 700 }, body: null }),
+    ).toBe(700);
+    expect(
+      measureEmbeddedAdminHeight({ documentElement: { scrollHeight: 0 }, body: { scrollHeight: 640 } }),
+    ).toBe(640);
+  });
+
+  it("reports 0 when neither box is usable, so the caller posts nothing", () => {
+    expect(measureEmbeddedAdminHeight({ documentElement: null, body: null })).toBe(0);
+    expect(
+      measureEmbeddedAdminHeight({
+        documentElement: { scrollHeight: Number.NaN },
+        body: { scrollHeight: 0 },
+      }),
+    ).toBe(0);
   });
 });
 
