@@ -4,7 +4,7 @@
 > `v0.1.0-rc54-signed` (`854f3ff`) and is deployed, but its credentialed
 > canary failed at session issuance (auth_sessions.roles NOT NULL vs nil
 > platform-principal roles); its evidence is immutable. Continue only with
-> `docs/superpowers/plans/2026-09-04-invoice-rc88-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-04-invoice-rc89-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

@@ -2,7 +2,7 @@
 
 > **SUPERSEDED — DO NOT EXECUTE.** RC49 failed and is retained as historical
 > evidence. Continue only with
-> `docs/superpowers/plans/2026-09-04-invoice-rc88-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-04-invoice-rc89-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -1,5 +1,10 @@
 # RC88 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC88 shipped at signed tag
+> `v0.1.0-rc88-signed` (`0eb602d`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-04-invoice-rc89-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC88 — one production defect, the one that makes the product's own usage pattern unbillable:
