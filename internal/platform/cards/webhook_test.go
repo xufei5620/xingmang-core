@@ -242,3 +242,28 @@ func TestParseWebhookEventRequiresHeaderEventID(t *testing.T) {
 		t.Fatal("缺请求头事件 id 必须报错")
 	}
 }
+
+// 诊断必须能分开「密钥解释方式错了」与「密钥值不对」。
+//
+// 两者的失败症状一模一样（都是签名不匹配），而修法相反：一个改代码，
+// 一个让人重填密钥。上线当天在这上面绕了很久，所以把判据本身也钉住。
+func TestDiagnoseSecretFormTellsTheTwoCausesApart(t *testing.T) {
+	// 44 字符的 base64，与真实 webhook 密钥同形。
+	secret := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	content := []byte("1788609600.evt-1.{}")
+
+	decoded, _ := base64.StdEncoding.DecodeString(secret)
+	byDecoded := webhookMAC(decoded, content)
+	if got := diagnoseSecretForm(secret, content, byDecoded); !strings.Contains(got, "base64 解码") {
+		t.Fatalf("按解码密钥能对上时应如实指出, got %q", got)
+	}
+
+	if got := diagnoseSecretForm(secret, content, []byte("完全不相干")); !strings.Contains(got, "密钥值本身") {
+		t.Fatalf("两种都对不上时应指向密钥值, got %q", got)
+	}
+
+	// 非 base64 的密钥不该给出误导性的建议。
+	if got := diagnoseSecretForm("not-base64!!", content, nil); !strings.Contains(got, "不是 base64") {
+		t.Fatalf("非 base64 密钥应如实说明, got %q", got)
+	}
+}

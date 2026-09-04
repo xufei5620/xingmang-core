@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -77,13 +78,8 @@ func (v *WebhookVerifier) Verify(secret string, h WebhookHeaders, payload []byte
 		return fmt.Errorf("%w: 时间戳超出容忍窗口", ErrWebhookRejected)
 	}
 
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(h.Timestamp))
-	mac.Write([]byte("."))
-	mac.Write([]byte(h.EventID))
-	mac.Write([]byte("."))
-	mac.Write(payload)
-	want := mac.Sum(nil)
+	content := signedContent(h, payload)
+	want := webhookMAC([]byte(secret), content)
 
 	// 十六进制。官方参考实现（infini-skill/references/WEBHOOKS.md）写死
 	// hex(HMAC-SHA256(secret, content))，Python 侧是 .hexdigest()。
@@ -101,10 +97,11 @@ func (v *WebhookVerifier) Verify(secret string, h WebhookHeaders, payload []byte
 		// 完全相反。同时给出签名内容的形状，好核对 timestamp/event_id
 		// 有没有带上多余空白。
 		return fmt.Errorf("%w: 签名不匹配（收到 %s… 本地算出 %s…，"+
-			"ts=%q event=%q 载荷 %d 字节）",
+			"ts=%q event=%q 载荷 %d 字节，%s）",
 			ErrWebhookRejected,
 			shortHex(h.Signature), shortHex(hex.EncodeToString(want)),
-			h.Timestamp, h.EventID, len(payload))
+			h.Timestamp, h.EventID, len(payload),
+			diagnoseSecretForm(secret, content, got))
 	}
 	return nil
 }
@@ -205,4 +202,45 @@ func shortHex(v string) string {
 		return v
 	}
 	return v[:12]
+}
+
+// signedContent 拼出被签名的内容：{timestamp}.{event_id}.{payload}。
+//
+// 用**请求头里的原始值**而不是解析后的：上游签的是它自己发出去的那几个
+// 字节，任何规范化（去空白、重新格式化时间戳）都会让本地算出的 MAC
+// 与之不同，而症状与"密钥不对"一模一样。
+func signedContent(h WebhookHeaders, payload []byte) []byte {
+	out := make([]byte, 0, len(h.Timestamp)+len(h.EventID)+len(payload)+2)
+	out = append(out, h.Timestamp...)
+	out = append(out, '.')
+	out = append(out, h.EventID...)
+	out = append(out, '.')
+	out = append(out, payload...)
+	return out
+}
+
+func webhookMAC(key, content []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(content)
+	return mac.Sum(nil)
+}
+
+// diagnoseSecretForm 在验签失败时判断「换一种密钥解释方式能否对上」。
+//
+// 起因：webhook 密钥是 44 个字符，正好是 32 字节的 base64。文档的示例代码
+// 用原始字符串做 HMAC 密钥（Python 的 SECRET.encode("utf-8")），但实际服务
+// 端也可能用 base64 解码后的字节。这两种的失败症状完全一样——都是
+// 「签名不匹配」——而修法一个是改代码、一个是让人重填密钥，方向相反。
+//
+// **只诊断，不放行**：多认一种密钥解释方式，就是多一条我们没有依据的
+// 信任路径。真相清楚之后再改成唯一的那一种。
+func diagnoseSecretForm(secret string, content, received []byte) string {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(secret))
+	if err != nil {
+		return "密钥不是 base64，只可能按原文用"
+	}
+	if subtle.ConstantTimeCompare(webhookMAC(decoded, content), received) == 1 {
+		return "注意：按 base64 解码后的密钥算能对上——是代码的密钥解释方式错了，不是密钥填错了"
+	}
+	return "两种密钥解释方式都对不上——大概率是密钥值本身不对"
 }
