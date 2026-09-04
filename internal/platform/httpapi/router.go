@@ -105,6 +105,12 @@ type Deps struct {
 	ExtraExpectedCredentials []credentials.ExpectedRef
 	// CardSyncInterval 供新鲜度判定；为零时用 5 分钟兜底。
 	CardSyncInterval time.Duration
+	// CardWebhook 处理 Infini 的卡片回调（XM-CARD4）。
+	//
+	// 为 nil 时整条回调路由不挂载——没有配回调密钥的部署，这个端点应当
+	// 根本不存在，而不是存在但永远返回 401：不存在的端点连被试探的价值
+	// 都没有。
+	CardWebhook CardWebhookProcessor
 
 	ServerAssets       ServerAssetLister
 	ServerSuppliers    ServerSupplierLister
@@ -189,6 +195,15 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Get("/healthz", HealthHandler())
 	r.Get("/readyz", ReadyHandler(d.DB))
+
+	// Infini 卡片回调（XM-CARD4）。**刻意挂在 /api/v1 之外**：它不带
+	// Principal、不吃 RequirePrincipal，唯一的闸是 HMAC 签名。放进 /api/v1
+	// 会让它继承那一组的鉴权中间件——而上游没有我们的会话，那样它永远
+	// 进不来；更糟的是有人以后往那一组加中间件时，会以为这个端点也被保护着。
+	if d.CardWebhook != nil {
+		r.Post("/webhooks/infini/{account}", CardWebhookHandler(
+			d.CardWebhook, d.CardAccounts, nil, logger))
+	}
 
 	r.Route("/api/v1", func(api chi.Router) {
 		// /api/v1 下每一条响应都是按 Principal 与环境裁剪过的数据——审计前后

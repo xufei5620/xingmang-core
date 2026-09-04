@@ -192,3 +192,26 @@ func unwrapAll(err error) string {
 	}
 	return strings.Join(parts, " | ")
 }
+
+// 「IP 不在白名单」必须与「签名不对」分成两类。
+//
+// 两者都是 401/403，但修法完全不同：一个是去后台加 IP，一个是重配密钥。
+// 归成同一个 auth，台账上就只写着「认证失败」，每次都要人工二选一去试。
+// 2026-09-04 上线当天就为这个绕了很久——当时两个账号都报 auth，
+// IP、时钟、权限逐个排除之后才发现是密钥粘贴截断。
+func TestClassifyDistinguishesIPWhitelistFromSignature(t *testing.T) {
+	cases := map[string]struct {
+		body string
+		want connector.ErrorKind
+	}{
+		"IP 不在白名单": {`{"message":"ip not in whitelist"}`, connector.KindIPNotAllowed},
+		"签名校验失败":   {`{"message":"client request can't be validated"}`, connector.KindAuth},
+		"没有可辨识文案":  {`{"message":"unauthorized"}`, connector.KindAuth},
+	}
+	for name, tc := range cases {
+		got := kindForUnauthorized(tc.body)
+		if got != tc.want {
+			t.Fatalf("%s: 分类 = %q, want %q", name, got, tc.want)
+		}
+	}
+}

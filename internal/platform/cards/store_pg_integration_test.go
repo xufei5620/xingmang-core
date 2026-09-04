@@ -37,6 +37,9 @@ func pgStore(t *testing.T) (*PgStore, *pgxpool.Pool) {
 	// 每个用例从干净状态开始：这三张表只有本包在用，整表清空是安全的。
 	for _, table := range []string{
 		"cards.card_operation", "cards.infini_card_transaction", "cards.infini_card",
+		// 新增表忘了加进来的症状很隐蔽：单跑通过、连跑失败，
+		// 因为上一轮的行把唯一键占住了。
+		"cards.webhook_event",
 	} {
 		if _, err := pool.Exec(context.Background(), "TRUNCATE "+table); err != nil {
 			t.Fatal(err)
@@ -681,4 +684,86 @@ func onlyCard(t *testing.T, store *PgStore, account string) CardView {
 		t.Fatalf("账号 %s 下应有 1 张卡, got %d", account, len(list))
 	}
 	return list[0]
+}
+
+// 回调去重：第一次是新事件，重复投递被识别为已收到。
+func TestPgStoreWebhookEventDeduplicates(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	ev := WebhookEvent{
+		ID: "evt-1", Type: WebhookEventCardStatusChange,
+		CardID: "card_1", OccurredAt: issueNow,
+	}
+
+	first, err := store.RecordWebhookEvent(ctx, "CHRIS", ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Fresh {
+		t.Fatal("第一次投递应是新事件")
+	}
+	if first.AlreadyProcessed {
+		t.Fatal("第一次投递不该是已处理")
+	}
+
+	second, err := store.RecordWebhookEvent(ctx, "CHRIS", ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Fresh {
+		t.Fatal("重复投递不该被当成新事件")
+	}
+}
+
+// **最要紧的一条**：处理失败后的重投必须被再处理一次。
+//
+// Infini 对非 200 最多重试 8 次。如果「收到过」就直接放行，那么第一次处理
+// 失败之后，后面 7 次重试全部被当成重复事件丢掉——一次真实的状态变更就此
+// 消失，而且我们还每次都回 200 让上游以为成功了。
+func TestPgStoreWebhookEventRetryIsReprocessedUntilMarkedDone(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+	ev := WebhookEvent{ID: "evt-retry", Type: WebhookEventCardTransaction, CardID: "card_1"}
+
+	if _, err := store.RecordWebhookEvent(ctx, "CHRIS", ev); err != nil {
+		t.Fatal(err)
+	}
+	// 处理失败：不标记完成。
+	again, err := store.RecordWebhookEvent(ctx, "CHRIS", ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.AlreadyProcessed {
+		t.Fatal("没标记完成之前，重投必须仍要处理")
+	}
+
+	if err := store.MarkWebhookEventProcessed(ctx, "CHRIS", ev.ID); err != nil {
+		t.Fatal(err)
+	}
+	done, err := store.RecordWebhookEvent(ctx, "CHRIS", ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done.AlreadyProcessed {
+		t.Fatal("标记完成之后，重投应识别为已处理")
+	}
+}
+
+// 两个账号各自的事件互不影响：事件 id 是上游生成的，不假设跨账号唯一。
+func TestPgStoreWebhookEventIsScopedToAccount(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+	ev := WebhookEvent{ID: "evt-same", Type: WebhookEventCardStatusChange, CardID: "card_1"}
+
+	if _, err := store.RecordWebhookEvent(ctx, "CHRIS", ev); err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.RecordWebhookEvent(ctx, "LINFENG", ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !other.Fresh {
+		t.Fatal("另一个账号的同 id 事件应是新事件")
+	}
 }

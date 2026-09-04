@@ -640,3 +640,78 @@ UPDATE cards.infini_card
 	}
 	return nil
 }
+
+// WebhookRecord 是一次回调投递的登记结果。
+//
+// 两个布尔分得很开是有原因的：Fresh 回答「这是不是第一次见」，
+// AlreadyProcessed 回答「上次见完做成了没有」。只有后者能决定跳过——
+// 把两者混成一个「见过就跳过」，会让处理失败后的 7 次重试全部被丢掉。
+type WebhookRecord struct {
+	Fresh            bool
+	AlreadyProcessed bool
+}
+
+// RecordWebhookEvent 登记一次回调投递，并回答它是否已经处理成功过。
+//
+// 同一事件的重投会累加 attempts：反复失败的事件在库里看得见，
+// 而不是只能从日志里翻。
+func (s *PgStore) RecordWebhookEvent(ctx context.Context, account string, ev WebhookEvent) (WebhookRecord, error) {
+	const upsertSQL = `
+INSERT INTO cards.webhook_event (
+    environment, account, event_id, event_type, upstream_card_id,
+    occurred_at, received_at, attempts, created_at, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$7,$7)
+ON CONFLICT (environment, account, event_id) DO UPDATE SET
+    attempts = cards.webhook_event.attempts + 1,
+    updated_at = EXCLUDED.updated_at
+RETURNING (xmax = 0) AS inserted, processed_at IS NOT NULL AS done`
+
+	var occurred any
+	if !ev.OccurredAt.IsZero() {
+		occurred = ev.OccurredAt
+	}
+
+	var rec WebhookRecord
+	if err := s.pool.QueryRow(ctx, upsertSQL,
+		s.environment, account, ev.ID, ev.Type, ev.CardID, occurred, s.now(),
+	).Scan(&rec.Fresh, &rec.AlreadyProcessed); err != nil {
+		return WebhookRecord{}, fmt.Errorf("登记回调事件 %s: %w", ev.ID, err)
+	}
+	return rec, nil
+}
+
+// MarkWebhookEventProcessed 标记一次回调已处理成功。
+//
+// **只在处理真的成功之后调用**：标早了等于把后续重试的机会一并放弃。
+func (s *PgStore) MarkWebhookEventProcessed(ctx context.Context, account, eventID string) error {
+	const updateSQL = `
+UPDATE cards.webhook_event
+   SET processed_at = $4, updated_at = $4, last_error = ''
+ WHERE environment = $1 AND account = $2 AND event_id = $3`
+
+	tag, err := s.pool.Exec(ctx, updateSQL, s.environment, account, eventID, s.now())
+	if err != nil {
+		return fmt.Errorf("标记回调事件 %s 已处理: %w", eventID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("回调事件 %s（账号 %s）不存在", eventID, account)
+	}
+	return nil
+}
+
+// RecordWebhookEventFailure 记下一次处理失败的原因。
+//
+// 只记错误**分类**，不记上游或内部的原文：这张表会被管理端展示，
+// 而 ADR-004 的纪律是细节只进服务端日志。
+func (s *PgStore) RecordWebhookEventFailure(ctx context.Context, account, eventID, reason string) error {
+	const updateSQL = `
+UPDATE cards.webhook_event
+   SET last_error = $4, updated_at = $5
+ WHERE environment = $1 AND account = $2 AND event_id = $3`
+
+	if _, err := s.pool.Exec(ctx, updateSQL,
+		s.environment, account, eventID, reason, s.now()); err != nil {
+		return fmt.Errorf("记录回调失败原因 %s: %w", eventID, err)
+	}
+	return nil
+}

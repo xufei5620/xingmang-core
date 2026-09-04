@@ -240,6 +240,8 @@ func stateForUpstreamError(err error, kind string) OperationState {
 	switch connector.KindOf(err) {
 	case connector.KindRejected,
 		connector.KindAuth,
+		// IP 不在上游白名单：请求被网关挡在业务处理之前，与 auth 同一档。
+		connector.KindIPNotAllowed,
 		connector.KindRateLimited,
 		connector.KindForbiddenTarget,
 		connector.KindMethodNotAllowed,
