@@ -1145,7 +1145,7 @@ th {
   background: #fafbfc;
   border-top: 1px solid #edf0f3;
   border-bottom: 1px solid #edf0f3;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 600;
   text-align: left;
   white-space: nowrap;
@@ -1155,13 +1155,13 @@ td {
   padding: 13px 15px;
   border-bottom: 1px solid #eef1f4;
   color: #59657a;
-  font-size: 10px;
+  font-size: 12px;
   vertical-align: middle;
 }
 td strong {
   display: block;
   color: #28354d;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -1170,7 +1170,7 @@ td small {
   max-width: 230px;
   margin-top: 4px;
   color: #9199a7;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.4;
 }
 .money-cell {
@@ -3000,7 +3000,7 @@ td small {
   flex: 0 0 auto;
   color: #657188;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: 12px;
 }
 .portal-embedded-admin .side-nav .nav-item:hover,
 .portal-embedded-admin .nav-item-muted:hover {
@@ -3023,16 +3023,11 @@ td small {
   margin-bottom: 15px;
   gap: 12px;
 }
-.portal-embedded-admin .page-header h1 {
-  font-size: 22px;
-}
 .portal-embedded-admin .page-header p {
   margin-top: 5px;
-  font-size: 11px;
 }
 .portal-embedded-admin .eyebrow {
   margin-bottom: 4px;
-  font-size: 8px;
 }
 
 @media (max-width: 480px) {
