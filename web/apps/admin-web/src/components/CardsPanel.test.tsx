@@ -354,7 +354,8 @@ describe("3DS 验证挑战", () => {
 
     renderPanel();
 
-    expect(await screen.findByText(/验证码 123456/)).toBeTruthy();
+    // 验证码单独成列，直接显示数字本身（能一眼扫到、能复制）。
+    expect(await screen.findByText("123456")).toBeTruthy();
   });
 
   // 上游不一定给验证码——生产收到的真实事件里就没有。这时只提示有待验证，
@@ -370,7 +371,8 @@ describe("3DS 验证挑战", () => {
     renderPanel();
 
     expect(await screen.findByText("待验证")).toBeTruthy();
-    expect(screen.queryByText(/验证码/)).toBeNull();
+    // 没有码时不显示任何数字，也不显示占位符。
+    expect(screen.queryByText(/^\d{6}$/)).toBeNull();
   });
 
   // 别的卡的挑战不该串到这一行来。

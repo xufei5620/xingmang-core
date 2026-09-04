@@ -37,6 +37,8 @@ type CardWebhookProcessor interface {
 	RecordWebhookEventFailure(ctx context.Context, account, eventID, reason string) error
 	// RecordCardChallenge 落一次 3DS 验证挑战。
 	RecordCardChallenge(ctx context.Context, c cards.CardChallenge) error
+	// NotifyCardEvent 把事件推给人。**尽力而为**：推送失败绝不能让回调失败。
+	NotifyCardEvent(ctx context.Context, n cards.Notification)
 }
 
 // CardWebhookHandler 处理 Infini 的卡片回调。
@@ -168,6 +170,40 @@ func CardWebhookHandler(
 		logger.InfoContext(r.Context(), "card_webhook_processed",
 			"module", "httpapi", "account", account, "event_id", ev.ID,
 			"event_type", ev.Type, "card_id", ev.CardID)
+
+		// 推送放在**标记完成之后**，且失败不改变响应。
+		//
+		// 顺序是刻意的：推送失败若回 5xx，上游会重投同一个事件，而它已经
+		// 处理过了——重投只会被去重挡掉，推送依然不会补发，白白让上游重试
+		// 八次。丢一条推送是可接受的损失，丢一次状态刷新不是。
+		p.NotifyCardEvent(r.Context(), notificationFor(account, ev))
+
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// notificationFor 把回调事件翻成一条给人看的通知。
+//
+// 卡号只带回调里给的 last_four：完整卡号绝不进推送（群机器人的消息留在
+// 聊天记录里，那不是我们能控制的存储）。
+func notificationFor(account string, ev cards.WebhookEvent) cards.Notification {
+	n := cards.Notification{Account: account, CardMask: ev.CardLastFour}
+	switch ev.Type {
+	case cards.WebhookEventCardChallenge:
+		n.Kind = cards.NotifyChallenge
+		n.ChallengeCode = ev.ChallengeCode
+		n.ExpiresAt = ev.ChallengeExpiresAt
+	case cards.WebhookEventCardTransaction:
+		n.Kind = cards.NotifyTransaction
+		n.Merchant = ev.Merchant
+		n.Amount = ev.Amount
+		n.Currency = ev.Currency
+		n.TransactionType = ev.TransactionType
+		n.TransactionStatus = ev.TransactionStatus
+		n.FailureReason = ev.FailureReason
+	default:
+		n.Kind = cards.NotifyStatusChange
+		n.Status = ev.CardStatus
+	}
+	return n
 }

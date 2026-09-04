@@ -465,7 +465,7 @@ func main() {
 		CardBalances: cardBalanceReaderOrNil(cardService),
 		// nil 时回调路由整个不挂载（见 httpapi.Deps.CardWebhook）。
 		CardWebhook: cardWebhookOrNil(
-			buildCardWebhookProcessor(cardsCfg, cardStore, cardAccounts, cardSecretProvider)),
+			buildCardWebhookProcessor(cardsCfg, cardStore, cardAccounts, cardSecretProvider, logger)),
 		// 卡片账号的凭据引用进密钥引用页：运营在那里填值与轮换，
 		// 写进去的就是 SecretProvider 读的文件。
 		ExtraExpectedCredentials: cardExpectedCredentials(cardsCfg),
