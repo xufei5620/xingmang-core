@@ -23,6 +23,36 @@ type EligibilityShadowAccountStatus struct {
 	ExternalAccountID string
 	EligibilityStatus string
 	OpenFreezes       int64
+
+	// XM-INV-SHADOW-EVAL-VACUOUS: the quantities an allocation change
+	// actually moves, so a reviewer can diff the numbers the change is
+	// about rather than only their classifications. RC88's carry-forward
+	// slice is the worked example: it was meant to make one account's
+	// expected balance move by a specific amount, and the report it was
+	// gated on could not have shown that even if the projection had run,
+	// because it carried no per-account quantity at all.
+	//
+	// ProjectionVersion increments once per completed reprojection, so an
+	// account whose version did not move was not reprojected -- the
+	// per-account counterpart to the report's AccountsProjected total.
+	// OverageUnits is read as text: non_invoiceable_overage_units is
+	// NUMERIC and source balance units are 1e8-scaled, so its magnitude is
+	// not bounded by int64 and this report has no reason to impose one.
+	// It is also nullable, and NULL is the ordinary case -- six of the eight
+	// accounts in production carry no overage. It is rendered as "0", which
+	// is unambiguous here rather than merely convenient: migration 0020's
+	// CHECK is (IS NULL OR > 0), so a stored value can never be zero and "0"
+	// can only mean "none". Scanning it straight into a string, as the first
+	// draft of this did, fails on every such row -- the integration test
+	// below caught that before it could break the rehearsal it was meant to
+	// fix.
+	ProjectionVersion int64
+	FinalizedThrough  time.Time
+	OverageUnits      string
+	CapMinor          int64
+	ConsumedCashMinor int64
+	ReservedMinor     int64
+	IssuedMinor       int64
 }
 
 // EligibilityShadowFreezeCount is the open freeze count for one
@@ -81,15 +111,29 @@ func (s *Store) EligibilityShadowSnapshot(ctx context.Context) (EligibilityShado
 	accountRows, err := s.pool.Query(ctx, `
 		SELECT eas.external_account_id::text,eas.eligibility_status,
 			(SELECT count(*) FROM eligibility_freezes ef
-			 WHERE ef.external_account_id=eas.external_account_id AND ef.status='open')
+			 WHERE ef.external_account_id=eas.external_account_id AND ef.status='open'),
+			eas.projection_version,eas.finalized_through,
+			COALESCE(eas.non_invoiceable_overage_units::text,'0'),
+			COALESCE(lots.cap,0),COALESCE(lots.consumed_cash,0),
+			COALESCE(lots.reserved,0),COALESCE(lots.issued,0)
 		FROM source_account_eligibility_state eas
+		LEFT JOIN LATERAL (
+			SELECT sum(lot.current_cap_minor) AS cap,
+				sum(lot.consumed_cash_minor) AS consumed_cash,
+				sum(lot.reserved_minor) AS reserved,
+				sum(lot.issued_minor) AS issued
+			FROM funding_lots lot
+			WHERE lot.external_account_id=eas.external_account_id
+		) lots ON TRUE
 		ORDER BY eas.external_account_id`)
 	if err != nil {
 		return snapshot, err
 	}
 	for accountRows.Next() {
 		var account EligibilityShadowAccountStatus
-		if err = accountRows.Scan(&account.ExternalAccountID, &account.EligibilityStatus, &account.OpenFreezes); err != nil {
+		if err = accountRows.Scan(&account.ExternalAccountID, &account.EligibilityStatus, &account.OpenFreezes,
+			&account.ProjectionVersion, &account.FinalizedThrough, &account.OverageUnits,
+			&account.CapMinor, &account.ConsumedCashMinor, &account.ReservedMinor, &account.IssuedMinor); err != nil {
 			accountRows.Close()
 			return snapshot, err
 		}
@@ -199,4 +243,43 @@ func (s *Store) EligibilityShadowFailedJobs(ctx context.Context) ([]EligibilityS
 		failed = append(failed, job)
 	}
 	return failed, rows.Err()
+}
+
+// EnqueueEligibilityShadowReprojection queues one projection job per account,
+// at that account's own finalized_through, and returns how many rows it
+// inserted. It is the only write in this file, and it exists because without
+// it the rehearsal it serves is vacuous by construction.
+//
+// XM-INV-SHADOW-EVAL-VACUOUS: eligibility-shadow drains whatever is already
+// in eligibility_projection_jobs. A healthy production has an empty queue --
+// that is what healthy means -- so a backup restored from one gives the
+// candidate evaluator nothing to do, and the rehearsal reported "ready" with
+// before and after byte-identical. RC78, RC79 and RC88 all shipped evaluator
+// or migration changes past that verdict.
+//
+// Requesting each account at its own finalized_through is an existing,
+// supported call shape rather than a new one: processEligibilityProjectionJob
+// reads requested_through, raises it to finalized_through when it is below
+// (never lowers it, and never skips), and then calls reprojectEligibilityTx
+// unconditionally -- there is no short-circuit for "the window did not
+// advance". The same shape is what observeEligibilityFactTx's late-fact path
+// uses. The job's own final UPDATE is
+// finalized_through=GREATEST(finalized_through,requested), so replaying an
+// account at its current boundary cannot move that boundary backwards or
+// forwards; the account ends where it started, having recomputed everything
+// in between with the candidate's code.
+//
+// ON CONFLICT DO NOTHING leaves any pre-existing job untouched, including a
+// status='dead' one: this must add work, never quietly reset the state the
+// restored backup captured.
+func (s *Store) EnqueueEligibilityShadowReprojection(ctx context.Context) (int64, error) {
+	command, err := s.pool.Exec(ctx, `
+		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
+		SELECT external_account_id,finalized_through,'queued',now()-interval '1 second'
+		FROM source_account_eligibility_state
+		ON CONFLICT (external_account_id) DO NOTHING`)
+	if err != nil {
+		return 0, err
+	}
+	return command.RowsAffected(), nil
 }

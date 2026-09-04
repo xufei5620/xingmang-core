@@ -20,6 +20,19 @@ type AccountStatus struct {
 	ExternalAccountID string `json:"external_account_id"`
 	EligibilityStatus string `json:"eligibility_status"`
 	OpenFreezes       int64  `json:"open_freezes"`
+
+	// The quantities an allocation change moves. Classifications alone
+	// cannot show that an account's expected balance reached a predicted
+	// value, which is the claim an evaluator change actually makes; see
+	// postgresstore.EligibilityShadowAccountStatus for why overage_units is
+	// a string.
+	ProjectionVersion int64     `json:"projection_version"`
+	FinalizedThrough  time.Time `json:"finalized_through"`
+	OverageUnits      string    `json:"non_invoiceable_overage_units"`
+	CapMinor          int64     `json:"cap_minor"`
+	ConsumedCashMinor int64     `json:"consumed_cash_minor"`
+	ReservedMinor     int64     `json:"reserved_minor"`
+	IssuedMinor       int64     `json:"issued_minor"`
 }
 
 // FreezeCount is the open freeze count for one freeze_reason category.
@@ -95,6 +108,19 @@ type Report struct {
 	RoundsRun         int      `json:"rounds_run"`
 	QueueDrained      bool     `json:"queue_drained"`
 
+	// XM-INV-SHADOW-EVAL-VACUOUS. RoundsRun and QueueDrained cannot tell a
+	// real rehearsal from an empty one: a drain against an already-empty
+	// queue reports exactly one round and "drained", and so does a run that
+	// claims every account in a single batch. Only AccountsProjected
+	// separates them, and it was being discarded (ProcessEligibilityProjectionJobs
+	// returns it; run() ignored the value). The three fields below are what
+	// make a vacuous run visible in the artifact instead of only in the
+	// reader's assumptions -- and, when ReprojectAllRequested is set,
+	// blocking rather than merely visible.
+	ReprojectAllRequested bool  `json:"reproject_all_requested"`
+	AccountsEnqueued      int64 `json:"accounts_enqueued"`
+	AccountsProjected     int   `json:"accounts_projected"`
+
 	Before       Snapshot         `json:"before"`
 	BeforeHealth ProjectionHealth `json:"before_projection_health"`
 	After        Snapshot         `json:"after"`
@@ -137,6 +163,19 @@ func EvaluateReadiness(report *Report) {
 	report.NewFreezeReasons = newReasons
 	report.HasProjectionErrors = len(report.RoundErrors) > 0 || len(report.FailedAccounts) > 0
 
+	// A rehearsal that was asked to reproject every account and projected
+	// none proved nothing about the candidate, so it must not read as
+	// "ready" -- that is precisely the failure this field exists to catch,
+	// and the one three releases shipped past. It is checked before the
+	// freeze/error comparison because those comparisons are themselves
+	// vacuous when nothing ran: "no new freeze reasons" is trivially true
+	// of a projection that never executed.
+	if report.ReprojectAllRequested && report.AccountsProjected == 0 {
+		report.Verdict = VerdictNotReady
+		report.VerdictReason = "a full reprojection was requested but no account was projected, so this run proves nothing about the candidate"
+		return
+	}
+
 	switch {
 	case len(newReasons) > 0 && report.HasProjectionErrors:
 		report.Verdict = VerdictNotReady
@@ -176,6 +215,13 @@ func toReportSnapshot(snapshot postgresstore.EligibilityShadowSnapshot) Snapshot
 			ExternalAccountID: account.ExternalAccountID,
 			EligibilityStatus: account.EligibilityStatus,
 			OpenFreezes:       account.OpenFreezes,
+			ProjectionVersion: account.ProjectionVersion,
+			FinalizedThrough:  account.FinalizedThrough,
+			OverageUnits:      account.OverageUnits,
+			CapMinor:          account.CapMinor,
+			ConsumedCashMinor: account.ConsumedCashMinor,
+			ReservedMinor:     account.ReservedMinor,
+			IssuedMinor:       account.IssuedMinor,
 		})
 	}
 	for _, count := range snapshot.OpenFreezes {

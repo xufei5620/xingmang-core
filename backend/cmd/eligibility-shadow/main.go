@@ -63,6 +63,7 @@ func main() {
 	backupLabel := flag.String("backup-label", "", "identifying label of the restored backup, echoed into the report")
 	candidateTag := flag.String("candidate-image-tag", "", "the candidate release's image tag, echoed into the report")
 	migrationsApplied := flag.String("migrations-applied", "", "comma-separated migration file names deploy/rehearsal/shadow-eval.sh's own invoice-migrate step newly applied before this run, empty when the restored backup was already current")
+	reprojectAll := flag.Bool("reproject-all", false, "queue one projection job per account at its own finalized_through before draining, so the candidate evaluator actually runs against the restored data; required for any release that changes the evaluator, the projection or a migration feeding either")
 	flag.Parse()
 
 	if flag.NArg() != 0 {
@@ -110,6 +111,7 @@ func main() {
 		MaxRounds: *maxRounds, BatchLimit: *batchLimit,
 		BackupLabel: *backupLabel, CandidateImageTag: *candidateTag,
 		MigrationsApplied: parseMigrationsApplied(*migrationsApplied),
+		ReprojectAll:      *reprojectAll,
 	})
 	if err != nil {
 		slog.Error("eligibility-shadow rehearsal failed", "error", err)
@@ -136,6 +138,7 @@ type runOptions struct {
 	MaxRounds, BatchLimit          int
 	BackupLabel, CandidateImageTag string
 	MigrationsApplied              []string
+	ReprojectAll                   bool
 }
 
 // parseMigrationsApplied splits --migrations-applied's comma-separated
@@ -159,7 +162,21 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 	report := Report{
 		GeneratedAt: time.Now().UTC(), BackupLabel: opts.BackupLabel,
 		CandidateImageTag: opts.CandidateImageTag, MaxRounds: opts.MaxRounds,
-		MigrationsApplied: opts.MigrationsApplied,
+		MigrationsApplied:     opts.MigrationsApplied,
+		ReprojectAllRequested: opts.ReprojectAll,
+	}
+
+	// Enqueue before the baseline snapshot, so BeforeHealth records the work
+	// this run set itself rather than an empty queue that would look exactly
+	// like the vacuous runs this flag exists to end. The enqueue changes no
+	// account state -- only eligibility_projection_jobs -- so the baseline
+	// it precedes is still the restored data as the backup captured it.
+	if opts.ReprojectAll {
+		enqueued, enqueueErr := store.EnqueueEligibilityShadowReprojection(ctx)
+		if enqueueErr != nil {
+			return report, fmt.Errorf("queue full reprojection: %w", enqueueErr)
+		}
+		report.AccountsEnqueued = enqueued
 	}
 
 	before, err := store.EligibilityShadowSnapshot(ctx)
@@ -189,8 +206,9 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 		// whole round was lost. Record it and keep draining; the durable
 		// per-account trace is read back from eligibility_projection_jobs
 		// after the loop via EligibilityShadowFailedJobs.
-		_, procErr := store.ProcessEligibilityProjectionJobs(ctx, opts.BatchLimit, time.Time{}, shadowEvalActor)
+		projected, procErr := store.ProcessEligibilityProjectionJobs(ctx, opts.BatchLimit, time.Time{}, shadowEvalActor)
 		report.RoundsRun++
+		report.AccountsProjected += projected
 		if procErr != nil {
 			report.RoundErrors = append(report.RoundErrors, procErr.Error())
 		}

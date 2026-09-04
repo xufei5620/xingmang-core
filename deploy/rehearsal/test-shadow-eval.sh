@@ -839,6 +839,156 @@ assert_verdict rc78-real-plus-new-reason-not-ready.json not_ready 3 "RC78 real r
 assert_new_reasons rc78-real-plus-new-reason-not-ready.json "AMBIGUOUS_EVENT_ORDER" "RC78 real report plus a genuinely new reason"
 echo "RC78 regression: ok"
 
+
+# XM-INV-SHADOW-EVAL-VACUOUS: the bash verdict must reach the same
+# conclusion as report.go's EvaluateReadiness about a run that was asked to
+# reproject every account and projected none. The two implementations are
+# compared against each other at rehearsal time, so a condition only one of
+# them knows would surface as a tooling failure rather than as the blocked
+# release it should be.
+
+# The RC88 report's exact shape: identical before/after, no errors, drained
+# in one round -- and not one account projected.
+write_fixture vacuous-reproject-all.json <<'JSON'
+{
+  "generated_at": "2026-09-05T02:00:00Z",
+  "backup_label": "invoice-20260904T184003Z",
+  "candidate_image_tag": "0.1.0-rc92",
+  "migrations_applied": null,
+  "max_rounds": 200,
+  "rounds_run": 1,
+  "queue_drained": true,
+  "reproject_all_requested": true,
+  "accounts_enqueued": 8,
+  "accounts_projected": 0,
+  "before": {
+    "accounts": [],
+    "open_freezes_by_reason": [
+      {
+        "freeze_reason": "SOURCE_GAP",
+        "open": 12
+      }
+    ],
+    "evaluations_by_status": []
+  },
+  "before_projection_health": {
+    "queued": 8,
+    "failed": 0,
+    "processing": 0,
+    "oldest_pending": "0001-01-01T00:00:00Z",
+    "proof_pending": 0,
+    "oldest_proof_pending": "0001-01-01T00:00:00Z"
+  },
+  "after": {
+    "accounts": [],
+    "open_freezes_by_reason": [
+      {
+        "freeze_reason": "SOURCE_GAP",
+        "open": 12
+      }
+    ],
+    "evaluations_by_status": []
+  },
+  "after_projection_health": {
+    "queued": 8,
+    "failed": 0,
+    "processing": 0,
+    "oldest_pending": "0001-01-01T00:00:00Z",
+    "proof_pending": 0,
+    "oldest_proof_pending": "0001-01-01T00:00:00Z"
+  },
+  "failed_accounts": null,
+  "round_errors": null,
+  "new_freeze_reasons": null,
+  "has_projection_errors": false,
+  "verdict": "not_ready",
+  "verdict_reason": "a full reprojection was requested but no account was projected, so this run proves nothing about the candidate"
+}
+JSON
+
+# The same run, done for real. Note rounds_run is 1 here too: eight accounts
+# fit in one batch of twenty-five, so the round count cannot distinguish
+# these two fixtures and accounts_projected is the only field that does.
+write_fixture reproject-all-projected.json <<'JSON'
+{
+  "generated_at": "2026-09-05T02:00:00Z",
+  "backup_label": "invoice-20260904T184003Z",
+  "candidate_image_tag": "0.1.0-rc92",
+  "migrations_applied": null,
+  "max_rounds": 200,
+  "rounds_run": 1,
+  "queue_drained": true,
+  "reproject_all_requested": true,
+  "accounts_enqueued": 8,
+  "accounts_projected": 8,
+  "before": {
+    "accounts": [],
+    "open_freezes_by_reason": [
+      {
+        "freeze_reason": "SOURCE_GAP",
+        "open": 12
+      }
+    ],
+    "evaluations_by_status": []
+  },
+  "before_projection_health": {
+    "queued": 8,
+    "failed": 0,
+    "processing": 0,
+    "oldest_pending": "0001-01-01T00:00:00Z",
+    "proof_pending": 0,
+    "oldest_proof_pending": "0001-01-01T00:00:00Z"
+  },
+  "after": {
+    "accounts": [],
+    "open_freezes_by_reason": [
+      {
+        "freeze_reason": "SOURCE_GAP",
+        "open": 12
+      }
+    ],
+    "evaluations_by_status": []
+  },
+  "after_projection_health": {
+    "queued": 0,
+    "failed": 0,
+    "processing": 0,
+    "oldest_pending": "0001-01-01T00:00:00Z",
+    "proof_pending": 0,
+    "oldest_proof_pending": "0001-01-01T00:00:00Z"
+  },
+  "failed_accounts": null,
+  "round_errors": null,
+  "new_freeze_reasons": null,
+  "has_projection_errors": false,
+  "verdict": "ready",
+  "verdict_reason": "no new freeze reason categories and no projection errors versus the post-restore baseline"
+}
+JSON
+
+assert_vacuous() {
+  local file=$1 expected=$2 label=$3
+  local actual
+  actual=$(shadow_eval_run_was_vacuous "$fixtures_dir/$file")
+  if [[ "$actual" != "$expected" ]]; then
+    fail "$label: expected vacuous=$expected, got $actual"
+  fi
+}
+
+assert_vacuous vacuous-reproject-all.json true "reproject-all that projected nothing"
+assert_verdict vacuous-reproject-all.json not_ready 3 "reproject-all that projected nothing"
+assert_new_reasons vacuous-reproject-all.json "" "reproject-all that projected nothing"
+
+assert_vacuous reproject-all-projected.json false "reproject-all that projected every account"
+assert_verdict reproject-all-projected.json ready 0 "reproject-all that projected every account"
+
+# A report written before these fields existed carries neither key, so
+# _shadow_eval_scalar returns empty for both and the condition must not
+# fire. Reports already on disk from earlier rehearsals stay readable.
+assert_vacuous no-freezes-ready.json false "pre-existing report without the new fields"
+assert_vacuous rc78-real-shadow-eval.json false "RC78 real report without the new fields"
+echo "reproject-all vacuity: ok"
+
 if (( failures > 0 )); then
   echo "test-shadow-eval.sh: $failures failure(s)" >&2
   exit 1

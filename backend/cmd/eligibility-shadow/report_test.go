@@ -278,3 +278,89 @@ func TestEvaluateReadinessBothNewReasonsAndErrorsStillExitThree(t *testing.T) {
 		t.Fatalf("expected not_ready/3, got verdict=%q exit=%d", report.Verdict, ExitCode(report))
 	}
 }
+
+// XM-INV-SHADOW-EVAL-VACUOUS. The four tests below pin the exact shape of
+// the reports RC78, RC79 and RC88 shipped past: a run that projected nothing
+// and was read as a pass because every comparison it makes is trivially
+// satisfied when nothing ran.
+
+func TestEvaluateReadinessVacuousReprojectAllRunBlocks(t *testing.T) {
+	// The RC88 report, reproduced: before and after identical, no errors, no
+	// new freeze reasons -- and not one account projected. Under the old
+	// logic this was "ready". Asking for a full reprojection and getting
+	// none is now the first thing checked.
+	report := Report{
+		ReprojectAllRequested: true,
+		AccountsEnqueued:      8,
+		AccountsProjected:     0,
+		RoundsRun:             1,
+		QueueDrained:          true,
+		Before:                Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+		After:                 Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+	}
+	EvaluateReadiness(&report)
+	if report.Verdict != VerdictNotReady || ExitCode(report) != 3 {
+		t.Fatalf("expected not_ready/3 for a run that projected nothing, got verdict=%q exit=%d", report.Verdict, ExitCode(report))
+	}
+	if !strings.Contains(report.VerdictReason, "no account was projected") {
+		t.Fatalf("verdict reason should name the vacuity, got %q", report.VerdictReason)
+	}
+}
+
+func TestEvaluateReadinessReprojectAllThatProjectedAccountsIsReady(t *testing.T) {
+	// One round is not evidence of vacuity on its own: eight accounts fit in
+	// a single batch of twenty-five, so a complete, genuine rehearsal of
+	// this production also reports rounds_run 1 and queue_drained true.
+	// Only AccountsProjected separates it from the report above.
+	report := Report{
+		ReprojectAllRequested: true,
+		AccountsEnqueued:      8,
+		AccountsProjected:     8,
+		RoundsRun:             1,
+		QueueDrained:          true,
+		Before:                Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+		After:                 Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+	}
+	EvaluateReadiness(&report)
+	if report.Verdict != VerdictReady || ExitCode(report) != 0 {
+		t.Fatalf("expected ready/0, got verdict=%q exit=%d (%s)", report.Verdict, ExitCode(report), report.VerdictReason)
+	}
+}
+
+func TestEvaluateReadinessWithoutReprojectAllZeroProjectedStaysReady(t *testing.T) {
+	// Without the flag the run never claimed to reproject anything, so
+	// projecting nothing is its ordinary, honest outcome and must keep
+	// behaving exactly as it does today. The new condition is scoped to the
+	// promise the flag makes, not applied to every run.
+	report := Report{
+		AccountsProjected: 0,
+		RoundsRun:         1,
+		QueueDrained:      true,
+		Before:            Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+		After:             Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 12}}},
+	}
+	EvaluateReadiness(&report)
+	if report.Verdict != VerdictReady || ExitCode(report) != 0 {
+		t.Fatalf("expected ready/0 for a plain run, got verdict=%q exit=%d (%s)", report.Verdict, ExitCode(report), report.VerdictReason)
+	}
+}
+
+func TestEvaluateReadinessVacuityIsCheckedBeforeFreezeComparison(t *testing.T) {
+	// A vacuous run that ALSO shows a new freeze reason must report the
+	// vacuity, not the freeze: nothing the candidate did produced that
+	// freeze, because the candidate did not run. Attributing it to the
+	// candidate would send a reader chasing a regression that is not there.
+	report := Report{
+		ReprojectAllRequested: true,
+		AccountsProjected:     0,
+		Before:                Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "SOURCE_GAP", Open: 1}}},
+		After:                 Snapshot{OpenFreezes: []FreezeCount{{FreezeReason: "USAGE_EXCEEDS_LEDGER", Open: 1}}},
+	}
+	EvaluateReadiness(&report)
+	if report.Verdict != VerdictNotReady {
+		t.Fatalf("expected not_ready, got %q", report.Verdict)
+	}
+	if !strings.Contains(report.VerdictReason, "no account was projected") {
+		t.Fatalf("vacuity must be reported ahead of the freeze comparison, got %q", report.VerdictReason)
+	}
+}

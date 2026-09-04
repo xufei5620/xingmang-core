@@ -168,3 +168,117 @@ func TestEligibilityShadowFailedJobs(t *testing.T) {
 		t.Fatalf("expected exactly the one dead job, got %+v", failed)
 	}
 }
+
+// TestEnqueueEligibilityShadowReprojectionQueuesEveryAccountAtItsOwnBoundary
+// is the geology under XM-INV-SHADOW-EVAL-VACUOUS: the rehearsal only stops
+// being vacuous if this INSERT really does put one job per account into the
+// queue, at that account's own finalized_through. Asserting it against a
+// real Postgres rather than reasoning about the SQL is the point -- the
+// defect this fixes existed because nobody checked what the rehearsal
+// actually did to the database.
+func TestEnqueueEligibilityShadowReprojectionQueuesEveryAccountAtItsOwnBoundary(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	first := "60000000-0000-4000-8000-0000000000c1"
+	second := "60000000-0000-4000-8000-0000000000c2"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, first, "reproject-first", cutover, manifestHash, configHash)
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, second, "reproject-second", cutover, manifestHash, configHash)
+	firstBoundary := cutover.Add(2 * time.Hour)
+	secondBoundary := cutover.Add(9 * time.Hour)
+	for accountID, boundary := range map[string]time.Time{first: firstBoundary, second: secondBoundary} {
+		if _, err := store.pool.Exec(ctx, `
+			UPDATE source_account_eligibility_state SET finalized_through=$2
+			WHERE external_account_id=$1`, accountID, boundary); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	enqueued, err := store.EnqueueEligibilityShadowReprojection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The contract is "one job per account", so the expectation is derived
+	// from the table rather than hard-coded: the shared fixture seeds an
+	// account of its own, and a literal 2 here would assert this test's
+	// bookkeeping instead of the behaviour.
+	var accounts int64
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state`).Scan(&accounts); err != nil {
+		t.Fatal(err)
+	}
+	if enqueued != accounts {
+		t.Fatalf("expected one job per account (%d), got %d", accounts, enqueued)
+	}
+	// Each account must be requested at its OWN boundary, not at a shared
+	// one: requesting a low-water account at a high-water time would ask the
+	// projection for a window it has no facts for.
+	for accountID, want := range map[string]time.Time{first: firstBoundary, second: secondBoundary} {
+		var requested time.Time
+		var status string
+		if err = store.pool.QueryRow(ctx, `
+			SELECT requested_through,status FROM eligibility_projection_jobs
+			WHERE external_account_id=$1`, accountID).Scan(&requested, &status); err != nil {
+			t.Fatal(err)
+		}
+		if !requested.Equal(want) {
+			t.Fatalf("account %s: requested_through %s, want its own finalized_through %s", accountID, requested, want)
+		}
+		if status != "queued" {
+			t.Fatalf("account %s: status %q, want queued", accountID, status)
+		}
+	}
+	// Claimable immediately -- next_attempt_at is backdated so the drain
+	// loop's very first round sees the work rather than waiting a tick.
+	claimable, err := store.EligibilityProjectionClaimableCount(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimable != accounts {
+		t.Fatalf("expected every queued job immediately claimable (%d), got %d", accounts, claimable)
+	}
+}
+
+// A rehearsal must add work, never silently reset state the restored backup
+// captured. A dead job is the case that matters: resetting it to 'queued'
+// would erase the very evidence an operator restored the backup to inspect,
+// and would also hide a genuinely stuck account behind a clean-looking run.
+func TestEnqueueEligibilityShadowReprojectionLeavesExistingJobsUntouched(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	deadAccount := "60000000-0000-4000-8000-0000000000d1"
+	freshAccount := "60000000-0000-4000-8000-0000000000d2"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, deadAccount, "reproject-dead", cutover, manifestHash, configHash)
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, freshAccount, "reproject-fresh", cutover, manifestHash, configHash)
+	now := time.Now().UTC().Truncate(time.Second)
+	seedEligibilityProjectionJobRow(t, store, ctx, deadAccount, "dead", strPtr("PROJECTION_DEAD"), now, now, now.Add(5*time.Minute))
+	// Read the row back rather than predicting it: the shared seed helper
+	// derives requested_through itself, and "untouched" is a statement about
+	// what was there before, not about what this test believes was written.
+	var deadRequested time.Time
+	if err := store.pool.QueryRow(ctx, `
+		SELECT requested_through FROM eligibility_projection_jobs
+		WHERE external_account_id=$1`, deadAccount).Scan(&deadRequested); err != nil {
+		t.Fatal(err)
+	}
+
+	enqueued, err := store.EnqueueEligibilityShadowReprojection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accounts int64
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM source_account_eligibility_state`).Scan(&accounts); err != nil {
+		t.Fatal(err)
+	}
+	if enqueued != accounts-1 {
+		t.Fatalf("expected every account except the one already holding a job (%d), got %d", accounts-1, enqueued)
+	}
+	var status string
+	var requested time.Time
+	if err = store.pool.QueryRow(ctx, `
+		SELECT status,requested_through FROM eligibility_projection_jobs
+		WHERE external_account_id=$1`, deadAccount).Scan(&status, &requested); err != nil {
+		t.Fatal(err)
+	}
+	if status != "dead" || !requested.Equal(deadRequested) {
+		t.Fatalf("dead job was modified: status=%q requested_through=%s", status, requested)
+	}
+}

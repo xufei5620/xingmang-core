@@ -45,12 +45,18 @@ backup_name=""
 image_tag=""
 max_rounds=200
 batch_limit=25
+# XM-INV-SHADOW-EVAL-VACUOUS: off by default, so a plain run keeps exactly
+# the meaning it has today. Any release that changes the evaluator, the
+# projection, or a migration feeding either must pass it -- without it the
+# candidate evaluator is never invoked against a single account, because a
+# healthy production's job queue is empty and there is nothing to drain.
+reproject_all=0
 tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE:-16g}
 
 usage() {
   cat >&2 <<'USAGE'
 usage: shadow-eval.sh --image-tag <0.1.0-rcNN> [--backup <invoice-TIMESTAMP>]
-                       [--max-rounds N] [--batch-limit N]
+                       [--max-rounds N] [--batch-limit N] [--reproject-all]
 USAGE
 }
 
@@ -68,6 +74,8 @@ while (( $# > 0 )); do
     --batch-limit)
       (( $# >= 2 )) || { echo '--batch-limit requires a value' >&2; exit 2; }
       batch_limit=$2; shift 2 ;;
+    --reproject-all)
+      reproject_all=1; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -348,6 +356,12 @@ schema_migrations_after=$(docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U
   -c "SELECT name FROM schema_migrations ORDER BY name")
 migrations_applied_csv=$(comm -13 <(printf '%s\n' "$schema_migrations_before") <(printf '%s\n' "$schema_migrations_after") | paste -sd ',' -)
 
+# An explicit array, so the flag is either present as one whole argument
+# or absent entirely -- never an empty string, which the tool would reject
+# as a positional argument (it accepts none).
+reproject_all_args=()
+if (( reproject_all )); then reproject_all_args=(--reproject-all); fi
+
 set +e
 docker run --pull never --rm --network "$network" --read-only \
   --cap-drop ALL --security-opt no-new-privileges:true \
@@ -358,6 +372,7 @@ docker run --pull never --rm --network "$network" --read-only \
   --max-rounds "$max_rounds" --batch-limit "$batch_limit" \
   --backup-label "$backup_name" --candidate-image-tag "$image_tag" \
   --migrations-applied "$migrations_applied_csv" \
+  "${reproject_all_args[@]}" \
   >"$report_json" 2>"$tool_log"
 tool_exit=$?
 set -e

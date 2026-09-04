@@ -1,7 +1,7 @@
 # XM-INV-SHADOW-EVAL-VACUOUS: the shadow evaluation has never exercised a projection
 
-- **status:** open, not started. Filed 2026-09-04 from the RC88 rehearsal.
-- **branch:** none yet.
+- **status:** implemented 2026-09-05, not yet exercised against a real backup. Filed 2026-09-04 from the RC88 rehearsal.
+- **branch:** ai/claude/XM-INV-AUTOLOGIN.
 - **found in production rehearsal**, 2026-09-04, while gating XM-INV-OVERAGE-CARRY-FORWARD.
 
 ## Symptom
@@ -84,3 +84,85 @@ quantities the change is about rather than only their classifications.
 3. Without the flag, the run behaves exactly as it does today.
 4. The verdict still fails closed on a new freeze-reason category or a
    projection error, unchanged.
+
+## What was built (2026-09-05)
+
+The fix is three things, not one. Enqueueing alone would have left the report
+looking exactly as it does today.
+
+**1. `postgresstore.EnqueueEligibilityShadowReprojection`** queues one job per
+account at that account's own `finalized_through`, `ON CONFLICT DO NOTHING`.
+Verified by reading the worker rather than trusting this document's earlier
+claim: `processEligibilityProjectionJob` raises `requested_through` to
+`finalized_through` when it is below, never lowers it, and then calls
+`reprojectEligibilityTx` unconditionally — there is no short-circuit for a
+window that did not advance. Its closing `UPDATE` is
+`finalized_through=GREATEST(finalized_through,requested)`, so replaying an
+account at its own boundary cannot move that boundary in either direction.
+
+**2. The report now carries `accounts_projected`, and the verdict fails
+closed on it.** This is the part the original write-up missed, and it matters
+more than the enqueue. `ProcessEligibilityProjectionJobs` returns how many
+accounts it processed; `run()` was discarding that value. Production has eight
+accounts, and the batch limit is twenty-five — so a complete, genuine
+rehearsal of this system reports `rounds_run: 1, queue_drained: true`, which
+is **the same shape as the vacuous runs**. Round count cannot distinguish
+them; only the account count can. When `--reproject-all` was passed and
+`accounts_projected` is zero, the verdict is now `not_ready`, checked *before*
+the freeze comparison — because "no new freeze reasons" is trivially true of a
+projection that never ran, and attributing that to the candidate would send a
+reader chasing a regression that is not there.
+
+The condition is taught to both verdict implementations, Go and bash. They are
+computed independently and compared at rehearsal time, so a condition only one
+side knows would surface as a tooling failure rather than the blocked release
+it should be.
+
+**3. Per-account quantities in the snapshot** — `projection_version`,
+`finalized_through`, `non_invoiceable_overage_units`, and the funding-lot
+totals (cap, consumed cash, reserved, issued). RC88 is the worked example: it
+claimed one account's expected balance would move by a specific amount, and
+the report it was gated on could not have shown that even if the projection
+had run, because it carried no quantity at all. `projection_version` doubles
+as the per-account counterpart to `accounts_projected`: an account whose
+version did not move was not reprojected.
+
+### What the pre-existing tests caught that reading the code did not
+
+The first draft scanned `non_invoiceable_overage_units::text` straight into a
+string. That column is nullable and **NULL is the ordinary case — six of the
+eight production accounts carry no overage** — so the snapshot query would
+have failed on the first row, and the rehearsal this slice exists to repair
+would have exited 1 before taking its baseline. It is now
+`COALESCE(...,'0')`, which is unambiguous rather than merely convenient:
+migration 0020's CHECK is `IS NULL OR > 0`, so a stored value can never be
+zero and "0" can only mean "none".
+
+Credit where it belongs: the two tests that caught this were the *existing*
+`TestEligibilityShadowSnapshotAccountsAndFreezes` and
+`...EvaluationsKeepsLatestPerCheckpoint`, not anything added by this slice.
+The failure mode was contained — `EligibilityShadowSnapshot` has exactly two
+callers, both in `cmd/eligibility-shadow`, so nothing in the request or worker
+path touches it, and the rehearsal fails closed (exit 1 blocks the tag) rather
+than reporting a wrong verdict. The lesson is not that it nearly shipped. It
+is that this is code which only runs during a release, so a defect in it stays
+invisible until the next release, at the most expensive possible moment to
+debug — on the server, with the age identity mounted. Reading the SQL was not
+an adequate substitute for running it.
+
+Two of the new tests also asserted hard-coded row counts that encoded the
+shared fixture's own bookkeeping rather than the behaviour; they now derive
+the expectation from `source_account_eligibility_state` itself, and the
+"leaves existing jobs untouched" test reads the row back before the enqueue
+instead of predicting what the seed helper wrote.
+
+## Still open
+
+- **Nothing has run against a real backup yet.** Every claim above is from
+  unit and integration tests plus reading the worker. Acceptance items 1 and 2
+  below need one rehearsal against a signed production backup, which needs the
+  age identity; that is a user step and is not done.
+- The release plan template must require `--reproject-all` for any release
+  touching the evaluator, the projection, or a migration feeding either. Until
+  that line exists in the template, this is a capability, not a gate.
+- `XM-INV-CATCHUP-BURST-BACKPRESSURE` remains untouched.

@@ -2383,6 +2383,27 @@ how many `ProcessEligibilityProjectionJobs` rounds it will run before giving
 up on draining the queue, and `--batch-limit N` (default 25, same cap the
 worker itself enforces) to change accounts claimed per round.
 
+**`--reproject-all` is mandatory for any release that changes the evaluator,
+the projection, or a migration that feeds either.** Without it this rehearsal
+proves nothing about such a release, and it will not tell you so: the tool
+drains whatever is already in `eligibility_projection_jobs`, and a healthy
+production's queue is empty by definition, so a backup restored from one gives
+the candidate evaluator no account to run against. RC78, RC79 and RC88 each
+shipped an evaluator or migration change past a "ready" verdict produced that
+way, with `before` and `after` byte-identical (XM-INV-SHADOW-EVAL-VACUOUS).
+
+With the flag, the run queues one job per account at that account's own
+`finalized_through` before taking its baseline, and the report carries
+`accounts_enqueued` and `accounts_projected`. If `accounts_projected` is zero
+the verdict is `not_ready` (exit 3) — a run that was asked to reproject
+everything and reprojected nothing must never read as a pass.
+
+Do not read `rounds_run` as evidence that the rehearsal did anything.
+Production has eight accounts and the batch limit is twenty-five, so a
+complete, genuine run reports `rounds_run: 1` and `queue_drained: true` —
+exactly what a vacuous run reports. `accounts_projected` is the only field
+that separates them.
+
 The `invoice-migrate` step needs no additional inputs: it runs inside the
 same isolated network, reuses the identical read-only database-url secret
 bind-mount and non-root-uid handling already prepared for
@@ -2462,7 +2483,10 @@ before the tag is created:
 
 ```
 - [ ] Run deploy/rehearsal/shadow-eval.sh against the newest signed backup with
-      this RC's candidate image tag; require verdict "ready" (exit 0). A
+      this RC's candidate image tag, adding --reproject-all whenever this RC
+      changes the evaluator, the projection, or a migration feeding either
+      (without it the rehearsal cannot exercise the change at all, and will
+      still say "ready"); require verdict "ready" (exit 0). A
       "not_ready" verdict (exit 3) blocks the tag until the report's
       new_freeze_reasons/round_errors/failed_accounts are root-caused and
       fixed, not silently re-run past. A failed invoice-migrate step inside

@@ -152,6 +152,33 @@ shadow_eval_report_is_valid() {
   grep -qE '^  "verdict": ' "$report" && ! grep -qE '^  "tooling_failure": true,?$' "$report"
 }
 
+# shadow_eval_run_was_vacuous <report.json>
+# Prints "true" when the report says a full reprojection was requested and
+# no account was projected, "false" otherwise.
+#
+# XM-INV-SHADOW-EVAL-VACUOUS: this is the bash half of the identical
+# condition EvaluateReadiness applies in report.go. The two verdicts are
+# computed independently and compared on purpose, so a new blocking
+# condition has to be taught to both -- one that only a single side knows is
+# worse than no condition at all, because the disagreement is itself
+# reported as a tooling failure.
+#
+# "No account was projected" reads accounts_projected, not rounds_run: a
+# drain against an already-empty queue runs exactly one round and reports
+# queue_drained true, and so does a healthy run that claims every account in
+# a single batch. Only the account count tells those two apart, which is why
+# three releases read a vacuous report as a passing one.
+shadow_eval_run_was_vacuous() {
+  local report=$1 requested projected
+  requested=$(_shadow_eval_scalar "$report" reproject_all_requested)
+  projected=$(_shadow_eval_scalar "$report" accounts_projected)
+  if [[ "$requested" == "true" && "$projected" == "0" ]]; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+}
+
 # shadow_eval_verdict_exit_code <report.json>
 # Prints "ready" or "not_ready" on stdout and returns 0 for ready, 3 for
 # not_ready -- the same release-blocking contract as
@@ -169,6 +196,13 @@ shadow_eval_verdict_exit_code() {
   fi
   new_reasons=$(shadow_eval_new_freeze_reasons "$report")
   has_errors=$(shadow_eval_has_errors "$report")
+  # Checked first, for the same reason report.go checks it first: when
+  # nothing ran, "no new freeze reasons" is trivially true and proves
+  # nothing about the candidate.
+  if [[ "$(shadow_eval_run_was_vacuous "$report")" == "true" ]]; then
+    printf 'not_ready\n'
+    return 3
+  fi
   if [[ -n "$new_reasons" || "$has_errors" == "true" ]]; then
     printf 'not_ready\n'
     return 3
