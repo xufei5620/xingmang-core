@@ -1,5 +1,10 @@
 # RC85 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC85 shipped at signed tag
+> `v0.1.0-rc85-signed` (`f520976`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc86-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC85 — the work accumulated on the release line since RC84: XM-INV-PROJECTION-HEALTH-UI (the admin 来源同步状态 screen renders the eligibility-projection queue counters the source-health endpoint has returned since RC80, with an honest empty state when the block is absent), the runtime-role hardening that revokes `UPDATE` on `console_assertion_nonces`, the RC83/RC84 execution records, and the per-worktree integration-test database convention in `docs/CONFIGURATION.md`.
