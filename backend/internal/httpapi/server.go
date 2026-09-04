@@ -1179,6 +1179,18 @@ func handleDomainError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrVersionConflict), errors.Is(err, domain.ErrInvalidState):
 		writeError(w, 409, "CONFLICT", err.Error())
 	default:
+		// XM-INV-UNCLASSIFIED-500-SILENT: an unrecognised error used to reach
+		// the client as a bare 500 and leave nothing behind. Production hit
+		// exactly that: three invoice submissions returned 500 within four
+		// minutes, and the api log for that window held four lines, none of
+		// them about the request -- the failure was only visible because the
+		// edge nginx access log recorded the status. Whatever lands here is by
+		// definition a case nobody anticipated, which is the case most worth
+		// being able to read afterwards.
+		//
+		// The message stays generic on the wire; the detail goes to the log.
+		slog.Error("unclassified request failure", slog.String("module", "httpapi"),
+			slog.String("error", err.Error()))
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "request could not be processed")
 	}
 }
