@@ -2,6 +2,7 @@ package infini_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -78,7 +79,18 @@ func TestLiveReadOnlyProbe(t *testing.T) {
 		case connector.KindForbiddenTarget:
 			t.Fatalf("目标被写通道拒绝：base URL 的主机名与 allowlist 不一致，或发生了重定向。%v", err)
 		default:
-			t.Fatalf("调用失败（分类 %s）: %v", connector.KindOf(err), err)
+			// 把整条 Unwrap 链打出来：对外错误文本按 ADR-004 只有分类与操作名，
+			// 状态码与上游响应体开头都在链里。没有它，一个 bad_response
+			// 完全无从下手。
+			t.Fatalf(`调用失败（分类 %s）。完整错误链：
+  %s
+
+bad_response 的常见成因，按可能性排：
+  1. 路径不对——base URL 是否该带前缀（如 /api），或端点其实不是 /v2/cards/list
+  2. 上游返回了非 JSON（网关错误页、验证码页、WAF 拦截页）
+  3. data 的字段形状与契约不符（契约漂移）
+链里的 http 状态码与响应体开头会直接指出是哪一种。`,
+				connector.KindOf(err), errorChain(err))
 		}
 	}
 
@@ -137,6 +149,15 @@ func TestLiveReadOnlyProbe(t *testing.T) {
 	} else {
 		t.Logf("✓ mask 字段确认为掩码形态")
 	}
+}
+
+// errorChain 把整条 Unwrap 链拼出来，每层一行。
+func errorChain(err error) string {
+	var lines []string
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		lines = append(lines, e.Error())
+	}
+	return strings.Join(lines, " -> ")
 }
 
 func hostOf(t *testing.T, rawURL string) string {

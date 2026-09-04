@@ -2,6 +2,7 @@ package infini
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -137,4 +138,57 @@ func TestDoSendsSignedHeaders(t *testing.T) {
 	if gotDate == "" {
 		t.Fatal("Date 头没发出去")
 	}
+}
+
+// bad_response 必须**可诊断**：对外错误文本仍然不带上游原文（ADR-004），
+// 但 Unwrap 链里要能看到状态码与响应体开头，否则运维拿到一句
+// "bad_response: infini GET /v2/cards/list" 完全无从下手。
+func TestBadResponseCarriesDiagnosticsInUnwrapChain(t *testing.T) {
+	c, _ := serverClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"route not found","hint":"check base path"}`))
+	})
+
+	err := c.do(context.Background(), http.MethodGet, "/v2/cards/list", nil, nil)
+	if err == nil {
+		t.Fatal("404 必须报错")
+	}
+
+	// 对外文本仍然干净
+	if strings.Contains(err.Error(), "route not found") {
+		t.Fatalf("上游原文不该出现在对外错误里: %q", err.Error())
+	}
+
+	// 但链里要有状态码与响应体开头，供服务端日志与排查用
+	chain := unwrapAll(err)
+	if !strings.Contains(chain, "404") {
+		t.Fatalf("Unwrap 链里要能看到状态码, got %q", chain)
+	}
+	if !strings.Contains(chain, "route not found") {
+		t.Fatalf("Unwrap 链里要能看到响应体开头, got %q", chain)
+	}
+}
+
+// 响应体不是 JSON 时同样要能看出「上游到底回了什么」。
+func TestUnparseableBodyCarriesBodyPrefixInChain(t *testing.T) {
+	c, _ := serverClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body>502 Bad Gateway</body></html>`))
+	})
+
+	err := c.do(context.Background(), http.MethodGet, "/v2/cards/list", nil, nil)
+	if err == nil {
+		t.Fatal("非 JSON 响应必须报错")
+	}
+	if chain := unwrapAll(err); !strings.Contains(chain, "502 Bad Gateway") {
+		t.Fatalf("Unwrap 链里要能看到响应体开头, got %q", chain)
+	}
+}
+
+// unwrapAll 把整条 Unwrap 链拼成一个字符串。
+func unwrapAll(err error) string {
+	var parts []string
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		parts = append(parts, e.Error())
+	}
+	return strings.Join(parts, " | ")
 }

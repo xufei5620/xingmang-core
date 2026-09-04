@@ -53,10 +53,8 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 	}
 	defer resp.Body.Close()
 
-	if kind, bad := kindForStatus(resp.StatusCode); bad {
-		return connector.NewError(kind, op, fmt.Errorf("http %d", resp.StatusCode))
-	}
-
+	// 先读体再判状态码：状态码之外还需要「上游到底回了什么」才能排查。
+	// 体是限长的，所以先读不会有内存风险。
 	limited, err := connector.LimitResponseBody(resp, maxResponseBytes)
 	if err != nil {
 		return connector.NewError(connector.KindBadResponse, op, err)
@@ -66,9 +64,18 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 		return connector.NewError(connector.KindBadResponse, op, err)
 	}
 
+	if kind, bad := kindForStatus(resp.StatusCode); bad {
+		// 状态码 + 体开头都进 cause（只进 Unwrap 链与服务端日志，
+		// 不进对外错误文本）。少了体开头，一个 404 就只剩「bad_response」
+		// 这五个字，运维完全无从下手——那等于没有错误分类。
+		return connector.NewError(kind, op,
+			fmt.Errorf("http %d: %s", resp.StatusCode, bodyPrefix(raw)))
+	}
+
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return connector.NewError(connector.KindBadResponse, op, err)
+		return connector.NewError(connector.KindBadResponse, op,
+			fmt.Errorf("%w: body=%s", err, bodyPrefix(raw)))
 	}
 
 	if env.Code != successCode {
@@ -81,9 +88,30 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 		return nil
 	}
 	if err := json.Unmarshal(env.Data, out); err != nil {
-		return connector.NewError(connector.KindBadResponse, op, err)
+		// data 的形状与我们的结构体对不上时，也要看得到上游给的是什么——
+		// 这是「契约漂移」最常见的暴露方式。
+		return connector.NewError(connector.KindBadResponse, op,
+			fmt.Errorf("%w: data=%s", err, bodyPrefix(env.Data)))
 	}
 	return nil
+}
+
+// bodyPrefixLimit 是进错误链的响应体截断长度。
+//
+// 取 300 字节：够看清一段错误 JSON 或一个网关错误页的开头，
+// 又不至于把一整页 HTML 灌进日志。
+const bodyPrefixLimit = 300
+
+// bodyPrefix 截断响应体并压平换行，供错误链使用。
+//
+// 只进 Unwrap 链（服务端日志看得到），不进 Error() 文本——ADR-004 禁的是
+// 把供应商原文透传给**调用方**，不是禁止运维看见它。
+func bodyPrefix(raw []byte) string {
+	text := strings.TrimSpace(string(raw))
+	if len(text) > bodyPrefixLimit {
+		text = text[:bodyPrefixLimit] + "…(截断)"
+	}
+	return strings.Join(strings.Fields(text), " ")
 }
 
 // kindForStatus 把 HTTP 状态码映射成错误分类。

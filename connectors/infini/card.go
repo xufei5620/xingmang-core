@@ -3,6 +3,7 @@ package infini
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/money"
@@ -41,8 +42,49 @@ type rawCard struct {
 	Currency   string          `json:"currency"`
 	Balance    money.RawAmount `json:"available_balance"`
 	UserID     string          `json:"user_id"`
-	CreatedAt  string          `json:"created_at"`
-	UpdatedAt  string          `json:"updated_at"`
+	CreatedAt  rawTimestamp    `json:"created_at"`
+	UpdatedAt  rawTimestamp    `json:"updated_at"`
+}
+
+// rawTimestamp 接住上游的时间字段。
+//
+// **上游给的是 Unix 秒时间戳数字**（如 1786095722），不是字符串——
+// 这是 2026-09-04 真实端点验证打脸得到的事实，供应商文档没写清楚，
+// 第一版按字符串解析，一调就报 "cannot unmarshal number into ... string"。
+// 那次失败是设计要的结果：宁可报错，也不默默落一个零值时间。
+//
+// 字符串形态一并保留：文档里给的示例是字符串，上游哪天改回去不该炸。
+type rawTimestamp struct {
+	unix int64
+	text string
+}
+
+func (t *rawTimestamp) UnmarshalJSON(b []byte) error {
+	trimmed := strings.TrimSpace(string(b))
+	switch {
+	case trimmed == "" || trimmed == "null":
+		return nil
+	case strings.HasPrefix(trimmed, `"`):
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		t.text = s
+		return nil
+	default:
+		// 不经 float：秒级时间戳超过 2^53 不现实，但让 JSON 解码器
+		// 走 float64 是一种会在别处咬人的习惯，这里直接要整数。
+		var n json.Number
+		if err := json.Unmarshal(b, &n); err != nil {
+			return err
+		}
+		v, err := n.Int64()
+		if err != nil {
+			return fmt.Errorf("时间戳 %q 不是整数: %w", n.String(), err)
+		}
+		t.unix = v
+		return nil
+	}
 }
 
 // timestampLayouts 是接受的时间格式。
@@ -114,16 +156,26 @@ func (raw rawCard) balanceMinor() (int64, error) {
 }
 
 // parseTimestamp 解析上游时间并统一转成 UTC（宪法条款 14：时间库内 UTC）。
-func parseTimestamp(raw, field string) (time.Time, error) {
-	if raw == "" {
-		return time.Time{}, fmt.Errorf("%s 为空", field)
+//
+// 数字与字符串两种形态都认，但**零值与负数一律报错**：0 会变成
+// 1970-01-01，那正是「看得见但没人会去查」的那类错误——新鲜度看板上
+// 一个 1970 年不会有人当成故障。
+func parseTimestamp(raw rawTimestamp, field string) (time.Time, error) {
+	if raw.unix != 0 {
+		if raw.unix < 0 {
+			return time.Time{}, fmt.Errorf("%s 的时间戳为负: %d", field, raw.unix)
+		}
+		return time.Unix(raw.unix, 0).UTC(), nil
+	}
+
+	if raw.text == "" {
+		return time.Time{}, fmt.Errorf("%s 为空或为 0（0 会落成 1970 年，不接受）", field)
 	}
 	for _, layout := range timestampLayouts {
-		if t, err := time.Parse(layout, raw); err == nil {
+		if t, err := time.Parse(layout, raw.text); err == nil {
 			return t.UTC(), nil
 		}
 	}
-	// 不把原始值放进错误文本之外的地方；这里放是因为时间不是敏感数据，
-	// 而排查格式问题必须看到它长什么样。
-	return time.Time{}, fmt.Errorf("%s 的时间格式无法解析: %q", field, raw)
+	// 时间不是敏感数据，排查格式问题必须看到它长什么样。
+	return time.Time{}, fmt.Errorf("%s 的时间格式无法解析: %q", field, raw.text)
 }
