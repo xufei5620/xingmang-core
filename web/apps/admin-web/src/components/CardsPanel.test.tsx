@@ -16,10 +16,12 @@ vi.mock("../api/cards", async () => {
     issueCard: vi.fn(),
     listCardBalances: vi.fn(),
     listCardChallenges: vi.fn(),
+    deleteCard: vi.fn(),
   };
 });
 
 import {
+  deleteCard,
   freezeCard,
   listCardBalances,
   listCardChallenges,
@@ -384,5 +386,62 @@ describe("3DS 验证挑战", () => {
 
     await screen.findByText("533228******1234");
     expect(screen.queryByText(/999999/)).toBeNull();
+  });
+});
+
+describe("关停卡", () => {
+  // 关停不可逆，而它和「详情」「充值」在同一行、按钮长得一样。
+  // 一点就走的代价太大，所以必须点两次。
+  it("第一次点击只是待确认，不发请求", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
+
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "关停" }));
+    expect(deleteCard).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: "确认关停" })).toBeTruthy();
+  });
+
+  it("确认后才走 Action，且带幂等键", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
+    vi.mocked(deleteCard).mockResolvedValue({ runId: "run-9", result: {} });
+
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "关停" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认关停" }));
+
+    await waitFor(() => expect(deleteCard).toHaveBeenCalledTimes(1));
+    const params = vi.mocked(deleteCard).mock.calls[0]?.[0];
+    expect(params?.card_id).toBe("card_1");
+    expect(params?.account).toBe("MAIN");
+    expect(params?.idempotency_key).toBeTruthy();
+  });
+
+  // 已经在关停流程里的卡不再提供这个按钮：再点一次没有意义。
+  it("pending_delete 的卡不显示关停按钮", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [{ ...activeCard, status: "pending_delete" }],
+      accounts: ["MAIN"], memberEmails: [],
+    });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
+
+    renderPanel();
+
+    // 状态筛选下拉里也会出现同样的文案，只认徽章。
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText("删除中").filter((el) => el.tagName !== "OPTION").length,
+      ).toBe(1),
+    );
+    expect(screen.queryByRole("button", { name: "关停" })).toBeNull();
   });
 });

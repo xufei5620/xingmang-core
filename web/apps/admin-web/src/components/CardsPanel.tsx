@@ -5,6 +5,7 @@ import { useId, useState } from "react";
 import {
   freezeCard,
   listCardBalances,
+  deleteCard,
   listCardChallenges,
   issueCard,
   listCardOperationsNeedingAttention,
@@ -535,6 +536,7 @@ export function CardsPanel() {
           >
             {isCardLocked(row.status) ? "解锁" : "锁定"}
           </Button>
+          <DeleteCardButton card={row} onDone={afterWrite} />
         </div>
       ),
     },
@@ -658,5 +660,61 @@ function ChallengeBadge({ challenge }: { challenge?: CardChallenge }) {
     <Badge tone="warning" title="上游要求验证，但回调里没有给出验证码——请到 Infini 后台或邮件里查看">
       待验证
     </Badge>
+  );
+}
+
+/** 关停一张卡。
+ *
+ *  **不可逆**，所以走两步：第一次点击只把按钮变成「确认关停」，再点一次才
+ *  真的发出去。一个不可逆的动作不该和「详情」「充值」一样一点就走——
+ *  它们在同一行、按钮长得一样，误点的代价却完全不同。
+ *
+ *  幂等键在第一次点击时生成并保持不变：确认阶段的重试必须带同一个键，
+ *  换一个键等于告诉后端「这是另一次关停」。
+ */
+function DeleteCardButton({
+  card,
+  onDone,
+}: {
+  card: CardItem;
+  onDone: (result: ActionResult) => void;
+}) {
+  const [armed, setArmed] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: (key: string) =>
+      deleteCard({ account: card.account, idempotency_key: key, card_id: card.card_id }),
+    onSuccess: (run) => {
+      onDone({ runId: run.runId, title: "已提交关停请求" });
+      setArmed(null);
+    },
+    onError: () => setArmed(null),
+  });
+
+  // 已经在关停流程里的卡不再提供这个按钮：再点一次没有意义。
+  if (card.status === "pending_delete" || card.status === "deleted") return null;
+
+  if (!armed) {
+    return (
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={() => setArmed(crypto.randomUUID())}
+        title="关停不可逆：卡会结清余额后删除，无法恢复"
+      >
+        关停
+      </Button>
+    );
+  }
+  return (
+    <Button
+      variant="danger"
+      size="sm"
+      disabled={mutation.isPending}
+      onClick={() => mutation.mutate(armed)}
+      title="再点一次将真的关停这张卡"
+    >
+      {mutation.isPending ? "关停中…" : "确认关停"}
+    </Button>
   );
 }

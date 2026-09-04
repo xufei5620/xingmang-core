@@ -215,3 +215,32 @@ func TestClassifyDistinguishesIPWhitelistFromSignature(t *testing.T) {
 		}
 	}
 }
+
+// 上游的业务错误码要分出「怎么办」，而不是一律 rejected。
+//
+// 依据是官方错误码页（docs/en/8-errorcodes）与四份 OpenAPI 的错误示例。
+// **卡 API 没有专属错误码表**——它的端点在 OpenAPI 里只定义了 200——所以
+// 这里只对确实有据的通用码与资金码分档，其余保持 rejected。
+func TestKindForBusinessCodeSplitsActionableCauses(t *testing.T) {
+	cases := map[int]connector.ErrorKind{
+		// 余额不足、超限：钱确定没花出去，改条件后可以重来。
+		30003: connector.KindRejected,
+		30005: connector.KindRejected,
+		// 参数不合法：改请求才行，重试没用。
+		30013: connector.KindRejected,
+		// 权限/IP：与网关那两条同类，修的是配置不是请求。
+		403: connector.KindIPNotAllowed,
+		// 认证失败。
+		401: connector.KindAuth,
+		// 服务端内部错误：**可能已经生效了**，必须落到可重试之外的那一档。
+		500: connector.KindUnavailable,
+		// 没见过的码保守归 rejected（确定没生效那一侧的前提是「上游明确
+		// 拒绝了」；未知码至少不能被当成可以自动重试的失败）。
+		999999: connector.KindRejected,
+	}
+	for code, want := range cases {
+		if got := kindForBusinessCode(code); got != want {
+			t.Fatalf("code %d 分类 = %q, want %q", code, got, want)
+		}
+	}
+}

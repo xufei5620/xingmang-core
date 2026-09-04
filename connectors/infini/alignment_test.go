@@ -168,3 +168,43 @@ func TestFakeSupportsBatchStatusAndBalances(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// 关停卡：请求字段是 card_id，不是其余端点统一用的 id。
+//
+// 这是全部十一个卡端点里唯一的例外（官方 OpenAPI 的 DeleteCardRequest），
+// 而 skill 的「标识规则」一节说一律用 id——照那条写会得到一个参数错误。
+func TestDeleteCardUsesCardIDField(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := serverClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/cards/delete" {
+			t.Errorf("路径不对: %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{
+			"success": true, "message": "Card deletion initiated",
+		}})
+	})
+
+	if err := c.DeleteCard(context.Background(), "a441831c"); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["card_id"] != "a441831c" {
+		t.Fatalf("请求体应带 card_id（不是 id）, got %v", gotBody)
+	}
+	if _, wrong := gotBody["id"]; wrong {
+		t.Fatalf("不该同时发 id: %v", gotBody)
+	}
+}
+
+// 上游用 success=false 表示拒绝时要报错，不能当成成功。
+func TestDeleteCardTreatsSuccessFalseAsError(t *testing.T) {
+	c, _ := serverClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{
+			"success": false, "message": "card has balance",
+		}})
+	})
+
+	if err := c.DeleteCard(context.Background(), "a441831c"); err == nil {
+		t.Fatal("success=false 必须报错——当成成功会让页面显示已关停而卡还活着")
+	}
+}

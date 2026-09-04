@@ -375,3 +375,15 @@ export async function listCardChallenges(
     .catch(translateUnmounted);
   return body.items ?? [];
 }
+
+/** 关停一张卡（`cards.card.delete@1`）。
+ *
+ *  **不可逆**：上游接受后卡进 pending_delete，结清余额后变 deleted，
+ *  没有任何接口能把它恢复。调用方必须先向人确认。 */
+export function deleteCard(
+  params: { account: string; idempotency_key: string; card_id: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.delete", version: "1", params }, options, client);
+}

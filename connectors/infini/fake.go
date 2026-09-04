@@ -268,3 +268,20 @@ func (f *Fake) AccountBalances(ctx context.Context) (AccountBalances, error) {
 	}
 	return AccountBalances{USDT: "1000.00", USDC: "0", USD: "0"}, nil
 }
+
+// DeleteCard 把卡推进到 pending_delete，与上游的异步语义一致
+// （真正变成 deleted 要等余额结清）。
+func (f *Fake) DeleteCard(ctx context.Context, cardID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeErr(); err != nil {
+		return err
+	}
+	c, ok := f.cards[cardID]
+	if !ok {
+		return fmt.Errorf("fake: 卡 %s 不存在", cardID)
+	}
+	c.Status = "pending_delete"
+	c.UpdatedAt = f.Now()
+	return nil
+}

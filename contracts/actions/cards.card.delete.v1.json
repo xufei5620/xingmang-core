@@ -1,0 +1,35 @@
+{
+  "id": "cards.card.delete",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "card.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_CLIENT_KEY",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "NOT_POSSIBLE",
+  "params": {
+    "account": {
+      "type": "string",
+      "required": true
+    },
+    "idempotency_key": {
+      "type": "string",
+      "required": true
+    },
+    "card_id": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-CARD5 关停一张卡。**不可逆**：上游接受后卡进 pending_delete，结清余额后变 deleted，没有任何接口能把它恢复，所以 compensation_mode 是 NOT_POSSIBLE，页面上有二次确认。与冻结的关键区别在幂等语义：冻结重复执行不产生新效果，因此超时可以安全重试；关停不能，它会触发余额结清，超时后落 unknown 交给对账，绝不自动重试——这一点在 naturallyIdempotent 里显式排除了它。上游的请求字段是 card_id 而不是其余端点统一用的 id，这是全部十一个卡端点里唯一的例外（见 contracts/connectors/infini/openapi/card.yaml 的 DeleteCardRequest），照「标识规则一律 id」写会得到参数错误。风险等级仍是 L1：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED（Foundation-B 未实现），声明成 L2 会让这个动作变成永远跑不起来的摆设；护栏由幂等键、台账、审计与页面二次确认承担。权限用 card.manage，与冻结解冻同档。"
+}

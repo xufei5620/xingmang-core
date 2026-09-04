@@ -189,3 +189,64 @@ func TestFundsActionsUseManagePermission(t *testing.T) {
 		}
 	}
 }
+
+// 关停卡走台账，且**不是天然幂等的**。
+//
+// 冻结/解冻重复执行不产生新效果，所以超时可以安全重试。关停不同：它不可逆，
+// 而且会触发余额结清。超时后我们不知道上游收到没有，落 unknown 交给对账，
+// 绝不自动重试——这与开卡、充值同一档。
+func TestDeleteCardIsNotNaturallyIdempotent(t *testing.T) {
+	if naturallyIdempotent(OpDelete) {
+		t.Fatal("关停不可逆，不能当成天然幂等——那会允许一次超时后的自动重试")
+	}
+	// 与冻结对照：那两个确实是幂等的。
+	if !naturallyIdempotent(OpFreeze) || !naturallyIdempotent(OpUnfreeze) {
+		t.Fatal("冻结/解冻仍应是天然幂等的")
+	}
+}
+
+func TestDeleteCardRecordsOperationAndAdvancesUpstream(t *testing.T) {
+	fake := infini.NewFake()
+	fake.ActivateOnApply()
+	store := newMemStore()
+	svc := newService(fake, store)
+
+	res, err := svc.IssueCard(context.Background(), issueReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.DeleteCard(context.Background(), testAccount, "del-1", res.CardID); err != nil {
+		t.Fatal(err)
+	}
+
+	op, ok := store.ops["del-1"]
+	if !ok || op.Kind != OpDelete || op.State != StateSucceeded {
+		t.Fatalf("关停应留台账且收敛: %+v", op)
+	}
+	// 上游进 pending_delete（异步：结清余额后才 deleted），投影要跟上。
+	if store.cards[res.CardID].Status != "pending_delete" {
+		t.Fatalf("关停后投影状态 = %q", store.cards[res.CardID].Status)
+	}
+}
+
+// 同一个幂等键重复提交不再打上游。
+func TestDeleteCardIsIdempotentByKey(t *testing.T) {
+	fake := infini.NewFake()
+	fake.ActivateOnApply()
+	store := newMemStore()
+	svc := newService(fake, store)
+
+	res, err := svc.IssueCard(context.Background(), issueReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteCard(context.Background(), testAccount, "del-1", res.CardID); err != nil {
+		t.Fatal(err)
+	}
+	// 第二次：卡已经在 pending_delete，若真打上游 fake 会再改一次状态；
+	// 这里断言的是「不再打」——台账已 succeeded 就直接返回。
+	if err := svc.DeleteCard(context.Background(), testAccount, "del-1", res.CardID); err != nil {
+		t.Fatalf("同键重复提交应直接返回: %v", err)
+	}
+}

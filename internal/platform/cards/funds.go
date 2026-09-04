@@ -265,3 +265,18 @@ func stateForUpstreamError(err error, kind string) OperationState {
 func upstreamReason(err error) string {
 	return string(connector.KindOf(err))
 }
+
+// DeleteCard 关停一张卡。
+//
+// 关停是异步的：上游接受后卡进 pending_delete，结清余额后才 deleted。
+// 所以这里成功只表示「请求确定被接受了」。
+//
+// 走与冻结相同的台账编排，但**不享受天然幂等的豁免**：见
+// naturallyIdempotent 的注释——超时后落 unknown，交给对账，绝不自动重试。
+func (s *Service) DeleteCard(ctx context.Context, account, idempotencyKey, cardID string) error {
+	acct, err := s.account(account)
+	if err != nil {
+		return err
+	}
+	return s.switchOperation(ctx, acct, OpDelete, idempotencyKey, cardID, acct.Client.DeleteCard)
+}
