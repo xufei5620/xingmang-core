@@ -196,7 +196,7 @@ function IssueCardDialog({
   onIssued: (result: ActionResult) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [account, setAccount] = useState(accounts[0] ?? "");
+  const [account, setAccount] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
   const [productId, setProductId] = useState("1");
   const [amount, setAmount] = useState("");
@@ -207,10 +207,15 @@ function IssueCardDialog({
   const [error, setError] = useState<unknown>(null);
   const formId = useId();
 
+  // 账号清单是异步到达的（与卡片列表同一个查询）。初值只在首次渲染取一次
+  // 会永远停在空，于是表单提交一个空账号——后端会拒，但表单本身是坏的。
+  // 每次渲染校正：选中的账号必须在当前清单里，否则回落到第一个。
+  const effectiveAccount = accounts.includes(account) ? account : (accounts[0] ?? "");
+
   const mutation = useMutation({
     mutationFn: () =>
       issueCard({
-        account,
+        account: effectiveAccount,
         idempotency_key: idempotencyKey,
         product_id: Number(productId),
         top_up_amount: amount.trim(),
@@ -256,7 +261,7 @@ function IssueCardDialog({
           <Select
             aria-label="使用账号"
             options={accounts.map((a) => ({ value: a, label: a }))}
-            value={account}
+            value={effectiveAccount}
             onValueChange={setAccount}
           />
         </FormField>
@@ -469,7 +474,10 @@ export function CardsPanel() {
           caption="Infini 卡片清单：掩码卡号、持卡人、状态、余额与数据新鲜度"
           rows={rows}
           columns={columns}
-          rowKey={(row) => row.card_id}
+          // 键必须带账号：卡 id 只在自己账号内唯一（投影表的唯一键是
+          // (environment, account, upstream_card_id)），只用 card_id 会让
+          // 两个账号的同名卡撞 React key，把一行渲染两遍。
+          rowKey={(row) => `${row.account}/${row.card_id}`}
           emptyState={
             <p className="text-sm text-fg-muted">
               还没有卡片。点击「开卡」创建第一张，或等待同步作业拉取已有的卡。

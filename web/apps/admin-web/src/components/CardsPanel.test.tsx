@@ -19,6 +19,7 @@ vi.mock("../api/cards", async () => {
 
 import {
   freezeCard,
+  issueCard,
   listCardOperationsNeedingAttention,
   listCards,
   revealCard,
@@ -188,5 +189,57 @@ describe("CardsPanel", () => {
 
     expect(await screen.findByRole("button", { name: "解冻" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "冻结" })).toBeNull();
+  });
+
+  // 两个账号可以持有**同一个上游卡 id**（投影表的唯一键就是
+  // (environment, account, upstream_card_id)）。表格的 rowKey 只用 card_id
+  // 会让 React key 撞车，把一行渲染两遍——本地跑起来才发现的，
+  // 因为 fake 模式下两个账号的替身各自从 1 开始编号。
+  it("两个账号的同名卡 id 各渲染一行", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [
+        { ...activeCard, account: "CHRIS", card_id: "same-id", holder_name: "ZHANG WEI" },
+        { ...activeCard, account: "LINFENG", card_id: "same-id", holder_name: "LI FANG" },
+      ],
+      accounts: ["CHRIS", "LINFENG"],
+    });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+
+    renderPanel();
+
+    expect(await screen.findByText("ZHANG WEI")).toBeTruthy();
+    expect(screen.getByText("LI FANG")).toBeTruthy();
+    expect(screen.getByText("CHRIS")).toBeTruthy();
+    expect(screen.getByText("LINFENG")).toBeTruthy();
+  });
+
+  // 账号列表是异步到达的（跟卡片列表同一个查询）。表单的账号初值若只在
+  // 首次渲染时取一次，就会永远停在空——不改选择直接提交会带一个空账号，
+  // 后端虽然会拒（fail closed 生效），但表单本身是坏的。
+  // 这个也是本地跑起来才看见的：单测里查询是同步 resolve 的，看不出来。
+  it("开卡表单默认选中第一个账号", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [],
+      accounts: ["CHRIS", "LINFENG"],
+    });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(issueCard).mockResolvedValue({ runId: "run-1", result: {} });
+
+    renderPanel();
+
+    // 先等账号清单到达——真实路径是页面加载完再开表单。
+    // 不等的话测的是「加载中就提交」那个不现实的竞态。
+    await screen.findByText(/还没有卡片/);
+
+    fireEvent.click(screen.getByRole("button", { name: "开卡" }));
+
+    fireEvent.change(screen.getByLabelText("充值金额"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("企业成员邮箱"), { target: { value: "a@b.com" } });
+    fireEvent.change(screen.getByLabelText("持卡人姓名"), { target: { value: "X Y" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认开卡" }));
+
+    await waitFor(() => expect(issueCard).toHaveBeenCalledTimes(1));
+    const params = vi.mocked(issueCard).mock.calls[0]?.[0];
+    expect(params?.account).toBe("CHRIS");
   });
 });
