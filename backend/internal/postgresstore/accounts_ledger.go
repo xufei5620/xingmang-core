@@ -187,6 +187,28 @@ const accountLedgerSignalsSelectList = `
 	eas.eligibility_status,
 	EXISTS(SELECT 1 FROM eligibility_projection_jobs j WHERE j.external_account_id=ea.id) AS has_projection_job,
 	COALESCE(latest_eval.evaluation_status,'') AS latest_evaluation_status,
+	-- XM-INV-RESOLVED-FREEZE-UNBLOCKS: has an operator already ruled on the
+	-- evidence this evaluation came from? Resolving a freeze is a human
+	-- judgement about exactly that evidence, and it is newer than the machine
+	-- evaluation it supersedes, so it should stop blocking the account.
+	--
+	-- Without this an idle account can never leave 对账中暂不可开票. Production
+	-- account 2820: two carry-forward proofs on 2026-09-02 showed the same
+	-- unexplained +¥0.50, the account was frozen, an operator resolved the
+	-- freeze on 2026-09-03, and then nothing else ever happened -- the account
+	-- consumes nothing, so no newer evidence is produced, so the 09-02
+	-- evaluation stays "latest" forever and keeps the ledger blocked on a
+	-- question that was already answered.
+	--
+	-- Only this one arm is affected. An account with an OPEN freeze still
+	-- reports frozen_manual_review from the arm above, an eligibility_status
+	-- of not_invoiceable_pending_reconciliation still blocks, and evidence
+	-- newer than the resolution still blocks -- a resolution cannot vouch for
+	-- something that had not happened yet.
+	(latest_eval.as_of IS NOT NULL AND latest_eval.as_of<=COALESCE(
+		(SELECT max(resolved.resolved_at) FROM eligibility_freezes resolved
+		 WHERE resolved.external_account_id=ea.id AND resolved.status='resolved'),
+		'-infinity'::timestamptz)) AS latest_evaluation_adjudicated,
 	latest_eval.kind AS latest_evaluation_kind,
 	latest_eval.key AS latest_evaluation_key,
 	latest_eval.as_of AS last_checkpoint_at,
@@ -253,7 +275,8 @@ func accountBlockStateExpr(thresholdSQL string) string {
 	return `CASE
 		WHEN has_open_freeze OR eligibility_status='frozen' THEN '` + AccountBlockStateFrozenManualReview + `'
 		WHEN eligibility_status='` + AccountBlockStateNotInvoiceablePendingReconciliation + `'
-			OR latest_evaluation_status NOT IN ('matched','positive_classified_non_cash','positive_blip_ignored')
+			OR (latest_evaluation_status NOT IN ('matched','positive_classified_non_cash','positive_blip_ignored')
+				AND NOT latest_evaluation_adjudicated)
 			THEN '` + AccountBlockStateNotInvoiceablePendingReconciliation + `'
 		WHEN has_projection_job THEN '` + AccountBlockStateSettling + `'
 		WHEN invoiceable_minor<` + thresholdSQL + ` THEN '` + AccountBlockStateBelowThreshold + `'
@@ -269,7 +292,8 @@ func accountBlockStateRankExpr(thresholdSQL string) string {
 	return `CASE
 		WHEN has_open_freeze OR eligibility_status='frozen' THEN 0
 		WHEN eligibility_status='` + AccountBlockStateNotInvoiceablePendingReconciliation + `'
-			OR latest_evaluation_status NOT IN ('matched','positive_classified_non_cash','positive_blip_ignored')
+			OR (latest_evaluation_status NOT IN ('matched','positive_classified_non_cash','positive_blip_ignored')
+				AND NOT latest_evaluation_adjudicated)
 			THEN 1
 		WHEN has_projection_job THEN 1
 		WHEN invoiceable_minor<` + thresholdSQL + ` THEN 2
@@ -286,12 +310,13 @@ func accountBlockStateRankExpr(thresholdSQL string) string {
 // state produced by the SQL side (accountBlockStateExpr) through this same
 // Go-side rank function across a real paginated walk, so a drift between
 // the two would surface as an out-of-order page there.
-func accountBlockStateRank(hasOpenFreeze bool, eligibilityStatus string, hasProjectionJob bool, latestEvaluationStatus string, invoiceableMinor, thresholdMinor int64) int {
+func accountBlockStateRank(hasOpenFreeze bool, eligibilityStatus string, hasProjectionJob bool, latestEvaluationStatus string, latestEvaluationAdjudicated bool, invoiceableMinor, thresholdMinor int64) int {
 	if hasOpenFreeze || eligibilityStatus == "frozen" {
 		return 0
 	}
 	if eligibilityStatus == AccountBlockStateNotInvoiceablePendingReconciliation ||
-		(latestEvaluationStatus != "matched" && latestEvaluationStatus != "positive_classified_non_cash" && latestEvaluationStatus != "positive_blip_ignored") {
+		(!latestEvaluationAdjudicated &&
+			latestEvaluationStatus != "matched" && latestEvaluationStatus != "positive_classified_non_cash" && latestEvaluationStatus != "positive_blip_ignored") {
 		return 1
 	}
 	if hasProjectionJob {
@@ -544,13 +569,15 @@ func (s *Store) ListAccountLedgerPage(ctx context.Context, in AccountLedgerPageQ
 				` + accountLedgerFrom + `
 				WHERE 1=1` + cursorFilterSQL + `
 			)
-			SELECT has_open_freeze,eligibility_status,has_projection_job,latest_evaluation_status,invoiceable_minor
+			SELECT has_open_freeze,eligibility_status,has_projection_job,latest_evaluation_status,latest_evaluation_adjudicated,invoiceable_minor
 			FROM signals WHERE account_id=` + cursorAdd(in.BeforeID)
 			var hasOpenFreeze, hasProjectionJob bool
 			var eligibilityStatus, latestEvaluationStatus string
+			var latestEvaluationAdjudicated bool
 			var invoiceableMinor int64
 			err := s.pool.QueryRow(ctx, cursorRankQuery, cursorArgs...).Scan(
-				&hasOpenFreeze, &eligibilityStatus, &hasProjectionJob, &latestEvaluationStatus, &invoiceableMinor)
+				&hasOpenFreeze, &eligibilityStatus, &hasProjectionJob, &latestEvaluationStatus,
+				&latestEvaluationAdjudicated, &invoiceableMinor)
 			if errors.Is(err, pgx.ErrNoRows) {
 				// A stale/unknown cursor: a defined, empty next page, not an
 				// error (the account it pointed at is no longer in this
@@ -560,7 +587,7 @@ func (s *Store) ListAccountLedgerPage(ctx context.Context, in AccountLedgerPageQ
 			if err != nil {
 				return AccountLedgerPage{}, err
 			}
-			rank := accountBlockStateRank(hasOpenFreeze, eligibilityStatus, hasProjectionJob, latestEvaluationStatus, invoiceableMinor, in.ThresholdMinor)
+			rank := accountBlockStateRank(hasOpenFreeze, eligibilityStatus, hasProjectionJob, latestEvaluationStatus, latestEvaluationAdjudicated, invoiceableMinor, in.ThresholdMinor)
 			rankSQL := add(rank)
 			idSQL := add(in.BeforeID)
 			query += ` WHERE (` + accountBlockStateRankExpr(thresholdSQL) + `)>` + rankSQL +

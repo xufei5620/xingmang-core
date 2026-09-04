@@ -1,6 +1,7 @@
 package postgresstore
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -804,4 +805,91 @@ func TestAccountLedgerDetail(t *testing.T) {
 			t.Fatalf("last_reconciled_at should be the earlier matched evaluation, not the later mismatched one")
 		}
 	})
+}
+
+// TestResolvedFreezeStopsBlockingOnTheEvidenceItAnswered is
+// XM-INV-RESOLVED-FREEZE-UNBLOCKS's guard.
+//
+// Production account 2820: two carry-forward proofs on 2026-09-02 showed the
+// same unexplained +¥0.50, the account was frozen, an operator resolved the
+// freeze on 2026-09-03, and it then stayed 对账中暂不可开票 indefinitely. The
+// account consumes nothing, so no newer evidence is ever produced, so the
+// 09-02 evaluation stays "latest" forever and keeps blocking a question a
+// human already answered. Resolving a freeze is a judgement about exactly
+// that evidence, and it is newer than the evaluation it supersedes.
+func TestResolvedFreezeStopsBlockingOnTheEvidenceItAnswered(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID := ledgerUUID('1', 940)
+	if _, err := store.pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name) VALUES($1,'sub2api','ledger-resolved-freeze')`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+
+	accountID := ledgerUUID('3', 941)
+	lot := seedLedgerAccount(t, store, ctx, sourceID, accountID, "ledger-941", 500_000)
+	setOpsConsumedCash(t, store, ctx, lot, 500_000, 320_000, 1000, 640, 50_000, 90_000)
+	// The evidence an operator later ruled on: a gap, not a match.
+	insertEvaluatedCheckpoint(t, store, ctx, sourceID, accountID, 9410, "source_gap_frozen", 1_000_000_000, 50_000_000)
+
+	const threshold = 20_000
+	blockState := func() string {
+		t.Helper()
+		page, err := store.ListAccountLedgerPage(ctx, AccountLedgerPageQuery{ExternalUserID: "ledger-941", ThresholdMinor: threshold})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) != 1 {
+			t.Fatalf("items=%+v", page.Items)
+		}
+		return page.Items[0].BlockState
+	}
+
+	// While the freeze is open the account is frozen_manual_review, and that
+	// arm is untouched by this change.
+	var evidenceAt time.Time
+	if err := store.pool.QueryRow(ctx, `SELECT max(as_of) FROM balance_reconciliation_checkpoints
+		WHERE external_account_id=$1`, accountID).Scan(&evidenceAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `INSERT INTO eligibility_freezes(
+		id,external_account_id,freeze_reason,trigger_object_type,trigger_object_id,opened_at)
+		VALUES($1,$2,'SOURCE_GAP','balance_checkpoint','ckpt-9410',$3)`,
+		ledgerUUID('6', 941), accountID, evidenceAt); err != nil {
+		t.Fatal(err)
+	}
+	if got := blockState(); got != AccountBlockStateFrozenManualReview {
+		t.Fatalf("block_state=%q while the freeze is open, want frozen_manual_review", got)
+	}
+
+	// The operator resolves it, after the evidence. Nothing else changes --
+	// no new checkpoint, no new evaluation, because this account is idle.
+	// The schema requires a resolution to carry who did it and the evidence
+	// they filed -- that is what makes it a judgement worth honouring here.
+	if _, err := store.pool.Exec(ctx, `UPDATE eligibility_freezes
+		SET status='resolved',resolved_at=$2,resolved_by=$3,resolution_evidence_hash=$4,
+			resolution_evidence_ciphertext=$5,resolution_note_ciphertext=$5,
+			resolution_note_hash=$6,resolution_version=2
+		WHERE id=$1`,
+		ledgerUUID('6', 941), evidenceAt.Add(time.Hour),
+		ledgerUUID('2', 941), testHash("resolution-evidence-941"),
+		bytes.Repeat([]byte{9}, 32), testHash("resolution-note-941")); err != nil {
+		t.Fatal(err)
+	}
+	if got := blockState(); got == AccountBlockStateNotInvoiceablePendingReconciliation {
+		t.Fatal("a resolved freeze left the account blocked on the very evidence it answered: " +
+			"an idle account can never produce newer evidence, so this never clears")
+	}
+
+	// The boundary runs the other way too: a resolution that predates the
+	// evidence cannot vouch for it, so the account blocks again. (The
+	// evidence itself is immutable by design -- source eligibility facts
+	// cannot be moved -- so this moves the resolution instead, which is the
+	// same ordering question from the other side.)
+	if _, err := store.pool.Exec(ctx, `UPDATE eligibility_freezes
+		SET resolved_at=$2 WHERE id=$1`,
+		ledgerUUID('6', 941), evidenceAt.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := blockState(); got != AccountBlockStateNotInvoiceablePendingReconciliation {
+		t.Fatalf("block_state=%q, want pending: a resolution older than the evidence adjudicates nothing", got)
+	}
 }
