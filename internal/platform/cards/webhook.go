@@ -91,10 +91,20 @@ func (v *WebhookVerifier) Verify(secret string, h WebhookHeaders, payload []byte
 	// 多认一种编码就是多一条我们没有依据的信任路径。
 	got, err := hex.DecodeString(h.Signature)
 	if err != nil {
-		return fmt.Errorf("%w: 签名不是十六进制", ErrWebhookRejected)
+		return fmt.Errorf("%w: 签名不是十六进制（收到 %d 字符）",
+			ErrWebhookRejected, len(h.Signature))
 	}
 	if subtle.ConstantTimeCompare(got, want) != 1 {
-		return fmt.Errorf("%w: 签名不匹配", ErrWebhookRejected)
+		// 不匹配时把两个 MAC 的开头并排放进错误链。**它们不是密钥**：
+		// HMAC 值泄漏不会反推出密钥，而没有这一行，"签名不匹配"这五个字
+		// 无法区分「密钥填错了」与「签名内容拼法不同」——这两者的排查方向
+		// 完全相反。同时给出签名内容的形状，好核对 timestamp/event_id
+		// 有没有带上多余空白。
+		return fmt.Errorf("%w: 签名不匹配（收到 %s… 本地算出 %s…，"+
+			"ts=%q event=%q 载荷 %d 字节）",
+			ErrWebhookRejected,
+			shortHex(h.Signature), shortHex(hex.EncodeToString(want)),
+			h.Timestamp, h.EventID, len(payload))
 	}
 	return nil
 }
@@ -184,4 +194,15 @@ func ParseWebhookEvent(payload []byte, eventID string) (WebhookEvent, error) {
 		}
 	}
 	return ev, nil
+}
+
+// shortHex 截取十六进制串的开头，用于把两个 MAC 并排放进诊断信息。
+//
+// 只取前 12 个字符：足以判断「完全不同」还是「只差编码」，
+// 又不至于把一个完整的有效签名写进日志。
+func shortHex(v string) string {
+	if len(v) <= 12 {
+		return v
+	}
+	return v[:12]
 }
