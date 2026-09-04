@@ -328,18 +328,6 @@ services:
       # cpa_sync 任务独有的启用开关与周期变量。
       XM_CPA_SYNC_ENABLED: ${XM_CPA_SYNC_ENABLED:-}
       XM_CPA_SYNC_INTERVAL: ${XM_CPA_SYNC_INTERVAL:-300s}
-      # 卡片同步（XM-CARD2）：承担异步开卡的轮询与不确定态的对账收敛。
-      # XM_CARDS_* 与 API 段同值——两个进程必须解析出**同一组账号**，
-      # 否则会出现「API 能开卡的账号，worker 不认识」，那笔操作的不确定态
-      # 永远收敛不了。worker 不发起花钱操作，所以不读金额上限。
-      XM_CARDS_MODE: ${XM_CARDS_MODE:-off}
-      XM_CARDS_BASE_URL: ${XM_CARDS_BASE_URL:-}
-      XM_CARDS_ACCOUNTS: ${XM_CARDS_ACCOUNTS:-}
-      # 不确定态的宽限期：期内查不到就继续等，超期才亮红条要人工。
-      # 留空用 30 分钟——更短会把「上游慢了一点」变成一次不必要的人工介入。
-      XM_CARDS_UNKNOWN_GRACE: ${XM_CARDS_UNKNOWN_GRACE:-}
-      # 流水同步默认关闭：调用量与卡数成正比，而上游限流阈值文档未提及。
-      XM_CARDS_SYNC_TRANSACTIONS: ${XM_CARDS_SYNC_TRANSACTIONS:-}
     volumes:
       # 命名卷而不是 bind：凭据文件只该存在于这个栈里，宿主目录一不小心就
       # 被 rsync / 备份脚本带走。镜像里已把挂载点交给运行用户（go.Dockerfile）。
@@ -524,6 +512,18 @@ services:
       # 它在 off 模式下把同步打开——那种矛盾配置会被 worker 拒绝启动。
       XM_CPA_SYNC_ENABLED: ${XM_CPA_SYNC_ENABLED:-}
       XM_CPA_SYNC_INTERVAL: ${XM_CPA_SYNC_INTERVAL:-300s}
+      # 卡片同步（XM-CARD2）：承担异步开卡的轮询与不确定态的对账收敛。
+      # XM_CARDS_* 与 API 段同值——两个进程必须解析出**同一组账号**，
+      # 否则会出现「API 能开卡的账号，worker 不认识」，那笔操作的不确定态
+      # 永远收敛不了。worker 不发起花钱操作，所以不读金额上限。
+      XM_CARDS_MODE: ${XM_CARDS_MODE:-off}
+      XM_CARDS_BASE_URL: ${XM_CARDS_BASE_URL:-}
+      XM_CARDS_ACCOUNTS: ${XM_CARDS_ACCOUNTS:-}
+      # 不确定态的宽限期：期内查不到就继续等，超期才亮红条要人工。
+      # 留空用 30 分钟——更短会把「上游慢了一点」变成一次不必要的人工介入。
+      XM_CARDS_UNKNOWN_GRACE: ${XM_CARDS_UNKNOWN_GRACE:-}
+      # 流水同步默认关闭：调用量与卡数成正比，而上游限流阈值文档未提及。
+      XM_CARDS_SYNC_TRANSACTIONS: ${XM_CARDS_SYNC_TRANSACTIONS:-}
       XM_CPA_INSTANCE_ID: ${XM_CPA_INSTANCE_ID:-cpa-cli-proxy-api}
       # --- 凭据登记（XM-CRED0）--------------------------------------------
       # 与 platform-api 同一个卷、同一个根目录；worker 只读——它经
