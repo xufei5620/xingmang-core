@@ -67,6 +67,10 @@ func (p *cardWebhookProcessor) MarkWebhookEventProcessed(
 	return p.store.MarkWebhookEventProcessed(ctx, account, eventID)
 }
 
+func (p *cardWebhookProcessor) RecordCardChallenge(ctx context.Context, c cards.CardChallenge) error {
+	return p.store.RecordCardChallenge(ctx, c)
+}
+
 func (p *cardWebhookProcessor) RecordWebhookEventFailure(
 	ctx context.Context, account, eventID, reason string,
 ) error {

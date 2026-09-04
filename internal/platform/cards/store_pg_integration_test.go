@@ -767,3 +767,95 @@ func TestPgStoreWebhookEventIsScopedToAccount(t *testing.T) {
 		t.Fatal("另一个账号的同 id 事件应是新事件")
 	}
 }
+
+// 开卡费只在开卡那一刻知道，同步作业每 5 分钟一轮传空，绝不能把它冲掉。
+// 与 owner_ref / user_email 同一条纪律。
+func TestPgStoreUpsertCardKeepsIssueFeeOnSync(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	card := infini.Card{
+		ID: "card_fee", Mask: "441357******7843", HolderName: "ops@example.com",
+		Alias: "xm-fee", Status: "active", Currency: "USD", BalanceMinor: 100,
+		UserID: "u1", CreatedAt: issueNow, UpdatedAt: issueNow,
+	}
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{
+		OwnerRef: "ops", IssueFee: "1", IssuePayAmount: "2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同步作业的常态：只带上游知道的字段。
+	card.BalanceMinor = 50
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := onlyCard(t, store, "CHRIS")
+	if got.BalanceMinor != 50 {
+		t.Fatalf("余额没刷新: %+v", got)
+	}
+	if got.IssueFee != "1" || got.IssuePayAmount != "2" {
+		t.Fatalf("同步冲掉了开卡费: %+v", got)
+	}
+}
+
+// 流水的外币原始金额与结算时间要能往返。
+//
+// 一张 USD 卡在欧元商户消费，amount 是折成 USD 的，transaction_amount 才是
+// EUR 原值——没有它看不出跨境消费与汇率加价。settled_at 分开「已授权」与
+// 「已结算」：授权可以被撤销，只有结算了的才是真正扣掉的钱。
+func TestPgStoreTransactionsCarryForeignAmountAndSettlement(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+	seedCard(t, store, "CHRIS", "card_1", "ops@example.com")
+
+	txs := []infini.CardTransaction{{
+		CardID: "card_1", Type: "Consume", AmountMinor: 1050, FeeMinor: 0,
+		Status: "Completed", Currency: "USD", Merchant: "Amazon DE",
+		OccurredAt:          issueNow.UTC().Format(time.RFC3339),
+		SettledAt:           issueNow.Add(time.Hour).UTC().Format(time.RFC3339),
+		TransactionAmount:   "9.80",
+		TransactionCurrency: "EUR",
+	}}
+	if err := store.UpsertTransactions(ctx, "CHRIS", "card_1", txs); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := store.ListTransactions(ctx, "CHRIS", "card_1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("应有 1 条流水, got %d", len(list))
+	}
+	got := list[0]
+	if got.TransactionAmount != "9.80" || got.TransactionCurrency != "EUR" {
+		t.Fatalf("外币原值没往返: %+v", got)
+	}
+	if got.SettledAt.IsZero() {
+		t.Fatalf("结算时间没往返: %+v", got)
+	}
+}
+
+// 未结算的流水：settled_at 为空要存 NULL，读出来是零值而不是 1970 年。
+func TestPgStoreTransactionsLeaveUnsettledNull(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+	seedCard(t, store, "CHRIS", "card_1", "ops@example.com")
+
+	if err := store.UpsertTransactions(ctx, "CHRIS", "card_1", []infini.CardTransaction{{
+		CardID: "card_1", Type: "Consume", AmountMinor: 100, Currency: "USD",
+		Status: "authorized", OccurredAt: issueNow.UTC().Format(time.RFC3339),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := store.ListTransactions(ctx, "CHRIS", "card_1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !list[0].SettledAt.IsZero() {
+		t.Fatalf("未结算的流水不该有结算时间: %+v", list[0])
+	}
+}

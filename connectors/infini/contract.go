@@ -39,6 +39,8 @@ type CardClient interface {
 	RedeemCard(ctx context.Context, req TopUpRequest) (FundsResult, error)
 	FreezeCard(ctx context.Context, cardID string) error
 	UnfreezeCard(ctx context.Context, cardID string) error
+	// DeleteCard 关停一张卡（异步：先 pending_delete，结清余额后 deleted）。
+	DeleteCard(ctx context.Context, cardID string) error
 
 	// 敏感读取：不改状态，但必须被审计，因此在领域层走 Action 而非普通读接口
 	RevealCard(ctx context.Context, cardID string) (RevealedCard, error)

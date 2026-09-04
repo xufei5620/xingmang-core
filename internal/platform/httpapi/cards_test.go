@@ -18,6 +18,7 @@ type fakeCardQuerier struct {
 	txs          []cards.TransactionView
 	ops          []cards.Operation
 	memberEmails []string
+	challenges   []cards.CardChallenge
 	err          error
 }
 
@@ -27,6 +28,10 @@ func (f *fakeCardQuerier) ListCards(ctx context.Context, account, ownerRef strin
 
 func (f *fakeCardQuerier) ListTransactions(ctx context.Context, account, cardID string, limit int) ([]cards.TransactionView, error) {
 	return f.txs, f.err
+}
+
+func (f *fakeCardQuerier) ActiveChallenges(ctx context.Context) ([]cards.CardChallenge, error) {
+	return f.challenges, f.err
 }
 
 func (f *fakeCardQuerier) KnownMemberEmails(ctx context.Context) ([]string, error) {

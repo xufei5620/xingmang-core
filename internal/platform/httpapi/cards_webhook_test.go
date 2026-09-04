@@ -28,7 +28,9 @@ type fakeWebhookProcessor struct {
 	recordRes cards.WebhookRecord
 	recordErr error
 	refreshErr error
-	markedDone []string
+	markedDone   []string
+	challenges   []cards.CardChallenge
+	challengeErr error
 }
 
 func (f *fakeWebhookProcessor) WebhookSecret(ctx context.Context, account string) (string, error) {
@@ -57,6 +59,11 @@ func (f *fakeWebhookProcessor) MarkWebhookEventProcessed(ctx context.Context, ac
 
 func (f *fakeWebhookProcessor) RecordWebhookEventFailure(ctx context.Context, account, eventID, reason string) error {
 	return nil
+}
+
+func (f *fakeWebhookProcessor) RecordCardChallenge(ctx context.Context, c cards.CardChallenge) error {
+	f.challenges = append(f.challenges, c)
+	return f.challengeErr
 }
 
 func newProcessor() *fakeWebhookProcessor {
@@ -191,5 +198,32 @@ func TestCardWebhookIgnoresNonCardEvents(t *testing.T) {
 	}
 	if len(p.refreshed) != 0 {
 		t.Fatalf("订单事件不该刷新卡片, got %v", p.refreshed)
+	}
+}
+
+// 挑战事件落库但**不刷新卡片**：它与卡的状态、余额都无关，
+// 重读一次上游只是白打一个受 IP 白名单限制的接口。
+func TestCardWebhookStoresChallengeWithoutRefreshing(t *testing.T) {
+	p := newProcessor()
+	payload := `{"event":"card.challenge","data":{"card":{"card_id":"card-1"},` +
+		`"challenge_id":"ch-1","challenge_type":"authorization_code","expires_at":1788553063}}`
+
+	ts := strconv.FormatInt(hookNow.Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(hookSecret))
+	mac.Write([]byte(ts + ".evt-1." + payload))
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/infini/CHRIS", strings.NewReader(payload))
+	req.Header.Set("X-Webhook-Signature", hex.EncodeToString(mac.Sum(nil)))
+	req.Header.Set("X-Webhook-Timestamp", ts)
+	req.Header.Set("X-Webhook-Event-Id", "evt-1")
+
+	rec := serveHook(p, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(p.challenges) != 1 || p.challenges[0].ID != "ch-1" {
+		t.Fatalf("挑战应落库, got %+v", p.challenges)
+	}
+	if len(p.refreshed) != 0 {
+		t.Fatalf("挑战事件不该刷新卡片, got %v", p.refreshed)
 	}
 }

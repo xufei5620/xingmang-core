@@ -19,6 +19,9 @@ const (
 	OpRedeem   = "redeem"
 	OpFreeze   = "freeze"
 	OpUnfreeze = "unfreeze"
+	// OpDelete 是关停。**不可逆**，且会触发余额结清——与冻结不同，
+	// 它不能被当成天然幂等的操作。
+	OpDelete = "delete"
 )
 
 // OperationState 是操作台账里一笔操作的状态。

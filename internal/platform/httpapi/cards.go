@@ -25,6 +25,8 @@ type CardQuerier interface {
 	KnownMemberEmails(ctx context.Context) ([]string, error)
 	ListTransactions(ctx context.Context, account, cardID string, limit int) ([]cards.TransactionView, error)
 	OperationsNeedingAttention(ctx context.Context) ([]cards.Operation, error)
+	// ActiveChallenges 返回尚未过期的 3DS 验证挑战。
+	ActiveChallenges(ctx context.Context) ([]cards.CardChallenge, error)
 }
 
 type cardItem struct {
@@ -59,7 +61,11 @@ type cardItem struct {
 	// 而分叉的那一边会把「续不上」显示成正常。
 	RenewalRisk string `json:"renewal_risk"`
 	// IssuedAt 是上游记的开卡时刻；缺失时字段不出现，而不是回一个 1970 年。
-	IssuedAt  string              `json:"issued_at,omitempty"`
+	IssuedAt string `json:"issued_at,omitempty"`
+	// IssueFee / IssuePayAmount 是开卡手续费与实付额（十进制文本，币种为
+	// 申请时所选代币）。实测手续费是固定 1 USD，小额卡的成本占比很高。
+	IssueFee       string `json:"issue_fee,omitempty"`
+	IssuePayAmount string `json:"issue_pay_amount,omitempty"`
 	Freshness cards.FreshnessInfo `json:"freshness"`
 }
 
@@ -73,6 +79,12 @@ type cardTransactionItem struct {
 	Status      string `json:"status"`
 	Merchant    string `json:"merchant"`
 	OccurredAt  string `json:"occurred_at,omitempty"`
+	// TransactionAmount / TransactionCurrency 是商户侧原始币种的金额；
+	// 同币种消费时不出现。
+	TransactionAmount   string `json:"transaction_amount,omitempty"`
+	TransactionCurrency string `json:"transaction_currency,omitempty"`
+	// SettledAt 缺席表示尚未结算（授权中，金额还可能变）。
+	SettledAt string `json:"settled_at,omitempty"`
 }
 
 type cardOperationItem struct {
@@ -144,6 +156,8 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 				NextRenewalOn:    c.NextRenewalOn,
 				UsageNote:        c.UsageNote,
 				RenewalRisk:      string(cards.RenewalRisk(c.NextRenewalOn, c.BalanceMinor, now)),
+				IssueFee:         c.IssueFee,
+				IssuePayAmount:   c.IssuePayAmount,
 				Freshness:        cards.Freshness(c.LastSyncedAt, now, syncInterval),
 			}
 			if !c.UpstreamCreatedAt.IsZero() {
@@ -218,6 +232,11 @@ func ListCardTransactionsHandler(store CardQuerier) http.HandlerFunc {
 			if !t.OccurredAt.IsZero() {
 				item.OccurredAt = t.OccurredAt.UTC().Format(time.RFC3339)
 			}
+			if !t.SettledAt.IsZero() {
+				item.SettledAt = t.SettledAt.UTC().Format(time.RFC3339)
+			}
+			item.TransactionAmount = t.TransactionAmount
+			item.TransactionCurrency = t.TransactionCurrency
 			out = append(out, item)
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
@@ -256,6 +275,59 @@ func ListCardOperationsNeedingAttentionHandler(store CardQuerier) http.HandlerFu
 				StartedAt:      op.StartedAt.UTC().Format(time.RFC3339),
 				RetryAllowed:   op.RetryAllowed(),
 			})
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	}
+}
+
+type cardChallengeItem struct {
+	Account   string `json:"account"`
+	CardID    string `json:"card_id"`
+	ID        string `json:"challenge_id"`
+	Type      string `json:"challenge_type,omitempty"`
+	// Code 只回给持有 card.reveal 的调用方，且上游不一定给。
+	Code      string `json:"code,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+// ListCardChallengesHandler 返回尚未过期的 3DS 验证挑战。
+//
+// 验证码按 **card.reveal** 权限门控，与卡面明文同一档：它是一次性密钥，
+// 拿到它就能替持卡人完成一笔在线支付的验证。只有 card.read 的调用方
+// 看得到「这张卡有一笔待验证」，看不到码本身。
+//
+// 过期的挑战由存储层过滤掉，不在这里判断——过期之后价值归零而风险不变，
+// 最稳妥的是根本不让它离开数据库。
+func ListCardChallengesHandler(store CardQuerier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, ok := principal.FromContext(r.Context())
+		if !ok {
+			WriteError(w, r, action.NewError(action.CodePermissionDenied, "缺少身份", nil))
+			return
+		}
+		// 验证码与卡面明文同一档权限：它是一次性密钥，拿到就能替持卡人
+		// 完成一笔在线支付的验证。只有 card.read 的调用方看得到
+		// 「这张卡有一笔待验证」，看不到码本身。
+		maySeeCode := p.HasScope(cards.PermissionReveal)
+
+		rows, err := store.ActiveChallenges(r.Context())
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+
+		out := make([]cardChallengeItem, 0, len(rows))
+		for _, c := range rows {
+			item := cardChallengeItem{
+				Account: c.Account, CardID: c.CardID, ID: c.ID, Type: c.Type,
+			}
+			if maySeeCode {
+				item.Code = c.Code
+			}
+			if !c.ExpiresAt.IsZero() {
+				item.ExpiresAt = c.ExpiresAt.UTC().Format(time.RFC3339)
+			}
+			out = append(out, item)
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 	}

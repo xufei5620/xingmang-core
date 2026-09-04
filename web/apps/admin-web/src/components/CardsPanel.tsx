@@ -4,11 +4,15 @@ import { Badge, Button, Dialog, FormField, Input, Select } from "@xingmang/ui-pr
 import { useId, useState } from "react";
 import {
   freezeCard,
+  listCardBalances,
+  deleteCard,
+  listCardChallenges,
   issueCard,
   listCardOperationsNeedingAttention,
   listCards,
   unfreezeCard,
   type CardFreshness,
+  type CardChallenge,
   type CardItem,
   type CardOperationItem,
 } from "../api/cards";
@@ -20,6 +24,8 @@ import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
 
 const CARDS_QUERY = "cards";
+const CARD_BALANCES_QUERY = "card-balances";
+const CARD_CHALLENGES_QUERY = "card-challenges";
 const CARD_ATTENTION_QUERY = "card-operations-attention";
 
 /** 充值币种。与后端 Action 契约的枚举一致——多一个值会被后端当场拒掉。 */
@@ -388,6 +394,17 @@ export function CardsPanel() {
     onError: (err) => setActionError(err),
   });
 
+  // 待验证的 3DS 挑战：轮询得比卡片列表勤，因为验证码通常只有几分钟有效，
+  // 拿到时已经过期就等于没拿到。
+  const challengeQuery = useQuery({
+    queryKey: [CARD_CHALLENGES_QUERY],
+    queryFn: ({ signal }) => listCardChallenges({ signal }),
+    refetchInterval: 30_000,
+  });
+  const challengesByCard = new Map(
+    (challengeQuery.data ?? []).map((c) => [`${c.account}/${c.card_id}`, c]),
+  );
+
   const rows = query.data?.cards ?? [];
   const accounts = query.data?.accounts ?? [];
   const memberEmails = query.data?.memberEmails ?? [];
@@ -409,6 +426,33 @@ export function CardsPanel() {
       primary: true,
     },
     {
+      id: "cvv",
+      header: "CVV",
+      // 与卡号同一逻辑：明文由后端按 card.reveal 权限决定回不回，
+      // 前端只显示它拿到的东西。默认隐藏——它比卡号更少用，
+      // 而摊在列表上等于长期暴露在任何一次截屏里。
+      cell: (row) => <span className="font-mono">{row.cvv || "—"}</span>,
+      value: (row) => row.cvv ?? "",
+      defaultHidden: true,
+    },
+    {
+      id: "expiry",
+      header: "有效期",
+      // 上游字段名叫 expiration_mmyy，但实测返回的是 MM/YYYY（11/2031），
+      // 与文档示例的 1228 不同。原样显示，不解析、不重排——
+      // 解析一个格式尚未定论的字段，只会在上游改回去时静默显示错。
+      cell: (row) => <span className="font-mono">{row.expiry_mmyy || "—"}</span>,
+      value: (row) => row.expiry_mmyy ?? "",
+      defaultHidden: true,
+    },
+    {
+      id: "issue_fee",
+      header: "开卡费",
+      cell: (row) => (row.issue_fee ? `${row.issue_fee} ${row.currency}` : "—"),
+      value: (row) => row.issue_fee ?? "",
+      defaultHidden: true,
+    },
+    {
       id: "holder",
       header: "持卡人",
       cell: (row) => row.holder_name || "—",
@@ -417,7 +461,12 @@ export function CardsPanel() {
     {
       id: "status",
       header: "状态",
-      cell: (row) => <Badge tone={cardStatusTone(row.status)}>{cardStatusLabel(row.status)}</Badge>,
+      cell: (row) => (
+        <span className="flex flex-col gap-1">
+          <Badge tone={cardStatusTone(row.status)}>{cardStatusLabel(row.status)}</Badge>
+          <ChallengeBadge challenge={challengesByCard.get(`${row.account}/${row.card_id}`)} />
+        </span>
+      ),
       value: (row) => cardStatusLabel(row.status),
     },
     {
@@ -487,6 +536,7 @@ export function CardsPanel() {
           >
             {isCardLocked(row.status) ? "解锁" : "锁定"}
           </Button>
+          <DeleteCardButton card={row} onDone={afterWrite} />
         </div>
       ),
     },
@@ -495,6 +545,7 @@ export function CardsPanel() {
   return (
     <section className="flex flex-col gap-3">
       <AttentionBanner items={attentionQuery.data ?? []} />
+      <AccountBalancesStrip />
 
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="text-sm text-fg-muted">
@@ -539,5 +590,131 @@ export function CardsPanel() {
         />
       </ApiStateView>
     </section>
+  );
+}
+
+/** 各账号资金池的可用余额。
+ *
+ *  它回答的是「还能开多少张卡」——卡上的余额是已经花出去的钱，资金池才是
+ *  没花的。两者混在一起看会得出完全相反的结论。
+ *
+ *  单独一个查询而不是并进卡片列表：这是实时上游调用，比列表慢；而且一个
+ *  账号取不到不该影响另一个（凭据、权限、IP 白名单都是各自独立的）。
+ */
+function AccountBalancesStrip() {
+  const query = useQuery({
+    queryKey: [CARD_BALANCES_QUERY],
+    queryFn: ({ signal }) => listCardBalances({ signal }),
+    // 余额不随卡片列表轮询：它慢，而且没人盯着看的时候不需要新。
+    staleTime: 60_000,
+  });
+
+  if (query.isPending || !query.data?.length) return null;
+
+  return (
+    <div className="flex flex-wrap gap-3">
+      {query.data.map((b) => (
+        <div key={b.account} className="rounded-lg border border-edge bg-surface px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Badge tone="neutral">{b.account}</Badge>
+            <span className="text-xs text-fg-muted">资金池可用</span>
+          </div>
+          {b.error ? (
+            // 取不到显示成「—」而不是 0：把取不到显示成零余额，
+            // 会让人以为钱花光了。
+            <div className="mt-1 text-sm text-fg-muted" title={`读取失败：${b.error}`}>
+              — <span className="text-xs">（读取失败）</span>
+            </div>
+          ) : (
+            <div className="mt-1 flex gap-3 font-mono text-sm">
+              <span>{b.usdt || "0"} USDT</span>
+              <span>{b.usdc || "0"} USDC</span>
+              <span>{b.usd || "0"} USD</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 待验证的 3DS 挑战。
+ *
+ *  持卡人在线支付时上游会要一次验证码。把它摆在这里，用卡的人就不用去翻
+ *  邮件或 Infini App。
+ *
+ *  **验证码可能不在回调里**：官方文档的示例带 challenge 字段，但生产收到的
+ *  真实事件没有。所以这里分两种显示——有码就显示码，没码就只提示「有一笔
+ *  待验证」。按文档假定它一定存在，会做出一个永远空白的栏位。
+ */
+function ChallengeBadge({ challenge }: { challenge?: CardChallenge }) {
+  if (!challenge) return null;
+  if (challenge.code) {
+    return (
+      <Badge tone="warning" title="在线支付验证码，仅数分钟内有效">
+        验证码 {challenge.code}
+      </Badge>
+    );
+  }
+  return (
+    <Badge tone="warning" title="上游要求验证，但回调里没有给出验证码——请到 Infini 后台或邮件里查看">
+      待验证
+    </Badge>
+  );
+}
+
+/** 关停一张卡。
+ *
+ *  **不可逆**，所以走两步：第一次点击只把按钮变成「确认关停」，再点一次才
+ *  真的发出去。一个不可逆的动作不该和「详情」「充值」一样一点就走——
+ *  它们在同一行、按钮长得一样，误点的代价却完全不同。
+ *
+ *  幂等键在第一次点击时生成并保持不变：确认阶段的重试必须带同一个键，
+ *  换一个键等于告诉后端「这是另一次关停」。
+ */
+function DeleteCardButton({
+  card,
+  onDone,
+}: {
+  card: CardItem;
+  onDone: (result: ActionResult) => void;
+}) {
+  const [armed, setArmed] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: (key: string) =>
+      deleteCard({ account: card.account, idempotency_key: key, card_id: card.card_id }),
+    onSuccess: (run) => {
+      onDone({ runId: run.runId, title: "已提交关停请求" });
+      setArmed(null);
+    },
+    onError: () => setArmed(null),
+  });
+
+  // 已经在关停流程里的卡不再提供这个按钮：再点一次没有意义。
+  if (card.status === "pending_delete" || card.status === "deleted") return null;
+
+  if (!armed) {
+    return (
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={() => setArmed(crypto.randomUUID())}
+        title="关停不可逆：卡会结清余额后删除，无法恢复"
+      >
+        关停
+      </Button>
+    );
+  }
+  return (
+    <Button
+      variant="danger"
+      size="sm"
+      disabled={mutation.isPending}
+      onClick={() => mutation.mutate(armed)}
+      title="再点一次将真的关停这张卡"
+    >
+      {mutation.isPending ? "关停中…" : "确认关停"}
+    </Button>
   );
 }

@@ -84,7 +84,7 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 
 	if env.Code != successCode {
 		// 上游的 message 只进 Unwrap 链（服务端日志看得到），不进 Error() 文本。
-		return connector.NewError(connector.KindRejected, op,
+		return connector.NewError(kindForBusinessCode(env.Code), op,
 			fmt.Errorf("upstream code %d: %s", env.Code, env.Message))
 	}
 
@@ -162,4 +162,36 @@ func pathOnly(pathWithQuery string) string {
 		return pathWithQuery[:i]
 	}
 	return pathWithQuery
+}
+
+// kindForBusinessCode 把应用层信封里的非零 code 分成「怎么办」。
+//
+// 为什么要分：一律归 rejected 时，台账上只写着「上游拒绝」，而余额不足、
+// 参数写错、IP 没放行、上游内部错这四种的处置完全不同——前三种改了条件
+// 就能重来，最后一种**可能已经生效了**，重试就是第二次扣钱。
+//
+// **部分业务错误以 HTTP 200 + 非零 code 返回**（官方错误码页明写），所以
+// 这一层不能只看 HTTP 状态码。
+//
+// 依据是 docs/en/8-errorcodes 与四份 OpenAPI 的错误示例（已入库
+// contracts/connectors/infini/openapi/）。注意**卡 API 没有专属错误码表**：
+// 它的端点在 OpenAPI 里只定义了 200 响应。所以这里只对确实有据的通用码与
+// 资金码分档，卡端点的业务失败落到 rejected 的默认分支——按猜测给一张卡
+// 端点的错误码表，只会在猜错时把一次「可能已生效」说成「确定没生效」。
+func kindForBusinessCode(code int) connector.ErrorKind {
+	switch code {
+	case 401:
+		return connector.KindAuth
+	case 403:
+		// 权限不足或 IP 未放行。与网关那两条同类：修的是配置不是请求。
+		return connector.KindIPNotAllowed
+	case 500:
+		// 上游内部错误：请求可能已经在那边生效了。归到 unavailable 这一档，
+		// 让领域层的 stateForUpstreamError 落 unknown 而不是 failed。
+		return connector.KindUnavailable
+	default:
+		// 其余（含 30003 余额不足、30005 超限、30013 参数错等）都是上游在
+		// 处理业务之前就明确拒绝了，钱确定没花出去。
+		return connector.KindRejected
+	}
 }

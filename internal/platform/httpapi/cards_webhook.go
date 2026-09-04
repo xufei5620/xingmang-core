@@ -35,6 +35,8 @@ type CardWebhookProcessor interface {
 	MarkWebhookEventProcessed(ctx context.Context, account, eventID string) error
 	// RecordWebhookEventFailure 记下失败分类，供管理端排查。
 	RecordWebhookEventFailure(ctx context.Context, account, eventID, reason string) error
+	// RecordCardChallenge 落一次 3DS 验证挑战。
+	RecordCardChallenge(ctx context.Context, c cards.CardChallenge) error
 }
 
 // CardWebhookHandler 处理 Infini 的卡片回调。
@@ -123,6 +125,21 @@ func CardWebhookHandler(
 			// 重投而上次已经成功：直接确认，别再打一次上游。
 			w.WriteHeader(http.StatusOK)
 			return
+		}
+
+		// 挑战事件不刷新卡片（与状态、余额无关），只把它记下来给页面用。
+		if ev.Type == cards.WebhookEventCardChallenge && ev.ChallengeID != "" {
+			if err := p.RecordCardChallenge(r.Context(), cards.CardChallenge{
+				Account: account, CardID: ev.CardID, ID: ev.ChallengeID,
+				Type: ev.ChallengeType, Code: ev.ChallengeCode,
+				ExpiresAt: ev.ChallengeExpiresAt,
+			}); err != nil {
+				_ = p.RecordWebhookEventFailure(r.Context(), account, ev.ID, "challenge_store_failed")
+				logger.ErrorContext(r.Context(), "card_challenge_store_failed",
+					"module", "httpapi", "account", account, "event_id", ev.ID, "err", err.Error())
+				http.Error(w, "internal", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		if ev.NeedsCardRefresh() {

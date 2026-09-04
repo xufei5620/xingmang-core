@@ -140,8 +140,9 @@ func (s *PgStore) UpsertCard(ctx context.Context, account string, card infini.Ca
 INSERT INTO cards.infini_card (
     environment, account, upstream_card_id, mask, holder_name, card_alias, status,
     currency, balance_minor, owner_ref, user_email, upstream_user_id,
-    upstream_created_at, upstream_updated_at, last_synced_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$15)
+    upstream_created_at, upstream_updated_at, last_synced_at, created_at, updated_at,
+    issue_fee_text, issue_pay_amount_text
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17)
 ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     mask = EXCLUDED.mask,
     holder_name = EXCLUDED.holder_name,
@@ -153,6 +154,9 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     -- 同 owner_ref：同步作业不知道这个字段（上游卡片对象里没有），
     -- 传空时保留原值，否则每轮同步都会把开卡时记下的邮箱冲掉。
     user_email = COALESCE(NULLIF(EXCLUDED.user_email, ''), cards.infini_card.user_email),
+    -- 同 owner_ref：开卡费只在开卡那一刻知道，同步作业传空，保留原值。
+    issue_fee_text = COALESCE(NULLIF(EXCLUDED.issue_fee_text, ''), cards.infini_card.issue_fee_text),
+    issue_pay_amount_text = COALESCE(NULLIF(EXCLUDED.issue_pay_amount_text, ''), cards.infini_card.issue_pay_amount_text),
     upstream_user_id = EXCLUDED.upstream_user_id,
     upstream_created_at = EXCLUDED.upstream_created_at,
     upstream_updated_at = EXCLUDED.upstream_updated_at,
@@ -170,7 +174,7 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
 	if _, err := s.pool.Exec(ctx, upsertSQL,
 		s.environment, account, card.ID, card.Mask, card.HolderName, card.Alias, card.Status,
 		card.Currency, card.BalanceMinor, attribution.OwnerRef, attribution.UserEmail, card.UserID,
-		createdAt, updatedAt, now,
+		createdAt, updatedAt, now, attribution.IssueFee, attribution.IssuePayAmount,
 	); err != nil {
 		return fmt.Errorf("落卡片投影: %w", err)
 	}
@@ -244,22 +248,33 @@ func (s *PgStore) UpsertTransactions(ctx context.Context, account, cardID string
 	const upsertSQL = `
 INSERT INTO cards.infini_card_transaction (
     environment, account, upstream_card_id, dedupe_key, tx_type, amount_minor, fee_minor,
-    currency, status, merchant, occurred_at, synced_at, created_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
+    currency, status, merchant, occurred_at, synced_at, created_at,
+    transaction_amount_text, transaction_currency, settled_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$13,$14,$15)
 ON CONFLICT (environment, account, dedupe_key) DO UPDATE SET
     status = EXCLUDED.status,
-    synced_at = EXCLUDED.synced_at`
+    synced_at = EXCLUDED.synced_at,
+    -- 同一笔交易会从 authorized 变成 completed，结算信息是那时才有的：
+    -- 必须覆盖，但只在新值非空时——否则一次没带结算信息的重读会把它抹掉。
+    settled_at = COALESCE(EXCLUDED.settled_at, cards.infini_card_transaction.settled_at),
+    transaction_amount_text = COALESCE(NULLIF(EXCLUDED.transaction_amount_text, ''),
+        cards.infini_card_transaction.transaction_amount_text),
+    transaction_currency = COALESCE(NULLIF(EXCLUDED.transaction_currency, ''),
+        cards.infini_card_transaction.transaction_currency)`
 
 	batch := &pgx.Batch{}
 	for _, tx := range txs {
-		var occurredAt any
+		var occurredAt, settledAt any
 		if parsed, err := time.Parse(time.RFC3339, tx.OccurredAt); err == nil {
 			occurredAt = parsed.UTC()
+		}
+		if parsed, err := time.Parse(time.RFC3339, tx.SettledAt); err == nil {
+			settledAt = parsed.UTC()
 		}
 		batch.Queue(upsertSQL,
 			s.environment, account, cardID, transactionDedupeKey(cardID, tx), tx.Type,
 			tx.AmountMinor, tx.FeeMinor, tx.Currency, tx.Status, tx.Merchant,
-			occurredAt, now)
+			occurredAt, now, tx.TransactionAmount, tx.TransactionCurrency, settledAt)
 	}
 
 	results := s.pool.SendBatch(ctx, batch)
@@ -393,6 +408,9 @@ type CardView struct {
 	UsageNote     string
 	// UpstreamCreatedAt 是上游记的开卡时刻。
 	UpstreamCreatedAt time.Time
+	// IssueFee / IssuePayAmount 是开卡时上游收的手续费与实际扣款额。
+	IssueFee       string
+	IssuePayAmount string
 }
 
 // ListCards 读卡片投影。
@@ -407,7 +425,7 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
        pan, cvv, expiry_mmyy,
        bound_account, bound_account_kind, service_name,
        COALESCE(to_char(next_renewal_on, 'YYYY-MM-DD'), ''), usage_note,
-       upstream_created_at
+       upstream_created_at, issue_fee_text, issue_pay_amount_text
   FROM cards.infini_card
  WHERE environment = $1
    AND ($2 = '' OR account = $2)
@@ -432,7 +450,8 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
 			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.UserEmail, &v.LastSyncedAt,
 			&v.PAN, &v.CVV, &v.ExpiryMMYY,
 			&v.BoundAccount, &v.BoundAccountKind, &v.ServiceName,
-			&v.NextRenewalOn, &v.UsageNote, &upstreamCreatedAt); err != nil {
+			&v.NextRenewalOn, &v.UsageNote, &upstreamCreatedAt,
+			&v.IssueFee, &v.IssuePayAmount); err != nil {
 			return nil, err
 		}
 		if upstreamCreatedAt != nil {
@@ -454,6 +473,13 @@ type TransactionView struct {
 	Merchant    string
 	OccurredAt  time.Time
 	SyncedAt    time.Time
+	// TransactionAmount / TransactionCurrency 是商户侧原始币种的金额；
+	// 同币种消费时为空。保持文本：币种可能是任何一种，逐一验证标度不现实，
+	// 而这两列只展示、不计算。
+	TransactionAmount   string
+	TransactionCurrency string
+	// SettledAt 为零值表示尚未结算（授权中）。
+	SettledAt time.Time
 }
 
 // ListTransactions 读某张卡的流水。
@@ -464,7 +490,8 @@ func (s *PgStore) ListTransactions(ctx context.Context, account, cardID string, 
 
 	const listSQL = `
 SELECT upstream_card_id, tx_type, amount_minor, fee_minor, currency,
-       status, merchant, occurred_at, synced_at
+       status, merchant, occurred_at, synced_at,
+       transaction_amount_text, transaction_currency, settled_at
   FROM cards.infini_card_transaction
  WHERE environment = $1 AND account = $2 AND upstream_card_id = $3
  ORDER BY occurred_at DESC NULLS LAST
@@ -479,15 +506,19 @@ SELECT upstream_card_id, tx_type, amount_minor, fee_minor, currency,
 	var out []TransactionView
 	for rows.Next() {
 		var (
-			v          TransactionView
-			occurredAt *time.Time
+			v                     TransactionView
+			occurredAt, settledAt *time.Time
 		)
 		if err := rows.Scan(&v.CardID, &v.Type, &v.AmountMinor, &v.FeeMinor, &v.Currency,
-			&v.Status, &v.Merchant, &occurredAt, &v.SyncedAt); err != nil {
+			&v.Status, &v.Merchant, &occurredAt, &v.SyncedAt,
+			&v.TransactionAmount, &v.TransactionCurrency, &settledAt); err != nil {
 			return nil, err
 		}
 		if occurredAt != nil {
 			v.OccurredAt = *occurredAt
+		}
+		if settledAt != nil {
+			v.SettledAt = *settledAt
 		}
 		out = append(out, v)
 	}
@@ -659,8 +690,9 @@ func (s *PgStore) RecordWebhookEvent(ctx context.Context, account string, ev Web
 	const upsertSQL = `
 INSERT INTO cards.webhook_event (
     environment, account, event_id, event_type, upstream_card_id,
-    occurred_at, received_at, attempts, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$7,$7)
+    occurred_at, received_at, attempts, created_at, updated_at,
+    transaction_id, related_transaction_id, transaction_type, transaction_status
+) VALUES ($1,$2,$3,$4,$5,$6,$7,1,$7,$7,$8,$9,$10,$11)
 ON CONFLICT (environment, account, event_id) DO UPDATE SET
     attempts = cards.webhook_event.attempts + 1,
     updated_at = EXCLUDED.updated_at
@@ -674,6 +706,7 @@ RETURNING (xmax = 0) AS inserted, processed_at IS NOT NULL AS done`
 	var rec WebhookRecord
 	if err := s.pool.QueryRow(ctx, upsertSQL,
 		s.environment, account, ev.ID, ev.Type, ev.CardID, occurred, s.now(),
+		ev.TransactionID, ev.RelatedTransactionID, ev.TransactionType, ev.TransactionStatus,
 	).Scan(&rec.Fresh, &rec.AlreadyProcessed); err != nil {
 		return WebhookRecord{}, fmt.Errorf("登记回调事件 %s: %w", ev.ID, err)
 	}
@@ -714,4 +747,89 @@ UPDATE cards.webhook_event
 		return fmt.Errorf("记录回调失败原因 %s: %w", eventID, err)
 	}
 	return nil
+}
+
+// CardStatusOf 返回投影里记着的状态。
+//
+// 供批量刷新判断「这张卡变了没有」：批量接口只回状态，与这里一比就知道
+// 要不要再花一次调用去取全量字段。
+func (s *PgStore) CardStatusOf(ctx context.Context, account, cardID string) (string, error) {
+	const selectSQL = `
+SELECT status FROM cards.infini_card
+ WHERE environment = $1 AND account = $2 AND upstream_card_id = $3`
+
+	var status string
+	if err := s.pool.QueryRow(ctx, selectSQL, s.environment, account, cardID).Scan(&status); err != nil {
+		return "", fmt.Errorf("查卡 %s 的当前状态: %w", cardID, err)
+	}
+	return status, nil
+}
+
+// CardChallenge 是一次 3DS 验证挑战。
+type CardChallenge struct {
+	Account   string
+	CardID    string
+	ID        string
+	Type      string
+	// Code 可能为空——上游不一定给（见迁移 000032 的说明）。
+	Code      string
+	ExpiresAt time.Time
+}
+
+// RecordCardChallenge 落一次挑战；同 challenge_id 重投时更新（验证码可能后到）。
+func (s *PgStore) RecordCardChallenge(ctx context.Context, c CardChallenge) error {
+	const upsertSQL = `
+INSERT INTO cards.card_challenge (
+    environment, account, upstream_card_id, challenge_id, challenge_type,
+    code, expires_at, received_at, created_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+ON CONFLICT (environment, account, challenge_id) DO UPDATE SET
+    -- 验证码只在非空时覆盖：重投若不带码，不能把已经收到的码抹掉。
+    code = COALESCE(NULLIF(EXCLUDED.code, ''), cards.card_challenge.code),
+    expires_at = COALESCE(EXCLUDED.expires_at, cards.card_challenge.expires_at)`
+
+	var expires any
+	if !c.ExpiresAt.IsZero() {
+		expires = c.ExpiresAt
+	}
+	if _, err := s.pool.Exec(ctx, upsertSQL,
+		s.environment, c.Account, c.CardID, c.ID, c.Type, c.Code, expires, s.now(),
+	); err != nil {
+		return fmt.Errorf("落验证挑战 %s: %w", c.ID, err)
+	}
+	return nil
+}
+
+// ActiveChallenges 返回尚未过期的挑战。
+//
+// 过期的一律不返回，也不靠调用方过滤：验证码是一次性敏感数据，
+// 过期之后价值归零而风险不变，最稳妥的做法是根本不让它离开数据库。
+func (s *PgStore) ActiveChallenges(ctx context.Context) ([]CardChallenge, error) {
+	const listSQL = `
+SELECT account, upstream_card_id, challenge_id, challenge_type, code, expires_at
+  FROM cards.card_challenge
+ WHERE environment = $1
+   AND expires_at IS NOT NULL
+   AND expires_at > $2
+ ORDER BY expires_at DESC`
+
+	rows, err := s.pool.Query(ctx, listSQL, s.environment, s.now())
+	if err != nil {
+		return nil, fmt.Errorf("查待验证挑战: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CardChallenge
+	for rows.Next() {
+		var c CardChallenge
+		var expires *time.Time
+		if err := rows.Scan(&c.Account, &c.CardID, &c.ID, &c.Type, &c.Code, &expires); err != nil {
+			return nil, err
+		}
+		if expires != nil {
+			c.ExpiresAt = *expires
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }

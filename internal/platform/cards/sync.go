@@ -31,6 +31,8 @@ type SyncStore interface {
 	// 已经 succeeded/failed 的不该被反复对账——每轮都打一次上游既浪费配额，
 	// 也提高触发限流的概率。
 	UnresolvedOperations(ctx context.Context) ([]Operation, error)
+	// CardStatusOf 返回投影里记着的状态，供批量刷新判断「这张卡变了没有」。
+	CardStatusOf(ctx context.Context, account, cardID string) (string, error)
 	// TrackedCards 返回投影里已有的卡，供状态与流水同步遍历。
 	TrackedCards(ctx context.Context) ([]CardRef, error)
 	// UpsertTransactions 落流水投影。
@@ -196,29 +198,95 @@ func (s *Syncer) applyDecision(ctx context.Context, op Operation, d ReconcileDec
 // refreshTrackedCards 刷新投影里每张卡的状态。
 //
 // 这也是异步开卡的轮询路径：申请单出来时卡是 init，靠这里推进到 active。
+// batchStatusChunk 是一次批量状态查询的卡数上限（上游文档：1~100）。
+const batchStatusChunk = 100
+
 func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
 	refs, err := s.store.TrackedCards(ctx)
 	if err != nil {
 		return err
 	}
 
+	// 按账号分组：批量接口是按凭据发的，两个账号的卡不能混进同一次调用。
+	byAccount := make(map[string][]string, len(s.accounts))
+	known := make(map[string]map[string]string, len(s.accounts))
+	for _, ref := range refs {
+		byAccount[ref.Account] = append(byAccount[ref.Account], ref.CardID)
+	}
+
 	var errs []error
+	for _, account := range s.order {
+		ids := byAccount[account]
+		if len(ids) == 0 {
+			continue
+		}
+		acct := s.accounts[account]
+		statuses := make(map[string]string, len(ids))
+		for start := 0; start < len(ids); start += batchStatusChunk {
+			end := start + batchStatusChunk
+			if end > len(ids) {
+				end = len(ids)
+			}
+			got, err := acct.Client.BatchCardStatus(ctx, ids[start:end])
+			if err != nil {
+				// 一批失败不该让其余批次与其余账号一起报废。
+				errs = append(errs, fmt.Errorf("账号 %s 批量查状态: %w", account, err))
+				continue
+			}
+			for id, status := range got {
+				statuses[id] = status
+			}
+		}
+		known[account] = statuses
+	}
+
+	// 账号没配的卡单独报错：这类错误此前也报，保持不变。
+	for _, ref := range refs {
+		if _, ok := s.accounts[ref.Account]; !ok {
+			errs = append(errs, fmt.Errorf("卡 %s 的账号 %q 未配置", ref.CardID, ref.Account))
+		}
+	}
+
+	// 只有状态变了的卡才值得再取一次全量字段。
+	//
+	// 批量接口只回 card_id + status，余额、掩码、更新时间这些要单查。
+	// 而绝大多数轮次里绝大多数卡什么都没变——对它们再单查一遍，就等于
+	// 把批量省下的调用又花回去了。余额变化会伴随状态之外的事件（充值、
+	// 消费），那条路由回调与资金操作各自触发定向刷新，不靠这一轮兜底。
 	for _, ref := range refs {
 		acct, ok := s.accounts[ref.Account]
 		if !ok {
-			errs = append(errs, fmt.Errorf("卡 %s 的账号 %q 未配置", ref.CardID, ref.Account))
+			continue // 上面已经报过
+		}
+		status, seen := known[ref.Account][ref.CardID]
+		if !seen {
+			// 批量结果里没有这张卡：可能那一批失败了，也可能上游不认识它。
+			// 退回单查，让它自己报错——静默跳过会让一张卡永远不再刷新。
+			if err := s.refreshOneCard(ctx, acct, ref); err != nil {
+				errs = append(errs, err)
+			}
 			continue
 		}
-		card, err := acct.Client.CardStatus(ctx, ref.CardID)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("账号 %s 查卡 %s: %w", ref.Account, ref.CardID, err))
+		if current, err := s.store.CardStatusOf(ctx, ref.Account, ref.CardID); err == nil && current == status {
 			continue
 		}
-		if err := s.store.UpsertCard(ctx, ref.Account, card, CardAttribution{}); err != nil {
-			errs = append(errs, fmt.Errorf("落卡片投影 %s: %w", ref.CardID, err))
+		if err := s.refreshOneCard(ctx, acct, ref); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// refreshOneCard 取一张卡的全量字段并回写投影。
+func (s *Syncer) refreshOneCard(ctx context.Context, acct Account, ref CardRef) error {
+	card, err := acct.Client.CardStatus(ctx, ref.CardID)
+	if err != nil {
+		return fmt.Errorf("账号 %s 查卡 %s: %w", ref.Account, ref.CardID, err)
+	}
+	if err := s.store.UpsertCard(ctx, ref.Account, card, CardAttribution{}); err != nil {
+		return fmt.Errorf("落卡片投影 %s: %w", ref.CardID, err)
+	}
+	return nil
 }
 
 // fetchMissingSecrets 给还没拉过明文的活卡各调一次 reveal。

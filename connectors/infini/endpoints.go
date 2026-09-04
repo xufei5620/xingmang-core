@@ -500,3 +500,35 @@ func (c *Client) AccountBalances(ctx context.Context) (AccountBalances, error) {
 	}
 	return AccountBalances{USDT: data.USDT, USDC: data.USDC, USD: data.USD}, nil
 }
+
+// DeleteCard 关停一张卡。
+//
+// **请求字段是 card_id，不是其余端点统一用的 id**——这是全部十一个卡端点里
+// 唯一的例外（官方 OpenAPI 的 DeleteCardRequest）。skill 的「标识规则」一节
+// 说一律用 id，照那条写会得到一个参数错误。
+//
+// 关停是异步的：卡先进 pending_delete，结清余额后才变 deleted。所以这里
+// 返回成功只表示「上游接受了这个请求」，不表示卡已经关掉。
+func (c *Client) DeleteCard(ctx context.Context, cardID string) error {
+	const path = "/v2/cards/delete"
+
+	body, err := json.Marshal(map[string]any{"card_id": cardID})
+	if err != nil {
+		return connector.NewError(connector.KindInternal, "infini "+path, err)
+	}
+
+	var data struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := c.do(ctx, http.MethodPost, path, body, &data); err != nil {
+		return err
+	}
+	if !data.Success {
+		// 上游原文只进 Unwrap 链（ADR-004）。当成成功会让页面显示
+		// 「已关停」而卡还活着——那是最坏的一种错。
+		return connector.NewError(connector.KindRejected, "infini "+path,
+			fmt.Errorf("upstream refused: %s", data.Message))
+	}
+	return nil
+}

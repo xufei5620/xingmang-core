@@ -102,6 +102,10 @@ export interface CardItem {
   renewal_risk: string;
   /** 上游记的开卡时刻（RFC3339）；缺失时字段不出现。 */
   issued_at?: string;
+  /** 开卡手续费与实付额（十进制文本，币种为申请时所选代币）。
+   *  实测手续费固定 1 USD——小额卡的成本占比很高，所以这一列要能被看到。 */
+  issue_fee?: string;
+  issue_pay_amount?: string;
   freshness: CardFreshness;
 }
 
@@ -116,6 +120,13 @@ export interface CardTransactionItem {
   status: string;
   merchant: string;
   occurred_at?: string;
+  /** 商户侧原始币种的金额；同币种消费时不出现。
+   *  一张 USD 卡在欧元商户消费，amount_minor 是折成 USD 的，这里才是 EUR 原值——
+   *  没有它看不出跨境消费与汇率加价。 */
+  transaction_amount?: string;
+  transaction_currency?: string;
+  /** 缺席表示尚未结算（授权中，金额还可能变）。 */
+  settled_at?: string;
 }
 
 /** 一笔待人工处置的操作。
@@ -312,4 +323,67 @@ export function setCardUsage(
   client: ApiClient = apiClient,
 ): Promise<ActionRun> {
   return executeAction({ actionId: "cards.card.usage.set", version: "1", params }, options, client);
+}
+
+/** 一个账号的资金池可用余额。 */
+export interface CardAccountBalance {
+  account: string;
+  usdt?: string;
+  usdc?: string;
+  usd?: string;
+  /** 有值表示这个账号这次没取到；只给失败**分类**，不含上游原文。 */
+  error?: string;
+}
+
+/** 读各账号的资金池可用余额。
+ *
+ *  这是**实时上游调用**，不是投影——比其余读端点慢，所以单独一个查询、
+ *  按需拉取，不跟卡片列表一起轮询。 */
+export async function listCardBalances(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardAccountBalance[]> {
+  const body = await client
+    .get<ListResponse<CardAccountBalance>>("/api/v1/cards/balances", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return body.items ?? [];
+}
+
+/** 一次尚未过期的 3DS 验证挑战。 */
+export interface CardChallenge {
+  account: string;
+  card_id: string;
+  challenge_id: string;
+  challenge_type?: string;
+  /** 验证码。只回给持有 card.reveal 的调用方，**而且上游不一定给**——
+   *  2026-09-05 生产收到的真实事件里就没有这个字段。 */
+  code?: string;
+  expires_at?: string;
+}
+
+/** 读尚未过期的验证挑战。过期的由服务端过滤掉，不到前端。 */
+export async function listCardChallenges(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardChallenge[]> {
+  const body = await client
+    .get<ListResponse<CardChallenge>>("/api/v1/cards/challenges", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return body.items ?? [];
+}
+
+/** 关停一张卡（`cards.card.delete@1`）。
+ *
+ *  **不可逆**：上游接受后卡进 pending_delete，结清余额后变 deleted，
+ *  没有任何接口能把它恢复。调用方必须先向人确认。 */
+export function deleteCard(
+  params: { account: string; idempotency_key: string; card_id: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "cards.card.delete", version: "1", params }, options, client);
 }

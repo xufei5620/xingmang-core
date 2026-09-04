@@ -105,6 +105,9 @@ type Deps struct {
 	ExtraExpectedCredentials []credentials.ExpectedRef
 	// CardSyncInterval 供新鲜度判定；为零时用 5 分钟兜底。
 	CardSyncInterval time.Duration
+	// CardBalances 读各账号的资金池可用余额（实时上游调用，非投影）。
+	// 为 nil 时该端点不挂载。
+	CardBalances CardBalanceReader
 	// CardWebhook 处理 Infini 的卡片回调（XM-CARD4）。
 	//
 	// 为 nil 时整条回调路由不挂载——没有配回调密钥的部署，这个端点应当
@@ -297,6 +300,14 @@ func NewRouter(d Deps) http.Handler {
 				api.With(RequireScope(cards.PermissionRead)).
 					Get("/cards/operations/attention",
 						ListCardOperationsNeedingAttentionHandler(d.Cards))
+				// 资金池余额：实时上游调用，不是投影。为 nil 时不挂载
+				// （fake 模式下没有真实余额可读）。
+				api.With(RequireScope(cards.PermissionRead)).
+					Get("/cards/challenges", ListCardChallengesHandler(d.Cards))
+				if d.CardBalances != nil {
+					api.With(RequireScope(cards.PermissionRead)).
+						Get("/cards/balances", CardBalancesHandler(d.CardBalances, d.CardAccounts))
+				}
 			}
 			api.With(RequireScope(savedviews.ScopeManage)).
 				Get("/ui/saved-views", ListSavedViewsHandler(d.SavedViews))

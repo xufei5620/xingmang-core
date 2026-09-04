@@ -12,6 +12,8 @@ const (
 	ActionRedeem   = "cards.card.redeem"
 	ActionFreeze   = "cards.card.freeze"
 	ActionUnfreeze = "cards.card.unfreeze"
+	// ActionDelete 关停一张卡。**不可逆**，且会触发余额结清。
+	ActionDelete = "cards.card.delete"
 )
 
 // fundsSchema 是充值/赎回的参数契约。
@@ -113,7 +115,7 @@ func fundsHandler(
 
 		out, err := call(svc, ctx, req)
 		if err != nil {
-			return nil, err
+			return nil, explainUpstream(err)
 		}
 
 		summary := map[string]any{
@@ -159,7 +161,7 @@ func switchHandler(
 		action.RecordResource(ctx, resourceCard, cardID)
 
 		if err := call(svc, ctx, account, key, cardID); err != nil {
-			return nil, err
+			return nil, explainUpstream(err)
 		}
 
 		summary := map[string]any{
@@ -238,4 +240,25 @@ func usageSetHandler(svc *Service) action.Handler {
 		action.RecordAfter(ctx, summary)
 		return summary, nil
 	}
+}
+
+func deleteDef(accounts []string) action.Definition {
+	return action.Definition{
+		ID: ActionDelete, Version: actionVersion,
+		// 仍是 L1：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED
+		// （Foundation-B 未实现），声明成 L2 会让它变成永远跑不起来的摆设。
+		// 这个动作的护栏由幂等键 + 台账 + 审计 + 页面二次确认承担。
+		RiskLevel: action.L1, Permission: PermissionManage,
+		Schema:       switchSchema(accounts),
+		Environments: allEnvironments, PrincipalTypes: humanOnly,
+	}
+}
+
+func deleteHandler(svc *Service) action.Handler {
+	// 目标状态是 pending_delete 而不是 deleted：关停是异步的，
+	// 上游接受后先进 pending_delete，结清余额后才 deleted。
+	// 写 deleted 会让审计摘要声称一件还没发生的事。
+	return switchHandler(svc, "pending_delete", func(s *Service, ctx context.Context, account, key, cardID string) error {
+		return s.DeleteCard(ctx, account, key, cardID)
+	})
 }

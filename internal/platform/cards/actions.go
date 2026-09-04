@@ -75,6 +75,7 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 		{redeemDef(accounts), redeemHandler(svc)},
 		{freezeDef(accounts), freezeHandler(svc)},
 		{unfreezeDef(accounts), unfreezeHandler(svc)},
+		{deleteDef(accounts), deleteHandler(svc)},
 		{usageSetDef(accounts), usageSetHandler(svc)},
 	}
 	for _, d := range defs {
@@ -142,7 +143,9 @@ func issueHandler(svc *Service) action.Handler {
 
 		res, err := svc.IssueCard(ctx, req)
 		if err != nil {
-			return nil, err
+			// 把上游的错误分类翻成指向下一步的话；领域层自己的错误
+			// （限额、账号未配置）原样返回。
+			return nil, explainUpstream(err)
 		}
 
 		// 审计贡献必须显式做：Handler 的返回值只进 Result.Value 回给调用方，
@@ -248,7 +251,7 @@ func revealHandler(svc *Service) action.Handler {
 			// 资源照样要记：被拒绝的查看尝试同样进审计链，
 			// 而且那是审计最有价值的部分之一。
 			action.RecordResource(ctx, resourceCard, cardID)
-			return nil, err
+			return nil, explainUpstream(err)
 		}
 
 		action.RecordResource(ctx, resourceCard, cardID)

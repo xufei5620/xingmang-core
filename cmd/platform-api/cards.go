@@ -338,3 +338,14 @@ func cardExpectedCredentials(cfg cardsConfig) []credentials.ExpectedRef {
 	}
 	return out
 }
+
+// cardBalanceReaderOrNil 把「卡片功能没开」如实变成接口的 nil。
+//
+// 同 cardQuerierOrNil：直接把 nil 指针赋给接口字段会得到一个非 nil 的
+// 接口值，于是路由照挂、每次请求都在 nil 上崩。
+func cardBalanceReaderOrNil(svc *cards.Service) httpapi.CardBalanceReader {
+	if svc == nil {
+		return nil
+	}
+	return svc
+}
