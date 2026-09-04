@@ -35,7 +35,14 @@ func (p *cardWebhookProcessor) WebhookSecret(ctx context.Context, account string
 	if err != nil {
 		return "", fmt.Errorf("解析回调密钥: %w", err)
 	}
-	secret := strings.TrimSpace(value.String())
+	// **必须是 Reveal()，不是 String()。**
+	//
+	// SecretValue.String() 恒定返回 "[REDACTED]"——那是它的设计目的，
+	// 防止密钥被误打进日志。拿它算 HMAC 得到的是一个对所有密钥都相同的
+	// 常量，症状是「签名永远不匹配」；更坏的是那个遮蔽串不是 base64，
+	// 会把诊断引向「密钥值填错了」，于是人去反复重填一个本来就正确的密钥。
+	// 2026-09-05 就这样绕了三轮。
+	secret := strings.TrimSpace(value.Reveal())
 	if secret == "" {
 		return "", fmt.Errorf("账号 %s 的回调密钥为空", account)
 	}
