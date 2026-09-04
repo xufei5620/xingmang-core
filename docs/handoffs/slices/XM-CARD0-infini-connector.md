@@ -11,6 +11,11 @@ Date 格式、IP 白名单、`card_alias` 回显、时间格式、`mask` 掩码�
 仍未验证的只剩「要花钱才能验」的四项，其中头号是 `card_alias` 能否在开卡时
 设置——整个幂等方案建立在这个假设上。
 
+**产品负责人 2026-09-04 决定：不在本片做首次真实开卡，先合入上线，由本人
+上线后自行验证。** 因此本片交付的是「配好就能用」的功能，而不是「已经用过
+一次」的功能——下面 not_run 与 risks 里那四项在第一次真实开卡时才会有答案，
+其中 `card_alias` 若不能在申请时设置，幂等对账要改设计（见 risks）。
+
 ## branch
 
 `ai/claude/XM-CARD0-infini-connector`（base `release/v0.1-launch` @ `2bd90d3`）
@@ -169,10 +174,40 @@ PgStore）+ 七个测试文件
 - **真实端点验证**（被密钥与 IP 白名单阻塞）：签名口径、字段形状、金额单位、
   时间格式、`card_alias` 能否当幂等信标，全部只在文档层面成立。
 - **首次真实开卡**（会花钱）：`card_alias` 能否在申请时设置、异步轮询到
-  active 的实际耗时、申请单终态取值。产品负责人已明确「先别开，改造完再说」。
+  active 的实际耗时、申请单终态取值、冻结后的 status 取值、余额 minor units
+  与控制台是否对得上。产品负责人 2026-09-04 决定由本人上线后自行验证。
+  已确认的输入：`product_id` 三个取值（1 Lite / 2 Pro / 102 AI，无产品列表
+  端点）、费用只在 apply 响应的 `total_fee` 里、文档未写最低充值额。
+- **本地只跑过 fake 模式**：`XM_CARDS_MODE=live` 的完整链路（凭据解析 →
+  签名 → 上游 → 台账 → 投影 → 页面）没有端到端跑过。off 模式的界面表现
+  已补（未启用说明，见 commit 29e2480）。
 - Storybook 构建：本片没有新增 ui-admin 组件（卡片页的组件都在 admin-web 内）。
 - 前端门禁走的是 node 直调 tsc/vitest（worktree 无 node_modules，按既定配方
   用 junction 镜像主检出），不是 `pnpm -r run`。
+
+## 上线清单（人工执行）
+
+AI 不部署生产（宪法红线）。合入后按这个顺序：
+
+1. **迁移**：000026 / 000027 / 000028 三个，走既有迁移流程。000027 加的是卡面
+   明文列——上线前确认数据库备份的存放与访问权限已按「含持卡数据」对待
+   （契约「敏感数据」一节列了三个后果）。
+2. **凭据**：在管理端「密钥引用」页填两个账号各两条：
+   `secret://infini-chris/{api-key-id,api-secret}`、
+   `secret://infini-linfeng/{api-key-id,api-secret}`。引用由账号 id 推出，
+   不需要配环境变量。**不要把明文写进 .env 或提交进仓库。**
+3. **环境变量**（`deploy/compose/.env`）：
+   - `XM_CARDS_MODE=live`（默认 off，不配就整组不挂载）
+   - `XM_CARDS_ACCOUNTS=CHRIS,LINFENG`
+   - 四个 `XM_CARDS_<账号>_LIMIT_PER_{OPERATION,DAY}=unlimited`
+     （留空 = 未配置 = 开卡被拒，这是有意的 fail closed）
+4. **IP 白名单**：Infini 后台确认服务器出口 IP 在列。开发机那两个临时 IP
+   （电信家宽动态）上线后删掉。服务器出口 IP 用 `curl checkip` 在服务器上确认，
+   不要假设它等于入站 IP。
+5. **首次真实开卡**：最小金额试一张，核对 `total_fee` 的真实费率、轮询到
+   active 的耗时（据此调 `XM_CARDS_SYNC_INTERVAL`，现在是拍脑袋的 300 秒）、
+   卡面明文是否落库、freeze 后的 status 取值、余额单位是否与控制台一致。
+   把结果回填进 `contracts/connectors/infini.card.v1.md` 的验证清单。
 
 ## risks
 
