@@ -2,8 +2,14 @@
 
 ## status
 
-READY（待验收线审读、复跑并人工合入）。**真实端点验证被密钥与 IP 白名单阻塞**
-——签名口径、字段形状、金额单位目前只在文档层面成立。
+READY（待验收线审读、复跑并人工合入）。
+
+**真实端点验证第一轮已通过**（2026-09-04，只读接口，零花费）：签名口径、
+Date 格式、IP 白名单、`card_alias` 回显、时间格式、`mask` 掩码形态六项确认。
+**PgStore 已对真实 Postgres 跑过**（迁移 000026 + 10 条集成测试）。
+
+仍未验证的只剩「要花钱才能验」的四项，其中头号是 `card_alias` 能否在开卡时
+设置——整个幂等方案建立在这个假设上。
 
 ## branch
 
@@ -134,7 +140,7 @@ PgStore）+ 七个测试文件
 
 ## tests_run
 
-- `go test ./...` —— 53 个包全绿
+- `go test -p 1 ./...`（**带真实测试库** `XM_TEST_DATABASE_URL`）—— 53 个包全绿
 - `go vet ./...`、`go build ./...` —— 干净
 - `bash scripts/check-governance.sh` —— 退出码 0
 - admin-web `vitest run` —— 104 文件 / 1480 用例全绿
@@ -147,8 +153,8 @@ PgStore）+ 七个测试文件
 
 - **真实端点验证**（被密钥与 IP 白名单阻塞）：签名口径、字段形状、金额单位、
   时间格式、`card_alias` 能否当幂等信标，全部只在文档层面成立。
-- **PgStore 的集成测试**：需要测试库（`XM_TEST_DATABASE_URL`）。SQL 经
-  `go vet` 与编译，但没有对真实 Postgres 跑过。**合入前建议由验收线补跑**。
+- **首次真实开卡**（会花钱）：`card_alias` 能否在申请时设置、异步轮询到
+  active 的实际耗时、申请单终态取值。产品负责人已明确「先别开，改造完再说」。
 - Storybook 构建：本片没有新增 ui-admin 组件（卡片页的组件都在 admin-web 内）。
 - 前端门禁走的是 node 直调 tsc/vitest（worktree 无 node_modules，按既定配方
   用 junction 镜像主检出），不是 `pnpm -r run`。
@@ -167,18 +173,24 @@ PgStore）+ 七个测试文件
    相同的交易折成一笔，但那比每轮同步造重复行要好——后者会让流水金额翻倍。
 5. **写通道是新增的攻击面**。平台从此能向外部发 POST，虽被 allowlist 与方法
    白名单框住，但误用后果是花真钱。
-6. **PgStore 未对真实库跑过**，SQL 层的字段名/类型错误要到运行时才暴露。
+6. ~~PgStore 未对真实库跑过~~ —— **已消除**：迁移 000026 在真实 Postgres 上
+   跑通，PgStore 有 10 条集成测试（幂等去重、跨账号隔离、今日累计的三态覆盖、
+   流水去重键、owner_ref 保留语义）。
 
 ## follow_ups
 
 **挡住上线的（产品负责人）**
 
-- 申请 API key（keyId + secret）→ 申请 `card.create` 与 `card.reveal` 权限 →
-  查出平台出口 IP 并登记白名单。**若服务器走动态出口或代理，白名单会时灵
-  时不灵，须先解决出口固定性。**
-- 定金额上限的实际数值（`XM_CARDS_LIMIT_PER_OPERATION` /
-  `XM_CARDS_LIMIT_PER_DAY`，单位是 token 本身）。未配齐时领域层 fail closed，
-  也就是开卡一律被拒。
+- ~~申请 API key、权限与 IP 白名单~~ —— 已完成（两个账号，三个 IP：
+  服务器 38.147.105.28、开发机直连出口 115.224.87.144、代理出口
+  192.220.24.14）。**开发机那两个是临时的，上线后应从白名单撤掉**——
+  家宽是动态 IP，长期留着等于白名单里挂了一条随时失效的规则。
+- 定金额上限的实际数值（`XM_CARDS_<账号>_LIMIT_PER_OPERATION` /
+  `_LIMIT_PER_DAY`，单位是 token 本身，按账号各配一份）。未配齐时领域层
+  fail closed，开卡一律被拒。
+- **凭据在管理端「密钥引用」页填写**，不再走环境变量——引用由账号 id 推出，
+  值经 `credential.secret.upsert` / `rotate` 写入（那条路径写的就是
+  SecretProvider 读的文件）。
 - **确认「卡片管理」在导航里的归属**：ADMIN-IA v3 没有这一条，现放在
   「平台治理」下是实现期判断，导航测试里已注明待确认。
 
@@ -188,7 +200,7 @@ PgStore）+ 七个测试文件
 - 顺带发现：现有 `registry.connection.set_status` 与 `registry.connector.create`
   两份契约声明为 L2，而内核对 L2 及以上返回 `ADVANCED_CONTROLS_REQUIRED`
   并拒绝执行——**建议核一下这两个 Action 是否实际可用**。
-- 补跑 PgStore 的集成测试（需测试库）。
+- ~~补跑 PgStore 的集成测试~~ —— 已完成（见 tests_run）。
 
 **后续切片**
 
