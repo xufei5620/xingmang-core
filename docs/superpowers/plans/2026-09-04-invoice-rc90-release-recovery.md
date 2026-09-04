@@ -1,5 +1,10 @@
 # RC90 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC90 shipped at signed tag
+> `v0.1.0-rc90-signed` (`0a074a8`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-04-invoice-rc91-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC90 — four fixes, two of them for accounts that could not recover on their own:
