@@ -543,6 +543,32 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 	// Enqueue only accounts with facts in the newly finalized interval. This is
 	// a single set-based operation; ingestion never loops/replays thousands of
 	// accounts while holding the signed batch transaction open.
+	// XM-INV-CATCHUP-BURST-BACKPRESSURE: the enqueue below must never wait on
+	// an account whose projection job is mid-transaction. processEligibilityProjectionJob
+	// takes FOR UPDATE on its own eligibility_projection_jobs row as its first
+	// statement and holds it until commit -- through the carry-forward proof
+	// phase, which on a contended account runs for minutes -- while this
+	// function is called from inside tryPublishEconomicScanCyclesTx with the
+	// stream's scan-cycle and watermark rows already locked. Under the runtime
+	// role's lock_timeout=5s, an ON CONFLICT DO UPDATE that waited on the job
+	// row died with 55P03 and took the whole cycle publication (and the event
+	// mark that wrapped it) down with it; the balances stream could not
+	// publish for 29 minutes on 2026-09-04 and readiness answered 503 the
+	// whole time, for one account's catch-up. See the handoff's 2026-09-05
+	// revision for the row-level evidence.
+	//
+	// `held` locks, with SKIP LOCKED, only the job rows this pass can take
+	// without waiting; an account whose row is held by a running job is left
+	// out of this pass entirely. Nothing is lost by skipping it: requested_through
+	// is recomputed from the stream watermarks on every pass, the running job
+	// publishes finalized_through when it commits, and the next pass -- at most
+	// one poll interval later -- enqueues whatever window is still open. Late
+	// facts at or below an already-finalized boundary are not this function's
+	// concern; the observe paths enqueue those themselves (and deliberately
+	// still wait, because skipping there would orphan the fact).
+	//
+	// Accounts with no job row at all are inserted as before: a conflict there
+	// can only be with another concurrent enqueue, which is short-lived.
 	_, err := tx.Exec(ctx, `
 		WITH targets AS (
 			SELECT eas.external_account_id,eas.finalized_through,
@@ -564,9 +590,15 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 					WHERE b.external_account_id=t.external_account_id
 						AND b.as_of>t.finalized_through AND b.as_of<=t.requested_through)
 			)
+		), held AS (
+			SELECT j.external_account_id FROM eligibility_projection_jobs j
+			WHERE j.external_account_id IN (SELECT external_account_id FROM changed)
+			FOR UPDATE SKIP LOCKED
 		)
 		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
-		SELECT external_account_id,requested_through,'queued',now() FROM changed
+		SELECT c.external_account_id,c.requested_through,'queued',now() FROM changed c
+		WHERE c.external_account_id IN (SELECT external_account_id FROM held)
+		   OR NOT EXISTS (SELECT 1 FROM eligibility_projection_jobs j WHERE j.external_account_id=c.external_account_id)
 		ON CONFLICT(external_account_id) DO UPDATE SET
 			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
 			-- XM-INV-PROJECTION-FAILURE-GRADING: a new fact must never silently

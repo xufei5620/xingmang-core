@@ -1,6 +1,6 @@
 # XM-INV-CATCHUP-BURST-BACKPRESSURE: chunk a released account's first projection
 
-- **status:** open; **root cause revised 2026-09-05 after a copy-run and a code trace. The proposed fix below does not address it.** Filed 2026-09-04 from the RC87 canary.
+- **status:** fix 1 of the revised ranking implemented 2026-09-05 (finalization skips a job row held by a running projection; see the end of this document). Root cause revised the same day after a copy-run and a code trace; the original proposal below does not address it. Filed 2026-09-04 from the RC87 canary.
 - **branch:** none yet.
 - **found in production**, 2026-09-04, while verifying the XM-INV-CATCHUP-RELEASE fix.
 
@@ -215,3 +215,42 @@ Note for the drain loop: "nothing claimable" because of backoff is
 indistinguishable from "drained" in the report, the same shape as
 XM-INV-SHADOW-EVAL-VACUOUS one layer down. Worth a `requeued_with_backoff`
 count in the report.
+
+## Implemented, 2026-09-05: fix 1, finalization no longer waits on a running job
+
+`finalizeSourceAccountsTx` now locks, with `FOR UPDATE SKIP LOCKED`, only the
+job rows it can take without waiting, and enqueues (a) those accounts and (b)
+accounts with no job row at all. An account whose row is held by a running
+projection is left out of the pass. Nothing is lost: `requested_through` is
+recomputed from the stream watermarks on every pass, the running job publishes
+`finalized_through` when it commits, and the next pass -- at most one poll
+interval later -- enqueues whatever window is still open. The second
+statement's own `NOT EXISTS (job)` guard already kept it from advancing
+`finalized_through` under a live job, so the two halves stay consistent.
+
+Pinned by `TestFinalizeSourceAccountsSkipsAJobRowHeldByARunningProjection`:
+one account's processing row held `FOR UPDATE` by another connection, a
+second account with an equally live window, finalization under
+`lock_timeout='2s'`. On the previous code the pass dies with 55P03 after
+2.01 s, the production publication failure verbatim. On this code it returns
+in ~1 s, enqueues the free account, leaves the held row byte-identical (status,
+lease, requested_through) and `finalized_through` unmoved, and reclaims the row
+on the first pass after release.
+
+Deliberately unchanged:
+
+- The observe-path enqueue (`ObserveBalanceCheckpoint`'s late-fact upsert and
+  its siblings) still waits. Skipping there would orphan a fact at or below an
+  already-finalized boundary, because finalization's `changed` window can
+  never see it again. Its wait is bounded by the same 5 s and retried by the
+  event's own attempt budget; that is the correct failure mode for it.
+- The job still takes its own row lock before the carry-forward proof phase.
+  Moving that lock after the proof (fix 1b) would shrink every hold to the
+  write phase; it reorders the hot path and needs the account-isolation tests
+  the evaluator discipline requires. Not done here.
+- Fix 2 (a stuck checkpoint event flipping readiness) and fix 3 (bounding the
+  evidence pass by checkpoint count) are untouched.
+
+Release note: this changes one statement in the finalization path. No
+migration, no evaluator or allocation change, so the shadow evaluation is
+skipped by rule; the differential run is not applicable.
