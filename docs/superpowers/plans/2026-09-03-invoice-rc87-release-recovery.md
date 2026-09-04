@@ -1,5 +1,10 @@
 # RC87 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC87 shipped at signed tag
+> `v0.1.0-rc87-signed` (`705beb4`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-04-invoice-rc88-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC87 — two production defects the product owner surfaced while working in the embedded admin console:
