@@ -807,45 +807,72 @@ func completeEligibilityCatchupTx(ctx context.Context, tx pgx.Tx, sourceID, catc
 	if remaining != 0 {
 		return nil
 	}
+	// Every account still carrying this catch-up key is released, whatever
+	// status it reached meanwhile -- not only the ones still 'syncing'
+	// (XM-INV-CATCHUP-RELEASE).
+	//
+	// catchup_key_hmac is what finalizeSourceAccountsTx excludes an account
+	// on, so an account that keeps it is excluded from finalization *forever*:
+	// no projection job is enqueued for it, its balance checkpoints are never
+	// evaluated, its finalized_through stops advancing, and the invoiceable
+	// amount an operator sees freezes at whatever the last projection wrote.
+	// Filtering on 'syncing' alone left exactly that hole: an account can
+	// leave 'syncing' during its own catch-up -- the POLICY_ANCHOR bootstrap
+	// parks one in not_invoiceable_pending_reconciliation the moment its
+	// triggering checkpoint reports a negative balance, and an open freeze
+	// makes another 'frozen' -- and those accounts were then skipped by their
+	// own completion. Production found one: a live account stuck since
+	// 2026-09-01 while every sibling finalized normally.
 	rows, err := tx.Query(ctx, `
-		SELECT external_account_id FROM source_account_eligibility_state
-		WHERE source_instance_id=$1 AND catchup_key_hmac=$2 AND eligibility_status='syncing'
+		SELECT external_account_id,eligibility_status FROM source_account_eligibility_state
+		WHERE source_instance_id=$1 AND catchup_key_hmac=$2
 		ORDER BY external_account_id FOR UPDATE`, sourceID, catchupKey)
 	if err != nil {
 		return err
 	}
-	ids := make([]string, 0)
+	type catchupAccount struct{ id, status string }
+	accounts := make([]catchupAccount, 0)
 	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
+		var item catchupAccount
+		if err = rows.Scan(&item.id, &item.status); err != nil {
 			rows.Close()
 			return err
 		}
-		ids = append(ids, id)
+		accounts = append(accounts, item)
 	}
 	rows.Close()
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	for _, id := range ids {
-		var openFreezes int64
-		if err = tx.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes WHERE external_account_id=$1 AND status='open'`, id).Scan(&openFreezes); err != nil {
-			return err
-		}
-		status := "active"
-		if openFreezes > 0 {
-			status = "frozen"
+	ids := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		// Only an account that is still 'syncing' has its status decided here.
+		// Any other status was reached by a rule that owns it -- a freeze, or
+		// the self-clearing pending-reconciliation state -- and completing a
+		// catch-up is not evidence about that rule, so the status is left
+		// exactly as it stands and only the exclusion key is dropped.
+		status := account.status
+		if status == "syncing" {
+			var openFreezes int64
+			if err = tx.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes WHERE external_account_id=$1 AND status='open'`, account.id).Scan(&openFreezes); err != nil {
+				return err
+			}
+			status = "active"
+			if openFreezes > 0 {
+				status = "frozen"
+			}
 		}
 		if _, err = tx.Exec(ctx, `
 			UPDATE source_account_eligibility_state SET eligibility_status=$1,catchup_key_hmac=NULL,
 				projection_version=projection_version+1,updated_at=now()
-			WHERE external_account_id=$2`, status, id); err != nil {
+			WHERE external_account_id=$2`, status, account.id); err != nil {
 			return err
 		}
-		if err = writeAudit(ctx, tx, actor, "eligibility.identity_catchup.completed", "external_account", id,
-			nil, map[string]any{"status": status}); err != nil {
+		if err = writeAudit(ctx, tx, actor, "eligibility.identity_catchup.completed", "external_account", account.id,
+			nil, map[string]any{"status": status, "status_decided_here": account.status == "syncing"}); err != nil {
 			return err
 		}
+		ids = append(ids, account.id)
 	}
 	if len(ids) > 0 {
 		return finalizeSourceAccountsTx(ctx, tx, sourceID, actor)

@@ -780,6 +780,94 @@ func TestParkedIdentityFactCanPublishAndCatchUpAfterBinding(t *testing.T) {
 	}
 }
 
+// XM-INV-CATCHUP-RELEASE: an account that leaves 'syncing' while its own
+// catch-up is still running must still be released when that catch-up
+// completes. catchup_key_hmac is what finalizeSourceAccountsTx excludes an
+// account on, so keeping it means the account never finalizes again --
+// production found one parked in not_invoiceable_pending_reconciliation by
+// its POLICY_ANCHOR bootstrap, stuck for days while every sibling advanced.
+//
+// The status itself must survive: completing a catch-up is not evidence about
+// a freeze or a pending reconciliation, so only the exclusion key is dropped.
+func TestCatchupCompletionReleasesAnAccountThatLeftSyncing(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID := "10000000-0000-4000-8000-000000000001"
+	accountID := "30000000-0000-4000-8000-000000000001"
+	if _, err := store.pool.Exec(ctx, `UPDATE source_instances SET runtime_version='v3-test' WHERE id=$1`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProvisionSourceStream(ctx, sourceID, "usage", AuditActor{Type: "system", ID: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	var oldWatermark time.Time
+	if err := store.pool.QueryRow(ctx, `SELECT watermark_at FROM source_economic_stream_watermarks
+		WHERE source_instance_id=$1 AND stream_kind='usage'`, sourceID).Scan(&oldWatermark); err != nil {
+		t.Fatal(err)
+	}
+	ceiling := oldWatermark.Add(time.Minute)
+	event := SourceBatchEvent{EventID: "82000000-0000-4000-8000-0000000000a1",
+		EntityType: "usage_event", Operation: "upsert", PayloadHash: strings.Repeat("7", 64),
+		PayloadCiphertext: bytes.Repeat([]byte{7}, 32), ObservedAt: ceiling}
+	chain := newV3TestChain()
+	chain.commit(t, store, ctx, sourceID, "usage",
+		"83000000-0000-4000-8000-0000000000a1", ceiling, []SourceBatchEvent{event})
+	claims, err := store.ClaimUnprocessedSourceEvents(ctx, 10, ceiling.Add(time.Minute))
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("initial parked claim=%+v err=%v", claims, err)
+	}
+	catchupKey := "h1:" + strings.Repeat("b", 64)
+	if err = store.MarkSourceEventWaitingDependency(ctx, claims[0], "source_external_account",
+		catchupKey, ceiling.Add(12*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.RequeueSourceDependency(ctx, "source_external_account", catchupKey); err != nil {
+		t.Fatal(err)
+	}
+	// The account enters the catch-up 'syncing', exactly as the binding path
+	// leaves it...
+	if _, err = store.pool.Exec(ctx, `UPDATE source_account_eligibility_state
+		SET eligibility_status='syncing',catchup_key_hmac=$1 WHERE external_account_id=$2`,
+		catchupKey, accountID); err != nil {
+		t.Fatal(err)
+	}
+	claims, err = store.ClaimUnprocessedSourceEvents(ctx, 10, ceiling.Add(time.Minute))
+	if err != nil || len(claims) != 1 || claims[0].CatchupKeyHMAC != catchupKey {
+		t.Fatalf("catch-up claim=%+v err=%v", claims, err)
+	}
+	// ... and leaves it mid-flight, the way the POLICY_ANCHOR bootstrap parks
+	// an account whose triggering checkpoint reported a negative balance.
+	// The pending columns move as one set (migration 0020's pairing CHECK), so
+	// the fixture sets them the way enterPendingReconciliationTx does.
+	if _, err = store.pool.Exec(ctx, `UPDATE source_account_eligibility_state
+		SET eligibility_status='not_invoiceable_pending_reconciliation',
+			pending_reconciliation_reason='UNKNOWN_NEGATIVE_BALANCE',
+			pending_reconciliation_trigger_type='balance_checkpoint',
+			pending_reconciliation_trigger_id='checkpoint-fixture-1',
+			pending_reconciliation_detail='fixture: negative balance at bootstrap',
+			pending_reconciliation_since=now()
+		WHERE external_account_id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = store.MarkSourceEventProcessed(ctx, claims[0], ceiling.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	var status string
+	var stillExcluded bool
+	if err = store.pool.QueryRow(ctx, `SELECT eligibility_status,catchup_key_hmac IS NOT NULL
+		FROM source_account_eligibility_state WHERE external_account_id=$1`,
+		accountID).Scan(&status, &stillExcluded); err != nil {
+		t.Fatal(err)
+	}
+	if stillExcluded {
+		t.Fatal("catch-up completion left the exclusion key set: this account can never finalize again")
+	}
+	if status != "not_invoiceable_pending_reconciliation" {
+		t.Fatalf("catch-up completion overwrote a status it does not own: %q", status)
+	}
+}
+
 func TestTruncatedBalanceSnapshotBlocksCycleAndDoesNotAdvanceWatermark(t *testing.T) {
 	store, ctx := integrationStore(t)
 	sourceID := "10000000-0000-4000-8000-000000000001"
