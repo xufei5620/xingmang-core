@@ -717,6 +717,72 @@ func privateSchemaMigrationsDir(t *testing.T, schema string) string {
 	return target
 }
 
+// XM-INV-LEDGER-ACCOUNT-EMAIL: the operator lists label an account with its
+// owner's verified address. This covers the whole path the display depends on
+// -- the bulk store lookup, the AAD the ciphertext is bound to, and the
+// decryption -- against a real database, because the AAD is exactly the kind
+// of detail a hand-written fake would get wrong without failing.
+func TestAccountEmailsResolvesVerifiedAddressPerAccount(t *testing.T) {
+	service, store, _, ctx := integrationApplication(t)
+	withEmail, err := service.EnsureUser(ctx, OIDCIdentity{
+		Issuer: "https://id.example", Subject: "ledger-email-subject-1",
+		Email: "chen.yuan@example.com", EmailVerified: true, Status: "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second user provisioned without a verified address: an account can
+	// legitimately have none, and that must come back absent rather than as an
+	// error or an empty-string entry.
+	withoutEmail, err := service.EnsureUser(ctx, OIDCIdentity{
+		Issuer: "https://id.example", Subject: "ledger-email-subject-2", Status: "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID := "10000000-0000-4000-8000-0000000000e1"
+	if _, err = store.UpsertSourceInstance(ctx, postgresstore.SourceInstanceRecord{
+		ID: sourceID, SourceType: domain.SourceSub2API, Name: "Sub2API", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	accountWithEmail := "30000000-0000-4000-8000-0000000000e1"
+	accountWithoutEmail := "30000000-0000-4000-8000-0000000000e2"
+	if _, err = service.BindExternalAccount(ctx, postgresstore.ExternalAccountRecord{
+		ID: accountWithEmail, PrincipalID: withEmail.ID, SourceInstanceID: sourceID,
+		ExternalUserID: "1147", BindingMethod: "platform_password_login", BindingStatus: "verified",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.BindExternalAccount(ctx, postgresstore.ExternalAccountRecord{
+		ID: accountWithoutEmail, PrincipalID: withoutEmail.ID, SourceInstanceID: sourceID,
+		ExternalUserID: "2092", BindingMethod: "platform_password_login", BindingStatus: "verified",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	emails, err := service.accountEmails(ctx, []string{accountWithEmail, accountWithoutEmail})
+	if err != nil {
+		t.Fatalf("resolve account emails: %v", err)
+	}
+	if emails[accountWithEmail] != "chen.yuan@example.com" {
+		t.Fatalf("account with a verified address resolved to %q", emails[accountWithEmail])
+	}
+	if _, present := emails[accountWithoutEmail]; present {
+		t.Fatalf("account without a verified address must be absent, got %q", emails[accountWithoutEmail])
+	}
+
+	// An unknown account id is not an error either: a page can race a deletion.
+	emails, err = service.accountEmails(ctx, []string{"30000000-0000-4000-8000-0000000000ff"})
+	if err != nil || len(emails) != 0 {
+		t.Fatalf("unknown account id: emails=%+v err=%v", emails, err)
+	}
+	// No ids at all short-circuits without touching the database.
+	if emails, err = service.accountEmails(ctx, nil); err != nil || emails != nil {
+		t.Fatalf("empty input: emails=%+v err=%v", emails, err)
+	}
+}
+
 func TestPersistentApplicationEndToEndRefundAndOutbox(t *testing.T) {
 	service, store, settings, ctx := integrationApplication(t)
 	user, err := service.EnsureUser(ctx, OIDCIdentity{

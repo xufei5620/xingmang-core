@@ -573,6 +573,75 @@ func (s *Store) IsEmailVerified(ctx context.Context, principalID, normalizedEmai
 	return found, err
 }
 
+// AccountVerifiedEmailRef is the encrypted email material for one external
+// account's invoice user: the same "latest non-revoked verified email" row
+// GetLatestVerifiedEmail returns for a single principal, but resolved in bulk
+// and keyed by external account so an operator list can label its rows.
+// Ciphertext stays ciphertext here -- only the application layer holds the
+// keyring, and only it turns these into an address (XM-INV-LEDGER-ACCOUNT-
+// EMAIL).
+type AccountVerifiedEmailRef struct {
+	ExternalAccountID   string
+	InvoiceUserID       string
+	EmailCiphertext     []byte
+	NormalizedEmailHMAC string
+}
+
+// ListAccountVerifiedEmails resolves the latest verified email for each of the
+// given external accounts. Accounts whose invoice user has no non-revoked
+// verified email are simply absent from the result -- an account can legitimately
+// have none (it was provisioned by a login path that never verified one), and
+// that is a normal state to render as "no address on file", not an error.
+//
+// Deliberately a separate lookup rather than a join inside the ledger and
+// freeze queries: those carry keyset cursors, computed sort ranks and a
+// FOR UPDATE lock path, and widening them for a display-only column would put
+// all of that at risk for no gain. One extra round trip per page (at most 100
+// accounts) is the cheaper trade.
+func (s *Store) ListAccountVerifiedEmails(ctx context.Context, externalAccountIDs []string) ([]AccountVerifiedEmailRef, error) {
+	ids := make([]string, 0, len(externalAccountIDs))
+	seen := make(map[string]struct{}, len(externalAccountIDs))
+	for _, id := range externalAccountIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || !eligibilityUUIDPattern.MatchString(id) {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT ea.id::text,ea.invoice_user_id::text,ve.email_ciphertext,ve.normalized_email_hmac
+		FROM external_accounts ea
+		JOIN LATERAL (
+			SELECT email_ciphertext,normalized_email_hmac
+			FROM verified_emails
+			WHERE invoice_user_id=ea.invoice_user_id AND revoked_at IS NULL
+			ORDER BY verified_at DESC,id DESC
+			LIMIT 1
+		) ve ON TRUE
+		WHERE ea.id=ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list account verified emails: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AccountVerifiedEmailRef, 0, len(ids))
+	for rows.Next() {
+		var item AccountVerifiedEmailRef
+		if err = rows.Scan(&item.ExternalAccountID, &item.InvoiceUserID,
+			&item.EmailCiphertext, &item.NormalizedEmailHMAC); err != nil {
+			return nil, fmt.Errorf("scan account verified email: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetLatestVerifiedEmail(ctx context.Context, principalID string) (VerifiedEmailRecord, error) {
 	var out VerifiedEmailRecord
 	err := s.pool.QueryRow(ctx, `

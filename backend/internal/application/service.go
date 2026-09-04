@@ -1098,19 +1098,94 @@ func (s *Service) ListRefundCasesPage(ctx context.Context, in postgresstore.Refu
 }
 
 func (s *Service) ListEligibilityFreezesPage(ctx context.Context, in postgresstore.EligibilityFreezePageQuery) (postgresstore.EligibilityFreezePage, error) {
-	return s.store.ListEligibilityFreezesPage(ctx, in)
+	page, err := s.store.ListEligibilityFreezesPage(ctx, in)
+	if err != nil {
+		return postgresstore.EligibilityFreezePage{}, err
+	}
+	ids := make([]string, 0, len(page.Items))
+	for _, item := range page.Items {
+		ids = append(ids, item.ExternalAccountID)
+	}
+	emails, err := s.accountEmails(ctx, ids)
+	if err != nil {
+		return postgresstore.EligibilityFreezePage{}, err
+	}
+	for index := range page.Items {
+		page.Items[index].AccountEmail = emails[page.Items[index].ExternalAccountID]
+	}
+	return page, nil
+}
+
+// accountEmails resolves the display address for a page of external accounts:
+// the store returns each account's latest verified email as ciphertext, and
+// this is the only layer holding the keyring that can open it
+// (XM-INV-LEDGER-ACCOUNT-EMAIL). Accounts with no verified email on file are
+// absent from both the store result and this map, which callers render as
+// "no address", never as an error -- but a ciphertext that fails to open is a
+// genuine keyring/data fault and fails the request closed, the same posture
+// decryptProfile and GetCurrentUser already take.
+func (s *Service) accountEmails(ctx context.Context, externalAccountIDs []string) (map[string]string, error) {
+	if len(externalAccountIDs) == 0 {
+		return nil, nil
+	}
+	refs, err := s.store.ListAccountVerifiedEmails(ctx, externalAccountIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		if len(ref.EmailCiphertext) == 0 {
+			continue
+		}
+		plaintext, decryptErr := s.keys.Decrypt(ref.EmailCiphertext,
+			verifiedEmailAAD(ref.InvoiceUserID, ref.NormalizedEmailHMAC))
+		if decryptErr != nil {
+			return nil, fmt.Errorf("decrypt account email: %w", decryptErr)
+		}
+		email, canonicalErr := canonicalEmail(string(plaintext))
+		if canonicalErr != nil {
+			return nil, fmt.Errorf("canonical account email: %w", canonicalErr)
+		}
+		out[ref.ExternalAccountID] = email
+	}
+	return out, nil
 }
 
 // ListAccountLedgerPage/GetAccountLedgerDetail: CR-0009's operator "用户
-// 账本" view (finalizing XM-INV-USER-LEDGER-QUERY, design section 3(E)),
-// plain passthroughs to the store -- see
-// postgresstore.accounts_ledger.go for the read-only queries themselves.
+// 账本" view (finalizing XM-INV-USER-LEDGER-QUERY, design section 3(E)).
+// The ledger rows themselves come straight from
+// postgresstore.accounts_ledger.go's read-only queries; only the display
+// address is filled in here, where the keyring lives.
 func (s *Service) ListAccountLedgerPage(ctx context.Context, in postgresstore.AccountLedgerPageQuery) (postgresstore.AccountLedgerPage, error) {
-	return s.store.ListAccountLedgerPage(ctx, in)
+	page, err := s.store.ListAccountLedgerPage(ctx, in)
+	if err != nil {
+		return postgresstore.AccountLedgerPage{}, err
+	}
+	ids := make([]string, 0, len(page.Items))
+	for _, item := range page.Items {
+		ids = append(ids, item.ExternalAccountID)
+	}
+	emails, err := s.accountEmails(ctx, ids)
+	if err != nil {
+		return postgresstore.AccountLedgerPage{}, err
+	}
+	for index := range page.Items {
+		page.Items[index].AccountEmail = emails[page.Items[index].ExternalAccountID]
+	}
+	return page, nil
 }
 
 func (s *Service) GetAccountLedgerDetail(ctx context.Context, externalAccountID string, thresholdMinor int64) (postgresstore.AccountLedgerDetail, error) {
-	return s.store.GetAccountLedgerDetail(ctx, externalAccountID, thresholdMinor)
+	detail, err := s.store.GetAccountLedgerDetail(ctx, externalAccountID, thresholdMinor)
+	if err != nil {
+		return postgresstore.AccountLedgerDetail{}, err
+	}
+	emails, err := s.accountEmails(ctx, []string{detail.ExternalAccountID})
+	if err != nil {
+		return postgresstore.AccountLedgerDetail{}, err
+	}
+	detail.AccountEmail = emails[detail.ExternalAccountID]
+	return detail, nil
 }
 
 func (s *Service) ResolveEligibilityFreeze(ctx context.Context, adminID, freezeID string, expectedVersion int64, evidenceReference, note string) (postgresstore.EligibilityFreeze, error) {

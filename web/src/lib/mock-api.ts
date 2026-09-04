@@ -418,6 +418,7 @@ let eligibilityFreezes: EligibilityFreeze[] = [
     openedAt: "2026-08-20T08:30:00.000Z",
     version: 1,
     externalUserId: "1147",
+    accountEmail: "chen.yuan@example.com",
   },
   {
     id: "31000000-0000-4000-8000-000000000002",
@@ -431,6 +432,7 @@ let eligibilityFreezes: EligibilityFreeze[] = [
     openedAt: "2026-08-19T04:10:00.000Z",
     version: 1,
     externalUserId: "88210",
+    accountEmail: "lin.qi@example.net",
   },
   {
     id: "31000000-0000-4000-8000-000000000003",
@@ -445,6 +447,7 @@ let eligibilityFreezes: EligibilityFreeze[] = [
     resolvedAt: "2026-08-11T05:00:00.000Z",
     version: 2,
     externalUserId: "30044",
+    accountEmail: "zhao.min@example.org",
   },
 ];
 
@@ -459,6 +462,7 @@ const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
     externalAccountId: "41000000-0000-4000-8000-000000000001",
     source: "sub2api",
     externalUserId: "1147",
+    accountEmail: "chen.yuan@example.com",
     policyStartAt: "2026-08-31T16:00:00.000Z",
     rechargesSinceStartCount: 3,
     rechargesSinceStartMinor: 128_000,
@@ -502,6 +506,7 @@ const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
     externalAccountId: "41000000-0000-4000-8000-000000000002",
     source: "newapi",
     externalUserId: "8821",
+    accountEmail: "wu.tao@example.net",
     policyStartAt: "2026-08-31T16:00:00.000Z",
     rechargesSinceStartCount: 1,
     rechargesSinceStartMinor: 20_000,
@@ -530,6 +535,7 @@ const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
     externalAccountId: "41000000-0000-4000-8000-000000000003",
     source: "sub2api",
     externalUserId: "34",
+    accountEmail: "he.lan@example.com",
     policyStartAt: "2026-08-31T16:00:00.000Z",
     rechargesSinceStartCount: 2,
     rechargesSinceStartMinor: 50_000,

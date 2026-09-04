@@ -156,6 +156,9 @@ type BackendEligibilityFreeze = {
   // Go DTO's key set (eligibilityFreezeDTO) and mapEligibilityFreeze's
   // `allowed` list below -- see exactObjectKeys's callers.
   external_user_id: string;
+  // Present only when the account has a verified address on file
+  // (XM-INV-LEDGER-ACCOUNT-EMAIL); the backend omits the key otherwise.
+  account_email?: string;
 };
 
 // CR-0009 (XM-INV-CR0009-LEDGER-VIEW): must stay byte-for-byte in sync with
@@ -173,6 +176,7 @@ type BackendAccountLedgerListItem = {
   issued_minor: number;
   threshold_reached: boolean;
   block_state: string;
+  account_email?: string;
   last_checkpoint_at: string | null;
 };
 
@@ -751,11 +755,12 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     "resolved_at",
     "version",
     "external_user_id",
+    "account_email",
   ] as const;
   exactObjectKeys(
     value,
     allowed,
-    allowed.filter((key) => key !== "resolved_at"),
+    allowed.filter((key) => key !== "resolved_at" && key !== "account_email"),
     "资格冻结记录",
   );
   if (
@@ -781,7 +786,8 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     typeof value.external_user_id !== "string" ||
     value.external_user_id.length === 0 ||
     value.external_user_id.length > 512 ||
-    /[\r\n\0]/.test(value.external_user_id)
+    /[\r\n\0]/.test(value.external_user_id) ||
+    !validOptionalAccountEmail(value.account_email)
   ) {
     throw new InvoiceApiError("资格冻结记录包含无效字段，已停止显示。", {
       code: "INVALID_ELIGIBILITY_FREEZE_RESPONSE",
@@ -800,6 +806,7 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     resolvedAt: value.resolved_at,
     version: value.version,
     externalUserId: value.external_user_id,
+    accountEmail: value.account_email,
   } satisfies EligibilityFreeze;
 }
 
@@ -844,6 +851,26 @@ const accountLedgerListKeys = [
   "last_checkpoint_at",
 ] as const;
 
+// account_email is optional on the wire (absent when the account has no
+// verified address on file), so it is allowed but never required -- both key
+// sets below admit it the same way (XM-INV-LEDGER-ACCOUNT-EMAIL).
+const accountLedgerOptionalKeys = ["account_email"] as const;
+
+// validOptionalAccountEmail accepts an absent key and otherwise applies the
+// same shape bound the other free-text fields get: a non-empty, bounded,
+// control-character-free string. It deliberately does not validate the
+// address itself -- the server already canonicalized it, and a stricter
+// client-side pattern could only ever reject a legitimate address.
+function validOptionalAccountEmail(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 320 &&
+    !/[\r\n\0]/.test(value)
+  );
+}
+
 // Shared by mapAccountLedgerListItem (which first checks the narrower list
 // key set) and mapAccountLedgerDetail (which already checked its own wider
 // key set) -- validates and converts the list-shaped fields alone, so
@@ -863,7 +890,8 @@ function accountLedgerListFieldsToItem(
     value.recharges_since_start_count < 0 ||
     typeof value.threshold_reached !== "boolean" ||
     !accountBlockStates.includes(value.block_state as AccountBlockState) ||
-    (value.last_checkpoint_at !== null && !validTimestamp(value.last_checkpoint_at))
+    (value.last_checkpoint_at !== null && !validTimestamp(value.last_checkpoint_at)) ||
+    !validOptionalAccountEmail(value.account_email)
   ) {
     throw new InvoiceApiError("用户账本记录包含无效字段，已停止显示。", {
       code: "INVALID_ACCOUNT_LEDGER_RESPONSE",
@@ -873,6 +901,7 @@ function accountLedgerListFieldsToItem(
     externalAccountId: value.external_account_id,
     source: value.source_type,
     externalUserId: value.external_user_id,
+    accountEmail: value.account_email,
     policyStartAt: value.policy_start_at,
     rechargesSinceStartCount: value.recharges_since_start_count,
     rechargesSinceStartMinor: requireSafeMinor(
@@ -894,7 +923,12 @@ function accountLedgerListFieldsToItem(
 function mapAccountLedgerListItem(
   value: BackendAccountLedgerListItem,
 ): AccountLedgerListItem {
-  exactObjectKeys(value, accountLedgerListKeys, accountLedgerListKeys, "用户账本列表项");
+  exactObjectKeys(
+    value,
+    [...accountLedgerListKeys, ...accountLedgerOptionalKeys],
+    accountLedgerListKeys,
+    "用户账本列表项",
+  );
   return accountLedgerListFieldsToItem(value);
 }
 
@@ -955,13 +989,19 @@ function mapAccountLedgerDetail(
 ): AccountLedgerDetail {
   const allowed = [
     ...accountLedgerListKeys,
+    ...accountLedgerOptionalKeys,
     "opening_balance_units",
     "recharges_since_start",
     "consumption_timeline",
     "last_reconciled_at",
     "block_reason",
   ] as const;
-  exactObjectKeys(value, allowed, allowed, "用户账本详情");
+  exactObjectKeys(
+    value,
+    allowed,
+    allowed.filter((key) => key !== "account_email"),
+    "用户账本详情",
+  );
   const listItem = accountLedgerListFieldsToItem(value);
   exactObjectKeys(
     value.opening_balance_units,

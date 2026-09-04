@@ -70,6 +70,49 @@ func TestAccountLedgerHandlersEnforceAdminIPAllowlist(t *testing.T) {
 	}
 }
 
+// XM-INV-LEDGER-ACCOUNT-EMAIL: account_email is additive and optional. It
+// appears only for accounts that actually have a verified address on file,
+// and the key is absent -- not an empty string -- for the others, so an
+// operator can tell "no address" from "blank address".
+func TestAccountLedgerListHandlerEmitsAccountEmailOnlyWhenPresent(t *testing.T) {
+	server, fake := sourceFilterTestServer(t)
+	fake.accountLedgerPage = postgresstore.AccountLedgerPage{
+		Items: []postgresstore.AccountLedgerListEntry{
+			{
+				ExternalAccountID: "1a2b0000-0000-4000-8000-000000000001", SourceType: domain.SourceSub2API,
+				ExternalUserID: "1147", BlockState: postgresstore.AccountBlockStateInvoiceable,
+				AccountEmail: "chen.yuan@example.com",
+			},
+			{
+				ExternalAccountID: "1a2b0000-0000-4000-8000-000000000002", SourceType: domain.SourceNewAPI,
+				ExternalUserID: "56", BlockState: postgresstore.AccountBlockStateBelowThreshold,
+			},
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, adminRequest("GET", "/api/v1/admin/accounts/ledger", "127.0.0.1", ""))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("expected two items, got %d", len(body.Items))
+	}
+	if body.Items[0]["account_email"] != "chen.yuan@example.com" {
+		t.Fatalf("first item did not carry the account email: %+v", body.Items[0])
+	}
+	if _, present := body.Items[1]["account_email"]; present {
+		t.Fatalf("second item must omit account_email entirely, got %+v", body.Items[1])
+	}
+}
+
 // Pins CR-0009's list wire contract: field set, threshold_reached computed
 // from the real (admin-configurable) minimum invoice amount rather than a
 // hardcoded value, null last_checkpoint_at for a never-evaluated account,

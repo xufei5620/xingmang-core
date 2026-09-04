@@ -30,7 +30,12 @@ type EligibilityFreeze struct {
 	// this account, plain and unmasked (CR-0007 problem one). It is exposed
 	// deliberately -- see eligibilityFreezeDTO's comment in httpapi for why
 	// this is not the same redaction posture as ExternalAccountID above.
-	ExternalUserID    string            `json:"-"`
+	ExternalUserID string `json:"-"`
+	// AccountEmail is the account's latest verified email address, filled in
+	// by the application layer and empty when there is none on file. Same
+	// display-only role as the ledger's own field of this name
+	// (XM-INV-LEDGER-ACCOUNT-EMAIL).
+	AccountEmail      string            `json:"-"`
 	SourceInstanceID  string            `json:"source_instance_id"`
 	SourceType        domain.SourceType `json:"source_type"`
 	SourceName        string            `json:"source_name"`

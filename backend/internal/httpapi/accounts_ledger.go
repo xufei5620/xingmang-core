@@ -219,6 +219,15 @@ func accountLedgerListDTO(item postgresstore.AccountLedgerListEntry, thresholdMi
 	if !item.LastCheckpointAt.IsZero() {
 		dto["last_checkpoint_at"] = item.LastCheckpointAt
 	}
+	// account_email is present only when the account actually has a verified
+	// address on file: an absent key is the honest shape for "none", and it
+	// keeps the operator from reading an empty string as an empty mailbox.
+	// It is additive to CR-0009's field set and identifies nothing on its own
+	// -- external_user_id remains the identifier every filter and cursor uses
+	// (XM-INV-LEDGER-ACCOUNT-EMAIL).
+	if item.AccountEmail != "" {
+		dto["account_email"] = item.AccountEmail
+	}
 	return dto
 }
 

@@ -184,6 +184,11 @@ export interface EligibilityFreeze {
   // CR-0007 problem one: the upstream platform's own (digital) user ID for
   // this account, plain and unmasked -- see docs/ELIGIBILITY-OPERATIONS.md.
   externalUserId: string;
+  // The account's latest verified email, when it has one. Absent means the
+  // account has no verified address on file -- render nothing rather than a
+  // placeholder, which would read as an empty mailbox
+  // (XM-INV-LEDGER-ACCOUNT-EMAIL).
+  accountEmail?: string;
 }
 
 export interface EligibilityFreezePage {
@@ -233,6 +238,8 @@ export interface AccountLedgerListItem {
   // Absent when this account has never had a reconciliation checkpoint or
   // carry-forward proof evaluated at all.
   lastCheckpointAt?: string;
+  // Same optional display address as EligibilityFreeze.accountEmail above.
+  accountEmail?: string;
 }
 
 export interface AccountLedgerRecharge {

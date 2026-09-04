@@ -295,6 +295,12 @@ type AccountLedgerListEntry struct {
 	// (a real, defined, non-error shape -- see the hard rule in
 	// docs/handoffs/XM-INV-CR0009-LEDGER-VIEW.md).
 	LastCheckpointAt time.Time
+	// AccountEmail is the account's latest verified email address, filled in
+	// by the application layer (the store never holds the keyring) and empty
+	// when the account has none on file. Display only: the upstream numeric
+	// ExternalUserID above stays the identifier every filter and cursor uses
+	// (XM-INV-LEDGER-ACCOUNT-EMAIL).
+	AccountEmail string
 }
 
 type AccountLedgerPageQuery struct {

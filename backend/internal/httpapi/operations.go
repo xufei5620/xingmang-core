@@ -112,6 +112,12 @@ func eligibilityFreezeDTO(item postgresstore.EligibilityFreeze) map[string]any {
 		"funding_lot_id": item.FundingLotID, "scope": scope, "freeze_reason": item.FreezeReason,
 		"status": item.Status, "eligibility_status": item.EligibilityStatus, "opened_at": item.OpenedAt,
 		"version": item.ResolutionVersion, "external_user_id": item.ExternalUserID}
+	// Same posture as the ledger's own account_email: present only when the
+	// account has a verified address on file, absent otherwise
+	// (XM-INV-LEDGER-ACCOUNT-EMAIL).
+	if item.AccountEmail != "" {
+		dto["account_email"] = item.AccountEmail
+	}
 	if !item.ResolvedAt.IsZero() {
 		dto["resolved_at"] = item.ResolvedAt
 	}

@@ -3121,7 +3121,10 @@ function EligibilityFreezesPage() {
                       <SourceBadge source={item.source} />
                       <small>{item.sourceLabel}</small>
                     </td>
-                    <td>{item.externalUserId}</td>
+                    <td>
+                      {item.externalUserId}
+                      <AccountEmailLine email={item.accountEmail} />
+                    </td>
                     <td>
                       <strong>{freezeReasonLabel(item.reason)}</strong>
                       {item.reason === "SOURCE_REFUND" && (
@@ -3316,7 +3319,10 @@ function EligibilityFreezeDrawer({
               </div>
               <div>
                 <dt>来源用户 ID</dt>
-                <dd>{item.externalUserId}</dd>
+                <dd>
+                  {item.externalUserId}
+                  <AccountEmailLine email={item.accountEmail} />
+                </dd>
               </div>
               <div>
                 <dt>冻结范围</dt>
@@ -3587,7 +3593,10 @@ function AccountLedgerPage() {
                     <td>
                       <SourceBadge source={item.source} />
                     </td>
-                    <td>{item.externalUserId}</td>
+                    <td>
+                      {item.externalUserId}
+                      <AccountEmailLine email={item.accountEmail} />
+                    </td>
                     <td>
                       {money(item.rechargesSinceStartMinor)}
                       <small>{item.rechargesSinceStartCount} 笔</small>
@@ -5335,6 +5344,21 @@ function StepUpPage() {
       </section>
     </main>
   );
+}
+
+// AccountEmailLine renders the account's verified email under its upstream
+// numeric ID, in the two operator lists that identify accounts by that ID
+// alone (用户账本 and 资格冻结队列) and in the freeze detail.
+//
+// Renders nothing when the account has no verified address on file. That is a
+// real state -- an account provisioned through a login path that never
+// verified one -- and a placeholder like "未知" would read as a failed lookup
+// rather than an absent address. The ID above stays the identifier: it is
+// what the filters and cursors use, and it is the only value guaranteed to
+// exist (XM-INV-LEDGER-ACCOUNT-EMAIL).
+function AccountEmailLine({ email }: { email?: string }) {
+  if (!email) return null;
+  return <small title={email}>{email}</small>;
 }
 
 const sourceReasonLabels: Record<string, string> = {
