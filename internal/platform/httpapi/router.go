@@ -10,6 +10,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
+	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
@@ -93,6 +94,18 @@ type Deps struct {
 	// 查询（XM-SERVER0，拍板「服务器只做记录」——不装 Agent，全部手工登记）。
 	// 权限复用 registry.ScopeRead，不新建读侧 scope（见
 	// internal/platform/server.ScopeManage 的注释）。
+	// Cards 为 nil 时卡片只读端点整组不挂载（XM-CARD3）。与 PlatformOrders
+	// 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
+	// 写路径只走 cards.card.* Action，这里不开第二条。
+	Cards CardQuerier
+	// CardAccounts 是已配置的账号清单，供管理端的开卡表单填下拉。
+	CardAccounts []string
+	// ExtraExpectedCredentials 是运行时才知道的预期凭据引用（卡片账号等），
+	// 与 credentials.ExpectedRefs() 的固定清单合并后一起显示在密钥引用页。
+	ExtraExpectedCredentials []credentials.ExpectedRef
+	// CardSyncInterval 供新鲜度判定；为零时用 5 分钟兜底。
+	CardSyncInterval time.Duration
+
 	ServerAssets       ServerAssetLister
 	ServerSuppliers    ServerSupplierLister
 	ServerDomains      ServerDomainLister
@@ -255,6 +268,21 @@ func NewRouter(d Deps) http.Handler {
 			// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 			api.With(RequireScope(alerts.ScopeRead)).
 				Get("/alerts", ListAlertsHandler(d.Alerts))
+			if d.Cards != nil {
+				interval := d.CardSyncInterval
+				if interval <= 0 {
+					interval = 5 * time.Minute
+				}
+				api.With(RequireScope(cards.PermissionRead)).
+					Get("/cards", ListCardsHandler(d.Cards, d.CardAccounts, interval))
+				api.With(RequireScope(cards.PermissionRead)).
+					Get("/cards/{cardID}/transactions", ListCardTransactionsHandler(d.Cards))
+				// 待人工处置的操作单列一个端点：它是红条的数据源，
+				// 前端要能在不拉全量卡片的情况下轮询它。
+				api.With(RequireScope(cards.PermissionRead)).
+					Get("/cards/operations/attention",
+						ListCardOperationsNeedingAttentionHandler(d.Cards))
+			}
 			api.With(RequireScope(savedviews.ScopeManage)).
 				Get("/ui/saved-views", ListSavedViewsHandler(d.SavedViews))
 			api.With(RequireScope(finance.ScopeRead)).
@@ -377,7 +405,8 @@ func NewRouter(d Deps) http.Handler {
 				api.With(RequireScope(credentials.ScopeManage)).
 					Get("/credentials", ListCredentialsHandler(d.Credentials))
 				api.With(RequireScope(credentials.ScopeManage)).
-					Get("/credentials/expected", ListExpectedCredentialsHandler(d.Credentials))
+					Get("/credentials/expected",
+						ListExpectedCredentialsHandler(d.Credentials, d.ExtraExpectedCredentials))
 				api.With(RequireScope(credentials.ScopeConnectorManage)).
 					Get("/connectors/config", ListConnectorConfigsHandler(d.Credentials))
 			}

@@ -41,6 +41,7 @@ import {
 } from "./lib/platforms";
 import { ActionsPage } from "./pages/ActionsPage";
 import { AlertsPage } from "./pages/AlertsPage";
+import { CardsPage } from "./pages/CardsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
@@ -435,6 +436,7 @@ export const routes = [
               // detail drawers」)。挂在平台下面而不是全局 /requests/:id：同一个 id 在
               // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
               { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
+              { path: "cards", Component: CardsPage },
               { path: "registry", Component: RegistryPage },
               { path: "identity", Component: IdentityPage },
               { path: "settings", Component: SettingsPage },

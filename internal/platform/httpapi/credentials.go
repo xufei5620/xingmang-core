@@ -142,7 +142,10 @@ func ListCredentialsHandler(store CredentialQuerier) http.HandlerFunc {
 
 // ListExpectedCredentialsHandler 把固定的预期引用清单与登记状态对上，
 // 回答运营页的「还缺哪把」。
-func ListExpectedCredentialsHandler(store CredentialQuerier) http.HandlerFunc {
+// extra 是运行时才知道的预期引用（如卡片功能按配置的账号推出来的那几条）。
+// 固定清单写死在 credentials.ExpectedRefs()，动态的从这里进来——
+// 把账号 id 写死在那份清单里会让「加一个账号」变成改代码。
+func ListExpectedCredentialsHandler(store CredentialQuerier, extra []credentials.ExpectedRef) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		environment, err := credentialEnvironment(r)
 		if err != nil {
@@ -158,7 +161,7 @@ func ListExpectedCredentialsHandler(store CredentialQuerier) http.HandlerFunc {
 		for _, item := range items {
 			configured[item.Ref] = !item.Revoked() && item.Available
 		}
-		expected := credentials.ExpectedRefs()
+		expected := append(credentials.ExpectedRefs(), extra...)
 		out := make([]expectedCredentialItem, 0, len(expected))
 		for _, e := range expected {
 			out = append(out, expectedCredentialItem{

@@ -128,6 +128,17 @@ export const GLOBAL_NAV_ITEMS: readonly NavItemSpec[] = [
 
 export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
   {
+    // XM-CARD3：ADMIN-IA 里**没有**这一条——原型画的四个平台里没有卡片这一块。
+    // 放在「平台治理」下是实现期的判断：它管的是平台自己持有的支付工具，
+    // 不属于任何一个上游平台。归属待产品负责人确认。
+    id: "cards",
+    label: "卡片管理",
+    path: "/cards",
+    stage: "M3",
+    built: true,
+    subTabs: [],
+  },
+  {
     id: "registry",
     label: "资源目录",
     path: "/registry",
