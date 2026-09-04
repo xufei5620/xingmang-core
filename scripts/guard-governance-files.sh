@@ -25,6 +25,7 @@ protected_globs=(
   'PROJECT-CONSTITUTION.md'
   'scripts/check-governance.sh'
   'scripts/check-versions.py'
+  'scripts/check-compose.py'
   'scripts/guard-governance-files.sh'
   'scripts/ci-local.sh'
   'deploy/git-hooks/'

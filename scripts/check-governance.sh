@@ -64,6 +64,18 @@ done <<EOF
 $version_files
 EOF
 
+# Compose 文件必须能被解析，且同一映射内无重复键。
+#
+# 2026-09-04 的教训：launch.yaml 的 platform-api 段里 XM_CARDS_MODE 被写了
+# 两次，PyYAML 默认「后者覆盖前者」静默通过，而 docker compose 的 Go 解析器
+# 直接拒绝整个文件——于是全部本地门禁绿灯、合并推送照常，一直到生产服务器
+# 的 preflight 才炸。跑得起来却没覆盖到的门禁比没有门禁更危险：它给的是虚假的绿。
+compose_files="$(git ls-files 'deploy/compose/*.yaml')"
+if [ -n "$compose_files" ]; then
+  # shellcheck disable=SC2086
+  python3 scripts/check-compose.py $compose_files     || err "Compose 文件解析失败或存在重复键（docker compose 会拒绝整个文件）"
+fi
+
 # #13: CI 中的 Actions 必须钉 commit SHA（40 位十六进制），禁止浮动 tag
 if [ -d .github/workflows ]; then
   while IFS= read -r line; do
@@ -131,6 +143,7 @@ governance_deps=(
   PROJECT-CONSTITUTION.md
   scripts/check-governance.sh
   scripts/check-versions.py
+  scripts/check-compose.py
   scripts/guard-governance-files.sh
 )
 for dep in "${governance_deps[@]}"; do
