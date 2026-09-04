@@ -145,11 +145,12 @@ func TestParseWebhookEventReadsEnvelope(t *testing.T) {
 	    "alias": "Travel card", "last_four": "1234", "status": "active", "currency": "USD"}}
 	}`)
 
-	ev, err := ParseWebhookEvent(payload)
+	ev, err := ParseWebhookEvent(payload, "hdr-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.ID != "b7ef2c62-6177-4ea8-84ec-3080f2db58f0" || ev.Type != "card.status_change" {
+	// 事件 id 取自请求头（载荷里的 id 是卡片信封才有的，订单事件没有）。
+	if ev.ID != "hdr-1" || ev.Type != "card.status_change" {
 		t.Fatalf("信封解析错: %+v", ev)
 	}
 	if ev.CardID != "a441831c-a5c7-4bed-8f61-793738afd5bc" {
@@ -172,7 +173,7 @@ func TestParseWebhookEventOnTransactionTakesOnlyCardID(t *testing.T) {
 	  "data":{"card":{"card_id":"c-1"},"transaction_id":"t-1","type":"consume",
 	    "status":"authorized","amount":"10","currency":"USD"}}`)
 
-	ev, err := ParseWebhookEvent(payload)
+	ev, err := ParseWebhookEvent(payload, "hdr-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +185,7 @@ func TestParseWebhookEventOnTransactionTakesOnlyCardID(t *testing.T) {
 // 认不出的事件类型不算错误，但要能被识别出「不用处理」。
 // 上游以后加新事件类型时，我们应当安静忽略而不是每次都报错刷屏。
 func TestParseWebhookEventMarksUnknownTypes(t *testing.T) {
-	ev, err := ParseWebhookEvent([]byte(`{"id":"x","event":"order.completed","data":{}}`))
+	ev, err := ParseWebhookEvent([]byte(`{"id":"x","event":"order.completed","data":{}}`), "hdr-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,14 +194,13 @@ func TestParseWebhookEventMarksUnknownTypes(t *testing.T) {
 	}
 }
 
-// 缺 id 或缺事件类型的载荷必须报错：它们是去重与分发的依据。
+// 缺事件类型或不是 JSON 的载荷必须报错。
 func TestParseWebhookEventRejectsIncomplete(t *testing.T) {
 	for name, payload := range map[string]string{
-		"缺 id":  `{"event":"card.status_change","data":{"card":{"card_id":"c"}}}`,
-		"缺事件类型": `{"id":"x","data":{"card":{"card_id":"c"}}}`,
+		"缺事件类型":   `{"data":{"card":{"card_id":"c"}}}`,
 		"不是 JSON": `not json`,
 	} {
-		if _, err := ParseWebhookEvent([]byte(payload)); err == nil {
+		if _, err := ParseWebhookEvent([]byte(payload), "hdr-1"); err == nil {
 			t.Fatalf("%s 应报错", name)
 		}
 	}
@@ -209,7 +209,36 @@ func TestParseWebhookEventRejectsIncomplete(t *testing.T) {
 // 卡片事件缺 card_id 必须报错——没有它就不知道该刷新哪张卡，
 // 静默通过会让一次真实的状态变更被丢掉。
 func TestParseWebhookEventRequiresCardIDForCardEvents(t *testing.T) {
-	if _, err := ParseWebhookEvent([]byte(`{"id":"x","event":"card.status_change","data":{}}`)); err == nil {
+	if _, err := ParseWebhookEvent([]byte(`{"id":"x","event":"card.status_change","data":{}}`), "hdr-1"); err == nil {
 		t.Fatal("卡片事件缺 card_id 应报错")
+	}
+}
+
+// 事件 id 以**请求头**为准，不是载荷里的 id。
+//
+// 文档明写「Use X-Webhook-Event-Id for idempotency」。更要紧的是订单/订阅
+// 事件的信封是扁平的、**根本没有 id 字段**（只有 event、order_id…），
+// 而卡片事件用的是带 id 的版本化信封。要求载荷里必须有 id，会让订阅了
+// 全部事件的端点在每个订单事件上回 400，然后被上游重试 8 次——噪音很大，
+// 而且掩盖真正的失败。
+func TestParseWebhookEventUsesHeaderEventID(t *testing.T) {
+	flat := []byte(`{"event":"order.completed","order_id":"o-1","status":"paid"}`)
+
+	ev, err := ParseWebhookEvent(flat, "hdr-evt-1")
+	if err != nil {
+		t.Fatalf("扁平信封（订单事件）不该报错: %v", err)
+	}
+	if ev.ID != "hdr-evt-1" {
+		t.Fatalf("事件 id 应取自请求头, got %q", ev.ID)
+	}
+	if ev.NeedsCardRefresh() {
+		t.Fatal("订单事件不该触发卡片刷新")
+	}
+}
+
+// 请求头缺事件 id 时必须报错：它是去重的唯一依据。
+func TestParseWebhookEventRequiresHeaderEventID(t *testing.T) {
+	if _, err := ParseWebhookEvent([]byte(`{"event":"card.status_change"}`), ""); err == nil {
+		t.Fatal("缺请求头事件 id 必须报错")
 	}
 }

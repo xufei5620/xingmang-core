@@ -144,9 +144,17 @@ func (e WebhookEvent) NeedsCardRefresh() bool {
 }
 
 // ParseWebhookEvent 解析回调信封。
-func ParseWebhookEvent(payload []byte) (WebhookEvent, error) {
+//
+// eventID 来自 **X-Webhook-Event-Id 请求头**，不是载荷。文档明写它是幂等
+// 依据；更要紧的是订单与订阅事件的信封是扁平的、根本没有 id 字段，
+// 只有卡片事件用带 id 的版本化信封。要求载荷里必须有 id，会让订阅了全部
+// 事件的端点在每个订单事件上回 400，然后被上游重试 8 次——噪音很大，
+// 而且会掩盖真正的失败。
+func ParseWebhookEvent(payload []byte, eventID string) (WebhookEvent, error) {
+	if strings.TrimSpace(eventID) == "" {
+		return WebhookEvent{}, fmt.Errorf("%w: 缺少事件 id 请求头", ErrWebhookRejected)
+	}
 	var raw struct {
-		ID         string `json:"id"`
 		Event      string `json:"event"`
 		OccurredAt int64  `json:"occurred_at"`
 		Data       struct {
@@ -158,15 +166,11 @@ func ParseWebhookEvent(payload []byte) (WebhookEvent, error) {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return WebhookEvent{}, fmt.Errorf("%w: 载荷不是 JSON", ErrWebhookRejected)
 	}
-	if strings.TrimSpace(raw.ID) == "" {
-		// 事件 id 是去重的唯一依据；没有它，重试会被当成新事件重复处理。
-		return WebhookEvent{}, fmt.Errorf("%w: 缺少事件 id", ErrWebhookRejected)
-	}
 	if strings.TrimSpace(raw.Event) == "" {
 		return WebhookEvent{}, fmt.Errorf("%w: 缺少事件类型", ErrWebhookRejected)
 	}
 
-	ev := WebhookEvent{ID: raw.ID, Type: raw.Event, CardID: raw.Data.Card.CardID}
+	ev := WebhookEvent{ID: eventID, Type: raw.Event, CardID: raw.Data.Card.CardID}
 	if raw.OccurredAt > 0 {
 		ev.OccurredAt = time.Unix(raw.OccurredAt, 0).UTC()
 	}

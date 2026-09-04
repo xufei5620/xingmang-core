@@ -104,7 +104,7 @@ func CardWebhookHandler(
 			return
 		}
 
-		ev, err := cards.ParseWebhookEvent(payload)
+		ev, err := cards.ParseWebhookEvent(payload, headers.EventID)
 		if err != nil {
 			logger.WarnContext(r.Context(), "card_webhook_unparseable",
 				"module", "httpapi", "account", account, "err", err.Error())
