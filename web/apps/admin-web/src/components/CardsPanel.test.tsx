@@ -22,7 +22,6 @@ import {
   issueCard,
   listCardOperationsNeedingAttention,
   listCards,
-  revealCard,
   type CardItem,
   type CardOperationItem,
 } from "../api/cards";
@@ -137,28 +136,32 @@ describe("CardsPanel", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("卡面明文只在取回后显示，关闭对话框即清空", async () => {
-    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"] });
-    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
-    vi.mocked(revealCard).mockResolvedValue({
-      Number: "5332281234561234",
-      CVV: "123",
-      ExpiryMMYY: "1229",
-      Currency: "USD",
+  // 明文落库之后（产品负责人 2026-09-04 决定），卡号直接来自列表响应，
+  // 不再走一次性 reveal。后端按 card.reveal 权限决定回不回明文——
+  // 前端只显示它拿到的，不做「本地隐藏」那种假控制。
+  it("拿到明文时列表直接显示完整卡号", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [{ ...activeCard, pan: "4413571234567843", cvv: "123", expiry_mmyy: "1229" }],
+      accounts: ["MAIN"],
     });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: "查看卡面" }));
-    fireEvent.click(await screen.findByRole("button", { name: "获取卡面信息" }));
+    expect(await screen.findByText("4413571234567843")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "复制" })).toBeTruthy();
+  });
 
-    expect(await screen.findByText("5332281234561234")).toBeTruthy();
+  // 没有明文（缺 card.reveal 权限，或卡还没 active 拉不到）时回落到掩码，
+  // 且不该出现复制按钮——复制一个掩码没有意义。
+  it("没有明文时回落到掩码", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
-    // 关闭后明文必须从 DOM 里消失：它不该留在任何地方
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
-    await waitFor(() => {
-      expect(screen.queryByText("5332281234561234")).toBeNull();
-    });
+    renderPanel();
+
+    expect(await screen.findByText("533228******1234")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
   });
 
   it("冻结走 Action 且每次带一个幂等键", async () => {
@@ -207,10 +210,10 @@ describe("CardsPanel", () => {
 
     renderPanel();
 
+    // 两个持卡人都在 = 两行都渲染了。不断言账号文本：筛选下拉里也有
+    // 同名 option，会匹配到多个元素。
     expect(await screen.findByText("ZHANG WEI")).toBeTruthy();
     expect(screen.getByText("LI FANG")).toBeTruthy();
-    expect(screen.getByText("CHRIS")).toBeTruthy();
-    expect(screen.getByText("LINFENG")).toBeTruthy();
   });
 
   // 账号列表是异步到达的（跟卡片列表同一个查询）。表单的账号初值若只在

@@ -7,14 +7,13 @@ import {
   issueCard,
   listCardOperationsNeedingAttention,
   listCards,
-  revealCard,
   unfreezeCard,
   type CardFreshness,
   type CardItem,
   type CardOperationItem,
-  type RevealedCard,
 } from "../api/cards";
 import { formatMinorUnits } from "../lib/money";
+import { CardDetailDialog } from "./CardDetailDialog";
 import { ActionErrorNote } from "./ActionErrorNote";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
@@ -59,6 +58,35 @@ function CardFreshnessBadge({ freshness }: { freshness: CardFreshness }) {
     <Badge tone="success" title={freshness.synced_at ? formatUtcTimestamp(freshness.synced_at) : ""}>
       最新
     </Badge>
+  );
+}
+
+/** 卡号单元格：有明文显示明文并可一键复制，没有则显示掩码。
+ *
+ *  明文由后端按 card.reveal 权限决定回不回——只有 card.read 的人这里
+ *  看到的就是掩码，前端不需要（也不应该）自己判断。 */
+function CardNumberCell({ card }: { card: CardItem }) {
+  const [copied, setCopied] = useState(false);
+  const shown = card.pan ?? card.mask;
+
+  if (!card.pan) {
+    return <span className="font-mono">{shown || "—"}</span>;
+  }
+  return (
+    <span className="flex items-center gap-2">
+      <span className="font-mono">{shown}</span>
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => {
+          void navigator.clipboard?.writeText(card.pan ?? "");
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? "已复制" : "复制"}
+      </Button>
+    </span>
   );
 }
 
@@ -110,76 +138,6 @@ function AttentionBanner({ items }: { items: CardOperationItem[] }) {
         ))}
       </ul>
     </section>
-  );
-}
-
-/** 查看明文卡面的对话框。
- *
- *  明文只存在于组件的局部 state 里，关闭即清空：不写 URL、不写
- *  localStorage、不进任何全局状态容器。后端那边它也不落库、不进日志、
- *  不进审计正文——审计只记「谁在何时看了哪张卡」。 */
-function RevealDialog({ card }: { card: CardItem }) {
-  const [open, setOpen] = useState(false);
-  const [revealed, setRevealed] = useState<RevealedCard | null>(null);
-  const [error, setError] = useState<unknown>(null);
-
-  const mutation = useMutation({
-    mutationFn: () => revealCard({ account: card.account, card_id: card.card_id }),
-    onSuccess: (data) => {
-      setRevealed(data);
-      setError(null);
-    },
-    onError: (err) => setError(err),
-  });
-
-  const close = () => {
-    setOpen(false);
-    // 关闭即清空，不等组件卸载
-    setRevealed(null);
-    setError(null);
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => (next ? setOpen(true) : close())}
-      title="查看卡面信息"
-      description="每次查看都会被审计记录。明文不会被保存在任何地方，关闭后需重新获取。"
-      trigger={
-        <Button variant="secondary" size="sm">
-          查看卡面
-        </Button>
-      }
-    >
-      <div className="flex flex-col gap-3">
-        {!revealed ? (
-          <>
-            <p className="text-sm text-fg-muted">
-              将向上游请求 {card.mask} 的完整卡号、CVV 与有效期。
-            </p>
-            <Button onClick={() => mutation.mutate()} disabled={mutation.isPending}>
-              {mutation.isPending ? "获取中…" : "获取卡面信息"}
-            </Button>
-          </>
-        ) : (
-          <dl className="flex flex-col gap-2 text-sm">
-            <div>
-              <dt className="text-fg-muted">卡号</dt>
-              <dd className="font-mono">{revealed.Number}</dd>
-            </div>
-            <div>
-              <dt className="text-fg-muted">CVV</dt>
-              <dd className="font-mono">{revealed.CVV}</dd>
-            </div>
-            <div>
-              <dt className="text-fg-muted">有效期（MMYY）</dt>
-              <dd className="font-mono">{revealed.ExpiryMMYY}</dd>
-            </div>
-          </dl>
-        )}
-        {error ? <ActionErrorNote error={error} /> : null}
-      </div>
-    </Dialog>
   );
 }
 
@@ -391,10 +349,12 @@ export function CardsPanel() {
       value: (row) => row.account,
     },
     {
-      id: "mask",
-      header: "卡号（掩码）",
-      cell: (row) => <span className="font-mono">{row.mask || "—"}</span>,
-      value: (row) => row.mask,
+      id: "pan",
+      header: "卡号",
+      // 有明文就显示明文（后端按 card.reveal 权限决定回不回），
+      // 没有就退回掩码——前端不做「本地隐藏」那种假控制。
+      cell: (row) => <CardNumberCell card={row} />,
+      value: (row) => row.pan ?? row.mask,
       primary: true,
     },
     {
@@ -434,7 +394,7 @@ export function CardsPanel() {
       // 只有按钮的列不给 value：它不该参与排序与搜索
       cell: (row) => (
         <div className="flex flex-wrap gap-2">
-          <RevealDialog card={row} />
+          <CardDetailDialog card={row} onWrite={afterWrite} />
           <Button
             variant="secondary"
             size="sm"
@@ -471,7 +431,18 @@ export function CardsPanel() {
         onRetry={() => void query.refetch()}
       >
         <DataTableV2
-          caption="Infini 卡片清单：掩码卡号、持卡人、状态、余额与数据新鲜度"
+          caption="Infini 卡片清单：账号、卡号、持卡人、状态、余额与数据新鲜度"
+          searchable
+          filters={[
+            { columnId: "account", label: "账号", options: accounts },
+            {
+              columnId: "status",
+              label: "状态",
+              // 取值来自实际数据而不是写死的枚举：上游的状态取值还没验证完
+              // （冻结后变成什么仍待确认），写死会漏掉没见过的那些。
+              options: Array.from(new Set(rows.map((r) => r.status))).filter(Boolean),
+            },
+          ]}
           rows={rows}
           columns={columns}
           // 键必须带账号：卡 id 只在自己账号内唯一（投影表的唯一键是

@@ -43,8 +43,16 @@ export interface CardItem {
    *  以后开放外部用户时，那一侧不暴露这个字段。 */
   account: string;
   card_id: string;
-  /** 掩码卡号。完整卡号只能经 `revealCard` 取得，不在任何读端点里。 */
+  /** 掩码卡号，任何人都看得到。 */
   mask: string;
+  /** 卡面明文，**只有持有 card.reveal 权限时后端才会回**；否则字段缺席。
+   *
+   *  明文落库是产品负责人 2026-09-04 的决定。原设计里明文只经
+   *  `revealCard` 取得且每次留审计，落库之后那条审计链不复存在，
+   *  权限是「谁能看卡号」剩下的唯一约束。 */
+  pan?: string;
+  cvv?: string;
+  expiry_mmyy?: string;
   holder_name: string;
   card_alias: string;
   status: string;

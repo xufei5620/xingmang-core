@@ -19,6 +19,7 @@ type memStore struct {
 	// cardAccount 记住每张卡属于哪个账号，供 TrackedCards 还原。
 	cardAccount map[string]string
 	txs         map[string][]infini.CardTransaction
+	secrets     map[string]infini.RevealedCard
 	spentToday  string
 	// spentByAccount 非空时按账号取值，否则回落到 spentToday。
 	spentByAccount map[string]string
@@ -30,6 +31,7 @@ func newMemStore() *memStore {
 		cards:       make(map[string]infini.Card),
 		cardAccount: make(map[string]string),
 		txs:         make(map[string][]infini.CardTransaction),
+		secrets:     make(map[string]infini.RevealedCard),
 		spentToday:  "0",
 	}
 }
@@ -83,6 +85,26 @@ func (m *memStore) TrackedCards(ctx context.Context) ([]CardRef, error) {
 
 func (m *memStore) UpsertTransactions(ctx context.Context, account, cardID string, txs []infini.CardTransaction) error {
 	m.txs[cardID] = append(m.txs[cardID], txs...)
+	return nil
+}
+
+func (m *memStore) CardsMissingSecrets(ctx context.Context) ([]CardRef, error) {
+	var out []CardRef
+	for id, card := range m.cards {
+		// 与 PgStore 同一条判据：只有 active 的卡才拉得到明文
+		if card.Status != "active" {
+			continue
+		}
+		if _, ok := m.secrets[id]; ok {
+			continue
+		}
+		out = append(out, CardRef{Account: m.cardAccount[id], CardID: id})
+	}
+	return out, nil
+}
+
+func (m *memStore) StoreCardSecrets(ctx context.Context, account, cardID string, r infini.RevealedCard) error {
+	m.secrets[cardID] = r
 	return nil
 }
 

@@ -32,11 +32,12 @@ func (f *fakeCardQuerier) OperationsNeedingAttention(ctx context.Context) ([]car
 	return f.ops, f.err
 }
 
-func cardRequest(t *testing.T, target string) *http.Request {
+func cardRequest(t *testing.T, target string, scopes ...string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	return req.WithContext(principal.WithPrincipal(req.Context(), principal.Principal{
 		ID: "ops-1", Type: principal.TypeHuman, Issuer: "test", Environment: "development",
+		Scopes: scopes,
 	}))
 }
 
@@ -74,9 +75,10 @@ func TestListCardsIncludesFreshness(t *testing.T) {
 	}
 }
 
-// 最要紧的一条：读端点永远不返回完整卡号。库里就只有掩码，
-// 但这条测试钉住「以后谁都别往这个响应里加明文字段」。
-func TestListCardsNeverReturnsPlaintextPAN(t *testing.T) {
+// 库里没有明文时（新卡还没拉到、或本来就没落），响应里不该出现空的
+// 卡面字段——omitempty 保证它们直接不出现，而不是回一串空字符串让前端
+// 把「还没拉到」显示成「卡号是空的」。
+func TestListCardsOmitsPlaintextFieldsWhenAbsent(t *testing.T) {
 	store := &fakeCardQuerier{cards: []cards.CardView{{
 		CardID: "card_1", Mask: "533228******1234", Status: "active",
 		LastSyncedAt: time.Now().UTC(),
@@ -142,5 +144,49 @@ func TestAttentionOperationsExposeRetryFlag(t *testing.T) {
 	}
 	if body.Items[0].RetryAllowed {
 		t.Fatal("不确定态绝不能告诉前端可以重试")
+	}
+}
+
+// 卡面明文落库之后（产品负责人 2026-09-04 决定），读端点会把卡号回给前端。
+// 但**只回给持有 card.reveal 的调用方**：只有 card.read 的人看到的仍是掩码。
+//
+// 这是「谁能看卡号」剩下的唯一一道闸——明文进了库、变成普通读字段之后，
+// 原来那条「谁在何时看了哪张卡」的审计链就不存在了。
+func TestListCardsHidesPlaintextWithoutRevealScope(t *testing.T) {
+	store := &fakeCardQuerier{cards: []cards.CardView{{
+		CardID: "card_1", Mask: "441357******7843",
+		PAN: "4413571234567843", CVV: "123", ExpiryMMYY: "1229",
+		Status: "active", Currency: "USD", LastSyncedAt: time.Now().UTC(),
+	}}}
+
+	rec := httptest.NewRecorder()
+	ListCardsHandler(store, []string{"MAIN"}, 5*time.Minute)(
+		rec, cardRequest(t, "/api/v1/cards", cards.PermissionRead))
+
+	body := rec.Body.String()
+	if strings.Contains(body, "4413571234567843") {
+		t.Fatalf("只有 card.read 的人不该看到完整卡号: %s", body)
+	}
+	if strings.Contains(body, "123") && strings.Contains(body, "cvv") {
+		t.Fatalf("CVV 不该出现: %s", body)
+	}
+	if !strings.Contains(body, "441357******7843") {
+		t.Fatal("应回落到掩码")
+	}
+}
+
+func TestListCardsReturnsPlaintextWithRevealScope(t *testing.T) {
+	store := &fakeCardQuerier{cards: []cards.CardView{{
+		CardID: "card_1", Mask: "441357******7843",
+		PAN: "4413571234567843", CVV: "123", ExpiryMMYY: "1229",
+		Status: "active", Currency: "USD", LastSyncedAt: time.Now().UTC(),
+	}}}
+
+	rec := httptest.NewRecorder()
+	ListCardsHandler(store, []string{"MAIN"}, 5*time.Minute)(
+		rec, cardRequest(t, "/api/v1/cards", cards.PermissionRead, cards.PermissionReveal))
+
+	if !strings.Contains(rec.Body.String(), "4413571234567843") {
+		t.Fatalf("持有 card.reveal 应看到完整卡号: %s", rec.Body.String())
 	}
 }

@@ -29,9 +29,16 @@ type cardItem struct {
 	// 以后开放外部用户时，那一侧的响应不该带这个字段。
 	Account string `json:"account"`
 	CardID  string `json:"card_id"`
-	// Mask 是掩码卡号，库里存的就是它。完整卡号只能经
-	// cards.card.reveal Action 取得，不在任何读路径上。
-	Mask         string              `json:"mask"`
+	// Mask 是掩码卡号。
+	Mask string `json:"mask"`
+	// PAN / CVV / ExpiryMMYY 是卡面明文，**只回给持有 card.reveal 的调用方**。
+	//
+	// 明文落库是产品负责人 2026-09-04 的决定（见迁移 000027）。原设计里
+	// 明文只经 cards.card.reveal Action 取得、每次都留审计；落库之后那条
+	// 审计链不复存在，这道权限闸是「谁能看卡号」剩下的唯一约束。
+	PAN          string              `json:"pan,omitempty"`
+	CVV          string              `json:"cvv,omitempty"`
+	ExpiryMMYY   string              `json:"expiry_mmyy,omitempty"`
 	HolderName   string              `json:"holder_name"`
 	Alias        string              `json:"card_alias"`
 	Status       string              `json:"status"`
@@ -77,10 +84,15 @@ type cardOperationItem struct {
 // 一个没有选项的表单。
 func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := principal.FromContext(r.Context()); !ok {
+		p, ok := principal.FromContext(r.Context())
+		if !ok {
 			WriteError(w, r, action.NewError(action.CodePermissionDenied, "缺少身份", nil))
 			return
 		}
+		// 明文卡面只回给持有 card.reveal 的调用方。路由上的 RequireScope
+		// 只保证有 card.read——两档权限刻意分开，「能看卡列表」与
+		// 「能看卡号」不是同一件事。
+		maySeePlaintext := p.HasScope(cards.PermissionReveal)
 
 		// account 与 owner_ref 都由调用方显式给出（内部运营看全部）。
 		//
@@ -100,7 +112,7 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 		now := time.Now().UTC()
 		out := make([]cardItem, 0, len(items))
 		for _, c := range items {
-			out = append(out, cardItem{
+			item := cardItem{
 				Account:      c.Account,
 				CardID:       c.CardID,
 				Mask:         c.Mask,
@@ -111,7 +123,11 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 				BalanceMinor: c.BalanceMinor,
 				OwnerRef:     c.OwnerRef,
 				Freshness:    cards.Freshness(c.LastSyncedAt, now, syncInterval),
-			})
+			}
+			if maySeePlaintext {
+				item.PAN, item.CVV, item.ExpiryMMYY = c.PAN, c.CVV, c.ExpiryMMYY
+			}
+			out = append(out, item)
 		}
 		if accounts == nil {
 			accounts = []string{}

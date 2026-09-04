@@ -370,6 +370,14 @@ type CardView struct {
 	BalanceMinor int64
 	OwnerRef     string
 	LastSyncedAt time.Time
+	// PAN / CVV / ExpiryMMYY 是卡面明文（产品负责人 2026-09-04 决定落库，
+	// 见迁移 000027）。空串 = 还没拉到（新卡在 active 之前拉不到）。
+	//
+	// **端点层负责按权限决定回不回**：只有 card.read 的调用方拿到的是
+	// 掩码，明文只回给持有 card.reveal 的人。
+	PAN        string
+	CVV        string
+	ExpiryMMYY string
 }
 
 // ListCards 读卡片投影。
@@ -380,7 +388,8 @@ type CardView struct {
 func (s *PgStore) ListCards(ctx context.Context, account, ownerRef string) ([]CardView, error) {
 	const listSQL = `
 SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
-       currency, balance_minor, owner_ref, last_synced_at
+       currency, balance_minor, owner_ref, last_synced_at,
+       pan, cvv, expiry_mmyy
   FROM cards.infini_card
  WHERE environment = $1
    AND ($2 = '' OR account = $2)
@@ -397,7 +406,8 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
 	for rows.Next() {
 		var v CardView
 		if err := rows.Scan(&v.Account, &v.CardID, &v.Mask, &v.HolderName, &v.Alias, &v.Status,
-			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.LastSyncedAt); err != nil {
+			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.LastSyncedAt,
+			&v.PAN, &v.CVV, &v.ExpiryMMYY); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -484,4 +494,63 @@ SELECT idempotency_key, account, kind, state, card_alias, upstream_card_id,
 		out = append(out, op)
 	}
 	return out, rows.Err()
+}
+
+// CardsMissingSecrets 返回已激活但还没拉到明文卡面的卡。
+//
+// 两个条件都必要：`pan_fetched_at IS NULL` 保证只拉一次（卡号在卡的生命
+// 周期内不变，每轮都拉等于每周期 N 次 reveal 调用），`status = 'active'`
+// 保证不白拉（卡还没建出来时上游给不了明文）。
+func (s *PgStore) CardsMissingSecrets(ctx context.Context) ([]CardRef, error) {
+	const listSQL = `
+SELECT account, upstream_card_id
+  FROM cards.infini_card
+ WHERE environment = $1
+   AND pan_fetched_at IS NULL
+   AND status = 'active'
+ ORDER BY account, created_at`
+
+	rows, err := s.pool.Query(ctx, listSQL, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查待拉明文的卡: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CardRef
+	for rows.Next() {
+		var ref CardRef
+		if err := rows.Scan(&ref.Account, &ref.CardID); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
+// StoreCardSecrets 落卡面明文。
+//
+// **这是平台成为持卡数据存储方的那一行**（产品负责人 2026-09-04 决定，
+// 见迁移 000027 的文件头）。原设计是只存掩码、明文只在 reveal 的一次性
+// 响应里出现；换成落库是为了「打开页面直接看到卡号」这个使用体验，
+// 代价是备份、导出、DB 权限全部进入敏感范围，且「谁看了卡号」不再有审计。
+func (s *PgStore) StoreCardSecrets(
+	ctx context.Context, account, cardID string, revealed infini.RevealedCard,
+) error {
+	const updateSQL = `
+UPDATE cards.infini_card
+   SET pan = $3, cvv = $4, expiry_mmyy = $5, pan_fetched_at = $6, updated_at = $6
+ WHERE environment = $1 AND account = $2 AND upstream_card_id = $7`
+
+	now := s.now()
+	tag, err := s.pool.Exec(ctx, updateSQL,
+		s.environment, account, revealed.Number, revealed.CVV, revealed.ExpiryMMYY, now, cardID)
+	if err != nil {
+		// 错误里不带明文：这个函数是全平台唯一会碰到卡号的写入路径，
+		// 一旦它把值写进错误文本，就会顺着日志跑得到处都是。
+		return fmt.Errorf("落卡面明文（账号 %s 卡 %s）: %w", account, cardID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("卡 %s（账号 %s）不存在，无法落明文", cardID, account)
+	}
+	return nil
 }

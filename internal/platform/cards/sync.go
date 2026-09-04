@@ -35,6 +35,14 @@ type SyncStore interface {
 	TrackedCards(ctx context.Context) ([]CardRef, error)
 	// UpsertTransactions 落流水投影。
 	UpsertTransactions(ctx context.Context, account, cardID string, txs []infini.CardTransaction) error
+	// CardsMissingSecrets 返回**已激活但还没拉到明文卡面**的卡。
+	//
+	// 只返回没拉过的：卡号在卡的生命周期内不变，每轮都拉等于每个周期
+	// N 次 reveal 调用——上游限流阈值未知，而 reveal 还是个要 IP 白名单的
+	// 受限权限。未激活的卡也不返回：那时上游还没把卡建出来，拉了也是白拉。
+	CardsMissingSecrets(ctx context.Context) ([]CardRef, error)
+	// StoreCardSecrets 落卡面明文。
+	StoreCardSecrets(ctx context.Context, account, cardID string, revealed infini.RevealedCard) error
 }
 
 // SyncOptions 是同步作业的可调参数。
@@ -91,6 +99,11 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 	}
 	if err := s.refreshTrackedCards(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("刷新卡状态: %w", err))
+	}
+	// 拉明文排在刷新卡状态**之后**：刚推进到 active 的卡在同一轮里就能被拉到，
+	// 不用等下一个周期。
+	if err := s.fetchMissingSecrets(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("拉取卡面明文: %w", err))
 	}
 	if s.opts.SyncTransactions {
 		if err := s.syncTransactions(ctx); err != nil {
@@ -203,6 +216,37 @@ func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
 		}
 		if err := s.store.UpsertCard(ctx, ref.Account, card, ""); err != nil {
 			errs = append(errs, fmt.Errorf("落卡片投影 %s: %w", ref.CardID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// fetchMissingSecrets 给还没拉过明文的活卡各调一次 reveal。
+//
+// 产品负责人 2026-09-04 决定卡面明文落库，而上游的列表接口只给 mask——
+// 明文只能从 reveal 来。这一步刻意做成「一次性」：拉到就不再拉，
+// 卡号在卡的生命周期内不变。
+func (s *Syncer) fetchMissingSecrets(ctx context.Context) error {
+	refs, err := s.store.CardsMissingSecrets(ctx)
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, ref := range refs {
+		acct, ok := s.accounts[ref.Account]
+		if !ok {
+			continue // refreshTrackedCards 已经报过这个账号缺配置
+		}
+		revealed, err := acct.Client.RevealCard(ctx, ref.CardID)
+		if err != nil {
+			// 单张卡拉失败不该让整轮报废：卡状态刷新是独立的一件事，
+			// 而下一轮还会再试这一张。
+			errs = append(errs, fmt.Errorf("账号 %s 拉卡 %s 的明文: %w", ref.Account, ref.CardID, err))
+			continue
+		}
+		if err := s.store.StoreCardSecrets(ctx, ref.Account, ref.CardID, revealed); err != nil {
+			errs = append(errs, fmt.Errorf("落卡面明文 %s: %w", ref.CardID, err))
 		}
 	}
 	return errors.Join(errs...)

@@ -395,3 +395,108 @@ func TestPgStoreUnresolvedOperationsOnlyReturnsOpenOnes(t *testing.T) {
 		}
 	}
 }
+
+// 卡面明文的一次性拉取，SQL 层的两个条件都要真库验证：
+// pan_fetched_at IS NULL（只拉一次）与 status='active'（不白拉）。
+func TestPgStoreCardsMissingSecretsRespectsBothConditions(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	seed := []struct {
+		id, status string
+	}{
+		{"active_no_pan", "active"},  // 该拉
+		{"init_no_pan", "init"},      // 还没激活，拉不到
+		{"active_has_pan", "active"}, // 已经拉过，不该再拉
+	}
+	for _, c := range seed {
+		card := infini.Card{
+			ID: c.id, Status: c.status, Currency: "USD",
+			CreatedAt: issueNow, UpdatedAt: issueNow,
+		}
+		if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.StoreCardSecrets(ctx, "CHRIS", "active_has_pan", infini.RevealedCard{
+		Number: "4000000000000000", CVV: "111", ExpiryMMYY: "1230",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := store.CardsMissingSecrets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0].CardID != "active_no_pan" {
+		t.Fatalf("只有已激活且没拉过的那张该被返回, got %+v", refs)
+	}
+}
+
+func TestPgStoreStoreCardSecretsRoundTrips(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	card := infini.Card{
+		ID: "card_1", Mask: "441357******7843", Status: "active",
+		Currency: "USD", CreatedAt: issueNow, UpdatedAt: issueNow,
+	}
+	if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreCardSecrets(ctx, "CHRIS", "card_1", infini.RevealedCard{
+		Number: "4413571234567843", CVV: "123", ExpiryMMYY: "1229",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := store.ListCards(ctx, "CHRIS", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("应有 1 张卡, got %d", len(list))
+	}
+	got := list[0]
+	if got.PAN != "4413571234567843" || got.CVV != "123" || got.ExpiryMMYY != "1229" {
+		t.Fatalf("明文没回读出来: %+v", got)
+	}
+	// 掩码仍然保留：不是所有调用方都有权限看明文
+	if got.Mask != "441357******7843" {
+		t.Fatalf("掩码不该被覆盖, got %q", got.Mask)
+	}
+}
+
+// 同步作业每轮都会 UpsertCard 刷新状态——那一步**不能把已拉到的明文冲掉**。
+func TestPgStoreUpsertCardDoesNotClearStoredSecrets(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	card := infini.Card{
+		ID: "card_1", Status: "active", Currency: "USD",
+		CreatedAt: issueNow, UpdatedAt: issueNow,
+	}
+	if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreCardSecrets(ctx, "CHRIS", "card_1", infini.RevealedCard{
+		Number: "4413571234567843", CVV: "123", ExpiryMMYY: "1229",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟下一轮同步：状态变了，再 upsert 一次
+	card.Status = "frozen"
+	card.BalanceMinor = 500
+	if err := store.UpsertCard(ctx, "CHRIS", card, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	list, _ := store.ListCards(ctx, "CHRIS", "")
+	if list[0].PAN != "4413571234567843" {
+		t.Fatal("刷新卡状态把明文冲掉了——那会让同步作业每轮重新拉一次 reveal")
+	}
+	if list[0].Status != "frozen" {
+		t.Fatal("状态该更新的还是要更新")
+	}
+}
