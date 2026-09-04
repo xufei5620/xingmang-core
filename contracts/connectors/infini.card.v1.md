@@ -237,10 +237,45 @@ apply 的参数说明里。因此连接器不实现产品发现，`product_id` �
 充值额可以通过 `redeem` 拿回来，**手续费拿不回来**。这决定了第一次真实开卡的
 风险敞口≈手续费，而不是充值额。
 
-## 卡片状态取值
+## 卡片状态取值（2026-09-05 实测定案）
 
-`init`、`pending`、`active`、`pending_delete`、`deleted`。文档未列出冻结后的
-状态取值——`freeze` 之后 `status` 变成什么**待真实验证**。
+权威枚举来自官方参考 infini-skill/references/CARDS.md：
+
+`init` → `pending` → `active`；冻结后为 **`suspend`**（2026-09-05 对真实卡冻结实测，
+回调与状态接口均返回 `suspend`）；`deleted`。
+
+网页文档的示例里出现过 `pending_delete`，不在官方枚举里，也未实测到——
+两处不一致，按官方枚举处理；页面对未知取值**原样显示并标记**，不静默归类。
+
+## 回调（webhook，2026-09-05 生产实测定案）
+
+Infini 后台的 Webhook 设置里确有卡片事件三种：`card.status_change`、
+`card.transaction`、`card.challenge`。官方 skill 仓库的 WEBHOOKS.md 只写了订单与
+订阅事件，**是它落后了**，以网页文档与后台为准。
+
+实测到的 `card.status_change` 信封（逐字）：
+
+```json
+{"data":{"card":{"alias":"xm-e91ba7f121a23c63","card_id":"1bbf365c-…",
+"currency":"USD","last_four":"9228","status":"suspend"}},
+"event":"card.status_change","id":"44133c19-…","occurred_at":1788549962,"version":1}
+```
+
+- `alias` 原样回显——幂等信标在回调侧同样成立。
+- 键按字母序输出（`data` / `event` / `id` / `occurred_at` / `version`）。
+- 订单/订阅事件的信封是**扁平的、没有 `id` 字段**；事件 id 一律取请求头
+  `X-Webhook-Event-Id`，载荷里的 `id` 只是卡片信封才有。
+
+签名：`hex(HMAC-SHA256(secret, "{timestamp}.{event_id}.{payload}"))`，容忍窗口
+300 秒——编码为 **hex** 已实测（错误分类能区分「不是 hex」与「不匹配」，
+真实事件走的是后者）。密钥用 base64url 字母表（含 `_`），44 字符解出 32 字节，
+**按原文字符串**做 HMAC 密钥，不解码。
+
+回调只当触发器：验签 → 按事件 id 去重 → 定向重读该卡（`Syncer.RefreshCard`）→
+标记完成。金额与状态一律以主动读取为准，不从载荷里写。处理失败回 5xx 让上游
+按其策略重试（最多 8 次），且**只在成功后**标记完成，否则重试会被当成重复丢掉。
+
+实测延迟：收到到处理完 < 1 秒（`received_at` 21:14:25.70 → `processed_at` 21:14:26.57）。
 
 ## 真实实例验证清单
 
