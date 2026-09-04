@@ -1,0 +1,942 @@
+openapi: 3.0.0
+info:
+  title: Infini Card API
+  version: 1.0.0
+  description: >-
+    Organization card APIs. All endpoints use the independent `/v2/cards`
+    prefix.
+
+
+    Requests require [HMAC-SHA256 authentication](/docs/en/4-authorization). To
+    use **Try it**, save Sandbox credentials on [API Credentials](/credentials),
+    or enter Key and Secret under **Security -> HMAC**.
+servers:
+  - url: https://openapi.infini.money/v2/cards
+    description: Production
+  - url: https://openapi-sandbox.infini.money/v2/cards
+    description: Sandbox
+tags:
+  - name: Card
+    description: Organization card management
+paths:
+  /apply:
+    post:
+      operationId: applyCard
+      summary: Apply for organization card
+      description: Requires `card.create` permission.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyCardRequest'
+            example:
+              product_id: 1
+              top_up_amount: '100.00'
+              token_type: USDT
+              user_email: jane@example.com
+              holder_name: Jane Doe
+              card_alias: Travel card
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyCardEnvelope'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/apply' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+                "product_id": 1,
+                "top_up_amount": "100.00",
+                "token_type": "USDT",
+                "user_email": "jane@example.com",
+                "holder_name": "Jane Doe",
+                "card_alias": "Travel card"
+              }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/cards/apply"
+            method := "POST"
+  /list:
+    get:
+      operationId: listCards
+      summary: List organization cards
+      description: Requires `card.create` permission.
+      tags:
+        - Card
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >-
+            Card status filter, comma-separated (init / pending / active /
+            suspend / pending_delete / deleted)
+          schema:
+            type: string
+        - name: card_alias
+          in: query
+          required: false
+          description: Card alias filter
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: Page size, max 100
+          schema:
+            type: integer
+            default: 20
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListCardsEnvelope'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/list' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/cards/list"
+            method := "GET"
+  /status:
+    get:
+      operationId: getCardStatus
+      summary: Get organization card status by id
+      description: Requires `card.create` permission.
+      tags:
+        - Card
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: Internal ORGANIZATION_CARD primary key id
+          schema:
+            type: string
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetCardStatusEnvelope'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/status?id=<card-id>' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/cards/status?id=<card-id>"
+            method := "GET"
+  /status/batch:
+    post:
+      operationId: batchGetCardStatuses
+      summary: Batch get organization card statuses
+      description: >-
+        Requires `card.create` permission. Accepts from 1 to 100 internal card
+        IDs and returns statuses in request order.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGetCardStatusesRequest'
+            example:
+              card_ids:
+                - a441831c-a5c7-4bed-8f61-793738afd5bc
+                - b552942d-b6d8-5cef-9062-804849bfe6cd
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGetCardStatusesEnvelope'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/status/batch' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{"card_ids":["a441831c-a5c7-4bed-8f61-793738afd5bc","b552942d-b6d8-5cef-9062-804849bfe6cd"]}'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/cards/status/batch"
+            method := "POST"
+  /transactions:
+    get:
+      operationId: getCardTransactions
+      summary: Get organization card transactions
+      description: >-
+        Requires `card.create` permission. Returns merchant-facing card IDs and
+        does not expose provider transaction IDs.
+      tags:
+        - Card
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: Internal ORGANIZATION_CARD primary key id
+          schema:
+            type: string
+            example: a441831c-a5c7-4bed-8f61-793738afd5bc
+        - name: page
+          in: query
+          required: false
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+            example: 1
+        - name: page_size
+          in: query
+          required: false
+          description: Page size, max 100
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+            example: 20
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetCardTransactionsEnvelope'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/transactions?id=a441831c-a5c7-4bed-8f61-793738afd5bc&page=1&page_size=20' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: >-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+
+            keyID := "{{INFINI_KEY_ID}}"
+
+            secretKey := "{{INFINI_SECRET}}"
+
+            path :=
+            "/v2/cards/transactions?id=a441831c-a5c7-4bed-8f61-793738afd5bc&page=1&page_size=20"
+
+            method := "GET"
+  /reveal:
+    post:
+      operationId: revealCard
+      summary: Reveal organization card
+      description: >-
+        Requires `card.reveal` permission. Returns sensitive PAN, CVV, and
+        expiry data.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardIdRequest'
+            example:
+              id: a441831c-a5c7-4bed-8f61-793738afd5bc
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevealCardEnvelope'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/reveal' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{"id":"a441831c-a5c7-4bed-8f61-793738afd5bc"}'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/cards/reveal"
+            method := "POST"
+  /top-up:
+    post:
+      operationId: topUpCard
+      summary: Top up organization card
+      description: Requires `card.create` permission.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardBalanceOperationRequest'
+            example:
+              id: a441831c-a5c7-4bed-8f61-793738afd5bc
+              amount: '50.00'
+              token_type: USDT
+              note: Top up for campaign budget
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardBalanceOperationEnvelope'
+  /redeem:
+    post:
+      operationId: redeemCard
+      summary: Redeem funds from organization card
+      description: Requires `card.create` permission.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardBalanceOperationRequest'
+            example:
+              id: a441831c-a5c7-4bed-8f61-793738afd5bc
+              amount: '20.00'
+              token_type: USDT
+              note: Redeem unused balance
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardBalanceOperationEnvelope'
+  /delete:
+    post:
+      operationId: deleteCard
+      summary: Delete organization card
+      description: >-
+        Requires `card.create` permission. Starts asynchronous card deletion and
+        balance settlement.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteCardRequest'
+            example:
+              card_id: a441831c-a5c7-4bed-8f61-793738afd5bc
+      responses:
+        '200':
+          description: >-
+            Card deletion accepted. The card moves to `pending_delete` before
+            final settlement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteCardEnvelope'
+  /freeze:
+    post:
+      operationId: freezeCard
+      summary: Freeze organization card
+      description: Requires `card.create` permission.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardIdRequest'
+            example:
+              id: a441831c-a5c7-4bed-8f61-793738afd5bc
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardActionEnvelope'
+  /unfreeze:
+    post:
+      operationId: unfreezeCard
+      summary: Unfreeze organization card
+      description: Requires `card.create` permission.
+      tags:
+        - Card
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardIdRequest'
+            example:
+              id: a441831c-a5c7-4bed-8f61-793738afd5bc
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardActionEnvelope'
+components:
+  parameters:
+    DateHeader:
+      name: Date
+      in: header
+      required: false
+      description: >-
+        GMT server time, e.g. Tue, 21 Jan 2025 12:00:00 GMT. Required for every
+        request.
+      schema:
+        type: string
+    AuthorizationHeader:
+      name: Authorization
+      in: header
+      required: false
+      description: >-
+        HMAC-SHA256 `Signature` header. See the
+        [Authentication](/docs/en/4-authorization) guide.
+      schema:
+        type: string
+    DigestHeader:
+      name: Digest
+      in: header
+      required: false
+      description: SHA-256 digest of the request body when a body is present.
+      schema:
+        type: string
+  schemas:
+    StandardEnvelope:
+      type: object
+      properties:
+        code:
+          type: integer
+          description: Business code. `0` means success.
+          example: 0
+        message:
+          type: string
+          description: Response message.
+          example: ''
+      required:
+        - code
+        - message
+    ApplyCardRequest:
+      type: object
+      required:
+        - product_id
+        - top_up_amount
+        - token_type
+        - user_email
+        - holder_name
+      properties:
+        product_id:
+          type: integer
+          description: Card product ID. 1 = Infini Lite, 2 = Infini Pro, 102 = Infini AI.
+          enum:
+            - 1
+            - 2
+            - 102
+          example: 1
+        top_up_amount:
+          type: string
+          description: Initial top-up amount.
+          example: '100.00'
+        token_type:
+          type: string
+          description: Token type, for example USDT or USDC.
+          example: USDT
+        user_email:
+          type: string
+          description: Organization member business account email.
+          example: jane@example.com
+        holder_name:
+          type: string
+          description: Card holder name.
+          example: Jane Doe
+        card_alias:
+          type: string
+          description: Card alias or nickname.
+          example: Travel card
+    ApplyCardResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Internal ORGANIZATION_CARD primary key id.
+          example: a441831c-a5c7-4bed-8f61-793738afd5bc
+        status:
+          type: string
+          description: Card application status.
+          example: init
+        total_top_up_amount:
+          type: string
+          description: Total top-up amount.
+          example: '100.00'
+        total_fee:
+          type: string
+          description: Total fee.
+          example: '1.00'
+        total_pay_amount:
+          type: string
+          description: Total payment amount.
+          example: '101.00'
+        message:
+          type: string
+          description: Status message.
+          example: ''
+    ApplyCardEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ApplyCardResponse'
+    CardItem:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Internal ORGANIZATION_CARD primary key id.
+          example: a441831c-a5c7-4bed-8f61-793738afd5bc
+        mask:
+          type: string
+          description: Masked card number.
+          example: 411111******1111
+        holder_name:
+          type: string
+          description: Card holder name.
+          example: Jane Doe
+        card_alias:
+          type: string
+          description: Card alias.
+          example: Travel card
+        status:
+          type: string
+          description: Card status.
+          example: active
+        currency:
+          type: string
+          description: Card currency.
+          example: USD
+        available_balance:
+          type: string
+          description: Available balance.
+          example: '50.25'
+        user_id:
+          type: string
+          description: Organization member user ID.
+          example: usr_01HXYZ
+        created_at:
+          type: integer
+          format: int64
+          description: Created timestamp in seconds.
+          example: 1714464000
+        updated_at:
+          type: integer
+          format: int64
+          description: Updated timestamp in seconds.
+          example: 1714550400
+    ListCardsResponse:
+      type: object
+      properties:
+        cards:
+          type: array
+          items:
+            $ref: '#/components/schemas/CardItem'
+        total:
+          type: integer
+          format: int32
+          example: 1
+        page:
+          type: integer
+          format: int32
+          example: 1
+        page_size:
+          type: integer
+          format: int32
+          example: 20
+        total_pages:
+          type: integer
+          format: int32
+          example: 1
+    ListCardsEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ListCardsResponse'
+    GetCardStatusResponse:
+      allOf:
+        - $ref: '#/components/schemas/CardItem'
+    GetCardStatusEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/GetCardStatusResponse'
+    BatchGetCardStatusesRequest:
+      type: object
+      required:
+        - card_ids
+      properties:
+        card_ids:
+          type: array
+          description: >-
+            Internal ORGANIZATION_CARD primary key ids. Accepts from 1 to 100
+            items.
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
+            example: a441831c-a5c7-4bed-8f61-793738afd5bc
+          example:
+            - a441831c-a5c7-4bed-8f61-793738afd5bc
+            - b552942d-b6d8-5cef-9062-804849bfe6cd
+    CardStatusItem:
+      type: object
+      properties:
+        card_id:
+          type: string
+          description: Internal ORGANIZATION_CARD primary key id.
+          example: a441831c-a5c7-4bed-8f61-793738afd5bc
+        status:
+          type: string
+          description: Card lifecycle status.
+          example: active
+    BatchGetCardStatusesResponse:
+      type: object
+      properties:
+        cards:
+          type: array
+          description: Card statuses in request order.
+          items:
+            $ref: '#/components/schemas/CardStatusItem'
+    BatchGetCardStatusesEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/BatchGetCardStatusesResponse'
+    CardTransactionItem:
+      type: object
+      properties:
+        card_id:
+          type: string
+          description: Internal ORGANIZATION_CARD primary key id.
+          example: a441831c-a5c7-4bed-8f61-793738afd5bc
+        type:
+          type: string
+          description: Transaction type.
+          example: Consume
+        amount:
+          type: string
+          description: Card transaction ledger amount.
+          example: '12.34'
+        fee:
+          type: string
+          description: Transaction fee.
+          example: '0.12'
+        status:
+          type: string
+          description: Transaction status.
+          example: Completed
+        currency:
+          type: string
+          description: Card ledger currency.
+          example: USD
+        merchant:
+          type: string
+          description: Merchant name.
+          example: Example Store
+        transaction_time:
+          type: integer
+          format: int64
+          description: Transaction timestamp in seconds.
+          example: 1710000000
+        transaction_currency:
+          type: string
+          description: Original transaction currency.
+          example: EUR
+        transaction_amount:
+          type: string
+          description: Original transaction amount.
+          example: '11.20'
+        created_at:
+          type: integer
+          format: int64
+          description: Created timestamp in seconds.
+          example: 1710000001
+        updated_at:
+          type: integer
+          format: int64
+          description: Updated timestamp in seconds.
+          example: 1710000002
+        settled_at:
+          type: integer
+          format: int64
+          description: Settled timestamp in seconds; 0 when unsettled.
+          example: 1710000003
+    GetCardTransactionsResponse:
+      type: object
+      properties:
+        transactions:
+          type: array
+          description: Transaction list.
+          items:
+            $ref: '#/components/schemas/CardTransactionItem'
+        total:
+          type: integer
+          format: int32
+          description: Total count.
+          example: 1
+        page:
+          type: integer
+          format: int32
+          description: Current page.
+          example: 1
+        page_size:
+          type: integer
+          format: int32
+          description: Page size.
+          example: 20
+        total_pages:
+          type: integer
+          format: int32
+          description: Total pages.
+          example: 1
+    GetCardTransactionsEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/GetCardTransactionsResponse'
+    CardIdRequest:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          description: Internal ORGANIZATION_CARD primary key id.
+          example: a441831c-a5c7-4bed-8f61-793738afd5bc
+    RevealCardResponse:
+      type: object
+      properties:
+        card_number:
+          type: string
+          description: Card number.
+          example: '4111111111111111'
+        cvv:
+          type: string
+          description: CVV.
+          example: '123'
+        expiration_mmyy:
+          type: string
+          description: Expiration date in MMYY format.
+          example: '1228'
+        card_currency:
+          type: string
+          description: Card currency.
+          example: USD
+    RevealCardEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/RevealCardResponse'
+    CardBalanceOperationRequest:
+      type: object
+      required:
+        - id
+        - amount
+        - token_type
+      properties:
+        id:
+          type: string
+          description: Internal ORGANIZATION_CARD primary key id.
+          example: a441831c-a5c7-4bed-8f61-793738afd5bc
+        amount:
+          type: string
+          description: Operation amount.
+          example: '50.00'
+        token_type:
+          type: string
+          description: Token type, for example USDT or USDC.
+          example: USDT
+        note:
+          type: string
+          description: Optional note.
+          example: Top up for campaign budget
+    CardBalanceOperationResponse:
+      type: object
+      properties:
+        tx_id:
+          type: string
+          description: Transaction ID.
+          example: tx_123
+        card_balance:
+          type: string
+          description: Card balance after the operation.
+          example: '150.25'
+    CardBalanceOperationEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/CardBalanceOperationResponse'
+    DeleteCardRequest:
+      type: object
+      required:
+        - card_id
+      properties:
+        card_id:
+          type: string
+          description: Internal ORGANIZATION_CARD primary key id.
+          example: a441831c-a5c7-4bed-8f61-793738afd5bc
+    DeleteCardResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Whether the deletion flow was accepted.
+          example: true
+        message:
+          type: string
+          description: Response message.
+          example: Card deletion initiated
+    DeleteCardEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/DeleteCardResponse'
+    CardActionResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Operation result.
+          example: true
+        message:
+          type: string
+          description: Response message.
+          example: Card frozen
+    CardActionEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/CardActionResponse'
+  securitySchemes:
+    InfiniHmac:
+      type: http
+      scheme: basic
+      description: Sandbox API **Key** (keyId) and **Secret** from the Infini dashboard.
+security:
+  - InfiniHmac: []

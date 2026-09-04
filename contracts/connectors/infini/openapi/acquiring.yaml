@@ -1,0 +1,1629 @@
+openapi: 3.0.0
+info:
+  title: Infini Acquiring API
+  version: 1.0.0
+  description: >-
+    Hosted checkout APIs for orders, payments, and subscriptions. All endpoints
+    use the `/v1/acquiring` prefix.
+
+
+    Requests require [HMAC-SHA256 authentication](/docs/en/4-authorization). To
+    use **Try it**, save Sandbox credentials on [API Credentials](/credentials),
+    or enter Key and Secret under **Security → HMAC**.
+servers:
+  - url: https://openapi.infini.money/v1/acquiring
+    description: Production
+  - url: https://openapi-sandbox.infini.money/v1/acquiring
+    description: Sandbox
+tags:
+  - name: Currency
+    description: Supported payment chains and tokens
+  - name: Order
+    description: Create and query orders, reissue checkout tokens
+  - name: Payment
+    description: Advanced payment APIs (optional for hosted checkout)
+  - name: Subscription
+    description: Subscription billing
+paths:
+  /currency:
+    get:
+      operationId: getSupportedCurrencies
+      summary: List supported payment currencies
+      description: >-
+        Returns the supported blockchain and token combinations available for
+        acquiring payments.
+      tags:
+        - Currency
+      parameters:
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.currency.v1.GetSupportCurrencyRes
+          description: Supported chain and token combinations
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/currency' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/currency"
+            method := "GET"
+  /order:
+    get:
+      parameters:
+        - description: Order id
+          in: query
+          name: order_id
+          schema:
+            description: Order id
+            format: string
+            type: string
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.QueryOrderRes
+          description: ''
+      summary: Get a new order
+      tags:
+        - Order
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            # HMAC-SHA256 — signing path must include query string when present
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/order' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/order"
+            method := "GET"
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: >-
+                #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.CreateOrderReq
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.CreateOrderRes
+          description: ''
+      summary: Create a new order
+      tags:
+        - Order
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: >-
+            # HMAC-SHA256 — save credentials on /credentials for Try it, or sign
+            manually
+
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/order' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+              "order_id": "ord-123",
+              "chain": "ETHEREUM",
+              "token_id": "USDT",
+              "payment_method": 1,
+              "force_create": false
+            }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/order"
+            method := "POST"
+      parameters:
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+        - name: Digest
+          in: header
+          required: false
+          description: SHA-256 digest of the request body (when a body is present).
+          schema:
+            type: string
+  /order/token/reissue:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: >-
+                #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.ReissueOrderTokenReq
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.ReissueOrderTokenRes
+          description: ''
+      summary: Reissue order token
+      tags:
+        - Order
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: >-
+            # HMAC-SHA256 — save credentials on /credentials for Try it, or sign
+            manually
+
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/order/token/reissue' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+              "request_id": "<uuid>",
+              "amount": "10.00",
+              "currency": "USD",
+              "order_desc": "Test order"
+            }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/order/token/reissue"
+            method := "POST"
+      parameters:
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+        - name: Digest
+          in: header
+          required: false
+          description: SHA-256 digest of the request body (when a body is present).
+          schema:
+            type: string
+  /payment:
+    get:
+      parameters:
+        - description: Payment ID
+          in: query
+          name: payment_id
+          schema:
+            description: Payment ID
+            format: string
+            type: string
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.QueryPaymentRes
+          description: ''
+      summary: Query payment
+      tags:
+        - Payment
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            # HMAC-SHA256 — signing path must include query string when present
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/payment' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/payment"
+            method := "GET"
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: >-
+                #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.CreatePaymentReq
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.CreatePaymentRes
+          description: ''
+      summary: Create a new payment
+      tags:
+        - Payment
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: >-
+            # HMAC-SHA256 — save credentials on /credentials for Try it, or sign
+            manually
+
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/payment' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+              "request_id": "<uuid>",
+              "amount": "10.00",
+              "currency": "USD",
+              "order_desc": "Test order"
+            }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/payment"
+            method := "POST"
+      parameters:
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+        - name: Digest
+          in: header
+          required: false
+          description: SHA-256 digest of the request body (when a body is present).
+          schema:
+            type: string
+  /payment/quote:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: >-
+                #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.QuotePaymentReq
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.QuotePaymentRes
+          description: ''
+      summary: Quote a payment without creating it
+      tags:
+        - Payment
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/payment/quote' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+              "order_id": "ord-123",
+              "chain": "ETHEREUM",
+              "token_id": "USDT",
+              "payment_method": 1
+            }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/payment/quote"
+            method := "POST"
+      parameters:
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+        - name: Digest
+          in: header
+          required: false
+          description: SHA-256 digest of the request body (when a body is present).
+          schema:
+            type: string
+  /payment/list:
+    get:
+      parameters:
+        - description: Order ID
+          in: query
+          name: order_id
+          schema:
+            description: Order ID
+            format: string
+            type: string
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.ListPaymentRes
+          description: ''
+      summary: Query Order's payments
+      tags:
+        - Payment
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            # HMAC-SHA256 — signing path must include query string when present
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/payment/list' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/payment/list"
+            method := "GET"
+  /subscription:
+    get:
+      parameters:
+        - description: 商户订阅ID
+          in: query
+          name: merchant_sub_id
+          required: true
+          schema:
+            description: 商户订阅ID
+            format: string
+            type: string
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.QuerySubscriptionRes
+          description: ''
+      summary: Query subscription
+      tags:
+        - Subscription
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            # HMAC-SHA256 — signing path must include query string when present
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/subscription' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/subscription"
+            method := "GET"
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: >-
+                #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CreateSubscriptionReq
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CreateSubscriptionRes
+          description: ''
+      summary: Create subscription
+      tags:
+        - Subscription
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: >-
+            # HMAC-SHA256 — save credentials on /credentials for Try it, or sign
+            manually
+
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/subscription' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+              "request_id": "<uuid>",
+              "amount": "10.00",
+              "currency": "USD",
+              "order_desc": "Test order"
+            }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/subscription"
+            method := "POST"
+      parameters:
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+        - name: Digest
+          in: header
+          required: false
+          description: SHA-256 digest of the request body (when a body is present).
+          schema:
+            type: string
+  /subscription/cancel:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: >-
+                #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CancelSubscriptionReq
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: >-
+                  #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CancelSubscriptionRes
+          description: ''
+      summary: Cancel subscription
+      tags:
+        - Subscription
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: >-
+            # HMAC-SHA256 — save credentials on /credentials for Try it, or sign
+            manually
+
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/subscription/cancel' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+              "request_id": "<uuid>",
+              "amount": "10.00",
+              "currency": "USD",
+              "order_desc": "Test order"
+            }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest (POST): SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v1/acquiring/subscription/cancel"
+            method := "POST"
+      parameters:
+        - name: Date
+          in: header
+          required: false
+          description: >-
+            GMT server time (e.g. Tue, 21 Jan 2025 12:00:00 GMT). Required for
+            every request.
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: false
+          description: >-
+            HMAC-SHA256 `Signature` header. See the
+            [Authentication](/docs/en/4-authorization) guide.
+          schema:
+            type: string
+        - name: Digest
+          in: header
+          required: false
+          description: SHA-256 digest of the request body (when a body is present).
+          schema:
+            type: string
+components:
+  schemas:
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.currency.v1.GetSupportCurrencyRes:
+      properties:
+        list:
+          description: List of supported cryptocurrencies
+          items:
+            $ref: >-
+              #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.currency.v1.SupportCurrency
+          type: array
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.currency.v1.SupportCurrency:
+      properties:
+        chain:
+          description: Blockchain network name
+          example: TRON
+          format: string
+          type: string
+        token_id:
+          description: Token identifier
+          example: USDT
+          format: string
+          type: string
+        contract:
+          description: Token contract address
+          example: TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.QueryOrderRes:
+      properties:
+        merchant_id:
+          format: string
+          type: string
+        request_id:
+          format: string
+          type: string
+        order_id:
+          format: string
+          type: string
+        client_reference:
+          format: string
+          type: string
+        order_desc:
+          format: string
+          type: string
+        order_currency:
+          format: string
+          type: string
+        order_amount:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        order_amount_usd:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirming:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirmed:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirming_usd:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirmed_usd:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        discount_amount:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        status:
+          format: string
+          type: string
+        created_at:
+          format: int64
+          type: integer
+        updated_at:
+          format: int64
+          type: integer
+        expires_at:
+          format: int64
+          type: integer
+        merchant_info:
+          $ref: >-
+            #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.MerchantInfo
+        exception_tag:
+          format: '[]string'
+          items:
+            format: string
+            type: string
+          type: array
+        success_url:
+          format: string
+          type: string
+        failure_url:
+          format: string
+          type: string
+        available_pay_method:
+          format: '[]int'
+          items:
+            format: int
+            type: integer
+          type: array
+        last_paid_payment:
+          $ref: >-
+            #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.PaymentItem
+        mode:
+          description: '订单模式: 0=普通订单, 1=订阅订单'
+          format: int
+          type: integer
+        subscription:
+          $ref: >-
+            #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.OrderSubscriptionInfo
+        email:
+          description: Payer email
+          format: string
+          type: string
+        kyc_required:
+          description: >-
+            Whether login and approved Infini KYC are required before a buyer
+            can create a payment for this order
+          example: false
+          type: boolean
+      type: object
+    github.com.shopspring.decimal.Decimal:
+      properties: {}
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.MerchantInfo:
+      properties:
+        uid:
+          format: string
+          type: string
+        display_name:
+          format: string
+          type: string
+        logo:
+          format: string
+          type: string
+        default_order_ttl:
+          format: int64
+          type: integer
+        name_type:
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.PaymentItem:
+      properties:
+        payment_id:
+          format: string
+          type: string
+        merchant_id:
+          format: string
+          type: string
+        payment_method:
+          format: int
+          type: integer
+        payment_address:
+          format: string
+          type: string
+        network:
+          format: string
+          type: string
+        due_amount:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        pay_currency:
+          format: string
+          type: string
+        amount_confirmed:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirming:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        quoted_token_price_usdc:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        status:
+          format: string
+          type: string
+        expires_at:
+          format: int64
+          type: integer
+        metadata:
+          format: string
+          type: string
+        created_at:
+          format: int64
+          type: integer
+        updated_at:
+          format: int64
+          type: integer
+        transactions:
+          description: Related transactions
+          format: '[]*v1.PaymentTransaction'
+          items:
+            $ref: >-
+              #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.PaymentTransaction
+          type: array
+        amount_status:
+          format: string
+          type: string
+        exception_tag:
+          format: '[]string'
+          items:
+            format: string
+            type: string
+          type: array
+        crypto_amount:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        channel_fee:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        order_currency:
+          description: Order currency
+          format: string
+          type: string
+        due_amount_fiat:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirmed_fiat:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirming_fiat:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.PaymentTransaction:
+      properties:
+        amount:
+          description: Transaction amount
+          format: string
+          type: string
+        hash:
+          description: Transaction hash
+          format: string
+          type: string
+        status:
+          description: Transaction status
+          format: string
+          type: string
+        transaction_time:
+          description: Transaction time (Unix timestamp in seconds)
+          format: int64
+          type: integer
+        from_address:
+          description: From address
+          format: string
+          type: string
+        transaction_id:
+          description: Transaction ID
+          format: string
+          type: string
+        created_at:
+          description: Created time (Unix timestamp in seconds)
+          format: int64
+          type: integer
+        estimate_confirm_time:
+          format: int64
+          type: integer
+        exception_tag:
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.OrderSubscriptionInfo:
+      properties:
+        subscription_id:
+          description: 系统订阅ID
+          format: string
+          type: string
+        merchant_sub_id:
+          description: 商户订阅ID
+          format: string
+          type: string
+        plan_name:
+          description: 计划名称
+          format: string
+          type: string
+        status:
+          description: 订阅状态
+          format: string
+          type: string
+        currency:
+          description: 币种
+          format: string
+          type: string
+        amount:
+          description: 每期金额
+          format: string
+          type: string
+        interval_unit:
+          description: 周期单位
+          format: string
+          type: string
+        interval_count:
+          description: 周期数量
+          format: int
+          type: integer
+        payer_email:
+          description: 付款人邮箱
+          format: string
+          type: string
+        current_period_start:
+          description: 当前周期开始
+          format: int64
+          type: integer
+        current_period_end:
+          description: 当前周期结束
+          format: int64
+          type: integer
+        canceled_url:
+          description: 取消跳转URL
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.CreateOrderReq:
+      properties:
+        client_reference:
+          description: Client Reference
+          format: string
+          type: string
+        request_id:
+          description: request id (unique)
+          format: string
+          type: string
+        order_desc:
+          description: Order description
+          format: string
+          type: string
+        currency:
+          default: USD
+          description: Order currency (USD, EUR, GBP, CAD, SGD, AUD)
+          format: string
+          type: string
+        amount:
+          description: >-
+            Order amount. The minimum is greater than 0.1 for crypto acquiring;
+            fiat payment methods require at least 16.
+          format: string
+          type: string
+        merchant_alias:
+          description: customized merchant alias (optional)
+          format: string
+          type: string
+        expires_in:
+          description: >-
+            Time to live in seconds (e.g., 3600 for 1 hour, 0 for default order
+            expires time)
+          format: int64
+          type: integer
+        success_url:
+          description: Success redirect Url
+          format: string
+          type: string
+        failure_url:
+          description: Failure redirect Url
+          format: string
+          type: string
+        pay_methods:
+          description: >-
+            Enabled payment modes for this order (optional, inherits from
+            merchant config if not specified)
+          format: '[]int'
+          items:
+            format: int
+            type: integer
+          type: array
+        email:
+          description: Payer email (optional)
+          format: string
+          type: string
+      required:
+        - request_id
+        - amount
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.CreateOrderRes:
+      properties:
+        client_reference:
+          format: string
+          type: string
+        request_id:
+          format: string
+          type: string
+        order_id:
+          description: Order id
+          format: string
+          type: string
+        checkout_url:
+          description: Checkout url
+          format: string
+          type: string
+        token:
+          description: Token
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.ReissueOrderTokenReq:
+      properties:
+        order_id:
+          description: order_id
+          format: string
+          type: string
+      required:
+        - order_id
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.order.v1.ReissueOrderTokenRes:
+      properties:
+        order_id:
+          description: Order id
+          format: string
+          type: string
+        checkout_url:
+          description: Checkout url
+          format: string
+          type: string
+        token:
+          description: Token
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.QueryPaymentRes:
+      properties:
+        payment_id:
+          format: string
+          type: string
+        merchant_id:
+          format: string
+          type: string
+        payment_method:
+          format: int
+          type: integer
+        payment_address:
+          format: string
+          type: string
+        network:
+          format: string
+          type: string
+        due_amount:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        pay_currency:
+          format: string
+          type: string
+        amount_confirmed:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirming:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        quoted_token_price_usdc:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        status:
+          format: string
+          type: string
+        expires_at:
+          format: int64
+          type: integer
+        metadata:
+          format: string
+          type: string
+        created_at:
+          format: int64
+          type: integer
+        updated_at:
+          format: int64
+          type: integer
+        transactions:
+          description: Related transactions
+          format: '[]*v1.PaymentTransaction'
+          items:
+            $ref: >-
+              #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.PaymentTransaction
+          type: array
+        amount_status:
+          format: string
+          type: string
+        exception_tag:
+          format: '[]string'
+          items:
+            format: string
+            type: string
+          type: array
+        crypto_amount:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        channel_fee:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        order_currency:
+          description: Order currency
+          format: string
+          type: string
+        due_amount_fiat:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirmed_fiat:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        amount_confirming_fiat:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+        order_amount:
+          $ref: '#/components/schemas/github.com.shopspring.decimal.Decimal'
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.CreatePaymentReq:
+      properties:
+        order_id:
+          description: Order ID
+          format: string
+          type: string
+        payment_method:
+          default: 1
+          description: Payment method
+          example: 1
+          format: int
+          type: integer
+        chain:
+          description: Chain
+          example: ETHEREUM
+          format: string
+          type: string
+        token_id:
+          description: Token identifier
+          example: USDT
+          format: string
+          type: string
+        force_create:
+          default: false
+          description: >-
+            Always create a new payment instead of reusing an existing reusable
+            payment
+          example: false
+          type: boolean
+      required:
+        - order_id
+        - chain
+        - token_id
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.QuotePaymentReq:
+      properties:
+        order_id:
+          description: Order ID
+          example: ord-123
+          format: string
+          type: string
+        payment_method:
+          default: 1
+          description: Payment method
+          example: 1
+          format: int
+          type: integer
+        chain:
+          description: Chain
+          example: ETHEREUM
+          format: string
+          type: string
+        token_id:
+          description: Token identifier
+          example: USDT
+          format: string
+          type: string
+      required:
+        - order_id
+        - chain
+        - token_id
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.CreatePaymentRes:
+      properties:
+        payment_id:
+          description: Payment ID
+          format: string
+          type: string
+        amount:
+          description: USD-denominated amount the payer still owes (== due_amount)
+          format: string
+          type: string
+        due_amount_fiat:
+          description: >-
+            Payment snapshot amount in order currency (immutable once payment is
+            created)
+          format: string
+          type: string
+        amount_confirmed:
+          description: USD-denominated amount already confirmed
+          format: string
+          type: string
+        amount_confirming:
+          description: USD-denominated amount currently confirming
+          format: string
+          type: string
+        address:
+          description: Payment address
+          format: string
+          type: string
+        expires_at:
+          description: Expires time (Unix timestamp)
+          format: int64
+          type: integer
+        quoted_token_amount:
+          description: Amount shown to payer, in pay_currency units
+          format: string
+          type: string
+        quoted_token_currency:
+          description: Currency of quoted_token_amount (matches pay_currency)
+          format: string
+          type: string
+        quoted_token_price_usdc:
+          description: USDC-per-token snapshot at create time; 0 for stablecoins
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.QuotePaymentRes:
+      properties:
+        amount:
+          description: USD-denominated amount the payer still owes (== due_amount)
+          example: '100.00'
+          format: string
+          type: string
+        due_amount_fiat:
+          description: Current payable amount in order currency
+          example: '100.00'
+          format: string
+          type: string
+        amount_confirmed:
+          description: USD-denominated amount already confirmed
+          example: '0'
+          format: string
+          type: string
+        amount_confirming:
+          description: USD-denominated amount currently confirming
+          example: '0'
+          format: string
+          type: string
+        quoted_token_amount:
+          description: Amount shown to payer, in pay_currency units
+          example: '100.00'
+          format: string
+          type: string
+        quoted_token_currency:
+          description: Currency of quoted_token_amount (matches pay_currency)
+          example: USDT
+          format: string
+          type: string
+        quoted_token_price_usdc:
+          description: USDC-per-token snapshot at quote time; 0 for stablecoins
+          example: '0'
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.ListPaymentRes:
+      properties:
+        list:
+          description: List
+          format: '[]*v1.PaymentItem'
+          items:
+            $ref: >-
+              #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.payment.v1.PaymentItem
+          type: array
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.QuerySubscriptionRes:
+      properties:
+        subscription_id:
+          description: 系统订阅ID
+          format: string
+          type: string
+        merchant_sub_id:
+          description: 商户订阅ID
+          format: string
+          type: string
+        plan_name:
+          description: 计划名称
+          format: string
+          type: string
+        trigger_method:
+          description: 触发方式
+          format: string
+          type: string
+        status:
+          description: 订阅状态
+          format: string
+          type: string
+        cancel_reason:
+          description: 取消原因
+          format: string
+          type: string
+        canceled_at:
+          description: 取消时间 (unix timestamp)
+          format: int64
+          type: integer
+        currency:
+          description: 币种
+          format: string
+          type: string
+        first_amount:
+          description: 首期金额
+          format: string
+          type: string
+        amount:
+          description: 后续每期金额
+          format: string
+          type: string
+        interval_unit:
+          description: 周期单位
+          format: string
+          type: string
+        interval_count:
+          description: 周期数量
+          format: int
+          type: integer
+        current_period_start:
+          description: 当前周期开始 (unix timestamp)
+          format: int64
+          type: integer
+        current_period_end:
+          description: 当前周期结束 (unix timestamp)
+          format: int64
+          type: integer
+        subscription_end_at:
+          description: 订阅终止时间 (unix timestamp)
+          format: int64
+          type: integer
+        next_invoice_at:
+          description: 下次发送 Invoice 时间 (unix timestamp)
+          format: int64
+          type: integer
+        payer_email:
+          description: 付款人邮箱
+          format: string
+          type: string
+        created_at:
+          description: 创建时间 (unix timestamp)
+          format: int64
+          type: integer
+        updated_at:
+          description: 更新时间 (unix timestamp)
+          format: int64
+          type: integer
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CreateSubscriptionReq:
+      properties:
+        amount:
+          description: 首次支付金额
+          format: string
+          type: string
+        currency:
+          default: USD
+          description: 币种（USD, EUR, GBP, CAD, SGD, AUD）
+          format: string
+          type: string
+        request_id:
+          description: 请求唯一ID
+          format: string
+          type: string
+        client_reference:
+          description: 客户端引用
+          format: string
+          type: string
+        expires_in:
+          description: 订单过期相对时间(Unix秒);不传则使用后台默认值
+          format: int64
+          type: integer
+        merchant_alias:
+          description: 商户别名
+          format: string
+          type: string
+        success_url:
+          description: 首次支付成功跳转
+          format: string
+          type: string
+        failure_url:
+          description: 首次支付失败跳转
+          format: string
+          type: string
+        pay_methods:
+          description: 支付方式
+          format: '[]int'
+          items:
+            format: int
+            type: integer
+          type: array
+        subscription:
+          $ref: >-
+            #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.SubscriptionParams
+      required:
+        - amount
+        - request_id
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.SubscriptionParams:
+      properties:
+        merchant_sub_id:
+          description: 商户订阅ID
+          format: string
+          type: string
+        plan_name:
+          description: 订阅计划名称
+          format: string
+          type: string
+        amount:
+          description: 后续每期金额
+          format: string
+          type: string
+        interval_unit:
+          description: 周期单位
+          enum:
+            - DAY
+            - MONTH
+          format: string
+          type: string
+        interval_count:
+          description: 周期数量
+          format: int
+          type: integer
+        payer_email:
+          description: 付款人邮箱
+          format: string
+          type: string
+        invoice_lead_days:
+          description: 提前发送天数
+          format: int
+          type: integer
+        invoice_due_days:
+          description: 到期天数
+          format: int
+          type: integer
+        subscription_end_at:
+          description: 订阅终止时间 (unix timestamp, 0=永不终止)
+          format: int64
+          type: integer
+        canceled_url:
+          description: 取消跳转URL
+          format: string
+          type: string
+      required:
+        - merchant_sub_id
+        - plan_name
+        - amount
+        - interval_unit
+        - interval_count
+        - payer_email
+        - invoice_lead_days
+        - invoice_due_days
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CreateSubscriptionRes:
+      properties:
+        order_id:
+          description: 首次订单ID
+          format: string
+          type: string
+        request_id:
+          description: 请求ID
+          format: string
+          type: string
+        client_reference:
+          description: 客户端引用
+          format: string
+          type: string
+        checkout_url:
+          description: 订阅确认页面 URL
+          format: string
+          type: string
+        token:
+          description: JWT Token
+          format: string
+          type: string
+        subscription:
+          $ref: >-
+            #/components/schemas/github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.SubscriptionResponse
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.SubscriptionResponse:
+      properties:
+        subscription_id:
+          description: 系统订阅ID
+          format: string
+          type: string
+        merchant_sub_id:
+          description: 商户订阅ID
+          format: string
+          type: string
+        status:
+          description: 订阅状态 (pending)
+          format: string
+          type: string
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CancelSubscriptionReq:
+      properties:
+        merchant_sub_id:
+          description: 商户订阅ID
+          format: string
+          type: string
+        cancel_reason:
+          description: 'Cancel reason: user_request / by_merchant_api / by_operation'
+          enum:
+            - user_request
+            - by_merchant_api
+            - by_operation
+          format: string
+          type: string
+        note:
+          description: 备注
+          format: string
+          type: string
+      required:
+        - merchant_sub_id
+        - cancel_reason
+      type: object
+    github.com.infini-money.infini-services-go.app.infini-payment-service.api.subscription.v1.CancelSubscriptionRes:
+      properties:
+        subscription_id:
+          description: 系统订阅ID
+          format: string
+          type: string
+        merchant_sub_id:
+          description: 商户订阅ID
+          format: string
+          type: string
+        status:
+          description: 订阅状态
+          format: string
+          type: string
+        canceled_at:
+          description: 取消时间 (unix timestamp)
+          format: int64
+          type: integer
+        cancel_reason:
+          description: 取消原因
+          format: string
+          type: string
+      type: object
+  securitySchemes:
+    InfiniHmac:
+      type: http
+      scheme: basic
+      description: Sandbox API **Key** (keyId) and **Secret** from the Infini dashboard.
+security:
+  - InfiniHmac: []

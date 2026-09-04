@@ -1,0 +1,1887 @@
+openapi: 3.0.0
+info:
+  title: Infini 法币付款 API
+  version: 0.4.0
+  description: >-
+    法币付款 API 支持组织从 Infini USD 余额向第三方银行账户进行 USD 付款报价、创建和查询。
+
+
+    所有接口均使用 `/v2/payouts` 前缀。请求必须通过 [HMAC-SHA256
+    鉴权](/docs/en/4-authorization)，并使用具有相应付款权限的 API Key。
+
+
+    `POST /v2/payouts` 不进入后台审批流。Infini
+    会完成最终的权限、合规、Quote、收款资料、限额及可用余额校验，然后立即开始执行付款。银行结算是异步过程，因此创建成功通常返回
+    `status=processing`；这不代表收款银行账户已经到账。
+servers:
+  - url: https://openapi.infini.money
+    description: 生产环境
+  - url: https://openapi-sandbox.infini.money
+    description: 沙箱环境
+tags:
+  - name: 报价
+    description: 有时效性的付款定价与收款资料校验
+  - name: 付款
+    description: 直接执行法币付款并查询状态
+paths:
+  /v2/payouts/quotes:
+    post:
+      operationId: createFiatPayoutQuote
+      summary: 创建付款报价
+      description: >-
+        校验一份银行收款资料，并返回有时效性的付款 Quote。需要 `payout.write` 权限。
+
+
+        第一期不提供独立的收款人资源，因此收款资料直接随 Quote 提交。Infini 会将标准化且不可变的收款资料快照绑定到
+        `quote_id`；创建付款时不能替换或修改这份资料。
+
+
+        第一期只支持以下金额模式与手续费承担方组合：
+
+
+        - `amount_mode=send` 与 `fee_paid_by=BENEFICIARY`：手续费内扣。`amount` 固定
+        `sending_amount`；`transfer_fee_amount = sending_amount ×
+        fee_rate_decimal`；`receiving_amount = sending_amount -
+        transfer_fee_amount - bank_fee_amount`。当 `amount=1000.00`、费率为
+        `0.001`、银行费为 `50.00` 时，收款人到账 `949.00`。
+
+        - `amount_mode=receive` 与 `fee_paid_by=PAYER`：手续费外扣。`amount` 固定
+        `receiving_amount`；`transfer_fee_amount = sending_amount ×
+        fee_rate_decimal`；`sending_amount = receiving_amount +
+        transfer_fee_amount + bank_fee_amount`。当 `amount=1000.00`、费率为
+        `0.001`、银行费为 `50.00` 时，付款账户扣款 `1051.05`。
+
+
+        在 `receive` 模式下，Infini 会反算并增加 `sending_amount`，确保扣除全部手续费后收款金额仍然准确。
+
+
+        修改 `fee_paid_by` 会改变计算结果，因此必须重新请求 Quote。已接受的 `quote_id` 会固定 Payout
+        使用的手续费承担方和两侧金额。
+
+
+        Quote 阶段会执行初步的收款资料、路由、金额、合规和限额校验，但不会冻结余额、批准或创建付款，也不保证一定能够执行。`POST
+        /v2/payouts` 会根据当时状态重新执行所有关键校验。
+      tags:
+        - 报价
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuoteRequest'
+            example:
+              amount: '1000.00'
+              amount_mode: receive
+              fee_paid_by: PAYER
+              source_currency: USD
+              destination_currency: USD
+              destination_country: US
+              payout_type: swift
+              destination:
+                type: bank_account
+                account_holder_type: business
+                account_holder_name: Acme Supplies LLC
+                bank_country: US
+                bank_name: Example Bank
+                account_number: '9876543210'
+                swift_code: BOFAUS3NXXX
+                address:
+                  line1: 123 Market Street
+                  line2: Suite 500
+                  city: New York
+                  state: NY
+                  postal_code: '10001'
+                  country: US
+      responses:
+        '200':
+          description: 有时效性的付款 Quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  quote_id: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+                  provider: sgb
+                  payout_type: swift
+                  source_currency: USD
+                  destination_currency: USD
+                  destination_country: US
+                  amount_mode: receive
+                  fee_paid_by: PAYER
+                  sending_amount: '1051.05'
+                  receiving_amount: '1000.00'
+                  transfer_fee_amount: '1.05'
+                  bank_fee_amount: '50.00'
+                  fee_rate_decimal: '0.001'
+                  rate: '1'
+                  billing:
+                    currency: USD
+                    transfer_fee: '1.05'
+                    fx_fee: '0.00'
+                    rail_fee: '50.00'
+                    total_fee: '51.05'
+                    fee_lines:
+                      - type: transfer_fee
+                        amount: '1.05'
+                        currency: USD
+                        rate: '0.001'
+                      - type: rail_fee
+                        amount: '50.00'
+                        currency: USD
+                        rate: '1'
+                  destination:
+                    type: bank_account
+                    account_holder_type: business
+                    account_holder_name: Acme Supplies LLC
+                    bank_country: US
+                    bank_name: Example Bank
+                    account_number_masked: '******3210'
+                    swift_code: BOFAUS3NXXX
+                  expires_at: 1786586700
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/v2/payouts/quotes' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+                "amount": "1000.00",
+                "amount_mode": "receive",
+                "fee_paid_by": "PAYER",
+                "source_currency": "USD",
+                "destination_currency": "USD",
+                "destination_country": "US",
+                "payout_type": "swift",
+                "destination": {
+                  "type": "bank_account",
+                  "account_holder_type": "business",
+                  "account_holder_name": "Acme Supplies LLC",
+                  "bank_country": "US",
+                  "bank_name": "Example Bank",
+                  "account_number": "9876543210",
+                  "swift_code": "BOFAUS3NXXX",
+                  "address": {
+                    "line1": "123 Market Street",
+                    "line2": "Suite 500",
+                    "city": "New York",
+                    "state": "NY",
+                    "postal_code": "10001",
+                    "country": "US"
+                  }
+                }
+              }'
+  /v2/payouts:
+    post:
+      operationId: createFiatPayout
+      summary: 创建法币付款
+      description: >-
+        使用有效 Quote 创建付款并立即开始执行。需要 `payout.write` 权限，且付款不会进入后台审批流。
+
+
+        `quote_id`
+        已经绑定服务商、收款资料快照、来源和目标币种、付款通道、金额模式、手续费承担方、汇率、金额和费用明细，因此本请求不重复提交这些字段。
+
+
+        本接口会执行具有最终效力的付款前校验，包括 API Key 归属与权限、Quote 归属与有效期、请求与 Quote
+        一致性、账户和收款资料、合规控制、限额、可用余额、执行服务商可用性和幂等。
+
+
+        `client_reference_id` 必须在当前鉴权组织内唯一标识一笔逻辑付款。使用相同业务请求重试时返回已有付款，并设置
+        `is_duplicate=true`；使用相同值提交不同请求数据时返回冲突。
+
+
+        请求成功表示付款已被接受并开始银行执行，不代表对端银行已经入账。请使用 `GET /v2/payouts/{payout_id}`
+        获取最新状态。
+
+
+        同一组织同一时间只允许一笔付款请求进入执行流程。并发提交会在消费 Quote、创建付款单和扣减余额之前返回 `108015
+        payout_submission_in_progress`。请在短暂的随机退避后重试；同一笔逻辑付款应继续使用相同的
+        `client_reference_id`。
+      tags:
+        - 付款
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePayoutRequest'
+            example:
+              client_reference_id: payout_20260730_0001
+              quote_id: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+              purpose_code: goods_and_services
+              statement_reference: INV-2026-0730
+      responses:
+        '200':
+          description: 付款创建成功，或返回幂等命中的已有付款
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  payout_id: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+                  client_reference_id: payout_20260730_0001
+                  quote_id: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+                  provider: sgb
+                  status: processing
+                  payout_type: swift
+                  source_currency: USD
+                  destination_currency: USD
+                  destination_country: US
+                  amount_mode: receive
+                  fee_paid_by: PAYER
+                  sending_amount: '1051.05'
+                  receiving_amount: '1000.00'
+                  transfer_fee_amount: '1.05'
+                  bank_fee_amount: '50.00'
+                  fee_rate_decimal: '0.001'
+                  rate: '1'
+                  billing:
+                    currency: USD
+                    transfer_fee: '1.05'
+                    fx_fee: '0.00'
+                    rail_fee: '50.00'
+                    total_fee: '51.05'
+                    fee_lines:
+                      - type: transfer_fee
+                        amount: '1.05'
+                        currency: USD
+                        rate: '0.001'
+                      - type: rail_fee
+                        amount: '50.00'
+                        currency: USD
+                        rate: '1'
+                  destination:
+                    type: bank_account
+                    account_holder_type: business
+                    account_holder_name: Acme Supplies LLC
+                    bank_country: US
+                    bank_name: Example Bank
+                    account_number_masked: '******3210'
+                    swift_code: BOFAUS3NXXX
+                  purpose_code: goods_and_services
+                  statement_reference: INV-2026-0730
+                  bank_reference: null
+                  failure: null
+                  return: null
+                  is_duplicate: false
+                  created_at: 1786587000
+                  updated_at: 1786587001
+                  completed_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/v2/payouts' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+                "client_reference_id": "payout_20260730_0001",
+                "quote_id": "poq_01JQ90B8S5VJ6R3T7F1M2C4N9X",
+                "purpose_code": "goods_and_services",
+                "statement_reference": "INV-2026-0730"
+              }'
+  /v2/payouts/status/batch:
+    post:
+      operationId: batchGetFiatPayoutStatuses
+      summary: 分页查询法币付款状态
+      description: |-
+        返回当前鉴权组织在 `start_time` 至 `end_time`（包含边界）内创建的法币付款。需要 `payout.read` 权限。
+
+        结果按创建时间倒序排列并使用页码分页。`page` 默认值为 `1`；`page_size` 默认值为 `20`，最大值为 `100`。
+
+        按时间窗口定期对账时使用此接口；查询一笔已知付款时使用 `GET /v2/payouts/{payout_id}`。
+      tags:
+        - 付款
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchPayoutStatusRequest'
+            example:
+              start_time: 1786500000
+              end_time: 1786599999
+              page: 1
+              page_size: 20
+      responses:
+        '200':
+          description: 按创建时间倒序返回的付款状态及分页信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchPayoutStatusEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  payouts:
+                    - payout_id: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+                      client_reference_id: payout_20260730_0001
+                      quote_id: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+                      provider: sgb
+                      status: completed
+                      payout_type: swift
+                      source_currency: USD
+                      destination_currency: USD
+                      destination_country: US
+                      amount_mode: receive
+                      fee_paid_by: PAYER
+                      sending_amount: '1051.05'
+                      receiving_amount: '1000.00'
+                      transfer_fee_amount: '1.05'
+                      bank_fee_amount: '50.00'
+                      fee_rate_decimal: '0.001'
+                      rate: '1'
+                      billing:
+                        currency: USD
+                        transfer_fee: '1.05'
+                        fx_fee: '0.00'
+                        rail_fee: '50.00'
+                        total_fee: '51.05'
+                        fee_lines:
+                          - type: transfer_fee
+                            amount: '1.05'
+                            currency: USD
+                            rate: '0.001'
+                          - type: rail_fee
+                            amount: '50.00'
+                            currency: USD
+                            rate: '1'
+                      destination:
+                        type: bank_account
+                        account_holder_type: business
+                        account_holder_name: Acme Supplies LLC
+                        bank_country: US
+                        bank_name: Example Bank
+                        account_number_masked: '******3210'
+                        swift_code: BOFAUS3NXXX
+                      purpose_code: goods_and_services
+                      statement_reference: INV-2026-0730
+                      bank_reference: RMTO2084957259539812352
+                      failure: null
+                      return: null
+                      created_at: 1786587000
+                      updated_at: 1786587871
+                      completed_at: 1786587871
+                  total: 1
+                  page: 1
+                  page_size: 20
+                  total_pages: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/v2/payouts/status/batch' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+                "start_time": 1786500000,
+                "end_time": 1786599999,
+                "page": 1,
+                "page_size": 20
+              }'
+  /v2/payouts/{payout_id}:
+    get:
+      operationId: getFiatPayout
+      summary: 查询法币付款
+      description: >-
+        返回当前鉴权组织的一笔付款最新状态。需要 `payout.read` 权限。
+
+
+        `processing` 表示仍在执行；`completed` 表示付款已成功完成。对端银行仍可能拒收并退回一笔已经完成的汇款；原付款继续保持
+        `completed`，可选的 `return` 对象会描述银行退汇和独立退款。`failed` 表示付款在银行成功完成前失败。
+      tags:
+        - 付款
+      parameters:
+        - $ref: '#/components/parameters/PayoutId'
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: 当前付款状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayoutEnvelope'
+              examples:
+                processing:
+                  summary: 付款处理中
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      payout_id: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+                      client_reference_id: payout_20260730_0001
+                      quote_id: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+                      provider: sgb
+                      status: processing
+                      payout_type: swift
+                      source_currency: USD
+                      destination_currency: USD
+                      destination_country: US
+                      amount_mode: receive
+                      fee_paid_by: PAYER
+                      sending_amount: '1051.05'
+                      receiving_amount: '1000.00'
+                      transfer_fee_amount: '1.05'
+                      bank_fee_amount: '50.00'
+                      fee_rate_decimal: '0.001'
+                      rate: '1'
+                      billing:
+                        currency: USD
+                        transfer_fee: '1.05'
+                        fx_fee: '0.00'
+                        rail_fee: '50.00'
+                        total_fee: '51.05'
+                        fee_lines:
+                          - type: transfer_fee
+                            amount: '1.05'
+                            currency: USD
+                            rate: '0.001'
+                          - type: rail_fee
+                            amount: '50.00'
+                            currency: USD
+                            rate: '1'
+                      destination:
+                        type: bank_account
+                        account_holder_type: business
+                        account_holder_name: Acme Supplies LLC
+                        bank_country: US
+                        bank_name: Example Bank
+                        account_number_masked: '******3210'
+                        swift_code: BOFAUS3NXXX
+                      purpose_code: goods_and_services
+                      statement_reference: INV-2026-0730
+                      bank_reference: null
+                      failure: null
+                      return: null
+                      is_duplicate: false
+                      created_at: 1786587000
+                      updated_at: 1786587001
+                      completed_at: null
+                completed:
+                  summary: 付款已完成
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      payout_id: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+                      client_reference_id: payout_20260730_0001
+                      quote_id: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+                      provider: sgb
+                      status: completed
+                      payout_type: swift
+                      source_currency: USD
+                      destination_currency: USD
+                      destination_country: US
+                      amount_mode: receive
+                      fee_paid_by: PAYER
+                      sending_amount: '1051.05'
+                      receiving_amount: '1000.00'
+                      transfer_fee_amount: '1.05'
+                      bank_fee_amount: '50.00'
+                      fee_rate_decimal: '0.001'
+                      rate: '1'
+                      billing:
+                        currency: USD
+                        transfer_fee: '1.05'
+                        fx_fee: '0.00'
+                        rail_fee: '50.00'
+                        total_fee: '51.05'
+                        fee_lines:
+                          - type: transfer_fee
+                            amount: '1.05'
+                            currency: USD
+                            rate: '0.001'
+                          - type: rail_fee
+                            amount: '50.00'
+                            currency: USD
+                            rate: '1'
+                      destination:
+                        type: bank_account
+                        account_holder_type: business
+                        account_holder_name: Acme Supplies LLC
+                        bank_country: US
+                        bank_name: Example Bank
+                        account_number_masked: '******3210'
+                        swift_code: BOFAUS3NXXX
+                      purpose_code: goods_and_services
+                      statement_reference: INV-2026-0730
+                      bank_reference: RMTO2084957259539812352
+                      failure: null
+                      return: null
+                      is_duplicate: false
+                      created_at: 1786587000
+                      updated_at: 1786587871
+                      completed_at: 1786587871
+                bank_returned:
+                  summary: 已完成付款随后被对端银行退回
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      payout_id: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+                      client_reference_id: payout_20260730_0001
+                      quote_id: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+                      provider: sgb
+                      status: completed
+                      payout_type: swift
+                      source_currency: USD
+                      destination_currency: USD
+                      destination_country: US
+                      amount_mode: receive
+                      fee_paid_by: PAYER
+                      sending_amount: '1051.05'
+                      receiving_amount: '1000.00'
+                      transfer_fee_amount: '1.05'
+                      bank_fee_amount: '50.00'
+                      fee_rate_decimal: '0.001'
+                      rate: '1'
+                      billing:
+                        currency: USD
+                        transfer_fee: '1.05'
+                        fx_fee: '0.00'
+                        rail_fee: '50.00'
+                        total_fee: '51.05'
+                        fee_lines:
+                          - type: transfer_fee
+                            amount: '1.05'
+                            currency: USD
+                            rate: '0.001'
+                          - type: rail_fee
+                            amount: '50.00'
+                            currency: USD
+                            rate: '1'
+                      destination:
+                        type: bank_account
+                        account_holder_type: business
+                        account_holder_name: Acme Supplies LLC
+                        bank_country: US
+                        bank_name: Example Bank
+                        account_number_masked: '******3210'
+                        swift_code: BOFAUS3NXXX
+                      purpose_code: goods_and_services
+                      statement_reference: INV-2026-0730
+                      bank_reference: RMTO2084957259539812352
+                      failure: null
+                      return:
+                        status: refunded
+                        reason_code: recipient_bank_rejected
+                        reason: Beneficiary bank rejected the transfer
+                        returned_amount: '1000.00'
+                        refund_amount: '1000.00'
+                        retained_fee: '51.05'
+                        currency: USD
+                        returned_at: 1786674271
+                      is_duplicate: false
+                      created_at: 1786587000
+                      updated_at: 1786674271
+                      completed_at: 1786587871
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/v2/payouts/fpo_01JQ90GQJTC5P7B2D8N6R4K1MX' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+components:
+  parameters:
+    DateHeader:
+      name: Date
+      in: header
+      required: false
+      description: GMT 服务器时间，例如 Tue, 21 Jan 2025 12:00:00 GMT。实际请求必填；Try it 签名器会自动注入。
+      schema:
+        type: string
+        example: Tue, 30 Jul 2026 08:50:00 GMT
+    AuthorizationHeader:
+      name: Authorization
+      in: header
+      required: false
+      description: >-
+        HMAC-SHA256 `Signature` 请求头。实际请求必填；Try it
+        签名器会自动注入。详见[鉴权](/docs/en/4-authorization)指南。
+      schema:
+        type: string
+        example: >-
+          Signature
+          keyId="key_example",algorithm="hmac-sha256",headers="@request-target
+          date",signature="<signature>"
+    DigestHeader:
+      name: Digest
+      in: header
+      required: false
+      description: 请求存在 Body 时实际请求必须携带 SHA-256 摘要；Try it 签名器会自动注入。
+      schema:
+        type: string
+        example: SHA-256=<base64(sha256(request body))>
+    PayoutId:
+      name: payout_id
+      in: path
+      required: true
+      description: Infini 法币付款 ID。
+      schema:
+        type: string
+        example: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+  responses:
+    BadRequest:
+      description: 请求语法或字段校验失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 30013
+            message: amount must be a positive decimal string
+            data:
+              error: invalid_parameter
+              field: amount
+              retryable: false
+    Unauthorized:
+      description: HMAC 网关校验或应用鉴权失败
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/GatewayError'
+          examples:
+            gatewayAuthenticationFailed:
+              summary: 网关无法校验签名请求
+              value:
+                message: client request can't be validated
+            applicationAuthenticationFailed:
+              summary: 应用鉴权上下文无效
+              value:
+                code: 401
+                message: Unauthorized
+                data:
+                  error: authentication_failed
+                  field: null
+                  retryable: false
+    Forbidden:
+      description: API Key 权限、IP 白名单或组织资格校验拒绝请求
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/GatewayError'
+          examples:
+            permissionDenied:
+              summary: 付款权限、IP 策略或组织访问被拒绝
+              value:
+                code: 403
+                message: Payout access is denied
+                data:
+                  error: permission_denied
+                  field: null
+                  retryable: false
+            payoutSourceAccountNotFound:
+              summary: 组织没有 USD 付款账户
+              value:
+                code: 108010
+                message: USD payout account is not available for this organization
+                data:
+                  error: payout_source_account_not_found
+                  field: null
+                  retryable: false
+    NotFound:
+      description: 当前鉴权组织下不存在该资源
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            payoutNotFound:
+              summary: 当前鉴权组织下不存在该付款
+              value:
+                code: 404
+                message: Payout does not exist
+                data:
+                  error: resource_not_found
+                  field: payout_id
+                  retryable: false
+            quoteNotFound:
+              summary: 当前鉴权组织下不存在该 Quote
+              value:
+                code: 404
+                message: Quote does not exist
+                data:
+                  error: resource_not_found
+                  field: quote_id
+                  retryable: false
+    Conflict:
+      description: 请求与幂等数据、Quote 状态或另一笔付款提交发生冲突
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            idempotencyConflict:
+              summary: 幂等引用被用于不同的请求数据
+              value:
+                code: 108012
+                message: client_reference_id was already used for a different request
+                data:
+                  error: idempotency_conflict
+                  field: client_reference_id
+                  retryable: false
+            quoteAlreadyUsed:
+              summary: 报价已经被消费
+              value:
+                code: 108013
+                message: Quote has already been used
+                data:
+                  error: quote_already_used
+                  field: quote_id
+                  retryable: false
+            quoteNotActive:
+              summary: 报价当前不可用
+              value:
+                code: 108014
+                message: Quote is not active
+                data:
+                  error: quote_not_active
+                  field: quote_id
+                  retryable: false
+            submissionInProgress:
+              summary: 当前组织已有另一笔付款正在提交
+              value:
+                code: 108015
+                message: >-
+                  Another payout submission is in progress. Please retry
+                  shortly.
+                data:
+                  error: payout_submission_in_progress
+                  field: null
+                  retryable: true
+            payoutSourceAccountInvalid:
+              summary: 付款账户的 USD 配置不一致
+              value:
+                code: 108011
+                message: USD payout account configuration is invalid. Contact support.
+                data:
+                  error: payout_source_account_invalid
+                  field: null
+                  retryable: false
+    UnprocessableEntity:
+      description: 请求语法正确，但未通过付款资格或执行校验
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            invalidFeeMode:
+              summary: 手续费模式无效
+              value:
+                code: 108001
+                message: amount_mode and fee_paid_by are not supported together
+                data:
+                  error: invalid_fee_mode
+                  field: fee_paid_by
+                  retryable: false
+            quoteExpired:
+              summary: 报价已过期
+              value:
+                code: 108002
+                message: Quote has expired
+                data:
+                  error: quote_expired
+                  field: quote_id
+                  retryable: true
+            quoteUnavailable:
+              summary: 报价暂时不可用
+              value:
+                code: 108003
+                message: Payout quote is temporarily unavailable
+                data:
+                  error: quote_unavailable
+                  field: null
+                  retryable: true
+            amountExceedsLimit:
+              summary: 金额超过支持的限额
+              value:
+                code: 108004
+                message: Payout amount exceeds the supported limit
+                data:
+                  error: amount_exceeds_limit
+                  field: amount
+                  retryable: false
+            amountTooSmall:
+              summary: 金额低于支持的最小值
+              value:
+                code: 108005
+                message: Payout sending amount must be greater than 100 USD
+                data:
+                  error: amount_too_small
+                  field: amount
+                  retryable: false
+            insufficientBalance:
+              summary: 可用余额不足
+              value:
+                code: 108006
+                message: Insufficient payout balance
+                data:
+                  error: insufficient_balance
+                  field: amount
+                  retryable: false
+            dailyLimitExceeded:
+              summary: 金额将超过账户共享的每日提现限额
+              value:
+                code: 108007
+                message: Payout would exceed the account's daily withdrawal limit
+                data:
+                  error: daily_limit_exceeded
+                  field: amount
+                  retryable: false
+    ServiceUnavailable:
+      description: 付款执行服务或服务商流动性暂时不可用
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 108009
+            message: Payout service is temporarily unavailable. Please try again later.
+            data:
+              error: payout_service_unavailable
+              field: null
+              retryable: true
+    InternalError:
+      description: 发生未预期的内部错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 500
+            message: An error occurred internally
+            data:
+              error: internal_error
+              field: null
+              retryable: true
+  schemas:
+    StandardEnvelope:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: integer
+          enum:
+            - 0
+          description: 业务码，`0` 表示成功。
+          example: 0
+        message:
+          type: string
+          description: 响应消息。
+          example: ''
+    ErrorEnvelope:
+      type: object
+      required:
+        - code
+        - message
+        - data
+      properties:
+        code:
+          type: integer
+          minimum: 1
+          description: 稳定的非零业务错误码。Fiat Payout 专属错误使用预留的 108001-108099 号段。
+          example: 108002
+        message:
+          type: string
+          description: 供排查使用的可读错误信息，不应作为程序分支依据。
+          example: Quote has expired
+        data:
+          $ref: '#/components/schemas/ErrorData'
+    ErrorData:
+      type: object
+      required:
+        - error
+        - field
+        - retryable
+      properties:
+        error:
+          type: string
+          description: 稳定的机器可读错误标识。
+          example: quote_expired
+        field:
+          type: string
+          nullable: true
+          description: 与错误相关的请求字段；不适用时为空。
+          example: quote_id
+        retryable:
+          type: boolean
+          description: 修正临时状态后重试是否可能成功。
+          example: true
+    GatewayError:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: 网关校验错误。
+          example: client request can't be validated
+    CreateQuoteRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - amount
+        - amount_mode
+        - fee_paid_by
+        - source_currency
+        - destination_currency
+        - destination_country
+        - payout_type
+        - destination
+      properties:
+        amount:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$
+          description: 按 `amount_mode` 含义填写的正数 USD 金额。
+          example: '1000.00'
+        amount_mode:
+          type: string
+          enum:
+            - send
+            - receive
+          description: '`amount` 固定的金额侧。`send` 表示来源账户扣款；`receive` 表示收款金额。'
+          example: receive
+        fee_paid_by:
+          type: string
+          enum:
+            - PAYER
+            - BENEFICIARY
+          description: >-
+            手续费承担方及金额计算输入。`PAYER` 表示手续费外扣；`BENEFICIARY` 表示手续费内扣。第一期只接受 `receive`
+            与 `PAYER`，或 `send` 与 `BENEFICIARY`。
+          example: PAYER
+        source_currency:
+          type: string
+          enum:
+            - USD
+          description: 组织余额币种。第一期仅支持 USD。
+          example: USD
+        destination_currency:
+          type: string
+          enum:
+            - USD
+          description: 收款人到账币种。付款 Quote 当前仅支持 USD。
+          example: USD
+        destination_country:
+          type: string
+          pattern: ^[A-Z]{2}$
+          description: ISO 3166-1 alpha-2 格式的目标国家代码。
+          example: US
+        payout_type:
+          type: string
+          enum:
+            - swift
+          description: 付款通道。当前仅支持 SWIFT。
+          example: swift
+        destination:
+          $ref: '#/components/schemas/BankDestinationInput'
+    BankDestinationInput:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - account_holder_type
+        - account_holder_name
+        - bank_country
+        - bank_name
+        - account_number
+        - swift_code
+      properties:
+        type:
+          type: string
+          enum:
+            - bank_account
+          description: 收款目标类型。
+          example: bank_account
+        account_holder_type:
+          type: string
+          enum:
+            - individual
+            - business
+          description: 银行账户持有人的法律主体类型。
+          example: business
+        account_holder_name:
+          type: string
+          minLength: 1
+          maxLength: 140
+          description: 银行账户登记的完整法定名称。
+          example: Acme Supplies LLC
+        bank_country:
+          type: string
+          pattern: ^[A-Z]{2}$
+          description: ISO 3166-1 alpha-2 格式的银行国家代码。
+          example: US
+        bank_name:
+          type: string
+          minLength: 1
+          maxLength: 140
+          description: 收款银行的法定名称。
+          example: Example Bank
+        account_number:
+          type: string
+          minLength: 4
+          maxLength: 34
+          writeOnly: true
+          description: 收款银行账号。
+          example: '9876543210'
+        swift_code:
+          type: string
+          pattern: ^[A-Z0-9]{8}([A-Z0-9]{3})?$
+          description: 收款银行的 SWIFT/BIC Code。
+          example: BOFAUS3NXXX
+        address:
+          $ref: '#/components/schemas/PostalAddress'
+    PostalAddress:
+      type: object
+      additionalProperties: false
+      required:
+        - line1
+        - city
+        - postal_code
+        - country
+      properties:
+        line1:
+          type: string
+          description: 主要街道地址。
+          example: 123 Market Street
+        line2:
+          type: string
+          nullable: true
+          description: 补充地址。
+          example: Suite 500
+        city:
+          type: string
+          description: 城市或地区。
+          example: New York
+        state:
+          type: string
+          nullable: true
+          description: 州、省或地区。
+          example: NY
+        postal_code:
+          type: string
+          description: 邮政编码。
+          example: '10001'
+        country:
+          type: string
+          pattern: ^[A-Z]{2}$
+          description: ISO 3166-1 alpha-2 格式的地址国家代码。
+          example: US
+    BankDestinationView:
+      type: object
+      required:
+        - type
+        - account_holder_type
+        - account_holder_name
+        - bank_country
+        - bank_name
+        - account_number_masked
+        - swift_code
+      properties:
+        type:
+          type: string
+          enum:
+            - bank_account
+          description: 收款目标类型。
+          example: bank_account
+        account_holder_type:
+          type: string
+          enum:
+            - individual
+            - business
+          description: 银行账户持有人的法律主体类型。
+          example: business
+        account_holder_name:
+          type: string
+          description: 银行账户登记的完整法定名称。
+          example: Acme Supplies LLC
+        bank_country:
+          type: string
+          description: ISO 3166-1 alpha-2 格式的银行国家代码。
+          example: US
+        bank_name:
+          type: string
+          description: 收款银行的法定名称。
+          example: Example Bank
+        account_number_masked:
+          type: string
+          description: 脱敏银行账号；响应永远不会返回完整账户资料。
+          example: '******3210'
+        swift_code:
+          type: string
+          description: 收款银行的 SWIFT/BIC Code。
+          example: BOFAUS3NXXX
+    FeeLine:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - amount
+        - currency
+        - rate
+      properties:
+        type:
+          type: string
+          enum:
+            - transfer_fee
+            - fx_fee
+            - rail_fee
+          description: 手续费分项类型。
+          example: transfer_fee
+        amount:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$
+          description: 以 `currency` 计价的手续费分项金额。
+          example: '1.05'
+        currency:
+          type: string
+          enum:
+            - USD
+          description: 手续费分项币种。
+          example: USD
+        rate:
+          type: string
+          description: 该费用分项使用的小数费率；固定通道费返回 `1`。
+          example: '0.001'
+    BillingBreakdown:
+      type: object
+      additionalProperties: false
+      required:
+        - currency
+        - transfer_fee
+        - fx_fee
+        - rail_fee
+        - total_fee
+        - fee_lines
+      properties:
+        currency:
+          type: string
+          enum:
+            - USD
+          description: 所有费用明细金额使用的币种。
+          example: USD
+        transfer_fee:
+          type: string
+          description: Infini 为处理该笔付款收取的服务费，不包含任何银行或通道费。
+          example: '1.05'
+        fx_fee:
+          type: string
+          description: 外汇兑换费。当前 USD 到 USD 路由固定为 `0.00`。
+          example: '0.00'
+        rail_fee:
+          type: string
+          description: 所选银行及付款通道对应的银行手续费。
+          example: '50.00'
+        total_fee:
+          type: string
+          description: '`billing` 中所有手续费项目的合计。'
+          example: '51.05'
+        fee_lines:
+          type: array
+          description: 用于对账的手续费分项。
+          items:
+            $ref: '#/components/schemas/FeeLine'
+    Quote:
+      type: object
+      required:
+        - quote_id
+        - provider
+        - payout_type
+        - source_currency
+        - destination_currency
+        - destination_country
+        - amount_mode
+        - fee_paid_by
+        - sending_amount
+        - receiving_amount
+        - transfer_fee_amount
+        - bank_fee_amount
+        - fee_rate_decimal
+        - rate
+        - billing
+        - destination
+        - expires_at
+      properties:
+        quote_id:
+          type: string
+          description: 有时效性的付款 Quote ID。
+          example: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+        provider:
+          type: string
+          enum:
+            - sgb
+          readOnly: true
+          description: 只读的执行服务商标识。
+          example: sgb
+        payout_type:
+          type: string
+          enum:
+            - swift
+          description: Quote 绑定的付款通道。
+          example: swift
+        source_currency:
+          type: string
+          enum:
+            - USD
+          description: 组织余额币种。
+          example: USD
+        destination_currency:
+          type: string
+          enum:
+            - USD
+          description: 收款人到账币种。
+          example: USD
+        destination_country:
+          type: string
+          description: ISO 3166-1 alpha-2 格式的目标国家代码。
+          example: US
+        amount_mode:
+          type: string
+          enum:
+            - send
+            - receive
+          description: Quote 请求固定的金额侧。
+          example: receive
+        fee_paid_by:
+          type: string
+          enum:
+            - PAYER
+            - BENEFICIARY
+          description: 付款手续费承担方。`PAYER` 表示手续费外扣；`BENEFICIARY` 表示手续费内扣。
+          example: PAYER
+        sending_amount:
+          type: string
+          description: 组织来源余额的实际总扣款，对账时应作为该笔付款的支出金额。
+          example: '1051.05'
+        receiving_amount:
+          type: string
+          description: 收款人的到账金额。
+          example: '1000.00'
+        transfer_fee_amount:
+          type: string
+          description: Infini 为处理该笔付款收取的服务费，不包含任何银行或通道费，与 `billing.transfer_fee` 相等。
+          example: '1.05'
+        bank_fee_amount:
+          type: string
+          description: 所选银行及付款通道对应的银行手续费，例如 SWIFT、ACH 或 Wire。该字段与 `billing.rail_fee` 相等。
+          example: '50.00'
+        fee_rate_decimal:
+          type: string
+          description: Quote 使用的小数形式转账费率。
+          example: '0.001'
+        rate:
+          type: string
+          description: 每 1 单位来源币种可兑换的目标币种数量。
+          example: '1'
+        billing:
+          $ref: '#/components/schemas/BillingBreakdown'
+        destination:
+          $ref: '#/components/schemas/BankDestinationView'
+        expires_at:
+          type: integer
+          format: int64
+          description: Quote 过期时间，Unix 秒。
+          example: 1786586700
+    QuoteEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/Quote'
+    CreatePayoutRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - client_reference_id
+        - quote_id
+        - purpose_code
+      properties:
+        client_reference_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: ^[A-Za-z0-9._-]+$
+          description: 在商户范围内标识一笔逻辑付款的幂等与对账引用。
+          example: payout_20260730_0001
+        quote_id:
+          type: string
+          description: 当前鉴权组织拥有且未过期的 Quote，绑定收款资料、金额、手续费承担方、服务商、通道和定价。
+          example: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+        purpose_code:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 当前付款路由接受的业务用途代码。
+          example: goods_and_services
+        statement_reference:
+          type: string
+          minLength: 1
+          maxLength: 35
+          description: 银行通道支持时向收款人展示的附言。
+          example: INV-2026-0730
+    BatchPayoutStatusRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - start_time
+        - end_time
+      properties:
+        start_time:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 付款创建时间区间的开始时间（含），Unix 秒。
+          example: 1786500000
+        end_time:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 付款创建时间区间的结束时间（含），Unix 秒，必须大于或等于 `start_time`。
+          example: 1786599999
+        page:
+          type: integer
+          minimum: 1
+          default: 1
+          description: 页码。
+          example: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+          description: 每页付款数量。
+          example: 20
+    PayoutStatusItem:
+      type: object
+      additionalProperties: false
+      required:
+        - payout_id
+        - client_reference_id
+        - quote_id
+        - provider
+        - status
+        - payout_type
+        - source_currency
+        - destination_currency
+        - destination_country
+        - amount_mode
+        - fee_paid_by
+        - sending_amount
+        - receiving_amount
+        - transfer_fee_amount
+        - bank_fee_amount
+        - fee_rate_decimal
+        - rate
+        - billing
+        - destination
+        - purpose_code
+        - statement_reference
+        - bank_reference
+        - failure
+        - return
+        - created_at
+        - updated_at
+        - completed_at
+      properties:
+        payout_id:
+          type: string
+          description: Infini 法币付款 ID。
+          example: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+        client_reference_id:
+          type: string
+          description: 商户提供的付款对账引用。
+          example: payout_20260730_0001
+        quote_id:
+          type: string
+          description: 创建该付款使用的 Quote。
+          example: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+        provider:
+          type: string
+          enum:
+            - sgb
+          readOnly: true
+          description: Infini 选择的执行服务商。
+          example: sgb
+        status:
+          type: string
+          enum:
+            - processing
+            - completed
+            - failed
+          description: 当前付款生命周期状态。
+          example: completed
+        payout_type:
+          type: string
+          enum:
+            - swift
+          description: Quote 绑定的付款通道。
+          example: swift
+        source_currency:
+          type: string
+          enum:
+            - USD
+          description: 组织余额币种。
+          example: USD
+        destination_currency:
+          type: string
+          enum:
+            - USD
+          description: 收款人到账币种。
+          example: USD
+        destination_country:
+          type: string
+          description: ISO 3166-1 alpha-2 格式的目标国家代码。
+          example: US
+        amount_mode:
+          type: string
+          enum:
+            - send
+            - receive
+          description: 已接受 Quote 固定的金额侧。
+          example: receive
+        fee_paid_by:
+          type: string
+          enum:
+            - PAYER
+            - BENEFICIARY
+          description: 付款手续费承担方。
+          example: PAYER
+        sending_amount:
+          type: string
+          description: 来源余额的实际总扣款。
+          example: '1051.05'
+        receiving_amount:
+          type: string
+          description: 收款人的到账金额。
+          example: '1000.00'
+        transfer_fee_amount:
+          type: string
+          description: Quote 固定的 Infini 服务费。
+          example: '1.05'
+        bank_fee_amount:
+          type: string
+          description: Quote 固定的银行手续费。
+          example: '50.00'
+        fee_rate_decimal:
+          type: string
+          description: Quote 固定的小数形式转账费率。
+          example: '0.001'
+        rate:
+          type: string
+          description: Quote 固定的汇率。
+          example: '1'
+        billing:
+          $ref: '#/components/schemas/BillingBreakdown'
+        destination:
+          $ref: '#/components/schemas/BankDestinationView'
+        purpose_code:
+          type: string
+          description: 创建付款时提供的业务用途。
+          example: goods_and_services
+        statement_reference:
+          type: string
+          nullable: true
+          description: 银行通道支持时向收款人展示的附言。
+          example: INV-2026-0730
+        bank_reference:
+          type: string
+          nullable: true
+          description: 可用时返回的银行转账引用。
+          example: RMTO2084957259539812352
+        failure:
+          $ref: '#/components/schemas/Failure'
+        return:
+          $ref: '#/components/schemas/PayoutReturn'
+        created_at:
+          type: integer
+          format: int64
+          description: 付款创建时间，Unix 秒。
+          example: 1786587000
+        updated_at:
+          type: integer
+          format: int64
+          description: 付款最后更新时间，Unix 秒。
+          example: 1786587871
+        completed_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: 可用时返回的付款完成时间，Unix 秒。
+          example: 1786587871
+    BatchPayoutStatusEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              type: object
+              additionalProperties: false
+              required:
+                - payouts
+                - total
+                - page
+                - page_size
+                - total_pages
+              properties:
+                payouts:
+                  type: array
+                  description: 按创建时间倒序排列的付款状态。
+                  items:
+                    $ref: '#/components/schemas/PayoutStatusItem'
+                total:
+                  type: integer
+                  format: int64
+                  description: 时间区间内符合条件的付款总数。
+                  example: 1
+                page:
+                  type: integer
+                  description: 当前页码。
+                  example: 1
+                page_size:
+                  type: integer
+                  description: 请求的每页数量。
+                  example: 20
+                total_pages:
+                  type: integer
+                  description: 总页数。
+                  example: 1
+    Payout:
+      type: object
+      required:
+        - payout_id
+        - client_reference_id
+        - quote_id
+        - provider
+        - status
+        - payout_type
+        - source_currency
+        - destination_currency
+        - destination_country
+        - amount_mode
+        - fee_paid_by
+        - sending_amount
+        - receiving_amount
+        - transfer_fee_amount
+        - bank_fee_amount
+        - fee_rate_decimal
+        - rate
+        - billing
+        - destination
+        - purpose_code
+        - statement_reference
+        - bank_reference
+        - failure
+        - return
+        - is_duplicate
+        - created_at
+        - updated_at
+        - completed_at
+      properties:
+        payout_id:
+          type: string
+          description: Infini 法币付款 ID。
+          example: fpo_01JQ90GQJTC5P7B2D8N6R4K1MX
+        client_reference_id:
+          type: string
+          description: 商户提供的付款对账引用。
+          example: payout_20260730_0001
+        quote_id:
+          type: string
+          description: 创建付款时使用的 Quote。
+          example: poq_01JQ90B8S5VJ6R3T7F1M2C4N9X
+        provider:
+          type: string
+          enum:
+            - sgb
+          readOnly: true
+          description: Infini 选择的执行服务商。
+          example: sgb
+        status:
+          type: string
+          enum:
+            - processing
+            - completed
+            - failed
+          description: 当前付款生命周期状态。对端银行退汇不会改变已完成付款的状态；请查看 `return` 对象了解独立退款。API 付款没有待审批状态。
+          example: processing
+        payout_type:
+          type: string
+          enum:
+            - swift
+          description: Quote 绑定的付款通道。
+          example: swift
+        source_currency:
+          type: string
+          enum:
+            - USD
+          description: 组织余额币种。
+          example: USD
+        destination_currency:
+          type: string
+          enum:
+            - USD
+          description: 收款人到账币种。
+          example: USD
+        destination_country:
+          type: string
+          description: ISO 3166-1 alpha-2 格式的目标国家代码。
+          example: US
+        amount_mode:
+          type: string
+          enum:
+            - send
+            - receive
+          description: 已接受 Quote 固定的金额侧。
+          example: receive
+        fee_paid_by:
+          type: string
+          enum:
+            - PAYER
+            - BENEFICIARY
+          description: 付款手续费承担方。`PAYER` 表示手续费外扣；`BENEFICIARY` 表示手续费内扣，并持久化用于账单对账。
+          example: PAYER
+        sending_amount:
+          type: string
+          description: 来源余额的实际总扣款，也是账单明细中的权威支出金额。
+          example: '1051.05'
+        receiving_amount:
+          type: string
+          description: 收款人的到账金额。
+          example: '1000.00'
+        transfer_fee_amount:
+          type: string
+          description: Quote 已固定的 Infini 服务费，不包含任何银行或通道费。
+          example: '1.05'
+        bank_fee_amount:
+          type: string
+          description: Quote 已固定的所选银行及付款通道手续费。通道类型包括 SWIFT、ACH 或 Wire。
+          example: '50.00'
+        fee_rate_decimal:
+          type: string
+          description: Quote 固定的小数形式转账费率。
+          example: '0.001'
+        rate:
+          type: string
+          description: Quote 固定的汇率。
+          example: '1'
+        billing:
+          $ref: '#/components/schemas/BillingBreakdown'
+        destination:
+          $ref: '#/components/schemas/BankDestinationView'
+        purpose_code:
+          type: string
+          description: 创建付款时提交的业务用途。
+          example: goods_and_services
+        statement_reference:
+          type: string
+          nullable: true
+          description: 银行通道支持时向收款人展示的附言。
+          example: INV-2026-0730
+        bank_reference:
+          type: string
+          nullable: true
+          description: 可用时返回银行汇款引用。
+          example: RMTO2084957259539812352
+        failure:
+          $ref: '#/components/schemas/Failure'
+        return:
+          $ref: '#/components/schemas/PayoutReturn'
+        is_duplicate:
+          type: boolean
+          description: 本响应是否来自创建付款的幂等重试。
+          example: false
+        created_at:
+          type: integer
+          format: int64
+          description: 付款创建时间，Unix 秒。
+          example: 1786587000
+        updated_at:
+          type: integer
+          format: int64
+          description: 付款最后更新时间，Unix 秒。
+          example: 1786587001
+        completed_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: 银行合作方报告付款完成的时间，Unix 秒。
+          example: 1786587871
+    Failure:
+      type: object
+      nullable: true
+      description: 付款未能完成时的失败详情；其他状态为空。
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: 稳定的机器可读付款失败代码。
+          example: payout_failed
+        message:
+          type: string
+          description: 可读的付款失败详情。
+          example: The payout could not be completed
+    PayoutReturn:
+      type: object
+      nullable: true
+      additionalProperties: false
+      description: 对端银行退回已完成付款后产生的独立退款；其他情况为空。原付款继续保持 `completed`。
+      required:
+        - status
+        - reason_code
+        - reason
+        - returned_amount
+        - refund_amount
+        - retained_fee
+        - currency
+        - returned_at
+      properties:
+        status:
+          type: string
+          enum:
+            - refunded
+          description: 独立退款的入账状态。
+          example: refunded
+        reason_code:
+          type: string
+          enum:
+            - recipient_bank_rejected
+          description: 稳定的机器可读银行退回原因。
+          example: recipient_bank_rejected
+        reason:
+          type: string
+          description: 银行合作方提供的可读退汇原因。
+          example: Beneficiary bank rejected the transfer
+        returned_amount:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$
+          description: 银行合作方报告的退回金额。
+          example: '1000.00'
+        refund_amount:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$
+          description: 扣除保留手续费后实际退回组织余额的金额。
+          example: '1000.00'
+        retained_fee:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$
+          description: 原付款保留且未计入 `refund_amount` 的手续费。
+          example: '51.05'
+        currency:
+          type: string
+          enum:
+            - USD
+          description: 退回金额、退款金额和保留手续费的币种。
+          example: USD
+        returned_at:
+          type: integer
+          format: int64
+          description: 独立退款入账时间，Unix 秒。
+          example: 1786674271
+    PayoutEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/Payout'
+  securitySchemes:
+    InfiniHmac:
+      type: http
+      scheme: basic
+      description: 从 Infini 后台获取的 Sandbox API **Key**（keyId）与 **Secret**。
+security:
+  - InfiniHmac: []
