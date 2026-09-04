@@ -1,5 +1,10 @@
 # RC91 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC91 shipped at signed tag
+> `v0.1.0-rc91-signed` (`eb467a6`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-05-invoice-rc92-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC91 — the third and final layer of a change two previous releases each declared finished, plus the diagnostic gap that let it hide:
