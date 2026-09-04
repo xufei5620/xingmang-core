@@ -26,3 +26,19 @@ func CredentialRefsFor(accountID string) (keyIDRef, secretRef string) {
 	return "secret://" + scope + "/" + credentialNameKeyID,
 		"secret://" + scope + "/" + credentialNameSecret
 }
+
+// credentialNameWebhookSecret 是回调验签密钥的 name。
+//
+// 与 API 密钥分开是上游的划分：webhook secret 在后台的「Webhook 设置」里
+// 随端点生成，与 API Key 各自独立轮换。合成一条会让任何一方轮换时
+// 把另一方也弄坏。
+const credentialNameWebhookSecret = "webhook-secret"
+
+// WebhookSecretRefFor 从账号 id 推出该账号的回调密钥引用。
+//
+// 与 CredentialRefsFor 同一条 scope 约定（infini-<小写账号 id>），
+// 所以管理端「密钥引用」页上三条并排显示，运营一眼能看出哪个账号缺哪条。
+func WebhookSecretRefFor(accountID string) string {
+	scope := credentialScopePrefix + strings.ToLower(strings.TrimSpace(accountID))
+	return "secret://" + scope + "/" + credentialNameWebhookSecret
+}

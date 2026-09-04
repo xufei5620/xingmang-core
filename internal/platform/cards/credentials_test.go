@@ -1,6 +1,9 @@
 package cards
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // 凭据引用由账号 id 推出，不再单独配置。
 //
@@ -35,5 +38,25 @@ func TestCredentialRefsDifferPerAccount(t *testing.T) {
 
 	if a == b {
 		t.Fatal("不同账号必须推出不同的凭据引用")
+	}
+}
+
+// 回调密钥的引用与 API 密钥同 scope、不同 name。
+//
+// 同 scope 让管理端把一个账号的三条凭据并排显示；不同 name 让它们能各自
+// 轮换——上游就是这么划分的（webhook secret 随端点生成，与 API Key 独立）。
+func TestWebhookSecretRefSharesScopeWithApiKey(t *testing.T) {
+	keyIDRef, secretRef := CredentialRefsFor("LINFENG")
+	hookRef := WebhookSecretRefFor("LINFENG")
+
+	if !strings.HasPrefix(hookRef, "secret://infini-linfeng/") {
+		t.Fatalf("回调密钥应与 API 密钥同 scope, got %q", hookRef)
+	}
+	if hookRef == keyIDRef || hookRef == secretRef {
+		t.Fatalf("回调密钥必须是独立的一条引用, got %q", hookRef)
+	}
+	// 大小写归一化：管理端按这个 scope 写文件，客户端按同一个 scope 读。
+	if WebhookSecretRefFor("linfeng") != hookRef {
+		t.Fatal("scope 必须大小写无关")
 	}
 }

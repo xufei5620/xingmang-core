@@ -386,8 +386,9 @@ func main() {
 			slog.String("error_code", "cards_config_invalid"), slog.Any("err", err))
 		os.Exit(2)
 	}
-	cardService, cardStore, err := buildCards(ctx, cardsCfg, pool,
-		platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger), cfg.Environment)
+	cardSecretProvider := platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger)
+	cardService, cardStore, cardAccounts, err := buildCards(ctx, cardsCfg, pool,
+		cardSecretProvider, cfg.Environment)
 	if err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "cards_config_invalid"), slog.Any("err", err))
@@ -460,6 +461,9 @@ func main() {
 		// 写路径只走 cards.card.* Action，这里不开第二条。
 		Cards:        cardQuerierOrNil(cardStore),
 		CardAccounts: cardAccountIDs(cardService),
+		// nil 时回调路由整个不挂载（见 httpapi.Deps.CardWebhook）。
+		CardWebhook: cardWebhookOrNil(
+			buildCardWebhookProcessor(cardsCfg, cardStore, cardAccounts, cardSecretProvider)),
 		// 卡片账号的凭据引用进密钥引用页：运营在那里填值与轮换，
 		// 写进去的就是 SecretProvider 读的文件。
 		ExtraExpectedCredentials: cardExpectedCredentials(cardsCfg),
