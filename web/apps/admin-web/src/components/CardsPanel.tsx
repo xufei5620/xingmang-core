@@ -4,6 +4,7 @@ import { Badge, Button, Dialog, FormField, Input, Select } from "@xingmang/ui-pr
 import { useId, useState } from "react";
 import {
   freezeCard,
+  listCardBalances,
   issueCard,
   listCardOperationsNeedingAttention,
   listCards,
@@ -20,6 +21,7 @@ import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
 
 const CARDS_QUERY = "cards";
+const CARD_BALANCES_QUERY = "card-balances";
 const CARD_ATTENTION_QUERY = "card-operations-attention";
 
 /** 充值币种。与后端 Action 契约的枚举一致——多一个值会被后端当场拒掉。 */
@@ -522,6 +524,7 @@ export function CardsPanel() {
   return (
     <section className="flex flex-col gap-3">
       <AttentionBanner items={attentionQuery.data ?? []} />
+      <AccountBalancesStrip />
 
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="text-sm text-fg-muted">
@@ -566,5 +569,50 @@ export function CardsPanel() {
         />
       </ApiStateView>
     </section>
+  );
+}
+
+/** 各账号资金池的可用余额。
+ *
+ *  它回答的是「还能开多少张卡」——卡上的余额是已经花出去的钱，资金池才是
+ *  没花的。两者混在一起看会得出完全相反的结论。
+ *
+ *  单独一个查询而不是并进卡片列表：这是实时上游调用，比列表慢；而且一个
+ *  账号取不到不该影响另一个（凭据、权限、IP 白名单都是各自独立的）。
+ */
+function AccountBalancesStrip() {
+  const query = useQuery({
+    queryKey: [CARD_BALANCES_QUERY],
+    queryFn: ({ signal }) => listCardBalances({ signal }),
+    // 余额不随卡片列表轮询：它慢，而且没人盯着看的时候不需要新。
+    staleTime: 60_000,
+  });
+
+  if (query.isPending || !query.data?.length) return null;
+
+  return (
+    <div className="flex flex-wrap gap-3">
+      {query.data.map((b) => (
+        <div key={b.account} className="rounded-lg border border-edge bg-surface px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Badge tone="neutral">{b.account}</Badge>
+            <span className="text-xs text-fg-muted">资金池可用</span>
+          </div>
+          {b.error ? (
+            // 取不到显示成「—」而不是 0：把取不到显示成零余额，
+            // 会让人以为钱花光了。
+            <div className="mt-1 text-sm text-fg-muted" title={`读取失败：${b.error}`}>
+              — <span className="text-xs">（读取失败）</span>
+            </div>
+          ) : (
+            <div className="mt-1 flex gap-3 font-mono text-sm">
+              <span>{b.usdt || "0"} USDT</span>
+              <span>{b.usdc || "0"} USDC</span>
+              <span>{b.usd || "0"} USD</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }

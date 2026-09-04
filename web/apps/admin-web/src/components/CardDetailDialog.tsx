@@ -175,6 +175,25 @@ export function CardDetailDialog({
       numeric: true,
     },
     {
+      id: "original",
+      header: "原始金额",
+      // 只在与卡本位币不同时显示：同币种消费时上游不给这两个字段，
+      // 硬填一个「等于本币」的值会让跨境消费看起来和普通消费一样。
+      cell: (row) =>
+        row.transaction_amount && row.transaction_currency
+          ? `${row.transaction_amount} ${row.transaction_currency}`
+          : "—",
+      value: (row) => row.transaction_amount ?? "",
+    },
+    {
+      id: "settled",
+      header: "结算时间",
+      // 空 = 仅授权、尚未结算。授权可以被撤销，金额也可能变（见回调里的
+      // auth_settle_adjustment），所以这一列不能拿「交易时间」顶替。
+      cell: (row) => (row.settled_at ? formatUtcTimestamp(row.settled_at) : "授权中"),
+      value: (row) => row.settled_at ?? "",
+    },
+    {
       id: "status",
       header: "状态",
       cell: (row) => <Badge tone="neutral">{row.status || "—"}</Badge>,

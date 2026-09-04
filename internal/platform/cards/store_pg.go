@@ -248,22 +248,33 @@ func (s *PgStore) UpsertTransactions(ctx context.Context, account, cardID string
 	const upsertSQL = `
 INSERT INTO cards.infini_card_transaction (
     environment, account, upstream_card_id, dedupe_key, tx_type, amount_minor, fee_minor,
-    currency, status, merchant, occurred_at, synced_at, created_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
+    currency, status, merchant, occurred_at, synced_at, created_at,
+    transaction_amount_text, transaction_currency, settled_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$13,$14,$15)
 ON CONFLICT (environment, account, dedupe_key) DO UPDATE SET
     status = EXCLUDED.status,
-    synced_at = EXCLUDED.synced_at`
+    synced_at = EXCLUDED.synced_at,
+    -- 同一笔交易会从 authorized 变成 completed，结算信息是那时才有的：
+    -- 必须覆盖，但只在新值非空时——否则一次没带结算信息的重读会把它抹掉。
+    settled_at = COALESCE(EXCLUDED.settled_at, cards.infini_card_transaction.settled_at),
+    transaction_amount_text = COALESCE(NULLIF(EXCLUDED.transaction_amount_text, ''),
+        cards.infini_card_transaction.transaction_amount_text),
+    transaction_currency = COALESCE(NULLIF(EXCLUDED.transaction_currency, ''),
+        cards.infini_card_transaction.transaction_currency)`
 
 	batch := &pgx.Batch{}
 	for _, tx := range txs {
-		var occurredAt any
+		var occurredAt, settledAt any
 		if parsed, err := time.Parse(time.RFC3339, tx.OccurredAt); err == nil {
 			occurredAt = parsed.UTC()
+		}
+		if parsed, err := time.Parse(time.RFC3339, tx.SettledAt); err == nil {
+			settledAt = parsed.UTC()
 		}
 		batch.Queue(upsertSQL,
 			s.environment, account, cardID, transactionDedupeKey(cardID, tx), tx.Type,
 			tx.AmountMinor, tx.FeeMinor, tx.Currency, tx.Status, tx.Merchant,
-			occurredAt, now)
+			occurredAt, now, tx.TransactionAmount, tx.TransactionCurrency, settledAt)
 	}
 
 	results := s.pool.SendBatch(ctx, batch)
@@ -462,6 +473,13 @@ type TransactionView struct {
 	Merchant    string
 	OccurredAt  time.Time
 	SyncedAt    time.Time
+	// TransactionAmount / TransactionCurrency 是商户侧原始币种的金额；
+	// 同币种消费时为空。保持文本：币种可能是任何一种，逐一验证标度不现实，
+	// 而这两列只展示、不计算。
+	TransactionAmount   string
+	TransactionCurrency string
+	// SettledAt 为零值表示尚未结算（授权中）。
+	SettledAt time.Time
 }
 
 // ListTransactions 读某张卡的流水。
@@ -472,7 +490,8 @@ func (s *PgStore) ListTransactions(ctx context.Context, account, cardID string, 
 
 	const listSQL = `
 SELECT upstream_card_id, tx_type, amount_minor, fee_minor, currency,
-       status, merchant, occurred_at, synced_at
+       status, merchant, occurred_at, synced_at,
+       transaction_amount_text, transaction_currency, settled_at
   FROM cards.infini_card_transaction
  WHERE environment = $1 AND account = $2 AND upstream_card_id = $3
  ORDER BY occurred_at DESC NULLS LAST
@@ -487,15 +506,19 @@ SELECT upstream_card_id, tx_type, amount_minor, fee_minor, currency,
 	var out []TransactionView
 	for rows.Next() {
 		var (
-			v          TransactionView
-			occurredAt *time.Time
+			v                     TransactionView
+			occurredAt, settledAt *time.Time
 		)
 		if err := rows.Scan(&v.CardID, &v.Type, &v.AmountMinor, &v.FeeMinor, &v.Currency,
-			&v.Status, &v.Merchant, &occurredAt, &v.SyncedAt); err != nil {
+			&v.Status, &v.Merchant, &occurredAt, &v.SyncedAt,
+			&v.TransactionAmount, &v.TransactionCurrency, &settledAt); err != nil {
 			return nil, err
 		}
 		if occurredAt != nil {
 			v.OccurredAt = *occurredAt
+		}
+		if settledAt != nil {
+			v.SettledAt = *settledAt
 		}
 		out = append(out, v)
 	}
@@ -722,4 +745,20 @@ UPDATE cards.webhook_event
 		return fmt.Errorf("记录回调失败原因 %s: %w", eventID, err)
 	}
 	return nil
+}
+
+// CardStatusOf 返回投影里记着的状态。
+//
+// 供批量刷新判断「这张卡变了没有」：批量接口只回状态，与这里一比就知道
+// 要不要再花一次调用去取全量字段。
+func (s *PgStore) CardStatusOf(ctx context.Context, account, cardID string) (string, error) {
+	const selectSQL = `
+SELECT status FROM cards.infini_card
+ WHERE environment = $1 AND account = $2 AND upstream_card_id = $3`
+
+	var status string
+	if err := s.pool.QueryRow(ctx, selectSQL, s.environment, account, cardID).Scan(&status); err != nil {
+		return "", fmt.Errorf("查卡 %s 的当前状态: %w", cardID, err)
+	}
+	return status, nil
 }

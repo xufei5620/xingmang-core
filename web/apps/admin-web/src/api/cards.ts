@@ -120,6 +120,13 @@ export interface CardTransactionItem {
   status: string;
   merchant: string;
   occurred_at?: string;
+  /** 商户侧原始币种的金额；同币种消费时不出现。
+   *  一张 USD 卡在欧元商户消费，amount_minor 是折成 USD 的，这里才是 EUR 原值——
+   *  没有它看不出跨境消费与汇率加价。 */
+  transaction_amount?: string;
+  transaction_currency?: string;
+  /** 缺席表示尚未结算（授权中，金额还可能变）。 */
+  settled_at?: string;
 }
 
 /** 一笔待人工处置的操作。
@@ -316,4 +323,30 @@ export function setCardUsage(
   client: ApiClient = apiClient,
 ): Promise<ActionRun> {
   return executeAction({ actionId: "cards.card.usage.set", version: "1", params }, options, client);
+}
+
+/** 一个账号的资金池可用余额。 */
+export interface CardAccountBalance {
+  account: string;
+  usdt?: string;
+  usdc?: string;
+  usd?: string;
+  /** 有值表示这个账号这次没取到；只给失败**分类**，不含上游原文。 */
+  error?: string;
+}
+
+/** 读各账号的资金池可用余额。
+ *
+ *  这是**实时上游调用**，不是投影——比其余读端点慢，所以单独一个查询、
+ *  按需拉取，不跟卡片列表一起轮询。 */
+export async function listCardBalances(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardAccountBalance[]> {
+  const body = await client
+    .get<ListResponse<CardAccountBalance>>("/api/v1/cards/balances", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return body.items ?? [];
 }

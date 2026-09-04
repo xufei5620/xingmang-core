@@ -290,3 +290,16 @@ func (s *Service) RevealCard(ctx context.Context, account, cardID string) (infin
 	}
 	return acct.Client.RevealCard(ctx, cardID)
 }
+
+// AccountBalances 读某个账号的资金池可用余额。
+//
+// **不落投影**：余额变化频繁，而且只在人要看的时候才重要；给它建一张
+// 投影表就要再建一个同步作业，而那个作业每轮都在打一个没人看的接口。
+// 未配置的账号一律报错，不回落——与其余账号操作同一条纪律。
+func (s *Service) AccountBalances(ctx context.Context, account string) (infini.AccountBalances, error) {
+	acct, err := s.account(account)
+	if err != nil {
+		return infini.AccountBalances{}, err
+	}
+	return acct.Client.AccountBalances(ctx)
+}

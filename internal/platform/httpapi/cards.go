@@ -77,6 +77,12 @@ type cardTransactionItem struct {
 	Status      string `json:"status"`
 	Merchant    string `json:"merchant"`
 	OccurredAt  string `json:"occurred_at,omitempty"`
+	// TransactionAmount / TransactionCurrency 是商户侧原始币种的金额；
+	// 同币种消费时不出现。
+	TransactionAmount   string `json:"transaction_amount,omitempty"`
+	TransactionCurrency string `json:"transaction_currency,omitempty"`
+	// SettledAt 缺席表示尚未结算（授权中，金额还可能变）。
+	SettledAt string `json:"settled_at,omitempty"`
 }
 
 type cardOperationItem struct {
@@ -224,6 +230,11 @@ func ListCardTransactionsHandler(store CardQuerier) http.HandlerFunc {
 			if !t.OccurredAt.IsZero() {
 				item.OccurredAt = t.OccurredAt.UTC().Format(time.RFC3339)
 			}
+			if !t.SettledAt.IsZero() {
+				item.SettledAt = t.SettledAt.UTC().Format(time.RFC3339)
+			}
+			item.TransactionAmount = t.TransactionAmount
+			item.TransactionCurrency = t.TransactionCurrency
 			out = append(out, item)
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{"items": out})

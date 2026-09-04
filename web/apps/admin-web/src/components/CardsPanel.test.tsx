@@ -14,11 +14,13 @@ vi.mock("../api/cards", async () => {
     freezeCard: vi.fn(),
     unfreezeCard: vi.fn(),
     issueCard: vi.fn(),
+    listCardBalances: vi.fn(),
   };
 });
 
 import {
   freezeCard,
+  listCardBalances,
   unfreezeCard,
   issueCard,
   listCardOperationsNeedingAttention,
@@ -60,6 +62,7 @@ describe("CardsPanel", () => {
   it("列出卡片时只显示掩码卡号", async () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -84,6 +87,7 @@ describe("CardsPanel", () => {
       accounts: ["MAIN"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -96,6 +100,7 @@ describe("CardsPanel", () => {
       accounts: ["MAIN"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -131,6 +136,7 @@ describe("CardsPanel", () => {
   it("没有待处置操作时不显示横幅", async () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -147,6 +153,7 @@ describe("CardsPanel", () => {
       accounts: ["MAIN"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -159,6 +166,7 @@ describe("CardsPanel", () => {
   it("没有明文时回落到掩码", async () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -169,6 +177,7 @@ describe("CardsPanel", () => {
   it("锁定走 Action 且每次带一个幂等键", async () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
     vi.mocked(freezeCard).mockResolvedValue({ runId: "run-1", result: {} });
 
     renderPanel();
@@ -192,6 +201,7 @@ describe("CardsPanel", () => {
       accounts: ["MAIN"], memberEmails: [],
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
     vi.mocked(unfreezeCard).mockResolvedValue({ runId: "run-2", result: {} });
 
     renderPanel();
@@ -217,6 +227,7 @@ describe("CardsPanel", () => {
       accounts: ["MAIN"], memberEmails: [],
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -235,6 +246,7 @@ describe("CardsPanel", () => {
   it("每一行直接给出充值与赎回入口", async () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -255,6 +267,7 @@ describe("CardsPanel", () => {
       accounts: ["CHRIS", "LINFENG"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
 
     renderPanel();
 
@@ -274,6 +287,7 @@ describe("CardsPanel", () => {
       accounts: ["CHRIS", "LINFENG"], memberEmails: [] 
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
     vi.mocked(issueCard).mockResolvedValue({ runId: "run-1", result: {} });
 
     renderPanel();
@@ -292,5 +306,23 @@ describe("CardsPanel", () => {
     await waitFor(() => expect(issueCard).toHaveBeenCalledTimes(1));
     const params = vi.mocked(issueCard).mock.calls[0]?.[0];
     expect(params?.account).toBe("CHRIS");
+  });
+});
+
+describe("资金池余额", () => {
+  it("按账号显示可用余额；取不到的账号显示为空而不是零", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [], accounts: ["CHRIS", "LINFENG"], memberEmails: [] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([
+      { account: "CHRIS", usdt: "55.68", usdc: "0", usd: "0" },
+      { account: "LINFENG", error: "ip_not_allowed" },
+    ]);
+
+    renderPanel();
+
+    expect(await screen.findByText("55.68 USDT")).toBeTruthy();
+    // 取不到的账号绝不能显示成 0——那会让人以为钱花光了。
+    expect(screen.getByText(/读取失败/)).toBeTruthy();
+    expect(screen.queryByText("0 USDT")).toBeNull();
   });
 });

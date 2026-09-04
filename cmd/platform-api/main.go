@@ -461,6 +461,8 @@ func main() {
 		// 写路径只走 cards.card.* Action，这里不开第二条。
 		Cards:        cardQuerierOrNil(cardStore),
 		CardAccounts: cardAccountIDs(cardService),
+		// 资金池余额直接走领域服务（它已经持有配好的客户端）。
+		CardBalances: cardBalanceReaderOrNil(cardService),
 		// nil 时回调路由整个不挂载（见 httpapi.Deps.CardWebhook）。
 		CardWebhook: cardWebhookOrNil(
 			buildCardWebhookProcessor(cardsCfg, cardStore, cardAccounts, cardSecretProvider)),

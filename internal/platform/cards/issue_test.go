@@ -1,6 +1,7 @@
 package cards
 
 import (
+	"fmt"
 	"context"
 	"errors"
 	"testing"
@@ -93,6 +94,14 @@ func (m *memStore) UnresolvedOperations(ctx context.Context) ([]Operation, error
 		}
 	}
 	return out, nil
+}
+
+func (m *memStore) CardStatusOf(ctx context.Context, account, cardID string) (string, error) {
+	c, ok := m.cards[cardID]
+	if !ok {
+		return "", fmt.Errorf("memStore: 卡 %s 不存在", cardID)
+	}
+	return c.Status, nil
 }
 
 func (m *memStore) TrackedCards(ctx context.Context) ([]CardRef, error) {
