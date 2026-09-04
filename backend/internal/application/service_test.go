@@ -63,7 +63,12 @@ func TestNewServiceFailsClosedOnUnsafeConfiguration(t *testing.T) {
 	if _, err := NewService(store, testKeys(), settings, Options{PublicBaseURL: "https://invoice.example/base"}); err == nil {
 		t.Fatal("accepted a path in the public origin")
 	}
-	if _, err := NewService(store, testKeys(), settings, Options{DownloadBaseURL: "https://invoice.example", MinimumRequestMinor: domain.MinimumRequestMinor - 1}); !errors.Is(err, domain.ErrMinimumAmount) {
+	// ¥199.99 used to be "unsafe" because the default doubled as a floor.
+	// Since XM-INV-SETTABLE-INVOICE-MINIMUM it is a legitimate configured
+	// minimum, so the unsafe value is a negative one -- a broken setting
+	// rather than a policy choice. Zero cannot be used here: this constructor
+	// reads zero as "not configured" and substitutes the default.
+	if _, err := NewService(store, testKeys(), settings, Options{DownloadBaseURL: "https://invoice.example", MinimumRequestMinor: -1}); !errors.Is(err, domain.ErrMinimumAmount) {
 		t.Fatalf("minimum error=%v", err)
 	}
 }

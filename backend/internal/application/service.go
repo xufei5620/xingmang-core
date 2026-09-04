@@ -79,7 +79,7 @@ func NewService(store *postgresstore.Store, keys securefields.Keyring, settings 
 	if minimum == 0 {
 		minimum = domain.MinimumRequestMinor
 	}
-	if minimum < domain.MinimumRequestMinor {
+	if minimum < domain.MinimumRequestFloorMinor {
 		return nil, domain.ErrMinimumAmount
 	}
 	baseValue := strings.TrimSpace(options.PublicBaseURL)
@@ -138,7 +138,7 @@ func (s *Service) sourceFreshnessPolicy() postgresstore.SourceFreshnessPolicy {
 func (s *Service) MinimumRequestMinor() int64 { return s.minimumRequestMinor.Load() }
 
 func (s *Service) SetMinimumRequestMinor(value int64) error {
-	if value < domain.MinimumRequestMinor {
+	if value < domain.MinimumRequestFloorMinor {
 		return domain.ErrMinimumAmount
 	}
 	s.minimumRequestMinor.Store(value)
@@ -639,7 +639,7 @@ func (s *Service) Submit(ctx context.Context, input ledger.SubmitInput, platform
 	if err != nil {
 		return domain.InvoiceRequest{}, fmt.Errorf("load invoice policy: %w", err)
 	}
-	if settings.MinimumRequestMinor < domain.MinimumRequestMinor {
+	if settings.MinimumRequestMinor < domain.MinimumRequestFloorMinor {
 		return domain.InvoiceRequest{}, domain.ErrMinimumAmount
 	}
 	s.minimumRequestMinor.Store(settings.MinimumRequestMinor)

@@ -48,7 +48,7 @@ func NewService() *Service {
 }
 
 func (s *Service) SetMinimumRequestMinor(value int64) error {
-	if value < domain.MinimumRequestMinor {
+	if value < domain.MinimumRequestFloorMinor {
 		return domain.ErrMinimumAmount
 	}
 	s.mu.Lock()

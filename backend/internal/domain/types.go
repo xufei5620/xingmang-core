@@ -11,7 +11,21 @@ import (
 
 const (
 	CurrencyCNY               = "CNY"
+	// MinimumRequestMinor is the DEFAULT minimum invoice amount -- what a
+	// fresh installation starts at and what every "no value configured yet"
+	// path seeds. It is not a floor: an administrator may set the invoice
+	// minimum above or below it (XM-INV-SETTABLE-INVOICE-MINIMUM).
 	MinimumRequestMinor int64 = 20_000
+	// MinimumRequestFloorMinor is the lowest value the configured minimum may
+	// take. Only a non-positive amount is refused, because that is a broken
+	// setting rather than a policy choice; every guard that used to compare
+	// against MinimumRequestMinor compares against this instead.
+	//
+	// Keeping the two apart matters more than it looks: while they were one
+	// constant, saving ¥5.00 committed to admin_settings and was then rejected
+	// by the in-memory refresh, so the database and the running process
+	// disagreed and the operator saw the old threshold with no way to fix it.
+	MinimumRequestFloorMinor int64 = 1
 	FixedServiceItem          = "技术服务"
 )
 
@@ -335,7 +349,7 @@ var (
 	ErrConflict           = errors.New("conflict")
 	ErrScanCycleBusy      = errors.New("stream already has an active scan cycle")
 	ErrInsufficientAmount = errors.New("insufficient available amount")
-	ErrMinimumAmount      = fmt.Errorf("minimum invoice amount is %d minor units", MinimumRequestMinor)
+	ErrMinimumAmount      = errors.New("invoice amount is below the configured minimum")
 	ErrSourceMixing       = errors.New("allocations from different source instances cannot be combined")
 	ErrUnverifiedPayment  = errors.New("payment is not verified")
 	ErrSourceUnavailable  = errors.New("source synchronization is unavailable or stale")

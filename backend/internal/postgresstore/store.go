@@ -335,7 +335,7 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 	if minimum == 0 {
 		minimum = domain.MinimumRequestMinor
 	}
-	if minimum < domain.MinimumRequestMinor {
+	if minimum < domain.MinimumRequestFloorMinor {
 		return domain.InvoiceRequest{}, domain.ErrMinimumAmount
 	}
 	if total < minimum {
