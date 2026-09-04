@@ -1,5 +1,10 @@
 # RC86 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC86 shipped at signed tag
+> `v0.1.0-rc86-signed` (`4c4a799`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-03-invoice-rc87-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC86 — three things: XM-INV-LEDGER-ACCOUNT-EMAIL (the operator 用户账本 and 资格冻结队列 lists, and the freeze detail, label each account with its verified email under the upstream numeric ID, rendering nothing when the account has none), XM-INV-ASSERT-STEPUP (an expired administrator step-up renews through the console assertion instead of the Keycloak step-up route that CR-0006 phase 2 step 5 unregistered), and the startup assertion that the runtime database role cannot `UPDATE console_assertion_nonces`.
