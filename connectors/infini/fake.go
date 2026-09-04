@@ -207,3 +207,32 @@ func (f *Fake) RevealCard(ctx context.Context, cardID string) (RevealedCard, err
 		Currency:   "USD",
 	}, nil
 }
+
+// BatchCardStatus 与真实客户端同构：不存在的卡不出现在结果里。
+func (f *Fake) BatchCardStatus(ctx context.Context, cardIDs []string) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeErr(); err != nil {
+		return nil, err
+	}
+	if len(cardIDs) > batchStatusMax {
+		return nil, fmt.Errorf("fake: 一次最多 %d 张", batchStatusMax)
+	}
+	out := make(map[string]string, len(cardIDs))
+	for _, id := range cardIDs {
+		if c, ok := f.cards[id]; ok {
+			out[id] = c.Status
+		}
+	}
+	return out, nil
+}
+
+// AccountBalances 回一组固定的演示余额。
+func (f *Fake) AccountBalances(ctx context.Context) (AccountBalances, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.takeErr(); err != nil {
+		return AccountBalances{}, err
+	}
+	return AccountBalances{USDT: "1000.00", USDC: "0", USD: "0"}, nil
+}

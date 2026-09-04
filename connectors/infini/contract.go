@@ -27,7 +27,11 @@ type CardClient interface {
 	// 读
 	ListCards(ctx context.Context, q ListCardsQuery) (CardPage, error)
 	CardStatus(ctx context.Context, cardID string) (Card, error)
+	// BatchCardStatus 一次查多张（≤100），供同步作业用；结果 card_id → status。
+	BatchCardStatus(ctx context.Context, cardIDs []string) (map[string]string, error)
 	CardTransactions(ctx context.Context, cardID string, page, pageSize int) (TransactionPage, error)
+	// AccountBalances 是组织账户的可用余额（资金 API，需 fund.withdraw 权限）。
+	AccountBalances(ctx context.Context) (AccountBalances, error)
 
 	// 写（花钱或改状态）
 	ApplyCard(ctx context.Context, req ApplyCardRequest) (CardApplication, error)
