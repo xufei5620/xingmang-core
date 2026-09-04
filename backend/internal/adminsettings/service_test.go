@@ -320,3 +320,42 @@ func TestUpdateSMTPIsOneRevisionAndEncryptionFailureChangesNothing(t *testing.T)
 		t.Fatalf("atomic update=%+v", updated)
 	}
 }
+
+// TestMinimumRequestMinorIsASettingNotAFloor is
+// XM-INV-SETTABLE-INVOICE-MINIMUM's guard. ¥200 is what a fresh installation
+// starts at; it used to be enforced as an absolute floor here, in migration
+// 0002's CHECK, and in both frontend validations, so the setting could only
+// ever move upward and a small-amount test was impossible. The product owner's
+// own words: "默认为200，如果有需要的时候我可以调整到5".
+func TestMinimumRequestMinorIsASettingNotAFloor(t *testing.T) {
+	repo := &memoryRepo{}
+	service := NewService(repo, testBox{})
+	if _, err := service.Update(context.Background(), validInput(), 0, Actor{ID: "admin", RequestID: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ¥5.00 -- the value the owner asked to be able to test with.
+	lowered := validInput()
+	lowered.MinimumRequestMinor = 500
+	settings, err := service.Update(context.Background(), lowered, 1, Actor{ID: "admin", RequestID: "lower"})
+	if err != nil {
+		t.Fatalf("lowering the invoice minimum to ¥5.00 was rejected: %v", err)
+	}
+	if settings.MinimumRequestMinor != 500 {
+		t.Fatalf("minimum_request_minor=%d, want 500", settings.MinimumRequestMinor)
+	}
+
+	// The default is unchanged and still what a fresh install starts at.
+	if DefaultMinimumRequestMinor != 20_000 {
+		t.Fatalf("DefaultMinimumRequestMinor=%d, want 20000 (¥200.00)", DefaultMinimumRequestMinor)
+	}
+
+	// Non-positive is not a policy choice, it is a broken setting.
+	for _, broken := range []int64{0, -1} {
+		invalid := validInput()
+		invalid.MinimumRequestMinor = broken
+		if _, err := service.Update(context.Background(), invalid, 2, Actor{ID: "admin", RequestID: "broken"}); err == nil {
+			t.Fatalf("minimum_request_minor=%d was accepted", broken)
+		}
+	}
+}

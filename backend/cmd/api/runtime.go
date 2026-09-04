@@ -106,7 +106,7 @@ func buildMockRuntime(authMode string) (appRuntime, error) {
 	if err != nil {
 		return appRuntime{}, err
 	}
-	settingsRepo := adminsettings.NewMemoryRepository(adminsettings.Settings{IssuerName: adminsettings.UnconfiguredIssuerName, ServiceItem: adminsettings.FixedServiceItem, MinimumRequestMinor: adminsettings.MinimumMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "not-configured@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	settingsRepo := adminsettings.NewMemoryRepository(adminsettings.Settings{IssuerName: adminsettings.UnconfiguredIssuerName, ServiceItem: adminsettings.FixedServiceItem, MinimumRequestMinor: adminsettings.DefaultMinimumRequestMinor, EligibilityStartAt: adminsettings.RequiredEligibilityStartAt, SMTPHost: "smtp.qq.com", SMTPPort: 587, SMTPFrom: "not-configured@qq.com", SMTPFromName: "发票中心", SMTPStartTLS: true, AdminCIDRs: adminCIDRs, Revision: 1, UpdatedBy: "bootstrap", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
 	keyring := securefields.Keyring{CurrentKeyID: "dev-only", EncryptionKeys: map[string][]byte{"dev-only": bytes.Repeat([]byte{0x42}, 32)}, IndexKey: bytes.Repeat([]byte{0x24}, 32)}
 	settingsService := adminsettings.NewService(settingsRepo, adminsettings.SecureFieldsBox{Keyring: keyring, AAD: "invoice/admin-settings/smtp-authorization-code"})
 	var store document.Store

@@ -8,8 +8,21 @@ import (
 )
 
 const (
-	FixedServiceItem           = "技术服务"
-	MinimumMinor               = int64(20_000)
+	FixedServiceItem = "技术服务"
+	// MinimumMinor is the floor the minimum-invoice-amount *setting* may be
+	// lowered to, not the business default. It used to be 20_000 (¥200), which
+	// made the setting one-way: an administrator could raise the threshold but
+	// never lower it, so a small-amount test was impossible
+	// (XM-INV-SETTABLE-INVOICE-MINIMUM). The only value that is genuinely not
+	// an administrator's call is a non-positive one, which is a broken setting
+	// rather than a policy choice; a smaller arbitrary floor would just move
+	// the same wall.
+	MinimumMinor = int64(1)
+	// DefaultMinimumRequestMinor is the ¥200 business default a fresh
+	// installation starts at, and what migration 0002's column DEFAULT still
+	// carries. Bootstrap uses it; the settings page can move it either way
+	// from there.
+	DefaultMinimumRequestMinor = int64(20_000)
 	EligibilityStartAtRFC3339  = "2026-09-01T00:00:00+08:00"
 	EligibilityDisplayTimeZone = "Asia/Shanghai"
 	// UnconfiguredIssuerName is the only issuer placeholder accepted by the

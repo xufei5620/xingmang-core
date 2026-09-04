@@ -1108,8 +1108,14 @@ function OrdersPage() {
     setPolicyError(null);
     try {
       const loaded = await invoiceApi.getInvoicePolicy();
+      // XM-INV-SETTABLE-INVOICE-MINIMUM: the threshold is an administrator
+      // setting (default ¥200), so this guard checks it is a sane positive
+      // amount rather than pinning the old ¥200 floor -- which would have
+      // made the public page reject a policy the settings page can legally
+      // save.
       if (
-        loaded.minimumRequestMinor < 20_000 ||
+        !Number.isFinite(loaded.minimumRequestMinor) ||
+        loaded.minimumRequestMinor <= 0 ||
         loaded.serviceItem !== "技术服务"
       ) {
         throw new Error("公开开票策略无效，已停止提交。 ");
@@ -4740,8 +4746,11 @@ function SystemSettingsPage() {
 
   const saveRules = () => {
     const minimumMinor = Math.round(Number(minimumYuan) * 100);
-    if (!Number.isFinite(minimumMinor) || minimumMinor < 20_000) {
-      toast("最低开票金额不能低于 ¥200.00。", "error");
+    // XM-INV-SETTABLE-INVOICE-MINIMUM: ¥200 is the default this field is
+    // seeded with, not a floor. The only rejected value is a non-positive
+    // one, matching the backend's own rule.
+    if (!Number.isFinite(minimumMinor) || minimumMinor <= 0) {
+      toast("最低开票金额必须大于 ¥0.00。", "error");
       return;
     }
     if (!issuerName.trim()) {
@@ -4868,13 +4877,13 @@ function SystemSettingsPage() {
                     <span>¥</span>
                     <input
                       type="number"
-                      min="200"
-                      step="1"
+                      min="0.01"
+                      step="0.01"
                       value={minimumYuan}
                       onChange={(event) => setMinimumYuan(event.target.value)}
                     />
                   </div>
-                  <small>可提高，但不能低于 ¥200.00</small>
+                  <small>默认 ¥200.00，可按需调高或调低（须大于 ¥0.00）</small>
                 </label>
                 <label className="form-field">
                   <span>开票资格生效时间</span>
