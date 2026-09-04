@@ -140,8 +140,9 @@ func (s *PgStore) UpsertCard(ctx context.Context, account string, card infini.Ca
 INSERT INTO cards.infini_card (
     environment, account, upstream_card_id, mask, holder_name, card_alias, status,
     currency, balance_minor, owner_ref, user_email, upstream_user_id,
-    upstream_created_at, upstream_updated_at, last_synced_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$15)
+    upstream_created_at, upstream_updated_at, last_synced_at, created_at, updated_at,
+    issue_fee_text, issue_pay_amount_text
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17)
 ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     mask = EXCLUDED.mask,
     holder_name = EXCLUDED.holder_name,
@@ -153,6 +154,9 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     -- 同 owner_ref：同步作业不知道这个字段（上游卡片对象里没有），
     -- 传空时保留原值，否则每轮同步都会把开卡时记下的邮箱冲掉。
     user_email = COALESCE(NULLIF(EXCLUDED.user_email, ''), cards.infini_card.user_email),
+    -- 同 owner_ref：开卡费只在开卡那一刻知道，同步作业传空，保留原值。
+    issue_fee_text = COALESCE(NULLIF(EXCLUDED.issue_fee_text, ''), cards.infini_card.issue_fee_text),
+    issue_pay_amount_text = COALESCE(NULLIF(EXCLUDED.issue_pay_amount_text, ''), cards.infini_card.issue_pay_amount_text),
     upstream_user_id = EXCLUDED.upstream_user_id,
     upstream_created_at = EXCLUDED.upstream_created_at,
     upstream_updated_at = EXCLUDED.upstream_updated_at,
@@ -170,7 +174,7 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
 	if _, err := s.pool.Exec(ctx, upsertSQL,
 		s.environment, account, card.ID, card.Mask, card.HolderName, card.Alias, card.Status,
 		card.Currency, card.BalanceMinor, attribution.OwnerRef, attribution.UserEmail, card.UserID,
-		createdAt, updatedAt, now,
+		createdAt, updatedAt, now, attribution.IssueFee, attribution.IssuePayAmount,
 	); err != nil {
 		return fmt.Errorf("落卡片投影: %w", err)
 	}
@@ -393,6 +397,9 @@ type CardView struct {
 	UsageNote     string
 	// UpstreamCreatedAt 是上游记的开卡时刻。
 	UpstreamCreatedAt time.Time
+	// IssueFee / IssuePayAmount 是开卡时上游收的手续费与实际扣款额。
+	IssueFee       string
+	IssuePayAmount string
 }
 
 // ListCards 读卡片投影。
@@ -407,7 +414,7 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
        pan, cvv, expiry_mmyy,
        bound_account, bound_account_kind, service_name,
        COALESCE(to_char(next_renewal_on, 'YYYY-MM-DD'), ''), usage_note,
-       upstream_created_at
+       upstream_created_at, issue_fee_text, issue_pay_amount_text
   FROM cards.infini_card
  WHERE environment = $1
    AND ($2 = '' OR account = $2)
@@ -432,7 +439,8 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
 			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.UserEmail, &v.LastSyncedAt,
 			&v.PAN, &v.CVV, &v.ExpiryMMYY,
 			&v.BoundAccount, &v.BoundAccountKind, &v.ServiceName,
-			&v.NextRenewalOn, &v.UsageNote, &upstreamCreatedAt); err != nil {
+			&v.NextRenewalOn, &v.UsageNote, &upstreamCreatedAt,
+			&v.IssueFee, &v.IssuePayAmount); err != nil {
 			return nil, err
 		}
 		if upstreamCreatedAt != nil {

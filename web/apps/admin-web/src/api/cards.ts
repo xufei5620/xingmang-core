@@ -102,6 +102,10 @@ export interface CardItem {
   renewal_risk: string;
   /** 上游记的开卡时刻（RFC3339）；缺失时字段不出现。 */
   issued_at?: string;
+  /** 开卡手续费与实付额（十进制文本，币种为申请时所选代币）。
+   *  实测手续费固定 1 USD——小额卡的成本占比很高，所以这一列要能被看到。 */
+  issue_fee?: string;
+  issue_pay_amount?: string;
   freshness: CardFreshness;
 }
 

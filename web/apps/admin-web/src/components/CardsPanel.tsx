@@ -409,6 +409,33 @@ export function CardsPanel() {
       primary: true,
     },
     {
+      id: "cvv",
+      header: "CVV",
+      // 与卡号同一逻辑：明文由后端按 card.reveal 权限决定回不回，
+      // 前端只显示它拿到的东西。默认隐藏——它比卡号更少用，
+      // 而摊在列表上等于长期暴露在任何一次截屏里。
+      cell: (row) => <span className="font-mono">{row.cvv || "—"}</span>,
+      value: (row) => row.cvv ?? "",
+      defaultHidden: true,
+    },
+    {
+      id: "expiry",
+      header: "有效期",
+      // 上游字段名叫 expiration_mmyy，但实测返回的是 MM/YYYY（11/2031），
+      // 与文档示例的 1228 不同。原样显示，不解析、不重排——
+      // 解析一个格式尚未定论的字段，只会在上游改回去时静默显示错。
+      cell: (row) => <span className="font-mono">{row.expiry_mmyy || "—"}</span>,
+      value: (row) => row.expiry_mmyy ?? "",
+      defaultHidden: true,
+    },
+    {
+      id: "issue_fee",
+      header: "开卡费",
+      cell: (row) => (row.issue_fee ? `${row.issue_fee} ${row.currency}` : "—"),
+      value: (row) => row.issue_fee ?? "",
+      defaultHidden: true,
+    },
+    {
       id: "holder",
       header: "持卡人",
       cell: (row) => row.holder_name || "—",

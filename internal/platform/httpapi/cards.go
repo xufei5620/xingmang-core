@@ -59,7 +59,11 @@ type cardItem struct {
 	// 而分叉的那一边会把「续不上」显示成正常。
 	RenewalRisk string `json:"renewal_risk"`
 	// IssuedAt 是上游记的开卡时刻；缺失时字段不出现，而不是回一个 1970 年。
-	IssuedAt  string              `json:"issued_at,omitempty"`
+	IssuedAt string `json:"issued_at,omitempty"`
+	// IssueFee / IssuePayAmount 是开卡手续费与实付额（十进制文本，币种为
+	// 申请时所选代币）。实测手续费是固定 1 USD，小额卡的成本占比很高。
+	IssueFee       string `json:"issue_fee,omitempty"`
+	IssuePayAmount string `json:"issue_pay_amount,omitempty"`
 	Freshness cards.FreshnessInfo `json:"freshness"`
 }
 
@@ -144,6 +148,8 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 				NextRenewalOn:    c.NextRenewalOn,
 				UsageNote:        c.UsageNote,
 				RenewalRisk:      string(cards.RenewalRisk(c.NextRenewalOn, c.BalanceMinor, now)),
+				IssueFee:         c.IssueFee,
+				IssuePayAmount:   c.IssuePayAmount,
 				Freshness:        cards.Freshness(c.LastSyncedAt, now, syncInterval),
 			}
 			if !c.UpstreamCreatedAt.IsZero() {

@@ -23,6 +23,8 @@ type memStore struct {
 	ownerRef    map[string]string
 	userEmail   map[string]string
 	usage       map[string]CardUsage
+	// attributions 记住最后一次非空归属，供断言开卡费落库。
+	attributions map[string]CardAttribution
 	spentToday  string
 	// spentByAccount 非空时按账号取值，否则回落到 spentToday。
 	spentByAccount map[string]string
@@ -37,7 +39,8 @@ func newMemStore() *memStore {
 		secrets:     make(map[string]infini.RevealedCard),
 		ownerRef:    make(map[string]string),
 		userEmail:   make(map[string]string),
-		usage:       make(map[string]CardUsage),
+		usage:        make(map[string]CardUsage),
+		attributions: make(map[string]CardAttribution),
 		spentToday:  "0",
 	}
 }
@@ -75,6 +78,9 @@ func (m *memStore) UpsertCard(ctx context.Context, account string, card infini.C
 	}
 	if attribution.UserEmail != "" {
 		m.userEmail[card.ID] = attribution.UserEmail
+	}
+	if attribution.IssueFee != "" || attribution.IssuePayAmount != "" {
+		m.attributions[card.ID] = attribution
 	}
 	return nil
 }
@@ -309,5 +315,95 @@ func TestIssueCardKeepsAliasOnUnknownOutcome(t *testing.T) {
 	}
 	if op.StartedAt.IsZero() {
 		t.Fatal("不确定态下 StartedAt 必须留存——宽限期从它算起")
+	}
+}
+
+// 卡开出来就是 active 时，当场把卡面明文拉下来。
+//
+// 上游的开卡是异步的，但实测（2026-09-05）返回时状态已经是 active。
+// 此前明文要等同步作业下一轮才拉，最长 300 秒——运营开完卡看到的是一行
+// 没有卡号的记录，只能反复刷新。reveal 需要 active，所以只对 active 动作。
+func TestIssueCardFetchesSecretsWhenCardIsAlreadyActive(t *testing.T) {
+	fake := infini.NewFake()
+	fake.ActivateOnApply() // 2026-09-05 生产实测：apply 返回时已是 active
+	store := newMemStore()
+	svc := newService(fake, store)
+
+	res, err := svc.IssueCard(context.Background(), issueReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := store.secrets[res.CardID]
+	if !ok {
+		t.Fatal("开卡后应当场拉到卡面明文，而不是等同步作业下一轮")
+	}
+	if got.Number == "" || got.CVV == "" {
+		t.Fatalf("明文不完整: %+v", got)
+	}
+}
+
+// 卡还没 active 时不去拉明文：reveal 对 init/pending 的卡本来就取不到，
+// 白打一次受 IP 白名单限制的敏感接口。
+func TestIssueCardSkipsRevealWhileCardIsNotActive(t *testing.T) {
+	fake := infini.NewFake() // 默认文档口径：卡从 init 起步
+	store := newMemStore()
+	svc := newService(fake, store)
+
+	res, err := svc.IssueCard(context.Background(), issueReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.secrets[res.CardID]; ok {
+		t.Fatal("卡还没 active 就不该拉明文")
+	}
+}
+
+// 拉明文失败不能让开卡失败。
+//
+// 卡已经开出来了、钱已经花了，此时因为「明文没拉到」而返回错误，会诱使
+// 调用方重试——而重试开卡是这套设计里最危险的动作。明文有周期同步兜底。
+func TestIssueCardSucceedsEvenWhenRevealFails(t *testing.T) {
+	fake := infini.NewFake()
+	fake.ActivateOnApply()
+	store := newMemStore()
+	svc := newService(fake, store)
+	fake.FailReveal(errors.New("上游拒绝"))
+
+	res, err := svc.IssueCard(context.Background(), issueReq())
+	if err != nil {
+		t.Fatalf("拉明文失败不该让开卡失败: %v", err)
+	}
+	if res.State != StateSucceeded {
+		t.Fatalf("State = %q, want succeeded", res.State)
+	}
+	if _, ok := store.secrets[res.CardID]; ok {
+		t.Fatal("这次本就该没存下明文")
+	}
+}
+
+// 开卡费与实付金额要落进投影。
+//
+// apply 的响应里带 total_fee / total_pay_amount，此前只用来判断成功、没落库。
+// 实测开卡费是 1 USD 固定（不是文档示例暗示的按比例），$1 的卡成本 100%——
+// 这个数字不落库，成本核算就永远少一块。
+func TestIssueCardRecordsFeeAndPaidAmount(t *testing.T) {
+	fake := infini.NewFake()
+	store := newMemStore()
+	svc := newService(fake, store)
+
+	res, err := svc.IssueCard(context.Background(), issueReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 断言的是 apply 响应里的那两个值原样落库，不是「非空」——
+	// 非空断言会被一个把两列都填成同一个数的实现骗过去。
+	got := store.attributions[res.CardID]
+	if got.IssueFee != "0" {
+		t.Fatalf("开卡费应取自 apply 响应的 total_fee, got %+v", got)
+	}
+	if got.IssuePayAmount != issueReq().TopUpAmount {
+		t.Fatalf("实付金额应取自 total_pay_amount, got %+v", got)
 	}
 }

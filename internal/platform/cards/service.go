@@ -61,6 +61,11 @@ type Store interface {
 	// 放在 Store 而不是靠运行时类型断言取一个可选接口：断言失败是运行时
 	// 才炸的错误，而「存储支不支持登记」本该在编译期就定下来。
 	SetCardUsage(ctx context.Context, usage CardUsage) error
+	// StoreCardSecrets 落卡面明文。
+	//
+	// 开卡成功后当场拉一次（卡通常已经是 active），不必等周期同步——
+	// 运营开完卡看到一行没有卡号的记录，只能反复刷新。
+	StoreCardSecrets(ctx context.Context, account, cardID string, revealed infini.RevealedCard) error
 }
 
 // CardAttribution 是只有平台自己知道的卡片归属信息。
@@ -76,6 +81,14 @@ type CardAttribution struct {
 	// UserEmail 供管理端的开卡表单做「选历史用过的成员」下拉——
 	// 上游没有成员列表接口，可选项只能来自平台自己开过的卡。
 	UserEmail string
+	// IssueFee / IssuePayAmount 来自 apply 响应的 total_fee / total_pay_amount。
+	//
+	// 保持十进制文本：单位是申请时的代币（USDT/USDC），真实标度未验证，
+	// 与操作台账的 AmountText 同一条纪律。实测开卡费是 1 USD 固定
+	// （不是文档示例暗示的按比例），$1 的卡成本 100%——不落库，
+	// 成本核算就永远少一块。
+	IssueFee       string
+	IssuePayAmount string
 }
 
 // Service 是卡业务的领域服务。
@@ -229,9 +242,22 @@ func (s *Service) IssueCard(ctx context.Context, req IssueRequest) (IssueResult,
 	// 开卡是异步的：这里拿到的是申请单，卡要等作业轮询到 active。
 	// 台账记成 succeeded 表示「请求确定被上游接受了」，不表示卡已可用。
 	if card, statusErr := acct.Client.CardStatus(ctx, app.ID); statusErr == nil {
-		attribution := CardAttribution{OwnerRef: req.OwnerRef, UserEmail: req.UserEmail}
+		attribution := CardAttribution{
+			OwnerRef:       req.OwnerRef,
+			UserEmail:      req.UserEmail,
+			IssueFee:       app.TotalFee,
+			IssuePayAmount: app.TotalPayAmount,
+		}
 		if err := s.store.UpsertCard(ctx, acct.ID, card, attribution); err != nil {
 			return IssueResult{}, fmt.Errorf("落卡片投影: %w", err)
+		}
+		// 卡已经可用就当场把明文拉下来。失败**不算错误**：卡已经开出来、
+		// 钱已经花了，此时因为「明文没拉到」返回错误会诱使调用方重试，
+		// 而重试开卡是这套设计里最危险的动作。明文有周期同步兜底。
+		if card.Status == cardStatusActive {
+			if revealed, revealErr := acct.Client.RevealCard(ctx, app.ID); revealErr == nil {
+				_ = s.store.StoreCardSecrets(ctx, acct.ID, app.ID, revealed)
+			}
 		}
 	}
 

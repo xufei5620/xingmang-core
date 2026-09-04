@@ -767,3 +767,35 @@ func TestPgStoreWebhookEventIsScopedToAccount(t *testing.T) {
 		t.Fatal("另一个账号的同 id 事件应是新事件")
 	}
 }
+
+// 开卡费只在开卡那一刻知道，同步作业每 5 分钟一轮传空，绝不能把它冲掉。
+// 与 owner_ref / user_email 同一条纪律。
+func TestPgStoreUpsertCardKeepsIssueFeeOnSync(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	card := infini.Card{
+		ID: "card_fee", Mask: "441357******7843", HolderName: "ops@example.com",
+		Alias: "xm-fee", Status: "active", Currency: "USD", BalanceMinor: 100,
+		UserID: "u1", CreatedAt: issueNow, UpdatedAt: issueNow,
+	}
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{
+		OwnerRef: "ops", IssueFee: "1", IssuePayAmount: "2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同步作业的常态：只带上游知道的字段。
+	card.BalanceMinor = 50
+	if err := store.UpsertCard(ctx, "CHRIS", card, CardAttribution{}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := onlyCard(t, store, "CHRIS")
+	if got.BalanceMinor != 50 {
+		t.Fatalf("余额没刷新: %+v", got)
+	}
+	if got.IssueFee != "1" || got.IssuePayAmount != "2" {
+		t.Fatalf("同步冲掉了开卡费: %+v", got)
+	}
+}
