@@ -19,7 +19,11 @@ const (
 	KindBadResponse     ErrorKind = "bad_response"     // 响应格式非法、字段缺失、超大
 	KindForbiddenTarget ErrorKind = "forbidden_target" // 目标不在 allowlist（闸 4）
 	KindWriteAttempt    ErrorKind = "write_attempt"    // 只读通道上出现写请求（闸 4）
-	KindInternal        ErrorKind = "internal"
+	// KindMethodNotAllowed 是供应商写通道上出现允许集之外的 HTTP 方法。
+	// 与 KindWriteAttempt 分开：那个表示「这条通道根本不该有写」，
+	// 这个表示「这条通道能写，但不该用这个方法」，排查方向完全不同。
+	KindMethodNotAllowed ErrorKind = "method_not_allowed"
+	KindInternal         ErrorKind = "internal"
 )
 
 // Error 是 Connector 层的统一错误。
