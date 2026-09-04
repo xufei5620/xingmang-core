@@ -200,13 +200,24 @@ export async function resetStaffAccountPassword(
 }
 
 /** 角色目录：内部名 → 中文标签。顺序即表单里勾选框的展示顺序。 */
+/** 可分配的角色目录。
+ *
+ *  **必须与后端 oidcauth.DefaultRoleScopeMap 的键完全一致**，两个方向都不能
+ *  漂：多一个（页面能勾、后端拒收，而且账号一旦存下就再也改不动角色）、
+ *  少一个（后端认、页面勾不到，等于那个角色永远授不出去）都会出事。
+ *  两个方向各有一条 Go 测试钉住（oidcauth/rolemap_catalog_test.go），
+ *  它读的就是本文件。
+ *
+ *  2026-09-05 这里同时有过两个方向的漂移：`auditor` 是后端早就没有的幽灵
+ *  角色，而 `assurance-probe-admin` / `fund-operator` 后端有、这里没有。 */
 export const STAFF_ROLE_CATALOG: readonly { value: string; label: string }[] = [
   { value: "staff", label: "员工" },
   { value: "admin", label: "管理员" },
-  { value: "auditor", label: "审计" },
   { value: "credential-admin", label: "凭据管理员" },
   { value: "key-metadata-reader", label: "Key 元数据只读" },
   { value: "request-content-reader", label: "请求正文查看" },
+  { value: "assurance-probe-admin", label: "探测开关管理员" },
+  { value: "fund-operator", label: "资金操作员（提现）" },
 ];
 
 const ROLE_LABELS: ReadonlyMap<string, string> = new Map(

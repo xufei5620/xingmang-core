@@ -171,14 +171,47 @@ describe("人员与权限 · 账号与身份", () => {
     await screen.findByText("alice");
 
     fireEvent.click(screen.getByRole("button", { name: "修改 alice 的角色" }));
-    fireEvent.click(screen.getByLabelText("审计"));
+    // 用 credential-admin 而不是原先的 auditor：auditor 是**后端不认识**的
+    // 幽灵角色，用它做断言等于把一个必然被拒的请求固化成"期望行为"。
+    fireEvent.click(screen.getByLabelText("凭据管理员"));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(postCallTo(fetchMock, "staff.account.set_roles")).toBeTruthy());
     const [url, init] = postCallTo(fetchMock, "staff.account.set_roles");
     expect(url).toContain("/api/v1/actions/staff.account.set_roles/versions/1/execute");
     expect(JSON.parse(init.body as string)).toEqual({
-      params: { username: "alice", roles: "staff,admin,auditor" },
+      params: { username: "alice", roles: "staff,admin,credential-admin" },
+    });
+  });
+
+  // 账号持有的、目录里没有的角色**必须显示出来**，否则它取消不掉。
+  //
+  // 2026-09-05 生产上卡住的就是这个：admin 账号带着一个 auditor（后端已经
+  // 不认识它了），复选框只渲染目录里的项，于是那个角色看不见、勾不掉，
+  // 却仍然被整体提交回去——每次保存都报「未知角色 auditor」，
+  // 这个账号的角色再也改不动。
+  it("改角色：账号持有的未知角色也要能看见并取消", async () => {
+    const fetchMock = handler({
+      rows: [{ ...aliceRow, roles: ["staff", "admin", "auditor"] }],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPanel();
+    await screen.findByText("alice");
+
+    fireEvent.click(screen.getByRole("button", { name: "修改 alice 的角色" }));
+
+    // 看得见：以内部名显示，并标注它已不在目录里。
+    const ghost = screen.getByLabelText(/auditor/) as HTMLInputElement;
+    expect(ghost.checked).toBe(true);
+
+    // 取消得掉，且提交出去的集合里不再有它。
+    fireEvent.click(ghost);
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(postCallTo(fetchMock, "staff.account.set_roles")).toBeTruthy());
+    const [, init] = postCallTo(fetchMock, "staff.account.set_roles");
+    expect(JSON.parse(init.body as string)).toEqual({
+      params: { username: "alice", roles: "staff,admin" },
     });
   });
 
