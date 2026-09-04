@@ -19,6 +19,7 @@ vi.mock("../api/cards", async () => {
 
 import {
   freezeCard,
+  unfreezeCard,
   issueCard,
   listCardOperationsNeedingAttention,
   listCards,
@@ -165,14 +166,14 @@ describe("CardsPanel", () => {
     expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
   });
 
-  it("冻结走 Action 且每次带一个幂等键", async () => {
+  it("锁定走 Action 且每次带一个幂等键", async () => {
     vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN", "BACKUP"], memberEmails: [] });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
     vi.mocked(freezeCard).mockResolvedValue({ runId: "run-1", result: {} });
 
     renderPanel();
 
-    fireEvent.click(await screen.findByRole("button", { name: "冻结" }));
+    fireEvent.click(await screen.findByRole("button", { name: "锁定" }));
 
     await waitFor(() => expect(freezeCard).toHaveBeenCalledTimes(1));
     const params = vi.mocked(freezeCard).mock.calls[0]?.[0];
@@ -182,17 +183,63 @@ describe("CardsPanel", () => {
     expect(params?.idempotency_key).toBeTruthy();
   });
 
-  it("已冻结的卡显示解冻而不是冻结", async () => {
+  // 冻结后的上游取值是 suspend（2026-09-05 对真实卡实测），不是此前猜的 frozen。
+  // 猜错的后果是一张已锁定的卡永远显示「锁定」按钮，点下去是再锁一次——
+  // 产品负责人在生产上就撞见了这个。
+  it("已锁定（suspend）的卡显示解锁，点击走解冻 Action", async () => {
     vi.mocked(listCards).mockResolvedValue({
-      cards: [{ ...activeCard, status: "frozen" }],
-      accounts: ["MAIN"], memberEmails: [] 
+      cards: [{ ...activeCard, status: "suspend" }],
+      accounts: ["MAIN"], memberEmails: [],
+    });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(unfreezeCard).mockResolvedValue({ runId: "run-2", result: {} });
+
+    renderPanel();
+
+    const unlock = await screen.findByRole("button", { name: "解锁" });
+    expect(screen.queryByRole("button", { name: "锁定" })).toBeNull();
+
+    fireEvent.click(unlock);
+    await waitFor(() => expect(unfreezeCard).toHaveBeenCalledTimes(1));
+    expect(freezeCard).not.toHaveBeenCalled();
+  });
+
+  // 状态徽章用中文，且按权威枚举（init/pending/active/suspend/deleted）翻译。
+  // 没见过的取值**原样显示并标记**，不静默归到某个已知分类——那正是最需要
+  // 被人看见的时刻。
+  it("状态显示中文；未知取值原样显示并标记", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [
+        { ...activeCard, card_id: "c1", status: "suspend" },
+        { ...activeCard, card_id: "c2", status: "pending" },
+        { ...activeCard, card_id: "c3", status: "wat_is_this" },
+      ],
+      accounts: ["MAIN"], memberEmails: [],
     });
     vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
 
     renderPanel();
 
-    expect(await screen.findByRole("button", { name: "解冻" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "冻结" })).toBeNull();
+    // 状态筛选下拉里也会列出同样的文案，所以只认徽章、排除 <option>。
+    const badges = (text: string | RegExp) =>
+      screen.queryAllByText(text).filter((el) => el.tagName !== "OPTION");
+    await waitFor(() => expect(badges("已锁定").length).toBe(1));
+    expect(badges("处理中").length).toBe(1);
+    const unknown = badges(/wat_is_this/);
+    expect(unknown.length).toBe(1);
+    expect(unknown[0]?.textContent).toContain("未知");
+  });
+
+  // 操作列对齐上游后台的四个动作：充值 / 赎回 / 锁定|解锁（关停暂不提供）。
+  // 此前充值与赎回只藏在详情弹窗里，要多点两层才能找到。
+  it("每一行直接给出充值与赎回入口", async () => {
+    vi.mocked(listCards).mockResolvedValue({ cards: [activeCard], accounts: ["MAIN"], memberEmails: [] });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+
+    renderPanel();
+
+    expect(await screen.findByRole("button", { name: "充值" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "赎回" })).toBeTruthy();
   });
 
   // 两个账号可以持有**同一个上游卡 id**（投影表的唯一键就是

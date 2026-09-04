@@ -12,6 +12,7 @@ import {
   type CardItem,
   type CardOperationItem,
 } from "../api/cards";
+import { cardStatusLabel, cardStatusTone, isCardLocked } from "../lib/cardStatus";
 import { formatMinorUnits } from "../lib/money";
 import { CardDetailDialog } from "./CardDetailDialog";
 import { ActionErrorNote } from "./ActionErrorNote";
@@ -136,23 +137,6 @@ function RenewalCell({ card }: { card: CardItem }) {
       {badge}
     </span>
   );
-}
-
-/** 卡状态徽章。冻结与删除都用 danger：它们都意味着这张卡现在刷不了。 */
-function cardStatusTone(status: string): "neutral" | "success" | "warning" | "danger" {
-  switch (status) {
-    case "active":
-      return "success";
-    case "init":
-    case "pending":
-      return "warning";
-    case "frozen":
-    case "deleted":
-    case "pending_delete":
-      return "danger";
-    default:
-      return "neutral";
-  }
 }
 
 /** 待人工处置的横幅。
@@ -399,7 +383,7 @@ export function CardsPanel() {
     onSuccess: (run, variables) =>
       afterWrite({
         runId: run.runId,
-        title: variables.freeze ? "已提交冻结请求" : "已提交解冻请求",
+        title: variables.freeze ? "已提交锁定请求" : "已提交解锁请求",
       }),
     onError: (err) => setActionError(err),
   });
@@ -433,8 +417,8 @@ export function CardsPanel() {
     {
       id: "status",
       header: "状态",
-      cell: (row) => <Badge tone={cardStatusTone(row.status)}>{row.status}</Badge>,
-      value: (row) => row.status,
+      cell: (row) => <Badge tone={cardStatusTone(row.status)}>{cardStatusLabel(row.status)}</Badge>,
+      value: (row) => cardStatusLabel(row.status),
     },
     {
       id: "balance",
@@ -489,15 +473,19 @@ export function CardsPanel() {
       cell: (row) => (
         <div className="flex flex-wrap gap-2">
           <CardDetailDialog card={row} onWrite={afterWrite} />
+          {/* 对齐上游后台的动作列：充值 / 赎回 / 锁定|解锁。
+              此前充值与赎回只藏在详情弹窗里，要多点两层才能找到。 */}
+          <CardDetailDialog card={row} onWrite={afterWrite} initialTab="topup" triggerLabel="充值" />
+          <CardDetailDialog card={row} onWrite={afterWrite} initialTab="redeem" triggerLabel="赎回" />
           <Button
             variant="secondary"
             size="sm"
             disabled={switchMutation.isPending}
             onClick={() =>
-              switchMutation.mutate({ card: row, freeze: row.status !== "frozen" })
+              switchMutation.mutate({ card: row, freeze: !isCardLocked(row.status) })
             }
           >
-            {row.status === "frozen" ? "解冻" : "冻结"}
+            {isCardLocked(row.status) ? "解锁" : "锁定"}
           </Button>
         </div>
       ),
@@ -532,9 +520,9 @@ export function CardsPanel() {
             {
               columnId: "status",
               label: "状态",
-              // 取值来自实际数据而不是写死的枚举：上游的状态取值还没验证完
-              // （冻结后变成什么仍待确认），写死会漏掉没见过的那些。
-              options: Array.from(new Set(rows.map((r) => r.status))).filter(Boolean),
+              // 取值来自实际数据而不是写死的枚举：上游加新状态时不该被漏掉。
+              // 用显示文案而不是原值，好与徽章上看到的一致。
+              options: Array.from(new Set(rows.map((r) => cardStatusLabel(r.status)))).filter(Boolean),
             },
           ]}
           rows={rows}
