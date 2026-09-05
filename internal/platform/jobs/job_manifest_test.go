@@ -23,7 +23,7 @@ func readJobManifestContract(t *testing.T) []byte {
 	return raw
 }
 
-func TestManifestCoversExactlyTenRegisteredPeriodicJobs(t *testing.T) {
+func TestManifestCoversExactlyElevenRegisteredPeriodicJobs(t *testing.T) {
 	manifest, hash, err := LoadJobManifest(readJobManifestContract(t))
 	if err != nil {
 		t.Fatalf("load frozen manifest: %v", err)
@@ -32,8 +32,8 @@ func TestManifestCoversExactlyTenRegisteredPeriodicJobs(t *testing.T) {
 		t.Fatal("manifest hash must not be empty")
 	}
 	registered := RegisteredPeriodicJobSpecs()
-	if len(registered) != 10 {
-		t.Fatalf("registered periodic jobs = %d, want 10", len(registered))
+	if len(registered) != 11 {
+		t.Fatalf("registered periodic jobs = %d, want 11", len(registered))
 	}
 	if len(manifest.Jobs) != len(registered) {
 		t.Fatalf("manifest jobs = %d, registered = %d", len(manifest.Jobs), len(registered))
@@ -119,6 +119,12 @@ func TestManifestPinsStableIDsKindsQueuesScheduleSourcesAndCatchup(t *testing.T)
 			ID: CardSyncJobKind, Kind: CardSyncJobKind, Queue: QueueMaintenance,
 			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
 			ScheduleConfig: "XM_CARDS_SYNC_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.CardSyncRunOnStart",
+			CatchUp: "at_most_one_immediate",
+		},
+		SMSProbeJobKind: {
+			ID: SMSProbeJobKind, Kind: SMSProbeJobKind, Queue: QueueMaintenance,
+			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_SMS_PROBE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.SMSProbeRunOnStart",
 			CatchUp: "at_most_one_immediate",
 		},
 	}
@@ -327,8 +333,8 @@ func TestEffectiveManifestDisabledJobAndConfigChangesChangeHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Jobs) != 10 {
-		t.Fatalf("jobs = %d, want 10", len(base.Jobs))
+	if len(base.Jobs) != 11 {
+		t.Fatalf("jobs = %d, want 11", len(base.Jobs))
 	}
 	cfg.RetentionEnabled = false
 	disabled, disabledHash, err := BuildEffectiveManifest(cfg, manifest)
@@ -519,6 +525,8 @@ func intervalForJob(id string) time.Duration {
 		return DefaultCPASyncInterval
 	case CardSyncJobKind:
 		return DefaultCardSyncInterval
+	case SMSProbeJobKind:
+		return DefaultSMSProbeInterval
 	default:
 		return 0
 	}

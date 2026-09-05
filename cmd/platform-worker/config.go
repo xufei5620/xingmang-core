@@ -363,6 +363,17 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 		// 就保持关闭。
 		config.CPASyncEnabled = cpaMode == jobs.CPAModeFile
 	}
+	// 接码巡检（XM-SMS2 #7）：开关由 XM_SMS_MODE 决定（见 main.go 的
+	// buildSMSProber），这里只解析节奏。默认 10 分钟
+	// （jobs.DefaultSMSProbeInterval）。
+	if value := getenv("XM_SMS_PROBE_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("sms probe interval: %w", err)
+		}
+		config.SMSProbeInterval = interval
+	}
+
 	if value := getenv("XM_CPA_SYNC_INTERVAL"); value != "" {
 		// 默认 5 分钟（jobs.DefaultCPASyncInterval），此处可覆盖。
 		interval, err := time.ParseDuration(value)

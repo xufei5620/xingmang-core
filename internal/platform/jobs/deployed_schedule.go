@@ -148,6 +148,22 @@ func DeployedSchedulesFromEnv(getenv func(string) string) (map[string]DeployedJo
 		}
 		cfg.CardSyncInterval = d
 	}
+	// 接码巡检没有独立的 ENABLED 开关：由 XM_SMS_MODE 决定，与 worker 里
+	// buildSMSProber 以及 API 侧挂不挂载接码端点同一个判据。三处分叉会让
+	// 这张「部署态时刻表」显示一个与实际不符的状态。
+	switch strings.ToLower(strings.TrimSpace(getenv("XM_SMS_MODE"))) {
+	case "fake", "real":
+		cfg.SMSProbeEnabled = true
+	default:
+		cfg.SMSProbeEnabled = false
+	}
+	if v := getenv("XM_SMS_PROBE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("sms probe interval: %w", err)
+		}
+		cfg.SMSProbeInterval = d
+	}
 	if v := getenv("XM_CPA_SYNC_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -167,6 +183,7 @@ func DeployedSchedulesFromEnv(getenv func(string) string) (map[string]DeployedJo
 		ConnectorProbeJobKind: "XM_CONNECTOR_PROBE_ENABLED",
 		CPASyncJobKind:        "XM_CPA_MODE=file (or XM_CPA_SYNC_ENABLED override)",
 		CardSyncJobKind:       "XM_CARDS_MODE=fake|real",
+		SMSProbeJobKind:       "XM_SMS_MODE=fake|real",
 	}
 
 	// EffectiveJobSchedules (effective_manifest.go) is the same validated

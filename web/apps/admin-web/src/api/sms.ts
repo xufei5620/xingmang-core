@@ -708,3 +708,24 @@ export function readSMSRequestResult(result: unknown): SMSRequestResult | null {
     needs_review: Boolean(r.needs_review),
   };
 }
+
+// ---------- 余额快照（XM-SMS2 #7） ----------
+
+/** 一家的最新余额快照。**不是实时值**：由 platform-worker 每 10 分钟抓一次，
+ *  所以 taken_at 必须和金额一起显示——一个不知道什么时候抓的余额，会让人
+ *  以为刚刚还有钱。 */
+export interface SMSBalance {
+  provider: string;
+  /** 十进制文本。 */
+  amount: string;
+  /** 空 = 上游没说（Hero 的兼容层不回币种）。分币种不折算。 */
+  currency?: string;
+  taken_at: string;
+}
+
+export function listSMSBalances(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSBalance[]> {
+  return get<SMSBalance>("/api/v1/sms/balances", options, client);
+}

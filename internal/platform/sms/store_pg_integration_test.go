@@ -338,3 +338,52 @@ func TestPgStoreResourceOperationLink(t *testing.T) {
 		t.Fatalf("不存在的操作应被 FK 挡住")
 	}
 }
+
+// 迁移 000045：余额快照。追加而不是覆盖；numeric 进出都是文本；
+// LatestBalanceSnapshots 每家只回最新一条。
+func TestPgStoreBalanceSnapshotAppendsAndReadsLatest(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	if _, err := store.pool.Exec(ctx, "TRUNCATE sms.balance_snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+
+	for _, row := range []BalanceSnapshot{
+		{Provider: ProviderHero, AmountText: "5.0000", TakenAt: base},
+		{Provider: ProviderHero, AmountText: "4.2000", Currency: "840", TakenAt: base.Add(time.Hour)},
+		{Provider: ProviderSMS62, AmountText: "100.5000", TakenAt: base},
+	} {
+		if _, err := store.SaveBalanceSnapshot(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	latest, err := store.LatestBalanceSnapshots(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(latest) != 2 {
+		t.Fatalf("每家一条, got %+v", latest)
+	}
+	byProvider := map[string]BalanceSnapshot{}
+	for _, row := range latest {
+		byProvider[row.Provider] = row
+	}
+	hero := byProvider[ProviderHero]
+	// 币种与时间必须来自**同一次抓取**：DISTINCT ON 回的是那一行，不是最大值。
+	if hero.AmountText != "4.2000" || hero.Currency != "840" || !hero.TakenAt.Equal(base.Add(time.Hour)) {
+		t.Fatalf("Hero 最新一条不对: %+v", hero)
+	}
+	if byProvider[ProviderSMS62].AmountText != "100.5000" {
+		t.Fatalf("62 的快照不对: %+v", byProvider[ProviderSMS62])
+	}
+	// 追加而不是覆盖：三条都还在。
+	var count int
+	if err := store.pool.QueryRow(ctx, "SELECT count(*) FROM sms.balance_snapshot WHERE environment = $1", testEnvironment).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("快照应追加, got %d 行", count)
+	}
+}

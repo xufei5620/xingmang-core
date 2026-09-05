@@ -146,6 +146,23 @@ func main() {
 		config.CardSyncEnabled = true
 	}
 
+	// 接码巡检（XM-SMS2 #7）：只读的连接测试 + 余额快照，一分钱都不花。
+	// 默认关闭（XM_SMS_MODE 未设或 off 时 prober 为 nil）；装配失败即拒绝
+	// 启动——一个「以为在盯着余额和凭据、其实每轮都失败」的 worker，会让
+	// 「密钥过期」与「余额见底」这两件事在买号失败那一刻才被发现。
+	smsProber, err := buildSMSProber(pool,
+		smsSecretProvider(config.SecretRoot, config.Environment, logger),
+		config.Environment, os.Getenv)
+	if err != nil {
+		logger.ErrorContext(ctx, "worker_start_failed", "event", "worker_start_failed",
+			"module", "platform.worker", "error_code", "sms_config_invalid", "err", err.Error())
+		os.Exit(2)
+	}
+	if smsProber != nil {
+		config.SMSProber = smsProber
+		config.SMSProbeEnabled = true
+	}
+
 	if *migrate {
 		if err := jobs.Migrate(ctx, pool, logger); err != nil {
 			logger.ErrorContext(ctx, "worker_migration_failed", "event", "worker_migration_failed", "module", "platform.worker", "error_code", "migration_failed")

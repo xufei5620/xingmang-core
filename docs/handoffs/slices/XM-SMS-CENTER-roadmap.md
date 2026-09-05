@@ -14,7 +14,7 @@ branch: ai/claude/XM-CARD0-infini-connector
 - 遇到需要产品负责人拍板的事（新的花钱路径、权限边界、数据删除），停下写在
   本文件「待决」一节，不猜。
 
-## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–6 done）
+## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–7 done）
 
 1. ~~改名「接码中心」~~ done（2d4b559）。
 2. ~~供应商注册表~~ done：`internal/platform/sms/registry.go` 定义 `ProviderSpec`（ID、标签、
@@ -53,8 +53,17 @@ branch: ai/claude/XM-CARD0-infini-connector
    回放与成本核算都靠它；新买的号从待收码起。页面：「要号」对话框（两步确认、
    自动 / 指定供应商、失败列每家原因、未知提示人工核对），要到号选中第一个，
    详情面板既有的 15 秒自动取码接手。
-7. 定时作业（platform-worker）：每家供应商连接测试 + 余额快照（写
-   `sms.balance_snapshot`，阶段 3 用）。
+7. ~~定时作业~~ done：River 周期任务 `sms_probe`（第 11 个，10 分钟一轮，
+   队列 maintenance）。`Service.ProbeOnce` 逐家：关着的**一个上游请求都不发**；
+   开着的做一次只读连接测试（写 verified_at / last_error，失败不清旧的验证事实）；
+   连接成功且有 CapBalance 的再抓一次余额，追加进迁移 000045 的
+   `sms.balance_snapshot`（numeric、对外文本、币种空 = 上游没说）。只有落库失败
+   才抛错让 River 重试，单家上游失败只记 warn——结论已经在 provider_status 里。
+   开关跟 `XM_SMS_MODE` 走（无独立 ENABLED），节奏 `XM_SMS_PROBE_INTERVAL`；
+   两者都补进 launch.yaml 的 worker 段与 .env.example。装配搬进领域包
+   （`sms.ParseMode` / `sms.BuildProviders`），API 与 worker 共用一份——两份解析
+   迟早分叉成「API 能买号、worker 不认识这家」。读端点 `GET /sms/balances`，
+   供应商卡片显示「余额 x · 抓取于 …」（**必须带抓取时间**，它是快照不是实时值）。
 8. 内部告警条件（不外发）：余额低于阈值（阈值走 Action 配）、unknown 待核对超过
    N 分钟、租用号 1 小时内到期——落 `sms.alert_event`，页面红条。
 
@@ -136,3 +145,21 @@ branch: ai/claude/XM-CARD0-infini-connector
   provider、全部失败列每家原因且不选号、未知提示人工核对并显示操作 ID、无可用
   供应商禁用。门禁：go vet / go test -p 1 ./...（含真库）/ check-governance 0 /
   pnpm -r typecheck / pnpm -r test（admin-web 1552 用例）全绿。
+- 2026-09-06 XM-SMS2 #7：`probe_test.go` 六条先红后绿：每家验证 + 只有 Hero 落
+  快照、关着的 testCalls==0、连接失败不读余额且不清 verified_at、余额失败保留
+  验证结论且不落快照、两轮追加两条（最新一条是第二轮）、落库失败抛错。
+  `jobs/sms_probe_test.go` 五条：跑一轮、单家上游失败不算任务失败、基础设施
+  错误算失败、未绑定 prober 失败、InsertOpts 用 maintenance 队列 + args/queue/
+  period 唯一，外加部署态时刻表认得这个任务（XM_SMS_MODE=fake|real + 15m）。
+  `build_test.go` 四条钉住 ParseMode 只收 off/fake/real 且错误信息逐字列出合法值
+  （XM_CARDS_MODE 写成 live 让生产下线四分钟的教训）。真库
+  `TestPgStoreBalanceSnapshotAppendsAndReadsLatest`：三条追加、DISTINCT ON 回
+  「那一行」（币种与时间同源）、每家只回最新（迁移 000045 在测试库上真跑过）。
+  钉死的作业契约按规矩两边一起改：`cluster-jobs.v1.json` 加第 11 条，
+  `job_manifest_test.go` 的「Exactly Ten」改成 Eleven 并把 sms_probe 加进 want。
+  compose 门禁如期抓到 XM_SMS_PROBE_INTERVAL 没进 launch.yaml（正是它存在的理由），
+  补上后归零。**顺带发现的既有小分叉**（未修，不在本切片范围）：
+  `XM_CARDS_SYNC_INTERVAL` 被部署态时刻表解析，但 cmd/platform-worker/config.go
+  从没读它——那张表会显示一个 worker 实际不用的周期。门禁：go vet / go test -p 1
+  ./...（含真库）/ check-governance 0 / pnpm -r typecheck / pnpm -r test
+  （admin-web 1554 用例）全绿。

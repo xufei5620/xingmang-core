@@ -737,3 +737,46 @@ func (s *PgStore) ListResourcesByOperation(ctx context.Context, operationID stri
 	}
 	return out, rows.Err()
 }
+
+// ---- 余额快照（迁移 000045）----
+
+func (s *PgStore) SaveBalanceSnapshot(ctx context.Context, snap BalanceSnapshot) (string, error) {
+	at := snap.TakenAt
+	if at.IsZero() {
+		at = s.now()
+	}
+	var id string
+	err := s.pool.QueryRow(ctx, `
+INSERT INTO sms.balance_snapshot (environment, provider, amount, currency, taken_at, created_at)
+VALUES ($1,$2,$3::numeric,$4,$5,$5)
+RETURNING id::text`,
+		s.environment, snap.Provider, snap.AmountText, snap.Currency, at.UTC()).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("落余额快照: %w", err)
+	}
+	return id, nil
+}
+
+// LatestBalanceSnapshots 每家最新一条。DISTINCT ON 而不是 GROUP BY：要的是
+// 「那一行」而不是「那个最大值」——币种与时间必须来自同一次抓取。
+func (s *PgStore) LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT DISTINCT ON (provider) id::text, provider, amount::text, currency, taken_at
+  FROM sms.balance_snapshot
+ WHERE environment = $1
+ ORDER BY provider, taken_at DESC, id DESC`, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查余额快照: %w", err)
+	}
+	defer rows.Close()
+	var out []BalanceSnapshot
+	for rows.Next() {
+		var snap BalanceSnapshot
+		if err := rows.Scan(&snap.ID, &snap.Provider, &snap.AmountText, &snap.Currency, &snap.TakenAt); err != nil {
+			return nil, err
+		}
+		snap.TakenAt = snap.TakenAt.UTC()
+		out = append(out, snap)
+	}
+	return out, rows.Err()
+}

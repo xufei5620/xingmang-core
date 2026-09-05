@@ -254,6 +254,20 @@ type Config struct {
 	// CardSyncRunOnStart 让进程起来就先同步一次，而不是干等一个周期。
 	CardSyncRunOnStart bool
 
+	// SMSProbeEnabled 决定是否注册接码巡检任务（XM-SMS2 #7）。
+	//
+	// **默认关闭**，与卡片同步同一条理由：这一轮会给每家打两个上游请求，
+	// 一个没配好凭据的环境只会每轮产生两次注定失败的调用。由
+	// XM_SMS_MODE=fake|real 打开，与 API 侧挂不挂载接码端点同一个判据。
+	SMSProbeEnabled bool
+	// SMSProbeInterval 是巡检周期，默认 DefaultSMSProbeInterval。
+	SMSProbeInterval time.Duration
+	// SMSProber 是实际干活的领域层服务；Enabled 时必须非 nil。
+	SMSProber SMSProber
+	// SMSProbeRunOnStart 让进程起来就先巡一轮：凭据是不是还能用，
+	// 是运维最想在启动后立刻知道的事。
+	SMSProbeRunOnStart bool
+
 	// CPASyncEnabled 决定是否注册 CPA 周期同步任务（XM-CPA0）。
 	//
 	// 与其他采集开关不同，它的零值 false 就是 DefaultConfig 的默认值——
@@ -432,6 +446,10 @@ func DefaultConfig() Config {
 		CardSyncInterval:   DefaultCardSyncInterval,
 		CardSyncRunOnStart: true,
 
+		SMSProbeEnabled:    false,
+		SMSProbeInterval:   DefaultSMSProbeInterval,
+		SMSProbeRunOnStart: true,
+
 		CPASyncEnabled:    false,
 		CPASyncInterval:   DefaultCPASyncInterval,
 		CPASyncRunOnStart: true,
@@ -532,6 +550,9 @@ func (c Config) normalized() Config {
 	}
 	if c.CardSyncInterval == 0 {
 		c.CardSyncInterval = defaults.CardSyncInterval
+	}
+	if c.SMSProbeInterval == 0 {
+		c.SMSProbeInterval = defaults.SMSProbeInterval
 	}
 	if c.CPASyncInterval == 0 {
 		c.CPASyncInterval = defaults.CPASyncInterval
@@ -760,6 +781,14 @@ func (c Config) validate() error {
 	}
 	if c.CardSyncEnabled && c.CardSyncInterval < time.Second {
 		return fmt.Errorf("card sync interval %s is below River's one-second minimum", c.CardSyncInterval)
+	}
+	if c.SMSProbeEnabled && c.SMSProber == nil {
+		// 启用了却没给 Prober，等于注册一个每轮必然失败的任务，而它的产出
+		// （凭据还能不能用、余额还剩多少）恰恰是没人会主动去看的那类事实。
+		return fmt.Errorf("sms probe 已启用但未提供 Prober")
+	}
+	if c.SMSProbeEnabled && c.SMSProbeInterval < time.Second {
+		return fmt.Errorf("sms probe interval %s is below River's one-second minimum", c.SMSProbeInterval)
 	}
 	if c.CPASyncEnabled && c.CPAMode != CPAModeFile {
 		// off 是硬性的停用状态，不是「暂时没配」：即便有人误把 Enabled 设成
@@ -1136,6 +1165,22 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			return nil, err
 		}
 		periodic = append(periodic, cardPeriodic)
+	}
+
+	if cfg.SMSProbeEnabled {
+		river.AddWorker(workers, NewSMSProbeWorker(cfg.Logger, cfg.SMSProber))
+		smsPeriodic, err := newManifestPeriodicJob(
+			SMSProbeJobKind, cfg.SMSProbeInterval, cfg.SMSProbeRunOnStart,
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := SMSProbeArgs{}
+				opts := args.InsertOpts()
+				return args, &opts
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, smsPeriodic)
 	}
 
 	if cfg.CPASyncEnabled {

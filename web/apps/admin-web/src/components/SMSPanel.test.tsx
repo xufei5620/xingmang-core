@@ -13,6 +13,7 @@ vi.mock("../api/sms", async () => {
     listSMSOperations: vi.fn(),
     listSMSCodes: vi.fn(),
     listSMSCatalog: vi.fn(),
+    listSMSBalances: vi.fn(),
     purchaseSMSNumbers: vi.fn(),
     verifySMSProvider: vi.fn(),
     setSMSProviderEnabled: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock("../api/sms", async () => {
 
 import {
   fetchSMSCode,
+  listSMSBalances,
   listSMSCatalog,
   listSMSCodes,
   listSMSOperations,
@@ -68,6 +70,7 @@ function seed(over: {
   vi.mocked(listSMSOperations).mockResolvedValue(over.operations ?? []);
   vi.mocked(listSMSCodes).mockResolvedValue([]);
   vi.mocked(listSMSCatalog).mockResolvedValue([]);
+  vi.mocked(listSMSBalances).mockResolvedValue([]);
 }
 
 afterEach(() => vi.clearAllMocks());
@@ -344,4 +347,32 @@ it("没有统一状态的旧号码退回显示上游原话", async () => {
   renderPanel();
 
   expect((await screen.findAllByText("正常")).length).toBeGreaterThan(0);
+});
+
+// 余额是**快照**不是实时值（platform-worker 每 10 分钟抓一轮）。抓取时间必须
+// 和金额一起显示——一个不知道什么时候抓的余额，会让人以为刚刚还有钱。
+it("供应商卡片显示余额快照与抓取时间", async () => {
+  seed({});
+  vi.mocked(listSMSBalances).mockResolvedValue([
+    { provider: "hero_sms", amount: "4.2000", currency: "840", taken_at: "2026-09-06T05:00:00Z" },
+  ]);
+  renderPanel();
+
+  const line = await screen.findByText(/余额 4\.2000/);
+  expect(line.textContent).toContain("840");
+  expect(line.textContent).toContain("抓取于");
+});
+
+// 没有快照的那家（62 没有余额接口）不显示这一行，而不是显示一个 0。
+it("没有余额快照时不显示余额行", async () => {
+  seed({
+    providers: [
+      { provider: "sms62", enabled: true, verified: true, supports_lifecycle: false, verified_at: "2026-09-05T00:00:00Z" },
+    ],
+  });
+  vi.mocked(listSMSBalances).mockResolvedValue([]);
+  renderPanel();
+
+  await screen.findAllByText("62-US");
+  expect(screen.queryByText(/余额 /)).toBeNull();
 });

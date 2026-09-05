@@ -20,6 +20,8 @@ type SMSQuerier interface {
 	ListCodes(ctx context.Context, resourceID string, limit int) ([]sms.Code, error)
 	// ListRoutingRules 是路由规则页的读端点（XM-SMS2 #5）。
 	ListRoutingRules(ctx context.Context) ([]sms.RoutingRule, error)
+	// LatestBalanceSnapshots 是巡检抓到的最新余额（XM-SMS2 #7）。
+	LatestBalanceSnapshots(ctx context.Context) ([]sms.BalanceSnapshot, error)
 }
 
 // SMSCatalogReader 读库存。**实时上游调用，不是投影**——库存变化频繁，
@@ -323,5 +325,38 @@ func ListSMSRoutingRulesHandler(store SMSQuerier, configured []string) http.Hand
 			"default_order": append([]string{}, configured...),
 			"wildcard":      sms.RouteAny,
 		})
+	}
+}
+
+// ---- 余额快照（XM-SMS2 #7）----
+
+type smsBalanceItem struct {
+	Provider string `json:"provider"`
+	// Amount 是十进制文本（金额不过 float）。
+	Amount string `json:"amount"`
+	// Currency 空 = 上游没说。分币种不折算。
+	Currency string `json:"currency,omitempty"`
+	TakenAt  string `json:"taken_at"`
+}
+
+// ListSMSBalancesHandler 返回每家最新一条余额快照。
+//
+// **是快照不是实时值**：它由 platform-worker 每 10 分钟抓一次。页面必须把抓取
+// 时间一起显示出来——一个不知道什么时候抓的余额，会让人以为刚刚还有钱。
+func ListSMSBalancesHandler(store SMSQuerier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rows, err := store.LatestBalanceSnapshots(r.Context())
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		out := make([]smsBalanceItem, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, smsBalanceItem{
+				Provider: row.Provider, Amount: row.AmountText, Currency: row.Currency,
+				TakenAt: row.TakenAt.UTC().Format(time.RFC3339),
+			})
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
 }

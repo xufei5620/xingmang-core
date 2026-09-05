@@ -15,13 +15,15 @@ var testNow = time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 // ---- 替身 ----
 
 type memStore struct {
-	ops       map[string]Operation
-	resources map[string]Resource
-	orders    map[string]Order
-	codes     map[string]Code
-	status    map[string]ProviderStatus
-	emails    map[string]Email
-	routing   map[string]RoutingRule
+	ops         map[string]Operation
+	resources   map[string]Resource
+	orders      map[string]Order
+	codes       map[string]Code
+	status      map[string]ProviderStatus
+	emails      map[string]Email
+	routing     map[string]RoutingRule
+	snapshots   []BalanceSnapshot
+	snapshotErr error
 	// pendingHash 模拟未决唯一索引。
 	pendingHash map[string]string
 	seq         int
@@ -271,9 +273,11 @@ type fakeAdapter struct {
 	testErr         error
 	purchaseCalls   int
 	importCalls     int
+	testCalls       int
 }
 
 func (f *fakeAdapter) TestConnection(ctx context.Context) (string, error) {
+	f.testCalls++
 	return f.testIP, f.testErr
 }
 
@@ -615,3 +619,33 @@ func (m *memStore) ListResourcesByOperation(ctx context.Context, operationID str
 	}
 	return out, nil
 }
+
+func (m *memStore) SaveBalanceSnapshot(ctx context.Context, snap BalanceSnapshot) (string, error) {
+	if m.snapshotErr != nil {
+		return "", m.snapshotErr
+	}
+	m.seq++
+	snap.ID = "snap-" + itoa(m.seq)
+	m.snapshots = append(m.snapshots, snap)
+	return snap.ID, nil
+}
+
+// LatestBalanceSnapshots 每家最新一条（与 PgStore 的 DISTINCT ON 同义）。
+func (m *memStore) LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error) {
+	latest := map[string]BalanceSnapshot{}
+	for _, s := range m.snapshots {
+		prev, ok := latest[s.Provider]
+		if !ok || !s.TakenAt.Before(prev.TakenAt) {
+			latest[s.Provider] = s
+		}
+	}
+	out := make([]BalanceSnapshot, 0, len(latest))
+	for _, id := range AllProviders {
+		if s, ok := latest[id]; ok {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) snapshotCount() int { return len(m.snapshots) }

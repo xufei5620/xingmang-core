@@ -6,6 +6,7 @@ import {
   executeSMSResourceAction,
   fetchSMSCode,
   importSMSOrder,
+  listSMSBalances,
   listSMSCatalog,
   listSMSCodes,
   listSMSOperations,
@@ -15,6 +16,7 @@ import {
   resolveSMSOperation,
   setSMSProviderEnabled,
   verifySMSProvider,
+  type SMSBalance,
   type SMSOperation,
   type SMSProvider,
   type SMSResource,
@@ -29,6 +31,7 @@ const PROVIDERS_QUERY = "sms-providers";
 const RESOURCES_QUERY = "sms-resources";
 const OPERATIONS_QUERY = "sms-operations";
 const CATALOG_QUERY = "sms-catalog";
+const BALANCES_QUERY = "sms-balances";
 
 /** 供应商的标签。
  *
@@ -174,10 +177,23 @@ function ProviderStrip({
   providers: SMSProvider[];
   onChanged: (r: ActionResult) => void;
 }) {
+  // 余额快照由 platform-worker 每 10 分钟抓一次（XM-SMS2 #7）。读失败不挡
+  // 这一条：卡片的主职是「开没开、验没验」，余额只是附注。
+  const balancesQuery = useQuery({
+    queryKey: [BALANCES_QUERY],
+    queryFn: ({ signal }) => listSMSBalances({ signal }),
+    staleTime: 60_000,
+  });
+  const balances = balancesQuery.data ?? [];
   return (
     <div className="flex flex-wrap gap-3">
       {providers.map((p) => (
-        <ProviderCard key={p.provider} provider={p} onChanged={onChanged} />
+        <ProviderCard
+          key={p.provider}
+          provider={p}
+          balance={balances.find((b) => b.provider === p.provider)}
+          onChanged={onChanged}
+        />
       ))}
     </div>
   );
@@ -185,9 +201,12 @@ function ProviderStrip({
 
 function ProviderCard({
   provider,
+  balance,
   onChanged,
 }: {
   provider: SMSProvider;
+  /** 最近一次巡检抓到的余额；这家没有余额接口或还没巡过时为空。 */
+  balance?: SMSBalance;
   onChanged: (r: ActionResult) => void;
 }) {
   const [error, setError] = useState<unknown>(null);
@@ -231,6 +250,13 @@ function ProviderCard({
       ) : (
         <span className="text-fg-muted text-xs">买号前必须先做一次连接测试</span>
       )}
+      {balance ? (
+        // **抓取时间必须一起显示**：一个不知道什么时候抓的余额，会让人以为
+        // 刚刚还有钱。这是快照不是实时值（巡检每 10 分钟一轮）。
+        <span className="text-fg-muted text-xs">
+          {`余额 ${balance.amount}${balance.currency ? ` (${balance.currency})` : ""} · 抓取于 ${formatUtcTimestamp(balance.taken_at)}`}
+        </span>
+      ) : null}
       {/* 出口 IP 的用处不是展示是排查：上游若做 IP 白名单，它对不上就是
           后续全部 403 的原因，而那种失败从错误码上看只是「没权限」。 */}
       {provider.client_ip ? (

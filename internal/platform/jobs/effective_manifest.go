@@ -176,6 +176,8 @@ func effectiveJobConfig(cfg Config, id string) (enabled, runOnStart bool, interv
 		return cfg.CPASyncEnabled, cfg.CPASyncRunOnStart, cfg.CPASyncInterval, "XM_CPA_SYNC_INTERVAL", nil
 	case CardSyncJobKind:
 		return cfg.CardSyncEnabled, cfg.CardSyncRunOnStart, cfg.CardSyncInterval, "XM_CARDS_SYNC_INTERVAL", nil
+	case SMSProbeJobKind:
+		return cfg.SMSProbeEnabled, cfg.SMSProbeRunOnStart, cfg.SMSProbeInterval, "XM_SMS_PROBE_INTERVAL", nil
 	default:
 		return false, false, 0, "", fmt.Errorf("effective job manifest: unknown job %q", id)
 	}

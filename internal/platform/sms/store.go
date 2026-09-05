@@ -73,6 +73,12 @@ type Store interface {
 	GetEmail(ctx context.Context, emailID string) (Email, error)
 	ListEmails(ctx context.Context, limit int) ([]Email, error)
 
+	// 余额快照（XM-SMS2 #7）。**追加**而不是覆盖：阶段 3 要用相邻两次的差
+	// 与成本事件对账，覆盖写就没有差可算。
+	SaveBalanceSnapshot(ctx context.Context, snap BalanceSnapshot) (string, error)
+	// LatestBalanceSnapshots 每家最新一条。
+	LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error)
+
 	// 路由规则（XM-SMS2 #5）。UpsertRoutingRule 按（环境, 服务, 国家）覆盖；
 	// RemoveRoutingRule 不存在时回 ErrRoutingRuleNotFound。
 	UpsertRoutingRule(ctx context.Context, r RoutingRule) (string, error)
