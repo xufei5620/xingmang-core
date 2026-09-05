@@ -6,6 +6,7 @@ import {
   getCardStats,
   type CardStatsBucket,
   type CardStatsCard,
+  type CardStatsIssueFee,
   type CardStatsMerchant,
 } from "../api/cards";
 import { formatMinorUnits } from "../lib/money";
@@ -99,19 +100,56 @@ export function CardStats({ account }: { account: string }) {
                 切到「全部」可以看到它们。
               </p>
             ) : null}
+            <IssueFees rows={stats.issue_fees} />
             <div className="grid min-w-0 gap-4 xl:grid-cols-2">
               <MerchantTable rows={stats.merchants} />
               <CardTable rows={stats.cards} />
             </div>
             <p className="text-fg-muted text-xs">
-              成本与利润暂不计算：成本口径（充值金额还是实际消费）与收入来源
-              （卡给谁用、那笔收入记在哪个系统）都还没定，定之前算出来的数会被当成钱。
-              跨平台财务的核算接入排在那之后。
+              成本口径是「实际消费 + 手续费 + 开卡费」（产品负责人 2026-09-06 定）：
+              充值只是资金搬家，不计成本，剩在卡里的算在途资金。
+              收入不在这套数据里（卡分自用、给客户用、代客充值三种，收入记在别处），
+              所以这一页只出成本，利润的合并等跨平台财务。
             </p>
           </div>
         )}
       </ApiStateView>
     </section>
+  );
+}
+
+/** 开卡费。**来自卡片表而不是流水表**，所以单独一块。
+ *
+ *  按计价代币分组：一列 USDT 的开卡费直接加到一列 USD 的消费上，得出的数
+ *  看起来完全正常，却是把两种资产当成了同一种。
+ *
+ *  金额是**文本原样显示**，不做 Number() 再格式化——相加已经在服务端的
+ *  numeric 里精确做完了，前端再过一遍浮点正是误差进来的地方。 */
+function IssueFees({ rows }: { rows: CardStatsIssueFee[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="border-edge flex flex-col gap-2 rounded-md border p-3">
+      <h3 className="text-sm font-semibold">开卡费</h3>
+      <div className="flex flex-wrap gap-3">
+        {rows.map((r) => (
+          <Tile
+            key={r.token || "unknown"}
+            label={
+              r.token
+                ? `${r.token} · ${r.count} 张`
+                : `单位未记录 · ${r.count} 张`
+            }
+            value={r.token ? `${r.amount_text} ${r.token}` : r.amount_text}
+          />
+        ))}
+      </div>
+      {rows.some((r) => !r.token) ? (
+        <p className="text-fg-muted text-xs">
+          「单位未记录」是 2026-09-06 之前开的卡：当时只存了金额没存代币。
+          不按 USDT 计入——那是一个汇率假设，不是记录。新开的卡会带上代币。
+        </p>
+      ) : null}
+    </div>
   );
 }
 

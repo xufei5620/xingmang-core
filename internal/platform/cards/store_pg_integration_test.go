@@ -1403,3 +1403,78 @@ func bucketOf(s TransactionStats, currency, txType, status string) StatsBucket {
 	}
 	return StatsBucket{}
 }
+
+// 开卡费要能按**计价代币**分组汇总，而且全程不过 float。
+//
+// 产品负责人 2026-09-06 定的成本口径是「实际消费 + 手续费」，开卡费是其中
+// 一块固定成本（实测 1 USDT/张）。它存在卡片表而不是流水表，所以必须单独
+// 聚合——漏掉它，成本就永远少一块，而少掉的那块正比于开了多少卡。
+//
+// 没记单位的老卡（000039 之前）单独归一组，**不当成 USDT**：
+// 1 USDT ≈ 1 USD 是汇率假设不是事实。
+func TestPgStoreIssueFeeStatsGroupsByToken(t *testing.T) {
+	store, pool := pgStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+
+	seed := []struct {
+		account, card, fee, token string
+		created                   *time.Time
+	}{
+		{"CHRIS", "k1", "1", "USDT", ptrTime(base)},
+		{"CHRIS", "k2", "1.5", "USDT", ptrTime(base.Add(time.Hour))},
+		{"CHRIS", "k3", "2", "USDC", ptrTime(base.Add(2 * time.Hour))},
+		{"LINFENG", "k4", "1", "USDT", ptrTime(base.Add(3 * time.Hour))},
+		// 000039 之前开的卡：有费用没单位。
+		{"CHRIS", "k5", "1", "", ptrTime(base.Add(4 * time.Hour))},
+		// 费用字段是空的（同步进来的、不是我们开的卡）——不该算进任何一组。
+		{"CHRIS", "k6", "", "", ptrTime(base.Add(5 * time.Hour))},
+	}
+	for _, r := range seed {
+		if _, err := pool.Exec(ctx, `
+INSERT INTO cards.infini_card
+ (environment, account, upstream_card_id, mask, holder_name, card_alias, status,
+  currency, balance_minor, last_synced_at, created_at, updated_at,
+  upstream_created_at, issue_fee_text, issue_fee_token)
+VALUES ($1,$2,$3,'****0000','h','a','active','USD',0,$4,$4,$4,$5,$6,$7)`,
+			testEnvironment, r.account, r.card, base, r.created, r.fee, r.token); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := store.TransactionStats(ctx, "", time.Time{}, time.Time{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, f := range all.IssueFees {
+		got[f.Token] = f.AmountText
+	}
+	// 精确十进制：1 + 1.5 + 1 = 3.5，不是 3.4999999999999996。
+	if got["USDT"] != "3.5" {
+		t.Errorf("USDT 开卡费合计 = %q, want \"3.5\"", got["USDT"])
+	}
+	if got["USDC"] != "2" {
+		t.Errorf("USDC 开卡费合计 = %q, want \"2\"", got["USDC"])
+	}
+	// 没记单位的单独一组，绝不并进 USDT。
+	if got[""] != "1" {
+		t.Errorf("单位未记录组 = %q, want \"1\"", got[""])
+	}
+	for _, f := range all.IssueFees {
+		if f.Count == 0 {
+			t.Errorf("每组都该有张数, got %+v", f)
+		}
+	}
+
+	// 按账号筛。
+	chris, err := store.TransactionStats(ctx, "CHRIS", time.Time{}, time.Time{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range chris.IssueFees {
+		if f.Token == "USDT" && f.AmountText != "2.5" {
+			t.Errorf("CHRIS 的 USDT 开卡费 = %q, want \"2.5\"", f.AmountText)
+		}
+	}
+}

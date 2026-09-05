@@ -141,8 +141,8 @@ INSERT INTO cards.infini_card (
     environment, account, upstream_card_id, mask, holder_name, card_alias, status,
     currency, balance_minor, owner_ref, user_email, upstream_user_id,
     upstream_created_at, upstream_updated_at, last_synced_at, created_at, updated_at,
-    issue_fee_text, issue_pay_amount_text
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17)
+    issue_fee_text, issue_pay_amount_text, issue_fee_token
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,$18)
 ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     mask = EXCLUDED.mask,
     holder_name = EXCLUDED.holder_name,
@@ -157,6 +157,7 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
     -- 同 owner_ref：开卡费只在开卡那一刻知道，同步作业传空，保留原值。
     issue_fee_text = COALESCE(NULLIF(EXCLUDED.issue_fee_text, ''), cards.infini_card.issue_fee_text),
     issue_pay_amount_text = COALESCE(NULLIF(EXCLUDED.issue_pay_amount_text, ''), cards.infini_card.issue_pay_amount_text),
+    issue_fee_token = COALESCE(NULLIF(EXCLUDED.issue_fee_token, ''), cards.infini_card.issue_fee_token),
     upstream_user_id = EXCLUDED.upstream_user_id,
     upstream_created_at = EXCLUDED.upstream_created_at,
     upstream_updated_at = EXCLUDED.upstream_updated_at,
@@ -175,6 +176,7 @@ ON CONFLICT (environment, account, upstream_card_id) DO UPDATE SET
 		s.environment, account, card.ID, card.Mask, card.HolderName, card.Alias, card.Status,
 		card.Currency, card.BalanceMinor, attribution.OwnerRef, attribution.UserEmail, card.UserID,
 		createdAt, updatedAt, now, attribution.IssueFee, attribution.IssuePayAmount,
+		attribution.IssueFeeToken,
 	); err != nil {
 		return fmt.Errorf("落卡片投影: %w", err)
 	}
@@ -414,6 +416,8 @@ type CardView struct {
 	// IssueFee / IssuePayAmount 是开卡时上游收的手续费与实际扣款额。
 	IssueFee       string
 	IssuePayAmount string
+	// IssueFeeToken 是开卡费的计价代币。空 = 单位未记录（000039 之前的卡）。
+	IssueFeeToken string
 }
 
 // ListCards 读卡片投影。
@@ -429,7 +433,7 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
        bound_account, bound_account_kind, service_name,
        COALESCE(to_char(next_renewal_on, 'YYYY-MM-DD'), ''), usage_note,
        subscription_amount_text, subscription_cycle,
-       upstream_created_at, issue_fee_text, issue_pay_amount_text
+       upstream_created_at, issue_fee_text, issue_pay_amount_text, issue_fee_token
   FROM cards.infini_card
  WHERE environment = $1
    AND ($2 = '' OR account = $2)
@@ -456,7 +460,7 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
 			&v.BoundAccount, &v.BoundAccountKind, &v.ServiceName,
 			&v.NextRenewalOn, &v.UsageNote,
 			&v.SubscriptionAmount, &v.SubscriptionCycle, &upstreamCreatedAt,
-			&v.IssueFee, &v.IssuePayAmount); err != nil {
+			&v.IssueFee, &v.IssuePayAmount, &v.IssueFeeToken); err != nil {
 			return nil, err
 		}
 		if upstreamCreatedAt != nil {

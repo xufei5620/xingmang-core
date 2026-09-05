@@ -442,10 +442,24 @@ export interface CardStatsCard {
   fee_minor: number;
 }
 
+/** 开卡费，按计价代币分组。**来自卡片表而不是流水表**——它不是一笔交易，
+ *  上游不会把它写进流水。漏掉它，成本就永远少一块，而少掉的那块正比于
+ *  开了多少卡。 */
+export interface CardStatsIssueFee {
+  /** 计价代币。**空串 = 单位未记录**（迁移 000039 之前开的卡）。
+   *  如实显示，不当成 USDT——1 USDT 约等于 1 USD 是汇率假设不是事实。 */
+  token: string;
+  /** 十进制文本。相加已在 PostgreSQL 的 numeric 里精确做完；
+   *  前端**不要**把它 Number() 之后再算，那正是 float 进来的入口。 */
+  amount_text: string;
+  count: number;
+}
+
 export interface CardStats {
   buckets: CardStatsBucket[];
   merchants: CardStatsMerchant[];
   cards: CardStatsCard[];
+  issue_fees: CardStatsIssueFee[];
   /** 没有发生时间、因而没能计入期间统计的笔数。
    *  显示出来而不是丢掉：一笔上游没给时间的流水在按月统计里会凭空消失，
    *  而消失的钱是查不出来的。 */
@@ -475,6 +489,7 @@ export async function getCardStats(
     buckets: body.buckets ?? [],
     merchants: body.merchants ?? [],
     cards: body.cards ?? [],
+    issue_fees: body.issue_fees ?? [],
     undated_count: body.undated_count ?? 0,
   };
 }

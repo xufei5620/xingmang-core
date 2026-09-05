@@ -422,6 +422,15 @@ type statsCardItem struct {
 	FeeMinor    int64  `json:"fee_minor"`
 }
 
+type statsIssueFeeItem struct {
+	// Token 空 = 单位未记录（000039 之前开的卡）。前端如实显示，不当成 USDT。
+	Token string `json:"token"`
+	// AmountText 是十进制文本：单位是代币，最小单位小数位无从判断。
+	// 相加已在 PostgreSQL 的 numeric 里精确做完，这里不再换算。
+	AmountText string `json:"amount_text"`
+	Count      int    `json:"count"`
+}
+
 // CardStatsHandler 返回按整表聚合的卡片流水统计。
 //
 // **服务端聚合，不是让前端对流水列表求和**：流水端点有 limit，拿那份截断的
@@ -479,10 +488,20 @@ func CardStatsHandler(store CardStatsQuerier) http.HandlerFunc {
 			})
 		}
 
+		issueFees := make([]statsIssueFeeItem, 0, len(stats.IssueFees))
+		for _, f := range stats.IssueFees {
+			issueFees = append(issueFees, statsIssueFeeItem{
+				Token: f.Token, AmountText: f.AmountText, Count: f.Count,
+			})
+		}
+
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"buckets":   buckets,
 			"merchants": merchants,
 			"cards":     cardRows,
+			// 开卡费来自卡片表而不是流水表：它不是一笔交易，上游不会把它
+			// 写进流水。漏掉它，成本就永远少一块。
+			"issue_fees": issueFees,
 			// undated_count 是没有发生时间、因而没能计入期间统计的笔数。
 			// 回出来而不是丢掉：一笔上游没给时间的流水在按月统计里会凭空
 			// 消失，而消失的钱是查不出来的。

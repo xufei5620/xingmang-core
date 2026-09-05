@@ -27,6 +27,7 @@ function seed(over: Partial<CardStatsData> = {}) {
     buckets: [],
     merchants: [],
     cards: [],
+    issue_fees: [],
     undated_count: 0,
     ...over,
   });
@@ -129,4 +130,42 @@ it("把账号作为查询参数传给服务端", async () => {
   await vi.waitFor(() =>
     expect(vi.mocked(getCardStats).mock.calls[0]?.[0]).toMatchObject({ account: "CHRIS" }),
   );
+});
+
+// 开卡费按代币分组，**没记单位的单独一组**，绝不并进 USDT。
+//
+// 1 USDT 约等于 1 USD 是汇率假设不是事实；把假设混进历史数据，
+// 以后就再也分不清哪些是记录、哪些是我们替它填的。
+it("开卡费按代币分组，未记录单位的单独显示", async () => {
+  seed({
+    buckets: [
+      { currency: "USD", type: "consume", status: "completed", count: 1, amount_minor: -1000, fee_minor: 0 },
+    ],
+    issue_fees: [
+      { token: "", amount_text: "4", count: 4 },
+      { token: "USDT", amount_text: "3.5", count: 3 },
+    ],
+  });
+  renderPanel();
+
+  expect(await screen.findByText("3.5 USDT")).toBeTruthy();
+  expect(screen.getByText(/单位未记录 · 4 张/)).toBeTruthy();
+  expect(screen.getByText(/不按 USDT 计入/)).toBeTruthy();
+});
+
+// 金额**原样显示**，不做 Number() 再格式化。
+//
+// 服务端已经在 numeric 里精确加完了，前端再过一遍浮点正是误差进来的地方
+// ——而 "0.30000000000000004" 印在成本上没人看得出是怎么来的。
+it("开卡费金额原样显示，不经浮点重算", async () => {
+  seed({
+    buckets: [
+      { currency: "USD", type: "consume", status: "completed", count: 1, amount_minor: -1000, fee_minor: 0 },
+    ],
+    issue_fees: [{ token: "USDT", amount_text: "0.30", count: 3 }],
+  });
+  renderPanel();
+
+  // 原样是 "0.30"；Number() 之后会变成 "0.3"。
+  expect(await screen.findByText("0.30 USDT")).toBeTruthy();
 });
