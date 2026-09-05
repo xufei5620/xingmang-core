@@ -35,6 +35,7 @@ function streamRow(
     sequence: 12,
     approved_runtime_version: "0.1.179",
     observed_runtime_version: "0.1.179",
+    cutover_runtime_version: "0.1.179",
     observed_agent_version: "0.3.2",
     projection_status: "healthy" as const,
     last_accepted_at: new Date().toISOString(),
@@ -171,5 +172,16 @@ describe("source health carries the eligibility projection block", () => {
     await expect(httpInvoiceApi.getSourceHealth()).rejects.toMatchObject({
       code: "INVALID_SOURCE_HEALTH_RESPONSE",
     });
+  });
+  // XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured
+  // under rides beside the approved pin, so a pin bump is visible as two values.
+  it("maps the cutover runtime beside the approved pin", async () => {
+    stubFetchReturning(healthPayload({ queued: 0, processing: 0, retrying: 0, dead: 0, proof_pending: 0 }));
+
+    const report = await httpInvoiceApi.getSourceHealth();
+    const first = report.items[0];
+
+    expect(first.approvedRuntimeVersion).toBe("0.1.179");
+    expect(first.cutoverRuntimeVersion).toBe("0.1.179");
   });
 });

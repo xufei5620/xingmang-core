@@ -546,3 +546,36 @@ func TestCommitSourceBatchContinuationOfActiveScanCycleIsUnaffectedBySupersedeGr
 		t.Fatalf("continuation batch was treated as a supersede: %#v", secondRow)
 	}
 }
+
+// XM-INV-SOURCE-RUNTIME-PIN: the sync status carries the runtime the sealed cutover
+// manifest was captured under beside the approved pin, so an operator can see
+// that a pin bump did not (and must not) rewrite the manifest.
+func TestSourceHealthReportsTheCutoverManifestRuntimeBesideThePin(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, _, _, _ := seedEligibilityProjectionHealthSource(t, store, ctx)
+	// A pin bump (the runbook's source-upgrade CAS) moves the approved runtime on
+	// the instance only; the manifest keeps the runtime it was captured under.
+	if _, err := store.pool.Exec(ctx, `UPDATE source_instances SET runtime_version='v3-test-2',runtime_version_revision=runtime_version_revision+1 WHERE id=$1`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	report, err := store.SourceHealth(ctx, SourceFreshnessPolicy{EconomicHeartbeatMaxAge: time.Hour, EconomicWatermarkMaxAge: time.Hour, IdentitiesMaxAge: time.Hour, EconomicRescanActivityMaxAge: time.Hour, Now: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, item := range report.Items {
+		if item.SourceInstanceID != sourceID {
+			continue
+		}
+		seen++
+		if item.CutoverRuntimeVersion != "v3-test" {
+			t.Fatalf("stream %s: cutover runtime must come from the manifest (v3-test), got %q", item.StreamID, item.CutoverRuntimeVersion)
+		}
+		if item.ApprovedRuntimeVersion != "v3-test-2" {
+			t.Fatalf("stream %s: approved pin must follow the instance (v3-test-2), got %q", item.StreamID, item.ApprovedRuntimeVersion)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("the seeded source must appear in the health report")
+	}
+}

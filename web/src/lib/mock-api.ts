@@ -774,6 +774,7 @@ export const mockInvoiceApi: InvoiceApiClient = {
           streamId: stream,
           sequence: 128,
           approvedRuntimeVersion: source === "sub2api" ? "0.1.179" : "v1.0.0-rc.25",
+          cutoverRuntimeVersion: source === "sub2api" ? "0.1.179" : "v1.0.0-rc.25",
           observedRuntimeVersion: source === "sub2api" ? "0.1.179" : "v1.0.0-rc.25",
           observedAgentVersion: "0.2.0",
           projectionStatus: "healthy" as const,

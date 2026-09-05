@@ -215,6 +215,7 @@ type BackendSourceHealth = {
     stream_id: "payments" | "identities" | "usage" | "credits" | "balances";
     sequence: number;
     approved_runtime_version: string;
+    cutover_runtime_version?: string;
     observed_runtime_version: string;
     observed_agent_version: string;
     projection_status: "healthy" | "blocked" | "unknown";
@@ -1802,6 +1803,7 @@ function mapSourceHealth(
       streamId: item.stream_id,
       sequence: item.sequence,
       approvedRuntimeVersion: String(item.approved_runtime_version ?? ""),
+      cutoverRuntimeVersion: String(item.cutover_runtime_version ?? ""),
       observedRuntimeVersion: String(item.observed_runtime_version ?? ""),
       observedAgentVersion: String(item.observed_agent_version ?? ""),
       projectionStatus: item.projection_status,

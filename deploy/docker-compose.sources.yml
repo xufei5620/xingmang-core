@@ -52,6 +52,9 @@ services:
       SOURCE_STATE_STREAM: payments
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${SUB2API_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/sub2api_payments_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -84,6 +87,9 @@ services:
       SOURCE_STATE_STREAM: identities
       SOURCE_SCHEMA_VERSION: "2.0"
       SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:-0.1.179}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${SUB2API_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/sub2api_identities_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_RECONCILE_FILE: /state/reconcile.json
@@ -114,6 +120,9 @@ services:
       SOURCE_STATE_STREAM: usage
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${SUB2API_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/sub2api_usage_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -139,6 +148,9 @@ services:
       SOURCE_STATE_STREAM: credits
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${SUB2API_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/sub2api_credits_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -164,6 +176,9 @@ services:
       SOURCE_STATE_STREAM: balances
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${SUB2API_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/sub2api_balances_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -192,6 +207,9 @@ services:
       SOURCE_STATE_STREAM: payments
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${NEWAPI_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/newapi_payments_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -224,6 +242,9 @@ services:
       SOURCE_STATE_STREAM: identities
       SOURCE_SCHEMA_VERSION: "2.0"
       SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${NEWAPI_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/newapi_identities_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_RECONCILE_FILE: /state/reconcile.json
@@ -254,6 +275,9 @@ services:
       SOURCE_STATE_STREAM: usage
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${NEWAPI_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/newapi_usage_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -279,6 +303,9 @@ services:
       SOURCE_STATE_STREAM: credits
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${NEWAPI_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/newapi_credits_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -304,6 +331,9 @@ services:
       SOURCE_STATE_STREAM: balances
       SOURCE_SCHEMA_VERSION: "3.0"
       SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${NEWAPI_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/newapi_balances_reader_database_url
       SOURCE_STATE_FILE: /state/state.json
       SOURCE_SPOOL_FILE: /state/pending.enc
@@ -334,6 +364,9 @@ services:
       SOURCE_ID: ${SUB2API_SOURCE_ID:?set registered Sub2API source UUID}
       SOURCE_TYPE: sub2api
       SOURCE_RUNTIME_VERSION: ${SUB2API_RUNTIME_VERSION:?set approved exact Sub2API runtime}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${SUB2API_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/sub2api_balances_reader_database_url
       SOURCE_SIGNING_KEY_ID: ${SUB2API_BALANCES_SIGNING_KEY_ID:-2026-08-balances}
       SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc
@@ -356,6 +389,9 @@ services:
       SOURCE_ID: ${NEWAPI_SOURCE_ID:?set registered New API source UUID}
       SOURCE_TYPE: newapi
       SOURCE_RUNTIME_VERSION: ${NEWAPI_RUNTIME_VERSION:-v1.0.0-rc.25}
+      # XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under;
+      # stays at the cutover-time value for the state generation while the pin above moves.
+      SOURCE_CUTOVER_RUNTIME_VERSION: ${NEWAPI_CUTOVER_RUNTIME_VERSION:-}
       SOURCE_DB_DSN_FILE: /run/secrets/newapi_balances_reader_database_url
       SOURCE_SIGNING_KEY_ID: ${NEWAPI_BALANCES_SIGNING_KEY_ID:-2026-08-balances}
       SOURCE_CUTOVER_MANIFEST_FILE: /cutover/manifest.enc

@@ -92,12 +92,16 @@ type SourceStreamHealth struct {
 	StreamID               string            `json:"stream_id"`
 	Sequence               int64             `json:"sequence"`
 	ApprovedRuntimeVersion string            `json:"approved_runtime_version"`
-	ObservedRuntimeVersion string            `json:"observed_runtime_version"`
-	ObservedAgentVersion   string            `json:"observed_agent_version"`
-	ProjectionStatus       string            `json:"projection_status"`
-	LastAcceptedAt         time.Time         `json:"last_accepted_at"`
-	LastNonemptyBatchAt    time.Time         `json:"last_nonempty_batch_at"`
-	EconomicWatermarkAt    time.Time         `json:"economic_watermark_at,omitempty"`
+	// CutoverRuntimeVersion is the source runtime the sealed cutover manifest was
+	// captured under; immutable for the state generation, while
+	// ApprovedRuntimeVersion is the pin batches must declare (XM-INV-SOURCE-RUNTIME-PIN).
+	CutoverRuntimeVersion  string    `json:"cutover_runtime_version"`
+	ObservedRuntimeVersion string    `json:"observed_runtime_version"`
+	ObservedAgentVersion   string    `json:"observed_agent_version"`
+	ProjectionStatus       string    `json:"projection_status"`
+	LastAcceptedAt         time.Time `json:"last_accepted_at"`
+	LastNonemptyBatchAt    time.Time `json:"last_nonempty_batch_at"`
+	EconomicWatermarkAt    time.Time `json:"economic_watermark_at,omitempty"`
 	// ActiveRescanUpdatedAt (XM-INV-AGENT-RESTART-GRACE part A) is the
 	// updated_at of this (source, stream)'s source_economic_scan_cycles row
 	// still in 'receiving' or 'processing' status, if any -- the partial
@@ -1023,7 +1027,7 @@ const sourceReadinessHealthQuery = `
 		FROM active_event_health
 	)
 	SELECT si.id,si.source_type,si.name,si.enabled,required.stream_id,
-		COALESCE(sis.sequence,0),si.runtime_version,
+		COALESCE(sis.sequence,0),si.runtime_version,COALESCE((SELECT scm.source_runtime_version FROM source_cutover_manifests scm WHERE scm.source_instance_id=si.id ORDER BY scm.cutover_at DESC LIMIT 1),''),
 		COALESCE(sis.source_runtime_version,''),COALESCE(sis.source_agent_version,''),COALESCE(sis.projection_status,'unknown'),
 		COALESCE(sis.last_accepted_at,'epoch'::timestamptz),
 		COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
@@ -1064,7 +1068,7 @@ func (s *Store) SourceReadinessHealth(ctx context.Context, policy SourceFreshnes
 		var ingest SourceIngestHealth
 		if err = rows.Scan(&item.SourceInstanceID, &item.SourceType, &item.SourceName,
 			&item.SourceEnabled, &item.StreamID, &item.Sequence,
-			&item.ApprovedRuntimeVersion, &item.ObservedRuntimeVersion,
+			&item.ApprovedRuntimeVersion, &item.CutoverRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
 			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents,
 			&ingest.Pending, &ingest.Dead, &ingest.OldestPending, &item.ActiveRescanUpdatedAt); err != nil {
@@ -1113,7 +1117,7 @@ func (s *Store) SourceHealth(ctx context.Context, policy SourceFreshnessPolicy) 
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT si.id,si.source_type,si.name,si.enabled,required.stream_id,
-			COALESCE(sis.sequence,0),si.runtime_version,
+			COALESCE(sis.sequence,0),si.runtime_version,COALESCE((SELECT scm.source_runtime_version FROM source_cutover_manifests scm WHERE scm.source_instance_id=si.id ORDER BY scm.cutover_at DESC LIMIT 1),''),
 			COALESCE(sis.source_runtime_version,''),COALESCE(sis.source_agent_version,''),COALESCE(sis.projection_status,'unknown'),
 			COALESCE(sis.last_accepted_at,'epoch'::timestamptz),
 			COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
@@ -1146,7 +1150,7 @@ func (s *Store) SourceHealth(ctx context.Context, policy SourceFreshnessPolicy) 
 		var item SourceStreamHealth
 		if err = rows.Scan(&item.SourceInstanceID, &item.SourceType, &item.SourceName,
 			&item.SourceEnabled, &item.StreamID, &item.Sequence,
-			&item.ApprovedRuntimeVersion, &item.ObservedRuntimeVersion,
+			&item.ApprovedRuntimeVersion, &item.CutoverRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
 			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.WaitingDependencies,
 			&item.ActiveRescanUpdatedAt); err != nil {
@@ -1195,7 +1199,7 @@ func assertSourceFreshTx(ctx context.Context, tx pgx.Tx, sourceInstanceID string
 		item.StreamID = streamID
 		err := tx.QueryRow(ctx, `
 			SELECT si.source_type,si.name,si.enabled,COALESCE(sis.sequence,0),
-				si.runtime_version,COALESCE(sis.source_runtime_version,''),
+				si.runtime_version,COALESCE((SELECT scm.source_runtime_version FROM source_cutover_manifests scm WHERE scm.source_instance_id=si.id ORDER BY scm.cutover_at DESC LIMIT 1),''),COALESCE(sis.source_runtime_version,''),
 				COALESCE(sis.source_agent_version,''),COALESCE(sis.projection_status,'unknown'),
 				COALESCE(sis.last_accepted_at,'epoch'::timestamptz),
 				COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
@@ -1212,7 +1216,7 @@ func assertSourceFreshTx(ctx context.Context, tx pgx.Tx, sourceInstanceID string
 				sis.source_runtime_version,sis.source_agent_version,sis.projection_status,sis.last_accepted_at,
 				sis.last_nonempty_batch_at,sew.watermark_at`, sourceInstanceID, streamID).Scan(
 			&item.SourceType, &item.SourceName, &item.SourceEnabled, &item.Sequence,
-			&item.ApprovedRuntimeVersion, &item.ObservedRuntimeVersion,
+			&item.ApprovedRuntimeVersion, &item.CutoverRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
 			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.WaitingDependencies)
 		if errors.Is(err, pgx.ErrNoRows) {

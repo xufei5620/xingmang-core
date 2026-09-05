@@ -47,6 +47,13 @@ type runConfig struct {
 	StreamID               string
 	SourceType             string
 	SourceRuntime          string
+	// CutoverRuntime is the source runtime the encrypted cutover manifest was
+	// sealed under (SOURCE_CUTOVER_RUNTIME_VERSION). The manifest is immutable --
+	// every record carries its hash -- so this stays at the cutover-time value
+	// for the life of the state generation, while SourceRuntime is the approved
+	// pin every batch declares and the API compares (XM-INV-SOURCE-RUNTIME-PIN).
+	// Empty means "same as SourceRuntime", which is every deployment before RC100.
+	CutoverRuntime         string
 	ProtocolVersion        string
 	DatabaseDSNFile        string
 	StateFile              string
@@ -168,7 +175,7 @@ func checkDatabaseFromEnvironment(requireLiveEconomicContract bool) error {
 	defer database.Close()
 	if requireLiveEconomicContract && config.ProtocolVersion == sourceagent.SchemaVersionV3 {
 		manifestStore := sourceagent.EncryptedStateFile{Path: config.CutoverManifestFile, Purpose: "cutover_manifest", Keys: sourceagent.FileSpoolKeyProvider{Path: config.CutoverKeyFile}}
-		manifest, loadErr := sourceagent.LoadCutoverManifest(ctx, manifestStore, config.SourceID, config.SourceType, config.SourceRuntime)
+		manifest, loadErr := sourceagent.LoadCutoverManifest(ctx, manifestStore, config.SourceID, config.SourceType, config.CutoverRuntime)
 		if loadErr != nil {
 			return fmt.Errorf("load encrypted cutover manifest for live database check: %w", loadErr)
 		}
@@ -240,6 +247,9 @@ func cutoverInitFromEnvironment() error {
 		return err
 	}
 	defer database.Close()
+	if err := cutoverInitRuntimeGuard(config); err != nil {
+		return err
+	}
 	manifest, err := sourceagent.CaptureCutover(ctx, database, sourceagent.CutoverCaptureConfig{
 		SourceID: config.SourceID, SourceType: config.SourceType, SourceRuntime: config.SourceRuntime,
 		SigningKeyID: config.SigningKeyID, EligibilityStartAt: config.EligibilityStartAt,
@@ -256,7 +266,7 @@ func checkCutoverFromEnvironment() error {
 	if err != nil {
 		return err
 	}
-	manifest, snapshot, err := sourceagent.LoadAndCheckCutover(context.Background(), manifestStore, snapshotStore, config.SourceID, config.SourceType, config.SourceRuntime)
+	manifest, snapshot, err := sourceagent.LoadAndCheckCutover(context.Background(), manifestStore, snapshotStore, config.SourceID, config.SourceType, config.CutoverRuntime)
 	if err != nil {
 		return err
 	}
@@ -270,8 +280,28 @@ func checkCutoverFromEnvironment() error {
 	return nil
 }
 
+// cutoverRuntimeFromEnv returns SOURCE_CUTOVER_RUNTIME_VERSION, falling back to
+// SOURCE_RUNTIME_VERSION when unset: the runtime the sealed cutover manifest
+// must match, as opposed to the approved pin batches declare.
+func cutoverRuntimeFromEnv(getenv func(string) string) string {
+	if value := strings.TrimSpace(getenv("SOURCE_CUTOVER_RUNTIME_VERSION")); value != "" {
+		return value
+	}
+	return strings.TrimSpace(getenv("SOURCE_RUNTIME_VERSION"))
+}
+
+// cutoverInitRuntimeGuard refuses to seal a cutover manifest under a runtime
+// other than the approved pin: the manifest records the runtime the source ran
+// at capture time, and a later pin bump must not be written into it.
+func cutoverInitRuntimeGuard(config runConfig) error {
+	if config.CutoverRuntime != config.SourceRuntime {
+		return errors.New("cutover-init seals the manifest at the approved runtime: SOURCE_CUTOVER_RUNTIME_VERSION must be unset or equal to SOURCE_RUNTIME_VERSION")
+	}
+	return nil
+}
+
 func loadCutoverCommandConfig(getenv func(string) string) (runConfig, sourceagent.EncryptedStateFile, sourceagent.EncryptedStateFile, error) {
-	config := runConfig{SourceID: strings.TrimSpace(getenv("SOURCE_ID")), SourceType: strings.TrimSpace(getenv("SOURCE_TYPE")), SourceRuntime: strings.TrimSpace(getenv("SOURCE_RUNTIME_VERSION")),
+	config := runConfig{SourceID: strings.TrimSpace(getenv("SOURCE_ID")), SourceType: strings.TrimSpace(getenv("SOURCE_TYPE")), SourceRuntime: strings.TrimSpace(getenv("SOURCE_RUNTIME_VERSION")), CutoverRuntime: cutoverRuntimeFromEnv(getenv),
 		ProtocolVersion: sourceagent.SchemaVersionV3, StreamID: sourceagent.StreamBalances, DatabaseDSNFile: strings.TrimSpace(getenv("SOURCE_DB_DSN_FILE")),
 		CutoverManifestFile: strings.TrimSpace(getenv("SOURCE_CUTOVER_MANIFEST_FILE")), CutoverKeyFile: strings.TrimSpace(getenv("SOURCE_CUTOVER_KEY_FILE")),
 		BalanceBaselineFile: strings.TrimSpace(getenv("SOURCE_BALANCE_BASELINE_FILE")), BalanceSnapshotKeyFile: strings.TrimSpace(getenv("SOURCE_BALANCE_SNAPSHOT_KEY_FILE")), SigningKeyID: strings.TrimSpace(getenv("SOURCE_SIGNING_KEY_ID"))}
@@ -606,7 +636,7 @@ func checkStateFromEnvironment() error {
 	}
 	if strings.TrimSpace(os.Getenv("SOURCE_SCHEMA_VERSION")) == sourceagent.SchemaVersionV3 {
 		manifestStore := sourceagent.EncryptedStateFile{Path: strings.TrimSpace(os.Getenv("SOURCE_CUTOVER_MANIFEST_FILE")), Purpose: "cutover_manifest", Keys: sourceagent.FileSpoolKeyProvider{Path: strings.TrimSpace(os.Getenv("SOURCE_CUTOVER_KEY_FILE"))}}
-		manifest, loadErr := sourceagent.LoadCutoverManifest(context.Background(), manifestStore, sourceID, sourceType, strings.TrimSpace(os.Getenv("SOURCE_RUNTIME_VERSION")))
+		manifest, loadErr := sourceagent.LoadCutoverManifest(context.Background(), manifestStore, sourceID, sourceType, cutoverRuntimeFromEnv(os.Getenv))
 		if loadErr != nil {
 			return fmt.Errorf("check cutover manifest: %w", loadErr)
 		}
@@ -622,7 +652,7 @@ func checkStateFromEnvironment() error {
 		}
 		if streamID == sourceagent.StreamBalances {
 			baseline := sourceagent.EncryptedStateFile{Path: strings.TrimSpace(os.Getenv("SOURCE_BALANCE_BASELINE_FILE")), Purpose: "balance_baseline", Keys: sourceagent.FileSpoolKeyProvider{Path: strings.TrimSpace(os.Getenv("SOURCE_BALANCE_SNAPSHOT_KEY_FILE"))}}
-			if _, _, loadErr = sourceagent.LoadAndCheckCutover(context.Background(), manifestStore, baseline, sourceID, sourceType, strings.TrimSpace(os.Getenv("SOURCE_RUNTIME_VERSION"))); loadErr != nil {
+			if _, _, loadErr = sourceagent.LoadAndCheckCutover(context.Background(), manifestStore, baseline, sourceID, sourceType, cutoverRuntimeFromEnv(os.Getenv)); loadErr != nil {
 				return fmt.Errorf("check cutover baseline: %w", loadErr)
 			}
 		}
@@ -800,6 +830,7 @@ func loadRunConfig(getenv func(string) string) (runConfig, error) {
 		StreamID:               strings.TrimSpace(getenv("SOURCE_STATE_STREAM")),
 		SourceType:             strings.TrimSpace(getenv("SOURCE_TYPE")),
 		SourceRuntime:          strings.TrimSpace(getenv("SOURCE_RUNTIME_VERSION")),
+		CutoverRuntime:         cutoverRuntimeFromEnv(getenv),
 		ProtocolVersion:        strings.TrimSpace(getenv("SOURCE_SCHEMA_VERSION")),
 		DatabaseDSNFile:        strings.TrimSpace(getenv("SOURCE_DB_DSN_FILE")),
 		StateFile:              strings.TrimSpace(getenv("SOURCE_STATE_FILE")),
@@ -1401,7 +1432,7 @@ func expectedBridgeRoutineCallers(config runConfig) []string {
 func buildDBConnector(config runConfig, database *sql.DB) (sourceagent.Connector, error) {
 	if config.ProtocolVersion == sourceagent.SchemaVersionV3 {
 		manifestStore := sourceagent.EncryptedStateFile{Path: config.CutoverManifestFile, Purpose: "cutover_manifest", Keys: sourceagent.FileSpoolKeyProvider{Path: config.CutoverKeyFile}}
-		manifest, err := sourceagent.LoadCutoverManifest(context.Background(), manifestStore, config.SourceID, config.SourceType, config.SourceRuntime)
+		manifest, err := sourceagent.LoadCutoverManifest(context.Background(), manifestStore, config.SourceID, config.SourceType, config.CutoverRuntime)
 		if err != nil {
 			return nil, fmt.Errorf("load encrypted cutover manifest: %w", err)
 		}

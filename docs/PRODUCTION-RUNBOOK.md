@@ -1729,10 +1729,20 @@ start or initialize the agents yet: even `docker compose run` must attach the
 external ingestion network, which is created with the API in section 9.
 
 Every signed batch must match the audited `source_instances.runtime_version`
-and carry `projection_status=healthy`. A source upgrade is a controlled CAS:
-stop/drain its five agents (including pending spools), set
+and carry `projection_status=healthy`. The runtime lives in three places with
+two meanings (XM-INV-SOURCE-RUNTIME-PIN): the **approved pin** --
+`source_instances.runtime_version` on the API and `SOURCE_RUNTIME_VERSION` in the
+agent env (`SUB2API_RUNTIME_VERSION` / `NEWAPI_RUNTIME_VERSION`) -- which every
+batch declares, and the **cutover runtime** sealed inside each agent's
+encrypted cutover manifest (`SOURCE_CUTOVER_RUNTIME_VERSION`, from
+`SUB2API_CUTOVER_RUNTIME_VERSION` / `NEWAPI_CUTOVER_RUNTIME_VERSION`), which never
+changes for a state generation because every record carries the manifest
+hash. A source upgrade is a controlled CAS of the pin only: re-audit the
+bridge contract against the new upstream schema, stop/drain the source's five
+agents (including pending spools), set `runtime_version` and
 `expected_previous_runtime_version` in the source bootstrap file, rerun
-`bootstrap-sources`, then restart and canary. The API requires fresh payments
+`bootstrap-sources`, set the pin in the release env, leave the cutover value
+untouched, then restart and canary. The API requires fresh payments
 and four economic plus identity heartbeats and zero queued/dead events before readiness, user
 submission or final manual issue confirmation. OIDC/account dependency waits
 remain visible but do not make unrelated users unhealthy. They use exact HMAC

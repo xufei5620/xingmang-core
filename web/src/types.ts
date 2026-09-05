@@ -442,6 +442,8 @@ export interface SourceStreamHealth {
   streamId: "payments" | "identities" | "usage" | "credits" | "balances";
   sequence: number;
   approvedRuntimeVersion: string;
+  // XM-INV-SOURCE-RUNTIME-PIN: the runtime the sealed cutover manifest was captured under.
+  cutoverRuntimeVersion: string;
   observedRuntimeVersion: string;
   observedAgentVersion: string;
   projectionStatus: "healthy" | "blocked" | "unknown";

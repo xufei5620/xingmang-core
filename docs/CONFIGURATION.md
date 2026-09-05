@@ -841,3 +841,19 @@ arrived with RC99. Set it only after the runbook's differential rehearsal has
 passed for the candidate (`25` is the value RC98 proved equal to the single pass
 on the 2026-09-04 incident's own data); the release's canary must then show the
 variable present in the api container's environment.
+
+## Source runtime pins (`*_RUNTIME_VERSION`, `*_CUTOVER_RUNTIME_VERSION`)
+
+XM-INV-SOURCE-RUNTIME-PIN. `SUB2API_RUNTIME_VERSION` and `NEWAPI_RUNTIME_VERSION` are the
+approved runtime pins: each source-agent declares its value in every batch
+header and the API accepts a batch only if it equals
+`source_instances.runtime_version` (moved by the runbook's source-upgrade CAS).
+They are declared, audited values -- nothing probes the upstream for its real
+version, and a pin never follows an upstream upgrade by itself.
+`SUB2API_CUTOVER_RUNTIME_VERSION` and `NEWAPI_CUTOVER_RUNTIME_VERSION` are the runtimes
+the encrypted cutover manifests were captured under
+(`source_cutover_manifests.source_runtime_version`); every record references the
+manifest hash, so they stay fixed for the life of a state generation. Empty
+means "same as the pin", which is every deployment before RC100; from RC100 the
+release env carries them explicitly so the pin can move without touching the
+manifest.

@@ -256,3 +256,27 @@ func TestExpectedBridgeAccessNeverGrantsCallerRawColumns(t *testing.T) {
 		}
 	}
 }
+
+// XM-INV-SOURCE-RUNTIME-PIN: the approved pin every batch declares and the runtime
+// the sealed cutover manifest was captured under are two values. Unset, the
+// second is the first (every deployment before RC100).
+func TestCutoverRuntimeFromEnvFallsBackToTheApprovedPin(t *testing.T) {
+	env := map[string]string{"SOURCE_RUNTIME_VERSION": "0.2.1"}
+	getenv := func(key string) string { return env[key] }
+	if got := cutoverRuntimeFromEnv(getenv); got != "0.2.1" {
+		t.Fatalf("unset cutover runtime must fall back to the pin: got %q", got)
+	}
+	env["SOURCE_CUTOVER_RUNTIME_VERSION"] = " 0.1.179 "
+	if got := cutoverRuntimeFromEnv(getenv); got != "0.1.179" {
+		t.Fatalf("cutover runtime must be read and trimmed: got %q", got)
+	}
+}
+
+func TestCutoverInitRuntimeGuardRefusesSealingUnderABumpedPin(t *testing.T) {
+	if err := cutoverInitRuntimeGuard(runConfig{SourceRuntime: "0.2.1", CutoverRuntime: "0.2.1"}); err != nil {
+		t.Fatalf("equal pins must seal: %v", err)
+	}
+	if err := cutoverInitRuntimeGuard(runConfig{SourceRuntime: "0.2.1", CutoverRuntime: "0.1.179"}); err == nil {
+		t.Fatal("a cutover runtime behind the pin must refuse cutover-init")
+	}
+}

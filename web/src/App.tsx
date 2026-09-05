@@ -5721,9 +5721,10 @@ function SourceHealthPage() {
                       )}
                     </td>
                     <td>
-                      <strong>{item.observedRuntimeVersion || "未观测"}</strong>
+                      <strong>代理声明 {item.observedRuntimeVersion || "未观测"}</strong>
                       <small>
-                        批准 {item.approvedRuntimeVersion || "未配置"} · 投影
+                        契约审计 {item.approvedRuntimeVersion || "未配置"} · 切换时{" "}
+                        {item.cutoverRuntimeVersion || "未登记"} · 投影
                         {item.projectionStatus === "healthy"
                           ? "健康"
                           : item.projectionStatus === "blocked"
