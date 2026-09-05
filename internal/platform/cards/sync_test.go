@@ -152,18 +152,27 @@ func TestSyncSkipsResolvedOperations(t *testing.T) {
 	if err := newSyncer(fake, store, issueNow).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if fake.listCalls > 0 {
-		t.Fatalf("已收敛的操作不该触发对账查询, listCalls=%d", fake.listCalls)
+	if fake.aliasListCalls > 0 {
+		t.Fatalf("已收敛的操作不该触发对账查询, aliasListCalls=%d", fake.aliasListCalls)
 	}
 }
 
 type countingClient struct {
 	infini.CardClient
-	listCalls int
+	// aliasListCalls 只数**对账**用的那种列卡：带 alias 过滤的。
+	//
+	// 与发现遍历（不带 alias、翻页）分开数是必要的：两者打的是同一个端点，
+	// 混在一个计数器里会让「已收敛的操作不该再对账」这条断言被发现遍历
+	// 带绿或带红，而它想守的根本不是那件事。
+	aliasListCalls int
+	listCalls      int
 }
 
 func (c *countingClient) ListCards(ctx context.Context, q infini.ListCardsQuery) (infini.CardPage, error) {
 	c.listCalls++
+	if q.Alias != "" {
+		c.aliasListCalls++
+	}
 	return c.CardClient.ListCards(ctx, q)
 }
 
@@ -240,4 +249,50 @@ func (c *batchCountingClient) BatchCardStatus(ctx context.Context, ids []string)
 func (c *batchCountingClient) CardStatus(ctx context.Context, id string) (infini.Card, error) {
 	c.statusCalls++
 	return c.CardClient.CardStatus(ctx, id)
+}
+
+// 同步要**发现**上游有而投影没有的卡。
+//
+// 2026-09-05 生产上暴露的缺口:产品负责人在 Infini 后台有 11 张卡,平台只
+// 显示 2 张。根因是 refreshTrackedCards 只遍历投影里已有的卡,而卡只有两条
+// 路径能进投影——我们自己开的、或回调带来的。在上游后台直接建的卡,平台
+// 压根不知道它存在。一个叫「卡片管理」的页面只管着 18% 的卡。
+func TestSyncDiscoversCardsCreatedUpstream(t *testing.T) {
+	fake := infini.NewFake()
+	// 模拟"在 Infini 后台直接建的卡":上游有,我们的投影里没有。
+	fake.SeedCard(infini.Card{
+		ID: "upstream-1", Alias: "Two.V", Status: "active",
+		Mask: "441357******2650",
+	})
+	store := newMemStore()
+	syncer := newSyncer(fake, store, issueNow)
+
+	if err := syncer.RunOnce(context.Background()); err != nil {
+		t.Fatalf("同步失败: %v", err)
+	}
+
+	if _, ok := store.cards["upstream-1"]; !ok {
+		t.Fatalf("上游直接建的卡必须被发现并落进投影, 投影里有 %d 张", len(store.cards))
+	}
+	// 账号要对：拿 A 账号的卡记到 B 名下，等于把另一张卡的钱算错地方。
+	if got := store.cardAccount["upstream-1"]; got != testAccount {
+		t.Fatalf("发现的卡应归到它所在的账号, got %q", got)
+	}
+}
+
+// 发现是幂等的：已经在投影里的卡不会被当成新卡重复处理。
+func TestSyncDiscoveryIsIdempotent(t *testing.T) {
+	fake := infini.NewFake()
+	fake.SeedCard(infini.Card{ID: "upstream-1", Alias: "Two.V", Status: "active"})
+	store := newMemStore()
+	syncer := newSyncer(fake, store, issueNow)
+
+	for i := 0; i < 3; i++ {
+		if err := syncer.RunOnce(context.Background()); err != nil {
+			t.Fatalf("第 %d 轮同步失败: %v", i+1, err)
+		}
+	}
+	if len(store.cards) != 1 {
+		t.Fatalf("重复同步不该产生多条, got %d", len(store.cards))
+	}
 }

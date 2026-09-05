@@ -49,6 +49,18 @@ func NewFake() *Fake {
 	}
 }
 
+// SeedCard 直接往替身里塞一张卡，**不经过 ApplyCard**。
+//
+// 用来模拟「在上游后台直接建的卡」：上游有、我们的投影里没有。
+// 这是同步发现遍历唯一要处理的情形，而经 ApplyCard 造出来的卡天然就在
+// 我们的台账里，模拟不出它。
+func (f *Fake) SeedCard(c Card) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	copied := c
+	f.cards[c.ID] = &copied
+}
+
 // FailNext 让下一次调用返回 err。
 func (f *Fake) FailNext(err error) {
 	f.mu.Lock()
