@@ -408,3 +408,88 @@ export function deleteCard(
 ): Promise<ActionRun> {
   return executeAction({ actionId: "cards.card.delete", version: "1", params }, options, client);
 }
+
+/** 一格聚合：某币种、某类型、某状态的笔数与金额。
+ *
+ *  **不预先压成「消费/充值」两个字段**：成本口径还没定（算充值还是算消费），
+ *  保留原始网格两种口径都算得出来，压扁了就只剩其中一种。 */
+export interface CardStatsBucket {
+  currency: string;
+  type: string;
+  status: string;
+  count: number;
+  /** 保留符号：消费是负数、充值是正数。取绝对值是展示层的事——
+   *  在数据层丢掉符号，净额就再也算不回来。 */
+  amount_minor: number;
+  fee_minor: number;
+}
+
+export interface CardStatsMerchant {
+  merchant: string;
+  currency: string;
+  count: number;
+  amount_minor: number;
+  fee_minor: number;
+}
+
+export interface CardStatsCard {
+  account: string;
+  card_id: string;
+  card_alias?: string;
+  currency: string;
+  count: number;
+  amount_minor: number;
+  fee_minor: number;
+}
+
+/** 开卡费，按计价代币分组。**来自卡片表而不是流水表**——它不是一笔交易，
+ *  上游不会把它写进流水。漏掉它，成本就永远少一块，而少掉的那块正比于
+ *  开了多少卡。 */
+export interface CardStatsIssueFee {
+  /** 计价代币。**空串 = 单位未记录**（迁移 000039 之前开的卡）。
+   *  如实显示，不当成 USDT——1 USDT 约等于 1 USD 是汇率假设不是事实。 */
+  token: string;
+  /** 十进制文本。相加已在 PostgreSQL 的 numeric 里精确做完；
+   *  前端**不要**把它 Number() 之后再算，那正是 float 进来的入口。 */
+  amount_text: string;
+  count: number;
+}
+
+export interface CardStats {
+  buckets: CardStatsBucket[];
+  merchants: CardStatsMerchant[];
+  cards: CardStatsCard[];
+  issue_fees: CardStatsIssueFee[];
+  /** 没有发生时间、因而没能计入期间统计的笔数。
+   *  显示出来而不是丢掉：一笔上游没给时间的流水在按月统计里会凭空消失，
+   *  而消失的钱是查不出来的。 */
+  undated_count: number;
+}
+
+/** 卡片流水统计。**服务端按整表聚合**。
+ *
+ *  不在前端对流水列表求和：那个列表有 limit，求和不会报错，只会给出一个
+ *  偏小的数——而「这个月花了多少」看起来完全正常。 */
+export async function getCardStats(
+  filter: { account?: string; since?: string; until?: string } = {},
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardStats> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(filter)) {
+    if (v) params.set(k, v);
+  }
+  const qs = params.toString();
+  const body = await client
+    .get<CardStats>(`/api/v1/cards/stats${qs ? `?${qs}` : ""}`, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return {
+    buckets: body.buckets ?? [],
+    merchants: body.merchants ?? [],
+    cards: body.cards ?? [],
+    issue_fees: body.issue_fees ?? [],
+    undated_count: body.undated_count ?? 0,
+  };
+}

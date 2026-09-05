@@ -99,7 +99,7 @@ function AttentionBannerView({ items }: { items: CardOperationItem[] }) {
       </h3>
       <p className="mt-1 text-xs text-fg-muted">
         上游没有幂等能力，这些操作超时后无法判定是否已经生效。请到 Infini
-        后台核对后再决定——**在确认之前不要重试**，重试可能重复扣钱。
+        后台核对后再决定——<strong>在确认之前不要重试</strong>，重试可能重复扣钱。
       </p>
       <ul className="mt-2 flex flex-col gap-1">
         {items.map((op) => (

@@ -92,6 +92,12 @@ type CardAttribution struct {
 	// 成本核算就永远少一块。
 	IssueFee       string
 	IssuePayAmount string
+	// IssueFeeToken 是开卡费的计价代币（USDT / USDC），来自开卡请求。
+	//
+	// 没有它，一列开卡费就只是一串没有单位的数字——而成本汇总把它加到
+	// USD 的消费上时，看起来完全正常。空 = 单位未记录（老数据），
+	// **不回填**：1 USDT ≈ 1 USD 是汇率假设不是事实。
+	IssueFeeToken string
 }
 
 // Service 是卡业务的领域服务。
@@ -250,6 +256,7 @@ func (s *Service) IssueCard(ctx context.Context, req IssueRequest) (IssueResult,
 			UserEmail:      req.UserEmail,
 			IssueFee:       app.TotalFee,
 			IssuePayAmount: app.TotalPayAmount,
+			IssueFeeToken:  req.TokenType,
 		}
 		if err := s.store.UpsertCard(ctx, acct.ID, card, attribution); err != nil {
 			return IssueResult{}, fmt.Errorf("落卡片投影: %w", err)

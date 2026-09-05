@@ -110,6 +110,8 @@ type Deps struct {
 	// （XM_SMS_MODE=off），与卡片同一条纪律。
 	SMS        SMSQuerier
 	SMSCatalog SMSCatalogReader
+	// CardStats 是卡片统计的读端点（「统计」页签）。为 nil 时不挂载。
+	CardStats CardStatsQuerier
 	// SMSProviders 是**已装配的**供应商清单。以它为准而不是以库里有的行
 	// 为准：没做过连接测试的那家库里根本没有行，而它恰恰最需要显示出来。
 	SMSProviders []string
@@ -322,6 +324,12 @@ func NewRouter(d Deps) http.Handler {
 				// （fake 模式下没有真实余额可读）。
 				api.With(RequireScope(cards.PermissionRead)).
 					Get("/cards/challenges", ListCardChallengesHandler(d.Cards))
+				// 统计：服务端整表聚合。与流水端点分开，因为它的代价不同，
+				// 而且前端对截断列表求和会给出一个偏小却看着正常的数。
+				if d.CardStats != nil {
+					api.With(RequireScope(cards.PermissionRead)).
+						Get("/cards/stats", CardStatsHandler(d.CardStats))
+				}
 				if d.CardBalances != nil {
 					api.With(RequireScope(cards.PermissionRead)).
 						Get("/cards/balances", CardBalancesHandler(d.CardBalances, d.CardAccounts))

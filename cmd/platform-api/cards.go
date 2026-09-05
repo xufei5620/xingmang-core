@@ -327,6 +327,17 @@ func cardQuerierOrNil(store *cards.PgStore) httpapi.CardQuerier {
 
 // cardAccountIDs 取出已配置的账号，供读端点回给管理端填下拉。
 // svc 为 nil（mode=off）时返回 nil——端点那时也不挂载。
+// cardStatsOrNil 把「没启用」翻成 nil 接口。
+//
+// 不能直接把 *cards.PgStore 赋给接口字段：一个装着 nil 指针的非 nil 接口
+// 会让路由以为端点该挂载，然后每次调用都空指针崩溃。
+func cardStatsOrNil(store *cards.PgStore) httpapi.CardStatsQuerier {
+	if store == nil {
+		return nil
+	}
+	return store
+}
+
 func cardAccountIDs(svc *cards.Service) []string {
 	if svc == nil {
 		return nil
