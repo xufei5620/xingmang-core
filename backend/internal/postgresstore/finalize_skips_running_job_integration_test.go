@@ -211,11 +211,86 @@ func TestFinalizeSourceAccountsSkipsAJobRowHeldByARunningProjection(t *testing.T
 	if _, err = f.runFinalizeUnderLockTimeout(t); err != nil {
 		t.Fatalf("finalization after release failed: %v", err)
 	}
-	// Reclaimed: queued, lease cleared, and requested_through merged with
-	// GREATEST -- never lowered (the seed's own value is newer than this
-	// pass's watermark-derived window, so it is kept as is).
+	// Fix 1b changed what "taking the row" means for a processing row: the
+	// pass may merge its window but never touches status or lease -- a live
+	// job keeps its claim, and a crashed one is reclaimed by the claim step's
+	// own lease-expiry rule, not by finalization. So after release the row is
+	// still processing with its lease, and requested_through was not lowered.
 	status, lease, requested, exists = f.jobRow(t, f.heldAccount)
-	if !exists || status != "queued" || lease != nil || requested.Before(f.heldRequestedBefore) {
-		t.Fatalf("held account should have been reclaimed once unheld, got status=%q lease=%v requested=%s (was %s)", status, lease, requested, f.heldRequestedBefore)
+	if !exists || status != "processing" || lease == nil || *lease != "test-lease-"+f.heldAccount || requested.Before(f.heldRequestedBefore) {
+		t.Fatalf("held account's processing row should keep its claim once unheld, got status=%q lease=%v requested=%s (was %s)", status, lease, requested, f.heldRequestedBefore)
+	}
+}
+
+// Fix 1b: the proof phase now runs before the job row is locked, so a
+// finalization pass can reach a live processing row. It may raise the row's
+// window; it must not touch the job's status or lease -- that would strip a
+// running job of its claim and, for an account with a fact every minute,
+// never let a job finish.
+func TestFinalizeSourceAccountsOnlyMergesTheWindowOfALiveProcessingRow(t *testing.T) {
+	f := seedFinalizeSkipFixture(t)
+	var nextBefore time.Time
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT next_attempt_at FROM eligibility_projection_jobs WHERE external_account_id=$1`, f.heldAccount).Scan(&nextBefore); err != nil {
+		t.Fatal(err)
+	}
+	// The held account's row is processing with a live lease, but nobody holds
+	// a row lock on it: exactly the lock-free proof phase.
+	if _, err := f.runFinalizeUnderLockTimeout(t); err != nil {
+		t.Fatalf("finalization failed: %v", err)
+	}
+	status, lease, requested, exists := f.jobRow(t, f.heldAccount)
+	if !exists || status != "processing" || lease == nil || *lease != "test-lease-"+f.heldAccount {
+		t.Fatalf("live processing row lost its claim: exists=%v status=%q lease=%v", exists, status, lease)
+	}
+	if requested.Before(f.heldRequestedBefore) {
+		t.Fatalf("requested_through was lowered: %s (was %s)", requested, f.heldRequestedBefore)
+	}
+	var nextAttempt time.Time
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT next_attempt_at FROM eligibility_projection_jobs WHERE external_account_id=$1`, f.heldAccount).Scan(&nextAttempt); err != nil {
+		t.Fatal(err)
+	}
+	if !nextAttempt.Equal(nextBefore) {
+		t.Fatalf("next_attempt_at of a processing row was changed: %s (was %s)", nextAttempt, nextBefore)
+	}
+}
+
+func TestFinishEligibilityProjectionJobRowDeletesAnExactWindowAndRequeuesARaisedOne(t *testing.T) {
+	f := seedFinalizeSkipFixture(t)
+	lease := "test-lease-" + f.heldAccount
+	// Exact window: the row asks for what was processed -> deleted.
+	tx, err := f.store.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = finishEligibilityProjectionJobRowTx(f.ctx, tx, f.heldAccount, lease, f.heldRequestedBefore); err != nil {
+		t.Fatalf("exact window: %v", err)
+	}
+	if err = tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, exists := f.jobRow(t, f.heldAccount); exists {
+		t.Fatal("job row should have been deleted for an exact window")
+	}
+	// Raised window: the row now asks for more than was processed -> requeued
+	// with the larger window kept, lease cleared, due now.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seedEligibilityProjectionJobRowProcessing(t, f.store, f.ctx, f.heldAccount, now, now, now.Add(2*time.Minute))
+	raised := now.Add(time.Hour)
+	if _, err = f.store.pool.Exec(f.ctx, `UPDATE eligibility_projection_jobs SET requested_through=$2 WHERE external_account_id=$1`, f.heldAccount, raised); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = f.store.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = finishEligibilityProjectionJobRowTx(f.ctx, tx, f.heldAccount, lease, now); err != nil {
+		t.Fatalf("raised window: %v", err)
+	}
+	if err = tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	status, leaseAfter, requested, exists := f.jobRow(t, f.heldAccount)
+	if !exists || status != "queued" || leaseAfter != nil || !requested.Equal(raised) {
+		t.Fatalf("raised window should requeue with the window kept: exists=%v status=%q lease=%v requested=%s", exists, status, leaseAfter, requested)
 	}
 }

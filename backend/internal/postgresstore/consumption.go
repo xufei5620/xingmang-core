@@ -610,17 +610,18 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 			-- requested_through above still advances while dead, so the
 			-- repair tool's requeue immediately picks up every fact that
 			-- arrived in the meantime.
-			status=CASE WHEN eligibility_projection_jobs.status='dead' THEN 'dead' ELSE 'queued' END,
-			lease_token=NULL,lease_expires_at=NULL,
+			status=CASE WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.status ELSE 'queued' END,
+			lease_token=CASE WHEN eligibility_projection_jobs.status='processing' THEN eligibility_projection_jobs.lease_token END,
+			lease_expires_at=CASE WHEN eligibility_projection_jobs.status='processing' THEN eligibility_projection_jobs.lease_expires_at END,
 			next_attempt_at=CASE
-				WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.next_attempt_at
+				WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.next_attempt_at
 				WHEN eligibility_projection_jobs.status='queued'
 					AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
 					AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
 				THEN eligibility_projection_jobs.next_attempt_at
 				ELSE now()
 			END,
-			updated_at=CASE WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.updated_at ELSE now() END`,
+			updated_at=CASE WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.updated_at ELSE now() END`,
 		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds())
 	if err != nil {
 		return err
@@ -1420,17 +1421,17 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				-- XM-INV-PROJECTION-FAILURE-GRADING: see the identical guard's
 				-- own comment in finalizeSourceAccountsTx above -- a new fact
 				-- must never silently revive a status='dead' job.
-				status=CASE WHEN eligibility_projection_jobs.status='dead' THEN 'dead' ELSE 'queued' END,
-				lease_token=NULL,lease_expires_at=NULL,
+				lease_token=CASE WHEN eligibility_projection_jobs.status='processing' THEN eligibility_projection_jobs.lease_token END,
+				lease_expires_at=CASE WHEN eligibility_projection_jobs.status='processing' THEN eligibility_projection_jobs.lease_expires_at END,
 				next_attempt_at=CASE
-					WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.next_attempt_at
+					WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.next_attempt_at
 					WHEN eligibility_projection_jobs.status='queued'
 						AND eligibility_projection_jobs.last_error_code='BALANCE_PROOF_PENDING'
 						AND eligibility_projection_jobs.next_attempt_at<=now()+make_interval(secs=>$3)
 					THEN eligibility_projection_jobs.next_attempt_at
 					ELSE now()
 				END,
-				updated_at=CASE WHEN eligibility_projection_jobs.status='dead' THEN eligibility_projection_jobs.updated_at ELSE now() END`,
+				updated_at=CASE WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.updated_at ELSE now() END`,
 			accountID, account.FinalizedThrough, balanceProofPendingRequeueResetWindow.Seconds())
 		if err != nil {
 			return err
@@ -3219,20 +3220,86 @@ func reanchorLegacyEligibilityAccountTx(ctx context.Context, tx pgx.Tx, account 
 }
 
 func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, lease string, actor AuditActor) error {
+	// XM-INV-CATCHUP-BURST-BACKPRESSURE fix 1b: the carry-forward proof runs
+	// before this job takes any row lock, in its own short transaction. The
+	// proof phase is the slow part on a contended account (its carry-candidate
+	// scans and unmapped-funding probes run for minutes), and it used to run
+	// with this job's own eligibility_projection_jobs row already held FOR
+	// UPDATE -- so every finalization pass in every stream's cycle publication
+	// queued behind a job that had not yet decided whether it could even
+	// start. Now a proof-pending job never holds the row at all, and a job
+	// that proceeds holds it only for the write phase.
+	//
+	// The proof's own writes are additive and idempotent (carry-forward proof
+	// rows keyed by account and cycle, ON CONFLICT DO NOTHING), which is what
+	// makes running it outside the SERIALIZABLE write transaction safe; the
+	// write phase re-runs it only if its window differs from the one proved.
+	proofRequested, proofDone, err := s.prepareEligibilityProjectionJob(ctx, accountID, lease, actor)
+	if err != nil {
+		return err
+	}
+	return s.completeEligibilityProjectionJob(ctx, accountID, lease, proofRequested, proofDone, actor)
+}
+
+// prepareEligibilityProjectionJob is the lock-free half: it reads the job's
+// window and the account without locking either, and runs the carry-forward
+// proof. It returns the window it proved and whether it did. An account that
+// still needs its one-time legacy re-anchor (which changes the very fields
+// the proof reads) is left to the locked half, exactly as before.
+func (s *Store) prepareEligibilityProjectionJob(ctx context.Context, accountID, lease string, actor AuditActor) (time.Time, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err = tx.Exec(ctx, `
+		SELECT set_config('statement_timeout','300s',true),
+		       set_config('idle_in_transaction_session_timeout','300s',true)`); err != nil {
+		return time.Time{}, false, err
+	}
+	var requested time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT requested_through FROM eligibility_projection_jobs
+		WHERE external_account_id=$1 AND status='processing' AND lease_token=$2`, accountID, lease).Scan(&requested)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, domain.ErrConflict
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	account, err := getEligibilityAccountTx(ctx, tx, accountID, false)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if account.BootstrapKind == "SIGNED_CUTOVER" || account.BootstrapKind == "POST_CUTOVER_REPLAY" {
+		return requested, false, nil
+	}
+	if requested.Before(account.FinalizedThrough) {
+		requested = account.FinalizedThrough
+	}
+	if err = ensureBalanceCarryForwardProofTx(ctx, tx, account, requested, actor); err != nil {
+		return time.Time{}, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return time.Time{}, false, err
+	}
+	return requested, true, nil
+}
+
+// completeEligibilityProjectionJob is the locked half: the SERIALIZABLE
+// transaction that holds the job row, replays the account, evaluates its
+// evidence and publishes finalized_through. If proofDone, the proof is
+// skipped only when the window it proved is exactly the window being
+// processed; any difference re-runs it (cheap, since its rows already exist).
+// A window raised by a finalization pass while the lock-free half ran is
+// never processed unproved: the job clamps to the proved window and, at the
+// end, requeues itself for the remainder instead of deleting its row.
+func (s *Store) completeEligibilityProjectionJob(ctx context.Context, accountID, lease string, proofRequested time.Time, proofDone bool, actor AuditActor) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	// The runtime role's defensive statement_timeout (15s) is sized for
-	// request-path queries. A first-login reprojection of a heavy account
-	// replays its full post-cutover history (thousands of usage facts) in
-	// this one SERIALIZABLE transaction and legitimately exceeds it -- the
-	// first such whale account in production wedged at PROJECTION_FAILED /
-	// SQLSTATE 57014 across 36 retries. Grant this job a bounded,
-	// transaction-local budget instead (same pattern the OIDC retention
-	// worker already uses); the advisory lock below serializes per account,
-	// so a long replay never blocks another account's job.
 	if _, err = tx.Exec(ctx, `
 		SELECT set_config('statement_timeout','300s',true),
 		       set_config('idle_in_transaction_session_timeout','300s',true)`); err != nil {
@@ -3249,29 +3316,6 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 	if err != nil {
 		return err
 	}
-	// XM-INV-PROOF-CONTENTION 2: the per-account advisory lock
-	// (hashtextextended(...,43)) used to be acquired here, before reanchor
-	// and the proof evaluation, and held for the rest of the transaction --
-	// including ensureBalanceCarryForwardProofTx's evaluation, which on a
-	// contended production account took tens of seconds per attempt (before
-	// requirement 4's set-based rewrite) while retrying every 30s. A
-	// concurrent source-projection worker event for the same account
-	// (ObserveUsageEvent/ObserveCreditEvent/ObserveBalanceCheckpoint, which
-	// take the identical lock) blocked for that whole duration and could
-	// hit a lock timeout (see MarkSourceEventBusy's doc comment).
-	//
-	// Reanchor and the proof evaluation below now run against an unlocked
-	// read of the account (lock=false): reanchor is a one-time, per-account
-	// transition gated by bootstrap_kind, and the job-claim SKIP LOCKED
-	// handoff in ProcessEligibilityProjectionJobs already guarantees only
-	// one processEligibilityProjectionJob execution per account runs at a
-	// time, so neither step needs the advisory lock to exclude another
-	// instance of itself; SERIALIZABLE isolation still catches (and this
-	// job's own backoff still retries) any genuine conflict with a
-	// concurrent writer, such as a worker-side freeze, at commit. The lock
-	// is acquired below, immediately before the write phase that actually
-	// needs a stable, exclusive view of the account: reprojection, pending
-	// evidence, and publishing finalized_through.
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, false)
 	if err != nil {
 		return err
@@ -3286,8 +3330,13 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 	if requested.Before(account.FinalizedThrough) {
 		requested = account.FinalizedThrough
 	}
-	if err = ensureBalanceCarryForwardProofTx(ctx, tx, account, requested, actor); err != nil {
-		return err
+	if proofDone && requested.After(proofRequested) {
+		requested = proofRequested
+	}
+	if !proofDone || !requested.Equal(proofRequested) {
+		if err = ensureBalanceCarryForwardProofTx(ctx, tx, account, requested, actor); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,43))`, accountID); err != nil {
 		return err
@@ -3309,14 +3358,50 @@ func (s *Store) processEligibilityProjectionJob(ctx context.Context, accountID, 
 		WHERE external_account_id=$2`, requested, accountID); err != nil {
 		return err
 	}
-	command, err := tx.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1 AND lease_token=$2`, accountID, lease)
+	if err = finishEligibilityProjectionJobRowTx(ctx, tx, accountID, lease, requested); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// finishEligibilityProjectionJobRowTx closes the job's own row once its window
+// has been published: deleted when the row still asks for exactly that window,
+// requeued -- lease cleared, due now, requested_through kept -- when a
+// finalization pass raised the window while this job ran, so the remainder is
+// processed with its own proof rather than dropped with the row.
+func finishEligibilityProjectionJobRowTx(ctx context.Context, tx pgx.Tx, accountID, lease string, processed time.Time) error {
+	var rowRequested time.Time
+	err := tx.QueryRow(ctx, `
+		SELECT requested_through FROM eligibility_projection_jobs
+		WHERE external_account_id=$1 AND status='processing' AND lease_token=$2
+		FOR UPDATE`, accountID, lease).Scan(&rowRequested)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ErrConflict
+	}
 	if err != nil {
 		return err
 	}
-	if command.RowsAffected() != 1 {
+	var affected int64
+	if rowRequested.After(processed) {
+		command, execErr := tx.Exec(ctx, `
+			UPDATE eligibility_projection_jobs SET status='queued',lease_token=NULL,lease_expires_at=NULL,
+				next_attempt_at=now(),updated_at=now()
+			WHERE external_account_id=$1 AND lease_token=$2`, accountID, lease)
+		if execErr != nil {
+			return execErr
+		}
+		affected = command.RowsAffected()
+	} else {
+		command, execErr := tx.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1 AND lease_token=$2`, accountID, lease)
+		if execErr != nil {
+			return execErr
+		}
+		affected = command.RowsAffected()
+	}
+	if affected != 1 {
 		return domain.ErrConflict
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, requested time.Time, actor AuditActor) error {
