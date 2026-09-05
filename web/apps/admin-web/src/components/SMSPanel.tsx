@@ -222,10 +222,13 @@ function ProviderCard({
         >
           {toggle.isPending ? "提交中…" : provider.enabled ? "停用" : "启用"}
         </Button>
+        {/* 这句说的是**号码的生命周期动作**（取消/完成/换号/延长/重激活），
+            不是这家总共能做什么。62 的官方接口里没有任何一个能对已买的号做操作
+            ——原先写「仅支持买号」，产品负责人读成了「62 只能买号」。 */}
         {provider.supports_lifecycle ? (
-          <span className="text-fg-muted text-xs">支持取消/延长</span>
+          <span className="text-fg-muted text-xs">号码可取消 / 延长 / 换号</span>
         ) : (
-          <span className="text-fg-muted text-xs">仅支持买号</span>
+          <span className="text-fg-muted text-xs">号码买后不可取消或延长（该家接口没有这些动作）</span>
         )}
       </span>
       {error ? <ActionErrorNote error={error} /> : null}
