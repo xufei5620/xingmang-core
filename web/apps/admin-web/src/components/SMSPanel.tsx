@@ -20,6 +20,7 @@ import {
 import { ActionErrorNote } from "./ActionErrorNote";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
+import { ExtendDialog, HeroBalance, ProlongHistory, UpstreamCodes } from "./SMSExtrasPanels";
 
 const PROVIDERS_QUERY = "sms-providers";
 const RESOURCES_QUERY = "sms-resources";
@@ -199,6 +200,8 @@ function ProviderCard({
       {provider.client_ip ? (
         <span className="text-fg-muted font-mono text-xs">出口 IP {provider.client_ip}</span>
       ) : null}
+      {/* 余额只有 Hero 有（兼容层 getBalance）；62 的 /info 官方没写余额字段，不编一个。 */}
+      {provider.provider === "hero_sms" && provider.enabled && provider.verified ? <HeroBalance /> : null}
       {provider.last_error ? (
         <span className="text-danger text-xs">上次错误：{provider.last_error}</span>
       ) : null}
@@ -346,6 +349,9 @@ function PurchaseDialog({
   const [service, setService] = useState("");
   const [country, setCountry] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
+  const [verificationType, setVerificationType] = useState("sms");
+  const [fixedPrice, setFixedPrice] = useState(false);
+  const [duration, setDuration] = useState("");
   const [armed, setArmed] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const formId = useId();
@@ -361,6 +367,13 @@ function PurchaseDialog({
         ...(isSMS62 ? { goods_id: goodsID.trim() } : {}),
         ...(isSMS62 ? {} : { service: service.trim(), country: Number(country) || 0 }),
         ...(maxPrice.trim() ? { max_price: maxPrice.trim() } : {}),
+        ...(isSMS62
+          ? {}
+          : {
+              verification_type: verificationType,
+              ...(fixedPrice && maxPrice.trim() ? { fixed_price: true } : {}),
+              ...(Number(duration) > 0 ? { duration: Number(duration) } : {}),
+            }),
       }),
     onSuccess: (run) => {
       onDone({ runId: run.runId, title: "已提交买号请求" });
@@ -404,7 +417,7 @@ function PurchaseDialog({
           <FormField
             label="商品 ID"
             htmlFor={`${formId}-goods`}
-            hint="三段正整数，如 1-2-3。商品详情接口只接受两段，不能自己把两段扩成三段——那样拼出来的 ID 指向别的商品。"
+            hint="官方格式：平台-国家-天数，如 12-1-7。「订单与商品（62）」页签里可以按两段 ID 查详情和可选天数。"
           >
             <Input
               id={`${formId}-goods`}
@@ -446,6 +459,39 @@ function PurchaseDialog({
                 aria-label="最高单价"
                 value={maxPrice}
                 onChange={(e) => setMaxPrice(e.target.value)}
+              />
+            </FormField>
+            <FormField
+              label="验证类型"
+              htmlFor={`${formId}-vt`}
+              hint="官方 sms / call。call 是语音验证，另一种计费——这是一个明确的选择，不是默认值悄悄决定。"
+            >
+              <Select
+                aria-label="验证类型"
+                value={verificationType}
+                onValueChange={(v) => { setVerificationType(v); setArmed(null); }}
+                options={[
+                  { value: "sms", label: "短信（sms）" },
+                  { value: "call", label: "语音（call）" },
+                ]}
+              />
+            </FormField>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                aria-label="固定价"
+                checked={fixedPrice}
+                disabled={!maxPrice.trim()}
+                onChange={(e) => { setFixedPrice(e.target.checked); setArmed(null); }}
+              />
+              严格按最高单价成交（官方 fixedPrice，要先填最高单价）
+            </label>
+            <FormField label="时长（小时）" htmlFor={`${formId}-dur`} hint="可选。留空用上游默认（普通激活约 20 分钟）。">
+              <Input
+                id={`${formId}-dur`}
+                aria-label="时长（小时）"
+                value={duration}
+                onChange={(e) => { setDuration(e.target.value); setArmed(null); }}
               />
             </FormField>
           </>
@@ -554,10 +600,17 @@ function ResourcePane({
           </span>
           <span className="text-fg-muted text-xs">
             {providerLabel(resource.provider)} · {resource.status || "—"}
+            {resource.subtype === 2 ? " · 租用（按小时）" : resource.subtype === 1 ? " · 激活（短时）" : ""}
+            {resource.verification_type === "call" ? " · 语音验证" : ""}
           </span>
         </span>
         {supportsLifecycle ? (
-          <LifecycleButtons resource={resource} onWrite={onWrite} />
+          <span className="flex flex-wrap items-center gap-2">
+            <LifecycleButtons resource={resource} onWrite={onWrite} />
+            {/* 延长 / 重激活要先读档位再确认——它们花钱，不能是一个裸按钮。 */}
+            <ExtendDialog resource={resource} kind="prolong" onWrite={onWrite} />
+            <ExtendDialog resource={resource} kind="reactivate" onWrite={onWrite} />
+          </span>
         ) : (
           // 62 一个生命周期动作都没有。**明说而不是把按钮灰掉**：
           // 一个灰按钮看起来像「暂时不能用」，而这是永远不能用。
@@ -596,9 +649,17 @@ function ResourcePane({
         </ApiStateView>
       </div>
 
+      {supportsLifecycle ? (
+        <>
+          <UpstreamCodes resource={resource} />
+          <ProlongHistory resource={resource} />
+        </>
+      ) : null}
       <dl className="grid grid-cols-2 gap-3">
         <Field label="服务" value={resource.service || "—"} />
-        <Field label="国家" value={resource.country || "—"} />
+        <Field label="国家" value={resource.country_phone_code ? `${resource.country || "—"}（+${resource.country_phone_code}）` : resource.country || "—"} />
+        <Field label="运营商" value={resource.operator || "—"} />
+        <Field label="单价" value={resource.price_text || "—"} />
         <Field
           label="最后取到码"
           value={resource.last_code_at ? formatUtcTimestamp(resource.last_code_at) : "—"}

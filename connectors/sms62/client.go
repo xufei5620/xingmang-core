@@ -183,21 +183,34 @@ func (c *Client) do(ctx context.Context, method, requestURI string, body []byte,
 	}, nil
 }
 
-// Info 是连接测试的返回：供应商观察到的我方出口 IP。
+// Info 是连接测试的返回：供应商观察到的我方出口 IP，以及 Key 的状态。
 //
 // 它的用处不是展示，是**排查**：上游若做 IP 白名单，这个值与白名单里那个
 // 对不上就是全部 403 的原因，而那种失败从错误码上看只是「没权限」。
+// 官方文档原话：「如果白名单不通过，优先调 /api/v1/info，查看当前服务端
+// 识别到的 client_ip」。
 type Info struct {
-	IP string `json:"ip"`
+	// ClientIP 官方字段名是 client_ip。
+	//
+	// 此前按冻结源码读的是 ip——真上游会回一个空的出口 IP，而页面上空 IP
+	// 看起来只是「这家没给」，没人会怀疑是我们读错了字段。保留 ip 作回退，
+	// 是给旧版服务端留的余地，不是两个都对。
+	ClientIP string
+	// KeyStatus 是 Key 状态（官方：status=1 为启用）。响应结构未在文档里
+	// 钉死，取不到就是 0，页面据此不显示而不是显示「已停用」。
+	KeyStatus int64
 }
 
 // GetInfo 是只读的连接测试。
 func (c *Client) GetInfo(ctx context.Context) (Info, error) {
-	var info Info
-	if _, err := c.do(ctx, http.MethodGet, "/api/v1/info", nil, "", &info); err != nil {
+	var raw map[string]any
+	if _, err := c.do(ctx, http.MethodGet, "/api/v1/info", nil, "", &raw); err != nil {
 		return Info{}, err
 	}
-	return info, nil
+	return Info{
+		ClientIP:  sanitizeText(scalarString(raw, "client_ip", "ip"), 64),
+		KeyStatus: scalarInt(raw, "status", "key_status"),
+	}, nil
 }
 
 // validateRequestURI 挡住把绝对 URL 或换行塞进路径的调用。
@@ -279,7 +292,38 @@ type BusinessError struct {
 }
 
 func (e *BusinessError) Error() string {
+	if hint := e.Hint(); hint != "" {
+		return fmt.Sprintf("62-US 业务错误 code=%d（%s）: %s", e.Code, hint, e.Message)
+	}
 	return fmt.Sprintf("62-US 业务错误 code=%d: %s", e.Code, e.Message)
+}
+
+// Hint 把官方错误码翻成**能指路**的中文。
+//
+// 40304 与 42204 的下一步完全不同（去加 IP 白名单 vs 去充值），而上游的 msg
+// 是英文短语；页面上只显示「业务错误 code=40304」等于什么都没说。
+// 表来自官方文档「常见错误码」一节（2026-09-06）。没列的码返回空串，
+// **不猜**：一个猜出来的提示会把人带到错的地方。
+func (e *BusinessError) Hint() string {
+	return officialErrorHints[e.Code]
+}
+
+var officialErrorHints = map[int64]string{
+	40101: "缺少 API Key——密钥引用未填或读取失败",
+	40102: "API Key 无效——密钥填错了",
+	40301: "API Key 已停用——去 62 后台启用它",
+	40302: "API Key 已过期——去 62 后台续期或换新",
+	40304: "请求 IP 不在白名单——把连接测试显示的出口 IP 加进 62 后台的白名单",
+	40401: "Host 不允许——请求打到了错误的主机",
+	42201: "goods/detail 参数错误——商品 ID 应为两段（平台-国家）",
+	42202: "get 参数错误——商品 ID 应为三段（平台-国家-天数），数量 1–200",
+	42203: "商品配置不存在——这个商品 ID 在 62 侧没有对应配置",
+	42204: "余额不足——去 62 后台充值",
+	42205: "库存不足——换商品或稍后再试",
+	42206: "缺少 token——取码请求没带订单 token",
+	42207: "order/tokens 参数错误——订单 ID 不对",
+	40411: "token 不存在或无权限——号码不属于当前 Key 的账号",
+	40412: "订单不存在或无权限——订单 ID 不属于当前 Key 的账号",
 }
 
 // ProtocolError 是响应不符合协议：解不开、形状不对、data 为空。

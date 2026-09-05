@@ -36,12 +36,12 @@ func (s *PgStore) PrepareOperation(ctx context.Context, op Operation) error {
 	const insertSQL = `
 INSERT INTO sms.sms_operation (
     id, environment, provider, kind, state, resource_id, request_hash,
-    params_summary, started_at, updated_at
-) VALUES ($1,$2,$3,$4,'prepared',NULLIF($5,'')::uuid,$6,$7,$8,$8)`
+    params_summary, started_at, updated_at, email_id
+) VALUES ($1,$2,$3,$4,'prepared',NULLIF($5,'')::uuid,$6,$7,$8,$8,NULLIF($9,'')::uuid)`
 
 	_, err := s.pool.Exec(ctx, insertSQL,
 		op.ID, s.environment, op.Provider, op.Kind, op.ResourceID,
-		op.RequestHash, op.ParamsSummary, op.StartedAt.UTC())
+		op.RequestHash, op.ParamsSummary, op.StartedAt.UTC(), op.EmailID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w（同一份请求已有未决操作，或该资源的同一动作正在进行）", ErrPendingDuplicate)
@@ -181,9 +181,16 @@ func (s *PgStore) UpsertResource(ctx context.Context, r Resource) (string, error
 INSERT INTO sms.sms_resource (
     environment, provider, external_id, phone, phone_mask, provider_token,
     service, country, status, order_id,
-    upstream_created_at, expires_at, synced_at, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::uuid,$11,$12,$13,$13,$13)
+    upstream_created_at, expires_at, synced_at, created_at, updated_at,
+    operator, price_text, verification_type, subtype, country_phone_code
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::uuid,$11,$12,$13,$13,$13,
+          $14,$15,$16,$17,$18)
 ON CONFLICT (environment, provider, external_id) DO UPDATE SET
+    operator = COALESCE(NULLIF(EXCLUDED.operator,''), sms_resource.operator),
+    price_text = COALESCE(NULLIF(EXCLUDED.price_text,''), sms_resource.price_text),
+    verification_type = COALESCE(NULLIF(EXCLUDED.verification_type,''), sms_resource.verification_type),
+    subtype = CASE WHEN EXCLUDED.subtype > 0 THEN EXCLUDED.subtype ELSE sms_resource.subtype END,
+    country_phone_code = COALESCE(NULLIF(EXCLUDED.country_phone_code,''), sms_resource.country_phone_code),
     phone = COALESCE(NULLIF(EXCLUDED.phone,''), sms_resource.phone),
     phone_mask = COALESCE(NULLIF(EXCLUDED.phone_mask,''), sms_resource.phone_mask),
     provider_token = COALESCE(NULLIF(EXCLUDED.provider_token,''), sms_resource.provider_token),
@@ -201,6 +208,7 @@ RETURNING id`
 		s.environment, r.Provider, r.ExternalID, r.Phone, r.PhoneMask, r.ProviderToken,
 		r.Service, r.Country, r.Status, r.OrderID,
 		nullableTime(r.UpstreamCreatedAt), nullableTime(r.ExpiresAt), s.now().UTC(),
+		r.Operator, r.PriceText, r.VerificationType, r.Subtype, r.CountryPhoneCode,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("落接码号码: %w", err)
@@ -211,7 +219,8 @@ RETURNING id`
 const resourceColumns = `
 SELECT id, provider, external_id, phone, phone_mask, provider_token,
        service, country, status, COALESCE(order_id::text,''),
-       last_code_at, upstream_created_at, expires_at, synced_at
+       last_code_at, upstream_created_at, expires_at, synced_at,
+       operator, price_text, verification_type, subtype, country_phone_code
   FROM sms.sms_resource`
 
 func (s *PgStore) GetResource(ctx context.Context, resourceID string) (Resource, error) {
@@ -434,7 +443,8 @@ ON CONFLICT (environment, provider) DO UPDATE SET
 const operationColumns = `
 SELECT id, provider, kind, state, COALESCE(resource_id::text,''), COALESCE(order_id::text,''),
        request_hash, params_summary, provider_request_id, provider_ref,
-       failure_reason, needs_human_review, resolve_note, started_at, updated_at
+       failure_reason, needs_human_review, resolve_note, started_at, updated_at,
+       COALESCE(email_id::text,'')
   FROM sms.sms_operation`
 
 type scannable interface {
@@ -447,7 +457,7 @@ func scanOperation(row scannable) (Operation, error) {
 	if err := row.Scan(&op.ID, &op.Provider, &op.Kind, &state, &op.ResourceID, &op.OrderID,
 		&op.RequestHash, &op.ParamsSummary, &op.ProviderRequestID, &op.ProviderRef,
 		&op.FailureReason, &op.NeedsHumanReview, &op.ResolveNote,
-		&op.StartedAt, &op.UpdatedAt); err != nil {
+		&op.StartedAt, &op.UpdatedAt, &op.EmailID); err != nil {
 		return Operation{}, err
 	}
 	op.State = OperationState(state)
@@ -459,7 +469,8 @@ func scanResource(row scannable) (Resource, error) {
 	var lastCode, upstreamCreated, expires *time.Time
 	if err := row.Scan(&r.ID, &r.Provider, &r.ExternalID, &r.Phone, &r.PhoneMask, &r.ProviderToken,
 		&r.Service, &r.Country, &r.Status, &r.OrderID,
-		&lastCode, &upstreamCreated, &expires, &r.SyncedAt); err != nil {
+		&lastCode, &upstreamCreated, &expires, &r.SyncedAt,
+		&r.Operator, &r.PriceText, &r.VerificationType, &r.Subtype, &r.CountryPhoneCode); err != nil {
 		return Resource{}, err
 	}
 	if lastCode != nil {
@@ -502,4 +513,94 @@ ON CONFLICT (environment, provider) DO UPDATE SET
 		return fmt.Errorf("开关供应商 %s: %w", provider, err)
 	}
 	return nil
+}
+
+// ---- 邮箱接码（迁移 000040）----
+
+// UpsertEmail 按 (provider, external_id) 落邮箱，保持本地 UUID 不变。
+//
+// value 用 COALESCE 保留：上游列表接口有时不带 value（它只在详情里），
+// 一次列表同步不该把已经收到的验证内容冲成空。
+func (s *PgStore) UpsertEmail(ctx context.Context, e Email) (string, error) {
+	const upsertSQL = `
+INSERT INTO sms.sms_email (
+    environment, provider, external_id, site, email, status, value,
+    cost_text, currency, upstream_date, message, synced_at, created_at, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$12)
+ON CONFLICT (environment, provider, external_id) DO UPDATE SET
+    site = COALESCE(NULLIF(EXCLUDED.site,''), sms_email.site),
+    email = COALESCE(NULLIF(EXCLUDED.email,''), sms_email.email),
+    status = COALESCE(NULLIF(EXCLUDED.status,''), sms_email.status),
+    value = COALESCE(NULLIF(EXCLUDED.value,''), sms_email.value),
+    cost_text = COALESCE(NULLIF(EXCLUDED.cost_text,''), sms_email.cost_text),
+    currency = CASE WHEN EXCLUDED.currency > 0 THEN EXCLUDED.currency ELSE sms_email.currency END,
+    upstream_date = COALESCE(EXCLUDED.upstream_date, sms_email.upstream_date),
+    message = COALESCE(NULLIF(EXCLUDED.message,''), sms_email.message),
+    synced_at = EXCLUDED.synced_at,
+    updated_at = EXCLUDED.updated_at
+RETURNING id`
+
+	var id string
+	err := s.pool.QueryRow(ctx, upsertSQL,
+		s.environment, e.Provider, e.ExternalID, e.Site, e.Email, e.Status, e.Value,
+		e.CostText, e.Currency, nullableTime(e.UpstreamDate), e.Message, s.now().UTC(),
+	).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("落邮箱接码: %w", err)
+	}
+	return id, nil
+}
+
+const emailColumns = `
+SELECT id, provider, external_id, site, email, status, value,
+       cost_text, currency, upstream_date, message, synced_at, created_at
+  FROM sms.sms_email`
+
+func (s *PgStore) GetEmail(ctx context.Context, emailID string) (Email, error) {
+	row := s.pool.QueryRow(ctx, emailColumns+`
+ WHERE environment = $1 AND id = $2`, s.environment, emailID)
+	e, err := scanEmail(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Email{}, fmt.Errorf("邮箱 %s 不存在", emailID)
+	}
+	if err != nil {
+		return Email{}, fmt.Errorf("查邮箱: %w", err)
+	}
+	return e, nil
+}
+
+func (s *PgStore) ListEmails(ctx context.Context, limit int) ([]Email, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, emailColumns+`
+ WHERE environment = $1
+ ORDER BY created_at DESC, id
+ LIMIT $2`, s.environment, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查邮箱清单: %w", err)
+	}
+	defer rows.Close()
+	var out []Email
+	for rows.Next() {
+		e, err := scanEmail(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func scanEmail(row scannable) (Email, error) {
+	var e Email
+	var date *time.Time
+	if err := row.Scan(&e.ID, &e.Provider, &e.ExternalID, &e.Site, &e.Email, &e.Status, &e.Value,
+		&e.CostText, &e.Currency, &date, &e.Message, &e.SyncedAt, &e.CreatedAt); err != nil {
+		return Email{}, err
+	}
+	if date != nil {
+		e.UpstreamDate = *date
+	}
+	return e, nil
 }

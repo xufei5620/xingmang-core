@@ -27,7 +27,11 @@ const (
 // 让构造随配置变化，等于在后台开一家之后还要重启进程才生效。
 var AllProviders = []string{ProviderSMS62, ProviderHero}
 
-// 操作类型。62 只支持 purchase；其余五个是 Hero 独有的生命周期动作。
+// 操作类型。62 只支持 purchase；其余全部是 Hero 独有。
+//
+// 与迁移 000040 的 CHECK 一一对应。花钱的有四个：purchase、rent、
+// email_purchase、email_reorder——它们**必须**走七态台账；不花钱的
+// （favorite_*、email_cancel）也走台账，为的是审计里能查到「谁做的」。
 const (
 	KindPurchase   = "purchase"
 	KindCancel     = "cancel"
@@ -35,6 +39,21 @@ const (
 	KindReplace    = "replace"
 	KindReactivate = "reactivate"
 	KindProlong    = "prolong"
+	// KindRent：Hero 兼容层的租用号码（按小时计费）。**花钱。**
+	KindRent = "rent"
+	// 邮箱接码（Hero Emails 组）。
+	KindEmailPurchase = "email_purchase"
+	KindEmailCancel   = "email_cancel"
+	KindEmailReorder  = "email_reorder"
+	// 收藏。不花钱，但仍走 Action 留审计。
+	KindFavoriteSet    = "favorite_set"
+	KindFavoriteRemove = "favorite_remove"
+)
+
+// 资源子类型（官方 ActivationSubtype）。
+const (
+	SubtypeActivation int64 = 1
+	SubtypeRent       int64 = 2
 )
 
 // OperationState 是操作台账里的状态。
@@ -79,6 +98,8 @@ var (
 	ErrRetryForbidden = errors.New("sms: 只有确定失败的操作才允许重试")
 	// ErrCodeNotAvailable：还没有码。**这是正常状态，不是故障。**
 	ErrCodeNotAvailable = errors.New("sms: 尚未收到验证码")
+	// ErrExtrasNotSupported：这家没有这项扩展能力（比如 62 没有邮箱接码）。
+	ErrExtrasNotSupported = errors.New("sms: 该供应商没有这项能力")
 )
 
 // Operation 是台账里的一笔。
@@ -103,6 +124,8 @@ type Operation struct {
 	ResolveNote      string
 	StartedAt        time.Time
 	UpdatedAt        time.Time
+	// EmailID 是邮箱动作指向的本地邮箱 UUID（其他动作为空）。
+	EmailID string
 }
 
 // RetryAllowed 只有确定失败的操作才为真。
@@ -143,6 +166,36 @@ type Resource struct {
 	UpstreamCreatedAt time.Time
 	ExpiresAt         time.Time
 	SyncedAt          time.Time
+	// 以下来自官方 ActivationSchema（迁移 000040）。62 全部为空。
+	Operator string
+	// PriceText 是十进制文本，不转 float。
+	PriceText        string
+	VerificationType string
+	// Subtype：1 = 普通激活，2 = 租用。0 = 上游没说（62 或旧数据）。
+	Subtype          int64
+	CountryPhoneCode string
+}
+
+// Email 是一次邮箱接码（Hero Emails 组，迁移 000040）。
+//
+// 与手机号是两种资源：按「站点 + 域名」买，状态只有 WAIT / CANCEL / SUCCESS，
+// 收到的是邮件里的验证内容（Value）。
+type Email struct {
+	ID         string
+	Provider   string
+	ExternalID string
+	Site       string
+	Email      string
+	Status     string
+	// Value 是收到的验证内容；与验证码同一档敏感度，对外 DTO 由 sms.reveal 把守。
+	Value    string
+	CostText string
+	// Currency 是 ISO 数字币种码（840=USD）。
+	Currency     int64
+	UpstreamDate time.Time
+	Message      string
+	SyncedAt     time.Time
+	CreatedAt    time.Time
 }
 
 // Code 是收到的一条验证码。
@@ -217,13 +270,19 @@ func CanonicalRequestHash(provider, kind string, params map[string]string) strin
 
 // SupportsAction 说明某家是否支持某个动作。
 //
-// 62 只有 purchase：它没有取消/完成/替换/延长的接口。把不支持的动作在
-// 领域层挡掉，而不是让它打到上游去换一个含糊的 404。
+// 62 只有 purchase：它没有取消/完成/替换/延长的接口，也没有租用、邮箱与
+// 收藏。把不支持的动作在领域层挡掉，而不是让它打到上游去换一个含糊的 404。
 func SupportsAction(provider, kind string) bool {
-	if kind == KindPurchase {
+	switch kind {
+	case KindPurchase:
 		return provider == ProviderSMS62 || provider == ProviderHero
+	case KindCancel, KindFinish, KindReplace, KindReactivate, KindProlong,
+		KindRent, KindEmailPurchase, KindEmailCancel, KindEmailReorder,
+		KindFavoriteSet, KindFavoriteRemove:
+		return provider == ProviderHero
+	default:
+		return false
 	}
-	return provider == ProviderHero
 }
 
 // ValidateProvider 挡住不认识的供应商。

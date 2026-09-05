@@ -20,6 +20,7 @@ type memStore struct {
 	orders    map[string]Order
 	codes     map[string]Code
 	status    map[string]ProviderStatus
+	emails    map[string]Email
 	// pendingHash 模拟未决唯一索引。
 	pendingHash map[string]string
 	seq         int
@@ -31,6 +32,7 @@ func newMemStore() *memStore {
 		ops: map[string]Operation{}, resources: map[string]Resource{},
 		orders: map[string]Order{}, codes: map[string]Code{},
 		status: map[string]ProviderStatus{}, pendingHash: map[string]string{},
+		emails: map[string]Email{},
 	}
 }
 
@@ -187,6 +189,40 @@ func (m *memStore) SetProviderEnabled(ctx context.Context, provider string, enab
 	st.Enabled = enabled
 	m.status[provider] = st
 	return nil
+}
+
+func (m *memStore) UpsertEmail(ctx context.Context, e Email) (string, error) {
+	for id, existing := range m.emails {
+		if existing.Provider == e.Provider && existing.ExternalID == e.ExternalID {
+			e.ID = id
+			if e.Value == "" {
+				e.Value = existing.Value
+			}
+			m.emails[id] = e
+			return id, nil
+		}
+	}
+	m.seq++
+	id := "email-" + itoa(m.seq)
+	e.ID = id
+	m.emails[id] = e
+	return id, nil
+}
+
+func (m *memStore) GetEmail(ctx context.Context, id string) (Email, error) {
+	e, ok := m.emails[id]
+	if !ok {
+		return Email{}, errors.New("邮箱不存在")
+	}
+	return e, nil
+}
+
+func (m *memStore) ListEmails(ctx context.Context, limit int) ([]Email, error) {
+	var out []Email
+	for _, e := range m.emails {
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 func itoa(n int) string {

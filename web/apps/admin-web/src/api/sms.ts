@@ -58,6 +58,13 @@ export interface SMSResource {
   last_code_at?: string;
   expires_at?: string;
   synced_at?: string;
+  /** 以下来自 Hero 官方 ActivationSchema（XM-SMS1）；62 没有。 */
+  operator?: string;
+  price_text?: string;
+  verification_type?: string;
+  /** 1 = 普通激活（20 分钟），2 = 租用（按小时）。 */
+  subtype?: number;
+  country_phone_code?: string;
 }
 
 export interface SMSOperation {
@@ -210,6 +217,10 @@ export function purchaseSMSNumbers(
     operator?: string;
     max_price?: string;
     duration?: number;
+    /** sms / call（官方 VerificationType）。call 是语音验证，另一种计费。 */
+    verification_type?: string;
+    /** 与 max_price 一起用：严格按这个价成交。 */
+    fixed_price?: boolean;
   },
   options: ListOptions = {},
   client: ApiClient = apiClient,
@@ -245,6 +256,284 @@ export function resolveSMSOperation(
 ): Promise<ActionRun> {
   return executeAction(
     { actionId: "sms.operation.resolve", version: "1", params },
+    options,
+    client,
+  );
+}
+
+
+// ---- XM-SMS1：两家官方文档补齐后的扩展能力 ----
+//
+// 全部是**实时上游调用**，不是投影。路由按供应商分（/sms/hero/…、/sms/sms62/…），
+// 共用路径会让页面在 62 上请求一个只有 Hero 有的东西。
+
+async function getObject<T>(path: string, options: ListOptions, client: ApiClient): Promise<T> {
+  return client
+    .get<T>(path, { ...(options.signal ? { signal: options.signal } : {}) })
+    .catch(translateUnmounted);
+}
+
+function qs(params: Record<string, string | number | boolean | undefined>): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== "" && v !== false) p.set(k, String(v));
+  }
+  const encoded = p.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+export interface HeroCountry {
+  id: number;
+  name_en: string;
+  name_cn: string;
+  name_ru: string;
+  visible: boolean;
+  retry: boolean;
+}
+export interface HeroService {
+  code: string;
+  name: string;
+}
+export interface HeroPriceRow {
+  country: string;
+  service: string;
+  cost_text: string;
+  count: number;
+  physical_count: number;
+}
+export interface HeroTopCountry {
+  country: number;
+  price_text: string;
+  retail_price_text: string;
+  count: number;
+}
+export interface HeroCustomDuration {
+  service: string;
+  country: string;
+  hours: number;
+}
+export interface HeroRentOffer {
+  service: string;
+  quantity: number;
+  price_text: string;
+  retail_price_text: string;
+}
+export interface HeroRentCountRow {
+  country: string;
+  hours: string;
+  price_text: string;
+  count: number;
+}
+export interface HeroHistoryItem {
+  id: string;
+  create_date: string;
+  service: string;
+  country: number;
+  phone: string;
+  more_codes: string;
+  cost_text: string;
+  status: number;
+  phone_code: string;
+  currency: number;
+}
+export interface HeroHistoryPage {
+  items: HeroHistoryItem[];
+  /** **这一页的**合计（官方如此），不是全量。 */
+  page_sum_text: string;
+  page_success_count: number;
+  page: number;
+  size: number;
+  total: number;
+  has_more: boolean;
+}
+export interface HeroStatsEntry {
+  country: string;
+  service: string;
+  count: number;
+  sum_text: string;
+  raw?: Record<string, unknown>;
+}
+export interface HeroEmailDomain {
+  name: string;
+  cost_text: string;
+  count: number;
+}
+export interface HeroExtendOption {
+  duration: number;
+  unit: string;
+  price_text: string;
+}
+export interface HeroProlongRecord {
+  duration: number;
+  unit: string;
+  price_text: string;
+  created_at: string;
+}
+export interface SMSEmail {
+  email_id: string;
+  provider: string;
+  external_id: string;
+  site: string;
+  email: string;
+  /** 官方枚举 WAIT / CANCEL / SUCCESS。 */
+  status: string;
+  cost_text: string;
+  currency: number;
+  message?: string;
+  /** 没有 sms.reveal 时后端不回 value，只回「有没有到」。 */
+  has_value: boolean;
+  value?: string;
+  upstream_date?: string;
+  synced_at?: string;
+}
+export interface SMS62GoodsDetail {
+  id: string;
+  name: string;
+  price_text: string;
+  country: string;
+  stock: number;
+  /** 这个商品可选的天数（三段 ID 的第三段）；上游没给就是空，自己填。 */
+  durations: number[];
+}
+export interface SMS62Order {
+  order_id: string;
+  goods_id: string;
+  quantity: number;
+  status: number;
+  status_text: string;
+  amount_text: string;
+  created_at?: string;
+}
+export interface SMS62OrdersPage {
+  items: SMS62Order[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export const getHeroBalance = (o: ListOptions = {}, c: ApiClient = apiClient) =>
+  getObject<{ balance_text: string }>("/api/v1/sms/hero/balance", o, c);
+export const listHeroCountries = (o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroCountry>("/api/v1/sms/hero/countries", o, c);
+export const listHeroServices = (country = 0, lang = "cn", o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroService>(`/api/v1/sms/hero/services${qs({ country: country || undefined, lang })}`, o, c);
+export const getHeroOperators = (country = 0, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  getObject<{ by_country: Record<string, string[]> }>(
+    `/api/v1/sms/hero/operators${qs({ country: country || undefined })}`,
+    o,
+    c,
+  );
+export const listHeroPrices = (service = "", country = 0, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroPriceRow>(`/api/v1/sms/hero/prices${qs({ service, country: country || undefined })}`, o, c);
+export const listHeroTopCountries = (service: string, byRank = false, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroTopCountry>(`/api/v1/sms/hero/top-countries${qs({ service, by_rank: byRank })}`, o, c);
+export const listHeroCustomDurations = (o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroCustomDuration>("/api/v1/sms/hero/custom-durations", o, c);
+export const getHeroRentOffers = (country: number, hours: number, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  getObject<{ operators: Record<string, string>; services: HeroRentOffer[] }>(
+    `/api/v1/sms/hero/rent-offers${qs({ country, hours })}`,
+    o,
+    c,
+  );
+export const listHeroRentCount = (service: string, country = 0, operator = "", o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroRentCountRow>(`/api/v1/sms/hero/rent-count${qs({ service, country: country || undefined, operator })}`, o, c);
+export const getHeroHistory = (
+  q: { from: string; to: string; page?: number; size?: number; search?: string },
+  o: ListOptions = {},
+  c: ApiClient = apiClient,
+) => getObject<HeroHistoryPage>(`/api/v1/sms/hero/history${qs(q)}`, o, c);
+export const getHeroStats = (date: string, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  getObject<{ date: string; items: HeroStatsEntry[] }>(`/api/v1/sms/hero/stats${qs({ date })}`, o, c);
+export const listHeroEmailDomains = (site = "", o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroEmailDomain>(`/api/v1/sms/hero/email-domains${qs({ site })}`, o, c);
+
+export const listUpstreamCodes = (resourceId: string, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<SMSCode>(`/api/v1/sms/resources/${encodeURIComponent(resourceId)}/upstream-codes`, o, c);
+export const listExtendOptions = (
+  resourceId: string,
+  kind: "prolong" | "reactivate",
+  o: ListOptions = {},
+  c: ApiClient = apiClient,
+) => get<HeroExtendOption>(`/api/v1/sms/resources/${encodeURIComponent(resourceId)}/extend-options${qs({ kind })}`, o, c);
+export const listProlongHistory = (resourceId: string, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<HeroProlongRecord>(`/api/v1/sms/resources/${encodeURIComponent(resourceId)}/prolong-history`, o, c);
+
+export const listSMSEmails = (o: ListOptions = {}, c: ApiClient = apiClient) =>
+  get<SMSEmail>("/api/v1/sms/emails", o, c);
+/** refresh=true 时先从上游读回最新状态（含收到的验证内容）——**人发起**，不轮询。 */
+export const getSMSEmail = (emailId: string, refresh = false, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  getObject<SMSEmail>(
+    `/api/v1/sms/emails/${encodeURIComponent(emailId)}${qs({ refresh: refresh ? 1 : undefined })}`,
+    o,
+    c,
+  );
+
+export const getSMS62GoodsDetail = (goodsId: string, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  getObject<SMS62GoodsDetail>(`/api/v1/sms/sms62/goods/${encodeURIComponent(goodsId)}`, o, c);
+export const listSMS62Orders = (page = 1, pageSize = 20, o: ListOptions = {}, c: ApiClient = apiClient) =>
+  getObject<SMS62OrdersPage>(`/api/v1/sms/sms62/orders${qs({ page, page_size: pageSize })}`, o, c);
+
+/** 租用一个号（`sms.rent.purchase@1`）。**花真钱且按小时计费。** */
+export function rentSMSNumber(
+  params: {
+    operation_id: string;
+    service: string;
+    country: number;
+    duration_hours: number;
+    operator?: string;
+    currency?: number;
+  },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.rent.purchase", version: "1", params: { provider: "hero_sms", ...params } },
+    options,
+    client,
+  );
+}
+
+/** 买邮箱接码（`sms.email.purchase@1`）。**花真钱。** count>1 走批量（上限 10）。 */
+export function purchaseSMSEmails(
+  params: { operation_id: string; site: string; domain: string; count?: number; service?: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.email.purchase", version: "1", params: { provider: "hero_sms", ...params } },
+    options,
+    client,
+  );
+}
+
+/** 邮箱取消 / 重下单（`sms.email.action@1`）。重下单可能花钱。 */
+export function executeSMSEmailAction(
+  params: { operation_id: string; email_id: string; kind: "email_cancel" | "email_reorder" },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "sms.email.action", version: "1", params }, options, client);
+}
+
+/** 收藏（`sms.favorite.set@1` / `sms.favorite.remove@1`）。不花钱。 */
+export function setSMSFavorite(
+  params: { service: string; country: number; operator?: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.favorite.set", version: "1", params: { provider: "hero_sms", ...params } },
+    options,
+    client,
+  );
+}
+export function removeSMSFavorite(
+  params: { service: string; country: number },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.favorite.remove", version: "1", params: { provider: "hero_sms", ...params } },
     options,
     client,
   );

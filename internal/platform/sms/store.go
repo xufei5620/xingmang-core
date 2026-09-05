@@ -63,6 +63,11 @@ type Store interface {
 	SaveProviderStatus(ctx context.Context, s ProviderStatus) error
 	// SetProviderEnabled 开关一家供应商。
 	SetProviderEnabled(ctx context.Context, provider string, enabled bool, at time.Time) error
+
+	// 邮箱接码（Hero，迁移 000040）。按 (provider, external_id) 落，保持本地 UUID。
+	UpsertEmail(ctx context.Context, e Email) (string, error)
+	GetEmail(ctx context.Context, emailID string) (Email, error)
+	ListEmails(ctx context.Context, limit int) ([]Email, error)
 }
 
 // Order 是一笔订单（主要是 62）。

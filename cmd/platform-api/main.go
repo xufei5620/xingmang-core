@@ -514,6 +514,7 @@ func main() {
 		CardStats:    cardStatsOrNil(cardStore),
 		SMS:          smsQuerierOrNil(smsStore),
 		SMSCatalog:   smsCatalogOrNil(smsService),
+		SMSExtras:    smsExtrasOrNil(smsService),
 		SMSProviders: smsProviderIDs(smsService),
 		// nil 时回调路由整个不挂载（见 httpapi.Deps.CardWebhook）。
 		CardWebhook: cardWebhookOrNil(

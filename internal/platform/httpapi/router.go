@@ -112,6 +112,9 @@ type Deps struct {
 	SMSCatalog SMSCatalogReader
 	// CardStats 是卡片统计的读端点（「统计」页签）。为 nil 时不挂载。
 	CardStats CardStatsQuerier
+	// SMSExtras 是接码扩展能力（历史/统计/目录/租用报价/邮箱/62 详情与订单）。
+	// 为 nil 时不挂载。
+	SMSExtras SMSExtrasReader
 	// SMSProviders 是**已装配的**供应商清单。以它为准而不是以库里有的行
 	// 为准：没做过连接测试的那家库里根本没有行，而它恰恰最需要显示出来。
 	SMSProviders []string
@@ -372,6 +375,9 @@ func NewRouter(d Deps) http.Handler {
 			if d.SMSCatalog != nil {
 				api.With(RequireScope(sms.PermissionRead)).
 					Get("/sms/catalog", ListSMSCatalogHandler(d.SMSCatalog))
+				if d.SMSExtras != nil {
+					mountSMSExtras(api, d.SMS, d.SMSExtras)
+				}
 			}
 			api.With(RequireScope(savedviews.ScopeManage)).
 				Get("/ui/saved-views", ListSavedViewsHandler(d.SavedViews))

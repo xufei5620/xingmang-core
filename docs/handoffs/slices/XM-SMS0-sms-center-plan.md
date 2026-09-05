@@ -117,8 +117,8 @@ Hero 的 `lookupResource` 最多扫 5 页 × 100 条 **active** activation；已
 
 - 自动重试付费、跨供应商 fallback、云端调度
 - 常驻后端验证码轮询器（取码由人在页面上发起）
-- 远端订单/统计/历史列表（62 的 `GetGoodsDetail`/`ListOrders`、
-  Hero 的 `GetStats`/`GetProlongHistory` 客户端方法存在但不暴露）
+- ~~远端订单/统计/历史列表~~ —— **2026-09-06 由 XM-SMS1 做了**（两家官方文档
+  补齐后全部接口都接了，见 `XM-SMS1-official-api-alignment.md`）
 - 参考实现里那条旧的「邮箱 URL 取码」入口——它不是这个中心的消费者
 
 ---

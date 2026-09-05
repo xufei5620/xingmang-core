@@ -50,7 +50,7 @@ var (
 	humanOnly = []principal.Type{principal.TypeHuman}
 )
 
-// RegisterActions 把五个 Action 注册进内核。
+// RegisterActions 把十个 Action 注册进内核。
 //
 // **全部 L1**：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED
 // （Foundation-B 未实现），声明成 L2 会让它们变成永远跑不起来的摆设。
@@ -72,6 +72,8 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 		{resourceActionDef(), resourceActionHandler(svc)},
 		{resolveDef(), resolveHandler(svc)},
 	}
+	// XM-SMS1：租用 / 邮箱 / 收藏（见 actions_extras.go）。
+	entries = append(entries, extraActionEntries(svc)...)
 	for _, e := range entries {
 		if err := reg.Register(e.def, e.handler); err != nil {
 			return fmt.Errorf("注册 %s: %w", e.def.ID, err)

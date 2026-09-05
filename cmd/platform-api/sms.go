@@ -193,6 +193,13 @@ func smsProviderIDs(svc *sms.Service) []string {
 	return svc.Providers()
 }
 
+func smsExtrasOrNil(svc *sms.Service) httpapi.SMSExtrasReader {
+	if svc == nil {
+		return nil
+	}
+	return svc
+}
+
 func smsCatalogOrNil(svc *sms.Service) httpapi.SMSCatalogReader {
 	if svc == nil {
 		return nil

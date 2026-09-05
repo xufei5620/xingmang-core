@@ -156,7 +156,7 @@ func (a *HeroAdapter) toResources(activations []herosms.Activation) []Resource {
 func (a *HeroAdapter) toResource(v herosms.Activation) Resource {
 	created, _ := time.Parse(time.RFC3339Nano, v.CreatedAt)
 	expires, _ := time.Parse(time.RFC3339Nano, v.ExpiresAt)
-	return Resource{
+	return a.enrich(Resource{
 		Provider: ProviderHero,
 		// 身份就是 activation ID。**这家不存 token**——迁移里的 CHECK
 		// 约束会挡住误存。
@@ -169,5 +169,5 @@ func (a *HeroAdapter) toResource(v herosms.Activation) Resource {
 		UpstreamCreatedAt: created.UTC(),
 		ExpiresAt:         expires.UTC(),
 		SyncedAt:          a.now(),
-	}
+	}, v)
 }

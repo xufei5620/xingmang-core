@@ -18,6 +18,18 @@ import (
 // servicePattern 是服务代号：2–4 位小写字母或数字。
 var servicePattern = regexp.MustCompile(`^[a-z0-9]{2,4}$`)
 
+// normalizeVerificationType 只认官方枚举 sms / call；空 = sms。
+func normalizeVerificationType(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "sms":
+		return "sms", nil
+	case "call":
+		return "call", nil
+	default:
+		return "", connector.NewError(connector.KindRejected, "Hero-SMS 验证类型只接受 sms / call", nil)
+	}
+}
+
 const (
 	minQuantity = 1
 	// maxQuantity 同 62：**这是我们自己的安全上限，不是官方声明的最大值**。
@@ -42,6 +54,13 @@ type Activation struct {
 	Price     string
 	CreatedAt string
 	ExpiresAt string
+	// 以下四个来自官方 ActivationSchema（2026-09-06 核对），冻结源码里没有。
+	Operator         string
+	CountryPhoneCode int64
+	// VerificationType 是 sms / call。
+	VerificationType string
+	// Subtype：1 = 普通激活，2 = 租用（官方 ActivationSubtype）。
+	Subtype int64
 }
 
 // Offer 是库存里的一项。
@@ -72,6 +91,16 @@ func (c *Client) TestConnection(ctx context.Context) error {
 // 单独说：按数组解会拿到空集合而不是报错，于是「库存为空」和「解析方式错了」
 // 长得一模一样。
 func (c *Client) ListOffers(ctx context.Context, services, countries string) ([]Offer, error) {
+	return c.ListOffersByType(ctx, "sms", services, countries)
+}
+
+// ListOffersByType 按验证类型读库存。verificationType 是官方路径参数，只认
+// sms / call；别的值本地拒绝，不打到上游去换一个 404。
+func (c *Client) ListOffersByType(ctx context.Context, verificationType, services, countries string) ([]Offer, error) {
+	kind, err := normalizeVerificationType(verificationType)
+	if err != nil {
+		return nil, err
+	}
 	query := url.Values{}
 	if services != "" {
 		query.Set("services", services)
@@ -79,7 +108,7 @@ func (c *Client) ListOffers(ctx context.Context, services, countries string) ([]
 	if countries != "" {
 		query.Set("countries", countries)
 	}
-	path := "/activations/offers/sms"
+	path := "/activations/offers/" + kind
 	if encoded := query.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
@@ -153,6 +182,12 @@ type PurchaseInput struct {
 	// Duration 是小时数；0 表示用上游默认。
 	Duration       int
 	ResellerUserID string
+	// VerificationType 是 sms / call；空 = sms。
+	//
+	// 此前固定 sms、不接受调用方指定。官方 schema 明确它是购买参数，
+	// call（语音验证）是另一种计费与交付方式——所以做成**显式参数**，
+	// 由页面上一个明确的选项决定，而不是默认值悄悄决定。
+	VerificationType string
 }
 
 // PurchaseActivations 买号。**花钱的写操作，没有任何重试。**
@@ -184,13 +219,15 @@ func (c *Client) PurchaseActivations(ctx context.Context, in PurchaseInput) ([]A
 		VerificationType string       `json:"verificationType"`
 		ResellerUserID   string       `json:"resellerUserId,omitempty"`
 	}
+	verificationType, err := normalizeVerificationType(in.VerificationType)
+	if err != nil {
+		return nil, err
+	}
 	body := request{
 		Service: service, Country: in.Country, Amount: in.Amount,
 		Operator: strings.TrimSpace(in.Operator), FixedPrice: in.FixedPrice,
-		Duration: in.Duration,
-		// **固定 sms，不接受调用方指定**：call 类型是另一种计费与另一种
-		// 交付方式，把它做成参数等于让一次手滑买成语音验证。
-		VerificationType: "sms",
+		Duration:         in.Duration,
+		VerificationType: verificationType,
 		ResellerUserID:   strings.TrimSpace(in.ResellerUserID),
 	}
 	if p := strings.TrimSpace(in.MaxPrice); p != "" {
@@ -276,10 +313,16 @@ func (c *Client) LookupActivation(ctx context.Context, activationID string) (Act
 
 // OTP 是一条收到的验证码。
 type OTP struct {
+	// ID 是上游的 OTP id（官方 ActivationOtpSchema.id）；只在列表接口里有意义。
+	ID         string
 	Code       string
 	Sender     string
 	Text       string
 	ReceivedAt string
+	// Type 是 sms / call（官方 VerificationType）。call 的那条码为空是正常的。
+	Type string
+	// Service 是这条码对应的服务代号。
+	Service string
 }
 
 // GetLastOTP 取最近一条验证码。
@@ -339,7 +382,11 @@ func parseActivations(raw json.RawMessage) ([]Activation, error) {
 			Price:     scalarString(o, "price", "cost"),
 			CreatedAt: scalarString(o, "createdAt"),
 			// 上游字段名是 expiredAt（不是 expiresAt）。
-			ExpiresAt: scalarString(o, "expiredAt"),
+			ExpiresAt:        scalarString(o, "expiredAt"),
+			Operator:         sanitizeText(scalarString(o, "operator"), 32),
+			CountryPhoneCode: scalarInt(o, "countryPhoneCode"),
+			VerificationType: sanitizeText(scalarString(o, "verificationType"), 8),
+			Subtype:          scalarInt(o, "subtype"),
 		})
 	}
 	return out, nil
