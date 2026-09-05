@@ -3,7 +3,7 @@
 > **SUPERSEDED — DO NOT EXECUTE.** RC86 shipped at signed tag
 > `v0.1.0-rc86-signed` (`4c4a799`) and is deployed; its evidence is
 > immutable. Continue only with
-> `docs/superpowers/plans/2026-09-05-invoice-rc93-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-05-invoice-rc94-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

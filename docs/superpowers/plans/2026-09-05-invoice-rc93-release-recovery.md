@@ -1,5 +1,10 @@
 # RC93 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC93 shipped at signed tag
+> `v0.1.0-rc93-signed` (`34c7775`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-05-invoice-rc94-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC93, which finishes the 2026-09-04 stall's repair at each of its three layers and lets the rehearsal exercise the account that matters most:
