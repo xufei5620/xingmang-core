@@ -69,3 +69,11 @@ Backup `invoice-20260905T010919Z`, rc94 tools image, `--reproject-all --reevalua
 The repair is in the tool, not the evaluator: `--reevaluate-evidence` now also rewinds every POLICY_ANCHOR account's `finalized_through` to its cutover after the jobs have been queued at the old boundary, so each account's window is its whole evidence history and the cleared items sit in front of the bound (`accounts_rewound` in the report; zero with re-evaluation set means a bounded run had nothing to chunk). That is a Go change and needs a new image; RC94's signed tag is fixed, so the real differential is RC95's.
 
 RC94 itself changes nothing in production — the knob is unset — and was not rolled forward pending the owner's decision.
+
+### Deployed after all
+
+The owner chose to roll RC94 forward before RC95. Signed pre-deploy backup `invoice-20260905T101318Z`; roll-forward PASS, 18 containers on rc94, healthz/readyz 200, migrations a no-op. Post-deploy: api image `invoice-system-api:0.1.0-rc94`, **`ELIGIBILITY_EVIDENCE_BATCH_LIMIT` absent from the api container's environment** (the bound is off; production behaviour is RC93's), zero `lock timeout` / `active scan cycle` lines in the first five minutes, zero busy events, balances cycles publishing with 0–1 s lag. Deployment record `rc94-deploy-20260905T101700Z` holds the containers list, roll-forward log, both differential reports and summaries, the differential log, transfer checksums and the watch log.
+
+### Canary
+
+30 minutes from 10:18:21Z: `readyz_non200=0`, zero error lines, zero reconcile errors, usage 28 cycles, credits 27 cycles with zero sync failures, `unclassified_request_failures=0`; lock timeouts, cycle deferrals, late balances cycles **0, 0, 0**; busy events at the end **0**. One projection job remained queued at the end: the whale's, in `BALANCE_PROOF_PENDING` backoff — the same wait it has had since RC92, benign, and the reason readiness stayed 200 through it is fix 2.
