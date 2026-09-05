@@ -117,7 +117,16 @@ export function CardWorkbench() {
               : "还没有卡片。点右上角「开卡」创建第一张；在 Infini 后台直接建的卡会由同步作业在下一轮（5 分钟内）自动拉进来。"}
           </p>
         ) : (
-          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(18rem,22rem)_1fr]">
+          // 三栏：清单 | 卡片详情 | 交易流水。
+          //
+          // 流水从详情里分出来单独占一栏（产品负责人 2026-09-05）：详情是
+          // 「这张卡是什么」，流水是「这张卡发生过什么」，两件事都要看但不
+          // 争同一块地方——原先流水挂在详情最底下，看一笔消费要先滚过整个
+          // 卡片信息，而右边那半屏是空的。
+          //
+          // xl 才三栏：中屏上第三栏会把前两栏挤到读不动，那时仍是两栏、
+          // 流水回到详情下方。
+          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)] xl:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)_minmax(0,1fr)]">
             <CardRail
               cards={cards}
               selected={selected}
@@ -125,14 +134,17 @@ export function CardWorkbench() {
               onSelect={select}
             />
             {selected ? (
-              <CardPane
-                card={selected}
-                challenge={challenges.get(
-                  `${selected.account}/${selected.card_id}`,
-                )}
-                onWrite={afterWrite}
-                onError={setActionError}
-              />
+              <>
+                <CardPane
+                  card={selected}
+                  challenge={challenges.get(
+                    `${selected.account}/${selected.card_id}`,
+                  )}
+                  onWrite={afterWrite}
+                  onError={setActionError}
+                />
+                <CardLedgerColumn card={selected} />
+              </>
             ) : null}
           </div>
         )}
@@ -282,7 +294,9 @@ function CardPane({
     // max-w 定宽：宽屏上不限宽会把「卡片信息」的双列拉到屏幕两端，
     // 标签和值之间隔着半个屏幕，眼睛要横扫才对得上——一个两列表格的
     // 可读性不该随窗口变宽而变差。
-    <section className="border-edge flex min-w-0 max-w-3xl flex-col gap-4 rounded-md border p-4">
+    // 不再自己设 max-w：宽度由三栏栅格分配。原先那条 max-w-3xl 是两栏时
+    // 防止详情被拉到满屏两端的补丁，三栏之后它反而会在超宽屏上留出空隙。
+    <section className="border-edge flex min-w-0 flex-col gap-4 rounded-md border p-4">
       <header className="flex flex-col items-center gap-1 text-center">
         <h2 className="flex items-center gap-2 text-lg font-semibold">
           <span className="min-w-0 break-all">
@@ -296,6 +310,9 @@ function CardPane({
       </header>
 
       <CardFace card={card} />
+      <div className="flex justify-center">
+        <CopyCardSecrets card={card} />
+      </div>
 
       <div className="flex flex-wrap items-center justify-center gap-4">
         <div className="text-center">
@@ -388,13 +405,26 @@ function CardPane({
         </Dialog>
       </div>
 
-      <div className="flex min-w-0 flex-col gap-2">
-        <h3 className="text-sm font-semibold">交易流水</h3>
-        {/* 右栏定了宽，而流水表有七八列。让**表自己**横向滚，
-            而不是把整个页面撑宽——页面横滚会让左边的卡片清单也跟着跑掉。 */}
-        <div className="min-w-0 overflow-x-auto">
-          <CardTransactions card={card} />
-        </div>
+      {/* 交易流水已分到第三栏（见 CardLedgerColumn）。中屏（lg 但非 xl）
+          上没有第三栏，那时它显示在这一栏下方——由 CardLedgerColumn 自己的
+          栅格位置决定，这里不再重复渲染。 */}
+    </section>
+  );
+}
+
+/** 第三栏：这张卡的交易流水。
+ *
+ *  与卡片详情分栏而不是叠在它下面：详情回答「这张卡是什么」，流水回答
+ *  「这张卡发生过什么」——两件事都要看，但不该争同一块地方。原先流水挂在
+ *  详情最底下，看一笔消费要先滚过整个卡片信息，而右边那半屏是空的。 */
+function CardLedgerColumn({ card }: { card: CardItem }) {
+  return (
+    <section className="border-edge flex min-w-0 flex-col gap-2 rounded-md border p-4">
+      <h3 className="text-sm font-semibold">交易流水</h3>
+      {/* 表有七八列，让**表自己**横向滚，而不是把页面撑宽——
+          页面横滚会让左边的卡片清单也跟着跑掉。 */}
+      <div className="min-w-0 overflow-x-auto">
+        <CardTransactions card={card} />
       </div>
     </section>
   );
@@ -412,11 +442,54 @@ function CardFace({ card }: { card: CardItem }) {
       <span className="font-mono text-lg tracking-widest break-all">
         {card.pan ?? card.mask ?? "—"}
       </span>
-      <span className="text-nav-fg-muted flex items-center justify-between text-xs">
-        <span>{card.holder_name || "—"}</span>
-        <span className="font-mono">{card.expiry_mmyy ?? "—"}</span>
+      {/* 持卡人 / 有效期 / CVV 三格，与 Infini 卡面同一排布。
+          在线支付要连着填这几样，卡面上没有就得往下翻到信息栏。 */}
+      <span className="text-nav-fg-muted flex items-end justify-between gap-2 text-xs">
+        <span className="flex min-w-0 flex-col">
+          <span className="text-[0.65rem] uppercase">持卡人</span>
+          <span className="truncate">{card.holder_name || "—"}</span>
+        </span>
+        <span className="flex shrink-0 flex-col">
+          <span className="text-[0.65rem] uppercase">有效期</span>
+          <span className="font-mono">{card.expiry_mmyy ?? "—"}</span>
+        </span>
+        <span className="flex shrink-0 flex-col">
+          <span className="text-[0.65rem] uppercase">CVV</span>
+          <span className="font-mono">{card.cvv ?? "—"}</span>
+        </span>
       </span>
     </div>
+  );
+}
+
+/** 一键复制卡号、有效期与 CVV。
+ *
+ *  在线支付要连着填这三样，分三次复制就要在页面和表单之间来回切三趟，
+ *  而每一趟都是一次贴错位置的机会。
+ *
+ *  **明文没拉到就不渲染这个按钮**：一个复制出「—」的按钮比没有按钮更糟——
+ *  人会以为复制成功了，直到粘进付款页才发现。 */
+function CopyCardSecrets({ card }: { card: CardItem }) {
+  const [copied, setCopied] = useState(false);
+  if (!card.pan) return null;
+
+  const text = [card.pan, card.expiry_mmyy ?? "", card.cvv ?? ""]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <Button
+      variant="secondary"
+      size="sm"
+      aria-label="复制卡号、有效期与 CVV"
+      onClick={() => {
+        void navigator.clipboard?.writeText(text);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied ? "已复制" : "复制卡号 / 有效期 / CVV"}
+    </Button>
   );
 }
 

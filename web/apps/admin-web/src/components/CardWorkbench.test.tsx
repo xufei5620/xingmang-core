@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, expect, it, vi } from "vitest";
 import { CardWorkbench } from "./CardWorkbench";
@@ -148,8 +148,9 @@ it("卡面明文与开卡时间在右栏直接可见", async () => {
   renderAt("/cards");
 
   await screen.findByRole("heading", { name: /Two\.V/ });
+  // 卡面与信息栏各显示一份，所以按数量断言而不是唯一性。
   expect(screen.getAllByText("4413576524979228").length).toBeGreaterThan(0);
-  expect(screen.getByText("631")).toBeTruthy();
+  expect(screen.getAllByText("631").length).toBeGreaterThan(0);
   expect(screen.getAllByText("12/2031").length).toBeGreaterThan(0);
   // 开卡时间要到秒并带时区——截图发给另一个时区的人不能变成错的。
   expect(screen.getByText("2026-09-04 07:36:02 UTC")).toBeTruthy();
@@ -248,4 +249,47 @@ it("按账号筛选后选中态落在可见的卡上", async () => {
   renderAt("/cards/LINFENG/c2?account=CHRIS");
 
   expect(await screen.findByRole("heading", { name: /克里斯卡/ })).toBeTruthy();
+});
+
+// 卡面带有效期与 CVV，并且一个按钮把三样一起复制走。
+//
+// 产品负责人：「卡片这边要有日期和 cvv，然后有个复制按钮，点一下复制这三个」。
+// 在线支付要连着填卡号、有效期、CVV，分三次复制就要在页面和表单之间来回切
+// 三趟，而每一趟都是一次贴错位置的机会。
+it("卡面显示有效期与 CVV，一键复制三样", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.assign(navigator, { clipboard: { writeText } });
+
+  seed([
+    card({
+      card_id: "c1",
+      card_alias: "Bond",
+      pan: "4413576561557283",
+      expiry_mmyy: "05/2031",
+      cvv: "251",
+    }),
+  ]);
+  renderAt("/cards");
+
+  await screen.findByRole("heading", { name: /Bond/ });
+  // 卡面上三样都在（信息栏里也有一份，所以按数量断言而不是唯一性）。
+  expect(screen.getAllByText("05/2031").length).toBeGreaterThan(1);
+  expect(screen.getAllByText("251").length).toBeGreaterThan(1);
+
+  fireEvent.click(screen.getByRole("button", { name: /复制卡号、有效期与 CVV/ }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+
+  const copied = writeText.mock.calls[0]![0] as string;
+  expect(copied).toContain("4413576561557283");
+  expect(copied).toContain("05/2031");
+  expect(copied).toContain("251");
+});
+
+// 明文还没拉到时不给复制按钮：一个复制出「—」的按钮比没有按钮更糟。
+it("没有卡面明文时不显示复制按钮", async () => {
+  seed([card({ card_id: "c1", card_alias: "Bond" })]);
+  renderAt("/cards");
+
+  await screen.findByRole("heading", { name: /Bond/ });
+  expect(screen.queryByRole("button", { name: /复制卡号/ })).toBeNull();
 });
