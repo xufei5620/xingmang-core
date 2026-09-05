@@ -14,6 +14,8 @@ vi.mock("../api/sms", async () => {
     listSMSCodes: vi.fn(),
     listSMSCatalog: vi.fn(),
     listSMSBalances: vi.fn(),
+    listSMSAlerts: vi.fn(),
+    setSMSBalanceThreshold: vi.fn(),
     purchaseSMSNumbers: vi.fn(),
     verifySMSProvider: vi.fn(),
     setSMSProviderEnabled: vi.fn(),
@@ -26,6 +28,7 @@ vi.mock("../api/sms", async () => {
 
 import {
   fetchSMSCode,
+  listSMSAlerts,
   listSMSBalances,
   listSMSCatalog,
   listSMSCodes,
@@ -71,6 +74,7 @@ function seed(over: {
   vi.mocked(listSMSCodes).mockResolvedValue([]);
   vi.mocked(listSMSCatalog).mockResolvedValue([]);
   vi.mocked(listSMSBalances).mockResolvedValue([]);
+  vi.mocked(listSMSAlerts).mockResolvedValue({ items: [], thresholds: [] });
 }
 
 afterEach(() => vi.clearAllMocks());
@@ -375,4 +379,66 @@ it("没有余额快照时不显示余额行", async () => {
 
   await screen.findAllByText("62-US");
   expect(screen.queryByText(/余额 /)).toBeNull();
+});
+
+// 告警是这一页唯一的「通知」：不外发（等通知规范），所以它必须在页面顶部
+// 显眼地摆着，而且 critical 排在最前——那一条的含义是「不知道钱花没花出去」。
+it("顶部红条按严重度排列还开着的告警", async () => {
+  seed({});
+  vi.mocked(listSMSAlerts).mockResolvedValue({
+    items: [
+      {
+        alert_id: "a1",
+        kind: "balance_low",
+        provider: "hero_sms",
+        severity: "warning",
+        summary: "Hero-SMS 余额 1.00 低于阈值 5",
+        first_seen_at: "2026-09-06T05:00:00Z",
+        last_seen_at: "2026-09-06T06:00:00Z",
+      },
+      {
+        alert_id: "a2",
+        kind: "operation_unknown_stale",
+        provider: "sms62",
+        severity: "critical",
+        summary: "62-US 的 purchase 操作结果未知已超过 30m0s",
+        first_seen_at: "2026-09-06T04:00:00Z",
+        last_seen_at: "2026-09-06T06:00:00Z",
+      },
+    ],
+    thresholds: [],
+  });
+  renderPanel();
+
+  const strip = await screen.findByRole("status", { name: "接码告警" });
+  expect(strip.textContent).toContain("需要处理（2）");
+  const items = strip.querySelectorAll("li");
+  // critical 在前：它是唯一需要人立刻做点什么的那条。
+  expect(items[0]!.textContent).toContain("结果未知");
+  expect(items[1]!.textContent).toContain("余额");
+  // 不外发这件事要写在页面上，免得有人以为已经推过群了。
+  expect(strip.textContent).toContain("不会外发");
+});
+
+it("没有告警时不显示红条", async () => {
+  seed({});
+  renderPanel();
+
+  await screen.findAllByText("Hero-SMS");
+  expect(screen.queryByRole("status", { name: "接码告警" })).toBeNull();
+});
+
+// 阈值只对有余额能力的那家给：62 没有余额接口，摆一个输入框等于让人配一条
+// 永远不会触发的规则。
+it("只有有余额能力的供应商才有阈值输入框", async () => {
+  seed({
+    providers: [
+      { provider: "sms62", label: "62-US", capabilities: ["purchase"], enabled: true, verified: true, supports_lifecycle: false },
+      { provider: "hero_sms", label: "Hero-SMS", capabilities: ["purchase", "balance"], enabled: true, verified: true, supports_lifecycle: true },
+    ],
+  });
+  renderPanel();
+
+  expect(await screen.findByLabelText("Hero-SMS 余额阈值")).toBeTruthy();
+  expect(screen.queryByLabelText("62-US 余额阈值")).toBeNull();
 });

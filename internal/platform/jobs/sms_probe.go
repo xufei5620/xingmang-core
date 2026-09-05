@@ -44,6 +44,9 @@ const (
 // 而那些判定在领域层已经用替身测完了。
 type SMSProber interface {
 	ProbeOnce(ctx context.Context) ([]sms.ProbeResult, error)
+	// EvaluateAlerts 紧跟在巡检之后跑：余额刚刚才刷新，这时判「低于阈值」
+	// 用的是本轮的事实而不是上一轮的。**不外发**，只落事件与页面红条。
+	EvaluateAlerts(ctx context.Context) ([]sms.AlertEvent, error)
 }
 
 // SMSProbeArgs 是巡检任务的参数。
@@ -109,6 +112,25 @@ func (w *SMSProbeWorker) Work(ctx context.Context, job *river.Job[SMSProbeArgs])
 			slog.String("provider", r.Provider),
 			slog.Bool("verified", r.Verified),
 			slog.String("reason", r.Reason))
+	}
+
+	// 告警评估紧跟其后：余额刚刷新，这一轮判的是本轮的事实。
+	// 它写的是自己的表，与上面的巡检互不影响，所以失败要抛——那说明库写不进去。
+	alerts, err := w.prober.EvaluateAlerts(ctx)
+	if err != nil {
+		w.logger.WarnContext(ctx, "接码告警评估失败",
+			slog.String("job_kind", SMSProbeJobKind),
+			slog.String("error", err.Error()))
+		return err
+	}
+	for _, a := range alerts {
+		// **不外发**（等通知规范）：这行日志是给排查用的，不是投递。
+		w.logger.WarnContext(ctx, "接码告警",
+			slog.String("job_kind", SMSProbeJobKind),
+			slog.String("alert_kind", a.Kind),
+			slog.String("provider", a.Provider),
+			slog.String("severity", a.Severity),
+			slog.String("summary", a.Summary))
 	}
 	return nil
 }

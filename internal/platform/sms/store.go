@@ -79,6 +79,19 @@ type Store interface {
 	// LatestBalanceSnapshots 每家最新一条。
 	LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error)
 
+	// 告警（XM-SMS2 #8）。阈值按家配（币种各自不同，不折算）；事件按指纹去重，
+	// 条件消失由 ResolveAlertEventsNotIn 自动收敛。
+	SaveBalanceThreshold(ctx context.Context, t BalanceThreshold) error
+	RemoveBalanceThreshold(ctx context.Context, provider string) error
+	ListBalanceThresholds(ctx context.Context) ([]BalanceThreshold, error)
+	UpsertAlertEvent(ctx context.Context, ev AlertEvent) (string, error)
+	ResolveAlertEventsNotIn(ctx context.Context, fingerprints []string, at time.Time) (int, error)
+	ListOpenAlertEvents(ctx context.Context) ([]AlertEvent, error)
+	// ListStaleUnknownOperations 列出 updated_at 早于 before 的待核对 unknown。
+	ListStaleUnknownOperations(ctx context.Context, before time.Time) ([]Operation, error)
+	// ListExpiringRentals 列出 (from, until] 内到期、还在等码的**租用**号。
+	ListExpiringRentals(ctx context.Context, from, until time.Time) ([]Resource, error)
+
 	// 路由规则（XM-SMS2 #5）。UpsertRoutingRule 按（环境, 服务, 国家）覆盖；
 	// RemoveRoutingRule 不存在时回 ErrRoutingRuleNotFound。
 	UpsertRoutingRule(ctx context.Context, r RoutingRule) (string, error)

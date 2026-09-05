@@ -22,6 +22,9 @@ type SMSQuerier interface {
 	ListRoutingRules(ctx context.Context) ([]sms.RoutingRule, error)
 	// LatestBalanceSnapshots 是巡检抓到的最新余额（XM-SMS2 #7）。
 	LatestBalanceSnapshots(ctx context.Context) ([]sms.BalanceSnapshot, error)
+	// 告警与阈值（XM-SMS2 #8）。**只读**：写走 sms.alert.* Action。
+	ListOpenAlertEvents(ctx context.Context) ([]sms.AlertEvent, error)
+	ListBalanceThresholds(ctx context.Context) ([]sms.BalanceThreshold, error)
 }
 
 // SMSCatalogReader 读库存。**实时上游调用，不是投影**——库存变化频繁，
@@ -358,5 +361,65 @@ func ListSMSBalancesHandler(store SMSQuerier) http.HandlerFunc {
 			})
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	}
+}
+
+// ---- 告警与阈值（XM-SMS2 #8）----
+
+type smsAlertItem struct {
+	ID       string `json:"alert_id"`
+	Kind     string `json:"kind"`
+	Provider string `json:"provider,omitempty"`
+	Subject  string `json:"subject,omitempty"`
+	Severity string `json:"severity"`
+	Summary  string `json:"summary"`
+	// FirstSeenAt 是「这件事从什么时候开始的」——判断它拖了多久的唯一依据。
+	FirstSeenAt string `json:"first_seen_at"`
+	LastSeenAt  string `json:"last_seen_at"`
+}
+
+type smsThresholdItem struct {
+	Provider string `json:"provider"`
+	// MinAmount 是十进制文本，按该家自己的币种比较、不折算。
+	MinAmount string `json:"min_amount"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+// ListSMSAlertsHandler 返回还开着的告警与已配的余额阈值。
+//
+// 一次返回两样：页面顶部的红条要显示告警，而供应商卡片上的阈值输入框要显示
+// 当前配的值——两次请求没有意义，它们总是一起用。
+//
+// **不外发**：这里只有读。投递等另一条线的通知规范定稿。
+func ListSMSAlertsHandler(store SMSQuerier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		events, err := store.ListOpenAlertEvents(r.Context())
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		thresholds, err := store.ListBalanceThresholds(r.Context())
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		items := make([]smsAlertItem, 0, len(events))
+		for _, ev := range events {
+			items = append(items, smsAlertItem{
+				ID: ev.ID, Kind: ev.Kind, Provider: ev.Provider, Subject: ev.Subject,
+				Severity: ev.Severity, Summary: ev.Summary,
+				FirstSeenAt: ev.FirstSeenAt.UTC().Format(time.RFC3339),
+				LastSeenAt:  ev.LastSeenAt.UTC().Format(time.RFC3339),
+			})
+		}
+		rows := make([]smsThresholdItem, 0, len(thresholds))
+		for _, t := range thresholds {
+			row := smsThresholdItem{Provider: t.Provider, MinAmount: t.MinAmountText}
+			if !t.UpdatedAt.IsZero() {
+				row.UpdatedAt = t.UpdatedAt.UTC().Format(time.RFC3339)
+			}
+			rows = append(rows, row)
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": items, "thresholds": rows})
 	}
 }

@@ -13,14 +13,22 @@ import (
 )
 
 type stubSMSProber struct {
-	results []sms.ProbeResult
-	err     error
-	calls   int
+	results    []sms.ProbeResult
+	err        error
+	calls      int
+	alerts     []sms.AlertEvent
+	alertErr   error
+	alertCalls int
 }
 
 func (s *stubSMSProber) ProbeOnce(ctx context.Context) ([]sms.ProbeResult, error) {
 	s.calls++
 	return s.results, s.err
+}
+
+func (s *stubSMSProber) EvaluateAlerts(ctx context.Context) ([]sms.AlertEvent, error) {
+	s.alertCalls++
+	return s.alerts, s.alertErr
 }
 
 func TestSMSProbeWorkerRunsOneRound(t *testing.T) {
@@ -35,6 +43,18 @@ func TestSMSProbeWorkerRunsOneRound(t *testing.T) {
 	}
 	if prober.calls != 1 {
 		t.Fatalf("应恰好跑一轮, got %d", prober.calls)
+	}
+	// 告警评估紧跟巡检：余额刚刷新，这一轮判的是本轮的事实。
+	if prober.alertCalls != 1 {
+		t.Fatalf("应评估一轮告警, got %d", prober.alertCalls)
+	}
+}
+
+// 告警评估写不进库要让任务失败——那是基础设施故障，重试有意义。
+func TestSMSProbeWorkerFailsWhenAlertEvaluationFails(t *testing.T) {
+	prober := &stubSMSProber{alertErr: errors.New("落告警事件: 库满了")}
+	if err := NewSMSProbeWorker(nil, prober).Work(context.Background(), &river.Job[SMSProbeArgs]{Args: SMSProbeArgs{}}); err == nil {
+		t.Fatal("告警评估失败必须让任务失败")
 	}
 }
 

@@ -24,6 +24,8 @@ type memStore struct {
 	routing     map[string]RoutingRule
 	snapshots   []BalanceSnapshot
 	snapshotErr error
+	thresholds  map[string]BalanceThreshold
+	alerts      map[string]AlertEvent
 	// pendingHash 模拟未决唯一索引。
 	pendingHash map[string]string
 	seq         int
@@ -35,8 +37,10 @@ func newMemStore() *memStore {
 		ops: map[string]Operation{}, resources: map[string]Resource{},
 		orders: map[string]Order{}, codes: map[string]Code{},
 		status: map[string]ProviderStatus{}, pendingHash: map[string]string{},
-		emails:  map[string]Email{},
-		routing: map[string]RoutingRule{},
+		emails:     map[string]Email{},
+		routing:    map[string]RoutingRule{},
+		thresholds: map[string]BalanceThreshold{},
+		alerts:     map[string]AlertEvent{},
 	}
 }
 
@@ -649,3 +653,90 @@ func (m *memStore) LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapsho
 }
 
 func (m *memStore) snapshotCount() int { return len(m.snapshots) }
+
+func (m *memStore) SaveBalanceThreshold(ctx context.Context, t BalanceThreshold) error {
+	m.thresholds[t.Provider] = t
+	return nil
+}
+
+func (m *memStore) RemoveBalanceThreshold(ctx context.Context, provider string) error {
+	delete(m.thresholds, provider)
+	return nil
+}
+
+func (m *memStore) ListBalanceThresholds(ctx context.Context) ([]BalanceThreshold, error) {
+	out := make([]BalanceThreshold, 0, len(m.thresholds))
+	for _, id := range AllProviders {
+		if t, ok := m.thresholds[id]; ok {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) UpsertAlertEvent(ctx context.Context, ev AlertEvent) (string, error) {
+	if prev, ok := m.alerts[ev.Fingerprint]; ok {
+		ev.ID = prev.ID
+		if prev.ResolvedAt.IsZero() {
+			// 与 PgStore 一致：还开着的保留首次看见的时间。
+			ev.FirstSeenAt = prev.FirstSeenAt
+		}
+		ev.ResolvedAt = time.Time{}
+		m.alerts[ev.Fingerprint] = ev
+		return ev.ID, nil
+	}
+	m.seq++
+	ev.ID = "alert-" + itoa(m.seq)
+	m.alerts[ev.Fingerprint] = ev
+	return ev.ID, nil
+}
+
+func (m *memStore) ResolveAlertEventsNotIn(ctx context.Context, fingerprints []string, at time.Time) (int, error) {
+	firing := map[string]bool{}
+	for _, f := range fingerprints {
+		firing[f] = true
+	}
+	n := 0
+	for key, ev := range m.alerts {
+		if firing[key] || !ev.ResolvedAt.IsZero() {
+			continue
+		}
+		ev.ResolvedAt = at
+		m.alerts[key] = ev
+		n++
+	}
+	return n, nil
+}
+
+func (m *memStore) ListOpenAlertEvents(ctx context.Context) ([]AlertEvent, error) {
+	var out []AlertEvent
+	for _, ev := range m.alerts {
+		if ev.Open() {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ListStaleUnknownOperations(ctx context.Context, before time.Time) ([]Operation, error) {
+	var out []Operation
+	for _, op := range m.ops {
+		if op.State == StateUnknown && op.NeedsHumanReview && op.UpdatedAt.Before(before) {
+			out = append(out, op)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ListExpiringRentals(ctx context.Context, from, until time.Time) ([]Resource, error) {
+	var out []Resource
+	for _, r := range m.resources {
+		if r.Subtype != SubtypeRent || r.State != StateWaitingCode || r.ExpiresAt.IsZero() {
+			continue
+		}
+		if r.ExpiresAt.After(from) && !r.ExpiresAt.After(until) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}

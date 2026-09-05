@@ -78,6 +78,8 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 	entries = append(entries, routingActionEntries(svc, providers)...)
 	// XM-SMS2 #6：要号（见 actions_request.go）。
 	entries = append(entries, requestActionEntries(svc, providers)...)
+	// XM-SMS2 #8：告警阈值（见 actions_alerts.go）。
+	entries = append(entries, alertActionEntries(svc, providers)...)
 	for _, e := range entries {
 		if err := reg.Register(e.def, e.handler); err != nil {
 			return fmt.Errorf("注册 %s: %w", e.def.ID, err)

@@ -6,6 +6,7 @@ import {
   executeSMSResourceAction,
   fetchSMSCode,
   importSMSOrder,
+  listSMSAlerts,
   listSMSBalances,
   listSMSCatalog,
   listSMSCodes,
@@ -16,7 +17,10 @@ import {
   resolveSMSOperation,
   setSMSProviderEnabled,
   verifySMSProvider,
+  setSMSBalanceThreshold,
+  type SMSAlert,
   type SMSBalance,
+  type SMSBalanceThreshold,
   type SMSOperation,
   type SMSProvider,
   type SMSResource,
@@ -32,6 +36,7 @@ const RESOURCES_QUERY = "sms-resources";
 const OPERATIONS_QUERY = "sms-operations";
 const CATALOG_QUERY = "sms-catalog";
 const BALANCES_QUERY = "sms-balances";
+const ALERTS_QUERY = "sms-alerts";
 
 /** 供应商的标签。
  *
@@ -131,6 +136,8 @@ export function SMSPanel() {
     <div className="flex min-w-0 flex-col gap-4">
       {result ? <ActionResultNote result={result} /> : null}
 
+      <AlertStrip />
+
       <ApiStateView
         isPending={providersQuery.isPending}
         error={providersQuery.error}
@@ -184,7 +191,13 @@ function ProviderStrip({
     queryFn: ({ signal }) => listSMSBalances({ signal }),
     staleTime: 60_000,
   });
+  const alertsQuery = useQuery({
+    queryKey: [ALERTS_QUERY],
+    queryFn: ({ signal }) => listSMSAlerts({ signal }),
+    staleTime: 30_000,
+  });
   const balances = balancesQuery.data ?? [];
+  const thresholds = alertsQuery.data?.thresholds ?? [];
   return (
     <div className="flex flex-wrap gap-3">
       {providers.map((p) => (
@@ -192,6 +205,7 @@ function ProviderStrip({
           key={p.provider}
           provider={p}
           balance={balances.find((b) => b.provider === p.provider)}
+          threshold={thresholds.find((t) => t.provider === p.provider)}
           onChanged={onChanged}
         />
       ))}
@@ -199,14 +213,106 @@ function ProviderStrip({
   );
 }
 
+/** 还开着的内部告警。**不外发**：这条红条就是全部的「通知」，投递等通知规范。
+ *
+ *  按严重度排：critical 的含义是「不知道钱花没花出去」，它必须排在最前面，
+ *  而不是混在一列同色的提示里。 */
+function AlertStrip() {
+  const alertsQuery = useQuery({
+    queryKey: [ALERTS_QUERY],
+    queryFn: ({ signal }) => listSMSAlerts({ signal }),
+    staleTime: 30_000,
+  });
+  const alerts = alertsQuery.data?.items ?? [];
+  if (alerts.length === 0) return null;
+  const sorted = [...alerts].sort((a, b) => severityRank(a) - severityRank(b));
+  return (
+    <section
+      className="border-danger flex min-w-0 flex-col gap-2 rounded-md border p-3"
+      role="status"
+      aria-label="接码告警"
+    >
+      <h3 className="text-sm font-semibold">需要处理（{alerts.length}）</h3>
+      <ul className="flex flex-col gap-1">
+        {sorted.map((a) => (
+          <li key={a.alert_id} className="flex flex-wrap items-center gap-2 text-sm">
+            <Badge tone={a.severity === "critical" ? "danger" : "warning"}>
+              {a.severity === "critical" ? "立刻处理" : "注意"}
+            </Badge>
+            <span className="min-w-0">{a.summary}</span>
+            <span className="text-fg-muted text-xs">{`起于 ${formatUtcTimestamp(a.first_seen_at)}`}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="text-fg-muted text-xs">
+        条件消失后这些条目会自动消失，不用手动关。<strong>不会外发</strong>，通知投递等规范定稿。
+      </p>
+    </section>
+  );
+}
+
+function severityRank(a: SMSAlert): number {
+  return a.severity === "critical" ? 0 : 1;
+}
+
+/** 余额阈值：低于它就在上面亮一条。留空 = 不判这家。 */
+function BalanceThresholdField({
+  provider,
+  threshold,
+  onChanged,
+}: {
+  provider: string;
+  threshold?: SMSBalanceThreshold;
+  onChanged: (r: ActionResult) => void;
+}) {
+  const [value, setValue] = useState(threshold?.min_amount ?? "");
+  const [error, setError] = useState<unknown>(null);
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => setSMSBalanceThreshold(provider, value.trim()),
+    onSuccess: (run) => {
+      onChanged({
+        runId: run.runId,
+        title: value.trim()
+          ? `已把 ${providerLabel(provider)} 的余额阈值设为 ${value.trim()}`
+          : `已取消 ${providerLabel(provider)} 的余额阈值`,
+      });
+      setError(null);
+      void queryClient.invalidateQueries({ queryKey: [ALERTS_QUERY] });
+    },
+    onError: setError,
+  });
+  return (
+    <span className="flex flex-col gap-1">
+      <span className="flex items-center gap-2">
+        <Input
+          aria-label={`${providerLabel(provider)} 余额阈值`}
+          className="w-24"
+          inputMode="decimal"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+        <Button variant="secondary" size="sm" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
+          存阈值
+        </Button>
+      </span>
+      <span className="text-fg-muted text-xs">低于它就报警；留空 = 不判这家。按该家自己的币种。</span>
+      {error ? <ActionErrorNote error={error} /> : null}
+    </span>
+  );
+}
+
 function ProviderCard({
   provider,
   balance,
+  threshold,
   onChanged,
 }: {
   provider: SMSProvider;
   /** 最近一次巡检抓到的余额；这家没有余额接口或还没巡过时为空。 */
   balance?: SMSBalance;
+  /** 已配的余额下限；没配 = 不判这家的余额。 */
+  threshold?: SMSBalanceThreshold;
   onChanged: (r: ActionResult) => void;
 }) {
   const [error, setError] = useState<unknown>(null);
@@ -256,6 +362,15 @@ function ProviderCard({
         <span className="text-fg-muted text-xs">
           {`余额 ${balance.amount}${balance.currency ? ` (${balance.currency})` : ""} · 抓取于 ${formatUtcTimestamp(balance.taken_at)}`}
         </span>
+      ) : null}
+      {/* 阈值只对有余额能力的那家给：62 没有余额接口，摆一个输入框等于让人
+          配一条永远不会触发的规则。 */}
+      {(provider.capabilities ?? []).includes("balance") ? (
+        <BalanceThresholdField
+          provider={provider.provider}
+          threshold={threshold}
+          onChanged={onChanged}
+        />
       ) : null}
       {/* 出口 IP 的用处不是展示是排查：上游若做 IP 白名单，它对不上就是
           后续全部 403 的原因，而那种失败从错误码上看只是「没权限」。 */}

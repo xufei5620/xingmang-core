@@ -729,3 +729,67 @@ export function listSMSBalances(
 ): Promise<SMSBalance[]> {
   return get<SMSBalance>("/api/v1/sms/balances", options, client);
 }
+
+// ---------- 内部告警与余额阈值（XM-SMS2 #8） ----------
+
+/** 一条还开着的内部告警。**不外发**：只在这一页显示，投递等通知规范定稿。 */
+export interface SMSAlert {
+  alert_id: string;
+  /** balance_low / operation_unknown_stale / rent_expiring。 */
+  kind: string;
+  provider?: string;
+  /** 这条告警指向的东西：操作 ID、号码 ID，或者供应商自己。 */
+  subject?: string;
+  /** warning / critical。 */
+  severity: string;
+  summary: string;
+  /** 这件事从什么时候开始的——判断它拖了多久的唯一依据。 */
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+/** 某一家的余额下限。没有 = 不判这家的余额。 */
+export interface SMSBalanceThreshold {
+  provider: string;
+  /** 十进制文本。**按该家自己的币种比较，不折算。** */
+  min_amount: string;
+  updated_at?: string;
+}
+
+export interface SMSAlertsResponse {
+  items: SMSAlert[];
+  thresholds: SMSBalanceThreshold[];
+}
+
+export async function listSMSAlerts(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSAlertsResponse> {
+  const body = await client
+    .get<Partial<SMSAlertsResponse>>("/api/v1/sms/alerts", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return { items: body.items ?? [], thresholds: body.thresholds ?? [] };
+}
+
+/** 配一家的余额下限（`sms.alert.set_balance_threshold@1`）。
+ *
+ *  **留空 = 清掉**（不判这家），不是「阈值为 0」——后者要等余额归零才报，
+ *  那时报警已经没用了。 */
+export function setSMSBalanceThreshold(
+  provider: string,
+  minAmount: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "sms.alert.set_balance_threshold",
+      version: "1",
+      params: { provider, min_amount: minAmount },
+    },
+    options,
+    client,
+  );
+}

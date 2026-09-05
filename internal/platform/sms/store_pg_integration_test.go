@@ -387,3 +387,188 @@ func TestPgStoreBalanceSnapshotAppendsAndReadsLatest(t *testing.T) {
 		t.Fatalf("快照应追加, got %d 行", count)
 	}
 }
+
+// 迁移 000046：告警。指纹去重（开着的保留 first_seen_at）、不在这批里的收敛、
+// 阈值 upsert 与清除、两条查询各自只回该回的那些。
+func TestPgStoreAlertEventDedupAndResolve(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	for _, table := range []string{"sms.alert_event", "sms.balance_threshold"} {
+		if _, err := store.pool.Exec(ctx, "TRUNCATE "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := time.Date(2026, 9, 6, 1, 0, 0, 0, time.UTC)
+	later := first.Add(30 * time.Minute)
+
+	ev := AlertEvent{
+		Kind: AlertBalanceLow, Provider: ProviderHero, Subject: ProviderHero,
+		Severity: SeverityWarning, Summary: "余额 1.00 低于阈值 5",
+		Fingerprint: alertFingerprint(AlertBalanceLow, ProviderHero, ProviderHero),
+		FirstSeenAt: first, LastSeenAt: first,
+	}
+	id, err := store.UpsertAlertEvent(ctx, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.Summary = "余额 0.50 低于阈值 5"
+	ev.LastSeenAt = later
+	again, err := store.UpsertAlertEvent(ctx, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != id {
+		t.Fatalf("同指纹应更新同一行, got %q vs %q", again, id)
+	}
+	open, err := store.ListOpenAlertEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("应只有一条, got %+v", open)
+	}
+	// first_seen_at 不变：那是「这件事从什么时候开始的」，也是判断它拖了多久的
+	// 唯一依据。摘要跟着最新一轮走。
+	if !open[0].FirstSeenAt.Equal(first) || !open[0].LastSeenAt.Equal(later) {
+		t.Fatalf("时间不对: %+v", open[0])
+	}
+	if open[0].Summary != "余额 0.50 低于阈值 5" {
+		t.Errorf("摘要该更新, got %q", open[0].Summary)
+	}
+
+	// 条件消失：不在这一批指纹里的开着的事件被收敛。
+	n, err := store.ResolveAlertEventsNotIn(ctx, []string{"别的指纹"}, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("应收敛一条, got %d", n)
+	}
+	if open, _ := store.ListOpenAlertEvents(ctx); len(open) != 0 {
+		t.Fatalf("收敛后不该还开着, got %+v", open)
+	}
+	// 再次发生：同一行重新打开，起始时间重置为这一轮。
+	ev.FirstSeenAt = later.Add(time.Hour)
+	ev.LastSeenAt = later.Add(time.Hour)
+	if _, err := store.UpsertAlertEvent(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	open, _ = store.ListOpenAlertEvents(ctx)
+	if len(open) != 1 || !open[0].FirstSeenAt.Equal(later.Add(time.Hour)) {
+		t.Fatalf("重新打开后起始时间该是这一轮: %+v", open)
+	}
+	// 空指纹清单会把所有开着的都收敛掉（没有任何条件在报的那一轮）。
+	if _, err := store.ResolveAlertEventsNotIn(ctx, nil, later.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := store.ListOpenAlertEvents(ctx); len(open) != 0 {
+		t.Fatalf("空清单应收敛全部, got %+v", open)
+	}
+}
+
+func TestPgStoreBalanceThresholdUpsertAndRemove(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	if _, err := store.pool.Exec(ctx, "TRUNCATE sms.balance_threshold"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 6, 2, 0, 0, 0, time.UTC)
+
+	if err := store.SaveBalanceThreshold(ctx, BalanceThreshold{Provider: ProviderHero, MinAmountText: "5.0000", UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBalanceThreshold(ctx, BalanceThreshold{Provider: ProviderHero, MinAmountText: "8.5000", UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ListBalanceThresholds(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].MinAmountText != "8.5000" {
+		t.Fatalf("同一家应覆盖, got %+v", got)
+	}
+	// 阈值必须为正：0 会让「余额归零」才报警，那时报警已经没用了。CHECK 兜底。
+	if err := store.SaveBalanceThreshold(ctx, BalanceThreshold{Provider: ProviderSMS62, MinAmountText: "0", UpdatedAt: now}); err == nil {
+		t.Errorf("0 应被 CHECK 挡住")
+	}
+	if err := store.RemoveBalanceThreshold(ctx, ProviderHero); err != nil {
+		t.Fatal(err)
+	}
+	// 删不存在的不是错：「清掉阈值」重复执行应当幂等。
+	if err := store.RemoveBalanceThreshold(ctx, ProviderHero); err != nil {
+		t.Fatalf("重复清除应幂等: %v", err)
+	}
+	if got, _ := store.ListBalanceThresholds(ctx); len(got) != 0 {
+		t.Fatalf("删后应为空, got %+v", got)
+	}
+}
+
+// 两条评估查询：只回超期待核对的 unknown、只回还在等码的租用号。
+func TestPgStoreAlertSourceQueriesFilterCorrectly(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 6, 3, 0, 0, 0, time.UTC)
+
+	stale := Operation{
+		ID: "1f2e3d4c-5b6a-4988-8776-655443322111", Provider: ProviderSMS62, Kind: KindPurchase,
+		RequestHash: "h-stale", StartedAt: now.Add(-3 * time.Hour), UpdatedAt: now.Add(-3 * time.Hour),
+	}
+	if err := store.PrepareOperation(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	stale.State = StateUnknown
+	stale.NeedsHumanReview = true
+	stale.UpdatedAt = now.Add(-2 * time.Hour)
+	if err := store.ResolveOperation(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	fresh := Operation{
+		ID: "1f2e3d4c-5b6a-4988-8776-655443322222", Provider: ProviderHero, Kind: KindPurchase,
+		RequestHash: "h-fresh", StartedAt: now, UpdatedAt: now,
+	}
+	if err := store.PrepareOperation(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	fresh.State = StateUnknown
+	fresh.NeedsHumanReview = true
+	fresh.UpdatedAt = now
+	if err := store.ResolveOperation(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	ops, err := store.ListStaleUnknownOperations(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 1 || ops[0].ID != stale.ID {
+		t.Fatalf("只该回超期那一笔, got %+v", ops)
+	}
+
+	rentID, err := store.UpsertResource(ctx, Resource{
+		Provider: ProviderHero, ExternalID: "rent-a", Phone: "79990000031", Subtype: SubtypeRent,
+		State: StateWaitingCode, ExpiresAt: now.Add(30 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertResource(ctx, Resource{
+		Provider: ProviderHero, ExternalID: "act-a", Phone: "79990000032", Subtype: SubtypeActivation,
+		State: StateWaitingCode, ExpiresAt: now.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertResource(ctx, Resource{
+		Provider: ProviderHero, ExternalID: "rent-cancelled", Phone: "79990000033", Subtype: SubtypeRent,
+		State: StateCancelled, ExpiresAt: now.Add(20 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rentals, err := store.ListExpiringRentals(ctx, now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rentals) != 1 || rentals[0].ID != rentID {
+		t.Fatalf("只该回还在等码的租用号, got %+v", rentals)
+	}
+}

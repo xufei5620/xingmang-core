@@ -780,3 +780,183 @@ SELECT DISTINCT ON (provider) id::text, provider, amount::text, currency, taken_
 	}
 	return out, rows.Err()
 }
+
+// ---- 告警（迁移 000046）----
+
+func (s *PgStore) SaveBalanceThreshold(ctx context.Context, t BalanceThreshold) error {
+	at := t.UpdatedAt
+	if at.IsZero() {
+		at = s.now()
+	}
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO sms.balance_threshold (environment, provider, min_amount, created_at, updated_at)
+VALUES ($1,$2,$3::numeric,$4,$4)
+ON CONFLICT (environment, provider) DO UPDATE SET
+    min_amount = EXCLUDED.min_amount,
+    updated_at = EXCLUDED.updated_at`,
+		s.environment, t.Provider, t.MinAmountText, at.UTC())
+	if err != nil {
+		return fmt.Errorf("写余额阈值: %w", err)
+	}
+	return nil
+}
+
+// RemoveBalanceThreshold 清掉一家的阈值。删不存在的不是错：「清掉」重复执行
+// 应当是幂等的。
+func (s *PgStore) RemoveBalanceThreshold(ctx context.Context, provider string) error {
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM sms.balance_threshold WHERE environment = $1 AND provider = $2`,
+		s.environment, provider); err != nil {
+		return fmt.Errorf("删余额阈值: %w", err)
+	}
+	return nil
+}
+
+func (s *PgStore) ListBalanceThresholds(ctx context.Context) ([]BalanceThreshold, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT provider, min_amount::text, updated_at
+  FROM sms.balance_threshold
+ WHERE environment = $1
+ ORDER BY provider`, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查余额阈值: %w", err)
+	}
+	defer rows.Close()
+	var out []BalanceThreshold
+	for rows.Next() {
+		var t BalanceThreshold
+		if err := rows.Scan(&t.Provider, &t.MinAmountText, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		t.UpdatedAt = t.UpdatedAt.UTC()
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// UpsertAlertEvent 按指纹落一条告警。
+//
+// 已有且**还开着**的只更新 last_seen_at 与摘要：first_seen_at 保持不变，
+// 那是「这件事从什么时候开始的」，也是判断它拖了多久的唯一依据。
+// 已收敛的同指纹事件会被重新打开（resolved_at 置空）并重置起始时间——
+// 那是新一轮的事，但沿用同一行比堆一串历史行更可读。
+func (s *PgStore) UpsertAlertEvent(ctx context.Context, ev AlertEvent) (string, error) {
+	at := ev.LastSeenAt
+	if at.IsZero() {
+		at = s.now()
+	}
+	var id string
+	err := s.pool.QueryRow(ctx, `
+INSERT INTO sms.alert_event (
+    environment, kind, provider, subject, severity, summary, fingerprint,
+    first_seen_at, last_seen_at, created_at, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$8,$8)
+ON CONFLICT (environment, fingerprint) DO UPDATE SET
+    severity = EXCLUDED.severity,
+    summary = EXCLUDED.summary,
+    last_seen_at = EXCLUDED.last_seen_at,
+    first_seen_at = CASE
+        WHEN sms.alert_event.resolved_at IS NULL THEN sms.alert_event.first_seen_at
+        ELSE EXCLUDED.first_seen_at
+    END,
+    resolved_at = NULL,
+    updated_at = EXCLUDED.updated_at
+RETURNING id::text`,
+		s.environment, ev.Kind, ev.Provider, ev.Subject, ev.Severity, ev.Summary, ev.Fingerprint, at.UTC()).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("落告警事件: %w", err)
+	}
+	return id, nil
+}
+
+// ResolveAlertEventsNotIn 把不在这一批指纹里的、还开着的事件收敛掉。
+//
+// 条件消失就自动关，不用人手动点：一个要人手动关的红条，最后总会留着一堆
+// 没人关的旧条，而那时红条本身就不再意味着什么了。
+func (s *PgStore) ResolveAlertEventsNotIn(ctx context.Context, fingerprints []string, at time.Time) (int, error) {
+	if at.IsZero() {
+		at = s.now()
+	}
+	if fingerprints == nil {
+		// **不能传 nil**：nil 到 Postgres 是 NULL，而 x = ANY(NULL) 是 NULL、
+		// NOT NULL 还是 NULL，于是一行都匹配不上。而「一条都没在报」的那一轮
+		// 恰恰是最需要把旧红条全部收敛掉的那一轮。空数组才是「不在任何指纹里」。
+		fingerprints = []string{}
+	}
+	tag, err := s.pool.Exec(ctx, `
+UPDATE sms.alert_event
+   SET resolved_at = $2, updated_at = $2
+ WHERE environment = $1 AND resolved_at IS NULL AND NOT (fingerprint = ANY($3))`,
+		s.environment, at.UTC(), fingerprints)
+	if err != nil {
+		return 0, fmt.Errorf("收敛告警事件: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (s *PgStore) ListOpenAlertEvents(ctx context.Context) ([]AlertEvent, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT id::text, kind, provider, subject, severity, summary, fingerprint, first_seen_at, last_seen_at
+  FROM sms.alert_event
+ WHERE environment = $1 AND resolved_at IS NULL
+ ORDER BY severity, first_seen_at`, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查告警事件: %w", err)
+	}
+	defer rows.Close()
+	var out []AlertEvent
+	for rows.Next() {
+		var ev AlertEvent
+		if err := rows.Scan(&ev.ID, &ev.Kind, &ev.Provider, &ev.Subject, &ev.Severity,
+			&ev.Summary, &ev.Fingerprint, &ev.FirstSeenAt, &ev.LastSeenAt); err != nil {
+			return nil, err
+		}
+		ev.FirstSeenAt = ev.FirstSeenAt.UTC()
+		ev.LastSeenAt = ev.LastSeenAt.UTC()
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+func (s *PgStore) ListStaleUnknownOperations(ctx context.Context, before time.Time) ([]Operation, error) {
+	rows, err := s.pool.Query(ctx, operationColumns+`
+ WHERE environment = $1 AND state = 'unknown' AND needs_human_review AND updated_at < $2
+ ORDER BY updated_at`, s.environment, before.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("查超期未核对的操作: %w", err)
+	}
+	defer rows.Close()
+	var out []Operation
+	for rows.Next() {
+		op, err := scanOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, op)
+	}
+	return out, rows.Err()
+}
+
+// ListExpiringRentals 只看**租用**号（subtype=2）且还在等码的。
+//
+// 普通激活号 20 分钟就过期是常态，报出来只会变成噪声；已取消 / 已完成的
+// 租用号到不到期都无所谓了。
+func (s *PgStore) ListExpiringRentals(ctx context.Context, from, until time.Time) ([]Resource, error) {
+	rows, err := s.pool.Query(ctx, resourceColumns+`
+ WHERE environment = $1 AND subtype = $2 AND state = $3
+   AND expires_at IS NOT NULL AND expires_at > $4 AND expires_at <= $5
+ ORDER BY expires_at`, s.environment, SubtypeRent, string(StateWaitingCode), from.UTC(), until.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("查将到期的租用号: %w", err)
+	}
+	defer rows.Close()
+	var out []Resource
+	for rows.Next() {
+		r, err := scanResource(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

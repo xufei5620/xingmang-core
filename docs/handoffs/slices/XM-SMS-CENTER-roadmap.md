@@ -14,7 +14,7 @@ branch: ai/claude/XM-CARD0-infini-connector
 - 遇到需要产品负责人拍板的事（新的花钱路径、权限边界、数据删除），停下写在
   本文件「待决」一节，不猜。
 
-## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–7 done）
+## XM-SMS2 · 中心化与多上游骨架 — status: done（1–8 全部完成）
 
 1. ~~改名「接码中心」~~ done（2d4b559）。
 2. ~~供应商注册表~~ done：`internal/platform/sms/registry.go` 定义 `ProviderSpec`（ID、标签、
@@ -64,8 +64,17 @@ branch: ai/claude/XM-CARD0-infini-connector
    （`sms.ParseMode` / `sms.BuildProviders`），API 与 worker 共用一份——两份解析
    迟早分叉成「API 能买号、worker 不认识这家」。读端点 `GET /sms/balances`，
    供应商卡片显示「余额 x · 抓取于 …」（**必须带抓取时间**，它是快照不是实时值）。
-8. 内部告警条件（不外发）：余额低于阈值（阈值走 Action 配）、unknown 待核对超过
-   N 分钟、租用号 1 小时内到期——落 `sms.alert_event`，页面红条。
+8. ~~内部告警条件（不外发）~~ done：迁移 000046 建 `sms.alert_event`（按
+   (环境, 指纹) 唯一）与 `sms.balance_threshold`（按家配、numeric、CHECK > 0）。
+   `Service.EvaluateAlerts` 全量评估三条：余额低于阈值（十进制比较，没配阈值
+   或还没巡到过就不报——「没有数据」不是「没有钱」）、unknown 待核对超过 30 分钟
+   （critical）、租用号 1 小时内到期（只看 subtype=2 且还在等码的：普通激活号
+   20 分钟过期是常态）。按指纹去重，条件消失自动收敛（不用人手动关）。
+   Action `sms.alert.set_balance_threshold`（sms.manage、L1、只给人；留空 = 清掉，
+   不是阈值为 0），契约同名。评估挂在巡检任务之后（余额刚刷新），
+   **一次外发都没有**——通知器在这条链上一次都不会被调用，投递等通知规范。
+   读端点 `GET /sms/alerts`（告警 + 阈值一次回），页面顶部红条按严重度排序、
+   写明「不会外发」，供应商卡片给有余额能力的那家一个阈值输入框。
 
 ## XM-SMS3 · 成本核算 — status: todo
 
@@ -163,3 +172,18 @@ branch: ai/claude/XM-CARD0-infini-connector
   从没读它——那张表会显示一个 worker 实际不用的周期。门禁：go vet / go test -p 1
   ./...（含真库）/ check-governance 0 / pnpm -r typecheck / pnpm -r test
   （admin-web 1554 用例）全绿。
+- 2026-09-06 XM-SMS2 #8：`alerts_test.go` 八条先红后绿：没配阈值不报余额、
+  十进制边界（4.999999 报 / 5.00 与 5.000001 不报 / 0 报）、空值清阈值且非法值
+  与未装配供应商被拒、超期 unknown 报 critical 而新鲜的与已结的不报、只提醒
+  还在等码的租用号（普通激活号与已取消的租用号都不报）、反复评估只有一条事件
+  且条件消失自动收敛、**通知器零调用**（不外发这条纪律用断言钉住，不是靠注释）。
+  真库三条：指纹去重时开着的保留 first_seen_at、收敛后同指纹再发生会重开并重置
+  起始时间、阈值 upsert / CHECK 0 / 幂等清除、两条评估查询各自只回该回的行
+  （迁移 000046 在测试库上真跑过）。**真库测试抓到一个真 bug**：
+  `ResolveAlertEventsNotIn` 传 nil 切片到 Postgres 是 NULL，而
+  `NOT (x = ANY(NULL))` 是 NULL，于是「这一轮一条都没在报」时旧红条一条都收敛
+  不掉——恰恰是最该全部收敛的那一轮；改成传空数组。jobs 侧：SMSProber 接口加
+  EvaluateAlerts，巡检之后紧接着评估（余额刚刷新），评估失败让任务失败。
+  页面测试三条：红条按严重度排（critical 在前）、无告警不显示、只有有余额能力
+  的那家才有阈值输入框。门禁：go vet / go test -p 1 ./...（含真库）/
+  check-governance 0 / pnpm -r typecheck / pnpm -r test（admin-web 1557 用例）全绿。
