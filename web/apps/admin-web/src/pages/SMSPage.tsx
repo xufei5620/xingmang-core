@@ -55,7 +55,7 @@ export function SMSPage() {
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <PageHeader
-        title="接码"
+        title="接码中心"
         description="62-US 与 Hero-SMS 的号码购买、取码与操作台账；以及两家官方文档里的全部能力。所有写操作经 Action 执行并留审计；买号、租用、买邮箱需要 sms-operator 角色。"
       />
 
