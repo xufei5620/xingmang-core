@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatUtcTimestamp } from "@xingmang/ui-admin";
 import { Badge, Button, Dialog, Input } from "@xingmang/ui-primitives";
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import {
   deleteCard,
   freezeCard,
@@ -40,7 +40,11 @@ const CARD_CHALLENGES_QUERY = "card-challenges";
  *  推翻的是视觉形态，不是可链接性。 */
 export function CardWorkbench() {
   const { account, cardId } = useParams();
+  const [params] = useSearchParams();
   const navigate = useNavigate();
+  // 账号筛选写在查询串里（`?account=`），与页签、选中卡同一条纪律：
+  // 这一页上所有「我在看什么」的状态都可链接、可刷新。
+  const accountFilter = params.get("account") ?? "";
   const queryClient = useQueryClient();
   const [result, setResult] = useState<ActionResult | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
@@ -57,7 +61,14 @@ export function CardWorkbench() {
     refetchInterval: 20_000,
   });
 
-  const cards = query.data?.cards ?? [];
+  const all = query.data?.cards ?? [];
+  // 不筛就是全部。默认只显示某个账号会让人以为卡丢了——两个账号的卡数
+  // 悬殊时，那种「丢了」看起来非常真。
+  //
+  // 选中态也只在**筛选后**的集合里找（见下面的 selected）：筛掉了当前
+  // 选中的卡时落到还看得见的第一张，否则右栏会显示一张左边根本看不到的
+  // 卡，那种不一致比空右栏更让人困惑。
+  const cards = accountFilter ? all.filter((c) => c.account === accountFilter) : all;
   const challenges = new Map(
     (challengesQuery.data ?? []).map((c) => [`${c.account}/${c.card_id}`, c]),
   );
@@ -74,11 +85,12 @@ export function CardWorkbench() {
   function select(card: CardItem) {
     // replace 而不是 push：在清单里点着看是浏览行为，不该在历史里堆一串，
     // 否则看完五张卡要按五次返回才离得开这一页。
+    // 带上当前的查询串：换卡不该顺手把账号筛选与页签清掉。
+    const qs = params.toString();
     navigate(
-      `/cards/${encodeURIComponent(card.account)}/${encodeURIComponent(card.card_id)}`,
-      {
-        replace: true,
-      },
+      `/cards/${encodeURIComponent(card.account)}/${encodeURIComponent(card.card_id)}` +
+        (qs ? `?${qs}` : ""),
+      { replace: true },
     );
   }
 
@@ -100,8 +112,9 @@ export function CardWorkbench() {
       >
         {cards.length === 0 ? (
           <p className="text-fg-muted text-sm">
-            还没有卡片。点右上角「开卡」创建第一张；在 Infini 后台直接建的卡
-            会由同步作业在下一轮（5 分钟内）自动拉进来。
+            {accountFilter
+              ? `账号 ${accountFilter} 名下还没有卡片。再点一次上面那个账号可以取消筛选。`
+              : "还没有卡片。点右上角「开卡」创建第一张；在 Infini 后台直接建的卡会由同步作业在下一轮（5 分钟内）自动拉进来。"}
           </p>
         ) : (
           <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(18rem,22rem)_1fr]">
@@ -170,7 +183,9 @@ function CardRail({
       {shown.length === 0 ? (
         <p className="text-fg-muted text-sm">没有匹配的卡片。</p>
       ) : (
-        <ul className="border-edge flex max-h-[36rem] min-w-0 flex-col overflow-y-auto rounded-md border">
+        // 不设 max-height、不开 overflow：框里再滚一层会让人先找到内滚动条
+        // 才够得着下面的卡，而页面本身已经能滚。
+        <ul className="border-edge flex min-w-0 flex-col rounded-md border">
           {shown.map((c) => {
             const active =
               selected?.account === c.account &&
@@ -234,7 +249,10 @@ function CardPane({
   onError: (e: unknown) => void;
 }) {
   return (
-    <section className="border-edge flex min-w-0 flex-col gap-4 rounded-md border p-4">
+    // max-w 定宽：宽屏上不限宽会把「卡片信息」的双列拉到屏幕两端，
+    // 标签和值之间隔着半个屏幕，眼睛要横扫才对得上——一个两列表格的
+    // 可读性不该随窗口变宽而变差。
+    <section className="border-edge flex min-w-0 max-w-3xl flex-col gap-4 rounded-md border p-4">
       <header className="flex flex-col items-center gap-1 text-center">
         <h2 className="flex items-center gap-2 text-lg font-semibold">
           <span className="min-w-0 break-all">
@@ -340,9 +358,13 @@ function CardPane({
         </Dialog>
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div className="flex min-w-0 flex-col gap-2">
         <h3 className="text-sm font-semibold">交易流水</h3>
-        <CardTransactions card={card} />
+        {/* 右栏定了宽，而流水表有七八列。让**表自己**横向滚，
+            而不是把整个页面撑宽——页面横滚会让左边的卡片清单也跟着跑掉。 */}
+        <div className="min-w-0 overflow-x-auto">
+          <CardTransactions card={card} />
+        </div>
       </div>
     </section>
   );

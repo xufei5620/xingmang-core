@@ -296,7 +296,24 @@ export function IssueCardDialog({
   );
 }
 
-export function AccountBalancesStrip() {
+/** 各账号的资金池余额，**同时也是账号选择器**。
+ *
+ *  产品负责人 2026-09-05：「卡片根据账户分开，点击不同的账户显示账户下的
+ *  卡片」。发现遍历上线后卡数从 2 张涨到十几张，两个账号的卡混在一列里，
+ *  而「这张卡的钱从哪个账号出」恰恰是操作前要先确定的事。
+ *
+ *  把选择器做在余额条上而不是另加一排页签：这两件事本来就是同一个问题的
+ *  两面——看某个账号的卡时，最想同时知道的就是那个账号还剩多少钱。
+ *
+ *  再点一次选中的账号 = 取消筛选。不做「全部」按钮：多一个按钮就多一处要
+ *  解释「全部和不选有什么区别」的地方，而它们本来就是一回事。 */
+export function AccountBalancesStrip({
+  selected = "",
+  onSelect,
+}: {
+  selected?: string;
+  onSelect?: (account: string) => void;
+} = {}) {
   const query = useQuery({
     queryKey: [CARD_BALANCES_QUERY],
     queryFn: ({ signal }) => listCardBalances({ signal }),
@@ -308,8 +325,25 @@ export function AccountBalancesStrip() {
 
   return (
     <div className="flex flex-wrap gap-3">
-      {query.data.map((b) => (
-        <div key={b.account} className="rounded-lg border border-edge bg-surface px-3 py-2">
+      {query.data.map((b) => {
+        const active = selected === b.account;
+        const clickable = typeof onSelect === "function";
+        const Tag = clickable ? "button" : "div";
+        return (
+        <Tag
+          key={b.account}
+          {...(clickable
+            ? {
+                type: "button" as const,
+                onClick: () => onSelect(active ? "" : b.account),
+                "aria-pressed": active,
+                "aria-label": `只看账号 ${b.account} 的卡片`,
+              }
+            : {})}
+          className={`rounded-lg border px-3 py-2 text-left ${
+            active ? "border-accent bg-accent-soft" : "border-edge bg-surface"
+          } ${clickable ? "hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-accent" : ""}`}
+        >
           <div className="flex items-center gap-2">
             <Badge tone="neutral">{b.account}</Badge>
             <span className="text-xs text-fg-muted">资金池可用</span>
@@ -327,8 +361,9 @@ export function AccountBalancesStrip() {
               <span>{b.usd || "0"} USD</span>
             </div>
           )}
-        </div>
-      ))}
+        </Tag>
+        );
+      })}
     </div>
   );
 }
