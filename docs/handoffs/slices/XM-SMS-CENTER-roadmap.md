@@ -106,11 +106,17 @@ branch: ai/claude/XM-CARD0-infini-connector
    **金额未知的笔数单独显示并写明「合计是下限而不是实际花费」**——一份背后有
    二十笔金额不明的报表，那个数字会被当成实际花费。
 
-## XM-SMS4 · 接入规范与内部接口 — status: in-progress（2–3 done，规范文档待写）
+## XM-SMS4 · 接入规范与内部接口 — status: done（1–4 全部完成）
 
-1. 规范文档 `docs/modules/sms/INTEGRATION.md`：机器身份与 API Key、幂等申请
-   （request_id 由调用方生成）、状态机、取码、释放、配额与花费上限、错误码、
-   **回调形状**（字段定稿，投递等通知规范）。
+1. ~~规范文档~~ done：`docs/modules/sms/INTEGRATION.md`。一条完整路径（登记 →
+   要号 → 轮询取码 → 释放）、身份与 scope、幂等 request_id 与回放语义、三种
+   结果状态（尤其 unknown「别重试」）、号码状态机、配额与止损线、错误码表
+   （按 code 分支不按文案）、成本口径，以及**回调字段定稿而投递未实现**。
+   开篇先写「现在能做什么 / 不能做什么」：**生产还没有机器身份的通道**——OIDC
+   解析器把每个身份都标成 HUMAN，dev-header 能造 SERVICE 但在生产会拒绝启动。
+   回调**不带验证码也不带完整号码**：码与卡面明文同档，推到一个 URL 上等于绕开
+   权限闸；消费者收到回调后用 sms.code.fetch 自取。
+4. ~~首个消费者未定~~ done（按原意）：只做规范与骨架，**没有任何具体对接**。
 2. ~~Action 放开机器身份~~ done：`sms.number.request` / `sms.code.fetch` /
    `sms.resource.action` 的 PrincipalTypes 加 `SERVICE`。**只放 SERVICE**——
    AI 与 SERVER_AGENT 不在其中：让 AI 身份自己买号是另一件事，要产品负责人
@@ -124,7 +130,6 @@ branch: ai/claude/XM-CARD0-infini-connector
    按币种各自计。Action `sms.quota.set`（sms.manage、L1、**只给人**，机器不该
    能给自己提额）+ 契约 + 读端点 `GET /sms/quotas`（配额与今日用量一起回）+
    页签「接入配额」。
-4. 首个消费者未定：只做规范与骨架，不做任何具体对接。
 
 ## XM-SMS5 · 转售（预充值扣费）— status: todo（依赖平台用户 / 支付模块）
 
@@ -140,6 +145,12 @@ branch: ai/claude/XM-CARD0-infini-connector
    买号——这与宪法里「AI 不作为 L3/L4 第二审批人」是同一类边界问题，不猜。
    要放开的话，做法与 SERVICE 相同（加进 PrincipalTypes + 登记配额），一行代码
    加一条配额行。
+2. **生产的机器身份走哪条路。** 现在的 OIDC 解析器把每一个身份都标成 `HUMAN`
+   （`internal/platform/oidcauth/resolver.go`），所以生产上根本没有 `SERVICE`
+   身份可用——接码中心这一侧已经就绪，缺的是身份线：OIDC client credentials，
+   还是独立的 API Key？这是身份架构的决定（会影响所有模块，不只接码），
+   多半要走 `docs/change-requests/`。在它落地之前，机器接入只能在开发 / 预发用
+   dev-header 联调。
 
 ## 验证记录
 
@@ -262,3 +273,18 @@ branch: ai/claude/XM-CARD0-infini-connector
   「没登记就调不动是刻意的默认」、留空上限不发该字段、消费者为空不能保存、
   编辑回填。门禁：go vet / go test -p 1 ./...（含真库）/ check-compose-env 0 /
   check-governance 0 / pnpm -r typecheck / pnpm -r test（admin-web 1569 用例）全绿。
+- 2026-09-06 XM-SMS4 #1（规范文档）：文档只写**已经实现并有测试**的东西，
+  开篇一张表列清「能做 / 不能做」，把两个缺口写在最显眼处（生产没有机器身份
+  通道、回调投递未实现）——一份把计划写成现状的接入文档，会让第一个消费者按
+  它接完才发现接不上。回调字段定稿但不投递：等另一条线的通知规范，现在自己
+  发明一套等规范来了就是两套。文档写作过程中核对了实现：OIDC 解析器确实只发
+  HUMAN（resolver.go:330）、dev-header 能发 SERVICE 但生产拒绝装配
+  （principal.go:45）——这两条都直接写进了文档与「待决」。门禁：go vet /
+  go test -p 1 ./...（含真库）/ check-governance 0 / pnpm -r typecheck /
+  pnpm -r test 全绿。
+
+## 收尾（2026-09-06 自主循环结束）
+
+XM-SMS2 / XM-SMS3 / XM-SMS4 全部完成，共 9 个提交在分支
+`ai/claude/XM-CARD0-infini-connector` 上，**未合验收线、未推远端、未碰生产**。
+XM-SMS5（转售）依赖平台用户与支付模块，按原计划没有开工。
