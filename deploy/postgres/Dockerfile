@@ -15,5 +15,5 @@ RUN test "$TARGETOS" = "linux" \
 FROM ${POSTGRES_BASE_IMAGE}
 
 COPY --from=gosu-build /out/gosu /usr/local/bin/gosu
-RUN apk add --no-cache libcrypto3=3.5.8-r0 libssl3=3.5.8-r0 \
+RUN apk add --no-cache libcrypto3=3.5.8-r0 libssl3=3.5.8-r0 libuuid=2.42.3-r1 \
     && gosu --version | grep -Fx '1.19 (go1.25.13 on linux/amd64; gc)'

@@ -75,6 +75,14 @@ remediation is urgent.
 
 - Alpine runtime stages install `libcrypto3=3.5.8-r0` and
   `libssl3=3.5.8-r0`.
+- The three Alpine 3.24 runtime derivatives that carry util-linux
+  (`invoice-system-web`, `invoice-ingest-proxy`, `invoice-postgres`) also install
+  `libuuid=2.42.3-r1` (Alpine 3.24 `main`): the RC100 exact1 scan on 2026-09-06 was the
+  first to report CVE-2026-53612, -53613, -53614, -76642, -78408, -78409 and
+  -78410 (all HIGH) against the base images' `libuuid 2.42.1-r0`; every other
+  image stayed at zero, and RC99's exact1 had reported zero for all nine.
+  `release/0.1.0-rc100-exact1` is retained as the failed evidence (image gate
+  exit 1, `required zero-finding image is not approved: web`).
 - `gosu` 1.19 is rebuilt from commit
   `6456aaa0f3c854d199d0f037f068eb97515b7513` with Go 1.25.13.
 - The locally built runtime derivatives are `invoice-postgres`,
