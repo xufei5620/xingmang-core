@@ -325,12 +325,31 @@ func (s *Service) ExecuteAction(ctx context.Context, operationID, kind, resource
 		return s.settleFailure(ctx, op, actionErr)
 	}
 
+	// 取消 / 完成成功后的**统一状态**是我们自己的事实：上游确认了这次动作。
+	// 上游原话 status 不动——那一列等下一次同步读回真值。
+	//
+	// 必须压过适配器回读的资源：Hero 在 setStatus 之后 getStatus 可能还回旧值，
+	// 拿它落库会把刚写的 cancelled 冲回 waiting_code。
+	var final NumberState
+	switch kind {
+	case KindCancel:
+		final = StateCancelled
+	case KindFinish:
+		final = StateFinished
+	}
 	// replace 可能返回**新的 activation ID**。落新资源，而 op.ResourceID
 	// 仍指向原目标——那笔操作针对的是「那张旧号」，改写它会让事后对账
 	// 找不到起点。
 	if updated.ExternalID != "" {
 		updated.Provider = resource.Provider
 		updated.SyncedAt = s.now()
+		switch {
+		case updated.ExternalID == resource.ExternalID && final != "":
+			updated.State = final
+		case updated.ExternalID != resource.ExternalID && updated.State == "":
+			// 换来的新号从头开始等码。
+			updated.State = StateWaitingCode
+		}
 		if _, err := s.store.UpsertResource(ctx, updated); err != nil {
 			op.State = StateUnknown
 			op.NeedsHumanReview = true
@@ -340,6 +359,11 @@ func (s *Service) ExecuteAction(ctx context.Context, operationID, kind, resource
 			return op, nil
 		}
 		op.ProviderRef = updated.ExternalID
+	}
+	// 适配器没回读资源（或回读的是换来的新号）时也要写原号的状态。
+	// 上游动作已成功，这里写不进去不值得把台账翻成 unknown——那会诱使人再取消一次。
+	if final != "" {
+		_ = s.store.SetResourceState(ctx, resource.ID, final, s.now())
 	}
 
 	op.State = StateSucceeded
@@ -380,6 +404,11 @@ func (s *Service) FetchCode(ctx context.Context, resourceID string) (Code, error
 		return Code{}, err
 	}
 	if err := s.store.TouchResourceCodeAt(ctx, resource.ID, s.now()); err != nil {
+		return Code{}, err
+	}
+	// 取到码就是「已收码」：这是我们自己的事实，不等上游改状态
+	// （62 根本没有状态可改）。
+	if err := s.store.SetResourceState(ctx, resource.ID, StateCodeReceived, s.now()); err != nil {
 		return Code{}, err
 	}
 

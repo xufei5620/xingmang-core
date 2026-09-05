@@ -50,6 +50,40 @@ const (
 	KindFavoriteRemove = "favorite_remove"
 )
 
+// NumberState 是**平台自己的**号码状态（ADR-022 决策 4）。
+//
+// 上游原话保留在 Resource.Status（Hero 是 1/2/3/4/6/7/8/10，62 是「正常」之类），
+// 这里是它们的统一含义。五个值够日常判断：这个号还能不能用、码到了没有。
+type NumberState string
+
+const (
+	StateWaitingCode  NumberState = "waiting_code"  // 待收码
+	StateCodeReceived NumberState = "code_received" // 已收码
+	StateFinished     NumberState = "finished"      // 已完成
+	StateCancelled    NumberState = "cancelled"     // 已取消（含退款）
+	StateExpired      NumberState = "expired"       // 已过期
+)
+
+// MapHeroStatus 把 Hero 官方 ActivationStatusTypes 映射到统一状态。
+//
+// 含义来自官方 setStatus 文档（3 请求重发、6 完成、8 取消）与 SMS-Activate 协议的
+// 惯例（1 等待、2 等待重发、4 已收到、7 过期、10 退款）。没见过的值归待收码——
+// 一个不认识的状态更可能是「还在进行中」而不是「已经结束」。
+func MapHeroStatus(status string) NumberState {
+	switch strings.TrimSpace(status) {
+	case "4":
+		return StateCodeReceived
+	case "6":
+		return StateFinished
+	case "7":
+		return StateExpired
+	case "8", "10":
+		return StateCancelled
+	default:
+		return StateWaitingCode
+	}
+}
+
 // 资源子类型（官方 ActivationSubtype）。
 const (
 	SubtypeActivation int64 = 1
@@ -174,6 +208,19 @@ type Resource struct {
 	// Subtype：1 = 普通激活，2 = 租用。0 = 上游没说（62 或旧数据）。
 	Subtype          int64
 	CountryPhoneCode string
+	// State 是统一状态（迁移 000042）。空 = 旧数据还没映射。
+	State NumberState
+}
+
+// EffectiveState 是页面该显示的状态：待收码但已经过了过期时间，就是已过期。
+//
+// 过期不靠上游通知（两家都不会推），靠本地时钟判；只对「待收码」生效——
+// 已完成 / 已取消不会因为时间流逝变成别的东西。
+func (r Resource) EffectiveState(now time.Time) NumberState {
+	if r.State == StateWaitingCode && !r.ExpiresAt.IsZero() && now.After(r.ExpiresAt) {
+		return StateExpired
+	}
+	return r.State
 }
 
 // Email 是一次邮箱接码（Hero Emails 组，迁移 000040）。

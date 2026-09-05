@@ -14,7 +14,7 @@ branch: ai/claude/XM-CARD0-infini-connector
 - 遇到需要产品负责人拍板的事（新的花钱路径、权限边界、数据删除），停下写在
   本文件「待决」一节，不猜。
 
-## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–3 done）
+## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–4 done）
 
 1. ~~改名「接码中心」~~ done（2d4b559）。
 2. ~~供应商注册表~~ done：`internal/platform/sms/registry.go` 定义 `ProviderSpec`（ID、标签、
@@ -23,8 +23,14 @@ branch: ai/claude/XM-CARD0-infini-connector
    一段时间给旧页面）；页面按能力渲染按钮。
 3. ~~迁移 000041~~ done：去掉 `provider_status / sms_order / sms_resource / sms_operation /
    sms_code / sms_email` 六处对 provider 名字的 CHECK（写路径由注册表校验兜底）。
-4. 统一号码状态：`sms_resource.state`（待收码 / 已收码 / 已完成 / 已取消 / 已过期），
-   `status` 列保留上游原话；各适配器给出映射；页面显示统一状态、悬停看原话。
+4. ~~统一号码状态~~ done：迁移 000042 加 `sms_resource.state`（waiting_code /
+   code_received / finished / cancelled / expired）并按 Hero 状态码 + 本地已有码回填；
+   `status` 列保留上游原话。`MapHeroStatus` 映射官方状态码，62 导入一律待收码；
+   取到码 → 已收码、取消 / 完成成功 → 已取消 / 已完成（**压过适配器回读**，Hero
+   setStatus 后 getStatus 可能还回旧值）；`EffectiveState(now)` 把「待收码但过了
+   到期时间」算成已过期，服务端算好以 `effective_state` 回给页面。页面号码栏与
+   详情头显示统一状态徽标，悬停看「上游状态：<原话>」；state 为空的旧数据退回
+   显示原话。
 5. 路由规则：`sms.routing_rule`（服务、国家、供应商优先级列表、单价上限、启用），
    Action `sms.routing.set` / `sms.routing.remove`（sms.manage），后台页面。
 6. 「要号」流程：Action `sms.number.request`（sms.purchase）——服务 + 国家 + 数量
@@ -76,3 +82,14 @@ branch: ai/claude/XM-CARD0-infini-connector
   ErrProviderUnknown 而不是 constraint）。cmd 层 buildSMSAdapter 改走
   spec.Build，凭据引用走 spec.CredentialRef。/sms/providers 多回 label 与
   capabilities，前端标签优先取服务端的。
+- 2026-09-06 XM-SMS2 #4：`state_test.go` 钉住官方状态码逐个映射、EffectiveState
+  只对待收码生效、取到码写 code_received、没取到不动、取消 / 完成写统一状态且
+  不改原话、失败不动。其中 `TestCancelAndFinishWriteUnifiedState` 先红了一次——
+  适配器回读的资源带 waiting_code，落库时把刚写的 cancelled 冲掉了；修法是同号
+  回读时强制用我们的状态，换号时新号从 waiting_code 起，再在落库之后补写原号
+  状态。真库 `TestPgStoreResourceStateRoundTrip`：不带 state 的同步保留原值、
+  SetResourceState 生效、ListResources 带出、带 state 的同步覆盖（迁移 000042 在
+  测试库上真跑过）。页面测试三条：统一状态徽标 + 悬停原话、effective_state 为
+  expired 时显示已过期、无 state 的旧数据退回原话。门禁：go vet / go test -p 1
+  ./...（含真库）/ check-governance / pnpm -r typecheck / pnpm -r test
+  （admin-web 1540 用例）全绿。

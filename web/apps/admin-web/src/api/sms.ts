@@ -69,6 +69,10 @@ export interface SMSResource {
   /** 1 = 普通激活（20 分钟），2 = 租用（按小时）。 */
   subtype?: number;
   country_phone_code?: string;
+  /** 平台自己的统一状态；status 仍是上游原话。 */
+  state?: string;
+  /** 「待收码但已过期」算成 expired 后的状态，页面显示用它。 */
+  effective_state?: string;
 }
 
 export interface SMSOperation {

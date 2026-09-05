@@ -104,6 +104,10 @@ func (m *memStore) UpsertResource(ctx context.Context, r Resource) (string, erro
 	for id, existing := range m.resources {
 		if existing.Provider == r.Provider && existing.ExternalID == r.ExternalID {
 			r.ID = id
+			// 与 PgStore 一致：传空 state 保留原值。
+			if r.State == "" {
+				r.State = existing.State
+			}
 			m.resources[id] = r
 			return id, nil
 		}
@@ -133,6 +137,16 @@ func (m *memStore) ListResources(ctx context.Context, provider string, limit int
 
 func (m *memStore) TouchResourceCodeAt(ctx context.Context, id string, at time.Time) error {
 	m.touched = append(m.touched, id)
+	return nil
+}
+
+func (m *memStore) SetResourceState(ctx context.Context, id string, state NumberState, at time.Time) error {
+	r, ok := m.resources[id]
+	if !ok {
+		return errors.New("号码不存在")
+	}
+	r.State = state
+	m.resources[id] = r
 	return nil
 }
 

@@ -105,7 +105,7 @@ func (f *FakeAdapter) Purchase(ctx context.Context, in PurchaseInput) (PurchaseO
 			Provider: f.provider, ExternalID: external,
 			Phone: phone, PhoneMask: MaskPhone(phone),
 			Service: in.Service, Country: strconv.Itoa(in.Country),
-			Status: "active", SyncedAt: f.now(),
+			Status: "active", State: StateWaitingCode, SyncedAt: f.now(),
 		}
 		if f.provider == ProviderSMS62 {
 			res.ProviderToken = token
@@ -158,7 +158,7 @@ func (f *FakeAdapter) ImportByUpstreamID(ctx context.Context, upstreamID string)
 			f.nums[external] = &fakeNumber{phone: phone, token: token, codeAfter: 2, code: fmt.Sprintf("%06d", 300000+f.seq)}
 			resources = append(resources, Resource{
 				Provider: f.provider, ExternalID: external, Phone: phone, PhoneMask: MaskPhone(phone),
-				ProviderToken: token, Service: "导入 " + upstreamID, Status: "active", SyncedAt: f.now(),
+				ProviderToken: token, Service: "导入 " + upstreamID, Status: "active", State: StateWaitingCode, SyncedAt: f.now(),
 			})
 		}
 		f.pendingOrders(upstreamID, resources)

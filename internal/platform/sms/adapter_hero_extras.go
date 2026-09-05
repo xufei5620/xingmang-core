@@ -315,6 +315,8 @@ func (a *HeroAdapter) enrich(r Resource, v herosms.Activation) Resource {
 	r.PriceText = v.Price
 	r.VerificationType = v.VerificationType
 	r.Subtype = v.Subtype
+	// 统一状态由官方状态码映射；上游原话留在 r.Status。
+	r.State = MapHeroStatus(v.Status)
 	if v.CountryPhoneCode > 0 {
 		r.CountryPhoneCode = strconv.FormatInt(v.CountryPhoneCode, 10)
 	}

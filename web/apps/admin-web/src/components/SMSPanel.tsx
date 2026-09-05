@@ -46,6 +46,19 @@ function providerLabel(id: string): string {
   return providerLabels.get(id) ?? id;
 }
 
+/** 号码的统一状态（ADR-022）。上游原话放在 title 里悬停看。 */
+const NUMBER_STATE: Record<string, { label: string; tone: "success" | "warning" | "danger" | "neutral" }> = {
+  waiting_code: { label: "待收码", tone: "warning" },
+  code_received: { label: "已收码", tone: "success" },
+  finished: { label: "已完成", tone: "neutral" },
+  cancelled: { label: "已取消", tone: "neutral" },
+  expired: { label: "已过期", tone: "danger" },
+};
+function numberState(r: SMSResource): { label: string; tone: "success" | "warning" | "danger" | "neutral" } {
+  const key = r.effective_state || r.state || "";
+  return NUMBER_STATE[key] ?? { label: r.status || "—", tone: "neutral" };
+}
+
 /** 七态的中文与色调。
  *
  *  **unknown 必须显眼**：它的含义是「不知道钱花没花出去」，而那正是唯一
@@ -659,7 +672,9 @@ function ResourceRail({
                   {providerLabel(r.provider)} · {r.service || "—"} · {r.country || "—"}
                 </span>
               </span>
-              <Badge tone="neutral">{r.status || "—"}</Badge>
+              <span title={r.status ? `上游状态：${r.status}` : undefined}>
+                <Badge tone={numberState(r).tone}>{numberState(r).label}</Badge>
+              </span>
             </button>
           </li>
         );
@@ -723,8 +738,11 @@ function ResourcePane({
           <span className="font-mono text-lg font-semibold">
             {resource.phone || resource.phone_mask}
           </span>
-          <span className="text-fg-muted text-xs">
-            {providerLabel(resource.provider)} · {resource.status || "—"}
+          <span className="text-fg-muted flex flex-wrap items-center gap-1 text-xs">
+            {providerLabel(resource.provider)} ·{" "}
+            <span title={resource.status ? `上游状态：${resource.status}` : undefined}>
+              <Badge tone={numberState(resource).tone}>{numberState(resource).label}</Badge>
+            </span>
             {resource.subtype === 2 ? " · 租用（按小时）" : resource.subtype === 1 ? " · 激活（短时）" : ""}
             {resource.verification_type === "call" ? " · 语音验证" : ""}
           </span>

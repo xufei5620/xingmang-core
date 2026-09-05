@@ -188,10 +188,11 @@ INSERT INTO sms.sms_resource (
     environment, provider, external_id, phone, phone_mask, provider_token,
     service, country, status, order_id,
     upstream_created_at, expires_at, synced_at, created_at, updated_at,
-    operator, price_text, verification_type, subtype, country_phone_code
+    operator, price_text, verification_type, subtype, country_phone_code, state
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::uuid,$11,$12,$13,$13,$13,
-          $14,$15,$16,$17,$18)
+          $14,$15,$16,$17,$18,$19)
 ON CONFLICT (environment, provider, external_id) DO UPDATE SET
+    state = COALESCE(NULLIF(EXCLUDED.state,''), sms_resource.state),
     operator = COALESCE(NULLIF(EXCLUDED.operator,''), sms_resource.operator),
     price_text = COALESCE(NULLIF(EXCLUDED.price_text,''), sms_resource.price_text),
     verification_type = COALESCE(NULLIF(EXCLUDED.verification_type,''), sms_resource.verification_type),
@@ -214,7 +215,7 @@ RETURNING id`
 		s.environment, r.Provider, r.ExternalID, r.Phone, r.PhoneMask, r.ProviderToken,
 		r.Service, r.Country, r.Status, r.OrderID,
 		nullableTime(r.UpstreamCreatedAt), nullableTime(r.ExpiresAt), s.now().UTC(),
-		r.Operator, r.PriceText, r.VerificationType, r.Subtype, r.CountryPhoneCode,
+		r.Operator, r.PriceText, r.VerificationType, r.Subtype, r.CountryPhoneCode, string(r.State),
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("落接码号码: %w", err)
@@ -226,7 +227,7 @@ const resourceColumns = `
 SELECT id, provider, external_id, phone, phone_mask, provider_token,
        service, country, status, COALESCE(order_id::text,''),
        last_code_at, upstream_created_at, expires_at, synced_at,
-       operator, price_text, verification_type, subtype, country_phone_code
+       operator, price_text, verification_type, subtype, country_phone_code, state
   FROM sms.sms_resource`
 
 func (s *PgStore) GetResource(ctx context.Context, resourceID string) (Resource, error) {
@@ -472,11 +473,12 @@ func scanOperation(row scannable) (Operation, error) {
 
 func scanResource(row scannable) (Resource, error) {
 	var r Resource
+	var state string
 	var lastCode, upstreamCreated, expires *time.Time
 	if err := row.Scan(&r.ID, &r.Provider, &r.ExternalID, &r.Phone, &r.PhoneMask, &r.ProviderToken,
 		&r.Service, &r.Country, &r.Status, &r.OrderID,
 		&lastCode, &upstreamCreated, &expires, &r.SyncedAt,
-		&r.Operator, &r.PriceText, &r.VerificationType, &r.Subtype, &r.CountryPhoneCode); err != nil {
+		&r.Operator, &r.PriceText, &r.VerificationType, &r.Subtype, &r.CountryPhoneCode, &state); err != nil {
 		return Resource{}, err
 	}
 	if lastCode != nil {
@@ -488,6 +490,7 @@ func scanResource(row scannable) (Resource, error) {
 	if expires != nil {
 		r.ExpiresAt = *expires
 	}
+	r.State = NumberState(state)
 	return r, nil
 }
 
@@ -630,6 +633,20 @@ func checkResourceShape(r Resource) error {
 	}
 	if !spec.Has(CapToken) && hasToken {
 		return fmt.Errorf("%s 的号码不该带 token（这家取码不用它）", spec.Label)
+	}
+	return nil
+}
+
+// SetResourceState 写统一状态。**不碰 status**：那是上游原话，我们的事实另存一列。
+func (s *PgStore) SetResourceState(ctx context.Context, resourceID string, state NumberState, at time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+UPDATE sms.sms_resource SET state = $3, updated_at = $4
+ WHERE environment = $1 AND id = $2`, s.environment, resourceID, string(state), at.UTC())
+	if err != nil {
+		return fmt.Errorf("写号码状态: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("号码 %s 不存在", resourceID)
 	}
 	return nil
 }

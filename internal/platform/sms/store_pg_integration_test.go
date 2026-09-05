@@ -178,3 +178,52 @@ func TestPgStoreProviderStatusAcceptsThirdProviderAfter000041(t *testing.T) {
 		t.Fatalf("迁移 000041 后不该再按名字挡供应商: %v", err)
 	}
 }
+
+// 迁移 000042：state 列。同步不带 state 时保留原值；SetResourceState 单独改它。
+func TestPgStoreResourceStateRoundTrip(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+
+	id, err := store.UpsertResource(ctx, Resource{
+		Provider: ProviderHero, ExternalID: "act-s1", Phone: "79990000009", Status: "1",
+		State: StateWaitingCode,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 一次不带 state 的同步（比如 62 的导入只回号码）。
+	if _, err := store.UpsertResource(ctx, Resource{Provider: ProviderHero, ExternalID: "act-s1", Status: "2"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetResource(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateWaitingCode {
+		t.Fatalf("空 state 的同步应保留原值, got %q", got.State)
+	}
+
+	if err := store.SetResourceState(ctx, id, StateCodeReceived, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetResource(ctx, id)
+	if got.State != StateCodeReceived {
+		t.Fatalf("SetResourceState 没写进去, got %q", got.State)
+	}
+	// 列表也要带出来：页面的号码栏读的是列表。
+	list, err := store.ListResources(ctx, ProviderHero, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].State != StateCodeReceived {
+		t.Fatalf("ListResources 应带 state, got %+v", list)
+	}
+	// 带 state 的同步（Hero 回读到状态 6）会覆盖。
+	if _, err := store.UpsertResource(ctx, Resource{Provider: ProviderHero, ExternalID: "act-s1", Status: "6", State: StateFinished}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetResource(ctx, id)
+	if got.State != StateFinished || got.Status != "6" {
+		t.Fatalf("带 state 的同步应覆盖, got state=%q status=%q", got.State, got.Status)
+	}
+}

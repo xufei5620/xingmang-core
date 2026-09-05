@@ -120,7 +120,7 @@ func (f *FakeAdapter) Rent(ctx context.Context, in HeroRentInput) (Resource, err
 	return Resource{
 		Provider: f.provider, ExternalID: external, Phone: phone, PhoneMask: MaskPhone(phone),
 		Service: in.Service, Country: strconv.FormatInt(in.Country, 10), Status: "1",
-		Operator: in.Operator, PriceText: "1.50", VerificationType: "sms", Subtype: SubtypeRent,
+		Operator: in.Operator, PriceText: "1.50", VerificationType: "sms", Subtype: SubtypeRent, State: StateWaitingCode,
 		UpstreamCreatedAt: f.now(), ExpiresAt: f.now().Add(time.Duration(in.DurationHours) * time.Hour),
 		SyncedAt: f.now(),
 	}, nil

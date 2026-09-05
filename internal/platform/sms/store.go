@@ -45,6 +45,8 @@ type Store interface {
 	ListResources(ctx context.Context, provider string, limit int) ([]Resource, error)
 	// TouchResourceCodeAt 记「最后一次成功取到码」的时间。
 	TouchResourceCodeAt(ctx context.Context, resourceID string, at time.Time) error
+	// SetResourceState 写统一状态（我们自己的事实，不改上游原话 status）。
+	SetResourceState(ctx context.Context, resourceID string, state NumberState, at time.Time) error
 
 	// UpsertOrder 落订单（62）。返回本地 UUID。
 	UpsertOrder(ctx context.Context, o Order) (string, error)

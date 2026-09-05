@@ -289,3 +289,59 @@ it("号码详情里的「向上游取码」调 fetchSMSCode 并带上 resource_i
   fireEvent.click(await screen.findByRole("button", { name: "向上游取码" }));
   await waitFor(() => expect(fetchSMSCode).toHaveBeenCalledWith("r1"));
 });
+
+// 号码栏显示**平台自己的**统一状态；上游原话（Hero 的 4、62 的「正常」）
+// 只在悬停时看。两家的原话没有统一含义，直接摆出来等于让人背两张表。
+it("号码显示统一状态，上游原话放在悬停里", async () => {
+  seed({
+    resources: [
+      {
+        resource_id: "r1",
+        provider: "hero_sms",
+        phone_mask: "1555****3333",
+        status: "4",
+        state: "code_received",
+        effective_state: "code_received",
+      },
+    ],
+  });
+  renderPanel();
+
+  const badges = await screen.findAllByText("已收码");
+  expect(badges.length).toBeGreaterThan(0);
+  expect(screen.queryByText("4")).toBeNull();
+  const hover = badges[0]!.closest("[title]");
+  expect(hover?.getAttribute("title")).toBe("上游状态：4");
+});
+
+// 「待收码但已过期」由服务端算成 expired 回来，页面按它显示，不自己再算一遍。
+it("过期的号按 effective_state 显示已过期", async () => {
+  seed({
+    resources: [
+      {
+        resource_id: "r1",
+        provider: "hero_sms",
+        phone_mask: "1555****4444",
+        status: "1",
+        state: "waiting_code",
+        effective_state: "expired",
+      },
+    ],
+  });
+  renderPanel();
+
+  expect((await screen.findAllByText("已过期")).length).toBeGreaterThan(0);
+  expect(screen.queryByText("待收码")).toBeNull();
+});
+
+// 旧数据还没映射（state 为空）时退回显示上游原话，不显示空白。
+it("没有统一状态的旧号码退回显示上游原话", async () => {
+  seed({
+    resources: [
+      { resource_id: "r1", provider: "sms62", phone_mask: "1555****5555", status: "正常" },
+    ],
+  });
+  renderPanel();
+
+  expect((await screen.findAllByText("正常")).length).toBeGreaterThan(0);
+});

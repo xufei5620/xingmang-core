@@ -65,10 +65,15 @@ type smsResourceItem struct {
 	// Subtype：1 = 普通激活，2 = 租用。页面据此区分 20 分钟号与按小时租的号。
 	Subtype          int64  `json:"subtype,omitempty"`
 	CountryPhoneCode string `json:"country_phone_code,omitempty"`
-	PhoneMask        string `json:"phone_mask"`
-	Service          string `json:"service,omitempty"`
-	Country          string `json:"country,omitempty"`
-	Status           string `json:"status,omitempty"`
+	// State 是统一状态（waiting_code / code_received / finished / cancelled /
+	// expired）；EffectiveState 把「待收码但已过期」算成 expired。Status 仍是
+	// 上游原话，页面悬停时看。
+	State          string `json:"state,omitempty"`
+	EffectiveState string `json:"effective_state,omitempty"`
+	PhoneMask      string `json:"phone_mask"`
+	Service        string `json:"service,omitempty"`
+	Country        string `json:"country,omitempty"`
+	Status         string `json:"status,omitempty"`
 	// **provider_token 任何情况下都不出现在这里。** 它是取码凭证，
 	// 只在服务端取码那条路上被读一次。
 	LastCodeAt string `json:"last_code_at,omitempty"`
@@ -171,6 +176,8 @@ func ListSMSResourcesHandler(store SMSQuerier) http.HandlerFunc {
 				Operator:   res.Operator, PriceText: res.PriceText,
 				VerificationType: res.VerificationType, Subtype: res.Subtype,
 				CountryPhoneCode: res.CountryPhoneCode,
+				State:            string(res.State),
+				EffectiveState:   string(res.EffectiveState(time.Now())),
 			}
 			if maySeePhone {
 				item.Phone = res.Phone
