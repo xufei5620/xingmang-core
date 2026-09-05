@@ -361,12 +361,14 @@ Two things the tests taught that the design had not said:
   so evaluation rows outnumber checkpoints; the equivalence is between the
   two modes' rows, not against the checkpoint count.
 
-Still to do before the bound is switched on in production: the server-side
-differential rehearsal (the runbook's procedure: one backup, `--reproject-all`
-twice, `--evidence-batch-limit 0` and `25`, `after.accounts` identical in
-every field but `projection_version`, `evaluations_by_status` identical).
-Until then the api runs with `0`, which is byte-for-byte the previous
-behaviour.
+Still to do before the bound is switched on in production: the forward-only
+differential rehearsal that replays the 2026-09-04 burst (the runbook's
+procedure: pre-repair backup `invoice-20260904T033226Z`, `--release-catchup` for
+`acdcdce9`, `--finalization-window`, `--reproject-all` twice with
+`--evidence-batch-limit 0` and `25`, both `ready`, the bound engaged on the
+released account, `after.accounts` identical in every field but
+`projection_version`, `evaluations_by_status` identical). Until then the api
+runs with `0`, which is byte-for-byte the previous behaviour.
 
 ### Fix 3 hardening, same day
 
@@ -392,4 +394,60 @@ had not exercised:
 And the rehearsal side: a restored copy already carries every evaluation
 production has made, so the differential pair was going to compare two runs
 that evaluated nothing. `--reevaluate-evidence` (see the shadow-eval handoff)
-clears the copy's evaluations first; the runbook's procedure now requires it.
+clears the copy's evaluations first -- which turned out not to be enough,
+and the rewind that followed it turned out to be unsound; see the next
+section.
+
+### Differential rehearsal, take three: the rewind was unsound (2026-09-05, RC95)
+
+RC94's pair compared two identical runs: on a current backup every evaluation
+already exists and the cleared ones lie below `finalized_through`, which the
+bound counts from, so the bounded run had nothing to chunk. RC95 made
+`--reevaluate-evidence` also rewind every POLICY_ANCHOR account's
+`finalized_through` to its cutover so the cleared pile would sit in front of
+the boundary. The rewind engaged (4 of 8 accounts) and so did the bound, and
+on the two rewound accounts without cash the bounded replay finished with
+quantities identical to the single pass -- but on the two cash accounts every
+chunk failed at commit: `wallet consumption state lacks matching usage
+allocations` (SQLSTATE P0001, `consumption_allocations_mirror_guard`, migration
+0011). A chunk's rebuild deletes all of the account's `consumption_allocations`
+and re-inserts only those for usage up to its boundary, while the lot loader
+takes only lots with `completed_at <= through`; a lot funded after the first
+boundary kept the consumption state the copy carried from production and now
+had no allocations.
+
+That is not a defect of the bound. A published boundary behind lots that
+already carry consumption is a state production never enters:
+`completeEligibilityProjectionJob` clamps `requested` up to `finalized_through`,
+`finalized_through` only moves by `GREATEST`, and a lot's consumption state is
+written only by a projection whose window covered it, after which the
+boundary covers it too. The re-anchor migration, the one legitimate backward
+move, zeroes allocations, lot states and `consumed_cash_minor` in the same
+transaction -- and even that reset would not make the rewind sound, because
+`acdcdce9` has an issued invoice and a partial replay from cutover computes
+consumption below `reserved+issued`, which the lot update refuses. Forward-only
+chunking keeps every invariant by construction; a rewind cannot be the
+instrument that proves it.
+
+RC96 therefore removes the rewind (`--reevaluate-evidence` clears evaluations
+and nothing else; `accounts_rewound` is gone from the report) and fixes the
+other half of the instrument: `--reproject-all` used to overwrite a captured
+job's `requested_through` with `finalized_through`, which on a backlog-era
+backup erased exactly the window the differential needs -- it now raises and
+never lowers. The acceptance moves to a forward-only replay of the incident
+itself. Backups taken after the burst carry no backlog -- on
+`invoice-20260904T065429Z` every account's `finalized_through` already stood at
+06:27-06:33Z and a real-queue pair projected nothing -- because the backlog
+window existed only between the RC87 post-deploy repair (~03:58Z) and the
+replay that landed at 04:16:42Z. The pre-repair backup
+`invoice-20260904T033226Z` is the incident's true starting state, so RC96 adds
+two rehearsal-only operations that replay what happened next on the copy:
+`--release-catchup <account>` clears `catchup_key_hmac` exactly as the repair did,
+and `--finalization-window` queues every finalization target through the
+window a finalization pass would have requested at the copy's last
+watermarks (`GREATEST(cutover, min stream watermark - finalization delay)`,
+never below `finalized_through`, never lowering a captured window). Both refuse
+a non-superuser session. The bound's engagement (`projection_version` strictly
+greater in the bounded report for the released account) is an explicit
+acceptance criterion. RC95 was not rolled forward; production stayed on RC94
+with the bound off.

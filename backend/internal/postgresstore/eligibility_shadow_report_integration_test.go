@@ -2,8 +2,11 @@ package postgresstore
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // seedEligibilityShadowCheckpoint inserts the minimal
@@ -287,20 +290,33 @@ func TestEnqueueEligibilityShadowReprojectionLeavesExistingJobsUntouched(t *test
 // window a frozen copy could never cover, so ON CONFLICT DO NOTHING left the
 // one account that matters most unexercised. A non-dead job is now retargeted
 // to the account's own boundary: claimable at once, backoff and lease cleared.
-func TestEnqueueEligibilityShadowReprojectionRetargetsAQueuedJobToTheAccountsOwnBoundary(t *testing.T) {
+// A queued job captured in the backup is a real window: raised to at least
+// the account's own boundary, never lowered (a window above the boundary is
+// the catch-up backlog a bounded-evidence differential exists to exercise;
+// RC95 found the old overwrite erased it), and made claimable now.
+func TestEnqueueEligibilityShadowReprojectionKeepsALargerQueuedWindowAndRaisesASmallerOne(t *testing.T) {
 	store, ctx := integrationStore(t)
 	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
-	account := "60000000-0000-4000-8000-0000000000e1"
-	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, account, "reproject-retarget", cutover, manifestHash, configHash)
+	larger := "60000000-0000-4000-8000-0000000000e1"
+	smaller := "60000000-0000-4000-8000-0000000000e2"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, larger, "reproject-keep", cutover, manifestHash, configHash)
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, smaller, "reproject-raise", cutover, manifestHash, configHash)
 	boundary := cutover.Add(3 * time.Hour)
-	if _, err := store.pool.Exec(ctx, `UPDATE source_account_eligibility_state SET finalized_through=$2 WHERE external_account_id=$1`, account, boundary); err != nil {
-		t.Fatal(err)
+	for _, account := range []string{larger, smaller} {
+		if _, err := store.pool.Exec(ctx, `UPDATE source_account_eligibility_state SET finalized_through=$2 WHERE external_account_id=$1`, account, boundary); err != nil {
+			t.Fatal(err)
+		}
 	}
 	now := time.Now().UTC().Truncate(time.Second)
-	// Queued, backed off ten minutes into the future with a proof-pending
-	// error and three attempts: the shape a continuously-consuming account's
-	// job has at backup time.
-	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, account, "queued", 3, strPtr("BALANCE_PROOF_PENDING"), now, now, now.Add(10*time.Minute))
+	// The seed helper requests through next_attempt_at plus one hour. Queued,
+	// backed off with a proof-pending error and three attempts, its window
+	// two hours past the boundary: the shape a continuously-consuming
+	// account's job has on a backup taken during a catch-up.
+	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, larger, "queued", 3, strPtr("BALANCE_PROOF_PENDING"), now, now, boundary.Add(time.Hour))
+	largerWindow := boundary.Add(2 * time.Hour)
+	// And one whose window fell an hour behind the boundary a later
+	// publication moved (RC92's shape).
+	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, smaller, "queued", 1, strPtr("BALANCE_PROOF_PENDING"), now, now, boundary.Add(-2*time.Hour))
 
 	enqueued, err := store.EnqueueEligibilityShadowReprojection(ctx)
 	if err != nil {
@@ -313,17 +329,22 @@ func TestEnqueueEligibilityShadowReprojectionRetargetsAQueuedJobToTheAccountsOwn
 	if enqueued != accounts {
 		t.Fatalf("a retargeted row must count as enqueued: expected %d, got %d", accounts, enqueued)
 	}
-	var status string
-	var lastError *string
-	var attempts int64
-	var requested, next time.Time
-	if err = store.pool.QueryRow(ctx, `SELECT status,last_error_code,attempt_count,requested_through,next_attempt_at
-		FROM eligibility_projection_jobs WHERE external_account_id=$1`, account).Scan(&status, &lastError, &attempts, &requested, &next); err != nil {
-		t.Fatal(err)
+	check := func(account string, want time.Time) {
+		t.Helper()
+		var status string
+		var lastError *string
+		var attempts int64
+		var requested, next time.Time
+		if err := store.pool.QueryRow(ctx, `SELECT status,last_error_code,attempt_count,requested_through,next_attempt_at
+			FROM eligibility_projection_jobs WHERE external_account_id=$1`, account).Scan(&status, &lastError, &attempts, &requested, &next); err != nil {
+			t.Fatal(err)
+		}
+		if status != "queued" || lastError != nil || attempts != 0 || !requested.Equal(want) || next.After(time.Now().UTC()) {
+			t.Fatalf("%s: status=%q err=%v attempts=%d requested=%s (want %s) next=%s", account, status, lastError, attempts, requested, want, next)
+		}
 	}
-	if status != "queued" || lastError != nil || attempts != 0 || !requested.Equal(boundary) || next.After(time.Now().UTC()) {
-		t.Fatalf("job was not retargeted to the account's own boundary: status=%q err=%v attempts=%d requested=%s next=%s", status, lastError, attempts, requested, next)
-	}
+	check(larger, largerWindow)
+	check(smaller, boundary)
 	claimable, err := store.EligibilityProjectionClaimableCount(ctx, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -469,18 +490,15 @@ func TestEligibilityShadowReevaluateEvidenceClearsEvaluationsAtOrAfterTheAnchorF
 	if cleared != 1 {
 		t.Fatalf("expected exactly the post-anchor evaluation cleared, got %d", cleared)
 	}
-	// The boundary is rewound to the cutover, the queued job still asks for
-	// the old boundary: the window is now the account's whole history, and
-	// the cleared evidence sits in front of the batch boundary.
-	if store.LastRewoundAccounts() != 1 {
-		t.Fatalf("expected the one POLICY_ANCHOR account rewound, got %d", store.LastRewoundAccounts())
-	}
+	// The published boundary is left where production put it (RC95: rewinding
+	// it made the bounded replay fail at commit on real cash accounts), and
+	// the queued job keeps the window --reproject-all gave it.
 	var finalized, requested time.Time
 	if err = store.pool.QueryRow(ctx, `SELECT finalized_through FROM source_account_eligibility_state WHERE external_account_id=$1`, account).Scan(&finalized); err != nil {
 		t.Fatal(err)
 	}
-	if !finalized.Equal(cutover) {
-		t.Fatalf("finalized_through should be rewound to the cutover %s, got %s", cutover, finalized)
+	if !finalized.Equal(published) {
+		t.Fatalf("finalized_through must stay at the published boundary %s, got %s", published, finalized)
 	}
 	if err = store.pool.QueryRow(ctx, `SELECT requested_through FROM eligibility_projection_jobs WHERE external_account_id=$1`, account).Scan(&requested); err != nil {
 		t.Fatal(err)
@@ -500,5 +518,102 @@ func TestEligibilityShadowReevaluateEvidenceClearsEvaluationsAtOrAfterTheAnchorF
 	}
 	if remaining != 0 {
 		t.Fatalf("the post-anchor evaluation must be gone, got %d rows", remaining)
+	}
+}
+
+// The RC87 post-deploy repair, replayed on the copy: only the named accounts,
+// only the key, counted.
+func TestEligibilityShadowReleaseCatchupClearsOnlyTheNamedAccountsKeys(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	stuck := "60000000-0000-4000-8000-0000000000d1"
+	other := "60000000-0000-4000-8000-0000000000d2"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, stuck, "release-stuck", cutover, manifestHash, configHash)
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, other, "release-other", cutover, manifestHash, configHash)
+	for _, account := range []string{stuck, other} {
+		if _, err := store.pool.Exec(ctx, `UPDATE source_account_eligibility_state SET catchup_key_hmac=$2 WHERE external_account_id=$1`, account, "h1:"+testHash("catchup-"+account)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	released, err := store.EligibilityShadowReleaseCatchup(ctx, []string{stuck})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released != 1 {
+		t.Fatalf("expected exactly the stuck account released, got %d", released)
+	}
+	var stuckKey, otherKey *string
+	if err = store.pool.QueryRow(ctx, `SELECT catchup_key_hmac FROM source_account_eligibility_state WHERE external_account_id=$1`, stuck).Scan(&stuckKey); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT catchup_key_hmac FROM source_account_eligibility_state WHERE external_account_id=$1`, other).Scan(&otherKey); err != nil {
+		t.Fatal(err)
+	}
+	if stuckKey != nil || otherKey == nil {
+		t.Fatalf("release must clear only the named account: stuck=%v other=%v", stuckKey, otherKey)
+	}
+	if again, err := store.EligibilityShadowReleaseCatchup(ctx, []string{stuck}); err != nil || again != 0 {
+		t.Fatalf("a second release must be a no-op: released=%d err=%v", again, err)
+	}
+}
+
+// The window a finalization pass would request at the copy's last watermarks:
+// GREATEST(cutover, min watermark - delay), never below finalized_through,
+// never lowering a captured window, skipping accounts finalization skips.
+func TestEnqueueEligibilityShadowFinalizationWindowRequestsWhatFinalizationWould(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	behind := "60000000-0000-4000-8000-0000000000d3"
+	captured := "60000000-0000-4000-8000-0000000000d4"
+	excluded := "60000000-0000-4000-8000-0000000000d5"
+	for _, account := range []string{behind, captured, excluded} {
+		seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, account, "window-"+account[len(account)-2:], cutover, manifestHash, configHash)
+	}
+	// Two streams; the earlier watermark bounds the window. The seeded
+	// accounts carry a 900 s finalization delay.
+	for stream, at := range map[string]time.Time{"usage": cutover.Add(3 * time.Hour), "balances": cutover.Add(2 * time.Hour)} {
+		if _, err := store.pool.Exec(ctx, `INSERT INTO source_economic_stream_watermarks(
+			source_instance_id,stream_kind,watermark_at,source_sequence,source_cursor,configuration_hash)
+			VALUES($1,$2,$3,1,'cursor',$4)`, sourceID, stream, at, configHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expected := cutover.Add(2*time.Hour - 900*time.Second)
+	if _, err := store.pool.Exec(ctx, `UPDATE source_account_eligibility_state SET catchup_key_hmac=$2 WHERE external_account_id=$1`, excluded, "h1:"+testHash("catchup-"+excluded)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	// A captured row asking for more than finalization would: kept.
+	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, captured, "queued", 2, strPtr("BALANCE_PROOF_PENDING"), now, now, cutover.Add(4*time.Hour))
+	capturedWindow := cutover.Add(5 * time.Hour)
+
+	windowed, err := store.EnqueueEligibilityShadowFinalizationWindow(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The shared test database may hold other tests' sources; the two targets
+	// here are the floor, the excluded account is checked by name below.
+	if windowed < 2 {
+		t.Fatalf("expected at least the two finalization targets queued, got %d", windowed)
+	}
+	requestedOf := func(account string) (time.Time, bool) {
+		var requested time.Time
+		err := store.pool.QueryRow(ctx, `SELECT requested_through FROM eligibility_projection_jobs WHERE external_account_id=$1 AND status='queued'`, account).Scan(&requested)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return time.Time{}, false
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return requested, true
+	}
+	if got, ok := requestedOf(behind); !ok || !got.Equal(expected) {
+		t.Fatalf("the account behind must be asked through min watermark minus delay %s: got %s present=%v", expected, got, ok)
+	}
+	if got, ok := requestedOf(captured); !ok || !got.Equal(capturedWindow) {
+		t.Fatalf("a larger captured window must be kept %s: got %s present=%v", capturedWindow, got, ok)
+	}
+	if _, ok := requestedOf(excluded); ok {
+		t.Fatal("an account still in catch-up must not be queued, exactly as finalization skips it")
 	}
 }

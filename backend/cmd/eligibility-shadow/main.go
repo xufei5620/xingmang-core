@@ -66,6 +66,8 @@ func main() {
 	evidenceBatchLimit := flag.Int("evidence-batch-limit", 0, "bound on pending balance-evidence items one projection job evaluates (0 = unbounded, the production default until the differential rehearsal proves the bound equivalent); the same image runs both modes so two rehearsals of one backup can be diffed")
 	reevaluateEvidence := flag.Bool("reevaluate-evidence", false, "rehearsal-only: clear every balance-evidence evaluation at or after each account's anchor floor on the restored copy before draining, so the evidence pass has a pile to work through (requires --reproject-all and a superuser session)")
 	reprojectAll := flag.Bool("reproject-all", false, "queue one projection job per account at its own finalized_through before draining, so the candidate evaluator actually runs against the restored data; required for any release that changes the evaluator, the projection or a migration feeding either")
+	releaseCatchup := flag.String("release-catchup", "", "rehearsal-only: comma-separated external account ids whose catchup_key_hmac is cleared on the restored copy before anything is queued (the RC87 post-deploy repair, replayed so a backup taken while the account was still excluded from finalization reproduces the 2026-09-04 catch-up burst)")
+	finalizationWindow := flag.Bool("finalization-window", false, "queue every finalization-target account through the window a finalization pass would request at the copy's last watermarks (never below finalized_through, never lowering a captured window); requires reproject-all")
 	flag.Parse()
 
 	if flag.NArg() != 0 {
@@ -86,6 +88,10 @@ func main() {
 	}
 	if *reevaluateEvidence && !*reprojectAll {
 		slog.Error("reevaluate-evidence requires reproject-all")
+	}
+	if *finalizationWindow && !*reprojectAll {
+		slog.Error("finalization-window requires reproject-all")
+		os.Exit(2)
 		os.Exit(2)
 	}
 	if *evidenceBatchLimit < 0 || *evidenceBatchLimit > 10000 {
@@ -125,6 +131,8 @@ func main() {
 		ReprojectAll:       *reprojectAll,
 		EvidenceBatchLimit: *evidenceBatchLimit,
 		ReevaluateEvidence: *reevaluateEvidence,
+		ReleaseCatchup:     splitCSV(*releaseCatchup),
+		FinalizationWindow: *finalizationWindow,
 	})
 	if err != nil {
 		slog.Error("eligibility-shadow rehearsal failed", "error", err)
@@ -154,6 +162,8 @@ type runOptions struct {
 	ReprojectAll                   bool
 	EvidenceBatchLimit             int
 	ReevaluateEvidence             bool
+	ReleaseCatchup                 []string
+	FinalizationWindow             bool
 }
 
 // parseMigrationsApplied splits --migrations-applied's comma-separated
@@ -162,7 +172,11 @@ type runOptions struct {
 // set -- nothing for deploy/rehearsal/shadow-eval.sh's invoice-migrate step
 // to apply) yields a nil slice, matching Report.MigrationsApplied's
 // "nil means none" convention shared with RoundErrors/FailedAccounts.
-func parseMigrationsApplied(value string) []string {
+func parseMigrationsApplied(value string) []string { return splitCSV(value) }
+
+// splitCSV splits a comma-separated flag value, trimming whitespace and
+// dropping empty entries; an empty value yields nil.
+func splitCSV(value string) []string {
 	var names []string
 	for _, name := range strings.Split(value, ",") {
 		name = strings.TrimSpace(name)
@@ -177,10 +191,12 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 	report := Report{
 		GeneratedAt: time.Now().UTC(), BackupLabel: opts.BackupLabel,
 		CandidateImageTag: opts.CandidateImageTag, MaxRounds: opts.MaxRounds,
-		MigrationsApplied:     opts.MigrationsApplied,
-		ReprojectAllRequested: opts.ReprojectAll,
-		EvidenceBatchLimit:    opts.EvidenceBatchLimit,
-		ReevaluateEvidence:    opts.ReevaluateEvidence,
+		MigrationsApplied:           opts.MigrationsApplied,
+		ReprojectAllRequested:       opts.ReprojectAll,
+		EvidenceBatchLimit:          opts.EvidenceBatchLimit,
+		ReevaluateEvidence:          opts.ReevaluateEvidence,
+		ReleaseCatchupRequested:     opts.ReleaseCatchup,
+		FinalizationWindowRequested: opts.FinalizationWindow,
 	}
 
 	// Enqueue before the baseline snapshot, so BeforeHealth records the work
@@ -188,25 +204,38 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 	// like the vacuous runs this flag exists to end. The enqueue changes no
 	// account state -- only eligibility_projection_jobs -- so the baseline
 	// it precedes is still the restored data as the backup captured it.
+	if len(opts.ReleaseCatchup) > 0 {
+		released, releaseErr := store.EligibilityShadowReleaseCatchup(ctx, opts.ReleaseCatchup)
+		if releaseErr != nil {
+			return report, fmt.Errorf("release accounts from catch-up: %w", releaseErr)
+		}
+		report.AccountsReleased = released
+	}
 	if opts.ReprojectAll {
 		enqueued, enqueueErr := store.EnqueueEligibilityShadowReprojection(ctx)
 		if enqueueErr != nil {
 			return report, fmt.Errorf("queue full reprojection: %w", enqueueErr)
 		}
 		report.AccountsEnqueued = enqueued
+		if opts.FinalizationWindow {
+			windowed, windowErr := store.EnqueueEligibilityShadowFinalizationWindow(ctx)
+			if windowErr != nil {
+				return report, fmt.Errorf("queue finalization windows: %w", windowErr)
+			}
+			report.AccountsWindowed = windowed
+		}
 	}
 
-	// After the enqueue and before the baseline snapshot: the jobs keep their
-	// requested_through at the old boundary while the accounts are rewound
-	// to their cutover, so "before" shows the emptied pile at the start of
-	// each account's history and "after" what the candidate made of it.
+	// After the enqueue and before the baseline snapshot, so "before" shows
+	// the emptied evaluations and "after" what the candidate made of them.
+	// The published boundary stays where production put it; see
+	// EligibilityShadowReevaluateEvidence for why it is never rewound.
 	if opts.ReevaluateEvidence {
 		cleared, clearErr := store.EligibilityShadowReevaluateEvidence(ctx)
 		if clearErr != nil {
 			return report, fmt.Errorf("clear evaluations for re-evaluation: %w", clearErr)
 		}
 		report.EvaluationsCleared = cleared
-		report.AccountsRewound = store.LastRewoundAccounts()
 	}
 
 	before, err := store.EligibilityShadowSnapshot(ctx)

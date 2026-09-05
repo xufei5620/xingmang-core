@@ -62,6 +62,11 @@ assert_exit 2 "--evidence-batch-limit missing value" --image-tag 0.1.0-rc5 --evi
 # A well-formed flag set passes argument validation and stops at the first
 # required-environment check, whose `:?` expansion exits 1, not 2.
 assert_exit 1 "--reevaluate-evidence is parsed and stops at the env checks" --image-tag 0.1.0-rc5 --reproject-all --reevaluate-evidence
+assert_exit 1 "--release-catchup and --finalization-window are parsed and stop at the env checks" --image-tag 0.1.0-rc5 --reproject-all --release-catchup acdcdce9-c7f4-4cb4-9a02-ce527849a440 --finalization-window
+assert_exit 2 "--finalization-window without --reproject-all is a usage error" --image-tag 0.1.0-rc5 --finalization-window
+assert_exit 2 "--release-catchup rejects a value that is not an account uuid" --image-tag 0.1.0-rc5 --reproject-all --release-catchup acdcdce9
+assert_exit 1 "--timeout is parsed and stops at the env checks" --image-tag 0.1.0-rc5 --timeout 90m
+assert_exit 2 "--timeout rejects a value that is not whole minutes" --image-tag 0.1.0-rc5 --timeout 1h
 # An explicit --backup's shape is validated with the other flags -- before
 # any environment or tool-availability check -- specifically so this needs
 # neither BACKUP_DIR nor age/docker/etc. installed.

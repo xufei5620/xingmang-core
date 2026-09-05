@@ -2411,17 +2411,38 @@ projection job evaluates; the job publishes `finalized_through` at the
 limit-th item's `as_of` and requeues itself for the rest. The rehearsal tool
 takes the same knob as `--evidence-batch-limit N`, and the report records it
 as `evidence_batch_limit`. Before the bound is enabled in production, run the
-**differential rehearsal**: the same backup twice with `--reproject-all
---reevaluate-evidence`, once with `--evidence-batch-limit 0` and once with a
-small bound (for example `25`), and require the two reports' `after.accounts`
-to be identical in every field but `projection_version` (which legitimately
-increments once per chunk) and the `evaluations_by_status` counts to match
-exactly. `--reevaluate-evidence` is what gives the pair meaning: a restored
-copy already carries every evaluation production has made, so without it the
-evidence pass finds nothing pending and the two runs are trivially identical.
-It clears every evaluation at or after each account's anchor floor on the copy
-(rehearsal-only: it refuses a non-superuser session, so it cannot run against
-production), and the report records `evaluations_cleared`. Any difference
+**differential rehearsal** as a forward-only replay of the 2026-09-04 catch-up
+burst: restore the pre-repair backup `invoice-20260904T033226Z` (the account
+`acdcdce9-c7f4-4cb4-9a02-ce527849a440` still excluded from finalization,
+`finalized_through` at 2026-09-01 12:14Z, three days of evidence pending), replay
+the RC87 post-deploy repair on the copy with `--release-catchup <that account>`,
+and ask for the window a finalization pass would have requested with
+`--finalization-window` (GREATEST of cutover and the source's minimum stream
+watermark minus the account's finalization delay, never below
+`finalized_through`, never lowering a captured window) -- twice with
+`--reproject-all`, once with `--evidence-batch-limit 0` and once with a small
+bound (for example `25`), and require: both verdicts `ready`;
+`accounts_released` 1 and `accounts_projected` above zero; `projection_version`
+in the bounded report strictly greater than in the unbounded one for the
+released account (the bound engaged -- a pair in which no account's version
+differs proves nothing, and RC94's first pair was exactly that);
+`after.accounts` identical in every field but `projection_version`;
+`evaluations_by_status` identical. Backups taken after the burst carry no
+backlog (by 06:54Z every account was current), and `--reproject-all` raises a
+captured job's window to at least the account's boundary and never lowers
+it (RC96), so the window the copy is asked for is what both runs drain. Do
+not try to manufacture a backlog on a current
+backup: RC95's tool rewound `finalized_through` to each account's cutover
+behind the cleared evaluations, and the bounded replay failed at commit on
+the cash accounts (`consumption_allocations_mirror_guard`), because a
+published boundary behind lots that already carry consumption -- or behind
+an issued invoice -- is a state production never enters.
+`--reevaluate-evidence` (rehearsal-only: it refuses a non-superuser session, so
+it cannot run against production) clears every evaluation at or after each
+account's anchor floor on the copy and records `evaluations_cleared`; it is
+an evaluator regression instrument -- the re-made statuses must match what
+production made -- not a way to engage the bound, since the cleared items
+lie below the published boundary the bound counts from. Any difference
 between the two reports means the bound changed a decision and must be
 understood before it ships.
 

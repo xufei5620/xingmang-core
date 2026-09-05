@@ -270,24 +270,28 @@ func (s *Store) EligibilityShadowFailedJobs(ctx context.Context) ([]EligibilityS
 // forwards; the account ends where it started, having recomputed everything
 // in between with the candidate's code.
 //
-// A pre-existing job that is not dead is retargeted to the account's own
-// boundary rather than left alone (RC92 finding). A continuously-consuming
-// account always has a queued job at backup time, requested through a window
-// whose tail no balances cycle in the frozen copy will ever cover, so left as
-// captured it is claimed once, returns BALANCE_PROOF_PENDING, and the account
-// -- the one whose reprojection matters most -- is the one the rehearsal
-// never exercises. Requested at its own finalized_through the proof has no
-// uncovered visibility to wait on and the replay runs. A status='dead' row is
-// still left untouched: that terminal grade exists so a persistently failing
-// account stops being retried until an operator looks, and a rehearsal must
-// not quietly revive it. The returned count includes retargeted rows.
+// A pre-existing job that is not dead is made claimable now and its window
+// raised to at least the account's own boundary -- never lowered (RC92 and
+// RC95 findings). Raised: a continuously-consuming account always has a
+// queued job at backup time, backed off with BALANCE_PROOF_PENDING, and
+// left as captured it is claimed once, returns the same error, and the
+// account whose reprojection matters most is the one the rehearsal never
+// exercises; requested at least at its finalized_through the replay runs.
+// Never lowered: a job captured with requested_through above the boundary is
+// a real catch-up window -- on a backup taken during the 2026-09-04 backlog
+// it is the backlog -- and overwriting it with finalized_through (what this
+// did until RC96) erased exactly the work a bounded-evidence differential
+// exists to exercise. A status='dead' row is still left untouched: that
+// terminal grade exists so a persistently failing account stops being
+// retried until an operator looks, and a rehearsal must not quietly revive
+// it. The returned count includes retargeted rows.
 func (s *Store) EnqueueEligibilityShadowReprojection(ctx context.Context) (int64, error) {
 	command, err := s.pool.Exec(ctx, `
 		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
 		SELECT external_account_id,finalized_through,'queued',now()-interval '1 second'
 		FROM source_account_eligibility_state
 		ON CONFLICT (external_account_id) DO UPDATE SET
-			requested_through=EXCLUDED.requested_through,status='queued',
+			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),status='queued',
 			next_attempt_at=EXCLUDED.next_attempt_at,lease_token=NULL,lease_expires_at=NULL,
 			last_error_code=NULL,attempt_count=0,updated_at=now()
 		WHERE eligibility_projection_jobs.status<>'dead'`)
@@ -343,6 +347,21 @@ func (s *Store) EligibilityShadowPendingJobs(ctx context.Context) ([]Eligibility
 // the evaluations on the copy hands both runs the same pile, the shape of the
 // 2026-09-04 incident, and makes the comparison mean something.
 //
+// It clears evaluations and nothing else. In particular it does not move
+// finalized_through: RC95 rewound every POLICY_ANCHOR account's boundary to
+// its cutover so the cleared pile would sit in front of the batch boundary,
+// and the bounded replay failed at commit on real cash accounts
+// (consumption_allocations_mirror_guard: a chunk rebuilds allocations only
+// for lots completed inside its window, while lots funded after the window
+// still carried production's consumption state). A published boundary
+// behind lots that already carry consumption is a state production never
+// enters -- finalized_through only ever moves by GREATEST, and the one
+// legitimate backward move, the re-anchor, zeroes the derived state in the
+// same transaction -- and an account with an issued invoice cannot be
+// replayed part-way from its cutover at all (consumption below
+// reserved+issued). The bound is exercised on a backup that really has a
+// backlog instead; see docs/PRODUCTION-RUNBOOK.md, "differential rehearsal".
+//
 // Evaluation rows are immutable history under triggers, and this must never
 // touch production: it refuses unless the session is a superuser, which the
 // production runtime and owner roles are not and the rehearsal's throwaway
@@ -383,33 +402,77 @@ func (s *Store) EligibilityShadowReevaluateEvidence(ctx context.Context) (int64,
 	if err != nil {
 		return 0, err
 	}
-	// Rewind the published boundary of every POLICY_ANCHOR account to its
-	// cutover, so the cleared evidence lies AFTER finalized_through. Without
-	// this the pile is history from the projection's point of view -- the
-	// batch boundary deliberately counts only items after the published
-	// boundary (that is what keeps a deferred item from pinning it), so a
-	// bounded run would evaluate the whole pile in one pass exactly like an
-	// unbounded one, and the differential would compare two identical runs.
-	// RC94's first pair did just that. The jobs --reproject-all queued
-	// before this call keep their requested_through at the old boundary, so
-	// each account's window is now its entire evidence history: the shape of
-	// a real catch-up, which is what the bound exists for. Legacy
-	// bootstrap kinds are left alone; their re-anchor logic reads these very
-	// fields and a rehearsal must not steer it.
-	rewound, err := tx.Exec(ctx, `
-		UPDATE source_account_eligibility_state
-		SET finalized_through=cutover_at,updated_at=now()
-		WHERE bootstrap_kind='POLICY_ANCHOR' AND finalized_through>cutover_at`)
 	if err != nil {
 		return 0, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	s.lastRewoundAccounts = rewound.RowsAffected()
 	return checkpoints.RowsAffected() + proofs.RowsAffected(), nil
 }
 
-// LastRewoundAccounts reports how many accounts the last
-// EligibilityShadowReevaluateEvidence call rewound to their cutover.
-func (s *Store) LastRewoundAccounts() int64 { return s.lastRewoundAccounts }
+// EligibilityShadowReleaseCatchup clears catchup_key_hmac for the named
+// accounts on a restored copy: the RC87 post-deploy repair, replayed in a
+// rehearsal so that a backup taken while an account was still excluded from
+// finalization (invoice-20260904T033226Z, acdcdce9) reproduces the 2026-09-04
+// catch-up burst forward-only -- the shape the bounded evidence pass exists
+// for. Rehearsal-only: it refuses a non-superuser session, so it cannot run
+// against production. Returns how many rows it cleared.
+func (s *Store) EligibilityShadowReleaseCatchup(ctx context.Context, accountIDs []string) (int64, error) {
+	if len(accountIDs) == 0 {
+		return 0, nil
+	}
+	var superuser bool
+	if err := s.pool.QueryRow(ctx, `SELECT current_setting('is_superuser')='on'`).Scan(&superuser); err != nil {
+		return 0, err
+	}
+	if !superuser {
+		return 0, errors.New("release-catchup is a rehearsal-only operation and requires a superuser session on a restored copy")
+	}
+	command, err := s.pool.Exec(ctx, `
+		UPDATE source_account_eligibility_state
+		SET catchup_key_hmac=NULL,updated_at=now()
+		WHERE external_account_id::text=ANY($1) AND catchup_key_hmac IS NOT NULL`, accountIDs)
+	if err != nil {
+		return 0, err
+	}
+	return command.RowsAffected(), nil
+}
+
+// EnqueueEligibilityShadowFinalizationWindow queues, for every account a
+// finalization pass would target (not in catch-up, not syncing), the job
+// finalization itself would have queued at the copy's last watermark
+// publication: requested_through = GREATEST(cutover_at, the source's minimum
+// stream watermark - finalization_delay_seconds) -- never below
+// finalized_through, never lowering a window a captured row already asks
+// for, never touching a dead row (the rules EnqueueEligibilityShadowReprojection
+// follows). On a frozen copy nothing publishes watermarks, so without this
+// the only windows are the ones the backup captured, and an account released
+// from catch-up on the copy would never be asked for the catch-up window that
+// is the whole point of releasing it. Returns how many rows it inserted or
+// retargeted.
+func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context) (int64, error) {
+	command, err := s.pool.Exec(ctx, `
+		WITH bounds AS (
+			SELECT source_instance_id,min(watermark_at) AS min_watermark
+			FROM source_economic_stream_watermarks GROUP BY source_instance_id
+		), targets AS (
+			SELECT eas.external_account_id,
+				GREATEST(eas.finalized_through,eas.cutover_at,
+					b.min_watermark-make_interval(secs=>eas.finalization_delay_seconds)) AS requested_through
+			FROM source_account_eligibility_state eas
+			JOIN bounds b ON b.source_instance_id=eas.source_instance_id
+			WHERE eas.catchup_key_hmac IS NULL AND eas.eligibility_status<>'syncing'
+		)
+		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
+		SELECT external_account_id,requested_through,'queued',now()-interval '1 second' FROM targets
+		ON CONFLICT (external_account_id) DO UPDATE SET
+			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),status='queued',
+			next_attempt_at=EXCLUDED.next_attempt_at,lease_token=NULL,lease_expires_at=NULL,
+			last_error_code=NULL,attempt_count=0,updated_at=now()
+		WHERE eligibility_projection_jobs.status<>'dead'`)
+	if err != nil {
+		return 0, err
+	}
+	return command.RowsAffected(), nil
+}

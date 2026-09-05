@@ -59,6 +59,16 @@ evidence_batch_limit=0
 # a pile to work through. Meaningless without --reproject-all; the tool
 # refuses the combination and refuses a non-superuser session.
 reevaluate_evidence=0
+# Forward-only reproduction of the 2026-09-04 catch-up burst on a backup taken
+# while the account was still excluded from finalization: --release-catchup
+# replays the RC87 post-deploy repair on the copy, --finalization-window asks
+# for the window a finalization pass would have requested. Both rehearsal-only;
+# the tool refuses them outside a superuser session on a restored copy.
+release_catchup=""
+finalization_window=0
+# Overall context budget handed to the tool's own --timeout; the default is
+# its own (25m). A three-day catch-up replayed unbounded needs more.
+tool_timeout=""
 tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE:-16g}
 
 usage() {
@@ -66,6 +76,8 @@ usage() {
 usage: shadow-eval.sh --image-tag <0.1.0-rcNN> [--backup <invoice-TIMESTAMP>]
                        [--max-rounds N] [--batch-limit N] [--reproject-all]
                        [--evidence-batch-limit N] [--reevaluate-evidence]
+                       [--release-catchup <account-id[,account-id...]>] [--finalization-window]
+                       [--timeout <Nm>]
 USAGE
 }
 
@@ -90,6 +102,14 @@ while (( $# > 0 )); do
       evidence_batch_limit=$2; shift 2 ;;
     --reevaluate-evidence)
       reevaluate_evidence=1; shift ;;
+    --release-catchup)
+      (( $# >= 2 )) || { echo '--release-catchup requires a value' >&2; exit 2; }
+      release_catchup=$2; shift 2 ;;
+    --finalization-window)
+      finalization_window=1; shift ;;
+    --timeout)
+      (( $# >= 2 )) || { echo '--timeout requires a value' >&2; exit 2; }
+      tool_timeout=$2; shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -101,6 +121,9 @@ done
 [[ "$max_rounds" =~ ^[1-9][0-9]{0,3}$ ]] || { echo '--max-rounds must be an integer 1-9999' >&2; exit 2; }
 [[ "$batch_limit" =~ ^[1-9][0-9]?$ ]] || { echo '--batch-limit must be an integer 1-99' >&2; exit 2; }
 [[ "$evidence_batch_limit" =~ ^[0-9]{1,5}$ ]] || { echo '--evidence-batch-limit must be an integer 0-99999' >&2; exit 2; }
+[[ -z "$release_catchup" || "$release_catchup" =~ ^[0-9a-f-]{36}(,[0-9a-f-]{36})*$ ]] || { echo '--release-catchup must be one or more comma-separated account uuids' >&2; exit 2; }
+if (( finalization_window )) && ! (( reproject_all )); then echo '--finalization-window requires --reproject-all' >&2; exit 2; fi
+[[ -z "$tool_timeout" || "$tool_timeout" =~ ^[1-9][0-9]{0,2}m$ ]] || { echo '--timeout must look like 90m' >&2; exit 2; }
 # An explicit --backup's shape is pure input validation and belongs with the
 # other flag checks above -- before any environment or tool-availability
 # check below -- so a typo'd backup name fails immediately regardless of
@@ -379,6 +402,12 @@ if (( reproject_all )); then reproject_all_args=(--reproject-all); fi
 evidence_batch_limit_args=(--evidence-batch-limit "$evidence_batch_limit")
 reevaluate_evidence_args=()
 if (( reevaluate_evidence )); then reevaluate_evidence_args=(--reevaluate-evidence); fi
+release_catchup_args=()
+if [[ -n "$release_catchup" ]]; then release_catchup_args=(--release-catchup "$release_catchup"); fi
+finalization_window_args=()
+if (( finalization_window )); then finalization_window_args=(--finalization-window); fi
+timeout_args=()
+if [[ -n "$tool_timeout" ]]; then timeout_args=(--timeout "$tool_timeout"); fi
 
 set +e
 docker run --pull never --rm --network "$network" --read-only \
@@ -391,6 +420,7 @@ docker run --pull never --rm --network "$network" --read-only \
   --backup-label "$backup_name" --candidate-image-tag "$image_tag" \
   --migrations-applied "$migrations_applied_csv" \
   "${reproject_all_args[@]}" "${evidence_batch_limit_args[@]}" "${reevaluate_evidence_args[@]}" \
+  "${release_catchup_args[@]}" "${finalization_window_args[@]}" "${timeout_args[@]}" \
   >"$report_json" 2>"$tool_log"
 tool_exit=$?
 set -e
