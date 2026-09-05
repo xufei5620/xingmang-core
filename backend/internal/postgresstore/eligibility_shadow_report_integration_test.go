@@ -587,7 +587,7 @@ func TestEnqueueEligibilityShadowFinalizationWindowRequestsWhatFinalizationWould
 	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, captured, "queued", 2, strPtr("BALANCE_PROOF_PENDING"), now, now, cutover.Add(4*time.Hour))
 	capturedWindow := cutover.Add(5 * time.Hour)
 
-	windowed, err := store.EnqueueEligibilityShadowFinalizationWindow(ctx, 0)
+	windowed, err := store.EnqueueEligibilityShadowFinalizationWindow(ctx, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ func TestEnqueueEligibilityShadowFinalizationWindowRequestsWhatFinalizationWould
 	if _, err = store.pool.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1`, behind); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.EnqueueEligibilityShadowFinalizationWindow(ctx, time.Hour); err != nil {
+	if _, err = store.EnqueueEligibilityShadowFinalizationWindow(ctx, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := requestedOf(behind); !ok || !got.Equal(lagged) {
@@ -630,5 +630,70 @@ func TestEnqueueEligibilityShadowFinalizationWindowRequestsWhatFinalizationWould
 	}
 	if got, ok := requestedOf(captured); !ok || !got.Equal(capturedWindow) {
 		t.Fatalf("lag must not lower a captured window %s: got %s present=%v", capturedWindow, got, ok)
+	}
+}
+
+// A frozen copy gets one request, so the window must end where the copy can
+// prove it: the latest published balances cycle ceiling by which every fact
+// inside the window had been seen. A fact ingested under a later watermark
+// than the cycle that follows its event time pushes the cut back one cycle.
+func TestEnqueueEligibilityShadowFinalizationWindowProvableCutsAtASelfConsistentBalancesCycle(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	account := "60000000-0000-4000-8000-0000000000d6"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, account, "window-provable", cutover, manifestHash, configHash)
+	for _, stream := range []string{"usage", "balances"} {
+		if _, err := store.pool.Exec(ctx, `INSERT INTO source_ingest_state(source_instance_id,stream_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, sourceID, stream); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.pool.Exec(ctx, `INSERT INTO source_economic_stream_watermarks(
+			source_instance_id,stream_kind,watermark_at,source_sequence,source_cursor,configuration_hash)
+			VALUES($1,$2,$3,1,'cursor',$4)`, sourceID, stream, cutover.Add(2*time.Hour), configHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two published balances cycles inside the finalization window
+	// (cutover+105m): ceilings at +90m and +100m.
+	for i, ceiling := range []time.Time{cutover.Add(90 * time.Minute), cutover.Add(100 * time.Minute)} {
+		if _, err := store.pool.Exec(ctx, `INSERT INTO source_economic_scan_cycles(
+			source_instance_id,stream_id,scan_cycle_id,stream_watermark_at,source_cursor,scan_ceiling_at,scan_ceiling_cursor,
+			scan_snapshot_id,scan_snapshot_row_count,first_sequence,last_sequence,final_sequence,cycle_status,published_at)
+			VALUES($1,'balances',$2,$3,'c',$3,'c',$4,0,$5,$5,$5,'published',now())`,
+			sourceID, randomUUID(), ceiling, testHash("provable-cycle-"+account+string(rune('a'+i))), int64(i+1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A usage fact at +95m seen only at +101m: the +100m ceiling cannot cover
+	// it, the +90m ceiling precedes it entirely.
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO source_usage_events(id,source_instance_id,external_account_id,external_event_id,external_usage_id,
+			event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,billing_scope,
+			source_sequence,source_cursor,stream_watermark_at,source_revision_hash,observed_at,invoice_eligible)
+		VALUES($1,$2,$3,$4,$4,$5,1,'SUB2_BALANCE_1E8',$6,$7,'wallet',1,'cursor:'||$4,$8,$9,$8,TRUE)`,
+		randomUUID(), sourceID, account, "provable-usage-"+account, cutover.Add(95*time.Minute), manifestHash, configHash,
+		cutover.Add(101*time.Minute), testHash("provable-usage-"+account)); err != nil {
+		t.Fatal(err)
+	}
+	requestedOf := func() time.Time {
+		var requested time.Time
+		if err := store.pool.QueryRow(ctx, `SELECT requested_through FROM eligibility_projection_jobs WHERE external_account_id=$1`, account).Scan(&requested); err != nil {
+			t.Fatal(err)
+		}
+		return requested
+	}
+	if _, err := store.EnqueueEligibilityShadowFinalizationWindow(ctx, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := requestedOf(), cutover.Add(105*time.Minute); !got.Equal(want) {
+		t.Fatalf("without provable the window is what finalization would request %s, got %s", want, got)
+	}
+	if _, err := store.pool.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1`, account); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueEligibilityShadowFinalizationWindow(ctx, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := requestedOf(), cutover.Add(90*time.Minute); !got.Equal(want) {
+		t.Fatalf("provable must cut at the +90m ceiling (the +100m one cannot cover the fact seen at +101m): want %s, got %s", want, got)
 	}
 }

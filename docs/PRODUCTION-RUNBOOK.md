@@ -2417,13 +2417,16 @@ burst: restore the pre-repair backup `invoice-20260904T033226Z` (the account
 `finalized_through` at 2026-09-01 12:14Z, three days of evidence pending), replay
 the RC87 post-deploy repair on the copy with `--release-catchup <that account>`,
 and ask for the window a finalization pass would have requested with
-`--finalization-window --finalization-window-lag 1h` (GREATEST of cutover and
-the source's minimum stream watermark, taken an hour earlier, minus the
-account's finalization delay; never below `finalized_through`, never lowering a
-captured window -- the lag is what lets the window's carry-forward proof
-close on a frozen copy, where the frontier facts' watermarks lie past every
-balances cycle inside a frontier window and RC97's un-lagged pair left the
-released account `BALANCE_PROOF_PENDING` without replaying) -- twice with
+`--finalization-window --finalization-window-provable` (the window a finalization
+pass would have requested -- GREATEST of cutover and the source's minimum
+stream watermark minus the account's finalization delay, never below
+`finalized_through`, never lowering a captured window -- cut down to the latest
+published balances cycle ceiling by which every fact inside it had been
+seen; that is what the carry-forward proof needs a cycle inside the window to
+cover, production reaches it by asking again a minute later with a wider
+window, and a frozen copy gets one request: RC96's and RC97's pairs left the
+released account `BALANCE_PROOF_PENDING` without replaying because their windows
+ended seconds after facts that were seen only after the window end) -- twice with
 `--reproject-all`, once with `--evidence-batch-limit 0` and once with a small
 bound (for example `25`), and require: both verdicts `ready`;
 `accounts_released` 1 and `accounts_projected` above zero; `projection_version`

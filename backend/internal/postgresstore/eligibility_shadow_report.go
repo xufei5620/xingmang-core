@@ -459,7 +459,16 @@ func (s *Store) EligibilityShadowReleaseCatchup(ctx context.Context, accountIDs 
 // the carry-forward proof of a frontier window pends forever there (in
 // production the next pass widens the window and the proof closes). An hour
 // of lag leaves a three-day catch-up window three days minus an hour.
-func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context, lag time.Duration) (int64, error) {
+// provable cuts each account's window down to the latest published balances
+// cycle ceiling at or below it by which every fact inside the window had
+// already been seen -- no usage or credit fact with event_time at or before
+// the ceiling ingested under a later watermark, no cash lot completed by then
+// whose payments cycle closed later. That is exactly what
+// ensureBalanceCarryForwardProofTx needs a balances cycle inside the window
+// to cover; production reaches it by asking again a minute later with a wider
+// window, a frozen copy gets one request. Without such a ceiling above
+// finalized_through the account is asked for finalized_through itself.
+func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context, lag time.Duration, provable bool) (int64, error) {
 	if lag < 0 {
 		return 0, errors.New("finalization window lag must not be negative")
 	}
@@ -467,13 +476,44 @@ func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context, 
 		WITH bounds AS (
 			SELECT source_instance_id,min(watermark_at) AS min_watermark
 			FROM source_economic_stream_watermarks GROUP BY source_instance_id
-		), targets AS (
-			SELECT eas.external_account_id,
+		), base AS (
+			SELECT eas.external_account_id,eas.source_instance_id,eas.finalized_through,
 				GREATEST(eas.finalized_through,eas.cutover_at,
-					b.min_watermark-make_interval(secs=>eas.finalization_delay_seconds)-make_interval(secs=>$1::double precision)) AS requested_through
+					b.min_watermark-make_interval(secs=>eas.finalization_delay_seconds)-make_interval(secs=>$1::double precision)) AS bound
 			FROM source_account_eligibility_state eas
 			JOIN bounds b ON b.source_instance_id=eas.source_instance_id
 			WHERE eas.catchup_key_hmac IS NULL AND eas.eligibility_status<>'syncing'
+		), targets AS (
+			SELECT base.external_account_id,
+				CASE WHEN $2::boolean THEN COALESCE((
+					SELECT c.scan_ceiling_at FROM source_economic_scan_cycles c
+					WHERE c.source_instance_id=base.source_instance_id AND c.stream_id='balances'
+					  AND c.cycle_status='published'
+					  AND c.scan_ceiling_at>base.finalized_through AND c.scan_ceiling_at<=base.bound
+					  AND NOT EXISTS (SELECT 1 FROM source_usage_events e
+						WHERE e.external_account_id=base.external_account_id
+						  AND e.event_time>base.finalized_through AND e.event_time<=c.scan_ceiling_at
+						  AND e.stream_watermark_at>c.scan_ceiling_at)
+					  AND NOT EXISTS (SELECT 1 FROM source_credit_events e
+						WHERE e.external_account_id=base.external_account_id
+						  AND e.event_time>base.finalized_through AND e.event_time<=c.scan_ceiling_at
+						  AND e.stream_watermark_at>c.scan_ceiling_at)
+					  AND NOT EXISTS (SELECT 1 FROM funding_lots lot
+						JOIN source_events event ON event.id=lot.source_event_id
+						JOIN source_economic_scan_cycle_events mapped
+						  ON mapped.source_instance_id=lot.source_instance_id AND mapped.stream_id='payments'
+						 AND mapped.event_id=CASE WHEN event.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN event.external_event_id::uuid END
+						 AND mapped.payload_hash=lot.source_revision_hash
+						JOIN source_economic_scan_cycles pc
+						  ON pc.source_instance_id=mapped.source_instance_id AND pc.stream_id=mapped.stream_id
+						 AND pc.scan_cycle_id=mapped.scan_cycle_id
+						WHERE lot.external_account_id=base.external_account_id
+						  AND lot.completed_at>base.finalized_through AND lot.completed_at<=c.scan_ceiling_at
+						  AND lot.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
+						  AND pc.cycle_status='published' AND pc.scan_ceiling_at>c.scan_ceiling_at)
+					ORDER BY c.scan_ceiling_at DESC LIMIT 1
+				), base.finalized_through) ELSE base.bound END AS requested_through
+			FROM base
 		)
 		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
 		SELECT external_account_id,requested_through,'queued',now()-interval '1 second' FROM targets
@@ -481,7 +521,7 @@ func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context, 
 			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),status='queued',
 			next_attempt_at=EXCLUDED.next_attempt_at,lease_token=NULL,lease_expires_at=NULL,
 			last_error_code=NULL,attempt_count=0,updated_at=now()
-		WHERE eligibility_projection_jobs.status<>'dead'`, lag.Seconds())
+		WHERE eligibility_projection_jobs.status<>'dead'`, lag.Seconds(), provable)
 	if err != nil {
 		return 0, err
 	}

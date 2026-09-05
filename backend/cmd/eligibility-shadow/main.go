@@ -68,6 +68,7 @@ func main() {
 	reprojectAll := flag.Bool("reproject-all", false, "queue one projection job per account at its own finalized_through before draining, so the candidate evaluator actually runs against the restored data; required for any release that changes the evaluator, the projection or a migration feeding either")
 	releaseCatchup := flag.String("release-catchup", "", "rehearsal-only: comma-separated external account ids whose catchup_key_hmac is cleared on the restored copy before anything is queued (the RC87 post-deploy repair, replayed so a backup taken while the account was still excluded from finalization reproduces the 2026-09-04 catch-up burst)")
 	finalizationWindowLag := flag.Duration("finalization-window-lag", 0, "with finalization-window: derive the window from watermarks this much earlier (the window a finalization pass would have requested that long ago); on a frozen copy a frontier window's carry-forward proof cannot close, so use about 1h")
+	finalizationWindowProvable := flag.Bool("finalization-window-provable", false, "with finalization-window: cut each window down to the latest published balances cycle ceiling by which every fact inside it had been seen, so the carry-forward proof can close on a frozen copy")
 	finalizationWindow := flag.Bool("finalization-window", false, "queue every finalization-target account through the window a finalization pass would request at the copy's last watermarks (never below finalized_through, never lowering a captured window); requires reproject-all")
 	flag.Parse()
 
@@ -93,6 +94,10 @@ func main() {
 	}
 	if *finalizationWindow && !*reprojectAll {
 		slog.Error("finalization-window requires reproject-all")
+		os.Exit(2)
+	}
+	if *finalizationWindowProvable && !*finalizationWindow {
+		slog.Error("finalization-window-provable requires finalization-window")
 		os.Exit(2)
 	}
 	if *finalizationWindowLag != 0 && !*finalizationWindow {
@@ -136,13 +141,14 @@ func main() {
 	report, err := run(ctx, store, runOptions{
 		MaxRounds: *maxRounds, BatchLimit: *batchLimit,
 		BackupLabel: *backupLabel, CandidateImageTag: *candidateTag,
-		MigrationsApplied:     parseMigrationsApplied(*migrationsApplied),
-		ReprojectAll:          *reprojectAll,
-		EvidenceBatchLimit:    *evidenceBatchLimit,
-		ReevaluateEvidence:    *reevaluateEvidence,
-		ReleaseCatchup:        splitCSV(*releaseCatchup),
-		FinalizationWindow:    *finalizationWindow,
-		FinalizationWindowLag: *finalizationWindowLag,
+		MigrationsApplied:          parseMigrationsApplied(*migrationsApplied),
+		ReprojectAll:               *reprojectAll,
+		EvidenceBatchLimit:         *evidenceBatchLimit,
+		ReevaluateEvidence:         *reevaluateEvidence,
+		ReleaseCatchup:             splitCSV(*releaseCatchup),
+		FinalizationWindow:         *finalizationWindow,
+		FinalizationWindowLag:      *finalizationWindowLag,
+		FinalizationWindowProvable: *finalizationWindowProvable,
 	})
 	if err != nil {
 		slog.Error("eligibility-shadow rehearsal failed", "error", err)
@@ -175,6 +181,7 @@ type runOptions struct {
 	ReleaseCatchup                 []string
 	FinalizationWindow             bool
 	FinalizationWindowLag          time.Duration
+	FinalizationWindowProvable     bool
 }
 
 // parseMigrationsApplied splits --migrations-applied's comma-separated
@@ -202,13 +209,14 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 	report := Report{
 		GeneratedAt: time.Now().UTC(), BackupLabel: opts.BackupLabel,
 		CandidateImageTag: opts.CandidateImageTag, MaxRounds: opts.MaxRounds,
-		MigrationsApplied:            opts.MigrationsApplied,
-		ReprojectAllRequested:        opts.ReprojectAll,
-		EvidenceBatchLimit:           opts.EvidenceBatchLimit,
-		ReevaluateEvidence:           opts.ReevaluateEvidence,
-		ReleaseCatchupRequested:      opts.ReleaseCatchup,
-		FinalizationWindowRequested:  opts.FinalizationWindow,
-		FinalizationWindowLagSeconds: int64(opts.FinalizationWindowLag / time.Second),
+		MigrationsApplied:                   opts.MigrationsApplied,
+		ReprojectAllRequested:               opts.ReprojectAll,
+		EvidenceBatchLimit:                  opts.EvidenceBatchLimit,
+		ReevaluateEvidence:                  opts.ReevaluateEvidence,
+		ReleaseCatchupRequested:             opts.ReleaseCatchup,
+		FinalizationWindowRequested:         opts.FinalizationWindow,
+		FinalizationWindowLagSeconds:        int64(opts.FinalizationWindowLag / time.Second),
+		FinalizationWindowProvableRequested: opts.FinalizationWindowProvable,
 	}
 
 	// Enqueue before the baseline snapshot, so BeforeHealth records the work
@@ -230,7 +238,7 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 		}
 		report.AccountsEnqueued = enqueued
 		if opts.FinalizationWindow {
-			windowed, windowErr := store.EnqueueEligibilityShadowFinalizationWindow(ctx, opts.FinalizationWindowLag)
+			windowed, windowErr := store.EnqueueEligibilityShadowFinalizationWindow(ctx, opts.FinalizationWindowLag, opts.FinalizationWindowProvable)
 			if windowErr != nil {
 				return report, fmt.Errorf("queue finalization windows: %w", windowErr)
 			}

@@ -159,6 +159,9 @@ type Report struct {
 	// watermarks the window was derived (0 = exactly what finalization would
 	// have requested at them).
 	FinalizationWindowLagSeconds int64 `json:"finalization_window_lag_seconds"`
+	// FinalizationWindowProvableRequested: each window was cut down to the
+	// latest balances cycle ceiling by which every fact inside it was seen.
+	FinalizationWindowProvableRequested bool `json:"finalization_window_provable_requested"`
 
 	Before       Snapshot         `json:"before"`
 	BeforeHealth ProjectionHealth `json:"before_projection_health"`

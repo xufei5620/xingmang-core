@@ -364,7 +364,7 @@ Two things the tests taught that the design had not said:
 Still to do before the bound is switched on in production: the forward-only
 differential rehearsal that replays the 2026-09-04 burst (the runbook's
 procedure: pre-repair backup `invoice-20260904T033226Z`, `--release-catchup` for
-`acdcdce9`, `--finalization-window --finalization-window-lag 1h`, `--reproject-all` twice with
+`acdcdce9`, `--finalization-window --finalization-window-provable`, `--reproject-all` twice with
 `--evidence-batch-limit 0` and `25`, both `ready`, the bound engaged on the
 released account, `after.accounts` identical in every field but
 `projection_version`, `evaluations_by_status` identical). Until then the api
@@ -471,3 +471,28 @@ that much earlier, so an hour of lag leaves the three-day catch-up window
 whole but provable. RC97 also restores the `os.Exit` that RC96's
 `--reevaluate-evidence`-without-`--reproject-all` check had lost (it logged and
 went on). Neither RC96 nor RC97 changes anything production runs.
+
+### Take five: the last seconds of the window (2026-09-05, RC97)
+
+RC97's pair with an hour of lag left `acdcdce9` `BALANCE_PROOF_PENDING` again, at
+window 02:11:42Z. A read-only probe of the restored copy (no evaluator, just
+SQL) showed the lag reasoning was wrong: the account's 1,399 usage facts
+across the three days were ingested continuously (visibility lag p50 1 min,
+p90 3 min, max 22 min), 550 reconciliation checkpoints sat unevaluated,
+balances cycles closed every ~65 s. What blocks the proof is the last slice
+of any window: the facts just before the window end are seen a few seconds
+to minutes later, and `ensureBalanceCarryForwardProofTx` needs a balances cycle
+ceiling inside the window at or after that visibility. RC96's window
+(03:11:42Z) held a fact seen at 03:12:03Z -- impossible; RC97's (02:11:42Z)
+held one seen at 02:11:25Z and the cycles closed at 02:10:45Z and 02:11:50Z --
+none in the seventeen seconds that mattered. Production asks again a minute
+later with a wider window and one of the next requests lands; a frozen copy
+asks once. The probe also showed where the proof does close: the latest
+balances cycle ceiling by which every fact before it had been seen was
+03:06:41Z below the un-lagged window and 01:50:44Z below the lagged one, each
+with its final ingest batch and a prior checkpoint. RC98 adds
+`--finalization-window-provable`, which cuts each account's window to exactly
+that ceiling (usage and credit facts by `stream_watermark_at`, cash lots by their
+payments cycle ceiling -- the proof's own visibility set); the lag flag
+stays but is no longer the instrument. Neither RC97 nor RC98 changes
+anything production runs.
