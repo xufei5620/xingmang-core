@@ -4,7 +4,7 @@
 > `v0.1.0-rc96-signed` (`43eb05a`) and was not rolled forward (its un-lagged
 > differential left the released account proof-pending, see its execution record); its evidence is
 > immutable. Continue only with
-> `docs/superpowers/plans/2026-09-05-invoice-rc99-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-05-invoice-rc100-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

@@ -310,7 +310,7 @@ function Assert-PostgresGosuFindingScope {
             [string]$_.Status -ceq [string]$finding.Status
         })
         if ($matchingTuple.Count -ne 1) {
-            throw "PostgreSQL exception has no approved RC99 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
+            throw "PostgreSQL exception has no approved RC100 no-fix tuple for $($finding.Target):$($finding.VulnerabilityID)"
         }
     }
     return $true
@@ -701,10 +701,10 @@ function Assert-StrictReleaseDirectoryName {
 function Get-StrictSignedReleaseTagRef {
     param([Parameter(Mandatory)][string]$SignedReleaseTag)
 
-    if ($SignedReleaseTag -cne 'v0.1.0-rc99-signed') {
-        throw 'strict transfer requires the exact signed RC99 tag v0.1.0-rc99-signed'
+    if ($SignedReleaseTag -cne 'v0.1.0-rc100-signed') {
+        throw 'strict transfer requires the exact signed RC100 tag v0.1.0-rc100-signed'
     }
-    return 'refs/tags/v0.1.0-rc99-signed'
+    return 'refs/tags/v0.1.0-rc100-signed'
 }
 
 function Assert-TransferReadyManifest {
@@ -719,28 +719,28 @@ function Assert-TransferReadyManifest {
     try {
         $releaseNameProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'releaseName' -Context 'manifest'
     } catch {
-        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc99 is mandatory'
+        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc100 is mandatory'
     }
     if ($releaseNameProperty.Value -isnot [string] -or
-        [string]$releaseNameProperty.Value -cne '0.1.0-rc99') {
-        throw 'strict transfer requires manifest releaseName=0.1.0-rc99'
+        [string]$releaseNameProperty.Value -cne '0.1.0-rc100') {
+        throw 'strict transfer requires manifest releaseName=0.1.0-rc100'
     }
 
     $expectedImageReferences = [ordered]@{
-        api = 'invoice-system-api:0.1.0-rc99'
-        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc99'
-        tools = 'invoice-system-tools:0.1.0-rc99'
-        web = 'invoice-system-web:0.1.0-rc99'
-        'source-agent' = 'invoice-source-agent:0.1.0-rc99'
-        'postgres-runtime' = 'invoice-postgres:0.1.0-rc99'
-        'clamav-runtime' = 'invoice-clamav:0.1.0-rc99'
-        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc99'
-        keycloak = 'invoice-keycloak:0.1.0-rc99'
+        api = 'invoice-system-api:0.1.0-rc100'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc100'
+        tools = 'invoice-system-tools:0.1.0-rc100'
+        web = 'invoice-system-web:0.1.0-rc100'
+        'source-agent' = 'invoice-source-agent:0.1.0-rc100'
+        'postgres-runtime' = 'invoice-postgres:0.1.0-rc100'
+        'clamav-runtime' = 'invoice-clamav:0.1.0-rc100'
+        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc100'
+        keycloak = 'invoice-keycloak:0.1.0-rc100'
     }
     $imagesProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'images' -Context 'manifest'
     if ($imagesProperty.Value -isnot [System.Array] -or
         $imagesProperty.Value.Count -ne $expectedImageReferences.Count) {
-        throw 'strict transfer requires the exact RC99 image inventory'
+        throw 'strict transfer requires the exact RC100 image inventory'
     }
     foreach ($expectedImage in $expectedImageReferences.GetEnumerator()) {
         $matchingRecords = @()
@@ -752,12 +752,12 @@ function Assert-TransferReadyManifest {
             }
         }
         if ($matchingRecords.Count -ne 1) {
-            throw 'strict transfer requires the exact RC99 image inventory'
+            throw 'strict transfer requires the exact RC100 image inventory'
         }
         $referenceProperty = Get-RequiredExactProperty -InputObject $matchingRecords[0] -PropertyName 'reference' -Context "manifest image $($expectedImage.Key)"
         if ($referenceProperty.Value -isnot [string] -or
             [string]$referenceProperty.Value -cne [string]$expectedImage.Value) {
-            throw 'strict transfer requires the exact RC99 image inventory'
+            throw 'strict transfer requires the exact RC100 image inventory'
         }
     }
 

@@ -1,5 +1,11 @@
 # RC99 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC99 shipped at signed tag
+> `v0.1.0-rc99-signed` (`555613e`) and is deployed (fix 3 on at 25, canary
+> clean, see its execution record); its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-05-invoice-rc100-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and **roll forward** RC99, which switches XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3 on in production:
