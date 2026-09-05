@@ -296,6 +296,39 @@ describe("CardsPanel", () => {
   // 首次渲染时取一次，就会永远停在空——不改选择直接提交会带一个空账号，
   // 后端虽然会拒（fail closed 生效），但表单本身是坏的。
   // 这个也是本地跑起来才看见的：单测里查询是同步 resolve 的，看不出来。
+  // CVV、有效期、开卡时间**默认就显示**，不藏在「列管理」后面。
+  //
+  // 产品负责人 2026-09-05 的要求。这三样原先默认隐藏，理由是「摊在列表上
+  // 等于长期暴露在任何一次截屏里」——但卡号本来就整串显示着，藏起另外两样
+  // 只是个半拉子措施：真要防截屏泄露，该藏的是卡号。既然卡面明文已经按
+  // card.reveal 权限回给了这一页，就让要用它的人一眼看全，而不是每次去
+  // 勾三个框。
+  it("卡面明文与开卡时间默认可见，不用去列管理里勾", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [
+        {
+          ...activeCard,
+          pan: "4413576524979228",
+          cvv: "123",
+          expiry_mmyy: "11/2031",
+          issued_at: "2026-09-04T16:05:07Z",
+        },
+      ],
+      accounts: ["MAIN"],
+      memberEmails: [],
+    });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
+    renderPanel();
+
+    await screen.findByText("4413576524979228");
+    expect(screen.getByText("123")).toBeTruthy();
+    expect(screen.getByText("11/2031")).toBeTruthy();
+    // 开卡时间要到秒，而且带时区——截图发给另一个时区的人不能变成错的。
+    expect(screen.getByText("2026-09-04 16:05:07 UTC")).toBeTruthy();
+  });
+
   it("开卡表单默认选中第一个账号", async () => {
     vi.mocked(listCards).mockResolvedValue({
       cards: [],
