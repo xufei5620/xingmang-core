@@ -25,6 +25,8 @@ type memStore struct {
 	snapshots   []BalanceSnapshot
 	snapshotErr error
 	thresholds  map[string]BalanceThreshold
+	costs       map[string]CostEvent
+	costOrder   []string
 	alerts      map[string]AlertEvent
 	// pendingHash 模拟未决唯一索引。
 	pendingHash map[string]string
@@ -40,6 +42,7 @@ func newMemStore() *memStore {
 		emails:     map[string]Email{},
 		routing:    map[string]RoutingRule{},
 		thresholds: map[string]BalanceThreshold{},
+		costs:      map[string]CostEvent{},
 		alerts:     map[string]AlertEvent{},
 	}
 }
@@ -736,6 +739,41 @@ func (m *memStore) ListExpiringRentals(ctx context.Context, from, until time.Tim
 		}
 		if r.ExpiresAt.After(from) && !r.ExpiresAt.After(until) {
 			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) AppendCostEvents(ctx context.Context, events []CostEvent) (int, error) {
+	n := 0
+	for _, ev := range events {
+		key := ev.OperationID + "|" + ev.Subject
+		if _, ok := m.costs[key]; ok {
+			// 与 PgStore 的 ON CONFLICT DO NOTHING 一致：记过的不改写。
+			continue
+		}
+		m.seq++
+		ev.ID = "cost-" + itoa(m.seq)
+		m.costs[key] = ev
+		m.costOrder = append(m.costOrder, key)
+		n++
+	}
+	return n, nil
+}
+
+func (m *memStore) ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var out []CostEvent
+	for _, key := range m.costOrder {
+		ev := m.costs[key]
+		if provider != "" && ev.Provider != provider {
+			continue
+		}
+		out = append(out, ev)
+		if len(out) >= limit {
+			break
 		}
 	}
 	return out, nil

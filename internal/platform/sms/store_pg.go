@@ -960,3 +960,62 @@ func (s *PgStore) ListExpiringRentals(ctx context.Context, from, until time.Time
 	}
 	return out, rows.Err()
 }
+
+// ---- 成本事件（迁移 000047）----
+
+// AppendCostEvents 按 (环境, 操作, 主体) 幂等地落成本事件。
+//
+// ON CONFLICT DO NOTHING 而不是 UPDATE：一笔已经记过的花费不该因为重放而被
+// 改写——那正是「事后从资源表反推」会犯的错。事后补金额（62 的订单金额）
+// 是另一条显式的路径，不走这里。
+func (s *PgStore) AppendCostEvents(ctx context.Context, events []CostEvent) (int, error) {
+	inserted := 0
+	for _, ev := range events {
+		at := ev.OccurredAt
+		if at.IsZero() {
+			at = s.now()
+		}
+		tag, err := s.pool.Exec(ctx, `
+INSERT INTO sms.cost_event (
+    environment, operation_id, provider, kind, subject, provider_ref,
+    service, country, amount, currency, amount_source, occurred_at, created_at
+) VALUES ($1,NULLIF($2,'')::uuid,$3,$4,$5,$6,$7,$8,NULLIF($9,'')::numeric,$10,$11,$12,$12)
+ON CONFLICT (environment, operation_id, subject) DO NOTHING`,
+			s.environment, ev.OperationID, ev.Provider, ev.Kind, ev.Subject, ev.ProviderRef,
+			ev.Service, ev.Country, ev.AmountText, ev.Currency, ev.AmountSource, at.UTC())
+		if err != nil {
+			return inserted, fmt.Errorf("落成本事件: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	return inserted, nil
+}
+
+func (s *PgStore) ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id::text, COALESCE(operation_id::text,''), provider, kind, subject, provider_ref,
+       service, country, COALESCE(amount::text,''), currency, amount_source, occurred_at
+  FROM sms.cost_event
+ WHERE environment = $1 AND ($2 = '' OR provider = $2)
+ ORDER BY occurred_at DESC, id
+ LIMIT $3`, s.environment, provider, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查成本事件: %w", err)
+	}
+	defer rows.Close()
+	var out []CostEvent
+	for rows.Next() {
+		var ev CostEvent
+		if err := rows.Scan(&ev.ID, &ev.OperationID, &ev.Provider, &ev.Kind, &ev.Subject,
+			&ev.ProviderRef, &ev.Service, &ev.Country, &ev.AmountText, &ev.Currency,
+			&ev.AmountSource, &ev.OccurredAt); err != nil {
+			return nil, err
+		}
+		ev.OccurredAt = ev.OccurredAt.UTC()
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}

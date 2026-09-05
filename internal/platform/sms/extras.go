@@ -324,6 +324,8 @@ func (s *Service) runLedger(ctx context.Context, op Operation, do func() (ledger
 	op.ProviderRef = result.providerRef
 
 	// 上游成功后落库失败 → unknown + 人工。钱已经花了，此时报错会诱使重试。
+	// 落库时把带上本地 ID 的副本留下：成本事件要指向本地主体，而不是上游 ID。
+	savedResources := make([]Resource, 0, len(result.resources))
 	for _, r := range result.resources {
 		r.Provider = op.Provider
 		r.SyncedAt = s.now()
@@ -334,7 +336,10 @@ func (s *Service) runLedger(ctx context.Context, op Operation, do func() (ledger
 		if op.ResourceID == "" {
 			op.ResourceID = id
 		}
+		r.ID = id
+		savedResources = append(savedResources, r)
 	}
+	savedEmails := make([]Email, 0, len(result.emails))
 	for _, e := range result.emails {
 		e.Provider = op.Provider
 		e.SyncedAt = s.now()
@@ -345,11 +350,22 @@ func (s *Service) runLedger(ctx context.Context, op Operation, do func() (ledger
 		if op.EmailID == "" {
 			op.EmailID = id
 		}
+		e.ID = id
+		savedEmails = append(savedEmails, e)
 	}
 	op.State = StateSucceeded
 	op.UpdatedAt = s.now()
 	if err := s.store.ResolveOperation(ctx, op); err != nil {
 		return Operation{}, err
+	}
+	// 成本在成功那一刻记（XM-SMS3 #1）。租用走资源上的价，邮箱走上游给的
+	// cost + currency；不花钱的动作（收藏等）costKindFor 返回空，不记。
+	if costKind := costKindFor(op.Kind); costKind != "" {
+		if len(savedEmails) > 0 {
+			s.recordCosts(ctx, s.emailCostEvents(op, costKind, savedEmails))
+		} else {
+			s.recordCosts(ctx, s.purchaseCostEvents(op, costKind, savedResources, nil))
+		}
 	}
 	return op, nil
 }

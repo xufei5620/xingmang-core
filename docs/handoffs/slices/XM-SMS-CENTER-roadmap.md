@@ -76,11 +76,19 @@ branch: ai/claude/XM-CARD0-infini-connector
    读端点 `GET /sms/alerts`（告警 + 阈值一次回），页面顶部红条按严重度排序、
    写明「不会外发」，供应商卡片给有余额能力的那家一个阈值输入框。
 
-## XM-SMS3 · 成本核算 — status: todo
+## XM-SMS3 · 成本核算 — status: in-progress（1 done）
 
-1. `sms.cost_event`：由 runLedger / Purchase 在成功那一刻写入（买号、租用、延长、
-   重激活、买邮箱、重下单；Hero 取消的退款为负）。金额 numeric，对外文本；
-   币种按上游（62 为 USD，Hero 为 ISO 数字码）。
+1. ~~`sms.cost_event`~~ done：迁移 000047，由 `purchase` / `runLedger` /
+   `ExecuteAction` 在**成功那一刻**写（买号、租用、延长、重激活、买邮箱、重下单；
+   取消记负数退款）。按 (环境, 操作, 主体) 幂等，ON CONFLICT DO NOTHING——重放
+   不改写已记的账。服务与国家落在事件上（统计要按服务聚合，事后 join 资源表会
+   被取消 / 过期的号带偏）。**金额可为 NULL = 上游没说，不是 0**：62 买号只回
+   订单 ID（留订单号等对账补，来源 pending_order_amount）、Hero 延长写体不回价格
+   （upstream_silent）；补 0 会让这个月少算一笔，比缺一行更难发现。币种：62 记
+   USD（ADR 口径，上游不回币种字段），Hero 活动不回币种留空、邮箱用官方 ISO
+   数字码。失败与 unknown **一条都不记**——「可能花了」不能变成账面上的一笔。
+   成本写失败只吞掉、不改操作状态：钱已经花了，翻成失败会诱使人再买一次，
+   少掉的行由 #2 的余额对账兜底。
 2. 与余额快照对账：同一供应商同一币种，「快照差」与「事件和」的差额超阈值
    落 alert_event。
 3. 统计页签：服务端整表聚合，按供应商 × 币种 × 服务 × 天；分币种不折算；
@@ -187,3 +195,13 @@ branch: ai/claude/XM-CARD0-infini-connector
   页面测试三条：红条按严重度排（critical 在前）、无告警不显示、只有有余额能力
   的那家才有阈值输入框。门禁：go vet / go test -p 1 ./...（含真库）/
   check-governance 0 / pnpm -r typecheck / pnpm -r test（admin-web 1557 用例）全绿。
+- 2026-09-06 XM-SMS3 #1：`cost_test.go` 十条先红后绿：Hero 逐个报价一号一条
+  （带服务 / 国家 / 操作 ID / 主体 / 来源）、62 只回订单号时金额留空且来源是
+  pending_order_amount 并留下订单号、失败与 unknown 一条不记、(操作, 主体) 幂等、
+  租用记 rent、取消记 -0.35 且来源写明按原价退、延长记一条金额未知、取码不记、
+  金额十进制原样保留且发生时间用本次操作的时钟。真库
+  `TestPgStoreCostEventsAreIdempotentAndAllowUnknownAmount`：三条插入后重放插 0 条、
+  NULL 金额读回是空串而不是 0、负数原样、按供应商筛（迁移 000047 在测试库上真
+  跑过）。runLedger 里顺带补了一处：落库后把带本地 ID 的资源 / 邮箱副本留下——
+  成本事件的主体必须是本地 ID，不是上游 ID。门禁：go vet / go test -p 1 ./...
+  （含真库）/ check-governance 0 / pnpm -r typecheck / pnpm -r test 全绿。

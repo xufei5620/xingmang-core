@@ -572,3 +572,86 @@ func TestPgStoreAlertSourceQueriesFilterCorrectly(t *testing.T) {
 		t.Fatalf("只该回还在等码的租用号, got %+v", rentals)
 	}
 }
+
+// 迁移 000047：成本事件。(操作, 主体) 幂等；金额可为 NULL（上游没说，不是 0）；
+// 退款是负数；十进制原样进出。
+func TestPgStoreCostEventsAreIdempotentAndAllowUnknownAmount(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	if _, err := store.pool.Exec(ctx, "TRUNCATE sms.cost_event"); err != nil {
+		t.Fatal(err)
+	}
+	opID := "2f3e4d5c-6b7a-4a99-8877-665544332211"
+	if err := store.PrepareOperation(ctx, Operation{
+		ID: opID, Provider: ProviderHero, Kind: KindPurchase, RequestHash: "h-cost", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 6, 4, 0, 0, 0, time.UTC)
+
+	events := []CostEvent{
+		{
+			OperationID: opID, Provider: ProviderHero, Kind: CostPurchase, Subject: "res-1",
+			Service: "go", Country: "12", AmountText: "0.350000", Currency: "",
+			AmountSource: CostSourceUpstreamPrice, OccurredAt: now,
+		},
+		{
+			OperationID: opID, Provider: ProviderHero, Kind: CostRefund, Subject: "res-2",
+			AmountText: "-0.350000", AmountSource: CostSourceRefundOfPrice, OccurredAt: now,
+		},
+		{
+			// 62 买号：上游只回订单号，金额此刻未知。
+			OperationID: opID, Provider: ProviderSMS62, Kind: CostPurchase, Subject: "",
+			ProviderRef: "order-9", Currency: CurrencyUSD,
+			AmountSource: CostSourcePendingOrder, OccurredAt: now,
+		},
+	}
+	inserted, err := store.AppendCostEvents(ctx, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted != 3 {
+		t.Fatalf("应插入三条, got %d", inserted)
+	}
+	// 重放：一条都不该再插进去，也不该改写已有的。
+	again, err := store.AppendCostEvents(ctx, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 0 {
+		t.Fatalf("重放不该记两次账, got %d", again)
+	}
+
+	got, err := store.ListCostEvents(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("应有三条, got %+v", got)
+	}
+	bySubject := map[string]CostEvent{}
+	for _, ev := range got {
+		bySubject[ev.Subject] = ev
+	}
+	if bySubject["res-1"].AmountText != "0.350000" || bySubject["res-1"].Service != "go" {
+		t.Errorf("金额与维度要原样回来: %+v", bySubject["res-1"])
+	}
+	if bySubject["res-2"].AmountText != "-0.350000" {
+		t.Errorf("退款要是负数: %+v", bySubject["res-2"])
+	}
+	// NULL 金额读回来是空串，**不是 0**。
+	if bySubject[""].AmountText != "" || bySubject[""].Currency != CurrencyUSD {
+		t.Errorf("未知金额应为空: %+v", bySubject[""])
+	}
+	if bySubject[""].ProviderRef != "order-9" {
+		t.Errorf("订单号要留着，事后才补得回金额: %+v", bySubject[""])
+	}
+	// 按供应商筛。
+	only62, err := store.ListCostEvents(ctx, ProviderSMS62, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(only62) != 1 || only62[0].Provider != ProviderSMS62 {
+		t.Fatalf("按供应商筛不对: %+v", only62)
+	}
+}

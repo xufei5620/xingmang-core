@@ -79,6 +79,10 @@ type Store interface {
 	// LatestBalanceSnapshots 每家最新一条。
 	LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error)
 
+	// 成本事件（XM-SMS3 #1）。按 (操作, 主体) 幂等：同一笔操作重放不会记两次账。
+	AppendCostEvents(ctx context.Context, events []CostEvent) (int, error)
+	ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error)
+
 	// 告警（XM-SMS2 #8）。阈值按家配（币种各自不同，不折算）；事件按指纹去重，
 	// 条件消失由 ResolveAlertEventsNotIn 自动收敛。
 	SaveBalanceThreshold(ctx context.Context, t BalanceThreshold) error

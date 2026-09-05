@@ -291,6 +291,10 @@ func (s *Service) purchase(ctx context.Context, operationID, provider string, in
 	if err := s.store.ResolveOperation(ctx, op); err != nil {
 		return Operation{}, nil, err
 	}
+	// 成本在**成功那一刻**记（XM-SMS3 #1）：事后从资源表反推算不出延长、
+	// 重激活与退款。写失败只吞掉，不把一笔成功的操作翻成失败——那会诱使人
+	// 再买一次；少掉的行由余额对账兜底。
+	s.recordCosts(ctx, s.purchaseCostEvents(op, CostPurchase, resources, resourceIDs))
 	return op, resourceIDs, nil
 }
 
@@ -378,6 +382,10 @@ func (s *Service) ExecuteAction(ctx context.Context, operationID, kind, resource
 	// 上游动作已成功，这里写不进去不值得把台账翻成 unknown——那会诱使人再取消一次。
 	if final != "" {
 		_ = s.store.SetResourceState(ctx, resource.ID, final, s.now())
+	}
+	// 取消退款记负数，延长 / 重激活记一条金额未知的花费（上游写体不回价格）。
+	if costKind := costKindFor(kind); costKind != "" {
+		s.recordCosts(ctx, s.lifecycleCostEvent(op, costKind, resource))
 	}
 
 	op.State = StateSucceeded
