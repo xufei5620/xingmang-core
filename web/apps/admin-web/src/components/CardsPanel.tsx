@@ -438,11 +438,15 @@ export function CardsPanel() {
       id: "cvv",
       header: "CVV",
       // 与卡号同一逻辑：明文由后端按 card.reveal 权限决定回不回，
-      // 前端只显示它拿到的东西。默认隐藏——它比卡号更少用，
-      // 而摊在列表上等于长期暴露在任何一次截屏里。
+      // 前端只显示它拿到的东西。
+      //
+      // 原先默认隐藏，理由是「摊在列表上等于长期暴露在任何一次截屏里」。
+      // 产品负责人 2026-09-05 要求默认显示，而那条理由本来也站不住：
+      // 卡号整串就在左边显示着，藏起 CVV 只是个半拉子措施——真要防截屏
+      // 泄露，该藏的是卡号。既然卡面明文已经按 card.reveal 权限回到了
+      // 这一页，就让要用它的人一眼看全，而不是每次去勾三个框。
       cell: (row) => <span className="font-mono">{row.cvv || "—"}</span>,
       value: (row) => row.cvv ?? "",
-      defaultHidden: true,
     },
     {
       id: "expiry",
@@ -452,7 +456,6 @@ export function CardsPanel() {
       // 解析一个格式尚未定论的字段，只会在上游改回去时静默显示错。
       cell: (row) => <span className="font-mono">{row.expiry_mmyy || "—"}</span>,
       value: (row) => row.expiry_mmyy ?? "",
-      defaultHidden: true,
     },
     {
       id: "issue_fee",
@@ -508,10 +511,12 @@ export function CardsPanel() {
     },
     {
       id: "issued",
-      header: "开卡日期",
+      // 「时间」而不是「日期」：显示到秒（formatUtcTimestamp 给的是
+      // YYYY-MM-DD HH:mm:ss UTC）。叫「日期」会让人以为只精确到天，
+      // 而排查一次开卡时最要紧的恰恰是分秒——那是和审计事件对得上的东西。
+      header: "开卡时间",
       cell: (row) => (row.issued_at ? formatUtcTimestamp(row.issued_at) : "—"),
       value: (row) => row.issued_at ?? "",
-      defaultHidden: true,
     },
     {
       id: "freshness",
