@@ -587,7 +587,7 @@ func TestEnqueueEligibilityShadowFinalizationWindowRequestsWhatFinalizationWould
 	seedEligibilityProjectionJobRowWithAttempts(t, store, ctx, captured, "queued", 2, strPtr("BALANCE_PROOF_PENDING"), now, now, cutover.Add(4*time.Hour))
 	capturedWindow := cutover.Add(5 * time.Hour)
 
-	windowed, err := store.EnqueueEligibilityShadowFinalizationWindow(ctx)
+	windowed, err := store.EnqueueEligibilityShadowFinalizationWindow(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,5 +615,20 @@ func TestEnqueueEligibilityShadowFinalizationWindowRequestsWhatFinalizationWould
 	}
 	if _, ok := requestedOf(excluded); ok {
 		t.Fatal("an account still in catch-up must not be queued, exactly as finalization skips it")
+	}
+	// With lag, the window is what finalization would have requested that
+	// much earlier; a captured larger window is still kept.
+	lagged := cutover.Add(2*time.Hour - 900*time.Second - time.Hour)
+	if _, err = store.pool.Exec(ctx, `DELETE FROM eligibility_projection_jobs WHERE external_account_id=$1`, behind); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.EnqueueEligibilityShadowFinalizationWindow(ctx, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := requestedOf(behind); !ok || !got.Equal(lagged) {
+		t.Fatalf("with an hour of lag the account behind must be asked through %s: got %s present=%v", lagged, got, ok)
+	}
+	if got, ok := requestedOf(captured); !ok || !got.Equal(capturedWindow) {
+		t.Fatalf("lag must not lower a captured window %s: got %s present=%v", capturedWindow, got, ok)
 	}
 }

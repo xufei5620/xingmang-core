@@ -67,6 +67,9 @@ assert_exit 2 "--finalization-window without --reproject-all is a usage error" -
 assert_exit 2 "--release-catchup rejects a value that is not an account uuid" --image-tag 0.1.0-rc5 --reproject-all --release-catchup acdcdce9
 assert_exit 1 "--timeout is parsed and stops at the env checks" --image-tag 0.1.0-rc5 --timeout 90m
 assert_exit 2 "--timeout rejects a value that is not whole minutes" --image-tag 0.1.0-rc5 --timeout 1h
+assert_exit 1 "--finalization-window-lag is parsed and stops at the env checks" --image-tag 0.1.0-rc5 --reproject-all --finalization-window --finalization-window-lag 1h
+assert_exit 2 "--finalization-window-lag without --finalization-window is a usage error" --image-tag 0.1.0-rc5 --reproject-all --finalization-window-lag 1h
+assert_exit 2 "--finalization-window-lag rejects a bare number" --image-tag 0.1.0-rc5 --reproject-all --finalization-window --finalization-window-lag 60
 # An explicit --backup's shape is validated with the other flags -- before
 # any environment or tool-availability check -- specifically so this needs
 # neither BACKUP_DIR nor age/docker/etc. installed.

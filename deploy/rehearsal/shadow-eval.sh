@@ -69,6 +69,10 @@ finalization_window=0
 # Overall context budget handed to the tool's own --timeout; the default is
 # its own (25m). A three-day catch-up replayed unbounded needs more.
 tool_timeout=""
+# --finalization-window-lag: derive the finalization window from watermarks
+# this much earlier (a frontier window's carry-forward proof cannot close on a
+# frozen copy; about 1h leaves a catch-up window whole but provable).
+finalization_window_lag=""
 tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE:-16g}
 
 usage() {
@@ -78,6 +82,7 @@ usage: shadow-eval.sh --image-tag <0.1.0-rcNN> [--backup <invoice-TIMESTAMP>]
                        [--evidence-batch-limit N] [--reevaluate-evidence]
                        [--release-catchup <account-id[,account-id...]>] [--finalization-window]
                        [--timeout <Nm>]
+                       [--finalization-window-lag <Nm|Nh>]
 USAGE
 }
 
@@ -110,6 +115,9 @@ while (( $# > 0 )); do
     --timeout)
       (( $# >= 2 )) || { echo '--timeout requires a value' >&2; exit 2; }
       tool_timeout=$2; shift 2 ;;
+    --finalization-window-lag)
+      (( $# >= 2 )) || { echo '--finalization-window-lag requires a value' >&2; exit 2; }
+      finalization_window_lag=$2; shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -124,6 +132,8 @@ done
 [[ -z "$release_catchup" || "$release_catchup" =~ ^[0-9a-f-]{36}(,[0-9a-f-]{36})*$ ]] || { echo '--release-catchup must be one or more comma-separated account uuids' >&2; exit 2; }
 if (( finalization_window )) && ! (( reproject_all )); then echo '--finalization-window requires --reproject-all' >&2; exit 2; fi
 [[ -z "$tool_timeout" || "$tool_timeout" =~ ^[1-9][0-9]{0,2}m$ ]] || { echo '--timeout must look like 90m' >&2; exit 2; }
+[[ -z "$finalization_window_lag" || "$finalization_window_lag" =~ ^[1-9][0-9]{0,2}[mh]$ ]] || { echo '--finalization-window-lag must look like 1h or 30m' >&2; exit 2; }
+if [[ -n "$finalization_window_lag" ]] && ! (( finalization_window )); then echo '--finalization-window-lag requires --finalization-window' >&2; exit 2; fi
 # An explicit --backup's shape is pure input validation and belongs with the
 # other flag checks above -- before any environment or tool-availability
 # check below -- so a typo'd backup name fails immediately regardless of
@@ -408,6 +418,8 @@ finalization_window_args=()
 if (( finalization_window )); then finalization_window_args=(--finalization-window); fi
 timeout_args=()
 if [[ -n "$tool_timeout" ]]; then timeout_args=(--timeout "$tool_timeout"); fi
+finalization_window_lag_args=()
+if [[ -n "$finalization_window_lag" ]]; then finalization_window_lag_args=(--finalization-window-lag "$finalization_window_lag"); fi
 
 set +e
 docker run --pull never --rm --network "$network" --read-only \
@@ -420,7 +432,7 @@ docker run --pull never --rm --network "$network" --read-only \
   --backup-label "$backup_name" --candidate-image-tag "$image_tag" \
   --migrations-applied "$migrations_applied_csv" \
   "${reproject_all_args[@]}" "${evidence_batch_limit_args[@]}" "${reevaluate_evidence_args[@]}" \
-  "${release_catchup_args[@]}" "${finalization_window_args[@]}" "${timeout_args[@]}" \
+  "${release_catchup_args[@]}" "${finalization_window_args[@]}" "${finalization_window_lag_args[@]}" "${timeout_args[@]}" \
   >"$report_json" 2>"$tool_log"
 tool_exit=$?
 set -e

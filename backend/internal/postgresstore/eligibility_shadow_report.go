@@ -451,7 +451,18 @@ func (s *Store) EligibilityShadowReleaseCatchup(ctx context.Context, accountIDs 
 // from catch-up on the copy would never be asked for the catch-up window that
 // is the whole point of releasing it. Returns how many rows it inserted or
 // retargeted.
-func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context) (int64, error) {
+//
+// lag moves the watermarks back before the window is derived: the window a
+// finalization pass would have requested that much earlier. On a frozen copy
+// the facts nearest the frontier were ingested under watermarks later than
+// the window end, and no balances cycle inside the window can cover them, so
+// the carry-forward proof of a frontier window pends forever there (in
+// production the next pass widens the window and the proof closes). An hour
+// of lag leaves a three-day catch-up window three days minus an hour.
+func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context, lag time.Duration) (int64, error) {
+	if lag < 0 {
+		return 0, errors.New("finalization window lag must not be negative")
+	}
 	command, err := s.pool.Exec(ctx, `
 		WITH bounds AS (
 			SELECT source_instance_id,min(watermark_at) AS min_watermark
@@ -459,7 +470,7 @@ func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context) 
 		), targets AS (
 			SELECT eas.external_account_id,
 				GREATEST(eas.finalized_through,eas.cutover_at,
-					b.min_watermark-make_interval(secs=>eas.finalization_delay_seconds)) AS requested_through
+					b.min_watermark-make_interval(secs=>eas.finalization_delay_seconds)-make_interval(secs=>$1::double precision)) AS requested_through
 			FROM source_account_eligibility_state eas
 			JOIN bounds b ON b.source_instance_id=eas.source_instance_id
 			WHERE eas.catchup_key_hmac IS NULL AND eas.eligibility_status<>'syncing'
@@ -470,7 +481,7 @@ func (s *Store) EnqueueEligibilityShadowFinalizationWindow(ctx context.Context) 
 			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),status='queued',
 			next_attempt_at=EXCLUDED.next_attempt_at,lease_token=NULL,lease_expires_at=NULL,
 			last_error_code=NULL,attempt_count=0,updated_at=now()
-		WHERE eligibility_projection_jobs.status<>'dead'`)
+		WHERE eligibility_projection_jobs.status<>'dead'`, lag.Seconds())
 	if err != nil {
 		return 0, err
 	}

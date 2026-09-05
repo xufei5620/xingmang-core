@@ -364,7 +364,7 @@ Two things the tests taught that the design had not said:
 Still to do before the bound is switched on in production: the forward-only
 differential rehearsal that replays the 2026-09-04 burst (the runbook's
 procedure: pre-repair backup `invoice-20260904T033226Z`, `--release-catchup` for
-`acdcdce9`, `--finalization-window`, `--reproject-all` twice with
+`acdcdce9`, `--finalization-window --finalization-window-lag 1h`, `--reproject-all` twice with
 `--evidence-batch-limit 0` and `25`, both `ready`, the bound engaged on the
 released account, `after.accounts` identical in every field but
 `projection_version`, `evaluations_by_status` identical). Until then the api
@@ -451,3 +451,23 @@ a non-superuser session. The bound's engagement (`projection_version` strictly
 greater in the bounded report for the released account) is an explicit
 acceptance criterion. RC95 was not rolled forward; production stayed on RC94
 with the bound off.
+
+### Take four: the instrument works, the frontier proof does not close on a frozen copy (2026-09-05, RC96)
+
+RC96's pair on `invoice-20260904T033226Z` with `--release-catchup acdcdce9` and
+`--finalization-window`: the release cleared the key (`accounts_released` 1), all
+eight accounts were queued through the window finalization would have
+requested (03:11:42Z, the minimum watermark minus the 900 s delay), six
+projected and both runs came back `ready` -- but the released account never
+replayed. Its job sat in `BALANCE_PROOF_PENDING` (as did `40bd883d`'s), because
+`ensureBalanceCarryForwardProofTx` covers each fact's visibility (the stream
+watermark it was ingested under) with a balances checkpoint or a published
+balances cycle whose ceiling lies inside the window, and the facts nearest
+the frontier were ingested under watermarks later than the window end. In
+production the next finalization pass widens the window and the proof
+closes; on a frozen copy there is no next pass. RC97 adds
+`--finalization-window-lag`: the window a finalization pass would have requested
+that much earlier, so an hour of lag leaves the three-day catch-up window
+whole but provable. RC97 also restores the `os.Exit` that RC96's
+`--reevaluate-evidence`-without-`--reproject-all` check had lost (it logged and
+went on). Neither RC96 nor RC97 changes anything production runs.

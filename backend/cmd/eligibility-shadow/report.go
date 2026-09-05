@@ -155,6 +155,10 @@ type Report struct {
 	// requested at the copy's last watermarks, never lowering a captured one.
 	FinalizationWindowRequested bool  `json:"finalization_window_requested"`
 	AccountsWindowed            int64 `json:"accounts_windowed"`
+	// FinalizationWindowLagSeconds: how much earlier than the copy's last
+	// watermarks the window was derived (0 = exactly what finalization would
+	// have requested at them).
+	FinalizationWindowLagSeconds int64 `json:"finalization_window_lag_seconds"`
 
 	Before       Snapshot         `json:"before"`
 	BeforeHealth ProjectionHealth `json:"before_projection_health"`
