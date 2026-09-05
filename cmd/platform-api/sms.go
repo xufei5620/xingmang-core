@@ -3,13 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/xufei5620/xingmang-platform/connectors/herosms"
-	"github.com/xufei5620/xingmang-platform/connectors/sms62"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
@@ -76,6 +73,9 @@ func loadSMSConfig(getenv func(string) string) (smsConfig, error) {
 // 是 hero_sms。直接拼会得到一个解析不过的引用，且只在 XM_SMS_MODE=real 时
 // 才炸——症状是「密钥引用非法」，看起来像运营填错了，可这串根本不是人填的。
 func smsCredentialRef(provider string) string {
+	if spec, ok := sms.Spec(provider); ok {
+		return spec.CredentialRef()
+	}
 	return "secret://" + strings.ReplaceAll(strings.ToLower(provider), "_", "-") + "/api-key"
 }
 
@@ -125,41 +125,16 @@ func buildSMSAdapter(mode smsMode, provider string, secretProvider secrets.Secre
 	if secretProvider == nil {
 		return nil, fmt.Errorf("real 模式需要 SecretProvider")
 	}
-	ref, err := secrets.ParseCredentialRef(smsCredentialRef(provider))
-	if err != nil {
-		return nil, fmt.Errorf("供应商 %s 的密钥引用 %q 非法: %w", provider, smsCredentialRef(provider), err)
-	}
-
-	switch provider {
-	case sms.ProviderSMS62:
-		host, err := hostOf(sms62.ProductionBaseURL)
-		if err != nil {
-			return nil, err
-		}
-		// allowlist 只放这一个主机：写通道的 fail-closed 语义要求它非空，
-		// 而放宽到多个主机没有任何业务理由。
-		return sms.NewSMS62Adapter(sms62.NewClient(secretProvider, ref, []string{host}), time.Now), nil
-	case sms.ProviderHero:
-		host, err := hostOf(herosms.ProductionBaseURL)
-		if err != nil {
-			return nil, err
-		}
-		return sms.NewHeroAdapter(herosms.NewClient(secretProvider, ref, []string{host}), time.Now), nil
-	default:
+	// 构造函数在注册表里（ADR-022）：接第三家不再改这里。
+	spec, ok := sms.Spec(provider)
+	if !ok {
 		return nil, fmt.Errorf("%w: %s", sms.ErrProviderUnknown, provider)
 	}
-}
-
-func hostOf(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return "", fmt.Errorf("接码端点 %q 无法解析主机名", raw)
+	ref, err := secrets.ParseCredentialRef(spec.CredentialRef())
+	if err != nil {
+		return nil, fmt.Errorf("供应商 %s 的密钥引用 %q 非法: %w", provider, spec.CredentialRef(), err)
 	}
-	if u.Scheme != "https" {
-		// 带密钥的请求必须走 TLS。
-		return "", fmt.Errorf("接码端点必须是 https，当前 %q", raw)
-	}
-	return u.Hostname(), nil
+	return spec.Build(secretProvider, ref, time.Now)
 }
 
 // registerSMSActions 注册四个 Action。svc 为 nil（mode=off）时不注册。

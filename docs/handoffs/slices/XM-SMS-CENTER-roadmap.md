@@ -14,14 +14,14 @@ branch: ai/claude/XM-CARD0-infini-connector
 - 遇到需要产品负责人拍板的事（新的花钱路径、权限边界、数据删除），停下写在
   本文件「待决」一节，不猜。
 
-## XM-SMS2 · 中心化与多上游骨架 — status: todo
+## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–3 done）
 
-1. 改名「接码中心」：导航、页面标题、文档、导航防漂移测试。
-2. 供应商注册表：`internal/platform/sms/registry.go` 定义 `ProviderSpec`（ID、标签、
+1. ~~改名「接码中心」~~ done（2d4b559）。
+2. ~~供应商注册表~~ done：`internal/platform/sms/registry.go` 定义 `ProviderSpec`（ID、标签、
    能力集、凭据引用、构造）；`SupportsAction` 改由能力集推导；`AllProviders` 由
    注册表生成；`/sms/providers` 回 `capabilities` 数组（保留 `supports_lifecycle`
    一段时间给旧页面）；页面按能力渲染按钮。
-3. 迁移 000041：去掉 `provider_status / sms_order / sms_resource / sms_operation /
+3. ~~迁移 000041~~ done：去掉 `provider_status / sms_order / sms_resource / sms_operation /
    sms_code / sms_email` 六处对 provider 名字的 CHECK（写路径由注册表校验兜底）。
 4. 统一号码状态：`sms_resource.state`（待收码 / 已收码 / 已完成 / 已取消 / 已过期），
    `status` 列保留上游原话；各适配器给出映射；页面显示统一状态、悬停看原话。
@@ -68,4 +68,11 @@ branch: ai/claude/XM-CARD0-infini-connector
 
 ## 验证记录
 
-（每个切片完成后填）
+- 2026-09-06 XM-SMS2 #1–#3：注册表测试钉住 ID 唯一 / 标签 / 凭据引用可解析 /
+  构造函数存在，SupportsAction 逐动作对照能力集；真库测试
+  `TestPgStoreProviderStatusAcceptsThirdProviderAfter000041` 直接写一个注册表里
+  没有的供应商名进 provider_status——迁移前会撞 CHECK，迁移后成功，这才证明
+  「接第三家不改迁移」成立；token 形状与未知供应商由代码拒绝（错误是
+  ErrProviderUnknown 而不是 constraint）。cmd 层 buildSMSAdapter 改走
+  spec.Build，凭据引用走 spec.CredentialRef。/sms/providers 多回 label 与
+  capabilities，前端标签优先取服务端的。

@@ -23,9 +23,9 @@ const (
 
 // AllProviders 是代码支持的全部供应商，顺序即页面上的展示顺序。
 //
-// 进程**永远把这两家都建出来**，能不能用由库里的 enabled 决定。
-// 让构造随配置变化，等于在后台开一家之后还要重启进程才生效。
-var AllProviders = []string{ProviderSMS62, ProviderHero}
+// **由注册表生成**（registry.go），不再手写第二份清单。进程永远把全部供应商
+// 都建出来，能不能用由库里的 enabled 决定。
+var AllProviders = ProviderIDs()
 
 // 操作类型。62 只支持 purchase；其余全部是 Hero 独有。
 //
@@ -268,21 +268,16 @@ func CanonicalRequestHash(provider, kind string, params map[string]string) strin
 	return hex.EncodeToString(sum[:])
 }
 
-// SupportsAction 说明某家是否支持某个动作。
-//
-// 62 只有 purchase：它没有取消/完成/替换/延长的接口，也没有租用、邮箱与
-// 收藏。把不支持的动作在领域层挡掉，而不是让它打到上游去换一个含糊的 404。
+// SupportsAction 说明某家是否支持某个动作。**由注册表的能力集推导**，
+// 不再按名字 switch——两份清单迟早差一家。把不支持的动作在领域层挡掉，
+// 而不是让它打到上游去换一个含糊的 404。
 func SupportsAction(provider, kind string) bool {
-	switch kind {
-	case KindPurchase:
-		return provider == ProviderSMS62 || provider == ProviderHero
-	case KindCancel, KindFinish, KindReplace, KindReactivate, KindProlong,
-		KindRent, KindEmailPurchase, KindEmailCancel, KindEmailReorder,
-		KindFavoriteSet, KindFavoriteRemove:
-		return provider == ProviderHero
-	default:
+	capability, ok := capabilityForKind(kind)
+	if !ok {
 		return false
 	}
+	spec, ok := Spec(provider)
+	return ok && spec.Has(capability)
 }
 
 // ValidateProvider 挡住不认识的供应商。
@@ -290,10 +285,8 @@ func SupportsAction(provider, kind string) bool {
 // 走 AllProviders 而不是另写一份 switch：两份清单迟早会差一家，
 // 而那种差异的症状是「页面上有这家，一点就说未知供应商」。
 func ValidateProvider(provider string) error {
-	for _, id := range AllProviders {
-		if id == provider {
-			return nil
-		}
+	if _, ok := Spec(provider); ok {
+		return nil
 	}
 	return fmt.Errorf("%w: %q", ErrProviderUnknown, provider)
 }

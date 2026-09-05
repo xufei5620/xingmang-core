@@ -29,9 +29,21 @@ const RESOURCES_QUERY = "sms-resources";
 const OPERATIONS_QUERY = "sms-operations";
 const CATALOG_QUERY = "sms-catalog";
 
-/** 供应商的中文名。未知取值原样显示。 */
+/** 供应商的标签。
+ *
+ *  优先用服务端注册表给的 label（/sms/providers 每次都带），这里的静态表只是
+ *  供应商清单还没加载时的回落；接第三家时不必改前端。 */
+const providerLabels = new Map<string, string>([
+  ["sms62", "62-US"],
+  ["hero_sms", "Hero-SMS"],
+]);
+function rememberProviderLabels(items: SMSProvider[]) {
+  for (const p of items) {
+    if (p.label) providerLabels.set(p.provider, p.label);
+  }
+}
 function providerLabel(id: string): string {
-  return { sms62: "62-US", hero_sms: "Hero-SMS" }[id] ?? id;
+  return providerLabels.get(id) ?? id;
 }
 
 /** 七态的中文与色调。
@@ -87,6 +99,7 @@ export function SMSPanel() {
   });
 
   const providers = providersQuery.data ?? [];
+  rememberProviderLabels(providers);
   const resources = resourcesQuery.data ?? [];
   const selected = resources.find((r) => r.resource_id === selectedId) ?? resources[0] ?? null;
 

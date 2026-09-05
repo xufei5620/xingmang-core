@@ -30,6 +30,10 @@ function translateUnmounted(error: unknown): never {
 
 export interface SMSProvider {
   provider: string;
+  /** 标签与能力集来自服务端注册表（ADR-022）。页面按能力渲染按钮，
+   *  接第三家供应商时前端一个字都不用改。 */
+  label?: string;
+  capabilities?: string[];
   /** 运营在后台开的开关。**与 verified 是两件事**：
    *  关着是运营的决定（去页面上打开），没验证是凭据的问题（去做连接测试）。
    *  买号要求两个都为 true。 */

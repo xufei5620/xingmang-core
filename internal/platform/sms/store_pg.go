@@ -177,6 +177,12 @@ UPDATE sms.sms_operation
 
 // UpsertResource 按 (provider, external_id) 落号码，保持本地 UUID 不变。
 func (s *PgStore) UpsertResource(ctx context.Context, r Resource) (string, error) {
+	// 形状校验搬出了数据库（迁移 000041 去掉了按名字的 CHECK）：
+	// 供应商必须在注册表里；有 token 能力的（62）必须带 token，没有的（Hero）
+	// 必须不带——token 落库那条纪律只对前者成立。
+	if err := checkResourceShape(r); err != nil {
+		return "", err
+	}
 	const upsertSQL = `
 INSERT INTO sms.sms_resource (
     environment, provider, external_id, phone, phone_mask, provider_token,
@@ -522,6 +528,10 @@ ON CONFLICT (environment, provider) DO UPDATE SET
 // value 用 COALESCE 保留：上游列表接口有时不带 value（它只在详情里），
 // 一次列表同步不该把已经收到的验证内容冲成空。
 func (s *PgStore) UpsertEmail(ctx context.Context, e Email) (string, error) {
+	// 只有具备邮箱能力的供应商才有邮箱行（此前是 CHECK (provider IN ('hero_sms'))）。
+	if spec, ok := Spec(e.Provider); !ok || !spec.Has(CapEmail) {
+		return "", fmt.Errorf("%w: %s 没有邮箱接码", ErrExtrasNotSupported, e.Provider)
+	}
 	const upsertSQL = `
 INSERT INTO sms.sms_email (
     environment, provider, external_id, site, email, status, value,
@@ -603,4 +613,23 @@ func scanEmail(row scannable) (Email, error) {
 		e.UpstreamDate = *date
 	}
 	return e, nil
+}
+
+// checkResourceShape 是迁移 000041 去掉的两条 CHECK 在代码里的替身。
+//
+// 放在存储层入口而不是 Service：所有写路径都经过 UpsertResource，
+// 这里是最窄的口。错误文案说明白是哪一条，免得人去猜「为什么落不进去」。
+func checkResourceShape(r Resource) error {
+	spec, ok := Spec(r.Provider)
+	if !ok {
+		return fmt.Errorf("%w: %q（不在注册表里）", ErrProviderUnknown, r.Provider)
+	}
+	hasToken := r.ProviderToken != ""
+	if spec.Has(CapToken) && !hasToken {
+		return fmt.Errorf("%s 的号码必须带取码 token", spec.Label)
+	}
+	if !spec.Has(CapToken) && hasToken {
+		return fmt.Errorf("%s 的号码不该带 token（这家取码不用它）", spec.Label)
+	}
+	return nil
 }

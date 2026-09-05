@@ -29,6 +29,10 @@ type SMSCatalogReader interface {
 
 type smsProviderItem struct {
 	Provider string `json:"provider"`
+	// Label / Capabilities 来自注册表（ADR-022）。页面按能力渲染按钮，
+	// 不再按供应商名字判断；标签也不再在前端另写一份。
+	Label        string   `json:"label"`
+	Capabilities []string `json:"capabilities"`
 	// Enabled 是**运营在后台开的开关**，与 Verified 分开报。
 	//
 	// 页面要能同时说清两件事：这家开没开（运营的意愿），以及凭据能不能用
@@ -124,6 +128,8 @@ func ListSMSProvidersHandler(store SMSQuerier, configured []string) http.Handler
 			st := byProvider[id]
 			item := smsProviderItem{
 				Provider:          id,
+				Label:             sms.Label(id),
+				Capabilities:      sms.Capabilities(id),
 				Enabled:           st.Enabled,
 				Verified:          st.Verified(),
 				ClientIP:          st.ClientIP,

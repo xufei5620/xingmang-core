@@ -2,6 +2,7 @@ package sms
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -136,5 +137,44 @@ func TestPgStoreOperationAcceptsNewKinds(t *testing.T) {
 		if err := store.PrepareOperation(ctx, op); err != nil {
 			t.Fatalf("kind %s 进不了台账: %v", kind, err)
 		}
+	}
+}
+
+// 迁移 000041 之后，数据库不再按名字挡供应商：一个注册表里没有的名字要被
+// **代码**拒绝，而不是撞 CHECK。这条测试同时钉住两件事：CHECK 真的没了
+// （否则错误文案会是 constraint 而不是「不在注册表里」），以及代码的兜底在。
+func TestPgStoreRejectsUnknownProviderInCodeNotByCheck(t *testing.T) {
+	store := pgStore(t)
+	_, err := store.UpsertResource(context.Background(), Resource{Provider: "nobody", ExternalID: "x", Phone: "1"})
+	if err == nil {
+		t.Fatal("不在注册表里的供应商必须被拒绝")
+	}
+	if !errors.Is(err, ErrProviderUnknown) {
+		t.Fatalf("应由注册表拒绝，而不是数据库 CHECK: %v", err)
+	}
+}
+
+// token 形状约束搬到代码后仍然有效：62 必须带、Hero 必须不带。
+func TestPgStoreTokenShapeEnforcedInCode(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	if _, err := store.UpsertResource(ctx, Resource{Provider: ProviderSMS62, ExternalID: "a", Phone: "1"}); err == nil {
+		t.Fatal("62 的号码没有 token 必须被拒绝")
+	}
+	if _, err := store.UpsertResource(ctx, Resource{Provider: ProviderHero, ExternalID: "b", Phone: "2", ProviderToken: "t"}); err == nil {
+		t.Fatal("Hero 的号码带 token 必须被拒绝")
+	}
+	if _, err := store.UpsertResource(ctx, Resource{Provider: ProviderSMS62, ExternalID: "c", Phone: "3", ProviderToken: "tok"}); err != nil {
+		t.Fatalf("合法的 62 号码应能落库: %v", err)
+	}
+}
+
+// 这条才真正证明 CHECK 没了：provider_status 没有代码层校验，直接写一个注册表
+// 里不存在的名字——迁移 000041 之前会撞 provider_status_provider_known。
+// 「接第三家不改迁移」就靠这一点。
+func TestPgStoreProviderStatusAcceptsThirdProviderAfter000041(t *testing.T) {
+	store := pgStore(t)
+	if err := store.SetProviderEnabled(context.Background(), "third_provider", true, testNow); err != nil {
+		t.Fatalf("迁移 000041 后不该再按名字挡供应商: %v", err)
 	}
 }
