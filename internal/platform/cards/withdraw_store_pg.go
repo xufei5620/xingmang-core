@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // 提现的持久化。与卡片的 PgStore 共用连接池与 environment，
@@ -15,16 +16,19 @@ import (
 // AllowedAddress 取一条登记的提现地址。
 func (s *PgStore) AllowedAddress(ctx context.Context, id string) (WithdrawAddress, error) {
 	const selectSQL = `
-SELECT id, account, chain, address, label
+SELECT id, account, chain, address, label, enabled
   FROM cards.withdraw_address
  WHERE environment = $1 AND id = $2`
 
 	var a WithdrawAddress
+	// **不在 SQL 里过滤 enabled**：停用与未登记要能在文案上分开
+	// （前者去启用，后者去登记），而那个判断属于领域层——放进 SQL
+	// 会让两种情形在这里就被压成同一个错误。
 	err := s.pool.QueryRow(ctx, selectSQL, s.environment, id).
-		Scan(&a.ID, &a.Account, &a.Chain, &a.Address, &a.Label)
+		Scan(&a.ID, &a.Account, &a.Chain, &a.Address, &a.Label, &a.Enabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 未登记与「查库失败」必须分开：前者是正常的拒绝，后者是故障。
-		return WithdrawAddress{}, fmt.Errorf("%w: %q", ErrAddressNotAllowed, id)
+		return WithdrawAddress{}, fmt.Errorf("%w：地址 %q 未登记", ErrAddressNotAllowed, id)
 	}
 	if err != nil {
 		return WithdrawAddress{}, fmt.Errorf("查提现地址 %s: %w", id, err)
@@ -39,27 +43,48 @@ SELECT id, account, chain, address, label
 func (s *PgStore) RegisterWithdrawAddress(ctx context.Context, a WithdrawAddress, registeredBy string) error {
 	const upsertSQL = `
 INSERT INTO cards.withdraw_address (
-    id, environment, account, chain, address, label, registered_by, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+    id, environment, account, chain, address, label, enabled, registered_by, created_at, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,TRUE,$7,$8,$8)
 ON CONFLICT (environment, account, chain, address) DO UPDATE SET
     label = EXCLUDED.label,
+    -- 重新登记一条已经存在的地址等于「我又要用它了」，顺带把它启用。
+    -- 否则运营会在一条停用的地址上反复点登记，看着成功却仍然提不了现。
+    enabled = TRUE,
     updated_at = EXCLUDED.updated_at`
 
 	if _, err := s.pool.Exec(ctx, upsertSQL,
 		a.ID, s.environment, a.Account, a.Chain, a.Address, a.Label, registeredBy, s.now(),
 	); err != nil {
+		// 主键是 id，而冲突键是 (environment, account, chain, address)。
+		// 拿一个已经用过的 id 去登记**另一条**地址时两者对不上，会撞主键
+		// ——那正是要挡住的事：一条 id 被改指到别的地址，等于以后所有选中
+		// 「冷钱包」的提现都悄悄转去了新地方，而标签一个字都没变。
+		// 裸的约束错读不出这层意思，这里把它翻成人话。
+		if isUniqueViolation(err) {
+			return fmt.Errorf(
+				"地址登记 id %q 已经指向另一条地址：id 不能改指——要换地址请新登记一条，再把旧的停用",
+				a.ID)
+		}
 		return fmt.Errorf("登记提现地址: %w", err)
 	}
 	return nil
 }
 
+// isUniqueViolation 判断是不是唯一约束冲突（Postgres 23505）。
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
 // ListWithdrawAddresses 列出某环境下的全部登记地址。
 func (s *PgStore) ListWithdrawAddresses(ctx context.Context) ([]WithdrawAddress, error) {
 	const listSQL = `
-SELECT id, account, chain, address, label
+SELECT id, account, chain, address, label, enabled
   FROM cards.withdraw_address
  WHERE environment = $1
- ORDER BY account, chain, label`
+ -- 启用的排在前面：停用的地址留在清单里是为了可查、可重新启用，
+ -- 但它们不该和在用的混在一起。
+ ORDER BY enabled DESC, account, chain, label`
 
 	rows, err := s.pool.Query(ctx, listSQL, s.environment)
 	if err != nil {
@@ -70,7 +95,7 @@ SELECT id, account, chain, address, label
 	var out []WithdrawAddress
 	for rows.Next() {
 		var a WithdrawAddress
-		if err := rows.Scan(&a.ID, &a.Account, &a.Chain, &a.Address, &a.Label); err != nil {
+		if err := rows.Scan(&a.ID, &a.Account, &a.Chain, &a.Address, &a.Label, &a.Enabled); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -311,4 +336,27 @@ SELECT account, per_operation, per_day, updated_by, updated_at
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// SetWithdrawAddressEnabled 上线或下线一条登记地址。
+//
+// 不删除：一条曾经被列入白名单的地址，它存在过这件事本身就是审计事实
+// （见迁移 000035）。已发出的提现也不受影响——台账里存的是登记时的
+// 地址快照。
+func (s *PgStore) SetWithdrawAddressEnabled(ctx context.Context, id string, enabled bool, by string) error {
+	const updateSQL = `
+UPDATE cards.withdraw_address
+   SET enabled = $3, status_changed_by = $4, updated_at = $5
+ WHERE environment = $1 AND id = $2`
+
+	tag, err := s.pool.Exec(ctx, updateSQL, s.environment, id, enabled, by, s.now().UTC())
+	if err != nil {
+		return fmt.Errorf("改提现地址状态 %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		// 改一条不存在的登记要报错而不是静默成功：静默会让页面显示
+		// 「已停用」，而那条地址其实压根不在这个环境里。
+		return fmt.Errorf("%w：地址 %q 未登记", ErrAddressNotAllowed, id)
+	}
+	return nil
 }

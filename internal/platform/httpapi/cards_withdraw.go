@@ -32,6 +32,9 @@ type withdrawAddressItem struct {
 	// 让他去别处查，等于逼他在页面之外做核对——那才是出错的地方。
 	Address string `json:"address"`
 	Label   string `json:"label"`
+	// Enabled 为假表示这条地址已下线：仍然列出来（可查、可重新启用），
+	// 但提现表单不该提供它。
+	Enabled bool `json:"enabled"`
 }
 
 type withdrawItem struct {
@@ -66,7 +69,7 @@ func ListWithdrawAddressesHandler(store WithdrawQuerier) http.HandlerFunc {
 		for _, a := range rows {
 			out = append(out, withdrawAddressItem{
 				ID: a.ID, Account: a.Account, Chain: a.Chain,
-				Address: a.Address, Label: a.Label,
+				Address: a.Address, Label: a.Label, Enabled: a.Enabled,
 			})
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{"items": out})

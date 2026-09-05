@@ -14,6 +14,7 @@ vi.mock("../api/withdraw", async () => {
     registerWithdrawAddress: vi.fn(),
     executeWithdraw: vi.fn(),
     setWithdrawLimits: vi.fn(),
+    setWithdrawAddressEnabled: vi.fn(),
   };
 });
 
@@ -22,6 +23,7 @@ import {
   listWithdrawAddresses,
   listWithdrawLimits,
   listWithdrawals,
+  setWithdrawAddressEnabled,
   setWithdrawLimits,
   type WithdrawAddress,
   type WithdrawItem,
@@ -33,6 +35,7 @@ const coldWallet: WithdrawAddress = {
   chain: "TRON",
   address: "TCold1111111111111111111111111111",
   label: "冷钱包",
+  enabled: true,
 };
 
 function renderPanel(accounts = ["MAIN"]) {
@@ -60,8 +63,9 @@ it("提现需要两步确认，第一次点击不发请求", async () => {
   vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
-  await screen.findByText(/冷钱包/);
-  fireEvent.change(screen.getByLabelText("金额"), { target: { value: "10" } });
+  // 用表单自身当就绪信号：地址名现在同时出现在清单行和下拉选项里，
+  // 按文本找会撞到多个元素。
+  fireEvent.change(await screen.findByLabelText("金额"), { target: { value: "10" } });
   fireEvent.click(screen.getByRole("button", { name: "提现" }));
 
   expect(executeWithdraw).not.toHaveBeenCalled();
@@ -80,8 +84,9 @@ it("确认后只提交 address_id，不提交地址本身", async () => {
   vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
-  await screen.findByText(/冷钱包/);
-  fireEvent.change(screen.getByLabelText("金额"), { target: { value: "10" } });
+  // 用表单自身当就绪信号：地址名现在同时出现在清单行和下拉选项里，
+  // 按文本找会撞到多个元素。
+  fireEvent.change(await screen.findByLabelText("金额"), { target: { value: "10" } });
   fireEvent.click(screen.getByRole("button", { name: "提现" }));
   fireEvent.click(await screen.findByRole("button", { name: /确认提现/ }));
 
@@ -102,8 +107,9 @@ it("两步之间幂等键不变", async () => {
   vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
-  await screen.findByText(/冷钱包/);
-  fireEvent.change(screen.getByLabelText("金额"), { target: { value: "10" } });
+  // 用表单自身当就绪信号：地址名现在同时出现在清单行和下拉选项里，
+  // 按文本找会撞到多个元素。
+  fireEvent.change(await screen.findByLabelText("金额"), { target: { value: "10" } });
   fireEvent.click(screen.getByRole("button", { name: "提现" }));
   fireEvent.click(await screen.findByRole("button", { name: /确认提现/ }));
   await waitFor(() => expect(executeWithdraw).toHaveBeenCalledTimes(1));
@@ -200,4 +206,78 @@ it("没设过额度的账号显示未设置而不是 0", async () => {
 
   await screen.findByText(/未设置/);
   expect(screen.queryByText(/^0$/)).toBeNull();
+});
+
+// 地址清单在页面上,停用的也列出来但标记清楚。
+//
+// 留着而不是删掉：一条曾经被列入白名单的地址，它存在过这件事本身就是
+// 审计事实——「这条地址当初是谁登记的、什么时候下线的」正是出事之后
+// 第一个要问的问题。
+it("停用的地址仍列出来，但提现表单不提供它", async () => {
+  vi.mocked(listWithdrawAddresses).mockResolvedValue([
+    coldWallet,
+    { ...coldWallet, address_id: "a2", label: "旧钱包", enabled: false },
+  ]);
+  vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
+  renderPanel();
+
+  // 两条都在清单里。
+  await screen.findByText(/旧钱包/);
+  expect(screen.getByText(/已停用/)).toBeTruthy();
+
+  // 表单在，且选中的是启用的那条。
+  expect(screen.getByLabelText("到账地址").textContent).toContain("冷钱包");
+});
+
+// **全部地址都停用时，提现表单整个不出现。**
+//
+// 这条才是「表单只吃启用的地址」真正可感知的形态。不去断言下拉框里有没有
+// 那一项：Select 是 Radix 的，选项在 Portal 里、只有展开才存在，
+// 「查不到」不等于「没提供」——那种断言把过滤删掉照样通过，试过了。
+it("地址全部停用时不显示提现表单", async () => {
+  vi.mocked(listWithdrawAddresses).mockResolvedValue([{ ...coldWallet, enabled: false }]);
+  vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
+  renderPanel();
+
+  // 清单还在（可查、可重新启用）。
+  await screen.findByText(/已停用/);
+  // 但没有任何可以发起提现的入口。
+  expect(screen.queryByLabelText("金额")).toBeNull();
+  expect(screen.queryByRole("button", { name: "提现" })).toBeNull();
+});
+
+// 下线一条地址就在清单里点。
+it("可以在页面上下线一条地址", async () => {
+  vi.mocked(listWithdrawAddresses).mockResolvedValue([coldWallet]);
+  vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
+  vi.mocked(setWithdrawAddressEnabled).mockResolvedValue({ runId: "run-1" } as never);
+  renderPanel();
+
+  fireEvent.click(await screen.findByRole("button", { name: /停用 冷钱包/ }));
+
+  await waitFor(() => expect(setWithdrawAddressEnabled).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(setWithdrawAddressEnabled).mock.calls[0]![0]).toEqual({
+    address_id: "a1",
+    enabled: false,
+  });
+});
+
+// 停用的地址能重新启用。
+it("停用的地址可以重新启用", async () => {
+  vi.mocked(listWithdrawAddresses).mockResolvedValue([{ ...coldWallet, enabled: false }]);
+  vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
+  vi.mocked(setWithdrawAddressEnabled).mockResolvedValue({ runId: "run-1" } as never);
+  renderPanel();
+
+  fireEvent.click(await screen.findByRole("button", { name: /启用 冷钱包/ }));
+
+  await waitFor(() => expect(setWithdrawAddressEnabled).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(setWithdrawAddressEnabled).mock.calls[0]![0]).toEqual({
+    address_id: "a1",
+    enabled: true,
+  });
 });

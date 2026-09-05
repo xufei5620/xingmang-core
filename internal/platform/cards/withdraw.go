@@ -21,7 +21,12 @@ import (
 
 var (
 	// ErrAddressNotAllowed：目标地址没有登记，或不属于这个账号/这条链。
-	ErrAddressNotAllowed = errors.New("cards: 提现地址未登记")
+	// ErrAddressNotAllowed：这条地址不能用于本次提现。
+	//
+	// 措辞刻意中性——包起它的地方有四种情形（没登记、已停用、账号不符、
+	// 链不符），句子里必须说清是哪一种，因为四种的下一步动作完全不同。
+	// 把「未登记」写进哨兵本身会让「已停用」读成一句自相矛盾的话。
+	ErrAddressNotAllowed = errors.New("cards: 提现地址不可用")
 	// ErrWithdrawLimitsUnbounded：提现额度配成了 unlimited。
 	ErrWithdrawLimitsUnbounded = errors.New("cards: 提现额度不接受 unlimited")
 )
@@ -31,12 +36,23 @@ var (
 // **调用方只能选「哪一条登记」，地址本身由服务端从库里取。**
 // 让调用方传地址、服务端再比对是另一回事——那样一个比对逻辑的疏漏
 // 就能让任意地址过去。
+// WithdrawAddress 是一条登记的可提现地址。
 type WithdrawAddress struct {
 	ID      string
 	Account string
 	Chain   string
 	Address string
 	Label   string
+	// Enabled 为假表示这条地址已被下线，不能再用于提现。
+	//
+	// **零值是 false（不可用）而不是 true**，这是刻意的：这个结构体走的是
+	// 资金路径，忘了赋值时应该挡住钱而不是放行。库里那一列的默认值是
+	// TRUE，读回来的行永远带着真实状态；会踩到零值的只有手写的构造点，
+	// 而那正是最该被挡下的地方。
+	//
+	// 用停用而不是删除：删掉一行就再也回答不了「这条地址当初是谁登记的、
+	// 什么时候下线的」，而那恰恰是出事之后第一个要问的问题。
+	Enabled bool
 }
 
 // WithdrawRequest 是一次提现申请。注意它**不含地址**，只含地址登记的 id。
@@ -165,6 +181,11 @@ func (s *WithdrawService) Withdraw(ctx context.Context, req WithdrawRequest) (Wi
 	addr, err := s.store.AllowedAddress(ctx, req.AddressID)
 	if err != nil {
 		return WithdrawOutcome{}, err
+	}
+	if !addr.Enabled {
+		// 已下线。文案要与「没登记过」分开：前者去启用，后者去登记，
+		// 两者的下一步动作不同。
+		return WithdrawOutcome{}, fmt.Errorf("%w：地址 %q 已停用", ErrAddressNotAllowed, addr.ID)
 	}
 	if addr.Account != req.Account {
 		// 两个账号的资金是分开的：拿 A 登记的地址从 B 提现，

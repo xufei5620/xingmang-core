@@ -62,7 +62,7 @@ func TestWithdrawUsesStoredAddressNotCallerSupplied(t *testing.T) {
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
 		ID: "addr-1", Account: testAccount, Chain: "TRON",
-		Address: "TRealAddressFromDB", Label: "冷钱包",
+		Address: "TRealAddressFromDB", Label: "冷钱包", Enabled: true,
 	}
 	svc := newWithdrawService(fake, store)
 
@@ -85,7 +85,7 @@ func TestWithdrawAddressIsScopedToAccount(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: "OTHER", Chain: "TRON", Address: "TXYZ",
+		ID: "addr-1", Account: "OTHER", Chain: "TRON", Address: "TXYZ", Enabled: true,
 	}
 	svc := newWithdrawService(fake, store)
 
@@ -104,7 +104,7 @@ func TestWithdrawRefusesChainMismatch(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ",
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ", Enabled: true,
 	}
 	svc := newWithdrawService(fake, store)
 
@@ -125,7 +125,7 @@ func TestWithdrawEnforcesLimitsBeforeCallingUpstream(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ",
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ", Enabled: true,
 	}
 	svc := newWithdrawService(fake, store)
 
@@ -145,7 +145,7 @@ func TestWithdrawIsIdempotentByRequestID(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ",
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TXYZ", Enabled: true,
 	}
 	svc := newWithdrawService(fake, store)
 
@@ -208,7 +208,7 @@ func TestWithdrawLimitsComeFromStore(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr", Enabled: true,
 	}
 	svc := newWithdrawService(fake, store)
 	// 助手会先塞一份宽松额度，这里覆盖成要测的那一档（顺序要紧）。
@@ -237,7 +237,7 @@ func TestWithdrawRefusesAccountWithoutLimits(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr", Enabled: true,
 	}
 	svc := NewWithdrawService([]Account{{ID: testAccount, Client: fake}},
 		store, func() time.Time { return issueNow })
@@ -265,7 +265,7 @@ func TestWithdrawLimitsAreSeparateFromCardLimits(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr", Enabled: true,
 	}
 	// 提现额度单独存库里，配真数字。
 	store.withdrawLimits[testAccount] = Limits{PerOperation: "500", PerDay: "2000"}
@@ -302,7 +302,7 @@ func TestSyncerAdvancesOpenWithdrawals(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
-		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr", Enabled: true,
 	}
 	svc := newWithdrawService(fake, store)
 
@@ -345,5 +345,53 @@ func TestSyncerSkipsWithdrawalsWhenUnconfigured(t *testing.T) {
 	})
 	if err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatalf("没配提现不该让同步失败: %v", err)
+	}
+}
+
+// 停用的地址一律拒绝，且**在打上游之前**拒绝。
+//
+// 下线一条地址的全部意义就在这里：它必须真的挡住钱，而不只是从下拉框里
+// 消失。只靠前端不渲染是不够的——一个还留着旧页面的标签页仍然能提交。
+func TestWithdrawRefusesDisabledAddress(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TAddr", Label: "已下线的冷钱包", Enabled: false,
+	}
+	svc := newWithdrawService(fake, store)
+
+	_, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "10", AddressID: "addr-1",
+	})
+	if !errors.Is(err, ErrAddressNotAllowed) {
+		t.Fatalf("停用的地址必须拒绝, got %v", err)
+	}
+	// 文案要能区分「没登记过」和「登记了但停用了」：前者去登记，
+	// 后者去启用，两者的下一步动作不同。
+	if !strings.Contains(err.Error(), "停用") {
+		t.Fatalf("错误里应说明是被停用了, got %v", err)
+	}
+	if fake.withdrawCalls != 0 {
+		t.Fatal("必须在打上游之前就拒绝")
+	}
+}
+
+// 启用的地址照常放行——停用检查不能把正常路径也挡了。
+func TestWithdrawAllowsEnabledAddress(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TAddr", Enabled: true,
+	}
+	svc := newWithdrawService(fake, store)
+
+	if _, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "10", AddressID: "addr-1",
+	}); err != nil {
+		t.Fatalf("启用的地址应放行: %v", err)
 	}
 }

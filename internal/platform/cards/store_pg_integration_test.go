@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -1121,5 +1122,132 @@ func TestPgStoreWithdrawLimitsArePerAccount(t *testing.T) {
 	}
 	if got.PerOperation != "" {
 		t.Fatalf("另一个账号不该拿到这份额度, got %+v", got)
+	}
+}
+
+// 停用之后 AllowedAddress 仍读得到那条登记，但 Enabled 是假。
+//
+// 读得到是刻意的：领域层要能分辨「没登记」和「登记了但停用了」，
+// 两者的下一步动作不同（去登记 / 去启用）。在 SQL 里过滤掉会把这两种
+// 情形压成同一个错误。
+func TestPgStoreDisabledAddressIsStillReadable(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if err := store.RegisterWithdrawAddress(ctx, WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TColdWallet", Label: "冷钱包",
+	}, "xufei"); err != nil {
+		t.Fatal(err)
+	}
+	// 新登记的必须是启用的：登记它的动作本身就是「我要用它」。
+	got, err := store.AllowedAddress(ctx, "addr-1")
+	if err != nil || !got.Enabled {
+		t.Fatalf("新登记的地址应是启用的: %+v (%v)", got, err)
+	}
+
+	if err := store.SetWithdrawAddressEnabled(ctx, "addr-1", false, "someone"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.AllowedAddress(ctx, "addr-1")
+	if err != nil {
+		t.Fatalf("停用后仍应读得到（要能区分未登记与已停用）: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("停用未生效")
+	}
+	// 清单里也留着，供查看与重新启用。
+	list, err := store.ListWithdrawAddresses(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Enabled {
+		t.Fatalf("停用的地址应留在清单里且标记为停用: %+v", list)
+	}
+}
+
+// 改一条不存在的登记要报错，不能静默成功。
+//
+// 静默会让页面显示「已停用」，而那条地址其实压根不在这个环境里。
+func TestPgStoreSetEnabledOnUnknownAddressFails(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	err := store.SetWithdrawAddressEnabled(ctx, "从没登记过", false, "xufei")
+	if !errors.Is(err, ErrAddressNotAllowed) {
+		t.Fatalf("改一条不存在的登记必须报错, got %v", err)
+	}
+}
+
+// **一个 id 不能被改指到另一条地址。**
+//
+// 这是白名单最要害的一条：若允许改指，以后所有选中「冷钱包」的提现都会
+// 悄悄转去新地方，而页面上标签一个字都没变。库层面靠主键挡住，
+// 这里断言它挡住了、而且报出来的是人话而不是裸的约束错。
+func TestPgStoreAddressIDCannotBeRepointed(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if err := store.RegisterWithdrawAddress(ctx, WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TOriginal", Label: "冷钱包",
+	}, "xufei"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := store.RegisterWithdrawAddress(ctx, WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TAttackerAddress", Label: "冷钱包",
+	}, "xufei")
+	if err == nil {
+		t.Fatal("同一个 id 改指到另一条地址必须被拒绝")
+	}
+	if !strings.Contains(err.Error(), "不能改指") {
+		t.Fatalf("错误要说清是改指被拒，而不是一句裸的约束错: %v", err)
+	}
+
+	// 原地址纹丝不动。
+	got, err := store.AllowedAddress(ctx, "addr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Address != "TOriginal" {
+		t.Fatalf("原地址被改掉了: %q", got.Address)
+	}
+}
+
+// 重新登记一条已停用的地址会把它启用。
+//
+// 否则运营会在一条停用的地址上反复点「登记」，每次都显示成功，
+// 却仍然提不了现。
+func TestPgStoreReRegisterReEnables(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	a := WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON",
+		Address: "TColdWallet", Label: "冷钱包",
+	}
+	if err := store.RegisterWithdrawAddress(ctx, a, "xufei"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetWithdrawAddressEnabled(ctx, "addr-1", false, "xufei"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同一条地址再登记一次（id 相同，走 ON CONFLICT 分支）。
+	a.Label = "冷钱包（重新启用）"
+	if err := store.RegisterWithdrawAddress(ctx, a, "xufei"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.AllowedAddress(ctx, "addr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled {
+		t.Fatal("重新登记应把停用的地址启用")
+	}
+	if got.Label != "冷钱包（重新启用）" {
+		t.Fatalf("标签应更新, got %q", got.Label)
 	}
 }

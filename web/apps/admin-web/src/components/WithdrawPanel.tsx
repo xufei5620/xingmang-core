@@ -8,6 +8,7 @@ import {
   listWithdrawLimits,
   listWithdrawals,
   registerWithdrawAddress,
+  setWithdrawAddressEnabled,
   setWithdrawLimits,
   type WithdrawAddress,
   type WithdrawItem,
@@ -215,7 +216,12 @@ export function WithdrawPanel({ accounts }: { accounts: string[] }) {
             这是误操作与后台滥用之间唯一的那道闸。
           </p>
         ) : (
-          <WithdrawForm addresses={addresses} onDone={afterWrite} />
+          <>
+            <AddressList addresses={addresses} onChanged={afterWrite} />
+            {/* 表单只吃启用的那几条。停用的地址留在上面的清单里可查、
+                可重新启用，但不该出现在下拉框里。 */}
+            <WithdrawForm addresses={addresses.filter((a) => a.enabled)} onDone={afterWrite} />
+          </>
         )}
       </ApiStateView>
 
@@ -409,6 +415,87 @@ function EditWithdrawLimitDialog({
         </Button>
       </form>
     </Dialog>
+  );
+}
+
+/** 已登记的地址清单，含上线/下线。
+ *
+ *  **停用而不是删除。** 一条曾经被列入白名单的地址，它存在过这件事本身
+ *  就是审计事实——「这条地址当初是谁登记的、什么时候下线的」正是出事之后
+ *  第一个要问的问题，删掉就再也回答不了。已经发出去的提现也不受影响：
+ *  台账里存的是登记时的地址快照。
+ *
+ *  地址本身**不可编辑**，只能停用后另登记一条。允许改地址意味着以后所有
+ *  选中「冷钱包」的提现都会悄悄转去新地方，而标签一个字都没变——那正是
+ *  攻击者会做的事，而且从页面上看不出来。库层面也挡着（id 撞主键）。 */
+function AddressList({
+  addresses,
+  onChanged,
+}: {
+  addresses: WithdrawAddress[];
+  onChanged: (result: ActionResult) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      {addresses.map((a) => (
+        <AddressRow key={a.address_id} address={a} onChanged={onChanged} />
+      ))}
+    </div>
+  );
+}
+
+function AddressRow({
+  address,
+  onChanged,
+}: {
+  address: WithdrawAddress;
+  onChanged: (result: ActionResult) => void;
+}) {
+  const [error, setError] = useState<unknown>(null);
+
+  const mutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      setWithdrawAddressEnabled({ address_id: address.address_id, enabled }),
+    onSuccess: (run) => {
+      onChanged({
+        runId: run.runId,
+        title: address.enabled
+          ? `已停用地址 ${address.label || address.address_id}`
+          : `已启用地址 ${address.label || address.address_id}`,
+      });
+      setError(null);
+    },
+    onError: (e) => setError(e),
+  });
+
+  const name = address.label || address.address_id;
+
+  return (
+    <div className="border-edge flex flex-wrap items-center gap-2 rounded-md border px-2 py-1 text-sm">
+      <span className={address.enabled ? "font-medium" : "text-fg-muted font-medium"}>{name}</span>
+      <Badge tone={address.enabled ? "success" : "neutral"}>
+        {address.enabled ? "启用中" : "已停用"}
+      </Badge>
+      <span className="text-fg-muted text-xs">
+        {address.account} · {address.chain}
+      </span>
+      {/* 地址给全值：能提现的人本来就必须核对它，截断了等于逼他去别处查。 */}
+      <span className="text-fg-muted font-mono text-xs break-all" title={address.address}>
+        {address.address}
+      </span>
+      <span className="ml-auto flex items-center gap-2">
+        {error ? <ActionErrorNote error={error} /> : null}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={mutation.isPending}
+          aria-label={`${address.enabled ? "停用" : "启用"} ${name}`}
+          onClick={() => mutation.mutate(!address.enabled)}
+        >
+          {address.enabled ? "停用" : "启用"}
+        </Button>
+      </span>
+    </div>
   );
 }
 

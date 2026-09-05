@@ -43,6 +43,8 @@ export interface WithdrawAddress {
   chain: string;
   address: string;
   label: string;
+  /** 停用的地址仍在清单里（可查、可重新启用），但提现表单不提供它。 */
+  enabled: boolean;
 }
 
 export interface WithdrawItem {
@@ -102,6 +104,23 @@ export function setWithdrawLimits(
 ): Promise<ActionRun> {
   return executeAction(
     { actionId: "cards.withdraw.limit.set", version: "1", params },
+    options,
+    client,
+  );
+}
+
+/** 上线或下线一条登记地址（`cards.withdraw.address.set_enabled@1`）。
+ *
+ *  **不删除**：一条曾经被列入白名单的地址，它存在过这件事本身就是审计
+ *  事实——「这条地址当初是谁登记的、什么时候下线的」正是出事之后第一个
+ *  要问的问题。已发出的提现也不受影响，台账里存的是登记时的地址快照。 */
+export function setWithdrawAddressEnabled(
+  params: { address_id: string; enabled: boolean },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "cards.withdraw.address.set_enabled", version: "1", params },
     options,
     client,
   );

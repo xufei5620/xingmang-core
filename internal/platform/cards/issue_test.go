@@ -479,6 +479,16 @@ func (m *memStore) WithdrawLimitsFor(ctx context.Context, account string) (Limit
 	return m.withdrawLimits[account], nil
 }
 
+func (m *memStore) SetWithdrawAddressEnabled(ctx context.Context, id string, enabled bool, by string) error {
+	a, ok := m.addresses[id]
+	if !ok {
+		return fmt.Errorf("%w：地址 %q 未登记", ErrAddressNotAllowed, id)
+	}
+	a.Enabled = enabled
+	m.addresses[id] = a
+	return nil
+}
+
 func (m *memStore) OpenWithdrawals(ctx context.Context) ([]WithdrawRecord, error) {
 	var out []WithdrawRecord
 	for _, w := range m.withdrawals {

@@ -17,6 +17,8 @@ const (
 	ActionWithdraw = "cards.withdraw.execute"
 	// ActionWithdrawLimitSet 调整某账号的提现额度。
 	ActionWithdrawLimitSet = "cards.withdraw.limit.set"
+	// ActionWithdrawAddressSetEnabled 上线或下线一条登记地址。
+	ActionWithdrawAddressSetEnabled = "cards.withdraw.address.set_enabled"
 )
 
 // PermissionWithdraw 是提现权限。
@@ -155,9 +157,51 @@ func withdrawLimitSetHandler(store WithdrawLimitStore) action.Handler {
 	}
 }
 
-// WithdrawAddressStore 是登记地址需要的写能力。
+// WithdrawAddressStore 是管理登记地址需要的写能力。
 type WithdrawAddressStore interface {
 	RegisterWithdrawAddress(ctx context.Context, a WithdrawAddress, registeredBy string) error
+	// SetWithdrawAddressEnabled 上线/下线一条登记。**不删除**——
+	// 一条曾经被列入白名单的地址，它存在过这件事本身就是审计事实。
+	SetWithdrawAddressEnabled(ctx context.Context, id string, enabled bool, by string) error
+}
+
+func withdrawAddressSetEnabledDef() action.Definition {
+	return action.Definition{
+		ID: ActionWithdrawAddressSetEnabled, Version: actionVersion,
+		RiskLevel: action.L1, Permission: PermissionWithdrawManage,
+		Schema: action.Schema{
+			Fields: []action.Field{
+				{Name: "address_id", Type: action.FieldString, Required: true},
+				{Name: "enabled", Type: action.FieldBool, Required: true},
+			},
+		},
+		Environments: allEnvironments, PrincipalTypes: humanOnly,
+	}
+}
+
+func withdrawAddressSetEnabledHandler(store WithdrawAddressStore) action.Handler {
+	return func(ctx context.Context, params map[string]any) (any, error) {
+		if store == nil {
+			return nil, ErrServiceUnbound
+		}
+		id := stringParam(params, "address_id")
+		enabled := action.BoolParam(params, "enabled")
+
+		who := ""
+		if p, ok := principal.FromContext(ctx); ok {
+			who = p.ID
+		}
+
+		action.RecordResource(ctx, "infini_withdraw_address", id)
+		// 两个方向都要留痕，但**启用是需要被看见的那一个**：下线一条地址
+		// 只是收窄了可选项，启用则是重新打开一条资金出口。
+		action.RecordAfter(ctx, map[string]any{"address_id": id, "enabled": enabled})
+
+		if err := store.SetWithdrawAddressEnabled(ctx, id, enabled, who); err != nil {
+			return nil, err
+		}
+		return map[string]any{"address_id": id, "enabled": enabled}, nil
+	}
 }
 
 func withdrawAddressRegisterHandler(store WithdrawAddressStore) action.Handler {
@@ -171,6 +215,8 @@ func withdrawAddressRegisterHandler(store WithdrawAddressStore) action.Handler {
 			Chain:   stringParam(params, "chain"),
 			Address: stringParam(params, "address"),
 			Label:   stringParam(params, "label"),
+			// 新登记的地址是启用的：登记它的动作本身就是「我要用它」。
+			Enabled: true,
 		}
 		if a.Address == "" || a.Chain == "" {
 			return nil, fmt.Errorf("cards: 地址与链都必填")
@@ -249,6 +295,7 @@ func RegisterWithdrawActions(
 		{withdrawAddressRegisterDef(accounts), withdrawAddressRegisterHandler(store)},
 		{withdrawDef(accounts), withdrawHandler(svc)},
 		{withdrawLimitSetDef(accounts), withdrawLimitSetHandler(limits)},
+		{withdrawAddressSetEnabledDef(), withdrawAddressSetEnabledHandler(store)},
 	}
 	for _, e := range entries {
 		if err := reg.Register(e.def, e.handler); err != nil {
