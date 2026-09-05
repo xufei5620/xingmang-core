@@ -27,6 +27,8 @@ type FakeAdapter struct {
 	// 号码要靠 ImportByUpstreamID 再读一次，替身也照这个形态来，
 	// 否则这条链在 fake 下根本走不到。
 	orders map[string][]Resource
+	// emails 是 Hero 替身的邮箱接码（见 fake_extras.go）。
+	emails map[string]*fakeEmail
 }
 
 type fakeNumber struct {

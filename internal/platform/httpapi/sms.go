@@ -53,11 +53,18 @@ type smsResourceItem struct {
 	//
 	// 号码在库里是明文列（本仓没有列加密工具，而卡面 PAN/CVV 已经是明文
 	// 列），这道权限闸是「谁能看号码」剩下的唯一约束。
-	Phone     string `json:"phone,omitempty"`
-	PhoneMask string `json:"phone_mask"`
-	Service   string `json:"service,omitempty"`
-	Country   string `json:"country,omitempty"`
-	Status    string `json:"status,omitempty"`
+	Phone string `json:"phone,omitempty"`
+	// 以下来自官方 ActivationSchema（XM-SMS1）。62 全部为空/0。
+	Operator         string `json:"operator,omitempty"`
+	PriceText        string `json:"price_text,omitempty"`
+	VerificationType string `json:"verification_type,omitempty"`
+	// Subtype：1 = 普通激活，2 = 租用。页面据此区分 20 分钟号与按小时租的号。
+	Subtype          int64  `json:"subtype,omitempty"`
+	CountryPhoneCode string `json:"country_phone_code,omitempty"`
+	PhoneMask        string `json:"phone_mask"`
+	Service          string `json:"service,omitempty"`
+	Country          string `json:"country,omitempty"`
+	Status           string `json:"status,omitempty"`
 	// **provider_token 任何情况下都不出现在这里。** 它是取码凭证，
 	// 只在服务端取码那条路上被读一次。
 	LastCodeAt string `json:"last_code_at,omitempty"`
@@ -155,6 +162,9 @@ func ListSMSResourcesHandler(store SMSQuerier) http.HandlerFunc {
 				LastCodeAt: formatUTC(res.LastCodeAt),
 				ExpiresAt:  formatUTC(res.ExpiresAt),
 				SyncedAt:   formatUTC(res.SyncedAt),
+				Operator:   res.Operator, PriceText: res.PriceText,
+				VerificationType: res.VerificationType, Subtype: res.Subtype,
+				CountryPhoneCode: res.CountryPhoneCode,
 			}
 			if maySeePhone {
 				item.Phone = res.Phone

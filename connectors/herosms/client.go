@@ -31,6 +31,14 @@ import (
 // 把密钥送到别处去。
 const ProductionBaseURL = "https://hero-sms.com/api/v1"
 
+// LegacyBaseURL 是 SMS-Activate 兼容层（官方 OpenAPI 的第二个 server）。
+//
+// 它存在的理由是给老客户软件用，但有几样东西**只有这一层有**：余额、
+// 国家/服务/运营商/价格目录、Top 国家、租用号码。所以两层都要接，
+// 而与现代层重复的十二个动作（getNumber、setStatus、getStatus…）刻意不接：
+// 同一功能两套实现只会多一处漂移。
+const LegacyBaseURL = "https://hero-sms.com/stubs/handler_api.php"
+
 const purposeAPIKey = "herosms.api_key"
 
 const (
@@ -45,6 +53,8 @@ type Client struct {
 	provider secrets.SecretProvider
 	keyRef   secrets.CredentialRef
 	httpc    *http.Client
+	// legacyBaseURL 是兼容层的完整入口（含 handler_api.php）。
+	legacyBaseURL string
 
 	apiKey string // 仅 fake/测试装配
 }
@@ -52,10 +62,11 @@ type Client struct {
 // NewClient 组装真实客户端。凭据只存引用，每次调用现取（ADR-014）。
 func NewClient(provider secrets.SecretProvider, keyRef secrets.CredentialRef, allowlist []string) *Client {
 	return &Client{
-		baseURL:  ProductionBaseURL,
-		provider: provider,
-		keyRef:   keyRef,
-		httpc:    connector.NewVendorWriteClient(allowlist, defaultTimeout),
+		baseURL:       ProductionBaseURL,
+		legacyBaseURL: LegacyBaseURL,
+		provider:      provider,
+		keyRef:        keyRef,
+		httpc:         connector.NewVendorWriteClient(allowlist, defaultTimeout),
 	}
 }
 
@@ -132,7 +143,20 @@ func (c *Client) do(ctx context.Context, method, requestURI string, body []byte,
 	return nil
 }
 
-// validateRequestURI 只允许 /activations 及其子路径，且禁止把 api_key 放 query。
+// modernPathAllowed 是现代层允许的路径：官方 OpenAPI 里只有这三个前缀。
+//
+// 白名单而不是黑名单：一个拼错的路径打到上游只会换来含糊的 404，
+// 而在这里被挡住会直接说「路径非法」。
+func modernPathAllowed(path string) bool {
+	for _, prefix := range []string{"/activations", "/classifiers", "/emails"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// validateRequestURI 只允许现代层的三个前缀，且禁止把 api_key 放 query。
 //
 // 后一条是主动防御：这家的密钥本来就走 Header，若哪天有人"顺手"改成 query，
 // 密钥会开始出现在上游访问日志里，而那种泄漏没有任何报错。
@@ -142,7 +166,7 @@ func validateRequestURI(requestURI string) error {
 	}
 	parsed, err := url.ParseRequestURI(requestURI)
 	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" ||
-		(parsed.Path != "/activations" && !strings.HasPrefix(parsed.Path, "/activations/")) ||
+		!modernPathAllowed(parsed.Path) ||
 		parsed.Query().Get("api_key") != "" {
 		return connector.NewError(connector.KindRejected, "Hero-SMS 请求路径非法", nil)
 	}

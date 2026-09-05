@@ -40,7 +40,7 @@ func (a *SMS62Adapter) TestConnection(ctx context.Context) (string, error) {
 	}
 	// 出口 IP 是这次测试最有价值的产出：上游若做 IP 白名单，它对不上就是
 	// 后续全部 403 的原因，而那种失败从错误码上看只是「没权限」。
-	return info.IP, nil
+	return info.ClientIP, nil
 }
 
 func (a *SMS62Adapter) ListCatalog(ctx context.Context, filter CatalogFilter) ([]CatalogItem, error) {
