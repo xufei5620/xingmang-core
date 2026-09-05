@@ -1,0 +1,27 @@
+{
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REVERSIBLE",
+  "id": "sms.provider.verify",
+  "idempotency": "NOT_REQUIRED",
+  "params": {
+    "provider": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-SMS0 对某家接码供应商做一次只读的连接测试。**它不是纯本地无副作用的**：成功会写下 verified_at，而购买前会检查这个事实——「验证过」必须是一个有时间戳的记录，不是一次口头确认。62 用 GET /api/v1/info，会带回供应商观察到的我方出口 IP；那是这次测试最有价值的产出：上游若做 IP 白名单，这个值对不上就是后续全部 403 的原因，而那种失败从错误码上看只是「没权限」。Hero 用列一页 activation，**不声称有余额或出口 IP**——那家没有info 端点，编一个 IP 出来会让人以为我们知道上游看到的是哪个地址。测试失败**不清掉上一次的验证事实**：一次网络抖动不该让配好的供应商变回「从未验证」，那会连带把购买挡死；只记下这次的错误。密钥走 CredentialRef（secret://sms62/api-key、secret://hero-sms/api-key），库里不存密文——这是与参考实现最大的一处偏离（宪法 7）。"
+}

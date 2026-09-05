@@ -18,6 +18,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
+	"github.com/xufei5620/xingmang-platform/internal/platform/sms"
 )
 
 // defaultRequestTimeout 是单请求的默认期限。
@@ -105,6 +106,13 @@ type Deps struct {
 	ExtraExpectedCredentials []credentials.ExpectedRef
 	// CardSyncInterval 供新鲜度判定；为零时用 5 分钟兜底。
 	CardSyncInterval time.Duration
+	// SMS / SMSCatalog 是接码中心的读端点。为 nil 时不挂载
+	// （XM_SMS_MODE=off），与卡片同一条纪律。
+	SMS        SMSQuerier
+	SMSCatalog SMSCatalogReader
+	// SMSProviders 是**已装配的**供应商清单。以它为准而不是以库里有的行
+	// 为准：没做过连接测试的那家库里根本没有行，而它恰恰最需要显示出来。
+	SMSProviders []string
 	// CardWithdraw 是提现页的读端点（地址白名单与提现历史）。
 	//
 	// 为 nil 时不挂载那两条路由——与卡片读端点分开判空，因为提现的
@@ -335,6 +343,27 @@ func NewRouter(d Deps) http.Handler {
 					api.With(RequireScope(cards.PermissionRead)).
 						Get("/cards/withdraw/limits", ListWithdrawLimitsHandler(d.CardWithdraw))
 				}
+			}
+			// 接码中心（XM-SMS0）。
+			//
+			// 读端点由 sms.read 把守；**号码与验证码的可见性在 handler 内
+			// 按 sms.reveal 再判一次**——它们与卡面明文同档，而清单本身
+			// 是运营日常要看的。两道闸分开是为了让「能看清单」与「能看号码」
+			// 可以分别授予。
+			if d.SMS != nil {
+				api.With(RequireScope(sms.PermissionRead)).
+					Get("/sms/providers", ListSMSProvidersHandler(d.SMS, d.SMSProviders))
+				api.With(RequireScope(sms.PermissionRead)).
+					Get("/sms/resources", ListSMSResourcesHandler(d.SMS))
+				api.With(RequireScope(sms.PermissionRead)).
+					Get("/sms/operations", ListSMSOperationsHandler(d.SMS))
+				api.With(RequireScope(sms.PermissionRead)).
+					Get("/sms/resources/{resourceID}/codes", ListSMSCodesHandler(d.SMS))
+			}
+			// 库存是实时上游调用，与投影读分开判空：fake 模式下没有真实库存。
+			if d.SMSCatalog != nil {
+				api.With(RequireScope(sms.PermissionRead)).
+					Get("/sms/catalog", ListSMSCatalogHandler(d.SMSCatalog))
 			}
 			api.With(RequireScope(savedviews.ScopeManage)).
 				Get("/ui/saved-views", ListSavedViewsHandler(d.SavedViews))

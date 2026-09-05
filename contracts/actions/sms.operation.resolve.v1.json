@@ -1,0 +1,39 @@
+{
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "id": "sms.operation.resolve",
+  "idempotency": "NOT_REQUIRED",
+  "params": {
+    "operation_id": {
+      "type": "string",
+      "required": true
+    },
+    "outcome": {
+      "type": "string",
+      "required": true
+    },
+    "resource_id": {
+      "type": "string",
+      "required": false
+    },
+    "note": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-SMS0 人工核对一笔 unknown 的操作。**只改本地账本，绝不向上游重发原动作**——这条链存在的全部理由是「钱可能已经花了，把事实记准」。只接受 unknown：已终局的操作不该能被改写。note 必填且不能为空：三个月后回看这条记录时，「谁凭什么判定它成功了」只有这句话回答得了；判定人一并进审计。判定为 succeeded 且是购买时还必须关联一个本地号码——一笔「成功了但没有号」的购买记录，事后没有任何办法核实。**后端不自动证明所选号码就是原那笔购买**：它只校验同供应商、不覆盖已有的不同关联；批量购买的逐号对账仍然靠人，不能声称逐条核验完备。note 是经过长度与文本校验的自由文本，不是自动脱敏保险箱——不要把密钥、完整号码或验证码写进去。"
+}

@@ -418,6 +418,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 接码中心（XM-SMS0）。与卡片同一条纪律：配错了就拒绝启动——
+	// 那时的错误如果推迟到有人点「买号」才出现，会长得像上游故障。
+	smsCfg, err := loadSMSConfig(os.Getenv)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "sms_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	smsService, smsStore, err := buildSMS(smsCfg, pool, cardSecretProvider, cfg.Environment, smsNotifier(cardSecretProvider))
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "sms_config_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	if err := registerSMSActions(actionRegistry, smsService); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 启动时把崩溃遗留的未决操作推进到该去的地方。
+	//
+	// **恢复失败不阻止启动**：那会让一次数据库抖动变成整个进程起不来。
+	// 也不当作已恢复——未决索引仍然挡着重复发送，而付费请求会再检查一次。
+	if recovered, err := recoverSMSOperations(ctx, smsService); err != nil {
+		logger.Warn("sms_recover_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "sms_recover_failed"), slog.Any("err", err))
+	} else if recovered > 0 {
+		logger.Info("sms_operations_recovered", slog.String("module", "platform.api"),
+			slog.Int("recovered", recovered))
+	}
+
 	// CPA 逐 key 用量（XM-CPA0）。与 reqlog file 模式同一条纪律：配错了就
 	// 拒绝启动；没启用（off）不算错误，路由据此不挂载
 	// /platforms/cpa/keys。这条链路只读一份只读挂载的本机 SQLite 文件，
@@ -480,6 +511,9 @@ func main() {
 		// 资金池余额直接走领域服务（它已经持有配好的客户端）。
 		CardBalances: cardBalanceReaderOrNil(cardService),
 		CardWithdraw: cardWithdrawQuerierOrNil(cardStore),
+		SMS:          smsQuerierOrNil(smsStore),
+		SMSCatalog:   smsCatalogOrNil(smsService),
+		SMSProviders: smsCfg.Providers,
 		// nil 时回调路由整个不挂载（见 httpapi.Deps.CardWebhook）。
 		CardWebhook: cardWebhookOrNil(
 			buildCardWebhookProcessor(cardsCfg, cardStore, cardAccounts, cardSecretProvider, logger)),
