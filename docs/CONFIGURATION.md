@@ -449,6 +449,7 @@ SOURCE_SPOOL_FILE=/var/lib/invoice-source-agent/sub2api-payments.pending.enc
 SOURCE_SPOOL_KEY_FILE=/run/secrets/source_spool_key
 SOURCE_POLL_INTERVAL=1m
 SOURCE_ECONOMIC_SAFETY_DELAY=5m
+ELIGIBILITY_EVIDENCE_BATCH_LIMIT=0
 SOURCE_RECONCILE_INTERVAL=6h
 NEWAPI_FULL_SCAN_INTERVAL=1h
 SOURCE_MAX_BACKOFF=1m
@@ -825,3 +826,18 @@ void/red-letter workflow; direct updates to an issued snapshot are prohibited.
 The PostgreSQL immutability trigger prevents direct changes to the issued
 request/profile/allocation/issuer snapshot. Memory-backed local settings remain
 development-only and are not tax/audit evidence.
+
+## Bounded evidence pass (`ELIGIBILITY_EVIDENCE_BATCH_LIMIT`)
+
+XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3. `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` (api; integer
+0-10000; default `0` = unbounded, the behaviour of every release before RC94) caps
+how many pending balance-evidence items one projection job evaluates: the job
+cuts its window at the limit-th item's `as_of`, publishes `finalized_through` there
+and requeues itself for the rest, so a three-day catch-up is many short
+transactions instead of one that holds the account for minutes. The compose
+file passes it through from the release env (`${ELIGIBILITY_EVIDENCE_BATCH_LIMIT:-0}`);
+RC94 shipped the code with the variable unset, and the passthrough itself
+arrived with RC99. Set it only after the runbook's differential rehearsal has
+passed for the candidate (`25` is the value RC98 proved equal to the single pass
+on the 2026-09-04 incident's own data); the release's canary must then show the
+variable present in the api container's environment.

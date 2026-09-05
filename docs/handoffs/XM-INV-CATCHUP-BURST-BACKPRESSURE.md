@@ -367,10 +367,16 @@ backup passed -- `invoice-20260904T033226Z`, `--release-catchup` for `acdcdce9`,
 `--evidence-batch-limit 0` and `25`: both `ready`, the released account replayed its
 three days once in a single pass and once in 22 chunks, `finalized_through`,
 `consumed_cash_minor`, every other published quantity and `evaluations_by_status`
-identical (see the RC98 plan's execution record). Still to do before the bound
-is switched on: the environment change itself, `ELIGIBILITY_EVIDENCE_BATCH_LIMIT=25`
-on the api, with its own 30-minute canary. Until then the api runs with `0`,
-which is byte-for-byte the previous behaviour.
+identical (see the RC98 plan's execution record). Switching it on turned out to
+need a release after all: `docker-compose.prod.yml` lists the api's environment
+explicitly and never passed `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` through -- RC94's
+canary noted the variable absent from the container and read that as "off",
+which it was, but no value in the release env could have turned it on. RC99
+adds the passthrough (`${ELIGIBILITY_EVIDENCE_BATCH_LIMIT:-0}`), documents the
+variable, and is rolled forward with `ELIGIBILITY_EVIDENCE_BATCH_LIMIT=25` set in
+its release env, under the usual backup and 30-minute canary with the variable
+confirmed inside the api container. Until that roll-forward the api runs with
+`0`, which is byte-for-byte the previous behaviour.
 
 ### Fix 3 hardening, same day
 

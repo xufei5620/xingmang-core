@@ -275,6 +275,11 @@ services:
       SOURCE_ECONOMIC_SAFETY_DELAY: ${SOURCE_ECONOMIC_SAFETY_DELAY:-5m}
       SOURCE_POLL_INTERVAL: ${SOURCE_POLL_INTERVAL:-1m}
       SOURCE_IDENTITIES_MAX_STALENESS: ${SOURCE_IDENTITIES_MAX_STALENESS:-15m}
+      # XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3: pending balance-evidence items one
+      # projection job evaluates before publishing and requeueing (0 = unbounded,
+      # every release before RC94). Proved equal to the single pass on the
+      # 2026-09-04 incident's own data (RC98's differential); 25 is that value.
+      ELIGIBILITY_EVIDENCE_BATCH_LIMIT: ${ELIGIBILITY_EVIDENCE_BATCH_LIMIT:-0}
       INGEST_PROXY_CIDRS: ${INVOICE_INGEST_PROXY_CIDR:?set the exact ingest-proxy /32}
       MIGRATIONS_DIR: /app/migrations
     secrets:
