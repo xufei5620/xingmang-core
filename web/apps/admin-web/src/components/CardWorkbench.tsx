@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatUtcTimestamp } from "@xingmang/ui-admin";
 import { Badge, Button, Dialog, Input } from "@xingmang/ui-primitives";
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import {
   deleteCard,
   freezeCard,
@@ -40,7 +40,11 @@ const CARD_CHALLENGES_QUERY = "card-challenges";
  *  推翻的是视觉形态，不是可链接性。 */
 export function CardWorkbench() {
   const { account, cardId } = useParams();
+  const [params] = useSearchParams();
   const navigate = useNavigate();
+  // 账号筛选写在查询串里（`?account=`），与页签、选中卡同一条纪律：
+  // 这一页上所有「我在看什么」的状态都可链接、可刷新。
+  const accountFilter = params.get("account") ?? "";
   const queryClient = useQueryClient();
   const [result, setResult] = useState<ActionResult | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
@@ -57,7 +61,14 @@ export function CardWorkbench() {
     refetchInterval: 20_000,
   });
 
-  const cards = query.data?.cards ?? [];
+  const all = query.data?.cards ?? [];
+  // 不筛就是全部。默认只显示某个账号会让人以为卡丢了——两个账号的卡数
+  // 悬殊时，那种「丢了」看起来非常真。
+  //
+  // 选中态也只在**筛选后**的集合里找（见下面的 selected）：筛掉了当前
+  // 选中的卡时落到还看得见的第一张，否则右栏会显示一张左边根本看不到的
+  // 卡，那种不一致比空右栏更让人困惑。
+  const cards = accountFilter ? all.filter((c) => c.account === accountFilter) : all;
   const challenges = new Map(
     (challengesQuery.data ?? []).map((c) => [`${c.account}/${c.card_id}`, c]),
   );
@@ -74,11 +85,12 @@ export function CardWorkbench() {
   function select(card: CardItem) {
     // replace 而不是 push：在清单里点着看是浏览行为，不该在历史里堆一串，
     // 否则看完五张卡要按五次返回才离得开这一页。
+    // 带上当前的查询串：换卡不该顺手把账号筛选与页签清掉。
+    const qs = params.toString();
     navigate(
-      `/cards/${encodeURIComponent(card.account)}/${encodeURIComponent(card.card_id)}`,
-      {
-        replace: true,
-      },
+      `/cards/${encodeURIComponent(card.account)}/${encodeURIComponent(card.card_id)}` +
+        (qs ? `?${qs}` : ""),
+      { replace: true },
     );
   }
 
@@ -100,8 +112,9 @@ export function CardWorkbench() {
       >
         {cards.length === 0 ? (
           <p className="text-fg-muted text-sm">
-            还没有卡片。点右上角「开卡」创建第一张；在 Infini 后台直接建的卡
-            会由同步作业在下一轮（5 分钟内）自动拉进来。
+            {accountFilter
+              ? `账号 ${accountFilter} 名下还没有卡片。再点一次上面那个账号可以取消筛选。`
+              : "还没有卡片。点右上角「开卡」创建第一张；在 Infini 后台直接建的卡会由同步作业在下一轮（5 分钟内）自动拉进来。"}
           </p>
         ) : (
           <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(18rem,22rem)_1fr]">
@@ -170,7 +183,9 @@ function CardRail({
       {shown.length === 0 ? (
         <p className="text-fg-muted text-sm">没有匹配的卡片。</p>
       ) : (
-        <ul className="border-edge flex max-h-[36rem] min-w-0 flex-col overflow-y-auto rounded-md border">
+        // 不设 max-height、不开 overflow：框里再滚一层会让人先找到内滚动条
+        // 才够得着下面的卡，而页面本身已经能滚。
+        <ul className="border-edge flex min-w-0 flex-col rounded-md border">
           {shown.map((c) => {
             const active =
               selected?.account === c.account &&
@@ -185,31 +200,61 @@ function CardRail({
                   type="button"
                   onClick={() => onSelect(c)}
                   aria-current={active ? "true" : undefined}
-                  className={`flex w-full min-w-0 flex-col gap-1 px-3 py-2 text-left hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-accent ${
+                  className={`flex w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-accent ${
                     active ? "bg-accent-soft" : ""
                   }`}
                 >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-sm font-medium">
-                      {c.card_alias || c.card_id}
+                  {/* 行的排布照 Infini 后台：卡图标 | 卡名 / 邮箱·后四位·状态 | 余额。
+                      三段各自定位——
+                      左段固定宽（图标），中段吃掉剩余宽度，右段按内容收缩并右对齐。
+
+                      状态原先是紧跟卡名的徽章，于是名字一长一短它就左右跳，
+                      扫一列卡时眼睛得逐行重新找它在哪儿。挪到第二行、且**邮箱定宽**
+                      之后，后四位与状态每行都落在同一个横坐标上。 */}
+                  <CardGlyph />
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-sm font-semibold">
+                        {c.card_alias || c.card_id}
+                      </span>
+                      {/* Infini 这里还有个 Lite / Pro 档位徽章，**我们画不出来**：
+                          product_id 只出现在开卡请求里，卡对象上没有这个字段
+                          （见 contracts/connectors/infini/openapi/card.yaml），
+                          上游读不回来。凭开卡时的记忆猜一个会在同步拉进来的
+                          卡上指错档位。 */}
                     </span>
-                    <Badge tone={cardStatusTone(c.status)}>
-                      {cardStatusLabel(c.status)}
-                    </Badge>
-                    {/* 有待验证的码就在清单里标出来——它只有几分钟有效，
-                    藏在右栏里等人点开就来不及了。 */}
-                    {challenge?.code ? (
-                      <Badge tone="warning">验证码 {challenge.code}</Badge>
-                    ) : null}
-                  </span>
-                  <span className="text-fg-muted flex min-w-0 items-center justify-between gap-2 text-xs">
-                    <span className="truncate">{c.holder_name || "—"}</span>
-                    <span className="font-mono whitespace-nowrap">
-                      {c.mask ? `••${c.mask.slice(-4)}` : "—"}
+                    <span className="text-fg-muted flex items-center gap-2 text-xs">
+                      {/* 邮箱定宽截断，好让后面两项每行对齐——这正是「状态固定
+                          一个位置」的做法，Infini 也是这么排的。 */}
+                      <span className="w-32 truncate">{c.holder_name || "—"}</span>
+                      <span aria-hidden="true" className="text-edge">
+                        |
+                      </span>
+                      {/* 后四位放大一档（text-xs → text-sm）：选卡时人常常是拿着
+                          手上那张卡或另一个页面的卡号来对，而这四位就是唯一的
+                          对照物，小到要凑近看就失职了。 */}
+                      <span className="text-fg font-mono text-sm whitespace-nowrap tabular-nums">
+                        {c.mask ? `****${c.mask.slice(-4)}` : "—"}
+                      </span>
+                      <span aria-hidden="true" className="text-edge">
+                        |
+                      </span>
+                      <span className={`whitespace-nowrap ${statusTextClass(c.status)}`}>
+                        {cardStatusLabel(c.status)}
+                      </span>
+                      {/* 验证码接在状态后面：它只有几分钟有效，而这一行正是
+                          眼睛扫过每张卡时会落到的地方。没有待验证时不渲染，
+                          让有码的那张在一列里跳出来。 */}
+                      {challenge?.code ? (
+                        <Badge tone="warning">验证码 {challenge.code}</Badge>
+                      ) : null}
                     </span>
                   </span>
-                  <span className="text-fg-muted text-xs tabular-nums">
-                    {formatMinorUnits(c.balance_minor, c.currency)}
+                  <span className="flex shrink-0 flex-col items-end">
+                    <span className="text-sm font-semibold tabular-nums">
+                      {formatMinorUnits(c.balance_minor, c.currency)}
+                    </span>
+                    <span className="text-fg-muted text-xs">总余额</span>
                   </span>
                 </button>
               </li>
@@ -234,7 +279,10 @@ function CardPane({
   onError: (e: unknown) => void;
 }) {
   return (
-    <section className="border-edge flex min-w-0 flex-col gap-4 rounded-md border p-4">
+    // max-w 定宽：宽屏上不限宽会把「卡片信息」的双列拉到屏幕两端，
+    // 标签和值之间隔着半个屏幕，眼睛要横扫才对得上——一个两列表格的
+    // 可读性不该随窗口变宽而变差。
+    <section className="border-edge flex min-w-0 max-w-3xl flex-col gap-4 rounded-md border p-4">
       <header className="flex flex-col items-center gap-1 text-center">
         <h2 className="flex items-center gap-2 text-lg font-semibold">
           <span className="min-w-0 break-all">
@@ -340,9 +388,13 @@ function CardPane({
         </Dialog>
       </div>
 
-      <div className="flex flex-col gap-2">
+      <div className="flex min-w-0 flex-col gap-2">
         <h3 className="text-sm font-semibold">交易流水</h3>
-        <CardTransactions card={card} />
+        {/* 右栏定了宽，而流水表有七八列。让**表自己**横向滚，
+            而不是把整个页面撑宽——页面横滚会让左边的卡片清单也跟着跑掉。 */}
+        <div className="min-w-0 overflow-x-auto">
+          <CardTransactions card={card} />
+        </div>
       </div>
     </section>
   );
@@ -450,6 +502,46 @@ function CardActions({
       )}
     </div>
   );
+}
+
+/** 卡片图标：清单每行最左边那个小卡片轮廓。
+ *
+ *  照 Infini 的行式来。它不承载任何信息，作用是给每一行一个固定的左锚点，
+ *  让卡名的起始位置不随内容变化——一列几十张卡时，这种对齐比图标本身值钱。
+ *  用 currentColor 的描边而不是实心块，免得它比卡名还抢眼。 */
+function CardGlyph() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="text-fg-muted size-6 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <rect x="2.5" y="5.5" width="19" height="13" rx="2" />
+      <path d="M2.5 9.5h19" />
+      <path d="M6 14.5h4" />
+    </svg>
+  );
+}
+
+/** 状态的文字色。
+ *
+ *  Infini 把状态显示成一行里的**彩色文字**而不是徽章。照搬：一列里每行都挂
+ *  一个徽章会让整列都是色块，反而看不出哪张不正常；只有异常状态需要跳出来。
+ *  未知取值走默认的灰，与 cardStatusLabel 的「原样显示」一致。 */
+function statusTextClass(status: string): string {
+  switch (cardStatusTone(status)) {
+    case "success":
+      return "text-success";
+    case "danger":
+      return "text-danger";
+    case "warning":
+      return "text-warning";
+    default:
+      return "text-fg-muted";
+  }
 }
 
 /** 扣款周期的中文。未知取值原样显示，不归到已知分类里——

@@ -95,6 +95,9 @@ export function CardLedger() {
     <section className="flex min-w-0 flex-col gap-3">
       <LedgerSummary rows={rows} />
       <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
+        {/* 八列表：窄屏上让**表自己**横滚，页面本身不横滚——
+            页面横滚会把左侧导航也带跑。 */}
+        <div className="min-w-0 overflow-x-auto">
         <DataTableV2
           caption="全部卡片的交易流水：时间、商户、类型、金额、卡片与状态"
           searchable
@@ -129,6 +132,7 @@ export function CardLedger() {
             </p>
           }
         />
+        </div>
       </ApiStateView>
     </section>
   );

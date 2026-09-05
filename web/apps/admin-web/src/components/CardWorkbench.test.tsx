@@ -208,3 +208,44 @@ it("卡片信息里验证码紧跟 CVV", async () => {
   // 码本身也要在（不止是个标签）。
   expect(screen.getAllByText("778899").length).toBeGreaterThan(0);
 });
+
+// 账号卡片可以点：点谁就只看谁名下的卡。
+//
+// 产品负责人 2026-09-05：「卡片根据账户分开，点击不同的账户显示账户下的
+// 卡片」。发现遍历上线后卡数从 2 张涨到十几张，两个账号的卡混在一列里，
+// 而「这张卡的钱从哪个账号出」恰恰是操作前要先确定的事。
+it("点账号只显示该账号名下的卡", async () => {
+  seed([
+    card({ account: "CHRIS", card_id: "c1", card_alias: "克里斯卡" }),
+    card({ account: "LINFENG", card_id: "c2", card_alias: "林风卡" }),
+  ]);
+  renderAt("/cards?account=CHRIS");
+
+  expect(await screen.findByRole("button", { name: /克里斯卡/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /林风卡/ })).toBeNull();
+});
+
+// 不带 account 就是全部——一个默认只显示某个账号的页面会让人以为卡丢了。
+it("不指定账号时两个账号的卡都在", async () => {
+  seed([
+    card({ account: "CHRIS", card_id: "c1", card_alias: "克里斯卡" }),
+    card({ account: "LINFENG", card_id: "c2", card_alias: "林风卡" }),
+  ]);
+  renderAt("/cards");
+
+  expect(await screen.findByRole("button", { name: /克里斯卡/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /林风卡/ })).toBeTruthy();
+});
+
+// 筛掉了当前选中的卡时，选中态跟着落到还看得见的第一张。
+//
+// 否则右栏会显示一张左边根本看不到的卡——那种不一致比空右栏更让人困惑。
+it("按账号筛选后选中态落在可见的卡上", async () => {
+  seed([
+    card({ account: "CHRIS", card_id: "c1", card_alias: "克里斯卡" }),
+    card({ account: "LINFENG", card_id: "c2", card_alias: "林风卡" }),
+  ]);
+  renderAt("/cards/LINFENG/c2?account=CHRIS");
+
+  expect(await screen.findByRole("heading", { name: /克里斯卡/ })).toBeTruthy();
+});

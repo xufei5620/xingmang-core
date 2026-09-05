@@ -92,7 +92,22 @@ export function CardsPage() {
       {/* 待人工处置的操作与资金池余额在页签之上：前者是红条，后者是
           「还能开几张卡 / 还能提多少」的前提，切到哪个页签都该看得见。 */}
       <AttentionBanner />
-      {tab === "withdraw" ? null : <AccountBalancesStrip />}
+      {tab === "withdraw" ? null : (
+        <AccountBalancesStrip
+          selected={params.get("account") ?? ""}
+          onSelect={(account) =>
+            setParams(
+              (prev) => {
+                const p = new URLSearchParams(prev);
+                if (account) p.set("account", account);
+                else p.delete("account");
+                return p;
+              },
+              { replace: true },
+            )
+          }
+        />
+      )}
 
       {tab === "cards" ? <CardWorkbench /> : null}
       {tab === "ledger" ? <CardLedger /> : null}

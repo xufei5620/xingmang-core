@@ -90,7 +90,9 @@ export function CardSubscriptions() {
   ];
 
   return (
-    <section className="flex min-w-0 flex-col gap-3">
+    // max-w 与卡片页右栏同一档：一张五列的表拉到满屏两端并不更好读，
+    // 而两个页签宽度不一致会让人以为切错了页。
+    <section className="flex min-w-0 max-w-5xl flex-col gap-3">
       <SubscriptionSummary rows={rows} />
       <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
         <DataTableV2
@@ -100,11 +102,16 @@ export function CardSubscriptions() {
           columns={columns}
           rowKey={(row) => row.key}
           emptyState={
-            <p className="text-fg-muted text-sm">
-              还没有登记任何订阅。到「卡片管理」选中一张卡，点右侧的「登记用途」
-              填上订阅服务、金额与下次扣款日期——这一页只列登记过的，
-              不从流水里猜，所以列出来的每一条都是准的。
-            </p>
+            <div className="text-fg-muted flex max-w-xl flex-col gap-1 text-sm">
+              <p>还没有登记任何订阅。</p>
+              <p>
+                到「卡片管理」选中一张卡，点右侧的「登记用途」，
+                填上订阅服务、金额与下次扣款日期。
+              </p>
+              <p className="text-xs">
+                这一页只列登记过的，不从流水里猜——所以列出来的每一条都是准的。
+              </p>
+            </div>
           }
         />
       </ApiStateView>
