@@ -383,8 +383,33 @@ func (s *Store) EligibilityShadowReevaluateEvidence(ctx context.Context) (int64,
 	if err != nil {
 		return 0, err
 	}
+	// Rewind the published boundary of every POLICY_ANCHOR account to its
+	// cutover, so the cleared evidence lies AFTER finalized_through. Without
+	// this the pile is history from the projection's point of view -- the
+	// batch boundary deliberately counts only items after the published
+	// boundary (that is what keeps a deferred item from pinning it), so a
+	// bounded run would evaluate the whole pile in one pass exactly like an
+	// unbounded one, and the differential would compare two identical runs.
+	// RC94's first pair did just that. The jobs --reproject-all queued
+	// before this call keep their requested_through at the old boundary, so
+	// each account's window is now its entire evidence history: the shape of
+	// a real catch-up, which is what the bound exists for. Legacy
+	// bootstrap kinds are left alone; their re-anchor logic reads these very
+	// fields and a rehearsal must not steer it.
+	rewound, err := tx.Exec(ctx, `
+		UPDATE source_account_eligibility_state
+		SET finalized_through=cutover_at,updated_at=now()
+		WHERE bootstrap_kind='POLICY_ANCHOR' AND finalized_through>cutover_at`)
+	if err != nil {
+		return 0, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return 0, err
 	}
+	s.lastRewoundAccounts = rewound.RowsAffected()
 	return checkpoints.RowsAffected() + proofs.RowsAffected(), nil
 }
+
+// LastRewoundAccounts reports how many accounts the last
+// EligibilityShadowReevaluateEvidence call rewound to their cutover.
+func (s *Store) LastRewoundAccounts() int64 { return s.lastRewoundAccounts }

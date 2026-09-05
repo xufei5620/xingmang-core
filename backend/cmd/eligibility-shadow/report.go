@@ -144,6 +144,11 @@ type Report struct {
 	// pass had work; a differential pair is only meaningful with this set.
 	ReevaluateEvidence bool  `json:"reevaluate_evidence_requested"`
 	EvaluationsCleared int64 `json:"evaluations_cleared"`
+	// AccountsRewound counts the POLICY_ANCHOR accounts whose published
+	// boundary was rewound to their cutover, which is what puts the cleared
+	// evidence in front of the batch boundary; zero with reevaluate set
+	// means the bounded run had nothing to chunk.
+	AccountsRewound int64 `json:"accounts_rewound"`
 
 	Before       Snapshot         `json:"before"`
 	BeforeHealth ProjectionHealth `json:"before_projection_health"`

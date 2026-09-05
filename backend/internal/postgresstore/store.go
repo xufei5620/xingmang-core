@@ -25,6 +25,9 @@ type Store struct {
 	// knob had. See completeEligibilityProjectionJob for the semantics and
 	// why a boundary between two items cannot change a decision.
 	evidenceBatchLimit int
+	// lastRewoundAccounts is rehearsal bookkeeping for
+	// EligibilityShadowReevaluateEvidence; never touched by production paths.
+	lastRewoundAccounts int64
 }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {

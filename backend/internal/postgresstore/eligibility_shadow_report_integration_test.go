@@ -452,6 +452,15 @@ func TestEligibilityShadowReevaluateEvidenceClearsEvaluationsAtOrAfterTheAnchorF
 	after := seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, cutover.Add(time.Hour))
 	seedEligibilityShadowCheckpointEvaluation(t, store, ctx, before, 1, "matched")
 	seedEligibilityShadowCheckpointEvaluation(t, store, ctx, after, 1, "matched")
+	// The account has published past its evidence, as production would have,
+	// and --reproject-all has already queued its job at that boundary.
+	published := cutover.Add(2 * time.Hour)
+	if _, err = store.pool.Exec(ctx, `UPDATE source_account_eligibility_state SET finalized_through=$2 WHERE external_account_id=$1`, account, published); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.EnqueueEligibilityShadowReprojection(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	cleared, err := store.EligibilityShadowReevaluateEvidence(ctx)
 	if err != nil {
@@ -459,6 +468,25 @@ func TestEligibilityShadowReevaluateEvidenceClearsEvaluationsAtOrAfterTheAnchorF
 	}
 	if cleared != 1 {
 		t.Fatalf("expected exactly the post-anchor evaluation cleared, got %d", cleared)
+	}
+	// The boundary is rewound to the cutover, the queued job still asks for
+	// the old boundary: the window is now the account's whole history, and
+	// the cleared evidence sits in front of the batch boundary.
+	if store.LastRewoundAccounts() != 1 {
+		t.Fatalf("expected the one POLICY_ANCHOR account rewound, got %d", store.LastRewoundAccounts())
+	}
+	var finalized, requested time.Time
+	if err = store.pool.QueryRow(ctx, `SELECT finalized_through FROM source_account_eligibility_state WHERE external_account_id=$1`, account).Scan(&finalized); err != nil {
+		t.Fatal(err)
+	}
+	if !finalized.Equal(cutover) {
+		t.Fatalf("finalized_through should be rewound to the cutover %s, got %s", cutover, finalized)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT requested_through FROM eligibility_projection_jobs WHERE external_account_id=$1`, account).Scan(&requested); err != nil {
+		t.Fatal(err)
+	}
+	if !requested.Equal(published) {
+		t.Fatalf("the queued job must keep the old boundary %s as its window, got %s", published, requested)
 	}
 	var remaining int
 	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM balance_checkpoint_evaluations WHERE checkpoint_id=$1`, before).Scan(&remaining); err != nil {

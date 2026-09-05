@@ -183,17 +183,6 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 		ReevaluateEvidence:    opts.ReevaluateEvidence,
 	}
 
-	// Clear evaluations before enqueueing and before the baseline snapshot,
-	// so "before" shows the emptied pile and "after" what the candidate made
-	// of it.
-	if opts.ReevaluateEvidence {
-		cleared, clearErr := store.EligibilityShadowReevaluateEvidence(ctx)
-		if clearErr != nil {
-			return report, fmt.Errorf("clear evaluations for re-evaluation: %w", clearErr)
-		}
-		report.EvaluationsCleared = cleared
-	}
-
 	// Enqueue before the baseline snapshot, so BeforeHealth records the work
 	// this run set itself rather than an empty queue that would look exactly
 	// like the vacuous runs this flag exists to end. The enqueue changes no
@@ -205,6 +194,19 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 			return report, fmt.Errorf("queue full reprojection: %w", enqueueErr)
 		}
 		report.AccountsEnqueued = enqueued
+	}
+
+	// After the enqueue and before the baseline snapshot: the jobs keep their
+	// requested_through at the old boundary while the accounts are rewound
+	// to their cutover, so "before" shows the emptied pile at the start of
+	// each account's history and "after" what the candidate made of it.
+	if opts.ReevaluateEvidence {
+		cleared, clearErr := store.EligibilityShadowReevaluateEvidence(ctx)
+		if clearErr != nil {
+			return report, fmt.Errorf("clear evaluations for re-evaluation: %w", clearErr)
+		}
+		report.EvaluationsCleared = cleared
+		report.AccountsRewound = store.LastRewoundAccounts()
 	}
 
 	before, err := store.EligibilityShadowSnapshot(ctx)
