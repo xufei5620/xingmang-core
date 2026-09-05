@@ -2,7 +2,7 @@
 
 > **SUPERSEDED — DO NOT EXECUTE.** RC50 failed and is fixed at signed tag
 > `v0.1.0-rc50-signed`; exact1 is retained failed evidence. Continue only with
-> `docs/superpowers/plans/2026-09-05-invoice-rc92-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-05-invoice-rc93-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -1,5 +1,10 @@
 # RC92 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC92 shipped at signed tag
+> `v0.1.0-rc92-signed` (`8358ddc`) and is deployed; its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-05-invoice-rc93-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC92, which carries two repairs to the release and ingest machinery and the records of how each was found:
