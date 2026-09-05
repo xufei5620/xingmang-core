@@ -1,6 +1,6 @@
 # XM-INV-CATCHUP-BURST-BACKPRESSURE: chunk a released account's first projection
 
-- **status:** fixes 1, 1b, 2 implemented and deployed (RC92/RC93, 2026-09-05); fix 3 implemented behind `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` (default off) with an in-repo equivalence test, awaiting the server-side differential rehearsal before it is switched on. Root cause revised 2026-09-05 after a copy-run and a code trace; the original proposal below does not address it. Filed 2026-09-04 from the RC87 canary.
+- **status:** fixes 1, 1b, 2 deployed (RC92/RC93, 2026-09-05); fix 3 proved on the incident's own data (RC98 differential) and **switched on in production at 25 by RC99 (2026-09-06)**; previously implemented behind `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` (default off) with an in-repo equivalence test, awaiting the server-side differential rehearsal before it is switched on. Root cause revised 2026-09-05 after a copy-run and a code trace; the original proposal below does not address it. Filed 2026-09-04 from the RC87 canary.
 - **branch:** none yet.
 - **found in production**, 2026-09-04, while verifying the XM-INV-CATCHUP-RELEASE fix.
 
@@ -375,8 +375,11 @@ which it was, but no value in the release env could have turned it on. RC99
 adds the passthrough (`${ELIGIBILITY_EVIDENCE_BATCH_LIMIT:-0}`), documents the
 variable, and is rolled forward with `ELIGIBILITY_EVIDENCE_BATCH_LIMIT=25` set in
 its release env, under the usual backup and 30-minute canary with the variable
-confirmed inside the api container. Until that roll-forward the api runs with
-`0`, which is byte-for-byte the previous behaviour.
+confirmed inside the api container. **Done: RC99 rolled forward on 2026-09-06 with
+`ELIGIBILITY_EVIDENCE_BATCH_LIMIT=25
+` in the api container; 30-minute canary clean
+(readiness 200 throughout, zero lock timeouts, zero cycle deferrals, zero late
+balances cycles, zero busy events). The bound is on.**
 
 ### Fix 3 hardening, same day
 
