@@ -361,14 +361,16 @@ Two things the tests taught that the design had not said:
   so evaluation rows outnumber checkpoints; the equivalence is between the
   two modes' rows, not against the checkpoint count.
 
-Still to do before the bound is switched on in production: the forward-only
-differential rehearsal that replays the 2026-09-04 burst (the runbook's
-procedure: pre-repair backup `invoice-20260904T033226Z`, `--release-catchup` for
-`acdcdce9`, `--finalization-window --finalization-window-provable`, `--reproject-all` twice with
-`--evidence-batch-limit 0` and `25`, both `ready`, the bound engaged on the
-released account, `after.accounts` identical in every field but
-`projection_version`, `evaluations_by_status` identical). Until then the api
-runs with `0`, which is byte-for-byte the previous behaviour.
+Done (2026-09-05, RC98): the forward-only differential on the incident's own
+backup passed -- `invoice-20260904T033226Z`, `--release-catchup` for `acdcdce9`,
+`--finalization-window --finalization-window-provable`, `--reproject-all` twice with
+`--evidence-batch-limit 0` and `25`: both `ready`, the released account replayed its
+three days once in a single pass and once in 22 chunks, `finalized_through`,
+`consumed_cash_minor`, every other published quantity and `evaluations_by_status`
+identical (see the RC98 plan's execution record). Still to do before the bound
+is switched on: the environment change itself, `ELIGIBILITY_EVIDENCE_BATCH_LIMIT=25`
+on the api, with its own 30-minute canary. Until then the api runs with `0`,
+which is byte-for-byte the previous behaviour.
 
 ### Fix 3 hardening, same day
 

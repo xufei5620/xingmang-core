@@ -47,3 +47,31 @@
 
 - Switching the bound on. That is a follow-up env change gated on the differential rehearsal above, with its own canary.
 - A continuously-consuming account is still blocked from invoicing while any projection job is queued; account 12 is still blocked by a negative upstream balance. Both remain under the reasoning recorded in RC90.
+
+## Execution record (2026-09-05)
+
+- Task 1: identity bump `c8878de` over `43a7c4e` (`--finalization-window-provable`, passthrough, static test, docs) and `9d00243` (RC97's execution record). Every gate 0 on `c8878de`: backend build/vet, full unit and integration suites, agents build/vet/tests, web typecheck/tests/build, release-range gitleaks, gate self-test, shadow static test, the four failure-evidence scripts 0/0/0/0. Tag `v0.1.0-rc98-signed` created on `c8878de`, SSH signature verified, peels to `HEAD`; the derived roll-forward script's `SHA=` points at it; the stage script's `PREV_SHA` stays at RC94 (`254d99dd…`), the running release.
+- Task 2: detached image gate from PowerShell (`scripts/run-detached.ps1`, run dir `rc98-task2-gate-20260905T145134Z-b636`, pid 112608): binding `c8878de…`, preflight 0 on attempt 1, release dir `release\0.1.0-rc98-exact1`, `IMAGE-GATE-EXIT=42`, ordinary/strict verifiers 0/0, evidence audit line `found 0 vulnerabilities`. Wall time 22:51 → 23:08 local.
+- Transfer: the first scp was cut by a connection reset (the third today); the server was checked before retrying (ssh up, `/readyz` 200, six production containers, uptime 95 days) and the transfer re-run end to end; all three remote checksums matched. Stage: `RC98-STAGED sha=c8878dee5943787b710e53786cc50d9bc8160cec`; the stage script's `PREV_SHA` (RC94 `254d99dd…`) matched the running release. The rc98 tools image exposes `-finalization-window-provable` beside RC96/RC97's flags; production env still has no `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` line. The age identity was placed from the operator workstation by the assistant under the owner's standing arrangement and is shredded by the runner's exit trap.
+
+### Differential rehearsal — the bound is proved on the incident's own data
+
+Backup `invoice-20260904T033226Z` (the pre-repair state of the 2026-09-04 catch-up burst: `acdcdce9` still excluded, `finalized_through` 2026-09-01 12:14:30Z, three days of evidence pending), rc98 tools image, `--reproject-all --release-catchup acdcdce9-… --finalization-window --finalization-window-provable --timeout 90m`, `--evidence-batch-limit 0` (report `rehearsals/20260905T151810Z-3798120`) and `25` (`rehearsals/20260905T152416Z-3834837`). Migrations 0024 and 0025 applied to the copy.
+
+| field | unbounded | bounded (25) |
+| --- | --- | --- |
+| verdict / round errors | ready / 0 | ready / 0 |
+| `accounts_released` / `accounts_windowed` / `accounts_projected` | 1 / 8 / 7 | 1 / 8 / 28 |
+| `rounds_run` | 1 | 22 |
+| `acdcdce9` `finalized_through` | 2026-09-01T12:14:30Z → **2026-09-04T03:06:41Z** | identical |
+| `acdcdce9` `consumed_cash_minor` | 546 → 5790 | identical |
+| `acdcdce9` `projection_version` | 10 → 14 | 10 → **35** |
+| `evaluations_by_status` | matched 2534 → 3060, negative_frozen 12 → 13, positive_blip_ignored 220, positive_classified_non_cash 10, source_gap_frozen 12 | identical |
+| `after.accounts` (all fields but `projection_version`) | — | identical, per account |
+| pending | `40bd883d` (its captured frontier job, `BALANCE_PROOF_PENDING`) | identical |
+
+The window ended at 03:06:41Z, the ceiling the probes had named; the released account replayed its three days — 526 evaluations made and one negative freeze, `consumed_cash_minor` 546 → 5790 — once in a single pass and once in 22 chunks of at most 25 pending items, with every published quantity and every evaluation identical between the two. `RC98-DIFF-ACCEPTANCE PASS`. That is the acceptance the handoff's fix 3 section asked for, on the incident's own account and evidence rather than a fixture.
+
+### Outcome
+
+RC98 built, signed and staged, not rolled forward: nothing it changes is run by production, and the instrument lives in the signed tag and the staged release. Production stays on RC94 with `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` unset. Switching the bound on is a separate environment change with its own 30-minute canary, not made tonight. Rehearsal evidence: `deployment-records/rc98-rehearsal-20260905T153149Z` on the server.
