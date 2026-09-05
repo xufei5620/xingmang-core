@@ -28,7 +28,13 @@ type SMSCatalogReader interface {
 }
 
 type smsProviderItem struct {
-	Provider   string `json:"provider"`
+	Provider string `json:"provider"`
+	// Enabled 是**运营在后台开的开关**，与 Verified 分开报。
+	//
+	// 页面要能同时说清两件事：这家开没开（运营的意愿），以及凭据能不能用
+	// （连接测试的事实）。合成一个「可用」布尔值，就分不出该去打开它还是
+	// 该去修密钥了。
+	Enabled    bool   `json:"enabled"`
 	Verified   bool   `json:"verified"`
 	VerifiedAt string `json:"verified_at,omitempty"`
 	// ClientIP 是供应商观察到的我方出口 IP（只有 62 会回）。
@@ -111,6 +117,7 @@ func ListSMSProvidersHandler(store SMSQuerier, configured []string) http.Handler
 			st := byProvider[id]
 			item := smsProviderItem{
 				Provider:          id,
+				Enabled:           st.Enabled,
 				Verified:          st.Verified(),
 				ClientIP:          st.ClientIP,
 				LastError:         st.LastError,

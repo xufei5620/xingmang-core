@@ -366,10 +366,10 @@ func (s *PgStore) ProviderStatus(ctx context.Context, provider string) (Provider
 	var st ProviderStatus
 	var verified *time.Time
 	err := s.pool.QueryRow(ctx, `
-SELECT provider, verified_at, client_ip, last_error, updated_at
+SELECT provider, enabled, verified_at, client_ip, last_error, updated_at
   FROM sms.provider_status
  WHERE environment = $1 AND provider = $2`, s.environment, provider).
-		Scan(&st.Provider, &verified, &st.ClientIP, &st.LastError, &st.UpdatedAt)
+		Scan(&st.Provider, &st.Enabled, &verified, &st.ClientIP, &st.LastError, &st.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// 没有行 = 从未做过连接测试。**不是错误**：新装环境本来就是这样，
 		// 报错会让「还没配」和「库挂了」长得一样。
@@ -386,7 +386,7 @@ SELECT provider, verified_at, client_ip, last_error, updated_at
 
 func (s *PgStore) ListProviderStatus(ctx context.Context) ([]ProviderStatus, error) {
 	rows, err := s.pool.Query(ctx, `
-SELECT provider, verified_at, client_ip, last_error, updated_at
+SELECT provider, enabled, verified_at, client_ip, last_error, updated_at
   FROM sms.provider_status
  WHERE environment = $1
  ORDER BY provider`, s.environment)
@@ -399,7 +399,7 @@ SELECT provider, verified_at, client_ip, last_error, updated_at
 	for rows.Next() {
 		var st ProviderStatus
 		var verified *time.Time
-		if err := rows.Scan(&st.Provider, &verified, &st.ClientIP, &st.LastError, &st.UpdatedAt); err != nil {
+		if err := rows.Scan(&st.Provider, &st.Enabled, &verified, &st.ClientIP, &st.LastError, &st.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if verified != nil {
@@ -415,6 +415,8 @@ func (s *PgStore) SaveProviderStatus(ctx context.Context, st ProviderStatus) err
 INSERT INTO sms.provider_status (environment, provider, verified_at, client_ip, last_error, updated_at)
 VALUES ($1,$2,$3,$4,$5,$6)
 ON CONFLICT (environment, provider) DO UPDATE SET
+    -- **不改 enabled**：连接测试是凭据的事实，开关是运营的意愿，
+    -- 一次测试不该把一家供应商顺手打开或关掉。
     verified_at = EXCLUDED.verified_at,
     client_ip = COALESCE(NULLIF(EXCLUDED.client_ip,''), provider_status.client_ip),
     last_error = EXCLUDED.last_error,
@@ -482,4 +484,22 @@ func nullableTime(t time.Time) any {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// SetProviderEnabled 开关一家供应商。
+//
+// **不碰 verified_at**：开关与验证是两件事。密钥过期时这家该保持开着并报错，
+// 而不是自己关掉——自动关掉会让「谁把它关了」变成一个查不出答案的问题。
+func (s *PgStore) SetProviderEnabled(ctx context.Context, provider string, enabled bool, at time.Time) error {
+	const upsertSQL = `
+INSERT INTO sms.provider_status (environment, provider, enabled, updated_at)
+VALUES ($1,$2,$3,$4)
+ON CONFLICT (environment, provider) DO UPDATE SET
+    enabled = EXCLUDED.enabled,
+    updated_at = EXCLUDED.updated_at`
+
+	if _, err := s.pool.Exec(ctx, upsertSQL, s.environment, provider, enabled, at.UTC()); err != nil {
+		return fmt.Errorf("开关供应商 %s: %w", provider, err)
+	}
+	return nil
 }

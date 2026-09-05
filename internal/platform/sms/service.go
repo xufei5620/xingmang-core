@@ -443,10 +443,28 @@ func (s *Service) requireVerified(ctx context.Context, provider string) error {
 	if err != nil {
 		return err
 	}
+	if !status.Enabled {
+		return fmt.Errorf("%w：先在接码页把这家打开", ErrProviderDisabled)
+	}
 	if !status.Verified() {
 		return fmt.Errorf("%w：先在页面上做一次连接测试", ErrProviderNotVerified)
 	}
 	return nil
+}
+
+// SetProviderEnabled 开关一家供应商。
+//
+// **与连接测试分开**：开关是运营的意愿，验证是凭据的事实。合成一个动作会让
+// 「我想用这家」和「这家的密钥能用」变成同一件事，而它们经常不同步——
+// 密钥过期时这家该保持开着并报错，而不是自己关掉。
+func (s *Service) SetProviderEnabled(ctx context.Context, provider string, enabled bool) (ProviderStatus, error) {
+	if _, err := s.adapter(provider); err != nil {
+		return ProviderStatus{}, err
+	}
+	if err := s.store.SetProviderEnabled(ctx, provider, enabled, s.now()); err != nil {
+		return ProviderStatus{}, err
+	}
+	return s.store.ProviderStatus(ctx, provider)
 }
 
 // settleFailure 把上游错误落成 failed 或 unknown。

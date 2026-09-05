@@ -15,6 +15,7 @@ vi.mock("../api/sms", async () => {
     listSMSCatalog: vi.fn(),
     purchaseSMSNumbers: vi.fn(),
     verifySMSProvider: vi.fn(),
+    setSMSProviderEnabled: vi.fn(),
     executeSMSResourceAction: vi.fn(),
     resolveSMSOperation: vi.fn(),
   };
@@ -27,6 +28,7 @@ import {
   listSMSProviders,
   listSMSResources,
   purchaseSMSNumbers,
+  setSMSProviderEnabled,
   type SMSOperation,
   type SMSProvider,
   type SMSResource,
@@ -50,7 +52,13 @@ function seed(over: {
 } = {}) {
   vi.mocked(listSMSProviders).mockResolvedValue(
     over.providers ?? [
-      { provider: "hero_sms", verified: true, supports_lifecycle: true, verified_at: "2026-09-05T00:00:00Z" },
+      {
+        provider: "hero_sms",
+        enabled: true,
+        verified: true,
+        supports_lifecycle: true,
+        verified_at: "2026-09-05T00:00:00Z",
+      },
     ],
   );
   vi.mocked(listSMSResources).mockResolvedValue(over.resources ?? []);
@@ -65,7 +73,7 @@ afterEach(() => vi.clearAllMocks());
 //
 // 后端也会拦，但那时钱虽然没花，人已经填完一整个表单了。
 it("未验证的供应商买号按钮是禁用的", async () => {
-  seed({ providers: [{ provider: "sms62", verified: false, supports_lifecycle: false }] });
+  seed({ providers: [{ provider: "sms62", enabled: true, verified: false, supports_lifecycle: false }] });
   renderPanel();
 
   // **先等数据到达**：供应商清单是异步的，而空态下按钮同样是禁用的——
@@ -99,7 +107,7 @@ it("买号需要两步确认，第一次点击不发请求", async () => {
 // 一个灰按钮看起来像「暂时不能用」，而这是永远不能用。
 it("62 的号码不显示取消/换号按钮", async () => {
   seed({
-    providers: [{ provider: "sms62", verified: true, supports_lifecycle: false }],
+    providers: [{ provider: "sms62", enabled: true, verified: true, supports_lifecycle: false }],
     resources: [
       { resource_id: "r1", provider: "sms62", phone_mask: "1555****1111", status: "active" },
     ],
@@ -199,10 +207,51 @@ it("核对没写依据时提交按钮禁用", async () => {
 it("显示供应商观察到的出口 IP", async () => {
   seed({
     providers: [
-      { provider: "sms62", verified: true, supports_lifecycle: false, client_ip: "203.0.113.10" },
+      {
+        provider: "sms62",
+        enabled: true,
+        verified: true,
+        supports_lifecycle: false,
+        client_ip: "203.0.113.10",
+      },
     ],
   });
   renderPanel();
 
   expect(await screen.findByText(/203\.0\.113\.10/)).toBeTruthy();
+});
+
+// 关掉的供应商买不了号，而且提示要说清是**哪一种**不能买。
+//
+// 「关着」与「没验证」的下一步完全不同：前者去页面上打开，后者去做连接测试。
+// 合成一句「不可用」，人就只能挨个试。
+it("停用的供应商买号按钮禁用，且提示与未验证区分开", async () => {
+  seed({
+    providers: [{ provider: "sms62", enabled: false, verified: true, supports_lifecycle: false }],
+  });
+  renderPanel();
+
+  await screen.findAllByText("62-US");
+  const button = (await screen.findByRole("button", { name: "买号" })) as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  expect(screen.getByText(/在后台被停用/)).toBeTruthy();
+  // 它验证过，所以**不该**看到「还没做过连接测试」那句。
+  expect(screen.queryByText(/还没做过连接测试/)).toBeNull();
+});
+
+// 开关走 Action，参数是 enabled 的**目标值**。
+//
+// 传「切换」而不是目标值，会让两个人同时点变成一次开一次关；
+// 传目标值时同向的两次点击是幂等的。
+it("点停用把 enabled=false 发给 Action", async () => {
+  seed({
+    providers: [{ provider: "sms62", enabled: true, verified: true, supports_lifecycle: false }],
+  });
+  vi.mocked(setSMSProviderEnabled).mockResolvedValue({ runId: "run-1" } as never);
+  renderPanel();
+
+  await screen.findAllByText("62-US");
+  fireEvent.click(await screen.findByRole("button", { name: "停用" }));
+
+  await waitFor(() => expect(setSMSProviderEnabled).toHaveBeenCalledWith("sms62", false));
 });

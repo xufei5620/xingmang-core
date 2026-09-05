@@ -1,0 +1,31 @@
+{
+  "id": "sms.provider.set_enabled",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "provider": {
+      "type": "string",
+      "required": true
+    },
+    "enabled": {
+      "type": "bool",
+      "required": true
+    }
+  },
+  "notes": "XM-SMS0 在管理后台开或关一家接码供应商。**这个开关刻意不是环境变量**：「今天开哪几家」是运营随时会改的决定（换供应商、某家挂了先停掉），落进环境变量意味着每次改都要改服务器配置再重启，而重启期间整个平台不可用——代价与这个决定的分量完全不匹配；走 Action 还多一样东西：审计里留下「谁在什么时候把这家关了」，那是出事之后第一个要问的问题。与之相对，XM_SMS_MODE（off/fake/real）留在环境变量里，因为它决定这个进程会不会花真钱，做成后台可改意味着一次误操作能让开发环境开始买真号，或者让生产悄悄切到替身而页面看起来一切正常。开关与验证是**两件独立的事**，不互相触发：连接测试成功不会顺手把这家打开（运营刻意关掉的那家不该被一次测试复活），失败也不会把它关掉（密钥过期时它该保持开着并报错，自动关掉会让「谁把它关了」变成查不出答案的问题）。购买前两个条件都要满足：开着（运营的意愿）且验证过（凭据确实能用）——两种拒绝的错误分开报，关着是去页面上打开，没验证是去做连接测试，下一步完全不同。新装环境默认全关：一个「装好就自动启用」的供应商，会在还没人填密钥、也没想清楚要不要用它的时候就出现在买号页的可选项里。领域层在打上游之前就拒绝关着的供应商，不只靠前端不渲染——一个还留着旧页面的标签页仍然能提交，而那一次提交花的是真钱。compensation_mode 是 REVERSIBLE：反方向再执行一次即可；已经买到的号码不受影响，关掉一家只挡新的购买，不会让手上的号码失效或取不到码。"
+}

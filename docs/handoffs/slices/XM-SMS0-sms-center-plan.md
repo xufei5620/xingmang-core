@@ -17,7 +17,7 @@ branch: ai/claude/XM-CARD0-infini-connector
 
 | 参考实现 | 星芒 | 依据 |
 |---|---|---|
-| API key 加密存 `sms_provider_settings.api_key_enc`，带 revision/CAS | **CredentialRef**：`secret://sms/<provider>-key`，库里不存任何密文 | 宪法 7 |
+| API key 加密存 `sms_provider_settings.api_key_enc`，带 revision/CAS | **CredentialRef**：`secret://sms62/api-key`、`secret://hero-sms/api-key`，库里不存任何密文 | 宪法 7 |
 | 17 个 Admin 路由直接读写 | 写全部走 **Action**（L1；内核对 L2+ 返回 `ADVANCED_CONTROLS_REQUIRED`），读走 Query 端点 | 宪法 2、3 |
 | 前端表单填 key | 走既有「密钥引用」页，与 Infini 凭据同一条路 | 宪法 7 |
 | 号码 AES-GCM 加密落库 | **明文列 + `sms.reveal` 权限闸** | 见下 |
@@ -160,13 +160,38 @@ Hero 的 `lookupResource` 最多扫 5 页 × 100 条 **active** activation；已
 （前端 `STAFF_ROLE_CATALOG` 没同步）。上一批漏掉两个角色是靠产品负责人截图
 发现的，这次它自己响了。
 
-### 上线前要做的三件事
+### 上线前要做的四件事
 
-1. **在管理端「密钥引用」页填两条密钥**：
-   `secret://sms62/api-key`、`secret://hero_sms/api-key`。
-2. **配环境变量**：`XM_SMS_MODE=real`（或 `fake` 先演示）、
-   `XM_SMS_PROVIDERS=sms62,hero_sms`。
-3. **授予 sms-operator 角色**给该买号的人——`sms.purchase` 刻意不给 admin。
+1. **配一个环境变量**：`XM_SMS_MODE=real`（或 `fake` 先演示）。
+   这是接码唯一的环境变量，其余全在管理后台。
+2. **在管理端「密钥引用」页填两条密钥**：
+   `secret://sms62/api-key`、`secret://hero-sms/api-key`。
+   注意 hero 的 scope 是**连字符**：scope 规则是 `^[a-z0-9][a-z0-9-]{0,63}$`，
+   不收下划线，所以供应商 id `hero_sms` 推出来的引用是 `hero-sms`。
+3. **在「接码中心」逐家做连接测试，通过后点「启用」**。
+   新装环境**默认两家都关着**：一个装好就自动启用的供应商，会在还没人填密钥、
+   也没想清楚要不要用它的时候就出现在买号页的可选项里。
+4. **授予 sms-operator 角色**给该买号的人——`sms.purchase` 刻意不给 admin。
+
+### 为什么「开哪几家」不是环境变量
+
+产品负责人 2026-09-05 指出这一点，是对的：最初的 `XM_SMS_PROVIDERS` 照抄了
+卡片的做法，但两者不是一类东西。「今天开哪几家」是运营随时会改的决定
+（换供应商、某家挂了先停掉），落进环境变量意味着每次改都要改服务器配置再重启，
+而重启期间整个平台不可用——代价与这个决定的分量完全不匹配。走 Action 还多一样
+东西：审计里留下「谁在什么时候把这家关了」，那是出事之后第一个要问的问题。
+开关现在在 `sms.provider_status.enabled`（迁移 000038），
+Action 是 `sms.provider.set_enabled@1`（权限 `sms.manage`）。
+残留的 `XM_SMS_PROVIDERS` 会让启动直接失败而不是被静默忽略——一个还写着
+`XM_SMS_PROVIDERS=sms62` 的配置文件会让人确信 hero 已经关掉了。
+
+**`XM_SMS_MODE` 留在环境变量里**，因为它是另一类：它决定这个进程会不会花真钱。
+做成后台可改，意味着一次误操作能让开发环境开始买真号，或者让生产悄悄切到替身
+而页面看起来一切正常。
+
+开关与验证是**两件独立的事**，不互相触发：连接测试成功不会顺手把这家打开
+（运营刻意关掉的那家不该被一次测试复活），失败也不会把它关掉（密钥过期时它该
+保持开着并报错，自动关掉会让「谁把它关了」变成查不出答案的问题）。
 
 可选：`secret://sms/notify-webhook` 填企业微信群机器人地址，验证码会推过去；
 不填就不推，不影响取码。

@@ -21,13 +21,13 @@ const hookSecret = "whsec_endpoint_test"
 var hookNow = time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 
 type fakeWebhookProcessor struct {
-	secrets   map[string]string
-	records   []cards.WebhookEvent
-	accounts  []string
-	refreshed []string
-	recordRes cards.WebhookRecord
-	recordErr error
-	refreshErr error
+	secrets      map[string]string
+	records      []cards.WebhookEvent
+	accounts     []string
+	refreshed    []string
+	recordRes    cards.WebhookRecord
+	recordErr    error
+	refreshErr   error
 	markedDone   []string
 	challenges   []cards.CardChallenge
 	challengeErr error
