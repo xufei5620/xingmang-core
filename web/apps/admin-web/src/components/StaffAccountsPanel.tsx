@@ -83,6 +83,22 @@ function GeneratedPasswordReveal({ password, onDone }: { password: string; onDon
 /** 角色多选：目录固定（api/staff.ts 的 STAFF_ROLE_CATALOG），用勾选框而不是
  *  下拉——设计系统没有 MultiSelect 原语，且角色只有五个，勾选框比多选下拉
  *  更容易一眼看清「现在选了哪几个」。 */
+/** 要渲染成复选框的角色 = 目录 ∪ 账号当前持有的。
+ *
+ *  并集而不是只取目录，是因为**只渲染目录里的项会让账号持有的未知角色
+ *  既看不见又取不掉**：`selected` 是整体提交回去的，看不见的那个仍在里面。
+ *  症状是每次保存都报「未知角色 X」，而页面上找不到任何东西可以改——
+ *  这个账号的角色从此改不动了。2026-09-05 生产上就这么卡住过（auditor）。
+ *
+ *  目录外的角色以内部名显示并标注，让人一眼看出「这个该取消掉」。 */
+function rolesToRender(selected: readonly string[]): { value: string; label: string }[] {
+  const known = new Set(STAFF_ROLE_CATALOG.map((r) => r.value));
+  const extras = selected
+    .filter((r) => !known.has(r))
+    .map((r) => ({ value: r, label: `${r}（已停用的角色，建议取消）` }));
+  return [...STAFF_ROLE_CATALOG, ...extras];
+}
+
 function RoleCheckboxGroup({
   label,
   selected,
@@ -108,7 +124,7 @@ function RoleCheckboxGroup({
         </span>
       </legend>
       <div className="flex flex-col gap-1.5 rounded-md border border-edge p-2">
-        {STAFF_ROLE_CATALOG.map((role) => {
+        {rolesToRender(selected).map((role) => {
           const id = `${idPrefix}-${role.value}`;
           return (
             <label key={role.value} htmlFor={id} className="flex items-center gap-2 text-sm text-fg">

@@ -21,6 +21,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/assurance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
+	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
@@ -401,6 +402,21 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	// 提现（XM-CARD6）。与卡片共用同一批已签名的账号客户端与同一个 PgStore：
+	// 再造一遍等于把同一份凭据解析两次、也多一处可以配歪的地方。
+	var withdrawService *cards.WithdrawService
+	var withdrawStore cards.WithdrawAddressStore
+	var withdrawLimits cards.WithdrawLimitStore
+	if cardStore != nil {
+		withdrawService = cards.NewWithdrawService(cardAccounts, cardStore, time.Now)
+		withdrawStore = cardStore
+		withdrawLimits = cardStore
+	}
+	if err := registerWithdrawActions(actionRegistry, withdrawService, withdrawStore, withdrawLimits, cardAccounts); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
 
 	// CPA 逐 key 用量（XM-CPA0）。与 reqlog file 模式同一条纪律：配错了就
 	// 拒绝启动；没启用（off）不算错误，路由据此不挂载
@@ -463,6 +479,7 @@ func main() {
 		CardAccounts: cardAccountIDs(cardService),
 		// 资金池余额直接走领域服务（它已经持有配好的客户端）。
 		CardBalances: cardBalanceReaderOrNil(cardService),
+		CardWithdraw: cardWithdrawQuerierOrNil(cardStore),
 		// nil 时回调路由整个不挂载（见 httpapi.Deps.CardWebhook）。
 		CardWebhook: cardWebhookOrNil(
 			buildCardWebhookProcessor(cardsCfg, cardStore, cardAccounts, cardSecretProvider, logger)),

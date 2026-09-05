@@ -186,6 +186,27 @@ func DefaultRoleScopeMap() map[string][]string {
 			"card.issue",
 			"card.manage",
 			"card.reveal",
+			// **提现权限（fund.withdraw）刻意不在这里**（XM-CARD6）。
+			//
+			// 卡片四权限给 admin 的理由是「不给就等于功能对唯一能用它的人
+			// 403」。提现不适用：它把钱转出平台、不可逆，而 admin 是日常
+			// 操作账号——一个被盗用的 admin 会话不该能把资金池搬空。
+			// 见下面的 fund-operator。
+			//
+			// 但**调整额度**（fund.limit.manage）在这里，而且刻意就该在
+			// 这里。额度 2026-09-05 从环境变量搬进了数据库、改成后台可调
+			// （产品负责人决定：要登服务器改文件再重启才能动的数字，实际上
+			// 没人会去动）。搬完之后「改不了」这道物理屏障就没有了，能替代
+			// 它的只有两把钥匙分持：
+			//
+			//   fund.limit.manage（admin）        —— 能抬高天花板，不能提现
+			//   fund.withdraw    （fund-operator）—— 能提现，抬不高天花板
+			//
+			// 拿到任一把都搬不空资金池，要两把都拿到才行。今天同一个人两个
+			// 角色都持有，这个分离在实践上是名义的；但审计里两件事是两条
+			// 独立记录，而且想拆给两个人时拆得开——并成一个权限就再也拆
+			// 不开了。
+			"fund.limit.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
@@ -206,6 +227,17 @@ func DefaultRoleScopeMap() map[string][]string {
 		// 配置写与受闸约束的触发，kill_switch 是"批准花真钱"本身，两者不是
 		// 同一类判断，一并给 admin 会让这条独立授权的设计意图落空）。
 		"assurance-probe-admin": {"assurance.probe.kill_switch"},
+		// XM-CARD6（2026-09-05）：资金提现。与 assurance-probe-admin 同一条
+		// 设计意图——把「批准花真钱」这类判断从日常操作角色里拿出来。
+		//
+		// 提现比那还重一档：它把钱转到**平台之外**，不可逆、不可追回。
+		// 平台今天没有第二人审批（内核拒执行 L2+，Advanced Controls 属
+		// Foundation-B 未实现），所以「谁持有这个权限」本身就是最后一道
+		// 人的闸。给 admin 等于把这道闸拆掉。
+		//
+		// 两个权限一起给：登记地址决定「钱能去哪儿」，提现决定「什么时候去」，
+		// 分开成两个串是为了以后想拆的时候拆得开，今天由同一个角色持有。
+		"fund-operator": {"fund.withdraw", "fund.address.manage"},
 	}
 }
 

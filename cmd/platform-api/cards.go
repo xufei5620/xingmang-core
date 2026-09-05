@@ -62,6 +62,9 @@ type cardsAccountConfig struct {
 	// 金额上限按账号各配一份：两个账号的资金是分开的。
 	PerOperationLimit string
 	PerDayLimit       string
+	// 提现额度**不在这里**：它存在库里，由管理后台的
+	// cards.withdraw.limit.set Action 调整（产品负责人 2026-09-05 决定：
+	// 要登服务器改文件再重启才能动的数字，实际上没人会去动）。
 	// BaseURL 覆盖进程级的 XM_CARDS_BASE_URL。
 	//
 	// 存在的唯一理由是**沙箱**：沙箱端点是
@@ -289,6 +292,27 @@ func registerCardActions(reg *action.Registry, svc *cards.Service) error {
 	return cards.RegisterActions(reg, svc)
 }
 
+// registerWithdrawActions 注册提现的两个 Action。
+//
+// 与卡片 Action 分开注册，但**不按「有没有配额度」决定注不注册**：
+// 没配额度的账号在领域层被 ErrLimitsUnconfigured 拒掉，那是一条会
+// 报错、能查、进审计的路径；按配置决定注册与否则会让页面上的按钮
+// 凭空消失，而「按钮没了」这种症状最难查。
+func registerWithdrawActions(
+	reg *action.Registry, svc *cards.WithdrawService,
+	store cards.WithdrawAddressStore, limits cards.WithdrawLimitStore,
+	accounts []cards.Account,
+) error {
+	if svc == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		ids = append(ids, a.ID)
+	}
+	return cards.RegisterWithdrawActions(reg, svc, store, limits, ids)
+}
+
 // cardQuerierOrNil 把「没启用」翻译成 nil 接口。
 //
 // 不能直接把 *cards.PgStore 赋给接口字段：一个装着 nil 指针的非 nil 接口
@@ -360,4 +384,15 @@ func cardBalanceReaderOrNil(svc *cards.Service) httpapi.CardBalanceReader {
 		return nil
 	}
 	return svc
+}
+
+// cardWithdrawQuerierOrNil 把「没启用」翻译成 nil 接口。
+//
+// 同 cardQuerierOrNil 那条纪律：一个装着 nil 指针的非 nil 接口会让路由
+// 以为端点该挂载，然后每次调用都空指针崩溃。
+func cardWithdrawQuerierOrNil(store *cards.PgStore) httpapi.WithdrawQuerier {
+	if store == nil {
+		return nil
+	}
+	return store
 }

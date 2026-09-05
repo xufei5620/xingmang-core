@@ -105,6 +105,11 @@ type Deps struct {
 	ExtraExpectedCredentials []credentials.ExpectedRef
 	// CardSyncInterval 供新鲜度判定；为零时用 5 分钟兜底。
 	CardSyncInterval time.Duration
+	// CardWithdraw 是提现页的读端点（地址白名单与提现历史）。
+	//
+	// 为 nil 时不挂载那两条路由——与卡片读端点分开判空，因为提现的
+	// 权限是独立的 fund.withdraw，两者不该被同一个开关连坐。
+	CardWithdraw WithdrawQuerier
 	// CardBalances 读各账号的资金池可用余额（实时上游调用，非投影）。
 	// 为 nil 时该端点不挂载。
 	CardBalances CardBalanceReader
@@ -307,6 +312,23 @@ func NewRouter(d Deps) http.Handler {
 				if d.CardBalances != nil {
 					api.With(RequireScope(cards.PermissionRead)).
 						Get("/cards/balances", CardBalancesHandler(d.CardBalances, d.CardAccounts))
+				}
+				// 提现的两条读端点由 fund.withdraw 把守，**不是 card.read**。
+				//
+				// 地址清单回的是完整转账地址，提现历史回的是逐笔资金流向；
+				// 两者都不该因为「能看卡」就顺带能看。持有 card.read 的人
+				// 看不见提现页，也就不会以为自己该有那个按钮。
+				if d.CardWithdraw != nil {
+					api.With(RequireScope(cards.PermissionWithdraw)).
+						Get("/cards/withdraw/addresses", ListWithdrawAddressesHandler(d.CardWithdraw))
+					api.With(RequireScope(cards.PermissionWithdraw)).
+						Get("/cards/withdrawals", ListWithdrawalsHandler(d.CardWithdraw))
+					// 额度用 card.read 而不是 fund.withdraw：它是一个上限
+					// 数字，不泄漏地址也不泄漏资金流向，而「这个账号的提现
+					// 上限是多少」是运营看板上该有的信息。改它才要
+					// fund.limit.manage（Action 自己把守）。
+					api.With(RequireScope(cards.PermissionRead)).
+						Get("/cards/withdraw/limits", ListWithdrawLimitsHandler(d.CardWithdraw))
 				}
 			}
 			api.With(RequireScope(savedviews.ScopeManage)).

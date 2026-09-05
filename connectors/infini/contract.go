@@ -32,6 +32,10 @@ type CardClient interface {
 	CardTransactions(ctx context.Context, cardID string, page, pageSize int) (TransactionPage, error)
 	// AccountBalances 是组织账户的可用余额（资金 API，需 fund.withdraw 权限）。
 	AccountBalances(ctx context.Context) (AccountBalances, error)
+	// 提现（资金 API）。**把钱转到平台之外**，与卡片操作不是一个风险量级。
+	Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error)
+	WithdrawStatus(ctx context.Context, requestID string) (WithdrawState, error)
+	WithdrawFees(ctx context.Context) ([]WithdrawFee, error)
 
 	// 写（花钱或改状态）
 	ApplyCard(ctx context.Context, req ApplyCardRequest) (CardApplication, error)

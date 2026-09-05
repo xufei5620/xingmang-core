@@ -30,6 +30,9 @@ type Account struct {
 	// Limits 按账号各配一份。两个账号的资金是分开的，用一套全局上限
 	// 会让「单日 500」变成两个账号抢同一个额度。
 	Limits Limits
+	// 提现额度**不在这里**：它存在库里，由管理后台的
+	// cards.withdraw.limit.set Action 修改（产品负责人 2026-09-05 决定）。
+	// 见 WithdrawStore.WithdrawLimitsFor。
 }
 
 // Store 是领域层需要的持久化能力。
