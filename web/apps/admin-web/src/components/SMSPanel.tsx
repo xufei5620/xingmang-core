@@ -11,6 +11,7 @@ import {
   listSMSResources,
   purchaseSMSNumbers,
   resolveSMSOperation,
+  setSMSProviderEnabled,
   verifySMSProvider,
   type SMSOperation,
   type SMSProvider,
@@ -161,11 +162,29 @@ function ProviderCard({
     },
     onError: setError,
   });
+  // 传 enabled 的**目标值**而不是「切换」：传切换时两个人同时点会变成
+  // 一次开一次关，传目标值时同向的两次点击是幂等的。
+  const toggle = useMutation({
+    mutationFn: () => setSMSProviderEnabled(provider.provider, !provider.enabled),
+    onSuccess: (run) => {
+      onChanged({
+        runId: run.runId,
+        title: `${provider.enabled ? "已停用" : "已启用"} ${providerLabel(provider.provider)}`,
+      });
+      setError(null);
+    },
+    onError: setError,
+  });
 
   return (
     <div className="border-edge flex min-w-64 flex-col gap-1 rounded-md border p-3">
       <span className="flex items-center gap-2">
         <span className="text-sm font-medium">{providerLabel(provider.provider)}</span>
+        {/* 两个徽章而不是一个「可用」：关着与没验证的下一步完全不同，
+            前者去这张卡上点启用，后者去做连接测试。合成一个就分不出来了。 */}
+        <Badge tone={provider.enabled ? "success" : "neutral"}>
+          {provider.enabled ? "已启用" : "已停用"}
+        </Badge>
         <Badge tone={provider.verified ? "success" : "warning"}>
           {provider.verified ? "已验证" : "未验证"}
         </Badge>
@@ -192,6 +211,14 @@ function ProviderCard({
         >
           {mutation.isPending ? "测试中…" : "连接测试"}
         </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={toggle.isPending}
+          onClick={() => toggle.mutate()}
+        >
+          {toggle.isPending ? "提交中…" : provider.enabled ? "停用" : "启用"}
+        </Button>
         {provider.supports_lifecycle ? (
           <span className="text-fg-muted text-xs">支持取消/延长</span>
         ) : (
@@ -216,12 +243,16 @@ function PurchaseSection({
     ? provider
     : (providers[0]?.provider ?? "");
   const current = providers.find((p) => p.provider === effective);
+  // 两个条件都要：开着（运营的意愿）且验证过（凭据确实能用）。
+  // 后端也会各自拦一道——只靠前端不渲染是不够的，一个还留着旧页面的
+  // 标签页仍然能提交，而那一次提交花的是真钱。
+  const usable = Boolean(current?.enabled && current?.verified);
 
   const catalogQuery = useQuery({
     queryKey: [CATALOG_QUERY, effective],
     queryFn: ({ signal }) => listSMSCatalog(effective, {}, { signal }),
     // 库存是实时上游调用，只有真要挑商品时才拉。
-    enabled: effective !== "" && Boolean(current?.verified),
+    enabled: effective !== "" && usable,
     staleTime: 60_000,
   });
 
@@ -241,11 +272,16 @@ function PurchaseSection({
             value={effective}
             onValueChange={setProvider}
           />
-          <PurchaseDialog provider={effective} verified={Boolean(current?.verified)} onDone={onDone} />
+          <PurchaseDialog provider={effective} usable={usable} onDone={onDone} />
         </span>
       </div>
 
-      {current && !current.verified ? (
+      {current && !current.enabled ? (
+        <p className="text-fg-muted text-sm">
+          {providerLabel(effective)} 在后台被停用了，暂时不能买号也读不到库存。
+          到上面那张卡上点「启用」即可。
+        </p>
+      ) : current && !current.verified ? (
         <p className="text-fg-muted text-sm">
           {providerLabel(effective)} 还没做过连接测试，暂时不能买号也读不到库存。
         </p>
@@ -292,11 +328,12 @@ function CatalogTable({ items }: { items: Awaited<ReturnType<typeof listSMSCatal
 /** 买号对话框。两步确认，幂等键在上膛时生成。 */
 function PurchaseDialog({
   provider,
-  verified,
+  usable,
   onDone,
 }: {
   provider: string;
-  verified: boolean;
+  /** 开着**且**验证过。两者缺一都不能买号。 */
+  usable: boolean;
   onDone: (r: ActionResult) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -338,7 +375,7 @@ function PurchaseDialog({
       title={`买号 · ${providerLabel(provider)}`}
       description="买到的号不可退。数量上限 200——那是我们自己的安全上限，不是供应商声明的最大值。"
       trigger={
-        <Button size="sm" disabled={!verified}>
+        <Button size="sm" disabled={!usable}>
           买号
         </Button>
       }

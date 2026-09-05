@@ -10,12 +10,17 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
-// 四个 Action。
+// 五个 Action。
 const (
-	ActionProviderVerify   = "sms.provider.verify"
-	ActionNumberPurchase   = "sms.number.purchase"
-	ActionResourceAction   = "sms.resource.action"
-	ActionOperationResolve = "sms.operation.resolve"
+	ActionProviderVerify = "sms.provider.verify"
+	// ActionProviderSetEnabled：开关一家供应商。
+	//
+	// 走 Action 而不是环境变量，是因为「谁在什么时候把这家关了」是出事之后
+	// 第一个要问的问题——改配置文件改完就没痕迹，还要重启整个平台才生效。
+	ActionProviderSetEnabled = "sms.provider.set_enabled"
+	ActionNumberPurchase     = "sms.number.purchase"
+	ActionResourceAction     = "sms.resource.action"
+	ActionOperationResolve   = "sms.operation.resolve"
 )
 
 // 四个权限。
@@ -45,7 +50,7 @@ var (
 	humanOnly = []principal.Type{principal.TypeHuman}
 )
 
-// RegisterActions 把四个 Action 注册进内核。
+// RegisterActions 把五个 Action 注册进内核。
 //
 // **全部 L1**：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED
 // （Foundation-B 未实现），声明成 L2 会让它们变成永远跑不起来的摆设。
@@ -62,6 +67,7 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 		handler action.Handler
 	}{
 		{verifyDef(providers), verifyHandler(svc)},
+		{setEnabledDef(providers), setEnabledHandler(svc)},
 		{purchaseDef(providers), purchaseHandler(svc)},
 		{resourceActionDef(), resourceActionHandler(svc)},
 		{resolveDef(), resolveHandler(svc)},
@@ -87,8 +93,45 @@ func verifyDef(providers []string) action.Definition {
 	return action.Definition{
 		ID: ActionProviderVerify, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionManage,
-		Schema: action.Schema{Fields: []action.Field{providerField(providers)}},
+		Schema:       action.Schema{Fields: []action.Field{providerField(providers)}},
 		Environments: allEnvironments, PrincipalTypes: humanOnly,
+	}
+}
+
+func setEnabledDef(providers []string) action.Definition {
+	return action.Definition{
+		ID: ActionProviderSetEnabled, Version: actionVersion,
+		RiskLevel: action.L1, Permission: PermissionManage,
+		Schema: action.Schema{Fields: []action.Field{
+			providerField(providers),
+			{Name: "enabled", Type: action.FieldBool, Required: true},
+		}},
+		Environments: allEnvironments, PrincipalTypes: humanOnly,
+	}
+}
+
+// setEnabledHandler 开关一家供应商。
+//
+// **不碰验证事实**：开关是运营的意愿，验证是凭据的事实。密钥过期时这家该
+// 保持开着并报错，而不是自己关掉——自动关掉会让「谁把它关了」变成一个查不出
+// 答案的问题。反过来，打开一家没验证过的也不会让它能花钱：购买那道闸另判。
+func setEnabledHandler(svc *Service) action.Handler {
+	return func(ctx context.Context, params map[string]any) (any, error) {
+		provider := stringParam(params, "provider")
+		enabled := action.BoolParam(params, "enabled")
+		action.RecordResource(ctx, "sms_provider", provider)
+
+		status, err := svc.SetProviderEnabled(ctx, provider, enabled)
+		if err != nil {
+			return nil, err
+		}
+		action.RecordAfter(ctx, map[string]any{
+			"provider": provider, "enabled": status.Enabled, "verified": status.Verified(),
+		})
+		return map[string]any{
+			"provider": provider, "enabled": status.Enabled,
+			"verified": status.Verified(), "usable": status.Usable(),
+		}, nil
 	}
 }
 

@@ -59,8 +59,10 @@ type Store interface {
 	// ProviderStatus 读某家的验证事实。
 	ProviderStatus(ctx context.Context, provider string) (ProviderStatus, error)
 	ListProviderStatus(ctx context.Context) ([]ProviderStatus, error)
-	// SaveProviderStatus 写连接测试的结果。
+	// SaveProviderStatus 写连接测试的结果。**不改 enabled**——那是另一个动作。
 	SaveProviderStatus(ctx context.Context, s ProviderStatus) error
+	// SetProviderEnabled 开关一家供应商。
+	SetProviderEnabled(ctx context.Context, provider string, enabled bool, at time.Time) error
 }
 
 // Order 是一笔订单（主要是 62）。
@@ -76,10 +78,15 @@ type Order struct {
 
 // ProviderStatus 是某家供应商的验证事实。
 //
-// **不含配置**：启用哪几家由 XM_SMS_PROVIDERS 显式声明，密钥在
-// SecretProvider。这里只记「最近一次连接测试是什么时候、结果如何」。
+// 记两件事：**运营开没开这家**（enabled），以及**最近一次连接测试的结果**。
+// 密钥不在这里——它在 SecretProvider，库里不存任何密文（宪法 7）。
 type ProviderStatus struct {
 	Provider string
+	// Enabled 是**运营在后台开的开关**，不是部署配置。
+	//
+	// 新装环境默认关：一个「装好就自动启用」的供应商，会在还没人填密钥、
+	// 也没想清楚要不要用它的时候就出现在买号页的可选项里。
+	Enabled bool
 	// VerifiedAt 为零值 = 从未验证成功。购买前必须非零。
 	VerifiedAt time.Time
 	// ClientIP 是供应商观察到的我方出口 IP。上游若做 IP 白名单，
@@ -89,5 +96,12 @@ type ProviderStatus struct {
 	UpdatedAt time.Time
 }
 
-// Verified 说明这家是否可以用来花钱。
+// Verified 说明这家做过成功的连接测试。
 func (s ProviderStatus) Verified() bool { return !s.VerifiedAt.IsZero() }
+
+// Usable 说明这家现在能不能用来花钱。
+//
+// **两个条件都要**：开着（运营的意愿）且验证过（凭据确实能用）。
+// 只看其中一个都会漏——开着但没验证的会在买号那一刻才报鉴权错误，
+// 验证过但关着的说明运营刻意停了它。
+func (s ProviderStatus) Usable() bool { return s.Enabled && s.Verified() }

@@ -174,7 +174,18 @@ func (m *memStore) ListProviderStatus(ctx context.Context) ([]ProviderStatus, er
 }
 
 func (m *memStore) SaveProviderStatus(ctx context.Context, s ProviderStatus) error {
+	// 与 PgStore 一致：**不改 enabled**。替身比真实存储宽松一档，
+	// 等于让一类真实存在的 bug 在单元测试里永远看不见。
+	s.Enabled = m.status[s.Provider].Enabled
 	m.status[s.Provider] = s
+	return nil
+}
+
+func (m *memStore) SetProviderEnabled(ctx context.Context, provider string, enabled bool, at time.Time) error {
+	st := m.status[provider]
+	st.Provider = provider
+	st.Enabled = enabled
+	m.status[provider] = st
 	return nil
 }
 
@@ -232,8 +243,8 @@ func (f *fakeAdapter) ExecuteAction(ctx context.Context, kind string, r Resource
 
 func newService(t *testing.T, adapter Adapter, store *memStore) *Service {
 	t.Helper()
-	store.status[ProviderSMS62] = ProviderStatus{Provider: ProviderSMS62, VerifiedAt: testNow}
-	store.status[ProviderHero] = ProviderStatus{Provider: ProviderHero, VerifiedAt: testNow}
+	store.status[ProviderSMS62] = ProviderStatus{Provider: ProviderSMS62, Enabled: true, VerifiedAt: testNow}
+	store.status[ProviderHero] = ProviderStatus{Provider: ProviderHero, Enabled: true, VerifiedAt: testNow}
 	return NewService(
 		[]Provider{{ID: ProviderSMS62, Adapter: adapter}, {ID: ProviderHero, Adapter: adapter}},
 		store, nil, func() time.Time { return testNow },
@@ -251,7 +262,7 @@ func TestPurchaseRequiresVerifiedProvider(t *testing.T) {
 	adapter := &fakeAdapter{}
 	svc := newService(t, adapter, store)
 	// 把验证事实抹掉。
-	store.status[ProviderSMS62] = ProviderStatus{Provider: ProviderSMS62}
+	store.status[ProviderSMS62] = ProviderStatus{Provider: ProviderSMS62, Enabled: true}
 
 	_, err := svc.Purchase(context.Background(), "op-1", ProviderSMS62, PurchaseInput{Quantity: 1})
 	if !errors.Is(err, ErrProviderNotVerified) {
@@ -392,7 +403,7 @@ func TestFetchCodeDeduplicates(t *testing.T) {
 	adapter := &fakeAdapter{code: Code{Code: "123456", Sender: "OPENAI"}}
 	svc := NewService([]Provider{{ID: ProviderHero, Adapter: adapter}}, store, notifier,
 		func() time.Time { return testNow })
-	store.status[ProviderHero] = ProviderStatus{Provider: ProviderHero, VerifiedAt: testNow}
+	store.status[ProviderHero] = ProviderStatus{Provider: ProviderHero, Enabled: true, VerifiedAt: testNow}
 	id, _ := store.UpsertResource(context.Background(), Resource{Provider: ProviderHero, ExternalID: "a1"})
 
 	for i := 0; i < 3; i++ {

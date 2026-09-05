@@ -19,7 +19,7 @@ interface ListResponse<T> {
 }
 
 const SMS_NOT_MOUNTED_DESCRIPTION =
-  "接码在当前环境未启用（XM_SMS_MODE=off）。配好供应商清单与密钥引用后会自动出现。";
+  "接码在当前环境未启用（XM_SMS_MODE=off）。开启后，供应商的密钥与启用开关都在管理后台里配。";
 
 function translateUnmounted(error: unknown): never {
   if (looksLikeUnmountedRoute(error)) {
@@ -30,6 +30,10 @@ function translateUnmounted(error: unknown): never {
 
 export interface SMSProvider {
   provider: string;
+  /** 运营在后台开的开关。**与 verified 是两件事**：
+   *  关着是运营的决定（去页面上打开），没验证是凭据的问题（去做连接测试）。
+   *  买号要求两个都为 true。 */
+  enabled: boolean;
   /** 是否做过成功的连接测试。**买号前必须为 true。** */
   verified: boolean;
   verified_at?: string;
@@ -165,6 +169,25 @@ export function verifySMSProvider(
 ): Promise<ActionRun> {
   return executeAction(
     { actionId: "sms.provider.verify", version: "1", params: { provider } },
+    options,
+    client,
+  );
+}
+
+/** 开关一家供应商（`sms.provider.set_enabled@1`）。
+ *
+ *  参数是 enabled 的**目标值**而不是「切换」：传切换时两个人同时点会变成
+ *  一次开一次关，传目标值时同向的两次点击是幂等的。
+ *
+ *  **不影响验证事实**：开关是运营的意愿，验证是凭据的事实，两者不互相触发。 */
+export function setSMSProviderEnabled(
+  provider: string,
+  enabled: boolean,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.provider.set_enabled", version: "1", params: { provider, enabled } },
     options,
     client,
   );

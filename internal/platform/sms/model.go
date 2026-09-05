@@ -21,6 +21,12 @@ const (
 	ProviderHero  = "hero_sms"
 )
 
+// AllProviders 是代码支持的全部供应商，顺序即页面上的展示顺序。
+//
+// 进程**永远把这两家都建出来**，能不能用由库里的 enabled 决定。
+// 让构造随配置变化，等于在后台开一家之后还要重启进程才生效。
+var AllProviders = []string{ProviderSMS62, ProviderHero}
+
 // 操作类型。62 只支持 purchase；其余五个是 Hero 独有的生命周期动作。
 const (
 	KindPurchase   = "purchase"
@@ -55,6 +61,11 @@ const (
 var (
 	// ErrProviderUnknown：不认识的供应商。
 	ErrProviderUnknown = errors.New("sms: 未知供应商")
+	// ErrProviderDisabled：这家在后台是关着的。
+	//
+	// 与「没验证」分开报：关着是运营的决定（去页面上打开），没验证是凭据
+	// 的问题（去做连接测试）——两者的下一步完全不同。
+	ErrProviderDisabled = errors.New("sms: 供应商未启用")
 	// ErrProviderNotVerified：这家还没做过成功的连接测试。
 	//
 	// 拿一份没验证过的凭据去花钱，失败时分不清是密钥没配还是上游故障——
@@ -216,11 +227,14 @@ func SupportsAction(provider, kind string) bool {
 }
 
 // ValidateProvider 挡住不认识的供应商。
+//
+// 走 AllProviders 而不是另写一份 switch：两份清单迟早会差一家，
+// 而那种差异的症状是「页面上有这家，一点就说未知供应商」。
 func ValidateProvider(provider string) error {
-	switch provider {
-	case ProviderSMS62, ProviderHero:
-		return nil
-	default:
-		return fmt.Errorf("%w: %q", ErrProviderUnknown, provider)
+	for _, id := range AllProviders {
+		if id == provider {
+			return nil
+		}
 	}
+	return fmt.Errorf("%w: %q", ErrProviderUnknown, provider)
 }

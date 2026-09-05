@@ -513,13 +513,13 @@ func main() {
 		CardWithdraw: cardWithdrawQuerierOrNil(cardStore),
 		SMS:          smsQuerierOrNil(smsStore),
 		SMSCatalog:   smsCatalogOrNil(smsService),
-		SMSProviders: smsCfg.Providers,
+		SMSProviders: smsProviderIDs(smsService),
 		// nil 时回调路由整个不挂载（见 httpapi.Deps.CardWebhook）。
 		CardWebhook: cardWebhookOrNil(
 			buildCardWebhookProcessor(cardsCfg, cardStore, cardAccounts, cardSecretProvider, logger)),
 		// 卡片账号的凭据引用进密钥引用页：运营在那里填值与轮换，
 		// 写进去的就是 SecretProvider 读的文件。
-		ExtraExpectedCredentials: cardExpectedCredentials(cardsCfg),
+		ExtraExpectedCredentials: append(cardExpectedCredentials(cardsCfg), smsExpectedCredentials(smsCfg)...),
 		CardSyncInterval:         cardsCfg.SyncInterval,
 		// 凭据登记的读与写共用同一个仓储：清单里只有指纹与可用性，没有值
 		Credentials: credentialStore,

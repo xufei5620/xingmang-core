@@ -11,6 +11,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/connectors/herosms"
 	"github.com/xufei5620/xingmang-platform/connectors/sms62"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 	"github.com/xufei5620/xingmang-platform/internal/platform/sms"
@@ -38,13 +39,17 @@ func parseSMSMode(raw string) (smsMode, error) {
 	}
 }
 
+// smsConfig 只剩一件事：这个进程打不打真实供应商。
+//
+// **开哪几家不在这里。**那是运营随时会改的决定（换供应商、某家挂了先停掉），
+// 落进环境变量意味着每次改都要改服务器配置再重启，代价与决定的分量不匹配。
+// 开关在 sms.provider_status.enabled，管理后台直接点。
+//
+// Mode 则留在环境变量里，因为它是另一类东西：它决定这个进程会不会花真钱。
+// 做成后台可改，意味着一次误操作能让开发环境开始买真号，或者让生产悄悄切到
+// 替身而页面上一切正常。
 type smsConfig struct {
 	Mode smsMode
-	// Providers 是**显式声明**的供应商清单，没有隐式回落。
-	//
-	// 同 XM_CARDS_ACCOUNTS 那条：一个「只配了一家就默默当成唯一供应商」的
-	// 行为，会在加第二家时把钱花到错的地方。
-	Providers []string
 }
 
 func loadSMSConfig(getenv func(string) string) (smsConfig, error) {
@@ -52,30 +57,12 @@ func loadSMSConfig(getenv func(string) string) (smsConfig, error) {
 	if err != nil {
 		return smsConfig{}, err
 	}
-	cfg := smsConfig{Mode: mode}
-	if mode == smsModeOff {
-		return cfg, nil
+	// 残留的旧变量要喊出来，不能默默忽略：一个还写着 XM_SMS_PROVIDERS=sms62
+	// 的配置文件会让人确信 hero_sms 已经关掉了，而它其实由库里的开关说了算。
+	if strings.TrimSpace(getenv("XM_SMS_PROVIDERS")) != "" {
+		return smsConfig{}, fmt.Errorf("XM_SMS_PROVIDERS 已废弃，请从配置里删掉；供应商启用开关改在管理后台「接码中心 → 供应商」")
 	}
-
-	seen := map[string]bool{}
-	for _, part := range strings.Split(getenv("XM_SMS_PROVIDERS"), ",") {
-		id := strings.ToLower(strings.TrimSpace(part))
-		if id == "" {
-			continue
-		}
-		if err := sms.ValidateProvider(id); err != nil {
-			return smsConfig{}, fmt.Errorf("XM_SMS_PROVIDERS 含未知供应商 %q，只接受 sms62 / hero_sms", id)
-		}
-		if seen[id] {
-			return smsConfig{}, fmt.Errorf("XM_SMS_PROVIDERS 里 %q 重复", id)
-		}
-		seen[id] = true
-		cfg.Providers = append(cfg.Providers, id)
-	}
-	if len(cfg.Providers) == 0 {
-		return smsConfig{}, fmt.Errorf("XM_SMS_MODE=%s 但 XM_SMS_PROVIDERS 为空——供应商清单必须显式声明", mode)
-	}
-	return cfg, nil
+	return smsConfig{Mode: mode}, nil
 }
 
 // smsCredentialRef 从供应商 id 推出它的密钥引用。
@@ -84,8 +71,12 @@ func loadSMSConfig(getenv func(string) string) (smsConfig, error) {
 // 地方，而配错引用的症状（「密钥没配」）与值填错了长得一模一样。
 //
 // 管理端「密钥引用」页按同一个 scope 写文件，客户端按同一个 scope 读。
+//
+// 下划线要换成连字符：scope 的规则是 ^[a-z0-9][a-z0-9-]{0,63}$，而供应商 id
+// 是 hero_sms。直接拼会得到一个解析不过的引用，且只在 XM_SMS_MODE=real 时
+// 才炸——症状是「密钥引用非法」，看起来像运营填错了，可这串根本不是人填的。
 func smsCredentialRef(provider string) string {
-	return "secret://" + strings.ToLower(provider) + "/api-key"
+	return "secret://" + strings.ReplaceAll(strings.ToLower(provider), "_", "-") + "/api-key"
 }
 
 // buildSMS 组装接码功能。mode=off 时返回 (nil, nil, nil)。
@@ -102,17 +93,29 @@ func buildSMS(
 	if pool == nil {
 		return nil, nil, fmt.Errorf("接码功能需要数据库连接")
 	}
+	providers, err := buildSMSProviders(cfg.Mode, secretProvider)
+	if err != nil {
+		return nil, nil, err
+	}
 	store := sms.NewPgStore(pool, environment, time.Now)
+	return sms.NewService(providers, store, notifier, time.Now), store, nil
+}
 
-	providers := make([]sms.Provider, 0, len(cfg.Providers))
-	for _, id := range cfg.Providers {
-		adapter, err := buildSMSAdapter(cfg.Mode, id, secretProvider)
+// buildSMSProviders 把已知的每一家都建出来。
+//
+// **不挑不选**：建适配器既不花钱也不连网，真正的闸是 requireVerified
+// （关着的、没验证过的都拦在打上游之前）。构造阶段就少建一家，会让后台
+// 点开它之后仍然报「未知供应商」，而那个错误看起来像代码不支持这家。
+func buildSMSProviders(mode smsMode, secretProvider secrets.SecretProvider) ([]sms.Provider, error) {
+	providers := make([]sms.Provider, 0, len(sms.AllProviders))
+	for _, id := range sms.AllProviders {
+		adapter, err := buildSMSAdapter(mode, id, secretProvider)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		providers = append(providers, sms.Provider{ID: id, Adapter: adapter})
 	}
-	return sms.NewService(providers, store, notifier, time.Now), store, nil
+	return providers, nil
 }
 
 func buildSMSAdapter(mode smsMode, provider string, secretProvider secrets.SecretProvider) (sms.Adapter, error) {
@@ -179,6 +182,17 @@ func smsQuerierOrNil(store *sms.PgStore) httpapi.SMSQuerier {
 	return store
 }
 
+// smsProviderIDs 是页面上要显示的供应商清单。
+//
+// 取**已装配的**那份而不是 sms.AllProviders：两者今天相同，但如果哪天
+// 某家因为凭据缺失没装配上，页面该看到的是装配后的事实。
+func smsProviderIDs(svc *sms.Service) []string {
+	if svc == nil {
+		return nil
+	}
+	return svc.Providers()
+}
+
 func smsCatalogOrNil(svc *sms.Service) httpapi.SMSCatalogReader {
 	if svc == nil {
 		return nil
@@ -224,3 +238,27 @@ func smsNotifier(provider secrets.SecretProvider) sms.Notifier {
 
 // smsNotifyWebhookRef 是接码验证码推送的地址引用。
 const smsNotifyWebhookRef = "secret://sms/notify-webhook"
+
+// smsExpectedCredentials 把接码要用的引用登记到「密钥引用」页。
+//
+// 运营在那一页填值与轮换，写进去的就是 SecretProvider 读的文件——
+// 不用登服务器、不用改代码。缺一条的症状很难查：功能整体是通的，只有那条
+// 对应的能力静默失灵（比如推送不发而取码正常），因为「没配」在这套代码里
+// 一律是安静跳过。页面上有槽位，运营才知道有这么一样东西要填。
+func smsExpectedCredentials(cfg smsConfig) []credentials.ExpectedRef {
+	if cfg.Mode == smsModeOff {
+		return nil
+	}
+	out := make([]credentials.ExpectedRef, 0, len(sms.AllProviders)+1)
+	for _, id := range sms.AllProviders {
+		out = append(out, credentials.ExpectedRef{
+			Ref: smsCredentialRef(id), Platform: "sms",
+			Purpose: "接码供应商 " + id + " 的 API 密钥（填好后到「接码中心」做连接测试再启用）",
+		})
+	}
+	out = append(out, credentials.ExpectedRef{
+		Ref: smsNotifyWebhookRef, Platform: "sms",
+		Purpose: "接码验证码推送的企业微信群机器人 Webhook（群成员都能看到码，建议指向只有自己的群）",
+	})
+	return out
+}
