@@ -1,5 +1,11 @@
 # RC95 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC95 was built at signed tag
+> `v0.1.0-rc95-signed` (`ff84f48`) and was not rolled forward (its rewind-based
+> differential failed on the cash accounts, see its execution record); its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-05-invoice-rc96-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and deploy RC95, which ships the last fix of the 2026-09-04 stall's ranking **switched off**, and uses its own rehearsal to decide whether it may ever be switched on:
