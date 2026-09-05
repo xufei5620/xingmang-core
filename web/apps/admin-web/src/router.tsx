@@ -42,6 +42,7 @@ import {
 import { ActionsPage } from "./pages/ActionsPage";
 import { AlertsPage } from "./pages/AlertsPage";
 import { CardsPage } from "./pages/CardsPage";
+import { SMSPage } from "./pages/SMSPage";
 import { AuditPage } from "./pages/AuditPage";
 import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
@@ -437,6 +438,9 @@ export const routes = [
               // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
               { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
               { path: "cards", Component: CardsPage },
+              // 接码与卡片并列：它们是同一类东西——平台自己持有的、用来
+              // 注册与维持外部服务账号的资源（一个支付工具，一个手机号）。
+              { path: "sms", Component: SMSPage },
               // 选中哪张卡写进路由，**渲染的是同一个卡片页**（左右分栏里
               // 选中它），不是另一个页面。这样看起来和 Infini 后台一样，
               // 而详情依然可链接、可刷新、可发给同事——ADMIN-IA §3 真正

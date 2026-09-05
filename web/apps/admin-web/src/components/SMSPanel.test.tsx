@@ -1,0 +1,208 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
+import { afterEach, expect, it, vi } from "vitest";
+import { SMSPanel } from "./SMSPanel";
+
+vi.mock("../api/sms", async () => {
+  const actual = await vi.importActual<typeof import("../api/sms")>("../api/sms");
+  return {
+    ...actual,
+    listSMSProviders: vi.fn(),
+    listSMSResources: vi.fn(),
+    listSMSOperations: vi.fn(),
+    listSMSCodes: vi.fn(),
+    listSMSCatalog: vi.fn(),
+    purchaseSMSNumbers: vi.fn(),
+    verifySMSProvider: vi.fn(),
+    executeSMSResourceAction: vi.fn(),
+    resolveSMSOperation: vi.fn(),
+  };
+});
+
+import {
+  listSMSCatalog,
+  listSMSCodes,
+  listSMSOperations,
+  listSMSProviders,
+  listSMSResources,
+  purchaseSMSNumbers,
+  type SMSOperation,
+  type SMSProvider,
+  type SMSResource,
+} from "../api/sms";
+
+function renderPanel() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <SMSPanel />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+function seed(over: {
+  providers?: SMSProvider[];
+  resources?: SMSResource[];
+  operations?: SMSOperation[];
+} = {}) {
+  vi.mocked(listSMSProviders).mockResolvedValue(
+    over.providers ?? [
+      { provider: "hero_sms", verified: true, supports_lifecycle: true, verified_at: "2026-09-05T00:00:00Z" },
+    ],
+  );
+  vi.mocked(listSMSResources).mockResolvedValue(over.resources ?? []);
+  vi.mocked(listSMSOperations).mockResolvedValue(over.operations ?? []);
+  vi.mocked(listSMSCodes).mockResolvedValue([]);
+  vi.mocked(listSMSCatalog).mockResolvedValue([]);
+}
+
+afterEach(() => vi.clearAllMocks());
+
+// 没做过连接测试的供应商**买不了号**，而且这一点要在人点之前就看得见。
+//
+// 后端也会拦，但那时钱虽然没花，人已经填完一整个表单了。
+it("未验证的供应商买号按钮是禁用的", async () => {
+  seed({ providers: [{ provider: "sms62", verified: false, supports_lifecycle: false }] });
+  renderPanel();
+
+  // **先等数据到达**：供应商清单是异步的，而空态下按钮同样是禁用的——
+  // 不等就会在「还没加载」那一刻断言成功，测不到想测的东西。
+  await screen.findAllByText("62-US");
+  const button = (await screen.findByRole("button", { name: "买号" })) as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  expect(screen.getByText(/还没做过连接测试/)).toBeTruthy();
+});
+
+// 买号是两步的：第一次点只是「上膛」。
+//
+// 买到的号不可退，而这个按钮和它周围的按钮长得一样。
+it("买号需要两步确认，第一次点击不发请求", async () => {
+  seed();
+  renderPanel();
+
+  // 同上：不等数据到达，按钮还是禁用的，点了没反应。
+  await screen.findAllByText("Hero-SMS");
+  fireEvent.click(await screen.findByRole("button", { name: "买号" }));
+  // 对话框里那个「买号」是上膛按钮。
+  const armButtons = await screen.findAllByRole("button", { name: "买号" });
+  fireEvent.click(armButtons[armButtons.length - 1]!);
+
+  expect(purchaseSMSNumbers).not.toHaveBeenCalled();
+  expect(await screen.findByRole("button", { name: /确认买/ })).toBeTruthy();
+});
+
+// 62 一个生命周期动作都没有，**明说而不是把按钮灰掉**。
+//
+// 一个灰按钮看起来像「暂时不能用」，而这是永远不能用。
+it("62 的号码不显示取消/换号按钮", async () => {
+  seed({
+    providers: [{ provider: "sms62", verified: true, supports_lifecycle: false }],
+    resources: [
+      { resource_id: "r1", provider: "sms62", phone_mask: "1555****1111", status: "active" },
+    ],
+  });
+  renderPanel();
+
+  await screen.findByText(/这家不支持取消\/延长/);
+  expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "换号" })).toBeNull();
+});
+
+// Hero 的号码有那三个按钮。
+it("Hero 的号码显示生命周期按钮", async () => {
+  seed({
+    resources: [
+      { resource_id: "r1", provider: "hero_sms", phone_mask: "1555****2222", status: "active" },
+    ],
+  });
+  renderPanel();
+
+  expect(await screen.findByRole("button", { name: "取消" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "换号" })).toBeTruthy();
+});
+
+// unknown 的操作要亮红条，并给出核对入口。
+//
+// 它的含义是「不知道钱花没花出去」——那是唯一需要人立刻做点什么的状态，
+// 混在一列普通记录里等于没有。
+it("结果未知的操作亮红条并给出核对入口", async () => {
+  seed({
+    operations: [
+      {
+        operation_id: "op-1",
+        provider: "sms62",
+        kind: "purchase",
+        state: "unknown",
+        needs_review: true,
+        retry_allowed: false,
+        provider_ref: "order-9",
+        started_at: "2026-09-05T00:00:00Z",
+      },
+    ],
+  });
+  renderPanel();
+
+  expect(await screen.findByText(/有 1 笔操作结果未知/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "核对" })).toBeTruthy();
+  // 上游引用要显示出来：unknown 时它是人去供应商侧对账的唯一抓手。
+  expect(screen.getByText("order-9")).toBeTruthy();
+});
+
+// 已有定论的操作不给核对入口。
+it("已成功的操作不显示核对按钮", async () => {
+  seed({
+    operations: [
+      {
+        operation_id: "op-1",
+        provider: "hero_sms",
+        kind: "purchase",
+        state: "succeeded",
+        needs_review: false,
+        retry_allowed: false,
+        started_at: "2026-09-05T00:00:00Z",
+      },
+    ],
+  });
+  renderPanel();
+
+  await screen.findByText("成功");
+  expect(screen.queryByRole("button", { name: "核对" })).toBeNull();
+  expect(screen.queryByText(/结果未知/)).toBeNull();
+});
+
+// 核对必须写依据：空备注时提交按钮是禁用的。
+it("核对没写依据时提交按钮禁用", async () => {
+  seed({
+    operations: [
+      {
+        operation_id: "op-1",
+        provider: "sms62",
+        kind: "purchase",
+        state: "unknown",
+        needs_review: true,
+        retry_allowed: false,
+        started_at: "2026-09-05T00:00:00Z",
+      },
+    ],
+  });
+  renderPanel();
+
+  fireEvent.click(await screen.findByRole("button", { name: "核对" }));
+  const submit = (await screen.findByRole("button", { name: "记录结论" })) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+});
+
+// 出口 IP 显示出来——它的用处是排查 IP 白名单，而那种失败看起来只是「没权限」。
+it("显示供应商观察到的出口 IP", async () => {
+  seed({
+    providers: [
+      { provider: "sms62", verified: true, supports_lifecycle: false, client_ip: "203.0.113.10" },
+    ],
+  });
+  renderPanel();
+
+  expect(await screen.findByText(/203\.0\.113\.10/)).toBeTruthy();
+});
