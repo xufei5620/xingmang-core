@@ -1019,3 +1019,59 @@ SELECT id::text, COALESCE(operation_id::text,''), provider, kind, subject, provi
 	}
 	return out, rows.Err()
 }
+
+// ListRecentBalanceSnapshots 某一家最近的几条，新的在前。对账要的是**相邻两条**。
+func (s *PgStore) ListRecentBalanceSnapshots(ctx context.Context, provider string, limit int) ([]BalanceSnapshot, error) {
+	if limit <= 0 {
+		limit = 2
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id::text, provider, amount::text, currency, taken_at
+  FROM sms.balance_snapshot
+ WHERE environment = $1 AND provider = $2
+ ORDER BY taken_at DESC, id DESC
+ LIMIT $3`, s.environment, provider, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查余额快照序列: %w", err)
+	}
+	defer rows.Close()
+	var out []BalanceSnapshot
+	for rows.Next() {
+		var snap BalanceSnapshot
+		if err := rows.Scan(&snap.ID, &snap.Provider, &snap.AmountText, &snap.Currency, &snap.TakenAt); err != nil {
+			return nil, err
+		}
+		snap.TakenAt = snap.TakenAt.UTC()
+		out = append(out, snap)
+	}
+	return out, rows.Err()
+}
+
+// SumCostEventsByCurrency 汇总 (from, to] 内的成本，按币种分组。
+//
+// 左开右闭：一条正好落在上一次快照那一刻的事件属于上一个窗口，不能两个窗口
+// 都算一次——重复计入会让对账凭空多出一笔差额。
+func (s *PgStore) SumCostEventsByCurrency(ctx context.Context, provider string, from, to time.Time) ([]CostSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT currency,
+       COALESCE(sum(amount)::text, '0'),
+       count(*),
+       count(*) FILTER (WHERE amount IS NULL)
+  FROM sms.cost_event
+ WHERE environment = $1 AND provider = $2 AND occurred_at > $3 AND occurred_at <= $4
+ GROUP BY currency
+ ORDER BY currency`, s.environment, provider, from.UTC(), to.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("汇总成本事件: %w", err)
+	}
+	defer rows.Close()
+	var out []CostSummary
+	for rows.Next() {
+		var row CostSummary
+		if err := rows.Scan(&row.Currency, &row.SumText, &row.Count, &row.UnknownCount); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

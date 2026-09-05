@@ -76,7 +76,7 @@ branch: ai/claude/XM-CARD0-infini-connector
    读端点 `GET /sms/alerts`（告警 + 阈值一次回），页面顶部红条按严重度排序、
    写明「不会外发」，供应商卡片给有余额能力的那家一个阈值输入框。
 
-## XM-SMS3 · 成本核算 — status: in-progress（1 done）
+## XM-SMS3 · 成本核算 — status: in-progress（1–2 done）
 
 1. ~~`sms.cost_event`~~ done：迁移 000047，由 `purchase` / `runLedger` /
    `ExecuteAction` 在**成功那一刻**写（买号、租用、延长、重激活、买邮箱、重下单；
@@ -89,8 +89,15 @@ branch: ai/claude/XM-CARD0-infini-connector
    数字码。失败与 unknown **一条都不记**——「可能花了」不能变成账面上的一笔。
    成本写失败只吞掉、不改操作状态：钱已经花了，翻成失败会诱使人再买一次，
    少掉的行由 #2 的余额对账兜底。
-2. 与余额快照对账：同一供应商同一币种，「快照差」与「事件和」的差额超阈值
-   落 alert_event。
+2. ~~与余额快照对账~~ done：`reconcileBalance` 取某家最近两张快照，比「余额差」
+   与这段窗口（**左开右闭**，落在上一张快照那一刻的事件属于上一个窗口）内同币种
+   的成本之和。差额超容差（`DefaultReconcileTolerance` = 0.05，各家自己的币种）
+   且方向是「掉得比账本多」才报 `balance_drift`——正方向是充值，不是异常。
+   三种不下结论的情形直接跳过：只有一张快照（没有窗口）、窗口里有金额未知的
+   事件（我们自己的和就不完整，报差额等于报自己的无知）、窗口里混着别的币种
+   （跨币种相减得到的数字什么都不是）。评估挂在既有的 EvaluateAlerts 里，
+   共用同一套「算出该报的、把不该报的收敛掉」，页面红条直接显示。
+   容差如果实际用起来太吵，下一步是做成 Action 配的（与余额阈值同形状）。
 3. 统计页签：服务端整表聚合，按供应商 × 币种 × 服务 × 天；分币种不折算；
    CSV 导出。事实表形状 = 跨平台财务的输入。
 
@@ -204,4 +211,11 @@ branch: ai/claude/XM-CARD0-infini-connector
   NULL 金额读回是空串而不是 0、负数原样、按供应商筛（迁移 000047 在测试库上真
   跑过）。runLedger 里顺带补了一处：落库后把带本地 ID 的资源 / 邮箱副本留下——
   成本事件的主体必须是本地 ID，不是上游 ID。门禁：go vet / go test -p 1 ./...
+  （含真库）/ check-governance 0 / pnpm -r typecheck / pnpm -r test 全绿。
+- 2026-09-06 XM-SMS3 #2：`reconcile_test.go` 八条先红后绿：对得上不报、多扣 2.00
+  报且摘要给出差额、充值（余额变多）不报、容差内的 0.02 不报、窗口含未知金额
+  不下结论、只有一张快照不报、混币种不下结论、退款按负数抵消后对得上。真库
+  `TestPgStoreReconcileQueries`：最近两条快照新的在前且只回本家、窗口左开右闭
+  （边界那条 5.00 不算进 (t0,t1]）、按币种分组、未知金额计入笔数但不进和、
+  别家的不算。金额一路走 big.Rat 不过 float。门禁：go vet / go test -p 1 ./...
   （含真库）/ check-governance 0 / pnpm -r typecheck / pnpm -r test 全绿。

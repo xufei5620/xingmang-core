@@ -655,3 +655,69 @@ func TestPgStoreCostEventsAreIdempotentAndAllowUnknownAmount(t *testing.T) {
 		t.Fatalf("按供应商筛不对: %+v", only62)
 	}
 }
+
+// 对账用的两条查询：某家最近的快照序列（新的在前）、按币种汇总的窗口成本。
+// 窗口是**左开右闭**：落在上一次快照那一刻的事件属于上一个窗口，两边都算
+// 会让对账凭空多出一笔差额。
+func TestPgStoreReconcileQueries(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	for _, table := range []string{"sms.balance_snapshot", "sms.cost_event"} {
+		if _, err := store.pool.Exec(ctx, "TRUNCATE "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t0 := time.Date(2026, 9, 6, 5, 0, 0, 0, time.UTC)
+	t1 := t0.Add(10 * time.Minute)
+
+	for _, snap := range []BalanceSnapshot{
+		{Provider: ProviderHero, AmountText: "10.000000", TakenAt: t0},
+		{Provider: ProviderHero, AmountText: "9.300000", TakenAt: t1},
+		{Provider: ProviderSMS62, AmountText: "1.000000", TakenAt: t1},
+	} {
+		if _, err := store.SaveBalanceSnapshot(ctx, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent, err := store.ListRecentBalanceSnapshots(ctx, ProviderHero, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent) != 2 || recent[0].AmountText != "9.300000" || recent[1].AmountText != "10.000000" {
+		t.Fatalf("应回本家最近两条、新的在前, got %+v", recent)
+	}
+
+	events := []CostEvent{
+		// 正好落在窗口起点：属于上一个窗口，不该算进 (t0, t1]。
+		{OperationID: "", Provider: ProviderHero, Kind: CostPurchase, Subject: "edge", AmountText: "5.000000", OccurredAt: t0},
+		{OperationID: "", Provider: ProviderHero, Kind: CostPurchase, Subject: "a", AmountText: "0.350000", OccurredAt: t0.Add(time.Minute)},
+		{OperationID: "", Provider: ProviderHero, Kind: CostRefund, Subject: "b", AmountText: "-0.100000", OccurredAt: t0.Add(2 * time.Minute)},
+		{OperationID: "", Provider: ProviderHero, Kind: CostProlong, Subject: "c", OccurredAt: t0.Add(3 * time.Minute)},
+		{OperationID: "", Provider: ProviderHero, Kind: CostEmailPurchase, Subject: "d", AmountText: "1.000000", Currency: "840", OccurredAt: t0.Add(4 * time.Minute)},
+		// 别家的不算。
+		{OperationID: "", Provider: ProviderSMS62, Kind: CostPurchase, Subject: "e", AmountText: "9.000000", Currency: CurrencyUSD, OccurredAt: t0.Add(5 * time.Minute)},
+	}
+	if _, err := store.AppendCostEvents(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+
+	summaries, err := store.SumCostEventsByCurrency(ctx, ProviderHero, t0, t1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byCurrency := map[string]CostSummary{}
+	for _, row := range summaries {
+		byCurrency[row.Currency] = row
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("应按币种分两组（空与 840）, got %+v", summaries)
+	}
+	blank := byCurrency[""]
+	// 0.35 − 0.10 = 0.25；边界那条 5.00 不算；未知金额计入笔数但不进和。
+	if blank.SumText != "0.250000" || blank.Count != 3 || blank.UnknownCount != 1 {
+		t.Fatalf("空币种那组不对: %+v", blank)
+	}
+	if byCurrency["840"].SumText != "1.000000" || byCurrency["840"].UnknownCount != 0 {
+		t.Fatalf("840 那组不对: %+v", byCurrency["840"])
+	}
+}

@@ -78,10 +78,15 @@ type Store interface {
 	SaveBalanceSnapshot(ctx context.Context, snap BalanceSnapshot) (string, error)
 	// LatestBalanceSnapshots 每家最新一条。
 	LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error)
+	// ListRecentBalanceSnapshots 某一家最近的几条，新的在前（对账要相邻两条）。
+	ListRecentBalanceSnapshots(ctx context.Context, provider string, limit int) ([]BalanceSnapshot, error)
 
 	// 成本事件（XM-SMS3 #1）。按 (操作, 主体) 幂等：同一笔操作重放不会记两次账。
 	AppendCostEvents(ctx context.Context, events []CostEvent) (int, error)
 	ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error)
+	// SumCostEventsByCurrency 汇总 (from, to] 内的成本，**按币种分组**：跨币种
+	// 相加得到的数字看起来像个金额，其实什么都不是。
+	SumCostEventsByCurrency(ctx context.Context, provider string, from, to time.Time) ([]CostSummary, error)
 
 	// 告警（XM-SMS2 #8）。阈值按家配（币种各自不同，不折算）；事件按指纹去重，
 	// 条件消失由 ResolveAlertEventsNotIn 自动收敛。

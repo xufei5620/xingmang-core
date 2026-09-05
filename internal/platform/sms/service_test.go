@@ -778,3 +778,51 @@ func (m *memStore) ListCostEvents(ctx context.Context, provider string, limit in
 	}
 	return out, nil
 }
+
+func (m *memStore) ListRecentBalanceSnapshots(ctx context.Context, provider string, limit int) ([]BalanceSnapshot, error) {
+	if limit <= 0 {
+		limit = 2
+	}
+	var out []BalanceSnapshot
+	for i := len(m.snapshots) - 1; i >= 0; i-- {
+		if m.snapshots[i].Provider != provider {
+			continue
+		}
+		out = append(out, m.snapshots[i])
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) SumCostEventsByCurrency(ctx context.Context, provider string, from, to time.Time) ([]CostSummary, error) {
+	byCurrency := map[string]*CostSummary{}
+	for _, key := range m.costOrder {
+		ev := m.costs[key]
+		if ev.Provider != provider || !ev.OccurredAt.After(from) || ev.OccurredAt.After(to) {
+			continue
+		}
+		row, ok := byCurrency[ev.Currency]
+		if !ok {
+			row = &CostSummary{Currency: ev.Currency, SumText: "0"}
+			byCurrency[ev.Currency] = row
+		}
+		row.Count++
+		if ev.AmountText == "" {
+			row.UnknownCount++
+			continue
+		}
+		sum, _ := parseSignedDecimal(row.SumText)
+		add, ok := parseSignedDecimal(ev.AmountText)
+		if !ok {
+			continue
+		}
+		row.SumText = ratText(sum.Add(sum, add))
+	}
+	out := make([]CostSummary, 0, len(byCurrency))
+	for _, row := range byCurrency {
+		out = append(out, *row)
+	}
+	return out, nil
+}

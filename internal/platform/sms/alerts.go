@@ -161,6 +161,16 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]AlertEvent, error) {
 		})
 	}
 
+	// 第四条：余额对账（XM-SMS3 #2）。放在这里而不是单开一个作业，是为了共用
+	// 同一套「算出该报的、把不该报的收敛掉」——两套收敛逻辑迟早会打架。
+	for _, provider := range s.order {
+		drift, err := s.reconcileBalance(ctx, provider)
+		if err != nil {
+			return nil, err
+		}
+		firing = append(firing, drift...)
+	}
+
 	sort.Slice(firing, func(i, j int) bool { return firing[i].Fingerprint < firing[j].Fingerprint })
 	fingerprints := make([]string, 0, len(firing))
 	for i := range firing {
