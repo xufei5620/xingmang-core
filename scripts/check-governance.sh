@@ -76,6 +76,14 @@ if [ -n "$compose_files" ]; then
   python3 scripts/check-compose.py $compose_files     || err "Compose 文件解析失败或存在重复键（docker compose 会拒绝整个文件）"
 fi
 
+# 进程读的每一个环境变量，compose 里都必须透传。
+#
+# 2026-09-06 的教训：接码整个做完并推送之后才发现 XM_SMS_MODE 从没接进
+# launch.yaml——这个功能部署不了，在 .env 里配它也进不了容器。同一次检查还
+# 翻出另外四个早就存在的同类洞。这类缺陷不报错（空串有合理默认）、本地测不
+# 出来（本地不经 compose）、症状还指向错误的方向（人会去查功能代码和权限）。
+python3 scripts/check-compose-env.py || err "有环境变量被进程读取却没在 launch.yaml 里透传（或已废弃的变量被复活）"
+
 # #13: CI 中的 Actions 必须钉 commit SHA（40 位十六进制），禁止浮动 tag
 if [ -d .github/workflows ]; then
   while IFS= read -r line; do
