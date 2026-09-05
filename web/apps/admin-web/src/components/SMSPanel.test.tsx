@@ -16,12 +16,15 @@ vi.mock("../api/sms", async () => {
     purchaseSMSNumbers: vi.fn(),
     verifySMSProvider: vi.fn(),
     setSMSProviderEnabled: vi.fn(),
+    fetchSMSCode: vi.fn(),
+    importSMSOrder: vi.fn(),
     executeSMSResourceAction: vi.fn(),
     resolveSMSOperation: vi.fn(),
   };
 });
 
 import {
+  fetchSMSCode,
   listSMSCatalog,
   listSMSCodes,
   listSMSOperations,
@@ -268,4 +271,21 @@ it("买号说明里没有裸露的 markdown 星号", async () => {
   await screen.findAllByText("Hero-SMS");
   expect(screen.queryByText(/\*\*/)).toBeNull();
   expect(screen.getByText("不可退").tagName).toBe("STRONG");
+});
+
+// 取码是人发起的入口：点「向上游取码」要真的调 sms.code.fetch，带这张号的 id。
+//
+// SMS0 时 Service.FetchCode 后端有、入口没有，页面上永远是「还没收到码」——
+// 这条测试钉住入口存在。
+it("号码详情里的「向上游取码」调 fetchSMSCode 并带上 resource_id", async () => {
+  seed({
+    resources: [
+      { resource_id: "r1", provider: "hero_sms", phone_mask: "****0001", service: "go", country: "12" },
+    ],
+  });
+  vi.mocked(fetchSMSCode).mockResolvedValue({ runId: "run-code" } as never);
+  renderPanel();
+
+  fireEvent.click(await screen.findByRole("button", { name: "向上游取码" }));
+  await waitFor(() => expect(fetchSMSCode).toHaveBeenCalledWith("r1"));
 });

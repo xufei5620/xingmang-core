@@ -145,6 +145,25 @@ func (f *FakeAdapter) ImportByUpstreamID(ctx context.Context, upstreamID string)
 			Status: "active", SyncedAt: f.now(),
 		}}, nil
 	}
+	// 62 替身：没见过的订单 ID 当成「在 62 后台下的单」，造两个号出来——
+	// 「导入上游订单」这条链在演示里要走得通，而演示订单列表里那两单不是替身
+	// 自己买出来的。Hero 保持报错：真实的 Hero 反查也会对已终结的号扫不到。
+	if f.provider == ProviderSMS62 {
+		var resources []Resource
+		for i := 0; i < 2; i++ {
+			f.seq++
+			phone := fmt.Sprintf("+1386%07d", f.seq)
+			token := fmt.Sprintf("fake-imported-%s-%d", upstreamID, i)
+			external := TokenFingerprint(token)
+			f.nums[external] = &fakeNumber{phone: phone, token: token, codeAfter: 2, code: fmt.Sprintf("%06d", 300000+f.seq)}
+			resources = append(resources, Resource{
+				Provider: f.provider, ExternalID: external, Phone: phone, PhoneMask: MaskPhone(phone),
+				ProviderToken: token, Service: "导入 " + upstreamID, Status: "active", SyncedAt: f.now(),
+			})
+		}
+		f.pendingOrders(upstreamID, resources)
+		return resources, nil
+	}
 	return nil, fmt.Errorf("替身里没有 %q", upstreamID)
 }
 

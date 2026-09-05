@@ -20,7 +20,7 @@ const (
 	ActionFavoriteRemove = "sms.favorite.remove"
 )
 
-func extraActionEntries(svc *Service) []struct {
+func extraActionEntries(svc *Service, providers []string) []struct {
 	def     action.Definition
 	handler action.Handler
 } {
@@ -33,6 +33,9 @@ func extraActionEntries(svc *Service) []struct {
 		{emailActionDef(), emailActionHandler(svc)},
 		{favoriteSetDef(), favoriteSetHandler(svc)},
 		{favoriteRemoveDef(), favoriteRemoveHandler(svc)},
+		// 取码与导入上游订单（见 actions_import.go）。
+		{codeFetchDef(), codeFetchHandler(svc)},
+		{orderImportDef(providers), orderImportHandler(svc)},
 	}
 }
 

@@ -394,6 +394,9 @@ export interface SMS62GoodsDetail {
   stock: number;
   /** 这个商品可选的天数（三段 ID 的第三段）；上游没给就是空，自己填。 */
   durations: number[];
+  /** 上游响应的真实字段名（只有名字）。官方没写这个接口的结构，
+   *  映射错了的列会显示为空——对着这一行就知道该改哪个键。 */
+  raw_keys?: string[];
 }
 export interface SMS62Order {
   order_id: string;
@@ -409,6 +412,8 @@ export interface SMS62OrdersPage {
   page: number;
   page_size: number;
   total: number;
+  /** 第一条订单的真实字段名（只有名字），理由同 SMS62GoodsDetail.raw_keys。 */
+  raw_keys?: string[];
 }
 
 export const getHeroBalance = (o: ListOptions = {}, c: ApiClient = apiClient) =>
@@ -537,4 +542,31 @@ export function removeSMSFavorite(
     options,
     client,
   );
+}
+
+
+/** 向上游取一次码（`sms.code.fetch@1`）。
+ *
+ *  **人发起，不是后台轮询**：两家的限流都按密钥算。「还没有码」是正常状态，
+ *  Action 成功、结果里 received=false；码本身不在结果里，走本地验证码端点。 */
+export function fetchSMSCode(
+  resourceId: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.code.fetch", version: "1", params: { resource_id: resourceId } },
+    options,
+    client,
+  );
+}
+
+/** 把在供应商后台下的单读进平台（`sms.order.import@1`）。**只读，不购买。**
+ *  62 传订单 ID，Hero 传 activation ID。 */
+export function importSMSOrder(
+  params: { provider: string; upstream_ref: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "sms.order.import", version: "1", params }, options, client);
 }

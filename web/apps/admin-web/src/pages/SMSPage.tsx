@@ -81,7 +81,7 @@ export function SMSPage() {
       {tab === "history" ? <HeroHistoryPanel /> : null}
       {tab === "emails" ? <HeroEmailsPanel onWrite={setResult} /> : null}
       {tab === "rent" ? <HeroRentPanel onWrite={setResult} /> : null}
-      {tab === "orders62" ? <SMS62OrdersPanel /> : null}
+      {tab === "orders62" ? <SMS62OrdersPanel onWrite={setResult} /> : null}
     </div>
   );
 }

@@ -24,7 +24,15 @@ import (
 //     访问日志；我们这边的日志与错误文本一律不带 URL。
 //   - 部分响应是**裸字符串**（`ACCESS_BALANCE:12.50`），不是 JSON。
 
-// doLegacy 发一次兼容层请求。out 为 nil 时把原始文本交给 asText。
+// maxLegacyResponseBytes 是兼容层响应体上限。
+//
+// 现代层用 1 MiB 够了，兼容层不够：不带筛选的 getPrices 是全部国家 × 全部
+// 服务的价格表，生产实测超过 1 MiB，被 1 MiB 的上限拒成「协议错误（兼容层
+// 响应体）」——页面上看到的是「服务内部错误」，而上游其实什么都没做错。
+// 16 MiB 仍然是一个上限（防止无限响应体把进程吃满），只是给目录类接口留够。
+const maxLegacyResponseBytes = 16 << 20
+
+// doLegacy 发一次兼容层请求。out 为 nil 时把原始文本交给调用方自己解析。
 func (c *Client) doLegacy(ctx context.Context, method, action string, params url.Values, out any) (string, error) {
 	if action == "" || strings.ContainsAny(action, "\r\n&=?/") {
 		return "", connector.NewError(connector.KindRejected, "Hero-SMS 兼容层动作名非法", nil)
@@ -57,9 +65,9 @@ func (c *Client) doLegacy(ctx context.Context, method, action string, params url
 		return "", connector.NewError(connector.KindUnavailable, "Hero-SMS 兼容层请求失败", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if readErr != nil || len(raw) > maxResponseBytes {
-		return "", &ProtocolError{Kind: "兼容层响应体", Status: resp.StatusCode}
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxLegacyResponseBytes+1))
+	if readErr != nil || len(raw) > maxLegacyResponseBytes {
+		return "", &ProtocolError{Kind: "兼容层响应体超过 16 MiB", Status: resp.StatusCode}
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return "", decodeHTTPError(resp.StatusCode, raw)

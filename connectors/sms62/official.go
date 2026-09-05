@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
@@ -29,9 +30,14 @@ const (
 
 // GoodsDetail 是单个商品的详情。
 type GoodsDetail struct {
-	ID    string
-	Name  string
-	Price string
+	// RawKeys 是上游响应的顶层字段名（**只有名字，没有值**）。
+	//
+	// 官方没写这个接口的响应结构，上面几个字段按常见命名取；取错了只会显示
+	// 为空，不会报错。把真实字段名带回页面，人一眼就能看出该改哪个键。
+	RawKeys []string
+	ID      string
+	Name    string
+	Price   string
 	// Country 是国家 ID 的文本形态。
 	Country string
 	Stock   int64
@@ -54,6 +60,7 @@ func (c *Client) GetGoodsDetail(ctx context.Context, goodsID string) (GoodsDetai
 		return GoodsDetail{}, err
 	}
 	detail := GoodsDetail{
+		RawKeys: sortedKeys(raw),
 		ID:      scalarString(raw, "goods_id", "id"),
 		Name:    sanitizeText(scalarString(raw, "name", "goods_name", "title"), 128),
 		Price:   scalarString(raw, "price", "money", "amount"),
@@ -96,6 +103,8 @@ type OrdersPage struct {
 	Orders   []OrderSummary
 	Page     int
 	PageSize int
+	// RawKeys 是第一条订单的字段名（只有名字），理由同 GoodsDetail.RawKeys。
+	RawKeys []string
 	// Total 是上游报的总条数；取不到就是 0，**不代表没有订单**。
 	Total int64
 }
@@ -131,6 +140,9 @@ func (c *Client) ListOrders(ctx context.Context, page, pageSize int) (OrdersPage
 	if root != nil {
 		out.Total = scalarInt(root, "total", "count")
 	}
+	if len(objects) > 0 {
+		out.RawKeys = sortedKeys(objects[0])
+	}
 	for _, o := range objects {
 		out.Orders = append(out.Orders, OrderSummary{
 			OrderID:    scalarString(o, "order_id", "id"),
@@ -143,4 +155,14 @@ func (c *Client) ListOrders(ctx context.Context, page, pageSize int) (OrdersPage
 		})
 	}
 	return out, nil
+}
+
+// sortedKeys 只取键名，稳定排序，便于页面展示与对比。
+func sortedKeys(o map[string]any) []string {
+	keys := make([]string, 0, len(o))
+	for k := range o {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

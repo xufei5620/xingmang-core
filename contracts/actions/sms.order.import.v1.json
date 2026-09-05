@@ -1,0 +1,17 @@
+{
+  "id": "sms.order.import",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": { "required": false },
+  "compensation_mode": "NONE",
+  "params": {
+    "provider": { "type": "string", "required": true, "enum": ["sms62", "hero_sms"] },
+    "upstream_ref": { "type": "string", "required": true }
+  },
+  "notes": "XM-SMS1 补正（2026-09-06）把一笔在供应商后台下的单读进平台：62 传订单 ID（「订单与商品（62）」页签里那一列），Hero 传 activation ID。**只读，绝不购买**，不花钱。产品负责人在 62 后台买的几十个号此前进不了平台——号码页只装通过平台买的号，而 ImportByUpstreamID 只在人工核对 unknown 那条路里用；这个 Action 把它变成正经入口。62 走 GET /api/v1/order/tokens 读回号码与 token（token 落库但绝不进对外 DTO，取码那条路才读它；号码身份是 token 的 SHA-256）；Hero 走 active 列表反查（最多 5 页 × 100，扫不完回「分页未完成」而不是「不存在」）。62 会先落一条 status=imported 的订单行，号码指回它。幂等：按 (provider, external_id) upsert，同一单导两次不会出现两份号。不写操作台账：它不花钱，也没有「不知道成没成」的第三态需要收敛，「谁在什么时候导入了哪一单」由 Action 内核的审计负责。compensation_mode 是 NONE：导入的是上游已经存在的事实。"
+}
