@@ -300,6 +300,11 @@ func NewRouter(d Deps) http.Handler {
 					Get("/cards", ListCardsHandler(d.Cards, d.CardAccounts, interval))
 				api.With(RequireScope(cards.PermissionRead)).
 					Get("/cards/{cardID}/transactions", ListCardTransactionsHandler(d.Cards))
+				// 跨卡流水（「交易记录」页签）。路径不带 cardID，与上面那条
+				// 靠形状区分而不是靠参数缺省——chi 的路由树里 /cards/transactions
+				// 会先于 /cards/{cardID}/transactions 匹配，因为静态段优先。
+				api.With(RequireScope(cards.PermissionRead)).
+					Get("/cards/transactions", ListAllCardTransactionsHandler(d.Cards))
 				// 待人工处置的操作单列一个端点：它是红条的数据源，
 				// 前端要能在不拉全量卡片的情况下轮询它。
 				api.With(RequireScope(cards.PermissionRead)).

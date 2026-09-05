@@ -24,6 +24,8 @@ type CardQuerier interface {
 	// 上游没有成员列表接口，可选项只能来自平台自己开过的卡。
 	KnownMemberEmails(ctx context.Context) ([]string, error)
 	ListTransactions(ctx context.Context, account, cardID string, limit int) ([]cards.TransactionView, error)
+	// RecentTransactions 是**跨卡**流水，新的在前，带卡片名称与账号。
+	RecentTransactions(ctx context.Context, limit int) ([]cards.TransactionView, error)
 	OperationsNeedingAttention(ctx context.Context) ([]cards.Operation, error)
 	// ActiveChallenges 返回尚未过期的 3DS 验证挑战。
 	ActiveChallenges(ctx context.Context) ([]cards.CardChallenge, error)
@@ -56,7 +58,10 @@ type cardItem struct {
 	BoundAccountKind string `json:"bound_account_kind,omitempty"`
 	ServiceName      string `json:"service_name,omitempty"`
 	NextRenewalOn    string `json:"next_renewal_on,omitempty"`
-	UsageNote        string `json:"usage_note,omitempty"`
+	// 订阅金额与周期供「订阅」页签汇总；没登记时字段不出现。
+	SubscriptionAmount string `json:"subscription_amount,omitempty"`
+	SubscriptionCycle  string `json:"subscription_cycle,omitempty"`
+	UsageNote          string `json:"usage_note,omitempty"`
 	// RenewalRisk 由**服务端**判定：让前端各算一遍，两处迟早分叉，
 	// 而分叉的那一边会把「续不上」显示成正常。
 	RenewalRisk string `json:"renewal_risk"`
@@ -64,9 +69,9 @@ type cardItem struct {
 	IssuedAt string `json:"issued_at,omitempty"`
 	// IssueFee / IssuePayAmount 是开卡手续费与实付额（十进制文本，币种为
 	// 申请时所选代币）。实测手续费是固定 1 USD，小额卡的成本占比很高。
-	IssueFee       string `json:"issue_fee,omitempty"`
-	IssuePayAmount string `json:"issue_pay_amount,omitempty"`
-	Freshness cards.FreshnessInfo `json:"freshness"`
+	IssueFee       string              `json:"issue_fee,omitempty"`
+	IssuePayAmount string              `json:"issue_pay_amount,omitempty"`
+	Freshness      cards.FreshnessInfo `json:"freshness"`
 }
 
 type cardTransactionItem struct {
@@ -85,6 +90,10 @@ type cardTransactionItem struct {
 	TransactionCurrency string `json:"transaction_currency,omitempty"`
 	// SettledAt 缺席表示尚未结算（授权中，金额还可能变）。
 	SettledAt string `json:"settled_at,omitempty"`
+	// CardAlias 只在跨卡流水里出现。**卡片名称是这张表的定位列**——
+	// Infini 后台的交易记录也正是按它认卡的。join 不上（卡已关停、投影行
+	// 没了）时为空，前端退回卡号后四位。
+	CardAlias string `json:"card_alias,omitempty"`
 }
 
 type cardOperationItem struct {
@@ -140,25 +149,27 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 		out := make([]cardItem, 0, len(items))
 		for _, c := range items {
 			item := cardItem{
-				Account:          c.Account,
-				CardID:           c.CardID,
-				Mask:             c.Mask,
-				HolderName:       c.HolderName,
-				Alias:            c.Alias,
-				Status:           c.Status,
-				Currency:         c.Currency,
-				BalanceMinor:     c.BalanceMinor,
-				OwnerRef:         c.OwnerRef,
-				UserEmail:        c.UserEmail,
-				BoundAccount:     c.BoundAccount,
-				BoundAccountKind: c.BoundAccountKind,
-				ServiceName:      c.ServiceName,
-				NextRenewalOn:    c.NextRenewalOn,
-				UsageNote:        c.UsageNote,
-				RenewalRisk:      string(cards.RenewalRisk(c.NextRenewalOn, c.BalanceMinor, now)),
-				IssueFee:         c.IssueFee,
-				IssuePayAmount:   c.IssuePayAmount,
-				Freshness:        cards.Freshness(c.LastSyncedAt, now, syncInterval),
+				Account:            c.Account,
+				CardID:             c.CardID,
+				Mask:               c.Mask,
+				HolderName:         c.HolderName,
+				Alias:              c.Alias,
+				Status:             c.Status,
+				Currency:           c.Currency,
+				BalanceMinor:       c.BalanceMinor,
+				OwnerRef:           c.OwnerRef,
+				UserEmail:          c.UserEmail,
+				BoundAccount:       c.BoundAccount,
+				BoundAccountKind:   c.BoundAccountKind,
+				ServiceName:        c.ServiceName,
+				NextRenewalOn:      c.NextRenewalOn,
+				SubscriptionAmount: c.SubscriptionAmount,
+				SubscriptionCycle:  c.SubscriptionCycle,
+				UsageNote:          c.UsageNote,
+				RenewalRisk:        string(cards.RenewalRisk(c.NextRenewalOn, c.BalanceMinor, now)),
+				IssueFee:           c.IssueFee,
+				IssuePayAmount:     c.IssuePayAmount,
+				Freshness:          cards.Freshness(c.LastSyncedAt, now, syncInterval),
 			}
 			if !c.UpstreamCreatedAt.IsZero() {
 				item.IssuedAt = c.UpstreamCreatedAt.UTC().Format(time.RFC3339)
@@ -281,10 +292,10 @@ func ListCardOperationsNeedingAttentionHandler(store CardQuerier) http.HandlerFu
 }
 
 type cardChallengeItem struct {
-	Account   string `json:"account"`
-	CardID    string `json:"card_id"`
-	ID        string `json:"challenge_id"`
-	Type      string `json:"challenge_type,omitempty"`
+	Account string `json:"account"`
+	CardID  string `json:"card_id"`
+	ID      string `json:"challenge_id"`
+	Type    string `json:"challenge_type,omitempty"`
 	// Code 只回给持有 card.reveal 的调用方，且上游不一定给。
 	Code      string `json:"code,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
@@ -332,3 +343,44 @@ func ListCardChallengesHandler(store CardQuerier) http.HandlerFunc {
 		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
 }
+
+// ListAllCardTransactionsHandler 返回跨卡流水，新的在前。
+//
+// 与按卡查的那个端点分开而不是加一个 optional 的 card_id 参数：两者的形状
+// 不同（这个带卡片名称与账号），权限相同但语义不同——一个回答「这张卡花了
+// 什么」，一个回答「这批卡刚刚发生了什么」。合成一个端点会让「不传 card_id
+// 就是全量」变成一条要读代码才知道的规则。
+func ListAllCardTransactionsHandler(store CardQuerier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rows, err := store.RecentTransactions(r.Context(), allTransactionsPageSize)
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		out := make([]cardTransactionItem, 0, len(rows))
+		for _, t := range rows {
+			item := cardTransactionItem{
+				Account: t.Account, CardID: t.CardID, CardAlias: t.CardAlias,
+				Type: t.Type, AmountMinor: t.AmountMinor, FeeMinor: t.FeeMinor,
+				Currency: t.Currency, Status: t.Status, Merchant: t.Merchant,
+				TransactionAmount: t.TransactionAmount, TransactionCurrency: t.TransactionCurrency,
+			}
+			if !t.OccurredAt.IsZero() {
+				item.OccurredAt = t.OccurredAt.UTC().Format(time.RFC3339)
+			}
+			if !t.SettledAt.IsZero() {
+				item.SettledAt = t.SettledAt.UTC().Format(time.RFC3339)
+			}
+			out = append(out, item)
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	}
+}
+
+// allTransactionsPageSize 是跨卡流水一次回多少条。
+//
+// 取 500：筛选在前端做（按卡/时间/类型/状态），所以这一批要足够大到让筛选
+// 有意义——只回 50 条再筛，用户会以为「这张卡没有流水」，而实际上是它的
+// 流水被更新的别的卡挤出去了。真到需要翻页的量级再加游标，那时也才知道
+// 该按什么翻。
+const allTransactionsPageSize = 500

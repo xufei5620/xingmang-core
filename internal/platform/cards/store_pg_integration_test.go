@@ -1251,3 +1251,60 @@ func TestPgStoreReRegisterReEnables(t *testing.T) {
 		t.Fatalf("标签应更新, got %q", got.Label)
 	}
 }
+
+// 跨卡流水：把全部卡的交易按时间倒序排在一起，并带上**卡片名称**。
+//
+// 这是 Infini「交易记录」那个页签的数据源。卡片名称必须在这里 join 出来：
+// 一张流水表里最要紧的定位信息就是「这笔是哪张卡刷的」，让前端拿着
+// card_id 再去卡片列表里配对，等于把一次 join 挪到浏览器里做——而那张列表
+// 可能因为筛选根本没加载全。
+func TestPgStoreRecentTransactionsAcrossCards(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	// 两个账号各一张卡，各一笔流水。
+	for _, c := range []struct {
+		account, cardID, alias string
+	}{
+		{testAccount, "card-a", "Two.V"},
+		{"OTHER", "card-b", "flower"},
+	} {
+		if err := store.UpsertCard(ctx, c.account, infini.Card{
+			ID: c.cardID, Alias: c.alias, Status: "active", Currency: "USD",
+		}, CardAttribution{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.UpsertTransactions(ctx, testAccount, "card-a", []infini.CardTransaction{{
+		Type: "Consume", AmountMinor: -2000, Currency: "USD", Status: "Completed",
+		Merchant: "OPENAI", OccurredAt: issueNow.Add(-time.Hour).Format(time.RFC3339),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTransactions(ctx, "OTHER", "card-b", []infini.CardTransaction{{
+		Type: "Consume", AmountMinor: -500, Currency: "USD", Status: "Completed",
+		Merchant: "ANTHROPIC", OccurredAt: issueNow.Format(time.RFC3339),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := store.RecentTransactions(ctx, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("两个账号的流水都该在, got %d", len(rows))
+	}
+	// 新的在前：一张流水表默认要回答「刚刚发生了什么」。
+	if rows[0].Merchant != "ANTHROPIC" {
+		t.Fatalf("应按时间倒序, got %+v", rows[0])
+	}
+	// 卡片名称 join 出来了。
+	if rows[0].CardAlias != "flower" || rows[1].CardAlias != "Two.V" {
+		t.Fatalf("卡片名称没带上: %+v / %+v", rows[0], rows[1])
+	}
+	// 账号也要带：两个账号可以有同名卡 id，只给 card_id 定位不了。
+	if rows[0].Account != "OTHER" {
+		t.Fatalf("账号没带上: %+v", rows[0])
+	}
+}

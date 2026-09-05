@@ -4,16 +4,21 @@ import { Button } from "@xingmang/ui-primitives";
 import { useSearchParams } from "react-router";
 import { listCards } from "../api/cards";
 import { AccountBalancesStrip, AttentionBanner, IssueCardDialog } from "../components/CardsShared";
+import { CardLedger } from "../components/CardLedger";
+import { CardSubscriptions } from "../components/CardSubscriptions";
 import { CardWorkbench } from "../components/CardWorkbench";
 import { WithdrawPanel } from "../components/WithdrawPanel";
 
-/** 顶级页签。照 Infini 后台的三个来，**「订阅」刻意不做**。
+/** 顶级页签，照 Infini 后台的排布，外加平台自己的「提现」。
  *
- *  Infini 那个页签自己在页面上写着「基于交易记录自动识别，仅供参考，可能与
- *  实际订阅不一致」——那是他们的一套商户名识别逻辑，我们没有。照着画一个
- *  只会得到空页签，或者更糟：一堆猜出来的订阅，而人会当真。 */
+ *  「订阅」做了，但**换了数据来源**：Infini 那一页是从交易记录自动识别的
+ *  （他们自己标着「仅供参考，可能与实际订阅不一致」），我们只列运营在
+ *  「用途登记」里填过的。代价是没登记的不出现，好处是出现的每一条都可信
+ *  ——错了的续费提醒比没有提醒更糟，人会拿它做预算。 */
 const TABS = [
   { id: "cards", label: "卡片管理" },
+  { id: "ledger", label: "交易记录" },
+  { id: "subscriptions", label: "订阅" },
   { id: "withdraw", label: "提现" },
 ] as const;
 
@@ -84,17 +89,15 @@ export function CardsPage() {
         ) : null}
       </div>
 
-      {tab === "cards" ? (
-        <>
-          {/* 待人工处置的操作与资金池余额留在页签之上：前者是红条，
-              后者是「还能开几张卡」的前提，切到哪个页签都该看得见。 */}
-          <AttentionBanner />
-          <AccountBalancesStrip />
-          <CardWorkbench />
-        </>
-      ) : (
-        <WithdrawPanel accounts={query.data?.accounts ?? []} />
-      )}
+      {/* 待人工处置的操作与资金池余额在页签之上：前者是红条，后者是
+          「还能开几张卡 / 还能提多少」的前提，切到哪个页签都该看得见。 */}
+      <AttentionBanner />
+      {tab === "withdraw" ? null : <AccountBalancesStrip />}
+
+      {tab === "cards" ? <CardWorkbench /> : null}
+      {tab === "ledger" ? <CardLedger /> : null}
+      {tab === "subscriptions" ? <CardSubscriptions /> : null}
+      {tab === "withdraw" ? <WithdrawPanel accounts={query.data?.accounts ?? []} /> : null}
     </div>
   );
 }

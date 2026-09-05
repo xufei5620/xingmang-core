@@ -286,12 +286,20 @@ function CardPane({
           {/* 与 Infini 后台同名：那边就叫「持卡人邮箱」。 */}
           <Field label="持卡人邮箱" value={card.user_email ?? "—"} />
           <Field
-            label="开卡时间"
+            label="创建时间"
             value={card.issued_at ? formatUtcTimestamp(card.issued_at) : "—"}
           />
           <Field label="绑定账号" value={card.bound_account ?? "—"} />
           <Field label="订阅服务" value={card.service_name ?? "—"} />
-          <Field label="下次续费" value={card.next_renewal_on ?? "—"} mono />
+          <Field
+            label="订阅金额"
+            value={
+              card.subscription_amount
+                ? `${card.subscription_amount}${card.subscription_cycle ? ` / ${cycleLabel(card.subscription_cycle)}` : ""}`
+                : "—"
+            }
+          />
+          <Field label="下次扣款日期" value={card.next_renewal_on ?? "—"} mono />
           <Field
             label="数据同步于"
             value={
@@ -437,6 +445,18 @@ function CardActions({
       )}
     </div>
   );
+}
+
+/** 扣款周期的中文。未知取值原样显示，不归到已知分类里——
+ *  静默归类会让第一个没见过的周期在最需要被看见的时候消失。 */
+export function cycleLabel(cycle: string): string {
+  const map: Record<string, string> = {
+    monthly: "每月",
+    yearly: "每年",
+    weekly: "每周",
+    other: "其它",
+  };
+  return map[cycle] ?? cycle;
 }
 
 function Field({

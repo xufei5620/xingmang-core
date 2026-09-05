@@ -107,6 +107,9 @@ export interface CardItem {
   issue_fee?: string;
   issue_pay_amount?: string;
   freshness: CardFreshness;
+  /** 订阅金额与扣款周期。**人填的**（用途登记），不是从流水推断的。 */
+  subscription_amount?: string;
+  subscription_cycle?: string;
 }
 
 /** 一笔卡交易。 */
@@ -127,6 +130,8 @@ export interface CardTransactionItem {
   transaction_currency?: string;
   /** 缺席表示尚未结算（授权中，金额还可能变）。 */
   settled_at?: string;
+  /** 卡片名称。只在跨卡流水里出现；卡已关停时为空，前端退回后四位。 */
+  card_alias?: string;
 }
 
 /** 一笔待人工处置的操作。
@@ -187,6 +192,22 @@ export async function listCardTransactions(
       `/api/v1/cards/${encodeURIComponent(cardId)}/transactions?account=${encodeURIComponent(account)}`,
       { ...(options.signal ? { signal: options.signal } : {}) },
     )
+    .catch(translateUnmounted);
+  return body.items ?? [];
+}
+
+/** 跨卡流水（「交易记录」页签）。
+ *
+ *  与按卡查的那个分开：这一份带卡片名称与账号，回答的是「这批卡刚刚发生了
+ *  什么」，而不是「这张卡花了什么」。 */
+export async function listAllCardTransactions(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<CardTransactionItem[]> {
+  const body = await client
+    .get<ListResponse<CardTransactionItem>>("/api/v1/cards/transactions", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
     .catch(translateUnmounted);
   return body.items ?? [];
 }

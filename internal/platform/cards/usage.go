@@ -28,6 +28,14 @@ type CardUsage struct {
 	// **人填的，不是算的。** 从流水推断周期看着聪明，但试用转正、年付转月付、
 	// 涨价都会让推断悄悄错掉，而错了的提醒比没有提醒更糟——人会信它。
 	NextRenewalOn string
+	// SubscriptionAmount 是每期扣款金额（十进制文本），空串表示没登记。
+	//
+	// **人填的，不是从流水算的**，与 NextRenewalOn 同一条纪律：试用价、
+	// 首月折扣、年付摊月、汇率波动都会让推断悄悄错掉，而一个错了的
+	// 「每月支出」比没有这个数更糟——人会拿它做预算。
+	SubscriptionAmount string
+	// SubscriptionCycle 是扣款周期：monthly / yearly / weekly / other。
+	SubscriptionCycle string
 	Note          string
 }
 
