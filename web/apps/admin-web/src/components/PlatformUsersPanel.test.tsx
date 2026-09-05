@@ -482,3 +482,76 @@ describe("XM_PLATFORM_USERS_MODE=off（端点未挂载）", () => {
     expect(screen.getByText(/XM_PLATFORM_USERS_MODE=off/)).toBeTruthy();
   });
 });
+
+describe("服务端筛选（XM-USERS-HONEST0：q / status 进 URL、随请求下发）", () => {
+  it("URL 里的 q 与 status 原样传给后端", async () => {
+    const urls = stubFetch();
+    renderPanel("sub2api", "/?q=alice&status=limited");
+    await screen.findByText("用户总数");
+
+    const first = new URL(urls[0] ?? "", "http://local.test");
+    expect(first.searchParams.get("q")).toBe("alice");
+    expect(first.searchParams.get("status")).toBe("limited");
+  });
+
+  it("改状态筛选会带新条件重新取数，不复用旧缓存", async () => {
+    const urls = stubFetch();
+    renderPanel();
+    await screen.findByText("用户总数");
+    expect(new URL(urls[0] ?? "", "http://local.test").searchParams.get("status")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("账号状态（服务端筛选）"), { target: { value: "disabled" } });
+
+    await waitFor(() => {
+      expect(new URL(urls[urls.length - 1] ?? "", "http://local.test").searchParams.get("status")).toBe("disabled");
+    });
+  });
+
+  it("搜索词在回车时才写进 URL 并重新取数", async () => {
+    const urls = stubFetch();
+    renderPanel();
+    await screen.findByText("用户总数");
+    const before = urls.length;
+
+    const input = screen.getByLabelText("搜索用户（服务端筛选）");
+    fireEvent.change(input, { target: { value: "bob" } });
+    expect(urls.length).toBe(before);
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(new URL(urls[urls.length - 1] ?? "", "http://local.test").searchParams.get("q")).toBe("bob");
+    });
+  });
+
+  it("URL 里不认识的 status 被忽略，不转发也不搞崩页面", async () => {
+    const urls = stubFetch();
+    renderPanel("sub2api", "/?status=banned");
+    await screen.findByText("用户总数");
+    expect(new URL(urls[0] ?? "", "http://local.test").searchParams.get("status")).toBeNull();
+  });
+
+  it("表内搜索已关闭：只剩服务端那一个搜索框", async () => {
+    stubFetch();
+    renderPanel();
+    await screen.findByText("用户总数");
+    expect(screen.getAllByRole("searchbox")).toHaveLength(1);
+  });
+});
+
+describe("样本措辞只在演示数据源下出现（XM-USERS-HONEST0）", () => {
+  it("演示源：warnbar 说明逐用户流水来自样本", async () => {
+    stubFetch(pageBody({ data_source: "sub2api-staging" }));
+    renderPanel();
+    await screen.findByText("用户总数");
+    expect(screen.getByRole("status").textContent).toContain("样本数据源");
+  });
+
+  it("真实源：warnbar 只说契约边界，不提「样本」", async () => {
+    stubFetch(pageBody({ data_source: "sub2api-prod" }));
+    renderPanel();
+    await screen.findByText("用户总数");
+    const text = screen.getByRole("status").textContent ?? "";
+    expect(text).toContain("契约边界");
+    expect(text).not.toContain("样本");
+  });
+});

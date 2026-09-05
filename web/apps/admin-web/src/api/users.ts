@@ -340,7 +340,7 @@ export async function getPlatformUser(
         last_error_code: "",
       },
     };
-    return { kind: "found", user: body.user, page, pagesScanned: 1 };
+    return { kind: "found", user: body.user, registeredAt: body.registered_at ?? null, page, pagesScanned: 1 };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
       // 未挂载路由的 404 没有可解析的 error.code；具体用户 id 不存在的 404
@@ -418,6 +418,10 @@ export type PlatformUserLookupResult =
   | {
       kind: "found";
       user: PlatformUserItem;
+      /** 详情端点回的注册时间；`null` = 链路已通但上游没给这个字段（不是
+       *  「未接入」）。走列表扫描兜底命中时同样是 null：那条路径压根不经过
+       *  详情端点。 */
+      registeredAt: string | null;
       page: PlatformUserPage;
       pagesScanned: number;
     }
@@ -470,7 +474,7 @@ export async function lookupPlatformUserExact(
     );
 
     const exact = page.items.find((item) => item.id === userId);
-    if (exact) return { kind: "found", user: exact, page, pagesScanned };
+    if (exact) return { kind: "found", user: exact, registeredAt: null, page, pagesScanned };
 
     const nextCursor = page.next_cursor;
     if (!nextCursor) return { kind: "notFound", pagesScanned };

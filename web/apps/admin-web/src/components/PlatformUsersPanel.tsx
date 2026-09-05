@@ -23,7 +23,9 @@ import {
   type PlatformUserItem,
   type PlatformUserPage,
   type PlatformUserSort,
+  type PlatformUserStatus,
 } from "../api/users";
+import { appDemoDataConfig, shouldShowDemoBanner } from "../lib/demoData";
 import { formatMinorUnits, toIntegerValue } from "../lib/money";
 import { describeCoverage, parseBusinessDay, parseGranularity } from "../lib/period";
 import { ApiStateView } from "./ApiStateView";
@@ -327,6 +329,11 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
   const day = parseBusinessDay(searchParams.get("day"));
   const granularity = parseGranularity(searchParams.get("granularity"));
   const sort = (searchParams.get("sort") ?? "balance_desc") as PlatformUserSort;
+  // 服务端筛选（XM-USERS-HONEST0）：q / status 进 URL、随请求下发、进查询键。
+  // 后端本来就接受这两个参数（listPlatformUsers 已拼进 searchParams），此前
+  // 面板只筛已加载的那一页，让 next_cursor、总数和统计全部失真。
+  const q = (searchParams.get("q") ?? "").trim();
+  const status = parseUserStatusFilter(searchParams.get("status"));
   const view = viewFor(platform);
 
   const setParam = (key: string, value: string) => {
@@ -337,11 +344,13 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
   };
 
   const query = useInfiniteQuery({
-    queryKey: ["platform-users", platform, { sort, day, granularity }],
+    queryKey: ["platform-users", platform, { sort, day, granularity, q, status }],
     queryFn: ({ pageParam, signal }) =>
       listPlatformUsers(platform, {
         signal,
         sort,
+        ...(q ? { q } : {}),
+        ...(status ? { status } : {}),
         limit: PAGE_SIZE,
         // 空串不传：让服务端解释「今天」
         ...(day ? { day } : {}),
@@ -365,6 +374,9 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
   // 「下面的逐用户流水来自样本数据源」，在未接入场景下继续显示等于把「没接」
   // 说成「接了但是假的」——两者对运营是完全不同的下一步
   const notMounted = query.error instanceof FeatureNotMountedError;
+  // 「来自样本数据源」这半句只有在数据源真是演示源时才成立：真实模式下三列
+  // 显示「—」正是契约边界本身，不是样本。判据与详情页同一个（宪法 12 条）。
+  const demo = page !== undefined && shouldShowDemoBanner([page.data_source], appDemoDataConfig);
 
   return (
     <section className="flex flex-col gap-3">
@@ -377,8 +389,14 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
         >
           当前只读契约 v1 仅提供用户总数与总余额；逐用户今日充值、今日消费和消费明细是目标界面，
           接真实数据前需扩展 read contract v2。
-          <strong> 下面的逐用户流水来自样本数据源</strong>
-          ，接上真实上游后这几列会退回「—」，直到 v2 契约落地。
+          {demo ? (
+            <>
+              <strong> 下面的逐用户流水来自样本数据源</strong>
+              ，接上真实上游后这几列会退回「—」，直到 v2 契约落地。
+            </>
+          ) : (
+            <> 真实上游下这几列显示「—」是契约边界，不是数据缺失。</>
+          )}
         </p>
       )}
 
@@ -415,17 +433,23 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
               </p>
             </div>
 
-            <UserSortPicker value={sort} onChange={(next) => setParam("sort", next)} />
+            <div className="flex flex-wrap items-end gap-3">
+              <UserSortPicker value={sort} onChange={(next) => setParam("sort", next)} />
+              {/* 服务端筛选控件放在表格外层：DataTableV2 空表时只渲染 emptyState，
+                  筛出零条的人必须还能看到并清掉自己的筛选条件 */}
+              <UserServerFilters
+                q={q}
+                status={status}
+                onQChange={(next) => setParam("q", next)}
+                onStatusChange={(next) => setParam("status", next)}
+              />
+            </div>
 
             <DataTableV2
               caption="终端用户：余额、区间充值与消费、状态与最后活跃"
               columns={[...view.columns, detailColumn(platform)]}
               rows={items}
               rowKey={(u) => u.id}
-              searchable
-              filters={[
-                { columnId: "status", label: "状态", options: ["正常", "注意", "停用", "未知"] },
-              ]}
               emptyState={
                 <PageState
                   kind="empty"
@@ -450,6 +474,76 @@ export function PlatformUsersPanel({ platform }: { platform: string }) {
         )}
       </ApiStateView>
     </section>
+  );
+}
+
+/** URL 里的 status 只认契约值；别的值当没写（不把整页搞崩，也不静默转发）。 */
+function parseUserStatusFilter(raw: string | null): PlatformUserStatus | "" {
+  return raw === "active" || raw === "limited" || raw === "disabled" || raw === "unknown" ? raw : "";
+}
+
+/** 服务端筛选：搜索词与账号状态。
+ *
+ *  与 DataTableV2 自带的表内搜索**二选一**——表内搜索只筛已加载的那一页，
+ *  两个搜索框并存时人会以为自己搜的是全部用户，所以这里关掉了表内搜索。
+ *  搜索词在回车 / 失焦时才写进 URL：每敲一个字就触发一次上游全量翻页扫描
+ *  不可接受（upstream.go 记录了不转发 search 的理由）。 */
+function UserServerFilters({
+  q,
+  status,
+  onQChange,
+  onStatusChange,
+}: {
+  q: string;
+  status: PlatformUserStatus | "";
+  onQChange: (next: string) => void;
+  onStatusChange: (next: PlatformUserStatus | "") => void;
+}) {
+  const statusOptions: { value: PlatformUserStatus | ""; label: string }[] = [
+    { value: "", label: "全部状态" },
+    { value: "active", label: describeUserStatus("active").label },
+    { value: "limited", label: describeUserStatus("limited").label },
+    { value: "disabled", label: describeUserStatus("disabled").label },
+    { value: "unknown", label: describeUserStatus("unknown").label },
+  ];
+  return (
+    <>
+      <label className="flex items-center gap-2 text-xs text-fg-muted">
+        <span>账号状态（服务端筛选）</span>
+        <select
+          aria-label="账号状态（服务端筛选）"
+          value={status}
+          onChange={(event) => onStatusChange(parseUserStatusFilter(event.target.value))}
+          className="rounded-md border border-edge-strong bg-surface px-2 py-1 text-xs text-fg hover:border-accent focus:outline-2 focus:outline-accent"
+        >
+          {statusOptions.map((o) => (
+            <option key={o.value || "all"} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="flex items-center gap-2 text-xs text-fg-muted">
+        <span>搜索（服务端）</span>
+        <input
+          type="search"
+          aria-label="搜索用户（服务端筛选）"
+          placeholder="用户名 / 用户 ID / 令牌前缀"
+          defaultValue={q}
+          key={q}
+          onBlur={(event) => {
+            if (event.target.value.trim() !== q) onQChange(event.target.value);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              onQChange((event.target as HTMLInputElement).value);
+            }
+          }}
+          className="h-8 w-56 rounded-md border border-edge-strong bg-surface px-2 text-xs text-fg outline-none placeholder:text-fg-muted focus-visible:outline-2 focus-visible:outline-accent"
+        />
+      </label>
+    </>
   );
 }
 

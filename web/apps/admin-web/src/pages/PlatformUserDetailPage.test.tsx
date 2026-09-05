@@ -260,7 +260,7 @@ describe("平台特有布局", () => {
 
     expect(await screen.findByRole("heading", { name: "基本信息", level: 3 })).toBeTruthy();
     expect(screen.getByText("tok-a1b2")).toBeTruthy();
-    for (const heading of ["客户类型", "注册时间", "近 7 天消费趋势"]) {
+    for (const heading of ["客户类型", "近 7 天消费趋势"]) {
       expect(screen.getByRole("heading", { name: heading, level: 3 })).toBeTruthy();
     }
     expect(await screen.findByText(/覆盖 6 \/ 7 天/)).toBeTruthy();
@@ -283,7 +283,28 @@ describe("平台特有布局", () => {
     ).toBeTruthy();
     expect(within(screen.getByRole("tabpanel")).getByText("未接入")).toBeTruthy();
     expect(screen.getByText(/客户类型.*platformusers read contract v2/)).toBeTruthy();
-    expect(screen.getByText(/注册时间.*platformusers read contract v2/)).toBeTruthy();
+    // 注册时间不再是「未接入」面板：详情端点已经回了 registered_at，null 是
+    // 「上游没给」，在基本信息里如实写出来（XM-USERS-HONEST0）。
+    const basic = screen.getByRole("heading", { name: "基本信息", level: 3 }).closest("section");
+    expect(basic).toBeTruthy();
+    expect(within(basic as HTMLElement).getByText("注册时间")).toBeTruthy();
+    expect(within(basic as HTMLElement).getByText("上游未提供")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "注册时间", level: 3 })).toBeNull();
+  });
+
+  it("注册时间由详情端点给出时按 UTC 展示，不再是「未接入」面板", async () => {
+    stubFetch((url) =>
+      /\/users\/u-[^/]+$/.test(new URL(url, "http://local.test").pathname)
+        ? fakeResponse({ ...detailFromPage(pageBody()), registered_at: "2026-08-01T02:03:04Z" })
+        : fakeResponse(pageBody()),
+    );
+    renderPage();
+
+    const basic = (await screen.findByRole("heading", { name: "基本信息", level: 3 })).closest("section");
+    expect(basic).toBeTruthy();
+    expect(within(basic as HTMLElement).getByText("注册时间")).toBeTruthy();
+    expect(within(basic as HTMLElement).getByText(/2026-08-01/)).toBeTruthy();
+    expect(within(basic as HTMLElement).queryByText("上游未提供")).toBeNull();
   });
 
   it("Sub2API 子页签写入 ?sub=，可分享恢复且同一时刻只显示一个 unavailable panel", async () => {
