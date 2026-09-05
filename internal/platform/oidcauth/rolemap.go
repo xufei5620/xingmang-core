@@ -207,6 +207,20 @@ func DefaultRoleScopeMap() map[string][]string {
 			// 独立记录，而且想拆给两个人时拆得开——并成一个权限就再也拆
 			// 不开了。
 			"fund.limit.manage",
+			// XM-SMS0（2026-09-05）：接码中心。三个日常权限给 admin
+			// ——看清单、看号码与验证码、连接测试与人工核对都是运营要做的
+			// 事，不给就等于这个功能对唯一能用它的人 403（卡片上线当天
+			// 就是这么撞上的）。
+			//
+			// **sms.purchase 刻意不在这里**：买号花真钱且不可退，
+			// 与 fund.withdraw 同一档，见下面的 sms-operator。
+			//
+			// sms.reveal 与 card.reveal 同档：号码在库里是明文列（本仓
+			// 没有列加密工具，而 PAN/CVV 已经是明文列），这道闸是
+			// 「谁能看号码」剩下的唯一约束。
+			"sms.read",
+			"sms.reveal",
+			"sms.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
@@ -238,6 +252,13 @@ func DefaultRoleScopeMap() map[string][]string {
 		// 两个权限一起给：登记地址决定「钱能去哪儿」，提现决定「什么时候去」，
 		// 分开成两个串是为了以后想拆的时候拆得开，今天由同一个角色持有。
 		"fund-operator": {"fund.withdraw", "fund.address.manage"},
+		// XM-SMS0（2026-09-05）：买号。与 fund-operator 同一条设计意图
+		// ——把「花真钱」从日常操作角色里拿出来。
+		//
+		// 接码的钱比提现小得多（一个号几毛到几块），但它的花法更容易失控：
+		// 数量上限 200，一次手滑就是两百个号；而买到的号不可退。
+		// 独立角色让「谁能花这笔钱」是一次显式授予。
+		"sms-operator": {"sms.purchase"},
 	}
 }
 

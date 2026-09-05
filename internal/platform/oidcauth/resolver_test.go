@@ -592,6 +592,30 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 		}
 	}
 
+	// XM-SMS0（2026-09-05）：接码中心的四个权限。
+	//
+	// **sms.purchase 不给 admin**，与 fund.withdraw 同一条理由：它花真钱
+	// 且不可退（买到的号就是买到了），而 admin 是日常操作账号。由专门的
+	// sms-operator 角色持有。
+	//
+	// 其余三个给 admin：看清单、看号码、连接测试与人工核对都是日常运营
+	// 要做的事，不给就等于这个功能对唯一能用它的人 403——这正是卡片上线
+	// 当天撞上的那件事。
+	for _, sc := range []string{"sms.read", "sms.reveal", "sms.manage"} {
+		if !slices.Contains(admin, sc) {
+			t.Fatalf("admin 应持有 %s，否则接码页对唯一能用它的人是 403", sc)
+		}
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 不该持有 %s", sc)
+		}
+	}
+	if slices.Contains(admin, "sms.purchase") {
+		t.Fatal("admin 不该持有 sms.purchase：买号花真钱，日常操作账号不该带它")
+	}
+	if got := m["sms-operator"]; !slices.Contains(got, "sms.purchase") {
+		t.Fatalf("sms-operator 应持有 sms.purchase，否则这个功能没有任何角色能用, got %v", got)
+	}
+
 	// XM-CARD6（2026-09-05 改）：额度从环境变量搬进数据库、由后台调整之后，
 	// 「改不了」这道物理屏障没有了。替代它的是**两把钥匙**：
 	//   fund.limit.manage（改额度）给 admin，

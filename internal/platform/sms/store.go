@@ -1,0 +1,93 @@
+package sms
+
+import (
+	"context"
+	"time"
+)
+
+// Store 是领域层需要的持久化能力。
+//
+// 定成接口而不是直接依赖具体实现：本包最要紧的逻辑（七态推进、未决防重、
+// unknown 收敛）必须能在没有数据库的情况下被完整测到——那些分支在真实环境里
+// 既难复现又昂贵（每复现一次不确定态，就是真买一次号）。
+type Store interface {
+	// PrepareOperation 落一条 prepared 台账。
+	//
+	// 同 requestHash 已有未决的一笔时返回 ErrPendingDuplicate——**这是
+	// 防重的核心**：换一个 operation UUID 重发同样的请求要被挡住。
+	PrepareOperation(ctx context.Context, op Operation) error
+	// MarkSubmitted 把 prepared 推进到 submitted。
+	//
+	// 单独一步而不是和 Prepare 合并：进程在这两点之间崩溃的处置完全不同
+	// ——prepared 崩了可以直接判失败（还没发出去），submitted 崩了只能
+	// 落 unknown。合并就分不出来了。
+	MarkSubmitted(ctx context.Context, operationID string, at time.Time) error
+	// ResolveOperation 写终局状态。
+	ResolveOperation(ctx context.Context, op Operation) error
+	// GetOperation 读一笔。
+	GetOperation(ctx context.Context, operationID string) (Operation, error)
+	// ListOperations 列台账，新的在前。
+	ListOperations(ctx context.Context, provider string, limit int) ([]Operation, error)
+	// RecoverStaleOperations 把进程崩溃遗留的未决操作推进到该去的地方。
+	//
+	// prepared → failed（还没发出去，钱没花）；
+	// submitted → unknown（发出去了但不知道结果）。
+	// 返回被改动的条数，供启动日志说明「恢复了几笔」。
+	RecoverStaleOperations(ctx context.Context, at time.Time) (int, error)
+
+	// UpsertResource 按 (provider, external_id) 落号码。
+	UpsertResource(ctx context.Context, r Resource) (string, error)
+	// GetResource 读一个号码，**含完整号码与 token**。
+	//
+	// 这是内部权威对象，只给取码与生命周期动作用；对外 DTO 走
+	// ListResources，那一份不含 token，号码是否可见由权限决定。
+	GetResource(ctx context.Context, resourceID string) (Resource, error)
+	ListResources(ctx context.Context, provider string, limit int) ([]Resource, error)
+	// TouchResourceCodeAt 记「最后一次成功取到码」的时间。
+	TouchResourceCodeAt(ctx context.Context, resourceID string, at time.Time) error
+
+	// UpsertOrder 落订单（62）。返回本地 UUID。
+	UpsertOrder(ctx context.Context, o Order) (string, error)
+
+	// RecordCode 落一条验证码。已存在同一条时第二个返回值为 false。
+	//
+	// 去重是必要的：轮询会反复读到同一条短信，而每次都推一遍企业微信
+	// 会让人在群里看到十条一样的码，然后开始忽略它们。
+	RecordCode(ctx context.Context, c Code) (Code, bool, error)
+	ListCodes(ctx context.Context, resourceID string, limit int) ([]Code, error)
+
+	// ProviderStatus 读某家的验证事实。
+	ProviderStatus(ctx context.Context, provider string) (ProviderStatus, error)
+	ListProviderStatus(ctx context.Context) ([]ProviderStatus, error)
+	// SaveProviderStatus 写连接测试的结果。
+	SaveProviderStatus(ctx context.Context, s ProviderStatus) error
+}
+
+// Order 是一笔订单（主要是 62）。
+type Order struct {
+	ID              string
+	Provider        string
+	ProviderOrderID string
+	GoodsID         string
+	Quantity        int
+	AmountText      string
+	Status          string
+}
+
+// ProviderStatus 是某家供应商的验证事实。
+//
+// **不含配置**：启用哪几家由 XM_SMS_PROVIDERS 显式声明，密钥在
+// SecretProvider。这里只记「最近一次连接测试是什么时候、结果如何」。
+type ProviderStatus struct {
+	Provider string
+	// VerifiedAt 为零值 = 从未验证成功。购买前必须非零。
+	VerifiedAt time.Time
+	// ClientIP 是供应商观察到的我方出口 IP。上游若做 IP 白名单，
+	// 这个值对不上就是全部 403 的原因，而那种失败从错误码上看只是「没权限」。
+	ClientIP  string
+	LastError string
+	UpdatedAt time.Time
+}
+
+// Verified 说明这家是否可以用来花钱。
+func (s ProviderStatus) Verified() bool { return !s.VerifiedAt.IsZero() }

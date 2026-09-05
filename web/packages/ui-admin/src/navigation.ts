@@ -139,6 +139,17 @@ export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
     subTabs: [],
   },
   {
+    // XM-SMS0：与卡片同一情况——ADMIN-IA 里没有这一条。放在「平台治理」下
+    // 并紧挨卡片，是因为它们是同一类东西：平台自己持有的、用来注册与维持
+    // 外部服务账号的资源（一个是支付工具，一个是手机号）。归属同样待确认。
+    id: "sms",
+    label: "接码",
+    path: "/sms",
+    stage: "M3",
+    built: true,
+    subTabs: [],
+  },
+  {
     id: "registry",
     label: "资源目录",
     path: "/registry",
