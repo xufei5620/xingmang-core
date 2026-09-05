@@ -267,7 +267,19 @@ services:
       # 用户清单模式（XM-0046）：off / fake / real。留空沿用进程默认 fake；
       # 生产应显式 off——real 客户端未交付前，fake 客户不得出现在生产页面。
       XM_PLATFORM_USERS_MODE: ${XM_PLATFORM_USERS_MODE:-}
+      # 平台支付模式（off / fake / real）。留空 = 进程默认 fake。
+      XM_PLATFORM_PAYMENTS_MODE: ${XM_PLATFORM_PAYMENTS_MODE:-}
+      # 接码（XM-SMS0）：off / fake / real。**这是接码唯一的环境变量**——
+      # 开哪几家供应商在管理后台点（sms.provider_status.enabled，
+      # Action sms.provider.set_enabled@1），不落配置文件。
+      # 留在这里的理由只有一个：它决定这个进程会不会花真钱。
+      XM_SMS_MODE: ${XM_SMS_MODE:-off}
+      # 被动保障探测（ADR-019）。ENABLED 是全局 Kill Switch，留空 = false；
+      # 两个进程各自独立解析同一个变量，**必须在两段都透传且配同一个值**。
+      XM_ASSURE_PROBE_ENABLED: ${XM_ASSURE_PROBE_ENABLED:-}
+      XM_ASSURE_PROBE_DAILY_BUDGET: ${XM_ASSURE_PROBE_DAILY_BUDGET:-}
       XM_REQLOG_ENDPOINT: ${XM_REQLOG_ENDPOINT:-}
+      XM_REQLOG_TOKENMAP_V2: ${XM_REQLOG_TOKENMAP_V2:-}
       XM_REQLOG_TARGET_ALLOWLIST: ${XM_REQLOG_TARGET_ALLOWLIST:-}
       XM_REQLOG_CREDENTIAL_REF: ${XM_REQLOG_CREDENTIAL_REF:-}
       # 控制台 Basic Auth 的 `用户名:口令` **整串**。默认空：没配就是没有真实
@@ -488,6 +500,12 @@ services:
       XM_ALERT_WECOM_WEBHOOK_REF: ${XM_ALERT_WECOM_WEBHOOK_REF:-}
       XM_ALERT_WECOM_WEBHOOK: ${XM_ALERT_WECOM_WEBHOOK:-}
       XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS: ${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}
+      # 被动保障探测（ADR-019）。**必须与 platform-api 段配同一个值**：
+      # 两个进程互不可见对方内存，各自独立解析这两个变量——Action 接受时读的是
+      # api 侧的值，Job 执行时刻复检读的是 worker 侧的值。配不一致的症状是
+      # 「Action 收下了，作业却拒绝执行」，而两边日志各自看都正常。
+      XM_ASSURE_PROBE_ENABLED: ${XM_ASSURE_PROBE_ENABLED:-}
+      XM_ASSURE_PROBE_DAILY_BUDGET: ${XM_ASSURE_PROBE_DAILY_BUDGET:-}
       # --- 请求量/成功率聚合（XM-REQLOG-METRICS）----------------------------
       # 与 platform-api 共享同一个环境变量名 XM_REQLOG_MODE/XM_REQLOG_DATA_DIR
       # （见该服务的「请求详情 / reqlog 只读网关」小节）：两个进程只读同一份

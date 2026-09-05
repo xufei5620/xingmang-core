@@ -162,8 +162,17 @@ Hero 的 `lookupResource` 最多扫 5 页 × 100 条 **active** activation；已
 
 ### 上线前要做的四件事
 
-1. **配一个环境变量**：`XM_SMS_MODE=real`（或 `fake` 先演示）。
-   这是接码唯一的环境变量，其余全在管理后台。
+1. **配一个环境变量**：在 `deploy/compose/.env`（服务器上那份，不入库）里写
+   `XM_SMS_MODE=real`（或 `fake` 先演示）。这是接码唯一的环境变量，其余全在
+   管理后台。**不需要删任何旧变量**——`XM_SMS_PROVIDERS` 从未进过部署配置。
+
+   > 2026-09-06 补：这一条原先是**做不到**的。`XM_SMS_MODE` 从没接进
+   > `deploy/compose/launch.yaml`，在 `.env` 里写了也进不了容器，进程读到空串
+   > 就当作 off，接码端点整组不挂载，页面显示「当前环境未启用」——而没有任何
+   > 一处会报错。同一次检查还翻出另外四个早就存在的同类洞（保障探测两个、
+   > 平台支付、reqlog v2 token 映射）。已补透传，并加了门禁
+   > `scripts/check-compose-env.py`：进程读的每个字面量环境变量都必须在
+   > launch.yaml 里出现，已废弃的（`XM_SMS_PROVIDERS`）则必须**不**出现。
 2. **在管理端「密钥引用」页填两条密钥**：
    `secret://sms62/api-key`、`secret://hero-sms/api-key`。
    注意 hero 的 scope 是**连字符**：scope 规则是 `^[a-z0-9][a-z0-9-]{0,63}$`，
