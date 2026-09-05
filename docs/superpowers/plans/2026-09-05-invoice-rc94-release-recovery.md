@@ -44,3 +44,28 @@ Production remains blocked until a 30-minute readiness watch binds RC94.
 
 - Switching the bound on. That is a follow-up env change gated on the differential rehearsal above, with its own canary.
 - A continuously-consuming account is still blocked from invoicing while any projection job is queued; account 12 is still blocked by a negative upstream balance. Both remain under the reasoning recorded in RC90.
+
+## Execution record (2026-09-05)
+
+- Task 1: identity bump `254d99d`; every gate 0, web 185 tests, four failure-evidence scripts 0/0/0/0; gate self-test 0 on the first run. Tag `v0.1.0-rc94-signed` created and verified, peeling to `HEAD`; the derived roll-forward script's `SHA=` checked against the tag commit before anything ran.
+- Task 2: `release/0.1.0-rc94-exact1`, first attempt: binding bound to `254d99dd…`, loopback preflight passed on attempt 1, image gate 42, ordinary verifier 0, strict transfer-ready verifier 0. The audit ran for real (`found 0 vulnerabilities`), waiver cleared, not used.
+- Task 3: staged (nine images, tag and evidence signatures good); release env carried over from RC93 with `INVOICE_IMAGE_TAG=0.1.0-rc94` and **no `ELIGIBILITY_EVIDENCE_BATCH_LIMIT`** (the knob stays off in production). The rc94 tools image exposes `-reproject-all`, `-reevaluate-evidence` and `-evidence-batch-limit`; the staged rehearsal script passes all three.
+
+### Differential rehearsal — run, and found inert
+
+Backup `invoice-20260905T010919Z`, rc94 tools image, `--reproject-all --reevaluate-evidence`, `--evidence-batch-limit 0` (report `rehearsals/20260905T092119Z-1670059`) and `25` (`rehearsals/20260905T092816Z-1711075`).
+
+| field | unbounded | bounded |
+| --- | --- | --- |
+| `evaluations_cleared` | 2743 | 2743 |
+| `accounts_projected` / `pending_accounts` | 8 / null | 8 / null |
+| `rounds_run` | 1 | 1 |
+| `evaluations_by_status` after | matched 3643, negative_frozen 7, positive_blip_ignored 332, positive_classified_non_cash 2 | identical |
+| `after.accounts` (all fields incl. `projection_version`) | — | identical, per account |
+| verdict | ready | ready |
+
+`--reevaluate-evidence` did what it was built for: 2,743 evaluations cleared and 2,742 re-made by the candidate in one pass per account (the one short of the count is the last deferred item, unwritten by rule). But the two runs are identical **including `projection_version`**, which means the bounded run took exactly one job per account: **the bound never engaged.** The cleared evidence is history — every item's `as_of` lies before the account's published `finalized_through` — and the batch boundary deliberately counts only items after the published boundary (the rule that keeps a deferred item from pinning it). On this copy the bound had nothing to chunk, so the pair compared two unbounded runs. It is not the acceptance the plan asked for, and it is recorded as such.
+
+The repair is in the tool, not the evaluator: `--reevaluate-evidence` now also rewinds every POLICY_ANCHOR account's `finalized_through` to its cutover after the jobs have been queued at the old boundary, so each account's window is its whole evidence history and the cleared items sit in front of the bound (`accounts_rewound` in the report; zero with re-evaluation set means a bounded run had nothing to chunk). That is a Go change and needs a new image; RC94's signed tag is fixed, so the real differential is RC95's.
+
+RC94 itself changes nothing in production — the knob is unset — and was not rolled forward pending the owner's decision.
