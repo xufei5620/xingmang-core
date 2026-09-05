@@ -323,8 +323,28 @@ export function AccountBalancesStrip({
 
   if (query.isPending || !query.data?.length) return null;
 
+  const clickableStrip = typeof onSelect === "function";
+
   return (
-    <div className="flex flex-wrap gap-3">
+    <div className="flex flex-wrap items-stretch gap-3">
+      {/* 「全部」显式成一个按钮。
+       *
+       *  我原先的想法是「再点一次选中的账号就取消，多一个按钮就多一处要
+       *  解释的地方」——那条站不住：**取消筛选这件事本身得有个看得见的
+       *  入口**。只靠「再点一次」是一条藏起来的规则，人得先猜到它存在。
+       *  产品负责人 2026-09-05 直接要求加上。 */}
+      {clickableStrip ? (
+        <button
+          type="button"
+          onClick={() => onSelect("")}
+          aria-pressed={selected === ""}
+          className={`rounded-lg border px-3 py-2 text-left text-sm font-medium hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-accent ${
+            selected === "" ? "border-accent bg-accent-soft" : "border-edge bg-surface"
+          }`}
+        >
+          全部
+        </button>
+      ) : null}
       {query.data.map((b) => {
         const active = selected === b.account;
         const clickable = typeof onSelect === "function";
