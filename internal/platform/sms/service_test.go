@@ -3,6 +3,7 @@ package sms
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -824,5 +825,50 @@ func (m *memStore) SumCostEventsByCurrency(ctx context.Context, provider string,
 	for _, row := range byCurrency {
 		out = append(out, *row)
 	}
+	return out, nil
+}
+
+func (m *memStore) AggregateCostsByDay(ctx context.Context, from, to time.Time) ([]CostAggregate, error) {
+	type key struct{ day, provider, currency, service string }
+	acc := map[key]*CostAggregate{}
+	for _, k := range m.costOrder {
+		ev := m.costs[k]
+		if ev.OccurredAt.Before(from) || !ev.OccurredAt.Before(to) {
+			continue
+		}
+		id := key{ev.OccurredAt.UTC().Format("2006-01-02"), ev.Provider, ev.Currency, ev.Service}
+		row, ok := acc[id]
+		if !ok {
+			row = &CostAggregate{Day: id.day, Provider: id.provider, Currency: id.currency, Service: id.service, SumText: "0"}
+			acc[id] = row
+		}
+		row.Count++
+		if ev.AmountText == "" {
+			row.UnknownCount++
+			continue
+		}
+		sum, _ := parseSignedDecimal(row.SumText)
+		add, ok2 := parseSignedDecimal(ev.AmountText)
+		if !ok2 {
+			continue
+		}
+		row.SumText = ratText(sum.Add(sum, add))
+	}
+	out := make([]CostAggregate, 0, len(acc))
+	for _, row := range acc {
+		out = append(out, *row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Day != out[j].Day {
+			return out[i].Day > out[j].Day
+		}
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		if out[i].Currency != out[j].Currency {
+			return out[i].Currency < out[j].Currency
+		}
+		return out[i].Service < out[j].Service
+	})
 	return out, nil
 }

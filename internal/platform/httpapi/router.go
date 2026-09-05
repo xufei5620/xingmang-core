@@ -379,6 +379,9 @@ func NewRouter(d Deps) http.Handler {
 				// 内部告警与阈值（XM-SMS2 #8）：**不外发**，只给页面红条。
 				api.With(RequireScope(sms.PermissionRead)).
 					Get("/sms/alerts", ListSMSAlertsHandler(d.SMS))
+				// 成本统计（XM-SMS3 #3）：库里聚合，页面只画。
+				api.With(RequireScope(sms.PermissionRead)).
+					Get("/sms/costs", ListSMSCostsHandler(d.SMS, nil))
 			}
 			// 库存是实时上游调用，与投影读分开判空：fake 模式下没有真实库存。
 			if d.SMSCatalog != nil {

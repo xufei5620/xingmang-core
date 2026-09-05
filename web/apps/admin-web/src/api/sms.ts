@@ -793,3 +793,46 @@ export function setSMSBalanceThreshold(
     client,
   );
 }
+
+// ---------- 成本统计（XM-SMS3 #3） ----------
+
+/** 一行聚合：**按供应商 × 币种 × 服务 × 天**。这张事实表的形状就是跨平台财务
+ *  的输入，所以四个维度在同一行里而不是嵌套。 */
+export interface SMSCostRow {
+  /** UTC 日期 YYYY-MM-DD。 */
+  day: string;
+  provider: string;
+  /** 空 = 上游没说。**分币种不折算。** */
+  currency?: string;
+  service?: string;
+  /** 十进制文本，退款为负。 */
+  amount: string;
+  count: number;
+  /** 金额未知的笔数。合计里要单独说明——有未知就说明合计是下限。 */
+  unknown_count: number;
+}
+
+export interface SMSCostsResponse {
+  items: SMSCostRow[];
+  from: string;
+  to: string;
+}
+
+/** 读成本统计。日期是 YYYY-MM-DD（UTC），两端都含。 */
+export async function listSMSCosts(
+  from: string,
+  to: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSCostsResponse> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const body = await client
+    .get<Partial<SMSCostsResponse>>(`/api/v1/sms/costs${suffix}`, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return { items: body.items ?? [], from: body.from ?? from, to: body.to ?? to };
+}

@@ -22,6 +22,8 @@ type SMSQuerier interface {
 	ListRoutingRules(ctx context.Context) ([]sms.RoutingRule, error)
 	// LatestBalanceSnapshots 是巡检抓到的最新余额（XM-SMS2 #7）。
 	LatestBalanceSnapshots(ctx context.Context) ([]sms.BalanceSnapshot, error)
+	// AggregateCostsByDay 是成本统计页签的读端点（XM-SMS3 #3）。
+	AggregateCostsByDay(ctx context.Context, from, to time.Time) ([]sms.CostAggregate, error)
 	// 告警与阈值（XM-SMS2 #8）。**只读**：写走 sms.alert.* Action。
 	ListOpenAlertEvents(ctx context.Context) ([]sms.AlertEvent, error)
 	ListBalanceThresholds(ctx context.Context) ([]sms.BalanceThreshold, error)
@@ -421,5 +423,87 @@ func ListSMSAlertsHandler(store SMSQuerier) http.HandlerFunc {
 			rows = append(rows, row)
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{"items": items, "thresholds": rows})
+	}
+}
+
+// ---- 成本统计（XM-SMS3 #3）----
+
+type smsCostRow struct {
+	Day      string `json:"day"`
+	Provider string `json:"provider"`
+	// Currency 空 = 上游没说。**分币种不折算**：两种币种加到一起得到的数字
+	// 看起来像总成本，其实什么都不是。
+	Currency string `json:"currency,omitempty"`
+	Service  string `json:"service,omitempty"`
+	// Amount 是十进制文本（退款为负）。
+	Amount string `json:"amount"`
+	Count  int    `json:"count"`
+	// UnknownCount 是金额未知的笔数。前端必须显示：一份「这个月花了 X」的
+	// 报表，背后如果有二十笔金额不明，那个 X 是下限不是花费。
+	UnknownCount int `json:"unknown_count"`
+}
+
+// 统计窗口的上限：一次最多回 366 天。
+//
+// 不是性能顾虑（聚合在库里做），是**页面可读性**：一张摊开三年的表没人看得懂，
+// 而真要那么长的区间应该走导出而不是页面。
+const maxSMSCostWindowDays = 366
+
+// ListSMSCostsHandler 返回按供应商 × 币种 × 服务 × 天聚合的成本。
+//
+// 聚合在库里做（服务端整表聚合）：一个跑了半年的环境有几十万行成本事件，
+// 拉到浏览器里再算既慢又会把「这个月花了多少」变成一个前端 bug。
+func ListSMSCostsHandler(store SMSQuerier, now func() time.Time) http.HandlerFunc {
+	if now == nil {
+		now = time.Now
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		to := now().UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+		from := to.AddDate(0, 0, -30)
+		if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
+			parsed, err := time.Parse("2006-01-02", raw)
+			if err != nil {
+				WriteError(w, r, action.NewError(action.CodeInvalidParams, "from 要是 YYYY-MM-DD", err))
+				return
+			}
+			from = parsed.UTC()
+		}
+		if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
+			parsed, err := time.Parse("2006-01-02", raw)
+			if err != nil {
+				WriteError(w, r, action.NewError(action.CodeInvalidParams, "to 要是 YYYY-MM-DD", err))
+				return
+			}
+			// 右端点含当天：人说的「到 9 月 6 日」包括 9 月 6 日。
+			to = parsed.UTC().AddDate(0, 0, 1)
+		}
+		if !to.After(from) {
+			WriteError(w, r, action.NewError(action.CodeInvalidParams, "to 要不早于 from", nil))
+			return
+		}
+		if to.Sub(from) > maxSMSCostWindowDays*24*time.Hour {
+			WriteError(w, r, action.NewError(action.CodeInvalidParams,
+				"一次最多查 366 天；更长的区间请分段查", nil))
+			return
+		}
+
+		rows, err := store.AggregateCostsByDay(r.Context(), from, to)
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		out := make([]smsCostRow, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, smsCostRow{
+				Day: row.Day, Provider: row.Provider, Currency: row.Currency, Service: row.Service,
+				Amount: row.SumText, Count: row.Count, UnknownCount: row.UnknownCount,
+			})
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"items": out,
+			"from":  from.Format("2006-01-02"),
+			// 回给页面的 to 是**含当天**的那一天，与人说的日期一致。
+			"to": to.AddDate(0, 0, -1).Format("2006-01-02"),
+		})
 	}
 }

@@ -87,6 +87,8 @@ type Store interface {
 	// SumCostEventsByCurrency 汇总 (from, to] 内的成本，**按币种分组**：跨币种
 	// 相加得到的数字看起来像个金额，其实什么都不是。
 	SumCostEventsByCurrency(ctx context.Context, provider string, from, to time.Time) ([]CostSummary, error)
+	// AggregateCostsByDay 按供应商 × 币种 × 服务 × 天聚合（服务端整表聚合）。
+	AggregateCostsByDay(ctx context.Context, from, to time.Time) ([]CostAggregate, error)
 
 	// 告警（XM-SMS2 #8）。阈值按家配（币种各自不同，不折算）；事件按指纹去重，
 	// 条件消失由 ResolveAlertEventsNotIn 自动收敛。

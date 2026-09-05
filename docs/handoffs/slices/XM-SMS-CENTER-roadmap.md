@@ -76,7 +76,7 @@ branch: ai/claude/XM-CARD0-infini-connector
    读端点 `GET /sms/alerts`（告警 + 阈值一次回），页面顶部红条按严重度排序、
    写明「不会外发」，供应商卡片给有余额能力的那家一个阈值输入框。
 
-## XM-SMS3 · 成本核算 — status: in-progress（1–2 done）
+## XM-SMS3 · 成本核算 — status: done（1–3 全部完成）
 
 1. ~~`sms.cost_event`~~ done：迁移 000047，由 `purchase` / `runLedger` /
    `ExecuteAction` 在**成功那一刻**写（买号、租用、延长、重激活、买邮箱、重下单；
@@ -98,8 +98,13 @@ branch: ai/claude/XM-CARD0-infini-connector
    （跨币种相减得到的数字什么都不是）。评估挂在既有的 EvaluateAlerts 里，
    共用同一套「算出该报的、把不该报的收敛掉」，页面红条直接显示。
    容差如果实际用起来太吵，下一步是做成 Action 配的（与余额阈值同形状）。
-3. 统计页签：服务端整表聚合，按供应商 × 币种 × 服务 × 天；分币种不折算；
-   CSV 导出。事实表形状 = 跨平台财务的输入。
+3. ~~统计页签~~ done：`AggregateCostsByDay` **在库里聚合**（几十万行明细不拉到
+   浏览器里算），四个维度在同一行——嵌套结构导不出 CSV，也喂不了财务那边。
+   读端点 `GET /sms/costs?from&to`（YYYY-MM-DD、UTC、两端含，一次最多 366 天，
+   非法日期回 INVALID_PARAMS）。新页签「成本统计」：按币种分开的合计（**不折算**）、
+   明细表、CSV 导出（RFC 4180 转义，服务代号是上游给的，保证不了不含逗号）。
+   **金额未知的笔数单独显示并写明「合计是下限而不是实际花费」**——一份背后有
+   二十笔金额不明的报表，那个数字会被当成实际花费。
 
 ## XM-SMS4 · 接入规范与内部接口 — status: todo
 
@@ -219,3 +224,12 @@ branch: ai/claude/XM-CARD0-infini-connector
   （边界那条 5.00 不算进 (t0,t1]）、按币种分组、未知金额计入笔数但不进和、
   别家的不算。金额一路走 big.Rat 不过 float。门禁：go vet / go test -p 1 ./...
   （含真库）/ check-governance 0 / pnpm -r typecheck / pnpm -r test 全绿。
+- 2026-09-06 XM-SMS3 #3：真库 `TestPgStoreAggregateCostsByDay`：跨日切分正确
+  （23:30 与次日 00:30 分属两天）、退款负数抵消后为 0、未知金额计入笔数但不进和、
+  币种分组（空 / 840 / USD 各自成行）、窗口外不算、按日期倒序。页面
+  `SMSCostPanel.test.tsx` 七条：合计按币种分开、有未知金额时写明「合计是下限」、
+  没有就不写、无数据时导出按钮禁用、CSV 表头 / 行格式 / 结尾换行、逗号与引号
+  按 RFC 4180 转义、空币种单独成组。其中一条先红：合计条上也有「N 笔金额未知」，
+  与提醒句撞名——改成按「合计是下限」这句独有的话定位。门禁：go vet /
+  go test -p 1 ./...（含真库）/ check-governance 0 / pnpm -r typecheck /
+  pnpm -r test（admin-web 1564 用例）全绿。

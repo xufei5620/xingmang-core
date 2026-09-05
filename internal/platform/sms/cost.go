@@ -220,3 +220,29 @@ func itoa64(v int64) string {
 func (s *Service) ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error) {
 	return s.store.ListCostEvents(ctx, provider, limit)
 }
+
+// CostAggregate 是成本统计的一行：**按供应商 × 币种 × 服务 × 天**聚合。
+//
+// 这张事实表的形状就是跨平台财务的输入（ADR-022 决策 5）。四个维度都在一行里，
+// 而不是先按天再按供应商嵌套：嵌套结构导不出 CSV，也没法直接喂给财务那边的
+// 汇总——那边要的是一行一个事实。
+type CostAggregate struct {
+	// Day 是 UTC 日期（YYYY-MM-DD）。时间库内一律 UTC（宪法 14）。
+	Day      string
+	Provider string
+	// Currency 空 = 上游没说。**分币种不折算**（与卡片同口径）：把两种币种加
+	// 到一起得到的数字看起来像总成本，其实什么都不是。
+	Currency string
+	Service  string
+	// SumText 是十进制文本（退款是负数，所以可能为负）。
+	SumText string
+	Count   int
+	// UnknownCount 是金额未知的笔数。**必须显示出来**：一份「这个月花了 X」
+	// 的报表，如果背后有二十笔金额不明，那个 X 就不是花费而是下限。
+	UnknownCount int
+}
+
+// AggregateCosts 按天聚合成本（服务端整表聚合，不把明细拉到页面上算）。
+func (s *Service) AggregateCosts(ctx context.Context, from, to time.Time) ([]CostAggregate, error) {
+	return s.store.AggregateCostsByDay(ctx, from, to)
+}

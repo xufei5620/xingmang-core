@@ -10,6 +10,7 @@ import {
   HeroRentPanel,
   SMS62OrdersPanel,
 } from "../components/SMSExtrasPanels";
+import { SMSCostPanel } from "../components/SMSCostPanel";
 import { SMSPanel } from "../components/SMSPanel";
 import { SMSRoutingPanel } from "../components/SMSRoutingPanel";
 
@@ -18,6 +19,7 @@ import { SMSRoutingPanel } from "../components/SMSRoutingPanel";
 const TABS = [
   { id: "numbers", label: "号码" },
   { id: "routing", label: "路由规则" },
+  { id: "costs", label: "成本统计" },
   { id: "catalog", label: "目录与价格（Hero）" },
   { id: "history", label: "历史与统计（Hero）" },
   { id: "emails", label: "邮箱接码（Hero）" },
@@ -80,6 +82,7 @@ export function SMSPage() {
 
       {tab === "numbers" ? <SMSPanel /> : null}
       {tab === "routing" ? <SMSRoutingPanel onWrite={setResult} /> : null}
+      {tab === "costs" ? <SMSCostPanel /> : null}
       {tab === "catalog" ? <HeroCatalogPanel onWrite={setResult} /> : null}
       {tab === "history" ? <HeroHistoryPanel /> : null}
       {tab === "emails" ? <HeroEmailsPanel onWrite={setResult} /> : null}

@@ -721,3 +721,72 @@ func TestPgStoreReconcileQueries(t *testing.T) {
 		t.Fatalf("840 那组不对: %+v", byCurrency["840"])
 	}
 }
+
+// 成本统计：按供应商 × 币种 × 服务 × 天聚合（服务端整表聚合）。
+// **分币种不折算**；金额未知的笔数单独计，不混进和里。
+func TestPgStoreAggregateCostsByDay(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	if _, err := store.pool.Exec(ctx, "TRUNCATE sms.cost_event"); err != nil {
+		t.Fatal(err)
+	}
+	day1 := time.Date(2026, 9, 5, 23, 30, 0, 0, time.UTC)
+	day2 := time.Date(2026, 9, 6, 0, 30, 0, 0, time.UTC)
+
+	events := []CostEvent{
+		{Provider: ProviderHero, Kind: CostPurchase, Subject: "a", Service: "go", AmountText: "0.350000", OccurredAt: day1},
+		{Provider: ProviderHero, Kind: CostPurchase, Subject: "b", Service: "go", AmountText: "0.350000", OccurredAt: day2},
+		{Provider: ProviderHero, Kind: CostRefund, Subject: "c", Service: "go", AmountText: "-0.350000", OccurredAt: day2},
+		{Provider: ProviderHero, Kind: CostProlong, Subject: "d", Service: "go", OccurredAt: day2},
+		{Provider: ProviderHero, Kind: CostEmailPurchase, Subject: "e", Service: "gmail", AmountText: "1.000000", Currency: "840", OccurredAt: day2},
+		{Provider: ProviderSMS62, Kind: CostPurchase, Subject: "f", Service: "google", AmountText: "0.800000", Currency: CurrencyUSD, OccurredAt: day2},
+	}
+	if _, err := store.AppendCostEvents(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+
+	from := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	rows, err := store.AggregateCostsByDay(ctx, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 5 号：Hero/空币种/go 一行。6 号：Hero/空/go、Hero/840/gmail、62/USD/google 三行。
+	if len(rows) != 4 {
+		t.Fatalf("应聚成四行, got %+v", rows)
+	}
+	// 新的日子在前。
+	if rows[0].Day != "2026-09-06" || rows[len(rows)-1].Day != "2026-09-05" {
+		t.Fatalf("应按日期倒序, got %+v", rows)
+	}
+	byKey := map[string]CostAggregate{}
+	for _, row := range rows {
+		byKey[row.Day+"|"+row.Provider+"|"+row.Currency+"|"+row.Service] = row
+	}
+	// 0.35 − 0.35 = 0；未知那笔计入笔数但不进和。
+	heroGo := byKey["2026-09-06|hero_sms||go"]
+	if heroGo.SumText != "0.000000" || heroGo.Count != 3 || heroGo.UnknownCount != 1 {
+		t.Fatalf("Hero go 那行不对: %+v", heroGo)
+	}
+	// 币种分开：邮箱那笔不会混进空币种那行。
+	if byKey["2026-09-06|hero_sms|840|gmail"].SumText != "1.000000" {
+		t.Fatalf("840 那行不对: %+v", byKey["2026-09-06|hero_sms|840|gmail"])
+	}
+	if byKey["2026-09-06|sms62|USD|google"].SumText != "0.800000" {
+		t.Fatalf("62 那行不对: %+v", byKey["2026-09-06|sms62|USD|google"])
+	}
+	// 窗口外的不算：只查 6 号那一天。
+	only6, err := store.AggregateCostsByDay(ctx,
+		time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range only6 {
+		if row.Day != "2026-09-06" {
+			t.Fatalf("窗口外的行漏进来了: %+v", row)
+		}
+	}
+	if len(only6) != 3 {
+		t.Fatalf("6 号应有三行, got %+v", only6)
+	}
+}

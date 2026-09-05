@@ -1075,3 +1075,34 @@ SELECT currency,
 	}
 	return out, rows.Err()
 }
+
+// AggregateCostsByDay 按供应商 × 币种 × 服务 × 天聚合。
+//
+// **在库里聚合**，不是把明细拉到页面上再算：一个跑了半年的环境有几十万行
+// 成本事件，拉到浏览器里既慢又会把「这个月花了多少」变成一个前端 bug。
+func (s *PgStore) AggregateCostsByDay(ctx context.Context, from, to time.Time) ([]CostAggregate, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT to_char(date_trunc('day', occurred_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+       provider, currency, service,
+       COALESCE(sum(amount)::text, '0'),
+       count(*),
+       count(*) FILTER (WHERE amount IS NULL)
+  FROM sms.cost_event
+ WHERE environment = $1 AND occurred_at >= $2 AND occurred_at < $3
+ GROUP BY day, provider, currency, service
+ ORDER BY day DESC, provider, currency, service`, s.environment, from.UTC(), to.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("聚合成本事件: %w", err)
+	}
+	defer rows.Close()
+	var out []CostAggregate
+	for rows.Next() {
+		var row CostAggregate
+		if err := rows.Scan(&row.Day, &row.Provider, &row.Currency, &row.Service,
+			&row.SumText, &row.Count, &row.UnknownCount); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
