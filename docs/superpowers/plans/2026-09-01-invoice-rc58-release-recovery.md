@@ -5,7 +5,7 @@
 > multi-platform login and live funding-lot materialization and exposed
 > the lot reason-code precedence defect; its evidence is immutable.
 > Continue only with
-> `docs/superpowers/plans/2026-09-05-invoice-rc94-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-05-invoice-rc95-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
