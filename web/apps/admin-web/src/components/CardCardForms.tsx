@@ -37,7 +37,7 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
  *
  *  幂等键在**打开表单时生成一次**：同一次提交的重试必须带同一个键，
  *  换一个键等于告诉后端「这是另一笔」，而上游没有幂等能力。 */
-function FundsForm({
+export function FundsForm({
   card,
   kind,
   onDone,
@@ -123,39 +123,19 @@ function FundsForm({
  *  东西，不做「本地隐藏」那种假控制。 */
 export type DetailTab = "info" | "usage" | "topup" | "redeem" | "tx";
 
-/** 卡片详情的主体（页签 + 各页签内容）。
+/** 这张卡的交易流水。
  *
- *  **这里不再是弹窗。** ADMIN-IA §3 对「主对象」一律要求完整详情页、
- *  明令不用右侧抽屉（快照 RECOVERY.md「No right-side detail drawers」），
- *  当初做成 Dialog 是我的偏离；产品负责人 2026-09-05 在生产上提出后纠正。
+ *  从原来的详情弹窗里搬出来的：弹窗的尺寸约束让这张可搜索可排序的表只能
+ *  挤在一小块里，真要查一笔消费反而得先关掉它回列表。现在它是右栏详情的
+ *  一节，和卡片信息同屏。
  *
- *  弹窗在这里本来就不合身：它同时装着五件事（只读字段、三个会花钱的表单、
- *  一张可搜索可排序的流水表），而弹窗的尺寸约束让流水表只能挤在一小块里，
- *  真要查一笔消费反而得先关掉它回列表。页面还带来两样弹窗给不了的东西——
- *  可以被链接、可以被刷新。 */
-export function CardDetailPanel({
-  card,
-  onWrite,
-  tab,
-  onTabChange,
-}: {
-  card: CardItem;
-  onWrite: (result: ActionResult) => void;
-  tab: DetailTab;
-  onTabChange: (tab: DetailTab) => void;
-}) {
-  const queryClient = useQueryClient();
-
-  const txQuery = useQuery({
+ *  跨卡的「交易记录」是另一件事（Infini 有一个顶级页签），需要一个新的
+ *  后端端点——投影表里有数据，但今天只有按卡查的读法。 */
+export function CardTransactions({ card }: { card: CardItem }) {
+  const query = useQuery({
     queryKey: [CARD_TX_QUERY, card.account, card.card_id],
     queryFn: ({ signal }) => listCardTransactions(card.account, card.card_id, { signal }),
-    enabled: tab === "tx",
   });
-
-  const afterWrite = (result: ActionResult) => {
-    onWrite(result);
-    void queryClient.invalidateQueries({ queryKey: [CARD_TX_QUERY, card.account, card.card_id] });
-  };
 
   const columns: DataTableColumn<CardTransactionItem>[] = [
     {
@@ -213,94 +193,25 @@ export function CardDetailPanel({
     },
   ];
 
-  const tabs = [
-    { id: "info" as const, label: "卡面信息" },
-    { id: "usage" as const, label: "用途登记" },
-    { id: "topup" as const, label: "充值" },
-    { id: "redeem" as const, label: "赎回" },
-    { id: "tx" as const, label: "交易流水" },
-  ];
-
   return (
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap gap-2" role="tablist">
-          {tabs.map((t) => (
-            <Button
-              key={t.id}
-              size="sm"
-              variant={tab === t.id ? "primary" : "secondary"}
-              onClick={() => onTabChange(t.id)}
-              role="tab"
-              aria-selected={tab === t.id}
-            >
-              {t.label}
-            </Button>
-          ))}
-        </div>
-
-        {tab === "info" ? (
-          <dl className="grid grid-cols-2 gap-3">
-            <Field label="账号" value={card.account} />
-            <Field label="状态" value={card.status} />
-            <Field label="卡号" value={card.pan ?? card.mask} mono />
-            <Field label="CVV" value={card.cvv ?? "—"} mono />
-            {/* 标签写「MMYY」是错的：上游字段名叫 expiration_mmyy，但实测
-                返回的是 MM/YYYY（12/2031）。原样显示、标签也照实说。 */}
-            <Field label="有效期" value={card.expiry_mmyy ?? "—"} mono />
-            {/* holder_name 里装的是**企业成员邮箱**（生产实测）。
-                叫「持卡人」名不副实——真正在 Infini 后台当持卡人显示的是
-                card_alias（他们叫「卡片名称」）。两个标签对调。 */}
-            <Field label="邮箱" value={card.holder_name} />
-            <Field label="余额" value={formatMinorUnits(card.balance_minor, card.currency)} />
-            <Field label="用途" value={card.owner_ref ?? "—"} />
-            <Field label="持卡人" value={card.card_alias} mono />
-            <Field
-              label="开卡时间"
-              value={card.issued_at ? formatUtcTimestamp(card.issued_at) : "—"}
-            />
-            <Field
-              label="数据同步于"
-              value={card.freshness.synced_at ? formatUtcTimestamp(card.freshness.synced_at) : "从未同步"}
-            />
-            <Field label="企业成员" value={card.user_email ?? "—"} />
-            <Field label="绑定账号" value={card.bound_account ?? "—"} />
-            <Field label="订阅服务" value={card.service_name ?? "—"} />
-            <Field label="下次续费" value={card.next_renewal_on ?? "—"} mono />
-            {card.pan ? null : (
-              <p className="col-span-2 text-xs text-fg-muted">
-                卡面明文尚未拉取。卡要先变成 active，同步作业才拉得到；
-                若你看不到卡号但别人看得到，是缺 card.reveal 权限。
-              </p>
-            )}
-          </dl>
-        ) : null}
-
-        {tab === "usage" ? <UsageForm card={card} onDone={afterWrite} /> : null}
-        {tab === "topup" ? <FundsForm card={card} kind="topup" onDone={afterWrite} /> : null}
-        {tab === "redeem" ? <FundsForm card={card} kind="redeem" onDone={afterWrite} /> : null}
-
-        {tab === "tx" ? (
-          <ApiStateView
-            isPending={txQuery.isPending}
-            error={txQuery.error}
-            onRetry={() => void txQuery.refetch()}
-            compact
-          >
-            <DataTableV2
-              caption="这张卡的交易流水"
-              rows={txQuery.data ?? []}
-              columns={columns}
-              rowKey={(row) => `${row.occurred_at}/${row.amount_minor}/${row.merchant}`}
-              emptyState={
-                <p className="text-sm text-fg-muted">
-                  暂无流水。流水同步默认关闭（调用量与卡数成正比，上游限流阈值未知），
-                  需要时用 XM_CARDS_SYNC_TRANSACTIONS=true 打开。
-                </p>
-              }
-            />
-          </ApiStateView>
-        ) : null}
-      </div>
+    <ApiStateView
+      isPending={query.isPending}
+      error={query.error}
+      onRetry={() => void query.refetch()}
+      compact
+    >
+      <DataTableV2
+        caption="这张卡的交易流水"
+        rows={query.data ?? []}
+        columns={columns}
+        rowKey={(row) => `${row.occurred_at}/${row.amount_minor}/${row.merchant}`}
+        emptyState={
+          <p className="text-fg-muted text-sm">
+            暂无流水。流水同步每 5 分钟一轮，回调到达时也会即时推进这张卡。
+          </p>
+        }
+      />
+    </ApiStateView>
   );
 }
 
@@ -317,7 +228,7 @@ const BOUND_KIND_OPTIONS = [
  *  这些字段上游一个都不知道，全是平台自己记的。续费日期是**人填的**：
  *  从流水推断周期看着聪明，但试用转正、年付转月付、涨价都会让推断悄悄错掉，
  *  而错了的提醒比没有提醒更糟——人会信它。 */
-function UsageForm({ card, onDone }: { card: CardItem; onDone: (r: ActionResult) => void }) {
+export function UsageForm({ card, onDone }: { card: CardItem; onDone: (r: ActionResult) => void }) {
   const [boundAccount, setBoundAccount] = useState(card.bound_account ?? "");
   const [boundKind, setBoundKind] = useState(card.bound_account_kind ?? "");
   const [serviceName, setServiceName] = useState(card.service_name ?? "");
