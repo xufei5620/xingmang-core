@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, expect, it, vi } from "vitest";
-import { ExtendDialog, HeroEmailsPanel, HeroRentPanel, UpstreamCodes } from "./SMSExtrasPanels";
+import { ExtendDialog, HeroEmailsPanel, HeroRentPanel, SMS62OrdersPanel, UpstreamCodes } from "./SMSExtrasPanels";
 
 vi.mock("../api/sms", async () => {
   const actual = await vi.importActual<typeof import("../api/sms")>("../api/sms");
@@ -17,12 +17,17 @@ vi.mock("../api/sms", async () => {
     executeSMSEmailAction: vi.fn(),
     rentSMSNumber: vi.fn(),
     purchaseSMSEmails: vi.fn(),
+    importSMSOrder: vi.fn(),
+    listSMS62Orders: vi.fn(),
+    getSMS62GoodsDetail: vi.fn(),
   };
 });
 
 import {
   executeSMSResourceAction,
   getSMSEmail,
+  importSMSOrder,
+  listSMS62Orders,
   listExtendOptions,
   listSMSEmails,
   listUpstreamCodes,
@@ -136,4 +141,24 @@ it("扩展面板里没有裸露的 markdown 星号", async () => {
   );
   await screen.findByText(/还没有邮箱/);
   expect(screen.queryByText(/\*\*/)).toBeNull();
+});
+
+// 62 订单行的「导入到平台」要带该行的订单 ID 调 sms.order.import（只读、不购买）。
+// 真实字段名那一行也要显示出来：官方没写响应结构，映射错的列靠它定位。
+it("62 订单行可以一键导入，并显示上游真实字段名", async () => {
+  vi.mocked(listSMS62Orders).mockResolvedValue({
+    items: [{ order_id: "21968", goods_id: "", quantity: 50, status: 3, status_text: "", amount_text: "1.500" }],
+    page: 1, page_size: 20, total: 1,
+    raw_keys: ["id", "num", "money", "status", "addtime"],
+  });
+  vi.mocked(importSMSOrder).mockResolvedValue({ runId: "run-imp" } as never);
+  const onWrite = vi.fn();
+  wrap(<SMS62OrdersPanel onWrite={onWrite} />);
+
+  expect(await screen.findByText(/上游字段：id, num, money, status, addtime/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "导入到平台" }));
+  await waitFor(() =>
+    expect(importSMSOrder).toHaveBeenCalledWith({ provider: "sms62", upstream_ref: "21968" }),
+  );
+  expect(onWrite).toHaveBeenCalled();
 });

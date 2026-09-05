@@ -217,3 +217,81 @@ func TestEmailCancelDoesNotRewriteLocalStatus(t *testing.T) {
 		t.Fatalf("本地状态不该被改写, got %q", e.Status)
 	}
 }
+
+// 导入上游订单：只读、不购买；62 先落订单行，号码指回它。
+func TestImportUpstreamRecordsOrderAndResourcesForSMS62(t *testing.T) {
+	store := newMemStore()
+	adapter := &fakeAdapter{importResources: []Resource{
+		{ExternalID: TokenFingerprint("tok-a"), Phone: "+13860000001", ProviderToken: "tok-a"},
+		{ExternalID: TokenFingerprint("tok-b"), Phone: "+13860000002", ProviderToken: "tok-b"},
+	}}
+	svc := newService(t, adapter, store)
+
+	imported, err := svc.ImportUpstream(context.Background(), ProviderSMS62, "21968")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imported) != 2 || adapter.purchaseCalls != 0 {
+		t.Fatalf("导入 %d 个，购买调用 %d 次——导入绝不能购买", len(imported), adapter.purchaseCalls)
+	}
+	if adapter.importCalls != 1 {
+		t.Fatalf("应只读一次上游, got %d", adapter.importCalls)
+	}
+	if len(store.orders) != 1 {
+		t.Fatalf("62 导入应落一条订单行, got %d", len(store.orders))
+	}
+	for _, r := range imported {
+		if r.OrderID == "" || r.Provider != ProviderSMS62 {
+			t.Fatalf("号码要指回订单: %+v", r)
+		}
+	}
+	// 同一单再导一次：按 external_id 幂等，不会多出一份号。
+	if _, err := svc.ImportUpstream(context.Background(), ProviderSMS62, "21968"); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.resources) != 2 {
+		t.Fatalf("重复导入不该复制号码, got %d", len(store.resources))
+	}
+}
+
+// 没验证过的供应商不许导入：导入虽不花钱，但会真打上游。
+func TestImportUpstreamRequiresVerifiedProvider(t *testing.T) {
+	store := newMemStore()
+	svc := newService(t, &fakeAdapter{}, store)
+	store.status[ProviderHero] = ProviderStatus{Provider: ProviderHero, Enabled: true}
+	if _, err := svc.ImportUpstream(context.Background(), ProviderHero, "42"); !errors.Is(err, ErrProviderNotVerified) {
+		t.Fatalf("未验证必须拒绝, got %v", err)
+	}
+}
+
+// 取码 Action：「还没有码」是正常状态——Action 成功、received=false，
+// 页面据此继续等而不是报错。
+func TestCodeFetchActionTreatsNotYetAsSuccess(t *testing.T) {
+	store := newMemStore()
+	adapter := &fakeAdapter{codeErr: ErrCodeNotAvailable}
+	svc := newService(t, adapter, store)
+	id, _ := store.UpsertResource(context.Background(), Resource{Provider: ProviderHero, ExternalID: "act-1", Phone: "+79990000001"})
+
+	out, err := codeFetchHandler(svc)(context.Background(), map[string]any{"resource_id": id})
+	if err != nil {
+		t.Fatalf("还没有码不该是错误: %v", err)
+	}
+	if got := out.(map[string]any)["received"]; got != false {
+		t.Fatalf("received = %v, want false", got)
+	}
+
+	adapter.codeErr = nil
+	adapter.code = Code{Code: "123456", Sender: "Google"}
+	out, err = codeFetchHandler(svc)(context.Background(), map[string]any{"resource_id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["received"] != true || result["code_id"] == "" {
+		t.Fatalf("result = %v", result)
+	}
+	// 返回体里**不带码**：能不能看由 sms.reveal 决定，走本地验证码端点。
+	if _, leaked := result["code"]; leaked {
+		t.Fatal("取码结果不该带码本身")
+	}
+}

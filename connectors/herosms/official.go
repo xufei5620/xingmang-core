@@ -207,15 +207,31 @@ func (c *Client) GetProlongHistory(ctx context.Context, activationID string) ([]
 // 「哪些服务在哪些国家的号不是默认 20 分钟」——买之前看一眼，免得以为
 // 买到的是短时号。
 func (c *Client) GetCustomDurations(ctx context.Context) (map[string]map[string]int64, error) {
-	var resp map[string]map[string]json.RawMessage
-	if err := c.do(ctx, http.MethodGet, "/classifiers/activations/custom-durations", nil, &resp); err != nil {
+	var raw map[string]json.RawMessage
+	if err := c.do(ctx, http.MethodGet, "/classifiers/activations/custom-durations", nil, &raw); err != nil {
 		return nil, err
 	}
-	out := make(map[string]map[string]int64, len(resp))
-	for service, byCountry := range resp {
+	// 官方 schema 写的是裸的 map<map<int>>，**生产实测外面还包了一层 data**
+	// （与其它接口一致）。按 schema 解会把 "data" 当成一个服务、把服务代号当成
+	// 国家、把对象当成小时数解出 0——页面上就是一列 data、一列服务名、一列 0。
+	// 有 data 键就剥掉，没有就按裸形状解，两种都认。
+	body := raw
+	if inner, ok := raw["data"]; ok && len(raw) == 1 {
+		var unwrapped map[string]json.RawMessage
+		if err := decodeOneJSON(inner, &unwrapped); err != nil {
+			return nil, &ProtocolError{Kind: "custom-durations 的 data 不是对象"}
+		}
+		body = unwrapped
+	}
+	out := make(map[string]map[string]int64, len(body))
+	for service, byCountryRaw := range body {
+		var byCountry map[string]json.RawMessage
+		if err := decodeOneJSON(byCountryRaw, &byCountry); err != nil {
+			return nil, &ProtocolError{Kind: "custom-durations 的服务条目不是对象"}
+		}
 		m := make(map[string]int64, len(byCountry))
-		for country, raw := range byCountry {
-			m[country] = jsonInt(raw)
+		for country, hours := range byCountry {
+			m[country] = jsonInt(hours)
 		}
 		out[service] = m
 	}

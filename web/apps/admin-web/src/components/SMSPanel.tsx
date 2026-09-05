@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DataTableV2, formatUtcTimestamp, type DataTableColumn } from "@xingmang/ui-admin";
 import { Badge, Button, Dialog, FormField, Input, Select } from "@xingmang/ui-primitives";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   executeSMSResourceAction,
+  fetchSMSCode,
+  importSMSOrder,
   listSMSCatalog,
   listSMSCodes,
   listSMSOperations,
@@ -283,6 +285,7 @@ function PurchaseSection({
             onValueChange={setProvider}
           />
           <PurchaseDialog provider={effective} usable={usable} onDone={onDone} />
+          <ImportOrderDialog providers={providers} onDone={onDone} />
         </span>
       </div>
 
@@ -332,6 +335,83 @@ function CatalogTable({ items }: { items: Awaited<ReturnType<typeof listSMSCatal
         emptyState={<p className="text-fg-muted text-sm">这家暂时没有可买的库存。</p>}
       />
     </div>
+  );
+}
+
+
+/** 导入上游订单：把在供应商后台下的单读进平台。**只读，不购买。**
+ *
+ *  产品负责人在 62 后台买的几十个号此前进不了平台——号码页只装通过平台买的号。
+ *  62 传订单 ID（「订单与商品（62）」页签里那一列），Hero 传 activation ID。 */
+function ImportOrderDialog({
+  providers,
+  onDone,
+}: {
+  providers: SMSProvider[];
+  onDone: (r: ActionResult) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [provider, setProvider] = useState("");
+  const [ref, setRef] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  const formId = useId();
+  const usable = providers.filter((p) => p.enabled && p.verified);
+  const effective = usable.some((p) => p.provider === provider) ? provider : (usable[0]?.provider ?? "");
+
+  const mutation = useMutation({
+    mutationFn: () => importSMSOrder({ provider: effective, upstream_ref: ref.trim() }),
+    onSuccess: (run) => {
+      onDone({ runId: run.runId, title: `已导入 ${providerLabel(effective)} 的 ${ref.trim()}` });
+      setOpen(false);
+      setRef("");
+      setError(null);
+    },
+    onError: setError,
+  });
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={setOpen}
+      title="导入上游订单"
+      description="把在供应商后台买的号读进平台。只读、不花钱；同一单导两次不会出现两份号。"
+      trigger={
+        <Button variant="secondary" size="sm" className="whitespace-nowrap">
+          导入上游订单
+        </Button>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <FormField label="供应商" htmlFor={`${formId}-provider`}>
+          <Select
+            aria-label="导入的供应商"
+            options={usable.map((p) => ({ value: p.provider, label: providerLabel(p.provider) }))}
+            value={effective}
+            onValueChange={setProvider}
+          />
+        </FormField>
+        <FormField
+          label={effective === "sms62" ? "订单 ID" : "activation ID"}
+          htmlFor={`${formId}-ref`}
+          hint={
+            effective === "sms62"
+              ? "「订单与商品（62）」页签里「订单」那一列的数字，如 21968。"
+              : "Hero 后台或历史里的 activation ID。已终结的号可能扫不到。"
+          }
+        >
+          <Input
+            id={`${formId}-ref`}
+            aria-label="上游订单或 activation ID"
+            value={ref}
+            onChange={(e) => setRef(e.target.value)}
+          />
+        </FormField>
+        {error ? <ActionErrorNote error={error} /> : null}
+        <Button size="sm" disabled={!effective || !ref.trim() || mutation.isPending} onClick={() => mutation.mutate()}>
+          {mutation.isPending ? "导入中…" : "导入"}
+        </Button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -591,6 +671,35 @@ function ResourcePane({
     // 验证码只有几分钟有效，刷新要勤。
     refetchInterval: 10_000,
   });
+  const queryClient = useQueryClient();
+  const [fetchError, setFetchError] = useState<unknown>(null);
+  const fetchMutation = useMutation({
+    mutationFn: () => fetchSMSCode(resource.resource_id),
+    onSuccess: () => {
+      setFetchError(null);
+      void queryClient.invalidateQueries({ queryKey: ["sms-codes", resource.resource_id] });
+    },
+    onError: setFetchError,
+  });
+  // 自动向上游取码：**只在这张号打开着、且还没有码的时候**，每 15 秒一次，
+  // 最多十分钟。本地库里的码要靠 sms.code.fetch 从上游拉——SMS0 时这条链
+  // 后端有、入口没有，页面上永远是「还没收到码」。不做常驻轮询：两家的限流
+  // 都按密钥算，把配额烧在没人看的号上，真要用的时候就被限流了。
+  const hasCode = (codesQuery.data ?? []).length > 0;
+  const attempts = useRef(0);
+  useEffect(() => {
+    attempts.current = 0;
+  }, [resource.resource_id]);
+  useEffect(() => {
+    if (hasCode || codesQuery.isPending) return;
+    const timer = setInterval(() => {
+      if (attempts.current >= 40 || fetchMutation.isPending) return;
+      attempts.current += 1;
+      fetchMutation.mutate();
+    }, 15_000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasCode, codesQuery.isPending, resource.resource_id]);
   const supportsLifecycle =
     providers.find((p) => p.provider === resource.provider)?.supports_lifecycle ?? false;
 
@@ -624,9 +733,20 @@ function ResourcePane({
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-semibold">验证码</h3>
         <p className="text-fg-muted text-xs">
-          码到达后会自动落库并推企业微信（配了 secret://sms/notify-webhook 才推）。
-          这里每 10 秒刷新一次。
+          码要从上游拉：这张号打开着、还没有码时每 15 秒自动取一次（最多十分钟），也可以手动点。
+          取到后落库并推企业微信（配了 secret://sms/notify-webhook 才推）。
         </p>
+        <span className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={fetchMutation.isPending}
+            onClick={() => fetchMutation.mutate()}
+          >
+            {fetchMutation.isPending ? "取码中…" : "向上游取码"}
+          </Button>
+          {fetchError ? <ActionErrorNote error={fetchError} /> : null}
+        </span>
         <ApiStateView
           isPending={codesQuery.isPending}
           error={codesQuery.error}

@@ -3,6 +3,7 @@ package herosms
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -303,5 +304,46 @@ func TestLegacyErrorsSplitLikeModern(t *testing.T) {
 	var rejected *RejectedError
 	if !errors.As(err, &rejected) {
 		t.Fatalf("402 应为 RejectedError, got %T %v", err, err)
+	}
+}
+
+// 生产实测：custom-durations 外面包了一层 data（官方 schema 没写）。
+// 两种形状都要认；按 schema 解会把 "data" 当成服务名。
+func TestCustomDurationsUnwrapsDataEnvelope(t *testing.T) {
+	c := serveJSON(t, 200, `{"data":{"md":{"0":72},"tg":{"12":24}}}`, nil)
+	got, err := c.GetCustomDurations(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["md"]["0"] != 72 || got["tg"]["12"] != 24 {
+		t.Fatalf("got = %v", got)
+	}
+	if _, has := got["data"]; has {
+		t.Fatal("data 不该被当成一个服务")
+	}
+}
+
+// 生产实测：不带筛选的 getPrices 超过 1 MiB。兼容层的上限要比现代层高。
+func TestLegacyAcceptsMultiMegabytePriceList(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{`)
+	for i := 0; i < 20000; i++ {
+		if i > 0 {
+			sb.WriteString(`,`)
+		}
+		sb.WriteString(fmt.Sprintf(`"%d":{"go":{"cost":0.35,"count":%d,"physicalCount":1}}`, i, i))
+	}
+	sb.WriteString(`}`)
+	body := sb.String()
+	if len(body) < 1<<20 {
+		t.Fatalf("夹具不够大：%d 字节", len(body))
+	}
+	c := serveJSON(t, 200, body, nil)
+	prices, err := c.GetPrices(t.Context(), "", 0)
+	if err != nil {
+		t.Fatalf("大响应体必须能解: %v", err)
+	}
+	if len(prices) != 20000 {
+		t.Fatalf("解出 %d 个国家", len(prices))
 	}
 }

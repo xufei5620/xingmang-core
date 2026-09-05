@@ -1,0 +1,16 @@
+{
+  "id": "sms.code.fetch",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.read",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": { "required": false },
+  "compensation_mode": "NONE",
+  "params": {
+    "resource_id": { "type": "string", "required": true }
+  },
+  "notes": "XM-SMS1 补正（2026-09-06）向上游取一次验证码。产品负责人在生产上问「那我们购买的号码接码问题呢」，一查发现 Service.FetchCode 从 SMS0 起就存在但**没有任何入口在调它**——页面上的「验证码」只读本地库，而本地库里的码要靠这个方法从上游拉；也就是说不管号是谁买的，页面上永远是「还没收到码」。这个 Action 就是那个入口。**人发起，不是后台轮询**：常驻轮询会在没人用的时候持续打上游，而两家的限流都按密钥算，把配额烧在没人看的号上，真要用的时候就被限流了；页面在号码详情打开、且还没有码时每 15 秒调一次，最多十分钟。用 sms.read 而不是 sms.manage：取码是拿到号之后每天要做的事，不花钱；码本身能不能看由 sms.reveal 决定，取码结果只回 received 与 code_id，不回码。「还没有码」是正常状态不是失败：码要几秒到几十秒才来，返回 received=false、Action 算成功，页面据此继续等。取到新码时落库并推企业微信（配了 secret://sms/notify-webhook 才推），同一条码只推一次。compensation_mode 是 NONE：它只读上游、只往本地加一条码，没有可撤销的东西。"
+}

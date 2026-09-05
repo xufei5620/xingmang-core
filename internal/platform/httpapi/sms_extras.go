@@ -545,6 +545,9 @@ func sms62GoodsDetailHandler(reader SMSExtrasReader) http.HandlerFunc {
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"id": detail.ID, "name": detail.Name, "price_text": detail.Price,
 			"country": detail.Country, "stock": detail.Stock, "durations": detail.Durations,
+			// raw_keys 是上游响应的真实字段名（只有名字）：官方没写这个接口的
+			// 结构，映射错了的列会显示为空，人对着这一行就知道该改哪个键。
+			"raw_keys": detail.RawKeys,
 		})
 	}
 }
@@ -574,6 +577,7 @@ func sms62OrdersHandler(reader SMSExtrasReader) http.HandlerFunc {
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"items": out, "page": page.Page, "page_size": page.PageSize, "total": page.Total,
+			"raw_keys": page.RawKeys,
 		})
 	}
 }

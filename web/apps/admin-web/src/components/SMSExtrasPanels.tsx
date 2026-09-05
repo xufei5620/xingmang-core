@@ -10,6 +10,7 @@ import {
   getHeroStats,
   getSMS62GoodsDetail,
   getSMSEmail,
+  importSMSOrder,
   listExtendOptions,
   listHeroCountries,
   listHeroCustomDurations,
@@ -585,7 +586,18 @@ export function HeroRentPanel({ onWrite }: { onWrite: (r: ActionResult) => void 
 
 // ---------- 62：订单与商品详情 ----------
 
-export function SMS62OrdersPanel() {
+export function SMS62OrdersPanel({ onWrite }: { onWrite: (r: ActionResult) => void }) {
+  const queryClient = useQueryClient();
+  const [importError, setImportError] = useState<unknown>(null);
+  const importMutation = useMutation({
+    mutationFn: (orderId: string) => importSMSOrder({ provider: "sms62", upstream_ref: orderId }),
+    onSuccess: (run, orderId) => {
+      onWrite({ runId: run.runId, title: `已导入 62 订单 ${orderId}` });
+      setImportError(null);
+      void queryClient.invalidateQueries({ queryKey: ["sms-resources"] });
+    },
+    onError: setImportError,
+  });
   const [page, setPage] = useState(1);
   const [goodsId, setGoodsId] = useState("");
   const orders = useQuery({
@@ -609,6 +621,7 @@ export function SMS62OrdersPanel() {
           <Input id="goods-detail-id" aria-label="商品 ID（两段）" value={goodsId} onChange={(e) => setGoodsId(e.target.value.trim())} />
         </FormField>
         {detail.data ? (
+          <>
           <dl className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
             <div><dt className="text-fg-muted text-xs">名称</dt><dd>{detail.data.name || "—"}</dd></div>
             <div><dt className="text-fg-muted text-xs">价格</dt><dd>{detail.data.price_text || "—"}</dd></div>
@@ -618,6 +631,10 @@ export function SMS62OrdersPanel() {
               <dd>{detail.data.durations.length ? detail.data.durations.join(" / ") : "上游没给，自己填"}</dd>
             </div>
           </dl>
+          {detail.data.raw_keys?.length ? (
+            <p className="text-fg-muted font-mono text-xs">上游字段：{detail.data.raw_keys.join(", ")}</p>
+          ) : null}
+          </>
         ) : detail.isError ? (
           <ActionErrorNote error={detail.error} />
         ) : null}
@@ -639,12 +656,32 @@ export function SMS62OrdersPanel() {
                 { id: "amount", header: "金额", numeric: true, cell: (r) => r.amount_text || "—" },
                 { id: "status", header: "状态", cell: (r) => r.status_text || String(r.status) },
                 { id: "time", header: "时间", cell: (r) => (r.created_at ? formatUtcTimestamp(r.created_at) : "—") },
+                {
+                  id: "import",
+                  header: "导入",
+                  cell: (r) => (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={importMutation.isPending}
+                      onClick={() => importMutation.mutate(r.order_id)}
+                    >
+                      导入到平台
+                    </Button>
+                  ),
+                },
               ] satisfies DataTableColumn<SMS62Order>[]
             }
             rows={orders.data?.items ?? []}
             rowKey={(r) => r.order_id}
             emptyState={<p className="text-fg-muted text-sm">没有订单。</p>}
           />
+          {importError ? <ActionErrorNote error={importError} /> : null}
+          {orders.data?.raw_keys?.length ? (
+            <p className="text-fg-muted font-mono text-xs">
+              上游字段：{orders.data.raw_keys.join(", ")}（哪列空就对着这里改映射）
+            </p>
+          ) : null}
           <div className="flex items-center gap-2">
             <Button variant="secondary" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</Button>
             <span className="text-fg-muted text-xs">第 {page} 页 · 共 {orders.data?.total ?? 0} 条</span>
