@@ -405,6 +405,9 @@ type CardView struct {
 	ServiceName      string
 	// NextRenewalOn 是 YYYY-MM-DD 或空串。
 	NextRenewalOn string
+	// SubscriptionAmount / SubscriptionCycle 供订阅汇总；空串表示没登记。
+	SubscriptionAmount string
+	SubscriptionCycle  string
 	UsageNote     string
 	// UpstreamCreatedAt 是上游记的开卡时刻。
 	UpstreamCreatedAt time.Time
@@ -425,6 +428,7 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
        pan, cvv, expiry_mmyy,
        bound_account, bound_account_kind, service_name,
        COALESCE(to_char(next_renewal_on, 'YYYY-MM-DD'), ''), usage_note,
+       subscription_amount_text, subscription_cycle,
        upstream_created_at, issue_fee_text, issue_pay_amount_text
   FROM cards.infini_card
  WHERE environment = $1
@@ -450,7 +454,8 @@ SELECT account, upstream_card_id, mask, holder_name, card_alias, status,
 			&v.Currency, &v.BalanceMinor, &v.OwnerRef, &v.UserEmail, &v.LastSyncedAt,
 			&v.PAN, &v.CVV, &v.ExpiryMMYY,
 			&v.BoundAccount, &v.BoundAccountKind, &v.ServiceName,
-			&v.NextRenewalOn, &v.UsageNote, &upstreamCreatedAt,
+			&v.NextRenewalOn, &v.UsageNote,
+			&v.SubscriptionAmount, &v.SubscriptionCycle, &upstreamCreatedAt,
 			&v.IssueFee, &v.IssuePayAmount); err != nil {
 			return nil, err
 		}
@@ -480,6 +485,12 @@ type TransactionView struct {
 	TransactionCurrency string
 	// SettledAt 为零值表示尚未结算（授权中）。
 	SettledAt time.Time
+	// Account / CardAlias 只在**跨卡**查询里填。
+	//
+	// 按卡查时它们是已知的（调用方就是拿着卡查的），塞进每一行只是重复；
+	// 跨卡查时它们是这张表最要紧的定位信息——「这笔是哪张卡刷的」。
+	Account   string
+	CardAlias string
 }
 
 // ListTransactions 读某张卡的流水。
@@ -656,13 +667,16 @@ UPDATE cards.infini_card
        service_name = $5,
        next_renewal_on = NULLIF($6, '')::date,
        usage_note = $7,
+       subscription_amount_text = $10,
+       subscription_cycle = $11,
        updated_at = $8
  WHERE environment = $1 AND account = $2 AND upstream_card_id = $9`
 
 	tag, err := s.pool.Exec(ctx, updateSQL,
 		s.environment, usage.Account,
 		usage.BoundAccount, usage.BoundAccountKind, usage.ServiceName,
-		usage.NextRenewalOn, usage.Note, s.now(), usage.CardID)
+		usage.NextRenewalOn, usage.Note, s.now(), usage.CardID,
+		usage.SubscriptionAmount, usage.SubscriptionCycle)
 	if err != nil {
 		return fmt.Errorf("写用途登记（账号 %s 卡 %s）: %w", usage.Account, usage.CardID, err)
 	}
@@ -830,6 +844,60 @@ SELECT account, upstream_card_id, challenge_id, challenge_type, code, expires_at
 			c.ExpiresAt = *expires
 		}
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// RecentTransactions 返回**全部卡**的交易，新的在前，并带上卡片名称与账号。
+//
+// 卡片名称在 SQL 里 join：一张跨卡流水表最要紧的定位信息就是「这笔是哪张卡
+// 刷的」，让前端拿 card_id 再去卡片列表里配对，等于把一次 join 挪到浏览器
+// 里做——而那张列表可能因为筛选或分页根本没加载全，配不上的行就只能显示
+// 一个裸 id。
+//
+// LEFT JOIN 而不是 INNER：一张卡被关停后投影行会消失，但它的流水必须还在
+// （钱确实花了）。join 不上时 alias 为空，前端显示成卡号后四位。
+func (s *PgStore) RecentTransactions(ctx context.Context, limit int) ([]TransactionView, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	const listSQL = `
+SELECT t.upstream_card_id, t.account, COALESCE(c.card_alias, ''),
+       t.tx_type, t.amount_minor, t.fee_minor, t.currency, t.status, t.merchant,
+       t.occurred_at, t.synced_at,
+       t.transaction_amount_text, t.transaction_currency, t.settled_at
+  FROM cards.infini_card_transaction t
+  LEFT JOIN cards.infini_card c
+         ON c.environment = t.environment
+        AND c.account = t.account
+        AND c.upstream_card_id = t.upstream_card_id
+ WHERE t.environment = $1
+ ORDER BY t.occurred_at DESC NULLS LAST, t.synced_at DESC
+ LIMIT $2`
+
+	rows, err := s.pool.Query(ctx, listSQL, s.environment, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查跨卡流水: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TransactionView
+	for rows.Next() {
+		var v TransactionView
+		var occurred, settled *time.Time
+		if err := rows.Scan(&v.CardID, &v.Account, &v.CardAlias,
+			&v.Type, &v.AmountMinor, &v.FeeMinor, &v.Currency, &v.Status, &v.Merchant,
+			&occurred, &v.SyncedAt,
+			&v.TransactionAmount, &v.TransactionCurrency, &settled); err != nil {
+			return nil, err
+		}
+		if occurred != nil {
+			v.OccurredAt = *occurred
+		}
+		if settled != nil {
+			v.SettledAt = *settled
+		}
+		out = append(out, v)
 	}
 	return out, rows.Err()
 }

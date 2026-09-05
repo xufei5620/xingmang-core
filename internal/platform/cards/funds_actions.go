@@ -2,6 +2,7 @@ package cards
 
 import (
 	"context"
+	"strings"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 )
@@ -196,6 +197,15 @@ func usageSetDef(accounts []string) action.Definition {
 				{Name: "bound_account_kind", Type: action.FieldString,
 					Enum: []string{"email", "username", "phone", "other"}},
 				{Name: "service_name", Type: action.FieldString},
+				// 订阅金额与周期：**人填的**，与续费日期同一条纪律。
+				// 周期用枚举约束在 Schema 这一层而不是数据库类型——上游的
+				// 订阅五花八门（双月、季付、按量），写死数据库枚举只会让第一个
+				// 不在表里的周期没法登记，而 Schema 改起来不需要迁移。
+				{Name: "subscription_amount", Type: action.FieldString},
+				{
+					Name: "subscription_cycle", Type: action.FieldString,
+					Enum: []string{"monthly", "yearly", "weekly", "other"},
+				},
 				// YYYY-MM-DD；空表示不是订阅。格式在领域层校验——
 				// 拼错的日期不能静默丢掉，那会让「本以为设了提醒」的卡悄悄扣不上。
 				{Name: "next_renewal_on", Type: action.FieldString},
@@ -212,13 +222,15 @@ func usageSetHandler(svc *Service) action.Handler {
 			return nil, ErrServiceUnbound
 		}
 		usage := CardUsage{
-			Account:          stringParam(params, "account"),
-			CardID:           stringParam(params, "card_id"),
-			BoundAccount:     stringParam(params, "bound_account"),
-			BoundAccountKind: stringParam(params, "bound_account_kind"),
-			ServiceName:      stringParam(params, "service_name"),
-			NextRenewalOn:    stringParam(params, "next_renewal_on"),
-			Note:             stringParam(params, "note"),
+			Account:            stringParam(params, "account"),
+			CardID:             stringParam(params, "card_id"),
+			BoundAccount:       stringParam(params, "bound_account"),
+			BoundAccountKind:   stringParam(params, "bound_account_kind"),
+			ServiceName:        stringParam(params, "service_name"),
+			SubscriptionAmount: strings.TrimSpace(stringParam(params, "subscription_amount")),
+			SubscriptionCycle:  stringParam(params, "subscription_cycle"),
+			NextRenewalOn:      stringParam(params, "next_renewal_on"),
+			Note:               stringParam(params, "note"),
 		}
 
 		action.RecordResource(ctx, resourceCard, usage.CardID)
@@ -231,11 +243,13 @@ func usageSetHandler(svc *Service) action.Handler {
 		// 审计只记「这张卡的用途登记被改过、改成了哪个服务、续费日期是什么」，
 		// 具体绑到谁去投影表查。审计是 append-only，写进去删不掉。
 		summary := map[string]any{
-			"account":            usage.Account,
-			"service_name":       usage.ServiceName,
-			"next_renewal_on":    usage.NextRenewalOn,
-			"bound_account_kind": usage.BoundAccountKind,
-			"bound_account_set":  usage.BoundAccount != "",
+			"account":             usage.Account,
+			"service_name":        usage.ServiceName,
+			"subscription_amount": usage.SubscriptionAmount,
+			"subscription_cycle":  usage.SubscriptionCycle,
+			"next_renewal_on":     usage.NextRenewalOn,
+			"bound_account_kind":  usage.BoundAccountKind,
+			"bound_account_set":   usage.BoundAccount != "",
 		}
 		action.RecordAfter(ctx, summary)
 		return summary, nil

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DataTableV2, formatUtcTimestamp, type DataTableColumn } from "@xingmang/ui-admin";
-import { Badge, Button, Dialog, FormField, Input, Select } from "@xingmang/ui-primitives";
+import { Badge, Button, FormField, Input, Select } from "@xingmang/ui-primitives";
 import { useId, useState } from "react";
 import {
   listCardTransactions,
@@ -37,7 +37,7 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
  *
  *  幂等键在**打开表单时生成一次**：同一次提交的重试必须带同一个键，
  *  换一个键等于告诉后端「这是另一笔」，而上游没有幂等能力。 */
-function FundsForm({
+export function FundsForm({
   card,
   kind,
   onDone,
@@ -121,35 +121,21 @@ function FundsForm({
  *
  *  卡面明文由后端按 card.reveal 权限决定回不回——前端只负责显示它拿到的
  *  东西，不做「本地隐藏」那种假控制。 */
-type DetailTab = "info" | "usage" | "topup" | "redeem" | "tx";
+export type DetailTab = "info" | "usage" | "topup" | "redeem" | "tx";
 
-export function CardDetailDialog({
-  card,
-  onWrite,
-  initialTab = "info",
-  triggerLabel = "详情",
-}: {
-  card: CardItem;
-  onWrite: (result: ActionResult) => void;
-  /** 打开时落在哪个页签。操作列的「充值」「赎回」直接跳到对应表单，
-   *  免得运营先开详情再找页签——对齐上游后台一键直达的体验。 */
-  initialTab?: DetailTab;
-  triggerLabel?: string;
-}) {
-  const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<DetailTab>(initialTab);
-
-  const txQuery = useQuery({
+/** 这张卡的交易流水。
+ *
+ *  从原来的详情弹窗里搬出来的：弹窗的尺寸约束让这张可搜索可排序的表只能
+ *  挤在一小块里，真要查一笔消费反而得先关掉它回列表。现在它是右栏详情的
+ *  一节，和卡片信息同屏。
+ *
+ *  跨卡的「交易记录」是另一件事（Infini 有一个顶级页签），需要一个新的
+ *  后端端点——投影表里有数据，但今天只有按卡查的读法。 */
+export function CardTransactions({ card }: { card: CardItem }) {
+  const query = useQuery({
     queryKey: [CARD_TX_QUERY, card.account, card.card_id],
     queryFn: ({ signal }) => listCardTransactions(card.account, card.card_id, { signal }),
-    enabled: open && tab === "tx",
   });
-
-  const afterWrite = (result: ActionResult) => {
-    onWrite(result);
-    void queryClient.invalidateQueries({ queryKey: [CARD_TX_QUERY, card.account, card.card_id] });
-  };
 
   const columns: DataTableColumn<CardTransactionItem>[] = [
     {
@@ -207,101 +193,25 @@ export function CardDetailDialog({
     },
   ];
 
-  const tabs = [
-    { id: "info" as const, label: "卡面信息" },
-    { id: "usage" as const, label: "用途登记" },
-    { id: "topup" as const, label: "充值" },
-    { id: "redeem" as const, label: "赎回" },
-    { id: "tx" as const, label: "交易流水" },
-  ];
-
   return (
-    <Dialog
-      open={open}
-      onOpenChange={setOpen}
-      title={`卡片详情 · ${card.mask || card.card_id}`}
-      description={`账号 ${card.account}`}
-      trigger={
-        <Button variant="secondary" size="sm">
-          {triggerLabel}
-        </Button>
-      }
+    <ApiStateView
+      isPending={query.isPending}
+      error={query.error}
+      onRetry={() => void query.refetch()}
+      compact
     >
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap gap-2" role="tablist">
-          {tabs.map((t) => (
-            <Button
-              key={t.id}
-              size="sm"
-              variant={tab === t.id ? "primary" : "secondary"}
-              onClick={() => setTab(t.id)}
-              role="tab"
-              aria-selected={tab === t.id}
-            >
-              {t.label}
-            </Button>
-          ))}
-        </div>
-
-        {tab === "info" ? (
-          <dl className="grid grid-cols-2 gap-3">
-            <Field label="账号" value={card.account} />
-            <Field label="状态" value={card.status} />
-            <Field label="卡号" value={card.pan ?? card.mask} mono />
-            <Field label="CVV" value={card.cvv ?? "—"} mono />
-            <Field label="有效期（MMYY）" value={card.expiry_mmyy ?? "—"} mono />
-            <Field label="持卡人" value={card.holder_name} />
-            <Field label="余额" value={formatMinorUnits(card.balance_minor, card.currency)} />
-            <Field label="用途" value={card.owner_ref ?? "—"} />
-            <Field label="卡别名（幂等信标）" value={card.card_alias} mono />
-            <Field
-              label="开卡日期"
-              value={card.issued_at ? formatUtcTimestamp(card.issued_at) : "—"}
-            />
-            <Field
-              label="数据同步于"
-              value={card.freshness.synced_at ? formatUtcTimestamp(card.freshness.synced_at) : "从未同步"}
-            />
-            <Field label="企业成员" value={card.user_email ?? "—"} />
-            <Field label="绑定账号" value={card.bound_account ?? "—"} />
-            <Field label="订阅服务" value={card.service_name ?? "—"} />
-            <Field label="下次续费" value={card.next_renewal_on ?? "—"} mono />
-            {card.pan ? null : (
-              <p className="col-span-2 text-xs text-fg-muted">
-                卡面明文尚未拉取。卡要先变成 active，同步作业才拉得到；
-                若你看不到卡号但别人看得到，是缺 card.reveal 权限。
-              </p>
-            )}
-          </dl>
-        ) : null}
-
-        {tab === "usage" ? <UsageForm card={card} onDone={afterWrite} /> : null}
-        {tab === "topup" ? <FundsForm card={card} kind="topup" onDone={afterWrite} /> : null}
-        {tab === "redeem" ? <FundsForm card={card} kind="redeem" onDone={afterWrite} /> : null}
-
-        {tab === "tx" ? (
-          <ApiStateView
-            isPending={txQuery.isPending}
-            error={txQuery.error}
-            onRetry={() => void txQuery.refetch()}
-            compact
-          >
-            <DataTableV2
-              caption="这张卡的交易流水"
-              rows={txQuery.data ?? []}
-              columns={columns}
-              rowKey={(row) => `${row.occurred_at}/${row.amount_minor}/${row.merchant}`}
-              emptyState={
-                <p className="text-sm text-fg-muted">
-                  暂无流水。流水同步默认关闭（调用量与卡数成正比，上游限流阈值未知），
-                  需要时用 XM_CARDS_SYNC_TRANSACTIONS=true 打开。
-                </p>
-              }
-            />
-          </ApiStateView>
-        ) : null}
-      </div>
-    </Dialog>
+      <DataTableV2
+        caption="这张卡的交易流水"
+        rows={query.data ?? []}
+        columns={columns}
+        rowKey={(row) => `${row.occurred_at}/${row.amount_minor}/${row.merchant}`}
+        emptyState={
+          <p className="text-fg-muted text-sm">
+            暂无流水。流水同步每 5 分钟一轮，回调到达时也会即时推进这张卡。
+          </p>
+        }
+      />
+    </ApiStateView>
   );
 }
 
@@ -318,7 +228,7 @@ const BOUND_KIND_OPTIONS = [
  *  这些字段上游一个都不知道，全是平台自己记的。续费日期是**人填的**：
  *  从流水推断周期看着聪明，但试用转正、年付转月付、涨价都会让推断悄悄错掉，
  *  而错了的提醒比没有提醒更糟——人会信它。 */
-function UsageForm({ card, onDone }: { card: CardItem; onDone: (r: ActionResult) => void }) {
+export function UsageForm({ card, onDone }: { card: CardItem; onDone: (r: ActionResult) => void }) {
   const [boundAccount, setBoundAccount] = useState(card.bound_account ?? "");
   const [boundKind, setBoundKind] = useState(card.bound_account_kind ?? "");
   const [serviceName, setServiceName] = useState(card.service_name ?? "");

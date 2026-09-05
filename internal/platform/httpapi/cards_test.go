@@ -30,6 +30,10 @@ func (f *fakeCardQuerier) ListTransactions(ctx context.Context, account, cardID 
 	return f.txs, f.err
 }
 
+func (f *fakeCardQuerier) RecentTransactions(ctx context.Context, limit int) ([]cards.TransactionView, error) {
+	return f.txs, f.err
+}
+
 func (f *fakeCardQuerier) ActiveChallenges(ctx context.Context) ([]cards.CardChallenge, error) {
 	return f.challenges, f.err
 }
@@ -198,5 +202,54 @@ func TestListCardsReturnsPlaintextWithRevealScope(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "4413571234567843") {
 		t.Fatalf("持有 card.reveal 应看到完整卡号: %s", rec.Body.String())
+	}
+}
+
+// 跨卡流水带**卡片名称**：那是这张表的定位列，Infini 后台也按它认卡。
+//
+// join 不上（卡已关停、投影行没了）时为空而不是报错——钱确实花了，
+// 那条流水必须还在。
+func TestAllCardTransactionsCarryCardAlias(t *testing.T) {
+	at := time.Date(2026, 9, 5, 5, 29, 45, 0, time.UTC)
+	rec := httptest.NewRecorder()
+	ListAllCardTransactionsHandler(&fakeCardQuerier{txs: []cards.TransactionView{
+		{
+			Account: "LINFENG", CardID: "c1", CardAlias: "Two.V",
+			Type: "Consume", AmountMinor: -20000, Currency: "USD",
+			Status: "Completed", Merchant: "OPENAI", OccurredAt: at,
+		},
+		{
+			Account: "LINFENG", CardID: "gone", CardAlias: "",
+			Type: "Consume", AmountMinor: -100, Currency: "USD",
+			Status: "Completed", Merchant: "OLD", OccurredAt: at,
+		},
+	}}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/cards/transactions", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			CardAlias  string `json:"card_alias"`
+			Account    string `json:"account"`
+			Merchant   string `json:"merchant"`
+			OccurredAt string `json:"occurred_at"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("两条都该在, got %+v", body.Items)
+	}
+	if body.Items[0].CardAlias != "Two.V" || body.Items[0].Account != "LINFENG" {
+		t.Fatalf("卡片名称与账号要带上: %+v", body.Items[0])
+	}
+	// 已关停的卡：名称为空，但流水本身在。
+	if body.Items[1].CardAlias != "" || body.Items[1].Merchant != "OLD" {
+		t.Fatalf("卡没了流水也得在: %+v", body.Items[1])
+	}
+	if body.Items[0].OccurredAt != "2026-09-05T05:29:45Z" {
+		t.Fatalf("时间应为 RFC3339 UTC, got %q", body.Items[0].OccurredAt)
 	}
 }

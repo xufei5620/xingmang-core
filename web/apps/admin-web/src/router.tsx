@@ -437,6 +437,15 @@ export const routes = [
               // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
               { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
               { path: "cards", Component: CardsPage },
+              // 选中哪张卡写进路由，**渲染的是同一个卡片页**（左右分栏里
+              // 选中它），不是另一个页面。这样看起来和 Infini 后台一样，
+              // 而详情依然可链接、可刷新、可发给同事——ADMIN-IA §3 真正
+              // 在乎的是后面这条，被产品负责人推翻的只是视觉形态。
+              //
+              // 账号进路径是因为卡 id 只在自己账号内唯一（投影表唯一键是
+              // environment+account+upstream_card_id），只用 card_id 会在
+              // 两个账号有同名卡时指错。
+              { path: "cards/:account/:cardId", Component: CardsPage },
               { path: "registry", Component: RegistryPage },
               { path: "identity", Component: IdentityPage },
               { path: "settings", Component: SettingsPage },

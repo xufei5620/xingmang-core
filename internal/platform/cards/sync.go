@@ -110,6 +110,11 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 	if err := s.reconcileOperations(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("对账未收敛的操作: %w", err))
 	}
+	// 发现排在刷新之前：这一轮新拉进来的卡，同一轮里就能拿到状态与明文，
+	// 不用等下一个周期。
+	if err := s.discoverCards(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("发现卡片: %w", err))
+	}
 	if err := s.refreshTrackedCards(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("刷新卡状态: %w", err))
 	}
@@ -231,6 +236,71 @@ func (s *Syncer) applyDecision(ctx context.Context, op Operation, d ReconcileDec
 		}
 	}
 	return nil
+}
+
+// discoveryPageSize 是发现遍历一次拉多少张。
+//
+// 取 100 而不是更大：上游的 page_size 上限没有文档，而 100 已经让常见规模
+// （几十张卡）一次拉完。真超了会翻页，多几次调用而已——限流预算是
+// 600/分钟/密钥，发现每 5 分钟才跑一轮。
+const discoveryPageSize = 100
+
+// discoveryMaxPages 是翻页的硬上限。
+//
+// 存在的理由是**防呆而不是防大**：如果上游的分页字段哪天变了语义
+// （比如 total_pages 恒为 1、或 page 参数被忽略），没有上限的循环会一直
+// 拉同一页直到把限流预算烧光，而那种故障从日志上看只是「同步慢」。
+const discoveryMaxPages = 50
+
+// discoverCards 把上游有、而投影里没有的卡拉进来。
+//
+// **这个遍历原本不存在**，于是在上游后台直接建的卡对平台完全不可见：
+// 卡只有两条路径能进投影（我们自己开的、回调带来的）。2026-09-05 生产上
+// 产品负责人有 11 张卡，页面只显示 2 张——一个叫「卡片管理」的页面
+// 只管着 18% 的卡。
+//
+// 只对**没见过的**卡写投影，已知的交给 refreshTrackedCards：那条路径带着
+// 批量状态查询与明文补拉，这里重复写一遍只会把归属信息（用途、绑定账号）
+// 覆盖成空。
+func (s *Syncer) discoverCards(ctx context.Context) error {
+	known, err := s.store.TrackedCards(ctx)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(known))
+	for _, ref := range known {
+		seen[ref.Account+"/"+ref.CardID] = true
+	}
+
+	var errs []error
+	for _, id := range s.order {
+		acct := s.accounts[id]
+		for page := 1; page <= discoveryMaxPages; page++ {
+			res, err := acct.Client.ListCards(ctx, infini.ListCardsQuery{
+				Page: page, PageSize: discoveryPageSize,
+			})
+			if err != nil {
+				errs = append(errs, fmt.Errorf("账号 %s 列卡（第 %d 页）: %w", id, page, err))
+				break
+			}
+			for _, c := range res.Cards {
+				if seen[id+"/"+c.ID] {
+					continue
+				}
+				// 归属留空：这张卡是在上游建的，平台这边还没人给它登记用途。
+				// 页面上会显示成「—」，而那正是实情。
+				if err := s.store.UpsertCard(ctx, id, c, CardAttribution{}); err != nil {
+					errs = append(errs, fmt.Errorf("落新发现的卡 %s: %w", c.ID, err))
+					continue
+				}
+				seen[id+"/"+c.ID] = true
+			}
+			if len(res.Cards) == 0 || (res.TotalPages > 0 && page >= res.TotalPages) {
+				break
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // refreshTrackedCards 刷新投影里每张卡的状态。
