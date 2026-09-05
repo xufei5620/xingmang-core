@@ -281,6 +281,11 @@ function CardPane({
           <Field label="持卡人姓名" value={card.holder_name || "—"} />
           <Field label="有效期" value={card.expiry_mmyy ?? "—"} mono />
           <Field label="CVV" value={card.cvv ?? "—"} mono />
+          {/* 验证码紧跟 CVV，与卡号→有效期→CVV→验证码的**填写次序**一致。
+              上面那块高亮的「待验证」仍然留着——它带过期时间，而且要在人
+              还没往下看信息栏时就抓住注意力；这里这一份是给正在逐项填表的
+              人的，让眼睛不用往回跳。没有待验证时留空而不是「—」。 */}
+          <Field label="验证码" value={challenge?.code ?? ""} mono />
           <Field label="账号" value={card.account} />
           <Field label="用途" value={card.owner_ref ?? "—"} />
           {/* 与 Infini 后台同名：那边就叫「持卡人邮箱」。 */}

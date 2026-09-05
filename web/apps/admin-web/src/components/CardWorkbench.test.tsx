@@ -185,3 +185,26 @@ it("左栏可以按卡名搜索", async () => {
   expect(screen.queryByRole("button", { name: /Two\.V/ })).toBeNull();
   expect(screen.getByRole("button", { name: /flower/ })).toBeTruthy();
 });
+
+// 验证码紧跟在 CVV 后面。
+//
+// 产品负责人要的次序是「卡号 → 有效期 → CVV → 验证码」，也就是在线支付时
+// 逐项填表的次序。表格删掉之后这条一度没落实：验证码只在信息栏**上方**的
+// 高亮块里，人填到 CVV 还得往回跳。
+it("卡片信息里验证码紧跟 CVV", async () => {
+  seed([card({ card_id: "c1", card_alias: "Two.V", cvv: "631", expiry_mmyy: "12/2031" })]);
+  vi.mocked(listCardChallenges).mockResolvedValue([
+    { account: "LINFENG", card_id: "c1", id: "ch1", type: "3ds", code: "778899" },
+  ] as never);
+  renderAt("/cards");
+
+  await screen.findByRole("heading", { name: /Two\.V/ });
+  const labels = Array.from(document.querySelectorAll("dt")).map((d) => d.textContent ?? "");
+  const at = (name: string) => labels.indexOf(name);
+
+  expect(at("有效期")).toBeGreaterThanOrEqual(0);
+  expect(at("CVV")).toBe(at("有效期") + 1);
+  expect(at("验证码")).toBe(at("CVV") + 1);
+  // 码本身也要在（不止是个标签）。
+  expect(screen.getAllByText("778899").length).toBeGreaterThan(0);
+});
