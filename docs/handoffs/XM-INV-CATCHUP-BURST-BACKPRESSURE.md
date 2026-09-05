@@ -1,6 +1,6 @@
 # XM-INV-CATCHUP-BURST-BACKPRESSURE: chunk a released account's first projection
 
-- **status:** fixes 1, 1b and 2 of the revised ranking implemented 2026-09-05 (see the end of this document); fix 3 open, to be validated with the differential rehearsal first. Root cause revised the same day after a copy-run and a code trace; the original proposal below does not address it. Filed 2026-09-04 from the RC87 canary.
+- **status:** fixes 1, 1b, 2 implemented and deployed (RC92/RC93, 2026-09-05); fix 3 implemented behind `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` (default off) with an in-repo equivalence test, awaiting the server-side differential rehearsal before it is switched on. Root cause revised 2026-09-05 after a copy-run and a code trace; the original proposal below does not address it. Filed 2026-09-04 from the RC87 canary.
 - **branch:** none yet.
 - **found in production**, 2026-09-04, while verifying the XM-INV-CATCHUP-RELEASE fix.
 
@@ -319,3 +319,51 @@ each addressed at their own layer: publication no longer waits on a job row,
 a job holds its row only for the write phase, and a short busy wait is not an
 outage. Fix 3 (bounding the evidence pass by checkpoint count) remains, and
 should be validated with the differential rehearsal before it ships.
+
+## Implemented behind a knob, 2026-09-05: fix 3, the evidence pass bounded by item count
+
+`Store.SetEvidenceBatchLimit(n)` (api: `ELIGIBILITY_EVIDENCE_BATCH_LIMIT`,
+default `0` = unbounded; rehearsal: `--evidence-batch-limit N`, recorded in
+the report as `evidence_batch_limit`). With a limit, `completeEligibilityProjectionJob`
+cuts the window at the as_of of the limit-th pending balance-evidence item
+(`evidenceBatchBoundaryTx`, selecting items exactly as the evaluation pass
+does -- same anchor floor, both sources, same order -- and keeping a shared
+instant whole), never below `finalized_through`, and everything else runs as
+before; the row finish from fix 1b requeues the remainder because the row
+still asks for more than was published. A window at or below the proved one
+needs no second proof.
+
+Why a boundary cannot change a decision, and what pins it:
+
+- An item deferred at the end of a pass is written nowhere -- the loop's
+  `continue` skips its evaluation and nothing after the loop writes it -- so
+  the next pass re-evaluates it from the same durable facts as its first
+  item. The consecutive-match counter lives in
+  `source_account_eligibility_state`. Nothing cross-item is held in memory
+  across a boundary.
+- `TestEvidenceBatchLimitChunksTheEvidencePassWithoutChangingItsResult`: an
+  anchored account with three checkpoints, driven with limit 1, drains in at
+  least three jobs, each chunk landing on a checkpoint's as_of, and ends with
+  the same evaluation rows in the same order, the same `finalized_through`
+  and the same consumed cash as a single pass on a fresh copy.
+- `TestEvidenceBatchBoundaryCutsAtTheLimitThItemAndKeepsASharedInstantWhole`
+  pins the boundary arithmetic, including the shared-instant and
+  already-evaluated cases.
+
+Two things the tests taught that the design had not said:
+
+- Pending items include carry-forward proofs the lock-free half inserts, and
+  those can predate `finalized_through` (the cutover cycle's, for one).
+  Cutting below the published boundary would evaluate them and publish
+  nothing, so the boundary is floored at `finalized_through` and such items
+  ride along with the first chunk that advances.
+- The anchor checkpoint is evaluated at observation as well as by the pass,
+  so evaluation rows outnumber checkpoints; the equivalence is between the
+  two modes' rows, not against the checkpoint count.
+
+Still to do before the bound is switched on in production: the server-side
+differential rehearsal (the runbook's procedure: one backup, `--reproject-all`
+twice, `--evidence-batch-limit 0` and `25`, `after.accounts` identical in
+every field but `projection_version`, `evaluations_by_status` identical).
+Until then the api runs with `0`, which is byte-for-byte the previous
+behaviour.

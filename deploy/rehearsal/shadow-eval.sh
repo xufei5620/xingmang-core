@@ -51,12 +51,17 @@ batch_limit=25
 # candidate evaluator is never invoked against a single account, because a
 # healthy production's job queue is empty and there is nothing to drain.
 reproject_all=0
+# XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3: 0 keeps the single-pass evidence
+# evaluation; N bounds it. The differential rehearsal runs one backup twice,
+# once with each, and diffs the per-account quantities in the two reports.
+evidence_batch_limit=0
 tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE:-16g}
 
 usage() {
   cat >&2 <<'USAGE'
 usage: shadow-eval.sh --image-tag <0.1.0-rcNN> [--backup <invoice-TIMESTAMP>]
                        [--max-rounds N] [--batch-limit N] [--reproject-all]
+                       [--evidence-batch-limit N]
 USAGE
 }
 
@@ -76,6 +81,9 @@ while (( $# > 0 )); do
       batch_limit=$2; shift 2 ;;
     --reproject-all)
       reproject_all=1; shift ;;
+    --evidence-batch-limit)
+      (( $# >= 2 )) || { echo '--evidence-batch-limit requires a value' >&2; exit 2; }
+      evidence_batch_limit=$2; shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -86,6 +94,7 @@ done
 [[ "$image_tag" =~ ^0\.1\.0-rc[0-9]+$ ]] || { echo "--image-tag must look like 0.1.0-rcNN, got '$image_tag'" >&2; exit 2; }
 [[ "$max_rounds" =~ ^[1-9][0-9]{0,3}$ ]] || { echo '--max-rounds must be an integer 1-9999' >&2; exit 2; }
 [[ "$batch_limit" =~ ^[1-9][0-9]?$ ]] || { echo '--batch-limit must be an integer 1-99' >&2; exit 2; }
+[[ "$evidence_batch_limit" =~ ^[0-9]{1,5}$ ]] || { echo '--evidence-batch-limit must be an integer 0-99999' >&2; exit 2; }
 # An explicit --backup's shape is pure input validation and belongs with the
 # other flag checks above -- before any environment or tool-availability
 # check below -- so a typo'd backup name fails immediately regardless of
@@ -361,6 +370,7 @@ migrations_applied_csv=$(comm -13 <(printf '%s\n' "$schema_migrations_before") <
 # as a positional argument (it accepts none).
 reproject_all_args=()
 if (( reproject_all )); then reproject_all_args=(--reproject-all); fi
+evidence_batch_limit_args=(--evidence-batch-limit "$evidence_batch_limit")
 
 set +e
 docker run --pull never --rm --network "$network" --read-only \
@@ -372,7 +382,7 @@ docker run --pull never --rm --network "$network" --read-only \
   --max-rounds "$max_rounds" --batch-limit "$batch_limit" \
   --backup-label "$backup_name" --candidate-image-tag "$image_tag" \
   --migrations-applied "$migrations_applied_csv" \
-  "${reproject_all_args[@]}" \
+  "${reproject_all_args[@]}" "${evidence_batch_limit_args[@]}" \
   >"$report_json" 2>"$tool_log"
 tool_exit=$?
 set -e

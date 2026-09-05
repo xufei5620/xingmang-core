@@ -56,6 +56,9 @@ assert_exit 2 "--max-rounds non-numeric" --image-tag 0.1.0-rc5 --max-rounds abc
 assert_exit 2 "--max-rounds too large" --image-tag 0.1.0-rc5 --max-rounds 99999
 assert_exit 2 "--batch-limit zero" --image-tag 0.1.0-rc5 --batch-limit 0
 assert_exit 2 "--batch-limit too large" --image-tag 0.1.0-rc5 --batch-limit 100
+assert_exit 2 "--evidence-batch-limit non-numeric" --image-tag 0.1.0-rc5 --evidence-batch-limit abc
+assert_exit 2 "--evidence-batch-limit too large" --image-tag 0.1.0-rc5 --evidence-batch-limit 100000
+assert_exit 2 "--evidence-batch-limit missing value" --image-tag 0.1.0-rc5 --evidence-batch-limit
 # An explicit --backup's shape is validated with the other flags -- before
 # any environment or tool-availability check -- specifically so this needs
 # neither BACKUP_DIR nor age/docker/etc. installed.

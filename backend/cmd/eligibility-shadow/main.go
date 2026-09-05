@@ -63,6 +63,7 @@ func main() {
 	backupLabel := flag.String("backup-label", "", "identifying label of the restored backup, echoed into the report")
 	candidateTag := flag.String("candidate-image-tag", "", "the candidate release's image tag, echoed into the report")
 	migrationsApplied := flag.String("migrations-applied", "", "comma-separated migration file names deploy/rehearsal/shadow-eval.sh's own invoice-migrate step newly applied before this run, empty when the restored backup was already current")
+	evidenceBatchLimit := flag.Int("evidence-batch-limit", 0, "bound on pending balance-evidence items one projection job evaluates (0 = unbounded, the production default until the differential rehearsal proves the bound equivalent); the same image runs both modes so two rehearsals of one backup can be diffed")
 	reprojectAll := flag.Bool("reproject-all", false, "queue one projection job per account at its own finalized_through before draining, so the candidate evaluator actually runs against the restored data; required for any release that changes the evaluator, the projection or a migration feeding either")
 	flag.Parse()
 
@@ -80,6 +81,10 @@ func main() {
 	}
 	if *batchLimit < 1 || *batchLimit > 100 {
 		slog.Error("batch-limit must be 1-100")
+		os.Exit(2)
+	}
+	if *evidenceBatchLimit < 0 || *evidenceBatchLimit > 10000 {
+		slog.Error("evidence-batch-limit must be 0-10000")
 		os.Exit(2)
 	}
 
@@ -106,12 +111,14 @@ func main() {
 		os.Exit(1)
 	}
 	store := postgresstore.New(pool)
+	store.SetEvidenceBatchLimit(*evidenceBatchLimit)
 
 	report, err := run(ctx, store, runOptions{
 		MaxRounds: *maxRounds, BatchLimit: *batchLimit,
 		BackupLabel: *backupLabel, CandidateImageTag: *candidateTag,
-		MigrationsApplied: parseMigrationsApplied(*migrationsApplied),
-		ReprojectAll:      *reprojectAll,
+		MigrationsApplied:  parseMigrationsApplied(*migrationsApplied),
+		ReprojectAll:       *reprojectAll,
+		EvidenceBatchLimit: *evidenceBatchLimit,
 	})
 	if err != nil {
 		slog.Error("eligibility-shadow rehearsal failed", "error", err)
@@ -139,6 +146,7 @@ type runOptions struct {
 	BackupLabel, CandidateImageTag string
 	MigrationsApplied              []string
 	ReprojectAll                   bool
+	EvidenceBatchLimit             int
 }
 
 // parseMigrationsApplied splits --migrations-applied's comma-separated
@@ -164,6 +172,7 @@ func run(ctx context.Context, store *postgresstore.Store, opts runOptions) (Repo
 		CandidateImageTag: opts.CandidateImageTag, MaxRounds: opts.MaxRounds,
 		MigrationsApplied:     opts.MigrationsApplied,
 		ReprojectAllRequested: opts.ReprojectAll,
+		EvidenceBatchLimit:    opts.EvidenceBatchLimit,
 	}
 
 	// Enqueue before the baseline snapshot, so BeforeHealth records the work

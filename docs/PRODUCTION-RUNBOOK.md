@@ -2404,6 +2404,20 @@ zero the verdict is `not_ready` (exit 3) — a run that was asked to reproject
 everything and reprojected nothing must never read as a pass. A non-empty
 `pending_accounts` is informational, not a failure.
 
+**Bounded evidence pass and the differential rehearsal
+(XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3).** `ELIGIBILITY_EVIDENCE_BATCH_LIMIT`
+(api; default `0` = unbounded) caps how many pending balance-evidence items one
+projection job evaluates; the job publishes `finalized_through` at the
+limit-th item's `as_of` and requeues itself for the rest. The rehearsal tool
+takes the same knob as `--evidence-batch-limit N`, and the report records it
+as `evidence_batch_limit`. Before the bound is enabled in production, run the
+**differential rehearsal**: the same backup twice with `--reproject-all`, once
+with `--evidence-batch-limit 0` and once with a small bound (for example
+`25`), and require the two reports' `after.accounts` to be identical in every
+field but `projection_version` (which legitimately increments once per chunk)
+and the `evaluations_by_status` counts to match exactly. Any difference means
+the bound changed a decision and must be understood before it ships.
+
 Do not read `rounds_run` as evidence that the rehearsal did anything.
 Production has eight accounts and the batch limit is twenty-five, so a
 complete, genuine run reports `rounds_run: 1` and `queue_drained: true` —

@@ -355,3 +355,69 @@ func TestEligibilityShadowPendingJobsListsNonDeadRowsWithTheirReason(t *testing.
 		t.Fatalf("expected exactly the queued proof-pending job, got %+v", pending)
 	}
 }
+
+// XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3: the evidence-pass boundary.
+func TestEvidenceBatchBoundaryCutsAtTheLimitThItemAndKeepsASharedInstantWhole(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	account := "60000000-0000-4000-8000-0000000000a9"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, account, "batch-boundary", cutover, manifestHash, configHash)
+	first := cutover.Add(1 * time.Hour)
+	second := cutover.Add(2 * time.Hour)
+	third := cutover.Add(3 * time.Hour)
+	seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, first)
+	seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, second)
+	seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, third)
+	through := cutover.Add(4 * time.Hour)
+
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// Unbounded: the window is untouched.
+	got, err := evidenceBatchBoundaryTx(ctx, tx, account, through, 0)
+	if err != nil || !got.Equal(through) {
+		t.Fatalf("limit 0 must leave the window alone: got %s err %v", got, err)
+	}
+	// Limit larger than the pile: untouched.
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 3)
+	if err != nil || !got.Equal(through) {
+		t.Fatalf("limit >= pending must leave the window alone: got %s err %v", got, err)
+	}
+	// Limit 2 of 3: cut at the second item's as_of.
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 2)
+	if err != nil || !got.Equal(second) {
+		t.Fatalf("limit 2 must cut at the second as_of %s: got %s err %v", second, got, err)
+	}
+	// Limit 1 of 3: cut at the first.
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 1)
+	if err != nil || !got.Equal(first) {
+		t.Fatalf("limit 1 must cut at the first as_of %s: got %s err %v", first, got, err)
+	}
+	// A second item sharing the first as_of: limit 1 still cuts at that
+	// instant, and the cut includes both (the evaluation pass selects by
+	// as_of <= boundary, so a shared instant is never split).
+	seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, first)
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 1)
+	if err != nil || !got.Equal(first) {
+		t.Fatalf("a shared instant must be kept whole at %s: got %s err %v", first, got, err)
+	}
+	// An already-evaluated item does not count: with one of the four
+	// evaluated, three remain, and limit 3 fits them all -- untouched --
+	// while limit 2 cuts at the second remaining item's as_of.
+	var firstID string
+	if err = store.pool.QueryRow(ctx, `SELECT id FROM balance_reconciliation_checkpoints WHERE external_account_id=$1 ORDER BY as_of,id LIMIT 1`, account).Scan(&firstID); err != nil {
+		t.Fatal(err)
+	}
+	seedEligibilityShadowCheckpointEvaluation(t, store, ctx, firstID, 1, "matched")
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 3)
+	if err != nil || !got.Equal(through) {
+		t.Fatalf("with one item evaluated, 3 pending remain and limit 3 fits: got %s err %v", got, err)
+	}
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 2)
+	if err != nil || !got.Equal(second) {
+		t.Fatalf("with one item evaluated, limit 2 cuts at %s: got %s err %v", second, got, err)
+	}
+}

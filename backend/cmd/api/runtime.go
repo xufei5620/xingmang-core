@@ -176,6 +176,14 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			store.Close()
 		}
 	}()
+	// XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3: 0 (the default) keeps the
+	// single-pass evidence evaluation every release before it had; a bound is
+	// enabled only after the differential rehearsal has shown it equivalent.
+	evidenceBatchLimit, err := boundedIntEnv("ELIGIBILITY_EVIDENCE_BATCH_LIMIT", 0, 0, 10000)
+	if err != nil {
+		return appRuntime{}, err
+	}
+	store.SetEvidenceBatchLimit(evidenceBatchLimit)
 	migrationsDir := env("MIGRATIONS_DIR", "/app/migrations")
 	if err = migrate.Verify(ctx, store.Pool(), migrationsDir); err != nil {
 		return appRuntime{}, fmt.Errorf("production migration verification: %w", err)
@@ -1080,6 +1088,23 @@ func exactHTTPSOrigin(value string) (string, error) {
 		return "", errors.New("PUBLIC_ORIGIN must be one exact HTTPS origin")
 	}
 	return parsed.String(), nil
+}
+
+// boundedIntEnv reads an optional integer environment variable within
+// [minimum, maximum], returning fallback when unset or empty.
+func boundedIntEnv(name string, fallback, minimum, maximum int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer, got %q", name, raw)
+	}
+	if value < minimum || value > maximum {
+		return 0, fmt.Errorf("%s must be between %d and %d, got %d", name, minimum, maximum, value)
+	}
+	return value, nil
 }
 
 func boundedDurationEnv(name, fallback string, minimum, maximum time.Duration) (time.Duration, error) {

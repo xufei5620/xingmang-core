@@ -17,7 +17,15 @@ import (
 	"invoice-system/backend/internal/domain"
 )
 
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool *pgxpool.Pool
+	// evidenceBatchLimit bounds how many pending balance-evidence items one
+	// projection job evaluates (XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3).
+	// Zero means unbounded, which is the behaviour every release before this
+	// knob had. See completeEligibilityProjectionJob for the semantics and
+	// why a boundary between two items cannot change a decision.
+	evidenceBatchLimit int
+}
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
@@ -42,9 +50,23 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	return New(pool), nil
 }
 
-func New(pool *pgxpool.Pool) *Store  { return &Store{pool: pool} }
-func (s *Store) Pool() *pgxpool.Pool { return s.pool }
-func (s *Store) Close()              { s.pool.Close() }
+func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+
+// SetEvidenceBatchLimit sets the per-job bound on pending balance-evidence
+// items (0 = unbounded). The api sets it from ELIGIBILITY_EVIDENCE_BATCH_LIMIT;
+// the rehearsal tool from --evidence-batch-limit, so the same image can run
+// the differential rehearsal in both modes.
+func (s *Store) SetEvidenceBatchLimit(limit int) {
+	if limit < 0 {
+		limit = 0
+	}
+	s.evidenceBatchLimit = limit
+}
+
+// EvidenceBatchLimit reports the configured bound (0 = unbounded).
+func (s *Store) EvidenceBatchLimit() int { return s.evidenceBatchLimit }
+func (s *Store) Pool() *pgxpool.Pool     { return s.pool }
+func (s *Store) Close()                  { s.pool.Close() }
 
 // ProfileRecord deliberately names encrypted fields explicitly. Encryption is
 // performed before the persistence boundary; this package never stores profile

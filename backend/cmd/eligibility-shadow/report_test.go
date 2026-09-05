@@ -405,3 +405,13 @@ func TestEvaluateReadinessIgnoresPendingAccounts(t *testing.T) {
 		t.Fatalf("pending accounts must not block readiness, got verdict=%q errors=%v", report.Verdict, report.HasProjectionErrors)
 	}
 }
+
+func TestEvidenceBatchLimitIsRecordedInTheReport(t *testing.T) {
+	encoded, err := json.Marshal(Report{EvidenceBatchLimit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"evidence_batch_limit":25`) {
+		t.Fatalf("the differential rehearsal needs each report to say which mode it ran in, got %s", encoded)
+	}
+}

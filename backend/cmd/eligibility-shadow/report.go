@@ -134,6 +134,11 @@ type Report struct {
 	ReprojectAllRequested bool  `json:"reproject_all_requested"`
 	AccountsEnqueued      int64 `json:"accounts_enqueued"`
 	AccountsProjected     int   `json:"accounts_projected"`
+	// EvidenceBatchLimit labels which mode this rehearsal ran in (fix 3): 0
+	// is the unbounded single pass, N is the bounded evidence pass. The
+	// differential rehearsal is two reports of one backup that differ only
+	// here, whose per-account quantities must be identical.
+	EvidenceBatchLimit int `json:"evidence_batch_limit"`
 
 	Before       Snapshot         `json:"before"`
 	BeforeHealth ProjectionHealth `json:"before_projection_health"`
