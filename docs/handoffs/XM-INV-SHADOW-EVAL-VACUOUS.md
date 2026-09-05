@@ -1,6 +1,6 @@
 # XM-INV-SHADOW-EVAL-VACUOUS: the shadow evaluation has never exercised a projection
 
-- **status:** implemented and verified on RC92 (2026-09-05): 7 of 8 accounts reprojected on a real backup, the eighth proof-pending by structure; both follow-ups implemented the same day (see the end of this document), pending an RC93 rehearsal to show the eighth account moving. Filed 2026-09-04 from the RC88 rehearsal.
+- **status:** implemented and verified: RC92 rehearsal 7 of 8 (whale proof-pending by structure), follow-ups implemented the same day, **RC93 rehearsal 8 of 8 with `pending_accounts` null** (2026-09-05, report `rehearsals/20260905T010341Z-3004051`). Filed 2026-09-04 from the RC88 rehearsal.
 - **branch:** ai/claude/XM-INV-AUTOLOGIN.
 - **found in production rehearsal**, 2026-09-04, while gating XM-INV-OVERAGE-CARRY-FORWARD.
 

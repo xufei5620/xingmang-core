@@ -46,3 +46,33 @@ Production remains blocked until a 30-minute readiness watch binds RC93.
 
 - Fix 3 (bound the evidence pass by checkpoint count) waits for a differential rehearsal — single-pass vs chunked on two restores of the same backup, per-account quantities diffed — which RC93's own rehearsal makes possible for the first time with the whale included.
 - A continuously-consuming account is still blocked from invoicing while any projection job is queued; account 12 is still blocked by a negative upstream balance. Both remain under the reasoning recorded in RC90.
+
+## Execution record (2026-09-05)
+
+- Task 1: identity bump `34c7775`; every gate 0, web 185 tests, four failure-evidence scripts 0/0/0/0. The plan file keeps its true date and the gate self-test's superseded-document pointer moved with it in the same token pass, so no correction was needed this time. Tag `v0.1.0-rc93-signed` created and verified, peeling to `HEAD`; the derived roll-forward script's `SHA=` checked against the tag commit before anything ran.
+- Task 2: `release/0.1.0-rc93-exact1`, first attempt: binding bound to `34c7775e…`, loopback preflight passed on attempt 1, image gate 42, ordinary verifier 0, strict transfer-ready verifier 0. The audit ran for real (`found 0 vulnerabilities`), waiver cleared, not used.
+- Task 3: staged (nine images, tag and evidence signatures good); signed pre-deploy backup `invoice-20260905T010919Z`; roll-forward PASS, 18 containers on rc93, healthz/readyz 200, migrations a no-op (0025 remains the newest). Deployment record `rc93-deploy-20260905T011300Z`.
+
+### Shadow evaluation with `--reproject-all` — the follow-ups close the gap
+
+Report `rehearsals/20260905T010341Z-3004051/shadow-eval.json`, backup `invoice-20260904T235516Z`, rc93 tools image.
+
+| field | RC92 | RC93 |
+| --- | --- | --- |
+| `accounts_enqueued` / `accounts_projected` | 7 / 7 | **8 / 8** |
+| `projection_version` moved | 7 of 8 | **8 of 8** |
+| `after_projection_health.proof_pending` | 1 | **0** |
+| `pending_accounts` | (field did not exist) | **null** |
+| whale `40bd883d` | 5105 → 5105, proof-pending | **5684 → 5685** |
+| per-account `consumed_cash_minor` / overage | unchanged | unchanged |
+| verdict | ready | ready, both implementations |
+
+The whale's captured job was retargeted to its own boundary and replayed. Every quantity is again identical before and after, which is the correct answer for a release without an evaluator change — and now it is the correct answer for all eight accounts, including the one whose reprojection matters most. This is the rehearsal the gate was built to run.
+
+### Post-deploy, first five minutes
+
+api image `invoice-system-api:0.1.0-rc93`; projection queue drained; zero `lock timeout` / `active scan cycle` lines; zero events in `ACCOUNT_LOCK_BUSY`; balances cycles publishing with 0 s lag.
+
+### Canary
+
+30 minutes from 01:14:21Z: `readyz_non200=0`, zero error lines, zero reconcile errors, usage 27 cycles, credits 28 cycles with zero sync failures, `unclassified_request_failures=0`; the finalization counters — lock timeouts, "active scan cycle" deferrals, late balances cycles — **0, 0, 0**; and the fix-2 counter, events sitting in `ACCOUNT_LOCK_BUSY` at the end of the window, **0** (oldest age none). Deployment record `rc93-deploy-20260905T011300Z` holds the containers list, roll-forward log, shadow-eval report and log, transfer checksums and the watch log.
