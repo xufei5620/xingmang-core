@@ -45,3 +45,31 @@
 
 - Switching the bound on. That is a follow-up env change gated on the differential rehearsal above, with its own canary.
 - A continuously-consuming account is still blocked from invoicing while any projection job is queued; account 12 is still blocked by a negative upstream balance. Both remain under the reasoning recorded in RC90.
+
+## Execution record (2026-09-05)
+
+- Task 1: identity bump `8d501c8` over `e0b6861` (the rehearsal instrument: rewind withdrawn, `--reproject-all` raises-never-lowers, `--release-catchup`, `--finalization-window`, `--timeout` passthrough) and `7d31f14` (RC95's execution record). Every gate 0 on `8d501c8` — backend build/vet, full unit and integration suites, agents build/vet/tests, web typecheck/tests/build, shadow static test, release-range gitleaks, the four failure-evidence scripts 0/0/0/0 — except the gate self-test, which refused the plan once, correctly: it paraphrased the verifier contract instead of carrying the literals. Fixed as a docs-only commit `43eb05a`; self-test 0 and release-range gitleaks 0 re-run on it. Tag `v0.1.0-rc96-signed` created on `43eb05a`, SSH signature verified, peels to `HEAD`; the derived roll-forward script's `SHA=` points at it; the stage script's `PREV_SHA` stays at RC94 (`254d99dd…`), the running release, because RC95 never rolled forward.
+- Task 2: detached image gate from PowerShell (`scripts/run-detached.ps1`, run dir `rc96-task2-gate-20260905T125504Z-2f6f`, pid 75952): binding `43eb05a…`, preflight 0 on attempt 1, release dir `release\0.1.0-rc96-exact1`, `IMAGE-GATE-EXIT=42`, ordinary/strict verifiers 0/0, evidence audit line `found 0 vulnerabilities`. Wall time 20:55 → 21:07 local.
+- Transfer: images tar `7c5218da…`, source bundle `8849c82d…`, evidence tgz `c3ba85d8…`. As with RC95, the first scp was cut by a connection reset; the server was checked before retrying (ssh up, `/readyz` 200, uptime 95 days, six production containers, no reboot) and the transfer re-run end to end; all three remote checksums matched.
+- Stage: `RC96-STAGED sha=43eb05a8919251e0b79ca66d91a943d172d8ed1d`, release dir `/root/invoice-system/app/releases/43eb05a…`; the stage script's `PREV_SHA` (RC94 `254d99dd…`) matched the running release. The rc96 tools image exposes `-reproject-all`, `-reevaluate-evidence`, `-evidence-batch-limit`, `-release-catchup`, `-finalization-window`, `-timeout`; production env still has no `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` line.
+
+### Differential rehearsal — the instrument works, the frontier proof does not close on a frozen copy
+
+Backup `invoice-20260904T033226Z` (the pre-repair state: `acdcdce9` still excluded, `finalized_through` 2026-09-01 12:14:30Z), rc96 tools image, `--reproject-all --release-catchup acdcdce9-… --finalization-window --timeout 90m`, `--evidence-batch-limit 0` (report `rehearsals/20260905T132946Z-3171158`) and `25` (`rehearsals/20260905T133541Z-3208870`). Migrations 0024 and 0025 applied to the copy by the migrate step.
+
+| field | unbounded | bounded |
+| --- | --- | --- |
+| `accounts_released` / `accounts_windowed` / `accounts_enqueued` | 1 / 8 / 8 | 1 / 8 / 8 |
+| `accounts_projected` / `pending_accounts` | 6 / 2 | 6 / 2 |
+| pending | `40bd883d`, `acdcdce9`: `BALANCE_PROOF_PENDING`, window 2026-09-04T03:11:42Z | identical |
+| `acdcdce9` `projection_version` / `finalized_through` | 10 → 10 / unchanged | 10 → 10 / unchanged |
+| `after.accounts` diffs, `evaluations_by_status` | — | identical (no account differs; nothing was chunked) |
+| verdict | ready | ready |
+
+The two new operations did what they were built for — the key was cleared, every account was queued through the window a finalization pass would have requested (the minimum stream watermark 03:26:42Z minus the 900 s delay) — and the six accounts that were already current projected trivially. The released account never replayed: `ensureBalanceCarryForwardProofTx` covers each fact's visibility (the stream watermark it was ingested under) with a balances checkpoint or a published balances cycle whose ceiling lies inside the window, and the facts nearest the frontier were ingested under watermarks later than the window end. In production the next finalization pass widens the window and the proof closes; on a frozen copy there is no next pass, so a frontier window pends forever — the same shape as `40bd883d`'s captured job on every backup so far. `RC96-DIFF-ACCEPTANCE FAIL` (released account not chunked) is the instrument's failure, not the bound's; the bound was never exercised.
+
+The repair is one flag: `--finalization-window-lag`, the window a finalization pass would have requested that much earlier, so an hour of lag leaves the three-day window whole but provable. That is RC97. Also found while adding it: RC96's `--reevaluate-evidence`-without-`--reproject-all` check had lost its `os.Exit` (it logged and went on); restored in RC97.
+
+### Outcome
+
+RC96 built, signed and staged, not rolled forward: nothing it changes is run by production. Production stays on RC94 with `ELIGIBILITY_EVIDENCE_BATCH_LIMIT` unset. Rehearsal evidence: `deployment-records/rc96-rehearsal-*` on the server.
