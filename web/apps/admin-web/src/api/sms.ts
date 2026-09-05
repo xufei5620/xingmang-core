@@ -578,3 +578,69 @@ export function importSMSOrder(
 ): Promise<ActionRun> {
   return executeAction({ actionId: "sms.order.import", version: "1", params }, options, client);
 }
+
+// ---------- 路由规则（XM-SMS2 #5，ADR-022 决策 3） ----------
+
+/** 一条路由规则：「服务 × 国家」→ 供应商优先级列表 + 单价上限。
+ *  service / country 为 "*" 表示任意。命中顺序：精确 > 服务通配国家 >
+ *  国家通配服务 > 全通配 > 没有规则时的默认顺序。 */
+export interface SMSRoutingRule {
+  rule_id: string;
+  service: string;
+  country: string;
+  /** 优先级顺序，第一家优先；失败回落下一家，每家最多试一次。 */
+  providers: string[];
+  /** 十进制文本；空 = 不限。**按各家自己的币种比较，不折算。** */
+  max_unit_price?: string;
+  enabled: boolean;
+  updated_at?: string;
+}
+
+export interface SMSRoutingRules {
+  items: SMSRoutingRule[];
+  /** 没有规则命中时要号按这个顺序试（= 装配顺序）。 */
+  default_order: string[];
+  wildcard: string;
+}
+
+export async function listSMSRoutingRules(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSRoutingRules> {
+  const body = await client
+    .get<Partial<SMSRoutingRules>>("/api/v1/sms/routing", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return { items: body.items ?? [], default_order: body.default_order ?? [], wildcard: body.wildcard ?? "*" };
+}
+
+/** 新建或覆盖一条规则（`sms.routing.set@1`）。同「服务 × 国家」只有一条。
+ *  不传 enabled 视为启用。 */
+export function setSMSRoutingRule(
+  input: { service: string; country: string; providers: string[]; max_unit_price?: string; enabled?: boolean },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const params: Record<string, unknown> = {
+    service: input.service,
+    country: input.country,
+    providers: input.providers,
+  };
+  if (input.max_unit_price) params.max_unit_price = input.max_unit_price;
+  if (input.enabled !== undefined) params.enabled = input.enabled;
+  return executeAction({ actionId: "sms.routing.set", version: "1", params }, options, client);
+}
+
+/** 删一条规则（`sms.routing.remove@1`）。可逆：再设一条同键的就回来了。 */
+export function removeSMSRoutingRule(
+  ruleId: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.routing.remove", version: "1", params: { rule_id: ruleId } },
+    options,
+    client,
+  );
+}

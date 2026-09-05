@@ -227,3 +227,68 @@ func TestPgStoreResourceStateRoundTrip(t *testing.T) {
 		t.Fatalf("带 state 的同步应覆盖, got state=%q status=%q", got.State, got.Status)
 	}
 }
+
+// 迁移 000043：路由规则。同「服务 × 国家」覆盖而不是第二条；numeric 进出都是文本；
+// text[] 顺序原样保留；删不存在的（含不是 uuid 的字符串）是 ErrRoutingRuleNotFound。
+func TestPgStoreRoutingRuleRoundTrip(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	if _, err := store.pool.Exec(ctx, "TRUNCATE sms.routing_rule"); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := store.UpsertRoutingRule(ctx, RoutingRule{
+		Service: "go", Country: "*", Providers: []string{ProviderHero, ProviderSMS62},
+		MaxUnitPriceText: "0.35", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.UpsertRoutingRule(ctx, RoutingRule{
+		Service: "go", Country: "*", Providers: []string{ProviderSMS62}, Enabled: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != id {
+		t.Fatalf("同键应覆盖同一条, got %q vs %q", again, id)
+	}
+	if _, err := store.UpsertRoutingRule(ctx, RoutingRule{
+		Service: "*", Country: "7", Providers: []string{ProviderSMS62}, MaxUnitPriceText: "1.5", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := store.ListRoutingRules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("应有两条, got %+v", rules)
+	}
+	// ORDER BY service, country："*" 排在 "go" 前。
+	if rules[0].Service != "*" || rules[0].MaxUnitPriceText != "1.5" {
+		t.Errorf("numeric 应以文本原样回来, got %+v", rules[0])
+	}
+	if rules[1].ID != id || rules[1].Enabled || rules[1].MaxUnitPriceText != "" ||
+		len(rules[1].Providers) != 1 || rules[1].Providers[0] != ProviderSMS62 {
+		t.Errorf("覆盖后应是新值（上限被清空、停用、只剩 62）, got %+v", rules[1])
+	}
+	if rules[1].UpdatedAt.IsZero() {
+		t.Errorf("updated_at 应被填上")
+	}
+
+	if err := store.RemoveRoutingRule(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveRoutingRule(ctx, id); !errors.Is(err, ErrRoutingRuleNotFound) {
+		t.Errorf("再删应为 ErrRoutingRuleNotFound, got %v", err)
+	}
+	if err := store.RemoveRoutingRule(ctx, "not-a-uuid"); !errors.Is(err, ErrRoutingRuleNotFound) {
+		t.Errorf("不是 uuid 的 ID 也是不存在, got %v", err)
+	}
+	// 空供应商列表被 CHECK 挡住（代码层 ValidateRoutingRule 之外的最后一道）。
+	if _, err := store.UpsertRoutingRule(ctx, RoutingRule{Service: "x", Country: "*", Providers: []string{}, Enabled: true}); err == nil {
+		t.Errorf("空供应商列表应被 CHECK 挡住")
+	}
+}

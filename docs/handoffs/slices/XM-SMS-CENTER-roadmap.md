@@ -14,7 +14,7 @@ branch: ai/claude/XM-CARD0-infini-connector
 - 遇到需要产品负责人拍板的事（新的花钱路径、权限边界、数据删除），停下写在
   本文件「待决」一节，不猜。
 
-## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–4 done）
+## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–5 done）
 
 1. ~~改名「接码中心」~~ done（2d4b559）。
 2. ~~供应商注册表~~ done：`internal/platform/sms/registry.go` 定义 `ProviderSpec`（ID、标签、
@@ -31,8 +31,16 @@ branch: ai/claude/XM-CARD0-infini-connector
    到期时间」算成已过期，服务端算好以 `effective_state` 回给页面。页面号码栏与
    详情头显示统一状态徽标，悬停看「上游状态：<原话>」；state 为空的旧数据退回
    显示原话。
-5. 路由规则：`sms.routing_rule`（服务、国家、供应商优先级列表、单价上限、启用），
-   Action `sms.routing.set` / `sms.routing.remove`（sms.manage），后台页面。
+5. ~~路由规则~~ done：迁移 000043 建 `sms.routing_rule`（环境 × 服务 × 国家唯一；
+   providers text[] 保序；max_unit_price numeric、对外文本；CHECK 供应商非空、上限 > 0）。
+   `ResolveRoute` 命中顺序：精确 > 服务通配国家 > 国家通配服务 > 全通配 > 装配顺序；
+   人指定供应商就只用那家但上限仍按命中规则。`ValidateRoutingRule` 按注册表拒未装配 /
+   不能买号 / 重复的供应商，上限只收正的十进制文本。Action `sms.routing.set`（enabled
+   缺省 true，同键覆盖）/ `sms.routing.remove`，sms.manage、L1、只给人，领域错误翻成
+   INVALID_PARAMS / PRECONDITION_FAILED（否则内核归一成「执行失败」看不出是哪个字段）。
+   契约 `contracts/actions/sms.routing.*.v1.json`。读端点 `GET /sms/routing` 带
+   `default_order`。页面新页签「路由规则」：加入 / 上移 / 移除定优先级、编辑回填、
+   删除点两次、只列有购买能力的供应商、说明默认顺序。
 6. 「要号」流程：Action `sms.number.request`（sms.purchase）——服务 + 国家 + 数量
    （+ 可选指定供应商）→ 按规则选供应商 → 买 → 落资源 → 自动取码由页面驱动
    （每 15 秒）。失败按规则回落下一家，**每家最多试一次**，全部失败落 failed。
@@ -93,3 +101,15 @@ branch: ai/claude/XM-CARD0-infini-connector
   expired 时显示已过期、无 state 的旧数据退回原话。门禁：go vet / go test -p 1
   ./...（含真库）/ check-governance / pnpm -r typecheck / pnpm -r test
   （admin-web 1540 用例）全绿。
+- 2026-09-06 XM-SMS2 #5：`routing_test.go` 先红（符号未定义）后绿：命中顺序七个
+  用例（含「服务规则压过国家规则」「停用不算」「人指定只用那家但上限仍按规则」）、
+  无规则回装配顺序、校验九种非法形状 + 未装配供应商、同键覆盖同一条且服务小写
+  去空白、删两次第二次 NotFound、Route 走库里规则、两个 Action 注册（L1 / manage）
+  与参数通过 Schema、enabled 缺省 true。真库 `TestPgStoreRoutingRuleRoundTrip`：
+  同键覆盖、numeric 文本进出、text[] 保序、非 uuid 的 ID 是 NotFound、空供应商
+  被 CHECK 挡（迁移 000043 在测试库上真跑过）。页面测试七条（先红：模块不存在）：
+  标签显示与默认顺序、按加入顺序提交、上移 / 移除 / 不可重复加入、删除点两次、
+  编辑回填、停用徽标、只列可买号的供应商——其中一条因表头「单价上限」经
+  aria-labelledby 也算标签而撞名，改表单 aria-label 为「路由单价上限」。门禁：
+  go vet / go test -p 1 ./...（含真库）/ check-governance 0 / pnpm -r typecheck /
+  pnpm -r test（admin-web 1547 用例）全绿。

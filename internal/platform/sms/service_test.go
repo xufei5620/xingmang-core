@@ -21,6 +21,7 @@ type memStore struct {
 	codes     map[string]Code
 	status    map[string]ProviderStatus
 	emails    map[string]Email
+	routing   map[string]RoutingRule
 	// pendingHash 模拟未决唯一索引。
 	pendingHash map[string]string
 	seq         int
@@ -32,7 +33,8 @@ func newMemStore() *memStore {
 		ops: map[string]Operation{}, resources: map[string]Resource{},
 		orders: map[string]Order{}, codes: map[string]Code{},
 		status: map[string]ProviderStatus{}, pendingHash: map[string]string{},
-		emails: map[string]Email{},
+		emails:  map[string]Email{},
+		routing: map[string]RoutingRule{},
 	}
 }
 
@@ -563,4 +565,36 @@ type countingNotifier struct{ calls int }
 func (n *countingNotifier) NotifyCode(ctx context.Context, provider, mask, code string) error {
 	n.calls++
 	return nil
+}
+
+// ---- 路由规则（XM-SMS2 #5）----
+
+func (m *memStore) UpsertRoutingRule(ctx context.Context, r RoutingRule) (string, error) {
+	for id, existing := range m.routing {
+		if existing.Service == r.Service && existing.Country == r.Country {
+			r.ID = id
+			m.routing[id] = r
+			return id, nil
+		}
+	}
+	m.seq++
+	r.ID = "rule-" + itoa(m.seq)
+	m.routing[r.ID] = r
+	return r.ID, nil
+}
+
+func (m *memStore) RemoveRoutingRule(ctx context.Context, id string) error {
+	if _, ok := m.routing[id]; !ok {
+		return ErrRoutingRuleNotFound
+	}
+	delete(m.routing, id)
+	return nil
+}
+
+func (m *memStore) ListRoutingRules(ctx context.Context) ([]RoutingRule, error) {
+	out := make([]RoutingRule, 0, len(m.routing))
+	for _, r := range m.routing {
+		out = append(out, r)
+	}
+	return out, nil
 }

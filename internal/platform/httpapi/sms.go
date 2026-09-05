@@ -18,6 +18,8 @@ type SMSQuerier interface {
 	ListResources(ctx context.Context, provider string, limit int) ([]sms.Resource, error)
 	ListOperations(ctx context.Context, provider string, limit int) ([]sms.Operation, error)
 	ListCodes(ctx context.Context, resourceID string, limit int) ([]sms.Code, error)
+	// ListRoutingRules 是路由规则页的读端点（XM-SMS2 #5）。
+	ListRoutingRules(ctx context.Context) ([]sms.RoutingRule, error)
 }
 
 // SMSCatalogReader 读库存。**实时上游调用，不是投影**——库存变化频繁，
@@ -275,5 +277,48 @@ func ListSMSCatalogHandler(reader SMSCatalogReader) http.HandlerFunc {
 			})
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	}
+}
+
+// ---- 路由规则（XM-SMS2 #5）----
+
+type smsRoutingRuleItem struct {
+	ID      string `json:"rule_id"`
+	Service string `json:"service"`
+	Country string `json:"country"`
+	// Providers 是优先级顺序。
+	Providers []string `json:"providers"`
+	// MaxUnitPrice 是十进制文本；空 = 不限。按各家自己的币种比较。
+	MaxUnitPrice string `json:"max_unit_price,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+// ListSMSRoutingRulesHandler 返回本环境全部路由规则（含停用的）以及没有规则时的
+// 默认顺序——页面要能告诉人「现在没规则，要号会按这个顺序试」。
+func ListSMSRoutingRulesHandler(store SMSQuerier, configured []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rules, err := store.ListRoutingRules(r.Context())
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		out := make([]smsRoutingRuleItem, 0, len(rules))
+		for _, rule := range rules {
+			item := smsRoutingRuleItem{
+				ID: rule.ID, Service: rule.Service, Country: rule.Country,
+				Providers:    append([]string{}, rule.Providers...),
+				MaxUnitPrice: rule.MaxUnitPriceText, Enabled: rule.Enabled,
+			}
+			if !rule.UpdatedAt.IsZero() {
+				item.UpdatedAt = rule.UpdatedAt.UTC().Format(time.RFC3339)
+			}
+			out = append(out, item)
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"items":         out,
+			"default_order": append([]string{}, configured...),
+			"wildcard":      sms.RouteAny,
+		})
 	}
 }

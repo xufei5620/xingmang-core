@@ -650,3 +650,66 @@ UPDATE sms.sms_resource SET state = $3, updated_at = $4
 	}
 	return nil
 }
+
+// ---- 路由规则（迁移 000043）----
+
+func (s *PgStore) UpsertRoutingRule(ctx context.Context, r RoutingRule) (string, error) {
+	const upsertSQL = `
+INSERT INTO sms.routing_rule (environment, service, country, providers, max_unit_price, enabled, created_at, updated_at)
+VALUES ($1,$2,$3,$4,NULLIF($5,'')::numeric,$6,$7,$7)
+ON CONFLICT (environment, service, country) DO UPDATE SET
+    providers      = EXCLUDED.providers,
+    max_unit_price = EXCLUDED.max_unit_price,
+    enabled        = EXCLUDED.enabled,
+    updated_at     = EXCLUDED.updated_at
+RETURNING id::text`
+
+	at := r.UpdatedAt
+	if at.IsZero() {
+		at = s.now()
+	}
+	var id string
+	err := s.pool.QueryRow(ctx, upsertSQL,
+		s.environment, r.Service, r.Country, r.Providers, r.MaxUnitPriceText, r.Enabled, at.UTC(),
+	).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("写路由规则: %w", err)
+	}
+	return id, nil
+}
+
+func (s *PgStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	// id::text 比较：一个不是 uuid 的字符串是「不存在」，不是 SQL 错误。
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM sms.routing_rule WHERE environment = $1 AND id::text = $2`, s.environment, ruleID)
+	if err != nil {
+		return fmt.Errorf("删路由规则: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRoutingRuleNotFound
+	}
+	return nil
+}
+
+func (s *PgStore) ListRoutingRules(ctx context.Context) ([]RoutingRule, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT id::text, service, country, providers, COALESCE(max_unit_price::text,''), enabled, updated_at
+  FROM sms.routing_rule
+ WHERE environment = $1
+ ORDER BY service, country`, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查路由规则: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RoutingRule
+	for rows.Next() {
+		var r RoutingRule
+		if err := rows.Scan(&r.ID, &r.Service, &r.Country, &r.Providers, &r.MaxUnitPriceText, &r.Enabled, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		r.UpdatedAt = r.UpdatedAt.UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

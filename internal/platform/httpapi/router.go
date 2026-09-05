@@ -370,6 +370,9 @@ func NewRouter(d Deps) http.Handler {
 					Get("/sms/operations", ListSMSOperationsHandler(d.SMS))
 				api.With(RequireScope(sms.PermissionRead)).
 					Get("/sms/resources/{resourceID}/codes", ListSMSCodesHandler(d.SMS))
+				// 路由规则（XM-SMS2 #5）：读是 sms.read，改走 sms.routing.* Action。
+				api.With(RequireScope(sms.PermissionRead)).
+					Get("/sms/routing", ListSMSRoutingRulesHandler(d.SMS, d.SMSProviders))
 			}
 			// 库存是实时上游调用，与投影读分开判空：fake 模式下没有真实库存。
 			if d.SMSCatalog != nil {

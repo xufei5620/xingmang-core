@@ -70,6 +70,12 @@ type Store interface {
 	UpsertEmail(ctx context.Context, e Email) (string, error)
 	GetEmail(ctx context.Context, emailID string) (Email, error)
 	ListEmails(ctx context.Context, limit int) ([]Email, error)
+
+	// 路由规则（XM-SMS2 #5）。UpsertRoutingRule 按（环境, 服务, 国家）覆盖；
+	// RemoveRoutingRule 不存在时回 ErrRoutingRuleNotFound。
+	UpsertRoutingRule(ctx context.Context, r RoutingRule) (string, error)
+	RemoveRoutingRule(ctx context.Context, ruleID string) error
+	ListRoutingRules(ctx context.Context) ([]RoutingRule, error)
 }
 
 // Order 是一笔订单（主要是 62）。

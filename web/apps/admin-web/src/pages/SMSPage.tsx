@@ -11,11 +11,13 @@ import {
   SMS62OrdersPanel,
 } from "../components/SMSExtrasPanels";
 import { SMSPanel } from "../components/SMSPanel";
+import { SMSRoutingPanel } from "../components/SMSRoutingPanel";
 
 /** 页签。第一个是原来的整页（供应商 / 买号 / 号码 / 台账），其余是 XM-SMS1
  *  按两家官方文档补齐后的扩展视图。按供应商标注：只有 Hero 有的就写明。 */
 const TABS = [
   { id: "numbers", label: "号码" },
+  { id: "routing", label: "路由规则" },
   { id: "catalog", label: "目录与价格（Hero）" },
   { id: "history", label: "历史与统计（Hero）" },
   { id: "emails", label: "邮箱接码（Hero）" },
@@ -77,6 +79,7 @@ export function SMSPage() {
       {tab !== "numbers" && result ? <ActionResultNote result={result} /> : null}
 
       {tab === "numbers" ? <SMSPanel /> : null}
+      {tab === "routing" ? <SMSRoutingPanel onWrite={setResult} /> : null}
       {tab === "catalog" ? <HeroCatalogPanel onWrite={setResult} /> : null}
       {tab === "history" ? <HeroHistoryPanel /> : null}
       {tab === "emails" ? <HeroEmailsPanel onWrite={setResult} /> : null}
