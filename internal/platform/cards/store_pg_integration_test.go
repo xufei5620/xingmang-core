@@ -1308,3 +1308,98 @@ func TestPgStoreRecentTransactionsAcrossCards(t *testing.T) {
 		t.Fatalf("账号没带上: %+v", rows[0])
 	}
 }
+
+// 统计必须在**服务端**按整表算，不能拿前端那份 limit 截断的列表求和。
+//
+// 截断求和的症状最坏：它不会报错，只会给出一个比真实值小的数，
+// 而「这个月花了多少」看起来完全正常——没人会去怀疑一个像模像样的数字。
+func TestPgStoreTransactionStatsAggregatesWholeTable(t *testing.T) {
+	store, pool := pgStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	// 三笔已完成消费、一笔授权中、一笔充值、一笔另一账号的消费，
+	// 外加一笔没有发生时间的——它不该被窗口统计悄悄吃掉。
+	seed := []struct {
+		account, card, dedupe, txType, currency, status, merchant string
+		amount, fee                                               int64
+		occurred                                                  *time.Time
+	}{
+		{"CHRIS", "c1", "d1", "consume", "USD", "completed", "OPENAI", -1795, 10, ptrTime(base)},
+		{"CHRIS", "c1", "d2", "consume", "USD", "completed", "OPENAI", -9359, 0, ptrTime(base.Add(time.Hour))},
+		{"CHRIS", "c2", "d3", "consume", "USD", "completed", "GOOGLE", -195, 5, ptrTime(base.Add(2 * time.Hour))},
+		{"CHRIS", "c1", "d4", "consume", "USD", "authorized", "OPENAI", -100, 0, ptrTime(base.Add(3 * time.Hour))},
+		{"CHRIS", "c1", "d5", "topup", "USD", "completed", "", 20000, 0, ptrTime(base.Add(4 * time.Hour))},
+		{"LINFENG", "c9", "d6", "consume", "USD", "completed", "OPENAI", -500, 0, ptrTime(base.Add(5 * time.Hour))},
+		{"CHRIS", "c1", "d7", "consume", "USD", "completed", "OPENAI", -777, 0, nil},
+	}
+	for _, r := range seed {
+		if _, err := pool.Exec(ctx, `
+INSERT INTO cards.infini_card_transaction
+ (environment, account, upstream_card_id, dedupe_key, tx_type, amount_minor,
+  fee_minor, currency, status, merchant, occurred_at, synced_at, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)`,
+			testEnvironment, r.account, r.card, r.dedupe, r.txType, r.amount,
+			r.fee, r.currency, r.status, r.merchant, r.occurred, base); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 全账号、不限期间。
+	all, err := store.TransactionStats(ctx, "", time.Time{}, time.Time{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bucketOf(all, "USD", "consume", "completed")
+	if got.Count != 5 || got.AmountMinor != -1795-9359-195-500-777 || got.FeeMinor != 15 {
+		t.Fatalf("已完成消费格 = %+v", got)
+	}
+	if tp := bucketOf(all, "USD", "topup", "completed"); tp.AmountMinor != 20000 {
+		t.Fatalf("充值格 = %+v", tp)
+	}
+
+	// 按账号筛：另一个账号的那笔必须不在里面。
+	chris, err := store.TransactionStats(ctx, "CHRIS", time.Time{}, time.Time{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := bucketOf(chris, "USD", "consume", "completed"); c.Count != 4 {
+		t.Fatalf("CHRIS 已完成消费笔数 = %d, want 4", c.Count)
+	}
+
+	// 期间统计：**没有发生时间的那笔单独报数**，不能被窗口悄悄吃掉。
+	win, err := store.TransactionStats(ctx, "", base, base.Add(3*time.Hour), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := bucketOf(win, "USD", "consume", "completed"); c.Count != 3 {
+		t.Fatalf("窗口内已完成消费笔数 = %d, want 3", c.Count)
+	}
+	if win.UndatedCount != 1 {
+		t.Fatalf("无发生时间的笔数 = %d, want 1", win.UndatedCount)
+	}
+	// 不限期间时它是被算进去的，所以那里不该再报一遍「未计入」。
+	if all.UndatedCount != 0 {
+		t.Fatalf("不限期间时 UndatedCount 应为 0, got %d", all.UndatedCount)
+	}
+
+	// Top 商户按花掉的钱排，OPENAI 应在第一。
+	if len(all.Merchants) == 0 || all.Merchants[0].Merchant != "OPENAI" {
+		t.Fatalf("top 商户 = %+v", all.Merchants)
+	}
+	// Top 卡片同理：c1 花得最多。
+	if len(all.Cards) == 0 || all.Cards[0].CardID != "c1" {
+		t.Fatalf("top 卡片 = %+v", all.Cards)
+	}
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+func bucketOf(s TransactionStats, currency, txType, status string) StatsBucket {
+	for _, b := range s.Buckets {
+		if b.Currency == currency && b.Type == txType && b.Status == status {
+			return b
+		}
+	}
+	return StatsBucket{}
+}

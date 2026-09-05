@@ -5,6 +5,7 @@ import { useSearchParams } from "react-router";
 import { listCards } from "../api/cards";
 import { AccountBalancesStrip, AttentionBanner, IssueCardDialog } from "../components/CardsShared";
 import { CardLedger } from "../components/CardLedger";
+import { CardStats } from "../components/CardStats";
 import { CardSubscriptions } from "../components/CardSubscriptions";
 import { CardWorkbench } from "../components/CardWorkbench";
 import { WithdrawPanel } from "../components/WithdrawPanel";
@@ -19,6 +20,8 @@ const TABS = [
   { id: "cards", label: "卡片管理" },
   { id: "ledger", label: "交易记录" },
   { id: "subscriptions", label: "订阅" },
+  // 统计排在提现前面：它回答的是「这批卡在花多少钱」，比提现更常看。
+  { id: "stats", label: "统计" },
   { id: "withdraw", label: "提现" },
 ] as const;
 
@@ -112,6 +115,7 @@ export function CardsPage() {
       {tab === "cards" ? <CardWorkbench /> : null}
       {tab === "ledger" ? <CardLedger /> : null}
       {tab === "subscriptions" ? <CardSubscriptions /> : null}
+      {tab === "stats" ? <CardStats account={params.get("account") ?? ""} /> : null}
       {tab === "withdraw" ? <WithdrawPanel accounts={query.data?.accounts ?? []} /> : null}
     </div>
   );

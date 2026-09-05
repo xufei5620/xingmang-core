@@ -31,6 +31,14 @@ type CardQuerier interface {
 	ActiveChallenges(ctx context.Context) ([]cards.CardChallenge, error)
 }
 
+// CardStatsQuerier 单独一个接口而不是并进 CardQuerier。
+//
+// 统计是**整表聚合**，与逐行读是两种代价完全不同的操作；分开声明，
+// 以后想给它单独换实现（物化视图、缓存）时不必牵动其余读端点。
+type CardStatsQuerier interface {
+	TransactionStats(ctx context.Context, account string, since, until time.Time, topN int) (cards.TransactionStats, error)
+}
+
 type cardItem struct {
 	// Account 是内部运营维度。管理端按它筛选与展示；
 	// 以后开放外部用户时，那一侧的响应不该带这个字段。
@@ -384,3 +392,110 @@ func ListAllCardTransactionsHandler(store CardQuerier) http.HandlerFunc {
 // 流水被更新的别的卡挤出去了。真到需要翻页的量级再加游标，那时也才知道
 // 该按什么翻。
 const allTransactionsPageSize = 500
+
+type statsBucketItem struct {
+	Currency string `json:"currency"`
+	Type     string `json:"type"`
+	Status   string `json:"status"`
+	Count    int    `json:"count"`
+	// AmountMinor 保留符号：消费是负数、充值是正数。
+	// 在这里取绝对值会让净额再也算不回来。
+	AmountMinor int64 `json:"amount_minor"`
+	FeeMinor    int64 `json:"fee_minor"`
+}
+
+type statsMerchantItem struct {
+	Merchant    string `json:"merchant"`
+	Currency    string `json:"currency"`
+	Count       int    `json:"count"`
+	AmountMinor int64  `json:"amount_minor"`
+	FeeMinor    int64  `json:"fee_minor"`
+}
+
+type statsCardItem struct {
+	Account     string `json:"account"`
+	CardID      string `json:"card_id"`
+	CardAlias   string `json:"card_alias,omitempty"`
+	Currency    string `json:"currency"`
+	Count       int    `json:"count"`
+	AmountMinor int64  `json:"amount_minor"`
+	FeeMinor    int64  `json:"fee_minor"`
+}
+
+// CardStatsHandler 返回按整表聚合的卡片流水统计。
+//
+// **服务端聚合，不是让前端对流水列表求和**：流水端点有 limit，拿那份截断的
+// 列表求和不会报错，只会给出一个偏小的数——而「这个月花了多少」看起来完全
+// 正常，没人会去怀疑一个像模像样的数字。
+//
+// 期间用 since/until（RFC3339，UTC）。两个都不给 = 不限期间。
+func CardStatsHandler(store CardStatsQuerier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := principal.FromContext(r.Context()); !ok {
+			WriteError(w, r, action.NewError(action.CodePermissionDenied, "缺少身份", nil))
+			return
+		}
+		account := strings.TrimSpace(r.URL.Query().Get("account"))
+
+		// 时间拼错当场 400，不静默当成「不限期间」：静默回落会让人拿到
+		// 一份全量统计却以为是本月的，而两个数都像模像样。
+		since, err := parseOptionalTime(r.URL.Query().Get("since"))
+		if err != nil {
+			WriteError(w, r, action.NewError(action.CodeInvalidParams, "since 非法（要 RFC3339）", nil))
+			return
+		}
+		until, err := parseOptionalTime(r.URL.Query().Get("until"))
+		if err != nil {
+			WriteError(w, r, action.NewError(action.CodeInvalidParams, "until 非法（要 RFC3339）", nil))
+			return
+		}
+
+		stats, err := store.TransactionStats(r.Context(), account, since, until, 10)
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+
+		buckets := make([]statsBucketItem, 0, len(stats.Buckets))
+		for _, b := range stats.Buckets {
+			buckets = append(buckets, statsBucketItem{
+				Currency: b.Currency, Type: b.Type, Status: b.Status,
+				Count: b.Count, AmountMinor: b.AmountMinor, FeeMinor: b.FeeMinor,
+			})
+		}
+		merchants := make([]statsMerchantItem, 0, len(stats.Merchants))
+		for _, m := range stats.Merchants {
+			merchants = append(merchants, statsMerchantItem{
+				Merchant: m.Merchant, Currency: m.Currency,
+				Count: m.Count, AmountMinor: m.AmountMinor, FeeMinor: m.FeeMinor,
+			})
+		}
+		cardRows := make([]statsCardItem, 0, len(stats.Cards))
+		for _, c := range stats.Cards {
+			cardRows = append(cardRows, statsCardItem{
+				Account: c.Account, CardID: c.CardID, CardAlias: c.CardAlias,
+				Currency: c.Currency, Count: c.Count,
+				AmountMinor: c.AmountMinor, FeeMinor: c.FeeMinor,
+			})
+		}
+
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"buckets":   buckets,
+			"merchants": merchants,
+			"cards":     cardRows,
+			// undated_count 是没有发生时间、因而没能计入期间统计的笔数。
+			// 回出来而不是丢掉：一笔上游没给时间的流水在按月统计里会凭空
+			// 消失，而消失的钱是查不出来的。
+			"undated_count": stats.UndatedCount,
+		})
+	}
+}
+
+// parseOptionalTime 空串 = 零值（不限），其余必须是 RFC3339。
+func parseOptionalTime(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339, raw)
+}

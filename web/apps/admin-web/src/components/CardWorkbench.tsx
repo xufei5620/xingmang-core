@@ -126,9 +126,15 @@ export function CardWorkbench() {
           //
           // xl 才三栏：中屏上第三栏会把前两栏挤到读不动，那时仍是两栏、
           // 流水回到详情下方。
-          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)] xl:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)_minmax(0,1fr)]">
+          //
+          // 三栏的配比（产品负责人 2026-09-06）：详情**定宽**，清单与流水
+          // 分掉剩下的。详情的内容宽度是固定的——一张卡面加一张两列表，
+          // 再宽只是把标签和值拉到两端；而清单要显示卡名+邮箱+后四位+状态，
+          // 流水有八列，这两栏每多一像素都在多显示真东西。
+          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(20rem,24rem)_minmax(0,1fr)] xl:grid-cols-[minmax(20rem,24rem)_26rem_minmax(0,1fr)]">
             <CardRail
               cards={cards}
+              accountFilter={accountFilter}
               selected={selected}
               challenges={challenges}
               onSelect={select}
@@ -160,11 +166,14 @@ export function CardWorkbench() {
  *  只能靠后四位区分。 */
 function CardRail({
   cards,
+  accountFilter,
   selected,
   challenges,
   onSelect,
 }: {
   cards: CardItem[];
+  /** 空串 = 上面选了「全部」，这一栏装的是所有账号的卡。 */
+  accountFilter: string;
   selected: CardItem | null;
   challenges: Map<string, CardChallenge>;
   onSelect: (card: CardItem) => void;
@@ -186,6 +195,16 @@ function CardRail({
 
   return (
     <div className="flex min-w-0 flex-col gap-2">
+      {/* 标题写明这一栏的**范围**，不只是「卡片」。
+          上面的账号筛选与这一栏隔着一段距离，光看列表分不出眼前这些是
+          某个账号的还是全部的——而两者的条数差别正是最容易看错的地方。 */}
+      <h3 className="flex items-baseline justify-between gap-2 text-sm font-semibold">
+        <span>所有卡片</span>
+        <span className="text-fg-muted text-xs font-normal">
+          {accountFilter ? `账号 ${accountFilter}` : "全部账号"} ·{" "}
+          {needle ? `${shown.length} / ${cards.length}` : `${cards.length}`} 张
+        </span>
+      </h3>
       <Input
         aria-label="搜索卡片"
         placeholder="搜卡名、邮箱、卡号后四位或用途"
@@ -297,6 +316,9 @@ function CardPane({
     // 不再自己设 max-w：宽度由三栏栅格分配。原先那条 max-w-3xl 是两栏时
     // 防止详情被拉到满屏两端的补丁，三栏之后它反而会在超宽屏上留出空隙。
     <section className="border-edge flex min-w-0 flex-col gap-4 rounded-md border p-4">
+      {/* 与「所有卡片」「交易流水」并排的第三个栏名。三栏各有标题，
+          才看得出中间这栏讲的是**选中的那一张**，不是又一份清单。 */}
+      <h3 className="text-sm font-semibold">卡片详情</h3>
       <header className="flex flex-col items-center gap-1 text-center">
         <h2 className="flex items-center gap-2 text-lg font-semibold">
           <span className="min-w-0 break-all">

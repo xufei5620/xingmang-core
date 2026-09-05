@@ -511,6 +511,7 @@ func main() {
 		// 资金池余额直接走领域服务（它已经持有配好的客户端）。
 		CardBalances: cardBalanceReaderOrNil(cardService),
 		CardWithdraw: cardWithdrawQuerierOrNil(cardStore),
+		CardStats:    cardStatsOrNil(cardStore),
 		SMS:          smsQuerierOrNil(smsStore),
 		SMSCatalog:   smsCatalogOrNil(smsService),
 		SMSProviders: smsProviderIDs(smsService),
