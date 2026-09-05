@@ -200,31 +200,61 @@ function CardRail({
                   type="button"
                   onClick={() => onSelect(c)}
                   aria-current={active ? "true" : undefined}
-                  className={`flex w-full min-w-0 flex-col gap-1 px-3 py-2 text-left hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-accent ${
+                  className={`flex w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-accent ${
                     active ? "bg-accent-soft" : ""
                   }`}
                 >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-sm font-medium">
-                      {c.card_alias || c.card_id}
+                  {/* 行的排布照 Infini 后台：卡图标 | 卡名 / 邮箱·后四位·状态 | 余额。
+                      三段各自定位——
+                      左段固定宽（图标），中段吃掉剩余宽度，右段按内容收缩并右对齐。
+
+                      状态原先是紧跟卡名的徽章，于是名字一长一短它就左右跳，
+                      扫一列卡时眼睛得逐行重新找它在哪儿。挪到第二行、且**邮箱定宽**
+                      之后，后四位与状态每行都落在同一个横坐标上。 */}
+                  <CardGlyph />
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-sm font-semibold">
+                        {c.card_alias || c.card_id}
+                      </span>
+                      {/* Infini 这里还有个 Lite / Pro 档位徽章，**我们画不出来**：
+                          product_id 只出现在开卡请求里，卡对象上没有这个字段
+                          （见 contracts/connectors/infini/openapi/card.yaml），
+                          上游读不回来。凭开卡时的记忆猜一个会在同步拉进来的
+                          卡上指错档位。 */}
                     </span>
-                    <Badge tone={cardStatusTone(c.status)}>
-                      {cardStatusLabel(c.status)}
-                    </Badge>
-                    {/* 有待验证的码就在清单里标出来——它只有几分钟有效，
-                    藏在右栏里等人点开就来不及了。 */}
-                    {challenge?.code ? (
-                      <Badge tone="warning">验证码 {challenge.code}</Badge>
-                    ) : null}
-                  </span>
-                  <span className="text-fg-muted flex min-w-0 items-center justify-between gap-2 text-xs">
-                    <span className="truncate">{c.holder_name || "—"}</span>
-                    <span className="font-mono whitespace-nowrap">
-                      {c.mask ? `••${c.mask.slice(-4)}` : "—"}
+                    <span className="text-fg-muted flex items-center gap-2 text-xs">
+                      {/* 邮箱定宽截断，好让后面两项每行对齐——这正是「状态固定
+                          一个位置」的做法，Infini 也是这么排的。 */}
+                      <span className="w-32 truncate">{c.holder_name || "—"}</span>
+                      <span aria-hidden="true" className="text-edge">
+                        |
+                      </span>
+                      {/* 后四位放大一档（text-xs → text-sm）：选卡时人常常是拿着
+                          手上那张卡或另一个页面的卡号来对，而这四位就是唯一的
+                          对照物，小到要凑近看就失职了。 */}
+                      <span className="text-fg font-mono text-sm whitespace-nowrap tabular-nums">
+                        {c.mask ? `****${c.mask.slice(-4)}` : "—"}
+                      </span>
+                      <span aria-hidden="true" className="text-edge">
+                        |
+                      </span>
+                      <span className={`whitespace-nowrap ${statusTextClass(c.status)}`}>
+                        {cardStatusLabel(c.status)}
+                      </span>
+                      {/* 验证码接在状态后面：它只有几分钟有效，而这一行正是
+                          眼睛扫过每张卡时会落到的地方。没有待验证时不渲染，
+                          让有码的那张在一列里跳出来。 */}
+                      {challenge?.code ? (
+                        <Badge tone="warning">验证码 {challenge.code}</Badge>
+                      ) : null}
                     </span>
                   </span>
-                  <span className="text-fg-muted text-xs tabular-nums">
-                    {formatMinorUnits(c.balance_minor, c.currency)}
+                  <span className="flex shrink-0 flex-col items-end">
+                    <span className="text-sm font-semibold tabular-nums">
+                      {formatMinorUnits(c.balance_minor, c.currency)}
+                    </span>
+                    <span className="text-fg-muted text-xs">总余额</span>
                   </span>
                 </button>
               </li>
@@ -472,6 +502,46 @@ function CardActions({
       )}
     </div>
   );
+}
+
+/** 卡片图标：清单每行最左边那个小卡片轮廓。
+ *
+ *  照 Infini 的行式来。它不承载任何信息，作用是给每一行一个固定的左锚点，
+ *  让卡名的起始位置不随内容变化——一列几十张卡时，这种对齐比图标本身值钱。
+ *  用 currentColor 的描边而不是实心块，免得它比卡名还抢眼。 */
+function CardGlyph() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="text-fg-muted size-6 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <rect x="2.5" y="5.5" width="19" height="13" rx="2" />
+      <path d="M2.5 9.5h19" />
+      <path d="M6 14.5h4" />
+    </svg>
+  );
+}
+
+/** 状态的文字色。
+ *
+ *  Infini 把状态显示成一行里的**彩色文字**而不是徽章。照搬：一列里每行都挂
+ *  一个徽章会让整列都是色块，反而看不出哪张不正常；只有异常状态需要跳出来。
+ *  未知取值走默认的灰，与 cardStatusLabel 的「原样显示」一致。 */
+function statusTextClass(status: string): string {
+  switch (cardStatusTone(status)) {
+    case "success":
+      return "text-success";
+    case "danger":
+      return "text-danger";
+    case "warning":
+      return "text-warning";
+    default:
+      return "text-fg-muted";
+  }
 }
 
 /** 扣款周期的中文。未知取值原样显示，不归到已知分类里——
