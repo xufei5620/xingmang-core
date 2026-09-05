@@ -2,6 +2,7 @@ package postgresstore
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -330,4 +331,60 @@ func (s *Store) EligibilityShadowPendingJobs(ctx context.Context) ([]Eligibility
 		pending = append(pending, job)
 	}
 	return pending, rows.Err()
+}
+
+// EligibilityShadowReevaluateEvidence deletes every balance-evidence
+// evaluation at or after each account's anchor floor, so the next projection
+// re-evaluates that evidence from scratch. It exists for one purpose: the
+// differential rehearsal of a bounded evidence pass (XM-INV-CATCHUP-BURST-BACKPRESSURE
+// fix 3). A restored copy carries every evaluation production has already
+// made, so a rehearsal's evidence pass finds nothing pending and a bounded run
+// is trivially identical to an unbounded one -- which proves nothing. Clearing
+// the evaluations on the copy hands both runs the same pile, the shape of the
+// 2026-09-04 incident, and makes the comparison mean something.
+//
+// Evaluation rows are immutable history under triggers, and this must never
+// touch production: it refuses unless the session is a superuser, which the
+// production runtime and owner roles are not and the rehearsal's throwaway
+// container's `postgres` role is; and it lifts the triggers only for its own
+// transaction via session_replication_role, never with the repair GUC that
+// production code paths honour.
+func (s *Store) EligibilityShadowReevaluateEvidence(ctx context.Context) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var superuser bool
+	if err = tx.QueryRow(ctx, `SELECT current_setting('is_superuser')='on'`).Scan(&superuser); err != nil {
+		return 0, err
+	}
+	if !superuser {
+		return 0, errors.New("reevaluate-evidence is a rehearsal-only operation and requires a superuser session on a restored copy")
+	}
+	if _, err = tx.Exec(ctx, `SET LOCAL session_replication_role='replica'`); err != nil {
+		return 0, err
+	}
+	checkpoints, err := tx.Exec(ctx, `
+		DELETE FROM balance_checkpoint_evaluations evaluation
+		USING balance_reconciliation_checkpoints checkpoint
+		JOIN source_account_eligibility_state state ON state.external_account_id=checkpoint.external_account_id
+		WHERE evaluation.checkpoint_id=checkpoint.id
+		  AND checkpoint.as_of>=CASE WHEN state.bootstrap_kind='POLICY_ANCHOR' THEN state.cutover_at ELSE '-infinity'::timestamptz END`)
+	if err != nil {
+		return 0, err
+	}
+	proofs, err := tx.Exec(ctx, `
+		DELETE FROM balance_carry_forward_evaluations evaluation
+		USING balance_carry_forward_proofs proof
+		JOIN source_account_eligibility_state state ON state.external_account_id=proof.external_account_id
+		WHERE evaluation.proof_id=proof.id
+		  AND proof.as_of>=CASE WHEN state.bootstrap_kind='POLICY_ANCHOR' THEN state.cutover_at ELSE '-infinity'::timestamptz END`)
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return checkpoints.RowsAffected() + proofs.RowsAffected(), nil
 }

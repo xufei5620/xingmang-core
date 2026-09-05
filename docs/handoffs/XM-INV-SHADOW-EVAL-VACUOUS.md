@@ -263,3 +263,17 @@ Two follow-ups, both small:
 Expected on the next rehearsal: `accounts_enqueued = accounts_projected = 8`,
 `pending_accounts` null. If the whale still lands in `pending_accounts`, the
 reason will be in the row.
+
+### `--reevaluate-evidence`, 2026-09-05
+
+`EligibilityShadowReevaluateEvidence` deletes every balance-evidence
+evaluation at or after each account's anchor floor on the restored copy, so a
+rehearsal's evidence pass has the pile the 2026-09-04 incident had. It exists
+for the fix-3 differential rehearsal, which is meaningless without it. It is
+rehearsal-only by construction: it refuses a non-superuser session (the
+production runtime and owner roles are not superusers; the throwaway
+container's `postgres` is), lifts the immutability triggers only through
+`session_replication_role` in its own transaction, and the tool requires
+`--reproject-all` alongside it. The report records
+`reevaluate_evidence_requested` and `evaluations_cleared`. Pinned by
+`TestEligibilityShadowReevaluateEvidenceClearsEvaluationsAtOrAfterTheAnchorFloor`.

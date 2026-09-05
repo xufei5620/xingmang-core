@@ -55,13 +55,17 @@ reproject_all=0
 # evaluation; N bounds it. The differential rehearsal runs one backup twice,
 # once with each, and diffs the per-account quantities in the two reports.
 evidence_batch_limit=0
+# Rehearsal-only: clear the copy's evaluations first so the evidence pass has
+# a pile to work through. Meaningless without --reproject-all; the tool
+# refuses the combination and refuses a non-superuser session.
+reevaluate_evidence=0
 tmpfs_size=${RESTORE_POSTGRES_TMPFS_SIZE:-16g}
 
 usage() {
   cat >&2 <<'USAGE'
 usage: shadow-eval.sh --image-tag <0.1.0-rcNN> [--backup <invoice-TIMESTAMP>]
                        [--max-rounds N] [--batch-limit N] [--reproject-all]
-                       [--evidence-batch-limit N]
+                       [--evidence-batch-limit N] [--reevaluate-evidence]
 USAGE
 }
 
@@ -84,6 +88,8 @@ while (( $# > 0 )); do
     --evidence-batch-limit)
       (( $# >= 2 )) || { echo '--evidence-batch-limit requires a value' >&2; exit 2; }
       evidence_batch_limit=$2; shift 2 ;;
+    --reevaluate-evidence)
+      reevaluate_evidence=1; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -371,6 +377,8 @@ migrations_applied_csv=$(comm -13 <(printf '%s\n' "$schema_migrations_before") <
 reproject_all_args=()
 if (( reproject_all )); then reproject_all_args=(--reproject-all); fi
 evidence_batch_limit_args=(--evidence-batch-limit "$evidence_batch_limit")
+reevaluate_evidence_args=()
+if (( reevaluate_evidence )); then reevaluate_evidence_args=(--reevaluate-evidence); fi
 
 set +e
 docker run --pull never --rm --network "$network" --read-only \
@@ -382,7 +390,7 @@ docker run --pull never --rm --network "$network" --read-only \
   --max-rounds "$max_rounds" --batch-limit "$batch_limit" \
   --backup-label "$backup_name" --candidate-image-tag "$image_tag" \
   --migrations-applied "$migrations_applied_csv" \
-  "${reproject_all_args[@]}" "${evidence_batch_limit_args[@]}" \
+  "${reproject_all_args[@]}" "${evidence_batch_limit_args[@]}" "${reevaluate_evidence_args[@]}" \
   >"$report_json" 2>"$tool_log"
 tool_exit=$?
 set -e

@@ -367,3 +367,29 @@ twice, `--evidence-batch-limit 0` and `25`, `after.accounts` identical in
 every field but `projection_version`, `evaluations_by_status` identical).
 Until then the api runs with `0`, which is byte-for-byte the previous
 behaviour.
+
+### Fix 3 hardening, same day
+
+Two gaps the first cut left, both found by asking what the equivalence test
+had not exercised:
+
+- **Progress.** The boundary used to count every pending item at or below
+  the window and floor the cut at `finalized_through`. An item deferred at
+  the end of a pass is unwritten and sits exactly at the published boundary,
+  so the next pass could cut on it again — deferred, unwritten, published at
+  the same instant, requeued — forever. The boundary now counts only items
+  strictly after `finalized_through`, so every chunk advances past at least
+  one new item; the deferred item rides along and the chunk's first new item
+  confirms or disconfirms it, exactly as the single pass would.
+- **The deferral path at a boundary was untested**: the constant-balance
+  fixture evaluated everything as `matched`.
+  `TestEvidenceBatchLimitCarriesADeferredPositiveAcrossTheChunkBoundary`
+  reports 500/600/600/600, drives the queue with a bound of one, and requires
+  the same rows as a single pass — `[positive_classified_non_cash matched
+  positive_classified_non_cash matched matched]` in both modes, four bounded
+  jobs, no spin.
+
+And the rehearsal side: a restored copy already carries every evaluation
+production has made, so the differential pair was going to compare two runs
+that evaluated nothing. `--reevaluate-evidence` (see the shadow-eval handoff)
+clears the copy's evaluations first; the runbook's procedure now requires it.

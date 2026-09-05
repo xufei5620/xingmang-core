@@ -137,3 +137,68 @@ func TestEvidenceBatchLimitChunksTheEvidencePassWithoutChangingItsResult(t *test
 		t.Fatalf("finalized_through differs relative to the fixture: single=%s bounded=%s", single.finalized, bounded.finalized)
 	}
 }
+
+// The case the constant-balance test cannot reach: a checkpoint that reports
+// more than the ledger expects is deferred until the next checkpoint
+// reproduces it. With a bound of one the boundary lands exactly on the
+// deferred checkpoint. The next chunk must carry it along and let the
+// following checkpoint confirm it -- the single pass's outcome -- and the
+// queue must not spin on it (the boundary counts only items after
+// finalized_through, so each chunk advances).
+func TestEvidenceBatchLimitCarriesADeferredPositiveAcrossTheChunkBoundary(t *testing.T) {
+	worker := AuditActor{Type: "system", ID: "batch-defer-test"}
+	balances := []string{"500", "600", "600", "600"}
+
+	store, ctx := integrationStore(t)
+	store.SetEvidenceBatchLimit(1)
+	account, asOfs, queue := seedAnchoredAccountWithCheckpointBalances(t, store, ctx, "d1", balances)
+	through := asOfs[len(asOfs)-1].Add(time.Minute)
+	queue(through)
+	jobs := 0
+	for jobs < 20 {
+		processed, err := store.ProcessEligibilityProjectionJobs(ctx, 10, time.Now().UTC().Add(time.Minute), worker)
+		if err != nil {
+			t.Fatalf("bounded job %d: %v", jobs+1, err)
+		}
+		if processed == 0 {
+			break
+		}
+		jobs++
+	}
+	if jobs >= 20 {
+		t.Fatal("the bounded queue did not drain: a deferred item is pinning the boundary")
+	}
+	bounded := readEvidenceOutcome(t, store, ctx, account)
+
+	store2, ctx2 := integrationStore(t)
+	account2, asOfs2, queue2 := seedAnchoredAccountWithCheckpointBalances(t, store2, ctx2, "d0", balances)
+	queue2(asOfs2[len(asOfs2)-1].Add(time.Minute))
+	if processed, err := store2.ProcessEligibilityProjectionJobs(ctx2, 10, time.Now().UTC().Add(time.Minute), worker); err != nil || processed != 1 {
+		t.Fatalf("single pass: processed=%d err=%v", processed, err)
+	}
+	single := readEvidenceOutcome(t, store2, ctx2, account2)
+
+	if len(single.statuses) == 0 || len(single.statuses) != len(bounded.statuses) {
+		t.Fatalf("both modes must produce the same evaluation rows: single=%v bounded=%v", single.statuses, bounded.statuses)
+	}
+	for i := range single.statuses {
+		if single.statuses[i] != bounded.statuses[i] {
+			t.Fatalf("evaluation %d differs: single=%q bounded=%q (single=%v bounded=%v)", i, single.statuses[i], bounded.statuses[i], single.statuses, bounded.statuses)
+		}
+	}
+	if single.consumedCash != bounded.consumedCash {
+		t.Fatalf("consumed cash differs: single=%d bounded=%d", single.consumedCash, bounded.consumedCash)
+	}
+	// The deferral path really ran: at least one status that only the
+	// confirm-or-disconfirm logic produces.
+	exercised := false
+	for _, status := range single.statuses {
+		if status == "positive_classified_non_cash" || status == "positive_blip_ignored" {
+			exercised = true
+		}
+	}
+	if !exercised {
+		t.Fatalf("the fixture did not exercise the deferral rule; statuses=%v", single.statuses)
+	}
+	t.Logf("statuses (both modes): %v; bounded jobs: %d", single.statuses, jobs)
+}

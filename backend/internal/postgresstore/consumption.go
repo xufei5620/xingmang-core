@@ -3347,20 +3347,19 @@ func (s *Store) completeEligibilityProjectionJob(ctx context.Context, accountID,
 	// lives in source_account_eligibility_state. The differential rehearsal
 	// (single pass vs bounded on two restores of one backup) is the proof.
 	if s.evidenceBatchLimit > 0 {
-		boundary, boundaryErr := evidenceBatchBoundaryTx(ctx, tx, accountID, requested, s.evidenceBatchLimit)
-		if boundaryErr != nil {
-			return boundaryErr
+		// The bound counts only items strictly after finalized_through, so
+		// every chunk advances past at least one new item. That is what makes
+		// a chunk boundary safe against the deferral rule: an item deferred
+		// at the end of a pass is written nowhere and sits at or below the
+		// published boundary; it rides along with the next chunk, whose
+		// first new item confirms or disconfirms it exactly as the single
+		// pass would have. Counting it would let the boundary land on it
+		// again -- deferred, unwritten, published at the same instant,
+		// requeued -- forever. Carry-forward proofs the lock-free half
+		// inserts at old cycles ride along the same way.
+		if requested, err = evidenceBatchBoundaryTx(ctx, tx, accountID, account.FinalizedThrough, requested, s.evidenceBatchLimit); err != nil {
+			return err
 		}
-		// Pending items can predate finalized_through (a carry-forward proof
-		// the lock-free half just inserted at an old cycle, or an item
-		// deferred at the end of the previous pass). Cutting below the
-		// published boundary would evaluate them and publish nothing; keep
-		// the window at least at finalized_through so every chunk that can
-		// advance does, and those old items ride along with it.
-		if boundary.Before(account.FinalizedThrough) {
-			boundary = account.FinalizedThrough
-		}
-		requested = boundary
 	}
 	// A window at or below the one already proved is covered by that proof:
 	// its visibilities are a subset, and the proof's own rows already exist.
@@ -4388,7 +4387,8 @@ func countConsecutiveRebaselinedBlipsTx(ctx context.Context, tx pgx.Tx, accountI
 
 // pendingEvidenceAsOfQuery selects the pending balance-evidence items exactly
 // as evaluatePendingBalanceEvidenceTx does (same anchor floor, same two
-// sources, same order) and returns the as_of of the item at OFFSET $3.
+// sources, same order), restricted to as_of strictly after $4 (the published
+// boundary), and returns the as_of of the item at OFFSET $3.
 const pendingEvidenceAsOfQuery = `
 	WITH evidence_floor AS (
 		SELECT CASE WHEN state.bootstrap_kind='POLICY_ANCHOR'
@@ -4399,14 +4399,14 @@ const pendingEvidenceAsOfQuery = `
 		SELECT checkpoint.as_of,checkpoint.source_sequence,0 AS kind_order,checkpoint.id
 		FROM balance_reconciliation_checkpoints checkpoint
 		WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
-		  AND checkpoint.as_of<=$2
+		  AND checkpoint.as_of<=$2 AND checkpoint.as_of>$4
 		  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
 		  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
 			WHERE evaluation.checkpoint_id=checkpoint.id)
 		UNION ALL
 		SELECT proof.as_of,proof.source_sequence,1,proof.id
 		FROM balance_carry_forward_proofs proof
-		WHERE proof.external_account_id=$1 AND proof.as_of<=$2
+		WHERE proof.external_account_id=$1 AND proof.as_of<=$2 AND proof.as_of>$4
 		  AND proof.as_of>=(SELECT anchor_floor FROM evidence_floor)
 		  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
 			WHERE evaluation.proof_id=proof.id)
@@ -4418,13 +4418,13 @@ const pendingEvidenceAsOfQuery = `
 // limit-th pending balance-evidence item at or before it -- every item
 // sharing that as_of included -- when more than limit items are pending;
 // otherwise `through` unchanged.
-func evidenceBatchBoundaryTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, limit int) (time.Time, error) {
-	if limit <= 0 {
+func evidenceBatchBoundaryTx(ctx context.Context, tx pgx.Tx, accountID string, finalized, through time.Time, limit int) (time.Time, error) {
+	if limit <= 0 || !through.After(finalized) {
 		return through, nil
 	}
-	// Is there a (limit+1)-th item at all? If not, the whole window fits.
+	// Is there a (limit+1)-th new item at all? If not, the whole window fits.
 	var overflow time.Time
-	err := tx.QueryRow(ctx, pendingEvidenceAsOfQuery, accountID, through, limit).Scan(&overflow)
+	err := tx.QueryRow(ctx, pendingEvidenceAsOfQuery, accountID, through, limit, finalized).Scan(&overflow)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return through, nil
 	}
@@ -4432,7 +4432,7 @@ func evidenceBatchBoundaryTx(ctx context.Context, tx pgx.Tx, accountID string, t
 		return through, err
 	}
 	var lastIncluded time.Time
-	if err = tx.QueryRow(ctx, pendingEvidenceAsOfQuery, accountID, through, limit-1).Scan(&lastIncluded); err != nil {
+	if err = tx.QueryRow(ctx, pendingEvidenceAsOfQuery, accountID, through, limit-1, finalized).Scan(&lastIncluded); err != nil {
 		return through, err
 	}
 	return lastIncluded.UTC(), nil

@@ -139,6 +139,11 @@ type Report struct {
 	// differential rehearsal is two reports of one backup that differ only
 	// here, whose per-account quantities must be identical.
 	EvidenceBatchLimit int `json:"evidence_batch_limit"`
+	// ReevaluateEvidence / EvaluationsCleared record that the rehearsal
+	// cleared the copy's evaluations first (and how many), so the evidence
+	// pass had work; a differential pair is only meaningful with this set.
+	ReevaluateEvidence bool  `json:"reevaluate_evidence_requested"`
+	EvaluationsCleared int64 `json:"evaluations_cleared"`
 
 	Before       Snapshot         `json:"before"`
 	BeforeHealth ProjectionHealth `json:"before_projection_health"`

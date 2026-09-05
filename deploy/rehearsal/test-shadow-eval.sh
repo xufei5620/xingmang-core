@@ -59,6 +59,9 @@ assert_exit 2 "--batch-limit too large" --image-tag 0.1.0-rc5 --batch-limit 100
 assert_exit 2 "--evidence-batch-limit non-numeric" --image-tag 0.1.0-rc5 --evidence-batch-limit abc
 assert_exit 2 "--evidence-batch-limit too large" --image-tag 0.1.0-rc5 --evidence-batch-limit 100000
 assert_exit 2 "--evidence-batch-limit missing value" --image-tag 0.1.0-rc5 --evidence-batch-limit
+# A well-formed flag set passes argument validation and stops at the first
+# required-environment check, whose `:?` expansion exits 1, not 2.
+assert_exit 1 "--reevaluate-evidence is parsed and stops at the env checks" --image-tag 0.1.0-rc5 --reproject-all --reevaluate-evidence
 # An explicit --backup's shape is validated with the other flags -- before
 # any environment or tool-availability check -- specifically so this needs
 # neither BACKUP_DIR nor age/docker/etc. installed.

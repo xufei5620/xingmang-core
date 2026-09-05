@@ -17,6 +17,19 @@ import (
 // given instant.
 func seedAnchoredAccountWithCheckpoints(t *testing.T, store *Store, ctx context.Context, tag string, count int) (string, []time.Time, func(time.Time)) {
 	t.Helper()
+	balances := make([]string, count)
+	for i := range balances {
+		balances[i] = "500"
+	}
+	return seedAnchoredAccountWithCheckpointBalances(t, store, ctx, tag, balances)
+}
+
+// seedAnchoredAccountWithCheckpointBalances is the same fixture with one
+// reported balance per checkpoint, so a test can make a checkpoint report
+// more than the ledger expects and exercise the deferral rule.
+func seedAnchoredAccountWithCheckpointBalances(t *testing.T, store *Store, ctx context.Context, tag string, balances []string) (string, []time.Time, func(time.Time)) {
+	t.Helper()
+	count := len(balances)
 	fixtureNow := time.Now().UTC().Truncate(time.Microsecond)
 	policyStart := fixtureNow.Add(-24 * time.Hour).Truncate(time.Second)
 	sourceID := "10000000-0000-4000-8000-0000000003" + tag
@@ -75,7 +88,7 @@ func seedAnchoredAccountWithCheckpoints(t *testing.T, store *Store, ctx context.
 		if err := store.ObserveBalanceCheckpoint(ctx, BalanceCheckpointObservation{
 			SourceInstanceID: sourceID, ExternalUserID: "3" + tag, ExternalEventID: eventID,
 			CheckpointID: fmt.Sprintf("batch-checkpoint-%d", i), CheckpointKind: "reconciliation", BaselineMember: i == 0,
-			BalanceServiceUnits: "500", UnitCode: "SUB2_BALANCE_1E8", SourceSnapshotID: testHash(cycle.cycleID),
+			BalanceServiceUnits: balances[i], UnitCode: "SUB2_BALANCE_1E8", SourceSnapshotID: testHash(cycle.cycleID),
 			SnapshotRowCount: "1", AsOf: asOf, ObservedAt: asOf, StreamWatermarkAt: asOf,
 			SourceCursor: fmt.Sprintf("balance:3%s:%d", tag, i), SourceRevision: event.PayloadHash,
 			CutoverManifestHash: manifestHash, ConfigurationHash: configHash, SourceSequence: int64(i + 1),

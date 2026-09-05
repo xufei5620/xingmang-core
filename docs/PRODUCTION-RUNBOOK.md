@@ -2411,12 +2411,19 @@ projection job evaluates; the job publishes `finalized_through` at the
 limit-th item's `as_of` and requeues itself for the rest. The rehearsal tool
 takes the same knob as `--evidence-batch-limit N`, and the report records it
 as `evidence_batch_limit`. Before the bound is enabled in production, run the
-**differential rehearsal**: the same backup twice with `--reproject-all`, once
-with `--evidence-batch-limit 0` and once with a small bound (for example
-`25`), and require the two reports' `after.accounts` to be identical in every
-field but `projection_version` (which legitimately increments once per chunk)
-and the `evaluations_by_status` counts to match exactly. Any difference means
-the bound changed a decision and must be understood before it ships.
+**differential rehearsal**: the same backup twice with `--reproject-all
+--reevaluate-evidence`, once with `--evidence-batch-limit 0` and once with a
+small bound (for example `25`), and require the two reports' `after.accounts`
+to be identical in every field but `projection_version` (which legitimately
+increments once per chunk) and the `evaluations_by_status` counts to match
+exactly. `--reevaluate-evidence` is what gives the pair meaning: a restored
+copy already carries every evaluation production has made, so without it the
+evidence pass finds nothing pending and the two runs are trivially identical.
+It clears every evaluation at or after each account's anchor floor on the copy
+(rehearsal-only: it refuses a non-superuser session, so it cannot run against
+production), and the report records `evaluations_cleared`. Any difference
+between the two reports means the bound changed a decision and must be
+understood before it ships.
 
 Do not read `rounds_run` as evidence that the rehearsal did anything.
 Production has eight accounts and the batch limit is twenty-five, so a

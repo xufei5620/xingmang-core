@@ -377,22 +377,22 @@ func TestEvidenceBatchBoundaryCutsAtTheLimitThItemAndKeepsASharedInstantWhole(t 
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	// Unbounded: the window is untouched.
-	got, err := evidenceBatchBoundaryTx(ctx, tx, account, through, 0)
+	got, err := evidenceBatchBoundaryTx(ctx, tx, account, cutover, through, 0)
 	if err != nil || !got.Equal(through) {
 		t.Fatalf("limit 0 must leave the window alone: got %s err %v", got, err)
 	}
 	// Limit larger than the pile: untouched.
-	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 3)
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, cutover, through, 3)
 	if err != nil || !got.Equal(through) {
 		t.Fatalf("limit >= pending must leave the window alone: got %s err %v", got, err)
 	}
 	// Limit 2 of 3: cut at the second item's as_of.
-	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 2)
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, cutover, through, 2)
 	if err != nil || !got.Equal(second) {
 		t.Fatalf("limit 2 must cut at the second as_of %s: got %s err %v", second, got, err)
 	}
 	// Limit 1 of 3: cut at the first.
-	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 1)
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, cutover, through, 1)
 	if err != nil || !got.Equal(first) {
 		t.Fatalf("limit 1 must cut at the first as_of %s: got %s err %v", first, got, err)
 	}
@@ -400,7 +400,7 @@ func TestEvidenceBatchBoundaryCutsAtTheLimitThItemAndKeepsASharedInstantWhole(t 
 	// instant, and the cut includes both (the evaluation pass selects by
 	// as_of <= boundary, so a shared instant is never split).
 	seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, first)
-	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 1)
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, cutover, through, 1)
 	if err != nil || !got.Equal(first) {
 		t.Fatalf("a shared instant must be kept whole at %s: got %s err %v", first, got, err)
 	}
@@ -412,12 +412,65 @@ func TestEvidenceBatchBoundaryCutsAtTheLimitThItemAndKeepsASharedInstantWhole(t 
 		t.Fatal(err)
 	}
 	seedEligibilityShadowCheckpointEvaluation(t, store, ctx, firstID, 1, "matched")
-	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 3)
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, cutover, through, 3)
 	if err != nil || !got.Equal(through) {
 		t.Fatalf("with one item evaluated, 3 pending remain and limit 3 fits: got %s err %v", got, err)
 	}
-	got, err = evidenceBatchBoundaryTx(ctx, tx, account, through, 2)
+	got, err = evidenceBatchBoundaryTx(ctx, tx, account, cutover, through, 2)
 	if err != nil || !got.Equal(second) {
 		t.Fatalf("with one item evaluated, limit 2 cuts at %s: got %s err %v", second, got, err)
+	}
+}
+
+// The differential rehearsal needs a pile to evaluate; on a copy every
+// evaluation already exists. Clearing must respect the anchor floor (an
+// evaluation before a POLICY_ANCHOR account's cutover is not this account's
+// evidence and is left alone) and count what it removed.
+func TestEligibilityShadowReevaluateEvidenceClearsEvaluationsAtOrAfterTheAnchorFloor(t *testing.T) {
+	store, ctx := integrationStore(t)
+	sourceID, cutover, manifestHash, configHash := seedEligibilityProjectionHealthSource(t, store, ctx)
+	account := "60000000-0000-4000-8000-0000000000c9"
+	seedEligibilityProjectionHealthAccount(t, store, ctx, sourceID, account, "reevaluate", cutover, manifestHash, configHash)
+	// bootstrap_kind is guarded by the trust-boundary trigger; the fixture
+	// lifts it for this one statement the same way the feature under test
+	// lifts the evaluation triggers -- superuser session, replica role,
+	// transaction-local.
+	anchorTx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = anchorTx.Exec(ctx, `SET LOCAL session_replication_role='replica'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = anchorTx.Exec(ctx, `UPDATE source_account_eligibility_state SET bootstrap_kind='POLICY_ANCHOR' WHERE external_account_id=$1`, account); err != nil {
+		t.Fatal(err)
+	}
+	if err = anchorTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, cutover.Add(-time.Hour))
+	after := seedEligibilityShadowCheckpoint(t, store, ctx, sourceID, account, manifestHash, configHash, cutover.Add(time.Hour))
+	seedEligibilityShadowCheckpointEvaluation(t, store, ctx, before, 1, "matched")
+	seedEligibilityShadowCheckpointEvaluation(t, store, ctx, after, 1, "matched")
+
+	cleared, err := store.EligibilityShadowReevaluateEvidence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 1 {
+		t.Fatalf("expected exactly the post-anchor evaluation cleared, got %d", cleared)
+	}
+	var remaining int
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM balance_checkpoint_evaluations WHERE checkpoint_id=$1`, before).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("the pre-anchor evaluation must be left alone, got %d rows", remaining)
+	}
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM balance_checkpoint_evaluations WHERE checkpoint_id=$1`, after).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("the post-anchor evaluation must be gone, got %d rows", remaining)
 	}
 }
