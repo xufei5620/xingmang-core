@@ -2,6 +2,7 @@ package cards
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func pgStore(t *testing.T) (*PgStore, *pgxpool.Pool) {
 		// 因为上一轮的行把唯一键占住了。
 		"cards.webhook_event",
 		"cards.card_challenge",
-		"cards.withdraw_request", "cards.withdraw_address",
+		"cards.withdraw_request", "cards.withdraw_address", "cards.withdraw_limit",
 	} {
 		if _, err := pool.Exec(context.Background(), "TRUNCATE "+table); err != nil {
 			t.Fatal(err)
@@ -1037,5 +1038,88 @@ func TestPgStoreAllowedAddressRejectsUnknown(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != "addr-1" {
 		t.Fatalf("清单不对: %+v", list)
+	}
+}
+
+// 没设过额度的账号读回零值而**不是报错**。
+//
+// 报错会让「还没人给这个账号设过上限」和「库挂了」长得一样，
+// 而这两件事的处置完全不同：前者去后台设一个，后者去看数据库。
+func TestPgStoreWithdrawLimitsUnsetIsNotAnError(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	got, err := store.WithdrawLimitsFor(ctx, testAccount)
+	if err != nil {
+		t.Fatalf("没设过额度不该报错: %v", err)
+	}
+	if got.PerOperation != "" || got.PerDay != "" {
+		t.Fatalf("没设过应读回零值, got %+v", got)
+	}
+	// 零值必须被判成「未配置」，也就是不能提现。
+	if err := got.CheckWithdraw("1", "0"); !errors.Is(err, ErrLimitsUnconfigured) {
+		t.Fatalf("零值额度必须 fail closed, got %v", err)
+	}
+
+	// 清单里也不该凭空冒出一行。
+	list, err := store.ListWithdrawLimits(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("没设过的账号不该出现在清单里, got %+v", list)
+	}
+}
+
+// 额度写入即生效，重复写是整体替换。
+func TestPgStoreSetWithdrawLimitsReplaces(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if err := store.SetWithdrawLimits(ctx, testAccount, "500", "2000", "xufei"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.WithdrawLimitsFor(ctx, testAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PerOperation != "500" || got.PerDay != "2000" {
+		t.Fatalf("额度读回不对: %+v", got)
+	}
+
+	// 再写一次：整体替换，不是叠加。
+	if err := store.SetWithdrawLimits(ctx, testAccount, "800", "3000", "someone-else"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := store.ListWithdrawLimits(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("同一账号只该有一行, got %d", len(list))
+	}
+	if list[0].PerOperation != "800" || list[0].PerDay != "3000" {
+		t.Fatalf("额度未被替换: %+v", list[0])
+	}
+	// 「谁改的」跟着一起更新——旧的那个人不该继续背这个上限。
+	if list[0].UpdatedBy != "someone-else" {
+		t.Fatalf("改动者应更新, got %q", list[0].UpdatedBy)
+	}
+}
+
+// 额度按账号隔离：给 A 设的上限不该影响 B。
+func TestPgStoreWithdrawLimitsArePerAccount(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	if err := store.SetWithdrawLimits(ctx, testAccount, "500", "2000", "xufei"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.WithdrawLimitsFor(ctx, "OTHER")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PerOperation != "" {
+		t.Fatalf("另一个账号不该拿到这份额度, got %+v", got)
 	}
 }

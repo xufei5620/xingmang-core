@@ -30,14 +30,9 @@ type Account struct {
 	// Limits 按账号各配一份。两个账号的资金是分开的，用一套全局上限
 	// 会让「单日 500」变成两个账号抢同一个额度。
 	Limits Limits
-	// WithdrawLimits 是提现的额度，**与 Limits 分开**。
-	//
-	// 不共用一个字段的理由是这两件事的约束根本不同：卡片这边生产上配的是
-	// unlimited（产品负责人裁定「只要 infini 那边有余额就可以开」，
-	// 而余额本身就是硬顶）；提现的目的恰恰是把余额搬空，余额不构成任何
-	// 约束，所以 CheckWithdraw 拒绝 unlimited。共用一个字段的结果是提现
-	// 永远抛 ErrWithdrawLimitsUnbounded——一个装好了却永远跑不起来的功能。
-	WithdrawLimits Limits
+	// 提现额度**不在这里**：它存在库里，由管理后台的
+	// cards.withdraw.limit.set Action 修改（产品负责人 2026-09-05 决定）。
+	// 见 WithdrawStore.WithdrawLimitsFor。
 }
 
 // Store 是领域层需要的持久化能力。

@@ -231,3 +231,84 @@ SELECT request_id, account, chain, token_type, amount_text, address_id, address,
 	}
 	return out, rows.Err()
 }
+
+// WithdrawLimitsFor 返回某账号的提现额度。
+//
+// **没有行时返回零值 Limits 而不是报错**：那不是异常，是「还没人给这个账号
+// 设过上限」的正常状态，由 CheckWithdraw 判成 ErrLimitsUnconfigured。
+// 报错会让「没配」和「库挂了」长得一样，而这两件事的处置完全不同。
+func (s *PgStore) WithdrawLimitsFor(ctx context.Context, account string) (Limits, error) {
+	const selectSQL = `
+SELECT per_operation, per_day
+  FROM cards.withdraw_limit
+ WHERE environment = $1 AND account = $2`
+
+	var l Limits
+	err := s.pool.QueryRow(ctx, selectSQL, s.environment, account).Scan(&l.PerOperation, &l.PerDay)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Limits{}, nil
+	}
+	if err != nil {
+		return Limits{}, fmt.Errorf("查提现额度 %s: %w", account, err)
+	}
+	return l, nil
+}
+
+// WithdrawLimitRow 是额度加上「谁改的」，供管理端展示。
+type WithdrawLimitRow struct {
+	Account      string
+	PerOperation string
+	PerDay       string
+	UpdatedBy    string
+	UpdatedAt    time.Time
+}
+
+// SetWithdrawLimits 写入某账号的提现额度。
+//
+// 整体替换而不是逐字段更新：两个值是一对，只改单笔不改单日会得到一组
+// 谁也没打算过的组合。
+func (s *PgStore) SetWithdrawLimits(ctx context.Context, account, perOperation, perDay, by string) error {
+	const upsertSQL = `
+INSERT INTO cards.withdraw_limit (environment, account, per_operation, per_day, updated_by, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (environment, account) DO UPDATE
+   SET per_operation = EXCLUDED.per_operation,
+       per_day       = EXCLUDED.per_day,
+       updated_by    = EXCLUDED.updated_by,
+       updated_at    = EXCLUDED.updated_at`
+
+	if _, err := s.pool.Exec(ctx, upsertSQL,
+		s.environment, account, perOperation, perDay, by, s.now().UTC()); err != nil {
+		return fmt.Errorf("写提现额度 %s: %w", account, err)
+	}
+	return nil
+}
+
+// ListWithdrawLimits 返回所有已设置的提现额度。
+//
+// 没设过的账号**不在结果里**，管理端据此显示成「未设置（不能提现）」——
+// 补一行零值会让「设成 0」和「没设过」长得一样，而前者是有人刻意关掉了
+// 这个账号的提现，后者是还没人管过它。
+func (s *PgStore) ListWithdrawLimits(ctx context.Context) ([]WithdrawLimitRow, error) {
+	const listSQL = `
+SELECT account, per_operation, per_day, updated_by, updated_at
+  FROM cards.withdraw_limit
+ WHERE environment = $1
+ ORDER BY account`
+
+	rows, err := s.pool.Query(ctx, listSQL, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查提现额度: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WithdrawLimitRow
+	for rows.Next() {
+		var r WithdrawLimitRow
+		if err := rows.Scan(&r.Account, &r.PerOperation, &r.PerDay, &r.UpdatedBy, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

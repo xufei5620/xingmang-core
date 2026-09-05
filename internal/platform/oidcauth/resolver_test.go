@@ -592,6 +592,22 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 		}
 	}
 
+	// XM-CARD6（2026-09-05 改）：额度从环境变量搬进数据库、由后台调整之后，
+	// 「改不了」这道物理屏障没有了。替代它的是**两把钥匙**：
+	//   fund.limit.manage（改额度）给 admin，
+	//   fund.withdraw（发起提现）给 fund-operator。
+	// 被盗用的 fund-operator 抬不高自己的天花板；被盗用的 admin 抬得高
+	// 天花板却提不了现。合成一个权限就再也拆不开了。
+	if !slices.Contains(admin, "fund.limit.manage") {
+		t.Fatal("admin 应持有 fund.limit.manage：额度要有人能调，而调它的不该是提现的那个角色")
+	}
+	if slices.Contains(m["fund-operator"], "fund.limit.manage") {
+		t.Fatal("fund-operator 不该持有 fund.limit.manage：那等于让提现的人自己抬高自己的上限")
+	}
+	if slices.Contains(staff, "fund.limit.manage") {
+		t.Fatal("staff 不该持有 fund.limit.manage")
+	}
+
 	// XM-LOGIN：admin 管理本地登录账号，staff 不该有这个能力。
 	if !slices.Contains(admin, "staff.manage") {
 		t.Fatalf("admin 应含 staff.manage（XM-LOGIN 账号管理）, got %v", admin)

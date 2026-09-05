@@ -64,6 +64,49 @@ export interface WithdrawItem {
   updated_at?: string;
 }
 
+/** 一个账号的提现额度。
+ *
+ *  没设过额度的账号**不会出现在清单里**——「设成 0」和「没设过」是两件事，
+ *  前者是有人刻意关掉了这个账号的提现，后者是还没人管过它。 */
+export interface WithdrawLimit {
+  account: string;
+  per_operation: string;
+  per_day: string;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export async function listWithdrawLimits(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<WithdrawLimit[]> {
+  const body = await client
+    .get<ListResponse<WithdrawLimit>>("/api/v1/cards/withdraw/limits", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return body.items ?? [];
+}
+
+/** 调整某账号的提现额度（`cards.withdraw.limit.set@1`）。
+ *
+ *  权限是 `fund.limit.manage`（admin 持有），**与提现的 `fund.withdraw`
+ *  不是同一个**。额度从环境变量搬进数据库之后，「改不了」这道屏障就没有了；
+ *  替代它的是两把钥匙分持——被盗用的 fund-operator 抬不高自己的天花板。
+ *
+ *  两个值一起提交：只改单笔不改单日会得到一组谁也没打算过的组合。 */
+export function setWithdrawLimits(
+  params: { account: string; per_operation: string; per_day: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "cards.withdraw.limit.set", version: "1", params },
+    options,
+    client,
+  );
+}
+
 export async function listWithdrawAddresses(
   options: ListOptions = {},
   client: ApiClient = apiClient,

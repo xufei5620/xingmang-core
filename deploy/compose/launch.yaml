@@ -259,20 +259,11 @@ services:
       XM_CARDS_CHRIS_LIMIT_PER_DAY: ${XM_CARDS_CHRIS_LIMIT_PER_DAY:-}
       XM_CARDS_LINFENG_LIMIT_PER_OPERATION: ${XM_CARDS_LINFENG_LIMIT_PER_OPERATION:-}
       XM_CARDS_LINFENG_LIMIT_PER_DAY: ${XM_CARDS_LINFENG_LIMIT_PER_DAY:-}
-      # 提现额度（XM-CARD6）。与上面那四条**不是同一套**，也不回落到它们。
-      #
-      # 卡片额度当前配的是 unlimited（产品负责人裁定：Infini 账户余额本身
-      # 就是硬顶）；提现的目的恰恰是把余额搬空，余额不构成任何约束，所以
-      # 提现额度**不接受 unlimited**，必须是真数字，启动期就校验。
-      #
-      # 两个都留空 = 该账号不能提现（fail closed）。这是允许的状态：不用
-      # 提现的部署不该被逼着编两个数字，而为通过校验编出来的数字不构成约束。
-      # 只配一半会在启动期被拒——那种半配的行为虽安全，却表现成「配了却
-      # 用不了」，人会以为是 bug 去翻代码。
-      XM_CARDS_CHRIS_WITHDRAW_LIMIT_PER_OPERATION: ${XM_CARDS_CHRIS_WITHDRAW_LIMIT_PER_OPERATION:-}
-      XM_CARDS_CHRIS_WITHDRAW_LIMIT_PER_DAY: ${XM_CARDS_CHRIS_WITHDRAW_LIMIT_PER_DAY:-}
-      XM_CARDS_LINFENG_WITHDRAW_LIMIT_PER_OPERATION: ${XM_CARDS_LINFENG_WITHDRAW_LIMIT_PER_OPERATION:-}
-      XM_CARDS_LINFENG_WITHDRAW_LIMIT_PER_DAY: ${XM_CARDS_LINFENG_WITHDRAW_LIMIT_PER_DAY:-}
+      # 提现额度**不在这里**：它存在库里，由管理端的
+      # cards.withdraw.limit.set Action 调整（产品负责人 2026-09-05 决定：
+      # 一个要登服务器改文件再重启才能动的数字，实际上没人会去动）。
+      # 改它要 fund.limit.manage 权限（admin），与提现的 fund.withdraw
+      # （fund-operator）分持——两把钥匙，拿到任一把都搬不空资金池。
       # 用户清单模式（XM-0046）：off / fake / real。留空沿用进程默认 fake；
       # 生产应显式 off——real 客户端未交付前，fake 客户不得出现在生产页面。
       XM_PLATFORM_USERS_MODE: ${XM_PLATFORM_USERS_MODE:-}

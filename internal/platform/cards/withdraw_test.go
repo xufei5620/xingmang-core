@@ -184,34 +184,96 @@ func (f *withdrawFake) Withdraw(ctx context.Context, req infini.WithdrawRequest)
 //
 // 额度用真数字而不是 unlimited：提现服务本来就拒绝 unlimited，
 // 用它组测试会让每个用例都卡在额度校验上。
-func newWithdrawService(client infini.CardClient, store WithdrawStore) *WithdrawService {
+// newWithdrawService 组装一个「额度已配好」的服务。
+//
+// 额度现在存在库里（管理后台可调），而它是提现的必经闸——不配的话每个
+// 用例都会先撞上 ErrLimitsUnconfigured，测不到它真正想测的那一段。
+// 专门测「没配额度」的用例直接用 NewWithdrawService，不走这个助手。
+func newWithdrawService(client infini.CardClient, store *memStore) *WithdrawService {
+	store.withdrawLimits[testAccount] = Limits{PerOperation: "1000", PerDay: "5000"}
 	return NewWithdrawService([]Account{{
-		ID:             testAccount,
-		Client:         client,
-		Limits:         Limits{PerOperation: "1000", PerDay: "5000"},
-		WithdrawLimits: Limits{PerOperation: "1000", PerDay: "5000"},
+		ID:     testAccount,
+		Client: client,
+		Limits: Limits{PerOperation: "1000", PerDay: "5000"},
 	}}, store, func() time.Time { return issueNow })
 }
 
-// 提现额度与卡片额度是**两套**，不能共用一个字段。
+// 额度从**库里**读，不是从进程配置读（XM-CARD6，产品负责人 2026-09-05
+// 决定改成管理后台可调）。
 //
-// 生产上卡片额度按产品负责人的裁定配成 unlimited（「只要 infini 那边有余额
-// 就可以开」）。若提现读的是同一个字段，CheckWithdraw 会永远抛
-// ErrWithdrawLimitsUnbounded——提现变成一个装好了但永远跑不起来的功能，
-// 而这种「fail-closed 到不可用」在上线当天才会被发现。
+// 这条断言的要害是「改完立刻生效」：额度存在进程里就意味着改一次要重启
+// 一次，而重启 API 会把正在用后台的人踢下线——于是没人愿意改，额度就永远
+// 停在第一次拍脑袋定的那个数上。
+func TestWithdrawLimitsComeFromStore(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+	}
+	svc := newWithdrawService(fake, store)
+	// 助手会先塞一份宽松额度，这里覆盖成要测的那一档（顺序要紧）。
+	store.withdrawLimits[testAccount] = Limits{PerOperation: "100", PerDay: "1000"}
+
+	req := WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "150", AddressID: "addr-1",
+	}
+	if _, err := svc.Withdraw(context.Background(), req); !errors.Is(err, ErrPerOperationExceeded) {
+		t.Fatalf("150 应超出库里的单次上限 100, got %v", err)
+	}
+
+	// 把上限调高——不重启、不改配置，下一笔立刻放行。
+	store.withdrawLimits[testAccount] = Limits{PerOperation: "500", PerDay: "1000"}
+	if _, err := svc.Withdraw(context.Background(), req); err != nil {
+		t.Fatalf("调高上限后应放行: %v", err)
+	}
+}
+
+// 没配额度的账号一律不能提现。
+//
+// 这是新装环境的默认状态，也是唯一正确的默认：一个「没人设过上限」的账号
+// 若能提现，等于上限的默认值是无穷大。
+func TestWithdrawRefusesAccountWithoutLimits(t *testing.T) {
+	fake := newWithdrawFake()
+	store := newMemStore()
+	store.addresses["addr-1"] = WithdrawAddress{
+		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
+	}
+	svc := NewWithdrawService([]Account{{ID: testAccount, Client: fake}},
+		store, func() time.Time { return issueNow })
+
+	_, err := svc.Withdraw(context.Background(), WithdrawRequest{
+		Account: testAccount, RequestID: "w-1", Chain: "TRON", TokenType: "USDT",
+		Amount: "1", AddressID: "addr-1",
+	})
+	if !errors.Is(err, ErrLimitsUnconfigured) {
+		t.Fatalf("没设过额度必须拒绝, got %v", err)
+	}
+	if fake.withdrawCalls != 0 {
+		t.Fatal("必须在打上游之前就拒绝")
+	}
+}
+
+// 提现额度与卡片额度是**两套**，存在两个地方。
+//
+// 卡片额度在 Account 上（进程配置，生产按裁定配成 unlimited——「只要 infini
+// 那边有余额就可以开」）；提现额度在库里（管理后台可调）。若提现读的是卡片
+// 那个字段，CheckWithdraw 会永远抛 ErrWithdrawLimitsUnbounded——提现变成一个
+// 装好了但永远跑不起来的功能，而这种「fail-closed 到不可用」在上线当天才会
+// 被发现。
 func TestWithdrawLimitsAreSeparateFromCardLimits(t *testing.T) {
 	fake := newWithdrawFake()
 	store := newMemStore()
 	store.addresses["addr-1"] = WithdrawAddress{
 		ID: "addr-1", Account: testAccount, Chain: "TRON", Address: "TAddr",
 	}
+	// 提现额度单独存库里，配真数字。
+	store.withdrawLimits[testAccount] = Limits{PerOperation: "500", PerDay: "2000"}
 	svc := NewWithdrawService([]Account{{
 		ID:     testAccount,
 		Client: fake,
 		// 卡片不限额——这就是生产的配法。
 		Limits: Limits{PerOperation: LimitUnlimited, PerDay: LimitUnlimited},
-		// 提现单独配真数字。
-		WithdrawLimits: Limits{PerOperation: "500", PerDay: "2000"},
 	}}, store, func() time.Time { return issueNow })
 
 	if _, err := svc.Withdraw(context.Background(), WithdrawRequest{

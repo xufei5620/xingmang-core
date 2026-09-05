@@ -3,6 +3,7 @@ package cards
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
@@ -14,6 +15,8 @@ const (
 	ActionWithdrawAddressRegister = "cards.withdraw.address.register"
 	// ActionWithdraw 发起一次提现。
 	ActionWithdraw = "cards.withdraw.execute"
+	// ActionWithdrawLimitSet 调整某账号的提现额度。
+	ActionWithdrawLimitSet = "cards.withdraw.limit.set"
 )
 
 // PermissionWithdraw 是提现权限。
@@ -28,6 +31,20 @@ const PermissionWithdraw = "fund.withdraw"
 // 与提现本身分开：登记地址决定「钱能去哪儿」，提现决定「什么时候去」。
 // 两者都由 fund-operator 持有，但分成两个权限串，让以后想拆的时候拆得开。
 const PermissionWithdrawManage = "fund.address.manage"
+
+// PermissionWithdrawLimitManage 是调整提现额度的权限。
+//
+// **刻意与 fund.withdraw 分开，且给的是另一个角色（admin）。**
+//
+// 额度从环境变量搬进数据库之后，「改不了」这道物理屏障就没有了；能替代它
+// 的只有「改它的人和用它的人不是同一个」。一个被盗用的 fund-operator 会话
+// 抬不高自己的天花板，一个被盗用的 admin 会话抬得高天花板却提不了现——
+// 两把钥匙都拿到才能把资金池搬空。
+//
+// 今天同一个人两个角色都持有，这个分离在实践上是名义的；但审计里
+// 「抬高上限」与「发起提现」是两条独立记录，而且想拆给两个人时拆得开。
+// 把它们并成一个权限就再也拆不开了。
+const PermissionWithdrawLimitManage = "fund.limit.manage"
 
 func withdrawAddressRegisterDef(accounts []string) action.Definition {
 	return action.Definition{
@@ -73,6 +90,68 @@ func withdrawDef(accounts []string) action.Definition {
 			},
 		},
 		Environments: allEnvironments, PrincipalTypes: humanOnly,
+	}
+}
+
+func withdrawLimitSetDef(accounts []string) action.Definition {
+	return action.Definition{
+		ID: ActionWithdrawLimitSet, Version: actionVersion,
+		RiskLevel: action.L1, Permission: PermissionWithdrawLimitManage,
+		Schema: action.Schema{
+			Fields: []action.Field{
+				accountField(accounts),
+				{Name: "per_operation", Type: action.FieldString, Required: true},
+				{Name: "per_day", Type: action.FieldString, Required: true},
+			},
+		},
+		Environments: allEnvironments, PrincipalTypes: humanOnly,
+	}
+}
+
+// WithdrawLimitStore 是调整额度需要的写能力。
+type WithdrawLimitStore interface {
+	SetWithdrawLimits(ctx context.Context, account, perOperation, perDay, by string) error
+}
+
+func withdrawLimitSetHandler(store WithdrawLimitStore) action.Handler {
+	return func(ctx context.Context, params map[string]any) (any, error) {
+		if store == nil {
+			return nil, ErrServiceUnbound
+		}
+		account := stringParam(params, "account")
+		limits := Limits{
+			PerOperation: strings.TrimSpace(stringParam(params, "per_operation")),
+			PerDay:       strings.TrimSpace(stringParam(params, "per_day")),
+		}
+
+		// 在**写库之前**校验，而不是等下一次提现时才发现配歪了。
+		//
+		// 这里复用提现自己那条校验（拒绝 unlimited、拒绝解析不出的数字），
+		// 用一笔最小金额试跑一遍：那正是这两个值将来要被怎么用。
+		// 另写一套校验必然会和真正的判定漂开，而漂开的方向永远是「存进去
+		// 时说没问题、真用时被拒」。
+		if err := limits.CheckWithdraw("0.000001", "0"); err != nil {
+			return nil, fmt.Errorf("额度不可用: %w", err)
+		}
+
+		who := ""
+		if p, ok := principal.FromContext(ctx); ok {
+			who = p.ID
+		}
+
+		action.RecordResource(ctx, "infini_withdraw_limit", account)
+		// 新值进审计摘要。**这条记录是这次改动的全部意义所在**——额度搬进
+		// 数据库之后，「谁在什么时候把上限从 500 抬到 50000」只能靠它回答。
+		action.RecordAfter(ctx, map[string]any{
+			"account": account, "per_operation": limits.PerOperation, "per_day": limits.PerDay,
+		})
+
+		if err := store.SetWithdrawLimits(ctx, account, limits.PerOperation, limits.PerDay, who); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"account": account, "per_operation": limits.PerOperation, "per_day": limits.PerDay,
+		}, nil
 	}
 }
 
@@ -156,7 +235,10 @@ func withdrawHandler(svc *WithdrawService) action.Handler {
 }
 
 // RegisterWithdrawActions 把两个提现 Action 注册进内核。
-func RegisterWithdrawActions(reg *action.Registry, svc *WithdrawService, store WithdrawAddressStore, accounts []string) error {
+func RegisterWithdrawActions(
+	reg *action.Registry, svc *WithdrawService,
+	store WithdrawAddressStore, limits WithdrawLimitStore, accounts []string,
+) error {
 	if reg == nil {
 		return nil
 	}
@@ -166,6 +248,7 @@ func RegisterWithdrawActions(reg *action.Registry, svc *WithdrawService, store W
 	}{
 		{withdrawAddressRegisterDef(accounts), withdrawAddressRegisterHandler(store)},
 		{withdrawDef(accounts), withdrawHandler(svc)},
+		{withdrawLimitSetDef(accounts), withdrawLimitSetHandler(limits)},
 	}
 	for _, e := range entries {
 		if err := reg.Register(e.def, e.handler); err != nil {

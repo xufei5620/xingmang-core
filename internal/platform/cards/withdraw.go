@@ -69,6 +69,17 @@ type WithdrawStore interface {
 	BeginWithdraw(ctx context.Context, w WithdrawRecord) (WithdrawRecord, bool, error)
 	// UpdateWithdraw 回写状态（受理结果或后续查询到的终态）。
 	UpdateWithdraw(ctx context.Context, w WithdrawRecord) error
+	// WithdrawLimitsFor 返回某账号的提现额度。
+	//
+	// 从库里读而不是从进程配置读（产品负责人 2026-09-05 决定改成管理后台
+	// 可调）：额度存在进程里意味着改一次要重启一次，而重启 API 会把正在
+	// 用后台的人踢下线——于是没人愿意改，额度就永远停在第一次拍脑袋定的
+	// 那个数上。**每次提现都现读**，不做进程内缓存：缓存会让「刚调完额度
+	// 却还是被拒」变成一个要等几分钟才自愈的怪现象。
+	//
+	// 没有条目时返回零值，由 CheckWithdraw 判成 ErrLimitsUnconfigured——
+	// 一个「没人设过上限」的账号若能提现，等于上限的默认值是无穷大。
+	WithdrawLimitsFor(ctx context.Context, account string) (Limits, error)
 	// OpenWithdrawals 返回尚未收敛的提现（pending / processing）。
 	//
 	// 只返回未收敛的：终态的再查一次既浪费配额，也提高触发限流的概率
@@ -166,11 +177,15 @@ func (s *WithdrawService) Withdraw(ctx context.Context, req WithdrawRequest) (Wi
 			ErrAddressNotAllowed, addr.Chain, req.Chain)
 	}
 
+	limits, err := s.store.WithdrawLimitsFor(ctx, acct.ID)
+	if err != nil {
+		return WithdrawOutcome{}, fmt.Errorf("读取提现额度: %w", err)
+	}
 	spent, err := s.store.WithdrawnToday(ctx, acct.ID, s.now())
 	if err != nil {
 		return WithdrawOutcome{}, fmt.Errorf("读取今日提现累计: %w", err)
 	}
-	if err := acct.WithdrawLimits.CheckWithdraw(req.Amount, spent); err != nil {
+	if err := limits.CheckWithdraw(req.Amount, spent); err != nil {
 		return WithdrawOutcome{}, err
 	}
 

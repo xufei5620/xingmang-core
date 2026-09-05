@@ -17,6 +17,8 @@ type WithdrawQuerier interface {
 	ListWithdrawAddresses(ctx context.Context) ([]cards.WithdrawAddress, error)
 	// RecentWithdrawals 返回最近的提现记录，新的在前。
 	RecentWithdrawals(ctx context.Context, limit int) ([]cards.WithdrawRecord, error)
+	// ListWithdrawLimits 返回已设置的提现额度（没设过的账号不在结果里）。
+	ListWithdrawLimits(ctx context.Context) ([]cards.WithdrawLimitRow, error)
 }
 
 type withdrawAddressItem struct {
@@ -107,4 +109,38 @@ func formatUTC(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+type withdrawLimitItem struct {
+	Account      string `json:"account"`
+	PerOperation string `json:"per_operation"`
+	PerDay       string `json:"per_day"`
+	// UpdatedBy / UpdatedAt 让「这个上限是谁定的、什么时候定的」在额度旁边
+	// 就看得到。审计里也有，但为一个数字去翻审计太贵，而这恰恰是看到一个
+	// 上限时第一个会冒出来的问题。
+	UpdatedBy string `json:"updated_by,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+// ListWithdrawLimitsHandler 返回各账号的提现额度。
+//
+// **没设过额度的账号不会出现在结果里**，由前端显示成「未设置（不能提现）」。
+// 补一行零值会让「设成 0」和「没设过」长得一样，而前者是有人刻意关掉了
+// 这个账号的提现，后者是还没人管过它。
+func ListWithdrawLimitsHandler(store WithdrawQuerier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rows, err := store.ListWithdrawLimits(r.Context())
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		out := make([]withdrawLimitItem, 0, len(rows))
+		for _, l := range rows {
+			out = append(out, withdrawLimitItem{
+				Account: l.Account, PerOperation: l.PerOperation, PerDay: l.PerDay,
+				UpdatedBy: l.UpdatedBy, UpdatedAt: formatUTC(l.UpdatedAt),
+			})
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+	}
 }

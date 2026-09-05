@@ -10,15 +10,19 @@ vi.mock("../api/withdraw", async () => {
     ...actual,
     listWithdrawAddresses: vi.fn(),
     listWithdrawals: vi.fn(),
+    listWithdrawLimits: vi.fn(),
     registerWithdrawAddress: vi.fn(),
     executeWithdraw: vi.fn(),
+    setWithdrawLimits: vi.fn(),
   };
 });
 
 import {
   executeWithdraw,
   listWithdrawAddresses,
+  listWithdrawLimits,
   listWithdrawals,
+  setWithdrawLimits,
   type WithdrawAddress,
   type WithdrawItem,
 } from "../api/withdraw";
@@ -53,6 +57,7 @@ afterEach(() => {
 it("提现需要两步确认，第一次点击不发请求", async () => {
   vi.mocked(listWithdrawAddresses).mockResolvedValue([coldWallet]);
   vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
   await screen.findByText(/冷钱包/);
@@ -72,6 +77,7 @@ it("确认后只提交 address_id，不提交地址本身", async () => {
   vi.mocked(listWithdrawAddresses).mockResolvedValue([coldWallet]);
   vi.mocked(listWithdrawals).mockResolvedValue([]);
   vi.mocked(executeWithdraw).mockResolvedValue({ runId: "run-1" } as never);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
   await screen.findByText(/冷钱包/);
@@ -93,6 +99,7 @@ it("两步之间幂等键不变", async () => {
   vi.mocked(listWithdrawAddresses).mockResolvedValue([coldWallet]);
   vi.mocked(listWithdrawals).mockResolvedValue([]);
   vi.mocked(executeWithdraw).mockRejectedValue(new Error("上游超时"));
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
   await screen.findByText(/冷钱包/);
@@ -118,6 +125,7 @@ it("两步之间幂等键不变", async () => {
 it("没有登记地址时不显示提现按钮", async () => {
   vi.mocked(listWithdrawAddresses).mockResolvedValue([]);
   vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
   await screen.findByText(/还没有登记任何提现地址/);
@@ -143,8 +151,53 @@ it("提现历史给出可核对的链上哈希", async () => {
   };
   vi.mocked(listWithdrawAddresses).mockResolvedValue([coldWallet]);
   vi.mocked(listWithdrawals).mockResolvedValue([done]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
   renderPanel();
 
   const link = await screen.findByRole("link", { name: /abcdef/ });
   expect(link.getAttribute("href")).toContain("abcdef123456");
+});
+
+// 额度在页面上看得到、改得动，不用登服务器。
+//
+// 这是产品负责人 2026-09-05 的要求：一个要改文件再重启才能动的数字，
+// 实际上没人会去动——它会永远停在第一次拍脑袋定的那个值上。
+it("额度可以在页面上直接调整", async () => {
+  vi.mocked(listWithdrawAddresses).mockResolvedValue([coldWallet]);
+  vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([
+    { account: "MAIN", per_operation: "500", per_day: "2000", updated_by: "xufei" },
+  ]);
+  vi.mocked(setWithdrawLimits).mockResolvedValue({ runId: "run-1" } as never);
+  renderPanel();
+
+  // 当前额度看得见，且带「谁定的」。
+  await screen.findByText(/500/);
+  expect(screen.getByText(/xufei/)).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: /改额度/ }));
+  fireEvent.change(screen.getByLabelText("单笔上限"), { target: { value: "800" } });
+  fireEvent.change(screen.getByLabelText("单日上限"), { target: { value: "3000" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存额度" }));
+
+  await waitFor(() => expect(setWithdrawLimits).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(setWithdrawLimits).mock.calls[0]![0]).toEqual({
+    account: "MAIN",
+    per_operation: "800",
+    per_day: "3000",
+  });
+});
+
+// 没设过额度的账号显示成「未设置」，并说清后果。
+//
+// 显示成 0 会让人以为有人刻意关掉了它，而实际上是还没人管过——
+// 两者的下一步动作完全不同。
+it("没设过额度的账号显示未设置而不是 0", async () => {
+  vi.mocked(listWithdrawAddresses).mockResolvedValue([coldWallet]);
+  vi.mocked(listWithdrawals).mockResolvedValue([]);
+  vi.mocked(listWithdrawLimits).mockResolvedValue([]);
+  renderPanel();
+
+  await screen.findByText(/未设置/);
+  expect(screen.queryByText(/^0$/)).toBeNull();
 });

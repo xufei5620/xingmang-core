@@ -5,10 +5,13 @@ import { useId, useState } from "react";
 import {
   executeWithdraw,
   listWithdrawAddresses,
+  listWithdrawLimits,
   listWithdrawals,
   registerWithdrawAddress,
+  setWithdrawLimits,
   type WithdrawAddress,
   type WithdrawItem,
+  type WithdrawLimit,
 } from "../api/withdraw";
 import { ActionErrorNote } from "./ActionErrorNote";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
@@ -16,6 +19,7 @@ import { ApiStateView } from "./ApiStateView";
 
 const WITHDRAW_ADDRESSES_QUERY = "withdraw-addresses";
 const WITHDRAWALS_QUERY = "withdrawals";
+const WITHDRAW_LIMITS_QUERY = "withdraw-limits";
 
 /** 提现代币。与后端 Action 契约一致。 */
 const TOKEN_TYPE_OPTIONS = [
@@ -112,6 +116,7 @@ export function WithdrawPanel({ accounts }: { accounts: string[] }) {
     setResult(r);
     void queryClient.invalidateQueries({ queryKey: [WITHDRAWALS_QUERY] });
     void queryClient.invalidateQueries({ queryKey: [WITHDRAW_ADDRESSES_QUERY] });
+    void queryClient.invalidateQueries({ queryKey: [WITHDRAW_LIMITS_QUERY] });
   }
 
   const columns: DataTableColumn<WithdrawItem>[] = [
@@ -197,6 +202,8 @@ export function WithdrawPanel({ accounts }: { accounts: string[] }) {
         <RegisterAddressDialog accounts={accounts} onDone={afterWrite} />
       </div>
 
+      <WithdrawLimitsStrip accounts={accounts} onChanged={afterWrite} />
+
       <ApiStateView
         isPending={addressesQuery.isPending}
         error={addressesQuery.error}
@@ -229,6 +236,179 @@ export function WithdrawPanel({ accounts }: { accounts: string[] }) {
         />
       </ApiStateView>
     </section>
+  );
+}
+
+/** 各账号的提现额度，以及就地修改的入口。
+ *
+ *  额度存在库里、在这里改（产品负责人 2026-09-05 决定），不再是服务器上的
+ *  环境变量：一个要登服务器改文件再重启才能动的数字，实际上没人会去动——
+ *  它会永远停在第一次拍脑袋定的那个值上，然后在真正要用的时候挡住正事。
+ *
+ *  换个地方存不等于放松。改额度的权限是 `fund.limit.manage`（admin），
+ *  提现是 `fund.withdraw`（fund-operator）——**两把钥匙**：拿到任一把都
+ *  搬不空资金池。没有 fund.limit.manage 的人点保存会拿到 403，
+ *  按钮不隐藏是刻意的：藏起来只会让人以为功能坏了。 */
+function WithdrawLimitsStrip({
+  accounts,
+  onChanged,
+}: {
+  accounts: string[];
+  onChanged: (result: ActionResult) => void;
+}) {
+  const query = useQuery({
+    queryKey: [WITHDRAW_LIMITS_QUERY],
+    queryFn: ({ signal }) => listWithdrawLimits({ signal }),
+    staleTime: 60_000,
+  });
+
+  const byAccount = new Map((query.data ?? []).map((l) => [l.account, l]));
+
+  return (
+    <ApiStateView
+      isPending={query.isPending}
+      error={query.error}
+      onRetry={() => void query.refetch()}
+      compact
+    >
+      <div className="flex flex-wrap gap-2">
+        {accounts.map((account) => (
+          <WithdrawLimitCard
+            key={account}
+            account={account}
+            limit={byAccount.get(account)}
+            onChanged={onChanged}
+          />
+        ))}
+      </div>
+    </ApiStateView>
+  );
+}
+
+function WithdrawLimitCard({
+  account,
+  limit,
+  onChanged,
+}: {
+  account: string;
+  limit: WithdrawLimit | undefined;
+  onChanged: (result: ActionResult) => void;
+}) {
+  return (
+    <div className="border-edge flex min-w-56 flex-col gap-1 rounded-md border p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium">{account}</span>
+        <EditWithdrawLimitDialog account={account} limit={limit} onChanged={onChanged} />
+      </div>
+      {limit ? (
+        <>
+          <span className="text-fg-muted text-xs tabular-nums">
+            单笔 {limit.per_operation} · 单日 {limit.per_day}
+          </span>
+          {limit.updated_by ? (
+            // 「这个上限是谁定的」就放在额度旁边：审计里也有，但为一个数字
+            // 去翻审计太贵，而这恰恰是看到一个上限时第一个会冒出来的问题。
+            <span className="text-fg-muted text-xs">
+              由 {limit.updated_by} 设定
+              {limit.updated_at ? ` · ${formatUtcTimestamp(limit.updated_at)}` : ""}
+            </span>
+          ) : null}
+        </>
+      ) : (
+        // 「未设置」而不是 0：前者是还没人管过这个账号，后者是有人刻意
+        // 关掉了它的提现，两者的下一步动作完全不同。
+        <span className="text-fg-muted text-xs">未设置——该账号目前不能提现</span>
+      )}
+    </div>
+  );
+}
+
+function EditWithdrawLimitDialog({
+  account,
+  limit,
+  onChanged,
+}: {
+  account: string;
+  limit: WithdrawLimit | undefined;
+  onChanged: (result: ActionResult) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [perOperation, setPerOperation] = useState(limit?.per_operation ?? "");
+  const [perDay, setPerDay] = useState(limit?.per_day ?? "");
+  const [error, setError] = useState<unknown>(null);
+  const formId = useId();
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      setWithdrawLimits({
+        account,
+        per_operation: perOperation.trim(),
+        per_day: perDay.trim(),
+      }),
+    onSuccess: (run) => {
+      onChanged({ runId: run.runId, title: `已更新 ${account} 的提现额度` });
+      setOpen(false);
+      setError(null);
+    },
+    onError: (e) => setError(e),
+  });
+
+  const canSave = perOperation.trim() !== "" && perDay.trim() !== "" && !mutation.isPending;
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={setOpen}
+      title={`提现额度：${account}`}
+      description="上限对提现生效，与卡片额度是两套。改动会进审计，记录下是谁在什么时候调的。"
+      trigger={
+        <Button variant="ghost" size="sm" aria-label={`改额度 ${account}`}>
+          改额度
+        </Button>
+      }
+    >
+      <form
+        id={formId}
+        className="flex flex-col gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          mutation.mutate();
+        }}
+      >
+        <FormField
+          label="单笔上限"
+          htmlFor={`${formId}-per-operation`}
+          hint="十进制文本，如 500。单位是代币本身（USDT/USDC），不做汇率换算。不接受「不限」——把余额搬空正是提现的目的，余额不构成上限。"
+        >
+          <Input
+            id={`${formId}-per-operation`}
+            aria-label="单笔上限"
+            value={perOperation}
+            onChange={(e) => setPerOperation(e.target.value)}
+            required
+          />
+        </FormField>
+        <FormField
+          label="单日上限"
+          htmlFor={`${formId}-per-day`}
+          hint="当天累计。**未收敛的那几笔也算在内**——它们可能真的已经转出去了。"
+        >
+          <Input
+            id={`${formId}-per-day`}
+            aria-label="单日上限"
+            value={perDay}
+            onChange={(e) => setPerDay(e.target.value)}
+            required
+          />
+        </FormField>
+
+        {error ? <ActionErrorNote error={error} /> : null}
+
+        <Button type="submit" disabled={!canSave}>
+          {mutation.isPending ? "保存中…" : "保存额度"}
+        </Button>
+      </form>
+    </Dialog>
   );
 }
 

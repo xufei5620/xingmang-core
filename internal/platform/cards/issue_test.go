@@ -30,25 +30,28 @@ type memStore struct {
 	// 提现：登记的地址与台账。
 	addresses   map[string]WithdrawAddress
 	withdrawals map[string]WithdrawRecord
-	spentToday  string
+	// withdrawLimits 按账号存提现额度；没有条目 = 该账号不能提现。
+	withdrawLimits map[string]Limits
+	spentToday     string
 	// spentByAccount 非空时按账号取值，否则回落到 spentToday。
 	spentByAccount map[string]string
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		ops:          make(map[string]Operation),
-		cards:        make(map[string]infini.Card),
-		cardAccount:  make(map[string]string),
-		txs:          make(map[string][]infini.CardTransaction),
-		secrets:      make(map[string]infini.RevealedCard),
-		ownerRef:     make(map[string]string),
-		userEmail:    make(map[string]string),
-		usage:        make(map[string]CardUsage),
-		attributions: make(map[string]CardAttribution),
-		addresses:    make(map[string]WithdrawAddress),
-		withdrawals:  make(map[string]WithdrawRecord),
-		spentToday:   "0",
+		ops:            make(map[string]Operation),
+		cards:          make(map[string]infini.Card),
+		cardAccount:    make(map[string]string),
+		txs:            make(map[string][]infini.CardTransaction),
+		secrets:        make(map[string]infini.RevealedCard),
+		ownerRef:       make(map[string]string),
+		userEmail:      make(map[string]string),
+		usage:          make(map[string]CardUsage),
+		attributions:   make(map[string]CardAttribution),
+		addresses:      make(map[string]WithdrawAddress),
+		withdrawals:    make(map[string]WithdrawRecord),
+		withdrawLimits: make(map[string]Limits),
+		spentToday:     "0",
 	}
 }
 
@@ -468,6 +471,12 @@ func (m *memStore) UpdateWithdraw(ctx context.Context, w WithdrawRecord) error {
 	}
 	m.withdrawals[w.RequestID] = cur
 	return nil
+}
+
+// WithdrawLimitsFor 返回该账号的提现额度。没有条目返回零值 Limits——
+// 两个空串会被 Check 判成 ErrLimitsUnconfigured，也就是 fail closed。
+func (m *memStore) WithdrawLimitsFor(ctx context.Context, account string) (Limits, error) {
+	return m.withdrawLimits[account], nil
 }
 
 func (m *memStore) OpenWithdrawals(ctx context.Context) ([]WithdrawRecord, error) {

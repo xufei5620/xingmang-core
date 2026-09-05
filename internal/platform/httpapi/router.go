@@ -323,6 +323,12 @@ func NewRouter(d Deps) http.Handler {
 						Get("/cards/withdraw/addresses", ListWithdrawAddressesHandler(d.CardWithdraw))
 					api.With(RequireScope(cards.PermissionWithdraw)).
 						Get("/cards/withdrawals", ListWithdrawalsHandler(d.CardWithdraw))
+					// 额度用 card.read 而不是 fund.withdraw：它是一个上限
+					// 数字，不泄漏地址也不泄漏资金流向，而「这个账号的提现
+					// 上限是多少」是运营看板上该有的信息。改它才要
+					// fund.limit.manage（Action 自己把守）。
+					api.With(RequireScope(cards.PermissionRead)).
+						Get("/cards/withdraw/limits", ListWithdrawLimitsHandler(d.CardWithdraw))
 				}
 			}
 			api.With(RequireScope(savedviews.ScopeManage)).

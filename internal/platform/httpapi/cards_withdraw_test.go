@@ -14,6 +14,7 @@ import (
 type fakeWithdrawQuerier struct {
 	addresses []cards.WithdrawAddress
 	records   []cards.WithdrawRecord
+	limits    []cards.WithdrawLimitRow
 	err       error
 }
 
@@ -23,6 +24,10 @@ func (f fakeWithdrawQuerier) ListWithdrawAddresses(ctx context.Context) ([]cards
 
 func (f fakeWithdrawQuerier) RecentWithdrawals(ctx context.Context, limit int) ([]cards.WithdrawRecord, error) {
 	return f.records, f.err
+}
+
+func (f fakeWithdrawQuerier) ListWithdrawLimits(ctx context.Context) ([]cards.WithdrawLimitRow, error) {
+	return f.limits, f.err
 }
 
 func serveWithdrawAddresses(q WithdrawQuerier) *httptest.ResponseRecorder {
@@ -113,5 +118,43 @@ func TestRecentWithdrawalsSerializesTimes(t *testing.T) {
 	}
 	if body.Items[0].TxHash != "0xabc" {
 		t.Fatalf("链上哈希应回传（人要拿它去区块浏览器核对）, got %+v", body.Items[0])
+	}
+}
+
+// 没设过额度的账号**不出现在结果里**。
+//
+// 补一行零值会让「设成 0」和「没设过」长得一样，而前者是有人刻意关掉了
+// 这个账号的提现，后者是还没人管过它——页面上要能分辨这两种。
+func TestWithdrawLimitsOmitUnsetAccounts(t *testing.T) {
+	at := time.Date(2026, 9, 5, 8, 30, 0, 0, time.UTC)
+	rec := httptest.NewRecorder()
+	ListWithdrawLimitsHandler(fakeWithdrawQuerier{limits: []cards.WithdrawLimitRow{
+		{Account: "LINFENG", PerOperation: "500", PerDay: "2000",
+			UpdatedBy: "xufei", UpdatedAt: at},
+	}}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/cards/withdraw/limits", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			Account      string `json:"account"`
+			PerOperation string `json:"per_operation"`
+			UpdatedBy    string `json:"updated_by"`
+			UpdatedAt    string `json:"updated_at"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 1 || body.Items[0].Account != "LINFENG" {
+		t.Fatalf("只该回已设置的账号, got %+v", body.Items)
+	}
+	if body.Items[0].PerOperation != "500" {
+		t.Fatalf("额度应原样回传（文本，不转数字）, got %+v", body.Items[0])
+	}
+	// 「这个上限是谁定的」要跟着额度一起回来。
+	if body.Items[0].UpdatedBy != "xufei" || body.Items[0].UpdatedAt != "2026-09-05T08:30:00Z" {
+		t.Fatalf("改动者与时间应回传, got %+v", body.Items[0])
 	}
 }

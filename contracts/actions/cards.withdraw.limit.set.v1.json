@@ -1,0 +1,35 @@
+{
+  "id": "cards.withdraw.limit.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "fund.limit.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "account": {
+      "type": "string",
+      "required": true
+    },
+    "per_operation": {
+      "type": "string",
+      "required": true
+    },
+    "per_day": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-CARD6 调整某账号的提现额度。额度原先是进程的环境变量，产品负责人 2026-09-05 要求改成管理后台可调——一个要登服务器改文件再重启才能动的数字，实际上没人会去动，它会永远停在第一次拍脑袋定的那个值上，然后在真正要用的时候挡住正事。换个地方存不等于放松：约束力从来不是来自「改不了」，而是来自改它要留痕、而且改它的权限和用它的权限不是同一个。**权限刻意与 fund.withdraw 分开，且给的是另一个角色**：fund.limit.manage 给 admin，fund.withdraw 给 fund-operator——两把钥匙，拿到任一把都搬不空资金池，被盗用的 fund-operator 会话抬不高自己的天花板，被盗用的 admin 会话抬得高天花板却提不了现。今天同一个人两个角色都持有，这个分离在实践上是名义的，但审计里两件事是两条独立记录，而且想拆给两个人时拆得开。审计摘要带新的额度值——额度搬进数据库之后，「谁在什么时候把上限从 500 抬到 50000」只能靠这条记录回答，它是这次改动的全部意义所在。两个值一起提交、整体替换：只改单笔不改单日会得到一组谁也没打算过的组合。写库之前先用一笔最小金额跑一遍 CheckWithdraw（复用提现真正用的那条校验，而不是另写一套——另写必然会漂开，而漂开的方向永远是「存进去时说没问题、真用时被拒」），因此这里同样拒绝 unlimited。没有行 = 该账号不能提现，这是新装环境的默认状态，也是唯一正确的默认：一个没人设过上限的账号若能提现，等于上限的默认值是无穷大。幂等不要求：这是一次幂等的整体替换，重放同样的值得到同样的结果。compensation_mode 是 REVERSIBLE——改回去即可，与提现本身的 NOT_POSSIBLE 完全不同。"
+}

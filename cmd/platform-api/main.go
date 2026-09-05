@@ -406,11 +406,13 @@ func main() {
 	// 再造一遍等于把同一份凭据解析两次、也多一处可以配歪的地方。
 	var withdrawService *cards.WithdrawService
 	var withdrawStore cards.WithdrawAddressStore
+	var withdrawLimits cards.WithdrawLimitStore
 	if cardStore != nil {
 		withdrawService = cards.NewWithdrawService(cardAccounts, cardStore, time.Now)
 		withdrawStore = cardStore
+		withdrawLimits = cardStore
 	}
-	if err := registerWithdrawActions(actionRegistry, withdrawService, withdrawStore, cardAccounts); err != nil {
+	if err := registerWithdrawActions(actionRegistry, withdrawService, withdrawStore, withdrawLimits, cardAccounts); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
