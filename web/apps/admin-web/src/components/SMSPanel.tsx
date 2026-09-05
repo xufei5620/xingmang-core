@@ -23,6 +23,7 @@ import { ActionErrorNote } from "./ActionErrorNote";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
 import { ExtendDialog, HeroBalance, ProlongHistory, UpstreamCodes } from "./SMSExtrasPanels";
+import { SMSRequestDialog } from "./SMSRequestDialog";
 
 const PROVIDERS_QUERY = "sms-providers";
 const RESOURCES_QUERY = "sms-resources";
@@ -135,7 +136,14 @@ export function SMSPanel() {
         <ProviderStrip providers={providers} onChanged={afterWrite} />
       </ApiStateView>
 
-      <PurchaseSection providers={providers} onDone={afterWrite} />
+      <PurchaseSection
+        providers={providers}
+        onDone={afterWrite}
+        // 要到号就选中第一个：详情面板会每 15 秒自动向上游取码。
+        onRequested={(ids) => {
+          if (ids[0]) setSelectedId(ids[0]);
+        }}
+      />
 
       <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
         <ApiStateView
@@ -268,9 +276,11 @@ function ProviderCard({
 function PurchaseSection({
   providers,
   onDone,
+  onRequested,
 }: {
   providers: SMSProvider[];
   onDone: (r: ActionResult) => void;
+  onRequested: (resourceIds: string[]) => void;
 }) {
   const [provider, setProvider] = useState("");
   const effective = providers.some((p) => p.provider === provider)
@@ -294,16 +304,17 @@ function PurchaseSection({
     <section className="border-edge flex min-w-0 flex-col gap-3 rounded-md border p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">买号</h3>
+          <h3 className="text-sm font-semibold">要号 / 买号</h3>
           <p className="text-fg-muted text-xs">
-            买号花真钱且<strong>不可退</strong>。需要 sms-operator
-            角色；没有这个角色时下面会显示无权限。
+            「要号」只填服务与国家，供应商按路由规则自动选、失败回落；「买号」是自己选供应商、
+            填商品或服务。都花真钱且<strong>不可退</strong>，需要 sms-operator 角色。
           </p>
         </div>
         {/* shrink-0：不加的话「买号」这个两字按钮会被 flex 压成上下两行
             （「买」/「号」）——一个被挤断的按钮读起来像渲染坏了，
             而它恰好是这一页唯一会花钱的入口。 */}
         <span className="flex shrink-0 items-center gap-2">
+          <SMSRequestDialog providers={providers} onDone={onDone} onRequested={onRequested} />
           <Select
             aria-label="供应商"
             options={providers.map((p) => ({ value: p.provider, label: providerLabel(p.provider) }))}

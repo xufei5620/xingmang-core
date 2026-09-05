@@ -108,7 +108,7 @@ func (s *PgStore) GetOperation(ctx context.Context, operationID string) (Operati
 	row := s.pool.QueryRow(ctx, selectSQL, s.environment, operationID)
 	op, err := scanOperation(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Operation{}, fmt.Errorf("接码操作 %s 不存在", operationID)
+		return Operation{}, fmt.Errorf("%w: %s", ErrOperationNotFound, operationID)
 	}
 	if err != nil {
 		return Operation{}, fmt.Errorf("查接码操作: %w", err)
@@ -188,10 +188,11 @@ INSERT INTO sms.sms_resource (
     environment, provider, external_id, phone, phone_mask, provider_token,
     service, country, status, order_id,
     upstream_created_at, expires_at, synced_at, created_at, updated_at,
-    operator, price_text, verification_type, subtype, country_phone_code, state
+    operator, price_text, verification_type, subtype, country_phone_code, state, operation_id
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,'')::uuid,$11,$12,$13,$13,$13,
-          $14,$15,$16,$17,$18,$19)
+          $14,$15,$16,$17,$18,$19,NULLIF($20,'')::uuid)
 ON CONFLICT (environment, provider, external_id) DO UPDATE SET
+    operation_id = COALESCE(EXCLUDED.operation_id, sms_resource.operation_id),
     state = COALESCE(NULLIF(EXCLUDED.state,''), sms_resource.state),
     operator = COALESCE(NULLIF(EXCLUDED.operator,''), sms_resource.operator),
     price_text = COALESCE(NULLIF(EXCLUDED.price_text,''), sms_resource.price_text),
@@ -216,6 +217,7 @@ RETURNING id`
 		r.Service, r.Country, r.Status, r.OrderID,
 		nullableTime(r.UpstreamCreatedAt), nullableTime(r.ExpiresAt), s.now().UTC(),
 		r.Operator, r.PriceText, r.VerificationType, r.Subtype, r.CountryPhoneCode, string(r.State),
+		r.OperationID,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("落接码号码: %w", err)
@@ -227,7 +229,8 @@ const resourceColumns = `
 SELECT id, provider, external_id, phone, phone_mask, provider_token,
        service, country, status, COALESCE(order_id::text,''),
        last_code_at, upstream_created_at, expires_at, synced_at,
-       operator, price_text, verification_type, subtype, country_phone_code, state
+       operator, price_text, verification_type, subtype, country_phone_code, state,
+       COALESCE(operation_id::text,'')
   FROM sms.sms_resource`
 
 func (s *PgStore) GetResource(ctx context.Context, resourceID string) (Resource, error) {
@@ -478,7 +481,8 @@ func scanResource(row scannable) (Resource, error) {
 	if err := row.Scan(&r.ID, &r.Provider, &r.ExternalID, &r.Phone, &r.PhoneMask, &r.ProviderToken,
 		&r.Service, &r.Country, &r.Status, &r.OrderID,
 		&lastCode, &upstreamCreated, &expires, &r.SyncedAt,
-		&r.Operator, &r.PriceText, &r.VerificationType, &r.Subtype, &r.CountryPhoneCode, &state); err != nil {
+		&r.Operator, &r.PriceText, &r.VerificationType, &r.Subtype, &r.CountryPhoneCode, &state,
+		&r.OperationID); err != nil {
 		return Resource{}, err
 	}
 	if lastCode != nil {
@@ -709,6 +713,26 @@ SELECT id::text, service, country, providers, COALESCE(max_unit_price::text,''),
 			return nil, err
 		}
 		r.UpdatedAt = r.UpdatedAt.UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListResourcesByOperation 列出某笔操作买下的号（迁移 000044 的 operation_id）。
+func (s *PgStore) ListResourcesByOperation(ctx context.Context, operationID string) ([]Resource, error) {
+	rows, err := s.pool.Query(ctx, resourceColumns+`
+ WHERE environment = $1 AND operation_id::text = $2
+ ORDER BY created_at, id`, s.environment, operationID)
+	if err != nil {
+		return nil, fmt.Errorf("按操作查号码: %w", err)
+	}
+	defer rows.Close()
+	var out []Resource
+	for rows.Next() {
+		r, err := scanResource(rows)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()

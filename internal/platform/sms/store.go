@@ -47,6 +47,8 @@ type Store interface {
 	TouchResourceCodeAt(ctx context.Context, resourceID string, at time.Time) error
 	// SetResourceState 写统一状态（我们自己的事实，不改上游原话 status）。
 	SetResourceState(ctx context.Context, resourceID string, state NumberState, at time.Time) error
+	// ListResourcesByOperation 列出某笔操作买下的号（要号回放用）。
+	ListResourcesByOperation(ctx context.Context, operationID string) ([]Resource, error)
 
 	// UpsertOrder 落订单（62）。返回本地 UUID。
 	UpsertOrder(ctx context.Context, o Order) (string, error)

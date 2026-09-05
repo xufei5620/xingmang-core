@@ -134,6 +134,8 @@ var (
 	ErrCodeNotAvailable = errors.New("sms: 尚未收到验证码")
 	// ErrExtrasNotSupported：这家没有这项扩展能力（比如 62 没有邮箱接码）。
 	ErrExtrasNotSupported = errors.New("sms: 该供应商没有这项能力")
+	// ErrOperationNotFound：按 ID 查不到操作。要号流程靠它判断「这一家试过没有」。
+	ErrOperationNotFound = errors.New("sms: 接码操作不存在")
 )
 
 // Operation 是台账里的一笔。
@@ -191,11 +193,14 @@ type Resource struct {
 	Phone     string
 	PhoneMask string
 	// ProviderToken 只有 62 有，取码必须带。**任何对外 DTO 都不含它。**
-	ProviderToken     string
-	Service           string
-	Country           string
-	Status            string
-	OrderID           string
+	ProviderToken string
+	Service       string
+	Country       string
+	Status        string
+	OrderID       string
+	// OperationID 是买下它的那笔操作（迁移 000044）；导入的号为空。
+	// 要号回放与成本核算都靠它。
+	OperationID       string
 	LastCodeAt        time.Time
 	UpstreamCreatedAt time.Time
 	ExpiresAt         time.Time

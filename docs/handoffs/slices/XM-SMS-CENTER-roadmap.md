@@ -14,7 +14,7 @@ branch: ai/claude/XM-CARD0-infini-connector
 - 遇到需要产品负责人拍板的事（新的花钱路径、权限边界、数据删除），停下写在
   本文件「待决」一节，不猜。
 
-## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–5 done）
+## XM-SMS2 · 中心化与多上游骨架 — status: in-progress（1–6 done）
 
 1. ~~改名「接码中心」~~ done（2d4b559）。
 2. ~~供应商注册表~~ done：`internal/platform/sms/registry.go` 定义 `ProviderSpec`（ID、标签、
@@ -41,9 +41,18 @@ branch: ai/claude/XM-CARD0-infini-connector
    契约 `contracts/actions/sms.routing.*.v1.json`。读端点 `GET /sms/routing` 带
    `default_order`。页面新页签「路由规则」：加入 / 上移 / 移除定优先级、编辑回填、
    删除点两次、只列有购买能力的供应商、说明默认顺序。
-6. 「要号」流程：Action `sms.number.request`（sms.purchase）——服务 + 国家 + 数量
-   （+ 可选指定供应商）→ 按规则选供应商 → 买 → 落资源 → 自动取码由页面驱动
-   （每 15 秒）。失败按规则回落下一家，**每家最多试一次**，全部失败落 failed。
+6. ~~「要号」流程~~ done：`Service.RequestNumber` + Action `sms.number.request`
+   （sms.purchase、L1、只给人；契约 `contracts/actions/sms.number.request.v1.json`）。
+   服务 + 国家 + 数量（+ 可选指定供应商）→ `Route` → 逐家 `purchase`：明确失败
+   （上游拒绝 / 关着 / 没验证 / 翻译不了 / 超上限）回落下一家，**每家最多一次**；
+   **unknown 就停**（钱可能花了，needs_review）。幂等：每家的台账 ID =
+   UUIDv5(request_id, provider)，重试同一个 request_id 是回放（先查台账，试过的
+   不再打上游，成功的回同一批号）。翻译：Hero 服务原样、国家转数字、上限作
+   maxPrice；62 按商品名（纯数字当平台 ID）+ 国家匹配，有货、上限内、最便宜，
+   没价格不买。迁移 000044 `sms_resource.operation_id`（FK）记下买它的操作——
+   回放与成本核算都靠它；新买的号从待收码起。页面：「要号」对话框（两步确认、
+   自动 / 指定供应商、失败列每家原因、未知提示人工核对），要到号选中第一个，
+   详情面板既有的 15 秒自动取码接手。
 7. 定时作业（platform-worker）：每家供应商连接测试 + 余额快照（写
    `sms.balance_snapshot`，阶段 3 用）。
 8. 内部告警条件（不外发）：余额低于阈值（阈值走 Action 配）、unknown 待核对超过
@@ -113,3 +122,17 @@ branch: ai/claude/XM-CARD0-infini-connector
   aria-labelledby 也算标签而撞名，改表单 aria-label 为「路由单价上限」。门禁：
   go vet / go test -p 1 ./...（含真库）/ check-governance 0 / pnpm -r typecheck /
   pnpm -r test（admin-web 1547 用例）全绿。
+- 2026-09-06 XM-SMS2 #6：`request_test.go` 先红（符号未定义）后绿，十条：62 明确
+  拒绝回落 Hero 且每家只打一次、unknown 停下不碰下一家、全拒绝为 failed、指定
+  供应商只试那家、62 选上限内最便宜且数量原样 / 超上限不买并说明、Hero 入参
+  （服务小写、国家数字、上限作 maxPrice）/ 非数字国家跳过、关着的跳过并写「未
+  启用」、七种非法输入、同 request_id 回放不打上游且回同一批号、Action 注册为
+  sms.purchase + 非法输入翻 INVALID_PARAMS。脚本改 Purchase 时漏了一处返回值、
+  把 OperationID 加到了 Operation 而不是 Resource（正则命中了前一个结构体）——
+  编译器抓住，修正后一次全绿。真库 `TestPgStoreResourceOperationLink`：FK 指向
+  sms_operation、同步不冲掉、按操作列出、指向不存在的操作被 FK 挡（迁移 000044
+  在测试库上真跑过）。页面 `SMSRequestDialog.test.tsx` 五条（先红：模块不存在，
+  再红：缺 QueryClientProvider）：两步确认默认不带 provider、指定供应商带
+  provider、全部失败列每家原因且不选号、未知提示人工核对并显示操作 ID、无可用
+  供应商禁用。门禁：go vet / go test -p 1 ./...（含真库）/ check-governance 0 /
+  pnpm -r typecheck / pnpm -r test（admin-web 1552 用例）全绿。

@@ -72,10 +72,12 @@ type smsResourceItem struct {
 	// 上游原话，页面悬停时看。
 	State          string `json:"state,omitempty"`
 	EffectiveState string `json:"effective_state,omitempty"`
-	PhoneMask      string `json:"phone_mask"`
-	Service        string `json:"service,omitempty"`
-	Country        string `json:"country,omitempty"`
-	Status         string `json:"status,omitempty"`
+	// OperationID 是买下它的那笔操作（迁移 000044）；导入的号为空。
+	OperationID string `json:"operation_id,omitempty"`
+	PhoneMask   string `json:"phone_mask"`
+	Service     string `json:"service,omitempty"`
+	Country     string `json:"country,omitempty"`
+	Status      string `json:"status,omitempty"`
 	// **provider_token 任何情况下都不出现在这里。** 它是取码凭证，
 	// 只在服务端取码那条路上被读一次。
 	LastCodeAt string `json:"last_code_at,omitempty"`
@@ -180,6 +182,7 @@ func ListSMSResourcesHandler(store SMSQuerier) http.HandlerFunc {
 				CountryPhoneCode: res.CountryPhoneCode,
 				State:            string(res.State),
 				EffectiveState:   string(res.EffectiveState(time.Now())),
+				OperationID:      res.OperationID,
 			}
 			if maySeePhone {
 				item.Phone = res.Phone

@@ -73,6 +73,8 @@ export interface SMSResource {
   state?: string;
   /** 「待收码但已过期」算成 expired 后的状态，页面显示用它。 */
   effective_state?: string;
+  /** 买下它的那笔操作；导入的号为空。 */
+  operation_id?: string;
 }
 
 export interface SMSOperation {
@@ -643,4 +645,66 @@ export function removeSMSRoutingRule(
     options,
     client,
   );
+}
+
+// ---------- 要号（XM-SMS2 #6，ADR-022 决策 3） ----------
+
+/** `sms.number.request@1` 的结果。**不带号码**：号码走 listSMSResources 且受 sms.reveal 把守。 */
+export interface SMSRequestAttempt {
+  provider: string;
+  operation_id: string;
+  /** 空 = 没打上游（关着 / 没验证 / 翻译不了 / 超上限），原因在 reason。 */
+  state: string;
+  provider_ref?: string;
+  reason?: string;
+  /** 来自台账（同一个 request_id 的重试）。 */
+  replayed?: boolean;
+}
+
+export interface SMSRequestResult {
+  request_id: string;
+  service: string;
+  country: string;
+  quantity: number;
+  rule_id?: string;
+  /** succeeded / failed / unknown。unknown 必须人工核对（needs_review）。 */
+  state: string;
+  provider?: string;
+  operation_id?: string;
+  resource_ids: string[];
+  attempts: SMSRequestAttempt[];
+  needs_review?: boolean;
+}
+
+/** 要号（`sms.number.request@1`）。**花真钱且不可退。**
+ *
+ *  不选供应商时由路由规则选；第一家明确失败回落下一家，每家最多试一次；
+ *  结果未知就停（钱可能已经花了）。`request_id` 由调用方稳定生成，是幂等键：
+ *  重试带同一个就是回放，永远不会多买。 */
+export function requestSMSNumbers(
+  params: { request_id: string; service: string; country: string; quantity: number; provider?: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "sms.number.request", version: "1", params }, options, client);
+}
+
+/** 把 ActionRun.result 读成要号结果；形状不对就当没有（页面退回只显示 run_id）。 */
+export function readSMSRequestResult(result: unknown): SMSRequestResult | null {
+  if (!result || typeof result !== "object") return null;
+  const r = result as Partial<SMSRequestResult>;
+  if (typeof r.state !== "string") return null;
+  return {
+    request_id: r.request_id ?? "",
+    service: r.service ?? "",
+    country: r.country ?? "",
+    quantity: r.quantity ?? 0,
+    ...(r.rule_id ? { rule_id: r.rule_id } : {}),
+    state: r.state,
+    ...(r.provider ? { provider: r.provider } : {}),
+    ...(r.operation_id ? { operation_id: r.operation_id } : {}),
+    resource_ids: Array.isArray(r.resource_ids) ? r.resource_ids : [],
+    attempts: Array.isArray(r.attempts) ? r.attempts : [],
+    needs_review: Boolean(r.needs_review),
+  };
 }

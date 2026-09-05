@@ -292,3 +292,49 @@ func TestPgStoreRoutingRuleRoundTrip(t *testing.T) {
 		t.Errorf("空供应商列表应被 CHECK 挡住")
 	}
 }
+
+// 迁移 000044：号码记下买它的操作。FK 指向 sms_operation；不带 operation_id 的
+// 同步保留原值；ListResourcesByOperation 只回那一笔的号。
+func TestPgStoreResourceOperationLink(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	opID := "0f1e2d3c-4b5a-4968-8776-655443322110"
+	if err := store.PrepareOperation(ctx, Operation{
+		ID: opID, Provider: ProviderHero, Kind: KindPurchase, RequestHash: "h-link", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.UpsertResource(ctx, Resource{
+		Provider: ProviderHero, ExternalID: "act-op1", Phone: "79990000021", OperationID: opID, State: StateWaitingCode,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertResource(ctx, Resource{Provider: ProviderHero, ExternalID: "act-op2", Phone: "79990000022"}); err != nil {
+		t.Fatal(err)
+	}
+	// 一次不带 operation_id 的同步（列表接口回读）。
+	if _, err := store.UpsertResource(ctx, Resource{Provider: ProviderHero, ExternalID: "act-op1", Status: "4"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetResource(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OperationID != opID {
+		t.Fatalf("同步不该冲掉 operation_id, got %q", got.OperationID)
+	}
+	linked, err := store.ListResourcesByOperation(ctx, opID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(linked) != 1 || linked[0].ID != id {
+		t.Fatalf("应只回这一笔买的号, got %+v", linked)
+	}
+	// 指向不存在的操作被 FK 挡住：号码不能声称自己被一笔不存在的操作买下。
+	if _, err := store.UpsertResource(ctx, Resource{
+		Provider: ProviderHero, ExternalID: "act-op3", Phone: "1", OperationID: "0f1e2d3c-4b5a-4968-8776-000000000000",
+	}); err == nil {
+		t.Fatalf("不存在的操作应被 FK 挡住")
+	}
+}

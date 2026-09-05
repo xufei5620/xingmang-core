@@ -69,7 +69,7 @@ func (m *memStore) ResolveOperation(ctx context.Context, op Operation) error {
 func (m *memStore) GetOperation(ctx context.Context, id string) (Operation, error) {
 	op, ok := m.ops[id]
 	if !ok {
-		return Operation{}, errors.New("不存在")
+		return Operation{}, ErrOperationNotFound
 	}
 	return op, nil
 }
@@ -109,6 +109,9 @@ func (m *memStore) UpsertResource(ctx context.Context, r Resource) (string, erro
 			// 与 PgStore 一致：传空 state 保留原值。
 			if r.State == "" {
 				r.State = existing.State
+			}
+			if r.OperationID == "" {
+				r.OperationID = existing.OperationID
 			}
 			m.resources[id] = r
 			return id, nil
@@ -257,6 +260,9 @@ func itoa(n int) string {
 type fakeAdapter struct {
 	purchaseOutcome PurchaseOutcome
 	purchaseErr     error
+	// catalog 是 ListCatalog 的回答；lastPurchase 记最近一次 Purchase 的入参。
+	catalog         []CatalogItem
+	lastPurchase    PurchaseInput
 	importResources []Resource
 	importErr       error
 	code            Code
@@ -272,11 +278,12 @@ func (f *fakeAdapter) TestConnection(ctx context.Context) (string, error) {
 }
 
 func (f *fakeAdapter) ListCatalog(ctx context.Context, filter CatalogFilter) ([]CatalogItem, error) {
-	return nil, nil
+	return f.catalog, nil
 }
 
 func (f *fakeAdapter) Purchase(ctx context.Context, in PurchaseInput) (PurchaseOutcome, error) {
 	f.purchaseCalls++
+	f.lastPurchase = in
 	return f.purchaseOutcome, f.purchaseErr
 }
 
@@ -595,6 +602,16 @@ func (m *memStore) ListRoutingRules(ctx context.Context) ([]RoutingRule, error) 
 	out := make([]RoutingRule, 0, len(m.routing))
 	for _, r := range m.routing {
 		out = append(out, r)
+	}
+	return out, nil
+}
+
+func (m *memStore) ListResourcesByOperation(ctx context.Context, operationID string) ([]Resource, error) {
+	var out []Resource
+	for _, r := range m.resources {
+		if r.OperationID == operationID {
+			out = append(out, r)
+		}
 	}
 	return out, nil
 }
