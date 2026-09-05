@@ -378,8 +378,11 @@ function PurchaseDialog({
       onOpenChange={setOpen}
       title={`买号 · ${providerLabel(provider)}`}
       description="买到的号不可退。数量上限 200——那是我们自己的安全上限，不是供应商声明的最大值。"
+      // whitespace-nowrap 是真正起作用的那个：光给外层 shrink-0 不够，
+      // 按钮自己的 min-content 宽度仍然按「可以在两个字之间断行」算，
+      // 于是它被压成上下两行的「买」「号」。实测被压到 31px 宽。
       trigger={
-        <Button size="sm" disabled={!usable}>
+        <Button size="sm" disabled={!usable} className="whitespace-nowrap">
           买号
         </Button>
       }
