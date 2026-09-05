@@ -1,6 +1,6 @@
 # XM-INV-CATCHUP-BURST-BACKPRESSURE: chunk a released account's first projection
 
-- **status:** fix 1 of the revised ranking implemented 2026-09-05 (finalization skips a job row held by a running projection; see the end of this document). Root cause revised the same day after a copy-run and a code trace; the original proposal below does not address it. Filed 2026-09-04 from the RC87 canary.
+- **status:** fixes 1, 1b and 2 of the revised ranking implemented 2026-09-05 (see the end of this document); fix 3 open, to be validated with the differential rehearsal first. Root cause revised the same day after a copy-run and a code trace; the original proposal below does not address it. Filed 2026-09-04 from the RC87 canary.
 - **branch:** none yet.
 - **found in production**, 2026-09-04, while verifying the XM-INV-CATCHUP-RELEASE fix.
 
@@ -254,3 +254,68 @@ Deliberately unchanged:
 Release note: this changes one statement in the finalization path. No
 migration, no evaluator or allocation change, so the shadow evaluation is
 skipped by rule; the differential run is not applicable.
+
+## Implemented, 2026-09-05: fix 1b, the proof phase runs before the row lock
+
+`processEligibilityProjectionJob` is now two halves.
+
+- `prepareEligibilityProjectionJob` (lock-free): reads the job's window and
+  the account without locking either, runs `ensureBalanceCarryForwardProofTx`
+  in its own short transaction and commits. A proof-pending job therefore
+  never holds its row at all; the caller's backoff requeue is unchanged. An
+  account still awaiting its one-time legacy re-anchor skips this half, since
+  re-anchoring changes the fields the proof reads.
+- `completeEligibilityProjectionJob` (SERIALIZABLE, locked): exactly the old
+  transaction from the `FOR UPDATE` read on. The proof is re-run only when the
+  window differs from the one proved (its rows already exist, so that is
+  cheap). If a finalization pass raised the row's `requested_through` while
+  the lock-free half ran, the job clamps to the proved window and
+  `finishEligibilityProjectionJobRowTx` requeues the row -- lease cleared, due
+  now, window kept -- instead of deleting it, so the remainder is processed
+  with its own proof rather than dropped.
+
+Because the row is now reachable while a job is live, both projection-job
+upserts (`finalizeSourceAccountsTx` and the observe-path enqueue) treat a
+`processing` row like a `dead` one for everything except `requested_through`:
+status, lease and `next_attempt_at` are left alone. Without that, a fact
+arriving every minute would strip a running whale job of its lease every
+minute and it could never finish. Reclaiming a crashed worker's row was never
+this upsert's job; the claim step's lease-expiry rule does it.
+
+Pinned by three tests in `finalize_skips_running_job_integration_test.go`:
+the merge-only rule on a live processing row (window may rise, status/lease/
+next_attempt unchanged); the row finish for an exact window (deleted) and a
+raised one (requeued with the window kept); and the fix-1 skip test, whose
+final assertion was corrected from "reclaimed to queued" to "claim intact".
+
+Still open: fix 2 (a stuck checkpoint event flipping readiness by itself) and
+fix 3 (bounding the evidence pass by checkpoint count, to be validated with
+the differential rehearsal now that the whale can be exercised on a copy).
+
+## Implemented, 2026-09-05: fix 2, a busy checkpoint event no longer flips readiness by itself
+
+Readiness counted every `queued`/`failed`/`processing` ingest event as pending
+and went 503 the moment one existed (`runtime.go`: `item.PendingEvents != 0`).
+An event requeued with `ACCOUNT_LOCK_BUSY` is one that found its account's
+projection in the write phase and will retry in fifteen seconds; on
+2026-09-04 that, not a stale watermark, turned readiness off at 03:45.
+
+`sourceReadinessHealthQuery` now leaves a `queued` event with
+`processing_error='ACCOUNT_LOCK_BUSY'` out of `pending_events` (and
+`oldest_pending`) while its `updated_at` is within
+`accountLockBusyReadinessGrace` (10 minutes), and counts it again after that.
+The bound is deliberately shorter than `SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS`
+(15 minutes), so a stream genuinely stuck behind a lock still fails readiness
+through the freshness gate: this stops a short, expected wait from
+masquerading as an outage, nothing more. A plain queued event is pending at
+once, as before.
+
+Pinned by `TestSourceReadinessHealthGivesAnAccountLockBusyEventABoundedGrace`:
+busy now → not pending, ready; busy for eleven minutes → pending, not ready;
+the same event without the busy marker → pending at once.
+
+With fixes 1, 1b and 2 in, the three couplings the 2026-09-04 stall ran on are
+each addressed at their own layer: publication no longer waits on a job row,
+a job holds its row only for the write phase, and a short busy wait is not an
+outage. Fix 3 (bounding the evidence pass by checkpoint count) remains, and
+should be validated with the differential rehearsal before it ships.

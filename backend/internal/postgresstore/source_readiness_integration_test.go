@@ -201,3 +201,53 @@ func readinessItem(t *testing.T, report SourceHealthReport, sourceID, streamID s
 	t.Fatalf("missing readiness item %s/%s", sourceID, streamID)
 	return SourceStreamHealth{}
 }
+
+// XM-INV-CATCHUP-BURST-BACKPRESSURE fix 2. An event requeued with
+// ACCOUNT_LOCK_BUSY is waiting fifteen seconds for an account's projection
+// to release its lock; counting it as pending turned readiness off within a
+// minute of the first busy retry on 2026-09-04. It is tolerated for a bounded
+// grace, then counted again so a genuinely stuck stream still fails.
+func TestSourceReadinessHealthGivesAnAccountLockBusyEventABoundedGrace(t *testing.T) {
+	store, ctx := integrationStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	policy := seedReadySourceStreams(t, store, ctx, now)
+	const sourceID = "10000000-0000-4000-8000-000000000001"
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO source_ingest_batches(source_instance_id,stream_id,batch_id,sequence,body_hash,
+			signing_key_id,record_count,source_runtime_version,source_agent_version,source_captured_at,projection_status)
+		VALUES($1,'balances','80000000-0000-4000-8000-0000000000b1',1,repeat('b',64),
+			'readiness-key',0,'fixture-runtime','readiness-agent',$2,'healthy')`, sourceID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO source_ingest_events(source_instance_id,stream_id,event_id,first_batch_id,entity_type,operation,
+			payload_hash,payload_ciphertext,observed_at,processing_status,processing_error,next_attempt_at,created_at,updated_at)
+		VALUES($1,'balances','82000000-0000-4000-8000-0000000000b1',
+			'80000000-0000-4000-8000-0000000000b1','balance_checkpoint','upsert',repeat('c',64),
+			decode(repeat('33',16),'hex'),$2,'queued','ACCOUNT_LOCK_BUSY',$3,$2,$2)`, sourceID, now, now.Add(15*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// Busy for a moment: not pending, still ready.
+	fresh, err := store.SourceReadinessHealth(ctx, policy)
+	if err != nil || !fresh.Report.Ready || fresh.Ingest.Pending != 0 {
+		t.Fatalf("a freshly busy event must not count as pending: ready=%v pending=%d err=%v", fresh.Report.Ready, fresh.Ingest.Pending, err)
+	}
+	// Busy for longer than the grace: pending again, readiness off.
+	if _, err = store.pool.Exec(ctx, `UPDATE source_ingest_events SET updated_at=$2 WHERE event_id=$1`,
+		"82000000-0000-4000-8000-0000000000b1", now.Add(-11*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := store.SourceReadinessHealth(ctx, policy)
+	if err != nil || stale.Report.Ready || stale.Ingest.Pending != 1 {
+		t.Fatalf("an event busy past the grace must count as pending: ready=%v pending=%d err=%v", stale.Report.Ready, stale.Ingest.Pending, err)
+	}
+	// And an ordinary queued event (no busy marker) is pending at once, as before.
+	if _, err = store.pool.Exec(ctx, `UPDATE source_ingest_events SET processing_error=NULL,updated_at=$2 WHERE event_id=$1`,
+		"82000000-0000-4000-8000-0000000000b1", now); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := store.SourceReadinessHealth(ctx, policy)
+	if err != nil || plain.Report.Ready || plain.Ingest.Pending != 1 {
+		t.Fatalf("a plain queued event must still count as pending: ready=%v pending=%d err=%v", plain.Report.Ready, plain.Ingest.Pending, err)
+	}
+}

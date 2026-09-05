@@ -983,14 +983,38 @@ func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshness
 	}
 }
 
+// accountLockBusyReadinessGrace bounds how long an event requeued with
+// ACCOUNT_LOCK_BUSY stays invisible to readiness. XM-INV-CATCHUP-BURST-BACKPRESSURE
+// fix 2: a checkpoint event for an account whose projection is in its write
+// phase is requeued 15 seconds at a time and counted as pending, and one such
+// event flips the whole deployment to 503 within a minute -- that, not a stale
+// watermark, is what turned readiness off at 03:45 on 2026-09-04. The busy
+// state is benign and self-limiting (the write phase holds the lock for
+// seconds to a couple of minutes now that the proof runs first), so it gets
+// the same treatment as ECONOMIC_RESCAN_ACTIVE: tolerated for a bounded time,
+// then counted again. The bound is deliberately shorter than
+// SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS (15m) so a stream that is genuinely
+// stuck behind a lock still fails readiness through the freshness gate; this
+// only stops a short, expected wait from masquerading as an outage.
+const accountLockBusyReadinessGrace = "10 minutes"
+
 const sourceReadinessHealthQuery = `
 	WITH active_event_health AS MATERIALIZED (
 		SELECT source_instance_id,stream_id,
-			count(*) FILTER (WHERE processing_status IN ('queued','failed','processing')) AS pending_events,
+			count(*) FILTER (WHERE processing_status IN ('queued','failed','processing') AND NOT busy_within_grace) AS pending_events,
 			count(*) FILTER (WHERE processing_status='dead') AS dead_events,
-			COALESCE(min(created_at) FILTER (WHERE processing_status IN ('queued','failed','processing')),'epoch'::timestamptz) AS oldest_pending
-		FROM source_ingest_events
-		WHERE processing_status IN ('queued','failed','processing','dead')
+			COALESCE(min(created_at) FILTER (WHERE processing_status IN ('queued','failed','processing') AND NOT busy_within_grace),'epoch'::timestamptz) AS oldest_pending
+		FROM (
+			SELECT source_instance_id,stream_id,processing_status,created_at,
+				-- COALESCE on both sides: processing_error is NULL for an ordinary
+				-- queued event, and NULL = 'ACCOUNT_LOCK_BUSY' is NULL, not false --
+				-- a bare NOT NULL in the FILTER above would silently drop every
+				-- plain pending event from the count.
+				COALESCE(processing_status='queued' AND COALESCE(processing_error,'')='ACCOUNT_LOCK_BUSY'
+				 AND updated_at>=now()-interval '` + accountLockBusyReadinessGrace + `',false) AS busy_within_grace
+			FROM source_ingest_events
+			WHERE processing_status IN ('queued','failed','processing','dead')
+		) classified
 		GROUP BY source_instance_id,stream_id
 	), ingest_health AS (
 		SELECT COALESCE(sum(pending_events),0)::bigint AS pending_events,
