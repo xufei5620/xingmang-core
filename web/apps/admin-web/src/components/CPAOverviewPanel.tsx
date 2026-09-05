@@ -211,7 +211,8 @@ function UnpricedNote({ item }: { item: MetricItem | undefined }) {
       className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg"
     >
       <span aria-hidden="true">⚠</span> 以下 provider/model 在 model_prices
-      里没有配置价格，其用量已计入请求量但**未计入**成本折算：{models.join("、")}。
+      里没有配置价格，其用量已计入请求量但<strong>未计入</strong>成本折算：
+      {models.join("、")}。
     </p>
   );
 }

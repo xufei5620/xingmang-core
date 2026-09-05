@@ -255,3 +255,17 @@ it("点停用把 enabled=false 发给 Action", async () => {
 
   await waitFor(() => expect(setSMSProviderEnabled).toHaveBeenCalledWith("sms62", false));
 });
+
+// 强调用 <strong>，不要把 markdown 星号当字面量吐到页面上。
+//
+// 这三个字是整页最要紧的一句（买号花的是真钱且退不回来），而 `**不可退**`
+// 在界面上读起来像个排版事故——它没有变粗，反倒让那句警告显得不可信。
+it("买号说明里没有裸露的 markdown 星号", async () => {
+  seed();
+  renderPanel();
+
+  // 默认夹具里只有 Hero-SMS。
+  await screen.findAllByText("Hero-SMS");
+  expect(screen.queryByText(/\*\*/)).toBeNull();
+  expect(screen.getByText("不可退").tagName).toBe("STRONG");
+});

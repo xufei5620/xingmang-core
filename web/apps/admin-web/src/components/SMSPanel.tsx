@@ -262,10 +262,14 @@ function PurchaseSection({
         <div>
           <h3 className="text-sm font-semibold">买号</h3>
           <p className="text-fg-muted text-xs">
-            买号花真钱且**不可退**。需要 sms-operator 角色；没有这个角色时下面会显示无权限。
+            买号花真钱且<strong>不可退</strong>。需要 sms-operator
+            角色；没有这个角色时下面会显示无权限。
           </p>
         </div>
-        <span className="flex items-center gap-2">
+        {/* shrink-0：不加的话「买号」这个两字按钮会被 flex 压成上下两行
+            （「买」/「号」）——一个被挤断的按钮读起来像渲染坏了，
+            而它恰好是这一页唯一会花钱的入口。 */}
+        <span className="flex shrink-0 items-center gap-2">
           <Select
             aria-label="供应商"
             options={providers.map((p) => ({ value: p.provider, label: providerLabel(p.provider) }))}
