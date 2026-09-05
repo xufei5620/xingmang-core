@@ -4,7 +4,7 @@
 > `v0.1.0-rc94-signed` (`254d99d`) and is deployed (its differential rehearsal
 > was inert, see its execution record); its evidence is
 > immutable. Continue only with
-> `docs/superpowers/plans/2026-09-05-invoice-rc96-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-05-invoice-rc97-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
