@@ -410,6 +410,7 @@ type balanceCheckpointPayload struct {
 	SourceSnapshotID    string  `json:"source_snapshot_id"`
 	SnapshotRowCount    string  `json:"snapshot_row_count"`
 	BalanceNegative     bool    `json:"balance_negative"`
+	DeficitServiceUnits *string `json:"deficit_service_units,omitempty"`
 	BaselineMember      *bool   `json:"baseline_member"`
 	SourceCursor        string  `json:"source_cursor"`
 	CausalDomain        string  `json:"causal_domain"`
@@ -663,8 +664,9 @@ func (s *Service) processBalanceCheckpoint(ctx context.Context, claim postgresst
 		SourceCursor: payload.SourceCursor, SourceRevision: claim.PayloadHash,
 		CutoverManifestHash: payload.CutoverManifestHash, ConfigurationHash: payload.ConfigurationHash,
 		SourceSequence: claim.BatchSequence, BalanceNegative: payload.BalanceNegative,
-		BaselineMember: *payload.BaselineMember,
-		CatchupKeyHMAC: claim.CatchupKeyHMAC, BatchID: claim.BatchID, ScanCycleID: claim.ScanCycleID,
+		DeficitServiceUnits: payload.DeficitServiceUnits,
+		BaselineMember:      *payload.BaselineMember,
+		CatchupKeyHMAC:      claim.CatchupKeyHMAC, BatchID: claim.BatchID, ScanCycleID: claim.ScanCycleID,
 	}, auditActor(ctx, "source_connector", claim.SourceInstanceID, "verified v3 balance checkpoint"))
 	if err != nil {
 		return wrapWithAccountHint(account.ID, s.balanceCheckpointDependencyError(err, claim, payload))

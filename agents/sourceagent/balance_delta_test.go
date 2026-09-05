@@ -130,8 +130,12 @@ func TestBalanceDeltaEmitsFirstPostCutoverAndOnlyRealChanges(t *testing.T) {
 	}
 
 	changedRows := append([]BalanceSnapshotRow(nil), capturedRows...)
-	changedRows[0].ServiceUnits = "75"
+	// A realistic negative row: the bridge floors units to "0" and reports the
+	// magnitude separately (XM-INV-NEGATIVE-DEFICIT); the database rejects a
+	// negative flag beside non-zero units, and so does validateBalanceSnapshot.
+	changedRows[0].ServiceUnits = "0"
 	changedRows[0].BalanceNegative = true
+	changedRows[0].DeficitServiceUnits = "75"
 	changed := testBalanceSnapshot(t, "reconciliation", "2026-08-25T00:02:00Z", "", changedRows)
 	next, err := buildBalanceReconciliationState(state.EmissionSnapshot.SnapshotID, captured, changed)
 	if err != nil {

@@ -254,6 +254,24 @@ administrator queue above and neither is affected by "safe resolution":
   frozen account (any other, real open freeze) is never downgraded into this
   state -- frozen always takes priority, and this state and `frozen` can
   never coexist on one account row.
+
+  XM-INV-NEGATIVE-DEFICIT (2026-09-06) narrowed what counts as "unreconciled"
+  for a **negative** upstream balance. The bridge now reports the magnitude
+  of a negative balance (`deficit_service_units`) beside the flag, and the
+  evaluator compares it with every unit of usage the projection could not
+  charge to any pool by that moment (the carried cash debts plus
+  non-invoice-eligible shortfalls, summed; `non_invoiceable_overage_units`
+  still names only the oldest of them). Equal
+  magnitudes evaluate `matched`: the account burned to zero and its last
+  request overdrew by exactly that much, which is the ledger and the source
+  agreeing, so the account stays `active` (and a pending account counts one
+  consecutive match). A `negative_frozen` evaluation therefore now has three
+  possible readings, and `pending_reconciliation_detail` says which:
+  "reported balance -X, expected -Y (difference D)" is a genuine gap in
+  either direction; "reported a negative balance of unknown magnitude" is
+  evidence sealed before the bridge learned to report deficits (or a bridge
+  that has not had `install-economic` re-run); and the account-bootstrap
+  wording is an opening negative balance, which no projection can explain.
 - **Usage exceeding the ledger** (`USAGE_EXCEEDS_LEDGER`). This no longer
   freezes the account at all -- the invoiceable amount was always capped at
   what actually got allocated into a cash pool, so the unallocated overage

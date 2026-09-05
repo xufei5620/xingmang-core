@@ -702,8 +702,10 @@ func privateSchemaMigrationsDir(t *testing.T, schema string) string {
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		if entry.Name() == "0014_balance_carry_forward_proof.sql" {
-			// Production 0014 is deliberately public-bound. Rebind only this
+		if entry.Name() == "0014_balance_carry_forward_proof.sql" ||
+			entry.Name() == "0026_balance_checkpoint_deficit.sql" {
+			// Production 0014 (and 0026, which ALTERs 0014's tables and recreates
+			// its trigger function) is deliberately public-bound. Rebind only this
 			// disposable private-schema copy while preserving its fixed search_path.
 			rebound := strings.ReplaceAll(string(body), "public.", "")
 			rebound = strings.ReplaceAll(rebound, "SET search_path=pg_catalog,public",

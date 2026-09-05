@@ -178,6 +178,7 @@
         "balance_service_units": { "$ref": "#/$defs/units" }, "unit_code": { "$ref": "#/$defs/unitCode" },
         "source_snapshot_id": { "$ref": "#/$defs/hash" }, "snapshot_row_count": { "$ref": "#/$defs/units" },
         "balance_negative": { "type": "boolean" },
+        "deficit_service_units": { "$ref": "#/$defs/units", "description": "XM-INV-NEGATIVE-DEFICIT: magnitude of a negative balance, \"0\" otherwise; absent only in evidence sealed before the bridge reported it (stored as unknown, never zero)" },
         "baseline_member": { "type": "boolean" },
         "source_cursor": { "$ref": "#/$defs/factCursor" }, "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
         "causal_order": { "$ref": "#/$defs/units" }, "cutover_manifest_hash": { "$ref": "#/$defs/hash" },

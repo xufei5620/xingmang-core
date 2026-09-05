@@ -263,7 +263,9 @@ BEGIN
     RETURN QUERY EXECUTE $query$
       SELECT to_jsonb(result) FROM (
         SELECT id AS user_id,GREATEST(quota,0)::numeric(78,0)::text AS balance_service_units,
-          (quota<0) AS balance_negative FROM public.users WHERE deleted_at IS NULL ORDER BY id
+          (quota<0) AS balance_negative,
+          GREATEST(-quota,0)::numeric(78,0)::text AS deficit_service_units
+        FROM public.users WHERE deleted_at IS NULL ORDER BY id
       ) result
     $query$;
     RETURN;

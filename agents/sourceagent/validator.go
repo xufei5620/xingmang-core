@@ -487,6 +487,11 @@ func validateRecord(schemaVersion, sourceType, streamID, sourceID, sourceRuntime
 			!strings.HasPrefix(payload.CheckpointID, payload.SourceSnapshotID+":") || validateFactMetadata(payload.FactMetadata) != nil {
 			return errors.New("invalid balance checkpoint")
 		}
+		if (payload.DeficitServiceUnits != "" && !serviceUnitsPattern.MatchString(payload.DeficitServiceUnits)) ||
+			(payload.DeficitServiceUnits != "" && (payload.DeficitServiceUnits != "0") != payload.BalanceNegative) ||
+			(payload.BalanceNegative && payload.BalanceServiceUnits != "0") {
+			return errors.New("invalid balance checkpoint deficit")
+		}
 		if payload.CheckpointKind == "cutover" && !payload.BaselineMember {
 			return errors.New("cutover balance checkpoint must prove baseline membership")
 		}

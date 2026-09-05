@@ -655,7 +655,7 @@ func balanceCheckpointProjection(manifest CutoverManifest, snapshot BalanceSnaps
 		CheckpointID: snapshot.SnapshotID + ":" + row.ExternalUserID, CheckpointKind: snapshot.CheckpointKind,
 		AsOf: snapshot.AsOf, BalanceServiceUnits: row.ServiceUnits, UnitCode: snapshot.UnitCode,
 		SourceSnapshotID: snapshot.SnapshotID, SnapshotRowCount: strconv.Itoa(len(snapshot.Rows)),
-		BalanceNegative: row.BalanceNegative, BaselineMember: row.BaselineMember,
+		BalanceNegative: row.BalanceNegative, DeficitServiceUnits: row.DeficitServiceUnits, BaselineMember: row.BaselineMember,
 		FactMetadata: FactMetadata{SourceCursor: cursorValue,
 			CausalDomain: "balance_snapshot", CausalOrder: &order,
 			CutoverManifestHash: manifest.ManifestHash, ConfigurationHash: manifest.ConfigurationHash}}
@@ -852,7 +852,10 @@ func changedBalanceRowsAndRetirements(previous, captured []BalanceSnapshotRow) (
 		if prior.BaselineMember != row.BaselineMember {
 			return nil, nil, errors.New("immutable balance baseline membership changed")
 		}
-		if prior.ServiceUnits != row.ServiceUnits || prior.BalanceNegative != row.BalanceNegative {
+		if prior.ServiceUnits != row.ServiceUnits || prior.BalanceNegative != row.BalanceNegative ||
+			prior.DeficitServiceUnits != row.DeficitServiceUnits {
+			// A deficit that moves (-3 to -5 units) is a changed balance even
+			// though the floored units stay "0" -- XM-INV-NEGATIVE-DEFICIT.
 			changed = append(changed, row)
 		}
 	}
@@ -974,7 +977,7 @@ func (c *BalanceDBConnector) captureReconciliation(ctx context.Context) (Balance
 	if err = checkLiveEconomicContract(ctx, tx, c.Source, StreamBalances, c.Manifest); err != nil {
 		return BalanceSnapshot{}, errors.New("balance snapshot configuration drifted or is unhealthy")
 	}
-	balanceRelation, err := bridgeJSONRecordRelation(c.Source, StreamBalances, "rows", "user_id bigint,balance_service_units text,balance_negative boolean")
+	balanceRelation, err := bridgeJSONRecordRelation(c.Source, StreamBalances, "rows", balanceRowRecordDefinition)
 	if err != nil {
 		return BalanceSnapshot{}, err
 	}
@@ -982,7 +985,7 @@ func (c *BalanceDBConnector) captureReconciliation(ctx context.Context) (Balance
 	if err != nil {
 		return BalanceSnapshot{}, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT user_id,balance_service_units,balance_negative FROM `+balanceRelation+` ORDER BY user_id`, request)
+	rows, err := tx.QueryContext(ctx, `SELECT user_id,balance_service_units,balance_negative,deficit_service_units FROM `+balanceRelation+` ORDER BY user_id`, request)
 	if err != nil {
 		return BalanceSnapshot{}, err
 	}
@@ -991,13 +994,19 @@ func (c *BalanceDBConnector) captureReconciliation(ctx context.Context) (Balance
 		var id int64
 		var units string
 		var negative bool
-		if err = rows.Scan(&id, &units, &negative); err != nil || id <= 0 || !serviceUnitsPattern.MatchString(units) {
+		var deficit sql.NullString
+		if err = rows.Scan(&id, &units, &negative, &deficit); err != nil || id <= 0 || !serviceUnitsPattern.MatchString(units) {
 			_ = rows.Close()
 			return BalanceSnapshot{}, errors.New("balance projection row is invalid")
 		}
 		externalID := strconv.FormatInt(id, 10)
 		_, member := baselineUsers[externalID]
-		values = append(values, BalanceSnapshotRow{ExternalUserID: externalID, ServiceUnits: units, BalanceNegative: negative, BaselineMember: member})
+		row := BalanceSnapshotRow{ExternalUserID: externalID, ServiceUnits: units, BalanceNegative: negative, BaselineMember: member}
+		if row.DeficitServiceUnits, err = balanceRowDeficit(deficit, units, negative); err != nil {
+			_ = rows.Close()
+			return BalanceSnapshot{}, err
+		}
+		values = append(values, row)
 		if len(values) > balanceSnapshotMaxRows {
 			_ = rows.Close()
 			return BalanceSnapshot{}, errors.New("balance projection exceeds bound")

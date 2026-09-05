@@ -141,7 +141,12 @@ Units are explicit canonical non-negative integer strings:
 
 - Sub2API uses `SUB2_BALANCE_1E8`. Wallet usage is PostgreSQL
   `round(actual_cost,8)*1e8`, matching `users.balance numeric(20,8)`. Negative
-  balances are sent as zero plus `balance_negative=true`, freezing that account.
+  balances are sent as zero plus `balance_negative=true` and, since
+  XM-INV-NEGATIVE-DEFICIT, `deficit_service_units` (the magnitude, the same
+  `1e8` scale). The receiver evaluates that magnitude against the ledger's own
+  still-unallocated overdraw: equal means `matched`, anything else or an absent
+  magnitude (evidence sealed before the bridge reported it) parks the account in
+  the self-clearing pending-reconciliation state.
   Contract `sub2api-economic-v4` hashes normalized numeric multiplier and fee
   values, not mutable settings timestamps. Missing, duplicate or non-numeric
   settings, a multiplier other than one, or a fee outside `0..100` with at most

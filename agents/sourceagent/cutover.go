@@ -66,7 +66,11 @@ type BalanceSnapshotRow struct {
 	ExternalUserID  string `json:"external_user_id"`
 	ServiceUnits    string `json:"service_units"`
 	BalanceNegative bool   `json:"balance_negative"`
-	BaselineMember  bool   `json:"baseline_member"`
+	// DeficitServiceUnits (XM-INV-NEGATIVE-DEFICIT) is the magnitude of a
+	// negative balance, "0" otherwise. omitempty keeps the content hash of a
+	// baseline snapshot sealed before this field existed unchanged.
+	DeficitServiceUnits string `json:"deficit_service_units,omitempty"`
+	BaselineMember      bool   `json:"baseline_member"`
 }
 
 type BalanceSnapshot struct {
@@ -348,11 +352,11 @@ func CaptureCutover(ctx context.Context, db *sql.DB, config CutoverCaptureConfig
 	if !contractOK || contract != expectedContract || !hexHashPattern.MatchString(configurationHash) {
 		return CutoverManifest{}, errors.New("source projection contract is not healthy at cutover")
 	}
-	balanceRelation, err := bridgeJSONRecordRelation(config.SourceType, StreamBalances, "rows", "user_id bigint,balance_service_units text,balance_negative boolean")
+	balanceRelation, err := bridgeJSONRecordRelation(config.SourceType, StreamBalances, "rows", balanceRowRecordDefinition)
 	if err != nil {
 		return CutoverManifest{}, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT user_id,balance_service_units,balance_negative FROM `+balanceRelation+` ORDER BY user_id`, request)
+	rows, err := tx.QueryContext(ctx, `SELECT user_id,balance_service_units,balance_negative,deficit_service_units FROM `+balanceRelation+` ORDER BY user_id`, request)
 	if err != nil {
 		return CutoverManifest{}, fmt.Errorf("capture cutover balances: %w", err)
 	}
@@ -361,11 +365,17 @@ func CaptureCutover(ctx context.Context, db *sql.DB, config CutoverCaptureConfig
 		var userID int64
 		var units string
 		var negative bool
-		if err = rows.Scan(&userID, &units, &negative); err != nil || userID <= 0 || !serviceUnitsPattern.MatchString(units) {
+		var deficit sql.NullString
+		if err = rows.Scan(&userID, &units, &negative, &deficit); err != nil || userID <= 0 || !serviceUnitsPattern.MatchString(units) {
 			_ = rows.Close()
 			return CutoverManifest{}, errors.New("cutover balance projection contains an invalid row")
 		}
-		baseline = append(baseline, BalanceSnapshotRow{ExternalUserID: fmt.Sprint(userID), ServiceUnits: units, BalanceNegative: negative, BaselineMember: true})
+		row := BalanceSnapshotRow{ExternalUserID: fmt.Sprint(userID), ServiceUnits: units, BalanceNegative: negative, BaselineMember: true}
+		if row.DeficitServiceUnits, err = balanceRowDeficit(deficit, units, negative); err != nil {
+			_ = rows.Close()
+			return CutoverManifest{}, err
+		}
+		baseline = append(baseline, row)
 		if len(baseline) > balanceSnapshotMaxRows {
 			_ = rows.Close()
 			return CutoverManifest{}, errors.New("cutover balance projection exceeds the reviewed bound")
@@ -521,6 +531,11 @@ func validateBalanceSnapshot(value BalanceSnapshot) error {
 		if !externalReferencePattern.MatchString(row.ExternalUserID) || !serviceUnitsPattern.MatchString(row.ServiceUnits) || (prior != "" && compareDecimalIDs(prior, row.ExternalUserID) >= 0) {
 			return errors.New("balance snapshot rows are invalid or unordered")
 		}
+		if (row.DeficitServiceUnits != "" && !serviceUnitsPattern.MatchString(row.DeficitServiceUnits)) ||
+			(row.DeficitServiceUnits != "" && (row.DeficitServiceUnits != "0") != row.BalanceNegative) ||
+			(row.BalanceNegative && row.ServiceUnits != "0") {
+			return errors.New("balance snapshot row deficit is inconsistent")
+		}
 		prior = row.ExternalUserID
 		if value.CheckpointKind == "cutover" && !row.BaselineMember {
 			return errors.New("cutover balance snapshot contains a non-baseline row")
@@ -531,6 +546,26 @@ func validateBalanceSnapshot(value BalanceSnapshot) error {
 		return errors.New("balance snapshot content hash mismatch")
 	}
 	return nil
+}
+
+// balanceRowRecordDefinition is the jsonb_to_record column list every
+// balances 'rows' reader declares. deficit_service_units arrived with
+// XM-INV-NEGATIVE-DEFICIT; a bridge installed before it yields NULL there,
+// which balanceRowDeficit refuses -- the operator must run install-economic
+// before this agent build may capture a snapshot.
+const balanceRowRecordDefinition = "user_id bigint,balance_service_units text,balance_negative boolean,deficit_service_units text"
+
+// balanceRowDeficit validates a captured deficit against the row's own
+// units/negative flag: a negative balance is "0" units plus a positive
+// deficit, a non-negative balance is a "0" deficit.
+func balanceRowDeficit(deficit sql.NullString, units string, negative bool) (string, error) {
+	if !deficit.Valid {
+		return "", errors.New("balance projection does not report deficit_service_units; install the current economic bridge first")
+	}
+	if !serviceUnitsPattern.MatchString(deficit.String) || (deficit.String != "0") != negative || (negative && units != "0") {
+		return "", errors.New("balance projection row deficit is inconsistent")
+	}
+	return deficit.String, nil
 }
 
 func balanceSnapshotID(value BalanceSnapshot) (string, error) {

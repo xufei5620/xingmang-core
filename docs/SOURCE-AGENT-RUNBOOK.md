@@ -89,7 +89,15 @@ inventories effective privileges and refuses raw SELECT, role membership,
 schema-create, mutation, sequence, unexpected function execution or a
 dependency-bearing/unsafe function. Full `check-db` repeats that boundary and,
 for V3 economic streams, requires the encrypted manifest plus live semantic
-contract/hash equality.
+contract/hash equality. It also compares `sha256(pg_proc.prosrc)` of the
+stream's bridge routine with the constant pinned in the agent binary
+(`expectedBridgeRoutineHash`): a bridge body edited in `contracts/` must be
+repinned in the same change (the agent's
+`TestExpectedBridgeRoutineHashesMatchTheReviewedContracts` recomputes every
+constant from the reviewed SQL), and the new body must be installed with the
+maintenance wrapper before agents built against it start -- since
+XM-INV-NEGATIVE-DEFICIT both `balances_v4` `rows` outputs carry
+`deficit_service_units`, and a capture that finds it NULL fails closed.
 
 For New API, `top_ups.id` is the `source_order_id` display reference. Do not
 grant/read `trade_no`, and do not put `top_ups.id` into a provider-trade-number

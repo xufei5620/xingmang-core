@@ -267,6 +267,11 @@ type BalanceCheckpointPayload struct {
 	SourceSnapshotID    string `json:"source_snapshot_id"`
 	SnapshotRowCount    string `json:"snapshot_row_count"`
 	BalanceNegative     bool   `json:"balance_negative"`
+	// DeficitServiceUnits (XM-INV-NEGATIVE-DEFICIT) is the magnitude of a
+	// negative upstream balance in service units, "0" when the balance is
+	// not negative. Absent only in evidence sealed before the bridge learned
+	// to report it; the receiver stores that as "unknown", never as zero.
+	DeficitServiceUnits string `json:"deficit_service_units,omitempty"`
 	BaselineMember      bool   `json:"baseline_member"`
 	FactMetadata
 }

@@ -1375,14 +1375,14 @@ func expectedBridgeRoutineHash(config runConfig) string {
 			sourceagent.StreamPayments:   "d908e1ef57383ad10ccf0c4d2e266577e51a5e37a1684866ad5dd4f347c10dcf",
 			sourceagent.StreamUsage:      "ca68cbf1a9ce5eaacde3c52b2778f535bf3510b24c095150ed2bf7bd7fd8843a",
 			sourceagent.StreamCredits:    "307183eda0f2e6900ea9c7dd49194e499e9abfbbb07d308b1558769e257bd8ff",
-			sourceagent.StreamBalances:   "63ab9a5c45cb06267c59a6b8e105149679249fce94b7f73abefd85e6f856d484",
+			sourceagent.StreamBalances:   "25a5836fe99e0f8c9f544d058f920bb652c263808b7851f9bca9d6cebbbe949b",
 			sourceagent.StreamIdentities: "dd92d2fe4b37a8b22509d19507ebae1143dde9952a185a0a180336cc3ef4a7a1",
 		},
 		sourceagent.SourceSub2API: {
 			sourceagent.StreamPayments:   "3ce533217c9535cec7ca711ccb2c011540f4976c414d4543bf3bb13f991c3df1",
 			sourceagent.StreamUsage:      "9291f757e1e0c5b0daa0c6858020e6f61f1cfd63f66cfbe4677b7c6dff3b1530",
 			sourceagent.StreamCredits:    "5683a8b5eec1b50f33740b63d6a361c003686fa6d90eafc92306882a337ab087",
-			sourceagent.StreamBalances:   "00697ce59c06a5a5715dfd4ac58df15e83f76418d8cc4f20ec904cf59d0b36d5",
+			sourceagent.StreamBalances:   "833966dbc1dc7ec68dcb4c79000cb08f7ff64053ee7b47c1e7ffca3819ba5b98",
 			sourceagent.StreamIdentities: "443fc8aa1ed8232c742bfe2964a2869e279886694dddeda0a9d532ecad8f1f90",
 		},
 	}

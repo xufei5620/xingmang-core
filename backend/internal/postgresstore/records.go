@@ -180,9 +180,12 @@ type BalanceCheckpointObservation struct {
 	SourceSequence                                                  int64
 	Watermarks                                                      []EligibilityWatermark
 	BalanceNegative                                                 bool
-	BaselineMember                                                  bool
-	CatchupKeyHMAC                                                  string
-	BatchID, ScanCycleID                                            string
+	// DeficitServiceUnits (XM-INV-NEGATIVE-DEFICIT): magnitude of a negative
+	// balance; nil means the evidence predates the bridge reporting it.
+	DeficitServiceUnits  *string
+	BaselineMember       bool
+	CatchupKeyHMAC       string
+	BatchID, ScanCycleID string
 }
 
 type SubscriptionObservation struct {

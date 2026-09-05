@@ -993,5 +993,8 @@ func migrationMapBeforeReadinessIndex(t *testing.T) fstest.MapFS {
 	// balance_carry_forward_evaluations, the latter created by 0014 -- it
 	// cannot apply on top of this deliberately-reduced set either.
 	delete(files, "0019_balance_blip_repair.sql")
+	// 0026 (XM-INV-NEGATIVE-DEFICIT) ALTERs both 0014 tables by their public
+	// names and recreates 0014's contract trigger function; same reason.
+	delete(files, "0026_balance_checkpoint_deficit.sql")
 	return files
 }

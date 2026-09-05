@@ -174,6 +174,13 @@ type eligibilityProjection struct {
 	// arrived. Only cash settles one; see the carried queue's own comment.
 	ShortfallUsage string
 	ShortfallUnits *big.Int
+	// UnallocatedUnits (XM-INV-NEGATIVE-DEFICIT) is every unit of usage this
+	// projection could not charge to any pool by the end of the window --
+	// the carried cash debts plus non-invoice-eligible shortfalls, all of
+	// them, not only the oldest one the overage columns name. The source
+	// deducted every one of those units, so a negative balance it reports
+	// should be exactly this magnitude.
+	UnallocatedUnits *big.Int
 }
 
 // EligibilityProjectionHealth's OldestPending/ProofPending split
@@ -1053,6 +1060,20 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 	if in.BalanceNegative && balance.Sign() != 0 {
 		return errors.New("negative balance checkpoint must carry zero service units")
 	}
+	// XM-INV-NEGATIVE-DEFICIT: the magnitude of a negative balance travels
+	// beside the flag. nil is "unknown" (evidence sealed before the bridge
+	// reported it) and is stored as NULL, never as zero.
+	var deficit any
+	if in.DeficitServiceUnits != nil {
+		parsed, deficitErr := parseUnsignedUnits(*in.DeficitServiceUnits, "balance deficit service units", true)
+		if deficitErr != nil {
+			return deficitErr
+		}
+		if (parsed.Sign() > 0) != in.BalanceNegative {
+			return errors.New("balance checkpoint deficit disagrees with its negative flag")
+		}
+		deficit = parsed.String()
+	}
 	snapshotRows, err := parseUnsignedUnits(in.SnapshotRowCount, "snapshot row count", true)
 	if err != nil || !snapshotRows.IsInt64() || snapshotRows.Int64() > 2_000_000 || !validHash(in.SourceSnapshotID) {
 		return errors.New("invalid balance snapshot row count")
@@ -1188,13 +1209,13 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				checkpoint_kind,baseline_snapshot_id,baseline_member,source_snapshot_id,snapshot_row_count,
 				as_of,balance_service_units,balance_negative,unit_code,cutover_manifest_hash,
 				configuration_hash,reconciliation_status,source_sequence,source_cursor,
-				stream_watermark_at,source_revision_hash,observed_at)
+				stream_watermark_at,source_revision_hash,observed_at,deficit_service_units)
 			VALUES($1,$2,$3,$4,$5,'cutover',$6,TRUE,$7,$8,$9,$10::numeric,$11,$12,$13,$14,
-				'cutover_baseline',$15,$16,$17,$18,$19)`, checkpointID, in.SourceInstanceID,
+				'cutover_baseline',$15,$16,$17,$18,$19,$20::numeric)`, checkpointID, in.SourceInstanceID,
 			accountID, in.ExternalEventID, in.CheckpointID, in.BaselineSnapshotID,
 			in.SourceSnapshotID, snapshotRows.Int64(), in.AsOf.UTC(), balance.String(),
 			in.BalanceNegative, in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash, in.SourceSequence,
-			in.SourceCursor, in.StreamWatermarkAt.UTC(), in.SourceRevision, in.ObservedAt.UTC())
+			in.SourceCursor, in.StreamWatermarkAt.UTC(), in.SourceRevision, in.ObservedAt.UTC(), deficit)
 		if err != nil {
 			return err
 		}
@@ -1343,14 +1364,14 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 				checkpoint_kind,baseline_member,source_snapshot_id,snapshot_row_count,
 				as_of,balance_service_units,balance_negative,unit_code,
 				cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
-				source_cursor,stream_watermark_at,source_revision_hash,observed_at)
+				source_cursor,stream_watermark_at,source_revision_hash,observed_at,deficit_service_units)
 			VALUES($1,$2,$3,$4,$5,'reconciliation',$6,$7,$8,$9,$10::numeric,$11,$12,$13,
-				$14,'cutover_baseline',$15,$16,$17,$18,$19)`, checkpointID, in.SourceInstanceID,
+				$14,'cutover_baseline',$15,$16,$17,$18,$19,$20::numeric)`, checkpointID, in.SourceInstanceID,
 			accountID, in.ExternalEventID, in.CheckpointID, in.BaselineMember, in.SourceSnapshotID,
 			snapshotRows.Int64(), in.AsOf.UTC(), balance.String(),
 			in.BalanceNegative, in.UnitCode, in.CutoverManifestHash, in.ConfigurationHash,
 			in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt.UTC(), in.SourceRevision,
-			in.ObservedAt.UTC())
+			in.ObservedAt.UTC(), deficit)
 		if err != nil {
 			return err
 		}
@@ -1401,14 +1422,14 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			checkpoint_kind,baseline_member,source_snapshot_id,snapshot_row_count,
 			as_of,balance_service_units,balance_negative,unit_code,cutover_manifest_hash,configuration_hash,
 			reconciliation_status,source_sequence,source_cursor,stream_watermark_at,
-			source_revision_hash,observed_at)
+			source_revision_hash,observed_at,deficit_service_units)
 		VALUES($1,$2,$3,$4,$5,'reconciliation',$6,$7,$8,$9,$10::numeric,$11,$12,$13,$14,
-			$15,$16,$17,$18,$19,$20)`, checkpointID, in.SourceInstanceID,
+			$15,$16,$17,$18,$19,$20,$21::numeric)`, checkpointID, in.SourceInstanceID,
 		accountID, in.ExternalEventID, in.CheckpointID, in.BaselineMember,
 		in.SourceSnapshotID, snapshotRows.Int64(), in.AsOf.UTC(), balance.String(),
 		in.BalanceNegative, in.UnitCode, in.CutoverManifestHash,
 		in.ConfigurationHash, status, in.SourceSequence, in.SourceCursor, in.StreamWatermarkAt.UTC(),
-		in.SourceRevision, in.ObservedAt.UTC())
+		in.SourceRevision, in.ObservedAt.UTC(), deficit)
 	if err != nil {
 		return err
 	}
@@ -1861,7 +1882,7 @@ func buildEligibilityProjectionTx(ctx context.Context, tx pgx.Tx, account eligib
 // building) changes: it always passes nil here.
 func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, through time.Time, excludeUsageIDs map[string]bool) (eligibilityProjection, error) {
 	projection := eligibilityProjection{
-		Lots: map[string]*projectedLot{}, ExpectedBalance: new(big.Int),
+		Lots: map[string]*projectedLot{}, ExpectedBalance: new(big.Int), UnallocatedUnits: new(big.Int),
 	}
 	facts := make([]eligibilityFact, 0)
 	rows, err := tx.Query(ctx, `
@@ -2151,6 +2172,9 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 					projection.ShortfallUsage = fact.UsageID
 					projection.ShortfallUnits = new(big.Int).Set(remaining)
 				}
+				if remaining.Sign() > 0 {
+					projection.UnallocatedUnits.Add(projection.UnallocatedUnits, remaining)
+				}
 				continue
 			}
 			remaining, allocErr := allocateCash(fact.UsageID, remaining)
@@ -2171,6 +2195,9 @@ func buildEligibilityProjectionExcludingUsageTx(ctx context.Context, tx pgx.Tx, 
 	if len(carried) > 0 && projection.ShortfallUsage == "" {
 		projection.ShortfallUsage = carried[0].usageID
 		projection.ShortfallUnits = new(big.Int).Set(carried[0].units)
+	}
+	for _, owed := range carried {
+		projection.UnallocatedUnits.Add(projection.UnallocatedUnits, owed.units)
 	}
 	for _, item := range nonCash {
 		projection.ExpectedBalance.Add(projection.ExpectedBalance, item.remaining)
@@ -3536,6 +3563,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	type carryCandidate struct {
 		cycleID, batchID, snapshotID, cursor, revision string
 		priorID, balance                               string
+		priorDeficit                                   *string
 		asOf, watermark, observed                      time.Time
 		snapshotRows, sequence                         int64
 		negative, baselineMember, hasRealCheckpoint    bool
@@ -3611,6 +3639,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			cycle.scan_snapshot_row_count,cycle.scan_ceiling_at,cycle.stream_watermark_at,
 			cycle.source_cursor,cycle.final_sequence,batch.body_hash,batch.source_captured_at,
 			prior.id::text,prior.balance_service_units::text,prior.balance_negative,prior.baseline_member,
+			prior.deficit_service_units::text,
 			EXISTS (
 				SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
 				JOIN source_economic_scan_cycle_events mapped
@@ -3629,7 +3658,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		 AND batch.sequence=cycle.final_sequence
 		JOIN LATERAL (
 			SELECT checkpoint.id,checkpoint.balance_service_units,
-				checkpoint.balance_negative,checkpoint.baseline_member
+				checkpoint.balance_negative,checkpoint.baseline_member,checkpoint.deficit_service_units
 			FROM balance_reconciliation_checkpoints checkpoint
 			WHERE checkpoint.external_account_id=$1
 			  AND (checkpoint.as_of<cycle.scan_ceiling_at
@@ -3650,7 +3679,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		if err = carryRows.Scan(&item.cycleID, &item.batchID, &item.snapshotID, &item.snapshotRows,
 			&item.asOf, &item.watermark, &item.cursor, &item.sequence, &item.revision,
 			&item.observed, &item.priorID, &item.balance, &item.negative, &item.baselineMember,
-			&item.hasRealCheckpoint); err != nil {
+			&item.priorDeficit, &item.hasRealCheckpoint); err != nil {
 			carryRows.Close()
 			return err
 		}
@@ -3698,13 +3727,13 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 				id,source_instance_id,external_account_id,proof_key,prior_checkpoint_id,
 				scan_cycle_id,final_batch_id,as_of,balance_service_units,balance_negative,
 				baseline_member,source_snapshot_id,snapshot_row_count,source_sequence,
-				source_cursor,stream_watermark_at,source_revision_hash,observed_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::numeric,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+				source_cursor,stream_watermark_at,source_revision_hash,observed_at,deficit_service_units)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::numeric,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::numeric)
 			ON CONFLICT(external_account_id,scan_cycle_id) DO NOTHING`, proofID,
 			account.SourceInstanceID, account.ExternalAccountID, proofKey, item.priorID,
 			item.cycleID, item.batchID, item.asOf.UTC(), item.balance, item.negative,
 			item.baselineMember, item.snapshotID, item.snapshotRows, item.sequence,
-			item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
+			item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC(), item.priorDeficit)
 		if insertErr != nil {
 			return insertErr
 		}
@@ -3886,13 +3915,14 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			WHERE state.external_account_id=$1
 		)
 		SELECT evidence_kind,id,evidence_key,external_event_id,as_of,balance_service_units,
-			balance_negative,source_sequence,source_cursor,stream_watermark_at,
+			balance_negative,deficit_service_units,source_sequence,source_cursor,stream_watermark_at,
 			source_revision_hash,observed_at
 		FROM (
 			SELECT 'real'::text AS evidence_kind,checkpoint.id,
 				checkpoint.checkpoint_id AS evidence_key,checkpoint.external_event_id,
 				checkpoint.as_of,checkpoint.balance_service_units::text AS balance_service_units,
-				checkpoint.balance_negative,checkpoint.source_sequence,checkpoint.source_cursor,
+				checkpoint.balance_negative,checkpoint.deficit_service_units::text,
+				checkpoint.source_sequence,checkpoint.source_cursor,
 				checkpoint.stream_watermark_at,checkpoint.source_revision_hash,checkpoint.observed_at
 			FROM balance_reconciliation_checkpoints checkpoint
 			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
@@ -3902,7 +3932,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				WHERE evaluation.checkpoint_id=checkpoint.id)
 			UNION ALL
 			SELECT 'carry'::text,proof.id,proof.proof_key,proof.proof_key,
-				proof.as_of,proof.balance_service_units::text,proof.balance_negative,
+				proof.as_of,proof.balance_service_units::text,proof.balance_negative,proof.deficit_service_units::text,
 				proof.source_sequence,proof.source_cursor,proof.stream_watermark_at,
 				proof.source_revision_hash,proof.observed_at
 			FROM balance_carry_forward_proofs proof
@@ -3919,6 +3949,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 	type proof struct {
 		kind, id, key, externalEventID string
 		balanceText, cursor, revision  string
+		deficitText                    *string
 		asOf, watermark, observed      time.Time
 		sequence                       int64
 		balanceNegative                bool
@@ -3928,7 +3959,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		var item proof
 		if err = rows.Scan(&item.kind, &item.id, &item.key, &item.externalEventID,
 			&item.asOf, &item.balanceText,
-			&item.balanceNegative, &item.sequence, &item.cursor, &item.watermark,
+			&item.balanceNegative, &item.deficitText, &item.sequence, &item.cursor, &item.watermark,
 			&item.revision, &item.observed); err != nil {
 			rows.Close()
 			return err
@@ -4116,18 +4147,47 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 
 		status := "matched"
 		if item.balanceNegative {
+			// XM-INV-NEGATIVE-DEFICIT: a negative balance whose reported
+			// magnitude equals the overdraw this projection still carries
+			// (ShortfallUnits: usage no pool has covered yet) is the ledger
+			// and the source agreeing -- the account burned to zero and its
+			// last request overdrew by exactly that much. It evaluates
+			// matched and never enters the pending state. Any other
+			// magnitude, or an unknown one (evidence sealed before the
+			// bridge reported deficits), keeps the XM-INV-ELIG-AUTO-RECONCILE
+			// treatment: negative_frozen plus the self-clearing pending
+			// state, never a manual eligibility_freezes row.
+			// evaluation_status classifies what this piece of evidence
+			// showed, independent of how the account is handled for it.
 			status = "negative_frozen"
-			// XM-INV-ELIG-AUTO-RECONCILE: a negative balance no longer
-			// opens a manual eligibility_freezes row -- see
-			// enterPendingReconciliationTx's doc comment. evaluation_status
-			// stays 'negative_frozen': that column classifies what this
-			// piece of evidence showed, independent of how the account is
-			// handled for it.
-			detail := fmt.Sprintf("%s %s at %s reported a negative balance",
+			detail := fmt.Sprintf("%s %s at %s reported a negative balance of unknown magnitude",
 				objectTypeOf(item), item.key, item.asOf.UTC().Format(time.RFC3339Nano))
-			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-				objectTypeOf(item), item.key, detail, actor); err != nil {
-				return err
+			if item.deficitText != nil {
+				deficit, deficitErr := parseUnsignedUnits(*item.deficitText, "balance deficit service units", true)
+				if deficitErr != nil {
+					return deficitErr
+				}
+				unallocated := new(big.Int)
+				if projection.UnallocatedUnits != nil {
+					unallocated.Set(projection.UnallocatedUnits)
+				}
+				// Signed arithmetic: the source reports -deficit; the ledger
+				// expects ExpectedBalance minus every unit it could not allocate.
+				expectedSigned := new(big.Int).Sub(new(big.Int).Set(projection.ExpectedBalance), unallocated)
+				difference = new(big.Int).Sub(new(big.Int).Neg(deficit), expectedSigned)
+				if difference.Sign() == 0 {
+					status = "matched"
+				} else {
+					detail = fmt.Sprintf("%s %s at %s reported balance -%s, expected %s (difference %s)",
+						objectTypeOf(item), item.key, item.asOf.UTC().Format(time.RFC3339Nano),
+						deficit.String(), expectedSigned.String(), difference.String())
+				}
+			}
+			if status == "negative_frozen" {
+				if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
+					objectTypeOf(item), item.key, detail, actor); err != nil {
+					return err
+				}
 			}
 		} else {
 			switch difference.Sign() {

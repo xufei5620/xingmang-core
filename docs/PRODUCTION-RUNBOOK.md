@@ -1613,6 +1613,18 @@ mode-0600 file. After cleanup, restore it, then run maintenance wrapper modes
 current source database. Bare psql is forbidden because the wrapper supplies
 `-X --no-password -v ON_ERROR_STOP=1`.
 
+Re-running `install-economic` is also how a reviewed change to a bridge body
+reaches production (XM-INV-NEGATIVE-DEFICIT added `deficit_service_units` to
+both `balances_v4` `rows` outputs without renaming the function, so no
+cutover manifest is invalidated). Order matters: install the bridge first --
+the running agents ignore the extra key -- then roll the release forward; a
+new agent build against the old bridge fails closed at its first balance
+capture ("does not report deficit_service_units"). Every bridge body is
+pinned by sha256 in the agent's `check-db` (`expectedBridgeRoutineHash`); the
+constants must be repinned in the same change, and
+`TestExpectedBridgeRoutineHashesMatchTheReviewedContracts` recomputes them
+from `contracts/` so a drift fails in CI before it can fail on the box.
+
 Production has ten active LOGIN roles/DSN secret files: one
 identity plus four V3 economic streams per source. The two legacy V2 payment
 compatibility holders (`invoice_sub2api_payments_reader` and
