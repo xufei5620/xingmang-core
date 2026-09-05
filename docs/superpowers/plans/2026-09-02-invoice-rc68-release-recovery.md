@@ -3,7 +3,7 @@
 > **SUPERSEDED — DO NOT EXECUTE.** RC68 shipped at signed tag
 > `v0.1.0-rc68-signed` (`ca6fa80`) and is deployed; its evidence is
 > immutable. Continue only with
-> `docs/superpowers/plans/2026-09-05-invoice-rc98-release-recovery.md`.
+> `docs/superpowers/plans/2026-09-05-invoice-rc99-release-recovery.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 

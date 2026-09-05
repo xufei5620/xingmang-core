@@ -1,5 +1,11 @@
 # RC98 Release Implementation Plan
 
+> **SUPERSEDED — DO NOT EXECUTE.** RC98 was built at signed tag
+> `v0.1.0-rc98-signed` (`c8878de`) and was not rolled forward (its provable-window
+> differential PASSED -- fix 3 proved on the incident data, see its execution record); its evidence is
+> immutable. Continue only with
+> `docs/superpowers/plans/2026-09-05-invoice-rc99-release-recovery.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task-by-task.
 
 **Goal:** Build, strictly verify, sign, and stage RC98, whose only change is the rehearsal instrument for XM-INV-CATCHUP-BURST-BACKPRESSURE fix 3 (one flag and one restored exit over RC98), and use it to replay the 2026-09-04 catch-up burst forward-only on the pre-repair backup so the bounded evidence pass is finally proved or disproved on a real cash account:
