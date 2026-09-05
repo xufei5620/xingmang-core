@@ -44,13 +44,21 @@ type GoodsItem struct {
 }
 
 // ListGoods 读库存。
-func (c *Client) ListGoods(ctx context.Context, platformID, country string) ([]GoodsItem, error) {
-	query := url.Values{}
-	if platformID != "" {
-		query.Set("pingtai_id", platformID)
+//
+// 两个筛选参数都是**整数**（上游叫 pingtai_id / country）；传 0 表示不筛。
+// 展示字段（名称、价格、库存）的键名参考实现没有钉死——它只钉了 goods_id，
+// 其余按常见命名尽力取，取不到就是空。这一点值得知道：真实上游若用别的
+// 键名，这几列会是空的，而**商品 ID 仍然是对的**，不影响购买。
+func (c *Client) ListGoods(ctx context.Context, platformID, country int64) ([]GoodsItem, error) {
+	if platformID < 0 || country < 0 {
+		return nil, connector.NewError(connector.KindRejected, "62-US 库存筛选参数非法", nil)
 	}
-	if country != "" {
-		query.Set("country", country)
+	query := url.Values{}
+	if platformID > 0 {
+		query.Set("pingtai_id", strconv.FormatInt(platformID, 10))
+	}
+	if country > 0 {
+		query.Set("country", strconv.FormatInt(country, 10))
 	}
 	path := "/api/v1/goods"
 	if encoded := query.Encode(); encoded != "" {
@@ -142,48 +150,103 @@ func (c *Client) PurchaseNumbers(ctx context.Context, in PurchaseInput) (Purchas
 	return PurchaseResult{ProviderMeta: meta, OrderID: orderID}, nil
 }
 
+// OrderTokens 是一个订单的补读结果。
+//
+// **响应是结构化的，不是通用集合**：它带 order_id / order_status /
+// order_num / total 四个自校验字段，而 total 必须等于 tokens 的条数。
+// 上游自己给了这个交叉校验，不用就浪费了——数量对不上时我们宁可判协议
+// 错误让它落 unknown，也不要把半份号码当成全部收下。
+type OrderTokens struct {
+	ProviderMeta
+	OrderID string
+	// OrderStatus / OrderNum 是上游对这个订单的说法。
+	// OrderNum 是下单数量，Total 是本次返回的 token 数——
+	// 前者小于后者说明上游给多了，那是协议异常。
+	OrderStatus int64
+	OrderNum    int
+	Numbers     []OrderNumber
+}
+
 // OrderNumber 是订单里的一个号码。
 type OrderNumber struct {
-	// Phone 是完整号码。
+	// Phone 是完整号码。上游字段名是 number（不是 phone）。
 	Phone string
-	// Token 是这个号码的取码凭证。**取码必须用它**，而它本身是敏感值。
+	// Token 是这个号码的取码凭证。**取码必须用它**，而它本身是敏感值：
+	// 不进日志、不进对外 DTO，落库时也只有取码那条路会读它。
 	Token string
+	// PlatformID / PlatformText 是这个号所属的平台（上游叫 pingtai）。
+	PlatformID   int64
+	PlatformText string
+	Status       int64
+	StatusText   string
 }
 
 // GetOrderTokens 按订单读回号码与 token。
 //
-// 买完必须调它才拿得到号码。**返回的订单 ID 要与请求的一致**：不校验的话，
-// 上游一次串号会让我们把别人的号码记到自己的订单上。
-func (c *Client) GetOrderTokens(ctx context.Context, orderID string) ([]OrderNumber, error) {
+// 买完必须调它才拿得到号码。三处校验都不能省：
+//
+//  1. **返回的 order_id 要与请求的一致**——上游一次串号会让我们把别人的
+//     号码记到自己的订单上，而那种错不会报错；
+//  2. total 必须等于 tokens 的条数；
+//  3. order_num（下单量）不能小于 total（返回量）。
+func (c *Client) GetOrderTokens(ctx context.Context, orderID string) (OrderTokens, error) {
 	id := strings.TrimSpace(orderID)
 	if id == "" || !validFilterText(id) {
-		return nil, connector.NewError(connector.KindRejected, "62-US 订单 ID 非法", nil)
+		return OrderTokens{}, connector.NewError(connector.KindRejected, "62-US 订单 ID 非法", nil)
 	}
 	query := url.Values{"order_id": []string{id}}
 
-	var raw json.RawMessage
-	if _, err := c.do(ctx, http.MethodGet, "/api/v1/order/tokens?"+query.Encode(), nil, "", &raw); err != nil {
-		return nil, err
+	var data struct {
+		OrderID     json.RawMessage `json:"order_id"`
+		OrderStatus json.RawMessage `json:"order_status"`
+		OrderNum    json.RawMessage `json:"order_num"`
+		Total       json.RawMessage `json:"total"`
+		Tokens      []struct {
+			Token        string          `json:"token"`
+			Number       string          `json:"number"`
+			PlatformID   json.RawMessage `json:"pingtai"`
+			PlatformText string          `json:"pingtai_text"`
+			Status       json.RawMessage `json:"status"`
+			StatusText   string          `json:"status_text"`
+		} `json:"tokens"`
 	}
-	objects, root, err := collectionObjectsWithRoot(raw, "tokens", "items", "list", "data")
+	meta, err := c.do(ctx, http.MethodGet, "/api/v1/order/tokens?"+query.Encode(), nil, "", &data)
 	if err != nil {
-		return nil, err
-	}
-	// 上游在根对象上回了订单 ID 就核一遍；没回就不假装校验过。
-	if got := scalarString(root, "order_id"); got != "" && got != id {
-		return nil, &ProtocolError{Kind: "返回的订单 ID 与请求不一致"}
+		return OrderTokens{}, err
 	}
 
-	out := make([]OrderNumber, 0, len(objects))
-	for _, o := range objects {
-		phone := scalarString(o, "phone", "number", "phone_number")
-		token := scalarString(o, "token", "order_token")
-		if phone == "" || token == "" {
-			return nil, &ProtocolError{Kind: "订单号码缺少 phone 或 token"}
-		}
-		out = append(out, OrderNumber{Phone: phone, Token: token})
+	responseOrderID := providerIDFromJSON(data.OrderID)
+	if responseOrderID == "" || responseOrderID != id {
+		return OrderTokens{}, &ProtocolError{Kind: "返回的订单 ID 与请求不一致"}
 	}
-	return out, nil
+	orderStatus, _ := decodeJSONInteger(data.OrderStatus)
+	orderNum, numErr := decodeJSONInteger(data.OrderNum)
+	total, totalErr := decodeJSONInteger(data.Total)
+	if numErr != nil || totalErr != nil ||
+		int(total) != len(data.Tokens) || orderNum < total || total > maxQuantity {
+		return OrderTokens{}, &ProtocolError{Kind: "订单号码数量自校验不通过"}
+	}
+
+	numbers := make([]OrderNumber, 0, len(data.Tokens))
+	for _, raw := range data.Tokens {
+		if strings.TrimSpace(raw.Token) == "" || strings.TrimSpace(raw.Number) == "" {
+			return OrderTokens{}, &ProtocolError{Kind: "订单号码缺少 number 或 token"}
+		}
+		platformID, _ := decodeJSONInteger(raw.PlatformID)
+		status, _ := decodeJSONInteger(raw.Status)
+		numbers = append(numbers, OrderNumber{
+			Phone:        strings.TrimSpace(raw.Number),
+			Token:        strings.TrimSpace(raw.Token),
+			PlatformID:   platformID,
+			PlatformText: sanitizeText(raw.PlatformText, 128),
+			Status:       status,
+			StatusText:   sanitizeText(raw.StatusText, 128),
+		})
+	}
+	return OrderTokens{
+		ProviderMeta: meta, OrderID: responseOrderID,
+		OrderStatus: orderStatus, OrderNum: int(orderNum), Numbers: numbers,
+	}, nil
 }
 
 // Message 是一条短信。

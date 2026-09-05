@@ -116,19 +116,42 @@ func (c *Client) durationAction(ctx context.Context, activationID, action string
 	return c.activationAction(ctx, http.MethodPost, "/activations/"+id+"/"+action, body)
 }
 
+// extendOptions 读可选档位。
+//
+// **响应是 data.options 数组，而每项的 duration 是一个 {value, unit} 对象**
+// ——不是一个标量。按标量解会得到 0，而 0 时长的档位在页面上看起来只是
+// 「这个档位没写时长」，人会照选。
 func (c *Client) extendOptions(ctx context.Context, path string) ([]ExtendOption, error) {
 	var resp struct {
-		Data []map[string]any `json:"data"`
+		Data struct {
+			Options []struct {
+				Price    json.Number `json:"price"`
+				Duration struct {
+					Value json.RawMessage `json:"value"`
+					Unit  string          `json:"unit"`
+				} `json:"duration"`
+			} `json:"options"`
+		} `json:"data"`
 	}
 	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return nil, err
 	}
-	out := make([]ExtendOption, 0, len(resp.Data))
-	for _, o := range resp.Data {
+	if resp.Data.Options == nil {
+		return nil, &ProtocolError{Kind: "档位列表缺失"}
+	}
+
+	out := make([]ExtendOption, 0, len(resp.Data.Options))
+	for _, o := range resp.Data.Options {
+		duration := jsonInt(o.Duration.Value)
+		// 单位只认 minute / hour：出现别的说明上游加了新单位，
+		// 而按分钟当小时算会让一次「延长 30」变成三十小时的账单。
+		if duration <= 0 || (o.Duration.Unit != "minute" && o.Duration.Unit != "hour") {
+			return nil, &ProtocolError{Kind: "档位时长或单位非法"}
+		}
 		out = append(out, ExtendOption{
-			Duration: scalarInt(o, "duration"),
-			Unit:     sanitizeText(scalarString(o, "unit", "durationUnit"), 32),
-			Price:    scalarString(o, "price", "cost"),
+			Duration: duration,
+			Unit:     o.Duration.Unit,
+			Price:    o.Price.String(),
 		})
 	}
 	return out, nil

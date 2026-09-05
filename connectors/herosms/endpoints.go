@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -66,6 +67,10 @@ func (c *Client) TestConnection(ctx context.Context) error {
 }
 
 // ListOffers 读库存。
+//
+// **响应是 service → country → offer 的嵌套 map，不是数组。** 这一点值得
+// 单独说：按数组解会拿到空集合而不是报错，于是「库存为空」和「解析方式错了」
+// 长得一模一样。
 func (c *Client) ListOffers(ctx context.Context, services, countries string) ([]Offer, error) {
 	query := url.Values{}
 	if services != "" {
@@ -80,25 +85,60 @@ func (c *Client) ListOffers(ctx context.Context, services, countries string) ([]
 	}
 
 	var body struct {
-		Data []map[string]any `json:"data"`
+		Data map[string]map[string]wireOffer `json:"data"`
 	}
 	if err := c.do(ctx, http.MethodGet, path, nil, &body); err != nil {
 		return nil, err
 	}
 
 	out := make([]Offer, 0, len(body.Data))
-	for _, o := range body.Data {
-		counts, _ := o["counts"].(map[string]any)
-		out = append(out, Offer{
-			Service:        scalarString(o, "service"),
-			Country:        scalarInt(o, "country"),
-			DefaultPrice:   scalarString(o, "default"),
-			RetailPrice:    scalarString(o, "retail"),
-			MinimumPrice:   scalarString(o, "min"),
-			AvailableCount: scalarInt(counts, "total"),
-		})
+	for service, byCountry := range body.Data {
+		for country, offer := range byCountry {
+			countryCode, _ := strconv.ParseInt(country, 10, 64)
+			out = append(out, Offer{
+				Service: service,
+				Country: countryCode,
+				// 三个价格是**不同的事实**，分开保留：把 default 当成
+				// 「本次成交价」会让人按一个不成立的数字做预算。
+				DefaultPrice:   offer.Prices.Default.String(),
+				RetailPrice:    offer.Prices.Retail.String(),
+				MinimumPrice:   offer.Prices.Min.String(),
+				AvailableCount: jsonInt(offer.Counts.Total),
+			})
+		}
 	}
+	// map 迭代顺序不定，排序让页面上每次刷新的顺序一致。
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Service != out[j].Service {
+			return out[i].Service < out[j].Service
+		}
+		return out[i].Country < out[j].Country
+	})
 	return out, nil
+}
+
+// wireOffer 贴着上游 JSON 的形状。
+type wireOffer struct {
+	Prices struct {
+		Default json.Number `json:"default"`
+		Retail  json.Number `json:"retail"`
+		Min     json.Number `json:"min"`
+	} `json:"prices"`
+	Counts struct {
+		Total json.RawMessage `json:"total"`
+	} `json:"counts"`
+}
+
+func jsonInt(raw json.RawMessage) int64 {
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0
+	}
+	v, err := n.Int64()
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // PurchaseInput 是一次购买的输入。
@@ -264,11 +304,18 @@ func (c *Client) GetLastOTP(ctx context.Context, activationID string) (OTP, bool
 	if len(resp.Data) == 0 {
 		return OTP{}, false, nil
 	}
+	// 上游字段名是 smsCode / smsText / phoneFrom / receivedAt，
+	// **不是** code / text / sender——按后者解会得到一条空码，
+	// 而空码在页面上看起来就是「还没到」，人会一直等下去。
+	code := scalarString(resp.Data, "smsCode")
+	if code == "" {
+		return OTP{}, false, nil
+	}
 	return OTP{
-		Code:       scalarString(resp.Data, "code", "otp"),
-		Sender:     sanitizeText(scalarString(resp.Data, "sender", "from"), 128),
-		Text:       scalarString(resp.Data, "text", "message"),
-		ReceivedAt: scalarString(resp.Data, "receivedAt", "created_at"),
+		Code:       code,
+		Sender:     sanitizeText(scalarString(resp.Data, "phoneFrom"), 128),
+		Text:       scalarString(resp.Data, "smsText"),
+		ReceivedAt: scalarString(resp.Data, "receivedAt"),
 	}, true, nil
 }
 
@@ -279,19 +326,20 @@ func parseActivations(raw json.RawMessage) ([]Activation, error) {
 	}
 	out := make([]Activation, 0, len(values))
 	for _, o := range values {
-		id := scalarString(o, "id", "activationId")
+		id := scalarString(o, "id")
 		if id == "" {
 			return nil, &ProtocolError{Kind: "activation 缺少 ID"}
 		}
 		out = append(out, Activation{
 			ID:        id,
-			Phone:     scalarString(o, "phone", "number"),
+			Phone:     scalarString(o, "phone"),
 			Service:   scalarString(o, "service"),
 			Country:   scalarInt(o, "country"),
 			Status:    sanitizeText(scalarString(o, "status"), 64),
 			Price:     scalarString(o, "price", "cost"),
-			CreatedAt: scalarString(o, "createdAt", "created_at"),
-			ExpiresAt: scalarString(o, "expiresAt", "expires_at"),
+			CreatedAt: scalarString(o, "createdAt"),
+			// 上游字段名是 expiredAt（不是 expiresAt）。
+			ExpiresAt: scalarString(o, "expiredAt"),
 		})
 	}
 	return out, nil
