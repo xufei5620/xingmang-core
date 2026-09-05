@@ -522,6 +522,15 @@ func (s *Store) Submit(ctx context.Context, in SubmitInput) (domain.InvoiceReque
 	if err = writeAudit(ctx, tx, in.Actor, "invoice_request.submitted", "invoice_request", requestID, nil, requestState); err != nil {
 		return domain.InvoiceRequest{}, err
 	}
+	// XM-INV-SUBMIT-NOTICE：同事务入队一条企业微信通知。
+	//
+	// 同事务是全部意义所在：通知行存在当且仅当这次提交真的落了库。放在事务
+	// 外的话，回滚而通知已入队会推出一条不存在的申请；先提交后入队则会在两步
+	// 之间崩掉时静默丢一条。投递本身由后台循环带重试完成，绝不占用用户这次
+	// 写入的响应时间——见迁移 0027 的注释。
+	if err = EnqueueInvoiceNoticeTx(ctx, tx, requestID, NoticeKindRequestSubmitted); err != nil {
+		return domain.InvoiceRequest{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return domain.InvoiceRequest{}, fmt.Errorf("commit submit: %w", err)
 	}
