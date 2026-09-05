@@ -264,8 +264,18 @@ describe("CardsPanel", () => {
 
     renderPanel();
 
-    expect(await screen.findByRole("button", { name: "充值" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "赎回" })).toBeTruthy();
+    // 是**链接**不是按钮：详情/充值/赎回都通向详情页的对应页签
+    // （ADMIN-IA §3：主对象一律完整详情页，不用弹窗）。
+    // 用链接换来中键新开、右键复制、悬停看目标——把「这张卡的充值页」
+    // 发给同事是详情从弹窗改成页面之后最常用到的一件事。
+    const topup = await screen.findByRole("link", { name: "充值" });
+    expect(topup.getAttribute("href")).toBe("/cards/MAIN/card_1?tab=topup");
+    expect(screen.getByRole("link", { name: "赎回" }).getAttribute("href")).toBe(
+      "/cards/MAIN/card_1?tab=redeem",
+    );
+    expect(screen.getByRole("link", { name: "详情" }).getAttribute("href")).toBe(
+      "/cards/MAIN/card_1",
+    );
   });
 
   // 两个账号可以持有**同一个上游卡 id**（投影表的唯一键就是
@@ -327,6 +337,53 @@ describe("CardsPanel", () => {
     expect(screen.getByText("11/2031")).toBeTruthy();
     // 开卡时间要到秒，而且带时区——截图发给另一个时区的人不能变成错的。
     expect(screen.getByText("2026-09-04 16:05:07 UTC")).toBeTruthy();
+  });
+
+  // 列序:卡号 → 有效期 → CVV → 验证码。
+  //
+  // 产品负责人 2026-09-05 定的顺序,理由是使用现场:在线支付时人按
+  // 卡号、有效期、CVV、验证码的次序一个个填过去,列序跟着填写次序走,
+  // 眼睛就不用来回跳。
+  it("卡面字段按填写次序排列：有效期在 CVV 前，验证码在 CVV 后", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [activeCard],
+      accounts: ["MAIN"],
+      memberEmails: [],
+    });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
+    renderPanel();
+
+    await screen.findByText("533228******1234");
+    const headers = Array.from(document.querySelectorAll("th")).map((h) => h.textContent ?? "");
+    const at = (name: string) => headers.findIndex((h) => h.includes(name));
+
+    expect(at("卡号")).toBeGreaterThanOrEqual(0);
+    expect(at("有效期")).toBeGreaterThan(at("卡号"));
+    expect(at("CVV")).toBeGreaterThan(at("有效期"));
+    expect(at("验证码")).toBeGreaterThan(at("CVV"));
+  });
+
+  // holder_name 那一列改叫「邮箱」。
+  //
+  // 产品负责人 2026-09-05:上游把企业成员邮箱放在这个字段里,叫「持卡人」
+  // 名不副实;而 Infini 后台显示成持卡人的那个值是 card_alias(他们叫
+  // 「卡片名称」)。两个标签对调,让页面和上游后台说同一种话。
+  it("holder_name 那一列叫邮箱，不叫持卡人", async () => {
+    vi.mocked(listCards).mockResolvedValue({
+      cards: [activeCard],
+      accounts: ["MAIN"],
+      memberEmails: [],
+    });
+    vi.mocked(listCardOperationsNeedingAttention).mockResolvedValue([]);
+    vi.mocked(listCardBalances).mockResolvedValue([]);
+    vi.mocked(listCardChallenges).mockResolvedValue([]);
+    renderPanel();
+
+    await screen.findByText("533228******1234");
+    const headers = Array.from(document.querySelectorAll("th")).map((h) => h.textContent ?? "");
+    expect(headers.some((h) => h.includes("邮箱"))).toBe(true);
   });
 
   it("开卡表单默认选中第一个账号", async () => {

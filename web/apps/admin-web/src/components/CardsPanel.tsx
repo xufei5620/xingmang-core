@@ -18,7 +18,7 @@ import {
 } from "../api/cards";
 import { cardStatusLabel, cardStatusTone, isCardLocked } from "../lib/cardStatus";
 import { formatMinorUnits } from "../lib/money";
-import { CardDetailDialog } from "./CardDetailDialog";
+import { Link } from "react-router";
 import { ActionErrorNote } from "./ActionErrorNote";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
@@ -40,6 +40,33 @@ const CARD_PRODUCTS = [
   { value: "2", label: "Infini Pro" },
   { value: "102", label: "Infini AI" },
 ];
+
+/** 通往卡片详情页的链接，长得像操作列里的其它按钮。
+ *
+ *  用 Link 而不是 Button+navigate：中键新开、右键复制链接、悬停看目标
+ *  这些都是浏览器免费给的，换成按钮就全没了——而「把这张卡的流水发给同事」
+ *  正是详情从弹窗改成页面之后最常用到的一件事。 */
+function CardDetailLink({
+  card,
+  tab,
+  label = "详情",
+}: {
+  card: CardItem;
+  tab?: "topup" | "redeem";
+  label?: string;
+}) {
+  const to =
+    `/cards/${encodeURIComponent(card.account)}/${encodeURIComponent(card.card_id)}` +
+    (tab ? `?tab=${tab}` : "");
+  return (
+    <Link
+      to={to}
+      className="inline-flex min-h-8 items-center rounded-md border border-edge bg-surface px-2 text-xs font-medium text-fg hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-accent"
+    >
+      {label}
+    </Link>
+  );
+}
 
 /** 新鲜度徽章。
  *
@@ -426,13 +453,16 @@ export function CardsPanel() {
       primary: true,
     },
     {
-      id: "challenge",
-      header: "验证码",
-      // 单独一列而不是挂在状态下面：在线支付时人要的就是这个数字，
-      // 它得能被一眼扫到、能被复制。没有待验证时留空而不是「—」，
-      // 让有码的那几行在满屏里跳出来。
-      cell: (row) => <ChallengeCell challenge={challengesByCard.get(`${row.account}/${row.card_id}`)} />,
-      value: (row) => challengesByCard.get(`${row.account}/${row.card_id}`)?.code ?? "",
+      id: "expiry",
+      header: "有效期",
+      // 卡面三列按**填写次序**排：卡号 → 有效期 → CVV → 验证码。
+      // 在线支付时人就是按这个次序一个个填过去的，列序跟着它走，
+      // 眼睛不用来回跳（产品负责人 2026-09-05 定）。
+      // 上游字段名叫 expiration_mmyy，但实测返回的是 MM/YYYY（11/2031），
+      // 与文档示例的 1228 不同。原样显示，不解析、不重排——
+      // 解析一个格式尚未定论的字段，只会在上游改回去时静默显示错。
+      cell: (row) => <span className="font-mono">{row.expiry_mmyy || "—"}</span>,
+      value: (row) => row.expiry_mmyy ?? "",
     },
     {
       id: "cvv",
@@ -449,13 +479,13 @@ export function CardsPanel() {
       value: (row) => row.cvv ?? "",
     },
     {
-      id: "expiry",
-      header: "有效期",
-      // 上游字段名叫 expiration_mmyy，但实测返回的是 MM/YYYY（11/2031），
-      // 与文档示例的 1228 不同。原样显示，不解析、不重排——
-      // 解析一个格式尚未定论的字段，只会在上游改回去时静默显示错。
-      cell: (row) => <span className="font-mono">{row.expiry_mmyy || "—"}</span>,
-      value: (row) => row.expiry_mmyy ?? "",
+      id: "challenge",
+      header: "验证码",
+      // 单独一列而不是挂在状态下面：在线支付时人要的就是这个数字，
+      // 它得能被一眼扫到、能被复制。没有待验证时留空而不是「—」，
+      // 让有码的那几行在满屏里跳出来。
+      cell: (row) => <ChallengeCell challenge={challengesByCard.get(`${row.account}/${row.card_id}`)} />,
+      value: (row) => challengesByCard.get(`${row.account}/${row.card_id}`)?.code ?? "",
     },
     {
       id: "issue_fee",
@@ -466,7 +496,11 @@ export function CardsPanel() {
     },
     {
       id: "holder",
-      header: "持卡人",
+      // 上游把**企业成员邮箱**放在 holder_name 里（生产实测：
+      // xufei5620136@gmail.com），叫「持卡人」名不副实；真正在 Infini
+      // 后台显示成持卡人的是 card_alias（他们叫「卡片名称」）。
+      // 两个标签对调，让这一页和上游后台说同一种话。
+      header: "邮箱",
       cell: (row) => row.holder_name || "—",
       value: (row) => row.holder_name,
     },
@@ -530,11 +564,12 @@ export function CardsPanel() {
       // 只有按钮的列不给 value：它不该参与排序与搜索
       cell: (row) => (
         <div className="flex flex-wrap gap-2">
-          <CardDetailDialog card={row} onWrite={afterWrite} />
-          {/* 对齐上游后台的动作列：充值 / 赎回 / 锁定|解锁。
-              此前充值与赎回只藏在详情弹窗里，要多点两层才能找到。 */}
-          <CardDetailDialog card={row} onWrite={afterWrite} initialTab="topup" triggerLabel="充值" />
-          <CardDetailDialog card={row} onWrite={afterWrite} initialTab="redeem" triggerLabel="赎回" />
+          {/* 详情、充值、赎回都是**链接**，不是弹窗（ADMIN-IA §3：主对象一律
+              完整详情页）。页签写在 ?tab= 里，所以「充值」能一步直达对应表单，
+              而不必先开详情再找页签；这几个位置也因此可以被链接、被刷新。 */}
+          <CardDetailLink card={row} />
+          <CardDetailLink card={row} tab="topup" label="充值" />
+          <CardDetailLink card={row} tab="redeem" label="赎回" />
           <Button
             variant="secondary"
             size="sm"

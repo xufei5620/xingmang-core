@@ -46,6 +46,7 @@ import { AuditPage } from "./pages/AuditPage";
 import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChannelDetailPage, isSupplyPlatform } from "./pages/ChannelDetailPage";
+import { CardDetailPage } from "./pages/CardDetailPage";
 import { IdentityPage } from "./pages/IdentityPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -437,6 +438,11 @@ export const routes = [
               // 两个来源之间不保证唯一，路径里少了平台就没法保证读的是哪一条
               { path: "platforms/:serviceType/requests/:requestId", Component: RequestDetailPage },
               { path: "cards", Component: CardsPage },
+              // 卡片详情是**完整页**而不是弹窗（ADMIN-IA §3：主对象一律
+              // 完整详情页，明令不用右侧抽屉）。账号进路径是因为卡 id 只在
+              // 自己账号内唯一——投影表的唯一键是 (environment, account,
+              // upstream_card_id)，只用 card_id 会在两个账号有同名卡时指错。
+              { path: "cards/:account/:cardId", Component: CardDetailPage },
               { path: "registry", Component: RegistryPage },
               { path: "identity", Component: IdentityPage },
               { path: "settings", Component: SettingsPage },

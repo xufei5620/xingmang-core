@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DataTableV2, formatUtcTimestamp, type DataTableColumn } from "@xingmang/ui-admin";
-import { Badge, Button, Dialog, FormField, Input, Select } from "@xingmang/ui-primitives";
+import { Badge, Button, FormField, Input, Select } from "@xingmang/ui-primitives";
 import { useId, useState } from "react";
 import {
   listCardTransactions,
@@ -121,29 +121,35 @@ function FundsForm({
  *
  *  卡面明文由后端按 card.reveal 权限决定回不回——前端只负责显示它拿到的
  *  东西，不做「本地隐藏」那种假控制。 */
-type DetailTab = "info" | "usage" | "topup" | "redeem" | "tx";
+export type DetailTab = "info" | "usage" | "topup" | "redeem" | "tx";
 
-export function CardDetailDialog({
+/** 卡片详情的主体（页签 + 各页签内容）。
+ *
+ *  **这里不再是弹窗。** ADMIN-IA §3 对「主对象」一律要求完整详情页、
+ *  明令不用右侧抽屉（快照 RECOVERY.md「No right-side detail drawers」），
+ *  当初做成 Dialog 是我的偏离；产品负责人 2026-09-05 在生产上提出后纠正。
+ *
+ *  弹窗在这里本来就不合身：它同时装着五件事（只读字段、三个会花钱的表单、
+ *  一张可搜索可排序的流水表），而弹窗的尺寸约束让流水表只能挤在一小块里，
+ *  真要查一笔消费反而得先关掉它回列表。页面还带来两样弹窗给不了的东西——
+ *  可以被链接、可以被刷新。 */
+export function CardDetailPanel({
   card,
   onWrite,
-  initialTab = "info",
-  triggerLabel = "详情",
+  tab,
+  onTabChange,
 }: {
   card: CardItem;
   onWrite: (result: ActionResult) => void;
-  /** 打开时落在哪个页签。操作列的「充值」「赎回」直接跳到对应表单，
-   *  免得运营先开详情再找页签——对齐上游后台一键直达的体验。 */
-  initialTab?: DetailTab;
-  triggerLabel?: string;
+  tab: DetailTab;
+  onTabChange: (tab: DetailTab) => void;
 }) {
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<DetailTab>(initialTab);
 
   const txQuery = useQuery({
     queryKey: [CARD_TX_QUERY, card.account, card.card_id],
     queryFn: ({ signal }) => listCardTransactions(card.account, card.card_id, { signal }),
-    enabled: open && tab === "tx",
+    enabled: tab === "tx",
   });
 
   const afterWrite = (result: ActionResult) => {
@@ -216,17 +222,6 @@ export function CardDetailDialog({
   ];
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={setOpen}
-      title={`卡片详情 · ${card.mask || card.card_id}`}
-      description={`账号 ${card.account}`}
-      trigger={
-        <Button variant="secondary" size="sm">
-          {triggerLabel}
-        </Button>
-      }
-    >
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap gap-2" role="tablist">
           {tabs.map((t) => (
@@ -234,7 +229,7 @@ export function CardDetailDialog({
               key={t.id}
               size="sm"
               variant={tab === t.id ? "primary" : "secondary"}
-              onClick={() => setTab(t.id)}
+              onClick={() => onTabChange(t.id)}
               role="tab"
               aria-selected={tab === t.id}
             >
@@ -249,13 +244,18 @@ export function CardDetailDialog({
             <Field label="状态" value={card.status} />
             <Field label="卡号" value={card.pan ?? card.mask} mono />
             <Field label="CVV" value={card.cvv ?? "—"} mono />
-            <Field label="有效期（MMYY）" value={card.expiry_mmyy ?? "—"} mono />
-            <Field label="持卡人" value={card.holder_name} />
+            {/* 标签写「MMYY」是错的：上游字段名叫 expiration_mmyy，但实测
+                返回的是 MM/YYYY（12/2031）。原样显示、标签也照实说。 */}
+            <Field label="有效期" value={card.expiry_mmyy ?? "—"} mono />
+            {/* holder_name 里装的是**企业成员邮箱**（生产实测）。
+                叫「持卡人」名不副实——真正在 Infini 后台当持卡人显示的是
+                card_alias（他们叫「卡片名称」）。两个标签对调。 */}
+            <Field label="邮箱" value={card.holder_name} />
             <Field label="余额" value={formatMinorUnits(card.balance_minor, card.currency)} />
             <Field label="用途" value={card.owner_ref ?? "—"} />
-            <Field label="卡别名（幂等信标）" value={card.card_alias} mono />
+            <Field label="持卡人" value={card.card_alias} mono />
             <Field
-              label="开卡日期"
+              label="开卡时间"
               value={card.issued_at ? formatUtcTimestamp(card.issued_at) : "—"}
             />
             <Field
@@ -301,7 +301,6 @@ export function CardDetailDialog({
           </ApiStateView>
         ) : null}
       </div>
-    </Dialog>
   );
 }
 
