@@ -22,6 +22,9 @@ type SMSQuerier interface {
 	ListRoutingRules(ctx context.Context) ([]sms.RoutingRule, error)
 	// LatestBalanceSnapshots 是巡检抓到的最新余额（XM-SMS2 #7）。
 	LatestBalanceSnapshots(ctx context.Context) ([]sms.BalanceSnapshot, error)
+	// 消费者配额（XM-SMS4 #3）。**只读**：写走 sms.quota.set Action。
+	ListConsumerQuotas(ctx context.Context) ([]sms.ConsumerQuota, error)
+	ConsumerUsageSince(ctx context.Context, consumer string, since time.Time) (sms.ConsumerUsage, error)
 	// AggregateCostsByDay 是成本统计页签的读端点（XM-SMS3 #3）。
 	AggregateCostsByDay(ctx context.Context, from, to time.Time) ([]sms.CostAggregate, error)
 	// 告警与阈值（XM-SMS2 #8）。**只读**：写走 sms.alert.* Action。
@@ -505,5 +508,63 @@ func ListSMSCostsHandler(store SMSQuerier, now func() time.Time) http.HandlerFun
 			// 回给页面的 to 是**含当天**的那一天，与人说的日期一致。
 			"to": to.AddDate(0, 0, -1).Format("2006-01-02"),
 		})
+	}
+}
+
+// ---- 消费者配额（XM-SMS4 #3）----
+
+type smsQuotaItem struct {
+	Consumer      string `json:"consumer"`
+	DailyRequests int    `json:"daily_requests"`
+	// DailySpendCap 空 = 不限花费（仍受日号数约束）。
+	DailySpendCap string `json:"daily_spend_cap,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
+	// UsedNumbers / UsedSpend 是**今天**已经用掉的，让人一眼看出谁快到顶了。
+	UsedNumbers int                `json:"used_numbers"`
+	UsedSpend   []smsQuotaSpendRow `json:"used_spend,omitempty"`
+}
+
+type smsQuotaSpendRow struct {
+	Currency string `json:"currency,omitempty"`
+	Amount   string `json:"amount"`
+}
+
+// ListSMSQuotasHandler 返回已登记的消费者与他们今天的用量。
+//
+// 没有行 = 那个机器身份一次都调不动（XM-SMS4 #3）；页面要能一眼看出「谁登记了、
+// 谁快到顶了」，所以配额与今日用量一起回。
+func ListSMSQuotasHandler(store SMSQuerier, now func() time.Time) http.HandlerFunc {
+	if now == nil {
+		now = time.Now
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		quotas, err := store.ListConsumerQuotas(r.Context())
+		if err != nil {
+			WriteError(w, r, err)
+			return
+		}
+		dayStart := now().UTC().Truncate(24 * time.Hour)
+		out := make([]smsQuotaItem, 0, len(quotas))
+		for _, q := range quotas {
+			item := smsQuotaItem{
+				Consumer: q.Consumer, DailyRequests: q.DailyRequests,
+				DailySpendCap: q.DailySpendCapText, Enabled: q.Enabled,
+			}
+			if !q.UpdatedAt.IsZero() {
+				item.UpdatedAt = q.UpdatedAt.UTC().Format(time.RFC3339)
+			}
+			usage, err := store.ConsumerUsageSince(r.Context(), q.Consumer, dayStart)
+			if err != nil {
+				WriteError(w, r, err)
+				return
+			}
+			item.UsedNumbers = usage.Numbers
+			for _, row := range usage.SpendByCurrency {
+				item.UsedSpend = append(item.UsedSpend, smsQuotaSpendRow{Currency: row.Currency, Amount: row.SumText})
+			}
+			out = append(out, item)
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
 }

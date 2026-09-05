@@ -213,9 +213,11 @@ func (s *Service) purchase(ctx context.Context, operationID, provider string, in
 
 	params := purchaseParams(provider, in)
 	op := Operation{
-		ID:            operationID,
-		Provider:      provider,
-		Kind:          KindPurchase,
+		ID:       operationID,
+		Provider: provider,
+		Kind:     KindPurchase,
+		// 机器身份才有值：配额按它计，出事时「谁买的」也要能对上。
+		PrincipalID:   consumerOf(ctx),
 		State:         StatePrepared,
 		RequestHash:   CanonicalRequestHash(provider, KindPurchase, params),
 		ParamsSummary: summarize(params),

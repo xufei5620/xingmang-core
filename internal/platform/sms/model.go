@@ -143,7 +143,10 @@ type Operation struct {
 	ID       string
 	Provider string
 	Kind     string
-	State    OperationState
+	// PrincipalID 是发起这笔操作的身份（机器身份才有值，XM-SMS4 #3）。
+	// 配额按它计，出事时「谁买的」也要能对上。
+	PrincipalID string
+	State       OperationState
 	// ResourceID / OrderID 是本地 UUID，不是上游 ID。
 	ResourceID string
 	OrderID    string

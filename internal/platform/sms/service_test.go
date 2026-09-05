@@ -27,6 +27,7 @@ type memStore struct {
 	snapshotErr error
 	thresholds  map[string]BalanceThreshold
 	costs       map[string]CostEvent
+	quotas      map[string]ConsumerQuota
 	costOrder   []string
 	alerts      map[string]AlertEvent
 	// pendingHash 模拟未决唯一索引。
@@ -44,6 +45,7 @@ func newMemStore() *memStore {
 		routing:    map[string]RoutingRule{},
 		thresholds: map[string]BalanceThreshold{},
 		costs:      map[string]CostEvent{},
+		quotas:     map[string]ConsumerQuota{},
 		alerts:     map[string]AlertEvent{},
 	}
 }
@@ -871,4 +873,70 @@ func (m *memStore) AggregateCostsByDay(ctx context.Context, from, to time.Time) 
 		return out[i].Service < out[j].Service
 	})
 	return out, nil
+}
+
+func (m *memStore) SaveConsumerQuota(ctx context.Context, q ConsumerQuota) error {
+	m.quotas[q.Consumer] = q
+	return nil
+}
+
+func (m *memStore) RemoveConsumerQuota(ctx context.Context, consumer string) error {
+	delete(m.quotas, consumer)
+	return nil
+}
+
+func (m *memStore) GetConsumerQuota(ctx context.Context, consumer string) (ConsumerQuota, bool, error) {
+	q, ok := m.quotas[consumer]
+	return q, ok, nil
+}
+
+func (m *memStore) ListConsumerQuotas(ctx context.Context) ([]ConsumerQuota, error) {
+	out := make([]ConsumerQuota, 0, len(m.quotas))
+	for _, q := range m.quotas {
+		out = append(out, q)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Consumer < out[j].Consumer })
+	return out, nil
+}
+
+func (m *memStore) ConsumerUsageSince(ctx context.Context, consumer string, since time.Time) (ConsumerUsage, error) {
+	var usage ConsumerUsage
+	mine := map[string]bool{}
+	for id, op := range m.ops {
+		if op.PrincipalID == consumer && !op.StartedAt.Before(since) {
+			mine[id] = true
+		}
+	}
+	for _, r := range m.resources {
+		if mine[r.OperationID] {
+			usage.Numbers++
+		}
+	}
+	byCurrency := map[string]*CostSummary{}
+	for _, key := range m.costOrder {
+		ev := m.costs[key]
+		if !mine[ev.OperationID] || ev.OccurredAt.Before(since) {
+			continue
+		}
+		row, ok := byCurrency[ev.Currency]
+		if !ok {
+			row = &CostSummary{Currency: ev.Currency, SumText: "0"}
+			byCurrency[ev.Currency] = row
+		}
+		row.Count++
+		if ev.AmountText == "" {
+			row.UnknownCount++
+			continue
+		}
+		sum, _ := parseSignedDecimal(row.SumText)
+		add, ok2 := parseSignedDecimal(ev.AmountText)
+		if !ok2 {
+			continue
+		}
+		row.SumText = ratText(sum.Add(sum, add))
+	}
+	for _, row := range byCurrency {
+		usage.SpendByCurrency = append(usage.SpendByCurrency, *row)
+	}
+	return usage, nil
 }

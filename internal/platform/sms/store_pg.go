@@ -36,12 +36,12 @@ func (s *PgStore) PrepareOperation(ctx context.Context, op Operation) error {
 	const insertSQL = `
 INSERT INTO sms.sms_operation (
     id, environment, provider, kind, state, resource_id, request_hash,
-    params_summary, started_at, updated_at, email_id
-) VALUES ($1,$2,$3,$4,'prepared',NULLIF($5,'')::uuid,$6,$7,$8,$8,NULLIF($9,'')::uuid)`
+    params_summary, started_at, updated_at, email_id, principal_id
+) VALUES ($1,$2,$3,$4,'prepared',NULLIF($5,'')::uuid,$6,$7,$8,$8,NULLIF($9,'')::uuid,$10)`
 
 	_, err := s.pool.Exec(ctx, insertSQL,
 		op.ID, s.environment, op.Provider, op.Kind, op.ResourceID,
-		op.RequestHash, op.ParamsSummary, op.StartedAt.UTC(), op.EmailID)
+		op.RequestHash, op.ParamsSummary, op.StartedAt.UTC(), op.EmailID, op.PrincipalID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w（同一份请求已有未决操作，或该资源的同一动作正在进行）", ErrPendingDuplicate)
@@ -454,7 +454,7 @@ const operationColumns = `
 SELECT id, provider, kind, state, COALESCE(resource_id::text,''), COALESCE(order_id::text,''),
        request_hash, params_summary, provider_request_id, provider_ref,
        failure_reason, needs_human_review, resolve_note, started_at, updated_at,
-       COALESCE(email_id::text,'')
+       COALESCE(email_id::text,''), principal_id
   FROM sms.sms_operation`
 
 type scannable interface {
@@ -467,7 +467,7 @@ func scanOperation(row scannable) (Operation, error) {
 	if err := row.Scan(&op.ID, &op.Provider, &op.Kind, &state, &op.ResourceID, &op.OrderID,
 		&op.RequestHash, &op.ParamsSummary, &op.ProviderRequestID, &op.ProviderRef,
 		&op.FailureReason, &op.NeedsHumanReview, &op.ResolveNote,
-		&op.StartedAt, &op.UpdatedAt, &op.EmailID); err != nil {
+		&op.StartedAt, &op.UpdatedAt, &op.EmailID, &op.PrincipalID); err != nil {
 		return Operation{}, err
 	}
 	op.State = OperationState(state)
@@ -1105,4 +1105,115 @@ SELECT to_char(date_trunc('day', occurred_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') 
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// ---- 消费者配额（迁移 000048）----
+
+func (s *PgStore) SaveConsumerQuota(ctx context.Context, q ConsumerQuota) error {
+	at := q.UpdatedAt
+	if at.IsZero() {
+		at = s.now()
+	}
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO sms.consumer_quota (environment, consumer, daily_requests, daily_spend_cap, enabled, created_at, updated_at)
+VALUES ($1,$2,$3,NULLIF($4,'')::numeric,$5,$6,$6)
+ON CONFLICT (environment, consumer) DO UPDATE SET
+    daily_requests = EXCLUDED.daily_requests,
+    daily_spend_cap = EXCLUDED.daily_spend_cap,
+    enabled = EXCLUDED.enabled,
+    updated_at = EXCLUDED.updated_at`,
+		s.environment, q.Consumer, q.DailyRequests, q.DailySpendCapText, q.Enabled, at.UTC())
+	if err != nil {
+		return fmt.Errorf("写消费者配额: %w", err)
+	}
+	return nil
+}
+
+// RemoveConsumerQuota 取消登记。删不存在的不是错：取消登记应当幂等。
+func (s *PgStore) RemoveConsumerQuota(ctx context.Context, consumer string) error {
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM sms.consumer_quota WHERE environment = $1 AND consumer = $2`,
+		s.environment, consumer); err != nil {
+		return fmt.Errorf("删消费者配额: %w", err)
+	}
+	return nil
+}
+
+func (s *PgStore) GetConsumerQuota(ctx context.Context, consumer string) (ConsumerQuota, bool, error) {
+	var q ConsumerQuota
+	err := s.pool.QueryRow(ctx, `
+SELECT consumer, daily_requests, COALESCE(daily_spend_cap::text,''), enabled, updated_at
+  FROM sms.consumer_quota
+ WHERE environment = $1 AND consumer = $2`, s.environment, consumer).
+		Scan(&q.Consumer, &q.DailyRequests, &q.DailySpendCapText, &q.Enabled, &q.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ConsumerQuota{}, false, nil
+	}
+	if err != nil {
+		return ConsumerQuota{}, false, fmt.Errorf("查消费者配额: %w", err)
+	}
+	q.UpdatedAt = q.UpdatedAt.UTC()
+	return q, true, nil
+}
+
+func (s *PgStore) ListConsumerQuotas(ctx context.Context) ([]ConsumerQuota, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT consumer, daily_requests, COALESCE(daily_spend_cap::text,''), enabled, updated_at
+  FROM sms.consumer_quota
+ WHERE environment = $1
+ ORDER BY consumer`, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查消费者配额: %w", err)
+	}
+	defer rows.Close()
+	var out []ConsumerQuota
+	for rows.Next() {
+		var q ConsumerQuota
+		if err := rows.Scan(&q.Consumer, &q.DailyRequests, &q.DailySpendCapText, &q.Enabled, &q.UpdatedAt); err != nil {
+			return nil, err
+		}
+		q.UpdatedAt = q.UpdatedAt.UTC()
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
+// ConsumerUsageSince 统计某个消费者从 since 起用掉的号数与花费。
+//
+// 号数按**真的拿到手的号**算（sms_resource 上的 operation_id），不是按调用次数：
+// 失败的请求没花钱，把它算进配额等于因为上游抖动惩罚调用方。
+func (s *PgStore) ConsumerUsageSince(ctx context.Context, consumer string, since time.Time) (ConsumerUsage, error) {
+	var usage ConsumerUsage
+	err := s.pool.QueryRow(ctx, `
+SELECT count(*)
+  FROM sms.sms_resource r
+  JOIN sms.sms_operation o ON o.id = r.operation_id
+ WHERE r.environment = $1 AND o.principal_id = $2 AND o.started_at >= $3`,
+		s.environment, consumer, since.UTC()).Scan(&usage.Numbers)
+	if err != nil {
+		return ConsumerUsage{}, fmt.Errorf("查消费者用量: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx, `
+SELECT c.currency,
+       COALESCE(sum(c.amount)::text, '0'),
+       count(*),
+       count(*) FILTER (WHERE c.amount IS NULL)
+  FROM sms.cost_event c
+  JOIN sms.sms_operation o ON o.id = c.operation_id
+ WHERE c.environment = $1 AND o.principal_id = $2 AND c.occurred_at >= $3
+ GROUP BY c.currency
+ ORDER BY c.currency`, s.environment, consumer, since.UTC())
+	if err != nil {
+		return ConsumerUsage{}, fmt.Errorf("查消费者花费: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row CostSummary
+		if err := rows.Scan(&row.Currency, &row.SumText, &row.Count, &row.UnknownCount); err != nil {
+			return ConsumerUsage{}, err
+		}
+		usage.SpendByCurrency = append(usage.SpendByCurrency, row)
+	}
+	return usage, rows.Err()
 }

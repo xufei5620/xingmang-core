@@ -106,14 +106,24 @@ branch: ai/claude/XM-CARD0-infini-connector
    **金额未知的笔数单独显示并写明「合计是下限而不是实际花费」**——一份背后有
    二十笔金额不明的报表，那个数字会被当成实际花费。
 
-## XM-SMS4 · 接入规范与内部接口 — status: todo
+## XM-SMS4 · 接入规范与内部接口 — status: in-progress（2–3 done，规范文档待写）
 
 1. 规范文档 `docs/modules/sms/INTEGRATION.md`：机器身份与 API Key、幂等申请
    （request_id 由调用方生成）、状态机、取码、释放、配额与花费上限、错误码、
    **回调形状**（字段定稿，投递等通知规范）。
-2. Action 放开 MACHINE 身份：`sms.number.request` / `sms.code.fetch` /
-   `sms.resource.action` 允许机器调用，按 principal 计配额。
-3. `sms.consumer_quota`（每个消费者的日配额与花费上限）+ Action + 后台页面。
+2. ~~Action 放开机器身份~~ done：`sms.number.request` / `sms.code.fetch` /
+   `sms.resource.action` 的 PrincipalTypes 加 `SERVICE`。**只放 SERVICE**——
+   AI 与 SERVER_AGENT 不在其中：让 AI 身份自己买号是另一件事，要产品负责人
+   拍板（写在下面「待决」）。其余动作（买号、开关供应商、路由、配额）仍只给人。
+3. ~~`sms.consumer_quota`~~ done：迁移 000048 建表并给 `sms_operation` 加
+   `principal_id`（机器调用才有值，出事时「谁买的」要对得上）。**没有配额行
+   或被停用 = 一次都调不动**（宪法 26 条的同一条纪律）；人不受约束。日配额按
+   **号数**算（一次要 50 个与 50 次要一个花的钱一样多），回放不重复计数，失败
+   的请求不计（没花钱）。花费上限是**止损线**不是预授权——买之前没人知道这次
+   要花多少（62 连买完都只回订单号），到线之后不再放行，最多超出一次请求；
+   按币种各自计。Action `sms.quota.set`（sms.manage、L1、**只给人**，机器不该
+   能给自己提额）+ 契约 + 读端点 `GET /sms/quotas`（配额与今日用量一起回）+
+   页签「接入配额」。
 4. 首个消费者未定：只做规范与骨架，不做任何具体对接。
 
 ## XM-SMS5 · 转售（预充值扣费）— status: todo（依赖平台用户 / 支付模块）
@@ -125,7 +135,11 @@ branch: ai/claude/XM-CARD0-infini-connector
 
 ## 待决（需要产品负责人）
 
-（暂无）
+1. **AI 身份要不要能自己要号。** XM-SMS4 只把 `SERVICE` 放进了三个消费者动作，
+   `AI` 与 `SERVER_AGENT` 仍被挡在外面。放开 AI 意味着一个 AI 会话可以自己花钱
+   买号——这与宪法里「AI 不作为 L3/L4 第二审批人」是同一类边界问题，不猜。
+   要放开的话，做法与 SERVICE 相同（加进 PrincipalTypes + 登记配额），一行代码
+   加一条配额行。
 
 ## 验证记录
 
@@ -233,3 +247,18 @@ branch: ai/claude/XM-CARD0-infini-connector
   与提醒句撞名——改成按「合计是下限」这句独有的话定位。门禁：go vet /
   go test -p 1 ./...（含真库）/ check-governance 0 / pnpm -r typecheck /
   pnpm -r test（admin-web 1564 用例）全绿。
+- 2026-09-06 XM-SMS4 #2–#3：`quota_test.go` 九条先红后绿：未登记的机器被拒且
+  **拒绝发生在打上游之前**（台账里一条都没有）、人不受约束、停用等于没登记、
+  日号数用完就拒、一次要 5 个超过日配额 2 也拒（按号数不按次数）、回放不重复
+  计数、花费止损线到线后拦住 / 宽上限不拦、四种非法配置被拒而 0 合法、配额
+  Action 只给人、三个消费者动作放开 SERVICE 而**不放 AI**、其余动作仍只给人。
+  两处先红暴露了真问题：一是替身每次回同一个 external_id，第二次 upsert 覆盖
+  第一次、用量永远停在 1（改成每次回新号，与真实上游一致）；二是回放被算成
+  新的一次要号——一个正好卡在配额线上的重试会拿不回它已经买到的号，改成先探
+  台账再决定要不要计数。真库 `TestPgStoreConsumerQuotaAndUsage`：未登记回
+  (false, nil)、同键覆盖（上限被清空）、0 上限被 CHECK 挡、principal_id 落库并
+  读回、用量只算自己的且只算窗口内的、取消登记幂等（迁移 000048 在测试库上真
+  跑过）。页面 `SMSQuotaPanel.test.tsx` 五条：今日用量与配额并排、空表说明
+  「没登记就调不动是刻意的默认」、留空上限不发该字段、消费者为空不能保存、
+  编辑回填。门禁：go vet / go test -p 1 ./...（含真库）/ check-compose-env 0 /
+  check-governance 0 / pnpm -r typecheck / pnpm -r test（admin-web 1569 用例）全绿。

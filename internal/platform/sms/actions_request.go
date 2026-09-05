@@ -38,7 +38,7 @@ func requestDef(providers []string) action.Definition {
 			{Name: "provider", Type: action.FieldString, Enum: providers},
 		}},
 		// XM-SMS4 会放开 MACHINE；在那之前只给人。
-		Environments: allEnvironments, PrincipalTypes: humanOnly,
+		Environments: allEnvironments, PrincipalTypes: humanOrService,
 	}
 }
 

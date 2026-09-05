@@ -81,6 +81,14 @@ type Store interface {
 	// ListRecentBalanceSnapshots 某一家最近的几条，新的在前（对账要相邻两条）。
 	ListRecentBalanceSnapshots(ctx context.Context, provider string, limit int) ([]BalanceSnapshot, error)
 
+	// 消费者配额（XM-SMS4 #3）。没有行 = 这个机器身份一次都不许调用。
+	SaveConsumerQuota(ctx context.Context, q ConsumerQuota) error
+	RemoveConsumerQuota(ctx context.Context, consumer string) error
+	GetConsumerQuota(ctx context.Context, consumer string) (ConsumerQuota, bool, error)
+	ListConsumerQuotas(ctx context.Context) ([]ConsumerQuota, error)
+	// ConsumerUsageSince 统计某个消费者从 since 起用掉的号数与花费（按币种）。
+	ConsumerUsageSince(ctx context.Context, consumer string, since time.Time) (ConsumerUsage, error)
+
 	// 成本事件（XM-SMS3 #1）。按 (操作, 主体) 幂等：同一笔操作重放不会记两次账。
 	AppendCostEvents(ctx context.Context, events []CostEvent) (int, error)
 	ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error)

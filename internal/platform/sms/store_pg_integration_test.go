@@ -790,3 +790,112 @@ func TestPgStoreAggregateCostsByDay(t *testing.T) {
 		t.Fatalf("6 号应有三行, got %+v", only6)
 	}
 }
+
+// 迁移 000048：消费者配额与台账上的 principal_id。
+func TestPgStoreConsumerQuotaAndUsage(t *testing.T) {
+	store := pgStore(t)
+	ctx := context.Background()
+	for _, table := range []string{"sms.consumer_quota", "sms.cost_event"} {
+		if _, err := store.pool.Exec(ctx, "TRUNCATE "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 9, 6, 6, 0, 0, 0, time.UTC)
+
+	if _, ok, err := store.GetConsumerQuota(ctx, "svc:none"); err != nil || ok {
+		t.Fatalf("没登记的应回 (false, nil), got ok=%v err=%v", ok, err)
+	}
+	if err := store.SaveConsumerQuota(ctx, ConsumerQuota{
+		Consumer: "svc:worker", DailyRequests: 10, DailySpendCapText: "5.000000", Enabled: true, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 同一个消费者再配一次是覆盖，不是第二行。
+	if err := store.SaveConsumerQuota(ctx, ConsumerQuota{
+		Consumer: "svc:worker", DailyRequests: 20, Enabled: false, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := store.GetConsumerQuota(ctx, "svc:worker")
+	if err != nil || !ok {
+		t.Fatalf("应能读回: ok=%v err=%v", ok, err)
+	}
+	if got.DailyRequests != 20 || got.Enabled || got.DailySpendCapText != "" {
+		t.Fatalf("覆盖后应是新值（上限被清空）: %+v", got)
+	}
+	// 上限为 0 被 CHECK 挡：0 会让「一分钱都不许花」与「不限」混成一个值。
+	if err := store.SaveConsumerQuota(ctx, ConsumerQuota{
+		Consumer: "svc:bad", DailyRequests: 1, DailySpendCapText: "0", Enabled: true, UpdatedAt: now,
+	}); err == nil {
+		t.Errorf("0 上限应被 CHECK 挡住")
+	}
+
+	// 用量：号数按真的拿到手的号算，花费按币种分。
+	opID := "3f4e5d6c-7b8a-4abb-8899-aabbccddeeff"
+	if err := store.PrepareOperation(ctx, Operation{
+		ID: opID, Provider: ProviderHero, Kind: KindPurchase, RequestHash: "h-quota",
+		PrincipalID: "svc:worker", StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 台账要记住是谁发起的。
+	back, err := store.GetOperation(ctx, opID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.PrincipalID != "svc:worker" {
+		t.Fatalf("principal_id 没落库: %+v", back)
+	}
+	for i, ext := range []string{"q1", "q2"} {
+		if _, err := store.UpsertResource(ctx, Resource{
+			Provider: ProviderHero, ExternalID: ext, Phone: "7999000004" + itoa(i),
+			OperationID: opID, State: StateWaitingCode,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.AppendCostEvents(ctx, []CostEvent{
+		{OperationID: opID, Provider: ProviderHero, Kind: CostPurchase, Subject: "q1", AmountText: "0.350000", OccurredAt: now},
+		{OperationID: opID, Provider: ProviderHero, Kind: CostPurchase, Subject: "q2", AmountText: "0.350000", OccurredAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := store.ConsumerUsageSince(ctx, "svc:worker", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Numbers != 2 {
+		t.Fatalf("应算两个号, got %d", usage.Numbers)
+	}
+	if len(usage.SpendByCurrency) != 1 || usage.SpendByCurrency[0].SumText != "0.700000" {
+		t.Fatalf("花费不对: %+v", usage.SpendByCurrency)
+	}
+	// 别人的不算。
+	other, err := store.ConsumerUsageSince(ctx, "svc:someone-else", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Numbers != 0 || len(other.SpendByCurrency) != 0 {
+		t.Fatalf("别的消费者不该算进来: %+v", other)
+	}
+	// 窗口之前的不算。
+	future, err := store.ConsumerUsageSince(ctx, "svc:worker", now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if future.Numbers != 0 {
+		t.Fatalf("窗口之前的不该算, got %d", future.Numbers)
+	}
+
+	if err := store.RemoveConsumerQuota(ctx, "svc:worker"); err != nil {
+		t.Fatal(err)
+	}
+	// 取消登记是幂等的。
+	if err := store.RemoveConsumerQuota(ctx, "svc:worker"); err != nil {
+		t.Fatalf("重复取消应幂等: %v", err)
+	}
+	if quotas, _ := store.ListConsumerQuotas(ctx); len(quotas) != 0 {
+		t.Fatalf("删后应为空, got %+v", quotas)
+	}
+}

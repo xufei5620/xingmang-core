@@ -102,6 +102,22 @@ func (s *Service) RequestNumber(ctx context.Context, requestID string, in Reques
 	if err != nil {
 		return RequestOutcome{}, err
 	}
+
+	// 配额在**打上游之前**查：拦晚了钱就已经花出去了（与买号那几道闸同一条）。
+	// 人不受配额约束，checkQuota 直接放行。
+	//
+	// 回放（同一个 request_id 重试）**不重复计数**：那不是新的一次要号，而且
+	// 一个正好卡在配额线上的重试会拿不回它已经买到的号——重试反而丢号是最坏的
+	// 一种护栏。
+	replay, err := s.hasPriorAttempt(ctx, requestID, route.Providers)
+	if err != nil {
+		return RequestOutcome{}, err
+	}
+	if !replay {
+		if err := s.checkQuota(ctx, in.Quantity); err != nil {
+			return RequestOutcome{}, err
+		}
+	}
 	out := RequestOutcome{
 		RequestID: requestID, Service: in.Service, Country: in.Country, Quantity: in.Quantity,
 		RuleID: route.RuleID, State: StateFailed,
@@ -149,6 +165,20 @@ func (s *Service) RequestNumber(ctx context.Context, requestID string, in Reques
 		}
 	}
 	return out, nil
+}
+
+// hasPriorAttempt 说明这个 request_id 已经试过至少一家：那么这次调用是回放。
+func (s *Service) hasPriorAttempt(ctx context.Context, requestID string, providers []string) (bool, error) {
+	for _, provider := range providers {
+		_, err := s.store.GetOperation(ctx, attemptOperationID(requestID, provider))
+		switch {
+		case err == nil:
+			return true, nil
+		case !errors.Is(err, ErrOperationNotFound):
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // settleRequest 按一笔尝试的结果决定要不要停。成功停；未知也停（钱可能花了）；

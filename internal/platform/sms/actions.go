@@ -48,6 +48,13 @@ var (
 	allEnvironments = []string{"development", "staging", "production"}
 	// humanOnly：这几个动作都花钱或改账本，不给机器身份。
 	humanOnly = []principal.Type{principal.TypeHuman}
+	// humanOrService：内部服务可以调的三个（XM-SMS4 #2）——要号、取码、
+	// 生命周期动作。机器要号**必须先登记配额**（见 quota.go），没有配额行
+	// 一次都调不动。
+	//
+	// **只放 SERVICE**：AI 与 SERVER_AGENT 不在其中。让 AI 身份自己买号是另一
+	// 件事，要产品负责人拍板；SERVER_AGENT 是机房里那条链路，与接码无关。
+	humanOrService = []principal.Type{principal.TypeHuman, principal.TypeService}
 )
 
 // RegisterActions 把十二个 Action 注册进内核。
@@ -80,6 +87,8 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 	entries = append(entries, requestActionEntries(svc, providers)...)
 	// XM-SMS2 #8：告警阈值（见 actions_alerts.go）。
 	entries = append(entries, alertActionEntries(svc, providers)...)
+	// XM-SMS4 #3：消费者配额（见 actions_quota.go）。
+	entries = append(entries, quotaActionEntries(svc)...)
 	for _, e := range entries {
 		if err := reg.Register(e.def, e.handler); err != nil {
 			return fmt.Errorf("注册 %s: %w", e.def.ID, err)
@@ -239,7 +248,7 @@ func resourceActionDef() action.Definition {
 			},
 			{Name: "duration", Type: action.FieldInt},
 		}},
-		Environments: allEnvironments, PrincipalTypes: humanOnly,
+		Environments: allEnvironments, PrincipalTypes: humanOrService,
 	}
 }
 

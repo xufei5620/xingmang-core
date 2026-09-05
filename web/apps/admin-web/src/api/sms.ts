@@ -836,3 +836,45 @@ export async function listSMSCosts(
     .catch(translateUnmounted);
   return { items: body.items ?? [], from: body.from ?? from, to: body.to ?? to };
 }
+
+// ---------- 接入配额（XM-SMS4 #3） ----------
+
+/** 一个消费者（机器身份）的日限额与今日用量。
+ *
+ *  没有行 = 那个机器身份一次都调不动。人不受配额约束。 */
+export interface SMSQuota {
+  /** principal ID，与审计里那一列同源。 */
+  consumer: string;
+  /** 每天最多能要多少**个号**，不是调用次数。0 = 一次都不许。 */
+  daily_requests: number;
+  /** 止损线：到线之后不再放行，最多超出一次请求。空 = 不限。 */
+  daily_spend_cap?: string;
+  enabled: boolean;
+  updated_at?: string;
+  /** 今天已经要到的号数。 */
+  used_numbers: number;
+  /** 今天的花费，**按币种分**（不折算）。 */
+  used_spend?: { currency?: string; amount: string }[];
+}
+
+export function listSMSQuotas(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSQuota[]> {
+  return get<SMSQuota>("/api/v1/sms/quotas", options, client);
+}
+
+/** 登记 / 修改一个消费者的配额（`sms.quota.set@1`）。**只有人能配。** */
+export function setSMSQuota(
+  input: { consumer: string; daily_requests: number; daily_spend_cap?: string; enabled?: boolean },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const params: Record<string, unknown> = {
+    consumer: input.consumer,
+    daily_requests: input.daily_requests,
+  };
+  if (input.daily_spend_cap) params.daily_spend_cap = input.daily_spend_cap;
+  if (input.enabled !== undefined) params.enabled = input.enabled;
+  return executeAction({ actionId: "sms.quota.set", version: "1", params }, options, client);
+}
