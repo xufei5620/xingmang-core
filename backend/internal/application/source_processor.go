@@ -982,6 +982,15 @@ func (s *Service) processPaymentCandidate(ctx context.Context, claim postgressto
 			cashUnits, unitCode = *payload.WalletCashServiceUnits, *payload.WalletUnitCode
 		}
 	}
+	// 自动核验的判据（见下面 Verification 字段处的完整理由）。
+	candidateVerification := domain.VerificationPending
+	candidateCap := int64(0)
+	if newAPICandidateSettled(payload.SourceStatus, completedAt, observedPayMinor) {
+		candidateVerification = domain.VerificationVerified
+		// 与人工核验（ledger.VerifyNewAPIPayment）逐字同义：上限就是已付金额。
+		candidateCap = observedPayMinor
+	}
+
 	_, err = s.ObserveFundingLot(ctx, FundingObservation{
 		Lot: domain.FundingLot{
 			PrincipalID: account.PrincipalID, SourceInstanceID: claim.SourceInstanceID,
@@ -989,10 +998,33 @@ func (s *Service) processPaymentCandidate(ctx context.Context, claim postgressto
 			// New API's restricted projection deliberately does not read trade_no.
 			// ExternalOrderID is the top_ups.id display/reference value.
 			TradeNo: "", Currency: domain.CurrencyCNY,
-			OriginalMinor: observedPayMinor, CurrentCapMinor: 0,
-			Verification:   domain.VerificationPending,
-			SourceStatus:   "candidate:" + payload.SourceStatus,
-			SourceRevision: claim.PayloadHash, CompletedAt: completedAt, ObservedAt: claim.ObservedAt,
+			OriginalMinor: observedPayMinor,
+			// XM-INV-NEWAPI-AUTOVERIFY：与 Sub2API 同一套判据自动核验。
+			//
+			// 原先这里硬写 pending：New API 的 top_ups 投影分不清"网关结算"与
+			// "管理员补单"，所以每一笔都要人工核验。2026-09-06 对着 New API 源码
+			// 逐条核实之后，产品负责人决定放开，依据是三件事：
+			//
+			//  1. **管理员送的额度根本进不来。** 手动加额度走 IncreaseUserQuota，
+			//     它只改 users.quota，**从不写 top_ups**；而本系统只读 top_ups。
+			//     这是结构上的隔离，不是操作纪律。
+			//  2. **"补单"是真钱。** AdminCompleteTopUp 必须带 tradeNo，那是支付
+			//     流程创建的订单——钱到了、只是回调没回来。
+			//  3. **最终由人开票。** 用户提交的是申请，真发票由管理员在税务平台
+			//     手动开具、再上传。自动核验不等于自动开票。
+			//
+			// 剩下的缺口是**退款**：New API 的状态只有 pending/success/failed/
+			// expired，没有退款态，一笔已退的充值在这里仍是 success。手动退款后
+			// 必须去管理端冻结该批次（freeze-payment / manual-cap-adjustment），
+			// 这条写进了 PRODUCTION-RUNBOOK。
+			//
+			// 判据故意与 Sub2API 那条同形（状态成功 + 有完成时刻 + 金额为正），
+			// 不额外要求支付渠道名：补单不会改 payment_provider，拿它当判据既挡
+			// 不住补单，又会把渠道名为空的正常订单误挡。
+			Verification:    candidateVerification,
+			CurrentCapMinor: candidateCap,
+			SourceStatus:    "candidate:" + payload.SourceStatus,
+			SourceRevision:  claim.PayloadHash, CompletedAt: completedAt, ObservedAt: claim.ObservedAt,
 		}, ExternalUserID: payload.ExternalUserID, EventKind: "payment",
 		ExternalEventID: claim.EventID, SchemaVersion: "source-agent-v" + claim.SchemaVersion, Payload: body,
 		SourceUpdatedAt: claim.ObservedAt, SourceSequence: claim.BatchSequence,
@@ -1154,4 +1186,21 @@ func (s *Service) processSourceTombstone(ctx context.Context, claim postgresstor
 		SourceUpdatedAt: confirmedAt.UTC(), SourceSequence: claim.BatchSequence,
 	})
 	return err
+}
+
+// newAPICandidateSettled 判断一笔 New API 充值是否算"网关已结算"，也就是
+// 可以自动核验（XM-INV-NEWAPI-AUTOVERIFY）。
+//
+// **抽成函数是为了让测试测到真东西**：判据写在调用点里时，测试只能复制一份
+// 条件再断言那份副本，改了实现测试照样绿。
+//
+// 三个条件与 Sub2API 那条同形（见本文件里 payment_order 的分支）。故意**不**
+// 额外要求支付渠道名：New API 的"补单"（AdminCompleteTopUp）不改
+// payment_provider，拿它当判据既挡不住补单，又会把渠道名为空的正常订单误挡。
+//
+// 状态用 New API 的字面常量小写 "success"（common/constants.go 里只有
+// pending/success/failed/expired 四个）。**不放宽大小写**：放宽等于替上游猜
+// 它没说过的话。
+func newAPICandidateSettled(sourceStatus string, completedAt time.Time, payMinor int64) bool {
+	return sourceStatus == "success" && !completedAt.IsZero() && payMinor > 0
 }

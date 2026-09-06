@@ -664,9 +664,27 @@ func TestNewAPIPaymentVerificationRequiresEvidenceAndAuditsOnlyHash(t *testing.T
 		WHERE funding_lot_id=$1 AND review_action='verify_approve'`, lot.ID); err == nil {
 		t.Fatal("database allowed immutable payment review evidence to be rewritten")
 	}
-	if _, err = store.pool.Exec(ctx, `UPDATE funding_lots SET current_cap_minor=31000 WHERE id=$1`, lot.ID); err == nil {
-		t.Fatal("database allowed verified New API cap to diverge from dual-control decision")
+	// XM-INV-NEWAPI-AUTOVERIFY (migration 0029) dropped
+	// newapi_verified_dual_control_guard, so the database no longer refuses a
+	// raw cap update on a verified New API lot.  That control was removed on the
+	// product owner's explicit decision -- see the migration for the three facts
+	// it rests on.  What is asserted here instead is that the removal is
+	// deliberate and total: the trigger must be gone, not merely disabled, so a
+	// future reader cannot mistake a half-applied migration for the intended
+	// state.
+	var guardExists bool
+	if err = store.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM pg_trigger
+			WHERE tgname='newapi_verified_dual_control_guard' AND NOT tgisinternal)`).
+		Scan(&guardExists); err != nil {
+		t.Fatal(err)
 	}
+	if guardExists {
+		t.Fatal("migration 0029 must drop the dual-control trigger, not leave it in place")
+	}
+	// The decision and review records above stay immutable regardless: removing
+	// the *requirement* for two people must not make the record of what people
+	// actually decided rewritable.
 	if _, err = store.ReviewNewAPIPaymentCandidate(ctx, ReviewPaymentCandidateInput{
 		LotID: lot.ID, Action: "verify", PaidMinor: 31_000, Currency: domain.CurrencyCNY,
 		Evidence:         PaymentEvidence{Hash: evidenceHash, Ciphertext: bytes.Repeat([]byte{0x44}, 32)},

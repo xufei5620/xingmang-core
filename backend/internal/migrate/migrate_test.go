@@ -227,6 +227,10 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	// 0023 (XM-INV-PROJECTION-FAILURE-GRADING) alters eligibility_projection_jobs,
 	// also created by the excluded 0009 -- same reason as 0016/0020/0022 above.
 	delete(all, "0023_projection_failure_grading.sql")
+	// 0029 (XM-INV-NEWAPI-AUTOVERIFY) updates funding_lots.refund_frozen and
+	// verified_cash_minor, both added by the excluded 0009 -- same reason as
+	// 0016/0020/0022/0023 above.
+	delete(all, "0029_newapi_auto_verification.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}

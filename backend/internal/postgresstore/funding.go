@@ -288,6 +288,28 @@ func (s *Store) ObserveFundingLot(ctx context.Context, in SourceObservation, act
 			// refresh source metadata but can never rewrite the reviewed amount.
 			lot.OriginalMinor = existing.OriginalMinor
 			lot.CurrentCapMinor = existing.CurrentCapMinor
+		} else if existing.SourceType == domain.SourceNewAPI {
+			// XM-INV-NEWAPI-AUTOVERIFY: since a New API candidate can now arrive
+			// already verified, the clause above no longer covers the case that
+			// matters most -- a human has reviewed this lot and a *later* scan
+			// carries a different amount.  Without this branch the automatic
+			// observation would silently overwrite the reviewed figure, which is
+			// exactly the property the manual path exists to guarantee.
+			//
+			// A human review is recorded in payment_candidate_reviews.  Any row
+			// there means "a person decided about this money", so the observation
+			// may refresh metadata but never the amounts.
+			var reviewed bool
+			if err = tx.QueryRow(ctx, `
+				SELECT EXISTS(SELECT 1 FROM payment_candidate_reviews WHERE funding_lot_id=$1)`,
+				lot.ID).Scan(&reviewed); err != nil {
+				return ObservationResult{}, err
+			}
+			if reviewed {
+				lot.OriginalMinor = existing.OriginalMinor
+				lot.CurrentCapMinor = existing.CurrentCapMinor
+				lot.Verification = existing.Verification
+			}
 		}
 		if existing.Verification == domain.VerificationFrozen ||
 			(existing.Verification == domain.VerificationVerified && lot.Verification == domain.VerificationPending) {
