@@ -422,7 +422,13 @@ func TestWeComNotifierSendsMessage(t *testing.T) {
 	}
 	markdown, _ := gotBody["markdown"].(map[string]any)
 	content, _ := markdown["content"].(string)
-	for _, want := range []string{"CRITICAL", revenueMetric, "production", RuleMetricSyncFailed, "累计 4 次"} {
+	// 信封（XM-NOTIFY-ENVELOPE）：徽标 + 中文严重度 + 环境 + 类型编号 + 处理入口，
+	// 正文字段一个不少。「严重」取代了此前的 "CRITICAL"——同一个 Severity，
+	// 面向的是群里的人，不是日志。
+	for _, want := range []string{
+		"【星芒·告警】", "严重", revenueMetric, "production", RuleMetricSyncFailed, "累计 4 次",
+		"XM-ALERT-" + RuleMetricSyncFailed, "管理后台 → 告警与故障",
+	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("markdown content 缺少 %q:\n%s", want, content)
 		}
@@ -654,15 +660,25 @@ func TestFormatWeComMarkdownTruncatesTo4096Bytes(t *testing.T) {
 func TestFormatWeComMarkdownIncludesAllRequiredFields(t *testing.T) {
 	content := FormatWeComMarkdown(testAlert())
 	for _, want := range []string{
-		"CRITICAL", "production", RuleMetricSyncFailed, revenueMetric,
+		"严重", "production", RuleMetricSyncFailed, revenueMetric,
 		"2026-08-27T05:00:00Z", "2026-08-27T05:03:00Z", "累计 4 次",
+		"来源 sub2api-prod，错误码 timeout。",
+		"XM-ALERT-" + RuleMetricSyncFailed, "管理后台 → 告警与故障",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("content 缺少 %q:\n%s", want, content)
 		}
 	}
-	if !strings.HasPrefix(content, "> ") {
-		t.Fatalf("每行应以引用块 `> ` 开头: %q", content)
+	// 首行是信封头部（域徽标 + 严重度 + 环境）——闭集文案，可以带标记；
+	// 其余每行都是引用块，上游可控的字符串只出现在那里。
+	rendered := strings.Split(content, "\n")
+	if !strings.HasPrefix(rendered[0], "【星芒·告警】") {
+		t.Fatalf("首行应是域徽标: %q", rendered[0])
+	}
+	for _, line := range rendered[1:] {
+		if line != "" && !strings.HasPrefix(line, "> ") {
+			t.Fatalf("正文每行应以引用块 `> ` 开头: %q", line)
+		}
 	}
 }
 

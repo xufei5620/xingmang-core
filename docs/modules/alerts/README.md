@@ -40,6 +40,7 @@
 | `channel.token.invalid` | 渠道 token 失效 | `sub2api.channels.balance` 的 `channels[].token_valid` | `token_valid` **明确为** `false` | 0 | warning | 恢复为 `true`，或该渠道从上游清单消失 | `channel.token.invalid:<env>:<channel_id>` |
 | `channel.balance.low` | 渠道余额不足 | `sub2api.channels.balance` 的 `channels[].balance_minor_units` | 余额 < 阈值（默认 500000 最小货币单位） | 0 | warning | 余额回到阈值之上，或该渠道消失 | `channel.balance.low:<env>:<channel_id>` |
 | `upstream.runway.low` | 上游可用天数不足 | `finance.balance_history` ÷ `finance.profit_daily`（近 7 个完整业务日的日均消耗，设计稿 §10.4） | 计量型上游的可用天数**算得出来**且 ≤ warning 档（默认 10 天） | 0 | warning（≤ critical 档 5 天升为 **critical**） | 天数回到告警档之上，或不再算得出天数 | `upstream.runway.low:<env>:<upstream_account_id>` |
+| `upstream.version.changed` | 上游版本变化 | connector probe 观测（`*.connector.health`）的 `version` 与同一指标的历史样本 | 最新观测的版本与历史里最近一个**不同**的版本不一致 | 0（立即） | warning | 下一轮不再变化（去重键带新版本，一次变化一条，不会因为版本稳定下来就假装没发生过） | `upstream.version.changed:<environment>:<metric_key>:<new_version>` |
 
 余下三项（通知渠道 / 静默策略 / 负责人）全部规则相同：
 渠道 = 已配置的 telegram + webhook；静默策略见下一节；负责人 = `platform-ops`。
@@ -76,6 +77,33 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 导入。数据库缺行、current/history 不配对或读取失败时，API 返回 503，worker
 整轮 fail closed；不会把默认档伪装成可信结果。无 DB provider 的静态
 `RuleConfig`/旧摘要处理器仍为兼容测试保留，但不是生产路径。
+
+### 版本变化规则（R6）为什么存在
+
+**它来自一次真实的两小时中断。** 2026-09-06，运营在 Sub2API 后台点了升级，上游
+二进制从 `0.1.179` 变成 `0.2.1`。平台的连接器兼容矩阵、开票代理的运行时钉子、
+运维手册里的三处版本号全都还写着旧值，而**没有任何地方告诉任何人上游动过**。
+几天后按手册抬钉子时，四条采集流因为清单不符崩掉、readyz 503 了两个小时。
+
+所以这条规则报的不是故障，是**一个要去核对的信号**：桥接契约、兼容矩阵、各处
+运行时钉子都该重新过一遍。severity 因此是 warning——真正的故障（如果有）会由
+别的规则以 critical 报出来。
+
+**判据是「与历史里最近一个不同的版本比」，不是「与上一条样本比」。** 探测每轮
+都写一条样本，按上一条比的话，这条告警只在变化后的那一轮里存在，评估周期错开
+一次就永远看不见。往回找最近一个不同值，告警会一直在，直到有人处理它。
+
+**去重键带新版本。** 只带指标键的话，`0.1.179 → 0.2.1` 之后再 `0.2.1 → 0.3.0`
+会复用同一行，而人已经确认过前一条了——第二次变化就被静悄悄吞掉。
+
+**读不出版本不告警。** 一条没有 `version` 字段的观测（探测失败、连接器还没实现
+`Version`、上游根本不报版本）不是「版本变了」。把缺失当成变化会在每次探测失败
+时都响一遍，而那时候 R1 已经以 critical 说清「你现在是瞎的」——与「`token_valid`
+缺失时不告警」同一条纪律。
+
+**判据看的是观测里有没有 `version`，不是指标键叫什么。** 将来多一个连接器探测，
+它自动被这条规则覆盖，不必回来改代码。
+
 
 ### 几个刻意的取舍
 

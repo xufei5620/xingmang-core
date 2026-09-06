@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/xufei5620/xingmang-platform/internal/platform/notify"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
@@ -82,32 +83,35 @@ func FormatMessage(a Alert) string {
 }
 
 // FormatWeComMarkdown 把一条告警渲染成企业微信群机器人 markdown 消息的
-// content 字段（XM-ALERT-WECOM）。
+// content 字段（XM-ALERT-WECOM；信封自 XM-NOTIFY-ENVELOPE 起统一）。
 //
-// 与 FormatMessage 同一条顾虑，措辞照抄：Title / Detail / RuleKey /
-// SourceMetricKey 由上游数据决定，可能含 `*` `#` 反引号等 markdown 特殊
-// 字符。这里不使用加粗、颜色或标题级别语法——那些语法只在输入完全可控时
-// 才安全，而告警标题里恰恰会出现指标键、渠道名这类不可控字符串，带标记
-// 就得转义，漏转义的后果是消息排版错乱甚至截断。唯一用到的语法是每行前的
-// `> `（引用块），它不会被内容中任何字符提前闭合，纯装饰、零转义负担。
-// msgtype 固定是 "markdown"（企微群机器人 API 的字段要求），内容本身写得
-// 保守。
+// 排版纪律已搬进 internal/platform/notify，理由不变：闭集（域徽标、严重度、
+// 环境、编号、处理入口）用 markdown 语法是安全的；Title / Detail / RuleKey /
+// SourceMetricKey 这些**由上游数据决定**的字符串一律进 `> ` 引用块且不带任何
+// 标记——带标记就得转义，漏转义的后果是排版错乱甚至整条发不出去。截断也在
+// 那里按**字节**做（企微 content 上限 4096 字节，按 rune 截仍会越界）。
+//
+// 本通道与卡片、接码两条**不合并**（三个领域的字段完全不同）；统一的只是信封：
+// 运营把同一个 Webhook 地址填进三个凭据之后，同一个群里的每条消息都能自己说清
+// 自己是哪个域、多严重、哪个环境、编号是什么、该去哪处理。
 func FormatWeComMarkdown(a Alert) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "> [%s] %s\n", strings.ToUpper(string(a.Severity)), a.Title)
-	fmt.Fprintf(&b, "> 环境：%s\n", a.Environment)
-	fmt.Fprintf(&b, "> 规则：%s\n", a.RuleKey)
-	fmt.Fprintf(&b, "> 状态：%s\n", a.Status)
-	fmt.Fprintf(&b, "> 首次发现：%s\n", a.OpenedAt.UTC().Format(time.RFC3339))
-	fmt.Fprintf(&b, "> 最近发现：%s（累计 %d 次）\n",
-		a.LastSeenAt.UTC().Format(time.RFC3339), a.FireCount)
-	if a.SourceMetricKey != "" {
-		fmt.Fprintf(&b, "> 指标：%s\n", a.SourceMetricKey)
-	}
-	if a.Detail != "" {
-		fmt.Fprintf(&b, "> 详情：%s", a.Detail)
-	}
-	return truncateBytes(strings.TrimRight(b.String(), "\n"), weComMaxContentBytes)
+	return notify.RenderWeComMarkdown(notify.Envelope{
+		Domain:      notify.DomainAlert,
+		Kind:        a.RuleKey,
+		Severity:    notify.Severity(a.Severity),
+		Environment: a.Environment,
+		Title:       a.Title,
+		Lines: []notify.Line{
+			{Label: "规则", Value: a.RuleKey},
+			{Label: "状态", Value: string(a.Status)},
+			{Label: "首次发现", Value: a.OpenedAt.UTC().Format(time.RFC3339)},
+			{Label: "最近发现", Value: fmt.Sprintf("%s（累计 %d 次）",
+				a.LastSeenAt.UTC().Format(time.RFC3339), a.FireCount)},
+			{Label: "指标", Value: a.SourceMetricKey},
+			{Label: "详情", Value: a.Detail},
+		},
+		Action: "管理后台 → 告警与故障",
+	})
 }
 
 // redact 把给定的敏感串从文本里抹掉。

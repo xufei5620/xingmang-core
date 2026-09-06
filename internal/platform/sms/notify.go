@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/notify"
 )
 
 // WeComNotifier 把收到的验证码推到企业微信群机器人。
@@ -44,8 +46,21 @@ func (w *WeComNotifier) NotifyCode(ctx context.Context, provider, phoneMask, cod
 		return nil
 	}
 
-	text := fmt.Sprintf("**接码验证码**\n>号码：%s\n>验证码：`%s`\n>供应商：%s\n>时间：%s",
-		phoneMask, code, provider, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
+	// 信封自 XM-NOTIFY-ENVELOPE 起统一（internal/platform/notify）：运营把同一个
+	// Webhook 地址填进了告警、卡片、接码三个凭据，同一个群里的每条消息都要能
+	// 自己说清是哪个域、多严重、编号是什么、该去哪处理。码有几分钟时效，
+	// 因此是 warning 而不是 info；码本身放进标题，位置越靠前越容易被抓到。
+	text := notify.RenderWeComMarkdown(notify.Envelope{
+		Domain: notify.DomainSMS, Kind: "code", Severity: notify.SeverityWarning,
+		Title: "验证码 " + code + "（" + phoneMask + "）",
+		Lines: []notify.Line{
+			{Label: "号码", Value: phoneMask},
+			{Label: "验证码", Value: code},
+			{Label: "供应商", Value: provider},
+			{Label: "时间", Value: time.Now().UTC().Format("2006-01-02 15:04:05 UTC")},
+		},
+		Action: "管理后台 → 接码中心",
+	})
 
 	body, err := json.Marshal(map[string]any{
 		"msgtype":  "markdown",

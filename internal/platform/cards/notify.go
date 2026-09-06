@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/notify"
 )
 
 // 通知类型。
@@ -80,64 +82,77 @@ func lookup(table map[string]string, value string) string {
 	return value // 没见过的取值原样显示，与页面同一条纪律
 }
 
-// FormatNotification 渲染成给人看的 markdown。
+// FormatNotification 渲染成给人看的消息（信封自 XM-NOTIFY-ENVELOPE 起统一，
+// 见 internal/platform/notify）。
 //
 // now 显式传入而不是取 time.Now()：剩余有效期要能在测试里断言。
+//
+// 与告警、接码两条通道**不合并**（三个领域的字段完全不同），统一的只是信封：
+// 运营把同一个 Webhook 地址填进三个凭据之后，同一个群里的每条消息都要能自己
+// 说清是哪个域、多严重、哪个环境、编号是什么、该去哪处理。
+//
+// 严重度按"要不要立刻动手"分：验证码有几分钟时效、状态变更可能是卡被锁，
+// 都是 warning；一笔已授权的消费是周知，info。失败的授权按 warning——
+// 余额不足这类要立刻处理。
 func FormatNotification(n Notification, now time.Time) string {
-	var b strings.Builder
-
 	head := n.Account
 	if n.CardMask != "" {
 		head += " · " + n.CardMask
 	}
 
+	severity := notify.SeverityInfo
+	title := "卡片事件 " + head
+	var lines []notify.Line
+
 	switch n.Kind {
 	case NotifyChallenge:
+		severity = notify.SeverityWarning
 		if n.ChallengeCode != "" {
-			fmt.Fprintf(&b, "**卡片验证码** %s\n验证码：**%s**\n", head, n.ChallengeCode)
+			// 码放进标题：它就是这条消息的全部价值，位置越靠前越容易被
+			// 正在付款的人一眼抓到。值仍不带任何 markdown 标记（信封纪律）。
+			title = "验证码 " + n.ChallengeCode + "（" + head + "）"
 		} else {
-			// 上游没给码（生产实测就有这种）：说清去哪儿看，
-			// 而不是推一条空的「验证码：」。
-			fmt.Fprintf(&b, "**卡片待验证** %s\n上游未给出验证码，请到管理端或 Infini 后台查看\n", head)
+			// 上游没给码（生产实测就有这种）：说清去哪儿看，而不是推一条
+			// 空的「验证码：」。
+			title = "卡片待验证 " + head
+			lines = append(lines, notify.Line{Label: "说明", Value: "上游未给出验证码，请到管理端或 Infini 后台查看"})
 		}
 		if !n.ExpiresAt.IsZero() {
 			// 剩余有效期而不是过期时刻：人看到消息时往往已经过了一分钟，
 			// 而一条过期的码和一条有效的长得一模一样。
-			left := n.ExpiresAt.Sub(now)
-			if left < 0 {
-				b.WriteString("**已过期**\n")
+			if left := n.ExpiresAt.Sub(now); left < 0 {
+				lines = append(lines, notify.Line{Label: "有效期", Value: "已过期"})
 			} else {
-				fmt.Fprintf(&b, "剩余约 %d 分钟\n", int(left.Minutes())+1)
+				lines = append(lines, notify.Line{Label: "有效期", Value: fmt.Sprintf("剩余约 %d 分钟", int(left.Minutes())+1)})
 			}
 		}
-
 	case NotifyTransaction:
-		status := lookup(notifyTxStatuses, n.TransactionStatus)
-		fmt.Fprintf(&b, "**卡片%s** %s\n", lookup(notifyTxTypes, n.TransactionType), head)
-		if n.Merchant != "" {
-			fmt.Fprintf(&b, "商户：%s\n", n.Merchant)
+		title = "卡片" + lookup(notifyTxTypes, n.TransactionType) + " " + head
+		if strings.EqualFold(n.TransactionStatus, "failed") {
+			severity = notify.SeverityWarning
 		}
-		if n.Amount != "" {
-			fmt.Fprintf(&b, "金额：%s %s\n", n.Amount, n.Currency)
+		amount := n.Amount
+		if amount != "" && n.Currency != "" {
+			amount += " " + n.Currency
 		}
-		if status != "" {
-			fmt.Fprintf(&b, "状态：%s\n", status)
-		}
-		if n.FailureReason != "" {
+		lines = append(lines,
+			notify.Line{Label: "商户", Value: n.Merchant},
+			notify.Line{Label: "金额", Value: amount},
+			notify.Line{Label: "状态", Value: lookup(notifyTxStatuses, n.TransactionStatus)},
 			// 上游原文直接转述：这里的读者是运营本人，而「余额不足」
 			// 这类原因正是他要拿去处理的东西。
-			fmt.Fprintf(&b, "原因：%s\n", n.FailureReason)
-		}
-
+			notify.Line{Label: "原因", Value: n.FailureReason},
+		)
 	case NotifyStatusChange:
-		fmt.Fprintf(&b, "**卡片状态变更** %s\n当前状态：%s\n",
-			head, lookup(notifyCardStatuses, n.Status))
-
-	default:
-		fmt.Fprintf(&b, "**卡片事件** %s\n", head)
+		severity = notify.SeverityWarning
+		title = "卡片状态变更 " + head
+		lines = append(lines, notify.Line{Label: "当前状态", Value: lookup(notifyCardStatuses, n.Status)})
 	}
 
-	return strings.TrimRight(b.String(), "\n")
+	return notify.RenderWeComMarkdown(notify.Envelope{
+		Domain: notify.DomainCard, Kind: n.Kind, Severity: severity,
+		Title: title, Lines: lines, Action: "管理后台 → 卡片管理",
+	})
 }
 
 // WeComNotifier 经企业微信群机器人 Webhook 推送。

@@ -28,6 +28,16 @@ const (
 	RuleChannelBalanceLow = "channel.balance.low"
 	// RuleSyncConsecutiveFailed：某条指标连续 N 轮同步失败。
 	RuleSyncConsecutiveFailed = "metric.sync.consecutive_failed"
+	// RuleUpstreamVersionChanged：某个上游的自报版本变了（XM-UPSTREAM-VERSION-ALERT）。
+	//
+	// 2026-09-06 的教训：运营在 Sub2API 后台点了升级，上游二进制从 0.1.179 变成
+	// 0.2.1，而平台、开票代理与运维手册里三处钉子仍然写着旧值。没有人被告知，
+	// 直到几天后按手册抬钉子时四条采集流崩掉、readyz 503 两小时才发现。
+	//
+	// 版本变化本身不是故障，所以它是 warning 而不是 critical：它是一个**要去核对
+	// 的信号**——桥接契约、连接器兼容矩阵、各处运行时钉子都要重新过一遍。真正的
+	// 故障（如果有）会以别的规则报出来。
+	RuleUpstreamVersionChanged = "upstream.version.changed"
 	// RuleUpstreamRunwayLow：某个计量型上游的可用天数低于告警档（XM-0049）。
 	//
 	// UI 交接 §10.4 的最后一条要求：「低于阈值时进入告警和待处理队列」。
@@ -74,6 +84,20 @@ const maxConsecutiveSamples int32 = 20
 // 采集周期 300s 时，24 小时足够装下几百轮。窗口存在的意义不是"看得更远"，
 // 而是防止一条早已停采的指标把三个月前的失败串拿来当"现在连续失败"。
 const consecutiveLookback = 24 * time.Hour
+
+// versionLookback 是 R6 往回找「最近一个不同版本」的窗口。
+//
+// 七天：一次上游升级要让人有整整一周看得见它，而不是几个小时。2026-09-06
+// 那次，版本变了几天之后才在一次运维操作里被发现——窗口短于「有人休假回来」
+// 就等于没有。
+const versionLookback = 7 * 24 * time.Hour
+
+// maxVersionSamples 是一次回看的样本数上限。
+//
+// 探测每 5 分钟一条，七天约 2000 条；这里只需要找到最近一个**不同**的版本，
+// 而版本在一周里变一次都算多，所以 200 条（约 16 小时）之内几乎必然命中。
+// 真的没命中就当没变化——宁可漏报一次陈年变更，也不要为了它把整段历史拖回来。
+const maxVersionSamples int32 = 200
 
 // Rule 是一条告警规则的静态声明。
 //
@@ -257,6 +281,26 @@ func Rules(cfg RuleConfig) []Rule {
 			SilencePolicy: silencePolicyText,
 			Owner:         cfg.Owner,
 		},
+		{
+			Key:   RuleUpstreamVersionChanged,
+			Title: "上游版本变化",
+			Source: "connector probe 观测（*.connector.health）里上游自报的 version，" +
+				"与同一条指标的历史样本比较",
+			Condition: "最新观测的上游版本与上一次观测到的版本不同",
+			// 变化是一个瞬时事实，没有「持续多久」可言：第一次看见就该说。
+			For:      0,
+			Severity: SeverityWarning,
+			Recovery: "下一轮评估里版本不再变化（同一条告警会随去重键里的新版本" +
+				"停在那一次变化上，不会因为版本稳定下来就假装没发生过）",
+			// 去重键带**新版本**：每一次不同的变化各自成一条告警。
+			// 只带指标键的话，0.1.179→0.2.1 之后再 0.2.1→0.3.0 会复用同一行，
+			// 而人已经确认过前一条了——第二次变化就被静悄悄吞掉。
+			DedupKey:      RuleUpstreamVersionChanged + ":<environment>:<metric_key>:<new_version>",
+			Channels:      defaultChannels,
+			SilencePolicy: silencePolicyText,
+			Owner:         cfg.Owner,
+		},
+
 		{
 			Key:   RuleUpstreamRunwayLow,
 			Title: "上游可用天数不足",
@@ -512,6 +556,15 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 		if o.MetricKey == e.cfg.ChannelBalanceMetricKey {
 			findings = append(findings, e.channelFindings(o, f, environment)...)
 		}
+		// R6：上游自报版本变了。判据是这条观测里**有没有 version**，不是它的
+		// 指标键叫什么——将来多一个连接器探测，它自动就被覆盖，不必回来改这里。
+		versionFinding, versionErr := e.versionChangeFinding(ctx, o, f, environment, now)
+		if versionErr != nil {
+			return nil, versionErr
+		}
+		if versionFinding != nil {
+			findings = append(findings, *versionFinding)
+		}
 	}
 
 	runwayFindings, err := e.runwayFindings(ctx, environment, thresholds, thresholdSnapshot)
@@ -657,6 +710,93 @@ func (e *Evaluator) consecutiveFailures(
 		streak++
 	}
 	return streak, nil
+}
+
+// versionChangeUnknown 是版本读不出来时的占位。
+//
+// **读不出来不告警**：一条没有 version 字段的观测（探测失败、连接器还没实现
+// Version、或者上游根本不报版本）不是「版本变了」。把缺失当成一次变化会在
+// 每次探测失败时都响一遍，而那时候 R1 已经以 critical 说清「你现在是瞎的」。
+const versionChangeUnknown = ""
+
+// observedVersion 从观测值里取上游自报版本。
+func observedVersion(value map[string]any) string {
+	if value == nil {
+		return versionChangeUnknown
+	}
+	raw, ok := value["version"].(string)
+	if !ok {
+		return versionChangeUnknown
+	}
+	return strings.TrimSpace(raw)
+}
+
+// observedSupported 报告连接器的兼容矩阵是否声明支持这个版本。
+//
+// 第二个返回值是「这条观测到底说没说」：没说与说了 false 是两回事，
+// 前者只是探测没给这个字段，不该被写成「不支持」。
+func observedSupported(value map[string]any) (bool, bool) {
+	if value == nil {
+		return false, false
+	}
+	supported, ok := value["supported"].(bool)
+	return supported, ok
+}
+
+// versionChangeFinding 判断这条观测的上游版本是不是刚变过（R6）。
+//
+// 判据是「最新样本的版本」与「历史样本里最近一个**不同**的版本」不一致。
+// 不跟「上一条样本」比：探测每轮都写一条样本，版本变化后第二轮起上一条就
+// 已经是新版本了，那样这条告警只在变化后的一轮里存在，评估周期错开一次就
+// 永远看不见。往回找最近一个不同值，则这条告警会一直在，直到人处理它——
+// 这正是「要去核对」类信号该有的行为。
+func (e *Evaluator) versionChangeFinding(
+	ctx context.Context, o ops.Observation, f ops.Freshness, environment string, now time.Time,
+) (*Finding, error) {
+	// 同步失败时不看：value_json 里留的是上一次成功的旧值（见各 sync worker 的
+	// failureObservation），拿它去判「版本刚变了」是在用过期数据下现在的结论。
+	if f.State == ops.StateFailed || f.State == ops.StateUninitialized {
+		return nil, nil
+	}
+	current := observedVersion(o.Value)
+	if current == versionChangeUnknown {
+		return nil, nil
+	}
+	samples, _, err := e.source.ListSamples(ctx, environment, o.MetricKey, now.Add(-versionLookback), maxVersionSamples)
+	if err != nil {
+		return nil, fmt.Errorf("读取 %s 历史样本: %w", o.MetricKey, err)
+	}
+	previous := versionChangeUnknown
+	for i := len(samples) - 1; i >= 0; i-- {
+		if samples[i].Status == ops.SyncFailed {
+			continue
+		}
+		seen := observedVersion(samples[i].Value)
+		if seen == versionChangeUnknown || seen == current {
+			continue
+		}
+		previous = seen
+		break
+	}
+	if previous == versionChangeUnknown {
+		return nil, nil
+	}
+
+	detail := fmt.Sprintf("上游自报版本从 %s 变成 %s。数据时间 %s，来源 %s。",
+		previous, current, describeObservedAt(f.ObservedAt), o.Source)
+	if supported, said := observedSupported(o.Value); said && !supported {
+		detail += "连接器的兼容矩阵没有声明支持这个版本——先核对桥接契约与各处运行时钉子再动生产。"
+	} else {
+		detail += "核对桥接契约、连接器兼容矩阵与各处运行时钉子是否仍然对得上。"
+	}
+	return &Finding{
+		RuleKey:         RuleUpstreamVersionChanged,
+		DedupKey:        dedupKey(RuleUpstreamVersionChanged, environment, o.MetricKey+":"+current),
+		Severity:        SeverityWarning,
+		Title:           fmt.Sprintf("%s 上游版本变化：%s → %s", o.Source, previous, current),
+		Detail:          detail,
+		SourceMetricKey: o.MetricKey,
+	}, nil
 }
 
 // dedupKey 拼出去重键。
