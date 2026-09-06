@@ -8,8 +8,8 @@
     "protocol": "xm-console-assertion-v1",
     "valid_from": "2026-09-03T11:53:17Z",
     "valid_until": "2027-09-03T11:53:17Z",
-    "revoked_at": null,
-    "revoke_reason": ""
+    "revoked_at": "2026-09-06T14:30:00Z",
+    "revoke_reason": "private key seed appeared in a terminal screenshot on 2026-09-06; rotated to 2026-09b"
   },
   {
     "key_id": "2026-09b",
