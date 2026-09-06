@@ -1,6 +1,7 @@
 import type { BadgeTone } from "@xingmang/ui-primitives";
 import { describeServiceStatus, platformNavSpec, type FreshnessContract } from "@xingmang/ui-admin";
 import type { AlertItem } from "../api/alerts";
+import { jobKindLabel, type JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import { describeSeverity, sortForDisplay } from "./alerts";
 import { PLATFORM_CATALOG, pendingBadge, platformOfMetricKey } from "./platforms";
@@ -40,7 +41,11 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
   {
     id: "jobs",
     label: "失败任务",
-    blockedBy: "后台任务页与 River 查询端点尚未建",
+    // XM-WORKBENCH-JOBS：这里原来写着「后台任务页与 River 查询端点尚未建」。
+    // 那句话在 XM-JOBS0 交付时就过期了——/api/v1/jobs/runs 一直都在，后台
+    // 任务页也一直都在。一个说"还没接"的占位比缺功能更糟：它让人不去看
+    // 本来就有的数据，于是失败的后台任务在首屏彻底不可见。
+    source: "后台任务里已放弃的运行记录（重试用尽，不会再跑）",
   },
   {
     id: "finance",
@@ -100,6 +105,38 @@ export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): Wo
       to: "/alerts",
     };
   });
+}
+
+/** 已放弃的后台任务 → 待处理事项。
+ *
+ *  **只收 `discarded`，不收 `retryable`。** 这不是图省事：「我的待处理」是
+ *  "我必须动手的事"，而一个 retryable 的任务不需要任何人动手——它会自己再试，
+ *  试成了就消失，试到用尽就变成 discarded 出现在这里。把它也列进来会让这张
+ *  清单抖动（一条目跳出来又自己消失），而一张会抖的待办清单，人很快就不看了。
+ *  重试中的任务在后台任务页「失败与重试」页签里，那里才是看过程的地方。
+ *
+ *  也不收 `cancelled`：那是有人主动取消的，不是失败。 */
+export function workItemsFromJobRuns(runs: readonly JobRunItem[], now: Date): WorkItem[] {
+  return runs
+    .filter((run) => run.state === "discarded")
+    .map((run) => {
+      // 放弃的时刻优先用 finalized_at（River 定终态的时刻）；缺了就退回最近
+      // 一次尝试，再退回创建时刻——不显示"0 秒前"这种编出来的新鲜。
+      const at = run.finalized_at ?? run.attempted_at ?? run.created_at;
+      return {
+        id: `job-${run.id}`,
+        categoryId: "jobs",
+        categoryLabel: "已放弃",
+        tone: "danger" as const,
+        title: `${jobKindLabel(run.kind)} 重试 ${run.max_attempts} 次后放弃`,
+        // 错误原文可能很长且带栈，这里只放一行定位信息；正文在后台任务页看。
+        meta: `${run.queue} · 共失败 ${run.error_count} 次 · ${ageText(at, now)}前`,
+        due: "需人工处理",
+        // 直接落到后台任务页的「多次失败任务」页签（state=discarded 那个），
+        // 而不是页面首屏——点进去还要自己找是多余的一步。
+        to: "/jobs?sub=repeated",
+      };
+    });
 }
 
 /** 顶部四格里「紧急」的口径：未解决的严重告警。

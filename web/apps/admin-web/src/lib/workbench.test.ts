@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AlertItem } from "../api/alerts";
+import type { JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import {
   focusRows,
@@ -7,6 +8,7 @@ import {
   recentlyRecoveredCount,
   urgentCount,
   workItemsFromAlerts,
+  workItemsFromJobRuns,
   RECOVERED_WINDOW_HOURS,
   WORK_CATEGORIES,
 } from "./workbench";
@@ -125,10 +127,10 @@ describe("我的待处理", () => {
     ]);
   });
 
-  it("只有「故障」一类有数据源，其余五类都写明被什么挡着", () => {
+  it("「故障」与「失败任务」有数据源，其余四类都写明被什么挡着", () => {
     // 摆一个永远空的分类而不说为什么，人会以为「这一类现在没有问题」
     const withSource = WORK_CATEGORIES.filter((c) => c.source);
-    expect(withSource.map((c) => c.id)).toEqual(["incidents"]);
+    expect(withSource.map((c) => c.id)).toEqual(["incidents", "jobs"]);
     for (const category of WORK_CATEGORIES) {
       expect(Boolean(category.source) !== Boolean(category.blockedBy)).toBe(true);
       if (category.blockedBy) expect(category.blockedBy.length).toBeGreaterThan(0);
@@ -157,6 +159,74 @@ describe("我的待处理", () => {
     expect(item?.meta).toContain("已持续 1 小时");
     expect(item?.due).toBe("触发 7 次");
     expect(item?.to).toBe("/alerts");
+  });
+});
+
+// XM-WORKBENCH-JOBS：「失败任务」原来写着"后台任务页与 River 查询端点尚未建"，
+// 而那两样在 XM-JOBS0 就交付了。占位让失败的后台任务在首屏彻底不可见。
+describe("失败任务：只收已放弃的后台任务", () => {
+  function run(overrides: Partial<JobRunItem> = {}): JobRunItem {
+    return {
+      id: 41,
+      kind: "sub2api_sync",
+      queue: "default",
+      state: "discarded",
+      attempt: 3,
+      max_attempts: 3,
+      created_at: "2026-08-28T08:00:00Z",
+      scheduled_at: "2026-08-28T08:00:00Z",
+      attempted_at: "2026-08-28T09:00:00Z",
+      finalized_at: "2026-08-28T11:00:00Z",
+      duration_ms: 120,
+      error_count: 3,
+      last_error: null,
+      args: {},
+      ...overrides,
+    };
+  }
+
+  it("重试中的任务不进待办：它不需要人动手，列进来会让清单抖动", () => {
+    const items = workItemsFromJobRuns(
+      [run({ id: 1 }), run({ id: 2, state: "retryable" }), run({ id: 3, state: "cancelled" })],
+      NOW,
+    );
+    expect(items.map((i) => i.id)).toEqual(["job-1"]);
+  });
+
+  it("完成与运行中的记录同样不进待办", () => {
+    const items = workItemsFromJobRuns(
+      [run({ id: 4, state: "completed" }), run({ id: 5, state: "running" })],
+      NOW,
+    );
+    expect(items).toEqual([]);
+  });
+
+  it("标题说清是重试用尽后放弃的，并直达后台任务页的对应页签", () => {
+    const item = workItemsFromJobRuns([run()], NOW)[0];
+    expect(item?.title).toBe("Sub2API 同步 重试 3 次后放弃");
+    expect(item?.categoryLabel).toBe("已放弃");
+    expect(item?.tone).toBe("danger");
+    expect(item?.due).toBe("需人工处理");
+    // 落到 state=discarded 那个页签，而不是后台任务页首屏
+    expect(item?.to).toBe("/jobs?sub=repeated");
+    expect(item?.categoryId).toBe("jobs");
+  });
+
+  it("时刻优先用 finalized_at，缺了退回最近一次尝试，再退回创建时刻", () => {
+    // NOW = 2026-08-28T12:00:00Z；夹具里终结/尝试/创建分别是 11:00 / 09:00 /
+    // 08:00，所以三级回退各自给出不同的数字，谁都替代不了谁。
+    expect(workItemsFromJobRuns([run()], NOW)[0]?.meta).toContain("1 小时前");
+    expect(workItemsFromJobRuns([run({ finalized_at: null })], NOW)[0]?.meta).toContain(
+      "3 小时前",
+    );
+    expect(
+      workItemsFromJobRuns([run({ finalized_at: null, attempted_at: null })], NOW)[0]?.meta,
+    ).toContain("4 小时前");
+  });
+
+  it("未知的任务类型显示原始 kind，不隐藏也不报错", () => {
+    const item = workItemsFromJobRuns([run({ kind: "brand_new_job" })], NOW)[0];
+    expect(item?.title).toContain("brand_new_job");
   });
 });
 

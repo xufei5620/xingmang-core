@@ -10,6 +10,7 @@ import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import { ALERT_STATUS_ALL, listAlerts, type AlertItem } from "../api/alerts";
+import { listJobRuns, type JobRunItem } from "../api/jobs";
 import {
   listAuditEvents,
   listMetrics,
@@ -26,6 +27,7 @@ import {
   recentlyRecoveredCount,
   urgentCount,
   workItemsFromAlerts,
+  workItemsFromJobRuns,
   RECOVERED_WINDOW_HOURS,
   WORK_CATEGORIES,
   type MatrixRow,
@@ -41,6 +43,10 @@ const RECENT_ALERTS_LIMIT = 200;
 
 /** 最近活动取几条。工作台只做入口，完整清单在审计记录页。 */
 const RECENT_ACTIVITY_LIMIT = 5;
+
+/** 失败任务每类取几条。工作台是入口不是清单，完整记录在后台任务页；
+ *  取满时界面上要说出来，不能让人以为看到的是全部。 */
+const WORK_JOBS_LIMIT = 20;
 
 /** 运营工作台(ADMIN-IA v3 §一 分组 1 第 1 页，原型 `#/g/overview`)。
  *
@@ -78,6 +84,13 @@ export function OverviewPage() {
     queryKey: ["audit", "recent"],
     queryFn: ({ signal }) => listAuditEvents({ signal, limit: RECENT_ACTIVITY_LIMIT }),
   });
+  // 已放弃的后台任务（XM-WORKBENCH-JOBS）。只查 discarded：重试中的任务不需要
+  // 人动手，见 lib/workbench 的 workItemsFromJobRuns。
+  const discardedJobsQuery = useQuery({
+    queryKey: ["jobs", "runs", "discarded", WORK_JOBS_LIMIT],
+    queryFn: ({ signal }) => listJobRuns({ signal, state: "discarded", limit: WORK_JOBS_LIMIT }),
+    retry: false,
+  });
 
   // 五条 query 各自独立：任何一条挂掉，别的格子照常显示。合成一条的话,
   // 指标端点 500 会把告警一起换成错误态——而那正是最需要看见告警的时候
@@ -87,12 +100,14 @@ export function OverviewPage() {
     void metricsQuery.refetch();
     void servicesQuery.refetch();
     void auditQuery.refetch();
+    void discardedJobsQuery.refetch();
   };
   useAutoRefresh(refreshAll);
 
   const alerts = alertsQuery.data ?? [];
   const recent = recentAlertsQuery.data ?? [];
   const now = new Date();
+  const failedJobs = discardedJobsQuery.data?.items ?? [];
 
   return (
     <section>
@@ -117,9 +132,15 @@ export function OverviewPage() {
 
         <WorkList
           alerts={alerts}
+          jobs={failedJobs}
           now={now}
           pending={alertsQuery.isPending}
           error={alertsQuery.error}
+          // 后台任务是独立的一格：它读不到时只有「失败任务」那一类降级，
+          // 告警照常显示。合成一个 error 会让 ops.read 缺权限时整块变红。
+          jobsPending={discardedJobsQuery.isPending}
+          jobsError={discardedJobsQuery.error}
+          onJobsRetry={() => void discardedJobsQuery.refetch()}
           onRetry={() => void alertsQuery.refetch()}
         />
 
@@ -244,16 +265,24 @@ function TileRow({
 
 function WorkList({
   alerts,
+  jobs,
   now,
   pending,
   error,
   onRetry,
+  jobsPending,
+  jobsError,
+  onJobsRetry,
 }: {
   alerts: AlertItem[];
+  jobs: JobRunItem[];
   now: Date;
   pending: boolean;
   error: unknown;
   onRetry: () => void;
+  jobsPending: boolean;
+  jobsError: unknown;
+  onJobsRetry: () => void;
 }) {
   // 筛选进 Search Params：一个筛过的工作台是可以贴给同事的地址（交接文档 §8）
   const [searchParams, setSearchParams] = useSearchParams();
@@ -267,8 +296,15 @@ function WorkList({
     setSearchParams(next, { replace: true });
   };
 
-  const items = workItemsFromAlerts(alerts, now);
+  // 两类事项各自派生再合并。「全部」视图里告警在前——严重告警比一条失败的
+  // 后台任务更要紧，顺序本身就是一种排序建议。
+  const items = [...workItemsFromAlerts(alerts, now), ...workItemsFromJobRuns(jobs, now)];
   const shown = activeId ? items.filter((item) => item.categoryId === activeId) : items;
+  // 「失败任务」这一类由 jobs query 供数，它的加载/错误态与告警的是两回事。
+  const jobsOnly = activeId === "jobs";
+  const listPending = jobsOnly ? jobsPending : pending;
+  const listError = jobsOnly ? jobsError : error;
+  const listRetry = jobsOnly ? onJobsRetry : onRetry;
 
   return (
     <Card title="我的待处理" hint="审批、故障、任务、财务、到期与变更">
@@ -287,7 +323,9 @@ function WorkList({
       {/* 这一句必须在：今天「故障」一类里躺的其实是活跃告警，故障事件（Incident）
           对象还没建。不说的话，人会以为这些已经是收敛过的故障单 */}
       <p className="mb-3 text-xs text-fg-muted">
-        本阶段只有「故障」一类有数据源，内容是活跃告警——故障事件（Incident）对象随治理段切片建立后再单列。
+        本阶段有数据源的是「故障」与「失败任务」两类：前者内容是活跃告警——故障事件（Incident）对象随治理段切片建立后再单列；
+        后者只收已放弃（重试用尽、不会再跑）的后台任务，最多 {WORK_JOBS_LIMIT} 条。
+        重试中的任务不在这里，它不需要人动手，看过程请去后台任务页的「失败与重试」。
         其余各类的空是「还没接」，不是「没有问题」。
       </p>
 
@@ -300,11 +338,15 @@ function WorkList({
           description={activeCategory.blockedBy}
         />
       ) : (
-        <ApiStateView isPending={pending} error={error} onRetry={onRetry}>
+        <ApiStateView isPending={listPending} error={listError} onRetry={listRetry}>
           {shown.length === 0 ? (
             <EmptyState
               title="没有待处理事项"
-              description="当前没有未解决的告警。注意：审批、失败任务、财务异常与到期项还没有接入，这一屏并不代表全部待办。"
+              description={
+                jobsOnly
+                  ? "当前没有已放弃的后台任务。重试中的任务不计入这里——它会自己再试，试到用尽才会出现。"
+                  : "当前没有未解决的告警，也没有失败的后台任务。注意：审批、财务异常、到期项与待评审变更还没有接入，这一屏并不代表全部待办。"
+              }
             />
           ) : (
             <ul className="flex flex-col gap-2">

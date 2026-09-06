@@ -918,6 +918,53 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     expect(screen.getByText(/其余各类的空是「还没接」，不是「没有问题」/)).not.toBeNull();
   });
 
+  // XM-WORKBENCH-JOBS：这一类原来写着"后台任务页与 River 查询端点尚未建"，
+  // 而那两样在 XM-JOBS0 就交付了——失败的后台任务在首屏彻底不可见。
+  it("已放弃的后台任务进「失败任务」，并直达后台任务页对应页签", async () => {
+    stubFetch((url) => {
+      if (url.startsWith("/api/v1/jobs/runs")) {
+        // 只有 state=discarded 那一次查询有内容：工作台不查重试中的任务。
+        if (!url.includes("state=discarded")) return fakeResponse(200, { items: [] });
+        return fakeResponse(200, {
+          items: [
+            {
+              id: 77,
+              kind: "newapi_sync",
+              queue: "default",
+              state: "discarded",
+              attempt: 3,
+              max_attempts: 3,
+              created_at: "2026-08-26T08:00:00Z",
+              scheduled_at: "2026-08-26T08:00:00Z",
+              attempted_at: "2026-08-26T09:00:00Z",
+              finalized_at: "2026-08-26T09:30:00Z",
+              duration_ms: 90,
+              error_count: 3,
+              last_error: null,
+              args: {},
+            },
+          ],
+          next_before: 0,
+        });
+      }
+      return okHandler(url);
+    });
+    renderRoute("/dashboard?work=jobs");
+    const item = await screen.findByText("NewAPI 同步 重试 3 次后放弃");
+    expect(item).not.toBeNull();
+    expect(screen.queryByText("「失败任务」还没有数据源")).toBeNull();
+    const link = item.closest("a") as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/jobs?sub=repeated");
+  });
+
+  it("没有已放弃的任务时说清重试中的不计入，不显示成「还没接」", async () => {
+    renderRoute("/dashboard?work=jobs");
+    // okHandler 的 /jobs/runs 返回空列表
+    expect(await screen.findByText("没有待处理事项")).not.toBeNull();
+    expect(screen.getByText(/重试中的任务不计入这里/)).not.toBeNull();
+    expect(screen.queryByText("「失败任务」还没有数据源")).toBeNull();
+  });
+
   it("筛选进 ?work=，选到没有数据源的分类时说清楚被什么挡着", async () => {
     renderRoute("/dashboard?work=approvals");
     const empty = await screen.findByText("「待审批」还没有数据源");
