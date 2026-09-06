@@ -99,18 +99,30 @@ describe("readConnectorHealthValue", () => {
     expect(readConnectorHealthValue({})).toEqual({
       healthy: null,
       version: "",
+      supported: null,
       kind: "",
       latencyMs: null,
+      checkedAt: "",
     });
-    expect(readConnectorHealthValue({ healthy: "yes", version: 1, latency_ms: "12" })).toEqual({
+    expect(
+      readConnectorHealthValue({
+        healthy: "yes",
+        version: 1,
+        supported: "true",
+        latency_ms: "12",
+        checked_at: 0,
+      }),
+    ).toEqual({
       healthy: null,
       version: "",
+      supported: null,
       kind: "",
       latencyMs: null,
+      checkedAt: "",
     });
   });
 
-  it("类型对得上时原样取出四个字段", () => {
+  it("类型对得上时原样取出六个字段", () => {
     expect(
       readConnectorHealthValue({
         version: "0.1.152",
@@ -120,7 +132,14 @@ describe("readConnectorHealthValue", () => {
         latency_ms: 12,
         checked_at: "2026-08-31T03:04:05Z",
       }),
-    ).toEqual({ healthy: true, version: "0.1.152", kind: "", latencyMs: 12 });
+    ).toEqual({
+      healthy: true,
+      version: "0.1.152",
+      supported: true,
+      kind: "",
+      latencyMs: 12,
+      checkedAt: "2026-08-31T03:04:05Z",
+    });
   });
 });
 
@@ -193,6 +212,50 @@ describe("buildOpsHealthRows", () => {
     expect(rows[3]?.note).toContain("健康");
     expect(rows[4]?.note).toContain("不健康");
     expect(rows[4]?.noteTone).toBe("danger");
+  });
+
+  // XM-CREDS-TAB-PROBE：supported 是采集链路的判据，判假时采集会停。
+  // 它以前只存在于指标 value 里，界面上一个字都没有。
+  it("矩阵未声明支持这个上游版本时，备注要说出来并染成警告色", () => {
+    const rows = buildOpsHealthRows(
+      overview({
+        connector_health: [
+          snapshot({
+            metric_key: "sub2api.connector.health",
+            value: { version: "0.2.1", supported: false, healthy: true, kind: "", latency_ms: 12 },
+          }),
+          snapshot({
+            metric_key: "newapi.connector.health",
+            value: { version: "1.0.0", supported: true, healthy: true, kind: "", latency_ms: 20 },
+          }),
+        ],
+      }),
+    );
+    expect(rows[3]?.note).toContain("矩阵未声明支持");
+    expect(rows[3]?.note).toContain("v0.2.1");
+    expect(rows[3]?.noteTone).toBe("warning");
+    // 判真的那条不该多出这句话
+    expect(rows[4]?.note).not.toContain("矩阵");
+  });
+
+  // 「不知道」不是「不支持」：旧样本没有 supported 字段时不能染色也不能报警。
+  it("supported 缺字段时不显示矩阵判定，也不改变色调", () => {
+    const rows = buildOpsHealthRows(
+      overview({
+        connector_health: [
+          snapshot({
+            metric_key: "sub2api.connector.health",
+            value: { version: "0.2.1", healthy: true, kind: "", latency_ms: 12 },
+          }),
+          snapshot({
+            metric_key: "newapi.connector.health",
+            value: { version: "1.0.0", healthy: true, kind: "", latency_ms: 20 },
+          }),
+        ],
+      }),
+    );
+    expect(rows[3]?.note).not.toContain("矩阵");
+    expect(rows[3]?.noteTone).toBe("neutral");
   });
 
   it("契约被破坏（sync_pipelines 缺一条）时抛错，不静默把数据画到错的行上", () => {

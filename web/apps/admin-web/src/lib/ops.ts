@@ -46,19 +46,27 @@ export function describeSyncMode(
 export interface ConnectorHealthValue {
   healthy: boolean | null;
   version: string;
+  /** 兼容矩阵是否声明支持这个版本；null = 这条样本没给这个字段。 */
+  supported: boolean | null;
   kind: string;
   latencyMs: number | null;
+  /** 探测执行时刻（RFC3339）；没给则为空串。 */
+  checkedAt: string;
 }
 
 /** 从 `OpsMetricSnapshot.value`（未类型化的 JSON）里取连接器健康检查关心的
- *  四个字段。防御式读取——这个 value 随 metric_key 变形状，字段名或类型
+ *  六个字段。防御式读取——这个 value 随 metric_key 变形状，字段名或类型
  *  对不上时给安全默认值，不让一次意外的后端改动直接炸掉这一格。 */
 export function readConnectorHealthValue(value: Record<string, unknown>): ConnectorHealthValue {
   return {
     healthy: typeof value.healthy === "boolean" ? value.healthy : null,
     version: typeof value.version === "string" ? value.version : "",
+    // 兼容矩阵的判定。null = 这次观测没给这个字段（旧样本），不是"不支持"——
+    // 与 healthy 同一条道理：不知道和坏了是两回事。
+    supported: typeof value.supported === "boolean" ? value.supported : null,
     kind: typeof value.kind === "string" ? value.kind : "",
     latencyMs: typeof value.latency_ms === "number" ? value.latency_ms : null,
+    checkedAt: typeof value.checked_at === "string" ? value.checked_at : "",
   };
 }
 
@@ -115,6 +123,9 @@ function connectorHealthRow(
   const note = [
     value.healthy === null ? null : value.healthy ? "健康" : "不健康",
     value.version ? `v${value.version}` : null,
+    // 矩阵没声明支持这个版本是一条运维事实，不是提示：Supported 是采集链路的
+    // 判据，判假时采集会停。只在明确为 false 时说话——null 是"这条样本没给"。
+    value.supported === false ? "矩阵未声明支持" : null,
   ]
     .filter((part): part is string => part !== null)
     .join(" · ");
@@ -127,7 +138,8 @@ function connectorHealthRow(
     note,
     // healthy 明确为 false 时用 danger；null（这个部署的健康检查没给这个字段）
     // 与 true 都不该染成红色——前者是「不知道」，不是「不健康」
-    noteTone: value.healthy === false ? "danger" : "neutral",
+    noteTone:
+      value.healthy === false ? "danger" : value.supported === false ? "warning" : "neutral",
   };
 }
 
