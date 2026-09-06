@@ -79,14 +79,35 @@ const (
 //	         （见 upstream.go 的 currencyBuckets）、admin 组新增合规门返 423
 //	         （见 classifyStatus）。本包同时兼容两种金额形状。
 //
-// 矩阵值仍是 "0.1" 而不是逐个列补丁版：前缀匹配已经覆盖 0.1.133 与 0.1.183，
-// 再写一条 "0.1.183" 是不生效的重复项，反而会让人误读成「只认这一版」。
+//	0.2.1    生产当前实际运行的版本（K:/sub2api-src @ v0.2.1，2026-09-06 核对）。
+//	         **本连接器读的七条路由与它们的字段一处未变**，逐条核对如下：
+//	           /admin/system/version    → gin.H{"version"}（未变）
+//	           /admin/dashboard/stats   → total_users / active_users /
+//	                                      stats_stale / stats_updated_at（未变）
+//	           /admin/dashboard/trend   → {"trend":[TrendDataPoint{date,cost,…}]}（未变）
+//	           /admin/payment/dashboard → DailyStats{date, amount: CurrencyAmounts, count}
+//	                                      ——**仍是 0.1.183 起的币种 map**，本包的
+//	                                      currencyBuckets 早已同时吃 map 与标量
+//	           /admin/payment/orders    → id/user_id/user_email/amount/pay_amount/
+//	                                      currency/out_trade_no/payment_type/status/
+//	                                      refund_amount/created_at（未变）
+//	           /admin/accounts          → 本包读的 22 个字段逐个仍在
+//	           /admin/accounts/:id 今日 → AccountStats{requests, cost}（未变）
+//	         响应信封 {code,message,data} 也未变。
 //
-// ⚠️ 仍然**没有对真实实例跑过 Version()**：以上是对上游源码的核对，
-// 不是一次观测。api.solov.cc 实际跑的是哪个补丁版目前仍未知。
-// 凭据到位后第一件事就是跑一次 Version()，把探测值补进
-// docs/inventory/managed-systems.yaml（矩阵本身多半不用动）。
-var SupportedUpstreamVersions = []string{"0.1"}
+// 矩阵值写到 minor 而不是逐个列补丁版：前缀匹配已经覆盖 0.1.133 / 0.1.183 /
+// 0.2.1，再写一条 "0.2.1" 是不生效的重复项，反而会让人误读成「只认这一版」。
+//
+// **为什么必须加 "0.2"**：生产在 2026-09-05 就地升级到了 0.2.1（后台点更新会
+// 替换容器内的二进制，镜像标签不变），我们各处显示的 0.1.179 全是自己钉的值、
+// 不是观测值。矩阵停在 "0.1" 意味着连接器对真实上游一律 Supported=false——
+// 而 Supported 是采集链路的判据，不是一句提示。R6 告警
+// （upstream.version.changed）现在会把这种矩阵陈旧直接说出来。
+//
+// ⚠️ 仍然**没有对真实实例跑过 Version()**：以上是对上游源码的核对，不是一次
+// 观测。凭据到位后第一件事仍是跑一次 Version()，把探测值补进
+// docs/inventory/managed-systems.yaml。
+var SupportedUpstreamVersions = []string{"0.1", "0.2"}
 
 // Option 调整客户端的构造。
 type Option func(*clientOptions)

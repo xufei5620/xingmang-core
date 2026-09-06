@@ -11,8 +11,16 @@ systems:
     detected_version: "未探测（XM-0017 已交付只读客户端，等待真实凭据后由 Version() 回填）"
     # 客户端当前逐字段核对过的上游源码版本（不是本实例的运行版本）。
     # 0.1.183 = K:/sub2api-src @ efb46db，见 EV-2026-08-27-sub2api-read-survey.md；
-    # 客户端同时兼容 0.1.133 与 0.1.183 两版的支付金额形状（XM-R013）。
-    client_verified_against: "0.1.183（源码核对，非实例探测）"
+    # 0.2.1  = K:/sub2api-src @ v0.2.1，2026-09-06 逐条核对了本客户端调的七条
+    #          路由与它们的字段（见 connectors/sub2api/client.go 的矩阵注释）；
+    # 客户端同时兼容 0.1.133/0.1.183 两版的支付金额形状（XM-R013），0.2.1 的
+    # 支付看板仍是 0.1.183 起的币种 map，没有再变。
+    client_verified_against: "0.1.183 + 0.2.1（源码核对，非实例探测）"
+    # 与 detected_version 分开记：这不是探测值，是 2026-09-06 在部署主机上看
+    # 容器内文件得到的——`/app/sub2api` 二进制 mtime 2026-09-05 17:45 CST，
+    # 版本 0.2.1（后台"点击更新"就地替换二进制，镜像标签不跟着变）。够用来
+    # 决定兼容矩阵该声明什么，不够格填进 detected_version。
+    observed_binary_version: "0.2.1（宿主机文件观测，非 Version() 探测）"
     user_count: 2482
     source_watermark: "未采集"
     # 拿到凭据后开采之前必须做的两件事，详见 contracts/connectors/sub2api.read.v1.md
