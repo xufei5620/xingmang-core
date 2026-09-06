@@ -453,11 +453,22 @@ Refresh any base only through the full image scan/SBOM/review flow.
 > **Cutover ordering (learned 2026-09-01/02):** after the three Compose projects
 > are rolled forward, restart `api` (its in-process workers can die on a
 > transient DNS failure during container churn and do not self-heal), and
-> **then** restart `ingest-proxy` — its Nginx resolves the `api` upstream at
-> start, so an `api` restart afterwards leaves it pointing at a dead IP and
-> every source agent sees HTTP 502 (a 3-hour balances-stream gap on 2026-09-01
-> came from exactly this order mistake). The public path via the host Nginx to
+> **then** restart `ingest-proxy` (a 3-hour balances-stream gap on 2026-09-01
+> came from getting this order wrong). The public path via the host Nginx to
 > the published port is unaffected.
+>
+> Since 2026-09-06 the ordering is no longer the only guarantee. That day the
+> order was right in the script and it happened anyway: the api restart timed
+> out, the script exited before its own proxy-restart step, and the proxy spent
+> 27 minutes posting every source batch to the address the api no longer had
+> (`connect() failed (111: Connection refused)`, HTTP 502, readyz 503). Two
+> changes came out of it. `deploy/nginx/ingest-mtls.conf` now resolves the
+> upstream **at request time** (`resolver 127.0.0.11 valid=10s` plus a variable
+> in `proxy_pass`), so a moved api heals itself within ten seconds no matter
+> what restarted it. And `deploy/roll-forward.sh` registers the proxy restart
+> as an `EXIT` trap **before** restarting the api, so it runs even when the
+> wait gives up — a recovery step that only runs on the happy path is not a
+> recovery step.
 
 Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC100
 manifest, signature and artifact verifier have passed. Production Compose has
@@ -1751,10 +1762,30 @@ encrypted cutover manifest (`SOURCE_CUTOVER_RUNTIME_VERSION`, from
 changes for a state generation because every record carries the manifest
 hash. A source upgrade is a controlled CAS of the pin only: re-audit the
 bridge contract against the new upstream schema, stop/drain the source's five
-agents (including pending spools), set `runtime_version` and
+agents, **prove every pending spool is empty**, set `runtime_version` and
 `expected_previous_runtime_version` in the source bootstrap file, rerun
 `bootstrap-sources`, set the pin in the release env, leave the cutover value
-untouched, then restart and canary. The API requires fresh payments
+untouched, then restart and canary.
+
+**The drain is a gate, not a courtesy** (2026-09-06 incident). A batch sealed
+under the old pin declares the old pin. Move the pin while one is still
+un-acked and the API rejects it with `409 request version conflict`; the agent
+must replay it byte for byte and may not skip it, so that stream stops and
+readiness goes 503. Rolling the pin back drains that one and strands whatever
+was sealed under the new pin in the meantime -- **each pin change strands the
+spools sealed under the previous value**, so there is no direction out except
+draining first. Run the gate on the deployment host and require exit 0:
+
+```bash
+bash deploy/check-pending-spools.sh          # PENDING-SPOOLS-EMPTY -> safe to move the pin
+```
+
+If it reports `PENDING-SPOOLS-PRESENT`, do not touch the pin. Check that the
+five agents are running and the API is reachable (readyz 200, no
+`connect() failed` in the ingest-proxy log) and let them drain. **Never delete a
+spool file to clear this gate** -- that discards a batch of upstream facts the
+API has not acknowledged; use the recovery check below (`inspect-pending` reads
+the batch header; compare it with the API's chain state). The API requires fresh payments
 and four economic plus identity heartbeats and zero queued/dead events before readiness, user
 submission or final manual issue confirmation. OIDC/account dependency waits
 remain visible but do not make unrelated users unhealthy. They use exact HMAC

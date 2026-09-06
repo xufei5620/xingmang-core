@@ -18,9 +18,17 @@
 #   1. idp, 2. main, 3. sources  -- Compose recreates only what changed;
 #   4. restart api                -- in-process workers can die on a transient
 #                                    DNS miss during container churn and stay dead;
-#   5. restart ingest-proxy       -- its Nginx resolved the api upstream at start;
-#                                    restarting api after it would strand every
-#                                    source agent on a dead IP (HTTP 502);
+#   5. restart ingest-proxy       -- belt to the Nginx resolver's braces. Since
+#                                    2026-09-06 the proxy resolves the api at
+#                                    request time (deploy/nginx/ingest-mtls.conf),
+#                                    so a moved api heals itself within ten
+#                                    seconds; this restart makes it immediate.
+#                                    It now runs **even when step 4 gives up**:
+#                                    that day it did not, and the proxy was left
+#                                    posting every source batch to the address
+#                                    the api no longer had -- 27 minutes of 502.
+#                                    A recovery step that only runs on the happy
+#                                    path is not a recovery step;
 #   6. verify: 18 containers on the tag, healthz 200, readyz 200 within a bound.
 set -euo pipefail
 
@@ -76,14 +84,25 @@ echo "==> [2/6] main project -> $tag";          compose docker-compose.prod.yml
 echo "==> [3/6] source agents -> $tag";         compose docker-compose.sources.yml
 sleep 20
 echo "==> [4/6] restart api (worker self-heal)"
+# The proxy restart below is registered before the api restart, not after, so
+# that it still runs if the wait times out and this script exits non-zero.
+# 2026-09-06: it did time out, the trap did not exist, and the proxy spent the
+# next 27 minutes posting to an address the api no longer had.
+restart_ingest_proxy() {
+  echo "==> [5/6] restart ingest-proxy (immediate re-resolve; the config also re-resolves at request time)"
+  docker restart invoice-system-prod-ingest-proxy-1 >/dev/null || true
+  sleep 5
+}
+trap restart_ingest_proxy EXIT
 docker restart invoice-system-prod-api-1 >/dev/null
-for _ in $(seq 1 30); do
-  docker logs --since 60s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' && break; sleep 2
+# 120s, not 60s: a cold api on a loaded box has taken over a minute to bind.
+# `--since` widens with the loop so a line printed early is still matched.
+for _ in $(seq 1 60); do
+  docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' && break; sleep 2
 done
-docker logs --since 60s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' || { echo "api did not report listening" >&2; exit 1; }
-echo "==> [5/6] restart ingest-proxy (re-resolve api upstream)"
-docker restart invoice-system-prod-ingest-proxy-1 >/dev/null
-sleep 5
+docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' || { echo "api did not report listening" >&2; exit 1; }
+restart_ingest_proxy
+trap - EXIT
 echo "==> [6/6] verify"
 count=$(docker ps --format '{{.Image}}' | grep -c ":$tag\$" || true)
 (( count == 18 )) || { echo "expected 18 containers on $tag, found $count" >&2; docker ps --format '{{.Names}} {{.Image}} {{.Status}}' | grep invoice >&2; exit 1; }

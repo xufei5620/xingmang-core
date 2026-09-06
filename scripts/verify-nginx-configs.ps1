@@ -66,8 +66,24 @@ try {
     $ingest = $ingest.Replace('/run/secrets/ingest_server_cert', $cert).
         Replace('/run/secrets/ingest_server_key', $key).
         Replace('/run/secrets/source_agent_ca', $ca).
-        Replace('proxy_pass http://api:8088;', 'proxy_pass http://127.0.0.1:8088;')
+        Replace('proxy_pass http://$ingest_upstream:8088;', 'proxy_pass http://127.0.0.1:8088;').
+        Replace('resolver 127.0.0.11 valid=10s ipv6=off;', '')
     [IO.File]::WriteAllText((Join-Path $tempRoot 'ingest.conf'), $ingest, [Text.UTF8Encoding]::new($false))
+
+    # XM-INV-INGEST-RESOLVER：入口代理必须在**请求时**解析 api，不能在 worker
+    # 启动时解析一次就缓存。2026-09-06 事故：api 重启后换了地址，nginx 仍然把
+    # 每一批源数据 POST 给旧地址，27 分钟 502。静态 proxy_pass 会让顺序成为唯一
+    # 保障，而任何一次重启、重排或 IPAM 重分配都能再次踩中。
+    $ingestRaw = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\nginx\ingest-mtls.conf')
+    if ($ingestRaw -notmatch 'resolver\s+127\.0\.0\.11\s') {
+        throw 'ingest-mtls.conf must declare Docker embedded DNS as a resolver (request-time upstream resolution)'
+    }
+    if ($ingestRaw -match 'proxy_pass\s+http://api:') {
+        throw 'ingest-mtls.conf must not name the api upstream literally in proxy_pass: a literal is resolved once at worker start and cached'
+    }
+    if ($ingestRaw -notmatch 'proxy_pass\s+http://\$') {
+        throw 'ingest-mtls.conf must proxy_pass through a variable so nginx resolves the upstream per request'
+    }
 
     foreach ($config in @('public.conf', 'ingest.conf')) {
         docker run --rm --network none `
