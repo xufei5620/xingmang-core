@@ -3687,7 +3687,7 @@ function AccountLedgerPage() {
       <PageHeader
         eyebrow="ACCOUNT LEDGER"
         title="用户账本"
-        description="按用户账号聚合查看 2026-09-01 起充值、消耗与可开票金额，替代逐条冻结记录排查（CR-0009）。"
+        description="按用户账号聚合查看 2026-09-01 00:00（开票策略起点，对所有账号一致）之后的充值、消耗与可开票金额，替代逐条冻结记录排查（CR-0009）。"
         action={
           <button
             className="button button-secondary"
@@ -3922,6 +3922,18 @@ function AccountLedgerDetailDrawer({
                     <dd>
                       {detail.openingBalance.serviceUnits}{" "}
                       {detail.openingBalance.unitCode}
+                    </dd>
+                  </div>
+                  {/* 与期初余额放在一起，因为它们讲的是同一件事：系统从哪一刻起
+                      为这个账号的余额背书。**它不是开票起点**——开票起点是全局
+                      的、对所有账号一致的策略起点。两者以前被「起点后充值」那一
+                      列悄悄混在一起，见 XM-INV-LEDGER-RECHARGE-POLICY-START。 */}
+                  <div>
+                    <dt>纳入采集时刻</dt>
+                    <dd>
+                      {detail.cutoverAt
+                        ? dateTimeShanghai(detail.cutoverAt)
+                        : "尚无记录"}
                     </dd>
                   </div>
                   <div>

@@ -50,14 +50,42 @@ const (
 
 // accountLedgerRechargesLateral: recharges_since_start_count/minor, CR-0009
 // "变更范围" item 2's own formula -- eligibility_kind IN (WALLET_CASH,
-// SUBSCRIPTION_CASH), verification_state='verified', currency='CNY',
-// completed_at>=eas.cutover_at (inclusive, design section 3(E)'s literal
-// wording). verification_state='verified' is included here even though
-// slice 4's own provisional eligibility_ledger.go omitted it for this exact
-// sum -- corrected here to match design section 2's fuller formula and every
-// other WALLET_CASH/SUBSCRIPTION_CASH formula in this codebase (see
+// SUBSCRIPTION_CASH), verification_state='verified', currency='CNY'.
+// verification_state='verified' is included here even though slice 4's own
+// provisional eligibility_ledger.go omitted it for this exact sum -- corrected
+// here to match design section 2's fuller formula and every other
+// WALLET_CASH/SUBSCRIPTION_CASH formula in this codebase (see
 // docs/handoffs/XM-INV-CR0009-LEDGER-VIEW.md for why this is flagged as a
 // deliberate correction, not an unexplained behavior change).
+//
+// XM-INV-LEDGER-RECHARGE-POLICY-START: this used to also require
+// completed_at>=eas.cutover_at (design section 3(E)'s literal wording), and
+// that made this one column disagree with the other three on the same row.
+//
+// eas.cutover_at is **per account** -- the instant the ingestion first
+// established a trustworthy balance baseline for it. In production those
+// instants span six days, so an account whose cutover landed at 2026-09-01
+// 20:14 showed "起点后充值 ¥0" for two verified cash top-ups it had made at
+// 17:03 and 17:07 that same afternoon. Meanwhile consumed/invoiceable/issued
+// (accountLedgerConsumedInvoiceableLateral) apply **no** date filter at all,
+// because enforce_funding_lot_invoice_policy (migration 0016) already refuses
+// to classify any lot as WALLET_CASH/SUBSCRIPTION_CASH unless its completed_at
+// and eligibility_cutover_at are both at or after the immutable policy start.
+// So the same lot fed the invoiceable base while being excluded here, and once
+// that account consumed anything the row would read "起点后充值 ¥0，可开票 ¥5"
+// -- invoiceable money out of nowhere.
+//
+// Dropping the filter (rather than swapping cutover_at for the policy start)
+// is what makes the two laterals literally the same predicate: the policy
+// bound is enforced in the database for every row either of them can see, so
+// naming it again here would be redundant, and a second copy of the bound is
+// a second thing that can drift. The page header's "2026-09-01 起" becomes
+// true for every account, which is what it always claimed.
+//
+// cutover_at itself is still worth showing -- it answers a different, real
+// question ("since when has the system been watching this account?") -- so the
+// detail response now carries it explicitly instead of silently steering a
+// money column.
 const accountLedgerRechargesLateral = `
 	LEFT JOIN LATERAL (
 		SELECT count(*) cnt, sum(fl.verified_cash_minor) minor
@@ -65,7 +93,6 @@ const accountLedgerRechargesLateral = `
 		WHERE fl.external_account_id=ea.id AND fl.currency='CNY'
 			AND fl.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH')
 			AND fl.verification_state='verified'
-			AND fl.completed_at>=eas.cutover_at
 	) r ON true`
 
 // accountLedgerConsumedInvoiceableLateral mirrors ListEligibilitySummaries's
@@ -432,8 +459,19 @@ type AccountLedgerDetail struct {
 
 	OpeningBalanceServiceUnits string
 	OpeningBalanceUnitCode     string
-	Recharges                  []AccountLedgerRecharge
-	ConsumptionTimeline        []AccountLedgerConsumptionDay
+	// CutoverAt is the instant the ingestion first established a trustworthy
+	// balance baseline for this account -- the "since when has the system been
+	// watching?" question, which is **not** the same as "since when is money
+	// invoiceable?" (that one is the immutable policy start, identical for
+	// every account and enforced in the database).
+	//
+	// It used to steer the recharges column silently, which made those two
+	// questions look like one and produced rows whose 起点后充值 disagreed with
+	// their own 可开票 (XM-INV-LEDGER-RECHARGE-POLICY-START). Now it is simply
+	// reported, next to the opening balance it belongs with.
+	CutoverAt           time.Time
+	Recharges           []AccountLedgerRecharge
+	ConsumptionTimeline []AccountLedgerConsumptionDay
 	// LastReconciledAt is the zero time.Time when no evaluation has ever
 	// been 'matched' for this account.
 	LastReconciledAt time.Time
@@ -668,7 +706,6 @@ func (s *Store) GetAccountLedgerDetail(ctx context.Context, externalAccountID st
 	var item AccountLedgerDetail
 	var lastCheckpointAt, lastReconciledAt, freezeOpenedAt, pendingSince *time.Time
 	var freezeLotIssuedMinor *int64
-	var cutoverAt time.Time
 	err := s.pool.QueryRow(ctx, query, args...).Scan(
 		&item.ExternalAccountID, &item.SourceType, &item.ExternalUserID, &item.PolicyStartAt,
 		&item.RechargesSinceStartCount, &item.RechargesSinceStartMinor, &item.ConsumedSinceStartMinor,
@@ -680,7 +717,7 @@ func (s *Store) GetAccountLedgerDetail(ctx context.Context, externalAccountID st
 		&item.PendingReconciliationTriggerID, &pendingSince,
 		&item.LatestEvaluationKind, &item.LatestEvaluationKey, &item.LatestEvaluationStatus,
 		&item.LatestEvaluationExpectedUnits, &item.LatestEvaluationDifferenceUnits,
-		&cutoverAt, &item.OpeningBalanceServiceUnits, &item.OpeningBalanceUnitCode)
+		&item.CutoverAt, &item.OpeningBalanceServiceUnits, &item.OpeningBalanceUnitCode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AccountLedgerDetail{}, domain.ErrNotFound
 	}
@@ -701,7 +738,7 @@ func (s *Store) GetAccountLedgerDetail(ctx context.Context, externalAccountID st
 		item.PendingReconciliationSince = *pendingSince
 	}
 
-	recharges, err := s.accountLedgerRecharges(ctx, externalAccountID, cutoverAt)
+	recharges, err := s.accountLedgerRecharges(ctx, externalAccountID)
 	if err != nil {
 		return AccountLedgerDetail{}, err
 	}
@@ -719,19 +756,23 @@ func (s *Store) GetAccountLedgerDetail(ctx context.Context, externalAccountID st
 // accountLedgerRecharges: the detail contract's recharges_since_start[]
 // array, same universe as accountLedgerRechargesLateral's own sum
 // (eligibility_kind IN (WALLET_CASH,SUBSCRIPTION_CASH),
-// verification_state='verified', currency='CNY', completed_at>=cutoverAt),
-// ordered by completed_at ascending per CR-0009's own wording ("按
-// completed_at 升序聚合"). refund_frozen lots are included (flagged via
-// their own field), matching the sum above -- a refund-frozen lot's cash
-// still genuinely arrived, it is simply not currently invoiceable.
-func (s *Store) accountLedgerRecharges(ctx context.Context, externalAccountID string, cutoverAt time.Time) ([]AccountLedgerRecharge, error) {
+// verification_state='verified', currency='CNY'), ordered by completed_at
+// ascending per CR-0009's own wording ("按 completed_at 升序聚合").
+// refund_frozen lots are included (flagged via their own field), matching the
+// sum above -- a refund-frozen lot's cash still genuinely arrived, it is
+// simply not currently invoiceable.
+//
+// XM-INV-LEDGER-RECHARGE-POLICY-START: the completed_at>=cutoverAt bound is
+// gone here for the same reason it is gone from the lateral, and it had to go
+// in the same commit: these two must stay literally the same predicate, or the
+// summary would count top-ups the itemized list below it refuses to show.
+func (s *Store) accountLedgerRecharges(ctx context.Context, externalAccountID string) ([]AccountLedgerRecharge, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text,completed_at,verified_cash_minor,eligibility_kind,refund_frozen
 		FROM funding_lots
 		WHERE external_account_id=$1 AND currency='CNY'
 			AND eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH') AND verification_state='verified'
-			AND completed_at>=$2
-		ORDER BY completed_at ASC, id ASC`, externalAccountID, cutoverAt)
+		ORDER BY completed_at ASC, id ASC`, externalAccountID)
 	if err != nil {
 		return nil, err
 	}
