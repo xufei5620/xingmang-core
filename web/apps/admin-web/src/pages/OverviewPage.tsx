@@ -9,7 +9,12 @@ import {
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
-import { ALERT_STATUS_ALL, listAlerts, type AlertItem } from "../api/alerts";
+import {
+  ALERT_STATUS_ALL,
+  listAlerts,
+  listAlertsPage,
+  type AlertItem,
+} from "../api/alerts";
 import { listJobRuns, type JobRunItem } from "../api/jobs";
 import {
   listAuditEvents,
@@ -63,10 +68,9 @@ const RECENT_ACTIVITY_LIMIT = 5;
  *  等于告诉运营「这一类现在没有问题」。 */
 export function OverviewPage() {
   const alertsQuery = useQuery({
-    // **显式传 limit**：后端有默认值（defaultAlertLimit=200），但那个数只写在
-    // 服务端，前端看不见，也就无从判断这一屏是不是被截断了。
+    // 用带信封的那个：截断由服务端说（XM-ALERTS-LIST-TRUNCATED）。
     queryKey: ["alerts", "active", ACTIVE_ALERTS_LIMIT],
-    queryFn: ({ signal }) => listAlerts({ signal, limit: ACTIVE_ALERTS_LIMIT }),
+    queryFn: ({ signal }) => listAlertsPage({ signal, limit: ACTIVE_ALERTS_LIMIT }),
   });
   // 「最近恢复」要的是**已解决**的告警，活跃列表里没有它们，所以是第二条 query。
   // 不把两者合成一条：活跃告警是这一屏最要紧的东西，它不该因为「顺便多要了
@@ -108,10 +112,12 @@ export function OverviewPage() {
   };
   useAutoRefresh(refreshAll);
 
-  const alerts = alertsQuery.data ?? [];
+  const alerts = alertsQuery.data?.items ?? [];
   const recent = recentAlertsQuery.data ?? [];
   const now = new Date();
   const failedJobs = discardedJobsQuery.data?.items ?? [];
+  // 任务那条的权威判据是游标：还有下一页就是还有没显示的。
+  const jobsTruncated = discardedJobsQuery.data?.nextBefore != null;
 
   return (
     <section>
@@ -137,6 +143,8 @@ export function OverviewPage() {
         <WorkList
           alerts={alerts}
           jobs={failedJobs}
+          alertsTruncated={alertsQuery.data?.truncated === true}
+          jobsTruncated={jobsTruncated}
           now={now}
           pending={alertsQuery.isPending}
           error={alertsQuery.error}
@@ -270,6 +278,8 @@ function TileRow({
 function WorkList({
   alerts,
   jobs,
+  alertsTruncated,
+  jobsTruncated,
   now,
   pending,
   error,
@@ -280,6 +290,8 @@ function WorkList({
 }: {
   alerts: AlertItem[];
   jobs: JobRunItem[];
+  alertsTruncated: boolean;
+  jobsTruncated: boolean;
   now: Date;
   pending: boolean;
   error: unknown;
@@ -313,8 +325,8 @@ function WorkList({
   // 被截断时才说——在「待审批」下面提"告警取了 200 条"是噪声。
   const truncation = truncationNote({
     activeCategoryId: activeId,
-    alertCount: alerts.length,
-    jobCount: jobs.length,
+    alertsTruncated,
+    jobsTruncated,
   });
 
   return (

@@ -79,12 +79,28 @@ function statusParam(status: ListAlertsOptions["status"]): string | undefined {
  *
  *  environment 由 client 侧的配置决定（不传则用调用者身份自己的环境）——
  *  跨环境读取在后端是硬拒绝，前端不该假装能选。 */
-export async function listAlerts(
+export interface AlertsPage {
+  items: AlertItem[];
+  /** 服务端说的「这一页可能不是全部」（XM-ALERTS-LIST-TRUNCATED）。
+   *
+   *  **不要在前端自己算**：调用方传的 limit 与真正生效的 limit 可能不是一个数
+   *  （不传、或传得比服务端上界还大都会被钳），拿自己传的数去比会永远判不出
+   *  截断。只有服务端知道生效值。老后端没有这个字段时按 false 处理——那时
+   *  它确实没法回答这个问题，假装"可能截断"会平白吓人。 */
+  truncated: boolean;
+  /** 服务端实际生效的上限；没给就是 0（不显示）。 */
+  limit: number;
+}
+
+/** 带信封的列表：要判断「这一屏是不是全部」时用它。 */
+export async function listAlertsPage(
   options: ListAlertsOptions = {},
   client: ApiClient = apiClient,
   config: PlatformApiConfig = appApiConfig,
-): Promise<AlertItem[]> {
-  const body = await client.get<ListResponse<AlertItem>>("/api/v1/alerts", {
+): Promise<AlertsPage> {
+  const body = await client.get<
+    ListResponse<AlertItem> & { truncated?: boolean; limit?: number }
+  >("/api/v1/alerts", {
     searchParams: {
       environment: config.environment,
       status: statusParam(options.status),
@@ -92,7 +108,20 @@ export async function listAlerts(
     },
     ...(options.signal ? { signal: options.signal } : {}),
   });
-  return body.items ?? [];
+  return {
+    items: body.items ?? [],
+    truncated: body.truncated === true,
+    limit: typeof body.limit === "number" && Number.isSafeInteger(body.limit) ? body.limit : 0,
+  };
+}
+
+/** 只要条目、不关心完整性时用它（多数计数与徽章都是这一类）。 */
+export async function listAlerts(
+  options: ListAlertsOptions = {},
+  client: ApiClient = apiClient,
+  config: PlatformApiConfig = appApiConfig,
+): Promise<AlertItem[]> {
+  return (await listAlertsPage(options, client, config)).items;
 }
 
 /** alerts.alert.acknowledge@1 声明的 Permission（alerts/permissions.go）。 */

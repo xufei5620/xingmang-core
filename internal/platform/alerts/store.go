@@ -107,6 +107,17 @@ func alertsFromRows(rows []gen.AlertsAlert) []Alert {
 }
 
 func clampLimit(limit int32) int32 {
+	return ClampListLimit(limit)
+}
+
+// ClampListLimit 是列表查询实际会用的条数。
+//
+// 导出它是为了让 HTTP 层能回答「这一页是不是被截断了」：调用方传的 limit 和
+// 真正生效的 limit 可能不是一个数（0 或超过上界都会被钳到 MaxListLimit），
+// 而「返回条数是否等于生效上限」正是判断截断的唯一依据。让 HTTP 层自己
+// 复刻这段钳制，就会出现两处各写一个数、改一处忘另一处的老问题
+// （parseAlertLimit 的注释已经点过这件事）。
+func ClampListLimit(limit int32) int32 {
 	if limit <= 0 || limit > MaxListLimit {
 		return MaxListLimit
 	}

@@ -238,32 +238,32 @@ describe("失败任务：只收已放弃的后台任务", () => {
 // 一张"没有待处理事项"的清单如果其实被截断了，人会据此收工——这比少一条
 // 信息严重得多。
 describe("这一屏是不是全部", () => {
-  const none = { activeCategoryId: "", alertCount: 3, jobCount: 2 };
+  const none = { activeCategoryId: "", alertsTruncated: false, jobsTruncated: false };
 
   it("没到上限时不说话——显示一句「没有截断」是噪声", () => {
     expect(truncationNote(none)).toBeNull();
   });
 
-  it("告警取满时说出来，并且只说「可能」", () => {
-    const note = truncationNote({ ...none, alertCount: ACTIVE_ALERTS_LIMIT });
+  it("告警被截断时说出来，并且只说「可能」", () => {
+    const note = truncationNote({ ...none, alertsTruncated: true });
     expect(note).not.toBeNull();
     expect(note).toContain("可能不是全部");
     expect(note).toContain(String(ACTIVE_ALERTS_LIMIT));
     expect(note).not.toContain("后台任务");
   });
 
-  it("任务取满时说出来", () => {
-    const note = truncationNote({ ...none, jobCount: WORK_JOBS_LIMIT });
+  it("任务被截断时说出来", () => {
+    const note = truncationNote({ ...none, jobsTruncated: true });
     expect(note).toContain("后台任务");
     expect(note).toContain(String(WORK_JOBS_LIMIT));
     expect(note).not.toContain("活跃告警");
   });
 
-  it("两边都取满就都说", () => {
+  it("两边都被截断就都说", () => {
     const note = truncationNote({
       activeCategoryId: "",
-      alertCount: ACTIVE_ALERTS_LIMIT,
-      jobCount: WORK_JOBS_LIMIT,
+      alertsTruncated: true,
+      jobsTruncated: true,
     });
     expect(note).toContain("活跃告警");
     expect(note).toContain("后台任务");
@@ -271,15 +271,10 @@ describe("这一屏是不是全部", () => {
 
   // 在「待审批」下面提"告警取了 200 条"是噪声：那一格根本不显示告警。
   it("只说当前这一格可能被截断的那一条", () => {
-    const both = { alertCount: ACTIVE_ALERTS_LIMIT, jobCount: WORK_JOBS_LIMIT };
+    const both = { alertsTruncated: true, jobsTruncated: true };
     expect(truncationNote({ ...both, activeCategoryId: "incidents" })).not.toContain("后台任务");
     expect(truncationNote({ ...both, activeCategoryId: "jobs" })).not.toContain("活跃告警");
     expect(truncationNote({ ...both, activeCategoryId: "approvals" })).toBeNull();
-  });
-
-  // 超过上限（后端多给了）同样算截断：判据是 >=，不是 ===。
-  it("超过上限也算截断", () => {
-    expect(truncationNote({ ...none, jobCount: WORK_JOBS_LIMIT + 5 })).toContain("后台任务");
   });
 });
 

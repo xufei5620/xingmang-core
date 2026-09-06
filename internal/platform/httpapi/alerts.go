@@ -120,7 +120,20 @@ func ListAlertsHandler(store AlertLister) http.HandlerFunc {
 		for _, a := range items {
 			out = append(out, alertToItem(a))
 		}
-		WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+		// truncated：返回条数正好等于**生效的**上限，说明可能还有没返回的。
+		//
+		// 为什么由服务端说：调用方传的 limit 与真正生效的 limit 可能不是一个数
+		// （0 或超过 MaxListLimit 都会被钳），前端拿 len(items) 去比自己传的那个
+		// 数，在被钳的情况下会**永远判不出截断**。只有这里知道生效值。
+		//
+		// 只能说"可能"：恰好等于上限时也可能就是恰好这么多。含糊不好，但让一份
+		// 被截断的列表看起来像全部更糟——人会据此收工。
+		effectiveLimit := alerts.ClampListLimit(limit)
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"items":     out,
+			"limit":     effectiveLimit,
+			"truncated": int32(len(out)) >= effectiveLimit,
+		})
 	}
 }
 
