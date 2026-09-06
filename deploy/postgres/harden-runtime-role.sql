@@ -65,19 +65,41 @@ REVOKE UPDATE, DELETE, TRUNCATE ON TABLE
 	source_ingest_batches,
 	payment_candidate_reviews,
   source_usage_events,
-  source_credit_events,
   balance_reconciliation_checkpoints,
   balance_checkpoint_evaluations,
   balance_carry_forward_proofs,
   balance_carry_forward_evaluations
 FROM invoice_app;
+
+-- source_credit_events 是这一组里**唯一**保留 DELETE 的表，理由与安全无关，
+-- 是因为收掉它会让一条设计好的修复路径永久失败。
+--
+-- evaluatePendingBalanceEvidenceTx（consumption.go，XM-INV-BLIP-SOFTFAIL）在
+-- 确认一笔试探性信用其实不是简单的余额抖动时，要把自己刚写下的那一行撤销。
+-- 那篇交接文档记的正是「返回错误会让该账号的投影任务在每次重试时失败、永远
+-- 失败」——软失败路径就是为此而写。
+--
+-- **真正的管控在触发器，不在表级权限**：source_credit_events_immutable 只允许
+-- 删除 credit_kind='UNKNOWN_POSITIVE' 且带会话标志
+-- invoice.balance_blip_repair_delete='on' 的行，其余一律 RAISE
+-- 'source eligibility facts are immutable'。表级 DELETE 比它宽得多，收掉并不
+-- 增加安全性。UPDATE 与 TRUNCATE 仍然收掉——事实本身不可改，而且
+-- cmd/api/runtime.go 的启动自检明确要求这张表的 UPDATE 为 false（它没有、
+-- 也不该有对 DELETE 的要求）。
+--
+-- 2026-09-06 的教训：那天 11:44Z 首次重放这份策略，忠实地收掉了 DELETE；
+-- 账号 40bd883d 在 17:42 走到这条路径，18:16 投影判死，readyz 转 503 约一个
+-- 半小时。同一天新加的 roll-forward [0b/6] 会在每次部署重放本策略，所以策略
+-- 里任何一处过时都会立刻兑现——这既是它的价值，也是它的锋利之处。
+REVOKE UPDATE, TRUNCATE ON TABLE source_credit_events FROM invoice_app;
+GRANT SELECT, INSERT, DELETE ON TABLE source_credit_events TO invoice_app;
+
 GRANT SELECT, INSERT ON TABLE
   source_cutover_manifests,
 	source_events,
 	source_ingest_batches,
 	payment_candidate_reviews,
   source_usage_events,
-  source_credit_events,
   balance_reconciliation_checkpoints,
   balance_checkpoint_evaluations,
   balance_carry_forward_proofs,
