@@ -1262,6 +1262,27 @@ export const mockInvoiceApi: InvoiceApiClient = {
     };
   },
 
+  async listRequestNotices(target: InvoiceRequest) {
+    await delay(60);
+    const current = requests.find((request) => request.id === target.id) ?? target;
+    // 演示数据里通知与申请同时产生（真实系统里也是同事务入队），所以
+    // 只要有 submittedAt 就有一条；还没提交的申请没有通知。
+    if (!current.submittedAt) {
+      return [];
+    }
+    return [
+      {
+        id: `notice-${current.id}`,
+        kind: "request.submitted",
+        status: "sent",
+        attemptCount: 1,
+        deliveredAt: current.submittedAt,
+        lastErrorCode: "",
+        createdAt: current.submittedAt,
+      },
+    ];
+  },
+
   async downloadInvoiceDocument(request: InvoiceRequest) {
     const body = `%PDF-1.4\n% SoloV invoice preview ${request.invoiceNumber ?? request.requestNo}\n%%EOF`;
     const url = URL.createObjectURL(

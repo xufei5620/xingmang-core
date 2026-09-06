@@ -110,6 +110,7 @@ import type {
   EligibilityProjectionHealth,
   FundingOrder,
   InvoiceProfile,
+  InvoiceNoticeDelivery,
   InvoiceProfileType,
   InvoicePolicy,
   InvoiceRequest,
@@ -2391,6 +2392,12 @@ function AdminDrawer({
   > | null>(null);
   const [deliveryLoading, setDeliveryLoading] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
+  // 企业微信通知（XM-INV-NOTICE-UI）。与交付状态分开：交付说的是"发票邮件
+  // 寄了没有"（要先开票），通知说的是"提交那一刻推的那条群消息发了没有"，
+  // 从提交起就存在。
+  const [notices, setNotices] = useState<InvoiceNoticeDelivery[] | null>(null);
+  const [noticesLoading, setNoticesLoading] = useState(false);
+  const [noticesError, setNoticesError] = useState<string | null>(null);
   useEffect(() => {
     setDelivery(null);
     setDeliveryError(null);
@@ -2422,6 +2429,33 @@ function AdminDrawer({
       active = false;
     };
   }, [requestId, request?.status, request?.updatedAt, request?.workflowStatus]);
+  // 通知不按状态设闸：一条 request.submitted 的通知在申请还是"待审核"时
+  // 就存在了，而那正是最需要查"推出去了没有"的时候。
+  useEffect(() => {
+    setNotices(null);
+    setNoticesError(null);
+    setNoticesLoading(false);
+    if (!request) return;
+    let active = true;
+    setNoticesLoading(true);
+    void invoiceApi
+      .listRequestNotices(request)
+      .then((value) => {
+        if (active) setNotices(value);
+      })
+      .catch((error) => {
+        if (active)
+          setNoticesError(
+            error instanceof Error ? error.message : "通知状态读取失败。",
+          );
+      })
+      .finally(() => {
+        if (active) setNoticesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [requestId, request?.status, request?.updatedAt]);
   useEffect(() => {
     setIssuedAt(currentLocalDateTimeValue());
   }, [requestId]);
@@ -2831,6 +2865,56 @@ function AdminDrawer({
               </div>
             </section>
           )}
+          {/* 企业微信通知（XM-INV-NOTICE-UI）。**不设状态闸**：提交那一刻的
+              通知在申请还是"待审核"时就存在，而那正是最需要查它的时候。 */}
+          <section className="delivery-box">
+            <div>
+              <Send size={21} />
+              <div>
+                <strong>企业微信通知</strong>
+                <span>
+                  提交、审核这类事件推到群机器人的记录；与上面的发票邮件是两条
+                  不同的通道。
+                </span>
+              </div>
+            </div>
+            <div className="mail-row">
+              {noticesLoading ? (
+                <span>正在读取通知状态</span>
+              ) : noticesError ? (
+                <>
+                  <span>通知状态读取失败</span>
+                  <small>{noticesError}</small>
+                </>
+              ) : notices && notices.length > 0 ? (
+                notices.map((notice) => (
+                  <span key={notice.id}>
+                    {noticeKindLabel(notice.kind)}：
+                    {noticeStatusLabel(notice.status)}
+                    {notice.attemptCount > 0 && (
+                      <small>已尝试 {notice.attemptCount} 次</small>
+                    )}
+                    {notice.deliveredAt && (
+                      <small>送达 {dateTime(notice.deliveredAt)}</small>
+                    )}
+                    {!notice.deliveredAt && notice.nextAttemptAt && (
+                      <small>下次尝试 {dateTime(notice.nextAttemptAt)}</small>
+                    )}
+                    {/* 失败短码是"为什么没发出去"的唯一线索；后端保证它不含
+                        Webhook 地址与上游原文，所以可以直接显示。 */}
+                    {notice.lastErrorCode && <small>{notice.lastErrorCode}</small>}
+                  </span>
+                ))
+              ) : (
+                <span>
+                  没有通知记录
+                  <small>
+                    未配置群机器人地址时不会入队，这不是故障
+                  </small>
+                </span>
+              )}
+            </div>
+          </section>
         </div>
         {working && (
           <div className="drawer-working">
@@ -2851,6 +2935,24 @@ function VerificationBadge({
   if (value === "passed") return <Badge tone="green">已通过</Badge>;
   if (value === "failed") return <Badge tone="red">异常</Badge>;
   return <Badge tone="amber">待核验</Badge>;
+}
+
+// 通知事件与状态的中文。**未知取值原样显示**，与卡片推送对未知交易类型的
+// 处理同一条纪律：后端加了新事件/新状态时，显示原值仍然有用，藏起来不是。
+function noticeKindLabel(value: string) {
+  return { "request.submitted": "提交申请" }[value] ?? (value || "未知事件");
+}
+
+function noticeStatusLabel(value: string) {
+  return (
+    {
+      queued: "排队中",
+      sending: "投递中",
+      sent: "已发送",
+      // 到达重试上限后停住。行留着，看得见它失败了。
+      failed: "已放弃",
+    }[value] ?? (value || "未知状态")
+  );
 }
 
 function mailStatusLabel(value: InvoiceRequest["mailStatus"]) {

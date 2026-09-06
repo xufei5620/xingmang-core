@@ -12,6 +12,7 @@ import type {
   FundingOrder,
   InvoiceProfile,
   InvoiceDeliveryState,
+  InvoiceNoticeDelivery,
   InvoicePolicy,
   InvoiceRequest,
   InvoiceRequestPage,
@@ -173,6 +174,9 @@ export interface InvoiceApiClient {
     request: InvoiceRequest,
     admin?: boolean,
   ): Promise<InvoiceDeliveryState>;
+  /** 一份申请的企业微信通知投递状态（**管理端专用**，没有 user 变体：
+   *  这是运维事实，不是申请人的业务数据）。 */
+  listRequestNotices(request: InvoiceRequest): Promise<InvoiceNoticeDelivery[]>;
   downloadInvoiceDocument(request: InvoiceRequest): Promise<void>;
   downloadAdminInvoiceDocument(request: InvoiceRequest): Promise<void>;
   getAdminSettings(): Promise<InvoiceSystemSettings>;
