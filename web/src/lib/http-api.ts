@@ -380,6 +380,7 @@ export type BackendSystemSettings = {
     starttls: boolean;
     credential_configured: boolean;
     test_recipient_masked: string;
+    test_recipient_managed?: boolean;
   };
   admin_access: {
     cidrs: string[];
@@ -1306,9 +1307,12 @@ export function mapAdminSettings(
       code: "INVALID_ELIGIBILITY_POLICY",
     });
   }
+  // 空串是合法的「还没配」——收件人搬进后台之后（XM-INV-SMTP-TEST-RECIPIENT-SETTING）
+  // 两个来源都可能为空，那时按钮会被禁用并提示去配置，而不是让整个设置页拒绝解析。
   if (
     typeof settings.smtp.test_recipient_masked !== "string" ||
-    !settings.smtp.test_recipient_masked.includes("***@") ||
+    (settings.smtp.test_recipient_masked !== "" &&
+      !settings.smtp.test_recipient_masked.includes("***@")) ||
     /[\r\n\0]/.test(settings.smtp.test_recipient_masked)
   ) {
     throw new InvoiceApiError("SMTP 测试收件地址配置无效。", {
@@ -1333,6 +1337,7 @@ export function mapAdminSettings(
       startTLS: settings.smtp.starttls,
       credentialConfigured: settings.smtp.credential_configured,
       testRecipientMasked: settings.smtp.test_recipient_masked,
+      testRecipientManaged: settings.smtp.test_recipient_managed === true,
     },
     adminAccess: {
       cidrs: settings.admin_access.cidrs,
@@ -2830,6 +2835,11 @@ export const httpInvoiceApi: InvoiceApiClient = {
         ...(input.authorizationCode
           ? { authorization_code: input.authorizationCode }
           : {}),
+        // undefined 与空串在这里含义不同，所以只能判 undefined，不能判真值：
+        // 传空串是「清空收件人」，被真值判断吃掉就变成了「保持不变」。
+        ...(input.testRecipient === undefined
+          ? {}
+          : { test_recipient: input.testRecipient }),
       },
     });
   },

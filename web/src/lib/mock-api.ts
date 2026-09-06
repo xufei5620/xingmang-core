@@ -22,6 +22,17 @@ import type {
 import { InvoiceApiError, type InvoiceApiClient } from "./api-contract";
 
 const delay = (ms = 220) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 与后端 adminsettings.MaskTestRecipient 同规则：本地部分留 3 位，不足 3 位留 1 位。
+ *  演示态必须跟真实响应长得一样，否则设置页的说明行在两种模式下对不上。 */
+const maskTestRecipient = (value: string): string => {
+  const trimmed = value.trim();
+  const at = trimmed.lastIndexOf("@");
+  if (at <= 0 || at === trimmed.length - 1) return "";
+  const local = trimmed.slice(0, at);
+  return `${local.slice(0, local.length < 3 ? 1 : 3)}***@${trimmed.slice(at + 1)}`;
+};
+
 const now = new Date().toISOString();
 
 const mockSession: AuthSession = {
@@ -267,6 +278,7 @@ let systemSettings: InvoiceSystemSettings = {
     startTLS: true,
     credentialConfigured: false,
     testRecipientMasked: "tes***@example.com",
+    testRecipientManaged: true,
   },
   adminAccess: {
     cidrs: ["127.0.0.1/32", "::1/128"],
@@ -1329,6 +1341,17 @@ export const mockInvoiceApi: InvoiceApiClient = {
 
   async saveSMTPSettings(input) {
     await delay(380);
+    if (
+      input.testRecipient !== undefined &&
+      input.testRecipient.trim() !== "" &&
+      input.testRecipient.trim().toLowerCase() ===
+        input.fromAddress.trim().toLowerCase()
+    ) {
+      throw new InvoiceApiError("测试收件人不能与发件人相同。", {
+        code: "SMTP_TEST_RECIPIENT_CONFLICT",
+        status: 422,
+      });
+    }
     if (input.revision !== systemSettings.revision) {
       throw new InvoiceApiError("设置已被其他管理员更新，请刷新后重试。", {
         code: "VERSION_CONFLICT",
@@ -1353,7 +1376,14 @@ export const mockInvoiceApi: InvoiceApiClient = {
       credentialConfigured:
         Boolean(input.authorizationCode) ||
         systemSettings.smtp.credentialConfigured,
-      testRecipientMasked: systemSettings.smtp.testRecipientMasked,
+      testRecipientMasked:
+        input.testRecipient === undefined
+          ? systemSettings.smtp.testRecipientMasked
+          : maskTestRecipient(input.testRecipient),
+      testRecipientManaged:
+        input.testRecipient === undefined
+          ? systemSettings.smtp.testRecipientManaged
+          : input.testRecipient.trim() !== "",
     };
     systemSettings.revision += 1;
   },

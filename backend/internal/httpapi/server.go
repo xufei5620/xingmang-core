@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/mail"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,9 +114,13 @@ func NewWithConfig(service InvoiceService, cfg Config, logger *slog.Logger) (*Se
 	if err != nil {
 		return nil, err
 	}
-	if cfg.SMTPTestSender != nil && cfg.ProductionAuth != nil && smtpTestRecipient == "" {
-		return nil, errors.New("production SMTP test recipient is required")
-	}
+	// 这里曾经在生产模式下强制要求环境变量非空。收件人搬进管理后台之后
+	// （XM-INV-SMTP-TEST-RECIPIENT-SETTING）这个前提在**进程启动时**已经无法
+	// 判断了：真正生效的值可能来自库里那一列，而它在建 Server 的时刻还没读。
+	// 于是判断从「启动即失败」挪到端点上——两个来源都为空时 testEmail 返回
+	// TEST_EMAIL_NOT_CONNECTED。这不是把要求放宽了：以前是整个进程起不来，
+	// 现在是那一个按钮明确报错，其余功能照常，而且管理员在页面上填一个地址
+	// 就能自己修好，不必找人改服务器。
 	switch cfg.AuthMode {
 	case "mock":
 		if cfg.ProductionAuth != nil || cfg.PlatformLogin != nil {
@@ -461,7 +464,7 @@ func (s *Server) settingsResponse(settings adminsettings.Settings, r *http.Reque
 		"eligibility_policy_version": settings.EligibilityPolicyVersion,
 		"eligibility_timezone":       adminsettings.EligibilityDisplayTimeZone,
 		"eligibility_rule":           "payment_and_usage_at_or_after",
-		"smtp":                       map[string]any{"host": settings.SMTPHost, "port": settings.SMTPPort, "from_address": settings.SMTPFrom, "from_name": settings.SMTPFromName, "starttls": settings.SMTPStartTLS, "credential_configured": settings.SMTPSecretConfigured, "test_recipient_masked": maskSMTPTestRecipient(s.smtpTestRecipient)},
+		"smtp":                       map[string]any{"host": settings.SMTPHost, "port": settings.SMTPPort, "from_address": settings.SMTPFrom, "from_name": settings.SMTPFromName, "starttls": settings.SMTPStartTLS, "credential_configured": settings.SMTPSecretConfigured, "test_recipient_masked": maskSMTPTestRecipient(s.effectiveTestRecipient(settings)), "test_recipient_managed": strings.TrimSpace(settings.SMTPTestRecipient) != ""},
 		"admin_access":               map[string]any{"cidrs": settings.AdminCIDRs, "current_ip": s.requestClientIP(r).String(), "bootstrap_access": s.requestUsesBootstrap(r)},
 	}
 }
@@ -533,6 +536,10 @@ func (s *Server) updateSMTPSettings(w http.ResponseWriter, r *http.Request) {
 		StartTLS               bool    `json:"starttls"`
 		AuthorizationCode      *string `json:"authorization_code,omitempty"`
 		ClearAuthorizationCode bool    `json:"clear_authorization_code,omitempty"`
+		// TestRecipient 用指针是为了区分「没提交这个字段」和「提交了空串」：
+		// 前者保持库里现值不变（老前端不会因为一次保存把地址清掉），后者是
+		// 明确的「清空，回到环境变量兜底」。
+		TestRecipient *string `json:"test_recipient,omitempty"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -545,10 +552,6 @@ func (s *Server) updateSMTPSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "INVALID_SMTP_SECRET_ACTION", "authorization_code cannot be empty")
 		return
 	}
-	if s.smtpTestRecipient != "" && strings.EqualFold(strings.TrimSpace(body.FromAddress), s.smtpTestRecipient) {
-		writeError(w, http.StatusUnprocessableEntity, "SMTP_TEST_RECIPIENT_CONFLICT", "SMTP sender and fixed test recipient must be different")
-		return
-	}
 	current, ok := s.currentSettings(w, r, body.Revision)
 	if !ok {
 		return
@@ -559,6 +562,17 @@ func (s *Server) updateSMTPSettings(w http.ResponseWriter, r *http.Request) {
 	input.SMTPFrom = body.FromAddress
 	input.SMTPFromName = body.FromName
 	input.SMTPStartTLS = body.StartTLS
+	if body.TestRecipient != nil {
+		input.SMTPTestRecipient = *body.TestRecipient
+	}
+	// 库里还没有配收件人时，生效的仍是环境变量那个（过渡期回退），它同样不能
+	// 与发件人相同——否则改完发件人就会撞上一个自己改不掉的冲突。校验放在
+	// 服务层之前，是为了给出这个专属错误码而不是笼统的 INVALID_SETTINGS。
+	if input.SMTPTestRecipient == "" && s.smtpTestRecipient != "" &&
+		strings.EqualFold(strings.TrimSpace(body.FromAddress), s.smtpTestRecipient) {
+		writeError(w, http.StatusUnprocessableEntity, "SMTP_TEST_RECIPIENT_CONFLICT", "SMTP sender and test recipient must be different")
+		return
+	}
 	actor := s.settingsActor(r)
 	change := adminsettings.SMTPSecretUnchanged
 	authorizationCode := ""
@@ -611,7 +625,7 @@ func (s *Server) updateAdminAccessSettings(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
-	if s.smtpTestSender == nil || s.productionAuth == nil || s.adminSettings == nil || s.publicOrigin == "" || s.smtpTestRecipient == "" {
+	if s.smtpTestSender == nil || s.productionAuth == nil || s.adminSettings == nil || s.publicOrigin == "" {
 		writeError(w, http.StatusServiceUnavailable, "TEST_EMAIL_NOT_CONNECTED", "test email delivery requires production authentication and SMTP")
 		return
 	}
@@ -652,8 +666,13 @@ func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "TEST_EMAIL_NOT_CONNECTED", "test email delivery requires production authentication and SMTP")
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(settings.SMTPFrom), s.smtpTestRecipient) {
-		writeError(w, http.StatusUnprocessableEntity, "SMTP_TEST_RECIPIENT_CONFLICT", "SMTP sender and fixed test recipient must be different")
+	recipient := s.effectiveTestRecipient(settings)
+	if recipient == "" {
+		writeError(w, http.StatusServiceUnavailable, "TEST_EMAIL_NOT_CONNECTED", "test email delivery requires production authentication and SMTP")
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(settings.SMTPFrom), recipient) {
+		writeError(w, http.StatusUnprocessableEntity, "SMTP_TEST_RECIPIENT_CONFLICT", "SMTP sender and test recipient must be different")
 		return
 	}
 	now := time.Now().UTC()
@@ -671,7 +690,7 @@ func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
 	s.smtpTestMu.Unlock()
 	messageID := requestID(r)
 	_, err = s.smtpTestSender.SendInvoiceReady(r.Context(), mailer.Message{
-		ID: messageID, Kind: mailer.MessageSMTPTest, Recipient: s.smtpTestRecipient,
+		ID: messageID, Kind: mailer.MessageSMTPTest, Recipient: recipient,
 		RequestNo:   "SMTP-TEST-" + strings.ToUpper(messageID[:min(len(messageID), 12)]),
 		DownloadURL: s.publicOrigin + "/", CreatedAt: now,
 	})
@@ -691,29 +710,29 @@ func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// effectiveTestRecipient 回答「这封测试邮件到底发给谁」。
+//
+// 管理端设置里的值优先；只有它为空时才回退到环境变量 SMTP_TEST_RECIPIENT。
+// 这个回退是**过渡期**的，不是「默认值」：迁移 0030 只能把新列建成空串，读不到
+// 环境变量，所以生产在管理员第一次在页面上保存之前必须靠它兜住。一旦库里那一列
+// 非空，环境变量就再也不参与——两者不是「默认值与下限」那种一个常量兼两职的
+// 关系，任何时刻只有一个来源生效。
+func (s *Server) effectiveTestRecipient(settings adminsettings.Settings) string {
+	if configured := strings.TrimSpace(settings.SMTPTestRecipient); configured != "" {
+		return configured
+	}
+	return s.smtpTestRecipient
+}
+
+// normalizeSMTPTestRecipient 只剩下校验环境变量这一个用途（进程启动时）。
+// 规则本身已经搬进 adminsettings —— 收件人现在由管理员在页面上填、要写进库，
+// 校验必须发生在写库之前，而同一条规则不能有两份实现。
 func normalizeSMTPTestRecipient(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", nil
-	}
-	parsed, err := mail.ParseAddress(value)
-	if err != nil || len(value) > 320 || parsed.Name != "" || parsed.Address != value || strings.ContainsAny(value, "\r\n\x00") || strings.IndexFunc(value, func(character rune) bool { return character < 33 || character > 126 }) >= 0 {
-		return "", errors.New("SMTP test recipient must be one exact email address")
-	}
-	return value, nil
+	return adminsettings.NormalizeTestRecipient(value)
 }
 
 func maskSMTPTestRecipient(value string) string {
-	separator := strings.LastIndexByte(value, '@')
-	if separator <= 0 || separator == len(value)-1 {
-		return ""
-	}
-	local := value[:separator]
-	visible := 3
-	if len(local) < visible {
-		visible = 1
-	}
-	return local[:visible] + "***@" + value[separator+1:]
+	return adminsettings.MaskTestRecipient(value)
 }
 
 func handleSettingsError(w http.ResponseWriter, err error) {
