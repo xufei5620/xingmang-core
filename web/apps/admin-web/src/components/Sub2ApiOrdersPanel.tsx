@@ -6,6 +6,7 @@ import { listPlatformOrders } from "../api/finance";
 import { periodRangeFor, type FinancePeriodMode } from "../lib/financeOverview";
 import { parseBusinessDay, parseGranularity } from "../lib/period";
 import { ApiStateView } from "./ApiStateView";
+import { PaymentStatusRollupTable } from "./PaymentStatusRollupTable";
 import { orderTableColumns, STATUS_BUCKET_OPTIONS } from "./platformOrdersColumns";
 
 const PAGE_LIMIT = 50;
@@ -90,6 +91,13 @@ export function Sub2ApiOrdersPanel() {
               <FreshnessBadge freshness={lastPage.freshness} />
             </div>
             <FreshnessNote freshness={lastPage.freshness} />
+            {/* 区间汇总放在逐笔表**之前**：先看整体，再决定要不要翻明细。
+                它来自 stats_by_status，覆盖整个查询区间，不随翻页变化。 */}
+            <PaymentStatusRollupTable
+              stats={lastPage.stats_by_status}
+              from={lastPage.from}
+              to={lastPage.to}
+            />
             <DataTableV2
               caption="Sub2API 充值订单：金额、手续费、状态与创建时间"
               columns={orderTableColumns("sub2api")}
