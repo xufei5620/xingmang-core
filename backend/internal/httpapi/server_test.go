@@ -836,3 +836,68 @@ func TestUserCancelReleasesPendingAndReturnedReservations(t *testing.T) {
 		})
 	}
 }
+
+// TestSMTPTestAllowsConsoleAdminWithoutEmail 钉住 XM-INV-SMTP-TEST-VESTIGIAL-GATE
+// 的整个理由：**经平台控制台登录的管理员在这一侧没有邮箱**——控制台只替操作者
+// 担保身份，不交出地址，所以 invoice_users 那行的邮箱密文长度为 0、
+// email_verified 恒为 false。生产在 OIDC_ADMIN_LOGIN_ENABLED 关掉之后只剩这条
+// 登录路径，旧判断于是对所有人永久返回 422。
+//
+// 这是一个「本来会被拒绝的请求现在应当通过」的断言，不是缺席型断言：它检查
+// 200 与一次真实投递（calls==1），把旧判断加回去会立刻变红。
+func TestSMTPTestAllowsConsoleAdminWithoutEmail(t *testing.T) {
+	capture := &capturingSMTPTestSender{}
+	server := &Server{
+		logger:            slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		smtpTestSender:    capture,
+		smtpTestRecipient: "test-recipient@example.com",
+		adminSettings:     smtpTestSettings("sender@example.com"),
+		// 控制台断言登录的形状：用户行存在，但没有邮箱、也没有验证标记。
+		productionAuth: &ProductionAuth{LoadUser: func(context.Context, string) (SessionUser, error) {
+			return SessionUser{}, nil
+		}},
+		publicOrigin: "https://invoice.example",
+		lastSMTPTest: make(map[string]time.Time),
+		operations:   smtpAuditOperations{},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", strings.NewReader(`{}`))
+	request = request.WithContext(context.WithValue(request.Context(), identityKey, identity{UserID: "console-admin"}))
+	recorder := httptest.NewRecorder()
+	server.testEmail(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("控制台管理员被拒: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	// 收件人始终是环境钉死的那个地址，与调用者是谁无关——这正是旧判断失去
+	// 依据的原因，一并钉住，防止有人把收件人改回 user.Email 而测试不响。
+	if capture.calls != 1 || capture.message.Recipient != "test-recipient@example.com" {
+		t.Fatalf("calls=%d message=%+v", capture.calls, capture.message)
+	}
+}
+
+// TestSMTPTestStillRefusesUnresolvableAdmin 钉住保留下来的那一层：会话通过了
+// admin 鉴权，但当前主体解析不出一条用户行时仍然拒绝，且一封信都不发。
+func TestSMTPTestStillRefusesUnresolvableAdmin(t *testing.T) {
+	capture := &capturingSMTPTestSender{}
+	server := &Server{
+		logger:            slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		smtpTestSender:    capture,
+		smtpTestRecipient: "test-recipient@example.com",
+		adminSettings:     smtpTestSettings("sender@example.com"),
+		productionAuth: &ProductionAuth{LoadUser: func(context.Context, string) (SessionUser, error) {
+			return SessionUser{}, errors.New("user row is gone")
+		}},
+		publicOrigin: "https://invoice.example",
+		lastSMTPTest: make(map[string]time.Time),
+		operations:   smtpAuditOperations{},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/smtp/test", strings.NewReader(`{}`))
+	request = request.WithContext(context.WithValue(request.Context(), identityKey, identity{UserID: "ghost-admin"}))
+	recorder := httptest.NewRecorder()
+	server.testEmail(recorder, request)
+	if recorder.Code != http.StatusUnprocessableEntity || !strings.Contains(recorder.Body.String(), "ADMIN_NOT_RESOLVABLE") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if capture.calls != 0 {
+		t.Fatalf("解析不出管理员却发了 %d 封信", capture.calls)
+	}
+}

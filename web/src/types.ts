@@ -533,7 +533,12 @@ export interface InvoiceSystemSettings {
     port: number;
     startTLS: boolean;
     credentialConfigured: boolean;
+    /** 测试邮件收件人的遮蔽形式；未配置时为空串。**没有明文**——与 SMTP
+     *  授权码、企业微信地址同一条纪律：设置响应只回遮蔽值，改地址靠输入即覆盖。 */
     testRecipientMasked: string;
+    /** true = 地址存在库里（管理员在后台设过）；false = 仍在用服务器环境变量
+     *  兜底的那个（过渡期，见迁移 0030），或者两处都没有。 */
+    testRecipientManaged: boolean;
   };
   adminAccess: {
     cidrs: string[];
@@ -565,6 +570,9 @@ export interface SMTPSettingsInput {
   port: number;
   startTLS: boolean;
   authorizationCode?: string;
+  /** 测试邮件收件人。**不传=保持库里现值不变**（不会因为一次普通保存被清掉）；
+   *  传空串=明确清空，回到环境变量兜底。 */
+  testRecipient?: string;
 }
 
 export interface AdminAccessSettingsInput {

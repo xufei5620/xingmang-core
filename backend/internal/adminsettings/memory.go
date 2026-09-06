@@ -84,6 +84,7 @@ func (r *MemoryRepository) UpdateSMTP(_ context.Context, in UpdateInput, change 
 	r.settings.SMTPFrom = in.SMTPFrom
 	r.settings.SMTPFromName = in.SMTPFromName
 	r.settings.SMTPStartTLS = in.SMTPStartTLS
+	r.settings.SMTPTestRecipient = in.SMTPTestRecipient
 	r.settings.SMTPSecretConfigured = len(r.secret.Ciphertext) > 0
 	r.settings.Revision++
 	r.settings.UpdatedBy = actor.ID

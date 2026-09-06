@@ -177,6 +177,11 @@ func normalizeInput(in UpdateInput) (UpdateInput, error) {
 	in.SMTPHost = strings.ToLower(strings.TrimSpace(in.SMTPHost))
 	in.SMTPFrom = strings.TrimSpace(in.SMTPFrom)
 	in.SMTPFromName = strings.TrimSpace(in.SMTPFromName)
+	testRecipient, err := NormalizeTestRecipient(in.SMTPTestRecipient)
+	if err != nil {
+		return UpdateInput{}, err
+	}
+	in.SMTPTestRecipient = testRecipient
 	if in.IssuerName == "" || utf8.RuneCountInString(in.IssuerName) > 200 || in.MinimumRequestMinor < MinimumMinor ||
 		in.EligibilityStartAt.IsZero() || !in.EligibilityStartAt.UTC().Equal(RequiredEligibilityStartAt) ||
 		in.SMTPPort != 587 || in.SMTPFromName == "" || utf8.RuneCountInString(in.SMTPFromName) > 128 || !in.SMTPStartTLS {
@@ -188,6 +193,12 @@ func normalizeInput(in UpdateInput) (UpdateInput, error) {
 	address, err := mail.ParseAddress(in.SMTPFrom)
 	if err != nil || !strings.EqualFold(address.Address, in.SMTPFrom) {
 		return UpdateInput{}, fmt.Errorf("%w: invalid SMTP from address", ErrInvalidSettings)
+	}
+	// 测试收件人不得与发件人相同：一封「自己发给自己」的测试邮件既证明不了
+	// 投递，也可能被服务商当成回环丢弃。库里另有同名 CHECK 兜底（迁移 0030），
+	// 这里先报出可读的错误码。
+	if in.SMTPTestRecipient != "" && strings.EqualFold(in.SMTPTestRecipient, in.SMTPFrom) {
+		return UpdateInput{}, ErrTestRecipientConflict
 	}
 	if len(in.AdminCIDRs) == 0 {
 		return UpdateInput{}, fmt.Errorf("%w: at least one admin CIDR is required", ErrInvalidSettings)

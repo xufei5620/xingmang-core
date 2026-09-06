@@ -4787,6 +4787,10 @@ function SystemSettingsPage() {
     port: "587",
     startTLS: true,
     authorizationCode: "",
+    // 测试收件人（XM-INV-SMTP-TEST-RECIPIENT-SETTING）。**只进不出**：服务端
+    // 只回遮蔽值，所以这个输入框每次加载都是空的，填了才覆盖，空着就保持不变
+    // ——与授权码、企业微信地址同一条纪律。
+    testRecipient: "",
   });
   // 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）。**只进不出**：保存后
   // 清空输入框，页面从不回读地址——与 SMTP 授权码同一条纪律。
@@ -4808,6 +4812,7 @@ function SystemSettingsPage() {
         port: String(loaded.smtp.port),
         startTLS: loaded.smtp.startTLS,
         authorizationCode: "",
+        testRecipient: "",
       });
       setCIDRs(loaded.adminAccess.cidrs);
     } catch (error) {
@@ -4881,6 +4886,18 @@ function SystemSettingsPage() {
       toast("请检查发件地址和 SMTP Host；当前仅支持 587 + STARTTLS。", "error");
       return;
     }
+    const testRecipient = smtp.testRecipient.trim();
+    if (testRecipient !== "" && !testRecipient.includes("@")) {
+      toast("测试收件邮箱不是一个有效地址。", "error");
+      return;
+    }
+    if (
+      testRecipient !== "" &&
+      testRecipient.toLowerCase() === smtp.fromAddress.trim().toLowerCase()
+    ) {
+      toast("测试收件邮箱不能与发件地址相同。", "error");
+      return;
+    }
     void run(
       "smtp",
       () =>
@@ -4889,10 +4906,17 @@ function SystemSettingsPage() {
           revision: settings?.revision ?? 0,
           port,
           authorizationCode: smtp.authorizationCode || undefined,
+          // 空着=保持库里现值不变。要清空得走「清除」而不是留空，否则每次
+          // 保存 SMTP 主机都会顺手把收件人抹掉。
+          testRecipient: testRecipient === "" ? undefined : testRecipient,
         }),
-      "SMTP 配置已保存；授权码不会再次显示。",
+      "SMTP 配置已保存；授权码与测试收件邮箱不会再次显示。",
     );
-    setSMTP((current) => ({ ...current, authorizationCode: "" }));
+    setSMTP((current) => ({
+      ...current,
+      authorizationCode: "",
+      testRecipient: "",
+    }));
   };
 
   const addNetwork = (value = networkEntry) => {
@@ -5101,6 +5125,38 @@ function SystemSettingsPage() {
                       保存后立即清空；服务端只返回“已配置”状态，不返回授权码内容。
                     </small>
                   </label>
+                  {/* 测试收件邮箱（XM-INV-SMTP-TEST-RECIPIENT-SETTING）。
+                      产品负责人：「为什么这个接收测试邮箱我不能自己在后台设置？」
+                      之前钉在服务器环境变量里，换地址要 SSH 上去改再重建容器。 */}
+                  <label className="form-field field-wide">
+                    <span>测试邮件收件邮箱</span>
+                    <div className="secret-input">
+                      <AtSign size={16} />
+                      <input
+                        type="email"
+                        autoComplete="off"
+                        value={smtp.testRecipient}
+                        onChange={(event) =>
+                          setSMTP((current) => ({
+                            ...current,
+                            testRecipient: event.target.value,
+                          }))
+                        }
+                        placeholder={
+                          settings.smtp.testRecipientMasked
+                            ? `留空表示继续使用 ${settings.smtp.testRecipientMasked}`
+                            : "尚未配置，填一个能收信的邮箱"
+                        }
+                      />
+                    </div>
+                    <small>
+                      「发送测试邮件」只会发到这一个地址，不接受在发信时临时指定
+                      收件人。必须与发件地址不同。
+                      {settings.smtp.testRecipientManaged
+                        ? "保存后立即清空；服务端只返回遮蔽形式。"
+                        : "当前用的是服务器上的旧配置，在这里存一次之后就以后台为准。"}
+                    </small>
+                  </label>
                 </div>
                 <label className="switch-row smtp-switch">
                   <input
@@ -5134,15 +5190,17 @@ function SystemSettingsPage() {
                 <div className="verified-recipient-note">
                   <AtSign size={17} />
                   <span>
-                    测试邮件固定发送至独立收件邮箱
-                    {settings.smtp.testRecipientMasked}，不接受自定义收件人。
+                    {settings.smtp.testRecipientMasked
+                      ? `测试邮件固定发送至 ${settings.smtp.testRecipientMasked}，不接受在发信时指定收件人。`
+                      : "尚未配置测试收件邮箱，请在上方填写并保存后再发送。"}
                   </span>
                 </div>
                 <button
                   className="button button-secondary"
                   disabled={
                     saving === "smtp-test" ||
-                    !settings.smtp.credentialConfigured
+                    !settings.smtp.credentialConfigured ||
+                    !settings.smtp.testRecipientMasked
                   }
                   onClick={() =>
                     void run(
