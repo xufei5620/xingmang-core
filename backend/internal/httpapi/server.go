@@ -624,9 +624,27 @@ func (s *Server) testEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	adminID := principal(r).UserID
-	user, err := s.productionAuth.LoadUser(r.Context(), adminID)
-	if err != nil || !user.EmailVerified || strings.TrimSpace(user.Email) == "" {
-		writeError(w, http.StatusUnprocessableEntity, "ADMIN_EMAIL_NOT_VERIFIED", "current administrator email must be verified")
+	// 这里曾经要求「当前管理员的邮箱已验证」。那道判断在 RC2 是必要的：
+	// **当时这封测试邮件就是发给管理员自己的**（Recipient: user.Email），
+	// 往一个未验证的地址发信，等于把发信通道借给了一个没人证明存在的收件人。
+	//
+	// 6f723c4（isolate SMTP test）把收件人换成了环境变量钉死的
+	// SMTP_TEST_RECIPIENT，并要求它与发件人不同。那一刻起管理员的邮箱就再没
+	// 参与过这封信——收件人、主题、正文都与它无关——判断的理由消失了，判断
+	// 本身却留了下来。
+	//
+	// CR-0006 让它从「多余」变成「有害」：经平台控制台登录的管理员在这一侧
+	// 根本没有邮箱（控制台只替操作者担保身份，不交出地址），行里的邮箱密文
+	// 长度为 0、email_verified 恒为 false。生产在 OIDC_ADMIN_LOGIN_ENABLED
+	// 关掉之后只剩这条登录路径，于是「发送测试邮件」对所有人永久返回 422，
+	// 而且这条分支既不写审计也不打日志，从外面看只是一句没有线索的报错。
+	//
+	// 因此这里只保留「当前管理员仍能解析成一条真实用户」这一层——它不依赖
+	// 邮箱，比原判断更贴近这个接口真正需要的前提。守卫这条路由的其余东西一个
+	// 没动：admin 角色、控制台断言的步进验证、每位管理员每分钟一次，以及每种
+	// 结局都落一条审计。
+	if _, err := s.productionAuth.LoadUser(r.Context(), adminID); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "ADMIN_NOT_RESOLVABLE", "current administrator could not be resolved")
 		return
 	}
 	settings, err := s.adminSettings.Get(r.Context())
