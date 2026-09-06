@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlatformAlertsPanel } from "./PlatformAlertsPanel";
 
@@ -30,11 +31,13 @@ function alert(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPanel(platform = "newapi") {
+function renderPanel(platform = "newapi", initialEntry = "/") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <PlatformAlertsPanel platform={platform} />
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <PlatformAlertsPanel platform={platform} />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -123,5 +126,83 @@ describe("平台内告警", () => {
 
     expect(await screen.findByText("没有可归属到 NewAPI 的告警")).toBeTruthy();
     expect(screen.getByText(/不代表全局没有告警/)).toBeTruthy();
+  });
+});
+
+describe("持续时长与时间范围（XM-ALERTS-TAB-DURATION）", () => {
+  // 取数时刻固定：面板用 query.dataUpdatedAt 而不是 Date.now()，否则每次重绘
+  // 都往前走一秒，排序会在人眼前跳动、测试变成碰运气。
+  function withNow(iso: string, alerts: unknown[]) {
+    vi.setSystemTime(new Date(iso));
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response({ items: alerts }))));
+  }
+
+  afterEach(() => vi.useRealTimers());
+
+  it("未恢复的告警按「到此刻」显示持续时长", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:07:00Z", [alert()]); // opened 07:00 -> 2 小时 7 分
+    renderPanel();
+
+    expect(await screen.findByText("2 小时 7 分")).toBeTruthy();
+  });
+
+  it("已恢复的告警算到恢复时刻，不再继续增长", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-30T00:00:00Z", [
+      alert({ id: "alert-resolved", status: "RESOLVED", resolved_at: "2026-08-29T07:30:00Z" }),
+    ]);
+    renderPanel();
+
+    expect(await screen.findByText("30 分")).toBeTruthy();
+  });
+
+  it("时间范围按最近一次发现收窄，长期未恢复的告警不会被藏起来", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:00:00Z", [
+      // 两个月前开的，但五分钟前还在响：它正是此刻要处理的那条，必须留下。
+      alert({ id: "alert-long", opened_at: "2026-06-29T07:00:00Z", last_seen_at: "2026-08-29T08:55:00Z" }),
+      // 十天前最后一次出现：24 小时窗口里应当被收走。
+      alert({ id: "alert-old", title: "十天前的告警", opened_at: "2026-08-19T07:00:00Z", last_seen_at: "2026-08-19T08:00:00Z" }),
+    ]);
+    renderPanel("newapi", "/?alert_window=24h");
+
+    expect(await screen.findByText("NewAPI 渠道健康数据延迟")).toBeTruthy();
+    expect(screen.queryByText("十天前的告警")).toBeNull();
+    expect(screen.getByText(/当前隐藏 1 条/)).toBeTruthy();
+  });
+
+  it("改时间范围写进 URL，可分享可恢复", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:00:00Z", [alert()]);
+    renderPanel();
+
+    const select = await screen.findByLabelText("按时间范围收窄");
+    expect((select as HTMLSelectElement).value).toBe("all");
+    fireEvent.change(select, { target: { value: "7d" } });
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("按时间范围收窄") as HTMLSelectElement).value).toBe("7d");
+    });
+  });
+
+  it("编号显示告警 ID 前八位，完整 ID 在提示里；不编造带序号的告警号", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:00:00Z", [
+      alert({ id: "0119ab26-0000-4000-8000-000000000001" }),
+    ]);
+    renderPanel();
+
+    const code = await screen.findByText("0119AB26");
+    expect(code.getAttribute("title")).toBe("0119ab26-0000-4000-8000-000000000001");
+  });
+
+  it("提供到全局告警中心的链接，处置仍不在平台页", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:00:00Z", [alert()]);
+    renderPanel();
+
+    const link = await screen.findByRole("link", { name: "全局告警中心" });
+    expect(link.getAttribute("href")).toBe("/alerts");
   });
 });

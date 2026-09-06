@@ -1339,7 +1339,8 @@ describe("NewAPI 平台详情（XM-0035）", () => {
 
   it("平台告警页签进入只读归属视图，不再落到通用占位", async () => {
     renderRoute("/platforms/newapi?tab=alerts");
-    expect(await screen.findByRole("heading", { name: "NewAPI 平台告警", level: 2 })).not.toBeNull();
+    // 页头改成冻结 IA 第 7 格的逐字标题（XM-ALERTS-TAB-DURATION）。
+    expect(await screen.findByRole("heading", { name: "NewAPI · 告警", level: 2 })).not.toBeNull();
     // 默认样本只有 sub2api.* 告警，所以 NewAPI 是可归属空态，不是全局零告警。
     expect(await screen.findByText("没有可归属到 NewAPI 的告警")).not.toBeNull();
     expect(screen.getByText(/不代表全局没有告警/)).not.toBeNull();

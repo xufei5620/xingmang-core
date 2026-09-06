@@ -22,6 +22,8 @@ export const SAVED_VIEW_TABLE_KEYS = {
   newapiChannels: "platform.newapi.channels",
   sub2apiUpstreams: "platform.sub2api.upstreams",
   newapiUpstreams: "platform.newapi.upstreams",
+  sub2apiAlerts: "platform.sub2api.alerts",
+  newapiAlerts: "platform.newapi.alerts",
 } as const;
 
 export type SavedViewTableKey = (typeof SAVED_VIEW_TABLE_KEYS)[keyof typeof SAVED_VIEW_TABLE_KEYS];
@@ -36,11 +38,18 @@ const UPSTREAM_KEYS: Readonly<Record<"sub2api" | "newapi", SavedViewTableKey>> =
   newapi: SAVED_VIEW_TABLE_KEYS.newapiUpstreams,
 };
 
+const ALERT_KEYS: Readonly<Record<"sub2api" | "newapi", SavedViewTableKey>> = {
+  sub2api: SAVED_VIEW_TABLE_KEYS.sub2apiAlerts,
+  newapi: SAVED_VIEW_TABLE_KEYS.newapiAlerts,
+};
+
 export function platformSavedViewTableKey(
   platform: "sub2api" | "newapi",
-  kind: "channels" | "upstreams",
+  kind: "channels" | "upstreams" | "alerts",
 ): SavedViewTableKey {
-  return kind === "channels" ? CHANNEL_KEYS[platform] : UPSTREAM_KEYS[platform];
+  if (kind === "channels") return CHANNEL_KEYS[platform];
+  if (kind === "upstreams") return UPSTREAM_KEYS[platform];
+  return ALERT_KEYS[platform];
 }
 
 export interface PersistentDataTableProps<T>
