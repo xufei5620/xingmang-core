@@ -38,6 +38,12 @@ GRANT SELECT, INSERT ON TABLE oidc_backchannel_logout_events TO invoice_app;
 REVOKE UPDATE, TRUNCATE ON TABLE console_assertion_nonces FROM invoice_app;
 GRANT SELECT, INSERT, DELETE ON TABLE console_assertion_nonces TO invoice_app;
 
+-- invoice_notice_outbox (migration 0027) follows email_outbox: the worker
+-- claims with UPDATE and settles with UPDATE, the submission transaction
+-- INSERTs, nothing ever deletes a notice row -- a delivered row is the audit
+-- trail of "that notice went out". notice_webhook_setting (0028) keeps the
+-- default SELECT/INSERT/UPDATE/DELETE because ClearNoticeWebhook deletes the
+-- singleton row on purpose.
 REVOKE DELETE, TRUNCATE ON TABLE
   source_events,
   funding_lots,
@@ -45,6 +51,7 @@ REVOKE DELETE, TRUNCATE ON TABLE
   invoice_allocations,
   invoice_documents,
   email_outbox,
+  invoice_notice_outbox,
   source_ingest_state,
   source_ingest_batches,
   source_ingest_events,

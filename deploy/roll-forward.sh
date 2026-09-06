@@ -79,6 +79,15 @@ fi
 compose() { docker compose --env-file "$env_file" -f "$deploy_dir/$1" up -d --no-build; }
 echo "==> [0/6] migrations (no-op when the schema is already current)"
 docker compose --env-file "$env_file" -f "$deploy_dir/docker-compose.prod.yml" run --rm --pull never migrate 2>&1 | tail -1 | grep -q 'migrations applied' || { echo "migrate one-shot did not report success" >&2; exit 1; }
+# RC101 (2026-09-06): nothing else grants invoice_app a privilege on a table a
+# migration has just created -- pg_default_acl is empty on production, and
+# deploy/postgres/harden-runtime-role.sql is the only place table privileges
+# come from. Migrations 0027/0028 created two tables, this step did not exist,
+# and every invoice submission failed with SQLSTATE 42501 until the policy was
+# replayed by hand. The `permissions` one-shot is the reviewed replay (one
+# transaction, idempotent), so it now always follows `migrate`.
+echo "==> [0b/6] runtime-role policy replay (permissions one-shot; idempotent)"
+docker compose --env-file "$env_file" -f "$deploy_dir/docker-compose.prod.yml" run --rm --pull never permissions >/dev/null 2>&1 || { echo "permissions one-shot failed: invoice_app privileges may be stale" >&2; exit 1; }
 echo "==> [1/6] keycloak project -> $tag";      compose docker-compose.idp.yml
 echo "==> [2/6] main project -> $tag";          compose docker-compose.prod.yml
 echo "==> [3/6] source agents -> $tag";         compose docker-compose.sources.yml

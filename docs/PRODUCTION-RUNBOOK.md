@@ -998,10 +998,19 @@ rollout.md`, steps 1/3/4/5):
 **Runtime-role grants.** Migration 0018 creates `console_assertion_nonces`
 after the `permissions` job last ran, so the runtime role's grants on it come
 only from that job's blanket `GRANT ... ON ALL TABLES`. Replay the job once
-after the migration; the service sits behind the `tools` profile, so neither
-an ordinary Compose bring-up nor `deploy/roll-forward.sh` ever starts it and
-nothing replays it for you. Skipping it leaves `invoice_app` able to `UPDATE` and `TRUNCATE` the
-table that decides whether an assertion has already been redeemed.
+after the migration; the service sits behind the `tools` profile, so an
+ordinary Compose bring-up never starts it. Since XM-INV-ROLLFORWARD-PERMISSIONS
+(RC101 follow-up) `deploy/roll-forward.sh` replays it itself as step `[0b/6]`,
+right after `migrate`; the manual replay below remains the recovery path for a
+release rolled forward by an older script. Skipping it leaves `invoice_app`
+able to `UPDATE` and `TRUNCATE` the table that decides whether an assertion has
+already been redeemed -- and, the other way round, it is the **only** thing
+that grants `invoice_app` anything at all on a table a migration has just
+created: `pg_default_acl` is empty on production, so RC101's migrations
+0027/0028 left `invoice_notice_outbox` and `notice_webhook_setting` unreadable
+by the api, and because `EnqueueInvoiceNoticeTx` runs inside the request
+creation transaction, every invoice submission failed with SQLSTATE 42501
+for the 15 minutes between the roll-forward and the manual replay.
 
 ```bash
 docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml run --rm --pull never permissions
