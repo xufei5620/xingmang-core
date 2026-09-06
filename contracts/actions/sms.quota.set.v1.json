@@ -1,0 +1,39 @@
+{
+  "id": "sms.quota.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "consumer": {
+      "type": "string",
+      "required": true
+    },
+    "daily_requests": {
+      "type": "int",
+      "required": true
+    },
+    "daily_spend_cap": {
+      "type": "string",
+      "required": false
+    },
+    "enabled": {
+      "type": "bool",
+      "required": false
+    }
+  },
+  "notes": "XM-SMS4（ADR-022）登记一个消费者（机器身份）的日限额。机器要号是花真钱，而且没有人在页面前面点确认——一个循环里的 bug 能在十分钟内买光余额。所以机器**必须先被登记**：没有配额行、或者行被停用，sms.number.request 一次都调不动（错误是 sms: 该消费者未登记配额）。这与「新装环境两家供应商默认都是关的」同一条纪律（宪法 26 条：天生不允许花钱，必须显式打开）。**人不受配额约束**：人有自己的权限闸（sms.purchase 不给 admin）与页面上的两步确认，再叠一层日配额只会让运营在最忙的那天被自己的护栏挡住。consumer 是 principal ID，与审计里那一列同源——出事时「谁买的」要能对上。daily_requests 按**号数**算而不是调用次数：一次要 50 个与 50 次要一个，花的钱一样多；0 是合法值，表示「保留登记但一次都不许」。daily_spend_cap 是**止损线**而不是预授权：买之前没人知道这次要花多少（62 连买完都只回订单号），所以语义是「今天已经花到上限就不再放行」，最多超出一次请求；留空 = 不限花费（仍受日号数约束）；数据库 CHECK 拒绝 0，因为 0 会让「一分钱都不许花」与「不限」混成一个值。上限**按币种各自计**：两家币种不同且不折算，跨币种的总额上限是个算不出来的数。用量按真的拿到手的号算（sms_resource.operation_id → sms_operation.principal_id），失败的请求不计——它没花钱，把它算进配额等于因为上游抖动惩罚调用方；同一个 request_id 的回放也不重复计数。**只给人**：机器不该能给自己提额。compensation_mode REVERSIBLE：改回原值或停用即可，已经买到的号不受影响。"
+}

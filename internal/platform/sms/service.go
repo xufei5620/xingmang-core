@@ -192,23 +192,32 @@ func (s *Service) ListCatalog(ctx context.Context, provider string, filter Catal
 // unknown**。下一次进程启动的 RecoverStaleOperations 才把它推到 unknown。
 // 所以「持久化失败即 unknown」是流程的结果，不是当下的 DB 状态；
 // 排查时不能假设看到的那条已经是 unknown。（参考实现踩过同一个坑。）
+// Purchase 买号（人选供应商的那条路）。见 purchase；这里丢掉号码 ID 列表。
 func (s *Service) Purchase(ctx context.Context, operationID, provider string, in PurchaseInput) (Operation, error) {
+	op, _, err := s.purchase(ctx, operationID, provider, in)
+	return op, err
+}
+
+func (s *Service) purchase(ctx context.Context, operationID, provider string, in PurchaseInput) (Operation, []string, error) {
+	var resourceIDs []string
 	adapter, err := s.adapter(provider)
 	if err != nil {
-		return Operation{}, err
+		return Operation{}, nil, err
 	}
 	if !SupportsAction(provider, KindPurchase) {
-		return Operation{}, fmt.Errorf("%w: %s 不支持购买", ErrActionNotSupported, provider)
+		return Operation{}, nil, fmt.Errorf("%w: %s 不支持购买", ErrActionNotSupported, provider)
 	}
 	if err := s.requireVerified(ctx, provider); err != nil {
-		return Operation{}, err
+		return Operation{}, nil, err
 	}
 
 	params := purchaseParams(provider, in)
 	op := Operation{
-		ID:            operationID,
-		Provider:      provider,
-		Kind:          KindPurchase,
+		ID:       operationID,
+		Provider: provider,
+		Kind:     KindPurchase,
+		// 机器身份才有值：配额按它计，出事时「谁买的」也要能对上。
+		PrincipalID:   consumerOf(ctx),
 		State:         StatePrepared,
 		RequestHash:   CanonicalRequestHash(provider, KindPurchase, params),
 		ParamsSummary: summarize(params),
@@ -216,16 +225,17 @@ func (s *Service) Purchase(ctx context.Context, operationID, provider string, in
 		UpdatedAt:     s.now(),
 	}
 	if err := s.store.PrepareOperation(ctx, op); err != nil {
-		return Operation{}, err
+		return Operation{}, nil, err
 	}
 	if err := s.store.MarkSubmitted(ctx, op.ID, s.now()); err != nil {
-		return Operation{}, err
+		return Operation{}, nil, err
 	}
 	op.State = StateSubmitted
 
 	outcome, purchaseErr := adapter.Purchase(ctx, in)
 	if purchaseErr != nil {
-		return s.settleFailure(ctx, op, purchaseErr)
+		op, err = s.settleFailure(ctx, op, purchaseErr)
+		return op, nil, err
 	}
 
 	op.ProviderRequestID = outcome.RequestID
@@ -242,9 +252,9 @@ func (s *Service) Purchase(ctx context.Context, operationID, provider string, in
 			op.FailureReason = "购买已提交但补读号码失败，需人工到供应商侧核对：" + importErr.Error()
 			op.UpdatedAt = s.now()
 			if err := s.store.ResolveOperation(ctx, op); err != nil {
-				return Operation{}, err
+				return Operation{}, nil, err
 			}
-			return op, nil
+			return op, nil, nil
 		}
 		resources = imported
 	}
@@ -256,6 +266,11 @@ func (s *Service) Purchase(ctx context.Context, operationID, provider string, in
 		resources[i].Provider = provider
 		resources[i].OrderID = op.OrderID
 		resources[i].SyncedAt = s.now()
+		// 记下是哪笔操作买的（要号回放与成本核算都靠它）；新号从待收码起。
+		resources[i].OperationID = op.ID
+		if resources[i].State == "" {
+			resources[i].State = StateWaitingCode
+		}
 		id, err := s.store.UpsertResource(ctx, resources[i])
 		if err != nil {
 			// 号码没落库 = 买到了却记不下来。落 unknown 交人工，
@@ -265,8 +280,9 @@ func (s *Service) Purchase(ctx context.Context, operationID, provider string, in
 			op.FailureReason = "购买成功但号码落库失败：" + err.Error()
 			op.UpdatedAt = s.now()
 			_ = s.store.ResolveOperation(ctx, op)
-			return op, nil
+			return op, nil, nil
 		}
+		resourceIDs = append(resourceIDs, id)
 		if op.ResourceID == "" {
 			op.ResourceID = id
 		}
@@ -275,9 +291,13 @@ func (s *Service) Purchase(ctx context.Context, operationID, provider string, in
 	op.State = StateSucceeded
 	op.UpdatedAt = s.now()
 	if err := s.store.ResolveOperation(ctx, op); err != nil {
-		return Operation{}, err
+		return Operation{}, nil, err
 	}
-	return op, nil
+	// 成本在**成功那一刻**记（XM-SMS3 #1）：事后从资源表反推算不出延长、
+	// 重激活与退款。写失败只吞掉，不把一笔成功的操作翻成失败——那会诱使人
+	// 再买一次；少掉的行由余额对账兜底。
+	s.recordCosts(ctx, s.purchaseCostEvents(op, CostPurchase, resources, resourceIDs))
+	return op, resourceIDs, nil
 }
 
 // ExecuteAction 执行 Hero 的生命周期动作。
@@ -325,12 +345,31 @@ func (s *Service) ExecuteAction(ctx context.Context, operationID, kind, resource
 		return s.settleFailure(ctx, op, actionErr)
 	}
 
+	// 取消 / 完成成功后的**统一状态**是我们自己的事实：上游确认了这次动作。
+	// 上游原话 status 不动——那一列等下一次同步读回真值。
+	//
+	// 必须压过适配器回读的资源：Hero 在 setStatus 之后 getStatus 可能还回旧值，
+	// 拿它落库会把刚写的 cancelled 冲回 waiting_code。
+	var final NumberState
+	switch kind {
+	case KindCancel:
+		final = StateCancelled
+	case KindFinish:
+		final = StateFinished
+	}
 	// replace 可能返回**新的 activation ID**。落新资源，而 op.ResourceID
 	// 仍指向原目标——那笔操作针对的是「那张旧号」，改写它会让事后对账
 	// 找不到起点。
 	if updated.ExternalID != "" {
 		updated.Provider = resource.Provider
 		updated.SyncedAt = s.now()
+		switch {
+		case updated.ExternalID == resource.ExternalID && final != "":
+			updated.State = final
+		case updated.ExternalID != resource.ExternalID && updated.State == "":
+			// 换来的新号从头开始等码。
+			updated.State = StateWaitingCode
+		}
 		if _, err := s.store.UpsertResource(ctx, updated); err != nil {
 			op.State = StateUnknown
 			op.NeedsHumanReview = true
@@ -340,6 +379,15 @@ func (s *Service) ExecuteAction(ctx context.Context, operationID, kind, resource
 			return op, nil
 		}
 		op.ProviderRef = updated.ExternalID
+	}
+	// 适配器没回读资源（或回读的是换来的新号）时也要写原号的状态。
+	// 上游动作已成功，这里写不进去不值得把台账翻成 unknown——那会诱使人再取消一次。
+	if final != "" {
+		_ = s.store.SetResourceState(ctx, resource.ID, final, s.now())
+	}
+	// 取消退款记负数，延长 / 重激活记一条金额未知的花费（上游写体不回价格）。
+	if costKind := costKindFor(kind); costKind != "" {
+		s.recordCosts(ctx, s.lifecycleCostEvent(op, costKind, resource))
 	}
 
 	op.State = StateSucceeded
@@ -380,6 +428,11 @@ func (s *Service) FetchCode(ctx context.Context, resourceID string) (Code, error
 		return Code{}, err
 	}
 	if err := s.store.TouchResourceCodeAt(ctx, resource.ID, s.now()); err != nil {
+		return Code{}, err
+	}
+	// 取到码就是「已收码」：这是我们自己的事实，不等上游改状态
+	// （62 根本没有状态可改）。
+	if err := s.store.SetResourceState(ctx, resource.ID, StateCodeReceived, s.now()); err != nil {
 		return Code{}, err
 	}
 

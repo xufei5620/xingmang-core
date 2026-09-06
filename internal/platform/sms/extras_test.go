@@ -11,14 +11,17 @@ import (
 // HeroExtras，这里嵌入它再补上要测的几个方法。
 type extrasFake struct {
 	fakeAdapter
-	rentRes     Resource
-	rentErr     error
-	emailRes    Email
-	emailErr    error
-	batchItems  []HeroEmailBatchItem
-	listedItems []Email
-	cancelErr   error
-	rentCalls   int
+	rentRes      Resource
+	rentErr      error
+	emailRes     Email
+	emailErr     error
+	batchItems   []HeroEmailBatchItem
+	listedItems  []Email
+	cancelErr    error
+	rentCalls    int
+	balanceText  string
+	balanceErr   error
+	balanceCalls int
 }
 
 func (f *extrasFake) ListOTPs(ctx context.Context, r Resource) ([]Code, error) { return nil, nil }
@@ -37,7 +40,16 @@ func (f *extrasFake) Stats(ctx context.Context, date string) ([]HeroStatsEntry, 
 func (f *extrasFake) CustomDurations(ctx context.Context) (map[string]map[string]int64, error) {
 	return nil, nil
 }
-func (f *extrasFake) Balance(ctx context.Context) (string, error)          { return "1.00", nil }
+func (f *extrasFake) Balance(ctx context.Context) (string, error) {
+	f.balanceCalls++
+	if f.balanceErr != nil {
+		return "", f.balanceErr
+	}
+	if f.balanceText == "" {
+		return "1.00", nil
+	}
+	return f.balanceText, nil
+}
 func (f *extrasFake) Countries(ctx context.Context) ([]HeroCountry, error) { return nil, nil }
 func (f *extrasFake) Services(ctx context.Context, country int64, lang string) ([]HeroServiceEntry, error) {
 	return nil, nil

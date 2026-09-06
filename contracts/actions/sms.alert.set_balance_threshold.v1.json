@@ -1,0 +1,31 @@
+{
+  "id": "sms.alert.set_balance_threshold",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "provider": {
+      "type": "string",
+      "required": true
+    },
+    "min_amount": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-SMS2（ADR-022）配一家接码供应商的余额下限：巡检抓到的最新余额低于它（严格小于）就落一条内部告警，页面顶部亮红条。**告警一律不外发**——投递等另一条线的通知规范定稿后再适配，现在自己发明一套投递，等规范来了就是两套。阈值**按家配**：62 是 USD、Hero 是账户币种，分币种不折算（与成本统计同口径），一个通用的数字在这里没有意义；没配 = 不判这家的余额，不替运营决定「多少算少」。min_amount 留空 = **清掉**这家的阈值，不是「阈值为 0」——后者要等余额归零才报，那时报警已经没用了；数据库 CHECK 也拒绝 0。值是正的十进制文本，最多六位小数，不带符号与币种（numeric 落库、对外文本，宪法 13：阈值边界上的浮点误差会变成「报了又不报」的抖动）。权限 sms.manage：配阈值不花钱，但决定「什么时候有人被叫起来」，与开关供应商同一档；只给人——机器身份不该改告警条件。这个 Action 只写配置，不产生也不消除任何告警：条件由巡检任务每轮全量评估，消失即自动收敛（不用人手动关，一个要人手动关的红条最后总会留着一堆没人关的旧条）。"
+}

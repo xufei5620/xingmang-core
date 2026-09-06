@@ -1,0 +1,43 @@
+{
+  "id": "sms.routing.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "service": {
+      "type": "string",
+      "required": true
+    },
+    "country": {
+      "type": "string",
+      "required": true
+    },
+    "providers": {
+      "type": "string_slice",
+      "required": true
+    },
+    "max_unit_price": {
+      "type": "string",
+      "required": false
+    },
+    "enabled": {
+      "type": "bool",
+      "required": false
+    }
+  },
+  "notes": "XM-SMS2（ADR-022 决策 3）新建或覆盖一条路由规则：「服务 × 国家」→ 供应商优先级列表 + 单价上限。要号默认由系统按规则选供应商，人只在想指定时才选；第一家失败回落下一家，每家最多试一次。service / country 为 * 表示任意；命中顺序：精确 > 服务通配国家 > 国家通配服务 > 全通配 > 没有规则时的装配顺序（服务比国家优先：同一个服务在各国的供应商偏好通常一致，「某国一律走某家」是更粗的兜底）。同「服务 × 国家」只有一条，再设就是覆盖——幂等，不需要客户端幂等键。providers 由领域层按注册表校验：未装配、不能买号、重复的一律 INVALID_PARAMS 并说明是哪一家。max_unit_price 是正的十进制文本，最多六位小数，不带符号与币种：**按各家自己的币种比较、不折算**（62 是 USD，Hero 是账户币种），与成本统计同口径；留空 = 不限。enabled 缺省为 true：配一条规则就是想让它生效，停用是一次显式动作。权限 sms.manage：改路由不花钱，但决定以后每一次要号的钱花到哪家，与开关供应商同一档；只给人——机器身份（XM-SMS4）按规则要号，不该能改规则。规则不在环境变量里，与供应商开关同一条纪律（000038）。compensation_mode REVERSIBLE：再设一次或删掉即可，已买到的号不受影响。"
+}

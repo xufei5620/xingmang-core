@@ -3,13 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/xufei5620/xingmang-platform/connectors/herosms"
-	"github.com/xufei5620/xingmang-platform/connectors/sms62"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
@@ -17,27 +14,19 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/sms"
 )
 
-// smsMode 是接码功能的开关。与 XM_CARDS_MODE 同一套取值。
-type smsMode string
+// smsMode / parseSMSMode 现在是领域包的别名（XM-SMS2 #7）。
+//
+// 解析与装配搬进 internal/platform/sms：platform-worker 的巡检任务要建**同一组**
+// 供应商，两份解析迟早会分叉成「API 能买号、worker 不认识这家」。
+type smsMode = sms.Mode
 
 const (
-	smsModeOff  smsMode = "off"
-	smsModeFake smsMode = "fake"
-	smsModeReal smsMode = "real"
+	smsModeOff  = sms.ModeOff
+	smsModeFake = sms.ModeFake
+	smsModeReal = sms.ModeReal
 )
 
-func parseSMSMode(raw string) (smsMode, error) {
-	switch v := smsMode(strings.ToLower(strings.TrimSpace(raw))); v {
-	case "", smsModeOff:
-		return smsModeOff, nil
-	case smsModeFake, smsModeReal:
-		return v, nil
-	default:
-		// 逐字列出合法值：上线当天把 XM_CARDS_MODE 写成 live 让生产下线
-		// 四分钟，就是因为错误信息没说清能填什么。
-		return "", fmt.Errorf("XM_SMS_MODE=%q 非法，只接受 off / fake / real", raw)
-	}
-}
+func parseSMSMode(raw string) (smsMode, error) { return sms.ParseMode(raw) }
 
 // smsConfig 只剩一件事：这个进程打不打真实供应商。
 //
@@ -76,6 +65,9 @@ func loadSMSConfig(getenv func(string) string) (smsConfig, error) {
 // 是 hero_sms。直接拼会得到一个解析不过的引用，且只在 XM_SMS_MODE=real 时
 // 才炸——症状是「密钥引用非法」，看起来像运营填错了，可这串根本不是人填的。
 func smsCredentialRef(provider string) string {
+	if spec, ok := sms.Spec(provider); ok {
+		return spec.CredentialRef()
+	}
 	return "secret://" + strings.ReplaceAll(strings.ToLower(provider), "_", "-") + "/api-key"
 }
 
@@ -101,65 +93,9 @@ func buildSMS(
 	return sms.NewService(providers, store, notifier, time.Now), store, nil
 }
 
-// buildSMSProviders 把已知的每一家都建出来。
-//
-// **不挑不选**：建适配器既不花钱也不连网，真正的闸是 requireVerified
-// （关着的、没验证过的都拦在打上游之前）。构造阶段就少建一家，会让后台
-// 点开它之后仍然报「未知供应商」，而那个错误看起来像代码不支持这家。
+// buildSMSProviders 走领域包的装配（见 sms.BuildProviders）。
 func buildSMSProviders(mode smsMode, secretProvider secrets.SecretProvider) ([]sms.Provider, error) {
-	providers := make([]sms.Provider, 0, len(sms.AllProviders))
-	for _, id := range sms.AllProviders {
-		adapter, err := buildSMSAdapter(mode, id, secretProvider)
-		if err != nil {
-			return nil, err
-		}
-		providers = append(providers, sms.Provider{ID: id, Adapter: adapter})
-	}
-	return providers, nil
-}
-
-func buildSMSAdapter(mode smsMode, provider string, secretProvider secrets.SecretProvider) (sms.Adapter, error) {
-	if mode == smsModeFake {
-		return sms.NewFakeAdapter(provider, time.Now), nil
-	}
-	if secretProvider == nil {
-		return nil, fmt.Errorf("real 模式需要 SecretProvider")
-	}
-	ref, err := secrets.ParseCredentialRef(smsCredentialRef(provider))
-	if err != nil {
-		return nil, fmt.Errorf("供应商 %s 的密钥引用 %q 非法: %w", provider, smsCredentialRef(provider), err)
-	}
-
-	switch provider {
-	case sms.ProviderSMS62:
-		host, err := hostOf(sms62.ProductionBaseURL)
-		if err != nil {
-			return nil, err
-		}
-		// allowlist 只放这一个主机：写通道的 fail-closed 语义要求它非空，
-		// 而放宽到多个主机没有任何业务理由。
-		return sms.NewSMS62Adapter(sms62.NewClient(secretProvider, ref, []string{host}), time.Now), nil
-	case sms.ProviderHero:
-		host, err := hostOf(herosms.ProductionBaseURL)
-		if err != nil {
-			return nil, err
-		}
-		return sms.NewHeroAdapter(herosms.NewClient(secretProvider, ref, []string{host}), time.Now), nil
-	default:
-		return nil, fmt.Errorf("%w: %s", sms.ErrProviderUnknown, provider)
-	}
-}
-
-func hostOf(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return "", fmt.Errorf("接码端点 %q 无法解析主机名", raw)
-	}
-	if u.Scheme != "https" {
-		// 带密钥的请求必须走 TLS。
-		return "", fmt.Errorf("接码端点必须是 https，当前 %q", raw)
-	}
-	return u.Hostname(), nil
+	return sms.BuildProviders(mode, secretProvider, time.Now)
 }
 
 // registerSMSActions 注册四个 Action。svc 为 nil（mode=off）时不注册。

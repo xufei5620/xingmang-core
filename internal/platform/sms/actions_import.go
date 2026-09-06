@@ -29,7 +29,7 @@ func codeFetchDef() action.Definition {
 		Schema: action.Schema{Fields: []action.Field{
 			{Name: "resource_id", Type: action.FieldString, Required: true},
 		}},
-		Environments: allEnvironments, PrincipalTypes: humanOnly,
+		Environments: allEnvironments, PrincipalTypes: humanOrService,
 	}
 }
 

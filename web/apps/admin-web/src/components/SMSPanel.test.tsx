@@ -13,6 +13,9 @@ vi.mock("../api/sms", async () => {
     listSMSOperations: vi.fn(),
     listSMSCodes: vi.fn(),
     listSMSCatalog: vi.fn(),
+    listSMSBalances: vi.fn(),
+    listSMSAlerts: vi.fn(),
+    setSMSBalanceThreshold: vi.fn(),
     purchaseSMSNumbers: vi.fn(),
     verifySMSProvider: vi.fn(),
     setSMSProviderEnabled: vi.fn(),
@@ -25,6 +28,8 @@ vi.mock("../api/sms", async () => {
 
 import {
   fetchSMSCode,
+  listSMSAlerts,
+  listSMSBalances,
   listSMSCatalog,
   listSMSCodes,
   listSMSOperations,
@@ -68,6 +73,8 @@ function seed(over: {
   vi.mocked(listSMSOperations).mockResolvedValue(over.operations ?? []);
   vi.mocked(listSMSCodes).mockResolvedValue([]);
   vi.mocked(listSMSCatalog).mockResolvedValue([]);
+  vi.mocked(listSMSBalances).mockResolvedValue([]);
+  vi.mocked(listSMSAlerts).mockResolvedValue({ items: [], thresholds: [] });
 }
 
 afterEach(() => vi.clearAllMocks());
@@ -288,4 +295,150 @@ it("号码详情里的「向上游取码」调 fetchSMSCode 并带上 resource_i
 
   fireEvent.click(await screen.findByRole("button", { name: "向上游取码" }));
   await waitFor(() => expect(fetchSMSCode).toHaveBeenCalledWith("r1"));
+});
+
+// 号码栏显示**平台自己的**统一状态；上游原话（Hero 的 4、62 的「正常」）
+// 只在悬停时看。两家的原话没有统一含义，直接摆出来等于让人背两张表。
+it("号码显示统一状态，上游原话放在悬停里", async () => {
+  seed({
+    resources: [
+      {
+        resource_id: "r1",
+        provider: "hero_sms",
+        phone_mask: "1555****3333",
+        status: "4",
+        state: "code_received",
+        effective_state: "code_received",
+      },
+    ],
+  });
+  renderPanel();
+
+  const badges = await screen.findAllByText("已收码");
+  expect(badges.length).toBeGreaterThan(0);
+  expect(screen.queryByText("4")).toBeNull();
+  const hover = badges[0]!.closest("[title]");
+  expect(hover?.getAttribute("title")).toBe("上游状态：4");
+});
+
+// 「待收码但已过期」由服务端算成 expired 回来，页面按它显示，不自己再算一遍。
+it("过期的号按 effective_state 显示已过期", async () => {
+  seed({
+    resources: [
+      {
+        resource_id: "r1",
+        provider: "hero_sms",
+        phone_mask: "1555****4444",
+        status: "1",
+        state: "waiting_code",
+        effective_state: "expired",
+      },
+    ],
+  });
+  renderPanel();
+
+  expect((await screen.findAllByText("已过期")).length).toBeGreaterThan(0);
+  expect(screen.queryByText("待收码")).toBeNull();
+});
+
+// 旧数据还没映射（state 为空）时退回显示上游原话，不显示空白。
+it("没有统一状态的旧号码退回显示上游原话", async () => {
+  seed({
+    resources: [
+      { resource_id: "r1", provider: "sms62", phone_mask: "1555****5555", status: "正常" },
+    ],
+  });
+  renderPanel();
+
+  expect((await screen.findAllByText("正常")).length).toBeGreaterThan(0);
+});
+
+// 余额是**快照**不是实时值（platform-worker 每 10 分钟抓一轮）。抓取时间必须
+// 和金额一起显示——一个不知道什么时候抓的余额，会让人以为刚刚还有钱。
+it("供应商卡片显示余额快照与抓取时间", async () => {
+  seed({});
+  vi.mocked(listSMSBalances).mockResolvedValue([
+    { provider: "hero_sms", amount: "4.2000", currency: "840", taken_at: "2026-09-06T05:00:00Z" },
+  ]);
+  renderPanel();
+
+  const line = await screen.findByText(/余额 4\.2000/);
+  expect(line.textContent).toContain("840");
+  expect(line.textContent).toContain("抓取于");
+});
+
+// 没有快照的那家（62 没有余额接口）不显示这一行，而不是显示一个 0。
+it("没有余额快照时不显示余额行", async () => {
+  seed({
+    providers: [
+      { provider: "sms62", enabled: true, verified: true, supports_lifecycle: false, verified_at: "2026-09-05T00:00:00Z" },
+    ],
+  });
+  vi.mocked(listSMSBalances).mockResolvedValue([]);
+  renderPanel();
+
+  await screen.findAllByText("62-US");
+  expect(screen.queryByText(/余额 /)).toBeNull();
+});
+
+// 告警是这一页唯一的「通知」：不外发（等通知规范），所以它必须在页面顶部
+// 显眼地摆着，而且 critical 排在最前——那一条的含义是「不知道钱花没花出去」。
+it("顶部红条按严重度排列还开着的告警", async () => {
+  seed({});
+  vi.mocked(listSMSAlerts).mockResolvedValue({
+    items: [
+      {
+        alert_id: "a1",
+        kind: "balance_low",
+        provider: "hero_sms",
+        severity: "warning",
+        summary: "Hero-SMS 余额 1.00 低于阈值 5",
+        first_seen_at: "2026-09-06T05:00:00Z",
+        last_seen_at: "2026-09-06T06:00:00Z",
+      },
+      {
+        alert_id: "a2",
+        kind: "operation_unknown_stale",
+        provider: "sms62",
+        severity: "critical",
+        summary: "62-US 的 purchase 操作结果未知已超过 30m0s",
+        first_seen_at: "2026-09-06T04:00:00Z",
+        last_seen_at: "2026-09-06T06:00:00Z",
+      },
+    ],
+    thresholds: [],
+  });
+  renderPanel();
+
+  const strip = await screen.findByRole("status", { name: "接码告警" });
+  expect(strip.textContent).toContain("需要处理（2）");
+  const items = strip.querySelectorAll("li");
+  // critical 在前：它是唯一需要人立刻做点什么的那条。
+  expect(items[0]!.textContent).toContain("结果未知");
+  expect(items[1]!.textContent).toContain("余额");
+  // 不外发这件事要写在页面上，免得有人以为已经推过群了。
+  expect(strip.textContent).toContain("不会外发");
+});
+
+it("没有告警时不显示红条", async () => {
+  seed({});
+  renderPanel();
+
+  await screen.findAllByText("Hero-SMS");
+  expect(screen.queryByRole("status", { name: "接码告警" })).toBeNull();
+});
+
+// 阈值只对有余额能力的那家给：62 没有余额接口，摆一个输入框等于让人配一条
+// 永远不会触发的规则。
+it("只有有余额能力的供应商才有阈值输入框", async () => {
+  seed({
+    providers: [
+      { provider: "sms62", label: "62-US", capabilities: ["purchase"], enabled: true, verified: true, supports_lifecycle: false },
+      { provider: "hero_sms", label: "Hero-SMS", capabilities: ["purchase", "balance"], enabled: true, verified: true, supports_lifecycle: true },
+    ],
+  });
+  renderPanel();
+
+  expect(await screen.findByLabelText("Hero-SMS 余额阈值")).toBeTruthy();
+  expect(screen.queryByLabelText("62-US 余额阈值")).toBeNull();
 });

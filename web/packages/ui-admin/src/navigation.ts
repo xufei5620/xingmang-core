@@ -143,7 +143,7 @@ export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
     // 并紧挨卡片，是因为它们是同一类东西：平台自己持有的、用来注册与维持
     // 外部服务账号的资源（一个是支付工具，一个是手机号）。归属同样待确认。
     id: "sms",
-    label: "接码",
+    label: "接码中心",
     path: "/sms",
     stage: "M3",
     built: true,

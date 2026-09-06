@@ -554,6 +554,14 @@ services:
       # 回调已能秒级推进单卡流水，这一轮周期同步是兜底——兜底默认开着
       # 才有意义。只有显式的 false 才关闭。
       XM_CARDS_SYNC_TRANSACTIONS: ${XM_CARDS_SYNC_TRANSACTIONS:-}
+      # 接码巡检（XM-SMS2 #7）：只读的连接测试 + 余额快照，一分钱都不花。
+      # XM_SMS_MODE 与 API 段同值——两个进程必须认识**同一组供应商**，
+      # 否则「API 能买号、worker 不认识这家」，那家的余额永远没有数据。
+      # off 时 worker 根本不注册这个任务。
+      XM_SMS_MODE: ${XM_SMS_MODE:-off}
+      # 巡检节奏，留空用 10 分钟：余额与凭据状态都不是每分钟在变的量，
+      # 而每轮会给每家各打两个上游请求。
+      XM_SMS_PROBE_INTERVAL: ${XM_SMS_PROBE_INTERVAL:-}
       XM_CPA_INSTANCE_ID: ${XM_CPA_INSTANCE_ID:-cpa-cli-proxy-api}
       # --- 凭据登记（XM-CRED0）--------------------------------------------
       # 与 platform-api 同一个卷、同一个根目录；worker 只读——它经

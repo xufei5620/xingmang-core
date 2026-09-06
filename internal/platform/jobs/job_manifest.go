@@ -57,7 +57,7 @@ type JobManifest struct {
 	Jobs         []JobSpec `json:"jobs"`
 }
 
-// RegisteredPeriodicJobSpecs returns a defensive copy of the nine periodic
+// RegisteredPeriodicJobSpecs returns a defensive copy of the eleven periodic
 // jobs currently registered by NewClient. Callers cannot mutate the package's
 // registry through the returned slices.
 func RegisteredPeriodicJobSpecs() []JobSpec {
@@ -143,6 +143,16 @@ func RegisteredPeriodicJobSpecs() []JobSpec {
 			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
 			Execution: jobManifestExecution, SideEffectClass: "upstream_read_then_db_transaction",
 			IdempotencyEvidence: "reconcile matches by card_alias before any write; retry re-reads upstream",
+		},
+		{
+			// XM-SMS2 #7：接码供应商的只读巡检——连接测试 + 余额快照。
+			//
+			ID: SMSProbeJobKind, Kind: SMSProbeJobKind, Queue: QueueMaintenance,
+			OwnerProcess: jobManifestOwnerProcess, Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_SMS_PROBE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.SMSProbeRunOnStart",
+			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
+			Execution: jobManifestExecution, SideEffectClass: "upstream_read_then_db_transaction",
+			IdempotencyEvidence: "both upstream calls are read-only; provider_status is upserted and each balance sample is appended as its own row, so a retry adds another sample rather than corrupting one",
 		},
 	}
 	return cloneJobSpecs(rows)

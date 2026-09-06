@@ -10,12 +10,18 @@ import {
   HeroRentPanel,
   SMS62OrdersPanel,
 } from "../components/SMSExtrasPanels";
+import { SMSCostPanel } from "../components/SMSCostPanel";
 import { SMSPanel } from "../components/SMSPanel";
+import { SMSQuotaPanel } from "../components/SMSQuotaPanel";
+import { SMSRoutingPanel } from "../components/SMSRoutingPanel";
 
 /** 页签。第一个是原来的整页（供应商 / 买号 / 号码 / 台账），其余是 XM-SMS1
  *  按两家官方文档补齐后的扩展视图。按供应商标注：只有 Hero 有的就写明。 */
 const TABS = [
   { id: "numbers", label: "号码" },
+  { id: "routing", label: "路由规则" },
+  { id: "costs", label: "成本统计" },
+  { id: "quotas", label: "接入配额" },
   { id: "catalog", label: "目录与价格（Hero）" },
   { id: "history", label: "历史与统计（Hero）" },
   { id: "emails", label: "邮箱接码（Hero）" },
@@ -55,7 +61,7 @@ export function SMSPage() {
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <PageHeader
-        title="接码"
+        title="接码中心"
         description="62-US 与 Hero-SMS 的号码购买、取码与操作台账；以及两家官方文档里的全部能力。所有写操作经 Action 执行并留审计；买号、租用、买邮箱需要 sms-operator 角色。"
       />
 
@@ -77,6 +83,9 @@ export function SMSPage() {
       {tab !== "numbers" && result ? <ActionResultNote result={result} /> : null}
 
       {tab === "numbers" ? <SMSPanel /> : null}
+      {tab === "routing" ? <SMSRoutingPanel onWrite={setResult} /> : null}
+      {tab === "costs" ? <SMSCostPanel /> : null}
+      {tab === "quotas" ? <SMSQuotaPanel onWrite={setResult} /> : null}
       {tab === "catalog" ? <HeroCatalogPanel onWrite={setResult} /> : null}
       {tab === "history" ? <HeroHistoryPanel /> : null}
       {tab === "emails" ? <HeroEmailsPanel onWrite={setResult} /> : null}

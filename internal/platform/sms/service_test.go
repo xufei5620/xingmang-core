@@ -3,6 +3,7 @@ package sms
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -15,12 +16,20 @@ var testNow = time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 // ---- 替身 ----
 
 type memStore struct {
-	ops       map[string]Operation
-	resources map[string]Resource
-	orders    map[string]Order
-	codes     map[string]Code
-	status    map[string]ProviderStatus
-	emails    map[string]Email
+	ops         map[string]Operation
+	resources   map[string]Resource
+	orders      map[string]Order
+	codes       map[string]Code
+	status      map[string]ProviderStatus
+	emails      map[string]Email
+	routing     map[string]RoutingRule
+	snapshots   []BalanceSnapshot
+	snapshotErr error
+	thresholds  map[string]BalanceThreshold
+	costs       map[string]CostEvent
+	quotas      map[string]ConsumerQuota
+	costOrder   []string
+	alerts      map[string]AlertEvent
 	// pendingHash 模拟未决唯一索引。
 	pendingHash map[string]string
 	seq         int
@@ -32,7 +41,12 @@ func newMemStore() *memStore {
 		ops: map[string]Operation{}, resources: map[string]Resource{},
 		orders: map[string]Order{}, codes: map[string]Code{},
 		status: map[string]ProviderStatus{}, pendingHash: map[string]string{},
-		emails: map[string]Email{},
+		emails:     map[string]Email{},
+		routing:    map[string]RoutingRule{},
+		thresholds: map[string]BalanceThreshold{},
+		costs:      map[string]CostEvent{},
+		quotas:     map[string]ConsumerQuota{},
+		alerts:     map[string]AlertEvent{},
 	}
 }
 
@@ -67,7 +81,7 @@ func (m *memStore) ResolveOperation(ctx context.Context, op Operation) error {
 func (m *memStore) GetOperation(ctx context.Context, id string) (Operation, error) {
 	op, ok := m.ops[id]
 	if !ok {
-		return Operation{}, errors.New("不存在")
+		return Operation{}, ErrOperationNotFound
 	}
 	return op, nil
 }
@@ -104,6 +118,13 @@ func (m *memStore) UpsertResource(ctx context.Context, r Resource) (string, erro
 	for id, existing := range m.resources {
 		if existing.Provider == r.Provider && existing.ExternalID == r.ExternalID {
 			r.ID = id
+			// 与 PgStore 一致：传空 state 保留原值。
+			if r.State == "" {
+				r.State = existing.State
+			}
+			if r.OperationID == "" {
+				r.OperationID = existing.OperationID
+			}
 			m.resources[id] = r
 			return id, nil
 		}
@@ -133,6 +154,16 @@ func (m *memStore) ListResources(ctx context.Context, provider string, limit int
 
 func (m *memStore) TouchResourceCodeAt(ctx context.Context, id string, at time.Time) error {
 	m.touched = append(m.touched, id)
+	return nil
+}
+
+func (m *memStore) SetResourceState(ctx context.Context, id string, state NumberState, at time.Time) error {
+	r, ok := m.resources[id]
+	if !ok {
+		return errors.New("号码不存在")
+	}
+	r.State = state
+	m.resources[id] = r
 	return nil
 }
 
@@ -241,6 +272,9 @@ func itoa(n int) string {
 type fakeAdapter struct {
 	purchaseOutcome PurchaseOutcome
 	purchaseErr     error
+	// catalog 是 ListCatalog 的回答；lastPurchase 记最近一次 Purchase 的入参。
+	catalog         []CatalogItem
+	lastPurchase    PurchaseInput
 	importResources []Resource
 	importErr       error
 	code            Code
@@ -249,18 +283,21 @@ type fakeAdapter struct {
 	testErr         error
 	purchaseCalls   int
 	importCalls     int
+	testCalls       int
 }
 
 func (f *fakeAdapter) TestConnection(ctx context.Context) (string, error) {
+	f.testCalls++
 	return f.testIP, f.testErr
 }
 
 func (f *fakeAdapter) ListCatalog(ctx context.Context, filter CatalogFilter) ([]CatalogItem, error) {
-	return nil, nil
+	return f.catalog, nil
 }
 
 func (f *fakeAdapter) Purchase(ctx context.Context, in PurchaseInput) (PurchaseOutcome, error) {
 	f.purchaseCalls++
+	f.lastPurchase = in
 	return f.purchaseOutcome, f.purchaseErr
 }
 
@@ -549,4 +586,357 @@ type countingNotifier struct{ calls int }
 func (n *countingNotifier) NotifyCode(ctx context.Context, provider, mask, code string) error {
 	n.calls++
 	return nil
+}
+
+// ---- 路由规则（XM-SMS2 #5）----
+
+func (m *memStore) UpsertRoutingRule(ctx context.Context, r RoutingRule) (string, error) {
+	for id, existing := range m.routing {
+		if existing.Service == r.Service && existing.Country == r.Country {
+			r.ID = id
+			m.routing[id] = r
+			return id, nil
+		}
+	}
+	m.seq++
+	r.ID = "rule-" + itoa(m.seq)
+	m.routing[r.ID] = r
+	return r.ID, nil
+}
+
+func (m *memStore) RemoveRoutingRule(ctx context.Context, id string) error {
+	if _, ok := m.routing[id]; !ok {
+		return ErrRoutingRuleNotFound
+	}
+	delete(m.routing, id)
+	return nil
+}
+
+func (m *memStore) ListRoutingRules(ctx context.Context) ([]RoutingRule, error) {
+	out := make([]RoutingRule, 0, len(m.routing))
+	for _, r := range m.routing {
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func (m *memStore) ListResourcesByOperation(ctx context.Context, operationID string) ([]Resource, error) {
+	var out []Resource
+	for _, r := range m.resources {
+		if r.OperationID == operationID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) SaveBalanceSnapshot(ctx context.Context, snap BalanceSnapshot) (string, error) {
+	if m.snapshotErr != nil {
+		return "", m.snapshotErr
+	}
+	m.seq++
+	snap.ID = "snap-" + itoa(m.seq)
+	m.snapshots = append(m.snapshots, snap)
+	return snap.ID, nil
+}
+
+// LatestBalanceSnapshots 每家最新一条（与 PgStore 的 DISTINCT ON 同义）。
+func (m *memStore) LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error) {
+	latest := map[string]BalanceSnapshot{}
+	for _, s := range m.snapshots {
+		prev, ok := latest[s.Provider]
+		if !ok || !s.TakenAt.Before(prev.TakenAt) {
+			latest[s.Provider] = s
+		}
+	}
+	out := make([]BalanceSnapshot, 0, len(latest))
+	for _, id := range AllProviders {
+		if s, ok := latest[id]; ok {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) snapshotCount() int { return len(m.snapshots) }
+
+func (m *memStore) SaveBalanceThreshold(ctx context.Context, t BalanceThreshold) error {
+	m.thresholds[t.Provider] = t
+	return nil
+}
+
+func (m *memStore) RemoveBalanceThreshold(ctx context.Context, provider string) error {
+	delete(m.thresholds, provider)
+	return nil
+}
+
+func (m *memStore) ListBalanceThresholds(ctx context.Context) ([]BalanceThreshold, error) {
+	out := make([]BalanceThreshold, 0, len(m.thresholds))
+	for _, id := range AllProviders {
+		if t, ok := m.thresholds[id]; ok {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) UpsertAlertEvent(ctx context.Context, ev AlertEvent) (string, error) {
+	if prev, ok := m.alerts[ev.Fingerprint]; ok {
+		ev.ID = prev.ID
+		if prev.ResolvedAt.IsZero() {
+			// 与 PgStore 一致：还开着的保留首次看见的时间。
+			ev.FirstSeenAt = prev.FirstSeenAt
+		}
+		ev.ResolvedAt = time.Time{}
+		m.alerts[ev.Fingerprint] = ev
+		return ev.ID, nil
+	}
+	m.seq++
+	ev.ID = "alert-" + itoa(m.seq)
+	m.alerts[ev.Fingerprint] = ev
+	return ev.ID, nil
+}
+
+func (m *memStore) ResolveAlertEventsNotIn(ctx context.Context, fingerprints []string, at time.Time) (int, error) {
+	firing := map[string]bool{}
+	for _, f := range fingerprints {
+		firing[f] = true
+	}
+	n := 0
+	for key, ev := range m.alerts {
+		if firing[key] || !ev.ResolvedAt.IsZero() {
+			continue
+		}
+		ev.ResolvedAt = at
+		m.alerts[key] = ev
+		n++
+	}
+	return n, nil
+}
+
+func (m *memStore) ListOpenAlertEvents(ctx context.Context) ([]AlertEvent, error) {
+	var out []AlertEvent
+	for _, ev := range m.alerts {
+		if ev.Open() {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ListStaleUnknownOperations(ctx context.Context, before time.Time) ([]Operation, error) {
+	var out []Operation
+	for _, op := range m.ops {
+		if op.State == StateUnknown && op.NeedsHumanReview && op.UpdatedAt.Before(before) {
+			out = append(out, op)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ListExpiringRentals(ctx context.Context, from, until time.Time) ([]Resource, error) {
+	var out []Resource
+	for _, r := range m.resources {
+		if r.Subtype != SubtypeRent || r.State != StateWaitingCode || r.ExpiresAt.IsZero() {
+			continue
+		}
+		if r.ExpiresAt.After(from) && !r.ExpiresAt.After(until) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) AppendCostEvents(ctx context.Context, events []CostEvent) (int, error) {
+	n := 0
+	for _, ev := range events {
+		key := ev.OperationID + "|" + ev.Subject
+		if _, ok := m.costs[key]; ok {
+			// 与 PgStore 的 ON CONFLICT DO NOTHING 一致：记过的不改写。
+			continue
+		}
+		m.seq++
+		ev.ID = "cost-" + itoa(m.seq)
+		m.costs[key] = ev
+		m.costOrder = append(m.costOrder, key)
+		n++
+	}
+	return n, nil
+}
+
+func (m *memStore) ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var out []CostEvent
+	for _, key := range m.costOrder {
+		ev := m.costs[key]
+		if provider != "" && ev.Provider != provider {
+			continue
+		}
+		out = append(out, ev)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ListRecentBalanceSnapshots(ctx context.Context, provider string, limit int) ([]BalanceSnapshot, error) {
+	if limit <= 0 {
+		limit = 2
+	}
+	var out []BalanceSnapshot
+	for i := len(m.snapshots) - 1; i >= 0; i-- {
+		if m.snapshots[i].Provider != provider {
+			continue
+		}
+		out = append(out, m.snapshots[i])
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) SumCostEventsByCurrency(ctx context.Context, provider string, from, to time.Time) ([]CostSummary, error) {
+	byCurrency := map[string]*CostSummary{}
+	for _, key := range m.costOrder {
+		ev := m.costs[key]
+		if ev.Provider != provider || !ev.OccurredAt.After(from) || ev.OccurredAt.After(to) {
+			continue
+		}
+		row, ok := byCurrency[ev.Currency]
+		if !ok {
+			row = &CostSummary{Currency: ev.Currency, SumText: "0"}
+			byCurrency[ev.Currency] = row
+		}
+		row.Count++
+		if ev.AmountText == "" {
+			row.UnknownCount++
+			continue
+		}
+		sum, _ := parseSignedDecimal(row.SumText)
+		add, ok := parseSignedDecimal(ev.AmountText)
+		if !ok {
+			continue
+		}
+		row.SumText = ratText(sum.Add(sum, add))
+	}
+	out := make([]CostSummary, 0, len(byCurrency))
+	for _, row := range byCurrency {
+		out = append(out, *row)
+	}
+	return out, nil
+}
+
+func (m *memStore) AggregateCostsByDay(ctx context.Context, from, to time.Time) ([]CostAggregate, error) {
+	type key struct{ day, provider, currency, service string }
+	acc := map[key]*CostAggregate{}
+	for _, k := range m.costOrder {
+		ev := m.costs[k]
+		if ev.OccurredAt.Before(from) || !ev.OccurredAt.Before(to) {
+			continue
+		}
+		id := key{ev.OccurredAt.UTC().Format("2006-01-02"), ev.Provider, ev.Currency, ev.Service}
+		row, ok := acc[id]
+		if !ok {
+			row = &CostAggregate{Day: id.day, Provider: id.provider, Currency: id.currency, Service: id.service, SumText: "0"}
+			acc[id] = row
+		}
+		row.Count++
+		if ev.AmountText == "" {
+			row.UnknownCount++
+			continue
+		}
+		sum, _ := parseSignedDecimal(row.SumText)
+		add, ok2 := parseSignedDecimal(ev.AmountText)
+		if !ok2 {
+			continue
+		}
+		row.SumText = ratText(sum.Add(sum, add))
+	}
+	out := make([]CostAggregate, 0, len(acc))
+	for _, row := range acc {
+		out = append(out, *row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Day != out[j].Day {
+			return out[i].Day > out[j].Day
+		}
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		if out[i].Currency != out[j].Currency {
+			return out[i].Currency < out[j].Currency
+		}
+		return out[i].Service < out[j].Service
+	})
+	return out, nil
+}
+
+func (m *memStore) SaveConsumerQuota(ctx context.Context, q ConsumerQuota) error {
+	m.quotas[q.Consumer] = q
+	return nil
+}
+
+func (m *memStore) RemoveConsumerQuota(ctx context.Context, consumer string) error {
+	delete(m.quotas, consumer)
+	return nil
+}
+
+func (m *memStore) GetConsumerQuota(ctx context.Context, consumer string) (ConsumerQuota, bool, error) {
+	q, ok := m.quotas[consumer]
+	return q, ok, nil
+}
+
+func (m *memStore) ListConsumerQuotas(ctx context.Context) ([]ConsumerQuota, error) {
+	out := make([]ConsumerQuota, 0, len(m.quotas))
+	for _, q := range m.quotas {
+		out = append(out, q)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Consumer < out[j].Consumer })
+	return out, nil
+}
+
+func (m *memStore) ConsumerUsageSince(ctx context.Context, consumer string, since time.Time) (ConsumerUsage, error) {
+	var usage ConsumerUsage
+	mine := map[string]bool{}
+	for id, op := range m.ops {
+		if op.PrincipalID == consumer && !op.StartedAt.Before(since) {
+			mine[id] = true
+		}
+	}
+	for _, r := range m.resources {
+		if mine[r.OperationID] {
+			usage.Numbers++
+		}
+	}
+	byCurrency := map[string]*CostSummary{}
+	for _, key := range m.costOrder {
+		ev := m.costs[key]
+		if !mine[ev.OperationID] || ev.OccurredAt.Before(since) {
+			continue
+		}
+		row, ok := byCurrency[ev.Currency]
+		if !ok {
+			row = &CostSummary{Currency: ev.Currency, SumText: "0"}
+			byCurrency[ev.Currency] = row
+		}
+		row.Count++
+		if ev.AmountText == "" {
+			row.UnknownCount++
+			continue
+		}
+		sum, _ := parseSignedDecimal(row.SumText)
+		add, ok2 := parseSignedDecimal(ev.AmountText)
+		if !ok2 {
+			continue
+		}
+		row.SumText = ratText(sum.Add(sum, add))
+	}
+	for _, row := range byCurrency {
+		usage.SpendByCurrency = append(usage.SpendByCurrency, *row)
+	}
+	return usage, nil
 }

@@ -45,6 +45,10 @@ type Store interface {
 	ListResources(ctx context.Context, provider string, limit int) ([]Resource, error)
 	// TouchResourceCodeAt 记「最后一次成功取到码」的时间。
 	TouchResourceCodeAt(ctx context.Context, resourceID string, at time.Time) error
+	// SetResourceState 写统一状态（我们自己的事实，不改上游原话 status）。
+	SetResourceState(ctx context.Context, resourceID string, state NumberState, at time.Time) error
+	// ListResourcesByOperation 列出某笔操作买下的号（要号回放用）。
+	ListResourcesByOperation(ctx context.Context, operationID string) ([]Resource, error)
 
 	// UpsertOrder 落订单（62）。返回本地 UUID。
 	UpsertOrder(ctx context.Context, o Order) (string, error)
@@ -68,6 +72,50 @@ type Store interface {
 	UpsertEmail(ctx context.Context, e Email) (string, error)
 	GetEmail(ctx context.Context, emailID string) (Email, error)
 	ListEmails(ctx context.Context, limit int) ([]Email, error)
+
+	// 余额快照（XM-SMS2 #7）。**追加**而不是覆盖：阶段 3 要用相邻两次的差
+	// 与成本事件对账，覆盖写就没有差可算。
+	SaveBalanceSnapshot(ctx context.Context, snap BalanceSnapshot) (string, error)
+	// LatestBalanceSnapshots 每家最新一条。
+	LatestBalanceSnapshots(ctx context.Context) ([]BalanceSnapshot, error)
+	// ListRecentBalanceSnapshots 某一家最近的几条，新的在前（对账要相邻两条）。
+	ListRecentBalanceSnapshots(ctx context.Context, provider string, limit int) ([]BalanceSnapshot, error)
+
+	// 消费者配额（XM-SMS4 #3）。没有行 = 这个机器身份一次都不许调用。
+	SaveConsumerQuota(ctx context.Context, q ConsumerQuota) error
+	RemoveConsumerQuota(ctx context.Context, consumer string) error
+	GetConsumerQuota(ctx context.Context, consumer string) (ConsumerQuota, bool, error)
+	ListConsumerQuotas(ctx context.Context) ([]ConsumerQuota, error)
+	// ConsumerUsageSince 统计某个消费者从 since 起用掉的号数与花费（按币种）。
+	ConsumerUsageSince(ctx context.Context, consumer string, since time.Time) (ConsumerUsage, error)
+
+	// 成本事件（XM-SMS3 #1）。按 (操作, 主体) 幂等：同一笔操作重放不会记两次账。
+	AppendCostEvents(ctx context.Context, events []CostEvent) (int, error)
+	ListCostEvents(ctx context.Context, provider string, limit int) ([]CostEvent, error)
+	// SumCostEventsByCurrency 汇总 (from, to] 内的成本，**按币种分组**：跨币种
+	// 相加得到的数字看起来像个金额，其实什么都不是。
+	SumCostEventsByCurrency(ctx context.Context, provider string, from, to time.Time) ([]CostSummary, error)
+	// AggregateCostsByDay 按供应商 × 币种 × 服务 × 天聚合（服务端整表聚合）。
+	AggregateCostsByDay(ctx context.Context, from, to time.Time) ([]CostAggregate, error)
+
+	// 告警（XM-SMS2 #8）。阈值按家配（币种各自不同，不折算）；事件按指纹去重，
+	// 条件消失由 ResolveAlertEventsNotIn 自动收敛。
+	SaveBalanceThreshold(ctx context.Context, t BalanceThreshold) error
+	RemoveBalanceThreshold(ctx context.Context, provider string) error
+	ListBalanceThresholds(ctx context.Context) ([]BalanceThreshold, error)
+	UpsertAlertEvent(ctx context.Context, ev AlertEvent) (string, error)
+	ResolveAlertEventsNotIn(ctx context.Context, fingerprints []string, at time.Time) (int, error)
+	ListOpenAlertEvents(ctx context.Context) ([]AlertEvent, error)
+	// ListStaleUnknownOperations 列出 updated_at 早于 before 的待核对 unknown。
+	ListStaleUnknownOperations(ctx context.Context, before time.Time) ([]Operation, error)
+	// ListExpiringRentals 列出 (from, until] 内到期、还在等码的**租用**号。
+	ListExpiringRentals(ctx context.Context, from, until time.Time) ([]Resource, error)
+
+	// 路由规则（XM-SMS2 #5）。UpsertRoutingRule 按（环境, 服务, 国家）覆盖；
+	// RemoveRoutingRule 不存在时回 ErrRoutingRuleNotFound。
+	UpsertRoutingRule(ctx context.Context, r RoutingRule) (string, error)
+	RemoveRoutingRule(ctx context.Context, ruleID string) error
+	ListRoutingRules(ctx context.Context) ([]RoutingRule, error)
 }
 
 // Order 是一笔订单（主要是 62）。

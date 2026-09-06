@@ -30,6 +30,10 @@ function translateUnmounted(error: unknown): never {
 
 export interface SMSProvider {
   provider: string;
+  /** 标签与能力集来自服务端注册表（ADR-022）。页面按能力渲染按钮，
+   *  接第三家供应商时前端一个字都不用改。 */
+  label?: string;
+  capabilities?: string[];
   /** 运营在后台开的开关。**与 verified 是两件事**：
    *  关着是运营的决定（去页面上打开），没验证是凭据的问题（去做连接测试）。
    *  买号要求两个都为 true。 */
@@ -65,6 +69,12 @@ export interface SMSResource {
   /** 1 = 普通激活（20 分钟），2 = 租用（按小时）。 */
   subtype?: number;
   country_phone_code?: string;
+  /** 平台自己的统一状态；status 仍是上游原话。 */
+  state?: string;
+  /** 「待收码但已过期」算成 expired 后的状态，页面显示用它。 */
+  effective_state?: string;
+  /** 买下它的那笔操作；导入的号为空。 */
+  operation_id?: string;
 }
 
 export interface SMSOperation {
@@ -569,4 +579,302 @@ export function importSMSOrder(
   client: ApiClient = apiClient,
 ): Promise<ActionRun> {
   return executeAction({ actionId: "sms.order.import", version: "1", params }, options, client);
+}
+
+// ---------- 路由规则（XM-SMS2 #5，ADR-022 决策 3） ----------
+
+/** 一条路由规则：「服务 × 国家」→ 供应商优先级列表 + 单价上限。
+ *  service / country 为 "*" 表示任意。命中顺序：精确 > 服务通配国家 >
+ *  国家通配服务 > 全通配 > 没有规则时的默认顺序。 */
+export interface SMSRoutingRule {
+  rule_id: string;
+  service: string;
+  country: string;
+  /** 优先级顺序，第一家优先；失败回落下一家，每家最多试一次。 */
+  providers: string[];
+  /** 十进制文本；空 = 不限。**按各家自己的币种比较，不折算。** */
+  max_unit_price?: string;
+  enabled: boolean;
+  updated_at?: string;
+}
+
+export interface SMSRoutingRules {
+  items: SMSRoutingRule[];
+  /** 没有规则命中时要号按这个顺序试（= 装配顺序）。 */
+  default_order: string[];
+  wildcard: string;
+}
+
+export async function listSMSRoutingRules(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSRoutingRules> {
+  const body = await client
+    .get<Partial<SMSRoutingRules>>("/api/v1/sms/routing", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return { items: body.items ?? [], default_order: body.default_order ?? [], wildcard: body.wildcard ?? "*" };
+}
+
+/** 新建或覆盖一条规则（`sms.routing.set@1`）。同「服务 × 国家」只有一条。
+ *  不传 enabled 视为启用。 */
+export function setSMSRoutingRule(
+  input: { service: string; country: string; providers: string[]; max_unit_price?: string; enabled?: boolean },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const params: Record<string, unknown> = {
+    service: input.service,
+    country: input.country,
+    providers: input.providers,
+  };
+  if (input.max_unit_price) params.max_unit_price = input.max_unit_price;
+  if (input.enabled !== undefined) params.enabled = input.enabled;
+  return executeAction({ actionId: "sms.routing.set", version: "1", params }, options, client);
+}
+
+/** 删一条规则（`sms.routing.remove@1`）。可逆：再设一条同键的就回来了。 */
+export function removeSMSRoutingRule(
+  ruleId: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    { actionId: "sms.routing.remove", version: "1", params: { rule_id: ruleId } },
+    options,
+    client,
+  );
+}
+
+// ---------- 要号（XM-SMS2 #6，ADR-022 决策 3） ----------
+
+/** `sms.number.request@1` 的结果。**不带号码**：号码走 listSMSResources 且受 sms.reveal 把守。 */
+export interface SMSRequestAttempt {
+  provider: string;
+  operation_id: string;
+  /** 空 = 没打上游（关着 / 没验证 / 翻译不了 / 超上限），原因在 reason。 */
+  state: string;
+  provider_ref?: string;
+  reason?: string;
+  /** 来自台账（同一个 request_id 的重试）。 */
+  replayed?: boolean;
+}
+
+export interface SMSRequestResult {
+  request_id: string;
+  service: string;
+  country: string;
+  quantity: number;
+  rule_id?: string;
+  /** succeeded / failed / unknown。unknown 必须人工核对（needs_review）。 */
+  state: string;
+  provider?: string;
+  operation_id?: string;
+  resource_ids: string[];
+  attempts: SMSRequestAttempt[];
+  needs_review?: boolean;
+}
+
+/** 要号（`sms.number.request@1`）。**花真钱且不可退。**
+ *
+ *  不选供应商时由路由规则选；第一家明确失败回落下一家，每家最多试一次；
+ *  结果未知就停（钱可能已经花了）。`request_id` 由调用方稳定生成，是幂等键：
+ *  重试带同一个就是回放，永远不会多买。 */
+export function requestSMSNumbers(
+  params: { request_id: string; service: string; country: string; quantity: number; provider?: string },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction({ actionId: "sms.number.request", version: "1", params }, options, client);
+}
+
+/** 把 ActionRun.result 读成要号结果；形状不对就当没有（页面退回只显示 run_id）。 */
+export function readSMSRequestResult(result: unknown): SMSRequestResult | null {
+  if (!result || typeof result !== "object") return null;
+  const r = result as Partial<SMSRequestResult>;
+  if (typeof r.state !== "string") return null;
+  return {
+    request_id: r.request_id ?? "",
+    service: r.service ?? "",
+    country: r.country ?? "",
+    quantity: r.quantity ?? 0,
+    ...(r.rule_id ? { rule_id: r.rule_id } : {}),
+    state: r.state,
+    ...(r.provider ? { provider: r.provider } : {}),
+    ...(r.operation_id ? { operation_id: r.operation_id } : {}),
+    resource_ids: Array.isArray(r.resource_ids) ? r.resource_ids : [],
+    attempts: Array.isArray(r.attempts) ? r.attempts : [],
+    needs_review: Boolean(r.needs_review),
+  };
+}
+
+// ---------- 余额快照（XM-SMS2 #7） ----------
+
+/** 一家的最新余额快照。**不是实时值**：由 platform-worker 每 10 分钟抓一次，
+ *  所以 taken_at 必须和金额一起显示——一个不知道什么时候抓的余额，会让人
+ *  以为刚刚还有钱。 */
+export interface SMSBalance {
+  provider: string;
+  /** 十进制文本。 */
+  amount: string;
+  /** 空 = 上游没说（Hero 的兼容层不回币种）。分币种不折算。 */
+  currency?: string;
+  taken_at: string;
+}
+
+export function listSMSBalances(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSBalance[]> {
+  return get<SMSBalance>("/api/v1/sms/balances", options, client);
+}
+
+// ---------- 内部告警与余额阈值（XM-SMS2 #8） ----------
+
+/** 一条还开着的内部告警。**不外发**：只在这一页显示，投递等通知规范定稿。 */
+export interface SMSAlert {
+  alert_id: string;
+  /** balance_low / operation_unknown_stale / rent_expiring。 */
+  kind: string;
+  provider?: string;
+  /** 这条告警指向的东西：操作 ID、号码 ID，或者供应商自己。 */
+  subject?: string;
+  /** warning / critical。 */
+  severity: string;
+  summary: string;
+  /** 这件事从什么时候开始的——判断它拖了多久的唯一依据。 */
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+/** 某一家的余额下限。没有 = 不判这家的余额。 */
+export interface SMSBalanceThreshold {
+  provider: string;
+  /** 十进制文本。**按该家自己的币种比较，不折算。** */
+  min_amount: string;
+  updated_at?: string;
+}
+
+export interface SMSAlertsResponse {
+  items: SMSAlert[];
+  thresholds: SMSBalanceThreshold[];
+}
+
+export async function listSMSAlerts(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSAlertsResponse> {
+  const body = await client
+    .get<Partial<SMSAlertsResponse>>("/api/v1/sms/alerts", {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return { items: body.items ?? [], thresholds: body.thresholds ?? [] };
+}
+
+/** 配一家的余额下限（`sms.alert.set_balance_threshold@1`）。
+ *
+ *  **留空 = 清掉**（不判这家），不是「阈值为 0」——后者要等余额归零才报，
+ *  那时报警已经没用了。 */
+export function setSMSBalanceThreshold(
+  provider: string,
+  minAmount: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "sms.alert.set_balance_threshold",
+      version: "1",
+      params: { provider, min_amount: minAmount },
+    },
+    options,
+    client,
+  );
+}
+
+// ---------- 成本统计（XM-SMS3 #3） ----------
+
+/** 一行聚合：**按供应商 × 币种 × 服务 × 天**。这张事实表的形状就是跨平台财务
+ *  的输入，所以四个维度在同一行里而不是嵌套。 */
+export interface SMSCostRow {
+  /** UTC 日期 YYYY-MM-DD。 */
+  day: string;
+  provider: string;
+  /** 空 = 上游没说。**分币种不折算。** */
+  currency?: string;
+  service?: string;
+  /** 十进制文本，退款为负。 */
+  amount: string;
+  count: number;
+  /** 金额未知的笔数。合计里要单独说明——有未知就说明合计是下限。 */
+  unknown_count: number;
+}
+
+export interface SMSCostsResponse {
+  items: SMSCostRow[];
+  from: string;
+  to: string;
+}
+
+/** 读成本统计。日期是 YYYY-MM-DD（UTC），两端都含。 */
+export async function listSMSCosts(
+  from: string,
+  to: string,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSCostsResponse> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const body = await client
+    .get<Partial<SMSCostsResponse>>(`/api/v1/sms/costs${suffix}`, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    })
+    .catch(translateUnmounted);
+  return { items: body.items ?? [], from: body.from ?? from, to: body.to ?? to };
+}
+
+// ---------- 接入配额（XM-SMS4 #3） ----------
+
+/** 一个消费者（机器身份）的日限额与今日用量。
+ *
+ *  没有行 = 那个机器身份一次都调不动。人不受配额约束。 */
+export interface SMSQuota {
+  /** principal ID，与审计里那一列同源。 */
+  consumer: string;
+  /** 每天最多能要多少**个号**，不是调用次数。0 = 一次都不许。 */
+  daily_requests: number;
+  /** 止损线：到线之后不再放行，最多超出一次请求。空 = 不限。 */
+  daily_spend_cap?: string;
+  enabled: boolean;
+  updated_at?: string;
+  /** 今天已经要到的号数。 */
+  used_numbers: number;
+  /** 今天的花费，**按币种分**（不折算）。 */
+  used_spend?: { currency?: string; amount: string }[];
+}
+
+export function listSMSQuotas(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<SMSQuota[]> {
+  return get<SMSQuota>("/api/v1/sms/quotas", options, client);
+}
+
+/** 登记 / 修改一个消费者的配额（`sms.quota.set@1`）。**只有人能配。** */
+export function setSMSQuota(
+  input: { consumer: string; daily_requests: number; daily_spend_cap?: string; enabled?: boolean },
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  const params: Record<string, unknown> = {
+    consumer: input.consumer,
+    daily_requests: input.daily_requests,
+  };
+  if (input.daily_spend_cap) params.daily_spend_cap = input.daily_spend_cap;
+  if (input.enabled !== undefined) params.enabled = input.enabled;
+  return executeAction({ actionId: "sms.quota.set", version: "1", params }, options, client);
 }

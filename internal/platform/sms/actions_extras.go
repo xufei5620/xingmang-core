@@ -39,10 +39,11 @@ func extraActionEntries(svc *Service, providers []string) []struct {
 	}
 }
 
-// heroOnlyField：这几个动作只有 Hero 有，枚举里就只放它一家。
-// 页面上的供应商下拉据此只显示 Hero，而不是让 62 出现后再报「不支持」。
-func heroOnlyField() action.Field {
-	return action.Field{Name: "provider", Type: action.FieldString, Required: true, Enum: []string{ProviderHero}}
+// providerFieldWith：只把**有这项能力**的供应商放进枚举。
+// 页面上的供应商下拉据此只显示能做的那几家，而不是让别家出现后再报「不支持」。
+// 由注册表推导——接第三家时这里一个字都不用改。
+func providerFieldWith(c Capability) action.Field {
+	return action.Field{Name: "provider", Type: action.FieldString, Required: true, Enum: ProvidersWith(c)}
 }
 
 func rentDef() action.Definition {
@@ -50,7 +51,7 @@ func rentDef() action.Definition {
 		ID: ActionRentPurchase, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionPurchase,
 		Schema: action.Schema{Fields: []action.Field{
-			heroOnlyField(),
+			providerFieldWith(CapRent),
 			{Name: "operation_id", Type: action.FieldString, Required: true},
 			{Name: "service", Type: action.FieldString, Required: true},
 			{Name: "country", Type: action.FieldInt, Required: true},
@@ -91,7 +92,7 @@ func emailPurchaseDef() action.Definition {
 		ID: ActionEmailPurchase, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionPurchase,
 		Schema: action.Schema{Fields: []action.Field{
-			heroOnlyField(),
+			providerFieldWith(CapEmail),
 			{Name: "operation_id", Type: action.FieldString, Required: true},
 			{Name: "site", Type: action.FieldString, Required: true},
 			{Name: "domain", Type: action.FieldString, Required: true},
@@ -162,7 +163,7 @@ func favoriteSetDef() action.Definition {
 		ID: ActionFavoriteSet, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionManage,
 		Schema: action.Schema{Fields: []action.Field{
-			heroOnlyField(),
+			providerFieldWith(CapFavorites),
 			{Name: "service", Type: action.FieldString, Required: true},
 			{Name: "country", Type: action.FieldInt, Required: true},
 			{Name: "operator", Type: action.FieldString},
@@ -194,7 +195,7 @@ func favoriteRemoveDef() action.Definition {
 		ID: ActionFavoriteRemove, Version: actionVersion,
 		RiskLevel: action.L1, Permission: PermissionManage,
 		Schema: action.Schema{Fields: []action.Field{
-			heroOnlyField(),
+			providerFieldWith(CapFavorites),
 			{Name: "service", Type: action.FieldString, Required: true},
 			{Name: "country", Type: action.FieldInt, Required: true},
 		}},

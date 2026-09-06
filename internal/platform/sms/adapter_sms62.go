@@ -101,7 +101,10 @@ func (a *SMS62Adapter) ImportByUpstreamID(ctx context.Context, orderID string) (
 			ProviderToken: n.Token,
 			Service:       n.PlatformText,
 			Status:        n.StatusText,
-			SyncedAt:      a.now(),
+			// 62 的号买到就是待收码；它没有取消/完成的接口，状态只会被本地
+			// 取码推进（见 Service.FetchCode）。
+			State:    StateWaitingCode,
+			SyncedAt: a.now(),
 		})
 	}
 	return out, nil

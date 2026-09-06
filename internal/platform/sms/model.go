@@ -23,9 +23,9 @@ const (
 
 // AllProviders 是代码支持的全部供应商，顺序即页面上的展示顺序。
 //
-// 进程**永远把这两家都建出来**，能不能用由库里的 enabled 决定。
-// 让构造随配置变化，等于在后台开一家之后还要重启进程才生效。
-var AllProviders = []string{ProviderSMS62, ProviderHero}
+// **由注册表生成**（registry.go），不再手写第二份清单。进程永远把全部供应商
+// 都建出来，能不能用由库里的 enabled 决定。
+var AllProviders = ProviderIDs()
 
 // 操作类型。62 只支持 purchase；其余全部是 Hero 独有。
 //
@@ -49,6 +49,40 @@ const (
 	KindFavoriteSet    = "favorite_set"
 	KindFavoriteRemove = "favorite_remove"
 )
+
+// NumberState 是**平台自己的**号码状态（ADR-022 决策 4）。
+//
+// 上游原话保留在 Resource.Status（Hero 是 1/2/3/4/6/7/8/10，62 是「正常」之类），
+// 这里是它们的统一含义。五个值够日常判断：这个号还能不能用、码到了没有。
+type NumberState string
+
+const (
+	StateWaitingCode  NumberState = "waiting_code"  // 待收码
+	StateCodeReceived NumberState = "code_received" // 已收码
+	StateFinished     NumberState = "finished"      // 已完成
+	StateCancelled    NumberState = "cancelled"     // 已取消（含退款）
+	StateExpired      NumberState = "expired"       // 已过期
+)
+
+// MapHeroStatus 把 Hero 官方 ActivationStatusTypes 映射到统一状态。
+//
+// 含义来自官方 setStatus 文档（3 请求重发、6 完成、8 取消）与 SMS-Activate 协议的
+// 惯例（1 等待、2 等待重发、4 已收到、7 过期、10 退款）。没见过的值归待收码——
+// 一个不认识的状态更可能是「还在进行中」而不是「已经结束」。
+func MapHeroStatus(status string) NumberState {
+	switch strings.TrimSpace(status) {
+	case "4":
+		return StateCodeReceived
+	case "6":
+		return StateFinished
+	case "7":
+		return StateExpired
+	case "8", "10":
+		return StateCancelled
+	default:
+		return StateWaitingCode
+	}
+}
 
 // 资源子类型（官方 ActivationSubtype）。
 const (
@@ -100,6 +134,8 @@ var (
 	ErrCodeNotAvailable = errors.New("sms: 尚未收到验证码")
 	// ErrExtrasNotSupported：这家没有这项扩展能力（比如 62 没有邮箱接码）。
 	ErrExtrasNotSupported = errors.New("sms: 该供应商没有这项能力")
+	// ErrOperationNotFound：按 ID 查不到操作。要号流程靠它判断「这一家试过没有」。
+	ErrOperationNotFound = errors.New("sms: 接码操作不存在")
 )
 
 // Operation 是台账里的一笔。
@@ -107,7 +143,10 @@ type Operation struct {
 	ID       string
 	Provider string
 	Kind     string
-	State    OperationState
+	// PrincipalID 是发起这笔操作的身份（机器身份才有值，XM-SMS4 #3）。
+	// 配额按它计，出事时「谁买的」也要能对上。
+	PrincipalID string
+	State       OperationState
 	// ResourceID / OrderID 是本地 UUID，不是上游 ID。
 	ResourceID string
 	OrderID    string
@@ -157,11 +196,14 @@ type Resource struct {
 	Phone     string
 	PhoneMask string
 	// ProviderToken 只有 62 有，取码必须带。**任何对外 DTO 都不含它。**
-	ProviderToken     string
-	Service           string
-	Country           string
-	Status            string
-	OrderID           string
+	ProviderToken string
+	Service       string
+	Country       string
+	Status        string
+	OrderID       string
+	// OperationID 是买下它的那笔操作（迁移 000044）；导入的号为空。
+	// 要号回放与成本核算都靠它。
+	OperationID       string
 	LastCodeAt        time.Time
 	UpstreamCreatedAt time.Time
 	ExpiresAt         time.Time
@@ -174,6 +216,19 @@ type Resource struct {
 	// Subtype：1 = 普通激活，2 = 租用。0 = 上游没说（62 或旧数据）。
 	Subtype          int64
 	CountryPhoneCode string
+	// State 是统一状态（迁移 000042）。空 = 旧数据还没映射。
+	State NumberState
+}
+
+// EffectiveState 是页面该显示的状态：待收码但已经过了过期时间，就是已过期。
+//
+// 过期不靠上游通知（两家都不会推），靠本地时钟判；只对「待收码」生效——
+// 已完成 / 已取消不会因为时间流逝变成别的东西。
+func (r Resource) EffectiveState(now time.Time) NumberState {
+	if r.State == StateWaitingCode && !r.ExpiresAt.IsZero() && now.After(r.ExpiresAt) {
+		return StateExpired
+	}
+	return r.State
 }
 
 // Email 是一次邮箱接码（Hero Emails 组，迁移 000040）。
@@ -268,21 +323,16 @@ func CanonicalRequestHash(provider, kind string, params map[string]string) strin
 	return hex.EncodeToString(sum[:])
 }
 
-// SupportsAction 说明某家是否支持某个动作。
-//
-// 62 只有 purchase：它没有取消/完成/替换/延长的接口，也没有租用、邮箱与
-// 收藏。把不支持的动作在领域层挡掉，而不是让它打到上游去换一个含糊的 404。
+// SupportsAction 说明某家是否支持某个动作。**由注册表的能力集推导**，
+// 不再按名字 switch——两份清单迟早差一家。把不支持的动作在领域层挡掉，
+// 而不是让它打到上游去换一个含糊的 404。
 func SupportsAction(provider, kind string) bool {
-	switch kind {
-	case KindPurchase:
-		return provider == ProviderSMS62 || provider == ProviderHero
-	case KindCancel, KindFinish, KindReplace, KindReactivate, KindProlong,
-		KindRent, KindEmailPurchase, KindEmailCancel, KindEmailReorder,
-		KindFavoriteSet, KindFavoriteRemove:
-		return provider == ProviderHero
-	default:
+	capability, ok := capabilityForKind(kind)
+	if !ok {
 		return false
 	}
+	spec, ok := Spec(provider)
+	return ok && spec.Has(capability)
 }
 
 // ValidateProvider 挡住不认识的供应商。
@@ -290,10 +340,8 @@ func SupportsAction(provider, kind string) bool {
 // 走 AllProviders 而不是另写一份 switch：两份清单迟早会差一家，
 // 而那种差异的症状是「页面上有这家，一点就说未知供应商」。
 func ValidateProvider(provider string) error {
-	for _, id := range AllProviders {
-		if id == provider {
-			return nil
-		}
+	if _, ok := Spec(provider); ok {
+		return nil
 	}
 	return fmt.Errorf("%w: %q", ErrProviderUnknown, provider)
 }
