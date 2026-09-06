@@ -226,3 +226,127 @@ func randomUUID() string {
 	raw := hex.EncodeToString(b[:])
 	return fmt.Sprintf("%s-%s-%s-%s-%s", raw[:8], raw[8:12], raw[12:16], raw[16:20], raw[20:])
 }
+
+// --- 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）---------------------
+//
+// 独立的单例表，理由见 0028 迁移与 Repository 接口上的注释。写操作各自审计，
+// 与 SMTP 口令一样：**审计里只有指纹，没有地址**。
+
+func (r *PostgresRepository) GetNoticeWebhook(ctx context.Context) (NoticeWebhookInfo, error) {
+	var info NoticeWebhookInfo
+	err := r.pool.QueryRow(ctx, `SELECT fingerprint,updated_by,updated_at
+		FROM notice_webhook_setting WHERE singleton_id=1`).
+		Scan(&info.Fingerprint, &info.UpdatedBy, &info.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 没配不是错误：通知功能默认关着。
+		return NoticeWebhookInfo{}, nil
+	}
+	if err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	info.Configured = true
+	return info, nil
+}
+
+func (r *PostgresRepository) StoreNoticeWebhook(ctx context.Context, envelope SecretEnvelope, fingerprint string, actor Actor) (NoticeWebhookInfo, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	before, err := noticeWebhookTx(ctx, tx)
+	if err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO notice_webhook_setting(
+			singleton_id,webhook_ciphertext,key_version,fingerprint,updated_by)
+		VALUES(1,$1,$2,$3,$4)
+		ON CONFLICT (singleton_id) DO UPDATE SET
+			webhook_ciphertext=EXCLUDED.webhook_ciphertext,
+			key_version=EXCLUDED.key_version,
+			fingerprint=EXCLUDED.fingerprint,
+			updated_by=EXCLUDED.updated_by,
+			updated_at=now()`,
+		envelope.Ciphertext, envelope.KeyVersion, fingerprint, actor.ID); err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	after, err := noticeWebhookTx(ctx, tx)
+	if err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	if err = auditNoticeWebhook(ctx, tx, "admin_settings.notice_webhook.set", before, after, actor); err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	return after, nil
+}
+
+func (r *PostgresRepository) ClearNoticeWebhook(ctx context.Context, actor Actor) (NoticeWebhookInfo, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	before, err := noticeWebhookTx(ctx, tx)
+	if err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM notice_webhook_setting WHERE singleton_id=1`); err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	if err = auditNoticeWebhook(ctx, tx, "admin_settings.notice_webhook.clear", before, NoticeWebhookInfo{}, actor); err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	return NoticeWebhookInfo{}, nil
+}
+
+func (r *PostgresRepository) LoadNoticeWebhook(ctx context.Context) (SecretEnvelope, error) {
+	var envelope SecretEnvelope
+	err := r.pool.QueryRow(ctx, `SELECT webhook_ciphertext,key_version
+		FROM notice_webhook_setting WHERE singleton_id=1`).
+		Scan(&envelope.Ciphertext, &envelope.KeyVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SecretEnvelope{}, ErrSecretMissing
+	}
+	return envelope, err
+}
+
+func noticeWebhookTx(ctx context.Context, tx pgx.Tx) (NoticeWebhookInfo, error) {
+	var info NoticeWebhookInfo
+	err := tx.QueryRow(ctx, `SELECT fingerprint,updated_by,updated_at
+		FROM notice_webhook_setting WHERE singleton_id=1`).
+		Scan(&info.Fingerprint, &info.UpdatedBy, &info.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return NoticeWebhookInfo{}, nil
+	}
+	if err != nil {
+		return NoticeWebhookInfo{}, err
+	}
+	info.Configured = true
+	return info, nil
+}
+
+// auditNoticeWebhook 记一条审计。**before/after 哈希算的是指纹与配置状态**，
+// 不是地址——地址从不进这个函数，也就永远不会进审计表。
+func auditNoticeWebhook(ctx context.Context, tx pgx.Tx, action string, before, after NoticeWebhookInfo, actor Actor) error {
+	_, err := tx.Exec(ctx, `INSERT INTO audit_events(
+			id,actor_type,actor_id,action,object_type,object_id,request_id,source_ip_hmac,before_hash,after_hash)
+		VALUES($1,'admin',$2,$3,'notice_webhook_setting','1',$4,$5,$6,$7)`,
+		randomUUID(), actor.ID, action, actor.RequestID, actor.SourceIPHash,
+		noticeWebhookHash(before), noticeWebhookHash(after))
+	return err
+}
+
+func noticeWebhookHash(info NoticeWebhookInfo) string {
+	if !info.Configured {
+		return "not-configured"
+	}
+	return info.Fingerprint
+}

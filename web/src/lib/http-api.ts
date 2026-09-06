@@ -385,6 +385,12 @@ export type BackendSystemSettings = {
     cidrs: string[];
     current_ip: string;
   };
+  notice_webhook?: {
+    configured?: boolean;
+    fingerprint?: string;
+    updated_by?: string;
+    updated_at?: string | null;
+  };
 };
 
 export type BackendInvoicePolicy = {
@@ -1331,6 +1337,13 @@ export function mapAdminSettings(
     adminAccess: {
       cidrs: settings.admin_access.cidrs,
       currentIP: settings.admin_access.current_ip,
+    },
+    // 整块缺失当成"未配置"：老版本后端没有这个字段，那时它确实没配。
+    noticeWebhook: {
+      configured: settings.notice_webhook?.configured === true,
+      fingerprint: settings.notice_webhook?.fingerprint ?? "",
+      updatedBy: settings.notice_webhook?.updated_by ?? "",
+      updatedAt: settings.notice_webhook?.updated_at ?? null,
     },
   };
 }
@@ -2758,6 +2771,29 @@ export const httpInvoiceApi: InvoiceApiClient = {
     anchor.download = request.pdfName ?? `${request.requestNo}.pdf`;
     anchor.click();
     URL.revokeObjectURL(url);
+  },
+
+  async saveNoticeWebhook(webhookURL) {
+    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook", {
+      method: "PUT",
+      role: "admin",
+      body: { webhook_url: webhookURL },
+    });
+  },
+
+  async clearNoticeWebhook() {
+    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook", {
+      method: "DELETE",
+      role: "admin",
+    });
+  },
+
+  async sendNoticeWebhookTest() {
+    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook/test", {
+      method: "POST",
+      role: "admin",
+      body: {},
+    });
   },
 
   async getAdminSettings() {

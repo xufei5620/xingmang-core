@@ -4788,6 +4788,9 @@ function SystemSettingsPage() {
     startTLS: true,
     authorizationCode: "",
   });
+  // 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）。**只进不出**：保存后
+  // 清空输入框，页面从不回读地址——与 SMTP 授权码同一条纪律。
+  const [noticeWebhookURL, setNoticeWebhookURL] = useState("");
   const [cidrs, setCIDRs] = useState<string[]>([]);
   const [networkEntry, setNetworkEntry] = useState("");
 
@@ -5155,6 +5158,141 @@ function SystemSettingsPage() {
                     <Send size={16} />
                   )}
                   发送测试邮件
+                </button>
+              </div>
+            </section>
+
+            {/* 企业微信通知（XM-INV-NOTICE-WEBHOOK-SETTING）。
+                产品负责人：「这个地址我希望的是在前端可以设置配置。如果写入
+                服务器中，那不是想更换很麻烦？」——原方案放宿主机文件，换群要
+                SSH 上去改再重启。搬到这里之后，改完下一条通知就用新地址。 */}
+            <section className="settings-card card">
+              <div className="settings-card-head">
+                <div className="settings-section-icon">
+                  <Send size={19} />
+                </div>
+                <div>
+                  <h2>企业微信通知</h2>
+                  <p>
+                    用户提交开票申请时推一条消息到群机器人。整个 Webhook
+                    地址就是凭据，保存后不会再显示。
+                  </p>
+                </div>
+                <Badge tone={settings.noticeWebhook.configured ? "green" : "amber"}>
+                  {settings.noticeWebhook.configured ? "已配置" : "未配置"}
+                </Badge>
+              </div>
+              {settings.noticeWebhook.configured && (
+                <div className="current-ip">
+                  <ShieldCheck size={17} />
+                  <div>
+                    <span>当前地址指纹</span>
+                    <strong>{settings.noticeWebhook.fingerprint}</strong>
+                  </div>
+                  <small>
+                    {settings.noticeWebhook.updatedAt
+                      ? `${dateTime(settings.noticeWebhook.updatedAt)} 由 ${settings.noticeWebhook.updatedBy} 更新`
+                      : ""}
+                  </small>
+                </div>
+              )}
+              <form
+                className="settings-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const value = noticeWebhookURL.trim();
+                  if (!value) {
+                    toast("请粘贴群机器人的 Webhook 地址。", "error");
+                    return;
+                  }
+                  void run(
+                    "notice-webhook",
+                    () => invoiceApi.saveNoticeWebhook(value),
+                    "通知地址已保存；地址不会再次显示，请用「发送测试」确认。",
+                  );
+                  setNoticeWebhookURL("");
+                }}
+              >
+                <label className="field">
+                  <span>群机器人 Webhook 地址</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={noticeWebhookURL}
+                    placeholder={
+                      settings.noticeWebhook.configured
+                        ? "已配置；粘贴新地址可覆盖"
+                        : "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+                    }
+                    onChange={(event) => setNoticeWebhookURL(event.target.value)}
+                  />
+                  <small>
+                    地址里的 key 就是鉴权凭据，所以这里按密码处理：保存后页面
+                    永不回读，只显示指纹供核对。
+                  </small>
+                </label>
+                <div className="settings-actions">
+                  <button
+                    className="button button-primary"
+                    disabled={saving === "notice-webhook"}
+                  >
+                    {saving === "notice-webhook" ? (
+                      <Loader2 className="spin" size={16} />
+                    ) : (
+                      <Save size={16} />
+                    )}
+                    保存通知地址
+                  </button>
+                </div>
+              </form>
+              <div className="test-mail-row">
+                <div className="verified-recipient-note">
+                  <Send size={17} />
+                  <span>
+                    消息到没到那个群，比看一段前缀可靠——换了地址之后用它确认。
+                  </span>
+                </div>
+                <button
+                  className="button button-secondary"
+                  disabled={
+                    saving === "notice-webhook-test" ||
+                    !settings.noticeWebhook.configured
+                  }
+                  onClick={() =>
+                    void run(
+                      "notice-webhook-test",
+                      () => invoiceApi.sendNoticeWebhookTest(),
+                      "测试消息已发出，请到群里确认。",
+                    )
+                  }
+                >
+                  {saving === "notice-webhook-test" ? (
+                    <Loader2 className="spin" size={16} />
+                  ) : (
+                    <Send size={16} />
+                  )}
+                  发送测试消息
+                </button>
+                <button
+                  className="button button-secondary"
+                  disabled={
+                    saving === "notice-webhook-clear" ||
+                    !settings.noticeWebhook.configured
+                  }
+                  onClick={() =>
+                    void run(
+                      "notice-webhook-clear",
+                      () => invoiceApi.clearNoticeWebhook(),
+                      "通知地址已清除；在重新配置之前不会再推送。",
+                    )
+                  }
+                >
+                  {saving === "notice-webhook-clear" ? (
+                    <Loader2 className="spin" size={16} />
+                  ) : (
+                    <X size={16} />
+                  )}
+                  清除
                 </button>
               </div>
             </section>

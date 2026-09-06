@@ -539,6 +539,16 @@ export interface InvoiceSystemSettings {
     cidrs: string[];
     currentIP: string;
   };
+  /** 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）。
+   *  **没有地址本身**：整个 URL 是凭据，页面只拿得到"配没配"与指纹。 */
+  noticeWebhook: {
+    configured: boolean;
+    /** sha256 前缀，可与"我刚才粘的那个"比对，反推不出地址。 */
+    fingerprint: string;
+    updatedBy: string;
+    /** 未配置时为 null——不是零时刻。 */
+    updatedAt: string | null;
+  };
 }
 
 export interface InvoiceRuleSettingsInput {

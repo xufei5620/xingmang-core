@@ -23,8 +23,8 @@ import (
 	"invoice-system/backend/internal/httpapi"
 	"invoice-system/backend/internal/ledger"
 	"invoice-system/backend/internal/mailer"
-	"invoice-system/backend/internal/notify"
 	"invoice-system/backend/internal/migrate"
+	"invoice-system/backend/internal/notify"
 	"invoice-system/backend/internal/postgresstore"
 	"invoice-system/backend/internal/securefields"
 	"invoice-system/backend/internal/sourceingest"
@@ -503,39 +503,30 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		})},
 	}
 	// XM-INV-SUBMIT-NOTICE：提交开票申请后推一条企业微信通知。
+	// XM-INV-NOTICE-WEBHOOK-SETTING：地址改为在管理端配置（存库、密文）。
 	//
-	// **默认不挂载**：没配 INVOICE_NOTICE_WEBHOOK_FILE 时这一段整个跳过，
-	// 发件箱照常入队（那是同事务的事，与投递无关），只是没有循环去取它。
-	// 这样这一片上线不改变任何现有环境的行为；运营把地址放进文件、重启 api
-	// 就开始投递，历史那几条会一起补发出去。
+	// **循环无条件挂载**，与之前"配了文件才挂"不同。原因是地址已经不是启动
+	// 期的常量：运营随时可以在页面上填、改、清。挂着但没配地址时，投递会以
+	// "地址取不到"失败并记进发件箱——那正是运营该看到的事实（管理端申请详情
+	// 里那一格会显示失败原因），比进程里悄悄没有这个循环诚实得多。
 	//
-	// 地址从**文件**读、不从环境变量读：整个 Webhook 地址就是凭据（企微把
-	// 鉴权 key 放在查询参数里），与本仓库其它凭据同一手法。
-	if path := strings.TrimSpace(os.Getenv("INVOICE_NOTICE_WEBHOOK_FILE")); path != "" {
-		webhook, readErr := readSecretLine(path, 4<<10)
-		if readErr != nil {
-			return appRuntime{}, fmt.Errorf("INVOICE_NOTICE_WEBHOOK_FILE: %w", readErr)
-		}
-		sender, senderErr := notify.NewWeComSender(webhook, nil)
-		if senderErr != nil {
-			// 地址填错要在进程起来时就说清楚，而不是等到第一条通知该发的
-			// 时候——那时候没人在看日志。错误里不含地址本身。
-			return appRuntime{}, senderErr
-		}
-		noticeWorker := notify.Worker{
-			Repository: store, Sender: sender,
-			Environment: strings.TrimSpace(os.Getenv("APP_ENV")),
-			Logger:      slog.Default(),
-		}
-		workers = append(workers, workerSpec{
-			Name: "invoice-notice-outbox", Interval: 5 * time.Second,
-			Worker: workerFunc(func(noticeCtx context.Context) (int, error) {
-				sent, _, runErr := noticeWorker.RunOnce(noticeCtx)
-				return sent, runErr
-			}),
-		})
+	// 没配地址也不会把队列跑干：失败按指数退避，第 8 次停在 failed。
+	noticeWorker := notify.Worker{
+		Repository: store,
+		// 每次投递现取地址：换群之后下一条通知就用新地址，不必重启。
+		Sender: notify.NewWeComSender(func(noticeCtx context.Context) (string, error) {
+			return settingsService.NoticeWebhookForDelivery(noticeCtx)
+		}, nil),
+		Environment: strings.TrimSpace(os.Getenv("APP_ENV")),
+		Logger:      slog.Default(),
 	}
-
+	workers = append(workers, workerSpec{
+		Name: "invoice-notice-outbox", Interval: 5 * time.Second,
+		Worker: workerFunc(func(noticeCtx context.Context) (int, error) {
+			sent, _, runErr := noticeWorker.RunOnce(noticeCtx)
+			return sent, runErr
+		}),
+	})
 
 	closeOnError = false
 	return appRuntime{API: api, AuthMode: "oidc", SourceMode: "agent", Workers: workers, close: store.Close}, nil

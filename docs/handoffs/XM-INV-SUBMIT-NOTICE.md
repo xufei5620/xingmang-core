@@ -1,7 +1,8 @@
 # XM-INV-SUBMIT-NOTICE：用户提交开票申请后，推一条企业微信通知
 
-- **status:** implemented，未发布。**对现有环境零改动**：没配
-  `INVOICE_NOTICE_WEBHOOK_FILE` 时投递循环整个不挂载。
+- **status:** implemented，未发布。**对现有环境零改动**：没配通知地址时
+  投递会失败并记进发件箱（原先的设计是「没配文件就不挂载循环」，已由
+  **XM-INV-NOTICE-WEBHOOK-SETTING** 改为地址存库、在管理端配置）。
 - **branch:** `ai/claude/XM-INV-AUTOLOGIN`（发布线），worktree `K:/发票/wt-XM-INV-AUTOLOGIN`。
 - **产品负责人 2026-09-06：** 「开票这边用户提交了开票应该需要有一个通知发到
   Webhook 企业微信那边」。
@@ -85,18 +86,16 @@
   只入队一次。
 - 全量：`go test -p 1 -count=1 ./...`（带 `INVOICE_TEST_DATABASE_URL`）。
 
-## 启用（生产，需产品负责人执行）
+## 启用（生产）
 
-1. 把企业微信群机器人的 Webhook 地址写进宿主机一个 0600 文件，例如
-   `/root/invoice-system/config/notice-webhook`。
-2. `deploy/docker-compose.prod.yml` 的 api 服务 `volumes` 加一行：
-   `- ${INVOICE_NOTICE_WEBHOOK_HOST_FILE}:/config/notice-webhook:ro`
-   （不预先写这行：compose 的挂载没有「可选」，写了就必须存在，而这一片的前提
-   是对现有环境零改动。）
-3. `.env.production` 里设
-   `INVOICE_NOTICE_WEBHOOK_HOST_FILE=/root/invoice-system/config/notice-webhook`
-   与 `INVOICE_NOTICE_WEBHOOK_FILE=/config/notice-webhook`。
-4. 重启 api。此前攒下的通知会一起补发出去（发件箱一直在入队）。
+**已改为在管理端配置**（XM-INV-NOTICE-WEBHOOK-SETTING）：
+管理端 → 设置 → 企业微信通知，粘贴群机器人地址、保存、点「发送测试消息」
+确认。不需要碰服务器、不需要改 compose、不需要重启 api；此前攒下的通知会
+在下一轮投递里补发出去（发件箱一直在入队）。
+
+原方案（宿主机 0600 文件 + compose 挂载 + 重启）已作废——产品负责人
+2026-09-06：「这个地址我希望的是在前端可以设置配置。如果写入服务器中，
+那不是想更换很麻烦？」
 
 ## follow_ups
 

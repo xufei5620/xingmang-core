@@ -116,11 +116,15 @@ func TestMultiLineValueCannotEscapeTheQuoteBlock(t *testing.T) {
 	}
 }
 
-// 地址本身就是凭据：构造期就要拒绝形状不对的，且任何错误都不得回显它。
-func TestSenderRejectsBadAddressesWithoutEchoingThem(t *testing.T) {
+// 地址本身就是凭据：形状不对的要被拒，且任何错误都不得回显它。
+//
+// XM-INV-NOTICE-WEBHOOK-SETTING 起，校验从构造期挪到了**保存那一刻**
+// （管理端点保存时调 ValidateWebhookAddress）——那时人就在页面前，比等
+// api 重启才在日志里报错强得多。
+func TestValidateWebhookAddressRejectsBadShapesWithoutEchoingThem(t *testing.T) {
 	secretish := "https://qyapi.example.test/webhook/send?key=super-secret-value"
 	for _, address := range []string{"", "   ", "http://qyapi.example.test/send?key=super-secret-value", "://bad"} {
-		_, err := NewWeComSender(address, nil)
+		err := ValidateWebhookAddress(address)
 		if err == nil {
 			t.Fatalf("address %q must be rejected", address)
 		}
@@ -128,8 +132,49 @@ func TestSenderRejectsBadAddressesWithoutEchoingThem(t *testing.T) {
 			t.Fatalf("error echoed the credential: %v", err)
 		}
 	}
-	if _, err := NewWeComSender(secretish, nil); err != nil {
+	if err := ValidateWebhookAddress(secretish); err != nil {
 		t.Fatalf("a well-formed https address must be accepted: %v", err)
+	}
+}
+
+// 地址每次投递现取：换了地址，下一条就用新的，不必重启。
+func TestSenderResolvesTheAddressOnEverySend(t *testing.T) {
+	hits := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = io.WriteString(w, `{"errcode":0,"errmsg":"ok"}`)
+	}))
+	defer server.Close()
+	calls := 0
+	sender := NewWeComSender(func(context.Context) (string, error) {
+		calls++
+		return server.URL + "/webhook/send?key=k", nil
+	}, server.Client())
+	for i := 0; i < 3; i++ {
+		if err := sender.Send(context.Background(), "hello"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("地址应当每次现取，实际只取了 %d 次", calls)
+	}
+	if hits != 3 {
+		t.Fatalf("上游收到 %d 条，want 3", hits)
+	}
+}
+
+// 取不到地址（没配、或解密失败）不是崩溃，是"这条发不出去"——发件箱会重试，
+// 而错误里不能夹带任何地址。
+func TestSenderFailsClosedWhenTheAddressIsUnavailable(t *testing.T) {
+	sender := NewWeComSender(func(context.Context) (string, error) {
+		return "", errors.New("secret missing")
+	}, nil)
+	err := sender.Send(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("取不到地址必须算失败")
+	}
+	if strings.Contains(err.Error(), "secret missing") {
+		t.Fatalf("不该把底层错误原样带出来：%v", err)
 	}
 }
 
@@ -141,11 +186,8 @@ func TestSenderPostsMarkdownAndReadsErrcode(t *testing.T) {
 		_, _ = io.WriteString(w, `{"errcode":0,"errmsg":"ok"}`)
 	}))
 	defer server.Close()
-	sender, err := NewWeComSender(server.URL+"/webhook/send?key=k", server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = sender.Send(context.Background(), "hello"); err != nil {
+	sender := NewWeComSender(func(context.Context) (string, error) { return server.URL + "/webhook/send?key=k", nil }, server.Client())
+	if err := sender.Send(context.Background(), "hello"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if got["msgtype"] != "markdown" {
@@ -159,11 +201,8 @@ func TestSenderFailsOnBusinessErrorAndHidesUpstreamText(t *testing.T) {
 		_, _ = io.WriteString(w, `{"errcode":93000,"errmsg":"invalid webhook url https://qyapi/send?key=leak"}`)
 	}))
 	defer server.Close()
-	sender, err := NewWeComSender(server.URL+"/webhook/send?key=k", server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = sender.Send(context.Background(), "hello")
+	sender := NewWeComSender(func(context.Context) (string, error) { return server.URL + "/webhook/send?key=k", nil }, server.Client())
+	err := sender.Send(context.Background(), "hello")
 	if err == nil {
 		t.Fatal("errcode 93000 must be an error even though HTTP was 200")
 	}

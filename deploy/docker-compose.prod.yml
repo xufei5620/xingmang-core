@@ -280,14 +280,6 @@ services:
       # every release before RC94). Proved equal to the single pass on the
       # 2026-09-04 incident's own data (RC98's differential); 25 is that value.
       ELIGIBILITY_EVIDENCE_BATCH_LIMIT: ${ELIGIBILITY_EVIDENCE_BATCH_LIMIT:-0}
-      # XM-INV-SUBMIT-NOTICE：企业微信通知的 Webhook 地址文件（容器内路径）。
-      # **留空 = 不投递**，这也是默认：发件箱照常入队，只是没有循环去取它。
-      # 启用时除了填这个变量，还要在下面 volumes 里加一行把宿主机上的地址
-      # 文件挂进来（只读），例如：
-      #   - ${INVOICE_NOTICE_WEBHOOK_HOST_FILE}:/config/notice-webhook:ro
-      # 不预先写这行挂载：compose 的挂载没有"可选"，写了就必须存在，而这一
-      # 片的前提是对现有环境零改动。
-      INVOICE_NOTICE_WEBHOOK_FILE: ${INVOICE_NOTICE_WEBHOOK_FILE:-}
       INGEST_PROXY_CIDRS: ${INVOICE_INGEST_PROXY_CIDR:?set the exact ingest-proxy /32}
       MIGRATIONS_DIR: /app/migrations
     secrets:

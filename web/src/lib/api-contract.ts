@@ -184,4 +184,10 @@ export interface InvoiceApiClient {
   saveSMTPSettings(input: SMTPSettingsInput): Promise<void>;
   sendSMTPTest(): Promise<void>;
   saveAdminAccess(input: AdminAccessSettingsInput): Promise<void>;
+  /** 保存（或覆盖）企业微信通知地址。**保存后永不回读**——想确认配对没有，
+   *  用 sendNoticeWebhookTest。 */
+  saveNoticeWebhook(webhookURL: string): Promise<void>;
+  clearNoticeWebhook(): Promise<void>;
+  /** 往已保存的地址发一条测试消息。消息到没到那个群，比看一段前缀可靠。 */
+  sendNoticeWebhookTest(): Promise<void>;
 }

@@ -9,10 +9,12 @@ import (
 // MemoryRepository is used only by the local mock server. Production uses the
 // PostgreSQL repository and an external, durable encryption key.
 type MemoryRepository struct {
-	mu         sync.Mutex
-	settings   Settings
-	configured bool
-	secret     SecretEnvelope
+	mu                  sync.Mutex
+	settings            Settings
+	configured          bool
+	secret              SecretEnvelope
+	noticeWebhook       NoticeWebhookInfo
+	noticeWebhookSecret SecretEnvelope
 }
 
 func NewMemoryRepository(initial Settings) *MemoryRepository {
@@ -129,4 +131,40 @@ func (r *MemoryRepository) LoadSMTPSecret(context.Context) (SecretEnvelope, erro
 		return SecretEnvelope{}, ErrSecretMissing
 	}
 	return SecretEnvelope{Ciphertext: append([]byte(nil), r.secret.Ciphertext...), KeyVersion: r.secret.KeyVersion}, nil
+}
+
+// --- 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）---------------------
+
+func (r *MemoryRepository) GetNoticeWebhook(context.Context) (NoticeWebhookInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.noticeWebhook, nil
+}
+
+func (r *MemoryRepository) StoreNoticeWebhook(_ context.Context, envelope SecretEnvelope, fingerprint string, actor Actor) (NoticeWebhookInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.noticeWebhookSecret = envelope
+	r.noticeWebhook = NoticeWebhookInfo{
+		Configured: true, Fingerprint: fingerprint,
+		UpdatedBy: actor.ID, UpdatedAt: time.Now().UTC(),
+	}
+	return r.noticeWebhook, nil
+}
+
+func (r *MemoryRepository) ClearNoticeWebhook(context.Context, Actor) (NoticeWebhookInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.noticeWebhookSecret = SecretEnvelope{}
+	r.noticeWebhook = NoticeWebhookInfo{}
+	return r.noticeWebhook, nil
+}
+
+func (r *MemoryRepository) LoadNoticeWebhook(context.Context) (SecretEnvelope, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.noticeWebhookSecret.Ciphertext) == 0 {
+		return SecretEnvelope{}, ErrSecretMissing
+	}
+	return r.noticeWebhookSecret, nil
 }
