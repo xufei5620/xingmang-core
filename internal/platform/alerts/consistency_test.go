@@ -84,6 +84,8 @@ func TestRulesCoverDocumentedFirstBatch(t *testing.T) {
 		"metric.sync.failed",
 		// XM-0049：可用天数低于告警档（UI 交接 §10.4 的最后一条要求）。
 		"upstream.runway.low",
+		// XM-UPSTREAM-VERSION-ALERT：上游自报版本变了，各处钉子要重新核对。
+		"upstream.version.changed",
 	}
 	got := alerts.RuleKeys()
 	if len(got) != len(want) {
