@@ -1,6 +1,8 @@
 # 企业微信消息目录：收到每条消息代表什么
 
-> 配套：`docs/modules/notify/README.md`（信封为什么长这样）、
+> 配套：`docs/modules/notify/INTEGRATION.md`（**新功能要发通知时照那份做**：
+> 该不该发、选哪种模型、每种消息的模板、噪声预算）、
+> `docs/modules/notify/README.md`（信封为什么长这样）、
 > `internal/platform/alerts/README.md`（告警规则的判据细节）。
 > 本文档由 `internal/platform/notify/catalog_test.go` 钉住完整性：
 > **新增一种消息而没写进这里，测试会红。**

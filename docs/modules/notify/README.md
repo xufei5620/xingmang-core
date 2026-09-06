@@ -1,6 +1,10 @@
 # notify —— 企业微信通知的信封
 
 > 设计稿 `docs/superpowers/specs/2026-09-06-xm-notify-envelope-design.md`（XM-NOTIFY-ENVELOPE）
+>
+> **要给一个新功能接通知？看 `INTEGRATION.md`，不是这一份。**
+> 这一份讲信封为什么长这样（写给改 notify 包的人）；`INTEGRATION.md` 讲怎么接
+> （写给做功能的人）；`CATALOG.md` 讲收到每条消息代表什么（写给运营）。
 
 平台有三条互相独立的企业微信群机器人通道，各有各的凭据引用、各写各的格式。运营把同一个
 Webhook 地址填进了三个凭据——这是合理用法——于是三种消息落在同一个群里，而它们谁也没说清

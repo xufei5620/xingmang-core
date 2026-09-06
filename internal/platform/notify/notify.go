@@ -219,3 +219,61 @@ func SortedLines(values map[string]string) []Line {
 	}
 	return lines
 }
+
+// --- 模板（XM-NOTIFY-INTEGRATION）-----------------------------------------
+//
+// 产品负责人 2026-09-06：「规范的基础上还需要对不同需要进行通知的功能制定好
+// 通知的模板和格式。这样才能清楚每条通知代表什么。」
+//
+// **模板写成数据而不是散文**，因为散文会和实现漂开：每种消息该带哪几行，
+// 在这里声明一次，由测试对着真实渲染结果核对（notify 的模板测试与各域自己的
+// 测试）。漏了一行、改了标签，测试就红——而不是等到运营在群里看见一条缺了
+// 关键字段的消息。
+//
+// 只声明**必须有**的行。可选行（比如告警的「指标」只在有来源指标时才有）不在
+// 这里，它们由各域自己判断——把可选行也钉死会逼出一堆空值占位，而空值行本来
+// 就该被省略。
+var templates = map[string][]string{
+	// 告警：读的人要能回答"什么规则、现在什么状态、响了多久"。
+	"XM-ALERT": {"规则", "状态", "首次发现", "最近发现"},
+	// 卡片交易：商户与金额是这条消息的全部价值；状态决定要不要动手。
+	"XM-CARD-transaction": {"商户", "金额", "状态"},
+	// 卡片状态变更：只有一件事要说。
+	"XM-CARD-status_change": {"当前状态"},
+	// 接码：号码定位、码是内容、供应商用来查上游、时间用来判断还有没有效。
+	"XM-SMS-code": {"号码", "验证码", "供应商", "时间"},
+}
+
+// TemplateFor 返回这条消息**必须**包含的行标签。
+//
+// 查找按「先精确匹配 XM-域-Kind，再回退到 XM-域」：告警的 Kind 是规则键，
+// 每加一条规则都登记一遍既没必要也会漏，所以整个告警域共用一套必备行。
+func TemplateFor(e Envelope) []string {
+	if labels, ok := templates[e.Code()]; ok {
+		return labels
+	}
+	if labels, ok := templates["XM-"+strings.ToUpper(string(e.Domain))]; ok {
+		return labels
+	}
+	return nil
+}
+
+// MissingTemplateLines 返回模板要求、但这条信封没给（或给了空值）的行。
+//
+// 给测试用，不在渲染路径上：**一条缺字段的消息也要发得出去**——半条消息
+// 胜过没有消息，而缺字段该在测试里被拦下，不该在运行时把通知丢掉。
+func (e Envelope) MissingTemplateLines() []string {
+	present := make(map[string]bool, len(e.Lines))
+	for _, line := range e.Lines {
+		if oneLine(line.Label) != "" && oneLine(line.Value) != "" {
+			present[oneLine(line.Label)] = true
+		}
+	}
+	var missing []string
+	for _, label := range TemplateFor(e) {
+		if !present[label] {
+			missing = append(missing, label)
+		}
+	}
+	return missing
+}
