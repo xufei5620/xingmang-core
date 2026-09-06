@@ -246,6 +246,12 @@ func accountLedgerDetailDTO(detail postgresstore.AccountLedgerDetail, thresholdM
 		"service_units": detail.OpeningBalanceServiceUnits,
 		"unit_code":     detail.OpeningBalanceUnitCode,
 	}
+	// XM-INV-LEDGER-RECHARGE-POLICY-START: the operator has to be able to tell
+	// "since when has the system been watching this account" (this field, per
+	// account) from "since when is money invoiceable" (the immutable policy
+	// start, identical for everyone). Conflating them is exactly what the old
+	// recharges filter did, silently and inside a money column.
+	dto["cutover_at"] = detail.CutoverAt
 	recharges := make([]map[string]any, 0, len(detail.Recharges))
 	for _, r := range detail.Recharges {
 		recharges = append(recharges, map[string]any{

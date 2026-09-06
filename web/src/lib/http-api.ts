@@ -198,6 +198,8 @@ type BackendAccountLedgerConsumptionDay = {
 };
 
 type BackendAccountLedgerDetail = BackendAccountLedgerListItem & {
+  // 老后端没有这个字段时按空串处理（可选），不让整个详情拒绝解析。
+  cutover_at?: string;
   opening_balance_units: { service_units: string; unit_code: string };
   recharges_since_start: BackendAccountLedgerRecharge[];
   consumption_timeline: BackendAccountLedgerConsumptionDay[];
@@ -1061,6 +1063,7 @@ function mapAccountLedgerDetail(
   }
   return {
     ...listItem,
+    cutoverAt: String(value.cutover_at ?? ""),
     openingBalance: {
       serviceUnits: value.opening_balance_units.service_units,
       unitCode: value.opening_balance_units.unit_code,

@@ -490,6 +490,7 @@ const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
     thresholdReached: true,
     blockState: "invoiceable",
     lastCheckpointAt: "2026-09-03T06:25:11.000Z",
+    cutoverAt: new Date(Date.now() - 86_400_000).toISOString(),
     openingBalance: { serviceUnits: "48200", unitCode: "SUB2_BALANCE_1E8" },
     recharges: [
       {
@@ -534,6 +535,7 @@ const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
     thresholdReached: false,
     blockState: "frozen_manual_review",
     lastCheckpointAt: "2026-09-02T18:00:00.000Z",
+    cutoverAt: new Date(Date.now() - 86_400_000).toISOString(),
     openingBalance: { serviceUnits: "0", unitCode: "NEWAPI_QUOTA" },
     recharges: [
       {
@@ -563,6 +565,7 @@ const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
     thresholdReached: false,
     blockState: "not_invoiceable_pending_reconciliation",
     lastCheckpointAt: "2026-09-03T06:25:11.000Z",
+    cutoverAt: new Date(Date.now() - 86_400_000).toISOString(),
     openingBalance: { serviceUnits: "48200", unitCode: "SUB2_BALANCE_1E8" },
     recharges: [
       {
@@ -598,6 +601,7 @@ const accountLedgerDetails: Record<string, AccountLedgerDetail> = {
     thresholdReached: false,
     blockState: "below_threshold",
     lastCheckpointAt: "2026-09-03T01:00:00.000Z",
+    cutoverAt: new Date(Date.now() - 86_400_000).toISOString(),
     openingBalance: { serviceUnits: "0", unitCode: "SUB2_BALANCE_1E8" },
     recharges: [
       {
@@ -620,6 +624,7 @@ const accountLedgerItems: AccountLedgerListItem[] = Object.values(
   ({
     recharges: _recharges,
     consumptionTimeline: _consumptionTimeline,
+    cutoverAt: _cutoverAt,
     openingBalance: _openingBalance,
     blockReason: _blockReason,
     lastReconciledAt: _lastReconciledAt,

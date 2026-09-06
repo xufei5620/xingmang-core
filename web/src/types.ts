@@ -268,6 +268,11 @@ export interface AccountLedgerConsumptionDay {
 
 export interface AccountLedgerDetail extends AccountLedgerListItem {
   openingBalance: { serviceUnits: string; unitCode: string };
+  /** 系统第一次为这个账号建立可信余额基线的时刻（每个账号各不相同）。
+   *  **不是**开票起点——那是全局策略起点，对所有账号一致、由库级约束保证。
+   *  这两件事以前被「起点后充值」那一列悄悄混在一起，见
+   *  XM-INV-LEDGER-RECHARGE-POLICY-START。ISO 8601，空串表示后端未提供。 */
+  cutoverAt: string;
   recharges: AccountLedgerRecharge[];
   consumptionTimeline: AccountLedgerConsumptionDay[];
   // A concrete Chinese sentence naming the blocking fact, present unless
