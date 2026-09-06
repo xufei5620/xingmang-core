@@ -431,10 +431,12 @@ $releaseAllowedSigners = '<reviewed release-tree allowed_signers file>'
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $releaseSignature -PathType Leaf)) {
   throw 'RC100 artifact SHA256SUMS signature was not created'
 }
-Get-Content -Raw -LiteralPath $checksumManifest | & ssh-keygen -Y verify `
-  -f "$releaseAllowedSigners" -I invoice-release@solov.cc `
-  -n solov-invoice-release-v1 -s "$releaseSignature"
-if ($LASTEXITCODE -ne 0) { throw 'RC100 artifact SHA256SUMS signature verification failed' }
+# 2026-09-06：**不要用 `Get-Content -Raw | ssh-keygen`**。签名算的是磁盘上的原始
+# 字节，而 PowerShell 把内容送进原生命令的管道时会重新编码，于是必然报
+# `Signature verification failed: incorrect signature`——签名其实是好的，坏的是
+# 验证方式。用重定向把原始字节喂进去（实测于 RC101 发布当天）：
+& cmd /c "ssh-keygen -Y verify -f \"%RELEASE_ALLOWED_SIGNERS%\" -I invoice-release@solov.cc -n solov-invoice-release-v1 -s \"%RELEASE_SIGNATURE%\" < \"%CHECKSUM_MANIFEST%\""
+if ($LASTEXITCODE -ne 0) { throw 'RC101 artifact SHA256SUMS signature verification failed' }
 ```
 
 Only after this signature and its verification pass may the exact signed source
