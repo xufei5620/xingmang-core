@@ -183,3 +183,55 @@ func (s *Store) MarkInvoiceNoticeFailed(ctx context.Context, id, errorCode strin
 	}
 	return nil
 }
+
+// InvoiceNoticeState 是一条通知在管理端要显示的投递事实。
+//
+// **与 InvoiceNotice 不是同一个东西**：那个是投递循环取件时用的，带着申请
+// 自身的字段（单号、金额、状态）好去渲染消息；这个只回答"这条通知发出去
+// 了没有"，不带任何申请内容——管理端那一屏本来就在申请详情里，再抄一份
+// 只会有两份可能不一致的事实。
+type InvoiceNoticeState struct {
+	ID            string
+	Kind          string
+	Status        string
+	AttemptCount  int
+	NextAttemptAt time.Time
+	// DeliveredAt 为 nil 表示还没送达（排队中或已放弃），不是"零时刻送达"。
+	DeliveredAt *time.Time
+	// LastErrorCode 是我方分类过的短码（如 "wecom: errcode 93000"），
+	// **不含 Webhook 地址、也不含上游自由文本**——投递侧已经保证了这一点
+	// （见 internal/notify 的 WeComSender.Send：net/http 的错误会带上含 key
+	// 的 URL，所以那里刻意不把 err 带出来）。因此这个值可以直接给管理员看。
+	LastErrorCode string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// ListInvoiceNoticesForRequest 列出一份申请的全部通知投递状态，最近入队的在前。
+//
+// **不做 principal 归属校验**：调用方是管理端专用路由。这条信息是运维事实
+// （"那条企业微信通知发出去了没有"），不是申请人的业务数据——用户看到自己
+// 的申请有没有触发内部推送，既没有用，也是一次不必要的内部暴露。
+func (s *Store) ListInvoiceNoticesForRequest(ctx context.Context, requestID string) ([]InvoiceNoticeState, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id,kind,status,attempt_count,next_attempt_at,delivered_at,
+			last_error_code,created_at,updated_at
+		FROM invoice_notice_outbox
+		WHERE invoice_request_id=$1::uuid
+		ORDER BY created_at DESC, id`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := []InvoiceNoticeState{}
+	for rows.Next() {
+		var state InvoiceNoticeState
+		if err = rows.Scan(&state.ID, &state.Kind, &state.Status, &state.AttemptCount,
+			&state.NextAttemptAt, &state.DeliveredAt, &state.LastErrorCode,
+			&state.CreatedAt, &state.UpdatedAt); err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
+}

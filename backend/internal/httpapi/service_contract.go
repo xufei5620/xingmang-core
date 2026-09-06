@@ -66,6 +66,7 @@ type OperationsService interface {
 	ListUserEligibilitySummaries(context.Context, string, domain.SourceType) ([]application.UserEligibilitySummary, error)
 	ResolveRefundCase(context.Context, string, string, string, string, string) (postgresstore.RefundCase, error)
 	GetInvoiceDeliveryState(context.Context, string, string, bool, domain.SourceType) (postgresstore.InvoiceDeliveryState, error)
+	ListInvoiceNoticesForRequest(context.Context, string) ([]postgresstore.InvoiceNoticeState, error)
 	RequeueEmail(context.Context, string, string, string) (domain.EmailOutbox, error)
 	RecordAdminAudit(context.Context, string, string, string, string, string) error
 }

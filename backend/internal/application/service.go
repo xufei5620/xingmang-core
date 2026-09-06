@@ -856,6 +856,14 @@ func (s *Service) GetInvoiceDeliveryState(ctx context.Context, principalID, requ
 	return s.store.GetInvoiceDeliveryState(ctx, principalID, requestID, admin, platform)
 }
 
+// ListInvoiceNoticesForRequest 列出一份申请的企业微信通知投递状态（管理端专用）。
+//
+// 不叠平台作用域（XM-INV-PLATFORM-SCOPE）：这条路由只挂在 admin 上，而管理端
+// 会话没有平台维度。调用方已经通过 require("admin") 了。
+func (s *Service) ListInvoiceNoticesForRequest(ctx context.Context, requestID string) ([]postgresstore.InvoiceNoticeState, error) {
+	return s.store.ListInvoiceNoticesForRequest(ctx, requestID)
+}
+
 // GetInvoiceDeliveryStatus is not reachable from any HTTP handler (unlike
 // GetInvoiceDeliveryState, it is not part of OperationsService); unscoped
 // (XM-INV-PLATFORM-SCOPE does not apply -- nothing calls this with a

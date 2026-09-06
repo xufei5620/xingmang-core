@@ -194,6 +194,9 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/admin/invoice-requests/{id}", s.require("admin", http.HandlerFunc(s.getAdminRequest)))
 	s.mux.Handle("GET /api/v1/admin/source-health", s.require("admin", http.HandlerFunc(s.getSourceHealth)))
 	s.mux.Handle("GET /api/v1/admin/invoice-requests/{id}/delivery", s.require("admin", http.HandlerFunc(s.getAdminDeliveryState)))
+	// 通知投递状态（XM-INV-NOTICE-VIEW）。**只有 admin，没有 user 变体**：
+	// "那条企业微信通知发出去了没有"是运维事实，不是申请人的业务数据。
+	s.mux.Handle("GET /api/v1/admin/invoice-requests/{id}/notices", s.require("admin", http.HandlerFunc(s.listAdminInvoiceNotices)))
 	s.mux.Handle("GET /api/v1/admin/payment-candidates", s.require("admin", http.HandlerFunc(s.listPaymentCandidates)))
 	s.mux.Handle("POST /api/v1/admin/funding-lots/{id}/verify-payment", s.require("admin", http.HandlerFunc(s.verifyNewAPIPayment)))
 	s.mux.Handle("POST /api/v1/admin/funding-lots/{id}/reject-payment", s.require("admin", http.HandlerFunc(s.rejectNewAPIPayment)))

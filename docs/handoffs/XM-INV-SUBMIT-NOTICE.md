@@ -100,8 +100,9 @@
 
 ## follow_ups
 
-- 管理端还没有「通知发件箱」的只读视图：今天要查一条通知发没发出去只能看库。
-  失败的行会一直留着，够用但不方便。
+- ~~管理端还没有「通知发件箱」的只读视图~~ —— 已由 **XM-INV-NOTICE-VIEW** 补上：
+  `GET /api/v1/admin/invoice-requests/{id}/notices`（见
+  `docs/handoffs/XM-INV-NOTICE-VIEW.md`）。
 - 只有 `request.submitted` 一种事件。审核通过、开具完成要不要也推，等产品负责人
   定——每多一种就多一份群消息，太吵会让人把整个群静音，那比不发还糟。
 - 「待审核积压 > 12h」仍属平台侧告警规则，依赖 CR-0002 冻结。
