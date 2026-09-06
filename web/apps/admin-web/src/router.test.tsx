@@ -957,6 +957,45 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     expect(link.getAttribute("href")).toBe("/jobs?sub=repeated");
   });
 
+  // XM-WORKBENCH-TRUNCATION：取满上限时要说出来。一张"没有待处理事项"的
+  // 清单如果其实被截断了，人会据此收工。
+  it("已放弃任务取满 20 条时说明这一屏可能不是全部", async () => {
+    stubFetch((url) => {
+      if (url.startsWith("/api/v1/jobs/runs")) {
+        if (!url.includes("state=discarded")) return fakeResponse(200, { items: [] });
+        return fakeResponse(200, {
+          items: Array.from({ length: 20 }, (_, index) => ({
+            id: 100 + index,
+            kind: "newapi_sync",
+            queue: "default",
+            state: "discarded",
+            attempt: 3,
+            max_attempts: 3,
+            created_at: "2026-08-26T08:00:00Z",
+            scheduled_at: "2026-08-26T08:00:00Z",
+            attempted_at: "2026-08-26T09:00:00Z",
+            finalized_at: "2026-08-26T09:30:00Z",
+            duration_ms: 90,
+            error_count: 3,
+            last_error: null,
+            args: {},
+          })),
+          next_before: 0,
+        });
+      }
+      return okHandler(url);
+    });
+    renderRoute("/dashboard?work=jobs");
+    expect(await screen.findByText(/这一屏可能不是全部/)).not.toBeNull();
+    expect(screen.getByText(/已放弃的后台任务只取了 20 条/)).not.toBeNull();
+  });
+
+  it("没取满时不显示截断提示——显示一句「没有截断」是噪声", async () => {
+    renderRoute("/dashboard?work=jobs");
+    await screen.findByText("没有待处理事项");
+    expect(screen.queryByText(/这一屏可能不是全部/)).toBeNull();
+  });
+
   it("没有已放弃的任务时说清重试中的不计入，不显示成「还没接」", async () => {
     renderRoute("/dashboard?work=jobs");
     // okHandler 的 /jobs/runs 返回空列表

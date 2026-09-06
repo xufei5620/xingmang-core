@@ -26,10 +26,13 @@ import {
   platformMatrixRows,
   recentlyRecoveredCount,
   urgentCount,
+  truncationNote,
   workItemsFromAlerts,
   workItemsFromJobRuns,
+  ACTIVE_ALERTS_LIMIT,
   RECOVERED_WINDOW_HOURS,
   WORK_CATEGORIES,
+  WORK_JOBS_LIMIT,
   type MatrixRow,
   type WorkItem,
 } from "../lib/workbench";
@@ -44,9 +47,8 @@ const RECENT_ALERTS_LIMIT = 200;
 /** 最近活动取几条。工作台只做入口，完整清单在审计记录页。 */
 const RECENT_ACTIVITY_LIMIT = 5;
 
-/** 失败任务每类取几条。工作台是入口不是清单，完整记录在后台任务页；
- *  取满时界面上要说出来，不能让人以为看到的是全部。 */
-const WORK_JOBS_LIMIT = 20;
+// 两条数据源的取数上限都在 lib/workbench：判断"是不是被截断了"要用同一个数，
+// 分两处写迟早会分叉（XM-WORKBENCH-TRUNCATION）。
 
 /** 运营工作台(ADMIN-IA v3 §一 分组 1 第 1 页，原型 `#/g/overview`)。
  *
@@ -61,8 +63,10 @@ const WORK_JOBS_LIMIT = 20;
  *  等于告诉运营「这一类现在没有问题」。 */
 export function OverviewPage() {
   const alertsQuery = useQuery({
-    queryKey: ["alerts", "active"],
-    queryFn: ({ signal }) => listAlerts({ signal }),
+    // **显式传 limit**：后端有默认值（defaultAlertLimit=200），但那个数只写在
+    // 服务端，前端看不见，也就无从判断这一屏是不是被截断了。
+    queryKey: ["alerts", "active", ACTIVE_ALERTS_LIMIT],
+    queryFn: ({ signal }) => listAlerts({ signal, limit: ACTIVE_ALERTS_LIMIT }),
   });
   // 「最近恢复」要的是**已解决**的告警，活跃列表里没有它们，所以是第二条 query。
   // 不把两者合成一条：活跃告警是这一屏最要紧的东西，它不该因为「顺便多要了
@@ -305,6 +309,13 @@ function WorkList({
   const listPending = jobsOnly ? jobsPending : pending;
   const listError = jobsOnly ? jobsError : error;
   const listRetry = jobsOnly ? onJobsRetry : onRetry;
+  // 取满上限时说出来（XM-WORKBENCH-TRUNCATION）。只在**当前这一格**真的可能
+  // 被截断时才说——在「待审批」下面提"告警取了 200 条"是噪声。
+  const truncation = truncationNote({
+    activeCategoryId: activeId,
+    alertCount: alerts.length,
+    jobCount: jobs.length,
+  });
 
   return (
     <Card title="我的待处理" hint="审批、故障、任务、财务、到期与变更">
@@ -339,6 +350,11 @@ function WorkList({
         />
       ) : (
         <ApiStateView isPending={listPending} error={listError} onRetry={listRetry}>
+          {truncation ? (
+            <p role="status" className="mb-2 text-xs text-warning">
+              {truncation}
+            </p>
+          ) : null}
           {shown.length === 0 ? (
             <EmptyState
               title="没有待处理事项"

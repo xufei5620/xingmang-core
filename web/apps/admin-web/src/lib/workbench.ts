@@ -139,6 +139,40 @@ export function workItemsFromJobRuns(runs: readonly JobRunItem[], now: Date): Wo
     });
 }
 
+/** 「我的待处理」两条数据源各自的取数上限（XM-WORKBENCH-TRUNCATION）。
+ *
+ *  活跃告警那条**必须显式传给后端**，不能靠它的默认值：默认值只写在服务端
+ *  （httpapi 的 defaultAlertLimit），前端看不见它，也就无从判断"这一屏是不是
+ *  被截断了"。写成常量并显式传参，这个判断才成立。 */
+export const ACTIVE_ALERTS_LIMIT = 200;
+export const WORK_JOBS_LIMIT = 20;
+
+/** 这一屏是不是没显示全，以及该怎么说。
+ *
+ *  **取满上限只能说"可能"**：恰好等于上限时，也可能就是恰好这么多。含糊其辞
+ *  不好，但假装看到的是全部更糟——一张"没有待处理事项"的清单如果其实被截断
+ *  了，人会据此收工。
+ *
+ *  返回 null 表示没有截断，界面据此不显示这一行（而不是显示一句"没有截断"，
+ *  那是噪声）。 */
+export function truncationNote(input: {
+  activeCategoryId: string;
+  alertCount: number;
+  jobCount: number;
+}): string | null {
+  const parts: string[] = [];
+  const showAlerts = input.activeCategoryId === "" || input.activeCategoryId === "incidents";
+  const showJobs = input.activeCategoryId === "" || input.activeCategoryId === "jobs";
+  if (showAlerts && input.alertCount >= ACTIVE_ALERTS_LIMIT) {
+    parts.push(`活跃告警只取了 ${ACTIVE_ALERTS_LIMIT} 条`);
+  }
+  if (showJobs && input.jobCount >= WORK_JOBS_LIMIT) {
+    parts.push(`已放弃的后台任务只取了 ${WORK_JOBS_LIMIT} 条`);
+  }
+  if (parts.length === 0) return null;
+  return `这一屏可能不是全部：${parts.join("，")}。完整清单在各自的页面里。`;
+}
+
 /** 顶部四格里「紧急」的口径：未解决的严重告警。
  *
  *  刻意只数 critical：把 warning 也算进「紧急」，这个数就永远不会小,
