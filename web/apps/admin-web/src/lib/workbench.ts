@@ -1,6 +1,7 @@
 import type { BadgeTone } from "@xingmang/ui-primitives";
 import { describeServiceStatus, platformNavSpec, type FreshnessContract } from "@xingmang/ui-admin";
 import type { AlertItem } from "../api/alerts";
+import { jobKindLabel, type JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import { describeSeverity, sortForDisplay } from "./alerts";
 import { PLATFORM_CATALOG, pendingBadge, platformOfMetricKey } from "./platforms";
@@ -40,7 +41,11 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
   {
     id: "jobs",
     label: "失败任务",
-    blockedBy: "后台任务页与 River 查询端点尚未建",
+    // XM-WORKBENCH-JOBS：这里原来写着「后台任务页与 River 查询端点尚未建」。
+    // 那句话在 XM-JOBS0 交付时就过期了——/api/v1/jobs/runs 一直都在，后台
+    // 任务页也一直都在。一个说"还没接"的占位比缺功能更糟：它让人不去看
+    // 本来就有的数据，于是失败的后台任务在首屏彻底不可见。
+    source: "后台任务里已放弃的运行记录（重试用尽，不会再跑）",
   },
   {
     id: "finance",
@@ -100,6 +105,75 @@ export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): Wo
       to: "/alerts",
     };
   });
+}
+
+/** 已放弃的后台任务 → 待处理事项。
+ *
+ *  **只收 `discarded`，不收 `retryable`。** 这不是图省事：「我的待处理」是
+ *  "我必须动手的事"，而一个 retryable 的任务不需要任何人动手——它会自己再试，
+ *  试成了就消失，试到用尽就变成 discarded 出现在这里。把它也列进来会让这张
+ *  清单抖动（一条目跳出来又自己消失），而一张会抖的待办清单，人很快就不看了。
+ *  重试中的任务在后台任务页「失败与重试」页签里，那里才是看过程的地方。
+ *
+ *  也不收 `cancelled`：那是有人主动取消的，不是失败。 */
+export function workItemsFromJobRuns(runs: readonly JobRunItem[], now: Date): WorkItem[] {
+  return runs
+    .filter((run) => run.state === "discarded")
+    .map((run) => {
+      // 放弃的时刻优先用 finalized_at（River 定终态的时刻）；缺了就退回最近
+      // 一次尝试，再退回创建时刻——不显示"0 秒前"这种编出来的新鲜。
+      const at = run.finalized_at ?? run.attempted_at ?? run.created_at;
+      return {
+        id: `job-${run.id}`,
+        categoryId: "jobs",
+        categoryLabel: "已放弃",
+        tone: "danger" as const,
+        title: `${jobKindLabel(run.kind)} 重试 ${run.max_attempts} 次后放弃`,
+        // 错误原文可能很长且带栈，这里只放一行定位信息；正文在后台任务页看。
+        meta: `${run.queue} · 共失败 ${run.error_count} 次 · ${ageText(at, now)}前`,
+        due: "需人工处理",
+        // 直接落到后台任务页的「多次失败任务」页签（state=discarded 那个），
+        // 而不是页面首屏——点进去还要自己找是多余的一步。
+        to: "/jobs?sub=repeated",
+      };
+    });
+}
+
+/** 「我的待处理」两条数据源各自的取数上限（XM-WORKBENCH-TRUNCATION）。 */
+export const ACTIVE_ALERTS_LIMIT = 200;
+export const WORK_JOBS_LIMIT = 20;
+
+/** 这一屏是不是没显示全，以及该怎么说。
+ *
+ *  **两个判据都由服务端给，前端不自己算**（XM-ALERTS-LIST-TRUNCATED）：
+ *  - 告警：`/api/v1/alerts` 的 `truncated`。调用方传的 limit 与真正生效的
+ *    limit 可能不是一个数（不传、或传得比服务端上界还大都会被钳），拿自己传
+ *    的数去比会**永远判不出截断**。
+ *  - 后台任务：`/api/v1/jobs/runs` 的 `next_before`——它本来就是游标分页的
+ *    "还有下一页"，比数个数可靠。
+ *
+ *  仍然只说"可能"：服务端的判据是"返回条数正好等于生效上限"，恰好等于时也
+ *  可能就是恰好这么多。含糊不好，但假装看到的是全部更糟——一张"没有待处理
+ *  事项"的清单如果其实被截断了，人会据此收工。
+ *
+ *  返回 null 表示没有截断，界面据此不显示这一行（而不是显示一句"没有截断"，
+ *  那是噪声）。 */
+export function truncationNote(input: {
+  activeCategoryId: string;
+  alertsTruncated: boolean;
+  jobsTruncated: boolean;
+}): string | null {
+  const parts: string[] = [];
+  const showAlerts = input.activeCategoryId === "" || input.activeCategoryId === "incidents";
+  const showJobs = input.activeCategoryId === "" || input.activeCategoryId === "jobs";
+  if (showAlerts && input.alertsTruncated) {
+    parts.push(`活跃告警只取了 ${ACTIVE_ALERTS_LIMIT} 条`);
+  }
+  if (showJobs && input.jobsTruncated) {
+    parts.push(`已放弃的后台任务只取了 ${WORK_JOBS_LIMIT} 条`);
+  }
+  if (parts.length === 0) return null;
+  return `这一屏可能不是全部：${parts.join("，")}。完整清单在各自的页面里。`;
 }
 
 /** 顶部四格里「紧急」的口径：未解决的严重告警。

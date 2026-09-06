@@ -11,7 +11,13 @@ import {
 import { Badge, Tabs } from "@xingmang/ui-primitives";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
+import {
+  ALERT_STATUS_ALL,
+  listAlerts,
+  listAlertsPage,
+  ruleLabel,
+  type AlertItem,
+} from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
 import { ApiStateView } from "../components/ApiStateView";
 import { CreateSilenceDialog } from "../components/CreateSilenceDialog";
@@ -86,8 +92,10 @@ function AlertsListPage() {
 
   const query = useQuery({
     queryKey: [ALERTS_QUERY_KEY, scope],
+    // 用带信封的那个（XM-ALERTS-LIST-TRUNCATED）：**这一页的职责就是"看全部"**，
+    // 而它原先不传 limit、吃服务端默认值，被截断时一个字都不说。
     queryFn: ({ signal }) =>
-      listAlerts({ signal, ...(scope === "all" ? { status: ALERT_STATUS_ALL } : {}) }),
+      listAlertsPage({ signal, ...(scope === "all" ? { status: ALERT_STATUS_ALL } : {}) }),
   });
 
   const refresh = () => {
@@ -102,7 +110,13 @@ function AlertsListPage() {
 
   const body = (
     <ApiStateView isPending={query.isPending} error={query.error} onRetry={refresh}>
-      <AlertsTable items={query.data ?? []} scope={scope} onAcknowledged={afterWrite} />
+      {query.data?.truncated ? (
+        <p role="status" className="mb-2 text-xs text-warning">
+          这一页可能不是全部：服务端一次最多返回 {query.data.limit || "若干"} 条，本次正好取满。
+          请用状态页签或时间范围收窄之后再看。
+        </p>
+      ) : null}
+      <AlertsTable items={query.data?.items ?? []} scope={scope} onAcknowledged={afterWrite} />
     </ApiStateView>
   );
 

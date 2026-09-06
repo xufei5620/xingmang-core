@@ -918,6 +918,151 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     expect(screen.getByText(/其余各类的空是「还没接」，不是「没有问题」/)).not.toBeNull();
   });
 
+  // XM-WORKBENCH-JOBS：这一类原来写着"后台任务页与 River 查询端点尚未建"，
+  // 而那两样在 XM-JOBS0 就交付了——失败的后台任务在首屏彻底不可见。
+  it("已放弃的后台任务进「失败任务」，并直达后台任务页对应页签", async () => {
+    stubFetch((url) => {
+      if (url.startsWith("/api/v1/jobs/runs")) {
+        // 只有 state=discarded 那一次查询有内容：工作台不查重试中的任务。
+        if (!url.includes("state=discarded")) return fakeResponse(200, { items: [] });
+        return fakeResponse(200, {
+          items: [
+            {
+              id: 77,
+              kind: "newapi_sync",
+              queue: "default",
+              state: "discarded",
+              attempt: 3,
+              max_attempts: 3,
+              created_at: "2026-08-26T08:00:00Z",
+              scheduled_at: "2026-08-26T08:00:00Z",
+              attempted_at: "2026-08-26T09:00:00Z",
+              finalized_at: "2026-08-26T09:30:00Z",
+              duration_ms: 90,
+              error_count: 3,
+              last_error: null,
+              args: {},
+            },
+          ],
+          next_before: 0,
+        });
+      }
+      return okHandler(url);
+    });
+    renderRoute("/dashboard?work=jobs");
+    const item = await screen.findByText("NewAPI 同步 重试 3 次后放弃");
+    expect(item).not.toBeNull();
+    expect(screen.queryByText("「失败任务」还没有数据源")).toBeNull();
+    const link = item.closest("a") as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/jobs?sub=repeated");
+  });
+
+  // XM-WORKBENCH-TRUNCATION / XM-ALERTS-LIST-TRUNCATED：被截断时要说出来。
+  // 一张"没有待处理事项"的清单如果其实被截断了，人会据此收工。
+  //
+  // **判据是服务端给的游标，不是"取满了 20 条"**：取满 20 条而没有下一页
+  // 游标时，那就真的只有 20 条，说"可能不是全部"是无中生有。
+  it("还有下一页时说明这一屏可能不是全部", async () => {
+    stubFetch((url) => {
+      if (url.startsWith("/api/v1/jobs/runs")) {
+        if (!url.includes("state=discarded")) return fakeResponse(200, { items: [] });
+        return fakeResponse(200, {
+          items: Array.from({ length: 20 }, (_, index) => ({
+            id: 100 + index,
+            kind: "newapi_sync",
+            queue: "default",
+            state: "discarded",
+            attempt: 3,
+            max_attempts: 3,
+            created_at: "2026-08-26T08:00:00Z",
+            scheduled_at: "2026-08-26T08:00:00Z",
+            attempted_at: "2026-08-26T09:00:00Z",
+            finalized_at: "2026-08-26T09:30:00Z",
+            duration_ms: 90,
+            error_count: 3,
+            last_error: null,
+            args: {},
+          })),
+          // 还有下一页：这才是"没显示全"的权威信号。
+          next_before: 99,
+        });
+      }
+      return okHandler(url);
+    });
+    renderRoute("/dashboard?work=jobs");
+    expect(await screen.findByText(/这一屏可能不是全部/)).not.toBeNull();
+    expect(screen.getByText(/已放弃的后台任务只取了 20 条/)).not.toBeNull();
+  });
+
+  // 权威判据比"数个数"准的地方正在这里：取满 20 条但没有下一页 = 就是 20 条。
+  it("取满 20 条但没有下一页时不提示——那就是全部", async () => {
+    stubFetch((url) => {
+      if (url.startsWith("/api/v1/jobs/runs")) {
+        if (!url.includes("state=discarded")) return fakeResponse(200, { items: [] });
+        return fakeResponse(200, {
+          items: Array.from({ length: 20 }, (_, index) => ({
+            id: 200 + index,
+            kind: "newapi_sync",
+            queue: "default",
+            state: "discarded",
+            attempt: 3,
+            max_attempts: 3,
+            created_at: "2026-08-26T08:00:00Z",
+            scheduled_at: "2026-08-26T08:00:00Z",
+            attempted_at: "2026-08-26T09:00:00Z",
+            finalized_at: "2026-08-26T09:30:00Z",
+            duration_ms: 90,
+            error_count: 3,
+            last_error: null,
+            args: {},
+          })),
+          next_before: 0,
+        });
+      }
+      return okHandler(url);
+    });
+    renderRoute("/dashboard?work=jobs");
+    await screen.findAllByText(/重试 3 次后放弃/);
+    expect(screen.queryByText(/这一屏可能不是全部/)).toBeNull();
+  });
+
+  it("没取满时不显示截断提示——显示一句「没有截断」是噪声", async () => {
+    renderRoute("/dashboard?work=jobs");
+    await screen.findByText("没有待处理事项");
+    expect(screen.queryByText(/这一屏可能不是全部/)).toBeNull();
+  });
+
+  it("没有已放弃的任务时说清重试中的不计入，不显示成「还没接」", async () => {
+    renderRoute("/dashboard?work=jobs");
+    // okHandler 的 /jobs/runs 返回空列表
+    expect(await screen.findByText("没有待处理事项")).not.toBeNull();
+    expect(screen.getByText(/重试中的任务不计入这里/)).not.toBeNull();
+    expect(screen.queryByText("「失败任务」还没有数据源")).toBeNull();
+  });
+
+  // XM-ALERTS-LIST-TRUNCATED：全局告警页的职责就是"看全部"，被截断时必须说。
+  it("告警页在服务端说截断时提示，并给出生效上限", async () => {
+    stubFetch((url) => {
+      if (url.startsWith("/api/v1/alerts")) {
+        return fakeResponse(200, { items: [], limit: 500, truncated: true });
+      }
+      return okHandler(url);
+    });
+    renderRoute("/alerts");
+    expect(await screen.findByText(/这一页可能不是全部/)).not.toBeNull();
+    expect(screen.getByText(/最多返回 500 条/)).not.toBeNull();
+  });
+
+  // 老后端没有 truncated 字段时按"没截断"处理：那时它确实回答不了这个问题，
+  // 假装"可能截断"是平白吓人。
+  it("服务端没给 truncated 时不提示", async () => {
+    renderRoute("/alerts");
+    // **必须等表格里的数据落地再断言"没有提示"**：页头在 ApiStateView 外面，
+    // 等到页头就断言的话，这条断言在查询还没回来时永远成立（恒真）。
+    await screen.findByText("指标 sub2api.revenue.daily 同步失败");
+    expect(screen.queryByText(/这一页可能不是全部/)).toBeNull();
+  });
+
   it("筛选进 ?work=，选到没有数据源的分类时说清楚被什么挡着", async () => {
     renderRoute("/dashboard?work=approvals");
     const empty = await screen.findByText("「待审批」还没有数据源");
