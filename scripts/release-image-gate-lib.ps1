@@ -701,10 +701,10 @@ function Assert-StrictReleaseDirectoryName {
 function Get-StrictSignedReleaseTagRef {
     param([Parameter(Mandatory)][string]$SignedReleaseTag)
 
-    if ($SignedReleaseTag -cne 'v0.1.0-rc102-signed') {
-        throw 'strict transfer requires the exact signed RC100 tag v0.1.0-rc102-signed'
+    if ($SignedReleaseTag -cne 'v0.1.0-rc103-signed') {
+        throw 'strict transfer requires the exact signed RC100 tag v0.1.0-rc103-signed'
     }
-    return 'refs/tags/v0.1.0-rc102-signed'
+    return 'refs/tags/v0.1.0-rc103-signed'
 }
 
 function Assert-TransferReadyManifest {
@@ -719,23 +719,23 @@ function Assert-TransferReadyManifest {
     try {
         $releaseNameProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'releaseName' -Context 'manifest'
     } catch {
-        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc102 is mandatory'
+        throw 'strict transfer requires exact property releaseName; manifest releaseName=0.1.0-rc103 is mandatory'
     }
     if ($releaseNameProperty.Value -isnot [string] -or
-        [string]$releaseNameProperty.Value -cne '0.1.0-rc102') {
-        throw 'strict transfer requires manifest releaseName=0.1.0-rc102'
+        [string]$releaseNameProperty.Value -cne '0.1.0-rc103') {
+        throw 'strict transfer requires manifest releaseName=0.1.0-rc103'
     }
 
     $expectedImageReferences = [ordered]@{
-        api = 'invoice-system-api:0.1.0-rc102'
-        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc102'
-        tools = 'invoice-system-tools:0.1.0-rc102'
-        web = 'invoice-system-web:0.1.0-rc102'
-        'source-agent' = 'invoice-source-agent:0.1.0-rc102'
-        'postgres-runtime' = 'invoice-postgres:0.1.0-rc102'
-        'clamav-runtime' = 'invoice-clamav:0.1.0-rc102'
-        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc102'
-        keycloak = 'invoice-keycloak:0.1.0-rc102'
+        api = 'invoice-system-api:0.1.0-rc103'
+        'pdf-scanner' = 'invoice-system-pdf-scanner:0.1.0-rc103'
+        tools = 'invoice-system-tools:0.1.0-rc103'
+        web = 'invoice-system-web:0.1.0-rc103'
+        'source-agent' = 'invoice-source-agent:0.1.0-rc103'
+        'postgres-runtime' = 'invoice-postgres:0.1.0-rc103'
+        'clamav-runtime' = 'invoice-clamav:0.1.0-rc103'
+        'ingest-proxy' = 'invoice-ingest-proxy:0.1.0-rc103'
+        keycloak = 'invoice-keycloak:0.1.0-rc103'
     }
     $imagesProperty = Get-RequiredExactProperty -InputObject $Manifest -PropertyName 'images' -Context 'manifest'
     if ($imagesProperty.Value -isnot [System.Array] -or
