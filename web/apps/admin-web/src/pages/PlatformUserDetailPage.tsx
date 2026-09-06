@@ -24,9 +24,9 @@ import {
 import { ApiStateView } from "../components/ApiStateView";
 import { DailyUsagePanel } from "../components/DailyUsagePanel";
 import { KeyMetadataPanel } from "../components/KeyMetadataPanel";
+import { amountBodyText } from "../components/platformOrdersColumns";
 import { PeriodControls } from "@xingmang/ui-admin";
 import { appDemoDataConfig, DEMO_BANNER_TEXT, shouldShowDemoBanner } from "../lib/demoData";
-import { formatMinorUnits } from "../lib/money";
 import { parseBusinessDay, parseGranularity } from "../lib/period";
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -39,13 +39,16 @@ function platformLabel(platform: string): string {
 }
 
 /** 缺席与已知 0 分开：null 是「上游没给」，字符串 "0" 才是零。 */
-function amountText(amount: AmountBody): string {
-  if (amount.minor_units === null) return "—";
-  return formatMinorUnits(amount.minor_units, amount.currency);
-}
-
 function lastActiveText(raw: string | null): string {
   if (raw === null) return "从未活跃";
+  if (Number.isNaN(new Date(raw).getTime())) return "时间格式异常（上游值未展示）";
+  return formatUtcTimestamp(raw);
+}
+
+/** 注册时间来自详情端点的 `registered_at`。`null` 是「链路通了、上游没给」，
+ *  与「未接入」（整组路由没挂载）是两件事，措辞不能混（XM-USERS-HONEST0）。 */
+function registeredAtText(raw: string | null): string {
+  if (raw === null) return "上游未提供";
   if (Number.isNaN(new Date(raw).getTime())) return "时间格式异常（上游值未展示）";
   return formatUtcTimestamp(raw);
 }
@@ -271,7 +274,7 @@ function FoundUserDetail({
   detailSub: string | null;
   onDetailSubChange: (next: string) => void;
 }) {
-  const { user, page } = result;
+  const { user, page, registeredAt } = result;
   const fake = shouldShowDemoBanner([page.data_source], appDemoDataConfig);
 
   return (
@@ -312,11 +315,11 @@ function FoundUserDetail({
         </p>
       </div>
 
-      <BasicInformation platform={platform} user={user} />
+      <BasicInformation platform={platform} user={user} registeredAt={registeredAt} />
       {platform === "newapi" ? (
         <NewApiUnsupported />
       ) : (
-        <Sub2ApiUnsupported userId={user.id} selectedDay={page.period.day} activeSub={detailSub} onSubChange={onDetailSubChange} />
+        <Sub2ApiDetailTabs userId={user.id} selectedDay={page.period.day} activeSub={detailSub} onSubChange={onDetailSubChange} />
       )}
     </div>
   );
@@ -327,7 +330,7 @@ function AmountTile({ label, amount, note }: { label: string; amount: AmountBody
   return (
     <StatTile
       label={label}
-      value={amountText(amount)}
+      value={amountBodyText(amount)}
       unavailable={unavailable}
       note={unavailable ? `上游没有提供这个值。${note}` : note}
       status={unavailable ? <Badge tone="neutral">未知</Badge> : undefined}
@@ -335,7 +338,15 @@ function AmountTile({ label, amount, note }: { label: string; amount: AmountBody
   );
 }
 
-function BasicInformation({ platform, user }: { platform: string; user: PlatformUserItem }) {
+function BasicInformation({
+  platform,
+  user,
+  registeredAt,
+}: {
+  platform: string;
+  user: PlatformUserItem;
+  registeredAt: string | null;
+}) {
   const email = describeMaskedEmail(user.email_masked);
   const status = describeUserStatus(user.status);
   return (
@@ -353,6 +364,16 @@ function BasicInformation({ platform, user }: { platform: string; user: Platform
         </Fact>
         <Fact label="最后活跃">
           <span className="break-words tabular-nums">{lastActiveText(user.last_active_at)}</span>
+        </Fact>
+        <Fact
+          label="注册时间"
+          hint={
+            registeredAt === null
+              ? "详情端点已接通，但上游响应里没有这个字段"
+              : "上游用户记录的创建时间（UTC）"
+          }
+        >
+          <span className="break-words tabular-nums">{registeredAtText(registeredAt)}</span>
         </Fact>
         {platform === "sub2api" ? (
           <Fact label="令牌前缀（脱敏证据）" hint="至多 8 字符；不是 API Key 列表或完整凭据">
@@ -410,7 +431,16 @@ const SUB2_DETAIL_TABS = [
   },
 ] as const;
 
-function Sub2ApiUnsupported({
+type Sub2DetailTabValue = (typeof SUB2_DETAIL_TABS)[number]["value"];
+
+/** 子页签 → 面板。接上真实数据的子页签在这里登记一个组件（独立 query、
+ *  独立 Snapshot/Freshness，照 KeyMetadataPanel 的骨架）；没登记的按其
+ *  description 渲染「未接入」面板。加一个真子页签只改这张表，不改渲染分支。 */
+const SUB2_DETAIL_PANELS: Partial<Record<Sub2DetailTabValue, (userId: string) => ReactNode>> = {
+  keys: (userId) => <KeyMetadataPanel platform="sub2api" userId={userId} />,
+};
+
+function Sub2ApiDetailTabs({
   userId,
   selectedDay,
   activeSub,
@@ -426,14 +456,10 @@ function Sub2ApiUnsupported({
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
         <UnavailablePanel
           title="客户类型"
           description="客户类型不在当前用户详情快照；归属 platformusers read contract v2。"
-        />
-        <UnavailablePanel
-          title="注册时间"
-          description="注册时间不在当前用户详情快照；归属 platformusers read contract v2。"
         />
         <DailyUsagePanel platform="sub2api" userId={userId} day={selectedDay} />
       </div>
@@ -446,12 +472,10 @@ function Sub2ApiUnsupported({
           items={SUB2_DETAIL_TABS.map((item) => ({
             value: item.value,
             label: item.label,
-            content:
-              item.value === "keys" ? (
-                <KeyMetadataPanel platform="sub2api" userId={userId} />
-              ) : (
-                <UnavailablePanel title={item.label} description={item.description} />
-              ),
+            content: (
+              SUB2_DETAIL_PANELS[item.value] ??
+              (() => <UnavailablePanel title={item.label} description={item.description} />)
+            )(userId),
           }))}
         />
       ) : (
