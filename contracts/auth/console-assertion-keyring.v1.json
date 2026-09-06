@@ -10,5 +10,17 @@
     "valid_until": "2027-09-03T11:53:17Z",
     "revoked_at": null,
     "revoke_reason": ""
+  },
+  {
+    "key_id": "2026-09b",
+    "algorithm": "Ed25519",
+    "public_key": "RUpR37B/jRn6+F6tEQio4uOPkqhVHkqnvZq3ixgyJDM=",
+    "fingerprint": "25c0649f1507c554280256bb86dde98eacbcfe88f64b3632ad19942e51cdfe2d",
+    "purpose": "console_admin_assertion_signing",
+    "protocol": "xm-console-assertion-v1",
+    "valid_from": "2026-09-06T12:59:15Z",
+    "valid_until": "2027-09-06T12:59:15Z",
+    "revoked_at": null,
+    "revoke_reason": ""
   }
 ]
