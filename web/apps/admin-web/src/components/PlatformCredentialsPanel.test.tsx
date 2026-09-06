@@ -38,8 +38,12 @@ describe("平台连接与凭据", () => {
   it("只展示 service_type 精确匹配的平台实例及最近一次真实观测", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(() =>
-        Promise.resolve(
+      vi.fn((input: unknown) => {
+        // 探测历史另有一张表（XM-CREDS-TAB-PROBE），这条测试只关心实例表。
+        if (String(input).includes("/metrics/history")) {
+          return Promise.resolve(response({ items: [] }));
+        }
+        return Promise.resolve(
           response({
             items: [
               service(),
@@ -51,15 +55,17 @@ describe("平台连接与凭据", () => {
               }),
             ],
           }),
-        ),
-      ),
+        );
+      }),
     );
 
     renderPanel();
 
     expect(await screen.findByText("newapi-prod-a")).toBeTruthy();
     expect(screen.queryByText("sub2api-prod-a")).toBeNull();
-    const table = within(screen.getByRole("table"));
+    const table = within(
+      screen.getByRole("table", { name: /已登记连接实例/ }),
+    );
     expect(table.getByText("https://newapi.example.invalid")).toBeTruthy();
     expect(table.getByText("平台运营组")).toBeTruthy();
     expect(table.getByText("数据新鲜")).toBeTruthy();
@@ -174,22 +180,146 @@ describe("平台连接与凭据", () => {
     expect(await within(credential).findByText(/credential\.manage/)).toBeTruthy();
   });
 
-  it("健康探测历史仍明确显示未接入，不拿服务观测冒充探测", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response({ items: [service()] }))));
+  // XM-CREDS-TAB-PROBE：这一格以前写着"独立探测历史 Query 尚未提供"，
+  // 而 /metrics/history 一直都在。占位比缺功能更糟——它让人以为没做。
+  function probeSample(value: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+    return {
+      observed_at: "2026-09-06T01:00:00Z",
+      synced_at: "2026-09-06T01:00:05Z",
+      source: "connector",
+      status: "ok",
+      is_partial: false,
+      watermark: "fp-1",
+      last_error_code: "",
+      value,
+      ...overrides,
+    };
+  }
+
+  function stubWithProbes(items: unknown[], probeStatus = 200) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: unknown) => {
+        const url = String(input);
+        if (url.includes("/metrics/history")) {
+          return Promise.resolve(
+            probeStatus === 200
+              ? response({ items })
+              : response(
+                  // 统一错误体形状（规格 §18.4）；写成 {message} 拿不到
+                  // missingScope，测出来的就只是"HTTP 403"而不是"缺哪个权限"。
+                  { error: { code: "forbidden", message: "缺少权限 ops.read", request_id: "req-1" } },
+                  probeStatus,
+                ),
+          );
+        }
+        return Promise.resolve(response({ items: [service()] }));
+      }),
+    );
+  }
+
+  it("探测历史显示上游版本、兼容矩阵判定、结果与延迟，最近一次在前", async () => {
+    stubWithProbes([
+      probeSample({ version: "1.0.0", supported: true, healthy: true, kind: "", latency_ms: 20 }),
+      probeSample(
+        { version: "1.1.0", supported: true, healthy: false, kind: "auth", latency_ms: 35 },
+        { synced_at: "2026-09-06T02:00:05Z", status: "failed", last_error_code: "auth" },
+      ),
+    ]);
 
     renderPanel();
 
-    await screen.findByText("newapi-prod-a");
+    const probes = (await screen.findByRole("heading", { name: "健康探测历史", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    // 标题在 ApiStateView 外面：等到标题不等于查询已落地，要等表里的值。
+    await within(probes).findByText("1.1.0");
+    const rows = within(probes).getAllByRole("row");
+    // 表头一行 + 两条样本；最近一次（1.1.0）排在第一条数据行。
+    expect(rows.length).toBe(3);
+    expect(within(rows[1] as HTMLElement).getByText("1.1.0")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("不健康 · auth")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("35 ms")).toBeTruthy();
+    expect(within(rows[2] as HTMLElement).getByText("1.0.0")).toBeTruthy();
+    // 上游版本这个事实本身出现在统计卡上——以前整个控制台只有"变化时告警"，
+    // 没告警时无从确认现在是什么版本。统计卡与表格各有一个徽章，取统计卡那个。
+    // 统计卡的标签是 h3（StatTile），表头的"上游版本"不是——按 role 取才唯一。
+    const tile = screen
+      .getByRole("heading", { name: "上游版本", level: 3 })
+      .closest("article") as HTMLElement;
+    expect(within(tile).getByText("1.1.0")).toBeTruthy();
+    expect(within(tile).getByText("矩阵已声明支持")).toBeTruthy();
+  });
+
+  it("矩阵未声明支持时说清这是矩阵没跟上，不是上游坏了", async () => {
+    stubWithProbes([
+      probeSample({ version: "2.0.0", supported: false, healthy: true, kind: "", latency_ms: 8 }),
+    ]);
+
+    renderPanel();
+
+    expect((await screen.findAllByText("矩阵未声明支持")).length).toBeGreaterThan(0);
+    // 统计卡的说明要讲清这是矩阵没跟上，不是上游坏了。
+    expect(screen.getByText(/不等于上游坏了/)).toBeTruthy();
+    // 探测到的版本号要出现在统计卡（值 + 说明里点名它）与探测表里。
+    const tile = screen
+      .getByRole("heading", { name: "上游版本", level: 3 })
+      .closest("article") as HTMLElement;
+    expect(within(tile).getByText("2.0.0")).toBeTruthy();
+    expect(within(tile).getByText(/没有覆盖 2\.0\.0/)).toBeTruthy();
+    // 上游本身是健康的，不能因为矩阵陈旧就说它不健康。
     const probes = screen.getByRole("heading", { name: "健康探测历史", level: 3 }).closest(
       "article",
     ) as HTMLElement;
-    expect(within(probes).getByText("未接入")).toBeTruthy();
-    expect(within(probes).getByText(/只能显示服务最近一次观测/)).toBeTruthy();
-    expect(screen.queryByText(/下次轮换/)).toBeNull();
+    expect(within(probes).getByText("健康")).toBeTruthy();
+    expect(within(probes).getByText("2.0.0")).toBeTruthy();
+  });
+
+  it("没有探测记录时说明探测只在真实对接下运行，不编一个版本号出来", async () => {
+    stubWithProbes([]);
+
+    renderPanel();
+
+    const probes = (await screen.findByRole("heading", { name: "健康探测历史", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(await within(probes).findByText(/近 24 小时没有 NewAPI 的探测记录/)).toBeTruthy();
+    expect(within(probes).getByText(/这不是故障/)).toBeTruthy();
+    // 统计卡上不能出现任何矩阵判定徽章——包括"未知"。一次都没探测过
+    // 与"探测了但没给判定"是两件事，把前者显示成后者就是在编事实。
+    const tile = screen
+      .getByRole("heading", { name: "上游版本", level: 3 })
+      .closest("article") as HTMLElement;
+    expect(within(tile).queryByText("矩阵已声明支持")).toBeNull();
+    expect(within(tile).queryByText("矩阵未声明支持")).toBeNull();
+    expect(within(tile).queryByText("未知")).toBeNull();
+    expect(within(tile).getByText(/没有探测记录/)).toBeTruthy();
+  });
+
+  it("没有 ops.read 权限时只有这一格降级，实例表照常显示", async () => {
+    stubWithProbes([], 403);
+
+    renderPanel();
+
+    // 整页没有跟着塌掉：实例表还在。
+    expect(await screen.findByText("newapi-prod-a")).toBeTruthy();
+    const probes = screen.getByRole("heading", { name: "健康探测历史", level: 3 }).closest(
+      "article",
+    ) as HTMLElement;
+    expect(await within(probes).findByText(/ops\.read/)).toBeTruthy();
   });
 
   it("平台没有登记实例时显示有行动指向的空态，不渲染空表", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response({ items: [service({ service_type: "sub2api" })] }))));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: unknown) =>
+        Promise.resolve(
+          String(input).includes("/metrics/history")
+            ? response({ items: [] })
+            : response({ items: [service({ service_type: "sub2api" })] }),
+        ),
+      ),
+    );
 
     renderPanel();
 
