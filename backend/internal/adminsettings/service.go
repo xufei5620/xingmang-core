@@ -2,12 +2,17 @@ package adminsettings
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/mail"
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"invoice-system/backend/internal/notify"
 )
 
 type Service struct {
@@ -221,4 +226,72 @@ func normalizeInput(in UpdateInput) (UpdateInput, error) {
 	sort.Strings(normalized)
 	in.AdminCIDRs = normalized
 	return in, nil
+}
+
+// --- 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）---------------------
+
+// NoticeWebhook 返回管理端能显示的那部分：配没配、指纹、谁在什么时候改的。
+// **不含地址**，也没有任何能反推地址的东西。
+func (s *Service) NoticeWebhook(ctx context.Context) (NoticeWebhookInfo, error) {
+	return s.repo.GetNoticeWebhook(ctx)
+}
+
+// SetNoticeWebhook 保存（或覆盖）通知地址。
+//
+// 形状校验放在**这里**——保存那一刻人就在页面前，比等 api 重启才在日志里
+// 报错强得多（这也是把地址从宿主机文件搬进库的一半理由）。
+// 校验函数刻意不回显地址：错误会一路回到页面上。
+func (s *Service) SetNoticeWebhook(ctx context.Context, address string, actor Actor) (NoticeWebhookInfo, error) {
+	if s.box == nil {
+		return NoticeWebhookInfo{}, ErrSecretMissing
+	}
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return NoticeWebhookInfo{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	address = strings.TrimSpace(address)
+	if err := notify.ValidateWebhookAddress(address); err != nil {
+		return NoticeWebhookInfo{}, fmt.Errorf("%w: %s", ErrInvalidSettings, err.Error())
+	}
+	envelope, err := s.box.Seal(ctx, []byte(address))
+	if err != nil {
+		// 不带 err：Seal 的错误理论上不含明文，但这条路径上不值得赌。
+		return NoticeWebhookInfo{}, errors.New("encrypt notice webhook failed")
+	}
+	if len(envelope.Ciphertext) == 0 || strings.TrimSpace(envelope.KeyVersion) == "" {
+		return NoticeWebhookInfo{}, errorsInvalidEnvelope()
+	}
+	return s.repo.StoreNoticeWebhook(ctx, envelope, NoticeWebhookFingerprint(address), actor)
+}
+
+func (s *Service) ClearNoticeWebhook(ctx context.Context, actor Actor) (NoticeWebhookInfo, error) {
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return NoticeWebhookInfo{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.ClearNoticeWebhook(ctx, actor)
+}
+
+// NoticeWebhookForDelivery 与 SMTPSecretForDelivery 同一条纪律：**只有投递
+// 循环该调它**，普通设置响应里永远没有这个值。
+func (s *Service) NoticeWebhookForDelivery(ctx context.Context) (string, error) {
+	if s.box == nil {
+		return "", ErrSecretMissing
+	}
+	envelope, err := s.repo.LoadNoticeWebhook(ctx)
+	if err != nil {
+		return "", err
+	}
+	plain, err := s.box.Open(ctx, envelope)
+	if err != nil {
+		return "", errors.New("decrypt notice webhook failed")
+	}
+	return string(plain), nil
+}
+
+// NoticeWebhookFingerprint 是地址的可核对标识：sha256 的十六进制前 16 位。
+//
+// 为什么是指纹而不是地址前缀：整个 URL 都是凭据，露出 key 的前几位就是露出
+// 凭据的前几位。指纹可以拿去和"我刚才粘的那个"比对，却反推不出地址。
+func NoticeWebhookFingerprint(address string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(address)))
+	return "sha256:" + hex.EncodeToString(sum[:])[:16]
 }

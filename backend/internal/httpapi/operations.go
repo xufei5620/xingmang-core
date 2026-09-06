@@ -417,6 +417,44 @@ func (s *Server) getDeliveryState(w http.ResponseWriter, r *http.Request, admin 
 	})
 }
 
+// listAdminInvoiceNotices 回答"这份申请的企业微信通知发出去了没有"。
+//
+// **单独一条路由，不并进 /delivery**：那条在申请还没有开票文档时直接返回
+// 404（它答的是"发票邮件寄了没有"），而通知恰恰在**提交那一刻**就产生了。
+// 并进去等于让这条信息在最需要它的时候查不到。
+//
+// 返回的 last_error_code 是我方分类过的短码，不含 Webhook 地址也不含上游
+// 自由文本（投递侧保证，见 internal/notify）。
+func (s *Server) listAdminInvoiceNotices(w http.ResponseWriter, r *http.Request) {
+	if s.operations == nil {
+		writeError(w, http.StatusServiceUnavailable, "OPERATIONS_UNAVAILABLE", "invoice notice status is unavailable")
+		return
+	}
+	notices, err := s.operations.ListInvoiceNoticesForRequest(r.Context(), r.PathValue("id"))
+	if err != nil {
+		handleDomainError(w, err)
+		return
+	}
+	items := make([]map[string]any, 0, len(notices))
+	for _, notice := range notices {
+		items = append(items, map[string]any{
+			"id":              notice.ID,
+			"kind":            notice.Kind,
+			"status":          notice.Status,
+			"attempt_count":   notice.AttemptCount,
+			"next_attempt_at": notice.NextAttemptAt,
+			// null 表示还没送达，不是"零时刻送达"。
+			"delivered_at":    notice.DeliveredAt,
+			"last_error_code": notice.LastErrorCode,
+			"created_at":      notice.CreatedAt,
+			"updated_at":      notice.UpdatedAt,
+		})
+	}
+	// 一份申请今天只可能有一条通知（request.submitted），但返回数组而不是
+	// 单对象：将来加"审核通过""开具完成"时，这个响应形状不用变。
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func boundedQueryLimit(r *http.Request, maximum int) int {
 	value, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
 	if err != nil || value <= 0 {

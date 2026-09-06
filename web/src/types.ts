@@ -418,6 +418,25 @@ export interface InvoiceDeliveryState {
   nextMailAttemptAt?: string;
 }
 
+/** 一条企业微信通知的投递事实（XM-INV-NOTICE-UI）。
+ *
+ *  **不含任何申请内容**：单号、金额、抬头这些在申请本身里，抄第二份只会
+ *  多出一份可能不一致的事实。这里只回答"那条通知发出去了没有"。 */
+export interface InvoiceNoticeDelivery {
+  id: string;
+  /** 事件键，今天只有 "request.submitted"。 */
+  kind: string;
+  /** "queued" | "sending" | "sent" | "failed"；未知取值原样带出，由界面兜底。 */
+  status: string;
+  attemptCount: number;
+  nextAttemptAt?: string;
+  /** 未送达时是 undefined，**不是零时刻**。 */
+  deliveredAt?: string;
+  /** 我方分类过的短码，不含 Webhook 地址与上游原文（后端保证）。 */
+  lastErrorCode: string;
+  createdAt?: string;
+}
+
 export interface DashboardSummary {
   totalAvailableMinor: number;
   reviewingMinor: number;
@@ -519,6 +538,16 @@ export interface InvoiceSystemSettings {
   adminAccess: {
     cidrs: string[];
     currentIP: string;
+  };
+  /** 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）。
+   *  **没有地址本身**：整个 URL 是凭据，页面只拿得到"配没配"与指纹。 */
+  noticeWebhook: {
+    configured: boolean;
+    /** sha256 前缀，可与"我刚才粘的那个"比对，反推不出地址。 */
+    fingerprint: string;
+    updatedBy: string;
+    /** 未配置时为 null——不是零时刻。 */
+    updatedAt: string | null;
   };
 }
 

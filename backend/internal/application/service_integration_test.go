@@ -1170,7 +1170,10 @@ func TestSourceBatchProcessorProjectsBindingsCandidatesLotsAndRefunds(t *testing
 		now.Format(time.RFC3339Nano), now.Add(-time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)))
 	commit(sub2ID, "payments", "72000000-0000-4000-8000-000000000003", strings.Repeat("5", 64), "", 1,
 		"72100000-0000-4000-8000-000000000003", "payment_order", paymentBody, strings.Repeat("6", 64))
-	candidateBody := []byte(fmt.Sprintf(`{"external_order_id":"701","external_user_id":"7","source_status":"success","order_type":"topup","quoted_amount":"300","observed_pay_amount":"300.00","verification_state":"pending_manual","verification_reason":"manual settlement evidence required","completed_at":%q,"created_at":%q,"observed_at":%q,"payment_type":"stripe","provider_key":"stripe"}`,
+	// XM-INV-NEWAPI-AUTOVERIFY：这一笔故意用非 success 状态——它不满足自动核验
+	// 判据，于是下面整套人工复核（冻结/驳回/提议/批准）仍然被覆盖到。自动核验
+	// 本身由 newapi_autoverify_integration_test.go 单独覆盖。
+	candidateBody := []byte(fmt.Sprintf(`{"external_order_id":"701","external_user_id":"7","source_status":"pending","order_type":"topup","quoted_amount":"300","observed_pay_amount":"300.00","verification_state":"pending_manual","verification_reason":"manual settlement evidence required","completed_at":%q,"created_at":%q,"observed_at":%q,"payment_type":"stripe","provider_key":"stripe"}`,
 		now.Format(time.RFC3339Nano), now.Add(-time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)))
 	commit(newAPIID, "payments", "72000000-0000-4000-8000-000000000004", strings.Repeat("7", 64), "", 1,
 		"72100000-0000-4000-8000-000000000004", "payment_candidate", candidateBody, strings.Repeat("8", 64))

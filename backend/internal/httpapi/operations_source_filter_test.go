@@ -41,6 +41,12 @@ type fakeSourceFilterOperations struct {
 func (f *fakeSourceFilterOperations) SourceHealth(context.Context) (postgresstore.SourceHealthReport, error) {
 	panic("unused in this test")
 }
+
+// XM-INV-NOTICE-VIEW added this to OperationsService; notice_view_test.go
+// overrides it on its own double.
+func (f *fakeSourceFilterOperations) ListInvoiceNoticesForRequest(context.Context, string) ([]postgresstore.InvoiceNoticeState, error) {
+	panic("unused in this test")
+}
 func (f *fakeSourceFilterOperations) EligibilityProjectionHealth(context.Context) (postgresstore.EligibilityProjectionHealth, error) {
 	panic("unused in this test")
 }

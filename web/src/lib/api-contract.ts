@@ -12,6 +12,7 @@ import type {
   FundingOrder,
   InvoiceProfile,
   InvoiceDeliveryState,
+  InvoiceNoticeDelivery,
   InvoicePolicy,
   InvoiceRequest,
   InvoiceRequestPage,
@@ -173,6 +174,9 @@ export interface InvoiceApiClient {
     request: InvoiceRequest,
     admin?: boolean,
   ): Promise<InvoiceDeliveryState>;
+  /** 一份申请的企业微信通知投递状态（**管理端专用**，没有 user 变体：
+   *  这是运维事实，不是申请人的业务数据）。 */
+  listRequestNotices(request: InvoiceRequest): Promise<InvoiceNoticeDelivery[]>;
   downloadInvoiceDocument(request: InvoiceRequest): Promise<void>;
   downloadAdminInvoiceDocument(request: InvoiceRequest): Promise<void>;
   getAdminSettings(): Promise<InvoiceSystemSettings>;
@@ -180,4 +184,10 @@ export interface InvoiceApiClient {
   saveSMTPSettings(input: SMTPSettingsInput): Promise<void>;
   sendSMTPTest(): Promise<void>;
   saveAdminAccess(input: AdminAccessSettingsInput): Promise<void>;
+  /** 保存（或覆盖）企业微信通知地址。**保存后永不回读**——想确认配对没有，
+   *  用 sendNoticeWebhookTest。 */
+  saveNoticeWebhook(webhookURL: string): Promise<void>;
+  clearNoticeWebhook(): Promise<void>;
+  /** 往已保存的地址发一条测试消息。消息到没到那个群，比看一段前缀可靠。 */
+  sendNoticeWebhookTest(): Promise<void>;
 }

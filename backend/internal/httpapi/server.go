@@ -24,6 +24,7 @@ import (
 	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/ledger"
 	"invoice-system/backend/internal/mailer"
+	"invoice-system/backend/internal/notify"
 )
 
 type identity struct {
@@ -194,6 +195,9 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/admin/invoice-requests/{id}", s.require("admin", http.HandlerFunc(s.getAdminRequest)))
 	s.mux.Handle("GET /api/v1/admin/source-health", s.require("admin", http.HandlerFunc(s.getSourceHealth)))
 	s.mux.Handle("GET /api/v1/admin/invoice-requests/{id}/delivery", s.require("admin", http.HandlerFunc(s.getAdminDeliveryState)))
+	// 通知投递状态（XM-INV-NOTICE-VIEW）。**只有 admin，没有 user 变体**：
+	// "那条企业微信通知发出去了没有"是运维事实，不是申请人的业务数据。
+	s.mux.Handle("GET /api/v1/admin/invoice-requests/{id}/notices", s.require("admin", http.HandlerFunc(s.listAdminInvoiceNotices)))
 	s.mux.Handle("GET /api/v1/admin/payment-candidates", s.require("admin", http.HandlerFunc(s.listPaymentCandidates)))
 	s.mux.Handle("POST /api/v1/admin/funding-lots/{id}/verify-payment", s.require("admin", http.HandlerFunc(s.verifyNewAPIPayment)))
 	s.mux.Handle("POST /api/v1/admin/funding-lots/{id}/reject-payment", s.require("admin", http.HandlerFunc(s.rejectNewAPIPayment)))
@@ -221,6 +225,11 @@ func (s *Server) routes() {
 	s.mux.Handle("PUT /api/v1/admin/settings/smtp", s.require("admin", http.HandlerFunc(s.updateSMTPSettings)))
 	s.mux.Handle("PUT /api/v1/admin/settings/admin-access", s.require("admin", http.HandlerFunc(s.updateAdminAccessSettings)))
 	s.mux.Handle("POST /api/v1/admin/settings/smtp/test", s.require("admin", http.HandlerFunc(s.testEmail)))
+	// 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）。放在设置页而不是
+	// 宿主机文件：运营会调的东西不该长在服务器上。
+	s.mux.Handle("PUT /api/v1/admin/settings/notice-webhook", s.require("admin", http.HandlerFunc(s.setNoticeWebhook)))
+	s.mux.Handle("DELETE /api/v1/admin/settings/notice-webhook", s.require("admin", http.HandlerFunc(s.clearNoticeWebhook)))
+	s.mux.Handle("POST /api/v1/admin/settings/notice-webhook/test", s.require("admin", http.HandlerFunc(s.testNoticeWebhook)))
 }
 
 func (s *Server) require(role string, next http.Handler) http.Handler {
@@ -423,7 +432,20 @@ func (s *Server) getAdminSettings(w http.ResponseWriter, r *http.Request) {
 		handleSettingsError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.settingsResponse(settings, r))
+	// 通知地址是另一张表（独立生命周期），单独取一次。读不到不该让整页 500——
+	// 设置页上别的东西还有用；这一格显示成"未配置"是诚实的降级。
+	webhook, webhookErr := s.adminSettings.NoticeWebhook(r.Context())
+	if webhookErr != nil {
+		webhook = adminsettings.NoticeWebhookInfo{}
+	}
+	body := s.settingsResponse(settings, r)
+	body["notice_webhook"] = map[string]any{
+		"configured":  webhook.Configured,
+		"fingerprint": webhook.Fingerprint,
+		"updated_by":  webhook.UpdatedBy,
+		"updated_at":  noticeWebhookUpdatedAt(webhook),
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) settingsResponse(settings adminsettings.Settings, r *http.Request) map[string]any {
@@ -1193,4 +1215,110 @@ func handleDomainError(w http.ResponseWriter, err error) {
 			slog.String("error", err.Error()))
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "request could not be processed")
 	}
+}
+
+// --- 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）---------------------
+//
+// 产品负责人 2026-09-06：「这个地址我希望的是在前端可以设置配置。如果写入
+// 服务器中，那不是想更换很麻烦？」原方案把地址放宿主机 0600 文件，换群要
+// SSH 上去改文件再重启。这三条路由把它搬进管理端。
+//
+// 三条路由都**只有 admin**，与设置页其余部分一致。响应里从不含地址本身。
+
+func noticeWebhookUpdatedAt(info adminsettings.NoticeWebhookInfo) any {
+	if !info.Configured || info.UpdatedAt.IsZero() {
+		// null 而不是零时刻：「1970 年更新的」会被读成一次真实的更新。
+		return nil
+	}
+	return info.UpdatedAt.UTC().Format(time.RFC3339)
+}
+
+func (s *Server) writeNoticeWebhook(w http.ResponseWriter, info adminsettings.NoticeWebhookInfo) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured":  info.Configured,
+		"fingerprint": info.Fingerprint,
+		"updated_by":  info.UpdatedBy,
+		"updated_at":  noticeWebhookUpdatedAt(info),
+	})
+}
+
+func (s *Server) setNoticeWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.adminSettings == nil {
+		writeError(w, http.StatusServiceUnavailable, "SETTINGS_DISABLED", "admin settings are not configured")
+		return
+	}
+	var body *struct {
+		WebhookURL string `json:"webhook_url"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be a JSON object")
+		return
+	}
+	info, err := s.adminSettings.SetNoticeWebhook(r.Context(), body.WebhookURL, s.settingsActor(r))
+	if err != nil {
+		// handleSettingsError 把 ErrInvalidSettings 映成 422，形状校验的说明
+		// 会回到页面上——**且不含地址本身**（ValidateWebhookAddress 保证）。
+		handleSettingsError(w, err)
+		return
+	}
+	s.writeNoticeWebhook(w, info)
+}
+
+func (s *Server) clearNoticeWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.adminSettings == nil {
+		writeError(w, http.StatusServiceUnavailable, "SETTINGS_DISABLED", "admin settings are not configured")
+		return
+	}
+	info, err := s.adminSettings.ClearNoticeWebhook(r.Context(), s.settingsActor(r))
+	if err != nil {
+		handleSettingsError(w, err)
+		return
+	}
+	s.writeNoticeWebhook(w, info)
+}
+
+// testNoticeWebhook 往**已保存的**地址发一条测试消息。
+//
+// 这是确认"配对没有"的正经办法：消息到没到那个群，比在页面上看一段前缀
+// 可靠得多——所以我们才敢在展示上只给指纹、一个字符的地址都不回读。
+func (s *Server) testNoticeWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.adminSettings == nil {
+		writeError(w, http.StatusServiceUnavailable, "SETTINGS_DISABLED", "admin settings are not configured")
+		return
+	}
+	var body *struct{}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body == nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be an empty JSON object")
+		return
+	}
+	address, err := s.adminSettings.NoticeWebhookForDelivery(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "NOTICE_WEBHOOK_NOT_CONFIGURED",
+			"configure the WeCom webhook address before sending a test message")
+		return
+	}
+	sender := notify.NewWeComSender(func(context.Context) (string, error) { return address, nil }, nil)
+	message := notify.RenderWeComMarkdown(notify.Envelope{
+		Kind: "settings.test", Severity: notify.SeverityInfo,
+		// Server 这一层没有环境标识（投递循环才读 APP_ENV）。宁可不带，
+		// 也不在这里编一个——信封允许 Environment 为空。
+		Title: "测试消息",
+		Lines: []notify.Line{
+			{Label: "说明", Value: "这条是管理员在设置页点「发送测试」发出的，收到即表示地址配对了。"},
+			{Label: "操作人", Value: principal(r).UserID},
+		},
+		Action: "管理端 → 设置 → 通知",
+	})
+	if err = sender.Send(r.Context(), message); err != nil {
+		// 发送器的错误串是分类过的短码，不含地址与上游原文，可以直接回显。
+		writeError(w, http.StatusBadGateway, "NOTICE_WEBHOOK_SEND_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sent": true})
 }

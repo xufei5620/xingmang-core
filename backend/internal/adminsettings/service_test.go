@@ -9,9 +9,11 @@ import (
 )
 
 type memoryRepo struct {
-	settings Settings
-	secret   SecretEnvelope
-	has      bool
+	settings            Settings
+	secret              SecretEnvelope
+	has                 bool
+	noticeWebhook       NoticeWebhookInfo
+	noticeWebhookSecret SecretEnvelope
 }
 
 func (m *memoryRepo) Get(context.Context) (Settings, error) {
@@ -363,4 +365,32 @@ func TestMinimumRequestMinorIsASettingNotAFloor(t *testing.T) {
 			t.Fatalf("minimum_request_minor=%d was accepted", broken)
 		}
 	}
+}
+
+// XM-INV-NOTICE-WEBHOOK-SETTING 给 Repository 加了四个方法。这个替身只服务
+// 本文件的既有用例，通知地址那部分用最小可用实现（不是 panic：本文件里有
+// 遍历式的用例会顺带碰到 Get 那一路）。
+func (m *memoryRepo) GetNoticeWebhook(context.Context) (NoticeWebhookInfo, error) {
+	return m.noticeWebhook, nil
+}
+
+func (m *memoryRepo) StoreNoticeWebhook(_ context.Context, envelope SecretEnvelope, fingerprint string, actor Actor) (NoticeWebhookInfo, error) {
+	m.noticeWebhookSecret = envelope
+	m.noticeWebhook = NoticeWebhookInfo{
+		Configured: true, Fingerprint: fingerprint, UpdatedBy: actor.ID,
+	}
+	return m.noticeWebhook, nil
+}
+
+func (m *memoryRepo) ClearNoticeWebhook(context.Context, Actor) (NoticeWebhookInfo, error) {
+	m.noticeWebhookSecret = SecretEnvelope{}
+	m.noticeWebhook = NoticeWebhookInfo{}
+	return m.noticeWebhook, nil
+}
+
+func (m *memoryRepo) LoadNoticeWebhook(context.Context) (SecretEnvelope, error) {
+	if len(m.noticeWebhookSecret.Ciphertext) == 0 {
+		return SecretEnvelope{}, ErrSecretMissing
+	}
+	return m.noticeWebhookSecret, nil
 }

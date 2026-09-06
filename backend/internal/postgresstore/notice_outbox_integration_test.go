@@ -209,3 +209,113 @@ func TestEnqueueIsIdempotentPerRequestAndKind(t *testing.T) {
 		t.Fatalf("enqueued %d rows for one request, want 1", count)
 	}
 }
+
+// XM-INV-NOTICE-VIEW：管理端的只读视图。
+func TestListInvoiceNoticesForRequestReturnsDeliveryFacts(t *testing.T) {
+	store, ctx := integrationStore(t)
+	requestID := seedNoticeRequest(t, store, ctx, "INV-NOTICE-0010", time.Now().UTC())
+	otherID := seedNoticeRequest(t, store, ctx, "INV-NOTICE-0011", time.Now().UTC())
+	enqueueNotice(t, store, ctx, requestID)
+	enqueueNotice(t, store, ctx, otherID)
+
+	// 排队中：delivered_at 必须是 nil，不是零时刻。
+	states, err := store.ListInvoiceNoticesForRequest(ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("want 1 notice for this request, got %d", len(states))
+	}
+	if states[0].Status != "queued" || states[0].DeliveredAt != nil || states[0].LastErrorCode != "" {
+		t.Fatalf("a freshly queued notice: %+v", states[0])
+	}
+	if states[0].Kind != NoticeKindRequestSubmitted {
+		t.Fatalf("kind=%q", states[0].Kind)
+	}
+
+	// 失败一次之后，原因看得见、尝试次数跟着涨。
+	now := time.Now().UTC()
+	claimed, err := store.ClaimInvoiceNotices(ctx, 10, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target InvoiceNotice
+	for _, notice := range claimed {
+		if notice.RequestNo == "INV-NOTICE-0010" {
+			target = notice
+		}
+	}
+	if target.ID == "" {
+		t.Fatal("没取到这份申请的通知")
+	}
+	if err = store.MarkInvoiceNoticeFailed(ctx, target.ID, "wecom: errcode 93000", target.AttemptCount, now); err != nil {
+		t.Fatal(err)
+	}
+	states, err = store.ListInvoiceNoticesForRequest(ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states[0].LastErrorCode != "wecom: errcode 93000" || states[0].AttemptCount != 1 || states[0].DeliveredAt != nil {
+		t.Fatalf("失败之后应看得见原因与次数，且仍未送达：%+v", states[0])
+	}
+
+	// 送达之后 delivered_at 有值、原因被清空。
+	//
+	// 必须先重新取件：MarkInvoiceNoticeSent 只对 status='sending' 生效，
+	// 而失败会把行放回 queued。这是投递循环的真实次序（取件→投递→标记），
+	// 跳过取件直接标记在生产里也不会发生。退避是 30 秒起，所以往后拨一分钟。
+	retryAt := now.Add(time.Minute)
+	reclaimed, err := store.ClaimInvoiceNotices(ctx, 10, retryAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, notice := range reclaimed {
+		if notice.ID == target.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("退避到期后应能重新取件，取到的是 %+v", reclaimed)
+	}
+	if err = store.MarkInvoiceNoticeSent(ctx, target.ID, retryAt); err != nil {
+		t.Fatal(err)
+	}
+	states, err = store.ListInvoiceNoticesForRequest(ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states[0].Status != "sent" || states[0].DeliveredAt == nil {
+		t.Fatalf("送达之后：%+v", states[0])
+	}
+	// 送达会清掉上一次的失败原因：留着它会让人以为这条还是失败的。
+	if states[0].LastErrorCode != "" {
+		t.Fatalf("送达之后不该还挂着失败原因：%q", states[0].LastErrorCode)
+	}
+
+	// **只列这一份申请的**：另一份申请的通知不能混进来。
+	other, err := store.ListInvoiceNoticesForRequest(ctx, otherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 1 || other[0].ID == states[0].ID {
+		t.Fatalf("按申请隔离失败：this=%+v other=%+v", states, other)
+	}
+}
+
+// 没有通知记录时返回空切片而不是 nil：JSON 里 [] 与 null 对前端不是一回事，
+// 而"这份申请没有通知记录"是正常状态（通知功能没启用时就是这样）。
+func TestListInvoiceNoticesReturnsEmptySliceWhenNone(t *testing.T) {
+	store, ctx := integrationStore(t)
+	requestID := seedNoticeRequest(t, store, ctx, "INV-NOTICE-0012", time.Now().UTC())
+	states, err := store.ListInvoiceNoticesForRequest(ctx, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states == nil {
+		t.Fatal("没有记录时要返回空切片，不是 nil")
+	}
+	if len(states) != 0 {
+		t.Fatalf("want 0, got %d", len(states))
+	}
+}

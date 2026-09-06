@@ -108,6 +108,20 @@ const (
 	SMTPSecretClear     SMTPSecretChange = "clear"
 )
 
+// NoticeWebhookInfo 是企业微信通知地址在管理端**能显示的全部**
+// （XM-INV-NOTICE-WEBHOOK-SETTING）。
+//
+// **没有地址本身，也没有它的任何明文片段**：整个 URL 就是凭据（企微把鉴权
+// key 放在查询参数里）。"配的是哪一个"由指纹回答——可核对、不可反推，与星芒
+// 平台凭据页显示指纹前缀而非值前缀是同一条纪律。真要确认配对没有，用"发送
+// 测试消息"：消息到没到那个群，比看一段前缀可靠得多。
+type NoticeWebhookInfo struct {
+	Configured  bool      `json:"configured"`
+	Fingerprint string    `json:"fingerprint"`
+	UpdatedBy   string    `json:"updated_by"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 type Repository interface {
 	Get(context.Context) (Settings, error)
 	Update(context.Context, UpdateInput, int64, Actor) (Settings, error)
@@ -115,6 +129,14 @@ type Repository interface {
 	StoreSMTPSecret(context.Context, SecretEnvelope, int64, Actor) (Settings, error)
 	ClearSMTPSecret(context.Context, int64, Actor) (Settings, error)
 	LoadSMTPSecret(context.Context) (SecretEnvelope, error)
+
+	// 通知地址走**独立的表**，不并进 admin_setting_secrets：那张表的
+	// smtp_secret_ciphertext 是 NOT NULL 且 ClearSMTPSecret 直接 DELETE 整行，
+	// 挂上去会让"清一次 SMTP 口令"顺手抹掉通知地址。两个凭据生命周期无关。
+	GetNoticeWebhook(context.Context) (NoticeWebhookInfo, error)
+	StoreNoticeWebhook(context.Context, SecretEnvelope, string, Actor) (NoticeWebhookInfo, error)
+	ClearNoticeWebhook(context.Context, Actor) (NoticeWebhookInfo, error)
+	LoadNoticeWebhook(context.Context) (SecretEnvelope, error)
 }
 
 type SecretBox interface {

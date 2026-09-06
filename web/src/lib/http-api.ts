@@ -385,6 +385,12 @@ export type BackendSystemSettings = {
     cidrs: string[];
     current_ip: string;
   };
+  notice_webhook?: {
+    configured?: boolean;
+    fingerprint?: string;
+    updated_by?: string;
+    updated_at?: string | null;
+  };
 };
 
 export type BackendInvoicePolicy = {
@@ -1331,6 +1337,13 @@ export function mapAdminSettings(
     adminAccess: {
       cidrs: settings.admin_access.cidrs,
       currentIP: settings.admin_access.current_ip,
+    },
+    // 整块缺失当成"未配置"：老版本后端没有这个字段，那时它确实没配。
+    noticeWebhook: {
+      configured: settings.notice_webhook?.configured === true,
+      fingerprint: settings.notice_webhook?.fingerprint ?? "",
+      updatedBy: settings.notice_webhook?.updated_by ?? "",
+      updatedAt: settings.notice_webhook?.updated_at ?? null,
     },
   };
 }
@@ -2688,6 +2701,50 @@ export const httpInvoiceApi: InvoiceApiClient = {
     };
   },
 
+  async listRequestNotices(request) {
+    // **只有 admin 路径**：后端没有 user 变体（这是运维事实，不是申请人的
+    // 业务数据），前端也不该造一个会 404 的调用。
+    const value = await requestJSON<{
+      items?: Array<{
+        id?: string;
+        kind?: string;
+        status?: string;
+        attempt_count?: number;
+        next_attempt_at?: string | null;
+        delivered_at?: string | null;
+        last_error_code?: string;
+        created_at?: string | null;
+      }> | null;
+    }>(
+      `/api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/notices`,
+      { role: "admin" },
+    );
+    return (value.items ?? []).map((item) => {
+      if (
+        item.attempt_count !== undefined &&
+        (!Number.isSafeInteger(item.attempt_count) || item.attempt_count < 0)
+      ) {
+        // 与邮件交付同一条纪律：宁可整块停掉，也不显示一个说不通的数字。
+        throw new InvoiceApiError("通知尝试次数无效，已停止显示。", {
+          code: "INVALID_NOTICE_RESPONSE",
+        });
+      }
+      return {
+        id: item.id ?? "",
+        kind: item.kind ?? "",
+        // 未知状态原样带出：后端加了新状态时显示原值仍然有用，
+        // 比藏起来强（与卡片推送对未知交易类型的处理同一条）。
+        status: item.status ?? "",
+        attemptCount: item.attempt_count ?? 0,
+        // null 与缺失都归成 undefined：界面只需要区分"有"和"没有"。
+        nextAttemptAt: item.next_attempt_at ?? undefined,
+        deliveredAt: item.delivered_at ?? undefined,
+        lastErrorCode: item.last_error_code ?? "",
+        createdAt: item.created_at ?? undefined,
+      };
+    });
+  },
+
   async downloadInvoiceDocument(request) {
     const response = await requestBinary(
       invoiceDocumentPath(request.id),
@@ -2714,6 +2771,29 @@ export const httpInvoiceApi: InvoiceApiClient = {
     anchor.download = request.pdfName ?? `${request.requestNo}.pdf`;
     anchor.click();
     URL.revokeObjectURL(url);
+  },
+
+  async saveNoticeWebhook(webhookURL) {
+    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook", {
+      method: "PUT",
+      role: "admin",
+      body: { webhook_url: webhookURL },
+    });
+  },
+
+  async clearNoticeWebhook() {
+    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook", {
+      method: "DELETE",
+      role: "admin",
+    });
+  },
+
+  async sendNoticeWebhookTest() {
+    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook/test", {
+      method: "POST",
+      role: "admin",
+      body: {},
+    });
   },
 
   async getAdminSettings() {

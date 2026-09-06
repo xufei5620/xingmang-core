@@ -110,6 +110,7 @@ import type {
   EligibilityProjectionHealth,
   FundingOrder,
   InvoiceProfile,
+  InvoiceNoticeDelivery,
   InvoiceProfileType,
   InvoicePolicy,
   InvoiceRequest,
@@ -2391,6 +2392,12 @@ function AdminDrawer({
   > | null>(null);
   const [deliveryLoading, setDeliveryLoading] = useState(false);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
+  // 企业微信通知（XM-INV-NOTICE-UI）。与交付状态分开：交付说的是"发票邮件
+  // 寄了没有"（要先开票），通知说的是"提交那一刻推的那条群消息发了没有"，
+  // 从提交起就存在。
+  const [notices, setNotices] = useState<InvoiceNoticeDelivery[] | null>(null);
+  const [noticesLoading, setNoticesLoading] = useState(false);
+  const [noticesError, setNoticesError] = useState<string | null>(null);
   useEffect(() => {
     setDelivery(null);
     setDeliveryError(null);
@@ -2422,6 +2429,33 @@ function AdminDrawer({
       active = false;
     };
   }, [requestId, request?.status, request?.updatedAt, request?.workflowStatus]);
+  // 通知不按状态设闸：一条 request.submitted 的通知在申请还是"待审核"时
+  // 就存在了，而那正是最需要查"推出去了没有"的时候。
+  useEffect(() => {
+    setNotices(null);
+    setNoticesError(null);
+    setNoticesLoading(false);
+    if (!request) return;
+    let active = true;
+    setNoticesLoading(true);
+    void invoiceApi
+      .listRequestNotices(request)
+      .then((value) => {
+        if (active) setNotices(value);
+      })
+      .catch((error) => {
+        if (active)
+          setNoticesError(
+            error instanceof Error ? error.message : "通知状态读取失败。",
+          );
+      })
+      .finally(() => {
+        if (active) setNoticesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [requestId, request?.status, request?.updatedAt]);
   useEffect(() => {
     setIssuedAt(currentLocalDateTimeValue());
   }, [requestId]);
@@ -2831,6 +2865,56 @@ function AdminDrawer({
               </div>
             </section>
           )}
+          {/* 企业微信通知（XM-INV-NOTICE-UI）。**不设状态闸**：提交那一刻的
+              通知在申请还是"待审核"时就存在，而那正是最需要查它的时候。 */}
+          <section className="delivery-box">
+            <div>
+              <Send size={21} />
+              <div>
+                <strong>企业微信通知</strong>
+                <span>
+                  提交、审核这类事件推到群机器人的记录；与上面的发票邮件是两条
+                  不同的通道。
+                </span>
+              </div>
+            </div>
+            <div className="mail-row">
+              {noticesLoading ? (
+                <span>正在读取通知状态</span>
+              ) : noticesError ? (
+                <>
+                  <span>通知状态读取失败</span>
+                  <small>{noticesError}</small>
+                </>
+              ) : notices && notices.length > 0 ? (
+                notices.map((notice) => (
+                  <span key={notice.id}>
+                    {noticeKindLabel(notice.kind)}：
+                    {noticeStatusLabel(notice.status)}
+                    {notice.attemptCount > 0 && (
+                      <small>已尝试 {notice.attemptCount} 次</small>
+                    )}
+                    {notice.deliveredAt && (
+                      <small>送达 {dateTime(notice.deliveredAt)}</small>
+                    )}
+                    {!notice.deliveredAt && notice.nextAttemptAt && (
+                      <small>下次尝试 {dateTime(notice.nextAttemptAt)}</small>
+                    )}
+                    {/* 失败短码是"为什么没发出去"的唯一线索；后端保证它不含
+                        Webhook 地址与上游原文，所以可以直接显示。 */}
+                    {notice.lastErrorCode && <small>{notice.lastErrorCode}</small>}
+                  </span>
+                ))
+              ) : (
+                <span>
+                  没有通知记录
+                  <small>
+                    未配置群机器人地址时不会入队，这不是故障
+                  </small>
+                </span>
+              )}
+            </div>
+          </section>
         </div>
         {working && (
           <div className="drawer-working">
@@ -2851,6 +2935,24 @@ function VerificationBadge({
   if (value === "passed") return <Badge tone="green">已通过</Badge>;
   if (value === "failed") return <Badge tone="red">异常</Badge>;
   return <Badge tone="amber">待核验</Badge>;
+}
+
+// 通知事件与状态的中文。**未知取值原样显示**，与卡片推送对未知交易类型的
+// 处理同一条纪律：后端加了新事件/新状态时，显示原值仍然有用，藏起来不是。
+function noticeKindLabel(value: string) {
+  return { "request.submitted": "提交申请" }[value] ?? (value || "未知事件");
+}
+
+function noticeStatusLabel(value: string) {
+  return (
+    {
+      queued: "排队中",
+      sending: "投递中",
+      sent: "已发送",
+      // 到达重试上限后停住。行留着，看得见它失败了。
+      failed: "已放弃",
+    }[value] ?? (value || "未知状态")
+  );
 }
 
 function mailStatusLabel(value: InvoiceRequest["mailStatus"]) {
@@ -4686,6 +4788,9 @@ function SystemSettingsPage() {
     startTLS: true,
     authorizationCode: "",
   });
+  // 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）。**只进不出**：保存后
+  // 清空输入框，页面从不回读地址——与 SMTP 授权码同一条纪律。
+  const [noticeWebhookURL, setNoticeWebhookURL] = useState("");
   const [cidrs, setCIDRs] = useState<string[]>([]);
   const [networkEntry, setNetworkEntry] = useState("");
 
@@ -5053,6 +5158,141 @@ function SystemSettingsPage() {
                     <Send size={16} />
                   )}
                   发送测试邮件
+                </button>
+              </div>
+            </section>
+
+            {/* 企业微信通知（XM-INV-NOTICE-WEBHOOK-SETTING）。
+                产品负责人：「这个地址我希望的是在前端可以设置配置。如果写入
+                服务器中，那不是想更换很麻烦？」——原方案放宿主机文件，换群要
+                SSH 上去改再重启。搬到这里之后，改完下一条通知就用新地址。 */}
+            <section className="settings-card card">
+              <div className="settings-card-head">
+                <div className="settings-section-icon">
+                  <Send size={19} />
+                </div>
+                <div>
+                  <h2>企业微信通知</h2>
+                  <p>
+                    用户提交开票申请时推一条消息到群机器人。整个 Webhook
+                    地址就是凭据，保存后不会再显示。
+                  </p>
+                </div>
+                <Badge tone={settings.noticeWebhook.configured ? "green" : "amber"}>
+                  {settings.noticeWebhook.configured ? "已配置" : "未配置"}
+                </Badge>
+              </div>
+              {settings.noticeWebhook.configured && (
+                <div className="current-ip">
+                  <ShieldCheck size={17} />
+                  <div>
+                    <span>当前地址指纹</span>
+                    <strong>{settings.noticeWebhook.fingerprint}</strong>
+                  </div>
+                  <small>
+                    {settings.noticeWebhook.updatedAt
+                      ? `${dateTime(settings.noticeWebhook.updatedAt)} 由 ${settings.noticeWebhook.updatedBy} 更新`
+                      : ""}
+                  </small>
+                </div>
+              )}
+              <form
+                className="settings-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const value = noticeWebhookURL.trim();
+                  if (!value) {
+                    toast("请粘贴群机器人的 Webhook 地址。", "error");
+                    return;
+                  }
+                  void run(
+                    "notice-webhook",
+                    () => invoiceApi.saveNoticeWebhook(value),
+                    "通知地址已保存；地址不会再次显示，请用「发送测试」确认。",
+                  );
+                  setNoticeWebhookURL("");
+                }}
+              >
+                <label className="field">
+                  <span>群机器人 Webhook 地址</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={noticeWebhookURL}
+                    placeholder={
+                      settings.noticeWebhook.configured
+                        ? "已配置；粘贴新地址可覆盖"
+                        : "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+                    }
+                    onChange={(event) => setNoticeWebhookURL(event.target.value)}
+                  />
+                  <small>
+                    地址里的 key 就是鉴权凭据，所以这里按密码处理：保存后页面
+                    永不回读，只显示指纹供核对。
+                  </small>
+                </label>
+                <div className="settings-actions">
+                  <button
+                    className="button button-primary"
+                    disabled={saving === "notice-webhook"}
+                  >
+                    {saving === "notice-webhook" ? (
+                      <Loader2 className="spin" size={16} />
+                    ) : (
+                      <Save size={16} />
+                    )}
+                    保存通知地址
+                  </button>
+                </div>
+              </form>
+              <div className="test-mail-row">
+                <div className="verified-recipient-note">
+                  <Send size={17} />
+                  <span>
+                    消息到没到那个群，比看一段前缀可靠——换了地址之后用它确认。
+                  </span>
+                </div>
+                <button
+                  className="button button-secondary"
+                  disabled={
+                    saving === "notice-webhook-test" ||
+                    !settings.noticeWebhook.configured
+                  }
+                  onClick={() =>
+                    void run(
+                      "notice-webhook-test",
+                      () => invoiceApi.sendNoticeWebhookTest(),
+                      "测试消息已发出，请到群里确认。",
+                    )
+                  }
+                >
+                  {saving === "notice-webhook-test" ? (
+                    <Loader2 className="spin" size={16} />
+                  ) : (
+                    <Send size={16} />
+                  )}
+                  发送测试消息
+                </button>
+                <button
+                  className="button button-secondary"
+                  disabled={
+                    saving === "notice-webhook-clear" ||
+                    !settings.noticeWebhook.configured
+                  }
+                  onClick={() =>
+                    void run(
+                      "notice-webhook-clear",
+                      () => invoiceApi.clearNoticeWebhook(),
+                      "通知地址已清除；在重新配置之前不会再推送。",
+                    )
+                  }
+                >
+                  {saving === "notice-webhook-clear" ? (
+                    <Loader2 className="spin" size={16} />
+                  ) : (
+                    <X size={16} />
+                  )}
+                  清除
                 </button>
               </div>
             </section>

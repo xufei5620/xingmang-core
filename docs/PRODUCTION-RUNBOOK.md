@@ -2098,6 +2098,29 @@ source agents. The supplied `/27` subnet uses a `/28` dynamic pool and reserves
 `.30` for the proxy; the old `/28` subnet with a `/29` pool is too small and is
 rejected by the production capacity review.
 
+## 9b. New API 手动退款：必须同时冻结资金批次
+
+**这一条是 XM-INV-NEWAPI-AUTOVERIFY 留下的唯一缺口，用流程补，代码补不了。**
+
+New API 的 `top_ups` 状态只有 `pending` / `success` / `failed` / `expired`，
+**没有退款态**。一笔已经退给用户的充值，在上游看起来仍然是 `success`，于是在
+开票系统里仍然是一笔可开票的资金批次。自动核验放开之后，没有任何自动机制会
+发现这件事。
+
+所以，**每一次手动退 New API 的款，都必须在管理端做对应处置**：
+
+- 退全款 → 管理端「待核验充值 / 资金批次」找到该笔，执行**冻结**
+  （`POST /api/v1/admin/funding-lots/{id}/freeze-payment`，需填写证据与理由）。
+- 退部分 → 执行**手动上限调整**
+  （`POST /api/v1/admin/funding-lots/{id}/manual-cap-adjustment`），把上限降到
+  实际保留的金额。上限只能降不能升。
+
+**没做这一步的后果**：用户可以为已经退回的钱申请开票，而审核的人如果不知道
+退过款，就会给一笔不存在的收入开出真发票。
+
+**核对建议**：每月对一次账——把当月手动退款清单与管理端的冻结/调额记录逐条
+对上。这件事今天没有自动化，也没有任何告警会提醒。
+
 ## 10. Canary acceptance
 
 Use one finance admin, one Sub2API user and one New API user.
