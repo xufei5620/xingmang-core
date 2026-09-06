@@ -155,3 +155,94 @@ describe("Sub2ApiOrdersPanel（XM-PAY1）", () => {
     expect(link.getAttribute("href")).toBe("/platforms/sub2api/finance/orders/9001?day=2026-08-27");
   });
 });
+
+describe("本区间汇总（XM-PAY-STATUS-ROLLUP）", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("按归一化分桶显示整个区间的笔数与金额，并说明它不随翻页变化", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(
+            200,
+            page([order()], {
+              stats_by_status: {
+                PAID: { count: 3, amount: { minor_units: "30000", currency: "CNY" } },
+                SUCCESS: { count: 2, amount: { minor_units: "20000", currency: "CNY" } },
+                PENDING: { count: 1, amount: { minor_units: "5000", currency: "CNY" } },
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+
+    renderPanel();
+
+    const summary = (await screen.findByRole("heading", { name: "本区间汇总", level: 3 })).closest(
+      "section",
+    ) as HTMLElement;
+    // 成功到账把 PAID 与 SUCCESS 合起来：5 笔、¥500.00。
+    expect(within(summary).getByText("5")).toBeTruthy();
+    expect(within(summary).getByText("¥500.00")).toBeTruthy();
+    // 原始状态一并列出，归一化不掩盖上游说了什么。
+    expect(within(summary).getByText("PAID、SUCCESS")).toBeTruthy();
+    // 覆盖范围要说清楚：整个区间，不是已加载的那几页。
+    expect(within(summary).getByText(/全部.*6.*笔订单/)).toBeTruthy();
+  });
+
+  it("上游出现没见过的状态时单独报出来，不悄悄丢掉", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(
+            200,
+            page([order()], {
+              stats_by_status: {
+                CHARGEBACK: { count: 2, amount: { minor_units: "700", currency: "CNY" } },
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+
+    renderPanel();
+
+    const summary = (await screen.findByRole("heading", { name: "本区间汇总", level: 3 })).closest(
+      "section",
+    ) as HTMLElement;
+    // 两处都要出现：顶部的警示条点名它，表格里也有一行「未知」承载它。
+    expect(within(summary).getAllByText("CHARGEBACK").length).toBe(2);
+    expect(within(summary).getByText(/尚未归类的状态/)).toBeTruthy();
+    expect(within(summary).getByText("未知")).toBeTruthy();
+  });
+
+  it("整桶没有金额时显示「—」而不是 0", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(
+            200,
+            page([order()], {
+              stats_by_status: { PENDING: { count: 4, amount: { minor_units: null, currency: "" } } },
+            }),
+          ),
+        ),
+      ),
+    );
+
+    renderPanel();
+
+    const summary = (await screen.findByRole("heading", { name: "本区间汇总", level: 3 })).closest(
+      "section",
+    ) as HTMLElement;
+    expect(within(summary).getByText("待处理")).toBeTruthy();
+    expect(within(summary).getByText("4")).toBeTruthy();
+    expect(within(summary).getByText("—")).toBeTruthy();
+    expect(within(summary).queryByText("¥0.00")).toBeNull();
+  });
+});
