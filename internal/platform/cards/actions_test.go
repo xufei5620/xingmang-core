@@ -16,20 +16,12 @@ func TestIssueActionDefinitionIsValid(t *testing.T) {
 	}
 }
 
-// 风险等级必须落在**平台当前真能执行**的范围内。
-//
-// 内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED 并拒绝执行（Advanced
-// Controls 属 Foundation-B / XM-0030，尚未实现），所以一个声明成 L2 的开卡
-// Action 会是个永远跑不起来的摆设。这条测试钉住的不是「L1 这个字面值」，
-// 而是「这个 Action 能被执行」——Foundation-B 落地后它会自然失效，
-// 那正是重估风险等级的时机。
-func TestIssueActionRiskLevelIsExecutableToday(t *testing.T) {
-	def := issueDef(testAccounts)
-
-	if def.RiskLevel.RequiresAdvancedControls() {
-		t.Fatalf("RiskLevel %q 需要尚未实现的 Advanced Controls，该 Action 将无法执行", def.RiskLevel)
-	}
-}
+// 这里原先有一条 TestIssueActionRiskLevelIsExecutableToday，断言开卡的等级
+// 不需要 Advanced Controls——那是 Foundation-B 未实现时期「平台只跑得动 L1」
+// 的天花板，它自己的注释就写了「Foundation-B 落地后它会自然失效，那正是重估
+// 风险等级的时机」。审批中心实装后这个时机到了，开卡恢复成 L2，所以那条断言
+// 连同它的前提一起删掉，换成 risk_levels_test.go 里对**行为**的断言：
+// 开卡经过接了审批中心的内核时落成审批单，reveal 这类 L1 仍然直接执行。
 
 func TestRevealActionRiskLevelIsExecutableToday(t *testing.T) {
 	if revealDef(testAccounts).RiskLevel.RequiresAdvancedControls() {

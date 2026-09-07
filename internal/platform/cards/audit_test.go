@@ -2,8 +2,12 @@ package cards
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/xufei5620/xingmang-platform/connectors/infini"
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
@@ -35,6 +39,76 @@ func kernelWith(t *testing.T, svc *Service) (*action.Kernel, *capturingSink) {
 	return action.NewKernel(reg, nopRunStore{}, action.WithAuditSink(sink)), sink
 }
 
+// kernelWithApprovals 是接了审批中心替身的内核。
+//
+// 开卡与关停恢复成 L2、提现恢复成 L3 之后（XM-RISK-RESTORE），它们不再能一
+// 步执行完；要测 Handler 的审计贡献就得走完「落单 → 批准 → 执行」这条路。
+func kernelWithApprovals(t *testing.T, svc *Service) (*action.Kernel, *capturingSink, *fakeApprovals) {
+	t.Helper()
+	reg := action.NewRegistry()
+	if err := RegisterActions(reg, svc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &capturingSink{}
+	gw := &fakeApprovals{claims: map[string]action.ApprovalClaim{}}
+	k := action.NewKernel(reg, nopRunStore{},
+		action.WithAuditSink(sink), action.WithApprovalGateway(gw))
+	return k, sink, gw
+}
+
+// fakeApprovals 是审批中心在内核这一侧那三个方法的替身：**批准是无条件的**。
+//
+// 它替代不了 approval 包的策略（票数、自批限制、有效期都在那边，由
+// approval 自己的用例覆盖）；这里只需要「单能落下、能取回、能占用」，
+// 好让 Handler 侧的用例走到执行那一步。
+type fakeApprovals struct {
+	submitted []action.ApprovalSubmission
+	claims    map[string]action.ApprovalClaim
+	claimed   []string
+}
+
+func (g *fakeApprovals) Submit(_ context.Context, in action.ApprovalSubmission) (string, error) {
+	id := fmt.Sprintf("appr-%d", len(g.submitted)+1)
+	g.submitted = append(g.submitted, in)
+	g.claims[id] = action.ApprovalClaim{
+		ActionID: in.ActionID, ActionVersion: in.ActionVersion,
+		RiskLevel: in.RiskLevel, Params: in.Params,
+		Reason: in.Reason, RequesterID: in.Requester.ID,
+	}
+	return id, nil
+}
+
+func (g *fakeApprovals) Peek(_ context.Context, id string) (action.ApprovalClaim, error) {
+	c, ok := g.claims[id]
+	if !ok {
+		return action.ApprovalClaim{}, fmt.Errorf("审批单 %s 不存在", id)
+	}
+	return c, nil
+}
+
+func (g *fakeApprovals) Claim(_ context.Context, id string, _ uuid.UUID, _ map[string]any) error {
+	g.claimed = append(g.claimed, id)
+	return nil
+}
+
+// runThroughApproval 走完「落单 → 执行」并把落单那一段的审计事件清掉，
+// 让调用方的断言对着**执行**那一条，与恢复等级之前的写法保持一致。
+func runThroughApproval(
+	t *testing.T, k *action.Kernel, sink *capturingSink, ctx context.Context, req action.Request,
+) (action.Result, error) {
+	t.Helper()
+	_, err := k.Execute(ctx, req)
+	if code := action.ErrorCode(err); code != action.CodeApprovalRequired {
+		t.Fatalf("L2+ 的调用应当被受理成审批单，got %q（%v）", code, err)
+	}
+	var ae *action.Error
+	if !errors.As(err, &ae) || ae.ApprovalRequestID == "" {
+		t.Fatalf("错误里必须带单号：%v", err)
+	}
+	sink.events = nil
+	return k.ExecuteApproved(ctx, ae.ApprovalRequestID, req.RequestID, nil)
+}
+
 // ctxAs 把身份放进 ctx——内核从 ctx 取 Principal，Request 里没有这个字段。
 func ctxAs(p principal.Principal) context.Context {
 	return principal.WithPrincipal(context.Background(), p)
@@ -54,12 +128,13 @@ func operator() principal.Principal {
 // 而不记资源 id 的话，出事时无法从审计定位到具体的卡。
 func TestIssueThroughKernelRecordsResource(t *testing.T) {
 	svc := newService(infini.NewFake(), newMemStore())
-	k, sink := kernelWith(t, svc)
+	k, sink, _ := kernelWithApprovals(t, svc)
 
-	res, err := k.Execute(ctxAs(operator()), action.Request{
+	res, err := runThroughApproval(t, k, sink, ctxAs(operator()), action.Request{
 		ActionID:      ActionIssue,
 		ActionVersion: actionVersion,
 		RequestID:     "req-test",
+		Reason:        "给新同事开一张订阅卡",
 		Params:        validIssueParams(),
 	})
 	if err != nil {
@@ -86,12 +161,13 @@ func TestIssueThroughKernelRecordsResource(t *testing.T) {
 // 「谁开的卡」由 PrincipalID 回答，不需要重复个人信息。
 func TestIssueAuditOmitsPersonalData(t *testing.T) {
 	svc := newService(infini.NewFake(), newMemStore())
-	k, sink := kernelWith(t, svc)
+	k, sink, _ := kernelWithApprovals(t, svc)
 
-	if _, err := k.Execute(ctxAs(operator()), action.Request{
+	if _, err := runThroughApproval(t, k, sink, ctxAs(operator()), action.Request{
 		ActionID:      ActionIssue,
 		ActionVersion: actionVersion,
 		RequestID:     "req-test",
+		Reason:        "给新同事开一张订阅卡",
 		Params:        validIssueParams(),
 	}); err != nil {
 		t.Fatal(err)

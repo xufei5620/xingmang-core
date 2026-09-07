@@ -264,7 +264,10 @@ func NewRouter(d Deps) http.Handler {
 			// 身份，而不是调用方声称的那个。装反了等于让伪造者换个 Header 就
 			// 换一个新桶。探针不在这一组，天然豁免——靠装配位置，不靠豁免名单。
 			api.Use(RateLimit(NewRateLimiter(d.RateLimit), logger))
-			api.Get("/actions", ListActionsHandler(d.ActionRegistry))
+			// d.Approvals 兼作「审批中心接上了没有」的信号：它与内核的
+			// WithApprovalGateway 在 cmd/platform-api 里由同一个 service 装配，
+			// 两者要么都在要么都不在（见上面 Approvals 字段的注释）。
+			api.Get("/actions", ListActionsHandler(d.ActionRegistry, d.Approvals != nil))
 			api.Post("/actions/{actionID}/versions/{version}/execute", ExecuteActionHandler(d.Kernel))
 			// 读也要权限（规格 §2.4）。声明在路由上，让路由表成为
 			// 「哪个端点要什么权限」的单一清单

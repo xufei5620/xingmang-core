@@ -256,13 +256,21 @@ func usageSetHandler(svc *Service) action.Handler {
 	}
 }
 
+// deleteDef 是关停一张卡的声明。
+//
+// 风险等级 L2：关停不可逆（上游接受后进 pending_delete，结清余额后变 deleted，
+// 没有任何接口能把它恢复，契约里 compensation_mode 是 NOT_POSSIBLE），
+// 按 ADR-003 属「启停资源」那一档，要的是「预览 + 幂等 + 写后确认 + 完整审计」。
+//
+// 此前是 L1，理由是内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED
+// （Foundation-B 未实现），声明成 L2 会让它变成永远跑不起来的摆设。审批中心
+// 实装并接进内核之后这个理由不再成立，恢复成 L2。
+//
+// 幂等键 + 台账 + 审计 + 页面二次确认这几道护栏照旧，审批是加在它们之上的。
 func deleteDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID: ActionDelete, Version: actionVersion,
-		// 仍是 L1：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED
-		// （Foundation-B 未实现），声明成 L2 会让它变成永远跑不起来的摆设。
-		// 这个动作的护栏由幂等键 + 台账 + 审计 + 页面二次确认承担。
-		RiskLevel: action.L1, Permission: PermissionManage,
+		RiskLevel: action.L2, Permission: PermissionManage,
 		Schema:       switchSchema(accounts),
 		Environments: allEnvironments, PrincipalTypes: humanOnly,
 	}

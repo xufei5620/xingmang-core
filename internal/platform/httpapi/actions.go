@@ -110,7 +110,16 @@ type actionSummary struct {
 }
 
 // ListActionsHandler 返回已注册 Action 清单。
-func ListActionsHandler(reg *action.Registry) http.HandlerFunc {
+//
+// approvalsWired 是「审批中心接上了没有」。它只影响 BlockedReason 的措辞，
+// 不影响 Executable：L2+ 无论如何都不能**直接**执行，区别在于接了审批中心
+// 时它会落成一张审批单（202 + 单号），没接时才是真的被拒（501）。
+//
+// 这个参数必须传而不是写死，是 XM-RISK-RESTORE 撞出来的：那一片把开卡、
+// 关停、提现与三个采购动作恢复成 L2/L3，如果这里继续无条件回
+// 「需要 Action Advanced Controls（Foundation-B）」，操作台就会在提现旁边
+// 写「功能待上线」——而它此刻是能用的，只是要先过审批。
+func ListActionsHandler(reg *action.Registry, approvalsWired bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defs := reg.List()
 		items := make([]actionSummary, 0, len(defs))
@@ -125,7 +134,11 @@ func ListActionsHandler(reg *action.Registry) http.HandlerFunc {
 				s.PrincipalTypes = append(s.PrincipalTypes, string(pt))
 			}
 			if !s.Executable {
-				s.BlockedReason = "需要 Action Advanced Controls（Foundation-B）"
+				if approvalsWired {
+					s.BlockedReason = "需要审批：提交后落一张审批单，批准后由人触发执行"
+				} else {
+					s.BlockedReason = "需要 Action Advanced Controls（Foundation-B）"
+				}
 			}
 			items = append(items, s)
 		}

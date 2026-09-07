@@ -1,7 +1,7 @@
 {
   "id": "cards.withdraw.execute",
   "version": "1",
-  "risk_level": "L1",
+  "risk_level": "L3",
   "permission": "fund.withdraw",
   "principal_types": [
     "HUMAN"
@@ -51,5 +51,5 @@
       "required": false
     }
   },
-  "notes": "XM-CARD6 发起一次提现。这是平台里唯一一个把钱转出平台的动作：链上转账没有撤回，compensation_mode 是 NOT_POSSIBLE 而且是字面意思。风险等级仍是 L1 —— 内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED（Foundation-B 未实现），声明成 L2 会让提现变成永远跑不起来的摆设。**这意味着平台今天没有第二人审批这道闸**，这一点必须写明，免得有人把 L1 读成「评估过风险不高」。实际的护栏有六道：权限独立且不给 admin（由 fund-operator 持有）、地址白名单、额度不许 unlimited 且与卡片额度分开配、幂等键、审计、页面两步确认。参数只收 address_id 不收地址本身：地址由服务端从白名单里取，传地址进来再比对是另一回事——那样一个比对逻辑的疏漏就能让任意地址过去。校验顺序全部在打上游之前：账号解析 → 白名单 → 账号归属 → 链一致性 → 额度 → 幂等台账 → 上游。上游自身对 request_id 有真幂等（返回 is_duplicate），但同键重投时我们不再打它一次：少一次调用就少一次出错的机会。审计摘要带金额、链与 address_id，不带完整地址，理由同登记那一处。"
+  "notes": "XM-CARD6 发起一次提现。这是平台里唯一一个把钱转出平台的动作：链上转账没有撤回，compensation_mode 是 NOT_POSSIBLE 而且是字面意思。风险等级 L3（XM-RISK-RESTORE 恢复，此前是 L1）——**这一档给的正是「第二人审批」**：按 approval.DefaultPolicy()，L2 是一票且允许提交人自批，那样提现仍然是一个人从头做到尾；L3 要两票且审批人≠提交人。此前的 L1 是因为内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED（Foundation-B 未实现），声明成 L2 会让提现变成永远跑不起来的摆设，那时本文件写明「平台今天没有第二人审批这道闸」；审批中心实装后这道闸补上了。**L3 还是 L4 由产品负责人裁定**：ADR-003 把「退款」这类钱出去的动作放在 L4，而 L4 需要一张 approval.l4 特权票，该 scope 按设计默认不发给任何人（见 oidcauth/rolemap.go 的 approval-l4 角色），在有人持有它之前 L4 的提现单会一直停在 PENDING 直到过期。实际的护栏有六道：权限独立且不给 admin（由 fund-operator 持有）、地址白名单、额度不许 unlimited 且与卡片额度分开配、幂等键、审计、页面两步确认。参数只收 address_id 不收地址本身：地址由服务端从白名单里取，传地址进来再比对是另一回事——那样一个比对逻辑的疏漏就能让任意地址过去。校验顺序全部在打上游之前：账号解析 → 白名单 → 账号归属 → 链一致性 → 额度 → 幂等台账 → 上游。上游自身对 request_id 有真幂等（返回 is_duplicate），但同键重投时我们不再打它一次：少一次调用就少一次出错的机会。审计摘要带金额、链与 address_id，不带完整地址，理由同登记那一处。"
 }

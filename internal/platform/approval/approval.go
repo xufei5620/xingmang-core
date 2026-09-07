@@ -2,8 +2,9 @@
 //
 // Foundation-A 的内核对 L2 及以上一律返回 ADVANCED_CONTROLS_REQUIRED（fail
 // closed）。这挡住了 Connector/Connection 登记、Kill Switch 拉闸，以及
-// Foundation-B 的全部写场景——业务侧被迫把本该 L2/L3 的 Action 声明成 L1 绕
-// 开（cards/funds_actions.go、sms/actions.go 等处都留了这样的注释）。
+// Foundation-B 的全部写场景——业务侧被迫把本该 L2/L3 的 Action 声明成 L1 绕开。
+// 那批降级已由 XM-RISK-RESTORE 恢复（cards 的开卡/关停/提现、sms 的三个
+// 采购动作），恢复的前提正是本包。
 //
 // 本包给内核补上「先批准、后执行」的通道，**不给任何绕过 Action 的口子**：
 // 审批通过后仍然走内核原有的 Execute 全链，权限、环境、Schema 一项不少。
