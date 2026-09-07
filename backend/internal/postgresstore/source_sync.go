@@ -54,6 +54,18 @@ type SourceEventClaim struct {
 	Attempt           int
 }
 
+// SourceEventFailed and SourceEventDead are the two grades
+// MarkSourceEventFailed applies, and the two values it returns. They are
+// spelled out as constants (XM-INV-READYZ-DETAIL) because the difference is
+// no longer internal to that method: 'failed' is a retry that will come round
+// again on its own, while 'dead' is terminal -- it takes SourceIngestHealth's
+// Dead above one, which holds /readyz at 503 until an operator repairs it, so
+// its caller reports it at a different log level.
+const (
+	SourceEventFailed = "failed"
+	SourceEventDead   = "dead"
+)
+
 type SourceIngestHealth struct {
 	Pending       int64
 	Dead          int64
@@ -666,14 +678,23 @@ func (s *Store) MarkSourceEventProcessed(ctx context.Context, claim SourceEventC
 // account itself could not be resolved). See XM-INV-PROOF-CONTENTION 5 in
 // the dead-status branch below for why this is needed in addition to the
 // pre-existing source_revision_hash correlation.
-func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClaim, errorCode string, next time.Time, hintAccountID string) error {
+//
+// The returned status is the grade this call actually applied, either
+// SourceEventDead or SourceEventFailed. XM-INV-READYZ-DETAIL: the CASE
+// expression below has always computed it, but the method used to return only
+// an error, so the one caller could not tell the irreversible outcome from the
+// routine one and logged both identically -- the eighth failure, which pins
+// /readyz at 503 until an operator intervenes, was indistinguishable from the
+// first seven. Returning it is what lets that caller raise the dead
+// transition to Error level.
+func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClaim, errorCode string, next time.Time, hintAccountID string) (string, error) {
 	errorCode = strings.TrimSpace(errorCode)
 	if errorCode == "" || len(errorCode) > 512 || strings.ContainsAny(errorCode, "\r\n\x00") {
-		return errors.New("invalid source event processing error code")
+		return "", errors.New("invalid source event processing error code")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var newStatus string
@@ -686,12 +707,12 @@ func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClai
 		RETURNING processing_status`, errorCode, next,
 		claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken).Scan(&newStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.ErrConflict
+		return "", domain.ErrConflict
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	if newStatus == "dead" {
+	if newStatus == SourceEventDead {
 		// XM-INV-POLICY-ANCHOR 2.5: a dead event with no freeze yet would
 		// otherwise hold its scan cycle open indefinitely (see the freeze
 		// correlation in tryPublishEconomicScanCyclesTx). There is no
@@ -717,7 +738,7 @@ func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClai
 				FROM source_credit_events WHERE source_revision_hash=$1
 			LIMIT 1`, claim.PayloadHash).Scan(&accountID, &objectType, &objectID)
 		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
-			return lookupErr
+			return "", lookupErr
 		}
 		reason := "dead event correlated to a persisted fact"
 		if errors.Is(lookupErr, pgx.ErrNoRows) && hintAccountID != "" {
@@ -740,17 +761,20 @@ func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClai
 			if err = freezeEligibilityTx(ctx, tx, accountID, "", "EVENT_DEAD", objectType, objectID,
 				claim.PayloadHash, AuditActor{Type: "source_connector", ID: claim.SourceInstanceID,
 					Reason: reason}); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 	if claim.SchemaVersion == "3.0" {
 		if err = tryPublishEconomicScanCyclesTx(ctx, tx, claim.SourceInstanceID, claim.StreamID,
 			AuditActor{Type: "source_connector", ID: claim.SourceInstanceID, Reason: "source event marked failed/dead"}); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return newStatus, nil
 }
 
 func (s *Store) MarkSourceEventWaitingDependency(ctx context.Context, claim SourceEventClaim, kind, keyHMAC string, next time.Time) error {

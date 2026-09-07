@@ -422,58 +422,36 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if len(trustedProxies) == 0 {
 		return appRuntime{}, errors.New("production trusted proxy CIDRs are required")
 	}
-	// One instance for the process lifetime: the Readiness closure below
-	// calls warnIfStale on every /readyz evaluation, and the rate limit
+	// One instance for the process lifetime: readinessProbe.evaluate calls
+	// warnIfStale on every /readyz evaluation, and the rate limit
 	// (eligibilityProofPendingWarnInterval) only works if state persists
 	// across calls instead of being reset per-request.
 	eligibilityProofPendingWarnings := &eligibilityProofPendingWarner{}
+	// XM-INV-READYZ-DETAIL: this is the only place the probe's dependencies
+	// are bound to the real ones. The check sequence itself moved to
+	// readinessProbe.evaluate (readiness.go), unchanged in order and in
+	// short-circuiting, so that each check can be failed in isolation by a
+	// test and so that each one reports its own name.
+	readiness := readinessProbe{
+		pingDatabase: store.Pool().Ping,
+		loadSettings: settingsService.Get,
+		pingClamAV:   clamAVScanner.Ping,
+		clamAVSignatures: func(now time.Time) error {
+			return document.CheckClamAVDatabaseFreshness(clamAVDatabaseRoot, clamAVMaxAge, now)
+		},
+		pingPDFScanner:    pdfScanner.Ping,
+		sourceHealth:      appService.SourceReadinessHealth,
+		eligibilityHealth: store.EligibilityProjectionHealth,
+		proofPending:      eligibilityProofPendingWarnings,
+		now:               func() time.Time { return time.Now().UTC() },
+	}
 	api, err := httpapi.NewWithConfig(appService, httpapi.Config{
 		AuthMode: "oidc", SourceMode: "agent", AdminIPAllowlist: settings.AdminCIDRs,
 		BreakGlassCIDRs: breakGlass, TrustedProxies: trustedProxies,
 		DocumentStore: documentStore, AdminSettings: settingsService, ProductionAuth: productionAuth, PlatformLogin: platformLogin,
 		SMTPTestSender: mailer.SettingsSender{Source: settingsService}, SMTPTestRecipient: smtpTestRecipient, PublicOrigin: publicOrigin,
 		SourceIngest: receiver,
-		Readiness: func(readyCtx context.Context) error {
-			if pingErr := store.Pool().Ping(readyCtx); pingErr != nil {
-				return pingErr
-			}
-			currentSettings, settingsErr := settingsService.Get(readyCtx)
-			if settingsErr != nil {
-				return settingsErr
-			}
-			if issuerErr := validateIssuerReadiness(currentSettings); issuerErr != nil {
-				return issuerErr
-			}
-			if clamErr := clamAVScanner.Ping(readyCtx); clamErr != nil {
-				return clamErr
-			}
-			if signatureErr := document.CheckClamAVDatabaseFreshness(clamAVDatabaseRoot, clamAVMaxAge, time.Now().UTC()); signatureErr != nil {
-				return signatureErr
-			}
-			if pdfScannerErr := pdfScanner.Ping(readyCtx); pdfScannerErr != nil {
-				return pdfScannerErr
-			}
-			sourceHealth, healthErr := appService.SourceReadinessHealth(readyCtx)
-			if healthErr != nil {
-				return healthErr
-			}
-			if ingestErr := validateSourceIngestRuntimeReadiness(sourceHealth.Ingest, time.Now().UTC()); ingestErr != nil {
-				return ingestErr
-			}
-			eligibilityHealth, healthErr := store.EligibilityProjectionHealth(readyCtx)
-			if healthErr != nil {
-				return healthErr
-			}
-			readinessNow := time.Now().UTC()
-			eligibilityProofPendingWarnings.warnIfStale(eligibilityHealth, readinessNow)
-			if readinessErr := eligibilityProjectionReady(eligibilityHealth, readinessNow); readinessErr != nil {
-				return readinessErr
-			}
-			if readinessErr := validateSourceRuntimeReadiness(sourceHealth.Report); readinessErr != nil {
-				return readinessErr
-			}
-			return nil
-		},
+		Readiness:    readiness.evaluate,
 	}, slog.Default())
 	if err != nil {
 		return appRuntime{}, err
@@ -615,6 +593,18 @@ const (
 	eligibilityProjectionStuckReason = "invoice eligibility projection is not making progress"
 )
 
+// errEligibilityProjectionDead/errEligibilityProjectionStuck carry exactly the
+// two strings above and replace the errors.New calls that used to build them
+// inline (XM-INV-READYZ-DETAIL). The text is unchanged; what is new is that
+// readinessProbe.evaluate can now tell them apart with errors.Is instead of
+// matching on message text, which is what lets /readyz report
+// eligibility_projection_dead_jobs and eligibility_projection_stuck as
+// separate checks.
+var (
+	errEligibilityProjectionDead  = errors.New(eligibilityProjectionDeadReason)
+	errEligibilityProjectionStuck = errors.New(eligibilityProjectionStuckReason)
+)
+
 // eligibilityProjectionReady is the pure decision extracted from the
 // Readiness closure in buildProductionRuntime so it is table-testable
 // without a database (XM-INV-READY-PENDING). XM-INV-PROJECTION-FAILURE-GRADING:
@@ -626,10 +616,10 @@ const (
 // backoff-driven retry loop never ages into the stuck bucket either.
 func eligibilityProjectionReady(health postgresstore.EligibilityProjectionHealth, now time.Time) error {
 	if health.Dead > 0 {
-		return errors.New(eligibilityProjectionDeadReason)
+		return errEligibilityProjectionDead
 	}
 	if !health.OldestPending.IsZero() && now.Sub(health.OldestPending) > eligibilityProjectionStuckAfter {
-		return errors.New(eligibilityProjectionStuckReason)
+		return errEligibilityProjectionStuck
 	}
 	return nil
 }
@@ -690,6 +680,22 @@ func (w *eligibilityProofPendingWarner) warnIfStale(health postgresstore.Eligibi
 var (
 	readySourceStreamAllowedReasons    = map[string]bool{"ECONOMIC_RESCAN_ACTIVE": true}
 	notReadySourceStreamAllowedReasons = map[string]bool{"EVENTS_PENDING": true, "ECONOMIC_RESCAN_ACTIVE": true}
+)
+
+// errSourceStreamDeadEvents/errSourceIngestDeadEvents are the two terminal
+// dead-event gates, promoted from inline errors.New to sentinels with their
+// original text (XM-INV-READYZ-DETAIL). They matter more than the other
+// not-ready conditions in these two validators: a dead event is irreversible
+// without operator repair, so unlike a stale or pending stream it keeps
+// /readyz at 503 forever rather than clearing itself. They are also the pair
+// that made the incident hard -- both are spelled `Dead > 0` in the source,
+// they live in different tables (source_ingest_events versus
+// eligibility_projection_jobs, whose own gate is errEligibilityProjectionDead
+// above), they need different repairs, and all three used to be reported as
+// the same sentence.
+var (
+	errSourceStreamDeadEvents = errors.New("required source stream contains dead events")
+	errSourceIngestDeadEvents = errors.New("source ingestion contains dead events")
 )
 
 func reasonsWithinSet(reasons []string, allowed map[string]bool) bool {
@@ -757,7 +763,7 @@ func validateSourceRuntimeReadiness(report postgresstore.SourceHealthReport) err
 				return errors.New("ready source stream has inconsistent health evidence")
 			}
 		case item.DeadEvents != 0:
-			return errors.New("required source stream contains dead events")
+			return errSourceStreamDeadEvents
 		case item.PendingEvents <= 0 || !containsReason(item.Reasons, "EVENTS_PENDING") ||
 			!reasonsWithinSet(item.Reasons, notReadySourceStreamAllowedReasons):
 			return errors.New("required source streams are stale, blocked, dead, or version-mismatched")
@@ -791,7 +797,7 @@ func validateSourceIngestRuntimeReadiness(health postgresstore.SourceIngestHealt
 		return errors.New("source ingestion readiness clock is unavailable")
 	}
 	if health.Dead > 0 {
-		return errors.New("source ingestion contains dead events")
+		return errSourceIngestDeadEvents
 	}
 	if health.Pending == 0 {
 		if !health.OldestPending.IsZero() {

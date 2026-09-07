@@ -47,6 +47,11 @@ func (p SourceEventProcessor) logger() *slog.Logger {
 // internally off the claim's own attempt_count), so this one log call site
 // covers both, matching the task's "marked PROJECTION_FAILED or dead"
 // requirement without needing to know here which one it will become.
+//
+// XM-INV-READYZ-DETAIL: it is still written before the mark, and still says
+// nothing about which grade follows, because at this point nothing knows.
+// logSourceEventDead below is the after-the-fact companion for the one
+// outcome that is terminal.
 func logProjectionFailure(logger *slog.Logger, claim postgresstore.SourceEventClaim, cause error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -54,6 +59,41 @@ func logProjectionFailure(logger *slog.Logger, claim postgresstore.SourceEventCl
 	logger.Warn("source event projection failed",
 		"source_instance_id", claim.SourceInstanceID, "stream_id", claim.StreamID,
 		"event_id", claim.EventID, "error", cause)
+}
+
+// logSourceEventDead records the one-way transition to processing_status=
+// 'dead' (XM-INV-READYZ-DETAIL). It is deliberately Error rather than Warn,
+// and it is the only Error this package emits.
+//
+// The distinction it draws is not cosmetic. The first seven failures of an
+// event are a retry loop that recovers on its own and are correctly Warn; the
+// eighth is terminal, takes SourceIngestHealth.Dead above zero, and pins
+// /readyz at 503 until a human runs a repair -- an incident, not a warning.
+// Until now both wrote the identical logProjectionFailure line above, so a
+// watch that scans for error-level lines saw a clean log all the way through
+// a six-hour outage, and the first hard evidence was Docker marking the
+// container (unhealthy). Level is the signal because level is what that watch
+// reads; a new metrics channel would have to be built and subscribed to
+// first, and this backend has no metrics facility at all (its only
+// dependencies are pgx, go-oidc, go-jose and oauth2).
+//
+// No durable record is written here on purpose. The dead row is already its
+// own durable evidence -- source_ingest_events keeps processing_status,
+// processing_error and updated_at, and MarkSourceEventFailed additionally
+// raises an EVENT_DEAD eligibility freeze whenever the event can be
+// correlated to an account. What was missing was never the record; it was
+// that nothing announced it.
+//
+// Carries ids and the error only, never payload contents, matching
+// logProjectionFailure's rule.
+func logSourceEventDead(logger *slog.Logger, claim postgresstore.SourceEventClaim, cause error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("source event marked dead",
+		"source_instance_id", claim.SourceInstanceID, "stream_id", claim.StreamID,
+		"event_id", claim.EventID, "entity_type", claim.EntityType,
+		"attempt", claim.Attempt, "error", cause)
 }
 
 type sourceDependencyWait struct {
@@ -178,9 +218,16 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 			// after enough attempts, dead -- see logProjectionFailure's doc
 			// comment. Never logs payload contents, only ids and the error.
 			logProjectionFailure(p.logger(), claim, processErr)
-			if err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute), hintAccountID); err != nil {
+			var grade string
+			if grade, err = p.Service.store.MarkSourceEventFailed(ctx, claim, "PROJECTION_FAILED", now().Add(5*time.Minute), hintAccountID); err != nil {
 				recordIsolated("mark source event failed", err)
 				continue
+			}
+			// XM-INV-READYZ-DETAIL: the grade is only known after the mark,
+			// since MarkSourceEventFailed decides it from the row's own
+			// attempt_count. Announce the terminal one; see logSourceEventDead.
+			if grade == postgresstore.SourceEventDead {
+				logSourceEventDead(p.logger(), claim, processErr)
 			}
 			processed++
 			continue

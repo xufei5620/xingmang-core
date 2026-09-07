@@ -1994,6 +1994,65 @@ degrades exactly as it did before this change. This grace needs no operator
 action; it is derived from the same timing contract in the paragraph above,
 not independently configured.
 
+**Reading a 503 from `/readyz` (XM-INV-READYZ-DETAIL).** The endpoint runs
+eleven checks in dependency order and stops at the first failure. Its 503 body
+names that check:
+
+```bash
+curl -s https://invoice.solov.cc/readyz
+# {"error":{"code":"NOT_READY","message":"source ingestion has dead events requiring operator repair","check":"source_ingest_dead_events"}}
+```
+
+`check` is a stable identifier, safe to alert on. It is deliberately short of
+detail -- `/readyz` is unauthenticated, so the body never carries the
+underlying error, a host, a port, a path or an account id. **The exact cause is
+in the API log**, which is where triage should actually start:
+
+```bash
+docker logs --since 30m invoice-system-prod-api-1 2>&1 | grep 'readiness check failed'
+# level=ERROR msg="readiness check failed" check=source_ingest_dead_events error="source ingestion contains dead events"
+```
+
+That line is rate-limited to one per five minutes while the same check keeps
+failing (the container healthcheck probes every 10s), and it repeats
+immediately whenever the failing check changes. Recovery logs
+`msg="readiness recovered"` once, so an episode has both ends.
+
+| `check` | What it means | Where to look |
+| --- | --- | --- |
+| `database` | The pool cannot ping PostgreSQL | `postgres` container, connection limits |
+| `admin_settings` | The settings row cannot be read or decrypted | field keyring, `admin_settings` |
+| `invoice_issuer` | Issuer still unconfigured | admin settings page (see the issuer section above) |
+| `clamav_daemon` | clamd unreachable | `clamav` container |
+| `clamav_signatures` | Signature database older than `CLAMAV_MAX_SIGNATURE_AGE` | freshclam |
+| `pdf_scanner` | Sidecar socket unreachable | `pdf-scanner` container, capability token |
+| `source_health_query` | The source-health query itself failed | database load, statement timeouts |
+| `source_ingest_dead_events` | `source_ingest_events.processing_status='dead'` | the dead-event paragraph below |
+| `source_ingest` | Ingest backlog too old or inconsistent | `deploy/check-pending-spools.sh`, source agents |
+| `eligibility_health_query` | The projection-health query failed | database load, lock contention |
+| `eligibility_projection_dead_jobs` | `eligibility_projection_jobs.status='dead'` | `invoice-eligibility-repair --kind=projection-requeue-dead`, next paragraph |
+| `eligibility_projection_stuck` | Projection queue not draining for 15 minutes | eligibility-projection worker |
+| `source_stream_dead_events` | A required stream reports dead events | source agent for that stream |
+| `source_streams` | Any other stream health problem | the log line carries the exact text |
+
+The three dead-event checks are the ones that never clear by themselves. Note
+that `source_ingest_dead_events` and `eligibility_projection_dead_jobs` are
+different tables needing different repairs despite both reading as "dead";
+telling them apart was the reason for this slice.
+
+**A source event reaching the dead grade** now writes its own error-level line
+at the moment of the transition, so it is visible to an error-level log watch
+rather than only once `/readyz` has already gone 503:
+
+```bash
+docker logs --since 24h invoice-system-prod-api-1 2>&1 | grep 'source event marked dead'
+# level=ERROR msg="source event marked dead" source_instance_id=... stream_id=usage event_id=... entity_type=usage_event attempt=8 error="..."
+```
+
+The retry attempts before it stay at `level=WARN`
+(`msg="source event projection failed"`); only the eighth and final one, which
+is irreversible without operator repair, is an error.
+
 **Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING).**
 A per-account error from the eligibility-projection worker no longer trips
 `/readyz` on the first occurrence. `EligibilityProjectionHealth.Dead` --
