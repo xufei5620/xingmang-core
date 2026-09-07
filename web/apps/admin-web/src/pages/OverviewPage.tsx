@@ -15,6 +15,7 @@ import {
   listAlertsPage,
   type AlertItem,
 } from "../api/alerts";
+import { listApprovals, type ApprovalItem } from "../api/approvals";
 import { listJobRuns, type JobRunItem } from "../api/jobs";
 import {
   listAuditEvents,
@@ -33,9 +34,11 @@ import {
   urgentCount,
   truncationNote,
   workItemsFromAlerts,
+  workItemsFromApprovals,
   workItemsFromJobRuns,
   ACTIVE_ALERTS_LIMIT,
   RECOVERED_WINDOW_HOURS,
+  WORK_APPROVALS_LIMIT,
   WORK_CATEGORIES,
   WORK_JOBS_LIMIT,
   type MatrixRow,
@@ -99,8 +102,23 @@ export function OverviewPage() {
     queryFn: ({ signal }) => listJobRuns({ signal, state: "discarded", limit: WORK_JOBS_LIMIT }),
     retry: false,
   });
+  // 待审批的动作（XM-WORKBENCH-APPROVALS）。
+  //
+  // queryKey 不与「操作与审批」页的审批队列共用：那边按状态筛选、缓存的是整条
+  // 队列，这边固定 PENDING 且另有取数上限，共用会让两屏互相改写对方的缓存。
+  // 但第一段仍是 "approvals"，所以那边投完票 invalidate ["approvals"] 时这一格
+  // 跟着刷——投了一票回到工作台还看见旧的票数，人会以为票没投上去。
+  //
+  // retry: false 与后台任务那条同理：整组端点没挂载不会因为再试三次就挂上，
+  // 而重试期间这一格一直停在加载态，把「未接入」拖成「好像很慢」。
+  const approvalsQuery = useQuery({
+    queryKey: ["approvals", "workbench", WORK_APPROVALS_LIMIT],
+    queryFn: ({ signal }) =>
+      listApprovals({ signal, status: "PENDING", limit: WORK_APPROVALS_LIMIT }),
+    retry: false,
+  });
 
-  // 五条 query 各自独立：任何一条挂掉，别的格子照常显示。合成一条的话,
+  // 每条 query 各自独立：任何一条挂掉，别的格子照常显示。合成一条的话,
   // 指标端点 500 会把告警一起换成错误态——而那正是最需要看见告警的时候
   const refreshAll = () => {
     void alertsQuery.refetch();
@@ -109,6 +127,7 @@ export function OverviewPage() {
     void servicesQuery.refetch();
     void auditQuery.refetch();
     void discardedJobsQuery.refetch();
+    void approvalsQuery.refetch();
   };
   useAutoRefresh(refreshAll);
 
@@ -116,6 +135,7 @@ export function OverviewPage() {
   const recent = recentAlertsQuery.data ?? [];
   const now = new Date();
   const failedJobs = discardedJobsQuery.data?.items ?? [];
+  const pendingApprovals = approvalsQuery.data?.items ?? [];
   // 任务那条的权威判据是游标：还有下一页就是还有没显示的。
   const jobsTruncated = discardedJobsQuery.data?.nextBefore != null;
 
@@ -143,8 +163,10 @@ export function OverviewPage() {
         <WorkList
           alerts={alerts}
           jobs={failedJobs}
+          approvals={pendingApprovals}
           alertsTruncated={alertsQuery.data?.truncated === true}
           jobsTruncated={jobsTruncated}
+          approvalsTruncated={approvalsQuery.data?.truncated === true}
           now={now}
           pending={alertsQuery.isPending}
           error={alertsQuery.error}
@@ -153,6 +175,13 @@ export function OverviewPage() {
           jobsPending={discardedJobsQuery.isPending}
           jobsError={discardedJobsQuery.error}
           onJobsRetry={() => void discardedJobsQuery.refetch()}
+          // 「待审批」同理，而且它多一种降级形态：整组端点没挂载时
+          // listApprovals 会把裸 404 翻成 FeatureNotMountedError，ApiStateView
+          // 据此显示「未接入」加那句说明，而不是「加载失败」加一个重试按钮
+          // ——与「操作与审批」页的审批队列同一条路径，两处不另立一套说法。
+          approvalsPending={approvalsQuery.isPending}
+          approvalsError={approvalsQuery.error}
+          onApprovalsRetry={() => void approvalsQuery.refetch()}
           onRetry={() => void alertsQuery.refetch()}
         />
 
@@ -275,11 +304,35 @@ function TileRow({
   );
 }
 
+/** 某一类事项的加载态 / 错误态：它跟着**这一类自己**那条 query 走。 */
+interface WorkListSource {
+  pending: boolean;
+  error: unknown;
+  onRetry: () => void;
+}
+
+/** 各分类"读到了，里面没有"时说的话。
+ *
+ *  逐类分开写而不共用一句「暂无数据」：空的是什么、为什么空、下一步该去哪，
+ *  这三件事每一类都不一样，而「暂无数据」一件也没说。 */
+const EMPTY_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  jobs: "当前没有已放弃的后台任务。重试中的任务不计入这里——它会自己再试，试到用尽才会出现。",
+  approvals:
+    "当前没有等着投票的动作。L2 及以上的调用才会在这里排队；L0/L1 直接执行，不经过审批。已过期的单也不算——它已经批不动了。",
+};
+
+/** 「全部」以及没有专属文案的分类用这一句。**必须点名还有哪几类没接**：
+ *  一个「没有待处理事项」如果被读成「都处理完了」，人就会据此收工。 */
+const DEFAULT_EMPTY_DESCRIPTION =
+  "当前没有未解决的告警、没有等着投票的审批单，也没有失败的后台任务。注意：财务异常、到期项与待评审变更还没有接入，这一屏并不代表全部待办。";
+
 function WorkList({
   alerts,
   jobs,
+  approvals,
   alertsTruncated,
   jobsTruncated,
+  approvalsTruncated,
   now,
   pending,
   error,
@@ -287,11 +340,16 @@ function WorkList({
   jobsPending,
   jobsError,
   onJobsRetry,
+  approvalsPending,
+  approvalsError,
+  onApprovalsRetry,
 }: {
   alerts: AlertItem[];
   jobs: JobRunItem[];
+  approvals: ApprovalItem[];
   alertsTruncated: boolean;
   jobsTruncated: boolean;
+  approvalsTruncated: boolean;
   now: Date;
   pending: boolean;
   error: unknown;
@@ -299,6 +357,9 @@ function WorkList({
   jobsPending: boolean;
   jobsError: unknown;
   onJobsRetry: () => void;
+  approvalsPending: boolean;
+  approvalsError: unknown;
+  onApprovalsRetry: () => void;
 }) {
   // 筛选进 Search Params：一个筛过的工作台是可以贴给同事的地址（交接文档 §8）
   const [searchParams, setSearchParams] = useSearchParams();
@@ -312,21 +373,35 @@ function WorkList({
     setSearchParams(next, { replace: true });
   };
 
-  // 两类事项各自派生再合并。「全部」视图里告警在前——严重告警比一条失败的
-  // 后台任务更要紧，顺序本身就是一种排序建议。
-  const items = [...workItemsFromAlerts(alerts, now), ...workItemsFromJobRuns(jobs, now)];
+  // 三类事项各自派生再合并。「全部」视图里的先后本身就是一份排序建议：告警在
+  // 最前（严重告警比什么都急），审批其次（它挂着别人的动作，而且会到期作废），
+  // 失败任务最后（已经放弃了，晚半小时看不会更糟）。
+  const items = [
+    ...workItemsFromAlerts(alerts, now),
+    ...workItemsFromApprovals(approvals, now),
+    ...workItemsFromJobRuns(jobs, now),
+  ];
   const shown = activeId ? items.filter((item) => item.categoryId === activeId) : items;
-  // 「失败任务」这一类由 jobs query 供数，它的加载/错误态与告警的是两回事。
-  const jobsOnly = activeId === "jobs";
-  const listPending = jobsOnly ? jobsPending : pending;
-  const listError = jobsOnly ? jobsError : error;
-  const listRetry = jobsOnly ? onJobsRetry : onRetry;
+
+  // 加载态与错误态跟着**当前这一格自己**那条 query 走。写成按分类查表，而不是
+  // 一串 `a ? … : b ? … : …`：三选一还勉强读得懂，第四类进来就没人敢动了，而
+  // 这张表加一行就够。
+  //
+  // 表里查不到（含「全部」）落到告警那一条：「全部」以告警为主，另外两条各自
+  // 失败时只是少几行，不该把整块换成错误态——那正是最需要看见告警的时候。
+  const sourceByCategory: Readonly<Record<string, WorkListSource>> = {
+    jobs: { pending: jobsPending, error: jobsError, onRetry: onJobsRetry },
+    approvals: { pending: approvalsPending, error: approvalsError, onRetry: onApprovalsRetry },
+  };
+  const source: WorkListSource = sourceByCategory[activeId] ?? { pending, error, onRetry };
+
   // 取满上限时说出来（XM-WORKBENCH-TRUNCATION）。只在**当前这一格**真的可能
-  // 被截断时才说——在「待审批」下面提"告警取了 200 条"是噪声。
+  // 被截断时才说——在「财务异常」下面提"告警取了 200 条"是噪声。
   const truncation = truncationNote({
     activeCategoryId: activeId,
     alertsTruncated,
     jobsTruncated,
+    approvalsTruncated,
   });
 
   return (
@@ -346,8 +421,9 @@ function WorkList({
       {/* 这一句必须在：今天「故障」一类里躺的其实是活跃告警，故障事件（Incident）
           对象还没建。不说的话，人会以为这些已经是收敛过的故障单 */}
       <p className="mb-3 text-xs text-fg-muted">
-        本阶段有数据源的是「故障」与「失败任务」两类：前者内容是活跃告警——故障事件（Incident）对象随治理段切片建立后再单列；
-        后者只收已放弃（重试用尽、不会再跑）的后台任务，最多 {WORK_JOBS_LIMIT} 条。
+        本阶段有数据源的是「故障」「待审批」与「失败任务」三类：「故障」的内容是活跃告警——故障事件（Incident）对象随治理段切片建立后再单列；
+        「待审批」是审批中心里仍等着投票的单，最多 {WORK_APPROVALS_LIMIT} 条，已过期的不算——它已经批不动了；
+        「失败任务」只收已放弃（重试用尽、不会再跑）的后台任务，最多 {WORK_JOBS_LIMIT} 条。
         重试中的任务不在这里，它不需要人动手，看过程请去后台任务页的「失败与重试」。
         其余各类的空是「还没接」，不是「没有问题」。
       </p>
@@ -361,7 +437,7 @@ function WorkList({
           description={activeCategory.blockedBy}
         />
       ) : (
-        <ApiStateView isPending={listPending} error={listError} onRetry={listRetry}>
+        <ApiStateView isPending={source.pending} error={source.error} onRetry={source.onRetry}>
           {truncation ? (
             <p role="status" className="mb-2 text-xs text-warning">
               {truncation}
@@ -370,11 +446,7 @@ function WorkList({
           {shown.length === 0 ? (
             <EmptyState
               title="没有待处理事项"
-              description={
-                jobsOnly
-                  ? "当前没有已放弃的后台任务。重试中的任务不计入这里——它会自己再试，试到用尽才会出现。"
-                  : "当前没有未解决的告警，也没有失败的后台任务。注意：审批、财务异常、到期项与待评审变更还没有接入，这一屏并不代表全部待办。"
-              }
+              description={EMPTY_DESCRIPTIONS[activeId] ?? DEFAULT_EMPTY_DESCRIPTION}
             />
           ) : (
             <ul className="flex flex-col gap-2">

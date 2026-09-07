@@ -1064,17 +1064,21 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
   });
 
   it("筛选进 ?work=，选到没有数据源的分类时说清楚被什么挡着", async () => {
-    renderRoute("/dashboard?work=approvals");
-    const empty = await screen.findByText("「待审批」还没有数据源");
+    // XM-WORKBENCH-APPROVALS：这一条原来用的是 `?work=approvals`。审批接上真实
+    // 数据之后那一类不再有 blockedBy，拿它就测不到「说清楚被什么挡着」这件事
+    // 了——换成一个今天仍然没有源的分类。「即将到期」的缺口比页面更深一层：
+    // 凭据模型里根本没有到期时间这个字段。
+    renderRoute("/dashboard?work=expiring");
+    const empty = await screen.findByText("「即将到期」还没有数据源");
     const box = empty.closest("div") as HTMLElement;
-    // XM-0030-ENABLE：这一格原来断言的是文案里有「Foundation-B」。那句话现在
-    // 是错的——审批中心已交付并启用，缺的只是把审批单派生成工作项的取数。
-    // 说明必须同时讲清「后端在」和「这一格没接」，只讲后半句会让人以为
-    // 审批中心整体不可用，跑去等一个已经上线的东西。
-    expect(within(box).getByText(/后端已启用/)).not.toBeNull();
-    expect(within(box).getByText(/XM-WORKBENCH-APPROVALS/)).not.toBeNull();
+    // 说明必须指到真正的缺口上。含糊成「随人员与权限页上线」会让人去等一个
+    // 早就建成的页面，而缺的其实是 CredentialRef 上的到期元数据。
+    expect(within(box).getByText(/凭据模型里还没有到期时间/)).not.toBeNull();
+    expect(within(box).getByText(/CredentialRef/)).not.toBeNull();
     // 一个筛过的工作台是可以贴给同事的地址（交接文档 §8）
-    expect(screen.getByRole("button", { name: "待审批" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "即将到期" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
   });
 
   it("没有数据源的分类，后端挂了也照样说「还没接」，不显示成加载失败", async () => {

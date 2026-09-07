@@ -1,9 +1,11 @@
 import type { BadgeTone } from "@xingmang/ui-primitives";
 import { describeServiceStatus, platformNavSpec, type FreshnessContract } from "@xingmang/ui-admin";
 import type { AlertItem } from "../api/alerts";
+import type { ApprovalItem } from "../api/approvals";
 import { jobKindLabel, type JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import { describeSeverity, sortForDisplay } from "./alerts";
+import { groupByRisk, isEffectivelyExpired, voteProgress } from "./approvals";
 import { PLATFORM_CATALOG, pendingBadge, platformOfMetricKey } from "./platforms";
 
 /** 「最近恢复」的回看窗口（原型副标题逐字：「最近 24 小时」）。 */
@@ -36,14 +38,14 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
   {
     id: "approvals",
     label: "待审批",
-    // XM-0030 已交付并在 platform-api / platform-worker 两端注入，
-    // `GET /api/v1/approvals` 是通的——所以这里**不能再写「随 XM-0030 上线」**。
-    // 但这一格今天仍然没有源：把审批单派生成工作项要另接一条 query，
-    // 那是 XM-WORKBENCH-APPROVALS 的事。写清「后端在、前端没接」，
-    // 而不是含糊成「还没上线」——后者会让人以为审批中心整体不可用。
-    blockedBy:
-      "审批中心（XM-0030）后端已启用，待审批队列在「操作与审批」页可查；" +
-      "这一格把审批单派生成待处理事项的取数还没接（XM-WORKBENCH-APPROVALS）。",
+    // XM-WORKBENCH-APPROVALS：这一格接上了 `GET /api/v1/approvals?status=PENDING`。
+    // 它原来写着「后端已启用、这一格的取数还没接」——那句话现在过期了，而一个
+    // 说「还没接」的占位比缺功能更糟：它让人不去看本来就有的数据，于是等着人
+    // 投票的 L3/L4 动作在首屏彻底不可见。
+    //
+    // 只收**此刻真的还等着人投票**的单（见 workItemsFromApprovals）：已过期的
+    // 不算待办，哪怕库里仍记着 PENDING。
+    source: "审批中心里仍等着投票的单（已过期的不算，见 workItemsFromApprovals）",
   },
   {
     id: "jobs",
@@ -96,13 +98,29 @@ export interface WorkItem {
   to: string;
 }
 
-function ageText(fromIso: string, now: Date): string {
-  const seconds = Math.max(0, Math.round((now.getTime() - Date.parse(fromIso)) / 1000));
+/** 把一段秒数说成人话。`ageText`（过去多久）与 `untilText`（还有多久）共用这
+ *  一份单位阶梯：两处各写一套，迟早会长成「3 小时」和「3小时」两种写法。 */
+function durationText(seconds: number): string {
   if (!Number.isFinite(seconds)) return "—";
-  if (seconds < 60) return `${seconds} 秒`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`;
-  return `${Math.floor(seconds / 86400)} 天`;
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole < 60) return `${whole} 秒`;
+  if (whole < 3600) return `${Math.floor(whole / 60)} 分钟`;
+  if (whole < 86400) return `${Math.floor(whole / 3600)} 小时`;
+  return `${Math.floor(whole / 86400)} 天`;
+}
+
+function ageText(fromIso: string, now: Date): string {
+  return durationText((now.getTime() - Date.parse(fromIso)) / 1000);
+}
+
+/** 距离某个未来时刻还有多久；时刻解析不出来时返回 null。
+ *
+ *  **不在这里退回一个占位字符串**：调用方要拼的是「N 小时后到期」，拿到 "—"
+ *  会拼出「—后到期」这种既不是时间也不是说明的句子。让它显式地判一次。 */
+function untilText(toIso: string, now: Date): string | null {
+  const at = Date.parse(toIso);
+  if (!Number.isFinite(at)) return null;
+  return durationText((at - now.getTime()) / 1000);
 }
 
 /** 活跃告警 → 待处理事项。
@@ -158,18 +176,79 @@ export function workItemsFromJobRuns(runs: readonly JobRunItem[], now: Date): Wo
     });
 }
 
-/** 「我的待处理」两条数据源各自的取数上限（XM-WORKBENCH-TRUNCATION）。 */
+/** 风险等级的色调。**与 components/ApprovalQueue.tsx 里的 RISK_TONE 是同一张表**
+ *  ——那一份在组件内私有，本片不改那个文件，所以这里照抄一份。将来加档位时两处
+ *  要一起改：同一个 L3 在工作台上是黄的、在审批队列上是红的，人会以为是两回事。 */
+const APPROVAL_RISK_TONE: Readonly<Record<string, BadgeTone>> = {
+  L2: "warning",
+  L3: "warning",
+  L4: "danger",
+};
+
+/** 待审批的动作 → 待处理事项（XM-WORKBENCH-APPROVALS）。
+ *
+ *  两道过滤缺一不可：
+ *
+ *  1. **只收 PENDING。** 取数那一层已经带了 `status=PENDING`，这里仍然再滤一遍：
+ *     这是个纯函数，调用方换个取法（比如为了省一次请求而复用不带筛选的列表）
+ *     时，它不该悄悄把已驳回、已执行的单也列成待办。
+ *  2. **过期的不收，哪怕库里仍记着 PENDING。** 过期是定时任务 ExpirePending 写
+ *     回去的，库里的 status 会滞后，而服务端在执行那一刻才按 expires_at 判
+ *     （见 lib/approvals 的 isEffectivelyExpired）。照抄 status 会让首屏混进一批
+ *     谁也批不动的单——「我的待处理」是"我必须动手的事"，摆一件动不了的事进来，
+ *     人翻两次就不再信这张清单，这与「重试中的任务不列进来」是同一条理由。
+ *
+ *  排序复用审批队列页那一套（groupByRisk：L4 → L3 → L2，组内先到期的在前），
+ *  两处不能各排各的——同一批单在两个页面上排成两个样子，人会以为看的是两份
+ *  数据。 */
+export function workItemsFromApprovals(items: readonly ApprovalItem[], now: Date): WorkItem[] {
+  const waiting = items.filter(
+    (item) => item.status === "PENDING" && !isEffectivelyExpired(item, now),
+  );
+  return groupByRisk(waiting).flatMap((group) =>
+    group.items.map((item) => {
+      const remaining = untilText(item.expires_at, now);
+      return {
+        id: `approval-${item.id}`,
+        categoryId: "approvals",
+        // 徽章上放风险等级而不是「待审批」：这一屏上唯一要当场判断的是「先看
+        // 哪一张」，而 L4 与 L2 的差别正是答案。不认识的等级照原样显示成中性
+        // 徽章，不丢弃——静默吞掉一整档待审批比显示一个陌生的等级名危险得多。
+        categoryLabel: item.risk_level,
+        tone: APPROVAL_RISK_TONE[item.risk_level] ?? "neutral",
+        title: `${item.action_id}@${item.action_version}`,
+        // 与审批队列卡片的落款同一行内容：谁提交的、还差几票。「还差几票」比
+        // 「何时提交」更能回答「我现在能不能推动它」，而票数措辞（含「票数够了
+        // 但还缺一张特权票」那种）只有 voteProgress 一份，不在这里另写。
+        meta: `${item.requester_id} 提交 · ${voteProgress(item, now)}`,
+        // 右侧那一列问的是「什么时候要处理完」——审批单的答案就是到期时刻。
+        due: remaining === null ? "到期时间未知" : `${remaining}后到期`,
+        // 直达「操作与审批」页的「待审批」子页签：投票、执行、撤回都在那里，
+        // 落到页面首屏还要自己找是多余的一步。
+        to: "/actions?sub=pending",
+      };
+    }),
+  );
+}
+
+/** 「我的待处理」三条数据源各自的取数上限（XM-WORKBENCH-TRUNCATION）。 */
 export const ACTIVE_ALERTS_LIMIT = 200;
 export const WORK_JOBS_LIMIT = 20;
+/** 待审批只取一屏够看的量。完整队列在「操作与审批」页——那边按等级分组，
+ *  也只有那边能投票和执行；这一格是入口，不是清单。服务端上界是 100
+ *  （httpapi/approvals.go 的 maxApprovalLimit），这个数远在其下。 */
+export const WORK_APPROVALS_LIMIT = 20;
 
 /** 这一屏是不是没显示全，以及该怎么说。
  *
- *  **两个判据都由服务端给，前端不自己算**（XM-ALERTS-LIST-TRUNCATED）：
+ *  **三个判据都由服务端给，前端不自己算**（XM-ALERTS-LIST-TRUNCATED）：
  *  - 告警：`/api/v1/alerts` 的 `truncated`。调用方传的 limit 与真正生效的
  *    limit 可能不是一个数（不传、或传得比服务端上界还大都会被钳），拿自己传
  *    的数去比会**永远判不出截断**。
  *  - 后台任务：`/api/v1/jobs/runs` 的 `next_before`——它本来就是游标分页的
  *    "还有下一页"，比数个数可靠。
+ *  - 待审批：`/api/v1/approvals` 的 `truncated`，与告警同一条理由（服务端算的
+ *    是"返回条数 >= 生效上限"，生效上限只有服务端知道）。
  *
  *  仍然只说"可能"：服务端的判据是"返回条数正好等于生效上限"，恰好等于时也
  *  可能就是恰好这么多。含糊不好，但假装看到的是全部更糟——一张"没有待处理
@@ -181,12 +260,17 @@ export function truncationNote(input: {
   activeCategoryId: string;
   alertsTruncated: boolean;
   jobsTruncated: boolean;
+  approvalsTruncated: boolean;
 }): string | null {
   const parts: string[] = [];
   const showAlerts = input.activeCategoryId === "" || input.activeCategoryId === "incidents";
+  const showApprovals = input.activeCategoryId === "" || input.activeCategoryId === "approvals";
   const showJobs = input.activeCategoryId === "" || input.activeCategoryId === "jobs";
   if (showAlerts && input.alertsTruncated) {
     parts.push(`活跃告警只取了 ${ACTIVE_ALERTS_LIMIT} 条`);
+  }
+  if (showApprovals && input.approvalsTruncated) {
+    parts.push(`待审批的单只取了 ${WORK_APPROVALS_LIMIT} 条`);
   }
   if (showJobs && input.jobsTruncated) {
     parts.push(`已放弃的后台任务只取了 ${WORK_JOBS_LIMIT} 条`);
