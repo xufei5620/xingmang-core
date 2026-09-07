@@ -40,8 +40,9 @@ import {
   type SMSResource,
 } from "../api/sms";
 import { ActionErrorNote } from "./ActionErrorNote";
-import { type ActionResult } from "./ActionResultNote";
+import { actionResultOf, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
+import { ApprovalReasonField, isApprovalReasonUsable } from "./ApprovalReasonField";
 
 /** XM-SMS1：两家官方文档补齐后的扩展面板。
  *
@@ -448,6 +449,8 @@ function EmailPurchaseDialog({ onDone }: { onDone: (r: ActionResult) => void }) 
   const [site, setSite] = useState("");
   const [domain, setDomain] = useState("");
   const [count, setCount] = useState("1");
+  const [reason, setReason] = useState("");
+  const [reasonTouched, setReasonTouched] = useState(false);
   const [armed, setArmed] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const formId = useId();
@@ -460,11 +463,21 @@ function EmailPurchaseDialog({ onDone }: { onDone: (r: ActionResult) => void }) 
   });
   const mutation = useMutation({
     mutationFn: (operationId: string) =>
-      purchaseSMSEmails({ operation_id: operationId, site: site.trim(), domain: domain.trim(), count: Number(count) || 1 }),
-    onSuccess: (run) => {
-      onDone({ runId: run.runId, title: "已提交邮箱购买" });
+      purchaseSMSEmails(
+        { operation_id: operationId, site: site.trim(), domain: domain.trim(), count: Number(count) || 1 },
+        reason.trim(),
+      ),
+    onSuccess: (outcome) => {
+      onDone(
+        actionResultOf(outcome, {
+          executed: "已提交邮箱购买",
+          approvalPending: "买邮箱已提交审批，还没有下单",
+        }),
+      );
       setOpen(false);
       setArmed(null);
+      setReason("");
+      setReasonTouched(false);
       setError(null);
     },
     // 失败**不清 armed**：那是同一笔业务的重试，幂等键必须保持不变。
@@ -494,12 +507,28 @@ function EmailPurchaseDialog({ onDone }: { onDone: (r: ActionResult) => void }) 
         <FormField label="数量" htmlFor={`${formId}-count`} hint="1–10。">
           <Input id={`${formId}-count`} aria-label="数量" value={count} onChange={(e) => { setCount(e.target.value); setArmed(null); }} />
         </FormField>
+        <ApprovalReasonField
+          id={`${formId}-reason`}
+          value={reason}
+          onChange={setReason}
+          subject="买邮箱"
+          touched={reasonTouched}
+        />
         {error ? <ActionErrorNote error={error} /> : null}
         <div className="flex items-center gap-2">
           {armed ? (
             <>
-              <Button variant="danger" size="sm" disabled={mutation.isPending} onClick={() => mutation.mutate(armed)}>
-                {mutation.isPending ? "提交中…" : `确认买 ${count} 个邮箱`}
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={mutation.isPending}
+                onClick={() => {
+                  setReasonTouched(true);
+                  if (!isApprovalReasonUsable(reason)) return;
+                  mutation.mutate(armed);
+                }}
+              >
+                {mutation.isPending ? "提交中…" : `提交买 ${count} 个邮箱的审批`}
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setArmed(null)}>取消</Button>
             </>
@@ -521,22 +550,34 @@ export function HeroRentPanel({ onWrite }: { onWrite: (r: ActionResult) => void 
   const [country, setCountry] = useState("");
   const [hours, setHours] = useState("4");
   const [operator, setOperator] = useState("");
+  const [reason, setReason] = useState("");
+  const [reasonTouched, setReasonTouched] = useState(false);
   const [armed, setArmed] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const formId = useId();
 
   const mutation = useMutation({
     mutationFn: (operationId: string) =>
-      rentSMSNumber({
-        operation_id: operationId,
-        service: service.trim(),
-        country: Number(country) || 0,
-        duration_hours: Number(hours) || 0,
-        ...(operator.trim() ? { operator: operator.trim() } : {}),
-      }),
-    onSuccess: (run) => {
-      onWrite({ runId: run.runId, title: "已提交租用请求" });
+      rentSMSNumber(
+        {
+          operation_id: operationId,
+          service: service.trim(),
+          country: Number(country) || 0,
+          duration_hours: Number(hours) || 0,
+          ...(operator.trim() ? { operator: operator.trim() } : {}),
+        },
+        reason.trim(),
+      ),
+    onSuccess: (outcome) => {
+      onWrite(
+        actionResultOf(outcome, {
+          executed: "已提交租用请求",
+          approvalPending: "租号已提交审批，还没有下单",
+        }),
+      );
       setArmed(null);
+      setReason("");
+      setReasonTouched(false);
       setError(null);
     },
     onError: setError,
@@ -565,12 +606,28 @@ export function HeroRentPanel({ onWrite }: { onWrite: (r: ActionResult) => void 
           <Input id={`${formId}-op`} aria-label="租用运营商" value={operator} onChange={(e) => setOperator(e.target.value)} />
         </FormField>
       </div>
+      <ApprovalReasonField
+        id={`${formId}-reason`}
+        value={reason}
+        onChange={setReason}
+        subject="租号"
+        touched={reasonTouched}
+      />
       {error ? <ActionErrorNote error={error} /> : null}
       <div className="flex items-center gap-2">
         {armed ? (
           <>
-            <Button variant="danger" size="sm" disabled={mutation.isPending} onClick={() => mutation.mutate(armed)}>
-              {mutation.isPending ? "提交中…" : `确认租 ${hours} 小时`}
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={mutation.isPending}
+              onClick={() => {
+                setReasonTouched(true);
+                if (!isApprovalReasonUsable(reason)) return;
+                mutation.mutate(armed);
+              }}
+            >
+              {mutation.isPending ? "提交中…" : `提交租 ${hours} 小时的审批`}
             </Button>
             <Button variant="ghost" size="sm" onClick={() => setArmed(null)}>取消</Button>
           </>

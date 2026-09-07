@@ -213,20 +213,71 @@ export async function listAuditEvents(
 
 // --- 写路径（POST /api/v1/actions/{id}/versions/{version}/execute）---
 
-/** Action 执行结果。
+/** 执行入口的响应体。**两种**，取决于风险等级：
  *
- *  字段名照抄 httpapi.executeActionResponse：`action_run_id` + `result`。 */
+ *  - 200：`httpapi.executeActionResponse`，`action_run_id` + `result`；
+ *  - 202：`httpapi.approvalRequiredResponse`，`approval_request_id` + `status`
+ *    + `message`——内核把 L2 及以上受理成了一张待批的审批单，动作**没有执行**。
+ *
+ *  合成一个类型是因为 ApiClient.post 只把 body 交出来，状态码留在它里面
+ *  （见 api/client.ts）。这不构成歧义：两个后端结构体的字段互不相交，而且用来
+ *  分辨的那个字段正是我们要用的那一个。字段名逐字照抄 httpapi/actions.go。 */
 interface ExecuteActionResponse {
   action_run_id?: string;
   /** 后端若改名成 run_id 也认——只用于显示，认宽一点不会误导人。 */
   run_id?: string;
   result?: unknown;
+  approval_request_id?: string;
+  status?: string;
+  message?: string;
 }
+
+/** 202 响应体里 `status` 的字面量（action/errors.go 的 CodeApprovalRequired）。 */
+export const APPROVAL_REQUIRED_STATUS = "APPROVAL_REQUIRED";
 
 export interface ActionRun {
   /** 规格 §5.8：所有写接口返回 action_run_id，界面必须把它显示出来。 */
   runId: string;
   result: unknown;
+}
+
+/** 同步执行完了：Handler 真的跑过，有 action_run_id。 */
+export interface ActionExecuted extends ActionRun {
+  kind: "executed";
+}
+
+/** 已受理为审批单：动作**还没发生**，等人批准后才由人在审批队列里触发。 */
+export interface ActionApprovalPending {
+  kind: "approval_pending";
+  /** 审批单号（`approval_request_id`）。 */
+  approvalRequestId: string;
+  /** 内核拼的那句人话（kernel.go：「action X 风险等级 L3 需要审批，已受理为审批单 Y」）。 */
+  message: string;
+}
+
+/** 一次 Action 调用的两种结局。
+ *
+ *  **刻意做成可辨识联合，而不是「runId 为空就当作审批」**：那个空串哨兵正是
+ *  本片之前那个 bug 的成因——界面把「已受理为审批单 X」显示成一次 run_id
+ *  为空的成功。哨兵表达不了「这是另一种结局」，只能表达「这一种结局缺了个值」。 */
+export type ActionOutcome = ActionExecuted | ActionApprovalPending;
+
+/** 一个只准备好接「执行完了」的调用点拿到了审批受理。
+ *
+ *  这不是服务端出错：单已经落下了。抛出来是因为**这个调用点没有承接它的界面**
+ *  ——没有填理由的入口，也没有显示单号的地方。宁可当场把话说出来，也不能悄悄
+ *  显示成成功；后者已经发生过一次。要处理审批的调用点改用 submitAction。 */
+export class ApprovalRequiredError extends Error {
+  readonly approvalRequestId: string;
+
+  constructor(pending: ActionApprovalPending) {
+    super(
+      pending.message ||
+        `该动作需要审批，已受理为审批单 ${pending.approvalRequestId || "（响应未带单号）"}`,
+    );
+    this.name = "ApprovalRequiredError";
+    this.approvalRequestId = pending.approvalRequestId;
+  }
 }
 
 export interface ExecuteActionInput {
@@ -235,26 +286,58 @@ export interface ExecuteActionInput {
   params: Record<string, unknown>;
   /** 不传则现生成一个。显式传是为了让「同一次提交重试」能带同一个 ID。 */
   requestId?: string;
+  /** 「为什么要做这件事」。L0/L1 可空；**L2 及以上必填**，否则内核当场回
+   *  INVALID_PARAMS（action/kernel.go）。这句话会原样写进审批单给审批人看，
+   *  所以只能由人自己写——**不要在任何一层兜底生成一句套话**，那等于让审批人
+   *  对着一句机器话做判断。 */
+  reason?: string;
 }
 
-/** 执行一个 Action。
+/** 提交一个 Action，如实返回两种结局之一（写路径唯一入口）。
  *
- *  请求体只有 `params`：后端 ExecuteActionHandler 用 DisallowUnknownFields 解析，
- *  多塞一个 request_id 会 400。request_id 走 `X-Request-ID` 头
- *  （httpapi/middleware.go 的 RequestID 中间件读它，写进审计事件与访问日志）。 */
+ *  请求体是 `{params, reason}`：后端 ExecuteActionHandler 用 DisallowUnknownFields
+ *  解析，而 httpapi.executeActionBody 只认这两个字段——多塞一个 request_id 会 400。
+ *  request_id 走 `X-Request-ID` 头（httpapi/middleware.go 的 RequestID 中间件读它，
+ *  写进审计事件与访问日志）。
+ *
+ *  没给 reason 时**不发这个字段**：L0/L1 的请求形状与本片之前逐字一致。 */
+export async function submitAction(
+  input: ExecuteActionInput,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionOutcome> {
+  const requestId = input.requestId ?? newRequestId();
+  const path = `/api/v1/actions/${encodeURIComponent(input.actionId)}/versions/${encodeURIComponent(input.version)}/execute`;
+  const body = await client.post<ExecuteActionResponse>(
+    path,
+    { params: input.params, ...(input.reason === undefined ? {} : { reason: input.reason }) },
+    { requestId, ...(options.signal ? { signal: options.signal } : {}) },
+  );
+  // 认单号**或**状态字面量：万一单号是空串，status 仍然说得清「这不是一次执行」。
+  // 反过来只认 status 也不行——它是 202 体里最不像业务数据的那个字段，改名的
+  // 代价最低，而单号是这条分支存在的理由。
+  if (body.approval_request_id !== undefined || body.status === APPROVAL_REQUIRED_STATUS) {
+    return {
+      kind: "approval_pending",
+      approvalRequestId: body.approval_request_id ?? "",
+      message: body.message ?? "",
+    };
+  }
+  return { kind: "executed", runId: body.action_run_id ?? body.run_id ?? "", result: body.result };
+}
+
+/** 执行一个 L0/L1 Action，只接受「执行完了」这一种结局。
+ *
+ *  **L2 及以上不要用它**：那些调用会被内核受理成审批单，这里会抛
+ *  ApprovalRequiredError。需要审批的调用点用 submitAction，并把两种结局都画出来。 */
 export async function executeAction(
   input: ExecuteActionInput,
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<ActionRun> {
-  const requestId = input.requestId ?? newRequestId();
-  const path = `/api/v1/actions/${encodeURIComponent(input.actionId)}/versions/${encodeURIComponent(input.version)}/execute`;
-  const body = await client.post<ExecuteActionResponse>(
-    path,
-    { params: input.params },
-    { requestId, ...(options.signal ? { signal: options.signal } : {}) },
-  );
-  return { runId: body.action_run_id ?? body.run_id ?? "", result: body.result };
+  const outcome = await submitAction(input, options, client);
+  if (outcome.kind === "approval_pending") throw new ApprovalRequiredError(outcome);
+  return { runId: outcome.runId, result: outcome.result };
 }
 
 /** 登记服务（registry.service.create@1，Permission = registry.service.manage）。 */

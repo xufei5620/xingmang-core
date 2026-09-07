@@ -599,38 +599,46 @@ interface RiskLevelInfo {
   level: string;
   examples: string;
   controls: string;
-  /** 该等级在 Foundation-A 阶段是否可能被执行（L0/L1 是；L2 及以上恒为否，
-   *  见 action.RiskLevel.RequiresAdvancedControls）。纯展示用的静态治理事实，
-   *  不是查询结果——变更需要走 ADR，不随部署环境变化。 */
-  foundationAReady: boolean;
+  /** 该等级能不能被**直接**执行（L0/L1 能；L2 及以上不能，见
+   *  action.RiskLevel.RequiresAdvancedControls）。纯展示用的静态治理事实，
+   *  不是查询结果——变更需要走 ADR，不随部署环境变化。
+   *
+   *  这个字段以前叫 foundationAReady，措辞是「（全部待 Foundation-B）」。
+   *  审批中心启用（XM-0030-ENABLE）之后那句话是错的：L2 及以上不再是「等下一个
+   *  阶段」，而是**现在就能提，只是先落审批单**。「不能直接执行」是这一栏唯一
+   *  始终为真的意思，所以字段跟着改名——一个会过期的名字迟早会把过期的话
+   *  再说一遍。至于某个环境接没接上审批中心，只有那个环境知道，由后端逐条给
+   *  blocked_reason（httpapi.ListActionsHandler 的 approvalsWired 分支），
+   *  显示在「操作目录」的「可执行」列里，本页不猜。 */
+  directlyExecutable: boolean;
 }
 
 /** ADR-003（docs/adr/ADR-003-Action唯一写入口.md）的风险等级表，逐字对齐。 */
 const RISK_LEVELS: readonly RiskLevelInfo[] = [
-  { level: "L0", examples: "保存个人视图、低影响偏好", controls: "权限 + 基础审计", foundationAReady: true },
+  { level: "L0", examples: "保存个人视图、低影响偏好", controls: "权限 + 基础审计", directlyExecutable: true },
   {
     level: "L1",
     examples: "修改低风险平台配置、确认普通告警",
     controls: "权限 + 审计；按需幂等",
-    foundationAReady: true,
+    directlyExecutable: true,
   },
   {
     level: "L2",
     examples: "批量配置、启停低风险资源",
     controls: "预览 + 幂等 + 写后确认 + 完整审计",
-    foundationAReady: false,
+    directlyExecutable: false,
   },
   {
     level: "L3",
     examples: "服务切换、账号批量导入、敏感配置",
     controls: "人工批准 + MFA + 冷却 + 补偿",
-    foundationAReady: false,
+    directlyExecutable: false,
   },
   {
     level: "L4",
     examples: "退款、生产基础设施高影响动作、开票关键动作",
     controls: "双人审批目标；单人阶段 Break-glass",
-    foundationAReady: false,
+    directlyExecutable: false,
   },
 ];
 
@@ -681,12 +689,12 @@ function ActionRiskConditionsTab() {
                   <td className="px-3 py-2 text-right tabular-nums text-fg">{countByLevel(r.level)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-fg">
                     {executableByLevel(r.level)}
-                    {!r.foundationAReady && countByLevel(r.level) > 0 ? (
+                    {!r.directlyExecutable && countByLevel(r.level) > 0 ? (
                       <span
                         className="ml-1 text-fg-muted"
-                        title="Foundation-A 阶段，L2 及以上一律拒绝执行（ADVANCED_CONTROLS_REQUIRED）"
+                        title="L2 及以上不能直接执行：内核受理成审批单，批准后在「待审批」里由人触发"
                       >
-                        （全部待 Foundation-B）
+                        （全部先落审批单）
                       </span>
                     ) : null}
                   </td>
@@ -697,7 +705,9 @@ function ActionRiskConditionsTab() {
         </div>
         <p className="text-xs text-fg-muted">
           依据 docs/adr/ADR-003-Action唯一写入口.md。「可执行」由内核按风险等级实时判定
-          （L2/L3/L4 在 Foundation-A 阶段恒为不可执行），不是本页写死的规则；隐藏或灰显同样不构成安全控制。
+          （L2/L3/L4 恒为否——它们<strong>不能被直接执行</strong>，而是先由内核受理成审批单，
+          批准后在「待审批」子页签由人触发），不是本页写死的规则；隐藏或灰显同样不构成安全控制。
+          某个环境接没接上审批中心，逐条写在「操作目录」的「可执行」列里，由后端给出。
         </p>
       </ApiStateView>
     </section>
