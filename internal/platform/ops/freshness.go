@@ -267,9 +267,9 @@ var registeredMetrics = struct {
 		// XM-0030c：审批队列积压（jobs/approval_expire.go 的 MetricApprovalQueue）。
 		// alerts 的 approval.pending.too_long 规则以它为**唯一输入**——不在这份
 		// 白名单里的话，/metrics/history 会把它判成未注册。
-		"platform.approval.queue": {},
-		"sub2api.connector.health":    {},
-		"newapi.connector.health":     {},
+		"platform.approval.queue":  {},
+		"sub2api.connector.health": {},
+		"newapi.connector.health":  {},
 		// CPA（XM-CPA0，connectors/cpa）。CPA = CLI Proxy API + cpa-manager-plus，
 		// 只读文件后端直读宿主机 usage.sqlite（只读绑定挂载，从不挂载凭据文件）。
 		// 四条键字面量与 connectors/cpa/contract.go 的 Metric* 常量逐字对应，

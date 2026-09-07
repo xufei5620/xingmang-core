@@ -36,7 +36,7 @@ type CardUsage struct {
 	SubscriptionAmount string
 	// SubscriptionCycle 是扣款周期：monthly / yearly / weekly / other。
 	SubscriptionCycle string
-	Note          string
+	Note              string
 }
 
 // boundAccountKinds 是允许的标识类型，与迁移 000028 的 CHECK 约束一致。

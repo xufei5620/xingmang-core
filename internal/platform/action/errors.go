@@ -6,11 +6,25 @@ import "errors"
 type Code string
 
 const (
-	CodeInvalidParams            Code = "INVALID_PARAMS"
-	CodePermissionDenied         Code = "PERMISSION_DENIED"
-	CodeEnvironmentMismatch      Code = "ENVIRONMENT_MISMATCH"
-	CodeConflict                 Code = "CONFLICT"
-	CodePreconditionFailed       Code = "PRECONDITION_FAILED"
+	CodeInvalidParams       Code = "INVALID_PARAMS"
+	CodePermissionDenied    Code = "PERMISSION_DENIED"
+	CodeEnvironmentMismatch Code = "ENVIRONMENT_MISMATCH"
+	CodeConflict            Code = "CONFLICT"
+	CodePreconditionFailed  Code = "PRECONDITION_FAILED"
+	// CodeNotRegistered：**这个 Action 没有注册**。对外字符串就是
+	// ACTION_NOT_REGISTERED，映射 404。
+	//
+	// 它在 Query（读）路径上被当作通用的「资源不存在」用（全仓 13 处：
+	// httpapi 的几个 GET handler、platformusers、requestlog）——GET 一个不存在
+	// 的资源回 404 是对的，那些用法保留。
+	//
+	// **但 Action handler 里不要用它**：Action 的端点存在、Action 也注册着，
+	// 不存在的只是参数里指名的那个对象；回 ACTION_NOT_REGISTERED 会让调用方
+	// 去查部署而不是查自己给的 id。那种情形用 CodePreconditionFailed，与
+	// assurance/credentials/alerts/finance 四个 Action handler 一致。
+	//
+	// 字符串本身对那 13 处读路径也算不上贴切，但改它是对外契约变更，
+	// 见 docs/handoffs/slices/XM-ERRCODE-NOTFOUND.md 的 follow_ups。
 	CodeNotRegistered            Code = "ACTION_NOT_REGISTERED"
 	CodePrincipalTypeNotAllowed  Code = "PRINCIPAL_TYPE_NOT_ALLOWED"
 	CodeAdvancedControlsRequired Code = "ADVANCED_CONTROLS_REQUIRED"

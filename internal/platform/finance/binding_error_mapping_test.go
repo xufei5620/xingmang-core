@@ -28,9 +28,12 @@ func TestBindingActionErrorMapping(t *testing.T) {
 		// assurance 的 ErrVersionConflict 用同一个码。
 		"绑定被别人改过": {ErrBindingConflict, action.CodeRevisionConflict},
 		"渠道清单不完整": {ErrBindingPrecondition, action.CodePreconditionFailed},
-		"资源不存在":   {ErrNotFound, action.CodeNotRegistered},
-		"缺字段":     {ErrMissingField, action.CodeInvalidParams},
-		"格式不对":    {ErrInvalidFormat, action.CodeInvalidParams},
+		// 412 而不是 404：CodeNotRegistered 的字符串是 ACTION_NOT_REGISTERED，
+		// 而这里是 Action handler——端点在、Action 注册着，不存在的是参数指名
+		// 的那条绑定。与 assurance/credentials/alerts 三个 Action handler 一致。
+		"绑定不存在": {ErrNotFound, action.CodePreconditionFailed},
+		"缺字段":   {ErrMissingField, action.CodeInvalidParams},
+		"格式不对":  {ErrInvalidFormat, action.CodeInvalidParams},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -410,7 +410,7 @@ type CardView struct {
 	// SubscriptionAmount / SubscriptionCycle 供订阅汇总；空串表示没登记。
 	SubscriptionAmount string
 	SubscriptionCycle  string
-	UsageNote     string
+	UsageNote          string
 	// UpstreamCreatedAt 是上游记的开卡时刻。
 	UpstreamCreatedAt time.Time
 	// IssueFee / IssuePayAmount 是开卡时上游收的手续费与实际扣款额。
@@ -785,10 +785,10 @@ SELECT status FROM cards.infini_card
 
 // CardChallenge 是一次 3DS 验证挑战。
 type CardChallenge struct {
-	Account   string
-	CardID    string
-	ID        string
-	Type      string
+	Account string
+	CardID  string
+	ID      string
+	Type    string
 	// Code 可能为空——上游不一定给（见迁移 000032 的说明）。
 	Code      string
 	ExpiresAt time.Time
