@@ -18,6 +18,7 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/approval"
 	"github.com/xufei5620/xingmang-platform/internal/platform/assurance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
@@ -222,10 +223,26 @@ func main() {
 	// EnrollTOTP/ConfirmTOTP/ResetTOTP 三个 HTTP 方法内部要经同一个 Kernel
 	// 执行对应 Action，localauth.NewHandlers 需要它作为构造参数。
 	actionRunStore := action.NewPgRunStore(pool, logger)
+
+	// 审批中心（XM-0030）。接上之后，内核对 L2 及以上不再直接拒绝，而是落一张
+	// 待批审批单并返回 202——registry.connection.set_status 与
+	// registry.connector.create 这两个「声明了 L2 却执行不了」的 Action 因此
+	// 变得可用（经审批）。
+	//
+	// **不接的话内核仍然 fail closed**（返回 ADVANCED_CONTROLS_REQUIRED），
+	// 那是 Foundation-A 的行为；这里显式接上，是产品负责人 2026-09-07 的启用
+	// 指示。启用的前置件（过期清理任务 + PENDING>4h 告警规则 + Runbook）已随
+	// XM-0030c 就位。
+	approvalService := approval.NewService(
+		approval.NewPgStore(pool, cfg.Environment, nil),
+		approval.DefaultPolicy(),
+		nil,
+	)
 	kernel := action.NewKernel(
 		actionRegistry,
 		actionRunStore,
 		action.WithAuditSink(audit.NewActionSink(auditStore)),
+		action.WithApprovalGateway(approvalService),
 		action.WithLogger(logger),
 	)
 	// 本地登录账号管理（XM-LOGIN + XM-AUTH-TOTP0）：只在 local 模式下注册
@@ -476,8 +493,12 @@ func main() {
 		Resolver:       resolver,
 		Kernel:         kernel,
 		ActionRegistry: actionRegistry,
-		Services:       registryStore,
-		Metrics:        opsStore,
+		// 审批队列的读写端点与执行端点（XM-0030b）。执行走内核的
+		// ExecuteApproved，所以两个字段指向的是同一条链的两端。
+		Approvals:    approvalService,
+		ApprovalExec: kernel,
+		Services:     registryStore,
+		Metrics:      opsStore,
 		// 历史样本复用同一个 Store：最新态与样本是同一个仓储的两张表
 		MetricHistory: opsStore,
 		// 后台任务概览与运行记录（XM-JOBS0）

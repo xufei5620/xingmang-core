@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/xufei5620/xingmang-platform/internal/platform/approval"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 )
@@ -179,6 +180,15 @@ func main() {
 		logger.InfoContext(ctx, "worker_migration_completed", "event", "worker_migration_completed", "module", "platform.worker", "environment", config.Environment, "principal_id", "worker:platform")
 		return
 	}
+
+	// 审批中心（XM-0030c）：过期清理任务要靠它把过期的 PENDING 推到 EXPIRED，
+	// 并写下队列观测——那条观测是 alerts 的 approval.pending.too_long 规则的
+	// **唯一输入**。为 nil 时任务不注册（jobs.NewClient 里两个条件都要满足）。
+	config.Approvals = approval.NewService(
+		approval.NewPgStore(pool, config.Environment, nil),
+		approval.DefaultPolicy(),
+		nil,
+	)
 
 	client, err := jobs.NewClient(pool, config)
 	if err != nil {

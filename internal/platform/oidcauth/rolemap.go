@@ -172,6 +172,19 @@ func DefaultRoleScopeMap() map[string][]string {
 			// scope 不是同一类判断——见下面专门角色 assurance-probe-admin。
 			"assurance.probe.manage",
 			"assurance.probe.run",
+			// XM-0030（2026-09-07 产品负责人指示启用）：审批中心的两个常规权限。
+			//
+			// approval.read（看队列）本该比 approval.decide 面更宽——提交人要能
+			// 查自己那张单的进度，值班的人要能看见积压。但本表今天只有
+			// staff/admin 两档，没有承载「只读审批队列」的第三档，所以两个都进
+			// admin，**staff 仍然一个都不给**：一个看板角色能看见「谁在申请改
+			// 什么」，等于把变更意图提前泄漏给不需要知道的人。
+			//
+			// **approval.l4 刻意不在这里**——理由与 assurance.probe.kill_switch
+			// 完全相同：设计稿 §7 写明「首批特权票仅产品负责人」，写进 admin
+			// 等于发给每一个管理员。见下面专门的 approval-l4 角色。
+			"approval.read",
+			"approval.decide",
 			// XM-CARD0（2026-09-04）：Infini 虚拟卡的四个权限档。
 			//
 			// 全部给 admin，理由与上面 credential.manage 同一条：本地登录的
@@ -241,6 +254,17 @@ func DefaultRoleScopeMap() map[string][]string {
 		// 配置写与受闸约束的触发，kill_switch 是"批准花真钱"本身，两者不是
 		// 同一类判断，一并给 admin 会让这条独立授权的设计意图落空）。
 		"assurance-probe-admin": {"assurance.probe.kill_switch"},
+		// XM-0030：L4 的特权票。**默认不发给任何人**——设计稿 §7 写明「具体
+		// 人选映射进 RoleScopeMap，不进 Keycloak」，且「首批特权票仅产品负责人」。
+		//
+		// 没有人持有它时，L4 的审批单会一直停在 PENDING（Settle 要求至少一张
+		// 特权票），直到过期。**这是刻意的 fail closed，不是缺陷**：L4 是拉闸级
+		// 操作，宁可等一个人回来，也不要让它被凑够普通票批掉。处置见
+		// docs/runbooks/APPROVAL-QUEUE.md §3.3。
+		//
+		// 这个角色顺带包含 approval.decide：持特权票的人当然也要能投普通票，
+		// 否则他必须同时被授予 admin 才投得了。
+		"approval-l4": {"approval.decide", "approval.l4"},
 		// XM-CARD6（2026-09-05）：资金提现。与 assurance-probe-admin 同一条
 		// 设计意图——把「批准花真钱」这类判断从日常操作角色里拿出来。
 		//
