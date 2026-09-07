@@ -59,6 +59,15 @@ type Deps struct {
 	Approvals    ApprovalService
 	ApprovalExec ApprovalExecutor
 	Alerts       AlertLister
+	// Silences 是静默窗口的只读列表（XM-SILENCE-LIST）。与 Alerts 同为
+	// *alerts.Store，分成两个字段是因为它们是两个窄接口，见 SilenceLister。
+	Silences SilenceLister
+	// SilenceNow 只为测试而存在：nil 时用 time.Now，生产从不设置它。
+	//
+	// 静默列表的全部内容就是「拿此刻去比起止时间」，跟着真实时钟走的话，
+	// 「生效中 / 未开始 / 已过期」三态的用例会在边界上间歇性变红——那种红
+	// 比不红更难查。把时刻做成可注入的，是让这三态能被确定性地钉住。
+	SilenceNow func() time.Time
 	// SavedViews 是 Principal/Environment 自隔离的个人表格视图 Query。
 	// 写入仍只走 ui.saved_view.* Action，不在这里增加第二条写路径。
 	SavedViews SavedViewLister
@@ -342,6 +351,11 @@ func NewRouter(d Deps) http.Handler {
 			// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 			api.With(RequireScope(alerts.ScopeRead)).
 				Get("/alerts", ListAlertsHandler(d.Alerts))
+			// 静默窗口的只读列表（XM-SILENCE-LIST）。同一个 scope：窗口正文
+			// （规则 + 理由 + 按的人 + 起止）比告警正文泄漏面更小。建窗口
+			// 仍走 Action（alerts.silence.manage），不在这里开第二条写路径。
+			api.With(RequireScope(alerts.ScopeRead)).
+				Get("/alerts/silences", ListSilencesHandler(d.Silences, d.SilenceNow))
 			if d.Cards != nil {
 				interval := d.CardSyncInterval
 				if interval <= 0 {

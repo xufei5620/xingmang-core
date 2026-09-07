@@ -20,6 +20,7 @@ import {
 } from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
 import { AlertNotifyDeliveries } from "../components/AlertNotifyDeliveries";
+import { AlertSilences } from "../components/AlertSilences";
 import { ApiStateView } from "../components/ApiStateView";
 import { BulkAckReceipt, BulkAcknowledgeAlerts } from "../components/BulkAcknowledgeAlerts";
 import { CreateSilenceDialog } from "../components/CreateSilenceDialog";
@@ -78,10 +79,14 @@ export function AlertsPage() {
       items={ALERT_SUB_TABS.map(([value, label]) => ({
         value,
         label,
-        content: value === "alerts" ? <AlertsListPage /> : value === "rules" ? <AlertRulesPage /> : value === "notifications" ? <AlertNotifyDeliveries /> : (
-          // 「故障事件」与「暂停告警」仍是占位，且必须保持占位：Incident 对象
-          // 今天不在平台里，静默记录也没有列表端点。通知能做出来只是因为它的
-          // 数据一直在 /alerts 的响应里（notify_status 三个字段）。
+        content: value === "alerts" ? <AlertsListPage /> : value === "rules" ? <AlertRulesPage /> : value === "notifications" ? <AlertNotifyDeliveries /> : value === "silences" ? <AlertSilences /> : (
+          // 「故障事件」仍是占位，且必须保持占位：Incident 对象今天不在平台里，
+          // 拿告警凑数就是把活跃告警误当成故障事件。
+          //
+          // 「暂停告警」曾经和它一起挂在这里，理由是「静默记录没有列表端点」。
+          // XM-SILENCE-LIST 把端点补上了（GET /api/v1/alerts/silences），
+          // 那条理由不再成立，于是它搬去了 AlertSilences。故障事件没有跟着搬，
+          // 因为它缺的不是端点而是对象本身。
           <section>
             <PageHeader title={label} description="该子页尚未接入稳定的数据源。" />
             <PageState kind="unavailable" title={`「${label}」尚未接入`} description="当前不会把其它告警数据误归类到这里。" />

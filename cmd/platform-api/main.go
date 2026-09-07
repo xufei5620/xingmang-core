@@ -511,8 +511,10 @@ func main() {
 		ActionRuns: actionRunStore,
 		// 详情端点关联的审计前后摘要同样复用 auditStore：新增的只是一条查询
 		// 方法（GetByActionRunID），不是第二条访问审计表的路径。
-		ActionRunAudit:          auditStore,
-		Alerts:                  alertStore,
+		ActionRunAudit: auditStore,
+		Alerts:         alertStore,
+		// 静默窗口列表复用同一个 Store：读的是同一张表，不另开一条路径。
+		Silences:                alertStore,
 		SavedViews:              savedViewStore,
 		PlatformChannelBindings: channelBindingStore,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）

@@ -67,6 +67,27 @@ function stubAlerts(items: AlertItem[], failing: Record<string, unknown> = {}) {
   return fetchMock;
 }
 
+/** 静默端点的 stub。
+ *
+ *  必须先于 `/api/v1/alerts` 判断：后者是前者的前缀，顺序反了的话静默请求会
+ *  拿到一份告警列表，而这一页会把它渲染成一张全是空格子的表。 */
+function stubSilences(active: unknown[], all: unknown[]) {
+  const fetchMock = vi.fn((url: string) => {
+    if (url.startsWith("/api/v1/alerts/silences")) {
+      const items = url.includes("state=all") ? all : active;
+      return Promise.resolve(
+        fakeResponse({ items, limit: 200, truncated: false, as_of: "2026-09-08T12:00:00Z" }),
+      );
+    }
+    if (url.startsWith("/api/v1/alerts")) {
+      return Promise.resolve(fakeResponse({ items: [] }));
+    }
+    return Promise.resolve(fakeResponse({ error: { code: "NOT_REGISTERED", message: "未知路径" } }, 404));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
 function renderAlerts(path = "/alerts") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -316,19 +337,26 @@ describe("通知子页（XM-ALERTS-GAPS）", () => {
     expect(await screen.findByText("从未投递成功")).not.toBeNull();
   });
 
-  it("故障事件与暂停告警仍是占位，不被顺手接上别的数据", async () => {
-    // 通知能做出来是因为它的数据一直在 /alerts 的响应里；这两个没有数据源，
-    // 拿告警凑数就是把活跃告警误当成故障事件
-    for (const [sub, label] of [
-      ["incidents", "故障事件"],
-      ["silences", "暂停告警"],
-    ]) {
-      stubAlerts(ALERTS);
-      const { unmount } = renderPlaceholder(sub as string);
-      expect(await screen.findByText(`「${label}」尚未接入`)).not.toBeNull();
-      expect(screen.queryByRole("table")).toBeNull();
-      unmount();
-    }
+  it("故障事件仍是占位，不被顺手接上别的数据", async () => {
+    // 通知与暂停告警都做出来了，因为它们各自有真实的数据源；故障事件没有，
+    // 拿告警凑数就是把活跃告警误当成故障事件。
+    // 「暂停告警」为什么不再在这条清单里：见 AlertSilences.test.tsx。
+    stubAlerts(ALERTS);
+    renderPlaceholder("incidents");
+    expect(await screen.findByText("「故障事件」尚未接入")).not.toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("暂停告警不再是占位——它有了自己的端点", async () => {
+    // 这条与上面那条是一对：同一个渲染入口、同一批 stub，只换子页签。
+    // 它防的是「把静默页删掉、退回占位」而上面那条仍然全绿。
+    stubSilences([], []);
+    renderPlaceholder("silences");
+
+    // 先等一个正向锚点，再同步断言占位不在——占位的缺席若套在 waitFor 里，
+    // 第一次回调会在「加载中…」时就通过，那条断言等于恒真。
+    expect(await screen.findByRole("heading", { name: "暂停告警", level: 2 })).not.toBeNull();
+    expect(screen.queryByText("「暂停告警」尚未接入")).toBeNull();
   });
 });
 

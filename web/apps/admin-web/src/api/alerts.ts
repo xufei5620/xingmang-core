@@ -124,6 +124,75 @@ export async function listAlerts(
   return (await listAlertsPage(options, client, config)).items;
 }
 
+/** 静默窗口此刻处在哪一态（Go 侧 httpapi/alert_silences.go 的 state 字段）。
+ *
+ *  **没有「已取消」**：平台今天没有撤销静默的能力，窗口只会自己到期。
+ *  编一个前端状态出来，会让运营以为「取消」这件事已经做得到。 */
+export type SilenceState = "active" | "scheduled" | "expired";
+
+/** `GET /api/v1/alerts/silences` 的一条记录（httpapi/alert_silences.go silenceItem）。 */
+export interface SilenceItem {
+  id: string;
+  /** 空串 = 全局窗口（该环境下所有规则）。翻译成中文是前端的事。 */
+  rule_key: string;
+  environment: string;
+  reason: string;
+  starts_at: string;
+  ends_at: string;
+  created_by: string;
+  created_at: string;
+  /** 由服务端按 as_of 算，**前端不要自己比时间**：一台快五分钟的机器会把
+   *  刚过期的窗口显示成「生效中」，而运营据此以为告警还压着。 */
+  state: SilenceState;
+}
+
+/** state 查询参数的两个取值。 */
+export const SILENCE_STATE_ACTIVE = "active";
+export const SILENCE_STATE_ALL = "all";
+
+export interface ListSilencesOptions extends ListOptions {
+  /** 不传 = 只看此刻生效的（服务端默认）。传 SILENCE_STATE_ALL 则含未开始与已过期。 */
+  state?: typeof SILENCE_STATE_ACTIVE | typeof SILENCE_STATE_ALL;
+  limit?: number;
+}
+
+export interface SilencesPage {
+  items: SilenceItem[];
+  /** 服务端说的「这一页可能不是全部」，理由同 AlertsPage.truncated。 */
+  truncated: boolean;
+  /** 服务端实际生效的上限；没给就是 0（不显示）。 */
+  limit: number;
+  /** 服务端判定三态所用的时刻。空串表示老后端没给——那时不显示「截至」。 */
+  as_of: string;
+}
+
+/** 列出某环境下的静默窗口。
+ *
+ *  这条端点存在之前，静默**只能建不能看**：运营按得下去，却回答不了
+ *  「现在有哪些静默生效中、是谁按的、什么时候到期」。 */
+export async function listSilencesPage(
+  options: ListSilencesOptions = {},
+  client: ApiClient = apiClient,
+  config: PlatformApiConfig = appApiConfig,
+): Promise<SilencesPage> {
+  const body = await client.get<
+    ListResponse<SilenceItem> & { truncated?: boolean; limit?: number; as_of?: string }
+  >("/api/v1/alerts/silences", {
+    searchParams: {
+      environment: config.environment,
+      ...(options.state === undefined ? {} : { state: options.state }),
+      ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+    },
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return {
+    items: body.items ?? [],
+    truncated: body.truncated === true,
+    limit: typeof body.limit === "number" && Number.isSafeInteger(body.limit) ? body.limit : 0,
+    as_of: typeof body.as_of === "string" ? body.as_of : "",
+  };
+}
+
 /** alerts.alert.acknowledge@1 声明的 Permission（alerts/permissions.go）。 */
 export const ACKNOWLEDGE_PERMISSION = "alerts.alert.manage";
 

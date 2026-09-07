@@ -165,9 +165,19 @@ func parseAlertStatuses(raw string) ([]alerts.Status, error) {
 }
 
 func parseAlertLimit(raw string) (int32, error) {
+	return parseListLimit(raw, defaultAlertLimit)
+}
+
+// parseListLimit 解析 limit 查询参数：空值取 def，其余必须是正整数。
+//
+// 抽出来给告警与静默两个列表共用，但**默认值仍由各自传进来**：共用的是
+// 「怎么解析、拼错了说什么」，不是「一页多少条」。前者两处必须逐字一致
+// （同一个参数在相邻端点上给出两种错误文案，只会让调用方以为自己看错了），
+// 后者是两份列表各自的取舍。
+func parseListLimit(raw string, def int32) (int32, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return defaultAlertLimit, nil
+		return def, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
