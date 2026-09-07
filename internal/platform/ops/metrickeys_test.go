@@ -74,6 +74,7 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		jobs.MetricNewAPIConnectorHealth,
 		jobs.MetricPlatformHeartbeat,
 		jobs.MetricRetentionLastRun,
+		jobs.MetricApprovalQueue,
 		// CPA 只读文件后端（XM-CPA0，connectors/cpa）。
 		cpa.MetricRequestsDaily,
 		cpa.MetricCostDaily,

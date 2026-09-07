@@ -196,6 +196,27 @@ type Config struct {
 	MetricSampleRetentionDays int
 	AlertRetentionDays        int
 
+	// ApprovalExpireEnabled 决定是否注册审批过期清理任务（XM-0030c）。
+	//
+	// **默认关闭**，与其他任务相反：审批中心本身尚未在任何环境启用
+	// （cmd/platform-api 还没有注入 approval.Service），一个对着空表跑的
+	// 任务除了每 5 分钟写一条「队列长度 0」的观测之外没有作用，而那条观测
+	// 会让「审批中心已经在跑」看起来成立。启用审批中心的那一片会同时打开它。
+	ApprovalExpireEnabled bool
+	// ApprovalExpireInterval 是执行周期，默认 DefaultApprovalExpireInterval（5m）。
+	ApprovalExpireInterval time.Duration
+	// ApprovalExpireRunOnStart 让进程起来就先跑一轮。
+	//
+	// 默认 **true**（与 Retention 相反）：它删不掉任何东西——只把已经过期的
+	// 单从 PENDING 推到 EXPIRED，而那是一个纯粹的状态订正。更要紧的是它顺带
+	// 写下队列观测，进程重启后越早写第一条，告警的空窗越短。
+	ApprovalExpireRunOnStart bool
+	// ApprovalExpireRunID 仅供集成测试隔离，生产必须留空。
+	ApprovalExpireRunID string
+	// Approvals 是审批中心；为 nil 时即便 ApprovalExpireEnabled 为真也不注册
+	// 该任务——没有服务可调时注册一个空转的任务只会制造噪声。
+	Approvals ApprovalQueueMaintainer
+
 	// AlertEvaluateEnabled 决定是否注册告警评估任务（XM-0033）。
 	//
 	// 与 Sub2APISyncEnabled 同样的零值纪律：用 Config 字面量构造的调用方
@@ -414,6 +435,11 @@ func DefaultConfig() Config {
 		RetentionInterval:         DefaultRetentionInterval,
 		MetricSampleRetentionDays: DefaultMetricSampleRetentionDays,
 		AlertRetentionDays:        DefaultAlertRetentionDays,
+
+		// 审批过期清理默认 **关闭**：审批中心尚未在任何环境启用，见字段注释。
+		ApprovalExpireEnabled:    false,
+		ApprovalExpireInterval:   DefaultApprovalExpireInterval,
+		ApprovalExpireRunOnStart: true,
 
 		AlertEvaluateEnabled:            true,
 		AlertEvaluateInterval:           DefaultAlertEvaluateInterval,
@@ -992,6 +1018,33 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			return nil, err
 		}
 		periodic = append(periodic, retentionPeriodic)
+	}
+
+	// 审批过期清理（XM-0030c）。两个条件都要满足：开关打开**且**审批服务在场。
+	// 只看开关的话，一个没接审批中心的进程会每 5 分钟写一条「队列长度 0」的
+	// 观测——那条观测会让「审批中心已经在跑」看起来成立，而实际上没有。
+	if cfg.ApprovalExpireEnabled && cfg.Approvals != nil {
+		river.AddWorker(workers, NewApprovalExpireWorker(ApprovalExpireOptions{
+			Logger:      cfg.Logger,
+			Environment: cfg.Environment,
+			Approvals:   cfg.Approvals,
+			// 观测是 alerts 的 approval.pending.too_long 规则的**唯一输入**，
+			// 所以这里必传：漏了的话规则永远不会命中，而且不会有任何报错。
+			Observations:     ops.NewStore(pool),
+			ExpectedInterval: cfg.ApprovalExpireInterval,
+		}))
+		approvalPeriodic, err := newManifestPeriodicJob(
+			ApprovalExpireJobKind, cfg.ApprovalExpireInterval, cfg.ApprovalExpireRunOnStart,
+			func() (river.JobArgs, *river.InsertOpts) {
+				args := ApprovalExpireArgs{RunID: cfg.ApprovalExpireRunID}
+				opts := args.InsertOpts()
+				return args, &opts
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		periodic = append(periodic, approvalPeriodic)
 	}
 
 	if cfg.AlertEvaluateEnabled {

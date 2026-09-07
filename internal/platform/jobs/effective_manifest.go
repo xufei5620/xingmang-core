@@ -166,6 +166,9 @@ func effectiveJobConfig(cfg Config, id string) (enabled, runOnStart bool, interv
 		return cfg.FinanceCollectEnabled, cfg.FinanceCollectRunOnStart, cfg.FinanceCollectInterval, "XM_FINANCE_COLLECT_INTERVAL", nil
 	case RetentionJobKind:
 		return cfg.RetentionEnabled, cfg.RetentionRunOnStart, cfg.RetentionInterval, "XM_RETENTION_INTERVAL", nil
+	case ApprovalExpireJobKind:
+		return cfg.ApprovalExpireEnabled && cfg.Approvals != nil,
+			cfg.ApprovalExpireRunOnStart, cfg.ApprovalExpireInterval, "XM_APPROVAL_EXPIRE_INTERVAL", nil
 	case AlertEvaluateJobKind:
 		return cfg.AlertEvaluateEnabled, cfg.AlertEvaluateRunOnStart, cfg.AlertEvaluateInterval, "XM_ALERT_EVALUATE_INTERVAL", nil
 	case ReqlogMetricsJobKind:

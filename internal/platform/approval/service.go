@@ -200,6 +200,11 @@ func (s *Service) ExpirePending(ctx context.Context) (int64, error) {
 	return s.store.ExpirePending(ctx, s.now().UTC())
 }
 
+// PendingStats 报告此刻的队列积压形态，供告警判定。
+func (s *Service) PendingStats(ctx context.Context) (QueueStats, error) {
+	return s.store.PendingStats(ctx, s.now().UTC())
+}
+
 // Policy 暴露当前策略，供 HTTP 层告诉前端「这张单还差几票」。
 func (s *Service) Policy() Policy { return s.policy }
 

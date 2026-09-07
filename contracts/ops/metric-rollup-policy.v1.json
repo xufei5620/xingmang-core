@@ -367,6 +367,22 @@
     },
     {
       "policy_version": 1,
+      "metric_key": "platform.approval.queue",
+      "value_kind": "gauge",
+      "primary_kind": "count",
+      "primary_json_pointer": "/pending_count",
+      "currency_json_pointer": "",
+      "business_day_json_pointer": "",
+      "unit": "requests",
+      "scale": 1,
+      "sum_mode": "forbidden",
+      "bucket_timezone": "UTC",
+      "expected_interval_seconds": null,
+      "full_value_required": true,
+      "partial_value_allowed": false
+    },
+    {
+      "policy_version": 1,
       "metric_key": "cpa.accounts.health",
       "value_kind": "document_status",
       "primary_kind": "count",

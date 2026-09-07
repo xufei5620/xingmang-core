@@ -510,12 +510,13 @@ func TestSilenceMatches(t *testing.T) {
 func TestRulesDeclareAllNineSpecFields(t *testing.T) {
 	rules := Rules(DefaultRuleConfig())
 	// 5 条第一批（XM-0033）+ 1 条可用天数（XM-0049）
-	// + 1 条上游版本变化（XM-UPSTREAM-VERSION-ALERT）。
+	// + 1 条上游版本变化（XM-UPSTREAM-VERSION-ALERT）
+	// + 1 条审批单挂太久（XM-0030c）。
 	// 这个数字**要求每加一条规则都改一次测试**，那是刻意的：
 	// 规则集是外部契约（静默窗口按 rule_key 匹配、文档按它列表），
 	// 加一条规则必须是一次有人看过的改动。
-	if len(rules) != 7 {
-		t.Fatalf("规则应有 7 条，实际 %d 条", len(rules))
+	if len(rules) != 8 {
+		t.Fatalf("规则应有 8 条，实际 %d 条", len(rules))
 	}
 	seen := map[string]bool{}
 	for _, r := range rules {

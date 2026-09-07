@@ -39,6 +39,8 @@ type Store interface {
 	Cancel(ctx context.Context, id uuid.UUID, requesterID string, at time.Time) error
 	// ExpirePending 把过期的 PENDING 单批量落 EXPIRED，返回条数。由定时任务调用。
 	ExpirePending(ctx context.Context, now time.Time) (int64, error)
+	// PendingStats 报告此刻队列的积压形态，供告警判定。
+	PendingStats(ctx context.Context, now time.Time) (QueueStats, error)
 	List(ctx context.Context, status Status, limit int) ([]Request, error)
 }
 
@@ -249,6 +251,41 @@ func (s *PgStore) ExpirePending(ctx context.Context, now time.Time) (int64, erro
 		return 0, fmt.Errorf("expire approval requests: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// QueueStats 是审批队列的积压形态。
+//
+// 只有两个数字，因为告警只需要回答一句话：**有没有人在等，等了多久**。
+// 队列长度回答「有没有」，最久那张回答「多久」——后者才是该不该响的判据：
+// 二十张刚提交的单不是问题，一张挂了六小时的才是。
+type QueueStats struct {
+	// PendingCount 是**尚未过期**的 PENDING 单数。已过期的不算：它们等的
+	// 不是人，是清理任务，混进来会让告警把「该清了」误报成「没人批」。
+	PendingCount int64
+	// OldestPendingAge 是其中最久那一张已经等了多久；队列为空时是 0。
+	OldestPendingAge time.Duration
+}
+
+// PendingStats 统计尚未过期的 PENDING 单。
+//
+// 与 ExpirePending 分成两次查询而不是一次带 RETURNING：这两件事的失败后果
+// 不同——清理失败要重试，统计失败只是这一轮没有观测。混在一起会让一次统计
+// 故障把清理也拖成失败。
+func (s *PgStore) PendingStats(ctx context.Context, now time.Time) (QueueStats, error) {
+	var stats QueueStats
+	var oldest *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*), min(created_at)
+		FROM core.approval_request
+		WHERE environment=$1 AND status='PENDING' AND expires_at>$2`,
+		s.environment, now).Scan(&stats.PendingCount, &oldest)
+	if err != nil {
+		return QueueStats{}, fmt.Errorf("read approval queue stats: %w", err)
+	}
+	if oldest != nil && now.After(*oldest) {
+		stats.OldestPendingAge = now.Sub(*oldest)
+	}
+	return stats, nil
 }
 
 func (s *PgStore) List(ctx context.Context, status Status, limit int) ([]Request, error) {
