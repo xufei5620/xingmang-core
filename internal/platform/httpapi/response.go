@@ -38,8 +38,13 @@ func StatusForCode(c action.Code) int {
 		return http.StatusConflict
 	case action.CodePreconditionFailed:
 		return http.StatusPreconditionFailed
-	case action.CodeNotRegistered:
+	case action.CodeNotRegistered, action.CodeApprovalNotFound:
 		return http.StatusNotFound
+	case action.CodeApprovalRequired:
+		// 202：调用被**受理**了，只是还没执行——不是失败。走 WriteError 会把它
+		// 记成 error 级日志并包成错误体，所以 handler 单独处理这一支；这里的
+		// 映射是兜底，防止别处误用 WriteError 时给出 500。
+		return http.StatusAccepted
 	case action.CodeAdvancedControlsRequired:
 		return http.StatusNotImplemented
 	case action.CodeExecutionFailed:

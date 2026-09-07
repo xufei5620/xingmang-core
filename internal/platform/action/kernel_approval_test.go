@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
@@ -12,6 +14,32 @@ type recordingGateway struct {
 	submissions []ApprovalSubmission
 	id          string
 	err         error
+
+	// 执行侧（ExecuteApproved 用）。
+	claim     ApprovalClaim
+	peekErr   error
+	claimErr  error
+	claimed   []claimCall
+	peekCalls int
+}
+
+type claimCall struct {
+	approvalID string
+	runID      uuid.UUID
+	params     map[string]any
+}
+
+func (g *recordingGateway) Peek(_ context.Context, _ string) (ApprovalClaim, error) {
+	g.peekCalls++
+	if g.peekErr != nil {
+		return ApprovalClaim{}, g.peekErr
+	}
+	return g.claim, nil
+}
+
+func (g *recordingGateway) Claim(_ context.Context, approvalID string, runID uuid.UUID, params map[string]any) error {
+	g.claimed = append(g.claimed, claimCall{approvalID: approvalID, runID: runID, params: params})
+	return g.claimErr
 }
 
 func (g *recordingGateway) Submit(_ context.Context, in ApprovalSubmission) (string, error) {

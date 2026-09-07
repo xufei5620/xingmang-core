@@ -9,6 +9,7 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/approval"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
@@ -51,7 +52,13 @@ type Deps struct {
 	// 与 ActionRuns 分开传入是因为二者的读权限不同（见 ActionRunAuditLookup
 	// 的注释）；为 nil 时详情端点不挂载，即便 ActionRuns 非 nil。
 	ActionRunAudit ActionRunAuditLookup
-	Alerts         AlertLister
+	// Approvals / ApprovalExec 是审批中心（XM-0030b）。两个都为 nil 时
+	// /approvals* 一概不挂载——与 Foundation-A 的行为一致：没有审批中心时，
+	// L2+ 的调用仍然拿 ADVANCED_CONTROLS_REQUIRED，而不是拿到一组一调就 500
+	// 的端点。ApprovalExec 单独一个字段是因为触发执行走的是内核而非审批服务。
+	Approvals    ApprovalService
+	ApprovalExec ApprovalExecutor
+	Alerts       AlertLister
 	// SavedViews 是 Principal/Environment 自隔离的个人表格视图 Query。
 	// 写入仍只走 ui.saved_view.* Action，不在这里增加第二条写路径。
 	SavedViews SavedViewLister
@@ -296,6 +303,31 @@ func NewRouter(d Deps) http.Handler {
 					api.With(RequireScope(action.ScopeRead)).
 						With(RequireScope(audit.ScopeRead)).
 						Get("/actions/runs/{runID}", GetActionRunHandler(d.ActionRuns, d.ActionRunAudit))
+				}
+			}
+			// 审批中心（XM-0030b）。
+			//
+			// **没有 POST /approvals**：单由内核代落——一次 L2+ 的
+			// POST /actions/{id}/versions/{v}/execute 被受理时返回 202 + 单号
+			// （设计稿 §4 的「由内核代落，一般不直调」）。单独开一个建单端点
+			// 就得在这一层把权限/环境/Schema 再判一遍，否则谁都能往队列里灌单
+			// ——那正是 XM-0030a-wire 挪风险闸堵掉的洞，不该在这里重新开一个。
+			//
+			// 执行端点不挂 RequireScope：要什么权限取决于单上那个 Action，
+			// 只有内核知道（见 ExecuteApprovalHandler 的注释）。
+			if d.Approvals != nil {
+				api.With(RequireScope(approval.ScopeRead)).
+					Get("/approvals", ListApprovalsHandler(d.Approvals))
+				api.With(RequireScope(approval.ScopeRead)).
+					Get("/approvals/{approvalID}", GetApprovalHandler(d.Approvals))
+				api.With(RequireScope(approval.ScopeDecide)).
+					Post("/approvals/{approvalID}/decide", DecideApprovalHandler(d.Approvals))
+				// 撤回只要 read：撤的是自己的单，归属由领域层按 requester_id 判。
+				// 要求 decide 会把「提交人撤回自己的单」变成需要审批权，说不通。
+				api.With(RequireScope(approval.ScopeRead)).
+					Post("/approvals/{approvalID}/cancel", CancelApprovalHandler(d.Approvals))
+				if d.ApprovalExec != nil {
+					api.Post("/approvals/{approvalID}/execute", ExecuteApprovalHandler(d.ApprovalExec))
 				}
 			}
 			// 告警与指标共用 ops.read：告警内容就是指标的判读结果，

@@ -28,7 +28,11 @@ type Store interface {
 	// Vote 在**同一个事务里**追加一票并按 Policy 重算状态。
 	// 票数判定必须与写票原子，否则两个人同时投最后一票会各自读到「还差一票」，
 	// 谁也不把单推进 APPROVED（或者更糟，两次都推进）。
-	Vote(ctx context.Context, id uuid.UUID, d Decision, policy Policy) (Request, error)
+	//
+	// approver 是**投票人的真实身份**，投票资格（自然人、approval.decide、
+	// 特权与否）一律由它判——d 上的对应字段由本方法按 approver 覆写，调用方
+	// 说自己是谁不算数。d 只提供 ID、Verdict 与 Comment。
+	Vote(ctx context.Context, id uuid.UUID, approver principal.Principal, d Decision, policy Policy) (Request, error)
 	// MarkExecuted 绑定 ActionRun 并落终态；execution_run_id 的 UNIQUE 让重复
 	// 触发在库层撞上。
 	MarkExecuted(ctx context.Context, id uuid.UUID, runID uuid.UUID, at time.Time) error
@@ -147,7 +151,7 @@ func (s *PgStore) decisions(ctx context.Context, q rowQuerier, id uuid.UUID) ([]
 // 并发是这里的要害：两个审批人同时投 L3 的第二票，如果各自先读后写，两边都会
 // 读到「已有一票、还差一票」，于是谁也不把单推进 APPROVED。锁住单行让第二个
 // 事务看到的是第一票已落库之后的状态。
-func (s *PgStore) Vote(ctx context.Context, id uuid.UUID, d Decision, policy Policy) (Request, error) {
+func (s *PgStore) Vote(ctx context.Context, id uuid.UUID, approver principal.Principal, d Decision, policy Policy) (Request, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Request{}, fmt.Errorf("begin approval vote: %w", err)
@@ -159,15 +163,14 @@ func (s *PgStore) Vote(ctx context.Context, id uuid.UUID, d Decision, policy Pol
 		return Request{}, err
 	}
 	now := s.now().UTC()
+	// 投票人的身份三项一律取自 approver，不取自 d——调用方声称自己是谁、
+	// 声称自己有特权，都不算数。（这里曾经反过来：用 d 造一个「一定持有
+	// ScopeDecide」的假 principal 去过 CanVote，等于把库层的资格校验废掉。）
+	d.ApproverID = approver.ID
+	d.ApproverType = approver.Type
+	d.Privileged = approver.HasScope(ScopeL4)
 	// 领域规则在这里再走一遍：调用方可能没查，或查完到这里之间单已改变。
-	approverPrincipal := principal.Principal{
-		ID: d.ApproverID, Type: d.ApproverType,
-		Scopes: []string{ScopeDecide},
-	}
-	if d.Privileged {
-		approverPrincipal.Scopes = append(approverPrincipal.Scopes, ScopeL4)
-	}
-	if err = policy.CanVote(req, approverPrincipal, now); err != nil {
+	if err = policy.CanVote(req, approver, now); err != nil {
 		return Request{}, err
 	}
 

@@ -73,15 +73,22 @@ func seed(t *testing.T, s *approval.PgStore, pool *pgxpool.Pool, level string, r
 	return req
 }
 
-func vote(approver string, verdict approval.Verdict, privileged bool) approval.Decision {
-	return approval.Decision{
-		ID:           uuid.New(),
-		ApproverID:   approver,
-		ApproverType: principal.TypeHuman,
-		Verdict:      verdict,
-		Comment:      "看过了",
-		Privileged:   privileged,
+// voter 造一个有投票资格的自然人；privileged 决定他是否持 approval.l4。
+// 资格取自 principal 而不是 Decision——Store 按前者覆写后者（见 Store.Vote）。
+func voter(id string, privileged bool) principal.Principal {
+	scopes := []string{approval.ScopeDecide}
+	if privileged {
+		scopes = append(scopes, approval.ScopeL4)
 	}
+	return principal.Principal{
+		ID: id, Type: principal.TypeHuman,
+		IdentityZone: "staff", Issuer: "https://auth.solov.cc/realms/solov-staff",
+		AuthenticationLevel: "mfa", Environment: testEnv, Scopes: scopes,
+	}
+}
+
+func vote(verdict approval.Verdict) approval.Decision {
+	return approval.Decision{ID: uuid.New(), Verdict: verdict, Comment: "看过了"}
 }
 
 func TestCreateAndGetRoundTrips(t *testing.T) {
@@ -137,7 +144,7 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 
 	t.Run("L2 一票即批", func(t *testing.T) {
 		req := seed(t, s, pool, "L2", "staff_alice")
-		got, err := s.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictApprove, false), policy)
+		got, err := s.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy)
 		if err != nil {
 			t.Fatalf("Vote: %v", err)
 		}
@@ -154,7 +161,7 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 
 	t.Run("L3 一票还不够两票才批", func(t *testing.T) {
 		req := seed(t, s, pool, "L3", "staff_alice")
-		got, err := s.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictApprove, false), policy)
+		got, err := s.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy)
 		if err != nil {
 			t.Fatalf("第一票: %v", err)
 		}
@@ -164,7 +171,7 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 		if got.DecidedAt != nil {
 			t.Fatal("还没落定就不该写 decided_at")
 		}
-		got, err = s.Vote(context.Background(), req.ID, vote("staff_carol", approval.VerdictApprove, false), policy)
+		got, err = s.Vote(context.Background(), req.ID, voter("staff_carol", false), vote(approval.VerdictApprove), policy)
 		if err != nil {
 			t.Fatalf("第二票: %v", err)
 		}
@@ -175,7 +182,7 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 
 	t.Run("一张 REJECT 立即驳回", func(t *testing.T) {
 		req := seed(t, s, pool, "L3", "staff_alice")
-		got, err := s.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictReject, false), policy)
+		got, err := s.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictReject), policy)
 		if err != nil {
 			t.Fatalf("Vote: %v", err)
 		}
@@ -183,7 +190,7 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 			t.Fatalf("一票驳回就该驳回，got %s", got.Status)
 		}
 		// 驳回后不再收票。
-		err = mustVoteErr(t, s, req.ID, vote("staff_carol", approval.VerdictApprove, false), policy)
+		err = mustVoteErr(t, s, req.ID, voter("staff_carol", false), vote(approval.VerdictApprove), policy)
 		if !errors.Is(err, approval.ErrNotPending) {
 			t.Fatalf("驳回后不该再收票，got %v", err)
 		}
@@ -191,11 +198,11 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 
 	t.Run("L4 缺特权票不批", func(t *testing.T) {
 		req := seed(t, s, pool, "L4", "staff_alice")
-		got, err := s.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictApprove, false), policy)
+		got, err := s.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy)
 		if err != nil {
 			t.Fatalf("第一票: %v", err)
 		}
-		got, err = s.Vote(context.Background(), req.ID, vote("staff_carol", approval.VerdictApprove, false), policy)
+		got, err = s.Vote(context.Background(), req.ID, voter("staff_carol", false), vote(approval.VerdictApprove), policy)
 		if err != nil {
 			t.Fatalf("第二票: %v", err)
 		}
@@ -203,7 +210,7 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 			t.Fatalf("L4 两张普通票不该批——缺特权票，got %s", got.Status)
 		}
 		// 对照：补一张特权票就该批，确认卡住的是特权票而不是票数。
-		got, err = s.Vote(context.Background(), req.ID, vote("staff_dave", approval.VerdictApprove, true), policy)
+		got, err = s.Vote(context.Background(), req.ID, voter("staff_dave", true), vote(approval.VerdictApprove), policy)
 		if err != nil {
 			t.Fatalf("特权票: %v", err)
 		}
@@ -213,9 +220,9 @@ func TestVoteSettlesAtRequiredCount(t *testing.T) {
 	})
 }
 
-func mustVoteErr(t *testing.T, s *approval.PgStore, id uuid.UUID, d approval.Decision, p approval.Policy) error {
+func mustVoteErr(t *testing.T, s *approval.PgStore, id uuid.UUID, who principal.Principal, d approval.Decision, p approval.Policy) error {
 	t.Helper()
-	_, err := s.Vote(context.Background(), id, d, p)
+	_, err := s.Vote(context.Background(), id, who, d, p)
 	return err
 }
 
@@ -226,15 +233,15 @@ func TestStoreRejectsDuplicateVote(t *testing.T) {
 	req := seed(t, s, pool, "L3", "staff_alice")
 	policy := approval.DefaultPolicy()
 
-	if _, err := s.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictApprove, false), policy); err != nil {
+	if _, err := s.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy); err != nil {
 		t.Fatalf("第一票: %v", err)
 	}
-	err := mustVoteErr(t, s, req.ID, vote("staff_bob", approval.VerdictApprove, false), policy)
+	err := mustVoteErr(t, s, req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy)
 	if !errors.Is(err, approval.ErrDuplicateVote) {
 		t.Fatalf("同一人第二票应当 ErrDuplicateVote，got %v", err)
 	}
 	// 对照：换个人就能投——确认拒的是重复而不是单不收票了。
-	if _, err := s.Vote(context.Background(), req.ID, vote("staff_carol", approval.VerdictApprove, false), policy); err != nil {
+	if _, err := s.Vote(context.Background(), req.ID, voter("staff_carol", false), vote(approval.VerdictApprove), policy); err != nil {
 		t.Fatalf("换人投票应当成功: %v", err)
 	}
 }
@@ -246,13 +253,13 @@ func TestSelfApprovalBlockedAboveL2(t *testing.T) {
 	policy := approval.DefaultPolicy()
 
 	l3 := seed(t, s, pool, "L3", "staff_alice")
-	err := mustVoteErr(t, s, l3.ID, vote("staff_alice", approval.VerdictApprove, false), policy)
+	err := mustVoteErr(t, s, l3.ID, voter("staff_alice", false), vote(approval.VerdictApprove), policy)
 	if !errors.Is(err, approval.ErrApproverIsRequester) {
 		t.Fatalf("L3 不许自批，got %v", err)
 	}
 
 	l2 := seed(t, s, pool, "L2", "staff_alice")
-	got, err := s.Vote(context.Background(), l2.ID, vote("staff_alice", approval.VerdictApprove, false), policy)
+	got, err := s.Vote(context.Background(), l2.ID, voter("staff_alice", false), vote(approval.VerdictApprove), policy)
 	if err != nil {
 		t.Fatalf("L2 允许自批: %v", err)
 	}
@@ -338,7 +345,7 @@ func TestConcurrentLastVoteSettlesExactlyOnce(t *testing.T) {
 	// 铺第一票时不该被栅栏拦住，所以先用不带栅栏的 Store 落单和投第一票。
 	plain := newStore(t, pool, nil)
 	req := seed(t, plain, pool, "L3", "staff_alice")
-	if _, err := plain.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictApprove, false), policy); err != nil {
+	if _, err := plain.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy); err != nil {
 		t.Fatalf("第一票: %v", err)
 	}
 
@@ -348,7 +355,7 @@ func TestConcurrentLastVoteSettlesExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func(i int, who string) {
 			defer wg.Done()
-			errs[i] = voteErr(s, req.ID, vote(who, approval.VerdictApprove, false), policy)
+			errs[i] = voteErr(s, req.ID, voter(who, false), vote(approval.VerdictApprove), policy)
 		}(i, who)
 	}
 	wg.Wait()
@@ -383,8 +390,8 @@ func TestConcurrentLastVoteSettlesExactlyOnce(t *testing.T) {
 	}
 }
 
-func voteErr(s *approval.PgStore, id uuid.UUID, d approval.Decision, p approval.Policy) error {
-	_, err := s.Vote(context.Background(), id, d, p)
+func voteErr(s *approval.PgStore, id uuid.UUID, who principal.Principal, d approval.Decision, p approval.Policy) error {
+	_, err := s.Vote(context.Background(), id, who, d, p)
 	return err
 }
 
@@ -401,7 +408,7 @@ func TestMarkExecutedIsIdempotentGuard(t *testing.T) {
 		t.Fatalf("未批准的单不该能标执行，got %v", err)
 	}
 
-	if _, err := s.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictApprove, false), policy); err != nil {
+	if _, err := s.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy); err != nil {
 		t.Fatalf("Vote: %v", err)
 	}
 	runID := uuid.New()
@@ -454,7 +461,7 @@ func TestCancelOnlyByRequesterAndOnlyWhilePending(t *testing.T) {
 
 	t.Run("已批准的撤不了", func(t *testing.T) {
 		req := seed(t, s, pool, "L2", "staff_alice")
-		if _, err := s.Vote(context.Background(), req.ID, vote("staff_bob", approval.VerdictApprove, false), policy); err != nil {
+		if _, err := s.Vote(context.Background(), req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy); err != nil {
 			t.Fatalf("Vote: %v", err)
 		}
 		if err := s.Cancel(context.Background(), req.ID, "staff_alice", time.Now().UTC()); !errors.Is(err, approval.ErrNotCancellableByOther) {
@@ -500,7 +507,7 @@ func TestExpirePendingLeavesDecidedAtNull(t *testing.T) {
 	}
 
 	// 过期的单一票也不能投。
-	err = mustVoteErr(t, s, req.ID, vote("staff_bob", approval.VerdictApprove, false), approval.DefaultPolicy())
+	err = mustVoteErr(t, s, req.ID, voter("staff_bob", false), vote(approval.VerdictApprove), approval.DefaultPolicy())
 	if !errors.Is(err, approval.ErrNotPending) && !errors.Is(err, approval.ErrExpired) {
 		t.Fatalf("过期的单不该收票，got %v", err)
 	}
@@ -512,7 +519,7 @@ func TestListFiltersByStatusAndEnvironment(t *testing.T) {
 	policy := approval.DefaultPolicy()
 	pending := seed(t, s, pool, "L3", "staff_alice")
 	approved := seed(t, s, pool, "L2", "staff_alice")
-	if _, err := s.Vote(context.Background(), approved.ID, vote("staff_bob", approval.VerdictApprove, false), policy); err != nil {
+	if _, err := s.Vote(context.Background(), approved.ID, voter("staff_bob", false), vote(approval.VerdictApprove), policy); err != nil {
 		t.Fatalf("Vote: %v", err)
 	}
 

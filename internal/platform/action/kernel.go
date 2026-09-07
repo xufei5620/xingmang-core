@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -52,8 +51,8 @@ type Request struct {
 	RequestID     string // 调用方提供的请求标识（规格 §5.8 X-Request-ID）
 	// Reason 是「为什么要做这件事」。L0/L1 可空；**L2 及以上必填**——
 	// 审批单的 reason 是审计要求（库层 NOT NULL），而它只能由发起人给出。
-	Reason        string
-	Params        map[string]any
+	Reason string
+	Params map[string]any
 }
 
 // Result 是执行结果。
@@ -82,6 +81,16 @@ type ApprovalSubmission struct {
 type ApprovalGateway interface {
 	// Submit 为一次被拦下的 L2+ 调用落一张待批审批单，返回单号。
 	Submit(ctx context.Context, in ApprovalSubmission) (string, error)
+	// Peek 只读地取出单上冻结的内容，**不改变任何状态**。
+	// 内核用它得知「这张单要跑什么」，好在占用之前先对执行者跑完校验链。
+	Peek(ctx context.Context, approvalID string) (ApprovalClaim, error)
+	// Claim 校验单此刻可执行，并**原子地占用它**（写入 execution_run_id）。
+	// params 是调用方当场声明的参数：非 nil 时必须与单上冻结的一致，
+	// 让客户端能证明自己执行的正是它看到的那份。
+	//
+	// 两个方法的错误都由审批中心映射成 *Error（它才分得清「单不存在」
+	// 「还没批」「已经跑过」），内核原样透传。
+	Claim(ctx context.Context, approvalID string, runID uuid.UUID, params map[string]any) error
 }
 
 // Kernel 是 Action 执行内核（Foundation-A 级 Core Lite）。
@@ -182,32 +191,16 @@ func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 
-	p, hasPrincipal := principal.FromContext(ctx)
+	// 校验链与 ExecuteApproved 共用同一份实现（见 precheck 的注释）：
+	// 审批那条路径只免掉风险闸，其余一项不少，写成两份迟早分叉。
+	p, hasPrincipal, chk := k.precheck(ctx, def, req.RequestID, req.Params)
 	if !hasPrincipal {
 		// 无身份时不写 ActionRun：principal_id 非空是审计表的硬约束，
 		// 且「谁都不是」的记录对审计没有价值。
-		return Result{}, newError(CodePermissionDenied, "缺少 Principal", nil)
+		return Result{}, chk
 	}
-	if err := p.Validate(); err != nil {
-		return fail(CodePermissionDenied, "Principal 不合法", err, p)
-	}
-	if req.RequestID == "" {
-		return fail(CodeInvalidParams, "缺少 request_id", nil, p)
-	}
-	if !slices.Contains(def.PrincipalTypes, p.Type) {
-		return fail(CodePrincipalTypeNotAllowed,
-			fmt.Sprintf("action %s 不允许 %s 类型身份", def.ID, p.Type), nil, p)
-	}
-	if !slices.Contains(def.Environments, p.Environment) {
-		return fail(CodeEnvironmentMismatch,
-			fmt.Sprintf("action %s 不允许在 %s 环境执行", def.ID, p.Environment), nil, p)
-	}
-	if !p.HasScope(def.Permission) {
-		return fail(CodePermissionDenied,
-			fmt.Sprintf("缺少权限 %s", def.Permission), nil, p)
-	}
-	if err := def.Schema.Validate(req.Params); err != nil {
-		return fail(CodeInvalidParams, "参数不符合 Action Schema", err, p)
+	if chk != nil {
+		return fail(chk.Code, chk.Message, chk.cause, p)
 	}
 	// 风险闸放在**环境/权限/Schema 之后**（XM-0030a-wire 把它从之前挪到了
 	// 这里）。理由：没有权限的人不该能刷审批单——他该拿到 PERMISSION_DENIED，

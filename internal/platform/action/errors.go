@@ -22,10 +22,13 @@ const (
 	// 网关时内核仍然 fail closed 返回后者（Foundation-A 的行为原样保留），
 	// 接了才会走到这里。
 	CodeApprovalRequired Code = "APPROVAL_REQUIRED"
-	CodeExecutionFailed          Code = "EXECUTION_FAILED"
-	CodeRunwayConfigUnavailable  Code = "RUNWAY_CONFIG_UNAVAILABLE"
-	CodeRevisionConflict         Code = "REVISION_CONFLICT"
-	CodeInternal                 Code = "INTERNAL"
+	// CodeApprovalNotFound：审批单不存在。单号形态不对与确实不存在给同一个
+	// 码——区分开等于给了一个探测单号空间的信道。
+	CodeApprovalNotFound        Code = "APPROVAL_NOT_FOUND"
+	CodeExecutionFailed         Code = "EXECUTION_FAILED"
+	CodeRunwayConfigUnavailable Code = "RUNWAY_CONFIG_UNAVAILABLE"
+	CodeRevisionConflict        Code = "REVISION_CONFLICT"
+	CodeInternal                Code = "INTERNAL"
 )
 
 // Error 是 Action 的对外错误：只暴露稳定 Code 与安全 Message；

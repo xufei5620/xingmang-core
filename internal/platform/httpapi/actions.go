@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sort"
@@ -22,11 +23,25 @@ type ActionExecutor interface {
 
 type executeActionBody struct {
 	Params map[string]any `json:"params"`
+	// Reason 是「为什么要做这件事」。L0/L1 可空；**L2 及以上必填**——
+	// 那些调用会被内核受理成一张审批单，而单上的理由是审批人唯一能据以
+	// 判断的东西（库层 reason NOT NULL）。
+	Reason string `json:"reason"`
 }
 
 type executeActionResponse struct {
 	ActionRunID string `json:"action_run_id"`
 	Result      any    `json:"result,omitempty"`
+}
+
+// approvalRequiredResponse 是 202 的响应体（XM-0030）。
+//
+// 它**不是错误体**：调用被受理了，只是要等人批。给的是单号与一句人话，让
+// 调用方知道下一步是去审批页而不是重试。
+type approvalRequiredResponse struct {
+	ApprovalRequestID string `json:"approval_request_id"`
+	Status            string `json:"status"`
+	Message           string `json:"message"`
 }
 
 // ExecuteActionHandler 执行一个 Action（ADR-003：写操作唯一入口）。
@@ -53,9 +68,22 @@ func ExecuteActionHandler(exec ActionExecutor) http.HandlerFunc {
 			ActionID:      actionID,
 			ActionVersion: version,
 			RequestID:     RequestIDFrom(r.Context()),
+			Reason:        body.Reason,
 			Params:        body.Params,
 		})
 		if err != nil {
+			// APPROVAL_REQUIRED 走 202 而不是 WriteError：内核确实没有执行，
+			// 但这不是失败——单已经受理，等人批。走错误路径会把它记成 error
+			// 级日志，也会让前端把「已提交待审批」显示成红色的失败提示。
+			var ae *action.Error
+			if errors.As(err, &ae) && ae.Code == action.CodeApprovalRequired {
+				WriteJSON(w, http.StatusAccepted, approvalRequiredResponse{
+					ApprovalRequestID: ae.ApprovalRequestID,
+					Status:            string(action.CodeApprovalRequired),
+					Message:           ae.Message,
+				})
+				return
+			}
 			WriteError(w, r, err)
 			return
 		}
