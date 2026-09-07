@@ -14,6 +14,14 @@ const (
 	CodeNotRegistered            Code = "ACTION_NOT_REGISTERED"
 	CodePrincipalTypeNotAllowed  Code = "PRINCIPAL_TYPE_NOT_ALLOWED"
 	CodeAdvancedControlsRequired Code = "ADVANCED_CONTROLS_REQUIRED"
+	// CodeApprovalRequired：调用被接受，但没有执行——内核为它落了一张待批
+	// 审批单（XM-0030）。它**不是失败**：HTTP 层映射成 202，ApprovalRequestID
+	// 是跟进用的单号。
+	//
+	// 与 ADVANCED_CONTROLS_REQUIRED 的区别是「有没有审批中心」：没接审批
+	// 网关时内核仍然 fail closed 返回后者（Foundation-A 的行为原样保留），
+	// 接了才会走到这里。
+	CodeApprovalRequired Code = "APPROVAL_REQUIRED"
 	CodeExecutionFailed          Code = "EXECUTION_FAILED"
 	CodeRunwayConfigUnavailable  Code = "RUNWAY_CONFIG_UNAVAILABLE"
 	CodeRevisionConflict         Code = "REVISION_CONFLICT"
@@ -26,7 +34,11 @@ const (
 type Error struct {
 	Code    Code
 	Message string
-	cause   error
+	// ApprovalRequestID 只在 Code == CodeApprovalRequired 时非空：内核落下的
+	// 审批单号，调用方据此跟进。放在这里而不是塞进 Message，是为了让 HTTP
+	// 层能给出结构化字段而不是让人从文案里抠单号。
+	ApprovalRequestID string
+	cause             error
 }
 
 func newError(code Code, message string, cause error) *Error {

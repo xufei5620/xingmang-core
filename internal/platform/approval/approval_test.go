@@ -19,7 +19,7 @@ func humanApprover(id string, scopes ...string) principal.Principal {
 
 func pendingRequest(risk, requester string, now time.Time, policy Policy) Request {
 	return Request{
-		ID: uuid.New(), ActionID: "registry.connector.create", ActionVersion: 1,
+		ID: uuid.New(), ActionID: "registry.connector.create", ActionVersion: "1",
 		Params: map[string]any{"name": "sub2api"}, ParamsHash: mustHash(map[string]any{"name": "sub2api"}),
 		RiskLevel: risk, Environment: "production",
 		RequesterID: requester, RequesterType: principal.TypeHuman,

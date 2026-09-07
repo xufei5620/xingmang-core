@@ -9,7 +9,9 @@
 CREATE TABLE core.approval_request (
     id                uuid PRIMARY KEY,
     action_id         text NOT NULL CHECK (btrim(action_id) <> ''),
-    action_version    integer NOT NULL CHECK (action_version > 0),
+    -- 版本是**字符串**（action.Definition.Version 是 string，如 "1"/"v1"），
+    -- 不是整数：写成整数会在接线那一刻才炸。
+    action_version    text NOT NULL CHECK (btrim(action_version) <> ''),
     -- 全量参数在提交时冻结。params_hash 是 SHA256(canonical(params))，执行时
     -- 内核重算并比对：**审批过的是这份参数，不是这个意图的任意版本**。
     params_json       jsonb NOT NULL,

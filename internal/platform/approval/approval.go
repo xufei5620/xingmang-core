@@ -88,7 +88,7 @@ var (
 type Request struct {
 	ID             uuid.UUID
 	ActionID       string
-	ActionVersion  int
+	ActionVersion  string
 	Params         map[string]any
 	ParamsHash     string
 	RiskLevel      string
