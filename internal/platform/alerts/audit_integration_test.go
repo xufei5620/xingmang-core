@@ -312,6 +312,77 @@ func TestAcknowledgeUnknownAlertIsNotAServerError(t *testing.T) {
 	}
 }
 
+// TestAcknowledgeResolvedAlertIsConflictNotServerError 钉住一个**运维真会撞到
+// 的竞态**：评估器每一轮都会把不再命中的告警自动转 RESOLVED，而人点「确认」
+// 的那一刻它可能刚好已经恢复了。
+//
+// 修之前这条路径返回 **502 EXECUTION_FAILED**——`store.Acknowledge` 的
+// `ErrNotAcknowledgeable` 是裸返回的，内核归一成了「执行失败」。看起来像服务端
+// 坏了，而实际上只是「这条已经不用确认了」。
+//
+// **这是上一片漏掉的**：XM-ERRCODE-AUDIT 修了同一个 handler 里两行之前的
+// `store.Get`，却没有跟下去看它后面的 `store.Acknowledge`。一个 handler 里
+// 逐条跟到源头，不能只修撞见的那一条。
+func TestAcknowledgeResolvedAlertIsConflictNotServerError(t *testing.T) {
+	f := newKernelFixture(t)
+	a := seedAlert(t, f.alertStore, "production")
+
+	// 让它先自动恢复——与评估器每轮做的事情一样。
+	if _, err := f.alertStore.Resolve(context.Background(), a.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	_, err := f.kernel.Execute(staffCtx("production", alerts.ScopeAcknowledge), action.Request{
+		ActionID:      alerts.ActionAcknowledge,
+		ActionVersion: "1",
+		RequestID:     "req-ack-resolved-1",
+		Params:        map[string]any{"alert_id": a.ID.String()},
+	})
+	if err == nil {
+		t.Fatal("确认一条已解决的告警应当报错")
+	}
+	if code := action.ErrorCode(err); code != action.CodeConflict {
+		t.Fatalf("错误码 = %q，期望 CONFLICT（不是 %q——那会让人以为服务端坏了）",
+			code, action.CodeExecutionFailed)
+	}
+	// 文案要说清「为什么不能确认」，而不是内核的通用兜底。
+	var ae *action.Error
+	if !errors.As(err, &ae) || !strings.Contains(ae.Message, "当前状态不允许确认") {
+		t.Fatalf("文案 = %+v", ae)
+	}
+
+	// 对照：同一个 fixture 里一条**没有**被解决的告警确认得掉——确认上面拒的是
+	// 状态，不是这条 Action 整个坏了。
+	fresh := seedAlertWithKey(t, f.alertStore, "production", "second")
+	if _, err := f.kernel.Execute(staffCtx("production", alerts.ScopeAcknowledge), action.Request{
+		ActionID:      alerts.ActionAcknowledge,
+		ActionVersion: "1",
+		RequestID:     "req-ack-resolved-2",
+		Params:        map[string]any{"alert_id": fresh.ID.String()},
+	}); err != nil {
+		t.Fatalf("未解决的告警应当确认得掉：%v", err)
+	}
+}
+
+// seedAlertWithKey 造一条 dedup_key 不同的告警，用来在同一个用例里拿到第二条。
+func seedAlertWithKey(t *testing.T, s *alerts.Store, env, suffix string) alerts.Alert {
+	t.Helper()
+	a, _, err := s.Upsert(context.Background(), alerts.UpsertInput{
+		RuleKey:         alerts.RuleMetricSyncFailed,
+		DedupKey:        alerts.RuleMetricSyncFailed + ":" + env + ":" + suffix,
+		Severity:        alerts.SeverityCritical,
+		Title:           "第二条告警",
+		Detail:          "对照组",
+		Environment:     env,
+		SourceMetricKey: revenueMetric,
+		Now:             time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("造第二条告警: %v", err)
+	}
+	return a
+}
+
 // TestAcknowledgeRejectsCrossEnvironment 是宪法 15 条在资源层的闸门。
 //
 // 内核只校验「这个 Action 允许在你的环境执行」——它不认识资源。一个 staging

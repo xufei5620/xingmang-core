@@ -146,6 +146,22 @@ func domainError(err error) error {
 		return nil
 	case errors.Is(err, ErrNotFound):
 		return action.NewError(action.CodePreconditionFailed, "指定的告警不存在", err)
+	case errors.Is(err, ErrNotAcknowledgeable):
+		// **409 而不是 412**：告警在，只是状态不允许确认（已解决 / 已静默）。
+		// 「与目标资源的当前状态冲突」正是 409 的定义；412 那一档留给
+		// 「参数指名的对象不存在」。
+		//
+		// 这条真的会被撞到：评估器每轮都会把不再命中的告警自动转 RESOLVED，
+		// 而运维点「确认」的那一刻它可能刚好已经恢复了。此前这个竞态返回
+		// **502**，看起来像服务端坏了。
+		return action.NewError(action.CodeConflict,
+			"该告警当前状态不允许确认（只有待处理 / 重新触发可确认，它可能刚刚自动恢复了）", err)
+	case errors.Is(err, ErrMissingField), errors.Is(err, ErrInvalidFormat):
+		// 防御性：静默窗口的这几项在 Handler 里已经先校验过一遍（rule_key 走
+		// KnownRuleKey、时长与理由各有判断），所以这一支**目前不可达**。
+		// 映射它不是因为今天会走到，而是因为 Store.CreateSilence 的契约里
+		// 确实会返回它们——留一条正确的翻译比留一个 502 的口子便宜。
+		return action.NewError(action.CodeInvalidParams, err.Error(), err)
 	default:
 		// 其余仓储错误原样返回：内核会归一成 EXECUTION_FAILED 并换掉文案，
 		// 细节（约束名、内网地址）只进服务端日志。
@@ -208,7 +224,7 @@ func acknowledgeHandler(store *Store) action.Handler {
 
 		after, err := store.Acknowledge(ctx, id, time.Now().UTC())
 		if err != nil {
-			return nil, err
+			return nil, domainError(err)
 		}
 		action.RecordAfter(ctx, alertSummary(after))
 		return after, nil
@@ -286,7 +302,7 @@ func silenceCreateHandler(store *Store) action.Handler {
 			CreatedBy:   p.ID,
 		})
 		if err != nil {
-			return nil, err
+			return nil, domainError(err)
 		}
 
 		action.RecordResource(ctx, resourceSilence, silence.ID.String())
