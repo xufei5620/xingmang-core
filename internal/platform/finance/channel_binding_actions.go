@@ -132,7 +132,11 @@ func bindingPrincipal(ctx context.Context) (principal.Principal, error) {
 func bindingActionError(err error) error {
 	switch {
 	case errors.Is(err, ErrBindingConflict):
-		return action.NewError(action.CodeConflict, "channel binding changed; refresh and retry", err)
+		// REVISION_CONFLICT 而不是笼统的 CONFLICT：两者都映射 409，但这一条
+		// 是**乐观并发的版本冲突**（读到写之间被别人改了），与 approval 包里
+		// 那些状态冲突（已执行过 / 重复投票）不是一回事。CodeRevisionConflict
+		// 就是为这个概念声明的，在此之前全仓一处未用。
+		return action.NewError(action.CodeRevisionConflict, "channel binding changed; refresh and retry", err)
 	case errors.Is(err, ErrBindingPrecondition):
 		return action.NewError(action.CodePreconditionFailed, "channel inventory is not complete and fresh", err)
 	case errors.Is(err, ErrNotFound):

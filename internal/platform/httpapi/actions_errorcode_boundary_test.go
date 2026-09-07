@@ -133,6 +133,16 @@ func TestHandlerDomainErrorReachesHTTPUnchanged(t *testing.T) {
 			wantCode:   "PERMISSION_DENIED",
 			wantMsg:    "缺少权限 assurance.probe.manage",
 		},
+		// 乐观并发的版本冲突（XM-ERRCODE-AUDIT）。assurance 的
+		// ErrVersionConflict 与 finance 的 ErrBindingConflict 都映射到它，
+		// 都要在边界上变成 409——曾经 assurance 那条是 412，两个包对同一个
+		// 概念给出不同状态码，而在内核 bug 期间两者都被改写成 502，看不出来。
+		"版本冲突": {
+			handlerErr: action.NewError(action.CodeRevisionConflict, "expected_version 与当前版本不一致，请刷新后重试", nil),
+			wantStatus: http.StatusConflict,
+			wantCode:   "REVISION_CONFLICT",
+			wantMsg:    "expected_version 与当前版本不一致，请刷新后重试",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

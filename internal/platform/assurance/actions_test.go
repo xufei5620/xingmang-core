@@ -174,7 +174,9 @@ func TestDomainErrorMapping(t *testing.T) {
 		{ErrInvalidInput, action.CodeInvalidParams},
 		{ErrNotFound, action.CodePreconditionFailed},
 		{ErrDeclarationNotActive, action.CodePreconditionFailed},
-		{ErrVersionConflict, action.CodePreconditionFailed},
+		// 409 而不是 412：expected_version 在请求体里，不是条件请求头
+		// （RFC 9110 把 412 留给后者）。与 finance 的 channel binding 同码。
+		{ErrVersionConflict, action.CodeRevisionConflict},
 		{errors.New("something else"), action.CodeExecutionFailed},
 	}
 	for _, c := range cases {

@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -127,6 +128,31 @@ func callerPrincipal(ctx context.Context) (principal.Principal, error) {
 	return p, nil
 }
 
+// domainError 把仓储错误翻成 Action 错误码。
+//
+// **修的是一个真实的错误分类问题**（XM-ERRCODE-AUDIT）：在这之前
+// `store.Get` 的错误是**裸返回**的，于是「确认一个不存在的 alert_id」在内核
+// 那里被归一成 EXECUTION_FAILED——调用方拿到 502，像是服务端坏了，而实际上
+// 是他给的 id 不对。这个错分在 XM-KERNEL-ERRCODE0 之前看不出来（那时**所有**
+// Handler 错误都是 502），修完内核之后它成了唯一还错着的那一类。
+//
+// ErrNotFound 取 PRECONDITION_FAILED（412）是跟随本仓多数派：assurance 的
+// 「声明不存在」与 credentials 的「credential_ref 尚未登记」都是这个码。
+// （finance 的渠道绑定用的是 NOT_REGISTERED/404——三处不一致这件事记在
+// 交接文档的 follow_ups 里，不在本片顺手统一。）
+func domainError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrNotFound):
+		return action.NewError(action.CodePreconditionFailed, "指定的告警不存在", err)
+	default:
+		// 其余仓储错误原样返回：内核会归一成 EXECUTION_FAILED 并换掉文案，
+		// 细节（约束名、内网地址）只进服务端日志。
+		return err
+	}
+}
+
 // --- alerts.alert.acknowledge（L0：确认普通告警）---
 
 // acknowledgeDef 声明确认动作。
@@ -167,7 +193,7 @@ func acknowledgeHandler(store *Store) action.Handler {
 
 		before, err := store.Get(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, domainError(err)
 		}
 		// **跨环境闸门**（宪法 15 条）。内核只校验「这个 Action 允许在你的
 		// 环境执行」，它不认识资源——一个 staging 身份完全可能拿着生产告警的

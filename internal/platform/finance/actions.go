@@ -639,8 +639,15 @@ func domainError(err error) error {
 		errors.Is(err, money.ErrUnknownCurrency):
 		return action.NewError(action.CodeInvalidParams, err.Error(), err)
 	default:
-		// 库层 CHECK 违反等落这里：它们的文本带约束名，对调用方没用，
-		// 由 WriteError 统一收敛成 INTERNAL 并隐藏细节。
+		// 库层 CHECK 违反等落这里：它们的文本带约束名，对调用方没用。
+		//
+		// 原样返回**裸错误**（不包 *action.Error）是刻意的：内核看到非
+		// *Error 的失败会归一成 EXECUTION_FAILED 并换掉文案
+		// （action/kernel.go，XM-KERNEL-ERRCODE0），细节只进服务端日志。
+		//
+		// 注：这里曾写「由 WriteError 统一收敛成 INTERNAL」——**那是过期的**。
+		// 收敛发生在内核而不是 WriteError，结果码是 EXECUTION_FAILED（502）
+		// 而不是 INTERNAL（500）。行为一直如此，只是注释没跟上。
 		return err
 	}
 }

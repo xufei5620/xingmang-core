@@ -3,6 +3,8 @@ package alerts_test
 import (
 	"context"
 	"errors"
+
+	"github.com/google/uuid"
 	"os"
 	"strings"
 	"testing"
@@ -277,6 +279,39 @@ func TestRejectedAcknowledgeAlsoAudited(t *testing.T) {
 	}
 }
 
+// TestAcknowledgeUnknownAlertIsNotAServerError 从 **Action 入口**打进来，
+// 钉住「不存在的 alert_id 是调用方的问题，不是服务端故障」。
+//
+// **为什么必须从这里打**：本包另有一条 `TestDomainErrorMapping` 直测
+// `domainError`，但它证明不了 Handler 会去调那个函数——变异验证时把
+// `return nil, domainError(err)` 改回 `return nil, err`（也就是修之前的样子），
+// 那条单测照样全绿。这就是「规则存在 ≠ 调用方走得到它」。
+func TestAcknowledgeUnknownAlertIsNotAServerError(t *testing.T) {
+	f := newKernelFixture(t)
+
+	_, err := f.kernel.Execute(staffCtx("production", alerts.ScopeAcknowledge), action.Request{
+		ActionID:      alerts.ActionAcknowledge,
+		ActionVersion: "1",
+		RequestID:     "req-unknown-alert-1",
+		Params:        map[string]any{"alert_id": uuid.NewString()},
+	})
+	if err == nil {
+		t.Fatal("不存在的 alert_id 应当报错")
+	}
+	// 修之前这里是 EXECUTION_FAILED（502）——调用方看到的是「服务端坏了」，
+	// 而实际上只是他给的 id 不对。这个错分在 XM-KERNEL-ERRCODE0 之前看不
+	// 出来，因为那时**所有** Handler 错误都是 502。
+	if code := action.ErrorCode(err); code != action.CodePreconditionFailed {
+		t.Fatalf("错误码 = %q，期望 PRECONDITION_FAILED（不是 %q）",
+			code, action.CodeExecutionFailed)
+	}
+	// 文案也要是设计过的那一句，不是内核的通用兜底。
+	var ae *action.Error
+	if !errors.As(err, &ae) || ae.Message != "指定的告警不存在" {
+		t.Fatalf("文案 = %+v", ae)
+	}
+}
+
 // TestAcknowledgeRejectsCrossEnvironment 是宪法 15 条在资源层的闸门。
 //
 // 内核只校验「这个 Action 允许在你的环境执行」——它不认识资源。一个 staging
@@ -294,6 +329,15 @@ func TestAcknowledgeRejectsCrossEnvironment(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("staging 身份不该能确认生产告警")
+	}
+	// **错误码也要钉住**（XM-ERRCODE-AUDIT）。只断言 err != nil 的话，这条
+	// 跨环境闸退化成 500 也照样绿——而一次安全拒绝给出 500，运维会当成故障
+	// 去查服务端，而不是当成「这个身份不该碰这条告警」。
+	//
+	// 在 XM-KERNEL-ERRCODE0 之前这条断言写不了（内核把所有 Handler 错误都
+	// 改写成 EXECUTION_FAILED），现在写得了了。
+	if code := action.ErrorCode(err); code != action.CodePermissionDenied {
+		t.Fatalf("跨环境拒绝的错误码 = %q，期望 PERMISSION_DENIED", code)
 	}
 
 	after, err := f.alertStore.Get(context.Background(), prodAlert.ID)
