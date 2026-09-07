@@ -111,23 +111,7 @@ function PlaceholderBody({ item }: { item: NavItemSpec }) {
   );
 }
 
-/** 少数子页签是**真实组件**而不是蓝图数据，在查蓝图之前先认一遍
- *  （CR-0005 平台线 g：治理「跨平台财务 → 开票集成」承载 global 模式的开票
- *  控制台嵌入）。放在蓝图查找之前而不是塞进 default 分支：与
- *  PlatformDetailPage 的 `fallbackTabContent` 是同一个理由——写在后面的话,
- *  任何一次蓝图数据调整都可能不小心把这个特例盖掉。
- *
- *  `FINANCE_BLUEPRINT` 里的 `invoicing` 条目本身**不删**：它的 id/label/source
- *  仍然是 `blueprints.test.ts` 拿来跟 navigation.ts 对账的那份数据，只是渲染
- *  时不再走 `BlueprintTabView`。 */
-function governanceSubTabOverride(path: string, tabId: string): ReactNode | undefined {
-  if (path === "/finance" && tabId === "invoicing") {
-    return <InvoiceConsolePanel mode="global" />;
-  }
-  return undefined;
-}
-
-/** 一个子页签渲染什么：先看有没有真实组件接管，再看有没有蓝图，都没有就还是
+/** 一个子页签渲染什么：先看有没有蓝图，没有就还是
  *  那句诚实的「尚未实现」。
  *
  *  按 **id** 匹配而不是按下标：navigation.ts 与蓝图规格是两份数据，
@@ -141,8 +125,11 @@ function subTabContent(
   tabLabel: string,
   stage: string,
 ) {
-  const override = governanceSubTabOverride(path, tabId);
-  if (override) return override;
+  // 这里曾经有一支 governanceSubTabOverride，把「跨平台财务 → 开票集成」
+  // 换成真实的 InvoiceConsolePanel。XM-FINANCE-GLOBAL0（2026-09-07）把
+  // /finance 建成了真实页面（built: true），于是这条路径再也走不到它——
+  // 那一支随即成为死代码，且与 FinancePage 里的实现逐字重复。删掉。
+  // 同类教训见 XM-0030b-ui：一个不会渲染的副本除了制造措辞漂移没有别的作用。
   const spec = blueprint?.tabs.find((tab) => tab.id === tabId);
   if (spec) return <BlueprintTabView tab={spec} />;
   return (

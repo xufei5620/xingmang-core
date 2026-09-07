@@ -186,7 +186,13 @@ export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "跨平台财务",
     path: "/finance",
     stage: "M3+",
-    built: false,
+    // XM-FINANCE-GLOBAL0（2026-09-07）：六格里「财务总览」接了两平台的
+    // payments.daily 与 finance 的渠道/上游摘要，「财务配置」是已冻结决定的
+    // 如实说明，「开票集成」早已是嵌入开票管理端的 iframe。
+    // **支付通道 / 财务对账 / 异常与冻结三格仍是诚实占位**——后端根本不存在
+    // （connectors/payment/ 是空目录、finance schema 里没有对账表），页面按
+    // 蓝图逐字列头呈现并写清在等 M3 支付接入。stage 保持 M3+ 正是这个意思。
+    built: true,
     subTabs: sub(
       ["overview", "财务总览"],
       ["channels", "支付通道"],
@@ -218,7 +224,10 @@ export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "版本与发布",
     path: "/changes",
     stage: "F-B",
-    built: false,
+    // XM-CHANGES0（2026-09-07）：「发布与回滚」的当前部署信息接了 ops 概览，
+    // 其余格子按各自的真实源接或诚实占位。stage 保持 F-B——审批中心虽已启用
+    // （XM-0030-ENABLE），但「变更单」这个对象本身仍未建，页面上说清了这一点。
+    built: true,
     subTabs: sub(
       ["requests", "变更单"],
       ["releases", "发布与回滚"],
@@ -232,7 +241,10 @@ export const GOVERNANCE_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "界面规范",
     path: "/design",
     stage: "UI",
-    built: false,
+    // XM-DESIGN0（2026-09-07）：**零后端依赖**——这一页展示的是设计系统本身，
+    // 令牌从 @xingmang/design-tokens 推导、控件是真组件实例，一条端点都不读。
+    // 「复杂组件」那一格仍是诚实占位：那四个组件仓库里一个都还没有。
+    built: true,
     subTabs: sub(
       ["color", "颜色与排版"],
       ["controls", "按钮与表单"],

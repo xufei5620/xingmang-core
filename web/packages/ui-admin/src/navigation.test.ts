@@ -262,24 +262,36 @@ describe("查表与状态标签", () => {
   });
 
   it("已实装的页不挂阶段标签，未实装的挂「未建·<阶段>」", () => {
-    const dashboard = navItemByPath("/dashboard")?.item;
+    // 先取到条目再断言，**不写 `item && navStageHint(item)`**：那种写法在条目
+    // 不存在时整个表达式就是 undefined，三条 toBeUndefined() 会一起恒真——
+    // 路径写错、导航项被删掉都照样绿。这是本仓库栽过的「缺席型断言」坑。
+    const stageHintOf = (path: string) => {
+      const item = navItemByPath(path)?.item;
+      expect(item, `导航里没有 ${path}`).toBeDefined();
+      return navStageHint(item!);
+    };
     // 操作与审批在 XM-ACTIONS0 接了操作目录/执行记录的真实数据，已实装，
-    // 不再挂阶段标签——「版本与发布」是现在仍未实装的 F-B 条目
-    const actions = navItemByPath("/actions")?.item;
-    const changes = navItemByPath("/changes")?.item;
-    expect(dashboard && navStageHint(dashboard)).toBeUndefined();
-    expect(actions && navStageHint(actions)).toBeUndefined();
-    expect(changes && navStageHint(changes)).toBe("未建·F-B");
+    // 不再挂阶段标签。
+    expect(stageHintOf("/dashboard")).toBeUndefined();
+    expect(stageHintOf("/actions")).toBeUndefined();
+    // 2026-09-07 三页建成（XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0）之后，
+    // 「版本与发布」也不再挂标签了；仍挂标签的换成扩展能力段的「内容发布」——
+    // 那一页按 ADMIN-IA §5.4 与实施计划 §2.5 是**刻意只做只读蓝图**，不是缺口。
+    expect(stageHintOf("/changes")).toBeUndefined();
+    expect(stageHintOf("/design")).toBeUndefined();
+    expect(stageHintOf("/finance")).toBeUndefined();
+    expect(stageHintOf("/ext/publishing")).toBe("未建·后置");
   });
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 0（操作与审批、后台任务已实装）+ 治理段 3（资源目录、人员与
-    // 权限、运行保障、设置已实装）+ 扩展能力 4
+    // 全局段 0 + 治理段 0 + 扩展能力 4。
+    //
+    // 2026-09-07 治理段清零：跨平台财务 / 版本与发布 / 界面规范三页建成。
+    // **剩下的四条不是缺口**——扩展能力段按 ADMIN-IA §5.4 与实施计划 §2.5
+    // 是刻意的只读蓝图（不预留后端、不做写入、不做执行），built:false 在这里
+    // 表达的是「后端未接且不打算接」，与治理段那三页当初的含义不是一回事。
     expect(paths).toEqual([
-      "/finance",
-      "/changes",
-      "/design",
       "/ext/app",
       "/ext/integration",
       "/ext/publishing",
@@ -301,7 +313,12 @@ describe("查表与状态标签", () => {
       "/sms",
       "/registry",
       "/identity",
+      // 2026-09-07 建成的三页。顺序即 navigation.ts 的声明顺序：
+      // finance 在 identity 之后、ops 之前；changes 与 design 在 ops 之后。
+      "/finance",
       "/ops",
+      "/changes",
+      "/design",
       "/settings",
     ]);
   });

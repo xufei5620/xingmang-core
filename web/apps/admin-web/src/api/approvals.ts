@@ -17,16 +17,23 @@ export const APPROVAL_READ_PERMISSION = "approval.read";
 export const APPROVAL_DECIDE_PERMISSION = "approval.decide";
 export const APPROVAL_L4_PERMISSION = "approval.l4";
 
-/** 审批中心整组端点在生产尚未接入时的说明。
+/** 审批中心整组端点在本环境没挂上时的说明。
  *
  *  与卡片/请求日志的「按环境变量可选挂载」不是同一回事，但表现一样：
  *  `router.go` 里 `if d.Approvals != nil` 为假时这组路由压根不存在，chi 回
- *  裸 404。这句话要说清楚**它不是坏了**，也不是「审批很慢」。 */
+ *  裸 404。这句话要说清楚**它不是坏了**，也不是「审批很慢」。
+ *
+ *  XM-0030-ENABLE 之后这句话必须改口径：`main.go` 现在**无条件**构造
+ *  approval.Service 并注入，所以再看到 404 已经不是「等启用」了，而是这套
+ *  前端在对一个**启用之前的旧后端**说话（典型场景：前端先发、platform-api
+ *  还没滚上去）。写清这一点，人才知道该去看后端版本，而不是去等一个不会
+ *  再来的排期。 */
 const APPROVALS_NOT_MOUNTED_DESCRIPTION =
-  "审批中心尚未在本环境启用。后端的审批单、票数策略与四个端点都已实装（XM-0030a/b），" +
-  "但 platform-api 还没有注入审批服务——启用要等 XM-0030c 的「PENDING 超 4 小时」告警规则先就位，" +
-  "否则会出现一个没人盯着的队列。在此之前内核对 L2 及以上一律拒绝执行" +
-  "（ADVANCED_CONTROLS_REQUIRED），不会有任何动作停在这里等审批。";
+  "这套后台连上的 platform-api 还没有审批中心（整组 /api/v1/approvals 端点返回 404）。" +
+  "审批中心自 XM-0030-ENABLE 起已在后端无条件启用，所以这通常意味着后端仍是启用之前的版本——" +
+  "请确认 platform-api 已滚到含该变更的版本，而不是等待排期。" +
+  "在此之前内核对 L2 及以上一律拒绝执行（ADVANCED_CONTROLS_REQUIRED），" +
+  "不会有任何动作停在这里等审批。";
 
 function translateUnmounted(error: unknown): never {
   if (looksLikeUnmountedRoute(error)) {

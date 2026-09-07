@@ -231,13 +231,20 @@ describe("审批队列", () => {
     expect(dialog.getByText("上游换域名，需要重新登记")).not.toBeNull();
   });
 
-  // 端点整组没挂载时说「尚未启用」，不是一个泛型报错。这条同时钉住
+  // 端点整组没挂载时说清是**后端版本旧了**，不是一个泛型报错。这条同时钉住
   // api/approvals.ts 把裸 404 翻成 FeatureNotMountedError 这件事。
-  it("审批中心未启用时说明原因，而不是显示报错", async () => {
+  // 口径随 XM-0030-ENABLE 改过：审批服务现在是无条件注入的，所以 404 已经
+  // 不再是「等启用」，而是这套前端在对一个启用之前的旧 platform-api 说话。
+  it("审批中心端点整组 404 时说明原因，而不是显示报错", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(bareNotFound())));
     renderQueue();
-    expect(await screen.findByText(/尚未在本环境启用/)).not.toBeNull();
-    // 未启用不给重试按钮：再点一次也不会变成已启用。
+    expect(await screen.findByText(/还没有审批中心/)).not.toBeNull();
+    // 逐字钉住指向后端版本的那句：只断言「有说明」不够，说错方向的说明
+    // 会把人支去等一个不会再来的排期。
+    expect(
+      screen.getByText(/请确认 platform-api 已滚到含该变更的版本，而不是等待排期/),
+    ).not.toBeNull();
+    // 版本不对不给重试按钮：再点一次也不会让旧后端长出这组路由。
     expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
   });
 

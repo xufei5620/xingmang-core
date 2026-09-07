@@ -1066,8 +1066,13 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
   it("筛选进 ?work=，选到没有数据源的分类时说清楚被什么挡着", async () => {
     renderRoute("/dashboard?work=approvals");
     const empty = await screen.findByText("「待审批」还没有数据源");
-    // Foundation-B 在「今日到期」那一格里也出现过，所以要限定在这一块里找
-    expect(within(empty.closest("div") as HTMLElement).getByText(/Foundation-B/)).not.toBeNull();
+    const box = empty.closest("div") as HTMLElement;
+    // XM-0030-ENABLE：这一格原来断言的是文案里有「Foundation-B」。那句话现在
+    // 是错的——审批中心已交付并启用，缺的只是把审批单派生成工作项的取数。
+    // 说明必须同时讲清「后端在」和「这一格没接」，只讲后半句会让人以为
+    // 审批中心整体不可用，跑去等一个已经上线的东西。
+    expect(within(box).getByText(/后端已启用/)).not.toBeNull();
+    expect(within(box).getByText(/XM-WORKBENCH-APPROVALS/)).not.toBeNull();
     // 一个筛过的工作台是可以贴给同事的地址（交接文档 §8）
     expect(screen.getByRole("button", { name: "待审批" }).getAttribute("aria-pressed")).toBe("true");
   });
@@ -1732,15 +1737,21 @@ describe("四分组侧栏：分组与条目逐字对齐 ADMIN-IA v3 §一", () =
     // 而后者才是这几页现在的状态（§12 惯例要的是别把没接的说成接了）
     renderRoute("/dashboard");
     const nav = await screen.findByRole("navigation", { name: "主导航" });
+    const publishing = within(nav).getByRole("link", { name: /内容发布/ });
+    expect(publishing.getAttribute("href")).toBe("/ext/publishing");
+    // 2026-09-07 起 F-B 一条不剩：跨平台财务 / 版本与发布 / 界面规范三页建成
+    // （XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0），操作与审批更早在
+    // XM-ACTIONS0 毕业。现在挂标签的只剩扩展能力段那四条「后置」——按
+    // ADMIN-IA §5.4 它们是刻意的只读蓝图，不是待补的缺口
+    expect(within(nav).queryAllByText("未建·F-B").length).toBe(0);
+    expect(within(nav).getAllByText("未建·后置").length).toBe(4);
     const changes = within(nav).getByRole("link", { name: /版本与发布/ });
     expect(changes.getAttribute("href")).toBe("/changes");
-    // F-B 现在只剩「版本与发布」一条：操作与审批在 XM-ACTIONS0 接了操作目录/
-    // 执行记录的真实数据，已从「未实装」名单里毕业，不再挂这个标签
-    expect(within(nav).getAllByText("未建·F-B").length).toBe(1);
     const actions = within(nav).getByRole("link", { name: /操作与审批/ });
     expect(actions.getAttribute("href")).toBe("/actions");
     // 已实装的页不挂标签：一个写着「未建」的标签贴在正常工作的页面旁边什么也没说
     expect(actions.textContent).not.toMatch(/未建/);
+    expect(changes.textContent).not.toMatch(/未建/);
     expect(within(nav).getByRole("link", { name: "运营工作台" })).not.toBeNull();
   });
 
@@ -2489,10 +2500,13 @@ describe("未实装页的诚实占位与门禁", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("占位页有页头与「未建」徽章", async () => {
-    // XM-JOBS0 把 /jobs 接上真实数据后，用仍是占位页的「跨平台财务」当样本。
-    renderRoute("/finance");
-    expect(await screen.findByRole("heading", { name: "跨平台财务", level: 2 })).not.toBeNull();
-    expect(within(screen.getByRole("main")).getByText("未建·M3+")).not.toBeNull();
+    // 样本第三次搬家：/jobs（XM-JOBS0）→ /finance（XM-FINANCE-GLOBAL0）→
+    // /ext/app。**治理段已经一页不剩是占位页了**，只有扩展能力四页仍走
+    // PlaceholderPage——而按 ADMIN-IA §5.4 它们是刻意的只读蓝图，会长期留在
+    // 这条路径上，所以这个样本不会再被建成真实页而搬走。
+    renderRoute("/ext/app");
+    expect(await screen.findByRole("heading", { name: "应用与配置", level: 2 })).not.toBeNull();
+    expect(within(screen.getByRole("main")).getByText("未建·后置")).not.toBeNull();
   });
 
   // 「操作与审批页显示 F-B 门禁」原来在这里断言，作为占位页的一个特例。
@@ -2506,17 +2520,22 @@ describe("未实装页的诚实占位与门禁", () => {
   });
 
   it("子页签进 ?sub=，可分享可恢复", async () => {
-    // 用 /finance 而不是 /ops：XM-OPS0 之后 /ops 的「控制平面健康」子页已经
-    // 接了真实数据、不再走这条通用占位路径，这里改测另一个仍是占位页的路径,
-    // 覆盖的仍是 PlaceholderPage 本身「?sub= 可分享可恢复」的通用行为
-    renderRoute("/finance?sub=invoicing");
-    expect(await screen.findByRole("tab", { name: "开票集成", selected: true })).not.toBeNull();
+    // 同上搬到 /ext/app：这一条测的是 PlaceholderPage 自己的
+    // 「?sub= 可分享可恢复」，路径必须真的还走 PlaceholderPage 才算数——
+    // 用一个已建成的页会让它测成那一页的实现，绿得毫无意义。
+    renderRoute("/ext/app?sub=pages");
+    expect(await screen.findByRole("tab", { name: "页面配置", selected: true })).not.toBeNull();
   });
 
   it("占位页拼错的 ?sub= 给 Not Found，不回落第一格", async () => {
-    renderRoute("/finance?sub=拼错了");
+    renderRoute("/ext/app?sub=拼错了");
     expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
   });
+
+  // 建成页的同一行为长什么样：它们不给 Not Found，而是留在本页显示
+  // 「「<x>」子页尚未接入」+ 回第一格的链接（PageState kind="unavailable"）。
+  // 两种做法都满足「不静默回落」这条红线，各自的断言在各自的页面测试里
+  // （FinancePage/ChangesPage/DesignPage/AuditPage/ActionsPage .test.tsx）。
 });
 
 
@@ -2537,12 +2556,17 @@ describe("操作与审批（XM-ACTIONS0：操作目录 + 执行记录接真实�
     expect(screen.getByText(/需要 Action Advanced Controls/)).not.toBeNull();
   });
 
-  it("页面级 F-B 门禁始终可见，不提供任何执行入口（ADMIN-IA §七）", async () => {
+  it("页面级门禁始终可见：目录页不是执行入口（ADMIN-IA §七）", async () => {
     renderRoute("/actions");
-    // 措辞随实装进度改过（XM-0030b-ui）：后端已实装、只是尚未在环境里启用。
-    // 「尚未启用」与「尚未上线」的下一步不同，页面上要说准。
-    expect(await screen.findByText(/后端已实装，但尚未在本环境启用/)).not.toBeNull();
-    expect(screen.getByText(/不提供任何执行入口/)).not.toBeNull();
+    // 措辞改过两次。XM-0030-ENABLE 这次是因为旧措辞**两处都错了**：审批服务
+    // 已无条件注入（「尚未在本环境启用」不再是编译期事实），而「本页不提供
+    // 任何执行入口」也不成立——「待审批」里已批准的单上就有执行按钮。
+    // 现在只断言唯一始终为真的那件事：目录页点不动 L2+，执行只长在单上。
+    expect(await screen.findByText(/操作目录只用来看，不是执行入口/)).not.toBeNull();
+    expect(screen.getByText(/执行按钮只出现在「待审批」里那张已批准的单上/)).not.toBeNull();
+    // 反向钉死那两句收回去的话，别在后面某次改版里被顺手写回来。
+    expect(screen.queryByText(/尚未在本环境启用/)).toBeNull();
+    expect(screen.queryByText(/本页不提供任何执行入口/)).toBeNull();
   });
 
   it("待审批子页签接审批队列；未启用时说明原因而不是伪造空队列", async () => {

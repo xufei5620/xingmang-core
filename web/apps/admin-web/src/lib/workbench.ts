@@ -36,7 +36,14 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
   {
     id: "approvals",
     label: "待审批",
-    blockedBy: "审批链随 Foundation-B（XM-0030）上线",
+    // XM-0030 已交付并在 platform-api / platform-worker 两端注入，
+    // `GET /api/v1/approvals` 是通的——所以这里**不能再写「随 XM-0030 上线」**。
+    // 但这一格今天仍然没有源：把审批单派生成工作项要另接一条 query，
+    // 那是 XM-WORKBENCH-APPROVALS 的事。写清「后端在、前端没接」，
+    // 而不是含糊成「还没上线」——后者会让人以为审批中心整体不可用。
+    blockedBy:
+      "审批中心（XM-0030）后端已启用，待审批队列在「操作与审批」页可查；" +
+      "这一格把审批单派生成待处理事项的取数还没接（XM-WORKBENCH-APPROVALS）。",
   },
   {
     id: "jobs",
@@ -55,12 +62,24 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
   {
     id: "expiring",
     label: "即将到期",
-    blockedBy: "凭据轮换到期随「人员与权限」页上线",
+    // 「人员与权限」页（/identity）早就建成了，所以这句话也不能再那么写。
+    // 真正的缺口在更下面一层：**凭据模型里根本没有到期这个概念**——
+    // secrets.CredentialRef 只有 scope/name 两个字段，全仓找不到任何
+    // ExpiresAt / RotatedAt。没有到期时间，就没有「即将到期」可算。
+    blockedBy:
+      "凭据模型里还没有到期时间：CredentialRef 只登记 secret://<scope>/<name>，" +
+      "不记录签发与轮换到期。要先给凭据加到期元数据，这一格才有得算。",
   },
   {
     id: "changes",
     label: "待评审变更",
-    blockedBy: "变更单随 Foundation-B 上线",
+    // 同上：Foundation-B 已交付，这一格等的不是它。变更单本体今天**不在平台里**
+    // （没有 change_request 表、没有只读端点、没有 change.* Action），真实的
+    // 变更单是仓库 docs/change-requests/ 下的 CR-xxxx。要不要搬进平台登记
+    // 待产品负责人裁定——逐字同 ChangesPage 的 TAB_SOURCE.requests。
+    blockedBy:
+      "变更单本体今天不在平台里：真实的变更单是仓库 docs/change-requests/ 下的 " +
+      "CR-xxxx（Markdown），后台没有读它的路径。要不要搬进平台登记待产品负责人裁定。",
   },
 ];
 

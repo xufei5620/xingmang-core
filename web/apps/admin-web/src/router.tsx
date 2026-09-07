@@ -51,6 +51,9 @@ import { IdentityPage } from "./pages/IdentityPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { ChangesPage } from "./pages/ChangesPage";
+import { DesignPage } from "./pages/DesignPage";
+import { FinancePage } from "./pages/FinancePage";
 import { OpsPage } from "./pages/OpsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
@@ -390,6 +393,14 @@ export const routes = [
               // 回归用例见下方改动。
               { path: "jobs", Component: JobsPage },
               { path: "ops", Component: OpsPage },
+              // XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0（2026-09-07）：
+              // 这三页的 built 刚翻成 true，于是它们掉出了 placeholderRoutes
+              // （那份只收 !item.built）。不在这里补显式路由的话，侧栏上有条目、
+              // 点进去落到最后的 `*` 兜底 404——与 XM-OPS-TAILS0 记录过的
+              // /jobs 那次缺口一模一样。
+              { path: "finance", Component: FinancePage },
+              { path: "changes", Component: ChangesPage },
+              { path: "design", Component: DesignPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,
