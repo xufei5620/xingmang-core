@@ -732,6 +732,144 @@ export function setProxyAsset(
   );
 }
 
+// --- 订阅批次与代理资产的四个生命周期 Action（退款 / 终止）---
+//
+// 字段名与必填性逐字抄自 `internal/platform/finance/subscription_actions.go`
+// 的四个 `Definition`（`subscriptionBatchRefundDef` / `…TerminateDef` /
+// `proxyAssetRefundDef` / `proxyAssetTerminateDef`）。Schema 是**白名单**语义
+// （`action/schema.go`：「未声明的字段一律拒绝」），所以这里逐个复制字段，
+// 不透传调用方对象。
+//
+// **`reason` 是这四个 Action 自己 Schema 里的字段，走 `params`。**
+// 它与 XM-ACTION-REASON 给请求体加的那个顶层 `reason` 不是同一个东西：
+// 后者是内核对 **L2 及以上**的审批理由（`action/kernel.go`），这四个是 L1，
+// 内核不要求、也不会因此落审批单。填错地方的后果是 Schema 校验直接 400
+// （params 缺 reason），而不是「多传了一个无害字段」。
+//
+// 因此这四个都用 `executeAction`（只接受同步执行完这一种结局）而不是
+// `submitAction`：L1 不会走 202，真拿到 202 说明等级被人改过，那时抛
+// `ApprovalRequiredError` 比悄悄显示成功正确——界面这一层没有承接审批单的地方。
+
+/** `finance.subscription_batch.refund@1` 的参数。 */
+export interface SubscriptionBatchRefundParams {
+  subscription_batch_id: string;
+  /** **累计**退款额（不是本次新增），scale-6 纯整数字符串。
+   *  仓储只增不减（`SetBatchRefund` 的 `ErrRefundNotDecreasing`）。 */
+  refunded_minor: string;
+  /** 退款生效日 `YYYY-MM-DD`，决定从哪天起冲减剩余未摊天。 */
+  refunded_on: string;
+  reason: string;
+}
+
+/** `finance.subscription_batch.terminate@1` 的参数。 */
+export interface SubscriptionBatchTerminateParams {
+  subscription_batch_id: string;
+  /** 终止日 `YYYY-MM-DD`，必须落在有效期内，且决定结转多少损失。 */
+  terminated_on: string;
+  reason: string;
+}
+
+/** `finance.proxy_asset.refund@1` 的参数。 */
+export interface ProxyAssetRefundParams {
+  proxy_asset_id: string;
+  refunded_minor: string;
+  refunded_on: string;
+  reason: string;
+}
+
+/** `finance.proxy_asset.terminate@1` 的参数。 */
+export interface ProxyAssetTerminateParams {
+  proxy_asset_id: string;
+  terminated_on: string;
+  reason: string;
+}
+
+/** 记一笔订阅批次的累计退款额（`finance.subscription_batch.refund@1`）。 */
+export function refundSubscriptionBatch(
+  params: SubscriptionBatchRefundParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.subscription_batch.refund",
+      version: "1",
+      params: {
+        subscription_batch_id: params.subscription_batch_id,
+        refunded_minor: params.refunded_minor,
+        refunded_on: params.refunded_on,
+        reason: params.reason,
+      },
+    },
+    options,
+    client,
+  );
+}
+
+/** 提前失效一笔订阅批次并结转损失（`finance.subscription_batch.terminate@1`）。 */
+export function terminateSubscriptionBatch(
+  params: SubscriptionBatchTerminateParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.subscription_batch.terminate",
+      version: "1",
+      params: {
+        subscription_batch_id: params.subscription_batch_id,
+        terminated_on: params.terminated_on,
+        reason: params.reason,
+      },
+    },
+    options,
+    client,
+  );
+}
+
+/** 记一笔代理资产的累计退款额（`finance.proxy_asset.refund@1`）。 */
+export function refundProxyAsset(
+  params: ProxyAssetRefundParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.proxy_asset.refund",
+      version: "1",
+      params: {
+        proxy_asset_id: params.proxy_asset_id,
+        refunded_minor: params.refunded_minor,
+        refunded_on: params.refunded_on,
+        reason: params.reason,
+      },
+    },
+    options,
+    client,
+  );
+}
+
+/** 提前失效一份代理资产并结转损失（`finance.proxy_asset.terminate@1`）。 */
+export function terminateProxyAsset(
+  params: ProxyAssetTerminateParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.proxy_asset.terminate",
+      version: "1",
+      params: {
+        proxy_asset_id: params.proxy_asset_id,
+        terminated_on: params.terminated_on,
+        reason: params.reason,
+      },
+    },
+    options,
+    client,
+  );
+}
+
 /** 登记 / 修改上游账号(`finance.upstream_account.set@1`)。
  *
  *  写路径唯一入口是 Action（宪法 2 条）。`upstream_account_id` 留空 = 新建。 */

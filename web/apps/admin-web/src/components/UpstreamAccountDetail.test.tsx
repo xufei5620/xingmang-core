@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -236,5 +236,164 @@ describe("订阅维护权限与列表诚实性", () => {
     ]) {
       expect(invalidate).toHaveBeenCalledWith({ queryKey });
     }
+  });
+});
+
+// --- 生命周期入口是否**接到了表上**（XM-SUBSCRIPTION-LIFECYCLE-UI）---
+//
+// 对话框自己那套用例（SubscriptionLifecycleDialog.test.tsx）证明的是「这个组件
+// 会做对的事」，证明不了「运营点得到它」。这一组补的正是后半句：入口真的长在
+// 批次行与代理行上，权限锁定跟着走，成功之后四类查询照样失效。
+
+const LINKED_PROXY_ID = "22222222-2222-4222-8222-222222222222";
+
+function lifecycleMoney(amount_minor: string) {
+  return { amount_minor, currency: "USD", scale: 6 };
+}
+
+function stubPopulatedPages() {
+  const fetchMock = vi.fn((url: string) => {
+    if (url.includes("/actions/")) {
+      return Promise.resolve(fakeResponse({ action_run_id: "run-terminate-1" }));
+    }
+    if (url.includes("/finance/proxy-assets")) {
+      return Promise.resolve(
+        fakeResponse({
+          items: [
+            {
+              id: LINKED_PROXY_ID,
+              paid: lifecycleMoney("6200000"),
+              surcharge: lifecycleMoney("0"),
+              refunded: lifecycleMoney("0"),
+              cost_basis: lifecycleMoney("6200000"),
+              account_share: lifecycleMoney("3100000"),
+              daily_amortization: lifecycleMoney("100000"),
+              currency: "USD",
+              opened_on: "2026-08-01",
+              expires_on: "2026-08-31",
+              effective_days: 31,
+              refunded_on: null,
+              terminated_on: null,
+              shared_account_count: 2,
+              buy_platform: "Example",
+              buy_address: "https://example.test",
+              credential_ref: "",
+              mounted: true,
+              environment: "development",
+            },
+          ],
+          truncated: false,
+          limit: 200,
+          as_of: "2026-08-28",
+        }),
+      );
+    }
+    return Promise.resolve(
+      fakeResponse({
+        items: [
+          {
+            id: "33333333-3333-4333-8333-333333333333",
+            upstream_account_id: subscriptionAccount().id,
+            paid: lifecycleMoney("29990000"),
+            surcharge: lifecycleMoney("0"),
+            refunded: lifecycleMoney("0"),
+            cost_basis: lifecycleMoney("29990000"),
+            account_share: lifecycleMoney("14995000"),
+            daily_amortization: lifecycleMoney("967419"),
+            currency: "USD",
+            starts_on: "2026-08-01",
+            expires_on: "2026-08-31",
+            effective_days: 31,
+            refunded_on: null,
+            terminated_on: null,
+            account_count: 2,
+            proxy_asset_id: LINKED_PROXY_ID,
+          },
+        ],
+        truncated: false,
+        limit: 200,
+        as_of: "2026-08-28",
+      }),
+    );
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function batchTable() {
+  return within(screen.getByRole("table", { name: "订阅批次：付款、摊销与有效期" }));
+}
+
+function proxyTable() {
+  return within(screen.getByRole("table", { name: "代理资产：购买渠道、摊销与挂载状态" }));
+}
+
+describe("退款 / 终止入口接在批次行与代理行上", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("批次行与代理行各有退款与终止两个有名字的入口", async () => {
+    stubPopulatedPages();
+    renderDetail([FINANCE_READ_PERMISSION, SUBSCRIPTION_MANAGE_PERMISSION]);
+
+    // 先等表真的渲染出来，再逐个找入口
+    await screen.findByRole("table", { name: "订阅批次：付款、摊销与有效期" });
+    expect(batchTable().getByRole("button", { name: "记退款" })).toBeTruthy();
+    expect(batchTable().getByRole("button", { name: "终止" })).toBeTruthy();
+
+    await screen.findByRole("table", { name: "代理资产：购买渠道、摊销与挂载状态" });
+    expect(proxyTable().getByRole("button", { name: "记退款" })).toBeTruthy();
+    expect(proxyTable().getByRole("button", { name: "终止" })).toBeTruthy();
+    // 原有的「修改代理」没有被挤掉：取消挂载是可逆的那条路，仍然要在
+    expect(proxyTable().getByRole("button", { name: "修改代理" })).toBeTruthy();
+  });
+
+  it("只有 read 时四个生命周期入口一并锁定，并指出缺哪个 scope", async () => {
+    stubPopulatedPages();
+    renderDetail([FINANCE_READ_PERMISSION]);
+
+    await screen.findByRole("table", { name: "订阅批次：付款、摊销与有效期" });
+    for (const table of [batchTable, proxyTable]) {
+      for (const name of ["记退款", "终止"]) {
+        const trigger = table().getByRole("button", { name }) as HTMLButtonElement;
+        expect(trigger.disabled).toBe(true);
+        expect(trigger.getAttribute("title")).toBe(`需要 ${SUBSCRIPTION_MANAGE_PERMISSION}`);
+      }
+    }
+  });
+
+  it("从批次行终止成功后，四类查询照样失效，回执说的是「已终止」而不是「已登记」", async () => {
+    const fetchMock = stubPopulatedPages();
+    const { onDone, invalidate } = renderDetail([
+      FINANCE_READ_PERMISSION,
+      SUBSCRIPTION_MANAGE_PERMISSION,
+    ]);
+
+    await screen.findByRole("table", { name: "订阅批次：付款、摊销与有效期" });
+    fireEvent.click(batchTable().getByRole("button", { name: "终止" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText(/终止日/), { target: { value: "2026-08-15" } });
+    fireEvent.change(dialog.getByLabelText(/理由/), { target: { value: "上游停服" } });
+    fireEvent.click(dialog.getByRole("checkbox"));
+    fireEvent.click(dialog.getByRole("button", { name: "确认终止" }));
+
+    await vi.waitFor(() =>
+      expect(onDone).toHaveBeenCalledWith({
+        title: "订阅批次已终止，损失已结转",
+        runId: "run-terminate-1",
+      }),
+    );
+    for (const queryKey of [
+      [SUBSCRIPTION_BATCHES_QUERY, subscriptionAccount().id],
+      [PROXY_ASSETS_QUERY],
+      [UPSTREAM_ACCOUNTS_QUERY],
+      [UPSTREAM_SUMMARY_QUERY],
+    ]) {
+      expect(invalidate).toHaveBeenCalledWith({ queryKey });
+    }
+    const executed = fetchMock.mock.calls.filter(([url]) => String(url).includes("/actions/"));
+    expect(executed.length).toBe(1);
+    expect(String(executed[0]![0])).toContain(
+      "/api/v1/actions/finance.subscription_batch.terminate/versions/1/execute",
+    );
   });
 });
