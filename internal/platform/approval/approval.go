@@ -64,7 +64,7 @@ var (
 	ErrNotPending = errors.New("approval request is no longer pending")
 	// ErrExpired：单已过期。过期的单一票也不能投，更不能执行。
 	ErrExpired = errors.New("approval request has expired")
-	// ErrApproverNotHuman 是**宪法 24 条的代码侧红线**：AI 不作为审批人。
+	// ErrApproverNotHuman 是**宪法 10 条的代码侧红线**：AI 不作为审批人。
 	// 库层另有 CHECK (approver_type = 'HUMAN')；两道都在，因为库层只在写到
 	// decision 表时生效，而这里要在更早的地方给出可读的错误。
 	ErrApproverNotHuman = errors.New("approval decisions must come from a HUMAN principal")

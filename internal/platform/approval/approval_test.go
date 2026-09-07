@@ -36,7 +36,7 @@ func mustHash(params map[string]any) string {
 	return h
 }
 
-// TestAIPrincipalCanNeverVote 是**宪法 24 条的代码侧证据**：AI 不作为审批人。
+// TestAIPrincipalCanNeverVote 是**宪法 10 条的代码侧证据**：AI 不作为审批人。
 //
 // 这条断言的形状是「本该被拒绝的操作确实被拒绝」，容易写成恒真——比如身份
 // 恰好也缺 approval.decide，那么就算红线没实现它也会「通过」。所以这里给 AI

@@ -22,6 +22,7 @@ import {
   type ActionRunStatusFilter,
 } from "../api/actions";
 import { ApiStateView } from "../components/ApiStateView";
+import { ApprovalQueue } from "../components/ApprovalQueue";
 
 const ACTIONS_SUB_TABS = (navItemByPath("/actions")?.item.subTabs ?? []).map(
   (tab) => [tab.id, tab.label] as const,
@@ -116,14 +117,22 @@ function renderActionsSubTab(value: string): ReactNode {
 
 /** 页面级门禁说明（ADMIN-IA §七 / 交接文档 §2.5 同一条纪律的操作与审批版本）。
  *
- *  这两句话要在页面上**看得见**，不能只写在文档里：审批链（Foundation-B）
- *  尚未上线，本页不提供任何执行入口。此处永远不会出现「假装执行成功」的
- *  按钮——写操作只走 Action，且 L2 及以上需要人工审批。 */
+ *  这句话要在页面上**看得见**，不能只写在文档里。它的内容随审批链的实装
+ *  进度改过一次（XM-0030b-ui）：审批中心的后端已经实装，但还没有在环境里
+ *  启用，所以本页仍不提供执行入口——**准确的说法是「尚未启用」而不是
+ *  「尚未上线」**，两者的下一步不同（前者等 XM-0030c 的告警规则，后者等
+ *  实装）。此处永远不会出现「假装执行成功」的按钮：写操作只走 Action，
+ *  L2 及以上要人工审批，而执行入口只出现在审批通过之后的那张单上。
+ *
+ *  「待审批」子页签会自行显示更具体的未启用说明（api/approvals.ts 的
+ *  APPROVALS_NOT_MOUNTED_DESCRIPTION），这里只说整页的事实——默认落在
+ *  「操作目录」的人也要看得到。 */
 function AdvancedControlsGate() {
   return (
     <p role="status" className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg">
-      门禁：审批链（Foundation-B）尚未上线，本页不提供任何执行入口。此处永远不会出现
-      「假装执行成功」的按钮——写操作只走 Action，且 L2 及以上需要人工审批。
+      门禁：审批中心（Foundation-B / XM-0030）后端已实装，但尚未在本环境启用，
+      因此本页不提供任何执行入口。此处永远不会出现「假装执行成功」的按钮——
+      写操作只走 Action，L2 及以上要人工审批，执行入口只出现在审批通过之后的那张单上。
     </p>
   );
 }
@@ -222,25 +231,7 @@ const CATALOG_COLUMNS: DataTableColumn<ActionDefinitionItem>[] = [
 // ---------------------------------------------------------------------------
 
 function ActionPendingApprovalTab() {
-  return (
-    <section className="flex flex-col gap-3">
-      <PageHeader
-        title="待审批"
-        description="L2 及以上风险等级的 Action 需要人工审批（宪法 9 条：L3/L4 必须审批）；AI 不作为 L3/L4 的第二审批人（宪法 10 条、ADR-009）。"
-      />
-      <PageState
-        kind="unavailable"
-        title="审批队列尚未接入"
-        description={
-          "approval 模块目前只有目录占位（internal/platform/approval/ 仅 .gitkeep），Foundation-B 的人工审批流未实装；" +
-          "内核对 L2 及以上风险等级一律拒绝执行（ADVANCED_CONTROLS_REQUIRED），不会有任何动作停在这里等审批——" +
-          "因为它们根本不会被内核接受，不是「审批慢」而是「审批还不存在」。审批模型的提案（申请/审批人/期限/与执行的" +
-          "衔接）见交接文档 docs/handoffs/slices/XM-ACTIONS0.md，待产品/架构拍板后再实装。"
-        }
-        footnote="Foundation-B · XM-0030"
-      />
-    </section>
-  );
+  return <ApprovalQueue />;
 }
 
 // ---------------------------------------------------------------------------

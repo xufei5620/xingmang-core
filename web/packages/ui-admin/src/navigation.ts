@@ -89,9 +89,10 @@ export const GLOBAL_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "操作与审批",
     path: "/actions",
     stage: "F-B",
-    // 操作目录/执行记录接真实数据（XM-ACTIONS0）；待审批子页签仍显示 F-B
-    // 门禁——approval/ 目前只有 .gitkeep，内核对 L2 及以上一律拒绝执行
-    // （ADMIN-IA §七：F-B 未完成前必须显示门禁，不可伪造执行）。
+    // 操作目录/执行记录接真实数据（XM-ACTIONS0）；待审批子页签接审批队列
+    // （XM-0030b-ui）——审批中心后端已实装，但尚未在环境里启用，队列会自己
+    // 显示「未启用」而不是伪造一个空队列。页面级门禁仍在
+    // （ADMIN-IA §七：未启用前必须显示门禁，不可伪造执行）。
     built: true,
     subTabs: sub(
       ["catalog", "操作目录"],

@@ -155,21 +155,16 @@ function subTabContent(
 
 /** 页面级门禁说明。
  *
- *  两条红线要求在页面上**看得见**，不能只写在文档里：
- *  - ADMIN-IA §七：F-B 未完成前，操作与审批页必须显示门禁，不可伪造执行；
- *  - 实施计划 §2.5：扩展能力四页是只读蓝图，明确标注仅预览、不保存、不发布、不执行。 */
+ *  红线要求在页面上**看得见**，不能只写在文档里：实施计划 §2.5——扩展能力
+ *  四页是只读蓝图，明确标注仅预览、不保存、不发布、不执行。
+ *
+ *  这里**曾经还有一支 `/actions` 的门禁横幅**，是死代码：`/actions` 在
+ *  navigation.ts 里是 `built: true`，永远走 ActionsPage 而不是本页
+ *  （placeholderRoutes 只收 `!item.built` 的条目）。它与 ActionsPage 里那份
+ *  逐字重复，于是 XM-0030b-ui 更新措辞时只改到了活的那一份——一个不会渲染
+ *  的副本除了制造这种漂移没有别的作用，删掉。操作与审批页的门禁由
+ *  ActionsPage 的 AdvancedControlsGate 负责（ADMIN-IA §七）。 */
 function PlaceholderGate({ item }: { item: NavItemSpec }) {
-  if (item.path === "/actions") {
-    return (
-      <p
-        role="status"
-        className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg"
-      >
-        门禁：审批链（Foundation-B）尚未上线，本页不提供任何执行入口。此处永远不会出现
-        「假装执行成功」的按钮——写操作只走 Action，且 L2 及以上需要人工审批。
-      </p>
-    );
-  }
   if (item.path.startsWith("/ext/")) {
     return (
       <p

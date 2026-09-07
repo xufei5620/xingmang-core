@@ -62,7 +62,7 @@ CREATE TABLE core.approval_decision (
     id            uuid PRIMARY KEY,
     request_id    uuid NOT NULL REFERENCES core.approval_request (id) ON DELETE CASCADE,
     approver_id   text NOT NULL CHECK (btrim(approver_id) <> ''),
-    -- **宪法 24 条的库层红线**：AI 不作为 L3/L4 第二审批人。这里比条文更严，
+    -- **宪法 10 条的库层红线**：AI 不作为 L3/L4 第二审批人。这里比条文更严，
     -- 一律只收 HUMAN——把「AI 能不能投票」变成一个不需要读代码就能回答的问题。
     -- 内核侧另有一道同样的校验（双重），因为库层 CHECK 只在写到这张表时生效，
     -- 而内核要在更早的地方给出可读的错误。

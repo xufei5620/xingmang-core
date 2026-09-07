@@ -2539,15 +2539,20 @@ describe("操作与审批（XM-ACTIONS0：操作目录 + 执行记录接真实�
 
   it("页面级 F-B 门禁始终可见，不提供任何执行入口（ADMIN-IA §七）", async () => {
     renderRoute("/actions");
-    expect(await screen.findByText(/审批链（Foundation-B）尚未上线/)).not.toBeNull();
+    // 措辞随实装进度改过（XM-0030b-ui）：后端已实装、只是尚未在环境里启用。
+    // 「尚未启用」与「尚未上线」的下一步不同，页面上要说准。
+    expect(await screen.findByText(/后端已实装，但尚未在本环境启用/)).not.toBeNull();
     expect(screen.getByText(/不提供任何执行入口/)).not.toBeNull();
   });
 
-  it("待审批子页签说明审批模块尚未接入，不假装有队列", async () => {
+  it("待审批子页签接审批队列；未启用时说明原因而不是伪造空队列", async () => {
     renderRoute("/actions?sub=pending");
     expect(await screen.findByRole("tab", { name: "待审批", selected: true })).not.toBeNull();
-    expect(await screen.findByText(/审批队列尚未接入/)).not.toBeNull();
-    expect(screen.getByText(/approval 模块目前只有目录占位/)).not.toBeNull();
+    // 钉的是「这一格现在是真队列」，所以要找**只有真队列才有**的东西。
+    // 用标题不行：旧的静态占位也叫「待审批」，那条断言两边都绿等于没测。
+    // 状态筛选器是队列独有的。队列自身的各种状态由
+    // components/ApprovalQueue.test.tsx 覆盖。
+    expect(await screen.findByRole("combobox", { name: "按状态筛选审批单" })).not.toBeNull();
   });
 
   it("执行记录子页签接真实分页数据", async () => {

@@ -254,7 +254,7 @@ func (s *Service) voteError(err error) error {
 	case errors.Is(err, ErrNotFound):
 		return action.NewError(action.CodeApprovalNotFound, "审批单不存在", err)
 	case errors.Is(err, ErrApproverNotHuman):
-		// 宪法 24 条。给 403 而不是 400：这不是请求写错了，是这个身份没有
+		// 宪法 10 条。给 403 而不是 400：这不是请求写错了，是这个身份没有
 		// 投票资格，且永远不会有。
 		return action.NewError(action.CodePrincipalTypeNotAllowed,
 			"审批决定必须由自然人做出", err)

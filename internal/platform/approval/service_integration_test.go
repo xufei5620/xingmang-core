@@ -176,7 +176,7 @@ func TestServiceVoteMapsDomainErrorsToCodes(t *testing.T) {
 		ai.IdentityZone = "ai"
 		_, err := svc.Vote(context.Background(), id, ai, approval.VerdictApprove, "")
 		if action.ErrorCode(err) != action.CodePrincipalTypeNotAllowed {
-			t.Fatalf("宪法 24 条：AI 不作为审批人，got %v", err)
+			t.Fatalf("宪法 10 条：AI 不作为审批人，got %v", err)
 		}
 		// 对照：同一张单换成自然人就投得下去——确认拒的是身份类型，
 		// 而不是这张单不收票。

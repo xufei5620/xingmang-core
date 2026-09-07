@@ -329,7 +329,7 @@ export const EXT_AI_BLUEPRINT: BlueprintPage = {
     {
       id: "roles",
       label: "AI角色",
-      source: `${NO_BACKEND}AI 身份不得作为 L3/L4 的第二审批人（宪法 28 条），这条不是可配置项。`,
+      source: `${NO_BACKEND}AI 身份不得作为 L3/L4 的第二审批人（宪法 10 条），这条不是可配置项。`,
       tables: [
         {
           caption: "AI角色",
