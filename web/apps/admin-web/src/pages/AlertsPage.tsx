@@ -19,8 +19,11 @@ import {
   type AlertItem,
 } from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
+import { AlertNotifyDeliveries } from "../components/AlertNotifyDeliveries";
 import { ApiStateView } from "../components/ApiStateView";
+import { BulkAckReceipt, BulkAcknowledgeAlerts } from "../components/BulkAcknowledgeAlerts";
 import { CreateSilenceDialog } from "../components/CreateSilenceDialog";
+import type { BulkAckSummary } from "../lib/alertBulkAck";
 import {
   describeNotifyStatus,
   describeSeverity,
@@ -75,7 +78,10 @@ export function AlertsPage() {
       items={ALERT_SUB_TABS.map(([value, label]) => ({
         value,
         label,
-        content: value === "alerts" ? <AlertsListPage /> : value === "rules" ? <AlertRulesPage /> : (
+        content: value === "alerts" ? <AlertsListPage /> : value === "rules" ? <AlertRulesPage /> : value === "notifications" ? <AlertNotifyDeliveries /> : (
+          // 「故障事件」与「暂停告警」仍是占位，且必须保持占位：Incident 对象
+          // 今天不在平台里，静默记录也没有列表端点。通知能做出来只是因为它的
+          // 数据一直在 /alerts 的响应里（notify_status 三个字段）。
           <section>
             <PageHeader title={label} description="该子页尚未接入稳定的数据源。" />
             <PageState kind="unavailable" title={`「${label}」尚未接入`} description="当前不会把其它告警数据误归类到这里。" />
@@ -89,6 +95,9 @@ export function AlertsPage() {
 function AlertsListPage() {
   const [scope, setScope] = useState<Scope>("active");
   const [notice, setNotice] = useState<string | null>(null);
+  // 批量回执单独一份状态，不塞进 notice：它是结构化的（成功名单 + 失败名单 +
+  // 跳过名单），压成一行字就丢掉了「哪几条、为什么」——那正是它的全部内容。
+  const [bulkSummary, setBulkSummary] = useState<BulkAckSummary | null>(null);
 
   const query = useQuery({
     queryKey: [ALERTS_QUERY_KEY, scope],
@@ -103,8 +112,17 @@ function AlertsListPage() {
   };
   useAutoRefresh(refresh);
 
+  // 两种回执互斥地显示：单条确认之后还挂着一张上一次批量的名单，会让人
+  // 分不清刚才那一下到底做了什么。后写的那个说了算，另一个清掉。
   const afterWrite = (message: string) => {
+    setBulkSummary(null);
     setNotice(message);
+    refresh();
+  };
+
+  const afterBulk = (summary: BulkAckSummary) => {
+    setNotice(null);
+    setBulkSummary(summary);
     refresh();
   };
 
@@ -116,7 +134,12 @@ function AlertsListPage() {
           请用状态页签或时间范围收窄之后再看。
         </p>
       ) : null}
-      <AlertsTable items={query.data?.items ?? []} scope={scope} onAcknowledged={afterWrite} />
+      <AlertsTable
+        items={query.data?.items ?? []}
+        scope={scope}
+        onAcknowledged={afterWrite}
+        onBulkAcknowledged={afterBulk}
+      />
     </ApiStateView>
   );
 
@@ -148,6 +171,10 @@ function AlertsListPage() {
           {notice}
         </p>
       ) : null}
+
+      {/* 批量回执放在页级而不是选择条里：选择条会随「清除选择」一起消失，
+          而那一下会把刚拿到的 run_id 名单一并带走。 */}
+      {bulkSummary ? <BulkAckReceipt summary={bulkSummary} /> : null}
 
       {/* 表格作为两个页签共用的 content：只有一个 useQuery，切页签换的是它的
           查询参数，而不是再开一条并行的数据流。Radix 只挂载当前页签的内容，
@@ -297,10 +324,12 @@ function AlertsTable({
   items,
   scope,
   onAcknowledged,
+  onBulkAcknowledged,
 }: {
   items: AlertItem[];
   scope: Scope;
   onAcknowledged: (message: string) => void;
+  onBulkAcknowledged: (summary: BulkAckSummary) => void;
 }) {
   return (
     <DataTableV2
@@ -317,13 +346,10 @@ function AlertsTable({
       ]}
       selectable
       bulkActions={(keys) => (
-        // **只统计，不执行**：批量确认是写操作，得走 Action 且 L2 以上要审批
-        // （宪法 2、3 条）。在这里放一个能直接点的「批量确认」，等于绕过审批，
-        // 所以这一格只说明它现在还不能做什么
-        <span className="text-fg-muted">
-          已选中 {keys.length} 条；批量确认随 Foundation-B（XM-0030）上线——
-          写操作只走 Action，这里不执行任何真实操作。
-        </span>
+        // 批量确认走的仍是 alerts.alert.acknowledge@1（宪法 2 条：写操作只经
+        // Action），只是循环调 N 次。它**不需要审批**——那个 Action 声明的是
+        // L0（internal/platform/alerts/actions.go），单条确认一直可用就是证据。
+        <BulkAcknowledgeAlerts selectedKeys={keys} items={items} onCompleted={onBulkAcknowledged} />
       )}
       emptyState={
         <PageState
