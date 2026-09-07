@@ -217,6 +217,9 @@ func NewRouter(d Deps) http.Handler {
 
 	r := chi.NewRouter()
 	r.Use(RequestID)
+	// Logging 要排在 Recover 之前：panic 恢复时也该用注入的 logger，
+	// 而不是掉回 slog.Default()。
+	r.Use(Logging(logger))
 	r.Use(Recover(logger))
 	r.Use(AccessLog(logger, d.Service, d.Environment))
 	r.Use(Timeout(timeout))

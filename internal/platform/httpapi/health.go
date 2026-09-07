@@ -34,7 +34,7 @@ func ReadyHandler(db Pinger) http.HandlerFunc {
 		defer cancel()
 		if err := db.Ping(ctx); err != nil {
 			// 根因只进日志：探针响应是公开面，不能泄漏内网地址（规格 §18.4）
-			slog.ErrorContext(ctx, "readiness_failed",
+			LoggerFrom(ctx).ErrorContext(ctx, "readiness_failed",
 				slog.String("module", "httpapi"),
 				slog.String("error_code", "database_unreachable"),
 				slog.Any("err", err))

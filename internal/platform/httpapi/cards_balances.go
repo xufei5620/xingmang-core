@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 
 	"github.com/xufei5620/xingmang-platform/connectors/infini"
@@ -46,7 +45,7 @@ func CardBalancesHandler(reader CardBalanceReader, accounts []string) http.Handl
 			balances, err := reader.AccountBalances(r.Context(), account)
 			if err != nil {
 				item.Error = string(connector.KindOf(err))
-				slog.ErrorContext(r.Context(), "card_balances_failed",
+				LoggerFrom(r.Context()).ErrorContext(r.Context(), "card_balances_failed",
 					"module", "httpapi", "account", account, "err", err.Error())
 			} else {
 				item.USDT, item.USDC, item.USD = balances.USDT, balances.USDC, balances.USD

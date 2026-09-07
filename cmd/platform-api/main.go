@@ -36,6 +36,14 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// 同时设成全局默认（XM-LOG-INJECTED）：注入 logger 只覆盖得到拿得到它的
+	// 调用点，而 `WriteJSON` 的编码失败那一处没有 ctx 也没有 logger 参数
+	// （它有近百个调用点，为一条极少发生的日志改签名不划算）。不设默认的话
+	// 那一条会以文本格式写 stderr，与其余 JSON/stdout 的日志分家。
+	//
+	// 安全性已核对：全仓没有任何地方用标准 `log` 包，所以这一行不会改变
+	// 除 slog 之外的任何输出。
+	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
