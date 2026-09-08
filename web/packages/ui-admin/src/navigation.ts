@@ -314,7 +314,10 @@ export const EXT_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "内容发布",
     path: "/ext/publishing",
     stage: "后置",
-    built: false,
+    // ADMIN-IA §5.4.1（2026-09-08）：产品负责人推翻了「扩展能力四页只读蓝图」
+    // 在这一页上的适用，要求真建。扩展能力段里**只有这一页** built=true，
+    // 另外三页的原裁定原样有效。
+    built: true,
     subTabs: sub(
       ["calendar", "内容日历"],
       ["drafts", "草稿与素材"],

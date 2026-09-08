@@ -1,0 +1,47 @@
+{
+  "id": "publishing.draft.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "publishing.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "UPSERT_BY_DRAFT_ID",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "draft_id": {
+      "type": "string",
+      "required": false
+    },
+    "title": {
+      "type": "string",
+      "required": true
+    },
+    "body": {
+      "type": "string",
+      "required": false
+    },
+    "scheduled_at": {
+      "type": "string",
+      "required": false
+    },
+    "note": {
+      "type": "string",
+      "required": false
+    },
+    "asset_ids": {
+      "type": "string_slice",
+      "required": false
+    }
+  },
+  "notes": "草稿保存。draft_id 为空表示新建。每次保存落一条不可变 draft_revision；审计 after 摘要只放形态（版本号/状态/素材数），正文一个字不进审计链。 XM-EXT-PUBLISHING（ADMIN-IA §5.4.1，2026-09-08 裁定变更）。平台今天没有任何出站投递器：内容发布的第一层只保证「内容的生命周期在平台内是真的」。"
+}

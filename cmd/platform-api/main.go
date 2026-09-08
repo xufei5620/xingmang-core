@@ -33,6 +33,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/lifecycle"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/publishing"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
 	"github.com/xufei5620/xingmang-platform/internal/platform/server"
@@ -175,6 +176,22 @@ func main() {
 	// set/remove 只在这里注册成 HUMAN-only L0 Action。注册失败即拒绝启动。
 	savedViewStore := savedviews.NewStore(pool)
 	if err := savedviews.RegisterActions(actionRegistry, savedViewStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 内容发布（XM-EXT-PUBLISHING）。七个 Action 都只给人；发布是 L3，
+	// 会经审批中心落单后由人触发执行。注册失败即拒绝启动。
+	//
+	// **第二个参数是投递器表，这里传 nil，意思是「平台没有任何出站投递器」。**
+	// 这不是一个可以在部署时打开的开关——本仓库根本没有 publishing.Deliverer
+	// 的实现（见 internal/platform/publishing/doc.go）。发布走完审批之后落下的
+	// 记录，结果一律是「未投递」，库层的 result 闭集也只认这一个值。
+	// 接上真投递器需要一次显式迁移 + 一份 Connector 契约 + 一条经 ADR-021
+	// 登记的写通道，不是在这里填一个 map 就成立的。
+	publishingStore := publishing.NewPgStore(pool, cfg.Environment)
+	publishingService := publishing.NewService(publishingStore, nil, nil)
+	if err := publishing.RegisterActions(actionRegistry, publishingService); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
@@ -554,6 +571,11 @@ func main() {
 		Silences:                alertStore,
 		SavedViews:              savedViewStore,
 		PlatformChannelBindings: channelBindingStore,
+		// 内容发布的五个只读端点。仓储与 Action 用同一份实现，不另开一条
+		// 访问 publishing.* 表的路径。PublishingDeliver 交的是 Service——
+		// 「哪些平台真的能发出去」由它回答（今天是空列表）。
+		Publishing:        publishingStore,
+		PublishingDeliver: publishingService,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
 		// nil 时「渠道保障」两个端点不挂载（见 httpapi.Deps.ChannelAssurance）

@@ -616,6 +616,40 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 		t.Fatalf("sms-operator 应持有 sms.purchase，否则这个功能没有任何角色能用, got %v", got)
 	}
 
+	// XM-EXT-PUBLISHING（2026-09-08）：内容发布的三个权限。
+	//
+	// **publishing.publish 不给 admin**，与 fund.withdraw / sms.purchase 同一条
+	// 理由：对外发布不可逆、而且是公开的（删了也已经被抓取、被截图）。
+	// 「谁能以公司的名义说话」是一次显式的组织授予，不该由「他是管理员」
+	// 顺带获得。读与编辑给 admin，否则这一页对唯一能用它的人也是 403。
+	for _, sc := range []string{"publishing.read", "publishing.manage"} {
+		if !slices.Contains(admin, sc) {
+			t.Fatalf("admin 应持有 %s，否则内容发布页对唯一能用它的人是 403", sc)
+		}
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 不该持有 %s：草稿正文与渠道登记不是看板数据", sc)
+		}
+	}
+	if slices.Contains(admin, "publishing.publish") {
+		t.Fatal("admin 不该持有 publishing.publish：对外发布不可逆，日常操作账号不该带它")
+	}
+	if slices.Contains(staff, "publishing.publish") {
+		t.Fatal("staff 更不该持有 publishing.publish")
+	}
+	// 挂在一个真实存在、可以被指派的角色上——否则「不给 admin」就成了
+	// 「谁都用不了」（那是 bug，不是最小权限）。
+	if got := m["content-publisher"]; !slices.Contains(got, "publishing.publish") {
+		t.Fatalf("content-publisher 应持有 publishing.publish，否则这个功能没有任何角色能用, got %v", got)
+	}
+	// 发布人也要看得见自己要发的东西，否则他必须同时被授予 admin 才用得起来。
+	if got := m["content-publisher"]; !slices.Contains(got, "publishing.read") {
+		t.Fatalf("content-publisher 应持有 publishing.read, got %v", got)
+	}
+	// 但发布人**不该**顺带拿到编辑权：改稿与发稿是两件事。
+	if slices.Contains(m["content-publisher"], "publishing.manage") {
+		t.Fatal("content-publisher 不该持有 publishing.manage：改稿与发稿刻意分开")
+	}
+
 	// XM-CARD6（2026-09-05 改）：额度从环境变量搬进数据库、由后台调整之后，
 	// 「改不了」这道物理屏障没有了。替代它的是**两把钥匙**：
 	//   fund.limit.manage（改额度）给 admin，

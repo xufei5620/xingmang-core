@@ -1,0 +1,31 @@
+{
+  "id": "publishing.publish.submit",
+  "version": "1",
+  "risk_level": "L3",
+  "permission": "publishing.publish",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NONE",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": true
+  },
+  "compensation_mode": "NOT_POSSIBLE",
+  "params": {
+    "draft_id": {
+      "type": "string",
+      "required": true
+    },
+    "channel_id": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "提起一次对外发布。**L3 = 两票且审批人≠提交人**（approval.DefaultPolicy）；依据：对外发布不可逆、不可追回（与 cards.withdraw.execute 同一条性质），且原型自己写明「对外发布属于有外部影响的操作，必须人工审核，不会有自动放行」——L2 允许自批，自批不是审核。现在定级而不是等第二层接上再抬，是因为此刻摩擦为零（发不出去任何东西），而事后抬级是一次行为变更（XM-RISK-RESTORE 就是在还这笔账）。**执行成功后落下的发布记录结果恒为 NOT_DELIVERED**：平台没有出站投递器，库层 result 闭集只认这一个值，接上投递器需要一次显式迁移。 XM-EXT-PUBLISHING（ADMIN-IA §5.4.1，2026-09-08 裁定变更）。平台今天没有任何出站投递器：内容发布的第一层只保证「内容的生命周期在平台内是真的」。"
+}

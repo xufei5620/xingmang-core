@@ -57,6 +57,7 @@ import { ExtAppPage } from "./pages/ExtAppPage";
 import { ExtIntegrationPage } from "./pages/ExtIntegrationPage";
 import { FinancePage } from "./pages/FinancePage";
 import { OpsPage } from "./pages/OpsPage";
+import { PublishingPage } from "./pages/PublishingPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { PlatformDetailPage } from "./pages/PlatformDetailPage";
@@ -415,6 +416,10 @@ export const routes = [
               // placeholderRoutes（那份只收 !item.built）。不在这里补显式
               // 路由的话，侧栏上有条目、点进去落到最后的 `*` 兜底 404。
               { path: "ext/integration", Component: ExtIntegrationPage },
+              // XM-EXT-PUBLISHING（2026-09-08，ADMIN-IA §5.4.1）：同上一条
+              // 理由——`built` 翻成 true 之后它掉出 placeholderRoutes，
+              // 不在这里补一条显式路由就会 404。
+              { path: "ext/publishing", Component: PublishingPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,

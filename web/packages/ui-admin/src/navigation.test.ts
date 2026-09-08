@@ -275,31 +275,35 @@ describe("查表与状态标签", () => {
     expect(stageHintOf("/dashboard")).toBeUndefined();
     expect(stageHintOf("/actions")).toBeUndefined();
     // 2026-09-07 三页建成（XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0）之后，
-    // 「版本与发布」也不再挂标签了；仍挂标签的换成扩展能力段的「内容发布」——
-    // 那一页按 ADMIN-IA §5.4 与实施计划 §2.5 是**刻意只做只读蓝图**，不是缺口。
+    // 「版本与发布」也不再挂标签了。
     expect(stageHintOf("/changes")).toBeUndefined();
     expect(stageHintOf("/design")).toBeUndefined();
     expect(stageHintOf("/finance")).toBeUndefined();
-    expect(stageHintOf("/ext/publishing")).toBe("未建·后置");
+    // 2026-09-08：「内容发布」也建成了（XM-EXT-PUBLISHING，裁定变更见
+    // ADMIN-IA §5.4.1），于是它同样不再挂阶段标签。仍挂标签的换成扩展能力段
+    // 剩下的三页——那三页按 §5.4 原裁定**刻意只做只读蓝图**，不是缺口。
+    expect(stageHintOf("/ext/publishing")).toBeUndefined();
+    expect(stageHintOf("/ext/app")).toBe("未建·后置");
   });
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 0 + 治理段 0 + 扩展能力 2。
+    // 全局段 0 + 治理段 0 + 扩展能力 1。
     //
     // 2026-09-07 治理段清零：跨平台财务 / 版本与发布 / 界面规范三页建成。
     // 2026-09-08 产品负责人推翻了 ADMIN-IA §5.4「扩展能力四页只读蓝图、
-    // 不得因此提前建后端」对其中三页的适用：`应用与配置`（XM-EXT-APP）与
-    // `接口与自动化`（XM-EXT-INTEGRATION）已建成、从这份清单里掉出去，
-    // `内容发布`（XM-EXT-PUBLISHING）由并行切片在建，建成时同样要删掉。
+    // 不得因此提前建后端」对其中三页的适用：`应用与配置`（XM-EXT-APP）、
+    // `接口与自动化`（XM-EXT-INTEGRATION）、`内容发布`（XM-EXT-PUBLISHING）
+    // 三页均已建成，从这份清单里掉出去。
     //
-    // **剩下的这两条含义已经不统一了**：`/ext/ai` 按 §5.4 仍是刻意的只读
-    // 蓝图（不预留后端、不做写入、不做执行），`/ext/publishing` 则是
-    // 「在建，还没合进来」。两种含义混在同一份 built:false 里——这是 built
-    // 这个字段本身的表达力上限，不是数据错了；真要分开得给导航加第三种
-    // 状态，那属于另一次 IA 改动。
+    // **只剩 `/ext/ai` 一条,而它是刻意的**——按 §5.4 与实施计划 §2.5 仍是
+    // 只读蓝图（不预留后端、不做写入、不做执行），built:false 在这里表达的是
+    // 「后端未接**且不打算接**」，与治理段那三页当初的含义不是一回事。
+    //
+    // **合并三片时这份清单必须重算,不能取任何一侧**：三片各自基于同一基线、
+    // 各自只删掉自己那一页，机械合并会留下一个多余的条目。这类冲突取任一侧
+    // 都是错的。
     expect(paths).toEqual([
-      "/ext/publishing",
       "/ext/ai",
     ]);
     expect(placeholderNavItems().every((item) => navStageHint(item) !== undefined)).toBe(true);
@@ -325,12 +329,13 @@ describe("查表与状态标签", () => {
       "/changes",
       "/design",
       "/settings",
-      // XM-EXT-APP / XM-EXT-INTEGRATION（2026-09-08）：扩展能力段前两页建成。
-      // 它们排在最后是因为顺序即 navigation.ts 的声明顺序（扩展能力是第四段），
-      // **不是按建成时间排的**——下一页建成时要插到声明顺序对应的位置，
-      // 不是追加到末尾。
+      // XM-EXT-APP / XM-EXT-INTEGRATION / XM-EXT-PUBLISHING（2026-09-08）：
+      // 扩展能力段前三页建成。它们排在最后是因为顺序即 navigation.ts 的
+      // **声明顺序**（扩展能力是第四个分组），**不是按建成时间排的**——
+      // 三者之间的先后也照声明顺序，不照合并顺序。
       "/ext/app",
       "/ext/integration",
+      "/ext/publishing",
     ]);
   });
 
