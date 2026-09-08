@@ -537,6 +537,30 @@ clears the lease and the stale `processing_error`, and writes one
 `source_ingest_event.repair_requeued` audit event per row. One transaction
 per event, so one row's conflict never blocks another row in the same run.
 
+**It refuses, by default, to requeue an event whose replay cannot succeed.**
+A replay is verified by `verifyFactBatchContextTx` against one exact
+`(event_id, batch_id, scan_cycle_id)` triple: the one reached through the
+event's own `first_batch_id`, because that is the batch
+`ClaimUnprocessedSourceEvents` joins. The tool resolves that same triple, calls
+it the **replay binding**, and prints it on its own line. If that cycle is not
+`receiving`/`processing`/`published`, or the binding is missing, the fact is
+refused on arrival and the requeue can only burn eight attempts and die again
+-- so the event is listed as `REQUEUED false (replay blocked)` with a
+`NOT REQUEUED:` line naming the reason, and counted under
+`not requeued (replay blocked)` rather than `total requeued`.
+`--include-blocked-cycles` overrides that; it is for deliberately reproducing
+the failure, never a fix.
+
+An event can be mapped to several cycles: agent event ids are deterministic
+(`agents/sourceagent/batch.go`), so a rescan re-delivers the identical event
+id and `CommitSourceBatch` adds a fresh mapping under the new cycle while
+leaving the existing ingest row -- `dead` included -- untouched. Every mapping
+is printed, labelled `replay binding` or `other binding, NOT used by replay`.
+**A healthy cycle among the other bindings does not make the event
+replayable**; only the replay binding governs. This is not hypothetical: the
+2026-09-08 production dry run showed exactly that pair, and reading the
+healthy sibling as the verdict would have been wrong.
+
 It deliberately changes nothing else:
 
 - **Freezes are left open.** The freeze is what lets
@@ -547,13 +571,13 @@ It deliberately changes nothing else:
   refuses to run until the account has no projection job left and its latest
   finalized balance evidence evaluates `matched` -- that gate is exactly what
   makes "requeue first, resolve second" the only valid order.
-- **Scan cycles are left alone.** An already-`published` cycle is never
-  re-evaluated, and `verifyFactBatchContextTx` still accepts a fact whose
-  cycle has published, so the fact lands as a late fact and reprojects. A
-  cycle still in `processing` *does* go back to incomplete until the requeued
-  event terminates -- read the `cycle_status` line in the dry-run report
-  before applying. A `blocked` cycle means the fact will be rejected and the
-  event will simply die again.
+- **Scan cycles are read, never written.** An already-`published` replay
+  binding is safe: that cycle is never re-evaluated, and
+  `verifyFactBatchContextTx` still accepts a fact whose cycle has published,
+  so the fact lands as a late fact and reprojects. A binding still in
+  `processing` *does* send that cycle back to incomplete until the requeued
+  event terminates, in both directions -- read the `replay_binding` line
+  before applying. Anything else is the refusal above.
 - **`created_at` is left alone.** Readiness ages a pending event from
   `created_at`, so a long-dead row requeued here is immediately "old":
   `/readyz` stays 503 with a *different* reason (`source ingestion processing
@@ -594,3 +618,90 @@ attempts (five minutes apart, so roughly 35 minutes) and goes dead again --
 reusing the same still-open freeze rather than opening a second one, so the
 system lands back exactly where it started. Re-running the tool later is
 safe and idempotent.
+
+### When the replay binding is blocked, there is nothing to run
+
+A `blocked` replay binding is almost always a superseded cycle: an agent
+restart abandoned an in-flight scan, `supersedeStaleActiveScanCycleTx` marked
+the abandoned cycle `blocked`, and any of its events that had not finished are
+now pinned to it forever, because `first_batch_id` never moves.
+
+There is no supported repair for that state, and none should be invented:
+
+- **The mapping table cannot be edited.** `source_economic_scan_cycle_events`
+  has exactly one writer, `CommitSourceBatch`, inside the transaction that
+  verifies the batch's hash chain and signing key. A hand-written row asserts
+  a delivery that never happened. On the `balances` stream it is also
+  destructive: `tryPublishEconomicScanCyclesTx` requires the cycle's
+  `balance_checkpoint` mapping count to equal the agent-signed
+  `scan_snapshot_row_count`, so one extra row blocks the cycle and opens a
+  `SOURCE_GAP` freeze on *every* account of that source.
+- **A blocked cycle cannot be revived.** No code path moves `cycle_status`
+  out of `blocked`, and un-blocking one would make it active again, colliding
+  with `source_economic_one_active_scan_cycle` against the live cycle and
+  wedging the stream -- the very failure the supersede machinery exists to
+  prevent. `superseded_by_scan_cycle_id` is a forensic breadcrumb, never read
+  by any code.
+- **The supported recovery is upstream, through the agent.** Because event ids
+  are deterministic, a rescan that reads the same upstream record re-delivers
+  the same event id into a healthy cycle and creates a valid mapping. That
+  already works for the mapping. Since XM-INV-CLAIM-BINDING the claim path
+  follows it too: `ClaimUnprocessedSourceEvents` prefers the event's newest
+  *currently valid* binding over `first_batch_id`, so an event whose evidence
+  is already on file is replayable again. Only an event with **no** valid
+  binding at all is genuinely stuck. See
+  `docs/handoffs/XM-INV-DEAD-REQUEUE.md` and
+  `docs/handoffs/XM-INV-CLAIM-BINDING.md`.
+
+### Acknowledging a fact that can never be replayed
+
+Resolving the account's freeze does **not** clear `/readyz`:
+`validateSourceIngestRuntimeReadiness` fails first on `Dead > 0`, and a
+permanently unreplayable row stays `dead` forever. Deleting it is blocked by
+the `source_economic_scan_cycle_events` foreign key (`ON DELETE RESTRICT`) and
+would destroy the evidence of what was lost.
+
+**`invoice-eligibility-repair --kind=ingest-acknowledge-unreplayable`** gives
+such a row a non-dead terminal state without asserting anything untrue. It
+uses exactly the column shape `RequeueSourceDependency` already uses for facts
+that will never be applied (`PRE_POLICY_SKIPPED`):
+`processing_status='processed'` with `processed_at` set, lease and dependency
+columns cleared, and a marker in `processing_error` -- here
+`UNREPLAYABLE_BINDING`. **It does not claim the fact was applied; it records
+that it never will be.** Nothing is written to `source_usage_events`,
+`source_credit_events` or `balance_reconciliation_checkpoints`, and no
+watermark or scan cycle moves.
+
+Guardrails, because this writes off customer data:
+
+- `--event` is **required**. There is no bulk mode: each acknowledgement is a
+  separate admission that one specific fact is gone.
+- Default dry run; `--apply` requires `--operator-id`.
+- One audit event (`source_ingest_event.unreplayable_acknowledged`) per
+  acknowledged row, carrying the previous state, the reason the replay is
+  impossible, and `fact_applied: false`.
+- It **refuses** an event that still has a binding the verifier would accept,
+  and points at `--kind=ingest-requeue-dead` instead. A replayable event has a
+  repair; it does not have a write-off.
+- Open freezes are untouched: closing the event is not the same judgment as
+  declaring the account clean.
+
+```
+# dry run (default) -- reports the event and why it is unreplayable
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid>
+
+# apply -- one reviewed event, with a named operator
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid> \
+  --apply --operator-id=<admin-uuid>
+```
+
+Afterwards, resolve the account's freeze through the normal admin path once
+its projection queue is empty and its *latest* finalized balance evidence
+evaluates `matched`. That gate reads only the latest evidence item, so a
+permanently missing older checkpoint does not block reopening the account.

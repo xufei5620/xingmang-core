@@ -4,12 +4,19 @@
 - branch: `ai/claude/XM-INV-DEAD-REQUEUE`
 - base: `331777a`（RC103 发版材料）
 - worktree: `K:/发票/wt-XM-INV-DEAD-REQUEUE`
-- commits（2 条，按顺序）：
+- commits（按顺序）：
   - `61b6ac4` `feat(eligibility-repair): requeue dead source ingest events (XM-INV-DEAD-REQUEUE)`
     —— 实现、CLI 接线、集成测试、`docs/ELIGIBILITY-OPERATIONS.md` 新增一节
-  - 本文（`docs(handoffs): XM-INV-DEAD-REQUEUE`）
+  - `fb48fb3` `docs(handoffs): XM-INV-DEAD-REQUEUE`
+  - 第三条 —— 报告缺陷修复（判据内建）与恢复可行性调查，见
+    《2026-09-08 生产 dry run：结论与第二轮修改》
 - 新增 `invoice-eligibility-repair --kind=ingest-requeue-dead`，形状照抄
   `--kind=projection-requeue-dead`（XM-INV-PROJECTION-FAILURE-GRADING）。
+
+> **结论先行（2026-09-08 生产 dry run 之后）**：那 3 条**现在一条都不能投**，
+> 工具已经改成自己拒绝而不是让人对着手册判断。**2 条用量事件在证据层面并没有丢**
+> （它们已经有一条合法的、指向已发布周期的绑定），卡住它们的是认领路径钉死在
+> `first_batch_id`；**1 条余额快照没有任何合法绑定，只能承认丢失**。详见文末那一节。
 
 ## summary
 
@@ -179,8 +186,14 @@ if evaluation != "matched" && evaluation != "positive_classified_non_cash"
 必须打印 `cycle_status`，运维要在动手前看这一行。
 
 **`blocked`：重投是徒劳的。** `verifyFactBatchContextTx` 只接受那三个状态，`blocked`
-会拿到 `domain.ErrConflict`，事件会把 8 次重试全部烧完再死一次。dry run 会打出来，
-看到 `blocked` 就别投，先处理周期。
+会拿到 `domain.ErrConflict`，事件会把 8 次重试全部烧完再死一次。
+
+> **2026-09-08 修订（生产实测后）**：第一版只把这一条写进文档、让人自己对照，这是错的
+> ——工具现在自己拒绝，见《2026-09-08 生产 dry run》。同时纠正这一节当初的一处
+> **不够精确**：这里说的「周期」不是「事件关联到的任意周期」，而是**经由
+> `first_batch_id` 到达的那一个**（`ReplayBinding`）。一条事件可以同时关联到多个周期，
+> 而只有 replay binding 上的状态决定成败。生产上那两条 usage 就是
+> 「blocked（replay binding）＋ published（其它绑定）」，按旧写法很容易读反。
 
 **顺带确认过的一条：** balances 流的 `invalidBalanceSnapshot` 判定用的是
 `count(*) FILTER (WHERE sie.entity_type='balance_checkpoint')` 与
@@ -188,15 +201,237 @@ if evaluation != "matched" && evaluation != "positive_classified_non_cash"
 
 ---
 
+## 2026-09-08 生产 dry run：结论与第二轮修改
+
+产品负责人在生产上跑了 dry run。**结果是一条都不能投**，而且暴露了报告的一处缺陷。
+
+### 生产实况
+
+| 事件 | 流 | `first_batch_id` 所绑定的周期 | 状态 |
+|---|---|---|---|
+| `fcd2e2c6` | balances | `e58b9430` | **blocked** |
+| `63872270` | usage | `b1de0e2b` | **blocked** |
+| `bb412266` | usage | `b1de0e2b` | **blocked** |
+
+两条 usage 在报告里还各列了一个 `9ca5afcb` = `published`，但那是**别的批次**下的关联。
+
+### 缺陷：判据打印了，结论却要人自己去对照手册
+
+第一版的 dry run **正确打印了 `cycle_status=blocked`**，可同一行的 `REQUEUED` 仍是
+`true`，末尾还汇总「total requeued: 3」。手册在报告之外，报告在人眼前——等于把判据
+交出去，让人自己得出相反的结论。而且它把**所有**关联周期平铺列出，没说哪一个才算数，
+于是「有一个 published」看起来像是好消息。
+
+**已修，判据现在由代码执行：**
+
+1. 工具自己解析出**唯一算数的那条绑定**（`ReplayBinding`），复刻运行时的真实路径：
+   `ClaimUnprocessedSourceEvents` 按 `sie.first_batch_id` 连 `source_ingest_batches`，
+   把该批次的 `batch_id` / `scan_cycle_id` 放上 claim，应用层原样传下去，
+   `verifyFactBatchContextTx` 按 **(event_id, batch_id, scan_cycle_id) 三元组**精确查。
+   工具查的是同一个三元组，并且把 `schema_version='3.0'`、`m.payload_hash` 相等、
+   `cycle_status ∈ {receiving, processing, published}` 这三项校验逐条复刻。
+2. 判定不通过时：`REQUEUED false (replay blocked)`、一行
+   `NOT REQUEUED: <原因，含周期 id 与 verifyFactBatchContextTx 字样>`，
+   汇总行拆成 `total requeued` 与 `not requeued (replay blocked)`。
+3. **apply 默认跳过这类**，行一个字都不改、审计一条都不写；要投必须显式加
+   `--include-blocked-cycles`（帮助文本里写明它「只用于故意复现失败，不是修复手段」）。
+4. 其余关联仍然打印，但逐条标注 `replay binding` / `other binding, NOT used by replay`
+   ——`9ca5afcb=published` 那种「看起来是好消息」的行不会再被误读。
+
+`TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked` 用**真实的 supersede 路径**
+把生产这一形状完整复现了（旧周期被 supersede 成 blocked ＋ 同一个确定性 event id 在
+后继周期里被重投递、后继周期发布），并顺带钉死了一条事实：**重投递不会复活死行**——
+断言 `before.status == "dead"`，通过。
+
+### 三个问题的调查结论
+
+#### 1. 能不能把事件重新绑定到后继周期？——**不能，而且不该**
+
+- **`source_economic_scan_cycle_events` 只有一个写入者**：`CommitSourceBatch`
+  （`source_sync.go:413`；全仓其余 10 处引用全是读）。它在那笔事务里校验批次哈希链
+  （`previous_batch_hash` / `body_hash` / `signing_key_id` / `sequence`）。手写一行映射
+  等于在没有任何这些证据的情况下断言「代理在那个批次里投递过这条事件」——就是伪造来源。
+- **对 balances 还额外具有破坏性**：`tryPublishEconomicScanCyclesTx` 会把周期内
+  `entity_type='balance_checkpoint'` 的映射条数与代理签名的 `scan_snapshot_row_count`
+  比对，不等即 `invalidBalanceSnapshot` → 周期置 `blocked`、
+  `source_ingest_state.projection_status='blocked'`、并对**该来源下的每一个账号**
+  调 `freezeSourceAccountsTx(SOURCE_GAP)`。手插一行会冻住全部 8 个账号。
+- **supersede 时不迁移未完成事件，是刻意的吗？** 严格讲：
+  `supersedeStaleActiveScanCycleTx` 的文件头注释**只字未提**遗留事件，所以它不是一条
+  被明确记录下来的决定。但服务端迁移在设计上本来就不成立（上面两条），而且**存在一条
+  正规路径**：代理的 event id 是确定性的
+  （`agents/sourceagent/batch.go:264`，`deterministicUUID(source, entity, externalID, operation, payloadHash)`），
+  所以代理重扫时会把同一个 event id 重新投递进新周期，映射由真实入库路径合法产生。
+  **两条 usage 事件的 `9ca5afcb` 关联就是这么来的。**
+  所以：**缺口不在 supersede，在最后一公里**——`CommitSourceBatch` 遇到已存在的行
+  只跳过、不复活（对 dead 行也一样），而 `ClaimUnprocessedSourceEvents` 又钉死在
+  `first_batch_id`。两者相加，一条「证据已经重新到位」的事件仍然取不走。
+- 顺带确认：`superseded_by_scan_cycle_id` 全仓**没有任何代码读它**（只在
+  `source_sync.go:533` 写、迁移 0022 里定义），它纯粹是给人看的痕迹。想「跟着后继走」
+  没有现成机制可用，得新造。
+
+#### 2. blocked 周期本身有没有合法的复活/重开路径？——**没有，也不该有**
+
+`cycle_status` 的全部写入点：`'published'`（仅由 `tryPublishEconomicScanCyclesTx`
+从 `'processing'` 改）、`'blocked'`（快照不自洽、水位线回退、supersede 三处）、
+以及 `CommitSourceBatch` 的 `ON CONFLICT DO UPDATE`。最后那处的 CASE 虽能写
+`'processing'`，但 `WHERE` 带 `final_sequence IS NULL` 且要求 `last_sequence+1` 严格衔接
+——需要**代理**继续用那个它已经放弃的 cycle id 从下一个 sequence 接着发，正是
+「客户端已放弃」这件事排除掉的可能。**没有任何面向运维的路径。**
+
+而且不只是不成立，是有害：把 `e58b9430` / `b1de0e2b` 解除 blocked 会让它们重新变成
+active 周期，与当前 receiving/processing 的周期在
+`source_economic_one_active_scan_cycle` 上撞车，直接卡死整条 stream——正是 supersede
+机制存在的理由。
+
+#### 3. 这三条是不是永久丢了？——**要分开说**
+
+**两条 usage 事件：证据没丢，丢的是取用路径。**
+它们已经带着一条**真实的、代理签名批次投递产生的**映射，指向一个 `published` 周期。
+`verifyFactBatchContextTx` 本来就接受 `published`。也就是说：这条事实并非「无法验证」，
+系统里存着「代理确实在批次 B、周期 `9ca5afcb` 下投递过这条 payload_hash 完全相同的
+事件」的证据。挡住它的只是 `ClaimUnprocessedSourceEvents` 取的是**第一个**批次绑定。
+
+**因此存在一条不绕过校验的出路**（供负责人决策，我没有动手）：让认领在该事件**当前
+仍然有效的**绑定里取一条（自然的选择是批次 sequence 最大的那条，即代理关于这条事件
+的最新陈述），而不是永远取第一条。这**不是**放宽 `verifyFactBatchContextTx`——它原封
+不动地照跑，只是拿到了一个**为真**的三元组。附带影响都指向「更正确」而非更松：
+`SourceSequence` 会取较晚批次的序号（对一条迟到事实本就该如此）、
+`StreamWatermarkAt` 取较晚的 `scan_ceiling_at`（那次扫描确实观测到了它）。
+`first_batch_id` 全仓只有两处用途（`CommitSourceBatch` 的 INSERT、认领的 JOIN），
+改动面很小。
+
+**但这是 worker 核心契约的改动，属于另一个切片，需要负责人拍板 + 独立设计与测试，
+我没有在本切片里做。**
+
+**一条余额快照：只有一条指向 blocked 周期的绑定，承认丢失。**
+（**这一条的前提来自生产 dry run 的输出，我没有生产访问权限**——执行前请用下面这条
+查询再确认一次，它把三条事件的全部绑定和「哪一条是 replay binding」一起列出来。若
+`fcd2e2c6` 意外也有一条状态可接受的其它绑定，那它就和两条 usage 同属一类，结论要改。）
+
+```sql
+SELECT sie.event_id, sie.entity_type,
+       m.scan_cycle_id, c.cycle_status, m.batch_id,
+       (m.batch_id = sie.first_batch_id) AS is_replay_binding
+FROM source_ingest_events sie
+JOIN source_economic_scan_cycle_events m
+  ON m.source_instance_id=sie.source_instance_id AND m.stream_id=sie.stream_id
+ AND m.event_id=sie.event_id
+JOIN source_economic_scan_cycles c
+  ON c.source_instance_id=m.source_instance_id AND c.stream_id=m.stream_id
+ AND c.scan_cycle_id=m.scan_cycle_id
+WHERE sie.processing_status='dead'
+ORDER BY sie.event_id, is_replay_binding DESC;
+```
+
+它没有被重投递过，而且**结构上也不会有**：`deterministicUUID` 把 `payloadHash` 算进
+event id，余额快照的 payload 含该时刻的余额与 `as_of`，之后任何一次扫描产生的都是
+**另一个 event id**（会作为新事件正常入库——该账号后来的 1663 条快照就是这么进来的）。
+所以这一条只能靠伪造映射才能 replay，而那是禁止的。
+
+**「丢失」的准确含义，以及它并不阻塞客户：** 丢的是**一个历史时点的对账证据**，不是
+当前余额状态。而 `ResolveEligibilityFreeze` 的证据关卡取的是
+`as_of <= finalized_through` 里**最新的那一条**（`ORDER BY as_of DESC ... LIMIT 1`），
+不是缺的那一条——所以这条快照永久缺失**不会**阻止解冻或让账号恢复可开票。
+
+**需要负责人决定的两件事：**
+
+1. 那两条 usage 事件要不要救（＝要不要开「认领改走当前有效绑定」这个切片）。
+   不救的话，这个客户的账里会永久少两条用量记录——金额影响需要另行核算。
+2. 余额快照（以及第 1 条若决定不救，那两条 usage）按丢失处理之后，**readyz 怎么办**。
+   这里有一个必须点破的地方：**「承认丢失」本身不会让 readyz 恢复。**
+   `validateSourceIngestRuntimeReadiness` 的第一条就是 `health.Dead > 0 → 503`，而
+   `Dead` 数的就是 `processing_status='dead'`。只要这几行还是 `dead`，readyz 就一直
+   503——处置冻结、让账号恢复可开票，都不改变这一点。要恢复，必须让这些行走到一个
+   **非 dead 的终态**，而当前没有任何合法手段做到（重投会被拒、删除被
+   `source_economic_scan_cycle_events` 的 `ON DELETE RESTRICT` 挡住，而且会毁掉证据）。
+
+   **仓库里有一条可以照抄的先例**：`RequeueSourceDependency`
+   （`source_sync.go:842` 一带）对「早于策略起点、永远不会被采用」的事件，就是把它们
+   置成 `processing_status='processed'` 且 `processing_error='PRE_POLICY_SKIPPED'`
+   ——不声称事实被采用了，只记录它永远不会被采用。按同样的形状加一个运维可执行的
+   「不可重投，登记后终结」处置（例如 `processing_error='UNREPLAYABLE_BINDING'` ＋
+   逐条审计），既能让 readyz 恢复，又不伪造任何来源；副作用也都是好的方向：
+   `completeEligibilityCatchupTx` 数的是 `processing_status<>'processed'`，终结后
+   卡住的 catch-up 会被释放，而涉及的周期本就是 blocked / 已发布，都不会被重新评估。
+
+   **已经实现（2026-09-08，负责人批准）**：`--kind=ingest-acknowledge-unreplayable`，
+   见下一节。**代码已落分支；对生产执行仍需产品负责人点头。**
+
+## 处置：`--kind=ingest-acknowledge-unreplayable`（已实现）
+
+给一条**永远无法重投**的死事件一个非 dead 的终态，不伪造任何东西。
+
+### 形状：照抄 `PRE_POLICY_SKIPPED`，不另设计
+
+`RequeueSourceDependency`（`source_sync.go`）对「早于策略起点、永远不会被采用」
+的事件写的是：
+
+```sql
+SET processing_status='processed',processing_error='PRE_POLICY_SKIPPED',
+    processed_at=now(),lease_token=NULL,lease_expires_at=NULL,
+    dependency_kind=NULL,dependency_key_hmac=NULL,updated_at=now()
+```
+
+本处置逐字用同一个形状，只把标记换成 `UNREPLAYABLE_BINDING`。
+**评审的人只需要判断「一致」，不需要判断一个新想法。**
+它**不声称事实被应用了，它记录的是「它永远不会被应用」**——这两件事的区别
+就是这个方案能成立的全部原因。
+
+### 护栏
+
+| 要求 | 实现 |
+| --- | --- |
+| 独立 kind，不混进重投 | `kindIngestAcknowledgeUnreplayable`，自己的 store 函数与汇总输出 |
+| 默认 dry run，`--apply` 要 `--operator-id` | 同其他 kind；dry run 靠 `defer tx.Rollback` |
+| 必须 `--event`，不接受批量 | CLI 层与 store 层**各拒一次**；`--account` 对这个 kind 直接报错 |
+| 逐条审计 | `source_ingest_event.unreplayable_acknowledged`，object_id = event_id，after 载荷带 `fact_applied: false` 与不可重投的具体原因 |
+| 不能变成「什么都能标 processed」 | **拒绝任何仍有有效绑定的事件**，复用同一个 `ingestRequeueDeadReplayBindingTx` 判定，错误文本指向 `--kind=ingest-requeue-dead` |
+| 只处置死事件 | 谓词里钉死 `processing_status='dead'`，且 UPDATE 重新断言一次 |
+
+冻结同样不动。
+
+### 测试与变异验证
+
+| 测试 | 钉住什么 |
+| --- | --- |
+| `TestAcknowledgeUnreplayableDryRunWritesNothing` | dry run 报出判定，但行与审计都没动 |
+| `TestAcknowledgeUnreplayableClosesTheEventWithoutApplyingItsFact` | PRE_POLICY_SKIPPED 列形状逐列对比；**三张事实表里都没有这个 payload 的行**（缺席断言）；`SourceIngestHealth.Dead` 从 1 归 0 且 `Pending` 不变；恰好 1 行审计；冻结仍 open；重跑被拒且不写第二条审计 |
+| `TestAcknowledgeUnreplayableRefusesAReplayableEvent` | 有效绑定的事件被拒，行未被修改，错误文本指向重投工具 |
+| `TestAcknowledgeUnreplayableRequiresAnEventAndAnOperator` | 6 种缺参/错参全部拒绝，且一个字都没写 |
+| `TestRunAcknowledgeUnreplayableRequiresAnEvent` | CLI 层：缺 `--event` 失败关闭；`--account` 不能当替代品 |
+
+| # | 变异 | 预期红 | 实测红 | 对照组 | 实测 |
+| --- | --- | --- | --- | --- | --- |
+| L | **在 apply 路径里加进一条 `source_usage_events` 插入**（缺席断言的变异方向：引入被否定的行为） | 「不写事实」那条 | `ClosesTheEventWithoutApplyingItsFact`，报 `1 fact rows exist for this payload` | 其余 3 个 | 全绿 |
+| M | `if !row.ReplayBlocked` → `if false`（去掉护栏） | 拒绝可重投事件那条 | `RefusesAReplayableEvent` | 其余 3 个 | 全绿 |
+| N | `if !in.Apply` → `if false`（dry run 走 apply） | dry-run 那条 | `DryRunWritesNothing` | 其余 3 个 | 全绿 |
+
+**变异 L 第一次又是假红，和变异 D 同一个坑：** 我又用 perl 注入带 `$1/$2/$3`
+占位符的 SQL，perl 把它们当成捕获组吃掉了，结果是语法错。目标用例确实红了，
+**但红在 `syntax error` 上，不是红在「出现了事实行」上**——只看「有红就算数」的话
+这次变异就白做了。改用 Edit 写入不带占位符的 SQL 后才拿到真信号。
+**同一个坑踩两次，记在这里：向被测代码注入 SQL 时不要用 perl。**
+
+---
+
+### 我特意没做的
+
+- 没有为了让它能投而放宽 `verifyFactBatchContextTx` 的任何一项校验。
+- 没有改数据模型、没有写 `source_economic_scan_cycle_events`、没有动 `cycle_status`。
+- 没有连生产、没有部署。
+
+---
+
 ## 改了什么
 
 | 文件 | 内容 |
 | --- | --- |
-| `backend/internal/postgresstore/ingest_requeue_dead_repair.go`（新增，~420 行） | `RepairIngestRequeueDead` 及其输入/结果类型。文件头注释写明上面三个设计问题的结论与理由，照样板 `projection_requeue_dead_repair.go` 的写法。 |
-| `backend/internal/postgresstore/ingest_requeue_dead_repair_integration_test.go`（新增） | 8 个集成测试 + fixture。 |
-| `backend/cmd/eligibility-repair/main.go` | 新 `--kind=ingest-requeue-dead`、新 `--event` 收窄标志、`--account` 扩到这个 kind、`runIngestRequeueDead`、`printIngestRequeueDeadSummary`、包文档补一条。**新增：收窄标志用错 kind 时报错而不是静默忽略。** |
-| `backend/cmd/eligibility-repair/main_test.go` | 既有 7 处 `run(...)` 调用补一个参数；新增空库冒烟测试与标志作用域测试；`TestRunApplyWithoutOperatorIDIsRejected` 加上新 kind。 |
-| `docs/ELIGIBILITY-OPERATIONS.md` | 新增《Dead source ingest events》一节，与既有 `projection-requeue-dead` 一节同格式。 |
+| `backend/internal/postgresstore/ingest_requeue_dead_repair.go`（新增，~520 行） | `RepairIngestRequeueDead` 及其输入/结果类型；`ingestRequeueDeadReplayBindingTx`（复刻 `verifyFactBatchContextTx` 的判据）。文件头注释写明三个设计问题的结论与理由，照样板 `projection_requeue_dead_repair.go` 的写法。 |
+| `backend/internal/postgresstore/ingest_requeue_dead_repair_integration_test.go`（新增） | 11 个集成测试 + fixture（含用真实 supersede 路径复现生产形状的 `commitSupersedingCycle`）。 |
+| `backend/cmd/eligibility-repair/main.go` | 新 `--kind=ingest-requeue-dead`、`--event` 收窄、`--include-blocked-cycles` 覆盖开关、`--account` 扩到这个 kind、`runIngestRequeueDead`、`printIngestRequeueDeadSummary`、包文档补一条。**收窄/覆盖标志用错 kind 时报错而不是静默忽略。** 顺手把 `run` 的三个可选标志收进 `repairFilters` 结构体（原本已经是 9 个位置参数、其中三个同类型相邻，容易写反）。 |
+| `backend/cmd/eligibility-repair/main_test.go` | 既有 7 处 `run(...)` 调用改用 `repairFilters{}`；新增空库冒烟测试与标志作用域测试（自带对照组）；`TestRunApplyWithoutOperatorIDIsRejected` 加上新 kind。 |
+| `docs/ELIGIBILITY-OPERATIONS.md` | 新增《Dead source ingest events》一节；含 replay binding 判据、`--include-blocked-cycles` 说明，以及《When the replay binding is blocked, there is nothing to run》。 |
 
 无迁移。无 `Dockerfile` 改动（`invoice-eligibility-repair` 已经从 `./cmd/eligibility-repair` 构建）。
 无上游（Sub2API/NewAPI）改动。
@@ -257,12 +492,15 @@ WHERE source_instance_id=$1 AND stream_id=$2 AND event_id=$3 AND processing_stat
 | `TestIngestRequeueDeadLeavesFreezesAndAccountStateUntouched` | 冻结仍 open、`resolution_version` 仍 1、四个处置列仍 NULL、账号仍 `frozen`、零条 `eligibility.freeze.resolved` 审计 |
 | `TestIngestRequeueDeadDoesNotReopenAPublishedScanCycle` | 已发布周期在重投后及再跑一次发布 pass 后仍 `published`，水位线一个字节没动 |
 | `TestIngestRequeueDeadHoldsAnUnpublishedScanCycleUntilTheEventTerminates` | 未发布周期在重投后确实停止发布；事件 processed 后立刻发布 |
+| `TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked` | **用真实 supersede 路径复现生产形状**（旧周期被 supersede 成 blocked，同一个确定性 event id 在后继周期重投递、后继周期发布）；重投递**不会复活死行**；dry run 与 apply 两种模式下都 `Requeued=false`、`TotalBlockedSkipped=1`、行与审计均未动；两条绑定都报出且只有 blocked 那条标为 `ReplayBinding`；`--include-blocked-cycles` 确实能强投 |
+| `TestIngestRequeueDeadBlocksAnEventWithNoReplayBinding` | 另一条拒绝分支：v3 经济事件的 `first_batch_id` 上根本没有周期映射（`verifyFactBatchContextTx` 的 `ErrForbidden`），同样跳过 |
 | `TestIngestRequeueDeadNarrowsByEventAndByAccount` | 两种收窄；`--account` 的冻结关联盲区；无关账号找到 0 条（不会退化成不收窄） |
+| `TestIngestRequeueDeadBlocksAnEventWhoseBindingPayloadHashDiverges` | 第三条拒绝分支（`m.payload_hash` 不等）。**是全量门禁抓出来的**：这条最初塞在上一个用例末尾，而那个用例的死事件没有冻结、周期永远不发布，于是第二个周期撞上 `source_economic_one_active_scan_cycle`。拆成独立 fixture 后通过 |
 | `TestIngestRequeueDeadApplyRequiresOperatorAndValidFilters` | apply 需要 operator UUID；畸形 `--event`/`--account` 被拒（而不是静默匹配 0 条）；被拒的调用没写任何东西 |
 | `TestRunIngestRequeueDeadDryRunAgainstEmptyDatabaseReportsNothing` | CLI 接线（标志、密钥、迁移校验、store 调用） |
-| `TestRunNarrowingFlagsRejectedForWrongKind` | 收窄标志作用域，**自带对照组**（实现该标志的 kind 必须仍然接受） |
+| `TestRunNarrowingFlagsRejectedForWrongKind` | 收窄/覆盖标志作用域，**自带对照组**（实现该标志的 kind 必须仍然接受） |
 
-### 变异验证（每次只改一个条件/取值，跑完整 8 个用例，记录红与绿）
+### 变异验证（每次只改一个条件/取值，跑完整用例集，记录红与绿）
 
 | # | 变异（改条件/取值，不删代码） | 预期红 | 实测红 | 对照组（必须绿）| 实测 |
 | --- | --- | --- | --- | --- | --- |
@@ -271,6 +509,15 @@ WHERE source_instance_id=$1 AND stream_id=$2 AND event_id=$3 AND processing_stat
 | C | `attempt_count=0` → `attempt_count=attempt_count` | 可认领性 | `RequeuedEventIsClaimableAgain`（报 `requeued event was not claimable: []`）、`ApplyRequeuesEveryRowWithItsOwnAudit` | 其余 6 个 | 全绿 |
 | D | **在 apply 路径里加进一条解冻 UPDATE**（缺席型断言的变异方向：引入被否定的行为） | 「不动冻结」 | `LeavesFreezesAndAccountStateUntouched`（`status="resolved" version=2`） | 其余 7 个 | 全绿 |
 | E | dry run 返回裸 `candidate` 而不是填充过的 `row` | 「报出找到的是什么」 | `DryRunWritesNothing` | 其余 7 个 | 全绿 |
+| F | `if row.ReplayBlocked && !in.IncludeBlockedCycles` → `if false`（永不跳过） | 两条 blocked 用例 | `SkipsEventsWhoseReplayCycleIsBlocked`、`BlocksAnEventWithNoReplayBinding` | 其余用例 | 全绿 |
+| G | `ingestReplayableCycleStatuses` 加上 `"blocked"` | 只有 blocked-cycle 那条 | `SkipsEventsWhoseReplayCycleIsBlocked` | 其余用例（含 `BlocksAnEventWithNoReplayBinding`，它走的是另一条分支） | 全绿 |
+| H | 绑定查询 `m.batch_id=b.batch_id` → `<>`（＝不再跟随 `first_batch_id`） | 「只有 replay binding 算数」 | `SkipsEventsWhoseReplayCycleIsBlocked` 报 **`Requeued=true for an event whose replay is refused`**——正是第一版那个缺陷；另有 3 条单绑定用例因反向失去绑定而红（已预判） | `LeavesFreezes…`、`DoesNotReopen…`、`Narrows…`、`BlocksAnEventWithNoReplayBinding`、`ApplyRequires…` | 全绿 |
+
+变异 G 与 F 的对照很说明问题：G 只让 `SkipsEventsWhoseReplayCycleIsBlocked` 变红而
+`BlocksAnEventWithNoReplayBinding` 保持绿，说明这两条用例确实钉的是两条不同的分支
+（周期状态不可接受 vs 绑定根本不存在），不是同一条断言写了两遍。
+变异 H 的失败信息**逐字**是第一版报告的缺陷，这是「只有 replay binding 算数」这条
+判据确实在起作用的最直接证据。
 
 关于变异 D 的一段插曲，值得记下来：**第一次写这个变异时它「假红」了。**
 我用 perl 注入 SQL，`$2::uuid` 里的 `$2` 被 perl 当成捕获组吃掉，变成
@@ -288,7 +535,7 @@ per-event 错误隔离把它记成了每条事件的错误。如果当时只看�
 | --- | --- | --- |
 | build | `go build ./...` | 通过 |
 | vet | `go vet ./internal/postgresstore/ ./cmd/eligibility-repair/` | 通过 |
-| 新用例 | `go test ./internal/postgresstore/ -run TestIngestRequeueDead -count=1` | 8/8 通过 |
+| 新用例 | `go test ./internal/postgresstore/ -run TestIngestRequeueDead -count=1` | 11/11 通过 |
 | CLI 用例 | `go test ./cmd/eligibility-repair/ -count=1` | 通过 |
 | 后端全量 | `go test -p 1 -count=1 ./...`（带 `INVOICE_TEST_DATABASE_URL`） | **EXIT=0，无一条 FAIL**（`postgresstore` 232.9s，`cmd/eligibility-repair` 15.9s，`testdb` 55.5s） |
 | gofmt | `gofmt -l`（两个新文件） | 干净。整包列出的是全仓 CRLF 问题（`.gitattributes` 未覆盖 `*.go`），与本切片无关 |
@@ -356,12 +603,17 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
 
 输出里逐条要看的三行：
 
-- `scan_cycle: <id> cycle_status=<status>`
-  - `published`：安全，重投不会动它（见设计问题 3）。**这 3 条预期是这个。**
+- `replay_binding: cycle=<id> cycle_status=<status> batch=<id>`
+  **只有这一行算数**，它是 `verifyFactBatchContextTx` 会拿到的那个三元组。
+  下面的 `scan_cycle:` 列表里凡是标着 `other binding, NOT used by replay` 的，
+  再健康也不代表这条事件能投。
+  - `published`：安全，重投不会动它（见设计问题 3）。
   - `processing`：重投会把这个周期暂时吊住，直到事件再次终态化。可以做，但要知道
     这段时间该 stream 不发布水位线。
-  - `blocked`：**别投**。事实会被 `verifyFactBatchContextTx` 拒收，事件会烧完 8 次
-    重试再死一次。先处理周期。
+  - 其它（`blocked`、或根本没有绑定）：**工具会自己拒绝**，这一行会跟着一条
+    `NOT REQUEUED: ...`，汇总计入 `not requeued (replay blocked)`。
+    **不要用 `--include-blocked-cycles` 去强投**——那只会烧掉 8 次重试再死一次。
+    2026-09-08 生产上这 3 条全部落在这一类；该怎么办见上面那一节。
 - `open_freeze: <id> account=<uuid> reason=EVENT_DEAD (left open on purpose)`
   记下这 3 个 freeze id 和账号 id，第 4 步要用。
 - `processing_error: ...`
@@ -474,6 +726,36 @@ SELECT (SELECT count(*) FROM eligibility_projection_jobs WHERE external_account_
 - 没有「反向工具」，也不需要：把行手工改回 `dead` 只会重现今天的故障，没有意义。
 - 如果重投后事件**成功了但结果不对**（例如落库的金额与预期不符），那不是本工具的问题
   域，走冻结/账本的既有处置路径，并保留第 1 步那份 dry run 输出作为修复前快照。
+
+---
+
+## 生产执行顺序（2026-09-08 定稿）
+
+1. **上 XM-INV-CLAIM-BINDING**（含迁移 0031）。
+2. **重跑 dry run**，确认那两条 usage 已从
+   `NOT REQUEUED (replay blocked)` 变成可投；若没变，**停下来**，不要用
+   `--include-blocked-cycles` 硬投。
+3. **重投那两条 usage**（`--kind=ingest-requeue-dead --event=<id> --apply`）。
+4. **核对事实真的进账了**——负责人加的这一道，必须做：
+
+   ```sql
+   SELECT external_usage_id, event_time, service_units, source_revision_hash
+   FROM source_usage_events
+   WHERE source_revision_hash IN ('<hash1>','<hash2>');
+   ```
+
+   预期两条 payload_hash 各对应一行。**「从队列里没了」和「数据进去了」是两回事**：
+   事件走到 `processed` 只说明它不再占着队列，它也可能是走了
+   pre-anchor / pre-policy 的跳过分支（那两条分支只写审计行，**不**写事实行）。
+   查不到就立即回报，不要往下走。
+5. **等投影排空**（该账号 `eligibility_projection_jobs` 为 0 行）。
+6. **走后台正规界面处置三张冻结**（带 MFA 与加密处置说明）。
+7. **最后才处置余额快照那一条**：
+   `--kind=ingest-acknowledge-unreplayable --event=<id>`，先 dry run 给产品负责人过目，
+   点头后再 `--apply`。这一步之后 `Dead` 归零，readyz 才能绿。
+
+第 7 步**必须在最后**：它是一个不可逆的「承认这条数据没了」。只要前面几步还有
+任何一步没走完，就不要做它。
 
 ---
 
