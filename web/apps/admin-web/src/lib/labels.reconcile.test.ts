@@ -26,8 +26,13 @@
  *  非 file: 的地址，readFileSync 直接拒收（"The URL must be of scheme file"）。 */
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
-import { describeServiceStatus } from "@xingmang/ui-admin";
-import { ALERT_RULES } from "../api/alerts";
+import { describeFreshness, describeServiceStatus } from "@xingmang/ui-admin";
+import {
+  ALERT_EVALUATE_INTERVAL_SECONDS,
+  ALERT_RULES,
+  FIRE_COUNT_HEADER,
+  FIRE_COUNT_MEANING,
+} from "../api/alerts";
 import { appStatusLabel, authModeLabel, releaseKindLabel } from "../api/extapp";
 import {
   CLIENT_STATUS_HINTS,
@@ -58,6 +63,7 @@ import {
   RISK_LEVELS,
   UPSTREAM_ACCOUNT_STATUSES,
 } from "./labels";
+import { FRESHNESS_PRIORITY } from "./workbench";
 
 /** 仓库根。本文件在 web/apps/admin-web/src/lib/ 下，往上五层。 */
 const REPO_ROOT = new URL("../../../../../", import.meta.url);
@@ -615,6 +621,213 @@ describe("资源目录：连接状态要有中文", () => {
   });
 });
 
+// --- 数据新鲜度：五个档位的中文，以及「取最差」的顺序 ----------------------
+
+/** 从 `Freshness()` 的**函数体**里把优先级推导出来。
+ *
+ *  后端没有导出有序清单（那才是真正该有的东西，见交接文档 follow_up），今天
+ *  唯一的真相是那个函数**先判哪个、后判哪个**。所以按 `f.State = StateX` 的
+ *  首次出现顺序去重，得到的就是「从最严重到最不严重」。
+ *
+ *  **这条判据依赖一个结构习惯**（函数写成最严重优先的早返回 / switch），不是
+ *  契约。习惯变了它不会报错，只会给出一个更短的清单——所以下面第一条断言先
+ *  钉住数量下界：被信任的过期闸比没有闸更坏。 */
+export function freshnessPriorityFromBody(source: string): string[] {
+  const start = source.indexOf("func (o Observation) Freshness(");
+  if (start < 0) return [];
+  const end = source.indexOf("\n}\n", start);
+  const body = source.slice(start, end < 0 ? source.length : end);
+  const byName = new Map<string, string>();
+  for (const m of source.matchAll(/^\s*(?:const\s+)?([A-Za-z_]\w*)\s+State\s*=\s*"([^"]*)"/gm)) {
+    byName.set(m[1] ?? "", m[2] ?? "");
+  }
+  const out: string[] = [];
+  for (const m of body.matchAll(/f\.State\s*=\s*(State\w+)/g)) {
+    const value = byName.get(m[1] ?? "");
+    if (value !== undefined && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+describe("数据新鲜度：五个档位要有中文，取最差的顺序要与后端一致", () => {
+  const source = goSource("internal/platform/ops/freshness.go");
+  const states = goTypedConstValues(source, "State");
+  const fromBody = freshnessPriorityFromBody(source);
+
+  it("两个抽取器都确实抓到了东西", () => {
+    // 抽空会让下面每一条断言恒真——这类测试最典型的假绿
+    expect(states.length).toBeGreaterThanOrEqual(5);
+    expect(states).toContain("failed");
+    expect(states).toContain("uninitialized");
+    expect(fromBody.length).toBeGreaterThanOrEqual(5);
+  });
+
+  /** 新鲜度的兜底带一层「未知状态（…）」的包装，与原值**不逐字相同**，所以
+   *  通用的 `translated` 判据在这里恒为真——不能用它，否则「每一档都有中文」
+   *  会对任何一个后端新增的状态自动成立。判据改成「中文名里不含原始取值」，
+   *  下面的反向验证喂 "melted" 确认它真的判得出。 */
+  const freshnessTranslated = (state: string): boolean => {
+    const label = describeFreshness(state).label;
+    return label !== "" && label !== state && !label.includes(state);
+  };
+
+  it("每一个新鲜度状态都有中文", () => {
+    const missing = states.filter((s) => !freshnessTranslated(s));
+    expect(missing).toEqual([]);
+  });
+
+  // 「发现而非手列」：后端加第六个状态，这一条红。
+  it("前端的优先级清单不多不少，正好是后端那五个状态", () => {
+    expect([...FRESHNESS_PRIORITY].sort()).toEqual([...states].sort());
+  });
+
+  // 顺序不再是第二份手写副本：它被后端函数体钉住。
+  it("取最差的顺序与后端 Freshness() 的判定顺序逐值相同", () => {
+    expect([...FRESHNESS_PRIORITY]).toEqual(fromBody);
+  });
+
+  it("逐值钉死：失败排在未初始化之前（XM-0031 的修正方向）", () => {
+    // 两个抽取器同时失灵时的最后一道。前端曾把这两个反过来，于是一个正在
+    // 发生的故障被显示成中性的「尚未接入」。
+    expect(FRESHNESS_PRIORITY[0]).toBe("failed");
+    expect(FRESHNESS_PRIORITY.indexOf("failed")).toBeLessThan(
+      FRESHNESS_PRIORITY.indexOf("uninitialized"),
+    );
+  });
+
+  /** 文档注释里那句「优先级：失败 > 未初始化 > 延迟 > 部分 > 新鲜。」用的是
+   *  中文简称，与 describeFreshness 的中文名（同步失败 / 数据延迟 / 数据不完整
+   *  / 数据新鲜）**不逐字相同**，所以要一座桥。
+   *
+   *  这座桥是人写的，因此它自己也要被钉住：下面两条断言分别把它的两端对上
+   *  「注释里实际出现的词」与「后端实际有的状态」——后端换词或加状态，桥先红，
+   *  而不是让顺序对账悄悄少比一项。 */
+  const COMMENT_WORD_TO_STATE: Readonly<Record<string, string>> = {
+    失败: "failed",
+    未初始化: "uninitialized",
+    延迟: "stale",
+    部分: "partial",
+    新鲜: "fresh",
+  };
+  const commentWords = (/优先级：([^\n]*)。/.exec(source)?.[1] ?? "").split(" > ");
+
+  it("注释里那句优先级确实抓到了，而且中文桥两端都对得上", () => {
+    expect(commentWords).toHaveLength(5);
+    expect([...commentWords].sort()).toEqual(Object.keys(COMMENT_WORD_TO_STATE).sort());
+    expect([...Object.values(COMMENT_WORD_TO_STATE)].sort()).toEqual([...states].sort());
+  });
+
+  it("后端自己的注释与自己的实现先对得上", () => {
+    // 这一条红说明后端的注释与代码漂开了——那是后端的问题，但也该有人看见
+    expect(commentWords.map((w) => COMMENT_WORD_TO_STATE[w])).toEqual(fromBody);
+  });
+
+  describe("变异验证：换成合成源码走同一条流水线", () => {
+    it("对调 failed / uninitialized 两个分支，推导顺序跟着变", () => {
+      // 改输入而不是删实现：删实现红的是编译，什么也证明不了
+      const mutated = source
+        .replace("f.State = StateFailed", "f.State = StateTmpMarker")
+        .replace("f.State = StateUninitialized", "f.State = StateFailed")
+        .replace("f.State = StateTmpMarker", "f.State = StateUninitialized");
+      expect(mutated).not.toBe(source);
+      expect(freshnessPriorityFromBody(mutated)[0]).toBe("uninitialized");
+      // 而前端那一份没跟着变 —— 顺序对账会红，正是要的
+      expect([...FRESHNESS_PRIORITY]).not.toEqual(freshnessPriorityFromBody(mutated));
+    });
+
+    it("后端多一个状态时，「不多不少」那条会把它算成缺失", () => {
+      const mutated = source.replace(
+        '\tStateFresh         State = "fresh"',
+        '\tStateFresh         State = "fresh"\n\tStateDegraded      State = "degraded"',
+      );
+      expect(mutated).not.toBe(source);
+      const added = goTypedConstValues(mutated, "State").filter(
+        (s) => !FRESHNESS_PRIORITY.includes(s),
+      );
+      expect(added).toEqual(["degraded"]);
+    });
+
+    it("函数体改掉赋值写法让抽取器抓空时，数量下界那条拦得住", () => {
+      const renamed = source.replaceAll("f.State = ", "f.state = ");
+      expect(freshnessPriorityFromBody(renamed)).toEqual([]);
+      // 抽空之后顺序对账会「恒真地」通过吗？不会——空数组与五个值不相等。
+      // 但集合断言那一条仍然只比 goTypedConstValues 的结果，所以数量下界
+      // 必须单独存在。
+      expect(freshnessPriorityFromBody(renamed).length).toBeLessThan(5);
+    });
+
+    it("「已翻译」的判据能判出没翻译：喂一个后端不存在的状态", () => {
+      // 通用的 translated 在这里会说 true（兜底包了一层「未知状态（…）」），
+      // 那正是本组不能用它的原因——先把这件事钉住，免得有人顺手换回去
+      expect(translated(describeFreshness("melted").label, "melted")).toBe(true);
+      expect(freshnessTranslated("melted")).toBe(false);
+      expect(describeFreshness("melted").label).toContain("melted");
+      // 对照：真的翻译过的值，判据说 true。少了这一条，上面也可能只是恒假
+      expect(freshnessTranslated("failed")).toBe(true);
+    });
+  });
+});
+
+// --- 告警计数：「评估 N 轮」这句话钉在后端事实上 ----------------------------
+
+/** `60 * time.Second` → 60；认不出来返回 NaN（同 goDurationHours 的纪律）。 */
+export function goDurationSeconds(expression: string): number {
+  const seconds = /^(\d+)\s*\*\s*time\.Second$/.exec(expression.trim());
+  return seconds ? Number(seconds[1]) : Number.NaN;
+}
+
+describe("告警计数：界面上的「评估 N 轮」要与后端的评估周期、SQL 对得上", () => {
+  const jobSource = goSource("internal/platform/jobs/alert_evaluate.go");
+  const sqlSource = goSource("db/queries/alerts.sql");
+  const interval = /DefaultAlertEvaluateInterval\s*=\s*([^\n/]+)/.exec(jobSource)?.[1] ?? "";
+  const touchAlert = (() => {
+    const start = sqlSource.indexOf("-- name: TouchAlert");
+    if (start < 0) return "";
+    const next = sqlSource.indexOf("-- name:", start + 1);
+    return sqlSource.slice(start, next < 0 ? sqlSource.length : next);
+  })();
+
+  it("两个抽取器确实抓到了东西", () => {
+    expect(interval).not.toBe("");
+    expect(goDurationSeconds(interval)).toBeGreaterThan(0);
+    expect(touchAlert).toContain("UPDATE alerts.alert");
+  });
+
+  it("前端说的秒数就是后端的评估周期", () => {
+    expect(ALERT_EVALUATE_INTERVAL_SECONDS).toBe(goDurationSeconds(interval));
+    expect(FIRE_COUNT_MEANING).toContain(`${goDurationSeconds(interval)} 秒`);
+  });
+
+  // 这一条是「评估 N 轮」这句文案的**依据**：TouchAlert 每命中一轮 +1。
+  // 后端哪天把 fire_count 改成真正的发生次数，这里会红，提醒把文案改回
+  // 「触发 N 次」——一句钉不住后端事实的文案，只是把一个猜测换成另一个猜测。
+  it("fire_count 确实是每评估一轮 +1，而不是别的什么口径", () => {
+    expect(touchAlert).toMatch(/fire_count\s*=\s*fire_count \+ 1/);
+    expect(FIRE_COUNT_MEANING).toContain("评估轮数，不是发生次数");
+    expect(FIRE_COUNT_HEADER).toBe("评估轮次");
+  });
+
+  it("界面上不再有把它说成「次数 / 命中」的地方", () => {
+    // 同一句话曾有五份措辞不同的副本（工作台待办、告警中心的列与表格说明、
+    // 平台告警面板的列与表格说明、平台概览那一栏），于是同一个数在三个页面
+    // 上有三种叫法。这一条跨文件 grep，防的是「只改了工作台」。
+    const srcRoot = new URL("../", import.meta.url);
+    const suspects = [
+      "pages/AlertsPage.tsx",
+      "components/PlatformAlertsPanel.tsx",
+      "lib/overview.ts",
+      "lib/workbench.ts",
+    ];
+    for (const relative of suspects) {
+      const text = readFileSync(new URL(relative, srcRoot), "utf8");
+      // 只看真正渲染出来的字面量：注释里复述那句旧话是允许的（本片正是
+      // 靠注释记录它为什么错），所以先把 // 与 /** */ 剥掉
+      const code = text.replaceAll(/\/\*[\s\S]*?\*\//g, "").replaceAll(/\/\/[^\n]*/g, "");
+      expect(code, relative).not.toMatch(/命中\s*\$\{|命中 \d+ 次|"次数"/);
+    }
+  });
+});
+
 // --- 枚举清点：后端一共有多少个枚举，我盖到了几个 --------------------------
 
 /** 后端全部字符串枚举的清点。
@@ -677,7 +890,7 @@ const ENUM_INVENTORY: Readonly<
   "sms.NumberState": { status: "labelled-elsewhere", note: "号码状态，SMSPanel 有映射与「未知状态」兜底" },
   "sms.OperationState": { status: "labelled-elsewhere", note: "接码操作状态，SMSPanel" },
   "sms.Capability": { status: "labelled-elsewhere", note: "上游能力位，SMSPanel" },
-  "ops.State": { status: "labelled-elsewhere", note: "数据新鲜度五档，ui-admin/freshness.ts 的 describeFreshness" },
+  "ops.State": { status: "reconciled", note: "数据新鲜度五档：中文在 ui-admin/freshness.ts 的 describeFreshness，取最差的顺序在 lib/workbench.ts 的 FRESHNESS_PRIORITY，两者都有差集断言" },
   "server.AssetStatus": { status: "labelled-elsewhere", note: "服务器资产状态，ServerAssetsPanel 的 ASSET_STATUS_OPTIONS" },
   "server.BillingCycle": { status: "labelled-elsewhere", note: "计费周期，lib/serverRegistryForm.ts" },
   "server.CertSource": { status: "labelled-elsewhere", note: "证书来源，ServerDomainsPanel" },

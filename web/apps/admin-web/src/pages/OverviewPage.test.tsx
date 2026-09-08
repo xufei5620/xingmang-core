@@ -208,6 +208,172 @@ function workCard(): HTMLElement {
     .closest("section") as HTMLElement;
 }
 
+/** 「平台状态矩阵」那一张卡。理由同 workCard：「数据不完整」「未接入」在这一
+ *  屏上至少各出现两三处（顶部四格、运营焦点、矩阵五行），全屏找要么撞见别人
+ *  的，要么——更糟——让缺席型断言恒真。 */
+function matrixCard(): HTMLElement {
+  return screen
+    .getByRole("heading", { name: "平台状态矩阵", level: 3 })
+    .closest("section") as HTMLElement;
+}
+
+/** 一条已放弃的后台任务（`GET /api/v1/jobs/runs` 的一项）。 */
+function discardedRun(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    kind: "card_sync",
+    queue: "default",
+    state: "discarded",
+    attempt: 3,
+    max_attempts: 3,
+    created_at: "2026-09-07T08:00:00Z",
+    scheduled_at: "2026-09-07T08:00:00Z",
+    attempted_at: "2026-09-07T09:00:00Z",
+    finalized_at: "2026-09-07T09:59:00Z",
+    duration_ms: 120,
+    error_count: 3,
+    last_error: null,
+    args: {},
+    ...overrides,
+  };
+}
+
+// XM-WORKBENCH-TRUTH：生产上 288 条 card_sync 把这一格全占满，真正需要人处理
+// 的东西被挤出首屏。合并之后最要紧的不是「少了几行」，而是那个计数会不会被读
+// 成「一共就这么多」——取数上限是 20，真实是 288。
+describe("我的待处理·失败任务合并（XM-WORKBENCH-TRUTH）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(APPROVALS_NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const twenty = Array.from({ length: 20 }, (_, i) => discardedRun({ id: 100 + i }));
+
+  function stubJobs(body: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) =>
+        Promise.resolve(
+          input.startsWith("/api/v1/jobs/runs") ? fakeResponse(body) : baseHandler(input),
+        ),
+      ),
+    );
+  }
+
+  it("同一类型的 20 条合并成一行，不再占满整格", async () => {
+    stubJobs({ items: twenty, next_before: 12345 });
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    await within(card).findByText(/卡片数据同步 已放弃/);
+    expect(within(card).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  // 取数上限 20 而真实 288：只显示「×20」会把界面从「288 行刷屏」退化成
+  // 「一个看起来权威的错数字」。粒度归 ×N 的「+」，整句归截断提示，两处分工
+  // 不重复，但缺一不可。
+  it("取数被截断时既带「+」也说清只取了 20 条", async () => {
+    stubJobs({ items: twenty, next_before: 12345 });
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    expect(await within(card).findByText(/卡片数据同步 已放弃 ×20\+/)).not.toBeNull();
+    expect(within(card).getByText(/已放弃的后台任务只取了 20 条/)).not.toBeNull();
+  });
+
+  it("没有被截断时不带「+」——不给一个假的「还有更多」", async () => {
+    stubJobs({ items: twenty, next_before: 0 });
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    expect(await within(card).findByText(/卡片数据同步 已放弃 ×20$/)).not.toBeNull();
+  });
+
+  // 折叠时明细必须**不在 DOM 里**。用 <details> 或 CSS 隐藏的话，jsdom 里
+  // 照样查得到，这条断言会恒真——本仓在 Portal / 懒渲染上踩过同一个坑。
+  it("明细默认收起，展开后才出现在文档里", async () => {
+    stubJobs({ items: twenty, next_before: 0 });
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    const toggle = await within(card).findByRole("button", { name: /卡片数据同步 已放弃/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(within(card).queryByText(/卡片数据同步 重试 3 次后放弃/)).toBeNull();
+
+    await act(async () => {
+      toggle.click();
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(within(card).getAllByText(/卡片数据同步 重试 3 次后放弃/)).toHaveLength(20);
+  });
+
+  it("只有一条时不合并、也没有展开按钮，逐字保持原样", async () => {
+    stubJobs({ items: [discardedRun({ id: 7 })], next_before: 0 });
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    expect(await within(card).findByText("卡片数据同步 重试 3 次后放弃")).not.toBeNull();
+    expect(within(card).queryByRole("button", { name: /已放弃 ×/ })).toBeNull();
+  });
+});
+
+// 这一格的黄灯亮了两周，界面上一个字的说明都没有。纯函数测试证明算得对，
+// DOM 测试证明它真的被渲染出来——两者缺一，另一半就会假绿。
+describe("平台状态矩阵：把「为什么是这个状态」写进格子里", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const partialMetric = {
+    metric_key: "newapi.subscription.daily",
+    source: "newapi-prod",
+    environment: "development",
+    watermark: "day:2026-09-06;subscription:unavailable_over_http",
+    value: {},
+    freshness: {
+      state: "partial",
+      staleness_seconds: 30,
+      threshold_seconds: 1800,
+      is_partial: true,
+      observed_at: "2026-09-07T09:59:00Z",
+      last_success: "2026-09-07T09:59:00Z",
+      last_error_code: "",
+    },
+  };
+
+  it("数据不完整的那一行说清是哪条指标、为什么，并挂上水位线原文", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) =>
+        Promise.resolve(
+          input.startsWith("/api/v1/metrics")
+            ? fakeResponse({ items: [partialMetric] })
+            : baseHandler(input),
+        ),
+      ),
+    );
+    renderWorkbench("/");
+    const card = matrixCard();
+    const note = await within(card).findByText(/NewAPI 日订阅这一轮采集成功了/);
+    expect(note.textContent).toContain("这不是故障，也不会自己好转");
+    expect(note.getAttribute("title")).toContain("unavailable_over_http");
+    // 解释挂在对的那一行上，不是整表一句
+    const newapiRow = within(card).getByRole("link", { name: "NewAPI" }).closest("tr");
+    expect(newapiRow?.contains(note)).toBe(true);
+  });
+
+  it("开票那一行在格子里说清「只读对接」与「点进去的嵌入管理端」不是一回事", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string) => Promise.resolve(baseHandler(input))));
+    renderWorkbench("/");
+    const card = matrixCard();
+    const scope = await within(card).findByText(/这一行说的是只读数据对接/);
+    expect(scope.textContent).toContain("两者不是一回事");
+    const invoiceRow = within(card).getByRole("link", { name: "开票系统" }).closest("tr");
+    expect(invoiceRow?.contains(scope)).toBe(true);
+    // 这一行今天算出来仍然是「未接入」——诚实不等于换结论
+    expect(invoiceRow?.textContent).toContain("未接入");
+  });
+});
+
 describe("我的待处理·待审批（XM-WORKBENCH-APPROVALS）", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

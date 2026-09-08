@@ -13,6 +13,9 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   ALERT_STATUS_ALL,
+  describeFireCount,
+  FIRE_COUNT_HEADER,
+  FIRE_COUNT_MEANING,
   listAlerts,
   listAlertsPage,
   ruleLabel,
@@ -279,12 +282,26 @@ function alertColumns(
     },
     {
       id: "fireCount",
-      header: "次数",
+      // 这一列以前叫「次数」，悬停说的是「被去重合并掉的命中次数（含首次）」
+      // ——两句都不对：fire_count 数的是每 60 秒重评一轮、条件仍成立就 +1 的
+      // 轮数（见 api/alerts 的 fire_count 契约注释）。措辞与工作台待办、平台
+      // 告警面板共用 FIRE_COUNT_HEADER / FIRE_COUNT_MEANING 一份。
+      header: FIRE_COUNT_HEADER,
       numeric: true,
       value: (alert) => alert.fire_count,
-      cell: (alert) => (
-        <span title="被去重合并掉的命中次数（含首次）">{alert.fire_count}</span>
-      ),
+      cell: (alert) => {
+        const counts = describeFireCount(alert);
+        return (
+          <span title={FIRE_COUNT_MEANING} className="block">
+            {/* trigger_count 到位后两个数一起显示：它们是不同的事实，
+                「触发几次」替代不了「已经这样多少轮」。 */}
+            {counts.triggers ? (
+              <span className="block text-xs text-fg-muted">{counts.triggers}</span>
+            ) : null}
+            <span className="block">{counts.rounds}</span>
+          </span>
+        );
+      },
     },
     {
       id: "notify",
@@ -338,7 +355,7 @@ function AlertsTable({
 }) {
   return (
     <DataTableV2
-      caption="告警列表：严重度、状态、首次与最近发现、命中次数与投递结果"
+      caption={`告警列表：严重度、状态、首次与最近发现、${FIRE_COUNT_HEADER}与投递结果`}
       columns={alertColumns(onAcknowledged)}
       // 默认顺序仍是「最严重的在最上面」：DataTableV2 不排序时保持入参顺序
       rows={sortForDisplay(items)}

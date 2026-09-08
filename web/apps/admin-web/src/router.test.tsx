@@ -1107,8 +1107,12 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
       return okHandler(url);
     });
     renderRoute("/dashboard?work=jobs");
-    await screen.findAllByText(/重试 3 次后放弃/);
+    // 本片起同 kind 的已放弃作业合并成一行带计数（20 条 newapi_sync = 一行），
+    // 明细收在展开里，所以这里等的是合并行的标题而不是逐条那句
+    await screen.findByText(/NewAPI 同步 已放弃 ×20/);
     expect(screen.queryByText(/这一屏可能不是全部/)).toBeNull();
+    // 没有下一页时计数后面不带「+」：那才是"这就是全部 20 条"
+    expect(screen.queryByText(/已放弃 ×20\+/)).toBeNull();
   });
 
   it("没取满时不显示截断提示——显示一句「没有截断」是噪声", async () => {
@@ -2879,7 +2883,7 @@ describe("告警中心页", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("列表显示严重度、状态、首见/最近、次数与投递状态", async () => {
+  it("列表显示严重度、状态、首见/最近、评估轮次与投递状态", async () => {
     renderRoute("/alerts");
     expect(await screen.findByText("指标 sub2api.revenue.daily 同步失败")).not.toBeNull();
 
@@ -2890,8 +2894,10 @@ describe("告警中心页", () => {
     // 首见与最近都要显示：只有一个就答不出「这个问题持续了多久」
     expect(screen.getByText(/首次 2026-08-26 10:00:00 UTC/)).not.toBeNull();
     expect(screen.getAllByText(/最近 2026-08-26 10:05:00 UTC/).length).toBeGreaterThan(0);
-    // fire_count：抖了一下与持续了两小时的唯一区分依据
-    expect(screen.getByText("6")).not.toBeNull();
+    // fire_count：抖了一下与一直在响的唯一区分依据。**它是评估轮数不是次数**
+    // ——每 60 秒重评一轮、条件仍成立就 +1，所以列上写的是「评估 6 轮」而不是
+    // 一个裸数字 6（裸数字既读不出口径，也会跟表里别的 6 撞上）
+    expect(alertsTable.getByText("评估 6 轮")).not.toBeNull();
     // 规则名翻成中文，原始键仍在 detail 之外可查
     expect(screen.getByText("指标同步失败")).not.toBeNull();
   });

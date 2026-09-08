@@ -7,7 +7,7 @@ import {
   navLabel,
 } from "@xingmang/ui-admin";
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
-import type { ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   ALERT_STATUS_ALL,
@@ -424,7 +424,9 @@ function WorkList({
   const items = [
     ...workItemsFromAlerts(alerts, now),
     ...workItemsFromApprovals(approvals, now),
-    ...workItemsFromJobRuns(jobs, now),
+    // truncated 这一位必须传进去：合并行显示的是「×20」，而生产上真实是 288。
+    // 不带这一位，一个看起来权威的错数字比 288 行刷屏更危险。
+    ...workItemsFromJobRuns(jobs, now, { truncated: jobsTruncated }),
   ];
   const shown = activeId ? items.filter((item) => item.categoryId === activeId) : items;
 
@@ -468,7 +470,9 @@ function WorkList({
       <p className="mb-3 text-xs text-fg-muted">
         本阶段有数据源的是「故障」「待审批」与「失败任务」三类：「故障」的内容是活跃告警——故障事件（Incident）对象随治理段切片建立后再单列；
         「待审批」是审批中心里仍等着投票的单，最多 {WORK_APPROVALS_LIMIT} 条，已过期的不算——它已经批不动了；
-        「失败任务」只收已放弃（重试用尽、不会再跑）的后台任务，最多 {WORK_JOBS_LIMIT} 条。
+        「失败任务」只收已放弃（重试用尽、不会再跑）的后台任务，最多 {WORK_JOBS_LIMIT} 条，
+        同一类型的已放弃作业合并成一行显示计数（点标题展开明细），所以计数只统计这最多{" "}
+        {WORK_JOBS_LIMIT} 条、不是该类型的全部；条数后带「+」就表示还有没取到的。
         重试中的任务不在这里，它不需要人动手，看过程请去后台任务页的「失败与重试」。
         其余各类的空是「还没接」，不是「没有问题」。
       </p>
@@ -533,10 +537,14 @@ function FilterChip({
 }
 
 function WorkRow({ item }: { item: WorkItem }) {
+  // 合并行与单条行是两种交互，分成两个组件而不是在一个里面判：hook 不能条件
+  // 调用，而合并行需要自己的展开状态。
+  if (item.children) return <MergedWorkRow item={item} />;
   return (
     <li>
       <Link
         to={item.to}
+        title={item.hint}
         className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-edge px-3 py-2 hover:bg-surface-muted"
       >
         <Badge tone={item.tone}>{item.categoryLabel}</Badge>
@@ -544,6 +552,51 @@ function WorkRow({ item }: { item: WorkItem }) {
         <span className="truncate text-xs text-fg-muted">{item.meta}</span>
         <span className="shrink-0 text-xs text-fg-muted tabular-nums">{item.due}</span>
       </Link>
+    </li>
+  );
+}
+
+/** 合并成一行的已放弃作业（同一个 job kind）。
+ *
+ *  **展开与跳转是两个可点区域**：整行套一个 `<Link>` 再往里塞一个 `<button>`
+ *  是嵌套交互控件，读屏与键盘都会失灵。
+ *
+ *  明细用**条件渲染**，不用 `<details>`、也不用 CSS 隐藏：折叠时 `<details>`
+ *  的内容仍然留在 DOM 里，testing-library 照样查得到，于是「折叠时看不到明细」
+ *  那条断言会恒真——本仓在 Portal / 懒渲染上踩过同一个坑。 */
+function MergedWorkRow({ item }: { item: WorkItem }) {
+  const [open, setOpen] = useState(false);
+  const detailId = useId();
+  const children = item.children ?? [];
+  return (
+    <li>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-edge px-3 py-2">
+        <Badge tone={item.tone}>{item.categoryLabel}</Badge>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={detailId}
+          onClick={() => setOpen((v) => !v)}
+          className="min-w-0 flex-1 truncate text-left text-sm font-medium text-fg hover:underline"
+        >
+          {item.title}
+          <span className="ml-2 text-xs font-normal text-fg-muted">
+            {open ? "收起明细" : "展开明细"}
+          </span>
+        </button>
+        <span className="truncate text-xs text-fg-muted">{item.meta}</span>
+        <span className="shrink-0 text-xs text-fg-muted tabular-nums">{item.due}</span>
+        <Link to={item.to} className="shrink-0 text-xs text-accent hover:underline">
+          去后台任务页
+        </Link>
+      </div>
+      {open ? (
+        <ul id={detailId} className="mt-1 flex flex-col gap-1 pl-6">
+          {children.map((child) => (
+            <WorkRow key={child.id} item={child} />
+          ))}
+        </ul>
+      ) : null}
     </li>
   );
 }
@@ -688,6 +741,14 @@ function MatrixTableRow({ row }: { row: MatrixRow }) {
         <Link to={row.to} className="font-medium text-accent hover:underline">
           {row.label}
         </Link>
+        {/* 这一行说的是什么范围。今天只有开票那一行挂：它写着「未接入」，而
+            点进去是一个能用的嵌入管理端，两者不是一回事——这句话必须在格子
+            里，不能只靠 hover。 */}
+        {row.scopeNote ? (
+          <span className="mt-1 block max-w-80 text-xs font-normal text-fg-muted">
+            {row.scopeNote}
+          </span>
+        ) : null}
       </td>
       <td className="py-2 text-xs text-fg-muted">{row.stage}</td>
       <td className="py-2">
@@ -695,6 +756,16 @@ function MatrixTableRow({ row }: { row: MatrixRow }) {
       </td>
       <td className="py-2">
         <FreshnessBadge freshness={row.freshness} />
+        {/* 「数据新鲜度必须可见」在这一屏上原来只剩四个字的徽章：NewAPI 那格
+            的黄灯亮了两周，没人说得出为什么。原因由 workbench 从数据里得出。 */}
+        {row.freshnessNote ? (
+          <span
+            className="mt-1 block max-w-80 text-xs text-fg-muted"
+            title={row.freshnessEvidence}
+          >
+            {row.freshnessNote}
+          </span>
+        ) : null}
       </td>
       <td className="py-2 text-right tabular-nums text-fg">{row.events}</td>
       <td className="py-2 text-xs text-fg-muted tabular-nums">

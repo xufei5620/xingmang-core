@@ -1,11 +1,17 @@
 import type { BadgeTone } from "@xingmang/ui-primitives";
 import { describeServiceStatus, platformNavSpec, type FreshnessContract } from "@xingmang/ui-admin";
-import type { AlertItem } from "../api/alerts";
+import {
+  alertAgeAnchor,
+  describeFireCount,
+  FIRE_COUNT_MEANING,
+  type AlertItem,
+} from "../api/alerts";
 import type { ApprovalItem } from "../api/approvals";
 import { jobKindLabel, type JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import { describeSeverity, sortForDisplay } from "./alerts";
 import { groupByRisk, isEffectivelyExpired, voteProgress } from "./approvals";
+import { metricLabel } from "./metrics";
 import { PLATFORM_CATALOG, pendingBadge, platformOfMetricKey } from "./platforms";
 
 /** 「最近恢复」的回看窗口（原型副标题逐字：「最近 24 小时」）。 */
@@ -111,6 +117,11 @@ export interface WorkItem {
   /** 右侧那一列：什么时候要处理完 / 现在什么进度。 */
   due: string;
   to: string;
+  /** 悬停说明：这一行的数字有什么读起来不直观的地方。缺省不挂。 */
+  hint?: string;
+  /** 被合并进这一行的明细（同 kind 的已放弃作业）。**只有合并行才有**，
+   *  单条不带（也不显示「×1」），否则界面上会多出一堆没有内容的展开箭头。 */
+  children?: WorkItem[];
 }
 
 /** 把一段秒数说成人话。`ageText`（过去多久）与 `untilText`（还有多久）共用这
@@ -145,16 +156,24 @@ function untilText(toIso: string, now: Date): string | null {
 export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): WorkItem[] {
   return sortForDisplay(alerts.filter((alert) => alert.status !== "RESOLVED")).map((alert) => {
     const severity = describeSeverity(alert.severity);
+    const age = alertAgeAnchor(alert);
     return {
       id: alert.id,
       categoryId: "incidents",
       categoryLabel: severity.label,
       tone: severity.tone,
       title: alert.title,
-      meta: `${alert.rule_key} · ${alert.environment} · 已持续 ${ageText(alert.opened_at, now)}`,
-      // 「触发 N 次」比「首次何时」更能区分「抖了一下」和「一直在响」
-      due: `触发 ${alert.fire_count} 次`,
+      // 「已持续」优先用 first_opened_at；那个字段今天还不存在，所以退回
+      // opened_at 并把「恢复后重新打开会重新计时」挂到 hint 上（见
+      // api/alerts 的 alertAgeAnchor）——一个系统性偏小的数字不加说明地摆
+      // 出来，与摆一个错数字没有区别。
+      meta: `${alert.rule_key} · ${alert.environment} · 已持续 ${ageText(age.since, now)}`,
+      // **不是「触发 N 次」。** fire_count 是每 60 秒重评一轮、条件仍成立就
+      // +1 的轮数（见 api/alerts 的 fire_count 契约注释）；措辞与告警中心、
+      // 平台告警面板共用 describeFireCount 一份，三处不各说各的。
+      due: describeFireCount(alert).combined,
       to: "/alerts",
+      hint: [FIRE_COUNT_MEANING, age.hint].filter(Boolean).join(" "),
     };
   });
 }
@@ -168,27 +187,86 @@ export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): Wo
  *  重试中的任务在后台任务页「失败与重试」页签里，那里才是看过程的地方。
  *
  *  也不收 `cancelled`：那是有人主动取消的，不是失败。 */
-export function workItemsFromJobRuns(runs: readonly JobRunItem[], now: Date): WorkItem[] {
-  return runs
-    .filter((run) => run.state === "discarded")
-    .map((run) => {
-      // 放弃的时刻优先用 finalized_at（River 定终态的时刻）；缺了就退回最近
-      // 一次尝试，再退回创建时刻——不显示"0 秒前"这种编出来的新鲜。
-      const at = run.finalized_at ?? run.attempted_at ?? run.created_at;
-      return {
-        id: `job-${run.id}`,
-        categoryId: "jobs",
-        categoryLabel: "已放弃",
-        tone: "danger" as const,
-        title: `${jobKindLabel(run.kind)} 重试 ${run.max_attempts} 次后放弃`,
-        // 错误原文可能很长且带栈，这里只放一行定位信息；正文在后台任务页看。
-        meta: `${run.queue} · 共失败 ${run.error_count} 次 · ${ageText(at, now)}前`,
-        due: "需人工处理",
-        // 直接落到后台任务页的「多次失败任务」页签（state=discarded 那个），
-        // 而不是页面首屏——点进去还要自己找是多余的一步。
-        to: "/jobs?sub=repeated",
-      };
-    });
+export function workItemsFromJobRuns(
+  runs: readonly JobRunItem[],
+  now: Date,
+  options: { truncated?: boolean } = {},
+): WorkItem[] {
+  const discarded = runs.filter((run) => run.state === "discarded");
+
+  /** 放弃的时刻优先用 finalized_at（River 定终态的时刻）；缺了就退回最近
+   *  一次尝试，再退回创建时刻——不显示"0 秒前"这种编出来的新鲜。 */
+  const discardedAt = (run: JobRunItem): string =>
+    run.finalized_at ?? run.attempted_at ?? run.created_at;
+
+  const single = (run: JobRunItem): WorkItem => ({
+    id: `job-${run.id}`,
+    categoryId: "jobs",
+    categoryLabel: "已放弃",
+    tone: "danger" as const,
+    title: `${jobKindLabel(run.kind)} 重试 ${run.max_attempts} 次后放弃`,
+    // 错误原文可能很长且带栈，这里只放一行定位信息；正文在后台任务页看。
+    meta: `${run.queue} · 共失败 ${run.error_count} 次 · ${ageText(discardedAt(run), now)}前`,
+    due: "需人工处理",
+    // 直接落到后台任务页的「多次失败任务」页签（state=discarded 那个），
+    // 而不是页面首屏——点进去还要自己找是多余的一步。
+    to: "/jobs?sub=repeated",
+  });
+
+  // 按 kind 分组：**不按 queue**。生产上 288 条 card_sync 与几条别的任务同在
+  // default 队列里，按队列合并会把它们并成一行，等于换一种方式丢信息。
+  const groups = new Map<string, JobRunItem[]>();
+  for (const run of discarded) {
+    const bucket = groups.get(run.kind);
+    if (bucket) bucket.push(run);
+    else groups.set(run.kind, [run]);
+  }
+
+  const items = [...groups.entries()].map(([kind, group]) => {
+    // 明细按放弃时刻倒序：展开第一眼看到的应当是最近那一次。
+    const detail = [...group]
+      .sort((a, b) => discardedAt(b).localeCompare(discardedAt(a)))
+      .map(single);
+    // 只有一条时**逐字保持原样**：不出现「×1」这种噪声，也不给一个展开箭头
+    // 后面空无一物。
+    if (detail.length === 1) return detail[0] as WorkItem;
+
+    const newest = discardedAt(group[0] as JobRunItem);
+    const oldest = newest;
+    const span = group.reduce(
+      (acc, run) => {
+        const at = discardedAt(run);
+        return { newest: at > acc.newest ? at : acc.newest, oldest: at < acc.oldest ? at : acc.oldest };
+      },
+      { newest, oldest },
+    );
+    // 队列去重后列出来：同一 kind 正常只在一个队列上，真出现两个也不能替它
+    // 挑一个说。
+    const queues = [...new Set(group.map((run) => run.queue))].join("、");
+    // `+` 号只标"还不止这些"这一层粒度；「只取了 N 条」的整句由
+    // truncationNote 一处说，两边不各写一份（见 CREDENTIAL_EXPIRY_GAP 的教训）。
+    const more = options.truncated ? "+" : "";
+    return {
+      id: `job-kind-${kind}`,
+      categoryId: "jobs",
+      categoryLabel: "已放弃",
+      tone: "danger" as const,
+      title: `${jobKindLabel(kind)} 已放弃 ×${detail.length}${more}`,
+      meta: `${queues} · 最近 ${ageText(span.newest, now)}前 · 最早 ${ageText(span.oldest, now)}前`,
+      due: "需人工处理",
+      to: "/jobs?sub=repeated",
+      children: detail,
+    } satisfies WorkItem;
+  });
+
+  // 条数多的排在前面（288 条的那一类必须第一眼看见）；条数相同的**保持取数
+  // 顺序**，那已经是服务端按放弃时刻倒序给的，这里不再自己排一遍。单条行没有
+  // children，按 1 参与排序。
+  const weight = (item: WorkItem): number => item.children?.length ?? 1;
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => weight(b.item) - weight(a.item) || a.index - b.index)
+    .map((entry) => entry.item);
 }
 
 /** 风险等级的色调。**与 components/ApprovalQueue.tsx 里的 RISK_TONE 是同一张表**
@@ -407,19 +485,56 @@ export interface MatrixRow {
   /** 最近观测时刻（该平台全部指标里最新的一个 observed_at）。 */
   observedAt: string | null;
   to: string;
+  /** 这一格**为什么**是这个状态。缺省不渲染（没有要解释的东西就不说话）。
+   *
+   *  一个四个字的徽章回答不了「黄灯亮了两周是怎么回事」。原因从这一行自己的
+   *  数据里得出（哪几条指标 is_partial、哪几条从未采到值），不是把后端的事实
+   *  再抄一份到前端。 */
+  freshnessNote?: string;
+  /** 悬停里的工程证据：相关指标的 watermark 原样文本。**只展示不解析**——
+   *  它是连接器私有的自由文本（NewAPI 那条里确实带着
+   *  `subscription:unavailable_over_http`），解析它等于在前端复刻一份后端事实。 */
+  freshnessEvidence?: string;
+  /** 这一行说的是什么范围。只有会被误读的行才挂（今天是开票系统那一行）。 */
+  scopeNote?: string;
 }
 
-/** 新鲜度取**最差**的那一条，不取平均也不取最新。
+/** 新鲜度从最差到最好的顺序。**与后端 `ops.Observation.Freshness` 同一个顺序**
+ *  （internal/platform/ops/freshness.go：失败 > 未初始化 > 延迟 > 部分 > 新鲜）。
  *
- *  一个平台有五条指标、其中一条已经两小时没更新时，矩阵上那一格必须显示
- *  「延迟」。取最新的那条会把这件事盖掉，而它正是人来这一屏要找的东西。 */
-const FRESHNESS_RANK: Record<string, number> = {
-  uninitialized: 0,
-  failed: 1,
-  stale: 2,
-  partial: 3,
-  fresh: 4,
-};
+ *  这一份是副本，不是真相源——后端没有导出有序清单，所以 labels.reconcile 的
+ *  「新鲜度优先级」一组从 Go 函数体里把顺序机械推导出来，与本表逐值对账；后端
+ *  调整优先级而这里没跟，那一组会红。**顺序不要再抄第三份。**
+ *
+ *  以前这里是 `{ uninitialized: 0, failed: 1, … }`，把「未初始化」排在「同步
+ *  失败」**之前**，与后端正好相反。后果不是排版问题：Sub2API 有一条结构上永远
+ *  采不到数的指标（订阅制上游没有钱包余额，`sub2api.channels.balance` 每轮都
+ *  写一行没有观测时刻的记录），于是那一格恒为中性灰的「未初始化」，**哪怕其余
+ *  六条指标全部同步失败也不会变红**——对该平台的任何后续故障失明。后端为同一
+ *  件事专门修过（XM-0031，原话：否则正在发生的故障会被显示成中性的「尚未接
+ *  入」），前端在汇总时又反着实现了一遍。 */
+export const FRESHNESS_PRIORITY: readonly string[] = [
+  "failed",
+  "uninitialized",
+  "stale",
+  "partial",
+  "fresh",
+];
+
+const FRESHNESS_RANK: Record<string, number> = Object.fromEntries(
+  FRESHNESS_PRIORITY.map((state, index) => [state, index]),
+);
+
+/** 前端不认识的状态排在**比 failed 还差**的位置。
+ *
+ *  这不是防御性编程的客套：以前的兜底写的是 `?? UNKNOWN_STATE_RANK`，而 0 恰好是当时最差的那
+ *  档（uninitialized），所以它「碰巧」是对的——把 0 让给 failed 之后，同一个
+ *  `?? UNKNOWN_STATE_RANK` 就变成「与同步失败并列」，再加上 `rank < worstRank` 的严格小于，先
+ *  到的 failed 会把一个后端新增的、我们完全不认识的状态吃掉。
+ *
+ *  显式给一个更差的哨兵，是让这个条件为自己负责：未知状态必须冒出来让人去查
+ *  （describeFreshness 对它已经是 warning 语气 +「未知状态（x）」的措辞）。 */
+const UNKNOWN_STATE_RANK = -1;
 
 const UNINITIALIZED: FreshnessContract = {
   state: "uninitialized",
@@ -431,14 +546,71 @@ const UNINITIALIZED: FreshnessContract = {
   last_error_code: "",
 };
 
+/** 新鲜度取**最差**的那一条，不取平均也不取最新。
+ *
+ *  一个平台有五条指标、其中一条已经两小时没更新时，矩阵上那一格必须显示
+ *  「延迟」。取最新的那条会把这件事盖掉，而它正是人来这一屏要找的东西。 */
 function worstFreshness(metrics: readonly MetricItem[]): FreshnessContract {
   let worst: FreshnessContract | undefined;
   for (const metric of metrics) {
-    const rank = FRESHNESS_RANK[metric.freshness.state] ?? 0;
-    const worstRank = worst ? (FRESHNESS_RANK[worst.state] ?? 0) : Number.POSITIVE_INFINITY;
+    const rank = FRESHNESS_RANK[metric.freshness.state] ?? UNKNOWN_STATE_RANK;
+    const worstRank = worst
+      ? (FRESHNESS_RANK[worst.state] ?? UNKNOWN_STATE_RANK)
+      : Number.POSITIVE_INFINITY;
     if (rank < worstRank) worst = metric.freshness;
   }
   return worst ?? UNINITIALIZED;
+}
+
+/** 这一格为什么是这个状态，以及有什么工程证据可放进悬停。
+ *
+ *  只解释两种今天真的会让人困惑的状态：
+ *
+ *  - **partial**：NewAPI 那格的黄灯永远亮着，界面上一个字的说明都没有。原因
+ *    从数据里发现——点名该平台里哪几条 `is_partial`，再加一句通用解释。**不**
+ *    在前端复述「NewAPI 上游没有订阅订单接口」这条后端事实，那是第二份副本；
+ *    真正的机器码原因要等后端的 `partial_reason` 字段（见交接文档 follow_up）。
+ *  - **uninitialized**：「这个平台一条指标都没有」（服务器）与「有指标在采、
+ *    其中一条从未采到值」（Sub2API 的渠道余额）是两回事，而今天两者显示成同
+ *    一个中性灰徽章。这个区分**不需要新字段**，从有没有指标行就能得出。
+ *
+ *  措辞**止步于事实**：不说「不适用」。要断言「订阅制上游结构上就没有钱包
+ *  余额」，前端唯一的自有手段是硬编一张指标键名单——那是禁止的第二份副本，
+ *  而且一条刚上线还没采到值的新指标与它长得一模一样。 */
+function describeWhy(
+  worst: FreshnessContract,
+  own: readonly MetricItem[],
+): Pick<MatrixRow, "freshnessNote" | "freshnessEvidence"> {
+  if (worst.state === "partial") {
+    const partials = own.filter((m) => m.freshness.is_partial);
+    const names = partials.map((m) => metricLabel(m.metric_key)).join("、");
+    const who = names === "" ? "其中一部分指标" : names;
+    const evidence = partials
+      .filter((m) => m.watermark !== "")
+      .map((m) => `${metricLabel(m.metric_key)}：${m.watermark}`)
+      .join("；");
+    return {
+      freshnessNote:
+        `${who}这一轮采集成功了，但其中一部分数据上游给不出来，` +
+        "显示的数值可能偏小；这不是故障，也不会自己好转。",
+      ...(evidence === ""
+        ? {}
+        : { freshnessEvidence: `采集水位线（连接器原文）：${evidence}` }),
+    };
+  }
+  if (worst.state === "uninitialized") {
+    if (own.length === 0) return { freshnessNote: "这个平台还没有任何指标在采。" };
+    const never = own
+      .filter((m) => m.freshness.state === "uninitialized")
+      .map((m) => metricLabel(m.metric_key));
+    if (never.length === 0) return {};
+    return {
+      freshnessNote:
+        `有指标在采，但「${never.join("、")}」从未采到值。` +
+        "「还没接上」与「每轮都在采、每轮都采到空」在这里长得一样，要看这条指标本身才分得清。",
+    };
+  }
+  return {};
 }
 
 function latestObservedAt(metrics: readonly MetricItem[]): string | null {
@@ -479,33 +651,81 @@ export function platformMatrixRows({ services, metrics, alerts }: MatrixInput): 
     // 同一个 degraded 在两页上显示成两种说法，人会以为是两回事
     const registered = instances[0];
     const status = registered ? describeServiceStatus(registered.status) : undefined;
+    const freshness = worstFreshness(own);
+    const why = describeWhy(freshness, own);
     return {
       key: spec.serviceType,
       label: spec.label,
       stage: platformNavSpec(spec.serviceType)?.stage ?? "—",
       statusLabel: status ? status.label : pendingBadge(spec.plan),
       statusTone: status ? status.tone : "neutral",
-      freshness: worstFreshness(own),
+      freshness,
       events,
       observedAt: latestObservedAt(own),
       to: `/platforms/${spec.serviceType}`,
+      ...why,
     };
   });
 
-  rows.push({
-    key: "invoice",
-    label: "开票系统",
-    stage: "契约前置",
-    statusLabel: "未接入",
-    statusTone: "neutral",
-    freshness: UNINITIALIZED,
-    events: 0,
-    observedAt: null,
-    // 开票不是平台（ADMIN-IA §5.2）：它的入口在治理段「跨平台财务」的
-    // 「开票集成」子页签，以及各平台「支付与财务」里的「开票」
-    to: "/finance?sub=invoicing",
-  });
+  rows.push(invoiceRow({ services, metrics, alerts: active }));
 
   return rows;
 }
+
+/** 开票系统那一行。
+ *
+ *  **和平台行走同一段计算**，不再是三个写死的字面量。今天算出来仍然是
+ *  「未接入 / 未初始化 / 0」——那正是要的结果：诚实不等于换个结论。区别在于
+ *  将来只读通道真的接上了、或者接上之后挂了，这一行会跟着变，而写死的版本
+ *  只会一直说同样三个词（`invoice.requests.daily` / `invoice.amount.daily`
+ *  已经在 ops 的 registeredMetrics 白名单里，所以这是一条真通路）。
+ *
+ *  与 `NON_PLATFORM_SERVICE_TYPES`（platforms.ts 里显式把 invoice 挡在侧栏平台
+ *  段外）**不矛盾，两处问的不是同一个问题**：侧栏问「哪些是平台」，答案是开票
+ *  不是；矩阵问「我管的这些系统现在怎么样」，答案里有开票。别把其中一处当成
+ *  bug 顺手改掉。 */
+function invoiceRow({ services, metrics, alerts }: MatrixInput): MatrixRow {
+  const own = metrics.filter((m) => platformOfMetricKey(m.metric_key) === INVOICE_SERVICE_TYPE);
+  const instances = services.filter((s) => s.service_type === INVOICE_SERVICE_TYPE);
+  const events = alerts.filter(
+    (a) => platformOfMetricKey(a.source_metric_key) === INVOICE_SERVICE_TYPE,
+  ).length;
+
+  const registered = instances[0];
+  const status = registered ? describeServiceStatus(registered.status) : undefined;
+  // 三级口径，与平台行同构：有登记实例就用 Registry 状态；没实例但已经有
+  // invoice.* 指标在采，说「未登记」（数据先到、登记没跟上，也是一种事实）；
+  // 两样都没有才是「未接入」——今天走的是这一支。
+  const statusLabel = status ? status.label : own.length > 0 ? "未登记" : "未接入";
+  const freshness = worstFreshness(own);
+  const why = describeWhy(freshness, own);
+
+  return {
+    key: INVOICE_SERVICE_TYPE,
+    label: "开票系统",
+    stage: "契约前置",
+    statusLabel,
+    statusTone: status ? status.tone : "neutral",
+    freshness,
+    events,
+    observedAt: latestObservedAt(own),
+    // 开票不是平台（ADMIN-IA §5.2）：它的入口在治理段「跨平台财务」的
+    // 「开票集成」子页签，以及各平台「支付与财务」里的「开票」
+    to: "/finance?sub=invoicing",
+    ...why,
+    scopeNote: INVOICE_SCOPE_NOTE,
+  };
+}
+
+/** 开票在登记簿与指标键里的 service_type。 */
+const INVOICE_SERVICE_TYPE = "invoice";
+
+/** 开票那一行说的是什么。
+ *
+ *  这一行写着「未接入」，而点它的链接进去是一个**能用的、嵌着开票管理端的
+ *  页面**（那条线 09-02 就上线了）。行说的是只读数据对接，链接去的是管理端
+ *  嵌入——今天格子里没有任何东西告诉人这是两回事，于是它每天都在误导人。 */
+const INVOICE_SCOPE_NOTE =
+  "这一行说的是只读数据对接（invoice.* 指标与登记簿实例）；" +
+  "点链接进去的是嵌到平台里的开票管理端，那条线已经能用——两者不是一回事。";
 

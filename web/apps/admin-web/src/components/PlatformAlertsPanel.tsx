@@ -6,7 +6,15 @@ import {
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { Link, useSearchParams } from "react-router";
-import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
+import {
+  ALERT_STATUS_ALL,
+  describeFireCount,
+  FIRE_COUNT_HEADER,
+  FIRE_COUNT_MEANING,
+  listAlerts,
+  ruleLabel,
+  type AlertItem,
+} from "../api/alerts";
 import {
   describeNotifyStatus,
   describeSeverity,
@@ -122,10 +130,22 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
   },
   {
     id: "count",
-    header: "次数",
+    // 与告警中心那一列共用同一份表头与说明（api/alerts 的 FIRE_COUNT_*）：
+    // 同一个数在两个页面上叫两个名字，人会以为看的是两个量。
+    header: FIRE_COUNT_HEADER,
     numeric: true,
     value: (alert) => alert.fire_count,
-    cell: (alert) => <span title="含首次及被去重合并的重复命中">{alert.fire_count}</span>,
+    cell: (alert) => {
+      const counts = describeFireCount(alert);
+      return (
+        <span title={FIRE_COUNT_MEANING} className="block">
+          {counts.triggers ? (
+            <span className="block text-xs text-fg-muted">{counts.triggers}</span>
+          ) : null}
+          <span className="block">{counts.rounds}</span>
+        </span>
+      );
+    },
   },
   {
     id: "notify",
@@ -246,7 +266,7 @@ export function PlatformAlertsPanel({ platform }: { platform: string }) {
       >
         <PersistentDataTable
           tableKey={savedViewKey ?? platformSavedViewTableKey("sub2api", "alerts")}
-          caption={`${label} 告警：编号、严重度、状态、来源指标、首次与最近发现、持续时长、次数及投递结果`}
+          caption={`${label} 告警：编号、严重度、状态、来源指标、首次与最近发现、持续时长、${FIRE_COUNT_HEADER}及投递结果`}
           columns={alertColumns(now)}
           rows={rows}
           rowKey={(alert) => alert.id}
